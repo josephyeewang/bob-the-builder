@@ -1,3 +1,30 @@
 .DS_Store
 *.swp
 *~
+
+# ── SECRETS (standard template) ──
+# Never commit real secrets. Put them in .env.local (which is gitignored below).
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# ── DEPS / BUILD ──
+node_modules/
+dist/
+build/
+.next/
+.vercel/
+
+# ── LOGS ──
+*.log
+npm-debug.log*
+
+# ── EDITORS ──
+.vscode/
+.idea/
+*.swp
+
+# ── CLAUDE CODE LOCAL STATE ──
+.claude/worktrees/
+.claude/scheduled_tasks.lock
