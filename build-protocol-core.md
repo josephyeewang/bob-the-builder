@@ -24,6 +24,8 @@ Before starting, assess project complexity:
 | **Standard** | 3-8 subsystems, AI OR multi-user OR 3+ integrations | Full protocol (default) |
 | **Heavy** | Complex AI + multi-user + 5+ integrations + compliance | Full protocol + mandatory deploy verification every phase + mandatory second-model review at spec and hardening gates |
 
+**Mid-build reclassification:** If escalating to Heavy mid-build: (1) future phases follow Heavy requirements immediately, (2) run one-time catch-up audit on completed phases for the Standard→Heavy delta (deploy verification, second-model spec review), (3) log reclassification in Build Manifest. Do NOT re-run completed phases.
+
 ---
 
 ## DOCUMENT HIERARCHY
@@ -71,14 +73,15 @@ Before starting, assess project complexity:
 
 ## MODE: NEW — Step Sequence
 
-1. **Product Spec** → 1a: Draft → 1b: Stress-test → 1c: Adversarial review → `→ HG`
-2. **Behavioral Core** (AI only) → 2a: Draft → 2b: Stress-test → 2c: Adversarial review → `→ HG`
+0. **Intake** → 0a: Existing materials check → 0b: Material mapping → 0c: Accelerated start → `→ HG` *(skip if starting from scratch)*
+1. **Product Spec** → 1a: Draft (or review/complete if intake provided coverage) → 1b: Stress-test → 1c: Adversarial review → `→ HG`
+2. **Behavioral Core** (AI only) → 2a: Draft → 2b: Stress-test → 2c: Adversarial review → `→ HG` — use `templates/behavioral-core.md`
 3. **Architecture Contract** → 3a: Draft → 3b: Adversarial review → `→ HG`
 4. **Domain Specs** → 4a: Identify subsystems → 4b: Write + cross-reference → `→ HG`
 5. **Build Manifest** → 5a: Define phases + capability matrix → 5b: Initialize manifest → `→ HG`
 6. **Project Setup** → 6a: CLAUDE.md → 6b: Hooks → 6c: Repo init → `→ HG`
-7+. **Build Phases** → For each phase: [N]a: Build → [N]b: Verify → [N]c: Reconcile → `→ HG`
-N+1. **Hardening** → Security → Adversarial/Abuse → Integration Seam → Data Integrity → Spec-Code → Fix
+7+. **Build Phases** → For each phase: [N]a: Build → [N]b: Verify (use `templates/phase-report.md`) → [N]c: Reconcile → `→ HG`
+N+1. **Hardening** → Security → Adversarial/Abuse → Integration Seam → Data Integrity → Spec-Code → Fix *(fresh session per audit)*
 N+2. **Learning Extraction** → Process review → Update artifacts
 
 **Each build phase follows:** Context Load → Gap Check → Plan → `→ HG` → Implement → Verify → Reconcile → `→ HG`
@@ -87,13 +90,19 @@ N+2. **Learning Extraction** → Process review → Update artifacts
 
 ## MODE: AUDIT — Step Sequence
 
-A1: Inventory → A2: Map to hierarchy → A3: Code-spec consistency → A4: Risk assessment → A5: Remediation plan → A6: Execute remediation
+A1: Inventory → A2: Map to hierarchy → A3: Code-spec consistency → A4: Risk assessment → A5: Remediation plan → A6: Execute remediation → A7: Re-entry
+
+**A7: Re-entry** — After remediation, Claude presents next-step options: resume building unbuilt capabilities (→ NEW mode Step 7), run hardening, or switch to EVOLVE for new features.
 
 ---
 
 ## MODE: EVOLVE — Step Sequence
 
 E1: Classify (Small/Medium/Large) → E2: Spec check → E3: Plan → E4: Execute → E5: Reconcile (Medium+) → E6: Impact audit (Large only)
+
+**Multiple concurrent changes:** If 3+ changes requested: independent → run sequentially (E1-E5 each); interdependent → batch into one evolution (classify batch one tier up). If batch is Large + touches 5+ subsystems → treat as mini build with phases, not an evolution.
+
+**Evolution hardening threshold:** Trigger targeted hardening (Security + Integration Seam + Spec-Code scoped to changed areas) when: 5th Medium+ evolution since last hardening, any evolution touching 3+ subsystems, any Behavioral Core modification, or 6 months since last hardening. Claude tracks count in Build Manifest and proactively warns at evolution 4 of 5.
 
 ---
 
@@ -138,6 +147,17 @@ If Tier 2-3 skipped during build → MUST run at hardening.
 
 ---
 
+## SESSION BUDGET HEURISTICS
+
+- **Spec steps (0-5):** 1-2 sessions (Light), 2-4 (Standard), 4-6 (Heavy). One spec step per session usually fits.
+- **S-complexity phases:** ~1 session (build + verify + reconcile)
+- **M-complexity phases:** 1-2 sessions. Fresh session if verify reveals significant issues.
+- **L-complexity phases:** 2-3 sessions. Consider splitting: build in session 1, verify + reconcile in session 2.
+- **Hardening audits:** 1 fresh session per audit (a/b/c/d/e). MUST be fresh sessions (writer/reviewer pattern).
+- **If a phase takes 3+ sessions:** it's likely too large — split it in the Build Manifest.
+
+---
+
 ## SESSION START PROTOCOL
 
 1. Read CLAUDE.md
@@ -160,4 +180,4 @@ If Tier 2-3 skipped during build → MUST run at hardening.
 
 ---
 
-*Core Reference for Build Protocol v2.0 — 2026-04-15*
+*Core Reference for Build Protocol v2.1 — 2026-04-15*

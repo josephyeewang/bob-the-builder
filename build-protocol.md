@@ -92,6 +92,14 @@ Before selecting a mode, assess project complexity to determine the appropriate 
 
 If unsure, start at Standard. You can escalate to Heavy mid-build if you discover unexpected complexity, but downgrading from Standard to Light mid-build is risky — you've already skipped the foundations.
 
+**Mid-build reclassification (escalating to Heavy):**
+
+If you discover mid-build that the project is more complex than initially assessed:
+1. **Future phases** follow Heavy requirements immediately (mandatory deploy verification every phase, mandatory second-model review at remaining spec and hardening gates)
+2. **Catch-up audit** on completed phases: run a one-time review covering the gaps between Standard and Heavy — specifically, deploy verification for any phases that touched external integrations, and second-model review of the Product Spec, Architecture Contract, and Behavioral Core (if they weren't reviewed at the higher bar)
+3. **Log the reclassification** in the Build Manifest with: date, which phase triggered it, rationale, and what catch-up work was done
+4. **Do NOT retroactively re-run** completed phases — the catch-up audit covers the delta
+
 ### Rules for Claude Code
 
 **Execution rules:**
@@ -311,6 +319,17 @@ Context window degradation is the #1 cause of quality drop-off in long build ses
 - **Scope file reads explicitly.** "Read only `src/services/billing.ts` for this task" saves enormous context vs "look at the billing system." For large files: "Focus on the `processRefund` function specifically."
 - **Session boundaries at phase boundaries.** Each build phase (Na/Nb/Nc) is a natural session boundary. If context is getting heavy, start a fresh session at the next phase — the Build Manifest carries state across sessions.
 
+**Session budget heuristics:**
+
+These are rough expectations, not commitments — actual session length depends on complexity, context load, and iteration cycles:
+- **Spec steps** (Steps 0-5): Expect 1-2 sessions for Light track, 2-4 for Standard, 4-6 for Heavy. Each spec step (draft → stress-test → adversarial) can usually fit in one session.
+- **S-complexity phases:** ~1 session (build + verify + reconcile)
+- **M-complexity phases:** 1-2 sessions. Start a fresh session if verify reveals significant issues.
+- **L-complexity phases:** 2-3 sessions. Consider splitting: session 1 for build, session 2 for verify + reconcile.
+- **Hardening audits:** 1 session per audit (a/b/c/d/e). Each MUST be a fresh session (writer/reviewer pattern).
+
+If a phase takes more than 3 sessions, it's likely too large — consider splitting it in the Build Manifest.
+
 **Context health indicators:**
 - At 50%+ capacity: be more explicit in instructions, scope file reads tightly
 - At 70%+: `/compact` immediately, consider fresh session
@@ -432,6 +451,29 @@ When a bug is discovered during verification or after deployment, follow this se
 ## PART II: MODE — NEW
 
 *Building a new product from scratch. Follow every step in order.*
+
+### Step 0: Intake
+
+**0a: Existing Materials Check**
+- Claude asks: "Do you have existing materials — specs, PRDs, notes, wireframes, Notion docs, Google Docs, slides, or prior conversations with other AI tools?"
+- If **no** → skip to Step 1a (draft from scratch)
+- If **yes** → human provides the materials (paste, file path, or URL)
+
+**0b: Material Mapping**
+- Claude reads all provided materials and maps content to the 5-document hierarchy:
+  - What maps to Product Spec? (vision, capabilities, scenarios, economics)
+  - What maps to Behavioral Core? (decision logic, tone, autonomy rules)
+  - What maps to Architecture Contract? (tech choices, constraints, patterns)
+  - What maps to Domain Specs? (subsystem details, data models, APIs)
+  - What is NOT covered by any document? (gaps to fill)
+  - What contradicts itself across materials? (conflicts to resolve)
+- Output: A mapping table showing which existing content covers which hierarchy document, what's missing, and what conflicts
+- `→ HG:` Human reviews mapping, confirms which materials to incorporate vs discard
+
+**0c: Accelerated Start**
+- For each hierarchy document that has substantial existing coverage: Step [N]a becomes "Review and complete" rather than "Draft from scratch" — Claude incorporates existing content, fills gaps, and flags where existing material is unclear or incomplete
+- For documents with no existing coverage: proceed with normal drafting
+- Existing materials that don't fit the hierarchy (e.g., competitor analysis, user research) are preserved in `docs/reference/` and cited where relevant
 
 ### Step 1: Product Spec
 
@@ -964,6 +1006,16 @@ Follow the approved plan. For each remediation item, use the Na/Nb/Nc pattern:
 - **b:** Verify it's correct and consistent
 - **c:** Reconcile with other docs that might be affected
 
+### Step A7: Re-entry
+
+After remediation is complete, the project is aligned to the Build Protocol. Claude presents the next-step options:
+
+- **If the product has unbuilt capabilities** (identified in A3 as "in spec but not implemented"): "Your project is now aligned. There are [N] unbuilt capabilities. To continue building, I recommend creating a Build Manifest (Step 5) for the remaining work and resuming in NEW mode at Step 7 (Build Phases)."
+- **If the product is feature-complete but needs hardening**: "Remediation is done. The codebase would benefit from a hardening pass. Want to run the hardening audits (Security → Adversarial/Abuse → Integration Seam → Data Integrity → Spec-Code Consistency)?"
+- **If the product is stable and the user wants to add features**: "Your project is aligned. For new features or changes, use MODE: EVOLVE — start at E1."
+
+`→ HG:` Human chooses next action.
+
 ---
 
 ## PART IV: MODE — EVOLVE
@@ -985,6 +1037,14 @@ Follow the approved plan. For each remediation item, use the Na/Nb/Nc pattern:
 | **Large** | New subsystem, architectural change, cross-cutting concern, or Behavioral Core change | E2 → E3 → E4 → E5 → E6 |
 
 If unsure, classify one size up. Under-processing a Large change as Medium is how inconsistencies accumulate.
+
+**Multiple concurrent changes:**
+
+If the user requests 3+ changes simultaneously:
+1. **Assess independence:** Are the changes independent (touch different subsystems, no shared data model changes) or interdependent (one change affects another)?
+2. **Independent changes:** Run each as a separate sequential E1-E5/E6 flow. Complete one fully before starting the next. Order by: dependencies first, then highest-risk first.
+3. **Interdependent changes:** Batch into a single evolution with combined scope. Classify the batch (the batch size is usually one tier above the largest individual change).
+4. **If the batch would be Large AND touches 5+ subsystems:** This is no longer an evolution — it's a mini build. Create a Build Manifest with phases (like NEW mode Step 5) and execute as build phases with full [N]a/[N]b/[N]c cycles.
 
 ### Step E2: Spec Check
 
@@ -1029,6 +1089,24 @@ Before building anything:
 - If Behavioral Core changed: test adversarial scenarios against the new logic
 
 `→ HG:` Present findings, fix issues
+
+### Evolution Hardening Threshold
+
+NEW mode has explicit hardening after all build phases. EVOLVE mode accumulates changes that can drift without a hardening check. To prevent silent accumulation:
+
+**Trigger a targeted hardening pass when ANY of these conditions are met:**
+- **5th Medium+ evolution** since the last hardening pass (count tracked in Build Manifest)
+- **Any single evolution that touches 3+ subsystems**
+- **Any evolution that modifies the Behavioral Core** (AI products)
+- **6 months since last hardening pass** (calendar trigger)
+
+**Targeted hardening scope (lighter than full NEW-mode hardening):**
+1. **Security audit** — scoped to areas changed since last hardening
+2. **Integration seam audit** — scoped to boundaries between changed and unchanged subsystems
+3. **Spec-code consistency** — full walk of changed domain specs only
+4. Fix findings, update Build Manifest with hardening date and scope.
+
+Claude tracks the evolution count in the Build Manifest. When the threshold is approaching (evolution 4 of 5), Claude proactively flags: "This is evolution 4 since the last hardening pass. One more Medium+ evolution will trigger a targeted hardening. Consider scheduling it."
 
 ---
 
@@ -1586,6 +1664,7 @@ When the human says "update the build protocol based on recent projects," Claude
 | v1.1 | 2026-04-15 | Hardened enforcement language: Global Spec Lock (FAIL matrix), behavior drift examples, Acceptance Gate, Critical Architecture Decision, mandatory Global Invariant Check, grep-based provider enforcement, Module Inventory as failure condition. | DLL 14-build-guide.md side-by-side comparison |
 | v1.2 | 2026-04-15 | Gap closure from self-test simulation: Capability Traceability Matrix, per-phase cross-cutting concern scan (integration seams, rate limits, abuse vectors, error propagation, auth gaps), experience testing, regression scenario specs, per-phase ChatGPT audit template, expanded hardening (5 audits: security + adversarial/abuse + integration seam + data integrity + spec-code consistency), phase-specific mandatory audit sections. | DLL audit findings (5 passes of edge cases/holes despite functional code) |
 | v2.0 | 2026-04-15 | Structural overhaul: Complexity Assessment (Light/Standard/Heavy tracks). Self-adversarial review as default, second-model review optional. Deploy & Verify substep for integration phases. Class-level pattern scan in verification. Hot path definition + per-phase testing. Deviation count tracking as health metric. Debugging Protocol (structured failure recovery). Protocol Effectiveness Metrics. Minimum Viable Process (tiered step priority). Conditional Phase Report sections ([A]/[C]/[O] markers). Test type distinction (unit/integration/deployment). Split into core + full reference with extractable templates and case studies. | DLL post-build analysis: 6-commit Twilio debug chain, 51-query class-level fix, non-declining deviation counts, production-only failures despite 166 passing tests |
+| v2.1 | 2026-04-15 | Seam and transition fixes from 3-mode simulation: Step 0 (Intake) for NEW mode — warm-start from existing materials. Step A7 (Re-entry) for AUDIT mode — explicit next-step guidance after remediation. Evolution Hardening Threshold — triggered at 5th Medium+ evolution, 3+ subsystem touches, Behavioral Core changes, or 6-month calendar. Mid-build reclassification rules for Complexity Assessment. Multiple concurrent evolutions guidance in E1. Template pointers in core reference. Session budget heuristics. | 3-mode simulation audit |
 
 ### What This Protocol Is NOT
 
@@ -1596,5 +1675,5 @@ When the human says "update the build protocol based on recent projects," Claude
 
 ---
 
-*Build Protocol v2.0 — 2026-04-15*
+*Build Protocol v2.1 — 2026-04-15*
 *Derived from: Explain My Blood Test (931 commits), Do Later List (200K lines, 13 phases), Tax Auction (7 phases, 3 days), strategy-research framework*

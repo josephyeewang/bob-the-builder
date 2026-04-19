@@ -32,4 +32,4 @@ case-studies/               ← Lessons from past projects
 
 ## Current Version
 
-v2.0 — 2026-04-15
+v2.1 — 2026-04-15
