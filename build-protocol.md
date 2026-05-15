@@ -30,7 +30,7 @@ This protocol was reverse-engineered from 4 real projects built between January�
 | **Explain My Blood Test** | 931 commits over 3.5 months, 70% were fixes. No upfront specs. Definition drift (7 copies of one taxonomy). Fix-after-fix chains. ~60K lines of code. | **Build-as-you-go produces massive churn.** Spec-first is definitively better. |
 | **Tax Auction** | 7,593 lines of specs → 7,090 lines of code in 3 days. Spec held with no deviations. 1 critical audit found real issues (74 parcel misclassifications). | **Comprehensive upfront specs + sequential phases = cleanest execution.** Even good specs need post-build auditing. |
 | **Do Later List** | 21 spec docs, 200K+ lines of code, 13 build phases. Copy-paste prompts. Specs never updated during build → 50+ items per audit pass × 5 audit passes. | **Upfront specs are necessary but not sufficient.** Mandatory reconciliation after each phase is the missing piece. Propagation enforcement prevents downstream rot. |
-| **strategy-research project** | Strategy-first: 280K lines of specs (context, playbook, agent specs) before any code. Deep behavioral and competitive research upfront. | **Spec depth scales with product complexity.** The Behavioral Core pattern (how the system thinks) is reusable across AI products. |
+| **Strategy-research project** | Strategy-first: deep upfront specs (context docs, playbooks, agent specs) before any code. Behavioral and competitive research completed before implementation. | **Spec depth scales with product complexity.** The Behavioral Core pattern (how the system thinks) is reusable across AI products. |
 
 ### Core Thesis
 
@@ -1455,12 +1455,12 @@ Claude tracks the evolution count in the Build Manifest. When the threshold is a
 
 Before starting Step 1 (Product Spec):
 
-- [ ] Create project directory (`~/Desktop/[project-name]/`)
+- [ ] Create project directory (wherever you keep your projects)
 - [ ] `git init` + initial commit
 - [ ] Create `docs/` directory
 - [ ] Create placeholder CLAUDE.md (will be populated at Step 6)
 - [ ] Push to GitHub
-- [ ] Register in sync scripts (if using multi-machine Dropbox sync)
+- [ ] Register in any multi-machine sync scripts you use (optional)
 - [ ] Initialize project memory directory
 - [ ] Determine project type:
   - [ ] Code product (web app, API, CLI tool)
@@ -1586,7 +1586,7 @@ Before starting Step 1 (Product Spec):
 
 1. Read `docs/build-manifest.md` → identify current phase and status
 2. Read relevant project memory
-3. Check for a handoff note at `~/Dropbox/99.0 Claude Sync/handoffs/<project>.md` — if present, surface any open questions FIRST.
+3. Check for a handoff note from a prior session (if you use one — common pattern: a synced folder like `~/sync/handoffs/<project>.md` shared across your machines). Surface any open questions FIRST.
 4. State as a Pulse Report: "We're at Step [X]. Last session completed [Y]. Next up is [Z]. Progress: [bar]."
 5. If resuming a build phase: re-read the relevant domain spec before proposing work
 6. If the human has a different intent (e.g., they want to EVOLVE, not continue building): switch modes — and use the Preamble Template (§11.2) when entering the new mode.
@@ -2130,7 +2130,7 @@ When the human says "update the build protocol based on recent projects," Claude
 
 | Version | Date | Changes | Triggered By |
 |---------|------|---------|-------------|
-| v1.0 | 2026-04-15 | Initial creation. 3 modes (NEW/AUDIT/EVOLVE), 5-layer doc hierarchy, 13 Claude guardrails, 8 appendices including Phase Report Template and Architecture Patterns Library. | Analysis of EMBT, DLL, Tax Auction, strategy-research project |
+| v1.0 | 2026-04-15 | Initial creation. 3 modes (NEW/AUDIT/EVOLVE), 5-layer doc hierarchy, 13 Claude guardrails, 8 appendices including Phase Report Template and Architecture Patterns Library. | Analysis of prior personal projects (EMBT, DLL, Tax Auction, strategy-research project) |
 | v1.1 | 2026-04-15 | Hardened enforcement language: Global Spec Lock (FAIL matrix), behavior drift examples, Acceptance Gate, Critical Architecture Decision, mandatory Global Invariant Check, grep-based provider enforcement, Module Inventory as failure condition. | DLL 14-build-guide.md side-by-side comparison |
 | v1.2 | 2026-04-15 | Gap closure from self-test simulation: Capability Traceability Matrix, per-phase cross-cutting concern scan (integration seams, rate limits, abuse vectors, error propagation, auth gaps), experience testing, regression scenario specs, per-phase ChatGPT audit template, expanded hardening (5 audits: security + adversarial/abuse + integration seam + data integrity + spec-code consistency), phase-specific mandatory audit sections. | DLL audit findings (5 passes of edge cases/holes despite functional code) |
 | v2.0 | 2026-04-15 | Structural overhaul: Complexity Assessment (Light/Standard/Heavy tracks). Self-adversarial review as default, second-model review optional. Deploy & Verify substep for integration phases. Class-level pattern scan in verification. Hot path definition + per-phase testing. Deviation count tracking as health metric. Debugging Protocol (structured failure recovery). Protocol Effectiveness Metrics. Minimum Viable Process (tiered step priority). Conditional Phase Report sections ([A]/[C]/[O] markers). Test type distinction (unit/integration/deployment). Split into core + full reference with extractable templates and case studies. | DLL post-build analysis: 6-commit Twilio debug chain, 51-query class-level fix, non-declining deviation counts, production-only failures despite 166 passing tests |
@@ -2331,4 +2331,4 @@ When the human says "update the build protocol based on recent projects," Claude
 ---
 
 *Build Protocol v2.5 — 2026-05-15*
-*Derived from: Explain My Blood Test (931 commits), Do Later List (200K lines, 13 phases), Tax Auction (7 phases, 3 days), strategy-research framework*
+*Derived from prior personal projects: an AI-driven blood-test interpretation tool, a personal task-management app, a tax auction analysis tool, and a strategy-research framework.*

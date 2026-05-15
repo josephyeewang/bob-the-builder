@@ -20,9 +20,9 @@ For daily use, load `build-protocol-core.md` (compact reference). Load `build-pr
 
 ```
 build-protocol.md          ← Full reference (all sections, templates, appendices)
-build-protocol-core.md     ← Compact reference (~300 lines) for session context
+build-protocol-core.md     ← Compact reference (~200 lines) for session context
 templates/                  ← Extractable templates (phase report, behavioral core, etc.)
-case-studies/               ← Lessons from past projects
+README.md                   ← Public-facing project overview
 ```
 
 ## Key Rules

@@ -177,7 +177,7 @@ If Tier 2-3 skipped during build → MUST run at hardening.
    - **YES → returning user.** Read it, identify current phase and status. Read relevant project memory.
 3. State (Pulse Report format): "We're at Step [X]. Last session completed [Y]. Next up is [Z]. Progress: [bar]."
 4. If resuming a build phase: re-read the relevant domain spec
-5. If any handoff note exists at `~/Dropbox/99.0 Claude Sync/handoffs/<project>.md`, surface its open questions first.
+5. If you keep handoff notes across sessions/machines (e.g., a synced folder pattern), check for one and surface any open questions first.
 
 ---
 
