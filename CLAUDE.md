@@ -6,10 +6,13 @@ A systematic framework for building, auditing, and evolving products with Claude
 
 ## How to Use
 
-Tell Claude Code to read `build-protocol.md` and it will present three modes:
+Tell Claude Code to read `build-protocol.md`. For first-time users, Claude will show a Journey Map (the full path from idea to launch) before asking which mode applies:
+
 - **NEW** — Build a new product from scratch
 - **AUDIT** — Assess an existing product
 - **EVOLVE** — Add features or make changes
+
+**Narrator Mode (v2.3) is ON by default.** Claude announces what's about to happen at every step, explains jargon inline, and summarizes progress after each completion. Say "terse mode" anytime to switch to a quieter pace.
 
 For daily use, load `build-protocol-core.md` (compact reference). Load `build-protocol.md` (full reference) when you need templates, appendices, or architecture patterns.
 
@@ -32,4 +35,4 @@ case-studies/               ← Lessons from past projects
 
 ## Current Version
 
-v2.2 — 2026-05-15
+v2.4 — 2026-05-15

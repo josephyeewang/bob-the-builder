@@ -1,4 +1,4 @@
-# BUILD PROTOCOL v2.2
+# BUILD PROTOCOL v2.4
 
 > A systematic framework for building, auditing, and evolving products with Claude Code.
 > Created: 2026-04-15. Last updated: 2026-05-15. Owner: Joe Wang.
@@ -55,22 +55,25 @@ Claude will then ask which mode fits your situation:
 
 ---
 
-**When the user references this file without specifying a mode, Claude MUST present this menu and wait for selection:**
+**When the user references this file without specifying a mode, Claude MUST:**
+
+1. **Check if this is a first-time user** — does `docs/build-manifest.md` exist? If NO, this is a first-time user.
+2. **For first-time users:** Show the Journey Map (§11.4) FIRST, then the menu below. Confirm: "Does this look like what you're trying to do?" before proceeding to mode selection. (Narrator Mode is ON by default per §11.)
+3. **For returning users:** Jump straight to the menu.
+
+Present this menu and wait for selection:
 
 > **Which mode fits where you are?**
 >
-> **A) NEW** — Start a brand new product from scratch
-> *I have an idea (or a rough spec) and want to build it systematically. This walks you through: product spec → behavioral core (if AI) → architecture → domain specs → phased build with verification at every step.*
+> | Mode | What it does | When to use | Roughly how long |
+> |---|---|---|---|
+> | **A) NEW** | Build a brand-new product from scratch. ~7 spec steps + build phases + hardening. | You're starting from zero or a fresh idea. | 4-12 sessions over 1-4 weeks |
+> | **B) AUDIT** | Assess an existing, partially-built product. Maps what you have to the 5-document hierarchy, finds gaps, proposes a remediation plan. | You inherited code, or you've been building without a process and want to formalize. | 1-3 sessions |
+> | **C) EVOLVE** | Add features or change an existing product. Classified Small / Medium / Large — bigger changes apply more of the build discipline. | You have a working product and want to extend it. | 1 session (Small) to 1+ week (Large) |
 >
-> **B) AUDIT** — Assess an existing, partially-built product
-> *I already have code and/or docs but I'm not sure how solid they are. This inventories what you have, maps gaps against a standard framework, scores consistency, and produces a prioritized remediation plan.*
->
-> **C) EVOLVE** — Add features or make changes to an existing product
-> *I have a working product and want to add something or change something. This classifies the change (small/medium/large), checks relevant specs, builds it, and keeps docs in sync.*
->
-> **Which one? (A / B / C)** — or describe what you're trying to do and I'll recommend one.
+> **Which one? (A / B / C)** — or say "I'm not sure" / describe what you're trying to do and I'll recommend one.
 
-After the user selects, Claude reads the relevant PART (II, III, or IV) and begins at Step 1 / A1 / E1. Claude does NOT need to read the entire document upfront — read Part I (Foundation) + the selected mode's section.
+After the user selects, Claude reads the relevant PART (II, III, or IV) and begins at Step 1 / A1 / E1. Claude does NOT need to read the entire document upfront — read Part I (Foundation, including §11 Narration Protocol) + the selected mode's section.
 
 ---
 
@@ -453,6 +456,94 @@ When a bug is discovered during verification or after deployment, follow this se
 
 **Three-strikes integration:** If the same fix fails 3 times following this protocol, STOP. The bug is not where you think it is. State what was tried, what was ruled out, and change approach entirely.
 
+### 11. Narration Protocol (v2.3 — for guiding non-engineer users)
+
+The rest of this protocol tells Claude *what to produce*. This section tells Claude *how to narrate the journey* so a non-engineer user knows where they are, what's happening, and what's coming next.
+
+**Default state:** Narrator Mode is **ON** for any session that enters NEW mode. The user can disable it with "skip narration" or "terse mode" at any point. Returning users with an existing Build Manifest get a condensed narration (skip the journey map and glossary primers — they've seen them).
+
+#### 11.1 — The Ten Narration Rules
+
+1. **Open with orientation.** On the first turn of a NEW mode session, before mode selection, show the Journey Map (§11.4). Confirm: "Does this look like what you're trying to do?" Don't proceed until the user has the shape of the thing in their head.
+
+2. **Use the Preamble Template at every step entry.** Before drafting Step 1a, Step 2a, Step 3a, etc., narrate per §11.2. Never just start producing the artifact without context.
+
+3. **Define jargon inline on first use.** When a term from Appendix J appears for the first time in a session, define it in one sentence inline before using it normally. Don't make the user go look it up.
+
+4. **Make every Human Gate (`→ HG`) explicit about choices.** When pausing for approval, state the user's four options every time: *approve* (advance), *revise* (request changes), *reject* (redirect entirely), *defer* (log it, skip, revisit later). Don't assume the user remembers them.
+
+5. **Use the Checkpoint Summary Template after every step completion.** After Step 1c (Product Spec done), Step 2d (Behavioral Core done), etc. — narrate per §11.3 before advancing.
+
+6. **Show progress at every step entry.** Use the Build Manifest progress tracker format (§5b): `Spec phase: ▓▓▓▓░░░ 4/7 complete. Next: Step 3 Architecture Contract.`
+
+7. **Match action items to user expertise.** If user's project CLAUDE.md or the global CLAUDE.md flags them as a non-coder, every actionable step gets the paste-ready block format: (a) what app/window to open, (b) the exact block to paste, (c) one plain-language line on what it does. No bare commands in prose.
+
+8. **Catch confusion signals.** If the user says "I don't get it", "what does that mean", "why are we doing this", "is this normal", or expresses uncertainty — STOP, switch to plain-English explainer mode, and resolve before continuing. Don't power through.
+
+9. **End each session with a Pulse Report.** Before the user closes the tab, narrate: (a) where we are in the Journey Map, (b) what got produced this session, (c) what's the next step when they resume, (d) any open questions Claude asked that the user didn't fully answer.
+
+10. **Stay narrator, not lecturer.** Narration is short and frequent, not long and rare. A one-sentence "we're about to do X because Y" beats a 200-word explainer every time. If you're writing more than 3-4 sentences of narration in a row, you're over-explaining.
+
+#### 11.2 — Preamble Template (use at every step entry)
+
+> **🟦 Step [N.x] — [Step Name]**
+> **What we're doing:** [One sentence, plain English. Avoid jargon or define it inline.]
+> **Why now:** [What we just finished + what this step enables. The chain.]
+> **What I'll ask you:** [Concrete preview of the questions Claude is about to pose.]
+> **What "done" looks like:** [The artifact — what file/document will exist, in plain English.]
+> **Time:** [Realistic estimate: "1 session", "2-3 turns", etc.]
+> **At the Human Gate, you can:** approve / revise / reject / defer.
+> **Progress:** [Use the progress bar format.]
+
+#### 11.3 — Checkpoint Summary Template (use after every step completion)
+
+> **✅ Step [N.x] complete — [Step Name]**
+> **📦 What we now have:** [The artifact, in 1-2 sentences. Where it lives. What it says.]
+> **🚀 What this unlocks:** [The next step + why it depends on what we just produced.]
+> **⚠️ Risks if we skip something later:** [Optional — only if a future step might be tempting to skip. E.g., "If we skip the eval set in Step 2d, we won't catch behavioral regressions during build."]
+> **Progress:** [Updated progress bar.]
+
+#### 11.4 — Journey Map (show on first contact, before mode selection)
+
+> Here's the full journey for building a new product with this protocol:
+>
+> ```
+> 📍 Step 0:  Intake               (if you have existing materials)
+>    Step 1:  Product Spec         — WHAT it does
+>    Step 2:  Behavioral Core      — HOW the AI thinks (if AI product)
+>    Step 3:  Architecture         — HOW it's built
+>    Step 4:  Domain Specs         — DETAILS per subsystem
+>    Step 5:  Build Manifest       — PLAN of phases
+>    Step 6:  Project Setup        — repo, hooks, environment
+>    Step 7+: Build Phases         — actual building, one phase at a time
+>    Step N+1: Hardening           — security/abuse/integrity audits
+>    Step N+2: Learning            — what worked, what to improve
+> ```
+>
+> **Spec phase (Steps 0-6):** ~1-4 sessions. We talk through your product, capture decisions, no code yet.
+> **Build phase (Steps 7+):** ~1-2 sessions per build phase. Code happens here.
+> **Hardening + Learning:** ~1 session per audit (5 audits) + 1 wrap-up.
+> **Total:** Roughly 4-12 sessions over 1-4 weeks, depending on complexity.
+>
+> We'll pause for your approval at every gate (`→ HG`). You can always stop, redirect, or defer items.
+
+#### 11.5 — Session Open Checklist (every NEW session)
+
+Before doing anything else:
+
+1. Check: is there a `docs/build-manifest.md`? **Yes** → returning user, condensed narration, jump to §11.6. **No** → first-time user, full narration, show Journey Map.
+2. State narrator status: "Narrator Mode is on by default. Say 'terse mode' anytime to switch."
+3. For returning users: state where we are in the Journey Map and what's next.
+
+#### 11.6 — Condensed narration for returning users
+
+Returning users (Build Manifest exists) skip the Journey Map and jargon primers. They still get:
+- Progress bar at every step entry
+- Preamble Template (shortened to 3 lines: what / why now / what "done" looks like)
+- Checkpoint Summary after each step
+- Pulse Report at session end
+- Inline jargon definitions ONLY for terms not previously used in this project's specs
+
 ---
 
 ## PART II: MODE — NEW
@@ -481,6 +572,29 @@ When a bug is discovered during verification or after deployment, follow this se
 - For each hierarchy document that has substantial existing coverage: Step [N]a becomes "Review and complete" rather than "Draft from scratch" — Claude incorporates existing content, fills gaps, and flags where existing material is unclear or incomplete
 - For documents with no existing coverage: proceed with normal drafting
 - Existing materials that don't fit the hierarchy (e.g., competitor analysis, user research) are preserved in `docs/reference/` and cited where relevant
+
+### Step 0.5: Project Profile (v2.4)
+
+*A routing step. Bob's core protocol is generic; archetypes have additional considerations. Step 0.5 classifies the project and pulls in the relevant addendum from Appendix K.*
+
+**0.5a: Classify**
+- Claude asks the user: "Which of these archetypes most closely matches what you're building?" — presents the profile list from Appendix K.
+- Common archetypes: AI Chat/Copilot, Internal B2B Tool, RAG Pipeline, Vertical SaaS, Agent/Tool-Use Workflow, Marketplace, E-commerce, Content/Community, Real-time/Collaborative, Mobile-First, Browser Extension, Voice/Audio, Data Pipeline/ETL, SEO/Marketing site.
+- Multi-archetype projects (e.g., "internal B2B tool with RAG and agent loops") select primary + secondary profiles.
+- "None of these / hybrid" is a valid answer — Claude proceeds with the generic protocol.
+
+**0.5b: Pull addendum**
+- For each selected profile, Claude reads the matching Appendix K entry and surfaces:
+  - Additional Product Spec considerations (extra capabilities/scenarios to include in Step 1a)
+  - Additional Architecture Contract considerations (extra concerns for Step 3a)
+  - Architecture Patterns relevant to this profile (specific G-pattern references)
+  - Known gotchas / failure modes for this archetype
+- The addendum is **additive only** — it never replaces or weakens core protocol steps. If a profile addendum and a core step conflict, the core step wins.
+
+**0.5c: Tag in Build Manifest**
+- When the Build Manifest is created in Step 5b, the selected profile(s) are recorded at the top: `Project Profile: [primary] + [secondary]`.
+- This tag persists across sessions so Claude reloads the relevant addendum at every session start.
+- `→ HG:` Human confirms profile selection.
 
 ### Step 1: Product Spec
 
@@ -585,6 +699,9 @@ Behavioral Core stress-tests are prose scenarios; they cannot be re-run automati
   - **Rollback / kill-switch posture** — Feature-flag strategy. Which features ship behind flags? Which are kill-switchable in seconds vs. requiring a deploy? Default for AI features and risky migrations: behind a flag. This shapes the per-phase rollback plan in the Build Manifest (Step 5a).
   - Cost model (estimated cost per user at 100 / 1K / 10K scale)
   - **Cost-budget guardrail** — Per-request $ ceiling (especially for AI calls) that triggers a regression check at the phase gate. Example: "AI cost per active user per day must stay under $0.05. Phase gate fails if measured cost exceeds 2× the budget."
+  - **Accessibility posture (v2.4)** — Target level (WCAG 2.1 AA is the typical default for B2B/consumer products; AAA for regulated/public-sector). Which surfaces are in scope. Testing approach (axe, screen reader spot-checks, keyboard-only smoke test). Even a "we punt on this for v1" decision should be recorded explicitly, not implicit.
+  - **Internationalization posture (v2.4)** — Single-locale only (state which) vs. multi-locale (list locales, copy-management approach, currency/date handling, RTL support). Punting is fine if recorded; assumed punt is not.
+  - **Compliance scope (v2.4)** — Pick from: None / GDPR / CCPA / HIPAA / SOC2 / PCI / industry-specific. Drives the depth of security audit at hardening, data-handling rules in domain specs, and data-subject-request endpoints. Default for indie/consumer products: GDPR + CCPA baseline (cookie banner, data export, account deletion). For B2B: add SOC2 readiness if enterprise customers will demand it.
   - Constraints (what this architecture does NOT support — explicit boundaries)
   - Red flags ("Stop immediately if you see X" — extracted from past project lessons)
 - `→ HG:` Human reviews
@@ -697,10 +814,18 @@ This matrix is the "nothing falls through the cracks" guarantee. Without it, you
 
 **5b: Initialize Manifest**
 - Create `docs/build-manifest.md` with:
+  - **Progress tracker (v2.3)** — visual where-are-we for the user. Updated after every completed step or phase. Format:
+    ```
+    Spec phase:  ▓▓▓▓▓▓▓ 7/7 ✅ complete
+    Build phase: ▓▓░░░░░ 2/7 (currently in Phase 3: messaging)
+    Hardening:   ░░░░░░░ 0/5
+    ```
+    Claude reads this at session start and recites it as part of the Pulse Report (§11.1 rule 9). Claude updates it before declaring any step or phase complete.
   - Phase list with status column (pending / in-progress / complete)
   - Capability traceability matrix (from 5a-ii)
   - Current phase pointer (updated after each phase)
   - **Hot paths** (1-3 project-wide critical paths that are tested at every phase gate, e.g., "SMS inbound → AI interpretation → task creation → confirmation outbound"). Hot path failure at any phase is a stop condition.
+  - **Success-metric instrumentation map (v2.4)** — For each success metric and leading indicator defined in the Product Spec (Step 1a), specify: (a) the analytics event name that proxies it, (b) the build phase that wires it up, (c) the dashboard/query that surfaces it post-launch. Without this map, success metrics are aspiration. Example: north-star "weekly active task creators" → event `task_created` (Phase 3) → PostHog cohort `WAU-creators`. If no analytics tool is chosen yet, this row triggers that decision in `tool-decisions.md`.
   - **Deviation tracker** (running count of spec deviations found per phase — used to monitor build quality trend. Format: `| Phase | Deviations Found | Deviations Fixed | Trend |`)
   - Decisions section (links to decision-log.md entries made during build)
   - Deferred items list (things explicitly skipped with rationale)
@@ -1309,12 +1434,30 @@ Before starting Step 1 (Product Spec):
 
 *What Claude Code should do at the beginning of every session on a project that uses this protocol.*
 
+**Step 0 — First-time vs. resuming check (v2.3):**
+
 1. Read CLAUDE.md
-2. Read `docs/build-manifest.md` → identify current phase and status
-3. Read relevant project memory
-4. State: "We're at Step [X]. Last session completed [Y]. Next up is [Z]."
+2. Check: does `docs/build-manifest.md` exist?
+   - **NO → this is a first-time user / fresh project.** Switch to first-time-user path below.
+   - **YES → this is a returning user.** Switch to resuming path below.
+
+**First-time-user path (no Build Manifest yet):**
+
+1. Announce: "Narrator Mode is ON by default per §11. Say 'terse mode' anytime to switch."
+2. Show the Journey Map (§11.4) so the user sees the full shape of what's coming.
+3. Confirm: "Does this look like what you're trying to do?"
+4. Then present the Mode Selection menu (Quick Start section).
+5. Once mode is selected, enter the appropriate Part (II / III / IV) at Step 0 / A1 / E1 — using the Preamble Template (§11.2) at every step entry.
+
+**Resuming-user path (Build Manifest exists):**
+
+1. Read `docs/build-manifest.md` → identify current phase and status
+2. Read relevant project memory
+3. Check for a handoff note at `~/Dropbox/99.0 Claude Sync/handoffs/<project>.md` — if present, surface any open questions FIRST.
+4. State as a Pulse Report: "We're at Step [X]. Last session completed [Y]. Next up is [Z]. Progress: [bar]."
 5. If resuming a build phase: re-read the relevant domain spec before proposing work
-6. If the human has a different intent (e.g., they want to EVOLVE, not continue building): switch modes
+6. If the human has a different intent (e.g., they want to EVOLVE, not continue building): switch modes — and use the Preamble Template (§11.2) when entering the new mode.
+7. Use **condensed narration** per §11.6 — skip the Journey Map and jargon primers, keep progress bar + preamble + checkpoint summaries.
 
 ---
 
@@ -1527,6 +1670,8 @@ For a data pipeline / analysis tool:
 
 *Reusable technical patterns extracted from past projects. Reference these during Step 3 (Architecture Contract) and Step 4 (Domain Specs). Not all patterns apply to every project — pick the ones relevant to yours.*
 
+> **Maintenance note (v2.4):** Patterns G11+ cover newer or more domain-specific topics. The shape of these problems is stable; the specific tools/libraries cited (AI Gateway, Inngest, Manifest V3, Yjs, etc.) move fast. Verify current-state against the latest official docs before relying on specifics in a new project.
+
 ### G1. Normalized Input/Output Contracts (Multi-Surface Products)
 
 If your product receives input from multiple surfaces (web, SMS, voice, email, API), define canonical message shapes that ALL surfaces must convert into before touching core logic.
@@ -1650,6 +1795,101 @@ If using Supabase or similar:
 - Admin routes use service role key (bypasses RLS) — server-side only, never client-side
 - System tables (config, definitions) = service role only
 
+### G11. RAG Pipeline (v2.4)
+
+For products that retrieve from a corpus to answer user questions.
+
+- **Chunking strategy:** size + overlap depends on content (300-800 tokens typical; smaller for dense legal/finance, larger for narrative). Make this a decision-log entry, not a guess.
+- **Embedding model choice:** pick one with a **migration plan**. Embedding models change; if you can't reindex, you're stuck. Wrap behind provider abstraction (G7).
+- **Hybrid retrieval:** vector search alone misses keyword matches. Combine BM25 + vector + reranker (Cohere, Voyage) for production-grade recall.
+- **Reranker:** non-negotiable for serious products. Cheap, large quality lift, no infra cost if hosted.
+- **Reindexing:** when corpus updates or embedding model changes — design from day one. Incremental for steady-state, full-rebuild path for migrations.
+- **"Not in corpus" UX:** explicit refusal beats hallucinated answers. Test for it in the eval set.
+- **Eval (Step 2d):** retrieval recall@k on a held-out QA set; answer faithfulness (does the answer cite real chunks?); refusal accuracy.
+
+### G12. Agent / Tool-Use Loop (v2.4)
+
+For products where the AI calls tools (functions, APIs, MCP servers) to act, often over multiple steps.
+
+- **Tool definitions are contracts.** Each tool needs a precise schema and a description that explains *when* to call it, not just *how*. Vague descriptions = wrong tool calls.
+- **Max-step bound (mandatory).** Every agent loop has a hard cap (e.g., 10 steps) to prevent runaways and cost blowouts. Exceeding the cap returns a partial result + user notification, never silent failure.
+- **Tool-call eval:** part of the eval set (Step 2d). For each user intent: did the agent pick the right tool, with the right args? Negative cases: "this should NOT call any tool."
+- **Tool-failure handling:** for each tool, define the retry/abort/ask-user behavior. Don't let tools silently fail — agents that don't know tools failed give worse output than agents that admit failure.
+- **Observability:** every tool call logged with input, output, latency, cost. Critical for debugging agent behavior in prod.
+- **MCP wrapping:** if exposing tools via MCP, treat the MCP server as its own subsystem with a domain spec.
+- **Common failure mode:** agent loops calling the same tool with the same args because it didn't get the answer it wanted. Detect with loop detection + early stop.
+
+### G13. Background Job Architecture (v2.4)
+
+For products with async work: scheduled jobs, queued tasks, webhooks-with-work, long-running operations.
+
+- **Pick one orchestrator, abstract it.** Options: Inngest (event-driven, generous free), Trigger.dev (similar), Vercel Workflow (Vercel-native, durable), DB-backed queue (simplest, less powerful). Wrap behind G7 abstraction — you WILL switch eventually.
+- **Idempotency is mandatory.** Every job has an idempotency key. Running twice = same result. Without this, retries duplicate charges/emails/whatever.
+- **Retry policy:** exponential backoff, capped retries (3-5 typical), dead letter on final failure. Document the policy per job type.
+- **Dead-letter handling:** failed jobs go somewhere visible. "Logs alert" is not a dead-letter strategy.
+- **Concurrency limits:** per-user, per-tool, global. Prevents a single user spamming the queue and blocking everyone.
+- **Observability:** job runs visible in a UI (Inngest/Trigger.dev give this free). Cost per job tracked.
+- **Critical Architecture Decision** required when introducing the orchestrator (per Step [N]a) — answer the standard verification questions: server restart → pending jobs survive? two workers → no double-processing? failed jobs → retry with backoff? 3x-failed → dead letter?
+
+### G14. Mobile App Considerations (v2.4 — Tier 3)
+
+For native iOS/Android, React Native, Expo, or Flutter apps. Pattern is signposts, not a playbook — mobile has enough quirks to deserve its own protocol if you go deep.
+
+- **Stack choice:** native (max performance, separate teams) vs RN (one codebase, JS ecosystem) vs Expo (RN + managed services, fastest path) vs Flutter (one codebase, custom rendering). For solo/Claude Code: Expo is the default unless you have a reason.
+- **App store review prep:** budget 2-5 days for first submission, including assets (icons, screenshots, privacy nutrition label, data-collection disclosure). Apple is stricter than Google. First rejection is normal; second rejection is a process problem.
+- **Push notifications:** provider choice (Expo Notifications, FCM, OneSignal); permissions UX (don't ask on first launch — earn it); user-controlled categories; deep-link routing on tap.
+- **Offline behavior:** explicit decision — fully offline-first, offline-tolerant (queue actions, sync later), or online-only (with clear UX when disconnected). "Crash if no signal" is a real-world outcome of leaving this implicit.
+- **OTA updates (Expo / RN):** what gets pushed OTA vs requires native binary update. Native code changes always require app-store resubmission.
+- **Deep / universal links:** configure early; testing them retroactively is painful.
+- **Common gotchas:** assumed permissions always granted; tokens stored in non-secure storage; analytics/crash reporting blocked by App Tracking Transparency on iOS; in-app purchases must use Apple/Google IAP for digital goods (15-30% fee).
+
+### G15. Browser Extension (v2.4 — Tier 3)
+
+For Chrome/Firefox/Edge/Safari extensions. The lifecycle is fundamentally different from a web app.
+
+- **Manifest version:** MV3 is mandatory (Chrome killed MV2 by mid-2024). Background "service worker" replaces persistent background page — *it stops when idle*. Anything that needs to run continuously needs a workaround (alarms API, declarativeContent, etc.).
+- **Boundary discipline:** content script (runs in page context, can access DOM) vs background service worker (runs in extension context, handles cross-origin) vs popup/options UI (separate context). Messaging between them is async; treat it like a subsystem boundary in your domain specs.
+- **Permissions:** request the minimum — broad permissions delay/block store review. Optional permissions (request-at-use) are reviewed more favorably.
+- **Storage:** `chrome.storage.local` (persistent, ~10MB) vs `chrome.storage.sync` (syncs across devices, smaller). Avoid `localStorage` in content scripts — different context, different storage.
+- **CSP issues:** many sites have strict Content Security Policy that breaks content scripts. Defensive coding required.
+- **Store review:** Chrome Web Store is faster than Apple but still 1-7 days. Reviews tighten when you request broad permissions or modify too many sites.
+- **Common gotchas:** service worker dies mid-operation; content script breaks when site updates DOM; cross-browser API differences (use `webextension-polyfill`); auto-updates can land while user has the extension open and break state.
+
+### G16. Real-time / Collaborative (v2.4 — Tier 3)
+
+For products with multi-user real-time state: co-editing, presence, live cursors, chat, multiplayer.
+
+- **Transport:** WebSocket (full-duplex, complex) vs Server-Sent Events (one-way server→client, simpler) vs WebRTC (peer-to-peer, lowest latency). Managed providers (Liveblocks, PartyKit, Pusher, Ably, Supabase Realtime) eliminate most of the infra pain — use them unless you have scale/cost reason not to.
+- **Conflict resolution:** CRDTs (Yjs, Automerge — eventually consistent, no central authority needed) vs OT (operational transform — needs central server) vs last-write-wins (simplest, lossy). Pick based on what kind of conflicts you'll see: text editing → CRDT; structured data → CRDT or OT; presence/cursors → LWW is fine.
+- **Presence model:** how do you detect a user is online, in this doc, on this section? How quickly does "left" propagate? Stale presence is a UX bug.
+- **Offline-first:** if users can edit offline, the merge story is the product. Design it deliberately; don't let it emerge.
+- **Permissions:** real-time updates must respect permissions — don't broadcast a doc's changes to users who can't see the doc.
+- **Common gotchas:** clock skew causing CRDT divergence (use logical clocks, not wall clocks); reconnect storms after a network blip; presence "online" forever because cleanup never ran; replaying entire history on join (scale issue).
+
+### G17. Voice / Audio Pipeline (v2.4 — Tier 3)
+
+For products that transcribe, generate, or process audio.
+
+- **STT (speech-to-text):** Deepgram (low latency, strong accents), OpenAI Whisper (high accuracy, batch-friendly), AssemblyAI (good speaker diarization). Wrap behind provider abstraction (G7).
+- **TTS (text-to-speech):** ElevenLabs (quality, voice cloning), OpenAI (cheaper, decent), Cartesia (low latency for conversational). Same wrapping rule.
+- **Streaming vs batch:** real-time conversation needs streaming both directions; transcribing a recording is batch. Mixing modes adds complexity.
+- **Latency budget:** end-to-end for conversational AI: user finishes speaking → TTS audio starts. Target <1.5s for natural feel; <800ms feels human. Each hop (VAD → STT → LLM → TTS → audio) eats budget. Optimize the whole pipeline, not one hop.
+- **Recording storage & retention:** explicit decision per jurisdiction. EU/CA require disclosure + consent + deletion. Default: short retention (hours-days) unless product needs longer.
+- **Legal disclosure:** recording laws vary (one-party vs two-party consent states); for B2B sales/support tools, the disclosure pattern is mandatory.
+- **Common gotchas:** STT accuracy degrades on non-native English / specialized vocab — fix with domain prompts or custom models; TTS prosody bad on long output — split at sentence boundaries; audio file format mismatches (sample rate, codec) breaking the pipeline silently.
+
+### G18. Marketplace / Two-Sided Platform (v2.4 — Tier 3)
+
+For products with distinct supply and demand sides where the product brokers their interaction.
+
+- **Two user models, two flows.** Supply side (sellers, providers, hosts) and demand side (buyers, customers, guests) often share an identity layer but have separate onboarding, separate dashboards, separate notification preferences. Don't try to unify the UX prematurely.
+- **Trust & safety:** ratings/reviews, reports, block/ban, dispute resolution. This is its own subsystem with its own domain spec.
+- **Identity verification:** if money flows, KYC is likely required somewhere. Stripe Connect Identity, Persona, Onfido. Tier-gated (only require KYC at first payout, not at signup) to reduce friction.
+- **Payments + payouts:** Stripe Connect is the default for two-sided (handles platform-fee split + payouts). Watch refunds — refund-after-payout creates a balance debt to the platform.
+- **Dispute resolution:** define the state machine (open → investigating → resolved-for-buyer / resolved-for-seller / no-resolution → appealed). Audit trail mandatory.
+- **Take-rate / fee model:** explicit in Product Spec. Changes here break unit economics retroactively.
+- **Common gotchas:** unverified supply side committing fraud; demand side abusing dispute system; payouts incorrect after refund chains; one side's PII leaking to the other (e.g., real names/addresses in messaging); review brigading.
+
 ---
 
 ## APPENDIX H: COWORK SESSION TEMPLATE
@@ -1763,6 +2003,189 @@ When the human says "update the build protocol based on recent projects," Claude
 | v2.0 | 2026-04-15 | Structural overhaul: Complexity Assessment (Light/Standard/Heavy tracks). Self-adversarial review as default, second-model review optional. Deploy & Verify substep for integration phases. Class-level pattern scan in verification. Hot path definition + per-phase testing. Deviation count tracking as health metric. Debugging Protocol (structured failure recovery). Protocol Effectiveness Metrics. Minimum Viable Process (tiered step priority). Conditional Phase Report sections ([A]/[C]/[O] markers). Test type distinction (unit/integration/deployment). Split into core + full reference with extractable templates and case studies. | DLL post-build analysis: 6-commit Twilio debug chain, 51-query class-level fix, non-declining deviation counts, production-only failures despite 166 passing tests |
 | v2.1 | 2026-04-15 | Seam and transition fixes from 3-mode simulation: Step 0 (Intake) for NEW mode — warm-start from existing materials. Step A7 (Re-entry) for AUDIT mode — explicit next-step guidance after remediation. Evolution Hardening Threshold — triggered at 5th Medium+ evolution, 3+ subsystem touches, Behavioral Core changes, or 6-month calendar. Mid-build reclassification rules for Complexity Assessment. Multiple concurrent evolutions guidance in E1. Template pointers in core reference. Session budget heuristics. | 3-mode simulation audit |
 | v2.2 | 2026-05-15 | **Best-practice gap closure (six changes, applied via Bob-on-Bob EVOLVE):** (1) Product Spec (Step 1a) — added success metrics + activation definition + non-goals + data classification. (2) New Step 2d (AI eval harness) — mandatory golden eval set of 10-30 input/expected pairs, LLM-as-judge + rubric scoring, re-run at every AI-touching phase gate. Drop in pass-rate is a stop condition. New `templates/eval-set.md`. (3) Architecture Contract (Step 3a) — added threat model (STRIDE/DFD), observability plan (logs/traces/metrics/alerts), rollback/kill-switch posture (feature-flag strategy), cost-budget guardrail. (4) Domain Specs (Step 4) — mandatory machine-readable contracts in `contracts/` (Zod/TS/OpenAPI/JSON Schema); new 4c adversarial review parallel to 1c/2c/3c. (5) Build Manifest (Step 5a) — mandatory rollback plan per phase entry. (6) Hooks (Step 6b) — promoted from "recommended" to **default-on with opt-out** for non-engineer users; default set: format + typecheck/build + block-destructive. Phase Report template adds `[C] AI Eval Results`, `[C] Cost Guardrail Check`, and rollback verification line. | Self-audit against 2026 spec-driven dev best practices: missing eval framework for AI products, prose-only integration contracts unenforceable, security/observability deferred to hardening, no per-phase rollback discipline. |
+| v2.3 | 2026-05-15 | **Narrator Mode for non-engineer users (applied via Bob-on-Bob EVOLVE):** New Foundation §11 "Narration Protocol" — 10 rules Claude must follow when guiding a first-time user, plus a standardized Preamble Template (used at every step entry), Checkpoint Summary Template (used after every step completion), and Journey Map (shown before mode selection). New Appendix J "Glossary" — plain-English definitions of every term the protocol uses. Mode menu expanded from terse A/B/C to a what/when/time table. Session Start Protocol (Appendix C) branched into first-time-user vs. resuming-user paths. Build Manifest (Step 5b) gained a visual progress tracker (`▓▓▓░░░░ 3/7`) recited at session start. Root CLAUDE.md instructs Claude to enable Narrator Mode by default. Narrator Mode is ON by default; user can disable with "terse mode". | Self-audit found no clear walkthrough capability for non-engineer users — protocol assumed Claude would narrate without explicit instruction, leaving UX inconsistent. |
+| v2.4 | 2026-05-15 | **Project archetype coverage (applied via Bob-on-Bob mini-build, 4 phases):** **Tier 1** — New Step 0.5 "Project Profile" routes the project through Appendix K addenda; new Appendix K "Project Profiles" with 15 archetypes (K1-K15: AI Chat, B2B Tool, RAG, Vertical SaaS, Agent, Background Jobs, E-commerce, Marketplace, Content/Community, Real-time, Mobile, Extension, Voice, ETL, SEO Site) — additive-only addenda that never override core protocol. Three new architecture patterns: G11 RAG Pipeline (chunking/embedding/reranker/eval), G12 Agent / Tool-Use Loop (tool contracts, max-step bound, tool eval), G13 Background Job Architecture (orchestrator choice, idempotency, dead letter). **Tier 2** — Architecture Contract (Step 3a) gained accessibility posture, internationalization posture, and compliance scope (GDPR/CCPA/HIPAA/SOC2/PCI/None). Build Manifest (Step 5b) gained success-metric instrumentation map (every Product Spec success metric must map to an analytics event + build phase + dashboard, closing the "metric defined but never wired" gap). **Tier 3** — Five additional architecture patterns for less common archetypes that may show up later: G14 Mobile App, G15 Browser Extension, G16 Real-time/Collaborative, G17 Voice/Audio Pipeline, G18 Marketplace/Two-Sided Platform. Pattern Library gains a maintenance note flagging that tool-specific advice in G11+ moves fast. | Self-audit against common 2026 Claude-Code project archetypes found three gaps: no routing layer for archetype-specific considerations; missing patterns for the most common AI-product archetypes (RAG, Agents, Jobs); a11y/i18n/compliance treated as implicit; success metrics defined in Product Spec but never instrumented during build. |
+
+---
+
+## APPENDIX J: GLOSSARY (v2.3 — plain English)
+
+*Inline reference for terms used in this protocol. Claude defines each term on first use during a session; this appendix is the canonical version. Ordered roughly by when you'll encounter the term.*
+
+### The five core documents
+
+- **Product Spec** — The "WHAT" document. Plain-English description of what you're building, who it's for, what problem it solves, and how you'll know it worked. Lives at `docs/product-spec.md`. Comes first because every later document refers to it.
+- **Behavioral Core** — The "HOW IT THINKS" document. Only exists if your product has an AI making decisions. Defines confidence thresholds, tone, what the AI is allowed to do without asking, and what it must refuse. Lives at `docs/behavioral-core.md`.
+- **Architecture Contract** — The "HOW IT'S BUILT" document. Tech stack, security baseline, threat model, observability plan, cost budget, what the system explicitly does NOT support. Lives at `docs/architecture.md`.
+- **Domain Specs** — One document per subsystem (e.g., "messaging", "billing", "scheduler"). Details: data models, APIs, state machines, edge cases. Live in `docs/domains/`.
+- **Build Manifest** — The "WHERE WE ARE" document. Phases, current status, what's done, what's deferred, deviations from plan. Lives at `docs/build-manifest.md`. The only document that tracks *current state* — all others describe *desired state*.
+
+### Gates (places we pause)
+
+- **Human Gate (`→ HG`)** — A pause point. Claude stops, presents work, and waits for you to approve / revise / reject / defer. The mechanism that keeps Claude from drifting off the plan.
+- **Phase Gate** — A bigger pause point at the end of every build phase. Checks: build passes, tests pass, hot paths work, no regressions, eval set still passes, cost stays in budget, specs still match code. Failing any check stops advancement.
+- **Quality Gate** — A category of gate (Spec Gate after spec docs, Phase Gate after each phase, Hardening Gate after audits, Ship Gate before launch). Each has pass criteria.
+- **Acceptance Gate** — The exit check for a single phase. Has two parts: *exit criteria* (what must be true) and *scope boundary* (what must NOT have been built — prevents creep into future phases).
+
+### Process disciplines
+
+- **Reconciliation** — After every build phase: spec says X, code does Y; decide which is right; update the other. Done at step `[N]c`. Non-optional.
+- **Propagation** — When a spec is modified mid-build, scan future phases that depend on it and flag them. Prevents Phase 3's data-model change from breaking Phase 8 silently.
+- **Class-level pattern scan** — When a bug is found, grep the entire codebase for the same pattern and fix all instances. Prevents fixing one symptom while identical bugs remain elsewhere.
+- **Hot path** — A 1-3 project-wide critical user flow defined in the Build Manifest (e.g., "user texts a task → AI interprets → task gets created → confirmation sent"). Tested at every phase gate. Failure is a stop condition.
+- **Capability Traceability Matrix** — A table mapping every capability in the Product Spec to a specific build phase. Prevents "we forgot to build feature X" at hardening.
+- **Hardening** — The audit phase after all build phases. Five fresh-session audits: security, adversarial/abuse, integration seams, data integrity, spec-code consistency. Each is a separate session with clean context (writer/reviewer pattern).
+- **Deviation tracker** — Running count of spec-vs-code mismatches per phase. If not declining over 3 phases → trigger a process review.
+
+### Specs & artifacts (v2.2 additions)
+
+- **Eval set** — For AI products: a `evals/behavioral-core.yaml` file with 10-30 input → expected-behavior pairs. The executable version of the Behavioral Core. Re-run at every phase gate that touches AI.
+- **Machine-readable contract** — A file in `contracts/` (TypeScript, Zod, OpenAPI, JSON Schema) that defines a subsystem boundary in code, not prose. The compiler/validator enforces what was previously prose-checked.
+- **Threat model** — STRIDE or data-flow analysis listing assets, threats, and mitigations. Sits in the Architecture Contract. Pulls security work into design, not hardening.
+- **Observability plan** — What gets logged / traced / measured / alerted on, defined in the Architecture Contract. Without it, debugging in production is blind.
+- **Rollback plan** — Per-phase: how to turn this phase off if it breaks in prod (feature flag, env var, revert path). Set in the Build Manifest.
+- **Cost guardrail** — A per-request or per-user-per-day $ ceiling that triggers a regression check at the phase gate. Common for AI products.
+
+### Modes & complexity
+
+- **NEW mode** — Build a brand-new product from scratch. The longest path: ~7 spec steps + N build phases + hardening.
+- **AUDIT mode** — Assess an existing partially-built product, map it to the 5-document hierarchy, find gaps, remediate.
+- **EVOLVE mode** — Add features or change an existing product. Classified Small/Medium/Large; the bigger the change, the more of the build discipline applies.
+- **Light / Standard / Heavy track** — Project complexity tier set at intake. Light skips Behavioral Core and some adversarial reviews; Heavy adds mandatory deploy verification per phase and second-model review at every gate.
+
+### Narration (v2.3)
+
+- **Narrator Mode** — Default-on for NEW mode. Claude announces what's about to happen, why now, what the user will be asked, and what "done" looks like. Show progress at every step entry. Summarize at every step completion. Catch confusion signals.
+- **Preamble Template / Checkpoint Summary** — The two standardized blocks Claude uses at the start and end of each step (see Section 11).
+- **Journey Map** — The ASCII overview of the full build path shown to first-time users before mode selection.
+- **Pulse Report** — Short session-end narration: where we are, what got produced, what's next, any open questions.
+
+---
+
+## APPENDIX K: PROJECT PROFILES (v2.4)
+
+*Used in Step 0.5. Each profile is an **additive addendum** to the core protocol — extra things to consider, never replacements. If addendum and core protocol conflict, core wins.*
+
+> **Maintenance note:** Profiles reflect best practice as of 2026-05-15. Tech in some of these (especially Tier-3 archetypes) moves fast. Verify against current sources when you actually start a project in that profile.
+
+### Profile index
+
+| Profile | Pattern refs | Tier |
+|---|---|---|
+| K1. AI Chat / Copilot / Assistant | G3, G4, G11 (if RAG), G12 (if tools) | Core fit |
+| K2. Internal B2B Tool / Dashboard | G7, G9, G10 | Core fit |
+| K3. RAG Pipeline | G11 | Core fit |
+| K4. Vertical SaaS (CRUD-heavy) | G8, G9, G10 | Core fit |
+| K5. Agent / Tool-Use Workflow | G3, G4, G12, G13 | Core fit |
+| K6. Background Job-Heavy / Workflow Orchestration | G13 | Core fit |
+| K7. E-commerce / Subscriptions | G7, G9, G10 | Common |
+| K8. Marketplace / Two-Sided Platform | G10, G18 | Tier 3 |
+| K9. Content / Community | G8, G10 | Common |
+| K10. Real-time / Collaborative | G16 | Tier 3 |
+| K11. Mobile-First / Native | G14 | Tier 3 |
+| K12. Browser Extension | G15 | Tier 3 |
+| K13. Voice / Audio / Video | G17 | Tier 3 |
+| K14. Data Pipeline / ETL | G7, G13 | Tier 3 |
+| K15. SEO / Marketing Site | (specific addendum below) | Tier 2 |
+
+### K1. AI Chat / Copilot / Assistant
+
+- **Product Spec additions:** conversation memory bounds (how many turns? when does context reset?); citations & sourcing UX; "I don't know" behavior; redirect-out-of-scope behavior; user feedback capture (thumbs up/down, regenerate).
+- **Architecture Contract additions:** streaming response strategy; rate limits per user/per-day; AI cost-per-conversation budget (not just per-request); prompt versioning approach.
+- **Common gotchas:** prompt injection from user input; context window blowups when memory grows unbounded; tone drift when system prompt is too long.
+- **Eval set focus (Step 2d):** disambiguation, refusal, citation accuracy, tone under frustration.
+
+### K2. Internal B2B Tool / Dashboard
+
+- **Product Spec additions:** role-based access (admin/viewer/etc.); audit log requirements; data export expectations; bulk-action workflows.
+- **Architecture Contract additions:** SSO strategy (SAML/OIDC if enterprise); audit logging required; row-level security if multi-team.
+- **Common gotchas:** assumed roles never enforced; export endpoints leaking data across tenants; bulk actions that lock the DB.
+
+### K3. RAG Pipeline
+
+- **Product Spec additions:** corpus size + update frequency; expected query latency; retrieval accuracy target; "answer found" vs "not in corpus" UX.
+- **Architecture Contract additions:** chunking strategy; embedding model choice (and migration plan when it changes); reranker decision; hybrid retrieval (BM25 + vector); reindexing strategy when corpus updates.
+- **Patterns:** see **G11** for full pattern.
+- **Common gotchas:** chunk size wrong for content type (legal vs slack convos); no reranker = poor retrieval; embeddings stale after corpus update; "I don't know" mishandled.
+- **Eval set focus:** retrieval recall@k, answer faithfulness (does the answer cite real chunks?), refusal when not in corpus.
+
+### K4. Vertical SaaS (CRUD-heavy)
+
+- **Product Spec additions:** primary entity hierarchy (Organization → User → Resource); permissions matrix; common workflows (create, edit, delete, share, archive); empty-state design.
+- **Architecture Contract additions:** RLS or app-level permissions; soft-delete vs hard-delete; data migration strategy as schema evolves.
+- **Common gotchas:** permission checks missing on one endpoint; cascading deletes that nuke too much; no soft-delete = no "undo".
+
+### K5. Agent / Tool-Use Workflow
+
+- **Product Spec additions:** what tools does the agent have access to; what's the max-step bound; how does the user observe agent progress; how does the user stop or redirect mid-run.
+- **Architecture Contract additions:** tool definition discipline (schemas, descriptions); tool-call eval; tool-failure handling (retry vs abort vs ask user); MCP integration if applicable.
+- **Patterns:** see **G12** for full pattern.
+- **Common gotchas:** agent calls wrong tool because description is unclear; infinite loops; agent's tool calls fail silently; no observability into multi-step runs.
+- **Eval set focus:** tool selection accuracy, refusal on out-of-scope requests, max-step compliance, recovery from tool errors.
+
+### K6. Background Job-Heavy / Workflow Orchestration
+
+- **Product Spec additions:** which user actions trigger background work; expected latency between trigger and completion; user-visible status; retry policy from user's POV ("we'll keep trying for 24h").
+- **Architecture Contract additions:** job runner choice (Inngest, Trigger.dev, Vercel Workflow, DB-backed queue) — see G13; idempotency keys; dead-letter handling; concurrency limits.
+- **Patterns:** see **G13**.
+- **Common gotchas:** non-idempotent jobs run twice → duplicate charges/emails; no dead-letter = silent loss; jobs not observable in prod.
+
+### K7. E-commerce / Subscriptions
+
+- **Product Spec additions:** payment flow (one-time, subscription, usage-based, freemium); cart/checkout vs single-product purchase; tax/region handling; refund + dispute flow; inventory model if physical goods.
+- **Architecture Contract additions:** payment provider (Stripe default, alternatives if EU-heavy); webhook signature verification (G7 abstraction recommended); idempotency on payment retries; PCI scope (use Stripe Elements → out of scope).
+- **Common gotchas:** double-charging from non-idempotent retries; webhook failures leaving payment ≠ DB state; tax handling wrong by region.
+
+### K8. Marketplace / Two-Sided Platform
+
+- **Product Spec additions:** supply side and demand side as distinct user types with separate flows; matching/discovery logic; trust & safety (reviews, reports, bans); dispute resolution; payouts to supply side (Stripe Connect or equivalent).
+- **Architecture Contract additions:** identity verification (KYC if money flows); review/report system; ban/suspension state machine; escrow vs direct-pay; transaction fees.
+- **Patterns:** see **G18**.
+- **Common gotchas:** supply side abuses to extract user data; demand side abuses to get free work; payouts incorrect after refunds; no audit trail for disputes.
+
+### K9. Content / Community
+
+- **Product Spec additions:** content types (post, comment, message, reaction); moderation model (pre-publish, post-publish, community); spam/abuse mitigation; notification model (email, in-app, push).
+- **Architecture Contract additions:** content storage (DB vs object store for media); moderation pipeline; notification fan-out (esp. for high-follower users); search/indexing strategy.
+- **Common gotchas:** notification storms on viral posts; moderation queue grows unboundedly; PII in user content accidentally indexed.
+
+### K10. Real-time / Collaborative
+
+- **Patterns:** see **G16**.
+- **Architecture Contract additions:** real-time transport (WebSocket, SSE, WebRTC); CRDT vs OT; presence model; conflict resolution; offline-first vs online-only.
+- **Common gotchas:** clock skew causing CRDT divergence; presence leaks (still shows online after disconnect); merge conflicts that lose user work.
+
+### K11. Mobile-First / Native
+
+- **Patterns:** see **G14**.
+- **Architecture Contract additions:** native vs RN vs Expo vs Flutter decision; push notification provider; OTA update strategy; app store review prep; offline behavior; deep links / universal links.
+- **Common gotchas:** assumed always-online; first app-store review rejection costs a week; push notification permissions never granted; OTA updates breaking when binary differs.
+
+### K12. Browser Extension
+
+- **Patterns:** see **G15**.
+- **Architecture Contract additions:** Manifest version (MV3 as of 2026); content-script vs background-worker boundary; cross-origin permissions; sync vs local storage; store review prep.
+- **Common gotchas:** MV3 service worker lifecycle (it stops when idle); permissions broader than needed → store rejection; content script breaking on sites with strict CSP.
+
+### K13. Voice / Audio / Video
+
+- **Patterns:** see **G17**.
+- **Architecture Contract additions:** STT/TTS provider (Deepgram, Whisper, ElevenLabs); streaming vs batch; latency budget; recording storage & retention; legal recording disclosure.
+- **Common gotchas:** latency budget violated end-to-end; recording stored longer than disclosed; STT accuracy variance by accent/language unaddressed.
+
+### K14. Data Pipeline / ETL
+
+- **Product Spec additions:** sources + frequencies; freshness target; schema evolution policy; reprocessing/backfill capability; data quality monitoring.
+- **Architecture Contract additions:** orchestrator (Airflow, Dagster, simple cron + scripts); idempotency at every stage; checkpointing; alerting on failure; cost per run.
+- **Common gotchas:** late-arriving data corrupts aggregates; schema change downstream breaks consumers; backfills that double-count; silent failures hidden because no one watches the dashboard.
+
+### K15. SEO / Marketing Site
+
+- **Product Spec additions:** target keywords + pages; structured data (Schema.org); social sharing (OG / Twitter cards); analytics + conversion tracking; A/B testing scope.
+- **Architecture Contract additions:** rendering strategy (SSG vs SSR vs ISR — favor SSG for SEO); image optimization; Core Web Vitals budget; sitemap + robots.txt; canonical URLs.
+- **Common gotchas:** client-side rendering hurting indexability; missing canonical → duplicate-content penalty; CLS/LCP regressions from a careless commit; analytics blocking by ad-blockers.
+
+---
 
 ### What This Protocol Is NOT
 
@@ -1773,5 +2196,5 @@ When the human says "update the build protocol based on recent projects," Claude
 
 ---
 
-*Build Protocol v2.1 — 2026-04-15*
+*Build Protocol v2.4 — 2026-05-15*
 *Derived from: Explain My Blood Test (931 commits), Do Later List (200K lines, 13 phases), Tax Auction (7 phases, 3 days), strategy-research framework*

@@ -6,13 +6,17 @@
 
 ## MODES
 
-When the user references this protocol without specifying a mode, present this menu:
+When the user references this protocol without specifying a mode, FIRST check whether this is a first-time user (no `docs/build-manifest.md` yet). For first-time users, show the Journey Map (full protocol §11.4) before mode selection. For returning users, jump straight to the menu.
 
-> **A) NEW** — Start a brand new product from scratch
-> **B) AUDIT** — Assess an existing, partially-built product
-> **C) EVOLVE** — Add features or make changes to an existing product
+Present this menu:
+
+> | Mode | What it does | When to use | Roughly how long |
+> |---|---|---|---|
+> | **A) NEW** | Build a brand-new product from scratch. ~7 spec steps + build phases + hardening. | You're starting from zero or a fresh idea. | 4-12 sessions over 1-4 weeks |
+> | **B) AUDIT** | Assess an existing, partially-built product. Maps what you have to the 5-document hierarchy, finds gaps, proposes a remediation plan. | You inherited code, or you've been building without a process and want to formalize. | 1-3 sessions |
+> | **C) EVOLVE** | Add features or change an existing product. Classified Small / Medium / Large — bigger changes apply more of the build discipline. | You have a working product and want to extend it. | 1 session (Small) to 1+ week (Large) |
 >
-> **Which one? (A / B / C)**
+> **Which one? (A / B / C)** — say "I'm not sure" and I'll ask a few questions to figure out which mode fits.
 
 ## COMPLEXITY ASSESSMENT
 
@@ -74,11 +78,12 @@ Before starting, assess project complexity:
 ## MODE: NEW — Step Sequence
 
 0. **Intake** → 0a: Existing materials check → 0b: Material mapping → 0c: Accelerated start → `→ HG` *(skip if starting from scratch)*
+0.5. **Project Profile (v2.4)** → 0.5a: Classify against Appendix K archetypes → 0.5b: Pull addendum → 0.5c: Tag in Build Manifest → `→ HG`
 1. **Product Spec** → 1a: Draft (incl. success metrics, activation, non-goals, data classification) → 1b: Stress-test → 1c: Adversarial review → `→ HG`
 2. **Behavioral Core** (AI only) → 2a: Draft → 2b: Stress-test → 2c: Adversarial review → 2d: Eval harness → `→ HG` — use `templates/behavioral-core.md` and `templates/eval-set.md`
-3. **Architecture Contract** → 3a: Draft (incl. threat model, observability plan, rollback posture, cost guardrail) → 3b: Adversarial review → `→ HG`
+3. **Architecture Contract** → 3a: Draft (incl. threat model, observability plan, rollback posture, cost guardrail, a11y/i18n/compliance posture v2.4) → 3b: Adversarial review → `→ HG`
 4. **Domain Specs** → 4a: Identify subsystems → 4b: Write + machine-readable `contracts/` + cross-reference → 4c: Adversarial review → `→ HG`
-5. **Build Manifest** → 5a: Define phases (incl. rollback plan per phase) + capability matrix → 5b: Initialize manifest → `→ HG`
+5. **Build Manifest** → 5a: Define phases (incl. rollback plan per phase) + capability matrix → 5b: Initialize manifest (incl. progress tracker v2.3 + success-metric instrumentation map v2.4) → `→ HG`
 6. **Project Setup** → 6a: CLAUDE.md → 6b: Hooks (DEFAULT ON — opt out explicitly) → 6c: Repo init → `→ HG`
 7+. **Build Phases** → For each phase: [N]a: Build → [N]b: Verify (use `templates/phase-report.md` — incl. AI eval results + cost guardrail) → [N]c: Reconcile → `→ HG`
 N+1. **Hardening** → Security → Adversarial/Abuse → Integration Seam → Data Integrity → Spec-Code → Fix *(fresh session per audit)*
@@ -167,15 +172,21 @@ If Tier 2-3 skipped during build → MUST run at hardening.
 ## SESSION START PROTOCOL
 
 1. Read CLAUDE.md
-2. Read `docs/build-manifest.md` → identify current phase and status
-3. Read relevant project memory
-4. State: "We're at Step [X]. Last session completed [Y]. Next up is [Z]."
-5. If resuming a build phase: re-read the relevant domain spec
+2. Check: does `docs/build-manifest.md` exist?
+   - **NO → first-time user.** Show the Journey Map (§11.4 of full protocol), announce "Narrator Mode is ON by default — say 'terse mode' anytime to switch", then proceed to Mode Selection.
+   - **YES → returning user.** Read it, identify current phase and status. Read relevant project memory.
+3. State (Pulse Report format): "We're at Step [X]. Last session completed [Y]. Next up is [Z]. Progress: [bar]."
+4. If resuming a build phase: re-read the relevant domain spec
+5. If any handoff note exists at `~/Dropbox/99.0 Claude Sync/handoffs/<project>.md`, surface its open questions first.
 
 ---
 
 ## TEMPLATES & REFERENCES
 
+- **Narration Protocol (v2.3):** §11 in full protocol — Preamble Template, Checkpoint Summary, Journey Map, 10 narration rules. Narrator Mode ON by default for NEW mode.
+- **Glossary (v2.3):** Appendix J in full protocol — plain-English definitions for all jargon.
+- **Project Profiles (v2.4):** Appendix K in full protocol — archetype lookup (K1-K15) for tailoring the protocol to your product type. Pulled in by Step 0.5.
+- **Architecture Patterns (v2.4 additions):** G11 RAG Pipeline · G12 Agent / Tool-Use Loop · G13 Background Job Architecture · G14 Mobile App · G15 Browser Extension · G16 Real-time / Collaborative · G17 Voice / Audio Pipeline · G18 Marketplace.
 - Phase Report template: `templates/phase-report.md` or Appendix F in full protocol
 - Behavioral Core template: `templates/behavioral-core.md` or Appendix B
 - AI Eval Set template: `templates/eval-set.md` (used in Step 2d and at AI phase gates)
@@ -187,4 +198,4 @@ If Tier 2-3 skipped during build → MUST run at hardening.
 
 ---
 
-*Core Reference for Build Protocol v2.2 — 2026-05-15*
+*Core Reference for Build Protocol v2.4 — 2026-05-15*
