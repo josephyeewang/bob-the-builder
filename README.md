@@ -7,9 +7,9 @@
 ## What is this
 
 - A structured playbook you hand to Claude Code
-- Instead of Claude making things up, it follows a clear sequence: figure out what you're building → design it → build phase by phase → audit before ship
-- You don't install anything — you point Claude at this repo
-- **Made by a non-technical product person who just wanted it to work.** Written in plain language. No engineering jargon. No bureaucratic bloat.
+- Forces Claude through a clear sequence: spec → design → build → audit
+- No install — you just point Claude at this repo
+- **Made by a non-technical product person who just wanted it to work** — plain language, no jargon, no bloat
 
 ---
 
