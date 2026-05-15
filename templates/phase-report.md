@@ -56,6 +56,22 @@
 - Integration points tested: [list each with PASS/FAIL]
 - Webhook delivery confirmed: [Yes/No/N/A]
 - Auth flow end-to-end: [PASS/FAIL/N/A]
+- **Rollback plan verified:** [Yes/No — confirm the flag/env-var/revert path defined in Build Manifest actually works]
+
+### [C] AI Eval Results — *required if phase touched AI behavior (prompts, decision logic, routing, summarization, tone)*
+- Eval set version: [git SHA of `evals/behavioral-core.yaml`]
+- Results table:
+  | Category | Total | Pass | Fail | Pass Rate | Δ vs Prior Phase |
+  |----------|-------|------|------|-----------|------------------|
+  | [list each category from eval set] | | | | | |
+  | **Overall** | | | | | |
+- Failures (list each: eval ID, what failed, severity, fix-now vs defer rationale)
+- **A drop in pass-rate vs prior phase is a stop condition.** If overall or any category dropped → fix before advancing or document why the drop is acceptable.
+
+### [C] Cost Guardrail Check — *required if Architecture Contract defines a per-request cost budget*
+- Measured cost per request (or per-user-per-day, matching the budget unit): [$N.NN]
+- Budget ceiling: [$N.NN]
+- Within budget: [Yes / No — if No, this is a stop condition]
 
 ### [A] Acceptance Gate
 - Exit criteria met: [Yes/No — cite each criterion]

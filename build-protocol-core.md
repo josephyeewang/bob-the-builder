@@ -74,13 +74,13 @@ Before starting, assess project complexity:
 ## MODE: NEW — Step Sequence
 
 0. **Intake** → 0a: Existing materials check → 0b: Material mapping → 0c: Accelerated start → `→ HG` *(skip if starting from scratch)*
-1. **Product Spec** → 1a: Draft (or review/complete if intake provided coverage) → 1b: Stress-test → 1c: Adversarial review → `→ HG`
-2. **Behavioral Core** (AI only) → 2a: Draft → 2b: Stress-test → 2c: Adversarial review → `→ HG` — use `templates/behavioral-core.md`
-3. **Architecture Contract** → 3a: Draft → 3b: Adversarial review → `→ HG`
-4. **Domain Specs** → 4a: Identify subsystems → 4b: Write + cross-reference → `→ HG`
-5. **Build Manifest** → 5a: Define phases + capability matrix → 5b: Initialize manifest → `→ HG`
-6. **Project Setup** → 6a: CLAUDE.md → 6b: Hooks → 6c: Repo init → `→ HG`
-7+. **Build Phases** → For each phase: [N]a: Build → [N]b: Verify (use `templates/phase-report.md`) → [N]c: Reconcile → `→ HG`
+1. **Product Spec** → 1a: Draft (incl. success metrics, activation, non-goals, data classification) → 1b: Stress-test → 1c: Adversarial review → `→ HG`
+2. **Behavioral Core** (AI only) → 2a: Draft → 2b: Stress-test → 2c: Adversarial review → 2d: Eval harness → `→ HG` — use `templates/behavioral-core.md` and `templates/eval-set.md`
+3. **Architecture Contract** → 3a: Draft (incl. threat model, observability plan, rollback posture, cost guardrail) → 3b: Adversarial review → `→ HG`
+4. **Domain Specs** → 4a: Identify subsystems → 4b: Write + machine-readable `contracts/` + cross-reference → 4c: Adversarial review → `→ HG`
+5. **Build Manifest** → 5a: Define phases (incl. rollback plan per phase) + capability matrix → 5b: Initialize manifest → `→ HG`
+6. **Project Setup** → 6a: CLAUDE.md → 6b: Hooks (DEFAULT ON — opt out explicitly) → 6c: Repo init → `→ HG`
+7+. **Build Phases** → For each phase: [N]a: Build → [N]b: Verify (use `templates/phase-report.md` — incl. AI eval results + cost guardrail) → [N]c: Reconcile → `→ HG`
 N+1. **Hardening** → Security → Adversarial/Abuse → Integration Seam → Data Integrity → Spec-Code → Fix *(fresh session per audit)*
 N+2. **Learning Extraction** → Process review → Update artifacts
 
@@ -108,22 +108,28 @@ E1: Classify (Small/Medium/Large) → E2: Spec check → E3: Plan → E4: Execut
 
 ## PHASE GATE (required before every phase transition)
 
-1. **Build check:** Compiles, types check
+1. **Build check:** Compiles, types check. Machine-readable `contracts/` validate.
 2. **Test check:** Unit tests pass. Integration tests pass (hot path exercised). Deployment tests if external integrations.
 3. **Hot path check:** Project-wide hot paths pass. Failure = stop condition.
-4. **Regression check:** All prior-phase flows still work.
-5. **Global invariants:** All pass.
-6. **Spec consistency:** No drift detected.
+4. **AI eval check (v2.2):** If phase touched AI behavior, re-run `evals/behavioral-core.yaml`. Pass-rate drop vs prior phase = stop condition.
+5. **Cost guardrail check (v2.2):** If cost budget defined in Architecture Contract, measure actual cost. Exceeding budget = stop condition.
+6. **Regression check:** All prior-phase flows still work.
+7. **Global invariants:** All pass.
+8. **Spec consistency:** No drift detected.
 
 ---
 
-## VERIFICATION ADDITIONS (v2.0)
+## VERIFICATION ADDITIONS (v2.0+)
 
 **Class-level pattern scan:** When any bug is found, grep entire codebase for same pattern. Fix ALL instances before proceeding.
 
-**Deploy & verify:** Mandatory if phase touches external integrations, webhooks, auth, or deployment config. Deploy to staging, test real requests.
+**Deploy & verify:** Mandatory if phase touches external integrations, webhooks, auth, or deployment config. Deploy to staging, test real requests. Verify the phase's rollback plan actually works.
 
 **Hot path testing:** 1-3 project-wide critical paths defined in Build Manifest, tested at EVERY phase gate.
+
+**AI eval re-run (v2.2):** If phase touched AI behavior (prompts, decision logic, routing, summarization, tone), re-run `evals/behavioral-core.yaml`. A drop in pass-rate vs prior phase is a stop condition.
+
+**Cost guardrail check (v2.2):** If Architecture Contract defines a per-request cost budget, measure actual cost during phase verification. Exceeding the budget is a stop condition.
 
 **Deviation tracking:** Count spec deviations per phase. If not declining over 3 phases → process review.
 
@@ -141,7 +147,7 @@ Three strikes: same fix fails 3x → STOP. Change approach entirely.
 
 | Tier 1 — Never Skip | Tier 2 — Skip With Caution | Tier 3 — Skip First |
 |---------------------|---------------------------|-------------------|
-| Reconciliation, Regression check, Scope lock, Class-level scan, Hot path test | Cross-cutting scan, Global invariants, Full Phase Report, Propagation | Adversarial reviews (spec phase), Experience test, Second-model review |
+| Reconciliation, Regression check, Scope lock, Class-level scan, Hot path test, AI eval re-run (AI products), Contract validation (code products) | Cross-cutting scan, Global invariants, Full Phase Report, Propagation, Cost guardrail | Adversarial reviews (spec phase, incl. 4c), Experience test, Second-model review |
 
 If Tier 2-3 skipped during build → MUST run at hardening.
 
@@ -172,6 +178,7 @@ If Tier 2-3 skipped during build → MUST run at hardening.
 
 - Phase Report template: `templates/phase-report.md` or Appendix F in full protocol
 - Behavioral Core template: `templates/behavioral-core.md` or Appendix B
+- AI Eval Set template: `templates/eval-set.md` (used in Step 2d and at AI phase gates)
 - Decision Log entry: `templates/decision-log-entry.md` or Appendix D
 - Cowork Session: `templates/cowork-session.md` or Appendix H
 - Architecture Patterns: Appendix G in full protocol
@@ -180,4 +187,4 @@ If Tier 2-3 skipped during build → MUST run at hardening.
 
 ---
 
-*Core Reference for Build Protocol v2.1 — 2026-04-15*
+*Core Reference for Build Protocol v2.2 — 2026-05-15*

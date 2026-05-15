@@ -1,7 +1,7 @@
-# BUILD PROTOCOL v2.0
+# BUILD PROTOCOL v2.2
 
 > A systematic framework for building, auditing, and evolving products with Claude Code.
-> Created: 2026-04-15. Owner: Joe Wang.
+> Created: 2026-04-15. Last updated: 2026-05-15. Owner: Joe Wang.
 
 ---
 
@@ -218,13 +218,18 @@ project-name/
 ├── docs/                           # Specs and process — never runtime code
 │   ├── product-spec.md             # Layer 1: WHAT
 │   ├── behavioral-core.md          # Layer 2: HOW it thinks (if AI product)
-│   ├── architecture.md             # Layer 3: HOW it's built
+│   ├── architecture.md             # Layer 3: HOW it's built (incl. threat model, observability, rollback posture, cost budget)
 │   ├── build-manifest.md           # Layer 5: WHERE we are
 │   ├── decision-log.md             # Non-obvious decisions with rationale
 │   ├── tool-decisions.md           # Tool evaluations and choices
-│   └── domains/                    # Layer 4: subsystem details
+│   └── domains/                    # Layer 4: subsystem details (prose)
 │       ├── [subsystem-1].md
 │       └── [subsystem-n].md
+├── contracts/                      # v2.2: Machine-readable contracts for subsystem boundaries
+│   ├── [subsystem-1].ts            # (or .schema.json, .openapi.yaml, .proto, etc.)
+│   └── shared.ts                   # Cross-subsystem shared types
+├── evals/                          # v2.2: AI golden eval sets (if AI product)
+│   └── behavioral-core.yaml        # Re-run at every AI-touching phase gate
 ├── src/ or app/ or lib/            # Application code
 ├── tests/ or __tests__/            # Test code
 ├── scripts/                        # Automation, deployment, audits
@@ -386,15 +391,17 @@ In DLL, specs were written comprehensively upfront (good) but never updated duri
 
 **Phase Gate detail (System Integrity Check — required before every phase transition):**
 
-1. **Build check:** Code compiles, types check, no errors
+1. **Build check:** Code compiles, types check, no errors. Machine-readable `contracts/` validate.
 2. **Test check (by type):**
    - **Unit tests:** All pass. These catch logic errors within modules.
    - **Integration tests:** All pass. These catch contract mismatches between subsystems. At minimum, one integration test must exercise the project's hot path(s) end-to-end.
    - **Deployment tests** (if phase touches external integrations, webhooks, or auth): Deploy to staging/preview environment and confirm at least one real request succeeds. "It compiles" is not "it works."
 3. **Hot path check:** Run the project-wide hot path(s) defined in the Build Manifest. Hot path failure is a stop condition — do not advance.
-4. **Regression check:** Re-test critical flows from ALL prior phases. If any prior flow is broken → fix before advancing.
-5. **Global invariants:** Re-verify all project invariants (see Appendix E). If any violated → fix before advancing.
-6. **Spec consistency:** Confirm implementation still matches domain specs, Architecture Contract, and Behavioral Core. If drift detected → reconcile before advancing.
+4. **AI eval check (v2.2):** If phase touched AI behavior, re-run `evals/behavioral-core.yaml`. A drop in pass-rate vs prior phase is a stop condition.
+5. **Cost guardrail check (v2.2):** If Architecture Contract defines a per-request cost budget, measure actual cost. Exceeding the budget is a stop condition.
+6. **Regression check:** Re-test critical flows from ALL prior phases. If any prior flow is broken → fix before advancing.
+7. **Global invariants:** Re-verify all project invariants (see Appendix E). If any violated → fix before advancing.
+8. **Spec consistency:** Confirm implementation still matches domain specs, Architecture Contract, and Behavioral Core. If drift detected → reconcile before advancing.
 
 If ANY check fails → fix before proceeding. Do NOT advance to next phase with known regressions or invariant violations.
 
@@ -424,9 +431,9 @@ If time pressure forces you to cut steps, follow this priority order. **Never sk
 
 | Tier | Steps | Why They're Essential |
 |------|-------|---------------------|
-| **Tier 1 — Never Skip** | Reconciliation ([N]c), Regression check, Scope lock, Class-level pattern scan, Hot path test | These prevent compounding errors. Skipping them creates debt that grows exponentially. |
-| **Tier 2 — Skip With Caution** | Cross-cutting concern scan, Global invariant check, Full Phase Report (use abbreviated), Propagation enforcement | These catch subtler issues. Skipping them is survivable for 1-2 phases but not more. |
-| **Tier 3 — Skip First** | Adversarial reviews (spec phase), Experience test, Second-model review, Cowork session template, Detailed module inventory | These improve quality but their absence doesn't compound. Defer to hardening. |
+| **Tier 1 — Never Skip** | Reconciliation ([N]c), Regression check, Scope lock, Class-level pattern scan, Hot path test, **AI eval re-run (AI products only)**, **Machine-readable contract validation (code products)** | These prevent compounding errors. Skipping them creates debt that grows exponentially. |
+| **Tier 2 — Skip With Caution** | Cross-cutting concern scan, Global invariant check, Full Phase Report (use abbreviated), Propagation enforcement, **Cost guardrail check** | These catch subtler issues. Skipping them is survivable for 1-2 phases but not more. |
+| **Tier 3 — Skip First** | Adversarial reviews (spec phase, including 4c), Experience test, Second-model review, Cowork session template, Detailed module inventory | These improve quality but their absence doesn't compound. Defer to hardening. |
 
 **The escape valve rule:** If you skip Tier 2 or Tier 3 steps during build, you MUST run them at hardening. Hardening is NOT optional even if build phases were compressed.
 
@@ -484,9 +491,13 @@ When a bug is discovered during verification or after deployment, follow this se
   - Who is it for? (Target users, their pain, their current alternatives)
   - What problem does it solve? (The core value proposition)
   - What are the core capabilities? (MVP scope — be ruthless about what's in vs out)
+  - **Non-goals** (explicit list of what this product does NOT do — mirrors the scope-boundary discipline in phase acceptance gates)
   - What's the roadmap beyond MVP? (Phases, not dates)
   - User scenarios (3-5 concrete end-to-end walkthroughs)
+  - **Success metrics** (1 north-star metric + 2-3 leading indicators; how we know the product is working, not just the code)
+  - **Activation definition** ("a user is activated when X" — the first moment the product delivers its core value)
   - Business model / economics (pricing, cost structure, unit economics)
+  - **Data classification** (what user data flows through this? PII / regulated / sensitive / public; informs threat model in Step 3a and security audit at hardening)
   - Constraints (budget, timeline, regulatory, technical)
 - `→ HG:` Human reviews, iterates until satisfied with the draft
 
@@ -540,6 +551,27 @@ When a bug is discovered during verification or after deployment, follow this se
 - `→ HG:` Human reviews, resolves. Behavioral Core finalized.
 - **Optional — second-model review:** Prompt: *"Review this AI behavioral spec. Focus on: decision logic soundness, edge cases where rules conflict, tone consistency under stress, scenarios where this system would frustrate or confuse users."*
 
+**2d: Eval Harness (MANDATORY for AI products)**
+
+Behavioral Core stress-tests are prose scenarios; they cannot be re-run automatically as the build progresses. For AI products, evals are what unit tests are for deterministic code. Without them, the Behavioral Core is aspiration, not enforcement.
+
+- Claude drafts a **golden eval set** of 10-30 input → expected-behavior pairs covering:
+  - Each decision-framework path in the Behavioral Core (happy path + 2-3 branches per major rule)
+  - Each absolute constraint ("never X" / "always Y" — adversarial inputs that try to break the rule)
+  - Each tone/communication boundary (frustrated user, ambiguous request, bad-news delivery)
+  - Each failure-cascade scenario (low-confidence, conflicting rules, scope boundary)
+- **Default scoring approach:** LLM-as-judge with explicit rubric per eval. Each eval defines:
+  - Input (what the user/system sends in)
+  - Expected behavior (the correct response, described concretely — not just "polite reply")
+  - Rubric (1-5 scale on the dimensions that matter: correctness, tone, autonomy compliance, etc.)
+  - Pass threshold (e.g., "all rubric dimensions ≥ 4")
+  - For structured outputs (JSON, enums, function calls): use deterministic equality match in addition to rubric
+- Store as `evals/behavioral-core.yaml` (or .json) — machine-readable, version-controlled, reviewable
+- Use `templates/eval-set.md` as the authoring template
+- **Phase gate integration:** Any phase that touches AI behavior (prompts, decision logic, routing, summarization, tone) MUST re-run the eval set as part of `[N]b: Verify`. A drop in eval pass-rate vs. the prior phase is a stop condition.
+- `→ HG:` Human reviews eval set, confirms coverage matches Behavioral Core, approves. Eval set finalized.
+- **Maintenance rule:** When Behavioral Core is modified during build, the eval set MUST be updated in the same commit (propagation enforcement applies to evals).
+
 ### Step 3: Architecture Contract
 
 **3a: Draft**
@@ -548,7 +580,11 @@ When a bug is discovered during verification or after deployment, follow this se
   - Architectural patterns (monolith vs modules, API design, state management, data flow)
   - Provider abstractions (what gets wrapped and why)
   - Security baseline (auth strategy, encryption, data handling, compliance requirements)
+  - **Threat model** — STRIDE or data-flow diagram. For each major data flow / trust boundary, list: assets at risk, plausible threats (spoofing, tampering, repudiation, info disclosure, denial of service, elevation of privilege), and the mitigation owned by this architecture. Pulls security work LEFT instead of deferring it to hardening. Inputs come from the data classification in the Product Spec (Step 1a).
+  - **Observability plan** — what gets logged, what gets traced, what metrics are emitted, what alerts fire, where dashboards live. Without this, "deploy and verify" is blind in prod. Specify: log levels and PII redaction rules; trace boundaries (which spans matter); minimum metric set (latency, error rate, AI cost per request, business KPIs from Product Spec success metrics); alert thresholds + on-call destination.
+  - **Rollback / kill-switch posture** — Feature-flag strategy. Which features ship behind flags? Which are kill-switchable in seconds vs. requiring a deploy? Default for AI features and risky migrations: behind a flag. This shapes the per-phase rollback plan in the Build Manifest (Step 5a).
   - Cost model (estimated cost per user at 100 / 1K / 10K scale)
+  - **Cost-budget guardrail** — Per-request $ ceiling (especially for AI calls) that triggers a regression check at the phase gate. Example: "AI cost per active user per day must stay under $0.05. Phase gate fails if measured cost exceeds 2× the budget."
   - Constraints (what this architecture does NOT support — explicit boundaries)
   - Red flags ("Stop immediately if you see X" — extracted from past project lessons)
 - `→ HG:` Human reviews
@@ -579,13 +615,34 @@ When a bug is discovered during verification or after deployment, follow this se
   - Edge cases and error handling (what can go wrong, how it's handled)
 - **Assumption tagging:** Anywhere Claude makes a decision without explicit human input, tag it inline: `[ASSUMPTION: We assume X because Y]`. Rank assumptions as HIGH/MEDIUM/LOW impact. HIGH-impact assumptions MUST be reviewed before build starts.
 - **Data flow diagram:** After writing all domain specs, produce a cross-subsystem data flow map showing which subsystems produce artifacts and which consume them. This catches orphaned outputs (nobody reads them) and missing inputs (nobody produces them).
+- **Machine-readable contracts (MANDATORY for code products):**
+  - For every subsystem boundary, produce an executable contract artifact in `contracts/` — TypeScript types, Zod schemas, OpenAPI spec, JSON Schema, Protobuf, or equivalent. Match the tech stack chosen in the Architecture Contract.
+  - The prose in the domain spec **explains** the contract; the file in `contracts/` **is** the contract. When they disagree, the file wins and the prose gets updated.
+  - This turns the Global Spec Lock rule (Section 1) from a prose-comparison check into a deterministic compiler/validator check. Phase gates can now fail on a type error instead of relying on Claude noticing a mismatch.
+  - Naming convention: `contracts/<subsystem>.<ext>` (e.g., `contracts/messaging.ts`, `contracts/billing.schema.json`). Cross-subsystem shared types live in `contracts/shared.<ext>`.
+  - For non-code products (strategy docs, analyses): skip this — no contracts needed.
 - After writing all specs, Claude cross-references them:
-  - Does Subsystem A's output match Subsystem B's expected input?
+  - Does Subsystem A's output match Subsystem B's expected input? (And does the machine-readable contract enforce that match?)
   - Do all specs align with the Product Spec and Architecture Contract?
   - Are there gaps — capabilities in the Product Spec that no domain spec covers?
   - Are there orphaned outputs or missing inputs in the data flow diagram?
 - Flag any tensions or ambiguities found during cross-reference
 - `→ HG:` Human reviews each spec, iterates, approves. **Review technique:** Open each spec in your editor, add inline annotations (corrections, questions, "remove this"), then tell Claude: "I added notes to [file]. Address all of them and update accordingly. Don't implement yet." Repeat until satisfied.
+
+**4c: Adversarial Review**
+- Claude performs a self-adversarial review of the Domain Specs as a set:
+  - *"I am now reviewing these domain specs as an adversarial critic. My job is to find seam mismatches, hidden coupling, and contract gaps — not confirm quality."*
+  - Focus areas:
+    - **Contract gaps:** subsystem boundaries where the prose says one thing but the machine-readable contract says another (or where the contract is missing required fields)
+    - **Hidden coupling:** subsystems that look independent but actually depend on each other's internal state, timing, or implicit ordering
+    - **Null/empty/error propagation:** what does each consuming subsystem do when an upstream returns null, empty, or an error? Are those cases defined?
+    - **Versioning & evolution:** if Subsystem A's schema changes later, what breaks? Is there a migration story or is it a tight coupling?
+    - **Orphans & dead ends:** outputs that nobody reads; inputs that nobody produces
+    - **Cross-spec consistency:** the same concept named or typed differently across two specs (e.g., `userId: string` here, `user_id: number` there)
+  - Present findings as a numbered list with severity (Critical / Important / Minor)
+- Claude proposes fixes for each finding
+- `→ HG:` Human reviews, resolves. Domain Specs and `contracts/` artifacts finalized. Changes after this point require a decision-log entry and propagation enforcement (Section 6).
+- **Optional — second-model review:** Prompt: *"Review this set of domain specs and their machine-readable contracts. Focus on: seam mismatches, hidden coupling, null/error propagation gaps, and versioning risks. Be adversarial — find the holes."*
 
 ### Step 5: Build Manifest
 
@@ -609,6 +666,7 @@ When a bug is discovered during verification or after deployment, follow this se
   - **Phase-specific audit section (if critical subsystem):** If this phase introduces a scheduler, auth system, payment processor, AI pipeline, or other critical subsystem — define a custom set of yes/no verification questions that MUST be answered in the phase report. (e.g., Scheduler: "Can I restart and pending jobs survive? Can two workers run without double-processing? Do failed jobs retry with backoff? Do 3x-failed jobs move to dead letter?") Failure to include this section for a critical subsystem is a failure condition.
   - **Complexity:** S / M / L (guides expectations, not commitments)
   - **Deploy verification required?** Yes / No. Yes if this phase touches external integrations, webhooks, auth flows, or deployment configuration. If yes, define what to verify post-deploy.
+  - **Rollback plan:** How this phase gets turned off if it breaks in prod. Specify ONE of: (a) feature flag name + how to disable, (b) env var to flip, (c) revert path (which commit/release to roll back to), or (d) "irreversible — extra care at deploy" with rationale. Anchored to the rollback/kill-switch posture in the Architecture Contract (Step 3a). Mandatory for any phase marked "Deploy verification required: Yes."
 - `→ HG:` Human reviews phase plan, adjusts scope/order
 
 **5a-ii: Capability Traceability Matrix (MANDATORY)**
@@ -663,13 +721,36 @@ This matrix is the "nothing falls through the cracks" guarantee. Without it, you
 - **CLAUDE.md should be <150 lines.** It's a session reference, not a spec. The elimination test for every line: "Would Claude make a mistake without this?" If not, cut it. Don't add anything Claude can figure out by reading code, anything a linter enforces, or anything that's standard practice for the language/framework.
 - `→ HG:` Human reviews
 
-**6b: Hooks Setup (recommended)**
-- CLAUDE.md rules are advisory (~80% followed). Hooks are deterministic (100% enforced). For must-happen quality gates, set up hooks:
-  - **PostToolUse (Edit/Write):** Auto-format after file changes (Prettier, Black, etc.)
-  - **Stop (on turn complete):** Run type-check / build to catch errors before human reviews
-  - **PreToolUse (Bash):** Block dangerous commands if needed (force-push, drop table, etc.)
-- Hooks live in `.claude/hooks/` or are configured in `settings.local.json`
-- Only add hooks for rules that MUST be enforced — don't over-constrain
+**6b: Hooks Setup (DEFAULT ON — opt out explicitly)**
+
+CLAUDE.md rules are advisory (~80% followed). Hooks are deterministic (100% enforced). For a non-engineer user shipping with Claude Code, the difference between 80% and 100% on quality gates is the difference between catching regressions in dev and finding them in prod.
+
+**Default hook set — install unless human opts out:**
+
+1. **PostToolUse (Edit/Write) → auto-format.** Prettier / Black / gofmt / etc. matched to the stack. Prevents whitespace and style noise from cluttering diffs.
+2. **Stop (on turn complete) → type-check + build.** Catches type errors and build breaks before the human reviews. The single highest-leverage hook for non-engineer users.
+3. **PreToolUse (Bash) → block destructive commands.** `git push --force` to main, `rm -rf` outside the project root, `DROP TABLE`, `truncate`. Pattern-matched, project-tunable.
+
+**Optional add-ons (recommend per project):**
+
+- **PreToolUse (Bash) → block hook-bypass flags.** `--no-verify`, `--no-gpg-sign` — flagged unless the human explicitly approved.
+- **PostToolUse (Edit on contracts/) → schema validate.** For projects using machine-readable contracts (Step 4b), validate the contract file on every edit.
+- **Stop → run AI eval set.** For AI products, re-run `evals/behavioral-core.yaml` if the phase touched AI behavior. Slower; recommend only if the eval set is fast (<30s).
+
+**Setup mechanics:**
+- Hooks live in `.claude/hooks/` (project-local) or `settings.local.json`
+- Claude installs the default set during Step 6b and reports each hook with: what it does, when it fires, how to disable
+- Human reviews the installed set, opts out of any that don't fit, and `→ HG:` approves the final set
+
+**Opt-out reasons that are legitimate:**
+- No build step exists (early prototype, pure prose project, exploratory notebook)
+- Build is slow enough that running it on every Stop creates more friction than value (>60s) — in that case, move it to a CI step instead
+- Project uses a tool the hook can't drive (rare; surface it and propose an alternative)
+
+**Reasons that are NOT legitimate (push back if you hear them):**
+- "It's annoying" — that's the point; the friction catches regressions
+- "I'll remember to run the check manually" — see the 80% vs 100% number above
+- "I want to commit broken code temporarily" — use a WIP branch, not a disabled hook
 
 **6c: Repository Init**
 - Create folder structure (per Section 2)
@@ -1354,6 +1435,22 @@ For a data pipeline / analysis tool:
 - Integration points tested: [list each with PASS/FAIL]
 - Webhook delivery confirmed: [Yes/No/N/A]
 - Auth flow end-to-end: [PASS/FAIL/N/A]
+- **Rollback plan verified:** [Yes/No — confirm the flag/env-var/revert path defined in Build Manifest actually works]
+
+### [C] AI Eval Results — *required if phase touched AI behavior (prompts, decision logic, routing, summarization, tone)*
+- Eval set version: [git SHA of `evals/behavioral-core.yaml`]
+- Results table:
+  | Category | Total | Pass | Fail | Pass Rate | Δ vs Prior Phase |
+  |----------|-------|------|------|-----------|------------------|
+  | [list each category from eval set] | | | | | |
+  | **Overall** | | | | | |
+- Failures (list each: eval ID, what failed, severity, fix-now vs defer rationale)
+- **A drop in pass-rate vs prior phase is a stop condition.** If overall or any category dropped → fix before advancing or document why the drop is acceptable.
+
+### [C] Cost Guardrail Check — *required if Architecture Contract defines a per-request cost budget*
+- Measured cost per request (or per-user-per-day, matching the budget unit): [$N.NN]
+- Budget ceiling: [$N.NN]
+- Within budget: [Yes / No — if No, this is a stop condition]
 
 ### [A] Acceptance Gate
 - Exit criteria met: [Yes/No — cite each criterion]
@@ -1665,6 +1762,7 @@ When the human says "update the build protocol based on recent projects," Claude
 | v1.2 | 2026-04-15 | Gap closure from self-test simulation: Capability Traceability Matrix, per-phase cross-cutting concern scan (integration seams, rate limits, abuse vectors, error propagation, auth gaps), experience testing, regression scenario specs, per-phase ChatGPT audit template, expanded hardening (5 audits: security + adversarial/abuse + integration seam + data integrity + spec-code consistency), phase-specific mandatory audit sections. | DLL audit findings (5 passes of edge cases/holes despite functional code) |
 | v2.0 | 2026-04-15 | Structural overhaul: Complexity Assessment (Light/Standard/Heavy tracks). Self-adversarial review as default, second-model review optional. Deploy & Verify substep for integration phases. Class-level pattern scan in verification. Hot path definition + per-phase testing. Deviation count tracking as health metric. Debugging Protocol (structured failure recovery). Protocol Effectiveness Metrics. Minimum Viable Process (tiered step priority). Conditional Phase Report sections ([A]/[C]/[O] markers). Test type distinction (unit/integration/deployment). Split into core + full reference with extractable templates and case studies. | DLL post-build analysis: 6-commit Twilio debug chain, 51-query class-level fix, non-declining deviation counts, production-only failures despite 166 passing tests |
 | v2.1 | 2026-04-15 | Seam and transition fixes from 3-mode simulation: Step 0 (Intake) for NEW mode — warm-start from existing materials. Step A7 (Re-entry) for AUDIT mode — explicit next-step guidance after remediation. Evolution Hardening Threshold — triggered at 5th Medium+ evolution, 3+ subsystem touches, Behavioral Core changes, or 6-month calendar. Mid-build reclassification rules for Complexity Assessment. Multiple concurrent evolutions guidance in E1. Template pointers in core reference. Session budget heuristics. | 3-mode simulation audit |
+| v2.2 | 2026-05-15 | **Best-practice gap closure (six changes, applied via Bob-on-Bob EVOLVE):** (1) Product Spec (Step 1a) — added success metrics + activation definition + non-goals + data classification. (2) New Step 2d (AI eval harness) — mandatory golden eval set of 10-30 input/expected pairs, LLM-as-judge + rubric scoring, re-run at every AI-touching phase gate. Drop in pass-rate is a stop condition. New `templates/eval-set.md`. (3) Architecture Contract (Step 3a) — added threat model (STRIDE/DFD), observability plan (logs/traces/metrics/alerts), rollback/kill-switch posture (feature-flag strategy), cost-budget guardrail. (4) Domain Specs (Step 4) — mandatory machine-readable contracts in `contracts/` (Zod/TS/OpenAPI/JSON Schema); new 4c adversarial review parallel to 1c/2c/3c. (5) Build Manifest (Step 5a) — mandatory rollback plan per phase entry. (6) Hooks (Step 6b) — promoted from "recommended" to **default-on with opt-out** for non-engineer users; default set: format + typecheck/build + block-destructive. Phase Report template adds `[C] AI Eval Results`, `[C] Cost Guardrail Check`, and rollback verification line. | Self-audit against 2026 spec-driven dev best practices: missing eval framework for AI products, prose-only integration contracts unenforceable, security/observability deferred to hardening, no per-phase rollback discipline. |
 
 ### What This Protocol Is NOT
 
