@@ -21,11 +21,6 @@
 - You'd rather have a structured conversation than try to "be a better prompter"
 - You want to **ship things**, not just play with prototypes
 
-**Skip Bob if:**
-- You have a team of engineers
-- You're building a throwaway prototype
-- You're doing pure research with no shipping deadline
-
 ---
 
 ## What it does
@@ -44,6 +39,8 @@ After working through Bob with Claude, you walk away with:
 
 ## Why this beats just asking Claude directly
 
+**Claude gets you live fast — then you spend 100x hours fixing bugs after. Bob builds it properly upfront, so you don't have to.**
+
 | Without Bob | With Bob |
 | --- | --- |
 | Claude builds, you discover halfway through it's the wrong thing | Spec gets locked in **before** any code happens |
@@ -53,8 +50,6 @@ After working through Bob with Claude, you walk away with:
 | You can't tell when something is "done enough" | Quality bar templates show good vs weak examples |
 | Claude assumes things you didn't approve | Pauses for your sign-off at every important step |
 | AI behavior drifts as you add features | Eval set re-runs at every phase; drift is a stop sign |
-
-**Tradeoff:** Bob is heavier than vibing. The upfront spec phase takes time. But that's better than debugging the same thing for a week.
 
 ---
 
@@ -190,6 +185,10 @@ cd ~/tools/bob-the-builder && git pull
 - Strategy-research framework — proved Behavioral Cores are reusable
 
 If Bob helps you ship something, that's the whole point.
+
+---
+
+*Why "Bob the Builder"? Because every time I'd ask Claude to build something real, I'd wonder — "can he build it?" Now, finally, the answer is: yes he can.* 🔨
 
 ---
 
