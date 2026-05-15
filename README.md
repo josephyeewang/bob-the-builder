@@ -53,13 +53,40 @@ After working through Bob with Claude, you walk away with:
 
 ---
 
-## How to use it
+## How to use it — the fast path (one paste)
+
+Open Claude Code in the folder where you want your new project to live. Then paste this:
+
+```
+Look at this repo: https://github.com/josephyeewang/bob-the-builder
+
+I want to build: [your idea in 2-3 sentences].
+
+If Bob is a good fit, please:
+1. Clone it to ~/tools/bob-the-builder/ (skip if it's already there)
+2. Read ~/tools/bob-the-builder/build-protocol.md to load the protocol
+3. Run ~/tools/bob-the-builder/scripts/bob-init.sh to scaffold a new project here
+4. Start MODE: NEW with Narrator Mode on
+5. Tell me where Bob lives so I can `git pull` for updates later
+
+If it's NOT a good fit, just say so and tell me why — no setup, no commitment.
+```
+
+That's it. Claude evaluates the repo against your idea, installs Bob if it fits, scaffolds a new project, and starts walking you through it.
+
+**Don't have Claude Code yet?** Get it at [claude.com/claude-code](https://claude.com/claude-code) first.
+
+**Heads up:** the first time Claude tries to clone outside your project folder, it may ask you to approve the action. That's normal — just say yes.
+
+---
+
+## What's happening under the hood
+
+If you'd rather see each step (or the fast path ran into a permission issue), run it manually:
 
 ### Step 1 — Get the protocol on your machine (one time)
 
-Open **Terminal** (search Spotlight on your Mac for "Terminal").
-
-Paste and press return:
+Open **Terminal** (search Spotlight on your Mac for "Terminal"). Paste:
 
 ```bash
 mkdir -p ~/tools && cd ~/tools && git clone https://github.com/josephyeewang/bob-the-builder.git
@@ -69,9 +96,7 @@ mkdir -p ~/tools && cd ~/tools && git clone https://github.com/josephyeewang/bob
 
 ### Step 2 — Open Claude Code in your project folder
 
-- Make a new folder for your project (or use an existing one)
-- Open Claude Code in that folder
-- Don't have Claude Code yet? Get it at [claude.com/claude-code](https://claude.com/claude-code)
+Make a new folder for your project (or use an existing one). Open Claude Code in that folder.
 
 ### Step 3 — Tell Claude to use Bob
 
@@ -84,7 +109,7 @@ Narrator Mode on — I've never used this before.
 The product I want to build: [one or two sentences about your idea]
 ```
 
-Claude will show you the map, ask which mode fits, and guide you from there. Pause and ask questions anytime.
+Claude will show you the map, ask which mode fits, and guide you from there.
 
 ---
 
@@ -131,24 +156,6 @@ Help me figure out what state this project is actually in.
 ```
 
 **When to use:** you've been "vibe coding" and want to clean up.
-
----
-
-## Pro tip — "Is Bob useful for what I want to build?"
-
-Not sure if Bob fits your project? **No setup needed** — paste this into Claude:
-
-```
-Please look at this repo: https://github.com/josephyeewang/bob-the-builder
-
-I'm thinking about building: [describe your idea in 2-3 sentences].
-
-Based on what Bob does, would it be useful for me? Be honest — if my idea is
-too small or wrong-shaped for this framework, say so. If it would help, tell
-me which mode (NEW / AUDIT / EVOLVE) and what to expect.
-```
-
-Claude will read the README, evaluate your idea, and give you a straight answer. No commitment.
 
 ---
 
