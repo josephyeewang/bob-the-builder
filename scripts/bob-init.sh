@@ -83,9 +83,22 @@ See \`docs/build-manifest.md\` for the current phase and progress.
 
 [Filled in after Step 3 (Architecture Contract). Compact extraction of the rules Claude needs every session.]
 
+## Never-do rules
+
+These are mechanically enforced where possible (via hooks + linters) and load-bearing always. Negative rules are unambiguous — the failure mode is clear.
+
+- Never commit \`.env\` files or any file containing real secrets
+- Never call external APIs without rate limiting
+- Never write to user-data tables without RLS policies (or equivalent multi-tenant isolation)
+- Never bypass the provider abstraction in \`lib/providers/\` (once it exists)
+- Never deploy without running type-check + integration tests
+- Never use \`any\` type — use \`unknown\` and narrow
+
+[Add project-specific never-do rules here during Step 3 (Architecture Contract).]
+
 ## Red flags (stop conditions)
 
-[Filled in after Step 3. Things that should make Claude stop immediately.]
+[Filled in after Step 3. Conditions that should make Claude stop entirely — distinct from never-do rules (inline constraints), red flags are halt-the-build conditions.]
 
 ## Build / deploy / test commands
 
@@ -97,9 +110,11 @@ When compacting, always preserve: current build phase, list of modified files, p
 
 ## Pointers to full specs (progressive disclosure)
 
+- Read \`docs/repo-map.md\` at session start for the compressed view of the codebase.
 - Read \`docs/product-spec.md\` for full product context.
 - Read \`docs/behavioral-core.md\` if working on AI behavior (if this is an AI product).
 - Read \`docs/architecture.md\` for tech stack and constraints.
+- Read \`docs/breadboard.md\` for the user-flow sketch (Shape Up breadboard from Step 4a-pre).
 - Read \`docs/domains/<subsystem>.md\` before working on a specific subsystem.
 EOF
 else

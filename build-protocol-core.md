@@ -82,14 +82,14 @@ Before starting, assess project complexity:
 1. **Product Spec** → 1a-pre: Structured interview + Day-in-the-life (v2.5) → 1a: Draft (incl. success metrics, activation, non-goals, data classification) → 1b: Stress-test → 1c: Adversarial review → 1d: Stability loop (v2.5) → `→ HG`
 2. **Behavioral Core** (AI only) → 2a: Draft → 2b: Stress-test → 2c: Adversarial review → 2d: Eval harness → `→ HG` — use `templates/behavioral-core.md` and `templates/eval-set.md`
 3. **Architecture Contract** → 3a: Draft (incl. threat model, observability plan, rollback posture, cost guardrail, a11y/i18n/compliance posture v2.4) → 3b: Adversarial review → `→ HG`
-4. **Domain Specs** → 4a: Identify subsystems → 4b: Write + machine-readable `contracts/` + cross-reference → 4c: Adversarial review → `→ HG`
+4. **Domain Specs** → 4a-pre: Breadboarding sketch (v2.7) → 4a: Identify subsystems → 4b: Write + machine-readable `contracts/` + cross-reference → 4c: Adversarial review → `→ HG`
 5. **Build Manifest** → 5a: Define phases (incl. rollback plan per phase) + capability matrix → 5b: Initialize manifest (auto-advance v2.5) → `→ HG` *(at 5a only)*
 6. **Project Setup** → 6a: CLAUDE.md → 6b: Hooks (DEFAULT ON — opt out explicitly) → 6c: Repo init (auto-advance v2.5) → `→ HG` *(at 6a/6b only)*
 7+. **Build Phases** → For each phase: [N]a: Build → [N]b: Verify (use `templates/phase-report.md` — incl. AI eval results + cost guardrail) → [N]c: Reconcile → `→ HG`
 N+1. **Hardening** → Security → Adversarial/Abuse → Integration Seam → Data Integrity → Spec-Code → Fix *(fresh session per audit)*
 N+2. **Learning Extraction** → Process review → Update artifacts
 
-**Each build phase follows:** Context Load → Gap Check → Plan → `→ HG` → Implement → Verify → Reconcile → `→ HG`
+**Each build phase follows:** Context Load → Gap Check → Plan (in Claude Code plan mode for M/L — v2.7) → `→ HG` → Test-first integration test (v2.7) → Implement → Verify → Reconcile (regenerate repo-map — v2.7) → `→ HG`
 
 ---
 
@@ -187,6 +187,10 @@ If Tier 2-3 skipped during build → MUST run at hardening.
 - **Glossary (v2.3):** Appendix J in full protocol — plain-English definitions for all jargon.
 - **Project Profiles (v2.4):** Appendix K in full protocol — archetype lookup (K1-K15) for tailoring the protocol to your product type. Pulled in by Step 0.5.
 - **Architecture Patterns (v2.4 additions):** G11 RAG Pipeline · G12 Agent / Tool-Use Loop · G13 Background Job Architecture · G14 Mobile App · G15 Browser Extension · G16 Real-time / Collaborative · G17 Voice / Audio Pipeline · G18 Marketplace.
+- **Integration Playbooks (v2.7):** Appendix L — 11 service-specific playbooks (Stripe, Supabase Auth, Resend, Twilio, Anthropic SDK, OpenAI, pgvector, Inngest, Sentry, PostHog, Vercel AI Gateway). Reference at Step 3a (tool choice) and at the Build Phase that wires the integration in.
+- **Skill Leverage Map (v2.7):** §10.5 — when to invoke which Claude Code skill (vercel:*, claude-api, security-review). Bob owns methodology; skills own current tactical detail.
+- **Scaffold script (v2.7):** `scripts/bob-init.sh <project-name>` — invoked at Step 6c. Generates folder structure, project CLAUDE.md (with Bob reference), .claude/settings.json with default hooks, .gitignore, .env.example, and runs git init.
+- **Repo map (v2.7):** `scripts/repo-map.sh` — regenerated at every Reconcile step. Compressed view of repo Claude reads at session start.
 - Phase Report template: `templates/phase-report.md` or Appendix F in full protocol
 - Behavioral Core template: `templates/behavioral-core.md` or Appendix B
 - AI Eval Set template: `templates/eval-set.md` (used in Step 2d and at AI phase gates)
@@ -198,4 +202,4 @@ If Tier 2-3 skipped during build → MUST run at hardening.
 
 ---
 
-*Core Reference for Build Protocol v2.6 — 2026-05-15*
+*Core Reference for Build Protocol v2.7 — 2026-05-15*

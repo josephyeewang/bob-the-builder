@@ -35,4 +35,4 @@ README.md                   ← Public-facing project overview
 
 ## Current Version
 
-v2.6 — 2026-05-15
+v2.7 — 2026-05-15

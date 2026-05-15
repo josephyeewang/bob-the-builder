@@ -1,4 +1,4 @@
-# BUILD PROTOCOL v2.6
+# BUILD PROTOCOL v2.7
 
 > A systematic framework for building, auditing, and evolving products with Claude Code.
 > Created: 2026-04-15. Last updated: 2026-05-15. Owner: Joe Wang.
@@ -456,6 +456,29 @@ When a bug is discovered during verification or after deployment, follow this se
 
 **Three-strikes integration:** If the same fix fails 3 times following this protocol, STOP. The bug is not where you think it is. State what was tried, what was ruled out, and change approach entirely.
 
+### 10.5. Skill Leverage Map (v2.7)
+
+Bob orchestrates the methodology; Claude Code skills provide domain-specific guidance bundles. At specific steps, Claude should invoke the matching skill to get current best-practice advice without Bob having to maintain that material.
+
+> **Important — verify before relying:** Skill names listed here reflect Anthropic's published skill ecosystem as of 2026-05-15. The skill catalog evolves; before invoking, confirm the skill is current via Claude Code's `/help` or skill listing. If a skill has been renamed/replaced, use the current name; if it's been removed, fall back to inline guidance in Bob.
+
+| Bob step | Skill to invoke | Why |
+|---|---|---|
+| 3a (Architecture Contract) — choosing AI provider/routing | `vercel:ai-gateway` | Current routing/failover/cost-tracking configuration guidance |
+| 3a — Vercel-hosted projects | `vercel:bootstrap`, `vercel:deployments-cicd`, `vercel:vercel-storage` | Platform-specific setup patterns |
+| 3a — security baseline + threat model | `security-review` | Up-to-date threat-model and security-baseline patterns |
+| 2d (eval harness) — for AI products | `claude-api` | Prompt caching, model selection, eval patterns for Anthropic SDK |
+| 6c (repo init) — Vercel projects | `vercel:bootstrap` | Provisioning Vercel-linked resources safely |
+| 6c — Next.js projects | `vercel:nextjs`, `vercel:next-cache-components` | App Router, RSC, Cache Components patterns |
+| 6c — shadcn/ui projects | `vercel:shadcn` | Component installation and theming |
+| [N]a Build (any phase touching middleware/auth) | `vercel:routing-middleware`, `vercel:auth` | Routing middleware + Clerk/Descope/Auth0 integration |
+| [N]a Build (functions/cron) | `vercel:vercel-functions` | Serverless/Edge/Fluid Compute + Cron Jobs configuration |
+| [N]a Build (background jobs) | `vercel:workflow` | Durable workflow patterns (alternative to Inngest/Trigger.dev) |
+| [N+1]a Security audit | `security-review` | Adversarial review focused on actual attack surface |
+| [N+1] Hardening — any phase | `vercel:verification` | End-to-end flow verification |
+
+**Rule:** Bob's per-step content remains canonical for methodology (when to do something, why, what success looks like). Skills provide current tactical guidance (specific configs, current SDK shapes, latest patterns). When they disagree, Bob's methodology wins on process; the skill wins on current tactical detail.
+
 ### 11. Narration Protocol (v2.3 — for guiding non-engineer users)
 
 The rest of this protocol tells Claude *what to produce*. This section tells Claude *how to narrate the journey* so a non-engineer user knows where they are, what's happening, and what's coming next.
@@ -860,9 +883,38 @@ Behavioral Core stress-tests are prose scenarios; they cannot be re-run automati
 
 ### Step 4: Domain Specs
 
+**4a-pre: Breadboarding (v2.7 — Shape Up pattern)**
+
+Before identifying subsystems formally, sketch the system as a low-fidelity flow: boxes (places where the user is — a page, a screen, an inbound message, a job) and arrows (affordances — what the user can do or what triggers what). The point is to think through user flow before locking in architecture.
+
+- **Output:** a single Mermaid `flowchart` in `docs/breadboard.md` showing the major flows from the Product Spec's user scenarios
+- Keep it intentionally coarse — boxes named "task inbox", "compose screen", "outbound SMS", not class names or table names
+- One arrow per affordance — "click", "send", "schedule fires"
+- Mark unclear regions with `?` — these are the questions the formal domain specs will need to answer
+- This is **not** an architecture diagram. No infrastructure, no databases, no API design. Just flow.
+
+**Why this comes before 4a:** sketching the flow surfaces "wait, this flow doesn't actually work" *before* the formal spec hardens. Non-engineers especially benefit — formal specs make assumptions invisible; a breadboard exposes them.
+
+Example breadboard:
+
+```mermaid
+flowchart LR
+    A[user texts 'remind me'] --> B[AI interpretation]
+    B -->|confident| C[task created]
+    B -->|unclear| D[ask clarifying Q]
+    D --> A
+    C --> E[scheduled reminder fires]
+    E --> F[outbound SMS]
+    F -->|user replies 'done'| G[mark complete]
+    F -->|user replies 'snooze'| H[reschedule]
+```
+
+`→ HG:` Human reviews breadboard. If the flow doesn't feel right, fix it here — much cheaper than fixing it in domain specs or, worse, in code.
+
 **4a: Identify Subsystems**
-- From the Product Spec, identify the major subsystems (typically 3-8)
-- For each, define scope: what it does, what it doesn't do, what it connects to
+- From the Product Spec **and the breadboard**, identify the major subsystems (typically 3-8)
+- Each box on the breadboard usually maps to a subsystem (or a piece of one); each arrow usually maps to an integration seam
+- For each subsystem, define scope: what it does, what it doesn't do, what it connects to
 - `→ HG:` Human reviews subsystem list and boundaries
 
 **4b: Write Domain Specs**
@@ -983,7 +1035,8 @@ This matrix is the "nothing falls through the cracks" guarantee. Without it, you
   - What this project is (2-3 sentences)
   - Current phase (pointer to Build Manifest)
   - Architecture rules (compact extraction from Architecture Contract — the rules Claude needs in every session)
-  - Red flags (stop conditions)
+  - **Never-do rules (v2.7 — MANDATORY section, borrowed from Cursor/Windsurf rules patterns):** explicit list of "never X" rules pulled from Architecture Contract red flags + provider abstraction rules + security baseline. Stated as imperatives Claude must obey. Examples: *"Never commit `.env` files. Never call external APIs without rate limiting. Never write to user-data tables without RLS policies. Never bypass the provider abstraction in `lib/providers/`. Never deploy without running the type-check + integration tests. Never use `any` type — use `unknown` and narrow."* These are mechanically enforceable where possible (via hooks + linters from Step 6b) and load-bearing always. Negative rules are easier for Claude to follow than positive ones because the failure mode is unambiguous.
+  - Red flags (stop conditions — when to halt entirely, distinct from never-do rules which are inline constraints)
   - Build/deploy/test commands
   - Compaction instructions ("When compacting, always preserve: current build phase, modified files list, pending decisions, and test commands")
   - Pointer to `docs/` for full specs — use **progressive disclosure**, not inline content. Example: "Read docs/product-spec.md for full product context. Read docs/domains/messaging.md before working on SMS features."
@@ -1067,15 +1120,30 @@ After the script runs, Claude:
 - If docs conflict → STOP. Explain the conflict. Do NOT proceed.
 
 *Plan:*
+- **Use Claude Code plan mode (v2.7 — MANDATORY for M/L phases):** Before writing any code, enter Claude Code's built-in plan mode. Plan mode mechanically prevents code edits while planning — it's enforcement, not advice. The plan-mode output IS the plan substep deliverable. For S phases, plan mode is optional but encouraged.
 - Propose implementation plan covering:
   - What files will be created or modified
   - What the key implementation decisions are
   - Any concerns or ambiguities from the domain spec
   - What is explicitly OUT of scope (scope lock)
-- `→ HG:` Human reviews plan, modifies or approves
+  - Which Appendix L integration playbooks apply (if any integrations are touched)
+- `→ HG:` Human reviews plan, modifies or approves. Approving the plan exits plan mode; Claude is now free to write code per the approved plan.
+
+*Test-first integration test (v2.7 — MANDATORY for any phase with code):*
+
+Before writing implementation, Claude writes an integration test that exercises this phase's hot-path user scenario. Borrowed from spec-driven development practice (GitHub Spec Kit and similar): generate the test that proves "the user scenario works" first, then write code until it passes.
+
+- The test must reference the user scenario named in the Build Manifest phase entry (Step 5a).
+- The test must initially FAIL — proving it exercises real code paths that don't exist yet. (If it passes before implementation, the test isn't testing the right thing.)
+- For AI products, the equivalent is the eval set (Step 2d) — additionally, write at least one integration test for the deterministic plumbing around the AI call (input shape, output shape, error handling).
+- The test file goes in `tests/integration/[phase-name].test.{ts,py,...}` per project conventions.
+- Test naming: describe the user-visible behavior, not the code. ✅ `"a user can text 'buy milk' and see a task created"` — ❌ `"taskCreator.createFromSMS should not throw"`.
+
+This parallels how the AI eval set (Step 2d) enforces behavior contracts on AI products — the integration test enforces behavior contracts on deterministic code.
 
 *Implement:*
 - Execute the approved plan
+- Implementation continues until the test from above passes (and continues passing after refactors)
 - Commit working code after each logical unit
 - If you discover a spec gap mid-implementation → STOP, propose patch, get approval, then continue
 
@@ -1187,6 +1255,10 @@ If the second model flags issues Claude missed → bring findings back to Claude
 5. Were all impacted future phases flagged in the Build Manifest?
 
 *Update Build Manifest:* mark phase complete, log decisions, note deferred items, record propagation flags
+
+*Regenerate repo map (v2.7 — MANDATORY for code products):*
+
+Run `bash ~/tools/bob-the-builder/scripts/repo-map.sh` from the project root. Updates `docs/repo-map.md` — a compressed view of folder structure + top-level files that Claude reads at session start instead of grep'ing the codebase. Borrowed from Aider's repo-map pattern: as projects grow past Phase 5-6, context loading becomes the bottleneck. A repo map keeps Claude oriented without re-reading source.
 
 *Update deviation tracker:*
 - Record: number of spec deviations found in this phase
@@ -1620,23 +1692,32 @@ Before starting Step 1 (Product Spec):
 
 ---
 
-## APPENDIX D: DECISION LOG TEMPLATE
+## APPENDIX D: DECISION LOG TEMPLATE (ADR format, v2.7)
 
-*Use this format for every entry in `docs/decision-log.md`.*
+*Use this format for every entry in `docs/decision-log.md`. Adapted from Michael Nygard's Architecture Decision Record (ADR) pattern — the industry standard for recording non-obvious decisions in software projects. Format is intentionally scannable by status: future-you (or future Claude) can grep for `Status: Accepted` to find what's still load-bearing vs `Status: Superseded` for what got reversed.*
 
 ```markdown
-### D-XXX: [Decision Title]
+### D-XXX: [Decision Title — short, declarative, present tense]
 
 - **Date:** YYYY-MM-DD
-- **Decision:** What was decided
-- **Context:** Why this came up (what problem or question triggered it)
-- **Alternatives Considered:** What else was on the table
-- **Rationale:** Why this option won
-- **Impact:** What downstream docs or code this affects
-- **Status:** Active / Superseded / Revisit later
+- **Status:** Proposed | Accepted | Deprecated | Superseded by D-YYY
+- **Context:** What problem, situation, or trigger forced a decision? What constraints or facts apply? (Include any relevant Bob step — e.g., "raised during Step 3a Architecture Contract review.")
+- **Decision:** What we chose. Stated as an action: "We will use X" — not "X seems good."
+- **Alternatives considered:** What else was on the table, with a one-line "why not."
+- **Consequences:** What follows from this choice — good, bad, and neutral. What constraints are now imposed on future decisions? What downstream specs, contracts, or code does this affect?
+- **Revisit trigger (optional):** What would make us reconsider? (E.g., "if cost per active user exceeds $X", "if Vercel changes pricing", "if we add a second LLM provider.")
 ```
 
-Include any decision where you: deviated from a spec, chose a library or tool, changed the data model, changed an API route, changed AI behavior, or deferred a feature. These entries are what prevent decision amnesia across sessions.
+**Status values explained:**
+
+- **Proposed** — decision is drafted but not yet ratified. Don't act on it until status changes to Accepted.
+- **Accepted** — this is the current load-bearing decision. Code, specs, and downstream choices depend on it.
+- **Deprecated** — decision no longer applies but hasn't been actively replaced (e.g., the feature is being deleted). Code may still reflect it; clean up at next reconcile.
+- **Superseded** — decision was overturned by a later ADR. The superseding entry MUST link back: `Status: Superseded by D-042`. Don't delete superseded entries — they're the audit trail of why we changed our mind.
+
+**When to write an ADR:** any decision where you deviated from a spec, chose a library or tool, changed the data model, changed an API route, changed AI behavior, deferred a feature, or made a non-obvious tradeoff. If a future reader would ask "why did they do it this way?", it deserves an ADR.
+
+**Anti-pattern to avoid:** ADRs that just describe the decision without consequences. The Consequences section is where future-you discovers why the seemingly clever shortcut is the thing now blocking a new requirement.
 
 ---
 
@@ -2163,6 +2244,7 @@ When the human says "update the build protocol based on recent projects," Claude
 | v2.1 | 2026-04-15 | Seam and transition fixes from 3-mode simulation: Step 0 (Intake) for NEW mode — warm-start from existing materials. Step A7 (Re-entry) for AUDIT mode — explicit next-step guidance after remediation. Evolution Hardening Threshold — triggered at 5th Medium+ evolution, 3+ subsystem touches, Behavioral Core changes, or 6-month calendar. Mid-build reclassification rules for Complexity Assessment. Multiple concurrent evolutions guidance in E1. Template pointers in core reference. Session budget heuristics. | 3-mode simulation audit |
 | v2.2 | 2026-05-15 | **Best-practice gap closure (six changes, applied via Bob-on-Bob EVOLVE):** (1) Product Spec (Step 1a) — added success metrics + activation definition + non-goals + data classification. (2) New Step 2d (AI eval harness) — mandatory golden eval set of 10-30 input/expected pairs, LLM-as-judge + rubric scoring, re-run at every AI-touching phase gate. Drop in pass-rate is a stop condition. New `templates/eval-set.md`. (3) Architecture Contract (Step 3a) — added threat model (STRIDE/DFD), observability plan (logs/traces/metrics/alerts), rollback/kill-switch posture (feature-flag strategy), cost-budget guardrail. (4) Domain Specs (Step 4) — mandatory machine-readable contracts in `contracts/` (Zod/TS/OpenAPI/JSON Schema); new 4c adversarial review parallel to 1c/2c/3c. (5) Build Manifest (Step 5a) — mandatory rollback plan per phase entry. (6) Hooks (Step 6b) — promoted from "recommended" to **default-on with opt-out** for non-engineer users; default set: format + typecheck/build + block-destructive. Phase Report template adds `[C] AI Eval Results`, `[C] Cost Guardrail Check`, and rollback verification line. | Self-audit against 2026 spec-driven dev best practices: missing eval framework for AI products, prose-only integration contracts unenforceable, security/observability deferred to hardening, no per-phase rollback discipline. |
 | v2.3 | 2026-05-15 | **Narrator Mode for non-engineer users (applied via Bob-on-Bob EVOLVE):** New Foundation §11 "Narration Protocol" — 10 rules Claude must follow when guiding a first-time user, plus a standardized Preamble Template (used at every step entry), Checkpoint Summary Template (used after every step completion), and Journey Map (shown before mode selection). New Appendix J "Glossary" — plain-English definitions of every term the protocol uses. Mode menu expanded from terse A/B/C to a what/when/time table. Session Start Protocol (Appendix C) branched into first-time-user vs. resuming-user paths. Build Manifest (Step 5b) gained a visual progress tracker (`▓▓▓░░░░ 3/7`) recited at session start. Root CLAUDE.md instructs Claude to enable Narrator Mode by default. Narrator Mode is ON by default; user can disable with "terse mode". | Self-audit found no clear walkthrough capability for non-engineer users — protocol assumed Claude would narrate without explicit instruction, leaving UX inconsistent. |
+| v2.7 | 2026-05-15 | **Feature-level competitive borrowing (8 tactical features from GitHub Spec Kit, Anthropic Skills, Cursor/Windsurf rules, Aider, Shape Up, Michael Nygard's ADR pattern):** (1) **Appendix L — Integration Playbooks** with 11 services (Stripe, Supabase Auth, Resend, Twilio, Anthropic SDK, OpenAI, pgvector, Inngest, Sentry, PostHog, Vercel AI Gateway) — each: env vars, provider abstraction shape, webhook/idempotency rules, common failure modes, eval/test that proves it works. (2) **Plan mode** mandatory at Step [N]a for M/L phases — leverages Claude Code's built-in plan mode for mechanical enforcement of "plan before code." (3) **Skill Leverage Map (§10.5)** — explicit table mapping Bob steps to Anthropic skills (vercel:*, claude-api, security-review). Bob owns methodology; skills own current tactical detail. (4) **ADR format for Appendix D / decision-log** — Michael Nygard's pattern (Title / Status / Context / Decision / Alternatives / Consequences). Status field (Proposed / Accepted / Deprecated / Superseded) makes the log scannable. (5) **Test-first integration tests** mandatory at Step [N]a — write the hot-path test before implementation; test must initially fail; parallels AI eval set for deterministic code. (6) **Step 4a-pre Breadboarding** — Shape Up's boxes-and-arrows flow sketch before formal domain specs. Output: `docs/breadboard.md` Mermaid flowchart. (7) **Never-do rules** mandatory in Step 6a CLAUDE.md template (Cursor/Windsurf pattern) — explicit negative constraints with concrete defaults baked into bob-init.sh. (8) **Repo map** generated at every Reconcile by `scripts/repo-map.sh` (Aider pattern) — compressed view of folder structure + top-level files Claude reads at session start instead of grep'ing source. | Feature-level audit of GitHub Spec Kit, Anthropic Skills, Cursor/Windsurf rules, Aider, Shape Up, and ADRs identified specific tactical patterns Bob was missing — most addressing how integration-specific friction and decision-amnesia accumulate as projects grow past Phase 5. |
 | v2.6 | 2026-05-15 | **Distribution + invocation polish (post-public-release iteration):** (1) Step 6a now MANDATES that the project-level CLAUDE.md include a Bob protocol reference line as its first section — without it, "invoke once and auto-resume" doesn't actually work; this was a real gap that broke session continuity. (2) New `scripts/bob-init.sh` — scaffold script that generates folder structure (`docs/`, `contracts/`, `evals/`, `scripts/`, `tests/`, `src/`, `.claude/`), writes the Bob-referencing CLAUDE.md, writes `.claude/settings.json` with placeholder hooks, writes `.gitignore` + `.env.example`, and runs `git init`. Safe to re-run. (3) Step 6c now invokes the scaffold script as preferred path; manual fallback retained. (4) ASCII journey map in §11.4 replaced with Mermaid flowchart (renders natively on GitHub; color-coded by phase). README adds same Mermaid + a new "How often do I invoke Bob?" section answering the most common new-user question. | Public release exposed the invocation/auto-resume gap and the visual deficiency of the ASCII journey map. |
 | v2.5 | 2026-05-15 | **Spec-extraction depth + narrator quality (applied via Bob-on-Bob mini-build, 4 phases):** **Narrator upgrades:** new §11.7 "Quality Bar Templates" defines what "done" looks like per artifact (Product Spec, Behavioral Core, Architecture Contract, Domain Specs, Build Manifest) with strong/weak examples and stop-iterating criteria — closes the gap where humans couldn't self-evaluate when to advance. New §11.8 mandates "💎 Why this matters" narration in Checkpoint Summary template — sells the value of each artifact in product-leader language. New §11.9 "Confusion-Catch Phrases" lists specific trigger phrases ("I'll just trust you", "sounds good" without engagement, "skip ahead") + response template with 3 explicit options (explain differently / show example / make a guess + flag). **Spec extraction depth:** new Step 1a-pre (Structured Interview + Day-in-the-Life) — mandatory when initial description is thin or ambiguous, runs a JTBD-style 12-question interview + a typical-day walkthrough to extract what's actually in the user's head before Claude drafts. Outputs `docs/interview-notes.md` + `docs/day-in-the-life.md`. New Step 1d "Stability Loop" — re-runs stress-test + adversarial review against revised spec until findings stabilize, capped at 3 iterations (signal that the product idea itself is unstable if not). **HG trimming:** Build Manifest init (5b) and Repo init (6c) auto-advance with status updates instead of HG pause — removes friction at the mechanical steps. | Audit of human-input balance, spec iteration depth, and narrator quality identified four gaps: (1) no interview framework when input is thin, (2) no quality bar to advance, (3) single-pass stress test fails to catch new gaps introduced by fix iterations, (4) narrator explained "what we have" but not "what good looks like" or "why this matters." |
 | v2.4 | 2026-05-15 | **Project archetype coverage (applied via Bob-on-Bob mini-build, 4 phases):** **Tier 1** — New Step 0.5 "Project Profile" routes the project through Appendix K addenda; new Appendix K "Project Profiles" with 15 archetypes (K1-K15: AI Chat, B2B Tool, RAG, Vertical SaaS, Agent, Background Jobs, E-commerce, Marketplace, Content/Community, Real-time, Mobile, Extension, Voice, ETL, SEO Site) — additive-only addenda that never override core protocol. Three new architecture patterns: G11 RAG Pipeline (chunking/embedding/reranker/eval), G12 Agent / Tool-Use Loop (tool contracts, max-step bound, tool eval), G13 Background Job Architecture (orchestrator choice, idempotency, dead letter). **Tier 2** — Architecture Contract (Step 3a) gained accessibility posture, internationalization posture, and compliance scope (GDPR/CCPA/HIPAA/SOC2/PCI/None). Build Manifest (Step 5b) gained success-metric instrumentation map (every Product Spec success metric must map to an analytics event + build phase + dashboard, closing the "metric defined but never wired" gap). **Tier 3** — Five additional architecture patterns for less common archetypes that may show up later: G14 Mobile App, G15 Browser Extension, G16 Real-time/Collaborative, G17 Voice/Audio Pipeline, G18 Marketplace/Two-Sided Platform. Pattern Library gains a maintenance note flagging that tool-specific advice in G11+ moves fast. | Self-audit against common 2026 Claude-Code project archetypes found three gaps: no routing layer for archetype-specific considerations; missing patterns for the most common AI-product archetypes (RAG, Agents, Jobs); a11y/i18n/compliance treated as implicit; success metrics defined in Product Spec but never instrumented during build. |
@@ -2348,6 +2430,117 @@ When the human says "update the build protocol based on recent projects," Claude
 
 ---
 
+## APPENDIX L: INTEGRATION PLAYBOOKS (v2.7)
+
+*Per-service playbooks for the most common integrations. Reference at Step 3 (Architecture Contract) when choosing tools, and at the relevant Build Phase when wiring the integration in. Each playbook is signposts, not exhaustive docs — verify current-state against the provider's docs.*
+
+> **Maintenance note:** Tool docs and SDKs evolve. The shape of these problems is stable; the specific SDK versions, endpoint names, and pricing referenced here may drift. Use the playbook as a checklist; verify exact API surface against current docs when wiring up.
+
+### L1. Stripe (payments / subscriptions)
+
+- **Env vars:** `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`. Never expose secret key client-side.
+- **Provider abstraction (G7) shape:** `PaymentProvider` interface — `createCheckoutSession(input)`, `verifyWebhook(rawBody, signature)`, `getCustomer(id)`. Wrap because EU customers may push you toward alternatives (Paddle, Lemon Squeezy).
+- **Webhook signature verification (mandatory):** use `stripe.webhooks.constructEvent(rawBody, signature, secret)`. Raw body matters — middleware that parses JSON breaks it.
+- **Idempotency:** every Stripe write call accepts an `Idempotency-Key` header. Use it for retried mutations. Without it, network retries double-charge.
+- **Test events:** Stripe CLI's `stripe trigger` is your friend during build. Real-money tests via test mode only.
+- **Common failure modes:** webhook never verified → silent acceptance of forged events; non-idempotent retries → double-charges; subscription state diverges between Stripe and your DB (handle every relevant webhook: `customer.subscription.*`); refunds after a payout create a platform balance debt.
+- **Eval/test that proves it works:** end-to-end test mode purchase → webhook received → DB updated → confirmation email sent.
+
+### L2. Supabase Auth + RLS
+
+- **Env vars:** `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY` (client), `SUPABASE_SERVICE_ROLE_KEY` (server-only — never client).
+- **RLS posture (mandatory):** enable RLS on **every** user-data table. Policy: `auth.uid() = user_id` (or group membership for shared data). See G10 for the full pattern.
+- **Service role usage:** server-side only, bypasses RLS. Use sparingly (admin routes, background jobs); never from client.
+- **Session handling:** `@supabase/ssr` for Next.js App Router. Older `auth-helpers-nextjs` is deprecated as of 2024.
+- **Common failure modes:** RLS not enabled on a table → cross-tenant data leak (the highest-severity Supabase bug); service role key leaked to client → full DB access for anyone; expired JWT not refreshed → silent 401s users can't recover from.
+- **Eval/test:** two test accounts; user A cannot read user B's rows under any combination of (logged out, wrong session, guessed ID).
+
+### L3. Resend (transactional email)
+
+- **Env vars:** `RESEND_API_KEY`. Domain verification required for production sending.
+- **Provider abstraction (G7) shape:** `EmailProvider` interface — `send(to, subject, html, tags?)`. Wrap because email providers churn (Postmark, SendGrid alternatives all viable).
+- **Idempotency:** Resend has no built-in idempotency key — add your own at the application layer (don't fire-and-forget transactional emails twice).
+- **Deliverability:** SPF, DKIM, DMARC records on the sending domain — non-negotiable for production. Resend's dashboard shows verification status.
+- **Templating:** use React Email (Resend's sibling tool) for type-safe email components. Plain HTML works but ages poorly.
+- **Common failure modes:** unverified domain → all emails go to spam; sending marketing + transactional from the same domain → IP reputation degrades; no unsubscribe link on marketing emails → CAN-SPAM violation.
+- **Eval/test:** send a real test email to an external inbox; verify it doesn't hit spam.
+
+### L4. Twilio (SMS / voice)
+
+- **Env vars:** `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_PHONE_NUMBER`.
+- **Provider abstraction (G7) shape:** `SMSProvider` — `send(to, body)`, `verifyWebhook(req)`. Wrap because Twilio is expensive at scale; MessageBird, Plivo are alternatives.
+- **Webhook signature verification (mandatory):** Twilio signs inbound requests with `X-Twilio-Signature`. Verify against your webhook URL + body. Forged webhooks → spam-pump your backend.
+- **A2P 10DLC registration (US):** for SMS to US numbers from a long code, you must register your brand and campaigns. ~$15-50/month + verification time. Skipping this → carriers filter your messages.
+- **Common failure modes:** missing signature verification → forged inbound webhooks; non-E.164 phone numbers → silent failures (always normalize to `+15551234567` format); unregistered A2P → silently filtered messages with no error from Twilio; long-code-to-US rate limits (~1 msg/sec) → backed-up queues.
+- **Eval/test:** send a test SMS to your own number; reply; verify inbound webhook fires + signature validates.
+
+### L5. Anthropic SDK / Claude API
+
+- **Env vars:** `ANTHROPIC_API_KEY`. Use Vercel AI Gateway (see L11 below) if you want provider failover.
+- **Prompt caching:** for any prompt > ~1024 tokens that's reused across requests, mark cacheable sections with `cache_control: { type: 'ephemeral' }`. Saves ~90% on input cost for cached portion. Cache TTL is 5 minutes; refresh via a non-cached request when expiration matters.
+- **Skill to invoke (v2.7):** during Step 2d (eval set) and any phase touching AI prompts, invoke the `claude-api` skill for prompt-caching configuration guidance.
+- **Streaming:** use streaming for any user-facing AI output to keep perceived latency low. Server-sent events (SSE) is the default Vercel-compatible path.
+- **Tool use:** for agent products (see K5, G12), every tool needs a precise JSON Schema and a clear description ("WHEN to call this", not just "WHAT it does"). Vague descriptions → wrong tool selection.
+- **Common failure modes:** prompt-cache misses because system prompt changed by one char → 10× cost; rate limits hit in production (handle 429 with backoff + queueing); long contexts (>100K tokens) silently degrading quality.
+- **Eval/test:** the Step 2d eval set IS the test. Drop in pass-rate vs prior phase = stop condition.
+
+### L6. OpenAI SDK (LLM alternative)
+
+- **Env vars:** `OPENAI_API_KEY`.
+- **Provider abstraction (G7) shape:** wrap behind a `ModelProvider` interface so swapping Anthropic ↔ OpenAI is a one-file change. Common methods: `chat({ messages, model, tools? })`, `embed(text)`.
+- **Tool use:** OpenAI function calling has slightly different schema from Anthropic tool use. The provider abstraction should normalize.
+- **Common failure modes:** model deprecations (GPT-3.5 → GPT-4o → GPT-5 — code references stale model IDs); cost surprises (GPT-5 input is much more expensive than 4o-mini); response format inconsistency when requesting JSON without `response_format: { type: "json_object" }`.
+- **Eval/test:** same as L5 — eval set re-run at every phase.
+
+### L7. pgvector (vector DB via Postgres)
+
+- **Env vars:** Postgres connection string (typically reusing your Supabase / Neon DB).
+- **When to use:** small-to-medium RAG corpora (<10M chunks). Past that, dedicated vector DBs (Pinecone, Weaviate) outperform.
+- **Migration:** enable the `vector` extension. Create a column of type `vector(1536)` (dimension matches your embedding model — OpenAI ada-002 is 1536, text-embedding-3-large is 3072). Index with `ivfflat` or `hnsw` for fast similarity search.
+- **Embedding generation:** wrap behind provider abstraction. When embedding model changes, you must reindex — bake this into the migration plan from day one (see G11 RAG Pattern).
+- **Hybrid retrieval:** combine vector search with full-text search (`tsvector`) and a reranker. Vector-only retrieval misses keyword matches; production-grade RAG needs hybrid.
+- **Common failure modes:** dimension mismatch between stored embeddings and query embedding (cryptic SQL errors); no index → query times explode past ~100K rows; reindex during an embedding model migration takes hours, locking the table.
+- **Eval/test:** retrieval recall@k on a held-out QA set (per G11).
+
+### L8. Inngest (background jobs / workflow orchestration)
+
+- **Env vars:** `INNGEST_EVENT_KEY`, `INNGEST_SIGNING_KEY`.
+- **When to use:** event-driven async work, scheduled jobs, multi-step workflows with retries. Generous free tier. Alternative: Trigger.dev (similar), Vercel Workflow (Vercel-native, durable), DB-backed queue (simplest, less powerful).
+- **Idempotency (mandatory):** every step in an Inngest function should be idempotent. Inngest retries on failure — without idempotency, retries duplicate side effects.
+- **Step functions:** wrap each side effect in `step.run("name", async () => { ... })`. Inngest checkpoints between steps — failures resume from the last successful checkpoint instead of restarting.
+- **Common failure modes:** non-idempotent steps duplicating emails/charges on retry; concurrency limits not set → user spam blocks everyone else's jobs; missing dead-letter handling (Inngest has it built-in — enable it).
+- **Eval/test:** kill the worker mid-job; restart; verify job resumes correctly. Run two workers concurrently with the same job; verify no double-processing.
+
+### L9. Sentry (error monitoring)
+
+- **Env vars:** `SENTRY_DSN`, `SENTRY_AUTH_TOKEN` (for releases).
+- **Setup at Step 6c:** install at repo init, not later. "We'll add monitoring before launch" never happens before something breaks.
+- **PII redaction (mandatory):** configure `beforeSend` to scrub user emails, names, tokens from error payloads. Sentry has built-in scrubbers — use them; don't ship PII to a third party.
+- **Release tracking:** integrate with your CI/CD so deploys are tagged in Sentry. Lets you see "errors started after deploy 7dffbeb."
+- **Source maps:** upload at build time so stack traces are readable. Without source maps, production errors are gibberish.
+- **Common failure modes:** PII leaked in error context (user emails, payment metadata); alert fatigue (every error → page → ignored); source maps not uploaded → unreadable stack traces from prod.
+- **Eval/test:** throw a test error in prod; verify it appears in Sentry with a readable stack trace and no PII.
+
+### L10. PostHog (product analytics)
+
+- **Env vars:** `NEXT_PUBLIC_POSTHOG_KEY`, `NEXT_PUBLIC_POSTHOG_HOST`.
+- **What to track (mandatory):** every success metric and leading indicator from the Product Spec Step 1a maps to a PostHog event. This is the v2.4 success-metric instrumentation map made concrete.
+- **Self-host vs cloud:** self-hosted PostHog is free at scale but operationally non-trivial. Cloud is free up to 1M events/month and fine for most v1 products.
+- **Feature flags:** PostHog includes feature flags — wire to the rollback-plan posture from Architecture Contract (Step 3a v2.2).
+- **Common failure modes:** event spam (every page view + every click = useless data — track meaningful events only); naming inconsistency (`task_created` vs `taskCreated` vs `task created` — pick one convention in Architecture Contract); ad-blockers blocking client-side calls (mitigate with server-side capture for critical events).
+- **Eval/test:** trigger your north-star event manually; verify it appears in PostHog with the right properties.
+
+### L11. Vercel AI Gateway (LLM routing / failover)
+
+- **Env vars:** `AI_GATEWAY_API_KEY`. Replaces individual provider keys.
+- **When to use:** anytime you might want to swap LLM providers later, do cost-aware routing, or need failover. Drop-in replacement for direct SDK calls.
+- **Skill to invoke (v2.7):** during Step 3a (Architecture Contract) for any AI product, invoke the `vercel:ai-gateway` skill for routing configuration guidance.
+- **Cost tracking:** gateway logs every request with token counts and cost. Pipes into the cost-guardrail (Step 3a + phase-gate v2.2).
+- **Common failure modes:** treating it as transparent when it's not (latency adds ~50ms vs direct); not configuring failover even though that's the main reason to use it; missing the unified billing benefit (one invoice across providers).
+- **Eval/test:** force-fail your primary model in config; verify request routes to fallback without user-visible error.
+
+---
+
 ### What This Protocol Is NOT
 
 - **Not a product spec template.** It doesn't tell you what to build — it tells you how to go from idea to built product systematically.
@@ -2357,5 +2550,5 @@ When the human says "update the build protocol based on recent projects," Claude
 
 ---
 
-*Build Protocol v2.6 — 2026-05-15*
+*Build Protocol v2.7 — 2026-05-15*
 *Derived from prior personal projects: an AI-driven blood-test interpretation tool, a personal task-management app, a tax auction analysis tool, and a strategy-research framework.*
