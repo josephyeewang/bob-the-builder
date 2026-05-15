@@ -6,6 +6,14 @@ Bob is a structured playbook that you hand to Claude Code. Instead of Claude mak
 
 You don't install anything. You point Claude at this repo. It does the rest.
 
+> **Made by a non-technical product person who just wanted it to work.**
+>
+> This is for non-engineers who want to build real things with Claude Code — without the technical jargon, without the engineering bureaucracy, and without having to learn what a "subsystem" is just to ship a side project.
+>
+> I'm a product and ops leader, not a coder. I built Bob because every time I tried to use Claude Code on a real product, I'd watch it confidently build the wrong thing, forget what we'd decided two sessions ago, or hand me code I couldn't tell was good or bad. Bob is the discipline I wished existed — written in plain language, with the tradeoffs that matter to people who think in customers and outcomes, not types and tests.
+>
+> If you'd describe yourself as "I have ideas but I'm not technical," this is for you.
+
 ---
 
 ## Who this is for
@@ -182,9 +190,9 @@ cd ~/tools/bob-the-builder && git pull
 
 ## Credits
 
-Built by [Joe Wang](https://github.com/josephyeewang) — former McKinsey, Fifth Wall, Clari — pairing with Claude Code to ship side projects without losing the discipline that bigger orgs spend years acquiring.
+Built by [Joe Wang](https://github.com/josephyeewang) — former McKinsey, Fifth Wall, Clari. Product and ops leader, not an engineer. Building side projects with Claude Code as my engineering team, and writing down what I wish I'd known from the start.
 
-Bob is derived from lessons learned across multiple personal projects (an AI blood-test interpreter, a personal task-management app with SMS+AI workflows, a tax auction analysis tool, and a strategy-research framework). Each one's failure modes shaped the protocol. The goal: make those mistakes harder to repeat — for me and for anyone else who finds it useful.
+Bob is derived from lessons learned the hard way across multiple personal projects: an AI blood-test interpreter that took 931 commits because I had no spec, a task-management app with SMS+AI that taught me what "spec drift" actually feels like, a tax auction analysis tool that proved good specs make 3-day builds possible, and a strategy-research framework that showed Behavioral Cores are reusable. Each project's failure modes shaped a piece of the protocol. The goal: make those mistakes harder to repeat — for me, for my friends, and for anyone else who finds it useful.
 
 If Bob helps you ship something, that's the whole point.
 
