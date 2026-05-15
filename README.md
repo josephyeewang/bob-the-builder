@@ -37,6 +37,38 @@ After working through Bob with Claude, you walk away with:
 
 ---
 
+## The journey, visually
+
+```mermaid
+flowchart TD
+    A[Step 0<br/>Intake] --> B[Step 0.5<br/>Project Profile]
+    B --> C[Step 1<br/>Product Spec]
+    C --> D[Step 2<br/>Behavioral Core + Eval Set<br/><i>AI products only</i>]
+    D --> E[Step 3<br/>Architecture]
+    E --> F[Step 4<br/>Domain Specs]
+    F --> G[Step 5<br/>Build Manifest]
+    G --> H[Step 6<br/>Project Setup]
+    H --> I[Steps 7+<br/>Build Phases]
+    I --> J[Step N+1<br/>Hardening]
+    J --> K[Step N+2<br/>Learning]
+
+    style C fill:#dbeafe,stroke:#1e40af
+    style D fill:#dbeafe,stroke:#1e40af
+    style E fill:#dbeafe,stroke:#1e40af
+    style F fill:#dbeafe,stroke:#1e40af
+    style G fill:#dbeafe,stroke:#1e40af
+    style I fill:#fde68a,stroke:#92400e
+    style J fill:#fecaca,stroke:#991b1b
+```
+
+- **Blue** = spec phase (no code yet) — ~1-4 sessions
+- **Yellow** = build phase (code happens) — ~1-2 sessions per phase
+- **Red** = hardening (security/abuse/integrity audits) — ~1 session per audit
+
+You pause for approval at every step. You can stop, redirect, or defer anything.
+
+---
+
 ## Why this beats just asking Claude directly
 
 **Claude gets you live fast — then you spend 100x hours fixing bugs after. Bob builds it properly upfront, so you don't have to.**
@@ -85,6 +117,21 @@ The product I want to build: [one or two sentences about your idea]
 ```
 
 Claude will show you the map, ask which mode fits, and guide you from there. Pause and ask questions anytime.
+
+---
+
+## How often do I have to invoke Bob?
+
+Short answer: **once per machine** (the clone), then **once per project** (the first time you start it). After that, **Claude auto-resumes** every time you open Claude Code in the project folder.
+
+| What | How often | Why |
+|---|---|---|
+| `git clone bob-the-builder` | Once per machine | The protocol lives at `~/tools/bob-the-builder/`. Updates land via `git pull`. |
+| Tell Claude "use Bob, build me X" | Once at the start of each new project | Kicks off the protocol. Claude runs the scaffold (`bob-init.sh`) and writes a project `CLAUDE.md` that references Bob. |
+| Open Claude Code in the project folder | Every session you work on it | Claude reads the project `CLAUDE.md` automatically. It contains a pointer back to Bob, so the protocol is loaded without you typing the long invocation again. Just say "let's continue" or "what's next." |
+| `git pull` in `~/tools/bob-the-builder` | When you want updates | Optional. Bob is updated as new lessons emerge. |
+
+**One-liner:** invoke Bob once to start a project; from then on, just open Claude Code in the project folder and resume.
 
 ---
 

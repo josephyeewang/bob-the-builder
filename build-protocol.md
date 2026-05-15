@@ -1,4 +1,4 @@
-# BUILD PROTOCOL v2.5
+# BUILD PROTOCOL v2.6
 
 > A systematic framework for building, auditing, and evolving products with Claude Code.
 > Created: 2026-04-15. Last updated: 2026-05-15. Owner: Joe Wang.
@@ -508,22 +508,32 @@ The rest of this protocol tells Claude *what to produce*. This section tells Cla
 
 > Here's the full journey for building a new product with this protocol:
 >
-> ```
-> 📍 Step 0:  Intake               (if you have existing materials)
->    Step 1:  Product Spec         — WHAT it does
->    Step 2:  Behavioral Core      — HOW the AI thinks (if AI product)
->    Step 3:  Architecture         — HOW it's built
->    Step 4:  Domain Specs         — DETAILS per subsystem
->    Step 5:  Build Manifest       — PLAN of phases
->    Step 6:  Project Setup        — repo, hooks, environment
->    Step 7+: Build Phases         — actual building, one phase at a time
->    Step N+1: Hardening           — security/abuse/integrity audits
->    Step N+2: Learning            — what worked, what to improve
+> ```mermaid
+> flowchart TD
+>     A[Step 0<br/>Intake<br/><i>existing materials, if any</i>] --> B[Step 0.5<br/>Project Profile<br/><i>RAG? Agent? Marketplace?</i>]
+>     B --> C[Step 1<br/>Product Spec<br/><i>WHAT it does</i>]
+>     C --> D[Step 2<br/>Behavioral Core + Eval Set<br/><i>HOW the AI thinks</i><br/><i>if AI product</i>]
+>     D --> E[Step 3<br/>Architecture Contract<br/><i>HOW it's built</i>]
+>     E --> F[Step 4<br/>Domain Specs + Contracts<br/><i>DETAILS per subsystem</i>]
+>     F --> G[Step 5<br/>Build Manifest<br/><i>PLAN of phases</i>]
+>     G --> H[Step 6<br/>Project Setup<br/><i>repo, hooks, environment</i>]
+>     H --> I[Steps 7+<br/>Build Phases<br/><i>actual building, one phase at a time</i>]
+>     I --> J[Step N+1<br/>Hardening<br/><i>5 fresh-session audits</i>]
+>     J --> K[Step N+2<br/>Learning Extraction<br/><i>what worked, what to improve</i>]
+>
+>     style C fill:#dbeafe,stroke:#1e40af
+>     style D fill:#dbeafe,stroke:#1e40af
+>     style E fill:#dbeafe,stroke:#1e40af
+>     style F fill:#dbeafe,stroke:#1e40af
+>     style G fill:#dbeafe,stroke:#1e40af
+>     style I fill:#fde68a,stroke:#92400e
+>     style J fill:#fecaca,stroke:#991b1b
 > ```
 >
-> **Spec phase (Steps 0-6):** ~1-4 sessions. We talk through your product, capture decisions, no code yet.
-> **Build phase (Steps 7+):** ~1-2 sessions per build phase. Code happens here.
-> **Hardening + Learning:** ~1 session per audit (5 audits) + 1 wrap-up.
+> - **Blue = spec phase (Steps 1-5)** — we talk through your product, capture decisions, no code yet. ~1-4 sessions.
+> - **Yellow = build phase (Steps 7+)** — code happens here. ~1-2 sessions per phase.
+> - **Red = hardening** — separate fresh-session audits before ship. ~1 session per audit.
+>
 > **Total:** Roughly 4-12 sessions over 1-4 weeks, depending on complexity.
 >
 > We'll pause for your approval at every gate (`→ HG`). You can always stop, redirect, or defer items.
@@ -969,6 +979,7 @@ This matrix is the "nothing falls through the cracks" guarantee. Without it, you
 
 **6a: CLAUDE.md**
 - Claude generates project-level CLAUDE.md containing:
+  - **Bob the Builder protocol reference (v2.6 — MANDATORY)** — first section of the file, stated as a single line: *"This project uses the Bob the Builder protocol at `~/tools/bob-the-builder/build-protocol.md` (full reference) and `~/tools/bob-the-builder/build-protocol-core.md` (compact session reference). Read the core reference at session start; consult the full reference for templates, appendices, and architecture patterns. Resume from `docs/build-manifest.md`."* This single line is what makes Bob **invoke-once-then-auto-resume**: once it's in the project CLAUDE.md, every future Claude Code session in this folder automatically loads Bob without the human re-typing the long invocation. If this line is missing, the protocol's session-resume guarantees break.
   - What this project is (2-3 sentences)
   - Current phase (pointer to Build Manifest)
   - Architecture rules (compact extraction from Architecture Contract — the rules Claude needs in every session)
@@ -1011,15 +1022,30 @@ CLAUDE.md rules are advisory (~80% followed). Hooks are deterministic (100% enfo
 - "I want to commit broken code temporarily" — use a WIP branch, not a disabled hook
 
 **6c: Repository Init**
+
+**v2.6 — preferred path: use the scaffold script.** Claude runs:
+```bash
+bash ~/tools/bob-the-builder/scripts/bob-init.sh <project-name>
+```
+This generates the full folder structure (`docs/`, `contracts/`, `evals/`, `scripts/`, `tests/`, `src/`, `.claude/`), writes a project CLAUDE.md that references Bob (so future sessions auto-resume — see §6a), writes `.claude/settings.json` with default hooks, writes `.gitignore` and `.env.example`, and runs `git init` with an initial commit. Safe to re-run — skips anything that already exists.
+
+After the script runs, Claude:
+- Customizes the hook commands in `.claude/settings.json` for the chosen stack (replace the placeholder `echo` commands with real format/typecheck commands per Step 6b)
+- Sets up hosting/deployment (if applicable — e.g., `vercel link`)
+- Pushes to GitHub
+- Initializes project memory directory (if not already created)
+
+**Fallback path (manual): if the scaffold script is unavailable or the project has unusual structure needs**, Claude performs the steps manually:
 - Create folder structure (per Section 2)
-- git init + initial commit with docs/ and CLAUDE.md
+- git init + initial commit with docs/ and CLAUDE.md (CLAUDE.md MUST include the Bob protocol reference per §6a)
 - .gitignore (appropriate for stack)
 - .env.example (all required env vars documented, no secrets)
 - package.json / pyproject.toml / etc. (if code product)
 - Push to GitHub
 - Set up hosting/deployment (if applicable)
 - Initialize project memory directory
-- **Auto-advance (v2.5):** repo init is mechanical and reversible. Claude reports as a status update ("Repo initialized at `<path>`, pushed to `<url>`, `.env.example` written with [N] variables documented.") and proceeds to Step 7 without a separate Human Gate. If the human needs to add custom files or change folder structure, they say so at this point; the default is to flow through.
+
+**Auto-advance (v2.5):** repo init is mechanical and reversible. Claude reports as a status update ("Repo initialized at `<path>`, pushed to `<url>`, `.env.example` written with [N] variables documented.") and proceeds to Step 7 without a separate Human Gate. If the human needs to add custom files or change folder structure, they say so at this point; the default is to flow through.
 
 ### Steps 7+: Build Phases
 
@@ -2137,6 +2163,7 @@ When the human says "update the build protocol based on recent projects," Claude
 | v2.1 | 2026-04-15 | Seam and transition fixes from 3-mode simulation: Step 0 (Intake) for NEW mode — warm-start from existing materials. Step A7 (Re-entry) for AUDIT mode — explicit next-step guidance after remediation. Evolution Hardening Threshold — triggered at 5th Medium+ evolution, 3+ subsystem touches, Behavioral Core changes, or 6-month calendar. Mid-build reclassification rules for Complexity Assessment. Multiple concurrent evolutions guidance in E1. Template pointers in core reference. Session budget heuristics. | 3-mode simulation audit |
 | v2.2 | 2026-05-15 | **Best-practice gap closure (six changes, applied via Bob-on-Bob EVOLVE):** (1) Product Spec (Step 1a) — added success metrics + activation definition + non-goals + data classification. (2) New Step 2d (AI eval harness) — mandatory golden eval set of 10-30 input/expected pairs, LLM-as-judge + rubric scoring, re-run at every AI-touching phase gate. Drop in pass-rate is a stop condition. New `templates/eval-set.md`. (3) Architecture Contract (Step 3a) — added threat model (STRIDE/DFD), observability plan (logs/traces/metrics/alerts), rollback/kill-switch posture (feature-flag strategy), cost-budget guardrail. (4) Domain Specs (Step 4) — mandatory machine-readable contracts in `contracts/` (Zod/TS/OpenAPI/JSON Schema); new 4c adversarial review parallel to 1c/2c/3c. (5) Build Manifest (Step 5a) — mandatory rollback plan per phase entry. (6) Hooks (Step 6b) — promoted from "recommended" to **default-on with opt-out** for non-engineer users; default set: format + typecheck/build + block-destructive. Phase Report template adds `[C] AI Eval Results`, `[C] Cost Guardrail Check`, and rollback verification line. | Self-audit against 2026 spec-driven dev best practices: missing eval framework for AI products, prose-only integration contracts unenforceable, security/observability deferred to hardening, no per-phase rollback discipline. |
 | v2.3 | 2026-05-15 | **Narrator Mode for non-engineer users (applied via Bob-on-Bob EVOLVE):** New Foundation §11 "Narration Protocol" — 10 rules Claude must follow when guiding a first-time user, plus a standardized Preamble Template (used at every step entry), Checkpoint Summary Template (used after every step completion), and Journey Map (shown before mode selection). New Appendix J "Glossary" — plain-English definitions of every term the protocol uses. Mode menu expanded from terse A/B/C to a what/when/time table. Session Start Protocol (Appendix C) branched into first-time-user vs. resuming-user paths. Build Manifest (Step 5b) gained a visual progress tracker (`▓▓▓░░░░ 3/7`) recited at session start. Root CLAUDE.md instructs Claude to enable Narrator Mode by default. Narrator Mode is ON by default; user can disable with "terse mode". | Self-audit found no clear walkthrough capability for non-engineer users — protocol assumed Claude would narrate without explicit instruction, leaving UX inconsistent. |
+| v2.6 | 2026-05-15 | **Distribution + invocation polish (post-public-release iteration):** (1) Step 6a now MANDATES that the project-level CLAUDE.md include a Bob protocol reference line as its first section — without it, "invoke once and auto-resume" doesn't actually work; this was a real gap that broke session continuity. (2) New `scripts/bob-init.sh` — scaffold script that generates folder structure (`docs/`, `contracts/`, `evals/`, `scripts/`, `tests/`, `src/`, `.claude/`), writes the Bob-referencing CLAUDE.md, writes `.claude/settings.json` with placeholder hooks, writes `.gitignore` + `.env.example`, and runs `git init`. Safe to re-run. (3) Step 6c now invokes the scaffold script as preferred path; manual fallback retained. (4) ASCII journey map in §11.4 replaced with Mermaid flowchart (renders natively on GitHub; color-coded by phase). README adds same Mermaid + a new "How often do I invoke Bob?" section answering the most common new-user question. | Public release exposed the invocation/auto-resume gap and the visual deficiency of the ASCII journey map. |
 | v2.5 | 2026-05-15 | **Spec-extraction depth + narrator quality (applied via Bob-on-Bob mini-build, 4 phases):** **Narrator upgrades:** new §11.7 "Quality Bar Templates" defines what "done" looks like per artifact (Product Spec, Behavioral Core, Architecture Contract, Domain Specs, Build Manifest) with strong/weak examples and stop-iterating criteria — closes the gap where humans couldn't self-evaluate when to advance. New §11.8 mandates "💎 Why this matters" narration in Checkpoint Summary template — sells the value of each artifact in product-leader language. New §11.9 "Confusion-Catch Phrases" lists specific trigger phrases ("I'll just trust you", "sounds good" without engagement, "skip ahead") + response template with 3 explicit options (explain differently / show example / make a guess + flag). **Spec extraction depth:** new Step 1a-pre (Structured Interview + Day-in-the-Life) — mandatory when initial description is thin or ambiguous, runs a JTBD-style 12-question interview + a typical-day walkthrough to extract what's actually in the user's head before Claude drafts. Outputs `docs/interview-notes.md` + `docs/day-in-the-life.md`. New Step 1d "Stability Loop" — re-runs stress-test + adversarial review against revised spec until findings stabilize, capped at 3 iterations (signal that the product idea itself is unstable if not). **HG trimming:** Build Manifest init (5b) and Repo init (6c) auto-advance with status updates instead of HG pause — removes friction at the mechanical steps. | Audit of human-input balance, spec iteration depth, and narrator quality identified four gaps: (1) no interview framework when input is thin, (2) no quality bar to advance, (3) single-pass stress test fails to catch new gaps introduced by fix iterations, (4) narrator explained "what we have" but not "what good looks like" or "why this matters." |
 | v2.4 | 2026-05-15 | **Project archetype coverage (applied via Bob-on-Bob mini-build, 4 phases):** **Tier 1** — New Step 0.5 "Project Profile" routes the project through Appendix K addenda; new Appendix K "Project Profiles" with 15 archetypes (K1-K15: AI Chat, B2B Tool, RAG, Vertical SaaS, Agent, Background Jobs, E-commerce, Marketplace, Content/Community, Real-time, Mobile, Extension, Voice, ETL, SEO Site) — additive-only addenda that never override core protocol. Three new architecture patterns: G11 RAG Pipeline (chunking/embedding/reranker/eval), G12 Agent / Tool-Use Loop (tool contracts, max-step bound, tool eval), G13 Background Job Architecture (orchestrator choice, idempotency, dead letter). **Tier 2** — Architecture Contract (Step 3a) gained accessibility posture, internationalization posture, and compliance scope (GDPR/CCPA/HIPAA/SOC2/PCI/None). Build Manifest (Step 5b) gained success-metric instrumentation map (every Product Spec success metric must map to an analytics event + build phase + dashboard, closing the "metric defined but never wired" gap). **Tier 3** — Five additional architecture patterns for less common archetypes that may show up later: G14 Mobile App, G15 Browser Extension, G16 Real-time/Collaborative, G17 Voice/Audio Pipeline, G18 Marketplace/Two-Sided Platform. Pattern Library gains a maintenance note flagging that tool-specific advice in G11+ moves fast. | Self-audit against common 2026 Claude-Code project archetypes found three gaps: no routing layer for archetype-specific considerations; missing patterns for the most common AI-product archetypes (RAG, Agents, Jobs); a11y/i18n/compliance treated as implicit; success metrics defined in Product Spec but never instrumented during build. |
 
@@ -2330,5 +2357,5 @@ When the human says "update the build protocol based on recent projects," Claude
 
 ---
 
-*Build Protocol v2.5 — 2026-05-15*
+*Build Protocol v2.6 — 2026-05-15*
 *Derived from prior personal projects: an AI-driven blood-test interpretation tool, a personal task-management app, a tax auction analysis tool, and a strategy-research framework.*
