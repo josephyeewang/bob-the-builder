@@ -1,182 +1,195 @@
 # Bob the Builder
 
-**A spec-driven build protocol for Claude Code, designed for non-engineer product leaders.**
+**Stop Claude from going off the rails when you try to build a real product with it.**
 
-Bob is a markdown framework that Claude Code reads and follows. It turns "I have an idea" into "I shipped a working product" by forcing structured spec, build, and audit phases — with explicit human checkpoints at every step.
+Bob is a structured playbook that you hand to Claude Code. Instead of Claude making things up as it goes, it follows a clear sequence — figure out what you're building, design it carefully, then build it phase by phase with checkpoints where you actually look at the work.
 
-You don't install Bob. You clone this repo, tell Claude Code to read the protocol, and Bob walks you through the rest.
-
----
-
-## What it does
-
-For a first-time user, a typical session opens like this:
-
-```
-Read ~/tools/bob-the-builder/build-protocol.md and help me build a new product.
-```
-
-Claude then:
-
-1. Shows you the **Journey Map** — the full path from idea to shipped product
-2. Confirms which mode you want (NEW / AUDIT / EVOLVE)
-3. Walks you through the protocol step-by-step in **Narrator Mode** — explaining what each step does, what "good" looks like, and why it matters
-4. Pauses at every Human Gate so you can approve, revise, reject, or defer
-5. Updates a `docs/build-manifest.md` so you can resume across sessions and machines
-
-By the end, you have:
-- A complete spec hierarchy (Product Spec, Behavioral Core if AI, Architecture, Domain Specs, Build Manifest)
-- A built, tested, hardened product with explicit traceability from every capability to the code that implements it
-- A decision log explaining why each non-obvious choice was made
+You don't install anything. You point Claude at this repo. It does the rest.
 
 ---
 
 ## Who this is for
 
-- **Solo or very small teams** using Claude Code as primary engineer
-- **Non-engineer product leaders** (PMs, ops leaders, founders) who can scope but rely on AI for implementation
-- **AI-heavy products** where behavior drift is a risk and you need an eval harness
-- **Multi-subsystem products** where integration seams cause silent production bugs
-- **Anyone burned by:** silent scope creep, specs that went stale during build, "we forgot to build feature X" at launch, or debugging chains of 5-6 commits that should have been one
+This is built for people like you if:
 
-## Who this is NOT for
+- You have ideas for products but you're not an engineer
+- You use Claude Code (or want to) but you've watched it go in circles, build the wrong thing, or generate code you can't actually use
+- You'd rather have a structured conversation than try to "be a better prompter"
+- You want to ship things — not just play with prototypes that never see daylight
 
-Bob is opinionated about scope. It will not help much with:
-
-- Multi-developer teams (built for solo/small operators; no PM/eng/design role splits)
-- Hardware products
-- Pure research with no ship deadline
-- Disposable prototypes (overhead exceeds value — skip Bob)
-- Heavily regulated domains needing day-one SOC2/HIPAA depth (handled lightly, not deeply)
-
-Bob also **stops at "ship-ready," not "operating in production."** It defines an observability plan but doesn't run your incident response. It sets cost guardrails but doesn't do ongoing FinOps. Pair it with a separate ops playbook if you need that.
+**Skip Bob if:** you have a team of engineers, you're building a quick throwaway, or you're doing pure research with no shipping deadline. Bob is opinionated about scope — it's for solo / very small builders who want discipline without overhead.
 
 ---
 
-## The three modes
+## What you actually get
 
-| Mode | Use when | Roughly how long |
-|---|---|---|
-| **NEW** | Building from scratch | 4-12 sessions over 1-4 weeks |
-| **AUDIT** | You inherited a half-built product and want to formalize | 1-3 sessions |
-| **EVOLVE** | You have a working product and want to add/change features | 1 session (small) to 1+ week (large) |
+After working through Bob with Claude, you walk away with:
 
----
+- **A clear written spec** — what your product does, who it's for, what's in scope and what's not
+- **A behavioral plan** (for AI products) — exactly how your AI should think and respond
+- **A build plan** — a list of phases with checkpoints, so progress is visible
+- **A working product** — built phase by phase, tested at each step
+- **A security/abuse review** — Claude audits its own work before you ship
+- **A decision log** — every non-obvious choice with the reason why
 
-## What makes it different
-
-A few things you won't find in most build playbooks:
-
-- **Narrator Mode** — guides non-engineer users through every step with plain-English previews, quality-bar rubrics ("what does done look like?"), and value narration ("why this matters")
-- **Capability Traceability Matrix** — every capability in your Product Spec maps to a specific build phase. No more "we forgot to build feature X" at launch
-- **AI eval harness** — for AI products, a golden eval set re-runs at every phase gate. Pass-rate drop is a stop condition
-- **Machine-readable contracts** — subsystem boundaries enforced by the compiler, not by Claude reading two docs and comparing
-- **Fresh-session hardening** — five separate audit sessions (security, abuse, integration seams, data integrity, spec-code) with clean context. Writer ≠ reviewer
-- **Project Profiles** — 15 archetypes (RAG, Agent, Marketplace, Mobile, etc.) with additive addenda so the protocol tailors itself to your product type
-- **Light / Standard / Heavy tracks** — Bob scales with project complexity instead of forcing one-size-fits-all
+And just as important: **you get to make decisions at every step**, not get surprised at the end.
 
 ---
 
-## Quickstart
+## Why this beats just asking Claude directly
 
-**Step 1 — Clone the repo (one time):**
+Most people use Claude Code by saying "build me X" and then steering as they go. That works for small things. For real products it usually goes one of these directions:
+
+| Without Bob | With Bob |
+|---|---|
+| Claude builds, you discover halfway through it's the wrong thing | Spec gets locked in before any code happens |
+| Claude forgets things between sessions | A `build-manifest.md` tracks where you are |
+| You ask for feature A, get features A through G that you didn't want | Explicit "what's in scope, what's out" at every phase |
+| Tests pass, then it breaks in production | Five separate security/integrity audits before ship |
+| You can't tell when something is "done enough" | Quality bar templates show you good vs weak examples |
+| Claude assumes things you didn't approve | Pauses for your sign-off at every important step |
+| AI behavior drifts as you add features | Eval set re-runs at every phase; drift is a stop sign |
+
+The trade is upfront time. Bob is heavier than vibing. But "spec phase takes 2 days" beats "I've been debugging the same thing for a week."
+
+---
+
+## Get started in 3 steps
+
+### Step 1 — Get the protocol onto your machine (one time, ~30 seconds)
+
+Open **Terminal** (it's an app on your Mac — search Spotlight for "Terminal").
+
+Paste this and press return:
 
 ```bash
 mkdir -p ~/tools && cd ~/tools && git clone https://github.com/josephyeewang/bob-the-builder.git
 ```
 
-This puts the protocol at `~/tools/bob-the-builder/`. It lives separately from any actual product you build.
+**What that did:** Created a folder called `tools` in your home directory and downloaded Bob into it. The protocol now lives at `~/tools/bob-the-builder/`. You'll never touch this folder directly — Claude reads from it.
 
-**Step 2 — Use Bob on a project:**
+### Step 2 — Open Claude Code in the folder where your project will live
 
-Open Claude Code in your project folder. Paste:
+Make a new folder for your project (or use an existing one). Open Claude Code there.
+
+If you don't have Claude Code yet, get it at [claude.com/claude-code](https://claude.com/claude-code).
+
+### Step 3 — Tell Claude to use Bob
+
+Paste this into Claude (replace the description with what you're trying to build):
 
 ```
-Read ~/tools/bob-the-builder/build-protocol.md and help me build a new product. Narrator Mode on.
+Read ~/tools/bob-the-builder/build-protocol.md and help me build a new product.
+Narrator Mode on — I've never used this before.
+
+The product I want to build: [one or two sentences about your idea — don't
+worry about being complete, Bob will walk you through the questions]
 ```
 
-Claude takes it from there.
+That's it. Claude will show you the map of where you're going, ask which mode fits, and then guide you through it. Pause and ask questions any time.
 
-**Step 3 — Get updates whenever:**
+---
+
+## Three things to try first
+
+Once Bob is set up, here are the three most useful ways to invoke it:
+
+### 1. Build something new from scratch
+
+```
+Read ~/tools/bob-the-builder/build-protocol.md and start MODE: NEW.
+Narrator Mode on. I want to build: [your idea].
+```
+
+Use this when you have an idea and no code yet. Bob will run you through an interview, draft a spec, get your approval, and only then start writing code.
+
+### 2. Add a feature to a project you've already started
+
+```
+Read ~/tools/bob-the-builder/build-protocol.md and start MODE: EVOLVE.
+I want to add this feature to my existing project: [describe the change].
+```
+
+Use this when you have something working and want to add to it. Bob figures out how big the change is and applies the right amount of process — small changes don't need the full machinery.
+
+### 3. Audit something you've been building messily
+
+```
+Read ~/tools/bob-the-builder/build-protocol.md and start MODE: AUDIT.
+Help me figure out what state this project is actually in.
+```
+
+Use this when you've been "vibe coding" and want to clean up. Bob inventories what you have, finds gaps, and proposes a plan to get back on track.
+
+---
+
+## Pro tip — "Is Bob useful for what I want to build?"
+
+If you're not sure whether Bob is right for your project, paste this into Claude (no setup needed — Claude can read GitHub URLs):
+
+```
+Please look at this repo: https://github.com/josephyeewang/bob-the-builder
+
+I'm thinking about building: [describe your idea in 2-3 sentences].
+
+Based on what Bob does, would it be useful for me? Be honest — if my idea is
+too small or wrong-shaped for this framework, say so. If it would help, tell
+me which mode (NEW / AUDIT / EVOLVE) and what to expect.
+```
+
+Claude will read the README, evaluate your idea against what Bob is good and bad at, and give you a straight answer. No commitment.
+
+---
+
+## What Bob doesn't do
+
+Being honest so you don't get surprised:
+
+- **It doesn't replace product judgment.** It asks the right questions; you still have to know your customer and your market.
+- **It stops at "ready to ship."** It doesn't run your customer support, monitor production, or manage your roadmap after launch.
+- **It doesn't do design.** It'll force you to think about user experience at key checkpoints, but no Figma flows, no UI kit.
+- **It's opinionated.** It won't help much with hardware, multi-team coordination, or one-off prototypes you'll throw away.
+- **It's not perfect.** It's a living protocol — updated as projects reveal new gaps. Run `cd ~/tools/bob-the-builder && git pull` whenever you want the latest.
+
+---
+
+## What's in the repo
+
+You don't need to read these — Claude does — but if you're curious:
+
+```
+README.md              ← This file
+build-protocol.md      ← The full reference Claude reads (~2400 lines)
+build-protocol-core.md ← A compact version for daily sessions
+CLAUDE.md              ← Project-level instructions
+templates/             ← Reusable templates (eval sets, phase reports, etc.)
+LICENSE                ← MIT (use it freely)
+```
+
+---
+
+## Staying current
+
+Bob is updated as new lessons emerge. To get the latest version any time:
 
 ```bash
 cd ~/tools/bob-the-builder && git pull
 ```
 
-Pulls any improvements pushed since you last cloned. Run it whenever you want, or only when there's a notable release.
-
----
-
-## The journey
-
-```
-Step 0:    Intake               (if you have existing materials)
-Step 0.5:  Project Profile      (RAG? Agent? Marketplace? Mobile?)
-Step 1:    Product Spec         WHAT it does
-Step 2:    Behavioral Core      HOW the AI thinks (if AI product)
-Step 3:    Architecture         HOW it's built
-Step 4:    Domain Specs         DETAILS per subsystem
-Step 5:    Build Manifest       PLAN of phases
-Step 6:    Project Setup        Repo, hooks, environment
-Step 7+:   Build Phases         Actual building, one phase at a time
-Step N+1:  Hardening            Security/abuse/integrity audits
-Step N+2:  Learning             What worked, what to improve
-```
-
-Every step has Human Gates where Claude pauses for your approval. You can stop, redirect, or defer at any time.
-
----
-
-## File map
-
-```
-README.md                  ← You are here
-build-protocol.md          ← Full reference (all sections, templates, appendices)
-build-protocol-core.md     ← Compact reference (~200 lines) for daily session context
-CLAUDE.md                  ← Project-level instructions for Claude Code
-templates/                 ← Extractable templates
-  ├── phase-report.md
-  ├── behavioral-core.md
-  ├── eval-set.md
-  ├── decision-log-entry.md
-  └── cowork-session.md
-```
-
-For day-to-day use, `build-protocol-core.md` is enough context. Load `build-protocol.md` when you need templates, the Architecture Patterns Library (G1-G18), the Project Profiles index (Appendix K), or the Glossary (Appendix J).
-
----
-
-## Versioning
-
-Bob is versioned in `build-protocol.md` and the changelog (Appendix I). Latest version is at the top of that file.
-
-The protocol is intentionally living — when projects reveal a process gap, Bob gets updated. Major versions reflect structural changes; minor versions add capabilities.
-
-To upgrade: `git pull` in your local clone.
-
----
-
-## A few principles
-
-If you read the protocol, you'll see these everywhere:
-
-- **Specs are living documents.** Reconcile after every phase. Propagate changes downstream.
-- **No silent refactoring.** Every change is named, explained, and approved.
-- **Class-level fixes.** Bug in one place → grep for the same pattern everywhere; fix all instances.
-- **Trust the gates.** Human Gates feel like friction. They're how the protocol works.
-- **Scope lock.** The Acceptance Gate has both *exit criteria* (what must be true) and *scope boundary* (what must NOT have been built). Both matter.
-- **Three strikes.** Same fix fails three times → STOP. The bug is not where you think it is.
+**What that does:** Pulls any improvements that have been added since you last cloned. Safe to run anytime — it doesn't touch your projects.
 
 ---
 
 ## Credits
 
-Built by [Joe Wang](https://github.com/josephyeewang) — former McKinsey, Fifth Wall, Clari — pairing with Claude Code for shipping side projects without losing the discipline that bigger orgs spend years acquiring.
+Built by [Joe Wang](https://github.com/josephyeewang) — former McKinsey, Fifth Wall, Clari — pairing with Claude Code to ship side projects without losing the discipline that bigger orgs spend years acquiring.
 
-Derived from lessons across multiple personal projects: an AI-driven blood-test interpretation tool, a personal task-management app with SMS+AI workflows, a tax auction analysis tool, and a strategy-research framework. The protocol learned from each one's failure modes and made them harder to repeat.
+Bob is derived from lessons learned across multiple personal projects (an AI blood-test interpreter, a personal task-management app with SMS+AI workflows, a tax auction analysis tool, and a strategy-research framework). Each one's failure modes shaped the protocol. The goal: make those mistakes harder to repeat — for me and for anyone else who finds it useful.
+
+If Bob helps you ship something, that's the whole point.
 
 ---
 
 ## License
 
-[MIT](LICENSE) — use it, fork it, adapt it. If it helps you ship something, that's enough.
+[MIT](LICENSE) — use it, fork it, adapt it, share it.
