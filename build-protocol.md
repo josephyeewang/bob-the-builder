@@ -1,4 +1,4 @@
-# BUILD PROTOCOL v2.4
+# BUILD PROTOCOL v2.5
 
 > A systematic framework for building, auditing, and evolving products with Claude Code.
 > Created: 2026-04-15. Last updated: 2026-05-15. Owner: Joe Wang.
@@ -499,6 +499,7 @@ The rest of this protocol tells Claude *what to produce*. This section tells Cla
 
 > **✅ Step [N.x] complete — [Step Name]**
 > **📦 What we now have:** [The artifact, in 1-2 sentences. Where it lives. What it says.]
+> **💎 Why this matters (v2.5):** [Plain-English explanation of what this artifact does for you over the next few weeks. Sell the value. A non-coder needs to feel that the time they just spent was worth it — and a clear "why" also primes them to push back if the artifact is weak. Example: "Without this Product Spec, every future build phase would have to re-litigate 'what are we even doing?' With it, when a question comes up at Phase 5 about whether feature X is in scope, the answer is in one place. This is the artifact that prevents scope creep."]
 > **🚀 What this unlocks:** [The next step + why it depends on what we just produced.]
 > **⚠️ Risks if we skip something later:** [Optional — only if a future step might be tempting to skip. E.g., "If we skip the eval set in Step 2d, we won't catch behavioral regressions during build."]
 > **Progress:** [Updated progress bar.]
@@ -543,6 +544,85 @@ Returning users (Build Manifest exists) skip the Journey Map and jargon primers.
 - Checkpoint Summary after each step
 - Pulse Report at session end
 - Inline jargon definitions ONLY for terms not previously used in this project's specs
+
+#### 11.7 — Quality Bar Templates (v2.5)
+
+The Preamble Template's "what 'done' looks like" line should reference these rubrics when the step has one. Each rubric: (a) the bar for "good enough to advance", (b) a concrete weak example, (c) a concrete strong example, (d) stop-iterating criteria.
+
+**Quality Bar — Product Spec (Step 1a)**
+
+- ✅ **Good enough to advance:** Every capability has a concrete user scenario behind it. Each user scenario passes the "can a stranger act this out?" test. Success metrics are measurable, not aspirational. At least one non-goal is explicit. A skeptical reader can't poke an obvious hole in the value proposition.
+- ❌ **Weak:** "Users can manage their tasks. The system will be intuitive and helpful. We'll measure success by user satisfaction."
+- ✅ **Strong:** "A user can text a half-formed task ('remind me to call mom tonight') and have it appear in the portal at the right time with the right context — without ever opening an app. We measure success by weekly active task-creators (north star) and the % of texted tasks that get marked complete within their timeframe (leading indicator). Non-goals for v1: project management, team collaboration, calendar sync."
+- 🛑 **Stop iterating when:** the human can describe the product from memory in 30 seconds without checking the doc; and a colleague unfamiliar with the project can read the spec and predict the right answer to "is feature X in scope?" 8 times out of 10.
+
+**Quality Bar — Behavioral Core (Step 2a, AI products)**
+
+- ✅ **Good enough to advance:** Every decision the AI makes has a rule. Every rule has a confidence threshold or a deterministic trigger. Every "never" / "always" rule has at least one adversarial test in the eval set (Step 2d). Tone is defined with concrete examples, not adjectives.
+- ❌ **Weak:** "The AI should be friendly and helpful. It should avoid being too pushy. It should ask for confirmation when unsure."
+- ✅ **Strong:** "If confidence ≥ 0.85 → execute silently. 0.5-0.85 → execute + show a one-line confirmation ('I scheduled it for 7pm — say nope if wrong'). <0.5 → ask one targeted question, never two. Tone: warm and brief, like a competent assistant — never apologetic, never robotic. Example warm: 'Got it — calling mom at 7.' Example NOT warm: 'I have successfully created your task.' Refuse and explain when: the request involves money, the user's identity, or another user's data."
+- 🛑 **Stop iterating when:** the rules are concrete enough that two different engineers reading them would implement the same behavior.
+
+**Quality Bar — Architecture Contract (Step 3a)**
+
+- ✅ **Good enough to advance:** Tech stack is chosen with a written rationale (`tool-decisions.md`). Every external integration has an abstraction-or-not decision. Cost-per-user at 100/1K/10K is estimated (range is fine; absent is not). Threat model lists ≥3 plausible threats with mitigations. Observability plan names specific metrics, not categories.
+- ❌ **Weak:** "We'll use a modern stack with appropriate security and monitoring."
+- ✅ **Strong:** "Next.js 16 + Supabase (Postgres + Auth + RLS) + Vercel for hosting + Anthropic Claude Sonnet via AI Gateway. Cost at 1K users: ~$180/mo (DB $50, Vercel $25, AI ~$105 @ $0.10/active-user-day). Threat model: (1) prompt injection from user task text — mitigation: sanitize + system-prompt isolation. (2) cross-tenant data leak — mitigation: RLS on every table. (3) webhook spoofing — mitigation: signature verification. Observability: log every AI call with tokens + cost + latency; trace SMS-in → AI → SMS-out as one span; alert on p95 latency > 8s or error rate > 2%."
+- 🛑 **Stop iterating when:** the architecture lets the human estimate cost and identify failure modes without re-asking Claude.
+
+**Quality Bar — Domain Specs (Step 4b)**
+
+- ✅ **Good enough to advance:** Every subsystem boundary has a machine-readable contract in `contracts/`. Every state machine has all transitions enumerated (including the error transitions). Every API endpoint has explicit error cases. Cross-references between specs use exact field names (no "task ID" in one and "taskId" in another).
+- ❌ **Weak:** "The messaging subsystem will handle SMS in and out. It will integrate with the task subsystem."
+- ✅ **Strong:** "Messaging subsystem owns inbound SMS parsing, outbound delivery, and provider abstraction. Inbound contract: `{ from: E164, body: string, twilioMessageSid: string }` → produces `NormalizedInput` (see contracts/messaging.ts). Outbound contract: `NormalizedOutput → { to: E164, body: string, provider: 'twilio' | 'mock' }`. States for outbound: queued → sending → sent → delivered | failed (retry up to 3x) → dead. Error cases enumerated: invalid phone (E164 fails), provider 4xx, provider 5xx, provider timeout."
+- 🛑 **Stop iterating when:** every spec compiles (machine-readable contracts validate) and every cross-spec reference resolves.
+
+**Quality Bar — Build Manifest (Step 5a)**
+
+- ✅ **Good enough to advance:** Every Product Spec capability maps to exactly one phase (Capability Traceability Matrix). Every phase has an Acceptance Gate with explicit exit criteria AND explicit scope boundary. Every phase has a rollback plan. Hot paths are defined. Success metrics from Step 1a are mapped to instrumentation events.
+- ❌ **Weak:** "Phase 1: set up infrastructure. Phase 2: build core features. Phase 3: polish."
+- ✅ **Strong:** "Phase 3 (Messaging — Medium). Scope: inbound SMS parsing + outbound delivery via Twilio. Exit criteria: a user can text 'buy milk tomorrow' and receive a confirmation within 5s; failed sends retry per spec; signature verification rejects forged webhooks. Scope boundary: NOT building AI interpretation yet (that's Phase 4) — Phase 3 just routes raw text. Rollback: set `MESSAGING_ENABLED=false` env var → falls back to manual-input mode. Validation: real Twilio test message + 3 forged webhook attempts (all should reject). Hot path: SMS-in → task object exists in DB → outbound confirmation sent."
+- 🛑 **Stop iterating when:** the human could hand the Build Manifest to a different engineer and they'd build it the same way.
+
+**General rule:** if the human can't say *what specifically would make this artifact better*, the artifact is done. If they can, keep iterating.
+
+#### 11.8 — Why-this-matters narration (v2.5)
+
+Rule 5 of §11.1 requires the Checkpoint Summary after every step. §11.3 now includes a "💎 Why this matters" line. This subsection is the **rule about that line**:
+
+- It's mandatory for a first-time user. Returning users (condensed narration, §11.6) get a shortened one-liner.
+- It must be **product-leader language, not engineer language**. Avoid mentioning files, schemas, or types. Talk about decisions prevented, scope creep avoided, future conversations made shorter.
+- It must be **specific to what you just produced**, not a generic platitude. "Your Product Spec is now ready" is not a why-this-matters; "your Product Spec just defined non-goals, which is the thing that will stop scope creep at Phase 5" is.
+- If you can't write a specific "why this matters", the artifact is probably weak — go back and look at the Quality Bar (§11.7) before declaring the step complete.
+
+#### 11.9 — Confusion-Catch Phrases (v2.5)
+
+Rule 8 of §11.1 says "catch confusion signals." This subsection lists the specific signals.
+
+**Trigger phrases (stop and back up if you hear any of these):**
+
+- "I'm not sure what you mean."
+- "What does [term] mean?"
+- "Why are we doing this?"
+- "Is this normal?"
+- "I'll just trust you on this."  ← *especially this one — it usually means "I'm lost and giving up"*
+- "Skip ahead."  ← *unless they explicitly know what they're skipping*
+- "Whatever you think is best."
+- "Just do what makes sense."
+- "I don't really know."
+- "Can we move on?"
+- "Sounds good." (without engaging with the specifics — this often means disengagement, not approval)
+
+**Response template when triggered:**
+
+> "Let me back up. We're at [step] because [reason in plain English]. What we're trying to figure out right now is [specific question]. The reason that matters is [downstream consequence]. Want me to explain a different way, give an example, or are you okay if I make a reasonable guess and flag it for you to confirm later?"
+
+Then offer three explicit options:
+1. **Explain differently** (Claude tries again with a different angle / analogy)
+2. **Show an example** (Claude shows what a strong answer looks like from a similar past project)
+3. **Make a guess + flag** (Claude proceeds with an assumption, tagged inline, surfaces it again at the next HG)
+
+Never just power through. Disengagement compounds — a user who said "sounds good" at Step 2 will discover at Step 5 that they didn't actually agree, and rolling back is expensive.
 
 ---
 
@@ -598,6 +678,45 @@ Returning users (Build Manifest exists) skip the Journey Map and jargon primers.
 
 ### Step 1: Product Spec
 
+**1a-pre: Structured Interview (v2.5 — MANDATORY if initial description is < ~50 words OR if Claude detects ambiguity)**
+
+The old Step 1a assumed the human walks in with a clear vision. Real users walk in with a sentence. This pre-step extracts what's actually in your head before Claude drafts.
+
+*Skip condition:* If the human provided substantial existing materials in Step 0 (PRDs, slides, prior chats) that already cover the interview dimensions below, Claude skips 1a-pre and proceeds to 1a — but still flags any dimension where the existing materials are thin.
+
+**Part I — JTBD-style interview (~10-15 questions, one at a time):**
+
+Claude asks these in conversation, one or two at a time — never as a wall of questions. Don't proceed to Part II until Part I is complete.
+
+1. **Customer:** Who specifically is this for? (Role, industry, company size, life stage — whatever defines them.) If you say "everyone" or "anyone who wants X" — narrow down. The first version cannot be for everyone.
+2. **Problem:** What's the pain they have today? Describe a specific moment when that pain shows up — not the abstract version.
+3. **Current alternatives:** What do they do today instead? (Other tools, manual processes, "they just suffer".) What do they hate about those alternatives?
+4. **Emotional driver:** When this product solves the problem, how does the customer *feel* in that moment? (Relieved? Smug? Productive? Trusting?)
+5. **Trigger:** What event/moment makes them decide they need to solve this? (The "I can't take this anymore" event.)
+6. **Success criteria — for the customer:** How will *they* know the product worked for them? (Not "they'll be satisfied" — a concrete observable.)
+7. **Success criteria — for you:** What does business success look like in 6 months and 12 months? (Users? Revenue? Retention? Word-of-mouth?)
+8. **Closest reference product:** What existing product is closest to what you want to build? What does it get right? What does it get wrong that you'll do differently?
+9. **What this is NOT:** Name 3 things that would be tempting to add but you want to explicitly NOT do in v1.
+10. **Hard constraints:** Budget, timeline, regulatory, technical (e.g., "must work without an account", "must not store PII", "shipping by Y").
+11. **Risk tolerance:** If a feature is 80% reliable, is that ship-worthy or no-go? Where's the bar — "delight" or "doesn't embarrass me"?
+12. **One-liner test:** Finish this: "It's like [X] but for [Y]." or "It's [adjective] [category] for [audience]."
+
+Claude captures answers in `docs/interview-notes.md` and surfaces any contradiction it spots ("you said the customer is X but the use case suggests Y — which is it?").
+
+**Part II — Day in the Life walkthrough:**
+
+Before drafting capabilities, Claude asks the human to narrate a typical day for the target user, in detail. Specifically:
+
+- What does the user do *before* they would use this product? (Context — what else is going on in their day.)
+- The exact moment they would reach for this product. Where are they? What just happened? What are they trying to accomplish in the next 5 minutes?
+- Step-by-step what they do *with* the product. (Bias toward concrete actions, not abstract "they manage their tasks".)
+- What happens *after* they're done with the product? (Did the value persist? Do they come back?)
+- Where does this break down today? (What goes wrong with their current process at each step?)
+
+This walkthrough surfaces unstated assumptions ("oh wait, they're driving when they think of this — so it has to be voice or SMS, not a web UI"). Capture as `docs/day-in-the-life.md` and treat it as the source for user scenarios in 1a.
+
+`→ HG:` Human reviews interview notes + day-in-the-life. Confirms accuracy. Flags anything Claude misunderstood.
+
 **1a: Draft**
 - Human describes the product conversationally
 - Claude drafts the Product Spec covering:
@@ -631,8 +750,22 @@ Returning users (Build Manifest exists) skip the Journey Map and jargon primers.
   - Focus areas: conceptual gaps, scope creep risks, scenarios where the product would fail or confuse users, missing economics, unstated assumptions
   - Present findings as a numbered list with severity (Critical / Important / Minor)
 - Claude proposes fixes for each finding
-- `→ HG:` Human reviews, resolves each finding. Product Spec finalized.
+- `→ HG:` Human reviews, resolves each finding.
 - **Optional — second-model review:** Human may additionally take the Product Spec to a second AI (e.g., ChatGPT) for independent review. Prompt: *"Review this product spec. Focus on: conceptual gaps, scope creep risks, market blind spots, scenarios where the product would fail or confuse users. Be adversarial — find the holes."* Bring back any new findings for Claude to incorporate.
+
+**1d: Stability Loop (v2.5 — MANDATORY)**
+
+A fix to one finding can introduce a new gap. One pass of stress-test + adversarial review is not enough.
+
+- Re-run the stress-test (1b focus areas) and the adversarial review (1c focus areas) against the now-revised spec
+- Report findings. Compare to prior round:
+  - **No new Critical or Important findings** → spec is stable, advance to Step 2
+  - **New Critical or Important findings** → resolve them, then loop again
+- **Iteration cap: 3 rounds.** If the spec is still unstable after 3 rounds, that's a signal the product idea itself is unstable. STOP and have an honest conversation about whether the scope needs to shrink or the problem needs to be re-framed. Don't keep iterating in hope.
+- Each round logs to `docs/decision-log.md`: round number, what was found, what was changed.
+- `→ HG:` Human reviews stability report. Product Spec finalized.
+
+Use the **Quality Bar — Product Spec (§11.7)** as the bar for "done." If the human can't say *what specifically would make the spec better*, the spec is done.
 
 ### Step 2: Behavioral Core (AI products only — skip if N/A)
 
@@ -830,7 +963,7 @@ This matrix is the "nothing falls through the cracks" guarantee. Without it, you
   - Decisions section (links to decision-log.md entries made during build)
   - Deferred items list (things explicitly skipped with rationale)
   - Deviations section (where build diverged from original specs, with explanation)
-- `→ HG:` Build Manifest initialized
+- **Auto-advance (v2.5):** the Build Manifest is auto-generated from the prior approvals in Step 5a/5a-ii. Claude reports it as a status update ("Build Manifest written to `docs/build-manifest.md`. Includes [N] phases, [M] capabilities mapped, progress tracker initialized.") and proceeds to Step 6 without a separate Human Gate. The human can still object — but the default is to flow through.
 
 ### Step 6: Project Setup
 
@@ -886,7 +1019,7 @@ CLAUDE.md rules are advisory (~80% followed). Hooks are deterministic (100% enfo
 - Push to GitHub
 - Set up hosting/deployment (if applicable)
 - Initialize project memory directory
-- `→ HG:` Environment ready
+- **Auto-advance (v2.5):** repo init is mechanical and reversible. Claude reports as a status update ("Repo initialized at `<path>`, pushed to `<url>`, `.env.example` written with [N] variables documented.") and proceeds to Step 7 without a separate Human Gate. If the human needs to add custom files or change folder structure, they say so at this point; the default is to flow through.
 
 ### Steps 7+: Build Phases
 
@@ -2004,6 +2137,7 @@ When the human says "update the build protocol based on recent projects," Claude
 | v2.1 | 2026-04-15 | Seam and transition fixes from 3-mode simulation: Step 0 (Intake) for NEW mode — warm-start from existing materials. Step A7 (Re-entry) for AUDIT mode — explicit next-step guidance after remediation. Evolution Hardening Threshold — triggered at 5th Medium+ evolution, 3+ subsystem touches, Behavioral Core changes, or 6-month calendar. Mid-build reclassification rules for Complexity Assessment. Multiple concurrent evolutions guidance in E1. Template pointers in core reference. Session budget heuristics. | 3-mode simulation audit |
 | v2.2 | 2026-05-15 | **Best-practice gap closure (six changes, applied via Bob-on-Bob EVOLVE):** (1) Product Spec (Step 1a) — added success metrics + activation definition + non-goals + data classification. (2) New Step 2d (AI eval harness) — mandatory golden eval set of 10-30 input/expected pairs, LLM-as-judge + rubric scoring, re-run at every AI-touching phase gate. Drop in pass-rate is a stop condition. New `templates/eval-set.md`. (3) Architecture Contract (Step 3a) — added threat model (STRIDE/DFD), observability plan (logs/traces/metrics/alerts), rollback/kill-switch posture (feature-flag strategy), cost-budget guardrail. (4) Domain Specs (Step 4) — mandatory machine-readable contracts in `contracts/` (Zod/TS/OpenAPI/JSON Schema); new 4c adversarial review parallel to 1c/2c/3c. (5) Build Manifest (Step 5a) — mandatory rollback plan per phase entry. (6) Hooks (Step 6b) — promoted from "recommended" to **default-on with opt-out** for non-engineer users; default set: format + typecheck/build + block-destructive. Phase Report template adds `[C] AI Eval Results`, `[C] Cost Guardrail Check`, and rollback verification line. | Self-audit against 2026 spec-driven dev best practices: missing eval framework for AI products, prose-only integration contracts unenforceable, security/observability deferred to hardening, no per-phase rollback discipline. |
 | v2.3 | 2026-05-15 | **Narrator Mode for non-engineer users (applied via Bob-on-Bob EVOLVE):** New Foundation §11 "Narration Protocol" — 10 rules Claude must follow when guiding a first-time user, plus a standardized Preamble Template (used at every step entry), Checkpoint Summary Template (used after every step completion), and Journey Map (shown before mode selection). New Appendix J "Glossary" — plain-English definitions of every term the protocol uses. Mode menu expanded from terse A/B/C to a what/when/time table. Session Start Protocol (Appendix C) branched into first-time-user vs. resuming-user paths. Build Manifest (Step 5b) gained a visual progress tracker (`▓▓▓░░░░ 3/7`) recited at session start. Root CLAUDE.md instructs Claude to enable Narrator Mode by default. Narrator Mode is ON by default; user can disable with "terse mode". | Self-audit found no clear walkthrough capability for non-engineer users — protocol assumed Claude would narrate without explicit instruction, leaving UX inconsistent. |
+| v2.5 | 2026-05-15 | **Spec-extraction depth + narrator quality (applied via Bob-on-Bob mini-build, 4 phases):** **Narrator upgrades:** new §11.7 "Quality Bar Templates" defines what "done" looks like per artifact (Product Spec, Behavioral Core, Architecture Contract, Domain Specs, Build Manifest) with strong/weak examples and stop-iterating criteria — closes the gap where humans couldn't self-evaluate when to advance. New §11.8 mandates "💎 Why this matters" narration in Checkpoint Summary template — sells the value of each artifact in product-leader language. New §11.9 "Confusion-Catch Phrases" lists specific trigger phrases ("I'll just trust you", "sounds good" without engagement, "skip ahead") + response template with 3 explicit options (explain differently / show example / make a guess + flag). **Spec extraction depth:** new Step 1a-pre (Structured Interview + Day-in-the-Life) — mandatory when initial description is thin or ambiguous, runs a JTBD-style 12-question interview + a typical-day walkthrough to extract what's actually in the user's head before Claude drafts. Outputs `docs/interview-notes.md` + `docs/day-in-the-life.md`. New Step 1d "Stability Loop" — re-runs stress-test + adversarial review against revised spec until findings stabilize, capped at 3 iterations (signal that the product idea itself is unstable if not). **HG trimming:** Build Manifest init (5b) and Repo init (6c) auto-advance with status updates instead of HG pause — removes friction at the mechanical steps. | Audit of human-input balance, spec iteration depth, and narrator quality identified four gaps: (1) no interview framework when input is thin, (2) no quality bar to advance, (3) single-pass stress test fails to catch new gaps introduced by fix iterations, (4) narrator explained "what we have" but not "what good looks like" or "why this matters." |
 | v2.4 | 2026-05-15 | **Project archetype coverage (applied via Bob-on-Bob mini-build, 4 phases):** **Tier 1** — New Step 0.5 "Project Profile" routes the project through Appendix K addenda; new Appendix K "Project Profiles" with 15 archetypes (K1-K15: AI Chat, B2B Tool, RAG, Vertical SaaS, Agent, Background Jobs, E-commerce, Marketplace, Content/Community, Real-time, Mobile, Extension, Voice, ETL, SEO Site) — additive-only addenda that never override core protocol. Three new architecture patterns: G11 RAG Pipeline (chunking/embedding/reranker/eval), G12 Agent / Tool-Use Loop (tool contracts, max-step bound, tool eval), G13 Background Job Architecture (orchestrator choice, idempotency, dead letter). **Tier 2** — Architecture Contract (Step 3a) gained accessibility posture, internationalization posture, and compliance scope (GDPR/CCPA/HIPAA/SOC2/PCI/None). Build Manifest (Step 5b) gained success-metric instrumentation map (every Product Spec success metric must map to an analytics event + build phase + dashboard, closing the "metric defined but never wired" gap). **Tier 3** — Five additional architecture patterns for less common archetypes that may show up later: G14 Mobile App, G15 Browser Extension, G16 Real-time/Collaborative, G17 Voice/Audio Pipeline, G18 Marketplace/Two-Sided Platform. Pattern Library gains a maintenance note flagging that tool-specific advice in G11+ moves fast. | Self-audit against common 2026 Claude-Code project archetypes found three gaps: no routing layer for archetype-specific considerations; missing patterns for the most common AI-product archetypes (RAG, Agents, Jobs); a11y/i18n/compliance treated as implicit; success metrics defined in Product Spec but never instrumented during build. |
 
 ---
@@ -2196,5 +2330,5 @@ When the human says "update the build protocol based on recent projects," Claude
 
 ---
 
-*Build Protocol v2.4 — 2026-05-15*
+*Build Protocol v2.5 — 2026-05-15*
 *Derived from: Explain My Blood Test (931 commits), Do Later List (200K lines, 13 phases), Tax Auction (7 phases, 3 days), strategy-research framework*

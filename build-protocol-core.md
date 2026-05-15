@@ -79,12 +79,12 @@ Before starting, assess project complexity:
 
 0. **Intake** → 0a: Existing materials check → 0b: Material mapping → 0c: Accelerated start → `→ HG` *(skip if starting from scratch)*
 0.5. **Project Profile (v2.4)** → 0.5a: Classify against Appendix K archetypes → 0.5b: Pull addendum → 0.5c: Tag in Build Manifest → `→ HG`
-1. **Product Spec** → 1a: Draft (incl. success metrics, activation, non-goals, data classification) → 1b: Stress-test → 1c: Adversarial review → `→ HG`
+1. **Product Spec** → 1a-pre: Structured interview + Day-in-the-life (v2.5) → 1a: Draft (incl. success metrics, activation, non-goals, data classification) → 1b: Stress-test → 1c: Adversarial review → 1d: Stability loop (v2.5) → `→ HG`
 2. **Behavioral Core** (AI only) → 2a: Draft → 2b: Stress-test → 2c: Adversarial review → 2d: Eval harness → `→ HG` — use `templates/behavioral-core.md` and `templates/eval-set.md`
 3. **Architecture Contract** → 3a: Draft (incl. threat model, observability plan, rollback posture, cost guardrail, a11y/i18n/compliance posture v2.4) → 3b: Adversarial review → `→ HG`
 4. **Domain Specs** → 4a: Identify subsystems → 4b: Write + machine-readable `contracts/` + cross-reference → 4c: Adversarial review → `→ HG`
-5. **Build Manifest** → 5a: Define phases (incl. rollback plan per phase) + capability matrix → 5b: Initialize manifest (incl. progress tracker v2.3 + success-metric instrumentation map v2.4) → `→ HG`
-6. **Project Setup** → 6a: CLAUDE.md → 6b: Hooks (DEFAULT ON — opt out explicitly) → 6c: Repo init → `→ HG`
+5. **Build Manifest** → 5a: Define phases (incl. rollback plan per phase) + capability matrix → 5b: Initialize manifest (auto-advance v2.5) → `→ HG` *(at 5a only)*
+6. **Project Setup** → 6a: CLAUDE.md → 6b: Hooks (DEFAULT ON — opt out explicitly) → 6c: Repo init (auto-advance v2.5) → `→ HG` *(at 6a/6b only)*
 7+. **Build Phases** → For each phase: [N]a: Build → [N]b: Verify (use `templates/phase-report.md` — incl. AI eval results + cost guardrail) → [N]c: Reconcile → `→ HG`
 N+1. **Hardening** → Security → Adversarial/Abuse → Integration Seam → Data Integrity → Spec-Code → Fix *(fresh session per audit)*
 N+2. **Learning Extraction** → Process review → Update artifacts
@@ -183,7 +183,7 @@ If Tier 2-3 skipped during build → MUST run at hardening.
 
 ## TEMPLATES & REFERENCES
 
-- **Narration Protocol (v2.3):** §11 in full protocol — Preamble Template, Checkpoint Summary, Journey Map, 10 narration rules. Narrator Mode ON by default for NEW mode.
+- **Narration Protocol (v2.3 + v2.5):** §11 in full protocol — Preamble Template, Checkpoint Summary (incl. "💎 Why this matters"), Journey Map, 10 narration rules. **§11.7 Quality Bar Templates** define what "done" looks like per artifact with strong/weak examples. **§11.8** mandates value narration. **§11.9 Confusion-Catch Phrases** lists specific signals + response template. Narrator Mode ON by default for NEW mode.
 - **Glossary (v2.3):** Appendix J in full protocol — plain-English definitions for all jargon.
 - **Project Profiles (v2.4):** Appendix K in full protocol — archetype lookup (K1-K15) for tailoring the protocol to your product type. Pulled in by Step 0.5.
 - **Architecture Patterns (v2.4 additions):** G11 RAG Pipeline · G12 Agent / Tool-Use Loop · G13 Background Job Architecture · G14 Mobile App · G15 Browser Extension · G16 Real-time / Collaborative · G17 Voice / Audio Pipeline · G18 Marketplace.
@@ -198,4 +198,4 @@ If Tier 2-3 skipped during build → MUST run at hardening.
 
 ---
 
-*Core Reference for Build Protocol v2.4 — 2026-05-15*
+*Core Reference for Build Protocol v2.5 — 2026-05-15*

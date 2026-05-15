@@ -35,4 +35,4 @@ case-studies/               ← Lessons from past projects
 
 ## Current Version
 
-v2.4 — 2026-05-15
+v2.5 — 2026-05-15
