@@ -30,6 +30,16 @@ A systematic protocol for building, auditing, and evolving products with Claude 
 
 If the user invokes the skill with an argument (e.g., `/bob NEW`, `/bob AUDIT`, `/bob EVOLVE`), skip the mode menu and jump straight to that mode. If no argument, follow the protocol's default flow (Journey Map for first-time users, mode menu otherwise).
 
+## Updating Bob
+
+If the user says **"update bob"**, **"/bob update"**, or any equivalent phrasing requesting an update of the Bob protocol itself, run:
+
+```bash
+cd ~/tools/bob-the-builder && git pull
+```
+
+Report what changed (paraphrase the last few commit messages). The skill is a symlink into that repo, so the update takes effect immediately — no re-install or re-symlink needed.
+
 ## Working directory awareness
 
 The user often invokes this skill from a *different* project directory than `bob-the-builder/` itself. That is intentional and expected. The protocol files always live at the absolute paths above. The *target project* — the thing being built / audited / evolved — is the current working directory. Do not confuse the two.

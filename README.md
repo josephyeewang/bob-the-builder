@@ -6,7 +6,7 @@
 
 ## What is this
 
-- A Claude Code **skill** — type `/bob` and it walks Claude through building real products properly
+- A Claude Code **skill** — type `/bob` and it guides you in Claude to build real products properly
 - Forces Claude through a clear sequence: spec → design → build → audit
 - Install once → type `/bob` in any project
 - **Made by a non-technical product person who just wanted it to work** — plain language, no jargon, no bloat
@@ -15,10 +15,9 @@
 
 ## Who this is for
 
-**You'll get value from Bob if:**
 - You're **not an engineer** but you want to **ship real products**, not just play with prototypes
-- You use Claude Code (or want to) but you've watched it go in circles
-- You'd rather have a structured conversation than try to "be a better prompter"
+- You use Claude Code (or want to) but Claude hallucinates or produces tons of errors
+- You'd rather be guided step by step instead of "try to be a better prompter"
 
 ---
 
@@ -31,7 +30,7 @@
 - **Class-Level Fixes** — bug in one place? Bob audits every similar pattern, not just the symptom
 - **Pre-Ship Security Review** — five separate audits before you call it done
 - **Living Decision Log** — every non-obvious choice recorded with the why
-- **3 Modes for Any Stage** — NEW (build from scratch) / AUDIT (assess what you have) / EVOLVE (extend what's working)
+- **3 Modes** — NEW (build) / AUDIT (assess) / EVOLVE (extend)
 
 ---
 
@@ -41,7 +40,7 @@
 
 | Without Bob | With Bob |
 | --- | --- |
-| Claude builds, you discover halfway through it's the wrong thing | Spec gets locked in **before** any code happens |
+| Claude guesses what to build | Spec gets locked in **before** any code happens |
 | Claude forgets things between sessions | A `build-manifest.md` tracks where you are |
 | You ask for feature A, get features A through G | Explicit "in scope / out of scope" at every phase |
 | Tests pass, then it breaks in production | Five separate security and integrity audits before ship |
@@ -61,35 +60,42 @@
 
 ---
 
-## How to use it — the fast path (`/bob` from anywhere)
+## How to use it
 
-**Prerequisite: install Claude Code first.** Free at [claude.com/claude-code](https://claude.com/claude-code).
+### Step 0: Install Claude Code
 
-**One-time setup.** Open Terminal and paste:
+Free at [claude.com/claude-code](https://claude.com/claude-code). Bob runs inside it.
+
+### Step 1: One-time setup
+
+Open Terminal and paste:
 
 ```bash
 mkdir -p ~/tools && cd ~/tools && git clone https://github.com/josephyeewang/bob-the-builder.git && mkdir -p ~/.claude/skills && ln -s ~/tools/bob-the-builder/skill ~/.claude/skills/bob
 ```
 
-**What that did:** registered Bob as a Claude Code skill. `/bob` now works in any project on this machine.
+*What that did:* registered Bob as a Claude Code skill on your machine.
+*Verify:* open Claude Code in any folder, type `/help`, look for `bob` in the skill list.
 
-**Verify it worked.** Open Claude Code in any folder, type `/help`, and look for `bob` in the skill list.
+### Step 2: Use it
 
-**Use it.** Open Claude Code in any project folder and type:
+Open Claude Code in any project folder and type:
 
 ```
 /bob
 ```
 
-Claude will show the mode menu (NEW / AUDIT / EVOLVE) and walk you from there.
+Bob shows the mode menu (NEW / AUDIT / EVOLVE) and walks you from there.
 
-**Updating Bob later:**
+### Step 3: Update Bob later
 
-```bash
-cd ~/tools/bob-the-builder && git pull
+In any Claude Code session, just type:
+
+```
+update bob
 ```
 
-That's it — the skill picks up the update automatically.
+Claude will pull the latest version. That's it.
 
 ---
 
@@ -98,13 +104,13 @@ That's it — the skill picks up the update automatically.
 - **Install:** once per machine
 - **Type `/bob`:** once at the start of each new project
 - **After that:** every session auto-resumes — just say "let's continue"
-- **Updates (optional):** `cd ~/tools/bob-the-builder && git pull` whenever
+- **Updates (optional):** type `update bob` to Claude whenever
 
 ---
 
 ## 3 most common things to try
 
-### 1. Build something new from scratch
+### 1. Build something new from scratch — you have an idea, no code yet
 
 ```
 /bob NEW
@@ -112,9 +118,7 @@ That's it — the skill picks up the update automatically.
 
 Or just `/bob` and pick **A) NEW** when Bob shows the menu. Bob will ask what you're building.
 
-**When to use:** you have an idea, no code yet.
-
-### 2. Audit something you've been building messily
+### 2. Audit something you've been "vibe coding" — clean up before going further
 
 ```
 /bob AUDIT
@@ -122,17 +126,13 @@ Or just `/bob` and pick **A) NEW** when Bob shows the menu. Bob will ask what yo
 
 Or `/bob` and pick **B) AUDIT**. Bob inventories what you've got, maps it to its 5-doc hierarchy, finds gaps, and proposes a remediation plan.
 
-**When to use:** you've been "vibe coding" and want to clean up before going further.
-
-### 3. Add a feature to an existing project
+### 3. Add a feature to an existing project — extend what's already working
 
 ```
 /bob EVOLVE
 ```
 
 Or `/bob` and pick **C) EVOLVE**. Bob classifies the change (Small / Medium / Large) and runs the right level of discipline for it.
-
-**When to use:** you have something working and want to extend it.
 
 ---
 
@@ -149,10 +149,10 @@ Narrator Mode is on by default — Bob explains each step in plain language and 
 
 ## Fallback — no install needed
 
-If you can't install the skill, paste this into Claude Code in your project folder:
+If you can't run Step 1 above, paste this into Claude Code in your project folder:
 
 ```
-Read ~/tools/bob-the-builder/build-protocol.md and start. Clone from https://github.com/josephyeewang/bob-the-builder if missing. I want to: [build / audit / add a feature]. [One sentence.]
+Clone https://github.com/josephyeewang/bob-the-builder to ~/tools/bob-the-builder, then read its build-protocol.md and start. I want to: [build / audit / add a feature]. [One sentence on what.]
 ```
 
 ---
@@ -168,15 +168,9 @@ Read ~/tools/bob-the-builder/build-protocol.md and start. Clone from https://git
 
 ## Creator
 
-**[Joe Wang](https://joe.wang)** — former McKinsey consultant, Fifth Wall venture capitalist, Clari SaaS exec. Not an engineer. Just wanted something that worked.
+**[Joe Wang](https://joe.wang)** — business guy who just wanted something that worked. Former McKinsey consultant, Fifth Wall venture capitalist, Clari SaaS exec. Not an engineer.
 
-**Bob's lessons came from:**
-- AI blood-test interpreter — 931 commits taught me what "no spec" feels like
-- Personal task-management app with SMS+AI — taught me what "spec drift" feels like
-- Tax auction analysis tool — proved good specs enable 3-day builds
-- Strategy-research framework — proved Behavioral Cores are reusable
-
-If Bob helps you ship something, that's the whole point.
+If Bob helps you ship something, shoot me an email at [joe@joe.wang](mailto:joe@joe.wang) — I'd love to see it.
 
 ---
 
