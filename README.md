@@ -93,16 +93,12 @@ That's it — the skill picks up the update automatically.
 
 ---
 
-## How often do I have to invoke Bob?
+## How often do I invoke Bob?
 
-Short answer: **install once per machine**, then **type `/bob` once per project**. After that, Claude auto-resumes every session — no command needed.
-
-| What | How often |
-|---|---|
-| Run the one-liner above (clone + symlink) | Once per machine |
-| Type `/bob` in a new project | Once at the start of that project — Bob takes it from there |
-| Open Claude Code in an existing Bob project | Every session. Claude reads the project's `CLAUDE.md` automatically; the protocol is already loaded. Just say "let's continue." |
-| `cd ~/tools/bob-the-builder && git pull` | Whenever you want updates. Optional. |
+- **Install:** once per machine
+- **Type `/bob`:** once at the start of each new project
+- **After that:** every session auto-resumes — just say "let's continue"
+- **Updates (optional):** `cd ~/tools/bob-the-builder && git pull` whenever
 
 ---
 
@@ -153,18 +149,11 @@ Narrator Mode is on by default — Bob explains each step in plain language and 
 
 ## Fallback — no install needed
 
-If you can't install the skill, open Claude Code in your project folder and paste this:
+If you can't install the skill, paste this into Claude Code in your project folder:
 
 ```
-Read ~/tools/bob-the-builder/build-protocol.md and start.
-
-If the repo isn't on this machine, first clone it:
-git clone https://github.com/josephyeewang/bob-the-builder.git ~/tools/bob-the-builder
-
-I want to: [build a new product / audit an existing one / add a feature]. [One sentence on what.]
+Read ~/tools/bob-the-builder/build-protocol.md and start. Clone from https://github.com/josephyeewang/bob-the-builder if missing. I want to: [build / audit / add a feature]. [One sentence.]
 ```
-
-Bob will load the protocol, do the silent project sense, and ask you to pick a mode — same as the `/bob` flow, just without the slash command.
 
 ---
 
