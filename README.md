@@ -2,11 +2,13 @@
 
 **Stop Claude from going off the rails when you try to build a real product with it.**
 
+*(Specifically, [Claude Code](https://claude.com/claude-code) — Anthropic's coding assistant that runs in your terminal. Like ChatGPT, but it can read your files, write code, and run commands. Bob plugs into it.)*
+
 ---
 
 ## What is this
 
-- A structured playbook you hand to Claude Code
+- A Claude Code **skill** — a structured guide Claude loads when you type `/bob` — that turns it into a disciplined product-build collaborator
 - Forces Claude through a clear sequence: spec → design → build → audit
 - Install once → type `/bob` in any project (or use the no-install paste-this fallback below)
 - **Made by a non-technical product person who just wanted it to work** — plain language, no jargon, no bloat
@@ -53,7 +55,21 @@ After working through Bob with Claude, you walk away with:
 
 ---
 
+## "But couldn't I just…"
+
+The three things people ask when they hear about Bob:
+
+| Alternative | The honest answer |
+| --- | --- |
+| **Just write a better prompt.** | A prompt is a paragraph. Bob is a 2,400-line versioned protocol baked from real shipped products and lessons learned the hard way. By the time your "better prompt" has every guardrail Bob has, you've reinvented Bob — minus the field-testing. |
+| **Use Cursor / Windsurf rules.** | Those govern code style — semicolons, formatting, framework idioms. Bob governs *what* to build: spec, behavior, scope, success metrics, decision log. It's the product-thinking layer, not the code-style layer. They're complementary, not substitutes. |
+| **Just tell Claude to be more disciplined.** | Tried it. Claude agrees, then drifts ten messages later. Bob installs as a first-party Claude Code skill with explicit pause-and-confirm gates the model can't quietly skip. Not a polite suggestion — a contract Claude follows. |
+
+---
+
 ## How to use it — the fast path (`/bob` from anywhere)
+
+**Prerequisite: install Claude Code first.** Get it at [claude.com/claude-code](https://claude.com/claude-code). It's free to install. (If you've used Claude in your browser before, the CLI is the same model, just running in your terminal where it can actually edit files.)
 
 **One-time setup.** Open Terminal and paste:
 
@@ -62,6 +78,14 @@ mkdir -p ~/tools && cd ~/tools && git clone https://github.com/josephyeewang/bob
 ```
 
 **What that did:** Cloned Bob to `~/tools/bob-the-builder/` and registered it as a Claude Code skill called `bob`. Now `/bob` works in every project on this machine.
+
+**Verify it worked.** Open Claude Code in any folder. Type `/help` (or check the skill list shown at session start) — you should see `bob` listed as an available skill. If yes, you're done. If not, see "If something errored" below.
+
+**If something errored.** The most common issues, with the fix you can paste back into Terminal:
+
+- *"`directory '/Users/.../bob-the-builder' already exists`"* — you've already cloned it before. To update instead: `cd ~/tools/bob-the-builder && git pull`
+- *"`File exists`" on the symlink line* — an old `bob` skill is already registered. Refresh it: `rm ~/.claude/skills/bob && ln -s ~/tools/bob-the-builder/skill ~/.claude/skills/bob`
+- *Anything else* — paste the error into Claude Code itself: "I ran the Bob install one-liner and got this error: [paste]. Can you fix it?" Claude will debug shell errors directly.
 
 **Use it.** Open Claude Code in any project folder and type:
 
@@ -78,10 +102,6 @@ cd ~/tools/bob-the-builder && git pull
 ```
 
 No need to re-symlink — the skill is a live pointer to the repo.
-
----
-
-**Don't have Claude Code yet?** Get it at [claude.com/claude-code](https://claude.com/claude-code) first.
 
 ---
 
