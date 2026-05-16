@@ -6,16 +6,16 @@
 
 ## What is this
 
-- A Claude Code **skill** — type `/bob` and it guides you in Claude to build real products properly
+- A Claude Code skill — type `/bob` and it guides you in Claude to build real products properly
 - Forces Claude through a clear sequence: spec → design → build → audit
 - Install once → type `/bob` in any project
-- **Made by a non-technical product person who just wanted it to work** — plain language, no jargon, no bloat
+- Made by a non-technical product person who just wanted it to work — plain language, no jargon, no bloat
 
 ---
 
 ## Who this is for
 
-- You're **not an engineer** but you want to **ship real products**, not just play with prototypes
+- You're not an engineer but you want to ship real products, not just play with prototypes
 - You use Claude Code (or want to) but Claude hallucinates or produces tons of errors
 - You'd rather be guided step by step instead of "try to be a better prompter"
 
