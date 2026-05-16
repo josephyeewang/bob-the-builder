@@ -1,6 +1,6 @@
 # Bob the Builder
 
-**Stop Claude from going off the rails when you try to build a real product with it.**
+**An automated step-by-step guide that helps you build real products in Claude Code — made for non-engineers.**
 
 ---
 
