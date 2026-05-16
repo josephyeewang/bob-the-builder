@@ -54,7 +54,7 @@
 
 | Alternative | The honest answer |
 | --- | --- |
-| **Just write a better prompt.** | A prompt is a paragraph. Bob is a 2,400-line versioned protocol baked from real shipped products and lessons learned the hard way. |
+| **Just write a better prompt.** | A prompt is a paragraph. Bob is a 2,600-line versioned protocol baked from real shipped products and lessons learned the hard way. |
 | **Use Cursor / Windsurf rules.** | Those govern code style — semicolons, formatting, framework idioms. Bob governs *what* to build: spec, behavior, scope, success metrics, decision log. It's the product-thinking layer, not the code-style layer. They're complementary, not substitutes. |
 | **Just tell Claude to be more disciplined.** | Tried it. Claude agrees, then drifts ten messages later. Bob installs as a first-party Claude Code skill with explicit pause-and-confirm gates the model can't quietly skip. |
 

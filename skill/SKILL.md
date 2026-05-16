@@ -10,9 +10,9 @@ A systematic protocol for building, auditing, and evolving products with Claude 
 
 ## What to do when this skill is invoked
 
-1. **Read the core protocol first**: `/Users/jowang/Desktop/bob-the-builder/build-protocol-core.md`. That file is the compact reference and contains the mode menu (NEW / AUDIT / EVOLVE), complexity assessment, document hierarchy, and rules.
+1. **Read the core protocol first**: `~/.claude/skills/bob/../build-protocol-core.md`. That file is the compact reference and contains the mode menu (NEW / AUDIT / EVOLVE), complexity assessment, document hierarchy, and rules. (The skill at `~/.claude/skills/bob` is a symlink to wherever the user cloned Bob — `..` from there resolves to the repo root regardless of install location.)
 
-2. **Then follow the protocol's own instructions.** It tells you what to do next — including when to load the full reference at `/Users/jowang/Desktop/bob-the-builder/build-protocol.md` for templates, appendices, and architecture patterns.
+2. **Then follow the protocol's own instructions.** It tells you what to do next — including when to load the full reference at `~/.claude/skills/bob/../build-protocol.md` for templates, appendices, and architecture patterns.
 
 3. **Streamlined startup (v2.9) — ONLY ONE question at startup: which mode.** Do all of this in ONE turn — never as preliminary yes/no questions:
    - Silently detect state (manifest exists? git status? what kind of project is this?)
@@ -35,14 +35,14 @@ If the user invokes the skill with an argument (e.g., `/bob NEW`, `/bob AUDIT`, 
 If the user says **"update bob"**, **"/bob update"**, or any equivalent phrasing requesting an update of the Bob protocol itself, run:
 
 ```bash
-cd ~/tools/bob-the-builder && git pull
+cd "$(dirname "$(readlink ~/.claude/skills/bob)")" && git pull
 ```
 
-Report what changed (paraphrase the last few commit messages). The skill is a symlink into that repo, so the update takes effect immediately — no re-install or re-symlink needed.
+This resolves the symlink to find Bob's actual install location (works regardless of where the user cloned it), then runs `git pull`. Report what changed (paraphrase the last few commit messages). The skill is a symlink into that repo, so the update takes effect immediately — no re-install or re-symlink needed.
 
 ## Working directory awareness
 
-The user often invokes this skill from a *different* project directory than `bob-the-builder/` itself. That is intentional and expected. The protocol files always live at the absolute paths above. The *target project* — the thing being built / audited / evolved — is the current working directory. Do not confuse the two.
+The user often invokes this skill from a *different* project directory than `bob-the-builder/` itself. That is intentional and expected. The protocol files always resolve through the skill symlink (see the path form in step 1 above). The *target project* — the thing being built / audited / evolved — is the current working directory. Do not confuse the two.
 
 ## Key rules (also enforced inside the protocol)
 
