@@ -1,6 +1,6 @@
 # Bob the Builder
 
-**An automated step-by-step guide that helps you build real products in Claude Code — made for non-engineers.**
+**A skill that guides you step-by-step to build real products in Claude Code. Made for non-engineers.**
 
 ---
 
