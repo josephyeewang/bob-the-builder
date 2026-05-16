@@ -6,7 +6,17 @@
 
 ## MODES
 
-When the user references this protocol without specifying a mode, FIRST check whether this is a first-time user (no `docs/build-manifest.md` yet). For first-time users, show the Journey Map (full protocol §11.4) before mode selection. For returning users, jump straight to the menu.
+**Streamlined startup (v2.9).** When the user invokes this protocol without specifying a mode, do all of this in ONE turn — never ask preliminary yes/no questions:
+
+1. **Silently detect state.** Check whether `docs/build-manifest.md` exists (returning user vs first-time). Run `git status` if it's a git repo. Skim top-level files (package.json, framework configs, CLAUDE.md, recent commits) to infer what this project is.
+2. **Tentatively classify complexity** (Light / Standard / Heavy) from those signals — propose, don't ask.
+3. **Show ONE narration block** containing: what you observed about the project, the tentative complexity with one-line reasoning, and any housekeeping flags worth knowing before picking a mode (e.g., uncommitted work, missing manifest, conflicting docs).
+4. **Present the menu and ask the single question: which mode?** Nothing else.
+
+**Defaults that are NEVER asked about:**
+- **Narrator Mode is ON.** Don't announce it as a status line, don't ask to confirm. Just be in it. User can disable at any point with "terse mode."
+- **Journey Map** (§11.4 of full protocol) is shown only AFTER mode selection — and only when the chosen mode is NEW for a first-time user. It's not a precondition for picking a mode.
+- **First-time vs. returning detection** is silent (filesystem check), never a question.
 
 Present this menu:
 
@@ -173,13 +183,12 @@ If Tier 2-3 skipped during build → MUST run at hardening.
 
 ## SESSION START PROTOCOL
 
-1. Read CLAUDE.md
-2. Check: does `docs/build-manifest.md` exist?
-   - **NO → first-time user.** Show the Journey Map (§11.4 of full protocol), announce "Narrator Mode is ON by default — say 'terse mode' anytime to switch", then proceed to Mode Selection.
-   - **YES → returning user.** Read it, identify current phase and status. Read relevant project memory.
-3. State (Pulse Report format): "We're at Step [X]. Last session completed [Y]. Next up is [Z]. Progress: [bar]."
-4. If resuming a build phase: re-read the relevant domain spec
-5. If you keep handoff notes across sessions/machines (e.g., a synced folder pattern), check for one and surface any open questions first.
+1. Read CLAUDE.md silently.
+2. Check `docs/build-manifest.md`:
+   - **NO → first-time user / fresh project.** Follow the Streamlined Startup in the MODES section above (silent detection → one narration block → single mode question). Show the Journey Map only AFTER NEW mode is selected.
+   - **YES → returning user.** Read it, identify current phase and status. Read relevant project memory. State a Pulse Report: "We're at Step [X]. Last session completed [Y]. Next up is [Z]. Progress: [bar]." Narrator Mode is silently ON — do not announce it.
+3. If resuming a build phase: re-read the relevant domain spec.
+4. If you keep handoff notes across sessions/machines (e.g., a synced folder pattern), check for one and surface any open questions first.
 
 ---
 

@@ -12,7 +12,9 @@ Tell Claude Code to read `build-protocol.md`. For first-time users, Claude will 
 - **AUDIT** — Assess an existing product
 - **EVOLVE** — Add features or make changes
 
-**Narrator Mode (v2.3) is ON by default.** Claude announces what's about to happen at every step, explains jargon inline, and summarizes progress after each completion. Say "terse mode" anytime to switch to a quieter pace.
+**Narrator Mode (v2.3) is silently ON by default.** Claude announces what's about to happen at every step, explains jargon inline, and summarizes progress after each completion. Claude does NOT announce that narrator mode is on at session start — it's the default, just be in it. Say "terse mode" anytime to switch to a quieter pace.
+
+**Streamlined startup (v2.9).** When the skill is invoked, Claude asks exactly ONE question — *which mode (NEW / AUDIT / EVOLVE)*. Everything else (first-time detection, project sensing, complexity classification, housekeeping flags) is silent or proposed in a single narration block. No "is this the first time?" / "narrator on or terse?" / "does this map look right?" gates.
 
 For daily use, load `build-protocol-core.md` (compact reference). Load `build-protocol.md` (full reference) when you need templates, appendices, or architecture patterns.
 
@@ -35,4 +37,4 @@ README.md                   ← Public-facing project overview
 
 ## Current Version
 
-v2.8 — 2026-05-15
+v2.9 — 2026-05-15

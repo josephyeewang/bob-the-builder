@@ -1,4 +1,4 @@
-# BUILD PROTOCOL v2.8
+# BUILD PROTOCOL v2.9
 
 > A systematic framework for building, auditing, and evolving products with Claude Code.
 > Created: 2026-04-15. Last updated: 2026-05-15. Owner: Joe Wang.
@@ -55,11 +55,13 @@ Claude will then ask which mode fits your situation:
 
 ---
 
-**When the user references this file without specifying a mode, Claude MUST:**
+**When the user references this file without specifying a mode, Claude MUST (v2.9 streamlined startup):**
 
-1. **Check if this is a first-time user** — does `docs/build-manifest.md` exist? If NO, this is a first-time user.
-2. **For first-time users:** Show the Journey Map (§11.4) FIRST, then the menu below. Confirm: "Does this look like what you're trying to do?" before proceeding to mode selection. (Narrator Mode is ON by default per §11.)
-3. **For returning users:** Jump straight to the menu.
+1. **Silently detect state.** Check whether `docs/build-manifest.md` exists. Run `git status` if it's a git repo. Skim top-level files (package.json, framework configs, CLAUDE.md, recent commits) to infer project type and stage. **Never ask "is this the first time?" — it's a filesystem check.**
+2. **Tentatively classify complexity** (Light / Standard / Heavy — see Complexity Assessment) from those signals. Propose with one-line reasoning, don't ask.
+3. **Show ONE narration block** with: what you observed, the tentative complexity, and any housekeeping flags worth knowing before picking a mode (dirty git tree, missing manifest, conflicting docs, etc.). Then present the menu below and ask the single question: **which mode?**
+4. **Narrator Mode is silently ON.** Do NOT announce it as a status line. Do NOT ask the user to confirm or choose terse vs narrator. Just be in narrator mode. User can switch at any point by saying "terse mode."
+5. **Journey Map (§11.4) is shown only AFTER mode selection** — and only when the chosen mode is NEW for a first-time user. It is NOT a precondition for picking a mode, and never gates the conversation with a "does this look right?" confirmation.
 
 Present this menu and wait for selection:
 
@@ -563,11 +565,11 @@ The rest of this protocol tells Claude *what to produce*. This section tells Cla
 
 #### 11.5 — Session Open Checklist (every NEW session)
 
-Before doing anything else:
+Before doing anything else (v2.9 streamlined):
 
-1. Check: is there a `docs/build-manifest.md`? **Yes** → returning user, condensed narration, jump to §11.6. **No** → first-time user, full narration, show Journey Map.
-2. State narrator status: "Narrator Mode is on by default. Say 'terse mode' anytime to switch."
-3. For returning users: state where we are in the Journey Map and what's next.
+1. **Silently** check whether `docs/build-manifest.md` exists. **Yes** → returning user, condensed narration per §11.6. **No** → first-time user; show Journey Map (§11.4) AFTER mode selection, not before.
+2. **Do NOT announce narrator status.** Narrator Mode is silently ON. The user already knows — it's the default. Announcing it on every session is friction, not service. User can opt out with "terse mode" at any time.
+3. For returning users: state where we are in the Journey Map and what's next, in one Pulse Report line.
 
 #### 11.6 — Condensed narration for returning users
 
@@ -1721,20 +1723,20 @@ Before starting Step 1 (Product Spec):
 
 *What Claude Code should do at the beginning of every session on a project that uses this protocol.*
 
-**Step 0 — First-time vs. resuming check (v2.3):**
+**Step 0 — First-time vs. resuming check (v2.3, revised v2.9):**
 
-1. Read CLAUDE.md
-2. Check: does `docs/build-manifest.md` exist?
+1. Read CLAUDE.md silently.
+2. Check: does `docs/build-manifest.md` exist? **Silent filesystem check — never asked as a question.**
    - **NO → this is a first-time user / fresh project.** Switch to first-time-user path below.
    - **YES → this is a returning user.** Switch to resuming path below.
 
-**First-time-user path (no Build Manifest yet):**
+**First-time-user path (no Build Manifest yet) — v2.9 streamlined:**
 
-1. Announce: "Narrator Mode is ON by default per §11. Say 'terse mode' anytime to switch."
-2. Show the Journey Map (§11.4) so the user sees the full shape of what's coming.
-3. Confirm: "Does this look like what you're trying to do?"
-4. Then present the Mode Selection menu (Quick Start section).
-5. Once mode is selected, enter the appropriate Part (II / III / IV) at Step 0 / A1 / E1 — using the Preamble Template (§11.2) at every step entry.
+1. **Do NOT announce narrator status.** It's silently ON. The user knows.
+2. **Sense the project silently** (git status, top-level files, recent commits) and **propose a tentative complexity** classification.
+3. **Show ONE narration block** with: what you observed about the project, the tentative complexity with one-line reasoning, and any housekeeping flags (dirty git tree, etc.). Then present the Mode Selection menu and ask the single question: which mode?
+4. After mode is selected, IF the chosen mode is NEW, show the Journey Map (§11.4) once — as context-setting for the road ahead, not as a confirmation gate. For AUDIT or EVOLVE, skip the Journey Map entirely and proceed.
+5. Enter the appropriate Part (II / III / IV) at Step 0 / A1 / E1 — using the Preamble Template (§11.2) at every step entry.
 
 **Resuming-user path (Build Manifest exists):**
 
@@ -2293,6 +2295,7 @@ When the human says "update the build protocol based on recent projects," Claude
 
 | Version | Date | Changes | Triggered By |
 |---------|------|---------|-------------|
+| v2.9 | 2026-05-15 | **Streamlined startup + skill-based invocation.** (1) Bob now ships as a Claude Code skill (`skill/SKILL.md`) — typing `/bob` in any project loads the protocol; no more pasting long bootstrap prompts. README updated with one-liner install + symlink. (2) **Startup UX streamlined to a single question.** Removed preliminary "is this the first time?" question (silent filesystem check on `docs/build-manifest.md` instead). Removed narrator-status announcement / "narrator on or terse?" question (Narrator Mode is silently ON by default; user can opt out with "terse mode" any time). Removed Journey Map "does this look right?" confirmation gate (now shown only AFTER NEW mode is selected by a first-time user, as context-setting, not as a precondition for picking a mode). The new flow: silent state detection → one narration block with project sensing + tentative complexity + housekeeping flags → mode menu → single question (which mode?). Mirrored in `build-protocol-core.md` MODES + Session Start Protocol, `build-protocol.md` Quick Start + §11.5 + Appendix C, and `skill/SKILL.md`. | (1) `/bob` couldn't be invoked from other projects — required pointing Claude at the repo manually. (2) Live test in a real project showed the startup asked 3 yes/no questions (first-time? narrator? does-the-map-look-right?) before the only one that mattered (which mode?). Friction for the non-engineer user the protocol is supposed to serve. |
 | v2.8 | 2026-05-15 | **AUDIT mode now runs both audit types, scoped to built surface area.** Inserted new Step A7 "Hardening Audits" between A6 (Execute Remediation) and the renumbered A8 (Re-entry). A7 always runs — but instead of a binary feature-complete gate, it begins with **A7.0 Hardening Scope Map**: per-audit split of "in scope now" (what's built) vs. "deferred" (and which build phase to revisit). Human can override the scope. A7a–A7e then run the standard 5 hardening audits (Security → Adversarial/Abuse → Integration Seam → Data Integrity → Spec-Code) on in-scope items only, fresh session per audit. **A7f registers deferred items into the Build Manifest** as inherited hardening obligations on future phases, so partial hardening mid-build doesn't leak. CTM gains an `H` (hardened) badge. A7 is explicitly re-invocable any time during the build as new subsystems ship; full-scope hardening still runs at Step [N+1] before launch. Mirrored update in `build-protocol-core.md`. | (1) Confusion that MODE: AUDIT only ran the macro doc-hierarchy audit (A1–A6) and treated the 5 hardening audits as an optional follow-up. (2) Original v2.8 draft used a binary feature-complete gate that was too rigid — Joe flagged that real projects want to harden auth/seams/data flows for built subsystems mid-build without redoing the rest, and need a mechanism so deferred items aren't forgotten. |
 | v1.0 | 2026-04-15 | Initial creation. 3 modes (NEW/AUDIT/EVOLVE), 5-layer doc hierarchy, 13 Claude guardrails, 8 appendices including Phase Report Template and Architecture Patterns Library. | Analysis of prior personal projects (EMBT, DLL, Tax Auction, strategy-research project) |
 | v1.1 | 2026-04-15 | Hardened enforcement language: Global Spec Lock (FAIL matrix), behavior drift examples, Acceptance Gate, Critical Architecture Decision, mandatory Global Invariant Check, grep-based provider enforcement, Module Inventory as failure condition. | DLL 14-build-guide.md side-by-side comparison |

@@ -8,7 +8,7 @@
 
 - A structured playbook you hand to Claude Code
 - Forces Claude through a clear sequence: spec → design → build → audit
-- No install — you just point Claude at this repo
+- Install once → type `/bob` in any project (or use the no-install paste-this fallback below)
 - **Made by a non-technical product person who just wanted it to work** — plain language, no jargon, no bloat
 
 ---
@@ -53,9 +53,37 @@ After working through Bob with Claude, you walk away with:
 
 ---
 
-## How to use it — the fast path (one paste)
+## How to use it — the fast path (`/bob` from anywhere)
 
-Open Claude Code in the folder where you want your new project to live. Then paste this:
+**One-time setup.** Open Terminal and paste:
+
+```bash
+mkdir -p ~/tools && cd ~/tools && git clone https://github.com/josephyeewang/bob-the-builder.git && mkdir -p ~/.claude/skills && ln -s ~/tools/bob-the-builder/skill ~/.claude/skills/bob
+```
+
+**What that did:** Cloned Bob to `~/tools/bob-the-builder/` and registered it as a Claude Code skill called `bob`. Now `/bob` works in every project on this machine.
+
+**Use it.** Open Claude Code in any project folder and type:
+
+```
+/bob
+```
+
+Claude will show the mode menu (NEW / AUDIT / EVOLVE) and walk you from there. You can also say it in plain language — "use bob the builder to start a new project" — and Claude will trigger the skill.
+
+**Updating Bob later:**
+
+```bash
+cd ~/tools/bob-the-builder && git pull
+```
+
+No need to re-symlink — the skill is a live pointer to the repo.
+
+---
+
+## Fallback — the paste-this method (no install needed)
+
+If you can't install the skill (different machine, restricted setup, want to try before committing), open Claude Code in the folder where you want your project to live and paste this:
 
 ```
 Look at this repo: https://github.com/josephyeewang/bob-the-builder
