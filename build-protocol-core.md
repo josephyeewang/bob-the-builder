@@ -95,9 +95,11 @@ N+2. **Learning Extraction** → Process review → Update artifacts
 
 ## MODE: AUDIT — Step Sequence
 
-A1: Inventory → A2: Map to hierarchy → A3: Code-spec consistency → A4: Risk assessment → A5: Remediation plan → A6: Execute remediation → A7: Re-entry
+A1: Inventory → A2: Map to hierarchy → A3: Code-spec consistency → A4: Risk assessment → A5: Remediation plan → A6: Execute remediation → A7: Hardening audits (scoped) → A8: Re-entry
 
-**A7: Re-entry** — After remediation, Claude presents next-step options: resume building unbuilt capabilities (→ NEW mode Step 7), run hardening, or switch to EVOLVE for new features.
+**A7: Hardening Audits (scoped to built surface area)** — Always runs after remediation. A7.0 first produces a **Hardening Scope Map** that splits each of the 5 audits (Security / Adversarial-Abuse / Integration Seam / Data Integrity / Spec-Code) into "in scope now" (what's built) vs. "deferred" (with the build phase to revisit). Human can override the scope. A7a–A7e then run on in-scope items only, **fresh session per audit** (writer/reviewer pattern). A7f fixes critical findings and **registers deferred items into the Build Manifest** as inherited hardening obligations on future phases, so they're not forgotten. CTM gets an `H` badge on hardened capabilities. A7 can be re-invoked any time during the build as new subsystems ship; full-scope hardening still runs at Step [N+1] before launch.
+
+**A8: Re-entry** — After remediation + scoped hardening, Claude presents next-step options based on Build Manifest state: resume building unbuilt capabilities (→ NEW mode Step 7, with inherited hardening obligations attached to each phase), switch to EVOLVE for new features, or re-invoke A7 mid-build to re-scope.
 
 ---
 
@@ -202,4 +204,4 @@ If Tier 2-3 skipped during build → MUST run at hardening.
 
 ---
 
-*Core Reference for Build Protocol v2.7 — 2026-05-15*
+*Core Reference for Build Protocol v2.8 — 2026-05-15*

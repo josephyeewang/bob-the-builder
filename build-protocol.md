@@ -1,4 +1,4 @@
-# BUILD PROTOCOL v2.7
+# BUILD PROTOCOL v2.8
 
 > A systematic framework for building, auditing, and evolving products with Claude Code.
 > Created: 2026-04-15. Last updated: 2026-05-15. Owner: Joe Wang.
@@ -1443,13 +1443,69 @@ Follow the approved plan. For each remediation item, use the Na/Nb/Nc pattern:
 - **b:** Verify it's correct and consistent
 - **c:** Reconcile with other docs that might be affected
 
-### Step A7: Re-entry
+### Step A7: Hardening Audits (scoped to built surface area)
 
-After remediation is complete, the project is aligned to the Build Protocol. Claude presents the next-step options:
+After remediation, run the 5-audit hardening sequence (Security → Adversarial/Abuse → Integration Seam → Data Integrity → Spec-Code Consistency) — but **scoped to what's actually built**. This is the second meaning of "audit" in Bob: A1–A6 is the **macro** audit (does the project match the 5-doc hierarchy?); A7 is the **micro** audit (does the code itself hold up under adversarial review?).
 
-- **If the product has unbuilt capabilities** (identified in A3 as "in spec but not implemented"): "Your project is now aligned. There are [N] unbuilt capabilities. To continue building, I recommend creating a Build Manifest (Step 5) for the remaining work and resuming in NEW mode at Step 7 (Build Phases)."
-- **If the product is feature-complete but needs hardening**: "Remediation is done. The codebase would benefit from a hardening pass. Want to run the hardening audits (Security → Adversarial/Abuse → Integration Seam → Data Integrity → Spec-Code Consistency)?"
-- **If the product is stable and the user wants to add features**: "Your project is aligned. For new features or changes, use MODE: EVOLVE — start at E1."
+**Design principle: hardening isn't all-or-nothing.** A half-built product still has built subsystems that benefit from hardening *now* (especially auth, data integrity for shipped flows, and seams between built modules). What doesn't make sense is hardening unbuilt surface — that generates noise. A7 splits the work into **harden now** vs. **harden later** and writes the deferred items into the Build Manifest as concrete follow-ups tied to upcoming phases.
+
+**A7 can also be re-invoked any time.** During an active build, the user can return to MODE: AUDIT → A7 to re-scope and re-harden as new subsystems ship. The standard cadence (run all 5 at full scope after the final build phase, Step [N+1]) still applies as the final gate before launch.
+
+---
+
+**A7.0: Hardening Scope Map (always runs first)**
+
+Before any audit fires, Claude produces a scope map using A3 findings + the Capability Traceability Matrix + the Build Manifest's phase status:
+
+| Audit | In scope now (what's built) | Deferred (and why) | Defer to |
+|---|---|---|---|
+| A7a Security | _e.g., auth subsystem, task API endpoints_ | _e.g., payment webhooks — Stripe not wired yet_ | Phase 5 |
+| A7b Adversarial/Abuse | _user-facing capabilities currently shipped_ | _AI prompt-injection — eval harness not built_ | Phase 4 |
+| A7c Integration Seam | _seams between two built subsystems_ | _seams touching unbuilt subsystems_ | Phase varies |
+| A7d Data Integrity | _state machines of built features_ | _state machines of unbuilt features_ | Phase varies |
+| A7e Spec-Code | _capabilities marked "implemented" in CTM_ | _capabilities marked "in spec, not implemented"_ | Their build phase |
+
+Rules for what counts as "in scope now":
+- **A7a Security** — every public endpoint, auth flow, secret-handling path, or stored-data table that exists in code today
+- **A7b Adversarial/Abuse** — every user-facing capability the CTM marks as implemented (even if the surrounding product is incomplete)
+- **A7c Integration Seam** — every boundary where **both** sides are built. Skip seams where one side is stub/mock/unbuilt.
+- **A7d Data Integrity** — every state machine and data flow whose code exists end-to-end (input → store → retrieve)
+- **A7e Spec-Code** — only capabilities marked implemented in the CTM. Unbuilt ones have no code to compare against.
+
+`→ HG:` Present scope map. Human can override (move items in/out of scope) before audits run. This is where the user expresses intent like *"harden auth now even though it's not done yet — I want to know what's already broken"* or *"defer integration seam audit until Phase 6 lands."*
+
+---
+
+**A7a–A7e: Run audits on in-scope items only**
+
+Use the same playbooks as NEW mode Step [N+1] a–e — see those sections for the per-audit checklists. The only difference is scope: each audit explicitly states *"in scope: [list]"* and *"out of scope (deferred): [list]"* at the top of its findings, so nothing is silently skipped.
+
+1. **A7a: Security Audit** — see [N+1]a, scoped per A7.0
+2. **A7b: Adversarial & Abuse Audit** — see [N+1]b, scoped per A7.0
+3. **A7c: Integration Seam Audit** — see [N+1]c, scoped per A7.0
+4. **A7d: Data Integrity Audit** — see [N+1]d, scoped per A7.0
+5. **A7e: Spec-Code Consistency** — see [N+1]e, scoped per A7.0
+
+**Critical: Fresh session per audit.** Each of A7a–A7e MUST start in a new Claude Code session (writer/reviewer pattern — same rule as Step [N+1]). The session that ran A1–A6 is the "writer"; each hardening session is a clean-context "reviewer." Claude in the A6 session should hand off with: *"Remediation complete. Hardening scope map below. Start a new session for A7a (Security Audit) and paste: 'Read build-protocol.md, run AUDIT Step A7a on this project. Scope: [paste in-scope items from A7.0].'"*
+
+---
+
+**A7f: Fix & Defer Register**
+
+After all 5 audits return:
+1. **Fix** all approved critical + high items from in-scope findings (same as [N+1]f)
+2. **Register deferred items** in the Build Manifest. For each deferred audit row from A7.0, write an entry into the corresponding future build phase: *"Phase [X] hardening obligations inherited from AUDIT A7: [list]."* This prevents the deferred items from being forgotten — they become acceptance criteria for that phase's verification.
+3. **Mark CTM:** capabilities that passed hardening get an `H` status badge alongside their implementation status.
+
+`→ HG:` Hardening pass complete (for current scope). Deferred items locked into Build Manifest.
+
+### Step A8: Re-entry
+
+After remediation and scoped hardening are complete, the project is aligned to the Build Protocol. Claude presents the next-step options based on Build Manifest state:
+
+- **If unbuilt capabilities remain:** "Your project is aligned and the built surface is hardened. There are [N] unbuilt capabilities with [M] hardening obligations registered against them. To continue building, resume in NEW mode at Step 7 (Build Phases) — each phase will pick up its inherited hardening items at verification. A final full-scope hardening pass runs at Step [N+1] before launch."
+- **If the product is feature-complete:** "Your project is aligned and fully hardened. For new features or changes, use MODE: EVOLVE — start at E1."
+- **If the user wants to re-scope hardening mid-build:** "Re-invoke MODE: AUDIT → A7 anytime. The scope map will reflect new subsystems and let you harden them without redoing the rest."
 
 `→ HG:` Human chooses next action.
 
@@ -2237,6 +2293,7 @@ When the human says "update the build protocol based on recent projects," Claude
 
 | Version | Date | Changes | Triggered By |
 |---------|------|---------|-------------|
+| v2.8 | 2026-05-15 | **AUDIT mode now runs both audit types, scoped to built surface area.** Inserted new Step A7 "Hardening Audits" between A6 (Execute Remediation) and the renumbered A8 (Re-entry). A7 always runs — but instead of a binary feature-complete gate, it begins with **A7.0 Hardening Scope Map**: per-audit split of "in scope now" (what's built) vs. "deferred" (and which build phase to revisit). Human can override the scope. A7a–A7e then run the standard 5 hardening audits (Security → Adversarial/Abuse → Integration Seam → Data Integrity → Spec-Code) on in-scope items only, fresh session per audit. **A7f registers deferred items into the Build Manifest** as inherited hardening obligations on future phases, so partial hardening mid-build doesn't leak. CTM gains an `H` (hardened) badge. A7 is explicitly re-invocable any time during the build as new subsystems ship; full-scope hardening still runs at Step [N+1] before launch. Mirrored update in `build-protocol-core.md`. | (1) Confusion that MODE: AUDIT only ran the macro doc-hierarchy audit (A1–A6) and treated the 5 hardening audits as an optional follow-up. (2) Original v2.8 draft used a binary feature-complete gate that was too rigid — Joe flagged that real projects want to harden auth/seams/data flows for built subsystems mid-build without redoing the rest, and need a mechanism so deferred items aren't forgotten. |
 | v1.0 | 2026-04-15 | Initial creation. 3 modes (NEW/AUDIT/EVOLVE), 5-layer doc hierarchy, 13 Claude guardrails, 8 appendices including Phase Report Template and Architecture Patterns Library. | Analysis of prior personal projects (EMBT, DLL, Tax Auction, strategy-research project) |
 | v1.1 | 2026-04-15 | Hardened enforcement language: Global Spec Lock (FAIL matrix), behavior drift examples, Acceptance Gate, Critical Architecture Decision, mandatory Global Invariant Check, grep-based provider enforcement, Module Inventory as failure condition. | DLL 14-build-guide.md side-by-side comparison |
 | v1.2 | 2026-04-15 | Gap closure from self-test simulation: Capability Traceability Matrix, per-phase cross-cutting concern scan (integration seams, rate limits, abuse vectors, error propagation, auth gaps), experience testing, regression scenario specs, per-phase ChatGPT audit template, expanded hardening (5 audits: security + adversarial/abuse + integration seam + data integrity + spec-code consistency), phase-specific mandatory audit sections. | DLL audit findings (5 passes of edge cases/holes despite functional code) |
