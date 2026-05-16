@@ -81,109 +81,86 @@ No need to re-symlink — the skill is a live pointer to the repo.
 
 ---
 
-## Fallback — the paste-this method (no install needed)
-
-If you can't install the skill (different machine, restricted setup, want to try before committing), open Claude Code in the folder where you want your project to live and paste this:
-
-```
-Look at this repo: https://github.com/josephyeewang/bob-the-builder
-
-I want to build: [your idea in 2-3 sentences].
-
-If Bob is a good fit, please:
-1. Clone it to ~/tools/bob-the-builder/ (skip if it's already there)
-2. Read ~/tools/bob-the-builder/build-protocol.md to load the protocol
-3. Run ~/tools/bob-the-builder/scripts/bob-init.sh to scaffold a new project here
-4. Start MODE: NEW with Narrator Mode on
-5. Tell me where Bob lives so I can `git pull` for updates later
-
-If it's NOT a good fit, just say so and tell me why — no setup, no commitment.
-```
-
-That's it. Claude evaluates the repo against your idea, installs Bob if it fits, scaffolds a new project, and starts walking you through it.
-
 **Don't have Claude Code yet?** Get it at [claude.com/claude-code](https://claude.com/claude-code) first.
-
-**Heads up:** the first time Claude tries to clone outside your project folder, it may ask you to approve the action. That's normal — just say yes.
-
----
-
-## What's happening under the hood
-
-If you'd rather see each step (or the fast path ran into a permission issue), run it manually:
-
-### Step 1 — Get the protocol on your machine (one time)
-
-Open **Terminal** (search Spotlight on your Mac for "Terminal"). Paste:
-
-```bash
-mkdir -p ~/tools && cd ~/tools && git clone https://github.com/josephyeewang/bob-the-builder.git
-```
-
-**What that did:** Created a `tools` folder in your home directory and downloaded Bob. The protocol now lives at `~/tools/bob-the-builder/`. You'll never touch this folder — Claude reads from it.
-
-### Step 2 — Open Claude Code in your project folder
-
-Make a new folder for your project (or use an existing one). Open Claude Code in that folder.
-
-### Step 3 — Tell Claude to use Bob
-
-Paste this into Claude:
-
-```
-Read ~/tools/bob-the-builder/build-protocol.md and help me build a new product.
-Narrator Mode on — I've never used this before.
-
-The product I want to build: [one or two sentences about your idea]
-```
-
-Claude will show you the map, ask which mode fits, and guide you from there.
 
 ---
 
 ## How often do I have to invoke Bob?
 
-Short answer: **once per machine** (the clone), then **once per project** (the first time you start it). After that, **Claude auto-resumes** every time you open Claude Code in the project folder.
+Short answer: **install once per machine**, then **type `/bob` once per project**. After that, Claude auto-resumes every session — no command needed.
 
-| What | How often | Why |
-|---|---|---|
-| `git clone bob-the-builder` | Once per machine | The protocol lives at `~/tools/bob-the-builder/`. Updates land via `git pull`. |
-| Tell Claude "use Bob, build me X" | Once at the start of each new project | Kicks off the protocol. Claude runs the scaffold (`bob-init.sh`) and writes a project `CLAUDE.md` that references Bob. |
-| Open Claude Code in the project folder | Every session you work on it | Claude reads the project `CLAUDE.md` automatically. It contains a pointer back to Bob, so the protocol is loaded without you typing the long invocation again. Just say "let's continue" or "what's next." |
-| `git pull` in `~/tools/bob-the-builder` | When you want updates | Optional. Bob is updated as new lessons emerge. |
-
-**One-liner:** invoke Bob once to start a project; from then on, just open Claude Code in the project folder and resume.
+| What | How often |
+|---|---|
+| Run the one-liner above (clone + symlink) | Once per machine |
+| Type `/bob` in a new project | Once at the start of that project — Bob takes it from there |
+| Open Claude Code in an existing Bob project | Every session. Claude reads the project's `CLAUDE.md` automatically; the protocol is already loaded. Just say "let's continue." |
+| `cd ~/tools/bob-the-builder && git pull` | Whenever you want updates. Optional. |
 
 ---
 
 ## 3 most common things to try
 
+After the one-time install, in any project folder:
+
 ### Build something new from scratch
 
 ```
-Read ~/tools/bob-the-builder/build-protocol.md and start MODE: NEW.
-Narrator Mode on. I want to build: [your idea].
+/bob NEW
 ```
+
+Or just `/bob` and pick **A) NEW** when Bob shows the menu. Bob will ask what you're building.
 
 **When to use:** you have an idea, no code yet.
-
-### Add a feature to an existing project
-
-```
-Read ~/tools/bob-the-builder/build-protocol.md and start MODE: EVOLVE.
-I want to add this feature: [describe the change].
-```
-
-**When to use:** you have something working and want to extend it.
 
 ### Audit something you've been building messily
 
 ```
-Read ~/tools/bob-the-builder/build-protocol.md and start MODE: AUDIT.
-Help me figure out what state this project is actually in.
+/bob AUDIT
 ```
 
-**When to use:** you've been "vibe coding" and want to clean up.
+Or `/bob` and pick **B) AUDIT**. Bob inventories what you've got, maps it to its 5-doc hierarchy, finds gaps, and proposes a remediation plan.
+
+**When to use:** you've been "vibe coding" and want to clean up before going further.
+
+### Add a feature to an existing project
+
+```
+/bob EVOLVE
+```
+
+Or `/bob` and pick **C) EVOLVE**. Bob classifies the change (Small / Medium / Large) and runs the right level of discipline for it.
+
+**When to use:** you have something working and want to extend it.
+
+---
+
+## What happens when you type `/bob`
+
+So you don't fly blind, here's the exact startup:
+
+1. **Bob senses the project silently.** Does a Bob manifest exist? Is the git tree clean? What kind of project is this? (No questions asked — it just looks.)
+2. **Bob shows one short summary** — what it sees, a tentative complexity classification, and any housekeeping flags (e.g., uncommitted work).
+3. **Bob asks one question: which mode?** (NEW / AUDIT / EVOLVE.) That's the only thing you decide at startup.
+4. **You pick.** Bob takes it from there — gathering what it needs, narrating as it goes.
+
+Narrator Mode is on by default — Bob explains each step in plain language and summarizes after every completion. Say **"terse mode"** any time if you'd rather it be quieter.
+
+---
+
+## Fallback — no install needed
+
+If you can't install the skill (work machine you don't control, want to try before committing), open Claude Code in your project folder and paste this:
+
+```
+Read ~/tools/bob-the-builder/build-protocol.md and start.
+
+If the repo isn't on this machine, first clone it:
+git clone https://github.com/josephyeewang/bob-the-builder.git ~/tools/bob-the-builder
+
+I want to: [build a new product / audit an existing one / add a feature]. [One sentence on what.]
+```
+
+Bob will load the protocol, do the silent project sense, and ask you to pick a mode — same as the `/bob` flow, just without the slash command.
 
 ---
 
@@ -204,7 +181,9 @@ README.md              ← This file
 build-protocol.md      ← Full reference Claude reads (~2400 lines)
 build-protocol-core.md ← Compact version for daily sessions
 CLAUDE.md              ← Project-level instructions
+skill/SKILL.md         ← Claude Code skill manifest (what makes /bob work)
 templates/             ← Reusable templates (eval sets, phase reports, etc.)
+scripts/               ← bob-init.sh scaffold + repo-map.sh
 LICENSE                ← MIT
 ```
 

@@ -9,7 +9,7 @@
 **Streamlined startup (v2.9).** When the user invokes this protocol without specifying a mode, do all of this in ONE turn — never ask preliminary yes/no questions:
 
 1. **Silently detect state.** Check whether `docs/build-manifest.md` exists (returning user vs first-time). Run `git status` if it's a git repo. Skim top-level files (package.json, framework configs, CLAUDE.md, recent commits) to infer what this project is.
-2. **Tentatively classify complexity** (Light / Standard / Heavy) from those signals — propose, don't ask.
+2. **Tentatively classify complexity** (Light / Standard / Heavy) from those signals — propose, don't ask. State only the track + one-line reasoning. **Do NOT enumerate the "What Changes" column at startup** (skip Behavioral Core, skip Domain Specs, etc.) — those terms are jargon to a first-time user before mode selection. Surface each change later, only when it actually applies.
 3. **Show ONE narration block** containing: what you observed about the project, the tentative complexity with one-line reasoning, and any housekeeping flags worth knowing before picking a mode (e.g., uncommitted work, missing manifest, conflicting docs).
 4. **Present the menu and ask the single question: which mode?** Nothing else.
 
