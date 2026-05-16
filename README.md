@@ -191,18 +191,6 @@ You don't need to read these — Claude does.
 
 ---
 
-## Staying current
-
-To get the latest version of Bob anytime:
-
-```bash
-cd ~/tools/bob-the-builder && git pull
-```
-
-**What that does:** Pulls any improvements added since you last cloned. Safe to run anytime — it doesn't touch your projects.
-
----
-
 ## Creator
 
 **[Joe Wang](https://joe.wang)** — former McKinsey consultant, Fifth Wall venture capitalist, Clari SaaS exec. Not an engineer. Just wanted something that worked.
