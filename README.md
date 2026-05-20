@@ -31,6 +31,7 @@
 - **Pre-Ship Audits** — eight separate audits before you call it done (five internal correctness: security, abuse, integration, data integrity, spec-code · three external fit: capability gap, effectiveness, UX friction)
 - **Living Decision Log** — every non-obvious choice recorded with the why
 - **3 Modes** — NEW (build) / AUDIT (assess) / EVOLVE (extend)
+- **Not locked to Claude** — every Bob-built project ships with both `CLAUDE.md` and `AGENTS.md`, so if you later try Codex, Cursor, or Aider, your project's context comes with you
 
 ---
 
