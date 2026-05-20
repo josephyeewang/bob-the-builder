@@ -213,4 +213,4 @@ If Tier 2-3 skipped during build → MUST run at hardening.
 
 ---
 
-*Core Reference for Build Protocol v2.8 — 2026-05-15*
+*Core Reference for Build Protocol v2.9 — 2026-05-15*

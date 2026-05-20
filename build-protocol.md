@@ -2610,5 +2610,5 @@ When the human says "update the build protocol based on recent projects," Claude
 
 ---
 
-*Build Protocol v2.7 — 2026-05-15*
+*Build Protocol v2.9 — 2026-05-15*
 *Derived from prior personal projects: an AI-driven blood-test interpretation tool, a personal task-management app, a tax auction analysis tool, and a strategy-research framework.*

@@ -64,7 +64,7 @@ if [[ ! -f CLAUDE.md ]]; then
 
 This project uses the **Bob the Builder** protocol.
 
-- **Full reference:** \`$BOB_PATH_DISPLAY/build-protocol.md\` (~2400 lines — templates, appendices, architecture patterns)
+- **Full reference:** \`$BOB_PATH_DISPLAY/build-protocol.md\` (~2,600 lines — templates, appendices, architecture patterns)
 - **Compact reference:** \`$BOB_PATH_DISPLAY/build-protocol-core.md\` (load this at session start)
 - **Current state:** \`docs/build-manifest.md\`
 - **Session start:** read this file → read \`build-protocol-core.md\` → read \`docs/build-manifest.md\` → resume.
