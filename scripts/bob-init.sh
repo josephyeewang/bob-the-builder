@@ -127,9 +127,9 @@ fi
 mkdir -p .claude
 if [[ ! -f .claude/settings.json ]]; then
   echo "🪝 Writing .claude/settings.json (default hooks)..."
-  cat > .claude/settings.json <<'EOF'
+  cat > .claude/settings.json <<EOF
 {
-  "_comment": "Default hook set per Bob the Builder Step 6b. Hooks are 100% enforced; CLAUDE.md rules are ~80% advisory. Customize per project — see ~/tools/bob-the-builder/build-protocol.md §6b for the default rationale.",
+  "_comment": "Default hook set per Bob the Builder Step 6b. Hooks are 100% enforced; CLAUDE.md rules are ~80% advisory. Customize per project — see ${BOB_PATH_DISPLAY}/build-protocol.md §6b for the default rationale.",
   "hooks": {
     "PostToolUse": [
       {
@@ -139,7 +139,7 @@ if [[ ! -f .claude/settings.json ]]; then
           {
             "type": "command",
             "command": "echo '[hook] format check — customize this command for your stack (prettier / black / gofmt / etc.)'",
-            "_comment_replace_with": "e.g.: cd \"$CLAUDE_PROJECT_DIR\" && npx prettier --write \"$CLAUDE_FILE_PATHS\""
+            "_comment_replace_with": "e.g.: cd \"\$CLAUDE_PROJECT_DIR\" && npx prettier --write \"\$CLAUDE_FILE_PATHS\""
           }
         ]
       }
@@ -151,7 +151,7 @@ if [[ ! -f .claude/settings.json ]]; then
           {
             "type": "command",
             "command": "echo '[hook] typecheck/build — customize this command for your stack'",
-            "_comment_replace_with": "e.g.: cd \"$CLAUDE_PROJECT_DIR\" && npx tsc --noEmit 2>&1 | head -20"
+            "_comment_replace_with": "e.g.: cd \"\$CLAUDE_PROJECT_DIR\" && npx tsc --noEmit 2>&1 | head -20"
           }
         ]
       }
