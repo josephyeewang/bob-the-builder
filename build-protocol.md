@@ -1,4 +1,4 @@
-# BUILD PROTOCOL v2.9
+# BUILD PROTOCOL v2.10
 
 > A systematic framework for building, auditing, and evolving products with Claude Code.
 > Created: 2026-04-15. Last updated: 2026-05-15. Owner: Joe Wang.
@@ -1455,6 +1455,13 @@ After remediation, run the 5-audit hardening sequence (Security → Adversarial/
 
 ---
 
+A7 has **two audit categories**:
+
+- **A7a–A7e — Internal correctness audits.** Does the code itself hold up? Security, abuse-resistance, integration seams, data integrity, spec-code match.
+- **A7f–A7h — External fit & value audits (v2.10).** Is this still the right product to be building? Capability gaps vs competitors, effectiveness signals, UX friction. *Internal correctness can pass while external fit is failing — and vice versa. Both matter.*
+
+---
+
 **A7.0: Hardening Scope Map (always runs first)**
 
 Before any audit fires, Claude produces a scope map using A3 findings + the Capability Traceability Matrix + the Build Manifest's phase status:
@@ -1466,6 +1473,9 @@ Before any audit fires, Claude produces a scope map using A3 findings + the Capa
 | A7c Integration Seam | _seams between two built subsystems_ | _seams touching unbuilt subsystems_ | Phase varies |
 | A7d Data Integrity | _state machines of built features_ | _state machines of unbuilt features_ | Phase varies |
 | A7e Spec-Code | _capabilities marked "implemented" in CTM_ | _capabilities marked "in spec, not implemented"_ | Their build phase |
+| A7f Capability Gap | _product-facing capabilities vs 3-5 closest competitors_ | _N/A — always in scope if product has external users_ | — |
+| A7g Effectiveness | _outcome metrics for shipped capabilities_ | _metrics for unshipped capabilities_ | Their launch |
+| A7h UX Friction | _flows touching non-engineer users_ | _N/A if Product Spec target is engineers/internal-only_ | — |
 
 Rules for what counts as "in scope now":
 - **A7a Security** — every public endpoint, auth flow, secret-handling path, or stored-data table that exists in code today
@@ -1473,12 +1483,15 @@ Rules for what counts as "in scope now":
 - **A7c Integration Seam** — every boundary where **both** sides are built. Skip seams where one side is stub/mock/unbuilt.
 - **A7d Data Integrity** — every state machine and data flow whose code exists end-to-end (input → store → retrieve)
 - **A7e Spec-Code** — only capabilities marked implemented in the CTM. Unbuilt ones have no code to compare against.
+- **A7f Capability Gap** — always in scope for products with external users; skip for internal-only tools, libraries, and pure data pipelines unless the Product Spec lists a comparable
+- **A7g Effectiveness** — runs only for capabilities that have been used at least once (i.e., shipped). Pre-launch projects skip A7g entirely; record a note to run it after activation.
+- **A7h UX Friction** — runs only if the Product Spec target audience includes non-engineers, end users, or any human flow. Skip for engineer-only / backend-only / library products.
 
 `→ HG:` Present scope map. Human can override (move items in/out of scope) before audits run. This is where the user expresses intent like *"harden auth now even though it's not done yet — I want to know what's already broken"* or *"defer integration seam audit until Phase 6 lands."*
 
 ---
 
-**A7a–A7e: Run audits on in-scope items only**
+**A7a–A7e: Internal correctness audits (run on in-scope items only)**
 
 Use the same playbooks as NEW mode Step [N+1] a–e — see those sections for the per-audit checklists. The only difference is scope: each audit explicitly states *"in scope: [list]"* and *"out of scope (deferred): [list]"* at the top of its findings, so nothing is silently skipped.
 
@@ -1492,14 +1505,139 @@ Use the same playbooks as NEW mode Step [N+1] a–e — see those sections for t
 
 ---
 
-**A7f: Fix & Defer Register**
+**A7f–A7h: External fit & value audits (v2.10)**
 
-After all 5 audits return:
+These audits answer different questions than A7a–A7e. Internal audits ask *"does the code hold up?"* External audits ask *"is this still the right thing to build?"* A product can pass every internal audit and still be quietly losing — a competitor shipped a category-defining capability you don't have, activation dropped 30% after the last release, or your users routinely need help with what should be a self-serve flow. Each external audit is a structured way to surface those signals before they become an "obvious in hindsight" moment.
+
+Like A7a–A7e, run each in a **fresh session** for clean reviewer context.
+
+---
+
+**A7f: Capability Gap & Competitor Scan**
+
+*Question this audit answers: are there meaningful capabilities your users would expect — that you don't have, by looking at the products they'd otherwise use?*
+
+This is NOT "do everything competitors do." It's "are there blind spots you didn't realize?" Bob explicitly rejects feature parity as a goal — copying for the sake of copying is how products get bloated. The audit's job is to surface gaps, not auto-import them.
+
+**Method:**
+
+1. **Identify 3-5 closest competitors / analogs.** Look at:
+   - Products users mention in your sales/support conversations
+   - Tools users had open in another tab when they started using yours
+   - Products that show up in "alternatives to [your product]" searches
+   - Adjacent categories whose users could realistically switch
+   - For methodology / framework products: published frameworks targeting the same outcome (e.g., for Bob: Spec Kit, Cursor rules, BMad, Aider's architect mode)
+
+2. **Build a capability matrix.** Rows: capabilities. Columns: your product + each competitor. Include both shipped capabilities and clearly-articulated roadmap items (only those publicly stated — don't speculate).
+
+3. **For each capability where competitors have it and you don't, decide:**
+   - **Adopt** — meaningful gap, plan it into next phase or evolution
+   - **Defer** — gap but not urgent; record in Build Manifest deferred list with revisit trigger
+   - **Reject** — intentional non-goal; record the reasoning in `decision-log.md` so it doesn't get re-litigated
+
+4. **Equally: for capabilities you have that competitors don't,** confirm they're real differentiators — not just things you happen to have that nobody cares about. Differentiators get protected; "happen-to-haves" get pruned when they cost more than they earn.
+
+**Output format:**
+
+```
+| Capability | Us | Comp A | Comp B | Comp C | Verdict | Notes |
+|---|---|---|---|---|---|---|
+| [capability] | ✓/—/roadmap | ✓ | — | ✓ | Adopt / Defer / Reject | rationale |
+```
+
+Plus a 3-sentence executive summary covering: (a) the most important gap, (b) the most defensible strength, (c) the most over-built area (capability that costs more than it earns).
+
+**Cadence:** Run at every AUDIT invocation. Competitors evolve faster than internal docs do.
+
+`→ HG:` Present capability matrix + summary. Decisions on each gap (Adopt / Defer / Reject) get logged in `decision-log.md`. Adopted items become EVOLVE candidates.
+
+---
+
+**A7g: Effectiveness Signals**
+
+*Question this audit answers: is what we built actually achieving its intended outcomes?*
+
+This audit is meaningless before the product has been used. Skip A7g entirely for pre-launch projects; note in Build Manifest to run it after activation. For products with at least one user / use-case, run it.
+
+**Method:**
+
+1. **Pull the success metrics from the Product Spec (Step 1a).** These are what the product was supposed to achieve. (If no success metrics exist, that's the finding — the Product Spec wasn't completed properly. Surface it and stop.)
+
+2. **For each metric, gather current signal.** Quantitative if available (analytics, logs, surveys). Qualitative if not (user quotes, support tickets, abandoned-workflow patterns). Note the source.
+
+3. **For methodology / framework products (like Bob itself):** the relevant signals are different from user-facing-app signals:
+   - Are users following the prescribed steps, or skipping them? Which steps?
+   - Are the documented outcomes (e.g., reduced fix-commit %, declining deviation count) actually showing up in projects using the framework?
+   - Where does context degradation still bite despite the protocol's guidance?
+   - Where is the framework producing friction that wasn't intended?
+
+4. **Compare to target / baseline / pre-product state.** "We launched 6 months ago, retention is 22%" is incomplete. "We launched 6 months ago, retention is 22% vs target 40% and industry benchmark 30%" is a finding.
+
+5. **Identify the single highest-leverage improvement opportunity.** Not five. Just one — the one place where moving the needle would matter most.
+
+**Output format:**
+
+```
+| Metric | Target | Current | Gap | Source | Confidence |
+|---|---|---|---|---|---|
+| [metric] | [value or qualitative] | [value or qualitative] | [delta or "below bar"] | [analytics / interviews / etc.] | High / Med / Low |
+```
+
+Plus a 1-paragraph executive summary ending with: *"Highest-leverage improvement opportunity: [one specific thing]."*
+
+**Stop condition:** if no Product Spec success metrics exist OR no signal can be gathered for any metric, A7g cannot run. Surface this as a gap (Product Spec incomplete or observability missing) and route to remediation.
+
+`→ HG:` Present effectiveness scorecard + the one highest-leverage opportunity. Outcome is either an EVOLVE candidate (if the gap is actionable) or a Product Spec update (if the underlying goal needs to change).
+
+---
+
+**A7h: UX Friction (for products with non-engineer or end-user audiences)**
+
+*Question this audit answers: where does the user have to do extra work that the product could have spared them?*
+
+Required when the Product Spec target audience includes non-engineers, end users, or any human flow. Skip for engineer-only / backend-only / library products (where "users" are other developers who can read the source).
+
+**Method:**
+
+1. **Walk the primary user workflow end-to-end.** Start from the user's actual entry point (not "open the app"; "they realized they needed to do X" — what happens next?). For each step, capture:
+   - What the user has to do (literal action)
+   - What they have to know (information that must already be in their head)
+   - What they have to decide (choices the product is asking them to make)
+   - What the product could have known/decided/done for them but didn't
+
+2. **Rate friction per step:** Clear (zero friction) / Mild (some friction, acceptable) / Painful (user pauses, hesitates, or asks for help).
+
+3. **Identify "the question we keep asking the user":** any decision the product asks more than once that has a stable answer. Those are smoothing opportunities — set the default and let the user override if needed, instead of asking every time. (Reference v2.9 streamlined startup: Bob used to ask 3 yes/no questions before the one that mattered; smoothing removed the noise.)
+
+4. **Identify "the thing the product knows but doesn't act on":** state the product has access to but treats as if it didn't. Show, don't ask.
+
+5. **Don't conflate friction with intentional gates.** A `→ HG` confirmation isn't friction — it's a deliberate sign-off. Friction is when the user works for the product, not for the outcome.
+
+**Output format:**
+
+```
+| Step | What user does | What they have to know | Friction | Smoothing opportunity |
+|---|---|---|---|---|
+| 1 | [action] | [knowledge required] | Clear/Mild/Painful | [proposal] |
+```
+
+Plus a "Top 3 smoothing opportunities" list, ranked by friction-reduction-per-effort.
+
+**Cadence:** Run at every AUDIT invocation for human-facing products. UX friction accumulates silently — each individually minor decision compounds, and you can't see it without a deliberate walkthrough.
+
+`→ HG:` Present friction map + top 3 smoothing opportunities. Adopted opportunities become EVOLVE candidates.
+
+---
+
+**A7i: Fix & Defer Register**
+
+After all in-scope audits (A7a–A7h) return:
 1. **Fix** all approved critical + high items from in-scope findings (same as [N+1]f)
 2. **Register deferred items** in the Build Manifest. For each deferred audit row from A7.0, write an entry into the corresponding future build phase: *"Phase [X] hardening obligations inherited from AUDIT A7: [list]."* This prevents the deferred items from being forgotten — they become acceptance criteria for that phase's verification.
-3. **Mark CTM:** capabilities that passed hardening get an `H` status badge alongside their implementation status.
+3. **Mark CTM:** capabilities that passed internal-correctness hardening get an `H` status badge alongside their implementation status. Capabilities that passed both internal-correctness AND external-fit (capability gap + effectiveness + UX friction where applicable) get an `H++` badge.
+4. **Log decisions from external-fit audits.** Capability-gap verdicts (Adopt / Defer / Reject), effectiveness-driven evolution candidates, and UX smoothing opportunities all get recorded in `decision-log.md` so they don't get re-litigated in future sessions.
 
-`→ HG:` Hardening pass complete (for current scope). Deferred items locked into Build Manifest.
+`→ HG:` Hardening pass complete (for current scope). Deferred items locked into Build Manifest. External-fit decisions logged.
 
 ### Step A8: Re-entry
 
@@ -2295,6 +2433,7 @@ When the human says "update the build protocol based on recent projects," Claude
 
 | Version | Date | Changes | Triggered By |
 |---------|------|---------|-------------|
+| v2.10 | 2026-05-20 | **AUDIT mode A7 extended with External Fit & Value audits.** A7 now has two audit categories: internal correctness (A7a–A7e, unchanged: Security · Adversarial-Abuse · Integration Seam · Data Integrity · Spec-Code) and **external fit & value (new A7f–A7h)**: (f) **Capability Gap & Competitor Scan** — capability matrix vs 3-5 closest competitors, each gap gets Adopt / Defer / Reject verdict logged in `decision-log.md`; (g) **Effectiveness Signals** — pull success metrics from Product Spec, gather current signal, identify single highest-leverage improvement opportunity; skips pre-launch projects; (h) **UX Friction** — workflow walkthrough rating friction per step, surface "questions we keep asking the user" and "things the product knows but doesn't act on"; required when target audience includes non-engineers / end users. A7.0 scope map extended with new audits + their scoping rules (A7f skips internal-only/library/pipeline; A7g skips pre-launch; A7h skips engineer-only/backend-only). Existing A7f (Fix & Defer Register) renumbered → A7i; now also logs external-fit decisions in `decision-log.md`. CTM gains `H++` badge for capabilities hardened on both internal-correctness AND external-fit axes. Mirrored update in `build-protocol-core.md`. | Live audit pass on bob-the-builder itself: ran A1–A6 and surfaced hygiene/consistency fixes (version drift, hardcoded paths, missing standard files) but missed defensive depth and capability/competitor evolution. Joe flagged that AUDIT skewed cosmetic — A7 already covered internal correctness (security/adversarial/seam/data/spec-code via v2.8) but there was no procedure for external fit (are competitors shipping things we're missing? is the product actually working for users? where does the UX still hurt?). v2.7 did a one-off competitive feature import; v2.10 makes competitor/effectiveness/UX scans a recurring AUDIT step instead of a one-time exercise. |
 | v2.9 | 2026-05-15 | **Streamlined startup + skill-based invocation.** (1) Bob now ships as a Claude Code skill (`skill/SKILL.md`) — typing `/bob` in any project loads the protocol; no more pasting long bootstrap prompts. README updated with one-liner install + symlink. (2) **Startup UX streamlined to a single question.** Removed preliminary "is this the first time?" question (silent filesystem check on `docs/build-manifest.md` instead). Removed narrator-status announcement / "narrator on or terse?" question (Narrator Mode is silently ON by default; user can opt out with "terse mode" any time). Removed Journey Map "does this look right?" confirmation gate (now shown only AFTER NEW mode is selected by a first-time user, as context-setting, not as a precondition for picking a mode). The new flow: silent state detection → one narration block with project sensing + tentative complexity + housekeeping flags → mode menu → single question (which mode?). Mirrored in `build-protocol-core.md` MODES + Session Start Protocol, `build-protocol.md` Quick Start + §11.5 + Appendix C, and `skill/SKILL.md`. | (1) `/bob` couldn't be invoked from other projects — required pointing Claude at the repo manually. (2) Live test in a real project showed the startup asked 3 yes/no questions (first-time? narrator? does-the-map-look-right?) before the only one that mattered (which mode?). Friction for the non-engineer user the protocol is supposed to serve. |
 | v2.8 | 2026-05-15 | **AUDIT mode now runs both audit types, scoped to built surface area.** Inserted new Step A7 "Hardening Audits" between A6 (Execute Remediation) and the renumbered A8 (Re-entry). A7 always runs — but instead of a binary feature-complete gate, it begins with **A7.0 Hardening Scope Map**: per-audit split of "in scope now" (what's built) vs. "deferred" (and which build phase to revisit). Human can override the scope. A7a–A7e then run the standard 5 hardening audits (Security → Adversarial/Abuse → Integration Seam → Data Integrity → Spec-Code) on in-scope items only, fresh session per audit. **A7f registers deferred items into the Build Manifest** as inherited hardening obligations on future phases, so partial hardening mid-build doesn't leak. CTM gains an `H` (hardened) badge. A7 is explicitly re-invocable any time during the build as new subsystems ship; full-scope hardening still runs at Step [N+1] before launch. Mirrored update in `build-protocol-core.md`. | (1) Confusion that MODE: AUDIT only ran the macro doc-hierarchy audit (A1–A6) and treated the 5 hardening audits as an optional follow-up. (2) Original v2.8 draft used a binary feature-complete gate that was too rigid — Joe flagged that real projects want to harden auth/seams/data flows for built subsystems mid-build without redoing the rest, and need a mechanism so deferred items aren't forgotten. |
 | v1.0 | 2026-04-15 | Initial creation. 3 modes (NEW/AUDIT/EVOLVE), 5-layer doc hierarchy, 13 Claude guardrails, 8 appendices including Phase Report Template and Architecture Patterns Library. | Analysis of prior personal projects (EMBT, DLL, Tax Auction, strategy-research project) |
@@ -2610,5 +2749,5 @@ When the human says "update the build protocol based on recent projects," Claude
 
 ---
 
-*Build Protocol v2.9 — 2026-05-15*
+*Build Protocol v2.10 — 2026-05-20*
 *Derived from prior personal projects: an AI-driven blood-test interpretation tool, a personal task-management app, a tax auction analysis tool, and a strategy-research framework.*

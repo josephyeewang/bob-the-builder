@@ -107,9 +107,16 @@ N+2. **Learning Extraction** → Process review → Update artifacts
 
 A1: Inventory → A2: Map to hierarchy → A3: Code-spec consistency → A4: Risk assessment → A5: Remediation plan → A6: Execute remediation → A7: Hardening audits (scoped) → A8: Re-entry
 
-**A7: Hardening Audits (scoped to built surface area)** — Always runs after remediation. A7.0 first produces a **Hardening Scope Map** that splits each of the 5 audits (Security / Adversarial-Abuse / Integration Seam / Data Integrity / Spec-Code) into "in scope now" (what's built) vs. "deferred" (with the build phase to revisit). Human can override the scope. A7a–A7e then run on in-scope items only, **fresh session per audit** (writer/reviewer pattern). A7f fixes critical findings and **registers deferred items into the Build Manifest** as inherited hardening obligations on future phases, so they're not forgotten. CTM gets an `H` badge on hardened capabilities. A7 can be re-invoked any time during the build as new subsystems ship; full-scope hardening still runs at Step [N+1] before launch.
+**A7: Hardening Audits (scoped to built surface area)** — Always runs after remediation. Has **two audit categories** (v2.10):
 
-**A8: Re-entry** — After remediation + scoped hardening, Claude presents next-step options based on Build Manifest state: resume building unbuilt capabilities (→ NEW mode Step 7, with inherited hardening obligations attached to each phase), switch to EVOLVE for new features, or re-invoke A7 mid-build to re-scope.
+- **Internal correctness (A7a–A7e):** Security · Adversarial-Abuse · Integration Seam · Data Integrity · Spec-Code. *Does the code hold up?*
+- **External fit & value (A7f–A7h):** Capability Gap vs competitors · Effectiveness Signals · UX Friction. *Is this still the right product to be building?*
+
+A7.0 first produces a **Hardening Scope Map** splitting each audit into "in scope now" vs. "deferred" (with the build phase to revisit). Human can override. Audits then run on in-scope items only, **fresh session per audit** (writer/reviewer pattern). A7i fixes critical findings, **registers deferred items into the Build Manifest** as inherited hardening obligations on future phases, and logs external-fit decisions (Adopt / Defer / Reject) in `decision-log.md`. CTM gets `H` for hardened-internally / `H++` for hardened on both axes. A7 can be re-invoked any time during the build; full-scope hardening still runs at Step [N+1] before launch.
+
+A7f (Capability Gap), A7g (Effectiveness), and A7h (UX Friction) have **scoping rules**: A7f skips internal-only / library / pipeline products; A7g skips pre-launch projects (no signal yet); A7h skips engineer-only / backend-only products. The scope map enforces this.
+
+**A8: Re-entry** — After remediation + scoped hardening, Claude presents next-step options based on Build Manifest state: resume building unbuilt capabilities (→ NEW mode Step 7, with inherited hardening obligations attached to each phase), switch to EVOLVE for new features (including external-fit candidates from A7f/g/h), or re-invoke A7 mid-build to re-scope.
 
 ---
 
@@ -213,4 +220,4 @@ If Tier 2-3 skipped during build → MUST run at hardening.
 
 ---
 
-*Core Reference for Build Protocol v2.9 — 2026-05-15*
+*Core Reference for Build Protocol v2.10 — 2026-05-20*

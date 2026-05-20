@@ -37,4 +37,4 @@ README.md                   ← Public-facing project overview
 
 ## Current Version
 
-v2.9 — 2026-05-15
+v2.10 — 2026-05-20
