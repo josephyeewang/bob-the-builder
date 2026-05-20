@@ -1,0 +1,64 @@
+name: scripts-ci
+
+# Supply chain backstop per Bob v2.13 audit finding F5. Bob's scripts/
+# and SKILL.md reach every user via `update bob`, so any compromise of
+# main propagates instantly. This workflow is the mechanical baseline
+# under the maintainer-discipline trust model documented in SECURITY.md.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  shellcheck:
+    name: shellcheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install shellcheck
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+      - name: Lint shell scripts
+        run: shellcheck scripts/*.sh
+
+  bob-init-smoke:
+    name: bob-init smoke test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure git identity (CI needs user.name + user.email)
+        run: |
+          git config --global user.name "Bob CI"
+          git config --global user.email "ci@example.com"
+      - name: Run bob-init.sh in a temp directory
+        run: |
+          TMP=$(mktemp -d)
+          cd "$TMP"
+          bash "$GITHUB_WORKSPACE/scripts/bob-init.sh" ci-smoke
+          # Assert all expected scaffold artifacts exist.
+          for f in ci-smoke/CLAUDE.md \
+                   ci-smoke/AGENTS.md \
+                   ci-smoke/.claude/settings.json \
+                   ci-smoke/.gitignore \
+                   ci-smoke/.env.example \
+                   ci-smoke/README.md \
+                   ci-smoke/.git/HEAD; do
+            test -e "$f" || { echo "MISSING: $f"; exit 1; }
+          done
+          # Assert the initial commit landed.
+          cd ci-smoke
+          test "$(git rev-list --count HEAD)" -ge 1 || { echo "no initial commit"; exit 1; }
+          echo "✓ scaffold + initial commit OK"
+
+  bob-doctor-smoke:
+    name: bob-doctor smoke test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Simulate a healthy install layout
+        run: |
+          mkdir -p "$HOME/.claude/skills"
+          ln -s "$GITHUB_WORKSPACE/skill" "$HOME/.claude/skills/bob"
+      - name: Run bob-doctor.sh
+        run: bash scripts/bob-doctor.sh
