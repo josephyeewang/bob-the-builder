@@ -1389,6 +1389,7 @@ Present as: `| Seam (A → B) | Contract Match | Error Handling | Auth | Rate Li
 - Final spec update: all docs now reflect what was actually built
 - Capability Traceability Matrix updated — all statuses final
 - Build Manifest updated to reflect hardening complete
+- **PR-back prompt (v2.13)** — at the end of full-scope hardening, Claude offers the [N+2]c PR-back template proactively (don't wait for Step [N+2]). Suggested phrasing: *"Hardening passed. Before we move to Learning Extraction, run `bash ~/tools/bob-the-builder/scripts/bob-stats.sh` for the fix-commit ratio — that one number is the most useful signal Bob can get on whether the protocol helped. Paste the output into a GitHub issue or email it to joe@joe.wang. Skip if you'd rather; one report per shipped project is plenty."*
 - `→ HG:` Hardening gate passed
 
 ### Step [N+2]: Learning Extraction
@@ -1738,6 +1739,8 @@ After all in-scope audits (A7a–A7h) return:
 2. **Register deferred items** in the Build Manifest. For each deferred audit row from A7.0, write an entry into the corresponding future build phase: *"Phase [X] hardening obligations inherited from AUDIT A7: [list]."* This prevents the deferred items from being forgotten — they become acceptance criteria for that phase's verification.
 3. **Mark CTM:** capabilities that passed internal-correctness hardening get an `H` status badge alongside their implementation status. Capabilities that passed both internal-correctness AND external-fit (capability gap + effectiveness + UX friction where applicable) get an `H++` badge.
 4. **Log decisions from external-fit audits.** Capability-gap verdicts (Adopt / Defer / Reject), effectiveness-driven evolution candidates, and UX smoothing opportunities all get recorded in `decision-log.md` so they don't get re-litigated in future sessions.
+
+**PR-back prompt (v2.13).** At the end of A7i, Claude offers the [N+2]c PR-back template proactively. Same phrasing as Step [N+1]f, scoped to "this AUDIT pass" rather than "this product." AUDIT-mode users may never reach Step [N+2] (they came in to assess existing code, not to ship a new product), so A7i is the realistic point to capture signal. Run `bash ~/tools/bob-the-builder/scripts/bob-stats.sh` if you want the fix-commit ratio auto-computed.
 
 `→ HG:` Hardening pass complete (for current scope). Deferred items locked into Build Manifest. External-fit decisions logged.
 
