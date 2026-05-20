@@ -28,7 +28,7 @@
 - **Phased Build Plan** — maps exactly what to build when, with sign-off gates at every step
 - **Drift Prevention** — Bob catches Claude when it starts wandering off-spec
 - **Class-Level Fixes** — bug in one place? Bob audits every similar pattern, not just the symptom
-- **Pre-Ship Security Review** — five separate audits before you call it done
+- **Pre-Ship Audits** — eight separate audits before you call it done (five internal correctness: security, abuse, integration, data integrity, spec-code · three external fit: capability gap, effectiveness, UX friction)
 - **Living Decision Log** — every non-obvious choice recorded with the why
 - **3 Modes** — NEW (build) / AUDIT (assess) / EVOLVE (extend)
 
@@ -75,7 +75,7 @@ mkdir -p ~/tools && cd ~/tools && git clone https://github.com/josephyeewang/bob
 ```
 
 *What that did:* registered Bob as a Claude Code skill on your machine.
-*Verify:* open Claude Code in any folder, type `/help`, look for `bob` in the skill list.
+*Verify:* open Claude Code in any folder and type `/bob` — Bob should respond with the mode menu. If Claude says it doesn't know that skill, the symlink didn't register; re-run the install one-liner.
 
 > **Windows users:** Bob assumes macOS or Linux. On Windows, run the install above inside [WSL](https://learn.microsoft.com/windows/wsl/install), then use Claude Code from inside WSL. Native Windows + PowerShell is not supported.
 

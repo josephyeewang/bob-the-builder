@@ -1,4 +1,4 @@
-# BUILD PROTOCOL v2.10
+# BUILD PROTOCOL v2.11
 
 > A systematic framework for building, auditing, and evolving products with Claude Code.
 > Created: 2026-04-15. Last updated: 2026-05-15. Owner: Joe Wang.
@@ -525,6 +525,7 @@ The rest of this protocol tells Claude *what to produce*. This section tells Cla
 > **✅ Step [N.x] complete — [Step Name]**
 > **📦 What we now have:** [The artifact, in 1-2 sentences. Where it lives. What it says.]
 > **💎 Why this matters (v2.5):** [Plain-English explanation of what this artifact does for you over the next few weeks. Sell the value. A non-coder needs to feel that the time they just spent was worth it — and a clear "why" also primes them to push back if the artifact is weak. Example: "Without this Product Spec, every future build phase would have to re-litigate 'what are we even doing?' With it, when a question comes up at Phase 5 about whether feature X is in scope, the answer is in one place. This is the artifact that prevents scope creep."]
+> **📏 Quality Bar self-check (v2.11):** [Cite the relevant §11.7 Quality Bar criteria and self-rate against each. Be honest — under-rate if borderline. Example: *"Against §11.7 Product Spec criteria: success metrics defined ✓, non-goals listed ✓, scenarios cover happy + 2 edge cases ✓, data classification stated ✓, activation defined — partial (we have 'first message sent' but not target time-to-first-message). Overall: 4/5. The activation gap is the one thing to push back on if you have a target in mind."* This lets the non-engineer ride along on the judgment instead of being asked cold. If self-rating is <4/5 on any criterion, surface it before the HG — don't bury it.]
 > **🚀 What this unlocks:** [The next step + why it depends on what we just produced.]
 > **⚠️ Risks if we skip something later:** [Optional — only if a future step might be tempting to skip. E.g., "If we skip the eval set in Step 2d, we won't catch behavioral regressions during build."]
 > **Progress:** [Updated progress bar.]
@@ -692,11 +693,31 @@ Never just power through. Disengagement compounds — a user who said "sounds go
 
 *A routing step. Bob's core protocol is generic; archetypes have additional considerations. Step 0.5 classifies the project and pulls in the relevant addendum from Appendix K.*
 
-**0.5a: Classify**
-- Claude asks the user: "Which of these archetypes most closely matches what you're building?" — presents the profile list from Appendix K.
-- Common archetypes: AI Chat/Copilot, Internal B2B Tool, RAG Pipeline, Vertical SaaS, Agent/Tool-Use Workflow, Marketplace, E-commerce, Content/Community, Real-time/Collaborative, Mobile-First, Browser Extension, Voice/Audio, Data Pipeline/ETL, SEO/Marketing site.
-- Multi-archetype projects (e.g., "internal B2B tool with RAG and agent loops") select primary + secondary profiles.
-- "None of these / hybrid" is a valid answer — Claude proceeds with the generic protocol.
+**0.5a: Classify (Claude proposes, user confirms — v2.11)**
+
+Don't ask the user to classify cold. Auto-detect first, then offer the proposed archetype with a one-tap confirm.
+
+1. **Auto-detect from filesystem signals** (silent, before asking anything):
+   - `package.json` with `"next"` / `"react"` / `"vue"` / `"svelte"` → web app candidate (Vertical SaaS / Internal B2B Tool / Content / SEO depending on context)
+   - `package.json` with `"@anthropic-ai/sdk"` / `"openai"` / `"ai"` → AI product candidate (refine with chat vs RAG vs Agent based on other deps)
+   - `package.json` with `langchain` / `llamaindex` / `pgvector` → RAG candidate
+   - `package.json` with `inngest` / `bullmq` / `temporal` → Background Jobs candidate
+   - `package.json` with `stripe` + product schema → E-commerce / Marketplace candidate
+   - `Cargo.toml` / `pyproject.toml` / `go.mod` only, no UI deps → Data Pipeline/ETL or CLI tool candidate
+   - `manifest.json` with `chrome_extension` shape → Browser Extension
+   - `Podfile` / `Info.plist` / iOS/Android directories → Mobile-First
+   - Empty / docs-only / strategy markdown → methodology or strategy product (neither needs an archetype; treat as hybrid)
+   - User-provided product description in the Intake step (Step 0) — keyword scan for "chatbot", "agent", "marketplace", "internal tool", "extension", "voice", "ETL/pipeline"
+
+2. **Propose ONE primary archetype with rationale** and a likely secondary if signals suggest one. Don't list all 15 — that's the question-the-user-cold pattern we just removed in v2.9.
+
+   Example proposal: *"Looks like an **AI Chat product** (signals: `@anthropic-ai/sdk` in package.json, the description mentions 'chatbot'). Possible secondary: **Background Jobs** (signals: `inngest`). Confirm or correct?"*
+
+3. **If no signals are detectable** (empty repo, novel idea, ambiguous description) — only then ask cold, with the Appendix K list visible. This is the v2.4 fallback path, not the default.
+
+4. **Multi-archetype projects** select primary + secondary profiles when signals suggest more than one.
+
+5. **"None of these / hybrid"** is a valid answer — Claude proceeds with the generic protocol.
 
 **0.5b: Pull addendum**
 - For each selected profile, Claude reads the matching Appendix K entry and surfaces:
@@ -802,7 +823,18 @@ A fix to one finding can introduce a new gap. One pass of stress-test + adversar
 
 Use the **Quality Bar — Product Spec (§11.7)** as the bar for "done." If the human can't say *what specifically would make the spec better*, the spec is done.
 
-### Step 2: Behavioral Core (AI products only — skip if N/A)
+### Step 2: Behavioral Core — How Your AI Should Behave (AI products only — skip if N/A)
+
+*Plain language (v2.11):* if your product makes decisions on behalf of users — what to do, when to ask, what to say, what to refuse — the Behavioral Core is where those rules live. It's the "personality and judgment" document. Without it, every prompt re-invents the wheel and your AI sounds different in different places. With it, you have one source of truth for *how the AI thinks* — which is harder to debug after the fact than *what the code does*, so it has to be designed upfront.
+
+**Worked example — to make this concrete before we draft yours:**
+
+Imagine a personal task-management AI. User texts: *"remind me to call mom"*. The AI has three options: (a) auto-create a task for "tomorrow at 10am" using a sensible default, (b) ask back *"when?"*, (c) reject the message.
+
+- A **Behavioral Core** rule like *"confidence threshold for auto-action = 0.8; below 0.5 ask back; below 0.2 reject"* tells the code what to do. The system is HIGH-confident there's a task in the message but LOW-confident on when → branch (b), ask back.
+- Without that rule, three different developers write three different behaviors and the AI feels inconsistent.
+
+That's the artifact. The seven sections below capture different facets of "how it thinks." If you have a non-AI product, skip Step 2 entirely.
 
 **2a: Draft**
 - Claude drafts the Behavioral Core covering:
@@ -1356,6 +1388,33 @@ Present as: `| Seam (A → B) | Contract Match | Error Handling | Auth | Rate Li
 - Save key learnings to project memory
 - Propose updates to this Build Protocol if warranted
 - Update tool-decisions.md with any post-launch tool insights
+
+**[N+2]c: PR-back to Bob (optional, v2.11) — close the feedback loop**
+
+Bob has no telemetry by design. Its effectiveness signals are unmeasured unless users self-report. If using Bob helped (or didn't), paste this template into a GitHub issue at the Bob repo (or skip — no obligation, but each report makes Bob better for the next person):
+
+```markdown
+**Bob version:** [from the header of build-protocol.md, e.g., v2.11]
+**Project type:** [archetype from Step 0.5, e.g., AI Chat + Background Jobs]
+**Complexity track:** [Light / Standard / Heavy]
+**Time to first usable build:** [days / weeks]
+
+**What worked:**
+- [Step or pattern that paid off — be specific. "Quality Bar templates saved me from advancing a weak Product Spec" beats "the spec phase was good."]
+
+**Where I got stuck:**
+- [Step or moment where Bob's guidance was unclear, missing, or wrong. Cite section numbers if you can.]
+
+**What I skipped (and why):**
+- [Steps you skipped deliberately. The "why" is more valuable than the list.]
+
+**Outcome:**
+- [Did the product ship? Approximate fix-commit ratio if you can compute it (Bob's target is <30% — see §8 Effectiveness Metrics).]
+```
+
+Issue link will be at: `https://github.com/josephyeewang/bob-the-builder/issues/new` (or wherever the canonical repo lives at your time of use).
+
+This is the only signal Bob has on whether the protocol is achieving its targets. One report per project shipped is plenty.
 
 ---
 
@@ -2433,6 +2492,7 @@ When the human says "update the build protocol based on recent projects," Claude
 
 | Version | Date | Changes | Triggered By |
 |---------|------|---------|-------------|
+| v2.11 | 2026-05-20 | **Self-audit findings from v2.10 dogfooding — 8 Adopt items shipped.** (1) **Bob declares its own success metrics** in CLAUDE.md, dogfooding Step 1a — surfaces that 4 of 5 metrics are structurally unmeasured (no telemetry by design). (2) **Step [N+2]c PR-back template** — copyable issue template for users to self-report after shipping, the only feedback channel Bob has. (3) **Step 0.5a switched from "ask cold" to "Claude proposes from filesystem signals, user confirms"** — reads package.json / Cargo.toml / pyproject.toml / etc., proposes archetype with rationale, falls back to asking only when no signals exist. (4) **§11.3 Checkpoint Summary template** adds **Quality Bar self-check** field — Claude self-rates against §11.7 criteria before HG so the non-engineer can ride along on the judgment instead of evaluating cold. (5) **Step 2 Behavioral Core demystified** — plain-language framing + worked example before the 7-section drafting; addresses the most jargon-heavy step. (6) **SKILL.md `update bob` command made divergence-aware** — same class of silent-failure bug as today's pullall fix; now reports DIVERGED / UNCOMMITTED loudly instead of trying to pull. (7) **README "five audits" → "eight separate audits"** — stale post-v2.10. (8) **README `/help` verification step replaced** — couldn't confirm `/help` actually lists skills; safer instruction is "type `/bob` and confirm it responds." | Live v2.10 dogfood pass on bob-the-builder itself surfaced 8 Adopt items: 6 from external-fit audits (capability gap pointed to Bob's own unmeasured effectiveness + Behavioral Core UX friction; A7g flagged that Bob's Product Spec didn't satisfy Bob's own Step 1a requirement for success metrics) + 2 from internal-correctness pass (`update bob` was the same silent-failure class as pullall; README hardening claim went stale at the same time the new audits shipped). |
 | v2.10 | 2026-05-20 | **AUDIT mode A7 extended with External Fit & Value audits.** A7 now has two audit categories: internal correctness (A7a–A7e, unchanged: Security · Adversarial-Abuse · Integration Seam · Data Integrity · Spec-Code) and **external fit & value (new A7f–A7h)**: (f) **Capability Gap & Competitor Scan** — capability matrix vs 3-5 closest competitors, each gap gets Adopt / Defer / Reject verdict logged in `decision-log.md`; (g) **Effectiveness Signals** — pull success metrics from Product Spec, gather current signal, identify single highest-leverage improvement opportunity; skips pre-launch projects; (h) **UX Friction** — workflow walkthrough rating friction per step, surface "questions we keep asking the user" and "things the product knows but doesn't act on"; required when target audience includes non-engineers / end users. A7.0 scope map extended with new audits + their scoping rules (A7f skips internal-only/library/pipeline; A7g skips pre-launch; A7h skips engineer-only/backend-only). Existing A7f (Fix & Defer Register) renumbered → A7i; now also logs external-fit decisions in `decision-log.md`. CTM gains `H++` badge for capabilities hardened on both internal-correctness AND external-fit axes. Mirrored update in `build-protocol-core.md`. | Live audit pass on bob-the-builder itself: ran A1–A6 and surfaced hygiene/consistency fixes (version drift, hardcoded paths, missing standard files) but missed defensive depth and capability/competitor evolution. Joe flagged that AUDIT skewed cosmetic — A7 already covered internal correctness (security/adversarial/seam/data/spec-code via v2.8) but there was no procedure for external fit (are competitors shipping things we're missing? is the product actually working for users? where does the UX still hurt?). v2.7 did a one-off competitive feature import; v2.10 makes competitor/effectiveness/UX scans a recurring AUDIT step instead of a one-time exercise. |
 | v2.9 | 2026-05-15 | **Streamlined startup + skill-based invocation.** (1) Bob now ships as a Claude Code skill (`skill/SKILL.md`) — typing `/bob` in any project loads the protocol; no more pasting long bootstrap prompts. README updated with one-liner install + symlink. (2) **Startup UX streamlined to a single question.** Removed preliminary "is this the first time?" question (silent filesystem check on `docs/build-manifest.md` instead). Removed narrator-status announcement / "narrator on or terse?" question (Narrator Mode is silently ON by default; user can opt out with "terse mode" any time). Removed Journey Map "does this look right?" confirmation gate (now shown only AFTER NEW mode is selected by a first-time user, as context-setting, not as a precondition for picking a mode). The new flow: silent state detection → one narration block with project sensing + tentative complexity + housekeeping flags → mode menu → single question (which mode?). Mirrored in `build-protocol-core.md` MODES + Session Start Protocol, `build-protocol.md` Quick Start + §11.5 + Appendix C, and `skill/SKILL.md`. | (1) `/bob` couldn't be invoked from other projects — required pointing Claude at the repo manually. (2) Live test in a real project showed the startup asked 3 yes/no questions (first-time? narrator? does-the-map-look-right?) before the only one that mattered (which mode?). Friction for the non-engineer user the protocol is supposed to serve. |
 | v2.8 | 2026-05-15 | **AUDIT mode now runs both audit types, scoped to built surface area.** Inserted new Step A7 "Hardening Audits" between A6 (Execute Remediation) and the renumbered A8 (Re-entry). A7 always runs — but instead of a binary feature-complete gate, it begins with **A7.0 Hardening Scope Map**: per-audit split of "in scope now" (what's built) vs. "deferred" (and which build phase to revisit). Human can override the scope. A7a–A7e then run the standard 5 hardening audits (Security → Adversarial/Abuse → Integration Seam → Data Integrity → Spec-Code) on in-scope items only, fresh session per audit. **A7f registers deferred items into the Build Manifest** as inherited hardening obligations on future phases, so partial hardening mid-build doesn't leak. CTM gains an `H` (hardened) badge. A7 is explicitly re-invocable any time during the build as new subsystems ship; full-scope hardening still runs at Step [N+1] before launch. Mirrored update in `build-protocol-core.md`. | (1) Confusion that MODE: AUDIT only ran the macro doc-hierarchy audit (A1–A6) and treated the 5 hardening audits as an optional follow-up. (2) Original v2.8 draft used a binary feature-complete gate that was too rigid — Joe flagged that real projects want to harden auth/seams/data flows for built subsystems mid-build without redoing the rest, and need a mechanism so deferred items aren't forgotten. |
@@ -2749,5 +2809,5 @@ When the human says "update the build protocol based on recent projects," Claude
 
 ---
 
-*Build Protocol v2.10 — 2026-05-20*
+*Build Protocol v2.11 — 2026-05-20*
 *Derived from prior personal projects: an AI-driven blood-test interpretation tool, a personal task-management app, a tax auction analysis tool, and a strategy-research framework.*
