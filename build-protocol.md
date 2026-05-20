@@ -831,10 +831,23 @@ Use the **Quality Bar — Product Spec (§11.7)** as the bar for "done." If the 
 
 Imagine a personal task-management AI. User texts: *"remind me to call mom"*. The AI has three options: (a) auto-create a task for "tomorrow at 10am" using a sensible default, (b) ask back *"when?"*, (c) reject the message.
 
-- A **Behavioral Core** rule like *"confidence threshold for auto-action = 0.8; below 0.5 ask back; below 0.2 reject"* tells the code what to do. The system is HIGH-confident there's a task in the message but LOW-confident on when → branch (b), ask back.
-- Without that rule, three different developers write three different behaviors and the AI feels inconsistent.
+A Behavioral Core would write a rule for each of the seven sections below. Here's what good looks like for this task-AI, end-to-end:
 
-That's the artifact. The seven sections below capture different facets of "how it thinks." If you have a non-AI product, skip Step 2 entirely.
+1. **Decision framework** — *"Confidence threshold for auto-action = 0.8. Between 0.5–0.8 ask back. Below 0.2 reject."* The system is HIGH-confident there's a task in the message but LOW-confident on when → branch (b), ask back. Without this rule, three different developers write three different behaviors and the AI feels inconsistent.
+
+2. **Autonomy boundaries** — *"Auto-create tasks. Auto-schedule reminders. Auto-tag with `#family` based on the word 'mom'. Always ask before deleting any task. Always ask before sending a message to a third party. Never modify a task created by someone else."* Each capability is in exactly one bucket: auto / ask / refuse.
+
+3. **Communication style** — *"Short. Conversational, not formal. One sentence to confirm; two if there's an ambiguity to resolve. Never bullet lists in confirmations. Use the user's words when echoing back ('call mom', not 'phone your mother'). Lowercase OK unless the user uses caps."* For our example, response is: *"Got it — when should I remind you?"* (not: *"I have noted your request. Could you please specify the desired time?"*)
+
+4. **Absolute constraints** — *"Never store the contents of a message that contains the words 'password', 'SSN', 'credit card'. Never auto-create a task with a time in the past. Never schedule a reminder for an event the system has no evidence exists (e.g., don't invent 'mom's birthday' from a message that didn't mention it)."* These are hard stops; the system would refuse to act even if confidence is high.
+
+5. **Conflict resolution** — *"If the message contains both a task and a question (e.g., 'remind me to call mom — what's her number?'), task creation wins; the question is surfaced separately, not auto-answered. If two rules disagree, the Absolute Constraint always wins."* Predictable conflict order means the system stays coherent under edge cases.
+
+6. **Memory model** — *"Remember: every task the user created in the last 30 days; every clarification the user gave ('mom = my mom Sarah, not mother-in-law'); the user's typical wake/sleep times. Forget: the original message text after task is created (only the structured task remains); any message the user explicitly says to forget; anything older than 30 days unless the user pinned it."* The memory budget is finite — be explicit about what stays.
+
+7. **Error behavior** — *"On low confidence: ask back with two options, not open-ended. On API failure: retry once silently, then surface 'something glitched — try again?'. On user frustration ('that's not what I meant'): drop confidence by 0.3 for the next interaction, default to ask-back. Never apologize more than once per session."* The system has rules for when it's wrong, not just when it's right.
+
+That's the artifact. Notice how each section answers a different facet of "how it thinks" — and how the rules compose: the autonomy bucket says "auto-create," the decision framework says "but only above 0.8 confidence," and the absolute constraint says "never with a past date." A non-AI product skips Step 2 entirely.
 
 **2a: Draft**
 - Claude drafts the Behavioral Core covering:
@@ -1412,9 +1425,37 @@ Bob has no telemetry by design. Its effectiveness signals are unmeasured unless 
 - [Did the product ship? Approximate fix-commit ratio if you can compute it (Bob's target is <30% — see §8 Effectiveness Metrics).]
 ```
 
-Issue link will be at: `https://github.com/josephyeewang/bob-the-builder/issues/new` (or wherever the canonical repo lives at your time of use).
+Issue link will be at: `https://github.com/josephyeewang/bob-the-builder/issues/new` (or wherever the canonical repo lives at your time of use). Lower-friction alternative: email **joe@joe.wang** — same content, private channel. One report per project shipped is plenty in either channel.
 
-This is the only signal Bob has on whether the protocol is achieving its targets. One report per project shipped is plenty.
+**[N+2]d: Closing Checkpoint Summary (v2.13)**
+
+Every other Bob step has a Checkpoint Summary (§11.3) when it completes. The end of the protocol historically didn't — users dropped into the PR-back template cold. This step closes the loop. Claude writes a short closing summary that names what just happened:
+
+```markdown
+## 🎉 You shipped.
+
+**What you built:** [1-sentence product description from Product Spec]
+**Time elapsed:** [Step 1 date → today]
+**Build phases completed:** [N] of [N]
+**Bob caught (during build):** [count] spec deviations, [count] hardening findings, [count] class-level pattern issues
+**Currently:** live / staging / internal / private
+
+### What worked
+- [Step or pattern that paid off — pulled from [N+2]a Process Review]
+
+### What was hard
+- [Step or moment that took longer or stalled — pulled from [N+2]a Process Review]
+
+### 💎 Why this matters
+You started with [the original problem from Step 1]. You now have [the artifact / outcome]. That's the loop closing.
+
+### Next steps
+1. **Share back to Bob** (optional, ~5 min): paste the [N+2]c template into a GitHub issue or email joe@joe.wang. This is the only way Bob learns whether it actually helped.
+2. **Post-launch:** Bob's scope ends at "ready to ship." For monitoring, support, and roadmap, you're on your own from here.
+3. **Next project:** invoke `/bob` again in a new folder. The protocol will recognize you as a returning user.
+```
+
+This template fires as the final action of Step [N+2]. Narrator Mode (v2.3) is on by default and the closing summary respects the same "💎 Why this matters" pattern as §11.8.
 
 ---
 
@@ -1644,7 +1685,7 @@ This audit is meaningless before the product has been used. Skip A7g entirely fo
 
 Plus a 1-paragraph executive summary ending with: *"Highest-leverage improvement opportunity: [one specific thing]."*
 
-**Stop condition:** if no Product Spec success metrics exist OR no signal can be gathered for any metric, A7g cannot run. Surface this as a gap (Product Spec incomplete or observability missing) and route to remediation.
+**Stop condition (this IS the finding, not a routing detail):** if no Product Spec success metrics exist OR no signal can be gathered for any metric, **A7g's output is "we cannot tell if this product is working."** That sentence — not an "EVOLVE candidate" — is the finding. Name it. Don't paper over it by writing aspirational metrics or by routing to remediation as if more work would fix the gap. The honest call: either the Product Spec is incomplete (write the metrics), or the observability is missing (instrument them), or — for methodology / framework products that have no telemetry by design — accept that effectiveness is structurally unmeasured and rely on qualitative self-reports from users (Step [N+2]c PR-back). Surfacing the gap is the audit value; the response is a separate decision.
 
 `→ HG:` Present effectiveness scorecard + the one highest-leverage opportunity. Outcome is either an EVOLVE candidate (if the gap is actionable) or a Product Spec update (if the underlying goal needs to change).
 

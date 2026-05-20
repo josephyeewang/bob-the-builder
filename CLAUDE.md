@@ -39,7 +39,7 @@ README.md                   ← Public-facing project overview
 
 Bob's Step 1a requires every product to declare success metrics. Bob is a product. Here are its.
 
-- **Self-effectiveness** — Bob can audit and evolve Bob (Bob-on-Bob). Demonstrated across v2.2 → v2.11 (10+ EVOLVE cycles applied to the protocol itself). *Current: passing.*
+- **Self-application count** — Bob has been applied to Bob (Bob-on-Bob) across v2.2 → v2.13 (12+ EVOLVE cycles + 3 AUDIT passes on the protocol itself). *Current: 15+ cycles.* Note: self-application is a sanity check that the protocol is internally coherent and re-runnable — it is NOT a claim of effectiveness on external users. Real effectiveness signal requires the PR-back channel (Step [N+2]c). Per A7g's stop condition (v2.13), the honest read on the four metrics below is "structurally unmeasured" — not "passing."
 - **Fix-commit ratio in projects using Bob** — target <30% (baseline: prior projects ran 70%). *Current: unmeasured externally; requires per-project manual git-log analysis. See A7g findings (v2.10 changelog).*
 - **Deviation count declining over consecutive phases** — Build Manifest tracks this column per phase. *Current: unmeasured at adoption scale.*
 - **Audit findings at hardening** — target <10 critical items at Step [N+1]. *Current: unmeasured externally.*
