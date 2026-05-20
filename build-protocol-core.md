@@ -212,6 +212,7 @@ If Tier 2-3 skipped during build → MUST run at hardening.
 - Phase Report template: `templates/phase-report.md` or Appendix F in full protocol
 - Behavioral Core template: `templates/behavioral-core.md` or Appendix B
 - AI Eval Set template: `templates/eval-set.md` (used in Step 2d and at AI phase gates)
+- Capability Traceability Matrix template: `templates/capability-traceability-matrix.md` (used in Step 5a-ii and at every Reconcile / A7i)
 - Decision Log entry: `templates/decision-log-entry.md` or Appendix D
 - Cowork Session: `templates/cowork-session.md` or Appendix H
 - Architecture Patterns: Appendix G in full protocol

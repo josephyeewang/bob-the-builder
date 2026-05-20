@@ -1030,6 +1030,8 @@ flowchart LR
 
 **5a-ii: Capability Traceability Matrix (MANDATORY)**
 
+Use `templates/capability-traceability-matrix.md` as the starting point — it has the status code legend, the H/H++ hardening badge column, and a worked example.
+
 After defining phases, create a matrix mapping EVERY capability from the Product Spec to a build phase:
 
 ```

@@ -132,6 +132,33 @@ else
 fi
 
 # ──────────────────────────────────────────────────────────────────────
+# 2b. AGENTS.md — cross-tool agent instruction file (v2.13)
+# Thin pointer to CLAUDE.md so projects built with Bob remain portable
+# to non-Claude agents (OpenAI Codex CLI, Cursor, Aider, etc.) that
+# read AGENTS.md as their convention.
+# ──────────────────────────────────────────────────────────────────────
+if [[ ! -f AGENTS.md ]]; then
+  echo "📝 Writing AGENTS.md (cross-tool agent pointer)..."
+  cat > AGENTS.md <<EOF
+# $PROJECT_NAME — Agent Instructions
+
+This project uses the **Bob the Builder** protocol. The canonical agent instructions live in **\`CLAUDE.md\`** — read that first.
+
+\`AGENTS.md\` exists so non-Claude agents (OpenAI Codex CLI, Cursor, Aider, and others that read the AGENTS.md convention) can find their entry point. The content is in \`CLAUDE.md\`; this file is a pointer, not a parallel source of truth.
+
+If you are an agent running on this repo:
+
+1. Read \`CLAUDE.md\` for project context, architecture rules, never-do rules, and pointers to specs.
+2. Read \`docs/build-manifest.md\` for current phase and progress.
+3. Follow the Bob the Builder protocol at \`$BOB_PATH_DISPLAY/build-protocol.md\` (compact reference: \`build-protocol-core.md\`).
+
+Updates to project conventions go in \`CLAUDE.md\`. Don't edit this file to add new rules — they'll get lost.
+EOF
+else
+  echo "✓ AGENTS.md already exists — leaving it alone."
+fi
+
+# ──────────────────────────────────────────────────────────────────────
 # 3. .claude/settings.json — default hook set
 # ──────────────────────────────────────────────────────────────────────
 mkdir -p .claude
