@@ -66,16 +66,47 @@
 
 Free at [claude.com/claude-code](https://claude.com/claude-code). Bob runs inside it.
 
+### Step 0.5: Before you start (one-time prereqs)
+
+The next step uses Terminal and `git`. If you've never opened Terminal or installed `git`, do this first — it takes ~2 minutes.
+
+**1. Open Terminal.** Press `Cmd + Space` to open Spotlight, type `terminal`, press `Enter`. A small text window opens.
+
+**2. Check that `git` is installed.** Paste this into Terminal and press `Enter`:
+
+```bash
+git --version
+```
+
+If you see something like `git version 2.x.x`, you're good — skip to Step 1.
+
+If you see `command not found` or macOS pops up a dialog asking to install command-line tools, paste this and press `Enter`:
+
+```bash
+xcode-select --install
+```
+
+A dialog will appear. Click **Install**, accept the license, and wait ~5 minutes for it to finish. When it's done, run `git --version` again to confirm.
+
+**3. Make sure git knows who you are** (only needed the very first time you use git on this machine). Paste these two commands, one at a time, replacing the placeholders with your name and email:
+
+```bash
+git config --global user.name "Your Name"
+git config --global user.email "you@example.com"
+```
+
+*To paste in Terminal:* `Cmd + V`. *To run:* press `Enter`.
+
 ### Step 1: One-time setup
 
 Open Terminal and paste:
 
 ```bash
-mkdir -p ~/tools && cd ~/tools && git clone https://github.com/josephyeewang/bob-the-builder.git && mkdir -p ~/.claude/skills && ln -s ~/tools/bob-the-builder/skill ~/.claude/skills/bob
+mkdir -p ~/tools && cd ~/tools && { [ -d bob-the-builder ] || git clone https://github.com/josephyeewang/bob-the-builder.git; } && mkdir -p ~/.claude/skills && ln -sfn ~/tools/bob-the-builder/skill ~/.claude/skills/bob
 ```
 
-*What that did:* registered Bob as a Claude Code skill on your machine.
-*Verify:* open Claude Code in any folder and type `/bob` — Bob should respond with the mode menu. If Claude says it doesn't know that skill, the symlink didn't register; re-run the install one-liner.
+*What that did:* registered Bob as a Claude Code skill on your machine. (Safe to re-run — it skips the clone if Bob is already installed, and updates the symlink in place.)
+*Verify:* open Claude Code in any folder and type `/bob` — Bob should respond with the mode menu. If Claude says it doesn't know that skill, run `bash ~/tools/bob-the-builder/scripts/bob-doctor.sh` for a plain-English diagnosis.
 
 > **Windows users:** Bob assumes macOS or Linux. On Windows, run the install above inside [WSL](https://learn.microsoft.com/windows/wsl/install), then use Claude Code from inside WSL. Native Windows + PowerShell is not supported.
 
