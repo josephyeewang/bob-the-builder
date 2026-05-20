@@ -21,7 +21,7 @@ This is the operational counterpart to `decision-log.md`. The decision log recor
 | F3 | README prerequisite section | M1 |
 | F4 | Install one-liner idempotent | M1 |
 | F5 | Supply-chain CI (shellcheck + smoke tests) | M5 |
-| F6 | Branch protection / signed commits — **user action** (see checklist below) | M5 |
+| F6 | Branch protection (Option A) applied via Rulesets API: no force-push, no deletion on `main`; no update, no deletion on `v*` tags. Signed commits deferred (see checklist below). | M5 + post-ship |
 | F7 | CTM template file | M4 |
 | F8 | CTM H / H++ hardening column in template | M4 |
 | F11 | AGENTS.md scaffold in bob-init | M4 |
@@ -49,24 +49,20 @@ This is the operational counterpart to `decision-log.md`. The decision log recor
 |---|---|
 | F14 | Verdicts from the v2.10 → v2.11 → v2.12 audit chain all held under re-inspection. Implementation bias did not produce bad Adopts; the failure mode of that chain was *what got missed*, not *what got shipped*. |
 
-### F6 — branch protection (user action)
+### F6 — branch & tag protection (status)
 
-Recommended GitHub repo settings to action manually. These are not auto-applied because they require judgment about the solo-dev workflow (e.g., requiring PR review would break direct-to-main commits, which Joe's CLAUDE.md explicitly authorizes).
+**Applied via Rulesets API (2026-05-20):**
 
-**Settings → Branches → Branch protection rules → Add rule** (apply to `main`):
-- [ ] Require status checks to pass before merging → check `scripts-ci` jobs (shellcheck, bob-init smoke test, bob-doctor smoke test)
-- [ ] Require branches to be up to date before merging
-- [ ] Disallow force pushes
-- [ ] Disallow deletions
-- [ ] (Skip: "Require pull request reviews" — incompatible with solo-dev direct-to-main pattern)
+- [x] **Ruleset `main-no-force-push-no-delete`** (id 16664976) — `non_fast_forward` + `deletion` rules on `refs/heads/main`. Bypass: never. Solo-dev direct-to-main commits still allowed; history cannot be rewritten or branch deleted.
+- [x] **Ruleset `tag-v-no-update-no-delete`** (id 16664978) — `update` + `deletion` rules on `refs/tags/v*`. Released tags cannot be moved or removed.
 
-**Settings → Tags → Tag protection rules:**
-- [ ] Protect tags matching `v*` from deletion / force-update
+**Deferred:**
 
-**Settings → Code security → Commit signature verification (optional, recommended):**
-- [ ] Require signed commits (needs Joe to set up GPG or SSH commit signing first)
+- [ ] **Require status checks to pass before merging** — not applied. Solo-dev direct-to-main pattern means commits often need to land before CI catches an issue (Joe's CLAUDE.md: "Push is pre-authorized; changes can't be evaluated until live"). CI failures will still surface via the GitHub UI; chose ergonomics over strict gating.
+- [ ] **Require pull request reviews** — skipped, incompatible with solo-dev direct-to-main pattern.
+- [ ] **Require signed commits** — deferred. Needs Joe to set up GPG/SSH commit signing first; recommended but not zero-effort.
 
-Document any decision to skip a recommended setting in `decision-log.md` so it doesn't get re-litigated next audit.
+Document any future decision to skip or revisit any of these in `decision-log.md` so it doesn't get re-litigated next audit.
 
 ---
 
