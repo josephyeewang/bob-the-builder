@@ -39,7 +39,7 @@ BOB_ROOT="$( cd "$SCRIPT_DIR/.." && pwd )"
 # Resolve a portable form of Bob's path for the project's CLAUDE.md.
 # Prefer ~ form if BOB_ROOT is inside $HOME.
 if [[ "$BOB_ROOT" == "$HOME"/* ]]; then
-  BOB_PATH_DISPLAY="~${BOB_ROOT#$HOME}"
+  BOB_PATH_DISPLAY="~${BOB_ROOT#"$HOME"}"
 else
   BOB_PATH_DISPLAY="$BOB_ROOT"
 fi
@@ -252,6 +252,20 @@ fi
 # 7. git init (only if not already a repo)
 # ──────────────────────────────────────────────────────────────────────
 if [[ ! -d .git ]]; then
+  # Preflight: git needs user.name + user.email configured to commit.
+  # On a freshly installed machine these are blank; fail clearly with
+  # the exact two paste-ready commands instead of a cryptic git error.
+  if ! git config --get user.email >/dev/null 2>&1 || ! git config --get user.name >/dev/null 2>&1; then
+    echo ""
+    echo "⚠ git is not configured yet (needs user.name and user.email)."
+    echo "  Paste these two commands into Terminal — replace with your real name and email:"
+    echo ""
+    echo "    git config --global user.name \"Your Name\""
+    echo "    git config --global user.email \"you@example.com\""
+    echo ""
+    echo "  Then re-run this script. (Project directory and files are already created; re-running is safe.)"
+    exit 1
+  fi
   echo "🔧 Initializing git repo..."
   git init -q
   git add .

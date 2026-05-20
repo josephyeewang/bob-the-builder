@@ -35,7 +35,11 @@ If the user invokes the skill with an argument (e.g., `/bob NEW`, `/bob AUDIT`, 
 If the user says **"update bob"**, **"/bob update"**, or any equivalent phrasing requesting an update of the Bob protocol itself, run this **divergence-aware** sequence (the prior version used a bare `git pull` which fails silently when Bob's install has local commits or uncommitted edits — surface it loudly instead):
 
 ```bash
-BOB_DIR="$(dirname "$(readlink ~/.claude/skills/bob)")" && cd "$BOB_DIR" && \
+if [ ! -L ~/.claude/skills/bob ]; then \
+  echo "⚠ ~/.claude/skills/bob is not a symlink. 'update bob' expects the README install layout."; \
+  echo "  Run: bash ~/tools/bob-the-builder/scripts/bob-doctor.sh   (plain-English diagnosis)"; \
+else \
+  BOB_DIR="$(dirname "$(readlink ~/.claude/skills/bob)")" && cd "$BOB_DIR" && \
   git fetch -q origin && \
   AHEAD=$(git rev-list --count "@{u}..HEAD" 2>/dev/null) && \
   BEHIND=$(git rev-list --count "HEAD..@{u}" 2>/dev/null) && \
@@ -43,7 +47,8 @@ BOB_DIR="$(dirname "$(readlink ~/.claude/skills/bob)")" && cd "$BOB_DIR" && \
   if [ -n "$DIRTY" ]; then echo "⚠ Bob install has uncommitted changes at $BOB_DIR — resolve manually before updating."; \
   elif [ "$AHEAD" -gt 0 ] && [ "$BEHIND" -gt 0 ]; then echo "⚠ Bob install is DIVERGED from origin ($AHEAD ahead, $BEHIND behind) — resolve manually."; \
   elif [ "$BEHIND" -gt 0 ]; then git pull --ff-only && echo "✓ Bob updated ($BEHIND new commits)."; \
-  else echo "✓ Bob is already up to date."; fi
+  else echo "✓ Bob is already up to date."; fi; \
+fi
 ```
 
 After running, paraphrase the last few commit messages if any were pulled. The skill is a symlink into the Bob repo, so the update takes effect immediately — no re-install or re-symlink needed.
