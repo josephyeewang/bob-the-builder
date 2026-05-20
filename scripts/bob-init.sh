@@ -22,6 +22,16 @@ if [[ -z "$PROJECT_NAME" ]]; then
   exit 1
 fi
 
+# Reject anything that isn't a single safe directory name.
+# Allowed: letters, digits, hyphens, underscores, dots (but not as leading char).
+# Rejects: path separators, traversal (..), leading dot/dash, spaces, shell metachars.
+if [[ ! "$PROJECT_NAME" =~ ^[a-zA-Z0-9_][a-zA-Z0-9_.-]*$ ]]; then
+  echo "Error: invalid project name: '$PROJECT_NAME'" >&2
+  echo "       Use only letters, digits, '-', '_', '.' (no leading dot/dash, no '/', no spaces)." >&2
+  echo "       Example: my-new-app" >&2
+  exit 1
+fi
+
 # Detect Bob's install location from this script's path
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
 BOB_ROOT="$( cd "$SCRIPT_DIR/.." && pwd )"
