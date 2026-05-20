@@ -49,4 +49,4 @@ Bob's Step 1a requires every product to declare success metrics. Bob is a produc
 
 ## Current Version
 
-v2.12 — 2026-05-20
+v2.13 — 2026-05-20

@@ -39,7 +39,7 @@ Bob propagates to users via `update bob` (which runs `git pull` from this repo).
 - Releases are tagged (`vX.Y` annotated tags). Untagged commits between releases are work-in-progress.
 
 **User side (cautious adopters):**
-- Pin to a tagged version instead of `main` if you want predictability. The install one-liner clones HEAD by default; to pin, replace the clone command with: `git clone --branch v2.12 --depth 1 https://github.com/josephyeewang/bob-the-builder.git` (substitute the latest tag).
+- Pin to a tagged version instead of `main` if you want predictability. The install one-liner clones HEAD by default; to pin, replace the clone command with: `git clone --branch v2.13 --depth 1 https://github.com/josephyeewang/bob-the-builder.git` (substitute the latest tag).
 - When `update bob` reports new commits, glance at the changelog (`build-protocol.md` Appendix I) before accepting big changes. The divergence-aware `update bob` will tell you how many commits are coming in.
 - If you've forked Bob and customized it, `update bob` will refuse to pull on top of your local changes — that's intentional. Resolve merges manually so your customizations don't get clobbered.
 
