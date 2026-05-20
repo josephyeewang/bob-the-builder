@@ -77,6 +77,8 @@ mkdir -p ~/tools && cd ~/tools && git clone https://github.com/josephyeewang/bob
 *What that did:* registered Bob as a Claude Code skill on your machine.
 *Verify:* open Claude Code in any folder, type `/help`, look for `bob` in the skill list.
 
+> **Windows users:** Bob assumes macOS or Linux. On Windows, run the install above inside [WSL](https://learn.microsoft.com/windows/wsl/install), then use Claude Code from inside WSL. Native Windows + PowerShell is not supported.
+
 ### Step 2: Use it
 
 Open Claude Code in any project folder and type:
