@@ -97,7 +97,17 @@ In any Claude Code session, just type:
 update bob
 ```
 
-Claude will pull the latest version. That's it.
+Claude will pull the latest version. That's it. (If Bob's install has local changes or has diverged from the canonical repo, the update will refuse to pull and tell you — no silent failures.)
+
+### Troubleshooting
+
+If `/bob` doesn't work, or you're not sure if Bob is installed correctly, run the install health check:
+
+```bash
+bash ~/tools/bob-the-builder/scripts/bob-doctor.sh
+```
+
+It checks the symlink, the protocol files, and the git repo state — and tells you in plain English what's wrong if anything.
 
 ---
 
