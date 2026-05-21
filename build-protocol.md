@@ -1384,8 +1384,81 @@ Present as: `| Seam (A → B) | Contract Match | Error Handling | Auth | Rate Li
 - Flag any divergences (missed features, extra features, different behavior)
 - `→ HG:` Present findings, decide which to fix vs accept
 
+**[N+1]j: Liveness Audit (v2.14)**
+
+*This audit catches what every other A7/[N+1] audit structurally misses: code that looks correct in source but is silently broken at runtime. The only audit that executes code rather than reasoning about it.*
+
+The failure modes [N+1]a–e cannot catch by inspection alone:
+- Typo'd or missing environment variable (referenced in code, undefined at runtime)
+- Import that resolves locally but breaks in the build/runtime path
+- Route registered but middleware throws before the handler ever runs
+- Migration referenced in code but never applied to the connected database
+- A transitive dependency upgrade broke a runtime call
+- Function exported but never wired into any user path (silent orphan)
+- AI prompt template referencing an undefined variable, or a model name typo
+
+**Philosophy: steal from incumbents.** Five mature tools already solve 90% of this. Bob's job is to orchestrate them, not reinvent them. Each ships with a JSON reporter that Claude can parse and triage.
+
+**Method:**
+
+1. **Inventory every callable surface using stack-appropriate tooling:**
+
+   | Stack | Job | Tool | Command |
+   |---|---|---|---|
+   | JS/TS | Dead exports, orphan files, unused deps | **Knip** | `npx knip --reporter json` |
+   | Python | Dead code | **Vulture** | `vulture src/ --min-confidence 80` |
+   | Python | Unused imports/vars (companion) | **Ruff** | `ruff check --output-format json` |
+   | Python | Unused deps | **deptry** | `deptry . -o json` |
+   | Next.js | Route enumeration | **`next build` manifest** | `next build && cat .next/routes-manifest.json` |
+   | Express / Fastify / Hono | Route enumeration | Read framework route registry at startup | per-framework |
+
+   Output: a flat list of every route + every exported function. Tag each `reachable` / `orphan` using Knip's results.
+
+2. **Smoke every reachable HTTP route.**
+   - **If an OpenAPI / GraphQL spec exists:** use **Schemathesis** (`schemathesis run --checks all <base-url>`). Property-based, generates inputs from the schema, catches 5xx automatically. This is the highest-leverage tool in the audit when applicable.
+   - **If no spec:** Claude reads the handler signature (TypeScript types, zod schema, pydantic model) and synthesizes a minimum-viable payload per route. `curl` or `fetch` each one. Capture status + first 200 chars of response.
+   - **Authenticated routes:** require a test-user token. Stash once per project in `.env.test`. Routes that 401 without a token but succeed with it pass; routes that 5xx with a valid token fail.
+
+3. **Smoke pure exported functions.** Generate a single throwaway `liveness.smoke.test.ts` (Vitest) or pytest equivalent. For each exported function in the inventory, build a minimum call from the type signature / docstring. Run `vitest run --reporter=json` (or `pytest --json-report`). Capture pass/fail per function.
+
+4. **Smoke the user's primary journey in a browser.** Use **Playwright** — `npx playwright codegen` records the flow once, then `npx playwright test --reporter=json` runs it. One test that walks: landing page → core feature → success state. Catches what HTTP smoke cannot: client-side hydration errors, env vars present server-side but missing client-side, hooks throwing on mount, broken routing in the browser.
+
+5. **Smoke LLM/AI features.** If the product has AI capabilities, use **promptfoo** (`promptfoo eval -o results.json`) with a small YAML config listing one canonical prompt per AI surface. Catches: missing API key, prompt template referencing an undefined variable, model name typo, structured-output schema mismatch, blocked-by-safety-filter responses.
+
+6. **Verdict table:**
+
+   ```
+   | Surface | Reachable? | Invoked? | Result | Notes |
+   |---|---|---|---|---|
+   | POST /api/explain | Yes (BloodForm.tsx) | Yes | 500 | OPENAI_API_KEY undefined |
+   | GET /api/markers | Yes (Dashboard.tsx) | Yes | 200 | |
+   | parseLabPdf() | Yes (/api/explain) | Yes | ✓ | |
+   | legacyCsvImport() | No (Knip: orphan) | — | — | Propose removal |
+   | weeklyEmailJob | Yes (cron) | Yes | ✗ | SMTP_FROM unset |
+   | Browser flow: explain blood test | — | Yes | ✗ | Client: useUser is null on mount |
+   ```
+
+**Preconditions (state to user before starting):**
+- App can be started locally OR a preview / staging URL is provided. If neither, A7j cannot run — surface "Liveness unverifiable — provide a runnable target" as the finding and stop. Don't paper over this with "we'll do it later."
+- Default to **read-only / safe** smoke (GET + idempotent POST equivalents). Write-side smoke requires explicit human approval and a sandbox environment — never run write-side smoke against production.
+- AI/LLM smoke costs real money per invocation. Default: one call per AI surface. Confirm before doing more.
+
+**Stop conditions:**
+- More than 50% of routes return 5xx → stop the audit. The problem is systemic at the framework/config layer; enumerating individual failures wastes effort. Surface as: "App is fundamentally broken — fix the critical path before continuing."
+- No runnable target and no spec → A7j cannot run; document the gap and skip.
+
+**Triage:**
+- 5xx / function-throws on a reachable surface → **critical** hardening item, fix in [N+1]f
+- Orphans (Knip-flagged dead exports / unreferenced routes) → propose for removal in [N+1]f after human confirms not "future use"
+- Auth-blocked without a test token → mark `🔒 auth-required`, note in audit-log, confirm separately
+
+**What this audit does NOT catch:**
+[N+1]j catches "function explodes on first call." It does NOT catch "function returns wrong answer on this specific edge case." Correctness-on-inputs is what unit / integration tests are for. [N+1]j is the smoke layer below those — the difference between "the building has lights on" and "the building has been inspected for code violations." Both matter; this audit is only the lights.
+
+- `→ HG:` Present findings, fix critical items
+
 **[N+1]f: Fix & Final Reconcile**
-- Fix all approved items from the five audits
+- Fix all approved items from the six audits (a, b, c, d, e, j)
 - Final spec update: all docs now reflect what was actually built
 - Capability Traceability Matrix updated — all statuses final
 - Build Manifest updated to reflect hardening complete
@@ -1558,9 +1631,10 @@ After remediation, run the 5-audit hardening sequence (Security → Adversarial/
 
 ---
 
-A7 has **two audit categories**:
+A7 has **three audit categories**:
 
-- **A7a–A7e — Internal correctness audits.** Does the code itself hold up? Security, abuse-resistance, integration seams, data integrity, spec-code match.
+- **A7a–A7e — Internal correctness audits (static).** Does the code itself hold up *on inspection*? Security, abuse-resistance, integration seams, data integrity, spec-code match. These audits read code and reason about it.
+- **A7j — Internal correctness audit (live, v2.14).** Does the code actually *run end-to-end*? The only audit that executes code instead of reading it. Catches silently-broken functions that pass static review but fail at runtime (typo'd env vars, broken imports, dead routes registered but throwing in middleware, AI surfaces with bad config, orphan functions never wired into a user path).
 - **A7f–A7h — External fit & value audits (v2.10).** Is this still the right product to be building? Capability gaps vs competitors, effectiveness signals, UX friction. *Internal correctness can pass while external fit is failing — and vice versa. Both matter.*
 
 ---
@@ -1576,6 +1650,7 @@ Before any audit fires, Claude produces a scope map using A3 findings + the Capa
 | A7c Integration Seam | _seams between two built subsystems_ | _seams touching unbuilt subsystems_ | Phase varies |
 | A7d Data Integrity | _state machines of built features_ | _state machines of unbuilt features_ | Phase varies |
 | A7e Spec-Code | _capabilities marked "implemented" in CTM_ | _capabilities marked "in spec, not implemented"_ | Their build phase |
+| A7j Liveness | _every callable surface in built subsystems IF app is runnable / preview URL exists_ | _surfaces in unbuilt subsystems; all surfaces if no runnable target available_ | Their build phase / when target available |
 | A7f Capability Gap | _product-facing capabilities vs 3-5 closest competitors_ | _N/A — always in scope if product has external users_ | — |
 | A7g Effectiveness | _outcome metrics for shipped capabilities_ | _metrics for unshipped capabilities_ | Their launch |
 | A7h UX Friction | _flows touching non-engineer users_ | _N/A if Product Spec target is engineers/internal-only_ | — |
@@ -1586,6 +1661,7 @@ Rules for what counts as "in scope now":
 - **A7c Integration Seam** — every boundary where **both** sides are built. Skip seams where one side is stub/mock/unbuilt.
 - **A7d Data Integrity** — every state machine and data flow whose code exists end-to-end (input → store → retrieve)
 - **A7e Spec-Code** — only capabilities marked implemented in the CTM. Unbuilt ones have no code to compare against.
+- **A7j Liveness** — every callable surface (route, exported function, background job, AI call site) in subsystems marked implemented in the CTM. Precondition: app must be runnable locally OR a preview / staging URL provided. If neither, A7j surfaces "Liveness unverifiable" as the finding and skips — don't paper over absence of a runnable target.
 - **A7f Capability Gap** — always in scope for products with external users; skip for internal-only tools, libraries, and pure data pipelines unless the Product Spec lists a comparable
 - **A7g Effectiveness** — runs only for capabilities that have been used at least once (i.e., shipped). Pre-launch projects skip A7g entirely; record a note to run it after activation.
 - **A7h UX Friction** — runs only if the Product Spec target audience includes non-engineers, end users, or any human flow. Skip for engineer-only / backend-only / library products.
@@ -1594,17 +1670,20 @@ Rules for what counts as "in scope now":
 
 ---
 
-**A7a–A7e: Internal correctness audits (run on in-scope items only)**
+**A7a–A7e + A7j: Internal correctness audits (run on in-scope items only)**
 
-Use the same playbooks as NEW mode Step [N+1] a–e — see those sections for the per-audit checklists. The only difference is scope: each audit explicitly states *"in scope: [list]"* and *"out of scope (deferred): [list]"* at the top of its findings, so nothing is silently skipped.
+Use the same playbooks as NEW mode Step [N+1] a–e and [N+1]j — see those sections for the per-audit checklists. The only difference is scope: each audit explicitly states *"in scope: [list]"* and *"out of scope (deferred): [list]"* at the top of its findings, so nothing is silently skipped.
 
 1. **A7a: Security Audit** — see [N+1]a, scoped per A7.0
 2. **A7b: Adversarial & Abuse Audit** — see [N+1]b, scoped per A7.0
 3. **A7c: Integration Seam Audit** — see [N+1]c, scoped per A7.0
 4. **A7d: Data Integrity Audit** — see [N+1]d, scoped per A7.0
 5. **A7e: Spec-Code Consistency** — see [N+1]e, scoped per A7.0
+6. **A7j: Liveness Audit** — see [N+1]j, scoped per A7.0 *(the only audit that executes code rather than reading it; addresses the "function looks correct in source but is silently dead at runtime" failure mode)*
 
-**Critical: Fresh session per audit.** Each of A7a–A7e MUST start in a new Claude Code session (writer/reviewer pattern — same rule as Step [N+1]). The session that ran A1–A6 is the "writer"; each hardening session is a clean-context "reviewer." Claude in the A6 session should hand off with: *"Remediation complete. Hardening scope map below. Start a new session for A7a (Security Audit) and paste: 'Read build-protocol.md, run AUDIT Step A7a on this project. Scope: [paste in-scope items from A7.0].'"*
+**Critical: Fresh session per audit.** Each of A7a–A7e and A7j MUST start in a new Claude Code session (writer/reviewer pattern — same rule as Step [N+1]). The session that ran A1–A6 is the "writer"; each hardening session is a clean-context "reviewer." Claude in the A6 session should hand off with: *"Remediation complete. Hardening scope map below. Start a new session for A7a (Security Audit) and paste: 'Read build-protocol.md, run AUDIT Step A7a on this project. Scope: [paste in-scope items from A7.0].'"*
+
+**A7j-specific note on session pattern:** Liveness audit's "reviewer freshness" comes from running tooling output (Knip, Schemathesis, Playwright, Vitest, promptfoo) and reasoning about JSON results without prior implementation context. Don't run A7j in the same session that just remediated routes — it will rationalize past decisions instead of catching their failures.
 
 ---
 
@@ -1734,8 +1813,8 @@ Plus a "Top 3 smoothing opportunities" list, ranked by friction-reduction-per-ef
 
 **A7i: Fix & Defer Register**
 
-After all in-scope audits (A7a–A7h) return:
-1. **Fix** all approved critical + high items from in-scope findings (same as [N+1]f)
+After all in-scope audits (A7a–A7h + A7j) return:
+1. **Fix** all approved critical + high items from in-scope findings (same as [N+1]f). A7j 5xx / function-throws findings are *always* critical — they represent code that does not run at all and is therefore higher-priority than most static findings.
 2. **Register deferred items** in the Build Manifest. For each deferred audit row from A7.0, write an entry into the corresponding future build phase: *"Phase [X] hardening obligations inherited from AUDIT A7: [list]."* This prevents the deferred items from being forgotten — they become acceptance criteria for that phase's verification.
 3. **Mark CTM:** capabilities that passed internal-correctness hardening get an `H` status badge alongside their implementation status. Capabilities that passed both internal-correctness AND external-fit (capability gap + effectiveness + UX friction where applicable) get an `H++` badge.
 4. **Log decisions from external-fit audits.** Capability-gap verdicts (Adopt / Defer / Reject), effectiveness-driven evolution candidates, and UX smoothing opportunities all get recorded in `decision-log.md` so they don't get re-litigated in future sessions.

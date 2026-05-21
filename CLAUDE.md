@@ -49,4 +49,6 @@ Bob's Step 1a requires every product to declare success metrics. Bob is a produc
 
 ## Current Version
 
-v2.13 — 2026-05-20
+v2.14 — 2026-05-20
+
+v2.14 adds **A7j Liveness Audit** ([N+1]j in NEW mode) — the first A7 audit that executes code rather than reading it. Addresses the "function looks correct in source but is silently dead at runtime" failure mode (typo'd env vars, broken imports, dead routes, orphan functions, AI surfaces with bad config). Orchestrates incumbent tools: Knip (JS/TS inventory + dead-code), Vulture/Ruff/deptry (Python), Schemathesis (HTTP smoke), Playwright (browser flows), Vitest/pytest (function smoke), promptfoo (LLM surfaces). Bob does not reinvent — Bob orchestrates.

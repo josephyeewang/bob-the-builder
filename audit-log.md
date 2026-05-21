@@ -6,6 +6,52 @@ This is the operational counterpart to `decision-log.md`. The decision log recor
 
 ---
 
+## EVOLVE pass — v2.14 (2026-05-20) — A7j Liveness Audit added
+
+**Trigger:** User report — two functions in a downstream Bob-built product (Explain My Blood Test) implemented the previous day were silently broken on manual spot-check. Failure mode: static review and spec-match passed, but functions threw at first runtime invocation. Root cause: no A7 step actually executes code; every existing audit reads source and reasons about it.
+
+**Change shipped:**
+
+- **New audit step:** `[N+1]j Liveness Audit` (canonical playbook in NEW mode) and `A7j Liveness Audit` (scoped reference in AUDIT mode). Inserted after [N+1]e / A7e, before [N+1]f / A7f.
+- **A7 categories restructured:** "two categories" → "three categories." Internal correctness now splits into *static* (A7a–A7e, read code) and *live* (A7j, run code).
+- **A7.0 scope map updated:** new A7j row; new precondition rule ("if no runnable target, surface 'Liveness unverifiable' as the finding rather than skipping silently").
+- **A7i updated:** A7j 5xx / function-throws findings are explicitly tagged as always-critical (they represent code that does not run at all).
+- **Compact reference (build-protocol-core.md) updated:** N+1 sequence now includes Liveness; A7 description includes the third category.
+
+**Tool selection (decision rationale captured in D-003):**
+- Knip (JS/TS dead exports + inventory) — incumbent; ts-prune is effectively dead
+- Vulture + Ruff + deptry (Python) — same job split across three tools because the Python ecosystem split them
+- Schemathesis (HTTP fuzz from OpenAPI) — uncontested in its niche
+- Playwright (browser flows) — settled vs Cypress in 2025–26
+- Vitest / pytest (function-level smoke harness)
+- promptfoo (LLM/AI surface smoke)
+
+All have JSON reporters, all CLI-callable by Claude Code without human in the loop.
+
+**Bob's stance:** orchestrate, don't reinvent. A7j is glue + triage + reporting on top of mature OSS tools.
+
+### Closed in v2.14
+
+| # | Title | Notes |
+|---|---|---|
+| F25 | A7j Liveness Audit added | Resolves blind spot where AUDIT could not catch silently-broken runtime code |
+
+### Deferred from v2.14
+
+| # | Title | Severity | Why deferred | Revisit trigger |
+|---|---|---|---|---|
+| F26 | A7j as per-phase Nb verification step (not just A7) | M | Higher-impact change — would catch dead functions the day they ship, not weeks later. Deferred to keep v2.14 surgical. | Next AUDIT pass on Bob, OR after first real user runs A7j and reports back |
+| F27 | A7j auth-token bootstrap helper (script that generates `.env.test` token from project config) | L | Today users have to provide a test-user token manually. Tooling that auto-generates it would be useful but not blocking. | If multiple PR-back reports cite auth-token setup as friction |
+| F28 | A7j writes findings into a structured `liveness-report.json` artifact | L | Currently the verdict table is markdown only. A machine-readable artifact would let downstream tools / CI consume A7j output. | When A7j is run more than ~3 times by external users |
+
+### Informational
+
+| # | Note |
+|---|---|
+| F29 | A7j is the first A7 audit that has a hard precondition (runnable target). Surfacing "Liveness unverifiable" as a *first-class finding* rather than skipping silently is deliberate — it makes the gap visible instead of papering over it, same pattern as A7g's stop condition for missing success metrics (v2.13 F17). |
+
+---
+
 ## Audit pass — v2.13 (2026-05-20)
 
 **Auditor:** Fresh Claude Opus session, no involvement in v2.10–v2.12 authoring.

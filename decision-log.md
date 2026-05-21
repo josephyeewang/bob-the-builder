@@ -23,6 +23,30 @@ The companion `audit-log.md` records *deferred* items (Defer verdicts that may s
 
 ---
 
+### D-003: A7j Liveness Audit orchestrates incumbent OSS tools instead of building custom
+
+- **Date:** 2026-05-20
+- **Status:** Accepted
+- **Context:** v2.14 added A7j Liveness Audit to catch silently-broken runtime code (functions that pass static review but throw on first invocation). The natural temptation was to build a custom liveness runner inside Bob — a Bob-flavored test harness, a Bob-flavored route enumerator, a Bob-flavored AI smoke checker. The alternative is to point A7j at well-established OSS tools with mature CLI + JSON-reporter interfaces and let Bob orchestrate them.
+- **Decision:** A7j orchestrates incumbents. Bob does not implement any of:
+  - Dead-code detection (use **Knip** for JS/TS, **Vulture** + **Ruff** + **deptry** for Python)
+  - HTTP endpoint fuzzing from a schema (use **Schemathesis**)
+  - Browser flow smoke (use **Playwright**)
+  - Function-level smoke harness (use **Vitest** / **pytest**)
+  - LLM surface smoke (use **promptfoo**)
+- **Alternatives considered:**
+  - *Build a custom Bob liveness CLI that abstracts all five tools behind one interface.* Rejected — the abstraction would lag the underlying tools (Knip ships a new release every few weeks; Bob can't keep up), be a maintenance tax with no proportionate value, and create a "Bob lock-in" feel that contradicts Bob's stance as a methodology, not a tool.
+  - *Build only the orchestration layer (a script that runs all five tools and merges JSON outputs).* Considered — eventually appropriate, but not in v2.14. The protocol prose tells Claude exactly which tool to invoke and how; that's enough orchestration for now. Revisit if external users self-report this as friction.
+  - *Pick one tool per stack and require it.* Rejected — different projects already have different tools wired up; Bob should adapt to what the user has, not impose a particular vendor.
+- **Consequences:**
+  - A7j's quality is bounded above by the quality of the underlying OSS tools. When Knip improves, Bob improves for free. When (e.g.) Schemathesis drops support for a spec format, A7j inherits the limitation.
+  - The protocol prose at [N+1]j must keep tool recommendations current. If one of the cited tools dies (as ts-prune did before v2.14), the protocol needs an audit pass to update.
+  - Users running A7j must install the relevant tools first. The protocol could add a one-shot installer script as future work; deferred (audit-log F27).
+  - Bob's "do not reinvent" principle is now explicit in a decision, not just an implicit norm. Future audits proposing custom tooling for similar problems should reference this ADR.
+- **Revisit trigger:** Either (a) one of the cited incumbents becomes unmaintained without a clear successor, OR (b) multiple PR-back reports cite tool-orchestration friction as the biggest A7j pain point.
+
+---
+
 ### D-002: Bob does not maintain a full Capability Traceability Matrix for itself
 
 - **Date:** 2026-05-20

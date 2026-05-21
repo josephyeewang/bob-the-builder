@@ -96,7 +96,7 @@ Before starting, assess project complexity:
 5. **Build Manifest** → 5a: Define phases (incl. rollback plan per phase) + capability matrix → 5b: Initialize manifest (auto-advance v2.5) → `→ HG` *(at 5a only)*
 6. **Project Setup** → 6a: CLAUDE.md → 6b: Hooks (DEFAULT ON — opt out explicitly) → 6c: Repo init (auto-advance v2.5) → `→ HG` *(at 6a/6b only)*
 7+. **Build Phases** → For each phase: [N]a: Build → [N]b: Verify (use `templates/phase-report.md` — incl. AI eval results + cost guardrail) → [N]c: Reconcile → `→ HG`
-N+1. **Hardening** → Security → Adversarial/Abuse → Integration Seam → Data Integrity → Spec-Code → Fix *(fresh session per audit)*
+N+1. **Hardening** → Security → Adversarial/Abuse → Integration Seam → Data Integrity → Spec-Code → **Liveness (v2.14)** → Fix *(fresh session per audit)*
 N+2. **Learning Extraction** → Process review → Update artifacts
 
 **Each build phase follows:** Context Load → Gap Check → Plan (in Claude Code plan mode for M/L — v2.7) → `→ HG` → Test-first integration test (v2.7) → Implement → Verify → Reconcile (regenerate repo-map — v2.7) → `→ HG`
@@ -107,10 +107,11 @@ N+2. **Learning Extraction** → Process review → Update artifacts
 
 A1: Inventory → A2: Map to hierarchy → A3: Code-spec consistency → A4: Risk assessment → A5: Remediation plan → A6: Execute remediation → A7: Hardening audits (scoped) → A8: Re-entry
 
-**A7: Hardening Audits (scoped to built surface area)** — Always runs after remediation. Has **two audit categories** (v2.10):
+**A7: Hardening Audits (scoped to built surface area)** — Always runs after remediation. Has **three audit categories** (v2.14):
 
-- **Internal correctness (A7a–A7e):** Security · Adversarial-Abuse · Integration Seam · Data Integrity · Spec-Code. *Does the code hold up?*
-- **External fit & value (A7f–A7h):** Capability Gap vs competitors · Effectiveness Signals · UX Friction. *Is this still the right product to be building?*
+- **Internal correctness, static (A7a–A7e):** Security · Adversarial-Abuse · Integration Seam · Data Integrity · Spec-Code. *Does the code hold up on inspection?* These audits read code.
+- **Internal correctness, live (A7j, v2.14):** Liveness Audit — the only audit that *executes* code. Inventories every callable surface (Knip / Vulture / route manifests), then smokes each one with Schemathesis (HTTP+OpenAPI), Vitest/pytest (functions), Playwright (browser flows), and promptfoo (LLM surfaces). Catches the silent-dead-function failure mode: code that looks correct in source but throws on first call (typo'd env var, broken import, dead route, AI surface with bad config). Precondition: app runnable locally OR preview URL provided.
+- **External fit & value (A7f–A7h, v2.10):** Capability Gap vs competitors · Effectiveness Signals · UX Friction. *Is this still the right product to be building?*
 
 A7.0 first produces a **Hardening Scope Map** splitting each audit into "in scope now" vs. "deferred" (with the build phase to revisit). Human can override. Audits then run on in-scope items only, **fresh session per audit** (writer/reviewer pattern). A7i fixes critical findings, **registers deferred items into the Build Manifest** as inherited hardening obligations on future phases, and logs external-fit decisions (Adopt / Defer / Reject) in `decision-log.md`. CTM gets `H` for hardened-internally / `H++` for hardened on both axes. A7 can be re-invoked any time during the build; full-scope hardening still runs at Step [N+1] before launch.
 
