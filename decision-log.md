@@ -48,6 +48,24 @@ The companion `audit-log.md` records *deferred* items (Defer verdicts that may s
 
 ---
 
+### D-004: Bob projects use a single rules file (CLAUDE.md), not sharded rules with glob-scoped activation
+
+- **Date:** 2026-05-20
+- **Status:** Accepted
+- **Context:** v2.16 dogfood pass (A7f-implementation scan) flagged sharded rules files with YAML frontmatter scoping (Cursor `.cursor/rules/*.mdc`, Continue `.prompt`, Cline `.clinerules`, Roo `.roomodes`, goose `.goosehints`, BMad templates) as the **strongest single Adopt** in the entire run — 5 of 9 tools converged on this exact mechanism. Initially deferred as F35 pending a discrete EVOLVE pass. On user review, Joe rejected the premise: *"not sure why anyone would deviate from a single rules file."*
+- **Decision:** Bob projects keep a **single CLAUDE.md** as the agent's rules surface. We will NOT shard into `.claude/rules/*.md` with glob-scoped activation, even though tool convergence suggests it.
+- **Alternatives considered:**
+  - *Mirror Cursor's `.cursor/rules/*.mdc` shape with `description` + `globs` + `alwaysApply` frontmatter.* Rejected — the sharded model assumes a project large enough that monolithic rules pollute context; Bob's target user (non-engineer product leader) ships single-purpose products where a slim CLAUDE.md (the protocol already mandates <150 lines) fits comfortably as always-on context. Splitting it adds cognitive overhead (where does this rule go?) without proportionate benefit.
+  - *Document a Bob-flavored sharding convention.* Rejected — would violate D-003 ("orchestrate, don't reinvent") because the underlying tool (Claude Code) doesn't have native scoped-rule machinery in the same shape, so we'd be inventing a Bob-specific format.
+  - *Wait until projects accumulate enough rules that CLAUDE.md becomes painful.* Rejected as the trigger — by then we'd be migrating a convention rather than designing one. If pain ever shows up, the response is "prune CLAUDE.md," not "shard it."
+- **Consequences:**
+  - The dogfood meta-finding gets a stronger anchor: **convergence across tools ≠ Adopt for Bob.** F35 is now the canonical example — a mechanism that 5 of 9 tools share, that Bob still rejects because the target user is different. Future scans surfacing convergence-Adopts should reference D-004 as the reminder that field convergence is signal, not verdict.
+  - The "single rules file" stance is now load-bearing for Bob's design. Step 6a's CLAUDE.md template stays monolithic; the <150-line elimination test ("Would Claude make a mistake without this?") becomes the maintenance discipline rather than sharding.
+  - We accept that Bob projects with unusually large rule sets *may* eventually want sharding — but at that point the project has already outgrown Bob's target shape, and the right answer is to question the rule-set growth, not to add sharding ergonomics.
+- **Revisit trigger:** A Bob user reports that their CLAUDE.md exceeded 300 lines without obvious prunable content, and the rule bloat is materially hurting their session quality. Until then, this is the Bob position.
+
+---
+
 ### D-002: Bob does not maintain a full Capability Traceability Matrix for itself
 
 - **Date:** 2026-05-20

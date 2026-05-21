@@ -45,12 +45,17 @@ The meta-finding directly shaped how the new protocol prose is written (bias-tow
 | F39 | "Orchestrate, don't reinvent" promoted to Section 3 load-bearing principle | Was implicit (D-003, F32); now mandatory on every tool decision |
 | F40 | D-001 addendum clarifying strategic-Reject ≠ mechanism-Reject | See decision-log entry |
 
+### Rejected on user review
+
+| # | Title | Verdict | Logged in |
+|---|---|---|---|
+| F35 | Sharded rules files with frontmatter scope (Cursor `.mdc` borrow) — strongest single Adopt from dogfood (5-of-9 tool convergence) | **Reject** — Joe applied higher-order filter on user review: *"not sure why anyone would deviate from a single rules file."* Convergence across tools ≠ Adopt for Bob's target user. Now the canonical example of the bias-toward-Reject principle: the mechanism scan correctly surfaced it; the human filter correctly rejected it. | D-004 |
+
 ### Deferred from v2.16
 
 | # | Title | Severity | Why deferred | Revisit trigger |
 |---|---|---|---|---|
-| F35 | Sharded rules files with frontmatter scope (Cursor `.mdc` borrow) — strongest single Adopt from dogfood; would shard CLAUDE.md into `.claude/rules/*.md` with glob-scoped activation | M | Needs its own EVOLVE pass. (1) Requires checking what Claude Code natively supports — per "orchestrate, don't reinvent," if Claude Code has native scoped-rule machinery we should orchestrate that, not invent a Bob-flavored shape. (2) Materially changes Step 6a and the CLAUDE.md template. (3) Joe should authorize as a discrete decision given the breadth of impact. Surfaced to Joe at end of v2.16 turn. | Joe approval, or next AUDIT pass on Bob |
-| F41 | `.claude-ignore` companion file convention (Roo `.rooignore` borrow) | L | Lightweight Adopt but downstream of F35's broader Step 6a rework. Bundle when F35 lands. | When F35 ships |
+| F41 | `.claude-ignore` companion file convention (Roo `.rooignore` borrow) | L | Lightweight Adopt; previously gated on F35 but that dependency dissolved when F35 was Rejected. Standalone value: excluding generated artifacts (audit reports, screenshots) from Claude's working context. Defer for now until at least one user reports artifact-pollution friction. | First PR-back citing context pollution from generated files |
 | F42 | Frontmatter-tagged templates as named slash commands (Continue `.prompt` borrow) | L | Bob's `templates/` folder could be wrapped with `name`/`description`/`invokable` frontmatter so they become first-class slash commands. Lightweight; defer until at least one user reports template-discovery friction. | First PR-back citing template invocation friction |
 | F43 | Explicit handoff prompts in protocol prose (BMad borrow) | L | A7.0 hardening scope map already implies the next-session priming; adding the literal "paste this to start A7b" block would reduce friction. Lightweight prose change, bundle with next AUDIT pass. | Next AUDIT pass |
 | F44 | Branched plan versioning (Plandex borrow) | L | No clear pain today; Build Manifest + decision-log carry the equivalent. | First user report of plan-history churn |
