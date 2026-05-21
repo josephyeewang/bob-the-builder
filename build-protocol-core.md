@@ -74,6 +74,7 @@ Before starting, assess project complexity:
 11. **Complexity rule.** Prefer simple, explicit code over clever abstractions.
 12. **Flag divergences immediately.** Don't silently pick one interpretation.
 13. **Two-correction rule.** Same issue corrected twice → recommend `/clear` and fresh session.
+14. **Orchestrate, don't reinvent (v2.16).** Before building custom anything, check whether the field has converged on an incumbent OSS tool worth orchestrating instead. Every tool decision in `tool-decisions.md` includes an explicit "Considered orchestrating: [tool]; chose [orchestrate/build] because [reason]" line. See full protocol §3 for the rule.
 
 **Failure stop conditions (STOP immediately if):**
 - Required behavior NOT in Behavioral Core (AI products)
@@ -91,7 +92,7 @@ Before starting, assess project complexity:
 0.5. **Project Profile (v2.4)** → 0.5a: Classify against Appendix K archetypes → 0.5b: Pull addendum → 0.5c: Tag in Build Manifest → `→ HG`
 1. **Product Spec** → 1a-pre: Structured interview + Day-in-the-life (v2.5) → 1a: Draft (incl. success metrics, activation, non-goals, data classification) → 1b: Stress-test → 1c: Adversarial review → 1d: Stability loop (v2.5) → `→ HG`
 2. **Behavioral Core** (AI only) → 2a: Draft → 2b: Stress-test → 2c: Adversarial review → 2d: Eval harness → `→ HG` — use `templates/behavioral-core.md` and `templates/eval-set.md`
-3. **Architecture Contract** → 3a: Draft (incl. threat model, observability plan, rollback posture, cost guardrail, a11y/i18n/compliance posture v2.4) → 3b: Adversarial review → `→ HG`
+3. **Architecture Contract** → 3a-pre: Reference Scan (v2.16 — scan 5-10 OSS repos, bias-toward-Reject, Adopts must name insertion point) → 3a: Draft (incl. threat model, observability plan, rollback posture, cost guardrail, a11y/i18n/compliance posture v2.4) → 3b: Adversarial review → `→ HG`
 4. **Domain Specs** → 4a-pre: Breadboarding sketch (v2.7) → 4a: Identify subsystems → 4b: Write + machine-readable `contracts/` + cross-reference → 4c: Adversarial review → `→ HG`
 5. **Build Manifest** → 5a: Define phases (incl. rollback plan per phase) + capability matrix → 5b: Initialize manifest (auto-advance v2.5) → `→ HG` *(at 5a only)*
 6. **Project Setup** → 6a: CLAUDE.md → 6b: Hooks (DEFAULT ON — opt out explicitly) → 6c: Repo init (auto-advance v2.5) → `→ HG` *(at 6a/6b only)*
@@ -111,7 +112,7 @@ A1: Inventory → A2: Map to hierarchy → A3: Code-spec consistency → A4: Ris
 
 - **Internal correctness, static (A7a–A7e):** Security · Adversarial-Abuse · Integration Seam · Data Integrity · Spec-Code. *Does the code hold up on inspection?* These audits read code.
 - **Internal correctness, live (A7j, v2.14):** Liveness Audit — the only audit that *executes* code. Inventories every callable surface (Knip / Vulture / route manifests), then smokes each one with Schemathesis (HTTP+OpenAPI), Vitest/pytest (functions), Playwright (browser flows), and promptfoo (LLM surfaces). Catches the silent-dead-function failure mode: code that looks correct in source but throws on first call (typo'd env var, broken import, dead route, AI surface with bad config). Precondition: app runnable locally OR preview URL provided.
-- **External fit & value (A7f–A7h, v2.10):** Capability Gap vs competitors · Effectiveness Signals · UX Friction. *Is this still the right product to be building?*
+- **External fit & value (A7f–A7h, v2.10; A7f split v2.16):** Capability Gap vs competitors (A7f-capability) · Mechanism Scan on Rejected tools (A7f-implementation, v2.16) · Effectiveness Signals · UX Friction. *Is this still the right product to be building, and are there specific mechanisms worth borrowing from tools we strategically rejected?*
 
 A7.0 first produces a **Hardening Scope Map** splitting each audit into "in scope now" vs. "deferred" (with the build phase to revisit). Human can override. Audits then run on in-scope items only, **fresh session per audit** (writer/reviewer pattern). A7i fixes critical findings, **registers deferred items into the Build Manifest** as inherited hardening obligations on future phases, and logs external-fit decisions (Adopt / Defer / Reject) in `decision-log.md`. CTM gets `H` for hardened-internally / `H++` for hardened on both axes. A7 can be re-invoked any time during the build; full-scope hardening still runs at Step [N+1] before launch.
 
@@ -123,7 +124,7 @@ A7f (Capability Gap), A7g (Effectiveness), and A7h (UX Friction) have **scoping 
 
 ## MODE: EVOLVE — Step Sequence
 
-E1: Classify (Small/Medium/Large) → E2: Spec check → E3: Plan → E4: Execute → E5: Reconcile (Medium+) → E6: Impact audit (Large only)
+E1: Classify (Small/Medium/Large) → E2: Spec check → E3-pre: Scoped Reference Scan (v2.16 — Large always; Medium if new subsystem/integration/pattern; skip Small) → E3: Plan (Medium+ in plan mode with hard gate before E4; Medium+ writes to `evolutions/{NNN-short-name}/`) → E4: Execute → E5: Reconcile (Medium+) → E6: Impact audit (Large only)
 
 **Multiple concurrent changes:** If 3+ changes requested: independent → run sequentially (E1-E5 each); interdependent → batch into one evolution (classify batch one tier up). If batch is Large + touches 5+ subsystems → treat as mini build with phases, not an evolution.
 
@@ -223,4 +224,4 @@ If Tier 2-3 skipped during build → MUST run at hardening.
 
 ---
 
-*Core Reference for Build Protocol v2.13 — 2026-05-20*
+*Core Reference for Build Protocol v2.16 — 2026-05-20*

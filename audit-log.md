@@ -6,6 +6,65 @@ This is the operational counterpart to `decision-log.md`. The decision log recor
 
 ---
 
+## EVOLVE pass — v2.16 (2026-05-20) — Reference Scan integration + dogfood findings
+
+**Trigger:** User challenge — *"Bob feels inward-looking / self-sufficient. There are tons of interesting OSS repos with smart patterns; it's not hard for Claude Code to find the top 10 and grab the best of their capabilities. (1) Where in NEW / EVOLVE / AUDIT should this go? (2) Have we done it for Bob itself?"* Honest analysis confirmed the hypothesis: Bob had exactly **one** external-research touchpoint (`A7f Capability Gap` in AUDIT only), and it operated at the strategic-positioning level — never at the mechanism-borrowing level. The "orchestrate, don't reinvent" principle (D-003) existed but was buried in an ADR, not promoted to a load-bearing rule.
+
+**Approach:** Joe authorized "do both" against my proposal (c) — dogfood the proposed new step on Bob itself FIRST, then ship the protocol edits informed by what the dogfood produced. This is the canonical Bob-on-Bob workflow.
+
+### Dogfood pass (A7f-implementation, run on Bob v2.15 vs the 9 tools in D-001)
+
+A research subagent scanned all 9 strategically-Rejected competitors (Plandex, Roo Code, goose, Continue.dev, Spec Kit, Cursor Rules, BMad, Aider, Cline) for borrow-worthy mechanisms. Output: 3 Adopts, 6 Reject/Defer per-tool findings, 3 convergence signals across ≥3 tools, and a meta-finding that **the step must be biased toward Reject** or it silently becomes a noise generator.
+
+The meta-finding directly shaped how the new protocol prose is written (bias-toward-Reject is now a named instruction in NEW Step 3a-pre, EVOLVE E3-pre, and AUDIT A7f-implementation — all three reference this audit-log entry as the dogfood evidence).
+
+**Convergence signals (≥3 tools shared):**
+1. Markdown-with-YAML-frontmatter as the unit of reusable AI instruction (Cursor `.mdc`, Continue `.prompt`, Cline `.clinerules`, Roo `.roomodes`, goose `.goosehints`, BMad templates)
+2. Per-feature directory pattern: `{feature-id}/` containing spec + plan + tasks + reconciliation (Spec Kit, BMad, Cline, Aider, Plandex)
+3. Architect/planner ≠ executor as an explicit model boundary (Aider, Cline, Spec Kit, BMad)
+
+### Changes shipped in v2.16
+
+- **NEW mode Step 3a-pre — Reference Scan (new sub-step).** Mandatory for Standard/Heavy, optional for Light. Scan 5-10 recent OSS repos matching the project profile, harvest mechanisms with Adopt/Defer/Reject verdicts, bias toward Reject. Output: `docs/reference-scan.md`. Adopts must name a concrete insertion point or they become Defers.
+- **EVOLVE E3-pre — Scoped Reference Scan (new sub-step).** Fires for Large always, Medium with new subsystems/integrations/patterns. Skip Small and pattern-extending Medium (already vetted at NEW 3a-pre).
+- **EVOLVE E3 — Per-evolution folder structure (F33, borrowed from Spec Kit's `specs/{FEATURE-ID}/` idiom).** Medium+ evolutions create `evolutions/{NNN-short-name}/` containing spec-delta + plan + reference-scan + reconciliation note. Solves the "evolution 7 scattered across 4 docs" pain. Small evolutions skip — overhead exceeds value.
+- **EVOLVE E3 → E4 — Plan-mode hard gate (F34, borrowed from Cline's Plan/Act model).** Medium+ evolutions must be drafted in Claude Code plan mode; switching to E4 is a named, deliberate transition. Names a gate Bob already implied softly via v2.7 prose; promoting it to a hard boundary directly attacks scope-creep at the highest-risk moment.
+- **AUDIT mode A7f split into A7f-capability + A7f-implementation.** A7f-capability is the existing positioning scan, unchanged. A7f-implementation is the new mechanism scan, runs *only* on tools A7f-capability marked Reject, biased toward Reject. The dogfood meta-finding's "≤3 Adopts per 9 tools scanned" guidance is encoded in the prose.
+- **Section 3 — "Orchestrate, don't reinvent" promoted to a load-bearing principle.** Previously implicit (D-003 + audit-log F32). Now a named selection rule on top of the 6 Decision Factors, with explicit convergence-check + custom-build-threshold + document-the-choice steps. Mandates `tool-decisions.md` rows include a "Considered orchestrating: [tool]" line every time.
+- **Compact reference (build-protocol-core.md) updated:** NEW step 3 sequence now includes 3a-pre; EVOLVE sequence includes E3-pre + per-evolution folder + plan-mode gate; AUDIT A7f description names both sub-audits; rule 14 added for orchestrate-don't-reinvent. Version footer bumped to v2.16.
+
+### Closed in v2.16
+
+| # | Title | Notes |
+|---|---|---|
+| F33 | Per-evolution folder pattern in EVOLVE E3 (Spec Kit borrow) | Shipped opportunistically — insertion point lined up exactly with the new E3 prose. Validated by dogfood Top Adopt #2. |
+| F34 | Plan-mode hard gate at EVOLVE E3 → E4 (Cline borrow) | Shipped opportunistically — directly attacks Joe's existing scope-lock concern. Validated by dogfood Top Adopt #3. |
+| F36 | NEW 3a-pre Reference Scan step | The protocol infrastructure Joe asked for, informed by dogfood meta-finding |
+| F37 | EVOLVE E3-pre Scoped Reference Scan (size-gated) | Same family as F36 but scoped per-evolution |
+| F38 | AUDIT A7f split into capability + implementation | Resolves the "A7f silently lost mechanism-level signal" failure mode |
+| F39 | "Orchestrate, don't reinvent" promoted to Section 3 load-bearing principle | Was implicit (D-003, F32); now mandatory on every tool decision |
+| F40 | D-001 addendum clarifying strategic-Reject ≠ mechanism-Reject | See decision-log entry |
+
+### Deferred from v2.16
+
+| # | Title | Severity | Why deferred | Revisit trigger |
+|---|---|---|---|---|
+| F35 | Sharded rules files with frontmatter scope (Cursor `.mdc` borrow) — strongest single Adopt from dogfood; would shard CLAUDE.md into `.claude/rules/*.md` with glob-scoped activation | M | Needs its own EVOLVE pass. (1) Requires checking what Claude Code natively supports — per "orchestrate, don't reinvent," if Claude Code has native scoped-rule machinery we should orchestrate that, not invent a Bob-flavored shape. (2) Materially changes Step 6a and the CLAUDE.md template. (3) Joe should authorize as a discrete decision given the breadth of impact. Surfaced to Joe at end of v2.16 turn. | Joe approval, or next AUDIT pass on Bob |
+| F41 | `.claude-ignore` companion file convention (Roo `.rooignore` borrow) | L | Lightweight Adopt but downstream of F35's broader Step 6a rework. Bundle when F35 lands. | When F35 ships |
+| F42 | Frontmatter-tagged templates as named slash commands (Continue `.prompt` borrow) | L | Bob's `templates/` folder could be wrapped with `name`/`description`/`invokable` frontmatter so they become first-class slash commands. Lightweight; defer until at least one user reports template-discovery friction. | First PR-back citing template invocation friction |
+| F43 | Explicit handoff prompts in protocol prose (BMad borrow) | L | A7.0 hardening scope map already implies the next-session priming; adding the literal "paste this to start A7b" block would reduce friction. Lightweight prose change, bundle with next AUDIT pass. | Next AUDIT pass |
+| F44 | Branched plan versioning (Plandex borrow) | L | No clear pain today; Build Manifest + decision-log carry the equivalent. | First user report of plan-history churn |
+| F45 | Recipe YAML for hardening audits (goose borrow) | L | Per D-003, Bob stays markdown-only. Revisit if Bob ever needs to run unattended in CI. | First real ask for Bob to run unattended |
+
+### Informational
+
+| # | Note |
+|---|---|
+| F46 | Dogfood meta-finding from the v2.16 A7f-implementation scan: **3 Adopts per 9 tools scanned (~33% hit rate) is the realistic high end**. The protocol prose now mandates bias-toward-Reject because, without it, the step degrades into a perpetual maybe-pile. This is the canonical reference for "scan should produce closure, not aspiration." Future scans that produce >50% Adopt rates should be re-run with stricter filtering — reference this finding in the re-run prompt. |
+| F47 | The "do (b) first, then (a)" sequencing — dogfood the proposed step before mandating it — is itself a meta-pattern worth naming. When proposing a new audit step in future EVOLVE passes, run the proposed step on Bob first and let the dogfood meta-finding shape the prose. v2.16 is the canonical instance of this pattern; reference when proposing future audit additions. |
+
+---
+
 ## EVOLVE pass — v2.15 (2026-05-20) — close v2.14 deferred items
 
 **Trigger:** User challenge — "why not do the deferred items now?" Honest review: F26 was the actual fix for the failure mode v2.14 existed to address (per-phase Liveness catches dead functions the day they ship, not at next audit), F28 was trivial (10-line JSON spec addition), and F27 was reshapeable from a brittle cross-stack script into per-stack protocol prose that's strictly better.

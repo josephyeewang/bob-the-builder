@@ -20,6 +20,7 @@ The companion `audit-log.md` records *deferred* items (Defer verdicts that may s
   - We accept that Bob will not be the "most feature-rich" agent-protocol product in any single dimension. Bob's competitive differentiation is the **methodology depth** (5-doc hierarchy + audit modes + non-engineer narration) — not feature parity.
   - If a future audit pass surfaces a *specific* pattern from one of these tools that addresses a *specific* gap Bob can't solve another way, that ADR should reference this one as the supersession baseline.
 - **Revisit trigger:** Any one of these tools ships an *external-fit-style audit step* (the closest competitor to Bob's A7f–A7h). That would be a genuine architectural overlap worth re-evaluating.
+- **2026-05-20 addendum (v2.16):** The original Reject was scoped to **strategic positioning** — *should Bob's identity become like theirs?* — and that verdict stands unchanged. The v2.16 EVOLVE pass introduced a distinct sub-audit (A7f-implementation) that asks a different question: *are there specific MECHANISMS in those Rejected tools worth borrowing as discrete patterns?* The first run of A7f-implementation on the same 9 tools produced 3 mechanism-level Adopts (per-feature folder, plan-mode hard gate, sharded rules files) — see audit-log v2.16 entry. **Strategic Reject ≠ mechanism Reject.** This ADR's identity-level verdict is unchanged; future audits should use A7f-implementation for the mechanism question and not re-litigate the identity question logged here.
 
 ---
 

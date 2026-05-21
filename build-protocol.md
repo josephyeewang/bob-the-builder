@@ -291,6 +291,20 @@ If there's >30% chance of switching providers within 12 months, wrap the integra
 - Common abstractions: messaging (SMS/push), AI models, email, payments, calendar, storage
 - Don't abstract everything — only capabilities where the market is shifting or you're uncertain
 
+#### Orchestrate, Don't Reinvent (v2.16 — load-bearing principle)
+
+Before building anything custom that wraps a capability the open-source world has already converged on, **orchestrate the incumbent** instead. The protocol prose should name specific tools; Bob does not maintain a Bob-flavored re-implementation.
+
+This is now an explicit selection rule on top of the 6 Decision Factors above. When evaluating a capability:
+
+1. **Convergence check.** Has the field converged on 1-2 incumbent tools for this capability (each with mature CLI + JSON output + active maintenance)? If yes, default to orchestrating the incumbent. Examples (current at v2.16): Knip for JS/TS dead-code; Schemathesis for HTTP fuzz; Playwright for browser smoke; Vitest/pytest for unit; promptfoo for LLM evals; Inngest/Temporal for durable jobs; Stripe for payments.
+2. **Custom build threshold.** Only build custom when (a) no convergence exists, (b) the incumbent is unmaintained without a clear successor, OR (c) the abstraction *itself* (not the underlying capability) is your product's differentiation.
+3. **Document the choice.** Every tool decision in `tool-decisions.md` includes an explicit "Considered orchestrating: [tool]; chose to [orchestrate/build] because [reason]" line — even when the choice is obvious. This creates an audit trail and prevents silent reinvention.
+
+**Why this is a principle, not a one-off:** D-003 (A7j orchestrates incumbent OSS tools) and audit-log F32 (F27 reshaped from script to per-stack prose) are both instances of this rule. Promoting it to a Section 3 principle makes it fire on every tool decision, not just the ones that happened to surface in audits.
+
+**Anti-pattern this prevents:** the "Bob-flavored X" trap — building a wrapper that lags the underlying tool, adds a maintenance tax with no proportionate value, and creates lock-in that contradicts Bob's stance as a methodology.
+
 ### 4. Memory & Lessons
 
 #### What Gets Saved (automatically by Claude Code)
@@ -901,6 +915,38 @@ Behavioral Core stress-tests are prose scenarios; they cannot be re-run automati
 - **Maintenance rule:** When Behavioral Core is modified during build, the eval set MUST be updated in the same commit (propagation enforcement applies to evals).
 
 ### Step 3: Architecture Contract
+
+**3a-pre: Reference Scan (v2.16 — MANDATORY for Standard and Heavy tracks; OPTIONAL for Light)**
+
+Before locking the tech stack, scan the open-source world for what's already shipped against your project profile. The point is NOT to copy — it's to ensure tool decisions in 3a aren't made in a vacuum, and to surface borrow-worthy patterns the field has converged on.
+
+**Method:**
+
+1. **Identify 5-10 recent reference repos** matching the project profile from Step 0.5 (the archetype) and the breadboard from Step 4a-pre (the major flows). Sources: GitHub trending in the relevant language/topic over the last 12 months, repos cited in awesome-lists for the archetype, repos linked from the Appendix L integration playbooks. **Recency matters** — anything older than ~18 months without an active maintainer should be skipped unless it's the convergence incumbent.
+
+2. **For each repo, harvest 1-3 specific MECHANISMS** (file formats, workflow primitives, abstraction shapes, library choices, configuration idioms) — not features, not positioning. Concrete, named, copy-able.
+
+3. **For each mechanism, assign a verdict** with bias toward **Reject**:
+   - **Adopt** — name a concrete insertion point in *this* project's planned architecture, the exact mechanism, and 2 sentences of rationale. If you can't name where it goes, it's not an Adopt.
+   - **Defer** — interesting but no clear insertion point today. State the revisit trigger.
+   - **Reject** — looked, not worth borrowing. One-line reason (so it isn't re-litigated).
+
+4. **Convergence detection.** Mechanisms that ≥3 repos share are stronger Adopt candidates than one-off curiosities — field convergence is signal. Call these out explicitly.
+
+5. **Filter against the Product Spec.** Any Adopt must serve a capability already in the Product Spec from Step 1a. Adopts that introduce new capabilities are scope creep — push them to a future Build Manifest entry or to the rejection pile, do not silently expand scope here.
+
+**Bias instruction (v2.16, derived from the v2.16 dogfood pass on Bob itself):** Most scans will produce a 3:6 Adopt-to-Reject/Defer ratio at best. If your output is heavy on Adopts, you are likely confusing "interesting" with "load-bearing." Re-run with stricter filtering: would this Adopt change a specific tool-decision row or domain-spec line, or would it just sit in a wishlist?
+
+**Output:** `docs/reference-scan.md` containing the matrix below, plus a "Top 3 Adopts" ranked-by-leverage list and a 1-paragraph honest meta-note (did the scan produce signal or noise? — if noise, *say so* and the scan still served its purpose).
+
+```
+| Repo | URL | Mechanism | Verdict | Insertion point | Rationale / Revisit trigger |
+|---|---|---|---|---|---|
+```
+
+**Orchestrate, don't reinvent** (Section 3 principle): if a scan surfaces an incumbent tool that solves a capability you were planning to custom-build, the Adopt is "use tool X" not "build a Bob-flavored wrapper around X."
+
+`→ HG:` Human reviews matrix and Top 3 Adopts. Each Adopt either becomes a row in `tool-decisions.md` (if it changes a tool choice) or a reference note attached to the relevant domain spec (Step 4b) for the implementing phase to honor. Rejects and Defers are logged so the next scan on this project skips them.
 
 **3a: Draft**
 - Claude drafts the Architecture Contract covering:
@@ -1778,7 +1824,13 @@ Like A7a–A7e, run each in a **fresh session** for clean reviewer context.
 
 ---
 
-**A7f: Capability Gap & Competitor Scan**
+**A7f: Capability Gap & Implementation Scan (v2.16 — split from prior single-step A7f)**
+
+A7f has **two sub-audits** that ask different questions and produce different verdicts. Run them sequentially in the same fresh session — A7f-capability first (positioning), then A7f-implementation (mechanism-borrowing) on the rejected tools.
+
+---
+
+**A7f-capability: Capability Gap & Competitor Scan**
 
 *Question this audit answers: are there meaningful capabilities your users would expect — that you don't have, by looking at the products they'd otherwise use?*
 
@@ -1814,7 +1866,53 @@ Plus a 3-sentence executive summary covering: (a) the most important gap, (b) th
 
 **Cadence:** Run at every AUDIT invocation. Competitors evolve faster than internal docs do.
 
-`→ HG:` Present capability matrix + summary. Decisions on each gap (Adopt / Defer / Reject) get logged in `decision-log.md`. Adopted items become EVOLVE candidates.
+`→ HG:` Present capability matrix + summary. Decisions on each gap (Adopt / Defer / Reject) get logged in `decision-log.md`. Adopted items become EVOLVE candidates. **Tools Rejected at this step proceed into A7f-implementation** — strategic Reject does not mean "ignore"; it means "don't adopt their framing, but check whether they have specific mechanisms worth borrowing."
+
+---
+
+**A7f-implementation: Mechanism Scan on Rejected Tools (v2.16)**
+
+*Question this audit answers: for the competitors strategically rejected in A7f-capability, are there specific MECHANISMS / file formats / workflow primitives / library choices worth borrowing as discrete patterns — without adopting the whole framework?*
+
+This sub-audit exists because of a real failure mode: A7f-capability used to settle every competitor with a single Adopt-feature / Reject-framing verdict, which silently lost signal. A tool can be wrong as a *whole product* while having one specific *mechanism* that's worth folding into Bob/your product as an idiom. Without this step, those mechanisms get re-discovered repeatedly across audits, or never get borrowed at all.
+
+**Hard scope:** runs **only** on tools that A7f-capability marked Reject. Tools marked Adopt are already heading into EVOLVE; tools marked Defer stay deferred. This avoids double-work.
+
+**Method:**
+
+1. **For each Rejected tool from A7f-capability, identify 1-3 candidate mechanisms.** Not features (that was A7f-capability's job). Concrete, named, copy-able shapes — file formats, slash-command idioms, state-machine patterns, prompt scaffolds, configuration conventions, library orchestration choices.
+
+2. **For each mechanism, assign a verdict with bias toward Reject:**
+   - **Adopt-as-pattern** — name the exact mechanism AND the exact insertion point in your product (which file / which step / which subsystem). If you can't name where it goes, it's not an Adopt — push it to Defer.
+   - **Defer** — interesting mechanism, no clear insertion point today. State a concrete revisit trigger.
+   - **Reject** — looked, not worth borrowing. One-line reason (so future audits don't re-litigate it).
+
+3. **Convergence detection.** Mechanisms that ≥3 of the Rejected tools share are stronger Adopt candidates than one-off curiosities — when the field converges, that's signal. Call these out in a "Convergence signals" section at the top of the output, separate from the per-tool table.
+
+4. **Filter against existing scope.** Any Adopt-as-pattern must serve a capability already in your Product Spec OR resolve a known friction logged in `decision-log.md` / `audit-log.md`. Adopts that expand product scope are not borrows — they're feature additions, route them through normal EVOLVE.
+
+**Bias instruction (v2.16, derived from the dogfood pass that introduced this step — see audit-log v2.16):** A healthy run produces ≤3 Adopts per 9 tools scanned (~30% hit rate). If your output is heavier than that, you are conflating "interesting" with "load-bearing." Re-run with the question: *"if I don't borrow this, what specifically gets worse?"* If the answer is "nothing concrete," it's a Reject.
+
+**Output format:**
+
+```
+### Convergence signals (mechanisms shared by ≥3 rejected tools)
+[bullets]
+
+### Per-tool mechanism findings
+| Tool | Mechanism | Verdict | Insertion point | Rationale / Revisit trigger |
+|---|---|---|---|---|
+
+### Top 3 Adopts (ranked by leverage)
+1. [mechanism] — [why this matters most]
+
+### Dogfood meta-note
+[1 paragraph — was the run signal or noise? Honest answer. If noise, say so; the scan still served by closing the question.]
+```
+
+**Cadence:** runs every AUDIT invocation, immediately after A7f-capability. Adds 15-30 min to A7f total when there are 5-10 Rejected tools to scan.
+
+`→ HG:` Present mechanism matrix + Top 3 Adopts. Adopts feed into EVOLVE backlog (each Adopt becomes a Medium evolution with a named insertion point). Rejects and Defers logged so they don't get re-litigated.
 
 ---
 
@@ -1959,12 +2057,31 @@ Before building anything:
 
 ### Step E3: Plan
 
+**E3-pre: Scoped Reference Scan (v2.16 — gated by size)**
+
+Fires when:
+- **Large** evolutions — always
+- **Medium** evolutions that introduce a new subsystem, a new external integration, or a pattern not already in the codebase — always
+- **Medium** evolutions that extend an existing pattern — skip (the pattern was already vetted at NEW Step 3a-pre)
+- **Small** — skip
+
+When it fires: run the same scan as NEW Step 3a-pre but scoped tightly to the *specific capability* being added. 3-5 reference repos, not 5-10. Harvest mechanisms with the same Adopt/Defer/Reject discipline and the same Reject-biased instruction.
+
+**Output:** appended to `evolutions/{NNN-short-name}/reference-scan.md` (see folder structure below). Adopts feed into the Plan below; Rejects/Defers are logged so the same scan doesn't re-litigate them.
+
+**Per-evolution folder (v2.16, borrowed from Spec Kit's `specs/{FEATURE-ID}/` pattern — see audit-log F33):** Medium and Large evolutions create `evolutions/{NNN-short-name}/` containing this evolution's spec-delta, plan, reference-scan (if applicable), and post-E5 reconciliation note. Number sequentially; short-name in kebab-case. This solves the "everything-about-evolution-7 is scattered across 4 docs" problem; the original docs in `docs/` remain the canonical full-state spec, but the per-evolution folder is the change-unit view. Small evolutions skip — overhead exceeds value.
+
+**E3-main: Plan**
+
 - List what files will change and why
 - Identify downstream impacts (what else might break or need updating?)
 - For Large changes: identify if new domain specs are needed
 - For Behavioral Core changes: explicitly map the decision logic change
+- For Medium+: write the plan into `evolutions/{NNN-short-name}/plan.md`
 
-`→ HG:` Human reviews plan, approves
+**Plan-mode hard gate (v2.16 — Medium+ only, borrowed from Cline's idiom — see audit-log F34):** For Medium and Large evolutions, the plan above MUST be drafted in Claude Code's plan mode. Switching out of plan mode is a named, deliberate transition into E4 (Execute). Do not slide from planning to editing implicitly — this is the moment most likely to leak scope creep, and naming the gate makes it visible. Small evolutions skip plan mode (overhead exceeds value).
+
+`→ HG:` Human reviews plan, approves. For Medium+, approval is the explicit signal to leave plan mode and start E4.
 
 ### Step E4: Execute
 
@@ -2700,6 +2817,9 @@ When the human says "update the build protocol based on recent projects," Claude
 
 | Version | Date | Changes | Triggered By |
 |---------|------|---------|-------------|
+| v2.16 | 2026-05-20 | **External research integrated into Bob's logic, dogfooded on Bob itself.** Pre-v2.16, Bob had exactly one external-research touchpoint (`A7f Capability Gap` in AUDIT, strategic-positioning level only) — by structure, Bob was inward-looking. Five changes: (1) **NEW Step 3a-pre Reference Scan** — mandatory for Standard/Heavy before architecture lock; scan 5-10 OSS repos, bias-toward-Reject Adopt/Defer/Reject matrix, Adopts must name a concrete insertion point. (2) **EVOLVE E3-pre Scoped Reference Scan** — size-gated (Large always, Medium for new subsystems/integrations/patterns). EVOLVE E3 also gains per-evolution folder `evolutions/{NNN-short-name}/` (Spec Kit borrow F33) and a named plan-mode → Execute hard gate (Cline borrow F34). (3) **AUDIT A7f split** into `A7f-capability` (existing positioning scan) + `A7f-implementation` (new mechanism-borrow scan, runs only on A7f-capability Rejects, biased toward Reject). (4) **Section 3 promotes "Orchestrate, don't reinvent"** from implicit ADR (D-003 + F32) to load-bearing principle with convergence-check + custom-build threshold; `tool-decisions.md` now mandates a "Considered orchestrating: [tool]" line per decision. (5) **Dogfood pass:** first A7f-implementation run was on Bob itself against the 9 strategically-Rejected tools in D-001 → 3 Adopts, 6 Reject/Defer, 3 convergence signals, meta-finding ("bias toward Reject or this step becomes noise") that is now baked into the prose for all three new scan steps. F33 + F34 shipped opportunistically; F35 (sharded rules — Cursor `.mdc` borrow) deferred for a discrete EVOLVE pass. D-001 gains addendum: strategic Reject ≠ mechanism Reject. Mirrored in `build-protocol-core.md` + new rule 14 (orchestrate, don't reinvent). | User challenge: *"Bob feels inward-looking. Tons of OSS repos with smart patterns; not hard for Claude to find the top 10 and grab the best. (1) Where in NEW/EVOLVE/AUDIT should this go? (2) Have we done it for Bob itself?"* Analysis confirmed: 1 of ~30+ steps had external scanning, only at strategic-positioning level. Approach was "dogfood (b) first, then ship protocol (a) informed by the meta-finding" — itself a meta-pattern now named in audit-log F47. |
+| v2.15 | 2026-05-20 | v2.15 closes the three v2.14 deferred items: (1) Per-phase Liveness check (F26) — Tier 1 phase-gate step, scoped to phase deltas. (2) Per-stack auth-token recipes (F27 reshaped from script to prose) — Clerk/NextAuth/Supabase/Auth0/custom JWT/session cookies. (3) `liveness-report.json` machine-readable artifact (F28) — versioned schema, append-not-overwrite. | User challenge: "why not do the deferred items now?" Honest review confirmed F26 was the actual fix for the v2.14 failure mode (catches dead functions the day they ship, not weeks later), F28 was trivial, F27 was reshapeable per D-003. |
+| v2.14 | 2026-05-20 | **A7j Liveness Audit added** — first A7 audit that executes code rather than reading it. Orchestrates Knip / Vulture+Ruff+deptry / Schemathesis / Playwright / Vitest+pytest / promptfoo. A7 categories restructured: two → three (static / live / external-fit). | User report: two functions in a downstream Bob-built product were silently broken; static review and spec-match passed but functions threw at first runtime invocation. |
 | v2.13 | 2026-05-20 | **Fresh-session adversarial re-audit — 16 Adopt items shipped across 7 milestones.** Audit run by a clean Claude Opus session with no involvement in v2.10–v2.12 to control for implementation bias. **M1 (onboarding):** README adds Step 0.5 "Before you start" with Terminal/git/xcode-select preflight (F18, F3); install one-liner now idempotent via `ln -sfn` + clone guard (F4). **M2 (scripts hardening):** `update bob` preflights non-symlink installs (F1); `bob-init.sh` preflights git user.name/user.email (F2). **M3 (protocol prose):** Behavioral Core worked example extended from 1-of-7 to all 7 sections — addresses the v2.11 half-fix that left 6 sections as jargon (F19); A7g stop condition rewritten as a first-class finding ("we cannot tell if this product is working") instead of escape-hatching to "EVOLVE candidate" (F17); Step [N+2]d Closing Checkpoint Summary template added (F21); CLAUDE.md self-effectiveness metric rephrased from tautological "passing" to descriptive "self-application count" (F16). **M4 (templates + portability):** new `templates/capability-traceability-matrix.md` with H/H++ hardening column (F7, F8); `bob-init.sh` writes `AGENTS.md` next to `CLAUDE.md` as cross-tool agent-instructions pointer (Codex/Cursor/Aider) — Bob-built projects no longer Claude-locked (F11). **M5 (supply chain):** `.github/workflows/scripts-ci.yml` runs shellcheck + bob-init smoke test + bob-doctor smoke test (F5); F6 (branch protection / signed commits) registered in audit-log as user-action checklist. **M6 (effectiveness):** `scripts/bob-stats.sh` auto-computes fix-commit ratio with paste-ready output (F15a); PR-back prompt now fires at Step [N+1]f + A7i + [N+2]c instead of only [N+2]c (F15b); `joe@joe.wang` documented as parallel channel (F15c). **M7 (housekeeping):** new `audit-log.md` registers F22 itself + 5 Defers + 1 informational + F6 user-action checklist; new `decision-log.md` records the 2 Rejects (D-001 Plandex/Roo/goose/Continue.dev influences not adopted; D-002 no full CTM for Bob itself). | Fresh-session re-audit explicitly checking whether v2.10–v2.12 verdicts were implementation-biased. v2.11/v2.12 verdicts held under re-inspection (F14). The new audit's value: surfaced UX gaps still present after v2.11 partial fixes (Step 2 worked example covered only 1 of 7 sections; non-engineer install assumed prior Terminal/git knowledge), structural weaknesses in v2.11's PR-back design (no auto-stats, single trigger point), an emerging AGENTS.md cross-tool convention not visible to v2.11, and Bob's own A7i protocol violation (no register for deferred items). 24 findings total: 16 Adopt (this release), 5 Defer (audit-log), 2 Reject (decision-log), 1 informational. |
 | v2.12 | 2026-05-20 | **Supply-chain trust + install health check (closes A7a/A7c deferred items from the v2.10 audit).** (1) **SECURITY.md adds a Supply Chain section** documenting Bob's trust model: maintainer commits to `scripts/` / `skill/SKILL.md` / install one-liner / SECURITY.md get extra review, new contributors land docs-only first, releases are tagged annotated for pinnability. User-side: cautious adopters can pin to a tag via `git clone --branch vX.Y --depth 1`. Verify canonical repo URL before running install. (2) **New `scripts/bob-doctor.sh`** — install health check that verifies skill symlink integrity, SKILL.md readability, protocol file resolution via the portable path form, and git repo state (remote, branch, divergence, dirty tree). Plain-English output so non-engineers can act on it. Surfaces dangling symlinks and divergence proactively instead of waiting for `/bob` to fail in Claude Code. (3) **README adds a Troubleshooting section** pointing to `bob-doctor.sh`. (4) **Annotated git tags** (`vX.Y`) — v2.11 tagged retroactively as the first pinnable release. | Two deferred items from the v2.10 dogfood pass: A7a flagged supply-chain risk on the public repo (PRs touching scripts/SKILL.md propagate to all users via `update bob`); A7c flagged the dangling-symlink case (user moves/deletes the Bob install and `/bob` fails at Claude Code's skill-loading layer, where Bob can't self-detect). |
 | v2.11 | 2026-05-20 | **Self-audit findings from v2.10 dogfooding — 8 Adopt items shipped.** (1) **Bob declares its own success metrics** in CLAUDE.md, dogfooding Step 1a — surfaces that 4 of 5 metrics are structurally unmeasured (no telemetry by design). (2) **Step [N+2]c PR-back template** — copyable issue template for users to self-report after shipping, the only feedback channel Bob has. (3) **Step 0.5a switched from "ask cold" to "Claude proposes from filesystem signals, user confirms"** — reads package.json / Cargo.toml / pyproject.toml / etc., proposes archetype with rationale, falls back to asking only when no signals exist. (4) **§11.3 Checkpoint Summary template** adds **Quality Bar self-check** field — Claude self-rates against §11.7 criteria before HG so the non-engineer can ride along on the judgment instead of evaluating cold. (5) **Step 2 Behavioral Core demystified** — plain-language framing + worked example before the 7-section drafting; addresses the most jargon-heavy step. (6) **SKILL.md `update bob` command made divergence-aware** — same class of silent-failure bug as today's pullall fix; now reports DIVERGED / UNCOMMITTED loudly instead of trying to pull. (7) **README "five audits" → "eight separate audits"** — stale post-v2.10. (8) **README `/help` verification step replaced** — couldn't confirm `/help` actually lists skills; safer instruction is "type `/bob` and confirm it responds." | Live v2.10 dogfood pass on bob-the-builder itself surfaced 8 Adopt items: 6 from external-fit audits (capability gap pointed to Bob's own unmeasured effectiveness + Behavioral Core UX friction; A7g flagged that Bob's Product Spec didn't satisfy Bob's own Step 1a requirement for success metrics) + 2 from internal-correctness pass (`update bob` was the same silent-failure class as pullall; README hardening claim went stale at the same time the new audits shipped). |

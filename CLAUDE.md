@@ -49,7 +49,21 @@ Bob's Step 1a requires every product to declare success metrics. Bob is a produc
 
 ## Current Version
 
-v2.15 — 2026-05-20
+v2.16 — 2026-05-20
+
+v2.16 integrates **external research into Bob's own logic** and dogfoods the integration on Bob itself. Before v2.16, Bob had exactly one external-research touchpoint (`A7f Capability Gap` in AUDIT only, at strategic-positioning level — never at mechanism-borrow level). Result: Bob was inward-looking by structure, even though "orchestrate, don't reinvent" was an implicit principle.
+
+Five changes:
+
+1. **NEW Step 3a-pre — Reference Scan (new sub-step).** Mandatory for Standard/Heavy. Scan 5-10 OSS repos matching the project profile before locking the stack, harvest mechanisms with Adopt/Defer/Reject verdicts, bias toward Reject. Output: `docs/reference-scan.md`.
+2. **EVOLVE E3-pre — Scoped Reference Scan (size-gated).** Fires for Large always, Medium with new subsystems/integrations/patterns. Skip Small. Also: Medium+ evolutions now write to `evolutions/{NNN-short-name}/` folders (Spec Kit idiom — F33) and switch from Claude Code plan mode to E4 via a named hard gate (Cline idiom — F34).
+3. **AUDIT A7f split** into `A7f-capability` (existing positioning scan) + `A7f-implementation` (new mechanism-borrow scan, runs only on tools A7f-capability marked Reject). The split resolves the failure mode where strategic Reject silently lost mechanism-level signal.
+4. **Section 3 — "Orchestrate, don't reinvent" promoted to a load-bearing principle.** Previously implicit (D-003 + audit-log F32). Now a named selection rule on top of the 6 Decision Factors, with explicit convergence-check + custom-build-threshold steps. Mandates `tool-decisions.md` rows include a "Considered orchestrating: [tool]" line.
+5. **Dogfood pass:** the first A7f-implementation run was on Bob itself, against the 9 strategically-Rejected tools in D-001. Produced 3 Adopts, 6 Reject/Defer, 3 convergence signals, and a meta-finding ("bias toward Reject or this step becomes noise") that is now baked into the prose for all three new scan steps. F33 + F34 shipped opportunistically; F35 (sharded rules files) deferred for a discrete EVOLVE pass.
+
+Meta-pattern named in audit-log F47: *propose new audit step → dogfood it on Bob → let the meta-finding shape the prose, then ship.* v2.16 is the canonical instance; reference when proposing future audit additions.
+
+---
 
 v2.15 closes the three v2.14 deferred items:
 
