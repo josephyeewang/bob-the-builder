@@ -135,12 +135,13 @@ E1: Classify (Small/Medium/Large) → E2: Spec check → E3: Plan → E4: Execut
 
 1. **Build check:** Compiles, types check. Machine-readable `contracts/` validate.
 2. **Test check:** Unit tests pass. Integration tests pass (hot path exercised). Deployment tests if external integrations.
-3. **Hot path check:** Project-wide hot paths pass. Failure = stop condition.
-4. **AI eval check (v2.2):** If phase touched AI behavior, re-run `evals/behavioral-core.yaml`. Pass-rate drop vs prior phase = stop condition.
-5. **Cost guardrail check (v2.2):** If cost budget defined in Architecture Contract, measure actual cost. Exceeding budget = stop condition.
-6. **Regression check:** All prior-phase flows still work.
-7. **Global invariants:** All pass.
-8. **Spec consistency:** No drift detected.
+3. **Liveness check on phase deltas (v2.15):** Every new/modified route, exported function, job, and AI call site introduced this phase is smoked end-to-end (Knip + curl/fetch + Vitest + promptfoo, scoped to deltas). Any reachable surface that 5xx's or throws on first call = stop condition. Skipped only if no runnable target OR phase touched no callable surface (logged either way).
+4. **Hot path check:** Project-wide hot paths pass. Failure = stop condition.
+5. **AI eval check (v2.2):** If phase touched AI behavior, re-run `evals/behavioral-core.yaml`. Pass-rate drop vs prior phase = stop condition.
+6. **Cost guardrail check (v2.2):** If cost budget defined in Architecture Contract, measure actual cost. Exceeding budget = stop condition.
+7. **Regression check:** All prior-phase flows still work.
+8. **Global invariants:** All pass.
+9. **Spec consistency:** No drift detected.
 
 ---
 

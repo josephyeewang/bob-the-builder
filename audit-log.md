@@ -6,6 +6,41 @@ This is the operational counterpart to `decision-log.md`. The decision log recor
 
 ---
 
+## EVOLVE pass — v2.15 (2026-05-20) — close v2.14 deferred items
+
+**Trigger:** User challenge — "why not do the deferred items now?" Honest review: F26 was the actual fix for the failure mode v2.14 existed to address (per-phase Liveness catches dead functions the day they ship, not at next audit), F28 was trivial (10-line JSON spec addition), and F27 was reshapeable from a brittle cross-stack script into per-stack protocol prose that's strictly better.
+
+**Changes shipped:**
+
+- **F26 — Per-phase Liveness check (now Tier 1).** Added as step 3 in the Phase Gate enumeration (build-protocol.md §7 and build-protocol-core.md PHASE GATE). Scoped to phase deltas only (git diff vs prior phase tag). Same tool set as A7j but narrowed: only routes/functions/jobs/AI surfaces this phase touched. Stop condition if anything reachable returns 5xx. Skipped (with logged note in Phase Report) only if no runnable target OR phase touched no callable surface.
+- **F27 reshaped — Per-stack auth-token recipes.** Added a table in `[N+1]j` covering Clerk, NextAuth/Auth.js, Supabase Auth, Auth0, custom JWT, and Rails/Django/Flask-Login session cookies. Tokens stash to `.env.test`. Pattern is "Claude detects auth provider during inventory, walks user through matching recipe, stashes token once." The original-shape F27 (a script) was rejected per D-003's no-reinvention stance.
+- **F28 — `liveness-report.json` machine-readable output.** Both A7j and per-phase Liveness now write structured findings to `audit-artifacts/liveness-report-<timestamp>.json` alongside the markdown verdict table. Schema versioned (`schema_version: "1.0"`). Append-not-overwrite so diff-across-time works. Default `.gitignore` for `audit-artifacts/` unless user opts in.
+
+**Order-of-operations note:** Per-phase Liveness (F26) is the more important of the three. v2.14 with only A7j would have caught the blood-test bug at the next audit; v2.15 catches it at phase verification. The latency between bug-shipped and bug-found shrinks from "weeks" to "minutes."
+
+### Closed in v2.15
+
+| # | Title | Notes |
+|---|---|---|
+| F26 | Per-phase Liveness check in Nb verification | Now Tier 1 Phase Gate step. Scoped to phase deltas. |
+| F27 | Auth-token guidance (reshaped from script to per-stack recipes) | 6-stack table in `[N+1]j` |
+| F28 | `liveness-report.json` machine-readable artifact | Versioned schema, append-not-overwrite |
+
+### Deferred from v2.15
+
+| # | Title | Severity | Why deferred | Revisit trigger |
+|---|---|---|---|---|
+| F30 | A7j orchestration script (`bob-liveness.sh`) that detects stack and runs the right tool sweep with one command | L | Per D-003, Bob orchestrates via protocol prose, not custom tooling. Revisit only if external users report tool-orchestration friction as the biggest A7j pain point in PR-backs. | Multiple PR-back reports citing orchestration friction |
+| F31 | History diff tooling on `liveness-report.json` (e.g., "since the last audit, 3 new surfaces went red") | L | The JSON shape now supports this; no consumer yet exists. Build when there's a second data point worth diffing. | After A7j has been run ≥3 times on the same project |
+
+### Informational
+
+| # | Note |
+|---|---|
+| F32 | F27's reshape — from "build a cross-stack script" to "per-stack recipes in protocol prose" — is the canonical example of how D-003 ("orchestrate, don't reinvent") applies to non-tool work too. The script would have been brittle (each auth provider's API surface drifts independently); the prose stays load-bearing because Claude reads it fresh each invocation and uses current docs. Reference this pattern when future deferred items tempt a custom-tool implementation. |
+
+---
+
 ## EVOLVE pass — v2.14 (2026-05-20) — A7j Liveness Audit added
 
 **Trigger:** User report — two functions in a downstream Bob-built product (Explain My Blood Test) implemented the previous day were silently broken on manual spot-check. Failure mode: static review and spec-match passed, but functions threw at first runtime invocation. Root cause: no A7 step actually executes code; every existing audit reads source and reasons about it.

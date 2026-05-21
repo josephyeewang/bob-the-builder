@@ -49,6 +49,12 @@ Bob's Step 1a requires every product to declare success metrics. Bob is a produc
 
 ## Current Version
 
-v2.14 — 2026-05-20
+v2.15 — 2026-05-20
 
-v2.14 adds **A7j Liveness Audit** ([N+1]j in NEW mode) — the first A7 audit that executes code rather than reading it. Addresses the "function looks correct in source but is silently dead at runtime" failure mode (typo'd env vars, broken imports, dead routes, orphan functions, AI surfaces with bad config). Orchestrates incumbent tools: Knip (JS/TS inventory + dead-code), Vulture/Ruff/deptry (Python), Schemathesis (HTTP smoke), Playwright (browser flows), Vitest/pytest (function smoke), promptfoo (LLM surfaces). Bob does not reinvent — Bob orchestrates.
+v2.15 closes the three v2.14 deferred items:
+
+1. **Per-phase Liveness check** (F26) — new Tier 1 phase-gate step. Every new/modified callable surface (routes, exported functions, jobs, AI call sites) gets smoked at the end of every phase, scoped to deltas only. Catches dead-on-arrival code the day it ships, not weeks later at hardening. Stop condition if anything reachable returns 5xx or throws.
+2. **Per-stack auth-token recipes** (F27, reshaped) — `[N+1]j` now includes a per-stack table (Clerk, NextAuth, Supabase, Auth0, custom JWT, session cookies). No more "Claude figures it out fresh every project." A script was considered and rejected per D-003.
+3. **`liveness-report.json` artifact** (F28) — A7j and per-phase Liveness now write structured findings to `audit-artifacts/liveness-report-*.json` alongside the markdown verdict table. Schema versioned. Enables CI consumption and diff-across-time.
+
+v2.14 added **A7j Liveness Audit** ([N+1]j in NEW mode) — the first A7 audit that executes code rather than reading it. Addresses the "function looks correct in source but is silently dead at runtime" failure mode. Orchestrates incumbent tools: Knip, Vulture/Ruff/deptry, Schemathesis, Playwright, Vitest/pytest, promptfoo. Bob does not reinvent — Bob orchestrates.

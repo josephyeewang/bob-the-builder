@@ -401,12 +401,13 @@ In DLL, specs were written comprehensively upfront (good) but never updated duri
    - **Unit tests:** All pass. These catch logic errors within modules.
    - **Integration tests:** All pass. These catch contract mismatches between subsystems. At minimum, one integration test must exercise the project's hot path(s) end-to-end.
    - **Deployment tests** (if phase touches external integrations, webhooks, or auth): Deploy to staging/preview environment and confirm at least one real request succeeds. "It compiles" is not "it works."
-3. **Hot path check:** Run the project-wide hot path(s) defined in the Build Manifest. Hot path failure is a stop condition — do not advance.
-4. **AI eval check (v2.2):** If phase touched AI behavior, re-run `evals/behavioral-core.yaml`. A drop in pass-rate vs prior phase is a stop condition.
-5. **Cost guardrail check (v2.2):** If Architecture Contract defines a per-request cost budget, measure actual cost. Exceeding the budget is a stop condition.
-6. **Regression check:** Re-test critical flows from ALL prior phases. If any prior flow is broken → fix before advancing.
-7. **Global invariants:** Re-verify all project invariants (see Appendix E). If any violated → fix before advancing.
-8. **Spec consistency:** Confirm implementation still matches domain specs, Architecture Contract, and Behavioral Core. If drift detected → reconcile before advancing.
+3. **Liveness check on phase deltas (v2.15):** For every new/modified route, exported function, background job, and AI call site introduced this phase, run a scoped smoke (Knip + curl/fetch for routes, Vitest/pytest one-liner for functions, promptfoo single-shot for AI). Any reachable surface that 5xx's or throws on first call is a stop condition. See `[N]b` Liveness check for the full method and skip conditions.
+4. **Hot path check:** Run the project-wide hot path(s) defined in the Build Manifest. Hot path failure is a stop condition — do not advance.
+5. **AI eval check (v2.2):** If phase touched AI behavior, re-run `evals/behavioral-core.yaml`. A drop in pass-rate vs prior phase is a stop condition.
+6. **Cost guardrail check (v2.2):** If Architecture Contract defines a per-request cost budget, measure actual cost. Exceeding the budget is a stop condition.
+7. **Regression check:** Re-test critical flows from ALL prior phases. If any prior flow is broken → fix before advancing.
+8. **Global invariants:** Re-verify all project invariants (see Appendix E). If any violated → fix before advancing.
+9. **Spec consistency:** Confirm implementation still matches domain specs, Architecture Contract, and Behavioral Core. If drift detected → reconcile before advancing.
 
 If ANY check fails → fix before proceeding. Do NOT advance to next phase with known regressions or invariant violations.
 
@@ -436,7 +437,7 @@ If time pressure forces you to cut steps, follow this priority order. **Never sk
 
 | Tier | Steps | Why They're Essential |
 |------|-------|---------------------|
-| **Tier 1 — Never Skip** | Reconciliation ([N]c), Regression check, Scope lock, Class-level pattern scan, Hot path test, **AI eval re-run (AI products only)**, **Machine-readable contract validation (code products)** | These prevent compounding errors. Skipping them creates debt that grows exponentially. |
+| **Tier 1 — Never Skip** | Reconciliation ([N]c), Regression check, Scope lock, Class-level pattern scan, Hot path test, **Liveness check on phase deltas (v2.15)**, **AI eval re-run (AI products only)**, **Machine-readable contract validation (code products)** | These prevent compounding errors. Skipping them creates debt that grows exponentially. |
 | **Tier 2 — Skip With Caution** | Cross-cutting concern scan, Global invariant check, Full Phase Report (use abbreviated), Propagation enforcement, **Cost guardrail check** | These catch subtler issues. Skipping them is survivable for 1-2 phases but not more. |
 | **Tier 3 — Skip First** | Adversarial reviews (spec phase, including 4c), Experience test, Second-model review, Cowork session template, Detailed module inventory | These improve quality but their absence doesn't compound. Defer to hardening. |
 
@@ -1220,6 +1221,32 @@ Claude MUST also define verification questions — concrete yes/no checks that p
   - **Integration tests:** All must pass. At minimum, one must exercise the project's hot path(s).
   - **Deployment tests:** If phase is marked "Deploy verification required: Yes" in the Build Manifest, deploy and verify (see Deploy & Verify below).
 
+*Liveness check on phase deltas (MANDATORY when phase introduces or modifies callable surfaces — v2.15):*
+
+This is the per-phase, narrowly-scoped version of [N+1]j. Catches dead-on-arrival code (typo'd env vars, broken imports, routes registered but throwing in middleware, AI surfaces with bad config) **the day it ships** rather than weeks later at hardening. Without this step, dead functions can sit silently in the codebase until manual spot-check finds them — which is the failure mode v2.15 exists to fix.
+
+Scope:
+- Routes added or modified in this phase (from git diff vs prior phase tag)
+- Exported functions added or modified
+- Background jobs / cron entries added or modified
+- AI/LLM call sites added or modified
+
+How to run (use the same incumbent tools as [N+1]j, but scoped to deltas only):
+1. `npx knip --reporter json` (JS/TS) or `vulture` + `deptry` (Python) — but filter results to files changed in this phase
+2. For each new/changed route: synthesize minimum-viable payload from type signature, `curl` or `fetch` the endpoint, confirm not-5xx
+3. For each new/changed exported function: scaffold a one-liner smoke call in a throwaway `phase-N.smoke.test.ts`, run with `vitest run`
+4. For each new/changed AI call site: send one canonical prompt via `promptfoo eval` (or a single-shot equivalent), confirm not-error
+5. Browser-flow smoke (optional this phase, mandatory at [N+1]j): only required if the phase shipped a user-facing flow that wasn't reachable before
+
+Preconditions:
+- App can be started locally OR a preview/staging URL is available. If neither, log "Liveness skipped — no runnable target" in the Phase Report and proceed (this is a known gap to be closed at [N+1]j, not a stop condition for the phase)
+- If the phase touched no callable surface (pure refactor of internal pure functions, doc-only, config-only) — skip with a one-line note in the Phase Report: "Liveness N/A — phase touched no callable surface"
+
+Stop condition:
+- Any reachable route or function in the phase delta returns 5xx / throws on first call → STOP. Do NOT advance the phase gate. This is the same severity as a hot-path failure. Fix before continuing.
+
+Output: a `liveness-delta` section in the Phase Report listing each phase-touched surface and its smoke result. Format matches [N+1]j's verdict table, but limited to phase deltas.
+
 *Class-level pattern scan (MANDATORY when any bug is found):*
 - If any bug was discovered during this phase (in build or verification), grep the entire codebase for the same pattern
 - Report: "Pattern: [description]. Found N instances. Fixed: N. Remaining: 0."
@@ -1454,6 +1481,62 @@ The failure modes [N+1]a–e cannot catch by inspection alone:
 
 **What this audit does NOT catch:**
 [N+1]j catches "function explodes on first call." It does NOT catch "function returns wrong answer on this specific edge case." Correctness-on-inputs is what unit / integration tests are for. [N+1]j is the smoke layer below those — the difference between "the building has lights on" and "the building has been inspected for code violations." Both matter; this audit is only the lights.
+
+**Authenticating smoke tests — recipe per stack (v2.15):**
+
+Most non-trivial routes require auth. A test-user token is needed once per project; stash it in `.env.test` and reuse it for every A7j run. Don't paste tokens into the protocol or commit `.env.test` to git.
+
+| Stack | How to get a test-user token |
+|---|---|
+| **Clerk** | In Clerk dashboard, create a test user. Dashboard → Users → [user] → "Impersonate" → copy session JWT. Or use `clerk-sdk-node` server-side: `await users.createUser({...})` then `await sessions.createSession({userId})` → use the `id` as a Bearer token. |
+| **NextAuth / Auth.js** | Run the app once, log in as a test user in the browser, copy the `next-auth.session-token` cookie value from DevTools → Application → Cookies. Pass as `Cookie: next-auth.session-token=...` header. For programmatic: `getServerSession()` in a script and serialize. |
+| **Supabase Auth** | `supabase.auth.signInWithPassword({email, password})` in a one-shot script → returns `access_token`. Use as `Authorization: Bearer <token>`. Anon key alone is insufficient for RLS-protected routes. |
+| **Auth0** | Client Credentials flow (M2M app): `POST https://<tenant>.auth0.com/oauth/token` with `grant_type=client_credentials` → `access_token`. For user-context routes, use Resource Owner Password grant with a test user. |
+| **Custom JWT** | Run the app's existing sign-in flow once via `curl`, capture the returned JWT. Or, if the secret is in `.env`, generate a token directly with `jsonwebtoken`: `jwt.sign({sub: 'test-user'}, process.env.JWT_SECRET, {expiresIn: '7d'})`. |
+| **Session cookie (Rails / Django / Flask-Login)** | Log in once via the app's sign-in form (or a `curl -c cookies.txt` POST to the sign-in endpoint). Then pass `-b cookies.txt` to every smoke curl. |
+
+**Pattern, regardless of stack:** Claude reads the project's auth provider once during inventory, walks the user through getting a token using the matching recipe above, stashes the token in `.env.test`, and references `process.env.TEST_USER_TOKEN` in every smoke invocation. Token expiry → regenerate. If the project uses multiple auth roles (admin, paid-user, free-user), stash one token per role.
+
+**Machine-readable output: `liveness-report.json` (v2.15):**
+
+In addition to the markdown verdict table, Claude writes findings to `audit-artifacts/liveness-report.json` so downstream tools (CI, dashboards, history diffing across audit passes) can consume them. Schema:
+
+```json
+{
+  "schema_version": "1.0",
+  "audit_run": {
+    "timestamp": "2026-05-20T19:33:00Z",
+    "bob_version": "v2.15",
+    "scope": "full" | "phase-delta",
+    "phase": 3,
+    "target": "http://localhost:3000" | "https://preview-abc.vercel.app",
+    "tools_run": ["knip", "schemathesis", "vitest", "playwright", "promptfoo"]
+  },
+  "surfaces": [
+    {
+      "surface": "POST /api/explain",
+      "kind": "route" | "function" | "job" | "ai_call" | "browser_flow",
+      "reachable": true,
+      "invoked": true,
+      "result": "pass" | "fail" | "skipped",
+      "status_code": 500,
+      "error": "OPENAI_API_KEY is undefined",
+      "severity": "critical" | "high" | "medium" | "low" | "info",
+      "notes": "Reachable from BloodForm.tsx; auth-required smoke passed token check"
+    }
+  ],
+  "summary": {
+    "total": 24,
+    "pass": 19,
+    "fail": 3,
+    "skipped": 2,
+    "orphans": 1,
+    "auth_blocked": 0
+  }
+}
+```
+
+`audit-artifacts/` should be in `.gitignore` by default unless the user opts in to history tracking. Multiple runs of A7j append new dated files (`liveness-report-2026-05-20T19-33Z.json`) rather than overwrite, so diff-across-time is possible.
 
 - `→ HG:` Present findings, fix critical items
 
