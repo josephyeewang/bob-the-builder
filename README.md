@@ -28,7 +28,10 @@
 - **Phased Build Plan** — maps exactly what to build when, with sign-off gates at every step
 - **Drift Prevention** — Bob catches Claude when it starts wandering off-spec
 - **Class-Level Fixes** — bug in one place? Bob audits every similar pattern, not just the symptom
-- **Pre-Ship Audits** — eight separate audits before you call it done (five internal correctness: security, abuse, integration, data integrity, spec-code · three external fit: capability gap, effectiveness, UX friction)
+- **🆕 30-Lens Audit Library (v2.17)** — instead of the engineer-default "run a security scan and call it done," Bob ships **30 ready-made audit prompts** across 8 bands: engineering hygiene, spec fidelity, capability quality, security, privacy, supply chain, UX (ease / friction / wow / edge states), AI behavior (accuracy / right-sizing / safety / cost), performance economics, mobile, i18n, accessibility, virality, observability, vendor risk, documentation, competitive positioning, pricing mechanics, marketing copy, persona simulation, strategic wedge sharpness, onboarding, retention loops. **Surveyed across 46+ industry sources** (CodeRabbit, Greptile, Sourcery, ISO 25010, OWASP T10:2025, OWASP ASVS 5.0, STRIDE, WCAG 2.2, GDPR, Microsoft HAX, Nielsen, Don Norman, Brignull dark patterns, Dunford positioning, Linear/Saarinen craft principles, Ramanujam pricing, Patrick Campbell value-metrics, Nir Eyal Hook model, Reforge growth loops, Andrew Chen network effects, and more). Bob picks the right 6-10 lenses for your project profile, OR you pick "Full Enchilada" to run all 30 before a launch.
+- **🆕 Execution Principle (v2.17.1)** — Bob doesn't just *read* your code and reason about it. Bob *runs* it — drives Playwright through user flows, executes Schemathesis against your APIs, runs Garak red-teams on your AI, queries cost APIs, programmatically walks signup-to-cancel flows. Execution catches what reading misses. Every lens names what Claude should EXECUTE vs READ vs leave to HUMAN walk.
+- **🆕 Audit Memory** — Bob remembers what audits you ran last and offers four options: Same / Complementary Curated / Full Enchilada / Custom. You never have to remember which lenses you used or invent them from scratch.
+- **🆕 Anti-Convergence Wedge Audit (L28)** — most audits force products toward "best-practice average." Bob includes a dedicated lens that pushes the OPPOSITE direction: is your product sharpening its strategic edge, or sanding it off? L28 can veto earlier UX findings as "do not fix — that friction is the wedge" (Linear keyboard-first, Superhuman, 37signals patterns). The first audit library that's explicitly designed to NOT make every product converge to mediocrity.
 - **Living Decision Log** — every non-obvious choice recorded with the why
 - **3 Modes** — NEW (build) / AUDIT (assess) / EVOLVE (extend)
 - **Not locked to Claude** — every Bob-built project ships with both `CLAUDE.md` and `AGENTS.md`, so if you later try Codex, Cursor, or Aider, your project's context comes with you
@@ -44,10 +47,13 @@
 | Claude guesses what to build | Spec gets locked in **before** any code happens |
 | Claude forgets things between sessions | A `build-manifest.md` tracks where you are |
 | You ask for feature A, get features A through G | Explicit "in scope / out of scope" at every phase |
-| Tests pass, then it breaks in production | Five separate security and integrity audits before ship |
+| Tests pass, then it breaks in production | **30-lens audit library** covers engineering, UX, AI, mobile, accessibility, pricing, virality, persona simulation, wedge sharpness, and more — synthesized from 46+ industry sources |
+| Audits only catch what one angle of attack catches | Bob runs **multiple lenses with ~15% intentional overlap** so different angles produce *confirmation signals*, not noise |
+| Audits push your product toward "best-practice average" | Bob includes an explicit **anti-convergence lens** (L28 Strategic Edge & Wedge) that can veto earlier findings as "do not fix — that's the wedge" |
 | You can't tell when something is "done enough" | Quality bar templates show good vs weak examples |
 | Claude assumes things you didn't approve | Pauses for your sign-off at every important step |
 | AI behavior drifts as you add features | Eval set re-runs at every phase; drift is a stop sign |
+| Code audits *read* the code and reason about it | Bob's lenses **EXECUTE** — drive Playwright, run Schemathesis, query APIs, simulate user behavior. Execution evidence > reasoning inference. |
 
 ---
 
@@ -170,7 +176,29 @@ Or just `/bob` and pick **A) NEW** when Bob shows the menu. Bob will ask what yo
 
 Or `/bob` and pick **B) AUDIT**. Bob inventories what you've got, maps it to its 5-doc hierarchy, finds gaps, and proposes a remediation plan.
 
-As of v2.17, Bob's AUDIT phase includes a **30-lens audit library** (`audit-lenses/`) covering everything from engineering hygiene and security to mobile, accessibility, pricing mechanics, persona simulation, and strategic wedge sharpness. Bob proposes a Curated panel (6-10 lenses) based on your project's profile; you can also pick "Full Enchilada" to run all 30 for pre-launch milestones. Surveyed across 12 commercial AI code-review tools, 14 industry audit taxonomies, 13 UX/product methods, and strategic frameworks (Dunford, Linear/Saarinen, 37signals, Ramanujam, Campbell, Wiebe, Eyal, Reforge, Andrew Chen) — consolidated so a non-engineer doesn't have to invent audits per project.
+**As of v2.17, Bob's AUDIT phase is dramatically different from what you'd get with a generic code review tool.** Bob ships a **30-lens audit library** (`audit-lenses/`) — 30 ready-made audit prompts each attacking the product from a different angle, organized into 8 bands:
+
+| Band | What it audits |
+|---|---|
+| 1. **Engineering Foundation** (L01-L06) | Code hygiene + liveness execution, spec fidelity, capability quality, security (STRIDE + OWASP T10:2025 + ASVS 5.0), data protection + privacy (GDPR Art.30), supply chain + configuration |
+| 2. **User Experience** (L07-L10) | Cognitive ease (Nielsen + Norman + Cognitive Walkthrough), friction + trust (Brignull dark patterns), wow + emotional peaks (Peak-End + JTBD), edge states + recovery |
+| 3. **AI Behavior** (L11-L14) | Accuracy + calibration (TruLens, RAGAS, Phoenix, promptfoo, ECE), right-sizing + model fit, interaction safety (Microsoft HAX + Garak red-team + OWASP LLM Top 10), cost + latency efficiency |
+| 4. **Performance Economics** (L15-L16) | Cost / speed drivers including the unique **tradeoff-inversion lens** — *where should we DELIBERATELY pay more or accept more latency for value?* |
+| 5. **Reach & Distribution** (L17-L20) | Mobile / form factor (Lighthouse + touch targets), internationalization, accessibility (WCAG 2.2+), shareability / virality / discoverability (OpenGraph + viral mechanics) |
+| 6. **Operational** (L21-L23) | Observability + incident readiness (SRE four golden signals), vendor + dependency risk (single-points-of-failure, sunset risk), documentation + onboardability (Diátaxis framework) |
+| 7. **Strategic & Market** (L24-L28) | Competitive benchmarking, **pricing & monetization** (4 sub-streams: strategy, discoverability, mechanics, FTC Click-to-Cancel compliance), marketing + copy + website (AI-slop detection per Google HCU), **persona simulation** (adversarial reasoning as domain expert, competitor power-user, privacy-paranoid skeptic), **strategic edge & wedge sharpness** (the anti-convergence lens) |
+| 8. **Growth & Adoption** (L29-L30) | Onboarding + activation (Sean Ellis + Reforge + Lenny benchmarks), retention + compounding loops (Hook model, growth loops, network effects, smile curves) |
+
+**Why this is different from running CodeRabbit / Greptile / Snyk alone:**
+
+- **Synthesized from 46+ sources, not one angle.** Bob surveyed 12 commercial AI code-review tools (CodeRabbit, Greptile, Bito, Qodo, Sourcery, DeepSource, Cursor Bugbot, Copilot, Diamond, CodeAnt, diffray, Kodus), 14 industry audit taxonomies (ISO 25010, OWASP T10:2025, ASVS, STRIDE, CWE25, NIST SSDF, WCAG 2.2, GDPR, Microsoft SDL, SonarQube, Snyk, GitLab Secure, CodeQL, OWASP LLM Top 10), 13 UX/product methods (Nielsen, Don Norman, Cognitive Walkthrough, JTBD, Friction Log, Peak-End, Microsoft HAX, Brignull dark patterns), and strategic frameworks (April Dunford positioning, Play Bigger, Linear/Karri Saarinen, 37signals, Patrick Hanlon, Madhavan Ramanujam pricing, Patrick Campbell value-metrics, Joanna Wiebe conversion copy, Nir Eyal Hooked, Reforge growth loops, Andrew Chen network effects).
+- **Three lenses are Bob-distinctive.** L01 Liveness (executes code rather than reading), L02 Spec Fidelity (built-vs-planned census), L03 Critical Capability Quality (grades each capability A/B/C/D/F for whether it's solid or hollow). No surveyed tool generalizes any of these.
+- **Bob picks the panel, not you.** Bob proposes a Curated panel of 6-10 lenses based on your project profile (greenfield consumer product? launched B2B SaaS? methodology product? pre-fundraise scrub? post-incident audit?). You confirm with one gate. The point: a non-engineer never has to invent or even pick lenses cold.
+- **Audit memory.** Bob remembers what you ran last and offers four options on every AUDIT entry: **Same** (drift check) / **Complementary Curated** (broaden coverage) / **Full Enchilada** (all 30 — rocketship-launch scrub) / **Custom**.
+- **L28 anti-convergence veto.** Most audits push products toward "best-practice average." Bob's L28 lens explicitly pushes back. It can mark earlier UX findings as "do not fix — that friction is your wedge" (Linear's keyboard-first onboarding, Superhuman's keyboard shortcuts, Vim's learning curve). The first audit library designed to NOT make every product converge to mediocrity.
+- **Execution-first (v2.17.1).** Bob doesn't just read your code and reason. Bob *runs* it — drives Playwright through user journeys, executes Schemathesis against APIs, runs Garak red-teams on AI surfaces, programmatically tests signup-to-cancel flows, queries cost APIs, triggers edge states via DevTools. Execution evidence > reasoning inference. Every lens names what Claude should EXECUTE vs READ vs leave to genuine HUMAN walk.
+
+See `audit-lenses/README.md` in the repo for the full library + provenance.
 
 ### 3. Add a feature to an existing project — extend what's already working
 
