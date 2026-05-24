@@ -170,6 +170,8 @@ Or just `/bob` and pick **A) NEW** when Bob shows the menu. Bob will ask what yo
 
 Or `/bob` and pick **B) AUDIT**. Bob inventories what you've got, maps it to its 5-doc hierarchy, finds gaps, and proposes a remediation plan.
 
+As of v2.17, Bob's AUDIT phase includes a **30-lens audit library** (`audit-lenses/`) covering everything from engineering hygiene and security to mobile, accessibility, pricing mechanics, persona simulation, and strategic wedge sharpness. Bob proposes a Curated panel (6-10 lenses) based on your project's profile; you can also pick "Full Enchilada" to run all 30 for pre-launch milestones. Surveyed across 12 commercial AI code-review tools, 14 industry audit taxonomies, 13 UX/product methods, and strategic frameworks (Dunford, Linear/Saarinen, 37signals, Ramanujam, Campbell, Wiebe, Eyal, Reforge, Andrew Chen) — consolidated so a non-engineer doesn't have to invent audits per project.
+
 ### 3. Add a feature to an existing project — extend what's already working
 
 ```

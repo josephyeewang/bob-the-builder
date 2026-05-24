@@ -108,15 +108,36 @@ N+2. **Learning Extraction** → Process review → Update artifacts
 
 A1: Inventory → A2: Map to hierarchy → A3: Code-spec consistency → A4: Risk assessment → A5: Remediation plan → A6: Execute remediation → A7: Hardening audits (scoped) → A8: Re-entry
 
-**A7: Hardening Audits (scoped to built surface area)** — Always runs after remediation. Has **three audit categories** (v2.14):
+**A7: Multi-Lens Audit (v2.17)** — Always runs after remediation. v2.17 replaces the prior single A7a–A7j audit phase with a **30-lens library** at `audit-lenses/`, organized into 8 bands:
 
-- **Internal correctness, static (A7a–A7e):** Security · Adversarial-Abuse · Integration Seam · Data Integrity · Spec-Code. *Does the code hold up on inspection?* These audits read code.
-- **Internal correctness, live (A7j, v2.14):** Liveness Audit — the only audit that *executes* code. Inventories every callable surface (Knip / Vulture / route manifests), then smokes each one with Schemathesis (HTTP+OpenAPI), Vitest/pytest (functions), Playwright (browser flows), and promptfoo (LLM surfaces). Catches the silent-dead-function failure mode: code that looks correct in source but throws on first call (typo'd env var, broken import, dead route, AI surface with bad config). Precondition: app runnable locally OR preview URL provided.
-- **External fit & value (A7f–A7h, v2.10; A7f split v2.16):** Capability Gap vs competitors (A7f-capability) · Mechanism Scan on Rejected tools (A7f-implementation, v2.16) · Effectiveness Signals · UX Friction. *Is this still the right product to be building, and are there specific mechanisms worth borrowing from tools we strategically rejected?*
+| Band | Lenses | Question |
+|---|---|---|
+| 1. Engineering Foundation | L01–L06 | Code work, match spec, security / privacy / supply-chain? (L01 includes prior A7a-A7j Hygiene + Liveness — Knip / Schemathesis / Playwright / Vitest / promptfoo) |
+| 2. User Experience | L07–L10 | Can users navigate, trust, delight, recover? |
+| 3. AI Behavior | L11–L14 | AI accurate, right-sized, safe, efficient? |
+| 4. Performance Economics | L15–L16 | Cost / speed / effectiveness drivers — incl. *invest-more* opportunities |
+| 5. Reach & Distribution | L17–L20 | Mobile, i18n, accessibility, shareability |
+| 6. Operational | L21–L23 | Observability, vendor risk, onboardability |
+| 7. Strategic & Market | L24–L28 | Competitive, pricing, marketing copy, personas, wedge sharpness (L28 vetoes UX findings that are intentional wedge) |
+| 8. Growth & Adoption | L29–L30 | Activation, retention loops |
 
-A7.0 first produces a **Hardening Scope Map** splitting each audit into "in scope now" vs. "deferred" (with the build phase to revisit). Human can override. Audits then run on in-scope items only, **fresh session per audit** (writer/reviewer pattern). A7i fixes critical findings, **registers deferred items into the Build Manifest** as inherited hardening obligations on future phases, and logs external-fit decisions (Adopt / Defer / Reject) in `decision-log.md`. CTM gets `H` for hardened-internally / `H++` for hardened on both axes. A7 can be re-invoked any time during the build; full-scope hardening still runs at Step [N+1] before launch.
+**A7 sub-steps:**
 
-A7f (Capability Gap), A7g (Effectiveness), and A7h (UX Friction) have **scoping rules**: A7f skips internal-only / library / pipeline products; A7g skips pre-launch projects (no signal yet); A7h skips engineer-only / backend-only products. The scope map enforces this.
+- **A7.0 — Entry.** Bob reads `audit-artifacts/audit-history.json` and proposes a Curated panel (6–10 lenses) based on project profile per `audit-lenses/_selection-rubric.md`. Offers four options: Same / Complementary Curated / **Full Enchilada (all 30)** / Custom. User confirms at `→ HG`.
+- **A7.1 — Sequential lens execution.** Each lens in a **fresh Claude Code session** (writer/reviewer pattern). Lens reads prior reports in `audit-artifacts/` to convert ~15% intentional overlap into confirmation, not noise. Each lens writes markdown + JSON sidecar.
+- **A7.2 — Aggregation.** Per `audit-lenses/_aggregation.md`: dedup, honor L28 wedge vetoes, rank by severity × frequency × user-impact, produce `audit-artifacts/audit-summary-{date}.md`.
+- **A7.3 — Fix & Defer.** Replaces prior A7i. Fix Criticals, triage Majors at `→ HG`, register Defers in `audit-log.md` with revisit triggers, log Rejects in `decision-log.md`. L01 Liveness 5xx / function-throws findings remain *always Critical*. PR-back prompt (v2.13) offered.
+
+**Selection rubric (panel examples):**
+- *Pre-launch consumer (DLL profile):* L01, L02, L03, L04, L05, L07, L08, L10, L13 (9)
+- *Methodology product (Bob itself):* L01, L02, L03, L23, L24, L28 (6)
+- *Pre-fundraise scrub:* L01-L05, L15, L16, L22, L24, L25, L28, L29 (12)
+- *Pre-public-launch:* L01-L10, L17, L19, L20, L25, L29 (14)
+- *Quarterly drift check:* L01, L04, L11, L15, L21, L24 (6)
+- *Post-incident:* L01, L04, L10, L21, L22 (5)
+- *Full Enchilada:* all 30 (1–3 hours over multiple sessions)
+
+A7 can be re-invoked anytime; standard cadence = a Curated panel after each major phase + a Full Enchilada before launch.
 
 **A8: Re-entry** — After remediation + scoped hardening, Claude presents next-step options based on Build Manifest state: resume building unbuilt capabilities (→ NEW mode Step 7, with inherited hardening obligations attached to each phase), switch to EVOLVE for new features (including external-fit candidates from A7f/g/h), or re-invoke A7 mid-build to re-scope.
 
@@ -224,4 +245,4 @@ If Tier 2-3 skipped during build → MUST run at hardening.
 
 ---
 
-*Core Reference for Build Protocol v2.16 — 2026-05-20*
+*Core Reference for Build Protocol v2.17 — 2026-05-23*

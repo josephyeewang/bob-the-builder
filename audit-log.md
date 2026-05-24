@@ -6,6 +6,73 @@ This is the operational counterpart to `decision-log.md`. The decision log recor
 
 ---
 
+## EVOLVE pass — v2.17 (2026-05-23) — Multi-Lens Audit Library
+
+**Trigger:** Joe's challenge in two parts. (1) Observation: even structured Claude builds miss things, and audits run on those builds also miss things — each audit catches different gaps depending on its angle. (2) Hypothesis: instead of a single A7 audit phase, Bob should ship a *library* of pre-written audit lens prompts attacking the codebase from many angles (hygiene, structure, security, UX, AI accuracy, pricing, virality, mobile, accessibility, wedge sharpness, persona simulation, etc.) — locked-and-loaded so a non-engineer doesn't have to invent them per project.
+
+**Approach:** External research across four parallel agents — (1) industry code/quality audit taxonomies (ISO 25010, OWASP T10/ASVS, STRIDE, CWE25, NIST SSDF, WCAG, GDPR), (2) UX/product audit methods (Nielsen, NN/g, JTBD, Friction Log, Peak-End, Microsoft HAX, Brignull dark patterns), (3) AI-era code review tools (CodeRabbit, Greptile, Bito, Qodo PR-Agent, Sourcery, DeepSource, Cursor Bugbot, Copilot, Diamond, CodeAnt, diffray, Kodus), (4) strategic / growth frameworks (Dunford, Play Bigger, Linear/Saarinen, 37signals, Hanlon, Ramanujam, Campbell, Wiebe, Eyal, Reforge, Andrew Chen). Joe-driven extension: the lens taxonomy must cover operator-distinctive angles engineering audits never touch (pricing mechanics, mobile-first, i18n, virality, wedge sharpness, persona simulation).
+
+### Library shipped: 30 lenses across 8 bands
+
+- **Band 1 Engineering Foundation (6):** L01 Hygiene & Liveness (folds prior A7a-A7j) · L02 Spec Fidelity · L03 Critical Capability Quality · L04 Security & Threat Surface · L05 Data Protection & Privacy · L06 Supply Chain & Configuration
+- **Band 2 User Experience (4):** L07 Ease & Cognitive Path · L08 Friction & Trust · L09 Wow & Emotional Peaks · L10 Edge States & Recovery
+- **Band 3 AI Behavior (4):** L11 Accuracy & Calibration · L12 Right-Sizing & Model Fit · L13 Interaction (HAX) & Safety · L14 Cost & Latency Efficiency
+- **Band 4 Performance Economics (2):** L15 Cost & Speed Drivers (incl. tradeoff inversion — *when to pay more for value*) · L16 Effectiveness & Quality Drivers
+- **Band 5 Reach & Distribution (4):** L17 Device & Form Factor · L18 i18n & Language · L19 Accessibility (WCAG+) · L20 Shareability, Virality & Discoverability
+- **Band 6 Operational (3):** L21 Observability & Incident Readiness · L22 Vendor & Dependency Risk · L23 Documentation & Onboardability
+- **Band 7 Strategic & Market (5):** L24 Competitive Benchmarking · L25 Pricing & Monetization · L26 Marketing, Copy & Website · L27 Persona Simulation · L28 Strategic Edge & Wedge Sharpness
+- **Band 8 Growth & Adoption (2):** L29 Onboarding & Activation · L30 Retention & Compounding Loops
+
+Plus three infrastructure files: `_selection-rubric.md` (Bob's panel-proposal logic), `_aggregation.md` (dedup + L28 vetoes + ranking), `_audit-memory.md` (history-aware entry + four options: Same / Complementary / Full Enchilada / Custom).
+
+### Dogfood pass on Bob itself
+
+Per the v2.16 meta-pattern (F47 — *propose new audit step → dogfood on Bob → let meta-findings reshape prose, then ship*), v2.17's lens library was stress-tested against Bob as a "methodology product" (Panel C — L01, L02, L03, L23, L24, L28).
+
+**Meta-findings:**
+
+1. **L28 Wedge applied to Bob:** wedge clearly articulable ("methodology for non-engineer product leaders building with Claude Code"); named enemies present (engineer-first agent-coding tools — Spec Kit, Cursor rules, BMad); anti-feature list non-empty (no telemetry by design per A7g; no sharded rules per D-004; no custom liveness CLI per D-003); convergence drift low per v2.16 dogfood (5 of 9 tools converged on sharded rules — Bob rejected). **No new L28 findings.** Bob's wedge is intact and the lens library reinforces it (orchestrate incumbent tooling rather than build custom audit infrastructure).
+
+2. **L02 Spec Fidelity applied to v2.17 work itself:** all 30 lens files referenced in `audit-lenses/README.md` exist on disk (verified). All three infrastructure files exist. `audit-history.json` schema documented in `_audit-memory.md` but not yet a live artifact — that's expected; it gets created on first real audit run. **No critical L02 findings.**
+
+3. **L23 Documentation:** README.md needs an update to surface the lens library and v2.17. CLAUDE.md "Current Version" block needs bump from v2.16 to v2.17. Both addressed in this release.
+
+4. **L01 Hygiene applied to lens-library writing:** lens files are markdown prose, no code, no liveness check needed. **N/A.**
+
+**Headline meta-finding (informs future EVOLVE):** *the lens library's biggest risk is sprawl, not shortfall.* 30 lenses × ~225 lines each = ~6,750 lines of lens content + 3 infrastructure files = ~7,200 lines added in one EVOLVE. That's load-bearing infrastructure for the foreseeable future, but it crosses Bob's protocol size from one repo of ~3,000 lines to ~10,200 lines. Mitigations baked in: (a) sequential execution + prior-report reading prevents re-litigation; (b) L28 explicit veto mechanism prevents convergence-to-mediocrity; (c) selection rubric defaults to Curated 6-10 lenses per run, not Full Enchilada; (d) audit-memory entry surfaces history so users don't reinvent panel choice each time.
+
+### Changes shipped in v2.17
+
+- **A7 rewritten** from prior A7a-A7j scope-map structure to A7.0 (entry + panel selection), A7.1 (sequential lens execution), A7.2 (aggregation), A7.3 (fix & defer register). Prior A7a-A7j content folded into L01 Hygiene & Liveness lens prompt.
+- **30 lens prompt files** at `audit-lenses/L01-L30.md`, each self-contained (purpose, source frameworks cited, audit method, check questions, output schema markdown + JSON, severity rubric, anti-pattern instructions, stop conditions, cross-lens handoff).
+- **3 infrastructure files** at `audit-lenses/_{selection-rubric,aggregation,audit-memory}.md`.
+- **`audit-lenses/README.md`** — library index, format spec, mode design, provenance (~46 sources cited).
+- **`build-protocol.md` A7 section** rewritten (~250 lines → ~130 lines, with detail moved to lens files).
+- **`build-protocol-core.md` AUDIT section** updated.
+- **Version footers** bumped to v2.17.
+
+### Deferred (revisit triggers named)
+
+- **F48 — audit-history.json as a live artifact.** Currently the schema is documented in `_audit-memory.md` prose; Bob's protocol tells Claude to write to this file at A7.2. No tooling validates or constructs it. **Revisit trigger:** if 3+ external Bob users self-report friction with manual audit-history maintenance, or if Bob ever ships a programmatic helper, formalize the schema with JSON Schema validation. Until then, prose-driven is consistent with D-003.
+
+- **F49 — Lens prompt evolution cadence.** 30 lens files reference dated industry sources. Industry frameworks evolve (OWASP ASVS will roll past 5.0; WCAG to 3.0; new AI safety standards; new pricing frameworks). **Revisit trigger:** annually, or when a major lens-referenced source has a non-trivial release (e.g., WCAG 3.0 ships).
+
+- **F50 — Mobile / device / i18n auditing on Bob itself.** Bob is a markdown methodology — no UI, no mobile, no i18n. L17/L18/L19 are not applicable as long as Bob stays methodology-only. **Revisit trigger:** if Bob ever ships a hosted dashboard, telemetry pipeline, or community marketplace (revisit trigger per D-002).
+
+- **F51 — Aggregation tooling.** Aggregation logic (dedup, L28 vetoes, ranking) is documented in `_aggregation.md` as prose. No script implements it. **Revisit trigger:** if users report inability to mentally aggregate findings across 6+ lenses per run, write a `scripts/aggregate-audit.sh` that consumes the JSON sidecars and produces the summary mechanically. Until then, prose-driven per D-003.
+
+### Convergence with prior decisions
+
+- **D-003 (orchestrate, don't reinvent):** every Tier 1 lens cites incumbent tooling (Knip, Schemathesis, Semgrep, Snyk, Gitleaks, axe-core, Lighthouse, TruLens, RAGAS, promptfoo, Garak, PyRIT, Stripe, etc.). Bob does not implement any audit scanners — Bob orchestrates them.
+- **D-004 (single CLAUDE.md, not sharded):** unchanged. Lens prompts live in `audit-lenses/`, not in CLAUDE.md.
+- **F47 meta-pattern (propose → dogfood on Bob → reshape prose → ship):** followed for v2.17. This entry is the dogfood evidence.
+
+### Future audit consideration
+
+The v2.17 lens library is itself a candidate for first-party stress-testing through future external Bob users. The PR-back template (v2.13, Step [N+2]c) is the lightweight feedback mechanism — when external users report which Curated panels they swap from, the selection rubric (`_selection-rubric.md`) gets refined. Track swap patterns in `audit-history.json` `user_swaps_from_recommended` field.
+
+---
+
 ## EVOLVE pass — v2.16 (2026-05-20) — Reference Scan integration + dogfood findings
 
 **Trigger:** User challenge — *"Bob feels inward-looking / self-sufficient. There are tons of interesting OSS repos with smart patterns; it's not hard for Claude Code to find the top 10 and grab the best of their capabilities. (1) Where in NEW / EVOLVE / AUDIT should this go? (2) Have we done it for Bob itself?"* Honest analysis confirmed the hypothesis: Bob had exactly **one** external-research touchpoint (`A7f Capability Gap` in AUDIT only), and it operated at the strategic-positioning level — never at the mechanism-borrowing level. The "orchestrate, don't reinvent" principle (D-003) existed but was buried in an ADR, not promoted to a load-bearing rule.

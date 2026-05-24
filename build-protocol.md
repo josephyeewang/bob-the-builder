@@ -1,4 +1,4 @@
-# BUILD PROTOCOL v2.13
+# BUILD PROTOCOL v2.17
 
 > A systematic framework for building, auditing, and evolving products with Claude Code.
 > Created: 2026-04-15. Last updated: 2026-05-15. Owner: Joe Wang.
@@ -1750,259 +1750,105 @@ Follow the approved plan. For each remediation item, use the Na/Nb/Nc pattern:
 - **b:** Verify it's correct and consistent
 - **c:** Reconcile with other docs that might be affected
 
-### Step A7: Hardening Audits (scoped to built surface area)
+### Step A7: Multi-Lens Audit (v2.17 — lens library replaces prior A7a–A7j)
 
-After remediation, run the 5-audit hardening sequence (Security → Adversarial/Abuse → Integration Seam → Data Integrity → Spec-Code Consistency) — but **scoped to what's actually built**. This is the second meaning of "audit" in Bob: A1–A6 is the **macro** audit (does the project match the 5-doc hierarchy?); A7 is the **micro** audit (does the code itself hold up under adversarial review?).
+After remediation, run the **multi-lens audit** — a curated panel (or full enchilada) of named audit lenses from `audit-lenses/`, run sequentially in fresh sessions per the writer/reviewer pattern. v2.17 replaces the prior single A7a–A7j audit phase with a **30-lens library** organized into 8 bands, with Bob selecting the panel based on project profile and the user confirming with one gate.
 
-**Design principle: hardening isn't all-or-nothing.** A half-built product still has built subsystems that benefit from hardening *now* (especially auth, data integrity for shipped flows, and seams between built modules). What doesn't make sense is hardening unbuilt surface — that generates noise. A7 splits the work into **harden now** vs. **harden later** and writes the deferred items into the Build Manifest as concrete follow-ups tied to upcoming phases.
+This is the second meaning of "audit" in Bob: A1–A6 is the **macro** audit (does the project match the 5-doc hierarchy?); A7 is the **micro** audit, multi-angle.
 
-**A7 can also be re-invoked any time.** During an active build, the user can return to MODE: AUDIT → A7 to re-scope and re-harden as new subsystems ship. The standard cadence (run all 5 at full scope after the final build phase, Step [N+1]) still applies as the final gate before launch.
+**Design principle:** Single audits are 90% effective and miss the rest. Different lenses catch *qualitatively different* finding categories — engineering-hygiene catches code issues, UX catches journey issues, strategic catches positioning drift. Running multiple lenses with intentional ~15% overlap converts overlap into *confirmation signal* rather than noise.
 
----
-
-A7 has **three audit categories**:
-
-- **A7a–A7e — Internal correctness audits (static).** Does the code itself hold up *on inspection*? Security, abuse-resistance, integration seams, data integrity, spec-code match. These audits read code and reason about it.
-- **A7j — Internal correctness audit (live, v2.14).** Does the code actually *run end-to-end*? The only audit that executes code instead of reading it. Catches silently-broken functions that pass static review but fail at runtime (typo'd env vars, broken imports, dead routes registered but throwing in middleware, AI surfaces with bad config, orphan functions never wired into a user path).
-- **A7f–A7h — External fit & value audits (v2.10).** Is this still the right product to be building? Capability gaps vs competitors, effectiveness signals, UX friction. *Internal correctness can pass while external fit is failing — and vice versa. Both matter.*
+**Design principle: audits aren't all-or-nothing AND aren't one-shot.** A half-built product still has built subsystems that benefit from selective auditing now. v2.17's lens library + Curated panel mechanism replaces the prior "scope map of A7a–A7j" pattern with a richer "which 6-10 lenses fit this project's profile right now" decision.
 
 ---
 
-**A7.0: Hardening Scope Map (always runs first)**
+**A7.0: Entry — Audit Memory + Panel Selection (always runs first)**
 
-Before any audit fires, Claude produces a scope map using A3 findings + the Capability Traceability Matrix + the Build Manifest's phase status:
+Before any lens fires, Bob reads `audit-artifacts/audit-history.json` and presents the history-aware entry experience defined in `audit-lenses/_audit-memory.md`:
 
-| Audit | In scope now (what's built) | Deferred (and why) | Defer to |
-|---|---|---|---|
-| A7a Security | _e.g., auth subsystem, task API endpoints_ | _e.g., payment webhooks — Stripe not wired yet_ | Phase 5 |
-| A7b Adversarial/Abuse | _user-facing capabilities currently shipped_ | _AI prompt-injection — eval harness not built_ | Phase 4 |
-| A7c Integration Seam | _seams between two built subsystems_ | _seams touching unbuilt subsystems_ | Phase varies |
-| A7d Data Integrity | _state machines of built features_ | _state machines of unbuilt features_ | Phase varies |
-| A7e Spec-Code | _capabilities marked "implemented" in CTM_ | _capabilities marked "in spec, not implemented"_ | Their build phase |
-| A7j Liveness | _every callable surface in built subsystems IF app is runnable / preview URL exists_ | _surfaces in unbuilt subsystems; all surfaces if no runnable target available_ | Their build phase / when target available |
-| A7f Capability Gap | _product-facing capabilities vs 3-5 closest competitors_ | _N/A — always in scope if product has external users_ | — |
-| A7g Effectiveness | _outcome metrics for shipped capabilities_ | _metrics for unshipped capabilities_ | Their launch |
-| A7h UX Friction | _flows touching non-engineer users_ | _N/A if Product Spec target is engineers/internal-only_ | — |
+1. **Audit history surfaced** — last audit date, mode (Curated / Full / Custom), lenses run, findings count by severity, open findings still in `audit-log.md`.
+2. **Panel proposal** — Bob proposes a Curated panel (6-10 lenses) based on project profile, per `audit-lenses/_selection-rubric.md`. Each included lens gets a one-line justification; the most relevant excluded lenses get a one-line skip reason.
+3. **Four options** offered to user:
+   - **Same** — re-run same lenses (drift check)
+   - **Complementary Curated** — Bob picks lenses you haven't run (broaden coverage)
+   - **Full Enchilada** — all 30 lenses (rocketship-launch scrub, typically 1–3 hours over multiple sessions)
+   - **Custom** — user specifies
 
-Rules for what counts as "in scope now":
-- **A7a Security** — every public endpoint, auth flow, secret-handling path, or stored-data table that exists in code today
-- **A7b Adversarial/Abuse** — every user-facing capability the CTM marks as implemented (even if the surrounding product is incomplete)
-- **A7c Integration Seam** — every boundary where **both** sides are built. Skip seams where one side is stub/mock/unbuilt.
-- **A7d Data Integrity** — every state machine and data flow whose code exists end-to-end (input → store → retrieve)
-- **A7e Spec-Code** — only capabilities marked implemented in the CTM. Unbuilt ones have no code to compare against.
-- **A7j Liveness** — every callable surface (route, exported function, background job, AI call site) in subsystems marked implemented in the CTM. Precondition: app must be runnable locally OR a preview / staging URL provided. If neither, A7j surfaces "Liveness unverifiable" as the finding and skips — don't paper over absence of a runnable target.
-- **A7f Capability Gap** — always in scope for products with external users; skip for internal-only tools, libraries, and pure data pipelines unless the Product Spec lists a comparable
-- **A7g Effectiveness** — runs only for capabilities that have been used at least once (i.e., shipped). Pre-launch projects skip A7g entirely; record a note to run it after activation.
-- **A7h UX Friction** — runs only if the Product Spec target audience includes non-engineers, end users, or any human flow. Skip for engineer-only / backend-only / library products.
+   Bob recommends the default option based on time-since-last-audit, project state, and whether a milestone (launch, fundraise, post-incident) is named.
 
-`→ HG:` Present scope map. Human can override (move items in/out of scope) before audits run. This is where the user expresses intent like *"harden auth now even though it's not done yet — I want to know what's already broken"* or *"defer integration seam audit until Phase 6 lands."*
+`→ HG:` User picks mode + panel. Bob does not auto-proceed.
 
 ---
 
-**A7a–A7e + A7j: Internal correctness audits (run on in-scope items only)**
+**A7.1: Sequential Lens Execution**
 
-Use the same playbooks as NEW mode Step [N+1] a–e and [N+1]j — see those sections for the per-audit checklists. The only difference is scope: each audit explicitly states *"in scope: [list]"* and *"out of scope (deferred): [list]"* at the top of its findings, so nothing is silently skipped.
+For each lens in the selected panel, in foundation-first order (L01 → L02 → L03 → risk band → UX band → AI band → strategic band → growth band):
 
-1. **A7a: Security Audit** — see [N+1]a, scoped per A7.0
-2. **A7b: Adversarial & Abuse Audit** — see [N+1]b, scoped per A7.0
-3. **A7c: Integration Seam Audit** — see [N+1]c, scoped per A7.0
-4. **A7d: Data Integrity Audit** — see [N+1]d, scoped per A7.0
-5. **A7e: Spec-Code Consistency** — see [N+1]e, scoped per A7.0
-6. **A7j: Liveness Audit** — see [N+1]j, scoped per A7.0 *(the only audit that executes code rather than reading it; addresses the "function looks correct in source but is silently dead at runtime" failure mode)*
+1. **Open a fresh Claude Code session.** Writer/reviewer pattern — same rule as prior A7a–A7e. The session that built or remediated capabilities rationalizes; the reviewer catches what the writer missed.
+2. **Paste the lens entry prompt:** *"Read `audit-lenses/L{NN}-{slug}.md` and run this audit on the current project. Read prior reports in `audit-artifacts/` first to avoid re-litigating findings."*
+3. **Lens executes** per its file:
+   - Loads its source frameworks (cited URLs)
+   - Walks its audit method
+   - Answers its check questions
+   - Produces output: markdown report + JSON sidecar at `audit-artifacts/L{NN}-{slug}-{YYYY-MM-DD}.md` / `.json`
+   - Names stop conditions if signal cannot be produced
+4. **Move to next lens.** Sequential, not parallel — each lens reads prior lens reports to convert intentional ~15% overlap into confirmation signal rather than noise.
 
-**Critical: Fresh session per audit.** Each of A7a–A7e and A7j MUST start in a new Claude Code session (writer/reviewer pattern — same rule as Step [N+1]). The session that ran A1–A6 is the "writer"; each hardening session is a clean-context "reviewer." Claude in the A6 session should hand off with: *"Remediation complete. Hardening scope map below. Start a new session for A7a (Security Audit) and paste: 'Read build-protocol.md, run AUDIT Step A7a on this project. Scope: [paste in-scope items from A7.0].'"*
+The library covers 30 lenses across 8 bands:
 
-**A7j-specific note on session pattern:** Liveness audit's "reviewer freshness" comes from running tooling output (Knip, Schemathesis, Playwright, Vitest, promptfoo) and reasoning about JSON results without prior implementation context. Don't run A7j in the same session that just remediated routes — it will rationalize past decisions instead of catching their failures.
+| Band | Lenses | Question |
+|---|---|---|
+| 1. Engineering Foundation | L01–L06 | Does the code work, match spec, hold up to security / privacy / supply-chain? |
+| 2. User Experience | L07–L10 | Can users navigate, trust, delight, recover? |
+| 3. AI Behavior | L11–L14 | Is the AI accurate, right-sized, safe, efficient? |
+| 4. Performance Economics | L15–L16 | What drives cost / speed / effectiveness — and where should we *invest more* for value? |
+| 5. Reach & Distribution | L17–L20 | Does it work on mobile, in other languages, for users with disabilities, and unfurl when shared? |
+| 6. Operational | L21–L23 | Can ops see prod, survive vendor failures, hand off to new collaborators? |
+| 7. Strategic & Market | L24–L28 | Where do we win/lose, how do we price, do we sound clear, what would each persona say, are we sharpening our wedge or sanding it off? |
+| 8. Growth & Adoption | L29–L30 | Do users activate fast and return? |
 
----
+See `audit-lenses/README.md` for full lens inventory + provenance (the "we surveyed ~46 sources" claim).
 
-**A7f–A7h: External fit & value audits (v2.10)**
-
-These audits answer different questions than A7a–A7e. Internal audits ask *"does the code hold up?"* External audits ask *"is this still the right thing to build?"* A product can pass every internal audit and still be quietly losing — a competitor shipped a category-defining capability you don't have, activation dropped 30% after the last release, or your users routinely need help with what should be a self-serve flow. Each external audit is a structured way to surface those signals before they become an "obvious in hindsight" moment.
-
-Like A7a–A7e, run each in a **fresh session** for clean reviewer context.
-
----
-
-**A7f: Capability Gap & Implementation Scan (v2.16 — split from prior single-step A7f)**
-
-A7f has **two sub-audits** that ask different questions and produce different verdicts. Run them sequentially in the same fresh session — A7f-capability first (positioning), then A7f-implementation (mechanism-borrowing) on the rejected tools.
-
----
-
-**A7f-capability: Capability Gap & Competitor Scan**
-
-*Question this audit answers: are there meaningful capabilities your users would expect — that you don't have, by looking at the products they'd otherwise use?*
-
-This is NOT "do everything competitors do." It's "are there blind spots you didn't realize?" Bob explicitly rejects feature parity as a goal — copying for the sake of copying is how products get bloated. The audit's job is to surface gaps, not auto-import them.
-
-**Method:**
-
-1. **Identify 3-5 closest competitors / analogs.** Look at:
-   - Products users mention in your sales/support conversations
-   - Tools users had open in another tab when they started using yours
-   - Products that show up in "alternatives to [your product]" searches
-   - Adjacent categories whose users could realistically switch
-   - For methodology / framework products: published frameworks targeting the same outcome (e.g., for Bob: Spec Kit, Cursor rules, BMad, Aider's architect mode)
-
-2. **Build a capability matrix.** Rows: capabilities. Columns: your product + each competitor. Include both shipped capabilities and clearly-articulated roadmap items (only those publicly stated — don't speculate).
-
-3. **For each capability where competitors have it and you don't, decide:**
-   - **Adopt** — meaningful gap, plan it into next phase or evolution
-   - **Defer** — gap but not urgent; record in Build Manifest deferred list with revisit trigger
-   - **Reject** — intentional non-goal; record the reasoning in `decision-log.md` so it doesn't get re-litigated
-
-4. **Equally: for capabilities you have that competitors don't,** confirm they're real differentiators — not just things you happen to have that nobody cares about. Differentiators get protected; "happen-to-haves" get pruned when they cost more than they earn.
-
-**Output format:**
-
-```
-| Capability | Us | Comp A | Comp B | Comp C | Verdict | Notes |
-|---|---|---|---|---|---|---|
-| [capability] | ✓/—/roadmap | ✓ | — | ✓ | Adopt / Defer / Reject | rationale |
-```
-
-Plus a 3-sentence executive summary covering: (a) the most important gap, (b) the most defensible strength, (c) the most over-built area (capability that costs more than it earns).
-
-**Cadence:** Run at every AUDIT invocation. Competitors evolve faster than internal docs do.
-
-`→ HG:` Present capability matrix + summary. Decisions on each gap (Adopt / Defer / Reject) get logged in `decision-log.md`. Adopted items become EVOLVE candidates. **Tools Rejected at this step proceed into A7f-implementation** — strategic Reject does not mean "ignore"; it means "don't adopt their framing, but check whether they have specific mechanisms worth borrowing."
+**Liveness execution remains in L01.** Bob's existing A7j Liveness Audit (v2.14, v2.15) is folded into L01 — the Hygiene & Liveness lens executes Knip / Vulture / Schemathesis / Playwright / Vitest / pytest / promptfoo per stack. Bob still orchestrates incumbent tooling per D-003 (no custom test harness).
 
 ---
 
-**A7f-implementation: Mechanism Scan on Rejected Tools (v2.16)**
+**A7.2: Aggregation**
 
-*Question this audit answers: for the competitors strategically rejected in A7f-capability, are there specific MECHANISMS / file formats / workflow primitives / library choices worth borrowing as discrete patterns — without adopting the whole framework?*
+After all lenses in the panel finish, run aggregation per `audit-lenses/_aggregation.md`:
 
-This sub-audit exists because of a real failure mode: A7f-capability used to settle every competitor with a single Adopt-feature / Reject-framing verdict, which silently lost signal. A tool can be wrong as a *whole product* while having one specific *mechanism* that's worth folding into Bob/your product as an idiom. Without this step, those mechanisms get re-discovered repeatedly across audits, or never get borrowed at all.
+1. **Dedup** findings that surfaced from multiple lenses (overlap = confirmation, not noise)
+2. **Apply L28 vetoes** — L28 Strategic Edge & Wedge can mark earlier-lens findings as "do_not_fix_wedge" — intentional friction, not bug. Aggregation honors L28's pushback explicitly (every veto is shown, never silent)
+3. **Rank** by severity × frequency × user-impact
+4. **Produce** `audit-artifacts/audit-summary-{YYYY-MM-DD}.md` (+ JSON) with top 10, critical fix list, major triage queue, wedge vetoes, convergence signals
+5. **Update** `audit-history.json` with run metadata (mode, lenses, findings, open/resolved)
 
-**Hard scope:** runs **only** on tools that A7f-capability marked Reject. Tools marked Adopt are already heading into EVOLVE; tools marked Defer stay deferred. This avoids double-work.
-
-**Method:**
-
-1. **For each Rejected tool from A7f-capability, identify 1-3 candidate mechanisms.** Not features (that was A7f-capability's job). Concrete, named, copy-able shapes — file formats, slash-command idioms, state-machine patterns, prompt scaffolds, configuration conventions, library orchestration choices.
-
-2. **For each mechanism, assign a verdict with bias toward Reject:**
-   - **Adopt-as-pattern** — name the exact mechanism AND the exact insertion point in your product (which file / which step / which subsystem). If you can't name where it goes, it's not an Adopt — push it to Defer.
-   - **Defer** — interesting mechanism, no clear insertion point today. State a concrete revisit trigger.
-   - **Reject** — looked, not worth borrowing. One-line reason (so future audits don't re-litigate it).
-
-3. **Convergence detection.** Mechanisms that ≥3 of the Rejected tools share are stronger Adopt candidates than one-off curiosities — when the field converges, that's signal. Call these out in a "Convergence signals" section at the top of the output, separate from the per-tool table.
-
-4. **Filter against existing scope.** Any Adopt-as-pattern must serve a capability already in your Product Spec OR resolve a known friction logged in `decision-log.md` / `audit-log.md`. Adopts that expand product scope are not borrows — they're feature additions, route them through normal EVOLVE.
-
-**Bias instruction (v2.16, derived from the dogfood pass that introduced this step — see audit-log v2.16):** A healthy run produces ≤3 Adopts per 9 tools scanned (~30% hit rate). If your output is heavier than that, you are conflating "interesting" with "load-bearing." Re-run with the question: *"if I don't borrow this, what specifically gets worse?"* If the answer is "nothing concrete," it's a Reject.
-
-**Output format:**
-
-```
-### Convergence signals (mechanisms shared by ≥3 rejected tools)
-[bullets]
-
-### Per-tool mechanism findings
-| Tool | Mechanism | Verdict | Insertion point | Rationale / Revisit trigger |
-|---|---|---|---|---|
-
-### Top 3 Adopts (ranked by leverage)
-1. [mechanism] — [why this matters most]
-
-### Dogfood meta-note
-[1 paragraph — was the run signal or noise? Honest answer. If noise, say so; the scan still served by closing the question.]
-```
-
-**Cadence:** runs every AUDIT invocation, immediately after A7f-capability. Adds 15-30 min to A7f total when there are 5-10 Rejected tools to scan.
-
-`→ HG:` Present mechanism matrix + Top 3 Adopts. Adopts feed into EVOLVE backlog (each Adopt becomes a Medium evolution with a named insertion point). Rejects and Defers logged so they don't get re-litigated.
+The aggregated summary is the user-facing artifact. Individual lens reports are drill-down references.
 
 ---
 
-**A7g: Effectiveness Signals**
+**A7.3: Fix & Defer Register (replaces prior A7i)**
 
-*Question this audit answers: is what we built actually achieving its intended outcomes?*
+After aggregation:
 
-This audit is meaningless before the product has been used. Skip A7g entirely for pre-launch projects; note in Build Manifest to run it after activation. For products with at least one user / use-case, run it.
+1. **Fix** all approved Critical findings from the aggregated summary (writer/reviewer rules from `[N+1]f` apply). L01 Liveness 5xx / function-throws findings remain *always Critical* — they represent code that does not run at all and are higher-priority than most static findings.
+2. **Triage Major findings** — user marks each as Fix / Defer / Reject at `→ HG`.
+3. **Register deferred items** in `audit-log.md` with **named revisit triggers** (no silent deferrals — same rule as v2.15's per-phase deferrals).
+4. **Log Reject decisions** in `decision-log.md` with rationale so they aren't re-litigated by future audits (continues D-001, D-003, D-004 precedent).
+5. **Update CTM:** capabilities passing the panel's hygiene + spec-fidelity + capability-quality lenses (L01–L03) get `H` status; capabilities also passing strategic + UX lenses get `H++`.
+6. **PR-back prompt (v2.13).** Claude offers the [N+2]c PR-back template proactively, scoped to "this audit pass." Run `bash ~/tools/bob-the-builder/scripts/bob-stats.sh` for auto-computed fix-commit ratio.
 
-**Method:**
-
-1. **Pull the success metrics from the Product Spec (Step 1a).** These are what the product was supposed to achieve. (If no success metrics exist, that's the finding — the Product Spec wasn't completed properly. Surface it and stop.)
-
-2. **For each metric, gather current signal.** Quantitative if available (analytics, logs, surveys). Qualitative if not (user quotes, support tickets, abandoned-workflow patterns). Note the source.
-
-3. **For methodology / framework products (like Bob itself):** the relevant signals are different from user-facing-app signals:
-   - Are users following the prescribed steps, or skipping them? Which steps?
-   - Are the documented outcomes (e.g., reduced fix-commit %, declining deviation count) actually showing up in projects using the framework?
-   - Where does context degradation still bite despite the protocol's guidance?
-   - Where is the framework producing friction that wasn't intended?
-
-4. **Compare to target / baseline / pre-product state.** "We launched 6 months ago, retention is 22%" is incomplete. "We launched 6 months ago, retention is 22% vs target 40% and industry benchmark 30%" is a finding.
-
-5. **Identify the single highest-leverage improvement opportunity.** Not five. Just one — the one place where moving the needle would matter most.
-
-**Output format:**
-
-```
-| Metric | Target | Current | Gap | Source | Confidence |
-|---|---|---|---|---|---|
-| [metric] | [value or qualitative] | [value or qualitative] | [delta or "below bar"] | [analytics / interviews / etc.] | High / Med / Low |
-```
-
-Plus a 1-paragraph executive summary ending with: *"Highest-leverage improvement opportunity: [one specific thing]."*
-
-**Stop condition (this IS the finding, not a routing detail):** if no Product Spec success metrics exist OR no signal can be gathered for any metric, **A7g's output is "we cannot tell if this product is working."** That sentence — not an "EVOLVE candidate" — is the finding. Name it. Don't paper over it by writing aspirational metrics or by routing to remediation as if more work would fix the gap. The honest call: either the Product Spec is incomplete (write the metrics), or the observability is missing (instrument them), or — for methodology / framework products that have no telemetry by design — accept that effectiveness is structurally unmeasured and rely on qualitative self-reports from users (Step [N+2]c PR-back). Surfacing the gap is the audit value; the response is a separate decision.
-
-`→ HG:` Present effectiveness scorecard + the one highest-leverage opportunity. Outcome is either an EVOLVE candidate (if the gap is actionable) or a Product Spec update (if the underlying goal needs to change).
+`→ HG:` Audit pass complete. Deferred items locked into `audit-log.md`. Reject decisions logged.
 
 ---
 
-**A7h: UX Friction (for products with non-engineer or end-user audiences)**
+**A7 fresh-session rules (unchanged from v2.13–v2.16)**
 
-*Question this audit answers: where does the user have to do extra work that the product could have spared them?*
+- Every lens runs in a **fresh Claude Code session.** The session that ran A1–A6 (or any prior lens) is the "writer"; each lens session is a clean-context "reviewer."
+- Hand-off prompt at end of A6: *"Remediation complete. Multi-lens audit entry below — start a new session per lens and paste the entry prompt from `audit-lenses/L{NN}-{slug}.md`."*
+- L01 Liveness portions and L11 AI Accuracy require tool execution, not just code-reading; install tooling per the lens file before running.
 
-Required when the Product Spec target audience includes non-engineers, end users, or any human flow. Skip for engineer-only / backend-only / library products (where "users" are other developers who can read the source).
-
-**Method:**
-
-1. **Walk the primary user workflow end-to-end.** Start from the user's actual entry point (not "open the app"; "they realized they needed to do X" — what happens next?). For each step, capture:
-   - What the user has to do (literal action)
-   - What they have to know (information that must already be in their head)
-   - What they have to decide (choices the product is asking them to make)
-   - What the product could have known/decided/done for them but didn't
-
-2. **Rate friction per step:** Clear (zero friction) / Mild (some friction, acceptable) / Painful (user pauses, hesitates, or asks for help).
-
-3. **Identify "the question we keep asking the user":** any decision the product asks more than once that has a stable answer. Those are smoothing opportunities — set the default and let the user override if needed, instead of asking every time. (Reference v2.9 streamlined startup: Bob used to ask 3 yes/no questions before the one that mattered; smoothing removed the noise.)
-
-4. **Identify "the thing the product knows but doesn't act on":** state the product has access to but treats as if it didn't. Show, don't ask.
-
-5. **Don't conflate friction with intentional gates.** A `→ HG` confirmation isn't friction — it's a deliberate sign-off. Friction is when the user works for the product, not for the outcome.
-
-**Output format:**
-
-```
-| Step | What user does | What they have to know | Friction | Smoothing opportunity |
-|---|---|---|---|---|
-| 1 | [action] | [knowledge required] | Clear/Mild/Painful | [proposal] |
-```
-
-Plus a "Top 3 smoothing opportunities" list, ranked by friction-reduction-per-effort.
-
-**Cadence:** Run at every AUDIT invocation for human-facing products. UX friction accumulates silently — each individually minor decision compounds, and you can't see it without a deliberate walkthrough.
-
-`→ HG:` Present friction map + top 3 smoothing opportunities. Adopted opportunities become EVOLVE candidates.
-
----
-
-**A7i: Fix & Defer Register**
-
-After all in-scope audits (A7a–A7h + A7j) return:
-1. **Fix** all approved critical + high items from in-scope findings (same as [N+1]f). A7j 5xx / function-throws findings are *always* critical — they represent code that does not run at all and is therefore higher-priority than most static findings.
-2. **Register deferred items** in the Build Manifest. For each deferred audit row from A7.0, write an entry into the corresponding future build phase: *"Phase [X] hardening obligations inherited from AUDIT A7: [list]."* This prevents the deferred items from being forgotten — they become acceptance criteria for that phase's verification.
-3. **Mark CTM:** capabilities that passed internal-correctness hardening get an `H` status badge alongside their implementation status. Capabilities that passed both internal-correctness AND external-fit (capability gap + effectiveness + UX friction where applicable) get an `H++` badge.
-4. **Log decisions from external-fit audits.** Capability-gap verdicts (Adopt / Defer / Reject), effectiveness-driven evolution candidates, and UX smoothing opportunities all get recorded in `decision-log.md` so they don't get re-litigated in future sessions.
-
-**PR-back prompt (v2.13).** At the end of A7i, Claude offers the [N+2]c PR-back template proactively. Same phrasing as Step [N+1]f, scoped to "this AUDIT pass" rather than "this product." AUDIT-mode users may never reach Step [N+2] (they came in to assess existing code, not to ship a new product), so A7i is the realistic point to capture signal. Run `bash ~/tools/bob-the-builder/scripts/bob-stats.sh` if you want the fix-commit ratio auto-computed.
-
-`→ HG:` Hardening pass complete (for current scope). Deferred items locked into Build Manifest. External-fit decisions logged.
+**A7 can be re-invoked any time.** During an active build, the user can return to MODE: AUDIT → A7 to re-run a Curated panel as new subsystems ship. Standard cadence: a Curated panel after each major phase; a Full Enchilada before launch.
 
 ### Step A8: Re-entry
 

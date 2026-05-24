@@ -49,9 +49,26 @@ Bob's Step 1a requires every product to declare success metrics. Bob is a produc
 
 ## Current Version
 
-v2.16 — 2026-05-20
+v2.17 — 2026-05-23
 
-v2.16 integrates **external research into Bob's own logic** and dogfoods the integration on Bob itself. Before v2.16, Bob had exactly one external-research touchpoint (`A7f Capability Gap` in AUDIT only, at strategic-positioning level — never at mechanism-borrow level). Result: Bob was inward-looking by structure, even though "orchestrate, don't reinvent" was an implicit principle.
+v2.17 replaces Bob's single A7 audit phase with a **multi-lens audit library**: 30 ready-made audit prompts across 8 bands, locked-and-loaded so a non-engineer doesn't have to invent audits per project. The user picks Curated (6-10 lenses, Bob proposes by project profile) or Full Enchilada (all 30, milestone scrubs); Bob's audit memory surfaces history + four options (Same / Complementary / Full / Custom) at every AUDIT entry. Lens library inventory (band by band):
+
+- **Engineering Foundation (L01-L06):** Hygiene & Liveness (folds prior A7a-A7j) · Spec Fidelity · Critical Capability Quality · Security & Threat Surface · Data Protection & Privacy · Supply Chain & Configuration
+- **User Experience (L07-L10):** Ease & Cognitive Path · Friction & Trust · Wow & Emotional Peaks · Edge States & Recovery
+- **AI Behavior (L11-L14):** Accuracy & Calibration · Right-Sizing & Model Fit · Interaction (HAX) & Safety · Cost & Latency Efficiency
+- **Performance Economics (L15-L16):** Cost & Speed Drivers (incl. tradeoff inversion — *where to invest more for value*) · Effectiveness & Quality Drivers
+- **Reach & Distribution (L17-L20):** Device & Form Factor · i18n & Language · Accessibility (WCAG+) · Shareability, Virality & Discoverability
+- **Operational (L21-L23):** Observability & Incident Readiness · Vendor & Dependency Risk · Documentation & Onboardability
+- **Strategic & Market (L24-L28):** Competitive Benchmarking · Pricing & Monetization · Marketing/Copy/Website · Persona Simulation · Strategic Edge & Wedge Sharpness (the anti-convergence lens — vetoes earlier UX findings that are intentional wedge, not bug)
+- **Growth & Adoption (L29-L30):** Onboarding & Activation · Retention & Compounding Loops
+
+Provenance: we surveyed 12 commercial AI code-review tools (CodeRabbit, Greptile, Bito, Qodo PR-Agent, Sourcery, DeepSource, Cursor Bugbot, GitHub Copilot Code Review, Graphite Diamond, CodeAnt, diffray, Kodus), 14 industry audit taxonomies (ISO 25010:2023, OWASP T10:2025, OWASP ASVS 5.0, STRIDE, CWE Top 25, NIST SSDF, WCAG 2.2, GDPR Art.30, Microsoft SDL, SonarQube, Snyk, GitLab Secure, CodeQL, OWASP LLM Top 10:2025), 13 UX / product audit methods (Nielsen, NN/g, Cognitive Walkthrough, Norman, JTBD, Friction Log, Peak-End, Aha Moment, Edge States, HAX, Brignull Dark Patterns, Content audits, Conversational UX), and strategic / growth frameworks (Dunford, Play Bigger, Linear/Saarinen, 37signals, Hanlon, Ramanujam, Campbell, Wiebe, Eyal, Reforge, Andrew Chen, a16z retention benchmarks). Three lenses are Bob-distinctive contributions: L01 Liveness, L02 Spec Fidelity, L03 Critical Capability Quality — no surveyed tool generalizes any of them.
+
+Per F47 meta-pattern: v2.17 dogfooded the lens library on Bob itself (Panel C — Methodology product: L01, L02, L03, L23, L24, L28). Headline meta-finding: *the lens library's biggest risk is sprawl, not shortfall.* Mitigations baked in: sequential execution + prior-report reading + L28 wedge veto + selection rubric defaulting to Curated 6-10 lenses per run. Deferred items F48-F51 logged in `audit-log.md` with named revisit triggers.
+
+---
+
+v2.16 (2026-05-20) integrated **external research into Bob's own logic** and dogfooded the integration on Bob itself. Before v2.16, Bob had exactly one external-research touchpoint (`A7f Capability Gap` in AUDIT only, at strategic-positioning level — never at mechanism-borrow level). Result: Bob was inward-looking by structure, even though "orchestrate, don't reinvent" was an implicit principle.
 
 Five changes:
 
