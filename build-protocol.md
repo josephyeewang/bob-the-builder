@@ -1785,7 +1785,7 @@ Before any lens fires, Bob reads `audit-artifacts/audit-history.json` and presen
 For each lens in the selected panel, in foundation-first order (L01 → L02 → L03 → risk band → UX band → AI band → strategic band → growth band):
 
 1. **Open a fresh Claude Code session.** Writer/reviewer pattern — same rule as prior A7a–A7e. The session that built or remediated capabilities rationalizes; the reviewer catches what the writer missed.
-2. **Paste the lens entry prompt:** *"Read `audit-lenses/L{NN}-{slug}.md` and run this audit on the current project. Read prior reports in `audit-artifacts/` first to avoid re-litigating findings."*
+2. **Paste the lens entry prompt:** *"Read `audit-lenses/L{NN}-{slug}.md` AND `audit-lenses/_execution-principle.md` (the per-lens execution catalog). Run this audit on the current project. Read prior reports in `audit-artifacts/` first to avoid re-litigating findings. **Execute checks wherever possible** (drive Playwright, run tools, query APIs, simulate behavior) rather than only reading code — execution evidence > reasoning inference."*
 3. **Lens executes** per its file:
    - Loads its source frameworks (cited URLs)
    - Walks its audit method

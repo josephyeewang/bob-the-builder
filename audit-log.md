@@ -6,6 +6,38 @@ This is the operational counterpart to `decision-log.md`. The decision log recor
 
 ---
 
+## EVOLVE pass — v2.17.1 (2026-05-23) — Execution Principle across all 30 lenses
+
+**Trigger:** Joe's question minutes after v2.17 shipped — *"are we fully utilizing Claude Code's ability to self-check and self-test features vs requiring manual checks vs not checking at all? (functions, buttons, workflows, experiences, databases, simulations, etc.)"*
+
+**Approach:** Quick audit of all 30 lens prompts against the question. Findings: 8 lenses already mandate execution (L01 Knip/Schemathesis/Playwright, L04 Semgrep/Snyk/Gitleaks, L06 Snyk/OSV/Checkov, L11 promptfoo/TruLens, L13 Garak/PyRIT/promptfoo-redteam, L17 Lighthouse, L19 axe-core, L20 link-unfurl validators). ~10 lenses are mixed (cite tools but default to "have Claude read the config"). ~12 lenses default to reading + human walk when Claude could execute via Playwright / API queries / programmatic flow walks (L02, L03, L07-L09, L15-L16, L21, L25-L27, L29, L30).
+
+**Decision:** Don't rewrite 30 lens files inline. Ship a cross-cutting principle file (`audit-lenses/_execution-principle.md`) that:
+- Names the principle: execution evidence > reasoning inference
+- Catalogs per-lens what Claude should EXECUTE / READ / leave to HUMAN
+- Provides read-mode-to-execute-mode rephrasing examples for common check question shapes
+- Documents the failure mode it prevents: *"I read the code and it looked correct"*
+
+Every lens prompt now gets `_execution-principle.md` loaded as a companion read at run time, via an updated A7.1 instruction in `build-protocol.md`. Future lens prompt edits add their row to the per-lens execution catalog.
+
+### Changes shipped in v2.17.1
+
+- **`audit-lenses/_execution-principle.md`** (new) — principle + per-lens catalog + rephrasing examples + anti-patterns.
+- **`audit-lenses/README.md`** — added "Execution Principle" section pointing to the new file.
+- **`build-protocol.md` §A7.1 step 2** — lens entry prompt now includes "Read `audit-lenses/_execution-principle.md`... Execute checks wherever possible..."
+- **`CLAUDE.md`** — v2.17.1 entry surfaces the principle + the meta-finding (8 fully execute / 10 mixed / 12 default-to-reading).
+
+### Why this isn't a v2.18
+
+It doesn't add new audit *capabilities* or new lenses; it sharpens how the existing 30 lenses run. v2.17.1 is the appropriate version increment for a cross-cutting prose addition that operationalizes a rule the library already implicitly favored (L01 Liveness was the first instance) but didn't make explicit.
+
+### Convergence with prior decisions
+
+- **D-003 (orchestrate, don't reinvent):** the execution principle is the natural consequence — orchestrate Claude's execution surface (Playwright, code-running, tool-driving) wherever possible, don't re-invent verification by reading.
+- **F47 meta-pattern (propose → dogfood → reshape prose → ship):** v2.17 had just shipped, so there's no separate dogfood run on Bob for v2.17.1 — but the meta-finding (8 fully execute / 10 mixed / 12 reading-heavy) IS the dogfood evidence informing the principle's prose.
+
+---
+
 ## EVOLVE pass — v2.17 (2026-05-23) — Multi-Lens Audit Library
 
 **Trigger:** Joe's challenge in two parts. (1) Observation: even structured Claude builds miss things, and audits run on those builds also miss things — each audit catches different gaps depending on its angle. (2) Hypothesis: instead of a single A7 audit phase, Bob should ship a *library* of pre-written audit lens prompts attacking the codebase from many angles (hygiene, structure, security, UX, AI accuracy, pricing, virality, mobile, accessibility, wedge sharpness, persona simulation, etc.) — locked-and-loaded so a non-engineer doesn't have to invent them per project.

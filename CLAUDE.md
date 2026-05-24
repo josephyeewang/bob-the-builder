@@ -49,6 +49,10 @@ Bob's Step 1a requires every product to declare success metrics. Bob is a produc
 
 ## Current Version
 
+v2.17.1 — 2026-05-23 — **Execution Principle** added as a load-bearing cross-cutting rule across all 30 lenses. New file `audit-lenses/_execution-principle.md` catalogs per-lens what Claude should EXECUTE (run tools, drive Playwright, query APIs, simulate behavior) vs READ (static inspection) vs delegate to HUMAN (subjective UX scoring, real-customer interviews). Surfaces the failure mode "I read the code and it looked correct" — execution evidence > reasoning inference. Originated from Joe's question: *"are we fully utilizing Claude Code's ability to self-check and self-test vs requiring manual checks?"* Audit of the v2.17 library found 8 lenses already lean hard on execution (L01, L04, L06, L11, L13, L17, L19, L20), ~10 are mixed, and ~12 defaulted to reading + human walk when Claude could execute (L02, L03, L07-L09, L15-L16, L21, L25-L27, L29, L30). The principle file rephrases each lens's check questions toward execute-mode, e.g., *"Is rate limiting enabled?"* → *"Send 200 requests in 1 second — what HTTP codes come back?"*
+
+---
+
 v2.17 — 2026-05-23
 
 v2.17 replaces Bob's single A7 audit phase with a **multi-lens audit library**: 30 ready-made audit prompts across 8 bands, locked-and-loaded so a non-engineer doesn't have to invent audits per project. The user picks Curated (6-10 lenses, Bob proposes by project profile) or Full Enchilada (all 30, milestone scrubs); Bob's audit memory surfaces history + four options (Same / Complementary / Full / Custom) at every AUDIT entry. Lens library inventory (band by band):

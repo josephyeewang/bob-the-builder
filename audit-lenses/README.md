@@ -146,6 +146,14 @@ You never need to remember a command. Default-recommended option depends on cont
 - **AI lenses (L11-L14) cluster.** Run together — accuracy feeds right-sizing feeds cost.
 - **Strategic & Growth lenses (L24-L30) last.** They benefit from understanding what's actually working (from earlier lenses) before judging direction.
 
+## Execution Principle (v2.17.1 — load-bearing rule)
+
+**Claude should EXECUTE, not just READ.** Many lenses default to "read code and reason" when Claude Code can actually drive Playwright, run scripts, query APIs, execute code, install tools, and simulate user behavior. Execution catches what reading misses.
+
+Before running any lens, Claude reads **`_execution-principle.md`** — a cross-cutting catalog naming for each lens what should be EXECUTED (tool runs, code execution, Playwright drives, API queries), what should be READ (static analysis, configs, docs), and what genuinely requires HUMAN follow-up (subjective UX scoring, real-customer interviews, brand-voice judgment).
+
+The rule of thumb: when a check question can be expressed as either *"is X true?"* (READ) or *"does Y happen when I do Z?"* (EXECUTE), prefer the latter. A finding with execution evidence is materially stronger than a finding with reading inference. See `_execution-principle.md` for the full per-lens catalog + rephrasing examples.
+
 ## Provenance — what we surveyed
 
 The library consolidates convergent angles from:
