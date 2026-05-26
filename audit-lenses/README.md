@@ -154,6 +154,10 @@ Before running any lens, Claude reads **`_execution-principle.md`** — a cross-
 
 The rule of thumb: when a check question can be expressed as either *"is X true?"* (READ) or *"does Y happen when I do Z?"* (EXECUTE), prefer the latter. A finding with execution evidence is materially stronger than a finding with reading inference. See `_execution-principle.md` for the full per-lens catalog + rephrasing examples.
 
+## Lens Retro — the self-learning loop (v2.18)
+
+The library improves itself over usage. After every audit, Bob auto-emits a **lens retro** (`audit-artifacts/audit-retro-{date}.{md,json}`) — a critique of the *lenses as instruments*, not the findings about the product ("L20 was noise for an SMS-only product; nothing caught the provider-429 retry storm"). Retros collect in `lens-retros/`; `scripts/lens-retro.sh` aggregates them and flags lenses that are consistently low-signal or high-swap. A human then decides which lenses to edit — **convergence across retros is signal, not a verdict** (D-004 / F35), and **Bob never auto-edits its own lenses** (D-005). See **`_lens-retro.md`** for the full artifact schema, the standalone retro prompt, and the ritual.
+
 ## Provenance — what we surveyed
 
 The library consolidates convergent angles from:

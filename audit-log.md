@@ -6,6 +6,50 @@ This is the operational counterpart to `decision-log.md`. The decision log recor
 
 ---
 
+## EVOLVE pass — v2.18 (2026-05-25) — Audit Self-Learning Loop (Lens Retro)
+
+**Trigger:** Joe's three-part question (2026-05-24) after kicking off a full lens-library audit on EMBT (Explain My Blood Test): (1) how should a project *self-apply* its audit learnings for future hygiene; (2) what prompt makes the project session emit detailed learnings to paste back to Bob so Bob's audit knows what worked / what to add; (3) how do we make (2) a *semi-automatic* self-learning capability so the audit library gets better every time it runs on any project. Joe selected building **A + B** (auto-emit + accumulate-and-flag); explicitly *not* full automation.
+
+**Framing that shaped the design:** three distinct loops were being conflated. (1) is project-side hygiene — not Bob's concern (handled by a paste-in prompt that stays in the project). (2) is the auto-emit **lens retro** — a critique of the *lenses as instruments*, NOT the findings about the product. The load-bearing distinction: a retro that restates findings teaches Bob nothing (findings are project-specific); a retro that says *"L20 was noise for an SMS-only product and check-question Q3 wrongly assumes a web surface"* improves the lens for every future project. (3) is the **Lens Retro Ritual** — accumulate retros, flag consistently weak lenses, human decides.
+
+### Changes shipped in v2.18
+
+- **`audit-lenses/_lens-retro.md`** (new) — the core spec. Defines the retro artifact (markdown + JSON schema), the finding-vs-instrument distinction, the standalone fresh-session retro prompt, the collection mechanism, and the full Lens Retro Ritual with its human gate.
+- **`scripts/lens-retro.sh`** (new) — thin jq aggregator (same class as `bob-stats.sh`). Reads `lens-retros/*.json` (+ optional project-dir args), tallies per-lens Noise rate / swap-out rate / should-have-executed rate / change-request count, and prints a ranked REVIEW-CANDIDATES board plus coverage-gap and change-request roll-ups. Validates `artifact_type == "audit_retro"`; warns below a 3-retro floor (don't act on N=1).
+- **`lens-retros/`** (new folder + README + `.gitkeep`) — collection point. Retros arrive via Joe copying his own project retros, external-user PR-back, or email — no telemetry, no phone-home.
+- **`build-protocol.md` §A7.4** (new sub-step) — Bob auto-emits the retro at the end of every audit pass. No `→ HG` (silent auto-write; the gate was A7.3).
+- **`build-protocol-core.md`** — A7.4 added to sub-steps; AUDIT header bumped v2.17 → v2.18.
+- **`audit-lenses/_audit-memory.md`** — retro artifacts added to the Files table; `audit_run_id` links retro ↔ run.
+- **`audit-lenses/README.md`** — new "Lens Retro — the self-learning loop" section.
+- **`decision-log.md` D-005** (new) — the surface-only non-goal: Bob never auto-edits its own lenses. Convergence across retros is signal, not a verdict (the D-004 / F35 lesson, applied to Bob's own improvement loop).
+- **`CLAUDE.md`** — Current Version → v2.18 + entry.
+
+### Dogfood pass (per F47 meta-pattern)
+
+`scripts/lens-retro.sh` was smoke-tested against two synthetic retros (EMBT + DLL, both SMS/AI profiles). It correctly flagged **L20 (Shareability/Virality)** as a REVIEW candidate — Noise in 2/2 runs, swapped out in 2/2, 2 change-requests targeting it — surfacing the convergent "virality lens is noise for SMS-only products" signal, and **L07** for a should-have-executed gap. The output footer correctly reminds the human that convergence is signal not verdict (D-005). The first *real* retro will be EMBT's, emitted when Joe runs A7.4 at the end of the in-flight audit.
+
+### Why this is v2.18 (not v2.17.2)
+
+It adds a new audit *capability* (the self-learning loop) with new artifacts, a new script, a new folder, and a new protocol sub-step — not a prose sharpening of existing lenses (which is what v2.17.1 was). Minor-version increment is correct.
+
+### Relationship to existing deferred items (honest accounting)
+
+- **F48 (audit-history.json as a live artifact)** — NOT closed. v2.18 introduces a *sibling* live-artifact discipline (retro JSON with a validated `artifact_type` + a script that consumes it), which is partial precedent for formalizing F48, but F48 specifically calls for JSON-Schema validation of `audit-history.json`. Its revisit trigger (3+ external users report friction) is unchanged.
+- **F51 (findings-aggregation script `aggregate-audit.sh`)** — NOT closed and deliberately distinct. `_aggregation.md` + a future `aggregate-audit.sh` combine *findings within one run*; `_lens-retro.md` + `lens-retro.sh` combine *retros across runs*. Different artifacts, different scripts, different purpose. v2.18 does not satisfy F51.
+
+### Convergence with prior decisions
+
+- **D-003 (orchestrate, don't reinvent):** `lens-retro.sh` is a thin jq aggregator producing paste-ready output (same class as `bob-stats.sh`), not new audit infrastructure. The retro loop orchestrates Claude's own judgment + a human gate; it builds no scoring engine.
+- **D-004 / F35 (convergence is signal, not a verdict):** this is the *governing* principle of D-005. The whole reason the loop is surface-only is the F35 lesson — mechanical convergence (5/9 tools wanted sharded rules) was correctly overridden by human judgment. The retro loop is designed to reproduce that override-able structure, never bypass it.
+- **F47 meta-pattern (propose → dogfood on Bob → reshape prose → ship):** followed — the script was dogfooded on synthetic Bob-profile retros before shipping, and the dogfood result (L20 flagged) is recorded above.
+
+### Deferred (revisit triggers named)
+
+- **F52 — Retro auto-emit fidelity.** A7.4's auto-emit is written by the same session that ran aggregation (it has context but also rationalization bias). The standalone fresh-session retro prompt exists as the higher-fidelity path. **Revisit trigger:** if 2+ retros are observably self-congratulatory (every lens rated Gold, no coverage gaps), make the fresh-session critique mandatory rather than optional.
+- **F53 — Selection-rubric auto-refinement from retros.** The retro `selection_rubric_accuracy` fields (swaps, should-not-have-run, missing-from-panel) are aggregated by the script but the rubric edits are still manual. **Revisit trigger:** once the ritual has run twice and produced stable swap patterns per profile, consider a rubric-update sub-step that proposes default-panel changes (still human-gated per D-005).
+
+---
+
 ## EVOLVE pass — v2.17.1 (2026-05-23) — Execution Principle across all 30 lenses
 
 **Trigger:** Joe's question minutes after v2.17 shipped — *"are we fully utilizing Claude Code's ability to self-check and self-test features vs requiring manual checks vs not checking at all? (functions, buttons, workflows, experiences, databases, simulations, etc.)"*

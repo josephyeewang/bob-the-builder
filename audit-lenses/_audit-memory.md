@@ -21,6 +21,8 @@ This document defines:
 | `audit-artifacts/audit-summary-{YYYY-MM-DD}.md` | Per-run summary (from `_aggregation.md`) |
 | `audit-artifacts/L{NN}-{slug}-{YYYY-MM-DD}.md` | Per-lens report (one per lens per run) |
 | `audit-artifacts/L{NN}-{slug}-{YYYY-MM-DD}.json` | Per-lens JSON sidecar |
+| `audit-artifacts/audit-retro-{YYYY-MM-DD}.md` | Lens retro — critique of the lenses *as instruments* (v2.18; auto-emitted at A7.4). See `_lens-retro.md` |
+| `audit-artifacts/audit-retro-{YYYY-MM-DD}.json` | Retro JSON sidecar; consumed by `scripts/lens-retro.sh`. `audit_run_id` links it to the run above |
 
 ## audit-history.json schema
 

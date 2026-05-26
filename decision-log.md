@@ -83,6 +83,24 @@ The companion `audit-log.md` records *deferred* items (Defer verdicts that may s
 
 ---
 
+### D-005: The Lens Retro loop surfaces lens edits — it never commits them. Bob does not auto-edit its own lenses.
+
+- **Date:** 2026-05-25
+- **Status:** Accepted
+- **Context:** v2.18 added the Audit Self-Learning Loop (auto-emitted lens retros + `scripts/lens-retro.sh` aggregation). The obvious next step — and the one Joe explicitly raised as a possibility — is *full* automation: Bob reads accumulated retros and rewrites its own lens prompts without a human in the loop. The retro JSONs are structured; an agent could mechanically apply the highest-frequency change-requests. Joe asked for the semi-automatic version (auto-emit + flag) and we deliberately stopped there.
+- **Decision:** Bob's lens-retro loop is **surface-only**. `scripts/lens-retro.sh` flags review candidates; Bob proposes specific edits; a **human supplies the verdict**; approved edits go through a normal EVOLVE + F47 dogfood. Bob will NOT auto-edit, auto-merge, or auto-ship changes to its own lens prompts from retro signal.
+- **Alternatives considered:**
+  - *Auto-apply change-requests above a frequency threshold (e.g., "3+ retros agree → edit the lens").* Rejected — this is precisely the D-004 / F35 failure mode. In v2.16, 5 of 9 surveyed tools converged on sharded rules files (the single strongest mechanical signal in the whole scan); Joe correctly rejected it anyway on higher-order judgment. **Convergence across sources is signal, not a verdict.** An auto-apply rule would have shipped F35. The human filter is the load-bearing part, not the aggregation.
+  - *Auto-draft a PR that a human merges.* Considered, deferred — closer to acceptable because a merge gate preserves the human verdict, but it adds CI/PR machinery that contradicts Bob's prose-driven, low-infrastructure stance (D-003) and isn't worth it until retro volume is high. Revisit if retro volume ever justifies it.
+  - *Convergence-to-mediocrity risk.* Lens prompts are load-bearing (~7,200 lines of curated content synthesized from 46+ sources). Auto-editing toward whatever the average retro complains about would sand off the distinctive lenses (L01 Liveness, L02 Spec Fidelity, L03 Critical Capability Quality, L28 Wedge) precisely because they're unusual — the same anti-convergence logic L28 applies to product features applies to Bob's own lenses.
+- **Consequences:**
+  - The loop's improvement cadence is gated on a human running the ritual (`_lens-retro.md` §B). That is intentional friction, not a missing feature.
+  - Retros accumulate even when nobody acts on them, so signal isn't lost between rituals — the cost of the human gate is latency, not data loss.
+  - If a future contributor proposes "let Bob improve its own lenses automatically," this ADR is the answer: surface, yes; commit, no.
+- **Revisit trigger:** Retro volume grows large enough (e.g., dozens per quarter from external users) that human triage becomes the bottleneck AND a PR-with-human-merge-gate is built. Even then, the human merge verdict is non-negotiable — only the *drafting* would automate.
+
+---
+
 ## Anti-pattern reminder
 
 ADRs that describe the decision without consequences are useless. The Consequences section is where future-you discovers why the seemingly clever shortcut is the thing now blocking a new requirement. Every decision in this file has a Consequences block — keep it that way.

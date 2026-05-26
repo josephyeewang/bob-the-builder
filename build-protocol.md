@@ -1,7 +1,7 @@
-# BUILD PROTOCOL v2.17
+# BUILD PROTOCOL v2.18
 
 > A systematic framework for building, auditing, and evolving products with Claude Code.
-> Created: 2026-04-15. Last updated: 2026-05-15. Owner: Joe Wang.
+> Created: 2026-04-15. Last updated: 2026-05-25. Owner: Joe Wang.
 
 ---
 
@@ -1839,6 +1839,20 @@ After aggregation:
 6. **PR-back prompt (v2.13).** Claude offers the [N+2]c PR-back template proactively, scoped to "this audit pass." Run `bash ~/tools/bob-the-builder/scripts/bob-stats.sh` for auto-computed fix-commit ratio.
 
 `→ HG:` Audit pass complete. Deferred items locked into `audit-log.md`. Reject decisions logged.
+
+---
+
+**A7.4: Lens Retro (v2.18 — auto-emit, no opt-in)**
+
+After the fix & defer register, Bob **automatically** writes a lens retro — a critique of the *lenses as instruments*, distinct from the findings about the product. This is the raw material for Bob's audit self-learning loop. The user does not have to ask; the retro is emitted every audit pass.
+
+1. **Write** `audit-artifacts/audit-retro-{YYYY-MM-DD}.md` + `.json` per the schema in `audit-lenses/_lens-retro.md`. The session that ran aggregation has full context of what each lens produced, so it writes a **first-pass self-assessment**: per-lens signal verdict (Gold / Useful / Noise), highest-value finding, false positives, executed-vs-read, confusing check questions; plus selection-rubric accuracy, the coverage gap no lens caught, aggregation quality, and ranked change-requests for Bob.
+2. **The retro critiques the instrument, never restates the findings.** "L04 found unauth `/api/results`" is a finding (belongs in A7.2). "L04 was gold and executed via Schemathesis; L20 was noise for an SMS-only product; nothing modeled the provider-429 retry storm" is a retro — it teaches Bob something reusable.
+3. **A deeper critique can be run later** in a fresh session (writer/reviewer) with the standalone retro prompt in `_lens-retro.md` §A — but the auto-emit guarantees a retro always exists even if nobody asks.
+
+Retros feed the **Lens Retro Ritual** (`_lens-retro.md` §B): collected into `lens-retros/`, aggregated by `scripts/lens-retro.sh` once ≥3 accumulate, and turned into a human-gated proposal to edit specific lenses. **Bob never auto-edits its own lenses** — convergence across retros is signal, not a verdict (D-004 / F35 lesson; non-goal logged as D-005). Approved edits go through a normal EVOLVE + F47 dogfood.
+
+`→ HG:` not required — A7.4 is a silent auto-write. The gate was A7.3.
 
 ---
 
