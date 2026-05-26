@@ -174,14 +174,15 @@ The auto-emit assembles Tier-1 fragments + Tier-2 synthesis. For an even sharper
 
 Retros are worthless scattered. The ritual turns a pile of retros into a ranked "lenses to review" list, then routes each through human judgment.
 
-### Collection point: `lens-retros/`
+### Collection point: `lens-retros/` (LOCAL — gitignored)
 
-Retro JSONs accumulate in Bob's own repo at `lens-retros/`. Three ways they get there:
-1. **Joe's own projects** — copy `audit-artifacts/audit-retro-*.json` from EMBT / DLL / etc. into `lens-retros/`, or point the script at the project dir directly (it accepts path args).
-2. **External users (PR-back)** — paste the retro into a GitHub issue, or PR the JSON file into `lens-retros/`. This is the audit-specific cousin of the Step [N+2]c PR-back.
-3. **Email** — joe@joe.wang, same private channel as [N+2]c; Joe drops the JSON into `lens-retros/`.
+> ⚠️ **Raw retros never go in the public repo.** A retro embeds project-specific security detail (vulnerable routes/tables, finding descriptions, commit hashes, still-open issues). `lens-retros/*.json` is gitignored so it stays on the local machine. Publishing one = publishing a live product's vulnerability map. (Learned the hard way — an EMBT retro was briefly committed on 2026-05-25 and had to be purged from git history.)
 
-No telemetry. No phone-home. Retros arrive only when a human shares them — consistent with Bob's no-telemetry-by-design stance.
+Retro JSONs accumulate **locally** in `lens-retros/`. Ways they get there:
+1. **Your own projects** — copy `audit-artifacts/audit-retro-*.json` from a project into `lens-retros/` (gitignored, local-only), or point the script at the project dir directly (it accepts path args). The script reads them off your machine.
+2. **External users** — do **not** PR a raw retro into this public repo. Hand-write a **sanitized** change-request set (lens IDs + signal verdicts + generic notes, NO finding detail / tables / routes / hashes) into a GitHub issue, or email joe@joe.wang. A maintainer folds the sanitized signal into the lenses. This is the audit-specific cousin of the Step [N+2]c PR-back.
+
+No telemetry. No phone-home. Retros arrive only when a human shares them, and only sanitized signal goes upstream — consistent with Bob's no-telemetry-by-design stance.
 
 ### When to run the ritual
 

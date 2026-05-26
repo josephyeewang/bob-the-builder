@@ -1,4 +1,4 @@
-# BUILD PROTOCOL v2.18.1
+# BUILD PROTOCOL v2.18.2
 
 > A systematic framework for building, auditing, and evolving products with Claude Code.
 > Created: 2026-04-15. Last updated: 2026-05-25. Owner: Joe Wang.

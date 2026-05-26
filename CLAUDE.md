@@ -49,6 +49,10 @@ Bob's Step 1a requires every product to declare success metrics. Bob is a produc
 
 ## Current Version
 
+v2.18.2 — 2026-05-25 — **Retros are private-by-default.** Fixes a confidentiality flaw in v2.18: the `lens-retros/` collection point was a tracked folder in this public repo, and the prose told users to PR raw retros into it. But a raw retro embeds project-specific security detail (vulnerable routes/tables, finding text, commit hashes). `lens-retros/*.json` is now gitignored (local-only; `scripts/lens-retro.sh` reads it off the machine); external contributors submit *sanitized* change-requests (lens IDs + verdicts + generic notes, no finding detail) via issue/email, never a raw-retro PR. Lesson: an artifact that critiques *the instrument* can still carry *the workpiece's* secrets when it cites specifics — separate "signal to share" from "context that stays local." Deferred F54 (auto-emit a sanitized `*.public.json` companion). Surfaced while processing the first real retro, which had been briefly committed and was purged from git history.
+
+---
+
 v2.18.1 — 2026-05-25 — **Two-tier retro capture** (fixes a context-loss flaw in v2.18, caught by Joe on design review). v2.18's retro was written at the end of the audit, assuming the end session had "full context of what each lens produced" — false, because lenses run in *fresh sessions*, so the end session never saw 29 of 30 runs and could only reconstruct from the *findings* artifacts, losing the instrument-level nuance the retro needs (ambiguous check questions, executed-vs-read, noise/false-positive judgments). Fix: **store throughout, compile at end.** Tier 1 — each lens appends a `retro_fragment` to its JSON sidecar as its final step, live and in-context (survives the session boundary + compaction). Tier 2 — A7.4 reads the durable fragments off disk (same disk-is-memory pattern A7.2 uses for findings) and adds the cross-lens synthesis that needs the whole-run vantage (coverage gap no lens caught, rubric accuracy, ranked change-requests). `scripts/lens-retro.sh` unchanged. Partially closes F52.
 
 ---

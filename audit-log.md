@@ -6,6 +6,25 @@ This is the operational counterpart to `decision-log.md`. The decision log recor
 
 ---
 
+## EVOLVE pass — v2.18.2 (2026-05-25) — Retros are private-by-default (fixes a confidentiality flaw in v2.18)
+
+**Trigger:** processing the first real retro (from a live consumer health product audit) surfaced a design flaw in v2.18: the `lens-retros/` collection point was a **tracked folder in a public repo**, and the README/`_lens-retro.md` prose instructed users (and maintainers) to *PR raw retros into it*. A raw retro embeds project-specific security detail — vulnerable routes/tables, finding descriptions, commit hashes, still-open issues. The first retro was briefly committed and pushed to the public repo before being caught; it was purged from git history (force-push of a rewritten branch after temporarily lifting the `main-no-force-push-no-delete` ruleset, then restoring it).
+
+**The flaw:** the loop's value (sharing audit-instrument learnings) was conflated with the artifact's risk (the artifact also contains product-specific findings). Sharing the *signal* is safe; sharing the *raw retro* is not.
+
+**Fix:**
+- `.gitignore` now excludes `lens-retros/*.json` (only `.gitkeep` + README tracked). Raw retros are **local-only**; `scripts/lens-retro.sh` reads them off the machine.
+- `lens-retros/README.md` + `_lens-retro.md` §B rewritten: external contributors submit a **sanitized** change-request set (lens IDs + verdicts + generic notes, no finding detail/tables/routes/hashes) via issue or email — never a raw retro PR.
+- The lesson is recorded inline in both docs so it isn't re-introduced.
+
+**Lesson for the loop's own design:** an artifact that critiques *the instrument* can still carry *the workpiece's* secrets if it cites specifics. Future artifact designs that get shared upstream must separate "signal to share" from "context that stays local" at emit time. (Candidate follow-up: have A7.4 emit a sanitized companion `audit-retro-{date}.public.json` alongside the private full one — deferred as F54.)
+
+### Deferred (revisit triggers named)
+
+- **F54 — sanitized retro companion at emit time.** A7.4 could auto-emit a `*.public.json` (lens IDs + verdicts + generic notes only, no finding text) so sharing upstream is a copy, not a manual sanitization. **Revisit trigger:** first time an external user actually wants to contribute a retro, or if manual sanitization proves error-prone.
+
+---
+
 ## EVOLVE pass — v2.18.1 (2026-05-25) — Two-tier retro capture (fixes a context-loss flaw in v2.18)
 
 **Trigger:** Joe's design-review question hours after v2.18 shipped — *"the audit takes a lot of time and tokens and the session will compact context along the way. Is that a problem for the accuracy of learnings if the loop only runs at the end of a 30-audit chain? Or does it need to store learnings throughout then compile at the end?"*
