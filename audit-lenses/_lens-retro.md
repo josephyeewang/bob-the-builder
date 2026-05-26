@@ -22,7 +22,21 @@ The retro is **not** the findings. It is a critique of how well the lenses *did 
 
 ## A — The auto-emit retro artifact (A7.4)
 
-After A7.3 (Fix & Defer Register) completes, Bob writes the retro automatically. The session that ran aggregation has the full context of what each lens produced, so it writes a **first-pass self-assessment**. (A deeper, fresh-session critique can be run later with the standalone retro prompt below — but the auto-emit guarantees a retro always exists, even if nobody asks.)
+### Why the retro is captured in two tiers (the context-loss problem)
+
+The naive design — "at the end of the audit, write a retro of how all the lenses did" — is **broken by Bob's own architecture**. Lenses run in *fresh sessions* (writer/reviewer pattern, A7.1), and a Full Enchilada is 30 of them across many sessions and a lot of tokens. By the time A7.4 runs, the end session:
+
+- **never witnessed 29 of the 30 lens runs** — they were separate sessions; and
+- can only see the **findings** artifacts on disk (`L{NN}-*.json`), which record what's wrong with the *product* — **not** the instrument-level nuance the retro needs (was a check question ambiguous? did the lens default to reading when it should have executed? did it feel like noise? what did it waste effort on?).
+
+That nuance exists only in each lens's *live* context and **evaporates when the session ends** (or compacts mid-run). Reconstructing it at the end is lossy. So the retro is captured in two tiers — **store throughout, compile at the end**:
+
+| Tier | What | When / by whom | Why it must be there |
+|---|---|---|---|
+| **Tier 1 — per-lens fragment** | The lens's own scorecard row: self signal verdict, false positives *it* generated, executed-vs-read, confusing check questions, time, stop conditions hit | Written by **each lens session as its final output step**, while fresh and in-context — persisted to disk in that lens's JSON sidecar | Only the running lens knows these; they don't survive to the end session |
+| **Tier 2 — cross-lens synthesis** | Selection-rubric accuracy, the coverage gap **no** lens caught, aggregation/dedup quality, ranked change-requests | Written at **A7.4** by the end session, which **reads the durable fragments from disk** (does not rely on remembering 30 runs) + the aggregated summary | These genuinely need the whole-run vantage — you can't see the hole until every lens has reported |
+
+The end session therefore does **not** need 30 lenses in its context window. It globs the fragments off disk and assembles them, exactly as aggregation (A7.2) already globs findings off disk. A deeper fresh-session critique can still be run later (standalone prompt below), but the two-tier capture means the auto-emit is *faithful*, not a lossy reconstruction.
 
 ### Markdown artifact — `audit-artifacts/audit-retro-{YYYY-MM-DD}.md`
 
@@ -126,11 +140,33 @@ This is what `scripts/lens-retro.sh` consumes. Schema is stable so the script ca
 }
 ```
 
+The `lens_scorecard` array is **assembled at A7.4 from the per-lens fragments** below — it is not authored from memory. `selection_rubric_accuracy`, `coverage_gaps`, `aggregation_quality`, and `change_requests` are the Tier-2 synthesis the end session adds.
+
+### Tier 1 — per-lens retro fragment (written live, by each lens)
+
+As the **final output step of every lens** (A7.1), the lens session appends a `retro_fragment` block to its own JSON sidecar (`audit-artifacts/L{NN}-{slug}-{YYYY-MM-DD}.json`) — *while it is still in-context and the experience is fresh*. This is the durable record A7.4 later reads. Write it even if the lens hit a stop condition — "couldn't run because X" is itself high-value retro signal.
+
+```json
+"retro_fragment": {
+  "lens": "L04",
+  "signal_verdict": "gold|useful|noise",
+  "highest_value_finding": "L04-F002",
+  "false_positives": ["L04-F009 flagged intentional CORS"],
+  "executed_vs_read": "executed|read|should_have_executed",
+  "confusing_check_questions": ["Q7 ambiguous on session vs JWT"],
+  "stop_conditions_hit": [],
+  "time_minutes": 25,
+  "self_note": "free-text: anything about running THIS lens that would help improve it"
+}
+```
+
+These fields are exactly the per-lens scorecard columns — and every one of them is something **only the running lens session knows well**. Capturing them live is what makes the end-of-run retro faithful instead of a guess. (For an unusually long lens run at risk of mid-session compaction, append to `self_note` as you go rather than only at the end.)
+
 ### Standalone retro prompt (deeper, fresh-session version)
 
-The auto-emit is a first-pass by the session that ran the audit. For a sharper critique — or when sharing back to Bob — run this in a **fresh session** (writer/reviewer: the session that ran the audit rationalizes; a clean session judges harder):
+The auto-emit assembles Tier-1 fragments + Tier-2 synthesis. For an even sharper critique — or when sharing back to Bob — run this in a **fresh session** (a clean session judges harder than the one that just ran the audit):
 
-> *Read every audit artifact in `audit-artifacts/` (the summary, every per-lens report, audit-history.json). Produce a LENS RETRO per `audit-lenses/_lens-retro.md` — a critique of the lenses as instruments, NOT the findings about this product. Judge whether each lens did its job: signal verdict, highest-value finding, false positives, executed-vs-read, confusing check questions. Then: was the panel right, what coverage gap did no lens catch, did aggregation rank correctly, and rank concrete change requests for Bob. Write both the `.md` and the `.json` sidecar. Be brutally honest and cite lens + finding IDs — vague praise is useless.*
+> *Read every audit artifact in `audit-artifacts/` (the summary, every per-lens report **including each one's `retro_fragment`**, audit-history.json). Produce a LENS RETRO per `audit-lenses/_lens-retro.md` — a critique of the lenses as instruments, NOT the findings about this product. Build the `lens_scorecard` from the per-lens `retro_fragment` blocks (don't re-derive from memory). Then add the cross-lens synthesis: was the panel right, what coverage gap did no lens catch, did aggregation rank correctly, and rank concrete change requests for Bob. Write both the `.md` and the `.json` sidecar. Be brutally honest and cite lens + finding IDs — vague praise is useless.*
 
 ---
 

@@ -1,4 +1,4 @@
-# BUILD PROTOCOL v2.18
+# BUILD PROTOCOL v2.18.1
 
 > A systematic framework for building, auditing, and evolving products with Claude Code.
 > Created: 2026-04-15. Last updated: 2026-05-25. Owner: Joe Wang.
@@ -1785,13 +1785,14 @@ Before any lens fires, Bob reads `audit-artifacts/audit-history.json` and presen
 For each lens in the selected panel, in foundation-first order (L01 → L02 → L03 → risk band → UX band → AI band → strategic band → growth band):
 
 1. **Open a fresh Claude Code session.** Writer/reviewer pattern — same rule as prior A7a–A7e. The session that built or remediated capabilities rationalizes; the reviewer catches what the writer missed.
-2. **Paste the lens entry prompt:** *"Read `audit-lenses/L{NN}-{slug}.md` AND `audit-lenses/_execution-principle.md` (the per-lens execution catalog). Run this audit on the current project. Read prior reports in `audit-artifacts/` first to avoid re-litigating findings. **Execute checks wherever possible** (drive Playwright, run tools, query APIs, simulate behavior) rather than only reading code — execution evidence > reasoning inference."*
+2. **Paste the lens entry prompt:** *"Read `audit-lenses/L{NN}-{slug}.md` AND `audit-lenses/_execution-principle.md` (the per-lens execution catalog). Run this audit on the current project. Read prior reports in `audit-artifacts/` first to avoid re-litigating findings. **Execute checks wherever possible** (drive Playwright, run tools, query APIs, simulate behavior) rather than only reading code — execution evidence > reasoning inference. As your final step, append a `retro_fragment` block to your JSON sidecar per `audit-lenses/_lens-retro.md` Tier 1 — your own signal verdict, false positives you generated, executed-vs-read, confusing check questions, stop conditions hit. Write it while fresh; it's the durable record the end-of-run retro reads."*
 3. **Lens executes** per its file:
    - Loads its source frameworks (cited URLs)
    - Walks its audit method
    - Answers its check questions
    - Produces output: markdown report + JSON sidecar at `audit-artifacts/L{NN}-{slug}-{YYYY-MM-DD}.md` / `.json`
    - Names stop conditions if signal cannot be produced
+   - **Appends its `retro_fragment` (v2.18.1)** to the JSON sidecar as the final step — the live, fresh self-assessment of how the *lens itself* performed (Tier 1 of the retro, per `_lens-retro.md`). This persists to disk so it survives the fresh-session boundary and any compaction.
 4. **Move to next lens.** Sequential, not parallel — each lens reads prior lens reports to convert intentional ~15% overlap into confirmation signal rather than noise.
 
 The library covers 30 lenses across 8 bands:
@@ -1842,13 +1843,17 @@ After aggregation:
 
 ---
 
-**A7.4: Lens Retro (v2.18 — auto-emit, no opt-in)**
+**A7.4: Lens Retro (v2.18 — auto-emit, no opt-in; two-tier capture v2.18.1)**
 
 After the fix & defer register, Bob **automatically** writes a lens retro — a critique of the *lenses as instruments*, distinct from the findings about the product. This is the raw material for Bob's audit self-learning loop. The user does not have to ask; the retro is emitted every audit pass.
 
-1. **Write** `audit-artifacts/audit-retro-{YYYY-MM-DD}.md` + `.json` per the schema in `audit-lenses/_lens-retro.md`. The session that ran aggregation has full context of what each lens produced, so it writes a **first-pass self-assessment**: per-lens signal verdict (Gold / Useful / Noise), highest-value finding, false positives, executed-vs-read, confusing check questions; plus selection-rubric accuracy, the coverage gap no lens caught, aggregation quality, and ranked change-requests for Bob.
+**Captured in two tiers so context loss can't degrade it (v2.18.1).** Lenses run in fresh sessions, so the end session never saw 29 of 30 lens runs — it must not reconstruct the retro from memory. Instead:
+- **Tier 1 (live, per lens):** each lens already wrote its `retro_fragment` to its JSON sidecar as its final step (A7.1) — the fresh, in-context self-assessment of how *that lens* performed.
+- **Tier 2 (end of run, A7.4):** the end session **reads the durable fragments off disk** (globs `audit-artifacts/L*-*.json`, the same way A7.2 globs findings) and assembles the `lens_scorecard`, then adds the cross-lens judgments that genuinely need the whole-run vantage.
+
+1. **Assemble** `audit-artifacts/audit-retro-{YYYY-MM-DD}.md` + `.json` per the schema in `audit-lenses/_lens-retro.md`: build `lens_scorecard` from the per-lens `retro_fragment` blocks (do **not** re-derive from memory), then add **selection-rubric accuracy**, the **coverage gap no lens caught**, **aggregation quality**, and **ranked change-requests** for Bob.
 2. **The retro critiques the instrument, never restates the findings.** "L04 found unauth `/api/results`" is a finding (belongs in A7.2). "L04 was gold and executed via Schemathesis; L20 was noise for an SMS-only product; nothing modeled the provider-429 retry storm" is a retro — it teaches Bob something reusable.
-3. **A deeper critique can be run later** in a fresh session (writer/reviewer) with the standalone retro prompt in `_lens-retro.md` §A — but the auto-emit guarantees a retro always exists even if nobody asks.
+3. **A deeper critique can be run later** in a fresh session with the standalone retro prompt in `_lens-retro.md` §A — but the two-tier auto-emit guarantees a faithful retro always exists even if nobody asks.
 
 Retros feed the **Lens Retro Ritual** (`_lens-retro.md` §B): collected into `lens-retros/`, aggregated by `scripts/lens-retro.sh` once ≥3 accumulate, and turned into a human-gated proposal to edit specific lenses. **Bob never auto-edits its own lenses** — convergence across retros is signal, not a verdict (D-004 / F35 lesson; non-goal logged as D-005). Approved edits go through a normal EVOLVE + F47 dogfood.
 

@@ -88,7 +88,7 @@ source_frameworks: [list with URLs]
 {5-15 questions. Each one phrased so "no" is a finding.}
 
 ## Output schema
-{Markdown table format that Claude fills in. Plus JSON sidecar shape.}
+{Markdown table format that Claude fills in. Plus JSON sidecar shape. As of v2.18.1, the lens also appends a `retro_fragment` block to its JSON sidecar as its final step — the live self-assessment of how the lens itself performed, which the end-of-run Lens Retro reads off disk. See `_lens-retro.md` Tier 1.}
 
 ## Severity rubric (calibrated to this lens)
 - **Critical** — {lens-specific definition}

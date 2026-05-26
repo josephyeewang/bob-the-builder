@@ -28,3 +28,12 @@ npm-debug.log*
 # ── CLAUDE CODE LOCAL STATE ──
 .claude/worktrees/
 .claude/scheduled_tasks.lock
+
+# ── LENS RETROS (private-by-default) ──
+# Raw audit retros cite project-specific findings, schema details, and commit
+# hashes. This is a PUBLIC repo — never commit raw retros. The collection point
+# (README + .gitkeep) is tracked; the data is not. scripts/lens-retro.sh reads
+# them locally. Only sanitized, genericized change-requests go upstream.
+# See audit-lenses/_lens-retro.md §B.
+lens-retros/*.json
+!lens-retros/.gitkeep

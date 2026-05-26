@@ -6,6 +6,36 @@ This is the operational counterpart to `decision-log.md`. The decision log recor
 
 ---
 
+## EVOLVE pass — v2.18.1 (2026-05-25) — Two-tier retro capture (fixes a context-loss flaw in v2.18)
+
+**Trigger:** Joe's design-review question hours after v2.18 shipped — *"the audit takes a lot of time and tokens and the session will compact context along the way. Is that a problem for the accuracy of learnings if the loop only runs at the end of a 30-audit chain? Or does it need to store learnings throughout then compile at the end?"*
+
+**The flaw he caught (real, and bigger than compaction):** v2.18's A7.4 wrote the retro at the end of the audit, assuming "the session that ran aggregation has full context of what each lens produced." False. Lenses run in **fresh sessions** (writer/reviewer, A7.1), so the end session never witnessed 29 of 30 lens runs — it could only read the *findings* artifacts on disk. Those record what's wrong with the **product**, not the instrument-level nuance the retro needs (ambiguous check questions, executed-vs-read struggles, noise/false-positive judgments, "couldn't run because X"). That nuance lives only in each lens's live context and evaporates at the session boundary (and can compact within a long lens). The end-of-run retro was therefore a **lossy reconstruction** — exactly the accuracy problem Joe flagged. Compaction is the secondary risk; the fresh-session architecture is the primary one.
+
+**Fix — two-tier capture (store throughout, compile at end):**
+- **Tier 1 (live, per lens):** each lens, as its **final output step** in A7.1, appends a `retro_fragment` block to its own JSON sidecar — self signal verdict, false positives it generated, executed-vs-read, confusing check questions, stop conditions hit, free-text `self_note`. Written while fresh and in-context; persisted to disk so it survives the fresh-session boundary and any compaction. Written even on a stop condition ("couldn't run because X" is high-value signal).
+- **Tier 2 (end of run, A7.4):** the end session **reads the durable fragments off disk** (globs `audit-artifacts/L*-*.json`, exactly as A7.2 globs findings) to assemble the `lens_scorecard`, then adds the cross-lens synthesis that genuinely needs the whole-run vantage — selection-rubric accuracy, the coverage gap **no** lens caught, aggregation quality, ranked change-requests. The end session no longer needs 30 lenses in its context window.
+
+This reuses Bob's existing **disk-is-memory** pattern (findings already work this way) rather than inventing anything — consistent with D-003.
+
+### Changes shipped in v2.18.1
+
+- **`audit-lenses/_lens-retro.md`** — replaced the "end session has full context" framing with the two-tier model (added a Tier-1/Tier-2 table + the `retro_fragment` JSON schema + the rule that `lens_scorecard` is assembled from fragments, not memory). Standalone fresh-session prompt updated to build from fragments.
+- **`build-protocol.md` §A7.1** — lens entry prompt + output contract now require appending `retro_fragment` as the final step. **§A7.4** — reframed from "write from full context" to "assemble Tier-1 fragments off disk + add Tier-2 synthesis."
+- **`build-protocol-core.md`** — A7.4 line notes the two-tier capture.
+- **`audit-lenses/README.md`** — per-lens output schema note mentions the `retro_fragment` final step.
+- **`CLAUDE.md`** + version headers → v2.18.1.
+
+### Why this is v2.18.1 (not v2.19)
+
+It corrects how the v2.18 mechanism *captures* data; it adds no new capability and no new lens. Same class of increment as v2.17.1 (sharpened v2.17's execution discipline). `scripts/lens-retro.sh` is unchanged — it still consumes the final `audit-retro-*.json`, whose `lens_scorecard` is now assembled from fragments rather than authored from memory.
+
+### Closes / supersedes
+
+- **Partially closes F52** (retro auto-emit fidelity). v2.18 deferred F52 with the worry that the auto-emit was a same-session rationalization. Two-tier capture addresses the structural half (the end session no longer relies on memory). The *remaining* F52 concern — a lens being self-congratulatory in its **own** fragment — stands; revisit trigger unchanged (if 2+ fragments are all-Gold/no-gaps, make the fresh-session critique mandatory).
+
+---
+
 ## EVOLVE pass — v2.18 (2026-05-25) — Audit Self-Learning Loop (Lens Retro)
 
 **Trigger:** Joe's three-part question (2026-05-24) after kicking off a full lens-library audit on EMBT (Explain My Blood Test): (1) how should a project *self-apply* its audit learnings for future hygiene; (2) what prompt makes the project session emit detailed learnings to paste back to Bob so Bob's audit knows what worked / what to add; (3) how do we make (2) a *semi-automatic* self-learning capability so the audit library gets better every time it runs on any project. Joe selected building **A + B** (auto-emit + accumulate-and-flag); explicitly *not* full automation.

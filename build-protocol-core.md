@@ -127,7 +127,7 @@ A1: Inventory → A2: Map to hierarchy → A3: Code-spec consistency → A4: Ris
 - **A7.1 — Sequential lens execution.** Each lens in a **fresh Claude Code session** (writer/reviewer pattern). Lens reads prior reports in `audit-artifacts/` to convert ~15% intentional overlap into confirmation, not noise. Each lens writes markdown + JSON sidecar.
 - **A7.2 — Aggregation.** Per `audit-lenses/_aggregation.md`: dedup, honor L28 wedge vetoes, rank by severity × frequency × user-impact, produce `audit-artifacts/audit-summary-{date}.md`.
 - **A7.3 — Fix & Defer.** Replaces prior A7i. Fix Criticals, triage Majors at `→ HG`, register Defers in `audit-log.md` with revisit triggers, log Rejects in `decision-log.md`. L01 Liveness 5xx / function-throws findings remain *always Critical*. PR-back prompt (v2.13) offered.
-- **A7.4 — Lens Retro (v2.18, auto-emit).** Bob automatically writes `audit-artifacts/audit-retro-{date}.{md,json}` — a critique of the *lenses as instruments* (signal verdict per lens, coverage gap no lens caught, ranked change-requests for Bob), distinct from the findings. Feeds the Lens Retro Ritual (`audit-lenses/_lens-retro.md`): `scripts/lens-retro.sh` aggregates retros from `lens-retros/`; once ≥3 accumulate, a human-gated proposal edits specific lenses. **Bob never auto-edits its own lenses** (D-005). No `→ HG`.
+- **A7.4 — Lens Retro (v2.18, auto-emit; two-tier capture v2.18.1).** Bob automatically writes `audit-artifacts/audit-retro-{date}.{md,json}` — a critique of the *lenses as instruments* (signal verdict per lens, coverage gap no lens caught, ranked change-requests for Bob), distinct from the findings. **Captured in two tiers so fresh-session/compaction context loss can't degrade it:** each lens writes its `retro_fragment` live to its JSON sidecar (Tier 1); A7.4 reads those fragments off disk and adds cross-lens synthesis (Tier 2) — it never reconstructs from memory. Feeds the Lens Retro Ritual (`audit-lenses/_lens-retro.md`): `scripts/lens-retro.sh` aggregates retros from `lens-retros/`; once ≥3 accumulate, a human-gated proposal edits specific lenses. **Bob never auto-edits its own lenses** (D-005). No `→ HG`.
 
 **Selection rubric (panel examples):**
 - *Pre-launch consumer (DLL profile):* L01, L02, L03, L04, L05, L07, L08, L10, L13 (9)
@@ -246,4 +246,4 @@ If Tier 2-3 skipped during build → MUST run at hardening.
 
 ---
 
-*Core Reference for Build Protocol v2.18 — 2026-05-25*
+*Core Reference for Build Protocol v2.18.1 — 2026-05-25*
