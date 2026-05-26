@@ -182,6 +182,7 @@ L07 is the foundation UX lens. L08 (Friction & Trust), L09 (Wow), and L10 (Edge 
 - **Do NOT recommend "rewrite the UI."** L07 surfaces specific findings with specific fixes. UI rewrites are EVOLVE-mode work, not audit recommendations.
 - **Do NOT confuse "I find this confusing" with "users find this confusing."** Note: as the auditor, you're an N=1. Findings should reference specific Cognitive Walkthrough question failures or Nielsen heuristics, not vibes.
 - **Bias toward "first-time user reaching for first task."** Most usability failures appear in the first 5 minutes. Audit there before optimizing power-user paths.
+- **After closing any copy/label fix, grep the whole project for the same claim class (v2.19).** Failure this prevents: an AuthModal showing false claims ("shareable link," "30-day expiry") was fixed in isolation, but the identical broken copy also lived in mobile nav and the homepage hero — each surface fixed in a separate cycle. Fixing one instance without re-grepping for the class is an incomplete fix. Enforced generally at build-protocol §A7.3; this is the pointed reminder for the lens where copy lies most often surface.
 
 ## Stop conditions
 

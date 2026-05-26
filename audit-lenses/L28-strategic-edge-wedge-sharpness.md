@@ -82,7 +82,7 @@ This is the most philosophically distinctive lens in the library. It's also the 
 
 ## Check questions
 
-1. Can you articulate the wedge in ONE sentence without hedging? Write it.
+1. Can you articulate the wedge in ONE sentence without hedging? Write it. **Then compress it to <8 words (v2.19) — a concrete sharpness test. If you can't name the wedge in under 8 words, it isn't sharp enough yet, and that vagueness IS the finding.**
 2. What do we believe about our category that 80% of competitors would publicly disagree with? Cite three claims.
 3. Name the "old way" we're replacing. If it's a vendor, name them. If we can't name an enemy, what's our POV opposing?
 4. What's in our anti-feature list this quarter? When did we last add to it (vs delete from it)?

@@ -212,6 +212,7 @@ Even US-first products usually have global users within 6-12 months. The cost of
 - **Do NOT recommend "wait until we have international users."** By then the rewrite is expensive. Externalize strings from day 1; translate later.
 - **Do NOT confuse i18n (infrastructure) with l10n (specific translations).** i18n is "ready to be translated"; l10n is "translated." This lens audits i18n.
 - **Bias toward "what would break if German speakers showed up tomorrow?"** German strings are ~30-40% longer than English; the truncation pattern reveals layout fragility.
+- **Half-shipped i18n → one binary decision, not N findings (v2.19).** When the UI is mostly hardcoded (e.g. <5% translated) but AI/content output is heavily translated (e.g. >50%) — a common "half-shipped" state — do NOT emit 7 separate per-gap findings. Compress to a single decision finding: **"commit to i18n (and here's the gap list) OR revert the partial translation (and hide the language picker)."** The half-state is the problem; itemizing it is noise.
 
 ## Stop conditions
 

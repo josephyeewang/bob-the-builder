@@ -230,6 +230,7 @@ The DLL audit didn't have a virality lens. EMBT (health-adjacent) probably doesn
 - **Do NOT recommend "build a viral loop" generically.** Viral mechanics require structural fit — not every product can/should viral. Recommend specific loops only when the product shape supports them.
 - **Do NOT confuse SEO checklist completion with discoverability.** Indexed ≠ found. Discoverability requires being where target users look.
 - **Bias toward "what happens when a real user pastes our link?"** That's the moment-of-truth.
+- **Scope virality checks to product type (v2.19).** Social-virality questions (share-to-TikTok/X/Reddit, viral loops) are out-of-scope — and can be active anti-patterns — for private, sensitive, or health/finance products where users do NOT want to broadcast usage. For these, audit *discoverability* (SEO, OG-unfurl correctness, canonical tags, attribution survival) and skip the social-amplification questions. Don't score a deliberately non-viral product as deficient for not being viral.
 
 ## Stop conditions
 

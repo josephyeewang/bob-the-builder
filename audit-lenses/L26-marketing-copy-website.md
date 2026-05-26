@@ -270,6 +270,7 @@ Sub-streams Joe called out:
 - **Do NOT optimize for keywords at the expense of clarity.** Keyword-stuffed content is HCU bait.
 - **Do NOT recommend "use AI to generate more content."** That's the L26 antagonist. Use AI to draft, but human-edit for originality + first-person + brand voice.
 - **Bias toward "would a real prospect read this and feel they understand the product?"** Not "did we mention every feature?"
+- **After fixing any hero/marketing claim, grep every surface for the same claim class (v2.19).** Failure this prevents: a hero subhead ("Get a real diagnosis") that contradicted an AI-safety fix was corrected on the homepage, but analogous "diagnosis / doctor-replacement" copy survived on other surfaces. A marketing claim fixed in one place but live in five is still a liability. Enforced generally at build-protocol §A7.3.
 
 ## Stop conditions
 

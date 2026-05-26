@@ -135,6 +135,7 @@ The 4 sub-streams Joe called out:
 13. When did you last reprice? (<6 months = ~2x ARPU growth.)
 14. Currency localized for top 3 non-US markets?
 15. Does pricing align with positioning (premium = value pricing; commodity = low pricing)?
+16. **Verify before claim (v2.19):** before flagging any billing config as missing (Stripe `apiVersion`, webhook secret, idempotency key, tax setting), have you grepped every call-site to confirm it's actually absent — not present elsewhere? (A false "apiVersion missing" on a Critical-adjacent lens erodes trust in the whole audit.)
 
 ## Output schema
 

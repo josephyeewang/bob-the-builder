@@ -78,6 +78,11 @@ Use when: production incident just happened.
 Lenses (5): **L01, L04, L10, L21, L22**
 Justification: root-cause-adjacent lenses + observability + vendor risk (incidents often vendor-triggered).
 
+### Panel K — "Production / launched scrub" (DEFAULT for live solo-dev projects) (v2.19)
+Use when: launched, has real users, solo or small team, and you want depth WITHOUT the risk of a 30-lens Full Enchilada (see caution below).
+Lenses (12): **L01, L04, L05, L07, L09, L10, L11, L13, L16, L17, L19, L21**
+Justification: foundation + liveness + deploy-verify (L01), security + privacy because real user data (L04, L05), the UX journey + peaks + edge/recovery (L07, L09, L10), AI accuracy + safety (L11, L13), what's actually working (L16), mobile + a11y because public (L17, L19), and operability (L21). Origin: an EMBT Full Enchilada retro found these 12 would have caught **14 of 15** closed Criticals — the strategic/growth lenses (L24-L30) and the half-covered ones (L25) added the most noise and the least new signal. This is the recommended production default; reach for Full Enchilada only at the milestones below.
+
 ## Selection algorithm
 
 ```
@@ -130,9 +135,20 @@ After user picks → `→ HG`, then run.
 
 ## Sizing guidance
 
-- Curated panel: 6-10 lenses typical. Less = under-coverage; more = panel sprawl (move to Full Enchilada instead).
+- Curated panel: 6-12 lenses typical. Less = under-coverage; more = panel sprawl (move to Full Enchilada instead). Production/launched projects: default to **Panel K (12)**.
 - Full Enchilada: 30 lenses. Runtime: 1-3 hours of Claude work, often multi-session. Use for major-milestone scrubs.
 - Custom: any number, but Bob warns if <4 (likely missing foundation) or >20 (likely should be Full Enchilada).
+
+### ⚠️ Full Enchilada on a LIVE production project carries incident risk (v2.19)
+
+A 30-lens scrub generates many fix-commits, and on a live product those compound — an EMBT Full Enchilada *caused a 65-minute P0 outage during the audit itself* (a perf fix that passed local build but white-screened prod). Before recommending Full Enchilada on a production project, Bob warns and offers mitigations:
+- **Prefer Panel K (12)** for routine production depth; reserve Full Enchilada for **annual** or **pre-launch / pre-fundraise** milestones.
+- If running Full Enchilada on live: batch fixes behind a **staging deploy + post-deploy verification** (L01 q13 / §A7.3 1b), or run during a **change-freeze window**, so compounding fixes don't ship unverified to prod.
+- Never apply a build-config/bundler/routing fix from an audit straight to prod without driving the deployed URL (§A7.3 1b).
+
+### L25 Pricing — rarely standalone (v2.19)
+
+L25 is **not** a default-panel lens. **L24** (competitive), **L16** (effectiveness), and **L08** (friction & trust) cover most pricing signal already. Include L25 only when pricing / monetization is the *explicit purpose* of the audit (e.g., pre-monetization, a repricing decision). Origin: an EMBT retro found L25 produced 0 closed findings + 1 false positive when run alongside L16/L24/L08. (Panels B, G, H still list it where pricing is genuinely in focus; it's just no longer auto-added elsewhere.)
 
 ## When Bob should override the user
 

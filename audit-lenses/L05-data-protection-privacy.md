@@ -235,6 +235,7 @@ The DLL audit didn't catch a privacy lens at all — privacy was not in scope. E
 - **Do NOT mark "anonymized" data as out-of-scope without verifying.** True anonymization is a high bar (GDPR Recital 26 — irreversibility). Pseudonymized data is still personal data.
 - **Bias toward "what would happen if a regulator asked tomorrow?"** Findings should be regulator-readable, not just engineer-readable.
 - **For AI products: training-data provenance is a critical sub-audit.** Has user data been used to train models? Has consent been obtained? Can users opt out? Is the answer documented?
+- **Checkpoint findings to disk as you go (v2.19).** L05 is one of the largest lenses — it has run long enough to exhaust a single session (RLS enumeration + GRANT posture + third-party data flow + DPA + regional). Write findings to the JSON sidecar after each major sub-area (DB-RLS posture → third-party flow → regional/DPA), not only at the end, so a mid-lens session drop loses nothing. Per build-protocol §A7.1 flush rule.
 
 ## Stop conditions (the gap IS the finding)
 

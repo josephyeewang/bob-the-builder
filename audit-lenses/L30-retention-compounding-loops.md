@@ -126,6 +126,7 @@ a16z's "Retention is all you need" highlights smile curves: AI-native products o
 13. Pause / downgrade / win-back surfaces exist?
 14. For AI products: returning-churn cohort measurable (smile-curve signal)?
 15. Is growth investment matched to retention shape? (L-shape = stop spending)
+16. **Day-30 measurement plan (v2.19):** for any retention/loop finding that matures only with time, has a concrete measurement plan been produced — exact cohort definition, the exact query (D1/D7/D30 retention, k-factor attribution), the comparison window, and the go/no-go threshold? (A deferred "measure later" finding decays unless it ships with the runnable query.)
 
 ## Output schema
 

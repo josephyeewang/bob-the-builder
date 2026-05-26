@@ -6,6 +6,48 @@ This is the operational counterpart to `decision-log.md`. The decision log recor
 
 ---
 
+## EVOLVE pass — v2.19 (2026-05-25) — First lens-library improvement driven by a real field retro
+
+**Milestone:** this is the first time Bob's lens library was improved from a **real audit retro** (not a Bob-on-Bob dogfood). The self-learning loop (v2.18) produced its first field signal — a Full Enchilada retro from a live consumer health product (EMBT) — and that signal drove concrete lens edits. The loop closed end-to-end: audit → retro → ritual (`scripts/lens-retro.sh`) → human verdict → lens edits → ship.
+
+**D-005 compliance:** Bob did not auto-edit anything. The retro *surfaced* ranked change-requests; the human (Joe) reviewed and gave the verdict "fix all of them." These edits are the human-approved result, per D-005.
+
+**N=1 caveat (recorded so future retros can revisit):** all of this is from a **single** project with one profile (launched · AI-pipeline · health-data · solo-dev · production). The two top changes (deploy-verification, class-level-fix) are backed by a concrete production incident, so they're profile-independent. The rest (L25 demotion, strategic bucket, measurement plans, etc.) are plausibly general but unconfirmed at N=1 — if a second project's retro disagrees, revisit. Nothing was *deleted* (e.g., L25 was demoted in the rubric, not removed) specifically to keep N=1 changes reversible.
+
+### Change-requests addressed (all 10 ranked + 5 coverage gaps + 3 meta-findings)
+
+| Retro CR | Fix shipped |
+|---|---|
+| #1 Deploy-verification (the audit *caused a 65-min P0*) | L01 check-q13 (drive Playwright against the **live deployed URL** after build-config/routing changes) + build-protocol **§A7.3 step 1b** (mandatory post-deploy verify for risky fixes) |
+| #2 Class-level fix not enforced (same broken copy in 3 places) | build-protocol **§A7.3 step 1a** (mandatory class-grep after every fix, all lenses) + pointed anti-patterns in L07 + L26 |
+| #3 L25 Pricing = Noise → fold | `_selection-rubric.md`: L25 removed from default panels + "rarely standalone" note (demoted, **not deleted** — reversible) |
+| #4 AI→DB constraint drift | L13 check-q16 (server-side normalization + non-silent error path for AI writes to constrained columns) |
+| #5 L29/L30 end with "measure later," no query | L29 + L30 check-q16 (require a day-30 measurement plan: exact events, exact query, window, threshold) |
+| #6 L25 verify-before-claim (false "apiVersion missing") | L25 check-q16 (grep all call-sites before claiming a config absent) |
+| #7 L05 too big / subagent socket-close | build-protocol **§A7.1 long-lens resilience** (flush findings to disk incrementally; 529/socket-close → retry-backoff → inline fallback; lens "complete" only when sidecar on disk) + L05 checkpoint note |
+| #8 L18 i18n → 7 findings for half-shipped feature | L18 anti-pattern (compress to one "commit OR revert i18n" binary decision) |
+| #9 Jargon: HAX / wedge / shareability | L13 HAX gloss ("Human-AI eXperience"); L28 q1 "<8-word wedge" concrete test; L20 virality-scope note (don't score a deliberately-non-viral product as deficient) |
+| #10 Strategic lenses rank-pollute Criticals | `_aggregation.md`: separate "Strategic / non-code" bucket (L24/L25/L27/L28 out of the code-fix queue) |
+| Coverage gap: state-change blindness | `_aggregation.md` convergence section: name cross-lens latent meta-patterns ("stateful at data, stateless at UX") |
+| Meta: Full Enchilada too big for solo-dev/prod | `_selection-rubric.md` **Panel K (12)** as production default + Full-Enchilada incident-risk caution (the 30-lens scrub is what exposed EMBT to the P0) |
+| Meta: ~8 lenses Read when they could Execute | `_execution-principle.md` **execution adherence gate** (per-lens ran/skipped accounting; every quantitative claim must cite the command behind the number) |
+
+### Files touched (15)
+
+11 lens files (L01, L05, L07, L13, L18, L20, L25, L26, L28, L29, L30 — targeted check-questions / anti-patterns / glosses) + 3 infra files (`_selection-rubric.md`, `_aggregation.md`, `_execution-principle.md`) + `build-protocol.md` (§A7.1 + §A7.3). Per the v2.17 "sprawl is the #1 risk" meta-finding, cross-cutting fixes (class-grep, deploy-verify, adherence gate) live in shared files (A7.1/A7.3/`_execution-principle.md`) rather than being copied into 30 lens files; only the genuinely lens-specific items edited individual lenses.
+
+### Convergence with prior decisions
+
+- **D-005:** human supplied the verdict; loop only surfaced. Honored.
+- **v2.17 sprawl meta-finding:** preferred cross-cutting single-file edits over per-lens duplication.
+- **F47 dogfood pattern:** the retro *is* the field evidence; these edits are its product.
+
+### Deferred (revisit triggers named)
+
+- **F55 — confirm N=1 changes against retro #2.** When a second project (different profile) produces a retro, re-check the non-incident-backed changes (L25 demotion, strategic bucket, measurement-plan requirement, L18 compression). **Revisit trigger:** second real retro lands in `lens-retros/`.
+
+---
+
 ## EVOLVE pass — v2.18.2 (2026-05-25) — Retros are private-by-default (fixes a confidentiality flaw in v2.18)
 
 **Trigger:** processing the first real retro (from a live consumer health product audit) surfaced a design flaw in v2.18: the `lens-retros/` collection point was a **tracked folder in a public repo**, and the README/`_lens-retro.md` prose instructed users (and maintainers) to *PR raw retros into it*. A raw retro embeds project-specific security detail — vulnerable routes/tables, finding descriptions, commit hashes, still-open issues. The first retro was briefly committed and pushed to the public repo before being caught; it was purged from git history (force-push of a rewritten branch after temporarily lifting the `main-no-force-push-no-delete` ruleset, then restoring it).

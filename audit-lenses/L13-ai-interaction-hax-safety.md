@@ -19,9 +19,11 @@ source_frameworks:
 
 # L13 — AI Interaction (HAX) & Safety
 
+> **HAX = Human-AI eXperience** — Microsoft's 18 Guidelines for Human-AI Interaction (how an AI product sets expectations, communicates uncertainty, handles failure, and lets users correct it). Not jargon to skip: it's the UX-of-AI half of this lens, paired with the security half.
+
 ## Question this lens answers
 
-*Does the AI interaction respect user expectations (HAX) AND withstand adversarial input (jailbreaks, prompt injection, over-refusal)?* This is the human-facing AI lens — both the "is this respectful UX" question and the "is this safe against abuse" question, which interact tightly.
+*Does the AI interaction respect user expectations (HAX — Human-AI eXperience) AND withstand adversarial input (jailbreaks, prompt injection, over-refusal)?* This is the human-facing AI lens — both the "is this respectful UX" question and the "is this safe against abuse" question, which interact tightly.
 
 ## Why this lens exists / what other lenses miss
 
@@ -120,6 +122,7 @@ The two halves interact: an AI that's well-protected against jailbreak but refus
 13. Does the user get a "why this answer" affordance on demand? (HAX G11)
 14. Over time: does the product learn from feedback or behave the same way every session?
 15. When the model updates, does the UI notify users that behavior may have changed?
+16. **AI→DB constraint drift (v2.19):** for every place AI output is written to a constrained DB column (enum, CHECK, typed), is there server-side normalization AND a *non-silent* error path? (The failure class: a silent `catch` swallows a Postgres CHECK rejection → invisible data loss. Execute it — feed a deliberately off-schema AI output and confirm the write fails loudly, not silently.)
 
 ## Output schema
 

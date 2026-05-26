@@ -111,7 +111,8 @@ Per D-003 (orchestrate, don't reinvent): this lens does NOT implement any toolin
 10. Has Playwright run the hot paths? Did each one reach its terminal step?
 11. For AI products: has promptfoo run against the eval set? Any throws or malformed outputs?
 12. For every callable surface (route, exported function, job, AI call site), is there evidence it was *executed* in this audit, not just read?
-13. Any deferred items registered into Build Manifest as inherited obligations on future phases?
+13. **Post-deploy verification (v2.19):** for any build-config, bundler, or routing change applied during or after this audit, is there a step that drove Playwright (or equivalent) against the **live deployed URL** — not just localhost — to confirm the app still loads? (The "manualChunks P0" class: a fix that passes the local build but white-screens production. An optimization is not done until the deployed URL is verified.)
+14. Any deferred items registered into Build Manifest as inherited obligations on future phases?
 
 ## Output schema
 

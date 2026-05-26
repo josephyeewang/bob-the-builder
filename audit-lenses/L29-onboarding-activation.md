@@ -127,6 +127,7 @@ The DLL audit found activation problems: "engagement scoring front-loaded — re
 13. Are there dead-end welcome CTAs?
 14. Sean Ellis PMF test ever run? Score?
 15. What's the single highest-leverage activation improvement?
+16. **Day-30 measurement plan (v2.19):** for any finding that can't be evaluated until post-fix data accrues, has a concrete measurement plan been produced — exact event names, the exact HogQL/SQL query to run, the comparison window, and the go/no-go threshold? ("Wait 30 days then check PostHog" is not a finding; the runnable query is.)
 
 ## Output schema
 

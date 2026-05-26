@@ -26,7 +26,7 @@ This table names, for each lens, what Claude should be doing. When running a len
 
 | Lens | EXECUTE (Claude runs / drives) | READ (Claude inspects) | HUMAN (genuine human needed) |
 |---|---|---|---|
-| **L01 Hygiene & Liveness** | Knip / Vulture / Ruff / deptry (dead code); Schemathesis (HTTP fuzz); Playwright (browser flows); Vitest / pytest (functions); promptfoo (LLM surfaces); Semgrep + Gitleaks (overlap with L04/L06) | input validation patterns; secret-handling code; integration contracts | — |
+| **L01 Hygiene & Liveness** | Knip / Vulture / Ruff / deptry (dead code); Schemathesis (HTTP fuzz); Playwright (browser flows + the **live deployed URL** after any build-config/routing change, q13); Vitest / pytest (functions); promptfoo (LLM surfaces); Semgrep + Gitleaks (overlap with L04/L06); `git log --since='<last audit date>'` to ground any "drift" claim in real commits | input validation patterns; secret-handling code; integration contracts | — |
 | **L02 Spec Fidelity** | grep / AST queries for each capability reference; curl / CLI each user-facing capability to confirm wiring; check `evals/behavioral-core.yaml` coverage | Product Spec, Behavioral Core, Architecture Contract, Domain Specs end-to-end | strategic intent disputes (when spec is wrong, not code) |
 | **L03 Critical Capability Quality** | drive each critical capability via UI / API / CLI; trigger failure modes (empty input, malformed, partial); observe actual behavior; measure error paths | code structure of each capability | A/B/C/D/F grading judgment requires reasoning |
 | **L04 Security & Threat Surface** | Semgrep with security rulesets; CodeQL; Snyk Code; Gitleaks (full git history); Bandit; OWASP ZAP baseline scan; test specific attacks against each surface | threat model doc; ASVS chapter checks; business-logic vulns | — |
@@ -92,6 +92,19 @@ When Claude runs a lens, the lens prompt should be augmented with this sequence:
 6. **Report**: findings cite their verification mode ("via Schemathesis run" / "via code reading" / "human walk required")
 
 A finding with "via Schemathesis run" is materially stronger than "via code reading." The audit's overall confidence is bounded by how much of it was EXECUTE vs READ.
+
+## Execution adherence gate (v2.19)
+
+Having this catalog is not the same as honoring it. An EMBT Full Enchilada retro found ~8 lenses (L01, L02, L03, L14, L18, L21, L22, L24) **defaulted to Read even though their EXECUTE column says otherwise** — e.g., L18 asserted "95% English-hardcoded" without running the `lang=` grep that would ground it; L21 asserted "zero alert rules" without hitting the Sentry API. The catalog was right; adherence failed.
+
+So every lens, before it finishes, runs an **adherence gate**:
+
+1. List this lens's EXECUTE-column items (from the catalog row above).
+2. For each, state **ran** (with the command/tool + a one-line result) or **skipped** (with why).
+3. A skipped EXECUTE item that *could* have run is recorded in the `retro_fragment` as `executed_vs_read: "should_have_executed"` and noted as a stop-condition-adjacent caveat — the finding's confidence is downgraded accordingly.
+4. **Any quantitative claim ("95% hardcoded," "zero alerts," "apiVersion missing") must cite the command that produced the number** — a grep count, an API response, a query result. A number without an execution behind it is a Read-mode guess and must be labeled as such or re-derived by executing.
+
+This makes "I read the code and it looked correct" visible at the per-lens level instead of only surfacing later in the retro.
 
 ## Anti-pattern callouts
 

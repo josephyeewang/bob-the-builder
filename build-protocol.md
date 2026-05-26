@@ -1,4 +1,4 @@
-# BUILD PROTOCOL v2.18.2
+# BUILD PROTOCOL v2.19
 
 > A systematic framework for building, auditing, and evolving products with Claude Code.
 > Created: 2026-04-15. Last updated: 2026-05-25. Owner: Joe Wang.
@@ -1795,6 +1795,11 @@ For each lens in the selected panel, in foundation-first order (L01 → L02 → 
    - **Appends its `retro_fragment` (v2.18.1)** to the JSON sidecar as the final step — the live, fresh self-assessment of how the *lens itself* performed (Tier 1 of the retro, per `_lens-retro.md`). This persists to disk so it survives the fresh-session boundary and any compaction.
 4. **Move to next lens.** Sequential, not parallel — each lens reads prior lens reports to convert intentional ~15% overlap into confirmation signal rather than noise.
 
+**A7.1 long-lens resilience (v2.19).** Big lenses (L05 data-protection, L04 security, L13 safety) have run long enough to exhaust a single session — an EMBT Full Enchilada hit two subagent socket-closes (one lens lost *all* work at ~32 min because nothing had been written yet) and four provider 529 overloads. So:
+- **Flush findings to disk incrementally**, not only at the end. Write each finding (and the running `retro_fragment`) to the JSON sidecar as it's confirmed, and checkpoint after each major sub-area. A mid-lens session drop should lose at most one sub-area, never the whole lens.
+- **On provider overload (429/529) or subagent socket-close**, retry with backoff; if the subagent keeps failing, fall back to running the lens inline in the main session. Lens *content* is independent of execution infrastructure — don't let an overload abort the panel.
+- **A lens is only "complete" once its sidecar (findings + `retro_fragment`) is on disk.** Until then, treat it as in-progress and resumable.
+
 The library covers 30 lenses across 8 bands:
 
 | Band | Lenses | Question |
@@ -1833,6 +1838,8 @@ The aggregated summary is the user-facing artifact. Individual lens reports are 
 After aggregation:
 
 1. **Fix** all approved Critical findings from the aggregated summary (writer/reviewer rules from `[N+1]f` apply). L01 Liveness 5xx / function-throws findings remain *always Critical* — they represent code that does not run at all and are higher-priority than most static findings.
+   - **1a. Class-level fix verification (v2.19 — mandatory).** After closing any finding, grep the whole project for the *same class* of issue and fix every instance in the same pass — do not fix only the instance the lens happened to land on. This applies to *every* lens's fixes (copy that lies, missing auth, silent catches, unvalidated input, …). Origin: an EMBT audit closed a false-claim copy bug in an AuthModal but the identical broken copy survived in mobile nav and the homepage hero because no lens re-grepped for the class — three fix cycles for one class. Reinforces Joe's engineering principle #3 (class-level fixes) at the audit fix step.
+   - **1b. Post-deploy verification (v2.19 — mandatory for risky fixes).** For any fix that touches build config, the bundler, routing, or deploy settings, you are not done when the local build passes — drive Playwright (or equivalent) against the **live deployed URL** to confirm the app still loads, then check observability for new errors. Origin: an EMBT audit's `manualChunks` perf fix passed the local build but white-screened production for 65 minutes (a P0 the audit itself caused). The optimization wasn't done until the deployed URL was verified. (Pairs with L01 check question 13.)
 2. **Triage Major findings** — user marks each as Fix / Defer / Reject at `→ HG`.
 3. **Register deferred items** in `audit-log.md` with **named revisit triggers** (no silent deferrals — same rule as v2.15's per-phase deferrals).
 4. **Log Reject decisions** in `decision-log.md` with rationale so they aren't re-litigated by future audits (continues D-001, D-003, D-004 precedent).
