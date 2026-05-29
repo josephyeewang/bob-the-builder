@@ -19,8 +19,8 @@
 1. **Built for non-engineers** — built by a non-engineer (former McKinsey, Fifth Wall, Clari — never wrote production code) who was sick of Claude going sideways. Every design choice was made for someone who is great at scoping a product but can't read or debug code themselves.
 2. **Easy install** — copy/paste once into Claude Code and you're installed. No multi-step chaos or downloads.
 3. **Easy to use** — type `/bob` and it works. Every step is in plain language, no jargon. Bob narrates what's happening and pauses for your sign-off before doing anything irreversible. You don't need to know how to code.
-4. **NEW prevents hallucinations** — instead of letting Claude guess what to build, Bob locks the spec, scope, and AI behavior upfront. Claude can't quietly drift, add features you didn't ask for, or forget what it agreed to two sessions ago.
-5. **AUDIT saves you the trouble of inventing your own audits** — Bob ships 30 ready-made audit prompts synthesized from 46+ industry sources (CodeRabbit, OWASP, Nielsen, Microsoft HAX, April Dunford, Reforge, and more). You don't have to know what to look for — Bob does.
+4. **Prevents Hallucinations** — instead of letting Claude guess what to build, Bob locks the spec, scope, and AI behavior upfront. Claude can't quietly drift, add features you didn't ask for, or forget what it agreed to two sessions ago.
+5. **Auto Audits Your Project** — Bob ships 30 ready-made audit prompts synthesized from 46+ industry sources (CodeRabbit, OWASP, Nielsen, Microsoft HAX, April Dunford, Reforge, and more). You don't have to know what to look for — Bob does.
 
 ---
 
