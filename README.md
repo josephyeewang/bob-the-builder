@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/bob-logo.svg" alt="Bob the Builder logo" width="140" />
+</p>
+
 # Bob the Builder
 
 **A skill that guides you step-by-step to build and audit real products in Claude Code. For non-engineers.**
@@ -43,7 +47,7 @@ In any project folder, open Claude Code and type:
 /bob
 ```
 
-Bob asks one question — which mode (NEW / AUDIT / EVOLVE) — and walks you from there in plain language. Say **"terse mode"** any time if you want Bob to talk less.
+Bob asks one question — which mode (NEW / AUDIT / EVOLVE) — and walks you from there in plain language.
 
 ---
 
