@@ -43,11 +43,11 @@ emit() { echo "BOB_UPDATE: $1"; exit 0; }
 bob_root=""
 if [[ -L "$SKILL_LINK" ]]; then
   target=$(readlink "$SKILL_LINK")
-  bob_root="$(cd "$target/.." 2>/dev/null && pwd -P || true)"
+  if resolved=$(cd "$target/.." 2>/dev/null && pwd -P); then bob_root="$resolved"; fi
 fi
 if [[ -z "$bob_root" ]]; then
   script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
-  bob_root="$(cd "$script_dir/.." 2>/dev/null && pwd -P || true)"
+  if resolved=$(cd "$script_dir/.." 2>/dev/null && pwd -P); then bob_root="$resolved"; fi
 fi
 [[ -n "$bob_root" && -d "$bob_root/.git" ]] || emit "status=noinstall"
 
@@ -69,7 +69,8 @@ if ! git -C "$bob_root" \
 fi
 
 # Record that we successfully checked (only after a real fetch).
-mkdir -p "$CACHE_DIR" 2>/dev/null && date +%s > "$STAMP" 2>/dev/null || true
+mkdir -p "$CACHE_DIR" 2>/dev/null || true
+date +%s > "$STAMP" 2>/dev/null || true
 
 # ── Compare local vs upstream (cached refs, no further network) ──────────
 ahead=$(git -C "$bob_root" rev-list --count "@{u}..HEAD" 2>/dev/null || echo 0)
