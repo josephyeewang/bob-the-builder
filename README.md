@@ -9,7 +9,7 @@
 3 things:
 
 1. **NEW** — Start a product from scratch. Bob takes you from "I have an idea" → spec → build plan → working product, pausing for your sign-off at every step.
-2. **AUDIT** — Inspect a product you've already started (yours or someone else's). Bob runs 30 ready-made audits across engineering, UX, AI, security, pricing, strategy, and growth — and tells you what's solid, what's hollow, and what to fix first.
+2. **AUDIT** — Inspect a product you've already started (yours or someone else's). Bob runs 33 ready-made audits across engineering, UX, AI, security, pricing, strategy, and growth — and tells you what's solid, what's hollow, and what to fix first.
 3. **EVOLVE** — Add a feature to a product Bob already built. Bob right-sizes the change (small / medium / large) and runs the right level of discipline for it.
 
 ---
@@ -20,7 +20,7 @@
 2. **Easy install** — one copy/paste into Claude Code. No git, no terminal, no downloads.
 3. **Easy to use** — type `/bob` and it works. Plain language. Sign-off gates before anything irreversible.
 4. **Prevents Hallucinations** — Bob locks the spec, scope, and AI behavior upfront. Claude can't quietly drift, add features you didn't ask for, or forget what it agreed to two sessions ago.
-5. **Auto Audits Your Project** — 30 ready-made audits pulled from 46+ industry sources (OWASP, Nielsen, April Dunford, Reforge, and more). You don't have to know what to look for — Bob does.
+5. **Auto Audits Your Project** — 33 ready-made audits pulled from 46+ industry sources (OWASP, Nielsen, April Dunford, Reforge, SR 11-7, ISO Plain Language, and more). You don't have to know what to look for — Bob does.
 
 ---
 
@@ -72,25 +72,25 @@ Invoke with `/bob NEW`.
 
 ### 2. AUDIT — Inspect a product (yours or someone else's)
 
-Bob ships a **30-audit library** — 30 ready-made audits, each attacking the product from a different angle, in 8 categories:
+Bob ships a **33-audit library** — 33 ready-made audits, each attacking the product from a different angle, in 8 categories:
 
 | Category | What it audits |
 |---|---|
-| **Engineering Foundation** | Code hygiene, spec fidelity, capability quality, security, privacy, supply chain |
+| **Engineering Foundation** | Code hygiene, spec fidelity, capability quality, security, privacy, supply chain, **end-to-end data-flow tracing** (does every field a user enters actually reach every feature that needs it?) |
 | **User Experience** | Cognitive ease, friction & trust, wow moments, edge states & recovery |
-| **AI Behavior** | Accuracy, model fit, safety, cost & latency |
+| **AI Behavior** | Accuracy, model fit, safety, cost & latency, **analytical soundness** (is the *method* behind a score/diagnosis/recommendation actually sound?) |
 | **Performance Economics** | Where to save money/time — and where to *spend* more for value |
 | **Reach & Distribution** | Mobile, internationalization, accessibility, shareability |
 | **Operational** | Observability, vendor risk, documentation |
-| **Strategic & Market** | Competitive position, pricing, marketing copy, persona simulation, strategic edge |
+| **Strategic & Market** | Competitive position, pricing, marketing copy, persona simulation, strategic edge, **output language & audience fit** (does what the product *says* match who's reading it — no jargon for non-experts?) |
 | **Growth & Adoption** | Onboarding & activation, retention loops |
 
 Why it's different from a generic code-review tool:
 
-- **Bob picks the audits for you** — proposes 6–10 based on what kind of product you have. Confirm with one gate. Or pick "Full Enchilada" to run all 30 before a launch.
+- **Bob picks the audits for you** — proposes 6–10 based on what kind of product you have. Confirm with one gate. Or pick "Full Enchilada" to run all 33 before a launch.
 - **Bob runs the code, not just reads it** — drives the app through real user flows, hits the APIs, simulates signup-to-cancel. Reading code can lie. Running it can't.
 - **Anti-convergence veto** — most audits push every product toward "best-practice average." Bob has a dedicated audit that pushes back: *"do not fix this — that friction is your wedge."* (Think Linear's keyboard-first onboarding, Superhuman's shortcuts.)
-- **Bob remembers** — each AUDIT, you can re-run the last set, broaden to new angles, or do the full 30.
+- **Bob remembers** — each AUDIT, you can re-run the last set, broaden to new angles, or do the full 33.
 - **Bob learns** — after every audit Bob critiques *its own audits*. Weak ones get flagged for you to sharpen. Bob never edits itself without you.
 
 Invoke with `/bob AUDIT`.
@@ -125,7 +125,7 @@ Bob writes the important stuff to disk so context survives session boundaries:
 | ❌ **Hallucinates** — makes up features, libraries, or behaviors you never asked for | ✅ Bob locks the spec, scope, and AI behavior *before* any code is written. Claude can't quietly add features or invent behaviors that weren't approved. |
 | ❌ **Forgets** what you talked about last session | ✅ Bob writes spec + decision log + build manifest to disk every session. Full context is always loadable — and portable to Codex / Cursor / Aider via `AGENTS.md`. |
 | ❌ **Drifts** off-spec mid-build — agrees with your spec, then quietly does something else ten messages later | ✅ Reconciliation after every phase: Bob checks built-vs-planned, flags drift, and won't move on until you sign off. |
-| ❌ **Audits narrowly** — one angle (usually a security scan) and calls it done | ✅ 30 ready-made audits across 8 categories, plus an anti-convergence veto so audits don't push your product toward "best-practice average." |
+| ❌ **Audits narrowly** — one angle (usually a security scan) and calls it done | ✅ 33 ready-made audits across 8 categories, plus an anti-convergence veto so audits don't push your product toward "best-practice average." |
 | ❌ **Doesn't right-size effort** — treats a typo and a multi-file refactor with the same level of care | ✅ EVOLVE classifies every change Small / Medium / Large. Small = quick edit + smoke test. Large = full discipline. |
 | ❌ **Reads code and reasons about it** instead of running it — "this looks correct" ≠ "this works" | ✅ Bob's audits *execute* — drives the app through real user flows, hits the APIs, simulates signup-to-cancel. Running it catches what reading it doesn't. |
 | ❌ **Patches the symptom** you reported and leaves the same bug pattern in three other files | ✅ Class-level fixes: a bug in one place triggers a repo-wide grep for the same pattern. Fix once, fix all. |

@@ -1752,7 +1752,7 @@ Follow the approved plan. For each remediation item, use the Na/Nb/Nc pattern:
 
 ### Step A7: Multi-Lens Audit (v2.17 — lens library replaces prior A7a–A7j)
 
-After remediation, run the **multi-lens audit** — a curated panel (or full enchilada) of named audit lenses from `audit-lenses/`, run sequentially in fresh sessions per the writer/reviewer pattern. v2.17 replaces the prior single A7a–A7j audit phase with a **30-lens library** organized into 8 bands, with Bob selecting the panel based on project profile and the user confirming with one gate.
+After remediation, run the **multi-lens audit** — a curated panel (or full enchilada) of named audit lenses from `audit-lenses/`, run sequentially in fresh sessions per the writer/reviewer pattern. v2.17 replaced the prior single A7a–A7j audit phase with a multi-lens library organized into 8 bands; as of v2.21 it's a **33-lens library**, with Bob selecting the panel based on project profile and the user confirming with one gate.
 
 This is the second meaning of "audit" in Bob: A1–A6 is the **macro** audit (does the project match the 5-doc hierarchy?); A7 is the **micro** audit, multi-angle.
 
@@ -1771,7 +1771,7 @@ Before any lens fires, Bob reads `audit-artifacts/audit-history.json` and presen
 3. **Four options** offered to user:
    - **Same** — re-run same lenses (drift check)
    - **Complementary Curated** — Bob picks lenses you haven't run (broaden coverage)
-   - **Full Enchilada** — all 30 lenses (rocketship-launch scrub, typically 1–3 hours over multiple sessions)
+   - **Full Enchilada** — all 33 lenses (rocketship-launch scrub, typically 1–3 hours over multiple sessions)
    - **Custom** — user specifies
 
    Bob recommends the default option based on time-since-last-audit, project state, and whether a milestone (launch, fundraise, post-incident) is named.
@@ -1800,17 +1800,17 @@ For each lens in the selected panel, in foundation-first order (L01 → L02 → 
 - **On provider overload (429/529) or subagent socket-close**, retry with backoff; if the subagent keeps failing, fall back to running the lens inline in the main session. Lens *content* is independent of execution infrastructure — don't let an overload abort the panel.
 - **A lens is only "complete" once its sidecar (findings + `retro_fragment`) is on disk.** Until then, treat it as in-progress and resumable.
 
-The library covers 30 lenses across 8 bands:
+The library covers 33 lenses across 8 bands (lens IDs are append-only — L31–L33 were added in v2.21 and sit in earlier bands; group by the band, not the number):
 
 | Band | Lenses | Question |
 |---|---|---|
-| 1. Engineering Foundation | L01–L06 | Does the code work, match spec, hold up to security / privacy / supply-chain? |
+| 1. Engineering Foundation | L01–L06, **L31** | Does the code work, match spec, hold up to security / privacy / supply-chain? **L31:** does one input/field flow all the way through — stored, deduped, propagated to every consumer, terminal states resolved? |
 | 2. User Experience | L07–L10 | Can users navigate, trust, delight, recover? |
-| 3. AI Behavior | L11–L14 | Is the AI accurate, right-sized, safe, efficient? |
+| 3. AI Behavior | L11–L14, **L32** | Is the AI accurate, right-sized, safe, efficient? **L32:** is the analytical *method* sound (right inputs, defensible weights, valid assumptions) — for AI **and** deterministic logic? |
 | 4. Performance Economics | L15–L16 | What drives cost / speed / effectiveness — and where should we *invest more* for value? |
 | 5. Reach & Distribution | L17–L20 | Does it work on mobile, in other languages, for users with disabilities, and unfurl when shared? |
 | 6. Operational | L21–L23 | Can ops see prod, survive vendor failures, hand off to new collaborators? |
-| 7. Strategic & Market | L24–L28 | Where do we win/lose, how do we price, do we sound clear, what would each persona say, are we sharpening our wedge or sanding it off? |
+| 7. Strategic & Market | L24–L28, **L33** | Where do we win/lose, how do we price, do we sound clear, what would each persona say, are we sharpening our wedge or sanding it off? **L33:** does *generated in-product output* match the audience register/jargon + house structure? |
 | 8. Growth & Adoption | L29–L30 | Do users activate fast and return? |
 
 See `audit-lenses/README.md` for full lens inventory + provenance (the "we surveyed ~46 sources" claim).

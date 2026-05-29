@@ -33,6 +33,14 @@ Each lens produces its own markdown + JSON report. Without aggregation, the user
 11. **Strategic / non-code findings → separate bucket (v2.19).** Findings from the strategic lenses (L24 Competitive, L25 Pricing, L27 Persona, L28 Wedge) are product/positioning decisions, not code fixes. Route them to a separate "Strategic" bucket; they do NOT rank in the Critical/Major *code-fix* queues or the top-10 action queue, so a strategic opinion can't rank-pollute the must-fix-before-launch list. (Exception: if a strategic lens surfaces a genuine code/security/data finding, that one goes in the normal queue.) Origin: an EMBT retro flagged that L24/L27/L28 produced near-zero in-run code closures yet competed against real Criticals in the ranking.
 ```
 
+### Band ≠ bucket — routing the v2.21 lenses (L31 / L32 / L33)
+
+The strategic bucket (step 11) is defined by its **explicit lens list**, NOT by band. Three lenses produce **actionable** findings and rank in the normal code-fix queues regardless of where they sit:
+
+- **L31 Input & Data-Flow Trace** (Band 1) — concrete propagation / dedup / atomicity / orphan defects. Normal queue (a dropped field or a double-spend is a real bug). Dedups against L03 on the *seam* vs. the *node*.
+- **L32 Analytical Method Soundness** (Band 3) — owns SR 11-7 **conceptual soundness**; L11 owns **outcomes analysis (evals)**. When both flag the same analytical site, merge the finding but **keep both pillars cited** — a site can be eval-passing yet method-unsound (or vice versa), so neither subsumes the other. Normal queue.
+- **L33 Output Register & Audience Fit** (Band 7, beside L26) — actionable content fixes (rewrite a jargon-laden diagnosis to the declared register). Routes like **L26**, into the normal queue, **NOT** the strategic bucket. A register/jargon mismatch for a declared audience is a defect, not a wedge/positioning call. Dedups against L27 when a persona surfaced the same register issue.
+
 ## Aggregated report template
 
 File: `audit-artifacts/audit-summary-{YYYY-MM-DD}.md`

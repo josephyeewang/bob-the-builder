@@ -6,6 +6,38 @@ This is the operational counterpart to `decision-log.md`. The decision log recor
 
 ---
 
+## EVOLVE pass — v2.21 (2026-05-29) — Three new audit lenses (L31–L33), batch-built via Bob's own EVOLVE protocol
+
+**Origin:** Joe's three-part question while reflecting on EMBT audits — were there audits for (1) end-to-end user-input-flow tracing (e.g. doc-upload extracts age/gender but never propagates them to scoring/recommendation), (2) the analytical quality/depth of processing/diagnosis/recommendation algorithms, and (3) audience-appropriate output language (jargon for non-technical users; McKinsey-style structure). Tracing each against the live 30-lens library (not the changelog) confirmed all three are **genuine gaps**, with only partial adjacency to L03/L05 (gap 1), L11/L16 (gap 2), L26/L18 (gap 3).
+
+**Classification:** Medium EVOLVE, batch of 3 interdependent lenses (shared rubric/aggregation/execution-principle wiring → classified one tier up per the multiple-concurrent-changes rule). Ran the full Medium path: E3-pre Reference Scan → spec → wire → reconcile. Planning docs under `evolutions/001-trace-process-present-lenses/`.
+
+### Lenses added
+
+| Lens | Band | Spine framework(s) | Distinctness (anti-sprawl gate) |
+|---|---|---|---|
+| **L31 Input & Data-Flow Trace** | 1 | Taint-tracking + column-level data lineage + STRIDE DFD; Engineering Principle #2 | L03 grades one capability *vertically*; L05 is PII *compliance*. L31 traces one field *horizontally* across all consumers — propagation completeness. |
+| **L32 Analytical Method Soundness** | 3 | SR 11-7 *conceptual-soundness* pillar (covers deterministic **and** AI) | L11 = outcomes analysis (evals, AI-only); L16 = ongoing monitoring. L32 = the method-design pillar neither owns; uniquely covers deterministic logic. |
+| **L33 Output Register & Audience Fit** | 7 | ISO 24495-1 Plain Language + Minto Pyramid + NN/g tone | L26 = marketing surfaces only (skips in-product output); L18 = translation readiness. L33 = generated in-product output register/structure. |
+
+### Design decisions (logged for reversibility)
+
+- **D-EVO1 — Append-only IDs.** L31/L32/L33 keep the next free IDs and declare `band:` in frontmatter rather than renumbering L01–L30 (blast radius across 30 files + every cross-ref; zero benefit). Convention shift noted in README + core + full protocol: group by band, not ID arithmetic.
+- **D-EVO2 — L33 is actionable content, not strategic-veto.** Routed like L26 to the normal code-fix queue, NOT the v2.19 strategic/non-code bucket (a jargon-laden diagnosis is a fixable defect, not a positioning opinion). `_aggregation.md` "Band ≠ bucket" note makes this explicit.
+- **D-EVO3 — L32 owns conceptual soundness only.** Explicit SR 11-7 three-pillar split with L11/L16 prevents overlap-litigation; when L32+L11 flag the same site, both pillars stay cited.
+- **D-EVO4 — Selection-rubric restraint.** The three lenses are **profile-conditional** (fire on data-fan-out / analytical-engine / non-technical-audience triggers), added to Panels A and K conditionally + a dedicated "New-lens inclusion triggers (v2.21)" note. Minimal panels (Internal-tool D = 3 lenses) untouched. Directly heeds the v2.17 "sprawl is the #1 risk, not shortfall" meta-finding.
+
+### Files touched
+
+3 new lens files; 2 planning docs (`evolutions/001-…/{reference-scan,spec}.md`); wiring across `audit-lenses/{README,_selection-rubric,_aggregation,_execution-principle,_audit-memory}.md`, `build-protocol-core.md`, `build-protocol.md`, `skill/SKILL.md`, public `README.md`, `CLAUDE.md`. Live counts 30→33 throughout; **historical changelog/audit-log entries left frozen at 30** (rewriting a past version's count would falsify the record); illustrative "29 of 30 fresh-session" narratives left as-is.
+
+### Deferred (revisit triggers)
+
+- **F56 — N=1 framework validation.** L31/L32/L33's frameworks (taint/lineage, SR 11-7, ISO 24495+Minto) are established, but their *fit as Bob lenses* is unproven against a real audit. **Revisit trigger:** first real retro that runs any of the three — does it produce signal or noise? (Same posture as v2.19 F55.)
+- **F57 — Profile-trigger tuning.** D-EVO4's conditional-inclusion triggers are a first guess. **Revisit trigger:** if users consistently swap the three in or out of recommended panels (tracked via `audit-history.json` "swaps from recommended"), retune the rubric.
+
+---
+
 ## EVOLVE pass — v2.19 (2026-05-25) — First lens-library improvement driven by a real field retro
 
 **Milestone:** this is the first time Bob's lens library was improved from a **real audit retro** (not a Bob-on-Bob dogfood). The self-learning loop (v2.18) produced its first field signal — a Full Enchilada retro from a live consumer health product (EMBT) — and that signal drove concrete lens edits. The loop closed end-to-end: audit → retro → ritual (`scripts/lens-retro.sh`) → human verdict → lens edits → ship.
