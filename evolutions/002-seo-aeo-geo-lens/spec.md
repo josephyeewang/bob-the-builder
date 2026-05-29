@@ -50,6 +50,15 @@ Two things make it rigorous rather than another listicle:
 - No live "33-lens" left; version = v2.22; distinctness/adjacency declared (L20/L26/L17/L19).
 - Commit + push.
 
+## Continuation — v2.23 (same-day, on Joe's follow-up)
+
+Joe pushed: the lens must not just *audit* but produce *what fixes to make* — tactical, work-oriented, and strategic. v2.22 L34 was audit-heavy (per-finding tactical recs only). Added without splitting the lens:
+
+- **D-EVO9 — One lens, two phases (Audit → Action Plan).** Rejected splitting into an audit lens + a strategy lens — the plan derives from the findings + opportunity scan; splitting fragments a coupled flow and adds sprawl.
+- **3-altitude Action Plan** (① tactical fixes · ② content to produce · ③ strategic positioning) as the primary deliverable.
+- **Strategic opportunity discovery** (new method steps 20-23): topic-space seeding w/ relevance gate → free demand signals (GSC striking-distance, autocomplete, PAA, community, AI sub-questions) → competitor content-gap → relevance × demand × winnability scoring → sequenced roadmap. No fabricated volumes.
+- JSON `opportunities[]` + `action_plan{}`; +5 check questions; +4 anti-patterns; +1 stop condition. Version → v2.23; lens count unchanged (34).
+
 ## Deferred
 
 - **F58 — Backlink/authority depth.** Off-page authority needs paid data (Ahrefs/Semrush). L34 flags it as human/paid-tool follow-up rather than faking. Revisit if a free authority source becomes reliable.

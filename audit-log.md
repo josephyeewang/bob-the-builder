@@ -6,6 +6,25 @@ This is the operational counterpart to `decision-log.md`. The decision log recor
 
 ---
 
+## EVOLVE pass — v2.23 (2026-05-29) — L34 gains Audit→Action-Plan + strategic opportunity discovery (evolution 002 continued)
+
+**Origin:** Joe's same-day follow-up to v2.22 — "make sure it's not just doing the audit but also *what fixes to make*," across tactical (change tags), work-oriented (build blogs/FAQ/comparison), and strategic (find hot/searched topics, test relevance, suggest where to invest content) altitudes; his call on whether to split.
+
+**Decision:** kept **one lens, made it two-phase** (Audit → Action Plan) rather than splitting (D-EVO9). Rationale: the plan derives directly from the findings + opportunity scan — splitting would fragment a tightly-coupled flow and add the sprawl Bob warns against. One lens stays invokable as "run the SEO audit" while delivering the plan.
+
+**What was missing (honest gap Joe caught):** v2.22 L34 had per-finding tactical recommendations only. Content-production was *implied* (Tier 1/2 mention FAQ + depth) but not delivered as a build backlog; **strategic opportunity discovery was entirely absent** — the lens only audited the *existing* site and never asked *what to create next*.
+
+**Added:**
+- **3-altitude Action Plan** as the primary deliverable: ① Tactical fixes (exact edits) · ② Content to produce (specific pages w/ target query, format, tier, GEO-evidence plan) · ③ Strategic positioning (ranked opportunity roadmap).
+- **Strategic opportunity-discovery** method block: seed topic space from product authority (relevance gate) → harvest demand from **free signals** (GSC striking-distance, autocomplete, PAA, community, AI sub-questions) → competitor content-gap → score **relevance × demand × winnability** → sequenced roadmap.
+- JSON `opportunities[]` + `action_plan{}`; 5 new check questions; 4 new anti-patterns (don't stop at findings; relevance-gate opportunities; no fabricated volumes; every page-to-build names its GEO evidence); new stop condition for no-demand-data sites.
+
+**Guardrails:** relevance is a hard gate (high-demand-but-irrelevant = keyword-stuffing at the strategy level); no fabricated search volumes (free signals only; volume validation → paid follow-up, ties to F58).
+
+**Files:** L34 (substantial in-place rewrite) + version bumps (CLAUDE.md, build-protocol-core footer, lens README version, SKILL.md, public README). Lens count unchanged (34).
+
+---
+
 ## EVOLVE pass — v2.22 (2026-05-29) — L34 SEO / AEO / GEO Discoverability lens
 
 **Origin:** Joe — "almost every product will have a website, which means it needs SEO and AI-EO." Asked for a deep research run across the fragmented SEO/AEO/GEO field and a master structured audit that beats them all, selectively invokable ("Bob, run the SEO audit").

@@ -34,7 +34,7 @@ Empirical anchor: the DLL audits run 2026-05-23 produced three categorically dis
 | | L18 | Internationalization & Language | Hardcoded English, broken-under-German layout, missing RTL, locale-naive dates. |
 | | L19 | Accessibility (WCAG+) | POUR + cognitive/motor/visual + keyboard/screen-reader paths. |
 | | L20 | Shareability, Virality & Discoverability | OG tags, thumbnails, share affordances, *social* discoverability, embed-ability, referral mechanics. |
-| | L34 | SEO / AEO / GEO Discoverability | Will engines find, rank, extract, and cite the site? 4-tier model — Foundation → SEO → AEO (answer engines) → GEO (ChatGPT/Perplexity/AI Overviews). Evidence-ranked from the Princeton GEO paper. |
+| | L34 | SEO / AEO / GEO Discoverability | Will engines find, rank, extract, and cite the site? 4-tier model (Foundation → SEO → AEO → GEO), evidence-ranked from the Princeton GEO paper — **then a 3-altitude Action Plan**: tactical fixes, content to produce, and strategic opportunity discovery (what to create next). |
 | **6. Operational** | L21 | Observability & Incident Readiness | What can ops see in prod? Runbook + rollback + blast radius. |
 | | L22 | Vendor & Dependency Risk | Single-points-of-failure, vendor lock-in, sunset risk, cost-spike risk. |
 | | L23 | Documentation & Onboardability | Could a new collaborator contribute in 2 weeks? (Diátaxis framework) |
@@ -179,4 +179,4 @@ The library consolidates convergent angles from:
 
 ## Version
 
-Lens library v2.22 — 2026-05-29 (34 lenses; L34 added). Prior: v2.21 (33; L31–L33), v2.17 (30, original). Each lens prompt is version-controlled and revised via standard Bob EVOLVE cycles. Lens additions or significant rewrites bump the library minor version; lens removals require a Decision Log entry.
+Lens library v2.23 — 2026-05-29 (34 lenses; L34 gained its two-phase Audit→Action-Plan + strategic opportunity discovery). Prior: v2.22 (34; L34 added), v2.21 (33; L31–L33), v2.17 (30, original). Each lens prompt is version-controlled and revised via standard Bob EVOLVE cycles. Lens additions or significant rewrites bump the library minor version; lens removals require a Decision Log entry.

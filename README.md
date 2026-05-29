@@ -80,7 +80,7 @@ Bob ships a **34-audit library** — 34 ready-made audits, each attacking the pr
 | **User Experience** | Cognitive ease, friction & trust, wow moments, edge states & recovery |
 | **AI Behavior** | Accuracy, model fit, safety, cost & latency, **analytical soundness** (is the *method* behind a score/diagnosis/recommendation actually sound?) |
 | **Performance Economics** | Where to save money/time — and where to *spend* more for value |
-| **Reach & Distribution** | Mobile, internationalization, accessibility, shareability, **SEO + AI-search visibility** (will Google, ChatGPT, Perplexity & AI Overviews find, rank, and *cite* your site?) |
+| **Reach & Distribution** | Mobile, internationalization, accessibility, shareability, **SEO + AI-search visibility** (will Google, ChatGPT, Perplexity & AI Overviews find, rank, and *cite* your site?) — and a 3-altitude plan: tactical fixes, content to build, and which topics to invest in owning |
 | **Operational** | Observability, vendor risk, documentation |
 | **Strategic & Market** | Competitive position, pricing, marketing copy, persona simulation, strategic edge, **output language & audience fit** (does what the product *says* match who's reading it — no jargon for non-experts?) |
 | **Growth & Adoption** | Onboarding & activation, retention loops |

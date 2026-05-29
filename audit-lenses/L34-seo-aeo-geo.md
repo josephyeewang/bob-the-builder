@@ -4,7 +4,7 @@ name: SEO / AEO / GEO Discoverability
 band: 5
 band_name: Reach & Distribution
 when_to_run: Any product with a public website or marketing surface (almost everything). Skip pure internal tools / headless APIs with no web presence. Mandatory before launch and at quarterly drift checks. The three tiers are independently runnable — a user can request just the GEO tier.
-estimated_duration: 90-180 min for the full 4-tier sweep; 30-45 min for a single tier
+estimated_duration: 2-4 hours for the full audit + opportunity discovery + 3-altitude action plan; 30-45 min for a single tier or a fast tactical-only pass
 session_pattern: fresh session; reads L17 (Core Web Vitals / mobile), L26 (copy/voice), L20 (social unfurl), L19 (semantic HTML) if available, and references their measurements instead of re-running them
 output_markdown: audit-artifacts/L34-seo-aeo-geo-{YYYY-MM-DD}.md
 output_json: audit-artifacts/L34-seo-aeo-geo-{YYYY-MM-DD}.json
@@ -18,13 +18,14 @@ source_frameworks:
   - llms.txt (Answer.AI, 2024 — emerging, low adoption; forward-looking hedge) + AI-crawler directives (GPTBot, ClaudeBot, PerplexityBot, Google-Extended)
   - AI-visibility measurement (share-of-AI-voice, citation frequency, sentiment — Profound / Otterly / Semrush AI Toolkit)
   - Open-source crawlers to orchestrate: Lighthouse / PageSpeed, LibreCrawl, open-seo-crawler, CrawlIQ, Screaming Frog
+  - "Opportunity discovery / content strategy: topic-cluster + pillar model, striking-distance (rank 5-20) query mining via Google Search Console, autocomplete / People-Also-Ask / related-searches harvesting, competitor content-gap analysis, relevance × demand × winnability scoring"
 ---
 
 # L34 — SEO / AEO / GEO Discoverability
 
 ## Question this lens answers
 
-*Will the engines that decide who gets found — classic search, answer engines, and generative AI engines — actually find, rank, extract, and cite this product's website? Across all three: is it crawlable and structured (Foundation), does it rank (SEO), does it win the extracted answer (AEO), and does it get cited by ChatGPT / Perplexity / AI Overviews / Gemini / Claude (GEO)?*
+*Will the engines that decide who gets found — classic search, answer engines, and generative AI engines — actually find, rank, extract, and cite this product's website? Across all three: is it crawlable and structured (Foundation), does it rank (SEO), does it win the extracted answer (AEO), and does it get cited by ChatGPT / Perplexity / AI Overviews / Gemini / Claude (GEO)?* **And then — what should we actually do about it?** This lens is two phases: an **Audit** (the 4-tier diagnosis) followed by an **Action Plan** at three altitudes — tactical fixes (change these tags/schema today), content production (build these pages: FAQ, comparison, pillar), and strategic positioning (here are the under-served, relevant, winnable topics/queries to invest in and own).
 
 ## Why this lens exists / what other lenses miss
 
@@ -42,6 +43,11 @@ The field is a pile of fragmented, single-discipline checklists (one for SEO, on
    | Add quotations from named experts | **+28%** | high leverage |
    | Add more words (no structure) | **≈0%** | useless |
    | **Keyword stuffing** | **−10% (HURTS)** | anti-pattern |
+
+3. **It ends in an action plan, not a findings dump.** An audit that lists 40 problems and stops is half a tool. L34's second phase converts findings + a forward-looking **opportunity scan** into a prioritized plan at **three altitudes**, because discoverability work is genuinely three different kinds of work:
+   - **Tactical** — surgical edits the team does now (rewrite a title tag, add FAQPage schema, unblock an AI crawler, server-render a route). Hours.
+   - **Content production** — pages to build (an FAQ that answers the top unanswered questions, a "vs-competitor" comparison, a pillar page on a core topic, a stats-backed cite-able resource). Days/weeks.
+   - **Strategic positioning** — *where to invest content effort at all*: which under-served, relevant, winnable topics / queries / AI-prompts to own. This requires **opportunity discovery** (search/answer demand + competitor content-gap + relevance test), which is forward-looking, not a critique of the current site. Quarters.
 
 ## When this lens fires
 
@@ -116,9 +122,31 @@ The field is a pile of fragmented, single-discipline checklists (one for SEO, on
 18. **AI-crawler access + freshness.** AI crawlers NOT blocked (Tier 0 cross-check); content updated recently (recency is a retrieval signal — stale pages get dropped). `llms.txt` present is a **cheap forward-looking hedge** — note it, but flag honestly that no major crawler honors it yet (Oct 2025), so it is *not* a ranking lever today.
 19. **Measure AI visibility.** If tooling exists (Profound/Otterly/Semrush AI), pull **share-of-AI-voice**, citation frequency, and sentiment vs. competitors. Otherwise, **spot-prompt the engines directly**: ask ChatGPT/Perplexity/AI-Overviews 5-10 category questions and record whether the brand is cited, in what context, with what sentiment. Note this is a snapshot — 40-60% of cited sources churn monthly.
 
-### Synthesis
+### Opportunity discovery (strategic — what to create next, not what's wrong now)
 
-20. **Rank by tier-leverage × impact.** A Tier-0 break (robots blocking the site; client-only rendering) caps all three funnels → Critical. Within GEO, rank by Princeton effect size. Produce the top 3 highest-leverage fixes and a per-tier scorecard.
+> The tiers above audit the *existing* site. This block looks *outward* — what topics/queries/prompts should this product own that it currently doesn't? Relevance-first: a high-volume term the product can't credibly serve is noise, not opportunity.
+
+20. **Seed the topic space from the product.** From the Product Spec (jobs-to-be-done, target persona, category, differentiators), list the themes the product is *credibly authoritative* on. This is the relevance filter — everything downstream is scored against it.
+
+21. **Harvest real demand (orchestrate free signals; name paid ones).** Gather what people actually search/ask, without inventing numbers:
+    - **Search demand** — Google Search Console queries (impressions where you rank 5-20 = "striking distance"), Google autocomplete + "People Also Ask" expansions, related-searches, AlsoAsked/AnswerThePublic-style question mining. (Volume *estimates* need a paid tool — Ahrefs/Semrush/Keyword Planner — flag as paid follow-up, don't fabricate volumes.)
+    - **Answer/AI demand** — the conversational questions real users ask an AI in this category; spot-prompt ChatGPT/Perplexity with category questions and capture the *sub-questions* they decompose into (those are GEO targets).
+    - **Community demand** — Reddit/Quora/Stack/forum threads and review-site complaints in the niche (also where AI engines source — double value).
+22. **Competitor content-gap.** Crawl 3-5 competitors' content; map topics they rank/get-cited for that this product is absent on. Gaps = candidate opportunities; saturated topics = lower winnability.
+23. **Score & rank opportunities** on three axes → an opportunity is worth pursuing when all three are non-trivial:
+    - **Relevance** — does it map to step-20 authority? (gate; low relevance = drop, no matter the volume)
+    - **Demand** — is anyone actually searching/asking? (from step 21)
+    - **Winnability** — can this product realistically rank/get-cited vs. who's there now? (from step 22 — gap, domain strength, content effort)
+    Output a ranked opportunity map with the *intent* and *target engine* per item (a "best X for Y" query is commercial + AEO/GEO; a "how to Z" is informational + snippet/GEO).
+
+### Synthesis → Action Plan
+
+24. **Score the audit findings** by tier-leverage × impact (a Tier-0 break that caps all three funnels → Critical; within GEO rank by Princeton effect size) and produce the per-tier scorecard.
+25. **Assemble the three-altitude Action Plan** — this is the lens's primary deliverable, not the findings list:
+    - **① Tactical fixes (do now)** — every corrective finding rewritten as a concrete edit with the exact surface and change (e.g. "homepage `<title>`: lead with the category term; add `Organization` JSON-LD"). Ordered by leverage × low-effort.
+    - **② Content to produce (build)** — specific pages the audit + opportunity scan call for, each with: the target query/question it wins, the format (FAQ / comparison / pillar / stats resource), the tier it serves (AEO snippet, GEO citation, SEO rank), and the evidence elements to include (statistics, expert quotes, source citations — the +41%/+28%/+115% GEO levers).
+    - **③ Strategic positioning (invest)** — the ranked opportunity map from steps 20-23 as a sequenced content/positioning roadmap: which clusters to own first, why (relevance × demand × winnability), and what "owning it" looks like across SEO rank + AEO answer + GEO citation. Flag the paid-data follow-ups (volume validation, backlink authority) separately.
+26. **Sequence it.** One sentence on order-of-operations: tactical fixes unblock the foundation first (cheap, unlocks everything), production fills the highest-winnability gaps next, strategic bets compound over quarters. Name the single highest-leverage move overall.
 
 ## Check questions
 
@@ -144,6 +172,11 @@ The field is a pile of fragmented, single-discipline checklists (one for SEO, on
 20. **GEO:** is AI visibility measured (share-of-AI-voice / spot-prompt) with sentiment, not just frequency?
 21. Is there evidence of the **keyword-stuffing anti-pattern** (measured −10%) anywhere?
 22. What's the single highest-leverage fix, ranked by tier × Princeton effect size?
+23. **Opportunity discovery:** did you seed the topic space from the product's *credible authority* (relevance gate) before chasing demand?
+24. **Opportunity discovery:** did you harvest real demand from free signals (GSC striking-distance, autocomplete, PAA, community, AI sub-questions) without fabricating search-volume numbers?
+25. **Opportunity discovery:** did you run a competitor content-gap to assess winnability, and score each opportunity on relevance × demand × winnability?
+26. **Action plan:** does the run end in a three-altitude plan — ① tactical fixes (exact edits), ② content to produce (specific pages with target query + format + GEO evidence elements), ③ strategic positioning (ranked opportunity roadmap)?
+27. **Action plan:** is it sequenced (tactical-first → production → strategic) with the single highest-leverage move named, and paid/human follow-ups flagged separately?
 
 ## Output schema
 
@@ -185,8 +218,29 @@ The field is a pile of fragmented, single-discipline checklists (one for SEO, on
 | Pattern | Where | Why it hurts |
 |---|---|---|
 
-## Top 3 highest-leverage fixes (tier × impact)
-1. ...
+## Opportunity map (strategic — what to create next)
+| Opportunity (topic / query / prompt) | Intent | Target engine | Relevance | Demand signal | Winnability | Priority |
+|---|---|---|---|---|---|---|
+(relevance is a gate — drop low-relevance rows regardless of demand)
+
+## ACTION PLAN (primary deliverable)
+
+### ① Tactical fixes — do now (hours)
+| # | Fix | Surface | Exact change | Leverage |
+|---|---|---|---|---|
+
+### ② Content to produce — build (days/weeks)
+| # | Page to create | Format (FAQ / comparison / pillar / stats) | Target query/question it wins | Tier served (SEO/AEO/GEO) | Evidence to include (stats / quotes / citations) |
+|---|---|---|---|---|---|
+
+### ③ Strategic positioning — invest (quarters)
+| # | Topic cluster to own | Why (relevance × demand × winnability) | What "owning it" looks like (rank + answer + citation) | Sequence |
+|---|---|---|---|---|
+
+### Sequencing & single highest-leverage move
+- Order of operations: {tactical-first → production → strategic, with the why}
+- Single highest-leverage move: {one thing}
+- Paid-data / human follow-ups: {volume validation, backlink authority — F58}
 
 ## Handed to other lenses
 - L17 (CWV depth): ...   - L26 (copy/voice): ...   - L20 (social unfurl): ...
@@ -216,6 +270,30 @@ The field is a pile of fragmented, single-discipline checklists (one for SEO, on
   "ai_visibility_measured": false,
   "keyword_stuffing_detected": false,
   "executed_against_live_site": false,
+  "opportunities": [
+    {
+      "topic": "{topic / query / prompt}",
+      "intent": "informational|commercial|transactional|navigational",
+      "target_engine": "seo|aeo|geo|all",
+      "relevance": "high|medium|low",
+      "demand_signal": "{GSC striking-distance | autocomplete | PAA | community | AI sub-question — source named}",
+      "winnability": "high|medium|low",
+      "priority": 1
+    }
+  ],
+  "action_plan": {
+    "tactical": [
+      {"fix": "{}", "surface": "{URL/template}", "change": "{exact edit}", "leverage": "{}"}
+    ],
+    "content_to_produce": [
+      {"page": "{}", "format": "faq|comparison|pillar|stats_resource|howto", "wins_query": "{}", "tier_served": "seo|aeo|geo", "evidence_to_include": ["statistics", "expert_quotes", "source_citations"]}
+    ],
+    "strategic": [
+      {"cluster": "{}", "why": "{relevance × demand × winnability}", "owning_looks_like": "{rank+answer+citation}", "sequence": 1}
+    ],
+    "highest_leverage_move": "{one thing}",
+    "paid_or_human_followups": ["{volume validation}", "{backlink authority — F58}"]
+  },
   "findings": [
     {
       "id": "L34-F001",
@@ -251,6 +329,10 @@ The field is a pile of fragmented, single-discipline checklists (one for SEO, on
 - **Do NOT fabricate authority/backlink numbers.** Off-page authority needs paid data — flag for human/paid-tool follow-up (F58), don't guess a DA score.
 - **Do NOT treat an AI-visibility snapshot as stable.** 40-60% of AI-cited sources change monthly — label it a point-in-time reading and recommend ongoing monitoring.
 - **Bias toward tier-leverage:** a Tier-0 fix that unlocks all three funnels beats a clever Tier-3 tweak. Rank accordingly.
+- **Do NOT stop at findings.** A list of 40 problems is half the job. The deliverable is the **three-altitude Action Plan** (tactical / content / strategic). A finding without a corresponding plan entry is incomplete.
+- **Do NOT let opportunity discovery skip the relevance gate.** A high-demand topic the product can't credibly serve is noise, not opportunity — chasing it produces thin content that hurts (and reads as the keyword-stuffing anti-pattern at the strategy level). Relevance first, then demand, then winnability.
+- **Do NOT fabricate search volumes or difficulty scores.** Those need paid keyword tools — surface the demand *signals* you can get free (striking-distance queries, autocomplete, PAA, community threads) and flag volume validation as a paid follow-up.
+- **Do NOT propose content with no evidence plan.** Every "build this page" item names the GEO evidence to include (statistics +41%, expert quotes +28%, source citations +115%) — otherwise you're recommending content that won't get cited.
 
 ## Stop conditions (the gap IS the finding)
 
@@ -258,6 +340,7 @@ The field is a pile of fragmented, single-discipline checklists (one for SEO, on
 2. **Cannot reach the live site** (no deployed URL, auth-walled). Audit what's reachable statically (robots/sitemap/schema in source), flag that rendered/CWV/AI-visibility checks could not run, and recommend re-running against the deployed URL.
 3. **No AI-visibility tooling and engines won't answer category prompts.** Report Tier 0-2 fully; for Tier 3 measurement, record the spot-prompt attempt and flag that quantified share-of-AI-voice needs a dedicated tool. Do not fabricate citation numbers.
 4. **Backlink/authority depth requested but only free tools available.** Deliver on-site E-E-A-T signals; flag off-page authority as paid-tool/human follow-up (F58).
+5. **Opportunity discovery on a brand-new site with no GSC history and no paid keyword tool.** You can still seed the topic space from the product + competitor content-gap + community/AI sub-question mining (all free), but flag that quantified demand validation needs GSC history or a paid keyword tool — deliver the relevance-and-gap-ranked opportunity map and label demand as "qualitative/unvalidated" rather than inventing volumes.
 
 ## Cross-lens handoff
 
