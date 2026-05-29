@@ -133,17 +133,18 @@ And every Bob-built project ships with both `CLAUDE.md` and `AGENTS.md` so you'r
 
 ---
 
-## Why this beats just asking Claude directly
+## Why this beats native Claude
 
-| If you do this | What Bob does instead |
+| ❌ Issues with Claude | ✅ Why Bob is Amazing |
 | --- | --- |
-| Write a longer, better prompt | A prompt is a paragraph. Bob is a 2,600-line versioned protocol baked from real shipped products and lessons learned the hard way. |
-| Tell Claude to "be more disciplined" | Claude agrees, then drifts ten messages later. Bob installs as a Claude Code skill with explicit pause-and-confirm gates the model can't quietly skip. |
-| One-shot prompt Claude and hope | Bob locks the spec **before** any code happens, with explicit "in scope / out of scope" at every phase. |
-| Use Cursor / Windsurf rules | Those govern code style (semicolons, formatting). Bob governs *what* to build: spec, behavior, scope, success metrics, decision log. Complementary, not substitutes. |
-| Run CodeRabbit / Greptile / Snyk for audits | Each is one angle. Bob runs 30 lenses synthesized from 46+ sources with an explicit anti-convergence veto (L28) so audits don't push your product toward "best-practice average." |
-| Trust that "tests passing" means it works | Tests pass, then it breaks in production. Bob's audits **execute** — Playwright, Schemathesis, Garak red-teams, API queries. Execution evidence > reasoning inference. |
-| Try to remember what you did last session | Bob writes spec + decision log + build manifest to disk. Full context is always loadable next session, and portable to other AI tools via `AGENTS.md`. |
+| ❌ **Hallucinates** — makes up features, libraries, or behaviors you never asked for | ✅ Bob locks the spec, scope, and AI behavior *before* any code is written. Claude can't quietly add features or invent behaviors that weren't approved. |
+| ❌ **Forgets** what you talked about last session | ✅ Bob writes spec + decision log + build manifest to disk every session. Full context is always loadable — and portable to Codex / Cursor / Aider via `AGENTS.md`. |
+| ❌ **Drifts** off-spec mid-build — agrees with your spec, then quietly does something else ten messages later | ✅ Reconciliation after every phase: Bob checks built-vs-planned, flags drift, and won't move on until you sign off. |
+| ❌ **Audits narrowly** — usually one angle (a security scan, maybe a lint pass) and calls it done | ✅ Bob ships a 30-lens audit library across 8 bands (engineering, UX, AI behavior, performance, reach, ops, strategy, growth) synthesized from 46+ industry sources, plus an anti-convergence veto so audits don't push your product toward "best-practice average." |
+| ❌ **Doesn't right-size effort** — treats a typo and a multi-file refactor with the same level of care | ✅ EVOLVE classifies every change Small / Medium / Large and runs the right discipline for each. Small = quick edit + smoke test. Large = reference scan + spec update + phased build + audit. |
+| ❌ **Reads code and reasons about it** instead of running it — "this looks correct" ≠ "this works" | ✅ Bob's audits *execute* — Playwright for user journeys, Schemathesis against APIs, Garak red-teams for AI surfaces, programmatic signup-to-cancel walks. Execution evidence beats reasoning inference. |
+| ❌ **Patches the symptom** you reported and leaves the same bug pattern in three other files | ✅ Class-level fixes: a bug in one place triggers a repo-wide grep for the same pattern. Fix once, fix all. |
+| ❌ **Calls it shipped** when the local build passes — even if prod is white-screening | ✅ Post-deploy verification: after every fix Bob hits the live URL and confirms the page actually renders before declaring done. |
 
 ---
 
