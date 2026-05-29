@@ -156,9 +156,9 @@ If Bob helps you ship something, shoot me an email at [joe@joe.wang](mailto:joe@
 
 ---
 
-**Q:** Why "Bob the Builder"?
+## Why call it Bob?
 
-**A:** Because I'd ask Claude to build something and I'd wonder — "Can he build it?"
+Because I'd ask Claude to build something and I'd wonder — "Can he build it?"
 
 Now, finally, the answer is: "Yes he can!" 🔨
 
