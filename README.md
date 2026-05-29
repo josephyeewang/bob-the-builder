@@ -9,18 +9,18 @@
 3 things:
 
 1. **NEW** — Start a product from scratch. Bob takes you from "I have an idea" → spec → build plan → working product, pausing for your sign-off at every step.
-2. **AUDIT** — Inspect a product you've already started (yours or someone else's). Bob runs 30 ready-made audits across engineering, UX, AI behavior, security, pricing, strategy, and growth — and tells you what's solid, what's hollow, and what to fix first.
-3. **EVOLVE** — Add a feature to a product Bob already built. Bob classifies the change (small / medium / large) and runs the right level of discipline for it.
+2. **AUDIT** — Inspect a product you've already started (yours or someone else's). Bob runs 30 ready-made audits across engineering, UX, AI, security, pricing, strategy, and growth — and tells you what's solid, what's hollow, and what to fix first.
+3. **EVOLVE** — Add a feature to a product Bob already built. Bob right-sizes the change (small / medium / large) and runs the right level of discipline for it.
 
 ---
 
 ## Why it's amazing
 
-1. **Built for non-engineers** — built by a non-engineer (former McKinsey, Fifth Wall, Clari — never wrote production code) who was sick of Claude going sideways. Every design choice was made for someone who is great at scoping a product but can't read or debug code themselves.
-2. **Easy install** — copy/paste once into Claude Code and you're installed. No multi-step chaos or downloads.
-3. **Easy to use** — type `/bob` and it works. Every step is in plain language, no jargon. Bob narrates what's happening and pauses for your sign-off before doing anything irreversible. You don't need to know how to code.
-4. **Prevents Hallucinations** — instead of letting Claude guess what to build, Bob locks the spec, scope, and AI behavior upfront. Claude can't quietly drift, add features you didn't ask for, or forget what it agreed to two sessions ago.
-5. **Auto Audits Your Project** — Bob ships 30 ready-made audit prompts synthesized from 46+ industry sources (CodeRabbit, OWASP, Nielsen, Microsoft HAX, April Dunford, Reforge, and more). You don't have to know what to look for — Bob does.
+1. **Built for non-engineers** — built by a non-engineer (former McKinsey, Fifth Wall, Clari) who was sick of Claude going sideways. Designed for someone who can scope a product but can't read code.
+2. **Easy install** — one copy/paste into Claude Code. No git, no terminal, no downloads.
+3. **Easy to use** — type `/bob` and it works. Plain language. Sign-off gates before anything irreversible.
+4. **Prevents Hallucinations** — Bob locks the spec, scope, and AI behavior upfront. Claude can't quietly drift, add features you didn't ask for, or forget what it agreed to two sessions ago.
+5. **Auto Audits Your Project** — 30 ready-made audits pulled from 46+ industry sources (OWASP, Nielsen, April Dunford, Reforge, and more). You don't have to know what to look for — Bob does.
 
 ---
 
@@ -43,16 +43,7 @@ In any project folder, open Claude Code and type:
 /bob
 ```
 
-Bob asks one question — which mode (NEW / AUDIT / EVOLVE) — and walks you from there.
-
-### What happens when you type `/bob`
-
-1. **Bob senses the project silently.** Does a Bob manifest exist? Is the git tree clean? What kind of project is this? (No questions asked — it just looks.)
-2. **Bob shows one short summary** — what it sees, a tentative complexity classification, and any housekeeping flags (e.g., uncommitted work).
-3. **Bob asks one question: which mode?** (NEW / AUDIT / EVOLVE.) That's the only thing you decide at startup.
-4. **You pick.** Bob takes it from there — gathering what it needs, narrating as it goes.
-
-Narrator Mode is on by default — Bob explains each step in plain language and summarizes after every completion. Say **"terse mode"** any time if you'd rather it be quieter.
+Bob asks one question — which mode (NEW / AUDIT / EVOLVE) — and walks you from there in plain language. Say **"terse mode"** any time if you want Bob to talk less.
 
 ---
 
@@ -61,75 +52,69 @@ Narrator Mode is on by default — Bob explains each step in plain language and 
 - **Install:** once per machine
 - **Type `/bob`:** once at the start of each new project
 - **After that:** every session auto-resumes — just say "let's continue"
-- **Updates:** automatic — each time you type `/bob`, Bob checks (at most once a day) whether a newer version exists and offers to grab it before you start. You just say yes; you never have to remember. You can also type `update bob` any time to force a check.
+- **Updates:** automatic — Bob asks before pulling a new version; just say yes
 
 ---
 
 ## What it does EXACTLY
 
-Five concrete capabilities. Three are the modes you invoke; two are cross-cutting things Bob does *during* the modes.
+Five things. Three are the modes you invoke; two are what Bob does *during* the modes.
 
 ### 1. NEW — Build from scratch
 
 You bring an idea. Bob walks you through:
 
-- **Bulletproof Product Spec** — what you're building, who it's for, what's explicitly out of scope
-- **AI Behavior Guardrails** — for AI products, Bob locks down how your AI thinks (tone, refusal patterns, edge-case behavior) *before* any code is written
-- **Phased Build Plan** — exactly what to build when, with a sign-off gate at every step
-- **Reconciliation after every phase** — Bob checks built-vs-planned, flags drift, won't move on until you sign off
+- **Bulletproof Product Spec** — what you're building, who it's for, what's out of scope
+- **AI Behavior Guardrails** — for AI products, locks how your AI thinks (tone, refusals, edge cases) *before* any code is written
+- **Phased Build Plan** — what to build when, with a sign-off gate at every step
 
-Invoke with `/bob NEW` or pick **A) NEW** from the menu.
+Invoke with `/bob NEW`.
 
 ### 2. AUDIT — Inspect a product (yours or someone else's)
 
-As of v2.17, AUDIT is dramatically different from what you'd get from a generic code review tool. Bob ships a **30-lens audit library** — 30 ready-made audit prompts each attacking the product from a different angle, in 8 bands:
+Bob ships a **30-audit library** — 30 ready-made audits, each attacking the product from a different angle, in 8 categories:
 
-| Band | What it audits |
+| Category | What it audits |
 |---|---|
-| **Engineering Foundation** (L01–L06) | Code hygiene + liveness execution, spec fidelity, capability quality, security (STRIDE + OWASP T10:2025 + ASVS 5.0), data protection + privacy (GDPR Art.30), supply chain + configuration |
-| **User Experience** (L07–L10) | Cognitive ease (Nielsen + Norman), friction + trust (Brignull dark patterns), wow + emotional peaks (Peak-End + JTBD), edge states + recovery |
-| **AI Behavior** (L11–L14) | Accuracy + calibration (TruLens, RAGAS, promptfoo), right-sizing + model fit, interaction safety (Microsoft HAX + Garak + OWASP LLM Top 10), cost + latency efficiency |
-| **Performance Economics** (L15–L16) | Cost / speed drivers including the **tradeoff-inversion lens** — *where should we DELIBERATELY pay more or accept more latency for value?* |
-| **Reach & Distribution** (L17–L20) | Mobile / form factor, internationalization, accessibility (WCAG 2.2+), shareability / virality / discoverability |
-| **Operational** (L21–L23) | Observability + incident readiness, vendor + dependency risk, documentation + onboardability (Diátaxis) |
-| **Strategic & Market** (L24–L28) | Competitive benchmarking, pricing & monetization (incl. FTC Click-to-Cancel), marketing + copy, persona simulation (adversarial reasoning), **strategic edge & wedge sharpness** (the anti-convergence lens) |
-| **Growth & Adoption** (L29–L30) | Onboarding + activation (Sean Ellis + Reforge), retention + compounding loops (Hook model, growth loops, network effects) |
+| **Engineering Foundation** | Code hygiene, spec fidelity, capability quality, security, privacy, supply chain |
+| **User Experience** | Cognitive ease, friction & trust, wow moments, edge states & recovery |
+| **AI Behavior** | Accuracy, model fit, safety, cost & latency |
+| **Performance Economics** | Where to save money/time — and where to *spend* more for value |
+| **Reach & Distribution** | Mobile, internationalization, accessibility, shareability |
+| **Operational** | Observability, vendor risk, documentation |
+| **Strategic & Market** | Competitive position, pricing, marketing copy, persona simulation, strategic edge |
+| **Growth & Adoption** | Onboarding & activation, retention loops |
 
-Why this is different from running CodeRabbit / Greptile / Snyk:
+Why it's different from a generic code-review tool:
 
-- **Synthesized from 46+ industry sources, not one angle.** 12 commercial code-review tools, 14 audit taxonomies, 13 UX/product methods, and strategic frameworks from April Dunford, Patrick Campbell, Nir Eyal, Reforge, Andrew Chen, and others.
-- **Bob picks the panel, not you.** Bob proposes a curated 6–10 lens panel based on your project profile (greenfield consumer? launched B2B SaaS? pre-fundraise scrub? post-incident audit?). You confirm with one gate.
-- **L28 anti-convergence veto.** Most audits push products toward "best-practice average." Bob's L28 explicitly pushes back. It can mark earlier UX findings as "do not fix — that friction is your wedge" (Linear keyboard-first, Superhuman shortcuts). The first audit library designed to NOT make every product converge to mediocrity.
-- **Execution-first.** Bob doesn't just *read* code — Bob *runs* it. Playwright for user journeys, Schemathesis against APIs, Garak red-teams on AI surfaces, programmatic signup-to-cancel walks. Every lens names what Claude should EXECUTE vs READ vs leave to a HUMAN walk.
-- **Audit memory.** Bob remembers what you ran last and offers four options on entry: **Same** (drift check) / **Complementary Curated** (broaden coverage) / **Full Enchilada** (all 30) / **Custom**.
-- **Self-learning library.** After every audit Bob auto-emits a *lens retro* — a critique of the lenses themselves, distinct from findings about your product. Retros accumulate; weak lenses get flagged; a human decides which to sharpen. Bob never auto-edits its own lenses.
+- **Bob picks the audits for you** — proposes 6–10 based on what kind of product you have. Confirm with one gate. Or pick "Full Enchilada" to run all 30 before a launch.
+- **Bob runs the code, not just reads it** — drives the app through real user flows, hits the APIs, simulates signup-to-cancel. Reading code can lie. Running it can't.
+- **Anti-convergence veto** — most audits push every product toward "best-practice average." Bob has a dedicated audit that pushes back: *"do not fix this — that friction is your wedge."* (Think Linear's keyboard-first onboarding, Superhuman's shortcuts.)
+- **Bob remembers** — each AUDIT, you can re-run the last set, broaden to new angles, or do the full 30.
+- **Bob learns** — after every audit Bob critiques *its own audits*. Weak ones get flagged for you to sharpen. Bob never edits itself without you.
 
-Invoke with `/bob AUDIT` or pick **B) AUDIT** from the menu. See `audit-lenses/README.md` in the repo for the full library + provenance.
+Invoke with `/bob AUDIT`.
 
 ### 3. EVOLVE — Add a feature
 
-Bob classifies the change (Small / Medium / Large) and runs the right level of discipline. Small = quick edit + smoke test. Medium = reference scan + spec update + phased build. Large = full discipline including reconciliation and audit.
+Bob classifies the change Small / Medium / Large and runs the right level of discipline. Small = quick edit + smoke test. Large = full discipline including reconciliation and audit.
 
-Invoke with `/bob EVOLVE` or pick **C) EVOLVE**.
+Invoke with `/bob EVOLVE`.
 
 ### 4. Drift prevention (during every mode)
 
-This is the load-bearing thing Bob does *while* you're in any of the modes above:
+What Bob does *while* you're building:
 
-- **Spec lock** — Bob catches Claude every time it wanders off-spec (adding features you didn't approve, silently changing behavior, forgetting earlier decisions)
-- **Class-level fixes** — bug in one place? Bob audits every similar pattern, not just the symptom that surfaced
-- **AI behavior eval re-runs** — for AI products, your eval set re-runs at every phase. Drift on a previously-passing eval is a stop sign, not a "ship it anyway"
+- **Spec lock** — Bob catches Claude every time it wanders off-spec
+- **Class-level fixes** — bug in one place? Bob audits every similar pattern, not just the symptom
+- **AI behavior re-checks** — for AI products, your test set re-runs at every phase. Regressions are a stop sign, not a "ship anyway"
 
 ### 5. Project memory (across every session)
 
-Bob writes the important stuff to disk so context survives session boundaries, compaction, and tool switches:
+Bob writes the important stuff to disk so context survives session boundaries:
 
-- **Spec** — living, updated during the build, not just at the start
-- **Decision log** — every non-obvious choice recorded with the *why*
-- **Build manifest** — what's done, what's next, where drift was caught
-- **Audit history** — which lenses ran, what they found
-
-And every Bob-built project ships with both `CLAUDE.md` and `AGENTS.md` so you're not locked to Claude. Try Codex, Cursor, or Aider later — your project's context comes with you.
+- Spec, decision log, build manifest, and audit history — all on disk
+- Every Bob-built project ships with both `CLAUDE.md` and `AGENTS.md` so you can switch to Codex, Cursor, or Aider later without losing context
 
 ---
 
@@ -140,9 +125,9 @@ And every Bob-built project ships with both `CLAUDE.md` and `AGENTS.md` so you'r
 | ❌ **Hallucinates** — makes up features, libraries, or behaviors you never asked for | ✅ Bob locks the spec, scope, and AI behavior *before* any code is written. Claude can't quietly add features or invent behaviors that weren't approved. |
 | ❌ **Forgets** what you talked about last session | ✅ Bob writes spec + decision log + build manifest to disk every session. Full context is always loadable — and portable to Codex / Cursor / Aider via `AGENTS.md`. |
 | ❌ **Drifts** off-spec mid-build — agrees with your spec, then quietly does something else ten messages later | ✅ Reconciliation after every phase: Bob checks built-vs-planned, flags drift, and won't move on until you sign off. |
-| ❌ **Audits narrowly** — usually one angle (a security scan, maybe a lint pass) and calls it done | ✅ Bob ships a 30-lens audit library across 8 bands (engineering, UX, AI behavior, performance, reach, ops, strategy, growth) synthesized from 46+ industry sources, plus an anti-convergence veto so audits don't push your product toward "best-practice average." |
-| ❌ **Doesn't right-size effort** — treats a typo and a multi-file refactor with the same level of care | ✅ EVOLVE classifies every change Small / Medium / Large and runs the right discipline for each. Small = quick edit + smoke test. Large = reference scan + spec update + phased build + audit. |
-| ❌ **Reads code and reasons about it** instead of running it — "this looks correct" ≠ "this works" | ✅ Bob's audits *execute* — Playwright for user journeys, Schemathesis against APIs, Garak red-teams for AI surfaces, programmatic signup-to-cancel walks. Execution evidence beats reasoning inference. |
+| ❌ **Audits narrowly** — one angle (usually a security scan) and calls it done | ✅ 30 ready-made audits across 8 categories, plus an anti-convergence veto so audits don't push your product toward "best-practice average." |
+| ❌ **Doesn't right-size effort** — treats a typo and a multi-file refactor with the same level of care | ✅ EVOLVE classifies every change Small / Medium / Large. Small = quick edit + smoke test. Large = full discipline. |
+| ❌ **Reads code and reasons about it** instead of running it — "this looks correct" ≠ "this works" | ✅ Bob's audits *execute* — drives the app through real user flows, hits the APIs, simulates signup-to-cancel. Running it catches what reading it doesn't. |
 | ❌ **Patches the symptom** you reported and leaves the same bug pattern in three other files | ✅ Class-level fixes: a bug in one place triggers a repo-wide grep for the same pattern. Fix once, fix all. |
 | ❌ **Calls it shipped** when the local build passes — even if prod is white-screening | ✅ Post-deploy verification: after every fix Bob hits the live URL and confirms the page actually renders before declaring done. |
 
