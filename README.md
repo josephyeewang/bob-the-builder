@@ -16,9 +16,9 @@
 
 ## Why it's amazing
 
-1. **Built for non-engineers** — built by a non-engineer (former McKinsey, Fifth Wall, Clari — never wrote production code) who was sick of Claude going sideways. Every design choice was made for someone who is great at scoping a product but can't read or debug code themselves. Not a tool an engineer dumbed down — a tool built ground-up for your seat.
-2. **Easy install** — one paste into Claude Code and you're done. No git commands, no terminal wrestling.
-3. **Easy to use** — every step is in plain language, no jargon. Bob narrates what's happening and pauses for your sign-off before doing anything irreversible. You don't need to know how to code.
+1. **Built for non-engineers** — built by a non-engineer (former McKinsey, Fifth Wall, Clari — never wrote production code) who was sick of Claude going sideways. Every design choice was made for someone who is great at scoping a product but can't read or debug code themselves.
+2. **Easy install** — copy/paste once into Claude Code and you're installed. No multi-step chaos or downloads.
+3. **Easy to use** — type `/bob` and it works. Every step is in plain language, no jargon. Bob narrates what's happening and pauses for your sign-off before doing anything irreversible. You don't need to know how to code.
 4. **NEW prevents hallucinations** — instead of letting Claude guess what to build, Bob locks the spec, scope, and AI behavior upfront. Claude can't quietly drift, add features you didn't ask for, or forget what it agreed to two sessions ago.
 5. **AUDIT saves you the trouble of inventing your own audits** — Bob ships 30 ready-made audit prompts synthesized from 46+ industry sources (CodeRabbit, OWASP, Nielsen, Microsoft HAX, April Dunford, Reforge, and more). You don't have to know what to look for — Bob does.
 
@@ -45,6 +45,15 @@ In any project folder, open Claude Code and type:
 
 Bob asks one question — which mode (NEW / AUDIT / EVOLVE) — and walks you from there.
 
+### What happens when you type `/bob`
+
+1. **Bob senses the project silently.** Does a Bob manifest exist? Is the git tree clean? What kind of project is this? (No questions asked — it just looks.)
+2. **Bob shows one short summary** — what it sees, a tentative complexity classification, and any housekeeping flags (e.g., uncommitted work).
+3. **Bob asks one question: which mode?** (NEW / AUDIT / EVOLVE.) That's the only thing you decide at startup.
+4. **You pick.** Bob takes it from there — gathering what it needs, narrating as it goes.
+
+Narrator Mode is on by default — Bob explains each step in plain language and summarizes after every completion. Say **"terse mode"** any time if you'd rather it be quieter.
+
 ---
 
 ## How often do I invoke Bob?
@@ -53,34 +62,6 @@ Bob asks one question — which mode (NEW / AUDIT / EVOLVE) — and walks you fr
 - **Type `/bob`:** once at the start of each new project
 - **After that:** every session auto-resumes — just say "let's continue"
 - **Updates:** automatic — each time you type `/bob`, Bob checks (at most once a day) whether a newer version exists and offers to grab it before you start. You just say yes; you never have to remember. You can also type `update bob` any time to force a check.
-
----
-
-## Creator
-
-**[Joe Wang](https://joe.wang)** — business guy who just wanted something that worked. Former McKinsey consultant, Fifth Wall venture capitalist, Clari SaaS exec. Not an engineer.
-
-If Bob helps you ship something, shoot me an email at [joe@joe.wang](mailto:joe@joe.wang) — I'd love to see it.
-
----
-
-**Q:** Why "Bob the Builder"?
-
-**A:** Because I'd ask Claude to build something and I'd wonder — "Can he build it?"
-
-Now, finally, the answer is: "Yes he can!" 🔨
-
----
-
-## License
-
-[MIT](LICENSE) — use it, fork it, adapt it, share it.
-
----
-
-# More detail
-
-Everything below is the long version. Skip unless you want the details.
 
 ---
 
@@ -166,11 +147,22 @@ And every Bob-built project ships with both `CLAUDE.md` and `AGENTS.md` so you'r
 
 ---
 
-## What happens when you type `/bob`
+## Creator
 
-1. **Bob senses the project silently.** Does a Bob manifest exist? Is the git tree clean? What kind of project is this? (No questions asked — it just looks.)
-2. **Bob shows one short summary** — what it sees, a tentative complexity classification, and any housekeeping flags (e.g., uncommitted work).
-3. **Bob asks one question: which mode?** (NEW / AUDIT / EVOLVE.) That's the only thing you decide at startup.
-4. **You pick.** Bob takes it from there — gathering what it needs, narrating as it goes.
+**[Joe Wang](https://joe.wang)** — business guy who just wanted something that worked. Former McKinsey consultant, Fifth Wall venture capitalist, Clari SaaS exec. Not an engineer.
 
-Narrator Mode is on by default — Bob explains each step in plain language and summarizes after every completion. Say **"terse mode"** any time if you'd rather it be quieter.
+If Bob helps you ship something, shoot me an email at [joe@joe.wang](mailto:joe@joe.wang) — I'd love to see it.
+
+---
+
+**Q:** Why "Bob the Builder"?
+
+**A:** Because I'd ask Claude to build something and I'd wonder — "Can he build it?"
+
+Now, finally, the answer is: "Yes he can!" 🔨
+
+---
+
+## License
+
+[MIT](LICENSE) — use it, fork it, adapt it, share it.
