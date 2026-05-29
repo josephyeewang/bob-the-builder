@@ -1,6 +1,6 @@
 ---
 name: bob
-description: "Use when the user wants to build, audit, or evolve a product using the Bob the Builder protocol. Triggers: any mention of 'bob', 'bob the builder', 'build protocol', 'NEW mode', 'AUDIT mode', 'EVOLVE mode', or requests to scope/spec/build a new product systematically, assess an existing partially-built product against a discipline, or extend an existing product with the same protocol. Optimized for a non-engineer product leader using Claude Code for implementation. Covers spec creation, phase-by-phase build with human gates, reconciliation, adversarial review, behavioral cores for AI products, and a 30-lens audit library (v2.17) covering engineering / UX / AI / performance / reach / operational / strategic / growth angles, synthesized from 46+ industry sources — with an explicit execution-first principle (v2.17.1) that drives Playwright / Schemathesis / Garak / API queries rather than only reading code, and a self-learning loop (v2.18) where each audit auto-emits a lens retro that — once accumulated — flags which lenses to sharpen, under human judgment (Bob never auto-edits its own lenses)."
+description: "Use when the user wants to build, audit, or evolve a product using the Bob the Builder protocol. Triggers: any mention of 'bob', 'bob the builder', 'build protocol', 'NEW mode', 'AUDIT mode', 'EVOLVE mode', or requests to scope/spec/build a new product systematically, assess an existing partially-built product against a discipline, or extend an existing product with the same protocol. Optimized for a non-engineer product leader using Claude Code for implementation. Covers spec creation, phase-by-phase build with human gates, reconciliation, adversarial review, behavioral cores for AI products, and a 30-lens audit library (v2.17) covering engineering / UX / AI / performance / reach / operational / strategic / growth angles, synthesized from 46+ industry sources — with an explicit execution-first principle (v2.17.1) that drives Playwright / Schemathesis / Garak / API queries rather than only reading code, and a self-learning loop (v2.18) where each audit auto-emits a lens retro that — once accumulated — flags which lenses to sharpen, under human judgment (Bob never auto-edits its own lenses), refined in v2.19 with post-deploy verification and class-level fix enforcement drawn from the first real field retro."
 user-invocable: true
 ---
 
@@ -9,6 +9,20 @@ user-invocable: true
 A systematic protocol for building, auditing, and evolving products with Claude Code. Designed for a non-engineer product leader.
 
 ## What to do when this skill is invoked
+
+**Step 0 — silent update check (do this FIRST, before anything else).** Run:
+
+```bash
+bash ~/.claude/skills/bob/../scripts/bob-update-check.sh
+```
+
+It prints exactly one line, `BOB_UPDATE: status=...`. It is throttled (one network check per day) and degrades silently offline, so it's cheap to run every time. Act on the status:
+
+- **`status=behind`** (line includes `current=` and `latest=`) — an update is available and safe to fast-forward. This is the ONE place at startup you may add a yes/no before the mode menu. Say, in plain language: *"📦 A newer Bob is available (v2.18 → v2.19, 3 updates since you installed). Want me to grab it before we start? Takes about 5 seconds."* If **yes**, run the divergence-aware sequence from the **Updating Bob** section below, paraphrase what changed, then continue to the mode flow. If **no**, continue on the current version and do not ask again this session.
+- **`status=dirty`** or **`status=diverged`** — an update exists, but their Bob install has local changes, so do NOT auto-update. Mention it in one quiet line (*"There's a newer Bob, but your copy has local changes — run `bash ~/tools/bob-the-builder/scripts/bob-doctor.sh` when you want to sort it out"*) and continue.
+- **`status=current` / `skip` / `offline` / `noinstall`** — say nothing. Proceed straight to the normal startup flow below.
+
+This check must never block the session: if the script errors or is missing, proceed silently. It does NOT count as the "one startup question" — the update offer only appears when genuinely behind, and the mode question is still the only thing the user decides in the common (up-to-date) path.
 
 1. **Read the core protocol first**: `~/.claude/skills/bob/../build-protocol-core.md`. That file is the compact reference and contains the mode menu (NEW / AUDIT / EVOLVE), complexity assessment, document hierarchy, and rules. (The skill at `~/.claude/skills/bob` is a symlink to wherever the user cloned Bob — `..` from there resolves to the repo root regardless of install location.)
 

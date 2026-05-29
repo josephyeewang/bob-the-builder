@@ -52,7 +52,7 @@ Bob asks one question — which mode (NEW / AUDIT / EVOLVE) — and walks you fr
 - **Install:** once per machine
 - **Type `/bob`:** once at the start of each new project
 - **After that:** every session auto-resumes — just say "let's continue"
-- **Updates (optional):** type `update bob` to Claude whenever
+- **Updates:** automatic — each time you type `/bob`, Bob checks (at most once a day) whether a newer version exists and offers to grab it before you start. You just say yes; you never have to remember. You can also type `update bob` any time to force a check.
 
 ---
 
