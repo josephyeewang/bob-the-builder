@@ -1,4 +1,6 @@
-# Bob the Builder &nbsp; <img src="assets/bob-logo.svg" alt="" height="64" align="center" />
+<img src="assets/bob-logo.svg" alt="Bob the Builder logo" width="180" align="right" />
+
+# Bob the Builder
 
 **A skill that guides you step-by-step to build and audit real products in Claude Code. For non-engineers.**
 
