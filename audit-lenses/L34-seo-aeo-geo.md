@@ -89,6 +89,12 @@ The field is a pile of fragmented, single-discipline checklists (one for SEO, on
 
 > Run the tiers in order. Tier 0 is the shared substrate — always run it. Each later tier *assumes Tier 0 passed*; a Tier-0 failure caps everything above it, so rank a Tier-0 fix above any Tier-3 polish.
 
+> **Two axes — this lens is half internal, half external. Both are mandatory.**
+> - **Internal (the mechanics of your site & content):** Tiers 0-2 and the content-evidence checks in Tier 3 — crawlability, rendering, schema, CWV, on-page, answer blocks, the words on your pages. *Inspect and execute against your own site.*
+> - **External (the context — what's happening, where you fit, how to win):** steps 16-23 — **actually run searches and prompts on Google / ChatGPT / Perplexity**, **crawl 3-5 competitors**, harvest autocomplete / People-Also-Ask / community threads, measure share-of-AI-voice, and scan the topic landscape. *This is field reconnaissance, not introspection.*
+>
+> **EXECUTE the external axis — do not reason about it (v2.17.1 execution principle).** An external finding must come from a real query you ran, a competitor page you actually fetched, a PAA box you actually pulled, an AI answer you actually prompted — not from what you assume the market looks like. "I believe competitors cover X" is a Read-mode guess; "I prompted Perplexity 'best X for Y' and it cited [A, B, C], not us" is evidence. If a platform won't respond or a tool is unavailable, name it as a stop condition — don't substitute reasoning for the missing run.
+
 ### Tier 0 — Foundation (shared substrate; required by SEO, AEO, and GEO)
 
 1. **Crawl access.** Fetch `robots.txt`. Is anything important `Disallow`ed? Are **AI crawlers** (GPTBot, ClaudeBot, PerplexityBot, Google-Extended) blocked? (Blocking them = invisible to GEO — flag as a decision, not auto-bad.) Confirm `sitemap.xml` returns 200, lists only canonical URLs, `lastmod` is real, <50k URLs/file.
@@ -177,6 +183,7 @@ The field is a pile of fragmented, single-discipline checklists (one for SEO, on
 25. **Opportunity discovery:** did you run a competitor content-gap to assess winnability, and score each opportunity on relevance × demand × winnability?
 26. **Action plan:** does the run end in a three-altitude plan — ① tactical fixes (exact edits), ② content to produce (specific pages with target query + format + GEO evidence elements), ③ strategic positioning (ranked opportunity roadmap)?
 27. **Action plan:** is it sequenced (tactical-first → production → strategic) with the single highest-leverage move named, and paid/human follow-ups flagged separately?
+28. **Internal + external balance:** did you cover BOTH axes — the internal site/content mechanics AND the external context — and did you **actually run** the external probes (real Google/ChatGPT/Perplexity queries, real competitor fetches, real PAA/autocomplete pulls) rather than reasoning about the market?
 
 ## Output schema
 
@@ -333,6 +340,8 @@ The field is a pile of fragmented, single-discipline checklists (one for SEO, on
 - **Do NOT let opportunity discovery skip the relevance gate.** A high-demand topic the product can't credibly serve is noise, not opportunity — chasing it produces thin content that hurts (and reads as the keyword-stuffing anti-pattern at the strategy level). Relevance first, then demand, then winnability.
 - **Do NOT fabricate search volumes or difficulty scores.** Those need paid keyword tools — surface the demand *signals* you can get free (striking-distance queries, autocomplete, PAA, community threads) and flag volume validation as a paid follow-up.
 - **Do NOT propose content with no evidence plan.** Every "build this page" item names the GEO evidence to include (statistics +41%, expert quotes +28%, source citations +115%) — otherwise you're recommending content that won't get cited.
+- **Do NOT reason about the market — go measure it.** The external axis is field reconnaissance: run the real searches, fetch the real competitor pages, pull the real PAA/autocomplete, prompt the real AI engines. "Competitors probably rank for X" and "users likely search Y" are guesses; an opportunity map built on guesses is fiction. If you couldn't run a probe, label that gap honestly rather than filling it with assumption.
+- **Do NOT let the audit collapse to internal-only.** A pristine site that nobody's searching for, in a space owned by competitors, is a strategic loss the internal tiers can't see. Internal mechanics + external context are co-equal; a run that skips the external axis is half a lens.
 
 ## Stop conditions (the gap IS the finding)
 

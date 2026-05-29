@@ -6,6 +6,21 @@ This is the operational counterpart to `decision-log.md`. The decision log recor
 
 ---
 
+## EVOLVE pass — v2.24 (2026-05-29) — L34 internal+external axes made co-equal + external-execution mandated (evolution 002 continued)
+
+**Origin:** Joe's check — is L34 both internal (site/content mechanics) and external (run keyword searches, prompt AI engines, scan competitors, map topic landscape)?
+
+**Finding:** the external work already existed (steps 16-23: spot-prompt ChatGPT/Perplexity/AI-Overviews, GSC striking-distance + autocomplete + PAA, 3-5-competitor content-gap, share-of-AI-voice, community mining) but was distributed and unlabeled, with a real risk of *reasoning about* the market instead of *measuring* it.
+
+**Fix (framing + execution emphasis, no structural change):**
+- Explicit **Two-axes frame** in the audit method: Internal = Tiers 0-2 + content evidence; External = steps 16-23, "field reconnaissance, not introspection."
+- Hard **EXECUTE-the-external-axis mandate** (per v2.17.1): external findings must come from a real query/fetch/prompt that was run; if a probe can't run, name it as a stop condition rather than substitute reasoning.
+- +1 check question (Q28 — balance + did-you-actually-run-it), +2 anti-patterns (don't reason about the market; don't collapse to internal-only).
+
+**Files:** L34 + version bumps (CLAUDE.md, core footer, lens README). Lens count unchanged (34).
+
+---
+
 ## EVOLVE pass — v2.23 (2026-05-29) — L34 gains Audit→Action-Plan + strategic opportunity discovery (evolution 002 continued)
 
 **Origin:** Joe's same-day follow-up to v2.22 — "make sure it's not just doing the audit but also *what fixes to make*," across tactical (change tags), work-oriented (build blogs/FAQ/comparison), and strategic (find hot/searched topics, test relevance, suggest where to invest content) altitudes; his call on whether to split.

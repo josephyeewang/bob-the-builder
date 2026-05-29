@@ -179,4 +179,4 @@ The library consolidates convergent angles from:
 
 ## Version
 
-Lens library v2.23 — 2026-05-29 (34 lenses; L34 gained its two-phase Audit→Action-Plan + strategic opportunity discovery). Prior: v2.22 (34; L34 added), v2.21 (33; L31–L33), v2.17 (30, original). Each lens prompt is version-controlled and revised via standard Bob EVOLVE cycles. Lens additions or significant rewrites bump the library minor version; lens removals require a Decision Log entry.
+Lens library v2.24 — 2026-05-29 (34 lenses; L34 internal+external axes made co-equal + external-execution mandated). Prior: v2.23 (L34 Audit→Action-Plan + opportunity discovery), v2.22 (34; L34 added), v2.21 (33; L31–L33), v2.17 (30, original). Each lens prompt is version-controlled and revised via standard Bob EVOLVE cycles. Lens additions or significant rewrites bump the library minor version; lens removals require a Decision Log entry.
