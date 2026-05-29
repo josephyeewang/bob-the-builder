@@ -6,6 +6,32 @@ This is the operational counterpart to `decision-log.md`. The decision log recor
 
 ---
 
+## EVOLVE pass — v2.22 (2026-05-29) — L34 SEO / AEO / GEO Discoverability lens
+
+**Origin:** Joe — "almost every product will have a website, which means it needs SEO and AI-EO." Asked for a deep research run across the fragmented SEO/AEO/GEO field and a master structured audit that beats them all, selectively invokable ("Bob, run the SEO audit").
+
+**Classification:** Medium EVOLVE (1 new lens + wiring; new domain → Reference Scan fired). Deep research sweep (8 web searches + source fetches) → reference scan → spec → lens → wire → reconcile. Docs under `evolutions/002-seo-aeo-geo-lens/`.
+
+**Research backbone:** the only peer-reviewed GEO evidence — *GEO: Generative Engine Optimization*, Aggarwal et al., **ACM KDD 2024** (Princeton/GT/IIT-Delhi/AI2), arXiv 2311.09735 — plus the technical-SEO 12-category consensus, AEO featured-snippet/FAQ-schema practice, the emerging `llms.txt` standard, AI-visibility tooling (Profound/Otterly/Semrush-AI), and OSS crawlers to orchestrate.
+
+**The thesis that beats the field:** every surveyed guide is a flat checklist for *one* of SEO/AEO/GEO. L34 unifies them into a **4-tier funnel sharing a common substrate** — Tier 0 Foundation (crawl/index/render/CWV/schema) → Tier 1 SEO → Tier 2 AEO → Tier 3 GEO — and makes recommendations **evidence-ranked** by the paper's measured effect sizes (cite sources +115%, statistics +41%, quotations +28%, keyword stuffing −10%/hurts) rather than opinion. Leverage-ordered: a Tier-0 break caps all three funnels. Tiers independently runnable.
+
+**Design decisions:**
+- **D-EVO5** — one lens, four tiers, tiers independently runnable (honors "one invokable SEO audit"; rejected splitting into 3 lenses → would fragment the shared-foundation insight + add sprawl).
+- **D-EVO6** — evidence-ranked, not opinion-ranked; `llms.txt` labeled low-confidence forward hedge.
+- **D-EVO7** — reference/don't-re-run overlaps: CWV → L17, content voice → L26, social unfurl → L20.
+- **D-EVO8** — append-only ID (L34, Band 5); profile-conditional (any web surface); new **Panel L** "SEO / AI-visibility scrub" (L34+L26+L20+L17+L24).
+
+**Distinctness (anti-sprawl gate):** no lens did technical SEO; AEO/GEO entirely absent. vs L20 (social discoverability) / L26 (copy clarity + readability-SEO) / L17 (CWV) / L19 (semantic HTML) — declared seams, overlap only on OG/meta. Routed as **actionable** (normal queue), not strategic bucket, except the share-of-AI-voice-vs-competitors read which may feed L24.
+
+**Files:** 1 new lens + 2 planning docs; wiring across `audit-lenses/{README,_selection-rubric,_aggregation,_execution-principle,_audit-memory}.md`, `build-protocol(-core).md`, `skill/SKILL.md`, public `README.md`, `CLAUDE.md`. Live counts 33→34; historical frozen.
+
+**Deferred:**
+- **F58 — Backlink/domain-authority depth.** Needs paid data (Ahrefs/Semrush); L34 flags off-page authority for human/paid-tool follow-up rather than faking a score. Revisit if a reliable free source appears.
+- **F59 — GEO effect-size drift.** Princeton numbers are 2024; generative engines change fast (40-60% of cited sources churn monthly). **Revisit trigger:** a newer peer-reviewed GEO study, or a real field retro that contradicts the rankings.
+
+---
+
 ## EVOLVE pass — v2.21 (2026-05-29) — Three new audit lenses (L31–L33), batch-built via Bob's own EVOLVE protocol
 
 **Origin:** Joe's three-part question while reflecting on EMBT audits — were there audits for (1) end-to-end user-input-flow tracing (e.g. doc-upload extracts age/gender but never propagates them to scoring/recommendation), (2) the analytical quality/depth of processing/diagnosis/recommendation algorithms, and (3) audience-appropriate output language (jargon for non-technical users; McKinsey-style structure). Tracing each against the live 30-lens library (not the changelog) confirmed all three are **genuine gaps**, with only partial adjacency to L03/L05 (gap 1), L11/L16 (gap 2), L26/L18 (gap 3).

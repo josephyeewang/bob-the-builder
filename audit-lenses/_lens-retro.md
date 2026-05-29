@@ -36,7 +36,7 @@ That nuance exists only in each lens's *live* context and **evaporates when the 
 | **Tier 1 — per-lens fragment** | The lens's own scorecard row: self signal verdict, false positives *it* generated, executed-vs-read, confusing check questions, time, stop conditions hit | Written by **each lens session as its final output step**, while fresh and in-context — persisted to disk in that lens's JSON sidecar | Only the running lens knows these; they don't survive to the end session |
 | **Tier 2 — cross-lens synthesis** | Selection-rubric accuracy, the coverage gap **no** lens caught, aggregation/dedup quality, ranked change-requests | Written at **A7.4** by the end session, which **reads the durable fragments from disk** (does not rely on remembering every run) + the aggregated summary | These genuinely need the whole-run vantage — you can't see the hole until every lens has reported |
 
-The end session therefore does **not** need all 33 lenses in its context window. It globs the fragments off disk and assembles them, exactly as aggregation (A7.2) already globs findings off disk. A deeper fresh-session critique can still be run later (standalone prompt below), but the two-tier capture means the auto-emit is *faithful*, not a lossy reconstruction.
+The end session therefore does **not** need every lens in its context window. It globs the fragments off disk and assembles them, exactly as aggregation (A7.2) already globs findings off disk. A deeper fresh-session critique can still be run later (standalone prompt below), but the two-tier capture means the auto-emit is *faithful*, not a lossy reconstruction.
 
 ### Markdown artifact — `audit-artifacts/audit-retro-{YYYY-MM-DD}.md`
 

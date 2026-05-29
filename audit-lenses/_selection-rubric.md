@@ -79,7 +79,7 @@ Lenses (5): **L01, L04, L10, L21, L22**
 Justification: root-cause-adjacent lenses + observability + vendor risk (incidents often vendor-triggered).
 
 ### Panel K — "Production / launched scrub" (DEFAULT for live solo-dev projects) (v2.19)
-Use when: launched, has real users, solo or small team, and you want depth WITHOUT the risk of a 33-lens Full Enchilada (see caution below).
+Use when: launched, has real users, solo or small team, and you want depth WITHOUT the risk of a 34-lens Full Enchilada (see caution below).
 Lenses (12, +3 conditional): **L01, L04, L05, L07, L09, L10, L11, L13, L16, L17, L19, L21** — add **L31** (if user-data fans out to downstream features), **L32** (if there's an analytical/diagnosis/recommendation engine), **L33** (if generated output is read by a non-technical audience).
 Justification: foundation + liveness + deploy-verify (L01), security + privacy because real user data (L04, L05), the UX journey + peaks + edge/recovery (L07, L09, L10), AI accuracy + safety (L11, L13), what's actually working (L16), mobile + a11y because public (L17, L19), and operability (L21). Origin: an EMBT Full Enchilada retro found these 12 would have caught **14 of 15** closed Criticals — the strategic/growth lenses (L24-L30) and the half-covered ones (L25) added the most noise and the least new signal. This is the recommended production default; reach for Full Enchilada only at the milestones below. **Note (v2.21):** the 14-of-15 tuning predates L31–L33 — those three target gaps the empirical run *couldn't* have surfaced (data-propagation completeness, method soundness, output register), and the EMBT profile that produced Panel K is exactly the profile they were built for, hence their conditional inclusion here.
 
@@ -97,7 +97,7 @@ Justification: foundation + liveness + deploy-verify (L01), security + privacy b
 
 3. Always offer:
    - Mode A: Curated (the proposed 6-10 lens panel)
-   - Mode B: Full Enchilada (all 33)
+   - Mode B: Full Enchilada (all 34)
    - Mode C: Custom (user specifies)
 
 4. Present to user with:
@@ -124,7 +124,7 @@ When AUDIT mode fires, Bob says (paraphrasing):
 > *Four options:*
 > 1. **Same {Curated/Full}** — re-run the same N lenses, check what changed.
 > 2. **Complementary Curated** — Bob picks N lenses you haven't run yet.
-> 3. **Full Enchilada** — all 33, the rocketship-launch scrub.
+> 3. **Full Enchilada** — all 34, the rocketship-launch scrub.
 > 4. **Custom** — tell me which lenses (by number or band).
 >
 > *Recommended this time: **{recommendation}**.*
@@ -136,25 +136,32 @@ After user picks → `→ HG`, then run.
 ## Sizing guidance
 
 - Curated panel: 6-12 lenses typical. Less = under-coverage; more = panel sprawl (move to Full Enchilada instead). Production/launched projects: default to **Panel K (12)**.
-- Full Enchilada: 33 lenses. Runtime: 1-3 hours of Claude work, often multi-session. Use for major-milestone scrubs.
+- Full Enchilada: 34 lenses. Runtime: 1-3 hours of Claude work, often multi-session. Use for major-milestone scrubs.
 - Custom: any number, but Bob warns if <4 (likely missing foundation) or >20 (likely should be Full Enchilada).
 
 ### ⚠️ Full Enchilada on a LIVE production project carries incident risk (v2.19)
 
-A 33-lens scrub generates many fix-commits, and on a live product those compound — an EMBT Full Enchilada *caused a 65-minute P0 outage during the audit itself* (a perf fix that passed local build but white-screened prod). Before recommending Full Enchilada on a production project, Bob warns and offers mitigations:
+A 34-lens scrub generates many fix-commits, and on a live product those compound — an EMBT Full Enchilada *caused a 65-minute P0 outage during the audit itself* (a perf fix that passed local build but white-screened prod). Before recommending Full Enchilada on a production project, Bob warns and offers mitigations:
 - **Prefer Panel K (12)** for routine production depth; reserve Full Enchilada for **annual** or **pre-launch / pre-fundraise** milestones.
 - If running Full Enchilada on live: batch fixes behind a **staging deploy + post-deploy verification** (L01 q13 / §A7.3 1b), or run during a **change-freeze window**, so compounding fixes don't ship unverified to prod.
 - Never apply a build-config/bundler/routing fix from an audit straight to prod without driving the deployed URL (§A7.3 1b).
 
-### New-lens inclusion triggers (v2.21) — L31 / L32 / L33
+### New-lens inclusion triggers (v2.21–v2.22) — L31 / L32 / L33 / L34
 
-The three lenses added in v2.21 are **profile-conditional**, not auto-included everywhere (anti-sprawl). Add them when the trigger fires:
+These lenses are **profile-conditional**, not auto-included everywhere (anti-sprawl). Add them when the trigger fires:
 
 - **L31 Input & Data-Flow Trace** — include when **user-supplied data fans out to downstream features** (profile/upload data feeding scoring/AI/personalization), or there's a **money/credit/quota flow** (purchase → redeem). Skip for read-only / stateless products. Natural fit: Panels A, G, H, K.
 - **L32 Analytical Method Soundness** — include when the product has an **interpretation engine** (diagnosis, score, recommendation, ranking, risk rating), whether AI or deterministic. Especially mandatory for health/finance/safety-adjacent analysis. Skip pure CRUD. Natural fit: Panels A, F, K (and I for AI drift).
 - **L33 Output Register & Audience Fit** — include when the product **generates prose output a user reads** AND that audience is non-technical OR a house style is declared. Skip data-only UIs. Natural fit: Panels A, H, K.
 
-A product hitting all three triggers (consumer AI product with personal data + an analytical engine + generated output — the EMBT shape) should include all three on top of its base panel. A pure internal CRUD tool (Panel D) adds none.
+- **L34 SEO / AEO / GEO Discoverability** (v2.22) — include for **any product with a public website / marketing surface** (almost everything consumer- or B2B-facing). Tiers are independently runnable, so a user can request just the GEO tier. Skip pure internal tools / headless APIs with no web presence. Natural fit: Panels A, B, F, G, H, K — and the dedicated mini-panel below.
+
+A product hitting all three v2.21 triggers (consumer AI product with personal data + an analytical engine + generated output — the EMBT shape) should include those three on top of its base panel, plus L34 if it has a website. A pure internal CRUD tool (Panel D) adds none.
+
+### Panel L — "SEO / AI-visibility scrub" (v2.22)
+Use when: the explicit purpose is discoverability — pre-launch website check, a "why aren't we showing up in ChatGPT/Google" investigation, or a quarterly search/AI-visibility pulse.
+Lenses (5): **L34, L26, L20, L17, L24**
+Justification: L34 is the spine (technical SEO + AEO + GEO); L26 covers content clarity/copy that L34 hands off; L20 covers social-share unfurl; L17 supplies the Core Web Vitals L34 references; L24 frames share-of-AI-voice against competitors. Run L34 alone for a fast single-lens check, or this panel for the full discoverability picture.
 
 ### L25 Pricing — rarely standalone (v2.19)
 

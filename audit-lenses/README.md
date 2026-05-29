@@ -1,6 +1,6 @@
-# Bob Audit Lens Library (v2.21)
+# Bob Audit Lens Library (v2.22)
 
-> **33 ready-made audit prompts across 8 bands.** Loaded once, locked-and-loaded for every project Bob audits. Bob picks the panel based on project profile; the user picks Curated or Full Enchilada at the entry gate.
+> **34 ready-made audit prompts across 8 bands.** Loaded once, locked-and-loaded for every project Bob audits. Bob picks the panel based on project profile; the user picks Curated or Full Enchilada at the entry gate.
 
 ## Why this exists
 
@@ -8,7 +8,7 @@ Single audits are 90% effective and always miss some %. Different lenses catch *
 
 Empirical anchor: the DLL audits run 2026-05-23 produced three categorically distinct lens taxonomies (spec-vs-built, capability quality, UX journey). The UX lens alone surfaced findings no engineering audit could catch — silent system actions damaging trust, capability invisibility, triple-SMS in 5 seconds, no recovery path. v2.17 codifies this multi-lens reality into Bob's protocol.
 
-## The 8 bands and 33 lenses
+## The 8 bands and 34 lenses
 
 | Band | # | Lens | Question it answers |
 |---|---|---|---|
@@ -33,7 +33,8 @@ Empirical anchor: the DLL audits run 2026-05-23 produced three categorically dis
 | **5. Reach & Distribution** | L17 | Device & Form Factor | Desktop / mobile / tablet — does it actually work on a phone? |
 | | L18 | Internationalization & Language | Hardcoded English, broken-under-German layout, missing RTL, locale-naive dates. |
 | | L19 | Accessibility (WCAG+) | POUR + cognitive/motor/visual + keyboard/screen-reader paths. |
-| | L20 | Shareability, Virality & Discoverability | OG tags, thumbnails, share affordances, SEO, embed-ability, referral mechanics. |
+| | L20 | Shareability, Virality & Discoverability | OG tags, thumbnails, share affordances, *social* discoverability, embed-ability, referral mechanics. |
+| | L34 | SEO / AEO / GEO Discoverability | Will engines find, rank, extract, and cite the site? 4-tier model — Foundation → SEO → AEO (answer engines) → GEO (ChatGPT/Perplexity/AI Overviews). Evidence-ranked from the Princeton GEO paper. |
 | **6. Operational** | L21 | Observability & Incident Readiness | What can ops see in prod? Runbook + rollback + blast radius. |
 | | L22 | Vendor & Dependency Risk | Single-points-of-failure, vendor lock-in, sunset risk, cost-spike risk. |
 | | L23 | Documentation & Onboardability | Could a new collaborator contribute in 2 weeks? (Diátaxis framework) |
@@ -46,7 +47,7 @@ Empirical anchor: the DLL audits run 2026-05-23 produced three categorically dis
 | **8. Growth & Adoption** | L29 | Onboarding & Activation | TTFV, aha-moment, drop-off mapping, activation-rate. |
 | | L30 | Retention & Compounding Loops | Hook model, growth loops, network effects, churn surfaces. |
 
-> **IDs are append-only, not band-sorted.** L01–L30 happen to be band-ordered (they shipped together in v2.17); lenses added later (L31 in Band 1, L32 in Band 3, L33 in Band 7 — added v2.21) keep the next free ID and declare their band in frontmatter rather than forcing a renumber. Group by the `band:` field, not by ID arithmetic.
+> **IDs are append-only, not band-sorted.** L01–L30 happen to be band-ordered (they shipped together in v2.17); lenses added later (L31 Band 1, L32 Band 3, L33 Band 7 — v2.21; L34 Band 5 — v2.22) keep the next free ID and declare their band in frontmatter rather than forcing a renumber. Group by the `band:` field, not by ID arithmetic.
 
 ## How each lens file is structured
 
@@ -127,7 +128,7 @@ source_frameworks: [list with URLs]
 | Mode | What it does | When to use |
 |---|---|---|
 | **Curated Panel** | Bob picks 6-10 lenses targeted to where you are (e.g., DLL pre-launch profile → L01, L02, L03, L04, L05, L07, L08, L10, L13). One-line justification for each include AND each exclude. | Default. Mid-build checkpoints, post-evolution validation, periodic pulse audits. |
-| **Full Enchilada** | All 33 lenses run sequentially. No curation. | Major milestones: pre-launch, major version bumps, post-incident comprehensive review, investor/partner/user hand-off. Runtime: 1-3 hours of Claude work, often multi-session. |
+| **Full Enchilada** | All 34 lenses run sequentially. No curation. | Major milestones: pre-launch, major version bumps, post-incident comprehensive review, investor/partner/user hand-off. Runtime: 1-3 hours of Claude work, often multi-session. |
 
 ## Audit memory entry
 
@@ -138,7 +139,7 @@ Every audit run is logged in `audit-artifacts/audit-history.json` (machine) + `a
 > *Four options:*
 > 1. **Same Curated** — re-run the same M lenses, check what changed.
 > 2. **Complementary Curated** — Bob picks M lenses you *haven't* run yet (broadens coverage; recommended if you ran the same panel <30 days ago).
-> 3. **Full Enchilada** — all 33 lenses, the rocketship-launch scrub.
+> 3. **Full Enchilada** — all 34 lenses, the rocketship-launch scrub.
 > 4. **Custom** — tell Bob which lenses (by number or band)."*
 
 You never need to remember a command. Default-recommended option depends on context (see `_audit-memory.md` for the logic).
@@ -174,8 +175,8 @@ The library consolidates convergent angles from:
 - **Strategic/marketing frameworks**: April Dunford's 5-component positioning, Play Bigger (Lochhead) category design, Linear/Karri Saarinen craft-as-moat, 37signals opinionated software, Hanlon Primal Branding, Ramanujam Monetizing Innovation, Patrick Campbell value-metric pricing, Joanna Wiebe conversion copy, Google HCU/AI-slop signals.
 - **Growth frameworks**: Sean Ellis activation, Reforge / Balfour growth loops, Nir Eyal Hook model, Andrew Chen network effects, a16z retention smile curves.
 
-**Bob-distinctive lenses**: L01 Liveness (carried forward from v2.14, novel among surveyed tools), L02 Spec Fidelity (no surveyed tool generalizes this), L03 Critical Capability Quality (the hollow-implementation lens that no surveyed tool names explicitly). Added v2.21: **L31 Input & Data-Flow Trace** (per-field horizontal propagation completeness — taint-tracking and column-level lineage applied to product correctness, not security), **L32 Analytical Method Soundness** (SR 11-7 conceptual-soundness validation extended to deterministic + AI interpretation logic), **L33 Output Register & Audience Fit** (ISO 24495 + Minto applied to *generated in-product output*, a surface L26 explicitly skips).
+**Bob-distinctive lenses**: L01 Liveness (carried forward from v2.14, novel among surveyed tools), L02 Spec Fidelity (no surveyed tool generalizes this), L03 Critical Capability Quality (the hollow-implementation lens that no surveyed tool names explicitly). Added v2.21: **L31 Input & Data-Flow Trace** (per-field horizontal propagation completeness — taint-tracking and column-level lineage applied to product correctness, not security), **L32 Analytical Method Soundness** (SR 11-7 conceptual-soundness validation extended to deterministic + AI interpretation logic), **L33 Output Register & Audience Fit** (ISO 24495 + Minto applied to *generated in-product output*, a surface L26 explicitly skips). Added v2.22: **L34 SEO / AEO / GEO Discoverability** — the only audit that unifies search, answer, and generative-engine discoverability into one 4-tier funnel (Foundation → SEO → AEO → GEO) with GEO recommendations *evidence-ranked* from the Princeton GEO paper (KDD 2024), rather than a flat single-discipline checklist.
 
 ## Version
 
-Lens library v2.21 — 2026-05-29 (33 lenses; L31–L33 added). Originally shipped v2.17 — 2026-05-23 (30 lenses). Each lens prompt is version-controlled and revised via standard Bob EVOLVE cycles. Lens additions or significant rewrites bump the library minor version; lens removals require a Decision Log entry.
+Lens library v2.22 — 2026-05-29 (34 lenses; L34 added). Prior: v2.21 (33; L31–L33), v2.17 (30, original). Each lens prompt is version-controlled and revised via standard Bob EVOLVE cycles. Lens additions or significant rewrites bump the library minor version; lens removals require a Decision Log entry.

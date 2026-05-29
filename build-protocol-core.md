@@ -108,7 +108,7 @@ N+2. **Learning Extraction** → Process review → Update artifacts
 
 A1: Inventory → A2: Map to hierarchy → A3: Code-spec consistency → A4: Risk assessment → A5: Remediation plan → A6: Execute remediation → A7: Hardening audits (scoped) → A8: Re-entry
 
-**A7: Multi-Lens Audit (v2.17; 33 lenses as of v2.21)** — Always runs after remediation. v2.17 replaced the prior single A7a–A7j audit phase with a multi-lens library at `audit-lenses/`; v2.21 brings it to a **33-lens library**, organized into 8 bands (lens IDs are append-only, so newer lenses sit in earlier bands — group by band, not ID arithmetic):
+**A7: Multi-Lens Audit (v2.17; 34 lenses as of v2.22)** — Always runs after remediation. v2.17 replaced the prior single A7a–A7j audit phase with a multi-lens library at `audit-lenses/`; it now stands at a **34-lens library**, organized into 8 bands (lens IDs are append-only, so newer lenses sit in earlier bands — group by band, not ID arithmetic):
 
 | Band | Lenses | Question |
 |---|---|---|
@@ -116,14 +116,14 @@ A1: Inventory → A2: Map to hierarchy → A3: Code-spec consistency → A4: Ris
 | 2. User Experience | L07–L10 | Can users navigate, trust, delight, recover? |
 | 3. AI Behavior | L11–L14, **L32** | AI accurate, right-sized, safe, efficient? **L32 (v2.21):** is the analytical *method* sound (right inputs, defensible weights, valid assumptions) — AI **and** deterministic logic? |
 | 4. Performance Economics | L15–L16 | Cost / speed / effectiveness drivers — incl. *invest-more* opportunities |
-| 5. Reach & Distribution | L17–L20 | Mobile, i18n, accessibility, shareability |
+| 5. Reach & Distribution | L17–L20, **L34** | Mobile, i18n, accessibility, social shareability. **L34 (v2.22):** SEO / AEO / GEO — will search, answer, and generative engines find/rank/extract/cite the site? 4-tier funnel, evidence-ranked from the Princeton GEO paper. |
 | 6. Operational | L21–L23 | Observability, vendor risk, onboardability |
 | 7. Strategic & Market | L24–L28, **L33** | Competitive, pricing, marketing copy, personas, wedge sharpness (L28 vetoes UX findings that are intentional wedge). **L33 (v2.21):** does *generated in-product output* match the audience register/jargon + house structure? (actionable content, not strategic-veto) |
 | 8. Growth & Adoption | L29–L30 | Activation, retention loops |
 
 **A7 sub-steps:**
 
-- **A7.0 — Entry.** Bob reads `audit-artifacts/audit-history.json` and proposes a Curated panel (6–10 lenses) based on project profile per `audit-lenses/_selection-rubric.md`. Offers four options: Same / Complementary Curated / **Full Enchilada (all 33)** / Custom. User confirms at `→ HG`.
+- **A7.0 — Entry.** Bob reads `audit-artifacts/audit-history.json` and proposes a Curated panel (6–10 lenses) based on project profile per `audit-lenses/_selection-rubric.md`. Offers four options: Same / Complementary Curated / **Full Enchilada (all 34)** / Custom. User confirms at `→ HG`.
 - **A7.1 — Sequential lens execution.** Each lens in a **fresh Claude Code session** (writer/reviewer pattern). Lens reads prior reports in `audit-artifacts/` to convert ~15% intentional overlap into confirmation, not noise. Each lens writes markdown + JSON sidecar.
 - **A7.2 — Aggregation.** Per `audit-lenses/_aggregation.md`: dedup, honor L28 wedge vetoes, rank by severity × frequency × user-impact, produce `audit-artifacts/audit-summary-{date}.md`.
 - **A7.3 — Fix & Defer.** Replaces prior A7i. Fix Criticals, triage Majors at `→ HG`, register Defers in `audit-log.md` with revisit triggers, log Rejects in `decision-log.md`. L01 Liveness 5xx / function-throws findings remain *always Critical*. PR-back prompt (v2.13) offered.
@@ -136,7 +136,8 @@ A1: Inventory → A2: Map to hierarchy → A3: Code-spec consistency → A4: Ris
 - *Pre-public-launch:* L01-L10, L17, L19, L20, L25, L29 (14)
 - *Quarterly drift check:* L01, L04, L11, L15, L21, L24 (6)
 - *Post-incident:* L01, L04, L10, L21, L22 (5)
-- *Full Enchilada:* all 33 (1–3 hours over multiple sessions)
+- *Full Enchilada:* all 34 (1–3 hours over multiple sessions)
+- *SEO / AI-visibility scrub:* L34, L26, L20, L17, L24 (5) — or L34 alone for a fast single-lens check
 
 A7 can be re-invoked anytime; standard cadence = a Curated panel after each major phase + a Full Enchilada before launch.
 
@@ -246,4 +247,4 @@ If Tier 2-3 skipped during build → MUST run at hardening.
 
 ---
 
-*Core Reference for Build Protocol v2.21 — 2026-05-29*
+*Core Reference for Build Protocol v2.22 — 2026-05-29*
