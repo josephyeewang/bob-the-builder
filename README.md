@@ -1,8 +1,17 @@
-<img src="assets/bob-logo.svg" alt="Bob the Builder logo" width="180" align="right" />
+<table border="0" cellpadding="0" cellspacing="0">
+<tr>
+<td valign="middle">
 
 # Bob the Builder
 
 **A skill that guides you step-by-step to build and audit real products in Claude Code. For non-engineers.**
+
+</td>
+<td valign="middle" align="right" width="220">
+<img src="assets/bob-logo.svg" alt="Bob the Builder logo" width="200" />
+</td>
+</tr>
+</table>
 
 ---
 
