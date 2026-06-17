@@ -90,7 +90,7 @@ Before starting, assess project complexity:
 
 0. **Intake** → 0a: Existing materials check → 0b: Material mapping → 0c: Accelerated start → `→ HG` *(skip if starting from scratch)*
 0.5. **Project Profile (v2.4)** → 0.5a: Classify against Appendix K archetypes → 0.5b: Pull addendum → 0.5c: Tag in Build Manifest → `→ HG`
-1. **Product Spec** → 1a-pre: Structured interview + Day-in-the-life (v2.5) → 1a: Draft (incl. success metrics, activation, non-goals, data classification) → 1b: Stress-test → 1c: Adversarial review → 1d: Stability loop (v2.5) → `→ HG`
+1. **Product Spec** → 1a-pre: Structured interview + Day-in-the-life (v2.5) → 1a: Draft (incl. success metrics, activation, non-goals, data classification) → 1b: Coverage Scan (9-category taxonomy, Clear/Partial/Missing — v2.25) + capped resolution + Stress-test → 1c: Adversarial review → 1d: Stability loop (v2.5) → `→ HG`
 2. **Behavioral Core** (AI only) → 2a: Draft → 2b: Stress-test → 2c: Adversarial review → 2d: Eval harness → `→ HG` — use `templates/behavioral-core.md` and `templates/eval-set.md`
 3. **Architecture Contract** → 3a-pre: Reference Scan (v2.16 — scan 5-10 OSS repos, bias-toward-Reject, Adopts must name insertion point) → 3a: Draft (incl. threat model, observability plan, rollback posture, cost guardrail, a11y/i18n/compliance posture v2.4) → 3b: Adversarial review → `→ HG`
 4. **Domain Specs** → 4a-pre: Breadboarding sketch (v2.7) → 4a: Identify subsystems → 4b: Write + machine-readable `contracts/` + cross-reference → 4c: Adversarial review → `→ HG`
@@ -247,4 +247,4 @@ If Tier 2-3 skipped during build → MUST run at hardening.
 
 ---
 
-*Core Reference for Build Protocol v2.24 — 2026-05-29*
+*Core Reference for Build Protocol v2.25 — 2026-06-16*

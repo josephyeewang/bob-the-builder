@@ -101,6 +101,22 @@ The companion `audit-log.md` records *deferred* items (Defer verdicts that may s
 
 ---
 
+### D-006: From the Spec Kit `/clarify` scan, Bob adopts the coverage taxonomy only — not ID-traceability or CLI machinery
+
+- **Date:** 2026-06-16
+- **Status:** Accepted
+- **Context:** v2.25 (evolution 003) harvested GitHub Spec Kit's `/clarify` command after a Bob-vs-Spec-Kit deep comparison. `/clarify` bundles four mechanisms: (1) a fixed ambiguity taxonomy, (2) capped recommended-default questioning, (3) incremental write-back, and (4) — via the sibling `/analyze` command — stable `FR-###`/`SC-###` requirement IDs mapped to tasks for zero-coverage detection. Spec Kit also ships a `specify` CLI with self-upgrade and a YAML extension-hook system.
+- **Decision:** Bob adopts mechanisms (1)–(3) into Step 1b (the Coverage Taxonomy + capped resolution + write-back to existing artifacts). Bob does **NOT** adopt: the FR/SC ID-traceability + task-coverage map, nor any CLI / extension-hook / self-upgrade machinery.
+- **Alternatives considered:**
+  - *Adopt FR-###/SC-### IDs with a task-coverage map.* Rejected — Bob already covers requirement→phase→test traceability via `templates/capability-traceability-matrix.md` (Step 5a), the L02 Spec-Fidelity lens, and mandatory Reconciliation. Adding a parallel ID scheme in Step 1b would be two sources of truth for the same concept — a direct Single-Source-of-Truth violation and exactly the kind of sprawl the v2.17 meta-finding warns against.
+  - *Adopt the `specify`-style CLI + extension hooks.* Rejected — this is **distribution machinery, not methodology**. Bob is a prose-driven Claude Code skill for one non-engineer; a versioned CLI with pluggable YAML hooks solves a multi-agent-portability / community-contribution problem Bob doesn't have. This is the same call as F35 (sharded rules, D-004): the mechanism scan can surface it, the human still rejects it.
+- **Consequences:**
+  - Step 1b gains a coverage *checklist* but not a coverage *ledger* — there is no machine-checkable "every requirement has a task" gate at spec time. That gate lives later (Step 5a matrix + Reconciliation), by design. If a future project shows requirements silently dropping between spec and build *despite* the matrix, revisit whether ID-tagging at Step 1b would help — but only as a supersession of this ADR, not a quiet addition.
+  - Bob stays CLI-free and low-infrastructure (consistent with D-003). If Bob is ever productized for external users (the "Bob as a public tool" question), Spec Kit's CLI/extension model is the documented blueprint to revisit — but that is a strategic decision outside any single evolution.
+- **Revisit trigger:** (a) requirements demonstrably leak between spec and build despite the Step 5a matrix; or (b) a deliberate decision to make Bob a public, multi-agent-portable product.
+
+---
+
 ## Anti-pattern reminder
 
 ADRs that describe the decision without consequences are useless. The Consequences section is where future-you discovers why the seemingly clever shortcut is the thing now blocking a new requirement. Every decision in this file has a Consequences block — keep it that way.

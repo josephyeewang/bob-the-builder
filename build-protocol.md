@@ -806,14 +806,36 @@ This walkthrough surfaces unstated assumptions ("oh wait, they're driving when t
 - `→ HG:` Human reviews, iterates until satisfied with the draft
 
 **1b: Stress-Test**
-- Claude pressure-tests the spec:
+
+**1b-i: Coverage Scan (v2.25 — fixed taxonomy).** Before the open-ended pass, Claude runs the spec through a fixed **9-category Spec Coverage Taxonomy** and marks each category **Clear / Partial / Missing** against the drafted spec. The open-ended stress-test below catches *non-obvious* gaps; this checklist guarantees the *structural-but-unglamorous* ones can't silently fall through. Many categories will already be **Clear** from 1a-pre + 1a — that's expected; the value is forcing a conscious verdict on each.
+
+| # | Category | A "Missing"/"Partial" verdict means the spec doesn't pin down… |
+|---|----------|----------------------------------------------------------------|
+| 1 | **Functional scope & roles** | core user goals or the distinction between actor types/roles |
+| 2 | **Domain & data model** | key entities, identity/uniqueness rules, **lifecycle/state transitions**, scale assumptions |
+| 3 | **Interaction & flow** | critical journeys, **error/empty/loading states**, accessibility/i18n notes |
+| 4 | **Non-functional targets** | performance / reliability / observability / security / compliance targets (and whether they're *quantified*) |
+| 5 | **Integrations & failure modes** | for each external service: its **failure behavior** (timeout, 429, outage, partial data) |
+| 6 | **Edge cases & conflict resolution** | negative scenarios, rate limits, **concurrent / conflicting actions** |
+| 7 | **Constraints & rejected alternatives** | hard constraints, and options explicitly considered-and-rejected |
+| 8 | **Terminology consistency** | a canonical term per concept (no concept named two ways) |
+| 9 | **Completion signals** | testable acceptance criteria; vague adjectives ("fast", "intuitive", "robust") converted to measurable targets |
+
+Output the coverage map (a 9-row Clear/Partial/Missing table) only if any category is Partial/Missing; if all are Clear, state that in one line and move on.
+
+**1b-ii: Resolve Partial/Missing (capped questioning).** For each Partial/Missing category whose resolution would *materially* change architecture, data model, scope, scenarios, or build sequencing, Claude asks a **targeted clarification question** — **one at a time, maximum 5 total**, prioritized by (Impact × Uncertainty). Each question leads with a **recommended default + one line of reasoning** (so the user can reply "yes" to accept, pick a lettered option, or give a ≤5-word answer) — keeping the non-coder ergonomics of Narrator Mode rather than a wall of questions. Categories whose ambiguity wouldn't change the build are noted as Deferred, not asked. (This is a focused gap-closer, not a second interview — if more than 5 categories are unresolved, that's a signal the spec is too thin and 1a-pre should be revisited.)
+
+**1b-iii: Open-ended stress-test.** Claude pressure-tests the spec on the non-checklist dimensions:
   - Logical gaps (capability X requires capability Y, but Y isn't listed)
   - Scope clarity (is each capability clearly MVP vs later?)
   - User scenario coverage (do scenarios cover happy path + key edge cases?)
   - Constraint realism (is this buildable within stated constraints?)
   - Missing economics (what's the cost per user? Per AI call? Per message?)
-- Present findings as a numbered list
+- Present all findings (coverage-scan + open-ended) as a single numbered list.
+- Resolutions fold into `product-spec.md`; non-trivial decisions log to `docs/decision-log.md`.
 - `→ HG:` Human reviews, resolves each finding
+
+> **Distinctness (anti-sprawl).** The Coverage Scan is a *spec-phase* instrument — "does the spec **say** enough?" It is orthogonal to **L31 Input & Data-Flow Trace** (traces one input through *built code*, post-build) and **L02 Spec Fidelity** (checks *code matches spec*, post-build). It does not duplicate the `capability-traceability-matrix` (requirement→phase→test mapping) — that's Step 5a. See `evolutions/003-clarify-coverage-taxonomy/`.
 
 **1c: Adversarial Review**
 - Claude performs a self-adversarial review of the Product Spec by adopting an explicitly critical stance:
