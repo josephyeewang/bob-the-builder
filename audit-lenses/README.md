@@ -1,6 +1,6 @@
 # Bob Audit Lens Library (v2.22)
 
-> **34 ready-made audit prompts across 8 bands.** Loaded once, locked-and-loaded for every project Bob audits. Bob picks the panel based on project profile; the user picks Curated or Full Enchilada at the entry gate.
+> **36 ready-made audit prompts across 8 bands.** Loaded once, locked-and-loaded for every project Bob audits. Bob picks the panel based on project profile; the user picks Curated or Full Enchilada at the entry gate.
 
 ## Why this exists
 
@@ -8,7 +8,7 @@ Single audits are 90% effective and always miss some %. Different lenses catch *
 
 Empirical anchor: the DLL audits run 2026-05-23 produced three categorically distinct lens taxonomies (spec-vs-built, capability quality, UX journey). The UX lens alone surfaced findings no engineering audit could catch — silent system actions damaging trust, capability invisibility, triple-SMS in 5 seconds, no recovery path. v2.17 codifies this multi-lens reality into Bob's protocol.
 
-## The 8 bands and 34 lenses
+## The 8 bands and 36 lenses
 
 | Band | # | Lens | Question it answers |
 |---|---|---|---|
@@ -28,6 +28,7 @@ Empirical anchor: the DLL audits run 2026-05-23 produced three categorically dis
 | | L13 | AI Interaction (HAX) & Safety | HAX 18 guidelines + jailbreak resistance + prompt injection + refusal calibration. |
 | | L14 | AI Cost & Latency Efficiency | Token bloat, caching hit rate, batching, streaming, cascading. |
 | | L32 | Analytical Method Soundness | Is the *method* behind a score/diagnosis/recommendation sound — right inputs, defensible weights, valid assumptions, real depth? Covers AI **and** deterministic logic. (SR 11-7 conceptual soundness) |
+| | L36 | AI-Forward / AI-Native | Is the product built AROUND an AI core (LLM-native UX, agents, RAG, structured generation, eval-driven dev, self-improving loops) — or a spec a great *pre-LLM* PM would have written, with AI bolted on? Pushes the AI-forward version unprompted. (Rule 19 — v2.27) |
 | **4. Performance Economics** | L15 | Cost & Speed Drivers | What's driving cost and latency, AND where should we deliberately add cost/time for effectiveness? |
 | | L16 | Effectiveness & Quality Drivers | What's driving outcomes the user cares about? Where's the leverage and the leakage? |
 | **5. Reach & Distribution** | L17 | Device & Form Factor | Desktop / mobile / tablet — does it actually work on a phone? |
@@ -44,10 +45,11 @@ Empirical anchor: the DLL audits run 2026-05-23 produced three categorically dis
 | | L27 | Persona Simulation | What would a doctor / Notion power-user / privacy-paranoid say? |
 | | L28 | Strategic Edge & Wedge Sharpness | Are we sharpening our wedge or sanding it off? The anti-convergence audit. |
 | | L33 | Output Register & Audience Fit | Does the product's *generated* output (diagnoses, recommendations, insights) match the audience register/jargon level and house structure (e.g. answer-first, labeled takeaways)? (ISO 24495 + Minto) |
+| | L35 | Capability Preservation (Guardrail-Neuter Check) | Do the product's own guardrails / rigor / examples neuter its differentiating *capability*? The functional complement to L28 — constraints belong at the communication layer not the capability layer; vocabularies open; notability un-suppressed; usefulness felt. (Rule 15 — v2.26) |
 | **8. Growth & Adoption** | L29 | Onboarding & Activation | TTFV, aha-moment, drop-off mapping, activation-rate. |
 | | L30 | Retention & Compounding Loops | Hook model, growth loops, network effects, churn surfaces. |
 
-> **IDs are append-only, not band-sorted.** L01–L30 happen to be band-ordered (they shipped together in v2.17); lenses added later (L31 Band 1, L32 Band 3, L33 Band 7 — v2.21; L34 Band 5 — v2.22) keep the next free ID and declare their band in frontmatter rather than forcing a renumber. Group by the `band:` field, not by ID arithmetic.
+> **IDs are append-only, not band-sorted.** L01–L30 happen to be band-ordered (they shipped together in v2.17); lenses added later (L31 Band 1, L32 Band 3, L33 Band 7 — v2.21; L34 Band 5 — v2.22; L35 Band 7 — v2.26; L36 Band 3 — v2.27) keep the next free ID and declare their band in frontmatter rather than forcing a renumber. Group by the `band:` field, not by ID arithmetic.
 
 ## How each lens file is structured
 
@@ -128,7 +130,7 @@ source_frameworks: [list with URLs]
 | Mode | What it does | When to use |
 |---|---|---|
 | **Curated Panel** | Bob picks 6-10 lenses targeted to where you are (e.g., DLL pre-launch profile → L01, L02, L03, L04, L05, L07, L08, L10, L13). One-line justification for each include AND each exclude. | Default. Mid-build checkpoints, post-evolution validation, periodic pulse audits. |
-| **Full Enchilada** | All 34 lenses run sequentially. No curation. | Major milestones: pre-launch, major version bumps, post-incident comprehensive review, investor/partner/user hand-off. Runtime: 1-3 hours of Claude work, often multi-session. |
+| **Full Enchilada** | All 36 lenses run sequentially. No curation. | Major milestones: pre-launch, major version bumps, post-incident comprehensive review, investor/partner/user hand-off. Runtime: 1-3 hours of Claude work, often multi-session. |
 
 ## Audit memory entry
 
@@ -139,7 +141,7 @@ Every audit run is logged in `audit-artifacts/audit-history.json` (machine) + `a
 > *Four options:*
 > 1. **Same Curated** — re-run the same M lenses, check what changed.
 > 2. **Complementary Curated** — Bob picks M lenses you *haven't* run yet (broadens coverage; recommended if you ran the same panel <30 days ago).
-> 3. **Full Enchilada** — all 34 lenses, the rocketship-launch scrub.
+> 3. **Full Enchilada** — all 36 lenses, the rocketship-launch scrub.
 > 4. **Custom** — tell Bob which lenses (by number or band)."*
 
 You never need to remember a command. Default-recommended option depends on context (see `_audit-memory.md` for the logic).
@@ -179,4 +181,4 @@ The library consolidates convergent angles from:
 
 ## Version
 
-Lens library v2.24 — 2026-05-29 (34 lenses; L34 internal+external axes made co-equal + external-execution mandated). Prior: v2.23 (L34 Audit→Action-Plan + opportunity discovery), v2.22 (34; L34 added), v2.21 (33; L31–L33), v2.17 (30, original). Each lens prompt is version-controlled and revised via standard Bob EVOLVE cycles. Lens additions or significant rewrites bump the library minor version; lens removals require a Decision Log entry.
+Lens library v2.27 — 2026-06-18 (36 lenses; **L36 AI-Forward / AI-Native added** — pushes the AI-native version of every spec, Rule 19). Prior: v2.26 (35; **L35 Capability Preservation / Guardrail-Neuter Check** — the functional anti-neuter complement to L28; both from the InsiderIntent build). Prior: v2.24 — 2026-05-29 (34 lenses; L34 internal+external axes made co-equal + external-execution mandated). Prior: v2.23 (L34 Audit→Action-Plan + opportunity discovery), v2.22 (34; L34 added), v2.21 (33; L31–L33), v2.17 (30, original). Each lens prompt is version-controlled and revised via standard Bob EVOLVE cycles. Lens additions or significant rewrites bump the library minor version; lens removals require a Decision Log entry.

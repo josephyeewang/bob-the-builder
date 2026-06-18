@@ -4,7 +4,7 @@
 
 ## Why audit memory matters
 
-The realistic UX: Joe types "let's audit DLL" or invokes AUDIT mode. He does NOT remember which lenses ran last time. He does NOT want to choose from a 34-lens menu cold. He wants Bob to remind him + offer sensible choices.
+The realistic UX: Joe types "let's audit DLL" or invokes AUDIT mode. He does NOT remember which lenses ran last time. He does NOT want to choose from a 36-lens menu cold. He wants Bob to remind him + offer sensible choices.
 
 This document defines:
 1. The audit-history file format
@@ -136,7 +136,7 @@ Skipped lenses (most relevant):
    {recommended if drift check}
 2. **Complementary Curated** — {Panel name} or Bob picks {N} lenses you haven't run
    {recommended if recent same-panel}
-3. **Full Enchilada** — all 34 lenses, the rocketship-launch scrub
+3. **Full Enchilada** — all 36 lenses, the rocketship-launch scrub
    {recommended if milestone}
 4. **Custom** — tell me which lenses (by number or band)
 
@@ -167,7 +167,7 @@ Based on project profile ({profile keywords}), I'd recommend **{Panel X — N le
 **Three options:**
 
 1. **Curated** — {N} lenses targeted to where you are
-2. **Full Enchilada** — all 34 lenses, the comprehensive scrub
+2. **Full Enchilada** — all 36 lenses, the comprehensive scrub
 3. **Custom** — specify lenses
 
 **Bob's recommendation: Curated**
@@ -206,7 +206,7 @@ Skipped this round (most relevant):
 
 **Three options:**
 1. **Curated** — 9 lenses above
-2. **Full Enchilada** — all 34
+2. **Full Enchilada** — all 35
 3. **Custom**
 
 **Recommendation: Curated (first audit, focus on foundation + UX + AI safety)**
