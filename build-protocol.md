@@ -1217,7 +1217,23 @@ After the script runs, Claude:
 - Set up hosting/deployment (if applicable)
 - Initialize project memory directory
 
-**Auto-advance (v2.5):** repo init is mechanical and reversible. Claude reports as a status update ("Repo initialized at `<path>`, pushed to `<url>`, `.env.example` written with [N] variables documented.") and proceeds to Step 7 without a separate Human Gate. If the human needs to add custom files or change folder structure, they say so at this point; the default is to flow through.
+**Auto-advance (v2.5):** repo init is mechanical and reversible. Claude reports as a status update ("Repo initialized at `<path>`, pushed to `<url>`, `.env.example` written with [N] variables documented.") and proceeds to **Step 6.5 (the Pre-Build Review Gate)** — NOT straight to Step 7.
+
+### Step 6.5: 🛑 Pre-Build Review Gate (v2.28 — MANDATORY; Rule 22)
+
+The transition from *design* (all spec docs complete) to *build* (first line of product code) is the highest-stakes, least-reversible boundary in the protocol, and the one most easily skated past on momentum. **It gets its own deliberate stop, every time — never auto-advanced.** Two parts, in order:
+
+**6.5a — Machine audit (fresh-context, multi-lens), BEFORE any code.** Do not defer this to the post-build hardening audits (Step N+1) — those are too late to catch a bad foundation or a mis-sequenced plan. Run an independent panel (fresh-context subagents, archetype-cast per Appendix K) over the COMPLETE document set + the build plan. Minimum lenses, always including:
+1. **Internal consistency & drift** — names, capability IDs, version numbers, dropped/orphaned concepts, contradictions across all docs, spec↔code drift, decision-log integrity (the EMBT/DLL hallucination/mutation/regression class).
+2. **Foundation-first sequencing** — is the build order laying a clean, reusable foundation (data layer, canonical model, adapters, quality, analytical core) before surfaces/agents/productization — or rushing to a visible MVP-for-its-own-sake?
+3. **Completeness / table-stakes-in-the-plan** — auth, billing/pricing, security, privacy/compliance, ops/support present *in the plan* (even if built much later), so nothing essential is forgotten.
+4. **Data-quality / integrity** (any data product) — is ingest/processing/aggregation actively pressure-tested and self-checking, not assumed-correct? (garbage-in → garbage-out is a foundation risk.)
+5. **Domain-expert POV** — the archetype's expert seats (e.g. quant/data-engineer/security for a fintech-data product).
+6. **AI-nativity** (L36, if AI-forward) — is the infra AI-native/AI-advantaged and is AI actually at work in the processing layer + front-end, with the deterministic boundary correctly drawn?
+
+Aggregate → a written findings doc + a triaged fix list. Apply clear-win fixes; surface judgment-calls for the human.
+
+**6.5b — Human recap & sign-off (`→ HG`, HARD — affirmative approval required).** Present a **plain-language recap for the non-engineer**: what the product *is*; what will be built and in what order (the phase plan); the key decisions made (and any reversed); the open decisions that need them; and the machine-audit's top findings + what changed. Then explicitly invite: *"This is your review-and-tweak gate before we write code — anything to change, cut, add, or resequence?"* **Do not proceed to Step 7 until the user has actively reviewed and approved.** Silence, or a generic earlier "continue/proceed/build," does NOT count — the gate requires its own affirmative sign-off. *(Origin: the InsiderIntent dogfood slid straight from spec into build with no intentional stop, no machine audit, and no human recap — the founder had to catch it and call the audit himself.)*
 
 ### Steps 7+: Build Phases
 

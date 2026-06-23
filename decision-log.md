@@ -6,6 +6,18 @@ The companion `audit-log.md` records *deferred* items (Defer verdicts that may s
 
 ---
 
+### D-002: A mandatory Pre-Build Review Gate (machine audit + human sign-off) before any product code
+
+- **Date:** 2026-06-23
+- **Status:** Accepted (v2.28)
+- **Context:** The InsiderIntent dogfood exposed a serious protocol hole: Bob ran Steps 1–6 (all five spec docs, including a thorough spec, behavioral core, architecture contract, domain specs, build manifest) and then **slid straight into writing product code with no intentional stop** — no fresh-context machine audit of the whole doc-set/plan, and no plain-language human recap/sign-off. The founder had to notice ("are we already in build phase? did we do a full audit of the build plan?") and call the audit himself. That audit then found real bugs in the just-written code (a tautological data-quality check, a wedge-signal miscount) AND structural plan gaps (no engagement-observation gate, mis-sequenced phases) — exactly the class of problem a pre-build gate exists to catch *before* code. The spec→code boundary is the least-reversible transition in the protocol; mistakes there compound through every later phase, and the post-build hardening audits (Step N+1) are too late.
+- **Decision:** Add **Rule 22 + Step 6.5 — a MANDATORY Pre-Build Review Gate**: (a) a fresh-context, multi-lens **machine audit** of the complete document set + build plan (consistency/drift, foundation-first sequencing, table-stakes-in-plan, data-quality, domain-expert POV, AI-nativity) producing a written findings doc, run *before* the first line of product code; and (b) an affirmative **human recap & sign-off** — a plain-language recap of what will be built, the phase plan, decisions, open questions, and audit findings, with an explicit invitation to review/tweak. Build (Step 7) cannot begin until the user affirmatively approves; a generic earlier "continue/proceed" does not count. **The gate is announced to the user up front at mode selection** so they expect a deliberate stop before building.
+- **Alternatives considered:**
+  - *Rely on the existing per-phase reconcile + the post-build hardening audits.* Rejected — those are mid/post-build; they cannot prevent a bad foundation or a mis-sequenced plan from being built in the first place. The whole point is to catch it before code.
+  - *Make it a soft recommendation rather than a hard rule.* Rejected — the failure mode is precisely momentum overriding good intentions ("the specs feel done, the user said proceed"). Only a hard, announced, affirmative-approval gate resists it.
+  - *Fold it into Step 6 (Project Setup) auto-advance.* Rejected — auto-advance is what caused the slide. The gate must be a deliberate, non-auto-advanced stop.
+- **Consequences:** Every NEW build now has one unmissable, plain-language review checkpoint before code — the non-engineer's real chance to review/tweak the entire plan. Adds one gate; removes a whole class of foundation-and-sequencing mistakes. AUDIT mode's lens library is reused for 6.5a (no new machinery). Origin retro: `retros/insiderintent-dogfood-2026-06-18.md` (extended).
+
 ### D-001: Bob does not adopt influence patterns from Plandex / Roo Code / goose / Continue.dev
 
 - **Date:** 2026-05-20
