@@ -6,6 +6,18 @@ The companion `audit-log.md` records *deferred* items (Defer verdicts that may s
 
 ---
 
+### D-007: The Build-Integrity Loop — milestone audits are push-not-pull; the build never forgets (Rule 24)
+
+- **Date:** 2026-06-24
+- **Status:** Accepted (v2.30)
+- **Context:** A continuation of the D-006 insight, generalized. Across a single InsiderIntent session the founder had to *manually* trigger: three cross-doc coherence audits (D-073/074/078), a 4-seat effectiveness panel ("given modern AI, is this the right capability set?"), a robustness sweep (signal symmetry / input-weighting / backend auditability), and a real-world benchmark (does our spec match/beat a real hedge-fund-13F writeup?). Each was high-value and each surfaced real gaps — but **every one was pull-based**: Bob had the capabilities (the A7 lens library, the Independent Audit Panel, Rule 20's unknown-unknowns sweep, the Reconcile/Phase-Gate/CTM machinery) yet they were **advisory**, so the non-engineer was the scheduler. Worse, nothing systematically guarded against *forgetting* — a capability planned in P1 or a binding decision (e.g. "no LLM numbers", "off-the-shelf-first") could silently drift by a later phase, invisible until someone re-read everything. Joe: *"how do we upgrade bob so these iterations happen automatically… do we have proper steps that ensure we build step-by-step, recursive audits at each milestone, propagate findings, and don't forget earlier steps or core decisions?"*
+- **Decision:** Add **Rule 24 — the Build-Integrity Loop**, which makes the existing cadence **enforced + push-based** (not new parallel machinery — it *connects and enforces* Reconcile / Phase Gate / CTM / decision-log / A7 / Rule-23): **(a)** a **trigger→audit map** (doc-edit → coherence sweep · phase-boundary → Anti-Forgetting Gate + mandatory Curated lens panel · named-gate → effectiveness panel re-fired + Rule-20 expert-demand checklist + real-world benchmark + full coherence audit), tracked in `audit-ledger.json` that **gate-blocks** until done-or-deferred-with-reason; **(b)** an **Anti-Forgetting Gate** at every phase boundary that mechanically re-checks CTM-diff (no capability silently dropped), decision-honor (build still honors every live decision), and finding-propagation (findings scanned backward); **(c)** tooling — `coherence-check.sh` gains a **class-7 code/contract scan** (closing the .md-only blind spot that let `event.ts` and `schema.sql` drift) and is wired as a **git pre-commit hook**. Rule 20 gains a real-world-benchmark frame + a "re-run at each milestone" clause.
+- **Alternatives considered:** (1) *Leave the cadence advisory and rely on the human* — rejected: that IS the failure mode (the founder-as-scheduler). (2) *A heavyweight always-on agent that re-audits everything every turn* — rejected as over-build (Rule 16/17) and token-ruinous; the right shape is *triggered* audits scoped to the milestone, mechanical-first. (3) *Make the script fully verify contracts-match-spec* — rejected: that's semantic (the script can't know the spec says "Event gains X"); the honest division is script-harvests-mechanical (retired terms, §-refs, contiguity) + a gate-prompt for the human/AI to reconcile the semantic rest.
+- **Dogfood note:** the class-7 scan, run once on InsiderIntent, immediately found a stale `§2.4` and a dropped-`@ai-spine-core` residue in `contracts/schema.sql` that three prior `.md`-only coherence audits had all missed — validating both the gap and the fix.
+- **Origin:** Joe, InsiderIntent build, 2026-06-24.
+
+---
+
 ### D-006: Living-doc coherence is a triggered, mechanical sweep (Rule 23 + coherence-check.sh)
 
 - **Date:** 2026-06-24

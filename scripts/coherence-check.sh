@@ -153,12 +153,47 @@ for d in "${DOCS[@]}"; do
 done
 echo "  (⚠ = consider a '📸 snapshot — not a living doc' banner; not a hard fail)"
 
+# ── Class 7: code / SSOT drift (Rule 24, v2.30) — the .md-only sweep's blind spot ──
+# Docs aren't the only source of truth: machine-readable contracts (contracts/*.ts,
+# *.sql, *.json) and schema files drift from the spec too (e.g. a stale "§2.4" comment
+# or a missing field the spec says the type "carries"). The script can't verify
+# "the type matches the spec" semantically — but it CAN scan code for the same
+# retired-terms + surface its doc-section (§) references for the reader to reconcile.
+echo
+echo "── [7] Code / contract SSOT scan (contracts/ + *.ts/*.sql) — reconcile against the spec ──"
+CODE_DIR="$(dirname "$DOCS_DIR")/contracts"
+[ -d "$CODE_DIR" ] || CODE_DIR="$DOCS_DIR/../contracts"
+if [ ! -d "$CODE_DIR" ]; then
+  echo "  (no sibling contracts/ dir found — skipped; pass a project with machine-readable contracts to enable)"
+else
+  CODE_FILES=()
+  while IFS= read -r f; do CODE_FILES+=("$f"); done < <(find "$CODE_DIR" -maxdepth 2 \( -name '*.ts' -o -name '*.sql' -o -name '*.js' -o -name '*.py' -o -name '*.json' \) | sort)
+  if [ "${#CODE_FILES[@]}" -eq 0 ]; then
+    echo "  (contracts/ has no .ts/.sql/.js/.py/.json files)"
+  else
+    echo "  scanning ${#CODE_FILES[@]} contract/code file(s)…"
+    # 7a — retired-term residue in code (reuse the same list)
+    if [ -f "$RETIRED_CFG" ]; then
+      while IFS= read -r term; do
+        [ -z "$term" ] && continue; case "$term" in \#*) continue;; esac
+        hits=$(grep -niE -- "$term" "${CODE_FILES[@]}" 2>/dev/null | grep -viE -- "$RETIRE_CTX")
+        [ -n "$hits" ] && { echo "  · retired term '$term' in code:"; echo "$hits" | sed 's/^/      /' | cut -c1-150; }
+      done < "$RETIRED_CFG"
+    fi
+    # 7b — doc-section (§) refs inside code comments: list for the reader to reconcile
+    SREFS=$(grep -rhoE '§[0-9][0-9A-Za-z.]*( invariant [0-9]+)?' "${CODE_FILES[@]}" 2>/dev/null | sort | uniq -c | sort -rn | awk '{printf "%s ", $2}')
+    [ -n "$SREFS" ] && echo "  · §-refs in code (verify each still resolves to a real spec section): $SREFS"
+    echo "  ⚠ REMINDER (Rule 24 Anti-Forgetting Gate): the script can't verify a contract MATCHES the spec —"
+    echo "    at each phase/gate, reconcile contracts/ against the spec it implements (the event.ts class of drift)."
+  fi
+fi
+
 echo
 echo "════════════════════════════════════════════════════════════════"
 if [ "$FAIL" -ne 0 ]; then
   echo " RESULT: ✗ hard problems found (contiguity and/or retired-term residue)."
 else
-  echo " RESULT: ✓ no mechanical drift. Review ⚠ items + judge §/D targets semantically."
+  echo " RESULT: ✓ no mechanical drift. Review ⚠ items + judge §/D targets + reconcile contracts semantically."
 fi
 echo "════════════════════════════════════════════════════════════════"
 exit "$FAIL"

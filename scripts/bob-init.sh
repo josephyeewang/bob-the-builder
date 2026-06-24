@@ -303,6 +303,30 @@ else
 fi
 
 # ──────────────────────────────────────────────────────────────────────
+# 7b. Coherence pre-commit hook (Rule 23/24 — push, not pull)
+# ──────────────────────────────────────────────────────────────────────
+# Runs the mechanical coherence sweep on every commit once docs/ exists, so
+# living-doc + contract drift is caught automatically (the non-engineer never
+# has to remember to run it). Non-blocking-friendly: it only hard-fails on a
+# decision-log contiguity gap or retired-term residue.
+if [[ -d .git ]] && [[ ! -f .git/hooks/pre-commit ]]; then
+  echo "🪝 Installing coherence pre-commit hook (Rule 24)..."
+  cat > .git/hooks/pre-commit <<EOF
+#!/usr/bin/env bash
+# Bob the Builder — coherence sweep on commit (Rule 23/24). Skip with: git commit --no-verify
+SWEEP="$BOB_ROOT/scripts/coherence-check.sh"
+[ -d docs ] && [ -x "\$SWEEP" ] || exit 0
+"\$SWEEP" docs || {
+  echo "✗ Bob coherence sweep failed (decision-log gap or retired-term residue)."
+  echo "  Fix it, or bypass once with: git commit --no-verify"
+  exit 1
+}
+EOF
+  chmod +x .git/hooks/pre-commit
+  echo "✓ pre-commit hook installed (bypass with --no-verify)."
+fi
+
+# ──────────────────────────────────────────────────────────────────────
 # Done
 # ──────────────────────────────────────────────────────────────────────
 echo ""
