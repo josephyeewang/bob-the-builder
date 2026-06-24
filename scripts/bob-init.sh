@@ -305,23 +305,39 @@ fi
 # ──────────────────────────────────────────────────────────────────────
 # 7b. Coherence pre-commit hook (Rule 23/24 — push, not pull)
 # ──────────────────────────────────────────────────────────────────────
-# Runs the mechanical coherence sweep on every commit once docs/ exists, so
-# living-doc + contract drift is caught automatically (the non-engineer never
-# has to remember to run it). Non-blocking-friendly: it only hard-fails on a
-# decision-log contiguity gap or retired-term residue.
-if [[ -d .git ]] && [[ ! -f .git/hooks/pre-commit ]]; then
-  echo "🪝 Installing coherence pre-commit hook (Rule 24)..."
-  cat > .git/hooks/pre-commit <<EOF
-#!/usr/bin/env bash
-# Bob the Builder — coherence sweep on commit (Rule 23/24). Skip with: git commit --no-verify
-SWEEP="$BOB_ROOT/scripts/coherence-check.sh"
-[ -d docs ] && [ -x "\$SWEEP" ] || exit 0
-"\$SWEEP" docs || {
-  echo "✗ Bob coherence sweep failed (decision-log gap or retired-term residue)."
-  echo "  Fix it, or bypass once with: git commit --no-verify"
-  exit 1
-}
+# Runs the mechanical coherence sweep on every commit, so living-doc + contract
+# drift is caught automatically (the non-engineer never has to remember to run
+# it). Hard-fails only on a decision-log contiguity gap / retired-term / contract
+# drift. ⚠ Respects a global core.hooksPath — a per-repo .git/hooks/pre-commit is
+# IGNORED when one is set (common: a global gitleaks hook). In that case we CHAIN
+# into the global hook, guarded so it no-ops in every non-Bob repo.
+BOB_HOOK_GUARD='# Bob coherence sweep (Rule 23/24) — no-ops outside a Bob project'
+GLOBAL_HOOKS="$(git config --get core.hooksPath || true)"
+COHERENCE_BLOCK="$(cat <<EOF
+
+$BOB_HOOK_GUARD
+__BOB_SWEEP="$BOB_ROOT/scripts/coherence-check.sh"
+if [ -f docs/build-manifest.md ] && [ -x "\$__BOB_SWEEP" ]; then
+  "\$__BOB_SWEEP" docs || { echo "✗ Bob coherence sweep failed — fix, or bypass once: git commit --no-verify"; exit 1; }
+fi
 EOF
+)"
+if [[ -n "$GLOBAL_HOOKS" ]]; then
+  GLOBAL_HOOKS_EXPANDED="${GLOBAL_HOOKS/#\~/$HOME}"
+  GLOBAL_PC="$GLOBAL_HOOKS_EXPANDED/pre-commit"
+  if [[ -f "$GLOBAL_PC" ]] && grep -q "Bob coherence sweep" "$GLOBAL_PC" 2>/dev/null; then
+    echo "✓ Coherence sweep already chained into the global hook ($GLOBAL_PC)."
+  else
+    echo "🪝 A global core.hooksPath is set ($GLOBAL_HOOKS) — per-repo hooks are ignored."
+    echo "   ACTION: chain the coherence sweep into $GLOBAL_PC by appending this (it no-ops outside Bob projects):"
+    echo "─────────────────────────────────────────────────────────────────"
+    echo "$COHERENCE_BLOCK"
+    echo "─────────────────────────────────────────────────────────────────"
+    echo "   (Bob does not auto-edit your global/shared hook — paste it in once, before the final 'exit 0'.)"
+  fi
+elif [[ -d .git ]] && [[ ! -f .git/hooks/pre-commit ]]; then
+  echo "🪝 Installing coherence pre-commit hook (Rule 24)..."
+  printf '#!/usr/bin/env bash\n%s\n' "$COHERENCE_BLOCK" > .git/hooks/pre-commit
   chmod +x .git/hooks/pre-commit
   echo "✓ pre-commit hook installed (bypass with --no-verify)."
 fi
