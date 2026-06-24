@@ -6,6 +6,17 @@ The companion `audit-log.md` records *deferred* items (Defer verdicts that may s
 
 ---
 
+### D-006: Living-doc coherence is a triggered, mechanical sweep (Rule 23 + coherence-check.sh)
+
+- **Date:** 2026-06-24
+- **Status:** Accepted (v2.29)
+- **Context:** The InsiderIntent dogfood exposed a *recurring* version of the drift problem. Two consecutive sessions each needed a **manual** full cross-doc sync audit: D-073 ("propagate D-058→D-072 everywhere") and then D-074, which caught drift D-073's own grep-sweep missed (the Ask-AI tier was renumbered P4→P6 by the robust-first roadmap, propagated everywhere *except* the Behavioral Core; plus a dangling `§2.4` cross-ref, version-summary lag, and index docs still saying "synced through D-072"). The human had to *notice* the drift and *call* the audit both times. Bob already had the concept (Pre-Build-Gate 6.5a lens 1 "internal consistency & drift"; the spec-phase consolidation pass), but it was **pull-based** (fires at a gate or on a growth trigger) and **manual** (hand-grepping), so a living spec set silently accumulates drift between gates and the non-engineer ends up being the drift detector. Joe: *"seems like I'm manually doing a lot of checks and edits that should be part of the Bob NEW build process."* (Bob's own docs had the same disease — the full-protocol rule list stops at 15 while 16–22 live only in the core ref; its changelog table stops at v2.16.)
+- **Decision:** Add **Rule 23 + `scripts/coherence-check.sh`**. Coherence becomes **push-based and tooled**: (a) any change to a *shared identifier* restated across docs (version number, phase ID, decision ID, capability/subsystem code, section anchor §) must propagate to every reference in the *same* edit; (b) a **Coherence Sweep** runs on a trigger — every living-doc version bump, every decision-log entry, every phase/code renumber, and as Pre-Build-Gate lens 1 — invoking the script *first* so the human never hand-greps. The script (macOS bash-3.2-portable, zero deps) harvests the mechanical drift classes (decision-log contiguity + highest-ID-vs-"synced-through" claims, version-string drift, §/D/P cross-ref inventory, snapshot-filtered retired-term residue, dated docs missing a snapshot banner), hard-failing only on contiguity gaps/dupes; everything else is a review list. The script harvests; the AI/human judges the semantic rest (is a §-ref pointing at the *right* section).
+- **Alternatives considered:** (1) *Fold into the existing consolidation pass / gate lens only* — rejected: that's where it already nominally lived, and it still required a human to call it; the lesson is that it must be *triggered* and *mechanical*, which warrants its own rule + tool. (2) *A fully-automatic semantic coherence checker* — rejected as over-build (Rule 16/17): cross-ref *validity* and contradiction-detection are genuinely fuzzy; the right division is script-harvests-mechanical-classes, AI-judges-semantics, which is exactly what the two manual audits did by hand. (3) *Make retired-term residue a hard fail* — rejected after dogfooding: too many false positives (lines that name a retired term precisely to retire it); demoted to a snapshot/retirement-context-filtered review list.
+- **Origin:** Joe, InsiderIntent NEW-mode build (D-073 → D-074), 2026-06-24.
+
+---
+
 ### D-002: A mandatory Pre-Build Review Gate (machine audit + human sign-off) before any product code
 
 - **Date:** 2026-06-23
