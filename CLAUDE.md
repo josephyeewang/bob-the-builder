@@ -33,6 +33,7 @@ README.md                   ← Public-facing project overview
 - Specs are living documents — update them during build, not just at the beginning.
 - Reconciliation after every phase is non-optional.
 - No silent refactoring. No behavior drift. No scope creep.
+- **Green ≠ Correct (cross-cutting).** CI passing, a health scan at "N/N", and "the job ran" verify *known-incident classes + syntactic success* — NOT semantic correctness, data completeness, or analytical soundness. Before trusting or reporting any data/analysis/pipeline result, run the forensics yourself and treat every plausible headline adversarially: census input null-rates (a ~0% field is a DEAD axis, not a "no signal"); confirm every collapse/dedup/group key captures all varying entities (spot-check the collapse ratio); distrust "no signal / anti-predictive" from selecting-on-realized-outcome (→ split-half); distrust "too sparse / untestable" (→ verify RAW volume — often an upstream collapse/backfill bug); residualize the dominant factor before declaring "one driver"; compute actual numbers before shipping anything outward-facing. Deepened in **L31** (dead-column / aggregation-blend / at-rest null census) and **L32** (empirical-validity forensics §4b). Origin: InsiderIntent D-267→271 — nearly every user push uncovered a real defect all the green checks missed; the non-engineer shouldn't have to be the linchpin.
 - When compacting, always preserve: current mode, current step, and any pending decisions.
 
 ## Success metrics (v2.11 — dogfooding Step 1a)

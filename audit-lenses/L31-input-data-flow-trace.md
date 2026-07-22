@@ -82,17 +82,22 @@ This is taint tracking applied to product correctness rather than security: foll
 
 4. **Execute the flow, don't just read it.** Submit a real input through the running app. Then query the DB / inspect each consumer to confirm the field actually arrived and is the right value — not just that a write *appears* to exist in source. (Source can lie: the field is in the payload, the insert omits it.)
 
+4b. **Census the field AT REST — the non-null RATE, not just "it can be written."** For each meaningful field, query `count(field IS NOT NULL) / count(*)` across the real table. A field at **~0% populated is a DEAD column** — silently dropped in practice even when a write path exists in source, so any downstream logic keyed on it is scoring a phantom. (Field-hardened, InsiderIntent D-269: `move_5d` and `position_type` were 100%/near-100% NULL on hundreds of thousands of rows — the analysis "ran" and silently produced nothing on those axes. "It can be populated" ≠ "it is.")
+
 5. **Check the lifecycle / terminal states per flow.** Every flow has end-states that must each be handled:
    - **Account:** created · verified · logged-in · password-reset · **deduplicated** (same email twice?) · suspended · **deleted** (real delete or orphaned rows?).
    - **Credits/money:** purchased · balance updated atomically · **redeemed exactly once** (race / double-spend?) · expired · refunded (reversible & reconcilable?) · negative-balance guarded?
    - **Upload:** received · parsed · validated · stored · propagated · re-downloadable · deletable.
    Each unhandled terminal state is a finding.
 
-6. **Hunt the four canonical flow defects:**
+6. **Hunt the canonical flow defects:**
    - **Propagation gap** — field captured & stored but never reaches a consumer the spec implies (the EMBT age/gender case).
+   - **Dead-column / silent-drop-at-rest** — field the spec expects, present in source, but ~0% populated in the real table (step 4b) → every downstream consumer silently gets nothing.
+   - **Aggregation-key blend** — a downstream collapse / dedup / group-by whose key OMITS an entity that varies **silently merges distinct records into one** (with an arbitrary survivor for the dropped field). Spot-check the collapse ratio per segment: a group collapsing ~10:1 where you expected ~1:1 is a blend bug. (Field-hardened, InsiderIntent D-267: an `(owner, day, direction)` collapse omitting `issuer` blended each fund's whole multi-ticker portfolio into one arbitrary-issuer row — 13F 793→47 — and corrupted every downstream stat.)
    - **Dedup/uniqueness gap** — no uniqueness constraint where one is required (duplicate accounts, double-applied credits).
    - **Atomicity/race gap** — read-modify-write on balance/quota without a transaction or constraint (double-spend, lost update).
    - **Orphan/leak gap** — delete/cancel path leaves rows, files, or references behind (data outlives its terminal state).
+   - **Malformed-value passthrough** — an attribute copied from a source field with no validation lets garbage flow downstream (e.g. a numeric CIK leaking into a `ticker` column, then never joining to prices). Validate shape at the boundary; null the odd value, don't drop the row.
 
 7. **Confirm validation at every trust boundary.** Each boundary the data crosses (entry, storage, cross-service) should validate type/range/authorization. A field that's validated at intake but trusted blindly by a downstream consumer is a finding.
 
@@ -112,6 +117,8 @@ This is taint tracking applied to product correctness rather than security: foll
 10. Is each field validated at every trust boundary it crosses, not just at intake?
 11. For any sensitive field (PII/PHI/payment), have you handed the storage/security specifics to L05?
 12. Are there silent drops — fields present in the request payload but absent from the insert/update?
+12b. Did you census each field's **at-rest non-null rate** (step 4b)? Any ~0%-populated **dead columns** the spec expects downstream?
+12c. Does any downstream **collapse / dedup / group-by key omit an entity that varies** (blend bug)? Did you spot-check collapse ratios? Any **malformed values** (e.g. a numeric id in a symbol column) passing a boundary unvalidated?
 13. Are there orphan/leak gaps where a terminal state leaves data behind?
 14. What's the single highest-blast-radius flow defect?
 

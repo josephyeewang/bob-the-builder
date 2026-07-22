@@ -73,6 +73,12 @@ SR 11-7 defines a "model" as *any quantitative method, system, or analytical too
    - **Reasoning edge cases** — how does the method behave on missing inputs, contradictory inputs, out-of-range values, the empty case, the extreme case? Does it degrade sensibly or produce confident nonsense?
    - **Defaults & fallbacks** — what does it output when it can't really decide? Is the default safe, visible, and rare — or does it fire silently and often (the "everyone scores 'moderate'" failure)?
 
+4b. **Empirical-validity forensics** (field-hardened — InsiderIntent D-267→271; run for any method that MINES data for signal or reports "X predicts / doesn't predict / is too sparse"). These are the artifact classes where a method looks sound and the *finding* is false:
+   - **Selection-on-outcome bias (the false null).** A "no signal / anti-predictive / it regresses" verdict drawn from selecting entities by their *realized* performance (a ≥X% threshold, "the proven cohort," "the top-decile") is a **regression-to-the-mean artifact**, not a result — you selected the high-noise draws. Demand a **bias-free test** (split-half: does first-half performance predict second-half? / out-of-sample) before believing any persistence null. (Origin: "track record is anti-predictive" was a threshold-selection artifact; split-half showed skill actually persists.)
+   - **Peak-seeking vs mode-seeking (the false "monolithic").** Ranking candidate signals by effect-size returns the ONE dominant factor **restated N ways** — then reported as "there's only one driver." **Residualize the dominant factor out** (subtract its per-cell mean) and hunt orthogonal pockets before concluding a single king. (Origin: the top-20 factors were all the same signal crossed with other axes; residualizing surfaced a whole distinct tier.)
+   - **Sparse ≠ untestable (the false "no data").** "Too few to test / no co-occurrences / n<threshold" is suspect — verify the **RAW input volume first**. Sparse *resolved/aggregated* data is usually an upstream **collapse/aggregation/backfill bug**, not a data fact. (Origin: "13F too sparse to test lead-lag" was a collapse bug blending portfolios + a missing backfill; fixing both took it 794→8,289 and the question became testable.)
+   - **Crowding/confirmation direction check.** When a method rewards "convergence / more confirmation / more sources agree," test it non-monotonically — the edge often PEAKS at moderate breadth and DECAYS when crowded (the signal is already priced). Don't assume more-agreement = more-signal.
+
 5. **Probe the input spread.** Run easy/typical/hard/adversarial inputs and inspect intermediate values (the actual weights, the chosen branch, the triggered default) — not just the final answer. Look for: outputs that don't move when an important input changes (a dead input), outputs that collapse to one value (a degenerate method), defaults firing on typical inputs.
 
 6. **Effective-challenge pass.** Adopt the stance of an independent domain expert paid to find the flaw: *"Why this method? What would a competent practitioner in this domain do differently? What's the strongest argument this analysis is wrong-by-design?"* Write the strongest refutation you can, then judge whether the method survives it.
@@ -93,6 +99,7 @@ SR 11-7 defines a "model" as *any quantitative method, system, or analytical too
 8. **Defaults:** when the method can't decide, is the fallback safe, visible, and rare — or silent and frequent?
 9. Did you probe the input spread and inspect *intermediate* values (weights, branches, defaults), not just final outputs?
 10. Did you run an effective-challenge pass (strongest argument the method is wrong-by-design) and judge survival?
+10b. **Empirical-validity forensics (data-mining/predict methods):** is any "no signal / anti-predictive" verdict selection-on-outcome (→ demanded a split-half)? Is any "one dominant driver / monolithic" conclusion peak-seeking (→ residualized the king first)? Is any "too sparse / untestable" verified against RAW volume (→ ruled out an upstream collapse/backfill bug)? Are convergence/confirmation signals tested non-monotonically (crowding decay)?
 11. Are the method's assumptions and limitations documented anywhere?
 12. For AI sites: does L11 cover output accuracy, so L32 can stay on method design? (Avoid double-counting.)
 13. For deterministic sites: is L32 the *only* lens looking at this (L11 skips it)? If so, this is the sole correctness check — weight accordingly.
@@ -154,7 +161,7 @@ SR 11-7 defines a "model" as *any quantitative method, system, or analytical too
     {
       "id": "L32-F001",
       "severity": "critical|major|minor|cosmetic",
-      "category": "missing_input|dead_input|arbitrary_weighting|invalid_assumption|shallow_proxy|reasoning_edge_case|unsafe_or_frequent_default|degenerate_output|undocumented_method|claimed_actual_gap",
+      "category": "missing_input|dead_input|arbitrary_weighting|invalid_assumption|shallow_proxy|reasoning_edge_case|unsafe_or_frequent_default|degenerate_output|undocumented_method|claimed_actual_gap|selection_on_outcome_artifact|peak_seeking_not_residualized|sparse_from_upstream_bug|crowding_not_tested",
       "title": "{short}",
       "site": "{path:line or prompt id}",
       "method_type": "ai|deterministic|hybrid",
@@ -184,6 +191,7 @@ SR 11-7 defines a "model" as *any quantitative method, system, or analytical too
 - **Do NOT confuse complexity with soundness, or simplicity with shallowness.** A simple method can be perfectly sound for its stakes; an elaborate one can be elaborately wrong. Judge fit-to-domain, not sophistication.
 - **Do NOT pass judgment on a method you only read.** Probe the input spread and watch the intermediate values — a dead input or a silent default is invisible from the source alone.
 - **Bias toward "would a competent practitioner in this domain stand behind this method?"** That's the effective-challenge bar. If the honest answer needs a real expert, say so and route to L27 (domain-expert persona) / human review — don't fake domain authority.
+- **Do NOT accept a data-mining verdict at face value — the finding is often the artifact.** A "no signal," a "one dominant driver," or a "too sparse to test" is a *hypothesis about the method's data*, not a result: selection-on-outcome fakes nulls, magnitude-ranking fakes monoliths, upstream collapse/backfill bugs fake sparsity. Run the forensics (4b) before reporting any of them. "Green + it ran + a clean-looking table" is NOT correctness.
 
 ## Stop conditions (the gap IS the finding)
 
