@@ -77,6 +77,7 @@ The user often invokes this skill from a *different* project directory than `bob
 
 - Follow steps in order. Stop at every human gate (`→ HG`).
 - **🛑 NEVER cross from design into build without the Pre-Build Review Gate (Step 6.5 / Rule 22, v2.28):** a fresh-context machine audit of the whole doc-set/plan **and** an affirmative human review-and-tweak sign-off, *before the first line of product code*. Announce this gate to the user up front (at mode selection) so they know a deliberate stop-and-review is coming. A generic earlier "proceed/build" is NOT gate approval. (Origin: a dogfood build slid spec→code with no stop; the founder had to catch it.)
+- **Green ≠ Correct (Rule 25, v2.31):** for any data-backed product, "CI green / scan N-of-N / the job ran" is NOT correctness. Run the silent-failure forensics *yourself, proactively* — census field null-rates (a ~0% column is a dead axis), check collapse/group keys capture all varying entities (blend bug), distrust "no signal" from selecting-on-outcome (→ split-half) and "too sparse" (→ verify raw volume), residualize the dominant factor before declaring "one driver." Deepened in L31/L32. (Origin: InsiderIntent — the founder shouldn't be the linchpin catching these.)
 - Specs are living documents — update them during build, not just at the beginning.
 - Reconciliation after every phase is non-optional.
 - No silent refactoring. No behavior drift. No scope creep.
