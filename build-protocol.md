@@ -1791,7 +1791,7 @@ Follow the approved plan. For each remediation item, use the Na/Nb/Nc pattern:
 
 ### Step A7: Multi-Lens Audit (v2.17 — lens library replaces prior A7a–A7j)
 
-After remediation, run the **multi-lens audit** — a curated panel (or full enchilada) of named audit lenses from `audit-lenses/`, run sequentially in fresh sessions per the writer/reviewer pattern. v2.17 replaced the prior single A7a–A7j audit phase with a multi-lens library organized into 8 bands; as of v2.22 it's a **34-lens library**, with Bob selecting the panel based on project profile and the user confirming with one gate.
+After remediation, run the **multi-lens audit** — a curated panel (or full enchilada) of named audit lenses from `audit-lenses/`, run sequentially in fresh sessions per the writer/reviewer pattern. v2.17 replaced the prior single A7a–A7j audit phase with a multi-lens library organized into 8 bands; it has since grown to a **37-lens library** (L31–L34 in v2.21–v2.22, L35–L36 later, **L37 the perpetual data-fidelity crawler in v2.32**), with Bob selecting the panel based on project profile and the user confirming with one gate.
 
 This is the second meaning of "audit" in Bob: A1–A6 is the **macro** audit (does the project match the 5-doc hierarchy?); A7 is the **micro** audit, multi-angle.
 
@@ -1810,7 +1810,7 @@ Before any lens fires, Bob reads `audit-artifacts/audit-history.json` and presen
 3. **Four options** offered to user:
    - **Same** — re-run same lenses (drift check)
    - **Complementary Curated** — Bob picks lenses you haven't run (broaden coverage)
-   - **Full Enchilada** — all 34 lenses (rocketship-launch scrub, typically 1–3 hours over multiple sessions)
+   - **Full Enchilada** — all 37 lenses (rocketship-launch scrub, typically 1–3 hours over multiple sessions; note L37 is a STANDING/perpetual crawler, not a one-shot — schedule it post-launch rather than only running it once here)
    - **Custom** — user specifies
 
    Bob recommends the default option based on time-since-last-audit, project state, and whether a milestone (launch, fundraise, post-incident) is named.
@@ -1839,7 +1839,7 @@ For each lens in the selected panel, in foundation-first order (L01 → L02 → 
 - **On provider overload (429/529) or subagent socket-close**, retry with backoff; if the subagent keeps failing, fall back to running the lens inline in the main session. Lens *content* is independent of execution infrastructure — don't let an overload abort the panel.
 - **A lens is only "complete" once its sidecar (findings + `retro_fragment`) is on disk.** Until then, treat it as in-progress and resumable.
 
-The library covers 34 lenses across 8 bands (lens IDs are append-only — L31–L33 added in v2.21, L34 in v2.22, sitting in earlier bands; group by the band, not the number):
+The library covers 37 lenses across 8 bands (lens IDs are append-only — L31–L33 added in v2.21, L34 in v2.22, L35–L36 later, L37 the perpetual data-fidelity crawler in v2.32, sitting in earlier bands; group by the band, not the number):
 
 | Band | Lenses | Question |
 |---|---|---|
