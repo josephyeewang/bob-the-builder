@@ -166,7 +166,24 @@ if [[ ! -f .claude/settings.json ]]; then
   echo "🪝 Writing .claude/settings.json (default hooks)..."
   cat > .claude/settings.json <<EOF
 {
-  "_comment": "Default hook set per Bob the Builder Step 6b. Hooks are 100% enforced; CLAUDE.md rules are ~80% advisory. Customize per project — see ${BOB_PATH_DISPLAY}/build-protocol.md §6b for the default rationale.",
+  "_comment": "Default hooks + permissions per Bob the Builder Step 6b + Rule 27 (Supervised Autonomy). Hooks are 100% enforced; CLAUDE.md rules are ~80% advisory. Customize per project — see ${BOB_PATH_DISPLAY}/build-protocol.md §6b + the 'Supervised Autonomy' section.",
+  "_autonomy_note": "SUPERVISED AUTONOMY (Rule 27): to run BUILD PHASES with milestone gates instead of approving every step, set defaultMode to 'auto' (needs a recent model; a classifier auto-approves routine work and blocks the destructive class). Keep 'default' for the foundations/spec phases. Always work on a branch. The 'ask' rules are your milestone gates; the 'deny' rules are the always-blocked destructive class. 'auto' is NOT --dangerously-skip-permissions.",
+  "permissions": {
+    "defaultMode": "default",
+    "ask": [
+      "Bash(git push:*)",
+      "Bash(gh pr create:*)",
+      "Bash(*deploy*)",
+      "Bash(*migrate*)"
+    ],
+    "deny": [
+      "Bash(rm -rf:*)",
+      "Bash(git push --force:*)",
+      "Bash(git reset --hard:*)",
+      "Read(.env)",
+      "Read(**/*credentials*)"
+    ]
+  },
   "hooks": {
     "PostToolUse": [
       {
@@ -183,12 +200,12 @@ if [[ ! -f .claude/settings.json ]]; then
     ],
     "Stop": [
       {
-        "_comment_fire_when": "When Claude finishes a turn — catch build errors before human reviews",
+        "_comment_fire_when": "When Claude finishes a turn — the 'don't-stop-until-green' gate (Rule 27): run typecheck+build+tests; a NON-ZERO exit (exit 2) forces Claude to keep fixing until green before it can finish a phase. This is verification the agent can't talk past.",
         "hooks": [
           {
             "type": "command",
-            "command": "echo '[hook] typecheck/build — customize this command for your stack'",
-            "_comment_replace_with": "e.g.: cd \"\$CLAUDE_PROJECT_DIR\" && npx tsc --noEmit 2>&1 | head -20"
+            "command": "echo '[hook] typecheck/build/test green-gate — customize for your stack; make it EXIT NON-ZERO on failure'",
+            "_comment_replace_with": "e.g.: cd \"\$CLAUDE_PROJECT_DIR\" && npm run typecheck && npm run build && npm test   # non-zero exit blocks stopping"
           }
         ]
       }
@@ -198,6 +215,33 @@ if [[ ! -f .claude/settings.json ]]; then
 EOF
 else
   echo "✓ .claude/settings.json already exists — leaving it alone."
+fi
+
+# ──────────────────────────────────────────────────────────────────────
+# 3b. .claude/agents/reviewer.md — the per-milestone fresh-context reviewer (Rule 27)
+# ──────────────────────────────────────────────────────────────────────
+mkdir -p .claude/agents
+if [[ ! -f .claude/agents/reviewer.md ]]; then
+  echo "🔍 Writing .claude/agents/reviewer.md (milestone reviewer subagent)..."
+  cat > .claude/agents/reviewer.md <<'EOF'
+---
+name: reviewer
+description: Fresh-context milestone reviewer (Bob Rule 27). Invoke at each build-phase boundary to check the diff against the plan for correctness, drift, and silent failures BEFORE the human reviews.
+tools: Read, Grep, Glob, Bash
+model: haiku
+---
+You are a critical, independent reviewer. You did NOT write this code and you do not see the author's reasoning — only the diff and the phase's done-criteria. Independence is the point: assume the author is wrong and find what they missed.
+
+At each milestone:
+1. Read the phase's done-criteria (from the Build Manifest / plan) and the diff (`git diff`).
+2. RUN THE TESTS / BUILD YOURSELF — do not trust any "done" claim (Green ≠ Correct; ~76% of agent failures are false-success).
+3. Report, concisely: (a) drift from the plan/spec, (b) untested or unhandled paths, (c) green-but-wrong results (tests that pass but don't test the right thing; deleted/weakened tests), (d) anything irreversible or outward-facing that slipped in.
+4. Verdict: PASS (ready for human diff-review) or BLOCK (with the specific issues to fix). Never rubber-stamp.
+
+You review; you do not edit. The human still owns the final diff review and any irreversible action.
+EOF
+else
+  echo "✓ .claude/agents/reviewer.md already exists — leaving it alone."
 fi
 
 # ──────────────────────────────────────────────────────────────────────

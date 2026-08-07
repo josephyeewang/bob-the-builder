@@ -1235,9 +1235,36 @@ Aggregate → a written findings doc + a triaged fix list. Apply clear-win fixes
 
 **6.5b — Human recap & sign-off (`→ HG`, HARD — affirmative approval required).** Present a **plain-language recap for the non-engineer**: what the product *is*; what will be built and in what order (the phase plan); the key decisions made (and any reversed); the open decisions that need them; and the machine-audit's top findings + what changed. Then explicitly invite: *"This is your review-and-tweak gate before we write code — anything to change, cut, add, or resequence?"* **Do not proceed to Step 7 until the user has actively reviewed and approved.** Silence, or a generic earlier "continue/proceed/build," does NOT count — the gate requires its own affirmative sign-off. *(Origin: the InsiderIntent dogfood slid straight from spec into build with no intentional stop, no machine audit, and no human recap — the founder had to catch it and call the audit himself.)*
 
+### Supervised Autonomy (Rule 27 — opt-in, BUILD PHASES only)
+
+By default Bob is human-gated at every step. That's correct for the foundations (Steps 0–6.5, per Rule 21), but on the mechanical build/verify loop below it produces the "approve something every ~20 minutes for 5–7 days" babysitting. **Offer supervised autonomy at the start of the build phases** (never before the Pre-Build Gate). Honest framing to the user: *fully hands-off, hand-it-the-plan-and-walk-away* does not exist for a multi-subsystem build (Aug 2026 evidence: agents reliably work in ~30–70-min chunks, "done" is the least-trustworthy signal, and multi-agent **swarms make coding worse**). What DOES work is collapsing the per-step gate to a **per-milestone** gate.
+
+**Mechanism (what changes when autonomy is ON):**
+- **`auto` permission mode** between milestones — a classifier auto-approves routine work and blocks the destructive class (needs a recent model). NOT `--dangerously-skip-permissions`.
+- **The "don't-stop-until-green" Stop hook** — runs typecheck+build+tests; a non-zero exit forces Claude to keep fixing until green before a phase can finish. Verification the agent can't talk past.
+- **A fresh-context `reviewer` subagent per phase** — Read-only, sees only the diff + done-criteria (NOT the generating reasoning). *Independence beats capability* (a diff-only reviewer has ~60× fewer false-passes). Assume-the-author-is-wrong.
+- **The per-phase `→ HG` becomes a milestone review**, not a per-step approval. Everything else in the phase cycle (Gap Check, Reconcile, Phase Gate) is unchanged — autonomy rides *on top of* Bob's existing verification, it doesn't replace it.
+
+**HARD boundaries — always human, regardless of autonomy:** the foundations (0–6.5); the Pre-Build Review Gate (Rule 22); any irreversible/outward-facing action (deploy, migrate, push-to-main, spend, external send — enforced by `ask`/`deny` rules, not by asking Claude nicely); and the **milestone diff review** (Green≠Correct, Rule 25 — the human reads the diff before merge; the Stop hook proves tests *ran*, not that they're *right*).
+
+**Honest autonomy map — state it up front per project (never imply hands-off):**
+| Subsystem type | Autonomy | Cadence |
+|---|---|---|
+| Backend / CLI / deterministic / well-tested | HIGH | autonomous 30–90-min runs → ~1–2 review hrs/milestone |
+| Novel integration glue | MEDIUM | autonomous + real end-to-end tests (not self-report) |
+| UI / frontend | MEDIUM | semi-autonomous + human visual checks |
+| **Device / hardware / real-time-audio / native-mobile / anything needing physical validation** | **LOW — the wall** | **human every iteration; CANNOT be autonomously verified** (e.g. simulator can't test a real audio loop) |
+| **Un-automatable one-time** (account/key creation, app-store review, subjective/taste calibration) | **NONE** | **human-only; these gate the ship** |
+
+**Setup (scaffolded by `bob-init`):** work on a branch (`git checkout -b build`); `.claude/settings.json` has the `permissions` block (`ask` = milestone gates on push/PR/deploy/migrate; `deny` = destructive class) — flip `defaultMode` to `"auto"` for the build phases; the Stop hook is the green-gate (make it exit non-zero on failure); `.claude/agents/reviewer.md` is the milestone reviewer. Structure each Build-Manifest phase with an explicit done-gate ("Phase N complete when: build green + tests pass + reviewer finds no drift → STOP and summarize").
+
+**Guardrails (enforce, don't instruct):** git is the rollback, NOT `/rewind` (it can't undo shell deletes); "DO NOT delete X" in prose gets ignored under pressure (the Replit prod-DB-wipe incident) → put it in `deny` rules / isolation; never expose prod credentials to an autonomous run; cost caps (`ccusage` / API workspace spend limit); `--max-turns` bounds headless loops. **Where "swarm-like" parallelism actually helps: the verification side** (adversarial reviewers, drift-checks, pressure-tests — read-heavy), not the write-heavy building.
+
+---
+
 ### Steps 7+: Build Phases
 
-*Repeat this cycle for each phase defined in the Build Manifest. Each phase follows the execution model: Context Load → Gap Check → Implement → Validate → Reconcile → Pulse Check.*
+*Repeat this cycle for each phase defined in the Build Manifest. Each phase follows the execution model: Context Load → Gap Check → Implement → Validate → Reconcile → Pulse Check. (When Supervised Autonomy is ON — see above — the per-step `→ HG` gates collapse to a per-phase milestone review; the HARD-boundary gates remain human.)*
 
 **[N]a: Build**
 

@@ -6,6 +6,24 @@ The companion `audit-log.md` records *deferred* items (Defer verdicts that may s
 
 ---
 
+### D-011: Supervised Autonomy — reduce build-phase babysitting via milestone gates, NOT a swarm (Rule 27)
+
+- **Date:** 2026-08-06
+- **Status:** Accepted (v2.34)
+- **Context:** Joe: every Bob build is ~5–7 days of pressing "continue" every ~20 min — mostly mechanical babysitting on the build/verify loop. He asked whether agent swarms (Hermes-style) can now run a detailed plan end-to-end. Research (Aug 2026, cross-verified: METR time-horizons, Berkeley MAST, Anthropic telemetry, field trials) is unambiguous: fully-hands-off multi-subsystem builds are unproven (agents reliably work ~30–70-min chunks; "done" is the least-trustworthy signal; ~76% of failures are false-success), and multi-agent **swarms make CODING worse** (coordination failure 41–87%, ~15× cost — the field retreated from free-form swarms toward orchestrator + gated subagents). Bob already had the *verification* half (phase gates, adversarial reviewers, reconciliation, Rules 24–25, a Stop-hook seed) but ZERO build-execution-autonomy concept — every step is `→ HG`, which IS the babysitting.
+- **Decision:** Add Rule 27 (Supervised Autonomy), scoped to the BUILD PHASES ONLY: `auto` permission mode between milestones + a real "don't-stop-until-green" Stop hook + a fresh-context `reviewer` subagent per phase, so the per-step `→ HG` collapses to a per-milestone review. `bob-init` scaffolds it (settings.json `permissions` + green-gate Stop hook + `.claude/agents/reviewer.md`). Full recipe + honest autonomy map in build-protocol.md §"Supervised Autonomy".
+- **Alternatives considered:**
+  - *Adopt/build a multi-agent swarm framework (LangGraph/CrewAI/AutoGen/ruflo/etc.) or an autonomous product (Devin/Factory/OpenHands).* Rejected — the evidence says swarms degrade write-heavy coding and every autonomous product runs the same work→PR→human-review loop (the review gate is the product, and it's the user's regardless of tool). Switching buys packaging, not hands-off autonomy, and adds coordination failure Bob doesn't have.
+  - *Apply autonomy protocol-wide (including foundations).* Rejected — directly violates Rule 21 (don't one-shot the foundations; Joe explicitly wants deep involvement on spec/design). Autonomy is surgically scoped to the mechanical build loop; foundations, the Pre-Build Gate, irreversible actions, and the milestone diff-review stay human.
+  - *Default `defaultMode` to `auto` in the scaffold.* Rejected — kept as `"default"` with `auto` documented as the opt-in for build phases, so the non-engineer doesn't get broad autonomy before they understand the branch/deny-rule guardrails.
+- **Consequences:**
+  - Build-phase babysitting drops from per-step to per-milestone on autonomy-friendly subsystems (backend/CLI). But Bob must set HONEST expectations via the autonomy map — device/hardware/real-time/native-mobile/taste work stays human-every-iteration and CANNOT be autonomously verified; un-automatable one-time items (accounts, app-review, calibration) gate the ship. Bob must never imply hands-off.
+  - The verification rigor Bob already has is what makes autonomy safe — autonomy rides on top of the phase gates + reviewers, never replaces them. Green≠Correct (Rule 25) means the human diff-review is non-negotiable.
+  - "Swarm-like" parallelism is redirected to where it helps (read-heavy verification: adversarial reviewers, drift-checks), not write-heavy building.
+- **Revisit trigger:** the reliable (80%-confidence) autonomous time-horizon for multi-subsystem builds extends to multiple days AND independent evidence shows a swarm shipping a real multi-subsystem app hands-off — then reconsider widening autonomy beyond milestone-gated. Not before.
+
+---
+
 ### D-010: Keep the machine hermetic & refactor by invariant — the ENGINEERING silent-failures (Rule 26)
 
 - **Date:** 2026-08-04
