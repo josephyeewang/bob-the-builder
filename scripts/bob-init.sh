@@ -167,21 +167,20 @@ if [[ ! -f .claude/settings.json ]]; then
   cat > .claude/settings.json <<EOF
 {
   "_comment": "Default hooks + permissions per Bob the Builder Step 6b + Rule 27 (Supervised Autonomy). Hooks are 100% enforced; CLAUDE.md rules are ~80% advisory. Customize per project — see ${BOB_PATH_DISPLAY}/build-protocol.md §6b + the 'Supervised Autonomy' section.",
-  "_autonomy_note": "SUPERVISED AUTONOMY (Rule 27): to run BUILD PHASES with milestone gates instead of approving every step, set defaultMode to 'auto' (needs a recent model; a classifier auto-approves routine work and blocks the destructive class). Keep 'default' for the foundations/spec phases. Always work on a branch. The 'ask' rules are your milestone gates; the 'deny' rules are the always-blocked destructive class. 'auto' is NOT --dangerously-skip-permissions.",
+  "_autonomy_note": "SUPERVISED AUTONOMY (Rule 27) — run BUILD PHASES milestone-gated. ⚠️ TRAP: defaultMode:'auto' is IGNORED in this project settings file — turn auto ON via Shift+Tab (⏵⏵ auto mode on) OR in ~/.claude/settings.json, per-session, on a fresh branch. Turn it OFF (Shift+Tab to Manual) when you return to foundations/spec. The REAL destructive-class guardrail in auto mode is Claude Code's built-in CLASSIFIER (blocks force-push, prod deploy/migrate, mass-delete, secret-exfil, git reset --hard, IaC destroy). The 'deny' rules below are belt-and-suspenders only — they are PREFIX/substring matches, NOT semantic, so they do NOT catch every deletion (e.g. find -delete, > redirect, a python rmtree). 'ask' rules = milestone checkpoints. HARD RULE: never expose PROD credentials to an autonomous run (the real Replit-DB-wipe lesson — separate prod/dev). Auto pauses after 3-in-a-row / 20-total classifier blocks (and ABORTS in headless -p).",
   "permissions": {
     "defaultMode": "default",
     "ask": [
       "Bash(git push:*)",
       "Bash(gh pr create:*)",
-      "Bash(*deploy*)",
-      "Bash(*migrate*)"
+      "Bash(psql:*)", "Bash(mysql:*)", "Bash(mongosh:*)",
+      "Bash(*deploy*)", "Bash(*migrate*)"
     ],
     "deny": [
-      "Bash(rm -rf:*)",
-      "Bash(git push --force:*)",
-      "Bash(git reset --hard:*)",
-      "Read(.env)",
-      "Read(**/*credentials*)"
+      "Bash(rm -rf:*)", "Bash(rm -fr:*)",
+      "Bash(git push --force:*)", "Bash(git reset --hard:*)", "Bash(git clean:*)",
+      "Bash(find:* -delete*)",
+      "Read(.env)", "Read(**/*credentials*)", "Read(**/.ssh/**)"
     ]
   },
   "hooks": {
@@ -200,12 +199,11 @@ if [[ ! -f .claude/settings.json ]]; then
     ],
     "Stop": [
       {
-        "_comment_fire_when": "When Claude finishes a turn — the 'don't-stop-until-green' gate (Rule 27): run typecheck+build+tests; a NON-ZERO exit (exit 2) forces Claude to keep fixing until green before it can finish a phase. This is verification the agent can't talk past.",
+        "_comment_fire_when": "The 'don't-stop-until-green' gate (Rule 27). Runs .claude/hooks/green-gate.sh: full-suite typecheck+build+test; exit 2 forces Claude to keep fixing until green. It is GUARDED against the infinite-loop footgun (stop_hook_active + a hard bounded-retry counter — surfaces to you after N attempts instead of looping). EDIT the script: set TEST_CMD for your stack.",
         "hooks": [
           {
             "type": "command",
-            "command": "echo '[hook] typecheck/build/test green-gate — customize for your stack; make it EXIT NON-ZERO on failure'",
-            "_comment_replace_with": "e.g.: cd \"\$CLAUDE_PROJECT_DIR\" && npm run typecheck && npm run build && npm test   # non-zero exit blocks stopping"
+            "command": "bash \"\$CLAUDE_PROJECT_DIR/.claude/hooks/green-gate.sh\""
           }
         ]
       }
@@ -226,22 +224,75 @@ if [[ ! -f .claude/agents/reviewer.md ]]; then
   cat > .claude/agents/reviewer.md <<'EOF'
 ---
 name: reviewer
-description: Fresh-context milestone reviewer (Bob Rule 27). Invoke at each build-phase boundary to check the diff against the plan for correctness, drift, and silent failures BEFORE the human reviews.
+description: Fresh-context milestone reviewer (Bob Rule 27). Invoke at EVERY build-phase boundary — before the human gate — to check the diff against the plan for correctness, drift, and silent failures.
 tools: Read, Grep, Glob, Bash
-model: haiku
+model: sonnet
 ---
-You are a critical, independent reviewer. You did NOT write this code and you do not see the author's reasoning — only the diff and the phase's done-criteria. Independence is the point: assume the author is wrong and find what they missed.
+You are a critical, independent reviewer. You did NOT write this code and you do NOT see the author's reasoning — only the diff and the phase's done-criteria. Independence is the point (a diff-only reviewer catches ~60× more false-passes than one that sees the author's rationale): assume the author is wrong and find what they missed. (Use a DIFFERENT model family from the builder when possible — same-family reviewers share the author's blind spots.)
 
 At each milestone:
-1. Read the phase's done-criteria (from the Build Manifest / plan) and the diff (`git diff`).
-2. RUN THE TESTS / BUILD YOURSELF — do not trust any "done" claim (Green ≠ Correct; ~76% of agent failures are false-success).
-3. Report, concisely: (a) drift from the plan/spec, (b) untested or unhandled paths, (c) green-but-wrong results (tests that pass but don't test the right thing; deleted/weakened tests), (d) anything irreversible or outward-facing that slipped in.
-4. Verdict: PASS (ready for human diff-review) or BLOCK (with the specific issues to fix). Never rubber-stamp.
+1. Read the phase's done-criteria (Build Manifest / plan) and the diff (`git diff`).
+2. RUN the tests/build yourself — never trust a "done" claim (Green ≠ Correct; 45–76% of agent "done" claims are false-success, and LLM "is it done?" judgments are near-random — the diff and a real run are the truth).
+3. **Diff the TEST files specifically** — flag any deleted, weakened, or newly-added-to-pass tests (the "rewrote the tests to go green" failure mode). Green means the code agrees with itself, not that it matches the spec.
+4. Also check: state-diff sanity (does the diff actually implement the claimed work, or is the tree ~unchanged?), drift from spec, untested/unhandled paths, anything irreversible or outward-facing that slipped in.
+5. Verdict: PASS (ready for the human diff-review) or BLOCK (with the specific issues). Never rubber-stamp.
 
-You review; you do not edit. The human still owns the final diff review and any irreversible action.
+You review; you do NOT edit. The human still owns the final diff review and any irreversible action.
 EOF
 else
   echo "✓ .claude/agents/reviewer.md already exists — leaving it alone."
+fi
+
+# ──────────────────────────────────────────────────────────────────────
+# 3c. .claude/hooks/green-gate.sh — the GUARDED don't-stop-until-green gate (Rule 27)
+# ──────────────────────────────────────────────────────────────────────
+mkdir -p .claude/hooks
+if [[ ! -f .claude/hooks/green-gate.sh ]]; then
+  echo "🚦 Writing .claude/hooks/green-gate.sh (guarded green-gate)..."
+  cat > .claude/hooks/green-gate.sh <<'GATEEOF'
+#!/usr/bin/env bash
+# Bob green-gate (Rule 27): "don't-stop-until-green" — a Stop hook that forces Claude to
+# keep fixing until the build/tests pass. GUARDED against the infinite-loop footgun.
+# CUSTOMIZE: set TEST_CMD below to your stack's full-suite command.
+set -uo pipefail
+INPUT="$(cat)"
+
+# ── Loop guard A: honor stop_hook_active if the harness sets it (avoid re-entrant loops) ──
+if printf '%s' "$INPUT" | grep -q '"stop_hook_active"[[:space:]]*:[[:space:]]*true'; then exit 0; fi
+
+# ── Loop guard B (HARD, docs-independent): bounded retry counter per session ──
+# stop_hook_active is absent from current docs and has propagation bugs, so we ALSO cap retries.
+SESSION="$(printf '%s' "$INPUT" | sed -n 's/.*"session_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
+SESSION="${SESSION:-default}"
+COUNT_FILE="/tmp/bob-greengate-${SESSION}"
+MAX_ATTEMPTS=8
+n="$(( $(cat "$COUNT_FILE" 2>/dev/null || echo 0) + 1 ))"
+printf '%s' "$n" > "$COUNT_FILE"
+if [ "$n" -gt "$MAX_ATTEMPTS" ]; then
+  echo "[green-gate] $MAX_ATTEMPTS attempts without green — surfacing to the human instead of looping." >&2
+  rm -f "$COUNT_FILE"
+  exit 0   # let Claude stop; a human is needed
+fi
+
+# ── The gate: run the FULL suite (this is also your regression / anti-forgetting check) ──
+# CUSTOMIZE THIS LINE for your stack (e.g. npm / pnpm / uv / cargo / go / xcodebuild):
+TEST_CMD="echo 'EDIT .claude/hooks/green-gate.sh: set TEST_CMD (e.g. npm run typecheck && npm run build && npm test)'; false"
+cd "${CLAUDE_PROJECT_DIR:-.}" || exit 0
+if OUT="$(bash -c "$TEST_CMD" 2>&1)"; then
+  rm -f "$COUNT_FILE"
+  exit 0   # green → allow stopping
+fi
+
+# ── Not green → block (exit 2) with the trimmed failure as the fix instruction ──
+{
+  echo "[green-gate] build/tests NOT green (attempt $n/$MAX_ATTEMPTS). Fix these before finishing the phase:"
+  printf '%s\n' "$OUT" | tail -50
+} >&2
+exit 2
+GATEEOF
+  chmod +x .claude/hooks/green-gate.sh
+else
+  echo "✓ .claude/hooks/green-gate.sh already exists — leaving it alone."
 fi
 
 # ──────────────────────────────────────────────────────────────────────
