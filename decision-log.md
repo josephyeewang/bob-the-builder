@@ -6,6 +6,17 @@ The companion `audit-log.md` records *deferred* items (Defer verdicts that may s
 
 ---
 
+### D-012: Structurally valid ≠ logically coherent — the spec-document silent-failures (Rule 28)
+
+- **Date:** 2026-08-21
+- **Status:** Accepted (v2.36)
+- **Context:** A ~40-round product-scoping session where the founder personally caught every structural defect: a pain filed under the wrong theme, two overlapping themes, a theme promising what its contents lacked, **two rival feature inventories in one document**, four concepts silently dropped in section rebuilds, fifteen capabilities living only in prose, three overview bullets restating one idea, and jargon in the reader-facing sections. **Every one passed the existing checks** — tag balance, cross-references, badges, counts. Those are syntactic; Bob had no semantic check on the artefact Step 1 produces. Rule 25 covers data silent-failures and Rule 26 the engineering twin; the document twin was missing.
+- **Decision:** Add **Rule 28** with ten named failure classes (bucket overlap · misfiled membership · undelivered promise · one-way coverage · structural duplication · retyped-from-memory drift · source-fidelity drift · altitude drift · jargon in reader-facing sections · local-fix-only), each with a test and its origin. Ship `scripts/spec-audit.py` and wire it as MANDATORY **Step 1c-audit**, into **Step 1e** consolidation, and as **Pre-Build Gate lens 1**. Separate **hard fails** from **review prompts** — some prose genuinely is context.
+- **Consequences:** The founder stops being the linter on spec docs. Two meta-disciplines become standing practice: **regression-test every check against the defect it was written for** (Bob's own duplication check first reported clean against the document containing the duplicate — it counted table rows and the duplicate used lists), and **calibrate before trusting** (reverse-coverage went 40 noise hits → 5 reviewable; the delivery check hard-failed on organisational headings until restricted to *claim* headings). Cost: one more mandatory gate in Step 1, and a script that needs `--inventory` / `--source` hints to run its two strongest checks.
+- **Alternatives considered:** *Extend `coherence-check.sh`* — rejected; that tool catches mechanical drift ACROSS a doc set (dangling refs, version strings, contiguity), a genuinely different job from logical incoherence WITHIN one document. *Leave it to the adversarial review (1c)* — rejected; 1c is a judgement pass that runs once and cannot mechanically detect two sections doing the same job or a concept dropped from source notes.
+
+---
+
 ### D-011: Supervised Autonomy — reduce build-phase babysitting via milestone gates, NOT a swarm (Rule 27)
 
 - **Date:** 2026-08-06

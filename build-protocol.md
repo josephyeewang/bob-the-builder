@@ -1,4 +1,4 @@
-# BUILD PROTOCOL v2.19
+# BUILD PROTOCOL v2.36
 
 > A systematic framework for building, auditing, and evolving products with Claude Code.
 > Created: 2026-04-15. Last updated: 2026-05-25. Owner: Joe Wang.
@@ -846,6 +846,16 @@ Output the coverage map (a 9-row Clear/Partial/Missing table) only if any catego
 - Claude proposes fixes for each finding
 - `→ HG:` Human reviews, resolves each finding.
 - **Optional — second-model review:** Human may additionally take the Product Spec to a second AI (e.g., ChatGPT) for independent review. Prompt: *"Review this product spec. Focus on: conceptual gaps, scope creep risks, market blind spots, scenarios where the product would fail or confuse users. Be adversarial — find the holes."* Bring back any new findings for Claude to incorporate.
+
+**1c-audit: Structure Audit (v2.36 — MANDATORY, Rule 28)**
+
+Before the stability loop, run `scripts/spec-audit.py` over the spec and **report what it found, including "nothing"**. Every heading/cross-ref/count check passes straight over the document silent-failure classes — bucket overlap, misfiled membership, undelivered promises, one-way coverage, structural duplication, source-fidelity drift. If the spec derives from earlier notes or an intake doc, pass them with `--source` so the fidelity diff runs.
+
+- **Hard fails** (fix before advancing): bucket overlap · misfiled membership · a bucket name its contents don't deliver · two sections doing the same job · a concept dropped from the source.
+- **Review prompts** (judge each): capabilities named only in prose — some genuinely are context.
+- Then **read for what the script cannot see**: altitude drift, jargon in reader-facing sections, and whether the bold leads of any list reword each other.
+
+`→ HG:` Human reviews the audit output.
 
 **1d: Stability Loop (v2.5 — MANDATORY)**
 
