@@ -849,7 +849,7 @@ Output the coverage map (a 9-row Clear/Partial/Missing table) only if any catego
 
 **1c-audit: Structure Audit (v2.36 — MANDATORY, Rule 28)**
 
-Before the stability loop, run `scripts/spec-audit.py` over the spec and **report what it found, including "nothing"**. Every heading/cross-ref/count check passes straight over the document silent-failure classes — bucket overlap, misfiled membership, undelivered promises, one-way coverage, structural duplication, source-fidelity drift. If the spec derives from earlier notes or an intake doc, pass them with `--source` so the fidelity diff runs.
+Before the stability loop, run `~/.claude/skills/bob/../scripts/spec-audit.py` over the spec and **report what it found, including "nothing"**. Every heading/cross-ref/count check passes straight over the document silent-failure classes — bucket overlap, misfiled membership, undelivered promises, one-way coverage, structural duplication, source-fidelity drift. If the spec derives from earlier notes or an intake doc, pass them with `--source` so the fidelity diff runs.
 
 - **Hard fails** (fix before advancing): bucket overlap · misfiled membership · a bucket name its contents don't deliver · two sections doing the same job · a concept dropped from the source.
 - **Review prompts** (judge each): capabilities named only in prose — some genuinely are context.

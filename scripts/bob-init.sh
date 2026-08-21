@@ -6,6 +6,8 @@
 #
 # What it does:
 #   - Creates the standard folder structure (docs/, contracts/, evals/, scripts/, tests/)
+#   - Rule 28's spec audit is invoked via the skill symlink from any project:
+#     python3 ~/.claude/skills/bob/../scripts/spec-audit.py docs/product-spec.md
 #   - Writes a starter project CLAUDE.md that references Bob (so future sessions auto-load it)
 #   - Writes .claude/settings.json with the default hook set (format + typecheck)
 #   - Writes .gitignore, .env.example, README.md
