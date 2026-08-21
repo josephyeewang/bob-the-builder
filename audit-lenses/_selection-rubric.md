@@ -26,6 +26,24 @@ From these, Bob assesses **project profile dimensions**:
 | **Has external positioning** | yes / no | Marketing surfaces exist? |
 | **Has users today** | yes / no / pre-launch | Analytics or self-report |
 
+
+## Check-level prerequisites (v2.37 — Rule 29)
+
+Panel selection picks *lenses*. This table gates *checks inside a lens*. A check whose input
+artefact does not exist yet is reported as **"no inputs yet — re-run at <stage>"** — never as a
+finding, never as a pass. Partial-lens runs are normal; record which checks were retired and why.
+
+| Check class | Needs | Examples | Before that, report as |
+|---|---|---|---|
+| Backwards-reading | A shipped feature history | Convergence drift over the last 6-10 features (L28) · cult/adoption signals (L28) · Sean-Ellis inverse (L28) · "what did a customer ask for that we said no to" (L28) | no inputs — re-run after first release |
+| Architecture-derived | Technical design decided | **Anti-feature / "we will never X" list (L28)** · vendor-lock and dependency refusals (L22) | no inputs — re-run after the architecture contract exists |
+| Build-state | Running code | All of bands 1-3 (L01-L14), L31, L32, L37 | no inputs — re-run post-build |
+| Output-state | Generated output exists | L33 register/audience fit · L11 accuracy | no inputs — re-run once the product generates something |
+
+**Why this is a rule and not a nicety:** a lens run without inputs does not fail cleanly. It
+produces a confident, well-formed, entirely invented finding — and a well-formed finding gets
+acted on. That is strictly worse than a check that cries wolf.
+
 ## Pre-baked Curated panels (recommended starting points)
 
 ### Panel A — "Pre-launch consumer product" (DLL profile)

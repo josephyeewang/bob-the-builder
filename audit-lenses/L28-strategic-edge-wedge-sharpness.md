@@ -58,6 +58,21 @@ This is the most philosophically distinctive lens in the library. It's also the 
 - **Jason Fried / DHH — opinionated software** — "If no one's upset by what you're saying, you're not pushing hard enough." Constraints unlock creativity. Anti-features as identity. https://signalvnoise.com/posts/646-jason-fried-discusses-highrise-red-flag-words-opinionated-companies-and-benevolent-dictators
 - **Patrick Hanlon — Primal Branding** — 7 elements of belief systems: creation story, creed, icons, rituals, pagans (the enemy), sacred words, leader.
 
+## Prerequisites (v2.37 — Rule 29)
+
+Four of this lens's checks read **backwards from artefacts that may not exist yet**. Verify before running:
+
+| Check | Needs | If absent |
+|---|---|---|
+| #5 Convergence drift (last 6-10 features) | A shipped feature history | Retire — re-run after first release |
+| #4 Anti-feature list | **Technical design decided** | Retire — re-run after the architecture contract. Durable refusals are architecture commitments; asserted from a strategy doc they lock unreasoned choices, and a refusal later reversed is worse than none |
+| #9/#14 Cult + owned-vocabulary adoption | Users in the market | Retire — market adoption cannot be inferred from a spec |
+| #11 Sean-Ellis inverse | Users to ask | Retire, or mark explicitly as inference |
+
+The wedge (#1), named enemy (#3), belief claims (#2), non-user (#8) and owned-vocabulary *intent* checks
+need only the spec and run at any stage. **Record retired checks in the artefact** — a partial run that
+does not say it was partial is read as a complete one.
+
 ## Audit method
 
 1. **Articulate the wedge in one sentence.** Before reading anything else, write the product's wedge — the sharp claim about what's broken in the category, what we believe, what we refuse to do, why we exist. Do this from memory / current understanding. If you can't articulate it in one sentence without hedging, that's already the finding.

@@ -1852,7 +1852,8 @@ Before any lens fires, Bob reads `audit-artifacts/audit-history.json` and presen
 
 1. **Audit history surfaced** — last audit date, mode (Curated / Full / Custom), lenses run, findings count by severity, open findings still in `audit-log.md`.
 2. **Panel proposal** — Bob proposes a Curated panel (6-10 lenses) based on project profile, per `audit-lenses/_selection-rubric.md`. Each included lens gets a one-line justification; the most relevant excluded lenses get a one-line skip reason.
-3. **Four options** offered to user:
+3. **Prerequisite pass (v2.37 — Rule 29, MANDATORY before any lens fires).** For each proposed lens, check which of its *individual checks* have their input artefacts. Many read backwards from a shipped feature history, a decided technical design, or running code. Retire the checks whose inputs do not exist, note the stage that unlocks each, and say so in the panel proposal — a lens run without inputs does not fail cleanly, it manufactures a confident finding. See the check-level prerequisite table in `_selection-rubric.md`. **Partial-lens runs are legitimate and must be recorded AS partial in the output artefact.**
+4. **Four options** offered to user:
    - **Same** — re-run same lenses (drift check)
    - **Complementary Curated** — Bob picks lenses you haven't run (broaden coverage)
    - **Full Enchilada** — all 37 lenses (rocketship-launch scrub, typically 1–3 hours over multiple sessions; note L37 is a STANDING/perpetual crawler, not a one-shot — schedule it post-launch rather than only running it once here)

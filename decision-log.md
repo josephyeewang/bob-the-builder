@@ -6,6 +6,17 @@ The companion `audit-log.md` records *deferred* items (Defer verdicts that may s
 
 ---
 
+### D-013: A check with no inputs is not a passing check — gate lenses by artefact state (Rule 29)
+
+- **Date:** 2026-08-21
+- **Status:** Accepted (v2.37)
+- **Context:** A strategy-sections audit ran L28 whole against a spec that had not reached technical design. Its wedge, enemy and belief checks were sound and found real gaps. Its **anti-feature check had no inputs** — there was no architecture to derive refusals from — so it produced eight confident "we will never X" statements asserted ahead of the design that would justify them. The founder deleted them: *"we haven't gotten into technical design, so putting refusals is premature."* The lens was not wrong; running it whole at that stage was.
+- **Decision:** Add **Rule 29**. Individual lens CHECKS carry prerequisites, not just lenses. Name three prerequisite classes — backwards-reading (needs shipped feature history), architecture-derived (needs technical design), build-state (needs code) — plus output-state. A check whose input artefact does not exist is reported as **"no inputs yet — re-run at <stage>"**, never as a finding and never as a pass. Legitimise **partial-lens runs** and require them to be recorded as partial. Ship a check-level prerequisite table in `_selection-rubric.md` and mark L28's four gated checks in the lens file itself.
+- **Consequences:** Audits stop manufacturing findings from absent artefacts — the failure mode that is worse than a noisy check, because a well-formed invented finding gets acted on. Bob gains a second axis on the audit side matching Rule 16 on the capability side: Rule 16 sizes ambition to stakes, Rule 29 sizes checks to artefacts. Cost: every lens run now needs a prerequisite pass first, and lens files need their gated checks marked as the library grows.
+- **Alternatives considered:** *Gate at the LENS level only (don't run L28 pre-architecture)* — rejected; L28's wedge and enemy checks found the tagline-ownership failure at exactly the right moment, and losing them to protect against one bad check is a worse trade. The granularity has to be the check. *Let the human filter the output* — rejected; that is precisely the "founder is the linter" pattern Rules 24 and 28 exist to end.
+
+---
+
 ### D-012: Structurally valid ≠ logically coherent — the spec-document silent-failures (Rule 28)
 
 - **Date:** 2026-08-21
