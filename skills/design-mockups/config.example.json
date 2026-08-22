@@ -1,0 +1,14 @@
+{
+  "product_name": "Explain My Blood Test",
+  "product_desc": "turns a blood test into a clear, personalized health report",
+  "headline": "Your Blood Test Results. Explained.",
+  "data_points": ["74/100", "Triglycerides 337", "HDL 33"],
+  "content_recipe": "the full report is the HERO, held by human hands (hands only, no full person or face), surrounded by floating glass panels that EXPLAIN the results (a score with a red/yellow/green status ring, biomarker cards with colored status dots, a small trend line-graph, a horizontal range/gauge bar, an alert chip, and a plain-language insight line), plus subtle medical/scientific accents. Convey that a number alone is not enough.",
+  "api_key_env": "GOOGLE_AI_API_KEY",
+  "api_key_file": "~/Desktop/explain-my-blood-test/.env.local",
+  "model": "gemini-3-pro-image",
+  "aspect": "3:4",
+  "out_dir": "mockups_out",
+  "workers": 5,
+  "rules": " Sophisticated, gallery-grade, art-directed, high craft. Flat full-bleed desktop homepage, not in a device frame. AVOID generic AI SaaS boilerplate and lifestyle/interior stock photography. Only headline text legible."
+}
