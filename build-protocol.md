@@ -1,4 +1,4 @@
-# BUILD PROTOCOL v2.36
+# BUILD PROTOCOL v2.38
 
 > A systematic framework for building, auditing, and evolving products with Claude Code.
 > Created: 2026-04-15. Last updated: 2026-05-25. Owner: Joe Wang.
@@ -1155,6 +1155,37 @@ This matrix is the "nothing falls through the cracks" guarantee. Without it, you
   - Deferred items list (things explicitly skipped with rationale)
   - Deviations section (where build diverged from original specs, with explanation)
 - **Auto-advance (v2.5):** the Build Manifest is auto-generated from the prior approvals in Step 5a/5a-ii. Claude reports it as a status update ("Build Manifest written to `docs/build-manifest.md`. Includes [N] phases, [M] capabilities mapped, progress tracker initialized.") and proceeds to Step 6 without a separate Human Gate. The human can still object — but the default is to flow through.
+
+### Step 5.5: Design Gallery & Lock (v2.38 — products with a user-facing surface)
+
+Skip for pure APIs/CLIs/pipelines. For everything a person will look at, run the **`design-gallery`
+skill** (`skills/design-gallery/` — full instructions live there; this section is the map):
+
+- **Explore as a gallery, on REAL content.** Three lanes that combine: **HTML mockups** for product
+  UI/dashboards (numbered self-contained files, real-shaped data, `:root` color tokens from mockup
+  one — these ARE the eventual spec); the **`design-mockups` image lane** for art direction /
+  heroes / brand / logo exploration (Nano Banana funnel); an **SVG concept board** for converging a
+  logo mark (parameterized inline-SVG concepts × light/dark/context tiles; the winner ships as one
+  canonical component with hard-coded colors).
+- **Converge by number.** The rating board (skill template) collects LIKE/MEH/NO + notes per
+  design and exports paste-ready feedback; rounds remix and hybridize the liked numbers; a **live
+  parameter playground** (skill template) lets the user audition palettes/parameters on the real
+  design — one playground beats twenty static variants. Never delete a direction; curate by
+  reordering.
+- **LOCK.** `LOCKED-DESIGN.md` from the skill's template: exact values only (families+weights,
+  per-element px sizes, radii, hexes), opening with the **mock-is-canonical banner**. `→ HG` —
+  the user picks the direction and approves the lock; Bob never locks a design alone.
+- **Transfer under the fidelity protocol.** Every visual build phase after the lock follows the
+  skill's `templates/fidelity-protocol.md`: read the mock FILE first (prose is never a sufficient
+  input; delegation passes literal values, not summaries) · mock sample content never ports as
+  defaults/hardcoded scales (every displayed figure traces to real data) · component consumption
+  is counted, not felt · finish with an adversarial value-diff AND a rendered screenshot diff ·
+  add the CI token gate · kill counterfeit design self-descriptions on sight.
+
+*(Origin: InsiderIntent D-312 — the gallery converged perfectly, then the transfer degraded twice
+into ~70% re-creation because a prose summary stood in for the mock file; the after-the-fact
+adversarial audits that rescued it are now the step's exit condition, and the gates make drift
+fail the build instead of waiting for the founder to notice.)*
 
 ### Step 6: Project Setup
 

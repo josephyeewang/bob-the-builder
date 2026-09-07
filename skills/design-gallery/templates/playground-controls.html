@@ -1,0 +1,113 @@
+<!--
+  LIVE PARAMETER PLAYGROUND (bob design-gallery skill) — the "design 55" pattern.
+
+  WHAT: a sticky dark controls bar you paste at the TOP OF <body> of the CHOSEN mockup
+  (a copy of it — e.g. designs/NN-playground.html). It live-sets the mockup's CSS custom
+  properties, so the user auditions parameters (brand accent, signal triad, radius, font…)
+  on the REAL design and every chart/pill/panel recolors instantly. One playground with 2
+  swatch rows beats 20 static variants — it converges a palette in minutes.
+
+  PRECONDITION: the mockup must derive ALL colored chrome/data from :root custom properties
+  (e.g. --accent, --good, --med, --bad) — if it doesn't, tokenize it first.
+
+  HOW: edit only the PG_ROWS config at the bottom. Three row kinds:
+    {label, sub, vars:["--accent"],                options:[["Name","#hex"], …]}           → round swatches
+    {label, sub, vars:["--good","--med","--bad"], options:[["Name","#a","#b","#c"], …]}    → multi-bar chips
+    {label, sub, preset:true, vars:[...all vars], options:[["Set name","#v1","#v2",…], …]} → one-click full sets
+  Mark defaults with a trailing `true`. The readout + "Copy palette" gives the user a
+  paste-ready lock string ("accent #0b0b0d · good/med/bad #06c281 #ffa60a #ff4363") —
+  that string is what goes into LOCKED-DESIGN.md.
+-->
+<style>
+  .dctl{position:sticky;top:0;z-index:100;background:#0e1117;color:#e6e9ef;border-bottom:2px solid #000;padding:8px 20px 10px;font-family:system-ui,sans-serif;}
+  .dctl-hd{display:flex;align-items:center;gap:12px;margin-bottom:8px;}
+  .dctl-badge{font-weight:800;font-size:9.5px;letter-spacing:.14em;text-transform:uppercase;color:#0e1117;background:#e6e9ef;padding:3px 8px;border-radius:2px;}
+  .dctl-title{font-weight:700;font-size:11px;letter-spacing:.05em;text-transform:uppercase;color:#aeb6c4;}
+  .dctl-readout{margin-left:auto;display:flex;align-items:center;gap:16px;font-size:10.5px;color:#aeb6c4;}
+  .dctl-readout b{color:#fff;font-weight:700;}
+  .dctl-copy{background:transparent;border:1px solid #3a4051;color:#cfd5e0;font-weight:700;font-size:9px;letter-spacing:.08em;text-transform:uppercase;padding:5px 10px;border-radius:3px;cursor:pointer;}
+  .dctl-copy:hover{background:#1a2030;border-color:#4a5266;color:#fff;}
+  .dctl-row{display:flex;align-items:center;gap:14px;padding:5px 0;}
+  .dctl-row + .dctl-row{border-top:1px solid #1c2230;}
+  .dctl-lab{font-weight:700;font-size:9px;letter-spacing:.1em;text-transform:uppercase;color:#8a93a6;width:150px;flex:0 0 auto;}
+  .dctl-lab small{display:block;color:#5f6878;font-weight:600;letter-spacing:.04em;margin-top:1px;}
+  .dctl-opts{display:flex;align-items:center;gap:11px;flex-wrap:wrap;}
+  .dctl-sw{width:22px;height:22px;border-radius:50%;cursor:pointer;position:relative;border:1px solid rgba(255,255,255,.18);box-shadow:0 1px 2px rgba(0,0,0,.4);transition:transform .08s ease;}
+  .dctl-sw:hover{transform:scale(1.12);}
+  .dctl-sw.active{box-shadow:0 0 0 2px #0e1117,0 0 0 4px #fff;}
+  .dctl-sw[data-tip]:hover::after{content:attr(data-tip);position:absolute;left:50%;top:calc(100% + 7px);transform:translateX(-50%);background:#000;color:#fff;font-size:9.5px;white-space:nowrap;padding:3px 7px;border-radius:3px;z-index:10;}
+  .dctl-chip{display:inline-flex;flex-direction:column;align-items:center;gap:4px;cursor:pointer;}
+  .dctl-bars{display:flex;width:64px;height:18px;border-radius:4px;overflow:hidden;border:1px solid rgba(255,255,255,.18);box-shadow:0 1px 2px rgba(0,0,0,.4);}
+  .dctl-bars span{flex:1;}
+  .dctl-chip.active .dctl-bars{box-shadow:0 0 0 2px #0e1117,0 0 0 4px #fff;}
+  .dctl-name{font-size:8.5px;color:#8a93a6;font-weight:600;letter-spacing:.03em;white-space:nowrap;}
+  .dctl-chip.active .dctl-name,.dctl-chip:hover .dctl-name{color:#fff;}
+</style>
+
+<div class="dctl" id="dctl">
+  <div class="dctl-hd">
+    <span class="dctl-badge">Playground</span>
+    <span class="dctl-title">Design controls · audition parameters live</span>
+    <div class="dctl-readout"><span id="dctl-ro"></span><button class="dctl-copy" id="dctl-copy">Copy palette</button></div>
+  </div>
+  <!-- rows injected -->
+</div>
+
+<script>
+(function(){
+  /* ═════ CONFIG — the only part you edit ═════ */
+  var PG_ROWS = [
+    { label:"Accent", sub:"chrome only", vars:["--accent"], options:[
+      ["Cobalt","#2b4ef5"], ["Ink Black","#0b0b0d", true], ["Teal","#0d9488"],
+    ]},
+    { label:"Signals", sub:"good · med · bad", vars:["--good","--med","--bad"], options:[
+      ["Mint/Amber/Coral","#10b981","#f59e0b","#f43f5e"],
+      ["Mint/Amber/Coral · intense","#06c281","#ffa60a","#ff4363", true],
+    ]},
+  ];
+  /* ═════ machinery below — no edits needed ═════ */
+  var root=document.documentElement, bar=document.getElementById("dctl"),
+      ro=document.getElementById("dctl-ro"), cur={};
+  function apply(row,opt){
+    row.vars.forEach(function(v,i){ root.style.setProperty(v,opt[i+1]); });
+    cur[row.label]={name:opt[0], values:opt.slice(1).filter(function(x){return typeof x==="string";})};
+    readout();
+  }
+  function readout(){
+    ro.innerHTML=Object.keys(cur).map(function(k){
+      return k+" <b>"+cur[k].name+" "+cur[k].values.join(" ")+"</b>";
+    }).join(" · ");
+  }
+  PG_ROWS.forEach(function(row){
+    var r=document.createElement("div"); r.className="dctl-row";
+    r.innerHTML='<div class="dctl-lab">'+row.label+(row.sub?'<small>'+row.sub+'</small>':'')+'</div>';
+    var wrap=document.createElement("div"); wrap.className="dctl-opts";
+    row.options.forEach(function(opt){
+      var isDefault=opt[opt.length-1]===true, el;
+      if(row.vars.length===1){
+        el=document.createElement("div"); el.className="dctl-sw";
+        el.style.background=opt[1]; el.setAttribute("data-tip",opt[0]+" "+opt[1]);
+      }else{
+        el=document.createElement("div"); el.className="dctl-chip";
+        el.innerHTML='<div class="dctl-bars">'+opt.slice(1).filter(function(x){return typeof x==="string";})
+          .map(function(c){return '<span style="background:'+c+'"></span>';}).join("")+'</div>'
+          +'<div class="dctl-name">'+opt[0]+'</div>';
+      }
+      el.addEventListener("click",function(){
+        wrap.querySelectorAll(".active").forEach(function(x){x.classList.remove("active");});
+        el.classList.add("active"); apply(row,opt);
+      });
+      if(isDefault){ el.classList.add("active"); apply(row,opt); }
+      wrap.appendChild(el);
+    });
+    r.appendChild(wrap); bar.appendChild(r);
+  });
+  document.getElementById("dctl-copy").addEventListener("click",function(){
+    var txt=Object.keys(cur).map(function(k){
+      return k.toLowerCase()+" "+cur[k].values.join(" ");
+    }).join(" · ");
+    var b=this, done=function(){ b.textContent="Copied ✓"; setTimeout(function(){b.textContent="Copy palette";},1600); };
+    if(navigator.clipboard&&navigator.clipboard.writeText){ navigator.clipboard.writeText(txt).then(done,done); } else { done(); }
+  });
+})();
+</script>

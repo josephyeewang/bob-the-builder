@@ -1,0 +1,223 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>PROJECT — Design Gallery</title>
+<!--
+  DESIGN-GALLERY RATING BOARD (bob design-gallery skill).
+  One self-contained file. Edit ONLY the CONFIG block in the <script> below:
+  - DESIGNS: one row per mockup file in ./designs/ (n = number, g = section key, t = title, d = what it explores)
+  - SECTIONS: the funnel rounds, newest/most-important first
+  Ratings + notes persist in localStorage; "Copy my feedback" builds a paste-ready summary
+  the user hands back to the builder — feedback is BY NUMBER/NAME, never "the third one".
+  Thumbnails are live iframes of the real mockups (scaled), so the board always shows truth.
+-->
+<style>
+  :root{
+    --bg:#0d0f12; --panel:#15181d; --line:#242830; --line2:#30353f;
+    --ink:#eef0f2; --soft:#9aa2ad; --mute:#6b7280; --accent:#c8ff5a;
+    --like:#2fd07a; --meh:#e5b23b; --no:#e5574d;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0}
+  body{
+    background:var(--bg); color:var(--ink);
+    font-family:"IBM Plex Sans", ui-sans-serif, system-ui, -apple-system, sans-serif;
+    -webkit-font-smoothing:antialiased;
+  }
+  .mono{font-family:"IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace}
+  header.top{
+    padding:34px 40px 22px; border-bottom:1px solid var(--line);
+    display:flex; align-items:flex-end; justify-content:space-between; gap:24px; flex-wrap:wrap;
+  }
+  .brand{display:flex; flex-direction:column; gap:8px}
+  .kicker{font-family:"IBM Plex Mono",monospace; font-size:11px; letter-spacing:.22em; text-transform:uppercase; color:var(--mute)}
+  h1{margin:0; font-size:30px; letter-spacing:-.02em; font-weight:600}
+  .sub{color:var(--soft); font-size:14px; max-width:640px; line-height:1.5}
+  .controls{display:flex; gap:10px; align-items:center; flex-wrap:wrap}
+  button.act{
+    font-family:"IBM Plex Mono",monospace; font-size:12px; letter-spacing:.04em;
+    background:var(--accent); color:#0d0f12; border:none; padding:11px 16px; cursor:pointer;
+    border-radius:2px; font-weight:600;
+  }
+  button.ghost{background:transparent; color:var(--soft); border:1px solid var(--line2)}
+  button.ghost:hover{color:var(--ink); border-color:var(--soft)}
+  .legend{padding:14px 40px; border-bottom:1px solid var(--line); color:var(--mute); font-size:12.5px; display:flex; gap:22px; flex-wrap:wrap}
+  .legend b{color:var(--soft); font-weight:600}
+
+  .grid{
+    display:grid; grid-template-columns:repeat(auto-fill, minmax(360px, 1fr));
+    gap:1px; background:var(--line); padding:1px;
+  }
+  .card{background:var(--panel); display:flex; flex-direction:column}
+  .thumbwrap{
+    position:relative; height:246px; overflow:hidden; background:#fff; border-bottom:1px solid var(--line);
+    cursor:pointer;
+  }
+  .thumbwrap iframe{
+    width:1280px; height:878px; border:0;
+    transform:scale(.281); transform-origin:top left; pointer-events:none;
+  }
+  .thumbwrap .open{
+    position:absolute; inset:0; display:flex; align-items:flex-end; justify-content:flex-end;
+    padding:12px; opacity:0; transition:opacity .15s; background:linear-gradient(transparent 60%, rgba(13,15,18,.55));
+  }
+  .thumbwrap:hover .open{opacity:1}
+  .open span{font-family:"IBM Plex Mono",monospace; font-size:11px; background:#0d0f12; color:var(--accent); padding:6px 10px; letter-spacing:.05em}
+  .meta{padding:16px 18px 8px}
+  .meta .num{font-family:"IBM Plex Mono",monospace; font-size:11px; color:var(--mute); letter-spacing:.14em}
+  .meta h2{margin:4px 0 6px; font-size:17px; font-weight:600; letter-spacing:-.01em}
+  .meta p{margin:0; color:var(--soft); font-size:12.5px; line-height:1.5; min-height:38px}
+  .rate{display:flex; align-items:center; gap:8px; padding:10px 18px 8px}
+  .rate button{
+    font-family:"IBM Plex Mono",monospace; font-size:11px; letter-spacing:.05em; text-transform:uppercase;
+    background:transparent; border:1px solid var(--line2); color:var(--soft); padding:7px 11px; cursor:pointer; border-radius:2px;
+  }
+  .rate button:hover{border-color:var(--soft); color:var(--ink)}
+  .rate button.on-like{background:var(--like); border-color:var(--like); color:#062a17}
+  .rate button.on-meh{background:var(--meh); border-color:var(--meh); color:#3a2c05}
+  .rate button.on-no{background:var(--no); border-color:var(--no); color:#380f0c}
+  .note{padding:0 18px 18px}
+  .note textarea{
+    width:100%; resize:vertical; min-height:38px; background:#0f1216; color:var(--ink);
+    border:1px solid var(--line2); border-radius:2px; padding:8px 10px; font-size:12.5px;
+    font-family:"IBM Plex Sans",sans-serif; line-height:1.45;
+  }
+  .note textarea::placeholder{color:var(--mute)}
+  footer{padding:26px 40px 60px; color:var(--mute); font-size:12px; border-top:1px solid var(--line)}
+  dialog#out{background:var(--panel); color:var(--ink); border:1px solid var(--line2); border-radius:4px; max-width:680px; width:92vw; padding:0}
+  dialog#out::backdrop{background:rgba(0,0,0,.6)}
+  dialog .dh{display:flex; justify-content:space-between; align-items:center; padding:16px 20px; border-bottom:1px solid var(--line)}
+  dialog .dh h3{margin:0; font-size:15px}
+  dialog pre{margin:0; padding:18px 20px; white-space:pre-wrap; font-family:"IBM Plex Mono",monospace; font-size:12.5px; line-height:1.6; max-height:52vh; overflow:auto}
+  dialog .df{padding:12px 20px 18px; display:flex; gap:10px; justify-content:flex-end}
+</style>
+</head>
+<body>
+<header class="top">
+  <div class="brand">
+    <div class="kicker">PROJECT · Design Studio · REV A.01</div>
+    <h1>Design Gallery — pick a direction</h1>
+    <div class="sub">Rate each direction and note WHAT specifically works or doesn't (type, color, density, layout) — that steers the next round. Combinations are welcome: "the panels of 12 + the palette of 07".</div>
+  </div>
+  <div class="controls">
+    <button class="act" onclick="buildSummary()">Copy my feedback ↗</button>
+    <button class="ghost act" onclick="if(confirm('Clear all your ratings & notes?')){localStorage.removeItem(KEY);location.reload()}">Reset</button>
+  </div>
+</header>
+
+<div class="legend">
+  <span><b>How to rate:</b> LIKE = keep exploring · MEH = parts work · NO = kill it</span>
+  <span><b>Tip:</b> reference designs by their number — feedback by name is what makes round two exact</span>
+</div>
+
+<main class="grid" id="grid"></main>
+
+<footer>
+  Local preview · <span class="mono">designs/*.html</span> · pure look-and-feel mockups on REAL product content — nothing wired to live data.
+</footer>
+
+<dialog id="out">
+  <div class="dh"><h3>Your feedback — paste this back to me</h3><button class="rate" onclick="document.getElementById('out').close()" style="border:1px solid var(--line2);padding:6px 10px;cursor:pointer;background:transparent;color:var(--soft)">close</button></div>
+  <pre id="outtext"></pre>
+  <div class="df"><button class="act" onclick="copyOut()">Copy to clipboard</button></div>
+</dialog>
+
+<script>
+/* ═══════════════ CONFIG — the only part you edit ═══════════════ */
+const KEY = "design_gallery_feedback_v1"; // bump when you want a clean slate
+const DESIGNS = [
+  // {f:"01-style-name.html", n:"01", g:"round1", t:"01 · Style Name", d:"What this direction explores."},
+];
+const SECTIONS = [
+  // {key:"round1", label:"Round 1 — breadth", blurb:"12-24 directions across the style space"},
+  // Later rounds go ABOVE earlier ones (newest first); mark the live focus with ★.
+];
+/* ═══════════════ machinery below — no edits needed ═══════════════ */
+
+let state = {};
+try{ state = JSON.parse(localStorage.getItem(KEY)||"{}"); }catch(e){ state={}; }
+function save(){ localStorage.setItem(KEY, JSON.stringify(state)); }
+
+const grid = document.getElementById("grid");
+function makeCard(dz){
+  const s = state[dz.f] || {rate:"", note:""};
+  const card = document.createElement("div");
+  card.className="card";
+  card.innerHTML = `
+    <div class="thumbwrap" onclick="window.open('designs/${dz.f}','_blank')">
+      <iframe src="designs/${dz.f}" loading="lazy" scrolling="no" tabindex="-1"></iframe>
+      <div class="open"><span>OPEN FULL ↗</span></div>
+    </div>
+    <div class="meta">
+      <div class="num">DESIGN ${dz.n}</div>
+      <h2>${dz.t}</h2>
+      <p>${dz.d}</p>
+    </div>
+    <div class="rate" data-f="${dz.f}">
+      <button data-r="like" class="${s.rate==='like'?'on-like':''}">Like</button>
+      <button data-r="meh"  class="${s.rate==='meh'?'on-meh':''}">Meh</button>
+      <button data-r="no"   class="${s.rate==='no'?'on-no':''}">No</button>
+    </div>
+    <div class="note">
+      <textarea placeholder="what worked / what didn't — type, color, density, layout…" data-f="${dz.f}">${s.note||""}</textarea>
+    </div>`;
+  return card;
+}
+function makeHeader(label, n, blurb){
+  const h = document.createElement("div");
+  h.style.cssText = "grid-column:1/-1; background:var(--bg); display:flex; align-items:baseline; gap:12px; padding:16px 4px 9px; border-bottom:1px solid var(--line2)";
+  h.innerHTML = `<span style="font-size:18px;font-weight:600;color:var(--ink)">${label}</span>`
+    + `<span style="font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:.06em;color:var(--mute)">${n} DESIGNS</span>`
+    + `<span style="font-size:12px;color:var(--soft)">· ${blurb}</span>`;
+  return h;
+}
+SECTIONS.forEach(sec=>{
+  const items = DESIGNS.filter(d=>d.g===sec.key);
+  if(!items.length) return;
+  grid.appendChild(makeHeader(sec.label, items.length, sec.blurb));
+  items.forEach(dz=>grid.appendChild(makeCard(dz)));
+});
+
+grid.addEventListener("click", e=>{
+  const b = e.target.closest(".rate button"); if(!b) return;
+  const f = b.parentElement.dataset.f, r = b.dataset.r;
+  if(!state[f]) state[f]={rate:"",note:""};
+  state[f].rate = (state[f].rate===r) ? "" : r;
+  save();
+  const wrap=b.parentElement;
+  [...wrap.children].forEach(x=>x.className="");
+  if(state[f].rate) b.className="on-"+r;
+});
+grid.addEventListener("input", e=>{
+  if(e.target.tagName!=="TEXTAREA") return;
+  const f=e.target.dataset.f;
+  if(!state[f]) state[f]={rate:"",note:""};
+  state[f].note=e.target.value; save();
+});
+
+function buildSummary(){
+  const order={like:0,meh:1,no:2,"":3};
+  const rows=[...DESIGNS].map(d=>({d, s:state[d.f]||{rate:"",note:""}}))
+    .sort((a,b)=>(order[a.s.rate]-order[b.s.rate]) || (a.d.n>b.d.n?1:-1));
+  let out="DESIGN GALLERY — my feedback\n============================\n\n";
+  const g={like:[],meh:[],no:[],"":[]};
+  rows.forEach(r=>g[r.s.rate].push(r));
+  const lab={like:"LIKE",meh:"MEH",no:"NO"};
+  ["like","meh","no",""].forEach(k=>{
+    const arr=g[k]; if(!arr.length) return;
+    out += `## ${k===""?"UNRATED":lab[k]}\n`;
+    arr.forEach(r=>{ out += `- ${r.d.n} ${r.d.t}${r.s.note?` — ${r.s.note}`:""}\n`; });
+    out += "\n";
+  });
+  document.getElementById("outtext").textContent=out.trim();
+  document.getElementById("out").showModal();
+}
+function copyOut(){
+  navigator.clipboard.writeText(document.getElementById("outtext").textContent)
+    .then(()=>{const b=event.target; const o=b.textContent; b.textContent="Copied ✓"; setTimeout(()=>b.textContent=o,1400);});
+}
+</script>
+</body>
+</html>
