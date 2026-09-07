@@ -7,7 +7,7 @@ decision log) found one mechanism behind every incident: **a prose intermediary 
 a summary, a stale code comment — stood in for the mock file at a hand-off.** This protocol
 makes the fix mechanical. Follow it for EVERY task that touches user-facing visuals.
 
-## The five rules
+## The seven rules
 
 ### 1. Read the mock FILE first — prose is never a sufficient input
 Before writing or restyling any surface, open the winning mock (`designs/NN-*.html`) and work
@@ -33,6 +33,11 @@ phase closes only when the real surfaces consume the tokens/components — check
 ### 4. Finish with an adversarial diff — value-level AND rendered
 - **Value diff:** element by element, compare your output's fonts/weights/sizes/radii/colors/
   spacing against the mock's CSS. Assume you drifted; hunt for it.
+- **Verify the COMPUTED font, not the class name.** Font infrastructure substitutes silently:
+  a `font-mono` class with no fontFamily mapping to the token file renders Menlo/Times and the
+  page looks "off" with every class technically present (struck twice on EMBT, PR #206→#210).
+  The value diff includes the rendered typeface + weight (screenshot zoom or computed style),
+  and the framework font config must mirror the tokens file.
 - **Rendered diff:** screenshot the REAL page (real data) next to the mock and compare.
   Headless Chrome needs no tooling:
   `"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" --headless --screenshot=out.png
@@ -72,12 +77,50 @@ phase closes only when the real surfaces consume the tokens/components — check
   the moment it's stale — InsiderIntent's global stylesheet header still said "Robinhood-style,
   white" seven weeks after the lock, mis-briefing every session that opened it. When you lock,
   grep for prior design self-descriptions (css headers, READMEs, old spec sections) and rewrite
-  them to point at the mock.
+  them to point at the mock. The same rot applies to MEMORY: a remembered brand hex decays fast
+  (EMBT shipped purple widgets from a stale memory note months after the accent moved to red) —
+  never restyle from a remembered value; re-read the tokens file or the mock.
+
+### 6. The reskin contract — restyling an existing surface locks its information architecture
+When the new look is applied to a surface the user has already perfected, the lock covers ONLY
+visual atoms (color, border, font, radius, shadow, spacing). The content, columns, groupings,
+ordering, labels, grades, and interaction depth are a CONTRACT — "rebuilding the spirit of a
+section in a new layout counts as reinventing and gets rejected" (EMBT, repeatedly; the user's
+most emphatic design rule). Two tests:
+- **Same shapes in the same places?** Put old and new side by side. Same shapes → reskin.
+  Different shapes → you are redesigning; stop and ask.
+- **Re-skin in place, never swap-and-lose-depth.** Swapping a battle-tested component for a
+  prettier presentational one deletes its accumulated behavior (expandable detail, receipts,
+  edge-state handling — the D-312 rejection). Restyle the existing component's classes instead.
+Consult LOCKED-DESIGN's **Pinned decisions & deliberate exceptions** before "fixing" anything —
+a deviation from the mock may be an approved ruling (EMBT kept a page background the gallery
+never showed), and un-fixing it re-litigates a closed decision.
+
+### 7. Iteration hygiene — experiments must die cleanly
+Design experiments haunt production for months when they can't be fully reverted (EMBT: a
+partial revert took 3 commits over 2 weeks; an un-retired experiment overlay was still mutating
+components a quarter later). Rules:
+- An experiment's styling lives in ONE revertible layer (a skin class / overlay / branch) —
+  never scattered as inline style props and per-site class swaps across components.
+- Ending an experiment = a **revert-completeness sweep**: grep for the wrapper components AND
+  inline class swaps AND the CSS overlay; a class with no global definition plus an inline
+  style prop is the tell of a leftover visual driver. RETIRE experiment CSS when it ends.
+- Gallery work never edits production files — mockups live in their own directory; check
+  `git diff --stat` before committing a gallery round (mislabeled "gallery" PRs that touched
+  product components happened).
+- Galleries are internal: keep them UNROUTED (a plain folder, opened as files) or, if they must
+  be app routes, auth-gate + noindex them (12 internal design routes once sat publicly
+  indexable). Gitignore scratch screenshots (`*-sheet.png`, audit shots) — one `git add -A`
+  committed one.
 
 ## Task checklist (paste into any visual task)
-- [ ] Opened the winning mock file; worked from its literal CSS
+- [ ] Opened the winning mock file; worked from its literal CSS (never prose or memory)
 - [ ] No mock sample content ported as defaults/hardcodes; every figure traces to real data
+- [ ] Reskin contract honored: same shapes in the same places; re-skinned in place; the
+      deliberate-exceptions list consulted before "fixing" any deviation
 - [ ] Real pages consume the tokens/components (count it)
-- [ ] Value-level adversarial diff done
-- [ ] Rendered screenshot diff done (real page, real data)
-- [ ] CI token gate passing; no new counterfeit design descriptions introduced
+- [ ] Value-level adversarial diff done (incl. COMPUTED fonts/weights)
+- [ ] Rendered screenshot diff done (real page, real data, PRODUCTION build)
+- [ ] CI token gate passing; no new counterfeit design descriptions or stale-memory values
+- [ ] Experiment/gallery hygiene: one revertible layer, no production files touched, no
+      public gallery routes, scratch shots ignored

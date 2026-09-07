@@ -39,6 +39,14 @@
 - **Base register:** body font-size / line-height from the mock.
 - Shadows, borders, chart stroke widths/fills/legends — literal values or "see mock lines N-M".
 
+## Pinned decisions & deliberate exceptions (do NOT re-litigate)
+<!-- Every place the PRODUCT intentionally deviates from the mock, and every closed ruling a
+     later session might be tempted to "fix" or tidy away. Without this list, fidelity audits
+     un-fix approved exceptions and fresh sessions re-open settled debates (both happened).
+     e.g. "the page-level graph-paper background STAYS even though gallery pages render white
+     (user ruling, <date>)" · "the skin overlay architecture is deliberate, not a kludge". -->
+- …
+
 ## Build note
 This is the design SSOT map. Wired into the app it becomes CSS tokens (one variable per palette +
 surface value); a light/dark toggle swaps only the surface set. The transfer itself follows

@@ -17,7 +17,7 @@ fidelity — fixed by the mock-is-canonical discipline in `templates/fidelity-pr
 |---|---|---|
 | **HTML mockups** | Product UI, dashboards, data-dense surfaces — anything that must transfer to code EXACTLY | Numbered self-contained `.html` files on REAL product content + the rating board (`templates/gallery-index.html`) + live playground (`templates/playground-controls.html`) |
 | **Image comps** | Art direction, homepage/hero, moodboards, brand feel, logo *exploration* | The **design-mockups** skill (Nano Banana funnel, theme→variation, refs-by-number) — invoke it for this lane |
-| **SVG logo board** | Converging a mark once direction is known | One HTML file: each concept is a parameterized inline-SVG function, rendered across context tiles (light/dark, sizes, in-context lockups). The winner ships as ONE canonical component (hard-coded colors, geometry exported to favicon/OG) |
+| **SVG logo board** | Converging a mark once direction is known | One HTML file: each concept is a parameterized inline-SVG function, rendered across context tiles (light/dark, sizes, in-context lockups). The winner ships as ONE canonical component — hard-coded colors, **no font dependency** (a type-set mark breaks in favicon/OG/email; draw the glyphs as geometry), exported to favicon/OG from the same SVG |
 
 Rule of thumb: image lane to FIND a direction cheaply; HTML lane the moment the surface is a
 real product UI (image comps can't be transferred exactly — HTML mockups ARE the spec).
@@ -50,9 +50,21 @@ build round. That is why this sits at Bob Step 5.5, ahead of the first line of p
    collision), and paste `templates/playground-controls.html` into a copy: swatch rows live-set
    the CSS variables so the user auditions 15 accents × 9 triads on the real design in minutes.
    One playground beats twenty static variants. "Copy palette" emits the lock string.
-5. **LOCK.** Write `LOCKED-DESIGN.md` from `templates/LOCKED-DESIGN.template.md` — exact values
-   only, opening with the mock-is-canonical banner. Set the playground's defaults to the locked
-   choice so the file reopens showing the decision.
+5. **Micro-variant rounds (when diffs get subtle).** Whole-page boards stop working once
+   variants differ in one element — the user "can't tell the differences without scrolling both
+   the whole way" (three comparison UIs were rejected before this one worked). Switch to the
+   **feature-lab pattern**: isolate the ONE varying element, show 4-5 variants side by side,
+   CROP each to the differing region, and label what differs on each. Offer options, never a
+   single answer — "I like X but more Y" gets 4-5 variations of X in the same file, with the
+   prior round kept visible for comparison (an under-provisioned axis takes 4 rounds instead
+   of 1; a color choice once burned 4 rounds / 15+ options).
+6. **LOCK.** Write `LOCKED-DESIGN.md` from `templates/LOCKED-DESIGN.template.md` — exact values
+   only, opening with the mock-is-canonical banner, closing with the **pinned decisions &
+   deliberate exceptions** list. **Validate the lock on the DENSEST surface first** — a look
+   that sings on a hero can fail on the data-heavy report (a full style port was reverted from
+   one surface but kept on another, leaving two visual languages coexisting); mock the hardest
+   surface before locking globally. Set the playground's defaults to the locked choice so the
+   file reopens showing the decision.
 
 ## The transfer (where it always broke — now mechanical)
 Follow `templates/fidelity-protocol.md` for every build/restyle task after the lock. The five
@@ -79,6 +91,13 @@ counterfeit spec that mis-briefs every future session).
   structural base is chosen; palette/type/radius decisions collapse from rounds into minutes.
 - **The lock is values, not vibes.** "Clean grotesk, ~8-10px, font TBD" produced the 70% drift;
   "Archivo 700/800/900, panels 3px, tags 2px, NOT rounded-full" produced an exact product.
+- **The loop shape: one big autonomous pass, then the user picks from boards.** Not
+  surgical-note ping-pong — do a full pass, render every ambiguous axis as an inline
+  mini-gallery of 3-4 options, and let the user scroll once and answer "badge B, pill B, nav A"
+  (the user's own redirect of a drifting iteration loop).
+- **Codify rejections as standing hard rules.** "No offset block shadows", "priority is the
+  PILL, not a colored edge", "mono font banned in report UI" — each user rejection becomes a
+  written rule in the lock doc, or it WILL be re-tried by a later session (each of these was).
 - **Logos: generate wide in the image lane, converge in code.** The SVG board renders every
   candidate at favicon size and on dark BEFORE choosing; the shipped mark is one component with
   hard-coded colors (a mark that re-tokenizes per theme stops being a mark).

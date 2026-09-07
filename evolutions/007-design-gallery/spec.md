@@ -30,6 +30,25 @@ only by founder-demanded adversarial audits. This evolution turns that rescue ri
 step's exit condition and adds hard gates (CI token gate, consumption count, mock-is-canonical
 banners) so fidelity fails loudly instead of decaying silently.
 
+## Bulletproofing audit (same day)
+
+After the initial ship, an exhaustive scar inventory was mined from BOTH origin projects
+(EMBT memory + repo docs + briefs + methodology; InsiderIntent decision log + git history;
+Bob's own records) — 15 ranked scars across the full arc. Nine were already covered; six gaps
+were patched: **the reskin contract** (restyling an existing surface locks its information
+architecture — visual atoms only, same-shapes test, re-skin in place, consult the
+deliberate-exceptions list; the user's most emphatic rule, violated repeatedly on EMBT),
+**iteration hygiene** (experiments in one revertible layer; revert-completeness sweeps;
+retire experiment CSS; gallery work never touches production files; galleries unrouted or
+gated+noindexed; scratch shots gitignored), **the font-substitution class** (verify COMPUTED
+fonts; framework font config mirrors tokens), **the feature-lab pattern** for subtle-diff
+rounds (isolate/crop/label, 4-5 options per axis, options-not-answers, keep the prior round),
+**pinned decisions & deliberate exceptions** in the lock template (so audits don't un-fix
+approved deviations and sessions don't re-litigate), and **lock-on-the-densest-surface**
+(a look that wins on the hero can fail on the report — EMBT ran a 3-commit partial revert
+learning this). Plus: review on the PRODUCTION build (dev hot-reload CSS lies), the loop shape
+(one big pass + inline mini-galleries), and rejections-become-hard-rules.
+
 ## Design decisions
 
 - **The machinery versions WITH Bob** (`skills/` in this repo, symlinked into `~/.claude/skills`)
