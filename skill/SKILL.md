@@ -1,10 +1,30 @@
 ---
 name: bob
-description: "Use when the user wants to build, audit, or evolve a product using the Bob the Builder protocol. Triggers: any mention of 'bob', 'bob the builder', 'build protocol', 'NEW mode', 'AUDIT mode', 'EVOLVE mode', or requests to scope/spec/build a new product systematically, assess an existing partially-built product against a discipline, or extend an existing product with the same protocol. Optimized for a non-engineer product leader using Claude Code for implementation. Covers spec creation, phase-by-phase build with human gates, reconciliation, adversarial review, behavioral cores for AI products, and a 37-lens audit library (v2.17, extended through v2.33) covering engineering / UX / AI / performance / reach / operational / strategic / growth angles — including end-to-end input/data-flow tracing (L31), analytical method soundness across AI and deterministic logic (L32), in-product output register/audience-fit (L33), and a unified SEO / AEO / GEO discoverability audit (L34) that scores whether search, answer, and generative engines (ChatGPT / Perplexity / AI Overviews) find, rank, and cite the site and then delivers a three-altitude action plan — tactical fixes, content to produce, and strategic opportunity discovery (what to create next) — synthesized from 46+ industry sources plus the Princeton GEO paper — with an explicit execution-first principle (v2.17.1) that drives Playwright / Schemathesis / Garak / API queries rather than only reading code, and a self-learning loop (v2.18) where each audit auto-emits a lens retro that — once accumulated — flags which lenses to sharpen, under human judgment (Bob never auto-edits its own lenses), refined in v2.19 with post-deploy verification and class-level fix enforcement drawn from the first real field retro, and a spec-phase Coverage Taxonomy (v2.25, Step 1b) — a fixed 9-category Clear/Partial/Missing checklist harvested from GitHub Spec Kit's /clarify that catches structural spec gaps before the build, and (v2.32) a perpetual, generative data-fidelity crawler (L37) — a STANDING scheduled audit that walks the SOURCE→EXTRACT→INTERPRET→LINK→COLLAPSE→OUTCOME→SERVE chain, generates falsifiable fidelity hypotheses against INDEPENDENT ORACLES (value↔shares×price, implied-price, null-rate census, collapse-ratio, coverage-depth, cross-source reconciliation), and on every confirmed defect emits a new reactive invariant back into the check registry (imagination → memory — the perpetual complement to L31's one-shot trace + L32's method soundness, so the human stops being the linchpin that catches the next fidelity bug)."
+description: "Build, audit, or evolve a product with the Bob the Builder protocol — Joe's spec→build→audit discipline for a non-engineer product leader directing Claude Code. Use on any mention of 'bob', 'bob the builder', 'build protocol', 'NEW mode', 'AUDIT mode', 'EVOLVE mode', or when the user wants to scope/spec/build a new product systematically, assess a partially-built product against a discipline, or extend an existing product the same way. Covers spec creation with a coverage checklist, design gallery + lock, a pre-build review gate, phase-by-phase build with human gates, reconciliation, adversarial review, behavioral cores for AI products, and a 37-lens audit library (engineering / UX / AI / performance / reach / operational / strategic / growth, incl. data-flow tracing, method soundness, output register, SEO/AEO/GEO, and a standing data-fidelity crawler) that runs real tools, not just code reads."
 user-invocable: true
 ---
 
 # Bob the Builder
+
+## What Bob covers (capability summary — moved out of the trigger description, v2.34)
+- **37-lens audit library** (v2.17, extended through v2.33) across engineering / UX / AI / performance / reach /
+  operational / strategic / growth angles. Named lenses: **L31** end-to-end input/data-flow tracing; **L32**
+  analytical method soundness across AI and deterministic logic; **L33** in-product output register / audience
+  fit; **L34** unified SEO / AEO / GEO discoverability audit — scores whether search, answer, and generative engines
+  (ChatGPT / Perplexity / AI Overviews) find, rank, and cite the site, then delivers a three-altitude plan (tactical
+  fixes, content to produce, strategic opportunity discovery), synthesized from 46+ industry sources + the Princeton
+  GEO paper; **L37** (v2.32) a perpetual, generative data-fidelity crawler — a STANDING scheduled audit that walks
+  SOURCE→EXTRACT→INTERPRET→LINK→COLLAPSE→OUTCOME→SERVE, generates falsifiable hypotheses against INDEPENDENT ORACLES
+  (value↔shares×price, implied-price, null-rate census, collapse-ratio, coverage-depth, cross-source reconciliation),
+  and on every confirmed defect emits a new reactive invariant into the check registry (imagination → memory; the
+  perpetual complement to L31's one-shot trace + L32's method soundness).
+- **Execution-first principle** (v2.17.1): audits drive Playwright / Schemathesis / Garak / API queries rather than
+  only reading code.
+- **Self-learning loop** (v2.18, refined v2.19): each audit auto-emits a lens retro; accumulated retros flag which
+  lenses to sharpen, under human judgment — Bob never auto-edits its own lenses. v2.19 added post-deploy
+  verification and class-level fix enforcement from the first real field retro.
+- **Spec-phase Coverage Taxonomy** (v2.25, Step 1b): a fixed 9-category Clear/Partial/Missing checklist harvested
+  from GitHub Spec Kit's /clarify that catches structural spec gaps before the build.
 
 A systematic protocol for building, auditing, and evolving products with Claude Code. Designed for a non-engineer product leader.
 
