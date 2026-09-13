@@ -1,6 +1,6 @@
 ---
 name: design-gallery
-description: "The design-gallery machinery: explore a product's look-and-feel as a rated gallery of mockups, converge through rounds to a LOCKED design, then transfer it into the real product EXACTLY (no re-creation-from-description drift). Three lanes: HTML mockups for product UI/dashboards where exactness must survive the transfer to code; AI-image comps (via the design-mockups skill) for art direction, heroes, moodboards, brand; code-drawn SVG concept boards for logos/marks. Use when the user wants to explore visual directions for a dashboard/app/website, run a design gallery, audition palettes/parameters live, lock a design, or push a locked design through to the real product. Proven on InsiderIntent (55-mockup gallery → locked design 45 → wired product, D-312) and Explain My Blood Test (~250 image comps → locked direction). Pairs with Bob the Builder Step 5.5."
+description: "The design-gallery machinery: explore a product's look-and-feel as a rated gallery of mockups, converge through rounds to a LOCKED design, then transfer it into the real product EXACTLY (no re-creation-from-description drift). Four lanes: HTML mockups for product UI/dashboards where exactness must survive the transfer to code; AI-image comps (via the design-mockups skill) for art direction, heroes, moodboards, brand; code-drawn SVG concept boards for logos/marks; a landing-page scroll-story lane (via the scroll-craft plugin) for marketing pages where scroll is the storytelling device. Includes the agent/chat-surface primitives checklist. Use when the user wants to explore visual directions for a dashboard/app/website, run a design gallery, audition palettes/parameters live, lock a design, or push a locked design through to the real product. Proven on InsiderIntent (55 mockups → lock → wired product) and Explain My Blood Test. Bob Step 5.5."
 user-invocable: true
 ---
 
@@ -18,9 +18,13 @@ fidelity — fixed by the mock-is-canonical discipline in `templates/fidelity-pr
 | **HTML mockups** | Product UI, dashboards, data-dense surfaces — anything that must transfer to code EXACTLY | Numbered self-contained `.html` files on REAL product content + the rating board (`templates/gallery-index.html`) + live playground (`templates/playground-controls.html`) |
 | **Image comps** | Art direction, homepage/hero, moodboards, brand feel, logo *exploration* | The **design-mockups** skill (Nano Banana funnel, theme→variation, refs-by-number) — invoke it for this lane |
 | **SVG logo board** | Converging a mark once direction is known | One HTML file: each concept is a parameterized inline-SVG function, rendered across context tiles (light/dark, sizes, in-context lockups). The winner ships as ONE canonical component — hard-coded colors, **no font dependency** (a type-set mark breaks in favicon/OG/email; draw the glyphs as geometry), exported to favicon/OG from the same SVG |
+| **Scroll story** | Marketing pages ONLY (homepage, launch page, joe.wang) where the visitor's scroll tells the story — feeling curve, page grammar, scroll devices, one signature move, scroll QA | The **scroll-craft** plugin (`/nateherk-design:scroll-craft`), run AFTER the lock, with Joe-specific overrides in `references/scroll-story-lane.md` |
 
 Rule of thumb: image lane to FIND a direction cheaply; HTML lane the moment the surface is a
 real product UI (image comps can't be transferred exactly — HTML mockups ARE the spec).
+Scroll-story lane only for a marketing page, only after its lock exists — it originates design
+and must never redefine tokens. Agent/chat surfaces: walk `references/agent-ui-primitives.md`
+before mocking so every state (thinking, streaming, awaiting approval, failed) is on the board.
 
 Two more proven uses of the HTML lane beyond look-and-feel: **dataviz concept labs** (N ways to
 visualize one analytical idea, interactive, on real-shaped data — InsiderIntent ran 8-concept and
@@ -107,6 +111,10 @@ counterfeit spec that mis-briefs every future session).
 - `templates/playground-controls.html` — the live-parameter bar (paste into a mockup copy)
 - `templates/LOCKED-DESIGN.template.md` — the lock doc
 - `templates/fidelity-protocol.md` — the transfer discipline + CI gate snippet + checklist
+- `references/scroll-story-lane.md` — lane 4: when to use scroll-craft, how it sequences with
+  the lock, the overrides for Joe's setup (assets via design-mockups, hero preference optional)
+- `references/agent-ui-primitives.md` — the 27-piece checklist for agent/chat surfaces (from
+  beautiful-ui); mock every state, re-tokenize before shipping
 - Image lane: `skills/design-mockups/` (own SKILL.md; includes `references/build-bridge.md`
   for the comp→code handoff, motion stack, and DESIGN.md spec layer)
 
