@@ -1,7 +1,7 @@
-# BUILD PROTOCOL v2.38
+# BUILD PROTOCOL v2.39
 
 > A systematic framework for building, auditing, and evolving products with Claude Code.
-> Created: 2026-04-15. Last updated: 2026-05-25. Owner: Joe Wang.
+> Created: 2026-04-15. Last updated: 2026-09-13. Owner: Joe Wang.
 
 ---
 
@@ -423,6 +423,7 @@ In DLL, specs were written comprehensively upfront (good) but never updated duri
 7. **Regression check:** Re-test critical flows from ALL prior phases. If any prior flow is broken → fix before advancing.
 8. **Global invariants:** Re-verify all project invariants (see Appendix E). If any violated → fix before advancing.
 9. **Spec consistency:** Confirm implementation still matches domain specs, Architecture Contract, and Behavioral Core. If drift detected → reconcile before advancing.
+10. **Fresh-eyes clean on Tier-1 deliverables (v2.39 — Rule 30):** Tier the phase's output by consequence — **Tier 1** = numbers or data someone acts on (financials, health data, scoring, pipelines, migrations, backfills, any join / collapse / dedup / group step, anything feeding a displayed figure); **Tier 2** = code without numbers; **Tier 3** = thinking work. For Tier 1: after the builder's own Rule-25 forensics, hand the artefacts + spec to a **fresh-context auditor** (a new subagent or session that did NOT build the phase) to run the scoped lens panel plus a plain re-read against the ask. Triage every finding **Material** (changes a displayed number, a decision, or data completeness) / **Minor** / **Cosmetic**. Material findings open = stop condition; fix and re-audit until zero. Log `{tier, class_of_work, material, minor, cosmetic}` in `audit-ledger.json`. Tier 2/3 phases record their tier and skip. Never wait for the human to ask for this audit — it is the phase's exit, not a favor.
 
 If ANY check fails → fix before proceeding. Do NOT advance to next phase with known regressions or invariant violations.
 

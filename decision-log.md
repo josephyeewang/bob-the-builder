@@ -214,6 +214,24 @@ The companion `audit-log.md` records *deferred* items (Defer verdicts that may s
 
 ---
 
+### D-007: "Done" is tiered by consequence; Tier-1 work exits only on a fresh-context audit with zero Material findings
+
+- **Date:** 2026-09-13
+- **Status:** Accepted
+- **Context:** Across InsiderIntent and other data-heavy work the founder observed that every post-milestone audit he *requested* found real errors — 100% of the time — and had begun hand-instructing every project to audit every milestone. Rule 24 (v2.30) already made lens audits fire at phase boundaries and Rule 25 (v2.31) defined the silent-failure forensics, but every Phase Gate item was executed by the context that built the work; the fresh re-read — the mechanism that actually finds the defects — remained pull-based. Meanwhile, "audit everything" has no stop condition: an auditor asked to find errors always finds something.
+- **Decision:** Rule 30 + Phase Gate item 10. Every deliverable is tiered (1 = numbers/data someone acts on; 2 = code without numbers; 3 = thinking work). Tier 1 exits only after a fresh-context auditor (new subagent/session, never the builder) reports zero **Material** findings; findings are always triaged Material / Minor / Cosmetic; `audit-ledger.json` records counts per audit. Tier demotion is *proposed* after five consecutive zero-Material audits on a class of work — never auto-applied (consistent with D-005). Mirrored as a plain-language "Definition of done" rule in the founder's global CLAUDE.md so non-Bob work inherits it.
+- **Alternatives considered:**
+  - *Blanket "always audit every milestone."* Rejected — no stop condition, doubles cost on research/drafts where it buys nothing, and the founder would abandon it within weeks.
+  - *Enforce via a Stop hook that asks "which tier? has the fresh audit run?" on every task end.* Deferred — guarantees the question is asked but adds a line of noise to every trivial task; revisit if Rule 30 is observed to be skipped in practice (the ledger will show it).
+  - *Make the builder's self-audit stricter instead of adding a fresh context.* Rejected — same context, same blind spots; the 100% find rate came specifically from fresh reads.
+- **Consequences:**
+  - Tier-1 milestones cost ~1.5–2× in tokens/time. Accepted deliberately: cheaper than the founder as scheduler + linchpin.
+  - `audit-ledger.json` gains a per-audit severity record; `bob-init`/`coherence-check.sh --build-integrity` should learn to gate on item 10 (not yet implemented — Rule 30 is currently enforced by protocol prose, like Rule 25 was before L37).
+  - Tier boundaries will be wrong at first. The ledger is the correction mechanism; the founder should expect 1–2 tier reassignments per project in the first month.
+- **Revisit trigger:** (a) the ledger shows Tier-1 audits being skipped or Material findings routinely reclassified as Minor to unblock — then adopt the Stop-hook alternative; (b) three projects in a row show zero Material findings across all Tier-1 classes — the tiers are too broad, tighten Tier 1; (c) Material findings keep appearing on Tier-2 work — a class is mis-tiered, promote it.
+
+---
+
 ## Anti-pattern reminder
 
 ADRs that describe the decision without consequences are useless. The Consequences section is where future-you discovers why the seemingly clever shortcut is the thing now blocking a new requirement. Every decision in this file has a Consequences block — keep it that way.
