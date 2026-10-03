@@ -76,11 +76,11 @@ Per D-003 (orchestrate, don't reinvent): L04 orchestrates Semgrep, CodeQL, OWASP
    - **Elevation of privilege** — can a lower-privilege actor gain higher access?
 
 3. **OWASP Top 10:2025 sweep.** For each Top 10 category, check whether the product has any instances:
-   - Broken Access Control — IDOR, missing function-level authz, parameter tampering
+   - Broken Access Control — IDOR, missing function-level authz, parameter tampering, **mass assignment** (a request body carrying extra fields — `role`, `owner_id`, `price`, `is_admin` — that the server binds straight onto the record), **parameter pollution** (the same parameter sent twice, or in both query string and body, read differently by the validator and the handler)
    - Security Misconfiguration — default credentials, verbose errors, unnecessary services
    - Supply Chain Failures — outdated/vulnerable deps, unverified npm/pip installs, typosquatting risk
    - Cryptographic Failures — weak crypto, weak random, weak password storage
-   - Injection — SQL/NoSQL/command/LDAP/XPath/HTML
+   - Injection — SQL/NoSQL/command/LDAP/XPath/HTML, plus **regex denial of service (ReDoS)** — a user-supplied string fed to a backtracking pattern (nested quantifiers like `(a+)+`, or a user-supplied pattern) that pins the server's CPU
    - Insecure Design — fundamental design choices that make security retrofits impossible
    - Auth Failures — session fixation, weak password resets, missing MFA, JWT misuse
    - Data Integrity Failures — unsigned tokens, untrusted deserialization, CI/CD without verification
@@ -155,6 +155,7 @@ Per D-003 (orchestrate, don't reinvent): L04 orchestrates Semgrep, CodeQL, OWASP
 26. **(v2.40, AI products)** Does an approval bind the exact action, arguments, target and amount — and survive a retry or a resumed session without mutating or duplicating?
 27. **(v2.40)** Did the wildcard and literalist hunters run?
 28. **(v2.40)** If any target-controlled code was executed, were **all** sandbox controls enforced — and if not, was execution refused rather than run anyway with a caveat?
+29. **(2026-10)** Do write endpoints accept only an explicit allowlist of fields (no mass assignment)? Is each parameter read from exactly one place (no pollution)? Does every regex that sees user input avoid nested quantifiers or run with a timeout (no ReDoS)? *(Harvested from `zeamp/ai-security-checklist-prompt.md`, GPL-3.0 — the three named checks only, no text copied; the rest of that prompt was already covered here.)*
 
 ## Output schema
 
