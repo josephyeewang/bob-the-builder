@@ -16,7 +16,7 @@ Principle 7 says a passing test suite verifies known-incident classes and syntac
 
 The exact defect class Joe has hit repeatedly in data work — a 100%-null column read as "no signal," a collapse key that silently blended distinct entities — has the same shape here: *an absence presented as a result*. A lens that ran four of its fourteen check questions and reported no findings is the audit-layer version of the dead axis.
 
-Cloudflare's published run is the empirical anchor: **20,799 raw candidates → 7,245 actionable findings across 128 repositories**, with the wrong-rejection rate falling **40% → 11%**, and one ~30k-line repository going from first look to opened pull request in **14 hours**. Their own reported figure for why one pass is not enough: *"a single run found roughly half of the vulnerabilities that repeated runs found in total."*
+Cloudflare's published run is the empirical anchor: **20,799 raw candidates → 7,245 actionable findings across 128 repositories**, with the share of raw candidates thrown out at first validation falling **40% → 11%** (Cloudflare credits better context from their Recon phase for that — it is a candidate-quality number, not a rate of real bugs wrongly dismissed; corrected 2026-10-03 against the source blog), and one ~30k-line repository going from first look to opened pull request in **14 hours**. Their own reported figure for why one pass is not enough: *"a single run found roughly half of the vulnerabilities that repeated runs found in total."*
 
 **One pass is about 50% coverage.** Plan accordingly, and never let a single clean run stand as proof of anything but that pass.
 
@@ -84,7 +84,7 @@ Bob's fresh-context rule (Rule 30) already says the auditor must not be the buil
 
 The cost is real — roughly one to two extra agent calls per surviving finding — which is exactly why §4 exists.
 
-**This is the mechanism behind the 40% → 11% wrong-rejection improvement.** It is the single highest-value item in this file.
+**This is the single highest-value item in this file** — it is what keeps unconfirmed findings away from a human. *(Correction 2026-10-03: an earlier version said this refutation pass was "the mechanism behind the 40% → 11% wrong-rejection improvement." Cloudflare's blog says otherwise: 40% → 11% is the first-stage rejection rate of raw candidates, and they attribute the drop to better Recon context, not to refutation. The refutation pass stands on its own logic; it has no published number of its own. Measure it against our ledger.)*
 
 ---
 
