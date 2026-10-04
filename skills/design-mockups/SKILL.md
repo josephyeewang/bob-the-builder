@@ -38,7 +38,7 @@ Every run also writes `_contact.png` + `gallery-ALL.html` (one searchable, NUMBE
 6. **Build the winner** — hand the winning comp + a DESIGN.md to a coding agent; reuse the 4K backdrop as a real asset; implement motion with GSAP + Lenis + Motion.dev. Full bridge (spec layer, motion-stack table, honest limits): `references/build-bridge.md`.
 
 ## Hard-won heuristics (the real IP — apply every time)
-- **Reference-class anchoring decides the cluster.** Naming Linear/Stripe/SaaS → generic boilerplate. Naming "luxury" → spa/interior stock. Naming A24 / Obys / fashion-campaign / gallery / fine-art → cinematic art direction. Name the *right* reference class in the prompt.
+- **Reference-class anchoring decides the cluster.** Naming Linear/Stripe/SaaS → generic boilerplate. Naming "luxury" → spa/interior stock. Naming A24 / Obys / fashion-campaign / gallery / fine-art → cinematic art direction. Name the *right* reference class in the prompt. For a homepage/hero, first run design-gallery's **Round 0** (`../design-gallery/references/inspo-round-zero.md` — real reference sites from Inspo, default-on) and pass the LIKEd screenshots as `refs`.
 - **Two independent axes — never collapse them:** CONTENT (what's in the hero) × ART-DIRECTION (how it looks). Cross them in a matrix; hold one constant and vary the other.
 - **Theme-first, not image-first.** Decisions are easier as "which of 12 themes" than "which of 100 images." Group variations under their theme.
 - **The hero must EMBODY the value prop, not just brand it.** (EMBT: a lone "NN/100" score argued *against* the product — the fix was showing R/Y/G status, flags, trend graphs, range bars, insight lines. The hero should demonstrate what's unique.)

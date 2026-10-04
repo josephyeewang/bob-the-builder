@@ -37,11 +37,17 @@ redirected mid-review, and paid for twice. One gallery round costs less than one
 build round. That is why this sits at Bob Step 5.5, ahead of the first line of product code.
 
 ## The HTML-lane funnel (proven shape: ~4 rounds, 45-55 files)
+0. **Round 0 — real reference sites (DEFAULT, don't ask).** For any website/marketing page
+   (and, smaller, for dashboards), pull ~10 real shipped sites that fit the brief from **Inspo**
+   (`inspo` MCP server — search, never `recommend`; trust its fonts/sizes/spacing, never its
+   colours), rate them by number, then build half of Round 1 from the LIKEd sites' real type and
+   spacing. Skip for 🔴 client work or if the tools are missing — say so in one line. Full
+   procedure, skip rules and the self-scoring trial: `references/inspo-round-zero.md`.
 1. **Round 1 — breadth.** 12-24 numbered mockups (`designs/01-….html` …), each a full page of the
    REAL product with real-shaped content (actual metrics, actual table rows, honest empty states)
    in a distinct style. Self-contained files: inline CSS, Google-Fonts links, `:root` custom
    properties for every color (this is what makes the playground and the transfer possible).
-   Include the user's own past favorites and named references as styles.
+   Include the user's own past favorites, named references, and the Round 0 LIKEs as styles.
 2. **Rating pass.** Build the board from `templates/gallery-index.html` (edit only its CONFIG
    block): live iframe thumbnails, LIKE/MEH/NO + a note per design, localStorage persistence,
    and a "Copy my feedback" export the user pastes back. Feedback is BY NUMBER — that precision
@@ -113,6 +119,8 @@ counterfeit spec that mis-briefs every future session).
 - `templates/fidelity-protocol.md` — the transfer discipline + CI gate snippet + checklist
 - `references/scroll-story-lane.md` — lane 4: when to use scroll-craft, how it sequences with
   the lock, the overrides for Joe's setup (assets via design-mockups, hero preference optional)
+- `references/inspo-round-zero.md` — Round 0: real reference sites from Inspo (default for every
+  website gallery), skip rules, and the trial; results logged in `references/inspo-trial-log.md`
 - `references/agent-ui-primitives.md` — the 27-piece checklist for agent/chat surfaces (from
   beautiful-ui); mock every state, re-tokenize before shipping
 - `logo-kit/LOGO-LANE.md` — lane 3 procedure: phases, concept checkpoint, craft pass, red flags;
