@@ -61,4 +61,4 @@ apply to dashboards, reports, or marketing pages.
   diff-table, thinking-state) that ai-elements lacks.
 - Every piece has a "nothing yet" state and a "failed" state. Mock both; agents fail visibly.
 
-Status 2026-09-12: 171★, one author, active weekly. The checklist is the durable part.
+Status 2026-10-22: 328★ (github.com/slev12397/beautiful-ui, MIT, created July 2026), one author, active. The checklist is the durable part.

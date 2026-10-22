@@ -1,7 +1,7 @@
 # Logo lane — process, checks and scripts
 
 The full procedure for the **SVG logo board** lane. Harvested 2026-10-03 from
-[kaankiziltug/logo-design-skill](https://github.com/kaankiziltug/logo-design-skill) @ `0ecf52e` (v1.4.4, MIT —
+[kaankiziltug/logo-design-skill](https://github.com/kaankiziltug/logo-design-skill) @ `7340903` (v1.4.5, MIT —
 see `LICENSE` in this folder). Taken: the phase discipline, the concept checkpoint, red flags, craft pass, testing
 checklist, discovery brief, SVG construction notes, and five dependency-free scripts. **Not taken:** its 1,432-logo
 reference library (other companies' trademarks; MIT does not cover them), the library search/catalog scripts, the
