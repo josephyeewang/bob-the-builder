@@ -39,7 +39,7 @@ bash ~/.claude/skills/bob/../scripts/bob-update-check.sh
 It prints exactly one line, `BOB_UPDATE: status=...`. It is throttled (one network check per day) and degrades silently offline, so it's cheap to run every time. Act on the status:
 
 - **`status=behind`** (line includes `current=` and `latest=`) — an update is available and safe to fast-forward. This is the ONE place at startup you may add a yes/no before the mode menu. Say, in plain language: *"📦 A newer Bob is available (v2.18 → v2.19, 3 updates since you installed). Want me to grab it before we start? Takes about 5 seconds."* If **yes**, run the divergence-aware sequence from the **Updating Bob** section below, paraphrase what changed, then continue to the mode flow. If **no**, continue on the current version and do not ask again this session.
-- **`status=dirty`** or **`status=diverged`** — an update exists, but their Bob install has local changes, so do NOT auto-update. Mention it in one quiet line (*"There's a newer Bob, but your copy has local changes — run `bash ~/tools/bob-the-builder/scripts/bob-doctor.sh` when you want to sort it out"*) and continue.
+- **`status=dirty`** or **`status=diverged`** — an update exists, but their Bob install has local changes, so do NOT auto-update. Mention it in one quiet line (*"There's a newer Bob, but your copy has local changes — run `bash ~/.claude/skills/bob/../scripts/bob-doctor.sh` when you want to sort it out"*) and continue.
 - **`status=current` / `skip` / `offline` / `noinstall`** — say nothing. Proceed straight to the normal startup flow below.
 
 This check must never block the session: if the script errors or is missing, proceed silently. It does NOT count as the "one startup question" — the update offer only appears when genuinely behind, and the mode question is still the only thing the user decides in the common (up-to-date) path.
@@ -71,7 +71,7 @@ If the user says **"update bob"**, **"/bob update"**, or any equivalent phrasing
 ```bash
 if [ ! -L ~/.claude/skills/bob ]; then \
   echo "⚠ ~/.claude/skills/bob is not a symlink. 'update bob' expects the README install layout."; \
-  echo "  Run: bash ~/tools/bob-the-builder/scripts/bob-doctor.sh   (plain-English diagnosis)"; \
+  echo "  Run: bash ~/.claude/skills/bob/../scripts/bob-doctor.sh   (plain-English diagnosis)"; \
 else \
   BOB_DIR="$(dirname "$(readlink ~/.claude/skills/bob)")" && cd "$BOB_DIR" && \
   git fetch -q origin && \

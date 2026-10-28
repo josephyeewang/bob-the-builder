@@ -1196,7 +1196,7 @@ fail the build instead of waiting for the founder to notice.)*
 
 **6a: CLAUDE.md**
 - Claude generates project-level CLAUDE.md containing:
-  - **Bob the Builder protocol reference (v2.6 — MANDATORY)** — first section of the file, stated as a single line: *"This project uses the Bob the Builder protocol at `~/tools/bob-the-builder/build-protocol.md` (full reference) and `~/tools/bob-the-builder/build-protocol-core.md` (compact session reference). Read the core reference at session start; consult the full reference for templates, appendices, and architecture patterns. Resume from `docs/build-manifest.md`."* This single line is what makes Bob **invoke-once-then-auto-resume**: once it's in the project CLAUDE.md, every future Claude Code session in this folder automatically loads Bob without the human re-typing the long invocation. If this line is missing, the protocol's session-resume guarantees break.
+  - **Bob the Builder protocol reference (v2.6 — MANDATORY)** — first section of the file, stated as a single line: *"This project uses the Bob the Builder protocol at `~/.claude/skills/bob/../build-protocol.md` (full reference) and `~/.claude/skills/bob/../build-protocol-core.md` (compact session reference). Read the core reference at session start; consult the full reference for templates, appendices, and architecture patterns. Resume from `docs/build-manifest.md`."* This single line is what makes Bob **invoke-once-then-auto-resume**: once it's in the project CLAUDE.md, every future Claude Code session in this folder automatically loads Bob without the human re-typing the long invocation. If this line is missing, the protocol's session-resume guarantees break.
   - What this project is (2-3 sentences)
   - Current phase (pointer to Build Manifest)
   - Architecture rules (compact extraction from Architecture Contract — the rules Claude needs in every session)
@@ -1243,7 +1243,7 @@ CLAUDE.md rules are advisory (~80% followed). Hooks are deterministic (100% enfo
 
 **v2.6 — preferred path: use the scaffold script.** Claude runs:
 ```bash
-bash ~/tools/bob-the-builder/scripts/bob-init.sh <project-name>
+bash ~/.claude/skills/bob/../scripts/bob-init.sh <project-name>
 ```
 This generates the full folder structure (`docs/`, `contracts/`, `evals/`, `scripts/`, `tests/`, `src/`, `.claude/`), writes a project CLAUDE.md that references Bob (so future sessions auto-resume — see §6a), writes `.claude/settings.json` with default hooks, writes `.gitignore` and `.env.example`, and runs `git init` with an initial commit. Safe to re-run — skips anything that already exists.
 
@@ -1506,7 +1506,7 @@ If the second model flags issues Claude missed → bring findings back to Claude
 
 *Regenerate repo map (v2.7 — MANDATORY for code products):*
 
-Run `bash ~/tools/bob-the-builder/scripts/repo-map.sh` from the project root. Updates `docs/repo-map.md` — a compressed view of folder structure + top-level files that Claude reads at session start instead of grep'ing the codebase. Borrowed from Aider's repo-map pattern: as projects grow past Phase 5-6, context loading becomes the bottleneck. A repo map keeps Claude oriented without re-reading source.
+Run `bash ~/.claude/skills/bob/../scripts/repo-map.sh` from the project root. Updates `docs/repo-map.md` — a compressed view of folder structure + top-level files that Claude reads at session start instead of grep'ing the codebase. Borrowed from Aider's repo-map pattern: as projects grow past Phase 5-6, context loading becomes the bottleneck. A repo map keeps Claude oriented without re-reading source.
 
 *Update deviation tracker:*
 - Record: number of spec deviations found in this phase
@@ -1717,7 +1717,7 @@ In addition to the markdown verdict table, Claude writes findings to `audit-arti
 - Final spec update: all docs now reflect what was actually built
 - Capability Traceability Matrix updated — all statuses final
 - Build Manifest updated to reflect hardening complete
-- **PR-back prompt (v2.13)** — at the end of full-scope hardening, Claude offers the [N+2]c PR-back template proactively (don't wait for Step [N+2]). Suggested phrasing: *"Hardening passed. Before we move to Learning Extraction, run `bash ~/tools/bob-the-builder/scripts/bob-stats.sh` for the fix-commit ratio — that one number is the most useful signal Bob can get on whether the protocol helped. Paste the output into a GitHub issue or email it to joe@joe.wang. Skip if you'd rather; one report per shipped project is plenty."*
+- **PR-back prompt (v2.13)** — at the end of full-scope hardening, Claude offers the [N+2]c PR-back template proactively (don't wait for Step [N+2]). Suggested phrasing: *"Hardening passed. Before we move to Learning Extraction, run `bash ~/.claude/skills/bob/../scripts/bob-stats.sh` for the fix-commit ratio — that one number is the most useful signal Bob can get on whether the protocol helped. Paste the output into a GitHub issue or email it to joe@joe.wang. Skip if you'd rather; one report per shipped project is plenty."*
 - `→ HG:` Hardening gate passed
 
 ### Step [N+2]: Learning Extraction
@@ -1971,7 +1971,7 @@ After aggregation:
 3. **Register deferred items** in `audit-log.md` with **named revisit triggers** (no silent deferrals — same rule as v2.15's per-phase deferrals).
 4. **Log Reject decisions** in `decision-log.md` with rationale so they aren't re-litigated by future audits (continues D-001, D-003, D-004 precedent).
 5. **Update CTM:** capabilities passing the panel's hygiene + spec-fidelity + capability-quality lenses (L01–L03) get `H` status; capabilities also passing strategic + UX lenses get `H++`.
-6. **PR-back prompt (v2.13).** Claude offers the [N+2]c PR-back template proactively, scoped to "this audit pass." Run `bash ~/tools/bob-the-builder/scripts/bob-stats.sh` for auto-computed fix-commit ratio.
+6. **PR-back prompt (v2.13).** Claude offers the [N+2]c PR-back template proactively, scoped to "this audit pass." Run `bash ~/.claude/skills/bob/../scripts/bob-stats.sh` for auto-computed fix-commit ratio.
 
 `→ HG:` Audit pass complete. Deferred items locked into `audit-log.md`. Reject decisions logged.
 

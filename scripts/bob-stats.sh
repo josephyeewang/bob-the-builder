@@ -2,7 +2,7 @@
 # bob-stats.sh — compute fix-commit ratio for a Bob-built project.
 #
 # Usage (run from the root of a Bob-built project):
-#   bash ~/tools/bob-the-builder/scripts/bob-stats.sh
+#   bash ~/.claude/skills/bob/../scripts/bob-stats.sh
 #
 # What it does:
 #   Counts commits by classifying each subject line as "fix" or "other".

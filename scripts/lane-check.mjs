@@ -35,7 +35,7 @@
 // project carrying a register, e.g.:
 //
 //   if [ -f docs/lanes.md ] && command -v node >/dev/null; then
-//     node ~/tools/bob-the-builder/scripts/lane-check.mjs || exit 1      # add --enforce when ready
+//     node ~/.claude/skills/bob/../scripts/lane-check.mjs || exit 1      # add --enforce when ready
 //   fi
 //
 // Start in WARN mode for a week; switch to --enforce once the register matches how work is split.

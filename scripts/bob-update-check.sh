@@ -5,8 +5,8 @@
 # The actual update is the divergence-aware sequence in SKILL.md ("update bob").
 #
 # Usage:
-#   bash ~/tools/bob-the-builder/scripts/bob-update-check.sh          # throttled (once/day)
-#   bash ~/tools/bob-the-builder/scripts/bob-update-check.sh --force  # ignore throttle
+#   bash ~/.claude/skills/bob/../scripts/bob-update-check.sh          # throttled (once/day)
+#   bash ~/.claude/skills/bob/../scripts/bob-update-check.sh --force  # ignore throttle
 #
 # It is invoked silently at the top of every /bob session (SKILL.md Step 0).
 # Throttled to one network check per day so it never slows down repeated use

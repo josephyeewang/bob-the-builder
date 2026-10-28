@@ -2,7 +2,7 @@
 # bob-doctor.sh — verify Bob's install on this machine.
 #
 # Usage:
-#   bash ~/tools/bob-the-builder/scripts/bob-doctor.sh
+#   bash ~/.claude/skills/bob/../scripts/bob-doctor.sh
 #   (or just: bash bob-doctor.sh — if you're inside the install directory)
 #
 # What it checks:

@@ -2,7 +2,7 @@
 # bob-init.sh — scaffold a new project using the Bob the Builder protocol.
 #
 # Usage:
-#   bash ~/tools/bob-the-builder/scripts/bob-init.sh <project-name>
+#   bash ~/.claude/skills/bob/../scripts/bob-init.sh <project-name>
 #
 # What it does:
 #   - Creates the standard folder structure (docs/, contracts/, evals/, scripts/, tests/)
@@ -238,8 +238,8 @@ At each milestone:
 2. RUN the tests/build yourself — never trust a "done" claim (Green ≠ Correct; 45–76% of agent "done" claims are false-success, and LLM "is it done?" judgments are near-random — the diff and a real run are the truth).
 3. **Diff the TEST files specifically** — flag any deleted, weakened, or newly-added-to-pass tests (the "rewrote the tests to go green" failure mode). Green means the code agrees with itself, not that it matches the spec.
 4. Also check: state-diff sanity (does the diff actually implement the claimed work, or is the tree ~unchanged?), drift from spec, untested/unhandled paths, anything irreversible or outward-facing that slipped in.
-5. **Failing-test receipt for every fix item** (Phase Gate 11): each fix item must name a test command — an item with none is an automatic BLOCK. For each, run `node ~/tools/bob-the-builder/scripts/prove-test-fails.mjs --commit <sha> --test "<cmd>" --fix <file>:<from>-<to>` (fix lines removed -> test must FAIL; restored -> must PASS) and include the receipt. You are a different session from the builder; that is what makes the receipt count.
-6. **Done-criteria unchanged** (Phase Gate 12): run `node ~/tools/bob-the-builder/scripts/check-bar.mjs <phase-report.md>`; a changed bar without a dated "bar changed because" line is a BLOCK.
+5. **Failing-test receipt for every fix item** (Phase Gate 11): each fix item must name a test command — an item with none is an automatic BLOCK. For each, run `node ~/.claude/skills/bob/../scripts/prove-test-fails.mjs --commit <sha> --test "<cmd>" --fix <file>:<from>-<to>` (fix lines removed -> test must FAIL; restored -> must PASS) and include the receipt. You are a different session from the builder; that is what makes the receipt count.
+6. **Done-criteria unchanged** (Phase Gate 12): run `node ~/.claude/skills/bob/../scripts/check-bar.mjs <phase-report.md>`; a changed bar without a dated "bar changed because" line is a BLOCK.
 7. Verdict: PASS (ready for the human diff-review) or BLOCK (with the specific issues). Never rubber-stamp.
 
 You review; you do NOT edit. The human still owns the final diff review and any irreversible action.
