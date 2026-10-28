@@ -15,10 +15,17 @@ Their licences are kept here, and every file that carries borrowed text or logic
 | [zeamp/ai-security-checklist-prompt.md](https://github.com/zeamp/ai-security-checklist-prompt.md) @ `804405cef101f087e64c4c966c84df40c87563b2` | MIT, Copyright (c) 2026 Richard Ward — full text in `ai-security-checklist-prompt/LICENSE` | The eight attack-path questions (§3) and closing rule 7 (keep found secrets out of the report), reworded | `audit-lenses/L04-security-threat-surface.md` step 11 and anti-patterns |
 | [kaankiziltug/logo-design-skill](https://github.com/kaankiziltug/logo-design-skill) @ `734090317a2155c5bf1ae8bd4cc85c6848a0128f` (v1.4.5) | MIT, Copyright (c) 2026 kaankiziltug — full text in `../skills/design-gallery/logo-kit/LICENSE` | The logo kit: preview sheet script, critique and testing checklists, smoke test and export-title test (adapted; each file names its source path) | `skills/design-gallery/logo-kit/` |
 | [slev12397/beautiful-ui](https://github.com/slev12397/beautiful-ui) @ `44a274e598395ab61e7c96c26fda2758780253b7` | MIT, Copyright (c) 2026 Shane Levine — full text in `beautiful-ui/LICENSE` | No code; the agent/chat-surface piece list, re-verified against its source | `skills/design-gallery/references/agent-ui-primitives.md` |
+| [usestrix/strix](https://github.com/usestrix/strix) @ `98e3df14258cd58d8b26d6ba8d17014c6182f755` | Apache-2.0, Copyright 2025 OmniSecure Inc. — full text in `strix/LICENSE` | **Ideas only — no code and no attack payloads copied.** Strix is an offensive pentest tool; Bob kept only the defensive review questions, reworded as "confirm X is configured / Y is enforced": two stack review packs (Supabase RLS/keys/RPC/storage/functions; Next.js middleware/server-actions/caching/SSRF) from its `skills/technologies/supabase.md` + `skills/frameworks/nextjs.md`; the nine "reasons that do NOT rule a finding out" from `skills/analysis/counterevidence.md`; the over-rated-severity list + Critical/Major acceptance checklist from `skills/analysis/severity_calibration.md`; and the self-reported-vs-observed `source` idea on a covered unit from `report/coverage.py` | `audit-lenses/L04-security-threat-surface.md` Appendix A + severity rubric; `audit-lenses/_evidence-accounting.md` §1 rule 2 and §3; `scripts/coverage-check.py` (rule 2b — Bob's own code) |
 
 **Apache-2.0 changes notice (§4b).** The EGM-derived files were modified by Joe Wang in October 2026:
 the brainstorm mode was removed, a plain-English summary for a non-engineer was added, the
 implementation-readiness reviewer gained a "check only the next phase at full detail" scope rule,
 and the wording was fitted to Bob's Pre-Build Gate. Each modified file states this in its header.
+
+**Apache-2.0 changes notice (§4b) — Strix.** No Strix file was copied. Its offensive pentest
+material (attack surfaces, payloads, bypass recipes) was deliberately left out; only the underlying
+defensive checks were reworded by Joe Wang in October 2026 into reviewer questions and merged into
+Bob's existing L04 lens, evidence-accounting file and coverage checker. Each place that carries a
+borrowed idea names its Strix source path inline.
 
 No NOTICE file ships with any upstream project at the commits above, so none is reproduced.

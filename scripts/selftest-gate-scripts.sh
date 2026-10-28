@@ -216,7 +216,7 @@ echo "coverage-check.py"
 CC="$HERE/coverage-check.py"; CR="$TMP/cov"; mkdir -p "$CR"
 cat > "$CR/good.json" <<'JSON'
 {"units":[
- {"id":"U1","state":"covered","files":["api/orders.ts"],"checks":["owner check on GET /orders/:id"]},
+ {"id":"U1","state":"covered","source":"observed","files":["api/orders.ts"],"checks":["owner check on GET /orders/:id"]},
  {"id":"U2","state":"deferred","reason":"budget ran out after wave 2"},
  {"id":"U3","state":"blocked","files":["infra/proxy.conf"],"checks":["header pass-through"],"missing_fact":"does the hosting proxy strip X-Forwarded-For?"},
  {"id":"U4","state":"out_of_scope","reason":"marketing site is a separate repo"}],
@@ -228,6 +228,8 @@ expect "a sound record -> OK" 0 "4 units, 0 problem" -- python3 "$CC" "$CR/good.
 mut() { python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); exec(sys.argv[2]); json.dump(r,open(sys.argv[3],"w"))' "$CR/good.json" "$1" "$CR/$2.json"; }
 mut 'r["units"][0]["files"]=[]' cov_noev
 expect "covered with no files -> FAIL" 1 "'covered' needs both" -- python3 "$CC" "$CR/cov_noev.json"
+mut 'del r["units"][0]["source"]' cov_nosrc
+expect "covered with no source -> FAIL" 1 "needs source" -- python3 "$CC" "$CR/cov_nosrc.json"
 mut 'r["units"][1]["reason"]=""' def_noreason
 expect "deferred with no reason -> FAIL" 1 "'deferred' needs a reason" -- python3 "$CC" "$CR/def_noreason.json"
 mut 'r["units"][1]["checks"]=["half-read the router"]' def_ev

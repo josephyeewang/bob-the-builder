@@ -250,6 +250,32 @@ Per D-003 (orchestrate, don't reinvent): L04 orchestrates Semgrep, CodeQL, OWASP
 - **Minor** — Practically exploitable but low impact, or theoretically exploitable with high impact: verbose error messages, missing security headers (HSTS, CSP, X-Frame-Options), session not invalidated on password change.
 - **Cosmetic** — Defense-in-depth improvements without a clear current exploitation path.
 
+### Rate severity last, and against a real bar (2026-10)
+
+Severity is a **conclusion**, drawn after reachability is established and the refuter pass (`_evidence-accounting.md` §3) has run — never an opening position. The test for the top two tiers:
+
+> Would a serious audit or bug-bounty firm, putting its reputation on the line, accept this as Critical / Major? If the honest answer is "only if you grant a chain of unproven assumptions," it is not. Rate the weakness you **proved**, not the worst case you can imagine reaching from it.
+
+**Usually NOT Critical or Major** — these are over-rated constantly; each needs unusual, demonstrated circumstances to clear Minor:
+- Self-XSS, and clickjacking on non-sensitive actions.
+- Missing security headers, cookie-attribute gaps, TLS-configuration nits.
+- Open redirect on its own, with no credential or token leakage.
+- Theoretical memory-safety issues with no reachable attacker input.
+- "Could matter if chained" with several unproven assumptions.
+- Anything that already requires admin, shell or physical access — if the attacker has that, the finding adds little.
+- Session weaknesses that require the attacker to **already hold** a victim secret (a stolen cookie, an intercepted link) — unless the *same* finding shows how to obtain it.
+- Enumeration that only confirms an account, domain or version exists.
+
+**Acceptance checklist before rating anything Critical or Major** — all must be true; if any is not, drop a tier:
+- [ ] The attack path is realistic and in scope — not a lab-only condition, not dependent on an unproven prior compromise.
+- [ ] The attacker position required is one an attacker can actually obtain (reflected honestly in exploitability).
+- [ ] The impact is **material and demonstrated**, not asserted — "mass read/write" means proven broad or systemic access, not one record.
+- [ ] The refuter pass found no constraint that meaningfully limits exploitation, or you have explained why the constraint does not hold.
+- [ ] There is concrete evidence of **reachability**, not an assumption about how the app is deployed. (Missing deployment evidence lowers *confidence*, not the severity floor — do not read "I could not confirm it is internet-facing" as "it is internal-only.")
+- [ ] You would defend this rating in a client debrief.
+
+*The over-rated list and the acceptance checklist are **ideas adapted** from `usestrix/strix` @ `98e3df14258cd58d8b26d6ba8d17014c6182f755`, `strix/skills/analysis/severity_calibration.md` — Apache-2.0, Copyright 2025 OmniSecure Inc.; licence in `third_party/strix/LICENSE`. Reworded for Bob's Critical/Major/Minor/Cosmetic tiers by Joe Wang, 2026-10-27; Strix's CVSS-vector mechanics were left out as out of scope for a read audit.*
+
 ## Anti-patterns / Bias instructions
 
 - **Do NOT skip running tooling.** Semgrep + Gitleaks + Snyk are non-negotiable. Manual code review without tools misses obvious gaps these tools catch in seconds.
@@ -286,3 +312,69 @@ Per D-003 (orchestrate, don't reinvent): L04 orchestrates Semgrep, CodeQL, OWASP
 - **Adjacent (~15% overlap):**
   - **L05** — both touch PII; L04 covers info-disclosure as STRIDE category, L05 covers data lifecycle. Dedup at aggregation.
   - **L06** — both touch supply chain; L04 covers it as OWASP T10 category, L06 goes deeper on SBOM + license.
+
+## Appendix A — Stack packs for Joe's stack (Supabase + Next.js)
+
+STRIDE and OWASP are framework-agnostic. These two packs add the stack-specific review questions the generic sweep does not name — the places Joe's own apps (Next.js front end, Supabase back end) actually leak. **Each item is a defensive review question: confirm X is configured, verify Y is enforced.** Run them as part of step 3's OWASP sweep (mostly Broken Access Control and Security Misconfiguration) and record each as a coverage unit. These are review checklists, not test scripts — L04 reads code and settings and optionally points ZAP at staging; it does not attack a running app. A "no" or an "I can't tell from the source" is a finding or a "needs checking" item (`_evidence-accounting.md` §2), never a guess.
+
+### A.1 — Supabase pack
+
+**Row-Level Security (RLS).**
+1. Is RLS enabled on **every** non-public table, with no permit-all / always-true policy left in place?
+2. Does each table's policy set cover **writes as well as reads** — INSERT, UPDATE and DELETE, not only SELECT? A read-only policy is not isolation.
+3. Does every policy derive the user and the tenant from **server context** (`auth.uid()` and JWT claims), never from a client-supplied id or a column in the request body?
+4. On multi-tenant tables, does every policy constrain by `org_id` / `tenant_id`, including the `NULL`-tenant case?
+
+**Keys and `service_role`.**
+5. Does the secret (`service_role`) key stay server-side only — never in a client bundle, and never echoed in an Edge Function response or error? (A browser 401 on a leaked secret key is a user-agent restriction, not revocation; server-side use still works.)
+6. After any migration to `sb_publishable_` / `sb_secret_` keys, were the **legacy `anon` / `service_role` keys actually revoked**? Creating new keys does not disable the old ones. *(Ties to Joe's "Supabase legacy key migration is all-or-nothing" note.)*
+
+**RPC functions.**
+7. Does every `SECURITY DEFINER` function perform its **own** ownership / tenant check in SQL and set an explicit `search_path`? `SECURITY DEFINER` bypasses RLS, so a missing in-function check is a direct bypass.
+8. Do RPCs re-derive the caller from `auth.uid()` rather than trusting a `user_id` / `tenant_id` passed in the payload?
+
+**PostgREST (REST).**
+9. Do write endpoints restrict **which columns** a request can set, so a PATCH cannot touch unintended columns (ownership, role, price) — enforced by policy or column grants, not client code?
+10. Do embedded / nested relation reads (`select=*,related(*)`) enforce per-row ownership at **each** level, not only on the top-level row?
+11. Can row **counts, filters or wildcard search** disclose the existence or volume of rows the caller cannot read?
+
+**Storage.**
+12. Are private buckets actually private (not public), and do list/read policies require the right identity?
+13. Are signed URLs scoped so one cannot be reused across tenants or paths, with a sensible expiry?
+14. Is uploaded HTML/SVG served as an attachment with `X-Content-Type-Options: nosniff`, so a stored file cannot run as a page?
+
+**Edge Functions, Realtime, GraphQL, tokens.**
+15. Does each Edge Function **verify the user's identity** (signature, issuer, audience) before it uses a privileged client? Passing the platform's `verify_jwt` check with a project key is not a signed-in user.
+16. Is CORS on functions free of wildcard-origin-with-credentials, and can a **user-supplied address** never make a function fetch an internal/metadata endpoint (SSRF)?
+17. Do Realtime channels and GraphQL nested relations enforce the **same** row rules as REST, with no parity gap between transports?
+18. Do custom JWT validators pin issuer and audience and handle key rotation / revocation (no stale cached signing key), and are tokens kept out of any place client script can read?
+
+### A.2 — Next.js pack
+
+**Middleware is not an authorization boundary.**
+1. Does every protected route and route handler enforce authorization **itself**, so the app is still safe if middleware is skipped? Middleware-only auth has a known bypass class (the `x-middleware-subrequest` header, CVE-2025-29927). Confirm the installed version is patched and that external `x-middleware-*` headers cannot reach the origin.
+2. Do middleware and the route handler **normalize paths the same way** (trailing slash, double slash, dot segments), and is each parameter read from exactly one place (no duplicate-parameter split between the check and the handler)?
+
+**Server Actions.**
+3. Does each Server Action enforce authorization **server-side**, rather than trusting client state, and re-check ownership of the object it acts on?
+4. Are action identifiers treated as discoverable (they appear in source maps and hydration data), so a hidden action is not relied on for secrecy?
+
+**Caching boundaries.**
+5. Are user- or tenant-specific responses kept out of any **shared cache / CDN** — identity in the cache key, `no-store` on sensitive fetches, `Vary` on auth cookies?
+6. Where Cache Components are used, do `use cache` closures, `cacheTag` and `cacheLife` keep users and tenants separate, with correct invalidation?
+
+**Data exposure.**
+7. Does server-fetched data handed to the client (`__NEXT_DATA__`, RSC flight payloads, page props) contain **only what the UI renders** — no full user objects, internal IDs, tokens or admin-only fields, and no cross-user data?
+8. In production, are source maps and build manifests not exposing internal route structure and server-action IDs?
+
+**Image optimizer / SSRF.**
+9. Are `remotePatterns` / `domains` narrow, so a user-supplied image URL cannot make the optimizer fetch an internal address, and is the version patched against the current optimizer / `ImageResponse` advisories?
+
+**Runtime, rendering, auth.**
+10. Is every security check enforced consistently across **Edge and Node** runtimes (including `x-forwarded-*` trust), with no check present on one and absent on the other?
+11. Is the Next.js / React version patched against the current **React Server Components** advisories (source-code exposure, denial of service, the RSC decoder RCE class)?
+12. Are draft/preview secrets kept out of client bundles, and can preview mode not be enabled via an open redirect or a subdomain cookie?
+13. Is client-side HTML sanitized wherever it is injected (`dangerouslySetInnerHTML`, markdown renderers, user-controlled `href`/`src`), with CSP covering server render, client render and hydration?
+14. For NextAuth: are `state` / `nonce` / PKCE present per provider, is `callbackUrl` restricted to an allowlist (open-redirect), and is JWT audience/issuer enforced on every route?
+
+*Both packs are **ideas adapted** (not text or payloads copied) from `usestrix/strix` @ `98e3df14258cd58d8b26d6ba8d17014c6182f755`, `strix/skills/technologies/supabase.md` and `strix/skills/frameworks/nextjs.md` — Apache-2.0, Copyright 2025 OmniSecure Inc.; licence in `third_party/strix/LICENSE`. Strix's files are an offensive pentest playbook (attack surfaces, payloads, bypass recipes); Bob keeps only the defensive review questions — "confirm X is configured / Y is enforced" — reworded by Joe Wang, 2026-10-27. No attack strings were carried over.*

@@ -41,7 +41,7 @@ A unit is a stable combination of *surface × boundary × subsystem × check-cla
 **Three rules that make it work, and without which it is decoration:**
 
 1. **Only the coordinating session writes the record.** Sub-agents return results; they never edit the shared file. One writer, no merge races. (Same discipline as `templates/scheduled-work-protocol.md` §2.)
-2. **`covered` requires evidence attached** — the specific files read and the specific checks made. A unit cannot be closed by assertion.
+2. **`covered` requires evidence attached** — the specific files read and the specific checks made, **plus a `source`** that says whether "clean" is an agent's claim (`self_reported`) or a tool/runtime fact (`observed`). A unit cannot be closed by assertion, and a hallucinated "clean" read as an observed fact is worse than no record — so the two are kept apart. *(The self-reported-vs-observed split is an idea adapted from `usestrix/strix` @ `98e3df14258cd58d8b26d6ba8d17014c6182f755`, `strix/report/coverage.py` — Apache-2.0, Copyright 2025 OmniSecure Inc.; licence in `third_party/strix/LICENSE`. Idea only; `coverage-check.py` is Bob's own code.)*
 3. **Unreached units become `deferred` with a reason — never silently dropped, and never quietly folded into a `covered` count.** Cloudflare's rule, verbatim: *"Untouched budget/profile units become unassigned deferred units with empty evidence and a reason; do not hide partial evidence in deferred."*
 
 The payoff is one sentence at the end of every audit that most audits cannot produce: **"Here is what we checked, here is what we did not check, and here is why."**
@@ -64,7 +64,7 @@ Keep the record as a JSON file next to the lens report (`audit-artifacts/<lens>-
 python3 ~/.claude/skills/bob/../scripts/coverage-check.py audit-artifacts/L04-coverage-2026-10-27.json
 ```
 
-It refuses a `covered` unit with no files or checks, a `deferred` or `out_of_scope` unit with no reason, a `deferred` unit hiding partial evidence, a `blocked` unit that does not name its missing fact, a unit left `planned` at close, a "needs checking" finding that carries a severity (§2), and a closing statement whose counts do not match the units. Add `--draft` mid-run. It checks that the record **adds up**, not that the evidence is any good — that is still the refuter's and the gap critic's job.
+It refuses a `covered` unit with no files or checks or no `source` (`self_reported` / `observed`), a `deferred` or `out_of_scope` unit with no reason, a `deferred` unit hiding partial evidence, a `blocked` unit that does not name its missing fact, a unit left `planned` at close, a "needs checking" finding that carries a severity (§2), and a closing statement whose counts do not match the units. Add `--draft` mid-run. It checks that the record **adds up**, not that the evidence is any good — that is still the refuter's and the gap critic's job.
 
 ---
 
@@ -110,6 +110,22 @@ Naming the stance ("try to break it") is not enough; a refuter with no checklist
 Our wording says "starting input → claimed effect" where the source says "entrypoint → sink," so the brief works for any lens, not only security. The source's sandbox and file-promotion text is left out here because §7 already carries that contract.
 
 *Adapted from `cloudflare/security-audit-skill` @ `c1c8a8c1471069fb0e188eeaff69b8e8db6564a8`, `skills/security-audit/VALIDATION-AND-REPORTING.md` (candidate-verifier prompt, the "parking place" line and the malformed-result rule). MIT, Copyright (c) 2025-2026 Cloudflare, Inc. — licence in `third_party/cloudflare-security-audit/LICENSE`. Reworded for plain English by Joe Wang, 2026-10-27.*
+
+### Nine reasons that do NOT rule a finding out (2026-10-27)
+
+The refuter's job is to close a candidate honestly. The danger is the *plausible-sounding* close — a reason that feels like "it's safe" but proves nothing. A candidate is only ruled out when you can name the specific control, at a specific place, and show it runs **before** the effect on **every** path the attacker can reach. None of the following clears that bar on its own; each is a proof gap wearing the costume of an answer:
+
+1. **"A trusted library handles it."** A well-known sanitizer, the framework's escaping, the ORM — generic trust is not counterevidence. Confirm *that* call, with *those* arguments, in *that* context. Escaping is context-specific: an HTML escaper does nothing in a JavaScript or attribute position, a SQL identifier quoter is not a value quoter.
+2. **"There's a control" — but it runs on a different path.** Middleware, a decorator or a guard on the common route does not protect a sibling route, an internal caller, a background job, or an admin alias that reaches the same place.
+3. **"There's a control" — but it runs at the wrong time.** A check that happens *after* the dangerous effect (ownership checked after the record is fetched and returned, canonicalization after the path is used) is an ordering bug, not a control.
+4. **"There's a control" — but it can fail open.** A hardening flag set inside a `try`/`except` that swallows errors, a default that a caller can override, an allowlist that is empty by default — all leave the finding alive.
+5. **"A nearby call site is safe."** One correctly-guarded call site says nothing about the others. Never let a safe instance close a reachable unsafe one, and never merge several instances into one just because they share a root cause.
+6. **"I couldn't find the caller / tell if it's deployed / stand up the service."** Missing information is an **open proof gap** ("needs checking" per §2), not proof of safety. Missing evidence is not evidence of absence.
+7. **"It was too hard to test."** A failed build or absent credentials is a reason to record a proof gap and move on — not a reason to mark it clean. Do not let one hard setup consume the budget the sibling candidates need.
+8. **"An operator could configure a filter / it's a documented option / it's off by default."** What ships and what is reachable is what counts, not what an operator *could* do.
+9. **"It's internal / admin-only / authenticated-only."** That lowers severity — it does not make the finding unreal. **Downgrade, don't delete**, and say why in the report.
+
+*Ideas adapted (no text or payloads copied) from `usestrix/strix` @ `98e3df14258cd58d8b26d6ba8d17014c6182f755`, `strix/skills/analysis/counterevidence.md` ("What Does NOT Rule Out a Candidate") — Apache-2.0, Copyright 2025 OmniSecure Inc.; licence in `third_party/strix/LICENSE`. Reworded, and generalised past security, by Joe Wang, 2026-10-27.*
 
 The cost is real — roughly one to two extra agent calls per surviving finding — which is exactly why §4 exists.
 

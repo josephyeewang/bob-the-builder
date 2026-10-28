@@ -9,6 +9,9 @@ is security-specific and was not copied.
 What it refuses (each line is one rule in _evidence-accounting.md):
   1  a unit with no id, a repeated id, or a state that is not one of the seven
   2  a `covered` unit without evidence: no files read, or no checks made          (§1 rule 2)
+  2b a `covered` unit without a `source` of 'self_reported' or 'observed' —
+     whether "clean" is an agent's claim or a tool/runtime fact must be stamped,
+     because a hallucinated "clean" read as fact is worse than no record          (§1 rule 2)
   3  a `deferred` / `out_of_scope` unit with no reason, or a `deferred` unit
      hiding partial evidence (put partial work in `blocked`, not `deferred`)      (§1 rule 3)
   4  a `blocked` unit that does not name the missing fact                          (§1 states)
@@ -18,9 +21,16 @@ What it refuses (each line is one rule in _evidence-accounting.md):
      fact or a safe way to find out                                               (§2)
   7  a closing statement that is missing or whose counts do not match the units  (closing statement)
 
+The `source` idea (rule 2b) is adapted from usestrix/strix (strix/report/coverage.py, which keeps
+self-reported closures apart from machine-observed ones; its finish step refuses to call an
+unexamined area clean). Apache-2.0, Copyright 2025 OmniSecure Inc.; licence in third_party/strix/LICENSE.
+The idea only — no code was copied; this is Bob's own Python.
+
 Record format (JSON):
-  {"units": [{"id": "U1", "state": "covered", "files": ["api/orders.ts"], "checks": ["owner check on GET"],
+  {"units": [{"id": "U1", "state": "covered", "source": "observed",
+              "files": ["api/orders.ts"], "checks": ["owner check on GET"],
               "reason": "", "missing_fact": ""}, ...],
+   # source: "self_reported" (an agent says it is clean) | "observed" (a tool/runtime confirmed it)
    "findings": [{"id": "F1", "verdict": "confirmed|needs_checking|rejected", "severity": "Major",
                  "missing_fact": "", "safe_check": ""}, ...],
    "statement": {"planned": 12, "covered": 8, "candidate": 0, "blocked": 1, "deferred": 2, "out_of_scope": 1}}
@@ -34,6 +44,7 @@ import json, sys
 
 STATES = ["planned", "in_progress", "covered", "candidate", "blocked", "deferred", "out_of_scope"]
 VERDICTS = {"confirmed", "needs_checking", "rejected"}
+SOURCES = {"self_reported", "observed"}
 
 def full(x):
     return isinstance(x, str) and x.strip() != "" or isinstance(x, list) and any(str(i).strip() for i in x)
@@ -54,6 +65,9 @@ def check(rec, draft=False):
         has_ev = full(u.get("files")) or full(u.get("checks"))
         if st == "covered" and not (full(u.get("files")) and full(u.get("checks"))):
             errs.append(f"{tag}: 'covered' needs both the files read and the checks made")
+        if st == "covered" and u.get("source") not in SOURCES:
+            errs.append(f"{tag}: 'covered' needs source 'self_reported' or 'observed' — "
+                        f"stamp whether 'clean' is a claim or an observed fact")
         if st in ("deferred", "out_of_scope") and not full(u.get("reason")):
             errs.append(f"{tag}: '{st}' needs a reason")
         if st == "deferred" and has_ev:
