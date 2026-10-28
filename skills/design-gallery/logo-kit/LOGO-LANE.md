@@ -3,9 +3,11 @@
 The full procedure for the **SVG logo board** lane. Harvested 2026-10-03 from
 [kaankiziltug/logo-design-skill](https://github.com/kaankiziltug/logo-design-skill) @ `7340903` (v1.4.5, MIT —
 see `LICENSE` in this folder). Taken: the phase discipline, the concept checkpoint, red flags, craft pass, testing
-checklist, discovery brief, SVG construction notes, and five dependency-free scripts. **Not taken:** its 1,432-logo
-reference library (other companies' trademarks; MIT does not cover them), the library search/catalog scripts, the
-heavy presentation-board generator, and the HTML preview sheet (the gallery's own SVG board does that job).
+checklist, discovery brief, SVG construction notes, and five dependency-free scripts. **Added 2026-10-27:** the HTML
+preview sheet (`scripts/preview_sheet.py`, minus its library option), the logo critique (`references/critique.md`),
+and two self-tests (`tests/`). Why the preview sheet came in after all: in a side-by-side test on real shipped marks it
+caught one-colour, reversed and app-icon failures that the concept sheet and the gallery board both missed. **Not taken:** its 1,432-logo reference library (other companies' trademarks; MIT
+does not cover them), the library search/catalog scripts, and the heavy presentation-board generator.
 `assets/library/stats.json` is kept — aggregate complexity numbers only, no logos — so `svg_audit.py` can flag an
 over-complex mark.
 
@@ -34,13 +36,21 @@ component with hard-coded colours and no font dependency.
    ```bash
    python3 scripts/svg_audit.py a.svg b.svg c.svg
    python3 scripts/render_png.py a.svg b.svg c.svg --out-dir renders --size 512   # then LOOK at the PNGs
+   python3 scripts/preview_sheet.py a.svg b.svg c.svg --brand-color "#HEX" --refs rival1.svg rival2.svg -o /tmp/preview.html
    ```
+   **The preview sheet is required — a mark is not "done" (or shown as a concept) until it has been run and looked
+   at.** Open the HTML in a browser and check, for every concept: **one-colour** black and white (does the idea
+   survive with no colour?), **reversed** (white on dark — heavier? shapes filled in?), **app icon** (white symbol on
+   the brand colour — anything left?), and **small sizes** (16–32 px and the pixel test). A mark whose parts are told
+   apart only by colour (not cut-out shapes) fails here as a blank blob — fix the geometry, don't ship a note. Say
+   which of the four passed in what you show the user.
    Drawing in SVG code is drawing blind — always render and look. Then the **craft pass** (where AI-drawn marks
    fall short): (1) *letter test* — every modified letter still reads as itself at a glance; (2) *junctions* — no
    notches, slivers or lumps where strokes meet; (3) *peer test* — beside 3–4 well-regarded marks at the same
    size, it looks equally resolved; (4) *literalness* — a cup for coffee is not a concept. Full list:
    `references/testing-checklist.md`. The audit catches structure (live text, near-miss angles, tiny details);
-   it does **not** catch ugly geometry — that is the render-and-look step's job.
+   it does **not** catch ugly geometry — that is the render-and-look step's job. To critique an existing mark
+   (Joe's or anyone's): `references/critique.md`.
 6. **Show the concepts, then STOP.**
    ```bash
    python3 scripts/concept_sheet.py a.svg b.svg c.svg --lockups a-lockup.svg b-lockup.svg c-lockup.svg \
@@ -56,6 +66,12 @@ component with hard-coded colours and no font dependency.
    python3 scripts/export_variants.py final-horizontal.svg --title "Brand logo" --only black white mono --mono "#HEX" --png 1200
    ```
    Record the locked mark in the gallery's `LOCKED-DESIGN` doc like any other lock.
+
+## Self-tests
+
+After changing or re-syncing any script, from this folder: `python3 tests/test_export_titles.py` (title escaping in
+exported SVGs) and `python3 tests/smoke_test.py` (runs every script once on test logos; PNG checks only if a renderer
+exists). Both must pass.
 
 ## Red flags — fix before showing anything
 

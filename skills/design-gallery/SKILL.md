@@ -109,7 +109,9 @@ counterfeit spec that mis-briefs every future session).
   PILL, not a colored edge", "mono font banned in report UI" — each user rejection becomes a
   written rule in the lock doc, or it WILL be re-tried by a later session (each of these was).
 - **Logos: generate wide in the image lane, converge in code.** The SVG board renders every
-  candidate at favicon size and on dark BEFORE choosing; the shipped mark is one component with
+  candidate at favicon size and on dark BEFORE choosing, and no mark is done until
+  `logo-kit/scripts/preview_sheet.py` has been run and looked at (one-colour, reversed, app icon,
+  16–32 px — see LOGO-LANE step 5); the shipped mark is one component with
   hard-coded colors (a mark that re-tokenizes per theme stops being a mark).
 
 ## Files
@@ -121,11 +123,12 @@ counterfeit spec that mis-briefs every future session).
   the lock, the overrides for Joe's setup (assets via design-mockups, hero preference optional)
 - `references/inspo-round-zero.md` — Round 0: real reference sites from Inspo (default for every
   website gallery), skip rules, and the trial; results logged in `references/inspo-trial-log.md`
-- `references/agent-ui-primitives.md` — the 27-piece checklist for agent/chat surfaces (from
+- `references/agent-ui-primitives.md` — the 24-piece checklist for agent/chat surfaces (from
   beautiful-ui); mock every state, re-tokenize before shipping
 - `logo-kit/LOGO-LANE.md` — lane 3 procedure: phases, concept checkpoint, craft pass, red flags;
-  `logo-kit/scripts/` (svg_audit, render_png, concept_sheet, export_variants — plain Python, no
-  installs); harvested from kaankiziltug/logo-design-skill (MIT, `logo-kit/LICENSE`)
+  `logo-kit/scripts/` (svg_audit, render_png, concept_sheet, preview_sheet, export_variants — plain
+  Python, no installs); `logo-kit/references/critique.md` (logo scorecard); `logo-kit/tests/` (two
+  self-tests); harvested from kaankiziltug/logo-design-skill (MIT, `logo-kit/LICENSE`)
 - Image lane: `skills/design-mockups/` (own SKILL.md; includes `references/build-bridge.md`
   for the comp→code handoff, motion stack, and DESIGN.md spec layer)
 

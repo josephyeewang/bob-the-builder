@@ -1,7 +1,7 @@
 # Testing Checklist
 
 A logo is only finished when it has survived these tests. Most can be run with
-`scripts/svg_audit.py` (structure and geometry) and the design-gallery SVG logo board (visual tests: sizes, light/dark, one-colour); the rest need
+`scripts/svg_audit.py` (structure and geometry) and `scripts/preview_sheet.py` (visual tests: size ladder, pixel test, light/dark/brand backgrounds, one-colour, reversed, app icon, contexts, shelf); the rest need
 judgement. Run them on every concept before presenting and again on the final artwork.
 
 ## 1. Scale
@@ -40,7 +40,7 @@ judgement. Run them on every concept before presenting and again on the final ar
 - [ ] **Peer test**: next to 3–4 well-regarded real marks at the same size, yours looks equally resolved.
 
 ## 4. Distinctiveness and originality
-- [ ] **Shelf test**: placed among competitors' marks on the logo board, it stands out
+- [ ] **Shelf test**: placed among competitors' marks (`preview_sheet.py --refs rival.svg …`), it stands out
       rather than blending in.
 - [ ] **Familiarity test**: it doesn't remind you (or anyone you ask) of an existing mark. If it feels familiar and
       it isn't yours, it's someone else's.
