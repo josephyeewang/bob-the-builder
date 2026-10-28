@@ -56,6 +56,16 @@ Every lens report gains a section that states, in plain language:
 
 Never imply that one run exhausts the target.
 
+### Checking the record mechanically (2026-10-27 — `SCRIPT`)
+
+Keep the record as a JSON file next to the lens report (`audit-artifacts/<lens>-coverage-{date}.json`; the format is in the script's header) and run, before the report is written:
+
+```bash
+python3 ~/.claude/skills/bob/../scripts/coverage-check.py audit-artifacts/L04-coverage-2026-10-27.json
+```
+
+It refuses a `covered` unit with no files or checks, a `deferred` or `out_of_scope` unit with no reason, a `deferred` unit hiding partial evidence, a `blocked` unit that does not name its missing fact, a unit left `planned` at close, a "needs checking" finding that carries a severity (§2), and a closing statement whose counts do not match the units. Add `--draft` mid-run. It checks that the record **adds up**, not that the evidence is any good — that is still the refuter's and the gap critic's job.
+
 ---
 
 ## 2. The third verdict — "needs checking," and it gets no severity
@@ -81,6 +91,25 @@ Bob's fresh-context rule (Rule 30) already says the auditor must not be the buil
 
 1. **Refutation pass.** Every candidate goes to a *fresh* agent whose instruction is to **disprove it** from the source — not to "review" it. The framing matters: "verify this" and "try to break this" produce measurably different results. Cloudflare's prompt language: *"You did not write this candidate. Try to refute it from repository source."*
 2. **Independent record check.** After the findings are written up, a *second, separate* fresh agent verifies the final written claims against the source. If it materially replaces a claim, that replacement goes through the loop again.
+
+### The refuter's brief — give it this, word for word (2026-10-27)
+
+Naming the stance ("try to break it") is not enough; a refuter with no checklist drifts back into reviewing. Paste this into every refutation prompt, after the candidate itself:
+
+> You did not write this candidate. Try to refute it from the source and from small, safe local checks. Do not touch live systems or shared services; if you need to run the target's code, the rules in §7 apply.
+>
+> 1. **Check the path is real.** Verify every file, line number and step the claim cites. Confirm the first step is a real starting input from someone with less authority (a user, a file, an outside service), and the last step is the effect the claim says happens.
+> 2. **Rebuild the strongest protections on that path.** Look for every check the source actually performs along the way — validation, identity and permission checks, clean-up of the input, lifecycle rules, framework defaults, isolation. If a similar part of the system is named as a comparison, note whether it shares the pattern — as calibration, never as a reason to dismiss.
+> 3. **Reproduce only the smallest result.** For a claim proposed as confirmed, reproduce the minimum observed effect if you can, with dummy data and dummy accounts. Do not infer a bigger result, and stop as soon as the question is settled.
+> 4. **Make the severity match what was shown.** Likelihood, impact, confidence and the proposed fix must match only what the evidence establishes — nothing stronger.
+> 5. **A "needs checking" blocker must really be out of sight.** For a claim proposed as "needs checking," decide whether the deciding fact truly cannot be seen from the source or a local check. If the source disproves the path, reject the claim. If the missing fact still decides it, keep "needs checking" and make the local check and the owner's check exact and harmless.
+> 6. **Answer in the agreed format, or not at all.** Return exactly the agreed structured answer (confirmed / needs checking / rejected, with the corrected record). The coordinator **throws away a malformed or prose-wrapped answer without repairing it** and, budget permitting, re-runs that candidate with a fresh refuter.
+>
+> **"Needs checking" is never a parking place for a speculative idea.**
+
+Our wording says "starting input → claimed effect" where the source says "entrypoint → sink," so the brief works for any lens, not only security. The source's sandbox and file-promotion text is left out here because §7 already carries that contract.
+
+*Adapted from `cloudflare/security-audit-skill` @ `c1c8a8c1471069fb0e188eeaff69b8e8db6564a8`, `skills/security-audit/VALIDATION-AND-REPORTING.md` (candidate-verifier prompt, the "parking place" line and the malformed-result rule). MIT, Copyright (c) 2025-2026 Cloudflare, Inc. — licence in `third_party/cloudflare-security-audit/LICENSE`. Reworded for plain English by Joe Wang, 2026-10-27.*
 
 The cost is real — roughly one to two extra agent calls per surviving finding — which is exactly why §4 exists.
 
@@ -115,7 +144,12 @@ After each wave of work, one fresh agent reads the coverage record and the archi
 - units that should exist and don't,
 - units that were closed without real evidence and need reassigning,
 - prior unresolved items nothing is currently addressing,
+- **parallel paths nobody checked** — a second route to the same result (a bulk version of a single action, an import beside the form, an admin tool beside the user screen, a background job beside the live request) where only one route has a unit;
+- **missing lifecycle modes** — a record's create path was covered but not its edit, delete, restore, export, expiry or hand-over paths;
+- **exclusions with no stated reason** — an `out_of_scope` or `deferred` unit whose reason is blank, vague, or just "not relevant";
 - whether it believes the run is complete.
+
+*(The three bold targets were added 2026-10-27 from `cloudflare/security-audit-skill` @ `c1c8a8c`, `HUNTING.md` coverage-critic list — MIT, Copyright (c) 2025-2026 Cloudflare, Inc.)*
 
 **It proposes coverage, never findings.** That constraint is what keeps it useful — a critic allowed to report findings starts hunting and stops auditing the hunt.
 
@@ -213,4 +247,4 @@ D-003 ("orchestrate incumbent tooling, don't reinvent") is not overturned by thi
 | **`audit-ledger.json`** | Gains coverage counts per run, so "five consecutive clean Tier-1 audits" means five *covered* audits, not five *quiet* ones. |
 | **Data-heavy work (L31, L32, L37)** | §1 and §2 transfer directly: an un-run fidelity check and a check that found nothing are different results, and today they look the same. |
 
-**Attribution:** mechanisms adapted from `cloudflare/security-audit-skill` and `anthropics/claude-code-security-review`, both MIT-licensed. Quoted lines are theirs; the framing, the Bob mappings and the plain-language rewrite are ours.
+**Attribution:** mechanisms adapted from `cloudflare/security-audit-skill` and `anthropics/claude-code-security-review`, both MIT-licensed. Quoted lines are theirs; the framing, the Bob mappings and the plain-language rewrite are ours. The §3 refuter brief and the three §5 critic targets (2026-10-27) are adapted from `cloudflare/security-audit-skill` @ `c1c8a8c1471069fb0e188eeaff69b8e8db6564a8`; licence in `third_party/cloudflare-security-audit/LICENSE`. `scripts/coverage-check.py` is Bob's own code.

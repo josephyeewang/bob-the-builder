@@ -121,7 +121,17 @@ Per D-003 (orchestrate, don't reinvent): L04 orchestrates Semgrep, CodeQL, OWASP
     - **The wildcard** — no category at all. *What is the strangest code in this codebase? What do the tests conspicuously not test?*
     - **The literalist** — a flat, boring, mechanical checklist run end to end. It does not need to be creative; it needs to be thorough.
 
-11. **Rank top 3 findings by exploitability × impact.** Not by count.
+11. **Rank top 3 findings by exploitability × impact.** Not by count. Before ranking, answer these **eight "can an attacker actually reach this?" questions** for every important finding, tracing the path *untrusted input → entry point → validation → processing → dangerous operation → impact*:
+    1. Can someone who is **not logged in** reach it?
+    2. Does it need a **logged-in account**?
+    3. What **privileges** does the attacker need?
+    4. What **attacker-controlled data** actually reaches the dangerous operation?
+    5. What **security boundary** is crossed (user → another user's data, user → admin, outside → server)?
+    6. What can the attacker **ultimately accomplish**?
+    7. Is it **blocked somewhere else** in the application (a check upstream, a framework default, a proxy rule)?
+    8. Is exploitation **practical, or only theoretical**?
+
+    A question you cannot answer from the source is a "needs checking" item (`_evidence-accounting.md` §2), not a guess. *(The eight questions are adapted from `zeamp/ai-security-checklist-prompt.md` @ `804405cef101f087e64c4c966c84df40c87563b2`, §3 Attack-Path Analysis — MIT, Copyright (c) 2026 Richard Ward; licence in `third_party/ai-security-checklist-prompt/LICENSE`.)*
 
 12. **Close the coverage record and write the coverage statement (v2.40).** Per `_evidence-accounting.md` §1: state how many areas were planned, covered, deferred, blocked and out of scope; what was deliberately not examined and why; and whether a prior run's record existed. **An L04 that cannot say what it did not check is not finished** — regardless of how many findings it produced.
 
@@ -255,6 +265,7 @@ Per D-003 (orchestrate, don't reinvent): L04 orchestrates Semgrep, CodeQL, OWASP
 - **(v2.40) Do NOT report an effect stronger than the one actually observed**, and do not extend a local check past the minimum result that settles the question.
 - **(v2.40) Do NOT write the report before independent verification**, and never let the prose and the structured findings disagree.
 - **(v2.40) Do NOT count "Semgrep ran clean" as coverage.** Cloudflare's published result: the scanner was wired into their agent loop and *"the Hunters invoked it zero times in a month of runs."* Keep running scanners (D-003 stands — they are the deterministic sweep), but record scanner output as **one unit** in the coverage record, never as the coverage itself.
+- **(2026-10) Name a found secret's file and line — never its value.** Not in the report, the JSON sidecar, the coverage record, a commit message or a chat reply. Write `config/payments.ts:14 — live payment key`, not the key. An audit report that pastes a found key leaks it a second time, into `audit-artifacts/` and anywhere that file is shared — the same lesson Bob learned for lens retros (v2.18.2). Tell the human to rotate it. *(From `zeamp/ai-security-checklist-prompt.md` rule 7, MIT.)*
 - **(v2.40) Apply the false-positive precedents** in `_evidence-accounting.md` §9 before filing: UUIDs are unguessable; environment variables and CLI flags are trusted values; React is XSS-safe absent unsafe methods; SSRF needs control of host or protocol; user content in an AI system prompt is not by itself a vulnerability.
 
 ## Stop conditions (the gap IS the finding)

@@ -220,6 +220,28 @@ def main():
         else:
             P(f"  ok  all {len(cand)} concepts from {os.path.basename(a.source)} still present")
 
+    # ---- 8: leftover placeholders ---------------------------------------------
+    # Our own check; the idea (only a marker that OPENS the text counts, quoted code
+    # is skipped) is from OpenSpec's purpose-placeholder rule (MIT). "Retry budget is
+    # TBD pending benchmarks" is a real sentence with an open question and is left alone.
+    P("\n8    LEFTOVER PLACEHOLDERS — TODO / TBD / FIXME opening a line, or ???")
+    left = []
+    for f in a.spec:
+        if not os.path.exists(f): continue
+        fence = False
+        for n, line in enumerate(open(f, encoding="utf-8"), 1):
+            if line.lstrip().startswith(("```", "~~~")): fence = not fence; continue
+            if fence: continue
+            text = re.sub(r"`[^`]*`", "", strip(line))
+            cells = text.split("|") if "|" in text else [text]
+            if "???" in text or any(re.match(r"[\s#>*_\[(-]*(\d+[.)]\s+)?[\s*_\[(]*(TODO|TBD|FIXME)(?![A-Za-z0-9_])", c) for c in cells):
+                left.append(f"{os.path.basename(f)}:{n}: {text.strip()[:60]}")
+    if left:
+        fails.append(f"{len(left)} leftover placeholder(s) — decide them or log them as open questions")
+        for x in left[:12]: P(f"  !!  {x}")
+    else:
+        P("  ok  none")
+
     P("\n" + "=" * 72)
     if fails:
         P("FAIL (fix before advancing):"); [P("  · " + f) for f in fails]

@@ -9,7 +9,8 @@
 #   - Rule 28's spec audit is invoked via the skill symlink from any project:
 #     python3 ~/.claude/skills/bob/../scripts/spec-audit.py docs/product-spec.md
 #   - Writes a starter project CLAUDE.md that references Bob (so future sessions auto-load it)
-#   - Writes .claude/settings.json with the default hook set (format + typecheck)
+#   - Writes .claude/settings.json with the default hook set (format + green-gate +
+#     two guards: block-no-verify and config-protection, copied into .claude/hooks/)
 #   - Writes .gitignore, .env.example, README.md
 #   - git init's the repo with an initial commit
 #
@@ -186,6 +187,28 @@ if [[ ! -f .claude/settings.json ]]; then
     ]
   },
   "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "_comment_fire_when": "Before Claude runs any shell command. Blocks skipping the commit checks: git commit/push --no-verify (or -n), git -c core.hooksPath=..., and git config writing core.hooksPath. From ECC (MIT) — see .claude/hooks/block-no-verify.js. You can still bypass by hand in your own Terminal; this only stops Claude.",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"\$CLAUDE_PROJECT_DIR/.claude/hooks/block-no-verify.js\" >/dev/null"
+          }
+        ]
+      },
+      {
+        "matcher": "Edit|MultiEdit|Write",
+        "_comment_fire_when": "Before Claude edits a file. Blocks edits to EXISTING lint/format settings (eslint, prettier, biome, ruff, stylelint, markdownlint + their ignore files) so Claude fixes the code instead of loosening the rules to get the green-gate to pass. Creating a new settings file is allowed. Does NOT cover tsconfig.json. From ECC (MIT) — see .claude/hooks/config-protection.js. To change a lint rule on purpose, edit it yourself or remove this entry for that session.",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"\$CLAUDE_PROJECT_DIR/.claude/hooks/config-protection.js\" >/dev/null"
+          }
+        ]
+      }
+    ],
     "PostToolUse": [
       {
         "matcher": "Edit|Write",
@@ -236,7 +259,7 @@ You are a critical, independent reviewer. You did NOT write this code and you do
 At each milestone:
 1. Read the phase's done-criteria (Build Manifest / plan) and the diff (`git diff`).
 2. RUN the tests/build yourself — never trust a "done" claim (Green ≠ Correct; 45–76% of agent "done" claims are false-success, and LLM "is it done?" judgments are near-random — the diff and a real run are the truth).
-3. **Diff the TEST files specifically** — flag any deleted, weakened, or newly-added-to-pass tests (the "rewrote the tests to go green" failure mode). Green means the code agrees with itself, not that it matches the spec.
+3. **Diff the TEST files specifically** — flag any deleted, weakened, or newly-added-to-pass tests (the "rewrote the tests to go green" failure mode). Green means the code agrees with itself, not that it matches the spec. Also flag any change to `tsconfig.json` or other type/lint settings — the config-protection hook does not cover tsconfig.
 4. Also check: state-diff sanity (does the diff actually implement the claimed work, or is the tree ~unchanged?), drift from spec, untested/unhandled paths, anything irreversible or outward-facing that slipped in.
 5. **Failing-test receipt for every fix item** (Phase Gate 11): each fix item must name a test command — an item with none is an automatic BLOCK. For each, run `node ~/.claude/skills/bob/../scripts/prove-test-fails.mjs --commit <sha> --test "<cmd>" --fix <file>:<from>-<to>` (fix lines removed -> test must FAIL; restored -> must PASS) and include the receipt. You are a different session from the builder; that is what makes the receipt count.
 6. **Done-criteria unchanged** (Phase Gate 12): run `node ~/.claude/skills/bob/../scripts/check-bar.mjs <phase-report.md>`; a changed bar without a dated "bar changed because" line is a BLOCK.
@@ -298,6 +321,23 @@ GATEEOF
   chmod +x .claude/hooks/green-gate.sh
 else
   echo "✓ .claude/hooks/green-gate.sh already exists — leaving it alone."
+fi
+
+# ──────────────────────────────────────────────────────────────────────
+# 3d. Guard hooks (D-017): block-no-verify + config-protection, from ECC (MIT)
+# Copied INTO the project (not pointed at Bob's install) so they travel with the
+# repo, work for anyone who clones it, and keep working if Bob moves. Needs Node.
+# ──────────────────────────────────────────────────────────────────────
+mkdir -p .claude/hooks/lib
+for f in block-no-verify.js config-protection.js lib/shell-scan.js; do
+  if [[ ! -f ".claude/hooks/$f" ]]; then
+    cp "$BOB_ROOT/scripts/hooks/$f" ".claude/hooks/$f"
+  fi
+done
+chmod +x .claude/hooks/block-no-verify.js .claude/hooks/config-protection.js
+echo "🛡  Guard hooks in .claude/hooks/: block-no-verify.js (no skipping commit checks), config-protection.js (no loosening lint settings)."
+if ! command -v node >/dev/null 2>&1; then
+  echo "   ⚠ Node is not installed, so these two guards will not run until it is (https://nodejs.org, version 18 or newer)."
 fi
 
 # ──────────────────────────────────────────────────────────────────────

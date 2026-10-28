@@ -25,6 +25,15 @@ user-invocable: true
   verification and class-level fix enforcement from the first real field retro.
 - **Spec-phase Coverage Taxonomy** (v2.25, Step 1b): a fixed 9-category Clear/Partial/Missing checklist harvested
   from GitHub Spec Kit's /clarify that catches structural spec gaps before the build.
+- **Scheduled & unattended work** (2026-10, D-015/D-017): any capability that runs on a schedule or without a human
+  watching (cron jobs, nightly pipelines, L37) follows `~/.claude/skills/bob/../templates/scheduled-work-protocol.md`
+  — LOAD IT before designing or reviewing one — and uses `templates/run-claim.mjs` so a double, crashed or
+  simultaneous run is harmless.
+- **Guard hooks** (2026-10, D-017): `bob-init` copies two hooks into every new project — `block-no-verify.js` (Claude
+  cannot skip the commit checks) and `config-protection.js` (Claude cannot loosen lint settings to go green).
+- **Mechanical checkers:** `scripts/spec-audit.py` (spec structure + leftover TODO/TBD), `scripts/coverage-check.py`
+  (an audit's coverage record adds up), plus the Phase-Gate scripts; all regression-tested by
+  `scripts/selftest-gate-scripts.sh`.
 
 A systematic protocol for building, auditing, and evolving products with Claude Code. Designed for a non-engineer product leader.
 

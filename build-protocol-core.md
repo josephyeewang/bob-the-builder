@@ -369,6 +369,9 @@ If Tier 2-3 skipped during build → MUST run at hardening.
 - Capability Traceability Matrix template: `templates/capability-traceability-matrix.md` (used in Step 5a-ii and at every Reconcile / A7i)
 - Decision Log entry: `templates/decision-log-entry.md` or Appendix D
 - Cowork Session: `templates/cowork-session.md` or Appendix H
+- **Scheduled / unattended work (D-015, D-017):** `templates/scheduled-work-protocol.md` — **load it whenever the product has anything that runs on a schedule or without a human watching** (cron, nightly pipelines, background jobs, L37). Ships with `templates/run-claim.mjs` (copy into the project; makes a double, crashed or simultaneous run harmless — `node run-claim.mjs --selftest`).
+- **Audit coverage record checker (D-017):** `scripts/coverage-check.py` — run on every lens's coverage record before the report is written (`audit-lenses/_evidence-accounting.md` §1).
+- **Guard hooks (D-017):** `scripts/hooks/block-no-verify.js` + `scripts/hooks/config-protection.js` (from ECC, MIT) — `bob-init` copies them into `.claude/hooks/` as PreToolUse hooks (Step 6b items 4–5).
 - Architecture Patterns: Appendix G in full protocol
 - Anti-patterns: Appendix A in full protocol
 - Global Invariants guide: Appendix E in full protocol

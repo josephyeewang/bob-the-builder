@@ -831,6 +831,17 @@ Output the coverage map (a 9-row Clear/Partial/Missing table) only if any catego
 
 **1b-ii: Resolve Partial/Missing (capped questioning).** For each Partial/Missing category whose resolution would *materially* change architecture, data model, scope, scenarios, or build sequencing, Claude asks a **targeted clarification question** — **one at a time, maximum 5 total**, prioritized by (Impact × Uncertainty). Each question leads with a **recommended default + one line of reasoning** (so the user can reply "yes" to accept, pick a lettered option, or give a ≤5-word answer) — keeping the non-coder ergonomics of Narrator Mode rather than a wall of questions. Categories whose ambiguity wouldn't change the build are noted as Deferred, not asked. (This is a focused gap-closer, not a second interview — if more than 5 categories are unresolved, that's a signal the spec is too thin and 1a-pre should be revisited.)
 
+  **How to word each question (2026-10-27 — five rules):**
+  1. Start with **`Question:`** followed by a full question that ends in **`?`**. The words before the `?` must make sense on their own.
+  2. **Never use a topic label, a section heading or an ID as the question.** *"Device/runtime matrix (FR-023)"* is a label, not a question.
+  3. After the `?`, the only thing allowed is an optional ID in brackets: `Question: Who can see another user's orders? (Q3)`. Never put the ID first, and never let the ID stand in for the question.
+  4. Straight after the question, add **one plain sentence on why it matters** — what goes wrong for launch or acceptance if it stays open — before the recommended default and options.
+  5. **Use everyday words**; introduce a technical term only if it is explained in the same sentence. Self-check: *someone who does not know this project's internal labels (phase codes, step numbers, capability IDs) must be able to answer from the Question line alone.* Short is fine; cryptic is not.
+
+  **After each answer — write it back, and delete what it contradicts.** Record the answer in the spec straight away, in a dated log (`## Clarifications` → `### Session YYYY-MM-DD` → `- Q: … → A: …`, one bullet per answer), and apply it to the section it affects. **If the answer contradicts an earlier line of the spec, replace or delete that line — never leave the old statement standing beside the new one.** A spec that says both things is worse than one that says neither, because the builder will pick one at random.
+
+  *The five wording rules and the write-back rule are adapted from GitHub Spec Kit (`github/spec-kit` @ `222a973f8b8794366680c043fb935a31f71902af`, `templates/commands/clarify.md` steps 5–7), MIT, Copyright GitHub, Inc. — licence in `third_party/spec-kit/LICENSE`. "A reader who does not know Spec Kit" became "this project's internal labels"; wording simplified by Joe Wang, 2026-10-27.*
+
 **1b-iii: Open-ended stress-test.** Claude pressure-tests the spec on the non-checklist dimensions:
   - Logical gaps (capability X requires capability Y, but Y isn't listed)
   - Scope clarity (is each capability clearly MVP vs later?)
@@ -838,7 +849,7 @@ Output the coverage map (a 9-row Clear/Partial/Missing table) only if any catego
   - Constraint realism (is this buildable within stated constraints?)
   - Missing economics (what's the cost per user? Per AI call? Per message?)
 - Present all findings (coverage-scan + open-ended) as a single numbered list.
-- Resolutions fold into `product-spec.md`; non-trivial decisions log to `docs/decision-log.md`.
+- Resolutions fold into `product-spec.md` (replacing any line they contradict — see 1b-ii); non-trivial decisions log to `docs/decision-log.md`.
 - `→ HG:` Human reviews, resolves each finding
 
 > **Distinctness (anti-sprawl).** The Coverage Scan is a *spec-phase* instrument — "does the spec **say** enough?" It is orthogonal to **L31 Input & Data-Flow Trace** (traces one input through *built code*, post-build) and **L02 Spec Fidelity** (checks *code matches spec*, post-build). It does not duplicate the `capability-traceability-matrix` (requirement→phase→test mapping) — that's Step 5a. See `evolutions/003-clarify-coverage-taxonomy/`.
@@ -1217,10 +1228,11 @@ CLAUDE.md rules are advisory (~80% followed). Hooks are deterministic (100% enfo
 1. **PostToolUse (Edit/Write) → auto-format.** Prettier / Black / gofmt / etc. matched to the stack. Prevents whitespace and style noise from cluttering diffs.
 2. **Stop (on turn complete) → type-check + build.** Catches type errors and build breaks before the human reviews. The single highest-leverage hook for non-engineer users.
 3. **PreToolUse (Bash) → block destructive commands.** `git push --force` to main, `rm -rf` outside the project root, `DROP TABLE`, `truncate`. Pattern-matched, project-tunable.
+4. **PreToolUse (Bash) → block skipping the commit checks (2026-10-27, D-017).** `.claude/hooks/block-no-verify.js` stops Claude running `git commit/push --no-verify` (or `-n`), `git -c core.hooksPath=…`, the same hidden inside `bash -c` or environment variables, and — Bob's addition — `git config` writing `core.hooksPath` (a lasting switch-off). Without it, every pre-commit check (secret scan, coherence sweep) is one flag away from not running. The human can still bypass by hand in their own Terminal. Taken from ECC (MIT); `bob-init` copies it in.
+5. **PreToolUse (Edit/Write) → don't loosen the lint settings (2026-10-27, D-017).** `.claude/hooks/config-protection.js` blocks edits to *existing* eslint / prettier / biome / ruff / stylelint / markdownlint settings and their ignore files, so Claude fixes the code instead of weakening the rules to get hook 2 to pass. Creating a settings file for the first time is allowed. **Gap:** it deliberately leaves `tsconfig.json` alone, so loosening TypeScript strictness is not covered — the milestone reviewer (Rule 27) must flag any `tsconfig.json` change in the diff. Taken from ECC (MIT); `bob-init` copies it in.
 
 **Optional add-ons (recommend per project):**
 
-- **PreToolUse (Bash) → block hook-bypass flags.** `--no-verify`, `--no-gpg-sign` — flagged unless the human explicitly approved.
 - **PostToolUse (Edit on contracts/) → schema validate.** For projects using machine-readable contracts (Step 4b), validate the contract file on every edit.
 - **Stop → run AI eval set.** For AI products, re-run `evals/behavioral-core.yaml` if the phase touched AI behavior. Slower; recommend only if the eval set is fast (<30s).
 

@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
-# selftest-gate-scripts.sh — regression tests for the three Phase-Gate scripts (D-016):
-#   prove-test-fails.mjs · check-bar.mjs · lane-check.mjs
+# selftest-gate-scripts.sh — regression tests for Bob's mechanical checkers:
+#   D-016: prove-test-fails.mjs · check-bar.mjs · lane-check.mjs
+#   D-017: hooks/block-no-verify.js · hooks/config-protection.js · coverage-check.py ·
+#          spec-audit.py's leftover-placeholder check · templates/run-claim.mjs
 #
 # Rule 28's discipline applied to Bob's own checkers: each check is run against the defect it
 # was written for (must catch it) AND against a clean case (must pass it). Everything happens in
 # throw-away git repos under a temp folder; nothing in the Bob repo or your projects is touched.
 #
 # Usage:  bash scripts/selftest-gate-scripts.sh      (exit 0 = all pass)
-# Needs:  bash, git, node >= 18.
+# Needs:  bash, git, node >= 18, python3.
 
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -151,6 +153,122 @@ printf 'lane\tbranch prefixes\towns\nweb\tweb/\tapps/web/\n' > "$TMP/lanes.tsv"
 expect "TSV register works" 1 "services/api/b.ts \(coordinator's\)" -- run_lane --enforce --register "$TMP/lanes.tsv"
 expect "missing register in WARN mode -> note, exit 0" 0 "no lane register" -- run_lane --register "$TMP/none.md"
 expect "missing register in ENFORCE mode -> exit 2" 2 "no lane register" -- run_lane --enforce --register "$TMP/none.md"
+
+# ── 4. Guard hooks (D-017, from ECC) ─────────────────────────────────────────
+# Cases from the 2026-10-27 bake-off (9 must block, 5 must pass) + Bob's core.hooksPath addition.
+# ECC's own suites (819 + 16 tests) were also run against these exact files; see D-017.
+echo "hooks/block-no-verify.js"
+NV="$HERE/hooks/block-no-verify.js"
+bash_hook() { node -e 'process.stdout.write(JSON.stringify({tool_name:"Bash",tool_input:{command:process.argv[1]}}))' "$1" | node "$NV" >/dev/null; }
+while IFS='|' read -r want cmd; do
+  [[ -z "$want" ]] && continue
+  code=0; [[ "$want" == BLOCK ]] && code=2
+  expect "$want: $cmd" "$code" "" -- bash_hook "$cmd"
+done <<'CASES'
+BLOCK|git commit --no-verify -m "wip"
+BLOCK|git commit -n -m "wip"
+BLOCK|git -c core.hooksPath=/dev/null commit -m "wip"
+BLOCK|git push --no-verify
+BLOCK|cd repo && git commit -am fix --no-verify
+BLOCK|bash -c 'git commit --no-verify -m x'
+BLOCK|git -C /tmp/x commit --no-verify -m x
+BLOCK|GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/dev/null git commit -m x
+BLOCK|git config core.hooksPath /dev/null && git commit -m x
+BLOCK|git config --global core.hooksPath /dev/null
+BLOCK|git config --global --unset core.hooksPath
+BLOCK|git config set core.hooksPath /tmp/x
+BLOCK|bash -c 'git -C repo config core.HooksPath ""'
+BLOCK|git config --local include.path ../other.cfg
+ALLOW|git commit -m "docs: explain why we never use --no-verify"
+ALLOW|git log --grep=no-verify
+ALLOW|echo "--no-verify is banned"
+ALLOW|git commit -m "normal commit"
+ALLOW|git status
+ALLOW|git config --get core.hooksPath
+ALLOW|git config core.hooksPath
+ALLOW|git config user.name "Sam Lee"
+CASES
+expect "block message reaches Claude on stderr" 2 "Git hooks must not be bypassed" -- bash_hook "git commit --no-verify -m x"
+
+echo "hooks/config-protection.js"
+CP="$HERE/hooks/config-protection.js"; CPD="$TMP/cp"; mkdir -p "$CPD"
+echo '{}' > "$CPD/.eslintrc.json"; : > "$CPD/.eslintignore"; echo '{}' > "$CPD/tsconfig.json"
+edit_hook() { node -e 'process.stdout.write(JSON.stringify({tool_name:"Edit",tool_input:{file_path:process.argv[1]}}))' "$1" | node "$CP" >/dev/null; }
+expect "editing an existing lint config -> BLOCKED" 2 "BLOCKED: Modifying .eslintrc.json" -- edit_hook "$CPD/.eslintrc.json"
+expect "case variant of an existing config -> BLOCKED" 2 "BLOCKED" -- edit_hook "$CPD/.ESLINTRC.JSON"
+expect "editing an existing ignore list -> BLOCKED" 2 "BLOCKED" -- edit_hook "$CPD/.eslintignore"
+expect "creating a lint config for the first time -> allowed" 0 "" -- edit_hook "$CPD/biome.json"
+expect "ordinary source file -> allowed" 0 "" -- edit_hook "$CPD/src/app.ts"
+expect "tsconfig.json is NOT covered (known gap, documented in 6b)" 0 "" -- edit_hook "$CPD/tsconfig.json"
+
+# ── 5. coverage-check.py (D-017) ─────────────────────────────────────────────
+echo "coverage-check.py"
+CC="$HERE/coverage-check.py"; CR="$TMP/cov"; mkdir -p "$CR"
+cat > "$CR/good.json" <<'JSON'
+{"units":[
+ {"id":"U1","state":"covered","files":["api/orders.ts"],"checks":["owner check on GET /orders/:id"]},
+ {"id":"U2","state":"deferred","reason":"budget ran out after wave 2"},
+ {"id":"U3","state":"blocked","files":["infra/proxy.conf"],"checks":["header pass-through"],"missing_fact":"does the hosting proxy strip X-Forwarded-For?"},
+ {"id":"U4","state":"out_of_scope","reason":"marketing site is a separate repo"}],
+ "findings":[{"id":"F1","verdict":"needs_checking","missing_fact":"proxy header policy","safe_check":"owner reads the proxy setting"},
+             {"id":"F2","verdict":"confirmed","severity":"Major"}],
+ "statement":{"planned":4,"covered":1,"candidate":0,"blocked":1,"deferred":1,"out_of_scope":1}}
+JSON
+expect "a sound record -> OK" 0 "4 units, 0 problem" -- python3 "$CC" "$CR/good.json"
+mut() { python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); exec(sys.argv[2]); json.dump(r,open(sys.argv[3],"w"))' "$CR/good.json" "$1" "$CR/$2.json"; }
+mut 'r["units"][0]["files"]=[]' cov_noev
+expect "covered with no files -> FAIL" 1 "'covered' needs both" -- python3 "$CC" "$CR/cov_noev.json"
+mut 'r["units"][1]["reason"]=""' def_noreason
+expect "deferred with no reason -> FAIL" 1 "'deferred' needs a reason" -- python3 "$CC" "$CR/def_noreason.json"
+mut 'r["units"][1]["checks"]=["half-read the router"]' def_ev
+expect "deferred hiding partial evidence -> FAIL" 1 "partial work belongs in 'blocked'" -- python3 "$CC" "$CR/def_ev.json"
+mut 'r["units"][2]["missing_fact"]=""' blk
+expect "blocked without the missing fact -> FAIL" 1 "must name the missing fact" -- python3 "$CC" "$CR/blk.json"
+mut 'r["units"][1]["state"]="planned"; r["units"][1]["reason"]=""; r["statement"]["deferred"]=0' left
+expect "unit left 'planned' at close -> FAIL" 1 "still 'planned' at close" -- python3 "$CC" "$CR/left.json"
+expect "...but allowed mid-run with --draft" 0 "0 problem" -- python3 "$CC" "$CR/left.json" --draft
+mut 'r["findings"][0]["severity"]="Minor"' nc_sev
+expect "'needs checking' with a severity -> FAIL" 1 "must carry no severity" -- python3 "$CC" "$CR/nc_sev.json"
+mut 'r["statement"]["covered"]=4' stmt
+expect "statement counts that don't add up -> FAIL" 1 "covered = 4, the units say 1" -- python3 "$CC" "$CR/stmt.json"
+mut 'del r["statement"]' nostmt
+expect "no closing statement -> FAIL" 1 "no closing statement" -- python3 "$CC" "$CR/nostmt.json"
+mut 'r["units"][1]["id"]="U1"' dup
+expect "repeated unit id -> FAIL" 1 "id used twice" -- python3 "$CC" "$CR/dup.json"
+expect "unreadable file -> exit 2" 2 "cannot read" -- python3 "$CC" "$CR/none.json"
+
+# ── 6. spec-audit.py leftover-placeholder check (D-017) ──────────────────────
+echo "spec-audit.py (check 8)"
+SA="$HERE/spec-audit.py"; SP="$TMP/spec.md"
+cat > "$SP" <<'SPEC'
+# Spec
+## Scope
+- Orders import from the shop's CSV export.
+- The retry budget is TBD pending benchmarks.
+- Use `TODO` comments sparingly in code.
+SPEC
+expect "TBD inside a sentence + quoted TODO -> not flagged" 0 "ok  none" -- python3 "$SA" "$SP"
+cat >> "$SP" <<'SPEC'
+- TBD: who can see another user's orders
+| Refunds | TODO |
+- Max file size ???
+```
+TODO in a code block is fine
+```
+SPEC
+expect "TBD opening a line -> flagged" 1 "spec.md:6: - TBD" -- python3 "$SA" "$SP"
+expect "TODO opening a table cell -> flagged" 1 "spec.md:7:" -- python3 "$SA" "$SP"
+expect "??? anywhere -> flagged" 1 "spec.md:8:" -- python3 "$SA" "$SP"
+expect "fenced code is skipped (exactly 3 hits)" 1 "3 leftover placeholder" -- python3 "$SA" "$SP"
+
+# ── 7. templates/run-claim.mjs (D-017, from ai-employees) ───────────────────
+echo "run-claim.mjs"
+RC="$HERE/../templates/run-claim.mjs"; mkdir -p "$TMP/rc"
+expect "its own self-test (crash expiry, resume, simultaneous fire)" 0 "selftest PASS" -- node "$RC" --selftest
+expect "first claim for a period -> go" 0 '"allowed":true' -- node "$RC" claim --job nightly --period 2026-10-27 --budget-minutes 5 --root "$TMP/rc"
+expect "second claim, same period, while live -> stop (exit 3)" 3 "another claim is active" -- node "$RC" claim --job nightly --period 2026-10-27 --budget-minutes 5 --root "$TMP/rc"
+expect "a refused run is not shown the owner's token" 1 "" -- bash -c "node '$RC' claim --job nightly --period 2026-10-27 --budget-minutes 5 --root '$TMP/rc' | grep -q token"
+expect "claim without a period -> refused" 1 "needs --period" -- node "$RC" claim --job nightly --budget-minutes 5 --root "$TMP/rc"
 
 echo
 echo "selftest-gate-scripts: $PASS passed, $FAIL failed"

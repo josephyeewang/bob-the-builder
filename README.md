@@ -156,4 +156,4 @@ Now, finally, the answer is: "Yes he can!" 🔨
 
 [MIT](LICENSE) — use it, fork it, adapt it, share it.
 
-A few pieces are adapted from other open-source projects (Google's elephant-goldfish-model, Apache-2.0; pullboard, MIT). Their licences and what was taken are listed in [`third_party/README.md`](third_party/README.md); those files keep their original licence.
+A few pieces are adapted from other open-source projects (Google's elephant-goldfish-model, Apache-2.0; and, all MIT: pullboard, ECC — whose two guard hooks `bob-init` installs in every new project — Cloudflare's security-audit skill, GitHub Spec Kit, ai-employees and ai-security-checklist-prompt). Their licences and what was taken are listed in [`third_party/README.md`](third_party/README.md); those files keep their original licence.
