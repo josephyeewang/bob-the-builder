@@ -5,7 +5,7 @@
 // working until the build is green) to a project that has been running without it, the
 // hook starts here first: it still runs and still says what it WOULD have blocked, but
 // the action goes ahead. Once the owner has seen it behave, they switch it to enforce:
-//   node ~/.claude/skills/bob/../scripts/bob-upgrade.mjs --enforce <item>
+//   node "$(realpath ~/.claude/skills/bob/..)/scripts/bob-upgrade.mjs" --enforce <item>
 //
 // Usage (as .claude/settings.json writes it):
 //   node "$CLAUDE_PROJECT_DIR/.claude/hooks/warn-only.mjs" <hook-file-in-.claude/hooks>
@@ -45,7 +45,7 @@ if (r.status === 2) {
   say(
     `Bob warn-only: the ${name} hook WOULD HAVE BLOCKED this, but it is in warn-only mode for this project, so it went ahead.` +
       (reason ? ` What it said: ${reason}` : "") +
-      ` To make it block for real: node ~/.claude/skills/bob/../scripts/bob-upgrade.mjs --enforce <item> (the item name is in the UPGRADE report).`,
+      ` To make it block for real: node "$(realpath ~/.claude/skills/bob/..)/scripts/bob-upgrade.mjs" --enforce <item> (the item name is in the UPGRADE report).`,
   );
 }
 process.exit(0);

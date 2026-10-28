@@ -35,7 +35,7 @@ trap cleanup EXIT
 if [ "$BLOCK" -eq 0 ]; then
   grep -E '✗|RESULT' "$OUT" | head -15
   echo "⚠ Bob's document check found the problems above. This project is set to warn only, so the commit goes ahead."
-  echo "  To have it stop commits: fix them, then run /bob UPGRADE (node ~/.claude/skills/bob/../scripts/bob-upgrade.mjs --apply commit-sweep)."
+  echo "  To have it stop commits: fix them, then run /bob UPGRADE (node \"\$(realpath ~/.claude/skills/bob/..)/scripts/bob-upgrade.mjs\" --apply commit-sweep)."
   exit 0
 fi
 

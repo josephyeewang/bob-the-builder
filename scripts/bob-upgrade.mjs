@@ -2,11 +2,11 @@
 // bob-upgrade.mjs — /bob UPGRADE: bring an existing project up to date with the current Bob (D-019).
 //
 // Run it FROM THE PROJECT FOLDER:
-//   node ~/.claude/skills/bob/../scripts/bob-upgrade.mjs                 # report only — changes nothing
-//   node ~/.claude/skills/bob/../scripts/bob-upgrade.mjs --apply all     # apply every safe update
-//   node ~/.claude/skills/bob/../scripts/bob-upgrade.mjs --apply merge-guard,reviewer-agent
-//   node ~/.claude/skills/bob/../scripts/bob-upgrade.mjs --interactive   # ask yes/no per item
-//   node ~/.claude/skills/bob/../scripts/bob-upgrade.mjs --enforce guard-settings-block-no-verify
+//   node "$(realpath ~/.claude/skills/bob/..)/scripts/bob-upgrade.mjs"                 # report only — changes nothing
+//   node "$(realpath ~/.claude/skills/bob/..)/scripts/bob-upgrade.mjs" --apply all     # apply every safe update
+//   node "$(realpath ~/.claude/skills/bob/..)/scripts/bob-upgrade.mjs" --apply merge-guard,reviewer-agent
+//   node "$(realpath ~/.claude/skills/bob/..)/scripts/bob-upgrade.mjs" --interactive   # ask yes/no per item
+//   node "$(realpath ~/.claude/skills/bob/..)/scripts/bob-upgrade.mjs" --enforce guard-settings-block-no-verify
 //   (bob-init calls it with --record-install; you never need to.)
 //
 // What it looks at — ONLY the pieces Bob installs into a project (the list is PIECES below):
@@ -38,7 +38,7 @@ import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const BOB_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const CMD = "node ~/.claude/skills/bob/../scripts/bob-upgrade.mjs";
+const CMD = 'node "$(realpath ~/.claude/skills/bob/..)/scripts/bob-upgrade.mjs"';
 const FORMAT = 1;
 
 // ── Arguments ────────────────────────────────────────────────────────────────────────────────────

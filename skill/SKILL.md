@@ -95,7 +95,7 @@ If the user invokes the skill with an argument (e.g., `/bob NEW`, `/bob AUDIT`, 
 
 Different from "update bob" below: that updates **Bob itself**; UPGRADE updates **the project** in the current folder to match the Bob you have. Follow `build-protocol-core.md` §"MODE: UPGRADE" (U1–U5). In short:
 
-1. Run `node ~/.claude/skills/bob/../scripts/bob-upgrade.mjs` from the project folder. It changes nothing.
+1. Run `node "$(realpath ~/.claude/skills/bob/..)/scripts/bob-upgrade.mjs"` from the project folder. It changes nothing.
 2. Retell the report in plain English — per item: what it does for the user, why Bob changed it (D-number + its one-line reason), what applying would change. Ask which to apply (`→ HG`). Do not use `--interactive` yourself (it needs a terminal); pass the user's choices with `--apply <item>,<item>` or `--apply all`.
 3. For "changed here, reason not written down": ask keep (add `- <item>: <why>` to `.bob/differences.md`) or take Bob's (the old copy is backed up).
 4. Tell the user which hooks arrived warn-only and how to switch them on later (`--enforce <item>`), and whether the commit-time document check blocks yet (`commit-sweep`).
