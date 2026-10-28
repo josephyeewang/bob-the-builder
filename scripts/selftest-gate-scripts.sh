@@ -3,6 +3,8 @@
 #   D-016: prove-test-fails.mjs · check-bar.mjs · lane-check.mjs
 #   D-017: hooks/block-no-verify.js · hooks/config-protection.js · coverage-check.py ·
 #          spec-audit.py's leftover-placeholder check · templates/run-claim.mjs
+#   D-018: hooks/merge-guard.mjs (its own node:test suite, incl. a bob-init scaffold + mutation proof) ·
+#          doc-pointers-check.mjs · audit-ledger-check.mjs · templates/loop-check.mjs
 #
 # Rule 28's discipline applied to Bob's own checkers: each check is run against the defect it
 # was written for (must catch it) AND against a clean case (must pass it). Everything happens in
@@ -269,6 +271,125 @@ expect "first claim for a period -> go" 0 '"allowed":true' -- node "$RC" claim -
 expect "second claim, same period, while live -> stop (exit 3)" 3 "another claim is active" -- node "$RC" claim --job nightly --period 2026-10-27 --budget-minutes 5 --root "$TMP/rc"
 expect "a refused run is not shown the owner's token" 1 "" -- bash -c "node '$RC' claim --job nightly --period 2026-10-27 --budget-minutes 5 --root '$TMP/rc' | grep -q token"
 expect "claim without a period -> refused" 1 "needs --period" -- node "$RC" claim --job nightly --budget-minutes 5 --root "$TMP/rc"
+
+# ── 8. hooks/merge-guard.mjs (D-018) ─────────────────────────────────────────
+echo "merge-guard.mjs"
+expect "its node:test suite (block/allow table, two stages, scaffolded hook, mutation proof)" 0 "# fail 0" -- \
+  node --test --test-reporter=tap "$HERE/hooks/merge-guard.test.mjs"
+
+# ── 9. doc-pointers-check.mjs (D-018) ────────────────────────────────────────
+echo "doc-pointers-check.mjs"
+DP="$HERE/doc-pointers-check.mjs"; D="$TMP/dp"; mkdir -p "$D/docs"
+printf '# Plan\n\n## 1. Scope\n\n## 2. Order of work\n' > "$D/docs/plan.md"
+printf '| D-001 | 2026-10-01 | first |\n- **Date:** 2026-10-20\n' > "$D/docs/decision-log.md"
+printf '# Manifest\nStatus as of: 2026-10-15\n' > "$D/docs/build-manifest.md"
+printf '# Project\n- Plan: `docs/plan.md` — read §2 of docs/plan.md first.\n- Log: `decision-log.md`\n' > "$D/AGENTS.md"
+expect "pointers that resolve -> pass" 0 "3 pointer\(s\) checked, 0 broken" -- node "$DP" --root "$D"
+printf -- '- Old: docs/retired-plan.md\n' >> "$D/AGENTS.md"
+expect "a path that no longer exists -> FAIL" 1 "docs/retired-plan.md, which does not exist" -- node "$DP" --root "$D"
+printf 'docs/retired-plan.md\n' > "$D/.bob-optional-pointers"
+expect "... unless listed in .bob-optional-pointers" 0 "doc-pointers-check: OK" -- node "$DP" --root "$D"
+printf -- '- See §7 of docs/plan.md\n' >> "$D/AGENTS.md"
+expect "a renumbered section -> FAIL" 1 "§7 of docs/plan.md, and docs/plan.md has no section 7" -- node "$DP" --root "$D"
+printf '# Project\n- `nowhere-at-all.md`\n' > "$D/CLAUDE.md"
+expect "a bare name found nowhere -> warning only (may live in another install)" 1 "⚠ CLAUDE.md names .nowhere-at-all.md." -- node "$DP" --root "$D"
+printf '# Project\n- docs/specs/missing.md\n' > "$D/CLAUDE.md"
+expect "CLAUDE.md is checked too (a missing path) -> FAIL" 1 "CLAUDE.md points at docs/specs/missing.md" -- node "$DP" --root "$D"
+rm "$D/CLAUDE.md"; printf '# Project\n- Plan: `docs/plan.md`\n' > "$D/AGENTS.md"
+expect "status 5 days behind the newest decision (limit 7) -> pass" 0 "doc-pointers-check: OK" -- \
+  node "$DP" --root "$D" --status docs/build-manifest.md --log docs/decision-log.md
+expect "status 5 days behind with --max-lag 4 -> FAIL" 1 "5 days later; the limit is 4" -- \
+  node "$DP" --root "$D" --status docs/build-manifest.md --log docs/decision-log.md --max-lag 4
+printf '> **2026-10-30 — a later state entry\n' > "$D/docs/PROJECT-STATE.md"
+expect "a newer PROJECT-STATE entry counts (15 days) -> FAIL" 1 "15 days later" -- \
+  node "$DP" --root "$D" --status docs/build-manifest.md --log docs/decision-log.md --also docs/PROJECT-STATE.md
+printf '# Manifest\n' > "$D/docs/build-manifest.md"
+expect "no as-of date -> warning only" 0 "carries no \"Status as of" -- \
+  node "$DP" --root "$D" --status docs/build-manifest.md --log docs/decision-log.md
+expect "no as-of date with --require-asof -> FAIL" 1 "carries no \"Status as of" -- \
+  node "$DP" --root "$D" --status docs/build-manifest.md --log docs/decision-log.md --require-asof
+expect "coherence-check.sh runs it on the root file (class 8)" 1 "\[8\] Root instruction file" -- \
+  bash -c "printf -- '- Gone: docs/gone.md\n' >> '$D/AGENTS.md'; bash '$HERE/coherence-check.sh' '$D/docs'"
+expect "Bob's own root files pass" 0 "doc-pointers-check: OK" -- node "$DP" --root "$HERE/.."
+
+# ── 10. audit-ledger-check.mjs (D-018) ───────────────────────────────────────
+echo "audit-ledger-check.mjs"
+AL="$HERE/audit-ledger-check.mjs"; L="$TMP/al"; mkdir -p "$L"
+expect "the template itself passes" 0 "audit-ledger-check: OK" -- node "$AL" "$HERE/../templates/audit-ledger.json"
+lmut() { # lmut <python-statements on dict l> <name>
+  python3 - "$HERE/../templates/audit-ledger.json" "$L/$2.json" "$1" <<'PYM'
+import json, sys
+l = json.load(open(sys.argv[1]))
+e = lambda ran, cls, tier, found, **kw: dict(audit=f"{cls}@{ran}", ran=ran, tier=tier, class_of_work=cls, material_found=found, material_remaining=0, minor=0, cosmetic=0, auditor_context="fresh subagent", **kw)
+exec(sys.argv[3])
+json.dump(l, open(sys.argv[2], "w"))
+PYM
+}
+lmut 'l["entries"]=[e("2026-10-0%d"%d,"ui",1,0) for d in range(1,6)] + [e("2026-10-01","outputs",1,1), e("2026-10-02","outputs",1,0), e("2026-10-03","outputs",2,3), e("2026-10-04","outputs",1,0,rounds=0)]' good
+expect "five clean Tier-1 ui audits -> propose Tier 2" 0 "ui +5  → propose Tier 2" -- node "$AL" "$L/good.json" --streaks
+expect "Tier 2 and rounds=0 skipped; a Material stops the streak" 0 "outputs +1   stopped by: outputs@2026-10-01 .*1 Material" -- node "$AL" "$L/good.json" --streaks
+lmut 'l["entries"]=[e("2026-10-01","ingestion",1,0)]' badclass
+expect "a class outside the vocabulary -> FAIL" 1 'class_of_work "ingestion" is not in the vocabulary' -- node "$AL" "$L/badclass.json"
+lmut 'l["entries"]=[e("2026-10-01","ui",1,None)]' nullnew
+expect "a null count on a new entry -> FAIL" 1 "new entry has null material_found" -- node "$AL" "$L/nullnew.json"
+lmut 'l["format"]["legacy_entry_count"]=1; l["entries"]=[e("2026-10-01","ui",1,None,unrecorded=["material_found"])]' legacy
+expect "... allowed on a migrated entry that declares it unrecorded" 0 "audit-ledger-check: OK" -- node "$AL" "$L/legacy.json"
+lmut 'l["entries"]=[dict(e("2026-10-01","ui",1,2), material_remaining=3)]' remaining
+expect "material_remaining > material_found -> FAIL" 1 "material_remaining > material_found" -- node "$AL" "$L/remaining.json"
+lmut 'x=e("2026-10-01","ui",1,0); x["material"]=0; l["entries"]=[x]' oldfield
+expect "an old count field name -> FAIL" 1 'old field name "material"' -- node "$AL" "$L/oldfield.json"
+lmut 'del l["format"]["class_of_work_vocabulary"]["mixed"]' nomixed
+expect "a vocabulary without 'mixed' -> FAIL" 1 'no "mixed" value' -- node "$AL" "$L/nomixed.json"
+expect "no ledger at all -> exit 2" 2 "cannot read" -- node "$AL" "$L/none.json"
+
+# ── 11. templates/loop-check.mjs (D-018) ─────────────────────────────────────
+echo "loop-check.mjs"
+LC="$HERE/../templates/loop-check.mjs"; LR="$TMP/lc"; mkdir -p "$LR/docs" "$LR/.github/workflows"
+NOW=2026-10-27T12:00:00Z
+echo '[]' > "$LR/prs.json"; echo '{}' > "$LR/runs.json"
+LCA=(--root "$LR" --now "$NOW" --prs-file "$LR/prs.json" --runs-file "$LR/runs.json")
+expect "an empty project -> nothing flagged" 0 "Nothing flagged" -- node "$LC" "${LCA[@]}"
+cat > "$LR/prs.json" <<'J'
+[{"number":7,"title":"plan: next steps","updatedAt":"2026-10-20T10:00:00Z","isDraft":false,"labels":[{"name":"HOLD"}]},
+ {"number":8,"title":"parked on purpose","updatedAt":"2026-10-01T10:00:00Z","isDraft":false,"labels":[{"name":"hold-until:2026-11-03"}]},
+ {"number":9,"title":"typo hold","updatedAt":"2026-10-01T10:00:00Z","isDraft":false,"labels":[{"name":"hold-until:2026-13-45"}]},
+ {"number":10,"title":"fresh","updatedAt":"2026-10-27T08:00:00Z","isDraft":false,"labels":[]}]
+J
+expect "a PR open 7 days with an undated HOLD -> flagged" 1 "#7 plan: next steps — not updated for 7.1 days" -- node "$LC" "${LCA[@]}"
+expect "a dated hold in force exempts (and is listed)" 1 "on hold: #8 held until 2026-11-03" -- node "$LC" "${LCA[@]}"
+expect "a malformed hold label exempts nothing" 1 '"hold-until:2026-13-45" is not a valid' -- node "$LC" "${LCA[@]}"
+expect "--report-only exits 0 even when flagged" 0 "item\(s\) flagged" -- node "$LC" "${LCA[@]}" --report-only
+echo '[]' > "$LR/prs.json"
+cp "$HERE/../templates/open-loops.md" "$LR/docs/open-loops.md"
+cat >> "$LR/docs/open-loops.md" <<'J'
+| L-004 | homeless finding | | | | | open |
+| L-005 | overdue | coordinator | ship it | 2026-10-01 | | waiting |
+| L-005 | duplicate id | coordinator | x | 2026-11-01 | | open |
+| L-006 | closed by say-so | coordinator | — | — | done | closed |
+| L-007 | odd status | coordinator | x | 2026-11-01 | | in progress |
+J
+python3 -c "print('| L-008 | ' + 'x'*620 + ' | coordinator | x | 2026-11-01 | | open |')" >> "$LR/docs/open-loops.md"
+expect "a row with no owner, next action or due date -> flagged" 1 "L-004: open with no owner" -- node "$LC" "${LCA[@]}"
+expect "a row past its due date -> flagged" 1 "L-005: past its due date \(2026-10-01\)" -- node "$LC" "${LCA[@]}"
+expect "a duplicate row ID -> flagged" 1 "L-005: duplicate ID" -- node "$LC" "${LCA[@]}"
+expect "closed with 'done' as proof -> flagged" 1 "L-006: closed with no closing proof" -- node "$LC" "${LCA[@]}"
+expect "a fourth status word -> flagged" 1 'status "in progress"' -- node "$LC" "${LCA[@]}"
+expect "a row over 600 bytes -> flagged" 1 "L-008: row is [0-9]+ bytes \(limit 600\)" -- node "$LC" "${LCA[@]}"
+rm "$LR/docs/open-loops.md"
+printf '| # | Item | Status |\n|---|---|---|\n| D1 | a | open |\n| D2 | b | open |\n| D3 | c | done |\n' > "$LR/docs/deferred-actions.md"
+echo '{"intake":{"cap":1}}' > "$LR/.github/loop-check.json"
+expect "an intake list over its cap -> flagged" 1 "2 open rows, over the cap of 1" -- node "$LC" "${LCA[@]}"
+rm "$LR/.github/loop-check.json" "$LR/docs/deferred-actions.md"
+printf 'on:\n  schedule:\n    - cron: "0 3 * * *"\njobs:\n  x:\n    steps:\n      - run: make nightly || true\n' > "$LR/.github/workflows/nightly.yml"
+echo '{"nightly.yml":[{"status":"completed","conclusion":"failure","createdAt":"2026-10-27T03:00:00Z"},{"status":"completed","conclusion":"failure","createdAt":"2026-10-26T03:00:00Z"},{"status":"completed","conclusion":"success","createdAt":"2026-10-25T03:00:00Z"}]}' > "$LR/runs.json"
+expect "a scheduled job failing two runs in a row -> flagged" 1 'nightly.yml: the last two finished runs both ended "failure", "failure"' -- node "$LC" "${LCA[@]}"
+expect "a job that swallows failures is named" 1 "nightly.yml swallows failures" -- node "$LC" "${LCA[@]}"
+echo '{"nightly.yml":[{"status":"completed","conclusion":"success","createdAt":"2026-10-24T03:00:00Z"}]}' > "$LR/runs.json"
+expect "a daily job silent for 3+ days -> flagged" 1 "nightly.yml: silent" -- node "$LC" "${LCA[@]}"
+echo '{"nightly.yml":[{"status":"completed","conclusion":"failure","createdAt":"2026-10-27T03:00:00Z"},{"status":"completed","conclusion":"success","createdAt":"2026-10-26T03:00:00Z"}]}' > "$LR/runs.json"
+expect "one failure then a success -> not flagged (two in a row only)" 0 "Nothing flagged" -- node "$LC" "${LCA[@]}"
+echo '{"heartbeats":[{"path":"logs/hb.txt","max_age_hours":30}]}' > "$LR/.github/loop-check.json"
+expect "a heartbeat that was never written -> flagged" 1 "heartbeat logs/hb.txt: missing" -- node "$LC" "${LCA[@]}"
 
 echo
 echo "selftest-gate-scripts: $PASS passed, $FAIL failed"

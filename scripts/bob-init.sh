@@ -10,7 +10,10 @@
 #     python3 ~/.claude/skills/bob/../scripts/spec-audit.py docs/product-spec.md
 #   - Writes a starter project CLAUDE.md that references Bob (so future sessions auto-load it)
 #   - Writes .claude/settings.json with the default hook set (format + green-gate +
-#     two guards: block-no-verify and config-protection, copied into .claude/hooks/)
+#     three guards: block-no-verify, config-protection and merge-guard, copied into .claude/hooks/)
+#   - Writes .claude/required-checks.json (the merge guard's one list — empty = "no CI yet" stage)
+#   - Writes docs/audit-ledger.json (Rule 30(d)), .bob-optional-pointers (Rule 23(c)),
+#     scripts/loop-check.mjs + .github/workflows/loop-check.yml (the daily dropped-work check)
 #   - Writes .gitignore, .env.example, README.md
 #   - git init's the repo with an initial commit
 #
@@ -63,7 +66,7 @@ cd "$PROJECT_DIR"
 # 1. Folder structure
 # ──────────────────────────────────────────────────────────────────────
 echo "📂 Creating folder structure..."
-mkdir -p docs/domains docs/reference contracts evals scripts tests src
+mkdir -p docs/domains docs/reference contracts evals scripts tests src .github/workflows
 
 # ──────────────────────────────────────────────────────────────────────
 # 2. Project CLAUDE.md (the critical file — references Bob so sessions auto-resume)
@@ -199,6 +202,28 @@ if [[ ! -f .claude/settings.json ]]; then
         ]
       },
       {
+        "matcher": "Bash",
+        "_comment_fire_when": "Before Claude runs any shell command that could merge a pull request or push to main. The merge guard (D-018): refuses gh pr merge / a merge through the GitHub API unless every check named in .claude/required-checks.json passes, and refuses a direct push to main once that list names any check. While the list is empty (no CI yet) merges and pushes go ahead with a one-line notice. No off switch; fails closed if the guard, Node, gh or the list is missing. See .claude/hooks/lib/merge-guard.mjs.",
+        "hooks": [
+          {
+            "type": "command",
+            "timeout": 120,
+            "command": "INPUT=\$(cat); if printf '%s' \"\$INPUT\" | grep -Eiq 'merg|push|send-pack|refs/heads|contents|graphql|updateref|commitonbranch|createref|deleteref|sync'; then G=\"\${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/merge-guard.mjs\"; [ -f \"\$G\" ] || G=\"\$(git rev-parse --show-toplevel 2>/dev/null)/.claude/hooks/merge-guard.mjs\"; [ -f \"\$G\" ] || { echo 'BLOCKED (merge guard): .claude/hooks/merge-guard.mjs not found, so the merge or push cannot be checked' >&2; exit 2; }; command -v node >/dev/null 2>&1 || { echo 'BLOCKED (merge guard): Node is not installed, so the merge or push cannot be checked (install Node 18 or newer)' >&2; exit 2; }; printf '%s' \"\$INPUT\" | node \"\$G\" || exit 2; fi"
+          }
+        ]
+      },
+      {
+        "matcher": "Monitor",
+        "_comment_fire_when": "The same merge guard on the Monitor tool (a watch command can merge too). Only the guard runs here.",
+        "hooks": [
+          {
+            "type": "command",
+            "timeout": 120,
+            "command": "INPUT=\$(cat); if printf '%s' \"\$INPUT\" | grep -Eiq 'merg|push|send-pack|refs/heads|contents|graphql|updateref|commitonbranch|createref|deleteref|sync'; then G=\"\${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/merge-guard.mjs\"; [ -f \"\$G\" ] || G=\"\$(git rev-parse --show-toplevel 2>/dev/null)/.claude/hooks/merge-guard.mjs\"; [ -f \"\$G\" ] || { echo 'BLOCKED (merge guard): .claude/hooks/merge-guard.mjs not found, so the merge or push cannot be checked' >&2; exit 2; }; command -v node >/dev/null 2>&1 || { echo 'BLOCKED (merge guard): Node is not installed, so the merge or push cannot be checked (install Node 18 or newer)' >&2; exit 2; }; printf '%s' \"\$INPUT\" | node \"\$G\" || exit 2; fi"
+          }
+        ]
+      },
+      {
         "matcher": "Edit|MultiEdit|Write",
         "_comment_fire_when": "Before Claude edits a file. Blocks edits to EXISTING lint/format settings (eslint, prettier, biome, ruff, stylelint, markdownlint + their ignore files) so Claude fixes the code instead of loosening the rules to get the green-gate to pass. Creating a new settings file is allowed. Does NOT cover tsconfig.json. From ECC (MIT) — see .claude/hooks/config-protection.js. To change a lint rule on purpose, edit it yourself or remove this entry for that session.",
         "hooks": [
@@ -324,20 +349,51 @@ else
 fi
 
 # ──────────────────────────────────────────────────────────────────────
-# 3d. Guard hooks (D-017): block-no-verify + config-protection, from ECC (MIT)
-# Copied INTO the project (not pointed at Bob's install) so they travel with the
-# repo, work for anyone who clones it, and keep working if Bob moves. Needs Node.
+# 3d. Guard hooks: block-no-verify + config-protection (D-017, from ECC, MIT)
+#     and the merge guard (D-018). Copied INTO the project (not pointed at
+# Bob's install) so they travel with the repo, work for anyone who clones it,
+# and keep working if Bob moves. Need Node.
 # ──────────────────────────────────────────────────────────────────────
 mkdir -p .claude/hooks/lib
-for f in block-no-verify.js config-protection.js lib/shell-scan.js; do
+for f in block-no-verify.js config-protection.js lib/shell-scan.js merge-guard.mjs lib/merge-guard.mjs; do
   if [[ ! -f ".claude/hooks/$f" ]]; then
     cp "$BOB_ROOT/scripts/hooks/$f" ".claude/hooks/$f"
   fi
 done
-chmod +x .claude/hooks/block-no-verify.js .claude/hooks/config-protection.js
-echo "🛡  Guard hooks in .claude/hooks/: block-no-verify.js (no skipping commit checks), config-protection.js (no loosening lint settings)."
+chmod +x .claude/hooks/block-no-verify.js .claude/hooks/config-protection.js .claude/hooks/merge-guard.mjs
+if [[ ! -f .claude/required-checks.json ]]; then
+  cp "$BOB_ROOT/templates/required-checks.json" .claude/required-checks.json
+fi
+echo "🛡  Guard hooks in .claude/hooks/: block-no-verify.js (no skipping commit checks), config-protection.js (no loosening lint settings), merge-guard.mjs (no merging past a red check)."
+echo "   The merge guard starts in its \"no CI yet\" stage: .claude/required-checks.json lists no checks, so merges and pushes go ahead with a notice. Name your CI checks there once CI exists."
 if ! command -v node >/dev/null 2>&1; then
-  echo "   ⚠ Node is not installed, so these two guards will not run until it is (https://nodejs.org, version 18 or newer)."
+  echo "   ⚠ Node is not installed (https://nodejs.org, version 18 or newer). Until it is, block-no-verify and config-protection do not run,"
+  echo "     and the merge guard REFUSES every merge and every push to main (it fails closed rather than wave things through)."
+fi
+
+# ──────────────────────────────────────────────────────────────────────
+# 3e. Process records (D-018): the audit ledger (Rule 30(d)), the optional-
+#     pointer list (Rule 23(c)), and the daily dropped-work check.
+# ──────────────────────────────────────────────────────────────────────
+if [[ ! -f docs/audit-ledger.json ]]; then
+  echo "📒 Writing docs/audit-ledger.json (Rule 30(d) — every audit, what it found)..."
+  sed "s/{project-name}/$PROJECT_NAME/" "$BOB_ROOT/templates/audit-ledger.json" > docs/audit-ledger.json
+fi
+if [[ ! -f .bob-optional-pointers ]]; then
+  cat > .bob-optional-pointers <<'EOF'
+# Paths CLAUDE.md / AGENTS.md may name before (or without) the file existing.
+# Read by Bob's coherence sweep (class [8]); every OTHER path those files name must exist.
+docs/behavioral-core.md
+docs/breadboard.md
+docs/repo-map.md
+EOF
+fi
+if [[ ! -f scripts/loop-check.mjs ]]; then
+  cp "$BOB_ROOT/templates/loop-check.mjs" scripts/loop-check.mjs
+fi
+if [[ ! -f .github/workflows/loop-check.yml ]]; then
+  echo "🔁 Writing .github/workflows/loop-check.yml (daily dropped-work check — runs once the repo is on GitHub)..."
+  cp "$BOB_ROOT/templates/loop-check.yml" .github/workflows/loop-check.yml
 fi
 
 # ──────────────────────────────────────────────────────────────────────

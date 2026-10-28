@@ -1,0 +1,18 @@
+{
+  "_doc": "THE ONE LIST of checks a pull request must pass before it may merge (Bob Step 6b, D-018). Read by .claude/hooks/merge-guard.mjs — the PreToolUse hook that refuses `gh pr merge` / `gh api .../pulls/N/merge` / a direct push to the protected branch unless every check below passes. Adding or removing a check is a change to this file only, and it is the OWNER's change: config-protection.js stops Claude editing this file. STAGES: while `required` is empty (a new project with no CI yet) merges and pushes go ahead, each with a one-line 'nothing was checked' notice. Once you name at least one check, every merge must show it passing and a direct push to `branch` is refused — open a pull request instead. A missing or broken file refuses every merge and push to `branch`. `may_skip`: a job that skips itself by design when nothing it tests changed counts as passing when skipped; any other required check that reports `skipped` blocks. `workflow`: only a check reported by the workflow of this name counts (leave it out to accept a check of that name from any workflow; a row may carry its own `workflow`). `not_required`: every other CI job, each with a reason, so a new job is a decision, not an accident.",
+  "branch": "main",
+  "workflow": "CI",
+  "workflow_file": "ci.yml",
+  "required": [],
+  "not_required": [],
+  "_example_once_ci_exists": {
+    "required": [
+      { "name": "build", "may_skip": false, "why": "type-check, unit tests and a real production build: a broken deploy must never reach main" },
+      { "name": "secrets-scan", "may_skip": false, "why": "a secret scanner over every commit: a leaked key must never reach main" },
+      { "name": "workflow-lint", "may_skip": false, "why": "a workflow file GitHub cannot read silently stops a scheduled job" }
+    ],
+    "not_required": [
+      { "name": "slow-end-to-end", "workflow": "CI", "why": "depends on a third-party sandbox that goes down for hours at a time; requiring it would block every merge on someone else's outage. Make it required once it stops depending on that sandbox." }
+    ]
+  }
+}

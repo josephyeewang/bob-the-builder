@@ -1,0 +1,45 @@
+# The daily loop check (Bob D-018) — copied by bob-init to .github/workflows/loop-check.yml.
+#
+# The backstop that catches dropped work even when no Claude session is running: pull requests left open with no dated
+# hold, findings with no owner or due date, an intake list over its cap, a scheduled job failing twice in a row or
+# not running at all, a missing heartbeat. What it checks and why: scripts/loop-check.mjs (its header).
+#
+# READ-ONLY: it lists pull requests and workflow runs and reads files in the repo. It writes nothing and needs no
+# secrets. When something is flagged the run FAILS — GitHub then emails the owner of a failed scheduled run, and that
+# email is the alarm. Nothing flagged → a green run and no email.
+#
+# Schedule: once a day at an off-minute (GitHub delays runs queued on the hour). GitHub turns scheduled workflows off
+# in a repository with no activity for 60 days; the check cannot report its own switch-off, so look at the Actions
+# tab after a long pause.
+name: Daily loop check
+
+on:
+  schedule:
+    - cron: "17 16 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: read
+  actions: read
+
+concurrency:
+  group: loop-check
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        timeout-minutes: 2
+      - uses: actions/setup-node@v4
+        timeout-minutes: 2
+        with:
+          node-version: 22
+      - name: Flag dropped work (stale PRs, homeless findings, failing or silent jobs)
+        timeout-minutes: 5
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/loop-check.mjs

@@ -14,7 +14,8 @@
 #   .bob-retired-terms   one term per line; flagged if found in a LIVE (non-
 #                        changelog, non-decision-log) line. '#' lines are comments.
 #
-# Exit code: 0 = no hard problems; 1 = contiguity gap/dup OR retired-term residue.
+# Exit code: 0 = no hard problems; 1 = contiguity gap/dup OR retired-term residue OR (class 8) a pointer in the
+#   root AGENTS.md/CLAUDE.md that does not resolve, or a status page whose as-of date trails the decision log.
 # Version-string and cross-ref inventories are always informational (never fail).
 
 set -uo pipefail
@@ -195,10 +196,44 @@ else
   fi
 fi
 
+# ── Class 8: the always-read root file — pointers resolve; the status page is not stale (Rule 23(c), D-018) ──
+# Every class above reads DOCS_DIR only, and the one file loaded into EVERY session (AGENTS.md / CLAUDE.md at the
+# repo root) sits outside it — so the most-read file was the one file no check looked at. In a real build a status
+# block there claimed a decision range months out of date while this sweep flagged the same claim
+# in docs/ every week. doc-pointers-check.mjs is the one implementation; this only runs it.
+echo
+echo "── [8] Root instruction file (AGENTS.md / CLAUDE.md): pointers resolve; status page as-of date ──"
+SWEEP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(git -C "$DOCS_DIR" rev-parse --show-toplevel 2>/dev/null || true)"
+if [ -z "$ROOT_DIR" ]; then
+  if [ "$(basename "$(cd "$DOCS_DIR" && pwd)")" = "docs" ]; then ROOT_DIR="$(cd "$DOCS_DIR/.." && pwd)"; else ROOT_DIR="$(cd "$DOCS_DIR" && pwd)"; fi
+fi
+if ! command -v node >/dev/null 2>&1; then
+  echo "  ⚠ skipped — needs Node (18 or newer); the root file's pointers were NOT checked"
+elif [ ! -f "$SWEEP_DIR/doc-pointers-check.mjs" ]; then
+  echo "  ⚠ skipped — doc-pointers-check.mjs not found next to this script; the root file's pointers were NOT checked"
+else
+  PTR_ARGS=(--root "$ROOT_DIR")
+  STATUS_FILE=""
+  for c in "$DOCS_DIR/build-manifest.md" "$DOCS_DIR/STATUS.md" "$DOCS_DIR/status.md"; do
+    [ -f "$c" ] && { STATUS_FILE="$c"; break; }
+  done
+  if [ -n "$STATUS_FILE" ] && [ -n "$LOG_FILE" ]; then
+    PTR_ARGS+=(--status "$(cd "$(dirname "$STATUS_FILE")" && pwd)/$(basename "$STATUS_FILE")" --log "$(cd "$(dirname "$LOG_FILE")" && pwd)/$(basename "$LOG_FILE")")
+    [ -f "$DOCS_DIR/PROJECT-STATE.md" ] && PTR_ARGS+=(--also "$(cd "$DOCS_DIR" && pwd)/PROJECT-STATE.md")
+  fi
+  if PTR_OUT="$(node "$SWEEP_DIR/doc-pointers-check.mjs" "${PTR_ARGS[@]}" 2>&1)"; then
+    printf '%s\n' "$PTR_OUT" | sed 's/^/  /'
+  else
+    printf '%s\n' "$PTR_OUT" | sed 's/^/  /'
+    FAIL=1
+  fi
+fi
+
 echo
 echo "════════════════════════════════════════════════════════════════"
 if [ "$FAIL" -ne 0 ]; then
-  echo " RESULT: ✗ hard problems found (contiguity and/or retired-term residue)."
+  echo " RESULT: ✗ hard problems found (contiguity, retired-term residue, or a broken root-file pointer / stale status)."
 else
   echo " RESULT: ✓ no mechanical drift. Review ⚠ items + judge §/D targets + reconcile contracts semantically."
 fi

@@ -31,9 +31,18 @@ user-invocable: true
   simultaneous run is harmless.
 - **Guard hooks** (2026-10, D-017): `bob-init` copies two hooks into every new project — `block-no-verify.js` (Claude
   cannot skip the commit checks) and `config-protection.js` (Claude cannot loosen lint settings to go green).
+- **Merge guard** (2026-10, D-018): `bob-init` also installs `merge-guard.mjs` — Claude cannot merge a pull request
+  past a red required check or push straight to main. The one list of required checks is `.claude/required-checks.json`
+  (empty at first = "no CI yet": merges go ahead with a notice). Only the owner edits that list.
+- **Process records** (2026-10, D-018): `bob-init` writes `docs/audit-ledger.json` (Rule 30(d) — check it with
+  `scripts/audit-ledger-check.mjs --streaks`) and a daily dropped-work check (`scripts/loop-check.mjs` +
+  `.github/workflows/loop-check.yml`: stale PRs with no dated hold, open loops with no owner/due date/proof, an intake
+  list over its cap, a scheduled job failing twice or silent). Running several sessions at once → use
+  `templates/open-loops.md` (one list, one coordinator who alone merges) — `build-protocol.md` §"Parallel sessions".
 - **Mechanical checkers:** `scripts/spec-audit.py` (spec structure + leftover TODO/TBD), `scripts/coverage-check.py`
-  (an audit's coverage record adds up), plus the Phase-Gate scripts; all regression-tested by
-  `scripts/selftest-gate-scripts.sh`.
+  (an audit's coverage record adds up), `scripts/doc-pointers-check.mjs` (every pointer in the root AGENTS.md /
+  CLAUDE.md resolves; the status page is not stale — run inside `coherence-check.sh`), plus the Phase-Gate scripts;
+  all regression-tested by `scripts/selftest-gate-scripts.sh`.
 
 A systematic protocol for building, auditing, and evolving products with Claude Code. Designed for a non-engineer product leader.
 

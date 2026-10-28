@@ -111,12 +111,16 @@ What Bob does *while* you're building:
 - **AI behavior re-checks** — for AI products, your test set re-runs at every phase. Regressions are a stop sign, not a "ship anyway"
 - **Proof a fix is real** — every fix names a test; a separate session removes the fix and confirms the test fails, puts it back and confirms it passes, and keeps a receipt
 - **No moving the finish line** — a phase's done-criteria are fingerprinted when it starts; changing them later needs a dated reason
+- **No merging on red** — a hook refuses a pull-request merge while any check you listed as required is failing, and refuses pushing straight to main. Brand-new projects with no checks yet aren't blocked; the guard switches on when you name your first check
+- **Nothing dropped between sessions** — one open-items list with one owner per row, and a daily check that flags pull requests left open with no dated hold, findings with no owner or due date, and scheduled jobs that failed twice or never ran
 
 ### 5. Project memory (across every session)
 
 Bob writes the important stuff to disk so context survives session boundaries:
 
 - Spec, decision log, build manifest, and audit history — all on disk
+- An audit record that a script can check, so "five clean audits in a row on this kind of work — relax it" is counted, not guessed
+- The file every session reads first holds pointers, not status — and a check fails when a pointer breaks or the status page falls a week behind the decisions
 - Every Bob-built project ships with both `CLAUDE.md` and `AGENTS.md` so you can switch to Codex, Cursor, or Aider later without losing context
 
 ---

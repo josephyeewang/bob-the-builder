@@ -127,6 +127,8 @@ Pin this next to the log, from Anthropic's own scheduled-task documentation, bec
 
 > *"A green status in the run list means the session started and exited without an infrastructure error. It does not mean the task in your prompt succeeded."*
 
+**A heartbeat, and a silent run is itself a finding (2026-10-27, D-018).** The run record above answers "what did the last run do?" — it cannot answer "did a run happen at all?", because a run that never starts writes nothing. So every unattended job also writes a **heartbeat**: one line, overwritten or appended at the end of every run (`2026-10-27T03:12Z nightly finished: did 4, waiting 1, stuck 0`), to a file whose path is listed in `.github/loop-check.json` under `heartbeats` with a maximum age. The daily loop check (`scripts/loop-check.mjs`, installed by `bob-init`) flags a heartbeat that is missing or older than its limit, and — for jobs scheduled on GitHub — a workflow with no run inside its silence limit or two failed runs in a row. **The absence of a run is reported as loudly as a failed run;** a quiet morning is not evidence that the night went well. Two limits, stated: (1) a job whose step ends `|| true` or is marked `continue-on-error` reports success when it failed — record its real exit code instead (`… || echo "tolerated_rc=$?" >> "$GITHUB_OUTPUT"`); the loop check names such workflows but cannot see through them; (2) a watcher on the same scheduler as the jobs it watches dies with them — if the jobs that matter run on GitHub, the heartbeat for the loop check itself should be read from somewhere else (a phone reminder to glance at the Actions tab weekly is a legitimate second watcher). *(Origin: an overnight multi-agent run in a real project wrote a heartbeat each night to a shared file, under the rule "a silent night is itself a finding"; nights that never started were caught the next morning instead of a week later.)*
+
 ---
 
 ## 8. Publish the real cost, measured — not estimated
@@ -160,6 +162,7 @@ Escalating permissions to make an unattended job stop asking is how an unattende
 - [ ] Everything read is treated as data; scope limits are written as absolutes (§5)
 - [ ] Outward-facing actions are drafts until a deliberate switch is set; buttons judged by the save test (§6)
 - [ ] Each run logs: did / waiting on a human / stuck — every "waiting" item was checked first — and a dated correction line beats the file (§7)
+- [ ] Each run writes a heartbeat, listed in `.github/loop-check.json` with a max age, so a run that never started is flagged the next day (§7)
 - [ ] Real cost measured over real runs, with the re-read share broken out (§8)
 - [ ] No permission escalation used to silence a prompt (§9)
 

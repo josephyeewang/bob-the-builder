@@ -58,14 +58,14 @@ every reader.
 
 | # | Failure mode | Owner | Fixture | Notes |
 |---|---|---|---|---|
-| C1 | A scheduled job silently stops running | **NONE** (O12 catches the symptom) | — | `grep -ri heartbeat` returns nothing in the whole repo. Natural home: L21. |
+| C1 | A scheduled job silently stops running | `templates/loop-check.mjs` (D-018, `SCRIPT`: a scheduled workflow with no run inside its silence limit, or two failed runs in a row; a heartbeat file past its age — `templates/scheduled-work-protocol.md` §7); O12 catches the symptom | — | Installed by `bob-init` as a daily GitHub workflow; its regression cases are in `scripts/selftest-gate-scripts.sh` §11. It watches GitHub's scheduler FROM GitHub's scheduler — see C3. |
 | C2 | Absence-detection whose grace window exceeds the longest legitimate gap | **NONE** | `fixtures/detection/004-absence-monitor.md` | The one fixture a fresh reader *failed* — a defect of omission. |
-| C3 | A watcher living in its patient's failure domain | **NONE** | — | A scheduled watcher of schedules dies with them. |
+| C3 | A watcher living in its patient's failure domain | **NONE** | — | A scheduled watcher of schedules dies with them. Bob's own daily loop check (C1) is exactly this for GitHub-scheduled jobs: if GitHub stops firing schedules, the check stops too. A second watcher on a different scheduler is still unowned. |
 | C4 | A verdict from an incomplete observation window | O10 (data); Rule 29 (audit verdicts) | — | The **operational** form — "it's dead" before the known-late window closes — is unowned. Two phantoms in two days. |
 | C5 | Shared-queue starvation / eviction | **NONE** | `fixtures/detection/005-queue-starvation.md` | The fix for starvation re-created starvation through another door. |
 | C6 | Work parked on a calendar date that could ride an event | **NONE — and Bob does this itself** | — | Bob's own cadences: `days_since_last_run`, "quarterly", "revisit in 6 months". The right pattern already exists in Bob for deferrals ("named revisit triggers"); generalise it. |
 | C7 | Budget below measured fixed cost / a bound that cannot fit its own work | **NONE** | — | A time-budget cut below the job's fixed setup cost guaranteed a zero-progress run every week. |
-| C8 | A trailing `\|\| true` that cannot catch a step timeout | **NONE** | — | |
+| C8 | A trailing `\|\| true` that cannot catch a step timeout | **NONE** | — | The loop check (C1) names workflows that swallow failures, as a warning only — it cannot see their real outcome. |
 
 ## D. Change propagation
 
@@ -95,7 +95,7 @@ every reader.
 |---|---|---|---|---|
 | F1 | A claim asserted from memory or inherited from another session, never receipted | **NONE** | `fixtures/detection/007-receipts-class.md` | Cost: 12h × 4 sessions, two void remedies, a support ticket nearly filed. |
 | F2 | A register/memory row carrying a count never re-measured | **NONE** | — | A remembered row count was several times the real one when finally re-measured, a year later. |
-| F3 | An index/pointer stale, so the rule it points at never loads | **NONE** | — | Cost a full session's plan. |
+| F3 | An index/pointer stale, so the rule it points at never loads | `scripts/doc-pointers-check.mjs` (D-018, `SCRIPT`, run as `coherence-check.sh` class [8]: every path and "§N of file" in the root AGENTS.md / CLAUDE.md resolves) | — | Cost a full session's plan. Regression cases: `scripts/selftest-gate-scripts.sh` §9. Covers the always-read root file; a memory index outside the repo is still unchecked. |
 | F3a | A document written to be **retrieved at symptom time** has no inbound reference from anything loaded by default | **NONE** | — | *"It will be found by whoever already knows it exists — which is the population that does not need it."* Caught on this evolution's own census document, by its own thesis. Ask: **what loads by default, and does it point here?** A guidance doc with no inbound link is written, not retrievable — the same distinction as a rule that is filed but never consulted. |
 | F4 | A safety gate bypassed "just this once" with a manual equivalent | bp:1235 (setup-side push-back only) | — | No audit-side counterpart, no bypass register. |
 | F5 | A spec written without measuring what it commits someone to | **NONE** | — | Distinct from "reproduce before you fix": this binds one step earlier. |
@@ -104,15 +104,15 @@ every reader.
 
 ---
 
-## Scoreboard (2026-09-18)
+## Scoreboard (2026-10-27 — C1 and F3 gained owners in D-018)
 
 *Machine-verified by `scripts/failure-mode-check.sh` — do not hand-edit these numbers; the
 script fails if they drift from a fresh count. (They already did once: this scoreboard was
 hand-written as 14/27/7 and was wrong on three of four lines within the hour.)*
 
 - Rows: **43**
-- With a named owner: **15**
-- **NONE: 28**
+- With a named owner: **17**
+- **NONE: 26**
 - With a fixture: **10**
 
 That ratio is the honest state of the library against the failure modes one real project hit in

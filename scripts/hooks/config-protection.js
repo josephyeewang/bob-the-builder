@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // Taken from affaan-m/ECC @ 25278e7d7b6cf6e6a4e7a6c8e10f14ff22f0eb5b (path: scripts/hooks/config-protection.js), MIT,
 // Copyright (c) 2026 Affaan Mustafa — full licence in third_party/ecc/LICENSE of Bob the Builder.
-// Unchanged apart from this header.
+// Changed for Bob by Joe Wang, 2026-10-27: one added protected name (search "BOB ADDITION") — the merge guard's
+// required-check list. Otherwise unchanged apart from this header.
 /**
  * Config Protection Hook
  *
@@ -96,7 +97,10 @@ const PROTECTED_FILES = new Set([
   '.eslintignore',
   '.prettierignore',
   '.stylelintignore',
-  '.markdownlintignore'
+  '.markdownlintignore',
+  // BOB ADDITION (2026-10-27, D-018): the merge guard's one list of required checks. Emptying it would switch
+  // the guard back to its "no CI yet" stage, so changing it is the owner's call, never Claude's.
+  'required-checks.json'
 ]);
 
 /**

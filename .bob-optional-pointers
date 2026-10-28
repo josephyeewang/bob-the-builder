@@ -1,0 +1,6 @@
+# Paths the always-read files (AGENTS.md / CLAUDE.md) may name without the file existing here.
+# Read by scripts/doc-pointers-check.mjs (run inside scripts/coherence-check.sh, class [8]).
+# In Bob these are files a Bob run creates INSIDE THE USER'S PROJECT, named in changelog prose — not Bob's own files.
+docs/reference-scan.md
+tool-decisions.md
+liveness-report.json

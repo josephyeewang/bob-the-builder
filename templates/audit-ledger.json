@@ -1,0 +1,40 @@
+{
+  "schema": "bob-audit-ledger/v2",
+  "project": "{project-name}",
+  "note": "Rule 24 / Rule 30(d) ledger — every audit that ran, when, on what class of work, and what it found. Gate-blocks: a phase or gate cannot advance until its required audits ran or are deferred with a reason. Check it with: node ~/.claude/skills/bob/../scripts/audit-ledger-check.mjs docs/audit-ledger.json (add --streaks for the five-clean-in-a-row count).",
+  "format": {
+    "required_fields": ["audit", "ran", "tier", "class_of_work", "material_found", "material_remaining", "minor", "cosmetic", "auditor_context"],
+    "fields": {
+      "audit": "what was audited, in one line — the milestone, phase or change (name the PR or commit if there is one).",
+      "ran": "YYYY-MM-DD the audit finished.",
+      "tier": "1, 2 or 3 per the definition of done (Rule 30(a): 1 = numbers or data someone acts on).",
+      "class_of_work": "exactly one value from class_of_work_vocabulary; free-text nuance goes in class_of_work_detail.",
+      "material_found": "integer: Material findings raised across every round of this audit, including ones fixed before merge.",
+      "material_remaining": "integer: Material findings still open when the entry was written (all fixed = 0). Never more than material_found.",
+      "minor": "integer: Minor findings (fix if cheap, else log with a revisit trigger).",
+      "cosmetic": "integer: Cosmetic findings (log only).",
+      "auditor_context": "who audited: 'fresh subagent', 'new session', 'human' — never the context that built the work (Rule 30(b)).",
+      "rounds": "optional integer: audit rounds run. 0 means no audit actually ran (the entry records a skip), and the streak walk skips it.",
+      "coverage": "optional object {planned, covered, deferred, blocked, out_of_scope}: unit counts from the coverage record (audit-lenses/_evidence-accounting.md §1), so 'five clean audits' means five COVERED audits, not five quiet ones.",
+      "zero_finding_rerun": "optional: when material_found is 0, the different angle the audit was re-run from (Rule 30(f)), or why it was not.",
+      "at_decision": "optional: the decision-log id this audit sits at (D-nnn); used to order same-day entries.",
+      "unrecorded": "only for entries migrated in from an older ledger: names the fields left null because the old entry does not state them. New entries may not use null.",
+      "count_note": "optional: how a migrated count was read from the old entry's own text."
+    },
+    "class_of_work_vocabulary": {
+      "docs-planning": "specs, plans, decisions and other documents; no runtime change",
+      "data-pipeline": "moving data in and through the system: imports, sync jobs, transformations, deduplication",
+      "data-repair": "one-off corrections to stored production data, and their verification",
+      "calculations": "any logic that produces a number or a verdict someone acts on: pricing, totals, scores, rankings",
+      "outputs": "what users receive: pages, exports, reports, notifications and emails",
+      "ops-ci": "CI, scheduled jobs, locks, run records, monitoring and alerting",
+      "ui": "front-end visuals, layout and copy",
+      "platform": "auth, billing/payments, security, model access, infrastructure",
+      "mixed": "one entry covering several changes of different classes; counted in no class streak"
+    },
+    "vocabulary_rule": "Edit the vocabulary to fit the project, but keep it small and fixed: 3 to 12 values, 'mixed' always present. A new free-text class per entry is how a ledger stops being countable.",
+    "streak_rule": "Per class, walk entries newest first (ordered by ran, then decision number, then position). Tier 2/3 entries and entries with rounds = 0 (no audit ran) are skipped. A Tier-1 entry with material_found = 0 extends the streak; anything else stops it — including material_found null and tier null, because an unrecorded count is not evidence of a clean audit. Five → propose (never apply) demoting that class to Tier 2.",
+    "legacy_entry_count": 0
+  },
+  "entries": []
+}
