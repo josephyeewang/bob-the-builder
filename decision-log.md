@@ -274,6 +274,33 @@ The companion `audit-log.md` records *deferred* items (Defer verdicts that may s
 
 ---
 
+### D-016: Two fixed Pre-Build reviewers + finding-sorting rules from EGM; failing-test receipts, a frozen bar and a lane check from pullboard
+
+- **Date:** 2026-10-27
+- **Status:** Accepted
+- **Context:** Two `/verdict` runs, each settled by a code-level bake-off rather than a read of the README. (1) **google/elephant-goldfish-model (EGM, Apache-2.0)** — a set of fresh-reader reviewer prompts for design documents. Run head-to-head against Bob's Step 6.5a panel on one real product's pre-build plan, with a blind re-score: on plan-level defects the two were within noise of each other, EGM's design critic being the strongest single reviewer; on data-correctness defects that were already visible in the plan, Bob's data-quality and domain-expert seats caught nearly all of them and EGM caught few. EGM's resolve skill also carried something Bob lacked: explicit rules for how the author answers a reviewer. (2) **pullboard-dev/pullboard (MIT)** — a local work board with git hooks. Run live, its gates did what they claimed: a builder could not verify its own item, a bar edit after claiming needed a reason, a named fix whose removal kept the test green was refused, an out-of-folder commit was blocked. It also had one hole: with no test named, an item was accepted on a note alone. Vendoring was not feasible — each command pulls in hundreds of files — but the three core methods are ~40-80 lines each. The same out-of-folder commit in a project using Bob-style global hooks was accepted silently, because that project's lanes existed only in prose.
+- **Decision:**
+  - **Pre-Build Gate (Step 6.5a) gains two FIXED reviewers** — `audit-lenses/prebuild-reviewers/design-critic.md` and `implementation-readiness.md` — adapted from EGM nearly word for word (brainstorm mode dropped; a plain-English section for the founder added; the readiness reviewer checks only the **next** phase at full detail, because flagging phase 5's missing file list on day one buried the real blockers). They run **alongside** the six archetype-cast topics, never instead of them — the bake-off is the evidence that the data-quality and domain-expert seats catch a class EGM does not. All reviewers: fresh subagent, read-only, `model: inherit`, `omitClaudeMd: true`.
+  - **`_aggregation.md` gains "Sorting reviewer findings"** — EGM's fix / contest / escalate / decline rules taken as-is (a contest must cite something the reviewer could read; never contest a comprehension finding; never add text only to satisfy a reviewer). Referenced from Rule 30(b) and 6.5a.
+  - **Phase Gate 11 — failing-test receipt** (`scripts/prove-test-fails.mjs`): in a scratch copy at the exact commit, remove the named fix lines → the named test must fail; restore → it must pass; print a receipt with the full hash. Run by a session other than the builder's. **Every fix item must name a test command** — closing the gap pullboard itself left open.
+  - **Phase Gate 12 — frozen acceptance bar** (`scripts/check-bar.mjs` + a block in `templates/phase-report.md`): sha256 of the done-criteria recorded at phase start; the gate refuses a changed bar unless a dated "bar changed because…" line explains it.
+  - **Optional lane check** (`scripts/lane-check.mjs`): reads a project's own lane register (`docs/lanes.md`, or a TSV), maps the branch to a lane by prefix, reports out-of-lane files. Warn by default; `--enforce` to block. Documented hook wiring only — Bob edits no global hooks and no project.
+  - **`bob-init` reviewer agent:** `model: sonnet` → `model: inherit`, add `omitClaudeMd: true`; **keep Bash** (it must run the tests, and now the receipt script).
+  - Licences: `third_party/egm/LICENSE` (Apache-2.0, full text), `third_party/pullboard/LICENSE` (MIT), `third_party/README.md`; each derived file names its source commit and the modification. Bob stays MIT.
+- **Alternatives considered:**
+  - *Replace Bob's 6.5a panel with EGM's reviewer set.* Rejected — it would have dropped the only seats that caught the data-correctness class.
+  - *Take EGM's zoom-out reviewer and its synthesizer/loop machinery too.* Rejected — in the bake-off the zoom-out run was the weakest and argued the wrong direction; Bob's own aggregation and Rule 30 loop already cover the rest.
+  - *Drop Bash from the milestone reviewer to make it read-only like the pre-build reviewers.* Rejected — a reviewer that cannot run the tests is back to trusting "done" claims (Rule 25).
+  - *Adopt pullboard whole, or vendor its files.* Rejected — the import chain is hundreds of files for three ~50-line ideas; port the method, credit the author.
+- **Consequences:**
+  - **Enforceability (Rule 33):** Phase Gate 11 and 12 are `SCRIPT` — runnable checkers with a self-test (`scripts/selftest-gate-scripts.sh`, which runs each against the defect it exists for and against a clean case). The lane check is `SCRIPT` but opt-in. The two reviewers and the sorting rules are `GATE`/`PROSE` — they depend on 6.5a actually being run.
+  - **The session rule is only half-mechanical.** `prove-test-fails.mjs` refuses when it can see that the runner's session id equals the builder's; when no session id is visible it records "unrecorded" and the reviewer must say who ran it. Honest limit, not a guarantee.
+  - Pre-build cost rises by two reviewer runs per gate. Every fix item now costs one extra test run in a scratch copy.
+  - Third-party text now lives in a public MIT repo under Apache-2.0 terms; any future edit to those files must keep the header and the changes notice.
+- **Revisit trigger:** (a) after three real pre-build gates, if the two fixed reviewers raise nothing the six topics did not, drop them back to optional; (b) if fix items routinely name a test that "proves" the fix by asserting on the fix's own text (a test that cannot fail for any other reason), the receipt needs a second check; (c) the version note — `omitClaudeMd` was checked against Claude Code 2.1.312 on 2026-10-27; re-check on a major Claude Code upgrade.
+
+---
+
 ## Anti-pattern reminder
 
 ADRs that describe the decision without consequences are useless. The Consequences section is where future-you discovers why the seemingly clever shortcut is the thing now blocking a new requirement. Every decision in this file has a Consequences block — keep it that way.

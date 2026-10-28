@@ -67,6 +67,7 @@ You bring an idea. Bob walks you through:
 - **Bulletproof Product Spec** — what you're building, who it's for, what's out of scope
 - **AI Behavior Guardrails** — for AI products, locks how your AI thinks (tone, refusals, edge cases) *before* any code is written
 - **Phased Build Plan** — what to build when, with a sign-off gate at every step
+- **Pre-build review** — before any code, fresh reviewers who didn't write the plan pick it apart (including a design critic and a "could an engineer build the next phase without guessing?" check), then you sign off
 
 Invoke with `/bob NEW`.
 
@@ -108,6 +109,8 @@ What Bob does *while* you're building:
 - **Spec lock** — Bob catches Claude every time it wanders off-spec
 - **Class-level fixes** — bug in one place? Bob audits every similar pattern, not just the symptom
 - **AI behavior re-checks** — for AI products, your test set re-runs at every phase. Regressions are a stop sign, not a "ship anyway"
+- **Proof a fix is real** — every fix names a test; a separate session removes the fix and confirms the test fails, puts it back and confirms it passes, and keeps a receipt
+- **No moving the finish line** — a phase's done-criteria are fingerprinted when it starts; changing them later needs a dated reason
 
 ### 5. Project memory (across every session)
 
@@ -152,3 +155,5 @@ Now, finally, the answer is: "Yes he can!" 🔨
 ## License
 
 [MIT](LICENSE) — use it, fork it, adapt it, share it.
+
+A few pieces are adapted from other open-source projects (Google's elephant-goldfish-model, Apache-2.0; pullboard, MIT). Their licences and what was taken are listed in [`third_party/README.md`](third_party/README.md); those files keep their original licence.

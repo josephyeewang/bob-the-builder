@@ -178,6 +178,29 @@ The user does NOT read 30 markdown reports. They read:
 
 The aggregation is the user-facing artifact. The lens reports are the source-of-truth drill-down.
 
+## Sorting reviewer findings — fix / contest / escalate / decline (2026-10)
+
+> This section only: `license: Apache-2.0`. Adapted from google/elephant-goldfish-model@a8380ab, Apache-2.0; modified by Joe Wang, 2026-10. Source: `skills/egm-resolve/SKILL.md` Step 2, taken as-is except that the category PROPOSE FIX is called FIX here and "the user" is "the human". Licence: `third_party/egm/LICENSE`.
+
+**When it applies.** Whenever the session that *wrote* a document or plan receives findings from fresh-context reviewers — the Pre-Build Gate (Step 6.5a), a Rule 30 Tier-1 re-audit, or a lens panel. The author sorts; the human sees the result. It runs **before** the confirmation gate below, so the human is handed findings that are already sorted, with the ones that need *their* knowledge on top.
+
+Give each finding exactly one category:
+
+*   **CONTEST**: The critique is inaccurate or relies on a misunderstanding of the codebase. Cite evidence that the reviewer could read: a file and symbol, or a decision recorded in the document.
+*   **ESCALATE**: The critique is inaccurate, but the evidence is outside every file the reviewer could read (for example, a team convention or a verbal decision). State that fact. Do not fix the finding. Give it to the human.
+*   **FIX**: The critique is valid. Define precise textual replacements or structural formatting adjustments to resolve the gap.
+*   **DECLINE**: The finding is a Nit. Record it. Do not fix it. You can use FIX for a Nit if the fix is worth it.
+
+Apply these rules:
+
+*   **A contest must be checkable.** "This was intentional" is not evidence. If you cannot cite evidence the reviewer could read, use ESCALATE or FIX.
+*   **Do not add context only to satisfy a reviewer.** Add context when a human reader of the document needs it. If only a zero-context subagent needs it, use ESCALATE.
+*   **Do not contest a comprehension gap.** If a fresh reader could not follow the document, the document is missing context.
+*   **Do not change a severity.** If you think a Blocker is a Nit, CONTEST it and state the reason.
+*   You wrote the document under review. A wish to contest is not evidence that the reviewer is wrong.
+
+**Bob wiring.** List ESCALATE items first when presenting to the human — they need the human's knowledge, not only approval. An ESCALATE that the human confirms becomes a decision-log entry, so the next fresh reviewer *can* read the evidence and the same finding does not come back. Severity names map to Rule 30's buckets (Blocker = Material, Major = Minor, Nit = Cosmetic).
+
 ## Confirmation gate before fixes
 
 After aggregation:
