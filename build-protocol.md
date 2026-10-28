@@ -72,10 +72,11 @@ Present this menu and wait for selection:
 > | **A) NEW** | Build a brand-new product from scratch. ~7 spec steps + build phases + hardening. | You're starting from zero or a fresh idea. | 4-12 sessions over 1-4 weeks |
 > | **B) AUDIT** | Assess an existing, partially-built product. Maps what you have to the 5-document hierarchy, finds gaps, proposes a remediation plan. | You inherited code, or you've been building without a process and want to formalize. | 1-3 sessions |
 > | **C) EVOLVE** | Add features or change an existing product. Classified Small / Medium / Large — bigger changes apply more of the build discipline. | You have a working product and want to extend it. | 1 session (Small) to 1+ week (Large) |
+> | **D) UPGRADE** | Bring a project Bob set up earlier up to date with the current Bob — its hooks, reviewer, checks and templates. Shows each change and Bob's reason for it; applies only what you approve; leaves your deliberate differences alone. | Bob has improved since this project started, or `/bob` says the project is behind. | 5–15 minutes |
 >
-> **Which one? (A / B / C)** — or say "I'm not sure" / describe what you're trying to do and I'll recommend one.
+> **Which one? (A / B / C / D)** — or say "I'm not sure" / describe what you're trying to do and I'll recommend one.
 
-After the user selects, Claude reads the relevant PART (II, III, or IV) and begins at Step 1 / A1 / E1. Claude does NOT need to read the entire document upfront — read Part I (Foundation, including §11 Narration Protocol) + the selected mode's section.
+After the user selects, Claude reads the relevant PART (II, III, or IV) and begins at Step 1 / A1 / E1. **UPGRADE** has no Part of its own: its steps (U1–U5) are in `build-protocol-core.md` §"MODE: UPGRADE" and the work is done by `scripts/bob-upgrade.mjs` (D-019). Claude does NOT need to read the entire document upfront — read Part I (Foundation, including §11 Narration Protocol) + the selected mode's section.
 
 ---
 
@@ -477,11 +478,12 @@ If time pressure forces you to cut steps, follow this priority order. **Never sk
 
 When a bug is discovered during verification or after deployment, follow this sequence instead of ad-hoc debugging:
 
-1. **Reproduce:** Confirm the failure. Define the exact input → expected output → actual output.
-2. **Isolate:** Which subsystem owns this failure? Trace the data flow until you find where expected ≠ actual.
+1. **Reproduce:** Confirm the failure. Define the exact input → expected output → actual output. **The obvious cause is often a red herring** (Engineering Principle 8a): a failure that starts right after a dependency upgrade, a config change or a new deploy is not proof that the change caused it. Before blaming it, check what the **last good run** actually used — versions, config, inputs. If the last good run used the same versions, the upgrade is not the cause. Fix only a cause you have reproduced; a fix to the wrong cause wastes the cycle and hides the real defect.
+2. **Isolate:** Which subsystem owns this failure? Trace the data flow until you find where expected ≠ actual (Engineering Principle 2 — trace end to end; don't patch the symptom).
 3. **Check spec coverage:** Does the spec define behavior for this case? If not → this is a spec gap, not just a code bug. Patch the spec first.
 4. **Fix:** Apply the targeted fix to the isolated subsystem.
 5. **Class-level scan:** Grep the entire codebase for the same pattern. If you found `.single()` should be `.maybeSingle()` in one query, check ALL queries. Report: "Found N additional instances. Fixed all."
+5b. **Read two neighbouring code paths:** the callers of the code you changed, and the code that runs next to it on the same data. A fix that changes a function's inputs or outputs is Engineering Principle 5 — every caller is updated in the same change.
 6. **Add regression test:** Write a test that would have caught this bug. This prevents recurrence.
 7. **Update spec if gap found:** If the bug revealed a spec gap (Step 3), update the relevant spec and run propagation enforcement.
 

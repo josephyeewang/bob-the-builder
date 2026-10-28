@@ -15,9 +15,14 @@
 #   - Writes docs/audit-ledger.json (Rule 30(d)), .bob-optional-pointers (Rule 23(c)),
 #     scripts/loop-check.mjs + .github/workflows/loop-check.yml (the daily dropped-work check)
 #   - Writes .gitignore, .env.example, README.md
+#   - Records what it installed, and from which Bob commit, in .bob/installed.json, plus an empty
+#     .bob/differences.md (D-019) — so `/bob UPGRADE` (scripts/bob-upgrade.mjs) can later tell
+#     Bob's improvements from this project's deliberate changes
 #   - git init's the repo with an initial commit
 #
 # Safe to re-run: skips anything that already exists.
+# BOB_INIT_REFERENCE=1 (used only by bob-upgrade.mjs to build a throw-away copy of Bob's current
+# scaffold): stops before the install record, git init and the pre-commit hook.
 
 set -euo pipefail
 
@@ -472,6 +477,23 @@ else
 fi
 
 # ──────────────────────────────────────────────────────────────────────
+# 6b. Install record (D-019): what Bob installed + from which Bob commit,
+#     so /bob UPGRADE can later diff. Needs Node; without it, UPGRADE
+#     infers the same thing by comparing files.
+# ──────────────────────────────────────────────────────────────────────
+if [[ "${BOB_INIT_REFERENCE:-}" == "1" ]]; then
+  exit 0   # throw-away reference copy for bob-upgrade.mjs — nothing below applies
+fi
+if [[ ! -f .bob/installed.json ]]; then
+  if command -v node >/dev/null 2>&1; then
+    node "$BOB_ROOT/scripts/bob-upgrade.mjs" --record-install --project "$PROJECT_DIR" \
+      || echo "   ⚠ Could not write .bob/installed.json — /bob UPGRADE will compare files instead."
+  else
+    echo "   ⚠ Node is not installed, so .bob/installed.json was not written — /bob UPGRADE will compare files instead."
+  fi
+fi
+
+# ──────────────────────────────────────────────────────────────────────
 # 7. git init (only if not already a repo)
 # ──────────────────────────────────────────────────────────────────────
 if [[ ! -d .git ]]; then
@@ -507,6 +529,9 @@ fi
 # drift. ⚠ Respects a global core.hooksPath — a per-repo .git/hooks/pre-commit is
 # IGNORED when one is set (common: a global gitleaks hook). In that case we CHAIN
 # into the global hook, guarded so it no-ops in every non-Bob repo.
+# D-019: it BLOCKS only where .bob/installed.json says "commit_sweep": "block" (bob-init writes that
+# for a new project; /bob UPGRADE switches an existing project once its documents pass); anywhere
+# else it prints the problems and lets the commit through.
 BOB_HOOK_GUARD='# Bob coherence sweep (Rule 23/24) — no-ops outside a Bob project'
 GLOBAL_HOOKS="$(git config --get core.hooksPath || true)"
 COHERENCE_BLOCK="$(cat <<EOF
@@ -514,7 +539,12 @@ COHERENCE_BLOCK="$(cat <<EOF
 $BOB_HOOK_GUARD
 __BOB_SWEEP="$BOB_ROOT/scripts/coherence-check.sh"
 if [ -f docs/build-manifest.md ] && [ -x "\$__BOB_SWEEP" ]; then
-  "\$__BOB_SWEEP" docs || { echo "✗ Bob coherence sweep failed — fix, or bypass once: git commit --no-verify"; exit 1; }
+  if ! "\$__BOB_SWEEP" docs; then
+    if [ -f .bob/installed.json ] && grep -Eq '"commit_sweep"[[:space:]]*:[[:space:]]*"block"' .bob/installed.json; then
+      echo "✗ Bob coherence sweep failed — fix, or bypass once: git commit --no-verify"; exit 1
+    fi
+    echo "⚠ Bob coherence sweep found problems (warn-only in this project until /bob UPGRADE switches it to blocking)."
+  fi
 fi
 EOF
 )"

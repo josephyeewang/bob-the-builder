@@ -14,7 +14,7 @@ source_frameworks:
   - STRIDE per-element Data-Flow Diagram (DFD) decomposition — trust boundaries
   - Static taint analysis for privacy (arXiv 1608.04671)
   - GDPR Art.30 Record of Processing / PCI-DSS data-flow mapping (the "why" for sensitive fields)
-  - Bob's own Engineering Principle #2 — "Trace End-to-End: input → output before fixing"
+  - Bob Engineering Principle 2 — "Trace end to end: input → output before fixing" (`build-protocol-core.md` §ENGINEERING PRINCIPLES)
 ---
 
 # L31 — Input & Data-Flow Trace
@@ -66,7 +66,7 @@ This is taint tracking applied to product correctness rather than security: foll
 - **STRIDE per-element DFD** — decompose the flow into external entities → processes → data stores, and mark every **trust boundary** the data crosses (each boundary is a validation/auth checkpoint).
 - **Static taint analysis for privacy** — arXiv 1608.04671.
 - **GDPR Art.30 RoPA / PCI-DSS data-flow mapping** — the regulatory "why" for sensitive-field completeness; hand the actual privacy verdict to L05.
-- **Engineering Principle #2 (Trace End-to-End)** — Bob's own build rule, now an audit.
+- **Engineering Principle 2 (Trace end to end)** — Bob's own build rule (`build-protocol-core.md` §ENGINEERING PRINCIPLES), now an audit.
 
 ## Audit method
 

@@ -1,6 +1,6 @@
 ---
 name: bob
-description: "Build, audit, or evolve a product with the Bob the Builder protocol — Joe's spec→build→audit discipline for a non-engineer product leader directing Claude Code. Use on any mention of 'bob', 'bob the builder', 'build protocol', 'NEW mode', 'AUDIT mode', 'EVOLVE mode', or when the user wants to scope/spec/build a new product systematically, assess a partially-built product against a discipline, or extend an existing product the same way. Covers spec creation with a coverage checklist, design gallery + lock, a pre-build review gate, phase-by-phase build with human gates, reconciliation, adversarial review, behavioral cores for AI products, and a 37-lens audit library (engineering / UX / AI / performance / reach / operational / strategic / growth, incl. data-flow tracing, method soundness, output register, SEO/AEO/GEO, and a standing data-fidelity crawler) that runs real tools, not just code reads."
+description: "Build, audit, or evolve a product with the Bob the Builder protocol — Joe's spec→build→audit discipline for a non-engineer product leader directing Claude Code. Use on any mention of 'bob', 'bob the builder', 'build protocol', 'NEW mode', 'AUDIT mode', 'EVOLVE mode', 'UPGRADE mode', or when the user wants to scope/spec/build a new product systematically, assess a partially-built product against a discipline, extend an existing product the same way, or bring a project Bob set up earlier up to date with the current Bob. Covers spec creation with a coverage checklist, design gallery + lock, a pre-build review gate, phase-by-phase build with human gates, reconciliation, adversarial review, behavioral cores for AI products, and a 37-lens audit library (engineering / UX / AI / performance / reach / operational / strategic / growth, incl. data-flow tracing, method soundness, output register, SEO/AEO/GEO, and a standing data-fidelity crawler) that runs real tools, not just code reads."
 user-invocable: true
 ---
 
@@ -39,6 +39,15 @@ user-invocable: true
   `.github/workflows/loop-check.yml`: stale PRs with no dated hold, open loops with no owner/due date/proof, an intake
   list over its cap, a scheduled job failing twice or silent). Running several sessions at once → use
   `templates/open-loops.md` (one list, one coordinator who alone merges) — `build-protocol.md` §"Parallel sessions".
+- **UPGRADE mode** (2026-10-27, D-019): `/bob UPGRADE` brings a project Bob set up earlier up to date —
+  `scripts/bob-upgrade.mjs` lists each Bob piece in the project as up to date / Bob has a newer version / missing /
+  changed here on purpose (`.bob/differences.md`) / changed here with no reason written down, gives Bob's
+  decision-log reason for each change, and applies only what the user approves (backups in `.bob/backups/<date>/`;
+  hooks that can stop work arrive warn-only first). `bob-init` records what it installed in `.bob/installed.json`.
+- **Three layers** (D-019): the user's global instructions (any task) · Bob (the one method for building software) ·
+  the project (its own facts + deliberate differences from Bob). Write a rule once in the lowest layer that covers
+  it; point, don't copy — `build-protocol-core.md` §"WHERE RULES LIVE". Bob's own Engineering Principles 1–9 are
+  in §"ENGINEERING PRINCIPLES".
 - **Mechanical checkers:** `scripts/spec-audit.py` (spec structure + leftover TODO/TBD), `scripts/coverage-check.py`
   (an audit's coverage record adds up), `scripts/doc-pointers-check.mjs` (every pointer in the root AGENTS.md /
   CLAUDE.md resolves; the status page is not stale — run inside `coherence-check.sh`), plus the Phase-Gate scripts;
@@ -62,7 +71,7 @@ It prints exactly one line, `BOB_UPDATE: status=...`. It is throttled (one netwo
 
 This check must never block the session: if the script errors or is missing, proceed silently. It does NOT count as the "one startup question" — the update offer only appears when genuinely behind, and the mode question is still the only thing the user decides in the common (up-to-date) path.
 
-1. **Read the core protocol first**: `~/.claude/skills/bob/../build-protocol-core.md`. That file is the compact reference and contains the mode menu (NEW / AUDIT / EVOLVE), complexity assessment, document hierarchy, and rules. (The skill at `~/.claude/skills/bob` is a symlink to wherever the user cloned Bob — `..` from there resolves to the repo root regardless of install location.)
+1. **Read the core protocol first**: `~/.claude/skills/bob/../build-protocol-core.md`. That file is the compact reference and contains the mode menu (NEW / AUDIT / EVOLVE / UPGRADE), complexity assessment, document hierarchy, and rules. (The skill at `~/.claude/skills/bob` is a symlink to wherever the user cloned Bob — `..` from there resolves to the repo root regardless of install location.)
 
 2. **Then follow the protocol's own instructions.** It tells you what to do next — including when to load the full reference at `~/.claude/skills/bob/../build-protocol.md` for templates, appendices, and architecture patterns.
 
@@ -80,7 +89,18 @@ This check must never block the session: if the script errors or is missing, pro
 
 ## Argument handling
 
-If the user invokes the skill with an argument (e.g., `/bob NEW`, `/bob AUDIT`, `/bob EVOLVE`), skip the mode menu and jump straight to that mode. If no argument, follow the protocol's default flow (Journey Map for first-time users, mode menu otherwise).
+If the user invokes the skill with an argument (e.g., `/bob NEW`, `/bob AUDIT`, `/bob EVOLVE`, `/bob UPGRADE`), skip the mode menu and jump straight to that mode. If no argument, follow the protocol's default flow (Journey Map for first-time users, mode menu otherwise).
+
+## /bob UPGRADE — bring this project up to date with Bob
+
+Different from "update bob" below: that updates **Bob itself**; UPGRADE updates **the project** in the current folder to match the Bob you have. Follow `build-protocol-core.md` §"MODE: UPGRADE" (U1–U5). In short:
+
+1. Run `node ~/.claude/skills/bob/../scripts/bob-upgrade.mjs` from the project folder. It changes nothing.
+2. Retell the report in plain English — per item: what it does for the user, why Bob changed it (D-number + its one-line reason), what applying would change. Ask which to apply (`→ HG`). Do not use `--interactive` yourself (it needs a terminal); pass the user's choices with `--apply <item>,<item>` or `--apply all`.
+3. For "changed here, reason not written down": ask keep (add `- <item>: <why>` to `.bob/differences.md`) or take Bob's (the old copy is backed up).
+4. Tell the user which hooks arrived warn-only and how to switch them on later (`--enforce <item>`), and whether the commit-time document check blocks yet (`commit-sweep`).
+5. Ask the reverse question the report prints — does this project do something better than Bob? — and offer to backwash it into Bob (generic wording, a decision-log entry, no project internals).
+6. Commit the project's changed files like any other change.
 
 ## Updating Bob
 

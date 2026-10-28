@@ -5,6 +5,7 @@
 #          spec-audit.py's leftover-placeholder check · templates/run-claim.mjs
 #   D-018: hooks/merge-guard.mjs (its own node:test suite, incl. a bob-init scaffold + mutation proof) ·
 #          doc-pointers-check.mjs · audit-ledger-check.mjs · templates/loop-check.mjs
+#   D-019: bob-upgrade.mjs (/bob UPGRADE, on fixture projects scaffolded from an older Bob) · hooks/warn-only.mjs
 #
 # Rule 28's discipline applied to Bob's own checkers: each check is run against the defect it
 # was written for (must catch it) AND against a clean case (must pass it). Everything happens in
@@ -390,6 +391,94 @@ echo '{"nightly.yml":[{"status":"completed","conclusion":"failure","createdAt":"
 expect "one failure then a success -> not flagged (two in a row only)" 0 "Nothing flagged" -- node "$LC" "${LCA[@]}"
 echo '{"heartbeats":[{"path":"logs/hb.txt","max_age_hours":30}]}' > "$LR/.github/loop-check.json"
 expect "a heartbeat that was never written -> flagged" 1 "heartbeat logs/hb.txt: missing" -- node "$LC" "${LCA[@]}"
+
+# ── 12. bob-upgrade.mjs + hooks/warn-only.mjs (D-019) ────────────────────────
+# Fixture projects scaffolded from an OLDER Bob: a throw-away git copy of the parts bob-init and
+# bob-upgrade read, whose first commit carries an older config-protection.js; its second commit
+# restores the current one (a "D-018" change). Then: a fresh project, a project with pieces
+# missing, one with deliberate differences, and one with no install record.
+echo "bob-upgrade.mjs"
+UG="$TMP/ug"; OB="$UG/bob"; mkdir -p "$OB"
+printf '[user]\n\tname = selftest\n\temail = selftest@example.com\n[core]\n\thooksPath = /dev/null\n[commit]\n\tgpgsign = false\n[init]\n\tdefaultBranch = main\n' > "$UG/gitconfig"
+cp -R "$HERE/../scripts" "$HERE/../templates" "$OB/"
+cp "$HERE/../build-protocol-core.md" "$HERE/../decision-log.md" "$OB/"
+newrepo "$OB"
+echo "// an older line from an earlier Bob" >> "$OB/scripts/hooks/config-protection.js"
+git -C "$OB" add -A && git -C "$OB" commit -qm "older Bob (D-017)"
+OLD="$(git -C "$OB" rev-parse HEAD)"
+scaffold() { (cd "$UG" && GIT_CONFIG_GLOBAL="$UG/gitconfig" GIT_CONFIG_NOSYSTEM=1 bash "$OB/scripts/bob-init.sh" "$1" >/dev/null 2>&1); }
+ub() { local d="$1"; shift; (cd "$UG/$d" && GIT_CONFIG_GLOBAL="$UG/gitconfig" GIT_CONFIG_NOSYSTEM=1 node "$OB/scripts/bob-upgrade.mjs" --today 2026-01-02 "$@"); }
+scaffold older; scaffold purpose; scaffold nomanifest
+cp "$HERE/hooks/config-protection.js" "$OB/scripts/hooks/config-protection.js"
+git -C "$OB" commit -qam "Config protection also guards the required-checks list — D-018"
+scaffold fresh
+expect "bob-init writes an install record naming the Bob commit" 0 "\"bob_commit\": \"$OLD\"" -- cat "$UG/older/.bob/installed.json"
+expect "a fresh project: everything up to date" 0 "Nothing is out of date" -- ub fresh
+expect "a fresh project: the commit-time check starts blocking" 0 '"commit_sweep": "block"' -- cat "$UG/fresh/.bob/installed.json"
+# 'older': simulate pieces Bob added after this project was set up (gone, and never recorded).
+node -e '
+  const fs=require("fs"),d=process.argv[1],s=JSON.parse(fs.readFileSync(d+"/.claude/settings.json","utf8"));
+  s.hooks.PreToolUse=s.hooks.PreToolUse.filter(e=>!e.hooks.some(h=>/merge-guard|block-no-verify/.test(h.command)));
+  fs.writeFileSync(d+"/.claude/settings.json",JSON.stringify(s,null,2));
+  const m=JSON.parse(fs.readFileSync(d+"/.bob/installed.json","utf8"));
+  for (const k of ["merge-guard","merge-guard-settings-bash","merge-guard-settings-monitor","guard-settings-block-no-verify"]) delete m.pieces[k];
+  fs.writeFileSync(d+"/.bob/installed.json",JSON.stringify(m,null,2));' "$UG/older"
+rm "$UG/older/.claude/hooks/merge-guard.mjs"
+echo "my own file" > "$UG/older/notes.txt"; git -C "$UG/older" add -A; GIT_CONFIG_GLOBAL="$UG/gitconfig" git -C "$UG/older" commit -qm "project work"
+expect "older install: Bob's newer hook is named, with the decision behind it" 0 "Why Bob changed it: D-018" -- ub older
+expect "older install: the newer item is the right one" 0 "\[guard-config-protection\] .claude/hooks/config-protection.js" -- ub older
+expect "older install: pieces new in Bob are listed as missing" 0 "Missing — added to Bob since this project was set up \(4\)" -- ub older
+expect "older install: a blocking hook is offered warn-only first" 0 "Goes in WARN-ONLY first" -- ub older
+expect "older install: the reverse question is asked" 0 "Does this project do something better than Bob\?" -- ub older
+expect "the report changes nothing" 0 "^$" -- git -C "$UG/older" status --porcelain
+expect "an unknown item is refused" 2 "unknown item" -- ub older --apply no-such-thing
+expect "--apply all applies the safe items" 0 "guard-settings-block-no-verify: added in WARN-ONLY mode" -- ub older --apply all
+expect "the replaced file was backed up first" 0 "an older line from an earlier Bob" -- cat "$UG/older/.bob/backups/2026-01-02/.claude/hooks/config-protection.js"
+expect "the newer version is now in place" 1 "" -- grep -q "an older line" "$UG/older/.claude/hooks/config-protection.js"
+expect "the merge guard is wired (no warn-only mode for it)" 0 'merge-guard.mjs' -- node -e 'const s=require(process.argv[1]);const c=s.hooks.PreToolUse.flatMap(e=>e.hooks).map(h=>h.command).filter(c=>c.includes("merge-guard"));if(c.length!==2||c.some(x=>x.includes("warn-only")))process.exit(1);console.log("merge-guard.mjs")' "$UG/older/.claude/settings.json"
+expect "nothing outside Bob's pieces was touched" 0 "^$" -- bash -c "git -C '$UG/older' status --porcelain | grep -vE ' (\.claude/|\.bob/)' || true"
+expect "after applying, the report is clean" 0 "Nothing is out of date" -- ub older
+WCMD="$(node -e 'const s=require(process.argv[1]);console.log(s.hooks.PreToolUse.flatMap(e=>e.hooks).map(h=>h.command).find(c=>c.includes("block-no-verify")))' "$UG/older/.claude/settings.json")"
+NOVERIFY='{"tool_name":"Bash","tool_input":{"command":"git commit --no-verify -m x"}}'
+hookrun() { printf '%s' "$NOVERIFY" | CLAUDE_PROJECT_DIR="$UG/older" bash -c "$1"; }
+expect "warn-only: the hook says it would have blocked, and lets it through" 0 "WOULD HAVE BLOCKED" -- hookrun "$WCMD"
+expect "--enforce switches it to blocking" 0 "switched to blocking" -- ub older --enforce guard-settings-block-no-verify
+ECMD="$(node -e 'const s=require(process.argv[1]);console.log(s.hooks.PreToolUse.flatMap(e=>e.hooks).map(h=>h.command).find(c=>c.includes("block-no-verify")))' "$UG/older/.claude/settings.json")"
+expect "enforced: the same command is now blocked" 2 "" -- hookrun "$ECMD"
+# 'purpose': a deliberate difference is left alone; an unexplained one is reported, and only replaced when named.
+echo "# runs at a different hour here" >> "$UG/purpose/.github/workflows/loop-check.yml"
+echo "- loop-check-workflow: runs at a different hour, after the nightly import" >> "$UG/purpose/.bob/differences.md"
+echo "Extra line added by the project." >> "$UG/purpose/.claude/agents/reviewer.md"
+cp "$UG/purpose/.github/workflows/loop-check.yml" "$UG/purpose-loop.yml"
+expect "a listed difference is shown with its reason" 0 "Reason recorded: runs at a different hour" -- ub purpose
+expect "an unlisted change is flagged as reason-not-written-down" 0 "\[reviewer-agent\]" -- ub purpose
+expect "--apply all" 0 "" -- ub purpose --apply all
+expect "--apply all left the listed difference alone" 0 "" -- cmp "$UG/purpose-loop.yml" "$UG/purpose/.github/workflows/loop-check.yml"
+expect "--apply all left the unexplained change alone too" 0 "" -- grep -q "Extra line added by the project" "$UG/purpose/.claude/agents/reviewer.md"
+expect "a listed difference is refused even when named" 0 "left alone — listed in .bob/differences.md" -- ub purpose --apply loop-check-workflow
+expect "naming the unexplained one replaces it" 0 "reviewer-agent: installed Bob's current version" -- ub purpose --apply reviewer-agent
+expect "... after backing it up" 0 "" -- grep -q "Extra line added by the project" "$UG/purpose/.bob/backups/2026-01-02/.claude/agents/reviewer.md"
+# 'nomanifest': no install record — compared against Bob's history instead.
+rm -rf "$UG/nomanifest/.bob"
+sed -i.bak 's|^TEST_CMD=.*|TEST_CMD="npm test"|' "$UG/nomanifest/.claude/hooks/green-gate.sh"
+echo "// changed by the project" >> "$UG/nomanifest/scripts/loop-check.mjs"
+expect "no record: says so" 0 "has no install record" -- ub nomanifest
+expect "no record: an old Bob copy is recognised from Bob's history" 0 "matches Bob's copy from commit ${OLD:0:7}" -- ub nomanifest
+expect "no record: a project's own test command does not count as a change" 0 "merge-guard-lib, green-gate, reviewer-agent" -- ub nomanifest
+expect "no record: an unknown change is 'can't tell'" 0 "can't tell who changed it \(1\)" -- ub nomanifest
+echo "# a stray line" >> "$UG/nomanifest/.claude/hooks/green-gate.sh"
+expect "naming green-gate updates it" 0 "" -- ub nomanifest --apply green-gate
+expect "... keeping the project's own test command" 0 '^TEST_CMD="npm test"$' -- cat "$UG/nomanifest/.claude/hooks/green-gate.sh"
+expect "... and recording what it installed" 0 '"green-gate"' -- cat "$UG/nomanifest/.bob/installed.json"
+expect "a project that upgrades starts the commit-time check warn-only" 0 '"commit_sweep": "warn"' -- cat "$UG/nomanifest/.bob/installed.json"
+# the commit-time check: refused while the documents fail, switched on once they pass.
+mkdir -p "$UG/nomanifest/docs"; printf '# Build Manifest\n\nStatus as of: 2026-01-02\n' > "$UG/nomanifest/docs/build-manifest.md"
+echo "See \`docs/missing-plan.md\` for the plan." >> "$UG/nomanifest/CLAUDE.md"
+expect "a failing document check is reported with its problems" 0 "missing-plan.md" -- ub nomanifest
+expect "switching it to blocking is refused while it fails" 0 "NOT switched" -- ub nomanifest --apply commit-sweep
+sed -i.bak '/missing-plan/d' "$UG/nomanifest/CLAUDE.md"; for f in product-spec architecture; do echo "# $f" > "$UG/nomanifest/docs/$f.md"; done
+expect "once it passes, it can be switched on" 0 "switched to blocking" -- ub nomanifest --apply commit-sweep
+expect "... and the record says so" 0 '"commit_sweep": "block"' -- cat "$UG/nomanifest/.bob/installed.json"
 
 echo
 echo "selftest-gate-scripts: $PASS passed, $FAIL failed"

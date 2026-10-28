@@ -6,11 +6,12 @@
 
 ## What this does
 
-3 things:
+4 things:
 
 1. **NEW** — Start a product from scratch. Bob takes you from "I have an idea" → spec → build plan → working product, pausing for your sign-off at every step.
 2. **AUDIT** — Inspect a product you've already started (yours or someone else's). Bob runs 34 ready-made audits across engineering, UX, AI, security, SEO/AI-search visibility, pricing, strategy, and growth — and tells you what's solid, what's hollow, and what to fix first.
 3. **EVOLVE** — Add a feature to a product Bob already built. Bob right-sizes the change (small / medium / large) and runs the right level of discipline for it.
+4. **UPGRADE** — Bring a project Bob set up earlier up to date with today's Bob. Bob shows what has improved since, and why, and changes only what you approve.
 
 ---
 
@@ -43,7 +44,7 @@ In any project folder, open Claude Code and type:
 /bob
 ```
 
-Bob asks one question — which mode (NEW / AUDIT / EVOLVE) — and walks you from there in plain language.
+Bob asks one question — which mode (NEW / AUDIT / EVOLVE / UPGRADE) — and walks you from there in plain language.
 
 ---
 
@@ -102,7 +103,18 @@ Bob classifies the change Small / Medium / Large and runs the right level of dis
 
 Invoke with `/bob EVOLVE`.
 
-### 4. Drift prevention (during every mode)
+### 4. UPGRADE — Bring an older project up to date
+
+Bob keeps getting better; projects started months ago don't get the improvements by themselves. UPGRADE checks every piece Bob put into your project (its safety hooks, the fresh-eyes reviewer, the daily dropped-work check, the lists it keeps) and tells you, in plain English, which are up to date, which Bob has improved — with the reason for each change — and which are new since you started. Then it changes only what you approve:
+
+- Your old copy of anything it replaces is saved first
+- A new check that could stop your work starts in **warn-only** mode — it tells you what it would have blocked, and you switch it on when you're ready
+- Anything you changed on purpose stays as you left it — you list those once, with a one-line reason, and Bob leaves them alone
+- It asks the reverse question too: is something in this project better than Bob? If so, that improvement goes back into Bob for every future project
+
+Invoke with `/bob UPGRADE`.
+
+### 5. Drift prevention (during every mode)
 
 What Bob does *while* you're building:
 
@@ -114,7 +126,7 @@ What Bob does *while* you're building:
 - **No merging on red** — a hook refuses a pull-request merge while any check you listed as required is failing, and refuses pushing straight to main. Brand-new projects with no checks yet aren't blocked; the guard switches on when you name your first check
 - **Nothing dropped between sessions** — one open-items list with one owner per row, and a daily check that flags pull requests left open with no dated hold, findings with no owner or due date, and scheduled jobs that failed twice or never ran
 
-### 5. Project memory (across every session)
+### 6. Project memory (across every session)
 
 Bob writes the important stuff to disk so context survives session boundaries:
 
@@ -122,6 +134,18 @@ Bob writes the important stuff to disk so context survives session boundaries:
 - An audit record that a script can check, so "five clean audits in a row on this kind of work — relax it" is counted, not guessed
 - The file every session reads first holds pointers, not status — and a check fails when a pointer breaks or the status page falls a week behind the decisions
 - Every Bob-built project ships with both `CLAUDE.md` and `AGENTS.md` so you can switch to Codex, Cursor, or Aider later without losing context
+
+---
+
+## How Bob fits with your own setup
+
+Your rules for working with Claude usually end up in three places. Bob keeps each rule in exactly one:
+
+1. **Your own instructions** (in Claude Code, `~/.claude/CLAUDE.md`) — rules for *any* task: how you like to be spoken to, what "done" means for you, your safety rails.
+2. **Bob** — the one current way to *build software*: the steps, the checkpoints, the reviewers, the checks. Your projects point to Bob instead of copying it.
+3. **Each project** — only facts about that project, plus anything it does differently from Bob on purpose (listed with the reason in `.bob/differences.md`).
+
+**Write a rule once, in the narrowest place that still covers every case it applies to, and point to it from everywhere else.** A copied rule drifts; a pointer can't. When a project finds a better way, it goes back into Bob (written in general terms). When Bob improves, `/bob UPGRADE` brings each project up to date.
 
 ---
 

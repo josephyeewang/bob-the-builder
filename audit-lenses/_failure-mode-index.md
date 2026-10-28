@@ -52,7 +52,7 @@ every reader.
 | B5 | A vacuous test/receipt (asserts a property of the stub, not the code) | Rule 28 meta-discipline (documents only) | `fixtures/detection/002-tree-kill.md` | 11 instances in one window; the receipt's blind spot was the defect's location. |
 | B5a | A fixture written from the **same source** as the code — passes for the reason the code is wrong | **NONE** | `fixtures/detection/008-fixture-from-the-same-wrong-source.md` | Ask what *independent* authority the test appeals to. For external systems the authority is the emitting **source**, never its docs. |
 | B6 | A capability merged but never run / never wired to a caller | Rule 24(b)(1) CTM-diff (capability); L02 | — | 8 instances. A four-round audit passed code no caller invokes. |
-| B7 | A consolidation dropping a runnable entrypoint | Rule 26 (imports only) | — | The `if __name__=="__main__"` case is in the founder's CLAUDE.md, not in Bob. |
+| B7 | A consolidation dropping a runnable entrypoint | Rule 26 (entry-point bullet) + Engineering Principle 8b | — | Moved into Bob 2026-10-27 (D-019): trace every place the code is *run*, not only imported, and run each entry point after the move. Still `PROSE` — no check detects it. |
 
 ## C. Running-system behaviour over time
 

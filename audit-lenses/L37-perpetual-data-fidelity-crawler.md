@@ -14,7 +14,7 @@ source_frameworks:
   - Property-based / metamorphic testing (Hypothesis, QuickCheck) — generate falsifiable properties rather than re-run fixed assertions
   - Column-level data lineage + null-rate census (extends L31's step 4b to a STANDING, rotating census)
   - SR 11-7 ongoing-monitoring pillar + selection-bias / pseudo-replication discipline (borrowed from L32 for the S6/method oracles)
-  - Bob Engineering Principle #7 — "Green ≠ Correct: run a proactive correctness audit yourself, treat every headline adversarially"
+  - Bob Engineering Principle 7 — "Green ≠ Correct: run a proactive correctness audit yourself, treat every headline adversarially" (`build-protocol-core.md` §ENGINEERING PRINCIPLES; Rule 25)
   - Companion reference — audit-lenses/_data-fidelity-chain.md (the 7-stage chain, 7-mode taxonomy, and 13-oracle catalog this lens runs on)
   - Origin case — a production data product (a ~two-dozen-session recurrence of the same fidelity-bug classes, each caught only because a human pushed)
 ---
