@@ -405,6 +405,18 @@ The companion `audit-log.md` records *deferred* items (Defer verdicts that may s
 
 ---
 
+### D-021: Harvest Strix's defensive checks (ideas only) into L04; copy no code
+
+- **Date:** 2026-10-27
+- **Status:** Accepted
+- **Context:** Strix (`usestrix/strix`, Apache-2.0) is an autonomous pentest tool that stands a target app up in a sandbox and attacks it. Its verdict (★4, `verdicts/tools/strix.md`) called for harvesting four of its written-down parts whose defensive content is sharper than Bob's: stack-specific review checks for the exact stack Bob's own builds use (Supabase + Next.js), a concrete list of plausible-but-false reasons to drop a finding, an honest severity rubric with an over-rated list and an acceptance gate, and the idea of recording whether a "clean" result was claimed or observed. The explicit condition was "no security trojan horses."
+- **Decision:** Copy **no executable code and no attack payloads** from Strix — only the underlying defensive checks, reworded into Bob's "confirm X is configured / verify Y is enforced" voice. Land them in: a new `audit-lenses/L04-stack-checklists.md` (Appendix A, referenced from L04's step-3 OWASP sweep); `_evidence-accounting.md` §3 (nine reasons that do not rule a finding out); L04's severity rubric (over-rated list + a six-point Critical/Major acceptance checklist + the bug-bounty-acceptance test); and `scripts/coverage-check.py` rule 2b (a `source` field, `self_reported` vs `observed`, on covered units, with the same field documented in `_evidence-accounting.md` §1). Ship `third_party/strix/LICENSE` (full Apache-2.0 text) and attribute every borrow inline plus a row in `third_party/README.md`. Bob stays MIT.
+- **Safety gate (Joe's condition).** Before copying, every source file was scanned: the four Markdown files carry only vendor-doc/advisory URLs (supabase.com, react.dev, nextjs.org, GitHub advisories), zero zero-width/bidi characters, no curl-pipe-to-shell, no eval/exec/base64, no telemetry, no writes to sensitive paths, and no AI-aimed directives. `coverage.py` (read for the idea, not copied) imports only json/logging/datetime/typing. `osv-scanner` on Strix's `uv.lock` reported 120 known vulns across 13 packages (9 Critical, 60 High) — recorded only; **none of those dependencies is copied into Bob**, so Bob's supply chain is unchanged. They matter only if Joe ever installs and runs Strix, which the verdict already fences to staging-only.
+- **Consequences:** L04 gains a stack-specific pass for the stack Bob's builds actually use, the refuter's "ruled out" bar gets concrete false-safe reasons, severity ratings get an honesty gate, and a hallucinated "clean" can no longer be laundered into an observed fact in a coverage record. `selftest-gate-scripts.sh` gains one coverage-check case (covered-without-source). Cost: one new file and a slightly stricter coverage-record format (covered units must now declare a `source`).
+- **Alternatives considered:** *Adopt the Strix tool itself into L04* — deferred, not rejected: it needs Docker (absent on Joe's Mac) and its exploit-validation can stall on Anthropic's safety classifiers without the Cyber Verification Program; the verdict tracks a re-look. *Copy the Strix Markdown files as-is* — rejected: they are an offensive playbook with runnable payloads; Bob is a read-only audit discipline and copying attack strings would be both off-mission and a needless risk surface.
+
+---
+
 ## Anti-pattern reminder
 
 ADRs that describe the decision without consequences are useless. The Consequences section is where future-you discovers why the seemingly clever shortcut is the thing now blocking a new requirement. Every decision in this file has a Consequences block — keep it that way.
