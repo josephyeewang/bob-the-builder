@@ -198,6 +198,18 @@ describe("the two stages (Bob addition)", () => {
     assert.match(guardCommand("git push origin main", { gh: neverAsked, specPath: missing }), /required-check list could not be read/);
     assert.equal(guardCommand("git push origin my-branch", { gh: neverAsked, specPath: missing }), null);
   });
+  it("a missing or damaged list: the refusal says how the owner recovers (D-020)", () => {
+    const missing = join(tmpdir(), "mg-no-such-dir", "required-checks.json");
+    const dir = mkdtempSync(join(tmpdir(), "mg-damaged-"));
+    const damaged = join(dir, "required-checks.json");
+    writeFileSync(damaged, "{ this is not json");
+    for (const specPath of [missing, damaged]) {
+      const why = guardCommand("gh pr merge 5", { gh: neverAsked, specPath });
+      assert.match(why, /cp ~\/\.claude\/skills\/bob\/\.\.\/templates\/required-checks\.json \.claude\/required-checks\.json/);
+      assert.match(why, /"no CI yet" stage/);
+      assert.match(why, /merge by hand in the Terminal app/);
+    }
+  });
 });
 
 describe("findMergeActions — what counts as a merge", () => {
@@ -603,6 +615,7 @@ describe("the wired hook in a freshly scaffolded project (scripts/bob-init.sh)",
     copyFileSync(join(project, ".claude", "hooks", "lib", "merge-guard.mjs"), join(empty, ".claude", "hooks", "lib", "merge-guard.mjs"));
     const r = run("gh pr merge 101", { out: GREEN }, empty);
     assert.equal(r.status, 2); assert.match(r.stderr, /required-check list could not be read/);
+    assert.match(r.stderr, /To recover, the owner runs this in the Terminal app/);
     assert.equal(run("git push origin feature", { out: "" }, empty).status, 0);
   });
   it("the guard file missing → exit 2 (fails closed), not a silent pass", () => {

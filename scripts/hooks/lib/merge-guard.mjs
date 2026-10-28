@@ -83,6 +83,16 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 export const REQUIRED_CHECKS_PATH = join(HERE, "..", "..", "required-checks.json");
 
 /**
+ * How the owner gets out of the fail-closed state, in plain words (Bob D-020). Claude cannot edit the list
+ * (config-protection.js), so the refusal must tell the owner the one command that resets it.
+ */
+export const RECOVER_SPEC =
+  "To recover, the owner runs this in the Terminal app, from the project folder: " +
+  "cp ~/.claude/skills/bob/../templates/required-checks.json .claude/required-checks.json — " +
+  "that resets the list to Bob's \"no CI yet\" stage (merges go ahead, each with a notice); if the old list named checks, add them back by hand. " +
+  "Or run /bob UPGRADE, which offers the same reset. The owner can always merge by hand in the Terminal app — this guard only stops Claude.";
+
+/**
  * The required-check list — the one definition. Throws when the file is missing or malformed; the caller turns a
  * throw into a refusal of every merge and every push to the protected branch (fails closed).
  * @param {string} [path] @returns {RequiredSpec}
@@ -1132,7 +1142,7 @@ export function guardCommand(command, deps = {}) {
   const actions = findMergeActions(command, 0, { cwd });
   if (!actions.length) return null;
   if (!spec) {
-    return `BLOCKED (merge guard): the required-check list could not be read (${specError}) — every merge and every push to ${BRANCH} is refused until .claude/required-checks.json is back.`; // refusal:no-spec
+    return `BLOCKED (merge guard): the required-check list could not be read (${specError}) — every merge and every push to ${BRANCH} is refused until .claude/required-checks.json is back. ${RECOVER_SPEC}`; // refusal:no-spec
   }
   if (!spec.required.length) {
     // the "no CI yet" stage: nothing to wait for, so nothing is refused — but say so every time

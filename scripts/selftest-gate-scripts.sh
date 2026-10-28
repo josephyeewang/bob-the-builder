@@ -6,6 +6,8 @@
 #   D-018: hooks/merge-guard.mjs (its own node:test suite, incl. a bob-init scaffold + mutation proof) ·
 #          doc-pointers-check.mjs · audit-ledger-check.mjs · templates/loop-check.mjs
 #   D-019: bob-upgrade.mjs (/bob UPGRADE, on fixture projects scaffolded from an older Bob) · hooks/warn-only.mjs
+#   D-020: bob-upgrade.mjs (own-version detection, green-gate test command, damaged list, pointer target) ·
+#          doc-pointers-check.mjs short paths · config-protection.js's required-checks advice · commit-sweep.sh
 #
 # Rule 28's discipline applied to Bob's own checkers: each check is run against the defect it
 # was written for (must catch it) AND against a clean case (must pass it). Everything happens in
@@ -203,6 +205,11 @@ expect "editing an existing ignore list -> BLOCKED" 2 "BLOCKED" -- edit_hook "$C
 expect "creating a lint config for the first time -> allowed" 0 "" -- edit_hook "$CPD/biome.json"
 expect "ordinary source file -> allowed" 0 "" -- edit_hook "$CPD/src/app.ts"
 expect "tsconfig.json is NOT covered (known gap, documented in 6b)" 0 "" -- edit_hook "$CPD/tsconfig.json"
+mkdir -p "$CPD/.claude"; echo '{"required":[]}' > "$CPD/.claude/required-checks.json"
+expect "the merge guard's list -> BLOCKED, with the right advice for that file (D-020)" 2 "owner's decision, not Claude's" -- edit_hook "$CPD/.claude/required-checks.json"
+expect "... and it says how to reset it" 2 "cp ~/.claude/skills/bob/../templates/required-checks.json .claude/required-checks.json" -- edit_hook "$CPD/.claude/required-checks.json"
+no_lint_advice() { ! edit_hook "$CPD/.claude/required-checks.json" 2>&1 | grep -q "Fix the source code"; }
+expect "... and never tells Claude to fix the source code" 0 "" -- no_lint_advice
 
 # ── 5. coverage-check.py (D-017) ─────────────────────────────────────────────
 echo "coverage-check.py"
@@ -291,9 +298,25 @@ expect "a path that no longer exists -> FAIL" 1 "docs/retired-plan.md, which doe
 printf 'docs/retired-plan.md\n' > "$D/.bob-optional-pointers"
 expect "... unless listed in .bob-optional-pointers" 0 "doc-pointers-check: OK" -- node "$DP" --root "$D"
 printf -- '- See §7 of docs/plan.md\n' >> "$D/AGENTS.md"
-expect "a renumbered section -> FAIL" 1 "§7 of docs/plan.md, and docs/plan.md has no section 7" -- node "$DP" --root "$D"
+expect "a renumbered section -> warning only, not a failure (D-020)" 0 "⚠ AGENTS.md cites §7 of docs/plan.md, and no heading there starts with 7" -- node "$DP" --root "$D"
+printf -- '- See §4 of docs/gone-log.md\n' > "$D/SECT.md"
+expect "a section cited in a file that does not exist -> FAIL" 1 "§4 of docs/gone-log.md, and docs/gone-log.md does not exist" -- node "$DP" --root "$D" --files SECT.md
+printf -- '- See §4 of `decision-log.md`\n' > "$D/SECT.md"
+expect "a section cited by a bare file name found in docs/ -> the file counts as found" 0 "doc-pointers-check: OK" -- node "$DP" --root "$D" --files SECT.md
+# short paths: resolved by a unique match on the end of a real path (D-020)
+mkdir -p "$D/supabase/functions/send-email" "$D/a/shared" "$D/b/shared" "$D/node_modules/pkg/send-sms"
+: > "$D/supabase/functions/send-email/index.ts"; : > "$D/a/shared/util.ts"; : > "$D/b/shared/util.ts"; : > "$D/node_modules/pkg/send-sms/index.ts"
+printf -- '- The handler is in `send-email/index.ts`.\n' > "$D/SHORT.md"
+expect "a short path that matches exactly one real file -> found" 0 "1 pointer\(s\) checked, 0 broken" -- node "$DP" --root "$D" --files SHORT.md
+printf -- '- The helper is in `shared/util.ts`.\n' > "$D/SHORT.md"
+expect "a short path that matches two files -> warning, not failure" 0 "⚠ SHORT.md points at shared/util.ts, which matches 2 files" -- node "$DP" --root "$D" --files SHORT.md
+printf -- '- The handler is in `send-fax/index.ts`.\n' > "$D/SHORT.md"
+expect "a short path that matches nothing -> FAIL" 1 "SHORT.md points at send-fax/index.ts, which does not exist" -- node "$DP" --root "$D" --files SHORT.md
+printf -- '- The handler is in `send-sms/index.ts`.\n' > "$D/SHORT.md"
+expect "a match only inside node_modules does not count -> FAIL" 1 "points at send-sms/index.ts, which does not exist" -- node "$DP" --root "$D" --files SHORT.md
+rm -rf "$D/SECT.md" "$D/SHORT.md" "$D/supabase" "$D/a" "$D/b" "$D/node_modules"
 printf '# Project\n- `nowhere-at-all.md`\n' > "$D/CLAUDE.md"
-expect "a bare name found nowhere -> warning only (may live in another install)" 1 "⚠ CLAUDE.md names .nowhere-at-all.md." -- node "$DP" --root "$D"
+expect "a bare name found nowhere -> warning only (may live in another install)" 0 "⚠ CLAUDE.md names .nowhere-at-all.md." -- node "$DP" --root "$D"
 printf '# Project\n- docs/specs/missing.md\n' > "$D/CLAUDE.md"
 expect "CLAUDE.md is checked too (a missing path) -> FAIL" 1 "CLAUDE.md points at docs/specs/missing.md" -- node "$DP" --root "$D"
 rm "$D/CLAUDE.md"; printf '# Project\n- Plan: `docs/plan.md`\n' > "$D/AGENTS.md"
@@ -428,11 +451,11 @@ echo "my own file" > "$UG/older/notes.txt"; git -C "$UG/older" add -A; GIT_CONFI
 expect "older install: Bob's newer hook is named, with the decision behind it" 0 "Why Bob changed it: D-018" -- ub older
 expect "older install: the newer item is the right one" 0 "\[guard-config-protection\] .claude/hooks/config-protection.js" -- ub older
 expect "older install: pieces new in Bob are listed as missing" 0 "Missing — added to Bob since this project was set up \(4\)" -- ub older
-expect "older install: a blocking hook is offered warn-only first" 0 "Goes in WARN-ONLY first" -- ub older
+expect "older install: a blocking hook is offered in trial mode first" 0 "Starts in trial mode" -- ub older
 expect "older install: the reverse question is asked" 0 "Does this project do something better than Bob\?" -- ub older
 expect "the report changes nothing" 0 "^$" -- git -C "$UG/older" status --porcelain
 expect "an unknown item is refused" 2 "unknown item" -- ub older --apply no-such-thing
-expect "--apply all applies the safe items" 0 "guard-settings-block-no-verify: added in WARN-ONLY mode" -- ub older --apply all
+expect "--apply all applies the safe items" 0 "\[guard-settings-block-no-verify\]: added in trial mode" -- ub older --apply all
 expect "the replaced file was backed up first" 0 "an older line from an earlier Bob" -- cat "$UG/older/.bob/backups/2026-01-02/.claude/hooks/config-protection.js"
 expect "the newer version is now in place" 1 "" -- grep -q "an older line" "$UG/older/.claude/hooks/config-protection.js"
 expect "the merge guard is wired (no warn-only mode for it)" 0 'merge-guard.mjs' -- node -e 'const s=require(process.argv[1]);const c=s.hooks.PreToolUse.flatMap(e=>e.hooks).map(h=>h.command).filter(c=>c.includes("merge-guard"));if(c.length!==2||c.some(x=>x.includes("warn-only")))process.exit(1);console.log("merge-guard.mjs")' "$UG/older/.claude/settings.json"
@@ -442,7 +465,7 @@ WCMD="$(node -e 'const s=require(process.argv[1]);console.log(s.hooks.PreToolUse
 NOVERIFY='{"tool_name":"Bash","tool_input":{"command":"git commit --no-verify -m x"}}'
 hookrun() { printf '%s' "$NOVERIFY" | CLAUDE_PROJECT_DIR="$UG/older" bash -c "$1"; }
 expect "warn-only: the hook says it would have blocked, and lets it through" 0 "WOULD HAVE BLOCKED" -- hookrun "$WCMD"
-expect "--enforce switches it to blocking" 0 "switched to blocking" -- ub older --enforce guard-settings-block-no-verify
+expect "--enforce switches it on" 0 "switched on: it now stops" -- ub older --enforce guard-settings-block-no-verify
 ECMD="$(node -e 'const s=require(process.argv[1]);console.log(s.hooks.PreToolUse.flatMap(e=>e.hooks).map(h=>h.command).find(c=>c.includes("block-no-verify")))' "$UG/older/.claude/settings.json")"
 expect "enforced: the same command is now blocked" 2 "" -- hookrun "$ECMD"
 # 'purpose': a deliberate difference is left alone; an unexplained one is reported, and only replaced when named.
@@ -456,7 +479,7 @@ expect "--apply all" 0 "" -- ub purpose --apply all
 expect "--apply all left the listed difference alone" 0 "" -- cmp "$UG/purpose-loop.yml" "$UG/purpose/.github/workflows/loop-check.yml"
 expect "--apply all left the unexplained change alone too" 0 "" -- grep -q "Extra line added by the project" "$UG/purpose/.claude/agents/reviewer.md"
 expect "a listed difference is refused even when named" 0 "left alone — listed in .bob/differences.md" -- ub purpose --apply loop-check-workflow
-expect "naming the unexplained one replaces it" 0 "reviewer-agent: installed Bob's current version" -- ub purpose --apply reviewer-agent
+expect "naming the unexplained one replaces it" 0 "\[reviewer-agent\]: installed Bob's current version" -- ub purpose --apply reviewer-agent
 expect "... after backing it up" 0 "" -- grep -q "Extra line added by the project" "$UG/purpose/.bob/backups/2026-01-02/.claude/agents/reviewer.md"
 # 'nomanifest': no install record — compared against Bob's history instead.
 rm -rf "$UG/nomanifest/.bob"
@@ -477,8 +500,86 @@ echo "See \`docs/missing-plan.md\` for the plan." >> "$UG/nomanifest/CLAUDE.md"
 expect "a failing document check is reported with its problems" 0 "missing-plan.md" -- ub nomanifest
 expect "switching it to blocking is refused while it fails" 0 "NOT switched" -- ub nomanifest --apply commit-sweep
 sed -i.bak '/missing-plan/d' "$UG/nomanifest/CLAUDE.md"; for f in product-spec architecture; do echo "# $f" > "$UG/nomanifest/docs/$f.md"; done
-expect "once it passes, it can be switched on" 0 "switched to blocking" -- ub nomanifest --apply commit-sweep
+expect "once it passes, it can be switched on" 0 "switched on: a commit with serious" -- ub nomanifest --apply commit-sweep
 expect "... and the record says so" 0 '"commit_sweep": "block"' -- cat "$UG/nomanifest/.bob/installed.json"
+
+# ── 13. bob-upgrade.mjs, D-020: the project's own version · green gate's test command · damaged list · pointer ─
+echo "bob-upgrade.mjs (D-020)"
+scaffold ownmg; scaffold ownlc; scaffold gg; scaffold ptr
+# 'ownmg': the project runs its OWN merge guard from scripts/, wired in .claude/settings.json; Bob's is absent.
+node -e '
+  const fs=require("fs"),d=process.argv[1],s=JSON.parse(fs.readFileSync(d+"/.claude/settings.json","utf8"));
+  s.hooks.PreToolUse=s.hooks.PreToolUse.filter(e=>!e.hooks.some(h=>/merge-guard/.test(h.command)));
+  s.hooks.PreToolUse.push({matcher:"Bash",hooks:[{type:"command",command:"node \"$CLAUDE_PROJECT_DIR/scripts/merge-guard.mjs\""}]});
+  fs.writeFileSync(d+"/.claude/settings.json",JSON.stringify(s,null,2));
+  const m=JSON.parse(fs.readFileSync(d+"/.bob/installed.json","utf8"));
+  for (const k of Object.keys(m.pieces)) if (/merge-guard/.test(k)) delete m.pieces[k];
+  fs.writeFileSync(d+"/.bob/installed.json",JSON.stringify(m,null,2));' "$UG/ownmg"
+rm -f "$UG/ownmg/.claude/hooks/merge-guard.mjs" "$UG/ownmg/.claude/hooks/lib/merge-guard.mjs" "$UG/ownmg/.claude/required-checks.json"
+mkdir -p "$UG/ownmg/scripts"; echo "// this project's own merge guard" > "$UG/ownmg/scripts/merge-guard.mjs"
+expect "own merge guard: reported as the project's own version, with its path" 0 "Project has its own version \(scripts/merge-guard.mjs" -- ub ownmg
+expect "own merge guard: not called missing" 0 "" -- bash -c "! (cd '$UG/ownmg' && GIT_CONFIG_GLOBAL='$UG/gitconfig' node '$OB/scripts/bob-upgrade.mjs' --today 2026-01-02) | grep -q '^Missing'"
+expect "own merge guard: --apply all leaves it alone and says so" 0 "Not applied:" -- ub ownmg --apply all
+expect "... Bob's merge guard was not added beside it" 1 "" -- test -e "$UG/ownmg/.claude/hooks/merge-guard.mjs"
+expect "... and no second merge-guard entry was wired" 0 "" -- node -e 'const s=require(process.argv[1]);const n=s.hooks.PreToolUse.flatMap(e=>e.hooks).filter(h=>/merge-guard/.test(h.command)).length;process.exit(n===1?0:1)' "$UG/ownmg/.claude/settings.json"
+# 'ownlc': the project has its own daily loop check (a TypeScript one).
+rm -f "$UG/ownlc/scripts/loop-check.mjs" "$UG/ownlc/.github/workflows/loop-check.yml"
+node -e 'const fs=require("fs"),f=process.argv[1]+"/.bob/installed.json",m=JSON.parse(fs.readFileSync(f,"utf8"));delete m.pieces["loop-check-script"];delete m.pieces["loop-check-workflow"];fs.writeFileSync(f,JSON.stringify(m,null,2))' "$UG/ownlc"
+echo "// this project's own loop check" > "$UG/ownlc/scripts/loop-check.ts"
+expect "own loop check: reported as the project's own version" 0 "Project has its own version \(scripts/loop-check.ts\)" -- ub ownlc
+expect "own loop check: --apply all does not install Bob's" 0 "" -- bash -c "ub_() { (cd '$UG/ownlc' && GIT_CONFIG_GLOBAL='$UG/gitconfig' node '$OB/scripts/bob-upgrade.mjs' --today 2026-01-02 --apply all >/dev/null); }; ub_ && test ! -e '$UG/ownlc/scripts/loop-check.mjs'"
+# 'gg': the green gate is not switched on and still has Bob's placeholder test command.
+node -e '
+  const fs=require("fs"),d=process.argv[1],s=JSON.parse(fs.readFileSync(d+"/.claude/settings.json","utf8"));
+  delete s.hooks.Stop; fs.writeFileSync(d+"/.claude/settings.json",JSON.stringify(s,null,2));
+  const f=d+"/.bob/installed.json",m=JSON.parse(fs.readFileSync(f,"utf8"));delete m.pieces["green-gate-settings"];fs.writeFileSync(f,JSON.stringify(m,null,2));' "$UG/gg"
+expect "green gate with the placeholder: 'needs your test command first'" 0 "needs your test command first" -- ub gg
+expect "... says how to set it" 0 "find the line that starts TEST_CMD=" -- ub gg
+expect "... --apply all does not switch it on" 0 "Not applied:" -- ub gg --apply all
+expect "... (no Stop entry was added)" 0 "" -- node -e 'const s=require(process.argv[1]);process.exit(s.hooks.Stop?1:0)' "$UG/gg/.claude/settings.json"
+expect "... naming it is refused too" 0 "not switched on — needs your test command first" -- ub gg --apply green-gate-settings
+sed -i.bak 's|^TEST_CMD=.*|TEST_CMD="true"|' "$UG/gg/.claude/hooks/green-gate.sh"
+expect "with a real test command it can be added (trial mode first)" 0 "\[green-gate-settings\]: added in trial mode" -- ub gg --apply green-gate-settings
+cp "$UG/gg/.claude/hooks/green-gate.sh.bak" "$UG/gg/.claude/hooks/green-gate.sh"
+expect "--enforce refuses while the placeholder is back" 0 "refused — needs your test command first" -- ub gg --enforce green-gate-settings
+expect "... and it stayed in trial mode" 0 "" -- grep -q 'warn-only.mjs.* green-gate.sh' "$UG/gg/.claude/settings.json"
+sed -i.bak 's|^TEST_CMD=.*|TEST_CMD="true"|' "$UG/gg/.claude/hooks/green-gate.sh"
+expect "--enforce works once the test command is set" 0 "switched on: it now stops" -- ub gg --enforce green-gate-settings
+# a damaged required-checks list: offered, never restored by --apply all, restored when named (backed up first).
+echo "{ not json" > "$UG/gg/.claude/required-checks.json"
+expect "a damaged required-checks list is reported" 0 "Damaged — the merge guard cannot read it" -- ub gg
+expect "... with the way to restore it" 0 "--apply required-checks" -- ub gg
+expect "... --apply all leaves it alone" 0 "" -- bash -c "(cd '$UG/gg' && GIT_CONFIG_GLOBAL='$UG/gitconfig' node '$OB/scripts/bob-upgrade.mjs' --today 2026-01-02 --apply all >/dev/null) && grep -q 'not json' '$UG/gg/.claude/required-checks.json'"
+expect "... naming it restores Bob's starting list" 0 "restored Bob's starting list" -- ub gg --apply required-checks
+expect "... which the merge guard can read" 0 "" -- node -e 'const s=require(process.argv[1]);process.exit(Array.isArray(s.required)?0:1)' "$UG/gg/.claude/required-checks.json"
+expect "... and the damaged copy was backed up" 0 "not json" -- cat "$UG/gg/.bob/backups/2026-01-02/.claude/required-checks.json"
+# 'ptr': CLAUDE.md only imports AGENTS.md — the Bob pointer goes into AGENTS.md.
+printf '@AGENTS.md\n' > "$UG/ptr/CLAUDE.md"; printf '# ptr\n\nProject facts only.\n' > "$UG/ptr/AGENTS.md"
+expect "pointer: goes into AGENTS.md when CLAUDE.md is only '@AGENTS.md'" 0 "section to AGENTS.md" -- ub ptr --apply bob-pointer
+expect "... CLAUDE.md is untouched" 0 "" -- bash -c "[ \"\$(cat '$UG/ptr/CLAUDE.md')\" = '@AGENTS.md' ]"
+# cosmetic: one "Present" heading; no repeated "already up to date" lines on --apply all.
+expect "report: the two 'Present' groups print as one" 0 "" -- bash -c "[ \"\$(cd '$UG/fresh' && GIT_CONFIG_GLOBAL='$UG/gitconfig' node '$OB/scripts/bob-upgrade.mjs' --today 2026-01-02 | grep -c '^Present (')\" = 1 ]"
+expect "--apply all on an up-to-date project: no 'already up to date' lines" 0 "" -- bash -c "! (cd '$UG/fresh' && GIT_CONFIG_GLOBAL='$UG/gitconfig' node '$OB/scripts/bob-upgrade.mjs' --today 2026-01-02 --apply all) | grep -q 'already up to date'"
+
+# ── 14. commit-sweep.sh (D-020): blocking mode judges what is being committed ─
+echo "commit-sweep.sh"
+CS="$HERE/commit-sweep.sh"; CW="$TMP/cs"; newrepo "$CW"
+mkdir -p "$CW/docs" "$CW/.bob"
+printf '# Build Manifest\n\nStatus as of: 2026-10-27\n' > "$CW/docs/build-manifest.md"
+printf '# Decisions\n\n| D-001 | 2026-10-27 | start |\n' > "$CW/docs/decision-log.md"
+printf '# Project\n- Plan: `docs/build-manifest.md`\n' > "$CW/AGENTS.md"
+echo '{"commit_sweep": "block"}' > "$CW/.bob/installed.json"
+git -C "$CW" add -A && git -C "$CW" commit -qm start
+csrun() { (cd "$CW" && bash "$CS"); }
+expect "outside a Bob project: nothing" 0 "^$" -- bash -c "cd '$TMP' && bash '$CS'"
+expect "clean documents: passes" 0 "" -- csrun
+echo "- Half-done: docs/half-done.md" >> "$CW/AGENTS.md"
+expect "a broken edit NOT staged (another session's): warns, does not block" 0 "passes on what you are committing" -- csrun
+git -C "$CW" add AGENTS.md
+expect "the same edit staged: blocks" 1 "failed on what you are committing" -- csrun
+git -C "$CW" reset -q AGENTS.md
+echo '{"commit_sweep": "warn"}' > "$CW/.bob/installed.json"; git -C "$CW" add -A
+expect "warn-only project: prints the problems, never blocks" 0 "set to warn only" -- csrun
 
 echo
 echo "selftest-gate-scripts: $PASS passed, $FAIL failed"

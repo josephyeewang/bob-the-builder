@@ -531,19 +531,23 @@ fi
 # into the global hook, guarded so it no-ops in every non-Bob repo.
 # D-019: it BLOCKS only where .bob/installed.json says "commit_sweep": "block" (bob-init writes that
 # for a new project; /bob UPGRADE switches an existing project once its documents pass); anywhere
-# else it prints the problems and lets the commit through.
+# else it prints the problems and lets the commit through. D-020: the logic lives in ONE script,
+# scripts/commit-sweep.sh (blocking mode judges the STAGED files, so another session's unstaged edits
+# can't stop a commit); this block only finds it, and says so loudly when Bob is missing.
 BOB_HOOK_GUARD='# Bob coherence sweep (Rule 23/24) — no-ops outside a Bob project'
 GLOBAL_HOOKS="$(git config --get core.hooksPath || true)"
 COHERENCE_BLOCK="$(cat <<EOF
 
 $BOB_HOOK_GUARD
-__BOB_SWEEP="$BOB_ROOT/scripts/coherence-check.sh"
-if [ -f docs/build-manifest.md ] && [ -x "\$__BOB_SWEEP" ]; then
-  if ! "\$__BOB_SWEEP" docs; then
-    if [ -f .bob/installed.json ] && grep -Eq '"commit_sweep"[[:space:]]*:[[:space:]]*"block"' .bob/installed.json; then
-      echo "✗ Bob coherence sweep failed — fix, or bypass once: git commit --no-verify"; exit 1
-    fi
-    echo "⚠ Bob coherence sweep found problems (warn-only in this project until /bob UPGRADE switches it to blocking)."
+__BOB_CS="$BOB_ROOT/scripts/commit-sweep.sh"
+[ -x "\$__BOB_CS" ] || __BOB_CS="\$HOME/.claude/skills/bob/../scripts/commit-sweep.sh"
+if [ -f docs/build-manifest.md ]; then
+  if [ -x "\$__BOB_CS" ]; then
+    "\$__BOB_CS" || exit 1
+  elif [ -f .bob/installed.json ] && grep -Eq '"commit_sweep"[[:space:]]*:[[:space:]]*"block"' .bob/installed.json; then
+    echo "⚠⚠ Bob's document check did NOT run: Bob was not found on this computer (looked for ~/.claude/skills/bob)."
+    echo "   This project is set to stop commits with document problems, so this commit went through UNCHECKED."
+    echo "   Fix: install Bob, or re-link it in the Terminal app: ln -s <your Bob folder>/skill ~/.claude/skills/bob"
   fi
 fi
 EOF

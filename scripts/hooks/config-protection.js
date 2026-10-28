@@ -204,6 +204,21 @@ function run(inputOrRaw, options = {}) {
       return { exitCode: 0 };
     }
 
+    // BOB ADDITION (D-020): the merge guard's list is not a linter config, so "fix the source code" is the wrong
+    // advice for it. Say what the file is, whose edit it is, and how the owner resets a missing or damaged one.
+    if (basename.toLowerCase() === 'required-checks.json') {
+      return {
+        exitCode: 2,
+        stderr:
+          `BLOCKED: ${basename} is the list of checks a pull request must pass before it may merge, and ` +
+          'changing it is the owner\'s decision, not Claude\'s (an emptier list lets more through). ' +
+          'Ask the owner. To add or remove a check, the owner edits the file by hand. If the file is damaged, ' +
+          'the owner can reset it in the Terminal app, from the project folder: ' +
+          'cp ~/.claude/skills/bob/../templates/required-checks.json .claude/required-checks.json ' +
+          '(Bob\'s "no CI yet" stage: merges go ahead, each with a notice), or run /bob UPGRADE, which offers the same reset.'
+      };
+    }
+
     return {
       exitCode: 2,
       stderr:

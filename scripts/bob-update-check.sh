@@ -87,15 +87,15 @@ if [[ "$ahead" -gt 0 ]]; then
   emit "status=diverged ahead=$ahead behind=$behind"
 fi
 
-# Clean and behind → an update is safe to fast-forward. Parse friendly version
-# strings from CLAUDE.md (the single source of truth for Bob's version) — the
-# one they HAVE (local) and the one available (upstream).
+# Clean and behind → an update is safe to fast-forward. Parse friendly version strings from
+# build-protocol-core.md — the single source of truth for Bob's version, the same line bob-upgrade.mjs reads
+# ("Core Reference for Build Protocol vN.N"). The one they HAVE (local) and the one available (upstream).
+# (Until D-020 this read CLAUDE.md, which became a one-line "@AGENTS.md" pointer, so it always showed "?".)
 extract_version() {
-  # First vN.N(.N) token appearing after the "## Current Version" header.
-  awk '/## Current Version/{f=1; next} f && match($0, /v[0-9]+\.[0-9]+(\.[0-9]+)?/){print substr($0, RSTART, RLENGTH); exit}'
+  grep -oE 'Core Reference for Build Protocol v[0-9]+(\.[0-9]+)+' | head -1 | grep -oE 'v[0-9.]+$'
 }
-current_v=$(extract_version < "$bob_root/CLAUDE.md" 2>/dev/null)
-latest_v=$(git -C "$bob_root" show "@{u}:CLAUDE.md" 2>/dev/null | extract_version)
+current_v=$(extract_version < "$bob_root/build-protocol-core.md" 2>/dev/null)
+latest_v=$(git -C "$bob_root" show "@{u}:build-protocol-core.md" 2>/dev/null | extract_version)
 [[ -n "$current_v" ]] || current_v="?"
 [[ -n "$latest_v" ]] || latest_v="?"
 

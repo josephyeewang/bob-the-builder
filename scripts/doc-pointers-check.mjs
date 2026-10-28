@@ -17,13 +17,18 @@
 // as-of date; and a check fails when that date trails the newest decision by more than N days.
 //
 // CHECK 1 — pointers (always on). In each always-read file (default: AGENTS.md and CLAUDE.md at the root):
-//   (a) every path it names must exist. A path with a "/" must resolve from the root (or from the file's own folder)
-//       — a miss FAILS. A bare file name in backticks (`decision-log.md`) that exists nowhere in the repo is a WARNING
+//   (a) every path it names must exist. A path with a "/" must resolve from the root (or from the file's own folder),
+//       or be the END of exactly one real path in the repo (`send-email/index.ts` → supabase/functions/send-email/index.ts — a
+//       short form is normal in prose). No match anywhere FAILS; two or more matches is a WARNING (ambiguous, not
+//       broken). node_modules and .git are never searched (D-020). A bare file name in backticks (`decision-log.md`) that exists nowhere in the repo is a WARNING
 //       only: a bare name often means a file in another tool's install (Bob's own `build-protocol-core.md`). Skipped: URLs, ~ and
 //       absolute paths, globs and placeholders (<x>, {x}, *), and any path listed in `.bob-optional-pointers` at the
 //       root (one per line — for files that legitimately may never exist, e.g. an AI-only spec in a non-AI product).
-//   (b) every "§N of path" (or "§N … `path`") names a section that exists: a markdown heading that starts with N
-//       ("## 3. …", "## §3 …"), or in .html an element with id="sN" / id="section-N" / class="snum" text "N —".
+//   (b) every "§N of path" (or "§N … `path`"): the FILE must exist (found the same way as in (a)) — a missing file
+//       FAILS. A missing SECTION is a WARNING only (D-020): section numbering varies by author ("§4" may be a
+//       numbered list item or a rule, not a heading), and a hard fail there was mostly false alarms. A section counts
+//       as found when a markdown heading starts with N ("## 3. …", "## §3 …"), or in .html an element with id="sN" /
+//       id="section-N" / class="snum" text "N —".
 // CHECK 2 — status as-of (when --status is given). The status page must carry an as-of date:
 //   markdown `Status as of: YYYY-MM-DD` (bold and HTML-comment forms accepted) or html
 //   `<time id="status-as-of" datetime="YYYY-MM-DD">`. It fails when that date is more than --max-lag days (default 7)
@@ -35,7 +40,7 @@
 //   node doc-pointers-check.mjs [--root DIR] [--files AGENTS.md,CLAUDE.md]
 //        [--status docs/build-manifest.md --log docs/decision-log.md [--also docs/PROJECT-STATE.md] [--max-lag 7]
 //         [--require-asof]] [--today YYYY-MM-DD]
-// Exit: 0 = clean (warnings may print) · 1 = a broken pointer, a missing section, or a stale status · 2 = bad usage.
+// Exit: 0 = clean (warnings may print) · 1 = a broken pointer, a cited file that is missing, or a stale status · 2 = bad usage.
 // Self-test: scripts/selftest-gate-scripts.sh runs it against each defect it exists for and against clean cases.
 
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
@@ -65,21 +70,34 @@ function parseArgs(argv) {
 
 const read = (p) => { try { return readFileSync(p, "utf8"); } catch { return null; } };
 
-/** Every file name in the repo (skips .git and node_modules), for resolving a bare `name.md`. */
-function allBasenames(root) {
-  const names = new Set();
-  const walk = (dir, depth) => {
+/** Every file in the repo as a root-relative path (skips .git and node_modules), for bare names and short paths. */
+function allFiles(root) {
+  const files = [];
+  const walk = (dir, rel, depth) => {
     if (depth > 8) return;
     let entries = [];
     try { entries = readdirSync(dir, { withFileTypes: true }); } catch { return; }
     for (const e of entries) {
       if (e.name === ".git" || e.name === "node_modules") continue;
-      if (e.isDirectory()) walk(join(dir, e.name), depth + 1);
-      else names.add(e.name);
+      const r = rel ? `${rel}/${e.name}` : e.name;
+      if (e.isDirectory()) walk(join(dir, e.name), r, depth + 1);
+      else files.push(r);
     }
   };
-  walk(root, 0);
-  return names;
+  walk(root, "", 0);
+  return files;
+}
+
+/**
+ * Where a path a document names really is: { found: true } when it resolves from the root or the document's folder,
+ * else the repo files whose path ENDS with it (`send-email/index.ts` matches supabase/functions/send-email/index.ts).
+ */
+function locate(root, srcDir, p, filesOf) {
+  if (existsSync(resolve(root, p)) || existsSync(resolve(srcDir, p))) return { found: true, matches: [] };
+  if (p.startsWith("../")) return { found: false, matches: [] };
+  const tail = p.replace(/^\.\//, "");
+  const matches = filesOf().filter((f) => f === tail || f.endsWith(`/${tail}`));
+  return { found: matches.length === 1, matches };
 }
 
 const EXT = "md|html|json|mjs|cjs|js|ts|tsx|sh|py|yml|yaml|tsv|csv|toml|sql";
@@ -114,6 +132,8 @@ function checkPointers(root, files) {
   const notes = [];
   const optionalFile = read(join(root, ".bob-optional-pointers")) ?? "";
   const optional = new Set(optionalFile.split("\n").map((l) => l.trim()).filter((l) => l && !l.startsWith("#")));
+  let repoFiles = null;
+  const filesOf = () => (repoFiles ??= allFiles(root));
   let names = null;
   let checked = 0;
   for (const f of files) {
@@ -124,18 +144,26 @@ function checkPointers(root, files) {
       if (optional.has(p)) continue;
       checked++;
       if (p.includes("/")) {
-        if (!existsSync(resolve(root, p)) && !existsSync(resolve(dirname(src), p))) problems.push(`${f} points at ${p}, which does not exist`);
+        const at = locate(root, dirname(src), p, filesOf);
+        if (at.found) continue;
+        if (at.matches.length > 1) notes.push(`${f} points at ${p}, which matches ${at.matches.length} files (${at.matches.slice(0, 3).join(", ")}${at.matches.length > 3 ? ", …" : ""}) — write the longer path so a reader knows which`);
+        else problems.push(`${f} points at ${p}, which does not exist`);
       } else {
-        names ??= allBasenames(root);
+        names ??= new Set(filesOf().map((r) => basename(r)));
         if (!names.has(p)) notes.push(`${f} names \`${p}\`, and no file of that name exists in this repo (fine if it lives elsewhere, e.g. in Bob's install)`);
       }
     }
     for (const { num, file } of sectionRefsIn(text)) {
       if (optional.has(file)) continue;
       checked++;
-      const target = read(resolve(root, file)) ?? read(resolve(dirname(src), file));
+      let target = read(resolve(root, file)) ?? read(resolve(dirname(src), file));
+      if (target == null) {
+        const at = file.includes("/") ? locate(root, dirname(src), file, filesOf) : { found: false, matches: filesOf().filter((r) => basename(r) === file) };
+        if (at.matches.length === 1) target = read(resolve(root, at.matches[0]));
+        else if (at.matches.length > 1) { notes.push(`${f} cites §${num} of ${file}, which matches ${at.matches.length} files — write the longer path so a reader knows which`); continue; }
+      }
       if (target == null) { problems.push(`${f} cites §${num} of ${file}, and ${file} does not exist`); continue; }
-      if (!hasSection(target, file, num)) problems.push(`${f} cites §${num} of ${file}, and ${file} has no section ${num}`);
+      if (!hasSection(target, file, num)) notes.push(`${f} cites §${num} of ${file}, and no heading there starts with ${num} — check the number still points at the right part`);
     }
   }
   return { problems, notes, checked };
