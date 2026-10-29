@@ -357,6 +357,13 @@ printf '# Decision Log\n\n| ID | Title |\n|---|---|\n| D-001 | a |\n| D-002 | b 
 expect "coherence-check.sh: a summary table AND a heading per entry -> pass" 0 "no duplicate IDs" -- bash "$HERE/coherence-check.sh" "$HL"
 printf '# Decision Log\n\n| D-001 | a |\n| D-001 | b |\n' > "$HL/decision-log.md"
 expect "coherence-check.sh: a duplicate table row -> FAIL" 1 "DUPLICATE IDs: D-001" -- bash "$HERE/coherence-check.sh" "$HL"
+printf '# Decision Log\n\n### D-001: a\n' > "$HL/decision-log.md"
+printf '# Audit steps\n' > "$HL/audit.md"
+expect "coherence-check.sh: an audit-named doc with no banner -> warning" 0 "audit.md looks dated/secondary" -- bash "$HERE/coherence-check.sh" "$HL"
+printf '# Audit steps\n<!-- living doc -->\n' > "$HL/audit.md"
+expect "coherence-check.sh: the living-doc marker silences that warning" 0 "" -- \
+  bash -c "! bash '$HERE/coherence-check.sh' '$HL' | grep -q 'audit.md looks dated'"
+rm "$HL/audit.md"
 expect "coherence-check.sh: Bob's own doc set is clean" 0 "no mechanical drift" -- bash "$HERE/coherence-check.sh" "$HERE/.."
 
 # ── 10. audit-ledger-check.mjs (D-018) ───────────────────────────────────────

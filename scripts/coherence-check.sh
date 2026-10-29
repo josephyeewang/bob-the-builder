@@ -160,12 +160,14 @@ for d in "${DOCS[@]}"; do
   base=$(basename "$d")
   case "$base" in
     *[Aa]udit*|*[Ss]ession*|*goldmine*|*-20[0-9][0-9]-*)
+      # A living doc whose name merely matches (e.g. modes/audit.md, the AUDIT steps) opts out with this marker.
+      grep -q '<!-- living doc -->' "$d" && continue
       if ! grep -qiE 'snapshot|point-in-time|not a living doc|📸' "$d"; then
         echo "  ⚠ $base looks dated/secondary but has no snapshot banner"
       fi ;;
   esac
 done
-echo "  (⚠ = consider a '📸 snapshot — not a living doc' banner; not a hard fail)"
+echo "  (⚠ = consider a '📸 snapshot — not a living doc' banner, or '<!-- living doc -->' if it is one; not a hard fail)"
 
 # ── Class 7: code / SSOT drift (Rule 24, v2.30) — the .md-only sweep's blind spot ──
 # Docs aren't the only source of truth: machine-readable contracts (contracts/*.ts,
