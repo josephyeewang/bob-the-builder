@@ -108,38 +108,7 @@ If you discover mid-build that the project is more complex than initially assess
 
 ### Rules for Claude Code
 
-*Numbering matches `build-protocol-core.md`, which holds Rules 16 onward and is the one home for rule numbers (renumbered 2026-10-29, D-027: this list used to number the step-format note as Rule 4, so every later rule here was one off from core).*
-
-**Execution rules:**
-1. **Follow steps in order.** Do not skip, merge, or reorder steps.
-2. **Stop at every human gate (marked `→ HG`).** Present your work, wait for explicit approval. Do not proceed without it.
-3. **Track current step.** Always know which step you're on. When resuming a session, read the Build Manifest to identify current position.
-- **Step numbering format:** Steps use `Na/Nb/Nc` (e.g., `8a`, `8b`, `8c`) so the human can remember and reference their position. Always prefix your work with the current step ID.
-4. **Reconciliation is non-optional.** Every build phase has a reconcile step. If there's nothing to reconcile, explicitly state "No divergences found." Never silently skip it.
-5. **Specs are living documents.** They are written upfront and comprehensive, then updated during build when reality diverges from plan. Stale specs are worse than no specs.
-
-**Behavioral guardrails (Claude MUST follow these at all times):**
-6. **No silent refactoring.** Previously built modules MUST NOT be refactored unless strictly required for the current phase's functionality. If a refactor IS necessary: list ALL changes explicitly in a `### Refactored` section, explain WHY each refactor was required, and confirm no regression in previously passing tests. Unauthorized refactors (changes to modules not required by the current phase) are a failure condition.
-7. **No behavior drift.** Do NOT change the behavior of previously built systems unless the current phase REQUIRES it. If behavior changes are necessary, list ALL changes under a `### Behavior Changes` section, explain WHY each was required (cite the spec section), and confirm no regression in previously passing tests. Silent behavior change is a failure condition. Examples of drift that MUST be flagged: changing confidence thresholds in existing flows, altering message/confirmation formats, modifying state transition rules, changing how engines/schedulers process jobs, altering normalized input/output contracts.
-8. **Scope lock.** Only build what is explicitly listed in the phase scope. Do NOT add extra features, extend scope, or anticipate future phases. If something seems missing from the specs, list it — do NOT build it.
-9. **Drift prevention.** Do NOT invent behavior not defined in the Behavioral Core. Do NOT invent system design not defined in domain specs. All behavior must trace back to a specific spec section. If you cannot cite the section, the behavior does not exist and must not be implemented.
-10. **Idempotency.** Every build step must be safely re-runnable. Check existing state before writing. Update instead of recreate when a file already exists. Verify current state matches expectations before proceeding.
-11. **Complexity rule.** Prefer simple implementation, explicit logic, and clarity over abstraction. Three clear lines of code are better than one clever abstraction. Avoid premature optimization and over-generalization.
-12. **Flag divergences immediately.** If you discover something that contradicts a spec, STOP and flag it — don't silently pick one interpretation. Present the conflict, propose 2-3 resolution options, and wait for approval.
-13. **Two-correction rule.** If the human has corrected the same issue twice in a session, the context is likely polluted with failed approaches. Recommend: `/clear` and restart with a better-scoped prompt. A fresh session with a clear prompt almost always outperforms a long session with accumulated corrections.
-14. **Orchestrate, don't reinvent (v2.16).** Before building custom anything, check whether the field already has it. Full text: Rule 14 in `build-protocol-core.md`.
-15. **Preserve the edge — don't let guardrails neuter the capability (v2.26).** A product's own rigor, safety/compliance caution, honesty rules, and example-lists can silently suppress the *differentiating capability* they exist to protect. Four facets: **(a) Layer.** Keep constraints at the **communication / legal / safety layer, not the analysis / capability layer** — the engine pursues its goal to the hilt; only *how results are phrased and to whom* is constrained. **(b) Open vocabularies.** Enumerated content examples (signals, categories, methods, styles) are seeds, not closed enums — instruct the system to seek beyond them; *governance* lists (safety/refusal/limits) stay closed and binding. **(c) Notability ≠ validation.** Don't let statistical/quality rigor built for *patterns* bury an individual *novel/rare/notable* instance — separate "is it worth surfacing?" (often assessable on one instance) from "is it validated?" (needs volume). **(d) Usefulness-as-felt.** Rigor that yields correct-but-useless output fails the user; guarantee felt value, with honesty as the framing, not as a reason to deliver nothing. The bright line for any guardrail: does it stop the engine *DOING* the valuable thing (a neuter — fix it, relocate to the communication layer) or only *SAYING* it carelessly/to the wrong audience (legitimate — keep it)? Audit with **lens L35 (Capability Preservation)**. *(Origin: a data product NEW-mode build — the single most-recurring correction, surfaced ~5×; a human had to catch each.)*
-
-**Failure stop conditions (Claude MUST stop immediately if):**
-- Required behavior is NOT defined in the Behavioral Core (for AI products)
-- Required mechanics are NOT defined in the relevant domain spec
-- Two docs conflict with each other
-- A system behavior is ambiguous (no clear rule exists)
-- An assumption would be needed to proceed
-- A dependency from a previous phase is missing or broken
-- A referenced module/file does not exist
-
-When stopping: clearly state the gap, propose the exact spec patch needed (which file, which section, what to add), provide 2-3 resolution options if applicable, and wait for approval.
+**Bob's rules live in one file: [`rules.md`](rules.md)** (D-028), filed by when you need them, with the failure stop conditions in its group 1. `build-protocol-core.md` has a one-line index. Rule numbers are the same everywhere.
 
 ### Role Division
 

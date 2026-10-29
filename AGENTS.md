@@ -23,19 +23,15 @@ For daily use, load `build-protocol-core.md` (compact reference). Load `build-pr
 
 ```
 build-protocol.md          ← Full reference (all sections, templates, appendices)
-build-protocol-core.md     ← Shorter reference loaded into sessions (not small: ~440 lines)
+build-protocol-core.md     ← Loaded into every session: modes, steps, gates, and a one-line index of the rules
+rules.md                    ← Every numbered rule, filed by when it is needed
 templates/                  ← Extractable templates (phase report, behavioral core, etc.)
 README.md                   ← Public-facing project overview
 ```
 
 ## Key Rules
 
-- Follow steps in order. Stop at every human gate (`→ HG`).
-- Specs are living documents — update them during build, not just at the beginning.
-- Reconciliation after every phase is non-optional.
-- No silent refactoring. No behavior drift. No scope creep.
-- **Green ≠ Correct (Rule 25, v2.31 — cross-cutting).** CI passing, a health scan at "N/N", and "the job ran" verify *known-incident classes + syntactic success* — NOT semantic correctness, data completeness, or analytical soundness. Before trusting or reporting any data/analysis/pipeline result, run the forensics yourself and treat every plausible headline adversarially: census input null-rates (a ~0% field is a DEAD axis, not a "no signal"); confirm every collapse/dedup/group key captures all varying entities (spot-check the collapse ratio); distrust "no signal / anti-predictive" from selecting-on-realized-outcome (→ split-half); distrust "too sparse / untestable" (→ verify RAW volume — often an upstream collapse/backfill bug); residualize the dominant factor before declaring "one driver"; compute actual numbers before shipping anything outward-facing. Deepened in **L31** (dead-column / aggregation-blend / at-rest null census) and **L32** (empirical-validity forensics §4b). Origin: a data product build — nearly every user push uncovered a real defect all the green checks missed; the non-engineer shouldn't have to be the linchpin.
-- When compacting, always preserve: current mode, current step, and any pending decisions.
+Bob's rules live in `rules.md` (D-028), filed by when each is needed; `build-protocol-core.md` has a one-line index. This file does not repeat them. Rules 25 (Green ≠ Correct) and 33 (Bob dogfoods Bob) matter most when changing Bob itself.
 
 ## Success metrics (v2.11 — dogfooding Step 1a)
 

@@ -455,6 +455,18 @@ The companion `audit-log.md` records *deferred* items (Defer verdicts that may s
 - **Consequences:** A template or a rule changes in one file. The core's version line is unchanged, so `bob-update-check.sh` and `bob-upgrade.mjs` read it as before. Rules 16–33 still live only in the core and the core still restates parts of the full protocol; one rules file filed by moment of need is the next pass.
 - **Revisit trigger:** a check finds the same text block in two Bob files again.
 
+
+---
+
+### D-028: Bob's rules live in one file, filed by when they are needed; the core keeps an index
+
+- **Date:** 2026-10-29
+- **Status:** Accepted
+- **Context:** Rules 1–15 were written out twice (`build-protocol.md` and the core, in different words); Rules 16–33 lived only in the core; `skill/SKILL.md` and `AGENTS.md` each carried their own "key rules" summary. The rules were filed in the order they were added, and they took ~56 KB, 57% of the core that every session loads. Rule 33 already tells projects to "file each rule under the moment it is needed"; Bob did not do it for itself.
+- **Decision:** A new `rules.md` holds every numbered rule word for word, in eight groups by moment of need (every session · shaping the product · crossing into build · each build phase · before calling it done · auditing · when a problem recurs or the field reports one · changing Bob). Rules 1–13 and 15 use the fuller wording from `build-protocol.md`. Numbers are unchanged. The core's rules section becomes a one-line index (number, title or the core's own short line, enforcement tag, group) plus the failure stop conditions, and says which group to read at which stage. The other copies become pointers. The user left the choice to Claude; Claude picked the index over loading every rule in every session.
+- **Alternatives considered:** Load `rules.md` in full with the core every session — one home, but no saving and every session still reads rules that don't apply to its step. Keep the rules in the core and only delete the copies — smallest change, but the core stays mostly rules and filed by date.
+- **Consequences:** A session reads ~50 KB less up front. The risk is a session skipping a group's full text at its stage; index rows 1–13 still state what those rules demand (rows 14–33 give titles only), and the two most-skipped gates (Step 6.5, Rule 22; done = fresh-eyes clean, Rule 30) are also in the steps themselves. Downstream projects keep pointing at `build-protocol-core.md`, which now points on to `rules.md` through the same `~/.claude/skills/bob/../` path. Rule 3 and Rule 23(c) still name the build manifest; the Blueprint work (owned elsewhere) edits them in `rules.md`.
+- **Revisit trigger:** an audit or retro finds a session broke a rule whose group it never read.
 ---
 
 ## Anti-pattern reminder
