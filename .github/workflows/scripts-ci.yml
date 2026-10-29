@@ -35,6 +35,28 @@ jobs:
       - name: Check fixture citations and re-count the scoreboard
         run: bash scripts/failure-mode-check.sh
 
+  bob-self-check:
+    name: Bob's own docs pass Bob's checks
+    runs-on: ubuntu-latest
+    # Rule 33 — the coherence sweep on Bob itself. Until 2026-10-28 it could not read Bob's
+    # heading-style decision log and reported "no drift" over three duplicate decision IDs.
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure git identity (the self-tests make commits in temp repos)
+        run: |
+          git config --global user.name "Bob CI"
+          git config --global user.email "ci@example.com"
+      - name: Coherence sweep over the Bob repo
+        run: bash scripts/coherence-check.sh .
+      - name: Regression tests for Bob's checkers
+        run: bash scripts/selftest-gate-scripts.sh
+      - name: The lens count in audit-lenses/README.md matches the lens files
+        run: |
+          files=$(ls audit-lenses/L[0-9][0-9]-*.md | grep -vc stack-checklists)
+          stated=$(grep -oE '^## The [0-9]+ bands and [0-9]+ lenses' audit-lenses/README.md | grep -oE '[0-9]+ lenses' | grep -oE '[0-9]+')
+          echo "lens files: $files · README says: $stated"
+          test "$files" = "$stated" || { echo "audit-lenses/README.md states $stated lenses but there are $files lens files"; exit 1; }
+
   bob-init-smoke:
     name: bob-init smoke test
     runs-on: ubuntu-latest

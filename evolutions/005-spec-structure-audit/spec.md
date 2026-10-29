@@ -1,7 +1,7 @@
 # Evolution 005 — Rule 28: the SPEC-DOCUMENT silent-failures
 
 **Version:** v2.36 · **Date:** 2026-08-21
-**Origin:** the Multycast product-scoping session (Joe Wang)
+**Origin:** a strategy-and-spec project's product-scoping session (Joe Wang)
 
 ## The problem
 

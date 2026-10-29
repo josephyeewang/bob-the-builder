@@ -30,7 +30,7 @@ Each lens produces its own markdown + JSON report. Without aggregation, the user
 8. Critical findings → fix list (mandatory before launch / next milestone)
 9. Major findings → triage list (user decides fix / defer per item)
 10. Minor + Cosmetic → backlog (logged in audit-log.md; revisit triggers documented)
-11. **Strategic / non-code findings → separate bucket (v2.19).** Findings from the strategic lenses (L24 Competitive, L25 Pricing, L27 Persona, L28 Wedge) are product/positioning decisions, not code fixes. Route them to a separate "Strategic" bucket; they do NOT rank in the Critical/Major *code-fix* queues or the top-10 action queue, so a strategic opinion can't rank-pollute the must-fix-before-launch list. (Exception: if a strategic lens surfaces a genuine code/security/data finding, that one goes in the normal queue.) Origin: an EMBT retro flagged that L24/L27/L28 produced near-zero in-run code closures yet competed against real Criticals in the ranking.
+11. **Strategic / non-code findings → separate bucket (v2.19).** Findings from the strategic lenses (L24 Competitive, L25 Pricing, L27 Persona, L28 Wedge) are product/positioning decisions, not code fixes. Route them to a separate "Strategic" bucket; they do NOT rank in the Critical/Major *code-fix* queues or the top-10 action queue, so a strategic opinion can't rank-pollute the must-fix-before-launch list. (Exception: if a strategic lens surfaces a genuine code/security/data finding, that one goes in the normal queue.) Origin: a consumer AI app retro flagged that L24/L27/L28 produced near-zero in-run code closures yet competed against real Criticals in the ranking.
 ```
 
 ### Band ≠ bucket — routing the v2.21 lenses (L31 / L32 / L33)
@@ -88,7 +88,7 @@ JSON: `audit-artifacts/audit-summary-{YYYY-MM-DD}.json`
 | Finding | Lenses | Implication |
 |---|---|---|
 
-**Named cross-lens meta-patterns (v2.19).** When ≥2 lenses independently note instances of the same *latent* pattern (not the same finding), name the pattern explicitly rather than leaving N scattered findings — the named class is more actionable than its instances. Canonical example surfaced by the EMBT retro: **"state-change blindness"** — the product is *stateful at the data layer but stateless at the UX layer* (it remembers your data but doesn't recognize or greet the returning user). L07 (cognitive path), L09 (peaks), and L29 (activation) each tend to catch one instance; aggregation should promote the pattern itself. Watch for this and similar latent classes (e.g., "UI that lies" — copy claiming capabilities the build doesn't have).
+**Named cross-lens meta-patterns (v2.19).** When ≥2 lenses independently note instances of the same *latent* pattern (not the same finding), name the pattern explicitly rather than leaving N scattered findings — the named class is more actionable than its instances. Canonical example surfaced by the consumer AI app retro: **"state-change blindness"** — the product is *stateful at the data layer but stateless at the UX layer* (it remembers your data but doesn't recognize or greet the returning user). L07 (cognitive path), L09 (peaks), and L29 (activation) each tend to catch one instance; aggregation should promote the pattern itself. Watch for this and similar latent classes (e.g., "UI that lies" — copy claiming capabilities the build doesn't have).
 
 ## Findings by lens (drill-down)
 - **L01 Hygiene & Liveness:** X findings (link to L01-{date}.md)

@@ -1,6 +1,6 @@
 ---
 name: design-gallery
-description: "The design-gallery machinery: explore a product's look-and-feel as a rated gallery of mockups, converge through rounds to a LOCKED design, then transfer it into the real product EXACTLY (no re-creation-from-description drift). Four lanes: HTML mockups for product UI/dashboards where exactness must survive the transfer to code; AI-image comps (via the design-mockups skill) for art direction, heroes, moodboards, brand; code-drawn SVG concept boards for logos/marks; a landing-page scroll-story lane (via the scroll-craft plugin) for marketing pages where scroll is the storytelling device. Includes the agent/chat-surface primitives checklist. Use when the user wants to explore visual directions for a dashboard/app/website, run a design gallery, audition palettes/parameters live, lock a design, or push a locked design through to the real product. Proven on InsiderIntent (55 mockups → lock → wired product) and Explain My Blood Test. Bob Step 5.5."
+description: "The design-gallery machinery: explore a product's look-and-feel as a rated gallery of mockups, converge through rounds to a LOCKED design, then transfer it into the real product EXACTLY (no re-creation-from-description drift). Four lanes: HTML mockups for product UI/dashboards where exactness must survive the transfer to code; AI-image comps (via the design-mockups skill) for art direction, heroes, moodboards, brand; code-drawn SVG concept boards for logos/marks; a landing-page scroll-story lane (via the scroll-craft plugin) for marketing pages where scroll is the storytelling device. Includes the agent/chat-surface primitives checklist. Use when the user wants to explore visual directions for a dashboard/app/website, run a design gallery, audition palettes/parameters live, lock a design, or push a locked design through to the real product. Proven on a data product build (55 mockups → lock → wired product) and a consumer AI app. Bob Step 5.5."
 user-invocable: true
 ---
 
@@ -27,11 +27,11 @@ and must never redefine tokens. Agent/chat surfaces: walk `references/agent-ui-p
 before mocking so every state (thinking, streaming, awaiting approval, failed) is on the board.
 
 Two more proven uses of the HTML lane beyond look-and-feel: **dataviz concept labs** (N ways to
-visualize one analytical idea, interactive, on real-shaped data — InsiderIntent ran 8-concept and
+visualize one analytical idea, interactive, on real-shaped data — a data product build ran 8-concept and
 2-lab explorations this way) and **strategy/positioning galleries** (N written directions side by
 side for the user to pick — same board, prose instead of pixels).
 
-**Sequencing (the expensive lesson):** run the gallery BEFORE building any real UI. InsiderIntent's
+**Sequencing (the expensive lesson):** run the gallery BEFORE building any real UI. The data product's
 first UI was built with no gallery — a full editorial-serif pass the user rejected on sight,
 redirected mid-review, and paid for twice. One gallery round costs less than one thrown-away
 build round. That is why this sits at Bob Step 5.5, ahead of the first line of product code.
@@ -93,7 +93,7 @@ counterfeit spec that mis-briefs every future session).
 - **Tokenize from mockup one.** Every color through `:root` variables — playgrounds, palette
   swaps, and the eventual token transfer all fall out of this one discipline.
 - **Separate brand from data color early** (data products). The accent-vs-signal split was the
-  single highest-leverage design decision of the InsiderIntent arc.
+  single highest-leverage design decision of the data product arc.
 - **Numbers are the shared vocabulary.** Files, board cards, and feedback all speak "#45";
   curation sections cite prior numbers ("like #117"); image-lane refs resolve from them.
 - **Keep everything on the board.** Curate by reordering/starring, never by deleting.

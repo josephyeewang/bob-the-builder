@@ -27,7 +27,7 @@ source_frameworks:
 
 L02 (Spec Fidelity) asks "does the capability exist?" L03 (Critical Capability Quality) asks "is this *one* capability A-grade?" — both look *vertically*, one capability at a time. Neither follows a single **input or data field horizontally across the whole system** to confirm it is handled at every step and reaches every place that needs it.
 
-This is the failure mode Joe named on EMBT: a medical document upload extracts **age and gender**, but those fields are used at intake and *never threaded through* the scoring / diagnosis / recommendation engines that should weight them. Every individual capability passes its own audit. The *flow* is broken in the seams between them — exactly where no per-capability lens looks.
+This is the failure mode Joe named on a consumer health-report app: a medical document upload extracts **age and gender**, but those fields are used at intake and *never threaded through* the scoring / diagnosis / recommendation engines that should weight them. Every individual capability passes its own audit. The *flow* is broken in the seams between them — exactly where no per-capability lens looks.
 
 The pattern generalizes far past health:
 - **Signup / account:** is the account actually created, the password hashed, the email **deduplicated** (or can one email register twice?), the verification state persisted, the session issued, the "deleted" path real?
@@ -91,7 +91,7 @@ This is taint tracking applied to product correctness rather than security: foll
    Each unhandled terminal state is a finding.
 
 6. **Hunt the canonical flow defects:**
-   - **Propagation gap** — field captured & stored but never reaches a consumer the spec implies (the EMBT age/gender case).
+   - **Propagation gap** — field captured & stored but never reaches a consumer the spec implies (the consumer AI app age/gender case).
    - **Dead-column / silent-drop-at-rest** — field the spec expects, present in source, but ~0% populated in the real table (step 4b) → every downstream consumer silently gets nothing.
    - **Aggregation-key blend** — a downstream collapse / dedup / group-by whose key OMITS an entity that varies **silently merges distinct records into one** (with an arbitrary survivor for the dropped field). Spot-check the collapse ratio per segment: a group collapsing ~10:1 where you expected ~1:1 is a blend bug. (Illustration: a `(customer, day, channel)` collapse omitting one varying entity column (`product_id`) blends each customer's many distinct orders into one arbitrary-survivor row — a heavy many-to-one collapse — and corrupts every downstream stat.)
    - **Dedup/uniqueness gap** — no uniqueness constraint where one is required (duplicate accounts, double-applied credits).
@@ -195,7 +195,7 @@ This is taint tracking applied to product correctness rather than security: foll
 
 ## Severity rubric (calibrated to this lens)
 
-- **Critical** — Money/credit atomicity race or double-spend. A core-value field dropped before reaching the engine that defines product quality (EMBT age/gender → diagnosis). Account dedup absent on a public signup (duplicate-identity / takeover surface). "Delete" that doesn't delete regulated data.
+- **Critical** — Money/credit atomicity race or double-spend. A core-value field dropped before reaching the engine that defines product quality (consumer AI app age/gender → result). Account dedup absent on a public signup (duplicate-identity / takeover surface). "Delete" that doesn't delete regulated data.
 - **Major** — Propagation gap on a non-core but spec-implied consumer. Missing validation at a downstream trust boundary. Unhandled refund/expiry on a money flow. Orphaned rows/files on cancel.
 - **Minor** — Propagation gap on a low-impact consumer. Terminal state handled but without user visibility. Validation present but weaker than spec.
 - **Cosmetic** — Redundant re-validation; trace documentation gaps.

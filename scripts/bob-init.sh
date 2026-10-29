@@ -8,7 +8,8 @@
 #   - Creates the standard folder structure (docs/, contracts/, evals/, scripts/, tests/)
 #   - Rule 28's spec audit is invoked via the skill symlink from any project:
 #     python3 ~/.claude/skills/bob/../scripts/spec-audit.py docs/product-spec.md
-#   - Writes a starter project CLAUDE.md that references Bob (so future sessions auto-load it)
+#   - Writes a starter project AGENTS.md that references Bob (so future sessions auto-load it),
+#     and a CLAUDE.md that only imports it ('@AGENTS.md')
 #   - Writes .claude/settings.json with the default hook set (format + green-gate +
 #     three guards: block-no-verify, config-protection and merge-guard, copied into .claude/hooks/)
 #   - Writes .claude/required-checks.json (the merge guard's one list — empty = "no CI yet" stage)
@@ -47,7 +48,7 @@ fi
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
 BOB_ROOT="$( cd "$SCRIPT_DIR/.." && pwd )"
 
-# Resolve a portable form of Bob's path for the project's CLAUDE.md.
+# Resolve a portable form of Bob's path for the project's AGENTS.md.
 # Prefer ~ form if BOB_ROOT is inside $HOME.
 if [[ "$BOB_ROOT" == "$HOME"/* ]]; then
   BOB_PATH_DISPLAY="~${BOB_ROOT#"$HOME"}"
@@ -74,18 +75,23 @@ echo "📂 Creating folder structure..."
 mkdir -p docs/domains docs/reference contracts evals scripts tests src .github/workflows
 
 # ──────────────────────────────────────────────────────────────────────
-# 2. Project CLAUDE.md (the critical file — references Bob so sessions auto-resume)
+# 2. Project AGENTS.md (the critical file — references Bob so sessions auto-resume).
+# AGENTS.md holds the instructions because every agent reads it (Claude Code through the
+# CLAUDE.md import below; Codex, Cursor and others directly). CLAUDE.md is a one-line import.
+# (2026-10-28, D-025 — before this, CLAUDE.md held them and AGENTS.md pointed to it.)
 # ──────────────────────────────────────────────────────────────────────
-if [[ ! -f CLAUDE.md ]]; then
-  echo "📝 Writing CLAUDE.md (with Bob protocol reference)..."
-  cat > CLAUDE.md <<EOF
+if [[ -f CLAUDE.md && ! -f AGENTS.md ]]; then
+  echo "✓ CLAUDE.md already exists (and no AGENTS.md) — leaving the project's instruction file alone."
+elif [[ ! -f AGENTS.md ]]; then
+  echo "📝 Writing AGENTS.md (with Bob protocol reference)..."
+  cat > AGENTS.md <<EOF
 # $PROJECT_NAME
 
 ## Build protocol
 
 This project uses the **Bob the Builder** protocol.
 
-- **Full reference:** \`$BOB_PATH_DISPLAY/build-protocol.md\` (~2,600 lines — templates, appendices, architecture patterns)
+- **Full reference:** \`$BOB_PATH_DISPLAY/build-protocol.md\` (the long version — templates, appendices, architecture patterns)
 - **Compact reference:** \`$BOB_PATH_DISPLAY/build-protocol-core.md\` (load this at session start)
 - **Current state:** \`docs/build-manifest.md\`
 - **Session start:** read this file → read \`build-protocol-core.md\` → read \`docs/build-manifest.md\` → resume.
@@ -139,34 +145,20 @@ When compacting, always preserve: current build phase, list of modified files, p
 - Read \`docs/domains/<subsystem>.md\` before working on a specific subsystem.
 EOF
 else
-  echo "✓ CLAUDE.md already exists — leaving it alone."
+  echo "✓ AGENTS.md already exists — leaving it alone."
 fi
 
 # ──────────────────────────────────────────────────────────────────────
-# 2b. AGENTS.md — cross-tool agent instruction file (v2.13)
-# Thin pointer to CLAUDE.md so projects built with Bob remain portable
-# to non-Claude agents (OpenAI Codex CLI, Cursor, Aider, etc.) that
-# read AGENTS.md as their convention.
+# 2b. CLAUDE.md — a one-line import of AGENTS.md, so Claude Code loads the same file
 # ──────────────────────────────────────────────────────────────────────
-if [[ ! -f AGENTS.md ]]; then
-  echo "📝 Writing AGENTS.md (cross-tool agent pointer)..."
-  cat > AGENTS.md <<EOF
-# $PROJECT_NAME — Agent Instructions
-
-This project uses the **Bob the Builder** protocol. The canonical agent instructions live in **\`CLAUDE.md\`** — read that first.
-
-\`AGENTS.md\` exists so non-Claude agents (OpenAI Codex CLI, Cursor, Aider, and others that read the AGENTS.md convention) can find their entry point. The content is in \`CLAUDE.md\`; this file is a pointer, not a parallel source of truth.
-
-If you are an agent running on this repo:
-
-1. Read \`CLAUDE.md\` for project context, architecture rules, never-do rules, and pointers to specs.
-2. Read \`docs/build-manifest.md\` for current phase and progress.
-3. Follow the Bob the Builder protocol at \`$BOB_PATH_DISPLAY/build-protocol.md\` (compact reference: \`build-protocol-core.md\`).
-
-Updates to project conventions go in \`CLAUDE.md\`. Don't edit this file to add new rules — they'll get lost.
-EOF
+if [[ ! -f CLAUDE.md ]]; then
+  echo "📝 Writing CLAUDE.md (imports AGENTS.md)..."
+  printf '@AGENTS.md\n' > CLAUDE.md
+  if ! grep -qiE 'build-protocol(-core)?\.md|Bob the Builder' AGENTS.md; then
+    echo "   ⚠ AGENTS.md was already here and does not mention Bob — run /bob UPGRADE to add the Bob pointer."
+  fi
 else
-  echo "✓ AGENTS.md already exists — leaving it alone."
+  echo "✓ CLAUDE.md already exists — leaving it alone."
 fi
 
 # ──────────────────────────────────────────────────────────────────────
@@ -177,7 +169,7 @@ if [[ ! -f .claude/settings.json ]]; then
   echo "🪝 Writing .claude/settings.json (default hooks)..."
   cat > .claude/settings.json <<EOF
 {
-  "_comment": "Default hooks + permissions per Bob the Builder Step 6b + Rule 27 (Supervised Autonomy). Hooks are 100% enforced; CLAUDE.md rules are ~80% advisory. Customize per project — see ${BOB_PATH_DISPLAY}/build-protocol.md §6b + the 'Supervised Autonomy' section.",
+  "_comment": "Default hooks + permissions per Bob the Builder Step 6b + Rule 27 (Supervised Autonomy). Hooks are 100% enforced; AGENTS.md rules are ~80% advisory. Customize per project — see ${BOB_PATH_DISPLAY}/build-protocol.md §6b + the 'Supervised Autonomy' section.",
   "_autonomy_note": "SUPERVISED AUTONOMY (Rule 27) — run BUILD PHASES milestone-gated. ⚠️ TRAP: defaultMode:'auto' is IGNORED in this project settings file — turn auto ON via Shift+Tab (⏵⏵ auto mode on) OR in ~/.claude/settings.json, per-session, on a fresh branch. Turn it OFF (Shift+Tab to Manual) when you return to foundations/spec. The REAL destructive-class guardrail in auto mode is Claude Code's built-in CLASSIFIER (blocks force-push, prod deploy/migrate, mass-delete, secret-exfil, git reset --hard, IaC destroy). The 'deny' rules below are belt-and-suspenders only — they are PREFIX/substring matches, NOT semantic, so they do NOT catch every deletion (e.g. find -delete, > redirect, a python rmtree). 'ask' rules = milestone checkpoints. HARD RULE: never expose PROD credentials to an autonomous run (the real Replit-DB-wipe lesson — separate prod/dev). Auto pauses after 3-in-a-row / 20-total classifier blocks (and ABORTS in headless -p).",
   "permissions": {
     "defaultMode": "default",
@@ -581,6 +573,6 @@ echo ""
 echo "Next steps:"
 echo "  1. cd \"$PROJECT_DIR\""
 echo "  2. Open Claude Code in this folder"
-echo "  3. Tell Claude:  \"We're using Bob the Builder. Read CLAUDE.md and start MODE: NEW. The product I want to build: [your idea]\""
+echo "  3. Tell Claude:  \"We're using Bob the Builder. Read AGENTS.md and start MODE: NEW. The product I want to build: [your idea]\""
 echo ""
-echo "Claude will resume the protocol from here. The CLAUDE.md references Bob, so subsequent sessions auto-load it."
+echo "Claude will resume the protocol from here. AGENTS.md references Bob (CLAUDE.md imports it), so subsequent sessions auto-load it."

@@ -26,7 +26,7 @@ source_frameworks:
 
 ## Why this lens exists / what other lenses miss
 
-L01 Hygiene catches dead code. L02 Spec Fidelity catches behavioral claims that don't match code. Neither answers *"does the AI actually work?"* Engineering-hygiene tools (CodeRabbit, Greptile, lint, type-check) treat an AI call as a function call — they verify it executes, not that it produces correct output. An AI product can pass every engineering audit, ship to production, and silently hallucinate 30% of the time. The DLL audit caught a related class — language detection uses regex script-ratio instead of spec'd NLP confidence — but didn't grade hallucination rate, calibration error, or eval coverage. This lens does.
+L01 Hygiene catches dead code. L02 Spec Fidelity catches behavioral claims that don't match code. Neither answers *"does the AI actually work?"* Engineering-hygiene tools (CodeRabbit, Greptile, lint, type-check) treat an AI call as a function call — they verify it executes, not that it produces correct output. An AI product can pass every engineering audit, ship to production, and silently hallucinate 30% of the time. The consumer-app audit caught a related class — language detection uses regex script-ratio instead of spec'd NLP confidence — but didn't grade hallucination rate, calibration error, or eval coverage. This lens does.
 
 The complementary failure mode: **confidence miscalibration.** A model that says "I'm 90% sure" but is actually right 60% of the time is dangerous — it makes users (and downstream code) trust outputs that shouldn't be trusted. Calibration is invisible without an Expected Calibration Error (ECE) check.
 
@@ -214,7 +214,7 @@ This lens orchestrates established eval frameworks (TruLens, RAGAS, Phoenix, Lan
 
 ## Anti-patterns / Bias instructions
 
-- **Do NOT score eval *absence* as Cosmetic.** If a user-visible AI call site has no evals, that's Critical. The DLL spec audit found wrong-mechanism implementations (regex instead of NLP) that would have been caught by eval; calling it Cosmetic understates the risk.
+- **Do NOT score eval *absence* as Cosmetic.** If a user-visible AI call site has no evals, that's Critical. The consumer-app spec audit found wrong-mechanism implementations (regex instead of NLP) that would have been caught by eval; calling it Cosmetic understates the risk.
 - **Do NOT fabricate eval results.** If you don't have access to run evals (no API key, no eval framework installed), say so explicitly as a stop condition. Do not estimate pass rates from "reading the prompt looks good."
 - **Do NOT recommend "build a custom eval framework."** D-003 — orchestrate, don't reinvent. Cite promptfoo / TruLens / RAGAS / Phoenix / LangSmith as the framework to adopt. Custom eval frameworks are almost always a bad call for non-research products.
 - **Do NOT conflate eval pass rate with accuracy.** A 90% pass rate on a 10-case eval is noisier than it sounds — confidence intervals on small samples are wide. Recommend N ≥ 30 per task type before reporting accuracy with confidence.

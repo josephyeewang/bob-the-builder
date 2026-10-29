@@ -1,6 +1,6 @@
 # The Failure-Mode Index
 
-**Why this file exists.** The lens library is indexed by *discipline* — 37 lenses in 8 bands
+**Why this file exists.** The lens library is indexed by *discipline* — the lenses in 8 bands
 (engineering / UX / AI / performance / reach / operational / strategic / growth). That answers
 "what should an engineering audit look at?" It cannot answer **"which failure modes has nobody
 here ever claimed?"** — so gaps stay invisible until a census finds them years later. One did,

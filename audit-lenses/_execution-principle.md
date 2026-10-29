@@ -6,7 +6,7 @@
 
 ## Why this matters
 
-The DLL audit (2026-05-23) found that memory decay engine "exists, exported, but `processMemoryDecay` never scheduled — will silently hit 500-record cap." That finding required *running* the code (or grep-ing the scheduler config), not just reading the function. Bob's v2.14 A7j Liveness Audit was the first lens to mandate execution over reading; v2.17.1 generalizes that principle to all lenses (34 as of v2.22).
+The consumer-app audit (2026-05-23) found that memory decay engine "exists, exported, but `processMemoryDecay` never scheduled — will silently hit 500-record cap." That finding required *running* the code (or grep-ing the scheduler config), not just reading the function. Bob's v2.14 A7j Liveness Audit was the first lens to mandate execution over reading; v2.17.1 generalizes that principle to all lenses (34 as of v2.22).
 
 The failure mode this principle prevents: *"I read the code and it looked correct."* If a check question is verifiable by execution and Claude relied only on code reading, the audit is incomplete.
 
@@ -99,7 +99,7 @@ A finding with "via Schemathesis run" is materially stronger than "via code read
 
 ## Execution adherence gate (v2.19)
 
-Having this catalog is not the same as honoring it. An EMBT Full Enchilada retro found ~8 lenses (L01, L02, L03, L14, L18, L21, L22, L24) **defaulted to Read even though their EXECUTE column says otherwise** — e.g., L18 asserted "95% English-hardcoded" without running the `lang=` grep that would ground it; L21 asserted "zero alert rules" without hitting the Sentry API. The catalog was right; adherence failed.
+Having this catalog is not the same as honoring it. A consumer AI app Full Enchilada retro found ~8 lenses (L01, L02, L03, L14, L18, L21, L22, L24) **defaulted to Read even though their EXECUTE column says otherwise** — e.g., L18 asserted "95% English-hardcoded" without running the `lang=` grep that would ground it; L21 asserted "zero alert rules" without hitting the Sentry API. The catalog was right; adherence failed.
 
 So every lens, before it finishes, runs an **adherence gate**:
 

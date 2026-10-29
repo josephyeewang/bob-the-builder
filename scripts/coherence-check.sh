@@ -44,19 +44,25 @@ echo "════════════════════════�
 # Decision IDs that LEAD a markdown table row: '| D-073 |'. References elsewhere
 # (e.g. "per D-062") are intentionally ignored so we count entries, not mentions.
 echo
-echo "── [1] Decision-log contiguity (row-leading | D-NNN | entries) ──"
+echo "── [1] Decision-log contiguity (| D-NNN | rows and ### D-NNN headings) ──"
 LOG_FILE="$(printf '%s\n' "${DOCS[@]}" | grep -i 'decision-log' | head -1)"
 HIGHEST_ID=""
 if [ -z "$LOG_FILE" ]; then
   echo "  (no *decision-log*.md found — skipped)"
 else
+  # An entry is either a table row '| D-073 |' or a heading '### D-073:' (Bob's own log uses
+  # headings; reading only rows made this check report "clean" on a log with 3 duplicate IDs).
+  # Duplicates are counted within each form separately: a log may list every entry in a summary
+  # table AND give each one a heading, and that is one entry, not two.
+  ROW_RE='^\| *D-[0-9]+ *\|'
+  HEAD_RE='^#+ +D-[0-9]+\b'
   IDS=()
-  while IFS= read -r id; do IDS+=("$id"); done < <(grep -oE '^\| *D-[0-9]+ *\|' "$LOG_FILE" \
+  while IFS= read -r id; do IDS+=("$id"); done < <(grep -hoE "$ROW_RE|$HEAD_RE" "$LOG_FILE" \
                       | grep -oE 'D-[0-9]+' | sort -u)
-  DUPES=$(grep -oE '^\| *D-[0-9]+ *\|' "$LOG_FILE" | grep -oE 'D-[0-9]+' \
-          | sort | uniq -d)
+  DUPES=$( { grep -oE "$ROW_RE" "$LOG_FILE" | grep -oE 'D-[0-9]+' | sort | uniq -d
+             grep -oE "$HEAD_RE" "$LOG_FILE" | grep -oE 'D-[0-9]+' | sort | uniq -d; } | sort -u)
   if [ "${#IDS[@]}" -eq 0 ]; then
-    echo "  (no row-leading | D-NNN | entries found — check the table format)"
+    echo "  (no | D-NNN | rows or ### D-NNN headings found — check the entry format)"
   else
     LO=$(printf '%s\n' "${IDS[@]}" | sed 's/D-//' | sort -n | head -1)
     HI=$(printf '%s\n' "${IDS[@]}" | sed 's/D-//' | sort -n | tail -1)

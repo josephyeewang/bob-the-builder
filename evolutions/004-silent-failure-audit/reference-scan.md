@@ -4,7 +4,7 @@
 
 ## The reference IS the field learning
 
-Source: the InsiderIntent build (a real NEW-mode build dogfooding Bob). The defect classes + their catching-checks are documented in the target project's own decision log and audit docs, and mirror established practice:
+Source: a data product build (a real NEW-mode build dogfooding Bob). The defect classes + their catching-checks are documented in the target project's own decision log and audit docs, and mirror established practice:
 
 - **Selection-on-outcome / regression-to-the-mean** → split-half & out-of-sample validation (standard in quantitative finance / ML model validation; already the spine of L32's SR 11-7 anchor — this adds the *specific* artifact + test).
 - **Peak-seeking vs mode-seeking** → residualization / partial-effect analysis (subgroup discovery, bump-hunting).

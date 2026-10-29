@@ -9,7 +9,7 @@ session_pattern: fresh session; reads no prior lens reports (this lens establish
 output_markdown: audit-artifacts/L02-spec-fidelity-{YYYY-MM-DD}.md
 output_json: audit-artifacts/L02-spec-fidelity-{YYYY-MM-DD}.json
 source_frameworks:
-  - DLL "Slice 1-6" audit lens (empirical anchor, 2026-05-23 — produced BUILT/PARTIAL/MISSING capability census across 110 capabilities)
+  - Consumer-app "Slice 1-6" audit lens (empirical anchor, 2026-05-23 — produced BUILT/PARTIAL/MISSING capability census across 110 capabilities)
   - Qodo PR-Agent `/review` Ticket Analysis (https://github.com/qodo-ai/pr-agent/blob/main/docs/docs/tools/review.md)
   - ISO 25010:2023 Functional Suitability sub-characteristic (completeness, correctness, appropriateness)
   - Bob's existing Capability Traceability Matrix (CTM) pattern (templates/capability-traceability-matrix.md)
@@ -23,7 +23,7 @@ source_frameworks:
 
 ## Why this lens exists / what other lenses miss
 
-Engineering-hygiene audits (L01 Hygiene & Liveness, CodeRabbit, Greptile, lint, type-check) answer *"does the code work?"* — they don't answer *"is it what we said we'd build?"* A capability can pass every engineering audit and still be missing from the product, hollow (exists but unwired), or quietly different from the spec. The DLL audit found 13 PARTIAL + 2 MISSING capabilities in the core loop alone, plus 4 unspecced silent behaviors (duplicate detection, memory decay, confidence adjustments, language detection using script-ratio instead of spec'd NLP confidence). None of these are bugs by engineering standards — they're spec-code divergences. This lens makes that divergence explicit.
+Engineering-hygiene audits (L01 Hygiene & Liveness, CodeRabbit, Greptile, lint, type-check) answer *"does the code work?"* — they don't answer *"is it what we said we'd build?"* A capability can pass every engineering audit and still be missing from the product, hollow (exists but unwired), or quietly different from the spec. The consumer-app audit found 13 PARTIAL + 2 MISSING capabilities in the core loop alone, plus 4 unspecced silent behaviors (duplicate detection, memory decay, confidence adjustments, language detection using script-ratio instead of spec'd NLP confidence). None of these are bugs by engineering standards — they're spec-code divergences. This lens makes that divergence explicit.
 
 The complementary failure mode: **spec drift in the other direction** — the spec says X, the build does Y, and the spec was never updated. Spec Fidelity flags both directions, not just "build missed spec."
 
@@ -50,7 +50,7 @@ The complementary failure mode: **spec drift in the other direction** — the sp
 
 ## Source frameworks
 
-- **DLL "Slice 1-6" audit lens** (Joe Wang, 2026-05-23) — empirical anchor. The methodology: read spec end-to-end, slice into 6 thematic groups of ~15-20 capabilities each, methodically check each one against code as BUILT / PARTIAL / MISSING with a one-line note. Produces a full census, not a sample.
+- **Consumer-app "Slice 1-6" audit lens** (Joe Wang, 2026-05-23) — empirical anchor. The methodology: read spec end-to-end, slice into 6 thematic groups of ~15-20 capabilities each, methodically check each one against code as BUILT / PARTIAL / MISSING with a one-line note. Produces a full census, not a sample.
 - **Qodo PR-Agent `/review` Ticket Analysis** — the only commercial AI review tool that checks PR-vs-ticket fidelity. https://github.com/qodo-ai/pr-agent/blob/main/docs/docs/tools/review.md
 - **ISO/IEC 25010:2023 Functional Suitability** — functional completeness, correctness, appropriateness. https://www.iso.org/standard/78176.html
 - **Bob's Capability Traceability Matrix** — the structural pattern this lens generalizes. `templates/capability-traceability-matrix.md`.
@@ -169,7 +169,7 @@ The complementary failure mode: **spec drift in the other direction** — the sp
 
 ## Severity rubric (calibrated to this lens)
 
-- **Critical** — Capability is MISSING and the spec explicitly promises it to users (e.g., DLL's `undo` was in the welcome SMS but not implemented — every user is told a feature exists that doesn't). Also: DRIFT in copy that creates legal exposure (privacy claims, compliance claims, refund promises, opt-out paths).
+- **Critical** — Capability is MISSING and the spec explicitly promises it to users (e.g., the consumer app's `undo` was in the welcome SMS but not implemented — every user is told a feature exists that doesn't). Also: DRIFT in copy that creates legal exposure (privacy claims, compliance claims, refund promises, opt-out paths).
 - **Major** — Capability is PARTIAL but reaches users (e.g., binary routing where spec says tri-band). Also: UNSPECCED behavior that affects user trust (e.g., silent auto-collapse without notification).
 - **Minor** — DRIFT in copy that's not user-promised behavior (e.g., spec quote slightly different from button label). Also: UNSPECCED intentional behavior that should be in the spec for completeness.
 - **Cosmetic** — Documentation-only inconsistency where neither user nor developer is affected (e.g., spec uses "task" and code uses "item" but they refer to the same thing and no user-visible string is wrong).

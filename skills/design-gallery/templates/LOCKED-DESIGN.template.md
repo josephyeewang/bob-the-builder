@@ -2,7 +2,7 @@
 
 > **THE MOCK FILES ARE CANONICAL — this doc is only a map to them.** Never build or restyle a
 > surface from this doc's text: that is exactly how transfer degrades into a ~70% re-creation
-> (it happened twice on InsiderIntent — a component library built from "font TBD, ~8-10px radius"
+> (it happened twice on a data product build — a component library built from "font TBD, ~8-10px radius"
 > prose while the mock file sat unread). Read the winning mock's literal CSS, match every value,
 > and finish with an adversarial diff of your output against the mock — see the skill's
 > `fidelity-protocol.md`.

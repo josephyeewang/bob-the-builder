@@ -26,7 +26,7 @@ source_frameworks:
 
 L26 (Marketing, Copy & Website) audits **marketing surfaces** — homepage, landing, pricing, blog — for clarity, SEO, conversion, contradictions. It explicitly **skips in-product output**. L18 (i18n & Language) audits **translation readiness** (hardcoded strings, plurals, RTL), not register or tone. L27 (Persona Simulation) can *notice* jargon adversarially but doesn't systematically audit every output surface.
 
-So the language users *actually read most* — the generated text the product produces in normal use — falls through the cracks. The EMBT case: a diagnosis written in clinical jargon for a deliberately non-technical audience. That's not a marketing-copy problem (L26 skips it) and not a translation problem (L18) — it's an **output register / audience-fit** problem, and no lens owns it.
+So the language users *actually read most* — the generated text the product produces in normal use — falls through the cracks. The consumer health-report app case: a diagnosis written in clinical jargon for a deliberately non-technical audience. That's not a marketing-copy problem (L26 skips it) and not a translation problem (L18) — it's an **output register / audience-fit** problem, and no lens owns it.
 
 There's a second half Joe named: **house presentation style.** Some products want a specific output structure — McKinsey-style answer-first with labeled takeaways and supporting detail after, or a strict "TL;DR → details" shape, or Diátaxis-typed docs. Whether generated output *conforms to the declared house structure* is a real, checkable quality bar that nothing currently checks.
 

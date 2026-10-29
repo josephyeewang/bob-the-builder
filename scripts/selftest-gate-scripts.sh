@@ -16,6 +16,8 @@
 # Usage:  bash scripts/selftest-gate-scripts.sh      (exit 0 = all pass)
 # Needs:  bash, git, node >= 18, python3.
 
+# The test fixtures below write literal backticks (Markdown code spans) on purpose.
+# shellcheck disable=SC2016
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/bob-selftest.XXXXXX")"
@@ -30,7 +32,10 @@ expect() {
   if [[ "$code" == "$want" ]] && { [[ -z "$pattern" ]] || grep -qE -- "$pattern" <<<"$out"; }; then
     echo "  PASS  $name"; PASS=$((PASS + 1))
   else
-    echo "  FAIL  $name (exit $code, wanted $want; pattern: ${pattern:-none})"; sed 's/^/        | /' <<<"$out"
+    echo "  FAIL  $name (exit $code, wanted $want; pattern: ${pattern:-none})"
+    # Prefixing every line of a multi-line string reads more clearly with sed.
+    # shellcheck disable=SC2001
+    sed 's/^/        | /' <<<"$out"
     FAIL=$((FAIL + 1))
   fi
 }
@@ -337,6 +342,16 @@ expect "no as-of date with --require-asof -> FAIL" 1 "carries no \"Status as of"
 expect "coherence-check.sh runs it on the root file (class 8)" 1 "\[8\] Root instruction file" -- \
   bash -c "printf -- '- Gone: docs/gone.md\n' >> '$D/AGENTS.md'; bash '$HERE/coherence-check.sh' '$D/docs'"
 expect "Bob's own root files pass" 0 "doc-pointers-check: OK" -- node "$DP" --root "$HERE/.."
+HL="$TMP/headlog"; mkdir -p "$HL"
+printf '# Decision Log\n\n### D-001: a\n\n### D-002: b\n\n### D-002: c\n' > "$HL/decision-log.md"
+expect "coherence-check.sh: a duplicate ### D-NNN heading -> FAIL" 1 "DUPLICATE IDs: D-002" -- bash "$HERE/coherence-check.sh" "$HL"
+printf '# Decision Log\n\n### D-001: a\n\n### D-002: b\n' > "$HL/decision-log.md"
+expect "coherence-check.sh: unique ### D-NNN headings -> pass" 0 "no duplicate IDs" -- bash "$HERE/coherence-check.sh" "$HL"
+printf '# Decision Log\n\n| ID | Title |\n|---|---|\n| D-001 | a |\n| D-002 | b |\n\n### D-001: a\n\n### D-002: b\n' > "$HL/decision-log.md"
+expect "coherence-check.sh: a summary table AND a heading per entry -> pass" 0 "no duplicate IDs" -- bash "$HERE/coherence-check.sh" "$HL"
+printf '# Decision Log\n\n| D-001 | a |\n| D-001 | b |\n' > "$HL/decision-log.md"
+expect "coherence-check.sh: a duplicate table row -> FAIL" 1 "DUPLICATE IDs: D-001" -- bash "$HERE/coherence-check.sh" "$HL"
+expect "coherence-check.sh: Bob's own doc set is clean" 0 "no mechanical drift" -- bash "$HERE/coherence-check.sh" "$HERE/.."
 
 # ── 10. audit-ledger-check.mjs (D-018) ───────────────────────────────────────
 echo "audit-ledger-check.mjs"
@@ -582,6 +597,20 @@ expect "the same edit staged: blocks" 1 "failed on what you are committing" -- c
 git -C "$CW" reset -q AGENTS.md
 echo '{"commit_sweep": "warn"}' > "$CW/.bob/installed.json"; git -C "$CW" add -A
 expect "warn-only project: prints the problems, never blocks" 0 "set to warn only" -- csrun
+
+# ── lens-retro.sh --check (2026-10-28) ───────────────────────────────────────
+echo "lens-retro.sh --check"
+LRD="$TMP/lr"; mkdir -p "$LRD"
+printf '{"artifact_type":"audit_retro","lens_scorecard":[]}\n' > "$LRD/good.json"
+printf '{"date":"2026-10-23","proposed_lens_changes":["x"]}\n' > "$LRD/other.json"
+if command -v jq >/dev/null 2>&1; then
+  expect "a retro in Bob's format -> OK" 0 "is in the retro format" -- bash "$HERE/lens-retro.sh" --check "$LRD/good.json"
+  expect "a retro with invented fields -> FAIL, names its fields" 1 "fields found: date, proposed_lens_changes" -- bash "$HERE/lens-retro.sh" --check "$LRD/other.json"
+  mkdir -p "$LRD/proj/audit-artifacts/2026-10-22"; cp "$LRD/other.json" "$LRD/proj/audit-artifacts/2026-10-22/audit-retro.json"
+  expect "a retro in a sub-folder, other format -> found and its proposals listed" 0 "Retros in another format \\(1\\)" -- bash "$HERE/lens-retro.sh" "$LRD/proj"
+else
+  echo "  SKIP  (jq not installed)"
+fi
 
 echo
 echo "selftest-gate-scripts: $PASS passed, $FAIL failed"

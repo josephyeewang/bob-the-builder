@@ -11,7 +11,7 @@ output_json: audit-artifacts/L36-ai-forward-native-{YYYY-MM-DD}.json
 source_frameworks:
   - Rule 19 (Build Protocol v2.27) — AI-forward by default
   - Anthropic/Claude capability surface (agents, tool-use, structured generation, long context, embeddings/RAG, computer-use, MCP) — verify current specifics via the claude-api skill
-  - Origin case — the InsiderIntent build (an excellent but pre-LLM-shaped spec until AI-native pieces were forced in)
+  - Origin case — a data product build (an excellent but pre-LLM-shaped spec until AI-native pieces were forced in)
 ---
 
 # L36 — AI-Forward / AI-Native

@@ -2,7 +2,7 @@
 
 This folder is where **audit retro JSONs** accumulate *locally* so `scripts/lens-retro.sh` can aggregate them across runs and projects. It is the Option B half of the v2.18 Audit Self-Learning Loop (see `audit-lenses/_lens-retro.md`).
 
-> ⚠️ **PRIVATE BY DEFAULT — never commit raw retros.** This is a **public** repo. A raw retro embeds project-specific detail: which routes/tables had vulnerabilities, finding descriptions, commit hashes, still-open issues. Committing one publishes a live product's security map. `*.json` here is gitignored for that reason — only `.gitkeep` and this README are tracked. (This rule exists because it was learned the hard way: an EMBT retro was briefly committed here on 2026-05-25 and had to be purged from history.)
+> ⚠️ **PRIVATE BY DEFAULT — never commit raw retros.** This is a **public** repo. A raw retro embeds project-specific detail: which routes/tables had vulnerabilities, finding descriptions, commit hashes, still-open issues. Committing one publishes a live product's security map. `*.json` here is gitignored for that reason — only `.gitkeep` and this README are tracked. (This rule exists because it was learned the hard way: a consumer AI app retro was briefly committed here on 2026-05-25 and had to be purged from history.)
 
 ## What goes here (locally)
 

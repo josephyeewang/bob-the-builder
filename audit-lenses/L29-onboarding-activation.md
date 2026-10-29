@@ -26,7 +26,7 @@ source_frameworks:
 
 L07 (Ease) covers whether users can navigate. L09 (Wow) covers emotional peaks. Neither asks "do they actually GET TO VALUE." Activation is the operator-distinctive metric: it predicts retention, monetization, and lifetime value. Lenny benchmarks: median activation 25% (all products), 30% (SaaS). Activated users retain ≥2× non-activated. If your activation milestone doesn't show the 2× lift, the milestone is wrong (not "we have low activation" — "we've defined the wrong moment").
 
-The DLL audit found activation problems: "engagement scoring front-loaded — reads as empty when user has 0 completions"; "first 5 messages try to convey completeness instead of simplicity"; "Try this onboarding steps speced but unwired creates silent disappointment."
+The consumer-app audit found activation problems: "engagement scoring front-loaded — reads as empty when user has 0 completions"; "first 5 messages try to convey completeness instead of simplicity"; "Try this onboarding steps speced but unwired creates silent disappointment."
 
 ## When this lens fires
 

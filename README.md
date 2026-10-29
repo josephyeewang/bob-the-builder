@@ -89,7 +89,7 @@ Bob ships a **34-audit library** — 34 ready-made audits, each attacking the pr
 
 Why it's different from a generic code-review tool:
 
-- **Bob picks the audits for you** — proposes 6–10 based on what kind of product you have. Confirm with one gate. Or pick "Full Enchilada" to run all 34 before a launch.
+- **Bob picks the audits for you** — proposes 6–10 based on what kind of product you have. Confirm with one gate. Or pick "Full Enchilada" to run every lens before a launch.
 - **Bob runs the code, not just reads it** — drives the app through real user flows, hits the APIs, simulates signup-to-cancel. Reading code can lie. Running it can't.
 - **Anti-convergence veto** — most audits push every product toward "best-practice average." Bob has a dedicated audit that pushes back: *"do not fix this — that friction is your wedge."* (Think Linear's keyboard-first onboarding, Superhuman's shortcuts.)
 - **Bob remembers** — each AUDIT, you can re-run the last set, broaden to new angles, or do the full 34.

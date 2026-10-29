@@ -27,7 +27,7 @@ source_frameworks:
 
 Engineering audits never check whether a Slack-link unfurl shows the right thumbnail. UX audits rarely walk the post-success share affordance. Growth audits often look at viral coefficient without checking whether the underlying mechanics (OG tags, attribution, share UX) actually function. This lens covers the surfaces that determine whether word-of-mouth, SEO, and viral mechanics can WORK — independent of whether they're being actively cultivated.
 
-The DLL audit didn't have a virality lens. EMBT (health-adjacent) probably doesn't either. Most products ship without ever sharing their own link to iMessage / Slack / LinkedIn / X to see what renders. That's L20's headline test.
+The consumer-app audit didn't have a virality lens. A consumer health-report app (health-adjacent) probably doesn't either. Most products ship without ever sharing their own link to iMessage / Slack / LinkedIn / X to see what renders. That's L20's headline test.
 
 ## When this lens fires
 

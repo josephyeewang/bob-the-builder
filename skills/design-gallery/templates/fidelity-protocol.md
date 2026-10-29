@@ -1,7 +1,7 @@
 # The Fidelity Transfer Protocol — mock → product, EXACTLY
 
 The whole point of a gallery lock is that the winning mock transfers to the real product
-verbatim. Twice on InsiderIntent it didn't: the transfer degraded into re-creation-from-prose
+verbatim. Twice on a data product build it didn't: the transfer degraded into re-creation-from-prose
 and shipped a ~70% approximation. The root-cause archaeology (receipts in that repo's
 decision log) found one mechanism behind every incident: **a prose intermediary — a spec doc,
 a summary, a stale code comment — stood in for the mock file at a hand-off.** This protocol
@@ -25,7 +25,7 @@ where no honest data series exists yet, OMIT the element and note it as a deferr
 never fake it.
 
 ### 3. Components built ≠ design done — enforce CONSUMPTION
-A faithful component library that no page imports is a shelved design (InsiderIntent's sat on
+A faithful component library that no page imports is a shelved design (the data product's sat on
 a small minority of pages for weeks while a "design complete" note stood in a tracking doc). A design
 phase closes only when the real surfaces consume the tokens/components — check it as a number
 (`grep -cl` the component dir across pages), not a feeling.
@@ -35,7 +35,7 @@ phase closes only when the real surfaces consume the tokens/components — check
   spacing against the mock's CSS. Assume you drifted; hunt for it.
 - **Verify the COMPUTED font, not the class name.** Font infrastructure substitutes silently:
   a `font-mono` class with no fontFamily mapping to the token file renders Menlo/Times and the
-  page looks "off" with every class technically present (struck twice on EMBT).
+  page looks "off" with every class technically present (struck twice on a consumer AI app).
   The value diff includes the rendered typeface + weight (screenshot zoom or computed style),
   and the framework font config must mirror the tokens file.
 - **Rendered diff:** screenshot the REAL page (real data) next to the mock and compare.
@@ -47,11 +47,11 @@ phase closes only when the real surfaces consume the tokens/components — check
   while the dev server shares its build dir (it poisons the running server), and kill dev
   servers by port (`lsof -ti :PORT | xargs kill`), or your screenshot hits a stale process.
 - The rendered diff catches a different defect class than the value diff (rule-2 violations
-  only show up rendered). Run BOTH. On InsiderIntent the pair caught 9 real drifts a green
+  only show up rendered). Run BOTH. On a data product build the pair caught 9 real drifts a green
   build sailed past.
 - **Review the PRODUCTION build, not the dev server.** Dev-mode hot-reload CSS is unreliable
   (observed: Turbopack + Tailwind v4 intermittently dropping utility classes between
-  recompiles, so the design "reverted" mid-review — observed on InsiderIntent). When a visual looks
+  recompiles, so the design "reverted" mid-review — observed on a data product build). When a visual looks
   wrong, `npm run build && npm run start` (or your stack's equivalent) is the source of truth
   before you debug anything.
 
@@ -71,21 +71,21 @@ phase closes only when the real surfaces consume the tokens/components — check
     done
     [ "$BAD" = "0" ] || { echo "The design is locked — tokens only (see LOCKED-DESIGN.md)."; exit 1; }
 ```
-  (On its first dry run at InsiderIntent it caught three components inside the already-"audited"
+  (On its first dry run on a data product build it caught three components inside the already-"audited"
   design-system library.) Dry-run locally and fix hits BEFORE adding the gate.
 - **Counterfeit SSOTs:** any comment or doc that *describes* the design becomes a rival source
   the moment it's stale — one build's global stylesheet header still described the
   pre-lock look weeks after the lock, mis-briefing every session that opened it. When you lock,
   grep for prior design self-descriptions (css headers, READMEs, old spec sections) and rewrite
   them to point at the mock. The same rot applies to MEMORY: a remembered brand hex decays fast
-  (EMBT shipped purple widgets from a stale memory note months after the accent moved to red) —
+  (a consumer AI app shipped purple widgets from a stale memory note months after the accent moved to red) —
   never restyle from a remembered value; re-read the tokens file or the mock.
 
 ### 6. The reskin contract — restyling an existing surface locks its information architecture
 When the new look is applied to a surface the user has already perfected, the lock covers ONLY
 visual atoms (color, border, font, radius, shadow, spacing). The content, columns, groupings,
 ordering, labels, grades, and interaction depth are a CONTRACT — "rebuilding the spirit of a
-section in a new layout counts as reinventing and gets rejected" (EMBT, repeatedly; the user's
+section in a new layout counts as reinventing and gets rejected" (a consumer AI app, repeatedly; the user's
 most emphatic design rule). Two tests:
 - **Same shapes in the same places?** Put old and new side by side. Same shapes → reskin.
   Different shapes → you are redesigning; stop and ask.
@@ -93,11 +93,11 @@ most emphatic design rule). Two tests:
   prettier presentational one deletes its accumulated behavior (expandable detail, receipts,
   edge-state handling — a swap the user rejected outright). Restyle the existing component's classes instead.
 Consult LOCKED-DESIGN's **Pinned decisions & deliberate exceptions** before "fixing" anything —
-a deviation from the mock may be an approved ruling (EMBT kept a page background the gallery
+a deviation from the mock may be an approved ruling (a consumer AI app kept a page background the gallery
 never showed), and un-fixing it re-litigates a closed decision.
 
 ### 7. Iteration hygiene — experiments must die cleanly
-Design experiments haunt production for months when they can't be fully reverted (EMBT: a
+Design experiments haunt production for months when they can't be fully reverted (a consumer AI app: a
 partial revert took 3 commits over 2 weeks; an un-retired experiment overlay was still mutating
 components a quarter later). Rules:
 - An experiment's styling lives in ONE revertible layer (a skin class / overlay / branch) —

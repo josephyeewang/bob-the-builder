@@ -11,7 +11,7 @@ output_json: audit-artifacts/L10-ux-edge-states-recovery-{YYYY-MM-DD}.json
 source_frameworks:
   - Edge-case audit methodology (Figr, Vibe Coder)
   - Nielsen H9 — Help users recognize/diagnose/recover from errors
-  - DLL audit 2026-05-23 — missing recovery paths pattern (no "wrong number?" fallback)
+  - Consumer-app audit 2026-05-23 — missing recovery paths pattern (no "wrong number?" fallback)
   - "Empty / Loading / Error / Offline / Partial / Slow / Permission-denied" state enumeration
 ---
 
@@ -25,7 +25,7 @@ source_frameworks:
 
 Engineering tests verify the happy path. Engineering audits often check error handling (L01, L04) at the technical level — does the code throw an exception, is the error caught. Neither asks *"when the system is in a degraded or unusual state, does the user know what's happening and what they can do?"*
 
-The DLL audit caught this pattern explicitly: "login has no 'wrong number?' fallback"; "phone-capture form has no 'SMS didn't arrive?' retry"; "did it work? anxiety has no portal link from confirmation." NN/g found 92% of AI-generated UIs ship without empty states. Edge states are the highest-leverage UX gap because they happen often (every user hits them) but no one designs for them.
+The consumer-app audit caught this pattern explicitly: "login has no 'wrong number?' fallback"; "phone-capture form has no 'SMS didn't arrive?' retry"; "did it work? anxiety has no portal link from confirmation." NN/g found 92% of AI-generated UIs ship without empty states. Edge states are the highest-leverage UX gap because they happen often (every user hits them) but no one designs for them.
 
 This lens enumerates the states and verifies each one has a recovery path.
 
@@ -55,7 +55,7 @@ This lens enumerates the states and verifies each one has a recovery path.
 
 - **Edge case audit methodology** — categorized state enumeration. https://figr.design/blog/10-edge-cases-every-pm-misses-and-why-they-cost-50-100x-more-after-launch + https://blog.vibecoder.me/empty-states-loading-states-error-states
 - **Nielsen Heuristic 9** — error recovery via plain-language messages + recovery action.
-- **DLL audit (Joe Wang, 2026-05-23)** — recovery-path-absence pattern.
+- **Consumer-app audit (Joe Wang, 2026-05-23)** — recovery-path-absence pattern.
 
 ## Audit method
 
@@ -80,7 +80,7 @@ This lens enumerates the states and verifies each one has a recovery path.
    - **Cost/rate limit** — what does the user see if their quota hit?
    - **Timeout** — what if the model takes 60+ seconds?
 
-4. **"Did it work?" anxiety audit (DLL pattern).** For every action where the user's mental model is uncertain about success — actions with side effects (charge, send, delete, share) — is there explicit confirmation? Where in the UX flow is the confirmation surfaced (immediately vs after a beat)?
+4. **"Did it work?" anxiety audit (consumer-app pattern).** For every action where the user's mental model is uncertain about success — actions with side effects (charge, send, delete, share) — is there explicit confirmation? Where in the UX flow is the confirmation surfaced (immediately vs after a beat)?
 
 5. **Recovery path mapping.** From every error state, can the user get to a known-good state in ≤2 steps? Or are they stuck?
 

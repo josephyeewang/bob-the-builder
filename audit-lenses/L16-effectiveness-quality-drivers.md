@@ -26,7 +26,7 @@ source_frameworks:
 
 L15 measures cost and speed (inputs). L16 measures effectiveness (outputs). Most products instrument enough analytics to tell you what's working *at all* but not enough to tell you what's working *disproportionately*. The Pareto pattern almost always exists — 20% of features drive 80% of value; 20% of users drive 80% of revenue; 20% of incidents cause 80% of pain — but it's invisible without targeted measurement.
 
-L16 also extends Bob's existing A7g (Effectiveness Signals, v2.10) by adding the *leakage* lens: where is the product creating value the user can't capture? DLL examples: Activity ledger exists but is invisible (value created, not seen); engagement scoring front-loaded (reads empty when user has 0 completions — value miscalibrated to context).
+L16 also extends Bob's existing A7g (Effectiveness Signals, v2.10) by adding the *leakage* lens: where is the product creating value the user can't capture? Consumer-app examples: Activity ledger exists but is invisible (value created, not seen); engagement scoring front-loaded (reads empty when user has 0 completions — value miscalibrated to context).
 
 ## When this lens fires
 
@@ -75,7 +75,7 @@ L16 also extends Bob's existing A7g (Effectiveness Signals, v2.10) by adding the
    - Is it currently amplified (marketed, surfaced, onboarded to), or hidden?
 
 5. **Leakage audit — value created but lost.** Walk the product looking for places where:
-   - Work happens but user can't see it (DLL: silent auto-recovery, invisible memory decay protection)
+   - Work happens but user can't see it (consumer app: silent auto-recovery, invisible memory decay protection)
    - Outcomes happen but aren't celebrated (first-task completion → cold "Got it.")
    - Insights exist in data but never surface to users (analytics dashboards for the team, no equivalent for the user)
    - Cross-feature connections that would compound value but aren't wired
@@ -201,7 +201,7 @@ L16 also extends Bob's existing A7g (Effectiveness Signals, v2.10) by adding the
 ## Severity rubric
 
 - **Critical** — Success metrics not declared OR not measured (A7g stop condition applies). North Star Metric undefined and team disagrees on what success means.
-- **Major** — Top winner feature getting under-invested. Major leakage point identified (e.g., DLL Activity ledger invisible). Top-20-user-segment is *not* target persona (positioning mismatch).
+- **Major** — Top winner feature getting under-invested. Major leakage point identified (e.g., a consumer app's Activity ledger invisible). Top-20-user-segment is *not* target persona (positioning mismatch).
 - **Minor** — Bottom-50% features without sunset plan. Support ticket pattern unaddressed.
 - **Cosmetic** — Measurement / dashboard improvements.
 

@@ -4,7 +4,7 @@
 
 ## Why audit memory matters
 
-The realistic UX: Joe types "let's audit DLL" or invokes AUDIT mode. He does NOT remember which lenses ran last time. He does NOT want to choose from a 36-lens menu cold. He wants Bob to remind him + offer sensible choices.
+The realistic UX: Joe types "let's audit the consumer app" or invokes AUDIT mode. He does NOT remember which lenses ran last time. He does NOT want to choose from a full lens menu cold. He wants Bob to remind him + offer sensible choices.
 
 This document defines:
 1. The audit-history file format
@@ -136,7 +136,7 @@ Skipped lenses (most relevant):
    {recommended if drift check}
 2. **Complementary Curated** — {Panel name} or Bob picks {N} lenses you haven't run
    {recommended if recent same-panel}
-3. **Full Enchilada** — all 36 lenses, the rocketship-launch scrub
+3. **Full Enchilada** — every lens, the rocketship-launch scrub
    {recommended if milestone}
 4. **Custom** — tell me which lenses (by number or band)
 
@@ -167,7 +167,7 @@ Based on project profile ({profile keywords}), I'd recommend **{Panel X — N le
 **Three options:**
 
 1. **Curated** — {N} lenses targeted to where you are
-2. **Full Enchilada** — all 36 lenses, the comprehensive scrub
+2. **Full Enchilada** — every lens, the comprehensive scrub
 3. **Custom** — specify lenses
 
 **Bob's recommendation: Curated**
@@ -177,10 +177,10 @@ Which?
 
 (No "Same" / "Complementary" options — they require prior runs.)
 
-## Sample first-audit on DLL (illustration)
+## Sample first-audit on the consumer app (illustration)
 
 ```markdown
-**First audit on DLL.**
+**First audit on the consumer app.**
 
 Project profile: launched, public, AI, personal data, SMS + web, paid plan, real users.
 
@@ -188,25 +188,25 @@ Recommended panel: **Panel A — Pre-launch consumer product (9 lenses)**
 
 Included:
 - **L01 Hygiene & Liveness** — every product needs this; engineering foundation
-- **L02 Spec Fidelity** — DLL has detailed product spec; verify built vs planned
+- **L02 Spec Fidelity** — the consumer app has detailed product spec; verify built vs planned
 - **L03 Critical Capability Quality** — for the 30+ critical capabilities, grade A/B/C
 - **L04 Security & Threat Surface** — STRIDE + OWASP because user data
 - **L05 Data Protection & Privacy** — PII + retention because personal data + GDPR-EU users plausible
 - **L07 UX Ease & Cognitive Path** — non-engineer users, SMS interface needs care
-- **L08 UX Friction & Trust** — silent system actions risk (DLL spec mentions auto-recovery, decay)
+- **L08 UX Friction & Trust** — silent system actions risk (the consumer app spec mentions auto-recovery, decay)
 - **L10 UX Edge States & Recovery** — SMS interface = high edge-state risk (delivery failures, etc.)
 - **L13 AI Interaction (HAX) & Safety** — LLM in user flow, prompt-injection surface
 
 Skipped this round (most relevant):
 - **L09 Wow & Emotional Peaks** — defer to post-activation audit; foundation first
 - **L11 AI Accuracy & Calibration** — defer; assumes L02 + L13 catch enough this run
-- **L17 Device & Form Factor** — DLL is SMS-first, less mobile-web surface
+- **L17 Device & Form Factor** — the consumer app is SMS-first, less mobile-web surface
 - **L19 Accessibility** — defer; will run before any consumer scale
 - **L24-L30** — defer; strategic/growth lenses after foundation pass
 
 **Three options:**
 1. **Curated** — 9 lenses above
-2. **Full Enchilada** — all 35
+2. **Full Enchilada** — every lens
 3. **Custom**
 
 **Recommendation: Curated (first audit, focus on foundation + UX + AI safety)**

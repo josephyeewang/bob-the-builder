@@ -31,7 +31,7 @@ L04 Security covers info-disclosure as a STRIDE category. It does NOT cover the 
 
 The product can be fully secure (no leaks, no breaches) and fully non-compliant (over-collecting, retaining indefinitely, no erasure path, no records of processing, no DPA with vendors). The fines under GDPR can reach 4% of global revenue; under CCPA, $7,500 per intentional violation per consumer. This lens names the gaps before they become incidents.
 
-The DLL audit didn't catch a privacy lens at all — privacy was not in scope. EMBT (health-adjacent) flagged it heavier. L05 makes privacy explicit and consistent.
+The consumer-app audit didn't catch a privacy lens at all — privacy was not in scope. A consumer health-report app (health-adjacent) flagged it heavier. L05 makes privacy explicit and consistent.
 
 ## When this lens fires
 
@@ -102,7 +102,7 @@ The DLL audit didn't catch a privacy lens at all — privacy was not in scope. E
    - Is identity-verification required and proportionate?
    - For erasure: does it cascade across replicas, backups, third-party processors, log archives, AI training data, analytics?
 
-5. **Retention audit.** For each PII-containing table/log/cache, is there a documented retention period? Is there an automated deletion job? When did it last run successfully? (DLL had memory decay engine but never scheduled — same pattern.)
+5. **Retention audit.** For each PII-containing table/log/cache, is there a documented retention period? Is there an automated deletion job? When did it last run successfully? (the consumer app had memory decay engine but never scheduled — same pattern.)
 
 6. **Vendor / processor audit.** For every third party receiving personal data: DPA in place? Sub-processor list available? Data location? Breach notification SLA? Is the relationship documented in `decision-log.md` or equivalent?
 

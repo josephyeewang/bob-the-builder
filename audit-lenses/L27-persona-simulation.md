@@ -26,7 +26,7 @@ source_frameworks:
 
 The audit is being run by the builder. The builder sees the product as a builder. Real users see it from completely different vantage points. Per the PersonaTeaming paper (arXiv 2509.03728), persona-conditioned reasoning surfaces 144% more findings than persona-free review — identity changes what gets discovered. Engineering audits, UX audits, even marketing audits all share the builder's vantage. L27 deliberately escapes it.
 
-The DLL audit didn't have an explicit persona simulation. EMBT (health-adjacent product) would benefit enormously from "what would a doctor say?" The pattern is: pick personas the team is NOT, simulate them, capture what they'd surface.
+The consumer-app audit didn't have an explicit persona simulation. A consumer health-report app (health-adjacent product) would benefit enormously from "what would a doctor say?" The pattern is: pick personas the team is NOT, simulate them, capture what they'd surface.
 
 ## When this lens fires
 

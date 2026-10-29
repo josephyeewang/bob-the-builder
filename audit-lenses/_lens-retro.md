@@ -176,7 +176,7 @@ Retros are worthless scattered. The ritual turns a pile of retros into a ranked 
 
 ### Collection point: `lens-retros/` (LOCAL — gitignored)
 
-> ⚠️ **Raw retros never go in the public repo.** A retro embeds project-specific security detail (vulnerable routes/tables, finding descriptions, commit hashes, still-open issues). `lens-retros/*.json` is gitignored so it stays on the local machine. Publishing one = publishing a live product's vulnerability map. (Learned the hard way — an EMBT retro was briefly committed on 2026-05-25 and had to be purged from git history.)
+> ⚠️ **Raw retros never go in the public repo.** A retro embeds project-specific security detail (vulnerable routes/tables, finding descriptions, commit hashes, still-open issues). `lens-retros/*.json` is gitignored so it stays on the local machine. Publishing one = publishing a live product's vulnerability map. (Learned the hard way — a consumer AI app retro was briefly committed on 2026-05-25 and had to be purged from git history.)
 
 Retro JSONs accumulate **locally** in `lens-retros/`. Ways they get there:
 1. **Your own projects** — copy `audit-artifacts/audit-retro-*.json` from a project into `lens-retros/` (gitignored, local-only), or point the script at the project dir directly (it accepts path args). The script reads them off your machine.

@@ -13,7 +13,7 @@ source_frameworks:
   - Cognitive Walkthrough (Lewis & Rieman) — https://www.userfocus.co.uk/articles/cogwalk.html
   - Don Norman's principles (Affordances, Signifiers, Constraints, Mappings, Feedback, Conceptual model)
   - Nielsen Severity Scale 0-4 — https://www.nngroup.com/articles/how-to-rate-the-severity-of-usability-problems/
-  - DLL audit 2026-05-23 — capability invisibility pattern
+  - Consumer-app audit 2026-05-23 — capability invisibility pattern
 ---
 
 # L07 — UX: Ease & Cognitive Path
@@ -24,7 +24,7 @@ source_frameworks:
 
 ## Why this lens exists / what other lenses miss
 
-Engineering audits verify the code works. L07 verifies the user can *use* the code. The DLL audit found that HELP was a compliance one-liner instead of a capability menu; PACKS used engineer syntax (`car_ownership`); the welcome SMS tried to convey three things in 226 characters; memory / objects / Activity ledger were powerful but invisible from the SMS interface. None of these are engineering bugs. All of them are *cognitive path* failures — the user doesn't know what to do, what's available, or where they are.
+Engineering audits verify the code works. L07 verifies the user can *use* the code. The consumer-app audit found that HELP was a compliance one-liner instead of a capability menu; PACKS used engineer syntax (`car_ownership`); the welcome SMS tried to convey three things in 226 characters; memory / objects / Activity ledger were powerful but invisible from the SMS interface. None of these are engineering bugs. All of them are *cognitive path* failures — the user doesn't know what to do, what's available, or where they are.
 
 L07 is the foundation UX lens. L08 (Friction & Trust), L09 (Wow), and L10 (Edge States) build on top of it. If L07 is failing, the others are noise — fix navigation before celebrating peak moments.
 
@@ -48,7 +48,7 @@ L07 is the foundation UX lens. L08 (Friction & Trust), L09 (Wow), and L10 (Edge 
 - **Cognitive Walkthrough (Lewis & Rieman)** — four questions per step: (a) will user try the right outcome? (b) will they notice the correct action? (c) will they associate the action with the outcome? (d) will they see progress feedback? https://www.userfocus.co.uk/articles/cogwalk.html
 - **Don Norman's 6 principles** — Affordances, Signifiers, Constraints, Mappings, Feedback, Conceptual model.
 - **Nielsen Severity Scale** — 0 not a problem / 1 cosmetic / 2 minor / 3 major / 4 catastrophe. Multiply by frequency × persistence. https://www.nngroup.com/articles/how-to-rate-the-severity-of-usability-problems/
-- **DLL audit (Joe Wang, 2026-05-23)** — empirical anchor for capability invisibility and engineer-syntax-on-user-surface patterns.
+- **Consumer-app audit (Joe Wang, 2026-05-23)** — empirical anchor for capability invisibility and engineer-syntax-on-user-surface patterns.
 
 ## Audit method
 
@@ -81,9 +81,9 @@ L07 is the foundation UX lens. L08 (Friction & Trust), L09 (Wow), and L10 (Edge 
    - **Constraints** — does the design prevent invalid actions (greying out, disabling, blocking)?
    - **Conceptual model** — does the user form an accurate mental model of how the product works after 1-2 sessions?
 
-5. **Capability invisibility scan (DLL pattern).** What does the product DO that the user has no way to discover? Memory? History? Settings? Power features? Each "exists but undiscoverable" is a finding.
+5. **Capability invisibility scan (consumer-app pattern).** What does the product DO that the user has no way to discover? Memory? History? Settings? Power features? Each "exists but undiscoverable" is a finding.
 
-6. **Engineer-syntax-on-user-surface scan.** Any place where developer terminology leaks into user-visible UI/copy. (DLL: PACKS using `car_ownership`. Generic: error codes, debug strings, internal IDs, jargon.)
+6. **Engineer-syntax-on-user-surface scan.** Any place where developer terminology leaks into user-visible UI/copy. (consumer app: PACKS using `car_ownership`. Generic: error codes, debug strings, internal IDs, jargon.)
 
 ## Check questions
 

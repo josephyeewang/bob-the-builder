@@ -13,7 +13,7 @@ source_frameworks:
   - Brignull's 12 Dark Patterns — https://www.deceptive.design/types
   - Bob's existing A7h UX Friction audit
   - NN/g content audit methodology
-  - DLL audit 2026-05-23 — silent system actions, spec-conforming-but-emotionally-wrong patterns
+  - Consumer-app audit 2026-05-23 — silent system actions, spec-conforming-but-emotionally-wrong patterns
 ---
 
 # L08 — UX: Friction & Trust
@@ -24,7 +24,7 @@ source_frameworks:
 
 ## Why this lens exists / what other lenses miss
 
-L07 catches cognitive-path failures (user can't figure out what to do). L08 catches a different class: cases where the user CAN figure out what to do but the interaction feels bad. Silent auto-collapses that hide what happened. Friction stacks that make cancellation harder than signup. Dark patterns that nudge users toward outcomes they didn't intend. Copy that hides behavior or implies more than it delivers. The DLL audit caught this pattern explicitly: "duplicate detection auto-collapses with zero user signal"; "recommendation appends attach invisibly"; "engagement scoring front-loaded — reads as empty when user has 0 completions."
+L07 catches cognitive-path failures (user can't figure out what to do). L08 catches a different class: cases where the user CAN figure out what to do but the interaction feels bad. Silent auto-collapses that hide what happened. Friction stacks that make cancellation harder than signup. Dark patterns that nudge users toward outcomes they didn't intend. Copy that hides behavior or implies more than it delivers. The consumer-app audit caught this pattern explicitly: "duplicate detection auto-collapses with zero user signal"; "recommendation appends attach invisibly"; "engagement scoring front-loaded — reads as empty when user has 0 completions."
 
 Trust is the long-tail compounding asset for any user-facing product. A single hostile pattern can erase months of earned trust. L08 surfaces them before users do.
 
@@ -47,7 +47,7 @@ Trust is the long-tail compounding asset for any user-facing product. A single h
 - **Friction Log methodology (Google DX)** — record per-step: scenario, expected vs actual behavior, thought process, delights, pain points. https://sites.research.google/datacardsplaybook/activities/friction-log-template.pdf
 - **Brignull's 12 Dark Patterns** — Hidden costs, Forced continuity, Confirmshaming, Roach motel (easy in / hard out), Privacy Zuckering, Trick questions, Sneak into basket, Disguised ads, Bait & switch, Misdirection, Friend spam, Price comparison prevention. https://www.deceptive.design/types
 - **Bob's existing A7h UX Friction** — friction = "user working for the product, not for the outcome."
-- **DLL audit (Joe Wang, 2026-05-23)** — silent-system-actions and spec-conforming-but-emotionally-wrong patterns.
+- **Consumer-app audit (Joe Wang, 2026-05-23)** — silent-system-actions and spec-conforming-but-emotionally-wrong patterns.
 
 ## Audit method
 

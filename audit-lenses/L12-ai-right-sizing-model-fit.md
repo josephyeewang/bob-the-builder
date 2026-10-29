@@ -28,7 +28,7 @@ The default failure mode in AI products is **over-AI-fication** — using LLMs f
 
 Within "yes, AI is right here," the second layer: which model? An Opus-grade task running on Haiku will fail accuracy; a Haiku-grade task running on Opus burns money. Vendor lock-in compounds the cost: if the primary vendor doubles prices, can you swap in <1 day or does it take 6 weeks?
 
-The DLL audit found a concrete instance: language detection used regex script-ratio (deterministic) instead of spec'd NLP confidence (AI). The spec was right; the implementation was under-AI-fied for the task. This lens names that pattern.
+The consumer-app audit found a concrete instance: language detection used regex script-ratio (deterministic) instead of spec'd NLP confidence (AI). The spec was right; the implementation was under-AI-fied for the task. This lens names that pattern.
 
 Per D-003: L12 recommends orchestrating LiteLLM / OpenRouter / similar gateways. Bob does not recommend custom router builds.
 

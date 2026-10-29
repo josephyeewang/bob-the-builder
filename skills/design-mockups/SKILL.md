@@ -6,7 +6,7 @@ user-invocable: true
 
 # design-mockups — explore the design space as images, then build the winner
 
-A reusable capability for producing Awwwards / One-Page-Love-caliber homepage directions for ANY product. Proven on Explain My Blood Test (Aug 2026): ~250 comps across the full design space for ~$15, funneled to a locked direction.
+A reusable capability for producing Awwwards / One-Page-Love-caliber homepage directions for ANY product. Proven on a consumer AI app (Aug 2026): ~250 comps across the full design space for ~$15, funneled to a locked direction.
 
 ## The one principle
 **Generic is a workflow problem, not a model problem. Explore as IMAGES (cheap, fast, artful), build as CODE (correct, data-wired, motion).** Never ask one tool to do both — that's what produces "AI slop." Image models originate art (texture, palette, type, mood, concept) that CSS can't; code originates correctness that images can't.
@@ -41,15 +41,15 @@ Every run also writes `_contact.png` + `gallery-ALL.html` (one searchable, NUMBE
 - **Reference-class anchoring decides the cluster.** Naming Linear/Stripe/SaaS → generic boilerplate. Naming "luxury" → spa/interior stock. Naming A24 / Obys / fashion-campaign / gallery / fine-art → cinematic art direction. Name the *right* reference class in the prompt. For a homepage/hero, first run design-gallery's **Round 0** (`../design-gallery/references/inspo-round-zero.md` — real reference sites from Inspo, default-on) and pass the LIKEd screenshots as `refs`.
 - **Two independent axes — never collapse them:** CONTENT (what's in the hero) × ART-DIRECTION (how it looks). Cross them in a matrix; hold one constant and vary the other.
 - **Theme-first, not image-first.** Decisions are easier as "which of 12 themes" than "which of 100 images." Group variations under their theme.
-- **The hero must EMBODY the value prop, not just brand it.** (EMBT: a lone "NN/100" score argued *against* the product — the fix was showing R/Y/G status, flags, trend graphs, range bars, insight lines. The hero should demonstrate what's unique.)
+- **The hero must EMBODY the value prop, not just brand it.** (consumer AI app: a lone "NN/100" score argued *against* the product — the fix was showing R/Y/G status, flags, trend graphs, range bars, insight lines. The hero should demonstrate what's unique.)
 - **Materiality beats flat color** (texture/grain/gradient/imagery, never flat divs). **Ban AI-default fonts** (Inter, Roboto, Arial, Space Grotesk) and clichés (purple gradient on white, centered-hero + 3 cards).
 - **People, if any, should be genuinely USING the product** (candid interaction), not fashion-posing.
 - **One consolidated, NAMED gallery** so feedback is precise ("the panels of X + the palette of Y + the type of Z").
 - **Expect iteration.** Don't chase "this is it" early; the user finds combinations by sorting. Never silently drop a direction they liked — keep everything in the board.
-- **Negative-constraint vocabulary works** (EMBT redesign, Sep 2026): state what it must be AND what it must never be — "LIGHT and TRUSTWORTHY — never a dark cave", "NOT a generic gray gradient, NOT homey/architectural-digest stock". The NOTs steer as hard as the wants.
+- **Negative-constraint vocabulary works** (consumer AI app redesign, Sep 2026): state what it must be AND what it must never be — "LIGHT and TRUSTWORTHY — never a dark cave", "NOT a generic gray gradient, NOT homey/architectural-digest stock". The NOTs steer as hard as the wants.
 - **The hero panel must EXPLAIN, not just display** — "colorful glass metric panels POP OUT (status ring, spectrum bar, trend chart, flagged chips)... NOT just a lone number." A number alone argues against the product.
 - **Overshoot-recover is one round, expect it** — "colorful popping panels" overshoots into candy within a round; the documented correction: "COLOR IS A RESTRAINED, TASTEFUL ACCENT... NOT bright primary red/yellow/green, NOT rainbow, NOT candy." Ask loud, then rein in.
-- **Prune loud/kitsch archetypes per-project via `reject`** (moved to `_deleted`, never erased — the EMBT blocklist: neo-brutalism, y2k-chrome, vaporwave, synthwave, cyberpunk-neon, memphis-80s, corporate-memphis, claymorphism).
+- **Prune loud/kitsch archetypes per-project via `reject`** (moved to `_deleted`, never erased — one consumer app's blocklist: neo-brutalism, y2k-chrome, vaporwave, synthwave, cyberpunk-neon, memphis-80s, corporate-memphis, claymorphism).
 - **Only headline text is legible** in image comps; body copy renders as gibberish — judge layout/mood, not paragraphs. Comps are direction, not a spec.
 - **Ops:** batch with backoff/retry (429/5xx); "prepayment credits depleted" = top up billing, not a bug.
 

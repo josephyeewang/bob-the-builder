@@ -68,7 +68,7 @@ This is the operational counterpart to `decision-log.md`. The decision log recor
 
 ## EVOLVE pass — v2.21 (2026-05-29) — Three new audit lenses (L31–L33), batch-built via Bob's own EVOLVE protocol
 
-**Origin:** Joe's three-part question while reflecting on EMBT audits — were there audits for (1) end-to-end user-input-flow tracing (e.g. doc-upload extracts age/gender but never propagates them to scoring/recommendation), (2) the analytical quality/depth of processing/diagnosis/recommendation algorithms, and (3) audience-appropriate output language (jargon for non-technical users; McKinsey-style structure). Tracing each against the live 30-lens library (not the changelog) confirmed all three are **genuine gaps**, with only partial adjacency to L03/L05 (gap 1), L11/L16 (gap 2), L26/L18 (gap 3).
+**Origin:** Joe's three-part question while reflecting on consumer AI app audits — were there audits for (1) end-to-end user-input-flow tracing (e.g. doc-upload extracts age/gender but never propagates them to scoring/recommendation), (2) the analytical quality/depth of processing/diagnosis/recommendation algorithms, and (3) audience-appropriate output language (jargon for non-technical users; McKinsey-style structure). Tracing each against the live 30-lens library (not the changelog) confirmed all three are **genuine gaps**, with only partial adjacency to L03/L05 (gap 1), L11/L16 (gap 2), L26/L18 (gap 3).
 
 **Classification:** Medium EVOLVE, batch of 3 interdependent lenses (shared rubric/aggregation/execution-principle wiring → classified one tier up per the multiple-concurrent-changes rule). Ran the full Medium path: E3-pre Reference Scan → spec → wire → reconcile. Planning docs under `evolutions/001-trace-process-present-lenses/`.
 
@@ -100,7 +100,7 @@ This is the operational counterpart to `decision-log.md`. The decision log recor
 
 ## EVOLVE pass — v2.19 (2026-05-25) — First lens-library improvement driven by a real field retro
 
-**Milestone:** this is the first time Bob's lens library was improved from a **real audit retro** (not a Bob-on-Bob dogfood). The self-learning loop (v2.18) produced its first field signal — a Full Enchilada retro from a live consumer health product (EMBT) — and that signal drove concrete lens edits. The loop closed end-to-end: audit → retro → ritual (`scripts/lens-retro.sh`) → human verdict → lens edits → ship.
+**Milestone:** this is the first time Bob's lens library was improved from a **real audit retro** (not a Bob-on-Bob dogfood). The self-learning loop (v2.18) produced its first field signal — a Full Enchilada retro from a live consumer health product — and that signal drove concrete lens edits. The loop closed end-to-end: audit → retro → ritual (`scripts/lens-retro.sh`) → human verdict → lens edits → ship.
 
 **D-005 compliance:** Bob did not auto-edit anything. The retro *surfaced* ranked change-requests; the human (Joe) reviewed and gave the verdict "fix all of them." These edits are the human-approved result, per D-005.
 
@@ -121,7 +121,7 @@ This is the operational counterpart to `decision-log.md`. The decision log recor
 | #9 Jargon: HAX / wedge / shareability | L13 HAX gloss ("Human-AI eXperience"); L28 q1 "<8-word wedge" concrete test; L20 virality-scope note (don't score a deliberately-non-viral product as deficient) |
 | #10 Strategic lenses rank-pollute Criticals | `_aggregation.md`: separate "Strategic / non-code" bucket (L24/L25/L27/L28 out of the code-fix queue) |
 | Coverage gap: state-change blindness | `_aggregation.md` convergence section: name cross-lens latent meta-patterns ("stateful at data, stateless at UX") |
-| Meta: Full Enchilada too big for solo-dev/prod | `_selection-rubric.md` **Panel K (12)** as production default + Full-Enchilada incident-risk caution (the 30-lens scrub is what exposed EMBT to the P0) |
+| Meta: Full Enchilada too big for solo-dev/prod | `_selection-rubric.md` **Panel K (12)** as production default + Full-Enchilada incident-risk caution (the 30-lens scrub is what exposed the consumer AI app to the P0) |
 | Meta: ~8 lenses Read when they could Execute | `_execution-principle.md` **execution adherence gate** (per-lens ran/skipped accounting; every quantitative claim must cite the command behind the number) |
 
 ### Files touched (15)
@@ -191,7 +191,7 @@ It corrects how the v2.18 mechanism *captures* data; it adds no new capability a
 
 ## EVOLVE pass — v2.18 (2026-05-25) — Audit Self-Learning Loop (Lens Retro)
 
-**Trigger:** Joe's three-part question (2026-05-24) after kicking off a full lens-library audit on EMBT (Explain My Blood Test): (1) how should a project *self-apply* its audit learnings for future hygiene; (2) what prompt makes the project session emit detailed learnings to paste back to Bob so Bob's audit knows what worked / what to add; (3) how do we make (2) a *semi-automatic* self-learning capability so the audit library gets better every time it runs on any project. Joe selected building **A + B** (auto-emit + accumulate-and-flag); explicitly *not* full automation.
+**Trigger:** Joe's three-part question (2026-05-24) after kicking off a full lens-library audit on a consumer AI app: (1) how should a project *self-apply* its audit learnings for future hygiene; (2) what prompt makes the project session emit detailed learnings to paste back to Bob so Bob's audit knows what worked / what to add; (3) how do we make (2) a *semi-automatic* self-learning capability so the audit library gets better every time it runs on any project. Joe selected building **A + B** (auto-emit + accumulate-and-flag); explicitly *not* full automation.
 
 **Framing that shaped the design:** three distinct loops were being conflated. (1) is project-side hygiene — not Bob's concern (handled by a paste-in prompt that stays in the project). (2) is the auto-emit **lens retro** — a critique of the *lenses as instruments*, NOT the findings about the product. The load-bearing distinction: a retro that restates findings teaches Bob nothing (findings are project-specific); a retro that says *"L20 was noise for an SMS-only product and check-question Q3 wrongly assumes a web surface"* improves the lens for every future project. (3) is the **Lens Retro Ritual** — accumulate retros, flag consistently weak lenses, human decides.
 
@@ -209,7 +209,7 @@ It corrects how the v2.18 mechanism *captures* data; it adds no new capability a
 
 ### Dogfood pass (per F47 meta-pattern)
 
-`scripts/lens-retro.sh` was smoke-tested against two synthetic retros (EMBT + DLL, both SMS/AI profiles). It correctly flagged **L20 (Shareability/Virality)** as a REVIEW candidate — Noise in 2/2 runs, swapped out in 2/2, 2 change-requests targeting it — surfacing the convergent "virality lens is noise for SMS-only products" signal, and **L07** for a should-have-executed gap. The output footer correctly reminds the human that convergence is signal not verdict (D-005). The first *real* retro will be EMBT's, emitted when Joe runs A7.4 at the end of the in-flight audit.
+`scripts/lens-retro.sh` was smoke-tested against two synthetic retros (consumer AI app + consumer task app, both SMS/AI profiles). It correctly flagged **L20 (Shareability/Virality)** as a REVIEW candidate — Noise in 2/2 runs, swapped out in 2/2, 2 change-requests targeting it — surfacing the convergent "virality lens is noise for SMS-only products" signal, and **L07** for a should-have-executed gap. The output footer correctly reminds the human that convergence is signal not verdict (D-005). The first *real* retro will be the consumer AI app's, emitted when Joe runs A7.4 at the end of the in-flight audit.
 
 ### Why this is v2.18 (not v2.17.2)
 
@@ -406,7 +406,7 @@ The meta-finding directly shaped how the new protocol prose is written (bias-tow
 - **F27 reshaped — Per-stack auth-token recipes.** Added a table in `[N+1]j` covering Clerk, NextAuth/Auth.js, Supabase Auth, Auth0, custom JWT, and Rails/Django/Flask-Login session cookies. Tokens stash to `.env.test`. Pattern is "Claude detects auth provider during inventory, walks user through matching recipe, stashes token once." The original-shape F27 (a script) was rejected per D-003's no-reinvention stance.
 - **F28 — `liveness-report.json` machine-readable output.** Both A7j and per-phase Liveness now write structured findings to `audit-artifacts/liveness-report-<timestamp>.json` alongside the markdown verdict table. Schema versioned (`schema_version: "1.0"`). Append-not-overwrite so diff-across-time works. Default `.gitignore` for `audit-artifacts/` unless user opts in.
 
-**Order-of-operations note:** Per-phase Liveness (F26) is the more important of the three. v2.14 with only A7j would have caught the blood-test bug at the next audit; v2.15 catches it at phase verification. The latency between bug-shipped and bug-found shrinks from "weeks" to "minutes."
+**Order-of-operations note:** Per-phase Liveness (F26) is the more important of the three. v2.14 with only A7j would have caught the consumer AI app bug at the next audit; v2.15 catches it at phase verification. The latency between bug-shipped and bug-found shrinks from "weeks" to "minutes."
 
 ### Closed in v2.15
 
@@ -433,7 +433,7 @@ The meta-finding directly shaped how the new protocol prose is written (bias-tow
 
 ## EVOLVE pass — v2.14 (2026-05-20) — A7j Liveness Audit added
 
-**Trigger:** User report — two functions in a downstream Bob-built product (Explain My Blood Test) implemented the previous day were silently broken on manual spot-check. Failure mode: static review and spec-match passed, but functions threw at first runtime invocation. Root cause: no A7 step actually executes code; every existing audit reads source and reasons about it.
+**Trigger:** User report — two functions in a downstream Bob-built product (a consumer AI app) implemented the previous day were silently broken on manual spot-check. Failure mode: static review and spec-match passed, but functions threw at first runtime invocation. Root cause: no A7 step actually executes code; every existing audit reads source and reasons about it.
 
 **Change shipped:**
 

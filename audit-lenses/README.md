@@ -8,9 +8,9 @@
 
 Single audits are 90% effective and always miss some %. Different lenses catch *qualitatively different* finding categories — engineering-hygiene audits miss UX, UX audits miss security, both miss strategic-wedge drift. Bob v2.16 had one A7 audit phase with ~10 sub-steps; v2.17 reorganizes that phase into a **lens library** where each lens is a self-contained, source-cited, ready-to-run audit prompt.
 
-Empirical anchor: the DLL audits run 2026-05-23 produced three categorically distinct lens taxonomies (spec-vs-built, capability quality, UX journey). The UX lens alone surfaced findings no engineering audit could catch — silent system actions damaging trust, capability invisibility, triple-SMS in 5 seconds, no recovery path. v2.17 codifies this multi-lens reality into Bob's protocol.
+Empirical anchor: the consumer-app audits run 2026-05-23 produced three categorically distinct lens taxonomies (spec-vs-built, capability quality, UX journey). The UX lens alone surfaced findings no engineering audit could catch — silent system actions damaging trust, capability invisibility, triple-SMS in 5 seconds, no recovery path. v2.17 codifies this multi-lens reality into Bob's protocol.
 
-## The 8 bands and 36 lenses
+## The 8 bands and 38 lenses
 
 | Band | # | Lens | Question it answers |
 |---|---|---|---|
@@ -133,8 +133,8 @@ source_frameworks: [list with URLs]
 
 | Mode | What it does | When to use |
 |---|---|---|
-| **Curated Panel** | Bob picks 6-10 lenses targeted to where you are (e.g., DLL pre-launch profile → L01, L02, L03, L04, L05, L07, L08, L10, L13). One-line justification for each include AND each exclude. | Default. Mid-build checkpoints, post-evolution validation, periodic pulse audits. |
-| **Full Enchilada** | All 36 lenses run sequentially. No curation. | Major milestones: pre-launch, major version bumps, post-incident comprehensive review, investor/partner/user hand-off. Runtime: 1-3 hours of Claude work, often multi-session. |
+| **Curated Panel** | Bob picks 6-10 lenses targeted to where you are (e.g., consumer-app pre-launch profile → L01, L02, L03, L04, L05, L07, L08, L10, L13). One-line justification for each include AND each exclude. | Default. Mid-build checkpoints, post-evolution validation, periodic pulse audits. |
+| **Full Enchilada** | All lenses run sequentially. No curation. | Major milestones: pre-launch, major version bumps, post-incident comprehensive review, investor/partner/user hand-off. Runtime: 1-3 hours of Claude work, often multi-session. |
 
 ## Audit memory entry
 
@@ -145,7 +145,7 @@ Every audit run is logged in `audit-artifacts/audit-history.json` (machine) + `a
 > *Four options:*
 > 1. **Same Curated** — re-run the same M lenses, check what changed.
 > 2. **Complementary Curated** — Bob picks M lenses you *haven't* run yet (broadens coverage; recommended if you ran the same panel <30 days ago).
-> 3. **Full Enchilada** — all 36 lenses, the rocketship-launch scrub.
+> 3. **Full Enchilada** — every lens, the rocketship-launch scrub.
 > 4. **Custom** — tell Bob which lenses (by number or band)."*
 
 You never need to remember a command. Default-recommended option depends on context (see `_audit-memory.md` for the logic).
@@ -185,4 +185,4 @@ The library consolidates convergent angles from:
 
 ## Version
 
-Lens library v2.31 — 2026-07-22 (36 lenses, unchanged; **L31 + L32 DEEPENED — silent-failure forensics, Rule 25 "Green ≠ Correct"**: L31 gains an at-rest null-rate census + aggregation-key-blend + malformed-value-passthrough defects; L32 gains §4b Empirical-Validity Forensics — selection-on-outcome false-nulls → split-half, peak-seeking false-monolithic → residualize, sparse≠untestable → verify raw volume. From the InsiderIntent build field retro; no new lens). Prior: v2.27 — 2026-06-18 (36 lenses; **L36 AI-Forward / AI-Native added** — pushes the AI-native version of every spec, Rule 19). Prior: v2.26 (35; **L35 Capability Preservation / Guardrail-Neuter Check** — the functional anti-neuter complement to L28; both from the InsiderIntent build). Prior: v2.24 — 2026-05-29 (34 lenses; L34 internal+external axes made co-equal + external-execution mandated). Prior: v2.23 (L34 Audit→Action-Plan + opportunity discovery), v2.22 (34; L34 added), v2.21 (33; L31–L33), v2.17 (30, original). Each lens prompt is version-controlled and revised via standard Bob EVOLVE cycles. Lens additions or significant rewrites bump the library minor version; lens removals require a Decision Log entry.
+Lens library v2.31 — 2026-07-22 (36 lenses, unchanged; **L31 + L32 DEEPENED — silent-failure forensics, Rule 25 "Green ≠ Correct"**: L31 gains an at-rest null-rate census + aggregation-key-blend + malformed-value-passthrough defects; L32 gains §4b Empirical-Validity Forensics — selection-on-outcome false-nulls → split-half, peak-seeking false-monolithic → residualize, sparse≠untestable → verify raw volume. From the data product build field retro; no new lens). Prior: v2.27 — 2026-06-18 (36 lenses; **L36 AI-Forward / AI-Native added** — pushes the AI-native version of every spec, Rule 19). Prior: v2.26 (35; **L35 Capability Preservation / Guardrail-Neuter Check** — the functional anti-neuter complement to L28; both from the data product build). Prior: v2.24 — 2026-05-29 (34 lenses; L34 internal+external axes made co-equal + external-execution mandated). Prior: v2.23 (L34 Audit→Action-Plan + opportunity discovery), v2.22 (34; L34 added), v2.21 (33; L31–L33), v2.17 (30, original). Each lens prompt is version-controlled and revised via standard Bob EVOLVE cycles. Lens additions or significant rewrites bump the library minor version; lens removals require a Decision Log entry.

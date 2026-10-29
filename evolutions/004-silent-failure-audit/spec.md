@@ -2,15 +2,15 @@
 
 - **Mode:** EVOLVE · **Classification:** Medium (deepens 2 existing lenses + a cross-cutting rule + multi-file wiring; no new lens, no new subsystem)
 - **Version:** v2.31 · **Decision:** D-008 · **Date:** 2026-07-22
-- **E3-pre Reference Scan:** skipped — this is not a new subsystem/pattern; the "reference" is the InsiderIntent field learning (a lived retro), not an external tool scan. See `reference-scan.md`.
+- **E3-pre Reference Scan:** skipped — this is not a new subsystem/pattern; the "reference" is the data product field learning (a lived retro), not an external tool scan. See `reference-scan.md`.
 
 ## Trigger
 
-Sequel to v2.30/Rule 24 (D-007). Rule 24 made Bob's audits **fire** at milestones; but across a run of InsiderIntent sessions, nearly **every** improvement was surfaced by a founder push-back on a plausible-looking result, and each push uncovered a real defect that every green signal (CI, a data-health scan with all checks passing, "the job ran") reported healthy. Firing an audit that doesn't know *what to look for* still misses the defect. Joe: *"I don't want to always be the linchpin to catch these."*
+Sequel to v2.30/Rule 24 (D-024). Rule 24 made Bob's audits **fire** at milestones; but across a run of data product sessions, nearly **every** improvement was surfaced by a founder push-back on a plausible-looking result, and each push uncovered a real defect that every green signal (CI, a data-health scan with all checks passing, "the job ran") reported healthy. Firing an audit that doesn't know *what to look for* still misses the defect. Joe: *"I don't want to always be the linchpin to catch these."*
 
 ## The defect classes harvested (each → a check)
 
-| Real defect (InsiderIntent) | Green said | The check that catches it |
+| Real defect (data product) | Green said | The check that catches it |
 |---|---|---|
 | A collapse key omitting a varying entity blended many distinct records into a few | analysis "ran successfully" | collapse/group key must capture all varying entities; spot-check collapse ratio |
 | Two analysis columns 100%/near-100% NULL across the table | health scan all-passing | at-rest null-rate census (a ~0% column is a dead axis) |

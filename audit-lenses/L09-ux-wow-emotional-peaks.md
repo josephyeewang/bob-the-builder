@@ -13,7 +13,7 @@ source_frameworks:
   - Chip & Dan Heath — "The Power of Moments" (peak categories — elevation, insight, pride, connection)
   - Tony Ulwick / Bob Moesta — JTBD emotional and social job layers — https://strategyn.com/jobs-to-be-done/
   - Nir Eyal — Variable Reward taxonomy (tribe / hunt / self)
-  - DLL audit 2026-05-23 — empirical anchor for "spec-conforming but emotionally wrong" pattern
+  - Consumer-app audit 2026-05-23 — empirical anchor for "spec-conforming but emotionally wrong" pattern
 ---
 
 # L09 — UX: Wow & Emotional Peaks
@@ -26,9 +26,9 @@ source_frameworks:
 
 L07 (Ease) checks whether users can navigate without frustration. L08 (Friction) checks where the product feels hostile. Both are about *avoiding negatives*. Neither asks *"where is there delight, surprise, pride, or connection — and where could there be?"*
 
-This is the most operator-distinctive UX lens. Engineering audits never ask it. Even most UX audits stop at "is it usable" rather than "is it memorable." The Peak-End Rule (Kahneman) shows that users' overall experience is shaped disproportionately by peak moments and the ending — not the average. A product that's 70% functional but has one genuinely delightful moment and a satisfying ending will be remembered better than a product that's 95% smooth with no peaks. The DLL audit found one unspecced peak ("the emoji-ack path 👍✅ is legitimately delightful surprise nobody specced") — and a dozen *missed* peaks where the product could have surprised the user but didn't (no notification when memory decay protected them, no celebration at first-task completion, no shareable artifact after a useful query).
+This is the most operator-distinctive UX lens. Engineering audits never ask it. Even most UX audits stop at "is it usable" rather than "is it memorable." The Peak-End Rule (Kahneman) shows that users' overall experience is shaped disproportionately by peak moments and the ending — not the average. A product that's 70% functional but has one genuinely delightful moment and a satisfying ending will be remembered better than a product that's 95% smooth with no peaks. The consumer-app audit found one unspecced peak ("the emoji-ack path 👍✅ is legitimately delightful surprise nobody specced") — and a dozen *missed* peaks where the product could have surprised the user but didn't (no notification when memory decay protected them, no celebration at first-task completion, no shareable artifact after a useful query).
 
-The complementary failure mode: **spec-conforming but emotionally wrong.** DLL's "Got it." confirmation works mechanically but lands cold on a user's first interaction. This lens names that pattern.
+The complementary failure mode: **spec-conforming but emotionally wrong.** The consumer app's "Got it." confirmation works mechanically but lands cold on a user's first interaction. This lens names that pattern.
 
 ## When this lens fires
 
@@ -52,7 +52,7 @@ The complementary failure mode: **spec-conforming but emotionally wrong.** DLL's
 - **Heath brothers — "The Power of Moments"** — peaks come from four sources: elevation (sensory boost), insight (aha), pride (achievement recognition), connection (shared moment).
 - **JTBD emotional/social layers (Ulwick, Christensen, Moesta)** — every functional job has emotional ("how I want to feel using this") and social ("how I want to be perceived using this") layers. Most products only design for functional. https://strategyn.com/jobs-to-be-done/
 - **Variable Reward taxonomy (Eyal, Hooked)** — tribe (social rewards: recognition, belonging), hunt (resource rewards: information, items), self (mastery rewards: completion, progression). Peaks usually map to one of these three.
-- **DLL audit (Joe Wang, 2026-05-23)** — empirical anchor. Found unspecced peak (emoji-ack) + many missed peaks (no first-task celebration, no Activity-ledger surfaces, no thank-you-for-trying-this moment).
+- **Consumer-app audit (Joe Wang, 2026-05-23)** — empirical anchor. Found unspecced peak (emoji-ack) + many missed peaks (no first-task celebration, no Activity-ledger surfaces, no thank-you-for-trying-this moment).
 
 ## Audit method
 
@@ -64,7 +64,7 @@ The complementary failure mode: **spec-conforming but emotionally wrong.** DLL's
 
 4. **Identify the ending sentiment.** Specifically: what does the user feel at the moment they stop using the product this session? Pride? Relief? Frustration? Indifference? Endings have outsized weight in remembered experience. A great middle with a meh ending = meh memory.
 
-5. **Inventory existing peaks.** Find every moment the product currently delights — onboarding surprises, micro-interactions, easter eggs, voice/copy moments, animations that reward an action, status messages that feel human. List them. The product probably has more peaks than the team knows about (DLL discovered the emoji-ack peak retroactively during audit).
+5. **Inventory existing peaks.** Find every moment the product currently delights — onboarding surprises, micro-interactions, easter eggs, voice/copy moments, animations that reward an action, status messages that feel human. List them. The product probably has more peaks than the team knows about (the consumer app discovered the emoji-ack peak retroactively during audit).
 
 6. **Inventory missed peaks.** For each journey step rated below "Strong," ask: what would turn this into a peak? Concrete suggestions, not platitudes. ("Add a celebration after first task" is platitude; "After the user's first completed task, send an SMS that names the specific task and adds 'You're 1 down. Most people get to 3 by the end of day 1.' — gives both pride and social-proof orientation" is concrete.)
 
@@ -83,12 +83,12 @@ The complementary failure mode: **spec-conforming but emotionally wrong.** DLL's
 2. Have you walked the journey live (not just read code)?
 3. For each step, what's the current peak intensity and the potential peak intensity? Where's the biggest gap?
 4. What's the ending sentiment of a typical session — and is it the sentiment you'd want a user to leave with?
-5. Have you found at least 1-3 *existing* peaks the team may not be tracking explicitly? (DLL had emoji-ack; what's your equivalent?)
+5. Have you found at least 1-3 *existing* peaks the team may not be tracking explicitly? (the consumer app had emoji-ack; what's your equivalent?)
 6. Have you found at least 3 *missed* peaks where the product could deliver elevation/insight/pride/connection but doesn't?
 7. Have you mapped peaks across all 4 Heath categories, or is the product peaking on only one (typically pride or insight, rarely connection or elevation)?
 8. For each major user action, do you know how the user *wants to feel* — and does the product help them feel that way?
 9. For products where users might be observed using them (in public, in front of colleagues), does the product help them be perceived as competent/savvy/discerning?
-10. Are there moments where the product takes a beneficial action *for* the user but doesn't tell them — silently denying a chance for the user to feel grateful or impressed? (DLL pattern: auto-recovery, duplicate detection — invisible work that could have been a peak.)
+10. Are there moments where the product takes a beneficial action *for* the user but doesn't tell them — silently denying a chance for the user to feel grateful or impressed? (consumer-app pattern: auto-recovery, duplicate detection — invisible work that could have been a peak.)
 11. Is there a "thank you for being here / for trying / for sticking with this" moment somewhere in the first week, or is the product purely transactional?
 12. For AI products: when the AI does something impressive (catches a subtle thing, makes a connection the user didn't see), does the product *show* the impressive moment, or hide it behind a generic UI?
 13. What's the single highest-leverage peak addition this product could ship in <1 week of engineering work?

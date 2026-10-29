@@ -3,7 +3,7 @@
 - **Mode:** EVOLVE
 - **Classification:** Medium (batch of 3 interdependent lenses — interdependent because they share selection-rubric / aggregation / execution-principle wiring, classified one tier up per the multiple-concurrent-changes rule)
 - **Date opened:** 2026-05-29
-- **Origin:** Joe's three-part question while reflecting on EMBT audits — gaps in (1) end-to-end user-input-flow tracing, (2) analytical/processing-algorithm quality, (3) audience-appropriate output language.
+- **Origin:** Joe's three-part question while reflecting on consumer AI app audits — gaps in (1) end-to-end user-input-flow tracing, (2) analytical/processing-algorithm quality, (3) audience-appropriate output language.
 - **Version target:** v2.21
 
 ## What & why
@@ -35,7 +35,7 @@ All three passed the **v2.17 anti-sprawl gate**: each is a distinct validation a
 - **D-EVO1 — Append-only IDs.** L31 (band 1), L32 (band 3), L33 (band 7). IDs are now creation-order, not band-sorted; `band:` frontmatter handles grouping. Renumbering rejected (blast radius across 30 files + all cross-refs, zero benefit).
 - **D-EVO2 — L33 is actionable content, not strategic-veto.** Routed like L26 (real fixes), NOT bucketed with L27/L28 in the v2.19 strategic/non-code bucket. A jargon-laden diagnosis is a fixable defect, not a positioning opinion.
 - **D-EVO3 — L32 owns "conceptual soundness" only.** Per SR 11-7's three-pillar split: L32 = conceptual soundness, L11 = outcomes analysis (evals), L16 = ongoing effectiveness. Explicit handoffs prevent overlap-litigation.
-- **D-EVO4 — Selection-rubric restraint (anti-sprawl).** New lenses are added to profile panels only where they earn inclusion: L31 → data-heavy / multi-step-flow / regulated profiles; L32 → AI or analytical-engine products (EMBT-like); L33 → consumer / non-technical-audience products. They do NOT bloat the minimal panels (Internal-tool D stays 3 lenses).
+- **D-EVO4 — Selection-rubric restraint (anti-sprawl).** New lenses are added to profile panels only where they earn inclusion: L31 → data-heavy / multi-step-flow / regulated profiles; L32 → AI or analytical-engine products (consumer-AI-app-like); L33 → consumer / non-technical-audience products. They do NOT bloat the minimal panels (Internal-tool D stays 3 lenses).
 
 ## File manifest
 

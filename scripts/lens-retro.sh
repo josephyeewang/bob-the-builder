@@ -12,6 +12,13 @@
 #   bash scripts/lens-retro.sh path/to/project # also scan a project's
 #                                              # audit-artifacts/audit-retro-*.json
 #   bash scripts/lens-retro.sh ~/p1 ~/p2 ...   # multiple project dirs
+#   bash scripts/lens-retro.sh --check FILE    # is FILE in the retro format? (exit 1 if not)
+#                                              # — run it at audit step A7.4 before saving
+#
+# Retros found in another shape (a run that invented its own fields) are no longer dropped
+# silently: they are counted, and whatever proposals they carry are listed for a human to read
+# (2026-10-28 — two of three real retros were being skipped as "not valid", so their proposals
+# never reached Bob). Retros in sub-folders of audit-artifacts/ are found too.
 #
 # What it does:
 #   Reads every audit-retro JSON it can find, then for each lens (L01–L30)
@@ -36,6 +43,9 @@
 
 set -uo pipefail
 
+# The one test for "this is a retro in Bob's format" (artifact_type + a lens_scorecard list).
+IS_RETRO='.artifact_type == "audit_retro" and (.lens_scorecard | type) == "array"'
+
 NOISE_PCT=40       # flag if Noise in >= this % of runs
 SWAP_PCT=40        # flag if swapped out in >= this % of runs
 EXEC_PCT=40        # flag if should_have_executed in >= this % of runs
@@ -49,6 +59,18 @@ ERROR: jq is required to parse retro JSON.
   Debian:  sudo apt-get install jq
 Then re-run this script.
 ERR
+  exit 1
+fi
+
+if [[ "${1:-}" == "--check" ]]; then
+  f="${2:-}"
+  [[ -f "$f" ]] || { echo "lens-retro --check: no such file: $f" >&2; exit 2; }
+  if jq -e "$IS_RETRO" "$f" >/dev/null 2>&1; then
+    echo "lens-retro --check: OK — $f is in the retro format"; exit 0
+  fi
+  echo "lens-retro --check: NOT in the retro format — $f" >&2
+  echo "  needs \"artifact_type\": \"audit_retro\" and a \"lens_scorecard\" list (see audit-lenses/_lens-retro.md);" >&2
+  echo "  top-level fields found: $(jq -r 'if type == "object" then (keys | join(", ")) else "(top level is a \(type), not an object)" end' "$f" 2>/dev/null || echo "(not JSON)")" >&2
   exit 1
 fi
 
@@ -68,7 +90,7 @@ fi
 for proj in "$@"; do
   if [[ -d "$proj/audit-artifacts" ]]; then
     while IFS= read -r f; do FILES+=("$f"); done \
-      < <(find "$proj/audit-artifacts" -maxdepth 1 -name 'audit-retro-*.json' -type f 2>/dev/null)
+      < <(find "$proj/audit-artifacts" -name 'audit-retro*.json' -type f 2>/dev/null)
   elif [[ -d "$proj" ]]; then
     while IFS= read -r f; do FILES+=("$f"); done \
       < <(find "$proj" -maxdepth 2 -name 'audit-retro-*.json' -type f 2>/dev/null)
@@ -98,19 +120,39 @@ EOF
   exit 0
 fi
 
-# Validate each file is a retro JSON; keep only valid ones.
-VALID=()
+# Sort each file: in Bob's retro format (VALID) or in another shape (OTHER).
+VALID=(); OTHER=()
 for f in "${FILES[@]}"; do
-  if jq -e '.artifact_type == "audit_retro"' "$f" >/dev/null 2>&1; then
+  if jq -e "$IS_RETRO" "$f" >/dev/null 2>&1; then
     VALID+=("$f")
   else
-    echo "WARN: $f is not a valid audit_retro JSON — skipping." >&2
+    OTHER+=("$f")
   fi
 done
 VALID_COUNT=${#VALID[@]}
 
+# Retros in another shape: count them and list the proposals they carry, so nothing they
+# propose is lost just because the run used its own field names.
+print_other() {
+  [[ ${#OTHER[@]} -eq 0 ]] && return 0
+  echo ""
+  echo "  Retros in another format (${#OTHER[@]}) — not tallied above; their proposals, for a human to read:"
+  for f in "${OTHER[@]}"; do
+    echo "  ◦ $f"
+    jq -r '
+      def items(f): if (f | type) == "array" then f elif f == null then [] else [f] end;
+      if type != "object" then ["(top level is not an object — cannot read its proposals)"] else
+      (items(.change_requests) + items(.proposed_lens_changes) + items(.changes_proposed_not_applied)) end
+      | map(if type == "string" then . else (.what // .change // .summary // tostring) end)
+      | .[:8] | if length == 0 then "      (no proposals found in it)" else (.[] | "      • " + (.[:220])) end
+    ' "$f" 2>/dev/null || echo "      (not readable JSON)"
+  done
+  echo "  Fix the format at the source: run 'bash scripts/lens-retro.sh --check <file>' at audit step A7.4."
+}
+
 if [[ "$VALID_COUNT" -eq 0 ]]; then
-  echo "No valid audit_retro JSON files found." >&2
+  echo "No retros in Bob's retro format found." >&2
+  print_other
   exit 0
 fi
 
@@ -207,6 +249,11 @@ $GAPS
 
   Top change-requests (severity, then rank):
 $CRS
+EOF
+
+print_other
+
+cat <<EOF
 
 ──────────────────────────────────────────────────────────────────────
   Next: for each ⚠ REVIEW lens, read the underlying retros, let Bob

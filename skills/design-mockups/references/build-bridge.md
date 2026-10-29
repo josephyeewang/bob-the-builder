@@ -1,6 +1,6 @@
 # Build bridge — from winning comp to real code
 
-Distilled from the methodology notes of a real product's mockup-to-code transfer (EMBT, Aug 2026).
+Distilled from the methodology notes of a real product's mockup-to-code transfer (a consumer AI app, Aug 2026).
 
 ## 1. DESIGN.md spec layer (the repeatability piece)
 Before building, capture the locked direction as a machine-readable `DESIGN.md`: tokens, type scale, spacing, radius, shadow, motion plan, and **forbidden defaults**. The coding agent reads it every session → consistent, on-brand, non-generic output. This is Joe's Principle #6 in file form: translate from a canonical source, not prose.

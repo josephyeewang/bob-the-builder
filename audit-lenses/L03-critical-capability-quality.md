@@ -9,7 +9,7 @@ session_pattern: fresh session; reads L02 (Spec Fidelity) as mandatory input
 output_markdown: audit-artifacts/L03-critical-capability-quality-{YYYY-MM-DD}.md
 output_json: audit-artifacts/L03-critical-capability-quality-{YYYY-MM-DD}.json
 source_frameworks:
-  - DLL "Slice 2" critical features audit (Joe Wang, 2026-05-23) — empirical anchor
+  - Consumer-app "Slice 2" critical features audit (Joe Wang, 2026-05-23) — empirical anchor
   - ISO 25010:2023 functional suitability (completeness + correctness + appropriateness)
   - SonarQube Reliability + Security ratings (A-E)
   - Bob's existing CTM H / H++ badge pattern
@@ -25,11 +25,11 @@ source_frameworks:
 
 L01 says "exists and runs." L02 says "matches the spec." Neither says *"is it any good?"* A capability can pass L01 (executes without throwing) AND pass L02 (matches the spec claim) and still be B-grade work — wired in only one direction, missing error handling, defaulting silently when it shouldn't, lacking the subtle behavior that makes the capability actually useful.
 
-The DLL audit found this pattern repeatedly:
+The consumer-app audit found this pattern repeatedly:
 - Memory decay engine exists, exported, but `processMemoryDecay` never scheduled — will silently hit 500-record cap.
 - 3-strike overdue management has a counter but never prompts "still want this?" — escalation MISSING.
 - "done" only completes last task, no keyword matching ("done air filter" fails).
-- Recommendations append silently with no separator — user can't tell what's their task vs DLL's suggestion.
+- Recommendations append silently with no separator — user can't tell what's their task vs the consumer app's suggestion.
 - Snooze without a time silently defaults to 7 days.
 
 None of these are spec gaps (the spec said the capability would exist) or engineering failures (the code runs). They're *quality* gaps. This lens grades them.
@@ -54,7 +54,7 @@ None of these are spec gaps (the spec said the capability would exist) or engine
 
 ## Source frameworks
 
-- **DLL "Slice 2" critical features audit** (Joe Wang, 2026-05-23) — empirical anchor. Methodology: identify 30-50 critical capabilities, grade each on the dimensions of wired-ness, robustness, error paths, defaults, completeness.
+- **Consumer-app "Slice 2" critical features audit** (Joe Wang, 2026-05-23) — empirical anchor. Methodology: identify 30-50 critical capabilities, grade each on the dimensions of wired-ness, robustness, error paths, defaults, completeness.
 - **ISO 25010:2023 Functional Suitability** — completeness (does it do everything needed), correctness (does it produce right results), appropriateness (does it fit the user's task). https://www.iso.org/standard/78176.html
 - **SonarQube Reliability + Security A-E ratings** — the A-E grading pattern adapted to capability quality. https://docs.sonarsource.com
 - **Bob's existing CTM H / H++ badge pattern** — H = hardened internally, H++ = hardened internally + externally. L03 grades inform the H badge.
@@ -67,7 +67,7 @@ None of these are spec gaps (the spec said the capability would exist) or engine
    - **Wired-ness** — is it reachable from the user-facing path it should be reachable from? Wired in both directions if the spec implies a round-trip?
    - **Robustness** — does it handle the obvious failure modes (empty input, malformed input, partial input, concurrent invocation)?
    - **Error paths** — when it fails, does it fail gracefully (clear error to user, structured error to logs) or silently/noisily-wrong?
-   - **Defaults** — are silent defaults safe? (Spec says "snooze with optional time" → does empty-time default to a sane value WITH user visibility, or silently default to 7 days as in DLL?)
+   - **Defaults** — are silent defaults safe? (Spec says "snooze with optional time" → does empty-time default to a sane value WITH user visibility, or silently default to 7 days as in the consumer app?)
    - **Completeness** — does it do everything implied by its capability claim, or only the obvious half?
 
 3. **Assign letter grade A-D-F per capability:**
@@ -77,11 +77,11 @@ None of these are spec gaps (the spec said the capability would exist) or engine
    - **D** — Wired but most other dimensions failing. The "exists in name only" pattern.
    - **F** — Capability claim is misleading; what's there doesn't deliver what's promised.
 
-4. **Identify "hollow capabilities."** Capabilities graded C-F where the spec promise vs delivered substance creates active trust damage. DLL's `undo` is the archetype: spec told users they could say "undo," code never implemented it — users typing "undo" create a literal task titled "undo." That's worse than missing; that's deceptive.
+4. **Identify "hollow capabilities."** Capabilities graded C-F where the spec promise vs delivered substance creates active trust damage. The consumer app's `undo` is the archetype: spec told users they could say "undo," code never implemented it — users typing "undo" create a literal task titled "undo." That's worse than missing; that's deceptive.
 
 5. **Identify "silent default" findings.** Cases where the code makes a decision the user wouldn't expect with no visibility. Snooze defaulting to 7 days, "done" matching only the last task, recommendations appending without separator. These are individually minor but cumulatively erode trust.
 
-6. **Identify "unidirectional wiring" findings.** Capabilities the spec implies are bidirectional but code only handles one direction. (DLL: 3-strike overdue counter increments but never prompts.)
+6. **Identify "unidirectional wiring" findings.** Capabilities the spec implies are bidirectional but code only handles one direction. (consumer app: 3-strike overdue counter increments but never prompts.)
 
 7. **Rank top 3 quality-degrading findings.** Not all C/D/F's are equally bad. Rank by: user-impact × frequency × trust-cost.
 
@@ -172,7 +172,7 @@ None of these are spec gaps (the spec said the capability would exist) or engine
 
 ## Severity rubric (calibrated to this lens)
 
-- **Critical** — Hollow capability where the spec actively misleads users (e.g., DLL's `undo` — promise without implementation). Grade F. Or: Grade D on a high-frequency user-facing capability.
+- **Critical** — Hollow capability where the spec actively misleads users (e.g., the consumer app's `undo` — promise without implementation). Grade F. Or: Grade D on a high-frequency user-facing capability.
 - **Major** — Grade C on a high-frequency capability, or Grade D on lower-frequency. Silent default with material trust cost. Unidirectional wiring on a spec-implied round-trip.
 - **Minor** — Grade B with specific improvement opportunity. Silent default with low trust cost. Brittle error path on rarely-exercised capability.
 - **Cosmetic** — Grade A capabilities with stylistic polish opportunities.

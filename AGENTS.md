@@ -6,7 +6,7 @@ A systematic framework for building, auditing, and evolving products with Claude
 
 ## How to Use
 
-Tell Claude Code to read `build-protocol.md`. For first-time users, Claude will show a Journey Map (the full path from idea to launch) before asking which mode applies:
+Say `/bob` (or "bob") in Claude Code; the skill (`skill/SKILL.md`) loads `build-protocol-core.md` first and asks one question, which mode. First-time users see the Journey Map (the full path from idea to launch) after choosing NEW. The modes:
 
 - **NEW** — Build a new product from scratch
 - **AUDIT** — Assess an existing product
@@ -23,7 +23,7 @@ For daily use, load `build-protocol-core.md` (compact reference). Load `build-pr
 
 ```
 build-protocol.md          ← Full reference (all sections, templates, appendices)
-build-protocol-core.md     ← Compact reference (~200 lines) for session context
+build-protocol-core.md     ← Shorter reference loaded into sessions (not small: ~440 lines)
 templates/                  ← Extractable templates (phase report, behavioral core, etc.)
 README.md                   ← Public-facing project overview
 ```
@@ -34,7 +34,7 @@ README.md                   ← Public-facing project overview
 - Specs are living documents — update them during build, not just at the beginning.
 - Reconciliation after every phase is non-optional.
 - No silent refactoring. No behavior drift. No scope creep.
-- **Green ≠ Correct (Rule 25, v2.31 — cross-cutting).** CI passing, a health scan at "N/N", and "the job ran" verify *known-incident classes + syntactic success* — NOT semantic correctness, data completeness, or analytical soundness. Before trusting or reporting any data/analysis/pipeline result, run the forensics yourself and treat every plausible headline adversarially: census input null-rates (a ~0% field is a DEAD axis, not a "no signal"); confirm every collapse/dedup/group key captures all varying entities (spot-check the collapse ratio); distrust "no signal / anti-predictive" from selecting-on-realized-outcome (→ split-half); distrust "too sparse / untestable" (→ verify RAW volume — often an upstream collapse/backfill bug); residualize the dominant factor before declaring "one driver"; compute actual numbers before shipping anything outward-facing. Deepened in **L31** (dead-column / aggregation-blend / at-rest null census) and **L32** (empirical-validity forensics §4b). Origin: the InsiderIntent build — nearly every user push uncovered a real defect all the green checks missed; the non-engineer shouldn't have to be the linchpin.
+- **Green ≠ Correct (Rule 25, v2.31 — cross-cutting).** CI passing, a health scan at "N/N", and "the job ran" verify *known-incident classes + syntactic success* — NOT semantic correctness, data completeness, or analytical soundness. Before trusting or reporting any data/analysis/pipeline result, run the forensics yourself and treat every plausible headline adversarially: census input null-rates (a ~0% field is a DEAD axis, not a "no signal"); confirm every collapse/dedup/group key captures all varying entities (spot-check the collapse ratio); distrust "no signal / anti-predictive" from selecting-on-realized-outcome (→ split-half); distrust "too sparse / untestable" (→ verify RAW volume — often an upstream collapse/backfill bug); residualize the dominant factor before declaring "one driver"; compute actual numbers before shipping anything outward-facing. Deepened in **L31** (dead-column / aggregation-blend / at-rest null census) and **L32** (empirical-validity forensics §4b). Origin: a data product build — nearly every user push uncovered a real defect all the green checks missed; the non-engineer shouldn't have to be the linchpin.
 - When compacting, always preserve: current mode, current step, and any pending decisions.
 
 ## Success metrics (v2.11 — dogfooding Step 1a)
@@ -51,7 +51,7 @@ Bob's Step 1a requires every product to declare success metrics. Bob is a produc
 
 ## Current Version
 
-**See the first line of `build-protocol-core.md`** ("Core Reference for Build Protocol vN.N") — that one line is the version; `bob-upgrade.mjs` and `scripts/bob-update-check.sh` both read it there. The dated record of what changed is the changelog in `build-protocol.md` and `decision-log.md`. (This section used to restate the version and fell behind — it said v2.31 while Bob was at v2.40 — so it now only points; D-020.)
+**See the "Core Reference for Build Protocol vN.N" line near the end of `build-protocol-core.md`** — that one line is the version; `bob-upgrade.mjs` and `scripts/bob-update-check.sh` both read it there. The dated record of what changed is the changelog in `build-protocol.md` and `decision-log.md`. (This section used to restate the version and fell behind — it said v2.31 while Bob was at v2.40 — so it now only points; D-020.)
 
 ## Older release notes
 
