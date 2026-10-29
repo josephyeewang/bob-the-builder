@@ -20,7 +20,7 @@
 <a id="card-K1-1"></a>
 #### 1 · What they do
 
-The one-liner is on the Blueprint page: [K1 in the market section](../blueprint/BLUEPRINT.md#s-2b).
+The one-liner is on the Blueprint page: [K1 in the market section](blueprint/BLUEPRINT.md#s-2b).
 
 <a id="card-K1-2"></a>
 #### 2 · Who uses them, and why
@@ -64,7 +64,7 @@ Research-library links (teardowns, reviews, screenshots):
 #### 8 · Last checked
 
 The last-checked and re-check-by dates are on the Blueprint page:
-[K1 in the market section](../blueprint/BLUEPRINT.md#s-2b). A market
+[K1 in the market section](blueprint/BLUEPRINT.md#s-2b). A market
 fact goes stale; the market line turns ◐ Amber once past its re-check date.
 
 <a id="card-K1-9"></a>
