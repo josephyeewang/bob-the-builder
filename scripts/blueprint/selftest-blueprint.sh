@@ -241,6 +241,8 @@ echo "template links — every link in Bob's chapter and card templates resolves
 LT="$TMP/links"; product "$LT"
 cp "$HERE/../../templates/blueprint-roadmap/chapters/"*.md "$LT/docs/"
 cp "$HERE/../../templates/blueprint-roadmap/module-card.md" "$LT/docs/blueprint/cards/M1.md"
+# Competitor cards live inside the Market chapter (README), so the sample card sits in docs/ beside it.
+cp "$HERE/../../templates/blueprint-roadmap/competitor-card.md" "$LT/docs/competitor-card.md"
 node "$HERE/render-blueprint.mjs" "$LT" --commit abc1234 --now 2031-03-02T09:00:00Z --built-at 2031-03-02T09:00:00Z --out "$LT/.pages" >/dev/null
 # The second argument lists anchors a later Blueprint row builds; remove each one when its row lands
 # (s-2b: the market section, R-0BR-09).
@@ -251,14 +253,25 @@ links_ok() {
     const files = [...fs.readdirSync(path.join(root, "docs")).filter((n) => n.endsWith(".md")).map((n) => path.join(root, "docs", n)),
                    ...fs.readdirSync(path.join(root, "docs/blueprint/cards")).map((n) => path.join(root, "docs/blueprint/cards", n))];
     let bad = 0;
+    const page = path.join(root, "docs/blueprint/BLUEPRINT.md");
+    const fail = (f, t, why) => { console.log(`${why}: ${path.relative(root, f)} -> ${t}`); bad++; };
     for (const f of files) {
-      for (const m of fs.readFileSync(f, "utf8").matchAll(/\]\(([^)<\s]+)\)/g)) {
-        const [target, anchor] = m[1].split("#");
+      const text = fs.readFileSync(f, "utf8");
+      // inline links, with or without <angle brackets> or a "title", and reference definitions ([r]: target)
+      const targets = [...[...text.matchAll(/\]\(\s*([^)\s]+)(?:\s+"[^"]*")?\s*\)/g)].map((m) => m[1]),
+                       ...[...text.matchAll(/^\s*\[[^\]]+\]:\s*(\S+)/gm)].map((m) => m[1])];
+      for (let t of targets) {
+        if (/^<[a-z-]+>$/.test(t)) continue;               // a placeholder such as <path>, filled in by the product
+        t = t.replace(/^<(.*)>$/, "$1");
+        const [target, anchor] = t.split("#");
         if (/^[a-z]+:/i.test(target)) continue;
         const abs = target ? path.resolve(path.dirname(f), target) : f;
-        if (!fs.existsSync(abs)) { console.log(`missing file: ${path.relative(root, f)} -> ${m[1]}`); bad++; continue; }
-        if (anchor && !pending.has(anchor) && !new RegExp(`id="${anchor}"`).test(fs.readFileSync(abs, "utf8"))) {
-          console.log(`missing anchor: ${path.relative(root, f)} -> ${m[1]}`); bad++;
+        if (path.relative(root, abs).startsWith("..")) { fail(f, t, "outside the product"); continue; }
+        if (!fs.existsSync(abs)) { fail(f, t, "missing file"); continue; }
+        if (!fs.statSync(abs).isFile()) { fail(f, t, "not a file"); continue; }
+        // an anchor a later row builds is allowed only on the Blueprint page itself
+        if (anchor && !(pending.has(anchor) && abs === page) && !new RegExp(`id="${anchor}"`).test(fs.readFileSync(abs, "utf8"))) {
+          fail(f, t, "missing anchor");
         }
       }
     }
@@ -268,6 +281,22 @@ links_ok() {
 expect "every chapter and card template link resolves after a render" 0 "all template links resolve" -- links_ok "$LT"
 printf '%s\n' 'See [the plan](../blueprint/BLUEPRINT.md#s-5c).' >> "$LT/docs/market.md"
 expect "planted broken link is caught" 1 "missing file: docs/market.md" -- links_ok "$LT"
+# Each planted case runs on a fresh copy of the good product, so one case can't hide another.
+plant_link() { rm -rf "$LT.p"; cp -R "$LT" "$LT.p"; printf '%s\n' "$2" >> "$LT.p/$1"; }
+plant_link docs/competitor-card.md 'See [K1](../blueprint/BLUEPRINT.md#s-2b).'
+expect "planted broken link in the competitor card is caught" 1 "missing file: docs/competitor-card.md" -- links_ok "$LT.p"
+plant_link docs/market.md 'See [x](../../../../../../../../etc/hosts).'
+expect "planted link leaving the product is caught" 1 "outside the product" -- links_ok "$LT.p"
+plant_link docs/market.md 'See [x](blueprint).'
+expect "planted link to a folder is caught" 1 "not a file" -- links_ok "$LT.p"
+plant_link docs/market.md 'See [x](nope.md "a title").'
+expect "planted broken link with a title is caught" 1 "missing file: docs/market.md -> nope.md" -- links_ok "$LT.p"
+plant_link docs/market.md 'See [x](<nope.md>).'
+expect "planted broken link in angle brackets is caught" 1 "missing file: docs/market.md -> nope.md" -- links_ok "$LT.p"
+plant_link docs/market.md '[r]: nope.md'
+expect "planted broken reference link is caught" 1 "missing file: docs/market.md -> nope.md" -- links_ok "$LT.p"
+plant_link docs/market.md 'See [x](blueprint/decided.yaml#s-2b).'
+expect "a pending anchor counts only on the Blueprint page" 1 "missing anchor" -- links_ok "$LT.p"
 
 echo "yaml-lite.mjs — the strict reader"
 YL="$HERE/yaml-lite.mjs"
