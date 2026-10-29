@@ -6,27 +6,21 @@
   a card with no last-checked date, fails "every competitor has a
   card".
 
-  GENERATED parts sit between the "generated" and
-  "/generated" marker comments. The ID, name, group and one-liner are owned by
-  the fact list (blueprint.yaml competitors) and are shown here
-  automatically; never type them by hand (fact-twice-check.mjs fails
-  a re-typed one-liner). The dates in field 8 are owned there too.
+  The group, the one-liner and the dates in field 8 are owned by the
+  fact list (blueprint.yaml competitors). A chapter never shows them:
+  it LINKS to the Blueprint page, where they are generated. A chapter
+  that copies one fails fact-twice-check.mjs. The ID and name in the
+  heading must match the fact list.
 -->
 
 <a id="card-K1"></a>
-<!-- Head: ID · name · group -->
-<!-- generated -->
-<!-- from: blueprint.yaml (competitors: id, name, group) -->
-### `K1` · **<Name>** · "<group, e.g. trackers>"
-<!-- /generated -->
+<!-- Head: ID · name (both match blueprint.yaml competitors); the group is on the Blueprint page -->
+### `K1` · **<Name>**
 
 <a id="card-K1-1"></a>
 #### 1 · What they do
 
-<!-- generated -->
-<!-- from: blueprint.yaml (competitors: one_liner) -->
-<one line, shown here automatically from the fact list>
-<!-- /generated -->
+The one-liner is on the Blueprint page: [K1 in the market section](../blueprint/BLUEPRINT.md#s-2b).
 
 <a id="card-K1-2"></a>
 #### 2 · Who uses them, and why
@@ -69,11 +63,9 @@ Research-library links (teardowns, reviews, screenshots):
 <a id="card-K1-8"></a>
 #### 8 · Last checked
 
-<!-- generated -->
-<!-- from: blueprint.yaml (competitors: last_checked, recheck_by) -->
-<the date>, and the date to re-check by: <re-check date>. A market
-fact goes stale; the market line turns ◐ Amber once past it.
-<!-- /generated -->
+The last-checked and re-check-by dates are on the Blueprint page:
+[K1 in the market section](../blueprint/BLUEPRINT.md#s-2b). A market
+fact goes stale; the market line turns ◐ Amber once past its re-check date.
 
 <a id="card-K1-9"></a>
 #### 9 · Corrections

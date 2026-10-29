@@ -12,8 +12,8 @@
   "we should take this" item becomes a roadmap or intake row.
   scripts/blueprint/fact-twice-check.mjs fails a re-typed one-liner.
 
-  GENERATED parts sit between the "generated" and
-  "/generated" marker comments; never type them by hand.
+  Facts the fact list owns (one-liners, dates) are never shown here:
+  this chapter links to the Blueprint page, where they are generated.
 
   Small product: the Product and Market chapters may be one file with
   two headings ("# Product" and "# Market"), so a personal tool isn't
@@ -42,13 +42,12 @@ competitors in one line each:
 <a id="comparison"></a>
 ## The comparison table
 
-<!-- generated -->
-<!-- from: the competitor cards below (fields 1, 4, 5, 6) and
-     blueprint.yaml (competitors), where possible -->
-| ID | Name | What they do | Where they beat us today | Where we are different | Coverage |
-|---|---|---|---|---|---|
-| K1 | <name> | <one-liner> | <field 4> | <field 5> | <field 6> |
-<!-- /generated -->
+<!-- Hand-written columns only; each competitor's one-liner is on the Blueprint page (linked). -->
+| ID | Name | Where they beat us today | Where we are different | Coverage |
+|---|---|---|---|---|
+| K1 | <name> | <field 4> | <field 5> | <field 6> |
+
+What each one does, in one line: [the market section of the Blueprint](../blueprint/BLUEPRINT.md#s-2b).
 
 <a id="general-ai"></a>
 ## Why not just ask a general AI
@@ -89,13 +88,8 @@ competitors in one line each:
 <a id="watch"></a>
 ## The watch list
 
-<!-- generated -->
-<!-- from: blueprint.yaml (competitors: last_checked, recheck_by).
-     A line past its re-check date shows ◐ Amber. -->
-| ID | Name | Last checked | Re-check by | Light |
-|---|---|---|---|---|
-| K1 | <name> | <date> | <date> | ● Green |
-<!-- /generated -->
+The watch list (each competitor's last-checked and re-check-by dates, amber once past re-check) is generated on the
+Blueprint page: [the market section](../blueprint/BLUEPRINT.md#s-2b).
 
 <a id="cards"></a>
 ## Competitor cards

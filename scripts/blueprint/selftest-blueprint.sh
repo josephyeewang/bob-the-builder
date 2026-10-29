@@ -163,11 +163,6 @@ The founder put it as “Planning the week takes under five minutes.” in the f
 Old plan, kept as written: B1 was due 2031-03-12.
 <!-- /frozen -->
 
-<!-- generated -->
-| Capability | Module |
-|---|---|
-| Drag to reschedule | M1 |
-<!-- /generated -->
 
 Dates use the form <YYYY-MM-DD> in the data files.
 
@@ -200,7 +195,7 @@ plant() {
 CHECK="$HERE/fact-twice-check.mjs"
 echo "fact-twice-check.mjs — owned fact written once"
 product "$TMP/clean"
-expect "clean product passes (banner, quotes, frozen, generated, old date, file names, links, placeholder)" 0 "no owned fact typed twice" -- node "$CHECK" "$TMP/clean"
+expect "clean product passes (banner, quotes, frozen, old date, file names, links, placeholder)" 0 "no owned fact typed twice" -- node "$CHECK" "$TMP/clean"
 expect "planted ISO date fails"              1 'date "2031-03-20"'        -- node "$CHECK" "$(plant iso docs/product-spec.md 'B1 should land on 2031-03-20.')"
 expect "planted stale copy of a moved date fails" 1 'date "2031-03-12"'   -- node "$CHECK" "$(plant stale docs/product-spec.md 'B1 lands 2031-03-12.')"
 expect "planted day-month-year date fails"   1 '"20 Mar 2031"'             -- node "$CHECK" "$(plant dmy docs/market.md 'We ship on 20 Mar 2031.')"
@@ -211,6 +206,10 @@ expect "planted objective promise fails"     1 "objective O1's promise"    -- no
 expect "planted competitor one-liner fails"  1 "competitor K1's one-liner" -- node "$CHECK" "$(plant comp docs/market.md 'BigBoard: a shared wall of cards for large teams')"
 expect "planted capability-list row fails"   1 'capability C1 re-typed'    -- node "$CHECK" "$(plant cap docs/product-spec.md '| Drag to reschedule | M1 | proposed |')"
 expect "planted date in a card fails"        1 'cards/M1.md:1: date'       -- node "$CHECK" "$(plant card docs/blueprint/cards/M1.md 'Usable on 2031-03-20.')"
+d_gen="$(plant genblock docs/market.md '<!-- generated -->')"; printf '%s\n' 'A shared wall of cards for large teams.' 'Due 2031-03-20.' '<!-- /generated -->' >> "$d_gen/docs/market.md"
+expect "planted generated block in a chapter is reported" 1 'a "generated" block in a hand-written file' -- node "$CHECK" "$d_gen"
+expect "facts inside a planted generated block still fail" 1 "competitor K1's one-liner" -- node "$CHECK" "$d_gen"
+expect "dates inside a planted generated block still fail" 1 'date "2031-03-20"' -- node "$CHECK" "$d_gen"
 # A date inside the banner line must NOT fail, even when it equals an owned date (the brief's "must not fail" case).
 expect "planted banner date does not fail"   0 "no owned fact typed twice" -- node "$CHECK" "$(plant banner docs/market.md '> **Chapter of the Blueprint** (B1 due 2031-03-20)')"
 expect "unquoted banner date does not fail"  0 "no owned fact typed twice" -- node "$CHECK" "$(plant banner2 docs/market.md 'Chapter of the Blueprint, checked 2031-03-20.')"

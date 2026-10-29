@@ -18,6 +18,20 @@ behaviour and architecture documents are chapters that hold depth and link to th
 | `chapters/product-spec.md` | the Product chapter: depth only; copy to `docs/product-spec.md` | ordinary docs changes |
 | `chapters/market.md` | the Market chapter: landscape, comparison, "why not just ask a general AI", what we take, positioning, coverage, watch list, competitor cards; copy to `docs/market.md` | ordinary docs changes |
 
+**The owner's words, one format.** A change to a decided fact (`decided.yaml`, `exit-tests.yaml` or `tests/exit/`)
+adds an entry to the product's decision log in the same change, and that entry carries exactly one line:
+
+```
+Owner's words (YYYY-MM-DD, <where it was said>): "<the exact words>"
+```
+
+The date is the day the owner said it, as `YYYY-MM-DD`; the place names where it was said (for example, the session or
+thread); the quote is the owner's own words, never empty. Every check that looks for the owner's approval reads this
+line and nothing else: Bob's decided-facts check, and any post-merge audit a product runs. Their shared test fixture
+plants three failing cases (the line missing, a malformed date, an empty quote) and one passing case. The check can
+tell that the line is there and well formed; it can't tell a real quote from an invented one, so the owner reading
+the notice is what catches that.
+
 Parts of the Markdown templates between `<!-- generated -->` and `<!-- /generated -->` are built from the fact
 files and are never typed by hand. Frozen history sits between `<!-- frozen -->` and `<!-- /frozen -->`. For a
 small product, only the core [C] sections appear, and the Product and Market chapters may be one file with two
