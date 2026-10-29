@@ -1,7 +1,12 @@
-# The shared data file: milestones and their dates and slips, modules, capabilities, competitors, research,
-# chapter paths and the as-of date. Changed only by the lead's daily roadmap change (Tier 2).
+# The shared data file: the product name, the summary's judgment fields, the loop's steps, milestones and their dates
+# and slips, modules (part lights, stage dates), capabilities, competitors, research, chapter paths and the as-of date.
+# Changed only by the lead's daily roadmap change (Tier 2).
 # Dates are written ONCE, here or in a row file; hand-written text links to them instead of re-typing them.
+product: "<product name, as the page titles show it>"
 as_of: "<YYYY-MM-DD: when the judgment fields were last reviewed>"
+summary:                 # the judgment fields of the executive summary, written by the daily roadmap change
+  risk: "<the biggest risk, one line>"
+  read: "<the one-line read: what this all means>"
 chapters:
   - name: Product
     path: docs/product-spec.md
@@ -19,11 +24,25 @@ milestones:
     estimate: "<YYYY-MM-DD>"
     condition: "<one condition the date depends on>"
     slips: []
+steps:                   # the loop's steps (a pipeline product: its stages), each owned by exactly one module
+  - n: "1"
+    name: "<step name>"
+    owner: M1
+    supports: []         # modules that serve this step without owning it
 modules:
   - id: M1
     name: "<module name>"
     plane: "<plane or zone>"
     role: "<one-line role>"
+    parts:               # the module's light is generated: the colour of its worst part
+      - name: "<part>"
+        light: "<green, amber or red>"
+        line: "<in one line: why>"
+    stage:
+      usable_on: "<YYYY-MM-DD>"
+      green_on: "<YYYY-MM-DD>"
+      reads_from: []     # module IDs this one reads from
+      done_test: "<yes or no: is its done-test written>"
 capabilities:
   - id: C1
     name: "<capability>"
