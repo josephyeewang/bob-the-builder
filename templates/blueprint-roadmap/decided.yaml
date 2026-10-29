@@ -1,0 +1,22 @@
+# Your decided facts: the product's overall goal, objectives and targets, "not doing", who it's for, the rules list
+# and the adopted capabilities. One home for each of these facts (Blueprint, design §3.5 / §3.9).
+# Changes ONLY through a decision change the owner approves, with its decision-log entry in the same change.
+# Tier 1, protected. Chapters and other hand-written text must not re-type these facts:
+# scripts/blueprint/fact-twice-check.mjs fails a change that does.
+goal: "<one sentence: what the product is for>"
+for_whom: "<one line: who it is for>"
+objectives:
+  - id: O1
+    name: "<1-2 word name>"
+    promise: "<one-line promise>"
+    target: "<a number>"
+    measured_by: "<how it is measured>"
+not_doing:
+  - what: "<what we are not doing>"
+    why: "<why>"
+    revisit_if: "<what would make us revisit it>"
+rules:
+  - id: RU1
+    name: "<bold short name>"
+    text: "<the rule, one sentence>"
+capabilities_adopted: []

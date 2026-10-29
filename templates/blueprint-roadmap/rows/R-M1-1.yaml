@@ -1,0 +1,12 @@
+# One roadmap row = one file, so two changes never edit the same file to mark their own rows.
+# The change that finishes the row sets its status, inside its own pull request.
+id: R-M1-1
+what: "<a short sentence>"
+module: M1
+capability: C1
+owner: "<who>"
+date: "<YYYY-MM-DD, or leave empty and give a trigger>"
+trigger:
+done_when: "<a short sentence; name the objective by ID (e.g. meets O1's target), never re-type its number>"
+status: planned
+receipts: []

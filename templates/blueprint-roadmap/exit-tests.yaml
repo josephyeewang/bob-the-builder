@@ -1,0 +1,6 @@
+# Milestone exit tests: pass/fail, runnable. Tier 1, protected; changes only with the owner's approval.
+# Each test may run only files inside tests/exit/ (a check refuses an entry that points anywhere else).
+exit_tests:
+  - milestone: B1
+    test: tests/exit/b1.sh
+    passes_when: "<plain sentence: what passing shows>"

@@ -1,0 +1,41 @@
+# The shared data file: milestones and their dates and slips, modules, capabilities, competitors, research,
+# chapter paths and the as-of date. Changed only by the lead's daily roadmap change (Tier 2).
+# Dates are written ONCE, here or in a row file; hand-written text links to them instead of re-typing them.
+as_of: "<YYYY-MM-DD: when the judgment fields were last reviewed>"
+chapters:
+  - name: Product
+    path: docs/product-spec.md
+  - name: Market
+    path: docs/market.md
+  - name: Behavior
+    path: docs/behavioral-core.md
+  - name: Architecture
+    path: docs/architecture.md
+  - name: Module specs
+    path: docs/domains/
+milestones:
+  - id: B1
+    name: "<milestone name>"
+    estimate: "<YYYY-MM-DD>"
+    condition: "<one condition the date depends on>"
+    slips: []
+modules:
+  - id: M1
+    name: "<module name>"
+    plane: "<plane or zone>"
+    role: "<one-line role>"
+capabilities:
+  - id: C1
+    name: "<capability>"
+    module: M1
+    maturity: proposed
+    row: R-M1-1
+competitors:
+  - id: K1
+    name: "<competitor>"
+    group: "<group>"
+    one_liner: "<what they do, one line>"
+    last_checked: "<YYYY-MM-DD>"
+    recheck_by: "<YYYY-MM-DD>"
+research: []
+handwritten: []   # extra hand-written files the fact-twice check scans, beyond the chapters and cards
