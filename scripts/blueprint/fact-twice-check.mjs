@@ -22,8 +22,12 @@
 //   exactly a capability name.
 // WHAT IT SKIPS, so honest text passes: the chapter banner line ("Chapter of the Blueprint…"); quotations (lines
 //   starting with ">", and text inside "…" or “…”); frozen history (between <!-- frozen --> and <!-- /frozen -->);
-//   generated blocks (between <!-- generated --> and <!-- /generated -->); dates older than the oldest date the
-//   data holds; dates that are part of a file name or path (2026-10-28-report.md); placeholders like <YYYY-MM-DD>.
+//   dates older than the oldest date the data holds; dates that are part of a file name or path
+//   (2026-10-28-report.md); placeholders like <YYYY-MM-DD>.
+// NOT SKIPPED: a "generated" block (<!-- generated --> … <!-- /generated -->) inside a hand-written file. Only the
+//   page builder's own output is generated, and it writes no chapter or card; a generated block in a hand-written
+//   file is therefore hand-typed, so it is reported and its facts are checked like any other text. Link to the
+//   Blueprint page instead.
 // LIMIT, said plainly: a paraphrase is not caught, only a copy. The review checks for paraphrased facts.
 //
 // Usage:  node scripts/blueprint/fact-twice-check.mjs [product-root]     (default: current folder)
@@ -158,14 +162,17 @@ function datesIn(text) {
 const findings = [];
 for (const file of [...targets].sort()) {
   const rel = path.relative(root, file);
-  let frozen = false, gen = false;
+  let frozen = false;
   fs.readFileSync(file, 'utf8').split(/\r?\n/).forEach((raw, i) => {
     const line = raw.trim();
     if (/<!--\s*frozen\s*-->/i.test(line)) { frozen = true; return; }
     if (/<!--\s*\/frozen\s*-->/i.test(line)) { frozen = false; return; }
-    if (/<!--\s*generated\s*-->/i.test(line)) { gen = true; return; }
-    if (/<!--\s*\/generated\s*-->/i.test(line)) { gen = false; return; }
-    if (frozen || gen) return;
+    if (/<!--\s*generated\s*-->/i.test(line)) {
+      findings.push(`${rel}:${i + 1}: a "generated" block in a hand-written file — nothing fills it, so it is hand-typed; link to the Blueprint page instead`);
+      return;
+    }
+    if (/<!--\s*\/generated\s*-->/i.test(line)) return;
+    if (frozen) return;
     if (line.startsWith('>')) return;                       // quotation
     if (/chapter of the blueprint/i.test(line)) return;     // the chapter banner
     const live = raw
