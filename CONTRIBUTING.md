@@ -21,7 +21,7 @@ Likely-to-be-rejected contributions:
 
 - **Plain English.** Bob is for non-engineers. If a rule needs jargon to be understood, simplify it.
 - **Cite the failure mode.** New rules should reference a real project failure they would have prevented. "a real product build had mostly fix commits because X" is better than "best practice says X."
-- **Update the changelog.** New behaviors land in `build-protocol.md`'s version table with a one-line "Triggered By" reason.
+- **Update the changelog.** New behaviors get an entry at the top of `CHANGELOG.md` with a one-line reason.
 
 ## Code in `scripts/`
 

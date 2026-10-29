@@ -28,7 +28,7 @@
 ## 5. Conflict Resolution
 - When two rules point in different directions, which wins?
 - Priority hierarchy: Safety > Absolute Constraints > User Preference > Efficiency
-- When subsystems disagree, resolution rules
+- When subsystems disagree (e.g., recommendation engine vs monitoring engine), resolution rules
 
 ## 6. Memory & Context
 - What does the system remember about the user?
@@ -47,12 +47,14 @@
 - SMS templates: max length, truncation rules, deep link format
 - Email templates: subject line pattern, body structure
 - Portal notifications: format, grouping rules
+- Example: Weekly summary template, confirmation template, alert template
 - Rule: If a message type doesn't have a template, it doesn't get sent
 
 ## 9. Temporal Constants
 - List ALL time-based thresholds as named values (not magic numbers)
 - Example: correction_window=60s, session_timeout=10min, cooldown=30d
 - These are defined HERE, not discovered during implementation
+- See Architecture Patterns G6 for implementation guidance
 
 ## 10. State Mutation Rules
 - Which actions auto-execute vs require confirmation?

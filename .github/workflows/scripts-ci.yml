@@ -56,6 +56,18 @@ jobs:
           stated=$(grep -oE '^## The [0-9]+ bands and [0-9]+ lenses' audit-lenses/README.md | grep -oE '[0-9]+ lenses' | grep -oE '[0-9]+')
           echo "lens files: $files · README says: $stated"
           test "$files" = "$stated" || { echo "audit-lenses/README.md states $stated lenses but there are $files lens files"; exit 1; }
+      - name: CHANGELOG.md has an entry for the current version (D-027)
+        run: |
+          ver=$(grep -oE 'Core Reference for Build Protocol v[0-9]+(\.[0-9]+)+' build-protocol-core.md | head -1 | grep -oE 'v[0-9.]+$' || true)
+          echo "core version: $ver"
+          test -n "$ver" || { echo "no 'Core Reference for Build Protocol vN.N' line in build-protocol-core.md"; exit 1; }
+          grep -qE "^\*?${ver//./\\.}[:  —]" CHANGELOG.md || { echo "CHANGELOG.md has no entry starting with $ver"; exit 1; }
+      - name: No template is copied back into build-protocol.md (D-027)
+        run: |
+          for t in "Phase Report Template:## Phase \[N\] Report" "Cowork Session:## SESSION \[N\]" "Behavioral Core:# \[Product Name\] — Behavioral Core" "Decision Log:### D-XXX: \["; do
+            pat="${t#*:}"
+            if grep -qE "^$pat" build-protocol.md; then echo "build-protocol.md contains a copy of the ${t%%:*} template; it lives only in templates/"; exit 1; fi
+          done
 
   bob-init-smoke:
     name: bob-init smoke test

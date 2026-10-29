@@ -4,6 +4,7 @@ Distilled from the methodology notes of a real product's mockup-to-code transfer
 
 ## 1. DESIGN.md spec layer (the repeatability piece)
 Before building, capture the locked direction as a machine-readable `DESIGN.md`: tokens, type scale, spacing, radius, shadow, motion plan, and **forbidden defaults**. The coding agent reads it every session → consistent, on-brand, non-generic output. This is Joe's Principle #6 in file form: translate from a canonical source, not prose.
+- **In a Bob build the winning mock file stays the canonical input**, and `LOCKED-DESIGN.md` (Bob Step 5.5, `design-gallery` skill) is the map to it — its banner forbids building from its text. A `DESIGN.md` token file is an optional extra generated from that mock, never a substitute for it.
 - `npx brandmd <url>` — any live site → DESIGN.md + Tailwind tokens *(reported, verify)*.
 - `rohitg00/awesome-claude-design` — DESIGN.md prompt packs by aesthetic family; `google-labs-code/design.md` — Google's spec *(both verified)*.
 - Apply Anthropic's `<frontend_aesthetics>` system-prompt block during the build so coded parts don't drift to generic.
@@ -20,7 +21,7 @@ Before building, capture the locked direction as a machine-readable `DESIGN.md`:
 **Rule: GSAP for scrub-pinned scroll; Motion.dev for UI transitions. Never cross them.** Arm the agent with a current GSAP skill or it emits outdated setup and leaks memory on unmount. Cheaper 3D fallback: a scroll-scrubbed image sequence (canvas frame swap) ≈ 80% of the feel, zero shaders.
 
 ## 3. The bridge itself
-- **Skip image-to-code converters.** Feed the winning comp + DESIGN.md straight to the coding agent: *"clean React/Tailwind, flexbox not absolute, reuse my components, responsive."* The agent reads the repo and reuses real conventions. (Avoid Anima — absolute-positioned 400-line bloat.)
+- **Skip image-to-code converters.** Feed the winning comp + `LOCKED-DESIGN.md` straight to the coding agent: *"clean React/Tailwind, flexbox not absolute, reuse my components, responsive."* The agent reads the repo and reuses real conventions. (Avoid Anima — absolute-positioned 400-line bloat.)
 - **Export the winning comp's 4K backdrop as an actual asset** — the art survives as a file instead of being approximated in CSS.
 - v0 for fast clean components; Relume to kill the blank page (sitemap→wireframe scaffold).
 - Copy-paste component libraries: Aceternity, Magic UI, React Bits, shadcn/ui, 21st.dev.

@@ -3,6 +3,8 @@
 > Use this format for every entry in `docs/decision-log.md`. Adapted from Michael Nygard's Architecture Decision Record (ADR) pattern — the industry standard for recording non-obvious decisions.
 >
 > Include any decision where you: deviated from a spec, chose a library or tool, changed the data model, changed an API route, changed AI behavior, deferred a feature, or made a non-obvious tradeoff. If a future reader would ask "why did they do it this way?", it deserves an ADR.
+>
+> Format is intentionally scannable by status: future-you (or future Claude) can grep for `Status: Accepted` to find what's still load-bearing vs `Status: Superseded` for what got reversed.
 
 ---
 
@@ -20,11 +22,11 @@
 
 ## Status values
 
-- **Proposed** — decision drafted, not yet ratified. Don't act on it until Accepted.
-- **Accepted** — current load-bearing decision. Code, specs, downstream choices depend on it.
-- **Deprecated** — no longer applies but not actively replaced (e.g., feature being deleted).
-- **Superseded** — overturned by a later ADR. Link back: `Status: Superseded by D-042`. Never delete superseded entries — they're the audit trail.
+- **Proposed** — decision is drafted but not yet ratified. Don't act on it until status changes to Accepted.
+- **Accepted** — this is the current load-bearing decision. Code, specs, and downstream choices depend on it.
+- **Deprecated** — decision no longer applies but hasn't been actively replaced (e.g., the feature is being deleted). Code may still reflect it; clean up at next reconcile.
+- **Superseded** — decision was overturned by a later ADR. The superseding entry MUST link back: `Status: Superseded by D-042`. Don't delete superseded entries — they're the audit trail of why we changed our mind.
 
 ## Anti-pattern
 
-ADRs that describe the decision without consequences. The Consequences section is where future-you discovers why the seemingly clever shortcut is the thing now blocking a new requirement.
+ADRs that just describe the decision without consequences. The Consequences section is where future-you discovers why the seemingly clever shortcut is the thing now blocking a new requirement.

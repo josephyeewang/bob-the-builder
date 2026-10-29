@@ -1,5 +1,7 @@
 # Phase Report Template
 
+> Claude MUST use this template when presenting results at every `[N]b: Verify` step. Section markers indicate when each section is required.
+
 > Section markers: **[A]** = Always required — omission is a failure condition. **[C]** = Conditional — required only when the stated condition applies; write "N/A — [reason]" when skipping. **[O]** = On-demand — include when relevant; omit entirely when not applicable.
 
 ---
@@ -105,12 +107,12 @@ bar-sha256: UNSET
 - If ANY violation is found → FIX before proceeding. Do NOT defer.
 
 ### [C] Cross-Cutting Concern Scan — *required for phases with integration points or new endpoints*
-- Integration seams checked: [list each seam — contract match? nulls handled? types compatible?]
-- Rate limits & caps: [list every new endpoint/action and its rate limit. If none → FLAG as gap]
-- Abuse vectors: [list at least 2 exploit scenarios + mitigation]
-- Error propagation: [trace at least 1 failure path across a subsystem boundary]
-- Auth/permission gaps: [list every new endpoint/action and confirm auth + authz exist]
-- Prior seam spot-check: [pick 1 prior seam — still correct?]
+- Integration seams checked: [list each seam between this phase and prior phases — contract match? nulls handled? types compatible?]
+- Rate limits & caps: [list every new endpoint/action and its rate limit. If none defined → FLAG as gap]
+- Abuse vectors: [list at least 2 ways a malicious/careless user could exploit what was just built + mitigation]
+- Error propagation: [trace at least 1 failure path across a subsystem boundary — what happens?]
+- Auth/permission gaps: [list every new endpoint/action and confirm auth + authz checks exist]
+- Prior seam spot-check: [pick 1 integration seam from a prior phase — still correct after this phase's changes?]
 
 ### [C] Class-Level Pattern Scan — *required if any bug was found during this phase*
 - Pattern identified: [description]
@@ -118,10 +120,10 @@ bar-sha256: UNSET
 - Remaining instances: [0 / list any deferred with rationale]
 
 ### [C] Experience Test — *include only if phase has user-facing output*
-- Expected experience: [from Build Manifest]
-- Actual output: [show real message, UI, or workflow]
-- Assessment: [warm/robotic? helpful/generic? premium/cheap?]
-- `→ HG decision:` "Feels wrong" is a valid NO-GO.
+- Expected experience: [from Build Manifest experience test field]
+- Actual output: [show the real message, UI, or workflow the user would see]
+- Assessment: [Does it feel right? Warm/robotic? Helpful/generic? Premium/cheap?]
+- `→ HG decision:` Human evaluates whether the experience meets the bar. "Feels wrong" is a valid NO-GO.
 
 ### [A] Test Cases (minimum 3)
 - [test 1: input → expected → actual → PASS/FAIL]
@@ -129,8 +131,8 @@ bar-sha256: UNSET
 - [test 3: input → expected → actual → PASS/FAIL]
 
 ### [A] Regression Scenarios *(from Build Manifest — specific, named scenarios)*
-- [scenario name]: [expected → actual → PASS/FAIL]
-- [scenario name]: [expected → actual → PASS/FAIL]
+- [scenario name from prior phase]: [expected outcome → actual → PASS/FAIL]
+- [scenario name from prior phase]: [expected outcome → actual → PASS/FAIL]
 
 ### [A] Propagation *(MANDATORY if specs were modified)*
 - Were any specs modified in this phase? [Yes/No — list files]
@@ -143,9 +145,9 @@ bar-sha256: UNSET
 - Phase complete? [Yes/No]
 - Still aligned with Product Spec? [Yes/No]
 - Drift detected? [Yes/No — describe]
-- Future phases affected? [Yes/No — list]
-- Propagation enforcement satisfied? [Yes / No — list what remains]
-- **Deviation trend:** [This phase: N. Prior phase: N. Trend: improving/stable/worsening]
+- Future phases affected? [Yes/No — list which ones]
+- Propagation enforcement satisfied? [Yes — all changes propagated / No — list what remains]
+- **Deviation trend:** [This phase: N deviations. Prior phase: N. Trend: improving/stable/worsening]
 
 ### [A] Module Inventory *(omission is a failure condition)*
 - Files created: [list]

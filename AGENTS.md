@@ -51,8 +51,8 @@ Bob's Step 1a requires every product to declare success metrics. Bob is a produc
 
 ## Current Version
 
-**See the "Core Reference for Build Protocol vN.N" line near the end of `build-protocol-core.md`** — that one line is the version; `bob-upgrade.mjs` and `scripts/bob-update-check.sh` both read it there. The dated record of what changed is the changelog in `build-protocol.md` and `decision-log.md`. (This section used to restate the version and fell behind — it said v2.31 while Bob was at v2.40 — so it now only points; D-020.)
+**See the "Core Reference for Build Protocol vN.N" line near the end of `build-protocol-core.md`** — that one line is the version; `bob-upgrade.mjs` and `scripts/bob-update-check.sh` both read it there. The dated record of what changed is `CHANGELOG.md`; the reasons are in `decision-log.md`. (This section used to restate the version and fell behind — it said v2.31 while Bob was at v2.40 — so it now only points; D-020.)
 
-## Older release notes
+## Release notes
 
-Moved to `CHANGELOG.md` (frozen, not kept up to date; not loaded into sessions).
+In `CHANGELOG.md`, the one changelog for Bob (D-027; not loaded into sessions).

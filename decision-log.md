@@ -442,6 +442,19 @@ The companion `audit-log.md` records *deferred* items (Defer verdicts that may s
 - **Consequences:** Rule origins still say what happened, not where. Git history still contains the old wording; rewriting public history is a separate decision.
 - **Revisit trigger:** a name check before each push (not built yet) — until then, grep for project names before publishing.
 
+
+---
+
+### D-027: Each kind of Bob content lives in one file; the others point to it
+
+- **Date:** 2026-10-29
+- **Status:** Accepted
+- **Context:** An architecture review found the same content written out in several places, and the copies had started to disagree. Four templates existed both as appendices in `build-protocol.md` and in `templates/`; the appendix phase report lacked the Acceptance Bar block that `scripts/check-bar.mjs` requires, so a report built from it failed the gate. The core and the full protocol each named only one of the two checkers for the pre-build review. The full protocol's Rules 1–14 were numbered one off from the core's. The core's audit step A7.1 left out the lens retro note that the lens entry prompt asks for. The image lane called the locked design file `DESIGN.md` while the gallery calls it `LOCKED-DESIGN.md`. The change history sat in four places (the core's footer, a table in `build-protocol.md` that stopped at v2.31 and skipped v2.17–v2.28, the release notes moved from `AGENTS.md`, the lens library's footer).
+- **Decision:** One home each, with pointers elsewhere. Templates live only in `templates/` (Appendices B, D, F and H are pointers; the fuller appendix wording was moved into the template files first, so nothing was lost). The full protocol's Step 5.5 is a short pointer to the `design-gallery` skill. The pre-build review's first lens runs both `coherence-check.sh` and `spec-audit.py` in both texts. Rule numbers follow the core; the full list was renumbered to match (nothing cited Rules 1–14 by number). All history is in `CHANGELOG.md`, newest block first, each block moved word for word. CI checks that `CHANGELOG.md` has an entry for the version on the core's "Core Reference" line.
+- **Alternatives considered:** Keep both copies and add a check that they match — rejected: two copies plus a checker is more to maintain than one copy plus a pointer, and the checker would have to understand rewording. Leave the history scattered — rejected: the table had already stopped at v2.31 while being called canonical.
+- **Consequences:** A template or a rule changes in one file. The core's version line is unchanged, so `bob-update-check.sh` and `bob-upgrade.mjs` read it as before. Rules 16–33 still live only in the core and the core still restates parts of the full protocol; one rules file filed by moment of need is the next pass.
+- **Revisit trigger:** a check finds the same text block in two Bob files again.
+
 ---
 
 ## Anti-pattern reminder

@@ -108,23 +108,26 @@ If you discover mid-build that the project is more complex than initially assess
 
 ### Rules for Claude Code
 
+*Numbering matches `build-protocol-core.md`, which holds Rules 16 onward and is the one home for rule numbers (renumbered 2026-10-29, D-027: this list used to number the step-format note as Rule 4, so every later rule here was one off from core).*
+
 **Execution rules:**
 1. **Follow steps in order.** Do not skip, merge, or reorder steps.
 2. **Stop at every human gate (marked `→ HG`).** Present your work, wait for explicit approval. Do not proceed without it.
 3. **Track current step.** Always know which step you're on. When resuming a session, read the Build Manifest to identify current position.
-4. **Step numbering format:** Steps use `Na/Nb/Nc` (e.g., `8a`, `8b`, `8c`) so the human can remember and reference their position. Always prefix your work with the current step ID.
-5. **Reconciliation is non-optional.** Every build phase has a reconcile step. If there's nothing to reconcile, explicitly state "No divergences found." Never silently skip it.
-6. **Specs are living documents.** They are written upfront and comprehensive, then updated during build when reality diverges from plan. Stale specs are worse than no specs.
+- **Step numbering format:** Steps use `Na/Nb/Nc` (e.g., `8a`, `8b`, `8c`) so the human can remember and reference their position. Always prefix your work with the current step ID.
+4. **Reconciliation is non-optional.** Every build phase has a reconcile step. If there's nothing to reconcile, explicitly state "No divergences found." Never silently skip it.
+5. **Specs are living documents.** They are written upfront and comprehensive, then updated during build when reality diverges from plan. Stale specs are worse than no specs.
 
 **Behavioral guardrails (Claude MUST follow these at all times):**
-7. **No silent refactoring.** Previously built modules MUST NOT be refactored unless strictly required for the current phase's functionality. If a refactor IS necessary: list ALL changes explicitly in a `### Refactored` section, explain WHY each refactor was required, and confirm no regression in previously passing tests. Unauthorized refactors (changes to modules not required by the current phase) are a failure condition.
-8. **No behavior drift.** Do NOT change the behavior of previously built systems unless the current phase REQUIRES it. If behavior changes are necessary, list ALL changes under a `### Behavior Changes` section, explain WHY each was required (cite the spec section), and confirm no regression in previously passing tests. Silent behavior change is a failure condition. Examples of drift that MUST be flagged: changing confidence thresholds in existing flows, altering message/confirmation formats, modifying state transition rules, changing how engines/schedulers process jobs, altering normalized input/output contracts.
-9. **Scope lock.** Only build what is explicitly listed in the phase scope. Do NOT add extra features, extend scope, or anticipate future phases. If something seems missing from the specs, list it — do NOT build it.
-10. **Drift prevention.** Do NOT invent behavior not defined in the Behavioral Core. Do NOT invent system design not defined in domain specs. All behavior must trace back to a specific spec section. If you cannot cite the section, the behavior does not exist and must not be implemented.
-11. **Idempotency.** Every build step must be safely re-runnable. Check existing state before writing. Update instead of recreate when a file already exists. Verify current state matches expectations before proceeding.
-12. **Complexity rule.** Prefer simple implementation, explicit logic, and clarity over abstraction. Three clear lines of code are better than one clever abstraction. Avoid premature optimization and over-generalization.
-13. **Flag divergences immediately.** If you discover something that contradicts a spec, STOP and flag it — don't silently pick one interpretation. Present the conflict, propose 2-3 resolution options, and wait for approval.
-14. **Two-correction rule.** If the human has corrected the same issue twice in a session, the context is likely polluted with failed approaches. Recommend: `/clear` and restart with a better-scoped prompt. A fresh session with a clear prompt almost always outperforms a long session with accumulated corrections.
+6. **No silent refactoring.** Previously built modules MUST NOT be refactored unless strictly required for the current phase's functionality. If a refactor IS necessary: list ALL changes explicitly in a `### Refactored` section, explain WHY each refactor was required, and confirm no regression in previously passing tests. Unauthorized refactors (changes to modules not required by the current phase) are a failure condition.
+7. **No behavior drift.** Do NOT change the behavior of previously built systems unless the current phase REQUIRES it. If behavior changes are necessary, list ALL changes under a `### Behavior Changes` section, explain WHY each was required (cite the spec section), and confirm no regression in previously passing tests. Silent behavior change is a failure condition. Examples of drift that MUST be flagged: changing confidence thresholds in existing flows, altering message/confirmation formats, modifying state transition rules, changing how engines/schedulers process jobs, altering normalized input/output contracts.
+8. **Scope lock.** Only build what is explicitly listed in the phase scope. Do NOT add extra features, extend scope, or anticipate future phases. If something seems missing from the specs, list it — do NOT build it.
+9. **Drift prevention.** Do NOT invent behavior not defined in the Behavioral Core. Do NOT invent system design not defined in domain specs. All behavior must trace back to a specific spec section. If you cannot cite the section, the behavior does not exist and must not be implemented.
+10. **Idempotency.** Every build step must be safely re-runnable. Check existing state before writing. Update instead of recreate when a file already exists. Verify current state matches expectations before proceeding.
+11. **Complexity rule.** Prefer simple implementation, explicit logic, and clarity over abstraction. Three clear lines of code are better than one clever abstraction. Avoid premature optimization and over-generalization.
+12. **Flag divergences immediately.** If you discover something that contradicts a spec, STOP and flag it — don't silently pick one interpretation. Present the conflict, propose 2-3 resolution options, and wait for approval.
+13. **Two-correction rule.** If the human has corrected the same issue twice in a session, the context is likely polluted with failed approaches. Recommend: `/clear` and restart with a better-scoped prompt. A fresh session with a clear prompt almost always outperforms a long session with accumulated corrections.
+14. **Orchestrate, don't reinvent (v2.16).** Before building custom anything, check whether the field already has it. Full text: Rule 14 in `build-protocol-core.md`.
 15. **Preserve the edge — don't let guardrails neuter the capability (v2.26).** A product's own rigor, safety/compliance caution, honesty rules, and example-lists can silently suppress the *differentiating capability* they exist to protect. Four facets: **(a) Layer.** Keep constraints at the **communication / legal / safety layer, not the analysis / capability layer** — the engine pursues its goal to the hilt; only *how results are phrased and to whom* is constrained. **(b) Open vocabularies.** Enumerated content examples (signals, categories, methods, styles) are seeds, not closed enums — instruct the system to seek beyond them; *governance* lists (safety/refusal/limits) stay closed and binding. **(c) Notability ≠ validation.** Don't let statistical/quality rigor built for *patterns* bury an individual *novel/rare/notable* instance — separate "is it worth surfacing?" (often assessable on one instance) from "is it validated?" (needs volume). **(d) Usefulness-as-felt.** Rigor that yields correct-but-useless output fails the user; guarantee felt value, with honesty as the framing, not as a reason to deliver nothing. The bright line for any guardrail: does it stop the engine *DOING* the valuable thing (a neuter — fix it, relocate to the communication layer) or only *SAYING* it carelessly/to the wrong audience (legitimate — keep it)? Audit with **lens L35 (Capability Preservation)**. *(Origin: a data product NEW-mode build — the single most-recurring correction, surfaced ~5×; a human had to catch each.)*
 
 **Failure stop conditions (Claude MUST stop immediately if):**
@@ -1186,34 +1189,13 @@ This matrix is the "nothing falls through the cracks" guarantee. Without it, you
 
 ### Step 5.5: Design Gallery & Lock (v2.38 — products with a user-facing surface)
 
-Skip for pure APIs/CLIs/pipelines. For everything a person will look at, run the **`design-gallery`
-skill** (`skills/design-gallery/` — full instructions live there; this section is the map):
+Skip for pure APIs/CLIs/pipelines. For everything a person will look at, run the **`design-gallery` skill** (`skills/design-gallery/SKILL.md`). **The full instructions live there and only there** (D-027); this is what the step must produce:
 
-- **Explore as a gallery, on REAL content.** Three lanes that combine: **HTML mockups** for product
-  UI/dashboards (numbered self-contained files, real-shaped data, `:root` color tokens from mockup
-  one — these ARE the eventual spec); the **`design-mockups` image lane** for art direction /
-  heroes / brand / logo exploration (Nano Banana funnel); an **SVG concept board** for converging a
-  logo mark (parameterized inline-SVG concepts × light/dark/context tiles; the winner ships as one
-  canonical component with hard-coded colors).
-- **Converge by number.** The rating board (skill template) collects LIKE/MEH/NO + notes per
-  design and exports paste-ready feedback; rounds remix and hybridize the liked numbers; a **live
-  parameter playground** (skill template) lets the user audition palettes/parameters on the real
-  design — one playground beats twenty static variants. Never delete a direction; curate by
-  reordering.
-- **LOCK.** `LOCKED-DESIGN.md` from the skill's template: exact values only (families+weights,
-  per-element px sizes, radii, hexes), opening with the **mock-is-canonical banner**. `→ HG` —
-  the user picks the direction and approves the lock; Bob never locks a design alone.
-- **Transfer under the fidelity protocol.** Every visual build phase after the lock follows the
-  skill's `templates/fidelity-protocol.md`: read the mock FILE first (prose is never a sufficient
-  input; delegation passes literal values, not summaries) · mock sample content never ports as
-  defaults/hardcoded scales (every displayed figure traces to real data) · component consumption
-  is counted, not felt · finish with an adversarial value-diff AND a rendered screenshot diff ·
-  add the CI token gate · kill counterfeit design self-descriptions on sight.
+- **A gallery on real content, converged by number** — HTML mockups for product UI, the `design-mockups` image lane for art direction and brand, an SVG board for a logo mark; rated rounds plus a live parameter playground.
+- **`LOCKED-DESIGN.md`** from the skill's template (exact values only, opening with the mock-is-canonical banner). `→ HG` — the user picks the direction and approves the lock; Bob never locks a design alone.
+- **Every visual build phase after the lock follows the skill's `templates/fidelity-protocol.md`** — the mock file is the input, never a prose summary.
 
-*(Origin: a data product build — the gallery converged perfectly, then the transfer degraded twice
-into ~70% re-creation because a prose summary stood in for the mock file; the after-the-fact
-adversarial audits that rescued it are now the step's exit condition, and the gates make drift
-fail the build instead of waiting for the founder to notice.)*
+*(Origin: a data product build — a converged gallery degraded twice into ~70% re-creation because a prose summary stood in for the mock file.)*
 
 ### Step 6: Project Setup
 
@@ -1297,7 +1279,7 @@ After the script runs, Claude:
 The transition from *design* (all spec docs complete) to *build* (first line of product code) is the highest-stakes, least-reversible boundary in the protocol, and the one most easily skated past on momentum. **It gets its own deliberate stop, every time — never auto-advanced.** Two parts, in order:
 
 **6.5a — Machine audit (fresh-context, multi-lens), BEFORE any code.** Do not defer this to the post-build hardening audits (Step N+1) — those are too late to catch a bad foundation or a mis-sequenced plan. Run an independent panel (fresh-context subagents, archetype-cast per Appendix K) over the COMPLETE document set + the build plan. Minimum lenses, always including:
-1. **Internal consistency & drift** — names, capability IDs, version numbers, dropped/orphaned concepts, contradictions across all docs, spec↔code drift, decision-log integrity (the consumer-app hallucination/mutation/regression class). **Run `scripts/coherence-check.sh <docs-dir>` first (Rule 23)** — it mechanically harvests this lens's regression classes (decision-log contiguity, version-string drift, dangling §/D cross-refs, "synced through D-n" lag, retired-term residue, missing snapshot banners) so the audit reasons over a clean harvest instead of hand-grepping. This same sweep is *also* a standing trigger during the spec phase (every living-doc version bump / decision entry / phase-or-code renumber), not only here at the gate.
+1. **Internal consistency & drift** — names, capability IDs, version numbers, dropped/orphaned concepts, contradictions across all docs, spec↔code drift, decision-log integrity (the consumer-app hallucination/mutation/regression class). **Run both checkers first:** `scripts/coherence-check.sh <docs-dir>` (Rule 23, drift ACROSS the doc set) and `~/.claude/skills/bob/../scripts/spec-audit.py` (Rule 28, incoherence WITHIN each doc). The first mechanically harvests this lens's regression classes (decision-log contiguity, version-string drift, dangling §/D cross-refs, "synced through D-n" lag, retired-term residue, missing snapshot banners) so the audit reasons over a clean harvest instead of hand-grepping. This same sweep is *also* a standing trigger during the spec phase (every living-doc version bump / decision entry / phase-or-code renumber), not only here at the gate.
 2. **Foundation-first sequencing** — is the build order laying a clean, reusable foundation (data layer, canonical model, adapters, quality, analytical core) before surfaces/agents/productization — or rushing to a visible MVP-for-its-own-sake?
 3. **Completeness / table-stakes-in-the-plan** — auth, billing/pricing, security, privacy/compliance, ops/support present *in the plan* (even if built much later), so nothing essential is forgotten.
 4. **Data-quality / integrity** (any data product) — is ingest/processing/aggregation actively pressure-tested and self-checking, not assumed-correct? (garbage-in → garbage-out is a foundation risk.)
@@ -1495,7 +1477,7 @@ This scan is cumulative — each phase checks its own NEW integration seams plus
 - Verify scope boundary is respected (nothing was built that shouldn't have been)
 - If either is violated → the phase is NOT complete
 
-Present verification results using the Phase Report Template (Appendix F). Every section is mandatory — omission of any section (Module Inventory, Global Invariant Check, Propagation, Cross-Cutting Concerns) is a failure condition.
+Present verification results using the Phase Report Template (`templates/phase-report.md`). Every section is mandatory — omission of any section (Module Inventory, Global Invariant Check, Propagation, Cross-Cutting Concerns) is a failure condition.
 
 *Second-model review (optional — recommended for Heavy-track projects or critical phases):*
 
@@ -2199,71 +2181,7 @@ Before starting Step 1 (Product Spec):
 
 ## APPENDIX B: BEHAVIORAL CORE TEMPLATE
 
-*Use this as a starting structure when writing a Behavioral Core (Step 2).*
-
-```markdown
-# [Product Name] — Behavioral Core
-
-## 1. Decision Framework
-- How does the system decide what action to take?
-- What are the confidence levels? (High / Medium / Low)
-- What happens at each level? (Act / Act+Confirm / Clarify)
-- What scoring or ranking logic is used?
-
-## 2. Autonomy Boundaries
-- What can the system do WITHOUT asking the user?
-- What requires user CONFIRMATION before acting?
-- What does the system REFUSE to do?
-- What happens when the system is unsure which category applies?
-
-## 3. Communication Style
-- Default tone (formal / conversational / terse / warm)
-- Message length constraints (by channel — SMS, email, portal)
-- How it handles: bad news, reminders, errors, celebrations
-- Escalation pattern: what does it say when it can't help?
-
-## 4. Absolute Constraints
-- [NEVER]: Things the system must never do (list exhaustively)
-- [ALWAYS]: Things the system must always do (list exhaustively)
-- These override all other rules. No confidence threshold or edge case bypasses them.
-
-## 5. Conflict Resolution
-- When two rules point in different directions, which wins?
-- Priority hierarchy: Safety > Absolute Constraints > User Preference > Efficiency
-- When subsystems disagree (e.g., recommendation engine vs monitoring engine), resolution rules
-
-## 6. Memory & Context
-- What does the system remember about the user?
-- How long does context persist? (Session / 24h / Forever)
-- How does it use past interactions to inform current behavior?
-- What does it forget (and why)?
-
-## 7. Error Behavior
-- System is uncertain → [behavior]
-- System made a mistake → [behavior]
-- External service fails → [behavior]
-- User is confused or frustrated → [behavior]
-
-## 8. Output Templates (per channel)
-- Define exact message templates with field placeholders for each output type
-- SMS templates: max length, truncation rules, deep link format
-- Email templates: subject line pattern, body structure
-- Portal notifications: format, grouping rules
-- Example: Weekly summary template, confirmation template, alert template
-- Rule: If a message type doesn't have a template, it doesn't get sent
-
-## 9. Temporal Constants
-- List ALL time-based thresholds as named values (not magic numbers)
-- Example: correction_window=60s, session_timeout=10min, cooldown=30d
-- These are defined HERE, not discovered during implementation
-- See Architecture Patterns G6 for implementation guidance
-
-## 10. State Mutation Rules
-- Which actions auto-execute vs require confirmation?
-- Define per action type: [action] → [auto-execute? Y/N] → [confirmation required? Y/N]
-- High-risk actions (deletion, financial, medical) → ALWAYS confirm regardless of confidence
-- Rule: Never confirm an action that didn't actually happen
-```
+**The template lives in one place: [`templates/behavioral-core.md`](templates/behavioral-core.md).** Use it as the starting structure when writing a Behavioral Core (Step 2). (Until 2026-10-29 a second copy sat here and had fallen behind the file; D-027.)
 
 ---
 
@@ -2300,30 +2218,7 @@ Before starting Step 1 (Product Spec):
 
 ## APPENDIX D: DECISION LOG TEMPLATE (ADR format, v2.7)
 
-*Use this format for every entry in `docs/decision-log.md`. Adapted from Michael Nygard's Architecture Decision Record (ADR) pattern — the industry standard for recording non-obvious decisions in software projects. Format is intentionally scannable by status: future-you (or future Claude) can grep for `Status: Accepted` to find what's still load-bearing vs `Status: Superseded` for what got reversed.*
-
-```markdown
-### D-XXX: [Decision Title — short, declarative, present tense]
-
-- **Date:** YYYY-MM-DD
-- **Status:** Proposed | Accepted | Deprecated | Superseded by D-YYY
-- **Context:** What problem, situation, or trigger forced a decision? What constraints or facts apply? (Include any relevant Bob step — e.g., "raised during Step 3a Architecture Contract review.")
-- **Decision:** What we chose. Stated as an action: "We will use X" — not "X seems good."
-- **Alternatives considered:** What else was on the table, with a one-line "why not."
-- **Consequences:** What follows from this choice — good, bad, and neutral. What constraints are now imposed on future decisions? What downstream specs, contracts, or code does this affect?
-- **Revisit trigger (optional):** What would make us reconsider? (E.g., "if cost per active user exceeds $X", "if Vercel changes pricing", "if we add a second LLM provider.")
-```
-
-**Status values explained:**
-
-- **Proposed** — decision is drafted but not yet ratified. Don't act on it until status changes to Accepted.
-- **Accepted** — this is the current load-bearing decision. Code, specs, and downstream choices depend on it.
-- **Deprecated** — decision no longer applies but hasn't been actively replaced (e.g., the feature is being deleted). Code may still reflect it; clean up at next reconcile.
-- **Superseded** — decision was overturned by a later ADR. The superseding entry MUST link back: `Status: Superseded by D-042`. Don't delete superseded entries — they're the audit trail of why we changed our mind.
-
-**When to write an ADR:** any decision where you deviated from a spec, chose a library or tool, changed the data model, changed an API route, changed AI behavior, deferred a feature, or made a non-obvious tradeoff. If a future reader would ask "why did they do it this way?", it deserves an ADR.
-
-**Anti-pattern to avoid:** ADRs that just describe the decision without consequences. The Consequences section is where future-you discovers why the seemingly clever shortcut is the thing now blocking a new requirement.
+**The template lives in one place: [`templates/decision-log-entry.md`](templates/decision-log-entry.md).** Use it for every entry in `docs/decision-log.md` (ADR format: context, decision, alternatives, consequences, revisit trigger, plus what each status means). (Until 2026-10-29 a second copy sat here and had fallen behind the file; D-027.)
 
 ---
 
@@ -2367,148 +2262,7 @@ For a data pipeline / analysis tool:
 
 ## APPENDIX F: PHASE REPORT TEMPLATE
 
-*Claude MUST use this template when presenting results at every `[N]b: Verify` step. Section markers indicate when each section is required.*
-
-*Section markers: **[A]** = Always required — omission is a failure condition. **[C]** = Conditional — required only when the stated condition applies; write "N/A — [reason]" when skipping. **[O]** = On-demand — include when relevant; omit entirely when not applicable.*
-
-```markdown
-## Phase [N] Report
-
-### [O] Gap Check Result
-- Behavioral Coverage: [Complete / Missing / Partial — cite spec modules]
-- Domain Spec Coverage: [Complete / Missing / Partial — cite sections]
-- Conflicts Found: [None / List each with file references]
-- Spec Patches Applied Before Build: [None / List each]
-*Abbreviate to "Clean — no gaps, no conflicts, no patches" if all clear.*
-
-### [A] Built
-- [list everything built — files created, endpoints added, features implemented]
-
-### [C] Mocked / Stubbed — *include only if anything was stubbed*
-- [list anything not fully implemented, with rationale]
-
-### [A] Implementation Decisions
-- [list key technical decisions made during build]
-- [for each: what was decided and why]
-
-### [A] Assumptions Made
-- [list any assumptions — if none, say "None"]
-- [assumptions are yellow flags — each one is a potential future divergence]
-
-### [A] Spec Deviations
-- [list EVERY difference from specs — schema, API, behavior, UI]
-- [for each: what changed, why, whether to accept or revert]
-- [if none, say "None"]
-- **Deviation count this phase: [N]** *(tracked in Build Manifest deviation tracker)*
-
-### [C] Behavior Changes to Existing Systems — *include only if modifying previously built systems*
-- [list any changes to previously built systems]
-- [for each: what changed, which spec section requires it, regression impact]
-
-### [A] Validation Results
-- Build/type-check: [PASS / FAIL]
-- Unit tests: [PASS / FAIL — count]
-- Integration tests: [PASS / FAIL — count]
-- Phase validation criteria: [list each criterion and PASS/FAIL]
-
-### [A] Hot Path Results
-- [For each project-wide hot path defined in Build Manifest:]
-  - [Hot path name]: [input → expected → actual → PASS/FAIL]
-- **Hot path failure is a stop condition.** Do NOT proceed if any hot path fails.
-
-### [A] Regression Check
-- [list prior-phase flows tested and PASS/FAIL for each]
-
-### [C] Deploy Verification — *required if phase touches external integrations, webhooks, auth, or deployment config*
-- Deployed to: [staging URL / preview environment]
-- Integration points tested: [list each with PASS/FAIL]
-- Webhook delivery confirmed: [Yes/No/N/A]
-- Auth flow end-to-end: [PASS/FAIL/N/A]
-- **Rollback plan verified:** [Yes/No — confirm the flag/env-var/revert path defined in Build Manifest actually works]
-
-### [C] AI Eval Results — *required if phase touched AI behavior (prompts, decision logic, routing, summarization, tone)*
-- Eval set version: [git SHA of `evals/behavioral-core.yaml`]
-- Results table:
-  | Category | Total | Pass | Fail | Pass Rate | Δ vs Prior Phase |
-  |----------|-------|------|------|-----------|------------------|
-  | [list each category from eval set] | | | | | |
-  | **Overall** | | | | | |
-- Failures (list each: eval ID, what failed, severity, fix-now vs defer rationale)
-- **A drop in pass-rate vs prior phase is a stop condition.** If overall or any category dropped → fix before advancing or document why the drop is acceptable.
-
-### [C] Cost Guardrail Check — *required if Architecture Contract defines a per-request cost budget*
-- Measured cost per request (or per-user-per-day, matching the budget unit): [$N.NN]
-- Budget ceiling: [$N.NN]
-- Within budget: [Yes / No — if No, this is a stop condition]
-
-### [A] Acceptance Gate
-- Exit criteria met: [Yes/No — cite each criterion]
-- Scope boundary respected: [Yes/No — list anything that must NOT have been built]
-
-### [A] Global Invariant Check *(use project's invariant checklist from Architecture Contract)*
-- [ ] [Invariant 1] — [PASS/FAIL]
-- [ ] [Invariant 2] — [PASS/FAIL]
-- [ ] ...
-- If ANY invariant is violated → FIX immediately. Do NOT proceed to next phase.
-
-### [C] Provider/Abstraction Enforcement — *include only if project uses provider abstractions*
-- grep for provider-specific imports outside abstraction layer: [results — must be empty]
-- grep for direct external calls bypassing abstraction: [results — must be empty]
-- If ANY violation is found → FIX before proceeding. Do NOT defer.
-
-### [C] Cross-Cutting Concern Scan — *required for phases with integration points or new endpoints*
-- Integration seams checked: [list each seam between this phase and prior phases — contract match? nulls handled? types compatible?]
-- Rate limits & caps: [list every new endpoint/action and its rate limit. If none defined → FLAG as gap]
-- Abuse vectors: [list at least 2 ways a malicious/careless user could exploit what was just built + mitigation]
-- Error propagation: [trace at least 1 failure path across a subsystem boundary — what happens?]
-- Auth/permission gaps: [list every new endpoint/action and confirm auth + authz checks exist]
-- Prior seam spot-check: [pick 1 integration seam from a prior phase — still correct after this phase's changes?]
-
-### [C] Class-Level Pattern Scan — *required if any bug was found during this phase*
-- Pattern identified: [description]
-- Codebase scan results: [N instances found, N fixed]
-- Remaining instances: [0 / list any deferred with rationale]
-
-### [C] Experience Test — *include only if phase has user-facing output*
-- Expected experience: [from Build Manifest experience test field]
-- Actual output: [show the real message, UI, or workflow the user would see]
-- Assessment: [Does it feel right? Warm/robotic? Helpful/generic? Premium/cheap?]
-- `→ HG decision:` Human evaluates whether the experience meets the bar. "Feels wrong" is a valid NO-GO.
-
-### [A] Test Cases (minimum 3)
-- [test 1: input → expected → actual → PASS/FAIL]
-- [test 2: input → expected → actual → PASS/FAIL]
-- [test 3: input → expected → actual → PASS/FAIL]
-
-### [A] Regression Scenarios *(from Build Manifest — specific, named scenarios)*
-- [scenario name from prior phase]: [expected outcome → actual → PASS/FAIL]
-- [scenario name from prior phase]: [expected outcome → actual → PASS/FAIL]
-
-### [A] Propagation *(MANDATORY if specs were modified)*
-- Were any specs modified in this phase? [Yes/No — list files]
-- If yes: which future phases depend on modified specs? [list each]
-- Are those phases impacted? [Yes/No — explain for each]
-- Were impacted phases flagged in Build Manifest? [Yes/No]
-- **If specs were modified and this section says "None" → FAILURE CONDITION**
-
-### [A] Pulse Check
-- Phase complete? [Yes/No]
-- Still aligned with Product Spec? [Yes/No]
-- Drift detected? [Yes/No — describe]
-- Future phases affected? [Yes/No — list which ones]
-- Propagation enforcement satisfied? [Yes — all changes propagated / No — list what remains]
-- **Deviation trend:** [This phase: N deviations. Prior phase: N. Trend: improving/stable/worsening]
-
-### [A] Module Inventory *(omission is a failure condition)*
-- Files created: [list]
-- Files modified: [list]
-- API routes added: [list]
-- DB migrations: [list schema changes]
-- Dependencies added: [list new packages]
-
-### [O] Decisions to Log
-- [list entries for decision-log.md, if any]
-```
+**The template lives in one place: [`templates/phase-report.md`](templates/phase-report.md).** Claude MUST use it when presenting results at every `[N]b: Verify` step. It includes the Acceptance Bar block that `scripts/check-bar.mjs` requires and the Failing-Test Receipts section (Phase Gate 11 and 12). (Until 2026-10-29 a second copy sat here and had fallen behind the file; D-027.)
 
 ---
 
@@ -2740,49 +2494,7 @@ For products with distinct supply and demand sides where the product brokers the
 
 ## APPENDIX H: COWORK SESSION TEMPLATE
 
-*Use this template when a build phase requires human-in-the-loop data collection, research, or manual enrichment that Claude assists with.*
-
-Some phases require the human and Claude to work together in real-time — looking up data, extracting information from websites, reviewing visual assets, etc. These sessions benefit from the same structure as build phases.
-
-```markdown
-## SESSION [N]: [Clear Scope Name]
-
-### Context
-[Why we're doing this. What project phase it supports.]
-
-### Your Job
-[One-sentence role statement for Claude]
-
-### What to Capture
-[Field-by-field list with "where to find it" notes]
-| Field | Source | Notes |
-|-------|--------|-------|
-|       |        |       |
-
-### Output Format
-[Exact structure — CSV columns, markdown table, JSON shape]
-
-### Workflow
-[Step-by-step sequence]
-1. Human does X
-2. Claude does Y
-3. Repeat for each item
-
-### Items to Process
-[Prioritized list with status column]
-| # | Item | Status |
-|---|------|--------|
-| 1 |      | Pending |
-
-### Error Handling
-- If item not found: [behavior]
-- If data is ambiguous: [behavior]
-- If source is down: [behavior]
-
-Let's start with item #1.
-```
-
-**When to use:** Vendor account setup, manual data enrichment (Zillow/Redfin lookups, competitor research), content review, visual asset evaluation, any task where Claude reads/processes but the human navigates.
+**The template lives in one place: [`templates/cowork-session.md`](templates/cowork-session.md).** Use it when a build phase needs the human and Claude working together in real time: data collection, research, manual enrichment, content review. (Until 2026-10-29 a second copy sat here and had fallen behind the file; D-027.)
 
 ---
 
@@ -2827,7 +2539,7 @@ When the human says "update the build protocol based on recent projects," Claude
 - What went wrong that ISN'T captured? (coverage gap)
 - Are there new reusable architecture patterns (Appendix G candidates)?
 - Are there new anti-patterns (Appendix A candidates)?
-- Are there new behavioral core patterns (Appendix B candidates)?
+- Are there new behavioral core patterns (`templates/behavioral-core.md` candidates)?
 
 **4. Propose changes:**
 - Present each proposed change with: what to change, why, which project triggered it
@@ -2836,36 +2548,12 @@ When the human says "update the build protocol based on recent projects," Claude
 
 **5. Version the update:**
 - Increment version (v1.0 → v1.1 for additions, v2.0 for structural changes)
-- Add entry to the changelog below
-- Update the "derived from" line at bottom with new project names
+- Add an entry at the top of `CHANGELOG.md` (the one changelog)
+- Update the "derived from" line at bottom with a neutral description of the new project (no project names, D-026)
 
 ### Changelog
 
-| Version | Date | Changes | Triggered By |
-|---------|------|---------|-------------|
-| v2.31 | 2026-07-22 | **Rule 25 — Green ≠ Correct: the silent-failure forensics a data/analysis audit must actually perform.** Rule 24 makes audits *fire*; Rule 25 defines what they must *catch*. CI passing, a health scan at "N/N", and "the job ran" verify *known-incident classes + syntactic success* — NOT semantic correctness, data completeness, or analytical soundness; green + a clean-looking table both sit happily on corrupted inputs and mis-specified methods. For any data-backed product, run these forensics **proactively** (don't wait for the founder to push), treating every plausible headline adversarially: **census input null-rates at rest** (a ~0% field is a DEAD axis silently producing nothing — → L31 §4b); **confirm every collapse/dedup/group key captures all varying entities** (a key omitting a varying entity silently blends records — spot-check the collapse ratio; ~10:1 = a blend bug — → L31 defects); **distrust "no signal / anti-predictive"** from selecting-on-realized-outcome (regression-to-mean → split-half — → L32 §4b); **distrust "too sparse / untestable"** (→ verify RAW volume — usually an upstream collapse/backfill bug); **one dominant factor = peak-seeking** (→ residualize before declaring a "king"); **test effects non-monotonically** (check whether an effect rises steadily with its driver rather than assuming it does); **compute real numbers before shipping outward-facing.** Deepened in **L31** (dead-column census · aggregation-blend · malformed-passthrough) + **L32 §4b** (empirical-validity forensics) + CLAUDE.md Key Rule. Lens count unchanged (36); rules → 25. | Data product build: nearly every founder push uncovered a real defect all the green checks missed — a collapse key that silently blended distinct entities, 100%-null swept columns, a "no signal" conclusion never checked with a split-half test, a "monolithic" conclusion never checked after controlling for the dominant factor, and a "too sparse" conclusion never checked against raw source volume. Joe: *"I don't want to always be the linchpin to catch these."* |
-| v2.30 | 2026-06-24 | **Rule 24 — the Build-Integrity Loop: milestone audits are push, not pull; the build never forgets an earlier step or decision.** Bob already had the pieces (Reconcile · Phase Gate · CTM · decision-log · A7 cadence · Rule-23 sweep) but they were **advisory/human-pulled**, so the founder kept *calling* audits and earlier capabilities/decisions silently drifted. Rule 24 makes the cadence **enforced + push-based**, tracked in `audit-ledger.json` that **gate-blocks**: **(a) trigger→audit map** — doc-edit→coherence sweep · phase-boundary→Anti-Forgetting Gate + mandatory Curated lens panel · named-gate→heavy audits (Independent Audit Panel re-fired for effectiveness · Rule-20 expert-demand checklist · real-world benchmark · full multi-agent coherence audit). **(b) Anti-Forgetting Gate** at every phase boundary: CTM-diff (no capability silently dropped) · decision-honor (build still honors every live decision-log decision) · finding-propagation (findings scanned backward against earlier phases). **(c)** `coherence-check.sh` gains a **class-7 code/contract scan** (the .md-only sweep's blind spot — immediately caught a stale `§2.4` + a dropped-shared-internal-library residue in a downstream project's `contracts/` that every prior `.md`-only audit missed) and is **wired as a git pre-commit hook** by `bob-init`. **Rule 20** gains a **real-world-benchmark frame** ("find the best real example a practitioner would cite — match it or beat it?") + "re-run the frame checklist at each milestone, not once." | Data product build: across one session the founder had to manually trigger three coherence audits, an effectiveness panel, a robustness sweep, and a real-world benchmark — every one should have auto-fired at a milestone. Joe: *"how do we upgrade bob so these iterations happen automatically… do we have proper steps that ensure we build step-by-step, recursive audits at each milestone, propagate findings, and don't forget earlier steps or core decisions?"* |
-| v2.29 | 2026-06-24 | **Rule 23 + `scripts/coherence-check.sh` — living-doc coherence is a TRIGGERED, MECHANICAL sweep, not a manual audit.** A living spec set drifts whenever a *shared identifier* restated across docs changes (version number, phase ID, decision ID, capability/subsystem code, section anchor §). Rule 23 has two halves: **(a)** propagate every shared-identifier change to all references in the *same* edit (index/secondary docs — CLAUDE.md, PROJECT-STATE, manifests, "synced through D-n" lines — lag first, get re-read last); **(b)** run a **Coherence Sweep** on a *trigger* — every version bump, every decision-log entry, every phase/code renumber, and as Pre-Build-Gate lens 1 — invoking `scripts/coherence-check.sh <docs-dir>` first so the human never hand-greps. The script (macOS bash-3.2-portable) harvests the mechanical drift classes: decision-log contiguity (gaps/dupes + highest-ID-vs-"synced-through" claims), version-string drift, §/D/P cross-ref inventory, retired-term residue (snapshot-doc + retirement-context filtered, review-list not hard-fail), and dated/secondary docs missing a "📸 snapshot" banner. Hard-fails only on contiguity gaps/dupes; everything else is a review list — the script harvests, the AI/human judges. Wired into Step 6.5a lens 1 + the core-ref footer. *(Changelog note: this table lags — rows v2.17–v2.28 live in the core-ref footer + `decision-log.md`, not back-filled here; that lag is itself the Rule-23 drift class, flagged for a future consolidation.)* | Data product dogfood: two consecutive sessions each needed a **manual** full cross-doc sync audit, and the second caught drift the first missed. Joe: *"seems like I'm manually doing a lot of checks and edits that should be part of the Bob NEW build process."* |
-| v2.16 | 2026-05-20 | **External research integrated into Bob's logic, dogfooded on Bob itself.** Pre-v2.16, Bob had exactly one external-research touchpoint (`A7f Capability Gap` in AUDIT, strategic-positioning level only) — by structure, Bob was inward-looking. Five changes: (1) **NEW Step 3a-pre Reference Scan** — mandatory for Standard/Heavy before architecture lock; scan 5-10 OSS repos, bias-toward-Reject Adopt/Defer/Reject matrix, Adopts must name a concrete insertion point. (2) **EVOLVE E3-pre Scoped Reference Scan** — size-gated (Large always, Medium for new subsystems/integrations/patterns). EVOLVE E3 also gains per-evolution folder `evolutions/{NNN-short-name}/` (Spec Kit borrow F33) and a named plan-mode → Execute hard gate (Cline borrow F34). (3) **AUDIT A7f split** into `A7f-capability` (existing positioning scan) + `A7f-implementation` (new mechanism-borrow scan, runs only on A7f-capability Rejects, biased toward Reject). (4) **Section 3 promotes "Orchestrate, don't reinvent"** from implicit ADR (D-003 + F32) to load-bearing principle with convergence-check + custom-build threshold; `tool-decisions.md` now mandates a "Considered orchestrating: [tool]" line per decision. (5) **Dogfood pass:** first A7f-implementation run was on Bob itself against the 9 strategically-Rejected tools in D-001 → 3 Adopts, 6 Reject/Defer, 3 convergence signals, meta-finding ("bias toward Reject or this step becomes noise") that is now baked into the prose for all three new scan steps. F33 + F34 shipped opportunistically; F35 (sharded rules — Cursor `.mdc` borrow, strongest single Adopt at 5-of-9 tool convergence) **Rejected on user review** per D-004 (single CLAUDE.md is the right shape for Bob's target user; convergence across tools is signal, not verdict) — now the canonical anchor for the bias-toward-Reject principle. D-001 gains addendum: strategic Reject ≠ mechanism Reject. Mirrored in `build-protocol-core.md` + new rule 14 (orchestrate, don't reinvent). | User challenge: *"Bob feels inward-looking. Tons of OSS repos with smart patterns; not hard for Claude to find the top 10 and grab the best. (1) Where in NEW/EVOLVE/AUDIT should this go? (2) Have we done it for Bob itself?"* Analysis confirmed: 1 of ~30+ steps had external scanning, only at strategic-positioning level. Approach was "dogfood (b) first, then ship protocol (a) informed by the meta-finding" — itself a meta-pattern now named in audit-log F47. |
-| v2.15 | 2026-05-20 | v2.15 closes the three v2.14 deferred items: (1) Per-phase Liveness check (F26) — Tier 1 phase-gate step, scoped to phase deltas. (2) Per-stack auth-token recipes (F27 reshaped from script to prose) — Clerk/NextAuth/Supabase/Auth0/custom JWT/session cookies. (3) `liveness-report.json` machine-readable artifact (F28) — versioned schema, append-not-overwrite. | User challenge: "why not do the deferred items now?" Honest review confirmed F26 was the actual fix for the v2.14 failure mode (catches dead functions the day they ship, not weeks later), F28 was trivial, F27 was reshapeable per D-003. |
-| v2.14 | 2026-05-20 | **A7j Liveness Audit added** — first A7 audit that executes code rather than reading it. Orchestrates Knip / Vulture+Ruff+deptry / Schemathesis / Playwright / Vitest+pytest / promptfoo. A7 categories restructured: two → three (static / live / external-fit). | User report: two functions in a downstream Bob-built product were silently broken; static review and spec-match passed but functions threw at first runtime invocation. |
-| v2.13 | 2026-05-20 | **Fresh-session adversarial re-audit — 16 Adopt items shipped across 7 milestones.** Audit run by a clean Claude Opus session with no involvement in v2.10–v2.12 to control for implementation bias. **M1 (onboarding):** README adds Step 0.5 "Before you start" with Terminal/git/xcode-select preflight (F18, F3); install one-liner now idempotent via `ln -sfn` + clone guard (F4). **M2 (scripts hardening):** `update bob` preflights non-symlink installs (F1); `bob-init.sh` preflights git user.name/user.email (F2). **M3 (protocol prose):** Behavioral Core worked example extended from 1-of-7 to all 7 sections — addresses the v2.11 half-fix that left 6 sections as jargon (F19); A7g stop condition rewritten as a first-class finding ("we cannot tell if this product is working") instead of escape-hatching to "EVOLVE candidate" (F17); Step [N+2]d Closing Checkpoint Summary template added (F21); CLAUDE.md self-effectiveness metric rephrased from tautological "passing" to descriptive "self-application count" (F16). **M4 (templates + portability):** new `templates/capability-traceability-matrix.md` with H/H++ hardening column (F7, F8); `bob-init.sh` writes `AGENTS.md` next to `CLAUDE.md` as cross-tool agent-instructions pointer (Codex/Cursor/Aider) — Bob-built projects no longer Claude-locked (F11). **M5 (supply chain):** `.github/workflows/scripts-ci.yml` runs shellcheck + bob-init smoke test + bob-doctor smoke test (F5); F6 (branch protection / signed commits) registered in audit-log as user-action checklist. **M6 (effectiveness):** `scripts/bob-stats.sh` auto-computes fix-commit ratio with paste-ready output (F15a); PR-back prompt now fires at Step [N+1]f + A7i + [N+2]c instead of only [N+2]c (F15b); `joe@joe.wang` documented as parallel channel (F15c). **M7 (housekeeping):** new `audit-log.md` registers F22 itself + 5 Defers + 1 informational + F6 user-action checklist; new `decision-log.md` records the 2 Rejects (D-001 Plandex/Roo/goose/Continue.dev influences not adopted; D-002 no full CTM for Bob itself). | Fresh-session re-audit explicitly checking whether v2.10–v2.12 verdicts were implementation-biased. v2.11/v2.12 verdicts held under re-inspection (F14). The new audit's value: surfaced UX gaps still present after v2.11 partial fixes (Step 2 worked example covered only 1 of 7 sections; non-engineer install assumed prior Terminal/git knowledge), structural weaknesses in v2.11's PR-back design (no auto-stats, single trigger point), an emerging AGENTS.md cross-tool convention not visible to v2.11, and Bob's own A7i protocol violation (no register for deferred items). 24 findings total: 16 Adopt (this release), 5 Defer (audit-log), 2 Reject (decision-log), 1 informational. |
-| v2.12 | 2026-05-20 | **Supply-chain trust + install health check (closes A7a/A7c deferred items from the v2.10 audit).** (1) **SECURITY.md adds a Supply Chain section** documenting Bob's trust model: maintainer commits to `scripts/` / `skill/SKILL.md` / install one-liner / SECURITY.md get extra review, new contributors land docs-only first, releases are tagged annotated for pinnability. User-side: cautious adopters can pin to a tag via `git clone --branch vX.Y --depth 1`. Verify canonical repo URL before running install. (2) **New `scripts/bob-doctor.sh`** — install health check that verifies skill symlink integrity, SKILL.md readability, protocol file resolution via the portable path form, and git repo state (remote, branch, divergence, dirty tree). Plain-English output so non-engineers can act on it. Surfaces dangling symlinks and divergence proactively instead of waiting for `/bob` to fail in Claude Code. (3) **README adds a Troubleshooting section** pointing to `bob-doctor.sh`. (4) **Annotated git tags** (`vX.Y`) — v2.11 tagged retroactively as the first pinnable release. | Two deferred items from the v2.10 dogfood pass: A7a flagged supply-chain risk on the public repo (PRs touching scripts/SKILL.md propagate to all users via `update bob`); A7c flagged the dangling-symlink case (user moves/deletes the Bob install and `/bob` fails at Claude Code's skill-loading layer, where Bob can't self-detect). |
-| v2.11 | 2026-05-20 | **Self-audit findings from v2.10 dogfooding — 8 Adopt items shipped.** (1) **Bob declares its own success metrics** in CLAUDE.md, dogfooding Step 1a — surfaces that 4 of 5 metrics are structurally unmeasured (no telemetry by design). (2) **Step [N+2]c PR-back template** — copyable issue template for users to self-report after shipping, the only feedback channel Bob has. (3) **Step 0.5a switched from "ask cold" to "Claude proposes from filesystem signals, user confirms"** — reads package.json / Cargo.toml / pyproject.toml / etc., proposes archetype with rationale, falls back to asking only when no signals exist. (4) **§11.3 Checkpoint Summary template** adds **Quality Bar self-check** field — Claude self-rates against §11.7 criteria before HG so the non-engineer can ride along on the judgment instead of evaluating cold. (5) **Step 2 Behavioral Core demystified** — plain-language framing + worked example before the 7-section drafting; addresses the most jargon-heavy step. (6) **SKILL.md `update bob` command made divergence-aware** — same class of silent-failure bug as today's pullall fix; now reports DIVERGED / UNCOMMITTED loudly instead of trying to pull. (7) **README "five audits" → "eight separate audits"** — stale post-v2.10. (8) **README `/help` verification step replaced** — couldn't confirm `/help` actually lists skills; safer instruction is "type `/bob` and confirm it responds." | Live v2.10 dogfood pass on bob-the-builder itself surfaced 8 Adopt items: 6 from external-fit audits (capability gap pointed to Bob's own unmeasured effectiveness + Behavioral Core UX friction; A7g flagged that Bob's Product Spec didn't satisfy Bob's own Step 1a requirement for success metrics) + 2 from internal-correctness pass (`update bob` was the same silent-failure class as pullall; README hardening claim went stale at the same time the new audits shipped). |
-| v2.10 | 2026-05-20 | **AUDIT mode A7 extended with External Fit & Value audits.** A7 now has two audit categories: internal correctness (A7a–A7e, unchanged: Security · Adversarial-Abuse · Integration Seam · Data Integrity · Spec-Code) and **external fit & value (new A7f–A7h)**: (f) **Capability Gap & Competitor Scan** — capability matrix vs 3-5 closest competitors, each gap gets Adopt / Defer / Reject verdict logged in `decision-log.md`; (g) **Effectiveness Signals** — pull success metrics from Product Spec, gather current signal, identify single highest-leverage improvement opportunity; skips pre-launch projects; (h) **UX Friction** — workflow walkthrough rating friction per step, surface "questions we keep asking the user" and "things the product knows but doesn't act on"; required when target audience includes non-engineers / end users. A7.0 scope map extended with new audits + their scoping rules (A7f skips internal-only/library/pipeline; A7g skips pre-launch; A7h skips engineer-only/backend-only). Existing A7f (Fix & Defer Register) renumbered → A7i; now also logs external-fit decisions in `decision-log.md`. CTM gains `H++` badge for capabilities hardened on both internal-correctness AND external-fit axes. Mirrored update in `build-protocol-core.md`. | Live audit pass on bob-the-builder itself: ran A1–A6 and surfaced hygiene/consistency fixes (version drift, hardcoded paths, missing standard files) but missed defensive depth and capability/competitor evolution. Joe flagged that AUDIT skewed cosmetic — A7 already covered internal correctness (security/adversarial/seam/data/spec-code via v2.8) but there was no procedure for external fit (are competitors shipping things we're missing? is the product actually working for users? where does the UX still hurt?). v2.7 did a one-off competitive feature import; v2.10 makes competitor/effectiveness/UX scans a recurring AUDIT step instead of a one-time exercise. |
-| v2.9 | 2026-05-15 | **Streamlined startup + skill-based invocation.** (1) Bob now ships as a Claude Code skill (`skill/SKILL.md`) — typing `/bob` in any project loads the protocol; no more pasting long bootstrap prompts. README updated with one-liner install + symlink. (2) **Startup UX streamlined to a single question.** Removed preliminary "is this the first time?" question (silent filesystem check on `docs/build-manifest.md` instead). Removed narrator-status announcement / "narrator on or terse?" question (Narrator Mode is silently ON by default; user can opt out with "terse mode" any time). Removed Journey Map "does this look right?" confirmation gate (now shown only AFTER NEW mode is selected by a first-time user, as context-setting, not as a precondition for picking a mode). The new flow: silent state detection → one narration block with project sensing + tentative complexity + housekeeping flags → mode menu → single question (which mode?). Mirrored in `build-protocol-core.md` MODES + Session Start Protocol, `build-protocol.md` Quick Start + §11.5 + Appendix C, and `skill/SKILL.md`. | (1) `/bob` couldn't be invoked from other projects — required pointing Claude at the repo manually. (2) Live test in a real project showed the startup asked 3 yes/no questions (first-time? narrator? does-the-map-look-right?) before the only one that mattered (which mode?). Friction for the non-engineer user the protocol is supposed to serve. |
-| v2.8 | 2026-05-15 | **AUDIT mode now runs both audit types, scoped to built surface area.** Inserted new Step A7 "Hardening Audits" between A6 (Execute Remediation) and the renumbered A8 (Re-entry). A7 always runs — but instead of a binary feature-complete gate, it begins with **A7.0 Hardening Scope Map**: per-audit split of "in scope now" (what's built) vs. "deferred" (and which build phase to revisit). Human can override the scope. A7a–A7e then run the standard 5 hardening audits (Security → Adversarial/Abuse → Integration Seam → Data Integrity → Spec-Code) on in-scope items only, fresh session per audit. **A7f registers deferred items into the Build Manifest** as inherited hardening obligations on future phases, so partial hardening mid-build doesn't leak. CTM gains an `H` (hardened) badge. A7 is explicitly re-invocable any time during the build as new subsystems ship; full-scope hardening still runs at Step [N+1] before launch. Mirrored update in `build-protocol-core.md`. | (1) Confusion that MODE: AUDIT only ran the macro doc-hierarchy audit (A1–A6) and treated the 5 hardening audits as an optional follow-up. (2) Original v2.8 draft used a binary feature-complete gate that was too rigid — Joe flagged that real projects want to harden auth/seams/data flows for built subsystems mid-build without redoing the rest, and need a mechanism so deferred items aren't forgotten. |
-| v1.0 | 2026-04-15 | Initial creation. 3 modes (NEW/AUDIT/EVOLVE), 5-layer doc hierarchy, 13 Claude guardrails, 8 appendices including Phase Report Template and Architecture Patterns Library. | Analysis of prior personal projects (a consumer AI app, a consumer task app, a data-analysis tool, strategy-research project) |
-| v1.1 | 2026-04-15 | Hardened enforcement language: Global Spec Lock (FAIL matrix), behavior drift examples, Acceptance Gate, Critical Architecture Decision, mandatory Global Invariant Check, grep-based provider enforcement, Module Inventory as failure condition. | Consumer task app 14-build-guide.md side-by-side comparison |
-| v1.2 | 2026-04-15 | Gap closure from self-test simulation: Capability Traceability Matrix, per-phase cross-cutting concern scan (integration seams, rate limits, abuse vectors, error propagation, auth gaps), experience testing, regression scenario specs, per-phase ChatGPT audit template, expanded hardening (5 audits: security + adversarial/abuse + integration seam + data integrity + spec-code consistency), phase-specific mandatory audit sections. | Consumer task app audit findings (5 passes of edge cases/holes despite functional code) |
-| v2.0 | 2026-04-15 | Structural overhaul: Complexity Assessment (Light/Standard/Heavy tracks). Self-adversarial review as default, second-model review optional. Deploy & Verify substep for integration phases. Class-level pattern scan in verification. Hot path definition + per-phase testing. Deviation count tracking as health metric. Debugging Protocol (structured failure recovery). Protocol Effectiveness Metrics. Minimum Viable Process (tiered step priority). Conditional Phase Report sections ([A]/[C]/[O] markers). Test type distinction (unit/integration/deployment). Split into core + full reference with extractable templates and case studies. | Consumer task app post-build analysis: 6-commit Twilio debug chain, 51-query class-level fix, non-declining deviation counts, production-only failures despite 166 passing tests |
-| v2.1 | 2026-04-15 | Seam and transition fixes from 3-mode simulation: Step 0 (Intake) for NEW mode — warm-start from existing materials. Step A7 (Re-entry) for AUDIT mode — explicit next-step guidance after remediation. Evolution Hardening Threshold — triggered at 5th Medium+ evolution, 3+ subsystem touches, Behavioral Core changes, or 6-month calendar. Mid-build reclassification rules for Complexity Assessment. Multiple concurrent evolutions guidance in E1. Template pointers in core reference. Session budget heuristics. | 3-mode simulation audit |
-| v2.2 | 2026-05-15 | **Best-practice gap closure (six changes, applied via Bob-on-Bob EVOLVE):** (1) Product Spec (Step 1a) — added success metrics + activation definition + non-goals + data classification. (2) New Step 2d (AI eval harness) — mandatory golden eval set of 10-30 input/expected pairs, LLM-as-judge + rubric scoring, re-run at every AI-touching phase gate. Drop in pass-rate is a stop condition. New `templates/eval-set.md`. (3) Architecture Contract (Step 3a) — added threat model (STRIDE/DFD), observability plan (logs/traces/metrics/alerts), rollback/kill-switch posture (feature-flag strategy), cost-budget guardrail. (4) Domain Specs (Step 4) — mandatory machine-readable contracts in `contracts/` (Zod/TS/OpenAPI/JSON Schema); new 4c adversarial review parallel to 1c/2c/3c. (5) Build Manifest (Step 5a) — mandatory rollback plan per phase entry. (6) Hooks (Step 6b) — promoted from "recommended" to **default-on with opt-out** for non-engineer users; default set: format + typecheck/build + block-destructive. Phase Report template adds `[C] AI Eval Results`, `[C] Cost Guardrail Check`, and rollback verification line. | Self-audit against 2026 spec-driven dev best practices: missing eval framework for AI products, prose-only integration contracts unenforceable, security/observability deferred to hardening, no per-phase rollback discipline. |
-| v2.3 | 2026-05-15 | **Narrator Mode for non-engineer users (applied via Bob-on-Bob EVOLVE):** New Foundation §11 "Narration Protocol" — 10 rules Claude must follow when guiding a first-time user, plus a standardized Preamble Template (used at every step entry), Checkpoint Summary Template (used after every step completion), and Journey Map (shown before mode selection). New Appendix J "Glossary" — plain-English definitions of every term the protocol uses. Mode menu expanded from terse A/B/C to a what/when/time table. Session Start Protocol (Appendix C) branched into first-time-user vs. resuming-user paths. Build Manifest (Step 5b) gained a visual progress tracker (`▓▓▓░░░░ 3/7`) recited at session start. Root CLAUDE.md instructs Claude to enable Narrator Mode by default. Narrator Mode is ON by default; user can disable with "terse mode". | Self-audit found no clear walkthrough capability for non-engineer users — protocol assumed Claude would narrate without explicit instruction, leaving UX inconsistent. |
-| v2.7 | 2026-05-15 | **Feature-level competitive borrowing (8 tactical features from GitHub Spec Kit, Anthropic Skills, Cursor/Windsurf rules, Aider, Shape Up, Michael Nygard's ADR pattern):** (1) **Appendix L — Integration Playbooks** with 11 services (Stripe, Supabase Auth, Resend, Twilio, Anthropic SDK, OpenAI, pgvector, Inngest, Sentry, PostHog, Vercel AI Gateway) — each: env vars, provider abstraction shape, webhook/idempotency rules, common failure modes, eval/test that proves it works. (2) **Plan mode** mandatory at Step [N]a for M/L phases — leverages Claude Code's built-in plan mode for mechanical enforcement of "plan before code." (3) **Skill Leverage Map (§10.5)** — explicit table mapping Bob steps to Anthropic skills (vercel:*, claude-api, security-review). Bob owns methodology; skills own current tactical detail. (4) **ADR format for Appendix D / decision-log** — Michael Nygard's pattern (Title / Status / Context / Decision / Alternatives / Consequences). Status field (Proposed / Accepted / Deprecated / Superseded) makes the log scannable. (5) **Test-first integration tests** mandatory at Step [N]a — write the hot-path test before implementation; test must initially fail; parallels AI eval set for deterministic code. (6) **Step 4a-pre Breadboarding** — Shape Up's boxes-and-arrows flow sketch before formal domain specs. Output: `docs/breadboard.md` Mermaid flowchart. (7) **Never-do rules** mandatory in Step 6a CLAUDE.md template (Cursor/Windsurf pattern) — explicit negative constraints with concrete defaults baked into bob-init.sh. (8) **Repo map** generated at every Reconcile by `scripts/repo-map.sh` (Aider pattern) — compressed view of folder structure + top-level files Claude reads at session start instead of grep'ing source. | Feature-level audit of GitHub Spec Kit, Anthropic Skills, Cursor/Windsurf rules, Aider, Shape Up, and ADRs identified specific tactical patterns Bob was missing — most addressing how integration-specific friction and decision-amnesia accumulate as projects grow past Phase 5. |
-| v2.6 | 2026-05-15 | **Distribution + invocation polish (post-public-release iteration):** (1) Step 6a now MANDATES that the project-level CLAUDE.md include a Bob protocol reference line as its first section — without it, "invoke once and auto-resume" doesn't actually work; this was a real gap that broke session continuity. (2) New `scripts/bob-init.sh` — scaffold script that generates folder structure (`docs/`, `contracts/`, `evals/`, `scripts/`, `tests/`, `src/`, `.claude/`), writes the Bob-referencing CLAUDE.md, writes `.claude/settings.json` with placeholder hooks, writes `.gitignore` + `.env.example`, and runs `git init`. Safe to re-run. (3) Step 6c now invokes the scaffold script as preferred path; manual fallback retained. (4) ASCII journey map in §11.4 replaced with Mermaid flowchart (renders natively on GitHub; color-coded by phase). README adds same Mermaid + a new "How often do I invoke Bob?" section answering the most common new-user question. | Public release exposed the invocation/auto-resume gap and the visual deficiency of the ASCII journey map. |
-| v2.5 | 2026-05-15 | **Spec-extraction depth + narrator quality (applied via Bob-on-Bob mini-build, 4 phases):** **Narrator upgrades:** new §11.7 "Quality Bar Templates" defines what "done" looks like per artifact (Product Spec, Behavioral Core, Architecture Contract, Domain Specs, Build Manifest) with strong/weak examples and stop-iterating criteria — closes the gap where humans couldn't self-evaluate when to advance. New §11.8 mandates "💎 Why this matters" narration in Checkpoint Summary template — sells the value of each artifact in product-leader language. New §11.9 "Confusion-Catch Phrases" lists specific trigger phrases ("I'll just trust you", "sounds good" without engagement, "skip ahead") + response template with 3 explicit options (explain differently / show example / make a guess + flag). **Spec extraction depth:** new Step 1a-pre (Structured Interview + Day-in-the-Life) — mandatory when initial description is thin or ambiguous, runs a JTBD-style 12-question interview + a typical-day walkthrough to extract what's actually in the user's head before Claude drafts. Outputs `docs/interview-notes.md` + `docs/day-in-the-life.md`. New Step 1d "Stability Loop" — re-runs stress-test + adversarial review against revised spec until findings stabilize, capped at 3 iterations (signal that the product idea itself is unstable if not). **HG trimming:** Build Manifest init (5b) and Repo init (6c) auto-advance with status updates instead of HG pause — removes friction at the mechanical steps. | Audit of human-input balance, spec iteration depth, and narrator quality identified four gaps: (1) no interview framework when input is thin, (2) no quality bar to advance, (3) single-pass stress test fails to catch new gaps introduced by fix iterations, (4) narrator explained "what we have" but not "what good looks like" or "why this matters." |
-| v2.4 | 2026-05-15 | **Project archetype coverage (applied via Bob-on-Bob mini-build, 4 phases):** **Tier 1** — New Step 0.5 "Project Profile" routes the project through Appendix K addenda; new Appendix K "Project Profiles" with 15 archetypes (K1-K15: AI Chat, B2B Tool, RAG, Vertical SaaS, Agent, Background Jobs, E-commerce, Marketplace, Content/Community, Real-time, Mobile, Extension, Voice, ETL, SEO Site) — additive-only addenda that never override core protocol. Three new architecture patterns: G11 RAG Pipeline (chunking/embedding/reranker/eval), G12 Agent / Tool-Use Loop (tool contracts, max-step bound, tool eval), G13 Background Job Architecture (orchestrator choice, idempotency, dead letter). **Tier 2** — Architecture Contract (Step 3a) gained accessibility posture, internationalization posture, and compliance scope (GDPR/CCPA/HIPAA/SOC2/PCI/None). Build Manifest (Step 5b) gained success-metric instrumentation map (every Product Spec success metric must map to an analytics event + build phase + dashboard, closing the "metric defined but never wired" gap). **Tier 3** — Five additional architecture patterns for less common archetypes that may show up later: G14 Mobile App, G15 Browser Extension, G16 Real-time/Collaborative, G17 Voice/Audio Pipeline, G18 Marketplace/Two-Sided Platform. Pattern Library gains a maintenance note flagging that tool-specific advice in G11+ moves fast. | Self-audit against common 2026 Claude-Code project archetypes found three gaps: no routing layer for archetype-specific considerations; missing patterns for the most common AI-product archetypes (RAG, Agents, Jobs); a11y/i18n/compliance treated as implicit; success metrics defined in Product Spec but never instrumented during build. |
+Moved to [`CHANGELOG.md`](CHANGELOG.md) on 2026-10-29 (D-027): one changelog for all of Bob, newest version first.
 
 ---
 

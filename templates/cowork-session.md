@@ -3,6 +3,8 @@
 > Use when a build phase requires human-in-the-loop data collection, research, or manual enrichment that Claude assists with.
 > Common uses: vendor account setup, manual data enrichment, competitor research, content review, visual asset evaluation.
 
+Some phases require the human and Claude to work together in real-time — looking up data, extracting information from websites, reviewing visual assets, etc. These sessions benefit from the same structure as build phases.
+
 ---
 
 ## SESSION [N]: [Clear Scope Name]
@@ -40,3 +42,5 @@
 - If source is down: [behavior]
 
 Let's start with item #1.
+
+**When to use:** Vendor account setup, manual data enrichment (Zillow/Redfin lookups, competitor research), content review, visual asset evaluation, any task where Claude reads/processes but the human navigates.
