@@ -3,6 +3,7 @@
 id: R-M1-1
 what: "<a short sentence>"
 module: M1
+milestone: B1   # the milestone this row sits under (empty if none)
 capability: C1
 owner: "<who>"
 date: "<YYYY-MM-DD, or leave empty and give a trigger>"

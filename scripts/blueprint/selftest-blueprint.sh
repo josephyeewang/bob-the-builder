@@ -53,7 +53,20 @@ rules:
 capabilities_adopted: [C1]
 EOF
   cat > "$d/docs/blueprint/blueprint.yaml" <<'EOF'
+product: Weekplan
 as_of: "2031-03-02"   # a made-up year, so the test never collides with real dates
+summary:
+  risk: "The editor row may slip past the first milestone."
+  read: "On track for a first saved plan, if the editor lands."
+steps:
+  - n: "1"
+    name: Type the week
+    owner: M1
+    supports: [M2]
+  - n: "2"
+    name: Save the plan
+    owner: M2
+    supports: []
 chapters:
   - name: Product
     path: docs/product-spec.md
@@ -76,6 +89,28 @@ modules:
     name: Editor
     plane: Do
     role: "Where the week is typed"
+    parts:
+      - name: Typing
+        light: green
+        line: "types and saves"
+      - name: Dragging
+        light: amber
+        line: "drag is half built"
+    stage:
+      usable_on: "2031-03-15"
+      green_on: "2031-03-20"
+      reads_from: []
+      done_test: "yes"
+  - id: M2
+    name: Store
+    plane: Keep
+    role: "Keeps every saved plan"
+    parts: []
+    stage:
+      usable_on:
+      green_on:
+      reads_from: [M1]
+      done_test: "no"
 capabilities:
   - id: C1
     name: Drag to reschedule
@@ -102,6 +137,7 @@ EOF
 id: R-M1-1
 what: "Drag a task to another day"
 module: M1
+milestone: B1
 capability: C1
 owner: lead
 date: "2031-03-15"
@@ -210,6 +246,92 @@ expect "block text keeps its lines" 0 '"t":"one\\ntwo\\n"' -- yl $'t: |\n  one\n
 expect "a tab for indentation is refused" 1 "t.yaml:2: tab" -- yl $'a:\n\tb: 1'
 expect "a flow map is refused"            1 "flow maps"     -- yl 'a: {b: 1}'
 expect "a duplicate key is refused"       1 'duplicate key "a"' -- yl $'a: 1\na: 2'
+
+echo "render-blueprint.mjs — the page builder (phone view and rich page)"
+RB="$HERE/render-blueprint.mjs"
+NOW="2031-03-02T12:00:00Z"
+render() { local d="$1"; shift; node "$RB" "$d" --commit abc1234def --now "$NOW" --out "$d/pages" "$@"; }
+product "$TMP/r1"
+expect "clean product renders" 0 "wrote docs/blueprint/BLUEPRINT.md" -- render "$TMP/r1"
+PV="$TMP/r1/docs/blueprint/BLUEPRINT.md"
+expect "phone view header: as of [date], built from [commit]" 0 'As of 2031-03-02, built from `abc1234def`' -- cat "$PV"
+expect "phone view draws the map as mermaid text" 0 '^flowchart TB' -- cat "$PV"
+expect "phone view folds with <details>" 0 '^<details><summary>8 · More detail</summary>' -- cat "$PV"
+expect "summary generated (counts per light, target dates)" 0 'Overall health.*Amber 1 · ○ Red 0 · ◌ Not scored 1' -- cat "$PV"
+expect "judgment fields rendered from blueprint.yaml summary" 0 'Biggest risk:\*\* The editor row may slip' -- cat "$PV"
+expect "product name comes from blueprint.yaml, not the folder" 0 '^# Weekplan: Blueprint & Roadmap$' -- cat "$PV"
+expect "map light = the worst part (green + amber → amber)" 0 '<br/>Where the week is typed<br/>◐ Amber"\]$' -- cat "$PV"
+expect "module with no parts is not scored" 0 '<br/>Keeps every saved plan<br/>◌ Not scored"\]$' -- cat "$PV"
+expect "map draws the loop path from the steps" 0 '^  n0 -->\|"1 · Type the week"\| n1$' -- cat "$PV"
+expect "card head: owns step n" 0 '^### `M1` · \*\*Editor\*\* · Do · ◐ Amber · owns step 1$' -- cat "$PV"
+expect "card field 0: step strip, takes in, hands on" 0 '\(a\) The step strip:\*\* ◯ 1 Type the week · ● 2 Save the plan' -- cat "$PV"
+expect "card field 0: takes in from the previous step's owner" 0 'Takes in:\*\* Type the week, from `M1`, at step 2' -- cat "$PV"
+expect "card field 5: parts table" 0 '^\| Dragging \| ◐ Amber \| drag is half built \|$' -- cat "$PV"
+expect "card field 7: usable on / green on from the stage" 0 'Usable on:\*\* Sat 15 Mar 2031 · \*\*Green on:\*\* Thu 20 Mar 2031' -- cat "$PV"
+expect "stage table generated" 0 '^\| `M1` Editor \| Sat 15 Mar 2031 \| Thu 20 Mar 2031 \| nothing \| yes \| `R-M1-1` \| Dragging \|$' -- cat "$PV"
+expect "rows sit under their milestone" 0 '^<details><summary>Rows under B1 \(1\)</summary>$' -- cat "$PV"
+expect "plan generated (milestone, estimate, slip)" 0 'Estimate:\*\* Thu 20 Mar 2031, if the editor row merges' -- cat "$PV"
+expect "card 'Next' field generated from the row file" 0 '`Sat 15 Mar 2031:` Drag a task to another day `R-M1-1`' -- cat "$PV"
+expect "capability index generated" 0 '^\| `C1` \| Drag to reschedule \| `M1` \| proposed \(adopted\) \| `R-M1-1` \| planned \|$' -- cat "$PV"
+expect "rich page and history page written" 0 "" -- test -s "$TMP/r1/pages/index.html" -a -s "$TMP/r1/pages/history.html"
+expect "rich page stamp: built from main at [commit], [time]" 0 'built from main at <code>abc1234def</code>, 2031-03-02 12:00 UTC' -- cat "$TMP/r1/pages/index.html" "$TMP/r1/pages/history.html"
+expect "fresh stamp (now) keeps the header unred" 0 '<html lang="en" class="fresh">' -- cat "$TMP/r1/pages/index.html"
+expect "fresh build: the served HTML has no red notice" 0 "" -- bash -c '! grep -q "<p id=\"stale-note\"" "$1"' _ "$TMP/r1/pages/index.html"
+expect "fresh build, scripts off: a neutral freshness note" 0 "<noscript><p class=\"neutral\">Freshness can't be checked here" -- cat "$TMP/r1/pages/index.html"
+# byte-identical: render twice, compare every output
+cp "$PV" "$TMP/r1-pv1"; cp "$TMP/r1/pages/index.html" "$TMP/r1-ix1"; cp "$TMP/r1/pages/history.html" "$TMP/r1-hi1"
+render "$TMP/r1" >/dev/null
+expect "same input twice → byte-identical phone view" 0 "" -- cmp "$TMP/r1-pv1" "$PV"
+expect "same input twice → byte-identical rich page" 0 "" -- cmp "$TMP/r1-ix1" "$TMP/r1/pages/index.html"
+expect "same input twice → byte-identical history page" 0 "" -- cmp "$TMP/r1-hi1" "$TMP/r1/pages/history.html"
+expect "no wall clock without --now: two builds a second apart match" 0 "" -- bash -c 'node "$1" "$2" --commit abc1234 --out "$3/a" >/dev/null && sleep 1 && node "$1" "$2" --commit abc1234 --out "$3/b" >/dev/null && cmp "$3/a/index.html" "$3/b/index.html"' _ "$RB" "$TMP/r1" "$TMP/r1nc"
+expect "no build time given → header red (fail safe)" 0 '<html lang="en" class="stale">' -- cat "$TMP/r1nc/a/index.html"
+# planted: a stamp over 2 hours old turns the header red, on both pages; 1 hour old does not
+product "$TMP/r2"; render "$TMP/r2" --built-at "2031-03-02T09:59:00Z" >/dev/null
+expect "planted old build stamp (2 h 1 min) → red header on the rich page" 0 '<html lang="en" class="stale">' -- cat "$TMP/r2/pages/index.html"
+expect "planted old build stamp → red header on the history page" 0 '<html lang="en" class="stale">' -- cat "$TMP/r2/pages/history.html"
+expect "planted old build stamp → the red note is shown" 0 '<p id="stale-note">' -- cat "$TMP/r2/pages/index.html"
+render "$TMP/r2" --built-at "2031-03-02T11:00:00Z" >/dev/null
+expect "a 1-hour-old stamp stays unred" 0 '<html lang="en" class="fresh">' -- cat "$TMP/r2/pages/index.html"
+# planted: markup and a <script> tag in the data render as plain text
+product "$TMP/r3"
+sed -i.bak 's|^what: .*|what: "<script>alert(1)</script><b>bold</b> \| [x](javascript:alert(2))"|' "$TMP/r3/docs/blueprint/rows/R-M1-1.yaml"
+sed -i.bak 's|^    role: .*|    role: "<img src=x onerror=alert(3)> \\" quote `tick` #hash"|' "$TMP/r3/docs/blueprint/blueprint.yaml"
+render "$TMP/r3" >/dev/null
+for f in pages/index.html pages/history.html docs/blueprint/BLUEPRINT.md; do
+  expect "planted <script> and tags in data stay text in $f" 0 "" -- bash -c '! grep -qiE "<script>alert|<img src|<b>bold" "$1"' _ "$TMP/r3/$f"
+done
+expect "planted <script> is escaped, visible text, on the rich page" 0 '&lt;script&gt;alert\(1\)&lt;/script&gt;&lt;b&gt;bold&lt;/b&gt;' -- cat "$TMP/r3/pages/index.html"
+expect "the rich page holds exactly one script, the builder's own" 0 '^1$' -- bash -c 'grep -o "<script" "$1" | wc -l | tr -d " "' _ "$TMP/r3/pages/index.html"
+expect "the page's own script is pinned by the page's security policy" 0 "script-src 'sha256-" -- cat "$TMP/r3/pages/index.html"
+expect "planted markup is escaped in the phone view" 0 '&lt;script&gt;alert\(1\)&lt;/script&gt;' -- cat "$TMP/r3/docs/blueprint/BLUEPRINT.md"
+expect "planted quote and tag stay inside the mermaid label" 0 'n0\["<code>M1</code> · <b>Editor</b><br/>#lt;img src=x onerror=alert\(3\)#gt; #quot; quote #96;tick#96; #35;hash<br/>' -- cat "$TMP/r3/docs/blueprint/BLUEPRINT.md"
+expect "no outside scripts, fonts or stylesheets" 0 "" -- bash -c '! grep -qiE "<(script|link|img)[^>]+(src|href)=|@import|url\(" "$1" "$2"' _ "$TMP/r1/pages/index.html" "$TMP/r1/pages/history.html"
+expect "dark mode tokens come from visual-devices.md" 0 'prefers-color-scheme: dark' -- cat "$TMP/r1/pages/index.html"
+# planted: invalid data → exit 2, nothing written
+product "$TMP/r4"; sed -i.bak '/done_when:/d' "$TMP/r4/docs/blueprint/rows/R-M1-1.yaml"
+expect "planted invalid data (row missing done-when) → exit 2" 2 'missing "done_when"' -- render "$TMP/r4"
+expect "invalid data writes no phone view" 0 "" -- test ! -e "$TMP/r4/docs/blueprint/BLUEPRINT.md"
+product "$TMP/r6"; sed -i.bak 's/light: amber/light: red/' "$TMP/r6/docs/blueprint/blueprint.yaml"; render "$TMP/r6" >/dev/null
+expect "planted red part → the module turns red" 0 '<br/>Where the week is typed<br/>○ Red"\]$' -- cat "$TMP/r6/docs/blueprint/BLUEPRINT.md"
+product "$TMP/r7"; sed -i.bak 's/light: amber/light: purple/' "$TMP/r7/docs/blueprint/blueprint.yaml"
+expect "planted unknown light word → exit 2" 2 'light "purple" is not one of green, amber, red' -- render "$TMP/r7"
+product "$TMP/r8"; sed -i.bak '/^product:/d' "$TMP/r8/docs/blueprint/blueprint.yaml"
+expect "planted missing product name → exit 2" 2 'missing "product"' -- render "$TMP/r8"
+product "$TMP/r9"; sed -i.bak '/^  read:/d' "$TMP/r9/docs/blueprint/blueprint.yaml"
+expect "planted summary missing its one-line read → exit 2" 2 'summary: missing "read"' -- render "$TMP/r9"
+product "$TMP/r10"; sed -i.bak 's/usable_on: "2031-03-15"/usable_on: "15 March"/' "$TMP/r10/docs/blueprint/blueprint.yaml"
+expect "planted stage date not YYYY-MM-DD → exit 2" 2 '"usable_on" must be a date' -- render "$TMP/r10"
+product "$TMP/r11"; sed -i.bak 's/^milestone: B1/milestone:/' "$TMP/r11/docs/blueprint/rows/R-M1-1.yaml"; render "$TMP/r11" >/dev/null
+expect "a row under no milestone is still shown" 0 '^#### Rows under no milestone$' -- cat "$TMP/r11/docs/blueprint/BLUEPRINT.md"
+product "$TMP/f1"; sed -i.bak 's/usable_on: "2031-03-15"/usable_on: "2031-03-16"/' "$TMP/f1/docs/blueprint/blueprint.yaml"
+printf 'Usable from 2031-03-16.\n' >> "$TMP/f1/docs/domains/M1.md"
+expect "a stage date (owned only by modules[].stage) re-typed in a chapter fails the fact-twice check" 1 'date "2031-03-16"' -- node "$CHECK" "$TMP/f1"
+product "$TMP/r5"; printf 'extra: &anchor x\n' >> "$TMP/r5/docs/blueprint/blueprint.yaml"
+expect "planted unsupported YAML → exit 2" 2 "anchors" -- render "$TMP/r5"
+expect "a bad --now is a setup error" 2 "must be an ISO time" -- node "$RB" "$TMP/r1" --now yesterday --out "$TMP/r1/pages"
+expect "the template itself renders" 0 "wrote docs/blueprint/BLUEPRINT.md" -- node "$RB" "$TMP/tpl" --commit 0000000 --now "$NOW" --out "$TMP/tpl/pages"
+expect "the rendered fixture still passes the fact-twice check" 0 "no owned fact typed twice" -- node "$CHECK" "$TMP/r1"
 
 echo ""
 echo "selftest-blueprint: $PASS passed, $FAIL failed"

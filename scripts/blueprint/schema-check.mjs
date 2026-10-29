@@ -17,7 +17,9 @@ import { fileURLToPath } from 'node:url';
 import { parseYaml, YamlLiteError } from './yaml-lite.mjs';
 
 // field: 'r' required (may not be empty) · 'o' optional (key may be absent or empty) · 'k' key required, may be empty
-// a nested object describes each item of a list.
+// a nested object describes each item of a list; map({...}) describes a nested map (the key is required).
+const IS_MAP = Symbol('map');
+export const map = (shape) => ({ ...shape, [IS_MAP]: true });
 export const SCHEMA = {
   'decided.yaml': {
     goal: 'r', for_whom: 'r',
@@ -30,20 +32,28 @@ export const SCHEMA = {
     exit_tests: { milestone: 'r', test: 'r', passes_when: 'r' },
   },
   'blueprint.yaml': {
+    product: 'r',
     as_of: 'r',
+    summary: map({ risk: 'r', read: 'r' }), // the judgment fields, written by the daily roadmap change
+    steps: { n: 'r', name: 'r', owner: 'r', supports: 'k' }, // the loop's steps (a pipeline product: its stages)
     chapters: { name: 'r', path: 'r' },
     milestones: { id: 'r', name: 'r', estimate: 'r', condition: 'o', slips: 'k' },
-    modules: { id: 'r', name: 'r', plane: 'r', role: 'r' },
+    modules: {
+      id: 'r', name: 'r', plane: 'r', role: 'r',
+      parts: { name: 'r', light: 'r', line: 'r' }, // the module's light is generated: the colour of its worst part
+      stage: map({ usable_on: 'o', green_on: 'o', reads_from: 'k', done_test: 'o' }),
+    },
     capabilities: { id: 'r', name: 'r', module: 'r', maturity: 'r', row: 'o' },
     competitors: { id: 'r', name: 'r', group: 'r', one_liner: 'r', last_checked: 'r', recheck_by: 'r' },
     research: 'k',
     handwritten: 'o',
   },
-  row: { id: 'r', what: 'r', module: 'r', capability: 'o', owner: 'r', date: 'o', trigger: 'o', done_when: 'r', status: 'r', receipts: 'k' },
+  row: { id: 'r', what: 'r', module: 'r', milestone: 'k', capability: 'o', owner: 'r', date: 'o', trigger: 'o', done_when: 'r', status: 'r', receipts: 'k' },
 };
 const STATUS = new Set(['planned', 'building', 'done', 'not done', 'dropped']);
 const ISO = /^\d{4}-\d{2}-\d{2}$/;
-const DATE_FIELDS = new Set(['as_of', 'estimate', 'last_checked', 'recheck_by', 'date']);
+const DATE_FIELDS = new Set(['as_of', 'estimate', 'last_checked', 'recheck_by', 'date', 'usable_on', 'green_on']);
+export const LIGHT_WORDS = new Set(['green', 'amber', 'red']);
 
 const empty = (v) => v === null || v === undefined || (typeof v === 'string' && v.trim() === '') || (Array.isArray(v) && v.length === 0);
 
@@ -55,6 +65,11 @@ export function checkShape(value, shape, where, out) {
   for (const [key, rule] of Object.entries(shape)) {
     const has = Object.prototype.hasOwnProperty.call(value, key);
     const v = value[key];
+    if (typeof rule === 'object' && rule[IS_MAP]) {
+      if (!has) { out.push(`${where}: missing "${key}" (a map of fields)`); continue; }
+      checkShape(v, rule, `${where} ${key}`, out);
+      continue;
+    }
     if (typeof rule === 'object') {
       if (!has) { out.push(`${where}: missing "${key}" (a list)`); continue; }
       if (v === null) continue; // an empty list is allowed; required items are a product decision, not a shape one
@@ -66,6 +81,9 @@ export function checkShape(value, shape, where, out) {
     if (rule === 'k' && !has) out.push(`${where}: missing "${key}" (may be empty, but the field must be there)`);
     if (has && DATE_FIELDS.has(key) && typeof v === 'string' && !/^\s*<.*>\s*$/.test(v) && v.trim() && !ISO.test(v.trim())) {
       out.push(`${where}: "${key}" must be a date written YYYY-MM-DD, not "${v}"`);
+    }
+    if (has && key === 'light' && typeof v === 'string' && !/^\s*<.*>\s*$/.test(v) && !LIGHT_WORDS.has(v.trim())) {
+      out.push(`${where}: light "${v}" is not one of green, amber, red`);
     }
   }
   for (const key of Object.keys(value)) {

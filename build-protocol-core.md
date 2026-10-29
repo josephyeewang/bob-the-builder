@@ -331,6 +331,6 @@ If Tier 2-3 skipped during build → MUST run at hardening.
 
 ---
 
-*Core Reference for Build Protocol v2.43 — 2026-10-29 (v2.40 2026-09-18; D-016…D-021 additions 2026-10-27, D-022…D-026 2026-10-28, D-027…D-029 2026-10-29; see `decision-log.md`)*
+*Core Reference for Build Protocol v2.44 — 2026-10-29 (v2.40 2026-09-18; D-016…D-021 additions 2026-10-27, D-022…D-026 2026-10-28, D-027…D-029 2026-10-29; see `decision-log.md`)*
 
 *Release notes for every version: `CHANGELOG.md` (the one changelog, D-027).*

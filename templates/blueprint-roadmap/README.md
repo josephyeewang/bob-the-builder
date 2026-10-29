@@ -7,7 +7,7 @@ behaviour and architecture documents are chapters that hold depth and link to th
 |---|---|---|
 | `decided.yaml` | the goal, objectives and targets, "not doing", who it's for, the rules, adopted capabilities | only a decision the owner approves, with its decision-log entry in the same change |
 | `exit-tests.yaml` | each milestone's pass/fail exit test (files in `tests/exit/` only) | only with the owner's approval |
-| `blueprint.yaml` | milestones, dates and slips, modules, capabilities, competitors, research, chapter paths, the as-of date | the daily roadmap change |
+| `blueprint.yaml` | the product name, the summary's judgment fields (risk, one-line read), the loop's steps, milestones, dates and slips, modules with their part lights and stage dates, capabilities, competitors, research, chapter paths, the as-of date | the daily roadmap change |
 | `rows/<row-id>.yaml` | one roadmap row each | the change whose task names that row |
 | `front-page.md` | the front page, the read for deciding: sections 0 to 8 and R, with their [C]/[G]/[O] marks | its generated parts by the page builder only; the rest by the daily roadmap change |
 | `history-page.md` | the second page, "History & evidence": appendices A to M and the Z archive, each with its frozen banner and a stable anchor | frozen blocks never; the rest by the daily roadmap change |
@@ -27,6 +27,11 @@ Two checks keep it true; run both in the product's tests:
 
 - `node <bob>/scripts/blueprint/schema-check.mjs .`: every file has its fields.
 - `node <bob>/scripts/blueprint/fact-twice-check.mjs .`: no owned fact is typed again in a chapter or card.
+
+The page builder makes the pages from these files and refuses data that fails the schema check:
+`node <bob>/scripts/blueprint/render-blueprint.mjs . --commit <sha> --now <ISO time> --out <dir>` writes the phone
+view (`docs/blueprint/BLUEPRINT.md`, saved in the repo, never hand-edited) and the rich page (`<dir>/index.html`,
+`<dir>/history.html`, built, not saved in the repo). Same input, byte-identical output.
 
 The files use a small part of YAML (maps, lists, quoted or plain text, `|` blocks, comments); anything else is
 refused with its line number. Why: `decision-log.md` D-029.
