@@ -27,7 +27,8 @@ if [ -f .bob/installed.json ] && grep -Eq '"commit_sweep"[[:space:]]*:[[:space:]
 
 OUT="$(mktemp "${TMPDIR:-/tmp}/bob-commit-sweep.XXXXXX")"
 SNAP=""
-# shellcheck disable=SC2329  # called by the EXIT trap on the next line
+# cleanup is called by the EXIT trap on the next line (shellcheck 0.9 says SC2317, 0.10+ SC2329).
+# shellcheck disable=SC2317,SC2329
 cleanup() { rm -f "$OUT"; [ -n "$SNAP" ] && rm -rf "$SNAP"; }
 trap cleanup EXIT
 

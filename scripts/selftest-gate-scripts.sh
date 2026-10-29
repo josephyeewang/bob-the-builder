@@ -205,7 +205,13 @@ CP="$HERE/hooks/config-protection.js"; CPD="$TMP/cp"; mkdir -p "$CPD"
 echo '{}' > "$CPD/.eslintrc.json"; : > "$CPD/.eslintignore"; echo '{}' > "$CPD/tsconfig.json"
 edit_hook() { node -e 'process.stdout.write(JSON.stringify({tool_name:"Edit",tool_input:{file_path:process.argv[1]}}))' "$1" | node "$CP" >/dev/null; }
 expect "editing an existing lint config -> BLOCKED" 2 "BLOCKED: Modifying .eslintrc.json" -- edit_hook "$CPD/.eslintrc.json"
-expect "case variant of an existing config -> BLOCKED" 2 "BLOCKED" -- edit_hook "$CPD/.ESLINTRC.JSON"
+# A case variant is the SAME file on a case-insensitive disk (macOS default) and a NEW file on
+# Linux, so the right answer depends on the disk: block the existing file, allow a new one.
+if [ -e "$CPD/.ESLINTRC.JSON" ]; then
+  expect "case variant of an existing config (case-insensitive disk) -> BLOCKED" 2 "BLOCKED" -- edit_hook "$CPD/.ESLINTRC.JSON"
+else
+  expect "case variant of an existing config (case-sensitive disk: a new file) -> allowed" 0 "" -- edit_hook "$CPD/.ESLINTRC.JSON"
+fi
 expect "editing an existing ignore list -> BLOCKED" 2 "BLOCKED" -- edit_hook "$CPD/.eslintignore"
 expect "creating a lint config for the first time -> allowed" 0 "" -- edit_hook "$CPD/biome.json"
 expect "ordinary source file -> allowed" 0 "" -- edit_hook "$CPD/src/app.ts"
