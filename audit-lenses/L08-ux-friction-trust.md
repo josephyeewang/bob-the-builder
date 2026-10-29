@@ -11,7 +11,7 @@ output_json: audit-artifacts/L08-ux-friction-trust-{YYYY-MM-DD}.json
 source_frameworks:
   - Friction Log methodology (Google DX) — https://sites.research.google/datacardsplaybook/activities/friction-log-template.pdf
   - Brignull's 12 Dark Patterns — https://www.deceptive.design/types
-  - Bob's existing A7h UX Friction audit
+  - Bob's prior (pre-v2.17) A7h UX Friction audit
   - NN/g content audit methodology
   - Consumer-app audit 2026-05-23 — silent system actions, spec-conforming-but-emotionally-wrong patterns
 ---
@@ -46,7 +46,7 @@ Trust is the long-tail compounding asset for any user-facing product. A single h
 
 - **Friction Log methodology (Google DX)** — record per-step: scenario, expected vs actual behavior, thought process, delights, pain points. https://sites.research.google/datacardsplaybook/activities/friction-log-template.pdf
 - **Brignull's 12 Dark Patterns** — Hidden costs, Forced continuity, Confirmshaming, Roach motel (easy in / hard out), Privacy Zuckering, Trick questions, Sneak into basket, Disguised ads, Bait & switch, Misdirection, Friend spam, Price comparison prevention. https://www.deceptive.design/types
-- **Bob's existing A7h UX Friction** — friction = "user working for the product, not for the outcome."
+- **Bob's prior (pre-v2.17) A7h UX Friction** — friction = "user working for the product, not for the outcome."
 - **Consumer-app audit (Joe Wang, 2026-05-23)** — silent-system-actions and spec-conforming-but-emotionally-wrong patterns.
 
 ## Audit method

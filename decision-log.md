@@ -476,6 +476,19 @@ The companion `audit-log.md` records *deferred* items (Defer verdicts that may s
 - **Alternatives considered:** Wait for the page builder and check "generated means generated" only, but that leaves every hand-written chapter free to re-type facts until then. JSON data files would need no reader, but they are harder for a person to edit and diff, and the protocol specifies YAML. A full YAML library would add a dependency to scripts that reach every user through `update bob`.
 - **Consequences:** Products adopting the Blueprint copy the template into `docs/blueprint/` and run both checks in their test suite. A paraphrased fact is not caught, only a copy; the review still looks for paraphrases. Year-less dates ("8 Nov") take the year nearest the as-of date, so a date more than six months from it can be read in the wrong year. Data files must stay inside the subset; anything else is a setup error, never a silent pass.
 - **Revisit trigger:** a product's facts need a YAML feature the reader refuses, or the fact-twice check fails honest text that its skip rules don't cover.
+
+---
+
+### D-030: The AUDIT and EVOLVE modes and the reference appendices each get their own file
+
+- **Date:** 2026-10-29
+- **Status:** Accepted
+- **Context:** `build-protocol.md` was one 2,829-line file holding everything: the foundation, all three modes, and twelve appendices. A reader who needed the AUDIT steps or the glossary opened the whole thing. Two sessions were also editing it at the same time, one on the NEW mode and the Blueprint and one on everything else, so unrelated changes kept landing in the same file.
+- **Decision:** Restructure pass 3, first half. PART III (AUDIT) moved to `modes/audit.md` and PART IV (EVOLVE) to `modes/evolve.md`. Appendices A, E, G, J, K and L moved to `reference/` (anti-patterns, global invariants, architecture patterns, glossary, project profiles, integration playbooks). The text moved word for word (Rule 28): a line-by-line check found every line of the old file in the new files. Every moved heading stays in `build-protocol.md` as a one-line pointer, so "Part III", "Appendix K" and "§A7" still lead somewhere. The core's reference list and `AGENTS.md` name the new files directly. PART I, PART II (NEW), PART V, the startup text and the core's NEW and startup sections did not move. They change with the Blueprint work and move in the second half, once that work has landed.
+- **Alternatives considered:** Move everything now, NEW mode included. Rejected because the NEW steps and startup text are being rewritten for the Blueprint right now, and moving text another session is editing produces conflicts. Leave the file whole. Rejected because the clash between the two sessions grows with every change. Remove the old headings outright. Rejected because templates, lenses and older projects cite "Appendix K" and "Part III" by name.
+- **Consequences:** `build-protocol.md` is about 1,970 lines. The AUDIT steps are about 220 lines in one file. A reader following an old reference takes one extra hop through the pointer. Lens notes that called the retired steps A7f, A7g, A7h and A7i (replaced in v2.17) "existing" now say "prior (pre-v2.17)". The core names the new files by their full install path (`~/.claude/skills/bob/../modes/…`), as it does for `rules.md`, so they resolve from a user's project.
+- **Revisit trigger:** the Blueprint changes to the NEW mode and startup text have landed. Then do the second half: NEW mode to `modes/new.md`, and the core becomes a short index.
+
 ---
 
 ## Anti-pattern reminder

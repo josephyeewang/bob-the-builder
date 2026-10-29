@@ -127,5 +127,5 @@ When a new lens is added, update this catalog with its row. When a check questio
 - `audit-lenses/_selection-rubric.md` — how panels get picked
 - `audit-lenses/_aggregation.md` — how findings get combined
 - `audit-lenses/_audit-memory.md` — history-aware entry experience
-- `build-protocol.md` §A7.1 — sequential lens execution
+- `modes/audit.md` §A7.1 — sequential lens execution
 - Bob's D-003 — orchestrate, don't reinvent — execution principle is the natural consequence: orchestrate Claude's execution surface (Playwright, code-running, tool-driving) wherever possible

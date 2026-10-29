@@ -206,7 +206,7 @@ Apply these rules:
 After aggregation:
 - Bob presents top 10 + critical list
 - `→ HG`: user reviews, marks each item as Fix / Defer / Reject
-- Fix items go to a remediation queue (similar to Bob's existing A7i fix register)
+- Fix items go to a remediation queue (similar to Bob's prior (pre-v2.17) A7i fix register, now A7.3)
 - Defer items go to `audit-log.md` with revisit triggers
 - Reject items go to `decision-log.md` with rationale
 

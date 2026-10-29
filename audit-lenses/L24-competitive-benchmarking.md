@@ -9,8 +9,8 @@ session_pattern: fresh session
 output_markdown: audit-artifacts/L24-competitive-benchmarking-{YYYY-MM-DD}.md
 output_json: audit-artifacts/L24-competitive-benchmarking-{YYYY-MM-DD}.json
 source_frameworks:
-  - Bob's existing A7f-capability competitor scan
-  - Bob's existing A7f-implementation mechanism scan (v2.16)
+  - Bob's prior (pre-v2.17) A7f-capability competitor scan
+  - Bob's prior (pre-v2.17) A7f-implementation mechanism scan (v2.16)
   - April Dunford 5-component positioning
   - Porter's Five Forces
   - Crossing the Chasm (Geoffrey Moore) — early-market vs mainstream
@@ -26,7 +26,7 @@ source_frameworks:
 
 This is the outside-in market view. L28 (Strategic Edge) is the inside-out view; both matter. L24 forces honest comparison — not "we're better" assertions, but feature-by-feature, surface-by-surface mapping. The mapping reveals: where we genuinely lead, where competitors have caught up, where we're behind, and where the market has converged (commoditization).
 
-L24 evolves Bob's existing A7f-capability + A7f-implementation pattern (v2.16). The v2.16 dogfood meta-finding ("bias toward Reject, don't auto-import competitor features") still applies: this lens surfaces gaps, doesn't auto-route them to roadmap.
+L24 evolves Bob's prior (pre-v2.17) A7f-capability + A7f-implementation pattern (v2.16). The v2.16 dogfood meta-finding ("bias toward Reject, don't auto-import competitor features") still applies: this lens surfaces gaps, doesn't auto-route them to roadmap.
 
 ## When this lens fires
 
@@ -47,7 +47,7 @@ L24 evolves Bob's existing A7f-capability + A7f-implementation pattern (v2.16). 
 
 ## Source frameworks
 
-- **Bob A7f-capability** — existing competitor capability scan with Adopt / Defer / Reject verdicts. https://build-protocol.md §A7f
+- **Bob A7f-capability** — existing competitor capability scan with Adopt / Defer / Reject verdicts. (A7a–A7j were replaced by this lens library in v2.17; history in `CHANGELOG.md`)
 - **Bob A7f-implementation** — mechanism scan on rejected competitors (v2.16) — for tools strategically Rejected, are there specific mechanisms worth borrowing?
 - **April Dunford 5-component positioning** — competitive alternatives are the FIRST component. https://www.aprildunford.com
 - **Porter's Five Forces** — supplier power, buyer power, substitutes, new entrants, rivalry.

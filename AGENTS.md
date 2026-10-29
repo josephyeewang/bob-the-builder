@@ -17,12 +17,14 @@ Say `/bob` (or "bob") in Claude Code; the skill (`skill/SKILL.md`) loads `build-
 
 **Streamlined startup (v2.9).** When the skill is invoked, Claude asks exactly ONE question — *which mode (NEW / AUDIT / EVOLVE / UPGRADE)*. Everything else (first-time detection, project sensing, complexity classification, housekeeping flags) is silent or proposed in a single narration block. No "is this the first time?" / "narrator on or terse?" / "does this map look right?" gates.
 
-For daily use, load `build-protocol-core.md` (compact reference). Load `build-protocol.md` (full reference) when you need templates, appendices, or architecture patterns.
+For daily use, load `build-protocol-core.md` (compact reference). Load `build-protocol.md` (full reference), `modes/` or `reference/` when you need the full steps, the glossary, profiles or architecture patterns.
 
 ## File Structure
 
 ```
-build-protocol.md          ← Full reference (all sections, templates, appendices)
+build-protocol.md          ← Full reference: foundation, the NEW mode, the project checklist, session start, protocol evolution; points to the files below
+modes/                      ← The AUDIT and EVOLVE steps in full (audit.md, evolve.md)
+reference/                  ← Glossary, project profiles, architecture patterns, integration playbooks, anti-patterns, invariants
 build-protocol-core.md     ← Loaded into every session: modes, steps, gates, and a one-line index of the rules
 rules.md                    ← Every numbered rule, filed by when it is needed
 templates/                  ← Extractable templates (phase report, behavioral core, etc.)

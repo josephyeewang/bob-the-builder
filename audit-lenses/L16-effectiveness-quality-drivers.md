@@ -12,7 +12,7 @@ source_frameworks:
   - Sean Ellis / Lenny Rachitsky activation benchmarks
   - Reforge / Brian Balfour growth-loop frameworks
   - Pareto principle (80/20)
-  - Bob's existing A7g Effectiveness Signals audit
+  - Bob's prior (pre-v2.17) A7g Effectiveness Signals audit
   - North Star Metric methodology (Amplitude)
 ---
 
@@ -26,7 +26,7 @@ source_frameworks:
 
 L15 measures cost and speed (inputs). L16 measures effectiveness (outputs). Most products instrument enough analytics to tell you what's working *at all* but not enough to tell you what's working *disproportionately*. The Pareto pattern almost always exists — 20% of features drive 80% of value; 20% of users drive 80% of revenue; 20% of incidents cause 80% of pain — but it's invisible without targeted measurement.
 
-L16 also extends Bob's existing A7g (Effectiveness Signals, v2.10) by adding the *leakage* lens: where is the product creating value the user can't capture? Consumer-app examples: Activity ledger exists but is invisible (value created, not seen); engagement scoring front-loaded (reads empty when user has 0 completions — value miscalibrated to context).
+L16 also extends Bob's prior (pre-v2.17) A7g (Effectiveness Signals, v2.10) by adding the *leakage* lens: where is the product creating value the user can't capture? Consumer-app examples: Activity ledger exists but is invisible (value created, not seen); engagement scoring front-loaded (reads empty when user has 0 completions — value miscalibrated to context).
 
 ## When this lens fires
 
@@ -53,7 +53,7 @@ L16 also extends Bob's existing A7g (Effectiveness Signals, v2.10) by adding the
 - **Reforge growth loops** — input → action → reward → investment → next input. Each "investment" should reduce friction for next loop.
 - **Pareto principle** — 80/20 rule applied to features, users, incidents.
 - **North Star Metric (Amplitude)** — single metric capturing "real value delivered."
-- **Bob A7g** — effectiveness signals audit. https://github.com/.../build-protocol.md §A7g
+- **Bob A7g** — effectiveness signals audit. (A7a–A7j were replaced by this lens library in v2.17; history in `CHANGELOG.md`)
 
 ## Audit method
 

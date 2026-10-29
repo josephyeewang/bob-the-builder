@@ -9,8 +9,8 @@ Bob is a personal protocol that I maintain based on real projects I'm building. 
 Likely-to-be-accepted contributions:
 - Bug fixes in `scripts/` (clear repro, narrow change)
 - Typos, broken links, formatting issues
-- New entries in Appendix L (Integration Playbooks) for services you've used — bring real evidence: what broke, what worked, env vars, gotchas.
-- New entries in Appendix K (Project Profiles) for archetypes Bob doesn't cover well yet.
+- New entries in `reference/integration-playbooks.md` (Integration Playbooks, formerly Appendix L) for services you've used — bring real evidence: what broke, what worked, env vars, gotchas.
+- New entries in `reference/project-profiles.md` (Project Profiles, formerly Appendix K) for archetypes Bob doesn't cover well yet.
 
 Likely-to-be-rejected contributions:
 - Adding new top-level sections without an issue discussion first — Bob's structure is intentional and additive-only doesn't always serve the non-engineer reader.

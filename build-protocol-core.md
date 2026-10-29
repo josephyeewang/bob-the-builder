@@ -1,6 +1,6 @@
 # BUILD PROTOCOL — CORE REFERENCE
 
-> Loaded into every session: modes, steps, gates, and a one-line index of the rules. The rules' full text is in `rules.md`; templates, appendices and architecture patterns are in `build-protocol.md` and `templates/`.
+> Loaded into every session: modes, steps, gates, and a one-line index of the rules. The rules' full text is in `rules.md`; the AUDIT and EVOLVE steps in full are in `modes/`; the glossary, project profiles, architecture patterns, integration playbooks, anti-patterns and invariants guide are in `reference/`; templates are in `templates/`; everything else is in `build-protocol.md`.
 
 ---
 
@@ -142,6 +142,8 @@ N+2. **Learning Extraction** → Process review → Update artifacts
 
 ## MODE: AUDIT — Step Sequence
 
+*Every step in full: `~/.claude/skills/bob/../modes/audit.md`.*
+
 A1: Inventory → A2: Map to hierarchy → A3: Code-spec consistency → A4: Risk assessment → A5: Remediation plan → A6: Execute remediation → A7: Hardening audits (scoped) → A8: Re-entry
 
 **A7: Multi-Lens Audit (v2.17; current list and count in `audit-lenses/README.md`)** — Always runs after remediation. v2.17 replaced the prior single A7a–A7j audit phase with a multi-lens library at `audit-lenses/`; it is now a **multi-lens library**, organized into 8 bands (lens IDs are append-only, so newer lenses sit in earlier bands — group by band, not ID arithmetic):
@@ -182,6 +184,8 @@ A7 can be re-invoked anytime; standard cadence = a Curated panel after each majo
 ---
 
 ## MODE: EVOLVE — Step Sequence
+
+*Every step in full: `~/.claude/skills/bob/../modes/evolve.md`.*
 
 E1: Classify (Small/Medium/Large) → E2: Spec check → E3-pre: Scoped Reference Scan (v2.16 — Large always; Medium if new subsystem/integration/pattern; skip Small) → E3: Plan (Medium+ in plan mode with hard gate before E4; Medium+ writes to `evolutions/{NNN-short-name}/`) → E4: Execute → E5: Reconcile (Medium+) → E6: Impact audit (Large only)
 
@@ -303,10 +307,10 @@ If Tier 2-3 skipped during build → MUST run at hardening.
 ## TEMPLATES & REFERENCES
 
 - **Narration Protocol (v2.3 + v2.5):** §11 in full protocol — Preamble Template, Checkpoint Summary (incl. "💎 Why this matters"), Journey Map, 10 narration rules. **§11.7 Quality Bar Templates** define what "done" looks like per artifact with strong/weak examples. **§11.8** mandates value narration. **§11.9 Confusion-Catch Phrases** lists specific signals + response template. Narrator Mode ON by default for NEW mode.
-- **Glossary (v2.3):** Appendix J in full protocol — plain-English definitions for all jargon.
-- **Project Profiles (v2.4):** Appendix K in full protocol — archetype lookup (K1-K15) for tailoring the protocol to your product type. Pulled in by Step 0.5.
+- **Glossary (v2.3):** `~/.claude/skills/bob/../reference/glossary.md` (was Appendix J) — plain-English definitions for all jargon.
+- **Project Profiles (v2.4):** `~/.claude/skills/bob/../reference/project-profiles.md` (was Appendix K) — archetype lookup (K1-K15) for tailoring the protocol to your product type. Pulled in by Step 0.5.
 - **Architecture Patterns (v2.4 additions):** G11 RAG Pipeline · G12 Agent / Tool-Use Loop · G13 Background Job Architecture · G14 Mobile App · G15 Browser Extension · G16 Real-time / Collaborative · G17 Voice / Audio Pipeline · G18 Marketplace.
-- **Integration Playbooks (v2.7):** Appendix L — 11 service-specific playbooks (Stripe, Supabase Auth, Resend, Twilio, Anthropic SDK, OpenAI, pgvector, Inngest, Sentry, PostHog, Vercel AI Gateway). Reference at Step 3a (tool choice) and at the Build Phase that wires the integration in.
+- **Integration Playbooks (v2.7):** `~/.claude/skills/bob/../reference/integration-playbooks.md` (was Appendix L) — 11 service-specific playbooks (Stripe, Supabase Auth, Resend, Twilio, Anthropic SDK, OpenAI, pgvector, Inngest, Sentry, PostHog, Vercel AI Gateway). Reference at Step 3a (tool choice) and at the Build Phase that wires the integration in.
 - **Skill Leverage Map (v2.7):** §10.5 — when to invoke which Claude Code skill (vercel:*, claude-api, security-review). Bob owns methodology; skills own current tactical detail.
 - **Scaffold script (v2.7):** `scripts/bob-init.sh <project-name>` — invoked at Step 6c. Generates folder structure, project CLAUDE.md (with Bob reference), .claude/settings.json with default hooks, .gitignore, .env.example, and runs git init.
 - **Repo map (v2.7):** `scripts/repo-map.sh` — regenerated at every Reconcile step. Compressed view of repo Claude reads at session start.
@@ -325,12 +329,12 @@ If Tier 2-3 skipped during build → MUST run at hardening.
 - **Daily dropped-work check (D-018):** `templates/loop-check.mjs` + `templates/loop-check.yml` (bob-init → `scripts/` + `.github/workflows/`) — stale PRs without a dated hold, open loops with no owner/due date/proof, an intake list over its cap, a scheduled job failing twice or silent, a missing heartbeat.
 - **Parallel sessions (D-018):** `templates/open-loops.md` — the one open-items list with one coordinator; rules in `build-protocol.md` §"Parallel sessions".
 - **UPGRADE (D-019):** `scripts/bob-upgrade.mjs` (run from the project folder; report by default, `--apply`, `--interactive`, `--enforce`) + `scripts/hooks/warn-only.mjs` (runs a hook warn-only) + `templates/bob-differences.md` (bob-init → `.bob/differences.md`). `bob-init` records what it installed in `.bob/installed.json`. Steps: §"MODE: UPGRADE". The commit-time document check is `scripts/commit-sweep.sh` (D-020: one script for every hook that runs it; in blocking mode it judges the staged files).
-- Architecture Patterns: Appendix G in full protocol
-- Anti-patterns: Appendix A in full protocol
-- Global Invariants guide: Appendix E in full protocol
+- Architecture Patterns: `~/.claude/skills/bob/../reference/architecture-patterns.md` (was Appendix G)
+- Anti-patterns: `~/.claude/skills/bob/../reference/anti-patterns.md` (was Appendix A)
+- Global Invariants guide: `~/.claude/skills/bob/../reference/global-invariants.md` (was Appendix E)
 
 ---
 
-*Core Reference for Build Protocol v2.46 — 2026-10-29 (v2.40 2026-09-18; D-016…D-021 additions 2026-10-27, D-022…D-026 2026-10-28, D-027…D-029 2026-10-29; see `decision-log.md`)*
+*Core Reference for Build Protocol v2.47 — 2026-10-29 (v2.40 2026-09-18; D-016…D-021 additions 2026-10-27, D-022…D-026 2026-10-28, D-027…D-030 2026-10-29; see `decision-log.md`)*
 
 *Release notes for every version: `CHANGELOG.md` (the one changelog, D-027).*
