@@ -27,7 +27,7 @@ Above the cards, this chapter keeps the landscape, the comparison
 table, the "why not just ask a general AI" baseline, what we take,
 positioning, the coverage map and the watch list. The closest
 competitors in one line each:
-[section 2b](blueprint/front-page.md#s-2b).
+[section 2b](blueprint/BLUEPRINT.md#s-2b).
 
 <a id="landscape"></a>
 ## The landscape map (groups)
@@ -47,7 +47,7 @@ competitors in one line each:
 |---|---|---|---|---|
 | K1 | <name> | <field 4> | <field 5> | <field 6> |
 
-What each one does, in one line: [the market section of the Blueprint](../blueprint/BLUEPRINT.md#s-2b).
+What each one does, in one line: [the market section of the Blueprint](blueprint/BLUEPRINT.md#s-2b).
 
 <a id="general-ai"></a>
 ## Why not just ask a general AI
@@ -89,7 +89,7 @@ What each one does, in one line: [the market section of the Blueprint](../bluepr
 ## The watch list
 
 The watch list (each competitor's last-checked and re-check-by dates, amber once past re-check) is generated on the
-Blueprint page: [the market section](../blueprint/BLUEPRINT.md#s-2b).
+Blueprint page: [the market section](blueprint/BLUEPRINT.md#s-2b).
 
 <a id="cards"></a>
 ## Competitor cards

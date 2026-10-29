@@ -237,6 +237,38 @@ expect "planted row whose id differs from its file name fails" 1 'must match its
 product "$TMP/s6"; sed -i.bak -e 's/^date: .*/date:/' "$TMP/s6/docs/blueprint/rows/R-M1-1.yaml"
 expect "planted row with neither date nor trigger fails" 1 'needs a date or a named trigger' -- node "$SC" "$TMP/s6"
 
+echo "template links — every link in Bob's chapter and card templates resolves in a product laid out as the README says"
+LT="$TMP/links"; product "$LT"
+cp "$HERE/../../templates/blueprint-roadmap/chapters/"*.md "$LT/docs/"
+cp "$HERE/../../templates/blueprint-roadmap/module-card.md" "$LT/docs/blueprint/cards/M1.md"
+node "$HERE/render-blueprint.mjs" "$LT" --commit abc1234 --now 2031-03-02T09:00:00Z --built-at 2031-03-02T09:00:00Z --out "$LT/.pages" >/dev/null
+# The second argument lists anchors a later Blueprint row builds; remove each one when its row lands
+# (s-2b: the market section, R-0BR-09).
+links_ok() {
+  node --input-type=module -e '
+    import fs from "node:fs"; import path from "node:path";
+    const root = process.argv[1]; const pending = new Set((process.argv[2] || "").split(" ").filter(Boolean));
+    const files = [...fs.readdirSync(path.join(root, "docs")).filter((n) => n.endsWith(".md")).map((n) => path.join(root, "docs", n)),
+                   ...fs.readdirSync(path.join(root, "docs/blueprint/cards")).map((n) => path.join(root, "docs/blueprint/cards", n))];
+    let bad = 0;
+    for (const f of files) {
+      for (const m of fs.readFileSync(f, "utf8").matchAll(/\]\(([^)<\s]+)\)/g)) {
+        const [target, anchor] = m[1].split("#");
+        if (/^[a-z]+:/i.test(target)) continue;
+        const abs = target ? path.resolve(path.dirname(f), target) : f;
+        if (!fs.existsSync(abs)) { console.log(`missing file: ${path.relative(root, f)} -> ${m[1]}`); bad++; continue; }
+        if (anchor && !pending.has(anchor) && !new RegExp(`id="${anchor}"`).test(fs.readFileSync(abs, "utf8"))) {
+          console.log(`missing anchor: ${path.relative(root, f)} -> ${m[1]}`); bad++;
+        }
+      }
+    }
+    console.log(bad ? `${bad} broken link(s)` : "all template links resolve"); process.exit(bad ? 1 : 0);
+  ' "$1" "s-2b"
+}
+expect "every chapter and card template link resolves after a render" 0 "all template links resolve" -- links_ok "$LT"
+printf '%s\n' 'See [the plan](../blueprint/BLUEPRINT.md#s-5c).' >> "$LT/docs/market.md"
+expect "planted broken link is caught" 1 "missing file: docs/market.md" -- links_ok "$LT"
+
 echo "yaml-lite.mjs — the strict reader"
 YL="$HERE/yaml-lite.mjs"
 yl() { node --input-type=module -e "import {parseYaml} from '$YL'; console.log(JSON.stringify(parseYaml(process.argv[1], 't.yaml')))" "$1"; }

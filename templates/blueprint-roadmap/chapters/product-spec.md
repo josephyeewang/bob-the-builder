@@ -26,15 +26,15 @@
 # Product
 
 The goal and objectives:
-[front page, section 2](blueprint/front-page.md#s-2).
-What we are not doing: [section 2a](blueprint/front-page.md#s-2a).
+[front page, section 2](blueprint/BLUEPRINT.md#s-2).
+What we are not doing: [section 2a](blueprint/BLUEPRINT.md#s-2a).
 
 <a id="who"></a>
 ## Who it's for and what they need
 
 <!-- In full here. The one-line customer and the pain sit in
      decided.yaml and show in section 2b; link, don't repeat. -->
-Who it's for, in one line: [section 2b](blueprint/front-page.md#s-2b).
+Who it's for, in one line: [section 2b](blueprint/BLUEPRINT.md#s-2b).
 
 <a id="who-pain"></a>
 ### The pain
@@ -66,7 +66,7 @@ Who it's for, in one line: [section 2b](blueprint/front-page.md#s-2b).
 
 <!-- One heading per capability ID. The list itself (name, module,
      maturity, row) is generated in section 3.c; never re-type it. -->
-The list: [section 3.c](blueprint/front-page.md#s-3-c).
+The list: [section 3.c](blueprint/BLUEPRINT.md#s-3-c).
 
 <a id="C1"></a>
 ### C1
@@ -79,4 +79,4 @@ The list: [section 3.c](blueprint/front-page.md#s-3-c).
 ## Later
 
 Ideas for after the first version are **later** rows on the roadmap,
-each with its trigger: [section 5c](blueprint/front-page.md#s-5c).
+each with its trigger: [section 5c](blueprint/BLUEPRINT.md#s-5c).

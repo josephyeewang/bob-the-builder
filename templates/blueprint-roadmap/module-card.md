@@ -65,7 +65,7 @@
 - <fact about what runs now> `<receipt>`
 - <fact about what runs now> `<receipt>`
 
-**Hands on: <X> to [<next module>](#card-M2)**
+**Hands on: <X> to [<next module>](../BLUEPRINT.md#card-M2)**
 
 <a id="card-M1-3"></a>
 #### 3 · Must-have
@@ -171,7 +171,7 @@ The fixed prompts, each with a **Target:**
 **Decisions that shaped it:** <D-n, one line>
 
 **The module's detail spec (its chapter), linked:**
-[docs/domains/M1.md](../domains/M1.md)
+[docs/domains/M1.md](../../domains/M1.md)
 
 <!-- generated -->
 <!-- from: blueprint.yaml (capabilities where module = this one),
