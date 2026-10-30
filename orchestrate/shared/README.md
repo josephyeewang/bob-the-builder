@@ -23,15 +23,18 @@ rules.rev;                                                    // the rules versi
 
   | Action | Subject |
   |---|---|
-  | `start_session` | `{ product, role, tier, editing, card?, usage? }` |
-  | `push_branch` | `{ product, card: { id, rows }, files }` |
-  | `merge` | `{ product, card, files, declared_tier, labels }` |
+  | `start_session` | `{ product, role, tier, editing, card?, usage? }`. A Tier-1 start needs `usage.read_at` (an ISO time) that is fresh. |
+  | `push_branch` | `{ product, card: { id, rows, kind?, doc: { lane } }, files }`. An exact reverse also passes `card.kind: 'exact_reverse'` and `reverses_files` (the reversed commit's paths). |
+  | `merge` | `{ product, card, files, declared_tier, labels, truncated? }`. An exact reverse also passes `kind: 'exact_reverse'`, `reverses` (the commit id), `exact_reverse_ok` (from M10's `checkExactReverse`) and `reversed_audit` (`failure`, `success` or `none`). |
   | `count_approval` | denied until 0b-5 M2 Approvals switches it on |
   | `delete_copy`, `write_production`, `flip_switch` | denied in 0b |
 
 - `classify(change)` takes `{ product, files: [{ path, previous_path?, status, mode?, added_lines? }], truncated?, declared_tier?, labels? }`. It always uses the current rules: a `policy` or `atCommit` field is dropped, so a caller can't hand in looser rules. The GitHub-side checker reads the parent commit's rules with M10's `classifyWithRulesText`.
   - Until the effect-path scanner lands (second cutover), a changed file is ordinary only if it sits under `docs/` and is a plain file (`.md`, `.txt`, `.csv`, `.json`, `.yaml`, `.yml`, `.png`, `.jpg`, `.jpeg`, `.gif`, `.svg`, `.pdf`). Anything else comes back `unclassifiable`, Tier 1.
   - Any risky class or protected path makes the answer Tier 1, whatever the rules module returned.
+- `files` is always `[{ path, status, previous_path? }]`, with `previous_path` set for a rename or copy.
+- **Held, not refused.** A `deny` whose reason is in `HOLD_REASONS` (`held_tier1_hours`, `rules_not_adopted`) means "wait and keep the place in the queue". Test membership in the list; never parse reason text. M10 answers `held_tier1_hours`; the Merge Gate sets `rules_not_adopted` itself while the rules file at the expected parent differs from the adopted one (`get('rules.adopted', { product })` gives the full ids).
+- **Hooks don't call `may()`.** A hook that must answer without the network reads M10's snapshot through `snapshotAnswer` in `modules/M10-rules/snapshot.mjs` (`write_production`, and `snapshot_fresh` to check the snapshot is usable).
 - **Gate only on `may()`.** `get()` is for display and sizing. An undefined `get()` means refuse, never "no limit".
 - Tests: `fakeRules({ answers: { merge: allow('ok') }, values: { 'caps.rounds': 3 } })`. Unlisted actions are denied, as with the real rules.
 
