@@ -17,24 +17,24 @@
 // be a non-empty list of JOIN_SOURCES; anything else throws. The Lead-input writer runs all five.
 //
 // `land` is called once per source first with CANARY, a sentence no lane writes itself: any run of it outside its
-// exact form, in any output of the check, is a miss (a lane that keeps something from its first call, or a store that
-// already holds raw text). Then with BASELINE, a neutral text of the same kind: what it writes then is the
-// lane's own wording (a safety note, headings), the reference. Then, per case, once with BASELINE again and once with
-// the planted text. A miss is any of:
+// exact form, in any output of the check, is a miss (a lane that keeps something from its first call). Then with
+// BASELINE, a neutral text of the same kind: what it writes then is the lane's own wording (a safety note, headings),
+// the reference. Then, per case, once with BASELINE again and once with the planted text. A miss is any of:
 // - the exact expected form is absent, or no more often than in the call just before (this call did not write it);
 // - in ANY output of the check (the baseline calls too), once every exact form is taken out, a run of RUN letters or
 //   digits of any case landed so far shows up more often than in the reference. Deny by default: case, spaces,
 //   punctuation, backslashes, invisible characters and fence tags are ignored, so a raw, partial, re-cased,
-//   re-wrapped, shell-quoted or earlier item's copy is caught, in a fence the lane wrote itself or not (audit rounds 1-4);
-// - a planted fake key shows up more often than in the reference.
-// Strings are compared as written and with JSON escapes undone (up to three levels), so a JSON record passes; CRLF line
-// ends count as LF. Hand back the text as written: a form indented or quoted line by line (YAML block, `> ` quote) does
-// not match and fails closed. A leak miss names the run and the case it came from (`run`, `from`), so a lane can tell
-// its own wording that happens to share 12 letters with a planted case (that fails closed: reword it). Each call is a new item (a lane that files by a fixed id must take a fresh one per call),
-// and `land` should hand back what this call wrote for it: from fresh state, or only this item. Per-item wording that
-// shares a run with a planted case fails closed, so a file rebuilt from a growing store must keep it neutral. A second fenced copy of part of the text
-// (a title from the first line) is a miss, as is a file name or slug built from it: store the exact form or a neutral
-// id. A raw copy deliberately cut into pieces under RUN letters (or encoded) is out of scope, like base64.
+//   re-wrapped, shell-quoted or earlier item's copy is caught, in a fence the lane wrote itself or not. A leak miss
+//   names the run and the case it came from (`run`, `from`);
+// - a planted fake key shows up more often than in the reference (every kind has a case with one).
+// The record is compared as written and with JSON escapes undone (up to three levels), so a JSON record passes; the
+// Lead's input file only as written, so it must hold the literal form. CRLF line ends count as LF.
+// What fails closed, by design: a form indented or quoted line by line (YAML block, `> ` quote); per-item wording that
+// shares a run with a planted case (reword it: the miss names the run); a second fenced copy of part of the text (a
+// title), or a file name or slug built from it (store the exact form or a neutral id); a lane that files by a fixed id
+// (take a fresh one per call). `land` hands back what this call wrote: from fresh state, or only this item. Raw planted
+// text already in a store before the check starts counts as the lane's own wording and is NOT caught, so start from
+// fresh state. Out of scope: a raw copy deliberately cut into pieces under RUN letters, or encoded (base64).
 
 import { readFileSync } from 'node:fs';
 import { FAKE } from './fakes.mjs';
@@ -80,47 +80,50 @@ export async function checkOutsideJoin(land, { sources = JOIN_SOURCES, where = J
   const srcs = [...new Set(cases.map((c) => c.source))];
   const canary = { text: CANARY, runs: [...runs(CANARY)] };
   // Every exact form, sources asked for or not (and the canary's), so a store already holding correct forms is clean.
-  const forms = [...new Set([...joinCases().map((c) => c.expect), ...srcs.map((s) => cleanOutside(CANARY, s))])]
+  const forms = [...new Set([...joinCases().map((c) => c.expect), ...JOIN_SOURCES.map((s) => cleanOutside(CANARY, s))])]
     .sort((x, y) => y.length - x.length);
-  const prep = (raw) => views(raw).map((v) => v.replace(/\r\n/g, '\n'));
+  // The record as written and with JSON escapes undone; the Lead's input file as written only (round 6).
+  const prep = (raw, w) => (w === 'leadInput' ? [raw] : views(raw)).map((v) => v.replace(/\r\n/g, '\n'));
+  // Only windows that are runs of some case (or the canary) are counted, so a big output stays cheap (round 6).
+  const watched = new Set([...cases.flatMap((c) => c.runs), ...canary.runs]);
   const formCount = (v) => forms.reduce((n, e) => n + v.split(e).length - 1, 0);
   // The text left once every exact form is out: each piece on its own (text either side of a removed form can't join
   // into a run), from the views that hold the most forms (so one backslash can't hide a copy in a lesser view).
-  const left = (raw) => {
-    const vs = prep(raw); const n = vs.map(formCount); const top = Math.max(...n);
+  const left = (raw, w) => {
+    const vs = prep(raw, w); const n = vs.map(formCount); const top = Math.max(...n);
     // Per view, how often each RUN-letter window appears, counted once so each run is a lookup (round 5 m3).
     return vs.filter((_, i) => n[i] === top).map((v) => {
       const m = new Map();
       for (const p of forms.reduce((ps, e) => ps.flatMap((x) => x.split(e)), [v]).map(words)) {
-        for (let i = 0; i + RUN <= p.length; i++) { const k = p.slice(i, i + RUN); m.set(k, (m.get(k) ?? 0) + 1); }
+        for (let i = 0; i + RUN <= p.length; i++) { const k = p.slice(i, i + RUN); if (watched.has(k)) m.set(k, (m.get(k) ?? 0) + 1); }
       }
       return m;
     });
   };
   const runCount = (l, r) => Math.max(...l.map((m) => m.get(r) ?? 0));
-  const keyCount = (raw, k) => Math.max(...prep(raw).map((v) => occ(v, k)));
+  const keyCount = (raw, w, k) => Math.max(...prep(raw, w).map((v) => occ(v, k)));
   const misses = [];
   const ref = {};
   for (const s of srcs) {
-    for (const w of where) ref[`${s}|${w}`] = { raw: '', left: left('') };
+    for (const w of where) ref[`${s}|${w}`] = { raw: '', left: left('', w) };
     const first = await land({ source: s, text: CANARY });
     const got = await land({ source: s, text: BASELINE });
     for (const w of where) {
       for (const o of [first?.[w], got?.[w]]) if (typeof o === 'string') leaksOf(o, s, w, [canary]);
       const raw = typeof got?.[w] === 'string' ? got[w] : '';
-      ref[`${s}|${w}`] = { raw, left: left(raw) };
+      ref[`${s}|${w}`] = { raw, left: left(raw, w) };
     }
   }
   const seen = [canary];
   // Every output is checked for every case landed so far, against the reference's counts (the canary against none).
   function leaksOf(raw, source, w, among, note = '') {
-    const l = left(raw); const r0 = ref[`${source}|${w}`];
+    const l = left(raw, w); const r0 = ref[`${source}|${w}`];
     const miss = (why, extra = {}) => misses.push({ source, where: w, why: `${why}${note}`, ...extra });
     for (const t of among) {
       const r = t.runs.find((x) => runCount(l, x) > (t === canary ? 0 : runCount(r0.left, x)));
       if (r) { miss('outside text appears outside its exact fence', { run: r, from: t.source ?? 'canary' }); break; }
     }
-    if (Object.values(FAKE).some((k) => among.some((t) => t.text.includes(k)) && keyCount(raw, k) > keyCount(r0.raw, k))) miss('a planted fake key survived');
+    if (Object.values(FAKE).some((k) => among.some((t) => t.text.includes(k)) && keyCount(raw, w, k) > keyCount(r0.raw, w, k))) miss('a planted fake key survived');
   }
   for (const c of cases) {
     const base = await land({ source: c.source, text: BASELINE });
@@ -129,8 +132,8 @@ export async function checkOutsideJoin(land, { sources = JOIN_SOURCES, where = J
     for (const w of where) {
       const raw = got?.[w];
       if (typeof raw !== 'string') { misses.push({ source: c.source, where: w, why: 'nothing written (not a string)' }); continue; }
-      const before = typeof base?.[w] === 'string' ? Math.max(...prep(base[w]).map((v) => v.split(c.expect).length - 1)) : 0;
-      if (Math.max(...prep(raw).map((v) => v.split(c.expect).length - 1)) <= before) misses.push({ source: c.source, where: w, why: 'the exact fenced form is missing' });
+      const before = typeof base?.[w] === 'string' ? Math.max(...prep(base[w], w).map((v) => v.split(c.expect).length - 1)) : 0;
+      if (Math.max(...prep(raw, w).map((v) => v.split(c.expect).length - 1)) <= before) misses.push({ source: c.source, where: w, why: 'the exact fenced form is missing' });
       leaksOf(raw, c.source, w, seen);
       // The call just before is an output too: an earlier item written there raw (a lane that fences only its newest).
       if (typeof base?.[w] === 'string') leaksOf(base[w], c.source, w, seen, ' (in the output for a neutral text)');

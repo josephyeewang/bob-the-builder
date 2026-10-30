@@ -21,6 +21,9 @@
       "expect": "<outside-text source=\"idea-issue\">Add export &lt;script&gt;alert(1)&lt;/script&gt;</outside-text>" },
     { "source": "commit-subject", "text": "fix: leaked {{FAKE.anthropic}} removed",
       "expect": "<outside-text source=\"commit-subject\">fix: leaked [REDACTED:anthropic] removed</outside-text>" },
+    {"source":"research-file","text":"Appendix: the deploy key is {{FAKE.github}} for now","expect":"<outside-text source=\"research-file\">Appendix: the deploy key is [REDACTED:github] for now</outside-text>"},
+    {"source":"idea-issue","text":"Use my key {{FAKE.anthropic}} to test it","expect":"<outside-text source=\"idea-issue\">Use my key [REDACTED:anthropic] to test it</outside-text>"},
+    {"source":"idea-file","text":"Idea: store {{FAKE.github}} in the notes","expect":"<outside-text source=\"idea-file\">Idea: store [REDACTED:github] in the notes</outside-text>"},
     { "source": "not-a-source", "text": "hi",
       "expect": "<outside-text source=\"unknown\">hi</outside-text>" }
   ]

@@ -208,3 +208,19 @@ test('R-0b-126 audit round 5: per-kind bugs, a first-call cache and wrong cuts a
   const whole = await checkOutsideJoin((x) => ({ leadInput: escapeOutside(x.text, x.source, { cap: Infinity }) }), { sources: ['commit-subject'], where: ['leadInput'] });
   assert.ok(whole.some((x) => x.why === 'the exact fenced form is missing'));
 });
+
+test('R-0b-126 audit round 6: masking skipped is caught for every kind; a subset check on a shared store passes; the Lead file holds the literal form', async () => {
+  for (const s of JOIN_SOURCES) {
+    const m = await checkOutsideJoin(({ source, text }) => ({ record: escapeOutside(text, source) }), { sources: [s], where: ['record'] });
+    assert.ok(m.some((x) => x.why.startsWith('a planted fake key')), s);
+  }
+  const store = [];
+  const right = ({ source, text }) => { store.push(cleanOutside(text, source)); return { record: JSON.stringify(store), leadInput: store.join('\n') }; };
+  assert.deepEqual(await checkOutsideJoin(right, { sources: ['lesson-file'] }), []);
+  assert.deepEqual(await checkOutsideJoin(right, { sources: ['idea-file'] }), []);
+  assert.deepEqual(await checkOutsideJoin(right), []);
+  assert.deepEqual(await checkOutsideJoin(right, { sources: ['research-file'] }), []);
+  // A Lead-input file holding the record's JSON (escaped quotes, no literal form) misses the exact form.
+  const m = await checkOutsideJoin(({ source, text }) => ({ leadInput: `## Items\n${JSON.stringify({ body: cleanOutside(text, source) })}` }), { where: ['leadInput'] });
+  assert.ok(m.some((x) => x.why === 'the exact fenced form is missing'));
+});
