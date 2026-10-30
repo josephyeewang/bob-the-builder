@@ -67,13 +67,13 @@ await carryOver({ reviewed, current, between, catchUps, tier1MergesSince, gh: vi
 
 Audit rounds 3 to 11 each found one more way of writing a database change that a list of patterns missed. So `db-lines.mjs` reads the other way round: every added or removed line in a code file counts as a possible database change (class `schema`, Tier 1, Joe's Approve) unless it is one of these:
 
-- blank, or a comment by itself in its own language (`//` outside `.sql`, `--` in `.sql`, `#` in script files, or a whole `/* … */`);
-- a plain SELECT read outside the migration and repair folders (no effect word, and only read calls such as `from`, `where`, `eq`, `count`);
-- in a test folder or test file, a line whose SQL and client words all sit inside plain strings (a fixture).
+- blank;
+- a comment by itself, in a language where it is one: `//` and a whole `/* … */` in C-family code (JavaScript, TypeScript, Java, Go and the like), `--` and a whole `/* … */` in `.sql` files, `#` in script files (Python, Ruby, shell, YAML and the like);
+- in a test folder or a `.test`/`.spec` file (not `.sql`), a fixture line: string literals and nothing that runs, such as `'drop table users',`, `query: 'x',` or `const q = 'select 1';`. A string with a `${…}` hole, a call, an operator or a comment makes it not a fixture.
 
-Words are read after undoing escapes, folding look-alike letters and splitting camelCase and snake_case. Text built at run time (`'dr' + 'op'`, `chr(…)`, `fromCharCode`) and lines over 20,000 characters always count. A rename keeps the stricter reading of its two names. The pattern scans in `classify.mjs` stay; they only name the reason more clearly in the read-back.
+The lead's first list also let plain SELECT reads through. Audit round 12 showed a SELECT line can't be proven harmless one line at a time (it can call any function, run `\gexec`, or hide a call behind a computed name), so it counts too. Text built at run time (`'dr' + 'op'`, `chr(…)`, `fromCharCode`), lines over 20,000 characters and a side of a file with over 1,000,000 characters always count. A renamed file's lines must be harmless under both its names. Every check runs in time proportional to the line's length. The pattern scans in `classify.mjs` stay; they only name the reason more clearly in the read-back.
 
-**What this changes.** A false alarm costs Joe one Approve tap; a miss costs live data. Every normal merge of code was already Tier 1, so nothing changes there. The visible change is the exact reverse: the undo of a code change now asks Joe unless every changed line is a comment, a blank line or a plain read. Only an undo of docs, or of comment-only code, goes through on its own after a failed audit.
+**What this changes.** A false alarm costs Joe one Approve tap; a miss costs live data. Every normal merge of code was already Tier 1, so nothing changes there. The visible change is the exact reverse: the undo of a code change now asks Joe unless every changed line is blank, a comment, or a test fixture. Only an undo of docs, or of such lines, goes through on its own after a failed audit.
 
 ## Known limits (logged by the 0b-1 code audit, rounds 1 to 11)
 
@@ -94,7 +94,7 @@ Words are read after undoing escapes, folding look-alike letters and splitting c
 - **An unchanged rules version skips the rewind check.** When `main`'s rules file is the same version as the one adopted, the reader answers "unchanged" before it checks whether `main` was rewound. The rules in force are the same text either way.
 - **A pattern can still name nothing.** `.` and `..` parts are refused, but a pattern that matches no file in the repository (a typo, or `[abc]`, which is read as a literal name) is accepted, so a protected entry can protect nothing. A typo in `migration_paths` or `repair_folder` also stops the folder rule from spotting a database change, including on an undo (the text scan still reads the lines). Brackets stay allowed because real file names use them (`[id].tsx`).
 - **A merge request needs no card id.** `push_branch` refuses a missing card id (MAT-5); `merge` answers from the files and the reverse fields only, so it doesn't require one.
-- **Allowed lines are judged one at a time.** A plain SELECT line, a comment line or a test fixture is read on its own. A SELECT line inside a multi-line string whose other lines change the database still counts, because those other lines count. A test file's fixture strings are trusted only in test folders and test files; a test that runs SQL (a client word outside a string) counts.
+- **Allowed lines are judged one at a time.** A comment line or a fixture line is read on its own. A `//` line inside a multi-line SQL string in code is passed as a comment; SQL can't run a line that starts with `//`, so this only matters for a database that reads `//` as something else. Fixtures are trusted only in test folders and test files (not `fixtures/` folders, which can hold seed scripts, and not `.sql` tests, which run against a database).
 - **The pattern scans err toward asking.** A code comment such as "revoke the token from the cache", or a name like `createColumnHelper`, matches a pattern and makes the change Tier 1, even though the line check alone would let a comment through.
 - **The snapshot checks permission bits only.** macOS access-control lists on the folder or file are not read. Adding one needs the owner's own access, the same as editing the file.
 

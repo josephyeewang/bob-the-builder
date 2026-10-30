@@ -468,7 +468,7 @@ test('merge: the table scans stay fast on long runs of spaces or blank lines (au
 
 test('merge: a needs-joe label is read whatever its case or spacing (audit round 10)', () => {
   const w = world();
-  for (const label of ['Needs-Joe', ' needs-joe ', 'NEEDS-JOE:schema', 'needs-joe-review', 'needs joe', 'needs_joe', 'needsjoe', 'needs\u2011joe', 'ｎｅｅｄｓ-joe']) {
+  for (const label of ['Needs-Joe', ' needs-joe ', 'NEEDS-JOE:schema', 'needs-joe-review', 'needs joe', 'needs_joe', 'needsjoe', 'needs\u2011joe', 'ｎｅｅｄｓ-joe', 'needs.joe', 'needs:joe', 'needs/joe', '[needs-joe]', '🚩needs-joe', 'needs\u200bjoe']) {
     assert.equal(mergeOf(w, [file('docs/research/x.md')], { labels: [label] }).decision, 'ask', JSON.stringify(label));
   }
   assert.equal(mergeOf(w, [file('docs/research/x.md')], { labels: ['joe-says-hi'] }).decision, 'allow');

@@ -148,18 +148,20 @@ export function classifyChange(policy, change) {
     // Removed lines too: a change that removes a table statement undoes a database change (0b-9 M4, audit round 7).
     if (scan && isLines(f.removed_lines) && scanHit(SCHEMA_SCANS, f.removed_lines)) add('schema', `${f.path} (table change in removed lines)`);
     // Deny by default (lead call L32): any line on either side that can't be proven harmless is a possible database
-    // change. The patterns above stay as the clearer reasons; this is the floor under them (db-lines.mjs).
+    // change. The patterns above stay as the clearer reasons; this is the floor under them (db-lines.mjs). A renamed
+    // file's lines must be harmless under both its names (audit round 12).
     if (scan) {
-      const opts = { path: f.path, migration: touched.some((p) => m.migrations(p) || m.repair(p)), test: touched.every(isTestPath) };
+      const test = touched.every(isTestPath);
       for (const side of ['added_lines', 'removed_lines']) {
-        const hit = isLines(f[side]) ? firstRiskyLine(f[side], opts) : null;
+        const hit = isLines(f[side]) ? touched.map((path) => firstRiskyLine(f[side], { path, test })).find(Boolean) : null;
         if (hit) add('schema', `${f.path} (${side.replace('_', ' ')}: line ${hit.n} may change the database: ${hit.why})`);
       }
     }
   }
 
-  // A `needs-joe` label adds `unclassifiable`; `needs-joe:<class>` adds that class. Neither removes one (MIN-3). Case,
-  // spaces, `_` or any dash between the words don't matter, and any other needs-joe label is unclassifiable (rounds 10, 11).
+  // A `needs-joe` label adds `unclassifiable`; `needs-joe:<class>` adds that class. Neither removes one (MIN-3). Case and
+  // anything that isn't a letter or digit before or between the words don't matter (`[needs.joe]`), and any other
+  // needs-joe label is unclassifiable (rounds 10 to 12).
   for (const label of Array.isArray(change.labels) ? change.labels : []) {
     const l = needsJoe(label);
     if (l === null) continue;
@@ -173,7 +175,7 @@ export function classifyChange(policy, change) {
 export function needsJoe(label) {
   if (typeof label !== 'string') return null;
   const l = label.normalize('NFKC').trim().toLowerCase();
-  const m = /^needs[\s_\u00ad\u2010-\u2015\u2212-]*joe/.exec(l);
+  const m = /^[^\p{L}\p{N}]*needs[^\p{L}\p{N}]*joe/u.exec(l);
   return m ? l.slice(m[0].length).trim() : null;
 }
 

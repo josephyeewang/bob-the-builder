@@ -7,18 +7,18 @@
 // stay, as clearer reasons in the read-back.
 //
 // A line is harmless only when it is one of:
-//   - blank, or a comment by itself (`//` outside .sql files, `--` in .sql files, `#` in script files, or a whole
-//     `/* … */` with nothing after it);
-//   - a plain SELECT read, outside the migration and repair folders: the word `select`, no effect word, and no call
-//     except the read calls listed below;
-//   - in a test folder or test file, a line whose effect and client words all sit inside plain string literals (a
-//     fixture).
+//   - blank;
+//   - a comment by itself, in a language where it is one: `//` and a whole `/* … */` in C-family code (JavaScript,
+//     TypeScript, Java, Go and the like), `--` and a whole `/* … */` in .sql files, `#` in script files;
+//   - in a test folder or a .test/.spec file (not .sql), a fixture: string literals and nothing that runs, such as
+//     `'drop table users',`, `name: 'x',` or `const q = 'select 1';`. Strings with `${…}` holes, unclosed strings,
+//     calls, operators and comments are not fixtures.
 // Every other line counts, even one with no listed word: it may sit inside a multi-line SQL string, so no list of
-// words can prove it harmless. The word lists below only name the reason, and keep plain SELECTs and fixtures apart.
-// Words are read after undoing escapes (`drop`, `U&"d\0072op"`), folding look-alike letters (NFKC) and splitting
-// camelCase, PascalCase and snake_case, so `dropTable`, `CreateTable`, `drop_table` and `"DROP"` all read as `drop`.
-// Two string literals joined with `+` or `||`, or a call that builds text from parts, counts too: text built at run
-// time can't be proven harmless.
+// words can prove it harmless. Audit round 12 showed a SELECT line can't be proven harmless one line at a time (it
+// may call any function, run `\gexec`, or hide a call after a computed name), so plain reads are not allowed either.
+// The word lists below only name the reason. Words are read after undoing escapes (`drop`, `U&"d\0072op"`), folding
+// look-alike letters (NFKC) and splitting camelCase, PascalCase and snake_case, so `dropTable`, `CreateTable`,
+// `drop_table` and `"DROP"` all read as `drop`. Every check here runs in time proportional to the line's length.
 
 // Every PostgreSQL command word except the read-only ones (SELECT, SHOW, EXPLAIN, VALUES, TABLE, WITH), plus the
 // effect words other databases and libraries use. A word that is also ordinary code (`set`, `do`, `end`, `import`)
@@ -40,16 +40,14 @@ export const CLIENT_WORDS = Object.freeze(new Set([
   'transaction',
 ]));
 
-// Calls a plain SELECT line may make: SQL read functions and the read steps of query builders.
-const READ_CALLS = new Set(['select', 'from', 'where', 'eq', 'neq', 'gt', 'gte', 'lt', 'lte', 'like', 'ilike', 'in', 'is',
-  'not', 'order', 'limit', 'range', 'single', 'maybe', 'filter', 'match', 'count', 'sum', 'min', 'max', 'avg', 'coalesce',
-  'lower', 'upper', 'now', 'length', 'query', 'sql', 'knex', 'db', 'then', 'await', 'map', 'json', 'log']);
-
+const C_FAMILY = /\.(m?[jt]sx?|c[jt]s|java|kts?|go|rs|c|h|cc|cpp|hpp|cs|swift|scala|dart|groovy|gradle)$/i;
+const SQL = /\.sql$/i;
 const SCRIPT = /\.(py|rb|sh|bash|zsh|ya?ml|toml|r|pl|ps1|conf|ini)$/i;
-const TEST_PATH = /(^|\/)(tests?|__tests__|specs?|fixtures|__fixtures__)\/|\.(test|spec)\.[a-z0-9]+$/i;
-export const isTestPath = (p) => typeof p === 'string' && TEST_PATH.test(p);
+const TEST_PATH = /(^|\/)(tests?|__tests__|specs?)\/|\.(test|spec)\.[a-z0-9]+$/i;
+export const isTestPath = (p) => typeof p === 'string' && TEST_PATH.test(p) && !SQL.test(p);
 const BUILT = /(['"`])\s*(\+|\|\|)\s*['"`]|\b(format|concat|concat_ws|chr|char|fromCharCode|fromCodePoint|atob|decode|unescape|quote_ident|quote_literal)\s*\(/i;
-const MAX_LINE = 20_000;   // a longer line is not read: it counts
+const MAX_LINE = 20_000;      // a longer line is not read: it counts
+const MAX_TOTAL = 1_000_000;  // nor is a side of a file with more text than this
 
 const codePoint = (hex) => { const n = parseInt(hex, 16); return n <= 0x10ffff && !(n >= 0xd800 && n <= 0xdfff) ? String.fromCodePoint(n) : ' '; };
 
@@ -66,52 +64,69 @@ function unescape(text) {
 
 // The lower-case words of a line: camelCase and PascalCase split, then every run of letters.
 export function wordsOf(text) {
-  return unescape(text).replace(/([a-z0-9])([A-Z])/g, '$1 $2').replace(/([A-Z]+)([A-Z][a-z])/g, '$1 $2').toLowerCase().match(/[a-z]+/g) ?? [];
+  return unescape(text).replace(/([a-z0-9])([A-Z])/g, '$1 $2').replace(/(?<![A-Z])([A-Z]+)([A-Z][a-z])/g, '$1 $2').toLowerCase().match(/[a-z]+/g) ?? [];
 }
 
 const effectWord = (words) => words.find((w) => EFFECT_WORDS.has(w));
 const clientWord = (words) => words.find((w) => CLIENT_WORDS.has(w));
 
 function commentOnly(t, path) {
-  if (t.startsWith('//')) return !/\.sql$/i.test(path);
-  if (t.startsWith('--')) return /\.sql$/i.test(path);
+  const c = C_FAMILY.test(path), sql = SQL.test(path);
+  if (t.startsWith('//')) return c;
+  if (t.startsWith('--')) return sql;
   if (t.startsWith('#')) return SCRIPT.test(path);
-  if (t.startsWith('/*')) { const end = t.indexOf('*/', 2); return end >= 0 && !t.slice(end + 2).trim(); }
+  if (t.startsWith('/*') && (c || sql)) { const end = t.indexOf('*/', 2); return end >= 0 && !t.slice(end + 2).trim(); }
   return false;
 }
 
-// A plain SELECT read: `select`, no effect word, and every call is a read call.
-function plainSelect(t, words) {
-  if (!words.includes('select') || effectWord(words)) return false;
-  for (const m of unescape(t).matchAll(/([A-Za-z_][\w$]*)\s*\(/g)) {
-    if (!wordsOf(m[1]).every((w) => READ_CALLS.has(w))) return false;
+// The line with each string literal replaced by \0, or null when a string is unclosed or a template has a `${` hole.
+function stripStrings(t) {
+  let out = '';
+  for (let i = 0; i < t.length; i++) {
+    const q = t[i];
+    if (q !== "'" && q !== '"' && q !== '`') { out += q; continue; }
+    let j = i + 1;
+    for (; j < t.length && t[j] !== q; j++) {
+      if (t[j] === '\\') j++;
+      else if (q === '`' && t[j] === '$' && t[j + 1] === '{') return null;
+    }
+    if (j >= t.length) return null;
+    out += '\0';
+    i = j;
   }
+  return out;
+}
+
+// A fixture line: string literals, object keys, a `const x =` start, brackets, commas and nothing else.
+const FIXTURE_TOKEN = /\s+|\0\s*:|\0|[[\]{},;]|[A-Za-z_$][\w$]*\s*:(?!:)|(?:export\s+)?(?:const|let|var)\s+[A-Za-z_$][\w$]*\s*=(?![=>])/y;
+function fixture(t) {
+  if (t.includes('\0')) return false;
+  const rest = stripStrings(t);
+  if (rest === null) return false;
+  FIXTURE_TOKEN.lastIndex = 0;
+  while (FIXTURE_TOKEN.lastIndex < rest.length) if (!FIXTURE_TOKEN.exec(rest)) return false;
   return true;
 }
 
-const withoutStrings = (t) => t.replace(/'(?:[^'\\\n]|\\.)*'|"(?:[^"\\\n]|\\.)*"|`(?:[^`\\$]|\\.|\$(?!\{))*`/g, ' ');
-
 // Why a line can't be proven harmless, or null when it can.
-export function lineRisk(line, { path = '', migration = false, test = isTestPath(path) } = {}) {
+export function lineRisk(line, { path = '', test = isTestPath(path) } = {}) {
   if (typeof line !== 'string') return 'not text';
   if (line.length > MAX_LINE) return 'too long to read';
   const t = line.trim();
   if (!t || commentOnly(t, path)) return null;
   if (BUILT.test(unescape(t))) return 'text built at run time';
-  const words = wordsOf(t);
-  if (!migration && plainSelect(t, words)) return null;
-  if (test) {
-    const bare = wordsOf(withoutStrings(t));
-    if (!effectWord(bare) && !clientWord(bare)) return null;
-  }
+  if (test && fixture(t)) return null;
   // Anything else counts. A line with no listed word still can't be proven harmless: it may sit inside a multi-line
   // SQL string, where an unlisted command (`optimize table t`) would run. The word, when there is one, is the reason.
+  const words = wordsOf(t);
   const w = effectWord(words) ?? clientWord(words);
   return w ? `"${w}"` : 'not a line known to be harmless';
 }
 
 // The first line of a list that can't be proven harmless, as { n, why } (n counts from 1), or null.
 export function firstRiskyLine(lines, opts) {
+  let total = 0;
+  for (const l of lines) if ((total += typeof l === 'string' ? l.length : 0) > MAX_TOTAL) return { n: lines.length, why: 'too much text to read' };
   for (let i = 0; i < lines.length; i++) {
     const why = lineRisk(lines[i], opts);
     if (why) return { n: i + 1, why };

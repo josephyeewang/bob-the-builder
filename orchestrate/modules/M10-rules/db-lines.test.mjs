@@ -1,6 +1,6 @@
 // db-lines.test.mjs — the deny-by-default line check (lead call L32). The sweep: every way of writing a database change
 // that an earlier audit round found a pattern missed is caught by the line check ALONE, and so are commands no list
-// names. Then the allow-list: only blank lines, comments, plain SELECT reads and test fixtures pass.
+// names. Then the allow-list: only blank lines, comments and test fixtures pass (audit round 12 removed plain reads).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { lineRisk, firstRiskyLine, wordsOf } from './db-lines.mjs';
@@ -29,16 +29,18 @@ const UNLISTED = ['OPTIMIZE TABLE users', 'FROBNICATE everything', '  users;'];
 
 test('the sweep: every past miss and every unlisted command counts, by the line check alone (lead call L32)', () => {
   for (const line of [...PAST_MISSES, ...UNLISTED]) assert.ok(lineRisk(line, CODE), line);
-  for (const line of PAST_MISSES) assert.ok(lineRisk(line, { path: 'db/migrations/1.sql', migration: true }), `migration: ${line}`);
+  for (const line of PAST_MISSES) assert.ok(lineRisk(line, { path: 'db/migrations/1.sql' }), `migration: ${line}`);
 });
 
-test('harmless lines: blank, a comment by itself in its own language, a plain SELECT read, a test fixture', () => {
+test('harmless lines: blank, a comment by itself in its own language, a test fixture', () => {
   for (const line of ['', '   ', '// create table users here', '/* drop table users */', '/* a */   ']) assert.equal(lineRisk(line, CODE), null, line);
   assert.equal(lineRisk('-- drop table users', { path: 'db/x.sql' }), null);
+  assert.equal(lineRisk('/* drop table users */', { path: 'db/x.sql' }), null);
   assert.equal(lineRisk('# drop table users', { path: 'tools/x.py' }), null);
-  for (const line of ['const rows = await sql`select id from users where id = ${id}`', ".from('users').select('id').eq('id', 1)",
-    'SELECT count(*) FROM users WHERE lower(email) = $1']) assert.equal(lineRisk(line, CODE), null, line);
-  assert.equal(lineRisk("expect(parse('drop table users')).toBe(true)", { path: 'lib/__tests__/parse.test.ts' }), null);
+  const T = { path: 'lib/__tests__/parse.test.ts' };
+  for (const line of ["'drop table users',", "query: 'delete from users',", "const q = 'select 1';", 'export const q = `drop table users`;',
+    "'a': \"b\",", '],', '{', '}', "['drop table x', \"truncate y\"],", "'it\\'s',", '"say \\"drop\\"",']) assert.equal(lineRisk(line, T), null, line);
+  for (const line of ['\0', "\0 await zap()", "'a\\'; await zap()"]) assert.ok(lineRisk(line, T), JSON.stringify(line));
 });
 
 test('look-alike harmless lines still count', () => {
@@ -52,7 +54,7 @@ test('look-alike harmless lines still count', () => {
     ['select * from users for update', CODE, 'a row lock'],
     ['select pg_terminate_backend(1)', CODE, 'a select that calls a function with an effect'],
     ["select set_config('x', '1', false)", CODE, 'set_config'],
-    ['select id from users', { path: 'db/migrations/1.sql', migration: true }, 'no select allowance in a migration'],
+    ['select id from users', CODE, 'a plain read is not proven harmless (audit round 12)'],
     ["db.query('dr' + 'op table x')", CODE, 'text built at run time'],
     ["sql(String.fromCharCode(100, 114))", CODE, 'text built from codes'],
     ["await db.query('drop table x')", { path: 'lib/__tests__/x.test.ts' }, 'a test that runs SQL'],
@@ -97,4 +99,43 @@ test('a plain SELECT or a fixture can\'t hide a change behind escapes, look-alik
   for (const line of ["select 1; \\u0064rop table x", 'SELECT 1; ＤＲＯＰ TABLE users', "select 'dr' || 'op table x'"]) assert.ok(lineRisk(line, CODE), line);
   assert.equal(lineRisk("const q = 'dr' + 'op';", { path: 'test/x.test.ts' }), 'text built at run time');
   assert.equal(lineRisk('// ' + 'a'.repeat(20_001), CODE), 'too long to read');
+});
+
+// Audit round 12: each line here was called harmless by the first deny-by-default version.
+const ROUND_12 = [
+  ['await db.query(cfg.Q) // select', 'lib/x.ts'], ['const rows = await pool.query(req.body.sql) // select rows', 'lib/x.ts'],
+  ['await c[k](stmt) // select', 'lib/x.ts'], ['await db.raw?.(q) // select', 'lib/x.ts'], ['select; await users.zap?.()', 'lib/x.ts'],
+  ["await db.from('users').select('id').then(nukeTables)", 'lib/x.ts'], ['await db.query`select 1`; await zap``', 'lib/x.ts'],
+  ['select "pg_terminate_backend"(pid) from pg_stat_activity', 'lib/x.sql'], ['select zap_users/**/()', 'lib/x.sql'],
+  ['select u.nuke from users u', 'lib/x.sql'], ['select 1; optimize table users', 'lib/x.sql'], ['select cmd from admin.pending \\gexec', 'lib/x.sql'],
+  ['select 1 \\! dropdb prod', 'lib/x.sql'], ["await db.query('\\144elete from users') // select", 'lib/x.js'],
+  ['select * from users for share', 'lib/x.ts'], ['select count_and_zap(1)', 'lib/x.sql'], ["await db.query('\\x64elete from users') // select", 'lib/x.ts'],
+  ['select 1; vacuum full', 'lib/x.sql'], ['select 1; U&"\\0064rop" table x', 'lib/x.sql'],
+  ["await c[`query`]('UPDATE users SET role = 1')", 'lib/__tests__/x.test.ts'], ["/* don't */ await db.query(q) /* won't */", 'lib/__tests__/x.test.ts'],
+  ["const a = /'/; await db.query(\"UPDATE users SET role='admin'\"); const b = /'/;", 'lib/__tests__/x.test.ts'],
+  ["const { Client } = require('pg')", 'lib/__tests__/x.test.ts'], ['await nukeUsers()', 'lib/__tests__/x.test.ts'],
+  ["const q = String.fromCharCode(100, 114)", 'test/x.test.ts'], ['const q = `drop ${t}`', 'test/x.test.ts'], ["const q = 'unclosed", 'test/x.test.ts'],
+  ['SELECT zap_users();', 'supabase/tests/x.test.sql'], ["'drop table x'", 'supabase/tests/x.test.sql'], ['await run(text)', 'scripts/fixtures/load.mjs'],
+  ["await zap('x')", 'lib/latest.ts'], ["'drop table x',", 'scripts/fixtures/seed.mjs'],
+  ['//usr/bin/psql "$DATABASE_URL" -c "UPDATE users SET role=\'admin\'"', 'scripts/reset.sh'], ['//; User.delete_all', 'lib/tasks/x.rb'],
+  ['//; $dbh->do($q)', 'lib/x.pl'], ['/* x */', 'lib/tasks/x.rb'], ['#init = this.db.nukeAll()', 'lib/x.ts'], ['--n; await zapAll()', 'lib/x.ts'],
+];
+
+test('audit round 12: no allowance can hide a call, a command or a run of SQL', () => {
+  for (const [line, path] of ROUND_12) assert.ok(lineRisk(line, { path }), `${path}: ${line}`);
+});
+
+test('the line check stays fast on long identifiers, capital runs, unclosed strings and large files (audit round 12)', () => {
+  const t0 = Date.now();
+  for (const line of ['select ' + 'A'.repeat(19_990), 'x' + 'AB'.repeat(9_000), "'\\'".repeat(6_000), '`'.repeat(19_000), "'a', ".repeat(3_900)]) {
+    lineRisk(line, CODE); lineRisk(line, { path: 'test/x.test.ts' });
+  }
+  assert.deepEqual(firstRiskyLine(Array(60).fill('// ' + 'a'.repeat(19_000)), CODE), { n: 60, why: 'too much text to read' });
+  assert.ok(Date.now() - t0 < 2000, `took ${Date.now() - t0} ms`);
+});
+
+test('a long run of capitals is read in one pass (audit round 12)', () => {
+  const t0 = Date.now();
+  for (let i = 0; i < 20; i++) lineRisk('A'.repeat(19_990) + '1', CODE);
+  assert.ok(Date.now() - t0 < 500, `took ${Date.now() - t0} ms`);
 });

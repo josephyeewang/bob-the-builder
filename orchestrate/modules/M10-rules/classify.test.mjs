@@ -202,12 +202,12 @@ test('deeply nested comments can\'t make the classifier slow (audit round 11)', 
   assert.ok(c.risky.includes('schema'), 'a line that long is not read, so it counts');
 });
 
-test('a rename can\'t lend code the test-file or migration allowance of its old name (lead call L32)', () => {
-  const lib = (line, from) => mod('lib/x.ts', { status: 'renamed', previous_path: from, added_lines: [line], removed_lines: [] });
-  const libHit = (c) => (c.reasons.schema ?? []).some((r) => r.startsWith('lib/x.ts (added lines: line 1'));
-  assert.ok(!libHit(run([mod('test/x.test.ts', { added_lines: ["const q = 'optimize everything';"], removed_lines: [] })])), 'a fixture in a test file');
-  assert.ok(libHit(run([lib("const q = 'optimize everything';", 'test/x.test.ts')])), 'a test file renamed into code');
-  assert.ok(!libHit(run([mod('lib/x.ts', { added_lines: ['select id from users'], removed_lines: [] })])), 'a plain read in code');
-  assert.ok(libHit(run([lib('select id from users', 'db/migrations/1.sql')])), 'a migration renamed into code');
-  assert.ok(libHit(run([lib('select id from users', 'db/repairs/1.sql')])), 'a repair file renamed into code');
+test('a renamed file\'s lines must be harmless under both its names (lead call L32, audit round 12)', () => {
+  const ren = (from, to, removed, added = []) => mod(to, { status: 'renamed', previous_path: from, added_lines: added, removed_lines: removed });
+  const hit = (c, p) => (c.reasons.schema ?? []).some((r) => r.startsWith(`${p} (`) && r.includes('may change the database'));
+  assert.ok(!hit(run([mod('test/x.test.ts', { added_lines: ["const q = 'optimize everything';"], removed_lines: [] })]), 'test/x.test.ts'), 'a fixture in a test file');
+  assert.ok(hit(run([ren('test/x.test.ts', 'lib/x.ts', [], ["const q = 'optimize everything';"])]), 'lib/x.ts'), 'a test file renamed into code');
+  assert.ok(hit(run([ren('lib/a.ts', 'lib/a.sql', ['--n; await zapAll()'], ['-- a'])]), 'lib/a.sql'), 'code renamed to .sql keeps the code reading');
+  assert.ok(hit(run([ren('lib/a.ts', 'lib/a.py', ['#init = this.db.nukeAll()'], ['# a'])]), 'lib/a.py'), 'code renamed to .py keeps the code reading');
+  assert.ok(!hit(run([ren('lib/a.ts', 'lib/b.ts', ['// a'], ['// b'])]), 'lib/b.ts'), 'comments under both names');
 });
