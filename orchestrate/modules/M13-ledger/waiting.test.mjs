@@ -29,3 +29,9 @@ test('planted: an item with a missing field shows as a record error, not blank',
   assert.ok(lines.includes('ask A-2: waits on owner for Approve PR 12, since 2026-11-02T17:00:00Z'));
   for (const l of lines) assert.ok(!/undefined|null|waits on  /.test(l), l);
 });
+
+test('every waiting entity is a record entity (a claim is a field on its card, not an entity)', async () => {
+  const { WAITING_ENTITIES } = await import('./waiting.mjs');
+  const { ENTITIES } = await import('../../shared/record.mjs');
+  for (const e of WAITING_ENTITIES) assert.ok(ENTITIES.includes(e), e);
+});

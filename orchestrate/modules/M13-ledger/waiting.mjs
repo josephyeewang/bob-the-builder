@@ -8,7 +8,8 @@
 
 import { WAIT_FIELDS } from '../../shared/record.mjs';
 
-export const WAITING_ENTITIES = Object.freeze(['card', 'ask', 'go', 'merge', 'claim']);
+// Record entities only: a claim is a field on its card (lead, after PR #21), not an entity.
+export const WAITING_ENTITIES = Object.freeze(['card', 'ask', 'go', 'merge']);
 const SHOWN = ['who', 'what', 'since'];
 
 export function waitingItems(rec, { entities = WAITING_ENTITIES } = {}) {
