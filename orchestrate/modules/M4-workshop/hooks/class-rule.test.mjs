@@ -371,6 +371,12 @@ test('L41 confirm: a letter class fails closed, a zsh group reads whole, a trail
   assert.deepEqual(shellWords('cat a(b)c'), ['cat', 'a', '(', 'b', ')', 'c']);
   assert.deepEqual(shellWords('(cd x && ls)'), ['(', 'cd', 'x', '&', '&', 'ls', ')']);
   passed(secret.decide(bash("ls 'app/(group)/page.tsx'", w.work), w.args), 'a route group, quoted');
+  // Round 2 MAT-1: a quoted `|` is not a zsh choice; ordinary searches and filters pass both guards.
+  for (const c of ["jq '.items | length' package.json", "grep -E 'a|b' src/x.ts", "git log --grep='fix|feat'", "sed -E 's/(a|b)/c/' x", 'echo "a|b"', "rg 'x(a|b)'"]) {
+    passed(secret.decide(bash(c, w.work), w.args), `secret: ${c}`);
+    passed(prodGuard.decide(bash(c, w.work), w.args), `production: ${c}`);
+  }
+  assert.equal(unreadable('cat x(a|b)y'), 'a zsh pattern group with a choice in it', 'an unquoted choice is still refused');
   // Both readings are checked: a name inside brackets in code fed to a program is still seen (lane 3's corpus).
   blocked(prodGuard.decide(bash(`python3 - <<'X'\nprint(open('${ENV_PROD}').read())\nX`, w.work), w.args), 'a name in brackets, production');
   blocked(secret.decide(bash(`python3 - <<'X'\nprint(open('${w.home}/${dot('ss', 'h')}/id_x').read())\nX`, w.work), w.args), 'a name in brackets, secret');
