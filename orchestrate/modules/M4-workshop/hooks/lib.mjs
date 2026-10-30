@@ -264,6 +264,32 @@ export function expandBraces(word, cap = 64) {
   return out;
 }
 
+/**
+ * A shell wildcard word as a pattern for one name: `*`, `?`, and `[…]` sets, where a leading `!` or `^` means
+ * "not" and a `]` first in the set is a plain `]`, as in the shell. The one definition for both guards (L41 G1:
+ * escaping `^` everywhere made `[^x]` a set of `^` and `x`, so `.e[^Q]v` never matched `.env`).
+ */
+export function globRe(g, flags = '') {
+  let s = '';
+  for (let i = 0; i < g.length; i += 1) {
+    const ch = g[i];
+    if (ch === '*') { s += '.*'; continue; }
+    if (ch === '?') { s += '.'; continue; }
+    if (ch === '[') {
+      const not = g[i + 1] === '!' || g[i + 1] === '^';
+      const from = i + 1 + (not ? 1 : 0);
+      const end = g.indexOf(']', from + 1);
+      if (end > from) {
+        s += `[${not ? '^' : ''}${g.slice(from, end).replace(/[\\\]^[]/g, '\\$&')}]`;
+        i = end;
+        continue;
+      }
+    }
+    s += ch.replace(/[.+^${}()|[\]\\]/g, '\\$&');
+  }
+  return new RegExp(`^${s}$`, flags);
+}
+
 /** Why a guard can't read this command (refuse it), or null when it is plain words. */
 export function unreadable(cmd) {
   const c = joinLines(cmd);

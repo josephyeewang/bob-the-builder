@@ -11,6 +11,8 @@ const LOOKALIKES = [
   ['.cl​aude', '.claude'], // zero-width space
   ['CLAUDE.LOCAL.MD', 'claude.local.md'],
   ['claude.locaⅼ.md', 'claude.local.md'], // the Roman numeral fifty, a look-alike l
+  ['\u1e9e', 'ss'], // capital sharp s: lowers to sharp s, which only a second round makes ss (L37)
+  ['.cla\u1e9eude', '.classude'],
 ];
 
 test('MAT-3: fold maps look-alike letters to the plain name', () => {

@@ -3,12 +3,12 @@
 // remaining forms. Throwaway folders only; names of secret files are built at run time.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, writeFileSync, realpathSync } from 'node:fs';
+import { mkdirSync, writeFileSync, realpathSync, symlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { makeSnapshot } from './snapshot.mjs';
-import { expansionIn, expandBraces, unreadable, shellCommands } from './lib.mjs';
+import { expansionIn, expandBraces, unreadable, shellCommands, globRe } from './lib.mjs';
 import * as merge from './merge-guard.mjs';
 import * as noVerify from './no-verify-block.mjs';
 import * as prodGuard from './production-write-guard.mjs';
@@ -190,7 +190,7 @@ test('L37: every one of the 11 letters, and a look-alike on no list, is refused 
     passed(secret.decide({ tool_name: 'Read', tool_input: { file_path: join(w.work, p) } }, w.args), p);
     passed(plain.decide({ tool_name: 'Write', tool_input: { file_path: join(w.work, p) } }, a), p);
   }
-  passed(secret.decide({ tool_name: 'Glob', tool_input: { pattern: 'src/**/*.{ts,tsx}' } }, w.args), 'a plain search');
+  passed(secret.decide({ tool_name: 'Glob', tool_input: { pattern: 'src/**/*.{ts,tsx}' }, cwd: w.work }, w.args), 'a plain search');
   passed(secret.decide(bash('git commit -m "fix — tidy"', w.work), w.args), 'a dash in a message is not a letter');
 });
 
@@ -211,4 +211,102 @@ test('round 3 MIN-1: every push is refused, paths are tidied before the git-file
     assert.match(secret.decide(bash(c, w.work), a).reason, /by its short name/, c);
   }
   for (const c of ['cat hosts.yml', 'cat notes/token.md', 'git status']) passed(secret.decide(bash(c, w.work), a), c);
+});
+
+// LEAD-CALLS L41 G1 (lane 3's corpus, round 13): a `[^x]` set never matched, because the pattern escaped `^`. One
+// pattern maker now serves both guards. The control shows the set really means "not": `[^n]` cannot be the n.
+test('L41 G1: a [^x] or [!x] set matches as the shell does, in both guards', () => {
+  const w = world();
+  assert.equal(globRe(dot('e[^Q]v')).test(dot('env')), true);
+  assert.equal(globRe(dot('e[!Q]v')).test(dot('env')), true);
+  assert.equal(globRe('[!a]').test('a'), false);
+  assert.equal(globRe('[]a]').test(']'), true, 'a ] first in the set is a plain ]');
+  assert.equal(globRe('a[b').test('a[b'), true, 'an unclosed [ is a plain [');
+  const caret = `${dot('e[^Q]v')}.production`;
+  for (const c of [`cat ${caret}`, `echo x > ${caret}`, `rm -f ${caret}`, `cd .. && cat work/${caret}`, `cat ${dot('e[!Q]v')}.production`]) {
+    blocked(prodGuard.decide(bash(c, w.work), w.args), c);
+  }
+  passed(prodGuard.decide(bash(`cat ${dot('e[^n]v')}.production`, w.work), w.args), 'control: [^n] is not the n');
+  for (const c of [`cat ${dot('e[^Q]v')}`, `cat ${dot('[^a]sh')}/config`]) blocked(secret.decide(bash(c, w.work), w.args), c);
+  blocked(secret.decide({ tool_name: 'Glob', tool_input: { pattern: `**/${dot('e[^Q]v')}` }, cwd: w.work }, w.args), 'Glob [^Q]');
+});
+
+// L41: the secret guard reads the value after `=` too, as the production guard does (`dd of=<file>`).
+test('L41: the secret guard reads a name after "="', () => {
+  const w = world();
+  for (const c of [`dd if=/dev/zero of=${dot('en', 'v')}`, `dd if=${w.home}/${dot('ss', 'h')}/id_x of=/tmp/y`, `tool --file=${dot('ne', 'trc')}`]) {
+    blocked(secret.decide(bash(c, w.work), w.args), c);
+  }
+  passed(secret.decide(bash('dd if=/dev/zero of=/tmp/y bs=1 count=1', w.work), w.args), 'control: plain dd');
+});
+
+// Lead, after the L37 confirm (a): `[ ]` is a pattern in the shell too. A route folder with a real `[id]` passes as a
+// path; a letter range that could spell a secret name is caught as a pattern.
+test('L41 (a): [ ] in a shell word is read as a pattern: route folders pass, a range spelling a secret is caught', () => {
+  const w = world();
+  for (const c of ['cat app/[id]/page.tsx', 'ls app/[slug]/(group)', 'cat app/[...all]/page.tsx']) passed(secret.decide(bash(c, w.work), w.args), c);
+  for (const c of [`cat ${dot('[d-f]nv')}`, `cat ${dot('[a-z]nv')}.local`, `cat ${dot('[s]sh')}/config`]) blocked(secret.decide(bash(c, w.work), w.args), c);
+  passed(secret.decide({ tool_name: 'Glob', tool_input: { pattern: 'app/[id]/**/*.tsx' }, cwd: w.work }, w.args), 'a route-folder search');
+});
+
+// Lead, deny by default for searches: a wildcard folder part, or a Grep (always every folder below), from a folder
+// holding the key folder, a listed secret or the home folder, is refused whatever its last part is.
+test('deny by default: a search that could reach into the key folder is refused, even naming no secret', () => {
+  const w = world();
+  mkdirSync(join(w.home, dot('ss', 'h')));
+  mkdirSync(join(w.home, 'sub'));
+  const no = (input, what) => assert.match(secret.decide(input, w.args).reason ?? 'passed', /could reach into a folder holding secret files/, what);
+  no({ tool_name: 'Glob', tool_input: { pattern: '**/config', path: w.home } }, '** from the folder holding the key folder');
+  no({ tool_name: 'Glob', tool_input: { pattern: '*/hosts', path: w.home } }, 'one * folder');
+  no({ tool_name: 'Glob', tool_input: { pattern: `${w.home}/**/x` } }, 'an absolute pattern');
+  no({ tool_name: 'Glob', tool_input: { pattern: '../**/config' }, cwd: join(w.home, 'sub') }, 'the folder above, by ..');
+  no({ tool_name: 'Glob', tool_input: { pattern: '**/*.ts' } }, 'no folder to judge from');
+  no({ tool_name: 'Grep', tool_input: { pattern: 'x', path: w.home } }, 'Grep searches every folder below');
+  no({ tool_name: 'Grep', tool_input: { pattern: 'x', glob: '*.md', path: w.root } }, 'Grep from above a listed secret');
+  no({ tool_name: 'Glob', tool_input: { pattern: '**/x', path: process.env.HOME } }, 'the home folder');
+  passed(secret.decide({ tool_name: 'Glob', tool_input: { pattern: 'src/**/*.ts' }, cwd: w.work }, w.args), 'control: a project search');
+  passed(secret.decide({ tool_name: 'Grep', tool_input: { pattern: 'x', glob: '*.ts', path: w.work } }, w.args), 'control: a project Grep');
+  passed(secret.decide({ tool_name: 'Glob', tool_input: { pattern: 'config', path: w.home } }, w.args), 'control: no wildcard folder part');  // Each reason alone, with no secret listed: a folder holding the key folder, and a folder above the home folder.
+  const none = join(w.root, 'none.json');
+  writeFileSync(none, makeSnapshot({ production: { env_files: [], programs: [], hosts: [] }, secrets: { paths: [] } }));
+  const bare = { ...w.args, snapshot: none };
+  for (const [input, what] of [[{ tool_name: 'Glob', tool_input: { pattern: '**/config', path: w.home } }, 'holds the key folder'],
+    [{ tool_name: 'Glob', tool_input: { pattern: '**/x', path: '/' } }, 'above the home folder']]) {
+    assert.match(secret.decide(input, bare).reason ?? 'passed', /could reach into a folder holding secret files/, what);
+  }
+  passed(secret.decide({ tool_name: 'Glob', tool_input: { pattern: '**/x', path: w.work } }, bare), 'control: a folder holding neither');
+});
+
+// LEAD-CALLS L41 G2: deny by default for whole-folder writes. Each is refused when its target folder holds the
+// production settings file, and a recursive delete of the working folder or anything above it always is.
+test('L41 G2: a whole-folder write, delete, move, copy-onto or unpack over a folder holding a protected file is refused', () => {
+  const w = world();
+  mkdirSync(join(w.work, 'src'));
+  symlinkSync(w.work, join(w.root, 'link'));
+  const refuse = [
+    `rm -rf ${w.work}`, 'rm -rf .', 'rm -r ../work', 'cd .. && rm -rf work', `cd ${w.root} && rm -rf work`, 'rm -rf /', `rm -rf ${w.root}`,
+    `cd ${w.root} && rm -rf w*`, `rm -rf ${w.root}/link/`, 'rm -d -r src/..', 'rmdir ../work', `mv ${w.work} /tmp/old`, 'cd src && rm -rf ..',
+    'find . -delete', `find ${w.work} -name x -delete`, 'git clean -fdx', `git -C ${w.work} clean -n`, 'tar xf /tmp/a.tar', `tar -xf /tmp/a.tar -C ${w.work}`,
+    `tar --extract -f /tmp/a.tar --directory=${w.work}`, `unzip /tmp/a.zip -d ${w.work}`, 'unzip /tmp/a.zip', `cp -r /tmp/src/. ${w.work}`, 'cp -a /tmp/src/ ..',
+    `rsync -a /tmp/src/ ${w.work}/`, `ditto /tmp/src ${w.work}`, 'chmod -R 777 .', `chown -R nobody ${w.work}`, 'cd sub* && rm -rf x',
+    '(cd .. && rm -rf work)', 'pushd .. && rm -rf work', `rm -rf ${w.home}`,
+  ];
+  for (const c of refuse) blocked(prodGuard.decide(bash(c, w.work), w.args), c);
+  const pf = [fold(w.envFile)];
+  for (const c of ['rm -rf ~/work', 'rm -rf $HOME/work', 'rm -rf ${HOME}/work', 'cd ~ && rm -rf work', 'rm -rf $PWD', 'cd && rm -rf work']) {
+    assert.ok(prodGuard.folderWriteWhy(c, { cwd: w.work, protectedFiles: pf, home: w.root }), c);
+  }
+  const allow = ['rm -rf build', 'rm -rf node_modules dist', 'cp -r src /tmp/x', 'tar cf /tmp/a.tar src', 'tar -czf /tmp/a.tgz --exclude=x src', 'mv a.txt b.txt',
+    'unzip -l /tmp/a.zip', 'rm notes.txt', 'chmod 644 a.txt', 'cd src && rm -rf gen', 'cp a.txt src/', 'cp /tmp/a.txt .', 'find . -name "*.log"', 'git status'];
+  for (const c of allow) passed(prodGuard.decide(bash(c, w.work), w.args), c);  // A recursive delete of the working folder or one above it is refused even when no protected file is inside.
+  const deep = join(w.root, 'other', 'deep');
+  mkdirSync(deep, { recursive: true });
+  for (const c of ['rm -rf .', 'rm -rf ..', `rm -r ${join(w.root, 'other')}`, 'find .. -delete']) {
+    assert.match(prodGuard.decide(bash(c, deep), w.args).reason ?? 'passed', /working folder or a folder above it/, c);
+  }
+  passed(prodGuard.decide(bash('rm -rf gen', deep), w.args), 'control: a folder below');
+  // The settings file listed through a folder link is still found where it really is.
+  const viaLink = join(w.root, 'via-link.json');
+  writeFileSync(viaLink, makeSnapshot({ production: { env_files: [join(w.root, 'link', ENV_PROD)], programs: [], hosts: [] }, secrets: { paths: [] } }));
+  blocked(prodGuard.decide(bash(`rm -rf ${w.work}`, w.root), { ...w.args, snapshot: viaLink }), 'listed through a link');
 });
