@@ -72,17 +72,30 @@ export function landingPath(p) {
   let head = norm;
   const tail = [];
   for (;;) {
-    try {
-      lstatSync(head);
-      const real = realpathSync(head);
-      return tail.length ? join(real, ...tail.reverse()) : real;
-    } catch {
-      const parent = dirname(head);
-      if (parent === head) return null;
-      tail.push(basename(head));
-      head = parent;
+    let exists = false;
+    try { lstatSync(head); exists = true; } catch { /* missing: walk up */ }
+    if (exists) {
+      // A link whose target is missing would land the write at its target: refuse (audit R-0b-44 M-2).
+      try { const real = realpathSync(head); return tail.length ? join(real, ...tail.reverse()) : real; } catch { return null; }
     }
+    const parent = dirname(head);
+    if (parent === head) return null;
+    tail.push(basename(head));
+    head = parent;
   }
+}
+
+/**
+ * Why the last part of `p` must not be written through, or null: a link of any kind, or a file
+ * with a second name (a hard link), would send the write somewhere else (audit R-0b-44 M-2).
+ */
+export function linkedFile(p) {
+  let st;
+  try { st = lstatSync(p); } catch { return null; }
+  if (st.isSymbolicLink()) return 'is a link';
+  if (st.isFile() && st.nlink > 1) return 'has a second name (a hard link)';
+  if (!st.isFile() && !st.isDirectory()) return 'is not a plain file';
+  return null;
 }
 
 export const inside = (child, parent) => child === parent || child.startsWith(parent.endsWith(sep) ? parent : parent + sep);
@@ -141,3 +154,32 @@ export function shellCommands(cmd) {
 }
 
 export const programOf = (words) => basename(words[0] ?? '');
+
+// ---- shell shapes no hook can check (audit R-0b-44 M-4, M-5) ----
+//
+// The hooks read a command line as text. A wrapper that runs a string, a substitution or a
+// variable can spell anything, so rather than try to understand them the guards refuse them where
+// it matters. The refusal names the shape, so the session can write the command out plainly.
+
+const SHELLS = ['sh', 'bash', 'zsh', 'dash', 'ksh', 'fish', 'csh', 'tcsh'];
+const INLINE = { node: /^(-e|-p|--eval|--print)$/, deno: /^eval$/, bun: /^(-e|--eval)$/, perl: /^-\w*e/, ruby: /^-\w*e/, php: /^-r$/, osascript: /^-e$/ };
+
+/** A wrapper that runs a string as a command: sh -c, eval, source, `.`; with `inline`, node -e and kin too. */
+export function wrapperOf(cmd, { inline = false } = {}) {
+  for (const c of shellCommands(cmd)) {
+    const prog = programOf(c);
+    if (SHELLS.includes(prog) && c.slice(1).some((w) => /^-[A-Za-z]*c[A-Za-z]*$/.test(w))) return `${prog} -c`;
+    if (['eval', 'source', '.'].includes(prog)) return prog;
+    if (inline) {
+      if (/^python[0-9.]*$/.test(prog) && c.slice(1).some((w) => /^-\w*c$/.test(w))) return `${prog} -c`;
+      if (INLINE[prog] && c.slice(1).some((w) => INLINE[prog].test(w))) return `${prog} with inline code`;
+    }
+  }
+  return null;
+}
+
+/** A command name that is a variable or a substitution: `$f deploy`, `$(echo x) deploy`. */
+export const builtCommandName = (cmd) => /(^|[;&|(\n{]|\b(then|do|else)\b)\s*([A-Za-z_][A-Za-z0-9_]*=\S*\s+)*["']?[$`]/.test(String(cmd));
+
+/** Any substitution or variable anywhere in the line (even inside quotes). */
+export const hasExpansion = (cmd) => /[$`]/.test(String(cmd));

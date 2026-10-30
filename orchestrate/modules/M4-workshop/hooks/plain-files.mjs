@@ -7,7 +7,7 @@
 
 import { pathToFileURL } from 'node:url';
 import { basename, dirname, sep } from 'node:path';
-import { runHook, block, pass, landingPath, inside, realFolder } from './lib.mjs';
+import { runHook, block, pass, landingPath, inside, realFolder, linkedFile } from './lib.mjs';
 
 export const OUTBOX_ONLY_ROLES = Object.freeze(['lead', 'front_door', 'thinking', 'learning']);
 
@@ -34,7 +34,11 @@ export function decide(input, args) {
   const raw = typeof t.file_path === 'string' ? t.file_path : t.notebook_path;
   if (typeof raw !== 'string' || !raw) return block('no file path in the write');
   const p = landingPath(raw);
-  if (!p) return block(`"${raw}" is not a plain absolute path`);
+  if (!p) return block(`"${raw}" is not a plain absolute path, or is a link to nowhere yet`);
+  // The Write tool runs outside the shell sandbox, so a link or a second name here would land the
+  // write wherever it points (audit R-0b-44 M-2).
+  const linked = linkedFile(raw) ?? linkedFile(p);
+  if (linked) return block(`"${raw}" ${linked}`);
   const outbox = realFolder(args.outbox);
   if (!outbox) return block('the outbox is missing');
 

@@ -8,8 +8,11 @@
 // A missing or stale snapshot, or one without that block, blocks every call (fail closed).
 
 import { pathToFileURL } from 'node:url';
-import { basename } from 'node:path';
-import { runHook, block, pass, toolPaths, shellCommands, shellWords, programOf, landingPath, inside } from './lib.mjs';
+import { basename, isAbsolute, resolve } from 'node:path';
+import { runHook, block, pass, toolPaths, shellCommands, shellWords, programOf, landingPath, inside, wrapperOf, builtCommandName } from './lib.mjs';
+
+// A wildcard word as a pattern for one file name.
+const globRe = (g) => new RegExp(`^${g.replace(/[.+^${}()|\\]/g, '\\$&').replace(/\*/g, '.*').replace(/\?/g, '.').replace(/\[!/g, '[^')}$`);
 import { readSnapshot } from './snapshot.mjs';
 
 export function decide(input, args) {
@@ -20,24 +23,37 @@ export function decide(input, args) {
     return block('the rules snapshot has no production block');
   }
   const touchesEnv = (p) => {
-    const real = landingPath(p) ?? p;
-    return prod.env_files.some((f) => inside(real, f) || inside(p, f));
+    const abs = isAbsolute(p) ? p : (typeof input.cwd === 'string' && isAbsolute(input.cwd) ? resolve(input.cwd, p) : p);
+    const real = landingPath(abs) ?? abs;
+    return prod.env_files.some((f) => inside(real, f) || inside(abs, f) || inside(p, f));
+  };
+  // A word naming a production settings file by its short name or a wildcard (`p*.x`), which a
+  // `cd` beforehand could point at the real file (audit R-0b-44 M-5).
+  const namesEnv = (w) => {
+    const name = basename(w);
+    if (!name) return false;
+    let re = null;
+    try { re = /[*?[]/.test(name) ? globRe(name) : null; } catch { return true; }
+    return prod.env_files.some((f) => (re ? re.test(basename(f)) : basename(f) === name));
   };
   for (const p of toolPaths(input)) if (touchesEnv(p)) return block(`"${p}" is a production settings file`);
 
   if (input.tool_name === 'Bash') {
     const cmd = String(input.tool_input?.command ?? '');
+    const wrap = wrapperOf(cmd, { inline: true });
+    if (wrap) return block(`"${wrap}" runs code the guard can't check; run the command directly`);
+    if (builtCommandName(cmd)) return block('a command name built from a variable or substitution can\'t be checked');
     for (const c of shellCommands(cmd)) {
       const prog = programOf(c);
       if (prod.programs.includes(prog)) return block(`"${prog}" reaches production`);
       // Package runners that would start the program: npx <p>, bunx <p>, pnpm dlx <p>, npm exec <p>.
       if (['npx', 'bunx', 'pnpx'].includes(prog) || (['pnpm', 'npm', 'yarn'].includes(prog) && ['dlx', 'exec', 'x'].includes(c[1]))) {
-        if (c.slice(1).some((w) => prod.programs.includes(basename(w.split('@')[0])))) return block('a package runner starts a production program');
+        if (c.slice(1).some((w) => prod.programs.includes(basename(w.replace(/^--?[a-z-]+=/, '').split('@')[0])))) return block('a package runner starts a production program');
       }
     }
     for (const w of shellWords(cmd)) {
       if (prod.hosts.some((h) => w.toLowerCase().includes(h.toLowerCase()))) return block('the command names a production host');
-      if (w.startsWith('/') || w.startsWith('.')) if (touchesEnv(w)) return block(`the command names a production settings file (${w})`);
+      if (!w.startsWith('-') && (touchesEnv(w) || namesEnv(w))) return block(`the command names a production settings file (${w})`);
     }
   }
   const url = input.tool_input?.url;
