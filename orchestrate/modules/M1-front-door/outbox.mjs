@@ -76,7 +76,31 @@ export function outboxFile(kind, id, input) {
 }
 
 // Intake's check of one file the Front Door left. Returns the normalized doc, or a refusal.
-export function checkOutboxFile(name, text) {
+// Lead call L26: `products` is the product list from the Front Door's context file; a product not on it is refused
+// (the skill asks Joe when unsure, never guesses). `seenIds` is every outbox id intake has taken in before, kept in the
+// record across restarts; a reused id is refused. Intake passes both (join item with lanes 1 and 2); left out, those
+// two checks are skipped, so the result says which were run.
+export function checkOutboxFile(name, text, { products = null, seenIds = null } = {}) {
+  const r = checkOne(name, text);
+  if (!r.ok) return r;
+  const id = /(\d{8}-\d{4}-[a-z]{2})\.(?:json|md)$/.exec(String(name))[1];
+  if (seenIds && (seenIds.has?.(id) || (Array.isArray(seenIds) && seenIds.includes(id)))) return refuse('this file id was used before');
+  if (products && r.doc.product != null && !products.includes(r.doc.product)) return refuse('that product is not on the product list');
+  return { ...r, id, checked: { products: !!products, seenIds: !!seenIds } };
+}
+
+// The push intake sends Joe for every Front Door file, taken in or refused (L26): the Front Door only ever says
+// "Filed"; this is the confirmation. Lane 2 sends it over the Front Door's push path.
+export function intakePush(name, result) {
+  if (!result?.ok) return `Not filed: ${maskSecrets(String(result?.reason ?? 'unknown reason')).text}. Say it again.`;
+  const d = result.doc ?? {};
+  const what = result.kind === 'idea' ? `idea ${result.id ?? ''}`.trim()
+    : result.kind === 'state' ? `${d.state === 'away' ? 'away' : 'pause'} ${d.product}${d.until ? ` until ${String(d.until).slice(0, 10)}` : ''}`
+      : d.request === 'rotate' ? `rotate ${d.name}` : d.request === 'wrapup' ? 'wrap up' : `resume ${d.product ?? 'all products'}`;
+  return `Confirmed: ${what}.${result.note ? ` (${result.note})` : ''}`;
+}
+
+function checkOne(name, text) {
   if (/^request-airhealth-/.test(String(name))) return refuse('the Air\'s health file comes from the Air\'s own check, never the Front Door');
   // A request word belongs only in a request name (0b-8 audit round 4 cosmetic: no state-resume-<id>).
   const m = /^(?:(request)-(resume|wrapup|rotate)|(state|idea))-(\d{8}-\d{4}-[a-z]{2})\.(json|md)$/.exec(String(name));

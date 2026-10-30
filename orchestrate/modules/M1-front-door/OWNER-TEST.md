@@ -34,7 +34,10 @@ Claude records each result as the second ledger line for its row (README). Use t
 ## 4. The trigger phrase (R-0b-81)
 
 - **Type:** `new: try a darker header on the test product`
-- **You should see:** "Filed as idea <id>, unsorted; the Lead will place it." Claude checks the `idea-` file in the outbox.
+- **You should see:** "Filed: idea <id>. The Mini confirms in a minute.", then a phone notification "Confirmed: idea
+  <id>." (lead call L26). Claude checks the `idea-` file in the outbox.
+- **Then type:** `pause nosuchproduct`. **You should see:** the Front Door asks which product you mean (a name not on
+  its product list), and writes nothing until you answer.
 
 ## 5. Reach it after a Mini restart (R-0b-81)
 
@@ -50,7 +53,8 @@ Claude records each result as the second ledger line for its row (README). Use t
 ## 7. Trip dry run (R-0b-83)
 
 - **Type:** `I'm away until Friday` and answer the time zone with a city, such as `Europe/Prague`.
-- **You should see:** the reply "Filed. Checking the Mini, I'll send it in a minute.", then within a few minutes a
+- **You should see:** the reply "Filed: away <the test product>. The Mini confirms in a minute.", a "Confirmed: away …"
+  notification, then within a few minutes a
   phone notification holding the brief (lead call L22): the test product set to away, what waits on your go and the
   open risky asks (each with a link), the Mini check (online, logged in, battery backup), and the Air line. If the
   push isn't wired yet, say `brief` and the Front Door quotes the same brief.

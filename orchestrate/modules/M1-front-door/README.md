@@ -6,7 +6,7 @@ everything he asks for becomes one small file in its outbox and one short reply.
 | File | Row | What it does |
 |---|---|---|
 | `skill/orchestrate/SKILL.md` | R-0b-81 | The one skill: new idea, new project, pause, away, back, wrap up, rotate. "Not wired yet" for the rest. |
-| `outbox.mjs` | R-0b-81, 83 | The three file shapes (`state-`, `request-`, `idea-`) and intake's check. Never `state: active`; a key in any file refuses it. |
+| `outbox.mjs` | R-0b-81, 83 | The three file shapes (`state-`, `request-`, `idea-`) and intake's check. Never `state: active`; a key in any file refuses it; a product off the list or a reused id is refused (L26). `intakePush` is the confirmation Joe gets. |
 | `timezone.mjs` | R-0b-83 | A time zone counts only as a city-based name the system knows; anything ambiguous is null, which holds number work. |
 | `trip.mjs` | R-0b-83 | The trip brief: go items and risky asks with links, the Mini check (online, logged in, battery backup), the Air. |
 | `transcript.mjs` | R-0b-82, 84 | Reads the Front Door's own conversation log: Joe's turns, question boxes and their answers, "turn finished". |
@@ -53,6 +53,12 @@ R-0b-82's decision and handoff code sit here although the row is tagged M11 (lan
    one the Front Door can't write). Intake reads that folder only, checks each file with `checkAirHealthFile`, and the
    Ledger stores `airFactFromFile(doc, now, storedFact)` under `AIR_FACT` ('air-health') when it isn't null. The fact
    carries the check's own time, so a late take-in is never fresh, and an older check never replaces a newer one. The Front Door's outbox check refuses that name. Joe never types a count.
+7. "Filed, then confirmed" (lead call L26). Lane 2: the Front Door's context file carries the product list (exact
+   names), and for every Front Door file intake takes in or refuses, it pushes `intakePush(name, result)` to Joe's
+   phone ("Confirmed: …" or "Not filed: <reason>. Say it again."). Lanes 1 and 2: intake calls
+   `checkOutboxFile(name, text, { products, seenIds })`, with `seenIds` every id taken in before, kept in the record
+   so it survives a restart; the result's `checked` says both checks ran. Until this is wired, a "Filed" reply has no
+   confirmation behind it.
 
 ## Ledger: two lines per row (review-0b-8 MAT-10)
 

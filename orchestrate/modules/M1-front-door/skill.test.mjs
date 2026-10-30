@@ -37,7 +37,7 @@ test('every file shape in the skill passes intake as written (the skill and outb
 });
 
 test('the skill carries the binding replies (MAT-6, MAT-7, minors 5–7)', () => {
-  for (const s of ['Filed as idea <id>, unsorted; the Lead will place it.', 'bob NEW X', 'isn\'t wired yet', 'request-wrapup-', 'request-rotate-', 'Never write `"state":"active"`']) assert.ok(SKILL.includes(s), s);
+  for (const s of ['Filed: idea <id>. The Mini confirms in a minute.', 'bob NEW X', 'isn\'t wired yet', 'request-wrapup-', 'request-rotate-', 'Never write `"state":"active"`']) assert.ok(SKILL.includes(s), s);
 });
 
 const PROFILE = { tools: ['Read', 'Glob', 'Grep', 'Write', 'AskUserQuestion', 'PushNotification', 'Skill'], skills: ['orchestrate'] };
