@@ -17,7 +17,7 @@
 import { writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
-export const CHECKS = Object.freeze(['heartbeat', 'audit-files', 'audit-run', 'deploys', 'permissions']);
+export const CHECKS = Object.freeze(['heartbeat', 'audit-files', 'audit-run', 'deploys', 'permissions', 'robot-merges']);
 export const SLOTS = 3;
 
 export function workflowYaml({ slots = SLOTS, cron = '17 * * * *' } = {}) {

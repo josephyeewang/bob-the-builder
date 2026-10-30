@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
-import { runOne, STALE_MIN } from './outside-check.mjs';
+import { runOne, STALE_MIN, inDocsLane } from './outside-check.mjs';
 import { collect } from './collect.mjs';
 import { notify, BOT } from './notify.mjs';
 import { keepAlive } from './keep-alive.mjs';
@@ -31,7 +31,9 @@ function fakeGh(over = {}) {
     statuses: { 2: 'success', 1: 'success' },
     perms: 'read',
     // GitHub's own push times for main (the activity list): b pushed 120 min ago, c merged 60 min ago.
-    activity: [{ activity_type: 'pr_merge', after: sha('c'), timestamp: iso(60) }, { activity_type: 'push', after: sha('b'), timestamp: iso(120) }, { activity_type: 'branch_creation', after: sha('f'), timestamp: iso(100) }],
+    // c was merged by the robot (docs only); b was pushed by a person.
+    activity: [{ activity_type: 'pr_merge', before: sha('b'), after: sha('c'), timestamp: iso(60), actor: { login: 'Robot' } }, { activity_type: 'push', before: sha('a'), after: sha('b'), timestamp: iso(120), actor: { login: 'person' } }, { activity_type: 'branch_creation', after: sha('f'), timestamp: iso(100), actor: { login: 'person' } }],
+    compare: { [`${sha('b')}...${sha('c')}`]: [{ filename: 'docs/notes.md' }, { filename: 'README.md' }] },
     ...over,
   };
   const calls = [];
@@ -42,6 +44,12 @@ function fakeGh(over = {}) {
     const rest = u.pathname.slice(`/repos/${REPO}`.length);
     if (rest === '/issues') return s.heartbeat;
     if (rest === '/activity') return s.activity;
+    const cmp = /^\/compare\/(.+)$/.exec(rest);
+    if (cmp) {
+      const f = s.compare[cmp[1]]; if (f === undefined) return { message: 'Not Found' };
+      const per = Number(u.searchParams.get('per_page')), page = Number(u.searchParams.get('page'));
+      return { files: f.slice((page - 1) * per, page * per) };
+    }
     if (rest === '/commits') return u.searchParams.get('page') === '1' ? s.commits : [];
     if (rest.startsWith('/actions/workflows/')) { const c = s.runs[u.searchParams.get('head_sha')]; return { workflow_runs: c ? [{ status: 'completed', conclusion: c }] : [] }; }
     if (rest.startsWith('/contents/')) { const f = s.files[decodeURIComponent(rest.slice(10))]; if (f === undefined) throw Object.assign(new Error('x'), { status: 404 }); return { content: Buffer.from(f).toString('base64') }; }
@@ -59,9 +67,10 @@ function fakeGh(over = {}) {
 }
 const product = (o = {}) => ({ repo: REPO, stage: 'second', audit_workflow: 'audit.yml', robot: 'robot', ...o });
 const pinned = { 'product 1': { 'scripts/a.mjs': AUDIT_SHA } };
-const run = (check, gh, p = product()) => runOne(check, 1, { products: [p], api: gh.api, pinned, now: () => NOW });
+const docsLane = { 'product 1': ['docs/', 'README.md'] };
+const run = (check, gh, p = product(), o = {}) => runOne(check, 1, { products: [p], api: gh.api, pinned, docsLane, acked: {}, now: () => NOW, ...o });
 
-test('a healthy product passes all five checks', async () => {
+test('a healthy product passes every check', async () => {
   for (const c of CHECKS) assert.equal((await run(c, fakeGh())).ok, true, c);
 });
 
@@ -134,7 +143,7 @@ test('public logs carry no product data: no repo, no commit, no path, no error t
     lines.push((await run(c, fakeGh())).line);
     lines.push((await run(c, fakeGh({ heartbeat: [], files: {}, runs: {}, perms: 'write', deployments: [{ id: 9, environment: 'Production', sha: sha('f'), created_at: iso(1) }], statuses: { 9: 'success' } }))).line);
   }
-  const broken = { products: [{ ...product(), repo: 'other/elsewhere' }], api: fakeGh().api, pinned, now: () => NOW };
+  const broken = { products: [{ ...product(), repo: 'other/elsewhere' }], api: fakeGh().api, pinned, docsLane, now: () => NOW };
   for (const c of CHECKS) lines.push((await runOne(c, 1, broken)).line);
   const all = lines.join('\n');
   for (const bad of ['secret-product-name', 'someone', 'elsewhere', 'scripts/', sha('c').slice(0, 7), sha('f').slice(0, 7), 'unexpected']) assert.equal(all.includes(bad), false, bad);
@@ -249,4 +258,73 @@ test('round 2 minor: more products than slots → FAIL on every slot', async () 
   const many = Array.from({ length: SLOTS + 1 }, () => product());
   const r = await runOne('heartbeat', 1, { products: many, api: fakeGh().api, pinned, now: () => NOW });
   assert.match(r.line, /FAIL products-over-slots/);
+});
+
+// ---- robot-merges (lead calls L19, L20; R-0b-72) ----
+const OLD = (d) => new Date(NOW - d * 24 * 3600e3).toISOString();
+const robotMerge = (files, o = {}) => fakeGh({
+  activity: [{ activity_type: 'pr_merge', before: sha('b'), after: sha('c'), timestamp: iso(60), actor: { login: 'robot' }, ...o }],
+  compare: { [`${sha('b')}...${sha('c')}`]: files },
+});
+
+test('robot-merges: docs-only robot merges pass; a person\'s change to src is not the robot\'s', async () => {
+  const r = await run('robot-merges', fakeGh());
+  assert.equal(r.ok, true); assert.match(r.line, /ok 1 robot updates/);
+  const person = fakeGh({ activity: [{ activity_type: 'push', before: sha('b'), after: sha('c'), timestamp: iso(5), actor: { login: 'person' } }], compare: { [`${sha('b')}...${sha('c')}`]: [{ filename: 'src/app.ts' }] } });
+  assert.equal((await run('robot-merges', person)).ok, true);
+});
+
+test('robot-merges planted: a robot merge touching src → FAIL; once its commit is acknowledged → ok', async () => {
+  const gh = robotMerge([{ filename: 'docs/a.md' }, { filename: 'src/app.ts' }]);
+  assert.match((await run('robot-merges', gh)).line, /FAIL robot-change-outside-docs-lane 1$/);
+  assert.equal((await run('robot-merges', gh, product(), { acked: { 'product 1': [createHash('sha256').update(sha('c')).digest('hex')] } })).ok, true);
+  assert.equal((await run('robot-merges', gh, product(), { acked: { 'product 2': [createHash('sha256').update(sha('c')).digest('hex')] } })).ok, false, 'another slot\'s acknowledgement does not count');
+  assert.equal((await run('robot-merges', gh, product(), { acked: { 'product 1': [sha('c')] } })).ok, false, 'a raw commit id is not accepted (the file is public)');
+});
+
+test('robot-merges planted: a rename out of the docs lane, a lookalike prefix, an empty diff → FAIL', async () => {
+  assert.equal((await run('robot-merges', robotMerge([{ filename: 'docs/x.md', previous_filename: 'src/x.ts' }]))).ok, false);
+  assert.equal((await run('robot-merges', robotMerge([{ filename: 'docs-evil/x.md' }]))).ok, false);
+  assert.equal((await run('robot-merges', robotMerge([{ filename: 'README.md.bak' }]))).ok, false);
+  assert.equal((await run('robot-merges', robotMerge([]))).ok, false);
+  assert.equal(inDocsLane('docs/a/b.md', ['docs/']), true);
+  assert.equal(inDocsLane('', ['docs/']), false);
+});
+
+test('robot-merges planted: a robot force-push or an unknown update type → FAIL without reading a diff', async () => {
+  for (const t of ['force_push', 'branch_deletion']) {
+    const gh = robotMerge([{ filename: 'docs/a.md' }], { activity_type: t });
+    assert.match((await run('robot-merges', gh)).line, /FAIL robot-change-outside-docs-lane 1/, t);
+    assert.equal(gh.calls.some((c) => c.includes('/compare/')), false);
+  }
+});
+
+test('robot-merges planted: no pinned docs lane, no robot, unreadable lists, a bad entry → FAIL', async () => {
+  assert.match((await run('robot-merges', fakeGh(), product(), { docsLane: {} })).line, /FAIL no-pinned-docs-lane/);
+  assert.match((await run('robot-merges', fakeGh(), product(), { docsLane: { 'product 1': [] } })).line, /FAIL no-pinned-docs-lane/);
+  assert.match((await run('robot-merges', fakeGh(), product(), { docsLane: { 'product 1': ['docs/', 7] } })).line, /FAIL no-pinned-docs-lane/);
+  assert.match((await run('robot-merges', fakeGh(), product({ robot: undefined }))).line, /FAIL no-robot-named/);
+  assert.match((await run('robot-merges', fakeGh({ activity: { message: 'x' } }))).line, /FAIL activity-unreadable/);
+  assert.match((await run('robot-merges', robotMerge([{ filename: 'docs/a.md' }], { timestamp: 'soon' }))).line, /FAIL activity-entry-malformed/);
+  assert.match((await run('robot-merges', robotMerge([{ filename: 'docs/a.md' }], { before: undefined }))).line, /FAIL activity-entry-malformed/);
+  assert.match((await run('robot-merges', robotMerge([{ filename: 'docs/a.md' }], { before: '0'.repeat(40) }))).line, /FAIL activity-entry-malformed/);
+  assert.match((await run('robot-merges', fakeGh({ compare: {} }))).line, /FAIL compare-unreadable/);
+});
+
+test('robot-merges planted: a full activity page that doesn\'t reach back 7 days → FAIL; older robot merges are out of the window', async () => {
+  const many = Array.from({ length: 100 }, (_, i) => ({ activity_type: 'push', before: sha('a'), after: sha('b'), timestamp: iso(i + 1), actor: { login: 'person' } }));
+  assert.match((await run('robot-merges', fakeGh({ activity: many }))).line, /FAIL activity-window-not-covered/);
+  const old = robotMerge([{ filename: 'src/app.ts' }], { timestamp: OLD(8) });
+  assert.match((await run('robot-merges', old)).line, /ok 0 robot updates/);
+});
+
+test('robot-merges planted: 300 or more changed files can\'t be fully listed → FAIL; 150 docs files page through → ok', async () => {
+  const docs = (n) => Array.from({ length: n }, (_, i) => ({ filename: `docs/${i}.md` }));
+  assert.equal((await run('robot-merges', robotMerge(docs(150)))).ok, true);
+  assert.equal((await run('robot-merges', robotMerge(docs(300)))).ok, false);
+  assert.equal((await run('robot-merges', robotMerge([...docs(250), { filename: 'src/z.ts' }]))).ok, false, 'the src file on page 3 is seen');
+});
+
+test('the template ships empty docs-lane and acknowledged lists', () => {
+  for (const f of ['./pinned-docs-lane.json', './acknowledged-merges.json']) assert.deepEqual(JSON.parse(readFileSync(new URL(f, import.meta.url), 'utf8')), {});
 });

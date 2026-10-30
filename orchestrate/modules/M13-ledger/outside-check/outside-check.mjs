@@ -21,6 +21,12 @@
 //                GitHub deployments are created by the Git integration, so source is "git" here; a CLI deploy leaves
 //                no GitHub deployment and is the Mini's watcher's to see.
 //   permissions  the repo's Actions default token permission is "read".
+//   robot-merges every main update the robot made in the last 7 days (GitHub's activity list, actor = the robot's
+//                login) touches only the docs-lane paths pinned for that slot (pinned-docs-lane.json, a copy of the
+//                product's first-cutover rules entry); anything else → FAIL until the owner lists that commit in
+//                acknowledged-merges.json (as the SHA-256 of the commit id: this repo is public). A robot force-push, a list that can't be read or doesn't cover the window,
+//                or no pinned docs lane → FAIL. The Mini records its last green time; the Merge Gate won't run unless
+//                it was green within 2 hours (lead calls L19, L20; R-0b-72 lead_note).
 // Endpoint shapes assumed from GitHub's REST docs, 29 Oct 2026 (Principle 9: void on an API change).
 
 import { createHash } from 'node:crypto';
@@ -36,6 +42,8 @@ const FIRST_PARENT_MAX = 200;
 const FUTURE_SLACK = 10 * 60e3;
 const MAIN_UPDATES = ['push', 'force_push', 'pr_merge', 'merge_queue_merge'];
 const DEPLOY_PAGES = 10;
+export const ROBOT_WINDOW = 7 * 24 * 3600e3;
+const COMPARE_FILE_CAP = 300;
 
 class HttpError extends Error { constructor(status) { super(`http ${status}`); this.status = status; } }
 
@@ -64,6 +72,11 @@ async function firstParent(api, repo, limit = FIRST_PARENT_MAX) {
 async function auditOk(api, repo, workflow, sha) {
   const r = await api(`/repos/${repo}/actions/workflows/${encodeURIComponent(workflow)}/runs?head_sha=${sha}&per_page=20`);
   return (r.workflow_runs ?? []).some((w) => w.status === 'completed' && w.conclusion === 'success');
+}
+
+// A path is in the docs lane when it equals an entry, or starts with an entry ending in "/".
+export function inDocsLane(path, lane) {
+  return typeof path === 'string' && path !== '' && lane.some((e) => (e.endsWith('/') ? path.startsWith(e) : path === e));
 }
 
 export const CHECKS = {
@@ -136,6 +149,41 @@ export const CHECKS = {
     }
     return p.no_production === true ? { ok: true, code: 'no-production-by-entry' } : { ok: false, code: 'no-live-production-deployment' };
   },
+  // The robot's main updates, judged by GitHub's own record of who moved main and when (the activity list), not by
+  // commit authors, which the pusher sets. Activity fields and the compare file cap as GitHub documents them,
+  // 29 Oct 2026; not yet checked live (Principle 9). The list is read unpaged (it pages by cursor in a header this
+  // reader doesn't see): a full page that still reaches into the window means the window isn't covered → FAIL.
+  async 'robot-merges'(p, { api, docsLane = {}, acked = {}, now }) {
+    const lane = docsLane[p.label];
+    if (!Array.isArray(lane) || !lane.length || lane.some((e) => typeof e !== 'string' || !e)) return { ok: false, code: 'no-pinned-docs-lane' };
+    if (!p.robot) return { ok: false, code: 'no-robot-named' };
+    const t = now();
+    const robot = String(p.robot).toLowerCase();
+    const acts = await api(`/repos/${p.repo}/activity?ref=refs/heads/main&time_period=week&per_page=100`);
+    if (!Array.isArray(acts)) return { ok: false, code: 'activity-unreadable' };
+    const times = acts.map((a) => Date.parse(a?.timestamp));
+    if (times.some((x) => !Number.isFinite(x))) return { ok: false, code: 'activity-entry-malformed' };
+    if (acts.length >= 100 && Math.min(...times) > t - ROBOT_WINDOW) return { ok: false, code: 'activity-window-not-covered' };
+    const mine = acts.filter((a, i) => times[i] >= t - ROBOT_WINDOW && String(a.actor?.login ?? '').toLowerCase() === robot);
+    const ok = new Set(Array.isArray(acked[p.label]) ? acked[p.label] : []);
+    let outside = 0;
+    for (const a of mine) {
+      if (typeof a.after === 'string' && ok.has(createHash('sha256').update(a.after).digest('hex'))) continue;
+      if (!MAIN_UPDATES.includes(a.activity_type) || a.activity_type === 'force_push') { outside += 1; continue; }
+      if (!/^[0-9a-f]{40}$/.test(a.before ?? '') || !/^[0-9a-f]{40}$/.test(a.after ?? '') || /^0+$/.test(a.before)) return { ok: false, code: 'activity-entry-malformed' };
+      const files = [];
+      for (let page = 1; page <= COMPARE_FILE_CAP / 100; page++) {
+        const c = await api(`/repos/${p.repo}/compare/${a.before}...${a.after}?per_page=100&page=${page}`);
+        if (!Array.isArray(c?.files)) return { ok: false, code: 'compare-unreadable' };
+        files.push(...c.files);
+        if (c.files.length < 100) break;
+      }
+      if (files.length >= COMPARE_FILE_CAP) { outside += 1; continue; }
+      const paths = files.flatMap((f) => [f.filename, ...(f.previous_filename ? [f.previous_filename] : [])]);
+      if (!paths.length || paths.some((x) => !inDocsLane(x, lane))) outside += 1;
+    }
+    return outside ? { ok: false, code: `robot-change-outside-docs-lane ${outside}` } : { ok: true, code: `${mine.length} robot updates` };
+  },
   async permissions(p, { api }) {
     const r = await api(`/repos/${p.repo}/actions/permissions/workflow`);
     return r.default_workflow_permissions === 'read' ? { ok: true, code: 'read' } : { ok: false, code: 'default-permissions-not-read' };
@@ -143,7 +191,7 @@ export const CHECKS = {
 };
 
 // Runs one (check, slot); returns the public line. Never throws, never prints product data.
-export async function runOne(check, slot, { products, api, pinned, now = () => Date.now() }) {
+export async function runOne(check, slot, { products, api, pinned, docsLane, acked, now = () => Date.now() }) {
   const label = `product ${slot}`;
   if (!CHECKS[check]) return { line: `${label} / ${check}: FAIL unknown-check`, ok: false, label };
   // A missing, empty or malformed product list fails every slot: a silent green would switch the net off (0b-7 audit M-5).
@@ -154,7 +202,7 @@ export async function runOne(check, slot, { products, api, pinned, now = () => D
   if (p !== undefined && (!p || typeof p !== 'object' || !p.repo)) return { line: `${label} / ${check}: FAIL product-entry-malformed`, ok: false, label };
   if (!p) return { line: `${label} / ${check}: ok slot-empty`, ok: true, label, empty: true };
   let r;
-  try { r = await CHECKS[check]({ ...p, label }, { api, pinned, now }); }
+  try { r = await CHECKS[check]({ ...p, label }, { api, pinned, docsLane, acked, now }); }
   catch (e) { r = { ok: false, code: `check-error ${Number.isInteger(e?.status) ? e.status : 'exception'}` }; }
   return { line: `${label} / ${check}: ${r.ok ? 'ok' : 'FAIL'} ${r.code}`, ok: r.ok, label };
 }
@@ -163,10 +211,13 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const [check, slotArg] = process.argv.slice(2);
   let products = [];
   try { products = JSON.parse(process.env.PRODUCTS || '[]'); } catch { products = null; }
-  const pinned = JSON.parse(readFileSync(new URL('./pinned-audit-files.json', import.meta.url), 'utf8'));
+  const read = (f) => JSON.parse(readFileSync(new URL(f, import.meta.url), 'utf8'));
+  const pinned = read('./pinned-audit-files.json');
+  const docsLane = read('./pinned-docs-lane.json');
+  const acked = read('./acknowledged-merges.json');
   const res = products === null
     ? { line: `product ${slotArg} / ${check}: FAIL products-secret-unreadable`, ok: false }
-    : await runOne(check, Number(slotArg), { products, api: makeApi(process.env.CHECK_TOKEN), pinned });
+    : await runOne(check, Number(slotArg), { products, api: makeApi(process.env.CHECK_TOKEN), pinned, docsLane, acked });
   console.log(res.line);
   if (process.env.RESULTS && !res.empty) appendFileSync(process.env.RESULTS, `${res.line}\n`);
   process.exitCode = res.ok ? 0 : 1;

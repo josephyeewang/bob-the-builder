@@ -37,6 +37,9 @@ jobs:
       - name: product 1 / permissions
         if: ${{ !cancelled() }}
         run: node src/outside-check.mjs permissions 1
+      - name: product 1 / robot-merges
+        if: ${{ !cancelled() }}
+        run: node src/outside-check.mjs robot-merges 1
       - name: product 2 / heartbeat
         if: ${{ !cancelled() }}
         run: node src/outside-check.mjs heartbeat 2
@@ -52,6 +55,9 @@ jobs:
       - name: product 2 / permissions
         if: ${{ !cancelled() }}
         run: node src/outside-check.mjs permissions 2
+      - name: product 2 / robot-merges
+        if: ${{ !cancelled() }}
+        run: node src/outside-check.mjs robot-merges 2
       - name: product 3 / heartbeat
         if: ${{ !cancelled() }}
         run: node src/outside-check.mjs heartbeat 3
@@ -67,6 +73,9 @@ jobs:
       - name: product 3 / permissions
         if: ${{ !cancelled() }}
         run: node src/outside-check.mjs permissions 3
+      - name: product 3 / robot-merges
+        if: ${{ !cancelled() }}
+        run: node src/outside-check.mjs robot-merges 3
       - name: collect
         id: collect
         if: ${{ always() }}

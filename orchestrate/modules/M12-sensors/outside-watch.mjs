@@ -7,13 +7,21 @@
 //     usual schedule delay; so a stopped check is noticed within ~2 h. Cleared when a fresh run appears.
 //   - a failing step: for the newest finished run, every step named "product N / <check>" that failed → one robot
 //     issue in product N's repo (alerts.mjs, one updated issue per step); a step that passed clears its issue.
+//   - robot-merges last-green fact (lead calls L19, L20): for each product named in productNames, the newest finished
+//     run's "product N / robot-merges" step → fact outside-robot-merges-<product> { green, last_green_at }. A missing or
+//     failed step writes green:false and keeps the earlier last_green_at. The Merge Gate asks robotMergesGreen(), the
+//     one place that decides it: open only when the latest result is green and last_green_at is at most 2 h old.
 // Endpoint shapes assumed from GitHub's REST docs, 29 Oct 2026 (Principle 9).
 
 export const STOPPED_MIN = 90;
+export const ROBOT_GREEN_MIN = 120;
+const slug = (product) => String(product).replace(/[^A-Za-z0-9_-]/g, '-');
+export const ROBOT_FACT = (product) => `outside-robot-merges-${slug(product)}`;
 
 // fetchJson(path) → JSON (public GitHub API, unauthenticated). homeAlerts: alerts.mjs for the home repo.
-// productAlerts: { 'product 1': alerts, … } from private config.
-export async function watchOutside({ fetchJson, repo, workflow = 'outside-check.yml', homeAlerts, productAlerts, now = () => Date.now() }) {
+// productAlerts: { 'product 1': alerts, … } from private config. writer: makeFactWriter(rec); productNames:
+// { 'product 1': '<product>' } from private config (the same slot order as the PRODUCTS secret).
+export async function watchOutside({ fetchJson, repo, workflow = 'outside-check.yml', homeAlerts, productAlerts, writer, productNames = {}, now = () => Date.now() }) {
   const out = [];
   const readKey = 'outside-check|watch-cannot-read|github';
   let runs;
@@ -39,7 +47,20 @@ export async function watchOutside({ fetchJson, repo, workflow = 'outside-check.
   const done = runs.filter((r) => r.status === 'completed').sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at))[0];
   if (!done) return out;
   const jobs = (await fetchJson(`/repos/${repo}/actions/runs/${done.id}/jobs?per_page=10`)).jobs ?? [];
-  for (const step of jobs.flatMap((j) => j.steps ?? [])) {
+  const steps = jobs.flatMap((j) => j.steps ?? []);
+  if (writer) {
+    const ranAt = Number.isFinite(Date.parse(done.created_at)) ? new Date(Date.parse(done.created_at)).toISOString() : null;
+    for (const [label, product] of Object.entries(productNames)) {
+      const step = steps.find((x) => x.name === `${label} / robot-merges`);
+      const green = step?.conclusion === 'success' && ranAt !== null;
+      const prev = writer.get(ROBOT_FACT(product))?.last_green_at ?? null;
+      const doc = { kind: 'fact.outside-robot-merges', product, label, at: new Date(now()).toISOString(), run_id: done.id ?? null,
+        run_at: ranAt, green, last_green_at: green && !(Date.parse(prev) > Date.parse(ranAt)) ? ranAt : prev,
+        reason: green ? 'step passed' : step ? `step ${step.conclusion ?? 'unfinished'}` : 'no robot-merges step in the newest run' };
+      out.push([`${label} / robot-merges fact`, writer.put(ROBOT_FACT(product), doc)]);
+    }
+  }
+  for (const step of steps) {
     const m = /^(product \d+) \/ ([a-z-]+)$/.exec(step.name ?? '');
     if (!m || !productAlerts[m[1]]) continue;
     const [, label, check] = m;
@@ -52,4 +73,18 @@ export async function watchOutside({ fetchJson, repo, workflow = 'outside-check.
     }
   }
   return out;
+}
+
+// read(id) → the fact's doc or null, e.g. (id) => rec.read('fact', id)?.doc. Never throws.
+export function robotMergesGreen({ read, product, now = () => Date.now() }) {
+  let d = null;
+  try { d = read(ROBOT_FACT(product)); } catch { d = null; }
+  if (!d) return { open: false, problems: ['robot-merges: no fact yet'] };
+  const problems = [];
+  if (d.green !== true) problems.push(`robot-merges: latest result not green (${d.reason ?? 'unknown'})`);
+  const age = (now() - Date.parse(d.last_green_at)) / 60e3;
+  if (!Number.isFinite(age)) problems.push('robot-merges: never green');
+  else if (age < -5) problems.push('robot-merges: last green time is in the future');
+  else if (age > ROBOT_GREEN_MIN) problems.push(`robot-merges: last green more than ${ROBOT_GREEN_MIN} min ago`);
+  return { open: problems.length === 0, problems };
 }
