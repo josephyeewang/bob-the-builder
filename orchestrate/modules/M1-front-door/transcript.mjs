@@ -2,21 +2,21 @@
 // and answers the questions R-0b-82 and R-0b-84 ask of it (review-0b-8 MAT-2, MAT-11).
 //
 // Terms, as the binding review defines them:
-//   Joe's turn       a message Joe typed or spoke, or his answer to a question box. Lines the Dispatcher types
-//                    (sendSafe always prefixes them "[watchdog]"), relays and system-injected entries are not his.
+//   the owner's turn  a message the owner typed or spoke, or their answer to a question box. Lines the Dispatcher types
+//                    (sendSafe always prefixes them "[watchdog]"), relays and system-injected entries are not theirs.
 //   question box     an AskUserQuestion tool call in this log. It is answered only by a tool result carrying the same
 //                    call ID; a typed line saying "yes" is not an answer to it. Open asks in the record don't count.
 //   turn finished    the last conversation entry is the assistant's, and every tool call it made has a result.
 //
 // Log format as Claude Code wrote it on 29 Oct 2026 (CLI 2.1.309): entries {type: 'user'|'assistant', uuid,
 // timestamp, isMeta?, isSidechain?, message: {content: string | blocks}}, blocks {type: 'text'|'image'|'document'|
-// 'tool_use'|'tool_result'}. A message Joe types while a turn runs may be logged only as {type: 'attachment',
+// 'tool_use'|'tool_result'}. A message the owner types while a turn runs may be logged only as {type: 'attachment',
 // attachment: {type: 'queued_command', prompt, timestamp?, origin: {kind: 'human'|'task-notification'|'peer'…}}}
 // (0b-8 audit round 2 M-1). Principle 9: a format note; re-check on a CLI upgrade, the tests' fixtures follow it.
 
 export const QUESTION_TOOL = 'AskUserQuestion';
 export const AUTOMATED_PREFIXES = Object.freeze(['[watchdog]', '[relay]', '[dispatcher]']);
-// Text Claude Code itself injects as a "user" entry: command output and notices, never Joe typing.
+// Text Claude Code itself injects as a "user" entry: command output and notices, never the owner typing.
 const INJECTED = /^\s*<(local-command-stdout|local-command-stderr|task-notification|system-reminder|bash-stdout|bash-stderr|cross-session-message|artifact-content-authored-by-others)\b/;
 export const INTERRUPTED = /^\s*\[Request interrupted by user/;
 
@@ -35,14 +35,14 @@ const blocks = (e) => {
   return Array.isArray(c) ? c.filter((b) => b && typeof b === 'object') : [];
 };
 const isTurn = (e) => (e?.type === 'user' || e?.type === 'assistant') && !e.isMeta && !e.isCompactSummary && !e.isSidechain;
-// A message Joe queued while a turn ran (M-1). It counts unless it is plainly not his: a notice, another session's
+// A message the owner queued while a turn ran (M-1). It counts unless it is plainly not theirs: a notice, another session's
 // message, or a meta entry. An origin missing or of a kind not listed counts (0b-8 audit round 3 M-1: queued entries
 // with no origin exist); counting one wrongly only delays a restart. An image or other block counts as "[image]".
-const NOT_JOE_ORIGINS = new Set(['task-notification', 'peer', 'cross-session', 'system', 'hook']);
+const NOT_OWNER_ORIGINS = new Set(['task-notification', 'peer', 'cross-session', 'system', 'hook']);
 const queued = (e) => {
   const a = e?.type === 'attachment' ? e.attachment : null;
   if (!a || a.type !== 'queued_command' || e.isSidechain || e.isMeta || a.isMeta) return null;
-  if (a.origin && NOT_JOE_ORIGINS.has(a.origin.kind)) return null;
+  if (a.origin && NOT_OWNER_ORIGINS.has(a.origin.kind)) return null;
   if (a.commandMode && a.commandMode !== 'prompt') return null;
   const text = typeof a.prompt === 'string' ? a.prompt
     : blocks({ message: { content: a.prompt } }).map((b) => (b.type === 'text' ? String(b.text ?? '') : `[${String(b.type).replace(/[^a-z_]/g, '')}]`)).join('\n');
@@ -76,7 +76,7 @@ export function questionBoxes(entries) {
 }
 
 // The answer itself: the log's structured answers when present (the result text repeats the question, so a question
-// mentioning "[watchdog]" would otherwise hide Joe's real answer; 0b-8 audit round 3 minor 1), else the result text.
+// mentioning "[watchdog]" would otherwise hide the owner's real answer; 0b-8 audit round 3 minor 1), else the result text.
 const answerValues = (e, b) => {
   const a = e?.toolUseResult?.answers;
   return a && typeof a === 'object' && !Array.isArray(a) ? Object.values(a).map((v) => String(v)) : null;
@@ -87,12 +87,12 @@ const answerAutomated = (e, b) => {
 };
 const resultText = (b) => (typeof b.content === 'string' ? b.content : blocks({ message: { content: b.content } }).map((x) => x.text ?? '').join(' '));
 
-// Joe's turns, oldest first: { at, kind: 'typed'|'answer'|'declined', text, index }. Anything Joe might have done counts
-// (0b-8 audit round 1, M-1): an image with no text, a question box he declined or interrupted (its result is an error;
-// counting a tool failure too only delays a restart), and his text after an injected block in the same entry.
-// A box answer holding an automated prefix ("[watchdog]…") is typed keys landing in the box, not Joe (M-7): not his.
-// A message queued while a turn ran counts (M-1); so does any block he sent that isn't a tool's result (a PDF too).
-export function joeTurns(entries) {
+// The owner's turns, oldest first: { at, kind: 'typed'|'answer'|'declined', text, index }. Anything the owner might have done counts
+// (0b-8 audit round 1, M-1): an image with no text, a question box they declined or interrupted (its result is an error;
+// counting a tool failure too only delays a restart), and their text after an injected block in the same entry.
+// A box answer holding an automated prefix ("[watchdog]…") is typed keys landing in the box, not the owner (M-7): not theirs.
+// A message queued while a turn ran counts (M-1); so does any block they sent that isn't a tool's result (a PDF too).
+export function ownerTurns(entries) {
   const boxIds = new Set(questionBoxes(entries).map((q) => q.callId));
   const out = [];
   const seen = new Set();
@@ -120,9 +120,9 @@ export function joeTurns(entries) {
   return out;
 }
 
-// The assistant's reply to each of Joe's turns: the assistant text between it and Joe's next turn.
-export function joeTurnsWithReplies(entries) {
-  const turns = joeTurns(entries);
+// The assistant's reply to each of the owner's turns: the assistant text between it and the owner's next turn.
+export function ownerTurnsWithReplies(entries) {
+  const turns = ownerTurns(entries);
   return turns.map((t, i) => {
     const end = i + 1 < turns.length ? turns[i + 1].index : entries.length;
     const reply = entries.slice(t.index + 1, end).filter((e) => isTurn(e) && e.type === 'assistant').map(textOf).filter((s) => s.trim()).join('\n');
@@ -133,7 +133,7 @@ export function joeTurnsWithReplies(entries) {
 export function lastTurnFinished(entries) {
   const turns = entries.filter(isTurn);
   const last = turns.at(-1);
-  // Joe pressing Esc ends the turn: Claude Code logs the interrupt line and runs nothing more (round 2 minor 3).
+  // The owner pressing Esc ends the turn: Claude Code logs the interrupt line and runs nothing more (round 2 minor 3).
   if (last?.type === 'user' && INTERRUPTED.test(textOf(last))) return true;
   if (!last || last.type !== 'assistant') return false;
   if (last.message?.stop_reason === 'tool_use') return false;

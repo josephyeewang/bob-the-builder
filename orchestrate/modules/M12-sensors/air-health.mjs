@@ -1,5 +1,5 @@
 // air-health.mjs — the Air's health result as a dated file a machine writes (lead call L23; 0b-8 audit round 3 M-4,
-// round 4 M-1). Joe never types a count: /configaudit on the Air runs this with its red count, and the file reaches the
+// round 4 M-1). The owner never types a count: /configaudit on the Air runs this with its red count, and the file reaches the
 // Mini's air-health folder (a synced folder the Front Door can't write; never the Front Door's outbox). Intake checks
 // it with checkAirHealthFile and the Ledger stores airFactFromFile(doc) under AIR_FACT ('air-health').
 //

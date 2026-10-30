@@ -1,7 +1,7 @@
 // waiting.mjs — who and what each waiting item waits on, and since when, for the digest and status replies
 // (R-0b-77; design v4 §8 A5, §9.2 M13 "the 'waiting on' roll-up").
 //
-// A waiting item is any record doc in state `waiting`, or any doc carrying a `wait` object (an ask waiting on Joe, a
+// A waiting item is any record doc in state `waiting`, or any doc carrying a `wait` object (an ask waiting on the owner, a
 // card held on a date). Its fields are the record's WAIT_FIELDS (who, what, since, next_check), read, never guessed.
 // An item missing who, what or since is shown as a RECORD ERROR naming the missing fields, never as a blank line:
 // a silent blank is how a stuck item hides (A5: every waiting state names who and what, and since when).

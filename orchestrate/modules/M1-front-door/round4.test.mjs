@@ -1,4 +1,4 @@
-// round4.test.mjs — planted cases for the 0b-8 audit round 4 findings and lead calls L22 (the brief pushed to Joe's
+// round4.test.mjs — planted cases for the 0b-8 audit round 4 findings and lead calls L22 (the brief pushed to the owner's
 // phone) and L23 (the Air's health result written by a machine, dated by its own check). Each fails on the old code.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';

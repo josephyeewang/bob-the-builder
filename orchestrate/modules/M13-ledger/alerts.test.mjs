@@ -34,7 +34,7 @@ test('a change of the condition comments once; clearing closes; coming back open
   assert.equal(gh.issues.size, 2);
 });
 
-test('an issue Joe closed while the condition holds is not reopened until it clears and comes back', async () => {
+test('an issue the owner closed while the condition holds is not reopened until it clears and comes back', async () => {
   const { gh, alerts } = setup();
   const key = alertKey('p', 'setting-changed', 'fp1');
   await alerts.raise({ key, title: 'Setting changed', body: 'b' });

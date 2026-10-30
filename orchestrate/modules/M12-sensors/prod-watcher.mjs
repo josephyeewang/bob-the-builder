@@ -16,7 +16,7 @@
 // A cancelled build (the build-skip refused it) or a failed one is never READY and raises nothing.
 //
 // The FIRST pass only records a baseline (every deployment already there counts as seen; settings fingerprinted), so
-// turning the watcher on never floods Joe with history. Each alert goes through M13's alerts (one updated issue per
+// turning the watcher on never floods the owner with history. Each alert goes through M13's alerts (one updated issue per
 // condition). The state of the last pass is one fact, `prod-watch-<product>`.
 // Deliberately absent: the N14 ref watch (D15's approved-jobs ref) is second cutover (0b-11); don't add it here.
 

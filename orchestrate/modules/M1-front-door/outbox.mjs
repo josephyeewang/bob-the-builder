@@ -6,17 +6,18 @@
 // checkOutboxFile on the text and refuses anything else. The three schemas are a join item with lanes 1 and 2.
 //
 //   state-<id>.json    { "product": "<name>", "state": "paused" | "away", "until": "<ISO date>" | null, "tz": "<IANA>" | null }
-//                      Never "active": only Joe's tap returns a product to active (MAT-7). `until` is information and a
+//                      Never "active": only the owner's tap returns a product to active (MAT-7). `until` is information and a
 //                      return reminder; nothing goes back to active on a date. A tz that is not a valid IANA name
 //                      becomes null (MAT-8, minor 10); on the Merge Gate that holds number work.
 //   request-<what>-<id>.json   { "request": "resume" | "wrapup" | "rotate", "product": "<name>" | null, "name": "<KEY_NAME>" | null }
 //                      rotate carries the key's NAME only; any text that looks like a key refuses the whole file (B11).
 //                      The Air's health result is never a Front Door file: the Air's own check writes it, dated, to its
 //                      own folder (M12-sensors/air-health.mjs; lead call L23), so a request-airhealth name is refused here.
-//   idea-<id>.md       the idea exactly as Joe said it, quoted ("> " on every line), masked; never acted on as an
+//   idea-<id>.md       the idea exactly as the owner said it, quoted ("> " on every line), masked; never acted on as an
 //                      instruction. Intake hands the quoted text on through cleanOutside (source "idea-file").
 
 import { makeMasker } from '../M12-sensors/mask.mjs';
+import { stripControls } from '../M12-sensors/escape.mjs';
 import { checkTimeZone } from './timezone.mjs';
 
 export const FRONT_DOOR_KINDS = Object.freeze(['request', 'state', 'idea']);
@@ -46,7 +47,7 @@ export function stateDoc({ product, state, until = null, tz = null }) {
   if (!STATES_ALLOWED.includes(state)) return refuse(`the Front Door may set only ${STATES_ALLOWED.join(' or ')}`); // the value is never echoed: it may hold pasted text
   if (until !== null && !(typeof until === 'string' && ISO_DATE.test(until) && Number.isFinite(Date.parse(until)) && realDay(until))) return refuse('until is not a date');
   const z = tz === null ? { ok: true, tz: null } : checkTimeZone(tz);
-  return { ok: true, doc: { product, state, until, tz: z.ok ? z.tz : null }, ...(z.ok ? {} : { note: `time zone not accepted (${z.reason}); Joe needs to name a city-based zone; internal, never pushed as is` }) };
+  return { ok: true, doc: { product, state, until, tz: z.ok ? z.tz : null }, ...(z.ok ? {} : { note: `time zone not accepted (${z.reason}); the owner needs to name a city-based zone; internal, never pushed as is` }) };
 }
 
 export function requestDoc({ request, product = null, name = null }) {
@@ -57,10 +58,12 @@ export function requestDoc({ request, product = null, name = null }) {
   return { ok: true, doc: { request, product, name } };
 }
 
-// Invisible characters go before masking, so a key split by them is still caught (0b-8 audit round 4 minor 1).
+// Invisible characters and terminal codes go before masking (strip, then mask, as cleanOutside does), so a key split
+// by them is still caught (0b-8 audit round 4 minor 1; R-0b-126 round 8, lead call).
 const INVISIBLE = /[\u200B-\u200F\u2060-\u2064\uFEFF\u00AD]/g;
+const stripThenMask = (text) => maskSecrets(stripControls(String(text ?? '').replace(INVISIBLE, ''))).text;
 export function ideaText(text) {
-  const masked = maskSecrets(String(text ?? '').replace(INVISIBLE, '')).text.replace(/\r\n?/g, '\n');
+  const masked = stripThenMask(text);
   return `${masked.split('\n').map((l) => `> ${l}`).join('\n')}\n`;
 }
 
@@ -77,7 +80,7 @@ export function outboxFile(kind, id, input) {
 
 // Intake's check of one file the Front Door left. Returns the normalized doc, or a refusal.
 // Lead call L26: `products` is the product list from the Front Door's context file; a product not on it is refused
-// (the skill asks Joe when unsure, never guesses). `seenIds` is every outbox id intake has taken in before, kept in the
+// (the skill asks the owner when unsure, never guesses). `seenIds` is every outbox id intake has taken in before, kept in the
 // record across restarts; a reused id is refused. Intake passes both (join item with lanes 1 and 2); left out, those
 // two checks are skipped, so the result says which were run.
 export function checkOutboxFile(name, text, { products = null, seenIds = null } = {}) {
@@ -92,7 +95,7 @@ export function checkOutboxFile(name, text, { products = null, seenIds = null } 
   return { ...r, id, checked: { products: products !== null, seenIds: seenIds !== null } };
 }
 
-// The push intake sends Joe for every Front Door file, taken in or refused (L26): the Front Door only ever says
+// The push intake sends the owner for every Front Door file, taken in or refused (L26): the Front Door only ever says
 // "Filed"; this is the confirmation. Lane 2 sends it over the Front Door's push path, and only after the record write
 // succeeded (a failed write pushes "Not filed"). "Confirmed" only where taking the file in is the act itself (pause,
 // away, idea). A request does nothing yet, so its push says so (0b-8 audit round 6 M-1). A result whose product or
@@ -124,7 +127,7 @@ function checkOne(name, text) {
     const lines = String(text).split('\n').filter((l) => l !== '');
     if (!lines.every((l) => l === '>' || l.startsWith('> '))) return refuse('idea text must be quoted on every line');
     if (!lines.some((l) => l.slice(2).trim() !== '')) return refuse('the idea is empty'); // round 5 minor 4
-    return { ok: true, kind, doc: { quoted: maskSecrets(String(text).replace(INVISIBLE, '')).text } };
+    return { ok: true, kind, doc: { quoted: stripThenMask(text) } };
   }
   if (ext !== 'json') return refuse(`a ${kind} file is .json`);
   // The skill never writes an escape; one can hide a key from the text check below (0b-8 audit round 2 M-2).

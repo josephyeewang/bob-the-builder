@@ -97,10 +97,10 @@ test('0b-7 audit round 6 MAT-C: lower-case "<what>_key", passphrase and credenti
 
 // ---- L24: the outside repo's lock ----
 
-const SELF = 'joe-example/outside-check';
+const SELF = 'owner-example/outside-check';
 function guardGh(o = {}) {
   const s = {
-    collaborators: [{ login: 'Joe-Example', permissions: { admin: true, maintain: true, push: true, pull: true } }, { login: 'robot', permissions: { admin: false, maintain: false, push: false, triage: false, pull: true } }],
+    collaborators: [{ login: 'Owner-Example', permissions: { admin: true, maintain: true, push: true, pull: true } }, { login: 'robot', permissions: { admin: false, maintain: false, push: false, triage: false, pull: true } }],
     keys: [{ id: 1, read_only: true }],
     rulesets: [{ id: 7 }],
     ruleset: { id: 7, target: 'branch', enforcement: 'active', conditions: { ref_name: { include: ['~DEFAULT_BRANCH'], exclude: [] } },
@@ -118,7 +118,7 @@ function guardGh(o = {}) {
     throw Object.assign(new Error('x'), { status: 404 });
   };
   const probe = async () => s.probeStatus;
-  return { api, probe, self: SELF, selfOwner: 'joe-example' };
+  return { api, probe, self: SELF, selfOwner: 'owner-example' };
 }
 const rs = (o) => ({ ruleset: { id: 7, target: 'branch', enforcement: 'active', conditions: { ref_name: { include: ['~DEFAULT_BRANCH'], exclude: [] } },
   rules: [{ type: 'update' }, { type: 'deletion' }, { type: 'non_fast_forward' }], bypass_actors: [{ actor_id: 5, actor_type: 'RepositoryRole', bypass_mode: 'always' }], ...o } });
@@ -131,9 +131,9 @@ test('L24: a repo only its owner can push, with the default branch locked, passe
 
 test('L24 planted: anyone else who can write, a writable deploy key, or a missing or weak lock → FAIL', async () => {
   const cases = [
-    [{ collaborators: [{ login: 'joe-example', permissions: { admin: true, push: true } }, { login: 'robot', permissions: { admin: false, maintain: false, push: true } }] }, /others-can-write 1/],
-    [{ collaborators: [{ login: 'joe-example', permissions: { admin: true, push: true } }, { login: 'mini-account', permissions: { admin: false, maintain: true, push: false } }] }, /others-can-write 1/],
-    [{ collaborators: [{ login: 'joe-example', permissions: { admin: true, push: true } }, { login: 'x' }] }, /collaborators-unreadable/],
+    [{ collaborators: [{ login: 'owner-example', permissions: { admin: true, push: true } }, { login: 'robot', permissions: { admin: false, maintain: false, push: true } }] }, /others-can-write 1/],
+    [{ collaborators: [{ login: 'owner-example', permissions: { admin: true, push: true } }, { login: 'mini-account', permissions: { admin: false, maintain: true, push: false } }] }, /others-can-write 1/],
+    [{ collaborators: [{ login: 'owner-example', permissions: { admin: true, push: true } }, { login: 'x' }] }, /collaborators-unreadable/],
     [{ collaborators: Array.from({ length: 100 }, (_, i) => ({ login: `u${i}`, permissions: { push: false, admin: false } })) }, /collaborators-not-covered/],
     [{ keys: [{ id: 1, read_only: false }] }, /deploy-key-can-write/],
     [{ rulesets: [] }, /default-branch-not-locked/],

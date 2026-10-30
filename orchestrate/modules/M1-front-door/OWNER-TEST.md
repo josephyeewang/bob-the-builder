@@ -1,9 +1,9 @@
 # Front Door: owner test script (R-0b-81 to R-0b-84)
 
-Joe runs these with Claude watching on the Mini. Each step says where to do it, what to type, and what you should see.
+The owner runs these with Claude watching on the Mini. Each step says where to do it, what to type, and what you should see.
 Claude records each result as the second ledger line for its row (README). Use the test product, never a live one.
 
-**Stop conditions. If either happens, stop, and Claude logs a design finding for Joe. No workarounds.**
+**Stop conditions. If either happens, stop, and Claude logs a design finding for the owner. No workarounds.**
 - The phone can reach the Front Door only through server mode (`claude remote-control` run as a server). The design
   forbids depending on it. A connected session started by the Mini must work, either with Remote Control on at start
   in its settings or with `/remote-control` typed in by the Dispatcher after start.

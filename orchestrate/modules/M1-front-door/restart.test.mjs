@@ -43,7 +43,7 @@ test('MAT-2: 200 open asks in the record and no open box → restart; the handof
   assert.ok(text.length <= HANDOFF_BUDGET_CHARS, String(text.length));
   assert.match(text, /- and \d+ more: see the waiting list/);
   assert.match(text, /ask-0:/);
-  assert.match(text, /Joe \(message, .*\): .*what is waiting\?/);
+  assert.match(text, /The owner \(message, .*\): .*what is waiting\?/);
 });
 
 test('MAT-3: a planted GitHub key and a connection-string password come out of the handoff masked', () => {
@@ -77,7 +77,7 @@ test('0b-8 audit round 1 M-1: an image-only message, a declined question box, or
   const cases = {
     image: [user(14, [{ type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'AAAA' } }]), said(14, 'Got the screenshot.')],
     declined: [asks(13, 'q-d'), result(14, 'q-d', 'The user declined to answer.', true), said(14, 'OK.')],
-    injectedThenJoe: [user(14, [{ type: 'text', text: '<system-reminder>note</system-reminder>' }, { type: 'text', text: 'actually wait' }]), said(14, 'Waiting.')],
+    injectedThenOwner: [user(14, [{ type: 'text', text: '<system-reminder>note</system-reminder>' }, { type: 'text', text: 'actually wait' }]), said(14, 'Waiting.')],
   };
   for (const [name, tail] of Object.entries(cases)) {
     const entries = [typed(0, 'hi'), said(1, 'hello'), ...tail];
@@ -89,13 +89,13 @@ test('0b-8 audit round 1 M-1: an image-only message, a declined question box, or
   assert.equal(shouldRestartFrontDoor({ sizeTokens: 200_000, entries: injectedOnly, now: at(16) }).restart, true);
 });
 
-test('0b-8 audit round 1 minor 10: quiet runs from Joe\'s latest timed turn, not session start, when the last has no time', () => {
+test('0b-8 audit round 1 minor 10: quiet runs from the owner\'s latest timed turn, not session start, when the last has no time', () => {
   const noTime = { ...typed(0, 'later'), timestamp: undefined };
   const entries = [typed(10, 'earlier'), said(10, 'ok'), noTime, said(11, 'ok')];
   assert.equal(shouldRestartFrontDoor({ sizeTokens: 200_000, entries, now: at(16), startedAt: new Date(T0 - 3600e3).toISOString() }).restart, false);
 });
 
-test('0b-8 audit round 1 minors 1, 2: with 60 asks all 5 of Joe\'s turns survive; a key in an ask link or the re-read list is masked', () => {
+test('0b-8 audit round 1 minors 1, 2: with 60 asks all 5 of the owner\'s turns survive; a key in an ask link or the re-read list is masked', () => {
   const entries = [];
   for (let i = 0; i < 5; i++) entries.push(typed(i, `message ${i} ${'x'.repeat(300)}`), said(i, `reply ${i} ${'y'.repeat(300)}`));
   const openAsks = Array.from({ length: 60 }, (_, i) => ({ id: `ask-${i}`, what: `Approve change ${i} ${'z'.repeat(80)}`, link: i === 0 ? `https://example.invalid/pr/0?t=${FAKE.github}` : `https://example.invalid/pr/${i}` }));

@@ -98,3 +98,15 @@ test('0b-8 audit round 1 minor 7: a lone ">" between quoted paragraphs is accept
   assert.equal(checkOutboxFile('idea-20261103-0915-kq.md', '> first part\n>\n> second part\n').ok, true);
   assert.equal(checkOutboxFile('idea-20261103-0915-kq.md', '> first part\nunquoted\n').ok, false);
 });
+
+test('R-0b-126 round 8: idea text is stripped before masking, so a key split by a terminal code or zero-width character is masked', async () => {
+  const { fillFakes } = await import('../M12-sensors/fakes.mjs');
+  const { stripControls } = await import('../M12-sensors/escape.mjs');
+  for (const how of ['ansi', 'zw', 'bel']) {
+    const text = fillFakes(`key {{FAKE.generic:${how}}}`);
+    const f = outboxFile('idea', '20261103-0915-sk', text);
+    assert.equal(stripControls(f.text).includes(FAKE.generic), false, `ideaText, ${how}`);
+    const c = checkOutboxFile('idea-20261103-0915-sl.md', `> ${text}\n`);
+    assert.equal(c.ok, true); assert.equal(stripControls(c.doc.quoted).includes(FAKE.generic), false, `intake quoted, ${how}`);
+  }
+});
