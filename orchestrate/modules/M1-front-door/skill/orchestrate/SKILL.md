@@ -51,7 +51,8 @@ Reply: "Filed: pause X. The Mini confirms in a minute." Only Joe's tap brings it
 3. Reply: "Filed: away <the products>. The Mini confirms in a minute." The Mini sends the trip brief to his phone itself. You
    don't know the time, so you can't judge a brief's age yourself; the brief written after these files names them.
 4. If Joe asks for the brief before it arrives ("brief"): read the trip brief file named in your context. Quote it
-   only if its first line lists **every** `<id>` of the newest `state-` files you wrote for this trip. Otherwise say:
+   only if its first line lists **every** `<id>` of the newest `state-` files you wrote for this trip, or its first
+   line says "wiring fault" (that one never names your ids; quote it as it is). Otherwise say:
    "Mini check: unknown (the brief isn't ready yet). Ask again in a few minutes; if it can't be built, the brief says so." When you quote it, start with
    "Made at <the time on its first line>." then the brief as it is. Don't add to or soften it.
 5. The brief's Air line comes from the Air's own check. Never ask Joe for a count and never write one; if the line

@@ -45,7 +45,7 @@ R-0b-82's decision and handoff code sit here although the row is tagged M11 (lan
    phone over the Front Door's push path and its `ids` stored as `lastPushedIds` (lead call L22); a result with
    `failed: true` (the brief couldn't be built) is pushed too, but its `ids` go to `lastFailedIds`, never
    `lastPushedIds`, so the next passes keep trying and push the real brief once it builds; pass both lists back in
-   every time. The pass also writes each result's text (a brief or a failure) to the read-only file the skill quotes
+   every time (each one replaced by the newest result of its kind; an old `lastFailedIds` is harmless, since ids are never reused). The pass also writes each result's text (a brief or a failure) to the read-only file the skill quotes
    if Joe asks first, and runs `readPowerSource` with the
    heartbeat. The skill quotes only a brief that names the ids it wrote (0b-8 audit round 3 M-3). If the push isn't
    ready by the first cutover, trip mode falls back to two replies ("filed", then the brief when Joe says "brief").

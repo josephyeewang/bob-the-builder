@@ -67,8 +67,12 @@ export function briefAnswers(text, ids) {
 export const TRIP_FAILED_TEXT = 'The Mini could not build it. It tries again every few minutes and pushes the brief when it can.';
 // The failure names the ids on its first line like a brief does, so the brief file can hold it and the skill quotes it
 // when Joe says "brief" (0b-8 audit round 9 M-1: in the two-reply fallback a failure was otherwise never seen).
-const failedText = (ids) => `Trip brief failed; answers state files: ${ids.join(', ')}.\n${TRIP_FAILED_TEXT}`;
-export function nextTripPush({ states, lastPushedIds = [], lastFailedIds = [], build }) {
+// A bad id is a wiring fault that won't clear by itself, and it can't name Joe's ids, so it has its own first line the
+// skill quotes whatever ids it names (0b-8 confirm round M-1). Both carry the time for the skill's "Made at".
+const failedText = (ids, at) => `Trip brief failed at ${at}; answers state files: ${ids.join(', ')}.\n${TRIP_FAILED_TEXT}`;
+export const WIRING_FAULT_LINE = 'wiring fault: the Ledger passed a state file id the Mini cannot read';
+const wiringText = (at) => `Trip brief failed at ${at}: ${WIRING_FAULT_LINE}.\nIt will not fix itself; tell the Lead. Your away files are filed; only the brief is missing.`;
+export function nextTripPush({ states, lastPushedIds = [], lastFailedIds = [], build, now = () => new Date() }) {
   const away = (Array.isArray(states) ? states : []).filter((s) => s?.state === 'away').map((s) => String(s.id));
   const ids = [...new Set(away)].sort();
   if (!ids.length) return null;
@@ -76,7 +80,7 @@ export function nextTripPush({ states, lastPushedIds = [], lastFailedIds = [], b
   const last = new Set(Array.isArray(lastPushedIds) ? lastPushedIds : []);
   if (ids.every((x) => last.has(x))) return null;
   const failedBefore = new Set(Array.isArray(lastFailedIds) ? lastFailedIds : []);
-  const fail = () => (ids.every((x) => failedBefore.has(x)) ? null : { text: badId ? failedText(['(not a file id)']) : failedText(ids), ids, failed: true });
+  const fail = () => (ids.every((x) => failedBefore.has(x)) ? null : { text: badId ? wiringText(now().toISOString()) : failedText(ids, now().toISOString()), ids, failed: true });
   if (badId) return fail();
   let text;
   try { text = build(ids); } catch { return fail(); } // the reason is not quoted: it could carry record text
