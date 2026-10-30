@@ -463,10 +463,20 @@ export function openRecord({ root, product, ownerUid, rules, alert = () => {}, n
         if (tx.seen(f.key)) return { ok: true, skipped: true };
         const ev = { actor: `${tag.role}:${tag.sessionId}`, file: basename(String(file)) };
         if (!f.ok) { tx.markSeen(f.key, 'refused'); return refuse({ ...ev, outbox: true }, f.reason); }
+        // A hand-in whose refusal fact is already down was refused before a kill stopped the seen mark: it stays refused,
+        // never re-judged, so a session told "refused" can't find it applied later (round 11 confirm m1).
+        const refusedId = f.kind === 'handin-' ? `outbox-refused-${tag.sessionId}-${createHash('sha256').update(f.key).digest('hex').slice(0, 12)}` : null;
+        const told = refusedId ? tx.lookup('fact', refusedId) : null;
+        if (told) { tx.markSeen(f.key, 'refused'); return refuse({ ...ev, outbox: true }, told.doc?.reason ?? 'refused'); }
         // A store error (a damaged diary, a lost lock) is not the file's fault: the file stays unseen and is tried again on
         // the next pass, so nothing an AI handed in is lost; the owner is alerted once per file (round 3 m-D, round 4 MAT-1).
         let r, storeErr;
-        try { r = applyParsed(tx, tag, f); } catch (e) {
+        try {
+          r = applyParsed(tx, tag, f);
+          // A refused hand-in becomes a fact the session's watcher reads at once (R3-M4). The fact goes down before the file is
+          // marked seen, so a kill between them can't lose it; a store error writing it leaves the file unseen to try again (round 11 m1, confirm m2).
+          if (!r.ok && refusedId) tx.commit([{ entity: 'fact', id: refusedId, doc: { type: 'outbox_refused', session: tag.sessionId, file: ev.file, reason: r.reason } }], meta('dispatcher', 'outbox_refused'));
+        } catch (e) {
           // A throw from the file's own content (not the store, not the disk) refuses the file like any other refusal (round 5 m-1).
           if (e?.store === true || typeof e?.code === 'string') storeErr = e;
           else r = no(`the file could not be applied: ${String(e?.message ?? e).slice(0, 200)}`);
@@ -479,12 +489,6 @@ export function openRecord({ root, product, ownerUid, rules, alert = () => {}, n
           return refuse({ ...ev, outbox: true }, reason);
         }
         if (r.ok) { tx.markSeen(f.key, 'applied'); return r; }
-        // A refused hand-in becomes a fact the session's watcher reads at once (R3-M4). The fact goes down before the file is
-        // marked seen, so a kill between them can't lose it; its id comes from the file, so a replay doesn't write it twice (round 11 m1).
-        if (f.kind === 'handin-') {
-          const id = `outbox-refused-${tag.sessionId}-${createHash('sha256').update(f.key).digest('hex').slice(0, 12)}`;
-          try { if (!tx.lookup('fact', id)) tx.commit([{ entity: 'fact', id, doc: { type: 'outbox_refused', session: tag.sessionId, file: ev.file, reason: r.reason } }], meta('dispatcher', 'outbox_refused')); } catch { /* the refusal below still fires */ }
-        }
         tx.markSeen(f.key, 'refused');
         return refuse({ ...ev, outbox: true }, r.reason);
       });

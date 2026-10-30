@@ -284,3 +284,38 @@ test('a kill while a refused hand-in\'s fact is being written loses nothing: the
   assert.equal(facts().length, 1, 'one fact per file');
   assert.equal(fresh.record.diary().filter((l) => l.kind === 'outbox_refused').length, 1, 'and one diary line');
 });
+
+test('a hand-in whose refusal fact is down stays refused, even if the seen mark was lost and it would pass now (round 11 confirm m1)', () => {
+  const env = setup({ prefix: 'm9-out-' });
+  running(env);
+  const raw = (doc) => env.store.transaction((tx) => tx.commit([{ entity: 'card', id: 'C-1', doc }], { actor: 'test', kind: 'seed' }));
+  const runningDoc = env.record.read('card', 'C-1').doc;
+  raw({ ...runningDoc, state: 'waiting' });
+  const tag = { role: 'worker', sessionId: 'S-1', card: 'C-1' };
+  const file = outboxFile(env, 'worker', 'S-1', 'handin-1.md', handin('C-1'));
+  assert.equal(env.record.applyOutbox(tag, file).ok, false, 'refused while waiting');
+  writeFileSync(join(env.root, 'outbox-seen.jsonl'), '');   // a kill between the fact and the seen mark
+  raw(runningDoc);
+  const again = env.record.applyOutbox(tag, file);
+  assert.equal(again.ok, false, 'the session was told "refused": it stays refused');
+  assert.equal(env.record.read('card', 'C-1').doc.state, 'running');
+  assert.equal(env.record.list('fact').filter((x) => x.doc.type === 'outbox_refused').length, 1);
+});
+
+test('a store error writing a refused hand-in\'s fact leaves the file unseen, tried again, with one alert (round 11 confirm m2)', async () => {
+  const { spawnSync } = await import('node:child_process');
+  const { fileURLToPath } = await import('node:url');
+  const CHILD = fileURLToPath(new URL('./child.test-helper.mjs', import.meta.url));
+  const env = setup({ prefix: 'm9-out-' });
+  running(env);
+  const tag = { role: 'worker', sessionId: 'S-2', card: 'C-1' };
+  const outbox = { root: env.outRoot, uids: Object.fromEntries(AI_ROLES.concat('script').map((r) => [r, UID])) };
+  const file = outboxFile(env, 'worker', 'S-2', 'handin-1.md', handin('C-1'));
+  const r = JSON.parse(spawnSync(process.execPath, [CHILD, JSON.stringify({ op: 'outbox', root: env.root, now: env.clock.t, faultAt: 'append_fails', outbox, tag, file })], { encoding: 'utf8', timeout: 60000 }).stdout);
+  assert.equal(r.ok, false);
+  assert.match(r.reason, /store error.*tried again/);
+  const fresh = openRecord({ root: env.root, product: PRODUCT, ownerUid: UID, rules: env.rules, host: 'mac-a', now: () => env.clock.t, outbox });
+  const again = fresh.record.applyOutbox(tag, file);
+  assert.equal(again.skipped, undefined, 'not skipped: the file was never marked seen');
+  assert.equal(fresh.record.list('fact').filter((x) => x.doc.type === 'outbox_refused').length, 1, 'the session hears of it on the retry');
+});
