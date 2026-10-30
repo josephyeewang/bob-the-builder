@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { loginJobPlist } from './login-job.mjs';
+import { tmpFolder } from '../M4-workshop/tmp-folders.test-helper.mjs';
 
 const OK = { label: 'org.example.dispatcher', node: '/opt/node/bin/node', script: '/srv/orch/dispatcher.mjs', config: '/srv/orch/config.json', path: '/opt/node/bin:/usr/bin:/bin', logDir: '/srv/orch/logs', workDir: '/srv/orch' };
 
@@ -20,7 +21,7 @@ test('m4: the job runs every 60 s and at load, with an explicit PATH', () => {
 });
 
 test('m4: the file is a valid property list (checked with plutil where it exists)', (t) => {
-  const p = join(mkdtempSync(join(tmpdir(), 'm11-plist-')), 'job.plist');
+  const p = join(tmpFolder('m11-plist-'), 'job.plist');
   writeFileSync(p, loginJobPlist({ ...OK, workDir: '/srv/a & b <c>' }));
   const r = spawnSync('plutil', ['-lint', p], { encoding: 'utf8' });
   if (r.error) return t.skip('plutil is not on this machine');

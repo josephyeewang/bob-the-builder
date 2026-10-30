@@ -5,6 +5,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, writeFileSync, mkdirSync, rmSync, symlinkSync, readFileSync, existsSync, renameSync, chmodSync, copyFileSync, linkSync } from 'node:fs';
+import { tmpFolder } from '../tmp-folders.test-helper.mjs';
 import { tmpdir } from 'node:os';
 import { join, dirname, delimiter } from 'node:path';
 import { randomBytes } from 'node:crypto';
@@ -19,7 +20,7 @@ import { startGate, factId } from './start-gate.mjs';
 import { memoryRecord } from '../../../shared/record.mjs';
 import { fakeRules, allow, deny } from '../../../shared/rules.mjs';
 
-const tmp = (p = 'orch-push-') => mkdtempSync(join(tmpdir(), p));
+const tmp = (p = 'orch-push-') => tmpFolder(p);
 const WF = '.github/workflows/outside-check.yml';
 const PRODUCT = 'p1';
 const REPO = 'owner/test-repo';

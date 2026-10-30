@@ -15,12 +15,13 @@ import * as merge from './merge-guard.mjs';
 import * as noVerify from './no-verify-block.mjs';
 import * as prodGuard from './production-write-guard.mjs';
 import * as secret from './secret-file-block.mjs';
+import { tmpFolder } from '../tmp-folders.test-helper.mjs';
 
 const dot = (...p) => `.${p.join('')}`;
 const ENV_PROD = dot('en', 'v.production');
 
 function world() {
-  const root = realpathSync(mkdtempSync(join(tmpdir(), 'm4-class-')));
+  const root = realpathSync(tmpFolder('m4-class-'));
   const home = join(root, 'home');
   const work = join(root, 'work');
   const outbox = join(root, 'outbox');

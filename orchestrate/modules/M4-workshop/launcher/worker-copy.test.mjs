@@ -8,8 +8,9 @@ import { join } from 'node:path';
 import { gitOk, initMirror } from '../git/safe-git.mjs';
 import { prepareWorkerCopy, safeJoin, removeProtected, isProtectedName } from './worker-copy.mjs';
 import { agentAdapter, adapterNames, SEAM_CALLS } from './agent-seam.mjs';
+import { tmpFolder } from '../tmp-folders.test-helper.mjs';
 
-const tmp = () => mkdtempSync(join(tmpdir(), 'orch-wc-'));
+const tmp = () => tmpFolder('orch-wc-');
 const REPO = 'example-owner/example-repo';
 
 async function commitAll(dir, msg) {

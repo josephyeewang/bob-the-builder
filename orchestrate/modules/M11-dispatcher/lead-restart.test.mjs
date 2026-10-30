@@ -7,6 +7,7 @@ import { leadRestartStep, leadInFlight, handoffVet, estimateTokens, RESTART_FACT
 import { intakePass } from './outbox-intake.mjs';
 import { KEYS as K } from './keys.mjs';
 import { rulesWith, recWith, T0, MIN, iso } from './fixtures.test-helper.mjs';
+import { tmpFolder } from '../M4-workshop/tmp-folders.test-helper.mjs';
 
 const R = rulesWith(); // soft 250k, hard 400k, handoff cap 8,000 tokens
 const SID = 'L-1';
@@ -15,7 +16,7 @@ const ended = (tokens, atMin = 0) => ({ tokens, turnEnded: true, endedAt: T0 + a
 const midTurn = (tokens) => ({ tokens, turnEnded: false, endedAt: null, openTools: ['t1'], compactions: 0 });
 
 function world() {
-  const outbox = join(mkdtempSync(join(tmpdir(), 'm11-lead-')), 'lead');
+  const outbox = join(tmpFolder('m11-lead-'), 'lead');
   mkdirSync(outbox);
   const calls = { sent: [], stops: 0, starts: [], alerts: [] };
   let outcome = 'sent';

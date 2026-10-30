@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, symlinkSync } from 'node:fs';
+import { tmpFolder } from '../M4-workshop/tmp-folders.test-helper.mjs';
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -26,7 +27,7 @@ function world(entries = [], { over = {}, rules = rulesWith({}, allow) } = {}) {
   const calls = { alerts: [], launched: [], reviewers: [], order: [] };
   const sessions = [];
   let n = 0;
-  const empty = mkdtempSync(join(tmpdir(), 'm11-tick-'));
+  const empty = tmpFolder('m11-tick-');
   const ports = {
     alert: (t) => calls.alerts.push(typeof t === 'string' ? t : t.text),
     board: () => [], healthy: () => true, resume: () => false,
@@ -209,7 +210,7 @@ test('MAT-1 end to end: ready -> started with a launch record -> reviewed -> one
 
 test('M16: two ticks started together: one runs, one exits with a diary line; the lock is released', async () => {
   const w = world([account(), usage(), card('C-1')]);
-  const lockFile = join(mkdtempSync(join(tmpdir(), 'm11-lock-')), 'pass.lock');
+  const lockFile = join(tmpFolder('m11-lock-'), 'pass.lock');
   let release;
   const slow = new Promise((r) => { release = r; });
   const launch = w.ports.launch;
@@ -225,7 +226,7 @@ test('M16: two ticks started together: one runs, one exits with a diary line; th
 });
 
 test('main.mjs: runs one tick through a wiring module named in the config; a bad config or wiring exits 1', async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'm11-main-'));
+  const dir = tmpFolder('m11-main-');
   const wiring = join(dir, 'wiring.mjs');
   const here = new URL('.', import.meta.url).pathname;
   writeFileSync(wiring, `import { recWith, rulesWith } from ${JSON.stringify(join(here, 'fixtures.test-helper.mjs'))};
@@ -266,7 +267,7 @@ export { rec };
 });
 
 test('audit 0b-6 r2 MAT-1: `node main.mjs <config>` runs a tick as a script, also through a symlinked folder; with no config it exits 1', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'm11-entry-'));
+  const dir = tmpFolder('m11-entry-');
   const here = new URL('.', import.meta.url).pathname;
   const link = join(dir, 'link');
   symlinkSync(here, link);
@@ -301,7 +302,7 @@ export async function wire() {
 
 test('audit 0b-6 r2 MAT-2: a Lead\'s read-only request goes through the start gate in the tick: red, the cap of 4, an outage and no signed-in account hold it; green starts it', async () => {
   const lead = (dir) => { mkdirSync(dir, { recursive: true }); writeFileSync(join(dir, 'think-q1.md'), 'Is A safe?'); return [{ sessionId: 'L-1', role: 'lead', outbox: dir, uid: process.getuid(), product: 'p1' }]; };
-  const root = mkdtempSync(join(tmpdir(), 'm11-ro-'));
+  const root = tmpFolder('m11-ro-');
   const run = async (name, entries, over = {}, signedIn = true) => {
     const started = [];
     const w = world([...(signedIn ? [account()] : []), ...entries], { over: { outboxSessions: () => lead(join(root, name)), startReadonly: async (x) => { started.push(x.kind); return { ok: true }; }, ...over } });

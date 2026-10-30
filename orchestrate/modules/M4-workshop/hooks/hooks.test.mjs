@@ -16,9 +16,10 @@ import * as noVerify from './no-verify-block.mjs';
 import * as secret from './secret-file-block.mjs';
 import * as prodGuard from './production-write-guard.mjs';
 import * as compact from './compact-note.mjs';
+import { tmpFolder } from '../tmp-folders.test-helper.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-const tmp = () => mkdtempSync(join(tmpdir(), 'orch-hook-'));
+const tmp = () => tmpFolder('orch-hook-');
 
 function world({ rules } = {}) {
   const root = landingPath(tmp());

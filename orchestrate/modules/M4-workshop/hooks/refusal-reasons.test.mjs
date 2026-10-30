@@ -15,9 +15,10 @@ import * as noVerify from './no-verify-block.mjs';
 import * as secret from './secret-file-block.mjs';
 import * as prodGuard from './production-write-guard.mjs';
 import * as compact from './compact-note.mjs';
+import { tmpFolder } from '../tmp-folders.test-helper.mjs';
 
 function world(rules = { production: { env_files: ['/nowhere/settings.production'], programs: ['fakehost'], hosts: ['db.prod.example.net'] }, secrets: { paths: [] } }) {
-  const root = landingPath(mkdtempSync(join(tmpdir(), 'orch-refuse-')));
+  const root = landingPath(tmpFolder('orch-refuse-'));
   const outbox = join(root, 'outbox'); mkdirSync(outbox);
   const copy = join(root, 'copy'); mkdirSync(copy);
   const snapshot = join(root, 'rules.json');

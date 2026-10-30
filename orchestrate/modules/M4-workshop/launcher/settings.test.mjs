@@ -10,8 +10,9 @@ import { DESIGN_PROFILES, NEVER_TOOLS, checkProfile, profilePort, fakeProfilePor
 import { parseSnapshot, readSnapshot, makeSnapshot, snapshotHash, SNAPSHOT_MAX_AGE_MS } from '../hooks/snapshot.mjs';
 import { renderAllowRules, renderRoleSettings, checkSettings, writeRoleSettings, POLICY_HOOKS, HOOK_TIMEOUT } from './render-settings.mjs';
 import { SETTINGS as S, ENV } from './settings-names.mjs';
+import { tmpFolder } from '../tmp-folders.test-helper.mjs';
 
-const tmp = () => mkdtempSync(join(tmpdir(), 'orch-set-'));
+const tmp = () => tmpFolder('orch-set-');
 
 const PATHS = {
   copy: '/w/copy', outbox: '/w/outbox', hooksDir: '/w/hooks', snapshot: '/w/rules.json', node: '/w/node',

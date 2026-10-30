@@ -11,7 +11,7 @@
 // Capability note: checked against Git 2.54.0 on 29 Oct 2026; requires git >= 2.42.
 
 import { spawn } from 'node:child_process';
-import { mkdtempSync, readFileSync, existsSync, readdirSync, lstatSync } from 'node:fs';
+import { mkdtempSync, readFileSync, existsSync, readdirSync, lstatSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -40,7 +40,15 @@ export const SAFE_CONFIG = Object.freeze([
 
 const FIXED_PATH = '/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin';
 let privateHome = null;
-const home = () => (privateHome ??= mkdtempSync(join(tmpdir(), 'orch-git-home-')));
+// The private git home is made once per process and removed when the process ends.
+const home = () => {
+  if (!privateHome) {
+    privateHome = mkdtempSync(join(tmpdir(), 'orch-git-home-'));
+    const made = privateHome;
+    process.once('exit', () => rmSync(made, { recursive: true, force: true }));
+  }
+  return privateHome;
+};
 
 // Every call made, for the "no git inside a worker copy" test.
 export const callLog = [];

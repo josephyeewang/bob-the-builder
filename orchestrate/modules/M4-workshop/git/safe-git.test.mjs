@@ -5,8 +5,9 @@ import { tmpdir } from 'node:os';
 import { join, dirname, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { safeGitEnv, git, gitOk, checkGitVersion, checkMirror, initMirror, MIRROR_CONFIG_TEMPLATE, SAFE_CONFIG } from './safe-git.mjs';
+import { tmpFolder } from '../tmp-folders.test-helper.mjs';
 
-const tmp = () => mkdtempSync(join(tmpdir(), 'orch-sg-'));
+const tmp = () => tmpFolder('orch-sg-');
 
 test('environment starts empty: no inherited GIT_* or other variables survive', () => {
   process.env.GIT_SSH_COMMAND = 'planted';

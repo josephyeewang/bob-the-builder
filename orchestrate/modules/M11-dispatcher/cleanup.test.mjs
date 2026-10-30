@@ -10,10 +10,11 @@ import { createSaveWork } from '../M4-workshop/git/save-work.mjs';
 import { git as safeGit, callLog } from '../M4-workshop/git/safe-git.mjs';
 import { PR_FACT } from './merges.mjs';
 import { rulesWith, recWith, T0, MIN, iso } from './fixtures.test-helper.mjs';
+import { tmpFolder } from '../M4-workshop/tmp-folders.test-helper.mjs';
 
 // Test set-up only: plain git with no user or machine config, in a throwaway folder.
 function world() {
-  const dir = mkdtempSync(join(tmpdir(), 'm11-cleanup-'));
+  const dir = tmpFolder('m11-cleanup-');
   const env = { PATH: process.env.PATH, HOME: dir, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1',
     GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@localhost', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@localhost' };
   const run = (args, cwd = dir) => execFileSync('git', args, { cwd, env }).toString().trim();
@@ -294,7 +295,7 @@ test('cleanupPass goes through every copy folder and skips one with no record', 
 });
 
 test('audit MIN-17: each copy-ownership check refuses on its own', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'm11-own-'));
+  const dir = tmpFolder('m11-own-');
   const copiesRoot = join(dir, 'copies');
   mkdirSync(join(copiesRoot, 'C-1'), { recursive: true });
   mkdirSync(join(copiesRoot, 'C-2'));
@@ -349,4 +350,10 @@ test('audit 0b-6 r2 MAT-5 / MAT-8 (C2): any answer but delete keeps the copy wit
     assert.equal(theAsk(rec).state, 'open');
     assert.ok(existsSync(w.copy));
   }
+});
+
+test('the staging folder is removed even when saving the work throws (temp-folder cleanup)', async () => {
+  const w = world();
+  await assert.rejects(clean(w, recFor(w), { saveWork: async () => { throw new Error('save-work crashed'); } }), /save-work crashed/);
+  assert.deepEqual(readdirSync(w.sealRoot).filter((n) => n.startsWith('.staging-')), [], 'no staging folder left behind');
 });

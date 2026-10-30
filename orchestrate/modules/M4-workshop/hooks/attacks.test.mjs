@@ -14,11 +14,12 @@ import * as merge from './merge-guard.mjs';
 import * as noVerify from './no-verify-block.mjs';
 import * as secret from './secret-file-block.mjs';
 import * as prodGuard from './production-write-guard.mjs';
+import { tmpFolder } from '../tmp-folders.test-helper.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
 function world() {
-  const root = landingPath(mkdtempSync(join(tmpdir(), 'orch-attack-')));
+  const root = landingPath(tmpFolder('orch-attack-'));
   const outbox = join(root, 'outbox'); mkdirSync(outbox);
   const copy = join(root, 'copy'); mkdirSync(copy);
   const home = join(root, 'home'); mkdirSync(join(home, 'Library', 'LaunchAgents'), { recursive: true });

@@ -11,8 +11,9 @@ import { DO_PLANE_TOML, RULES_VERSION, checkScanner, scanSecrets } from './gitle
 import { parseRawZ } from './push-refusals.mjs';
 import { gitOk } from './safe-git.mjs';
 import { resetCloneGit, createSaveWork } from './save-work.mjs';
+import { tmpFolder } from '../tmp-folders.test-helper.mjs';
 
-const tmp = () => realpathSync(mkdtempSync(join(tmpdir(), 'orch-git-refuse-')));
+const tmp = () => realpathSync(tmpFolder('orch-git-refuse-'));
 
 function scanner(versionLine = '8.30.1') {
   const d = tmp();

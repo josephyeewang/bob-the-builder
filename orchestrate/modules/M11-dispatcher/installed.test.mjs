@@ -4,6 +4,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, symlinkSync, existsSync } from 'node:fs';
+import { tmpFolder } from '../M4-workshop/tmp-folders.test-helper.mjs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -15,7 +16,7 @@ const strings = (xml) => [...xml.matchAll(/<string>([^<]*)<\/string>/g)].map((m)
 const after = (xml, key) => xml.split(`<key>${key}</key>`)[1];
 
 test('L31: one pass runs from the login job file as installed, through a linked folder, and writes its diary line', () => {
-  const root = mkdtempSync(join(tmpdir(), 'm11-installed-'));
+  const root = tmpFolder('m11-installed-');
   const install = join(root, 'install');
   mkdirSync(install);
   symlinkSync(HERE, join(install, 'dispatcher'));

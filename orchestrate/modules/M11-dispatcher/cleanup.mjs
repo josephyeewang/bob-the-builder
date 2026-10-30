@@ -148,6 +148,9 @@ export async function cleanupCopy({ rec, rules, now, card, copiesRoot, sealRoot,
   // A fresh bundle, always, inside the lock-down; this also covers a worker that died with none.
   mkdirSync(sealRoot, { recursive: true, mode: 0o700 });
   const staging = mkdtempSync(join(sealRoot, `.staging-${card}-`));
+  // The staging folder goes on every path, a thrown error included.
+  let sealed;
+  try {
   const startedAt = Date.now();
   const saved = await saveWork({ clone: copy, mirror, card, branch, outbox: staging });
   let bundle = saved?.ok ? saved.bundle : null;
@@ -178,11 +181,10 @@ export async function cleanupCopy({ rec, rules, now, card, copiesRoot, sealRoot,
 
   if (!reasons.length) {
     rmSync(copy, { recursive: true, force: true });
-    rmSync(staging, { recursive: true, force: true });
     return done('deleted', ['proven merged on the mirror']);
   }
-  const sealed = bundle ? seal(bundle, sealRoot, card, now) : null;
-  rmSync(staging, { recursive: true, force: true });
+  sealed = bundle ? seal(bundle, sealRoot, card, now) : null;
+  } finally { rmSync(staging, { recursive: true, force: true }); }
   const d = rules.may('delete_copy', { card, copy, reasons });
   if (d.decision === 'deny') {
     alert(`card ${card}: its copy could not be proven safe to delete and the rules refuse to ask (${d.reason}); it is kept`);
