@@ -6,11 +6,11 @@ import { waitingItems, waitingLines } from './waiting.mjs';
 function seed() {
   const rec = memoryRecord();
   const w = (entity, id, doc) => assert.equal(rec.write({ actor: 'dispatcher', entity, id, expectRev: 0, doc }).ok, true);
-  w('card', 'C-1', { state: 'waiting', wait: { who: 'joe', what: 'go on the plan', since: '2026-11-03T08:00:00Z', next_check: '2026-11-03T17:00:00Z' } });
-  w('ask', 'A-2', { state: 'pushed', wait: { who: 'joe', what: 'Approve PR 12', since: '2026-11-02T17:00:00Z' } });
-  w('card', 'C-3', { state: 'running' });
-  w('card', 'C-4', { state: 'waiting', wait: { what: 'the Mini', since: '2026-11-03T09:00:00Z' } });
-  w('card', 'C-5', { state: 'waiting' });
+  w('card', 'C-1', { module: 'M4', state: 'waiting', wait: { who: 'joe', what: 'go on the plan', since: '2026-11-03T08:00:00Z', next_check: '2026-11-03T17:00:00Z' } });
+  w('ask', 'A-2', { module: 'M4', state: 'pushed', wait: { who: 'joe', what: 'Approve PR 12', since: '2026-11-02T17:00:00Z' } });
+  w('card', 'C-3', { module: 'M4', state: 'running' });
+  w('card', 'C-4', { module: 'M4', state: 'waiting', wait: { what: 'the Mini', since: '2026-11-03T09:00:00Z' } });
+  w('card', 'C-5', { module: 'M4', state: 'waiting' });
   return rec;
 }
 
