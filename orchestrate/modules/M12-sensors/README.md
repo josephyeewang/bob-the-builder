@@ -10,7 +10,7 @@ Vercel, the repo) and write facts into the record. Everything they write is mask
 | `record-scan.mjs` | R-0b-125 | The weekly scan: an independent looser detector plus gitleaks when installed, with a planted control. |
 | `escape.mjs`, `fixtures/outside-text.json` | R-0b-126 | `cleanOutside(text, source)`: mask then fence outside text; fixtures with exact expected output. |
 | `fact-shapes.mjs` | R-0b-125, lead call L25 | The allow-list: each fact kind's fields and their types. Only those are stored as written; every other value, at any depth, is masked (its name kept). A kind with no shape keeps only `kind` and `ts`. A new fact kind needs a shape here (a test checks every `kind: 'fact.…'` in M1, M12 and M13). |
-| `facts.mjs` | R-0b-125 | The one fact writer (allow-list, then masks, writes only if unchanged since read). |
+| `facts.mjs` | R-0b-125 | The one fact writer (allow-list, then masks token shapes and known values, writes only if unchanged since read). No second masking by field name: the allow-list did that, and a name rule misfired on map keys an outside system chose (round 7). |
 | `pr-facts.mjs` | R-0b-74 | Each PR's changed files and diff summary, with checks, threads and "behind main". |
 | `history.mjs` | R-0b-75 | The repo-history file (main's first-parent log) and safe answers to history requests. |
 | `supported.mjs` | R-0b-71/72 | The one rule for "a supported main commit", per product stage. |

@@ -185,7 +185,24 @@ export function makeMasker({ env = process.env, protectedEnvKeys = [], protected
     if (typeof v === 'number' || (typeof v === 'string' && v.length >= 4)) return '[REDACTED:named-key]';
     return typeof v === 'string' ? maskSecrets(v).text : v;
   }
-  return Object.freeze({ maskSecrets, maskDeep });
+  // The second layer for facts that already passed their allow-list (fact-shapes.mjs, L25): token shapes and known
+  // values in every string and key, but no masking by field name. Every name left is either declared or already
+  // masked, so a name rule only misfires, e.g. on a map key an outside system chose (0b-7 audit round 7 M-2).
+  function maskValues(v) {
+    if (typeof v === 'string') return maskSecrets(v).text;
+    if (Array.isArray(v)) return v.map(maskValues);
+    if (v && typeof v === 'object') {
+      const o = {};
+      for (const [k, x] of Object.entries(v)) {
+        let key = maskSecrets(k).text;
+        while (Object.hasOwn(o, key)) key += '~';
+        o[key] = isTypedField(k, x) ? x : maskValues(x);
+      }
+      return o;
+    }
+    return v;
+  }
+  return Object.freeze({ maskSecrets, maskDeep, maskValues });
 }
 
 // Find credential-like strings without changing anything: the week-of-record scan. Returns [{ kind, at }].

@@ -200,7 +200,7 @@ test('L24: checkNoPush is red with no tokens or any token that can write or can\
   const fact = () => rec.read('fact', NO_PUSH_FACT).doc;
   await run([]); assert.equal(fact().green, false);
   await run([{ name: 'mini main', probe: async () => 403 }, { name: 'robot', probe: async () => 422 }]);
-  assert.equal(fact().green, false); assert.match(fact().reason, /robot: can-write/);
+  assert.equal(fact().green, false); assert.match(fact().reason, /robot answered can-write/);
   assert.equal([...gh.issues.values()].filter((i) => !i.closed).length, 1);
   await run([{ name: 'mini main', probe: async () => 500 }]); assert.match(fact().reason, /unknown/);
   await run([{ name: 'mini main', probe: async () => 403 }, { name: 'robot', probe: async () => 404 }]);

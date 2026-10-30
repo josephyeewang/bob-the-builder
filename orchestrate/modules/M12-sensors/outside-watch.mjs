@@ -71,6 +71,8 @@ export async function watchOutside({ fetchJson, repo, workflow = 'outside-check.
   let jobs;
   try { jobs = (await fetchJson(`/repos/${repo}/actions/runs/${done.id}/jobs?per_page=10`)).jobs; } catch { jobs = undefined; }
   const jobsKey = 'outside-check|watch-cannot-read-steps|github';
+  // A run whose steps couldn't be read is not marked as seen, so it counts once they can be (round 7 M-1).
+  const stepsRead = Array.isArray(jobs);
   if (!Array.isArray(jobs)) {
     out.push(['cannot-read-steps', await homeAlerts.raise({ key: jobsKey, title: 'The Mini cannot read the outside check\'s steps',
       body: 'Reading the newest outside-check run\'s steps failed, so which checks pass is unknown until it can.', status: 'cannot-read' })]);
@@ -109,7 +111,7 @@ export async function watchOutside({ fetchJson, repo, workflow = 'outside-check.
       const prevDoc = writer.get(ROBOT_FACT(product)) ?? null;
       const prev = prevDoc?.last_green_at ?? null;
       // The latch. A new run that failed adds to red_runs; the same run seen again doesn't.
-      const newRun = prevDoc?.run_id !== (done.id ?? null);
+      const newRun = stepsRead && prevDoc?.run_id !== (done.id ?? null);
       const stepFailed = step?.conclusion === 'failure';
       const prevRuns = prevDoc?.red_runs ?? 0;
       const redRuns = step?.conclusion === 'success' ? 0 : stepFailed && newRun ? prevRuns + 1 : prevRuns;
@@ -130,8 +132,8 @@ export async function watchOutside({ fetchJson, repo, workflow = 'outside-check.
       const reason = !ownerFile ? `cannot read ${OWNER_FILE}` : !bound ? 'the slot tag does not match this product' : stepGreen ? 'step passed'
         : guard?.conclusion === 'failure' ? 'the outside repo guard failed' : !guard && rm ? 'no repo-guard step in the newest run'
           : step ? `step ${step.conclusion ?? 'unfinished'}` : 'no robot-merges step in the newest run';
-      const doc = { kind: 'fact.outside-robot-merges', product, label, at: nowIso, run_id: done.id ?? null,
-        run_at: ranAt, green, last_green_at: green && !(Date.parse(prev) > Date.parse(ranAt)) ? ranAt : prev,
+      const doc = { kind: 'fact.outside-robot-merges', product, label, at: nowIso,
+        run_id: stepsRead ? done.id ?? null : prevDoc?.run_id ?? null, run_at: stepsRead ? ranAt : prevDoc?.run_at ?? null, green, last_green_at: green && !(Date.parse(prev) > Date.parse(ranAt)) ? ranAt : prev,
         red_runs: redRuns, red_since: redSince, latch_reason: latchWhy, last_red_at: lastRed, reason };
       out.push([`${label} / robot-merges fact`, writer.put(ROBOT_FACT(product), doc)]);
     }
@@ -184,7 +186,7 @@ export async function checkNoPush({ tokens, repo, writer, homeAlerts, writeProbe
   if (!Array.isArray(tokens) || !tokens.length) bad.push('no tokens listed');
   else for (const t of tokens) {
     const r = await writeProbe(t?.probe, repo);
-    if (r !== 'no-write') bad.push(`${String(t?.name ?? 'unnamed').replace(/[^A-Za-z0-9 _-]/g, '')}: ${r}`);
+    if (r !== 'no-write') bad.push(`${String(t?.name ?? 'unnamed').replace(/[^A-Za-z0-9 _-]/g, '')} answered ${r}`);
   }
   const green = bad.length === 0;
   const reason = green ? 'no Mini token can write there' : bad.join('; ');
