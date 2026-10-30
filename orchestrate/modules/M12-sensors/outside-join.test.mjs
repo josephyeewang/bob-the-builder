@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { checkOutsideJoin, joinCases, JOIN_SOURCES, RUN } from './outside-join.mjs';
-import { cleanOutside, escapeOutside, SOURCES } from './escape.mjs';
+import { cleanOutside, escapeOutside, stripControls, SOURCES } from './escape.mjs';
 import { makeHistory } from './history.mjs';
 import { intakeIdeas } from '../M13-ledger/caught-up.mjs';
 import { makeFactWriter } from './facts.mjs';
@@ -256,4 +256,29 @@ test('R-0b-126 audit round 7: an over-escaped record, mask-before-strip, and con
   await assert.rejects(checkOutsideJoin(() => ({}), { where: ['record', 'record'] }), /each once/);
   const buf = await checkOutsideJoin((x) => ({ record: Buffer.from(fence(x)) }), { sources: ['idea-file'], where: ['record'] });
   assert.ok(buf.every((x) => /Buffer/.test(x.why)));
+});
+
+test('R-0b-126 audit round 8: a raw field beside a JSON-encoded body is read', async () => {
+  const { makeMasker } = await import('./mask.mjs');
+  const { maskSecrets } = makeMasker({ env: {} });
+  const raw = (text) => maskSecrets(stripControls(text)).text;
+  // The body stored as JSON in a string, one or two levels down, with the planted text raw in a field beside it.
+  for (const enc of [(b) => JSON.stringify({ body: b }), (b) => JSON.stringify({ inner: JSON.stringify({ body: b }) })]) {
+    const leak = ({ source, text }) => ({ record: JSON.stringify({ event: 'intake', data: enc(cleanOutside(text, source)), subject: raw(text) }) });
+    const m = await checkOutsideJoin(leak, { where: ['record'] });
+    assert.ok(m.some((x) => x.why.startsWith('outside text appears outside its exact fence')), String(enc));
+    const ok = ({ source, text }) => ({ record: JSON.stringify({ event: 'intake', data: enc(cleanOutside(text, source)), subject: 'neutral' }) });
+    assert.deepEqual(await checkOutsideJoin(ok, { where: ['record'] }), []);
+  }
+});
+
+test('R-0b-126 round 8: a record nested too deep to read fails closed, never a pass', async () => {
+  const deep = (inner) => { let s = JSON.stringify(inner); for (let i = 0; i < 20000; i++) s = `[${s}]`; return s; };
+  // A correct form buried 20,000 levels deep: no crash, and a miss.
+  const m = await checkOutsideJoin(({ source, text }) => ({ record: deep({ body: cleanOutside(text, source) }) }), { where: ['record'] });
+  assert.ok(m.some((x) => x.source === 'any' && /could not be read/.test(x.why)), JSON.stringify(m.slice(0, 2)));
+  // Deep only in the baseline call's output: still a miss.
+  let n = 0;
+  const m2 = await checkOutsideJoin(({ source, text }) => ({ record: n++ === 3 ? deep({}) : JSON.stringify({ body: cleanOutside(text, source) }) }), { where: ['record'] });
+  assert.ok(m2.some((x) => /could not be read/.test(x.why)));
 });

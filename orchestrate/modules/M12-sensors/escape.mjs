@@ -18,7 +18,7 @@
 //   output, log lines) are kept whole (review-0b-7 M8): a cut research report would reach the Lead silently short.
 // - Escape ONCE, at the write. Consumers never re-escape; cleaning already-cleaned text escapes it again by design,
 //   which is why the record stores only the cleaned form and nobody cleans it twice.
-// Masking runs first (cleanOutside = mask, then escape), so a key inside outside text never survives into the copy.
+// cleanOutside strips, then masks, then escapes, so a key inside outside text never survives into the copy.
 // `source` comes only from SOURCES (our own constant), never from outside text; anything else becomes "unknown".
 
 import { makeMasker } from './mask.mjs';

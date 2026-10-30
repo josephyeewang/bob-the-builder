@@ -17,6 +17,7 @@
 //                      instruction. Intake hands the quoted text on through cleanOutside (source "idea-file").
 
 import { makeMasker } from '../M12-sensors/mask.mjs';
+import { stripControls } from '../M12-sensors/escape.mjs';
 import { checkTimeZone } from './timezone.mjs';
 
 export const FRONT_DOOR_KINDS = Object.freeze(['request', 'state', 'idea']);
@@ -57,10 +58,12 @@ export function requestDoc({ request, product = null, name = null }) {
   return { ok: true, doc: { request, product, name } };
 }
 
-// Invisible characters go before masking, so a key split by them is still caught (0b-8 audit round 4 minor 1).
+// Invisible characters and terminal codes go before masking (strip, then mask, as cleanOutside does), so a key split
+// by them is still caught (0b-8 audit round 4 minor 1; R-0b-126 round 8, lead call).
 const INVISIBLE = /[\u200B-\u200F\u2060-\u2064\uFEFF\u00AD]/g;
+const stripThenMask = (text) => maskSecrets(stripControls(String(text ?? '').replace(INVISIBLE, ''))).text;
 export function ideaText(text) {
-  const masked = maskSecrets(String(text ?? '').replace(INVISIBLE, '')).text.replace(/\r\n?/g, '\n');
+  const masked = stripThenMask(text);
   return `${masked.split('\n').map((l) => `> ${l}`).join('\n')}\n`;
 }
 
@@ -124,7 +127,7 @@ function checkOne(name, text) {
     const lines = String(text).split('\n').filter((l) => l !== '');
     if (!lines.every((l) => l === '>' || l.startsWith('> '))) return refuse('idea text must be quoted on every line');
     if (!lines.some((l) => l.slice(2).trim() !== '')) return refuse('the idea is empty'); // round 5 minor 4
-    return { ok: true, kind, doc: { quoted: maskSecrets(String(text).replace(INVISIBLE, '')).text } };
+    return { ok: true, kind, doc: { quoted: stripThenMask(text) } };
   }
   if (ext !== 'json') return refuse(`a ${kind} file is .json`);
   // The skill never writes an escape; one can hide a key from the text check below (0b-8 audit round 2 M-2).

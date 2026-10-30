@@ -32,9 +32,10 @@
 // What fails closed, by design: a form indented or quoted line by line (YAML block, `> ` quote); per-item wording that
 // shares a run with a planted case (reword it: the miss names the run); a second fenced copy of part of the text (a
 // title), or a file name or slug built from it (store the exact form or a neutral id); a lane that files by a fixed id
-// (take a fresh one per call). `land` hands back what this call wrote: from fresh state, or only this item. Raw planted
-// text already in a store before the check starts counts as the lane's own wording and is NOT caught, so start from
-// fresh state. Out of scope: a raw copy deliberately cut into pieces under RUN letters, or encoded (base64).
+// (take a fresh one per call); a record nested more than 200 levels deep (a miss with source 'any'). `land` hands back
+// what this call wrote: from fresh state, or only this item. Raw planted text already in a store before the check
+// starts counts as the lane's own wording and is NOT caught, so start from fresh state. Out of scope: a raw copy
+// deliberately cut into pieces under RUN letters, or encoded (base64).
 
 import { readFileSync } from 'node:fs';
 import { FAKE, fillFakes as fill } from './fakes.mjs';
@@ -59,12 +60,15 @@ export function joinCases(sources = JOIN_SOURCES) {
 }
 
 // The record read as JSON (a document, or one per line): every key and string in it, joined, with any string that is
-// itself JSON read the same way, up to three levels. A real parser, so a body escaped once too often (a literal `\n`,
-// `\"`) stays wrong (round 7). Text that is not JSON is read as written.
+// itself JSON read the same way (with the plain strings beside it), up to three levels. A real parser, so a body
+// escaped once too often (a literal `\n`, `\"`) stays wrong (round 7). Text that is not JSON is read as written.
 const parse = (s) => { try { return { ok: true, v: JSON.parse(s) }; } catch { return { ok: false }; } };
-const strings = (v, out) => {
+// Nesting deeper than DEPTH throws, and the check counts an output it can't read as a miss (fails closed, round 8).
+const DEPTH = 200;
+const strings = (v, out, d = 0) => {
+  if (d > DEPTH) throw new Error(`nested more than ${DEPTH} levels`);
   if (typeof v === 'string') out.push(v);
-  else if (v && typeof v === 'object') for (const [k, x] of Object.entries(v)) { if (!Array.isArray(v)) out.push(k); strings(x, out); }
+  else if (v && typeof v === 'object') for (const [k, x] of Object.entries(v)) { if (!Array.isArray(v)) out.push(k); strings(x, out, d + 1); }
   return out;
 };
 const views = (raw) => {
@@ -75,9 +79,11 @@ const views = (raw) => {
     for (const d of docs) {
       let r = parse(d);
       if (!r.ok && d.includes('\n')) { const ls = d.split('\n').filter((l) => l.trim()).map(parse); if (ls.length && ls.every((x) => x.ok)) r = { ok: true, v: ls.map((x) => x.v) }; }
-      if (r.ok) next.push(...strings(r.v, []));
+      // A string that is not JSON again is carried to the next level, so a raw field beside a JSON-encoded body is
+      // still read there (round 8).
+      if (r.ok) next.push(...strings(r.v, [])); else if (i > 0) next.push(d);
     }
-    if (!next.length) break;
+    if (!next.length || next.join('\n') === out[out.length - 1]) break;
     out.push(next.join('\n'));
     docs = next;
   }
@@ -104,7 +110,16 @@ export async function checkOutsideJoin(land, opts = {}) {
   const forms = [...new Set([...joinCases().map((c) => c.expect), ...JOIN_SOURCES.map((s) => cleanOutside(CANARY, s))])]
     .sort((x, y) => y.length - x.length);
   // The record as written and with JSON escapes undone; the Lead's input file as written only (round 6).
-  const prep = (raw, w) => (w === 'leadInput' ? [raw] : views(raw)).map((v) => v.replace(/\r\n/g, '\n'));
+  // A record it can't read (nested too deep) is read as written AND counted as a miss, never a pass (round 8).
+  const unreadable = new Map();
+  const read = (raw, w) => { if (w === 'leadInput') return [raw]; try { return views(raw); } catch (e) { unreadable.set(w, e.message); return [raw]; } };
+  // Each output is read once per output kind, then reused by every count (round 9 minor: 5,000 fields took 13 s).
+  const seenViews = new Map();
+  const prep = (raw, w) => {
+    const k = `${w}\u0000${raw}`;
+    if (!seenViews.has(k)) seenViews.set(k, read(raw, w).map((v) => v.replace(/\r\n/g, '\n')));
+    return seenViews.get(k);
+  };
   // Only windows that are runs of some case (or the canary) are counted, so a big output stays cheap (round 6).
   const watched = new Set([...cases.flatMap((c) => c.runs), ...canary.runs]);
   const formCount = (v) => forms.reduce((n, e) => n + v.split(e).length - 1, 0);
@@ -169,5 +184,6 @@ export async function checkOutsideJoin(land, opts = {}) {
       if (typeof base?.[w] === 'string') leaksOf(base[w], c.source, w, seen, ' (in the output for a neutral text)');
     }
   }
+  for (const [w, why] of unreadable) misses.push({ source: 'any', where: w, why: `an output could not be read (${why}); counted as a miss` });
   return misses;
 }
