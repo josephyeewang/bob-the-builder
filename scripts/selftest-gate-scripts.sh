@@ -718,6 +718,8 @@ printf '## Phase 2 Report\n### Built\n*Signup form, /api/signup, users migration
 expect "phase-report: real text written in italics counts -> OK" 0 "phase-report-check: OK" -- node "$PR" "$PD/it.md" --template "$PD/tpl.md"
 printf '## Phase 2 Report\n### 3.1 Built\n- x\n### 3.2 Spec Deviations\nN/A\n' > "$PD/na-a.md"
 expect "phase-report: dotted numbers are read; N/A in an always-required section -> REFUSED" 1 'line 4: the "spec deviations" section has nothing of its own' -- node "$PR" "$PD/na-a.md" --template "$PD/tpl.md"
+printf '## Phase 1 Report\n### Built\n- x\n### Spec Deviations: None\n### Assumptions Made\n- N/A — nothing assumed\n### Regression Check — N/A (phase 1, no earlier flows)\n' > "$PD/none.md"
+expect "phase-report: None in a heading, N/A with a reason in [A] sections -> OK" 0 "phase-report-check: OK" -- node "$PR" "$PD/none.md" --template "$PD/tpl.md"
 expect "phase-report: no report file -> cannot run (exit 2, not a pass)" 2 "not a pass" -- node "$PR" "$PD/missing.md"
 printf '# Phase 2\n## 1. Built ✅\n- the login page\n## 2. Spec Deviations\n- None\n' > "$PD/h2.md"
 expect "phase-report: level-2, numbered headings with a status mark -> OK" 0 "phase-report-check: OK" -- node "$PR" "$PD/h2.md" --template "$PD/tpl.md"
@@ -790,6 +792,8 @@ ac_base; sed -i.bak 's/"permissions"/"env": { "PROD_URL": "https:\/\/example.com
 expect "autonomy: PROD in a setting that is not a secret (PROD_URL, SKIP_PROD_DEPLOY) -> OK" 0 "autonomy-check: OK" -- node "$AC" "$AD"
 ac_base; printf '\xef\xbb\xbf\n---\nname: reviewer\ntools: Read, Grep\n---\n' > "$AD/.claude/agents/reviewer.md"
 expect "autonomy: a reviewer file starting with a BOM and a blank line -> OK" 0 "autonomy-check: OK" -- node "$AC" "$AD"
+ac_base; sed -i.bak 's/"Bash(git push --force:\*)"/"Bash(git push --force-with-lease:*)"/' "$AD/.claude/settings.json"
+expect "autonomy: deny --force-with-lease does not cover git push --force -> REFUSED" 1 'no rule for "git push --force"' -- node "$AC" "$AD"
 mkdir -p "$TMP/ac-none"
 mkdir -p "$TMP/ac-bare/.claude"; printf '{"permissions":{}}\n' > "$TMP/ac-bare/.claude/settings.json"
 expect "autonomy: settings but no Stop hook and no reviewer -> not set up (exit 2, not six failures)" 2 "not set up for supervised autonomy" -- node "$AC" "$TMP/ac-bare"
@@ -851,6 +855,24 @@ git -C "$T2" add -A; git -C "$T2" commit -q -m base; git -C "$T2" checkout -q -b
 git -C "$T2" mv src/index.js src/index.ts
 printf 'app = 1\n' > "$T2/app/main.py"; printf 'import unittest\n' > "$T2/tests/test_api.py"
 expect "run-commands: a .js → .ts move whose build output keeps the name, and run blocks dropped from imported files (uvicorn app.main:app, pytest) -> OK" 0 "run-commands-check: OK" -- node "$RC" "$T2"
+T3="$TMP/rc-r6"; newrepo "$T3"; mkdir -p "$T3/lib" "$T3/scripts" "$T3/jobs" "$T3/.github/workflows"
+printf 'module.exports = 1\n' > "$T3/lib/foo.js"; printf 'echo\n' > "$T3/scripts/deploy.sh"; printf 'echo\n' > "$T3/build.sh"
+printf 'if __name__ == "__main__":\n    print(1)\n' > "$T3/jobs/job.py"
+printf '{"main":"lib/foo.js"}\n' > "$T3/package.json"
+printf 'on:\n  push:\n    paths:\n    - scripts/deploy.sh\njobs:\n  t:\n    steps:\n      - run: ./build.sh\n' > "$T3/.github/workflows/ci.yml"
+printf 'job:\n\t.venv/bin/python -X dev jobs/job.py\n\t$(PYTHON) jobs/job.py\n' > "$T3/Makefile"
+git -C "$T3" add -A; git -C "$T3" commit -q -m base; git -C "$T3" checkout -q -b change
+mkdir -p "$T3/src"; git -C "$T3" mv lib/foo.js src/foo.ts; printf 'lib/\n' > "$T3/.gitignore"; printf 'module.exports = 1\n' > "$T3/lib/foo.js"
+git -C "$T3" rm -q scripts/deploy.sh; mkdir -p "$T3/scripts"; git -C "$T3" mv build.sh scripts/build.sh
+printf 'jobs:\n  t:\n    steps:\n      - working-directory: scripts\n        run: ./build.sh\n' > "$T3/.github/workflows/ci.yml"
+expect "run-commands: a rename into rebuilt output, a zero-indented paths: list, a script moved with its run folder -> OK" 0 "run-commands-check: OK" -- node "$RC" "$T3"
+printf 'from jobs.core import run\n' > "$T3/jobs/job.py"
+expect "run-commands: lost run block run by .venv/bin/python -X dev and by \$(PYTHON) -> REFUSED twice" 1 "REFUSED — 2 run config line" -- node "$RC" "$T3"
+git -C "$T3" checkout -q main 2>/dev/null || true
+T4="$TMP/rc-ff"; newrepo "$T4"; printf 'echo\n' > "$T4/a.sh"; printf '{"scripts":{"a":"bash a.sh"}}\n' > "$T4/package.json"
+git -C "$T4" add -A; git -C "$T4" commit -q -m base; git -C "$T4" checkout -q -b feat; git -C "$T4" rm -q a.sh; git -C "$T4" commit -q -m "drop a.sh"; git -C "$T4" branch -q -f main feat
+expect "run-commands: a branch already fast-forwarded into main, no --base -> cannot judge (exit 2), not a silent pass" 2 "adds nothing to main" -- node "$RC" "$T4"
+expect "run-commands: --base with no commit -> cannot run (exit 2)" 2 "needs a commit" -- node "$RC" "$T3" --base
 expect "run-commands: an unknown base commit -> cannot run (exit 2)" 2 "cannot be found" -- node "$RC" "$RD" --base nope
 SH="$TMP/rc-shallow"; git clone -q --depth 1 "file://$RD" "$SH" 2>/dev/null; git -C "$SH" checkout -q --detach; git -C "$SH" branch -q -D main; git -C "$SH" remote remove origin
 expect "run-commands: a shallow detached clone with no main, no --base -> cannot judge (exit 2)" 2 "cannot tell where this change starts" -- node "$RC" "$SH"

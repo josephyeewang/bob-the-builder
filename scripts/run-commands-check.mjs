@@ -38,6 +38,7 @@ const args = process.argv.slice(2);
 const bi = args.findIndex((a) => a === '--base' || a.startsWith('--base='));
 const inline = bi >= 0 && args[bi].includes('=');
 const baseArg = bi < 0 ? null : inline ? args[bi].slice('--base='.length) : args[bi + 1];
+if (bi >= 0 && (!baseArg || baseArg.startsWith('--'))) { process.stderr.write('run-commands-check: --base needs a commit, e.g. --base main\n'); process.exit(2); }
 const DIR = path.resolve(args.filter((a, i) => !a.startsWith('--') && (bi < 0 || inline || i !== bi + 1))[0] ?? '.');
 
 function cannot(message) {
@@ -58,9 +59,12 @@ if (!base) {
       try { base = git('merge-base', 'HEAD', ref).trim(); break; } catch { /* try the next */ }
     }
     if (!base) cannot(`cannot tell where this change starts (no main or master to compare with — a shallow CI clone?). Pass --base REF`);
+    // Already merged into main (fast-forward) and nothing uncommitted: the branch point is HEAD itself, so there is
+    // nothing to compare. (A new branch with uncommitted work is compared with HEAD, as it should be.)
+    if (base === git('rev-parse', 'HEAD').trim() && !git('status', '--porcelain').trim()) cannot('this branch adds nothing to main (its branch point is HEAD) — pass --base REF (the commit the phase started from)');
   }
 }
-try { git('rev-parse', '--verify', `${base}^{commit}`); } catch { cannot(`the base commit "${base}" cannot be found (pass one with --base REF)`); }
+try { base = git('rev-parse', '--verify', `${base}^{commit}`).trim(); } catch { cannot(`the base commit "${base}" cannot be found (pass one with --base REF)`); }
 
 // What changed since the base, working tree included: D = deleted, R = renamed (old → new), M = modified.
 const changes = git('diff', '-M', '--name-status', base, '--').split('\n').filter(Boolean).map((l) => l.split('\t'));
@@ -74,7 +78,8 @@ for (const [st, a, b] of changes) {
     // Untracked but still on disk, or now ignored (a build output taken out of git), is not gone.
     if (!fs.existsSync(path.join(ROOT, a)) && !ignored(a) && (SCRIPT.test(a) || executable(a))) gone.push([a, null]);
   } else if (st.startsWith('R')) {
-    if (SCRIPT.test(a) || executable(a)) gone.push([a, b]);
+    // The old path may live on as build output (lib/foo.js → src/foo.ts, lib/ now ignored and rebuilt): not gone.
+    if ((SCRIPT.test(a) || executable(a)) && !fs.existsSync(path.join(ROOT, a)) && !ignored(a)) gone.push([a, b]);
     if (b.endsWith('.py')) modifiedPy.push([a, b]);
   } else if (st === 'M' && a.endsWith('.py')) modifiedPy.push([a, a]);
 }
@@ -111,7 +116,8 @@ function runLines(f, text) {
   let filter = -1;
   return lines.flatMap((l, i) => {
     const ind = l.search(/\S/);
-    if (filter >= 0 && l.trim() && ind <= filter) filter = -1;
+    // A filter's list ends at a line no deeper than its key — except a "- item" at the same indent (zero-indented YAML).
+    if (filter >= 0 && l.trim() && (ind < filter || (ind === filter && !/^\s*-\s/.test(l)))) filter = -1;
     const k = l.match(/^(\s*)(paths|paths-ignore|branches|tags):/);
     if (k) { filter = k[1].length; return []; }
     return filter >= 0 ? [] : [[i + 1, stripComment(l)]];
@@ -148,7 +154,7 @@ const TOKEN = /[^\s"'=(),;:`[\]{}]+/g;
 // Where the run configs name `p`. asScript: count only a mention that runs the file as a script — after python (and
 // its flags) or uv/poetry run, as ./path, or as `-m module` — because only then does a lost __main__ block matter.
 // `uvicorn app.main:app`, `pytest tests/x.py` or a pyproject entry point import the file; they never needed the block.
-function mentions(p, asScript = false) {
+function mentions(p, asScript = false, movedTo = null) {
   const hits = [];
   const mods = moduleOf(p);
   for (const { f, lines } of configs) {
@@ -157,8 +163,11 @@ function mentions(p, asScript = false) {
       let hit = false;
       for (const m of l.matchAll(TOKEN)) {
         if (!means(m[0], p, f)) continue;
+        // build.sh → scripts/build.sh with `working-directory: scripts` + `./build.sh`: that names the new file.
+        const w = m[0].replace(/^\.\//, '');
+        if (movedTo && !w.includes('/') && (movedTo === w || movedTo.endsWith(`/${w}`))) continue;
         const before = l.slice(0, m.index);
-        if (!asScript || m[0].startsWith('./') || /(?:^|[\s"'(])(?:python[\d.]*|uv run(?: python[\d.]*)?|poetry run python[\d.]*)(?:\s+-[\w-]+)*\s+["']?$/.test(before)) { hit = true; break; }
+        if (!asScript || m[0].startsWith('./') || /(?:(?:^|[\s"'(/])(?:python[\d.]*|uv run(?: python[\d.]*)?|poetry run python[\d.]*)|\$[({]?PYTHON\w*[)}]?)(?:\s+-[\w-]+(?:\s+[^\s"'-]\S*)?)*\s+["']?$/.test(before)) { hit = true; break; }
       }
       if (!hit && mods.length) {
         const modRun = new RegExp(`-m\\s+["']?(?:${mods.map(esc).join('|')})(?=$|[\\s"'])`);
@@ -173,7 +182,7 @@ function mentions(p, asScript = false) {
 
 const problems = [];
 for (const [oldPath, newPath] of gone)
-  for (const where of mentions(oldPath))
+  for (const where of mentions(oldPath, false, newPath))
     problems.push(`${where} still names ${oldPath}, which this change ${newPath ? `moved to ${newPath}` : 'deleted'}`);
 const hasMain = (src) => /^\s*if\s+__name__\s*==\s*['"]__main__['"]/m.test(src);
 for (const [oldPath, newPath] of modifiedPy) {

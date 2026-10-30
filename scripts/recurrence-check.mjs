@@ -58,11 +58,12 @@ const mentionsOnly = [];
 for (const rec of log.split('\x1e')) {
   const [sha, date, subject, rawBody] = rec.replace(/^\n/, '').split('\x1f');
   if (!sha || rawBody === undefined) continue;
+  if (/\(cherry picked from commit [0-9a-f]+\)/.test(rawBody)) continue; // a backport of a fix already counted
   // Lines that start with "Class:" / "Rung:", anywhere in the message (above a Co-Authored-By line is fine) but not
   // inside a ``` code block and not indented, so a docs commit that quotes an example does not count.
   const body = rawBody.replace(/```[\s\S]*?```/g, '');
   const field = (key) => [...body.matchAll(new RegExp(`^${key}:[ \\t]*(.+?)[ \\t]*$`, 'gim'))].map((m) => m[1]);
-  const classes = field('Class').flatMap((v) => v.split(',')).map((c) => c.trim().toLowerCase().replace(/[.;!?]+$/, '').replace(/\s+/g, '-')).filter(Boolean);
+  const classes = field('Class').flatMap((v) => v.split(',')).map((c) => c.trim().toLowerCase().replace(/\s*\([^)]*\)\s*$/, '').replace(/[.;!?]+$/, '').replace(/\s+/g, '-')).filter(Boolean);
   if (!classes.length) continue;
   // The Rung: line wins; otherwise "closed at rung N" in the message.
   const trailer = field('Rung').map((r) => r.match(/(\d)/)?.[1]).filter(Boolean).map(Number); // "3", "R3 (fresh read)"

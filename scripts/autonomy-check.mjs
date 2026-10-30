@@ -15,7 +15,8 @@
 //   3. permissions.deny holds the destructive basics: rm -rf, git push --force, git reset --hard;
 //   4. permissions.ask stops at git push (refused if missing) and at a deploy or migrate command (a warning if none
 //      is recognised — deploy tools vary);
-//   5. a Stop hook runs a project green-gate script that compares a counter with a retry limit of at least 2 (`-ge 8`,
+//   5. a Stop hook runs a project green-gate script that compares something with a limit of at least 2 — it cannot tell
+//      a retry counter from other numbers, so it catches a missing limit, not a wrong one (`-ge 8`,
 //      `-gt "$MAX_ATTEMPTS"` with MAX_ATTEMPTS=8 or "${MAX_ATTEMPTS:-8}", `n > MAX` in JavaScript or Python) and no longer holding bob-init's "EDIT … set TEST_CMD" placeholder. Other
 //      Stop hooks (a notifier in ~/.claude, say) are left alone; a gate run through `npm run …` or `make …` cannot be
 //      read, so it is a warning to check by hand;
@@ -62,10 +63,10 @@ if (settings) {
   // on another machine or in CI would not have them.
   const perms = settings.permissions ?? {};
   const list = (k) => (Array.isArray(perms[k]) ? perms[k] : []);
-  // A rule covers a command when it names it, or when its prefix is shorter and still matches: deny Bash(rm:*) covers
-  // "rm -rf", deny Bash(git push:*) covers "git push --force".
   const prefixOf = (r) => r.replace(/\s+/g, ' ').match(/^Bash\((.*?)(?::\*|\*)?\)$/)?.[1];
-  const covers = (k, needle) => list(k).some((r) => r.replace(/\s+/g, ' ').includes(needle) || (prefixOf(r) && needle.startsWith(prefixOf(r))));
+  // A rule covers a command when its prefix starts the command: deny Bash(rm:*) covers "rm -rf"; Bash(git push origin
+  // main:*) does not cover every "git push", and Bash(git push --force-with-lease:*) does not cover "git push --force".
+  const covers = (k, needle) => list(k).some((r) => { const pre = prefixOf(r); return pre !== undefined && !pre.includes('*') && needle.startsWith(pre.trim()); });
 
   if (perms.defaultMode === 'auto')
     bad(2, `${SETTINGS} sets defaultMode "auto", which Claude Code ignores in a project file — auto is NOT on. Turn it on with Shift+Tab (⏵⏵ auto mode on) or in ~/.claude/settings.json`);

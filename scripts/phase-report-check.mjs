@@ -47,9 +47,11 @@ function heading(line) {
   const m = line.match(/^(#{2,4})\s+(?:\d+(?:\.\d+)*[.)]?\s+)?(?:\[([ACO])\]\s+)?(.+?)\s*$/);
   if (!m) return null;
   const name = m[3].split(/\s+\(|\s+—|\s+\*|\s+-\s|\s*:/)[0].replace(/[*_`]/g, '').replace(/[^\p{L}\p{N}/ -]+/gu, '').trim().toLowerCase();
-  // "### Deploy Verification — N/A (no integrations touched)" says in the heading that the section does not apply.
-  const saysNA = /(?:—|:|\(|-)\s*\**\s*(N\/A|None)\b/i.test(m[3]);
-  return { level: m[1].length, kind: m[2] ?? null, name, saysNA };
+  // The heading itself can answer: "### Spec Deviations: None", "### Regression Check — N/A (phase 1, nothing before)".
+  const rest = m[3].slice(m[3].search(/\s*(?:—|:|\(|\s-\s)/) + 1 || m[3].length);
+  const saysNone = /^\s*[—:(-]?\s*\**\s*(None|No divergences found)\b/i.test(rest);
+  const na = rest.match(/^\s*[—:(-]?\s*\**\s*N\/A\b\**\s*(.*)$/i);
+  return { level: m[1].length, kind: m[2] ?? null, name, saysNone, saysNA: !!na, saysNAWhy: !!na && /\w/.test(na[1]) };
 }
 // A report heading matches a template section when its name starts with the template's ("built" ⊂ "built so far").
 const same = (mine, tpl) => mine === tpl || mine.startsWith(`${tpl} `);
@@ -100,14 +102,15 @@ for (const m of mine) {
   const kind = m.kind ?? kindOf.get(tplName);
   if (kind !== 'A' && kind !== 'C') continue;
   // Text of its own: not blank, not an italic instruction, and not a line copied unchanged from the template's section.
-  // A line saying there was nothing ("None", "No divergences found") always counts, even when the template suggests it.
-  // "N/A" (does not apply) counts only for a [C] section: an always-required section cannot be skipped.
-  const says = (l) => new RegExp(`^\\s*(?:[-*]\\s*)*\\**\\s*(${kind === 'C' ? 'N\\/A|' : ''}None|No divergences found)\\b`, 'i').test(l);
+  // A line saying there was nothing ("None", "No divergences found") or that the section does not apply ("N/A — …")
+  // always counts, even when the template suggests it. In an always-required [A] section a bare "N/A" with no reason
+  // is a skip, not an answer.
+  const says = (l) => /^\s*(?:[-*]\s*)*\**\s*(N\/A|None|No divergences found)\b/i.test(l);
+  const skip = (l) => kind === 'A' && /^\s*(?:[-*]\s*)*\**\s*N\/A[\s*.]*$/i.test(l);
   // An italic line is the template's instruction only when the template has that same line; real text may be italic.
-  const skip = (l) => kind === 'A' && /^\s*(?:[-*]\s*)*\**\s*N\/A\b/i.test(l);
   const own = m.body.filter((l) => l.trim() && !skip(l) && (says(l) || (!placeholders.has(norm(l)) && !tplLines.get(tplName)?.has(norm(l)) && !tplItalic.has(norm(l)))));
-  if (!own.length && !(m.saysNA && kind === 'C'))
-    problems.push(`line ${m.line}: the "${m.name}" section has nothing of its own${kind === 'C' ? ' — if it does not apply, write "N/A — <reason>"' : ''}${m.name === 'spec deviations' ? ' — if there were none, write "None" (Rule 4: "No divergences found")' : ''}`);
+  if (!own.length && !m.saysNone && !(kind === 'C' ? m.saysNA : m.saysNAWhy))
+    problems.push(`line ${m.line}: the "${m.name}" section has nothing of its own${kind === 'C' ? ' — if it does not apply, write "N/A — <reason>"' : m.name === 'spec deviations' ? ' — if there were none, write "None" (Rule 4: "No divergences found")' : ' — if there was nothing, write "None", or "N/A — <reason>"'}`);
 }
 
 text.split('\n').forEach((l, i) => {
