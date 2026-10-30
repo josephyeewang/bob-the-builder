@@ -1,8 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { fileURLToPath } from 'node:url';
-import { existsSync, realpathSync } from 'node:fs';
-import { dirname, resolve } from 'node:path';
+import { existsSync, mkdirSync, realpathSync } from 'node:fs';
+import { basename, dirname, resolve } from 'node:path';
 import { corpus, cases, pathForms, askHook, runCorpus, hostDead, caselessAt } from './runner.mjs';
 import { touchCheck } from './selfcheck.mjs';
 import { tempDir } from '../../../shared/test-tmp.mjs';
@@ -30,6 +30,7 @@ test('every path form really names the protected file when the shell expands it'
   mkdirSync(`${dir}/x`);
   writeFileSync(`${dir}/${T}`, 'PLANTED\n');
   for (const [form, p] of Object.entries(pathForms(T))) {
+    if (form === 'globstar') continue; // zsh only; the self-check runs it under zsh
     const out = execFileSync('/bin/bash', ['-c', `cat ${p} 2>/dev/null; true`], { cwd: dir, encoding: 'utf8' });
     assert.match(out, /PLANTED/, form);
   }
@@ -232,7 +233,8 @@ test('round 10 audit 5 minors: no recursive grep of a folder holding the file is
 
 // Round 10 audit 6: three routes a careful guard (variables, home, cd, globs, whole folders it is shown) still missed.
 test('round 10 audit 6 M-1: a guard that only looks at the paths named misses a read of the run folder that names none', () => {
-  const root = tmp();
+  const root = tmp(); tmp(); // a folder beside root, for the allow-beside cases
+  mkdirSync(`${root}/apps/web`, { recursive: true }); mkdirSync(`${root}/apps/api`);
   for (const target of [T, `apps/web/${T}`]) {
     const file = resolve(root, target);
     const guard = (c, cwd) => (c.split(/[\s;&|()<>'"]+/).some((w) => w && (resolve(cwd, w) === file || file.startsWith(`${resolve(cwd, w)}/`))) ? 'refuse' : 'allow');
@@ -286,6 +288,7 @@ test('round 10 audit 7 M-1: a guard that reads a newline as a space, or a commen
 test('round 10 audit 8 M-1: the case-flip form follows the caseless option on any machine; the file\'s own disk by default', () => {
   const root = tmp();
   assert.ok(!hostDead('cat {{P}}', 'case-flip'), 'never dropped for the machine running the runner');
+  assert.equal(hostDead('cat {{P}}', 'globstar'), !existsSync('/bin/zsh'), 'round 10 audit 9: `**/` only where zsh is');
   assert.ok(cases(T, root, { caseless: true }).some((c) => c.form === 'case-flip'));
   // Minor 2: by default, the disk the file's folder is on.
   const flipped = `${dirname(root)}/${[...root.split('/').pop()].map((c) => (c === c.toUpperCase() ? c.toLowerCase() : c.toUpperCase())).join('')}`;
@@ -321,4 +324,68 @@ test('no case is built twice (a template that names no spelling of the file is o
     const keys = cases(target, root).map((c) => `${c.expect}|${c.cwd ?? ''}|${c.command}`);
     assert.deepEqual(keys.filter((k, i) => keys.indexOf(k) !== i), [], target);
   }
+});
+
+// Round 10 audit 9: what a careful guard (quotes, variables, globs in the name, a list of folder readers) still passed.
+test('round 10 audit 9 M-1: a guard matching globs against the name only misses a glob in the folder part, and zsh **/', () => {
+  const root = tmp();
+  const re = (g) => new RegExp(`^${g.replace(/[.+^${}()|\\]/g, '\\$&').replace(/\*/g, '[^/]*').replace(/\?/g, '.')}$`);
+  for (const target of [T, `apps/web/${T}`]) {
+    const file = resolve(root, target);
+    const nameOnly = (c, cwd) => (c.split(/[\s;&|()<>'"]+/).some((w) => w && dirname(resolve(cwd, w)) === dirname(file) && re(basename(resolve(cwd, w))).test(basename(file))) ? 'refuse' : 'allow');
+    const missed = runCorpus(nameOnly, { target, cwd: root }).failures.filter((f) => f.expect === 'refuse');
+    assert.ok(missed.some((f) => f.form === 'dir-glob'), `${target}: a glob in the folder part`);
+    if (existsSync('/bin/zsh')) assert.ok(missed.some((f) => f.form === 'globstar'), `${target}: **/`);
+    assert.equal(nameOnly(`cat ${pathForms(target, root).glob}`, root), 'refuse', 'it does catch a glob in the name');
+  }
+  assert.equal(pathForms(`apps/web/${T}`, root)['dir-glob'], `apps/*/${T}`);
+});
+
+test('round 10 audit 9 M-2: a guard missing < as a word break, or reading quoted script text as one word, misses those reads', () => {
+  const root = tmp(); const file = resolve(root, T);
+  const by = (sep) => (c, cwd) => (c.split(sep).some((w) => w && resolve(cwd, w) === file) ? 'refuse' : 'allow');
+  const missed = (sep) => runCorpus(by(sep), { target: T, cwd: root }).failures.filter((f) => f.expect === 'refuse' && f.form === 'plain').map((f) => f.tpl);
+  assert.ok(missed(/[\s;&|()'"]+/).includes('cat <{{P}}'), 'glued to <');
+  assert.ok(missed(/[\s;&|()<>"]+/).some((t) => t.includes('{path:')), "set in an object, {path:'…'}");
+  assert.ok(!missed(/[\s;&|()<>'"]+/).some((t) => t === 'cat <{{P}}' || t.includes('{path:')), 'a guard breaking words at both catches them');
+});
+
+test('round 10 audit 9 M-3: a guard taking only -r or -R as a recursive grep misses grep -nr and --recursive', () => {
+  for (const t of ['grep -nr e', 'grep -inr e', 'grep --recursive -n e', 'rsync -a ./ /tmp/y']) assert.ok(corpus.refuse_here.includes(t), t);
+  const root = tmp();
+  for (const target of [T, `apps/web/${T}`]) {
+    const file = resolve(root, target);
+    const guard = (c, cwd) => {
+      const w = c.split(/\s+/);
+      if (w[0] === 'grep' && /^-[rR]/.test(w[1]) && file.startsWith(`${resolve(cwd, w[3] ?? '.')}/`)) return 'refuse';
+      return c.split(/[\s;&|()<>'"]+/).some((x) => x && resolve(cwd, x) === file) ? 'refuse' : 'allow';
+    };
+    const missed = runCorpus(guard, { target, cwd: root }).failures.filter((f) => f.expect === 'refuse' && f.tpl?.startsWith('grep'));
+    for (const g of ['here', 'folder']) assert.ok(missed.some((f) => f.group === g && /grep (-nr|-inr|--recursive)/.test(f.command)), `${target}: ${g}`);
+    assert.ok(!missed.some((f) => /grep -[rR]/.test(f.command)), `${target}: it does catch -r and -R`);
+  }
+  // Minor 3: a file beside it whose name differs in its last word is an allow case.
+  assert.ok(cases(T, root).some((c) => c.group === 'allow-near' && c.command === `cat ${root}/.env.example`));
+});
+
+test('round 10 audit 9 M-4: allow-beside cases are asked from a folder that exists and does not hold the file', () => {
+  const root = tmp(); tmp(); // a folder beside root
+  mkdirSync(`${root}/apps/web`, { recursive: true }); mkdirSync(`${root}/apps/api`);
+  for (const target of [T, `apps/web/${T}`]) {
+    const beside = cases(target, root).filter((c) => c.group === 'allow-beside');
+    assert.ok(beside.length > 0, target);
+    for (const c of beside) assert.ok(existsSync(c.cwd) && !resolve(root, target).startsWith(`${c.cwd}/`), `${target}: ${c.cwd}`);
+  }
+  assert.ok(!cases(T, root, { beside: null }).some((c) => c.group === 'allow-beside'), 'none when there is no such folder');
+});
+
+test('round 10 audit 9 M-5: run through a link to its folder, the runner still runs the corpus and fails a bad hook', async () => {
+  const { symlinkSync } = await import('node:fs');
+  const { spawnSync } = await import('node:child_process');
+  const root = tmp();
+  symlinkSync(dirname(fileURLToPath(import.meta.url)), `${root}/link`);
+  const env = { ...process.env }; delete env.NODE_TEST_CONTEXT;
+  const r = spawnSync(node, [`${root}/link/runner.mjs`, 'exit 2'], { cwd: root, encoding: 'utf8', env });
+  assert.match(r.stdout, /cases as expected/);
+  assert.equal(r.status, 1);
 });

@@ -15,7 +15,7 @@
 // Status: pending the real hook. Until it runs green against lane 2's installed hook at the join, R-0b-70 is not done.
 
 import { spawnSync } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { homedir } from 'node:os';
 import { basename, dirname, isAbsolute, resolve } from 'node:path';
@@ -75,6 +75,12 @@ export function pathForms(target, cwd, { absolute = true, home = homedir(), case
   const hex = enc((n) => `\\x${n.toString(16).padStart(2, '0')}`);
   const folder = target.includes('/') ? basename(dirname(target)) : cwd ? basename(cwd) : 'x';
   const rel = isAbsolute(target) || cwd ? fromHome(resolve(cwd ?? '/', target), home) : null;
+  // A glob in the folder part (round 10 audit 9 M-1: every glob sat in the name, so a guard matching globs against the
+  // name only, and the folders literally, passed): the file's folder as `*`, or from the folder above when none is named.
+  const last = dir ? dir.slice(0, -1).split('/').pop() : folder;
+  const star = (n) => (n.startsWith('.') ? '.*' : '*');
+  const dirGlob = !last || /^\.\.?$/.test(last) || (!dir && !cwd) ? null
+    : dir ? `${dir.slice(0, -1).slice(0, -last.length)}${star(last)}/${base}` : `../${star(last)}/${base}`;
   return {
     plain: target,
     ...(isAbsolute(target) ? {} : { 'dot-slash': `./${target}` }), // "./" before "/abs" would make it relative
@@ -102,10 +108,13 @@ export function pathForms(target, cwd, { absolute = true, home = homedir(), case
     'base64-sub': `$(echo ${Buffer.from(target).toString('base64')} | base64 -d)`,
     'ansi-c': `$'${hex}'`,
     'brace': `${dir}{${base},nothing}`,
+    ...(dirGlob ? { 'dir-glob': dirGlob } : {}),
+    // zsh's `**/` searches every folder below (round 10 audit 9 M-1); bash without globstar does not (hostDead).
+    ...(isAbsolute(target) ? {} : { globstar: `**/${base}` }),
     ...(absolute && cwd && !isAbsolute(target) ? { absolute: resolve(cwd, target) } : {}),
-    ...(absolute && rel !== null ? { 'home-tilde': `~/${rel}`, 'home-var': `$HOME/${rel}` } : {}),
+    ...(absolute && rel !== null ? { 'home-tilde': `~/${rel}`, 'home-var': `$HOME/${rel}`, 'home-brace': `\${HOME}/${rel}` } : {}),
     // $PWD, which a guard must take from the folder the command runs in, not its own (round 10 audit 6 M-2).
-    ...(cwd && !isAbsolute(target) ? { 'pwd-var': `$PWD/${target}` } : {}),
+    ...(cwd && !isAbsolute(target) ? { 'pwd-var': `$PWD/${target}`, 'pwd-brace': `\${PWD}/${target}` } : {}),
     ...(caseless && swapCase(base) !== base ? { 'case-flip': `${dir}${swapCase(base)}` } : {}),
   };
 }
@@ -127,14 +136,25 @@ export function checkPath(p) {
 // quotes around it) proves nothing, so it is left out; corpus.dead lists them and a test checks the list both ways
 // (0b-7 round 10). corpus.dead is for a Mac (bash, zsh, and an sh that reads $'…'). hostDead adds the pairs that touch
 // nothing on this machine because a shell is missing: without zsh a brace after ">" is an error, and dash (Linux's sh)
-// does not read $'…' (round 10 audit 3 M-4).
+// does not read $'…' (round 10 audit 3 M-4); without zsh, `**/` is `*/` and finds no file in the folder itself.
 const SH_ANSI_C = spawnSync('sh', ['-c', "printf %s $'\\x41'"], { encoding: 'utf8' }).stdout === 'A';
 export const hostDead = (tpl, form) => (form === 'brace' && !existsSync('/bin/zsh') && /> ?(\{\{UP\}\}\/)?\{\{(P|BASE)\}\}/.test(tpl))
-  || (form === 'ansi-c' && !SH_ANSI_C && tpl.startsWith('sh -c'));
+  || (form === 'ansi-c' && !SH_ANSI_C && tpl.startsWith('sh -c'))
+  || (form === 'globstar' && !existsSync('/bin/zsh'));
 const live = (tpl, form) => !(corpus.dead[tpl] ?? []).includes(form) && !hostDead(tpl, form);
 
+// The first folder (by name) beside the file's folder that does not hold the file, or null.
+function besideOf(abs) {
+  const up = dirname(dirname(abs));
+  try {
+    return readdirSync(up, { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => resolve(up, e.name))
+      .filter((p) => !abs.startsWith(`${p}/`) && /^[A-Za-z0-9._\/-]+$/.test(p)).sort()[0] ?? null;
+  } catch { return null; }
+}
+
 // cwd: the folder the hook is asked from (a relative target is taken from there). home: as for pathForms.
-export function cases(target, cwd = process.cwd(), { home = homedir(), caseless = caselessAt(dirname(resolve(cwd, target))) } = {}) {
+// beside: a folder beside the file's that does not hold it (default: found on disk); null leaves out allow-beside.
+export function cases(target, cwd = process.cwd(), { home = homedir(), caseless = caselessAt(dirname(resolve(cwd, target))), beside = besideOf(resolve(cwd, target)) } = {}) {
   const out = [];
   const abs = checkPath(resolve(cwd, target));
   const forms = pathForms(target, cwd, { home, caseless });
@@ -183,22 +203,28 @@ export function cases(target, cwd = process.cwd(), { home = homedir(), caseless 
   for (const tpl of corpus.refuse_cd_up) {
     // One naming the whole folder, not the file, is one case (form '-'), not one per spelling of the name.
     if (!tpl.includes('{{BASE}}')) { if (live(tpl, '-')) out.push({ expect: 'refuse', group: 'cd-up', form: '-', tpl, cwd: dir, command: fill(tpl, { UP: basename(dir) }) }); continue; }
-    for (const [form, p] of short) if (form !== 'pwd-var' && live(tpl, form)) out.push({ expect: 'refuse', group: 'cd-up', form, tpl, cwd: dir, command: fill(tpl, { UP: basename(dir), BASE: p }) });
+    for (const [form, p] of short) if (!form.startsWith('pwd-') && live(tpl, form)) out.push({ expect: 'refuse', group: 'cd-up', form, tpl, cwd: dir, command: fill(tpl, { UP: basename(dir), BASE: p }) });
   }
   // A recursive grep of a folder that holds the file reads it, so it is no allow case there (round 10 audit 5 minor 1).
-  const readsFile = (command, where) => /\bgrep -r|^tar |^cp -r/.test(command) && [resolve(where, command.split(' ').pop())].some((f) => abs === f || abs.startsWith(`${f}/`));
+  const readsFile = (command, where) => /\bgrep (-\w*[rR]|--recursive)|^tar |^cp -r|^rsync /.test(command) && [resolve(where, command.split(' ').pop())].some((f) => abs === f || abs.startsWith(`${f}/`));
   for (const command of corpus.allow) if (!readsFile(command, cwd)) out.push({ expect: 'allow', group: 'allow', form: '-', command });
   // Ordinary commands asked from the folder above and from the file's folder: a guard that refuses whatever is asked
   // from outside the run folder fails (round 10 audit 4 M-2).
   for (const command of corpus.allow_elsewhere) for (const where of [up, dir]) out.push({ expect: 'allow', group: 'allow-elsewhere', form: '-', cwd: where, command });
-  const beside = `${dir}-other`;
-  for (const command of corpus.refuse_here) out.push({ expect: 'allow', group: 'allow-beside', form: '-', cwd: beside, command });
+  // A folder that exists, as Claude Code's cwd always does (round 10 audit 9 M-4: a guard that resolves the cwd's real
+  // path and refuses when it cannot failed a made-up one). Left out when the file's folder has no folder beside it.
+  if (beside) for (const command of corpus.refuse_here) out.push({ expect: 'allow', group: 'allow-beside', form: '-', cwd: beside, command });
   // Round 10 audit 3 M-2: near misses built from this file's folder and the words of its name, so a guard that refuses
   // anything naming the folder or a word of the name fails. Still a sample: no list proves a guard never over-refuses.
   const words = [...new Set(basename(abs).split(/[^A-Za-z0-9]+/).filter((w) => w.length >= 2))];
+  // A file beside it whose name differs in its last word, as `.env.example` beside `.env.production` (round 10 audit 9
+  // minor 3: a guard refusing every name that starts the same passed).
+  const sib = basename(abs).replace(/[A-Za-z0-9]+$/, 'example');
+  const sibling = sib !== basename(abs) ? `${dirname(abs)}/${sib}` : null;
   for (const tpl of corpus.allow_near) {
+    if (tpl.includes('{{SIBLING}}') && !sibling) continue;
     for (const WORD of /\{\{WORD\}\}/.test(tpl) ? words : ['']) {
-      const command = tpl.replace(/\{\{(DIR|WORD)\}\}/g, (_, k) => ({ DIR: dirname(abs), WORD })[k]);
+      const command = tpl.replace(/\{\{(DIR|WORD|SIBLING)\}\}/g, (_, k) => ({ DIR: dirname(abs), WORD, SIBLING: sibling })[k]);
       if (!readsFile(command, cwd)) out.push({ expect: 'allow', group: 'allow-near', form: '-', command });
     }
   }
@@ -238,12 +264,15 @@ export function askHook(hookCommand, command, { timeoutMs = 60000, cwd, hookCwd 
 // cwd: the folder each case is asked from; after-cd cases carry their own.
 export function runCorpus(hook, { target = '.env.production', ...opts } = {}) {
   const ask = typeof hook === 'function' ? hook : (command, cwd) => askHook(hook, command, { ...opts, cwd });
-  const results = cases(target, opts.cwd, { ...(opts.home ? { home: opts.home } : {}), ...(opts.caseless !== undefined ? { caseless: opts.caseless } : {}) }).map((c) => ({ ...c, got: ask(c.command, c.cwd ?? opts.cwd ?? process.cwd()) }));
+  const results = cases(target, opts.cwd, { ...(opts.home ? { home: opts.home } : {}), ...(opts.caseless !== undefined ? { caseless: opts.caseless } : {}), ...(opts.beside !== undefined ? { beside: opts.beside } : {}) }).map((c) => ({ ...c, got: ask(c.command, c.cwd ?? opts.cwd ?? process.cwd()) }));
   const failures = results.filter((r) => r.got !== r.expect);
   return { total: results.length, failures, passed: results.length - failures.length };
 }
 
-if (process.argv[1] === fileURLToPath(import.meta.url)) {
+// Started directly, also through a link (round 10 audit 9 M-5: argv[1] keeps the link, the module's path is the real
+// one, so a plain compare ran nothing and exited 0).
+const started = (() => { try { return realpathSync(process.argv[1]) === fileURLToPath(import.meta.url); } catch { return false; } })();
+if (started) {
   const [hook, target] = process.argv.slice(2);
   if (!hook) { console.error('usage: node runner.mjs \'<hook command>\' [protected path]'); process.exit(64); }
   const r = runCorpus(hook, target ? { target } : {});
