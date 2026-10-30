@@ -270,3 +270,42 @@ test('round 3: a hostile error message, long labels, a label count that is not a
     'docs/research/x.agent.md', 'docs/research/llms.txt', 'docs/research/llms-full.txt', 'docs/CONTRIBUTING.md', 'docs/CODE_OF_CONDUCT.md',
     'docs/SUPPORT.md', 'docs/README.md', 'docs/GOVERNANCE.md']) assert.ok(check([f(p)]), p);
 });
+
+test('round 4: huge paths answer quickly on every route, reasons stay short, needs-joe counts anywhere in a label', async () => {
+  const { needsJoe } = await import('./classify.mjs');
+  const { pathProblem } = await import('./paths.mjs');
+  const r = rulesFor();
+  // MATERIAL-1: 2,999 paths of 4 MB each, one shared string, refused quickly through the engine.
+  const huge = 'docs/research/' + 'a/'.repeat(2_000_000) + 'x.md';
+  let t0 = Date.now();
+  const d = merge(r, Array(2999).fill({ path: huge, status: 'modified' }));
+  assert.equal(d.decision, 'deny');
+  assert.ok(Date.now() - t0 < 2000, `took ${Date.now() - t0} ms`);
+  assert.ok(d.reason.length < 300, 'the reason is short');
+  t0 = Date.now();
+  for (let i = 0; i < 2999; i++) assert.ok(pathProblem(huge));
+  assert.ok(Date.now() - t0 < 1000, 'the shared path check is cheap too');
+  assert.equal(pathProblem('a/'.repeat(2046) + 'b.md'), null, '4,096 characters is still a path');
+  assert.ok(pathProblem('a/'.repeat(2046) + 'bc.md'), 'one more is not');
+  // MINOR-1: the engine's own file check never quotes a whole path.
+  assert.ok(merge(r, [f('docs/research/' + 'a'.repeat(4000) + '\\x.md')]).reason.length < 300);
+  const pushed = r.may('push_branch', { product: 'app', card: { id: 'C-1', rows: [], doc: { lane: 'docs' } }, files: [f('docs/research/' + 'a'.repeat(4000) + '\\x.md')] });
+  assert.equal(pushed.decision, 'deny');
+  assert.ok(pushed.reason.length < 300, 'push_branch quotes at most 80 characters of a path');
+  // M26: the caught message is cut to 200 characters.
+  const c = change([f('docs/research/a.md')]); Object.defineProperty(c, 'truncated', { get() { throw new Error('z'.repeat(10_000)); } });
+  assert.ok(docsLaneProblem(POL, c).length < 250);
+  // M3: needsJoe's own cap, for classify and the deep merge.
+  t0 = Date.now();
+  const big = 'a'.repeat(10_000_000);
+  for (let i = 0; i < 1000; i++) assert.equal(needsJoe(big), '');
+  assert.ok(Date.now() - t0 < 1000, 'needsJoe answers a long label without searching it');
+  // M7: a label count that is not a whole number, through the engine.
+  for (const n of ['abc', 1.5, -1]) {
+    const l = new Proxy(['needs-joe'], { get: (t, k) => (k === 'length' ? n : t[k]) });
+    assert.equal(merge(r, [f('docs/research/a.md')], { labels: l }).decision, 'deny', String(n));
+  }
+  // MINOR-2: a prefix before needs-joe still counts; other labels don't.
+  for (const l of ['status: needs-joe', 'bot:needs-joe', 'please needs joe']) assert.equal(merge(r, [f('docs/research/a.md')], { labels: [l] }).decision, 'deny', l);
+  assert.equal(merge(r, [f('docs/research/a.md')], { labels: ['docs', 'joe-review'] }).decision, 'allow');
+});

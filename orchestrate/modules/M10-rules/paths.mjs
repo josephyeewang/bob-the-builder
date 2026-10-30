@@ -20,6 +20,8 @@ const fold = (s) => s.normalize('NFC').toLowerCase();
 // A path the matcher can trust: relative, `/`-separated, no `..`, no empty segment, no backslash or NUL.
 function shapeProblem(p) {
   if (typeof p !== 'string' || p === '') return 'empty path';
+  // Checked before any split or scan, so a huge path costs nothing (L34 confirm audit round 4: 2,999 paths of 4 MB took 97 s).
+  if (p.length > 4096) return 'path over 4096 characters';
   if (p.includes('\\') || p.includes('\0')) return 'backslash or NUL in path';
   if (p.startsWith('/')) return 'absolute path';
   const segs = p.split('/');

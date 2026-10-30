@@ -243,7 +243,7 @@ export function needsJoe(label) {
   if (label.length > 256) return '';   // no real label is this long; searching one is slow (round 3, MAT-2)
   if (/[^\x20-\x7e]/.test(label)) return '';
   const l = label.toLowerCase().replace(/[^a-z_:]/g, '');
-  const m = /^[_:]*needs[_:]*joe/.exec(l);
+  const m = /needs[_:]*joe/.exec(l);   // anywhere in the label: "status: needs-joe" counts too (round 4)
   return m ? l.slice(m[0].length) : null;
 }
 

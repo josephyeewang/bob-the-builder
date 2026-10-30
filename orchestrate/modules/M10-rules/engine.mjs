@@ -207,7 +207,7 @@ export function makeEngine({ products, rulesState, productState, running, rolesD
       if (!f || typeof f !== 'object' || !FILE_STATUSES.includes(f.status)) throw new Error('bad file entry');
       if ((f.status === 'renamed' || f.status === 'copied') && typeof f.previous_path !== 'string') throw new Error(`${f.status} with no old name`);
       const bad = pathProblem(f.path) ?? (f.previous_path !== undefined ? pathProblem(f.previous_path) : null);
-      if (bad) throw new Error(`${bad}: ${JSON.stringify(f.path)}`);
+      if (bad) throw new Error(`${bad}: ${JSON.stringify(String(f.path).slice(0, 80))}`);   // never the whole path (round 4)
     }
   };
 
@@ -254,9 +254,10 @@ export function makeEngine({ products, rulesState, productState, running, rolesD
   function mergeDocsLane(subject) {
     const s = readSubjectOnce(subject);
     const pol = policyOf(s.product);
-    checkFiles(s.files);
+    // The docs-lane check first: it caps path length and depth before any scan (round 4).
     const why = docsLaneProblem(pol, s);
     if (why) return deny(`not this lane's change; MAIN merges it as today: ${why}`);
+    checkFiles(s.files);
     const reverse = s.kind === 'exact_reverse' && typeof s.reverses === 'string' && SHA.test(s.reverses) && s.exact_reverse_ok === true && REVERSED_AUDIT.includes(s.reversed_audit);
     const state = stateOf(s.product);
     const fileRule = at(pol, `product_state_rules.${state}.tier1_merge`);
