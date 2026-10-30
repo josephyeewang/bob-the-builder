@@ -3,7 +3,7 @@
 // remaining forms. Throwaway folders only; names of secret files are built at run time.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, writeFileSync, realpathSync, symlinkSync } from 'node:fs';
+import { mkdirSync, writeFileSync, realpathSync, symlinkSync, chmodSync } from 'node:fs';
 import { join, dirname, basename } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -589,4 +589,44 @@ test('L46 round 4 check: lines with Windows line ends are read as the shell read
   // A return anywhere else is still refused.
   for (const c of ['echo a\rrm -rf x', 'echo a\r', 'echo a\r\r\n']) no(c);
   passed(noVerify.decide(bash("git commit -F - <<'EOF'\r\nmsg\r\nEOF\r\n", W)), 'no-verify: CRLF message');
+});
+
+// Lane 2 follow-up (cd-glob false refusals): a line that starts with a plain `cd` into a real subfolder runs the rest
+// there for certain, so its globs and `.` are judged from that folder, not from the working folder too.
+test('cd-glob: after a plain cd into a real subfolder, globs and . are judged there; ../* and an uncertain cd still refuse', () => {
+  const w = world();
+  for (const d of ['dist/sub', 'locked']) mkdirSync(join(w.work, d), { recursive: true });
+  writeFileSync(join(w.work, 'dist', 'a.txt'), 'x');
+  writeFileSync(join(w.work, 'notdir'), 'x');
+  symlinkSync(w.root, join(w.work, 'out'));
+  symlinkSync(join(w.work, 'dist'), join(w.work, 'in'));
+  symlinkSync(w.outbox, join(w.work, 'ob'));
+  // A file the system would run is still not a folder; a folder it can't enter is not certain to be entered.
+  chmodSync(join(w.work, 'notdir'), 0o755);
+  chmodSync(join(w.work, 'locked'), 0o600);
+  try {
+    const allow = ['cd dist && rm -rf *', 'cd dist; rm -rf *', 'cd dist && rm -rf .', 'cd dist && rm -rf ./*', 'cd ./dist && rm -rf *', 'cd dist/ && rm -rf *',
+      'cd dist/sub && rm -rf *', 'cd dist && cd sub && rm -rf .', 'cd dist ; rm -rf * && ls', 'cd in && rm -rf *'];
+    for (const c of allow) {
+      passed(prodGuard.decide(bash(c, w.work), w.args), c);
+      passed(secret.decide(bash(c, w.work), w.args), `secret: ${c}`);
+    }
+    // From a folder holding no protected file the working-folder shield no longer refuses them either.
+    for (const c of allow.slice(0, 4)) passed(prodGuard.decide(bash(c.replace(/^cd [^ ;&]+/, 'cd sub'), join(w.work, 'dist')), w.args), `from dist: ${c}`);
+    const refuse = ['cd dist && rm -rf ../*', 'cd dist; rm -rf ..', 'cd dist && rm -rf ../.', 'cd dist || rm -rf *', '(cd dist); rm -rf *', '(cd dist && true); rm -rf *', '(cd dist; true); rm -rf *', 'cd ob && rm -rf *',
+      'cd nope; rm -rf *', 'cd notdir; rm -rf *', 'cd locked; rm -rf *', 'cd out && rm -rf *', 'cd dist & rm -rf *', 'cd dist | rm -rf *', 'cd dist && cd .. && rm -rf *',
+      'cd dist; cd -; rm -rf *', 'cd .. && rm -rf *', 'cd dist/.. && rm -rf *', 'cd d* && rm -rf *', 'cd -P dist && rm -rf ../*', 'ls; cd dist && rm -rf *',
+      'cd dist && rm -rf * ; cd .. ; rm -rf *', 'rm -rf *', 'if cd dist; then true; fi; rm -rf *'];
+    for (const c of refuse) blocked(prodGuard.decide(bash(c, w.work), w.args), c);
+    const pf = [fold(w.envFile)];
+    const why = (c, more = {}) => prodGuard.folderWriteWhy(c, { cwd: w.work, protectedFiles: pf, home: w.home, cdpath: '', ...more });
+    // CDPATH can send a plain name elsewhere; a ./ name is never searched there. A changed shell option, likewise.
+    assert.ok(why('cd dist && rm -rf *', { cdpath: '/x' }), 'CDPATH set outside the line');
+    assert.ok(why('CDPATH=/x; cd dist; rm -rf *'), 'CDPATH set in the line');
+    assert.equal(why('cd ./dist && rm -rf *', { cdpath: '/x' }), null, 'a ./ cd ignores CDPATH');
+    assert.ok(why('cd dist; setopt cdablevars; rm -rf *'), 'a shell option changed');
+    // A protected file inside the folder the cd leads to is still found.
+    writeFileSync(join(w.work, 'dist', 'sub', ENV_PROD), 'X=1\n');
+    assert.match(why('cd dist && rm -rf *', { protectedFiles: [fold(join(w.work, 'dist', 'sub', ENV_PROD))] }) ?? 'none', /holding a protected file/);
+  } finally { chmodSync(join(w.work, 'locked'), 0o755); }
 });

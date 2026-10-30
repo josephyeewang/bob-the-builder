@@ -8,7 +8,7 @@
 // A missing or stale snapshot, or one without that block, blocks every call (fail closed).
 
 import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path';
-import { readdirSync } from 'node:fs';
+import { accessSync, constants, readdirSync, statSync } from 'node:fs';
 import { homedir, userInfo } from 'node:os';
 import { isMain, runHook, block, pass, toolPaths, shellCommands, bothWords, programOf, landingPath, realFolder, inside, joinLines, unreadable, expandBraces, fold, globRe } from './lib.mjs';
 import { readSnapshot } from './snapshot.mjs';
@@ -176,14 +176,46 @@ const dotsAfterPattern = (p) => { const parts = p.split(sep); const k = parts.fi
 
 const linkTarget = (p) => { const r = realFolder(p); return r && r !== p ? r : null; };
 
+// Changing a shell option anywhere in the line can change where a `cd` lands (`cdable_vars`; MAT-9).
+const OPTS_CHANGED = /(^|[\s;&|(])(setopt|unsetopt|shopt|enable)(\s|$)|(^|[\s;&|(])set\s+[-+]o/;
+
+// A line that starts with plain `cd <folder>` steps, each joined to the next by `&&` or `;`, runs the rest in the
+// last folder for certain, when each is a real folder it can enter below the one before (lane 2 follow-up: the
+// false refusals of `cd dist && rm -rf *`). The rest is then judged from that folder alone, and the folder the call
+// runs in stays shielded. Anything else keeps the rule below, where every folder the line may be in counts: a
+// bracket, `||`, `|` or `&`, a variable, `~`, `..`, a pattern, a name starting with a dot or a dash, a folder that
+// is missing or leads out through a link, CDPATH, a changed shell option.
+const PLAIN_CD = /^\s*cd\s+((?:\.\/)?[A-Za-z0-9_][A-Za-z0-9._-]*(?:\/[A-Za-z0-9_][A-Za-z0-9._-]*)*\/?)\s*(?:&&|;(?!;))/;
+function plainCds(cmd, cwd, cdpath) {
+  let rest = cmd;
+  let at = cwd;
+  if (OPTS_CHANGED.test(cmd)) return { rest, at };
+  const viaCdpath = Boolean(cdpath) || /cdpath/i.test(cmd);
+  for (let m = PLAIN_CD.exec(rest); m; m = PLAIN_CD.exec(rest)) {
+    if (viaCdpath && !m[1].startsWith('./')) break;
+    const to = resolve(at, m[1]);
+    const real = realFolder(to);
+    const from = realFolder(at) ?? at;
+    try { if (!real || real === from || !inside(real, from) || !statSync(real).isDirectory()) break; accessSync(real, constants.X_OK); } catch { break; }
+    at = to;
+    rest = rest.slice(m[0].length);
+  }
+  return { rest, at };
+}
+
 /**
  * Why the command writes a folder holding a protected file, or null. `cwd` is where the call runs; every `cd`
  * or `pushd` adds where it leads (a subshell's `cd` may or may not still hold, so both count), and a `cd` the
  * guard can't follow makes every relative target unknown, which is refused.
  */
 export function folderWriteWhy(cmd, { cwd, protectedFiles, home = homedir(), user = process.env.USER || userInfo().username, tmpdir = process.env.TMPDIR, projectDir = null, cdpath = process.env.CDPATH }) {
+  // A plain cd at the start moves the line for certain; the folder the call runs in stays shielded.
+  const shielded = [cwd, ...(projectDir && isAbsolute(projectDir) ? [projectDir] : [])];
+  const start = plainCds(cmd, cwd, cdpath);
+  cmd = start.rest;
   // A Set: each `cd` would otherwise double the list (audit of L41, round 2, minor).
-  const cwds = new Set([cwd]);
+  // After a plain cd, where it really lands counts too, as for any cd below.
+  const cwds = new Set(start.at === cwd ? [cwd] : [start.at, realFolder(start.at) ?? start.at]);
   let lost = false;
   // A whole-folder write after a command that can make a link is refused: the link may not exist yet when the guard
   // looks (`ln`, `cp -R <link> l`, an unpacked link; MAT-5, MAT-10). See MAKES_LINKS.
@@ -191,10 +223,9 @@ export function folderWriteWhy(cmd, { cwd, protectedFiles, home = homedir(), use
   // A `cd` searched through CDPATH (set any way: `CDPATH+=`, zsh's `cdpath`), after a shell option is changed
   // (`cdable_vars`), or `cd -` to a folder this line did not visit, lands where the guard can't tell (MAT-4, MAT-9).
   const viaCdpath = Boolean(cdpath) || /cdpath/i.test(cmd);
-  const optsChanged = /(^|[\s;&|(])(setopt|unsetopt|shopt|enable)(\s|$)|(^|[\s;&|(])set\s+[-+]o/.test(cmd);
+  const optsChanged = OPTS_CHANGED.test(cmd);
   const setOld = /(^|[\s;&|(])(export\s+)?OLDPWD=/.test(cmd);
   let moved = false;
-  const shielded = [cwd, ...(projectDir && isAbsolute(projectDir) ? [projectDir] : [])];
   const holdsProtected = (d) => [d, realFolder(d)].filter(Boolean).some((x) => protectedFiles.some((f) => inside(f, fold(x))));
   for (const c of shellCommands(spellOut(cmd, { HOME: home, PWD: PWD_MARK, USER: user, TMPDIR: tmpdir }))) {
     const prog = programOf(c);
