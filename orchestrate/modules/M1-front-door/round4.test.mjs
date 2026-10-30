@@ -63,15 +63,16 @@ test('L23: the command the Air runs writes one checked file to the folder it is 
 const brief = (ids) => `Brief made ${at(0).toISOString()}; answers state files: ${ids.join(', ')}.\nMini check: ...`;
 test('L22: the brief is pushed once per new set of state files, and only when it names every id', () => {
   const ids = ['20261103-0915-kr', '20261103-0915-kq'];
-  const p = nextTripPush({ stateIds: ids, lastPushedIds: [], build: brief });
+  const away = (xs) => xs.map((id) => ({ id, state: 'away' }));
+  const p = nextTripPush({ states: away(ids), lastPushedIds: [], build: brief });
   assert.deepEqual(p.ids, ['20261103-0915-kq', '20261103-0915-kr']);
   assert.equal(briefAnswers(p.text, ids), true);
-  assert.equal(nextTripPush({ stateIds: ids, lastPushedIds: p.ids, build: brief }), null, 'the same request is not pushed twice');
-  assert.ok(nextTripPush({ stateIds: [...ids, '20261103-0920-ks'], lastPushedIds: p.ids, build: brief }), 'a new state file (the time zone answer) pushes again');
-  assert.equal(nextTripPush({ stateIds: ids, lastPushedIds: [], build: () => brief(['20261103-0915-kq']) }), null, 'a brief missing an id is never sent');
-  assert.equal(nextTripPush({ stateIds: [], build: brief }), null);
-  assert.equal(nextTripPush({ stateIds: ['../x'], build: brief }), null);
-  assert.equal(nextTripPush({ stateIds: ids, build: () => { throw new Error('x'); } }), null);
+  assert.equal(nextTripPush({ states: away(ids), lastPushedIds: p.ids, build: brief }), null, 'the same request is not pushed twice');
+  assert.ok(nextTripPush({ states: away([...ids, '20261103-0920-ks']), lastPushedIds: p.ids, build: brief }), 'a new state file (the time zone answer) pushes again');
+  assert.equal(nextTripPush({ states: away(ids), lastPushedIds: [], build: () => brief(['20261103-0915-kq']) }), null, 'a brief missing an id is never sent');
+  assert.equal(nextTripPush({ states: [], build: brief }), null);
+  assert.equal(nextTripPush({ states: away(['../x']), build: brief }), null);
+  assert.equal(nextTripPush({ states: away(ids), build: () => { throw new Error('x'); } }), null);
   const skill = readFileSync(new URL('./skill/orchestrate/SKILL.md', import.meta.url), 'utf8');
   assert.match(skill, /Checking the Mini, I'll send it in a minute\./);
 });

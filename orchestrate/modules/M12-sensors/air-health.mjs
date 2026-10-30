@@ -41,10 +41,13 @@ export function checkAirHealthFile(name, text, now = () => new Date()) {
   return { ok: true, doc: { red_count: doc.red_count, checked_at: new Date(t).toISOString() } };
 }
 
-// The fact the trip brief reads, dated by the check itself (never by when it was taken in).
-export function airFactFromFile(doc, now = () => new Date()) {
+// The fact the trip brief reads, dated by the check itself (never by when it was taken in). stored: the fact already
+// in the record; a file whose check is not newer than it returns null, so an older result synced late never replaces
+// a newer one (0b-8 audit round 5 M-3).
+export function airFactFromFile(doc, now = () => new Date(), stored = null) {
   const t = Date.parse(doc?.checked_at);
   if (!Number.isInteger(doc?.red_count) || doc.red_count < 0 || !Number.isFinite(t) || t > now().getTime() + FUTURE_SLACK_MS) return null;
+  if (Date.parse(stored?.checked_at) >= t) return null;
   return { kind: 'fact.air-health', red_count: doc.red_count, checked_at: new Date(t).toISOString() };
 }
 

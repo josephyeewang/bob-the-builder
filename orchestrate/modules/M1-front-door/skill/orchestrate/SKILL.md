@@ -49,7 +49,9 @@ Reply: "X is paused. Only your tap brings it back."
    "Made at <the time on its first line>." then the brief as it is. Don't add to or soften it.
 5. The brief's Air line comes from the Air's own check. Never ask Joe for a count and never write one; if the line
    says it hasn't passed, repeat its step.
-6. Only if Joe says the Mini will be turned off, the brief's freeze wording applies; otherwise don't mention it.
+6. Only if Joe says the Mini will be turned off, add this to your step 3 reply, word for word (the Mini can't send
+   anything once it is off): "The Mini is turning off: products freeze (nothing starts, nothing merges); the digest issue and the GitHub view stay as they were at the last update; the outside check will open one "heartbeat stale" issue. MAIN is not affected."
+   Otherwise don't mention it.
 Never write `"state":"active"`. A date passing does not bring anything back; only Joe's tap does.
 
 ## Back ("I'm back", "resume X")

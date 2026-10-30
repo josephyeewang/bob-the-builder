@@ -44,7 +44,7 @@ heartbeat says "usage: unknown" until it is).
   writes red, so a loop that forgets it keeps the gate shut.
 - Lead call L23: the owner's `/configaudit` on the Air ends by running `node air-health.mjs <red count> <folder>` into
   the Mini's air-health folder (a synced folder the Front Door can't write); the Mini's intake runs
-  `checkAirHealthFile` on each new file and stores `airFactFromFile(doc)` under `air-health`.
+  `checkAirHealthFile` on each new file and stores `airFactFromFile(doc, now, storedFact)` under `air-health` when it isn't null (only a newer check replaces it).
 
 ## Owner steps (Joe), for the (b) halves
 

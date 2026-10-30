@@ -57,19 +57,24 @@ export function briefAnswers(text, ids) {
   return ids.every((id) => listed.has(id));
 }
 
-// Lead call L22: the brief goes to Joe's phone as a push, once per new set of state files. stateIds: the ids of the
-// newest checked state file per product; lastPushedIds: what the Ledger pushed last (it stores the returned ids);
-// build(ids) → the brief text. Returns { text, ids } to push, or null (nothing new, or a brief that doesn't name
-// every id, which is never sent).
-export function nextTripPush({ stateIds, lastPushedIds = [], build }) {
-  const ids = [...new Set((Array.isArray(stateIds) ? stateIds : []).filter((i) => /^\d{8}-\d{4}-[a-z]{2}$/.test(String(i))))].sort();
+// Lead call L22: the brief goes to Joe's phone as a push, once per new set of away files. states: [{ id, state }], the
+// newest checked state file per product; only "away" ones count, so a plain pause never pushes a trip brief (0b-8
+// audit round 5 M-1). lastPushedIds: what the Ledger pushed last (it stores the returned ids); build(ids) → the brief
+// text. Returns { text, ids } to push, or null (nothing new, or a brief that doesn't name every id, never sent).
+export function nextTripPush({ states, lastPushedIds = [], build }) {
+  const away = (Array.isArray(states) ? states : []).filter((s) => s?.state === 'away').map((s) => s.id);
+  const ids = [...new Set(away.filter((i) => /^\d{8}-\d{4}-[a-z]{2}$/.test(String(i))))].sort();
   if (!ids.length) return null;
-  const last = [...new Set(Array.isArray(lastPushedIds) ? lastPushedIds : [])].sort();
-  if (last.length === ids.length && last.every((x, i) => x === ids[i])) return null;
+  const last = new Set(Array.isArray(lastPushedIds) ? lastPushedIds : []);
+  if (ids.every((x) => last.has(x))) return null;
   let text;
   try { text = build(ids); } catch { return null; }
   return briefAnswers(text, ids) ? { text, ids } : null;
 }
+
+// The one wording for "the Mini is turning off"; the skill says it word for word, because once the Mini is off it
+// can't push a brief (0b-8 audit round 5 M-2; a test checks the skill carries it).
+export const FREEZE_TEXT = 'The Mini is turning off: products freeze (nothing starts, nothing merges); the digest issue and the GitHub view stay as they were at the last update; the outside check will open one "heartbeat stale" issue. MAIN is not affected.';
 
 export function airCheck({ facts, now = () => new Date() }) {
   // Dated by the Air's own check (M12-sensors/air-health.mjs; lead call L23), never by Joe's word or the take-in time.
@@ -119,7 +124,7 @@ export function buildTripBrief({ products, until = null, tz: tzIn = null, stateI
 
   out.push('');
   if (miniGoingOff) {
-    out.push('The Mini is turning off: products freeze (nothing starts, nothing merges); the digest issue and the GitHub view stay as they were at the last update; the outside check will open one "heartbeat stale" issue. MAIN is not affected.');
+    out.push(FREEZE_TEXT);
   } else {
     const m = miniCheck({ facts, heartbeatProduct, now });
     out.push(`Mini check: ${m.green ? 'green' : 'NOT green'}`);
