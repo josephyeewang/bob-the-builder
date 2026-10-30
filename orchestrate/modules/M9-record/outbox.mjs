@@ -56,7 +56,8 @@ export function readOutboxFile({ outboxRoot, uids = {}, tag, file }) {
   const owner = uids[tag.role];
   if (!Number.isInteger(owner)) return no(`no owner uid configured for ${tag.role} outboxes`);
   let fd;
-  try { fd = openSync(real, constants.O_RDONLY | constants.O_NOFOLLOW); } catch (e) { return no(e?.code === 'ELOOP' ? 'file is a link' : `can't open file (${e?.code ?? 'error'})`); }
+  // O_NONBLOCK: a FIFO can't hang the pass (0b-2 audit round 9 M5).
+  try { fd = openSync(real, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); } catch (e) { return no(e?.code === 'ELOOP' ? 'file is a link' : `can't open file (${e?.code ?? 'error'})`); }
   let buf;
   try {
     const st = fstatSync(fd);

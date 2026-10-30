@@ -2,7 +2,8 @@
 // (0b-2 M-3, R2-M8 … R2-M10, R2-M12, R3-M3, R3-M4, R3-m7).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { linkSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
+import { linkSync, mkdirSync, readFileSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { join } from 'node:path';
 import { AI_ROLES, OUTBOX_KINDS } from '../../shared/record.mjs';
 import { MAX_OUTBOX_BYTES, readOutboxFile } from './outbox.mjs';
@@ -249,4 +250,14 @@ test('the role tag decides the actor; a bad tag is refused before any file is re
   assert.match(env.record.applyOutbox({ role: 'dispatcher', sessionId: 'S-1' }, f).reason, /unknown role/);
   assert.match(env.record.applyOutbox({ role: 'worker', sessionId: '../S-1' }, f).reason, /session id/);
   assert.equal(env.record.diary().length, 0);
+});
+
+test('a FIFO in an outbox is refused at once, never waited on (0b-2 audit round 9 M5)', { timeout: 20000 }, () => {
+  const env = setup({ prefix: 'm9-out-' });
+  const p = outboxFile(env, 'worker', 'S-1', 'report-x.md', 'x');
+  unlinkSync(p);
+  execFileSync('mkfifo', [p]);
+  const r = env.record.applyOutbox({ role: 'worker', sessionId: 'S-1' }, p);
+  assert.equal(r.ok, false);
+  assert.match(r.reason, /not a plain file|regular|file/);
 });

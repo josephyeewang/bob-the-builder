@@ -20,8 +20,8 @@
 //   store.recover()   // runs under the lock at the first lock in each process and after a dead holder's lock is broken
 
 import { createHash, randomBytes } from 'node:crypto';
-import { chmodSync, closeSync, existsSync, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync,
-  renameSync, ftruncateSync, unlinkSync, writeFileSync, writeSync, appendFileSync, constants } from 'node:fs';
+import { chmodSync, closeSync, fchmodSync, existsSync, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync,
+  renameSync, ftruncateSync, unlinkSync, writeFileSync, writeSync, constants } from 'node:fs';
 import { hostname } from 'node:os';
 import { dirname, isAbsolute, join } from 'node:path';
 import { makeLock, processDead, realProbe, sleepMs } from './lock.mjs';
@@ -63,6 +63,18 @@ function look(path) {
     return { kind: 'file', bytes: readFileSync(fd) };
   } catch (e) { return { kind: 'odd', why: `unreadable (${e?.code ?? e})` }; } finally { closeSync(fd); }
 }
+// The store's own side files are opened without following a link or waiting on a FIFO, and only a plain file is
+// written or read: a link in their place must not let a refusal or a seen mark land outside the store (round 9).
+function plainFd(path, flags) {
+  const fd = openSync(path, flags | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  try { if (!fstatSync(fd).isFile()) throw Object.assign(new Error(`${path} is not a plain file`), { store: true }); } catch (e) { closeSync(fd); throw e; }
+  return fd;
+}
+function appendPlain(path, text) {
+  const fd = plainFd(path, constants.O_WRONLY | constants.O_APPEND);
+  try { fchmodSync(fd, 0o644); writeSync(fd, text); } finally { closeSync(fd); }
+}
+function readPlain(path) { const fd = plainFd(path, constants.O_RDONLY); try { return readFileSync(fd, 'utf8'); } finally { closeSync(fd); } }
 // A document's bytes: null when there is none, ODD when something other than a readable plain file is there.
 const ODD = Symbol('odd');
 function docAt(path) { const l = look(path); return l.kind === 'none' ? null : l.kind === 'file' ? l.bytes : ODD; }
@@ -81,6 +93,24 @@ export function openStore({ root, ownerUid, alert = () => {}, now = () => Date.n
 
   const P = { docs: join(root, 'docs'), tmp: join(root, 'tmp'), quarantine: join(root, 'quarantine'), diary: join(root, 'diary.jsonl'),
     refusals: join(root, 'refusals.jsonl'), seen: join(root, 'outbox-seen.jsonl') };
+  // The store's own names must be what they should be before anything touches them: a link, a FIFO or the wrong kind of
+  // thing in their place stops the store with an alert naming it, and nothing is read, written, moved or deleted through it
+  // (0b-2 audit round 9 M1-M4; one check for the whole store folder, after rounds 6-8 patched it one name at a time).
+  const told = new Set();
+  const tellOnce = (event, key = event.reason) => { const k = `${event.type}:${key}`; if (told.has(k)) return; told.add(k); try { alert({ at: new Date(now()).toISOString(), ...event }); } catch { /* never stops the store */ } };
+  const stopFor = (type, reason, key = reason) => { tellOnce({ type, reason }, key); return Object.assign(new Error(`${reason}; writes stop until the owner fixes it`), { store: true }); };
+  function layoutProblem() {
+    const kind = (p) => {
+      let st; try { st = lstatSync(p); } catch (e) { return e?.code === 'ENOENT' ? 'none' : `unreadable (${e?.code ?? e})`; }
+      return st.isSymbolicLink() ? 'a link' : st.isDirectory() ? 'folder' : st.isFile() ? 'file' : 'not a plain file or folder';
+    };
+    const r = kind(root);
+    if (r !== 'folder' && r !== 'none') return `the store folder ${root} is ${r}`;
+    for (const d of ['docs', 'tmp', 'quarantine']) { const k = kind(join(root, d)); if (k !== 'folder' && k !== 'none') return `the store's ${d}/ is ${k}, not a folder`; }
+    for (const f of ['diary.jsonl', 'refusals.jsonl', 'outbox-seen.jsonl', 'lock', 'break.lock']) { const k = kind(join(root, f)); if (k !== 'file' && k !== 'none') return `the store's ${f} is ${k}, not a plain file`; }
+    return null;
+  }
+  { const bad = layoutProblem(); if (bad) throw stopFor('store_layout', bad); }
   for (const d of [root, P.docs, P.tmp, P.quarantine]) mkdir755(d);
   for (const f of [P.diary, P.refusals, P.seen]) { if (!existsSync(f)) writeFileSync(f, '', { mode: 0o644, flag: 'a' }); chmodSync(f, 0o644); }
 
@@ -123,8 +153,11 @@ export function openStore({ root, ownerUid, alert = () => {}, now = () => Date.n
 
   function fstatOf(path) { const fd = openSync(path, constants.O_RDONLY); try { return fstatSync(fd).size; } finally { closeSync(fd); } }
   function refresh() {
+    // Every read goes through here, so a linked or odd diary is never read through, by a read as much as by a write (round 9).
+    const bad = layoutProblem();
+    if (bad) throw stopFor('store_layout', bad);
     let fd;
-    try { fd = openSync(P.diary, constants.O_RDONLY); } catch (e) { throw storeFail(`diary unreadable: ${e?.code ?? e}`); }
+    try { fd = openSync(P.diary, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); } catch (e) { throw storeFail(`diary unreadable: ${e?.code ?? e}`); }
     try {
       const size = fstatSync(fd).size;
       if (size < offset) { reset(); }   // shorter than we read: cut by recover() in another process, or replaced; read again
@@ -272,17 +305,23 @@ export function openStore({ root, ownerUid, alert = () => {}, now = () => Date.n
 
   let recovered = false;
   let lastRecovery = null;
+  // Any failure inside recovery stops the store with an alert that names it, once, rather than a raw error on every write
+  // (round 9 M6, m2).
+  function recoverOrStop() {
+    try { return recover(); } catch (e) { throw e?.store ? e : stopFor('recovery_stopped', `recovery stopped: ${String(e?.message ?? e).slice(0, 300)}`, `${e?.code}:${e?.path}`); }
+  }
   function transaction(fn) {
+    { const bad = layoutProblem(); if (bad) throw stopFor('store_layout', bad); }
     const { nonce, broke } = lock.acquire();
     let released = false;
     const release = () => { if (!released) { released = true; lock.release(nonce); } };
     try {
       fault('locked');
-      if (!recovered || broke) { lastRecovery = recover(); recovered = true; } else {
+      if (!recovered || broke) { lastRecovery = recoverOrStop(); recovered = true; } else {
         refresh();
         // Bytes after the last whole line, seen under the lock, are a torn line another writer left when it died; cut it
         // before appending, or our line joins it and the diary becomes unreadable (0b-2 audit round 2 M-1).
-        if (!testNoLock && fstatOf(P.diary) > offset) lastRecovery = recover();
+        if (!testNoLock && fstatOf(P.diary) > offset) lastRecovery = recoverOrStop();
       }
       const tx = {
         current(entity, id) {
@@ -341,14 +380,22 @@ export function openStore({ root, ownerUid, alert = () => {}, now = () => Date.n
             for (const t of temps) { try { unlinkSync(t); } catch { /* gone */ } }
             throw storeFail(`the diary line didn't read back as seq ${line.seq}${damaged ? ` (${damaged})` : ''}`);
           }
-          out.forEach((o, i) => renameSync(temps[i], docPath(o.entity, o.id)));
-          fault('renamed');
-          for (const ent of new Set(out.map((o) => o.entity))) fsyncPath(join(P.docs, ent));
-          fault('dir_synced');
+          // Past the commit point the write stands: the diary line is the truth. A document copy that can't be put in place
+          // (a locked file, a full disk) is alerted and left to the next recover(), never reported as a refused write (round 9 M7).
+          try {
+            out.forEach((o, i) => renameSync(temps[i], docPath(o.entity, o.id)));
+            fault('renamed');
+            for (const ent of new Set(out.map((o) => o.entity))) fsyncPath(join(P.docs, ent));
+            fault('dir_synced');
+          } catch (e) {
+            recovered = false;
+            for (const t of temps) { try { unlinkSync(t); } catch { /* gone */ } }
+            say({ type: 'doc_copy_failed', seq: line.seq, reason: String(e?.message ?? e).slice(0, 300) });
+          }
           return { rev: first.rev, seq: line.seq, revs: out.map((o) => o.rev) };
         },
-        seen(key) { return readFileSync(P.seen, 'utf8').split('\n').some((l) => { try { return JSON.parse(l).key === key; } catch { return false; } }); },
-        markSeen(key, outcome) { appendFileSync(P.seen, `${JSON.stringify({ key, outcome, at: new Date(now()).toISOString() })}\n`); },
+        seen(key) { return readPlain(P.seen).split('\n').some((l) => { try { return JSON.parse(l).key === key; } catch { return false; } }); },
+        markSeen(key, outcome) { appendPlain(P.seen, `${JSON.stringify({ key, outcome, at: new Date(now()).toISOString() })}\n`); },
       };
       const result = fn(tx);
       release();
@@ -386,7 +433,7 @@ export function openStore({ root, ownerUid, alert = () => {}, now = () => Date.n
     damaged() { refresh(); return damaged; },
     refuse(event) {
       const line = { at: new Date(now()).toISOString(), ...event };
-      try { appendFileSync(P.refusals, `${JSON.stringify(line)}\n`); chmodSync(P.refusals, 0o644); } catch { /* the alert still fires */ }
+      try { appendPlain(P.refusals, `${JSON.stringify(line)}\n`); } catch { /* the alert still fires */ }
       say({ type: 'refused', ...event });
     },
     alert: say,

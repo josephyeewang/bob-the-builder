@@ -4,6 +4,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { appendFileSync, chmodSync, existsSync, lstatSync, mkdirSync, renameSync, symlinkSync, readFileSync, readdirSync, statSync, writeFileSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
+import { execFileSync } from 'node:child_process';
 import { PRODUCT, UID, must, put, rulesFor, seed, setup } from './fixtures.test-helper.mjs';
 import { openRecord } from './writer.mjs';
 import { openStore } from './store.mjs';
@@ -283,4 +284,99 @@ test('a lock left by a dead process is broken; one held by a live process is not
   const r2 = busy.record.write({ actor: 'workshop', entity: 'card', id: 'C-1', expectRev: 1, doc: card({ head: 'c'.repeat(40) }) });
   assert.match(r2.reason, /store busy/);
   unlinkSync(join(env.root, 'lock'));
+});
+
+// ---- 0b-2 audit round 9: one check for the whole store folder ----
+const outsideDir = (env, tag) => { const d = join(env.root, '..', `outside-${tag}-${process.pid}-${Date.now()}`); mkdirSync(d, { mode: 0o700 }); chmodSync(d, 0o700); writeFileSync(join(d, 'victim.json'), 'keep me', { mode: 0o600 }); return d; };
+const snapshot = (d) => JSON.stringify(readdirSync(d).sort().map((n) => [n, lstatSync(join(d, n)).mode, lstatSync(join(d, n)).isFile() ? readFileSync(join(d, n), 'utf8') : null]).concat([[d, lstatSync(d).mode]]));
+// Written straight, not read first: a read of a stopped store reports the card corrupt, and the test is about the write.
+const cancel = (record, id = 'C-0') => record.write({ actor: 'approvals', entity: 'card', id, expectRev: 1, doc: card({ state: 'cancelled', cancel_reason: 'test' }) });
+const reopen = (env, alerts = []) => openRecord({ root: env.root, product: PRODUCT, ownerUid: UID, rules: env.rules, alert: (a) => alerts.push(a), now: () => env.clock.t });
+
+test('a link, FIFO or wrong kind of thing in place of any store name stops the store with an alert naming it, touching nothing outside (round 9 M1-M4, m1-m3)', { timeout: 60000 }, () => {
+  const cases = [
+    ['docs', 'link-dir'], ['tmp', 'link-dir'], ['quarantine', 'link-dir'],
+    ['diary.jsonl', 'link-file'], ['refusals.jsonl', 'link-file'], ['outbox-seen.jsonl', 'link-file'],
+    ['diary.jsonl', 'fifo'], ['outbox-seen.jsonl', 'fifo'], ['refusals.jsonl', 'fifo'], ['lock', 'fifo'],
+    ['diary.jsonl', 'folder'], ['lock', 'folder'], ['tmp', 'file'],
+  ];
+  for (const [name, how] of cases) {
+    const env = setup({ prefix: 'm9-store-' });
+    seed(env, 'card', 'C-0', card());
+    const out = outsideDir(env, name.replace('.', '_'));
+    const target = join(env.root, name);
+    if (existsSync(target) || lstatSafe(target)) renameSync(target, join(env.root, '..', `${name}-away-${process.pid}-${Date.now()}`));
+    if (how === 'link-dir') symlinkSync(out, target);
+    else if (how === 'link-file') symlinkSync(join(out, 'victim.json'), target);
+    else if (how === 'fifo') execFileSync('mkfifo', [target]);
+    else if (how === 'folder') mkdirSync(target);
+    else writeFileSync(target, 'x');
+    const before = snapshot(out);
+    const r = cancel(env.record);
+    assert.equal(r.ok, false, `${name} ${how}: the write is refused`);
+    assert.match(r.reason, new RegExp(name.replace('.', '\\.')), `${name} ${how}: the reason names it`);
+    assert.ok(env.alerts.some((a) => a.type === 'store_layout' && a.reason.includes(name)), `${name} ${how}: alerted`);
+    assert.throws(() => reopen(env), new RegExp(name.replace('.', '\\.')), `${name} ${how}: a fresh writer won't open`);
+    assert.equal(snapshot(out), before, `${name} ${how}: nothing outside touched`);
+  }
+});
+
+test('a folder the owner can\'t write stops the store with one named alert, not a raw error on every write (round 9 M6)', () => {
+  const env = setup({ prefix: 'm9-store-' });
+  seed(env, 'card', 'C-0', card());
+  const sub = join(env.root, 'docs', 'card', 'sub');
+  mkdirSync(sub);
+  chmodSync(sub, 0o000);
+  try {
+    const alerts = [];
+    const fresh = reopen(env, alerts);
+    for (let i = 0; i < 2; i++) assert.match(cancel(fresh.record).reason, /recovery stopped/);
+    const stops = alerts.filter((a) => a.type === 'recovery_stopped');
+    assert.equal(stops.length, 1, 'one alert, not one per write');
+    assert.match(stops[0].reason, /sub/, 'the alert names what is in the way');
+  } finally { chmodSync(sub, 0o755); }
+});
+
+test('a document copy that can\'t be put in place after the commit point: the write stands and is alerted, not reported refused (round 9 M7)', () => {
+  const env = setup({ prefix: 'm9-store-' });
+  seed(env, 'card', 'C-0', card());
+  const doc = join(env.root, 'docs', 'card', 'C-0.json');
+  execFileSync('chflags', ['uchg', doc]);
+  try {
+    const before = env.record.diary().length;
+    must(cancel(env.record), 'the write stands');
+    assert.equal(env.record.diary().length, before + 1);
+    assert.ok(env.alerts.some((a) => a.type === 'doc_copy_failed'));
+    assert.equal(readFileSync(join(env.root, 'refusals.jsonl'), 'utf8'), '', 'not logged as a refusal');
+  } finally { execFileSync('chflags', ['nouchg', doc]); }
+});
+
+test('an indexed document replaced by a link to an identical outside copy is never read through (round 9 m4)', () => {
+  const env = setup({ prefix: 'm9-store-' });
+  seed(env, 'card', 'C-0', card());
+  const out = outsideDir(env, 'doclink');
+  const doc = join(env.root, 'docs', 'card', 'C-0.json');
+  writeFileSync(join(out, 'C-0.json'), readFileSync(doc));
+  unlinkSync(doc);
+  symlinkSync(join(out, 'C-0.json'), doc);
+  assert.equal(env.record.read('card', 'C-0').corrupt, true, 'a perfect copy behind a link is not trusted');
+  const before = snapshot(out);
+  // The write finds the link, moves it aside as it is and restores the card from the diary: tamper, so this write is refused.
+  assert.match(cancel(env.record).reason, /changed outside the Store Writer; restored/);
+  assert.equal(snapshot(out), before, 'nothing outside touched');
+  assert.equal(env.record.read('card', 'C-0').rev, 1, 'the card reads cleanly again');
+  assert.ok(lstatSync(doc).isFile() && !lstatSync(doc).isSymbolicLink(), 'restored as a plain file');
+});
+
+test('a read never goes through a linked diary, even one identical to the real one (round 9: the layout check on reads)', () => {
+  const env = setup({ prefix: 'm9-store-' });
+  seed(env, 'card', 'C-0', card());
+  const out = outsideDir(env, 'diarylink');
+  const diary = join(env.root, 'diary.jsonl');
+  writeFileSync(join(out, 'diary.jsonl'), readFileSync(diary));
+  unlinkSync(diary);
+  symlinkSync(join(out, 'diary.jsonl'), diary);
+  const r = env.record.read('card', 'C-0');
+  assert.equal(r?.corrupt, true, 'a perfect copy behind a link is not read');
+  assert.ok(env.alerts.some((a) => a.type === 'store_layout' && a.reason.includes('diary.jsonl')), 'alerted, naming the diary');
 });

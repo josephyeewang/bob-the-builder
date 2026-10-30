@@ -9,7 +9,7 @@ See LANES.md for who builds this folder, and the build rows (0b-2, R-0b-20..28) 
 | File | What it does |
 |---|---|
 | `writer.mjs` | The Store Writer. `openRecord({ root, product, ownerUid, rules, alert, outbox })` checks every write against the rev read, the legal moves, who may change which fields, and each move's conditions (the ready rule, a passing verdict for the current head, a full wait, one merge at a time, the round cap). Refused writes go to `refusals.jsonl` with an alert and leave no diary line. Also: the outbox, claims (release, dead-owner break, lapse), the ready list and overdue. |
-| `store.mjs` | The files on disk: one diary line per write (`diary.jsonl`, the truth), one file per document, a lock. Folders 755, files 644, and it runs only as the store's owner. A document changed by hand is quarantined, restored from the diary and alerted. Anything in `docs/` that is not a plain readable file (a folder, a link, a file the owner can't read) is moved into `quarantine/` as it is, never followed, so it can neither block writes nor reach outside the store; Finder's `.DS_Store` is left alone. `recover()` after a crash cuts a torn last diary line and rolls each document forward; a writer that finds a torn line under the lock recovers before it appends, and a line that doesn't read back stops the write before any document moves. |
+| `store.mjs` | The files on disk: one diary line per write (`diary.jsonl`, the truth), one file per document, a lock. Folders 755, files 644, and it runs only as the store's owner. Before any read or write it checks the store folder's own names are a real folder or plain file; a link, a pipe or the wrong kind of thing stops the store with one alert naming it. A document changed by hand is quarantined, restored from the diary and alerted. Anything in `docs/` that is not a plain readable file (a folder, a link, a file the owner can't read) is moved into `quarantine/` as it is, never followed, so it can neither block writes nor reach outside the store; Finder's `.DS_Store` is left alone. `recover()` after a crash cuts a torn last diary line and rolls each document forward; a writer that finds a torn line under the lock recovers before it appends, and a line that doesn't read back stops the write before any document moves. |
 | `lock.mjs` | The store lock, and the one "is this process dead?" check: gone means no such process, or a different start time (a reused pid). A process of another user counts as alive. |
 | `moves.mjs` | Every legal state move and who may make it. Anything not listed is refused. |
 | `permissions.mjs` | Who may create each entity and change which fields; which card kinds each creator may make. |
@@ -62,6 +62,16 @@ Claude Code has a native task list. We checked whether it could hold the claims:
 - **A verdict is not checked to come after its launch.** If the Dispatcher ever reused a session id for a second launch on a new head, a pass written before that launch would count. The Dispatcher (0b-9) must never reuse a session id.
 - **A store written before round 6 with an id over 200 characters** stops every write with "bad entity or id", not "damaged". No live store exists yet, so there is nothing to mend; a store made from now on can't get such a line.
 - **A hand-edited diary line naming `../x`** makes every later write fail with a plain error rather than "the diary is damaged". It can't reach outside the store; it only blocks writes until the owner repairs the diary.
+
+## Known gaps (audit round 9, logged, not fixed here)
+
+Round 9 changed approach: rather than patching one store name at a time, one check now looks at the whole store folder (each folder must be a real folder, each of its files a plain file) before any open, read or write. A link, a pipe or the wrong kind of thing in place of any name stops the store with one alert naming it, and nothing is read, written, moved or deleted through it. What it leaves:
+
+- **How far to defend against the owner's own hands** is a lead call. These checks treat the owner's links and pipes in the store folder as mistakes to stop on, not attacks; the store isn't hardened against an owner racing the check (swapping a name between the check and the open).
+- **A lock or break.lock holding garbage** reads as "store busy", not as a named fault (m1).
+- **Quarantined items keep a `.json` name** even when they were a folder or a link, and a link is kept as a link (c1).
+- **macOS `._*` files** (left on some shared or external disks) are moved aside as odd, not ignored like `.DS_Store` (c2).
+- **The diary's own no-link open and the side files' plain-file check** sit behind the folder check. A planted break of either alone isn't caught, because the folder check already stops the same cases; they stay as a second guard.
 
 ## Running the tests
 
