@@ -40,12 +40,17 @@ Reply: "X is paused. Only your tap brings it back."
    city-based name (Region/City, or UTC). If the answer is ambiguous (EST, "Pacific", GMT+2), ask once more. Until he
    answers, write `"tz":null`: number work holds while tz is null; [Undo] still runs. After he answers, write a new
    `state-<id>.json` for each product, the same as step 1 but with the time zone.
-3. Read the trip brief file named in your context. Its first line says when it was made and "good until" a time.
-   If the current time is past that, or the brief names other products, another until date or another time zone than
-   this request, don't quote it: say "Mini check: unknown (the brief is out of date); ask me again in a few minutes."
-   Otherwise quote it in your reply as it is. It lists what waits on his go, the open risky-act asks with links, the
-   Mini check and the Air's health check. Don't add to it or soften it.
-4. Only if Joe says the Mini will be turned off, the brief's freeze wording applies; otherwise don't mention it.
+3. Reply: "Filed. The Mini is building your trip brief; say **brief** in a minute and I'll read it to you." You
+   don't know the time, so you can't judge a brief's age yourself; the brief written after these files names them.
+4. When Joe says "brief": read the trip brief file named in your context. Quote it only if its first line lists
+   **every** `<id>` of the newest `state-` files you wrote for this trip, and the date it was made is today's date.
+   Otherwise say: "Mini check: unknown (the brief isn't ready or is out of date); ask me again in a minute."
+   When you quote it, start with "Made at <the time on its first line>." then the brief as it is. It lists what waits
+   on his go, the open risky-act asks with links, the Mini check and the Air's health check. Don't add to or soften it.
+5. If Joe then tells you the Air's red count ("air 0 red", "3 red"), write `request-airhealth-<id>.json`:
+   `{"request":"airhealth","product":null,"name":null,"red_count":0}` with his number. Reply: "Recorded: <n> red on
+   the Air." If the number isn't clear, ask once; never guess it.
+6. Only if Joe says the Mini will be turned off, the brief's freeze wording applies; otherwise don't mention it.
 Never write `"state":"active"`. A date passing does not bring anything back; only Joe's tap does.
 
 ## Back ("I'm back", "resume X")

@@ -5,6 +5,11 @@
 // the skill reads and quotes (the pass's wiring into lane 2's loop is a join item). This file decides the words; it
 // reads the record and facts and writes nothing.
 //
+// Freshness without a clock (0b-8 audit round 3 M-3): the Front Door knows the date but not the time, so it can't
+// test "good until". The brief's first line names the ids of the state files it answers (stateIds: the newest
+// state file per product, written for this request); the skill quotes only a brief that names every id it wrote,
+// which proves the brief was made after the request, and it repeats the made time so Joe sees its age.
+//
 // Mini check: each item is green only from a fact newer than an hour (FRESH_MIN); a missing or stale fact reads
 // "unknown", never green. Merge hours: stated only for products on the Merge Gate (MAT-8); the Merge Gate, not this
 // file, enforces them. Freeze wording only when Joe says the Mini is going off (minor 9).
@@ -44,23 +49,39 @@ export function miniCheck({ facts, heartbeatProduct, now = () => new Date() }) {
   return { green: items.every((i) => i.state === 'green'), items };
 }
 
+// The Ledger's turn of a checked request-airhealth file into the air-health fact (round 3 M-4). told_at is when the
+// Ledger took the file in; the Front Door has no clock of its own.
+export function airFactFromRequest(doc, now = () => new Date()) {
+  if (doc?.request !== 'airhealth' || !Number.isInteger(doc.red_count) || doc.red_count < 0) return null;
+  return { kind: 'fact.air-health', red_count: doc.red_count, told_at: now().toISOString() };
+}
+
+// Does this brief answer these state files? True only when its first line lists every id (round 3 M-3).
+export function briefAnswers(text, ids) {
+  const m = /; answers state files: ([0-9a-z, -]+)\.$/.exec(String(text ?? '').split('\n')[0]);
+  if (!m || !Array.isArray(ids) || !ids.length) return false;
+  const listed = new Set(m[1].split(', '));
+  return ids.every((id) => listed.has(id));
+}
+
 export function airCheck({ facts, now = () => new Date() }) {
   const a = facts.get(AIR_FACT);
   const h = ageMin(a?.told_at, now().getTime()) / 60;
   const passed = a && Number.isInteger(a.red_count) && a.red_count === 0 && h <= AIR_TOLD_FRESH_H;
   if (passed) return { passed: true, text: `Air health check: passed (0 red, you told me ${a.told_at}).` };
   const last = a?.told_at ? `${a.told_at}, ${a.red_count} red` : 'never';
-  return { passed: false, text: `Air health check: not known to the Mini; last result you told me: ${last}.\n  Step: on the Air, open Claude Code, type /configaudit and press Return; reply here with how many red items it shows.` };
+  return { passed: false, text: `Air health check: not known to the Mini; last result you told me: ${last}.\n  Step: on the Air, open Claude Code, type /configaudit and press Return; reply here with how many red items it shows (send "air 0 red" if none).` };
 }
 
 // products: [{ name, on_merge_gate }]. tz: a checked IANA name or null. askExpiryH: from the rules (risky asks keep
 // their own time limit while away).
-export function buildTripBrief({ products, until = null, tz: tzIn = null, rec, facts, heartbeatProduct, miniGoingOff = false, askExpiryH = 12, now = () => new Date() }) {
+export function buildTripBrief({ products, until = null, tz: tzIn = null, stateIds = [], rec, facts, heartbeatProduct, miniGoingOff = false, askExpiryH = 12, now = () => new Date() }) {
   const out = [];
   const made = now();
   const z = tzIn === null ? null : checkTimeZone(tzIn);
   const tz = z?.ok ? z.tz : null; // a zone that fails the check is no zone: number work holds (round 2 minor 9)
-  out.push(`Brief made ${made.toISOString()}; good until ${new Date(made.getTime() + BRIEF_FRESH_MIN * 60e3).toISOString()}.`);
+  const ids = stateIds.filter((i) => /^\d{8}-\d{4}-[a-z]{2}$/.test(String(i)));
+  out.push(`Brief made ${made.toISOString()}; good until ${new Date(made.getTime() + BRIEF_FRESH_MIN * 60e3).toISOString()}; answers state files: ${ids.join(', ') || 'none'}.`);
   out.push(`Trip mode: ${products.map((p) => p.name).join(', ') || 'no products'} set to away${until ? ` until ${until}` : ''}. Only your tap brings a product back to active.`);
 
   out.push('', 'Time zone:');

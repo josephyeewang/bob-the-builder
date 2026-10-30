@@ -11,6 +11,9 @@
 //                      becomes null, which holds number work (MAT-8, minor 10).
 //   request-<what>-<id>.json   { "request": "resume" | "wrapup" | "rotate", "product": "<name>" | null, "name": "<KEY_NAME>" | null }
 //                      rotate carries the key's NAME only; any text that looks like a key refuses the whole file (B11).
+//   request-airhealth-<id>.json  { "request": "airhealth", "product": null, "name": null, "red_count": <0-999> }
+//                      the red count Joe read off /configaudit on the Air; the Ledger turns it into the dated air-health
+//                      fact (trip.mjs airFactFromRequest; 0b-8 audit round 3 M-4).
 //   idea-<id>.md       the idea exactly as Joe said it, quoted ("> " on every line), masked; never acted on as an
 //                      instruction. Intake hands the quoted text on through cleanOutside (source "idea-file").
 
@@ -19,7 +22,7 @@ import { checkTimeZone } from './timezone.mjs';
 
 export const FRONT_DOOR_KINDS = Object.freeze(['request', 'state', 'idea']);
 export const STATES_ALLOWED = Object.freeze(['paused', 'away']);
-export const REQUESTS = Object.freeze(['resume', 'wrapup', 'rotate']);
+export const REQUESTS = Object.freeze(['resume', 'wrapup', 'rotate', 'airhealth']);
 // The id the skill writes: date, time, two letters (20261103-0915-kq). Nothing longer fits, so a key can't ride in a file
 // name into the record's diary (0b-8 audit round 3 M-2).
 export const OUTBOX_ID = /^\d{8}-\d{4}-[a-z]{2}$/;
@@ -40,11 +43,17 @@ export function stateDoc({ product, state, until = null, tz = null }) {
   return { ok: true, doc: { product, state, until, tz: z.ok ? z.tz : null }, ...(z.ok ? {} : { note: `time zone not accepted (${z.reason}); number work holds until Joe names a city-based zone` }) };
 }
 
-export function requestDoc({ request, product = null, name = null }) {
+export function requestDoc({ request, product = null, name = null, red_count: redCount }) {
   if (!REQUESTS.includes(request)) return refuse(`unknown request (allowed: ${REQUESTS.join(', ')})`);
   if (product !== null && !PRODUCT.test(String(product))) return refuse('no valid product name');
   if (request === 'rotate' && (!KEY_NAME.test(String(name ?? '')) || KEY_ID.test(String(name)))) return refuse('rotate needs the key\'s name only (capitals, digits, _)');
   if (request !== 'rotate' && name !== null) return refuse('only rotate carries a name');
+  if (request === 'airhealth') {
+    if (product !== null) return refuse('airhealth carries no product');
+    if (!(Number.isInteger(redCount) && redCount >= 0 && redCount <= 999)) return refuse('airhealth needs red_count, a whole number 0 to 999');
+    return { ok: true, doc: { request, product, name, red_count: redCount } };
+  }
+  if (redCount !== undefined) return refuse('only airhealth carries red_count');
   return { ok: true, doc: { request, product, name } };
 }
 
@@ -66,7 +75,7 @@ export function outboxFile(kind, id, input) {
 
 // Intake's check of one file the Front Door left. Returns the normalized doc, or a refusal.
 export function checkOutboxFile(name, text) {
-  const m = /^(request|state|idea)-(?:(resume|wrapup|rotate)-)?(\d{8}-\d{4}-[a-z]{2})\.(json|md)$/.exec(String(name));
+  const m = /^(request|state|idea)-(?:(resume|wrapup|rotate|airhealth)-)?(\d{8}-\d{4}-[a-z]{2})\.(json|md)$/.exec(String(name));
   if (!m || maskSecrets(String(name)).text !== String(name)) return refuse('not a Front Door outbox file name');
   const [, kind, , , ext] = m;
   if (kind === 'idea') {
@@ -79,7 +88,7 @@ export function checkOutboxFile(name, text) {
   if (/\\u/i.test(String(text))) return refuse('the file holds an escape (\\u); write plain text');
   let doc; try { doc = JSON.parse(text); } catch { return refuse('not JSON'); }
   if (!doc || typeof doc !== 'object' || Array.isArray(doc)) return refuse('not an object');
-  const allowed = kind === 'state' ? ['product', 'state', 'until', 'tz'] : ['request', 'product', 'name'];
+  const allowed = kind === 'state' ? ['product', 'state', 'until', 'tz'] : ['request', 'product', 'name', 'red_count'];
   const extra = Object.keys(doc).filter((k) => !allowed.includes(k));
   if (extra.length) return refuse(`${extra.length} unexpected field(s); allowed: ${allowed.join(", ")}`);
   if (maskSecrets(String(text)).text !== String(text)) return refuse('the file holds something that looks like a key');

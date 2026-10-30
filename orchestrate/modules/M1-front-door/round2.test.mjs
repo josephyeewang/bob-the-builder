@@ -75,7 +75,7 @@ test('0b-8 audit round 2 M-3: the brief lists what waits on Joe from the one wai
 
 test('0b-8 audit round 2 M-5, minors 8, 9: the brief is stamped with when it was made and good until; a future heartbeat is unknown; a bad zone holds number work', () => {
   const x = tripWorld();
-  assert.match(brief(x).split('\n')[0], /^Brief made 2026-11-03T12:00:00.000Z; good until 2026-11-03T12:15:00.000Z\.$/);
+  assert.match(brief(x).split('\n')[0], /^Brief made 2026-11-03T12:00:00.000Z; good until 2026-11-03T12:15:00.000Z; answers state files: none\.$/);
   x.facts.put(STATUS_FACT('mini'), { kind: 'fact.heartbeat-status', at: new Date(x.now().getTime() + 3 * 3600e3).toISOString(), front_door_reachable: true, signed_in: true, login: 'account A' });
   x.facts.put(POWER_FACT, { kind: 'fact.power-source', at: x.ago(5), ups_present: true });
   assert.equal(miniCheck({ facts: x.facts, heartbeatProduct: 'mini', now: x.now }).items[0].state, 'unknown');

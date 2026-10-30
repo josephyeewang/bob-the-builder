@@ -40,12 +40,15 @@ R-0b-82's decision and handoff code sit here although the row is tagged M11 (lan
    `checkOutboxFile` after lane 2's name and owner check, and passes idea text on through `cleanOutside`.
 3. Lane 2: stop and start the Front Door under its fixed name when `shouldRestartFrontDoor` says so, and deliver
    `makeFrontDoorHandoff`'s text (first prompt, or a read-only file outside the outbox).
-4. Lane 2: a Ledger pass writes `buildTripBrief`'s text to the read-only brief file the skill quotes, and runs
-   `readPowerSource` with the heartbeat.
+4. Lane 2: a Ledger pass writes `buildTripBrief`'s text to the read-only brief file the skill quotes, passing
+   `stateIds` (the ids of the newest checked `state-` file per product), and runs `readPowerSource` with the
+   heartbeat. The skill quotes only a brief that names the ids it wrote (0b-8 audit round 3 M-3), so trip mode takes
+   two replies: "filed", then the brief when Joe says "brief".
 5. Lane 2: its launch read-back checker replaces `readback.mjs` at the join; the two agree on EndConversation and on
    settings sources (machine-wide + `--settings` only).
-6. The Air's health result (`air-health` fact: red count and date) has no writer yet: Joe tells the Front Door, which
-   has no file shape for it. Until a shape is agreed, the brief says "not known to the Mini" plus the step.
+6. The Air's health result: Joe tells the Front Door his red count; the skill writes `request-airhealth-<id>.json`
+   (`outbox.mjs`); intake checks it and the Ledger writes `airFactFromRequest(doc)` as the `air-health` fact
+   (0b-8 audit round 3 M-4). Lanes 1 and 2: the fourth request kind in the intake contract.
 
 ## Ledger: two lines per row (review-0b-8 MAT-10)
 

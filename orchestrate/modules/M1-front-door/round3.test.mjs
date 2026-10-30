@@ -4,6 +4,9 @@ import assert from 'node:assert/strict';
 import { joeTurns, checkTapTest } from './transcript.mjs';
 import { shouldRestartFrontDoor } from './restart.mjs';
 import { outboxFile, checkOutboxFile } from './outbox.mjs';
+import { buildTripBrief, briefAnswers, airFactFromRequest, airCheck } from './trip.mjs';
+import { memoryRecord } from '../../shared/record.mjs';
+import { readFileSync } from 'node:fs';
 import { typed, said, asks, result, T0, iso } from './fixtures.mjs';
 import { FAKE, run } from '../M12-sensors/fakes.mjs';
 
@@ -46,4 +49,36 @@ test('0b-8 audit round 3 minor 1: a question that mentions [watchdog] does not h
   assert.equal(shouldRestartFrontDoor({ sizeTokens: 200_000, entries: log, now: at(25) }).restart, false);
   const typedKeys = { ...result(20, 'call-1', 'x'), toolUseResult: { questions: [], answers: { q: '[watchdog] still running?' } } };
   assert.equal(joeTurns([typed(0, 'hi'), q, typedKeys]).length, 1, 'keys typed into the box are still not Joe');
+});
+
+test('0b-8 audit round 3 M-3: the brief names the state files it answers; one made before them is never quoted', () => {
+  const rec = memoryRecord();
+  const facts = new Map();
+  const mk = (stateIds) => buildTripBrief({ products: [{ name: 'test-product', on_merge_gate: true }], until: '2026-11-07', tz: 'Europe/Prague', stateIds, rec, facts, heartbeatProduct: 'mini', now: () => new Date(T0) });
+  const older = mk(['20261103-0900-aa']);
+  const newer = mk(['20261103-0915-kq', '20261103-0915-kr']);
+  assert.match(newer.split('\n')[0], /; answers state files: 20261103-0915-kq, 20261103-0915-kr\.$/);
+  assert.equal(briefAnswers(newer, ['20261103-0915-kq', '20261103-0915-kr']), true);
+  assert.equal(briefAnswers(older, ['20261103-0915-kq']), false, 'a brief made for an earlier request');
+  assert.equal(briefAnswers(newer, ['20261103-0915-kq', '20261103-0915-ks']), false, 'one id missing');
+  assert.equal(briefAnswers(mk([]), ['20261103-0915-kq']), false);
+  assert.equal(briefAnswers(mk(['../x']), []), false);
+  const skill = readFileSync(new URL('./skill/orchestrate/SKILL.md', import.meta.url), 'utf8');
+  assert.doesNotMatch(skill, /current time is past/, 'the skill no longer asks for a time it does not have');
+  assert.match(skill, /lists\s+\*\*every\*\* `<id>`/);
+});
+
+test('0b-8 audit round 3 M-4: Joe\'s Air red count has a file shape and becomes the dated air-health fact the brief reads', () => {
+  const f = outboxFile('request', '20261103-0930-ab', { request: 'airhealth', red_count: 0 });
+  assert.equal(f.ok, true);
+  assert.equal(f.name, 'request-airhealth-20261103-0930-ab.json');
+  const c = checkOutboxFile(f.name, f.text);
+  assert.equal(c.ok, true);
+  for (const bad of [{ request: 'airhealth', red_count: -1 }, { request: 'airhealth', red_count: 1.5 }, { request: 'airhealth' }, { request: 'airhealth', red_count: 0, product: 'test-product' }, { request: 'wrapup', red_count: 0 }]) {
+    assert.equal(outboxFile('request', '20261103-0930-ac', bad).ok, false, JSON.stringify(bad));
+  }
+  const fact = airFactFromRequest(c.doc, () => new Date(T0));
+  assert.deepEqual(fact, { kind: 'fact.air-health', red_count: 0, told_at: new Date(T0).toISOString() });
+  assert.equal(airCheck({ facts: new Map([['air-health', fact]]), now: () => new Date(T0 + 3600e3) }).passed, true);
+  assert.equal(airFactFromRequest({ request: 'wrapup' }), null);
 });
