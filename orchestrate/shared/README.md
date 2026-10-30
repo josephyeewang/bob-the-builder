@@ -1,6 +1,6 @@
 # orchestrate/shared/
 
-Small helpers more than one module uses (the record file format, masking, safe file writes). Owned by lane 1; other lanes ask the lead before adding here, so two lanes never edit the same file.
+Small helpers more than one module uses (the record file format, safe file writes). Secret masking is lane 3's, in `modules/M12-sensors/`; it is re-exported here once it merges. Owned by lane 1; other lanes ask the lead before adding here, so two lanes never edit the same file.
 
 ## The two interfaces other lanes code against
 
@@ -12,13 +12,23 @@ Import these, never the module folders behind them. Each has a fake for your own
 import { makeRules, fakeRules, ACTIONS, RISKY_CLASSES } from '../../shared/rules.mjs';
 const d = rules.may('push_branch', { product, card, files });  // { decision: 'allow'|'ask'|'deny', tier?, reason, rev }
 rules.get('caps.editing_per_mac', { product });               // a value from the rules (Mac-wide ones: strictest across products)
-rules.classify({ product, files, diff });                     // { tier: 1|2, risky: [...RISKY_CLASSES], reasons }
+rules.classify(change);                                       // { tier: 1|2, risky: [...RISKY_CLASSES], reasons, protected }
 rules.rev;                                                    // the rules version, stamped on diary lines
 ```
 
 - **It never throws and fails closed.** An unknown action, an error, or no readable rules is `deny`. A classification that fails is `unclassifiable`, Tier 1.
 - `ask` means allowed only with Joe's answer: `tier: 1` is his GitHub Approve, `tier: 2` a tap.
 - Actions (`ACTIONS`): `start_session`, `write_production`, `push_branch`, `merge`, `count_approval`, `delete_copy`, `flip_switch`. A new one is added here first, by lane 1.
+- What each action is asked with (missing fields are a deny):
+
+  | Action | Subject |
+  |---|---|
+  | `start_session` | `{ product, role, tier, editing, card?, usage? }` |
+  | `push_branch` | `{ product, card: { id, rows }, files }` |
+  | `merge` | `{ product, card, files, declared_tier, labels }` |
+  | `count_approval`, `delete_copy`, `write_production`, `flip_switch` | denied in 0b |
+
+- `classify(change)` takes `{ product, files: [{ path, previous_path?, status, mode?, added_lines? }], truncated?, declared_tier?, labels?, policy? }`. Until the effect-path scanner lands (second cutover), any changed file outside `docs/` comes back `unclassifiable`, Tier 1. GitHub-side, `policy` is the rules as of the parent commit.
 - Tests: `fakeRules({ answers: { merge: allow('ok') }, values: { 'caps.rounds': 3 } })`. Unlisted actions are denied, as with the real rules.
 
 ### `record.mjs`: read and write M9 Record
@@ -32,8 +42,11 @@ rec.applyOutbox({ role: 'worker', sessionId: 'S-4', card: 'C-12' }, outboxFilePa
 rec.diary({ since: 0 });
 ```
 
+- **Required fields** (`REQUIRED_FIELDS`) are refused when missing, by the fake too: a card's `state` and `module`; a verdict's `session_id` and `head`; every field of `launch` and `merge_request` (both written by the Dispatcher only).
+- **Final states** (`FINAL_STATES`) need no time limit; every other state has one in the rules. `closed → reverted` is the one move out of a final state.
+- **`joe` writes nothing**: Joe's answers reach the record through `approvals`.
 - **Only plain scripts call `write`**, under their own actor name (`SCRIPT_ACTORS`). AI sessions never do: the Dispatcher hands their outbox files to `applyOutbox`, tagged with the session's role.
 - **Every write is "only if unchanged since read"**: pass the `rev` you read (`0` to create). A mismatch is refused. Each accepted write leaves one diary line; a refused one leaves none.
 - `write` and `applyOutbox` never throw; any failure is `{ ok: false, reason }`.
-- The names (`SCRIPT_ACTORS`, `AI_ROLES`, `ENTITIES`, `STATES`, `WAIT_FIELDS`) are defined once, here.
+- The names (`SCRIPT_ACTORS`, `AI_ROLES`, `ENTITIES`, `STATES`, `FINAL_STATES`, `REQUIRED_FIELDS`, `WAIT_FIELDS`) are defined once, here.
 - Tests: `memoryRecord()` keeps the rev check and the diary only. The real Store Writer (M9) adds the legal state moves and who may change what, so code that passes on the fake can still be refused by the real one.
