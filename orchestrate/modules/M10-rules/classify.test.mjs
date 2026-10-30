@@ -33,6 +33,12 @@ test('a rename counts both names: moving a workflow out of .github is still prot
   assert.deepEqual(r.protected, ['.github/workflows/a.yml']);
 });
 
+test('truncated or labels of the wrong type are unclassifiable (audit round 3)', () => {
+  for (const extra of [{ truncated: 'true' }, { truncated: 1 }, { labels: 'needs-joe' }, { labels: [null] }]) {
+    assert.ok(run([mod('docs/research/x.md')], extra).risky.includes('unclassifiable'), JSON.stringify(extra));
+  }
+});
+
 test('a rename or copy with no old name is unclassifiable, never a plain doc (audit round 2, MAT-7)', () => {
   for (const status of ['renamed', 'copied']) {
     const r = run([{ path: 'docs/research/a.md', status }]);

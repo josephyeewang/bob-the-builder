@@ -15,7 +15,7 @@
 //     clock()       → ms since epoch; the only clock used (subject.now is ignored, R3-m9)
 
 import { allow, ask, deny } from '../../shared/rules.mjs';
-import { classifyChange } from './classify.mjs';
+import { classifyChange, MAX_FILES } from './classify.mjs';
 import { compileList, pathProblem } from './paths.mjs';
 import { PRODUCT_STATES, HOURS, validZone, compareVersions } from './policy.mjs';
 import { loadRoles, profileFor } from './roles.mjs';
@@ -248,10 +248,15 @@ export function makeEngine({ products, rulesState, productState, running, rolesD
   function merge(s) {
     const pol = policyOf(s.product);
     checkFiles(s.files);
+    // A field of the wrong type is a caller fault: refuse it rather than read it as "no" (audit round 3).
+    if (s.truncated !== undefined && typeof s.truncated !== 'boolean') throw new Error('truncated must be true or false');
+    if (s.labels !== undefined && (!Array.isArray(s.labels) || !s.labels.every((l) => typeof l === 'string'))) throw new Error('labels must be a list of names');
     const c = classifyChange(pol, { files: s.files, truncated: s.truncated, declared_tier: s.declared_tier, labels: s.labels });
     const reverse = s.kind === 'exact_reverse' && SHA.test(s.reverses ?? '') && s.exact_reverse_ok === true && REVERSED_AUDIT.includes(s.reversed_audit);
     if (reverse) {
-      // R3-M3, in this order. Pause and the hours window never hold an exact reverse.
+      // R3-M3, in this order. Pause and the hours window never hold an exact reverse. A cut-off file list can hide a
+      // protected file, so it is never let through (MAT-6).
+      if (s.truncated === true || s.files.length > MAX_FILES) return ask(1, 'exact reverse with a cut-off file list');
       if (c.protected.length) return ask(1, 'exact reverse touches a protected file');
       if (s.reversed_audit === 'failure') return allow('exact reverse of a merge whose audit failed');
       if (!c.risky.length && c.tier === 2) return allow('exact reverse of an ordinary change');

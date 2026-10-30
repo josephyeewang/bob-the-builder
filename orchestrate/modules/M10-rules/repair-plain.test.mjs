@@ -30,6 +30,8 @@ test('plain repair files pass', () => {
   assert.equal(ok('UPDATE t SET (a, b) = (1, 2) FROM (VALUES (1, 2)) AS v(x, y) WHERE t.id = v.x').ok, true);
   assert.equal(ok('WITH RECURSIVE w(n) AS (SELECT 1) INSERT INTO t SELECT n FROM w').ok, true);
   assert.equal(ok('INSERT INTO t (a) VALUES (1) ON CONFLICT DO NOTHING').ok, true);
+  assert.equal(ok("SELECT count(*) FILTER (WHERE a = 'U&x') FROM t").ok, true, 'FILTER after a call, and & inside a value');
+  assert.equal(ok('WITH g AS MATERIALIZED (SELECT 1) DELETE FROM t USING g').ok, true);
 });
 
 // One planted form per refused rule: [name, sql, reason pattern].
@@ -62,6 +64,14 @@ const PLANTED = [
   ['psql variable', 'DELETE FROM t WHERE id = :victim', /psql variable/],
   ['unexpected character', 'SELECT 1 # 2', /unparseable/],
   ['empty file', '-- nothing here\n', /no statements/],
+  ['U& escaped function name (audit round 3)', `SELECT U&"pg_sleep" UESCAPE '!' (5)`, /an & outside/],
+  ['U& escaped call inside UPDATE', `UPDATE t SET a = U&"pg_read_file" UESCAPE '!' ('x') WHERE id = 1`, /an & outside/],
+  ['a ( after a quoted value', `SELECT 'x' (5)`, /a \( after a value/],
+  ['a ( after a number', 'SELECT 1 (5)', /a \( after a value/],
+  ['filter as a function name', 'SELECT filter(1)', /filter\(…\)/],
+  ['over as a function name', 'SELECT over(1)', /over\(…\)/],
+  ['conflict as a function name', 'SELECT conflict(1)', /conflict\(…\)/],
+  ['materialized as a function name', 'SELECT materialized(1)', /materialized\(…\)/],
 ];
 
 test('every planted form is refused, with its reason', () => {

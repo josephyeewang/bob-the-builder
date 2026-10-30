@@ -258,6 +258,21 @@ test('merge while paused: only an exact reverse (MAT-8)', () => {
 
 const reverse = (audit, extra = {}) => ({ kind: 'exact_reverse', reverses: R, exact_reverse_ok: true, reversed_audit: audit, ...extra });
 
+test('merge: an exact reverse with a cut-off file list asks Joe, even while paused (audit round 3, MAT-6)', () => {
+  const w = world({ states: { app: { state: 'paused' } }, now: AT_03 });
+  const r = mergeOf(w, [file('app/x.ts')], reverse('failure', { truncated: true }));
+  assert.deepEqual([r.decision, r.tier], ['ask', 1]);
+  assert.match(r.reason, /cut-off/);
+});
+
+test('merge: truncated or labels of the wrong type are refused, never read as "no" (audit round 3)', () => {
+  const w = world();
+  for (const bad of [{ truncated: 'true' }, { truncated: 1 }, { labels: 'needs-joe' }, { labels: [1] }]) {
+    assert.equal(mergeOf(w, [file('docs/research/x.md')], bad).decision, 'deny', JSON.stringify(bad));
+  }
+  assert.equal(mergeOf(w, [file('docs/research/x.md')], { truncated: false }).decision, 'allow');
+});
+
 test('merge: the exact-reverse answer, in R3-M3\'s order', () => {
   const w = world({ states: { app: { state: 'paused' } }, now: AT_03 });
   const flaggedTier1 = mergeOf(w, [file('app/x.ts')], { declared_tier: 1, ...reverse('failure') });

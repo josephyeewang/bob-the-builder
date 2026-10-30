@@ -15,7 +15,8 @@
 // INSERT/UPDATE/DELETE); a line starting with `\`; dollar-quoting or any other `$`; the words DO, CALL, EXECUTE,
 // PREPARE, COPY, LOAD, CREATE, ALTER, DROP, TRUNCATE, GRANT, REVOKE, SET, RESET, BEGIN, COMMIT, ROLLBACK outside a
 // literal (SET only as an UPDATE's own SET, DO only as ON CONFLICT DO); more than `repairs.max_statements`
-// statements (undeclared = refused); any call `name(` whose name isn't in `repairs.allowed_functions`.
+// statements (undeclared = refused); any call `name(` whose name isn't in `repairs.allowed_functions`; an `&` (a
+// U&"…" escaped name hides a call); a `(` straight after a quoted value or number.
 // Stricter than the spec, to stay closed: a backslash inside a quoted value (on some database settings it moves
 // where the value ends); a schema-qualified or quoted function name; `SELECT … INTO` (it creates a table); a psql
 // variable (`:name`); an alias column list without AS.
@@ -147,7 +148,8 @@ function tokenize(s) {
     if (c === ':' && /[A-Za-z_'"{]/.test(s[i + 1] ?? '')) no('a psql variable (:name)');
     if (c === '(') { push('punct', '('); depth++; i++; continue; }
     if (c === ')') { if (--depth < 0) no('unparseable: a ) with no ('); push('punct', ')'); i++; continue; }
-    if (/[;,.=<>!+\-*/%|&^~\[\]:]/.test(c)) { push('punct', c); i++; continue; }
+    if (c === '&') no('an & outside a quoted value (a U& escaped name, or a bitwise operator)');
+    if (/[;,.=<>!+\-*/%|^~\[\]:]/.test(c)) { push('punct', c); i++; continue; }
     no(`unparseable: unexpected character ${JSON.stringify(c)}`);
   }
   if (depth !== 0) no('unparseable: a ( is never closed');
@@ -189,8 +191,10 @@ function checkStatement(toks, n, allowed) {
       if (w === 'into' && !isWord(prev, 'insert')) no(`${where}: INTO is allowed only in INSERT INTO (SELECT … INTO creates a table)`);
       if (BANNED_WORDS.includes(w) && !allowedHere(w, toks, i, conflictAt)) no(`${where}: ${w.toUpperCase()} is not allowed in a repair file`);
     }
+    // A `(` straight after a quoted value or number is a call by another spelling (U&"name" UESCAPE '!' (…)).
+    if (isPunct(tok, '(') && (prev?.t === 'lit' || prev?.t === 'num')) no(`${where}: a ( after a value is not allowed`);
     if (isPunct(tok, '(') && prev && (prev.t === 'word' || prev.t === 'qident')) {
-      if (prev.t === 'word' && NOT_CALLS.has(prev.v.toLowerCase())) continue;
+      if (prev.t === 'word' && NOT_CALLS.has(prev.v.toLowerCase()) && keywordHere(prev.v.toLowerCase(), toks, i - 1)) continue;
       if (columnList(toks, i - 1, lead === 'with' ? mainAt : -1)) continue;
       const name = prev.t === 'word' ? prev.v.toLowerCase() : null;
       if (isPunct(toks[i - 2], '.')) no(`${where}: a schema-qualified call ${prev.v}(…) is not allowed`);
@@ -198,6 +202,15 @@ function checkStatement(toks, n, allowed) {
       if (!allowed.has(name)) no(`${where}: ${name}(…) is not in repairs.allowed_functions`);
     }
   }
+}
+
+// Some words in NOT_CALLS are also legal function names; they count as the keyword only where the keyword can stand.
+function keywordHere(w, toks, k) {
+  const before = toks[k - 1];
+  if (w === 'filter' || w === 'over') return isPunct(before, ')');
+  if (w === 'conflict') return isWord(before, 'on');
+  if (w === 'materialized') return isWord(before, 'as') || isWord(before, 'not');
+  return true;
 }
 
 // SET only as an UPDATE's own SET (an UPDATE at the same depth with no SET since); DO only as ON CONFLICT … DO.
