@@ -80,7 +80,7 @@ export function leadCard(env, id, over = {}) {
   return env.record.read('card', id).doc;
 }
 
-// A draft card from the Lead, with Joe's go, moved to ready.
+// A draft card from the Lead, with the owner's go, moved to ready.
 export function readyCard(env, id, over = {}) {
   const doc = leadCard(env, id, over);
   go(env, id, doc);

@@ -5,8 +5,8 @@ import assert from 'node:assert/strict';
 import { linkSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { AI_ROLES, OUTBOX_KINDS } from '../../shared/record.mjs';
-import { MAX_OUTBOX_BYTES } from './outbox.mjs';
-import { HEAD, HEAD2, PRODUCT, leadCard, must, outboxFile, product, put, readyCard, roadmap, runCard, setup } from './fixtures.test-helper.mjs';
+import { MAX_OUTBOX_BYTES, readOutboxFile } from './outbox.mjs';
+import { HEAD, HEAD2, PRODUCT, UID, leadCard, must, outboxFile, product, put, readyCard, roadmap, runCard, setup } from './fixtures.test-helper.mjs';
 
 const handin = (id, extra = {}) => `${JSON.stringify({ entity: 'card', id, from_state: 'running', to_state: 'in_review', fields: { summary: 'done' }, ...extra })}\n`;
 const refusals = (env) => { try { return readFileSync(join(env.root, 'refusals.jsonl'), 'utf8').trim().split('\n').filter(Boolean).length; } catch { return 0; } };
@@ -59,6 +59,20 @@ test('unsafe files are refused with no diary line: link, hard link, outside path
   assert.equal(lines(), before, 'no diary line for any refused file');
   assert.equal(refusals(env), cases.length, 'each refusal logged once');
   assert.ok(!JSON.stringify(env.record.list('report')).includes('not for the record'));
+});
+
+test('a session folder that is a link, a file of the wrong owner, and a role with no owner are refused (0b-2 audit MIN-5, MIN-9)', () => {
+  const env = setup({ prefix: 'm9-out-' });
+  const other = outboxFile(env, 'worker', 'S-3', 'report-s3.md', 'from S-3');
+  symlinkSync(join(env.outRoot, 'worker', 'S-3'), join(env.outRoot, 'worker', 'S-2'));
+  const r = env.record.applyOutbox({ role: 'worker', sessionId: 'S-2' }, join(env.outRoot, 'worker', 'S-2', 'report-s3.md'));
+  assert.equal(r.ok, false);
+  assert.match(r.reason, /outbox folder S-2 is a link/);
+  assert.equal(env.record.list('report').length, 0);
+  const tag = { role: 'worker', sessionId: 'S-3' };
+  assert.match(readOutboxFile({ outboxRoot: env.outRoot, uids: { worker: UID + 1 }, tag, file: other }).reason, /owned by uid \d+, not the worker outbox owner/);
+  assert.match(readOutboxFile({ outboxRoot: env.outRoot, uids: {}, tag, file: other }).reason, /no owner uid configured for worker/);
+  assert.equal(readOutboxFile({ outboxRoot: env.outRoot, uids: { worker: UID }, tag, file: other }).ok, true, 'the same file with the right owner');
 });
 
 test('every outbox kind × every AI role: applied only for the roles listed (R2-M9)', () => {
@@ -175,7 +189,7 @@ test('the Lead: only ordinary and lead_daily_card cards; plan inputs change only
 
 test('an ask request is stored as an inert report; it never becomes an ask (R3-M2)', () => {
   const env = setup({ prefix: 'm9-out-' });
-  must(env.record.applyOutbox({ role: 'front_door', sessionId: 'F-1' }, outboxFile(env, 'front_door', 'F-1', 'ask-request-1.md', 'please ask Joe')));
+  must(env.record.applyOutbox({ role: 'front_door', sessionId: 'F-1' }, outboxFile(env, 'front_door', 'F-1', 'ask-request-1.md', 'please ask the owner')));
   assert.equal(env.record.list('ask').length, 0);
   assert.equal(env.record.list('report')[0].doc.kind, 'ask-request-');
 });

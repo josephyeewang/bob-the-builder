@@ -22,7 +22,7 @@ export function fullTimeouts(overrides = {}) {
   t.card.draft = { no_limit_reason: 'the Lead plans at its own pace', recheck_max_min: 1440 };
   t.card.waiting = { no_limit_reason: 'waits on someone else', recheck_max_min: 1440 };
   t.card.merged = { no_limit_reason: 'waits for the nightly audit', recheck_max_min: 1440 };
-  for (const s of STATES.product) t.product[s] = { no_limit_reason: 'Joe sets it', recheck_max_min: 1440 };
+  for (const s of STATES.product) t.product[s] = { no_limit_reason: 'the owner sets it', recheck_max_min: 1440 };
   for (const [e, rows] of Object.entries(overrides)) Object.assign(t[e], rows);
   return t;
 }

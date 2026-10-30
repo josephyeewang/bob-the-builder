@@ -1,7 +1,7 @@
 // ready.mjs — the one ready rule: may this card start now? (0b-2 M-2, m-3, R2-M4, R2-M5, R2-m2, R3-M3, R3-m2)
 //
-// WHY. "Ready" decides what a worker builds next, so a card that skips Joe's go, or starts before the change it builds
-// on is merged, is work Joe never agreed to. Every move into `ready` and the ready list call this one function, so the
+// WHY. "Ready" decides what a worker builds next, so a card that skips the owner's go, or starts before the change it builds
+// on is merged, is work the owner never agreed to. Every move into `ready` and the ready list call this one function, so the
 // two can't drift. It fails closed: anything missing or unreadable is "not ready", with the reason.
 //
 //   readyCheck(card, view, { rules, product }) → { ok: true } | { ok: false, reason }
@@ -12,7 +12,7 @@
 //   - every dependency exists, is readable, and is `merged` or `closed` (never `reverted`, never only `in_review`),
 //     and following dependencies never comes back to this card;
 //   - its product's state lets work start (no product document reads as `paused`);
-//   - Joe's go matches the plan (the fingerprint of the ROOT card's id and this card's plan inputs), or the card's kind
+//   - The owner's go matches the plan (the fingerprint of the ROOT card's id and this card's plan inputs), or the card's kind
 //     is go-free in the rules AND the card was created by the one actor allowed to make that kind.
 
 import { planFingerprint } from '../../shared/plan-fingerprint.mjs';
@@ -63,8 +63,8 @@ function depsCheck(card, view) {
     const d = view.get('card', id);
     if (!d) return { ok: false, reason: `dependency ${id} does not exist` };
     if (d.corrupt) return { ok: false, reason: `dependency ${id} is unreadable` };
-    // A dependency that will never merge (cancelled, no answer, failed) can't be waited out: the card waits on Joe.
-    if (['cancelled', 'closed_no_answer', 'failed'].includes(d.doc.state)) return { ok: false, joe: true, reason: `dependency ${id} is ${d.doc.state}; Joe decides what happens to this card` };
+    // A dependency that will never merge (cancelled, no answer, failed) can't be waited out: the card waits on the owner.
+    if (['cancelled', 'closed_no_answer', 'failed'].includes(d.doc.state)) return { ok: false, joe: true, reason: `dependency ${id} is ${d.doc.state}; the owner decides what happens to this card` };
     if (d.doc.state !== 'merged' && d.doc.state !== 'closed') return { ok: false, reason: `dependency ${id} is ${d.doc.state}, not merged` };
   }
   return { ok: true };
@@ -84,7 +84,7 @@ function goCheck(card, view, rules, product) {
   if (goFreeKinds(rules, product).includes(kind)) {
     const creator = view.createdBy('card', card.id);
     if (creator && mayCreateKind(creator, kind)) return { ok: true };
-    return { ok: false, reason: `a ${kind} card made by ${creator ?? 'an unknown writer'} needs Joe's go` };
+    return { ok: false, reason: `a ${kind} card made by ${creator ?? 'an unknown writer'} needs the owner's go` };
   }
   const r = rootOf(card, view);
   if (!r.ok) return r;
@@ -92,7 +92,7 @@ function goCheck(card, view, rules, product) {
   const fp = planFingerprint({ product: d.product, card_id: r.root.id, tier: d.tier, files: d.files, done_when: d.done_when, plan_sha256: d.plan_sha256, main_commit: d.main_commit });
   if (!fp.ok) return { ok: false, reason: `plan can't be fingerprinted: ${fp.reason}` };
   const go = view.list('go').find((g) => g.doc?.plan_fingerprint === fp.sha256 && g.doc?.product === d.product && g.doc?.card_id === r.root.id);
-  return go ? { ok: true, go: go.id } : { ok: false, reason: `no go from Joe matches this plan (fingerprint ${fp.sha256.slice(0, 12)})` };
+  return go ? { ok: true, go: go.id } : { ok: false, reason: `no go from the owner matches this plan (fingerprint ${fp.sha256.slice(0, 12)})` };
 }
 
 export function readyCheck(card, view, { rules, product }) {

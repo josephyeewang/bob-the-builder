@@ -6,7 +6,7 @@
 // doesn't match its diary line was changed by something other than the Store Writer: it is restored from the diary,
 // the changed copy is kept in quarantine/, and an alert fires.
 //
-// Layout under `root` (a required argument; the real path is Joe's launcher setting):
+// Layout under `root` (a required argument; the real path is the owner's launcher setting):
 //   docs/<entity>/<id>.json   diary.jsonl   lock   break.lock   tmp/   quarantine/   refusals.jsonl   outbox-seen.jsonl
 // Folders are 755 and files 644, set with chmod whatever the umask.
 //
@@ -23,10 +23,12 @@ import { createHash, randomBytes } from 'node:crypto';
 import { chmodSync, closeSync, existsSync, fstatSync, fsyncSync, mkdirSync, openSync, readFileSync, readSync, readdirSync,
   renameSync, ftruncateSync, unlinkSync, writeFileSync, writeSync, appendFileSync, constants } from 'node:fs';
 import { hostname } from 'node:os';
-import { isAbsolute, join } from 'node:path';
+import { dirname, isAbsolute, join } from 'node:path';
 import { makeLock, processDead, realProbe, sleepMs } from './lock.mjs';
 
 export const FAULT_POINTS = Object.freeze(['locked', 'temp_written', 'diary_torn', 'diary_written', 'renamed', 'dir_synced', 'released']);
+// Not a kill: `append_fails` makes the diary append fail partway (a full disk), for the cut-back test.
+
 const SAFE_ID = /^[A-Za-z0-9._-]+$/;
 
 export const sha256 = (s) => createHash('sha256').update(s).digest('hex');
@@ -36,7 +38,12 @@ function fsyncPath(path) {
   const fd = openSync(path, constants.O_RDONLY);
   try { fsyncSync(fd); } finally { closeSync(fd); }
 }
-function mkdir755(path) { mkdirSync(path, { recursive: true }); chmodSync(path, 0o755); }
+// Every level this makes is 755, not only the last: under a umask of 077 the levels between would be 700 (0b-2 audit MIN-6).
+function mkdir755(path) {
+  const first = mkdirSync(path, { recursive: true });
+  if (first) for (let p = path; ; p = dirname(p)) { chmodSync(p, 0o755); if (p === first || p === dirname(p)) break; }
+  chmodSync(path, 0o755);
+}
 function readOrNull(path) { try { return readFileSync(path); } catch (e) { if (e?.code === 'ENOENT') return null; throw e; } }
 
 export function openStore({ root, ownerUid, alert = () => {}, now = () => Date.now(), host = hostname(), lockTimeoutMs = 10000,
@@ -46,7 +53,7 @@ export function openStore({ root, ownerUid, alert = () => {}, now = () => Date.n
   if (typeof process.getuid === 'function' && process.getuid() !== ownerUid) throw new Error(`the Store Writer runs only as the store's owner (uid ${ownerUid}), not uid ${process.getuid()}`);
   if (faultAt !== undefined) {
     const step = typeof faultAt === 'string' ? faultAt : faultAt?.step;
-    if (!FAULT_POINTS.includes(step)) throw new Error(`unknown fault point ${step}`);
+    if (!FAULT_POINTS.includes(step) && step !== 'append_fails') throw new Error(`unknown fault point ${step}`);
   }
 
   const P = { docs: join(root, 'docs'), tmp: join(root, 'tmp'), quarantine: join(root, 'quarantine'), diary: join(root, 'diary.jsonl'),
@@ -229,7 +236,7 @@ export function openStore({ root, ownerUid, alert = () => {}, now = () => Date.n
         damaged: () => damaged,
         nextSeq: () => lastSeq + 1,
         commit(writes, meta) {
-          if (damaged) throw new Error(`the diary is damaged (${damaged}); writes stop until Joe repairs it`);
+          if (damaged) throw new Error(`the diary is damaged (${damaged}); writes stop until the owner repairs it`);
           const ts = new Date(now()).toISOString();
           const out = writes.map((w) => {
             if (!SAFE_ID.test(w.id) || /^\.+$/.test(w.id)) throw new Error('bad id');
@@ -249,9 +256,16 @@ export function openStore({ root, ownerUid, alert = () => {}, now = () => Date.n
           const text = `${JSON.stringify(line)}\n`;
           try {
             const fd = openSync(P.diary, constants.O_WRONLY | constants.O_APPEND);
+            const size = fstatSync(fd).size;
             try {
               if (faultAt !== undefined && (faultAt === 'diary_torn' || faultAt?.step === 'diary_torn')) { writeSync(fd, text.slice(0, Math.floor(text.length / 2))); fsyncSync(fd); fault('diary_torn'); }
+              if (faultAt === 'append_fails') { writeSync(fd, text.slice(0, Math.floor(text.length / 2))); throw new Error('test: the append failed partway'); }
               writeSync(fd, text); fsyncSync(fd);
+            } catch (e) {
+              // A part-written line (a full disk) is cut back off, so the next line doesn't join it and become unreadable
+              // (0b-2 audit MIN-7). If it can't be cut, writes stop until the owner looks.
+              try { ftruncateSync(fd, size); fsyncSync(fd); } catch { damaged = 'a failed diary append could not be cut back'; say({ type: 'diary_damaged', reason: damaged }); }
+              throw e;
             } finally { closeSync(fd); }
           } catch (e) { for (const t of temps) { try { unlinkSync(t); } catch { /* gone */ } } throw e; }
           fault('diary_written');

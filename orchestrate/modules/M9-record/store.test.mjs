@@ -19,7 +19,35 @@ test('folders are 755 and files 644 whatever the umask (M-7 a)', () => {
     seed(env, 'card', 'C-1', card());
     for (const d of ['', 'docs', 'tmp', 'quarantine', 'docs/card']) assert.equal(mode(join(env.root, d)), 0o755, d || 'root');
     for (const f of ['diary.jsonl', 'refusals.jsonl', 'outbox-seen.jsonl', 'docs/card/C-1.json']) assert.equal(mode(join(env.root, f)), 0o644, f);
+    // Every level the store makes is 755, not only the last (0b-2 audit MIN-6).
+    openStore({ root: join(env.base, 'a', 'b', 'store'), ownerUid: UID });
+    for (const d of ['a', 'a/b', 'a/b/store']) assert.equal(mode(join(env.base, d)), 0o755, d);
   } finally { process.umask(old); }
+});
+
+test('a diary append that fails partway is cut back, so the next write reads back (0b-2 audit MIN-7)', () => {
+  const env = setup({ prefix: 'm9-store-' });
+  const size = statSync(join(env.root, 'diary.jsonl')).size;
+  const broken = openStore({ root: env.root, ownerUid: UID, faultAt: 'append_fails' });
+  assert.throws(() => broken.transaction((tx) => tx.commit([{ entity: 'card', id: 'C-1', doc: card() }], { actor: 'test', kind: 'seed' })), /append failed partway/);
+  assert.equal(statSync(join(env.root, 'diary.jsonl')).size, size, 'the part-line is gone');
+  seed(env, 'card', 'C-2', card());
+  assert.equal(env.record.read('card', 'C-2').doc.state, 'draft');
+  assert.equal(env.record.read('card', 'C-1'), null);
+  for (const l of readFileSync(join(env.root, 'diary.jsonl'), 'utf8').trim().split('\n')) JSON.parse(l);
+});
+
+test('a writer that lost the lock before the commit point writes nothing (0b-2 audit MIN-9)', () => {
+  const env = setup({ prefix: 'm9-store-' });
+  const lines = env.record.diary().length;
+  assert.throws(() => env.store.transaction((tx) => {
+    const lockFile = join(env.root, 'lock');
+    writeFileSync(lockFile, JSON.stringify({ ...JSON.parse(readFileSync(lockFile, 'utf8')), nonce: 'someone-else' }));
+    return tx.commit([{ entity: 'card', id: 'C-1', doc: card() }], { actor: 'test', kind: 'seed' });
+  }), /lost the store lock/);
+  assert.equal(env.record.diary().length, lines, 'no diary line');
+  assert.equal(existsSync(docFile(env, 'card', 'C-1')), false, 'no document');
+  assert.deepEqual(readdirSync(join(env.root, 'tmp')), [], 'no temp file left');
 });
 
 test('the writer refuses to start as anyone but the store owner (M-7 a), and needs an absolute root (m-6)', () => {

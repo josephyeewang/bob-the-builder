@@ -10,6 +10,11 @@ const wait = (env, over = {}) => ({ who: 'dependency', what: 'the API key', sinc
 const refused = (r, pattern, where) => { assert.equal(r.ok, false, where ?? JSON.stringify(r)); assert.match(r.reason, pattern, where); };
 const fixCard = (env, id, of, over = {}) => env.record.write({ actor: 'dispatcher', entity: 'card', id, expectRev: 0,
   doc: { state: 'draft', product: PRODUCT, kind: 'fix', fix_of: of, ...plan(), ...over } });
+// Set-up only: put a card in failed, the one state a fix card may name.
+const fail = (env, id) => seed(env, 'card', id, { ...env.record.read('card', id).doc, state: 'failed' });
+// A Lead roadmap file that edits an existing card.
+const roadmapEdit = (env, id, fields) => env.record.applyOutbox({ role: 'lead', sessionId: 'L-1' }, outboxFile(env, 'lead', 'L-1', `roadmap-edit-${id}.md`,
+  `${JSON.stringify({ entity: 'card', id, expectRev: env.record.read('card', id).rev, fields })}\n`));
 
 // ---------------- waits ----------------
 
@@ -70,22 +75,29 @@ test('session waits: waiting_input and waiting_limit need a full wait; other sta
 
 // ---------------- the round cap and fix cards ----------------
 
-test('round cap 2: round 3 goes to Joe; a supplied round is ignored (M-8)', () => {
+test('round cap 2: round 3 goes to the owner; a supplied round is ignored (M-8)', () => {
   const env = setup({ prefix: 'm9-wr-', values: { 'caps.rounds': 2 } });
   product(env);
   leadCard(env, 'C-1');
+  refused(fixCard(env, 'F-1', 'C-1'), /fixes a failed card; C-1 is draft/);
+  fail(env, 'C-1');
   must(fixCard(env, 'F-1', 'C-1', { round: 1 }), 'fix 1');
   assert.equal(env.record.read('card', 'F-1').doc.round, 2, 'round comes from the chain');
   assert.equal(env.record.read('card', 'F-1').doc.state, 'draft');
+  // Naming the root again doesn't reset the round (0b-2 audit MAT-2).
+  refused(fixCard(env, 'F-9', 'C-1'), /C-1 already has a fix card/);
+  refused(fixCard(env, 'F-2', 'F-1'), /fixes a failed card; F-1 is draft/);
+  fail(env, 'F-1');
   must(fixCard(env, 'F-2', 'F-1', { round: 1 }), 'fix 2');
+  refused(fixCard(env, 'F-3', 'F-1'), /F-1 already has a fix card/);
   const f2 = env.record.read('card', 'F-2').doc;
   assert.equal(f2.round, 3);
-  assert.equal(f2.state, 'waiting', 'over the cap: created waiting on Joe');
+  assert.equal(f2.state, 'waiting', 'over the cap: created waiting on the owner');
   assert.equal(f2.wait.who, 'joe');
   assert.equal(f2.wait.return_to, null);
   refused(put(env.record, 'dispatcher', 'card', 'F-2', { state: 'ready' }), /no way back/);
   refused(put(env.record, 'dispatcher', 'card', 'F-2', { wait: { ...f2.wait, next_check: iso(env.clock.t + 60 * MIN) } }), /round-cap wait changes only by cancel/);
-  must(put(env.record, 'approvals', 'card', 'F-2', { state: 'cancelled', cancel_reason: 'Joe: start over' }), 'Joe cancels');
+  must(put(env.record, 'approvals', 'card', 'F-2', { state: 'cancelled', cancel_reason: 'the owner: start over' }), 'the owner cancels');
   // The Lead may not supply a round at all; its card is round 1.
   refused(env.record.applyOutbox({ role: 'lead', sessionId: 'L-1' }, outboxFile(env, 'lead', 'L-1', 'roadmap-r7.md', `${JSON.stringify({ entity: 'card', id: 'C-2', expectRev: 0, fields: { product: PRODUCT, kind: 'ordinary', round: 7, ...plan() } })}\n`)), /may not set round/);
   leadCard(env, 'C-2');
@@ -96,12 +108,32 @@ test('a fix card\'s plan is its root\'s, unchanged, and needs no new go (R2-M5, 
   const env = setup({ prefix: 'm9-wr-' });
   product(env);
   readyCard(env, 'C-1');
-  refused(fixCard(env, 'F-0', 'C-1', { files: ['src/other.mjs'] }), /files must equal its root card's/);
   refused(fixCard(env, 'F-0', 'C-9'), /names the card it fixes/);
+  refused(fixCard(env, 'F-0', 'C-1'), /fixes a failed card; C-1 is ready/);
+  fail(env, 'C-1');
+  refused(fixCard(env, 'F-0', 'C-1', { files: ['src/other.mjs'] }), /files must equal its root card's/);
   refused(env.record.write({ actor: 'dispatcher', entity: 'card', id: 'X-1', expectRev: 0, doc: { state: 'draft', product: PRODUCT, kind: 'ordinary', fix_of: 'C-1', ...plan() } }), /may not create a ordinary card|only a fix card names fix_of/);
   must(fixCard(env, 'F-1', 'C-1'), 'fix');
   must(put(env.record, 'dispatcher', 'card', 'F-1', { state: 'ready' }), 'fix ready on the root go');
   refused(put(env.record, 'dispatcher', 'card', 'F-1', { done_when: 'easier' }), /may not change done_when|fix card's plan/);
+});
+
+test('merged needs its merge document; the dispatcher\'s report fields go with their move (0b-2 audit MIN-3, MIN-4)', () => {
+  const env = setup({ prefix: 'm9-wr-' });
+  product(env);
+  seed(env, 'card', 'C-1', { state: 'merging', product: PRODUCT, module: 'M1', kind: 'ordinary', round: 1, head: HEAD });
+  refused(put(env.record, 'merge_gate', 'card', 'C-1', { state: 'merged' }), /names its merge commit/);
+  refused(put(env.record, 'merge_gate', 'card', 'C-1', { state: 'merged', merge_commit: HEAD }), /no merged merge document for C-1/);
+  seed(env, 'merge', 'M-1', { state: 'merged', card: 'C-1', merge_commit: HEAD2 });
+  refused(put(env.record, 'merge_gate', 'card', 'C-1', { state: 'merged', merge_commit: HEAD }), /no merged merge document/, 'another commit');
+  seed(env, 'merge', 'M-2', { state: 'merged', card: 'C-1', merge_commit: HEAD });
+  must(put(env.record, 'merge_gate', 'card', 'C-1', { state: 'merged', merge_commit: HEAD }), 'merged with evidence');
+  readyCard(env, 'C-2');
+  runCard(env, 'C-2');
+  refused(put(env.record, 'dispatcher', 'card', 'C-2', { failure: 'x' }), /failure only on a move into failed/);
+  refused(put(env.record, 'dispatcher', 'card', 'C-2', { summary: 'x' }), /summary and report_ref only on a tab's hand-in/);
+  refused(put(env.record, 'dispatcher', 'card', 'C-2', { state: 'waiting', wait: wait(env), summary: 'x' }), /only on a tab's hand-in/);
+  must(put(env.record, 'dispatcher', 'card', 'C-2', { state: 'failed', failure: 'tests fail' }), 'failure with its move');
 });
 
 // ---------------- card kinds and their evidence (R3-M3) ----------------
@@ -123,6 +155,12 @@ test('exact_reverse needs an answered Undo ask or an authenticated audit issue, 
   must(env.record.write({ actor: 'sensors', entity: 'fact', id: 'F-a', expectRev: 0, doc: { type: 'undo_issue', authenticated: true } }));
   must(er('U-1', { ask: 'A-1' }), 'from the ask');
   must(er('U-2', { fact: 'F-a' }), 'from the fact');
+  // One reverse per piece of evidence (0b-2 audit MAT-2).
+  refused(er('U-3', { ask: 'A-1' }), /ask A-1 already has its exact_reverse card/);
+  refused(er('U-3', { fact: 'F-a' }), /fact F-a already has its exact_reverse card/);
+  // The Lead may not rewrite a go-free card's plan, which would then go to ready with no go (0b-2 audit MAT-1).
+  refused(roadmapEdit(env, 'U-2', { files: ['src/anything-else.mjs', 'src/other.mjs'] }), /lead may not change the plan of a exact_reverse card/);
+  assert.deepEqual(env.record.read('card', 'U-2').doc.files, plan().files);
   must(put(env.record, 'dispatcher', 'card', 'U-1', { state: 'ready' }), 'ready with no go');
 });
 
@@ -134,6 +172,8 @@ test('research_copy needs an open research ask', () => {
   seed(env, 'ask', 'A-2', { state: 'consumed', kind: 'research', reask_count: 0 });
   refused(rc('R-0', 'A-2'), /needs an open research ask/);
   must(rc('R-1', 'A-1'));
+  refused(rc('R-4', 'A-1'), /ask A-1 already has its research_copy card/);
+  refused(roadmapEdit(env, 'R-1', { done_when: 'easier' }), /lead may not change the plan of a research_copy card/);
   refused(env.record.write({ actor: 'dispatcher', entity: 'card', id: 'R-2', expectRev: 0, doc: { state: 'ready', product: PRODUCT, kind: 'fix', module: 'M1' } }), /may not create a card in ready|created in draft/);
   refused(env.record.write({ actor: 'dispatcher', entity: 'card', id: 'R-3', expectRev: 0, doc: { state: 'draft', product: 'other-app', kind: 'research_copy', research_ask: 'A-1', ...plan() } }), /belongs to product sample-app/);
 });
@@ -175,7 +215,7 @@ test('sessions: no resume after a usage limit for the Lead or a Tier-1 card; onl
   must(resume('S-2'), 'a Tier-2 worker resumes');
   refused(put(env.record, 'workshop', 'session', 'S-2', { state: 'recycling' }), /only the Lead's session recycles/);
   seed(env, 'session', 'Q-1', { state: 'quarantined', role: 'worker', card: 'T1' });
-  refused(put(env.record, 'dispatcher', 'session', 'Q-1', { state: 'ended' }), /ends only once its card is final or Joe has answered/);
+  refused(put(env.record, 'dispatcher', 'session', 'Q-1', { state: 'ended' }), /ends only once its card is final or the owner has answered/);
   seed(env, 'ask', 'A-1', { state: 'consumed', kind: 'question', session: 'Q-1', reask_count: 0 });
   must(put(env.record, 'dispatcher', 'session', 'Q-1', { state: 'ended' }), 'answered');
 });
@@ -230,7 +270,7 @@ test('verified needs a passing verdict for the current head from a reviewer laun
 
 // ---------------- merges ----------------
 
-test('a merge request needs an approved card, or a verified one that doesn\'t need Joe', () => {
+test('a merge request needs an approved card, or a verified one that doesn\'t need the owner', () => {
   const env = setup({ prefix: 'm9-wr-' });
   const base = { product: PRODUCT, module: 'M1', kind: 'ordinary', round: 1 };
   seed(env, 'card', 'C-a', { ...base, state: 'approved' });
@@ -241,15 +281,15 @@ test('a merge request needs an approved card, or a verified one that doesn\'t ne
   const mr = (card) => env.record.write({ actor: 'dispatcher', entity: 'merge_request', id: `mr-${card}`, expectRev: 0,
     doc: { card, pr: 1, session_id: 'S-1', head: HEAD, rev: 1, requested_at: iso(env.clock.t) } });
   must(mr('C-a'), 'approved');
-  must(mr('C-v'), 'verified, no Joe');
-  refused(mr('C-j'), /needs Joe; no merge request yet/);
-  refused(mr('C-r'), /needs Joe/);
+  must(mr('C-v'), 'verified, no the owner');
+  refused(mr('C-j'), /needs the owner; no merge request yet/);
+  refused(mr('C-r'), /needs the owner/);
   refused(mr('C-i'), /is in_review/);
   refused(mr('C-x'), /missing card/);
   refused(env.record.write({ actor: 'merge_gate', entity: 'merge_request', id: 'mr-g', expectRev: 0, doc: { card: 'C-a', pr: 1, session_id: 'S-1', head: HEAD, rev: 1, requested_at: iso(env.clock.t) } }), /may not create/);
 });
 
-test('one merge at a time, and a verified card that needs Joe never enters merging', () => {
+test('one merge at a time, and a verified card that needs the owner never enters merging', () => {
   const env = setup({ prefix: 'm9-wr-' });
   const base = { product: PRODUCT, module: 'M1', kind: 'ordinary', round: 1 };
   seed(env, 'card', 'C-1', { ...base, state: 'approved' });
@@ -263,7 +303,7 @@ test('one merge at a time, and a verified card that needs Joe never enters mergi
   };
   refused(put(env.record, 'merge_gate', 'merge', 'M-1', { state: 'checking' }), /same write as its card moves to merging/);
   refused(put(env.record, 'merge_gate', 'card', 'C-1', { state: 'merging' }), /same write as its merge enters checking/);
-  refused(check('M-3', 'C-3'), /needs Joe's Approve/);
+  refused(check('M-3', 'C-3'), /needs the owner's Approve/);
   must(check('M-1', 'C-1'), 'first merge');
   refused(check('M-2', 'C-2'), /one merge at a time: M-1 is checking/);
   assert.equal(env.record.read('card', 'C-2').doc.state, 'approved', 'the pair is all or nothing');

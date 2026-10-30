@@ -27,7 +27,7 @@
 // out, and a list that can't be read at all comes back as one such corrupt entry, so a caller never takes it for empty.
 
 // Plain-script actors write under their own name; AI roles only through applyOutbox, as `<role>:<sessionId>`.
-// `joe` writes nothing in 0b (Joe acts through `approvals`); it stays a name so old diary lines still parse.
+// `joe` writes nothing in 0b (the owner acts through `approvals`); it stays a name so old diary lines still parse.
 export const SCRIPT_ACTORS = Object.freeze(['dispatcher', 'workshop', 'merge_gate', 'approvals', 'sensors', 'ledger',
   'live_check', 'joe']);
 export const AI_ROLES = Object.freeze(['lead', 'worker', 'reviewer', 'auditor', 'incident', 'scout', 'writer',
@@ -157,7 +157,7 @@ export function makeRecord(impl) {
     write(w) {
       if (!w || !isActor(w.actor)) return refused(`unknown actor "${w?.actor}"`);
       if (!SCRIPT_ACTORS.includes(w.actor)) return refused('AI roles write only through their outbox');
-      if (w.actor === 'joe') return refused('joe writes nothing; his answers come through approvals');
+      if (w.actor === 'joe') return refused('joe writes nothing; the owner answers through approvals');
       if (!ENTITIES.includes(w.entity)) return refused(`unknown entity "${w.entity}"`);
       if (typeof w.id !== 'string' || !/^[A-Za-z0-9._-]+$/.test(w.id) || w.id.length > 200 || /^\.+$/.test(w.id)) return refused('bad id');
       if (!Number.isInteger(w.expectRev) || w.expectRev < 0) return refused('expectRev must be the rev read (0 to create)');

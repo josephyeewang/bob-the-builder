@@ -126,7 +126,7 @@ export function openRecord({ root, product, ownerUid, rules, alert = () => {}, n
         const c = tx.lookup('card', doc.card);
         if (!c) return no(`merge request for missing card ${doc.card}`);
         const okState = c.doc.state === 'approved' || (c.doc.state === 'verified' && !c.doc.needs_joe && !c.doc.approval_required);
-        if (!okState) return no(`card ${doc.card} is ${c.doc.state}${c.doc.needs_joe || c.doc.approval_required ? ' and needs Joe' : ''}; no merge request yet`);
+        if (!okState) return no(`card ${doc.card} is ${c.doc.state}${c.doc.needs_joe || c.doc.approval_required ? ' and needs the owner' : ''}; no merge request yet`);
         if (c.doc.claim) return no(`card ${doc.card} still has a claim`);
       }
       if (entity === 'card') {
@@ -180,6 +180,10 @@ export function openRecord({ root, product, ownerUid, rules, alert = () => {}, n
     if (doc.kind === 'fix') {
       const parent = typeof doc.fix_of === 'string' ? tx.lookup('card', doc.fix_of) : null;
       if (!parent) return no('a fix card names the card it fixes (fix_of)');
+      // Only a card that failed gets a fix, and only one: the next round fixes the fix (0b-2 audit MAT-2), so the round
+      // cap can't be stepped round by naming the root again.
+      if (parent.doc.state !== 'failed') return no(`a fix card fixes a failed card; ${doc.fix_of} is ${parent.doc.state}`);
+      if (tx.list('card').some((c) => c.doc.kind === 'fix' && c.doc.fix_of === doc.fix_of)) return no(`${doc.fix_of} already has a fix card; the next round fixes that one`);
       let root = parent;
       for (let i = 0; i < 64 && typeof root.doc.fix_of === 'string'; i++) root = tx.lookup('card', root.doc.fix_of) ?? root;
       // The plan inputs are the root's, unchanged (R3-m2): the go covers only that plan.
@@ -198,10 +202,14 @@ export function openRecord({ root, product, ownerUid, rules, alert = () => {}, n
       const askOk = ask && ask.doc.kind === 'undo' && (ask.doc.state === 'answered' || ask.doc.state === 'consumed');
       const factOk = fact && fact.createdBy === 'sensors' && fact.doc.type === 'undo_issue' && fact.doc.authenticated === true;
       if (!askOk && !factOk) return no('an exact_reverse card needs an answered Undo ask or an authenticated audit issue (source)');
+      // One reverse per piece of evidence (0b-2 audit MAT-2): one answered Undo is never the go for many cards.
+      const key = askOk ? ['ask', src.ask] : ['fact', src.fact];
+      if (tx.list('card').some((c) => c.doc.kind === 'exact_reverse' && c.doc.source?.[key[0]] === key[1])) return no(`${key[0]} ${key[1]} already has its exact_reverse card`);
     }
     if (doc.kind === 'research_copy') {
       const ask = typeof doc.research_ask === 'string' ? tx.lookup('ask', doc.research_ask) : null;
       if (!ask || ask.doc.kind !== 'research' || !isOpen('ask', ask.doc.state)) return no('a research_copy card needs an open research ask (research_ask)');
+      if (tx.list('card').some((c) => c.doc.kind === 'research_copy' && c.doc.research_ask === doc.research_ask)) return no(`ask ${doc.research_ask} already has its research_copy card`);
     }
     const cap = get('caps.rounds');
     if (!Number.isInteger(cap) || cap < 1) return no('no round cap in the rules (caps.rounds)');
@@ -210,13 +218,16 @@ export function openRecord({ root, product, ownerUid, rules, alert = () => {}, n
       if (!t) return no('the rules have no card waiting limit');
       doc.state = 'waiting';
       doc.wait = { who: 'joe', what: 'round cap', since: iso(nowMs), next_check: iso(nowMs + (t.minutes ?? t.recheck_max_min) * MIN), resume: null, return_to: null,
-        reason: `round ${doc.round} is over the cap of ${cap}; Joe cancels it, or the Lead makes a new card with a new go` };
+        reason: `round ${doc.round} is over the cap of ${cap}; the owner cancels it, or the Lead makes a new card with a new go` };
     }
     return { ok: true };
   }
 
   function checkCardUpdate(tx, { id, old, doc, from, to, moving, changed, name, nowMs, ctx }) {
     if (old.kind === 'fix' && PLAN_INPUTS.some((f) => changed.includes(f))) return no('a fix card\'s plan is its root card\'s; it never changes');
+    // The Lead edits the plan only of a card kind it may make (0b-2 audit MAT-1): a go-free card (exact_reverse,
+    // research_copy) gets to ready with no go, so a changed plan on one would run with no go at all.
+    if (PLAN_INPUTS.some((f) => changed.includes(f)) && !mayCreateKind(name, old.kind)) return no(`${name} may not change the plan of a ${old.kind} card`);
     if (changed.includes('needs_joe')) {
       if (doc.needs_joe === true && !NEEDS_JOE_SETTERS.includes(name)) return no(`${name} may not set needs_joe`);
       if (doc.needs_joe !== true && name !== 'approvals') return no('only approvals clears needs_joe');
@@ -256,7 +267,17 @@ export function openRecord({ root, product, ownerUid, rules, alert = () => {}, n
     if (moving && from === 'in_review' && to === 'verified') { const r = verdictFor(tx, id, doc); if (!r.ok) return r; }
     if (moving && to === 'merging') {
       if (!ctx.mergeChecking) return no('a card moves to merging only in the same write as its merge enters checking');
-      if (from === 'verified' && (doc.needs_joe || doc.approval_required)) return no('this card needs Joe\'s Approve before it merges');
+      if (from === 'verified' && (doc.needs_joe || doc.approval_required)) return no('this card needs the owner\'s Approve before it merges');
+    }
+    // merged needs its evidence: this card's merge document, merged, with the same commit (0b-2 audit MIN-4).
+    if (moving && to === 'merged') {
+      if (typeof doc.merge_commit !== 'string' || !HEX40.test(doc.merge_commit)) return no('a merged card names its merge commit (merge_commit)');
+      if (!tx.list('merge').some((m) => m.doc.card === id && m.doc.state === 'merged' && m.doc.merge_commit === doc.merge_commit)) return no(`no merged merge document for ${id} at ${doc.merge_commit.slice(0, 7)}`);
+    }
+    // The dispatcher's report fields go with their move (0b-2 audit MIN-3).
+    if (name === 'dispatcher') {
+      if (changed.includes('failure') && !(moving && to === 'failed')) return no('the dispatcher sets failure only on a move into failed');
+      if (['summary', 'report_ref'].some((f) => changed.includes(f)) && !(moving && from === 'running' && to === 'in_review' && old.claim?.kind === 'tab')) return no('the dispatcher sets summary and report_ref only on a tab\'s hand-in');
     }
     return { ok: true };
   }
@@ -292,7 +313,7 @@ export function openRecord({ root, product, ownerUid, rules, alert = () => {}, n
       const c = typeof old.card === 'string' ? tx.lookup('card', old.card) : null;
       const cardFinal = c && FINAL_STATES.card.includes(c.doc.state);
       const asked = tx.list('ask').some((a) => a.doc.session === id && a.doc.state === 'consumed');
-      if (!cardFinal && !asked) return no('a quarantined session ends only once its card is final or Joe has answered about it');
+      if (!cardFinal && !asked) return no('a quarantined session ends only once its card is final or the owner has answered about it');
     }
     return { ok: true };
   }
@@ -477,7 +498,12 @@ export function openRecord({ root, product, ownerUid, rules, alert = () => {}, n
         const board = tx.list('card').filter((e) => (e.doc.state === 'claimed' || e.doc.state === 'running') && e.doc.claim?.kind === 'session' && e.doc.claim.host === host);
         if (board.length >= 2) {
           const dead = board.filter((e) => deadness(tx, e.doc.claim, p, nowMs, stuckMin).dead).length;
-          if (dead * 2 >= board.length) { store.alert({ type: 'claims_outage', dead, of: board.length }); return no(`${dead} of ${board.length} claims look dead at once; none is broken (outage)`); }
+          if (dead * 2 >= board.length) {
+            // One alert per Mac per day, not one per card per pass (L38; 0b-2 audit MIN-1).
+            const key = `alert:claims_outage:${host}:${iso(nowMs).slice(0, 10)}`;
+            if (!tx.seen(key)) { store.alert({ type: 'claims_outage', dead, of: board.length }); tx.markSeen(key, 'alerted'); }
+            return no(`${dead} of ${board.length} claims look dead at once; none is broken (outage)`);
+          }
         }
         const r = endClaim(tx, c, 'ready', 'claim_break', { session_id: claim.session_id, pid: claim.pid, why: mine.why });
         return { ok: true, rev: r.rev, seq: r.seq };

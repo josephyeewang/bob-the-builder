@@ -2,6 +2,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { FINAL_STATES, SCRIPT_ACTORS, STATES, timeoutFor } from '../../shared/record.mjs';
+import { readFileSync } from 'node:fs';
+import { parsePolicy } from '../M10-rules/policy.mjs';
 import { INTERNAL_MOVES, MOVES, moveActors } from './moves.mjs';
 import { HEAD, PRODUCT, fullTimeouts, iso, seed, setup } from './fixtures.test-helper.mjs';
 
@@ -86,6 +88,20 @@ test('every non-final state has a time limit or a reason in the rules (A4), read
   assert.equal(timeoutFor({ timeouts: missing }, 'card', 'running'), undefined);
 });
 
+// The check above reads a test fixture; the real guard is M10 refusing a rules file that leaves a state out
+// (0b-2 audit MIN-9). Its own fixture passes, and taking one state's row out makes the whole file corrupt.
+test('A4 on the real rules: M10 refuses a rules file with a non-final state missing from timeouts', () => {
+  const text = readFileSync(new URL('../M10-rules/fixtures/policy.yaml', import.meta.url), 'utf8');
+  const good = parsePolicy(text);
+  assert.ok(good.ok, good.reason);
+  for (const [entity, states] of Object.entries(STATES)) for (const s of states) if (!FINAL_STATES[entity].includes(s)) assert.ok(good.policy.timeouts[entity][s], `${entity} ${s}`);
+  const row = /\n    draft:\n      no_limit_reason: [^\n]*\n/;
+  assert.match(text, row);
+  const bad = parsePolicy(text.replace(row, '\n'));
+  assert.equal(bad.ok, false);
+  assert.match(bad.reason, /timeouts\.card\.draft missing/);
+});
+
 // R-0b-21 "allowed ones pass": every legal move, by every listed script actor, succeeds once its condition holds.
 test('every legal move succeeds for each listed actor when its condition holds', () => {
   const env = setup({ prefix: 'm9-legal-' });
@@ -120,6 +136,7 @@ test('every legal move succeeds for each listed actor when its condition holds',
               ok(env.record.write({ actor: 'dispatcher', entity: 'launch', id: `launch-${id}`, expectRev: 0, doc: { session_id: `R-${id}`, role: 'reviewer', card: id, head: HEAD, rev: 1, launched_at: iso(t) } }), 'launch');
               env.store.transaction((tx) => tx.commit([{ entity: 'verdict', id: `verdict-${id}`, doc: { session_id: `R-${id}`, role: 'reviewer', card: id, head: HEAD, pass: true } }], { actor: `reviewer:R-${id}`, kind: 'verdict' }));
             }
+            if (to === 'merged') { next.merge_commit = HEAD; seed(env, 'merge', `merged-${id}`, { state: 'merged', card: id, merge_commit: HEAD }); }
             const cardWrite = { entity: 'card', id, expectRev: env.record.read('card', id).rev, doc: next };
             if (to === 'merging') {
               const mid = `merge-for-${id}`;

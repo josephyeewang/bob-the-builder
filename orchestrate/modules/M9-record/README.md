@@ -19,18 +19,25 @@ See LANES.md for who builds this folder, and the build rows (0b-2, R-0b-20..28) 
 
 ## Claims
 
-A claim is a field on its card: set by `ready → claimed`, cleared when the card leaves claimed and running. A session's claim ends by a release from its holder, a lapse (claimed for longer than the card's `claimed` time limit), or a dead-owner break. A break needs all three of: the process gone, its session ended or gone, and no activity for `claims.stuck_min` minutes. If half or more of this Mac's claims look dead at once, none is broken (an outage) and Joe gets one alert. A claim from another Mac is never broken from this one. A tab's claim is never broken; it lapses when its heartbeat is older than `proposals.heartbeat_stale_min` or at the running limit.
+A claim is a field on its card: set by `ready → claimed`, cleared when the card leaves claimed and running. A session's claim ends by a release from its holder, a lapse (claimed for longer than the card's `claimed` time limit), or a dead-owner break. A break needs all three of: the process gone, its session ended or gone, and no activity for `claims.stuck_min` minutes. If half or more of this Mac's claims look dead at once, none is broken (an outage) and the owner gets one alert. A claim from another Mac is never broken from this one. A tab's claim is never broken; it lapses when its heartbeat is older than `proposals.heartbeat_stale_min` or at the running limit.
 
 ## Why our own store, not Claude Code's task list
 
-Claude Code has a native task list. We checked whether it could hold the claims: tests 3 (a claim on a stale read is refused), 4 (eight processes race, one wins) and 9 (a dead owner's claim is broken) cannot be expressed in it, so they were not run against it. Checked on Claude Code 2.1.312, 29 Oct 2026; this note is void at its next release, so check again then. Until it can, the claims stay in this store.
+Claude Code has a native task list. We checked whether it could hold the claims: tests 3 (a claim on a stale read is refused), 4 (eight processes race, one wins) and 9 (a dead owner's claim is broken) cannot be expressed in it, so they were not run against it. Checked on Claude Code 2.1.312 (the version installed that day; the project pins 2.1.300), 29 Oct 2026; this note is void at its next release, so check again then. Until it can, the claims stay in this store.
 
 ## What the tests cover, and what they don't
 
 - **A kill is not a power cut.** The crash tests kill the writer with SIGKILL at every step of a write. On macOS, `fsync` doesn't force the disk's own cache to the platter (that needs `F_FULLFSYNC`), so a power cut could still lose the last write. Not tested.
 - **The nightly copy of the diary is not built yet.** When it is, it must mask anything private before it copies.
-- **The ready rule's dependency behaviour** is our own, written to behave like BMAD's (a cycle is refused, a missing dependency blocks, a dependency that will never merge waits on Joe). No upstream source was available to port.
-- **Joe's step:** in production the store's owner is a separate Mac user, and AI sessions write their outbox as Joe's user. The tests run as one user, so "a write as Joe's user fails" is tested by giving the writer a different owner uid. That the real other user gets "permission denied" is a check Joe runs once on the Mac.
+- **The ready rule's dependency behaviour** is our own, written to behave like BMAD's (a cycle is refused, a missing dependency blocks, a dependency that will never merge waits on the owner). No upstream source was available to port.
+- **The owner's step:** in production the store belongs to its own Mac user, and AI sessions write their outbox as the owner's everyday user. The tests run as one user, so "a write as the everyday user fails" is tested by giving the writer a different owner uid. That the real other user gets "permission denied" is a check the owner runs once on the Mac.
+
+## Known gaps (audit round 1, logged, not fixed here)
+
+- **A crash between applying an outbox file and marking it seen.** On restart the file is applied again: a hand-in is refused (and logged as a refusal it isn't), a verdict is stored twice. Both are harmless to the card's state; one write for both would close it.
+- **`merged → reverted` has no evidence check yet.** The reversing merge is the Merge Gate's to name (0b-9).
+- **Two claims, one dead.** The outage rule (half or more dead) stops a two-claim Mac from breaking its one dead claim on its own. That is a lead call to make, not a bug.
+- **The outage raises an alert, not an ask.** Only `approvals` writes asks; the alert goes out on the owner's push path once a day (L38).
 
 ## Running the tests
 

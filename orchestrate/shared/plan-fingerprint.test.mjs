@@ -1,4 +1,4 @@
-// plan-fingerprint.test.mjs — the one fingerprint Joe's go binds to (0b-5 M7, 0b-2 R2-M12, R2-M5).
+// plan-fingerprint.test.mjs — the one fingerprint the owner's go binds to (0b-5 M7, 0b-2 R2-M12, R2-M5).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';

@@ -1,6 +1,6 @@
 // permissions.mjs — who may create or change which document, and which fields (0b-2 M-1, R2-M12, R3-M2, R3-M3, R3-m5).
 //
-// WHY. Moves alone don't protect a card: a hand-in that also clears `needs_joe` would drop Joe's step (R2-M12). So
+// WHY. Moves alone don't protect a card: a hand-in that also clears `needs_joe` would drop the owner's step (R2-M12). So
 // every write is checked twice: the move against moves.mjs, and every changed field against this table. A field not
 // listed for that actor, entity and moment is refused, never silently dropped. Anything not listed is refused.
 //

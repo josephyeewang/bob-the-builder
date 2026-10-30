@@ -84,7 +84,7 @@ test('claim 5: a claim on a card that is not ready is refused', () => {
   board(env3);
   seed(env3, 'go', 'go-C-1', { product: PRODUCT, card_id: 'C-1', plan_fingerprint: 'f'.repeat(64) });
   const r3 = put(env3.record, 'dispatcher', 'card', 'C-1', { state: 'claimed', claim: sessionClaim() });
-  assert.match(r3.reason, /can't claim: no go from Joe/);
+  assert.match(r3.reason, /can't claim: no go from the owner/);
 });
 
 test('claim 6: a claim survives a writer restart', () => {
@@ -250,6 +250,12 @@ test('G1 outage: when half or more of this Mac\'s claims look dead at once, none
   assert.match(r.reason, /3 of 4 claims look dead at once; none is broken/);
   assert.ok(three.alerts.some((a) => a.type === 'claims_outage' && a.dead === 3));
   assert.ok(ids.every((id) => three.record.read('card', id).doc.state === 'running'));
+  // One alert per Mac per day, however many passes and cards (L38; 0b-2 audit MIN-1); a new day alerts again.
+  for (let pass = 0; pass < 2; pass++) for (const id of ids.slice(0, 3)) three.record.breakIfDead({ card: id });
+  assert.equal(three.alerts.filter((a) => a.type === 'claims_outage').length, 1);
+  three.clock.t += 24 * 60 * 60000;
+  three.record.breakIfDead({ card: 'C-1' });
+  assert.equal(three.alerts.filter((a) => a.type === 'claims_outage').length, 2);
   const two = make([100, 101]);
   assert.match(two.record.breakIfDead({ card: 'C-1' }).reason, /2 of 4/);
   const one = make([100]);

@@ -1,6 +1,6 @@
 // ready.test.mjs — R-0b-25 / R-0b-26: the one ready rule, its planted negatives, and the ready list (0b-2 M-2, m-3,
 // R2-M4, R2-M5, R2-m2, R3-M3, R3-m2). Own tests, behaviour-equivalent to BMAD's dependency rules (a cycle is refused,
-// a missing dependency blocks, a dependency that will never merge waits on Joe, many and chained dependencies);
+// a missing dependency blocks, a dependency that will never merge waits on the owner, many and chained dependencies);
 // no upstream source was available to port.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -26,19 +26,19 @@ const check = (id, doc, v, rules = R) => readyCheck({ id, doc }, v, { rules, pro
 // A card C-1 with a go, plus whatever `cards` are added.
 function withGo(doc, cards = {}, extra = {}) { return view({ cards: { 'C-1': doc, ...cards }, gos: [goFor('C-1', doc)], ...extra }); }
 
-test('ready: a card with Joe\'s go for this plan, in an active product, with no dependencies', () => {
+test('ready: a card with the owner\'s go for this plan, in an active product, with no dependencies', () => {
   const d = card();
   assert.deepEqual(check('C-1', d, withGo(d)), { ok: true });
 });
 
 test('no go, or a go for another plan, card or product, is not ready', () => {
   const d = card();
-  assert.match(check('C-1', d, view({ cards: { 'C-1': d } })).reason, /no go from Joe/);
+  assert.match(check('C-1', d, view({ cards: { 'C-1': d } })).reason, /no go from the owner/);
   const changed = card({ files: ['src/a.mjs', 'src/extra.mjs'] });
-  assert.match(check('C-1', changed, withGo(d, { 'C-1': changed })).reason, /no go from Joe/, 'planted: go with the wrong fingerprint');
+  assert.match(check('C-1', changed, withGo(d, { 'C-1': changed })).reason, /no go from the owner/, 'planted: go with the wrong fingerprint');
   for (const over of [{ card_id: 'C-2' }, { product: 'other-app' }]) {
     const v = view({ cards: { 'C-1': d }, gos: [goFor('C-1', d, over)] });
-    assert.match(check('C-1', d, v).reason, /no go from Joe/, JSON.stringify(over));
+    assert.match(check('C-1', d, v).reason, /no go from the owner/, JSON.stringify(over));
   }
   assert.match(check('C-1', card({ files: ['src/*'] }), view({ cards: {} })).reason, /can't be fingerprinted/);
 });
@@ -57,13 +57,13 @@ test('every plan input is in the fingerprint: changing any one voids the go', ()
 test('go-free kinds: listed in the rules AND made by their one allowed creator', () => {
   const d = card({ kind: 'lead_daily_card' });
   assert.equal(check('C-1', d, view({ cards: { 'C-1': d } })).ok, true);
-  assert.match(check('C-1', d, view({ cards: { 'C-1': d }, creators: { 'C-1': 'dispatcher' } })).reason, /made by dispatcher needs Joe's go/);
+  assert.match(check('C-1', d, view({ cards: { 'C-1': d }, creators: { 'C-1': 'dispatcher' } })).reason, /made by dispatcher needs the owner's go/);
   assert.match(check('C-1', d, view({ cards: { 'C-1': d }, creators: { 'C-1': null } })).reason, /unknown writer/);
   const er = card({ kind: 'exact_reverse' });
   assert.equal(check('C-1', er, view({ cards: { 'C-1': er }, creators: { 'C-1': 'dispatcher' } })).ok, true);
   // Planted: a go-free kind the rules don't list needs a go.
   const notListed = rulesFor({ 'approvals.plan_go.go_free': ['lead_daily_card'] });
-  assert.match(check('C-1', er, view({ cards: { 'C-1': er }, creators: { 'C-1': 'dispatcher' } }), notListed).reason, /no go from Joe/);
+  assert.match(check('C-1', er, view({ cards: { 'C-1': er }, creators: { 'C-1': 'dispatcher' } }), notListed).reason, /no go from the owner/);
   // An ordinary card is never go-free, whatever the rules list.
   const ord = card();
   assert.match(check('C-1', ord, view({ cards: { 'C-1': ord } }), rulesFor({ 'approvals.plan_go.go_free': ['ordinary_typo'] })).reason, /no go/);
@@ -95,13 +95,13 @@ test('a dependency that is missing, unreadable, or not yet merged blocks', () =>
   }
 });
 
-test('a dependency that will never merge (cancelled, no answer, failed) waits on Joe', () => {
+test('a dependency that will never merge (cancelled, no answer, failed) waits on the owner', () => {
   for (const s of ['cancelled', 'closed_no_answer', 'failed']) {
     const d = card({ depends_on: ['C-0'] });
     const r = check('C-1', d, withGo(d, { 'C-0': card({ state: s }) }));
     assert.equal(r.ok, false);
     assert.equal(r.joe, true, s);
-    assert.match(r.reason, /Joe decides/);
+    assert.match(r.reason, /the owner decides/);
   }
 });
 
@@ -189,7 +189,7 @@ test('the ready list: a dependency closing makes a card appear; reverting makes 
   seed(env, 'card', 'A', card({ state: 'reverted' }));
   assert.deepEqual(ids(), ['C'], 'A reverted: B disappears');
   seed(env, 'card', 'A', card({ state: 'cancelled' }));
-  assert.deepEqual(ids(), ['C'], 'A cancelled: B waits on Joe, not listed');
+  assert.deepEqual(ids(), ['C'], 'A cancelled: B waits on the owner, not listed');
   // A plan edited after the go (planted: a seeded edit past the writer) drops the card off the list.
   seed(env, 'card', 'C', { ...env.record.read('card', 'C').doc, files: ['src/changed.mjs'] });
   assert.deepEqual(ids(), []);

@@ -11,10 +11,10 @@
 //     { ok: true, key, kind, spec, header, body, sha256, realpath } | { ok: false, key, reason }
 //   `key` is the file's identity for "seen before": its real path and sha256 (R3-m7). An unsafe file that can't be read
 //   is keyed by its path and the reason, so the same refusal is reported once.
-//   `uids` maps a role to the uid that must own its files (Joe's user in production).
+//   `uids` maps a role to the uid that must own its files (the owner's user in production).
 
 import { createHash } from 'node:crypto';
-import { closeSync, fstatSync, openSync, readSync, realpathSync, constants } from 'node:fs';
+import { closeSync, fstatSync, lstatSync, openSync, readSync, realpathSync, constants } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { OUTBOX_KINDS, SESSION_ID } from '../../shared/record.mjs';
 
@@ -36,7 +36,12 @@ export function readOutboxFile({ outboxRoot, uids = {}, tag, file }) {
 
   let real; let folder;
   try { real = realpathSync(given); } catch { return no('file not found'); }
-  try { folder = realpathSync(join(outboxRoot, tag.role, tag.sessionId)); } catch { return no(`no outbox folder for ${tag.role} ${tag.sessionId}`); }
+  // The role and session folders themselves may not be links: a session folder linked to another's would hand that
+  // session's files in under this tag (0b-2 audit MIN-5).
+  try {
+    for (const p of [join(outboxRoot, tag.role), join(outboxRoot, tag.role, tag.sessionId)]) if (lstatSync(p).isSymbolicLink()) return no(`outbox folder ${basename(p)} is a link`);
+    folder = realpathSync(join(outboxRoot, tag.role, tag.sessionId));
+  } catch { return no(`no outbox folder for ${tag.role} ${tag.sessionId}`); }
   if (dirname(real) !== folder) return no(`file is not directly inside the ${tag.role} outbox of session ${tag.sessionId}`);
   // The name given must be the file itself, not a link to it: realpath follows links, O_NOFOLLOW checks the last part.
   if (basename(given) !== basename(real)) return no('file is a link');

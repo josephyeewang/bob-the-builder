@@ -1,6 +1,6 @@
-// plan-fingerprint.mjs — the one fingerprint of a card's plan, which Joe's go binds to (0b-5 M7, 0b-2 R2-M12, R2-M5).
+// plan-fingerprint.mjs — the one fingerprint of a card's plan, which the owner's go binds to (0b-5 M7, 0b-2 R2-M12, R2-M5).
 //
-// WHY. A go from Joe counts only for the plan he saw. M2 Approvals stores the fingerprint on the go; M9 Record
+// WHY. A go from the owner counts only for the plan they saw. M2 Approvals stores the fingerprint on the go; M9 Record
 // recomputes it from the card's current fields at `draft → ready` and finds a go with the same hash. Both import this
 // file, so the two can't disagree. The card stores no trusted fingerprint of its own.
 //
