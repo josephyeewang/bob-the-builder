@@ -227,7 +227,8 @@ export function readSubjectOnce(subject) {
   for (const k of SUBJECT_FIELDS) { const v = subject[k]; if (v !== undefined) s[k] = v; }
   if (Array.isArray(s.labels)) {
     const n = s.labels.length;
-    if (n > 1000) s.labels = 'more than 1000 labels';
+    if (!Number.isSafeInteger(n) || n < 0) s.labels = 'the label count is not a whole number';   // round 3, m-5
+    else if (n > 1000) s.labels = 'more than 1000 labels';
     else { const copy = new Array(n); for (let i = 0; i < n; i++) copy[i] = s.labels[i]; s.labels = copy; }
   }
   s.files = readFilesOnce(subject.files);
@@ -239,6 +240,7 @@ export function readSubjectOnce(subject) {
 // scripts is ever complete (audit rounds 13 to 15), and a false alarm costs Joe one tap (lead call L32).
 export function needsJoe(label) {
   if (typeof label !== 'string') return null;
+  if (label.length > 256) return '';   // no real label is this long; searching one is slow (round 3, MAT-2)
   if (/[^\x20-\x7e]/.test(label)) return '';
   const l = label.toLowerCase().replace(/[^a-z_:]/g, '');
   const m = /^[_:]*needs[_:]*joe/.exec(l);

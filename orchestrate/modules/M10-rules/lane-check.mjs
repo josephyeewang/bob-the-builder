@@ -21,14 +21,20 @@ export const DOCS_FLOOR = compileList(['docs/*.md', 'docs/domains/**', 'docs/res
 // list is complete, so settings formats (JSON, YAML) are left out of the lane altogether (TEXT below).
 const NOT_DOCS = compileList(['**/AGENTS.override.md', '**/AGENT.md', '**/GEMINI.md', '**/WARP.md', '**/CRUSH.md', '**/QWEN.md',
   '**/copilot-instructions.md', '**/CONVENTIONS.md', '**/SKILL.md', '**/commands/**', '**/skills/**', '**/agents/**', '**/rules/**',
-  '**/pull_request_template.md', '**/PULL_REQUEST_TEMPLATE/**', '**/ISSUE_TEMPLATE/**', '**/SECURITY.md']);
+  '**/pull_request_template.md', '**/PULL_REQUEST_TEMPLATE/**', '**/ISSUE_TEMPLATE/**', '**/SECURITY.md',
+  '**/IFLOW.md', '**/CODEBUDDY.md', '**/*.instructions.md', '**/*.prompt.md', '**/*.agent.md', '**/llms.txt', '**/llms-full.txt',
+  // GitHub shows these as the repository's own pages (README in docs/ when the root has none): public, so ask-first (m-3).
+  'docs/README.md', '**/CONTRIBUTING.md', '**/CODE_OF_CONDUCT.md', '**/SUPPORT.md', '**/GOVERNANCE.md']);
 // A path this long or deep is no doc; refusing it keeps the pattern checks quick (m1: 95 s at 2,000 folders).
 const MAX_PATH = 512;
 const MAX_DEPTH = 16;
+// GitHub caps a label at 50 characters; a longer one is refused before it is searched (round 3, MAT-2: 10 MB labels took 11 s).
+const MAX_LABEL = 256;
 // Plain text only. No images, PDFs or other binaries (L28), nothing that can run (`.mdx`, `.html`, `.svg`), and no
 // JSON or YAML: tools read too many such names as settings to list them all (confirm audit round 2, m-2).
 const TEXT = /\.(md|txt|csv)$/i;
 const STATUSES = ['added', 'modified', 'renamed', 'copied'];   // a removal is never the docs lane's here
+const quote = (p) => JSON.stringify(String(p).slice(0, 80));   // a reason never copies a huge path (m-6)
 const list = (v) => (Array.isArray(v) ? v : v == null ? [] : [v]);
 
 export function docsLaneProblem(policy, change) {
@@ -36,8 +42,9 @@ export function docsLaneProblem(policy, change) {
     return problem(policy, change);
   } catch (e) {
     // The thrown thing may itself be hostile (a revoked proxy, a message that throws), so reading it is guarded too.
+    // The message is read once: a getter could answer text to the test and something hostile after (round 3, MAT-1).
     let why = 'unknown error';
-    try { if (typeof e?.message === 'string') why = e.message.slice(0, 200); } catch { /* keep the fixed text */ }
+    try { const m = e?.message; if (typeof m === 'string') why = m.slice(0, 200); } catch { /* keep the fixed text */ }
     return `could not be read (${why})`;
   }
 }
@@ -69,10 +76,12 @@ function problem(policy, change) {
   // Lists are read by position: a list's own iterator can hide entries (m2).
   const labels = given === undefined ? [] : given;
   const n = labels.length;
-  if (!(n <= 1000)) return 'more than 1000 labels';
+  if (!Number.isSafeInteger(n) || n < 0) return 'the label count is not a whole number';
+  if (n > 1000) return 'more than 1000 labels';
   for (let i = 0; i < n; i++) {
     const l = labels[i];
     if (typeof l !== 'string') return 'a label is not text';
+    if (l.length > MAX_LABEL) return `a label is over ${MAX_LABEL} characters`;
     if (needsJoe(l) !== null) return `label ${JSON.stringify(l)} asks for Joe`;
   }
   if (!Array.isArray(files)) return 'no files';
@@ -83,11 +92,11 @@ function problem(policy, change) {
     const f = files[i];
     if (!f || typeof f !== 'object') return 'a file entry is not an object';
     const { path, previous_path: prev, status, mode } = f;
-    if (!STATUSES.includes(status)) return `${JSON.stringify(path)}: status ${JSON.stringify(status)} is not the docs lane's`;
-    if ((status === 'renamed' || status === 'copied') !== (prev !== undefined)) return `${JSON.stringify(path)}: an old name goes with a rename or copy only`;
-    if (mode !== undefined && mode !== '100644' && mode !== 100644) return `${JSON.stringify(path)}: mode ${JSON.stringify(mode)} is a link, submodule or runnable file`;
+    if (!STATUSES.includes(status)) return `${quote(path)}: status ${quote(status)} is not the docs lane's`;
+    if ((status === 'renamed' || status === 'copied') !== (prev !== undefined)) return `${quote(path)}: an old name goes with a rename or copy only`;
+    if (mode !== undefined && mode !== '100644' && mode !== 100644) return `${quote(path)}: mode ${quote(mode)} is a link, submodule or runnable file`;
     for (const p of prev === undefined ? [path] : [path, prev]) {
-      if (typeof p !== 'string' || p.length > MAX_PATH || p.split('/').length > MAX_DEPTH) return `${JSON.stringify(String(p).slice(0, 80))}: too long or too deep for a doc`;
+      if (typeof p !== 'string' || p.length > MAX_PATH || p.split('/').length > MAX_DEPTH) return `${quote(p)}: too long or too deep for a doc`;
       const bad = pathProblem(p);
       if (bad) return `${JSON.stringify(p)}: ${bad}`;
       const seg = p.split('/');

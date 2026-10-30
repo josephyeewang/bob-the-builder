@@ -40,6 +40,7 @@ test('anything outside the lane, protected, removed, linked, runnable or binary 
     [f('docs/research/../../lib/a.md')], [f('docs/research/./a.md')], [f('docs//research/a.md')], [f('/docs/research/a.md')], [f('docs\\research\\a.md')],
     [f('docs/research/é.md')], [f('docs/research/a​.md')], [f('docs/research/a.md\0')], [f('docs/research/.github/a.md')], [f('docs/research/.claude/x.md')],
     [f('docs/research/AGENTS.md')], [f('docs/CLAUDE.md')], [{ status: 'modified' }], [null], ['docs/research/a.md'],
+    [Object.assign(() => {}, { path: 'docs/research/a.md', status: 'modified' })],
   ];
   for (const files of REFUSED) assert.ok(check(files), JSON.stringify(files));
 });
@@ -62,6 +63,12 @@ test('the rules file can only narrow the lane: its protected, Tier 1 and effect 
   assert.ok(check([f('docs/research/a.md')], {}, add('tiers:\n  paths:\n', 'tiers:\n  paths:\n    - pattern: docs/research/**\n      tier: 1\n')));
   assert.ok(check([f('docs/research/x.md', 'added')], {}, add('new_files_under: [app/]', 'new_files_under: [app/, docs/research/]')));
   assert.ok(check([f('docs/research/a.md')], {}, add('sender_paths: [lib/mail/, lib/alerts/]', 'sender_paths: [lib/mail/, docs/research/]')));
+  // Each of the rules' effect paths, one at a time (round 3, m-1).
+  assert.equal(check([f('docs/research/a.md')]), null);
+  assert.ok(check([f('docs/research/a.md')], {}, add('files: [next.config.*, middleware.ts, env.schema.ts]', 'files: [next.config.*, docs/research/a.md]')), 'secrets file');
+  assert.ok(check([f('docs/research/a.md')], {}, add('migration_paths: [db/migrations/]', 'migration_paths: [db/migrations/, docs/research/]')), 'migrations');
+  assert.ok(check([f('docs/research/a.md')], {}, add('repair_folder: [db/repairs/]', 'repair_folder: [db/repairs/, docs/research/]')), 'repairs');
+  assert.ok(check([f('docs/research/a.md')], {}, add('flag_files: [lib/flags.ts]', 'flag_files: [lib/flags.ts, docs/research/a.md]')), 'flag file');
   assert.ok(check([f('docs/x.md')], {}, add('  docs:\n    - docs/*.md\n', '  docs:\n    - docs/domains/**\n')), 'a lane the rules leave out');
   // A rules lane wider than the floor is still held to the floor.
   assert.ok(check([f('docs/sub/x.md')], {}, add('  docs:\n    - docs/*.md\n', '  docs:\n    - docs/**\n')));
@@ -234,4 +241,32 @@ test('the built-in floor, the exact length and depth edges and an undo\'s kind e
   for (const kind of ['reverse', undefined, 'EXACT_REVERSE']) {
     assert.equal(merge(rulesFor('paused'), [f('docs/research/a.md')], { ...undo('failure'), kind }).decision, 'deny', String(kind));
   }
+});
+
+test('round 3: a hostile error message, long labels, a label count that is not a number, a huge path, more instruction and repository-page names', () => {
+  const ok = [f('docs/research/a.md')];
+  // MAT-1: a message that is text when first read and hostile after.
+  let reads = 0;
+  const bad = { get message() { reads++; return reads === 1 ? 'ok' : { slice: () => ({ toString() { throw new Error('x'); } }) }; } };
+  const c = change(ok); Object.defineProperty(c, 'truncated', { get() { throw bad; } });
+  assert.match(docsLaneProblem(POL, c), /^could not be read/);
+  assert.equal(reads, 1, 'the message is read once');
+  // MAT-2: a long label is refused before it is searched, and quickly.
+  const big = 'a'.repeat(10_000_000);
+  const t0 = Date.now();
+  assert.match(check(ok, { labels: Array(1000).fill(big) }), /over 256 characters/);
+  assert.ok(Date.now() - t0 < 1000, 'quick');
+  assert.equal(check(ok, { labels: ['a'.repeat(256)] }), null);
+  assert.ok(check(ok, { labels: ['a'.repeat(257)] }));
+  // m-5: a list whose count is not a whole number.
+  for (const n of ['abc', 1.5, -1, NaN]) {
+    const l = new Proxy(['needs-joe'], { get: (t, k) => (k === 'length' ? n : t[k]) });
+    assert.ok(check(ok, { labels: l }), String(n));
+  }
+  // m-6: a huge path is cut short in the reason.
+  assert.ok(check([f('docs/research/' + 'a'.repeat(1_000_000) + '.md', 'removed')]).length < 300);
+  // m-2, m-3.
+  for (const p of ['docs/research/IFLOW.md', 'docs/research/CODEBUDDY.md', 'docs/research/x.instructions.md', 'docs/research/x.prompt.md',
+    'docs/research/x.agent.md', 'docs/research/llms.txt', 'docs/research/llms-full.txt', 'docs/CONTRIBUTING.md', 'docs/CODE_OF_CONDUCT.md',
+    'docs/SUPPORT.md', 'docs/README.md', 'docs/GOVERNANCE.md']) assert.ok(check([f(p)]), p);
 });
