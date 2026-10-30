@@ -32,7 +32,7 @@ export async function undoStep({ rec, rules, now, filesOf, alert }) {
     if (doc.kind !== 'undo' || doc.state !== 'answered') continue;
     const held = async (cause, what) => {
       out.push([id, what]);
-      try { await holdAlert({ rec, cause: `undo-tap-${id}-${cause}`, text: `your Undo tap (ask ${id}, PR ${doc.pr ?? '?'}) is not acted on: ${what}`, alert, now }); }
+      try { holdAlert({ rec, cause: `undo-tap-${id}-${cause}`, text: `your Undo tap (ask ${id}, PR ${doc.pr ?? '?'}) is not acted on: ${what}`, alert, now }); }
       catch { /* the record is unwritable: the step's own error says so */ }
     };
     try { await tap({ rec, rules, now, filesOf, alert, out, held, id, rev, doc }); }
@@ -59,7 +59,7 @@ async function tap({ rec, rules, now, filesOf, alert, out, held, id, rev, doc })
     if (!w.ok) {
       // Joe tapped Undo: a card that cannot be written (say, its module is unknown) is told to him, once a day.
       out.push([id, `undo card not recorded: ${w.reason}`]);
-      await holdAlert({ rec, cause: `undo-tap-${id}-not-recorded`, text: `your Undo of PR ${doc.pr} could not be queued: ${w.reason}; the Lead has to queue it by hand`, alert, now });
+      holdAlert({ rec, cause: `undo-tap-${id}-not-recorded`, text: `your Undo of PR ${doc.pr} could not be queued: ${w.reason}; the Lead has to queue it by hand`, alert, now });
       return;
     }
   }

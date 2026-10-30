@@ -1,11 +1,16 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
-import { dispatcherPass, stopPass, undoStarts, stopProcessGroup, STOP_FACT, LIMIT_FACT, UNDO_HELD_FACT, PAUSE_FACT, RULES_MISSING_FACT, rulesMissingAlert } from './pass.mjs';
+import { dispatcherPass as dispatcherPass0, stopPass as stopPass0, undoStarts, stopProcessGroup, STOP_FACT, LIMIT_FACT, UNDO_HELD_FACT, PAUSE_FACT, RULES_MISSING_FACT, rulesMissingAlert as rulesMissingAlert0 } from './pass.mjs';
 import { USAGE_FACT, BAND_FACT } from './usage.mjs';
 import { OUTAGE_FACT } from './outage.mjs';
 import { KEYS as K } from './keys.mjs';
-import { rulesWith, recWith, usageFact, undoEntries, filesOfCommits, T0, MIN, H, iso } from './fixtures.test-helper.mjs';
+import { rulesWith, recWith, usageFact, undoEntries, filesOfCommits, T0, MIN, H, iso, withAlerts } from './fixtures.test-helper.mjs';
+
+// Each step runs as the tick runs it: its alerts are queued, then sent once it is done (alerts.mjs, L47).
+const dispatcherPass = (a) => withAlerts(a.rec, a.now, a.alert ?? (() => {}), (alert) => dispatcherPass0({ ...a, alert }));
+const stopPass = (a) => withAlerts(a.rec, a.now, a.alert ?? (() => {}), (alert) => stopPass0({ ...a, alert }));
+const rulesMissingAlert = (a) => withAlerts(a.rec, a.now, a.alert ?? (() => {}), (alert) => rulesMissingAlert0({ ...a, alert }));
 
 const ACCT = 'acct-a';
 const GREEN = { week: 30, h5: 20 };
@@ -395,7 +400,8 @@ test('audit MAT-2: a cancel still stops when the rules lack a value: cancel_grac
 });
 
 test('audit MAT-4: a fix card the undo step writes is never started as a worker; nor is any card for the Lead', async () => {
-  const { undoStep, FIX_CARD, REVERSE_FACT, UNDO_CARD } = await import('./undo.mjs');
+  const { undoStep: undoStep0, FIX_CARD, REVERSE_FACT, UNDO_CARD } = await import('./undo.mjs');
+  const undoStep = (a) => withAlerts(a.rec, a.now, a.alert, (alert) => undoStep0({ ...a, alert }));
   const U = UNDO_CARD('A-1');
   const w = world([['card', U, { state: 'merged', kind: 'undo', pr: 7, product: 'p1', module: 'M-test', tier: 2 }],
     ['fact', REVERSE_FACT(U), { state: 'not_clean', reason: 'a later change touched src/a.js' }],
@@ -630,6 +636,18 @@ test('audit 0b-6 r3 MAT-3: the missing-values alert names only keys not told bef
   await tell([], false);
   assert.equal(rec.read('fact', RULES_MISSING_FACT).doc.keys, 'b, c', 'an incomplete tick keeps what it did not read');
   assert.equal(alerts.length, 2);
+});
+
+test('audit 0b-6 r6 m-5: a new missing value told alone keeps the day clock of the values told before', async () => {
+  const rec = recWith();
+  const alerts = [];
+  const tell = (keys, at) => rulesMissingAlert({ rec, keys, alert: (t) => alerts.push(t), now: at });
+  await tell(['a'], T0);
+  await tell(['a', 'b'], T0 + 12 * H);
+  assert.match(alerts.at(-1), /no value for b:/);
+  await tell(['a', 'b'], T0 + 24 * H);
+  assert.equal(alerts.length, 3, alerts.join(' | '));
+  assert.match(alerts.at(-1), /no value for a, b:/, 'a day after a was first told, both are told again');
 });
 
 // Audit 0b-6 r4 MAT-1: a time limit on every stop and save, and the stops side by side.

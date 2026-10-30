@@ -41,7 +41,8 @@ import { timeLimits, requestMerges } from './merges.mjs';
 import { undoStep } from './undo.mjs';
 import { phoneLinkStep } from './phone-link.mjs';
 import { cleanupPass } from './cleanup.mjs';
-import { move, waitOn, note, tellThen } from './moves.mjs';
+import { move, waitOn, note } from './moves.mjs';
+import { outbox, tellThen, sendAlerts } from './alerts.mjs';
 import { takePassLock } from './pass-lock.mjs';
 
 export const STEPS = Object.freeze(['stops', 'undo', 'undo-starts', 'outage', 'intake', 'leads', 'pass', 'limits', 'merges', 'phone', 'cleanup']);
@@ -81,52 +82,13 @@ export function actOnDead({ rec, now, restart, asks, cards = {} }) {
 }
 
 /**
- * The alert port as every step gets it (audit 0b-6 r4 MAT-2): an alert that throws or rejects never
- * fails a step, or skips the steps after it. An alert that fails is not lost (audit 0b-6 r5 MAT-2): its
- * text goes on the fact `alert-unsent`, and the next pass sends it again before its steps run
- * (`resendAlerts`), until it goes through. That covers the one-off alerts (an event told once); a cause
- * marked told is marked only after its send went through (`tellThen`, moves.mjs). The queue keeps at most ALERT_QUEUE_MAX texts, the newest; the oldest
- * dropped are counted in the next text sent.
- */
-export const ALERT_QUEUE_FACT = 'alert-unsent';
-export const ALERT_QUEUE_MAX = 50;
-function queueAlert(rec, text, e, now, queue = true) {
-  try {
-    const d = rec.read('fact', ALERT_QUEUE_FACT)?.doc ?? {};
-    // A send through `tellThen` is not queued (its own step tells again), but its error is still recorded.
-    const all = [...(Array.isArray(d.texts) ? d.texts : []).filter((t) => t !== text), ...(queue ? [text] : [])];
-    const over = Math.max(0, all.length - ALERT_QUEUE_MAX);
-    putFact(rec, ALERT_QUEUE_FACT, { texts: all.slice(over), dropped: (d.dropped ?? 0) + over, error: String(e?.message ?? e), at: iso(now) }, 'alert_failed');
-  } catch { /* the record is unwritable too: the pass itself fails and tells */ }
-}
-// It answers a promise of whether the send went through, and never throws or rejects. A send through
-// `tellThen` (moves.mjs) passes { queue: false }: that step marks its cause told only after a send that
-// went through, and tries again itself.
-export function safeAlert(rec, alert, now) {
-  return (text, { queue = true } = {}) => {
-    const failed = (e) => { queueAlert(rec, text, e, now, queue); return false; };
-    try { const r = alert(text); return typeof r?.then === 'function' ? r.then(() => true, failed) : Promise.resolve(true); } catch (e) { return Promise.resolve(failed(e)); }
-  };
-}
-
-/** Sends again every alert a past pass could not send (see `safeAlert`); one that fails again stays queued. */
-export function resendAlerts(rec, alert, now) {
-  const d = rec.read('fact', ALERT_QUEUE_FACT)?.doc;
-  const texts = Array.isArray(d?.texts) ? d.texts : [];
-  if (!texts.length) return 0;
-  putFact(rec, ALERT_QUEUE_FACT, { texts: [], dropped: 0, error: null, at: iso(now) }, 'alert_resent');
-  const send = safeAlert(rec, alert, now);
-  texts.forEach((t, i) => send(i === 0 && d.dropped ? `${t} (${d.dropped} older alerts could not be sent and were dropped)` : t));
-  return texts.length;
-}
-
-/**
  * One full pass. `ports` holds every outside effect (see README, "The tick's ports"); each step reads
  * only the ports it needs. Returns { steps: { name: { ok, result | error } } }.
  */
 export async function tick({ rec, rules, now, ports: p }) {
   const res = {};
-  const alert = safeAlert(rec, p.alert, now);
+  // Every alert is queued (alerts.mjs, L47): no step sends or waits on a send. The queue is sent at the end.
+  const alert = outbox(rec, now);
   let bands = null;
   let running = [];
   const deadline = p.stepDeadlineMs ?? STEP_DEADLINE_MS;
@@ -147,7 +109,7 @@ export async function tick({ rec, rules, now, ports: p }) {
       const cause = error.replace(/\d+/g, 'N');
       if (seen?.error !== error) putFact(rec, STEP_ERROR_FACT(step), { ...seen, error, at: iso(now) }, 'step_error');
       if (seen?.told_cause !== cause || !(now - Date.parse(seen?.told_at ?? '') < HOLD_REPEAT_MS)) {
-        await tellThen(alert, `the Dispatcher's ${step} step failed: ${error}; the other steps still ran`, () => putFact(rec, STEP_ERROR_FACT(step), { ...rec.read('fact', STEP_ERROR_FACT(step))?.doc, error, told_cause: cause, told_at: iso(now) }, 'step_error'));
+        tellThen(alert, `the Dispatcher's ${step} step failed: ${error}; the other steps still ran`, { fact: STEP_ERROR_FACT(step), fields: { told_cause: cause, told_at: iso(now) }, kind: 'step_error' });
       }
     } finally { clearTimeout(timer); }
   };
@@ -173,7 +135,6 @@ export async function tick({ rec, rules, now, ports: p }) {
   });
 
   // Alerts a past pass could not send go out now, after the safety acts (audit 0b-6 r5 MAT-2).
-  try { resendAlerts(rec, p.alert, now); } catch { /* the record is unreadable: the steps below fail and tell */ }
   let outageOpen = false;
   // A failing outage step falls back on the record (audit 0b-6 r3 MIN-1): an open outage still holds.
   try { outageOpen = rec.read('fact', OUTAGE_FACT)?.doc?.state === 'open'; } catch { outageOpen = true; }
@@ -227,10 +188,10 @@ export async function tick({ rec, rules, now, ports: p }) {
   // No silent hold (L38). The band is not told while the account is unknown: that hold is the account's.
   try {
     // A missing rules value is told by the missing-values alert, not twice.
-    if (acct.reason && !acct.missing) await holdAlert({ rec, cause: 'account', text: `nothing new starts but undo cards: ${acct.reason}`, alert, now });
+    if (acct.reason && !acct.missing) holdAlert({ rec, cause: 'account', text: `nothing new starts but undo cards: ${acct.reason}`, alert, now });
     const band = stops?.bands ?? bands;
     if (!acct.reason && band && ['red', 'unknown'].includes(band.band)) {
-      await holdAlert({ rec, cause: `band-${band.band}`, text: `the usage band is ${band.band}${band.reason ? ` (${band.reason})` : ''}: work it holds waits; stops and undo still run`, alert, now });
+      holdAlert({ rec, cause: `band-${band.band}`, text: `the usage band is ${band.band}${band.reason ? ` (${band.reason})` : ''}: work it holds waits; stops and undo still run`, alert, now });
     }
   } catch (e) { alert(`the Dispatcher could not record a hold: ${e?.message ?? e}`); }
   await run('phone', () => phoneLinkStep({ rec, rules, now, send: p.sendFrontDoor, restartFrontDoor: p.restartFrontDoor, startMinibase: p.startMinibase,
@@ -238,7 +199,9 @@ export async function tick({ rec, rules, now, ports: p }) {
   await run('cleanup', () => cleanupPass({ rec, rules, now, ...p.cleanup, alert }));
 
   putFact(rec, LAST_PASS_FACT, { at: iso(now), steps: Object.fromEntries(STEPS.map((s) => [s, res[s]?.ok ? 'ok' : 'failed'])) }, 'full_pass');
-  return { steps: res };
+  // The one sender (alerts.mjs), last: every step, the safety acts first, has run before any send is waited on.
+  const alerts = await sendAlerts(rec, p.alert, now, { ...(p.alertSendMs !== undefined && { sendMs: p.alertSendMs }), budgetMs: deadline });
+  return { steps: res, alerts };
 }
 
 /** The login job's entry: one full pass under the single-instance lock (M16). */
@@ -247,7 +210,7 @@ export async function runTick({ lockFile, lock = takePassLock, ...args }) {
   // A lock left by a dead pass: the last run was killed (the run deadline, the watchdog in main.mjs, a
   // crash) before it finished. Joe is told, once a day (L38); this pass runs as usual.
   if (l.ok && l.broke) {
-    try { await holdAlert({ rec: args.rec, cause: 'run-late', text: `the last Dispatcher pass (taken ${l.broke.taken_at ?? 'at an unknown time'}) was stopped before it finished; this pass runs as usual`, alert: safeAlert(args.rec, args.ports.alert, args.now), now: args.now }); }
+    try { holdAlert({ rec: args.rec, cause: 'run-late', text: `the last Dispatcher pass (taken ${l.broke.taken_at ?? 'at an unknown time'}) was stopped before it finished; this pass runs as usual`, alert: outbox(args.rec, args.now), now: args.now }); }
     catch { /* the record is unwritable: the pass itself will fail and tell */ }
   }
   if (!l.ok) {

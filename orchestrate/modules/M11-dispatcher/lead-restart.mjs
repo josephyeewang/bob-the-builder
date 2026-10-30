@@ -15,7 +15,7 @@
 // The step's progress is the fact `lead-restart-<session>`.
 
 import { KEYS, need } from './keys.mjs';
-import { tellThen } from './moves.mjs';
+import { tellThen } from './alerts.mjs';
 import { ENTITIES } from '../../shared/record.mjs';
 
 export const RESTART_FACT = (sid) => `lead-restart-${sid}`;
@@ -78,7 +78,7 @@ export async function leadRestartStep({ rec, rules, now, lead, size, inFlight, s
   const noSize = !size || size.tokens == null;
   // Told only once sent (audit 0b-6 r5 MAT-2).
   if (!noSize && size.tokens > hard + HARD_MARGIN && !st.hard_told) {
-    await tellThen(alert, `the Lead ${sid} is at ${size.tokens} tokens, past ${hard} + ${HARD_MARGIN}: its compaction did not happen`, () => save({ hard_told: true }, 'lead_hard_alert'));
+    tellThen(alert, `the Lead ${sid} is at ${size.tokens} tokens, past ${hard} + ${HARD_MARGIN}: its compaction did not happen`, { fact: RESTART_FACT(sid), fields: { hard_told: true }, kind: 'lead_hard_alert' });
   }
   if (['done', 'gave_up'].includes(st.phase)) return st.phase;
   // The old Lead is stopped and the new one did not start (audit 0b-6 r2 MIN-1): try again every pass,
@@ -124,7 +124,7 @@ export async function leadRestartStep({ rec, rules, now, lead, size, inFlight, s
     try { stopped = await stopSession(); } catch (e) { stopped = { ok: false, reason: e.message }; }
     if (!stopped?.ok) {
       save({ stop_failed_at: iso(now) }, 'lead_stop_failed');
-      if (!st.stop_told) await tellThen(alert, `the Lead ${sid} handed off but could not be stopped (${stopped?.reason ?? 'no answer'}); no new Lead starts until it is`, () => save({ stop_told: true }, 'lead_stop_failed'));
+      if (!st.stop_told) tellThen(alert, `the Lead ${sid} handed off but could not be stopped (${stopped?.reason ?? 'no answer'}); no new Lead starts until it is`, { fact: RESTART_FACT(sid), fields: { stop_told: true }, kind: 'lead_stop_failed' });
       return 'old Lead not stopped; tried again next pass';
     }
     let started;

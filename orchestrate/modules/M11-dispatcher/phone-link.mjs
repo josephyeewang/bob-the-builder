@@ -19,7 +19,8 @@
 // The step's memory is the fact `phone-link`. A reading counts once (by its observed_at).
 
 import { KEYS, minutes } from './keys.mjs';
-import { note, tellThen } from './moves.mjs';
+import { note } from './moves.mjs';
+import { tellThen } from './alerts.mjs';
 
 export const LINK_FACT = 'phone-link';
 export const FACTS = Object.freeze({ network: 'network-up', reachable: 'frontdoor-reachable', minibase: 'minibase-running' });
@@ -113,7 +114,7 @@ export async function phoneLinkStep({ rec, rules, now, send, restartFrontDoor, s
   if (st.attempts > 0) st.failures += 1; // the last try did not bring the link back
   // Told only once sent (audit 0b-6 r5 MAT-2).
   if (st.failures >= ALERT_AFTER_FAILURES && !st.told) {
-    await tellThen(alert, `the phone cannot reach the Front Door; ${st.failures} tries to reconnect it failed`, () => { st.told = true; });
+    tellThen(alert, `the phone cannot reach the Front Door; ${st.failures} tries to reconnect it failed`, { fact: LINK_FACT, fields: { told: true }, kind: 'phone_link' });
   }
   const r = await send(REMOTE_CONTROL);
   st.attempts += 1;

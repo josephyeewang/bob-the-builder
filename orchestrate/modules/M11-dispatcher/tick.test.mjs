@@ -8,7 +8,8 @@ import { RULES_MISSING_FACT } from './pass.mjs';
 import { tempDir } from '../../shared/test-tmp.mjs';
 import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
-import { tick, runTick, signedInAccount, actOnDead, safeAlert, resendAlerts, ALERT_QUEUE_MAX, STEPS, ACCOUNT_FACT, LAST_PASS_FACT, STEP_ERROR_FACT } from './tick.mjs';
+import { tick, runTick, signedInAccount, actOnDead, STEPS, ACCOUNT_FACT, LAST_PASS_FACT, STEP_ERROR_FACT } from './tick.mjs';
+import { queueAlert, sendAlerts, ALERT_QUEUE_MAX, ALERT_QUEUE_FACT } from './alerts.mjs';
 import { main } from './main.mjs';
 import { MERGE_REQUEST } from './merges.mjs';
 import { OUTAGE_FACT } from './outage.mjs';
@@ -715,23 +716,60 @@ test('r5 MAT-2: an alert that fails once is sent on the next pass, for a hold an
     await w.pass(1);
     assert.equal(sent.filter((t) => /could not be stopped/.test(t)).length, 1, `${label}: ${sent.join(' | ')}`);
     assert.equal(sent.filter((t) => /signed-in account/.test(t)).length, 1, `${label}: ${sent.join(' | ')}`);
-    assert.deepEqual(w.rec.read('fact', 'alert-unsent')?.doc?.texts, [], `${label}: the queue is empty once sent`);
+    assert.deepEqual(w.rec.read('fact', 'alert-unsent')?.doc?.entries, [], `${label}: the queue is empty once sent`);
   }
 });
 
-test('r5 MAT-2: the unsent queue keeps the newest texts, once each, and counts what it dropped', () => {
+test('r5 MAT-2 / L47: the outbox keeps the newest entries, one per cause or text, and counts what it dropped', async () => {
   const rec = recWith([]);
-  const send = safeAlert(rec, () => { throw new Error('down'); }, 0);
-  for (let i = 0; i < ALERT_QUEUE_MAX + 5; i += 1) send(`t${i}`);
-  send('t10');
-  const d = rec.read('fact', 'alert-unsent').doc;
-  assert.equal(d.texts.length, ALERT_QUEUE_MAX);
-  assert.equal(d.texts.at(-1), 't10');
-  assert.equal(new Set(d.texts).size, d.texts.length);
-  assert.equal(d.dropped, 5);
+  for (let i = 0; i < ALERT_QUEUE_MAX + 5; i += 1) queueAlert(rec, `t${i}`, { now: T0 });
+  queueAlert(rec, 't10', { now: T0 });
+  queueAlert(rec, 'stop A first', { now: T0, mark: { fact: 'stop-A', fields: { told_at: 'x' } } });
+  queueAlert(rec, 'stop A again', { now: T0, mark: { fact: 'stop-A', fields: { told_at: 'y' } } });
+  const d = rec.read('fact', ALERT_QUEUE_FACT).doc;
+  const texts = d.entries.map((e) => e.text);
+  assert.equal(texts.length, ALERT_QUEUE_MAX);
+  assert.equal(new Set(texts).size, texts.length);
+  assert.ok(texts.includes('t10') && !texts.includes('stop A first') && texts.at(-1) === 'stop A again', texts.join(' | '));
+  assert.equal(d.dropped, 6);
   const got = [];
-  assert.equal(resendAlerts(rec, (t) => got.push(t), 1), ALERT_QUEUE_MAX);
-  assert.match(got[0], /5 older alerts could not be sent/);
+  const r = await sendAlerts(rec, (t) => got.push(t), T0, { sendMs: 100, budgetMs: 60_000 });
+  assert.equal(r.sent, ALERT_QUEUE_MAX);
+  assert.match(got[0], /6 older alerts could not be sent/);
+  assert.equal(rec.read('fact', 'stop-A').doc.told_at, 'y', 'the mark of the copy delivered');
+});
+
+// L47: no safety step waits on a send. The alert port hangs for good: the failed stop is told, the undo
+// still starts, the tick ends near the send deadline, and the port is first called after every stop and
+// start. Once the port works, each cause is delivered once and only then marked told.
+test('L47: a send that hangs delays no safety act and loses no alert', async () => {
+  const order = [];
+  let hang = true;
+  const sent = [];
+  const running = [{ id: 'S-X', product: 'p1', kind: 'editing', card: 'X-1', pgid: 98 }];
+  const w = world([usage(), card('X-1', { state: 'cancelled', session: 'S-X' }), ...undoEntries('U-1')], { over: {
+    alert: (t) => { order.push('alert'); return hang ? new Promise(() => {}) : sent.push(t); },
+    sessions: () => running,
+    stopGroup: async () => { order.push('stop'); return { ok: false, reason: 'EPERM' }; },
+    launch: async ({ card: c }) => { order.push(`launch ${c.id}`); return { ok: true, sessionId: 'S-U', pgid: 200, head: HEAD }; },
+    alertSendMs: 50, stepDeadlineMs: 5000 } });
+  const t0 = Date.now();
+  const r = await w.pass();
+  assert.ok(Date.now() - t0 < 2000, `the tick took ${Date.now() - t0} ms`);
+  for (const s of ['stops', 'undo', 'undo-starts']) assert.equal(r.steps[s].ok, true, `${s}: ${r.steps[s].error ?? ''}`);
+  assert.ok(order.includes('launch U-1'), order.join(', '));
+  assert.ok(order.lastIndexOf('stop') < order.indexOf('alert') && order.indexOf('launch U-1') < order.indexOf('alert'), order.join(', '));
+  assert.equal(order.filter((x) => x === 'alert').length, 1, 'a hung send ends the round');
+  assert.deepEqual(r.alerts, { sent: 0, failed: 1, left: w.rec.read('fact', 'alert-unsent').doc.entries.length });
+  assert.match(w.rec.read('fact', 'alert-unsent').doc.error, /did not answer within 50 ms/);
+  assert.ok(!w.rec.read('fact', 'stop-S-X')?.doc?.told_at, 'marked told although unsent');
+  hang = false;
+  await w.pass(1, { ports: { alertSendMs: 50 } });
+  await w.pass(2, { ports: { alertSendMs: 50 } });
+  assert.equal(sent.filter((x) => /S-X \(card X-1\) could not be stopped/.test(x)).length, 1, sent.join(' | '));
+  assert.equal(sent.filter((x) => /signed-in account/.test(x)).length, 1, sent.join(' | '));
+  assert.ok(w.rec.read('fact', 'stop-S-X').doc.told_at);
+  assert.deepEqual(w.rec.read('fact', 'alert-unsent').doc.entries, []);
 });
 
 // Audit 0b-6 r5 MAT-1: the watchdog starts before the wiring loads, so a wiring that never finishes

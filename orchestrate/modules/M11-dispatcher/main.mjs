@@ -20,7 +20,8 @@ import { readFileSync, realpathSync } from 'node:fs';
 import { isAbsolute } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
 import { Worker } from 'node:worker_threads';
-import { runTick, safeAlert, STEPS, STEP_DEADLINE_MS } from './tick.mjs';
+import { runTick, STEPS, STEP_DEADLINE_MS } from './tick.mjs';
+import { outbox, sendAlerts, ALERT_SEND_MS } from './alerts.mjs';
 import { holdAlert } from './pass.mjs';
 import { limitedSync } from './sync-limit.mjs';
 
@@ -76,7 +77,8 @@ export async function main(argv, { now = Date.now(), log = (s) => process.stderr
   if (r.late) {
     log(`dispatcher: the pass did not finish within ${limit} ms; exiting so the next start can run`);
     // Joe is told too (L38), once a day: a stuck pass holds everything after the step it is stuck in.
-    try { await holdAlert({ rec: wired.rec, cause: 'run-late', text: `a Dispatcher pass did not finish within ${limit} ms and was stopped; the next pass starts in a minute`, alert: safeAlert(wired.rec, wired.ports.alert, now), now }); }
+    // Queued, then sent with one send's time: a pass that is late every time never reaches its own sender.
+    try { holdAlert({ rec: wired.rec, cause: 'run-late', text: `a Dispatcher pass did not finish within ${limit} ms and was stopped; the next pass starts in a minute`, alert: outbox(wired.rec, now), now }); await sendAlerts(wired.rec, wired.ports.alert, now, { budgetMs: ALERT_SEND_MS }); }
     catch (e) { log(`dispatcher: the late pass could not be told: ${e?.message ?? e}`); }
     return 2;
   }

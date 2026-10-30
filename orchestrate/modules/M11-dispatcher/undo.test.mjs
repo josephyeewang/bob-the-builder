@@ -1,7 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { undoStep, UNDO_CARD, FIX_CARD, REVERSE_FACT } from './undo.mjs';
-import { rulesWith, recWith, T0, iso } from './fixtures.test-helper.mjs';
+import { undoStep as undoStep0, UNDO_CARD, FIX_CARD, REVERSE_FACT } from './undo.mjs';
+import { rulesWith, recWith, T0, iso, withAlerts } from './fixtures.test-helper.mjs';
+import { outbox, ALERT_QUEUE_FACT } from './alerts.mjs';
+
+// Each step runs as the tick runs it: its alerts are queued, then sent once it is done (alerts.mjs, L47).
+const undoStep = (a) => withAlerts(a.rec, a.now, a.alert ?? (() => {}), (alert) => undoStep0({ ...a, alert }));
 
 const SHA = 'a'.repeat(40);
 const OTHER = 'b'.repeat(40);
@@ -16,6 +20,23 @@ function world(entries, { files = ['src/a.js', 'src/b.js'] } = {}) {
   const step = (rules = R) => undoStep({ rec, rules, now: T0, filesOf: (s) => { calls.filesOf.push(s); return files; }, alert: (t) => calls.alerts.push(t) });
   return { rec, calls, step };
 }
+
+// L47: a crash between queueing and sending. The pass that queued the alert ends before its send; the next
+// pass (the same record, a working port) delivers it once, and only then is the cause marked told.
+test('L47: an alert queued by a pass that crashed before sending is delivered once by the next pass', async () => {
+  const w = world([['merge', 'M-1', merged({ module: undefined, card: null })], ['ask', 'A-1', ask()]]);
+  await undoStep0({ rec: w.rec, rules: R, now: T0, filesOf: () => ['src/a.js'], alert: outbox(w.rec, T0) });
+  const q = w.rec.read('fact', ALERT_QUEUE_FACT).doc.entries;
+  assert.equal(q.length, 1);
+  assert.match(q[0].text, /PR 7 could not be queued/);
+  assert.ok(!w.rec.list('fact').some((f) => f.id !== ALERT_QUEUE_FACT && f.doc?.told_at), 'marked told before any send');
+  await w.step();
+  await w.step();
+  assert.equal(w.calls.alerts.length, 1, w.calls.alerts.join(' | '));
+  assert.match(w.calls.alerts[0], /PR 7 could not be queued/);
+  assert.deepEqual(w.rec.read('fact', ALERT_QUEUE_FACT).doc.entries, []);
+  assert.ok(w.rec.list('fact').some((f) => f.id !== ALERT_QUEUE_FACT && f.doc?.told_at), 'told once delivered');
+});
 
 test('M21: an answered, counted tap naming a merged PR -> one go-free undo card first in the queue; the ask consumed', async () => {
   const w = world([['merge', 'M-1', merged()], ['ask', 'A-1', ask()]]);

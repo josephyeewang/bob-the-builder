@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { leadRestartStep, leadInFlight, handoffVet, estimateTokens, RESTART_FACT, HANDOFF_NAME } from './lead-restart.mjs';
 import { intakePass } from './outbox-intake.mjs';
 import { KEYS as K } from './keys.mjs';
-import { rulesWith, recWith, T0, MIN, iso } from './fixtures.test-helper.mjs';
+import { rulesWith, recWith, T0, MIN, iso, withAlerts } from './fixtures.test-helper.mjs';
 import { tempDir } from '../../shared/test-tmp.mjs';
 
 const R = rulesWith(); // soft 250k, hard 400k, handoff cap 8,000 tokens
@@ -20,14 +20,13 @@ function world() {
   const calls = { sent: [], stops: 0, starts: [], alerts: [] };
   let outcome = 'sent';
   const rec = recWith();
-  const step = (size, min, over = {}) => leadRestartStep({
-    rec, rules: over.rules ?? R, now: T0 + min * MIN, lead: { sessionId: SID, product: 'p' }, size,
+  const step = (size, min, over = {}) => withAlerts(rec, T0 + min * MIN, over.alert ?? ((t) => calls.alerts.push(t)), (alert) => leadRestartStep({
+    rec, rules: over.rules ?? R, now: T0 + min * MIN, lead: { sessionId: SID, product: 'p' }, size, alert,
     inFlight: over.inFlight ?? null,
     send: async (t) => { calls.sent.push(t); return { outcome }; },
     stopSession: async () => { calls.stops += 1; return over.stopFails ? { ok: false, reason: 'still running' } : { ok: true }; },
     startLead: async (x) => { calls.starts.push(x); return over.startFails ? { ok: false, reason: 'no' } : { ok: true, sessionId: 'L-2' }; },
-    alert: over.alert ?? ((t) => calls.alerts.push(t)),
-  });
+  }));
   // The pass's own intake, with the handoff vet, over the Lead's real outbox folder.
   const intake = (min = 3) => intakePass({ rec, now: T0 + min * MIN, sessions: [{ sessionId: SID, role: 'lead', outbox, uid: UID }], wait: async () => {},
     alert: (t) => calls.alerts.push(t), note: () => {}, startReadonly: () => ({ ok: true }), replyToLead: () => {}, vet: handoffVet(R) });

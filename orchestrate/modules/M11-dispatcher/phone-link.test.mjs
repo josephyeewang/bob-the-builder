@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { phoneLinkStep, FACTS, LINK_FACT, REMOTE_CONTROL } from './phone-link.mjs';
 import { KEYS as K } from './keys.mjs';
-import { rulesWith, recWith, T0, MIN, iso } from './fixtures.test-helper.mjs';
+import { rulesWith, recWith, T0, MIN, iso, withAlerts } from './fixtures.test-helper.mjs';
 
 function world({ outcome = 'sent', restartOk = true, minibaseOk = true, alert = null } = {}) {
   const rec = recWith();
@@ -16,9 +16,8 @@ function world({ outcome = 'sent', restartOk = true, minibaseOk = true, alert = 
     send: async (t) => { calls.sent.push(t); return { outcome: typeof outcome === 'function' ? outcome() : outcome }; },
     restartFrontDoor: async () => { calls.restarts += 1; return restartOk ? { ok: true } : { ok: false, reason: 'did not start' }; },
     startMinibase: async () => { calls.minibase += 1; return minibaseOk ? { ok: true } : { ok: false, reason: 'no' }; },
-    alert: alert ?? ((t) => calls.alerts.push(t)),
   };
-  const step = (min, rules = rulesWith()) => phoneLinkStep({ rec, rules, now: T0 + min * MIN, ...ports });
+  const step = (min, rules = rulesWith()) => withAlerts(rec, T0 + min * MIN, alert ?? ((t) => calls.alerts.push(t)), (a) => phoneLinkStep({ rec, rules, now: T0 + min * MIN, ...ports, alert: a }));
   // one reading of every sensor at minute `min`
   const read = (min, { net = true, fd = true, mb = true } = {}) => { fact(FACTS.network, net, min); fact(FACTS.reachable, fd, min); fact(FACTS.minibase, mb, min); };
   const diary = () => rec.read('fact', 'phone-link-note')?.rev ?? 0;
@@ -159,9 +158,9 @@ test('audit MAT-10: the Front Door gone is restarted with its last handoff, at m
   const fact = (id, value, min) => rec.write({ actor: 'dispatcher', entity: 'fact', id, expectRev: rec.read('fact', id)?.rev ?? 0, doc: { value, observed_at: iso(T0 + min * MIN) } });
   const step = (min, alive) => {
     for (const id of [FACTS.network, FACTS.reachable, FACTS.minibase]) fact(id, true, min);
-    return phoneLinkStep({ rec, rules: rulesWith(), now: T0 + min * MIN, send: async () => ({ outcome: 'sent' }), startMinibase: async () => ({ ok: true }),
+    return withAlerts(rec, T0 + min * MIN, (t) => alerts.push(t), (alert) => phoneLinkStep({ rec, rules: rulesWith(), now: T0 + min * MIN, send: async () => ({ outcome: 'sent' }), startMinibase: async () => ({ ok: true }),
       restartFrontDoor: async (x) => { handoffs.push(x.handoff); return ok ? { ok: true } : { ok: false, reason: 'did not start' }; },
-      frontDoorAlive: () => alive, lastHandoff: () => 'fd-handoff-7', alert: (t) => alerts.push(t) });
+      frontDoorAlive: () => alive, lastHandoff: () => 'fd-handoff-7', alert }));
   };
   assert.deepEqual(await step(0, true), []);
   assert.equal(handoffs.length, 0);

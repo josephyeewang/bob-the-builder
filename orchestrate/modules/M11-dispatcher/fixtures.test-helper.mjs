@@ -4,6 +4,7 @@
 import { fakeRules } from '../../shared/rules.mjs';
 import { memoryRecord } from '../../shared/record.mjs';
 import { KEYS as K } from './keys.mjs';
+import { outbox, sendAlerts } from './alerts.mjs';
 
 export const VALUES = Object.freeze({
   [K.redPace]: 1.0, [K.redWeek]: 85, [K.redH5]: 80,
@@ -62,3 +63,13 @@ export function undoEntries(id, over = {}, { product = 'p1', files = [`src/${id}
     ['card', id, { state: 'ready', kind: 'undo', queue: 'front', go_free: true, module: 'M-test', product, tier: 2, files, pr, merge_commit_sha: sha, reverses: `MG-${id}`, changed_at: iso(T0 - 600_000), ...over }]];
 }
 export const filesOfCommits = (sha) => { if (!commitFiles.has(sha)) throw new Error(`no such commit ${sha}`); return commitFiles.get(sha); };
+
+/**
+ * Test-only: run one step as the tick runs it (alerts.mjs, L47): its alerts are queued, then the one sender
+ * hands them to `port` once the step is done. A told mark is written only when `port` took the alert.
+ */
+export async function withAlerts(rec, now, port, f) {
+  const r = await f(outbox(rec, now));
+  await sendAlerts(rec, port, now, { sendMs: 200, budgetMs: 10_000 });
+  return r;
+}
