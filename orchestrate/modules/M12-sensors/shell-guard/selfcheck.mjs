@@ -7,16 +7,20 @@
 // and the corpus's /tmp/x and /tmp/y are swapped for files inside it.
 
 import { spawnSync } from 'node:child_process';
-import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
-import { cases } from './runner.mjs';
+import { CASELESS, cases } from './runner.mjs';
 
 const CONTENT = 'echo PLANTED\n'; // `source` runs it, so a sourced read shows too
 const B64 = Buffer.from(CONTENT).toString('base64').slice(0, 12);
+// What a case left at /tmp/y (swapped for a file in the run's folder): a file, or a folder copied there (cp -r).
+const readOut = (y) => (!existsSync(y) ? '' : lstatSync(y).isDirectory() ? readdirSync(y, { recursive: true }).map((n) => `${y}/${n}`).filter((f) => lstatSync(f).isFile()).map((f) => readFileSync(f, 'utf8')).join('') : readFileSync(y, 'utf8'));
 
 // Builds the refuse cases for a folder; hex and ANSI-C forms encode the path, so each run builds its own, never swaps text.
 // HOME is the folder itself, so the ~ and $HOME forms are built and checked too.
-const refuseCases = (name, mode, root) => cases(mode === 'relative' ? name : `${root}/proj/${name}`, mode === 'relative' ? `${root}/proj` : `${root}/other`, { home: root })
+// The case-flip form follows CASELESS for the stand-in and the real folder alike (the temp folder is taken to share
+// this file's disk), so both build the same cases.
+const refuseCases = (name, mode, root) => cases(mode === 'relative' ? name : `${root}/proj/${name}`, mode === 'relative' ? `${root}/proj` : `${root}/other`, { home: root, caseless: CASELESS })
   .filter((x) => x.expect === 'refuse');
 
 function runOne(i, name, mode, sh, newFolder) {
@@ -31,7 +35,7 @@ function runOne(i, name, mode, sh, newFolder) {
     // Sealed from the user's shell set-up (round 10 audit 4 minor 4): no rc files, HOME inside the folder, a plain PATH.
     const env = { PATH: `${dirname(process.execPath)}:/usr/bin:/bin`, HOME: root, LANG: 'C' }; // node's folder: node -e cases
     const r = spawnSync(sh, [...(sh.endsWith('zsh') ? ['-f'] : []), '-c', cmd], { cwd, env, encoding: 'utf8', timeout: 10000 });
-    const seen = (r.stdout ?? '') + (existsSync(`${root}/y`) ? readFileSync(`${root}/y`, 'utf8') : '');
+    const seen = (r.stdout ?? '') + readOut(`${root}/y`);
     let changed = true;
     try { changed = lstatSync(file).isSymbolicLink() || readFileSync(file, 'utf8') !== CONTENT; } catch { /* gone: changed */ }
     return seen.includes('PLANTED') || seen.includes(B64) || changed;

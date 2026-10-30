@@ -48,6 +48,15 @@ export const CASELESS = (() => {
   return existsSync(`${dirname(self)}/${basename(self).toUpperCase()}`);
 })();
 const swapCase = (t) => [...t].map((c) => (c === c.toUpperCase() ? c.toLowerCase() : c.toUpperCase())).join('');
+// Whether the disk holding folder p ignores case: its nearest existing folder with a letter in its name is found again
+// with the case flipped (round 10 audit 8 minor 2: the file's disk, not this file's). CASELESS if none qualifies.
+export function caselessAt(p) {
+  for (let d = p; d !== dirname(d); d = dirname(d)) {
+    const b = basename(d);
+    if (swapCase(b) !== b && existsSync(d)) return existsSync(`${dirname(d)}/${swapCase(b)}`);
+  }
+  return CASELESS;
+}
 
 // The ways one protected path can be written so a plain text match misses it. With a cwd, a relative target also gets
 // its absolute form (0b-7 round 9 minor 5: a guard that only matched relative paths passed the old corpus).
@@ -121,12 +130,11 @@ export function checkPath(p) {
 // does not read $'…' (round 10 audit 3 M-4).
 const SH_ANSI_C = spawnSync('sh', ['-c', "printf %s $'\\x41'"], { encoding: 'utf8' }).stdout === 'A';
 export const hostDead = (tpl, form) => (form === 'brace' && !existsSync('/bin/zsh') && /> ?(\{\{UP\}\}\/)?\{\{(P|BASE)\}\}/.test(tpl))
-  || (form === 'ansi-c' && !SH_ANSI_C && tpl.startsWith('sh -c'))
-  || (form === 'case-flip' && !CASELESS); // a disk that keeps case: the form is not built
+  || (form === 'ansi-c' && !SH_ANSI_C && tpl.startsWith('sh -c'));
 const live = (tpl, form) => !(corpus.dead[tpl] ?? []).includes(form) && !hostDead(tpl, form);
 
 // cwd: the folder the hook is asked from (a relative target is taken from there). home: as for pathForms.
-export function cases(target, cwd = process.cwd(), { home = homedir(), caseless = CASELESS } = {}) {
+export function cases(target, cwd = process.cwd(), { home = homedir(), caseless = caselessAt(dirname(resolve(cwd, target))) } = {}) {
   const out = [];
   const abs = checkPath(resolve(cwd, target));
   const forms = pathForms(target, cwd, { home, caseless });
@@ -150,7 +158,7 @@ export function cases(target, cwd = process.cwd(), { home = homedir(), caseless 
   const hdir = hrel !== null ? `~/${hrel}` : dir === home && fromHome(abs, home) !== null ? '~' : null;
   if (hdir) {
     for (const tpl of corpus.refuse_folder) if (live(tpl, 'home')) out.push({ expect: 'refuse', group: 'folder', form: 'home', tpl, command: fill(tpl, { DIR: hdir }) });
-    for (const tpl of corpus.refuse_after_cd) if (live(tpl, 'home')) out.push({ expect: 'refuse', group: 'after-cd-home', form: 'home', tpl, cwd: up, command: fill(tpl, { DIR: hdir, BASE: basename(abs) }) });
+    for (const tpl of corpus.refuse_after_cd) if (!tpl.includes('{{UP}}') && live(tpl, 'home')) out.push({ expect: 'refuse', group: 'after-cd-home', form: 'home', tpl, cwd: up, command: fill(tpl, { DIR: hdir, BASE: basename(abs) }) });
   }
   // Reads of the whole folder the command runs in, naming no folder (round 10 audit 6 M-1: `grep -rn KEY` from the
   // project's top folder): asked from the file's folder and from the run folder when it holds the file; the same asked
@@ -167,15 +175,18 @@ export function cases(target, cwd = process.cwd(), { home = homedir(), caseless 
   for (const tpl of corpus.refuse_after_cd) {
     for (const [form, p] of short) {
       if (!live(tpl, form)) continue;
-      out.push({ expect: 'refuse', group: 'after-cd', form, tpl, cwd: up, command: fill(tpl, { DIR: dir, BASE: p }) });
-      out.push({ expect: 'refuse', group: 'after-cd-here', form, tpl, cwd, command: fill(tpl, { DIR: dir, BASE: p }) });
+      out.push({ expect: 'refuse', group: 'after-cd', form, tpl, cwd: up, command: fill(tpl, { DIR: dir, UP: basename(dir), BASE: p }) });
+      // {{UP}} is the folder's own name, so `cd {{UP}}` works only from the folder above (round 10 audit 8 minor 3).
+      if (!tpl.includes('{{UP}}')) out.push({ expect: 'refuse', group: 'after-cd-here', form, tpl, cwd, command: fill(tpl, { DIR: dir, BASE: p }) });
     }
   }
   for (const tpl of corpus.refuse_cd_up) {
+    // One naming the whole folder, not the file, is one case (form '-'), not one per spelling of the name.
+    if (!tpl.includes('{{BASE}}')) { if (live(tpl, '-')) out.push({ expect: 'refuse', group: 'cd-up', form: '-', tpl, cwd: dir, command: fill(tpl, { UP: basename(dir) }) }); continue; }
     for (const [form, p] of short) if (form !== 'pwd-var' && live(tpl, form)) out.push({ expect: 'refuse', group: 'cd-up', form, tpl, cwd: dir, command: fill(tpl, { UP: basename(dir), BASE: p }) });
   }
   // A recursive grep of a folder that holds the file reads it, so it is no allow case there (round 10 audit 5 minor 1).
-  const readsFile = (command, where) => /\bgrep -r/.test(command) && [resolve(where, command.split(' ').pop())].some((f) => abs === f || abs.startsWith(`${f}/`));
+  const readsFile = (command, where) => /\bgrep -r|^tar |^cp -r/.test(command) && [resolve(where, command.split(' ').pop())].some((f) => abs === f || abs.startsWith(`${f}/`));
   for (const command of corpus.allow) if (!readsFile(command, cwd)) out.push({ expect: 'allow', group: 'allow', form: '-', command });
   // Ordinary commands asked from the folder above and from the file's folder: a guard that refuses whatever is asked
   // from outside the run folder fails (round 10 audit 4 M-2).

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { fileURLToPath } from 'node:url';
 import { existsSync, realpathSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
-import { corpus, cases, pathForms, askHook, runCorpus, hostDead } from './runner.mjs';
+import { corpus, cases, pathForms, askHook, runCorpus, hostDead, caselessAt } from './runner.mjs';
 import { touchCheck } from './selfcheck.mjs';
 import { tempDir } from '../../../shared/test-tmp.mjs';
 
@@ -280,4 +280,45 @@ test('round 10 audit 7 M-1: a guard that reads a newline as a space, or a commen
   assert.ok(toEnd.some((f) => f.group === 'lines'), 'a comment line, then the read');
   // The same guard splitting at newlines and ending a comment at the line's end misses none of them.
   assert.deepEqual(twoLine(guard(/;|&&|\|\||\||[()]|\n/, /#[^\n]*/g)), []);
+});
+
+// Round 10 audit 8.
+test('round 10 audit 8 M-1: the case-flip form follows the caseless option on any machine; the file\'s own disk by default', () => {
+  const root = tmp();
+  assert.ok(!hostDead('cat {{P}}', 'case-flip'), 'never dropped for the machine running the runner');
+  assert.ok(cases(T, root, { caseless: true }).some((c) => c.form === 'case-flip'));
+  // Minor 2: by default, the disk the file's folder is on.
+  const flipped = `${dirname(root)}/${[...root.split('/').pop()].map((c) => (c === c.toUpperCase() ? c.toLowerCase() : c.toUpperCase())).join('')}`;
+  assert.equal(caselessAt(root), existsSync(flipped));
+  assert.equal(cases(T, root).some((c) => c.form === 'case-flip'), existsSync(flipped));
+});
+
+test('round 10 audit 8 M-2: a guard whose list of folder readers is grep, find, rm, ls and cat misses an archive or copy of the folder', () => {
+  const root = tmp(); const file = resolve(root, 'apps/web', T);
+  const holds = (d) => file.startsWith(`${d}/`);
+  const guard = (readers) => (c, cwd) => {
+    let here = cwd;
+    for (const seg of c.split(/;|&&|\|\||\||\n/)) {
+      const w = seg.trim().split(/\s+/).filter(Boolean);
+      if (w[0] === 'cd') { here = resolve(here, w[1] ?? '.'); continue; }
+      if (w.some((x) => resolve(here, x) === file)) return 'refuse';
+      if (readers.includes(w[0]) && (w.slice(1).some((x) => !x.startsWith('-') && holds(resolve(here, x))) || holds(here))) return 'refuse';
+    }
+    return 'allow';
+  };
+  const copies = (readers) => runCorpus(guard(readers), { target: `apps/web/${T}`, cwd: root }).failures.filter((f) => f.expect === 'refuse' && /^(cd \.\. && )?(tar|cp)\b/.test(f.tpl ?? ''));
+  const missed = copies(['grep', 'find', 'rm', 'ls', 'xargs', 'cat']);
+  for (const g of ['folder', 'here', 'cd-up']) assert.ok(missed.some((f) => f.group === g), g);
+  assert.deepEqual(copies(['grep', 'find', 'rm', 'ls', 'xargs', 'cat', 'tar', 'cp']), []);
+  // Minor 1: a recursive grep spelled -R; minor 3: cd by the folder's own name, from the folder above.
+  assert.ok(corpus.refuse_here.some((t) => t.startsWith('grep -R')));
+  assert.ok(cases(`apps/web/${T}`, root).some((c) => c.group === 'after-cd' && c.command.startsWith('cd web && ') && c.cwd === resolve(root, 'apps')));
+});
+
+test('no case is built twice (a template that names no spelling of the file is one case, not one per form)', () => {
+  const root = tmp();
+  for (const target of [T, `apps/web/${T}`]) {
+    const keys = cases(target, root).map((c) => `${c.expect}|${c.cwd ?? ''}|${c.command}`);
+    assert.deepEqual(keys.filter((k, i) => keys.indexOf(k) !== i), [], target);
+  }
 });
