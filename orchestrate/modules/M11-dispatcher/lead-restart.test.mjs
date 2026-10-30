@@ -26,7 +26,7 @@ function world() {
     send: async (t) => { calls.sent.push(t); return { outcome }; },
     stopSession: async () => { calls.stops += 1; return over.stopFails ? { ok: false, reason: 'still running' } : { ok: true }; },
     startLead: async (x) => { calls.starts.push(x); return over.startFails ? { ok: false, reason: 'no' } : { ok: true, sessionId: 'L-2' }; },
-    alert: (t) => calls.alerts.push(t),
+    alert: over.alert ?? ((t) => calls.alerts.push(t)),
   });
   // The pass's own intake, with the handoff vet, over the Lead's real outbox folder.
   const intake = (min = 3) => intakePass({ rec, now: T0 + min * MIN, sessions: [{ sessionId: SID, role: 'lead', outbox, uid: UID }], wait: async () => {},
@@ -256,4 +256,19 @@ test('audit 0b-6 r3 MIN-3: a handoff applied in the same pass that sent WRAP is 
   const f = v.rec.read('fact', RESTART_FACT(SID));
   v.rec.write({ actor: 'dispatcher', entity: 'fact', id: RESTART_FACT(SID), expectRev: f.rev, doc: { ...f.doc, sent_at: iso(T0 + 3 * MIN) } });
   assert.equal(await v.step(ended(262_000, 4), 4), 'restarted');
+});
+
+// Audit 0b-6 r5 MAT-2: the Lead's alerts are marked told only once sent; one that fails is sent next pass.
+test('r5 MAT-2: a hard-line alert that fails is told on the next pass, once', async () => {
+  for (const bad of [() => { throw new Error('down'); }, () => Promise.reject(new Error('down'))]) {
+    const w = world();
+    const sent = [];
+    let down = true;
+    const alert = (t) => (down ? bad(t) : sent.push(t));
+    await w.step(midTurn(460_000), 1, { alert });
+    down = false;
+    await w.step(midTurn(461_000), 2, { alert });
+    await w.step(midTurn(462_000), 3, { alert });
+    assert.equal(sent.filter((t) => /compaction did not happen/.test(t)).length, 1, sent.join(' | '));
+  }
 });

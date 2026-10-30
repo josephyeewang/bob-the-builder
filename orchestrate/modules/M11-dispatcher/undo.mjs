@@ -26,40 +26,40 @@ const moduleOf = (rec, attempt) => (attempt.card ? rec.read('card', attempt.card
  * Each tap is read on its own (audit 0b-6 r4 MAT-4): one that throws holds no other. A tap that is
  * not acted on is told to Joe, once per tap and reason and again each day (L38: no silent hold).
  */
-export function undoStep({ rec, rules, now, filesOf, alert }) {
+export async function undoStep({ rec, rules, now, filesOf, alert }) {
   const out = [];
   for (const { id, rev, doc } of rec.list('ask')) {
     if (doc.kind !== 'undo' || doc.state !== 'answered') continue;
-    const held = (cause, what) => {
+    const held = async (cause, what) => {
       out.push([id, what]);
-      try { holdAlert({ rec, cause: `undo-tap-${id}-${cause}`, text: `your Undo tap (ask ${id}, PR ${doc.pr ?? '?'}) is not acted on: ${what}`, alert, now }); }
+      try { await holdAlert({ rec, cause: `undo-tap-${id}-${cause}`, text: `your Undo tap (ask ${id}, PR ${doc.pr ?? '?'}) is not acted on: ${what}`, alert, now }); }
       catch { /* the record is unwritable: the step's own error says so */ }
     };
-    try { tap({ rec, rules, now, filesOf, alert, out, held, id, rev, doc }); }
-    catch (e) { held('error', `it could not be read (${e?.message ?? e})`); }
+    try { await tap({ rec, rules, now, filesOf, alert, out, held, id, rev, doc }); }
+    catch (e) { await held('error', `it could not be read (${e?.message ?? e})`); }
   }
   fixCards({ rec, now, alert, out });
   return out;
 }
 
-function tap({ rec, rules, now, filesOf, alert, out, held, id, rev, doc }) {
-  if (doc.via !== 'tap') return held('not-tap', 'not a tap: nothing');
+async function tap({ rec, rules, now, filesOf, alert, out, held, id, rev, doc }) {
+  if (doc.via !== 'tap') return await held('not-tap', 'not a tap: nothing');
   const counted = rules.may('count_approval', { ask: { id, ...doc } });
-  if (counted.decision !== 'allow') return held('not-counted', `not counted: ${counted.reason}`);
-  if (doc.pr == null || !SHA.test(String(doc.merge_commit_sha))) return held('no-pr', 'names no merged PR');
+  if (counted.decision !== 'allow') return await held('not-counted', `not counted: ${counted.reason}`);
+  if (doc.pr == null || !SHA.test(String(doc.merge_commit_sha))) return await held('no-pr', 'names no merged PR');
   const attempt = rec.list('merge').find((m) => m.doc.pr === doc.pr && m.doc.merge_commit_sha === doc.merge_commit_sha && MERGED.includes(m.doc.state));
-  if (!attempt) return held('no-merge', 'no merged attempt matches');
+  if (!attempt) return await held('no-merge', 'no merged attempt matches');
   const cardId = UNDO_CARD(id);
   if (!rec.read('card', cardId)) {
     const files = filesOf(doc.merge_commit_sha);
-    if (!Array.isArray(files)) return held('files', 'the reversed commit\'s files could not be read');
+    if (!Array.isArray(files)) return await held('files', 'the reversed commit\'s files could not be read');
     const w = rec.write({ actor: 'dispatcher', entity: 'card', id: cardId, expectRev: 0, kind: 'undo_card',
       doc: { state: 'ready', kind: 'undo', go_free: true, queue: 'front', files, pr: doc.pr, merge_commit_sha: doc.merge_commit_sha,
         product: attempt.doc.product ?? doc.product ?? null, module: moduleOf(rec, attempt.doc) ?? doc.module ?? null, reverses: attempt.id, from_ask: id, changed_at: iso(now) } });
     if (!w.ok) {
       // Joe tapped Undo: a card that cannot be written (say, its module is unknown) is told to him, once a day.
       out.push([id, `undo card not recorded: ${w.reason}`]);
-      holdAlert({ rec, cause: `undo-tap-${id}-not-recorded`, text: `your Undo of PR ${doc.pr} could not be queued: ${w.reason}; the Lead has to queue it by hand`, alert, now });
+      await holdAlert({ rec, cause: `undo-tap-${id}-not-recorded`, text: `your Undo of PR ${doc.pr} could not be queued: ${w.reason}; the Lead has to queue it by hand`, alert, now });
       return;
     }
   }

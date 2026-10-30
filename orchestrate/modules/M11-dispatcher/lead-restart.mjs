@@ -10,11 +10,12 @@
 //   4. once applied: a `handoff` entry, the old session stopped (its transcript kept), the new Lead
 //      started on the same profile with the handoff first.
 // A missing or oversize handoff gets one re-ask; after that the old Lead keeps running and Joe is
-// alerted. A Lead is never stopped without an applied handoff. A Lead read above
+// told. A Lead is never stopped without an applied handoff. A Lead read above
 // context.lead.hard + 50k means Claude Code's own compaction did not fire: alert once (m9).
 // The step's progress is the fact `lead-restart-<session>`.
 
 import { KEYS, need } from './keys.mjs';
+import { tellThen } from './moves.mjs';
 import { ENTITIES } from '../../shared/record.mjs';
 
 export const RESTART_FACT = (sid) => `lead-restart-${sid}`;
@@ -75,9 +76,9 @@ export async function leadRestartStep({ rec, rules, now, lead, size, inFlight, s
   };
 
   const noSize = !size || size.tokens == null;
-  if (!noSize && size.tokens > hard + HARD_MARGIN && !st.hard_alerted) {
-    alert(`the Lead ${sid} is at ${size.tokens} tokens, past ${hard} + ${HARD_MARGIN}: its compaction did not happen`);
-    save({ hard_alerted: true }, 'lead_hard_alert');
+  // Told only once sent (audit 0b-6 r5 MAT-2).
+  if (!noSize && size.tokens > hard + HARD_MARGIN && !st.hard_told) {
+    await tellThen(alert, `the Lead ${sid} is at ${size.tokens} tokens, past ${hard} + ${HARD_MARGIN}: its compaction did not happen`, () => save({ hard_told: true }, 'lead_hard_alert'));
   }
   if (['done', 'gave_up'].includes(st.phase)) return st.phase;
   // The old Lead is stopped and the new one did not start (audit 0b-6 r2 MIN-1): try again every pass,
@@ -122,8 +123,8 @@ export async function leadRestartStep({ rec, rules, now, lead, size, inFlight, s
     let stopped;
     try { stopped = await stopSession(); } catch (e) { stopped = { ok: false, reason: e.message }; }
     if (!stopped?.ok) {
-      if (!st.stop_alerted) alert(`the Lead ${sid} handed off but could not be stopped (${stopped?.reason ?? 'no answer'}); no new Lead starts until it is`);
-      save({ stop_alerted: true, stop_failed_at: iso(now) }, 'lead_stop_failed');
+      save({ stop_failed_at: iso(now) }, 'lead_stop_failed');
+      if (!st.stop_told) await tellThen(alert, `the Lead ${sid} handed off but could not be stopped (${stopped?.reason ?? 'no answer'}); no new Lead starts until it is`, () => save({ stop_told: true }, 'lead_stop_failed'));
       return 'old Lead not stopped; tried again next pass';
     }
     let started;

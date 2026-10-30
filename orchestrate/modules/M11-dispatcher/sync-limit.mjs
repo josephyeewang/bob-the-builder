@@ -6,6 +6,9 @@
 
 export const SYNC_PORT_TIMEOUT_MS = 20_000;
 export const SYNC_PORT_MAX_BUFFER = 8 * 1024 * 1024;
+// No limit above this (audit 0b-6 r5 m3): a synchronous command blocks the whole pass, so it must end well
+// inside the step's own deadline.
+export const SYNC_PORT_MAX_TIMEOUT_MS = 60_000;
 
 /**
  * `limitedSync(spawnSync)` returns `run(cmd, args, { timeoutMs, cwd, input })`, which never takes longer
@@ -16,6 +19,7 @@ export function limitedSync(spawnSync) {
   if (typeof spawnSync !== 'function') throw new Error('limitedSync needs the spawnSync to run commands with');
   return function run(cmd, args = [], { timeoutMs = SYNC_PORT_TIMEOUT_MS, cwd, input } = {}) {
     if (!(Number.isFinite(timeoutMs) && timeoutMs > 0)) return { ok: false, why: 'no time limit given' };
+    if (timeoutMs > SYNC_PORT_MAX_TIMEOUT_MS) return { ok: false, why: `a time limit of ${timeoutMs} ms is above the most allowed, ${SYNC_PORT_MAX_TIMEOUT_MS} ms` };
     let r;
     try {
       r = spawnSync(cmd, args, {

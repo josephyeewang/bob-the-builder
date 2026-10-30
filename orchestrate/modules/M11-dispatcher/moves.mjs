@@ -30,3 +30,21 @@ export const ageMs = (doc, now) => {
   const t = Date.parse(doc?.changed_at ?? '');
   return Number.isFinite(t) ? now - t : Infinity;
 };
+
+export const ALERT_DEADLINE_MS = 30_000;
+/**
+ * The one way a cause is marked told (audit 0b-6 r5 MAT-2): `markTold` runs only after the alert was sent.
+ * An alert that throws, rejects, answers false or takes longer than `ms` leaves the cause untold, so the
+ * next pass tells it again. The send is not queued (the step itself tries again). Returns whether it was sent.
+ * Every "told" mark in this folder is written inside a `tellThen` call: the sweep in tick.test.mjs checks it.
+ */
+export async function tellThen(alert, text, markTold, ms = ALERT_DEADLINE_MS) {
+  let timer;
+  let sent;
+  try {
+    const late = new Promise((ok) => { timer = setTimeout(() => ok(false), ms); });
+    sent = (await Promise.race([Promise.resolve().then(() => alert(text, { queue: false })), late])) !== false;
+  } catch { sent = false; } finally { clearTimeout(timer); }
+  if (sent) markTold();
+  return sent;
+}

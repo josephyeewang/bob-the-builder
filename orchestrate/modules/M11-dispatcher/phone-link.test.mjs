@@ -4,7 +4,7 @@ import { phoneLinkStep, FACTS, LINK_FACT, REMOTE_CONTROL } from './phone-link.mj
 import { KEYS as K } from './keys.mjs';
 import { rulesWith, recWith, T0, MIN, iso } from './fixtures.test-helper.mjs';
 
-function world({ outcome = 'sent', restartOk = true, minibaseOk = true } = {}) {
+function world({ outcome = 'sent', restartOk = true, minibaseOk = true, alert = null } = {}) {
   const rec = recWith();
   const calls = { sent: [], restarts: 0, minibase: 0, alerts: [] };
   const fact = (id, value, atMin) => {
@@ -16,7 +16,7 @@ function world({ outcome = 'sent', restartOk = true, minibaseOk = true } = {}) {
     send: async (t) => { calls.sent.push(t); return { outcome: typeof outcome === 'function' ? outcome() : outcome }; },
     restartFrontDoor: async () => { calls.restarts += 1; return restartOk ? { ok: true } : { ok: false, reason: 'did not start' }; },
     startMinibase: async () => { calls.minibase += 1; return minibaseOk ? { ok: true } : { ok: false, reason: 'no' }; },
-    alert: (t) => calls.alerts.push(t),
+    alert: alert ?? ((t) => calls.alerts.push(t)),
   };
   const step = (min, rules = rulesWith()) => phoneLinkStep({ rec, rules, now: T0 + min * MIN, ...ports });
   // one reading of every sensor at minute `min`
@@ -134,7 +134,7 @@ test('the link coming back resets everything', async () => {
   w.read(17, { fd: true });
   assert.deepEqual(await w.step(17), ['phone link back']);
   const st = w.rec.read('fact', LINK_FACT).doc;
-  assert.deepEqual([st.false_streak, st.attempts, st.failures, st.alerted], [0, 0, 0, false]);
+  assert.deepEqual([st.false_streak, st.attempts, st.failures, st.told], [0, 0, 0, false]);
   // a new outage alerts again
   for (let m = 18; m <= 36; m += 1) { w.read(m, { fd: false }); await w.step(m); }
   assert.equal(w.calls.alerts.length, 2);
@@ -192,4 +192,17 @@ test('audit 0b-6 r3 MIN-5 (J9): the network dropping clears the refused clock an
   await w.step(0);
   const d = w.rec.read('fact', LINK_FACT).doc;
   assert.deepEqual([d.refused_since, d.false_streak], [null, 0]);
+});
+
+// Audit 0b-6 r5 MAT-2: the link alert is marked told only once sent.
+test('r5 MAT-2: a link alert that fails is told at the next try, once', async () => {
+  for (const bad of [() => { throw new Error('down'); }, () => Promise.reject(new Error('down'))]) {
+    const sent = [];
+    let down = true;
+    const w = world({ alert: (t) => (down ? bad(t) : sent.push(t)) });
+    for (let m = 0; m <= 16; m += 1) { w.read(m, { fd: false }); await w.step(m); }
+    down = false;
+    for (let m = 17; m <= 40; m += 1) { w.read(m, { fd: false }); await w.step(m); }
+    assert.equal(sent.filter((t) => /tries to reconnect it failed/.test(t)).length, 1, sent.join(' | '));
+  }
 });

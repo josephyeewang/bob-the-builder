@@ -543,8 +543,7 @@ test('audit 0b-6 r3 MAT-3: a value only the reviewer start asks for is told once
 // L38 (3): no silent hold. Each failure point, planted alone, gives exactly one alert over two ticks, and
 // one more a day later while it lasts. The facts are refreshed before the later tick so only the planted
 // cause remains.
-test('L38 sweep: each hold or failure is told exactly once over two ticks, and once more a day later', async () => {
-  const H25 = 25 * 60;
+function l38Cases() {
   const red = (at) => ['fact', USAGE_FACT(ACCT), usageFact({ week: 90, h5: 20, account: ACCT, now: at })];
   const unread = (at) => ['fact', USAGE_FACT(ACCT), usageFact({ week: 30, h5: 20, account: ACCT, now: at, observedAgoMin: 120 })];
   const deny = { start_session: { decision: 'deny', reason: 'the product is paused' } };
@@ -560,6 +559,12 @@ test('L38 sweep: each hold or failure is told exactly once over two ticks, and o
     ['a step that throws', (at) => [account(at), usage(at)], { over: { board: () => { throw new Error('board unreadable'); } } }, /outage step failed: board unreadable/],
     ['an undo held', (at) => [account(at), usage(at)], { cards: undoEntries('U-9'), rules: rulesWith({}, deny) }, /your undo \(card U-9\) is waiting: rules: the product is paused/],
   ];
+  return cases;
+}
+
+test('L38 sweep: each hold or failure is told exactly once over two ticks, and once more a day later', async () => {
+  const H25 = 25 * 60;
+  const cases = l38Cases();
   const ctl = world([account(), usage()]);
   await ctl.pass(0);
   await ctl.pass(1);
@@ -581,6 +586,26 @@ test('L38 sweep: each hold or failure is told exactly once over two ticks, and o
     const escalation = /usage has been unreadable for over a day/;
     const others = later.filter((a) => !told.test(a));
     assert.ok(others.length === 0 || (['account missing', 'account stale', 'band unknown'].includes(label) && others.length === 1 && escalation.test(others[0])), `${label}: ${others.join(' | ')}`);
+  }
+});
+
+// Audit 0b-6 r5 MAT-2 sweep: every hold and failure, planted alone, with the alert port failing on the
+// first tick (throwing, then rejecting) and working after: exactly one alert names it over three ticks.
+// A cause marked told before its send went through would be silent for a day here.
+test('r5 MAT-2 sweep: each hold or failure whose first alert fails is told exactly once once alerts work', async () => {
+  for (const [how, bad] of [['throws', () => { throw new Error('no network'); }], ['rejects', () => Promise.reject(new Error('no network'))]]) {
+    for (const [label, facts, opt, told] of l38Cases()) {
+      let down = true;
+      const sent = [];
+      const w = world([...facts(T0), ...(opt.cards ?? [])], { over: { ...(opt.over ?? {}), alert: (t) => (down ? bad(t) : sent.push(t)) }, ...(opt.rules ? { rules: opt.rules } : {}) });
+      await w.pass(0);
+      await new Promise((ok) => setImmediate(ok));
+      assert.deepEqual(sent, [], `${how}, ${label}: control, nothing got through while alerts were down`);
+      down = false;
+      await w.pass(1);
+      await w.pass(2);
+      assert.equal(sent.filter((a) => told.test(a)).length, 1, `${how}, ${label}: ${sent.join(' | ')}`);
+    }
   }
 });
 
@@ -683,8 +708,9 @@ test('r5 MAT-2: an alert that fails once is sent on the next pass, for a hold an
     await w.pass();
     await new Promise((ok) => setImmediate(ok));
     assert.deepEqual(sent, [], `${label}: control, nothing got through while alerts were down`);
-    const queued = w.rec.read('fact', 'alert-unsent')?.doc?.texts ?? [];
-    assert.ok(queued.some((t) => /could not be stopped/.test(t)) && queued.some((t) => /signed-in account/.test(t)), `${label}: ${queued.join(' | ')}`);
+    // Both are causes told through tellThen: not queued, and not marked told, so their own step tells again.
+    assert.match(w.rec.read('fact', 'alert-unsent')?.doc?.error ?? '', /no network/, label);
+    assert.ok(!w.rec.read('fact', 'stop-S-X')?.doc?.told_at && !w.rec.read('fact', 'hold-account')?.doc?.told_at, `${label}: marked told although unsent`);
     down = false;
     await w.pass(1);
     assert.equal(sent.filter((t) => /could not be stopped/.test(t)).length, 1, `${label}: ${sent.join(' | ')}`);
@@ -788,4 +814,20 @@ export async function wire() {
   assert.equal(await main([config], { now: T0, log: () => {}, watchdog: true, runDeadlineMs: 200 }), 0);
   await new Promise((ok) => setTimeout(ok, 6_000));
   assert.ok(true, 'still alive past the watchdog time');
+});
+
+// Audit 0b-6 r5 m4: a step error that changes only in a number is one cause; and the error is on record even
+// while its alert cannot be sent (r5 MAT-2).
+test('r5 m4: a step error that changes only in a number is told once; an untold error is still recorded', { timeout: 10_000 }, async () => {
+  let n = 0;
+  const w = world([account(), usage()], { over: { board: () => { throw new Error(`board unreadable (pid ${++n})`); } } });
+  await w.pass(0);
+  await w.pass(1);
+  await w.pass(2);
+  assert.equal(w.calls.alerts.filter((a) => /outage step failed: board unreadable/.test(a)).length, 1, w.calls.alerts.join(' | '));
+  const down = world([account(), usage()], { over: { board: () => { throw new Error('board unreadable'); }, alert: () => { throw new Error('no network'); } } });
+  await down.pass(0);
+  const f = down.rec.read('fact', 'step-error-outage')?.doc;
+  assert.equal(f?.error, 'board unreadable');
+  assert.ok(!f?.told_at, 'not marked told');
 });

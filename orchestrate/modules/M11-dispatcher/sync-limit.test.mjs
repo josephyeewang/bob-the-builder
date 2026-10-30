@@ -91,3 +91,13 @@ test('main hands limitedSync to the wiring', async () => {
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('r5 m3: a time limit above the most allowed is refused before anything runs', async () => {
+  const { SYNC_PORT_MAX_TIMEOUT_MS } = await import('./sync-limit.mjs');
+  let ran = 0;
+  const run = limitedSync(() => { ran += 1; return { status: 0, stdout: '' }; });
+  assert.match(run('x', [], { timeoutMs: SYNC_PORT_MAX_TIMEOUT_MS + 1 }).why, /above the most allowed/);
+  assert.match(run('x', [], { timeoutMs: Infinity }).why, /no time limit given/);
+  assert.equal(ran, 0);
+  assert.equal(run('x', [], { timeoutMs: SYNC_PORT_MAX_TIMEOUT_MS }).ok, true);
+});

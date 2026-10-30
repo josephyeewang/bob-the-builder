@@ -19,7 +19,7 @@
 // The step's memory is the fact `phone-link`. A reading counts once (by its observed_at).
 
 import { KEYS, minutes } from './keys.mjs';
-import { note } from './moves.mjs';
+import { note, tellThen } from './moves.mjs';
 
 export const LINK_FACT = 'phone-link';
 export const FACTS = Object.freeze({ network: 'network-up', reachable: 'frontdoor-reachable', minibase: 'minibase-running' });
@@ -87,7 +87,7 @@ export async function phoneLinkStep({ rec, rules, now, send, restartFrontDoor, s
   if (fresh) st.reading_at = fd.at;
   if (fd.value === true) {
     if (st.false_streak || st.refused_since) done.push('phone link back');
-    Object.assign(st, { false_streak: 0, attempts: 0, failures: 0, alerted: false, refused_since: null, last_try_at: null });
+    Object.assign(st, { false_streak: 0, attempts: 0, failures: 0, told: false, refused_since: null, last_try_at: null });
     save();
     return done;
   }
@@ -111,9 +111,9 @@ export async function phoneLinkStep({ rec, rules, now, send, restartFrontDoor, s
 
   if (st.last_try_at && now - Date.parse(st.last_try_at) < RETRY_MS) { save(); return [...done, 'waiting to try again']; }
   if (st.attempts > 0) st.failures += 1; // the last try did not bring the link back
-  if (st.failures >= ALERT_AFTER_FAILURES && !st.alerted) {
-    alert(`the phone cannot reach the Front Door; ${st.failures} tries to reconnect it failed`);
-    st.alerted = true;
+  // Told only once sent (audit 0b-6 r5 MAT-2).
+  if (st.failures >= ALERT_AFTER_FAILURES && !st.told) {
+    await tellThen(alert, `the phone cannot reach the Front Door; ${st.failures} tries to reconnect it failed`, () => { st.told = true; });
   }
   const r = await send(REMOTE_CONTROL);
   st.attempts += 1;

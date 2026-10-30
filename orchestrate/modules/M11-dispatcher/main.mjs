@@ -76,7 +76,7 @@ export async function main(argv, { now = Date.now(), log = (s) => process.stderr
   if (r.late) {
     log(`dispatcher: the pass did not finish within ${limit} ms; exiting so the next start can run`);
     // Joe is told too (L38), once a day: a stuck pass holds everything after the step it is stuck in.
-    try { holdAlert({ rec: wired.rec, cause: 'run-late', text: `a Dispatcher pass did not finish within ${limit} ms and was stopped; the next pass starts in a minute`, alert: safeAlert(wired.rec, wired.ports.alert, now), now }); }
+    try { await holdAlert({ rec: wired.rec, cause: 'run-late', text: `a Dispatcher pass did not finish within ${limit} ms and was stopped; the next pass starts in a minute`, alert: safeAlert(wired.rec, wired.ports.alert, now), now }); }
     catch (e) { log(`dispatcher: the late pass could not be told: ${e?.message ?? e}`); }
     return 2;
   }

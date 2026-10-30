@@ -401,7 +401,7 @@ test('audit MAT-4: a fix card the undo step writes is never started as a worker;
     ['fact', REVERSE_FACT(U), { state: 'not_clean', reason: 'a later change touched src/a.js' }],
     card('L-1', { for: 'lead' })]);
   const alerts = [];
-  undoStep({ rec: w.rec, rules: rulesWith(), now: T0, filesOf: () => [], alert: (t) => alerts.push(t) });
+  await undoStep({ rec: w.rec, rules: rulesWith(), now: T0, filesOf: () => [], alert: (t) => alerts.push(t) });
   assert.ok(w.rec.read('card', FIX_CARD(U)));
   const r = await w.pass(1);
   assert.deepEqual(r.started, []);
@@ -615,19 +615,19 @@ test('audit 0b-6 r3 MAT-3: the pass alone tells Joe of a missing value once; a n
   assert.equal(w.rec.read('fact', RULES_MISSING_FACT).doc.keys, null);
 });
 
-test('audit 0b-6 r3 MAT-3: the missing-values alert names only keys not told before; a shrinking set tells nothing', () => {
+test('audit 0b-6 r3 MAT-3: the missing-values alert names only keys not told before; a shrinking set tells nothing', async () => {
   const rec = recWith();
   const alerts = [];
   const tell = (keys, complete = true) => rulesMissingAlert({ rec, keys, alert: (t) => alerts.push(t), now: T0, complete });
-  tell(['a', 'b']);
+  await tell(['a', 'b']);
   assert.equal(alerts.length, 1);
   assert.match(alerts[0], /no value for a, b:/);
-  tell(['b']);
+  await tell(['b']);
   assert.equal(alerts.length, 1, 'one key came back: nothing to tell');
   assert.equal(rec.read('fact', RULES_MISSING_FACT).doc.keys, 'b');
-  tell(['b', 'c']);
+  await tell(['b', 'c']);
   assert.match(alerts.at(-1), /no value for c:/);
-  tell([], false);
+  await tell([], false);
   assert.equal(rec.read('fact', RULES_MISSING_FACT).doc.keys, 'b, c', 'an incomplete tick keeps what it did not read');
   assert.equal(alerts.length, 2);
 });
@@ -738,3 +738,40 @@ test('r4 Minor: usage unread for over a day is told again each day it lasts', as
 function usageInto(rec) {
   rec.write({ actor: 'dispatcher', entity: 'fact', id: USAGE_FACT(ACCT), expectRev: 0, doc: usageFact({ ...GREEN, account: ACCT, now: T0 }) });
 }
+
+// Audit 0b-6 r5 m1: a launch has its own time limit. One that never answers holds no other start; its card
+// stays claimed (a late answer may still start a session, so it never goes back to ready) and Joe is told.
+test('r5 m1: a launch that never answers holds no other start; its card stays claimed and is told once a day', { timeout: 10_000 }, async () => {
+  const w = world([card('C-A'), card('C-B', { product: 'p2', files: ['src/b.js'] })]);
+  const run = (min) => dispatcherPass({ rec: w.rec, rules: rulesWith({}, { start_session: { decision: 'allow', reason: 'ok' } }), now: T0 + min * MIN, account: ACCT, sessions: [], probe: () => idle,
+    launch: (x) => (x.card.id === 'C-A' ? new Promise(() => {}) : { ok: true, sessionId: 'S-B', pgid: 9, head: 'h'.repeat(40) }),
+    stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }), filesOf: filesOfCommits, alert: (t) => w.calls.alerts.push(t), portDeadlineMs: 50 });
+  const r = await run(0);
+  assert.deepEqual(r.started.map((x) => (Array.isArray(x) ? x[0] : x)), ['C-B'], JSON.stringify(r));
+  assert.equal(w.rec.read('card', 'C-A').doc.state, 'claimed');
+  assert.equal(w.calls.alerts.filter((a) => /card C-A: the launcher it did not answer within 50 ms/.test(a)).length, 1, w.calls.alerts.join(' | '));
+});
+
+// Audit 0b-6 r5 MAT-2 and m4: the pass's own alert sites with the alert failing first, and a Lead hand-off
+// reason that changes only in a number.
+test('r5 MAT-2: usage unknown and a failed Lead hand-off, with the first alert failing, are each told once once alerts work', { timeout: 10_000 }, async () => {
+  for (const bad of [() => { throw new Error('down'); }, () => Promise.reject(new Error('down'))]) {
+    const parked = { state: 'waiting', product: 'p1', waiting: { who: 'dispatcher', what: 'usage_band', since: iso(T0), next_check: iso(T0) } };
+    const w = world([['card', 'C-1', { ...parked, tier: 1 }]], { usage: null });
+    w.setProduct('p2', 'paused');
+    const sent = [];
+    let down = true;
+    let n = 0;
+    const at = (min) => dispatcherPass({ rec: w.rec, rules: rulesWith(), now: T0 + min * MIN, account: ACCT, sessions: [], probe: () => idle, launch: async () => ({ ok: false }),
+      stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }), filesOf: filesOfCommits, portDeadlineMs: 50,
+      pauseLead: () => { throw new Error(`Lead not reachable (pid ${++n})`); }, alert: (t) => (down ? bad(t) : sent.push(t)) });
+    await at(0);
+    await at(24 * 60 + 1);
+    assert.deepEqual(sent, []);
+    down = false;
+    await at(24 * 60 + 2);
+    await at(24 * 60 + 3);
+    assert.equal(sent.filter((t) => /usage has been unreadable/.test(t)).length, 1, sent.join(' | '));
+    assert.equal(sent.filter((t) => /could not be asked to hand off/.test(t)).length, 1, sent.join(' | '));
+  }
+});

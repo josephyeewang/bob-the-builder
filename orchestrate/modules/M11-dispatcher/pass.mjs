@@ -25,7 +25,7 @@ import { currentBands, recordBands } from './usage.mjs';
 import { startGate } from './gate.mjs';
 import { atSafePoint } from './transcript.mjs';
 import { OUTAGE_FACT } from './outage.mjs';
-import { move, waitOn, note } from './moves.mjs';
+import { move, waitOn, note, tellThen } from './moves.mjs';
 import { exactReverse } from './undo.mjs';
 import { FINAL_STATES } from '../../shared/record.mjs';
 
@@ -62,20 +62,24 @@ export async function guarded(f, ms = PORT_DEADLINE_MS) {
  * reported nothing. A value the gate reads only for some cards can be told again when such a card comes
  * back after a pass without one: once per return, never once per pass. Returns the joined key list.
  */
-export function rulesMissingAlert({ rec, factId = RULES_MISSING_FACT, keys, alert, now, what = 'nothing new starts until they do; stops still run', complete = true }) {
+export async function rulesMissingAlert({ rec, factId = RULES_MISSING_FACT, keys, alert, now, what = 'nothing new starts until they do; stops still run', complete = true }) {
   const seen = [...new Set(keys)].sort();
-  const had = String(factDoc(rec, factId)?.doc?.keys ?? '').split(', ').filter(Boolean);
-  const fresh = seen.filter((k) => !had.includes(k));
+  const doc = factDoc(rec, factId)?.doc;
+  const list = (v) => String(v ?? '').split(', ').filter(Boolean);
+  const had = list(doc?.keys);
   const keep = complete ? seen : [...new Set([...had, ...seen])].sort();
+  // Told keys are marked only once the alert went through (audit 0b-6 r5 MAT-2). Only those still in the
+  // last recorded set count, so a key that left is told again when it comes back.
+  const told = list(doc?.told_keys).filter((k) => had.includes(k));
+  const fresh = seen.filter((k) => !told.includes(k));
   // Still missing a day after the last alert: told again, all of them (LEAD-CALLS L38, once per cause per day).
-  const last = Date.parse(factDoc(rec, factId)?.doc?.alerted_at ?? factDoc(rec, factId)?.doc?.at ?? '');
+  const last = Date.parse(doc?.told_at ?? '');
   const again = !fresh.length && keep.length && seen.length && Number.isFinite(last) && now - last >= HOLD_REPEAT_MS;
   const tell = fresh.length ? fresh : again ? keep : [];
-  if (keep.join(', ') !== had.join(', ') || tell.length) {
-    const alertedAt = tell.length ? iso(now) : factDoc(rec, factId)?.doc?.alerted_at ?? null;
-    putFact(rec, factId, { keys: keep.join(', ') || null, at: iso(now), alerted_at: alertedAt }, keep.length ? 'rules_missing' : 'rules_missing_cleared');
-  }
-  if (tell.length) alert(`the rules have no value for ${tell.join(', ')}: ${what}`);
+  const joined = keep.join(', ') || null;
+  if (joined !== (doc?.keys ?? null)) putFact(rec, factId, { ...doc, keys: joined, at: iso(now) }, keep.length ? 'rules_missing' : 'rules_missing_cleared');
+  const toldNow = () => [...new Set([...told, ...tell])].sort().join(', ');
+  if (tell.length) await tellThen(alert, `the rules have no value for ${tell.join(', ')}: ${what}`, () => putFact(rec, factId, { ...factDoc(rec, factId)?.doc, told_keys: toldNow(), told_at: iso(now) }, 'rules_missing_told'));
   return seen.join(', ') || null;
 }
 
@@ -86,14 +90,13 @@ export const HOLD_REPEAT_MS = 24 * 60 * 60_000;
  * No silent hold (LEAD-CALLS L38): anything that holds or blocks work tells Joe what and why, once per
  * cause per day, on the fact `hold-<cause>`.
  */
-export function holdAlert({ rec, cause, text, alert, now }) {
+export async function holdAlert({ rec, cause, text, alert, now, ms }) {
   const f = factDoc(rec, HOLD_FACT(cause))?.doc;
-  const last = Date.parse(f?.alerted_at ?? '');
+  const last = Date.parse(f?.told_at ?? '');
   // Once per cause per day (L38): a changing detail in the text does not make it a new cause.
   if (Number.isFinite(last) && now - last < HOLD_REPEAT_MS) return false;
-  putFact(rec, HOLD_FACT(cause), { text, alerted_at: iso(now) }, 'hold_alert');
-  alert(text);
-  return true;
+  // Marked told only once sent (audit 0b-6 r5 MAT-2).
+  return tellThen(alert, text, () => putFact(rec, HOLD_FACT(cause), { text, told_at: iso(now) }, 'hold_alert'), ms);
 }
 
 /** Stops a process group: SIGTERM, then SIGKILL if still alive after 10 s. Ports for tests. */
@@ -181,17 +184,16 @@ export async function stopPass({ rec, rules, now, account, sessions, probe, stop
   }
   const answers = await Promise.all(due.map(({ s }) => guarded(() => stopGroup(s), portDeadlineMs)));
   const done = [];
+  const failed = [];
   due.forEach((d, i) => {
-    const { s, pending } = d;
     const stopped = answers[i];
-    if (stopped?.ok) { done.push({ ...d, stopped }); return; }
-    // One alert per wanted stop, and again each day it fails (audit MIN-4; L38: no silent hold).
-    if (!pending.fail_alerted || !(now - Date.parse(pending.fail_alerted_at ?? '') < HOLD_REPEAT_MS)) {
-      alert(`session ${s.id} (card ${s.card}) could not be stopped: ${stopped?.reason ?? 'no answer'}`);
-      putFact(rec, STOP_FACT(s.id), { ...pending, fail_alerted: true, fail_alerted_at: iso(now) }, 'stop_failed');
-    }
-    out.stopping.push([s.id, pending.reason]);
+    if (stopped?.ok) done.push({ ...d, stopped });
+    else { failed.push({ ...d, stopped }); out.stopping.push([d.s.id, d.pending.reason]); }
   });
+  // One alert per wanted stop, and again each day it fails (audit MIN-4; L38: no silent hold); told only
+  // once sent (r5 MAT-2). Side by side, so one slow alert holds no other.
+  await Promise.all(failed.map(({ s, pending, stopped }) => (now - Date.parse(pending.told_at ?? '') < HOLD_REPEAT_MS ? null
+    : tellThen(alert, `session ${s.id} (card ${s.card}) could not be stopped: ${stopped?.reason ?? 'no answer'}`, () => putFact(rec, STOP_FACT(s.id), { ...pending, told_at: iso(now) }, 'stop_failed')))));
   const saves = await Promise.all(done.map(({ s }) => guarded(() => saveWork(s), saveDeadlineMs)));
   for (const [i, { s, pending, late, stopped }] of done.entries()) {
     const saved = saves[i];
@@ -267,9 +269,8 @@ export async function dispatcherPass({ rec, rules, now, account, sessions, probe
   }
   // Once per stretch of unread usage, and again each day it lasts (L38).
   const uf = factDoc(rec, UNKNOWN_FACT)?.doc;
-  if (unknownLong && (!uf?.since?.startsWith?.(unknownSince) || !(now - Date.parse(uf?.at ?? '') < HOLD_REPEAT_MS))) {
-    putFact(rec, UNKNOWN_FACT, { since: unknownSince, at: iso(now) }, 'usage_unknown_alert');
-    alert('usage has been unreadable for over a day; parked work waits on you');
+  if (unknownLong && (!uf?.since?.startsWith?.(unknownSince) || !(now - Date.parse(uf?.told_at ?? '') < HOLD_REPEAT_MS))) {
+    await tellThen(alert, 'usage has been unreadable for over a day; parked work waits on you', () => putFact(rec, UNKNOWN_FACT, { since: unknownSince, told_at: iso(now) }, 'usage_unknown_alert'));
   }
 
   // 6. Starts. When starts are off (no account reading, a rules value missing), undo cards still go
@@ -277,11 +278,11 @@ export async function dispatcherPass({ rec, rules, now, account, sessions, probe
   if (factDoc(rec, OUTAGE_FACT)?.doc?.state === 'open') { out.notes.push('outage: nothing starts'); }
   else {
     if (startsOff) out.notes.push(`nothing but undo cards starts: ${startsOff}`);
-    await starts({ rec, rules, now, b, running, launch, out, alert, onlyUndo: !!startsOff, missing, filesOf });
+    await starts({ rec, rules, now, b, running, launch, out, alert, onlyUndo: !!startsOff, missing, filesOf, portDeadlineMs });
   }
   // The tick tells Joe once for all its steps (`tellMissing` false); run alone, the pass tells him itself.
   out.missing = missing;
-  if (tellMissing) rulesMissingAlert({ rec, keys: missing, alert, now });
+  if (tellMissing) await rulesMissingAlert({ rec, keys: missing, alert, now });
 
   // 7. Paused products: the Lead hands off once its workers are parked.
   for (const { id: product, doc } of rec.list('product')) {
@@ -292,8 +293,12 @@ export async function dispatcherPass({ rec, rules, now, account, sessions, probe
     // A failing port is that product's problem, told once, not a failed pass (audit 0b-6 r3 MIN-2).
     const asked = await guarded(async () => { await pauseLead({ product }); return { ok: true }; }, portDeadlineMs);
     if (!asked.ok) {
-      // Once per reason, and again each day it fails (L38).
-      if (pf?.doc?.reason !== asked.reason || !(now - Date.parse(pf?.doc?.at ?? '') < HOLD_REPEAT_MS)) { putFact(rec, PAUSE_FACT(product), { state: 'failed', reason: asked.reason, at: iso(now) }, 'pause_lead_failed'); alert(`the Lead of ${product} could not be asked to hand off: ${asked.reason}; tried again every pass`); }
+      // Once per reason (its numbers out; audit 0b-6 r5 m4), and again each day it fails (L38); told only once sent (r5 MAT-2).
+      const cause = String(asked.reason).replace(/\d+/g, 'N');
+      if (pf?.doc?.state !== 'failed') putFact(rec, PAUSE_FACT(product), { state: 'failed', reason: asked.reason, at: iso(now) }, 'pause_lead_failed');
+      if (pf?.doc?.told_cause !== cause || !(now - Date.parse(pf?.doc?.told_at ?? '') < HOLD_REPEAT_MS)) {
+        await tellThen(alert, `the Lead of ${product} could not be asked to hand off: ${asked.reason}; tried again every pass`, () => putFact(rec, PAUSE_FACT(product), { state: 'failed', reason: asked.reason, at: iso(now), told_cause: cause, told_at: iso(now) }, 'pause_lead_failed'));
+      }
       continue;
     }
     putFact(rec, PAUSE_FACT(product), { state: 'asked', at: iso(now) }, 'pause_lead');
@@ -305,12 +310,12 @@ export async function dispatcherPass({ rec, rules, now, account, sessions, probe
 
 // Undo cards' starts, alone, before every other step (L38): the tick's own step, so a failure in the
 // main pass cannot keep an undo from starting. The gate still checks each one (L40).
-export async function undoStarts({ rec, rules, now, bands = HELD_BANDS, running = [], launch, filesOf, alert }) {
+export async function undoStarts({ rec, rules, now, bands = HELD_BANDS, running = [], launch, filesOf, alert, portDeadlineMs = PORT_DEADLINE_MS }) {
   const out = { started: [], refused: [], notes: [] };
   const missing = [];
   if (factDoc(rec, OUTAGE_FACT)?.doc?.state === 'open') { out.notes.push('outage: nothing starts'); return { ...out, missing, running }; }
   const live = [...running];
-  await starts({ rec, rules, now, b: bands, running: live, launch, out, alert, onlyUndo: true, missing, filesOf });
+  await starts({ rec, rules, now, b: bands, running: live, launch, out, alert, onlyUndo: true, missing, filesOf, portDeadlineMs });
   return { ...out, missing, running: live };
 }
 
@@ -329,7 +334,7 @@ const capRefusal = (r) => /cap|already runs|shares |runs alone/.test(r);
 
 export const UNDO_HELD_FACT = (card) => `undo-held-${card}`;
 
-async function starts({ rec, rules, now, b, running, launch, out, alert, onlyUndo = false, missing = [], filesOf }) {
+async function starts({ rec, rules, now, b, running, launch, out, alert, onlyUndo = false, missing = [], filesOf, portDeadlineMs = PORT_DEADLINE_MS }) {
   const amberish = b.band !== 'green' || b.own_building !== 'open';
   // A card meant for the Lead to plan (for: 'lead') is never started as a worker (audit MAT-4).
   const ready = rec.list('card').filter((c) => c.doc.state === 'ready' && c.doc.for !== 'lead');
@@ -344,33 +349,39 @@ async function starts({ rec, rules, now, b, running, launch, out, alert, onlyUnd
     // An undo that cannot start is the way out of a bad change: Joe is told why, once per reason and again
     // each day (audit 0b-6 r3 MAT-5). The reason counts with its numbers out, so "runs 2 workers" and
     // "runs 3 workers" are one cause (audit 0b-6 r4).
-    const refuse = (reason) => {
+    const refuse = async (reason) => {
       out.refused.push([id, reason]);
       const held = factDoc(rec, UNDO_HELD_FACT(id))?.doc;
       const cause = reason.replace(/\d+/g, 'N');
-      if (doc.kind === 'undo' && (held?.cause !== cause || !(now - Date.parse(held?.at ?? '') < HOLD_REPEAT_MS))) {
-        putFact(rec, UNDO_HELD_FACT(id), { reason, cause, at: iso(now) }, 'undo_held');
-        alert(`your undo (card ${id}) is waiting: ${reason}`);
+      if (doc.kind === 'undo' && (held?.told_cause !== cause || !(now - Date.parse(held?.told_at ?? '') < HOLD_REPEAT_MS))) {
+        await tellThen(alert, `your undo (card ${id}) is waiting: ${reason}`, () => putFact(rec, UNDO_HELD_FACT(id), { reason, told_cause: cause, told_at: iso(now) }, 'undo_held'));
       }
     };
     let may;
     try { may = rules.may('start_session', { card, product }); } catch (e) { may = { decision: 'refuse', reason: `could not be asked (${e?.message ?? e})` }; }
-    if (may.decision !== 'allow') { refuse(`rules: ${may.reason}`); continue; }
-    if (amberish && tierOf(doc) === 2 && tier1Waiting.has(product)) { refuse('queued behind Tier-1 work in amber'); continue; }
+    if (may.decision !== 'allow') { await refuse(`rules: ${may.reason}`); continue; }
+    if (amberish && tierOf(doc) === 2 && tier1Waiting.has(product)) { await refuse('queued behind Tier-1 work in amber'); continue; }
     const kind = kindOf(doc);
     // An undo starts only as the exact reverse of a merge in the record (LEAD-CALLS L40).
     const exact = kind === 'undo' ? exactReverse({ rec, card, filesOf }) : null;
-    if (exact && !exact.ok) { refuse(`it is not an exact reverse: ${exact.reason}`); continue; }
+    if (exact && !exact.ok) { await refuse(`it is not an exact reverse: ${exact.reason}`); continue; }
     const g = startGate({ rules, rec, card, kind, product, b, running, exactReverse: !!exact?.ok });
     if (g.missing) missing.push(g.missing);
-    if (!g.ok) { if (amberish && tierOf(doc) === 1 && capRefusal(g.reason)) tier1Waiting.add(product); refuse(g.reason); continue; }
+    if (!g.ok) { if (amberish && tierOf(doc) === 1 && capRefusal(g.reason)) tier1Waiting.add(product); await refuse(g.reason); continue; }
     const claim = rec.write({ actor: 'dispatcher', entity: 'card', id, expectRev: rev, doc: { ...doc, state: 'claimed', claimed_at: iso(now), changed_at: iso(now), rules_rev: may.rev ?? rules.rev ?? null }, kind: 'claim' });
-    if (!claim.ok) { refuse(`not claimed: ${claim.reason}`); continue; }
-    let l;
-    try { l = await launch({ card, kind, product }); } catch (e) { l = { ok: false, reason: e.message }; }
+    if (!claim.ok) { await refuse(`not claimed: ${claim.reason}`); continue; }
+    // A launch has its own time limit (audit 0b-6 r5 m1): one that never answers holds no other start.
+    // It may still start a session after the limit, so the card stays claimed, never back to ready (a
+    // second start would make two sessions for one card); Joe is told, once a day.
+    const l = await guarded(() => launch({ card, kind, product }), portDeadlineMs);
+    if (!l?.ok && l?.reason === `it did not answer within ${portDeadlineMs} ms`) {
+      out.refused.push([id, `launcher: ${l.reason}`]);
+      await holdAlert({ rec, cause: `launch-late-${id}`, text: `card ${id}: the launcher ${l.reason}; the card stays claimed so it cannot start twice`, alert, now });
+      continue;
+    }
     if (!l?.ok) {
       move(rec, 'card', id, { state: 'ready', last_refusal: l?.reason ?? 'the launcher gave no answer' }, { now, kind: 'launch_refused' });
-      refuse(`launcher: ${l?.reason ?? 'no answer'}`);
+      await refuse(`launcher: ${l?.reason ?? 'no answer'}`);
       continue;
     }
     const started = move(rec, 'card', id, { state: 'running', session: l.sessionId }, { now, kind: 'started' });
