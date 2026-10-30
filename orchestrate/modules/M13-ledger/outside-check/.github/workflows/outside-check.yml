@@ -76,6 +76,9 @@ jobs:
       - name: product 3 / robot-merges
         if: ${{ !cancelled() }}
         run: node src/outside-check.mjs robot-merges 3
+      - name: product 1 / repo-guard
+        if: ${{ !cancelled() }}
+        run: node src/outside-check.mjs repo-guard 1
       - name: collect
         id: collect
         if: ${{ always() }}

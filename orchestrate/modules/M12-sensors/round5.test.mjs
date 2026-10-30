@@ -4,7 +4,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { memoryRecord } from '../../shared/record.mjs';
 import { makeAlerts, fakeIssues } from '../M13-ledger/alerts.mjs';
-import { watchOutside, robotMergesGreen, ROBOT_FACT } from './outside-watch.mjs';
+import { watchOutside, robotMergesGreen, ROBOT_FACT, NO_PUSH_FACT } from './outside-watch.mjs';
 import { makeFactWriter } from './facts.mjs';
 import { makeMasker } from './mask.mjs';
 import { FAKE } from './fakes.mjs';
@@ -23,14 +23,14 @@ function world(cleared) {
     if (path.includes('/workflows/')) return { workflow_runs: runs.slice(0, 10).map(({ c: _c, ...r }) => r) };
     if (jobsBroken) throw Object.assign(new Error('rate limited'), { status: 403 });
     const r = runs.find((x) => x.id === Number(/\/runs\/(\d+)\/jobs/.exec(path)[1]));
-    return { jobs: [{ name: 'check', steps: [{ name: 'product 1 / robot-merges', conclusion: r.c }] }] };
+    return { jobs: [{ name: 'check', steps: [{ name: 'product 1 / robot-merges', conclusion: r.c }, { name: 'product 1 / repo-guard', conclusion: 'success' }] }] };
   };
   const writer = makeFactWriter(rec, { masker: makeMasker({ env: {} }) });
   const productNames = { 'product 1': { product: 'real-product', tag: TAG } };
   return {
     run: () => { t += 60 * 60e3; runs.unshift({ id: ++id, created_at: new Date(t - 60e3).toISOString(), status: 'completed', conclusion: conc === 'success' ? 'success' : 'failure', c: conc }); },
     pass: () => watchOutside({ fetchJson, repo: 'o/c', homeAlerts, productAlerts, writer, productNames, now: () => t }),
-    gate: () => robotMergesGreen({ read: (i) => rec.read('fact', i)?.doc, product: 'real-product', now: () => t }),
+    gate: () => robotMergesGreen({ read: (i) => (i === NO_PUSH_FACT ? { green: true, at: new Date(t).toISOString() } : rec.read('fact', i)?.doc), product: 'real-product', now: () => t }),
     fact: () => rec.read('fact', ROBOT_FACT('real-product'))?.doc,
     clearNow: () => { owner.cleared = { 'product 1': new Date(t).toISOString() }; },
     set: (c) => { conc = c; }, breakJobs: (b) => { jobsBroken = b; }, tick: (m) => { t += m * 60e3; },
@@ -84,7 +84,9 @@ test('0b-7 audit round 5 MAT-4: text under a count-like secret name is masked; n
 
 test('0b-7 audit round 5 minor 4: a fact written under another product name that shares the id never opens this gate', () => {
   const doc = { product: 'a.b', green: true, red_since: null, last_green_at: new Date(1e12).toISOString() };
-  const g = robotMergesGreen({ read: () => doc, product: 'a-b', now: () => 1e12 });
+  const np = { green: true, at: new Date(1e12).toISOString() };
+  const read = (i) => (i === NO_PUSH_FACT ? np : doc);
+  const g = robotMergesGreen({ read, product: 'a-b', now: () => 1e12 });
   assert.equal(g.open, false);
-  assert.equal(robotMergesGreen({ read: () => doc, product: 'a.b', now: () => 1e12 }).open, true);
+  assert.equal(robotMergesGreen({ read, product: 'a.b', now: () => 1e12 }).open, true);
 });

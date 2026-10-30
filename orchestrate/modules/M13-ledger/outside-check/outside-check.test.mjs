@@ -225,7 +225,8 @@ test('workflow: committed file equals the generator; schedule only; least permis
   assert.match(jobs['keep-alive'], / {4}permissions:\n {6}contents: write\n {4}env/);
   for (const j of ['notify', 'keep-alive']) assert.equal(jobs[j].includes('secrets.'), false, `${j} holds no secrets`);
   const steps = [...y.matchAll(/- name: (product \d+ \/ [a-z-]+)\n {8}if: \$\{\{ !cancelled\(\) \}\}\n/g)].map((m) => m[1]);
-  assert.equal(steps.length, SLOTS * CHECKS.length);
+  assert.equal(steps.length, SLOTS * CHECKS.length + 1, 'one step per (slot, check) plus the repo guard');
+  assert.equal(steps.at(-1), 'product 1 / repo-guard');
   assert.equal(new Set(steps).size, steps.length);
   assert.equal(/[A-Za-z0-9-]+\/[A-Za-z0-9-]+(?=\.git|")/.test(y.replace(/\$GITHUB_REPOSITORY/g, '')), false, 'no repo named in the file');
 });

@@ -21,6 +21,12 @@
 //     Round 5: a first-pass or gap latch starts when the Mini noticed, so a clear written earlier never opens it (MAT-1);
 //     only a passed step resets the failed-run count, never a step it couldn't read, skipped or cancelled (MAT-2); and
 //     the gap counts between the check runs the Mini saw as well as between its own passes (MAT-3).
+//     Round 6 MAT-A: the clear must also be at or after the newest run whose step wasn't green (last_red_at), so a
+//     clear written before a later failure never opens the gate once that failure ages out of the 7-day window.
+//   - the outside repo's lock (lead call L24): the robot-merges result counts as green only when the same run's
+//     "product 1 / repo-guard" step passed too (a failed guard counts as a failed run for the latch). And the Mini
+//     probes each of its own tokens (checkNoPush): none may write to the outside repo; the gate needs that fact green
+//     and under 2 hours old.
 // Endpoint shapes assumed from GitHub's REST docs, 29 Oct 2026 (Principle 9).
 
 export const STOPPED_MIN = 90;
@@ -30,6 +36,8 @@ export const UNSEEN_GAP_MS = 5 * 24 * 3600e3;
 export const OWNER_FILE = 'robot-merges-owner.json';
 const slug = (product) => String(product).replace(/[^A-Za-z0-9_-]/g, '-');
 export const ROBOT_FACT = (product) => `outside-robot-merges-${slug(product)}`;
+export const NO_PUSH_FACT = 'outside-no-push';
+const GUARD_STEP = 'product 1 / repo-guard';
 
 // fetchJson(path) → JSON (public GitHub API, unauthenticated). homeAlerts: alerts.mjs for the home repo.
 // productAlerts: { 'product 1': alerts, … } from private config. writer: makeFactWriter(rec); productNames:
@@ -87,7 +95,13 @@ export async function watchOutside({ fetchJson, repo, workflow = 'outside-check.
     const nowIso = new Date(now()).toISOString();
     for (const [label, cfg] of Object.entries(productNames)) {
       const product = typeof cfg === 'object' && cfg ? cfg.product : cfg;
-      const step = steps.find((x) => x.name === `${label} / robot-merges`);
+      const rm = steps.find((x) => x.name === `${label} / robot-merges`);
+      const guard = steps.find((x) => x.name === GUARD_STEP);
+      // The guard and robot-merges as one result (lead call L24): a failure of either is a failure; green needs both.
+      const conc = rm?.conclusion === 'failure' || guard?.conclusion === 'failure' ? 'failure'
+        : rm?.conclusion === 'success' && guard?.conclusion === 'success' ? 'success'
+          : rm && rm.conclusion !== 'success' ? rm.conclusion : rm ? (guard ? guard.conclusion : 'no-guard') : undefined;
+      const step = rm ? { conclusion: conc } : undefined;
       const stepGreen = step?.conclusion === 'success' && ranAt !== null;
       const pinnedTag = ownerFile?.tags?.[label];
       const bound = typeof cfg?.tag === 'string' && cfg.tag !== '' && pinnedTag === cfg.tag;
@@ -108,13 +122,17 @@ export async function watchOutside({ fetchJson, repo, workflow = 'outside-check.
         latchWhy = !prevDoc ? 'no earlier result on this Mini' : passGap ? 'the Mini saw nothing for more than 5 days' : 'more than 5 days between outside-check runs';
       }
       if (!redSince && redRuns >= LATCH_RUNS) { redSince = ranAt ?? nowIso; latchWhy = `failed in ${redRuns} runs in a row`; }
+      // The newest run whose result wasn't green (round 6 MAT-A): a clear must come after it too.
+      const lastRed = !stepGreen && newRun ? ranAt ?? nowIso : prevDoc?.last_red_at ?? null;
       const cleared = Date.parse(ownerFile?.cleared?.[label]);
-      if (redSince && green && Number.isFinite(cleared) && cleared >= Date.parse(redSince) && cleared <= now() + 5 * 60e3) { redSince = null; latchWhy = null; }
+      if (redSince && green && Number.isFinite(cleared) && cleared >= Date.parse(redSince) && !(lastRed && cleared < Date.parse(lastRed))
+        && cleared <= now() + 5 * 60e3) { redSince = null; latchWhy = null; }
       const reason = !ownerFile ? `cannot read ${OWNER_FILE}` : !bound ? 'the slot tag does not match this product' : stepGreen ? 'step passed'
-        : step ? `step ${step.conclusion ?? 'unfinished'}` : 'no robot-merges step in the newest run';
+        : guard?.conclusion === 'failure' ? 'the outside repo guard failed' : !guard && rm ? 'no repo-guard step in the newest run'
+          : step ? `step ${step.conclusion ?? 'unfinished'}` : 'no robot-merges step in the newest run';
       const doc = { kind: 'fact.outside-robot-merges', product, label, at: nowIso, run_id: done.id ?? null,
         run_at: ranAt, green, last_green_at: green && !(Date.parse(prev) > Date.parse(ranAt)) ? ranAt : prev,
-        red_runs: redRuns, red_since: redSince, latch_reason: latchWhy, reason };
+        red_runs: redRuns, red_since: redSince, latch_reason: latchWhy, last_red_at: lastRed, reason };
       out.push([`${label} / robot-merges fact`, writer.put(ROBOT_FACT(product), doc)]);
     }
   }
@@ -144,9 +162,35 @@ export function robotMergesGreen({ read, product, now = () => Date.now() }) {
   if (d.green !== true) problems.push(`robot-merges: latest result not green (${d.reason ?? 'unknown'})`);
   if (d.red_since !== null && d.red_since !== undefined) problems.push(`robot-merges: red since ${d.red_since} (${d.latch_reason ?? 'latched'}); stays shut until the owner clears it in ${OWNER_FILE}`);
   if (d.red_since === undefined) problems.push('robot-merges: fact has no latch field (written by an older version)');
+  // The Mini's own tokens can't write to the outside repo (lead call L24), checked within the same 2 hours.
+  let np = null;
+  try { np = read(NO_PUSH_FACT); } catch { np = null; }
+  const npAge = (now() - Date.parse(np?.at)) / 60e3;
+  if (np?.green !== true) problems.push(`outside repo: the Mini's tokens are not shown unable to write there (${np?.reason ?? 'no check yet'})`);
+  else if (!(npAge >= -5 && npAge <= ROBOT_GREEN_MIN)) problems.push(`outside repo: the no-write check is more than ${ROBOT_GREEN_MIN} min old or in the future`);
   const age = (now() - Date.parse(d.last_green_at)) / 60e3;
   if (!Number.isFinite(age)) problems.push('robot-merges: never green');
   else if (age < -5) problems.push('robot-merges: last green time is in the future');
   else if (age > ROBOT_GREEN_MIN) problems.push(`robot-merges: last green more than ${ROBOT_GREEN_MIN} min ago`);
   return { open: problems.length === 0, problems };
+}
+
+// The Mini's half of lead call L24: none of the Mini's tokens may write to the outside-check repo. tokens:
+// [{ name, probe }] where probe = makeProbe(token) from the outside-check code (the name is a label, never the token).
+// Writes fact outside-no-push { green, reason, at } and raises / clears one home alert. Lane 2 calls it each pass
+// with every token the Mini holds (join item); with no tokens listed it is red, never green by default.
+export async function checkNoPush({ tokens, repo, writer, homeAlerts, writeProbe, now = () => Date.now() }) {
+  const bad = [];
+  if (!Array.isArray(tokens) || !tokens.length) bad.push('no tokens listed');
+  else for (const t of tokens) {
+    const r = await writeProbe(t?.probe, repo);
+    if (r !== 'no-write') bad.push(`${String(t?.name ?? 'unnamed').replace(/[^A-Za-z0-9 _-]/g, '')}: ${r}`);
+  }
+  const green = bad.length === 0;
+  const reason = green ? 'no Mini token can write there' : bad.join('; ');
+  writer.put(NO_PUSH_FACT, { kind: 'fact.outside-no-push', green, reason, at: new Date(now()).toISOString() });
+  const key = 'outside-check|mini-token-can-write|github';
+  return green ? homeAlerts.clear({ key, note: 'No Mini token can write to the outside-check repo.' })
+    : homeAlerts.raise({ key, title: 'A Mini token may be able to change the outside check',
+      body: `The Mini probed its tokens against the outside-check repo: ${reason}. Until each reads "no-write", the Merge Gate stays shut.`, status: 'can-write' });
 }

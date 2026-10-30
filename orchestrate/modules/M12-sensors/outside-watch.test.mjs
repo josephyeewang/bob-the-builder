@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { memoryRecord } from '../../shared/record.mjs';
 import { makeAlerts, fakeIssues } from '../M13-ledger/alerts.mjs';
-import { watchOutside, robotMergesGreen, ROBOT_FACT, ROBOT_GREEN_MIN, STOPPED_MIN } from './outside-watch.mjs';
+import { watchOutside, robotMergesGreen, ROBOT_FACT, NO_PUSH_FACT, ROBOT_GREEN_MIN, STOPPED_MIN } from './outside-watch.mjs';
 import { makeFactWriter } from './facts.mjs';
 import { makeMasker } from './mask.mjs';
 
@@ -41,7 +41,8 @@ function setup({ names } = {}) {
   };
   const writer = makeFactWriter(rec, { masker: makeMasker({ env: {} }) });
   const pass = () => watchOutside({ fetchJson, repo: 'owner/outside-check', homeAlerts, productAlerts, ...(names ? { writer, productNames: names } : {}), now: () => t });
-  const gate = (product = 'test-product') => robotMergesGreen({ read: (i) => rec.read('fact', i)?.doc, product, now: () => t });
+  // The Mini's no-write probe (lead call L24) is green and fresh here; its own tests are in l24.test.mjs.
+  const gate = (product = 'test-product') => robotMergesGreen({ read: (i) => (i === NO_PUSH_FACT ? { green: true, at: new Date(t).toISOString() } : rec.read('fact', i)?.doc), product, now: () => t });
   return { home, p1, tick, pass, gate, fact: (p = 'test-product') => rec.read('fact', ROBOT_FACT(p))?.doc, now: () => t, stop: () => { stopped = true; }, setSteps: (s) => { steps = s; }, setOwner: (o) => { owner = o; } };
 }
 
@@ -86,7 +87,7 @@ test('no run at all → stopped alert', async () => {
 });
 
 // ---- robot-merges last-green fact (lead calls L19, L20) ----
-const RM = (c) => [{ name: 'product 1 / heartbeat', conclusion: 'success' }, { name: 'product 1 / robot-merges', conclusion: c }];
+const RM = (c) => [{ name: 'product 1 / heartbeat', conclusion: 'success' }, { name: 'product 1 / robot-merges', conclusion: c }, { name: 'product 1 / repo-guard', conclusion: 'success' }];
 
 test('L20: a green robot-merges step writes last_green_at; the Merge Gate opens, then shuts 2 h after the check stops', async () => {
   const w = setup({ names: NAMES });

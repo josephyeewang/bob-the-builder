@@ -45,7 +45,8 @@ export function redactCredentialValues(input, credentialValues) {
 
 // ── Layer 2: known shapes ──
 // Each rule: kind, a global regex, and which capture group is the secret (0 = the whole match).
-const SECRET_NAME = '[A-Za-z0-9_.-]*(?:token|secret|passw(?:or)?d|pwd|api[_-]?key|private[_-]?key|access[_-]?key|client[_-]?secret|auth[_-]?key)[A-Za-z0-9_.-]*';
+// Round 6 MAT-C: passphrase, credentials and the common "<what>_key" names in any case.
+const SECRET_NAME = '[A-Za-z0-9_.-]*(?:token|secret|passw(?:or)?d|pwd|passphrase|credentials?|api[_-]?key|private[_-]?key|access[_-]?key|client[_-]?secret|auth[_-]?key|deploy[_-]?key|signing[_-]?key|encryption[_-]?key|ssh[_-]?key|master[_-]?key|license[_-]?key|service[_-]?key)[A-Za-z0-9_.-]*';
 const SHAPES = [
   { kind: 'github', re: /\bgh[pousr]_[A-Za-z0-9]{8,}/g, group: 0 },
   { kind: 'github', re: /\bgithub_pat_[A-Za-z0-9_]{8,}/g, group: 0 },
@@ -122,7 +123,11 @@ const SECRET_KEY = new RegExp(`^${SECRET_NAME}$`, 'i');
 // Count-like names (input_tokens, token_count, tokens_used) hold usage numbers, not credentials (round 4 minor); a
 // number under any other secret name (a PIN) is still masked.
 const COUNT_KEY = /(^|_)(count|counts|tokens)$|^tokens_|_count_/i;
-export const isSecretKey = (k) => SECRET_KEY.test(k) || (/^[A-Z0-9_]+$/.test(k) && CREDENTIAL_ENV_KEY_SUFFIX.test(k));
+// Any "<what>_key" field name, any case (round 6 MAT-C), except names that hold our own ids (idempotency_key).
+const KEY_NAME = /[_.-]key$/i;
+const NOT_SECRET_KEY = /(^|[_.-])(idempotency|dedup|sort|cache|partition|primary|foreign|alert)[_.-]key$/i;
+export const isSecretKey = (k) => SECRET_KEY.test(k) || (/^[A-Z0-9_]+$/.test(k) && CREDENTIAL_ENV_KEY_SUFFIX.test(k))
+  || (KEY_NAME.test(k) && !NOT_SECRET_KEY.test(k));
 
 export const TYPED_KEY = /^(?:sha|id|uid|ts|created|[a-z0-9]+(?:_sha|_id|_at))$/;
 // A field is exempt only when BOTH its name is typed AND its value has a typed shape (review round 2: outside systems
@@ -160,11 +165,25 @@ export function makeMasker({ env = process.env, protectedEnvKeys = [], protected
         // Only a number (or digits) under a count-like name is kept; text under it is masked (0b-7 audit round 5 MAT-4).
         const countValue = COUNT_KEY.test(k) && (typeof x === 'number' || (typeof x === 'string' && /^\d+$/.test(x)));
         if (isSecretKey(k) && !countValue && (typeof x === 'number' || (typeof x === 'string' && x.length >= 4))) o[key] = '[REDACTED:named-key]';
+        // A list or object under a secret name: every value at any depth is masked too (round 6 MAT-B); under a
+        // count-like name only its numbers are kept.
+        else if (isSecretKey(k) && x && typeof x === 'object') o[key] = maskAll(x, COUNT_KEY.test(k));
         else o[key] = isTypedField(k, x) ? x : maskDeep(x);
       }
       return o;
     }
     return v;
+  }
+  function maskAll(v, keepNumbers) {
+    if (Array.isArray(v)) return v.map((x) => maskAll(x, keepNumbers));
+    if (v && typeof v === 'object') {
+      const o = {};
+      for (const [k, x] of Object.entries(v)) { let key = maskSecrets(k).text; while (Object.hasOwn(o, key)) key += '~'; o[key] = maskAll(x, keepNumbers); }
+      return o;
+    }
+    if (keepNumbers && (typeof v === 'number' || (typeof v === 'string' && /^\d+$/.test(v)))) return v;
+    if (typeof v === 'number' || (typeof v === 'string' && v.length >= 4)) return '[REDACTED:named-key]';
+    return typeof v === 'string' ? maskSecrets(v).text : v;
   }
   return Object.freeze({ maskSecrets, maskDeep });
 }

@@ -32,13 +32,20 @@
 //                tag per slot; the PRODUCTS entry must carry the same tag, and a pinned slot left empty FAILs. The Mini
 //                checks the same tag, records its last green time and latches a red until the owner clears it in
 //                that file; the Merge Gate won't run unless green within 2 hours (lead calls L19, L20).
+//   repo-guard   (one step, "product 1 / repo-guard"; lead call L24) this outside repo itself, so nobody but the owner
+//                can change the check or acknowledge a merge: no collaborator other than the owner can push (the
+//                robots and the Mini's accounts included), no deploy key can write, an active ruleset on the default
+//                branch blocks updates, deletion and force-pushes with only the admin role able to bypass it, and the
+//                check's own token can't write here. Anything that can't be read → FAIL. Commit author names are
+//                never trusted. The Mini probes its own tokens the same way (outside-watch.mjs checkNoPush).
+//                CHECK_TOKEN needs Administration: read on this repo to see deploy keys and ruleset bypass lists.
 // Endpoint shapes assumed from GitHub's REST docs, 29 Oct 2026 (Principle 9: void on an API change).
 
 import { createHash } from 'node:crypto';
 import { appendFileSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { resolveStage, isSupported } from './supported.mjs';
-import { SLOTS } from './workflow.mjs';
+import { SLOTS, GUARD } from './workflow.mjs';
 
 export const STALE_MIN = 70;
 const AUDIT_MIN_AGE = 30 * 60e3;
@@ -53,6 +60,76 @@ const ACKABLE = ['push', 'pr_merge'];
 export const SLOT_TAG = /^[a-z0-9]{8,32}$/;
 
 class HttpError extends Error { constructor(status) { super(`http ${status}`); this.status = status; } }
+
+// A write that can't succeed, to learn whether a token may write to a repo without changing anything: creating a
+// branch at the all-zero commit. 403 or 404 → the token can't write; 422 → it got past the permission check (it can
+// write; the commit just doesn't exist); anything else → unknown. Unverified that GitHub checks permission before
+// the commit (REST docs, 29 Oct 2026, don't say): the owner's set-up proves it once with a token that can write,
+// which must read "can-write" (README; Principle 9: void on an API change).
+export async function writeProbe(post, repo) {
+  let status;
+  try { status = await post(`/repos/${repo}/git/refs`, { ref: 'refs/heads/orchestrate-write-probe', sha: '0'.repeat(40) }); } catch { status = undefined; }
+  if (status === 403 || status === 404) return 'no-write';
+  if (status === 422) return 'can-write';
+  return 'unknown';
+}
+
+// post(path, body) → the HTTP status only; never throws, never returns a body.
+export function makeProbe(token, fetchImpl = fetch) {
+  return async (path, body) => {
+    try {
+      const r = await fetchImpl(`https://api.github.com${path}`, { method: 'POST', headers: { authorization: `Bearer ${token}`, accept: 'application/vnd.github+json', 'x-github-api-version': '2022-11-28' }, body: JSON.stringify(body) });
+      return r.status;
+    } catch { return undefined; }
+  };
+}
+
+const LOCK_RULES = ['update', 'deletion', 'non_fast_forward'];
+const ADMIN_ROLE = 5;
+function coversDefault(conditions, def) {
+  const inc = conditions?.ref_name?.include; const exc = conditions?.ref_name?.exclude ?? [];
+  if (!Array.isArray(inc) || !Array.isArray(exc)) return false;
+  const names = ['~DEFAULT_BRANCH', '~ALL', `refs/heads/${def}`];
+  if (!inc.some((x) => names.includes(x))) return false;
+  // Any exclude that could match the default branch (it, a pattern, or the special names) doesn't count (strict).
+  return !exc.some((x) => typeof x !== 'string' || names.includes(x) || /[*?[\]]/.test(x));
+}
+
+// The outside repo's own lock (lead call L24). self = GITHUB_REPOSITORY, selfOwner = GITHUB_REPOSITORY_OWNER.
+export async function repoGuard({ api, probe, self, selfOwner }) {
+  if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(String(self ?? '')) || !selfOwner) return { ok: false, code: 'self-unknown' };
+  const repo = await api(`/repos/${self}`);
+  const def = repo?.default_branch;
+  if (typeof def !== 'string' || !def) return { ok: false, code: 'repo-unreadable' };
+  const people = await api(`/repos/${self}/collaborators?affiliation=all&per_page=100`);
+  if (!Array.isArray(people)) return { ok: false, code: 'collaborators-unreadable' };
+  if (people.length >= 100) return { ok: false, code: 'collaborators-not-covered' };
+  if (people.some((c) => typeof c?.login !== 'string' || !c.permissions || typeof c.permissions !== 'object')) return { ok: false, code: 'collaborators-unreadable' };
+  const writers = people.filter((c) => c.login.toLowerCase() !== String(selfOwner).toLowerCase()
+    && (c.permissions.push !== false || c.permissions.maintain === true || c.permissions.admin !== false));
+  if (writers.length) return { ok: false, code: `others-can-write ${writers.length}` };
+  const keys = await api(`/repos/${self}/keys?per_page=100`);
+  if (!Array.isArray(keys) || keys.length >= 100) return { ok: false, code: 'deploy-keys-unreadable' };
+  if (keys.some((k) => k?.read_only !== true)) return { ok: false, code: 'deploy-key-can-write' };
+  const list = await api(`/repos/${self}/rulesets?per_page=100`);
+  if (!Array.isArray(list) || list.length >= 100) return { ok: false, code: 'rulesets-unreadable' };
+  let locked = false;
+  for (const s of list) {
+    if (!Number.isInteger(s?.id)) return { ok: false, code: 'rulesets-unreadable' };
+    const r = await api(`/repos/${self}/rulesets/${s.id}`);
+    if (r?.target !== 'branch' || r.enforcement !== 'active' || !coversDefault(r.conditions, def)) continue;
+    // Without the bypass list (a token lacking Administration: read) the lock can't be judged.
+    if (!Array.isArray(r.bypass_actors) || !Array.isArray(r.rules)) return { ok: false, code: 'ruleset-unreadable' };
+    const types = r.rules.map((x) => x?.type);
+    const update = r.rules.find((x) => x?.type === 'update');
+    const onlyAdmin = r.bypass_actors.every((b) => b?.actor_type === 'RepositoryRole' && b.actor_id === ADMIN_ROLE);
+    if (LOCK_RULES.every((t) => types.includes(t)) && update?.parameters?.update_allows_fetch_and_merge !== true && onlyAdmin) locked = true;
+  }
+  if (!locked) return { ok: false, code: 'default-branch-not-locked' };
+  const w = await writeProbe(probe, self);
+  if (w !== 'no-write') return { ok: false, code: w === 'can-write' ? 'check-token-can-write' : 'write-probe-unclear' };
+  return { ok: true, code: 'locked' };
+}
 
 export function makeApi(token, fetchImpl = fetch) {
   return async (path) => {
@@ -210,8 +287,16 @@ export const CHECKS = {
 };
 
 // Runs one (check, slot); returns the public line. Never throws, never prints product data.
-export async function runOne(check, slot, { products, api, pinned, docsLane, acked, owner, now = () => Date.now() }) {
+export async function runOne(check, slot, { products, api, pinned, docsLane, acked, owner, probe, self, selfOwner, now = () => Date.now() }) {
   const label = `product ${slot}`;
+  // The outside repo's own lock runs once, under slot 1, whatever the product list holds (lead call L24).
+  if (check === GUARD) {
+    if (slot !== 1) return { line: `${label} / ${check}: FAIL guard-runs-in-slot-1`, ok: false, label };
+    let r;
+    try { r = await repoGuard({ api, probe, self, selfOwner }); }
+    catch (e) { r = { ok: false, code: `check-error ${Number.isInteger(e?.status) ? e.status : 'exception'}` }; }
+    return { line: `${label} / ${check}: ${r.ok ? 'ok' : 'FAIL'} ${r.code}`, ok: r.ok, label };
+  }
   if (!CHECKS[check]) return { line: `${label} / ${check}: FAIL unknown-check`, ok: false, label };
   // A missing, empty or malformed product list fails every slot: a silent green would switch the net off (0b-7 audit M-5).
   if (!Array.isArray(products) || !products.length) return { line: `${label} / ${check}: FAIL products-missing`, ok: false, label };
@@ -239,7 +324,8 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const owner = read('./robot-merges-owner.json');
   const res = products === null
     ? { line: `product ${slotArg} / ${check}: FAIL products-secret-unreadable`, ok: false }
-    : await runOne(check, Number(slotArg), { products, api: makeApi(process.env.CHECK_TOKEN), pinned, docsLane, acked, owner });
+    : await runOne(check, Number(slotArg), { products, api: makeApi(process.env.CHECK_TOKEN), probe: makeProbe(process.env.CHECK_TOKEN),
+      self: process.env.GITHUB_REPOSITORY, selfOwner: process.env.GITHUB_REPOSITORY_OWNER, pinned, docsLane, acked, owner });
   console.log(res.line);
   if (process.env.RESULTS && !res.empty) appendFileSync(process.env.RESULTS, `${res.line}\n`);
   process.exitCode = res.ok ? 0 : 1;
