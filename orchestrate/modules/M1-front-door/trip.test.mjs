@@ -70,7 +70,8 @@ test('R-0b-83 brief: away line, time zone question, go items and risky asks with
   w('ask', 'ask-3', { state: 'open', what: 'no link here' });
   const text = buildTripBrief({ products: [{ name: 'test-product', on_merge_gate: true }, { name: 'second', on_merge_gate: false }], until: '2026-11-07', tz: null, rec, facts, heartbeatProduct: HB, now });
   assert.match(text, /test-product, second set to away until 2026-11-07/);
-  assert.match(text, /Which time zone will you be in\?.*number work holds; \[Undo\] still runs/);
+  assert.match(text, /Which time zone will you be in\?/);
+  assert.match(text, /test-product: number work holds until you answer; \[Undo\] still runs/);
   assert.match(text, /second still merges the way you run it today; the hours rule starts at the second cutover/);
   assert.match(text, /Waiting on your go \(1\):\n- go go-1: .*go on roadmap row 7.*\(https:\/\/example.invalid\/roadmap#row-7\)/);
   assert.match(text, /Open risky-act asks \(2\); they still expire after 12 h/);

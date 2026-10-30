@@ -32,9 +32,9 @@ test('L26 + round 6 M-1: "Confirmed" only where taking the file in is the act; a
   const push = (kind, id, input) => { const f = outboxFile(kind, id, input); return intakePush(f.name, checkOutboxFile(f.name, f.text, { products, seenIds: new Set() })); };
   assert.equal(push('state', '20261103-0915-ka', { product: 'test-product', state: 'paused' }), 'Confirmed: pause test-product. Only your tap brings it back.');
   assert.equal(push('state', '20261103-0915-kb', { product: 'test-product', state: 'away', until: '2026-11-07', tz: 'Europe/Prague' }), 'Confirmed: away test-product until 2026-11-07, time zone Europe/Prague.');
-  assert.equal(push('state', '20261103-0915-kh', { product: 'test-product', state: 'away', until: '2026-11-07' }), 'Confirmed: away test-product until 2026-11-07, no time zone yet, so number work holds.', 'round 6 minor 4');
+  assert.equal(push('state', '20261103-0915-kh', { product: 'test-product', state: 'away', until: '2026-11-07' }), 'Confirmed: away test-product until 2026-11-07, no time zone yet; the trip brief says what that means for each product.', 'round 6 minor 4');
   const est = checkOutboxFile('state-20261103-0915-kc.json', '{"product":"test-product","state":"away","until":null,"tz":"EST"}', { products, seenIds: [] });
-  assert.match(intakePush('state-20261103-0915-kc.json', est), /^Confirmed: away test-product, no time zone yet, so number work holds \(that time zone was not accepted; name a city/);
+  assert.match(intakePush('state-20261103-0915-kc.json', est), /^Confirmed: away test-product, no time zone yet; the trip brief says what that means for each product \(that time zone was not accepted; name a city/);
   assert.equal(push('idea', '20261103-0915-kg', 'try a darker header'), 'Confirmed: idea 20261103-0915-kg.');
   const requests = [push('request', '20261103-0915-kd', { request: 'resume' }), push('request', '20261103-0915-ki', { request: 'resume', product: 'test-product' }),
     push('request', '20261103-0915-ke', { request: 'wrapup' }), push('request', '20261103-0915-kf', { request: 'rotate', name: 'STRIPE_KEY' })];

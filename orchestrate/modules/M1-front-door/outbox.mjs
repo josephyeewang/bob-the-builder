@@ -105,7 +105,7 @@ export function intakePush(name, result) {
   if (result.kind === 'idea') return `Confirmed: idea ${result.id ?? ''}.`.replace(' .', '.');
   if (result.kind === 'state') {
     if (d.state !== 'away') return `Confirmed: pause ${d.product}. Only your tap brings it back.`;
-    const tz = d.tz ? `time zone ${d.tz}` : `no time zone yet, so number work holds${result.note ? ' (that time zone was not accepted; name a city, such as Europe/Prague)' : ''}`;
+    const tz = d.tz ? `time zone ${d.tz}` : `no time zone yet; the trip brief says what that means for each product${result.note ? ' (that time zone was not accepted; name a city, such as Europe/Prague)' : ''}`;
     return `Confirmed: away ${d.product}${d.until ? ` until ${String(d.until).slice(0, 10)}` : ''}, ${tz}.`;
   }
   if (d.request === 'rotate') return `Request taken: rotate ${d.name}. The key is NOT rotated yet; the steps follow.`;

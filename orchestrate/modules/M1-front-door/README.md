@@ -42,7 +42,8 @@ R-0b-82's decision and handoff code sit here although the row is tagged M11 (lan
    `makeFrontDoorHandoff`'s text (first prompt, or a read-only file outside the outbox).
 4. Lane 2: each Ledger pass calls `nextTripPush({ states, lastPushedIds, build })` (`states`: `{ id, state }` of the
    newest checked `state-` file per product, of which only `away` ones count; `build` = `buildTripBrief` with those ids). A result is sent to Joe's
-   phone over the Front Door's push path and its `ids` stored as `lastPushedIds` (lead call L22). The pass also
+   phone over the Front Door's push path and its `ids` stored as `lastPushedIds` (lead call L22); a result with
+   `failed: true` (the brief couldn't be built) is pushed and stored the same way. The pass also
    writes the brief to the read-only file the skill quotes if Joe asks first, and runs `readPowerSource` with the
    heartbeat. The skill quotes only a brief that names the ids it wrote (0b-8 audit round 3 M-3). If the push isn't
    ready by the first cutover, trip mode falls back to two replies ("filed", then the brief when Joe says "brief").

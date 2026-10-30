@@ -46,7 +46,7 @@ Reply: "Filed: pause X. The Mini confirms in a minute." Only Joe's tap brings it
    `{"product":"X","state":"away","until":"<date as YYYY-MM-DD, or null>","tz":"<time zone, or null>"}`
 2. Time zone: ask once with a question box: "Which time zone will you be in? A city, such as Europe/Prague." Use the
    city-based name (Region/City, or UTC). If the answer is ambiguous (EST, "Pacific", GMT+2), ask once more. Until he
-   answers, write `"tz":null`: number work holds while tz is null; [Undo] still runs. After he answers, write a new
+   answers, write `"tz":null`. Don't tell him what that holds; the trip brief says it per product. After he answers, write a new
    `state-<id>.json` for each product, the same as step 1 but with the time zone.
 3. Reply: "Filed: away <the products>. The Mini confirms in a minute." The Mini sends the trip brief to his phone itself. You
    don't know the time, so you can't judge a brief's age yourself; the brief written after these files names them.

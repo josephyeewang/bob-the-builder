@@ -60,7 +60,8 @@ export function briefAnswers(text, ids) {
 // Lead call L22: the brief goes to Joe's phone as a push, once per new set of away files. states: [{ id, state }], the
 // newest checked state file per product; only "away" ones count, so a plain pause never pushes a trip brief (0b-8
 // audit round 5 M-1). lastPushedIds: what the Ledger pushed last (it stores the returned ids); build(ids) → the brief
-// text. Returns { text, ids } to push, or null (nothing new, or a brief that doesn't name every id, never sent).
+// text. Returns { text, ids } to push (failed: true when the build threw), or null (nothing new, or a brief that
+// doesn't name every id, never sent).
 export function nextTripPush({ states, lastPushedIds = [], build }) {
   const away = (Array.isArray(states) ? states : []).filter((s) => s?.state === 'away').map((s) => s.id);
   const ids = [...new Set(away.filter((i) => /^\d{8}-\d{4}-[a-z]{2}$/.test(String(i))))].sort();
@@ -68,7 +69,9 @@ export function nextTripPush({ states, lastPushedIds = [], build }) {
   const last = new Set(Array.isArray(lastPushedIds) ? lastPushedIds : []);
   if (ids.every((x) => last.has(x))) return null;
   let text;
-  try { text = build(ids); } catch { return null; }
+  // A brief that can't be built is pushed as a failure, once per id set, so Joe isn't left waiting for a brief that
+  // never comes (0b-8 audit round 7 minor 1). The reason is not quoted: it could carry record text.
+  try { text = build(ids); } catch { return { text: 'Trip brief failed: the Mini could not build it. Say "brief" to try again.', ids, failed: true }; }
   return briefAnswers(text, ids) ? { text, ids } : null;
 }
 
@@ -98,10 +101,13 @@ export function buildTripBrief({ products, until = null, tz: tzIn = null, stateI
   out.push(`Trip mode: ${products.map((p) => p.name).join(', ') || 'no products'} set to away${until ? ` until ${until}` : ''}. Only your tap brings a product back to active.`);
 
   out.push('', 'Time zone:');
-  if (!tz) out.push('- Which time zone will you be in? Name a city, such as Europe/Prague. Until you answer, number work holds; [Undo] still runs.');
+  // "Holds" is said only for a product the Merge Gate actually holds; before the second cutover nothing holds number
+  // work, and saying so would make Joe believe it was held (0b-8 audit round 7 M-1).
+  if (!tz) out.push('- Which time zone will you be in? Name a city, such as Europe/Prague.');
   for (const p of products) {
     if (!p.on_merge_gate) out.push(`- ${p.name} still merges the way you run it today; the hours rule starts at the second cutover.`);
     else if (tz) out.push(`- ${p.name}: number work merges only ${MERGE_HOURS} ${tz}; a go you don't answer holds; [Undo] still runs.`);
+    else out.push(`- ${p.name}: number work holds until you answer; [Undo] still runs.`);
   }
 
   // M13's one waiting list (card, ask, go, merge, claim), only what waits on Joe (round 2 M-3, minor 12); an item with a
