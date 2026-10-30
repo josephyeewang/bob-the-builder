@@ -7,7 +7,7 @@
 //                        hosts: [production host names] }
 // A missing or stale snapshot, or one without that block, blocks every call (fail closed).
 
-import { basename, isAbsolute, join, resolve, sep } from 'node:path';
+import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { readdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { isMain, runHook, block, pass, toolPaths, shellCommands, bothWords, programOf, landingPath, realFolder, inside, joinLines, unreadable, expandBraces, fold, globRe } from './lib.mjs';
@@ -46,6 +46,38 @@ function optValues(c, letter, longs = []) {
   return out.filter((x) => typeof x === 'string');
 }
 const clusterHas = (o, letter) => o.some((w) => /^-[^-]/.test(w) && w.includes(letter));
+// Folders given one after another where each counts from the one before (`tar -C sub -C ../../work`, `git -C a -C b`;
+// round 3 MAT-4): every step, as a path from where the command runs.
+const chain = (vals) => { const out = []; let at = ''; for (const v of vals) { at = isAbsolute(v) || !at ? v : `${at}/${v}`; out.push(at); } return out; };
+
+// tar's short options that take a value, in GNU tar and in bsdtar (the Mac's tar). In a cluster the rest of the word
+// is the value (`-fCa.tar` is `-f Ca.tar`, with no -C; round 3 MAT-5), else the next word. Both readings are judged.
+const TAR_VALUE_LETTERS = ['bCfFgHIKLNTVX', 'bCfIsTX'];
+// The folders tar unpacks into, read as tar reads its words; the folder it runs in too when a name comes before the
+// first -C (GNU tar takes -C in order).
+function tarDirs(c, letters) {
+  const dirs = [];
+  let named = false;
+  let i = 1;
+  // The old form (`tar xf a.tar`): its letters' values are the next words, in order.
+  if (c[1] && !c[1].startsWith('-')) i = 2 + [...c[1]].filter((x) => letters.includes(x)).length;
+  for (; i < c.length; i += 1) {
+    const w = c[i];
+    if (w === '--') { if (i + 1 < c.length && !dirs.length) named = true; break; }
+    if (['--directory', '--cd'].some((l) => longIs(w, l))) { const v = w.includes('=') ? w.slice(w.indexOf('=') + 1) : c[++i]; if (typeof v === 'string') dirs.push(v); continue; }
+    // Another long option may take the next word as its value (`--exclude x`): that word is not a name.
+    if (w.startsWith('--')) { if (!w.includes('=')) i += 1; continue; }
+    if (!/^-[^-]/.test(w)) { if (!w.startsWith('-') && !dirs.length) named = true; continue; }
+    for (let k = 1; k < w.length; k += 1) {
+      if (!letters.includes(w[k])) continue;
+      const v = k + 1 < w.length ? w.slice(k + 1) : c[++i];
+      if (w[k] === 'C' && typeof v === 'string') dirs.push(v);
+      break;
+    }
+  }
+  const steps = chain(dirs);
+  return !steps.length || named ? ['.', ...steps] : steps;
+}
 
 /**
  * The folders a command writes as a whole, or [] when it writes none. `'.'` stands for the folder it runs in.
@@ -76,8 +108,7 @@ export function folderWrites(c) {
       if (/P/.test(mode) || o.some((w) => longIs(w, '--absolute-paths'))) return { targets: [sep], deletes: false };
       // The old form (`tar xCf dir a.tar`) takes its values in letter order; not worked out, so judged from the top.
       if (old.includes('C')) return { targets: [sep], deletes: false };
-      const dirs = optValues(c, 'C', ['--directory', '--cd']);
-      return { targets: dirs.length ? dirs : ['.'], deletes: false };
+      return { targets: [...new Set(TAR_VALUE_LETTERS.flatMap((l) => tarDirs(c, l)))], deletes: false };
     }
     return { targets: [], deletes: false };
   }
@@ -95,7 +126,7 @@ export function folderWrites(c) {
   // `git clean -x` deletes the ignored files, settings files among them; any `git clean` is refused where it runs.
   // `git stash --all` stashes the ignored files too, then removes them, as `git clean -x` does (MAT-6).
   const stashAll = c.includes('stash') && c.slice(c.indexOf('stash') + 1).some((w) => longIs(w, '--all') || /^-[A-Za-z]*a[A-Za-z]*$/.test(w));
-  if (prog === 'git' && (c.includes('clean') || stashAll)) return { targets: ['.', ...optValues(c, 'C')], deletes: true };
+  if (prog === 'git' && (c.includes('clean') || stashAll)) return { targets: ['.', ...chain(optValues(c, 'C'))], deletes: true };
   return { targets: [], deletes: false };
 }
 
@@ -113,18 +144,32 @@ function expand(w, home, cwds) {
 // The fixed front of a path with a wildcard: `proj/a*/b` gives `proj`. A wildcard target is judged by that folder.
 const fixedFront = (p) => { const parts = p.split(sep); const i = parts.findIndex((x) => /[*?[]/.test(x)); return i < 0 ? p : parts.slice(0, i).join(sep) || sep; };
 
-// While the command may run in a folder holding a protected file, only these programs run there: any other one could
-// unpack or write files it never names (`cpio -idm`, `pax -r`, `aa extract`), so it is refused, not listed (L45, MAT-8).
-// The commands that write a whole folder are judged above in any case.
-const IN_PROTECTED = new Set(['cd', 'pushd', 'popd', 'pwd', 'ls', 'cat', 'head', 'tail', 'less', 'more', 'grep', 'egrep', 'fgrep', 'rg', 'ag',
-  'sed', 'awk', 'jq', 'yq', 'echo', 'printf', 'test', '[', '[[', 'true', 'false', ':', 'wc', 'sort', 'uniq', 'diff', 'cmp', 'comm', 'file', 'stat',
-  'find', 'tree', 'du', 'df', 'mkdir', 'touch', 'cp', 'mv', 'rm', 'rmdir', 'ln', 'chmod', 'tar', 'unzip', 'zip', 'rsync', 'ditto', 'trash',
-  'basename', 'dirname', 'realpath', 'readlink', 'tr', 'cut', 'paste', 'tee', 'xxd', 'od', 'hexdump', 'shasum', 'sha256sum', 'md5', 'md5sum',
-  'date', 'sleep', 'base64', 'which', 'type', 'whoami', 'uname', 'env', 'command', 'nohup', 'time', 'exec', 'builtin',
-  'git', 'gh', 'node', 'npm', 'npx', 'pnpm', 'yarn', 'bun', 'deno', 'tsc', 'tsx', 'eslint', 'prettier', 'biome', 'vitest', 'jest', 'playwright',
-  'python', 'python3', 'pip', 'pip3', 'uv', 'pytest', 'ruff', 'make', 'open', 'code',
-  // The shell's own words.
-  'if', 'then', 'else', 'elif', 'fi', 'for', 'in', 'do', 'done', 'while', 'until', 'case', 'esac', '{', '}', '!', 'export', 'set', 'unset', 'local', 'read', 'return', 'exit', 'wait', 'break', 'continue']);
+// While the command may run in a folder holding a protected file, a program that unpacks files it does not name
+// (`cpio -idm`, `pax -r`, `aa extract`) is refused (L45, MAT-8). Only unpackers: ordinary tools run there (L46; round 3
+// MAT-11). The commands that write a whole folder are judged below in any case.
+const UNPACKERS = new Set(['cpio', 'bsdcpio', 'pax', 'aa', 'ar', '7z', '7za', '7zr', '7zz', 'unrar', 'unar', 'xar', 'jar', 'lha', 'cabextract',
+  'unshar', 'pkgutil', 'installer', 'hdiutil', 'dpkg-deb']);
+// Programs that can make a link or a folder by another name, which a whole-folder write later in the same line could
+// go through when it did not exist yet as the guard looked (MAT-5, MAT-10). Any other earlier command (`git pull`,
+// `rm`) leaves the later write alone (L46; round 3 MAT-10).
+const MAKES_LINKS = new Set(['ln', 'link', 'cp', 'mv', 'ditto', 'rsync', 'install', ...UNPACKERS]);
+
+// Where a path really leads, as the system reads it: one part at a time from the folder's real path, a link followed
+// before the next part, so a `..` after a link climbs from the link's target (round 3 MAT-1, MAT-2). The part from
+// the first missing name on is kept as written.
+function physical(base, p) {
+  let cur = isAbsolute(p) ? sep : (realFolder(base) ?? base);
+  let missing = false;
+  for (const part of p.split(sep)) {
+    if (!part || part === '.') continue;
+    if (part === '..') { cur = dirname(cur); continue; }
+    cur = join(cur, part);
+    if (!missing) { const r = realFolder(cur); if (r) cur = r; else missing = true; }
+  }
+  return cur;
+}
+// A `..` after a pattern (`l*/../work`) can climb out of whatever the pattern matched: not worked out, refused.
+const dotsAfterPattern = (p) => { const parts = p.split(sep); const k = parts.findIndex((x) => /[*?[]/.test(x)); return k >= 0 && parts.slice(k + 1).includes('..'); };
 
 const linkTarget = (p) => { const r = realFolder(p); return r && r !== p ? r : null; };
 
@@ -137,8 +182,8 @@ export function folderWriteWhy(cmd, { cwd, protectedFiles, home = homedir(), pro
   // A Set: each `cd` would otherwise double the list (audit of L41, round 2, minor).
   const cwds = new Set([cwd]);
   let lost = false;
-  // A whole-folder write after any other write in the same line is refused: the earlier one may make a link or a
-  // folder that does not exist yet when the guard looks (`ln`, `cp -R <link> l`, an unpacked link; MAT-5, MAT-10).
+  // A whole-folder write after a command that can make a link is refused: the link may not exist yet when the guard
+  // looks (`ln`, `cp -R <link> l`, an unpacked link; MAT-5, MAT-10). See MAKES_LINKS.
   let wrote = null;
   // A `cd` searched through CDPATH (set any way: `CDPATH+=`, zsh's `cdpath`), after a shell option is changed
   // (`cdable_vars`), or `cd -` to a folder this line did not visit, lands where the guard can't tell (MAT-4, MAT-9).
@@ -151,7 +196,7 @@ export function folderWriteWhy(cmd, { cwd, protectedFiles, home = homedir(), pro
   for (const c of shellCommands(spellOut(cmd, home))) {
     const prog = programOf(c);
     // A word list starting with an option is the rest of a command split at a quoted bracket (`find . \( -name a \)`).
-    if (!IN_PROTECTED.has(prog) && !prog.startsWith('-') && (lost || [...cwds].some(holdsProtected))) {
+    if (UNPACKERS.has(prog) && (lost || [...cwds].some(holdsProtected))) {
       return `"${prog}" may write files it does not name, in a folder holding a protected file; run it from another folder`;
     }
     if (prog === 'cd' || prog === 'pushd') {
@@ -165,7 +210,8 @@ export function folderWriteWhy(cmd, { cwd, protectedFiles, home = homedir(), pro
       else if (to === '-') { if (setOld || !moved) lost = true; /* else back to a folder already counted */ }
       else if (/[*?[]/.test(to) || forms === null || (viaCdpath && !/^(\/|~|@pwd@|\.\.?(\/|$))/.test(to))) lost = true;
       // Where the cd really lands counts too: after `cd <link>`, a later `..` is taken on disk from the link's target.
-      else for (const x of forms) for (const base of [...cwds]) { const to2 = resolve(base, x); cwds.add(to2); const r = realFolder(to2); if (r) cwds.add(r); }
+      // `cd -P l/..` goes up from the link's target: where the system takes the path counts too (round 3 MAT-2).
+      else for (const x of forms) for (const base of [...cwds]) { const to2 = resolve(base, x); cwds.add(to2); const r = realFolder(to2); if (r) cwds.add(r); cwds.add(physical(base, x)); }
       moved = true;
       continue;
     }
@@ -176,13 +222,14 @@ export function folderWriteWhy(cmd, { cwd, protectedFiles, home = homedir(), pro
       if (forms === null) return `"${t}" is written as a whole in a folder the guard can't place`;
       if (forms.some((f) => !isAbsolute(f)) && lost) return `"${t}" is written as a whole after a folder change the guard can't follow`;
       for (const f of forms) {
-        for (const abs of isAbsolute(f) ? [resolve(f)] : [...cwds].map((b) => resolve(b, f))) {
+        if (dotsAfterPattern(f)) return `"${t}" has a ".." after a pattern, which the guard can't place`;
+        for (const abs of (isAbsolute(f) ? [sep] : [...cwds]).flatMap((b) => [resolve(b, f), physical(b, f)])) {
           const why = judge(t, abs, deletes, protectedFiles, shielded);
           if (why) return why;
         }
       }
     }
-    if (targets.length || ['ln', 'link', 'cp', 'mv', 'ditto', 'rsync', 'install', 'tar', 'bsdtar', 'unzip', 'git', 'zip'].includes(prog)) wrote = prog;
+    if (MAKES_LINKS.has(prog) || (targets.length && ['tar', 'bsdtar', 'gtar', 'unzip'].includes(prog))) wrote = prog;
   }
   return null;
 }
@@ -261,7 +308,8 @@ export function decide(input, args) {
   // `cd` beforehand could point at the real file (audit R-0b-44 M-5).
   const namesEnv = (w) => {
     const name = basename(w);
-    if (!name) return false;
+    // A name of stars alone (`dist/*`) names no file in particular (L46; round 3 MAT-14).
+    if (!name || /^\*+$/.test(name)) return false;
     let re = null;
     try { re = /[*?[]/.test(name) ? globRe(fold(name), 'i') : null; } catch { return true; }
     return envFiles.some((f) => (re ? re.test(basename(f)) : basename(f) === fold(name)));
@@ -271,16 +319,18 @@ export function decide(input, args) {
   if (input.tool_name === 'Bash') {
     // A short name is read from the session's folder; without it the guard can't tell (lane 3, R-0b-70).
     if (typeof input.cwd !== 'string' || !isAbsolute(input.cwd)) return block('the call gives no working folder, so a short file name can\'t be checked');
-    const cmd = joinLines(input.tool_input?.command);
+    // Read raw where a here-document matters: joining lines first could move where its body ends (L46).
+    const raw = String(input.tool_input?.command ?? '');
+    const cmd = joinLines(raw);
     // Shapes no hook can read are refused as a class (lib.mjs `unreadable`; R-0b-44 round 2 MAT-1, R-0b-70).
-    const why = unreadable(cmd);
+    const why = unreadable(raw);
     if (why) return block(`${why}; write the command out plainly`);
     // Each protected file as listed and where it really is (a folder link, or /tmp on a Mac), folded.
     const listed = [...prod.env_files, ...(Array.isArray(snap.rules.secrets?.paths) ? snap.rules.secrets.paths : [])].filter((f) => typeof f === 'string' && isAbsolute(f));
     const protectedFiles = [...new Set(listed.flatMap((f) => [f, landingPath(f)]).filter(Boolean).map(fold))];
-    const folderWhy = folderWriteWhy(cmd, { cwd: input.cwd, protectedFiles, home: process.env.HOME || homedir(), projectDir: process.env.CLAUDE_PROJECT_DIR });
+    const folderWhy = folderWriteWhy(raw, { cwd: input.cwd, protectedFiles, home: process.env.HOME || homedir(), projectDir: process.env.CLAUDE_PROJECT_DIR });
     if (folderWhy) return block(folderWhy);
-    for (const c of shellCommands(cmd)) {
+    for (const c of shellCommands(raw)) {
       const prog = programOf(c);
       if (programs.includes(fold(prog))) return block(`"${prog}" reaches production`);
       // Package runners that would start the program: npx <p>, bunx <p>, pnpm dlx <p>, npm exec <p>.

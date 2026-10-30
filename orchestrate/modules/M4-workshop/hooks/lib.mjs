@@ -129,6 +129,95 @@ export function toolPaths(input) {
 /** A backslash before a line break joins the two lines, as the shell does (audit R-0b-44 round 2 MAT-1). */
 export const joinLines = (cmd) => String(cmd ?? '').replace(/\\\r?\n/g, '');
 
+/**
+ * The line with each here-document's body taken out, and the bodies (LEAD-CALLS L46; round 3 MAT-12). A body is text
+ * fed to a program, not commands, so the shape checks and the command list skip it; the word checks still read it.
+ * Where the guard and the shell could disagree on where a body ends, the line is refused (`why`): an end word that
+ * is not a plain name (`1 << 2` is a shift, not a here-document), `<<` next to `((`, a body line ending in a
+ * backslash, or a comment holding a quote. Read from the raw line: a backslash and line break inside a quoted body
+ * stay as written.
+ */
+export function heredocs(cmd) {
+  const s = String(cmd ?? '');
+  let out = '';
+  const bodies = [];
+  const pending = [];
+  let quotedComment = false;
+  let q = null;
+  let wordStart = true;
+  const refuse = (why) => ({ text: s, bodies, why });
+  for (let i = 0; i < s.length;) {
+    const ch = s[i];
+    if (q) {
+      out += ch;
+      if (ch === q) q = null;
+      else if (ch === '\\' && q === '"' && i + 1 < s.length) { out += s[i + 1]; i += 1; }
+      i += 1;
+      continue;
+    }
+    if (ch === '\\' && i + 1 < s.length) { out += ch + s[i + 1]; i += 2; wordStart = false; continue; }
+    if (ch === "'" || ch === '"') { q = ch; out += ch; i += 1; wordStart = false; continue; }
+    if (ch === '#' && wordStart) {
+      const end = s.indexOf('\n', i);
+      const stop = end < 0 ? s.length : end;
+      if (/['"]/.test(s.slice(i, stop))) quotedComment = true;
+      out += s.slice(i, stop);
+      i = stop;
+      continue;
+    }
+    if (ch === '<' && s[i + 1] === '<' && s[i + 2] !== '<') {
+      let k = i + 2;
+      const dash = s[k] === '-';
+      if (dash) k += 1;
+      while (s[k] === ' ' || s[k] === '\t') k += 1;
+      let delim = '';
+      let quoted = false;
+      let dq = null;
+      for (; k < s.length; k += 1) {
+        const d = s[k];
+        if (dq) { if (d === dq) dq = null; else delim += d; continue; }
+        if (d === "'" || d === '"') { dq = d; quoted = true; continue; }
+        if (d === '\\' && k + 1 < s.length) { quoted = true; delim += s[k + 1]; k += 1; continue; }
+        if (/[\s;&|()<>]/.test(d)) break;
+        delim += d;
+      }
+      if (dq || !/^[A-Za-z_][A-Za-z0-9_.-]*$/.test(delim)) return refuse('a << whose end word is not a plain name');
+      pending.push({ delim, dash, quoted });
+      out += s.slice(i, k);
+      i = k;
+      wordStart = false;
+      continue;
+    }
+    if (ch === '\n' && pending.length) {
+      out += '\n';
+      i += 1;
+      for (const h of pending) {
+        const lines = [];
+        while (i < s.length) {
+          const end = s.indexOf('\n', i);
+          const line = s.slice(i, end < 0 ? s.length : end);
+          i = end < 0 ? s.length : end + 1;
+          if ((h.dash ? line.replace(/^\t+/, '') : line) === h.delim) break;
+          lines.push(line);
+        }
+        if (lines.some((l) => l.endsWith('\\'))) return refuse('a here-document line ending in a backslash');
+        bodies.push({ text: lines.join('\n'), quoted: h.quoted });
+      }
+      pending.length = 0;
+      wordStart = true;
+      continue;
+    }
+    out += ch;
+    i += 1;
+    wordStart = /[\s;&|()<>]/.test(ch);
+  }
+  if (bodies.length || pending.length) {
+    if (quotedComment) return refuse('a comment holding a quote next to a here-document');
+    if (/\(\(/.test(bareText(out))) return refuse('a << next to (( ))');
+  }
+  return { text: out, bodies, why: null };
+}
+
 /** Splits a shell line into words, roughly: quotes are removed, joiners split. For matching, not running. */
 const BLANK = /[ \t\n]/;
 // A `|` inside an unquoted zsh group is kept as this mark, so a quoted `|` (`jq '.a | b'`) is never taken for one
@@ -175,7 +264,8 @@ export function shellCommands(cmd, { raw = false } = {}) {
   // The word after `<` or `>` is a file, not a command: it stays out of the command list (the
   // guards still see it among the words).
   let redirect = false;
-  for (const w of shellWords(joinLines(cmd).replace(/\n/g, ' ; '))) {
+  // A here-document's body is text fed to a program, not commands (L46).
+  for (const w of shellWords(joinLines(heredocs(cmd).text).replace(/\n/g, ' ; '))) {
     if (w === '<' || w === '>') { redirect = true; continue; }
     if (redirect && w === '&') continue;
     if ([';', '&', '|', '(', ')', '`', '$'].includes(w)) { redirect = false; if (cur.length) cmds.push(cur); cur = []; continue; }
@@ -325,7 +415,9 @@ export function globRe(g, flags = '') {
 // `time`, `command`, `exec`, `builtin` with no options. Any other use, and every other wrapper, is refused (MAT-14).
 const WRAPPERS = ['env', 'command', 'exec', 'nohup', 'time', 'builtin', 'sudo', 'doas', 'su', 'runuser', 'nice', 'renice', 'ionice',
   'caffeinate', 'timeout', 'stdbuf', 'chroot', 'arch', 'script', 'unbuffer', 'rlwrap', 'setsid', 'flock', 'taskset', 'chrt',
-  'watch', 'eatmydata', 'sandbox-exec', 'xcrun', 'nsenter', 'unshare', 'firejail', 'proxychains', 'proxychains4', 'torsocks', 'faketime', 'with-env', 'dotenv'];
+  'watch', 'eatmydata', 'sandbox-exec', 'xcrun', 'nsenter', 'unshare', 'firejail', 'proxychains', 'proxychains4', 'torsocks', 'faketime', 'with-env', 'dotenv',
+  // zsh's own ones (round 3 Minor).
+  'noglob', 'nocorrect', '-', 'repeat', 'coproc'];
 const PLAIN_WRAPPERS = ['nohup', 'time', 'command', 'exec', 'builtin'];
 const KEYWORDS = ['if', 'then', 'else', 'elif', 'do', 'while', 'until', '!', '{', '}'];
 
@@ -358,7 +450,8 @@ function oddBracket(bare) {
     }
     if (ch !== '(') continue;
     const before = bare.slice(0, i);
-    const prev = before.trimEnd();
+    // Only blanks are trimmed: a bracket first on a new line starts a subshell (round 3 MAT-12).
+    const prev = before.replace(/[ \t]+$/, '');
     const attached = before.length > 0 && !/\s$/.test(before);
     if (prev === '' || /[;&|(\n]$/.test(prev)) continue;
     if (attached && /[<>]$/.test(prev)) continue;
@@ -369,15 +462,50 @@ function oddBracket(bare) {
   return null;
 }
 
+// Changing a shell option anywhere in the line can change how the rest is read (`setopt extendedglob`, `braceccl`),
+// and loading a module or builtin adds commands the guards don't know: refused as a class (L46; round 3 MAT-8).
+const SHELL_OPTIONS = ['setopt', 'unsetopt', 'shopt', 'emulate', 'zmodload', 'enable', 'disable'];
+const SET_OK = ['pipefail', 'errexit', 'nounset', 'xtrace', 'verbose'];
+function plainSet(words) {
+  for (let i = 1; i < words.length; i += 1) {
+    const w = words[i];
+    if (w === '--' || w === '-') return true;
+    if (!/^[-+]/.test(w)) continue;
+    if (!/^[-+][euxv]*o?$/.test(w)) return false;
+    if (w.endsWith('o')) { i += 1; if (!SET_OK.includes(words[i])) return false; }
+  }
+  return true;
+}
+// The guards read `~`, `$HOME`, `$PWD` and `$TMPDIR` as the launcher set them; a line that sets one first could point
+// them anywhere (L46; round 3 MAT-3). Any assignment, and any builtin that sets a variable by name, is refused.
+const SAFE_NAMES = 'HOME|PWD|TMPDIR|USER';
+const SETS_SAFE_VAR = [
+  new RegExp(`(^|[\\s;&|(])(${SAFE_NAMES})(\\[[^\\]]*\\])?\\+?=`),
+  new RegExp(`(^|[\\s;&|(])(export|typeset|declare|local|readonly|integer|float|private|unset|read|vared|getopts|for|select|foreach|print|printf|zparseopts|let|strftime|zformat)(\\s[^;&|\\n]*?)?[\\s=,:(+-](${SAFE_NAMES})\\b`),
+];
+
 /** Why a guard can't read this command (refuse it), or null when it is plain words. */
 export function unreadable(cmd) {
-  const c = joinLines(cmd);
+  const h = heredocs(cmd);
+  if (h.why) return h.why;
+  const c = joinLines(h.text);
   const exp = expansionIn(c);
   if (exp) return exp;
+  // A body whose end word is unquoted still expands `$…` and backticks; its quotes are plain letters.
+  for (const b of h.bodies) {
+    const e = b.quoted ? null : expansionIn(b.text.replace(/['"]/g, ' '));
+    if (e) return `${e}, in a here-document`;
+  }
   const bare = bareText(c);
   const bracket = oddBracket(bare);
   if (bracket) return bracket;
   if (/\{[^{}\s]*\.\.[^{}\s]*\}/.test(bare)) return 'a brace range ({a..b})';
+  // Whole classes (LEAD-CALLS L46; round 3 MAT-3, MAT-6 to MAT-9, and *** once ** is let through).
+  if (/\(\s*\)/.test(bare)) return 'a function definition';
+  if (/(^|[\s;&|(])=[^\s=]/.test(bare)) return 'a word starting with = (zsh runs the program it names)';
+  if (/<\d*-\d*>/.test(bare)) return 'a zsh number range (<1-9>)';
+  if (/\*\*\*/.test(bare)) return 'a *** pattern (it follows links into any folder)';
+  if (SETS_SAFE_VAR.some((re) => re.test(bare))) return 'a line that sets HOME, PWD, TMPDIR or USER, which the guards read as fixed';
   for (const raw of shellCommands(c, { raw: true })) {
     let i = 0;
     while (i < raw.length && (/^[A-Za-z_][A-Za-z0-9_]*=/.test(raw[i]) || KEYWORDS.includes(raw[i]))) i += 1;
@@ -398,6 +526,9 @@ export function unreadable(cmd) {
     const prog = programOf(words);
     const word0 = words[0];
     if (SHELLS.includes(prog)) return `"${prog}" runs commands the guard can't see`;
+    if (word0 === 'function') return 'a function definition';
+    if (SHELL_OPTIONS.includes(prog)) return `"${prog}" changes how the shell reads the line`;
+    if (prog === 'set' && !plainSet(words)) return '"set" changing a shell option other than -e, -u, -x, -v or -o pipefail';
     if (!['[', '[['].includes(word0) && /[*?[\]{}]/.test(word0)) return 'a command name with a pattern in it';
     if (word0.includes('/') && !SYSTEM_BIN.includes(word0.slice(0, word0.lastIndexOf('/')))) return `"${word0}" runs a file by its path`;
     if (prog === 'find' && words.some((w) => /^-(exec|execdir|ok|okdir)$/.test(w))) return 'find -exec runs commands the guard can\'t see';
