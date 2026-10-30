@@ -32,6 +32,8 @@ const TEST_FAULTS = Object.freeze(['append_fails', 'short_write', 'readback_wron
 // Not a kill: `append_fails` makes the diary append fail partway (a full disk), for the cut-back test.
 
 const SAFE_ID = /^[A-Za-z0-9._-]+$/;
+// The one test for a name that becomes part of a path: no slash, not all dots, short enough to be a file name (rounds 5 m-2, 6).
+const safeName = (s) => typeof s === 'string' && s.length <= 200 && SAFE_ID.test(s) && !/^\.+$/.test(s);
 
 export const sha256 = (s) => createHash('sha256').update(s).digest('hex');
 export const docBytes = (entity, id, rev, doc) => `${JSON.stringify({ entity, id, rev, doc })}\n`;
@@ -67,7 +69,7 @@ export function openStore({ root, ownerUid, alert = () => {}, now = () => Date.n
   const say = (event) => { try { alert({ at: new Date(now()).toISOString(), ...event }); } catch { /* the sink never stops a write */ } };
   // Every path from an id goes through here, so an id like ../../x can never name a file outside the store (round 5 m-2).
   const docPath = (entity, id) => {
-    if (typeof entity !== 'string' || !SAFE_ID.test(entity) || typeof id !== 'string' || !SAFE_ID.test(id) || /^\.+$/.test(id)) throw new Error(`bad entity or id: ${String(id).slice(0, 80)}`);
+    if (!safeName(entity) || !safeName(id)) throw new Error(`bad entity or id: ${String(id).slice(0, 80)}`);
     return join(P.docs, entity, `${id}.json`);
   };
   // A failure of the store itself, not of what was asked of it: the outbox tries such a file again (round 5 m-1).
@@ -257,7 +259,8 @@ export function openStore({ root, ownerUid, alert = () => {}, now = () => Date.n
           if (damaged) throw storeFail(`the diary is damaged (${damaged}); writes stop until the owner repairs it`);
           const ts = new Date(now()).toISOString();
           const out = writes.map((w) => {
-            if (!SAFE_ID.test(w.id) || /^\.+$/.test(w.id)) throw new Error('bad id');
+            // Checked before any folder, temp or diary line is made: a name the disk can't hold would block every later write (round 6).
+            if (!safeName(w.entity) || !safeName(w.id)) throw new Error('bad entity or id');
             const cur = index.get(keyOf(w.entity, w.id));
             const rev = (cur?.rev ?? 0) + 1;
             const bytes = docBytes(w.entity, w.id, rev, w.doc);
@@ -317,7 +320,7 @@ export function openStore({ root, ownerUid, alert = () => {}, now = () => Date.n
   // Reads come from the diary; the file is only checked. A file that is neither this version nor the one before (a write
   // between its commit point and its rename) is corrupt until the next write or recover() puts it right.
   function read(entity, id) {
-    if (typeof id !== 'string' || !SAFE_ID.test(id) || /^\.+$/.test(id) || typeof entity !== 'string' || !SAFE_ID.test(entity)) return null;
+    if (!safeName(entity) || !safeName(id)) return null;
     refresh();
     const e = index.get(keyOf(entity, id));
     const bytes = readOrNull(docPath(entity, id));

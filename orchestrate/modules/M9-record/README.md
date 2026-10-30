@@ -55,6 +55,13 @@ Claude Code has a native task list. We checked whether it could hold the claims:
 - **`recover()` on damage in the middle of the diary** (not a torn last line) rolls documents back to the last good line before it stops. Writes stay stopped until the owner repairs it, so nothing new is lost, but the documents show the older versions meanwhile.
 - **"Store busy" alerts on every pass** while another writer holds the lock, not once a day per cause (L38). Rare: the lock is held for milliseconds.
 
+## Known gaps (audit round 6, logged, not fixed here)
+
+- **A disk error after the commit point** (the rename or the folder sync, once the diary line is down) is reported as "store error, tried again". The write did happen. A retried verdict is then stored twice, and a retried hand-in is refused with an `outbox_refused` fact although it went through. Same family as the round 1 crash gap; one write that also marks the file seen closes both.
+- **No test drives a real disk error (an `e.code`) inside an outbox apply.** The code retries it; that branch is unproven by a test.
+- **A verdict is not checked to come after its launch.** If the Dispatcher ever reused a session id for a second launch on a new head, a pass written before that launch would count. The Dispatcher (0b-9) must never reuse a session id.
+- **A hand-edited diary line naming `../x`** makes every later write fail with a plain error rather than "the diary is damaged". It can't reach outside the store; it only blocks writes until the owner repairs the diary.
+
 ## Running the tests
 
 Plain Node, no packages:

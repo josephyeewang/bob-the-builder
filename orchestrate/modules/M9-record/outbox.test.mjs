@@ -133,6 +133,19 @@ test('a file whose own content throws is refused and marked seen, not tried fore
   assert.equal(env.record.applyOutbox(tag, f).skipped, true, 'marked seen: not tried again');
 });
 
+test('a name too long for the disk never reaches the diary, so the store keeps taking writes (0b-2 audit round 6)', () => {
+  const env = setup({ prefix: 'm9-out-' });
+  product(env);
+  const long = 'S'.repeat(248);
+  assert.match(env.record.applyOutbox({ role: 'worker', sessionId: long }, outboxFile(env, 'worker', long, 'report-long.md', 'body')).reason, /session id/, 'a session id over 128 is refused');
+  const before = env.record.diary().length;
+  assert.throws(() => env.store.transaction((tx) => tx.commit([{ entity: 'report', id: 'r'.repeat(240), doc: { text: 'x' } }], { actor: 'test', kind: 'seed' })), /bad entity or id/);
+  assert.throws(() => env.store.transaction((tx) => tx.commit([{ entity: '../../x', id: 'r-1', doc: { text: 'x' } }], { actor: 'test', kind: 'seed' })), /bad entity or id/);
+  assert.equal(env.record.diary().length, before, 'no diary line');
+  const fresh = openRecord({ root: env.root, product: PRODUCT, ownerUid: UID, rules: env.rules, alert: () => {}, now: () => env.clock.t, outbox: { root: env.outRoot, uids: { worker: UID } } });
+  must(fresh.record.applyOutbox({ role: 'worker', sessionId: 'S-1' }, outboxFile(env, 'worker', 'S-1', 'report-ok.md', 'body')), 'a fresh writer still writes');
+});
+
 test('the same file twice: one document and one diary line; a refused file twice: one alert (R2-M10, R3-m7)', () => {
   const env = setup({ prefix: 'm9-out-' });
   const tag = { role: 'worker', sessionId: 'S-1' };

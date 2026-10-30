@@ -134,11 +134,11 @@ export function timeoutFor(rules, entity, state) {
 export const WAIT_FIELDS = Object.freeze(['who', 'what', 'since', 'next_check']);
 export const WAIT_RETURN_FIELDS = Object.freeze(['resume', 'return_to']);
 export const WAIT_WHO = Object.freeze(['joe', 'usage', 'dependency', 'incident', 'date']);   // `date` also needs a reason
-export const SESSION_ID = /^[A-Za-z0-9-]+$/;
+export const SESSION_ID = /^[A-Za-z0-9-]{1,128}$/;   // capped so an id made from it stays a legal file name (0b-2 audit round 6)
 
 export function isActor(a) {
   if (SCRIPT_ACTORS.includes(a)) return true;
-  const m = /^([a-z_]+):([A-Za-z0-9-]+)$/.exec(String(a));   // the session part is SESSION_ID
+  const m = /^([a-z_]+):([A-Za-z0-9-]{1,128})$/.exec(String(a));   // the session part is SESSION_ID
   return !!m && AI_ROLES.includes(m[1]);
 }
 
