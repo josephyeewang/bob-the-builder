@@ -20,7 +20,7 @@
 //   store.recover()   // runs under the lock at the first lock in each process and after a dead holder's lock is broken
 
 import { createHash, randomBytes } from 'node:crypto';
-import { chmodSync, closeSync, existsSync, fstatSync, fsyncSync, mkdirSync, openSync, readFileSync, readSync, readdirSync,
+import { chmodSync, closeSync, existsSync, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync,
   renameSync, ftruncateSync, unlinkSync, writeFileSync, writeSync, appendFileSync, constants } from 'node:fs';
 import { hostname } from 'node:os';
 import { dirname, isAbsolute, join } from 'node:path';
@@ -48,7 +48,26 @@ function mkdir755(path) {
   if (first) for (let p = path; ; p = dirname(p)) { chmodSync(p, 0o755); if (p === first || p === dirname(p)) break; }
   chmodSync(path, 0o755);
 }
-function readOrNull(path) { try { return readFileSync(path); } catch (e) { if (e?.code === 'ENOENT') return null; throw e; } }
+// What sits at a path in docs/, never following a link and never throwing: a folder, a link or a file the owner can't read
+// there must not block every write or let the store read, move or delete anything outside it (0b-2 audit round 8 M1, M2).
+// The caller has made sure the folders above it are real folders (see entityDir).
+function look(path) {
+  let fd;
+  try { fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); } catch (e) {
+    return e?.code === 'ENOENT' ? { kind: 'none' } : { kind: 'odd', why: e?.code === 'ELOOP' ? 'a link' : `unreadable (${e?.code ?? e})` };
+  }
+  try {
+    const st = fstatSync(fd);
+    if (st.isDirectory()) return { kind: 'dir' };
+    if (!st.isFile()) return { kind: 'odd', why: 'not a plain file' };
+    return { kind: 'file', bytes: readFileSync(fd) };
+  } catch (e) { return { kind: 'odd', why: `unreadable (${e?.code ?? e})` }; } finally { closeSync(fd); }
+}
+// A document's bytes: null when there is none, ODD when something other than a readable plain file is there.
+const ODD = Symbol('odd');
+function docAt(path) { const l = look(path); return l.kind === 'none' ? null : l.kind === 'file' ? l.bytes : ODD; }
+// Finder leaves these when the owner looks at docs/ by eye; they are not documents (round 8 m2).
+const IGNORED = new Set(['.DS_Store']);
 
 export function openStore({ root, ownerUid, alert = () => {}, now = () => Date.now(), host = hostname(), lockTimeoutMs = 10000,
   probe = realProbe, faultAt, testNoLock = false } = {}) {
@@ -126,6 +145,7 @@ export function openStore({ root, ownerUid, alert = () => {}, now = () => Date.n
 
   // ---- files ----
   function writeDocFile(entity, id, bytes, tag) {
+    entityDir(entity, true);
     mkdir755(join(P.docs, entity));
     const tmp = join(P.tmp, `${process.pid}-${tag}-${randomBytes(4).toString('hex')}.json`);
     const fd = openSync(tmp, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL, 0o644);
@@ -133,16 +153,30 @@ export function openStore({ root, ownerUid, alert = () => {}, now = () => Date.n
     chmodSync(tmp, 0o644);
     return tmp;
   }
-  function quarantine(entity, id, bytes, why) {
-    // Short whatever the names: a file placed by hand with a long name must not make the quarantine itself fail (round 7 M-1).
+  // Moves whatever is at `path` (a file, a folder, a link) into quarantine/ as it is: a rename never follows a link, so
+  // nothing outside the store is read, copied or deleted (round 8 M2). A missing path only raises the alert.
+  // The name is short whatever the names it holds (round 7 M-1).
+  function quarantine(entity, id, path, why) {
     const tidy = (s) => String(s).replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 40);
-    const q = join(P.quarantine, `${tidy(entity)}-${tidy(id)}-${sha256(`${entity}/${id}`).slice(0, 12)}-${now()}-${randomBytes(3).toString('hex')}.json`);
-    writeFileSync(q, bytes ?? '', { mode: 0o644 });
-    chmodSync(q, 0o644);
-    say({ type: 'tamper', entity, id, reason: why, quarantined: q });
-    return q;
+    const q = join(P.quarantine, `${tidy(entity)}-${tidy(id)}-${sha256(`${entity}/${id}`).slice(0, 12)}-${now()}-${randomBytes(6).toString('hex')}.json`);
+    let moved = null;
+    if (path) { try { renameSync(path, q); moved = q; } catch (e) { if (e?.code !== 'ENOENT') throw e; } }
+    say({ type: 'tamper', entity, id, reason: why, quarantined: moved });
+    return moved;
+  }
+  // docs/<entity> must be a real folder: a link there would send reads, renames and restores outside the store (round 8 M2).
+  // Under the lock, anything else at that name is moved aside. Returns true when the folder is (now) safe to use.
+  function entityDir(entity, fix) {
+    const d = join(P.docs, entity);
+    let st; try { st = lstatSync(d); } catch (e) { if (e?.code === 'ENOENT') return true; throw e; }
+    if (st.isDirectory() && !st.isSymbolicLink()) return true;
+    if (!fix) return false;
+    quarantine(entity, '(folder)', d, st.isSymbolicLink() ? 'the entity folder is a link' : 'the entity folder is not a folder');
+    return true;
   }
   function restore(entry) {
+    // Whatever odd thing still sits at the name (a folder, a link) is moved aside first: a rename can't replace a folder.
+    if (docAt(docPath(entry.entity, entry.id)) === ODD) quarantine(entry.entity, entry.id, docPath(entry.entity, entry.id), 'not a plain readable file');
     const tmp = writeDocFile(entry.entity, entry.id, docBytes(entry.entity, entry.id, entry.rev, entry.doc), 'restore');
     renameSync(tmp, docPath(entry.entity, entry.id));
     fsyncPath(join(P.docs, entry.entity));
@@ -160,19 +194,19 @@ export function openStore({ root, ownerUid, alert = () => {}, now = () => Date.n
   // A file that doesn't match its diary line (under the lock, nothing is mid-write): quarantine, restore, alert.
   function checkFile(entity, id) {
     const entry = index.get(keyOf(entity, id));
-    const bytes = readOrNull(docPath(entity, id));
+    entityDir(entity, true);
+    const bytes = docAt(docPath(entity, id));
     if (!entry) {
       if (bytes === null) return { ok: true };
-      quarantine(entity, id, bytes, 'document file has no diary line');
-      unlinkSync(docPath(entity, id));
+      quarantine(entity, id, docPath(entity, id), bytes === ODD ? 'not a plain readable file' : 'document file has no diary line');
       return { ok: false, reason: `${entity} ${id}: a document file with no diary line was found and quarantined` };
     }
-    if (bytes !== null && sha256(bytes) === entry.hash) return { ok: true };
+    if (bytes !== null && bytes !== ODD && sha256(bytes) === entry.hash) return { ok: true };
     // Missing or the version before: a write that crashed between its diary line and its rename. Rolled forward quietly,
     // as recover() does, not reported as tamper (0b-2 audit round 3 m-A).
     // Only a create (rev 1) can be left missing by a crash; a later version that is missing was removed by hand (round 4 m-1).
-    if ((bytes === null && entry.rev === 1) || (bytes !== null && sha256(bytes) === entry.prevHash)) { restore(entry); return { ok: true }; }
-    quarantine(entity, id, bytes, bytes === null ? 'document file missing' : 'document changed outside the Store Writer');
+    if ((bytes === null && entry.rev === 1) || (bytes !== null && bytes !== ODD && sha256(bytes) === entry.prevHash)) { restore(entry); return { ok: true }; }
+    quarantine(entity, id, docPath(entity, id), bytes === null ? 'document file missing' : bytes === ODD ? 'not a plain readable file' : 'document changed outside the Store Writer');
     restore(entry);
     return { ok: false, reason: `${entity} ${id} was changed outside the Store Writer; restored from the diary and quarantined` };
   }
@@ -201,11 +235,12 @@ export function openStore({ root, ownerUid, alert = () => {}, now = () => Date.n
     refresh();
     // 3. Documents: roll forward a missing file or the previous version; any other difference is tamper.
     for (const e of index.values()) {
-      const bytes = readOrNull(docPath(e.entity, e.id));
-      const h = bytes === null ? null : sha256(bytes);
+      entityDir(e.entity, true);
+      const bytes = docAt(docPath(e.entity, e.id));
+      const h = bytes === null ? null : bytes === ODD ? ODD : sha256(bytes);
       if (h === e.hash) continue;
       if ((bytes === null && e.rev === 1) || (bytes !== null && h === e.prevHash)) { restore(e); report.rolledForward.push(keyOf(e.entity, e.id)); continue; }
-      quarantine(e.entity, e.id, bytes, 'document changed outside the Store Writer');
+      quarantine(e.entity, e.id, docPath(e.entity, e.id), bytes === ODD ? 'not a plain readable file' : 'document changed outside the Store Writer');
       restore(e);
       report.restored.push(keyOf(e.entity, e.id));
     }
@@ -213,14 +248,17 @@ export function openStore({ root, ownerUid, alert = () => {}, now = () => Date.n
     let entities = [];
     try { entities = readdirSync(P.docs); } catch { /* none */ }
     for (const ent of entities) {
+      if (IGNORED.has(ent)) continue;
+      // Only a real folder is listed; a link or anything else at the top of docs/ is moved aside, never followed.
+      if (!entityDir(ent, false)) { entityDir(ent, true); report.quarantined.push(keyOf(ent, '(folder)')); continue; }
       let names = [];
       try { names = readdirSync(join(P.docs, ent)); } catch { continue; }
       for (const n of names) {
+        if (IGNORED.has(n)) continue;
         const id = n.endsWith('.json') ? n.slice(0, -5) : n;
-        if (n.endsWith('.json') && index.has(keyOf(ent, id))) continue;
         const p = join(P.docs, ent, n);
-        quarantine(ent, id, readOrNull(p), 'document file has no diary line');
-        unlinkSync(p);
+        if (n.endsWith('.json') && index.has(keyOf(ent, id)) && docAt(p) !== ODD) continue;
+        quarantine(ent, id, p, docAt(p) === ODD ? 'not a plain readable file' : 'document file has no diary line');
         report.quarantined.push(keyOf(ent, id));
       }
     }
@@ -325,9 +363,11 @@ export function openStore({ root, ownerUid, alert = () => {}, now = () => Date.n
     if (!safeName(entity) || !safeName(id)) return null;
     refresh();
     const e = index.get(keyOf(entity, id));
-    const bytes = readOrNull(docPath(entity, id));
+    // read() doesn't hold the lock, so it moves nothing: an odd folder or file is reported corrupt (round 8 M1, M2).
+    const bytes = entityDir(entity, false) ? docAt(docPath(entity, id)) : ODD;
     // A corrupt document is reported, never returned as absent (m-5); the next write or recover() quarantines it.
     const corrupt = (reason) => { say({ type: 'corrupt_read', entity, id, reason }); return { id, entity, corrupt: true, reason }; };
+    if (bytes === ODD) return corrupt('not a plain readable file');
     if (!e) return bytes === null ? null : corrupt('document file has no diary line');
     const h = bytes === null ? null : sha256(bytes);
     if (h !== e.hash && h !== e.prevHash) return corrupt(bytes === null ? 'document file missing' : 'document changed outside the Store Writer');

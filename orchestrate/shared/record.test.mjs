@@ -53,7 +53,7 @@ test('required fields are refused when missing, on the fake as on the real recor
   assert.match(rec.write({ actor: 'dispatcher', entity: 'launch', id: 'L', expectRev: 0, doc: { session_id: 'S' } }).reason, /missing role, card, head, rev, launched_at/);
   const launch = { session_id: 'S-1', role: 'reviewer', card: 'C', head: 'a'.repeat(40), rev: 2, launched_at: '2026-10-29T00:00:00Z' };
   assert.equal(rec.write({ actor: 'dispatcher', entity: 'launch', id: 'L-1', expectRev: 0, doc: launch }).ok, true);
-  assert.match(rec.write({ actor: 'dispatcher', entity: 'launch', id: 'L-2', expectRev: 0, doc: { ...launch, session_id: 'S'.repeat(129) } }).reason, /launch needs a session_id/);
+  for (const bad of ['S'.repeat(129), 123, ['S-1'], true]) assert.match(rec.write({ actor: 'dispatcher', entity: 'launch', id: 'L-2', expectRev: 0, doc: { ...launch, session_id: bad } }).reason, /launch needs a session_id/);
   assert.equal(rec.write({ actor: 'dispatcher', entity: 'verdict', id: 'V', expectRev: 0, doc: { session_id: 'S-1' } }).ok, false);
   assert.ok(Object.keys(REQUIRED_FIELDS).every((e) => ENTITIES.includes(e)));
 });

@@ -164,7 +164,7 @@ export function makeRecord(impl) {
       const missing = (REQUIRED_FIELDS[w.entity] ?? []).filter((f) => w.doc?.[f] === undefined || w.doc?.[f] === null || w.doc?.[f] === '');
       if (missing.length) return refused(`${w.entity} is missing ${missing.join(', ')}`);
       // A launch names a session that can hand in: the outbox refuses any other session id (round 7 m-2).
-      if (w.entity === 'launch' && !SESSION_ID.test(w.doc.session_id)) return refused('a launch needs a session_id of letters, digits and dashes, at most 128');
+      if (w.entity === 'launch' && !(typeof w.doc.session_id === 'string' && SESSION_ID.test(w.doc.session_id))) return refused('a launch needs a session_id of letters, digits and dashes, at most 128');
       return guard(() => impl.write(w));
     },
     applyOutbox(tag, file) {

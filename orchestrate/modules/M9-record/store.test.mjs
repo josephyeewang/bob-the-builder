@@ -2,7 +2,7 @@
 // (0b-2 M-4, M-7, R2-m3, m-5, m-6).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync, unlinkSync } from 'node:fs';
+import { appendFileSync, chmodSync, existsSync, lstatSync, mkdirSync, renameSync, symlinkSync, readFileSync, readdirSync, statSync, writeFileSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { PRODUCT, UID, must, put, rulesFor, seed, setup } from './fixtures.test-helper.mjs';
 import { openRecord } from './writer.mjs';
@@ -160,6 +160,49 @@ test('a file placed by hand with a long name is quarantined and alerted; the sto
   assert.equal(alerts.filter((a) => a.type === 'tamper' && a.id === 'q'.repeat(240)).length, 2, 'both alerted with the full name');
   assert.equal(readdirSync(join(env.root, 'quarantine')).length, 2);
   assert.ok(!existsSync(join(env.root, 'docs', 'report', `${'q'.repeat(240)}.json`)));
+});
+
+test('odd things in docs/ (folders, links, unreadable files) are moved aside, never followed, and never block a write (0b-2 audit round 8 M1, M2, m2)', () => {
+  const env = setup({ prefix: 'm9-store-' });
+  seed(env, 'card', 'C-0', card());
+  seed(env, 'card', 'C-7', card());
+  const docs = join(env.root, 'docs');
+  const outside = join(env.root, '..', `outside-${process.pid}-${Date.now()}`);
+  mkdirSync(outside);
+  writeFileSync(join(outside, 'victim.json'), 'keep me');
+  writeFileSync(join(outside, 'secret.txt'), 'OUTSIDE-TEXT');
+  mkdirSync(join(docs, 'card', 'sub'));                                  // a folder inside an entity folder
+  mkdirSync(join(docs, 'card', 'x.json'));                               // a folder named like a document
+  symlinkSync(outside, join(docs, 'evil'));                              // an entity folder that is a link out
+  symlinkSync(join(outside, 'secret.txt'), join(docs, 'card', 'L.json'));  // a document that is a link out
+  chmodSync(join(docs, 'card', 'C-7.json'), 0o000);                      // an indexed document the owner can't read
+  writeFileSync(join(docs, 'card', '.DS_Store'), 'finder');               // Finder's clutter
+  const alerts = [];
+  const fresh = openRecord({ root: env.root, product: PRODUCT, ownerUid: UID, rules: env.rules, alert: (a) => alerts.push(a), now: () => env.clock.t });
+  for (let i = 0; i < 2; i++) must(put(fresh.record, 'approvals', 'card', i ? 'C-7' : 'C-0', { state: 'cancelled', cancel_reason: 'test' }), `write ${i}`);
+  assert.equal(readFileSync(join(outside, 'victim.json'), 'utf8'), 'keep me', 'nothing outside the store is deleted');
+  assert.equal(readFileSync(join(outside, 'secret.txt'), 'utf8'), 'OUTSIDE-TEXT');
+  const q = readdirSync(join(env.root, 'quarantine'));
+  assert.ok(!q.some((n) => { const p = join(env.root, 'quarantine', n); if (lstatSync(p).isSymbolicLink() || !lstatSync(p).isFile()) return false; try { return readFileSync(p, 'utf8') === 'OUTSIDE-TEXT'; } catch { return false; } }), 'no outside text copied in');
+  for (const name of ['sub', 'x.json', 'L.json']) assert.ok(!existsSync(join(docs, 'card', name)) && !lstatSafe(join(docs, 'card', name)), `${name} moved aside`);
+  assert.ok(!lstatSafe(join(docs, 'evil')), 'the link folder moved aside');
+  assert.equal(fresh.record.read('card', 'C-7').doc.state, 'cancelled', 'the unreadable document restored and written');
+  assert.ok(existsSync(join(docs, 'card', '.DS_Store')), 'Finder clutter left alone');
+  assert.ok(!alerts.some((a) => a.id === '.DS_Store'), 'and not alerted');
+  for (const id of ['sub', 'x', 'L', 'C-7']) assert.ok(alerts.some((a) => a.type === 'tamper' && a.id === id), `${id} alerted`);
+});
+const lstatSafe = (p) => { try { return lstatSync(p); } catch { return null; } };
+
+test('read() of a document whose entity folder is a link reports it corrupt, reading nothing through the link (0b-2 audit round 8 M2)', () => {
+  const env = setup({ prefix: 'm9-store-' });
+  seed(env, 'card', 'C-0', card());
+  const outside = join(env.root, '..', `outside-r-${process.pid}-${Date.now()}`);
+  mkdirSync(outside);
+  const docs = join(env.root, 'docs');
+  writeFileSync(join(outside, 'C-0.json'), readFileSync(join(docs, 'card', 'C-0.json')));   // even a perfect copy out there is not trusted
+  renameSync(join(docs, 'card'), join(env.root, 'card-away'));
+  symlinkSync(outside, join(docs, 'card'));
+  assert.equal(env.record.read('card', 'C-0').corrupt, true);
 });
 
 test('recover(): a missing file or the previous version rolls forward quietly; any other change is restored and alerted (R2-m3)', () => {
