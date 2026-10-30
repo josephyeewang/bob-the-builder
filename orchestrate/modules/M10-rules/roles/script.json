@@ -1,0 +1,20 @@
+{
+  "role": "script",
+  "model": "main",
+  "effort": "per_row",
+  "effort_floor": "medium",
+  "tools": [
+    "Read",
+    "Glob",
+    "Grep",
+    "Write",
+    "Workflow"
+  ],
+  "permission_mode": "dontAsk",
+  "restricted_mode": false,
+  "outbox_kinds": [
+    "report-"
+  ],
+  "auto_resume": false,
+  "context": "context.script"
+}

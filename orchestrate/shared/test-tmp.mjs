@@ -1,8 +1,9 @@
 // test-tmp.mjs — temp folders for tests that are always removed, pass or fail.
 //
 // WHY. Test temp folders that were never removed filled a Mac's disk (lead, 29 Oct 2026). Every orchestrate test that
-// needs a folder asks here; tmp-guard.test.mjs fails any orchestrate file that calls mkdtemp itself (bar the files it
-// lists as not switched yet) and any whole run that leaves one of these folders behind.
+// needs a folder asks here; tmp-guard.test.mjs fails any orchestrate test code that calls mkdtemp itself (bar the files
+// it lists as not switched yet) and any whole run that leaves one of these folders behind. Production scripts may make
+// their own run-time folder and remove it themselves (LEAD-CALLS L36).
 //
 //   import { tempDir } from '../../shared/test-tmp.mjs';
 //   const dir = tempDir('m10-reader-');   // a lane or module prefix (PREFIX below), then a name, then '-'   // removed by an after() hook when this test file ends, even on failure

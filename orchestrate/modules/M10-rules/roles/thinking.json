@@ -1,0 +1,22 @@
+{
+  "role": "thinking",
+  "model": "main",
+  "effort": "medium",
+  "effort_floor": "medium",
+  "tools": [
+    "Read",
+    "Glob",
+    "Grep",
+    "Write",
+    "AskUserQuestion",
+    "PushNotification"
+  ],
+  "permission_mode": "acceptEdits",
+  "restricted_mode": true,
+  "outbox_kinds": [
+    "report-",
+    "idea-"
+  ],
+  "auto_resume": false,
+  "context": "context.thinking"
+}

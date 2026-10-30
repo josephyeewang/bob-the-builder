@@ -37,9 +37,50 @@ test('classify fails closed to unclassifiable Tier 1', () => {
     assert.deepEqual(c.risky, ['unclassifiable']);
   }
   assert.deepEqual(fakeRules().classify({ files: [] }).risky, []);
+  for (const classify of [() => ({ tier: 2, risky: [] }), () => ({ tier: 2, risky: [], reasons: [] }), () => ({ tier: 2, risky: [], reasons: {}, protected: 'x' })]) {
+    assert.deepEqual(fakeRules({ classify }).classify({ files: [] }).risky, ['unclassifiable']);
+  }
+  const broke = fakeRules({ classify: () => { throw new Error('rules unreadable'); } });
+  assert.deepEqual(broke.classify({ files: [{ path: '.github/workflows/ci.yml' }, { path: 'docs/x.md' }] }).protected,
+    ['.github/workflows/ci.yml', 'docs/x.md'], 'a failed classification counts every named file as protected (audit round 6)');
+  assert.deepEqual(broke.classify(null).protected, []);
+});
+
+test('any risky class or protected path forces Tier 1 (R2-m2)', () => {
+  const risky = fakeRules({ classify: () => ({ tier: 2, risky: ['schema'], reasons: { schema: ['x'] } }) });
+  assert.equal(risky.classify({ files: [] }).tier, 1);
+  const prot = fakeRules({ classify: () => ({ tier: 2, risky: [], reasons: {}, protected: ['.husky/pre-commit'] }) });
+  assert.equal(prot.classify({ files: [] }).tier, 1);
+});
+
+test('a caller cannot hand classify looser rules (R2-M10)', () => {
+  let seen;
+  const r = fakeRules({ classify: (c) => { seen = c; return { tier: c.policy || c.atCommit ? 2 : 1, risky: [], reasons: {} }; } });
+  const change = { product: 'sample-app', files: [{ path: 'src/a.js', status: 'modified' }] };
+  const plain = r.classify(change);
+  const looser = r.classify({ ...change, policy: { tiers: { paths: [] } }, atCommit: 'abc' });
+  assert.deepEqual(looser, plain);
+  assert.ok(!('policy' in seen) && !('atCommit' in seen));
 });
 
 test('the shapes are fixed', () => {
   assert.ok(isDecision(deny('x')) && isDecision(ask(2, 'x')) && !isDecision(deny('')));
   assert.ok(Object.isFrozen(ACTIONS) && RISKY_CLASSES.includes('unclassifiable'));
+});
+
+test('HOLD_REASONS names the two "wait" denies (0b-1 R3-m8)', async () => {
+  const { HOLD_REASONS } = await import('./rules.mjs');
+  assert.deepEqual([...HOLD_REASONS], ['held_tier1_hours', 'rules_not_adopted']);
+  assert.ok(Object.isFrozen(HOLD_REASONS));
+});
+
+test('a throwing getter on the answer or on the change is a fail-closed answer, never an exception (audit round 9)', () => {
+  const trap = { reason: 'looks fine', get decision() { throw new Error('boom'); } };
+  const r = makeRules({ rev: 'x', may: () => trap, get: () => undefined, classify: () => ({ tier: 2, risky: [], reasons: {} }) });
+  assert.equal(r.may('merge', {}).decision, 'deny');
+  const change = { get files() { throw new Error('boom'); } };
+  const c = r.classify(change);
+  assert.deepEqual([c.tier, c.risky], [1, ['unclassifiable']]);
+  const sneaky = makeRules({ rev: 'x', may: () => allow('ok'), get: () => undefined, classify: () => ({ tier: 2, risky: ['schema', 'loose'], reasons: {} }) });
+  assert.deepEqual(sneaky.classify({ files: [] }).reasons, { unclassifiable: ['unknown risky class in classification'] }, 'an unknown class beside a known one');
 });

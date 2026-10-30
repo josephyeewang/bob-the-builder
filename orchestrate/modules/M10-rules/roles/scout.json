@@ -1,0 +1,18 @@
+{
+  "role": "scout",
+  "model": "haiku",
+  "effort": "low",
+  "effort_floor": "low",
+  "tools": [
+    "Read",
+    "Glob",
+    "Grep"
+  ],
+  "permission_mode": "dontAsk",
+  "restricted_mode": false,
+  "outbox_kinds": [
+    "report-"
+  ],
+  "auto_resume": false,
+  "context": "context.scout"
+}
