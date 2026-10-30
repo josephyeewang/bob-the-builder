@@ -872,6 +872,20 @@ git -C "$T3" checkout -q main 2>/dev/null || true
 T4="$TMP/rc-ff"; newrepo "$T4"; printf 'echo\n' > "$T4/a.sh"; printf '{"scripts":{"a":"bash a.sh"}}\n' > "$T4/package.json"
 git -C "$T4" add -A; git -C "$T4" commit -q -m base; git -C "$T4" checkout -q -b feat; git -C "$T4" rm -q a.sh; git -C "$T4" commit -q -m "drop a.sh"; git -C "$T4" branch -q -f main feat
 expect "run-commands: a branch already fast-forwarded into main, no --base -> cannot judge (exit 2), not a silent pass" 2 "adds nothing to main" -- node "$RC" "$T4"
+T5="$TMP/rc-r7"; newrepo "$T5"; mkdir -p "$T5/jobs" "$T5/tests" "$T5/bin" "$T5/pkg/cli" "$T5/.github/workflows"
+printf 'if __name__ == "__main__":\n    print(1)\n' > "$T5/jobs/report.py"
+printf 'import unittest\nif __name__ == "__main__":\n    unittest.main()\n' > "$T5/tests/test_core.py"
+printf '#!/bin/sh\necho\n' > "$T5/bin/test"; chmod +x "$T5/bin/test"; printf 'def main():\n    pass\n' > "$T5/pkg/cli/__init__.py"; : > "$T5/pkg/__init__.py"
+printf 'jobs:\n  test:\n    defaults:\n      run:\n        working-directory: jobs\n    steps:\n      - run: python report.py\n      - run: npm test\n' > "$T5/.github/workflows/ci.yml"
+printf 'test:\n\tpython -m pytest tests/test_core.py -q\n' > "$T5/Makefile"
+printf '[project.scripts]\nx = "pkg.cli:main"\n' > "$T5/pyproject.toml"
+git -C "$T5" add -A; git -C "$T5" commit -q -m base; git -C "$T5" checkout -q -b change
+printf 'import unittest\n' > "$T5/tests/test_core.py"; git -C "$T5" rm -q bin/test
+expect "run-commands: run block dropped from a test run by python -m pytest, an extensionless bin/test deleted while 'test' is a job name -> OK" 0 "run-commands-check: OK" -- node "$RC" "$T5"
+mkdir -p "$T5/jobs/core"; git -C "$T5" mv jobs/report.py jobs/core/report.py
+expect "run-commands: a file moved to a sub-folder under the same name, named by bare name from an untouched workflow line -> REFUSED" 1 'ci.yml:7 still names jobs/report.py, which this change moved to jobs/core/report.py' -- node "$RC" "$T5"
+git -C "$T5" mv jobs/core/report.py jobs/report.py; git -C "$T5" rm -q pkg/cli/__init__.py
+expect "run-commands: a package __init__.py an entry point still names (pkg.cli:main) is deleted -> REFUSED" 1 'pyproject.toml:2 still names pkg/cli/__init__.py' -- node "$RC" "$T5"
 expect "run-commands: --base with no commit -> cannot run (exit 2)" 2 "needs a commit" -- node "$RC" "$T3" --base
 expect "run-commands: an unknown base commit -> cannot run (exit 2)" 2 "cannot be found" -- node "$RC" "$RD" --base nope
 SH="$TMP/rc-shallow"; git clone -q --depth 1 "file://$RD" "$SH" 2>/dev/null; git -C "$SH" checkout -q --detach; git -C "$SH" branch -q -D main; git -C "$SH" remote remove origin

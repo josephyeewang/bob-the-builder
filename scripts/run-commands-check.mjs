@@ -128,12 +128,23 @@ const configs = tracked.filter((f) => (CONFIG.test(f) && !f.includes('node_modul
   .map((f) => ({ f, lines: runLines(f, fs.readFileSync(path.join(ROOT, f), 'utf8')) }));
 const existing = tracked.filter((f) => fs.existsSync(path.join(ROOT, f)));
 
+// A config's run lines as they were at the base, to tell a line this change wrote from one it left alone.
+const baseCache = new Map();
+function baseLines(f) {
+  if (!baseCache.has(f)) {
+    let text = null;
+    try { text = git('show', `${base}:${f}`); } catch { /* the config is new in this change */ }
+    baseCache.set(f, new Set(text === null ? [] : runLines(f, text).map(([, l]) => l.trim())));
+  }
+  return baseCache.get(f);
+}
 const esc = (x) => x.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-// The Python module a file is run as: pkg/job.py → pkg.job, src/pkg/job.py → pkg.job, pkg/__main__.py → pkg.
+// The Python module a file is run as: pkg/job.py → pkg.job, src/pkg/job.py → pkg.job, pkg/__main__.py and
+// pkg/__init__.py → pkg.
 function moduleOf(p) {
   if (!p.endsWith('.py')) return [];
   const parts = p.replace(/\.py$/, '').split('/');
-  if (parts.at(-1) === '__main__') parts.pop();
+  if (parts.at(-1) === '__main__' || parts.at(-1) === '__init__') parts.pop();
   if (!parts.length) return [];
   const mods = [parts.join('.')];
   if (parts[0] === 'src' && parts.length > 1) mods.push(parts.slice(1).join('.'));
@@ -143,12 +154,16 @@ function moduleOf(p) {
 // is p; or when it is a whole-segment tail of p ("scripts/build.sh" or "build.sh" for web/scripts/build.sh — a command
 // run from a sub-folder) that no other file in the project also ends with. "dist/index.js" is not a tail of
 // src/index.js, so a build output never stands for its source.
-function means(written, p, f) {
+// `movedTo` (a rename's new path) is left out of that "no other file" test: the moved file is the same file.
+function means(written, p, f, movedTo = null) {
   const w = written.replace(/^\.\//, '');
   if (!w || /[$*{}]/.test(w)) return false;
   if (w === p || path.normalize(path.join(path.dirname(f), w)) === p) return true;
   if (!p.endsWith(`/${w}`)) return false;
-  return !existing.some((o) => o !== p && (o === w || o.endsWith(`/${w}`)));
+  // An executable with no extension (bin/test, scripts/deploy) is named only as a path or as ./name, never by a bare
+  // word — "test" or "dev" in a config is almost always something else.
+  if (!/\.\w+$/.test(p) && !w.includes('/') && !written.startsWith('./')) return false;
+  return !existing.some((o) => o !== p && o !== movedTo && (o === w || o.endsWith(`/${w}`)));
 }
 const TOKEN = /[^\s"'=(),;:`[\]{}]+/g;
 // Where the run configs name `p`. asScript: count only a mention that runs the file as a script — after python (and
@@ -159,15 +174,19 @@ function mentions(p, asScript = false, movedTo = null) {
   const mods = moduleOf(p);
   for (const { f, lines } of configs) {
     if (asScript && path.basename(f) === 'pyproject.toml') continue;
+    const unchanged = baseLines(f);
     for (const [at, l] of lines) {
       let hit = false;
       for (const m of l.matchAll(TOKEN)) {
-        if (!means(m[0], p, f)) continue;
-        // build.sh → scripts/build.sh with `working-directory: scripts` + `./build.sh`: that names the new file.
+        if (!means(m[0], p, f, movedTo)) continue;
+        // A bare name that is also the moved file's own name is ambiguous: `working-directory: scripts` + `./build.sh`
+        // after build.sh → scripts/build.sh names the new file; `python report.py` from jobs/ after jobs/report.py →
+        // jobs/core/report.py is now broken. The line tells them apart: one this change wrote was pointed at the new
+        // place on purpose; one it left untouched still points where the file used to be.
         const w = m[0].replace(/^\.\//, '');
-        if (movedTo && !w.includes('/') && (movedTo === w || movedTo.endsWith(`/${w}`))) continue;
+        if (movedTo && !w.includes('/') && (movedTo === w || movedTo.endsWith(`/${w}`)) && !unchanged.has(l.trim())) continue;
         const before = l.slice(0, m.index);
-        if (!asScript || m[0].startsWith('./') || /(?:(?:^|[\s"'(/])(?:python[\d.]*|uv run(?: python[\d.]*)?|poetry run python[\d.]*)|\$[({]?PYTHON\w*[)}]?)(?:\s+-[\w-]+(?:\s+[^\s"'-]\S*)?)*\s+["']?$/.test(before)) { hit = true; break; }
+        if (!asScript || m[0].startsWith('./') || /(?:(?:^|[\s"'(/])(?:python[\d.]*|uv run(?: python[\d.]*)?|poetry run python[\d.]*)|\$[({]?PYTHON\w*[)}]?)(?:\s+-(?!m\b)[\w-]+(?:\s+[^\s"'-]\S*)?)*\s+["']?$/.test(before)) { hit = true; break; }
       }
       if (!hit && mods.length) {
         const modRun = new RegExp(`-m\\s+["']?(?:${mods.map(esc).join('|')})(?=$|[\\s"'])`);
