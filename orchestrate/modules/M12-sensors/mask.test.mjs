@@ -1,0 +1,77 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { makeMasker, findCredentials, looksHighEntropy, collectCredentialValues, redactCredentialValues } from './mask.mjs';
+import { FAKE, run } from './fakes.mjs';
+
+const { maskSecrets } = makeMasker();
+const clean = (s) => maskSecrets(s).text;
+const KINDS = ['github', 'githubShort', 'githubApp', 'githubPat', 'vercelPrefixed', 'supabasePat', 'supabaseSecret',
+  'supabaseJwt', 'anthropic', 'skShort', 'generic'];
+
+// R-0b-125: every known shape, planted in a log line, a commit message and a check output, is masked.
+for (const k of KINDS) {
+  for (const [where, line] of [
+    ['log line', `2026-11-03T10:00:00Z deploy step used ${FAKE[k]} and finished`],
+    ['commit message', `fix: rotate the key\n\nOld value was ${FAKE[k]}, do not reuse`],
+    ['check output', `Error: request failed (auth ${FAKE[k]}) at step 4`],
+  ]) {
+    test(`masks a planted ${k} key in a ${where}`, () => {
+      const out = clean(line);
+      assert.ok(!out.includes(FAKE[k]), out);
+      assert.match(out, /\[REDACTED(:[a-z-]+)?\]/);
+      assert.equal(findCredentials(out).length, 0, out);
+    });
+  }
+}
+
+test('Vercel classic 24-character token is masked by name, flag and Bearer, not by shape alone', () => {
+  const t = FAKE.vercelClassic;
+  for (const line of [`VERCEL_TOKEN=${t}`, `vercel deploy --token ${t} --prod`, `vercel --token=${t}`,
+    `Authorization: Bearer ${t}`, `{"vercel_token": "${t}"}`]) {
+    assert.ok(!clean(line).includes(t), line);
+  }
+});
+
+test('passwords inside connection addresses, and values after secret-sounding names', () => {
+  const url = `postgres://app_user:${FAKE.dbPassword}@db.example.internal:5432/main`;
+  assert.equal(clean(url), 'postgres://app_user:[REDACTED:url-password]@db.example.internal:5432/main');
+  for (const line of [`DB_PASSWORD=${FAKE.dbPassword}`, `client_secret: ${FAKE.dbPassword}`, `"api_key": "${FAKE.dbPassword}"`]) {
+    assert.ok(!clean(line).includes(FAKE.dbPassword), line);
+  }
+});
+
+test('exact values from the Sensors environment are masked even without their name (Archon port)', () => {
+  const secret = 'plain-words-but-secret-' + run(6, 30);
+  const m = makeMasker({ env: { ROBOT_PRIVATE_KEY: secret, HOME: '/somewhere', DATABASE_URL: 'x-db-value-' + run(5, 31) } });
+  assert.equal(m.maskSecrets(`echoed: ${secret} done`).text, 'echoed: [REDACTED] done');
+  assert.equal(m.maskSecrets('home is /somewhere').text, 'home is /somewhere');
+  // the port keeps Archon's order: longest first, so a value inside another is replaced whole
+  assert.deepEqual(collectCredentialValues({ A_TOKEN: 'abc', B_TOKEN: 'abcdef' }), ['abcdef', 'abc']);
+  assert.equal(redactCredentialValues('xabcdefx', ['abcdef', 'abc']), 'x[REDACTED]x');
+});
+
+test('never masks what the history file needs: SHAs, paths, ordinary prose', () => {
+  const sha = 'a3f9c0e1b2d4f6a8c0e2b4d6f8a0c2e4b6d8f0a2';
+  const lines = [
+    `commit ${sha}`,
+    'orchestrate/modules/M12-sensors/history.test.mjs',
+    'docs/research/2026-11-03-competitor-pricing-review.md',
+    'Merge pull request #142 from robot/card-C-12-tier2-filter-remembers-value',
+    'fix: the token refresh retries now back off',
+  ];
+  for (const l of lines) assert.equal(clean(l), l, l);
+  assert.equal(looksHighEntropy(sha), false);
+});
+
+test('maskDeep masks every string at any depth, keys included', () => {
+  const { maskDeep } = makeMasker();
+  const out = maskDeep({ a: [`x ${FAKE.github}`], b: { c: FAKE.anthropic, [FAKE.generic]: 1 }, n: 3 });
+  const s = JSON.stringify(out);
+  for (const k of ['github', 'anthropic', 'generic']) assert.ok(!s.includes(FAKE[k]));
+  assert.equal(out.n, 3);
+});
+
+test('planted failure: the scanner itself finds an unmasked key (so a 0 from it means something)', () => {
+  assert.ok(findCredentials(`left in: ${FAKE.github}`).length >= 1);
+  assert.ok(findCredentials(`left in: ${FAKE.generic}`).length >= 1);
+});

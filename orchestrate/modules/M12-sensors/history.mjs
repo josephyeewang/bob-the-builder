@@ -1,0 +1,97 @@
+// history.mjs — the repo's history as a file the Lead can read, and the Lead's history questions answered safely
+// (R-0b-75; design v4 §4.4, §14.1.4 "History requests", rail B2).
+//
+// WHY. The Lead has no shell and no GitHub token (B2). It reads the recent history from a file the Sensors write from
+// the Do-plane's own copy of `main`, and asks for one path's history by dropping a request file in its outbox.
+// The path it names is DATA: it must be a path that exists on `main`, it is never part of a command line (git runs
+// with an argument list, never a shell), and git reads it with --literal-pathspecs, so `:(glob)**` is just a name.
+// A path that isn't on `main` gets "no such path" and no git command runs with it at all: the check is a lookup in
+// the list of `main`'s paths, read once per pass.
+// Commit subjects and author names are masked and fenced like any outside text; file paths are kept exact (they are
+// what the Lead searches by) with only `& < >` escaped, so they can't form a tag.
+
+import { execFileSync } from 'node:child_process';
+import { makePrepare } from './escape.mjs';
+
+export const HISTORY_COMMITS = 200;
+export const REQUEST_COMMITS = 50;
+const SEP = '\u001e';
+const END = '\u001f';
+
+export function escapePath(p) { return String(p).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
+export function unescapePath(p) { return String(p).replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&'); }
+
+// Card id from the subject ("[C-12] …", "card C-12", "(C-12)") or a "Card: C-12" trailer.
+export function cardOf(subject, body = '') {
+  const t = /^Card:\s*([A-Z]+-\d+)\s*$/m.exec(body);
+  if (t) return t[1];
+  const s = /\b(?:card[ -])?([A-Z]{1,4}-\d{1,6})\b/.exec(subject);
+  return s ? s[1] : null;
+}
+
+// git, always with an argument list. The runner is injectable so tests can see every call.
+export function makeGit(repoDir, runner = (args) => execFileSync('git', args, { cwd: repoDir, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 })) {
+  return (args) => { if (!Array.isArray(args)) throw new Error('git takes an argument list only'); return runner(['--literal-pathspecs', ...args]); };
+}
+
+function parseLog(out) {
+  const commits = [];
+  for (const chunk of out.split(END)) {
+    const c = chunk.replace(/^\n+/, '');
+    if (!c.trim()) continue;
+    const [head, rest = ''] = c.split(`${SEP}BODY${SEP}`);
+    const [sha, author, date, subject] = head.split(SEP);
+    const [body, files = ''] = rest.split(`${SEP}FILES${SEP}`);
+    commits.push({ sha, author, date, subject, body, files: files.split('\n').filter(Boolean) });
+  }
+  return commits;
+}
+
+const FORMAT = `--format=${END}%H${SEP}%an${SEP}%aI${SEP}%s${SEP}BODY${SEP}%b${SEP}FILES${SEP}`;
+
+// Raw commits on `ref` (default main), newest first, optionally for one literal path.
+export function readLog(git, { ref = 'main', n = HISTORY_COMMITS, path = null } = {}) {
+  const args = ['log', `-n${n}`, '--name-only', FORMAT, ref];
+  if (path !== null) args.push('--', path);
+  return parseLog(git(args));
+}
+
+export function makeHistory({ git, prepare = makePrepare(), ref = 'main' }) {
+  const shape = (c) => ({
+    sha: c.sha,
+    author: prepare(c.author, 'commit-author'),
+    date: c.date,
+    subject: prepare(c.subject, 'commit-subject'),
+    card: cardOf(c.subject, c.body),
+    files: c.files.map(escapePath),
+  });
+
+  // The history file's content: the last 200 commits of main, each with its files, author and card.
+  function historyFile() {
+    const head = git(['rev-parse', ref]).trim();
+    return { ref, head, commits: readLog(git, { ref }).map(shape) };
+  }
+
+  let pathSet = null;
+  function paths() {
+    if (!pathSet) {
+      const files = git(['ls-tree', '-r', '--name-only', '-z', ref]).split('\0').filter(Boolean);
+      pathSet = new Set(files);
+      for (const f of files) { const parts = f.split('/'); for (let i = 1; i < parts.length; i++) pathSet.add(parts.slice(0, i).join('/')); }
+    }
+    return pathSet;
+  }
+
+  // Answer one Lead history request ({ path }). Never throws.
+  function answer(request) {
+    const p = request && typeof request.path === 'string' ? request.path : null;
+    if (p === null || p.length === 0 || p.length > 1024 || !paths().has(p)) return { ok: false, answer: 'no such path' };
+    try {
+      return { ok: true, path: escapePath(p), commits: readLog(git, { ref, n: REQUEST_COMMITS, path: p }).map(shape) };
+    } catch {
+      return { ok: false, answer: 'history unavailable' };
+    }
+  }
+
+  return Object.freeze({ historyFile, answer, refreshPaths: () => { pathSet = null; } });
+}
