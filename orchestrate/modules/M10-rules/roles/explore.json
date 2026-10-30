@@ -1,0 +1,13 @@
+{
+  "role": "explore",
+  "model": "per_task",
+  "effort": "as_asked",
+  "effort_floor": "low",
+  "tools": [],
+  "permission_mode": "dontAsk",
+  "restricted_mode": false,
+  "outbox_kinds": [],
+  "auto_resume": false,
+  "context": "context.explore",
+  "enforced": false
+}
