@@ -266,7 +266,7 @@ export function makeReader({ gh, stateDir, products, verifyApproved, alert, now 
 }
 
 // The real client: GET on api.github.com only, with a token from the caller. Tests pass a fake with the same get().
-export function githubClient({ token, fetchFn = globalThis.fetch, timeoutMs = 15_000 }) {
+export function githubClient({ token, fetchFn = globalThis.fetch, timeoutMs = 10_000 }) {
   return Object.freeze({
     async get(path) {
       if (!path.startsWith('/repos/')) throw new Error('only repository reads are allowed');

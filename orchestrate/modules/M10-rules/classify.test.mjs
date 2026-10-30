@@ -33,6 +33,14 @@ test('a rename counts both names: moving a workflow out of .github is still prot
   assert.deepEqual(r.protected, ['.github/workflows/a.yml']);
 });
 
+test('a rename or copy with no old name is unclassifiable, never a plain doc (audit round 2, MAT-7)', () => {
+  for (const status of ['renamed', 'copied']) {
+    const r = run([{ path: 'docs/research/a.md', status }]);
+    assert.ok(r.risky.includes('unclassifiable'), status);
+    assert.match(r.reasons.unclassifiable.join(), /no old name/);
+  }
+});
+
 test('a near-miss folder name is not the lead lane, and outside docs/ is unclassifiable', () => {
   assert.equal(run([mod('docs/blueprintx/a.md')]).tier, 2);
   const r = run([mod('lib/util.ts')]);

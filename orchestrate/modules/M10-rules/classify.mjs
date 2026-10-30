@@ -68,6 +68,8 @@ export function classifyChange(policy, change) {
   let tier = change.declared_tier === 2 ? 2 : 1;     // a missing or unknown declared tier counts as 1
   for (const f of files) {
     if (!f || typeof f !== 'object' || !STATUSES.includes(f.status)) { add('unclassifiable', `bad file entry ${JSON.stringify(f?.path ?? f)}`); continue; }
+    // A rename or copy must name its old path: renaming a protected file away is itself protected (MAT-7).
+    if ((f.status === 'renamed' || f.status === 'copied') && typeof f.previous_path !== 'string') { add('unclassifiable', `${f.status} with no old name: ${JSON.stringify(f.path)}`); continue; }
     const touched = [f.path, ...(f.previous_path !== undefined ? [f.previous_path] : [])];
     const bad = touched.map(pathProblem).find(Boolean);
     if (bad) { add('unclassifiable', `${bad}: ${JSON.stringify(f.path)}`); continue; }

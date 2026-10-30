@@ -168,6 +168,7 @@ export function makeEngine({ products, rulesState, productState, running, rolesD
       const staleMin = macValue('usage.stale_after_min');
       const readAt = Date.parse(s.usage?.read_at ?? '');
       const now = clock();
+      if (!Number.isFinite(now)) return deny('no usable clock');
       if (!Number.isFinite(staleMin) || !Number.isFinite(readAt)) return deny('Tier 1 start needs a usage reading');
       if (now - readAt > staleMin * 60_000 || readAt - now > USAGE_FUTURE_MS) return deny('usage reading is stale');
     }
@@ -201,6 +202,7 @@ export function makeEngine({ products, rulesState, productState, running, rolesD
     if (!Array.isArray(files) || !files.length) throw new Error('files missing');
     for (const f of files) {
       if (!f || typeof f !== 'object' || !FILE_STATUSES.includes(f.status)) throw new Error('bad file entry');
+      if ((f.status === 'renamed' || f.status === 'copied') && typeof f.previous_path !== 'string') throw new Error(`${f.status} with no old name`);
       const bad = pathProblem(f.path) ?? (f.previous_path !== undefined ? pathProblem(f.previous_path) : null);
       if (bad) throw new Error(`${bad}: ${JSON.stringify(f.path)}`);
     }

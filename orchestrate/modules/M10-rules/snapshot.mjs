@@ -64,9 +64,9 @@ export function readSnapshot(dir, now = Date.now()) {
   try { ds = statSync(dir); } catch { return { ok: false, reason: 'snapshot missing' }; }
   if (!ds.isDirectory() || (ds.mode & 0o022) !== 0) return { ok: false, reason: 'snapshot folder is writable by others' };
   if (!mine(ds)) return { ok: false, reason: 'snapshot folder owned by someone else' };
-  // Open once, refusing a symlink, then check and read that same open file, so it can't be swapped in between.
+  // Open once, refusing a symlink (and not waiting on a named pipe planted there), then check and read that same open file, so it can't be swapped in between.
   let fd; let doc;
-  try { fd = openSync(f, constants.O_RDONLY | constants.O_NOFOLLOW); } catch (e) {
+  try { fd = openSync(f, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); } catch (e) {
     return { ok: false, reason: e.code === 'ENOENT' ? 'snapshot missing' : 'snapshot is a link or unreadable' };
   }
   try {

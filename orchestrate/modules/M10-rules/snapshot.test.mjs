@@ -3,6 +3,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, readFileSync, writeFileSync, chmodSync, statSync, unlinkSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { execFileSync } from 'node:child_process';
 import { join } from 'node:path';
 import { publishSnapshot, readSnapshot, snapshotAnswer, SNAPSHOT_FILE, MAX_AGE_MS, MAX_FUTURE_MS } from './snapshot.mjs';
 
@@ -98,4 +99,29 @@ test('the snapshot answer equals the live answer for every rules status (R2-M6(d
     const hook = snapshotAnswer(readSnapshot(d, T), 'write_production', { product: 'sample-app' });
     assert.equal(hook.decision, live.may('write_production', { product: 'sample-app' }).decision, status);
   }
+});
+
+test('a folder or file owned by another user is refused (audit round 2)', () => {
+  const d = fresh();
+  const real = process.getuid;
+  try {
+    process.getuid = () => real() + 1;          // as if the folder had been made by another user
+    assert.match(readSnapshot(d, T).reason, /folder owned by someone else/);
+    let calls = 0;                              // the folder is ours; the file inside is someone else's
+    process.getuid = () => (++calls === 1 ? real() : real() + 1);
+    assert.equal(readSnapshot(d, T).reason, 'snapshot owned by someone else');
+  } finally { process.getuid = real; }
+  assert.equal(readSnapshot(d, T).ok, true);
+});
+
+test('a named pipe planted at the snapshot path is refused at once, not waited on (audit round 2)', () => {
+  const d = fresh();
+  unlinkSync(join(d, SNAPSHOT_FILE));
+  execFileSync('mkfifo', [join(d, SNAPSHOT_FILE)]);
+  // In a child process with a time limit, so a read that waits on the pipe fails this test instead of hanging the run.
+  const mod = new URL('./snapshot.mjs', import.meta.url).href;
+  const out = execFileSync(process.execPath, ['--input-type=module', '-e',
+    `import { readSnapshot } from ${JSON.stringify(mod)}; console.log(JSON.stringify(readSnapshot(${JSON.stringify(d)}, ${T})));`],
+    { timeout: 5000, encoding: 'utf8' });
+  assert.equal(JSON.parse(out).ok, false);
 });

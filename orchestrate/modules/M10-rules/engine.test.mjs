@@ -122,6 +122,8 @@ test('start_session: Tier 1 needs a fresh usage reading (A8)', () => {
   assert.match(start(w, { tier: 1, usage: { read_at: new Date(w.now - 16 * 60_000).toISOString() } }).reason, /stale/);
   assert.match(start(w, { tier: 1, usage: { read_at: new Date(w.now + 5 * 60_000).toISOString() } }).reason, /stale/);
   assert.equal(start(w, { tier: 2 }).decision, 'allow', 'Tier 2 needs no reading');
+  w.now = NaN;
+  assert.match(start(w, { tier: 1, usage: { read_at: '2000-01-01T00:00:00Z' } }).reason, /clock/, 'a broken clock never lets Tier 1 start (audit round 2)');
 });
 
 test('Mac-wide values take the strictest product (MAT-10, R-0b-18)', () => {
@@ -189,6 +191,18 @@ test('push_branch while paused: only an exact reverse of the reversed commit\'s 
   assert.equal(w.rules.may('push_branch', { product: 'app', card, reverses_files: ['app/a.ts'], files: [file('app/a.ts'), file('app/b.ts')] }).decision, 'deny');
   assert.equal(w.rules.may('push_branch', { product: 'app', card: { ...card, kind: 'undo' }, reverses_files: ['app/a.ts'], files: [file('app/a.ts')] }).decision, 'deny');
   assert.equal(w.rules.may('push_branch', { product: 'app', card: { ...card, kind: undefined }, files: [file('app/a.ts')] }).decision, 'deny');
+  // The old name of a rename counts too (audit round 2): renaming a workflow into a listed path is not a reverse.
+  assert.match(w.rules.may('push_branch', { product: 'app', card, reverses_files: ['app/a.ts'], files: [file('app/a.ts', 'renamed', { previous_path: '.github/workflows/deploy.yml' })] }).reason, /paused/);
+  assert.equal(w.rules.may('push_branch', { product: 'app', card, reverses_files: ['app/a.ts', 'app/old.ts'], files: [file('app/a.ts', 'renamed', { previous_path: 'app/old.ts' })] }).decision, 'allow');
+});
+
+test('a rename or copy with no old name is refused by push and merge (audit round 2, MAT-7)', () => {
+  const w = world();
+  const bare = [file('docs/research/a.md', 'renamed')];
+  assert.equal(w.rules.may('push_branch', { product: 'app', card: { id: 'C-1', rows: [], doc: { lane: 'docs' } }, files: bare }).decision, 'deny');
+  assert.match(mergeOf(w, bare).reason, /no old name/);
+  assert.equal(mergeOf(w, bare).decision, 'deny');
+  assert.equal(mergeOf(w, [file('docs/research/a.md', 'copied')]).decision, 'deny');
 });
 
 const mergeOf = (w, files, extra = {}) => w.rules.may('merge', { product: 'app', card: { id: 'C-1' }, files, declared_tier: 2, labels: [], ...extra });

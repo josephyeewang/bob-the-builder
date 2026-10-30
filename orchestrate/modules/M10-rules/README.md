@@ -61,12 +61,14 @@ await carryOver({ reviewed, current, between, catchUps, tier1MergesSince, gh: vi
 - **New keys enter as optional (R3-m10).** A key added to the rules later is optional, with a missing value read as the stricter choice, so an older rules file stays valid.
 - **The snapshot.** Its hash proves the file wasn't damaged. It does not prove who wrote it: the guard against a looser copy is that only its owner may write it (a file writable by others is refused). Hooks read it only through `snapshotAnswer`, which adds the protected floor.
 
-## Known limits (logged by the 0b-1 code audit, round 1)
+## Known limits (logged by the 0b-1 code audit, rounds 1 and 2)
 
 - **An exact-reverse push trusts its file list.** `push_branch` lets an exact reverse through, even while paused, when every file is in the subject's `reverses_files`. The caller fills that list from the reversed commit. The merge still needs `exact_reverse_ok`, which M10's `checkExactReverse` recomputes from GitHub, so a wrong list can only push a branch, never merge it.
-- **The last good rules on disk.** After a restart, the reader re-checks the saved copy's hash and parse, and uses it only once a fresh GitHub read agrees. Anyone who can write the reader's private folder (owner-only) could change it, as they could change the code itself.
+- **The last good rules on disk.** After a restart, the reader re-checks the saved copy's hash and parse, and uses it again after the next successful GitHub read. If that read finds a new, unapproved version, the saved copy stays the last good one (MAT-3). Anyone who can write the reader's private folder (owner-only) could change it, as they could change the code itself.
 - **Non-ASCII file names are refused.** A changed path with a letter outside plain ASCII is unclassifiable and cannot be pushed, because the Mac treats some look-alikes as the same file.
-- **The approval check only moves forward.** A rules change is adopted only through a pull request merged after the last good version. With the stopgap allow-list, a version must be listed after the current one (append new versions; never reorder).
+- **The approval check only moves forward.** A rules change is adopted only through a pull request merged after the last good version. With the stopgap allow-list, a version must be listed after the current one (append new versions; never reorder). The one exception is the very first read with no saved copy at all: then there is no "after", so any approved version is accepted. Seeding a product (or losing the saved copy) is a hand step for that reason.
+- **Carry-over trusts the caller on `main`.** `carryOver` checks that the reviewed and current bases are each the change's base, but not that the current base (or a catch-up's second parent) is on `main`. The caller passes the base it read from `main`.
+- **The snapshot checks permission bits only.** macOS access-control lists on the folder or file are not read. Adding one needs the owner's own access, the same as editing the file.
 
 ## Repair files: what the check cannot see
 

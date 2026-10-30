@@ -77,6 +77,10 @@ test('a push that is not a recorded catch-up is refused, even with an identical 
   assert.match((await carryOver({ ...w.args, current: { base: w.m1, head: single }, between: [single],
     catchUps: [{ pr: 7, before_sha: w.H0, after_sha: single }] })).reasons.join(), /not a merge onto/);
   assert.match((await carryOver({ ...w.args, between: [] })).reasons.join(), /do not end at the current head/);
+  // A recorded catch-up whose FIRST parent is main, not the reviewed head (audit round 2).
+  const flipped = w.r.commit([w.m1, w.H0], { 'docs/other.md': 'other, edited', 'docs/guide.md': 'new guide' }, { from: w.m1 });
+  assert.match((await carryOver({ ...w.args, current: { base: w.m1, head: flipped }, between: [flipped],
+    catchUps: [{ pr: 7, before_sha: w.H0, after_sha: flipped }] })).reasons.join(), /not a merge onto/);
 });
 
 test('the audit carries over only with no computed Tier-1 merge since; anything unknown means no', async () => {
