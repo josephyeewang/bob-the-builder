@@ -1,11 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { writeFileSync, mkdirSync, readdirSync, readFileSync, statSync, symlinkSync, utimesSync, existsSync, chmodSync, cpSync, rmSync } from 'node:fs';
+import { writeFileSync, mkdirSync, readdirSync, readFileSync, statSync, symlinkSync, utimesSync, existsSync, chmodSync, cpSync, rmSync, realpathSync, appendFileSync } from 'node:fs';
 import { join, dirname, relative } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { spawn, spawnSync } from 'node:child_process';
 import { createServer } from 'node:net';
-import { safeGitEnv, sweepStaleHomes, git, gitOk, checkGitVersion, checkMirror, initMirror, MIRROR_CONFIG_TEMPLATE, SAFE_CONFIG, withNoPrograms, repoConfigWhy, repoConfigFiles, inertSetting, INERT_KEYS } from './safe-git.mjs';
+import { safeGitEnv, sweepStaleHomes, git, gitOk, checkGitVersion, checkMirror, initMirror, MIRROR_CONFIG_TEMPLATE, SAFE_CONFIG, withNoPrograms, repoConfigWhy, repoConfigFiles, inertSetting, INERT_KEYS, pointerPath } from './safe-git.mjs';
 import { tempDir } from '../../../shared/test-tmp.mjs';
 
 const tmp = () => tempDir('orch-sg-');
@@ -359,13 +359,17 @@ test('L36: the flags reach git: a diff-family command runs with them', async () 
   const fake = join(d, 'fake-git');
   writeFileSync(fake, '#!/bin/sh\necho "$@"\n');
   chmodSync(fake, 0o755);
-  const r = await git(['--literal-pathspecs', 'log', '-n1'], { gitDir: join(d, 'none'), gitBin: fake });
+  mkdirSync(join(d, 'empty'));
+  const r = await git(['--literal-pathspecs', 'log', '-n1'], { gitDir: join(d, 'empty'), gitBin: fake });
   assert.equal(r.stdout.toString().trim(), '--no-pager --literal-pathspecs log --no-ext-diff --no-textconv -n1');
 });
 
-test('L36: a repository config that cannot be read is refused; a folder with no config yet is not', async () => {
+test('L36: a repository config that cannot be read is refused; a folder with no config yet is not; nothing there is refused but for init', async () => {
   const d = tmp();
-  assert.equal(await repoConfigWhy(join(d, 'none')), null);
+  assert.match(await repoConfigWhy(join(d, 'none')) ?? '', /missing/);
+  assert.equal((await git(['status'], { gitDir: join(d, 'none') })).code, -1);
+  mkdirSync(join(d, 'empty'));
+  assert.equal(await repoConfigWhy(join(d, 'empty')), null);
   const gd = join(d, '.git');
   await gitOk(['init', '-q', d], { gitDir: gd });
   assert.equal(await repoConfigWhy(gd), null);
@@ -407,6 +411,8 @@ test('L49 sweep: every key git lists is refused and named unless it is on the sa
   const listed = spawnSync('git', ['help', '--config'], { encoding: 'utf8', env: safeGitEnv() }).stdout.split('\n')
     .filter((l) => /^[A-Za-z0-9][A-Za-z0-9.<>*_-]*$/.test(l) && l.includes('.'));
   assert.ok(listed.length > 900, `git listed only ${listed.length} keys`);
+  // Keys ordinary repositories have that git does not list (#32 round 2, Minor 6): swept the same way.
+  listed.push('extensions.relativeWorktrees', 'remote.<name>.gh-resolved', 'branch.<name>.vscode-merge-base');
   const w = await trapWorld();
   const markers = join(w.root, 'markers');
   mkdirSync(markers);
@@ -436,7 +442,7 @@ test('L49 sweep: every key git lists is refused and named unless it is on the sa
   writeFileSync(join(w.gd, 'config'), clean);
   assert.deepEqual(failures, []);
   // What the list lets through is the safe list itself, nothing more.
-  assert.deepEqual(let_through.filter((k) => !INERT_KEYS.has(k.toLowerCase()) && !/^(?:remote\.<name>\.(?:url|pushurl|fetch)|branch\.<name>\.(?:remote|merge|rebase))$/.test(k)), []);
+  assert.deepEqual(let_through.filter((k) => !INERT_KEYS.has(k.toLowerCase()) && !/^(?:remote\.<name>\.(?:url|pushurl|fetch|gh-resolved)|branch\.<name>\.(?:merge|rebase|vscode-merge-base))$/.test(k)), []);
   // Each of those, planted with the program or with a network address, starts nothing and reaches nothing.
   const net = await listener();
   for (const key of let_through) {
@@ -485,7 +491,7 @@ test('L49: a planted program behind a pointer file, a commondir, a worktree or a
   const ok = await planted('clean-pointer', (d, gd) => { const p = join(d, 'ptr'); writeFileSync(p, `gitdir: ${gd}\n`); return p; });
   assert.equal(ok.why, null);
   assert.equal(ok.r.code, 0, ok.r.stderr);
-  assert.equal(repoConfigFiles(ok.gitDir).dir, join(ok.d, '.git'));
+  assert.equal(repoConfigFiles(ok.gitDir).dir, realpathSync.native(join(ok.d, '.git')));
   for (const p of ['not a pointer\n', 'gitdir: /nonexistent-folder\n']) {
     const f = join(ok.d, 'bad-ptr'); writeFileSync(f, p);
     assert.match(await repoConfigWhy(f) ?? '', /pointer/);
@@ -553,8 +559,181 @@ test('L49: git is handed the folder the check read, not the pointer file', async
   const ptr = join(d, 'ptr');
   writeFileSync(ptr, `gitdir: ${gd}\n`);
   const fake = join(d, 'fake-git');
-  writeFileSync(fake, '#!/bin/sh\n[ "$1" = config ] && exit 0\necho "$GIT_DIR"\n');
+  writeFileSync(fake, '#!/bin/sh\n[ "$1" = config ] && exit 0\necho "$GIT_DIR|$GIT_COMMON_DIR"\n');
   chmodSync(fake, 0o755);
   const r = await git(['status'], { gitDir: ptr, gitBin: fake });
-  assert.equal(r.stdout.toString().trim(), gd);
+  const real = realpathSync.native(gd);
+  assert.equal(r.stdout.toString().trim(), `${real}|${real}`);
+});
+
+// #32 round 2: a hook named in config (git 2.54 runs these even with core.hooksPath pinned), and a repository copy.
+const hookConfig = (marker) => `[hook "x"]\n\tcommand = touch ${marker}\n\tevent = reference-transaction\n`;
+const copyOf = (w, name) => { const d = join(w.root, name); cpSync(w.d, d, { recursive: true }); return { d, gd: join(d, '.git') }; };
+
+test('#32 round 2 M1: a commondir git reads differently (a trailing space; a link then ..) never lets a planted hook run', async () => {
+  const w = await trapWorld();
+  // A: commondir is "c " plus a newline. Git keeps the space and reads the hooked "c "; trim() read the clean "c".
+  const a = join(w.root, 'A');
+  mkdirSync(a);
+  cpSync(w.gd, join(a, 'c'), { recursive: true });
+  cpSync(w.gd, join(a, 'c '), { recursive: true });
+  const markA = join(w.root, 'PWNED-A');
+  appendFileSync(join(a, 'c ', 'config'), hookConfig(markA));
+  writeFileSync(join(a, 'HEAD'), readFileSync(join(w.gd, 'HEAD')));
+  writeFileSync(join(a, 'commondir'), 'c \n');
+  // B: commondir is lnk/../x, and lnk leads to other/sub. Git reads other/x; resolve() read the clean B/x.
+  const b = join(w.root, 'B');
+  mkdirSync(join(w.root, 'other', 'sub'), { recursive: true });
+  mkdirSync(b);
+  symlinkSync(join(w.root, 'other', 'sub'), join(b, 'lnk'));
+  cpSync(w.gd, join(b, 'x'), { recursive: true });
+  cpSync(w.gd, join(w.root, 'other', 'x'), { recursive: true });
+  const markB = join(w.root, 'PWNED-B');
+  appendFileSync(join(w.root, 'other', 'x', 'config'), hookConfig(markB));
+  writeFileSync(join(b, 'HEAD'), readFileSync(join(w.gd, 'HEAD')));
+  writeFileSync(join(b, 'commondir'), 'lnk/../x\n');
+
+  for (const [gitDir, mark, why] of [[a, markA, /commondir is not one path/], [b, markB, /hook\.x\.command/]]) {
+    assert.match(await repoConfigWhy(gitDir) ?? '', why, gitDir);
+    const r = await git(['update-ref', 'refs/heads/zz', 'HEAD'], { gitDir });
+    assert.equal(r.code, -1, r.stderr);
+    assert.equal(existsSync(mark), false, `${gitDir}: the planted hook ran`);
+    // Control: the pins alone, with git reading commondir itself, run the hook.
+    await rawGit(['update-ref', 'refs/heads/zz', 'HEAD'], { gitDir });
+    assert.equal(existsSync(mark), true, `${gitDir}: control: the hook should run when git reads commondir itself`);
+    rmSync(mark);
+  }
+  // The clean side read the right way: B with the hook moved to B/x is let through, and git uses other/x, as checked.
+  rmSync(join(w.root, 'other', 'x'), { recursive: true });
+  cpSync(w.gd, join(w.root, 'other', 'x'), { recursive: true });
+  appendFileSync(join(b, 'x', 'config'), hookConfig(markB));
+  assert.equal(await repoConfigWhy(b), null);
+  const found = repoConfigFiles(b);
+  assert.equal(found.common, realpathSync.native(join(w.root, 'other', 'x')));
+  assert.equal((await git(['update-ref', 'refs/heads/zz', 'HEAD'], { gitDir: b })).code, 0);
+  assert.equal(existsSync(markB), false, 'git read a commondir other than the one checked');
+  assert.equal((await gitOk(['rev-parse', '--git-common-dir'], { gitDir: b })).trim(), found.common);
+});
+
+test('#32 round 2 M1: a pointer or commondir path is taken only when git and the check read it the same way', () => {
+  for (const ok of ['c\n', 'c', '../x\n', 'a b\n', '/abs/path\n']) assert.equal(pointerPath(Buffer.from(ok)), ok.replace(/\n$/, ''), JSON.stringify(ok));
+  for (const bad of ['c \n', ' c\n', 'c\t\n', '\uFEFFc\n', 'c\r\n', 'c\n\n', 'c\0\n', 'c\nd\n', '', '\n', 'c\u00a0\n', '\u00a0c']) {
+    assert.equal(pointerPath(Buffer.from(bad)), null, JSON.stringify(bad));
+  }
+  assert.equal(pointerPath(Buffer.from([0x63, 0xff, 0x0a])), null, 'not UTF-8');
+  assert.equal(pointerPath(Buffer.from('gitdir: ../.git\n'), 'gitdir: '), '../.git');
+  for (const bad of ['gitdir:  x\n', 'gitdir: x \n', 'gitdir:x\n', 'x\ngitdir: y\n']) assert.equal(pointerPath(Buffer.from(bad), 'gitdir: '), null, JSON.stringify(bad));
+});
+
+test('#32 round 2 M1: a missing or dangling .git is refused; only git init runs where nothing is yet', async () => {
+  const d = tmp();
+  symlinkSync(join(d, 'nowhere'), join(d, 'dangling'));
+  assert.match(await repoConfigWhy(join(d, 'dangling')) ?? '', /leads nowhere/);
+  assert.match(await repoConfigWhy(join(d, 'none')) ?? '', /missing/);
+  assert.equal((await git(['status'], { gitDir: join(d, 'none') })).code, -1);
+  assert.equal((await git(['init', '-q', join(d, 'dangling')], { gitDir: join(d, 'dangling') })).code, -1, 'init never follows a dangling link');
+  assert.equal((await git(['init', '-q', join(d, 'r')], { gitDir: join(d, 'r', '.git') })).code, 0);
+  assert.equal((await checkGitVersion()).ok, true, 'a call with no command opens no repository');
+});
+
+test('#32 round 2 M1: git and the check agree on every config file and folder, for every allowed command, on a linked worktree', { timeout: 300_000 }, async () => {
+  const w = await trapWorld();
+  const wt = join(w.root, 'wt');
+  await gitOk(['worktree', 'add', '-q', '-b', 'wt', wt, 'main'], { gitDir: w.gd, workTree: w.d });
+  appendFileSync(join(w.gd, 'config'), '[extensions]\n\tworktreeConfig = true\n');
+  writeFileSync(join(w.gd, 'config.worktree'), '[user]\n\temail = main@localhost\n');
+  writeFileSync(join(w.gd, 'worktrees', 'wt', 'config.worktree'), '[user]\n\tname = wt\n');
+  for (const [gitDir, workTree] of [[w.gd, w.d], [join(wt, '.git'), wt]]) {
+    const found = repoConfigFiles(gitDir);
+    assert.equal(found.why, undefined, found.why);
+    const origins = (await gitOk(['config', '--list', '--show-origin', '--show-scope'], { gitDir, workTree })).split('\n')
+      .map((l) => l.split('\t')).filter(([scope]) => scope === 'local' || scope === 'worktree').map(([, o]) => realpathSync.native(o.replace(/^file:/, '')));
+    assert.deepEqual([...new Set(origins)].sort(), [join(found.common, 'config'), join(found.dir, 'config.worktree')].sort(), gitDir);
+    const checked = new Set(found.files.map((f) => realpathSync.native(f)));
+    for (const o of origins) assert.ok(checked.has(o), `git read ${o}, which the check did not`);
+    assert.deepEqual((await gitOk(['rev-parse', '--git-dir', '--git-common-dir'], { gitDir, workTree })).trim().split('\n'), [found.dir, found.common]);
+  }
+  // Every command the scripts run is handed exactly the folders the check read.
+  const found = repoConfigFiles(join(wt, '.git'));
+  const log = join(w.root, 'env.log');
+  const wrapper = join(w.root, 'git-wrapper');
+  writeFileSync(wrapper, `#!/bin/sh\n[ -n "$GIT_DIR" ] && printf '%s|%s|%s\\n' "$GIT_DIR" "$GIT_COMMON_DIR" "$*" >> ${JSON.stringify(log)}\nexec git "$@"\n`);
+  chmodSync(wrapper, 0o755);
+  await everyCommand(w, wt, (args, opts) => git(args, { ...opts, gitBin: wrapper }));
+  const lines = readFileSync(log, 'utf8').trim().split('\n').filter((l) => !l.includes('/into-'));
+  assert.ok(lines.length >= 40, `only ${lines.length} commands ran`);
+  for (const l of lines) assert.ok(l.startsWith(`${found.dir}|${found.common}|`), l);
+});
+
+test('#32 round 2 Minors 1 and 2: a remote named like an address, or a branch whose remote is not a plain name, is refused', async () => {
+  const w = await trapWorld();
+  for (const name of ['a/b', 'x:y', `file://${w.root}/A`]) {
+    for (const k of ['url', 'pushurl', 'fetch', 'gh-resolved']) assert.equal(inertSetting(`remote.${name}.${k}`, '/srv/r.git'), false, `${name} ${k}`);
+  }
+  for (const v of ['origin', '.', 'up-stream_2']) assert.equal(inertSetting('branch.main.remote', v), true, v);
+  for (const v of ['ext::sh -c touch', '/srv/r.git', 'a:b', 'a/b', '-x', '', undefined, 'a b']) assert.equal(inertSetting('branch.main.remote', v), false, String(v));
+  const { d, gd } = copyOf(w, 'remote-name');
+  appendFileSync(join(gd, 'config'), `[remote "file://${w.root}/A"]\n\turl = ${w.src}\n`);
+  assert.match(await repoConfigWhy(gd) ?? '', /remote\.file:/);
+  const args = ['fetch', '-q', '--no-tags', `file://${w.root}/A`, 'refs/heads/src-main:refs/heads/got'];
+  assert.equal((await git(args, { gitDir: gd, workTree: d })).code, -1);
+  assert.equal(existsSync(join(gd, 'refs', 'heads', 'got')), false);
+  // Control: git fetches from the address the remote's config names, not the one the call named.
+  await rawGit(args, { gitDir: gd, workTree: d });
+  assert.equal(existsSync(join(gd, 'refs', 'heads', 'got')), true, 'control: the planted remote should redirect the fetch');
+  const b = copyOf(w, 'branch-remote');
+  appendFileSync(join(b.gd, 'config'), '[branch "main"]\n\tremote = ext::sh -c touch\n');
+  assert.match(await repoConfigWhy(b.gd) ?? '', /branch\.main\.remote/);
+});
+
+test('#32 round 2 Minor 6: keys ordinary repositories have are let through (the L49 sweep runs each); http and hooksPath stay refused', async () => {
+  for (const k of ['core.autocrlf', 'core.untrackedcache', 'extensions.relativeworktrees', 'remote.origin.gh-resolved', 'branch.main.vscode-merge-base']) {
+    assert.equal(inertSetting(k, 'true'), true, k);
+  }
+  assert.equal(inertSetting('remote.origin.url', 'http://example.invalid/r.git'), false);
+  const w = await trapWorld();
+  const { gd } = copyOf(w, 'ordinary');
+  appendFileSync(join(gd, 'config'), '[core]\n\tautocrlf = input\n\tuntrackedCache = true\n[remote "origin"]\n\tgh-resolved = base\n[branch "main"]\n\tvscode-merge-base = origin/main\n');
+  assert.equal(await repoConfigWhy(gd), null);
+  appendFileSync(join(gd, 'config'), '[extensions]\n\tworktreeConfig = true\n');
+  writeFileSync(join(gd, 'config.worktree'), '[core]\n\thooksPath = /x\n');
+  assert.match(await repoConfigWhy(gd) ?? '', /core\.hookspath \(config\.worktree\)/);
+});
+
+test('#32 round 2 Minor 3: old-style remote files are refused; an empty folder is not', async () => {
+  const w = await trapWorld();
+  const { d, gd } = copyOf(w, 'legacy');
+  mkdirSync(join(gd, 'branches'));
+  assert.equal(await repoConfigWhy(gd), null, 'an empty branches folder is let through');
+  mkdirSync(join(gd, 'remotes'));
+  writeFileSync(join(gd, 'remotes', 'origin'), `URL: ${w.src}\nPull: refs/heads/src-main:refs/heads/got\n`);
+  assert.match(await repoConfigWhy(gd) ?? '', /old-style remote files in remotes/);
+  assert.equal((await git(['fetch', '-q', '--no-tags', 'origin'], { gitDir: gd, workTree: d })).code, -1);
+  assert.equal(existsSync(join(gd, 'refs', 'heads', 'got')), false);
+  await rawGit(['fetch', '-q', '--no-tags', 'origin'], { gitDir: gd, workTree: d });
+  assert.equal(existsSync(join(gd, 'refs', 'heads', 'got')), true, 'control: the remotes file should redirect the fetch');
+  rmSync(join(gd, 'remotes'), { recursive: true });
+  writeFileSync(join(gd, 'branches', 'origin'), `${w.src}#src-main\n`);
+  assert.match(await repoConfigWhy(gd) ?? '', /old-style remote files in branches/);
+});
+
+test('#32 round 2 Minor 4: a borrowed-objects list is refused unless it names only the folders the call allows', async () => {
+  const w = await trapWorld();
+  const only = (await gitOk(['hash-object', '-w', '--stdin'], { gitDir: join(w.src, '.git'), input: 'only in src\n' })).trim();
+  const { gd } = copyOf(w, 'alt');
+  const srcObjects = join(w.src, '.git', 'objects');
+  const alt = join(gd, 'objects', 'info', 'alternates');
+  writeFileSync(alt, `${srcObjects}\n`);
+  assert.match(await repoConfigWhy(gd) ?? '', /alternates/);
+  assert.equal((await git(['cat-file', '-e', only], { gitDir: gd })).code, -1);
+  assert.equal((await rawGit(['cat-file', '-e', only], { gitDir: gd })).code, 0, 'control: git reads the borrowed object');
+  assert.equal((await git(['cat-file', '-e', only], { gitDir: gd, allowObjects: [srcObjects] })).code, 0);
+  writeFileSync(alt, '../../../src/.git/objects\n');
+  assert.equal(await repoConfigWhy(gd, { allowObjects: [srcObjects] }), null, 'a relative line is read from the objects folder, as git reads it');
+  writeFileSync(alt, `${srcObjects}\n${join(w.peer, 'objects')}\n`);
+  assert.match(await repoConfigWhy(gd, { allowObjects: [srcObjects] }) ?? '', /alternates/);
+  writeFileSync(alt, '');
+  assert.equal(await repoConfigWhy(gd), null, 'an empty list borrows nothing');
+  writeFileSync(join(gd, 'objects', 'info', 'http-alternates'), '');
+  assert.match(await repoConfigWhy(gd) ?? '', /http-alternates/);
 });
