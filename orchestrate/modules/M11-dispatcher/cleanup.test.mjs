@@ -240,7 +240,7 @@ test("the ask: one per copy; Joe's answer is acted on once; a refusal to ask kee
   assert.equal(again.result, 'kept');
   assert.equal(again.calls.length, 0, 'no second bundle while the ask is open');
   const cur = rec.read('ask', ASK_ID('C-1'));
-  rec.write({ actor: 'joe', entity: 'ask', id: ASK_ID('C-1'), expectRev: cur.rev, doc: { ...cur.doc, state: 'answered', answer: 'delete' } });
+  assert.equal(rec.write({ actor: 'approvals', entity: 'ask', id: ASK_ID('C-1'), expectRev: cur.rev, doc: { ...cur.doc, state: 'answered', answer: 'delete' } }).ok, true, 'the answer is recorded');
   // audit: a "delete" is acted on only when the rules count it as Joe's approval
   assert.equal((await clean(w, rec, { rules: rulesWith({}, { count_approval: { decision: 'deny', reason: 'not counted' } }) })).result, 'refused');
   assert.ok(existsSync(w.copy));
@@ -253,7 +253,7 @@ test("the ask: one per copy; Joe's answer is acted on once; a refusal to ask kee
   const rec2 = recFor(w2);
   await clean(w2, rec2);
   const c2 = rec2.read('ask', ASK_ID('C-1'));
-  rec2.write({ actor: 'joe', entity: 'ask', id: ASK_ID('C-1'), expectRev: c2.rev, doc: { ...c2.doc, state: 'answered', answer: 'keep' } });
+  assert.equal(rec2.write({ actor: 'approvals', entity: 'ask', id: ASK_ID('C-1'), expectRev: c2.rev, doc: { ...c2.doc, state: 'answered', answer: 'keep' } }).ok, true, 'the answer is recorded');
   assert.equal((await clean(w2, rec2)).result, 'kept');
   assert.ok(existsSync(w2.copy));
   const later = await clean(w2, rec2);
@@ -336,7 +336,7 @@ test('audit 0b-6 r2 MAT-5 / MAT-8 (C2): any answer but delete keeps the copy wit
     const rec = recFor(w, { card: { changed_at: iso(T0 - 20 * MIN) } });
     await clean(w, rec);
     const a = rec.read('ask', ASK_ID('C-1'));
-    rec.write({ actor: 'joe', entity: 'ask', id: ASK_ID('C-1'), expectRev: a.rev, doc: { ...a.doc, state: 'answered', answer } });
+    assert.equal(rec.write({ actor: 'approvals', entity: 'ask', id: ASK_ID('C-1'), expectRev: a.rev, doc: { ...a.doc, state: 'answered', answer } }).ok, true, 'the answer is recorded');
     assert.equal((await clean(w, rec)).result, 'kept', answer);
     const later = await clean(w, rec);
     assert.deepEqual([later.result, later.calls.length], ['kept', 0], `${JSON.stringify(answer)}: not bundled or asked again`);
@@ -385,7 +385,7 @@ test("audit 0b-6 r3 MIN-5 (J7): Joe's delete is refused when the record now name
   const rec = recFor(w);
   await clean(w, rec);
   const cur = rec.read('ask', ASK_ID('C-1'));
-  rec.write({ actor: 'joe', entity: 'ask', id: ASK_ID('C-1'), expectRev: cur.rev, doc: { ...cur.doc, state: 'answered', answer: 'delete' } });
+  assert.equal(rec.write({ actor: 'approvals', entity: 'ask', id: ASK_ID('C-1'), expectRev: cur.rev, doc: { ...cur.doc, state: 'answered', answer: 'delete' } }).ok, true, 'the answer is recorded');
   const c = rec.read('card', 'C-1');
   rec.write({ actor: 'dispatcher', entity: 'card', id: 'C-1', expectRev: c.rev, doc: { ...c.doc, copy: join(w.dir, 'another') } });
   const r = await clean(w, rec, { rules: COUNTED });
