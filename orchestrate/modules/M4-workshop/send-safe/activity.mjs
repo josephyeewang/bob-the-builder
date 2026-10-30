@@ -45,7 +45,8 @@ export const isWatchdogText = (text) => typeof text === 'string' && text.trimSta
 /**
  * Tracks every session's activity from hook signals. `store` holds session records:
  * { id, activity: { state, at }, firstSignalAt, terminated }. In-flight tool state is
- * in memory only: a restart loses it and the session clears at its next turn boundary.
+ * in memory only: a restart loses it and the session clears at its next turn boundary. This assumes one
+ * permission dialog on screen at a time (README open items: a live check next to L1).
  */
 export class ActivityTracker {
   constructor(store, { notify = () => {}, now = () => Date.now() } = {}) {
@@ -92,6 +93,9 @@ export class ActivityTracker {
     const rec = this.store.get(id) ?? {};
     const asks = Array.isArray(rec.openAsks) ? [...rec.openAsks] : (rec.activity?.reason === 'question' ? ['?'] : []);
     const keep = (list) => { const r = this.store.get(id); if (r) this.store.set(id, { ...r, openAsks: list }); };
+    // The stand-in is stored the moment it is used (audit round 4 m2), so a dialog that opens on
+    // top of it can't erase it.
+    if (!Array.isArray(rec.openAsks) && asks.length) keep(asks);
     if (s.event === 'ask-user-question-open') { asks.push(s.toolUseId || '*'); keep(asks); }
     if (asks.length && s.event !== 'ask-user-question-open') {
       const realPrompt = s.event === 'user-prompt-submit' && !isWatchdogText(s.prompt);
@@ -108,7 +112,7 @@ export class ActivityTracker {
       if (realPrompt || ends) { keep([]); this.flights.delete(id); return s; }
       if (s.state !== State.BLOCKED) {
         // The blocking tool's own post ends that dialog, but the question is still open.
-        if (cur === State.BLOCKED && isPostToolUseEvent(s.event) && fl.blockedCandidate && s.toolUseId === fl.blockedCandidate) {
+        if (cur === State.BLOCKED && isPostToolUseEvent(s.event) && fl?.blockedCandidate && s.toolUseId === fl.blockedCandidate) {
           fl.blockedCandidate = '';
           return { ...s, state: State.WAITING_INPUT, reason: 'question' };
         }

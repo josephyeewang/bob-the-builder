@@ -486,3 +486,35 @@ test('a restarted tracker still knows every open question (audit round 3 MAT-1)'
   const done = trackRig(); askQ(done, 'q1'); askQ(done, 'q2'); done.restart(); ansQ(done, 'q1'); ansQ(done, 'q2');
   assert.notEqual(done.store.get('S').activity.state, State.WAITING_INPUT);
 });
+
+test('audit round 4: a restart while blocked with a question open never crashes the tracker (m1)', async () => {
+  const r = trackRig(); blockOn(r); askQ(r); r.restart();
+  assert.doesNotThrow(() => r.hook('post-tool-use', { tool_name: 'Bash', tool_use_id: 'b1' }));
+  idleNote(r);
+  assert.notEqual(r.store.get('S').activity.state, State.IDLE);
+  await nothingTyped(r, 'restart while blocked');
+});
+
+test('audit round 4: the unnamed-question stand-in survives a dialog opening on top of it (m2)', async () => {
+  const r = trackRig();
+  r.store.set('S', { id: 'S', activity: { state: State.WAITING_INPUT, at: 0, reason: 'question' }, firstSignalAt: 1 });
+  blockOn(r); r.hook('post-tool-use', { tool_name: 'Bash', tool_use_id: 'b1' }); r.hook('stop'); idleNote(r);
+  assert.deepEqual(r.store.get('S').openAsks, ['?']);
+  await nothingTyped(r, 'stand-in under a dialog');
+});
+
+test('audit round 4: lines no test protected (m3)', async () => {
+  // An idle notice never ends a "needs input" wait.
+  const w = trackRig(State.WAITING_INPUT); idleNote(w);
+  assert.equal(w.store.get('S').activity.state, State.WAITING_INPUT);
+  assert.notEqual((await sendSafe(w.guard, 'S', 'WRAP')).outcome, Outcome.SENT, 'idle ends a wait');
+  // A real prompt clears the open-question list, so the session can move on afterwards.
+  const p = trackRig(); askQ(p); p.hook('user-prompt-submit', { prompt: 'answer' });
+  assert.deepEqual(p.store.get('S').openAsks, []);
+  p.hook('stop');
+  assert.notEqual(p.store.get('S').activity.state, State.WAITING_INPUT);
+  // A new launch clears the list.
+  const l = trackRig(); askQ(l); l.tracker().beginLaunch('S', 'L2');
+  assert.deepEqual(l.store.get('S').openAsks, []);
+  l.hook('stop', {});
+});
