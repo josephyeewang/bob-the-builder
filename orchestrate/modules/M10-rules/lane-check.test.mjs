@@ -20,8 +20,8 @@ const change = (files, extra = {}) => ({ files, declared_tier: 2, labels: [], ..
 const check = (files, extra, policy = POL) => docsLaneProblem(policy, change(files, extra));
 
 test('a plain text doc in the docs or research lane passes', () => {
-  for (const files of [[f('docs/research/a.md')], [f('docs/x.md', 'added')], [f('docs/domains/sales/notes.yaml')], [f('docs/research/data.csv', 'added', { mode: '100644' })],
-    [f('docs/research/a.json', 'modified', { mode: 100644 })], [f('docs/x.md', 'renamed', { previous_path: 'docs/y.md' })],
+  for (const files of [[f('docs/research/a.md')], [f('docs/x.md', 'added')], [f('docs/domains/sales/notes.txt')], [f('docs/research/data.csv', 'added', { mode: '100644' })],
+    [f('docs/research/a.md', 'modified', { mode: 100644 })], [f('docs/x.md', 'renamed', { previous_path: 'docs/y.md' })],
     [f('docs/research/b.md', 'copied', { previous_path: 'docs/research/a.md' })], [f('docs/research/a.md'), f('docs/research/x.txt', 'added')]]) {
     assert.equal(check(files), null, JSON.stringify(files));
   }
@@ -181,5 +181,57 @@ test('the rules\' docs_paths narrow the lane; a pause holds whatever the state r
   assert.match(merge(rulesFor('paused', pausedRules), [f('docs/research/a.md')]).reason, /paused/);
   for (const audit of ['bogus', undefined, 'SUCCESS']) {
     assert.equal(merge(rulesFor('paused'), [f('docs/research/a.md')], { ...undo('failure'), reversed_audit: audit }).decision, 'deny', String(audit));
+  }
+});
+
+// Confirm audit of L34, round 2 (29 Oct 2026).
+test('the check never throws, even when what is thrown is itself hostile (M-1)', () => {
+  const revoked = Proxy.revocable({}, {}); revoked.revoke();
+  const odd = [revoked.proxy, { get message() { throw new Error('x'); } }, { message: Symbol('s') }, Object.create(null)];
+  for (const thrown of odd) {
+    const c = Object.defineProperty(change([f('docs/research/a.md')]), 'labels', { get() { throw thrown; } });
+    let r;
+    assert.doesNotThrow(() => { r = docsLaneProblem(POL, c); });
+    assert.match(r, /^could not be read/);
+  }
+  let r;
+  assert.doesNotThrow(() => { r = docsLaneProblem(POL, change([f('docs/research/a.md', 'modified', { mode: revoked.proxy })])); });
+  assert.equal(typeof r, 'string');
+});
+
+test('each field of the change is read once, so a getter that changes its answer slips nothing past (m-1)', () => {
+  for (const [k, answers] of [['labels', [undefined, [], ['needs-joe']]], ['labels', [['needs-joe'], []]], ['truncated', ['yes', false]], ['truncated', [false, true]],
+    ['declared_tier', [1, 2]], ['files', [[f('lib/a.ts')], [f('docs/research/a.md')]]]]) {
+    let reads = 0;
+    const c = change([f('docs/research/a.md')]);
+    delete c[k];
+    Object.defineProperty(c, k, { get: () => answers[Math.min(reads++, answers.length - 1)], enumerable: true });
+    const got = docsLaneProblem(POL, c);
+    assert.equal(reads, 1, `${k} read ${reads} times`);
+    // The answer is the one the first read gives.
+    assert.equal(got === null, check(change([f('docs/research/a.md')], { [k]: answers[0] }).files, { [k]: answers[0] }) === null, `${k}: ${JSON.stringify(answers)}`);
+  }
+  assert.ok(check([f('docs/research/a.md')], { labels: Array.from({ length: 1001 }, () => 'docs') }), 'over 1000 labels');
+});
+
+test('JSON, YAML and markdown other tools read as instructions are not docs (m-2)', () => {
+  for (const p of ['docs/research/project.json', 'docs/research/notes.yaml', 'docs/domains/a/b.yml', 'docs/research/settings.json', 'docs/research/mcp.json',
+    'docs/research/AGENT.md', 'docs/research/WARP.md', 'docs/research/CRUSH.md', 'docs/research/QWEN.md', 'docs/research/copilot-instructions.md',
+    'docs/research/CONVENTIONS.md', 'docs/research/SKILL.md', 'docs/research/commands/x.md', 'docs/research/skills/x/notes.md', 'docs/research/CLAUDE.local.md']) {
+    assert.ok(check([f(p)]), p);
+  }
+});
+
+test('the built-in floor, the exact length and depth edges and an undo\'s kind each hold on their own (m-3)', () => {
+  const wide = pol((t) => t.replace('  docs:\n    - docs/*.md\n', '  docs:\n    - docs/**\n'));
+  for (const p of ['docs/x.txt', 'docs/x.csv', 'docs/sub/x.md']) assert.ok(check([f(p)], {}, wide), `floor: ${p}`);
+  const at = (len) => `docs/research/${'a'.repeat(len - 'docs/research/'.length - 3)}.md`;
+  assert.equal(check([f(at(512))]), null, '512 characters');
+  assert.ok(check([f(at(513))]), '513 characters');
+  const parts = (k) => `docs/research/${'a/'.repeat(k - 3)}x.md`;
+  assert.equal(check([f(parts(16))]), null, '16 parts');
+  assert.ok(check([f(parts(17))]), '17 parts');
+  for (const kind of ['reverse', undefined, 'EXACT_REVERSE']) {
+    assert.equal(merge(rulesFor('paused'), [f('docs/research/a.md')], { ...undo('failure'), kind }).decision, 'deny', String(kind));
   }
 });

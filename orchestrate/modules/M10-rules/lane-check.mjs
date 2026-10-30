@@ -17,14 +17,17 @@ import { needsJoe, MAX_FILES } from './classify.mjs';
 // The lane's floor: whatever the rules file says, the docs lane never reaches beyond these. The one definition;
 // engine.mjs imports it. Matching ignores case (for the Mac), so the folder names are also checked exactly below.
 export const DOCS_FLOOR = compileList(['docs/*.md', 'docs/domains/**', 'docs/research/**']);
-// Files other tools read as instructions or settings, wherever they sit (confirm audit of L34, m4).
-const NOT_DOCS = compileList(['**/AGENTS.override.md', '**/GEMINI.md', '**/package.json', '**/tsconfig*.json', '**/pull_request_template.md',
-  '**/PULL_REQUEST_TEMPLATE/**', '**/ISSUE_TEMPLATE/**', '**/CODEOWNERS', '**/FUNDING.yml', '**/SECURITY.md', '**/dependabot.yml']);
+// Markdown files other tools read as instructions, wherever they sit (confirm audits of L34, m4 and m-2). No such
+// list is complete, so settings formats (JSON, YAML) are left out of the lane altogether (TEXT below).
+const NOT_DOCS = compileList(['**/AGENTS.override.md', '**/AGENT.md', '**/GEMINI.md', '**/WARP.md', '**/CRUSH.md', '**/QWEN.md',
+  '**/copilot-instructions.md', '**/CONVENTIONS.md', '**/SKILL.md', '**/commands/**', '**/skills/**', '**/agents/**', '**/rules/**',
+  '**/pull_request_template.md', '**/PULL_REQUEST_TEMPLATE/**', '**/ISSUE_TEMPLATE/**', '**/SECURITY.md']);
 // A path this long or deep is no doc; refusing it keeps the pattern checks quick (m1: 95 s at 2,000 folders).
 const MAX_PATH = 512;
 const MAX_DEPTH = 16;
-// Plain text only. No images, PDFs or other binaries (L28), and nothing that can run (`.mdx`, `.html`, `.svg`).
-const TEXT = /\.(md|txt|csv|json|yaml|yml)$/i;
+// Plain text only. No images, PDFs or other binaries (L28), nothing that can run (`.mdx`, `.html`, `.svg`), and no
+// JSON or YAML: tools read too many such names as settings to list them all (confirm audit round 2, m-2).
+const TEXT = /\.(md|txt|csv)$/i;
 const STATUSES = ['added', 'modified', 'renamed', 'copied'];   // a removal is never the docs lane's here
 const list = (v) => (Array.isArray(v) ? v : v == null ? [] : [v]);
 
@@ -32,7 +35,10 @@ export function docsLaneProblem(policy, change) {
   try {
     return problem(policy, change);
   } catch (e) {
-    return `could not be read (${e?.message ?? 'unknown error'})`;
+    // The thrown thing may itself be hostile (a revoked proxy, a message that throws), so reading it is guarded too.
+    let why = 'unknown error';
+    try { if (typeof e?.message === 'string') why = e.message.slice(0, 200); } catch { /* keep the fixed text */ }
+    return `could not be read (${why})`;
   }
 }
 
@@ -55,20 +61,25 @@ function problem(policy, change) {
   ]);
   const watchedRemovals = compileList(strings(ep.deletes?.removed_file_paths));
 
-  if (change.truncated !== undefined && change.truncated !== false) return 'the file list may be cut off';
-  if (change.declared_tier !== 2) return 'not declared Tier 2';
-  if (change.labels !== undefined && !Array.isArray(change.labels)) return 'labels are not a list';
+  // Each field is read once, so a getter can't answer one way to a check and another way to the next (round 2, m-1).
+  const { truncated, declared_tier: tier, labels: given, files } = change;
+  if (truncated !== undefined && truncated !== false) return 'the file list may be cut off';
+  if (tier !== 2) return 'not declared Tier 2';
+  if (given !== undefined && !Array.isArray(given)) return 'labels are not a list';
   // Lists are read by position: a list's own iterator can hide entries (m2).
-  const labels = change.labels === undefined ? [] : change.labels;
-  for (let i = 0, n = labels.length; i < n; i++) {
+  const labels = given === undefined ? [] : given;
+  const n = labels.length;
+  if (!(n <= 1000)) return 'more than 1000 labels';
+  for (let i = 0; i < n; i++) {
     const l = labels[i];
     if (typeof l !== 'string') return 'a label is not text';
     if (needsJoe(l) !== null) return `label ${JSON.stringify(l)} asks for Joe`;
   }
-  const files = change.files;
-  if (!Array.isArray(files) || !files.length) return 'no files';
-  if (files.length >= MAX_FILES) return `${MAX_FILES} files or more`;
-  for (let i = 0, n = files.length; i < n; i++) {
+  if (!Array.isArray(files)) return 'no files';
+  const count = files.length;
+  if (!count) return 'no files';
+  if (count >= MAX_FILES) return `${MAX_FILES} files or more`;
+  for (let i = 0; i < count; i++) {
     const f = files[i];
     if (!f || typeof f !== 'object') return 'a file entry is not an object';
     const { path, previous_path: prev, status, mode } = f;
