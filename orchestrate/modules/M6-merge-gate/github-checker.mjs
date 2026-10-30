@@ -1499,7 +1499,9 @@ function skipCommand({ mode, checkerUrl, sha256 } = {}) {
   if (typeof sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(sha256)) throw new Error('sha256 must be 64 lowercase hex characters');
   // Each step must succeed for the next to run; any failure falls through to `exit 0` (skip). Only the exact token
   // on the checker's output reaches `exit 1` (build).
-  return `f=$(mktemp) && curl -fsSL --max-time 60 -o "$f" '${checkerUrl}' && [ "$(sha256sum "$f" | cut -c1-64)" = ${sha256} ] && [ "$(node "$f" ${mode})" = ${BUILD_TOKEN} ] && exit 1; exit 0`;
+  // The file is named checker.mjs inside a fresh temp folder: node loads a bundle only by a .mjs name (a bare mktemp
+  // name like tmp.AbCd12 is an unknown extension, and no extension depends on module detection).
+  return `d=$(mktemp -d) && f="$d/checker.mjs" && curl -fsSL --max-time 60 -o "$f" '${checkerUrl}' && [ "$(sha256sum "$f" | cut -c1-64)" = ${sha256} ] && [ "$(node "$f" ${mode})" = ${BUILD_TOKEN} ] && exit 1; exit 0`;
 }
 
 function makeFetchGh({ token, fetchImpl = globalThis.fetch } = {}) {
@@ -1541,11 +1543,11 @@ async function main(argv, env, { gh, out = (s) => console.log(s) } = {}) {
 __bob_def('orchestrate/modules/M6-merge-gate/checker-entry.mjs', ['orchestrate/modules/M10-rules/classify.mjs', 'orchestrate/modules/M10-rules/exact-reverse.mjs', 'orchestrate/modules/M10-rules/git-view.mjs', 'orchestrate/modules/M6-merge-gate/mark.mjs', 'orchestrate/modules/M6-merge-gate/audit-run.mjs', 'orchestrate/modules/M6-merge-gate/build-skip.mjs'], function (__bob_e, __bob_i) {
 const { readFileSync, writeFileSync, realpathSync } = __bob_node_fs;
 const { pathToFileURL } = __bob_node_url;
-let classifyWithRulesText, checkExactReverse, makeGitView, touchedPaths, readMark, readAuditRun, DEFAULT_FLAG_STEP, buildSkipMain, makeFetchGh;
+let classifyWithRulesText, checkExactReverse, makeGitView, touchedPaths, readMark, NEEDS_JOE_CONTEXT, NEEDS_JOE_DESC, readAuditRun, DEFAULT_FLAG_STEP, buildSkipMain, makeFetchGh;
 __bob_i('orchestrate/modules/M10-rules/classify.mjs', (m) => { classifyWithRulesText = m.classifyWithRulesText; });
 __bob_i('orchestrate/modules/M10-rules/exact-reverse.mjs', (m) => { checkExactReverse = m.checkExactReverse; });
 __bob_i('orchestrate/modules/M10-rules/git-view.mjs', (m) => { makeGitView = m.makeGitView; touchedPaths = m.touchedPaths; });
-__bob_i('orchestrate/modules/M6-merge-gate/mark.mjs', (m) => { readMark = m.readMark; });
+__bob_i('orchestrate/modules/M6-merge-gate/mark.mjs', (m) => { readMark = m.readMark; NEEDS_JOE_CONTEXT = m.NEEDS_JOE_CONTEXT; NEEDS_JOE_DESC = m.NEEDS_JOE_DESC; });
 __bob_i('orchestrate/modules/M6-merge-gate/audit-run.mjs', (m) => { readAuditRun = m.readAuditRun; DEFAULT_FLAG_STEP = m.DEFAULT_FLAG_STEP; });
 __bob_i('orchestrate/modules/M6-merge-gate/build-skip.mjs', (m) => { buildSkipMain = m.main; makeFetchGh = m.makeFetchGh; });
 Object.defineProperties(__bob_e, {
@@ -1586,9 +1588,7 @@ Object.defineProperties(__bob_e, {
 //   ORCHESTRATE_AUDIT_WORKFLOW, ORCHESTRATE_FLAG_STEP (optional). The token is never printed.
 
 
-const NEEDS_JOE_CONTEXT = 'orchestrate/needs-joe';
 const RULES_PATH = 'orchestrate/policy.yaml';
-const NEEDS_JOE_DESC = /^needs-joe: (true|false); declared tier: ([12])$/;
 const REVERSES_LINE = /^reverses: ([0-9a-f]{40})$/;
 const SHA = /^[0-9a-f]{40}$/;
 const NAME = /^[A-Za-z0-9_.-]+$/;
@@ -1751,6 +1751,10 @@ if (isScript()) main(process.argv.slice(2), process.env).then((code) => { proces
 __bob_def('orchestrate/modules/M6-merge-gate/mark.mjs', [], function (__bob_e, __bob_i) {
 Object.defineProperties(__bob_e, {
   MARK_CONTEXT: { get: () => MARK_CONTEXT, enumerable: true },
+  NEEDS_JOE_CONTEXT: { get: () => NEEDS_JOE_CONTEXT, enumerable: true },
+  NEEDS_JOE_DESC: { get: () => NEEDS_JOE_DESC, enumerable: true },
+  needsJoeDescription: { get: () => needsJoeDescription, enumerable: true },
+  markable: { get: () => markable, enumerable: true },
   markDescription: { get: () => markDescription, enumerable: true },
   parseMark: { get: () => parseMark, enumerable: true },
   readMark: { get: () => readMark, enumerable: true },
@@ -1769,12 +1773,24 @@ Object.defineProperties(__bob_e, {
 //   markDescription({ card, head }) → string        (≤ 140 characters, GitHub's limit for a status description)
 //   parseMark(description) → { card, head } | null
 //   await readMark({ gh, owner, repo, sha, robotBotId }) → { ok: true, card, head, pr } | { ok: false, reason }
+//   NEEDS_JOE_CONTEXT, needsJoeDescription({ needsJoe, tier }), NEEDS_JOE_DESC: the second status the gate posts on its
+//     merge commit, saying whether the change needed the owner and its tier (checker-entry.mjs readNeedsJoe reads it)
 // `gh` is a GitHub client ({ get(path) } → { status, json }). Any error → no mark (fail closed).
 
 const MARK_CONTEXT = 'orchestrate/merge-gate';
 const SHA = /^[0-9a-f]{40}$/;
 const CARD = /^[A-Za-z0-9._-]{1,80}$/;
 const DESC = /^merged by the Merge Gate: card ([A-Za-z0-9._-]{1,80}) head ([0-9a-f]{40})$/;
+
+const NEEDS_JOE_CONTEXT = 'orchestrate/needs-joe';
+const NEEDS_JOE_DESC = /^needs-joe: (true|false); declared tier: ([12])$/;
+function needsJoeDescription({ needsJoe, tier }) {
+  if (typeof needsJoe !== 'boolean' || (tier !== 1 && tier !== 2)) throw new Error('needs-joe is true or false and the tier 1 or 2');
+  return `needs-joe: ${needsJoe}; declared tier: ${tier}`;
+}
+
+// A card the mark can name (the record allows longer ids; the gate refuses those before merging).
+const markable = (card) => CARD.test(card ?? '');
 
 function markDescription({ card, head }) {
   if (!CARD.test(card ?? '') || !SHA.test(head ?? '')) throw new Error('a mark names a card id and a 40-hex head');

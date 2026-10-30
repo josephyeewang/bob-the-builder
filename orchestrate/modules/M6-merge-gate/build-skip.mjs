@@ -94,7 +94,9 @@ export function skipCommand({ mode, checkerUrl, sha256 } = {}) {
   if (typeof sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(sha256)) throw new Error('sha256 must be 64 lowercase hex characters');
   // Each step must succeed for the next to run; any failure falls through to `exit 0` (skip). Only the exact token
   // on the checker's output reaches `exit 1` (build).
-  return `f=$(mktemp) && curl -fsSL --max-time 60 -o "$f" '${checkerUrl}' && [ "$(sha256sum "$f" | cut -c1-64)" = ${sha256} ] && [ "$(node "$f" ${mode})" = ${BUILD_TOKEN} ] && exit 1; exit 0`;
+  // The file is named checker.mjs inside a fresh temp folder: node loads a bundle only by a .mjs name (a bare mktemp
+  // name like tmp.AbCd12 is an unknown extension, and no extension depends on module detection).
+  return `d=$(mktemp -d) && f="$d/checker.mjs" && curl -fsSL --max-time 60 -o "$f" '${checkerUrl}' && [ "$(sha256sum "$f" | cut -c1-64)" = ${sha256} ] && [ "$(node "$f" ${mode})" = ${BUILD_TOKEN} ] && exit 1; exit 0`;
 }
 
 export function makeFetchGh({ token, fetchImpl = globalThis.fetch } = {}) {

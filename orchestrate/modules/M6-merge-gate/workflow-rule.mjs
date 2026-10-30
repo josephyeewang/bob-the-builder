@@ -29,7 +29,7 @@ const EMPTY = '';                       // stands for `{}` between the pre-pa
 const MAX_TEXT = 512 * 1024;
 const DEFAULT_SECRET_TRIGGERS = ['schedule', 'workflow_dispatch', 'push-to-main'];
 // Outside text a pull request or issue author controls; inside a script it runs as code (normalised expression text).
-const UNTRUSTED = /github\.event\.(issue|comment|pull_request|review|review_comment|discussion|discussion_comment)\.(title|body)|github\.event\.pull_request\.head\.(ref|label)|head_ref/;
+const UNTRUSTED = /github\.event\.(issue|comment|pull_request|review|review_comment|discussion|discussion_comment)\.(title|body)|github\.event\.pull_request\.head\.(ref|label)|head_ref|github\.event\.(head_commit|commits)\b[^}]*\.(message|author|committer)|github\.event\.pages\b[^}]*\.page_name/;
 const own = (o, k) => o !== null && typeof o === 'object' && Object.hasOwn(o, k);
 const isMap = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
 const short = (s) => JSON.stringify(String(s).slice(0, 80));

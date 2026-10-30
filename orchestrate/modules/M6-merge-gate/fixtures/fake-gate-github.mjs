@@ -9,6 +9,7 @@
 //   g.checks.set(sha, [run, …])           default: one required check `test`, passed, on that commit
 //   g.threads = [{ isResolved, comments: { nodes: [{ author: { __typename } }] } }]
 //   g.answer.merge / g.answer.update = (pr, body) → { status, json } | null    to make GitHub refuse
+//   g.answer.status = (body) → { status, json } | null                         to make a commit status fail
 //   g.gh.get / post / put(path, body) → { status, json };  g.writes = [[method, path, body], …]
 // Shapes follow REST API version 2022-11-28 ("Merge a pull request", "Update a pull request branch", "List check runs
 // for a Git reference", "Get the combined status for a specific reference", "Create a commit status"; checked
@@ -89,6 +90,7 @@ export function fakeGateGitHub({ owner = 'sample-org', repo = 'sample-app', robo
       g.writes.push(['post', path, body]);
       if (path === '/graphql') return ok({ data: { repository: { pullRequest: { reviewThreads: { totalCount: g.threads.length, nodes: g.threads } } } } });
       const m = /^\/statuses\/([0-9a-f]{40})$/.exec(path.slice(base.length));
+      if (m && g.answer.status) { const a = g.answer.status(body); if (a) return a; }
       if (m) { statuses.set(m[1], [...(statuses.get(m[1]) ?? []), { ...body, creator: { id: robotId } }]); return ok({ id: 1 }, 201); }
       return { status: 404, json: null };
     },

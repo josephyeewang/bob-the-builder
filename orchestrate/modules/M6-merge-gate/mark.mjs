@@ -12,12 +12,24 @@
 //   markDescription({ card, head }) → string        (≤ 140 characters, GitHub's limit for a status description)
 //   parseMark(description) → { card, head } | null
 //   await readMark({ gh, owner, repo, sha, robotBotId }) → { ok: true, card, head, pr } | { ok: false, reason }
+//   NEEDS_JOE_CONTEXT, needsJoeDescription({ needsJoe, tier }), NEEDS_JOE_DESC: the second status the gate posts on its
+//     merge commit, saying whether the change needed the owner and its tier (checker-entry.mjs readNeedsJoe reads it)
 // `gh` is a GitHub client ({ get(path) } → { status, json }). Any error → no mark (fail closed).
 
 export const MARK_CONTEXT = 'orchestrate/merge-gate';
 const SHA = /^[0-9a-f]{40}$/;
 const CARD = /^[A-Za-z0-9._-]{1,80}$/;
 const DESC = /^merged by the Merge Gate: card ([A-Za-z0-9._-]{1,80}) head ([0-9a-f]{40})$/;
+
+export const NEEDS_JOE_CONTEXT = 'orchestrate/needs-joe';
+export const NEEDS_JOE_DESC = /^needs-joe: (true|false); declared tier: ([12])$/;
+export function needsJoeDescription({ needsJoe, tier }) {
+  if (typeof needsJoe !== 'boolean' || (tier !== 1 && tier !== 2)) throw new Error('needs-joe is true or false and the tier 1 or 2');
+  return `needs-joe: ${needsJoe}; declared tier: ${tier}`;
+}
+
+// A card the mark can name (the record allows longer ids; the gate refuses those before merging).
+export const markable = (card) => CARD.test(card ?? '');
 
 export function markDescription({ card, head }) {
   if (!CARD.test(card ?? '') || !SHA.test(head ?? '')) throw new Error('a mark names a card id and a 40-hex head');

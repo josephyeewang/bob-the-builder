@@ -7,7 +7,7 @@ import { readFileSync, readdirSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setup, product, leadCard, runCard, outboxFile, put, must, plan, PRODUCT, fingerprintFor, fullTimeouts } from '../M9-record/fixtures.test-helper.mjs';
-import { fakeRules, allow, makeRules } from '../../shared/rules.mjs';
+import { fakeRules, allow, deny, makeRules } from '../../shared/rules.mjs';
 import { makeEngine } from '../M10-rules/engine.mjs';
 import { parsePolicy } from '../M10-rules/policy.mjs';
 import { fakeGateGitHub } from './fixtures/fake-gate-github.mjs';
@@ -16,6 +16,8 @@ import { blobSha } from '../M10-rules/reader.mjs';
 import { ROBOT_FACT, NO_PUSH_FACT } from '../M12-sensors/outside-watch.mjs';
 import { gatePass, queueOrder, NOT_GREEN_LINE } from './gate.mjs';
 import { readMark } from './mark.mjs';
+import { readNeedsJoe } from './checker-entry.mjs';
+import { gatherFacts } from './gather.mjs';
 
 const POLICY = 'tiers: {}\n';
 const CLEAN = { correct: 'clean', well_built: 'clean', works_for_user: 'clean', holds_up: 'clean' };
@@ -46,7 +48,7 @@ function world({ values = {}, mergeAnswer } = {}) {
 }
 
 // A card built, reviewed by a launched reviewer through the review outbox, verified, and asked to merge as pull #7.
-function verifiedCard(w, id = 'C-1', { pr = 7, files = { 'src/a.mjs': 'two' }, undo } = {}) {
+function verifiedCard(w, id = 'C-1', { pr = 7, files = { 'src/a.mjs': 'two' }, undo, request = true } = {}) {
   const { env, g } = w;
   if (undo) {
     // The Dispatcher's undo card, from an authenticated audit issue (lane 2 makes it; here it is made the same way).
@@ -67,6 +69,12 @@ function verifiedCard(w, id = 'C-1', { pr = 7, files = { 'src/a.mjs': 'two' }, u
   const hdr = `${JSON.stringify({ entity: 'verdict', card: id, expectRev: env.record.read('card', id).rev, fields: { head, pass: true, checklist: CLEAN, material: 0 } })}\n`;
   must(env.review.applyOutbox({ role: 'reviewer', sessionId: sid, card: id }, outboxFile(env, 'reviewer', sid, `verdict-${id}.md`, hdr)), 'verdict');
   must(put(env.record, 'dispatcher', 'card', id, { state: 'verified' }), 'verified');
+  if (request) requestMerge(w, id, pr, head);
+  return head;
+}
+
+function requestMerge(w, id, pr, head) {
+  const { env } = w;
   must(env.record.write({ actor: 'dispatcher', entity: 'merge_request', id: `mr-${id}`, expectRev: 0, doc: { card: id, pr, session_id: 'S-1', head, rev: env.record.read('card', id).rev, requested_at: new Date(env.clock.t).toISOString() } }), 'request');
   return head;
 }
@@ -91,7 +99,9 @@ test('a clean card merges: paired write, squash merge of the judged head, card m
   assert.equal(r.ran, true);
   const m = mergeOf(w);
   assert.equal(m.doc.state, 'merged', JSON.stringify({ did: r.did, alerts: w.alerts }));
-  assert.deepEqual(r.did.map((d) => d.step), ['requested', 'queued', 'checking', 'merging', 'merged']);
+  assert.deepEqual(r.did.map((d) => d.step), ['requested', 'queued', 'checking', 'merging', 'merged', 'marked']);
+  // The needs-joe status the GitHub-side checker reads: a Tier-2 change that needed no Approve says so.
+  assert.deepEqual(await readNeedsJoe({ gh: w.g.gh, owner: 'sample-org', repo: 'sample-app', sha: m.doc.merge_commit, robotBotId: w.g.robotId }), { needsJoe: false, tier: 2, reason: 'robot status' });
   const card = w.env.record.read('card', 'C-1').doc;
   assert.equal(card.state, 'merged');
   assert.equal(card.merge_commit, m.doc.merge_commit);
@@ -216,15 +226,13 @@ test('behind main: catch up with the expected head; a conflict returns it to the
   assert.equal(m.doc.state, 'catching_up');
   const up = w.g.writes.find(([, p]) => p.endsWith('/update-branch'));
   assert.equal(up[2].expected_head_sha, m.doc.catch_up_from);
-  await gatePass(w.ctx);
+  // Caught up, it is served in the same pass, before a younger change can put it behind again. The caught-up head
+  // carries the review over (M10 carry-over: only main's changes came in), and merges.
+  const r2 = await gatePass(w.ctx);
   m = mergeOf(w);
-  assert.equal(m.doc.state, 'queued');
   assert.equal(m.doc.catch_ups.length, 1);
   assert.equal(m.doc.catch_ups[0].before_sha, w.env.record.read('card', 'C-1').doc.head);
-  // The caught-up head carries the review over (M10 carry-over: only main's changes came in), and merges.
-  const r3 = await gatePass(w.ctx);
-  m = mergeOf(w);
-  assert.equal(m.doc.state, 'merged', JSON.stringify({ did: r3.did, reasons: m.doc.reasons, alerts: w.alerts }));
+  assert.equal(m.doc.state, 'merged', JSON.stringify({ did: r2.did, reasons: m.doc.reasons, alerts: w.alerts }));
   assert.equal(m.doc.judged_head, m.doc.catch_ups[0].after_sha);
   assert.equal(w.env.record.read('card', 'C-1').doc.state, 'merged');
 
@@ -294,3 +302,83 @@ for (const deep of [false, true]) {
     });
   }
 }
+
+// Audit round 1, M1: a change held at the front steps aside; the Tier-2 change behind it merges in the same pass.
+test('a change held for the Tier-1 hours steps aside and the change behind it merges', async () => {
+  const w = world({ mergeAnswer: (s) => (s.card?.id === 'C-1' ? deny('held_tier1_hours') : allow('in lane')) });
+  verifiedCard(w);
+  w.env.clock.t += 60_000;
+  verifiedCard(w, 'C-2', { pr: 8, files: { 'src/b.mjs': 'b' } });
+  await gatePass(w.ctx);
+  assert.equal(mergeOf(w, 'C-2').doc.state, 'merged');
+  assert.equal(mergeOf(w, 'C-1').doc.state, 'held');
+});
+
+// Audit round 1, M3: a mark that didn't post is posted on a later pass, and the merge is then marked.
+test('a failed mark is retried on the next pass until both statuses are on the merge commit', async () => {
+  const w = world();
+  verifiedCard(w);
+  w.g.answer.status = () => ({ status: 500, json: null });
+  await gatePass(w.ctx);
+  const m = mergeOf(w);
+  assert.equal(m.doc.state, 'merged');
+  assert.equal(m.doc.marked_at, undefined);
+  assert.ok(w.alerts.some((a) => a.type === 'merge_mark_failed'));
+  w.g.answer.status = null;
+  const r = await gatePass(w.ctx);
+  assert.ok(r.did.some((d) => d.step === 'marked'));
+  assert.equal((await readMark({ gh: w.g.gh, owner: 'sample-org', repo: 'sample-app', sha: m.doc.merge_commit, robotBotId: w.g.robotId })).ok, true);
+  assert.equal(w.env.record.read('card', 'C-1').doc.state, 'merged');
+});
+
+// Audit round 1, M2: a Tier-1 merge that landed after the main the review read voids the audit's carry-over, even
+// when the merge request came after that merge.
+test('a Tier-1 merge after the reviewed main stops the audit carrying over, whenever the request was made', async () => {
+  for (const tier of [2, 1]) {
+    const w = world();
+    verifiedCard(w);
+    // C-2 is built and reviewed on the first main, but not yet asked to merge.
+    const head2 = verifiedCard(w, 'C-2', { pr: 8, files: { 'src/b.mjs': 'b' }, request: false });
+    await gatePass(w.ctx);
+    const m1 = mergeOf(w);
+    assert.equal(m1.doc.state, 'merged');
+    if (tier === 1) must(w.env.record.write({ actor: 'merge_gate', entity: 'merge', id: m1.id, expectRev: m1.rev, doc: { ...m1.doc, tier: 1 } }), 'tier');
+    w.env.clock.t += 60_000;
+    requestMerge(w, 'C-2', 8, head2);
+    await gatePass(w.ctx);   // behind main: catch-up asked
+    await gatePass(w.ctx);   // caught up: queued, then judged
+    const m2 = mergeOf(w, 'C-2');
+    const f = await gatherFacts(w.ctx, { ...m2, doc: { ...m2.doc } });
+    assert.equal(f.carried?.review, true, JSON.stringify({ m2: m2.doc, carried: f.carried }));
+    assert.equal(f.carried.audit, tier === 2, `tier ${tier}: ${JSON.stringify(f.carried)}`);
+  }
+});
+
+// Audit round 2, Material: a card id the mark can't name is refused before merging, and the gate keeps serving.
+test('a card id too long for the mark is refused before merging; the change behind it merges', async () => {
+  const w = world();
+  const long = 'C-' + 'x'.repeat(86);
+  verifiedCard(w, long);
+  w.env.clock.t += 60_000;
+  verifiedCard(w, 'C-2', { pr: 8, files: { 'src/b.mjs': 'b' } });
+  await gatePass(w.ctx);
+  assert.equal(mergeOf(w, long).doc.state, 'refused');
+  assert.ok(!w.g.writes.some(([verb, path]) => verb === 'put' && path.endsWith('/pulls/7/merge')), 'never merged');
+  assert.equal(mergeOf(w, 'C-2').doc.state, 'merged');
+});
+
+// Audit round 2, minor: a mark still missing when the audit result lands is posted anyway, and the owner is told.
+test('a mark that failed until the audit result landed is still posted, with an alert to re-run the audit', async () => {
+  const w = world();
+  verifiedCard(w);
+  w.g.answer.status = () => ({ status: 500, json: null });
+  await gatePass(w.ctx);
+  const m = mergeOf(w);
+  must(w.env.record.write({ actor: 'sensors', entity: 'fact', id: 'run-1', expectRev: 0, doc: { type: 'audit_run', commit: m.doc.merge_commit, conclusion: 'failure' } }), 'fact');
+  w.g.answer.status = null;
+  await gatePass(w.ctx);
+  const after = mergeOf(w);
+  assert.equal(after.doc.state, 'audit_flagged');
+  assert.ok(after.doc.marked_at);
+  assert.ok(w.alerts.some((a) => a.type === 'merge_marked_after_audit'));
+});

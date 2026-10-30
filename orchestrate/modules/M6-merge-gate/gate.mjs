@@ -22,13 +22,14 @@
 import { robotMergesGreen } from '../M12-sensors/outside-watch.mjs';
 import { gatherFacts, botId } from './gather.mjs';
 import { judge } from './refusals.mjs';
-import { MARK_CONTEXT, markDescription } from './mark.mjs';
+import { MARK_CONTEXT, markDescription, markable, NEEDS_JOE_CONTEXT, needsJoeDescription } from './mark.mjs';
 import { isOpen } from '../../shared/record.mjs';
 import { markReverted } from './undo.mjs';
 
 export const ACTOR = 'merge_gate';
 export const NOT_GREEN_LINE = 'outside check not green in 2 h';
 export const FRESHNESS_FACT = 'blueprint_freshness_alarm';
+const STEPPED_ASIDE = 'stepped_aside';
 export const MAX_CATCH_UPS = 3;
 const SHA = /^[0-9a-f]{40}$/;
 const short = (s) => String(s ?? '').slice(0, 7);
@@ -88,6 +89,13 @@ export async function gatePass(ctx) {
     move({ id }, 'queued', { queue_since: since });
   }
 
+  // 3a. A merge whose card write or statuses a stopped pass left behind: finished now (R-0b-94), before the audit
+  // result moves it on, and also after (a late mark means the audit needs running again; the alert says so).
+  for (const m of merges().filter((x) => ['merged', 'audited_ok', 'audit_flagged'].includes(x.doc.state) && SHA.test(x.doc.merge_commit ?? ''))) {
+    const card = fresh('card', m.doc.card);
+    if (card?.doc?.state === 'merging' || !m.doc.marked_at) await complete(m, m.doc.merge_commit);
+  }
+
   // 3. Audit results (R-0b-93): only a Sensors audit_run fact for the merge commit moves a merged merge.
   for (const m of merges().filter((x) => x.doc.state === 'merged' && SHA.test(x.doc.merge_commit ?? ''))) {
     const f = record.list('fact').find((x) => x.doc?.type === 'audit_run' && x.doc.commit === m.doc.merge_commit && ['success', 'failure'].includes(x.doc.conclusion));
@@ -107,21 +115,38 @@ export async function gatePass(ctx) {
   // 6. The next queued merge.
   const cardOf = (id) => fresh('card', id)?.doc ?? null;
   const queue = queueOrder(merges().filter((m) => m.doc.state === 'queued' || m.doc.state === 'catching_up'), { cardOf, freshnessAlarm: readFact(FRESHNESS_FACT)?.on === true });
-  const next = queue[0];
-  if (next) await serve(next);
+  for (const m of queue) {
+    const out = await serve(m);
+    if (out !== STEPPED_ASIDE) break;
+  }
   return { ran: true, did };
 
+  // Returns STEPPED_ASIDE when this merge left the front without taking the lock or starting a catch-up, so the next
+  // in the queue is served in the same pass (R-0b-90: a Tier-1 change held for the hours steps aside).
   async function serve(m) {
-    if (m.doc.state === 'catching_up') return finishCatchUp(m);
+    if (m.doc.state === 'catching_up') {
+      await finishCatchUp(m);
+      // Caught up: served now, before younger changes can put it behind main again.
+      const now = fresh('merge', m.id);
+      return now?.doc?.state === 'queued' ? serve(now) : STEPPED_ASIDE;
+    }
     const facts = await gatherFacts(ctx, m);
+    // GitHub unreadable: refuse this one and stop, rather than refuse the whole queue in one pass.
+    const outage = !facts.pr || !SHA.test(facts.main?.sha ?? '');
     // Behind main: catch up first (R-0b-89), never judge a head that can't land as judged.
     if ((facts.compareStatus === 'behind' || facts.compareStatus === 'diverged') && facts.pr?.state === 'open' && SHA.test(facts.pr?.head?.sha ?? '')) {
-      if ((m.doc.catch_ups ?? []).length >= (ctx.maxCatchUps ?? MAX_CATCH_UPS)) return move(m, 'returned_to_builder', { reasons: [`caught up ${MAX_CATCH_UPS} times and still behind main`] });
+      if ((m.doc.catch_ups ?? []).length >= (ctx.maxCatchUps ?? MAX_CATCH_UPS)) { move(m, 'returned_to_builder', { reasons: [`caught up ${MAX_CATCH_UPS} times and still behind main`] }); return STEPPED_ASIDE; }
       return catchUp(m, facts.pr.head.sha);
     }
     const v = judge(facts);
-    if (v.decision === 'refuse') return refuse(m, facts, v);
-    if (v.decision === 'hold') return move(m, 'held', { hold: v.hold });
+    if (v.decision === 'refuse') { refuse(m, facts, v); return outage ? undefined : STEPPED_ASIDE; }
+    if (v.decision === 'hold') { move(m, 'held', { hold: v.hold }); return STEPPED_ASIDE; }
+    if (!markable(m.doc.card)) {
+      const reasons = ['the card id is too long for the robot\'s mark (80 characters at most)'];
+      move(m, 'refused', { reasons });
+      alert({ type: 'merge_refused', merge: m.id, card: m.doc.card, reasons });
+      return STEPPED_ASIDE;
+    }
     return take(m, facts);
   }
 
@@ -156,7 +181,7 @@ export async function gatePass(ctx) {
     const head = facts.pr.head.sha;
     const card = fresh('card', m.doc.card);
     const mm = fresh('merge', m.id);
-    const pair = record.write({ actor: ACTOR, entity: 'merge', id: mm.id, expectRev: mm.rev, doc: { ...mm.doc, state: 'checking', judged_head: head, judged_main: facts.main.sha, tier: facts.tier },
+    const pair = record.write({ actor: ACTOR, entity: 'merge', id: mm.id, expectRev: mm.rev, doc: { ...mm.doc, state: 'checking', judged_head: head, judged_main: facts.main.sha, tier: facts.tier, needs_joe: facts.approve?.needed !== false || card.doc.needs_joe === true },
       also: [{ entity: 'card', id: card.id, expectRev: card.rev, doc: { ...card.doc, state: 'merging' } }] });
     if (!pair.ok) { alert({ type: 'merge_gate_write_refused', merge: m.id, to: 'checking', reason: pair.reason }); return; }
     step(m, 'checking');
@@ -190,20 +215,43 @@ export async function gatePass(ctx) {
 
   async function finish(m, sha) {
     if (!move(m, 'merged', { merge_commit: sha, merged_at: iso() })) return;
-    const card = fresh('card', m.doc.card);
-    const c = write('card', card, { state: 'merged', merge_commit: sha });
-    if (!c.ok) alert({ type: 'merge_gate_write_refused', card: card.id, to: 'merged', reason: c.reason });
-    else if (card.doc.kind === 'exact_reverse') { const u = markReverted({ record, alert }, card.id); if (u.ok) step(m, 'reverted', { card: u.card }); }
-    // The robot's mark (R-0b-94): what the checks after a merge read to know the gate made this commit.
-    try {
-      const s = await gh.post(`${base}/statuses/${sha}`, { state: 'success', context: MARK_CONTEXT, description: markDescription({ card: m.doc.card, head: m.doc.judged_head }) });
-      if (s?.status !== 201) alert({ type: 'merge_mark_failed', merge: m.id, commit: sha, status: s?.status });
-    } catch (e) { alert({ type: 'merge_mark_failed', merge: m.id, commit: sha, status: 0 }); }
+    await complete(fresh('merge', m.id), sha);
     // The merge must sit right on the main that was judged; if main moved in between, say so (the merge stands).
     try {
       const k = await ctx.view.commit(sha);
       if (k?.parents?.[0] !== m.doc.judged_main) alert({ type: 'merge_parent_moved', merge: m.id, commit: sha, judged_main: m.doc.judged_main, parent: k?.parents?.[0] ?? null, ask_owner: 'Undo?' });
     } catch { alert({ type: 'merge_parent_moved', merge: m.id, commit: sha, judged_main: m.doc.judged_main, parent: null }); }
+  }
+
+  // After a merge is recorded: the card goes merged (and an undo marks what it undid), and the two statuses go on the
+  // merge commit: the robot's mark (R-0b-94) and the needs-joe answer the GitHub-side checker reads. Each part is redone
+  // on later passes until it holds (posting a status twice is harmless); marked_at records that both were posted.
+  async function complete(m, sha) {
+    const card = fresh('card', m.doc.card);
+    if (card?.doc?.state === 'merging') {
+      const c = write('card', card, { state: 'merged', merge_commit: sha });
+      if (!c.ok) alert({ type: 'merge_gate_write_refused', card: card.id, to: 'merged', reason: c.reason });
+      else if (card.doc.kind === 'exact_reverse') { const u = markReverted({ record, alert }, card.id); if (u.ok) step(m, 'reverted', { card: u.card }); }
+    }
+    if (m.doc.marked_at) return;
+    let posts;
+    try {
+      posts = [
+        { context: MARK_CONTEXT, description: markDescription({ card: m.doc.card, head: m.doc.judged_head }) },
+        { context: NEEDS_JOE_CONTEXT, description: needsJoeDescription({ needsJoe: m.doc.needs_joe !== false, tier: m.doc.tier === 2 ? 2 : 1 }) },
+      ];
+    } catch (e) { alert({ type: 'merge_mark_failed', merge: m.id, commit: sha, reason: e.message }); return; }
+    for (const p of posts) {
+      let s;
+      try { s = await gh.post(`${base}/statuses/${sha}`, { state: 'success', ...p }); } catch { s = { status: 0 }; }
+      if (s?.status !== 201) { alert({ type: 'merge_mark_failed', merge: m.id, commit: sha, context: p.context, status: s?.status }); return; }
+    }
+    const r = write('merge', fresh('merge', m.id), { marked_at: iso() });
+    if (r.ok) {
+      step(m, 'marked');
+      // An audit that already ran on this commit read it with no mark: it needs running again.
+      if (m.doc.state !== 'merged' || record.list('fact').some((x) => x.doc?.type === 'audit_run' && x.doc.commit === sha)) alert({ type: 'merge_marked_after_audit', merge: m.id, commit: sha, ask_owner: 'Re-run the audit on this commit?' });
+    } else alert({ type: 'merge_gate_write_refused', merge: m.id, to: 'marked', reason: r.reason });
   }
 
   // A merge in checking or merging, found at the start of a pass (or a merge GitHub didn't confirm): GitHub says
@@ -219,6 +267,7 @@ export async function gatePass(ctx) {
     if (pr.merged === true) {
       alert({ type: 'merge_gate_unsure', merge: m.id, note: `pull request #${pr.number} merged at ${short(pr.head?.sha)}, not the judged ${short(m.doc.judged_head)}` });
       move(m, 'refused', { reasons: ['merged outside the gate, at a head the gate did not judge'] });
+      putBack(m, 'verified');
       return;
     }
     move(m, 'refused', { reasons: ['GitHub did not merge the judged head'] });

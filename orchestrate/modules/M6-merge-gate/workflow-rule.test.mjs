@@ -93,7 +93,8 @@ test('a checkout that keeps its key fails, except in the audit workflow', () => 
 
 test('outside text inside run: is script injection, in a plain or block script', () => {
   for (const ex of ['github.event.issue.body', 'github.event.issue.title', 'github.event.comment.body', 'github.event.pull_request.title',
-    'github.event.pull_request.body', 'github.head_ref', 'github.event.pull_request.head.ref', "github.event['issue']['body']", 'GITHUB.EVENT.ISSUE.BODY']) {
+    'github.event.pull_request.body', 'github.head_ref', 'github.event.pull_request.head.ref', "github.event['issue']['body']", 'GITHUB.EVENT.ISSUE.BODY',
+    'github.event.head_commit.message', 'github.event.commits[0].message', 'github.event.head_commit.author.email']) {
     fails(check(wf({ run: `      - run: echo "\${{ ${ex} }}"\n` })), /script injection/);
     fails(check(wf({ run: `      - name: greet\n        run: |\n          echo start\n          # still the script\n          echo "\${{${ex}}}"\n` })), /script injection/);
   }

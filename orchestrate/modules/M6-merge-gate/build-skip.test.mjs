@@ -131,4 +131,10 @@ test('the command, run by sh: a failed download, a wrong hash and a crash each s
   assert.equal(runCmd(skipCommand({ mode: 'full', checkerUrl: PIN, sha256: hash() })), 0, 'a crash exits 1 but prints no token');
   write('console.log("no"); process.exit(1);');
   assert.equal(runCmd(skipCommand({ mode: 'full', checkerUrl: PIN, sha256: hash() })), 0, 'exit 1 with no token');
+  // The real bundle (an ES module with imports) through the exact command: a production main commit builds at the
+  // first cutover, a preview skips. (A bare mktemp name made node refuse the file, so every deploy was skipped.)
+  writeFileSync(checker, readFileSync(new URL('./github-checker.mjs', import.meta.url)));
+  const runEnv = (cmd, extra) => { try { execFileSync('/bin/sh', ['-c', cmd], { env: { PATH, ...extra }, stdio: 'pipe' }); return 0; } catch (e) { return e.status; } };
+  assert.equal(runEnv(skipCommand({ mode: 'first', checkerUrl: PIN, sha256: hash() }), env()), 1, 'the real checker builds production main');
+  assert.equal(runEnv(skipCommand({ mode: 'first', checkerUrl: PIN, sha256: hash() }), env({ VERCEL_ENV: 'preview' })), 0, 'the real checker skips a preview');
 });

@@ -190,8 +190,13 @@ export async function gatherFacts(ctx, merge) {
       }
       const B0 = (await view.compare(mainSha, H0)).mergeBase;
       const B1 = (await view.compare(mainSha, head)).mergeBase;
-      const reqAt = Date.parse(f.request?.doc?.requested_at);
-      const tier1MergesSince = record.list('merge').filter((m) => m.id !== merge.id && ['merged', 'audited_ok', 'audit_flagged'].includes(m.doc?.state) && m.doc?.tier === 1 && !(Date.parse(m.doc.merged_at) < reqAt)).length;
+      // Tier-1 merges the review and audit did not see: on main now but not on the main H0 was built on (B0). Anchored
+      // on what the audit read, not on when the merge was requested; a merge commit that can't be placed counts.
+      let tier1MergesSince = 0;
+      for (const m of record.list('merge')) {
+        if (m.id === merge.id || m.doc?.tier !== 1 || !['merged', 'audited_ok', 'audit_flagged'].includes(m.doc?.state)) continue;
+        if (!SHA.test(m.doc.merge_commit ?? '') || !(await view.onHistory(m.doc.merge_commit, B0))) tier1MergesSince += 1;
+      }
       return carryOver({ reviewed: { base: B0, head: H0 }, current: { base: B1, head }, between, catchUps, tier1MergesSince, gh: view });
     }, { review: false, audit: false, reasons: ['carry-over could not be read'] });
   }

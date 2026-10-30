@@ -33,13 +33,12 @@ import { pathToFileURL } from 'node:url';
 import { classifyWithRulesText } from '../M10-rules/classify.mjs';
 import { checkExactReverse } from '../M10-rules/exact-reverse.mjs';
 import { makeGitView, touchedPaths } from '../M10-rules/git-view.mjs';
-import { readMark } from './mark.mjs';
+import { readMark, NEEDS_JOE_CONTEXT, NEEDS_JOE_DESC } from './mark.mjs';
 import { readAuditRun, DEFAULT_FLAG_STEP } from './audit-run.mjs';
 import { main as buildSkipMain, makeFetchGh } from './build-skip.mjs';
 
-export const NEEDS_JOE_CONTEXT = 'orchestrate/needs-joe';
+export { NEEDS_JOE_CONTEXT };
 export const RULES_PATH = 'orchestrate/policy.yaml';
-const NEEDS_JOE_DESC = /^needs-joe: (true|false); declared tier: ([12])$/;
 const REVERSES_LINE = /^reverses: ([0-9a-f]{40})$/;
 const SHA = /^[0-9a-f]{40}$/;
 const NAME = /^[A-Za-z0-9_.-]+$/;
