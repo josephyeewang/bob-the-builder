@@ -1,6 +1,6 @@
 // db-lines.test.mjs — the deny-by-default line check (lead call L32). The sweep: every way of writing a database change
 // that an earlier audit round found a pattern missed is caught by the line check ALONE, and so are commands no list
-// names. Then the allow-list: only blank lines, comments and test fixtures pass (audit round 12 removed plain reads).
+// names. Then the allow-list: only a blank line passes (audit rounds 12 and 13 removed reads, comments and fixtures).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { lineRisk, firstRiskyLine, wordsOf } from './db-lines.mjs';
@@ -32,15 +32,13 @@ test('the sweep: every past miss and every unlisted command counts, by the line 
   for (const line of PAST_MISSES) assert.ok(lineRisk(line, { path: 'db/migrations/1.sql' }), `migration: ${line}`);
 });
 
-test('harmless lines: blank, a comment by itself in its own language, a test fixture', () => {
-  for (const line of ['', '   ', '// create table users here', '/* drop table users */', '/* a */   ']) assert.equal(lineRisk(line, CODE), null, line);
-  assert.equal(lineRisk('-- drop table users', { path: 'db/x.sql' }), null);
-  assert.equal(lineRisk('/* drop table users */', { path: 'db/x.sql' }), null);
-  assert.equal(lineRisk('# drop table users', { path: 'tools/x.py' }), null);
-  const T = { path: 'lib/__tests__/parse.test.ts' };
-  for (const line of ["'drop table users',", "query: 'delete from users',", "const q = 'select 1';", 'export const q = `drop table users`;',
-    "'a': \"b\",", '],', '{', '}', "['drop table x', \"truncate y\"],", "'it\\'s',", '"say \\"drop\\"",']) assert.equal(lineRisk(line, T), null, line);
-  for (const line of ['\0', "\0 await zap()", "'a\\'; await zap()"]) assert.ok(lineRisk(line, T), JSON.stringify(line));
+test('only a blank line is harmless; every comment and every string counts (audit round 13)', () => {
+  for (const line of ['', '   ', '\t', ' \t ']) assert.equal(lineRisk(line), null, JSON.stringify(line));
+  const ROUND_13 = ['// a', '/* a */', '-- a', '# a', "'drop table users',", "query: 'x',", '],', '\r', '  ', '\u0085',
+    '// x\rawait db.query("update users set is_admin = true")', '-- x\rupdate users set is_admin = true;', '# x\rdb.execute(q)',
+    '# -*- coding: utf-7 -*-', '//go:generate psql -c "x"', '/*!50000 update users set is_admin = 1 */', '/*! or 1 */', '// */', '/* /* */',
+    "'psql' \"$DATABASE_URL\" '-c' 'x'", '"$(psql -c x)"', '`psql -c x`', '"#{DB.run(q)}"', "command: 'psql -c x'", '#!/usr/bin/env -S psql -f', '/// db.run()'];
+  for (const line of ROUND_13) assert.ok(lineRisk(line), JSON.stringify(line));
 });
 
 test('look-alike harmless lines still count', () => {
@@ -68,8 +66,8 @@ test('look-alike harmless lines still count', () => {
 test('words are read through escapes and every naming style', () => {
   assert.deepEqual(wordsOf('dropTable CreateTable drop_table "DROP" XMLHttp'), ['drop', 'table', 'create', 'table', 'drop', 'table', 'drop', 'xml', 'http']);
   assert.deepEqual(wordsOf('\\u{64}rop'), ['drop']);
-  assert.deepEqual(firstRiskyLine(['// a', '', 'drop table x'], CODE), { n: 3, why: '"drop"' });
-  assert.equal(firstRiskyLine(['// a', ''], CODE), null);
+  assert.deepEqual(firstRiskyLine(['', '  ', 'drop table x']), { n: 3, why: '"drop"' });
+  assert.equal(firstRiskyLine(['', '\t']), null);
 });
 
 test('the line check is fast on long and many lines', () => {

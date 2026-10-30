@@ -293,7 +293,9 @@ test('merge: the undo of a database change found only in the text asks Joe (0b-9
     assert.equal(undo([line]).reason, 'exact reverse of a database change', line);
   }
   assert.equal(undo(['export const x = 1;']).reason, 'exact reverse of a database change', 'deny by default: any code line asks (lead call L32)');
-  assert.equal(undo(['-- an old note']).decision, 'allow', 'a file of comments only still reverses');
+  assert.equal(undo(['', '  ']).decision, 'allow', 'a file of blank lines only still reverses');
+  for (const line of ['-- an old note', '// x\rawait db.query("update users set is_admin = true")', '/*!50000 update users set is_admin = 1 */', "'psql' '-c' 'x'"])
+    assert.equal(undo([line]).reason, 'exact reverse of a database change', `a comment or string can run (audit round 13): ${line}`);
   assert.equal(mergeOf(w, [file('lib/db/setup.sql', 'removed')], reverse('failure')).reason, 'exact reverse of code without its lines');
   assert.equal(mergeOf(w, [file('lib/a.ts', 'renamed', { previous_path: 'lib/b.ts' })], reverse('failure')).reason, 'exact reverse of code without its lines', 'a rename too');
   assert.equal(mergeOf(w, [file('docs/research/x.md', 'renamed', { previous_path: 'lib/x.ts' })], reverse('failure')).reason, 'exact reverse of code without its lines', 'a rename from code to a doc');
@@ -342,7 +344,7 @@ test('merge: an exact reverse with rules that cannot be fully read asks Joe (aud
   const r = mergeOf(w, [file('orchestrate/policy.yaml'), file('.github/workflows/a.yml')], reverse('failure'));
   assert.deepEqual([r.decision, r.tier], ['ask', 1]);
   const label = world({ states: { app: { state: 'paused' } }, now: AT_03 });
-  const code = file('app/x.ts', 'modified', { removed_lines: ['// x was 1'], added_lines: [] });
+  const code = file('app/x.ts', 'modified', { removed_lines: [''], added_lines: [] });
   assert.equal(mergeOf(label, [file('app/x.ts')], reverse('failure', { labels: ['needs-joe'] })).decision, 'ask', 'a needs-joe label is never skipped');
   assert.equal(mergeOf(label, [code], reverse('failure')).decision, 'allow', 'code whose lines are all harmless still reverses');
   assert.notEqual(mergeOf(label, [file('app/x.ts')], reverse('failure', { reverses: [R] })).reason, 'exact reverse of a merge whose audit failed', 'reverses must be one id');
@@ -358,7 +360,7 @@ test('merge: truncated or labels of the wrong type are refused, never read as "n
 
 test('merge: the exact-reverse answer, in R3-M3\'s order', () => {
   const w = world({ states: { app: { state: 'paused' } }, now: AT_03 });
-  const flaggedTier1 = mergeOf(w, [file('app/x.ts', 'modified', { removed_lines: ['// x was 1'], added_lines: [] })], { declared_tier: 1, ...reverse('failure') });
+  const flaggedTier1 = mergeOf(w, [file('app/x.ts', 'modified', { removed_lines: [''], added_lines: [] })], { declared_tier: 1, ...reverse('failure') });
   assert.equal(flaggedTier1.decision, 'allow', 'reverse of a flagged Tier-1 merge, paused, 03:00');
   assert.deepEqual([mergeOf(w, [file('db/migrations/1.sql')], reverse('success')).decision, mergeOf(w, [file('db/migrations/1.sql')], reverse('success')).tier], ['ask', 1], 'risky reverse whose audit passed');
   assert.equal(mergeOf(w, [file('orchestrate/policy.yaml')], reverse('failure')).decision, 'ask', 'a protected reverse always asks');
@@ -406,7 +408,7 @@ test('classify through the engine uses the product\'s adopted rules; a roles fil
 
 test('merge: on an undo, every needs-joe label reaches Joe, whatever class it names (audit round 9)', () => {
   const w = world({ states: { app: { state: 'paused' } }, now: AT_03 });
-  const code = file('lib/x.ts', 'modified', { added_lines: ['// a'], removed_lines: ['// b'] });
+  const code = file('lib/x.ts', 'modified', { added_lines: [''], removed_lines: [''] });
   assert.equal(mergeOf(w, [code], reverse('failure')).decision, 'allow', 'no label: the failed-audit undo still goes');
   for (const cls of ['secrets_settings', 'messages_people', 'deletes', 'first_customer_visible', 'made_up']) {
     const r = mergeOf(w, [code], reverse('failure', { labels: [`needs-joe:${cls}`] }));
@@ -468,7 +470,7 @@ test('merge: the table scans stay fast on long runs of spaces or blank lines (au
 
 test('merge: a needs-joe label is read whatever its case or spacing (audit round 10)', () => {
   const w = world();
-  for (const label of ['Needs-Joe', ' needs-joe ', 'NEEDS-JOE:schema', 'needs-joe-review', 'needs joe', 'needs_joe', 'needsjoe', 'needs\u2011joe', 'ｎｅｅｄｓ-joe', 'needs.joe', 'needs:joe', 'needs/joe', '[needs-joe]', '🚩needs-joe', 'needs\u200bjoe']) {
+  for (const label of ['Needs-Joe', ' needs-joe ', 'NEEDS-JOE:schema', 'needs-joe-review', 'needs joe', 'needs_joe', 'needsjoe', 'needs\u2011joe', 'ｎｅｅｄｓ-joe', 'needs.joe', 'needs:joe', 'needs/joe', '[needs-joe]', '🚩needs-joe', 'needs\u200bjoe', 'n\u00adeeds-joe', 'nee\u0301ds-joe', 'n\u0435\u0435ds-joe', 'needs-j\u043ee', '\u0274\u1d07\u1d07ds-joe']) {
     assert.equal(mergeOf(w, [file('docs/research/x.md')], { labels: [label] }).decision, 'ask', JSON.stringify(label));
   }
   assert.equal(mergeOf(w, [file('docs/research/x.md')], { labels: ['joe-says-hi'] }).decision, 'allow');
@@ -476,8 +478,8 @@ test('merge: a needs-joe label is read whatever its case or spacing (audit round
 
 test('merge: undo gaps from audit round 10 — audit "none" on code asks; one empty side on a wholly removed or added file asks', () => {
   const w = world({ states: { app: { state: 'paused' } }, now: AT_03 });
-  const code = file('lib/x.ts', 'modified', { added_lines: ['// a'], removed_lines: ['// b'] });
+  const code = file('lib/x.ts', 'modified', { added_lines: [''], removed_lines: [''] });
   assert.equal(mergeOf(w, [code], reverse('none')).reason, 'exact reverse of a merge whose audit passed', 'an unaudited code undo is not ordinary');
-  assert.equal(mergeOf(w, [file('lib/x.ts', 'removed', { removed_lines: [], added_lines: ['// a'] })], reverse('failure')).reason, 'exact reverse of code without its lines');
-  assert.equal(mergeOf(w, [file('lib/x.ts', 'added', { added_lines: [], removed_lines: ['// a'] })], reverse('failure')).reason, 'exact reverse of code without its lines');
+  assert.equal(mergeOf(w, [file('lib/x.ts', 'removed', { removed_lines: [], added_lines: [''] })], reverse('failure')).reason, 'exact reverse of code without its lines');
+  assert.equal(mergeOf(w, [file('lib/x.ts', 'added', { added_lines: [], removed_lines: [''] })], reverse('failure')).reason, 'exact reverse of code without its lines');
 });

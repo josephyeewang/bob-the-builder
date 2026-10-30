@@ -16,7 +16,7 @@
 //                                           reads them at the parent commit); corrupt text = every file unclassifiable
 //   change = { files: [{ path, previous_path?, status, mode?, added_lines?, removed_lines? }], truncated?, declared_tier?, labels? }
 
-import { firstRiskyLine, isTestPath } from './db-lines.mjs';
+import { firstRiskyLine } from './db-lines.mjs';
 import { RISKY_CLASSES } from '../../shared/rules.mjs';
 import { PROTECTED_FLOOR, compileList, pathProblem } from './paths.mjs';
 import { parsePolicy } from './policy.mjs';
@@ -89,6 +89,11 @@ export function classifyChange(policy, change) {
     add('unclassifiable', 'no file list');
     return finish(reasons, protectedPaths, 1);
   }
+  // A change with more line text than this is not read line by line: it is unclassifiable (audit round 13).
+  let text = 0;
+  for (const f of files) for (const side of ['added_lines', 'removed_lines']) if (isLines(f?.[side])) for (const l of f[side]) text += typeof l === 'string' ? l.length : 0;
+  const tooBig = text > MAX_CHANGE_TEXT;
+  if (tooBig) add('unclassifiable', 'too much changed text to read');
   if (change.truncated !== undefined && change.truncated !== false) add('unclassifiable', change.truncated === true ? 'file list truncated' : 'truncated is not true or false');
   if (change.labels !== undefined && (!Array.isArray(change.labels) || !change.labels.every((l) => typeof l === 'string'))) add('unclassifiable', 'labels are not a list of names');
   // GitHub's pull request file list stops at exactly MAX_FILES, so a list that long may be cut off (audit round 5).
@@ -136,7 +141,7 @@ export function classifyChange(policy, change) {
     // migration, repair and sender folders always are, wherever those folders are.
     // A rename is scanned when either name would be: a rename from code back to a doc still undoes code (audit round 8).
     const scanned = (p) => !m.plainDoc(p) || m.migrations(p) || m.repair(p) || m.senders(p);
-    const scan = scanned(f.path) || (typeof f.previous_path === 'string' && scanned(f.previous_path));
+    const scan = !tooBig && (scanned(f.path) || (typeof f.previous_path === 'string' && scanned(f.previous_path)));
     for (const field of ['added_lines', 'removed_lines']) if (f[field] !== undefined && !isLines(f[field])) add('unclassifiable', `${field} is not a list of lines: ${f.path}`);
     if (scan && isLines(f.added_lines)) {
       if (scanHit(SCHEMA_SCANS, f.added_lines)) add('schema', `${f.path} (table change in added lines)`);
@@ -148,12 +153,11 @@ export function classifyChange(policy, change) {
     // Removed lines too: a change that removes a table statement undoes a database change (0b-9 M4, audit round 7).
     if (scan && isLines(f.removed_lines) && scanHit(SCHEMA_SCANS, f.removed_lines)) add('schema', `${f.path} (table change in removed lines)`);
     // Deny by default (lead call L32): any line on either side that can't be proven harmless is a possible database
-    // change. The patterns above stay as the clearer reasons; this is the floor under them (db-lines.mjs). A renamed
-    // file's lines must be harmless under both its names (audit round 12).
+    // change. The patterns above stay as the clearer reasons; this is the floor under them (db-lines.mjs). Only a
+    // blank line is harmless (audit round 13).
     if (scan) {
-      const test = touched.every(isTestPath);
       for (const side of ['added_lines', 'removed_lines']) {
-        const hit = isLines(f[side]) ? touched.map((path) => firstRiskyLine(f[side], { path, test })).find(Boolean) : null;
+        const hit = isLines(f[side]) ? firstRiskyLine(f[side]) : null;
         if (hit) add('schema', `${f.path} (${side.replace('_', ' ')}: line ${hit.n} may change the database: ${hit.why})`);
       }
     }
@@ -171,10 +175,14 @@ export function classifyChange(policy, change) {
   return finish(reasons, protectedPaths, tier);
 }
 
+// Cyrillic and Greek letters that look like the Latin ones in "needs joe" (audit round 13).
+const LOOK_ALIKES = { 'а': 'a', 'е': 'e', 'ё': 'e', 'о': 'o', 'с': 'c', 'ѕ': 's', 'ј': 'j', 'і': 'i', 'ԁ': 'd', 'ո': 'n', 'ο': 'o', 'ε': 'e', 'η': 'n', 'ν': 'v', 'ϳ': 'j', 'ꜱ': 's', 'ɴ': 'n', 'ᴇ': 'e', 'ᴏ': 'o', 'ᴊ': 'j', 'ᴅ': 'd' };
+const MAX_CHANGE_TEXT = 5_000_000;
+
 // A label's text after "needs joe" (in any spelling), or null when it isn't a needs-joe label.
 export function needsJoe(label) {
   if (typeof label !== 'string') return null;
-  const l = label.normalize('NFKC').trim().toLowerCase();
+  const l = label.normalize('NFKD').replace(/[\p{M}\p{Cf}]/gu, '').toLowerCase().replace(/[^\x00-\x7f]/g, (c) => LOOK_ALIKES[c] ?? c).trim();
   const m = /^[^\p{L}\p{N}]*needs[^\p{L}\p{N}]*joe/u.exec(l);
   return m ? l.slice(m[0].length).trim() : null;
 }

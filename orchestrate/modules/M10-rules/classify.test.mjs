@@ -184,7 +184,8 @@ test('removed lines are scanned for table changes too: removing one undoes a dat
   assert.ok(run([mod('lib/db/setup.ts', { removed_lines: ['await sql`CREATE TABLE users (id int)`'] })]).risky.includes('schema'));
   // Deny by default (lead call L32): any code line counts unless proven harmless; a comment by itself is.
   assert.ok(run([mod('lib/db/setup.ts', { removed_lines: ['const created = table;'] })]).risky.includes('schema'));
-  assert.ok(!run([mod('lib/db/setup.ts', { removed_lines: ['// the old helper lived here'] })]).risky.includes('schema'));
+  assert.ok(!run([mod('lib/db/setup.ts', { removed_lines: ['', '\t'] })]).risky.includes('schema'));
+  assert.ok(run([mod('lib/db/setup.ts', { removed_lines: ['// the old helper lived here'] })]).risky.includes('schema'), 'a comment counts too (audit round 13)');
   assert.ok(!run([mod('docs/research/x.md', { removed_lines: ['CREATE TABLE in prose'] })]).risky.includes('schema'), 'docs are prose');
   assert.match(run([mod('lib/a.ts', { removed_lines: 'CREATE TABLE x' })]).reasons.unclassifiable.join(), /removed_lines is not a list/);
 });
@@ -202,12 +203,11 @@ test('deeply nested comments can\'t make the classifier slow (audit round 11)', 
   assert.ok(c.risky.includes('schema'), 'a line that long is not read, so it counts');
 });
 
-test('a renamed file\'s lines must be harmless under both its names (lead call L32, audit round 12)', () => {
-  const ren = (from, to, removed, added = []) => mod(to, { status: 'renamed', previous_path: from, added_lines: added, removed_lines: removed });
-  const hit = (c, p) => (c.reasons.schema ?? []).some((r) => r.startsWith(`${p} (`) && r.includes('may change the database'));
-  assert.ok(!hit(run([mod('test/x.test.ts', { added_lines: ["const q = 'optimize everything';"], removed_lines: [] })]), 'test/x.test.ts'), 'a fixture in a test file');
-  assert.ok(hit(run([ren('test/x.test.ts', 'lib/x.ts', [], ["const q = 'optimize everything';"])]), 'lib/x.ts'), 'a test file renamed into code');
-  assert.ok(hit(run([ren('lib/a.ts', 'lib/a.sql', ['--n; await zapAll()'], ['-- a'])]), 'lib/a.sql'), 'code renamed to .sql keeps the code reading');
-  assert.ok(hit(run([ren('lib/a.ts', 'lib/a.py', ['#init = this.db.nukeAll()'], ['# a'])]), 'lib/a.py'), 'code renamed to .py keeps the code reading');
-  assert.ok(!hit(run([ren('lib/a.ts', 'lib/b.ts', ['// a'], ['// b'])]), 'lib/b.ts'), 'comments under both names');
+test('a change with too much text to read is unclassifiable, and its lines are not scanned (audit round 13)', () => {
+  const big = Array(300).fill('a'.repeat(19_000));
+  const t0 = Date.now();
+  const c = run([mod('lib/a.ts', { added_lines: big, removed_lines: big })]);
+  assert.ok(Date.now() - t0 < 1000, `took ${Date.now() - t0} ms`);
+  assert.ok(c.reasons.unclassifiable.includes('too much changed text to read'));
+  assert.equal(c.tier, 1);
 });
