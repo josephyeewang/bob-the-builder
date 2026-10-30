@@ -24,12 +24,12 @@ test('R-0b-126: every kind the row names has an instruction-shaped planted case,
 });
 
 test('R-0b-126: M12 and M13\'s own paths (commit subject, idea issue) land in the record in the exact fenced form', async () => {
-  const commits = await checkOutsideJoin(({ text }) => ({ record: JSON.stringify(makeHistory({ git: fakeGit(text) }).historyFile()) }),
+  const commits = await checkOutsideJoin(async ({ text }) => ({ record: JSON.stringify(await makeHistory({ git: fakeGit(text) }).historyFile()) }),
     { sources: ['commit-subject'], where: ['record'] });
   assert.deepEqual(commits, []);
   // Planted failure: the same path with fencing switched off is caught.
-  assert.notDeepEqual(await checkOutsideJoin(({ text }) =>
-    ({ record: JSON.stringify(makeHistory({ git: fakeGit(text), prepare: (s) => s }).historyFile()) }),
+  assert.notDeepEqual(await checkOutsideJoin(async ({ text }) =>
+    ({ record: JSON.stringify(await makeHistory({ git: fakeGit(text), prepare: (s) => s }).historyFile()) }),
     { sources: ['commit-subject'], where: ['record'] }), []);
   const rec = memoryRecord();
   let n = 0;
