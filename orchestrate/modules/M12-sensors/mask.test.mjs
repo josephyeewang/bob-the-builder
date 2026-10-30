@@ -141,3 +141,10 @@ test('0b-7 audit round 3 M-B: a token at the end of a URL path is masked, by bot
   assert.ok(findCredentials(line).some((f) => f.kind === 'high-entropy' && line.slice(f.at).startsWith(tok)));
   assert.equal(maskSecrets('src/components/very-long-file-name_for-testing/index.tsx').hits.length, 0, 'plain paths stay');
 });
+
+test('0b-7 audit round 4 minor: count-like names keep their numbers; a PIN under a secret name is still masked', () => {
+  const { maskDeep } = makeMasker({ env: {} });
+  const out = maskDeep({ input_tokens: 1234, token_count: 5, tokens_used: 77, PIN_TOKEN: 123456 });
+  assert.equal(out.input_tokens, 1234); assert.equal(out.token_count, 5); assert.equal(out.tokens_used, 77);
+  assert.equal(out.PIN_TOKEN, '[REDACTED:named-key]');
+});

@@ -119,6 +119,9 @@ function maskShapes(text, hits) {
 // A key that names a secret (password, api_key, STRIPE_SECRET_KEY…) masks its whole value, as the "named" rule does
 // for the same pair written as text (round 3 M-A; R-0b-125 "any value after a secret-sounding name").
 const SECRET_KEY = new RegExp(`^${SECRET_NAME}$`, 'i');
+// Count-like names (input_tokens, token_count, tokens_used) hold usage numbers, not credentials (round 4 minor); a
+// number under any other secret name (a PIN) is still masked.
+const COUNT_KEY = /(^|_)(count|counts|tokens)$|^tokens_|_count_/i;
 export const isSecretKey = (k) => SECRET_KEY.test(k) || (/^[A-Z0-9_]+$/.test(k) && CREDENTIAL_ENV_KEY_SUFFIX.test(k));
 
 export const TYPED_KEY = /^(?:sha|id|uid|ts|created|[a-z0-9]+(?:_sha|_id|_at))$/;
@@ -154,7 +157,7 @@ export function makeMasker({ env = process.env, protectedEnvKeys = [], protected
       for (const [k, x] of Object.entries(v)) {
         let key = maskSecrets(k).text;
         while (Object.hasOwn(o, key)) key += '~';
-        if (isSecretKey(k) && x !== null && x !== undefined && typeof x !== 'object' && !(typeof x === 'string' && x.length < 4) && typeof x !== 'boolean') o[key] = '[REDACTED:named-key]';
+        if (isSecretKey(k) && !COUNT_KEY.test(k) && (typeof x === 'number' || (typeof x === 'string' && x.length >= 4))) o[key] = '[REDACTED:named-key]';
         else o[key] = isTypedField(k, x) ? x : maskDeep(x);
       }
       return o;

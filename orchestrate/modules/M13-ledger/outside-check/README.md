@@ -11,6 +11,7 @@ public too, so the check prints only "product N / <check>: ok|FAIL <reason code>
 | `outside-check.mjs` | The six checks for one product: heartbeat, audit files, audit runs, live deploy, Actions permission, robot merges. |
 | `pinned-docs-lane.json` | Per product slot: the paths the robot may merge alone (its first-cutover docs lane). Empty in the template. |
 | `acknowledged-merges.json` | Per product slot: SHA-256 of each robot merge the owner has looked at and accepted. Empty in the template. |
+| `robot-merges-owner.json` | `tags`: a short public tag per slot (8–32 lowercase letters or digits) that the PRODUCTS entry and the Mini's config must repeat; `cleared`: per slot, the time the owner last cleared a latched robot-merges red. Empty in the template. |
 | `collect.mjs`, `notify.mjs` | One updated issue in this repo per failing check, closed when it passes. |
 | `keep-alive.mjs` | A small commit after 50 quiet days so GitHub doesn't switch the schedule off. |
 | `supported.mjs` | A copy of Bob's M12 rule for "a supported main commit"; a Bob test keeps the two identical. |
@@ -35,8 +36,14 @@ step format applies; the Front Door or the Lead turns each into paste-ready step
 5. **Pin the docs lane.** For each product, ask Claude for the `pinned-docs-lane.json` entry (a copy of the docs-lane
    paths in that product's first-cutover rules entry) and commit it. With no entry, robot-merges FAILs and the Merge Gate stays shut.
    If robot-merges FAILs on a merge you have looked at and accept, ask Claude for its `acknowledged-merges.json` line and commit it.
-6. **Set the Mini's watch.** In the Mini's private config: this repo's name, the home repo for "stopped" alerts, and the
-   slot → product names (`product 1` → the first product) so the Mini records robot-merges' last green time.
+   **Tag the slot:** ask Claude for a new tag for each product; put it in `robot-merges-owner.json` under `tags`, in
+   that product's `PRODUCTS` entry as `"tag"`, and in the Mini's config (step 6). The tag is not secret; it only makes
+   sure slot 1 is the product the Mini thinks it is.
+6. **Set the Mini's watch.** In the Mini's private config: this repo's name, the home repo for "stopped" alerts, and
+   each slot's product name and tag (`product 1` → the first product, its tag) so the Mini records robot-merges' last
+   green time. **Clear the first latch:** the Mini starts with the gate shut. After the first green run, put the
+   current time in `robot-merges-owner.json` under `cleared` for that slot (Claude gives you the line) and commit it.
+   Do the same after a robot-merges red you have dealt with, or after the Mini was off for more than 5 days.
 7. **Check it.** After the first hourly run, the Actions tab shows a green run.
 8. **Stop it on purpose** (Actions tab → the workflow → Disable workflow): within about 2 hours an issue
    "The hourly outside check has stopped running" appears in the home repo. Enable it again; the issue closes.
@@ -47,4 +54,7 @@ step format applies; the Front Door or the Lead turns each into paste-ready step
 12. **Prove robot-merges on the test repo first** (before any real product; lead call L20). With the test repo as
     product 1: have the robot merge a PR that changes only a docs-lane file → the next hourly run shows
     `product 1 / robot-merges: ok`. Then have it merge one that changes a file outside the lane → `FAIL
-    robot-change-outside-docs-lane 1`, and the Mini's Merge Gate fact turns red. Acknowledge that merge → ok again.
+    robot-change-outside-docs-lane 1`, and the Mini's Merge Gate fact turns red. After two hourly runs it stays red
+    (latched). Acknowledge that merge → the check is ok again, but the gate stays shut until you add a `cleared` time.
+    **When you move from the test repo to the real product, give the slot a new tag** in all three places; the old
+    tag then no longer matches and the gate stays shut until all three agree.

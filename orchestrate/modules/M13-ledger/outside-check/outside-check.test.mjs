@@ -40,15 +40,16 @@ function fakeGh(over = {}) {
   const api = async (path) => {
     calls.push(path);
     const u = new URL(`https://x${path}`);
-    if (!path.startsWith(`/repos/${REPO}/`)) throw Object.assign(new Error('x'), { status: 404 });
+    if (!u.pathname.startsWith(`/repos/${REPO}/`) && u.pathname !== `/repos/${REPO}`) throw Object.assign(new Error('x'), { status: 404 });
     const rest = u.pathname.slice(`/repos/${REPO}`.length);
     if (rest === '/issues') return s.heartbeat;
     if (rest === '/activity') return s.activity;
+    if (rest === '') return { default_branch: s.branch ?? 'main' };
     const cmp = /^\/compare\/(.+)$/.exec(rest);
     if (cmp) {
+      // GitHub sends the whole file list (at most 300) on the compare's first page.
       const f = s.compare[cmp[1]]; if (f === undefined) return { message: 'Not Found' };
-      const per = Number(u.searchParams.get('per_page')), page = Number(u.searchParams.get('page'));
-      return { files: f.slice((page - 1) * per, page * per) };
+      return { files: f.slice(0, 300) };
     }
     if (rest === '/commits') return u.searchParams.get('page') === '1' ? s.commits : [];
     if (rest.startsWith('/actions/workflows/')) { const c = s.runs[u.searchParams.get('head_sha')]; return { workflow_runs: c ? [{ status: 'completed', conclusion: c }] : [] }; }
@@ -65,10 +66,12 @@ function fakeGh(over = {}) {
   };
   return { s, api, calls };
 }
-const product = (o = {}) => ({ repo: REPO, stage: 'second', audit_workflow: 'audit.yml', robot: 'robot', ...o });
+const TAG = 'slottag01';
+const product = (o = {}) => ({ repo: REPO, stage: 'second', audit_workflow: 'audit.yml', robot: 'robot', tag: TAG, ...o });
 const pinned = { 'product 1': { 'scripts/a.mjs': AUDIT_SHA } };
 const docsLane = { 'product 1': ['docs/', 'README.md'] };
-const run = (check, gh, p = product(), o = {}) => runOne(check, 1, { products: [p], api: gh.api, pinned, docsLane, acked: {}, now: () => NOW, ...o });
+const owner = { tags: { 'product 1': TAG }, cleared: {} };
+const run = (check, gh, p = product(), o = {}) => runOne(check, 1, { products: [p], api: gh.api, pinned, docsLane, acked: {}, owner, now: () => NOW, ...o });
 
 test('a healthy product passes every check', async () => {
   for (const c of CHECKS) assert.equal((await run(c, fakeGh())).ok, true, c);
@@ -143,7 +146,7 @@ test('public logs carry no product data: no repo, no commit, no path, no error t
     lines.push((await run(c, fakeGh())).line);
     lines.push((await run(c, fakeGh({ heartbeat: [], files: {}, runs: {}, perms: 'write', deployments: [{ id: 9, environment: 'Production', sha: sha('f'), created_at: iso(1) }], statuses: { 9: 'success' } }))).line);
   }
-  const broken = { products: [{ ...product(), repo: 'other/elsewhere' }], api: fakeGh().api, pinned, docsLane, now: () => NOW };
+  const broken = { products: [{ ...product(), repo: 'other/elsewhere' }], api: fakeGh().api, pinned, docsLane, owner, now: () => NOW };
   for (const c of CHECKS) lines.push((await runOne(c, 1, broken)).line);
   const all = lines.join('\n');
   for (const bad of ['secret-product-name', 'someone', 'elsewhere', 'scripts/', sha('c').slice(0, 7), sha('f').slice(0, 7), 'unexpected']) assert.equal(all.includes(bad), false, bad);
@@ -318,11 +321,47 @@ test('robot-merges planted: a full activity page that doesn\'t reach back 7 days
   assert.match((await run('robot-merges', old)).line, /ok 0 robot updates/);
 });
 
-test('robot-merges planted: 300 or more changed files can\'t be fully listed → FAIL; 150 docs files page through → ok', async () => {
+test('robot-merges planted: 300 or more changed files can\'t be fully listed → FAIL; 150 docs files → ok, read in one call', async () => {
   const docs = (n) => Array.from({ length: n }, (_, i) => ({ filename: `docs/${i}.md` }));
   assert.equal((await run('robot-merges', robotMerge(docs(150)))).ok, true);
   assert.equal((await run('robot-merges', robotMerge(docs(300)))).ok, false);
-  assert.equal((await run('robot-merges', robotMerge([...docs(250), { filename: 'src/z.ts' }]))).ok, false, 'the src file on page 3 is seen');
+  assert.equal((await run('robot-merges', robotMerge([...docs(250), { filename: 'src/z.ts' }]))).ok, false, 'the 251st file is seen');
+  const gh = robotMerge(docs(150)); await run('robot-merges', gh);
+  assert.equal(gh.calls.filter((c) => c.includes('/compare/')).length, 1, 'no second page asked for (round 4 minor)');
+});
+
+// ---- 0b-7 audit round 4 ----
+const ackOf = (c) => ({ 'product 1': [createHash('sha256').update(sha(c)).digest('hex')] });
+
+test('0b-7 audit round 4 M-1: an acknowledged commit does not excuse a robot force-push (or unknown kind) landing on it', async () => {
+  for (const t of ['force_push', 'branch_deletion', 'merge_queue_merge']) {
+    const gh = robotMerge([{ filename: 'docs/a.md' }], { activity_type: t });
+    assert.equal((await run('robot-merges', gh, product(), { acked: ackOf('c') })).ok, t === 'merge_queue_merge' ? true : false, t);
+  }
+  assert.equal((await run('robot-merges', robotMerge([{ filename: 'src/a.ts' }]), product(), { acked: ackOf('c') })).ok, true, 'an ordinary merge can still be acknowledged');
+});
+
+test('0b-7 audit round 4 M-2: a pinned slot left empty FAILs; a PRODUCTS entry whose tag differs from the pinned one FAILs', async () => {
+  const empty = await runOne('robot-merges', 2, { products: [product()], api: fakeGh().api, pinned, docsLane: { ...docsLane, 'product 2': ['docs/'] }, acked: {}, owner, now: () => NOW });
+  assert.match(empty.line, /^product 2 \/ robot-merges: FAIL pinned-slot-empty$/);
+  const emptyTag = await runOne('robot-merges', 2, { products: [product()], api: fakeGh().api, pinned, docsLane, acked: {}, owner: { tags: { ...owner.tags, 'product 2': 'othertag9' } }, now: () => NOW });
+  assert.equal(emptyTag.ok, false);
+  const unpinned = await runOne('robot-merges', 2, { products: [product()], api: fakeGh().api, pinned, docsLane, acked: {}, owner, now: () => NOW });
+  assert.match(unpinned.line, /ok slot-empty/, 'an unpinned empty slot still passes');
+  assert.match((await run('robot-merges', fakeGh(), product({ tag: 'swapped01' }))).line, /FAIL slot-tag-mismatch$/);
+  assert.match((await run('robot-merges', fakeGh(), product({ tag: undefined }))).line, /FAIL slot-tag-mismatch$/);
+  assert.match((await run('robot-merges', fakeGh(), product(), { owner: { tags: {} } })).line, /FAIL no-pinned-slot-tag$/);
+  assert.match((await run('robot-merges', fakeGh(), product(), { owner: { tags: { 'product 1': 'BAD TAG' } } })).line, /FAIL no-pinned-slot-tag$/);
+});
+
+test('0b-7 audit round 4 minors: an entry with no actor, a person\'s merge-queue merge, a default branch not main → FAIL', async () => {
+  assert.match((await run('robot-merges', robotMerge([{ filename: 'docs/a.md' }], { actor: null }))).line, /FAIL activity-actor-missing$/);
+  assert.match((await run('robot-merges', robotMerge([{ filename: 'src/a.ts' }], { activity_type: 'merge_queue_merge', actor: { login: 'github-merge-queue[bot]' } }))).line, /FAIL merge-queue-merge-unverified 1$/);
+  assert.match((await run('robot-merges', fakeGh({ branch: 'trunk' }))).line, /FAIL default-branch-not-main$/);
+});
+
+test('the template ships an empty owner file for slot tags and clears', () => {
+  assert.deepEqual(JSON.parse(readFileSync(new URL('./robot-merges-owner.json', import.meta.url), 'utf8')), { tags: {}, cleared: {} });
 });
 
 test('the template ships empty docs-lane and acknowledged lists', () => {
