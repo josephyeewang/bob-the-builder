@@ -16,7 +16,8 @@ const CONTENT = 'echo PLANTED\n'; // `source` runs it, so a sourced read shows t
 const B64 = Buffer.from(CONTENT).toString('base64').slice(0, 12);
 
 // Builds the refuse cases for a folder; hex and ANSI-C forms encode the path, so each run builds its own, never swaps text.
-const refuseCases = (name, mode, root) => cases(mode === 'relative' ? name : `${root}/proj/${name}`, mode === 'relative' ? `${root}/proj` : `${root}/other`)
+// HOME is the folder itself, so the ~ and $HOME forms are built and checked too.
+const refuseCases = (name, mode, root) => cases(mode === 'relative' ? name : `${root}/proj/${name}`, mode === 'relative' ? `${root}/proj` : `${root}/other`, { home: root })
   .filter((x) => x.expect === 'refuse');
 
 function runOne(i, name, mode, sh) {

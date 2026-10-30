@@ -192,3 +192,37 @@ test('round 10 audit 4 M-2: a cd-blind guard that refuses whatever is asked from
     assert.ok(failures.some((f) => f.group === 'allow-elsewhere'), `${target}: ordinary commands asked from elsewhere`);
   }
 });
+
+// Round 10 audit 5 M-1: a guard that reads every variable as empty (as a shell-quote parse does) passed the unset-variable
+// form, yet a set variable can carry part of the name.
+test('round 10 audit 5 M-1: a guard that drops every variable misses a set variable carrying part of the name', () => {
+  for (const name of [T, 'secret.prod']) {
+    const guard = (c) => {
+      if (/\$\(|`|\$'/.test(c)) return 'refuse';
+      return c.replace(/\$\{[^}]*\}|\$[A-Za-z_]\w*/g, '').replace(/["'\\]/g, '').includes(name) ? 'refuse' : 'allow';
+    };
+    const missed = runCorpus(guard, { target: name }).failures.filter((f) => f.expect === 'refuse');
+    for (const form of ['var-mid', 'var-early', 'abs-var-mid']) assert.ok(missed.some((f) => f.form === form), `${name}: ${form}`);
+  }
+});
+
+// Round 10 audit 5 M-2: no form went through the home folder, so a guard that never expands ~ or $HOME passed.
+test('round 10 audit 5 M-2: a guard that never expands ~ or $HOME misses the home forms; none are built outside home', () => {
+  const root = tmp(); const dir = `${root}/proj`; const file = `${dir}/${T}`;
+  const guard = (c, cwd) => (c.split(/[\s;&|()<>'"=]+/).some((w) => w && resolve(cwd, w) === file) ? 'refuse' : 'allow');
+  const missed = runCorpus(guard, { target: T, cwd: dir, home: root }).failures.filter((f) => f.expect === 'refuse');
+  for (const form of ['home-tilde', 'home-var']) assert.ok(missed.some((f) => f.form === form), form);
+  assert.ok(missed.some((f) => f.group === 'after-cd-home'), 'cd ~/… first');
+  assert.ok(!cases(T, dir, { home: '/elsewhere' }).some((c) => c.form.startsWith('home')), 'no home forms outside home');
+});
+
+test('round 10 audit 5 minors: no recursive grep of a folder holding the file is an allow case; negated brackets; cd -', () => {
+  const root = tmp();
+  const allowed = (t) => cases(t, root).filter((c) => c.expect === 'allow').map((c) => c.command);
+  assert.ok(allowed(T).includes("grep -r 'TODO' src"));
+  assert.ok(!allowed(`src/${T}`).includes("grep -r 'TODO' src"));
+  assert.ok(!allowed(`docs/${T}`).some((c) => c.startsWith('grep -rn') && c.endsWith(' docs')));
+  const refuse = cases(T, root).filter((c) => c.expect === 'refuse');
+  for (const form of ['not-bracket', 'caret-bracket']) assert.ok(refuse.some((c) => c.form === form), form);
+  assert.ok(refuse.some((c) => c.command.startsWith('cd /; cd - ')), 'cd -');
+});

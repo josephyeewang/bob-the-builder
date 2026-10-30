@@ -17,30 +17,42 @@
 import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { basename, dirname, isAbsolute, resolve } from 'node:path';
+import { homedir } from 'node:os';
+import { basename, dirname, isAbsolute, relative, resolve } from 'node:path';
 
 export const corpus = JSON.parse(readFileSync(new URL('./corpus.json', import.meta.url), 'utf8'));
 
 // The ways one protected path can be written so a plain text match misses it. With a cwd, a relative target also gets
 // its absolute form (0b-7 round 9 minor 5: a guard that only matched relative paths passed the old corpus).
 // absolute: false leaves out the absolute form (the after-cd cases, whose short name is taken from the new folder).
-export function pathForms(target, cwd, { absolute = true } = {}) {
+// Where the name is split. At a letter no shell, JS or Python string reads as an escape (`\t` is a tab in node -e and
+// python3 -c), so a form means the same file whatever the name (0b-7 round 10 audit 2 M-2).
+function split(target) {
   const dir = target.includes('/') ? target.slice(0, target.lastIndexOf('/') + 1) : '';
   const base = target.slice(dir.length);
-  // Split at a letter no shell, JS or Python string reads as an escape (`\t` is a tab in node -e and python3 -c), so a
-  // form means the same file whatever the name (0b-7 round 10 audit 2 M-2); no backslash form if no letter qualifies.
   const half = Math.max(1, Math.floor(base.length / 2));
   const safe = (i) => /[A-Za-z]/.test(base[i] ?? '') && !/[abfnrtvuxNU]/.test(base[i]);
   const order = [...Array(base.length).keys()].slice(1).sort((a, b) => Math.abs(a - half) - Math.abs(b - half) || a - b);
-  const mid = order.find(safe) ?? half;
+  return { dir, base, safe, mid: order.find(safe) ?? half, early: Math.min(2, base.length - 1) };
+}
+
+// A path under the home folder written from it (`~/…`), or null (round 10 audit 5 M-2: a guard that never expands ~ or
+// $HOME passed). Left out when the home folder's own path has a space or shell character.
+const fromHome = (abs, home) => (home && /^[A-Za-z0-9._\/-]+$/.test(home) && abs.startsWith(`${home}/`) ? abs.slice(home.length + 1) : null);
+
+// home: the home folder the shell expands ~ and $HOME to (default this user's).
+export function pathForms(target, cwd, { absolute = true, home = homedir() } = {}) {
+  // No backslash form if no letter is safe to split at.
+  const { dir, base, safe, mid, early } = split(target);
   // Round 10 audit 3 M-1: with every trick at one point, the first half of the name was always plain text, and a guard
   // matching it passed. So quotes and a bracket also go near each end, the first half can be all "?", and three forms
   // carry no letter of the name at all (hex, octal, base64).
-  const early = Math.min(2, base.length - 1); const late = Math.max(1, base.length - 2);
+  const late = Math.max(1, base.length - 2);
   const lead = base.startsWith('.') ? '.' : ''; // a glob never matches a leading dot
   const enc = (f) => [...target].map((c) => f(c.charCodeAt(0))).join('');
   const hex = enc((n) => `\\x${n.toString(16).padStart(2, '0')}`);
   const folder = target.includes('/') ? basename(dirname(target)) : cwd ? basename(cwd) : 'x';
+  const rel = isAbsolute(target) || cwd ? fromHome(resolve(cwd ?? '/', target), home) : null;
   return {
     plain: target,
     ...(isAbsolute(target) ? {} : { 'dot-slash': `./${target}` }), // "./" before "/abs" would make it relative
@@ -57,6 +69,9 @@ export function pathForms(target, cwd, { absolute = true } = {}) {
     'lead-qmarks': `${dir}${lead}${'?'.repeat(Math.max(1, mid - lead.length))}${base.slice(Math.max(mid, lead.length + 1))}`,
     bracket: `${dir}${base.slice(0, mid)}[${base[mid]}]${base.slice(mid + 1)}`,
     'early-bracket': `${dir}${base.slice(0, early)}[${base[early]}]${base.slice(early + 1)}`,
+    // Negated brackets, both spellings (round 10 audit 5 minor 2: a guard reading [ ] as a plain set missed them).
+    'not-bracket': `${dir}${base.slice(0, mid)}[!${base[mid] === 'Q' ? 'Z' : 'Q'}]${base.slice(mid + 1)}`,
+    'caret-bracket': `${dir}${base.slice(0, early)}[^${base[early] === 'Q' ? 'Z' : 'Q'}]${base.slice(early + 1)}`,
     // Through the file's own folder when it is known (round 10 audit 3 minor 2: "x/.." touches only if x/ exists).
     'dot-dot': folder === 'x' ? `${dir}x/../${base}` : `${dir}../${folder}/${base}`,
     'command-sub': `$(printf '%s' '${target}')`,
@@ -66,12 +81,13 @@ export function pathForms(target, cwd, { absolute = true } = {}) {
     'ansi-c': `$'${hex}'`,
     'brace': `${dir}{${base},nothing}`,
     ...(absolute && cwd && !isAbsolute(target) ? { absolute: resolve(cwd, target) } : {}),
+    ...(absolute && rel !== null ? { 'home-tilde': `~/${rel}`, 'home-var': `$HOME/${rel}` } : {}),
   };
 }
 
 // A function replacement, never a string: a string replacement reads `$'` (the ansi-c form) as "the text after the
 // match", which garbled every ansi-c case until 0b-7 round 10.
-const fill = (tpl, vals) => tpl.replace(/\{\{(P|DIR|BASE|UP)\}\}/g, (_, k) => vals[k]);
+const fill = (tpl, vals) => tpl.replace(/\{\{(P|DIR|BASE|UP|HEAD|TAIL)\}\}/g, (_, k) => vals[k]);
 
 // The path forms and folders are put into commands unquoted, so a path with a space or a shell character would make
 // cases that touch nothing, and no precise guard could pass them (0b-7 round 10 M-2): refuse to run instead.
@@ -92,17 +108,33 @@ export const hostDead = (tpl, form) => (form === 'brace' && !existsSync('/bin/zs
   || (form === 'ansi-c' && !SH_ANSI_C && tpl.startsWith('sh -c'));
 const live = (tpl, form) => !(corpus.dead[tpl] ?? []).includes(form) && !hostDead(tpl, form);
 
-// cwd: the folder the hook is asked from (a relative target is taken from there).
-export function cases(target, cwd = process.cwd()) {
+// cwd: the folder the hook is asked from (a relative target is taken from there). home: as for pathForms.
+export function cases(target, cwd = process.cwd(), { home = homedir() } = {}) {
   const out = [];
   const abs = checkPath(resolve(cwd, target));
-  const forms = pathForms(target, cwd);
+  const forms = pathForms(target, cwd, { home });
   for (const [group, list] of Object.entries(corpus.refuse)) {
     for (const tpl of list) for (const [form, p] of Object.entries(forms)) if (live(tpl, form)) out.push({ expect: 'refuse', group, form, tpl, command: fill(tpl, { P: p }) });
+  }
+  // A variable that is set carries the first part of the name (round 10 audit 5 M-1: a guard that reads every variable
+  // as empty passed the unset-variable form). Split at two points, for the path as given and its absolute form.
+  for (const [kind, t] of [['var', target], ...(isAbsolute(target) ? [] : [['abs-var', abs]])]) {
+    const { dir: d, base, mid, early } = split(t);
+    for (const [at, i] of [['mid', mid], ['early', early]]) {
+      const form = `${kind}-${at}`;
+      for (const tpl of corpus.refuse_var) if (live(tpl, form)) out.push({ expect: 'refuse', group: 'var', form, tpl, command: fill(tpl, { HEAD: d + base.slice(0, i), TAIL: base.slice(i) }) });
+    }
   }
   // Whole-folder reads and writes: no form of the name appears at all (round 10 audit 4 M-1).
   const dir = dirname(abs); const up = dirname(dir);
   for (const tpl of corpus.refuse_folder) if (live(tpl, '-')) out.push({ expect: 'refuse', group: 'folder', form: '-', tpl, command: fill(tpl, { DIR: dir }) });
+  // The same, and change-folder-first, with the folder written from home (round 10 audit 5 M-2).
+  const hrel = fromHome(dir, home);
+  const hdir = hrel !== null ? `~/${hrel}` : dir === home && fromHome(abs, home) !== null ? '~' : null;
+  if (hdir) {
+    for (const tpl of corpus.refuse_folder) if (live(tpl, 'home')) out.push({ expect: 'refuse', group: 'folder', form: 'home', tpl, command: fill(tpl, { DIR: hdir }) });
+    for (const tpl of corpus.refuse_after_cd) if (live(tpl, 'home')) out.push({ expect: 'refuse', group: 'after-cd-home', form: 'home', tpl, cwd: up, command: fill(tpl, { DIR: hdir, BASE: basename(abs) }) });
+  }
   // Change folder first, then name the file by its short name (in each form). Asked from the folder above, so a guard
   // that ignores the cd and reads the short name from its own folder misses it (0b-7 round 10 M-1); and from the run
   // folder, with a step up asked from the file's own folder, so a guard that refuses every case asked from elsewhere
@@ -118,7 +150,9 @@ export function cases(target, cwd = process.cwd()) {
   for (const tpl of corpus.refuse_cd_up) {
     for (const [form, p] of short) if (live(tpl, form)) out.push({ expect: 'refuse', group: 'cd-up', form, tpl, cwd: dir, command: fill(tpl, { UP: basename(dir), BASE: p }) });
   }
-  for (const command of corpus.allow) out.push({ expect: 'allow', group: 'allow', form: '-', command });
+  // A recursive grep of a folder that holds the file reads it, so it is no allow case there (round 10 audit 5 minor 1).
+  const readsFile = (command, where) => /\bgrep -r/.test(command) && [resolve(where, command.split(' ').pop())].some((f) => abs === f || abs.startsWith(`${f}/`));
+  for (const command of corpus.allow) if (!readsFile(command, cwd)) out.push({ expect: 'allow', group: 'allow', form: '-', command });
   // Ordinary commands asked from the folder above and from the file's folder: a guard that refuses whatever is asked
   // from outside the run folder fails (round 10 audit 4 M-2).
   for (const command of corpus.allow_elsewhere) for (const where of [up, dir]) out.push({ expect: 'allow', group: 'allow-elsewhere', form: '-', cwd: where, command });
@@ -126,7 +160,10 @@ export function cases(target, cwd = process.cwd()) {
   // anything naming the folder or a word of the name fails. Still a sample: no list proves a guard never over-refuses.
   const words = [...new Set(basename(abs).split(/[^A-Za-z0-9]+/).filter((w) => w.length >= 2))];
   for (const tpl of corpus.allow_near) {
-    for (const WORD of /\{\{WORD\}\}/.test(tpl) ? words : ['']) out.push({ expect: 'allow', group: 'allow-near', form: '-', command: tpl.replace(/\{\{(DIR|WORD)\}\}/g, (_, k) => ({ DIR: dirname(abs), WORD })[k]) });
+    for (const WORD of /\{\{WORD\}\}/.test(tpl) ? words : ['']) {
+      const command = tpl.replace(/\{\{(DIR|WORD)\}\}/g, (_, k) => ({ DIR: dirname(abs), WORD })[k]);
+      if (!readsFile(command, cwd)) out.push({ expect: 'allow', group: 'allow-near', form: '-', command });
+    }
   }
   return out;
 }
@@ -163,7 +200,7 @@ export function askHook(hookCommand, command, { timeoutMs = 60000, cwd, hookCwd 
 // cwd: the folder each case is asked from; after-cd cases carry their own.
 export function runCorpus(hook, { target = '.env.production', ...opts } = {}) {
   const ask = typeof hook === 'function' ? hook : (command, cwd) => askHook(hook, command, { ...opts, cwd });
-  const results = cases(target, opts.cwd).map((c) => ({ ...c, got: ask(c.command, c.cwd ?? opts.cwd ?? process.cwd()) }));
+  const results = cases(target, opts.cwd, opts.home ? { home: opts.home } : {}).map((c) => ({ ...c, got: ask(c.command, c.cwd ?? opts.cwd ?? process.cwd()) }));
   const failures = results.filter((r) => r.got !== r.expect);
   return { total: results.length, failures, passed: results.length - failures.length };
 }

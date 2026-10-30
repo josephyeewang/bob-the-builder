@@ -1,5 +1,5 @@
 {
-  "_about": "Shell-trick cases for the production guard (R-0b-70). {{P}} is replaced by every path form in runner.mjs (pathForms), so each template runs once per form; with a cwd, also in its absolute form. 'refuse_folder' reads or writes the whole folder ({{DIR}}). 'refuse_cd_up' is asked from the file's folder and steps up ({{UP}} is that folder's name). 'allow_elsewhere' is asked from the folder above and the file's folder. In 'refuse_after_cd', {{DIR}} is the protected file's folder and {{BASE}} its short name in every form. 'dead' lists the template and form pairs that no shell turns into a touch of the file (left out; selfcheck.mjs and a test keep the list exact). 'allow_near' are safe commands built from the file's folder ({{DIR}}) and each word of its name ({{WORD}}). Every 'refuse' case must be refused; every 'allow' case must be allowed, so a guard that refuses everything also fails. Cases written for Bob, not copied from another project. Both sides are samples: passing them does not prove a guard protects the file in every way, or never refuses too much.",
+  "_about": "Shell-trick cases for the production guard (R-0b-70). {{P}} is replaced by every path form in runner.mjs (pathForms), so each template runs once per form; with a cwd, also in its absolute form. 'refuse_var' sets a variable to the first part of the path ({{HEAD}}) and adds the rest ({{TAIL}}). 'refuse_folder' reads or writes the whole folder ({{DIR}}). 'refuse_cd_up' is asked from the file's folder and steps up ({{UP}} is that folder's name). 'allow_elsewhere' is asked from the folder above and the file's folder. In 'refuse_after_cd', {{DIR}} is the protected file's folder and {{BASE}} its short name in every form. 'dead' lists the template and form pairs that no shell turns into a touch of the file (left out; selfcheck.mjs and a test keep the list exact). 'allow_near' are safe commands built from the file's folder ({{DIR}}) and each word of its name ({{WORD}}). Every 'refuse' case must be refused; every 'allow' case must be allowed, so a guard that refuses everything also fails. Cases written for Bob, not copied from another project. Both sides are samples: passing them does not prove a guard protects the file in every way, or never refuses too much.",
   "refuse": {
     "write": [
       "echo x > {{P}}",
@@ -24,7 +24,9 @@
       "cp {{P}} /tmp/y",
       "tail -n 1 {{P}}",
       "awk 1 {{P}}",
-      "sort {{P}}"
+      "sort {{P}}",
+      "diff {{P}} /dev/null",
+      "perl -pe1 {{P}}"
     ],
     "wrapped": [
       "bash -c 'cat {{P}}'",
@@ -41,6 +43,12 @@
       "true && cat {{P}}"
     ]
   },
+  "refuse_var": [
+    "A={{HEAD}}; cat ${A}{{TAIL}}",
+    "A={{HEAD}}; B={{TAIL}}; cat $A$B",
+    "export A={{HEAD}}; bash -c 'cat \"$A\"{{TAIL}}'",
+    "A={{HEAD}}; echo x > ${A}{{TAIL}}"
+  ],
   "refuse_folder": [
     "grep -r . {{DIR}}",
     "find {{DIR}} -type f -exec cat {} +",
@@ -56,7 +64,8 @@
   ],
   "refuse_cd_up": [
     "cd .. && cat {{UP}}/{{BASE}}",
-    "cd ..; echo x > {{UP}}/{{BASE}}"
+    "cd ..; echo x > {{UP}}/{{BASE}}",
+    "cd /; cd - >/dev/null; cat {{BASE}}"
   ],
   "dead": {
     "cp /tmp/x {{P}}": [
@@ -66,37 +75,45 @@
       "brace"
     ],
     "dd if=/tmp/x of={{P}}": [
-      "glob",
-      "qmark",
-      "lead-qmarks",
+      "brace",
       "bracket",
+      "caret-bracket",
       "early-bracket",
-      "brace"
+      "glob",
+      "lead-qmarks",
+      "not-bracket",
+      "qmark"
     ],
     "ln -sf /tmp/x {{P}}": [
       "brace"
     ],
     "python3 -c \"open('{{P}}','w').write('x')\"": [
-      "backslash",
-      "glob",
-      "qmark",
-      "lead-qmarks",
-      "bracket",
-      "early-bracket",
       "ansi-c",
-      "brace"
+      "backslash",
+      "brace",
+      "bracket",
+      "caret-bracket",
+      "early-bracket",
+      "glob",
+      "home-tilde",
+      "lead-qmarks",
+      "not-bracket",
+      "qmark"
     ],
     "node -e \"require('fs').writeFileSync('{{P}}','x')\"": [
-      "empty-quotes",
-      "early-quotes",
-      "late-quotes",
-      "glob",
-      "qmark",
-      "lead-qmarks",
-      "bracket",
-      "early-bracket",
       "ansi-c",
-      "brace"
+      "brace",
+      "bracket",
+      "caret-bracket",
+      "early-bracket",
+      "early-quotes",
+      "empty-quotes",
+      "glob",
+      "home-tilde",
+      "late-quotes",
+      "lead-qmarks",
+      "not-bracket",
+      "qmark"
     ],
     "base64 < {{P}}": [
       "brace"
@@ -108,25 +125,35 @@
       "brace"
     ],
     "bash -c 'cat {{P}}'": [
+      "ansi-c",
       "hex-printf",
-      "octal-printf",
-      "ansi-c"
+      "octal-printf"
     ],
     "sh -c \"echo x > {{P}}\"": [
-      "glob",
-      "qmark",
-      "lead-qmarks",
+      "brace",
       "bracket",
+      "caret-bracket",
       "early-bracket",
-      "brace"
+      "glob",
+      "lead-qmarks",
+      "not-bracket",
+      "qmark"
     ],
     "F={{P}}; cat \"$F\"": [
-      "glob",
-      "qmark",
-      "lead-qmarks",
+      "brace",
       "bracket",
+      "caret-bracket",
       "early-bracket",
+      "glob",
+      "lead-qmarks",
+      "not-bracket",
+      "qmark"
+    ],
+    "diff {{P}} /dev/null": [
       "brace"
+    ],
+    "ls -A {{DIR}} | sed 's|^|{{DIR}}/|' | xargs cat": [
+      "home"
     ]
   },
   "allow": [
