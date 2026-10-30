@@ -14,7 +14,7 @@ Pick ONE of the sections below and delete the others.
 <!-- One sentence + any error output. -->
 
 **Reproduction**
-<!-- Exact commands or steps. Include the Bob version (the header at the top of build-protocol.md) and your OS. -->
+<!-- Exact commands or steps. Include the Bob version (the one line in `VERSION`) and your OS. -->
 
 **Where it broke**
 <!-- One of: install one-liner / `scripts/bob-init.sh` / `scripts/repo-map.sh` / `skill/SKILL.md` invocation / build-protocol.md content / other (specify). -->

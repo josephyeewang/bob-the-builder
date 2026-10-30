@@ -9,7 +9,7 @@
 ## Phase [N] Report
 
 ### [A] Acceptance Bar (frozen at phase start — Phase Gate 12)
-*Write the phase's done-criteria between the two markers **before** building, then run `node scripts/check-bar.mjs --stamp <this-file>` to record the fingerprint. At the gate, `node scripts/check-bar.mjs <this-file>` refuses if the criteria changed without an explanation. To move the bar on purpose, edit the criteria and run `node scripts/check-bar.mjs --change "<why>" <this-file>` — it appends a dated line below the fingerprint. Never edit the fingerprint by hand.*
+*Write the phase's done-criteria between the two markers **before** building, then run `node "$(realpath ~/.claude/skills/bob/..)/scripts/check-bar.mjs" --stamp <this-file>` to record the fingerprint. At the gate, `node "$(realpath ~/.claude/skills/bob/..)/scripts/check-bar.mjs" <this-file>` refuses if the criteria changed without an explanation. To move the bar on purpose, edit the criteria and run `node "$(realpath ~/.claude/skills/bob/..)/scripts/check-bar.mjs" --change "<why>" <this-file>` — it appends a dated line below the fingerprint. Never edit the fingerprint by hand.*
 
 <!-- bar:start -->
 - [done-criterion 1 — testable]
@@ -56,7 +56,7 @@ bar-sha256: UNSET
 
 ### [C] Failing-Test Receipts (Phase Gate 11) — *required for every fix or bug item in the phase*
 - Every fix item names its test command. An item with no test command = gate fails.
-- Paste one receipt per item from `node scripts/prove-test-fails.mjs --commit <sha> --test "<cmd>" --fix <file>:<from>-<to>`, **run by a session other than the builder's** (the milestone reviewer or a new session).
+- Paste one receipt per item from `node "$(realpath ~/.claude/skills/bob/..)/scripts/prove-test-fails.mjs" --commit <sha> --test "<cmd>" --fix <file>:<from>-<to>`, **run by a session other than the builder's** (the milestone reviewer or a new session).
   | Fix item | Test command | Receipt verdict (PROVEN / NOT PROVEN) | Commit | Run by (session) |
   |----------|--------------|----------------------------------------|--------|------------------|
 - *N/A — no fix items this phase* (say so explicitly if skipping).
