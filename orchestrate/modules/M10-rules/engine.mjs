@@ -264,10 +264,13 @@ export function makeEngine({ products, rulesState, productState, running, rolesD
       if (c.protected.length || c.risky.includes('protected')) return ask(1, 'exact reverse touches a protected file');
       // 0b-9 M4: a database-change merge is never undone automatically, even after a failed audit (audit round 6).
       if (c.risky.includes('schema') || c.risky.includes('production_data')) return ask(1, 'exact reverse of a database change');
-      // A code file can hold a database change outside the migration folders, so the undo of one needs its removed
-      // lines (the lines the reversed merge added) to be scanned; without them, ask (audit round 7).
+      // A code file can hold a database change outside the migration folders, so the undo of one needs both sides of
+      // its diff scanned: the lines it removes and the lines it puts back. Without them, or with no lines at all for a
+      // file that was wholly removed or added, ask (audit rounds 7 and 8).
       const code = new Set((c.reasons.unclassifiable ?? []).filter((r) => r.startsWith('scan_not_built: ')).map((r) => r.slice('scan_not_built: '.length)));
-      if (s.files.some((f) => (code.has(f.path) || code.has(f.previous_path)) && !Array.isArray(f.removed_lines))) return ask(1, 'exact reverse of code without its removed lines');
+      const unread = (f) => !Array.isArray(f.removed_lines) || !Array.isArray(f.added_lines)
+        || (f.status === 'removed' && !f.removed_lines.length) || (f.status === 'added' && !f.added_lines.length);
+      if (s.files.some((f) => (code.has(f.path) || code.has(f.previous_path)) && unread(f))) return ask(1, 'exact reverse of code without its lines');
       if (s.reversed_audit === 'failure') return allow('exact reverse of a merge whose audit failed');
       if (!c.risky.length && c.tier === 2) return allow('exact reverse of an ordinary change');
       return ask(1, 'exact reverse of a merge whose audit passed');

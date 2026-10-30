@@ -14,7 +14,7 @@
 //   classifyChange(policy, change)        → { tier: 1|2, risky: [...], reasons: { class: [why…] }, protected: [paths] }
 //   classifyWithRulesText(text, change)   → the same, for rules given as raw policy.yaml text (the GitHub-side checker
 //                                           reads them at the parent commit); corrupt text = every file unclassifiable
-//   change = { files: [{ path, previous_path?, status, mode?, added_lines? }], truncated?, declared_tier?, labels? }
+//   change = { files: [{ path, previous_path?, status, mode?, added_lines?, removed_lines? }], truncated?, declared_tier?, labels? }
 
 import { RISKY_CLASSES } from '../../shared/rules.mjs';
 import { PROTECTED_FLOOR, compileList, pathProblem } from './paths.mjs';
@@ -32,9 +32,13 @@ const LINK_MODES = new Set(['120000', '160000']);
 const FILE_MODES = new Set(['100644', '100755', '120000', '160000']);   // a symlink or a submodule: protected, whatever its path
 
 // Whole SQL statements only, so prose like "drop the feature" never matches (R2-M4(c)).
-// Round 7 widened the object list (functions, triggers, policies, views, types, grants...) for the exact-reverse check.
-const SCHEMA_SCANS = [/\b(create(\s+or\s+replace)?|alter|drop)\s+(unique\s+)?(table|index|function|procedure|trigger|policy|view|materialized\s+view|type|schema|extension|sequence|role)\b/i,
-  /\balter\s+table\s+\S+\s+(add|drop|alter)\s+column\b/i, /\b(grant|revoke)\s+[\w\s,]+?\s+on\b/i];
+// Rounds 7 and 8 widened it for the exact-reverse check: up to three words may stand between the verb and the object
+// (`create unlogged table`, `create constraint trigger`), SQL comments are blanked first (`CREATE/**/TABLE`), and the
+// usual code-library calls (`createTable`, `schema.dropTable`) count. A backstop, never complete (README).
+const SCHEMA_SCANS = [/\b(create|alter|drop)\b(\s+\w+){0,3}?\s+(table|index|function|procedure|trigger|policy|view|type|schema|extension|sequence|role|domain|rule|database)\b/i,
+  /\b(grant|revoke)\s+[\w\s,]+?\s+on\b/i, /\b(create|alter|drop|rename)(Table|Index|Column|Schema)\b/];
+const sqlText = (lines) => lines.join('\n').replace(/\/\*[\s\S]*?\*\//g, ' ');
+const isLines = (v) => Array.isArray(v) && v.every((l) => typeof l === 'string');
 const DELETE_SCANS = [/\bdelete\s+from\b/i, /\btruncate\s+(table\s+)?\w/i, /\bdrop\s+(table|column|index|schema|database|view)\b/i];
 
 export function classifyWithRulesText(text, change) {
@@ -114,17 +118,19 @@ export function classifyChange(policy, change) {
 
     // Text scans of added lines: only ever add a class. Plain docs are prose, so they are never scanned; files in the
     // migration, repair and sender folders always are, wherever those folders are.
-    const scan = !m.plainDoc(f.path) || m.migrations(f.path) || m.repair(f.path) || m.senders(f.path);
-    if (scan && Array.isArray(f.added_lines)) {
-      const text = f.added_lines.join('\n');
+    // A rename is scanned when either name would be: a rename from code back to a doc still undoes code (audit round 8).
+    const scanned = (p) => !m.plainDoc(p) || m.migrations(p) || m.repair(p) || m.senders(p);
+    const scan = scanned(f.path) || (typeof f.previous_path === 'string' && scanned(f.previous_path));
+    for (const field of ['added_lines', 'removed_lines']) if (f[field] !== undefined && !isLines(f[field])) add('unclassifiable', `${field} is not a list of lines: ${f.path}`);
+    if (scan && isLines(f.added_lines)) {
+      const text = sqlText(f.added_lines);
       if (SCHEMA_SCANS.some((re) => re.test(text))) add('schema', `${f.path} (table change in added lines)`);
       if (DELETE_SCANS.some((re) => re.test(text))) add('deletes', `${f.path} (delete statement in added lines)`);
       const pkg = m.packages.find((name) => importsPackage(text, name));
       if (pkg) add('messages_people', `${f.path} (imports ${pkg})`);
     }
     // Removed lines too: a change that removes a table statement undoes a database change (0b-9 M4, audit round 7).
-    if (f.removed_lines !== undefined && !(Array.isArray(f.removed_lines) && f.removed_lines.every((l) => typeof l === 'string'))) add('unclassifiable', `removed_lines is not a list of lines: ${f.path}`);
-    else if (scan && Array.isArray(f.removed_lines) && SCHEMA_SCANS.some((re) => re.test(f.removed_lines.join('\n')))) add('schema', `${f.path} (table change in removed lines)`);
+    if (scan && isLines(f.removed_lines) && SCHEMA_SCANS.some((re) => re.test(sqlText(f.removed_lines)))) add('schema', `${f.path} (table change in removed lines)`);
   }
 
   // A `needs-joe` label adds `unclassifiable`; `needs-joe:<class>` adds that class. Neither removes one (MIN-3).

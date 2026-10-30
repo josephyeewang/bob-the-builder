@@ -14,7 +14,7 @@
 //   rules.get('caps.editing_per_mac', { product })                  // → a number from the rules, or undefined
 //   rules.classify(change)                                          // → { tier, risky: [...], reasons, protected } (D7)
 //     change = { product, files: [{ path, previous_path?, status: added|modified|removed|renamed|copied, mode?,
-//                added_lines? }], truncated?, declared_tier?, labels? }
+//                added_lines?, removed_lines? }], truncated?, declared_tier?, labels? }
 //     Always judged by the current rules. A caller can't hand in rules of its own: any `policy` or `atCommit` field is
 //     dropped (round 2, R2-M10). The GitHub-side checker reads the parent commit's rules through M10's
 //     classifyWithRulesText instead.
