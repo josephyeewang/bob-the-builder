@@ -235,7 +235,8 @@ export function cases(target, cwd = process.cwd(), { home = homedir(), caseless 
   for (const command of corpus.allow_elsewhere) for (const where of [up, dir]) out.push({ expect: 'allow', group: 'allow-elsewhere', form: '-', cwd: where, command });
   // A folder that exists, as Claude Code's cwd always does (round 10 audit 9 M-4: a guard that resolves the cwd's real
   // path and refuses when it cannot failed a made-up one). Left out when the file's folder has no folder beside it.
-  if (beside) for (const command of corpus.refuse_here) out.push({ expect: 'allow', group: 'allow-beside', form: '-', cwd: beside, command });
+  // Not xargs: the hook refuses every xargs, by LEAD-CALLS L41.
+  if (beside) for (const command of corpus.refuse_here) if (!/\bxargs\b/.test(command)) out.push({ expect: 'allow', group: 'allow-beside', form: '-', cwd: beside, command });
   // Round 10 audit 3 M-2: near misses built from this file's folder and the words of its name, so a guard that refuses
   // anything naming the folder or a word of the name fails. Still a sample: no list proves a guard never over-refuses.
   const words = [...new Set(basename(abs).split(/[^A-Za-z0-9]+/).filter((w) => w.length >= 2))];
@@ -284,9 +285,15 @@ export function askHook(hookCommand, command, { timeoutMs = 60000, cwd, hookCwd 
 
 // hook: the hook's shell command, or (for Bob's own tests) a function (command, cwd) → 'refuse' | 'allow' | 'crash'.
 // cwd: the folder each case is asked from; after-cd cases carry their own.
-export function runCorpus(hook, { target = '.env.production', ...opts } = {}) {
+// A case that reads the whole folder, naming no file, and changes nothing (LEAD-CALLS L41: the sandbox's read-deny list
+// stops those, not the hook).
+export const folderRead = (c) => ['folder', 'folder-up', 'here', 'cd-here'].includes(c.group) && !/\b(rm|mv) /.test(c.command);
+
+// folderReads: false leaves out the folder-read cases (L41), for a hook that leaves them to the sandbox.
+export function runCorpus(hook, { target = '.env.production', folderReads = true, ...opts } = {}) {
   const ask = typeof hook === 'function' ? hook : (command, cwd) => askHook(hook, command, { ...opts, cwd });
-  const results = cases(target, opts.cwd, { ...(opts.home ? { home: opts.home } : {}), ...(opts.caseless !== undefined ? { caseless: opts.caseless } : {}), ...(opts.beside !== undefined ? { beside: opts.beside } : {}) }).map((c) => ({ ...c, got: ask(c.command, c.cwd ?? opts.cwd ?? process.cwd()) }));
+  const results = cases(target, opts.cwd, { ...(opts.home ? { home: opts.home } : {}), ...(opts.caseless !== undefined ? { caseless: opts.caseless } : {}), ...(opts.beside !== undefined ? { beside: opts.beside } : {}) })
+    .filter((c) => folderReads || c.expect !== 'refuse' || !folderRead(c)).map((c) => ({ ...c, got: ask(c.command, c.cwd ?? opts.cwd ?? process.cwd()) }));
   const failures = results.filter((r) => r.got !== r.expect);
   return { total: results.length, failures, passed: results.length - failures.length };
 }
@@ -295,9 +302,11 @@ export function runCorpus(hook, { target = '.env.production', ...opts } = {}) {
 // one, so a plain compare ran nothing and exited 0).
 const started = (() => { try { return realpathSync(process.argv[1]) === fileURLToPath(import.meta.url); } catch { return false; } })();
 if (started) {
-  const [hook, target] = process.argv.slice(2);
-  if (!hook) { console.error('usage: node runner.mjs \'<hook command>\' [protected path]'); process.exit(64); }
-  const r = runCorpus(hook, target ? { target } : {});
+  const args = process.argv.slice(2);
+  const folderReads = !args.includes('--no-folder-reads');
+  const [hook, target] = args.filter((a) => a !== '--no-folder-reads');
+  if (!hook) { console.error('usage: node runner.mjs [--no-folder-reads] \'<hook command>\' [protected path]'); process.exit(64); }
+  const r = runCorpus(hook, { ...(target ? { target } : {}), folderReads });
   console.log(`${r.passed}/${r.total} cases as expected`);
   for (const f of r.failures) console.log(`  expected ${f.expect}, got ${f.got}  [${f.group} / ${f.form}]  ${JSON.stringify(f.command)}`);
   process.exitCode = r.failures.length ? 1 : 0;

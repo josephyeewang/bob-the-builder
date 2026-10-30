@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { fileURLToPath } from 'node:url';
 import { existsSync, mkdirSync, realpathSync } from 'node:fs';
 import { basename, dirname, resolve } from 'node:path';
-import { corpus, cases, pathForms, askHook, runCorpus, hostDead, hostLive, caselessAt } from './runner.mjs';
+import { corpus, cases, pathForms, askHook, runCorpus, hostDead, hostLive, caselessAt, folderRead } from './runner.mjs';
 import { touchCheck } from './selfcheck.mjs';
 import { tempDir } from '../../../shared/test-tmp.mjs';
 
@@ -472,4 +472,21 @@ test('round 12: guards keeping a brace\'s first choice, judging only the file\'s
     assert.ok(miss({ firstOpt: true }).some((f) => /grep -n -r/.test(f.command)), `${target}: grep -n -r`);
     assert.ok(miss({ execOnly: true }).some((f) => /find .*\| xargs/.test(f.command)), `${target}: find | xargs`);
   }
+});
+
+test('round 13: aliased writes; L41: --no-folder-reads leaves out only reads of a whole folder, and no allow case uses xargs', () => {
+  const root = tmp();
+  const all = cases(T, root);
+  // A guard that never refuses an aliased command misses writes, not just the read (round 13 M-1).
+  const writes = all.filter((c) => c.group === 'wrapped' && /alias wr=tee/.test(c.tpl));
+  assert.ok(writes.some((c) => c.form === 'plain' && !c.tpl.includes('eval')) && writes.some((c) => c.tpl.includes('eval')), 'alias writes, with and without eval');
+  assert.ok(all.some((c) => c.tpl === '(echo x > {{P}})') && all.some((c) => c.tpl === 'A=1 cp /tmp/x {{P}}'), 'plain ( ) and A=1 writes');
+  // A hook that judges only named paths (lane 2's design under L41) passes with folder reads left out, not with them in.
+  const file = resolve(root, T);
+  const named = (c, cwd) => (/\b(rm|mv) -?\w* ?\S+/.test(c) && c.split(/\s+/).some((w) => file.startsWith(`${resolve(cwd, w)}/`))) || c.includes(T) || c.includes(file) ? 'refuse' : 'allow';
+  const kept = runCorpus(named, { target: T, cwd: root, folderReads: false }).failures;
+  assert.ok(!kept.some((f) => f.expect === 'refuse' && folderRead(f)), 'no folder read is scored');
+  assert.ok(runCorpus(named, { target: T, cwd: root }).failures.some((f) => folderRead(f)), 'scored by default');
+  assert.ok(all.some((c) => c.group === 'folder-up' && /^rm -rf /.test(c.command)) && all.some((c) => /^mv \S+ \/tmp\/y$/.test(c.command) && c.group === 'folder'), 'L41 deletes and moves');
+  assert.ok(!all.some((c) => c.group === 'allow-beside' && /xargs/.test(c.command)), 'L41: no xargs allow case');
 });
