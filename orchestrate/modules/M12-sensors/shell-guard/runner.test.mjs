@@ -1,19 +1,18 @@
-import { after, test } from 'node:test';
+import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { fileURLToPath } from 'node:url';
-import { existsSync, mkdtempSync, realpathSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { existsSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { corpus, cases, pathForms, askHook, runCorpus, hostDead } from './runner.mjs';
 import { touchCheck } from './selfcheck.mjs';
+import { tempFolders } from '../test-tmp.mjs';
 
 const fx = (f) => fileURLToPath(new URL(`./fixtures/${f}`, import.meta.url));
 const T = '.env.production';
 const node = process.execPath;
 // Temp folders, removed after the run (round 10 audit 3 minor 4: one held a planted file named like the protected one).
-const made = [];
-const tmp = () => { const d = realpathSync(mkdtempSync(`${tmpdir()}/sg-`)); made.push(d); return d; };
-after(() => { for (const d of made) rmSync(d, { recursive: true, force: true }); });
+const tmpIn = tempFolders(); // removed after the file, even on failure, and checked gone
+const tmp = () => tmpIn('sg-');
 
 test('the corpus covers every trick the row names, ~150+ refuse cases, and has allow cases', () => {
   const all = cases(T);

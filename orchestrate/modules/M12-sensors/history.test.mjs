@@ -1,17 +1,19 @@
-import { test, before, after } from 'node:test';
+import { test, before } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { writeFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { makeHistory, makeGit, cardOf } from './history.mjs';
 import { FAKE } from './fakes.mjs';
+import { tempFolders } from './test-tmp.mjs';
+
+const tmp = tempFolders(); // removed after the file, even on failure
 
 let dir, src, clone;
 const g = (cwd, ...a) => execFileSync('git', a, { cwd, encoding: 'utf8' });
 
 before(() => {
-  dir = mkdtempSync(join(tmpdir(), 'hist-'));
+  dir = tmp('hist-');
   src = join(dir, 'src');
   mkdirSync(src);
   g(src, 'init', '-q', '-b', 'main');
@@ -28,7 +30,6 @@ before(() => {
   clone = join(dir, 'clone');
   g(dir, 'clone', '-q', src, clone);
 });
-after(() => rmSync(dir, { recursive: true, force: true }));
 
 test('the history file equals git log on a fresh clone of main (sha, date, files, order)', () => {
   const h = makeHistory({ git: makeGit(src) }).historyFile();

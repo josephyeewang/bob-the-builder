@@ -36,7 +36,10 @@ function runOne(i, name, mode, sh) {
     let changed = true;
     try { changed = lstatSync(file).isSymbolicLink() || readFileSync(file, 'utf8') !== CONTENT; } catch { /* gone: changed */ }
     return seen.includes('PLANTED') || seen.includes(B64) || changed;
-  } finally { rmSync(root, { recursive: true, force: true }); }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    if (existsSync(root)) throw new Error(`could not remove ${root}`); // never leave test folders behind
+  }
 }
 
 // mode 'relative': the target is the short name, asked from its folder; 'absolute': the full path, asked from elsewhere.
