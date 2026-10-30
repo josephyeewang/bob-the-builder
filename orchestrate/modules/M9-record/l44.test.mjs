@@ -83,6 +83,8 @@ test('L44: the accepted verdict records the review user, and a verdict without o
   // A pass put in past the outbox (no outbox_uid) doesn't verify.
   env.store.transaction((tx) => tx.commit([{ entity: 'verdict', id: 'verdict-planted', doc: { session_id: 'R-1', role: 'reviewer', card: 'C-1', head: HEAD, pass: true } }], { actor: 'reviewer:R-1', kind: 'verdict' }));
   refused(put(env.record, 'dispatcher', 'card', 'C-1', { state: 'verified' }), /no passing verdict/);
-  must(env.review.applyOutbox({ role: 'reviewer', sessionId: 'R-1', card: 'C-1' }, outboxFile(env, 'reviewer', 'R-1', 'verdict-2.md', hdr({ head: HEAD, pass: true }))), 'the pass');
+  refused(env.review.applyOutbox({ role: 'reviewer', sessionId: 'R-1', card: 'C-1' }, outboxFile(env, 'reviewer', 'R-1', 'verdict-2.md', hdr({ head: HEAD, pass: true }))), /already given its verdict/);
+  launch(env, 'C-1', 'R-2');
+  must(env.review.applyOutbox({ role: 'reviewer', sessionId: 'R-2', card: 'C-1' }, outboxFile(env, 'reviewer', 'R-2', 'verdict-3.md', hdr({ head: HEAD, pass: true }))), 'the pass');
   must(put(env.record, 'dispatcher', 'card', 'C-1', { state: 'verified' }), 'verified');
 });

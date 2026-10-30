@@ -283,7 +283,10 @@ test('verified needs a passing verdict for the current head from a reviewer laun
   // A verdict naming a head the session wasn't launched on is refused at intake (L44 planted case).
   refused(apply('R-2', 'verdict-h.md', hdr({ head: HEAD2, pass: true })), /no launch of reviewer session R-2 on C-1 at head bbbbbbb/);
   refused(put(env.record, 'dispatcher', 'card', 'C-1', { state: 'verified' }), /no passing verdict for head aaaaaaa/);
-  must(apply('R-2', 'verdict-i.md', hdr({ head: HEAD, pass: true })), 'the pass');
+  // One verdict per session: R-2 already said fail, so a second file is refused and a pass needs a new launch.
+  refused(apply('R-2', 'verdict-i0.md', hdr({ head: HEAD, pass: true })), /already given its verdict/);
+  launch(env, 'C-1', 'R-5');
+  must(apply('R-5', 'verdict-i.md', hdr({ head: HEAD, pass: true })), 'the pass');
   must(put(env.record, 'dispatcher', 'card', 'C-1', { state: 'verified' }), 'verified');
   // A new head after verification sends it back to review.
   refused(put(env.record, 'workshop', 'card', 'C-1', { head: HEAD2 }), /sends it back to in_review/);
