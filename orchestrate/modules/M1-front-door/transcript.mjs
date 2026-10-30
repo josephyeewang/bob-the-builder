@@ -35,12 +35,17 @@ const blocks = (e) => {
   return Array.isArray(c) ? c.filter((b) => b && typeof b === 'object') : [];
 };
 const isTurn = (e) => (e?.type === 'user' || e?.type === 'assistant') && !e.isMeta && !e.isCompactSummary && !e.isSidechain;
-// A message Joe queued while a turn ran (M-1): only a human origin; notices and other sessions' messages are not his.
+// A message Joe queued while a turn ran (M-1). It counts unless it is plainly not his: a notice, another session's
+// message, or a meta entry. An origin missing or of a kind not listed counts (0b-8 audit round 3 M-1: queued entries
+// with no origin exist); counting one wrongly only delays a restart. An image or other block counts as "[image]".
+const NOT_JOE_ORIGINS = new Set(['task-notification', 'peer', 'cross-session', 'system', 'hook']);
 const queued = (e) => {
   const a = e?.type === 'attachment' ? e.attachment : null;
-  if (!a || a.type !== 'queued_command' || e.isSidechain) return null;
-  if (!(a.origin?.kind === 'human' || (a.origin === undefined && a.humanTurn === true))) return null;
-  const text = typeof a.prompt === 'string' ? a.prompt : blocks({ message: { content: a.prompt } }).map((b) => b.text ?? '').join('\n');
+  if (!a || a.type !== 'queued_command' || e.isSidechain || e.isMeta || a.isMeta) return null;
+  if (a.origin && NOT_JOE_ORIGINS.has(a.origin.kind)) return null;
+  if (a.commandMode && a.commandMode !== 'prompt') return null;
+  const text = typeof a.prompt === 'string' ? a.prompt
+    : blocks({ message: { content: a.prompt } }).map((b) => (b.type === 'text' ? String(b.text ?? '') : `[${String(b.type).replace(/[^a-z_]/g, '')}]`)).join('\n');
   return { text, at: Number.isFinite(Date.parse(a.timestamp)) ? Date.parse(a.timestamp) : at(e) };
 };
 // Drop repeated entries (the same uuid twice), keeping the first (round 2 minor 4).
@@ -63,13 +68,23 @@ export function questionBoxes(entries) {
         boxes.set(b.id, { callId: b.id, askedAt: at(e), askedEntry: e.uuid ?? null, answer: null });
       }
       if (e.type === 'user' && b.type === 'tool_result' && boxes.has(b.tool_use_id) && !boxes.get(b.tool_use_id).answer) {
-        boxes.get(b.tool_use_id).answer = { at: at(e), entry: e.uuid ?? null, isError: b.is_error === true, automated: AUTOMATED_PREFIXES.some((p) => resultText(b).toLowerCase().includes(p)) };
+        boxes.get(b.tool_use_id).answer = { at: at(e), entry: e.uuid ?? null, isError: b.is_error === true, automated: answerAutomated(e, b) };
       }
     }
   }
   return [...boxes.values()];
 }
 
+// The answer itself: the log's structured answers when present (the result text repeats the question, so a question
+// mentioning "[watchdog]" would otherwise hide Joe's real answer; 0b-8 audit round 3 minor 1), else the result text.
+const answerValues = (e, b) => {
+  const a = e?.toolUseResult?.answers;
+  return a && typeof a === 'object' && !Array.isArray(a) ? Object.values(a).map((v) => String(v)) : null;
+};
+const answerAutomated = (e, b) => {
+  const v = answerValues(e, b);
+  return v ? v.some((x) => isAutomated(x)) : AUTOMATED_PREFIXES.some((p) => resultText(b).toLowerCase().includes(p));
+};
 const resultText = (b) => (typeof b.content === 'string' ? b.content : blocks({ message: { content: b.content } }).map((x) => x.text ?? '').join(' '));
 
 // Joe's turns, oldest first: { at, kind: 'typed'|'answer'|'declined', text, index }. Anything Joe might have done counts
@@ -90,7 +105,7 @@ export function joeTurns(entries) {
     const answers = bs.filter((b) => b.type === 'tool_result' && boxIds.has(b.tool_use_id));
     if (answers.length) {
       const text = answers.map(resultText).join('\n');
-      if (AUTOMATED_PREFIXES.some((p) => text.toLowerCase().includes(p))) return;
+      if (answers.some((b) => answerAutomated(e, b))) return;
       out.push({ at: at(e), kind: answers.every((b) => b.is_error === true) ? 'declined' : 'answer', text, index });
       return;
     }

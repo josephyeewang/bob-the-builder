@@ -121,8 +121,11 @@ export const CHECKS = {
     const t = now();
     const future = (await firstParent(api, p.repo, 100)).filter((c) => Date.parse(c.commit?.committer?.date) > t + FUTURE_SLACK);
     if (future.length) return { ok: false, code: `commit-dated-in-future ${future.length}` };
-    const acts = await api(`/repos/${p.repo}/activity?ref=refs/heads/main&per_page=100`);
+    const acts = await api(`/repos/${p.repo}/activity?ref=refs/heads/main&direction=desc&per_page=100`);
     if (!Array.isArray(acts)) return { ok: false, code: 'activity-unreadable' };
+    // A full page that doesn't reach back 48 h may hide an unaudited update (0b-7 audit round 5 minor 1).
+    const seen = acts.map((a) => Date.parse(a?.timestamp)).filter(Number.isFinite);
+    if (acts.length >= 100 && !(Math.min(...seen) <= t - AUDIT_MAX_AGE)) return { ok: false, code: 'activity-window-not-covered' };
     // An update entry without the fields this reads is a FAIL, never "nothing due" (0b-7 audit round 2, M-3b).
     const updates = acts.filter((a) => MAIN_UPDATES.includes(a?.activity_type));
     const malformed = updates.filter((a) => !/^[0-9a-f]{40}$/.test(a.after ?? '') || !Number.isFinite(Date.parse(a.timestamp))).length;
@@ -173,7 +176,7 @@ export const CHECKS = {
     const robot = String(p.robot).toLowerCase();
     const info = await api(`/repos/${p.repo}`);
     if (info?.default_branch !== 'main') return { ok: false, code: 'default-branch-not-main' };
-    const acts = await api(`/repos/${p.repo}/activity?ref=refs/heads/main&time_period=week&per_page=100`);
+    const acts = await api(`/repos/${p.repo}/activity?ref=refs/heads/main&time_period=week&direction=desc&per_page=100`);
     if (!Array.isArray(acts)) return { ok: false, code: 'activity-unreadable' };
     const times = acts.map((a) => Date.parse(a?.timestamp));
     if (times.some((x) => !Number.isFinite(x))) return { ok: false, code: 'activity-entry-malformed' };

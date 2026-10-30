@@ -25,10 +25,16 @@ function setup({ names } = {}) {
       if (!stopped && new Date(t).getUTCMinutes() === 17) runs.unshift({ id: ++id, created_at: new Date(t).toISOString(), status: 'completed', steps: steps.map((s) => ({ ...s })) });
     }
   };
-  // The outside repo's owner file: the slot tag, and a clear set at install (the first pass on a Mini latches).
-  let owner = { tags: { 'product 1': TAG }, cleared: { 'product 1': new Date(T0).toISOString() } };
+  // The outside repo's owner file: the slot tag, and the owner's clear written right after the Mini's first pass
+  // latched ('install' stands for that moment; the first pass on a Mini latches, round 5 MAT-1).
+  let owner = { tags: { 'product 1': TAG }, cleared: { 'product 1': 'install' } };
+  let installAt = null;
   const fetchJson = async (path) => {
-    if (path.endsWith('/contents/robot-merges-owner.json')) { if (owner === null) throw Object.assign(new Error('x'), { status: 404 }); return { content: Buffer.from(JSON.stringify(owner)).toString('base64') }; }
+    if (path.endsWith('/contents/robot-merges-owner.json')) {
+      if (owner === null) throw Object.assign(new Error('x'), { status: 404 });
+      const o = owner.cleared?.['product 1'] === 'install' ? { ...owner, cleared: { 'product 1': new Date(installAt ??= t).toISOString() } } : owner;
+      return { content: Buffer.from(JSON.stringify(o)).toString('base64') };
+    }
     if (path.includes('/workflows/')) return { workflow_runs: runs.slice(0, 10).map(({ steps: _s, ...r }) => r) };
     const m = /\/runs\/(\d+)\/jobs/.exec(path);
     return { jobs: [{ name: 'check', steps: runs.find((r) => r.id === Number(m[1])).steps }] };

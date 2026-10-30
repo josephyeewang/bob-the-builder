@@ -20,7 +20,10 @@ import { checkTimeZone } from './timezone.mjs';
 export const FRONT_DOOR_KINDS = Object.freeze(['request', 'state', 'idea']);
 export const STATES_ALLOWED = Object.freeze(['paused', 'away']);
 export const REQUESTS = Object.freeze(['resume', 'wrapup', 'rotate']);
-const ID = /^[A-Za-z0-9-]{1,64}$/;
+// The id the skill writes: date, time, two letters (20261103-0915-kq). Nothing longer fits, so a key can't ride in a file
+// name into the record's diary (0b-8 audit round 3 M-2).
+export const OUTBOX_ID = /^\d{8}-\d{4}-[a-z]{2}$/;
+const ID = OUTBOX_ID;
 const PRODUCT = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/;
 // A key's NAME: capitals with an underscore (STRIPE_KEY), never a key-ID shape (round 2 minor 6: AKIA…).
 const KEY_NAME = /^[A-Z][A-Z0-9]*_[A-Z0-9_]{1,62}$/;
@@ -63,9 +66,9 @@ export function outboxFile(kind, id, input) {
 
 // Intake's check of one file the Front Door left. Returns the normalized doc, or a refusal.
 export function checkOutboxFile(name, text) {
-  const m = /^(request|state|idea)-([A-Za-z0-9-]{1,80})\.(json|md)$/.exec(String(name));
-  if (!m) return refuse('not a Front Door outbox file name');
-  const [, kind, , ext] = m;
+  const m = /^(request|state|idea)-(?:(resume|wrapup|rotate)-)?(\d{8}-\d{4}-[a-z]{2})\.(json|md)$/.exec(String(name));
+  if (!m || maskSecrets(String(name)).text !== String(name)) return refuse('not a Front Door outbox file name');
+  const [, kind, , , ext] = m;
   if (kind === 'idea') {
     if (ext !== 'md') return refuse('an idea is a .md file');
     if (!String(text).split('\n').filter((l) => l !== '').every((l) => l === '>' || l.startsWith('> '))) return refuse('idea text must be quoted on every line');

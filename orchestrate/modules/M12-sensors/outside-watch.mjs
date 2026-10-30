@@ -18,6 +18,9 @@
 //     A robot-merges step failing in 2 runs in a row, or a gap of more than 5 days in what the Mini saw (or no earlier
 //     fact), sets red_since; the gate stays shut until the owner writes a "cleared" time at or after red_since for
 //     that slot in robot-merges-owner.json (and the step is green). One failed run alone (a GitHub blip) doesn't latch.
+//     Round 5: a first-pass or gap latch starts when the Mini noticed, so a clear written earlier never opens it (MAT-1);
+//     only a passed step resets the failed-run count, never a step it couldn't read, skipped or cancelled (MAT-2); and
+//     the gap counts between the check runs the Mini saw as well as between its own passes (MAT-3).
 // Endpoint shapes assumed from GitHub's REST docs, 29 Oct 2026 (Principle 9).
 
 export const STOPPED_MIN = 90;
@@ -94,11 +97,16 @@ export async function watchOutside({ fetchJson, repo, workflow = 'outside-check.
       // The latch. A new run that failed adds to red_runs; the same run seen again doesn't.
       const newRun = prevDoc?.run_id !== (done.id ?? null);
       const stepFailed = step?.conclusion === 'failure';
-      const redRuns = stepFailed ? (newRun ? (prevDoc?.red_runs ?? 0) + 1 : (prevDoc?.red_runs ?? 0)) : 0;
+      const prevRuns = prevDoc?.red_runs ?? 0;
+      const redRuns = step?.conclusion === 'success' ? 0 : stepFailed && newRun ? prevRuns + 1 : prevRuns;
       let redSince = prevDoc?.red_since ?? null;
       let latchWhy = prevDoc?.latch_reason ?? null;
-      const gap = !prevDoc || !(now() - Date.parse(prevDoc.at) <= UNSEEN_GAP_MS);
-      if (!redSince && gap) { redSince = prevDoc?.at && Number.isFinite(Date.parse(prevDoc.at)) ? new Date(Date.parse(prevDoc.at)).toISOString() : '1970-01-01T00:00:00.000Z'; latchWhy = prevDoc ? 'the Mini saw nothing for more than 5 days' : 'no earlier result on this Mini'; }
+      const passGap = !prevDoc || !(now() - Date.parse(prevDoc.at) <= UNSEEN_GAP_MS);
+      const runGap = !!prevDoc && newRun && ranAt !== null && !(Date.parse(ranAt) - Date.parse(prevDoc.run_at) <= UNSEEN_GAP_MS);
+      if (!redSince && (passGap || runGap)) {
+        redSince = nowIso;
+        latchWhy = !prevDoc ? 'no earlier result on this Mini' : passGap ? 'the Mini saw nothing for more than 5 days' : 'more than 5 days between outside-check runs';
+      }
       if (!redSince && redRuns >= LATCH_RUNS) { redSince = ranAt ?? nowIso; latchWhy = `failed in ${redRuns} runs in a row`; }
       const cleared = Date.parse(ownerFile?.cleared?.[label]);
       if (redSince && green && Number.isFinite(cleared) && cleared >= Date.parse(redSince) && cleared <= now() + 5 * 60e3) { redSince = null; latchWhy = null; }
@@ -131,6 +139,8 @@ export function robotMergesGreen({ read, product, now = () => Date.now() }) {
   try { d = read(ROBOT_FACT(product)); } catch { d = null; }
   if (!d) return { open: false, problems: ['robot-merges: no fact yet'] };
   const problems = [];
+  // Two names can share a fact id ("a.b", "a-b"); the fact must be this product's (round 5 minor 4).
+  if (d.product !== product) problems.push('robot-merges: the fact belongs to another product name');
   if (d.green !== true) problems.push(`robot-merges: latest result not green (${d.reason ?? 'unknown'})`);
   if (d.red_since !== null && d.red_since !== undefined) problems.push(`robot-merges: red since ${d.red_since} (${d.latch_reason ?? 'latched'}); stays shut until the owner clears it in ${OWNER_FILE}`);
   if (d.red_since === undefined) problems.push('robot-merges: fact has no latch field (written by an older version)');

@@ -36,16 +36,16 @@ test('0b-8 audit round 2 M-2: a key hidden behind a \\u escape is refused and ne
   // In the product field, whose name rule a key's characters pass.
   const text = `{"request":"resume","product":"${escaped}","name":null}`;
   assert.equal(JSON.parse(text).product, k, 'the planted file really holds the key once parsed');
-  const c = checkOutboxFile('request-resume-k-9.json', text);
+  const c = checkOutboxFile('request-resume-20261103-0915-ao.json', text);
   assert.equal(c.ok, false);
   assert.equal(JSON.stringify(c).includes(k.slice(1)), false);
 });
 
 test('0b-8 audit round 2 minor 6: rotate refuses a key-ID shape and a name with no underscore', () => {
   const id = `AKIA${'Q7'.repeat(8)}`;
-  assert.equal(outboxFile('request', 'k-1', { request: 'rotate', name: id }).ok, false);
-  assert.equal(outboxFile('request', 'k-2', { request: 'rotate', name: 'ABCDEFGH' }).ok, false);
-  assert.equal(outboxFile('request', 'k-3', { request: 'rotate', name: 'GITHUB_TOKEN' }).ok, true);
+  assert.equal(outboxFile('request', '20261103-0915-ae', { request: 'rotate', name: id }).ok, false);
+  assert.equal(outboxFile('request', '20261103-0915-af', { request: 'rotate', name: 'ABCDEFGH' }).ok, false);
+  assert.equal(outboxFile('request', '20261103-0915-ai', { request: 'rotate', name: 'GITHUB_TOKEN' }).ok, true);
 });
 
 function tripWorld() {

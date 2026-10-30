@@ -30,7 +30,7 @@ test('every file shape in the skill passes intake as written (the skill and outb
     assert.equal(r.ok, true, `${j}: ${r.reason}`);
   }
   // the away shape, filled in
-  assert.equal(checkOutboxFile('state-1.json', '{"product":"test-product","state":"away","until":"2026-11-07","tz":"Europe/Prague"}').ok, true);
+  assert.equal(checkOutboxFile('state-20261103-0915-an.json', '{"product":"test-product","state":"away","until":"2026-11-07","tz":"Europe/Prague"}').ok, true);
   assert.equal(examples.some((j) => JSON.parse(j).state === 'active'), false, 'no example sets a product active');
 });
 

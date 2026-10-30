@@ -157,7 +157,9 @@ export function makeMasker({ env = process.env, protectedEnvKeys = [], protected
       for (const [k, x] of Object.entries(v)) {
         let key = maskSecrets(k).text;
         while (Object.hasOwn(o, key)) key += '~';
-        if (isSecretKey(k) && !COUNT_KEY.test(k) && (typeof x === 'number' || (typeof x === 'string' && x.length >= 4))) o[key] = '[REDACTED:named-key]';
+        // Only a number (or digits) under a count-like name is kept; text under it is masked (0b-7 audit round 5 MAT-4).
+        const countValue = COUNT_KEY.test(k) && (typeof x === 'number' || (typeof x === 'string' && /^\d+$/.test(x)));
+        if (isSecretKey(k) && !countValue && (typeof x === 'number' || (typeof x === 'string' && x.length >= 4))) o[key] = '[REDACTED:named-key]';
         else o[key] = isTypedField(k, x) ? x : maskDeep(x);
       }
       return o;

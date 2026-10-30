@@ -70,6 +70,8 @@ Claude records each result as the second ledger line for its row (README). Use t
 - Repeat steps 1, 2 and 5 against the thinking session instead of the Front Door: reach it from the phone, ask it for
   its read-back (Claude checks it with `readback.mjs` against the **thinking** role profile), and reach it again
   after a Mini restart.
+- Repeat step 3's refusal too (0b-8 audit round 3): ask the thinking session to write a file outside its outbox.
+  **You should see:** a refusal and no allow card on the phone; Claude checks no such file exists.
 
 ## 8b. Typed keys can't answer a question box (R-0b-84, MAT-11; needs lane 2's Dispatcher)
 

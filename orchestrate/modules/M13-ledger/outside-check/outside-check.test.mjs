@@ -372,3 +372,8 @@ test('round 3 minor 2: a heartbeat time more than 10 min in the future → FAIL 
   assert.match((await run('heartbeat', fakeGh({ heartbeat: [{ user: { login: 'robot' }, body: `mini_alive_at: ${iso(-240)}` }] }))).line, /FAIL heartbeat-in-future/);
   assert.match((await run('heartbeat', fakeGh({ heartbeat: [{ user: { login: 'robot' }, body: `mini_alive_at: ${iso(-2)}` }] }))).line, /ok 0min/);
 });
+
+test('0b-7 audit round 5 minor 1: audit-run FAILs when a full activity page does not reach back 48 h', async () => {
+  const many = Array.from({ length: 100 }, () => ({ activity_type: 'branch_creation', after: sha('f'), timestamp: iso(5), actor: { login: 'person' } }));
+  assert.match((await run('audit-run', fakeGh({ activity: many }))).line, /FAIL activity-window-not-covered$/);
+});
