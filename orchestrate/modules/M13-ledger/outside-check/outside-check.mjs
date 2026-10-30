@@ -86,7 +86,9 @@ export const CHECKS = {
       .map((i) => /^mini_alive_at: (\S+)$/m.exec(i.body ?? '')?.[1]).map((t) => Date.parse(t)).filter(Number.isFinite);
     if (!times.length) return { ok: false, code: 'heartbeat-missing' };
     const age = Math.round((now() - Math.max(...times)) / 60e3);
-    return age > STALE_MIN ? { ok: false, code: `heartbeat-stale ${age}min` } : { ok: true, code: `${age}min` };
+    // A time more than 10 minutes ahead is a wrong clock, not a fresh heartbeat (round 3 minor 2).
+    if (age < -10) return { ok: false, code: 'heartbeat-in-future' };
+    return age > STALE_MIN ? { ok: false, code: `heartbeat-stale ${age}min` } : { ok: true, code: `${Math.max(age, 0)}min` };
   },
   async 'audit-files'(p, { api, pinned }) {
     const files = pinned[p.label];

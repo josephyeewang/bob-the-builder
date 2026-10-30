@@ -328,3 +328,8 @@ test('robot-merges planted: 300 or more changed files can\'t be fully listed →
 test('the template ships empty docs-lane and acknowledged lists', () => {
   for (const f of ['./pinned-docs-lane.json', './acknowledged-merges.json']) assert.deepEqual(JSON.parse(readFileSync(new URL(f, import.meta.url), 'utf8')), {});
 });
+
+test('round 3 minor 2: a heartbeat time more than 10 min in the future → FAIL (a wrong clock, not fresh)', async () => {
+  assert.match((await run('heartbeat', fakeGh({ heartbeat: [{ user: { login: 'robot' }, body: `mini_alive_at: ${iso(-240)}` }] }))).line, /FAIL heartbeat-in-future/);
+  assert.match((await run('heartbeat', fakeGh({ heartbeat: [{ user: { login: 'robot' }, body: `mini_alive_at: ${iso(-2)}` }] }))).line, /ok 0min/);
+});

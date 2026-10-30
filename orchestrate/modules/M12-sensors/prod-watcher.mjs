@@ -79,6 +79,7 @@ export async function watchOnce({ vercel, rulesEntry, mainFirstParent, evidence,
   const judge = (d) => isSupported(d, { stage, mainFirstParent, evidence });
 
   if (fallback) await raise('no-stage', 'rules', 'rules entry has no stage', 'The product\'s rules entry has no stage (first/second), so the watcher uses the strict rule. Add the stage to the rules entry.');
+  else await alerts.clear({ key: `${product}|no-stage|rules`, note: 'The rules entry has a stage again.' });
 
   const ready = deps.filter((d) => d.state === 'READY' && d.target === 'production');
   const seen = new Set(prev?.seen ?? []);

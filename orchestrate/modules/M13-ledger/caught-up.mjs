@@ -49,7 +49,7 @@ export async function caughtUpOnce({ rec, gh, writer, ownerId, product, lastGood
   const asks = rec.list('ask').map((a) => ({ id: a.id, ...a.doc }));
   const expired = asks.filter((a) => a.state === 'expired' && whileDown(a));
   const waiting = asks.filter((a) => a.state === 'answered' && whileDown(a));
-  const ideasWhileDown = rec.list('fact').filter((f) => f.doc.kind === 'fact.idea-issue' && f.doc.ts >= downSince).length;
+  const ideasWhileDown = rec.list('fact').filter((f) => f.doc.kind === 'fact.idea-issue' && Date.parse(f.doc.ts) >= Date.parse(downSince)).length;
 
   const idem = createHash('sha256').update(`caught-up|${product}|${downSince}`).digest('hex').slice(0, 16);
   const pid = `push-request-${idem}`;

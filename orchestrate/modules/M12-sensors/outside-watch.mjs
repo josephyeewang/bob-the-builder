@@ -46,8 +46,22 @@ export async function watchOutside({ fetchJson, repo, workflow = 'outside-check.
 
   const done = runs.filter((r) => r.status === 'completed').sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at))[0];
   if (!done) return out;
-  const jobs = (await fetchJson(`/repos/${repo}/actions/runs/${done.id}/jobs?per_page=10`)).jobs ?? [];
+  let jobs;
+  try { jobs = (await fetchJson(`/repos/${repo}/actions/runs/${done.id}/jobs?per_page=10`)).jobs; } catch { jobs = undefined; }
+  const jobsKey = 'outside-check|watch-cannot-read-steps|github';
+  if (!Array.isArray(jobs)) {
+    out.push(['cannot-read-steps', await homeAlerts.raise({ key: jobsKey, title: 'The Mini cannot read the outside check\'s steps',
+      body: 'Reading the newest outside-check run\'s steps failed, so which checks pass is unknown until it can.', status: 'cannot-read' })]);
+    jobs = [];
+  } else out.push(['cannot-read-steps', await homeAlerts.clear({ key: jobsKey, note: 'The Mini can read the outside check\'s steps again.' })]);
   const steps = jobs.flatMap((j) => j.steps ?? []);
+  // A run that didn't finish green (timed out, cancelled) → one home alert; its missing or skipped steps are not passes
+  // (round 3 minor 5). Product steps only raise on "failure" and clear on "success" below.
+  const runKey = 'outside-check|run-not-green|schedule';
+  if (done.conclusion && done.conclusion !== 'success' && done.conclusion !== 'failure') {
+    out.push(['run-not-green', await homeAlerts.raise({ key: runKey, title: 'The newest outside-check run did not finish',
+      body: `The newest scheduled outside-check run ended "${String(done.conclusion).replace(/[^a-z_]/g, '')}", so some checks did not run.`, status: 'not-finished' })]);
+  } else if (done.conclusion) out.push(['run-not-green', await homeAlerts.clear({ key: runKey, note: 'The outside check finished a run again.' })]);
   if (writer) {
     const ranAt = Number.isFinite(Date.parse(done.created_at)) ? new Date(Date.parse(done.created_at)).toISOString() : null;
     for (const [label, product] of Object.entries(productNames)) {

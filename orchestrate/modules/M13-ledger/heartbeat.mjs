@@ -43,8 +43,8 @@ export async function heartbeatOnce({ product, writer, gh, alerts, owner, probes
   const d = await probe(probes.dispatcherLastGood);
   const dParsed = d.ok && d.v ? Date.parse(d.v) : NaN;
   const dAge = Number.isFinite(dParsed) ? Math.round((t - dParsed) / 60e3) : null;
-  await set('dispatcher', dAge === null || !(dAge <= DISPATCHER_LATE_MIN),
-    `last good Dispatcher pass: ${dAge === null ? 'unknown' : `${dAge} min ago`}`,
+  await set('dispatcher', dAge === null || dAge < -10 || !(dAge <= DISPATCHER_LATE_MIN),
+    `last good Dispatcher pass: ${dAge === null ? 'unknown' : dAge < -10 ? 'time is in the future' : `${dAge} min ago`}`,
     `The Dispatcher's last good pass was ${dAge === null ? 'never recorded' : `${dAge} minutes ago`} (red after ${DISPATCHER_LATE_MIN}). Nothing new is being started or merged.`);
 
   const r = await probe(probes.rulesReadable);

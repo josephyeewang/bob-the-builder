@@ -119,3 +119,17 @@ test('without a writer the watch writes no fact (alerts unchanged)', async () =>
   w.setSteps(RM('success')); w.tick(20); await w.pass();
   assert.equal(w.fact(), undefined);
 });
+
+test('round 3 minor 5: a cancelled or timed-out run, or steps that cannot be read, raise a home alert', async () => {
+  const rec = memoryRecord(); const home = fakeIssues();
+  const homeAlerts = makeAlerts({ rec, gh: home, owner: 'o', now: () => new Date(T0) });
+  const runs = [{ id: 1, created_at: new Date(T0 - 60e3).toISOString(), status: 'completed', conclusion: 'cancelled' }];
+  let jobs = { jobs: [] };
+  const fetchJson = async (path) => (path.includes('/workflows/') ? { workflow_runs: runs } : jobs);
+  const pass = () => watchOutside({ fetchJson, repo: 'o/c', homeAlerts, productAlerts: {}, now: () => T0 });
+  await pass();
+  assert.ok([...home.issues.values()].some((i) => /did not finish/.test(i.title) && !i.closed));
+  jobs = { message: 'Not Found' };
+  await pass();
+  assert.ok([...home.issues.values()].some((i) => /cannot read the outside check's steps/.test(i.title) && !i.closed));
+});
