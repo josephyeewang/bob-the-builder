@@ -22,6 +22,7 @@ import { compileList, pathProblem } from './paths.mjs';
 import { PRODUCT_STATES, HOURS, validZone, compareVersions } from './policy.mjs';
 import { loadRoles, profileFor } from './roles.mjs';
 import { docsLaneProblem, DOCS_FLOOR } from './lane-check.mjs';
+import { activeKind } from '../../shared/asks.mjs';
 
 // Mac-wide keys and how they combine across products (MAT-10, R2-M5(b)). `*` = every key under that map.
 export const MAC_MIN = Object.freeze(['caps.editing_per_mac', 'caps.scripts_per_mac', 'caps.script_agents_max',
@@ -339,11 +340,29 @@ export function makeEngine({ products, rulesState, productState, running, rolesD
     return allow('Tier 2, no risky class');
   }
 
+  // count_approval (0b-5 spec review round 2 m2-2): which answer channel an ask needs. Its own GitHub Approve (tier 1)
+  // for a kind answered on GitHub, any risky class, or a Tier-1 go; a tap (tier 2) otherwise. The answer is "ask" at
+  // that tier when the channel M2 read the answer from is that channel, else deny; M2 counts the answer only on "ask"
+  // AND its own binding check. The kinds are the one shared table (shared/asks.mjs).
+  const CHANNEL_TIER = { github_review: 1, tap: 2 };
+  function countApproval(s) {
+    policyOf(s.product);
+    const k = activeKind(s.ask_kind);
+    if (!k) return deny(`unknown or inactive ask kind "${s.ask_kind}"`);
+    if (!Array.isArray(s.risky) || !s.risky.every((r) => typeof r === 'string' && r)) return deny('risky must be a list of class names');
+    if (s.tier !== null && s.tier !== undefined && s.tier !== 1 && s.tier !== 2) return deny('tier must be 1, 2 or unset');
+    if (k.go && s.tier !== 1 && s.tier !== 2) return deny('a go names its tier');
+    if (!Object.hasOwn(CHANNEL_TIER, s.channel ?? '')) return deny('channel must be github_review or tap');
+    const need = k.channel === 'github_review' || s.risky.length || (k.go && s.tier === 1) ? 1 : 2;
+    if (CHANNEL_TIER[s.channel] !== need) return deny(need === 1 ? 'this answer needs the owner\'s own Approve on GitHub' : 'this answer is a tap in a question box');
+    return ask(need, need === 1 ? 'the owner\'s GitHub Approve' : 'the owner\'s tap');
+  }
+
   const ANSWERS = {
     start_session: startSession,
     push_branch: pushBranch,
     merge: (subject) => (deepMerge === true ? mergeDeep(subject) : mergeDocsLane(subject)),
-    count_approval: () => deny('not built until 0b-5 (M2)'),
+    count_approval: countApproval,
     delete_copy: () => deny('nothing is deleted in 0b (keep, don\'t delete)'),
     write_production: () => deny('production writes are not allowed in this phase'),
     flip_switch: () => deny('the Switch Runner is Phase 2'),

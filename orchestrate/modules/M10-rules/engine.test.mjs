@@ -434,8 +434,27 @@ test('merge: the exact-reverse answer, in R3-M3\'s order', () => {
 
 test('actions not open in 0b are denied', () => {
   const w = world();
-  for (const a of ['count_approval', 'delete_copy', 'write_production', 'flip_switch']) assert.equal(w.rules.may(a, { product: 'app' }).decision, 'deny', a);
-  assert.match(w.rules.may('count_approval', {}).reason, /0b-5/);
+  for (const a of ['delete_copy', 'write_production', 'flip_switch']) assert.equal(w.rules.may(a, { product: 'app' }).decision, 'deny', a);
+});
+
+test('count_approval: the channel each ask needs (0b-5 m2-2)', () => {
+  const w = world();
+  const c = (o) => w.rules.may('count_approval', { product: 'app', card: 'C-1', risky: [], tier: null, ...o });
+  const d = (o) => { const r = c(o); return r.decision === 'ask' ? `ask${r.tier}` : r.decision; };
+  assert.equal(d({ ask_kind: 'tap_yes_no', channel: 'tap' }), 'ask2');
+  assert.equal(d({ ask_kind: 'tap_yes_no', channel: 'github_review' }), 'deny');
+  assert.equal(d({ ask_kind: 'tap_yes_no', channel: 'tap', risky: ['schema'] }), 'deny', 'a risky class needs GitHub');
+  assert.equal(d({ ask_kind: 'risky_approve', channel: 'github_review', risky: ['schema'] }), 'ask1');
+  assert.equal(d({ ask_kind: 'risky_approve', channel: 'tap' }), 'deny');
+  assert.equal(d({ ask_kind: 'decision', channel: 'github_review' }), 'ask1');
+  assert.equal(d({ ask_kind: 'go_t2', channel: 'tap', tier: 2 }), 'ask2');
+  assert.equal(d({ ask_kind: 'go_t2', channel: 'tap', tier: 1 }), 'deny', 'a Tier-1 go is a GitHub Approve');
+  assert.equal(d({ ask_kind: 'go_t2', channel: 'tap' }), 'deny', 'a go names its tier');
+  assert.equal(d({ ask_kind: 'go_t1', channel: 'github_review', tier: 1 }), 'ask1');
+  assert.equal(d({ ask_kind: 'undo', channel: 'tap' }), 'ask2');
+  for (const bad of [{ ask_kind: 'jobs_list', channel: 'tap' }, { ask_kind: 'nope', channel: 'tap' }, { ask_kind: 'toString', channel: 'tap' },
+    { ask_kind: 'tap_yes_no', channel: 'phone' }, { ask_kind: 'tap_yes_no', channel: 'tap', risky: 'schema' }, { ask_kind: 'tap_yes_no', channel: 'tap', tier: 3 }]) assert.equal(d(bad), 'deny', JSON.stringify(bad));
+  assert.equal(w.rules.may('count_approval', { product: 'nope', ask_kind: 'tap_yes_no', channel: 'tap', risky: [] }).decision, 'deny', 'an unknown product');
 });
 
 test('the engine on its own denies an action it does not own, even an inherited name (audit minor 5)', () => {

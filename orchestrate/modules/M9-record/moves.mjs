@@ -39,8 +39,10 @@ export const MOVES = Object.freeze({
     waiting: { ready: D, in_review: D, verified: D, closed_no_answer: D, cancelled: A },
   }),
   ask: freeze({
-    open: { pushed: A, withdrawn: A },
-    // → open: the first lapse (reask_count 0 → 1) or a released question box (count unchanged), R3-M1.
+    // open → expired: an ask whose box was released lapses a second time without being shown again (0b-5 M5-2).
+    open: { pushed: A, withdrawn: A, expired: A },
+    // → open: the first lapse (reask_count 0 → 1) or a released question box (count unchanged), R3-M1. An answered
+    // ask goes back to open only on its first lapse (the 24-hour rule), never on a release (0b-5 M5-2).
     pushed: { answered: A, expired: A, withdrawn: A, open: A },
     answered: { consumed: A, expired: A, withdrawn: A, open: A },
   }),

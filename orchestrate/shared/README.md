@@ -17,7 +17,7 @@ rules.rev;                                                    // the rules versi
 ```
 
 - **It never throws and fails closed.** An unknown action, an error, or no readable rules is `deny`. A classification that fails is `unclassifiable`, Tier 1.
-- `ask` means allowed only with the owner's answer: `tier: 1` is their GitHub Approve, `tier: 2` a tap.
+- `ask` means allowed only with the owner's answer, and `tier` names the answer channel: `tier: 1` is their own GitHub Approve, `tier: 2` a tap on M2's question box.
 - Actions (`ACTIONS`): `start_session`, `write_production`, `push_branch`, `merge`, `count_approval`, `delete_copy`, `flip_switch`. A new one is added here first, by lane 1.
 - What each action is asked with (missing fields are a deny):
 
@@ -26,7 +26,7 @@ rules.rev;                                                    // the rules versi
   | `start_session` | `{ product, role, tier, editing, card?, usage? }`. A Tier-1 start needs `usage.read_at` (an ISO time) that is fresh. |
   | `push_branch` | `{ product, card: { id, rows, kind?, doc: { lane } }, files }`. An exact reverse also passes `card.kind: 'exact_reverse'` and `reverses_files` (the reversed commit's paths). |
   | `merge` | `{ product, card, files, declared_tier, labels, truncated? }`. At the first cutover only a docs-lane change passes (`M10-rules/README.md`, L34); anything else is denied for MAIN to merge as today. An exact reverse also passes `kind: 'exact_reverse'`, `reverses` (the commit id), `exact_reverse_ok` (from M10's `checkExactReverse`) and `reversed_audit` (`failure`, `success` or `none`). |
-  | `count_approval` | denied until 0b-5 M2 Approvals switches it on |
+  | `count_approval` | `{ product, ask_kind, risky, tier, channel }`. `channel` is where M2 read the answer (`github_review` or `tap`). The owner's own GitHub Approve (tier 1) is needed for a kind answered on GitHub, any risky class, or a Tier-1 go; a tap (tier 2) otherwise. "ask" at that tier when the channel matches, else deny. M2 counts an answer only on "ask" and its own binding check. |
   | `delete_copy`, `write_production`, `flip_switch` | denied in 0b |
 
 - `classify(change)` takes `{ product, files: [{ path, previous_path?, status, mode?, added_lines?, removed_lines? }], truncated?, declared_tier?, labels? }`. It always uses the current rules: a `policy` or `atCommit` field is dropped, so a caller can't hand in looser rules. The GitHub-side checker reads the parent commit's rules with M10's `classifyWithRulesText`.
@@ -60,7 +60,7 @@ rec.lapseClaims(now);
 - **Outbox kinds** (`OUTBOX_KINDS`) are the file-name prefixes each AI role may send. A worker hands its card in with `handin-` (running → in_review). An `ask-request-` is stored as an inert report; only `approvals` turns it into an ask.
 - **Plan fingerprint**: `plan-fingerprint.mjs` is the one fingerprint a go binds to. M2 Approvals stores it on the go; M9 recomputes it at `draft → ready`.
 
-- **Required fields** (`REQUIRED_FIELDS`) are refused when missing, by the fake too: a card's `state` and `module`; a verdict's `session_id` and `head`; every field of `launch` and `merge_request` (both written by the Dispatcher only).
+- **Required fields** (`REQUIRED_FIELDS`) are refused when missing, by the fake too: a card's `state` and `module`; a verdict's `session_id` and `head`; every field of `merge_request` and of `launch` (both written by the Dispatcher only), except that a launch names a `card` and `head` only for a worker, reviewer or auditor (`CARD_ROLES`; one check, `missingFields`).
 - **Final states** (`FINAL_STATES`) need no time limit; every other state has one in the rules. `closed → reverted` is the one move out of a final state.
 - **`joe` writes nothing**: the owner's answers reach the record through `approvals`.
 - **Only plain scripts call `write`**, under their own actor name (`SCRIPT_ACTORS`). AI sessions never do: the Dispatcher hands their outbox files to `applyOutbox`, tagged with the session's role.
