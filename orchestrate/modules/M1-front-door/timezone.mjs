@@ -1,5 +1,5 @@
 // timezone.mjs — accept a time zone only as a real IANA name the system knows (review-0b-8 minor 10).
-// "EST", "Pacific" or "GMT+2" are ambiguous: the skill asks once more, and until Joe answers, tz stays null
+// "EST", "Pacific" or "GMT+2" are ambiguous: the skill asks once more, and until the owner answers, tz stays null
 // (on the Merge Gate, number work holds; [Undo] still runs).
 
 export function checkTimeZone(name) {

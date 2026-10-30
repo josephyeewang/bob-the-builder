@@ -1,19 +1,19 @@
 // trip.mjs — the facts half of trip mode (R-0b-83; design v4 §7.2 R2; review-0b-8 MAT-8, MAT-9, minors 9, 10, 11).
 //
 // "I'm away until Friday" → the skill writes one `state-` file per product (away, until, tz; outbox.mjs) and replies
-// "Checking the Mini, I'll send it in a minute." The Ledger then pushes the brief this file builds to Joe's phone,
+// "Checking the Mini, I'll send it in a minute." The Ledger then pushes the brief this file builds to the owner's phone,
 // once per new set of state files (nextTripPush; lead call L22), and also writes it to a read-only file the skill can
-// quote if Joe asks before the push arrives (the pass's wiring into lane 2's loop is a join item). This file decides
+// quote if the owner asks before the push arrives (the pass's wiring into lane 2's loop is a join item). This file decides
 // the words; it reads the record and facts and writes nothing.
 //
 // Freshness without a clock (0b-8 audit round 3 M-3): the Front Door knows the date but not the time, so it can't
 // test a brief's age. The brief's first line names the ids of the state files it answers (stateIds: the newest
 // state file per product, written for this request); the skill quotes only a brief that names every id it wrote,
-// which proves the brief was made after the request, and it repeats the made time so Joe sees its age.
+// which proves the brief was made after the request, and it repeats the made time so the owner sees its age.
 //
 // Mini check: each item is green only from a fact newer than an hour (FRESH_MIN); a missing or stale fact reads
 // "unknown", never green. Merge hours: stated only for products on the Merge Gate (MAT-8); the Merge Gate, not this
-// file, enforces them. Freeze wording only when Joe says the Mini is going off (minor 9).
+// file, enforces them. Freeze wording only when the owner says the Mini is going off (minor 9).
 
 import { cleanOutside } from '../M12-sensors/escape.mjs';
 import { POWER_FACT } from '../M12-sensors/power-source.mjs';
@@ -57,7 +57,7 @@ export function briefAnswers(text, ids) {
   return ids.every((id) => listed.has(id));
 }
 
-// Lead call L22: the brief goes to Joe's phone as a push, once per new set of away files. states: [{ id, state }], the
+// Lead call L22: the brief goes to the owner's phone as a push, once per new set of away files. states: [{ id, state }], the
 // newest checked state file per product; only "away" ones count, so a plain pause never pushes a trip brief (0b-8
 // audit round 5 M-1). lastPushedIds: the ids of the last brief pushed; lastFailedIds: the ids of the last failure
 // pushed; build(ids) → the brief text. Returns { text, ids } to push, or null (nothing new). A brief that can't be
@@ -66,8 +66,8 @@ export function briefAnswers(text, ids) {
 // audit round 8 M-1); the failure itself is pushed once per id set (round 7 minor 1).
 export const TRIP_FAILED_TEXT = 'The Mini could not build it. It tries again every few minutes and pushes the brief when it can.';
 // The failure names the ids on its first line like a brief does, so the brief file can hold it and the skill quotes it
-// when Joe says "brief" (0b-8 audit round 9 M-1: in the two-reply fallback a failure was otherwise never seen).
-// A bad id is a wiring fault that won't clear by itself, and it can't name Joe's ids, so it has its own first line the
+// when the owner says "brief" (0b-8 audit round 9 M-1: in the two-reply fallback a failure was otherwise never seen).
+// A bad id is a wiring fault that won't clear by itself, and it can't name the owner's ids, so it has its own first line the
 // skill quotes whatever ids it names (0b-8 confirm round M-1). Both carry the time for the skill's "Made at".
 const failedText = (ids, at) => `Trip brief failed at ${at}; answers state files: ${ids.join(', ')}.\n${TRIP_FAILED_TEXT}`;
 export const WIRING_FAULT_LINE = 'wiring fault: the Ledger passed a state file id the Mini cannot read';
@@ -92,7 +92,7 @@ export function nextTripPush({ states, lastPushedIds = [], lastFailedIds = [], b
 export const FREEZE_TEXT = 'The Mini is turning off: products freeze (nothing starts, nothing merges); the digest issue and the GitHub view stay as they were at the last update; the outside check will open one "heartbeat stale" issue. MAIN is not affected.';
 
 export function airCheck({ facts, now = () => new Date() }) {
-  // Dated by the Air's own check (M12-sensors/air-health.mjs; lead call L23), never by Joe's word or the take-in time.
+  // Dated by the Air's own check (M12-sensors/air-health.mjs; lead call L23), never by the owner's word or the take-in time.
   const a = facts.get(AIR_FACT);
   const h = ageMin(a?.checked_at, now().getTime()) / 60;
   const passed = a && Number.isInteger(a.red_count) && a.red_count === 0 && h <= AIR_FRESH_H;
@@ -114,7 +114,7 @@ export function buildTripBrief({ products, until = null, tz: tzIn = null, stateI
 
   out.push('', 'Time zone:');
   // "Holds" is said only for a product the Merge Gate actually holds; before the second cutover nothing holds number
-  // work, and saying so would make Joe believe it was held (0b-8 audit round 7 M-1).
+  // work, and saying so would make the owner believe it was held (0b-8 audit round 7 M-1).
   if (!tz) out.push('- Which time zone will you be in? Name a city, such as Europe/Prague.');
   for (const p of products) {
     if (typeof p.on_merge_gate !== 'boolean') out.push(`- ${p.name}: Merge Gate status unknown; ask before you leave.`);
@@ -123,12 +123,12 @@ export function buildTripBrief({ products, until = null, tz: tzIn = null, stateI
     else out.push(`- ${p.name}: number work holds until you answer; [Undo] still runs.`);
   }
 
-  // M13's one waiting list (card, ask, go, merge, claim), only what waits on Joe (round 2 M-3, minor 12); an item with a
-  // record error is shown, since it might be his. Risky asks have their own section below.
+  // M13's one waiting list (card, ask, go, merge, claim), only what waits on the owner (round 2 M-3, minor 12); an item with a
+  // record error is shown, since it might be theirs. Risky asks have their own section below.
   const asks = rec.list('ask').filter(({ doc }) => doc && OPEN_ASK.includes(doc.state));
   const askIds = new Set(asks.map((a) => a.id));
   let goes; let listError = null;
-  try { goes = waitingItems(rec).filter((i) => (i.record_error || String(i.who ?? '').toLowerCase() === 'joe') && !(i.entity === 'ask' && askIds.has(i.id))); } catch { goes = []; listError = 'RECORD ERROR: the waiting list could not be read'; }
+  try { goes = waitingItems(rec).filter((i) => (i.record_error || String(i.who ?? '').toLowerCase() === 'owner') && !(i.entity === 'ask' && askIds.has(i.id))); } catch { goes = []; listError = 'RECORD ERROR: the waiting list could not be read'; }
   const link = (doc, what) => (doc?.link ? doc.link : `RECORD ERROR: no ${what} link in the record`);
   out.push('', `Waiting on your go (${listError ? 'unknown' : goes.length}):`);
   if (listError) out.push(`- ${listError}`);

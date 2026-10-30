@@ -68,6 +68,6 @@ test('L26: the skill never says a thing is done; every filing reply is "Filed: â
   for (const r of filing) assert.match(r, /^Filed: .+\. The Mini confirms in a minute\.$/, r);
   assert.doesNotMatch(SKILL, /is paused\.|I filed the request|Filed as idea/);
   assert.match(SKILL, /Product names come only from the product list in your context file/);
-  assert.match(SKILL, /ask him which with a question box before writing anything/);
+  assert.match(SKILL, /ask them which with a question box before writing anything/);
   assert.doesNotMatch(SKILL, /\d{8}-\d{4}-[a-z]{2}/, 'no real-looking example id for the phone to copy');
 });

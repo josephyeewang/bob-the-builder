@@ -1,6 +1,6 @@
 // readback.mjs — the phone-side read-back check for R-0b-81 (review-0b-8 MAT-5).
 //
-// From the phone, Joe asks the Front Door to read back its set-up; the reply carries one JSON object
+// From the phone, the owner asks the Front Door to read back its set-up; the reply carries one JSON object
 // { tools, skills, mcp_servers, plugins, connectors, setting_sources }. This checks it against the role profile PASSED IN
 // (lane 1's roles/front_door.json): M1 holds no tool list of its own. EndConversation is always tolerated (Claude Code
 // adds it to every session). Settings sources must be exactly machine-wide and --settings ("managed" and "flag" in the

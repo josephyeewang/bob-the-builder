@@ -9,6 +9,7 @@ Vercel, the repo) and write facts into the record. Everything they write is mask
 | `mask.mjs`, `fakes.mjs` | R-0b-125 | Masks secrets at every depth; fake keys for tests are built at run time, never committed. |
 | `record-scan.mjs` | R-0b-125 | The weekly scan: an independent looser detector plus gitleaks when installed, with a planted control. |
 | `escape.mjs`, `fixtures/outside-text.json` | R-0b-126 | `cleanOutside(text, source)`: mask then fence outside text; fixtures with exact expected output. |
+| `outside-join.mjs` | R-0b-126 | The join check other lanes run: `checkOutsideJoin(land)` puts each planted case (an instruction-shaped string for each of commit subject, research file, idea issue, lesson file and idea file) through a lane's real path and fails it unless the record and the Lead's input file hold the exact fenced form, the instruction never outside a fence and no planted key. M12 and M13's own paths (commit subjects, idea issues) pass it. |
 | `fact-shapes.mjs` | R-0b-125, lead call L25 | The allow-list: each fact kind's fields and their types. Only those are stored as written; every other value, at any depth, is masked (its name kept). A kind with no shape keeps only `kind` and `ts`. A new fact kind needs a shape here (a test checks every `kind: 'fact.…'` in M1, M12 and M13). |
 | `facts.mjs` | R-0b-125 | The one fact writer (allow-list, then masks token shapes and known values, writes only if unchanged since read). No second masking by field name: the allow-list did that, and a name rule misfired on map keys an outside system chose (round 7). |
 | `pr-facts.mjs` | R-0b-74 | Each PR's changed files and diff summary, with checks, threads and "behind main". |
@@ -17,7 +18,7 @@ Vercel, the repo) and write facts into the record. Everything they write is mask
 | `vercel-reader.mjs`, `prod-watcher.mjs` | R-0b-71 | The production watcher: unsupported deploys, older version live, settings changed (never values). |
 | `outside-watch.mjs` | R-0b-72 | Every 10 min: is the hourly outside check still running, and which of its steps fail. Writes `outside-robot-merges-<product>` (last green time); `robotMergesGreen()` is the Merge Gate's one test (green within 120 min; lead calls L19, L20). The step counts only when the slot's public tag matches this product's; two failed runs, a 5-day gap or a first pass latch it shut until the owner's `cleared` time (0b-7 audit round 4). |
 | `outside-watch.mjs` (`checkNoPush`) | lead call L24 | Each pass, tests every Mini token against the outside repo; writes `outside-no-push` and raises a home alert if any can write. The Merge Gate stays shut without a green one from the last 120 min. The robot-merges step counts only with the newest run's repo-guard step green too. |
-| `air-health.mjs` | R-0b-84, lead call L23 | The Air's health result as a dated file a machine writes (`node air-health.mjs <red count> <folder>`); `checkAirHealthFile` and `airFactFromFile` date the fact by the check itself, never by when it arrived. Joe never types a count. |
+| `air-health.mjs` | R-0b-84, lead call L23 | The Air's health result as a dated file a machine writes (`node air-health.mjs <red count> <folder>`); `checkAirHealthFile` and `airFactFromFile` date the fact by the check itself, never by when it arrived. The owner never types a count. |
 | `start-gate.mjs` | lead call L3 | The two Vercel facts lane 2's launcher gate reads: skip command equals the pinned one; no env name in both Preview and Production. Lane 2's shape: `start_gate.vercel_skip.<product>` / `start_gate.vercel_env.<product>`, `{ product, vercel_project, read_at, result }`. M4's startGate decides (≤10 min old), so the Sensors re-read every 5 min; `startGateOpen` is a test helper. |
 | `device-checks.mjs` | R-0b-78 | The decisions behind the owner's private `/host` and `/configaudit` for the Air. |
 | `shell-guard/` | R-0b-70 | Shell-trick cases and a runner for the production guard (the guard is lane 2's R-0b-36). `selfcheck.mjs` proves each case really touches the file, each in a new folder, under bash and zsh where present. The pairs that touch nothing on a Mac are listed as dead in `corpus.json` (a test keeps that list exact on two names); the runner also drops those that touch nothing on the machine it runs on (no zsh, so no `**/`; or an sh without `$'…'`). Both sides are samples. The refuse side (many spellings of the path, brace lists with the real name first or later, globs in the folder part too, the path glued to `<`, set inside a script's object or named in a script fed in as a here-doc, a variable carrying part of it, the path written from the home folder when the file is under it or from `$PWD`, the name with its letters' case flipped when the file's disk ignores case, two commands on separate lines, one sometimes a comment, whole-folder reads (every usual spelling of a recursive grep, find piped to xargs, an archive or copy of the folder too, and of the folder above), including ones that name no folder and run from a folder holding the file or after a change into it, change-folder cases asked from three places) catches the simple guards a test here builds, but cannot prove a guard blocks every way to reach the file. The allow side (ordinary commands, near misses built from the file's folder and name, a file beside it whose name ends differently, commands asked from other folders, the no-folder reads asked from an existing folder beside the file's) catches a guard that refuses too much, but cannot prove it never does. The cases are checked in a folder holding only the file; beside a similar name (say a `.local` copy) a glob form may match both. A list of folder readers is never complete (zip, other search tools), and a link to the file from elsewhere in the project is not a case: a guard should compare real paths. Under LEAD-CALLS L41 a whole-folder read is the sandbox's job: `--no-folder-reads` leaves those cases out (deletes, moves and the named-path cases stay), and a hook that refuses every xargs is not marked down for it. A shell guard is a speed bump, not the wall: a script written to a file and run later (or written with another tool) is out of its reach. A variable set outside the command (say `$NODE_ENV`) can carry part of the name, so a guard should treat a variable it cannot see as matching anything. |
@@ -32,8 +33,13 @@ heartbeat says "usage: unknown" until it is).
 
 ## Join items (other lanes or the lead)
 
-- R-0b-126: lane 1/2 intake (research, lesson and idea files, the Lead's input) must go through `cleanOutside` and pass
-  `fixtures/outside-text.json` end to end. Until then R-0b-126 is "half: intake wiring pending".
+- R-0b-126: every other path that hands outside text to an AI calls `cleanOutside` once, at its write, and runs
+  `checkOutsideJoin` in its own tests with its real path as `land`:
+  - lane 2's outbox intake and lane 1's Store Writer, for lesson- and idea- files into the record;
+  - the lead's Lead-input writer (M3), for research files and the record's text, into the Lead's input file.
+
+  Until each passes, R-0b-126 is "half: intake wiring pending". The other half, "the Lead takes no action on it", is
+  R-0b-148's.
 - R-0b-70: from the project's top folder (where Claude Code runs the hook; if you must run from elsewhere, set
   `CLAUDE_PROJECT_DIR` to the top folder), run `node <Bob's folder>/orchestrate/modules/M12-sensors/shell-guard/runner.mjs
   '<the installed hook command, exactly as in settings>' <the file's path from there>` and again with its absolute
@@ -53,7 +59,7 @@ heartbeat says "usage: unknown" until it is).
   the Mini's air-health folder (a synced folder the Front Door can't write); the Mini's intake runs
   `checkAirHealthFile` on each new file and stores `airFactFromFile(doc, now, storedFact)` under `air-health` when it isn't null (only a newer check replaces it).
 
-## Owner steps (Joe), for the (b) halves
+## Owner steps, for the (b) halves
 
 Plain steps; the lead turns each into paste-ready blocks with the real names.
 

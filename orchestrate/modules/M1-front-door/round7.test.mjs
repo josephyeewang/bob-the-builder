@@ -26,7 +26,7 @@ test('0b-8 audit round 7 minor 1: a brief that throws is pushed as a failure onc
   assert.equal(nextTripPush({ states, lastFailedIds: p.ids, build: () => { throw new Error('x'); } }), null, 'once per id set');
 });
 
-test('0b-8 audit round 8 M-1: after a failed brief the next healthy pass pushes the real brief; the failure push promises no retry Joe must do', () => {
+test('0b-8 audit round 8 M-1: after a failed brief the next healthy pass pushes the real brief; the failure push promises no retry the owner must do', () => {
   const states = [{ id: '20261103-0915-kq', state: 'away' }];
   const f = nextTripPush({ states, build: () => { throw new Error('record down'); } });
   assert.equal(f.failed, true); assert.doesNotMatch(f.text, /Say "brief"/);
