@@ -14,10 +14,17 @@
 //   rec.applyOutbox({ role: 'worker', sessionId: 'S-4', card: 'C-12' }, '/path/report-C-12.md')
 //                                                // → { ok: true, … } or { ok: false, reason }
 //   rec.diary({ since: 0 })                      // → diary lines, oldest first
+//   rec.ready()                                  // → cards that may start now (M9's ready rule)
+//   rec.overdue(now)                             // → [{ entity, id, state, since, limit }] past their time limit
+//   rec.release({ card, session_id })            // the claim's holder gives the card back (claimed → ready)
+//   rec.breakIfDead({ card }, probe?)            // break a claim whose owner is provably dead (G1)
+//   rec.lapseClaims(now)                         // claims past their time limit lapse, each with a diary line
 //
 // RULES EVERY IMPLEMENTATION KEEPS. Every write is "only if unchanged since read": expectRev is the rev the caller
 // read (0 to create). A mismatch is refused. Every accepted write appends exactly one diary line; a refused one
-// appends none. write() and applyOutbox() never throw: any failure is { ok: false, reason }.
+// appends none. write() and applyOutbox() never throw: any failure is { ok: false, reason }. read() of a corrupt document
+// gives { id, entity, corrupt: true, reason } with no doc (never null, which means "absent"); list() leaves corrupt ones
+// out, and a list that can't be read at all comes back as one such corrupt entry, so a caller never takes it for empty.
 
 // Plain-script actors write under their own name; AI roles only through applyOutbox, as `<role>:<sessionId>`.
 // `joe` writes nothing in 0b (Joe acts through `approvals`); it stays a name so old diary lines still parse.
@@ -36,9 +43,11 @@ export const OUTBOX_KINDS = Object.freeze(Object.fromEntries(Object.entries({
   'report-compact-': { roles: ['worker'], entity: 'report', mode: 'create' },
   'state-compact-': { roles: ['front_door'], entity: 'report', mode: 'create' },
   'handoff-': { roles: ['lead', 'learning'], entity: 'handoff', mode: 'create' },
+  'handin-': { roles: ['worker'], entity: 'card', mode: 'move' },   // the worker's running → in_review (0b-2 R3-M4)
   'lesson-': { roles: ['learning'], entity: 'lesson', mode: 'create' },
   'verdict-': { roles: ['reviewer', 'auditor'], entity: 'verdict', mode: 'move' },
-  'ask-request-': { roles: ['front_door', 'incident'], entity: 'ask', mode: 'create' },
+  // Stored as an inert request document; only approvals turns it into an ask (0b-2 R3-M2), so it is never an `ask` here.
+  'ask-request-': { roles: ['front_door', 'incident'], entity: 'report', mode: 'create' },
   'wish-': { roles: ['lead'], entity: null, mode: 'create' },
   'think-': { roles: ['lead'], entity: null, mode: 'create' },
   'scout-': { roles: ['lead'], entity: null, mode: 'create' },
@@ -53,8 +62,13 @@ export const OUTBOX_KINDS = Object.freeze(Object.fromEntries(Object.entries({
 }).map(([k, v]) => [k, Object.freeze({ ...v, roles: Object.freeze(v.roles) })])));
 export const OUTBOX_KIND_PATTERN = /^[a-z]+(-[a-z]+)*-$/;
 
-export const ENTITIES = Object.freeze(['card', 'ask', 'go', 'verdict', 'session', 'merge', 'claim', 'fact', 'product',
+// A claim is a field on its card, set and cleared in the same write as the card's move (0b-2 R2-M6); `claim` stays
+// a diary kind only.
+export const ENTITIES = Object.freeze(['card', 'ask', 'go', 'verdict', 'session', 'merge', 'fact', 'product',
   'handoff', 'report', 'lesson', 'launch', 'merge_request']);
+
+// Card kinds (0b-2 R3-M3). Set once, at create, by the creator M9's permissions name. `exact_reverse` is the undo card.
+export const CARD_KINDS = Object.freeze(['ordinary', 'fix', 'exact_reverse', 'lead_daily_card', 'research_copy']);
 
 // Fields a document must carry on every write, checked here so a fake record refuses what the real one would.
 // launch and merge_request are the Dispatcher's (D12, refusals 5 and 11); a verdict names the session and head it is
@@ -84,12 +98,16 @@ export const FINAL_STATES = Object.freeze({
   card: ['closed', 'failed', 'cancelled', 'closed_no_answer', 'reverted'],
   ask: ['consumed', 'expired', 'withdrawn'],
   session: ['ended'],
-  merge: ['audited_ok', 'audit_flagged', 'refused'],
+  merge: ['returned_to_builder', 'audited_ok', 'audit_flagged', 'refused'],
   product: [],
 });
 
 // "Open" cards: neither final nor merged. Derived here, never retyped (0b-1 round 2, R2-M7).
 export const OPEN_CARD_STATES = Object.freeze(STATES.card.filter((s) => !FINAL_STATES.card.includes(s) && s !== 'merged'));
+// The one "is it still open" test for any entity with states (0b-2 R2-M3): not final and not merged.
+export function isOpen(entity, state) {
+  return Object.hasOwn(STATES, entity) && STATES[entity].includes(state) && !FINAL_STATES[entity].includes(state) && state !== 'merged';
+}
 
 // The one reading of a state's time limit from the rules (0b-2 round 2, R2-M1). M9's overdue check and M10's
 // validator both call it. `timeouts.<entity>.<state>` is { minutes ≥ 1, then } or { no_limit_reason, recheck_max_min? }.
@@ -112,11 +130,15 @@ export function timeoutFor(rules, entity, state) {
 }
 
 // A wait must say who and what it waits on, since when, and when it is next checked (A5).
+// They sit in the document's `wait` field. A card's wait also says how it resumes and where to (R2-m10, R2-m1).
 export const WAIT_FIELDS = Object.freeze(['who', 'what', 'since', 'next_check']);
+export const WAIT_RETURN_FIELDS = Object.freeze(['resume', 'return_to']);
+export const WAIT_WHO = Object.freeze(['joe', 'usage', 'dependency', 'incident', 'date']);   // `date` also needs a reason
+export const SESSION_ID = /^[A-Za-z0-9-]+$/;
 
 export function isActor(a) {
   if (SCRIPT_ACTORS.includes(a)) return true;
-  const m = /^([a-z_]+):([A-Za-z0-9-]+)$/.exec(String(a));
+  const m = /^([a-z_]+):([A-Za-z0-9-]+)$/.exec(String(a));   // the session part is SESSION_ID
   return !!m && AI_ROLES.includes(m[1]);
 }
 
@@ -124,16 +146,20 @@ function refused(reason) { return { ok: false, reason }; }
 
 // Wrap an implementation so bad arguments and thrown errors come back as a refusal, never an exception.
 export function makeRecord(impl) {
-  const guard = (fn) => { try { const r = fn(); return r && typeof r.ok === 'boolean' ? r : refused('record gave no valid answer'); } catch (e) { return refused(`record error: ${e.message}`); } };
+  const errText = (e) => { try { return String(e?.message ?? e).slice(0, 300); } catch { return 'unreadable error'; } };
+  const guard = (fn) => { try { const r = fn(); return r && typeof r.ok === 'boolean' ? r : refused('record gave no valid answer'); } catch (e) { return refused(`record error: ${errText(e)}`); } };
+  const corrupt = (entity, id, e) => ({ id: id ?? null, entity, corrupt: true, reason: `record error: ${errText(e)}` });
+  const optional = (name, fallback) => (...a) => (typeof impl[name] === 'function' ? impl[name](...a) : fallback(...a));
   return Object.freeze({
-    read(entity, id) { return ENTITIES.includes(entity) ? impl.read(entity, id) : null; },
-    list(entity) { return ENTITIES.includes(entity) ? impl.list(entity) : []; },
+    read(entity, id) { if (!ENTITIES.includes(entity)) return null; try { return impl.read(entity, id); } catch (e) { return corrupt(entity, id, e); } },
+    list(entity) { if (!ENTITIES.includes(entity)) return []; try { return impl.list(entity); } catch (e) { return [corrupt(entity, null, e)]; } },
     diary(opts = {}) { return impl.diary(opts); },
     write(w) {
       if (!w || !isActor(w.actor)) return refused(`unknown actor "${w?.actor}"`);
       if (!SCRIPT_ACTORS.includes(w.actor)) return refused('AI roles write only through their outbox');
+      if (w.actor === 'joe') return refused('joe writes nothing; his answers come through approvals');
       if (!ENTITIES.includes(w.entity)) return refused(`unknown entity "${w.entity}"`);
-      if (typeof w.id !== 'string' || !/^[A-Za-z0-9._-]+$/.test(w.id)) return refused('bad id');
+      if (typeof w.id !== 'string' || !/^[A-Za-z0-9._-]+$/.test(w.id) || w.id.length > 200 || /^\.+$/.test(w.id)) return refused('bad id');
       if (!Number.isInteger(w.expectRev) || w.expectRev < 0) return refused('expectRev must be the rev read (0 to create)');
       const missing = (REQUIRED_FIELDS[w.entity] ?? []).filter((f) => w.doc?.[f] === undefined || w.doc?.[f] === null || w.doc?.[f] === '');
       if (missing.length) return refused(`${w.entity} is missing ${missing.join(', ')}`);
@@ -141,14 +167,23 @@ export function makeRecord(impl) {
     },
     applyOutbox(tag, file) {
       if (!tag || !AI_ROLES.includes(tag.role)) return refused(`unknown role "${tag?.role}"`);
-      if (typeof tag.sessionId !== 'string' || !tag.sessionId) return refused('outbox tag needs the session id');
+      if (typeof tag.sessionId !== 'string' || !SESSION_ID.test(tag.sessionId)) return refused('outbox tag needs the session id');
       return guard(() => impl.applyOutbox(tag, file));
     },
+    // Read-side helpers fail closed: an error is "nothing ready" and "everything we know is overdue" can't be faked,
+    // so overdue() errors come back as one entry the caller alerts on.
+    ready() { try { const r = optional('ready', () => [])(); return Array.isArray(r) ? r : []; } catch { return []; } },
+    overdue(now) { try { return optional('overdue', () => [])(now); } catch (e) { return [{ entity: null, id: null, corrupt: true, reason: `record error: ${errText(e)}` }]; } },
+    release(r) { return guard(() => optional('release', () => refused('this record has no claims'))(r)); },
+    breakIfDead(r, probe) { return guard(() => optional('breakIfDead', () => refused('this record has no claims'))(r, probe)); },
+    lapseClaims(now) { return guard(() => optional('lapseClaims', () => ({ ok: true, lapsed: [] }))(now)); },
   });
 }
 
 // For other modules' tests: an in-memory record that keeps the rev check and the diary, and nothing else (no
 // state moves, no who-may-change-what — those are M9's real Store Writer). applyOutbox records the hand-in only.
+// The claim fakes are simple: ready() is every `ready` card with no claim, release() hands a claimed card back when the
+// session holds it, breakIfDead() never breaks (the fake can't tell a dead owner), overdue() and lapseClaims() find none.
 export function memoryRecord() {
   const docs = new Map();
   const lines = [];
@@ -174,5 +209,17 @@ export function memoryRecord() {
       const seq = log(`${tag.role}:${tag.sessionId}`, 'outbox', 'report', String(file).split('/').pop(), null, null, { card: tag.card ?? null });
       return { ok: true, seq };
     },
+    ready() { return [...docs.values()].filter((d) => d.entity === 'card' && d.doc?.state === 'ready' && !d.doc.claim).map((d) => structuredClone(d)); },
+    overdue() { return []; },
+    release({ card, session_id } = {}) {
+      const cur = docs.get(key('card', card));
+      if (!cur || cur.doc?.state !== 'claimed' || cur.doc.claim?.session_id !== session_id) return refused('only the claim\'s holder may release it');
+      const { claim, ...rest } = cur.doc;   // eslint-disable-line no-unused-vars
+      cur.doc = { ...rest, state: 'ready' };
+      cur.rev += 1;
+      return { ok: true, rev: cur.rev, seq: log('dispatcher', 'claim_release', 'card', card, 'claimed', 'ready') };
+    },
+    breakIfDead() { return refused('the memory record never breaks a claim'); },
+    lapseClaims() { return { ok: true, lapsed: [] }; },
   });
 }

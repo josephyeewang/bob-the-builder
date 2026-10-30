@@ -36,7 +36,7 @@ test('applyOutbox needs a known role and its session id', () => {
 
 test('a throwing store comes back as a refusal', () => {
   const rec = makeRecord({ write() { throw new Error('disk full'); }, applyOutbox() { return 'yes'; } });
-  assert.match(rec.write({ actor: 'dispatcher', entity: 'claim', id: 'C', expectRev: 0 }).reason, /disk full/);
+  assert.match(rec.write({ actor: 'dispatcher', entity: 'card', id: 'C', expectRev: 0, doc: { state: 'draft', module: 'm' } }).reason, /disk full/);
   assert.equal(rec.applyOutbox({ role: 'lead', sessionId: 'S' }, 'f').ok, false);
 });
 

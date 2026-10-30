@@ -49,7 +49,16 @@ rec.list('card');
 rec.write({ actor: 'dispatcher', entity: 'card', id: 'C-12', expectRev: 3, doc, kind: 'claim' });  // { ok, rev, seq } | { ok: false, reason }
 rec.applyOutbox({ role: 'worker', sessionId: 'S-4', card: 'C-12' }, outboxFilePath);
 rec.diary({ since: 0 });
+rec.ready();                                    // cards that may start now (the one ready rule)
+rec.overdue(now);                               // documents past their time limit or their wait's next_check
+rec.release({ card: 'C-12', session_id: 'S-4' });   // only the claim's holder
+rec.breakIfDead({ card: 'C-12' });              // only when the owner is provably gone (M9 README, "Claims")
+rec.lapseClaims(now);
 ```
+
+- **Claims are a field on the card** (`claim`), set by `ready → claimed` and cleared when the card leaves claimed and running. `claimed → ready` and `running → ready` are never a plain write: they happen only through `release`, `breakIfDead` or `lapseClaims`.
+- **Outbox kinds** (`OUTBOX_KINDS`) are the file-name prefixes each AI role may send. A worker hands its card in with `handin-` (running → in_review). An `ask-request-` is stored as an inert report; only `approvals` turns it into an ask.
+- **Plan fingerprint**: `plan-fingerprint.mjs` is the one fingerprint a go binds to. M2 Approvals stores it on the go; M9 recomputes it at `draft → ready`.
 
 - **Required fields** (`REQUIRED_FIELDS`) are refused when missing, by the fake too: a card's `state` and `module`; a verdict's `session_id` and `head`; every field of `launch` and `merge_request` (both written by the Dispatcher only).
 - **Final states** (`FINAL_STATES`) need no time limit; every other state has one in the rules. `closed → reverted` is the one move out of a final state.

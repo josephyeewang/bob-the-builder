@@ -17,7 +17,7 @@ const PIN = TOOLS_CHECKED.claude_code;
 // The design's table (v4 §14.1.2), written out as literal values; every file must match it.
 const TABLE = {
   lead: { model: 'main', effort: 'high', tools: ['Read', 'Glob', 'Grep', 'Write', 'AskUserQuestion'], permission_mode: 'acceptEdits', restricted_mode: true, outbox_kinds: ['wish-', 'think-', 'scout-', 'write-', 'handoff-', 'roadmap-', 'history-'], auto_resume: false },
-  worker: { model: 'main', effort: { 1: 'high', 2: 'medium' }, tools: ['Read', 'Glob', 'Grep', 'Edit', 'Write', 'Bash'], permission_mode: 'dontAsk', restricted_mode: false, outbox_kinds: ['report-', 'report-compact-'], auto_resume: { 1: false, 2: true } },
+  worker: { model: 'main', effort: { 1: 'high', 2: 'medium' }, tools: ['Read', 'Glob', 'Grep', 'Edit', 'Write', 'Bash'], permission_mode: 'dontAsk', restricted_mode: false, outbox_kinds: ['report-', 'report-compact-', 'handin-'], auto_resume: { 1: false, 2: true } },
   reviewer: { model: 'main', effort: 'high', tools: ['Read', 'Glob', 'Grep', 'Bash', 'Write'], permission_mode: 'dontAsk', restricted_mode: false, outbox_kinds: ['verdict-'], auto_resume: false },
   incident: { model: 'main', effort: 'high', tools: ['Read', 'Glob', 'Grep'], permission_mode: 'dontAsk', restricted_mode: false, outbox_kinds: ['ask-request-'], auto_resume: false },
   scout: { model: 'haiku', effort: 'low', tools: ['Read', 'Glob', 'Grep'], permission_mode: 'dontAsk', restricted_mode: false, outbox_kinds: ['report-'], auto_resume: false },
