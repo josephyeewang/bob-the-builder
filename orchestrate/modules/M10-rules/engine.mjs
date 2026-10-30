@@ -254,13 +254,15 @@ export function makeEngine({ products, rulesState, productState, running, rolesD
     const c = classifyChange(pol, { files: s.files, truncated: s.truncated, declared_tier: s.declared_tier, labels: s.labels });
     const reverse = s.kind === 'exact_reverse' && typeof s.reverses === 'string' && SHA.test(s.reverses) && s.exact_reverse_ok === true && REVERSED_AUDIT.includes(s.reversed_audit);
     if (reverse) {
-      // R3-M3, in this order. Pause and the hours window never hold an exact reverse. A cut-off file list can hide a
+      // R3-M3, in this order, plus 0b-9 M4's database rule before the failed-audit allow. Pause and the hours window never hold an exact reverse. A cut-off file list can hide a
       // protected file, so it is never let through (MAT-6).
       if (s.truncated === true || s.files.length >= MAX_FILES) return ask(1, 'exact reverse with a cut-off file list');
       // Only "no scan built for this code" is expected on a reverse; any other unclassifiable reason (unreadable
       // rules, a bad entry, a label) means the protected check below can't be trusted, so ask (audit round 4).
       if ((c.reasons.unclassifiable ?? []).some((r) => !r.startsWith('scan_not_built:'))) return ask(1, 'exact reverse that could not be fully classified');
       if (c.protected.length) return ask(1, 'exact reverse touches a protected file');
+      // 0b-9 M4: a database-change merge is never undone automatically, even after a failed audit (audit round 6).
+      if (c.risky.includes('schema') || c.risky.includes('production_data')) return ask(1, 'exact reverse of a database change');
       if (s.reversed_audit === 'failure') return allow('exact reverse of a merge whose audit failed');
       if (!c.risky.length && c.tier === 2) return allow('exact reverse of an ordinary change');
       return ask(1, 'exact reverse of a merge whose audit passed');

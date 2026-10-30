@@ -73,7 +73,9 @@ export function makeRules(impl) {
     // A change the rules can't classify counts as risky (D7), so a failure here is "unclassifiable", Tier 1.
     // Any risky class or protected path makes it Tier 1, whatever the implementation said (R2-m2).
     classify(change) {
-      const failed = (reason) => ({ tier: 1, risky: ['unclassifiable'], reasons: { unclassifiable: [reason] }, protected: [] });
+      // With no trusted classification, every named file may be protected: never answer with an empty list (audit round 6).
+      const named = () => (Array.isArray(change?.files) ? change.files.map((f) => f?.path).filter((p) => typeof p === 'string') : []);
+      const failed = (reason) => ({ tier: 1, risky: ['unclassifiable'], reasons: { unclassifiable: [reason] }, protected: named() });
       let asked = change;
       if (change && typeof change === 'object') {
         const { policy, atCommit, ...rest } = change;   // eslint-disable-line no-unused-vars

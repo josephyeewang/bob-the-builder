@@ -49,7 +49,7 @@ await carryOver({ reviewed, current, between, catchUps, tier1MergesSince, gh: vi
 ```
 
 - **Any error means "no".** Each returns a plain answer and never throws. A missing commit, a cut-off file list (GitHub lists at most 300 files in a compare; a recursive tree can be truncated) or an unknown file status makes the answer "no".
-- **The robot's merge mark is the caller's check.** `checkExactReverse` proves only that the files are an exact undo. That the robot made the merge (the other half of 0b-9 M4) is checked by the Merge Gate. What the undo still counts as (protected files, risky classes) is M10's `merge` answer.
+- **The robot's merge mark is the caller's check.** `checkExactReverse` proves only that the files are an exact undo. That the robot made the merge (the other half of 0b-9 M4) is checked by the Merge Gate. What the undo still counts as (protected files, risky classes) is M10's `merge` answer. An undo that touches a database change (the `schema` or `production_data` class) always asks Joe, even when the reversed merge failed its audit (0b-9 M4).
 - **`carryOver` takes a git view as `gh`**, not the raw GitHub client.
 
 ## Notes for callers

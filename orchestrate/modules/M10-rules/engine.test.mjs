@@ -268,6 +268,21 @@ test('merge: an exact reverse with a cut-off file list asks Joe, even while paus
   assert.match(mergeOf(w, full, reverse('failure')).reason, /cut-off/, 'a list of exactly the limit may be cut off (audit round 5)');
 });
 
+test('merge: the undo of a database change asks Joe even after a failed audit, while paused at 03:00 (0b-9 M4, audit round 6)', () => {
+  const w = world({ states: { app: { state: 'paused' } }, now: AT_03 });
+  for (const path of ['db/migrations/0005_add_col.sql', 'db/repairs/0007_fix.sql']) {
+    const r = mergeOf(w, [{ path, status: 'removed' }], reverse('failure'));
+    assert.deepEqual([r.decision, r.tier, r.reason], ['ask', 1, 'exact reverse of a database change'], path);
+  }
+});
+
+test('merge: the Tier-1 hours window ends at 22:00 exactly (audit round 6)', () => {
+  const w = world({ now: Date.parse('2026-10-15T02:00:00Z') });   // 22:00 New York
+  assert.equal(mergeOf(w, [file('app/x.ts')], { declared_tier: 1 }).reason, 'held_tier1_hours');
+  w.now = Date.parse('2026-10-15T01:59:00Z');
+  assert.notEqual(mergeOf(w, [file('app/x.ts')], { declared_tier: 1 }).reason, 'held_tier1_hours');
+});
+
 test('merge: an exact reverse with rules that cannot be fully read asks Joe (audit round 4, R3-M3)', () => {
   const broken = { ...pol(), effect_paths: { ...pol().effect_paths, production_data: { ...pol().effect_paths.production_data, repair_folder: '{bad' } } };
   const w = world({ policies: { app: broken }, states: { app: { state: 'paused' } }, now: AT_03 });

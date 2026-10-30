@@ -72,6 +72,8 @@ const PLANTED = [
   ['settings changed by UPDATE (audit round 4)', "UPDATE pg_settings SET setting = 'off' WHERE name = 'row_security'", /system tables/],
   ['a quoted system table', 'UPDATE "pg_settings" SET setting = 1', /system tables/],
   ['information_schema', 'SELECT 1 FROM information_schema.tables', /system tables/],
+  ['a scheduled job by insert (audit round 6)', "INSERT INTO cron.job (schedule, command) VALUES ('* * * * *', 'DROP TABLE users')", /runs jobs/],
+  ['a web request by insert (audit round 6)', "INSERT INTO \"net\".http_request_queue (url) VALUES ('x')", /runs jobs/],
   ['a no-break space hides a call (audit round 4)', 'UPDATE t SET a = 1 WHERE b IN (1, \u00a0(2))', /unparseable/],
   ['a byte-order mark', '\ufeffSELECT 1', /unparseable/],
   ['filter as a function name', 'SELECT filter(1)', /filter\(…\)/],

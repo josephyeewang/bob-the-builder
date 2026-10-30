@@ -40,6 +40,10 @@ test('classify fails closed to unclassifiable Tier 1', () => {
   for (const classify of [() => ({ tier: 2, risky: [] }), () => ({ tier: 2, risky: [], reasons: [] }), () => ({ tier: 2, risky: [], reasons: {}, protected: 'x' })]) {
     assert.deepEqual(fakeRules({ classify }).classify({ files: [] }).risky, ['unclassifiable']);
   }
+  const broke = fakeRules({ classify: () => { throw new Error('rules unreadable'); } });
+  assert.deepEqual(broke.classify({ files: [{ path: '.github/workflows/ci.yml' }, { path: 'docs/x.md' }] }).protected,
+    ['.github/workflows/ci.yml', 'docs/x.md'], 'a failed classification counts every named file as protected (audit round 6)');
+  assert.deepEqual(broke.classify(null).protected, []);
 });
 
 test('any risky class or protected path forces Tier 1 (R2-m2)', () => {
