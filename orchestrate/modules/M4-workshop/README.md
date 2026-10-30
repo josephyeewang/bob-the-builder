@@ -22,3 +22,25 @@ See LANES.md for who builds this folder, and the build rows for what.
 | The compaction hooks are not test-run at launch (audit R-0b-44 round 1, minor) | Known limit | Launch check 7 test-runs the five safety hooks. The two hooks that save and restore context around compaction are installed but not run at launch, so a broken one shows only when compaction happens. | The builder. | With the row that builds compaction handling. |
 
 The launch check (audit m3): the tracker's half is built (`ActivityTracker.beginLaunch`, tested); the wiring is the open item above.
+
+## The push script and git safety (0b-4: R-0b-45, 46, 47)
+
+Files: `git/push.mjs` (the push script), `git/push-refusals.mjs` (the one list of refused paths; M10 imports it, review m4), `git/gitleaks.mjs` (the secret scan with the scripts' own settings), `git/start-gate.mjs`, `git/save-work.mjs`, `git/safe-git.mjs` (the only file that starts git), and `launcher/worker-copy.mjs` (fresh copy and restart from the mirror).
+
+| Item | Kind | What could go wrong | Who decides or checks | When |
+|---|---|---|---|---|
+| The outbox's access-list entry (review 0b-4 M9) | Wiring, for R-0b-05 | The push script reads the worker's outbox as the scripts' own user. The access-list entry that lets it read the outbox (and stops the worker reading the scripts' private folder) is set up with the Mac users in R-0b-05, not here. Until then the tests use throwaway folders. | The builder of R-0b-05, with the person's Mac-user steps. | With R-0b-05. |
+| Masking the pull request's text (review 0b-4 m2) | Wiring, for M6 | The push script opens or updates the pull request through a port (`pullRequests.upsert`), passing the card's title and summary. Masking anything secret-shaped in that text is the port's job, in M6's pull-request writer, not done here. | The builder of M6's pull-request writer. | Before the first real push. |
+| Submodules are refused (review 0b-4 m3) | Deliberate addition | The design does not mention submodules. A worker has no need for one, and one would point the copy at another repository, so any submodule entry or change to `.gitmodules` is refused. | Decided here; change it only by a design change. | n/a |
+| The cleanup proof (R-0b-46) | Wiring, for M11 | R-0b-46 also asks that the Dispatcher's cleanup proof work from the mirror's copy of the branch only, through `safe-git.mjs`. That part is M11's and is built with the Dispatcher (0b-6). | This lane, in 0b-6. | With 0b-6. |
+| Who writes start-gate facts 3 and 4 (review 0b-4 OPEN-1) | Answered by the lead (L3) | M12 writes the Vercel facts; the push script only reads them. Until they exist the gate is shut, so nothing is pushed. | Lane 3 writes them in the shape `fact` / `start_gate.vercel_skip.<product>` and `start_gate.vercel_env.<product>`, with `{product, vercel_project, read_at, result}`. | Before live proof 3. |
+| A fix round after GitHub's catch-up merge (review 0b-4 OPEN-2) | Answered by the lead (L4) | The push script never force-pushes. A restart fast-forwards the copy to GitHub's branch first; if the two went different ways, the restart refuses. | Built and tested here. | n/a |
+
+### Live proofs still to run (plain steps)
+
+1. **Push to the test repo** (the person and Claude; after the robot account, its short-lived key, and the person creating the test repo `orchestrate-test`). Claude runs the push script on a clean bundle and on each refused case. The person opens the test repo on github.com and checks that only the clean card branch appears.
+2. **Start gate, Actions setting** (the person, then Claude checks). On github.com, in the test repo, the person opens Settings → Actions → General and sets Workflow permissions to "Read and write", then runs the outside check by hand (Actions tab → the check → Run workflow). Claude checks the next push is refused and an issue appears. The person sets the permission back to "Read".
+3. **Start gate, Vercel** (the person, then Claude checks; after lane 3 writes facts 3 and 4). In the Vercel dashboard, for the test project, the person changes the Ignored Build Step command; later, separately, adds a dummy variable with all three environments ticked. Each time, Claude checks pushes stop within 10 minutes. The person undoes both.
+4. **Start gate, workflow rule** (the person and Claude; after R-0b-91 and 92). A workflow that fails the audit rule lands on the test repo's main through the workflow route. Claude checks pushes stop.
+5. **Real gitleaks** (Claude, on the Mac). Run the planted-secret tests with the pinned gitleaks and write its version in the audit ledger. (The offline tests already use the real gitleaks where it is installed.)
+6. **Git settings from a worker, on the Mini** (the person and Claude; after the Mac users from R-0b-05). Run the booby-trapped-copy test with the real users and lock-down. Check save-work cannot write outside the copy or reach github.com, and that the scripts' user's git refuses a copy owned by the person.
