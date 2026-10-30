@@ -6,6 +6,7 @@ import { memoryRecord } from '../../shared/record.mjs';
 import { makeFactWriter } from '../M12-sensors/facts.mjs';
 import { airHealthFile, checkAirHealthFile, airFactFromFile } from '../M12-sensors/air-health.mjs';
 import { airCheck, AIR_FACT, nextTripPush, FREEZE_TEXT } from './trip.mjs';
+import { checkOutboxFile } from './outbox.mjs';
 
 const T0 = Date.parse('2026-11-03T12:00:00Z');
 const at = (h) => new Date(T0 + h * 3600e3);
@@ -38,4 +39,16 @@ test('0b-8 audit round 5 M-3: an older Air result synced late never replaces a n
   assert.equal(a.passed, false); assert.match(a.text, /3 red/);
   takeIn(airHealthFile({ red_count: 0, at: at(-0.1) }));
   assert.equal(airCheck({ facts, now: () => at(0) }).passed, true, 'a newer check does replace it');
+});
+
+test('0b-8 audit round 5 minors 2–5: impossible dates, empty ideas and numeric names are refused; the rotate name is as said', () => {
+  const st = (o) => checkOutboxFile('state-20261103-0915-kq.json', JSON.stringify({ product: 'test-product', state: 'away', until: null, tz: null, ...o }));
+  assert.equal(st({ until: '2026-02-30' }).ok, false);
+  assert.equal(st({ until: '2026-02-28' }).ok, true);
+  assert.equal(st({ product: 123 }).ok, false);
+  assert.equal(checkOutboxFile('idea-20261103-0915-kq.md', '> \n>\n\n').ok, false);
+  assert.equal(checkOutboxFile('idea-20261103-0915-kq.md', '> a real idea\n').ok, true);
+  const skill = readFileSync(new URL('./skill/orchestrate/SKILL.md', import.meta.url), 'utf8');
+  assert.equal(skill.includes('X_NAME'), false);
+  assert.match(skill, /exactly two lowercase letters/);
 });

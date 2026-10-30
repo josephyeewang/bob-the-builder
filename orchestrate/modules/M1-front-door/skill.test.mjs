@@ -22,14 +22,16 @@ test('the skill names no machine path or account', () => {
 
 test('every file shape in the skill passes intake as written (the skill and outbox.mjs agree)', () => {
   const examples = [...SKILL.matchAll(/`(\{"[^`]+\})`/g)].map((m) => m[1]).filter((j) => !j.includes('<'));
-  assert.ok(examples.length >= 4, String(examples.length));
+  assert.ok(examples.length >= 3, String(examples.length));
   for (const j of examples) {
     const doc = JSON.parse(j);
     const name = doc.request ? `request-${doc.request}-20261103-0915-kq.json` : 'state-20261103-0915-kq.json';
     const r = checkOutboxFile(name, j.replace('"X"', '"test-product"'));
     assert.equal(r.ok, true, `${j}: ${r.reason}`);
   }
-  // the away shape, filled in
+  // the away and rotate shapes, filled in
+  assert.equal(checkOutboxFile('request-rotate-20261103-0915-ro.json', '{"request":"rotate","product":null,"name":"STRIPE_KEY"}').ok, true);
+  assert.ok(SKILL.includes('{"request":"rotate","product":null,"name":"<NAME>"}'));
   assert.equal(checkOutboxFile('state-20261103-0915-an.json', '{"product":"test-product","state":"away","until":"2026-11-07","tz":"Europe/Prague"}').ok, true);
   assert.equal(examples.some((j) => JSON.parse(j).state === 'active'), false, 'no example sets a product active');
 });

@@ -33,18 +33,25 @@ const KEY_ID = /^(?:AKIA|ASIA|AGPA|AIDA|AROA|ANPA|ANVA|AIPA)[A-Z0-9]{12,}$/;
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}(T[\d:.]+(Z|[+-]\d{2}:\d{2})?)?$/;
 const refuse = (reason) => ({ ok: false, reason });
 const { maskSecrets } = makeMasker();
+// A calendar day that exists: 2026-02-30 is refused, not rolled over to 2 March (0b-8 audit round 5 minor 3).
+function realDay(s) {
+  const [y, m, d] = String(s).slice(0, 10).split('-').map(Number);
+  const t = new Date(Date.UTC(y, m - 1, d));
+  return t.getUTCFullYear() === y && t.getUTCMonth() === m - 1 && t.getUTCDate() === d;
+}
+const isName = (v) => typeof v === 'string' && PRODUCT.test(v); // a string, never a number (round 5 minor 5)
 
 export function stateDoc({ product, state, until = null, tz = null }) {
-  if (!PRODUCT.test(String(product ?? ''))) return refuse('no valid product name');
+  if (!isName(product)) return refuse('no valid product name');
   if (!STATES_ALLOWED.includes(state)) return refuse(`the Front Door may set only ${STATES_ALLOWED.join(' or ')}`); // the value is never echoed: it may hold pasted text
-  if (until !== null && !(ISO_DATE.test(String(until)) && Number.isFinite(Date.parse(until)))) return refuse('until is not a date');
+  if (until !== null && !(typeof until === 'string' && ISO_DATE.test(until) && Number.isFinite(Date.parse(until)) && realDay(until))) return refuse('until is not a date');
   const z = tz === null ? { ok: true, tz: null } : checkTimeZone(tz);
   return { ok: true, doc: { product, state, until, tz: z.ok ? z.tz : null }, ...(z.ok ? {} : { note: `time zone not accepted (${z.reason}); number work holds until Joe names a city-based zone` }) };
 }
 
 export function requestDoc({ request, product = null, name = null }) {
   if (!REQUESTS.includes(request)) return refuse(`unknown request (allowed: ${REQUESTS.join(', ')})`);
-  if (product !== null && !PRODUCT.test(String(product))) return refuse('no valid product name');
+  if (product !== null && !isName(product)) return refuse('no valid product name');
   if (request === 'rotate' && (!KEY_NAME.test(String(name ?? '')) || KEY_ID.test(String(name)))) return refuse('rotate needs the key\'s name only (capitals and digits with at least one _, such as STRIPE_KEY)');
   if (request !== 'rotate' && name !== null) return refuse('only rotate carries a name');
   return { ok: true, doc: { request, product, name } };
@@ -77,7 +84,9 @@ export function checkOutboxFile(name, text) {
   const kind = m[1] ?? m[3]; const ext = m[5];
   if (kind === 'idea') {
     if (ext !== 'md') return refuse('an idea is a .md file');
-    if (!String(text).split('\n').filter((l) => l !== '').every((l) => l === '>' || l.startsWith('> '))) return refuse('idea text must be quoted on every line');
+    const lines = String(text).split('\n').filter((l) => l !== '');
+    if (!lines.every((l) => l === '>' || l.startsWith('> '))) return refuse('idea text must be quoted on every line');
+    if (!lines.some((l) => l.slice(2).trim() !== '')) return refuse('the idea is empty'); // round 5 minor 4
     return { ok: true, kind, doc: { quoted: maskSecrets(String(text).replace(INVISIBLE, '')).text } };
   }
   if (ext !== 'json') return refuse(`a ${kind} file is .json`);
