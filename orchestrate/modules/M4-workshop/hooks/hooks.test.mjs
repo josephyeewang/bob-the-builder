@@ -153,7 +153,7 @@ test('merge guard blocks every merge route and lets ordinary pushes through', ()
     'cd x && git push origin main', 'true; gh pr merge 1',
   ];
   for (const c of blocked) assert.equal(merge.decide(bash(c)).block, true, c);
-  for (const c of ['git push origin card/c-12', 'git status', 'gh pr view 7', 'echo main', 'git log main']) assert.equal(merge.decide(bash(c)).block, false, c);
+  for (const c of ['git status', 'gh pr view 7', 'echo main', 'git log main']) assert.equal(merge.decide(bash(c)).block, false, c);
   assert.equal(merge.decide({ tool_name: 'Read', tool_input: { file_path: '/x' } }).block, false);
 });
 

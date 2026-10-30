@@ -72,7 +72,7 @@ test('MAT-1: the merge guard refuses every round-2 rewrite of a push or merge to
     'echo "  push = HEAD:main" >> .git/config && git push', 'if true; then gh pr merge 1; fi',
   ];
   for (const c of forms) blocked(merge.decide(bash(c, '/')), c);
-  for (const c of ['git push origin card/c-12', 'git status', 'gh pr view 7', 'git log main', 'echo $HOME']) passed(merge.decide(bash(c, '/')), c);
+  for (const c of ['git status', 'gh pr view 7', 'git log main', 'echo $HOME']) passed(merge.decide(bash(c, '/')), c);
 });
 
 test('MAT-1: the no-verify guard refuses every round-2 way of skipping the checks', () => {
@@ -152,4 +152,23 @@ test('round 3 MAT-1: names spelled with letters a Mac disk folds to plain ones a
   for (const c of [`cat ${w.home}/.${LONG_S}sh/config`, `cat ${w.home}/.con${FI}g/gh/hosts.yml`]) blocked(secret.decide(bash(c, w.work), w.args), c);
   for (const p of [`.mcp.j${LONG_S}on`, `.v${LONG_S}code/settings.json`, `${LONG_S}KILL.md`, `.con${FI}g/x`]) assert.equal(plain.isSetupPath(join(w.work, p)), true, p);
   blocked(prodGuard.decide(bash(`fakeho${LONG_S}t --x`, w.work), w.args), 'program spelled with long s');
+});
+
+test('round 3 MIN-1: every push is refused, paths are tidied before the git-files check, and secrets are matched by short name', () => {
+  const w = world();
+  for (const c of ['git switch -c main && git push origin HEAD', 'git checkout -B main && git push -u origin @', 'git push origin card/c-12', 'git send-pack x HEAD']) {
+    assert.equal(merge.decide(bash(c, w.work)).reason, 'a push (only the push script pushes)', c);
+  }
+  for (const c of ['printf "push = HEAD:main" >> .git/./config && git status', 'cat .git//config']) {
+    assert.equal(merge.decide(bash(c, w.work)).reason, 'the command touches git\'s own settings or hooks files', c);
+  }
+  assert.equal(noVerify.decide(bash('cd .git/./hooks && rm pre-commit; git commit -m x', w.work)).reason, 'the command touches git\'s own settings or hooks files');
+  // A `cd` the guard cannot follow, then the short name: the built-in gh login and a listed secret's last part.
+  const bare = join(w.root, 'bare.json');
+  writeFileSync(bare, makeSnapshot({ production: { env_files: [], programs: [], hosts: [] }, secrets: { paths: [join(w.home, 'vault', 'token.txt')] } }));
+  const a = { ...w.args, snapshot: bare };
+  for (const c of [`cd ${w.home}/.config && cat gh/hosts.yml`, `cd ${w.home}/vault && cat token.txt`]) {
+    assert.match(secret.decide(bash(c, w.work), a).reason, /by its short name/, c);
+  }
+  for (const c of ['cat hosts.yml', 'cat notes/token.md', 'git status']) passed(secret.decide(bash(c, w.work), a), c);
 });

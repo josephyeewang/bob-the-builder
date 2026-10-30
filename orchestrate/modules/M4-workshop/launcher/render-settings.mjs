@@ -48,8 +48,10 @@ const denyPair = (p) => [`Read(/${abs(p)}/**)`, `Edit(/${abs(p)}/**)`];
  *          bobFolder?, extraOutboxes?: [] }
  * product: { commands, hosts }         rulesHosts: the rules' allowed hosts; registryHosts: allowed during install only
  * phase: 'session' | 'install'
+ * productionFiles: the rules' `production.env_files`. Each must be on the read-deny list, or the launch is refused
+ * (audit R-0b-44 round 3 MIN-2): the hooks match only plain words, and this list is the wall for `grep -r` or `tar`.
  */
-export function renderRoleSettings({ role, profile, paths, product = {}, rulesHosts = [], registryHosts = [], phase = 'session' }) {
+export function renderRoleSettings({ role, profile, paths, product = {}, rulesHosts = [], registryHosts = [], phase = 'session', productionFiles }) {
   if (!DESIGN_PROFILES[role]) return refuse(`no such role "${role}"`);
   if (phase !== 'session' && phase !== 'install') return refuse('bad phase');
   if (phase === 'install' && role !== 'worker') return refuse('only a worker has an install step');
@@ -73,6 +75,9 @@ export function renderRoleSettings({ role, profile, paths, product = {}, rulesHo
   const d = paths.deny ?? {};
   const denyPaths = [...(d.secrets ?? []), d.claudeHome, d.ssh, d.gh, d.robotKeys, d.record, ...(d.otherCopies ?? [])].filter(Boolean);
   if (paths.mirror && denyPaths.includes(paths.mirror)) return refuse('the mirror must not be on the read-deny list');
+  if (!Array.isArray(productionFiles)) return refuse('the rules\' production file list was not given');
+  const unguarded = productionFiles.filter((f) => !denyPaths.some((d) => typeof f === 'string' && (f === d || f.startsWith(`${d.replace(/\/+$/, '')}/`))));
+  if (unguarded.length) return refuse(`the rules list production files the role file does not deny: ${unguarded.join(', ')}`);
   const deny = denyPaths.flatMap(denyPair);
   // Outbox: no dot-names, no sub-folders' dot-names.
   const ob = abs(paths.outbox);

@@ -1,10 +1,9 @@
 // The merge guard (design v4 §14.1.5). No role merges or pushes to main: only the Merge Gate does,
-// as the robot. Blocks `gh pr merge`, `gh api …/merge(s)`, a push whose refspec lands on main (or
-// master, or a mirror/all push), and any web call to GitHub's merge address.
+// as the robot. Blocks `gh pr merge`, `gh api …/merge(s)`, every `git push` (the push script is the only
+// route to GitHub), and any web call to GitHub's merge address.
 
 import { isMain, runHook, block, pass, shellCommands, shellWords, programOf, joinLines, unreadable, namesGitInternals } from './lib.mjs';
 
-const MAIN = /^(?:\+)?(?:[^:]*:)?(?:refs\/)?(?:heads\/)?(main|master)$/;
 // Git settings that turn a plain push into a push to main, or rename a command.
 const PUSH_SETTINGS = /^(remote\..+\.(push|pushurl|url|mirror)|remote\.pushdefault|push\.default|alias\..+|core\.hookspath|url\..+\.(push)?insteadof|include\.path|includeif\..+)(=|$)/i;
 const MERGE_URL = /(api\.)?github\.com\/.*\/(merges?|pulls\/\d+\/merge)(\b|$)|\/repos\/[^\s]+\/(merges?|pulls\/\d+\/merge)\b/i;
@@ -32,14 +31,9 @@ export function decide(input) {
     if (prog === 'git') {
       // `git -c key=value` and `git config key value` of a push, alias or hooks setting.
       if (c.some((w) => PUSH_SETTINGS.test(w))) return block('changing git\'s push, alias or hooks settings');
-      const i = c.findIndex((w, k) => k > 0 && (w === 'push' || w === 'send-pack'));
-      if (i > 0) {
-        const pushArgs = c.slice(i + 1);
-        // A pattern the shell expands (`HEAD:mai?`, `HEAD:{main,}`) can land on main.
-        if (pushArgs.some((w) => /[*?[\]{}]/.test(w))) return block('a push with a pattern in it');
-        if (pushArgs.some((w) => ['--mirror', '--all', '--delete', '-d'].includes(w))) return block('a mirror, all-branches or delete push');
-        if (pushArgs.filter((w) => !w.startsWith('-')).some((w) => MAIN.test(w))) return block('a push to main');
-      }
+      // No role pushes: the push script is the only route to GitHub, so every push is refused, whatever
+      // its refspec (`git switch -c main && git push origin HEAD` lands on main with none; audit R-0b-44 round 3 MIN-1).
+      if (c.some((w, k) => k > 0 && (w === 'push' || w === 'send-pack'))) return block('a push (only the push script pushes)');
     }
   }
   // A merge address spelled across quoting or variables is still a GitHub merge call.

@@ -19,7 +19,7 @@ const PATHS = {
   bobFolder: '/w/bob', mirror: '/w/mirror.git',
 };
 const PRODUCT = { commands: { test: 'npm test', build: 'npm run build' }, hosts: ['registry.example.com'] };
-const render = (role, extra = {}) => renderRoleSettings({ role, profile: DESIGN_PROFILES[role], paths: PATHS, product: PRODUCT, rulesHosts: ['registry.example.com'], ...extra });
+const render = (role, extra = {}) => renderRoleSettings({ productionFiles: [], role, profile: DESIGN_PROFILES[role], paths: PATHS, product: PRODUCT, rulesHosts: ['registry.example.com'], ...extra });
 
 // ---- role profiles ----
 
@@ -239,7 +239,7 @@ test('the role file is written, read back from disk and checked', () => {
 // ---- planted failures for each refusal line, checked by their own reasons (audit R-0b-44 M-6) ----
 
 test('render and check: an unknown role, a bad phase, a path with a space, a missing unsandboxed refusal and a read-back that differs each refuse with their own reason', () => {
-  assert.equal(renderRoleSettings({ role: 'nobody', profile: DESIGN_PROFILES.worker, paths: PATHS }).reason, 'no such role "nobody"');
+  assert.equal(renderRoleSettings({ productionFiles: [], role: 'nobody', profile: DESIGN_PROFILES.worker, paths: PATHS }).reason, 'no such role "nobody"');
   assert.equal(render('worker', { phase: 'later' }).reason, 'bad phase');
   assert.match(render('worker', { paths: { ...PATHS, outbox: '/w/out box' } }).reason, /^path "\/w\/out box" is not a plain absolute path$/);
   const s = structuredClone(render('worker').settings);
@@ -258,4 +258,11 @@ test('round 2 MIN-4: the Bob folder is on the sandbox no-write list, so the shel
     const w = render(role).settings[S.sandbox][S.filesystem][S.denyWrite];
     assert.ok(w.includes(PATHS.bobFolder) && w.includes(`${PATHS.bobFolder}/**`), role);
   }
+});
+
+test('round 3 MIN-2: a production file the rules list but the role file does not deny refuses the launch', () => {
+  assert.equal(renderRoleSettings({ role: 'worker', profile: DESIGN_PROFILES.worker, paths: PATHS, product: PRODUCT, rulesHosts: ['registry.example.com'] }).reason, 'the rules\' production file list was not given');
+  assert.equal(render('worker', { productionFiles: ['/p/settings.production'] }).reason, 'the rules list production files the role file does not deny: /p/settings.production');
+  assert.equal(render('worker', { productionFiles: ['/w/secrets/settings.production', '/w/secrets'] }).ok, true, 'inside a denied folder, or the folder itself');
+  assert.equal(render('worker', { productionFiles: ['/w/secretsX/settings.production'] }).ok, false, 'a folder whose name only starts the same');
 });

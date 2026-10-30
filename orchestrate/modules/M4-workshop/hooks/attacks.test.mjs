@@ -92,7 +92,7 @@ test('M-4: the merge guard blocks pushes to main and merges by other routes', ()
     'git -c remote.origin.push=HEAD:main push', 'git -c alias.p=push p origin HEAD:main', 'git config --global url.x.pushInsteadOf y',
   ];
   for (const c of routes) blocked(merge.decide(bash(c)), c);
-  for (const c of ['git push origin card/c-1', 'git push origin HEAD:refs/heads/card/c-1', 'git status', 'npm test', 'echo $HOME', 'gh pr view 1', 'git log --oneline -5', 'git config user.name x'])
+  for (const c of ['git status', 'npm test', 'echo $HOME', 'gh pr view 1', 'git log --oneline -5', 'git config user.name x'])
     passed(merge.decide(bash(c)), c);
 });
 

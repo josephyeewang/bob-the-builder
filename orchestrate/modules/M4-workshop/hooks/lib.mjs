@@ -9,7 +9,7 @@
 // byte for byte, so a hook may import only from this folder.
 
 import { realpathSync, lstatSync } from 'node:fs';
-import { dirname, basename, join, isAbsolute, resolve, sep } from 'node:path';
+import { dirname, basename, join, isAbsolute, resolve, sep, posix } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 export const BLOCK = 2;
@@ -300,5 +300,6 @@ export function unreadable(cmd) {
 export const fold = (s) => String(s).normalize('NFKC').toUpperCase().toLowerCase().normalize('NFKC').replace(/\p{Default_Ignorable_Code_Point}/gu, '');
 
 /** The command names git's own settings or hooks files (`.git/config`, `.git/hooks/…`, `.git/info/…`). */
-export const namesGitInternals = (cmd) => [joinLines(cmd), ...shellWords(String(cmd ?? ''))]
+// Each word's path is tidied first, so `.git/./config` and `.git//hooks` count (audit R-0b-44 round 3 MIN-1).
+export const namesGitInternals = (cmd) => [joinLines(cmd), ...shellWords(String(cmd ?? '')).flatMap((w) => [w, posix.normalize(w)])]
   .some((t) => /(^|[\/\s"'=:])\.git\/(config|hooks|info)(\b|\/|$)/i.test(t));

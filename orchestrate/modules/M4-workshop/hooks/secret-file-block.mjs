@@ -49,6 +49,16 @@ function patternMeetsSecret(w, listed) {
   });
 }
 
+// A short name a `cd` beforehand could point at a secret (audit R-0b-44 round 3 MIN-1), as the production
+// guard's `namesEnv` does: `gh/hosts.yml`, or the last part of a path the rules list.
+function shortName(w, listed) {
+  const parts = fold(w).split(sep).filter(Boolean);
+  const name = parts[parts.length - 1];
+  if (!name || w.startsWith('-')) return false;
+  if (name === 'hosts.yml' && parts[parts.length - 2] === 'gh') return true;
+  return listed.some((l) => basename(fold(l)) === name);
+}
+
 export function decide(input, args) {
   const snap = readSnapshot(args.snapshot);
   if (!snap.ok) return block(snap.reason);
@@ -70,6 +80,7 @@ export function decide(input, args) {
     for (const word of shellWords(joinLines(t.command))) {
       for (const w of expandBraces(word)) {
         if (w.length > 1 && isSecretPath(w, listed, input.cwd)) return block(`the command names a secret file (${word})`);
+        if (shortName(w, listed)) return block(`the command names a secret file by its short name (${word})`);
         if (patternMeetsSecret(w, listed)) return block(`the command's pattern could name a secret file (${word})`);
       }
     }

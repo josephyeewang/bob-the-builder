@@ -32,7 +32,7 @@ const N_PATHS = {
 const N_VERSION = '2.1.300';
 const N_FLAGS = Object.values(FLAGS).filter((f) => f.startsWith('-'));
 function NAMES(role, over = {}) {
-  const r = renderRoleSettings({ role, profile: DESIGN_PROFILES[role], paths: N_PATHS, product: { commands: { test: 'npm test' } } });
+  const r = renderRoleSettings({ productionFiles: [], role, profile: DESIGN_PROFILES[role], paths: N_PATHS, product: { commands: { test: 'npm test' } } });
   assert.equal(r.ok, true, `${role}: ${r.reason}`);
   const confirmed = Object.fromEntries([...namesIn(r.settings), ...N_FLAGS].map((n) => [n, { by: 'readback:stand-in', version: N_VERSION }]));
   return { settings: r.settings, flags: N_FLAGS, version: N_VERSION, confirmed, ...over };
@@ -305,7 +305,7 @@ function hookWorld(role = 'worker') {
   const rules = { production: { env_files: [join(root, 'prod.env')], programs: ['fakehost'], hosts: ['db.prod.example.net'] }, secrets: { paths: [keys] } };
   writeFileSync(snapshot, makeSnapshot(rules));
   const profile = DESIGN_PROFILES[role];
-  const r = renderRoleSettings({ role, profile, paths: { copy, outbox, hooksDir, snapshot, node: process.execPath, deny: { secrets: [keys] } }, product: { commands: { test: 'npm test' } } });
+  const r = renderRoleSettings({ productionFiles: [], role, profile, paths: { copy, outbox, hooksDir, snapshot, node: process.execPath, deny: { secrets: [keys] } }, product: { commands: { test: 'npm test' } } });
   assert.equal(r.ok, true, r.reason);
   const check = (over = {}) => checkHooks({ settings: r.settings, hooksDir, source, kinds: profile.outbox, copy, outbox, harmfulProduction: productionProbe(rules), timeoutMs: 1500, ...over });
   return { root, source, hooksDir, outbox, settings: r.settings, check, rules };
@@ -450,7 +450,7 @@ test('check 4: the registry is allowed for the install step only', async () => {
   const profile = DESIGN_PROFILES.worker;
   const paths = { copy: '/w/copy', outbox: '/w/outbox', hooksDir: '/w/hooks', snapshot: '/w/rules.json', node: '/w/node' };
   const registryHosts = ['registry.example.org'];
-  const render = (phase) => renderRoleSettings({ role: 'worker', profile, paths, product: { commands: { test: 'npm test' } }, registryHosts, phase });
+  const render = (phase) => renderRoleSettings({ productionFiles: [], role: 'worker', profile, paths, product: { commands: { test: 'npm test' } }, registryHosts, phase });
   const written = [];
   const write = (s) => { written.push(s[S.sandbox][S.network][S.allowedDomains]); return { ok: true }; };
   let seenDuringInstall;
@@ -465,7 +465,7 @@ test('check 4: the registry is allowed for the install step only', async () => {
   const leaky = (phase) => { const x = render('install'); return phase === 'install' ? x : x; };
   assert.match((await installStep({ render: leaky, write: () => ({ ok: true }), install: async () => ({ ok: true }), registryHosts })).reason, /still allowed/);
   // Only a worker has an install step.
-  assert.equal(renderRoleSettings({ role: 'lead', profile: DESIGN_PROFILES.lead, paths, phase: 'install' }).ok, false);
+  assert.equal(renderRoleSettings({ productionFiles: [], role: 'lead', profile: DESIGN_PROFILES.lead, paths, phase: 'install' }).ok, false);
   // A card that changes the dependency files triggers an install at the next round.
   const first = needsInstall({ lastInstalledHash: null, files: [['package-lock.json', 'a']] });
   assert.equal(first.needed, true);
@@ -564,7 +564,7 @@ test('check 7: a missing hook folder, no outbox kinds, a hook that is not a comm
 
 test('check 4: a role file that will not write, before or after the install, refuses with its own reason', async () => {
   const paths = { copy: '/w/copy', outbox: '/w/outbox', hooksDir: '/w/hooks', snapshot: '/w/rules.json', node: '/w/node' };
-  const render = (phase) => renderRoleSettings({ role: 'worker', profile: DESIGN_PROFILES.worker, paths, product: { commands: { test: 'npm test' } }, registryHosts: ['registry.example.org'], phase });
+  const render = (phase) => renderRoleSettings({ productionFiles: [], role: 'worker', profile: DESIGN_PROFILES.worker, paths, product: { commands: { test: 'npm test' } }, registryHosts: ['registry.example.org'], phase });
   const failOn = (n) => { let i = 0; return () => (++i === n ? { ok: false, reason: 'disk full' } : { ok: true }); };
   let ran = false;
   const install = async () => { ran = true; return { ok: true }; };
@@ -610,4 +610,14 @@ test('check 6 and 10: a start message missing a field, and a machine-wide file t
     assert.equal(checkInit(i, { role: 'worker', profile: DESIGN_PROFILES.worker }).reason, `start message has no ${k}`);
   }
   assert.equal(checkMachineWide({ readFile: () => '{', path: '/w/managed.json' }).reason, 'machine-wide settings are missing or not JSON');
+});
+
+test('round 3 MIN-4 (round 2 MIN-1): an empty or partial role file handed to the names check refuses before check 1', async () => {
+  let started = 0;
+  for (const settings of [{}, { permissions: { deny: [] } }]) {
+    const r = await launch({ role: 'worker', profile: DESIGN_PROFILES.worker, checks: {}, start: async () => { started += 1; }, names: { ...NAMES('worker'), settings } });
+    assert.equal(r.failedAt, 0);
+    assert.match(r.reason, /not locked down/);
+  }
+  assert.equal(started, 0);
 });

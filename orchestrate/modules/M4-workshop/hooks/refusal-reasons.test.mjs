@@ -87,3 +87,17 @@ test('secret-file block: a missing snapshot refuses with its own reason', () => 
   const w = world();
   assert.equal(secret.decide(bash('true'), args(w, 'worker', { snapshot: join(w.root, 'none.json') })).reason, 'rules snapshot is missing or unreadable');
 });
+
+test('round 3 MIN-4 (round 2 MIN-2): each link refusal gives its own reason, so no layer hides another', () => {
+  const w = world();
+  writeFileSync(join(w.copy, 'real.txt'), 'x');
+  // A link inside the copy to a file inside the copy: only the raw-path link check refuses it.
+  const link = join(w.copy, 'link.txt');
+  symlinkSync(join(w.copy, 'real.txt'), link);
+  assert.equal(plain.decide(write(link), args(w)).reason, `"${link}" is a link`);
+  // A link to a missing target: the landing path refuses it before the link check sees it.
+  const dangling = join(w.copy, 'dangling.txt');
+  symlinkSync(join(w.copy, 'not-there.txt'), dangling);
+  assert.equal(plain.decide(write(dangling), args(w)).reason, `"${dangling}" is not a plain absolute path, or is a link to nowhere yet`);
+  assert.equal(plain.decide(write(join(w.copy, 'real.txt')), args(w)).block, false);
+});
