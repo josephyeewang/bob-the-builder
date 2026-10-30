@@ -8,11 +8,12 @@ import { mkdtempSync, writeFileSync, mkdirSync, rmSync, symlinkSync, readFileSyn
 import { tmpdir } from 'node:os';
 import { join, dirname, delimiter } from 'node:path';
 import { randomBytes } from 'node:crypto';
-import { gzipSync } from 'node:zlib';
+import { gzipSync, deflateSync } from 'node:zlib';
 import { gitOk, git, initMirror, callLog } from './safe-git.mjs';
 import { createPushScript, readBundleHeader, githubUrl } from './push.mjs';
 import { refusedPath } from './push-refusals.mjs';
 import { DO_PLANE_TOML, RULES_VERSION, scanSecrets } from './gitleaks.mjs';
+import { crc32 } from './binary-files.mjs';
 import { startGate, factId } from './start-gate.mjs';
 import { memoryRecord } from '../../../shared/record.mjs';
 import { fakeRules, allow, deny } from '../../../shared/rules.mjs';
@@ -427,10 +428,10 @@ test('R-0b-47 MAT-2, real gitleaks: a secret in a file git calls binary is still
   const sha = (await gitOk(['rev-parse', 'HEAD'], w.cg)).trim();
   await gitOk(['push', '-q', w.mirror, 'HEAD:refs/heads/scan'], w.cg);
   // Positive control: the git scan alone, without the files, misses it.
-  assert.deepEqual(await scanSecrets({ setup: scanner, mirror: w.mirror, shas: [sha], messages: [], privateDir: tmp() }), { ok: true });
+  assert.deepEqual(await scanSecrets({ setup: scanner, mirror: w.mirror, shas: [sha], messages: [], privateDir: tmp() }), { ok: true, binaries: [] });
   await w.bundle();
-  const r = await refusedAndUntouched(w, /the file scan: .*likely secret/);
-  assert.match(r.reason, /b\.js/);
+  const r = await refusedAndUntouched(w, /b\.js cannot be scanned for secrets/);
+  assert.match(r.reason, /not plain UTF-8 text/);
 });
 
 test('R-0b-47 MAT-1: the vendored rules have no allow-list and are all there', () => {
@@ -780,6 +781,68 @@ test('L4 restart: the copy fast-forwards to GitHub\'s branch kept in the mirror;
   assert.match((await prepareWorkerCopy({ product, card, dest: join(w.root, 'diverged'), lastBundle })).reason, /went another way/);
 });
 
+// A small valid PNG (1x1, grey), with an optional plain tEXt chunk.
+const chunk = (type, data) => { const t = Buffer.from(type, 'latin1'); const len = Buffer.alloc(4); len.writeUInt32BE(data.length); const c = Buffer.alloc(4); c.writeUInt32BE(crc32(Buffer.concat([t, data]))); return Buffer.concat([len, t, data, c]); };
+function makePng({ text, extra = [] } = {}) {
+  const ihdr = Buffer.from([0, 0, 0, 1, 0, 0, 0, 1, 8, 0, 0, 0, 0]);
+  return Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), chunk('IHDR', ihdr), ...(text ? [chunk('tEXt', Buffer.from(`Comment\0${text}`, 'latin1'))] : []), ...extra, chunk('IDAT', deflateSync(Buffer.from([0, 128]))), chunk('IEND', Buffer.alloc(0))]);
+}
+// A one-file zip, stored (not packed); `locked` sets the "encrypted" flag a password lock sets.
+function makeZip(name, data, { locked = false } = {}) {
+  const n = Buffer.from(name); const h = Buffer.alloc(30); h.writeUInt32LE(0x04034b50, 0); h.writeUInt16LE(20, 4); h.writeUInt16LE(locked ? 1 : 0, 6);
+  h.writeUInt32LE(crc32(data), 14); h.writeUInt32LE(data.length, 18); h.writeUInt32LE(data.length, 22); h.writeUInt16LE(n.length, 26);
+  const c = Buffer.alloc(46); c.writeUInt32LE(0x02014b50, 0); c.writeUInt16LE(20, 4); c.writeUInt16LE(20, 6); c.writeUInt16LE(locked ? 1 : 0, 8);
+  c.writeUInt32LE(crc32(data), 16); c.writeUInt32LE(data.length, 20); c.writeUInt32LE(data.length, 24); c.writeUInt16LE(n.length, 28);
+  const local = Buffer.concat([h, n, data]); const central = Buffer.concat([c, n]);
+  const e = Buffer.alloc(22); e.writeUInt32LE(0x06054b50, 0); e.writeUInt16LE(1, 8); e.writeUInt16LE(1, 10); e.writeUInt32LE(central.length, 12); e.writeUInt32LE(local.length, 16);
+  return Buffer.concat([local, central, e]);
+}
+
+test('L28: a file the scan cannot fully read is refused by default: a .tgz, a renamed archive, a locked zip, a zip, UTF-16 text, a zip renamed to .png', async () => {
+  const secret = Buffer.from(`key = "${fakeSecret()}"\n`);
+  const tgz = gzipSync(secret);
+  const cases = {
+    'pack.tgz': tgz,
+    'data.txt': tgz, // a packed file renamed
+    'locked.zip': makeZip('cfg.txt', randomBytes(64), { locked: true }),
+    'plain.zip': makeZip('cfg.txt', secret),
+    'notes16.txt': Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from([...secret].flatMap((b) => [b, 0]))]),
+    'docs/pic.png': makeZip('cfg.txt', secret), // inside an allowed path, but not really a PNG
+    'docs/tail.png': Buffer.concat([makePng(), makeZip('cfg.txt', secret)]), // a real PNG with an archive after its end
+    'docs/ztxt.png': makePng({ extra: [chunk('zTXt', Buffer.concat([Buffer.from('Comment\0\0'), deflateSync(secret)]))] }), // packed text inside
+  };
+  for (const [path, bytes] of Object.entries(cases)) {
+    const w = await world();
+    w.values['product.allowed_binaries'] = [{ path: 'docs/**/*.png', type: 'png' }];
+    await w.commit('one', (c) => { mkdirSync(dirname(join(c, path)), { recursive: true }); writeFileSync(join(c, path), bytes); });
+    await w.bundle();
+    const r = await refusedAndUntouched(w, /cannot be scanned for secrets/);
+    assert.ok(r.reason.includes(path), `${path}: ${r.reason}`);
+  }
+});
+
+test('L28: a real image is allowed only where the rules entry names its type and path, and it is listed in the read-back', async () => {
+  const png = makePng();
+  // No entry (the first cutover's default), a malformed entry, the wrong type, the wrong path: refused.
+  for (const entry of [undefined, 'docs/**/*.png', [{ path: 'docs/**/*.png' }], [{ path: '/docs/*.png', type: 'png' }], [{ path: 'docs/**/*.png', type: 'jpeg' }], [{ path: 'img/*.png', type: 'png' }]]) {
+    const w = await world();
+    w.values['product.allowed_binaries'] = entry;
+    await w.commit('pic', (c) => { mkdirSync(join(c, 'docs', 'a'), { recursive: true }); writeFileSync(join(c, 'docs', 'a', 'pic.png'), png); });
+    await w.bundle();
+    await refusedAndUntouched(w, /docs\/a\/pic\.png cannot be scanned for secrets/);
+  }
+  // Planted fault: with the entry, the same push goes through and the image is in the read-back.
+  const w = await world();
+  w.values['product.allowed_binaries'] = [{ path: 'docs/**/*.png', type: 'png' }];
+  await w.commit('pic', (c) => { mkdirSync(join(c, 'docs', 'a'), { recursive: true }); writeFileSync(join(c, 'docs', 'a', 'pic.png'), png); writeFileSync(join(c, 'a.txt'), 'text\n'); });
+  await w.bundle();
+  const r = await w.push();
+  assert.equal(r.ok, true, r.reason);
+  assert.deepEqual(r.binaries, [{ path: 'docs/a/pic.png', type: 'png' }]);
+  const fact = w.record.list('fact').find((f) => f.id.startsWith('push.'));
+  assert.deepEqual(fact.doc.binaries, [{ path: 'docs/a/pic.png', type: 'png' }]);
+});
+
 // Files gitleaks dir skips or misreads when given as they are (round 2 MAT-A).
 const typed = (secret) => {
   const s = Buffer.from(`key = "${secret}"\n`);
@@ -802,7 +865,7 @@ const typed = (secret) => {
   };
 };
 
-test('R-0b-47 round 2 MAT-A, real gitleaks: a secret in a file that looks like an archive, a program, a database, a PDF or UTF-16 text is stopped', { skip: realGitleaks ? false : 'skipped: gitleaks 8.30.1 not installed' }, async () => {
+test('R-0b-47 round 2 MAT-A (L28), real gitleaks: a file that looks like an archive, a program, a database, a PDF or UTF-16 text is refused unread', { skip: realGitleaks ? false : 'skipped: gitleaks 8.30.1 not installed' }, async () => {
   const scanner = await realScanner(tmp());
   for (const [name, bytes] of Object.entries(typed(fakeSecret()))) {
     // Positive control: gitleaks dir on the file as it is finds nothing.
@@ -813,7 +876,7 @@ test('R-0b-47 round 2 MAT-A, real gitleaks: a secret in a file that looks like a
     const w = await world({ scanner });
     await w.commit('typed', (c2) => { mkdirSync(join(c2, 'deep'), { recursive: true }); writeFileSync(join(c2, 'deep', name), bytes); });
     await w.bundle();
-    const r = await refusedAndUntouched(w, /the file scan: .*likely secret/);
+    const r = await refusedAndUntouched(w, /cannot be scanned for secrets/);
     assert.ok(r.reason.includes(`deep/${name}`), `${name}: ${r.reason}`);
     // MIN-b: the refusal names the repo path, never the private scan folder.
     assert.doesNotMatch(r.reason, /scan-|files\/(raw|text|nul)/, name);
@@ -845,15 +908,16 @@ test('R-0b-47 round 2 MAT-B, real gitleaks: a secret in an extra commit header l
   await refusedAndUntouched(w, /header lines or file names: .*likely secret/);
 });
 
-test('R-0b-47 round 2 MIN-a, MIN-c, real gitleaks: the same content under two names is scanned under both; an executable file is scanned', { skip: realGitleaks ? false : 'skipped: gitleaks 8.30.1 not installed' }, async () => {
+test('R-0b-47 round 2 MIN-a, MIN-c, real gitleaks: an allowed image is still scanned, under each of its names, executable or not', { skip: realGitleaks ? false : 'skipped: gitleaks 8.30.1 not installed' }, async () => {
   const scanner = await realScanner(tmp());
   const w = await world({ scanner });
-  const bytes = Buffer.concat([Buffer.from([0, 1, 2, 0]), Buffer.from(`\nconst t = "${fakeSecret()}";\n`)]);
-  await w.commit('twice', (c) => { writeFileSync(join(c, 'one.js'), bytes); writeFileSync(join(c, 'two.js'), bytes); writeFileSync(join(c, 'run.sh'), Buffer.concat([Buffer.from([0x7f, 0x45, 0x4c, 0x46, 0]), bytes])); chmodSync(join(c, 'run.sh'), 0o755); });
-  assert.match(await gitOk(['ls-files', '-s', 'run.sh'], w.cg), /^100755/);
+  w.values['product.allowed_binaries'] = [{ path: 'docs/**/*.png', type: 'png' }];
+  const bytes = makePng({ text: `key = "${fakeSecret()}"` });
+  await w.commit('twice', (c) => { mkdirSync(join(c, 'docs'), { recursive: true }); for (const n of ['one.png', 'two.png', 'run.png']) writeFileSync(join(c, 'docs', n), bytes); chmodSync(join(c, 'docs', 'run.png'), 0o755); });
+  assert.match(await gitOk(['ls-files', '-s', 'docs/run.png'], w.cg), /^100755/);
   await w.bundle();
   const r = await refusedAndUntouched(w, /the file scan: .*likely secret/);
-  for (const n of ['one.js', 'two.js', 'run.sh']) assert.ok(r.reason.includes(n), `${n}: ${r.reason}`);
+  for (const n of ['one.png', 'two.png', 'run.png']) assert.ok(r.reason.includes(`docs/${n}`), `${n}: ${r.reason}`);
 });
 
 test('R-0b-47 round 2 MIN-d: a new file over the size cap, or new files over the total cap, are refused before they are read', async () => {
@@ -873,5 +937,5 @@ test('R-0b-47 round 2 MIN-d: a new file over the size cap, or new files over the
   assert.equal(r.ok, false);
   assert.match(r.reason, /more than 7000 bytes/);
   // Planted fault: under both caps the same scan passes.
-  assert.deepEqual(await scan({}), { ok: true });
+  assert.deepEqual(await scan({}), { ok: true, binaries: [] });
 });

@@ -10,13 +10,15 @@
 // added line holding `gitleaks:allow` itself, in case a later version drops the flag.
 // The git scan reads patches, and a patch skips a file git thinks is binary, so every new file's
 // raw bytes are also written to the private scan folder and scanned there (R-0b-47 MAT-2). That
-// `gitleaks dir` scan in turn skips a file whose first bytes mark it as an archive, a program, a
-// database or a PDF, and finds nothing in UTF-16 text, so each file is written three ways: as it
+// Only plain text, and images or fonts a product allows, get this far (binary-files.mjs, L28): any
+// other file is refused unread. The `gitleaks dir` scan in turn skips a file whose first bytes
+// mark it as an archive, a program, a database or a PDF, and finds nothing in UTF-16 text, so
+// each file is written three ways: as it
 // is, under its own name (rules that look at the name still fire); and, under a plain .txt name
 // (gitleaks also skips some endings, such as .tar), behind a text lead-in that hides the marker,
 // once as is and once with every zero byte removed (UTF-16 then reads as plain text); round 2
-// MAT-A. A .zip or .tar.gz is opened two levels deep. Content packed under another name, or
-// locked, cannot be read by any scan: the README lists it as an open item. A file over the size
+// MAT-A. A .zip or .tar.gz is opened two levels deep. These views are a second line now that
+// such files are refused: they still read the text inside an allowed image. A file over the size
 // cap is refused, not read (MIN-d).
 // Capability note: --ignore-gitleaks-allow, the default rules' allow-lists (global: node_modules,
 // lock files, images, fonts and more), `gitleaks dir` reading a file with NUL bytes, a type marker
@@ -30,6 +32,7 @@ import { readFileSync, lstatSync, statSync, mkdtempSync, mkdirSync, writeFileSyn
 import { join, isAbsolute } from 'node:path';
 import { createHash } from 'node:crypto';
 import { git, safeGitEnv } from './safe-git.mjs';
+import { checkFile } from './binary-files.mjs';
 
 export const RULES_VERSION = '8.30.1';
 export const DO_PLANE_TOML = readFileSync(new URL(`./rules-${RULES_VERSION}.gitleaks.toml`, import.meta.url), 'utf8');
@@ -110,14 +113,17 @@ const repoPath = (blobs) => (file) => {
 
 /**
  * Scans the commits `shas` (all new, already checked) in the mirror, then every new file's raw
- * bytes (`blobs`: [{ id, path }], each added or changed file under each of its names), then each
+ * bytes (`blobs`: [{ id, path }], each added or changed file under each of its names; one that is
+ * not plain text and not allowed by `allowedBinaries`, from binary-files.mjs, refuses), then each
  * commit's own text through stdin. `messages` is [[sha, text]]: the whole commit object (every
- * header line, the message) and the names of the files it touches.
+ * header line, the message) and the names of the files it touches. Clean is { ok: true, binaries }:
+ * the allowed non-text files, for the read-back.
  */
-export async function scanSecrets({ setup, mirror, shas, blobs = [], messages, privateDir, maxFileBytes = MAX_FILE_BYTES, maxTotalBytes = MAX_TOTAL_BYTES }) {
+export async function scanSecrets({ setup, mirror, shas, blobs = [], messages, privateDir, allowedBinaries = [], maxFileBytes = MAX_FILE_BYTES, maxTotalBytes = MAX_TOTAL_BYTES }) {
   const c = await checkScanner(setup);
   if (!c.ok) return c;
   const dir = mkdtempSync(join(privateDir, 'scan-'));
+  const binaries = [];
   try {
     const env = safeGitEnv({ gitDir: mirror });
     const report = join(dir, 'git.json');
@@ -141,6 +147,9 @@ export async function scanSecrets({ setup, mirror, shas, blobs = [], messages, p
         if (total > maxTotalBytes) return refuse(`the new files come to more than ${maxTotalBytes} bytes, too much to scan`);
         const cat = await git(['cat-file', 'blob', b.id], { gitDir: mirror, purpose: 'push-scan-files' });
         if (cat.code !== 0 || cat.stdout.length !== n) return refuse(`could not read the new file ${name}`);
+        const kind = checkFile(String(b.path), cat.stdout, allowedBinaries);
+        if (!kind.ok) return refuse(kind.reason);
+        if (kind.binary) binaries.push(kind.binary);
         for (const k of VIEWS) {
           const sub = join(files, k, String(i));
           mkdirSync(sub, { mode: 0o700 });
@@ -158,6 +167,6 @@ export async function scanSecrets({ setup, mirror, shas, blobs = [], messages, p
       const mv = verdict(m, rep);
       if (!mv.ok) return refuse(`commit ${sha.slice(0, 12)} message, header lines or file names: ${mv.reason}`);
     }
-    return { ok: true };
+    return { ok: true, binaries };
   } finally { rmSync(dir, { recursive: true, force: true }); }
 }

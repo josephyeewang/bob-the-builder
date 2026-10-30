@@ -22,6 +22,7 @@ import { join, isAbsolute } from 'node:path';
 import { git, gitOk, checkMirror, checkGitVersion } from './safe-git.mjs';
 import { parseRawZ, refusedEntries } from './push-refusals.mjs';
 import { scanSecrets } from './gitleaks.mjs';
+import { allowList } from './binary-files.mjs';
 import { startGate } from './start-gate.mjs';
 
 export const BUNDLE_CAP = 200 * 1024 * 1024;
@@ -223,7 +224,7 @@ export function createPushScript(deps) {
       // 5. The secret scan.
       const shas = commits.map(([s]) => s);
       for (const sha of shas) if (await addedAllowComment(mirror, sha)) no(`commit ${sha.slice(0, 12)} adds a "gitleaks:allow" comment`);
-      const scan = await scanSecrets({ setup: scanner, mirror, shas, blobs: [...blobs.values()], messages: await messages(mirror, shas, names), privateDir: work });
+      const scan = await scanSecrets({ setup: scanner, mirror, shas, blobs: [...blobs.values()], messages: await messages(mirror, shas, names), privateDir: work, allowedBinaries: allowList(rules.get('product.allowed_binaries', { product })) });
       if (!scan.ok) no(scan.reason);
 
       // 6. The rules, then the start gate.
@@ -240,7 +241,7 @@ export function createPushScript(deps) {
       let pr;
       try { pr = await pullRequests.upsert({ repo, branch, base, title: String(card_doc.title ?? card), body: String(card_doc.summary ?? ''), token }); } catch { pr = null; }
       await gitOk(['update-ref', `refs/heads/${branch}`, tip], { gitDir: mirror, purpose: 'push-mirror-branch' });
-      return { ok: true, product, card, branch, tip, commits: shas.length, pr: pr ?? null };
+      return { ok: true, product, card, branch, tip, commits: shas.length, pr: pr ?? null, binaries: scan.binaries };
     } finally {
       await git(['update-ref', '-d', holding], { gitDir: mirror, purpose: 'push-cleanup' });
       rmSync(work, { recursive: true, force: true });
@@ -254,7 +255,7 @@ export function createPushScript(deps) {
     const s = record.read('session', sessionId)?.doc ?? {};
     const id = `push.${CARD.test(String(s.card)) ? s.card : 'unknown'}.${ATTEMPT.test(String(s.attempt)) ? s.attempt : 'unknown'}`;
     const cur = record.read('fact', id);
-    const doc = res.ok ? { result: 'pushed', branch: res.branch, tip: res.tip, at: new Date(now()).toISOString() } : { result: 'refused', reason: res.reason, at: new Date(now()).toISOString() };
+    const doc = res.ok ? { result: 'pushed', branch: res.branch, tip: res.tip, binaries: res.binaries ?? [], at: new Date(now()).toISOString() } : { result: 'refused', reason: res.reason, at: new Date(now()).toISOString() };
     record.write({ actor: 'workshop', entity: 'fact', id, expectRev: cur?.rev ?? 0, doc, kind: res.ok ? 'push' : 'push_refused' });
     return res;
   };
