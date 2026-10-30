@@ -21,7 +21,7 @@
 //      read, so it is a warning to check by hand;
 //   6. .claude/agents/reviewer.md exists and lists its tools, none of them Edit, Write, MultiEdit or NotebookEdit (a
 //      reviewer with no tools line inherits every tool, including Edit). Bash is allowed — the reviewer runs the tests;
-//   7. the settings' "env" block names no production credential (a key with PROD or PRODUCTION as a word, or LIVE on a key, secret, token, password, DSN or URL).
+//   7. the settings' "env" block names no production credential (a key with PROD or PRODUCTION as a word, or LIVE on a key, secret, token or password).
 //
 // Usage: node "$(realpath ~/.claude/skills/bob/..)/scripts/autonomy-check.mjs" [DIR]
 // Exit: 0 = ready for a hands-off phase (warnings, if any, printed) · 1 = REFUSED (each problem listed) · 2 = cannot
@@ -82,19 +82,19 @@ if (settings) {
   for (const raw of stopCmds) {
     // "$CLAUDE_PROJECT_DIR"/.claude/hooks/x.sh (the quoting Claude Code's docs use) is the same path as the unquoted form.
     const c = raw.replace(/["']?\$\{?CLAUDE_PROJECT_DIR\}?["']?\//g, '$CLAUDE_PROJECT_DIR/');
-    const script = c.match(/["']?((?:\$CLAUDE_PROJECT_DIR|\$\{CLAUDE_PROJECT_DIR\}|~|\$HOME|\/)?[\w./${}-]*\.(?:sh|mjs|js|py))["']?/)?.[1];
+    const script = c.match(/["']?((?:\$CLAUDE_PROJECT_DIR|\$\{CLAUDE_PROJECT_DIR\}|~|\$HOME|\/)?[\w./${}-]*\.(?:sh|mjs|cjs|js|ts|mts|py))["']?/)?.[1];
     if (!script) { if (/\b(npm|pnpm|yarn|bun) run\b|\bmake\b/.test(c)) warn(5, `the Stop hook "${c.slice(0, 60)}" runs through a task runner, so this check cannot see whether it is bounded — check it by hand`); continue; }
     const local = script.replace(/^(?:\$CLAUDE_PROJECT_DIR|\$\{CLAUDE_PROJECT_DIR\})\//, '');
     if (/^(~|\$HOME|\/)/.test(local)) continue; // a personal hook outside the project, e.g. a notifier
     if (!fs.existsSync(at(local))) { bad(5, `the Stop hook runs ${local}, which does not exist`); continue; }
     gates.push({ local, src: fs.readFileSync(at(local), 'utf8') });
   }
-  // A bounded gate compares a counter with a limit of at least 2: `-ge 8`, `-gt "$MAX_ATTEMPTS"`, `n > MAX_ATTEMPTS`,
+  // A bounded gate compares a counter with a limit of at least 2: `-ge 8`, `-lt "$MAX_ATTEMPTS"`, `n > MAX_ATTEMPTS`,
   // `(( n >= RETRIES ))` — the limit written as a number or held in a variable set to one (any name, any language).
   const limitOf = (src) => {
     const nums = new Map();
     for (const m of src.matchAll(/\b(?:(?:const|let|var|readonly|declare)\s+(?:-\w\s+)?)?([A-Za-z_]\w*)\s*=\s*["']?(?:\$\{\w+:-)?(\d+)\b/g)) nums.set(m[1], Number(m[2]));
-    for (const m of src.matchAll(/(?:-ge|-gt|>=|>)\s*["']?(?:\$\{?([A-Za-z_]\w*)\}?|(\d+)|([A-Za-z_]\w*))["']?/g)) {
+    for (const m of src.matchAll(/(?:-ge|-gt|-le|-lt|>=|<=|>|<)\s*["']?(?:\$\{?([A-Za-z_]\w*)\}?|(\d+)|([A-Za-z_]\w*))["']?/g)) {
       const n = m[2] !== undefined ? Number(m[2]) : nums.get(m[1] ?? m[3]);
       if (n >= 2) return m;
     }
@@ -110,8 +110,8 @@ if (settings) {
 
   const env = settings.env && typeof settings.env === 'object' ? Object.keys(settings.env) : [];
   for (const k of env)
-    // PROD / PRODUCTION as a word; LIVE only on a secret-looking key (STRIPE_LIVE_KEY, not ENABLE_LIVE_PREVIEW).
-    if (/(^|[_-])(PROD|PRODUCTION)($|[_-])/i.test(k) || (/(^|[_-])LIVE($|[_-])/i.test(k) && /KEY|SECRET|TOKEN|PASSWORD|DSN|URL/i.test(k))) bad(7, `settings.env sets ${k} — never give an autonomous run production credentials; keep prod and dev separate`);
+    // PROD / PRODUCTION as a word; LIVE only on a secret-looking key (STRIPE_LIVE_KEY, not ENABLE_LIVE_PREVIEW or VITE_LIVE_RELOAD_URL).
+    if (/(^|[_-])(PROD|PRODUCTION)($|[_-])/i.test(k) || (/(^|[_-])LIVE($|[_-])/i.test(k) && /KEY|SECRET|TOKEN|PASSWORD/i.test(k))) bad(7, `settings.env sets ${k} — never give an autonomous run production credentials; keep prod and dev separate`);
 }
 
 if (!fs.existsSync(at(REVIEWER))) bad(6, `no ${REVIEWER} — there is no fresh-context reviewer to invoke at the milestone`);

@@ -780,6 +780,10 @@ ac_base; printf 'n=$(( $(cat f 2>/dev/null || echo 0) + 1 ))\nif [ "$n" -ge 8 ];
 expect "autonomy: a limit written as a plain number (-ge 8) -> OK" 0 "autonomy-check: OK" -- node "$AC" "$AD"
 ac_base; printf 'TIMEOUT_LIMIT=30\ntimeout $TIMEOUT_LIMIT npm test || exit 2\n' > "$AD/.claude/hooks/green-gate.sh"
 expect "autonomy: a LIMIT variable that is never compared is not a retry limit -> REFUSED" 1 "numeric retry limit" -- node "$AC" "$AD"
+ac_base; printf 'MAX_ATTEMPTS=8\nif [ "$n" -lt "$MAX_ATTEMPTS" ]; then npm test || exit 2; fi\n' > "$AD/.claude/hooks/green-gate.sh"
+expect "autonomy: a limit written as 'less than' (-lt \$MAX_ATTEMPTS) -> OK" 0 "autonomy-check: OK" -- node "$AC" "$AD"
+ac_base; sed -i.bak 's/"permissions"/"env": { "VITE_LIVE_RELOAD_URL": "x" }, "permissions"/' "$AD/.claude/settings.json"
+expect "autonomy: a dev-only LIVE setting that is not a key or secret -> OK" 0 "autonomy-check: OK" -- node "$AC" "$AD"
 mkdir -p "$TMP/ac-none"
 mkdir -p "$TMP/ac-bare/.claude"; printf '{"permissions":{}}\n' > "$TMP/ac-bare/.claude/settings.json"
 expect "autonomy: settings but no Stop hook and no reviewer -> not set up (exit 2, not six failures)" 2 "not set up for supervised autonomy" -- node "$AC" "$TMP/ac-bare"
@@ -791,28 +795,49 @@ expect "autonomy: ...and nothing else in it is refused" 0 "" -- bash -c "node '$
 
 # ── 19. run-commands-check.mjs (D-033, Rule 26) ─────────────────────────────
 echo "run-commands-check.mjs"
-RC="$HERE/run-commands-check.mjs"; RD="$TMP/rc"; newrepo "$RD"; mkdir -p "$RD/jobs" "$RD/web/scripts" "$RD/.github/workflows"
+RC="$HERE/run-commands-check.mjs"; RD="$TMP/rc"; newrepo "$RD"; mkdir -p "$RD/jobs" "$RD/web/scripts" "$RD/.github/workflows" "$RD/pkg" "$RD/tools" "$RD/bin"
 printf 'import sys\n\ndef main():\n    print(1)\n\nif __name__ == "__main__":\n    main()\n' > "$RD/jobs/nightly.py"
+cp "$RD/jobs/nightly.py" "$RD/pkg/job.py"; cp "$RD/jobs/nightly.py" "$RD/pkg/entry.py"; : > "$RD/pkg/__init__.py"
 printf 'console.log(1)\n' > "$RD/server.js"; printf 'echo\n' > "$RD/web/scripts/build.sh"; printf 'x\n' > "$RD/notes.md"
-printf '{"scripts":{"start":"cross-env NODE_ENV=production node server.js","nightly":"(cd jobs && python3 nightly.py) || true"}}\n' > "$RD/package.json"
-printf 'jobs:\n    build:\n        defaults:\n            run:\n                working-directory: web\n        steps:\n            - run: bash scripts/build.sh\n' > "$RD/.github/workflows/ci.yml"
+printf 'echo\n' > "$RD/run.sh"; printf 'echo\n' > "$RD/tools/run.sh"; printf 'old\n' > "$RD/old.py"
+printf '#!/bin/sh\necho\n' > "$RD/bin/serve"; chmod +x "$RD/bin/serve"
+printf '{"scripts":{"start":"cross-env NODE_ENV=production node server.js","nightly":"(cd jobs && python3 nightly.py) || true","serve":"bin/serve"},"files":["old.py"]}\n' > "$RD/package.json"
+printf 'on:\n  push:\n    paths: ["old.py", "src/**"]\njobs:\n    build:\n        defaults:\n            run:\n                working-directory: web\n        steps:\n            - run: bash scripts/build.sh  # replaces old.py\n            - run: python -m pkg.job\n' > "$RD/.github/workflows/ci.yml"
+printf 'tools:\n\tbash tools/run.sh\n' > "$RD/Makefile"
+printf '[project.scripts]\nentry = "pkg.entry:main"\n[tool.ruff]\nexclude = ["old.py"]\n' > "$RD/pyproject.toml"
 git -C "$RD" add -A; git -C "$RD" commit -q -m "base"; RB="$(git -C "$RD" rev-parse HEAD)"
-expect "run-commands: nothing moved -> OK (any command shape)" 0 "0 file\\(s\\) moved or deleted" -- node "$RC" "$RD" --base "$RB"
+expect "run-commands: nothing changed on main -> cannot judge without --base (exit 2)" 2 "no change to compare" -- node "$RC" "$RD"
+expect "run-commands: nothing moved -> OK (any command shape)" 0 "0 script\\(s\\) moved or deleted" -- node "$RC" "$RD" --base "$RB"
 git -C "$RD" rm -q server.js
-expect "run-commands: a deleted file a wrapped package script still runs -> REFUSED" 1 'package.json:1 still runs server.js, which this change deleted' -- node "$RC" "$RD" --base "$RB"
+expect "run-commands: a deleted file a wrapped package script still runs -> REFUSED" 1 'package.json:scripts.start still names server.js, which this change deleted' -- node "$RC" "$RD" --base "$RB"
+expect "run-commands: ...the same with --base=REF before the folder" 1 'still names server.js' -- node "$RC" --base="$RB" "$RD"
 git -C "$RD" checkout -q "$RB" -- server.js
 git -C "$RD" mv web/scripts/build.sh web/scripts/make.sh
-expect "run-commands: a moved file a workflow runs from its working folder -> REFUSED" 1 'ci.yml:7 still runs web/scripts/build.sh, which this change moved to web/scripts/make.sh' -- node "$RC" "$RD" --base "$RB"
+expect "run-commands: a moved file a workflow runs from its working folder -> REFUSED" 1 'ci.yml:10 still names web/scripts/build.sh, which this change moved to web/scripts/make.sh' -- node "$RC" "$RD" --base "$RB"
 sed -i.bak 's#scripts/build.sh#scripts/make.sh#' "$RD/.github/workflows/ci.yml"; rm -f "$RD/.github/workflows/ci.yml.bak"
 expect "run-commands: ...and once the workflow names the new path -> OK" 0 "run-commands-check: OK" -- node "$RC" "$RD" --base "$RB"
-printf 'from jobs.core import main\n__all__ = ["main"]\n' > "$RD/jobs/nightly.py"
-expect "run-commands: a run file that lost its __main__ block (still run via cd) -> REFUSED" 1 'runs jobs/nightly.py, which lost its .if __name__' -- node "$RC" "$RD" --base "$RB"
-git -C "$RD" checkout -q "$RB" -- jobs/nightly.py; git -C "$RD" rm -q notes.md
-expect "run-commands: deleting a file nothing runs -> OK" 0 "2 file\\(s\\) moved or deleted" -- node "$RC" "$RD" --base "$RB"
+printf 'from jobs.core import main\n__all__ = ["main"]\n# if __name__ == "__main__":\n' > "$RD/jobs/nightly.py"
+expect "run-commands: a run file that lost its __main__ block (a commented one does not count; run via cd) -> REFUSED" 1 'names jobs/nightly.py, which lost its .if __name__' -- node "$RC" "$RD" --base "$RB"
+git -C "$RD" checkout -q "$RB" -- jobs/nightly.py
+printf 'from pkg.impl import main\n' > "$RD/pkg/job.py"
+expect "run-commands: a module run with python -m that lost its __main__ block -> REFUSED" 1 'ci.yml:11 names pkg/job.py, which lost its' -- node "$RC" "$RD" --base "$RB"
+git -C "$RD" checkout -q "$RB" -- pkg/job.py
+printf 'def main():\n    print(1)\n' > "$RD/pkg/entry.py"
+expect "run-commands: a pyproject entry point losing its __main__ block is fine (it calls the function) -> OK" 0 "run-commands-check: OK" -- node "$RC" "$RD" --base "$RB"
+git -C "$RD" checkout -q "$RB" -- pkg/entry.py
+git -C "$RD" rm -q old.py run.sh notes.md
+expect "run-commands: deleted files named only in paths: filters, a files list, a comment, a tool config, or under another folder's same name -> OK" 0 "run-commands-check: OK — .*script\\(s\\) moved or deleted" -- node "$RC" "$RD" --base "$RB"
+git -C "$RD" checkout -q "$RB" -- old.py run.sh notes.md
+git -C "$RD" rm -q bin/serve
+expect "run-commands: a deleted executable with no extension a script still runs -> REFUSED" 1 'still names bin/serve' -- node "$RC" "$RD" --base "$RB"
+git -C "$RD" checkout -q "$RB" -- bin/serve
+git -C "$RD" rm -q --cached server.js; printf 'server.js\n' >> "$RD/.gitignore"
+expect "run-commands: a build output taken out of git but still on disk is not 'deleted' -> OK" 0 "run-commands-check: OK" -- node "$RC" "$RD" --base "$RB"
 expect "run-commands: an unknown base commit -> cannot run (exit 2)" 2 "cannot be found" -- node "$RC" "$RD" --base nope
+SH="$TMP/rc-shallow"; git clone -q --depth 1 "file://$RD" "$SH" 2>/dev/null; git -C "$SH" checkout -q --detach; git -C "$SH" branch -q -D main; git -C "$SH" remote remove origin
+expect "run-commands: a shallow detached clone with no main, no --base -> cannot judge (exit 2)" 2 "cannot tell where this change starts" -- node "$RC" "$SH"
 mkdir -p "$TMP/rc-none"
 expect "run-commands: not a git repository -> cannot run (exit 2, not a pass)" 2 "not a git repository" -- node "$RC" "$TMP/rc-none"
-expect "run-commands: Bob's own change against main -> OK" 0 "run-commands-check: OK" -- node "$RC" "$HERE/.."
 
 # ── 20. recurrence-check.mjs (D-033, Rule 31) ───────────────────────────────
 echo "recurrence-check.mjs"
@@ -854,6 +879,7 @@ expect "recurrence: 'stale-cache.' and 'Stale-Cache' are one class; 'R3 (…)' r
 expect "recurrence: --since=DATE with nothing after it -> cannot judge (exit 2)" 2 "since 2099-01-01" -- node "$RQ" "$Q2" --since=2099-01-01
 Q3="$TMP/rq3"; newrepo "$Q3"
 expect "recurrence: a repo with no commits -> says so (exit 2)" 2 "has no commits yet" -- node "$RQ" "$Q3"
+expect "recurrence: --since with no date -> cannot run (exit 2)" 2 "needs a date" -- node "$RQ" "$Q2" --since
 expect "recurrence: not a git repo -> cannot run (exit 2)" 2 "not a git repository" -- node "$RQ" "$TMP/rc-none"
 
 # ── 21. rule-tags-check.mjs (D-033, Rule 33) ────────────────────────────────

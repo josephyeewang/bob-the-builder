@@ -532,7 +532,7 @@ The companion `audit-log.md` records *deferred* items (Defer verdicts that may s
   - Rule 27's how-to was written out twice: in `rules.md`, and in the Supervised Autonomy section of `build-protocol.md`.
   - "Tier 1" meant three different things in the core.
   - The two design skills were installed on the author's machine only by hand.
-  - About 40 method lines spoke of "Joe" as if they were the reader.
+  - About 40 method lines spoke of the author by name as if they were the reader.
   - Several small findings:
     - one retro was linked from nowhere;
     - five files the consistency check flagged as dated carried neither a snapshot note nor a living-doc marker;
@@ -546,12 +546,13 @@ The companion `audit-log.md` records *deferred* items (Defer verdicts that may s
     - `scripts/recurrence-check.mjs` (Rule 31; Phase Gate 15). It reads `Class:` and `Rung:` lines in fix commits and refuses a class fixed twice whose newest fix is below rung 3.
     - `scripts/rule-tags-check.mjs` (Rule 33, in Bob's CI). Every rule the index tags as checked must name a script that exists and that CI or the self-test runs.
     - Each check exits 2 (cannot judge) rather than 0 when it has nothing to read (Rule 29).
+    - A fourth review, of the rebuilt run-commands check, found that it passed without comparing anything when there was no base (on main, in a shallow CI clone), that it read any mention of a file as "runs" (a workflow's `paths:` filter, package.json "files", a comment), and that it missed a module run with `python -m`. It now needs a base (or says it cannot judge), reads only the parts of each config that run things, and matches modules. CI fetches the full history and passes the pull request's base. A commit with a `Class:` line and no `Rung:` line now counts as a mention, not a fix.
     - A third review found the remaining edge cases: italic text in a report, a retry limit written as a plain number, class names that differ only in case or a trailing full stop, and a later commit that names a class without a rung. Each was fixed and became a self-test. Rule 4 is tagged `SCRIPT` (in part), because the check can see that "Spec Deviations" was filled in, not that what it says is true.
     - A fresh review found nine serious problems in the first version, most of them false alarms on healthy projects. All were fixed and turned into self-tests before release:
       - the phase-report check now accepts other heading styles, any "N/A" or "None" line, and the short report the Minimum Viable Process allows (`--abbreviated`);
       - the run-commands check follows `cd`, workflow and job defaults, matrix folders, build output and installed tools, and it passes an app whose scripts only call tools;
       - the autonomy check ignores personal Stop hooks, accepts an overridable retry limit, refuses a reviewer with no tools line, and reports a project that was never set up as "cannot judge" rather than as six failures;
-      - the recurrence check reads only real git trailers;
+      - the recurrence check reads the `Class:` / `Rung:` lines on their own lines outside code blocks;
       - the rule-tags check needs a real call, not a mention in a comment, and compares the whole tag. It found that Rule 32 was tagged one way in `rules.md` and another in the index, and that was fixed.
     - A second fresh review found eight more. They were fixed the same way, and again each became a self-test:
       - the run-commands check was narrowed to commands it could read for sure (a third review still found shapes it got wrong, so it was rebuilt; see Consequences);
@@ -575,7 +576,7 @@ The companion `audit-log.md` records *deferred* items (Defer verdicts that may s
   - Build a check for Rule 22 now. Deferred to the NEW-mode rewrite, for the reason above.
 - **Consequences:**
   - The phase gate has 15 items.
-  - A project's fix commits need two short git trailer lines for the recurrence check to see them; the phase report's class-level scan section now says so. Without those lines it reports "cannot judge", never "clean".
+  - A project's fix commits need two short lines of their own for the recurrence check to see them; the phase report's class-level scan section now says so. Without those lines it reports "cannot judge", never "clean".
   - The autonomy check reads only the project's own settings, because personal rules do not travel with the project. A user whose deny rules live only in their personal settings is told to add them to the project.
   - The run-commands check was rebuilt after the third review. Its first design read every run command and judged whether the file it named existed. Each of three fresh reviews found new healthy command shapes it judged wrong: wrappers, subshells, monorepo filters, files made while the job runs, `.ONESHELL` Makefiles. That is three rounds of the same fix failing, so the approach was changed rather than patched a fourth time. It now judges the change: it asks git what the change deleted, renamed or stripped of its run block, and refuses only when a run config still names that file. Run over long stretches of real history in several projects, it raised no false alarm. The cost is deliberate: it cannot see a command that was already broken before the change.
   - The autonomy check, run on a fresh `bob-init` project, refuses only the test command the user has not filled in yet. That is deliberate: until it is filled in, the gate blocks every stop.

@@ -13,7 +13,9 @@
 //
 // Several classes go on one line, comma-separated, or on several Class: lines.
 //
-// CHECK: for every class named in two or more commits, the NEWEST of them must record rung 3 (a fresh-context read
+// A fix commit carries both lines; a commit with a Class: line and no rung is a mention (listed, not counted). Put the
+// lines on the one commit that is the fix, not on its review follow-ups, or one fix counts twice.
+// CHECK: for every class with two or more fix commits, the NEWEST of them must record rung 3 (a fresh-context read
 // at the moment the class can come back) or rung 4 (the defect made unrepresentable). Rung 1, rung 2 or no rung =
 // REFUSED, listing the commits.
 //
@@ -27,6 +29,7 @@ import path from 'node:path';
 const args = process.argv.slice(2);
 const si = args.findIndex((a) => a === '--since' || a.startsWith('--since='));
 const since = si < 0 ? null : args[si].includes('=') ? args[si].slice('--since='.length) : args[si + 1];
+if (si >= 0 && (!since || since.startsWith('--'))) { process.stderr.write('recurrence-check: --since needs a date, e.g. --since 2026-09-01\n'); process.exit(2); }
 const unknown = args.find((a) => a.startsWith('--') && !a.startsWith('--since'));
 const DIR = path.resolve(args.filter((a, i) => !a.startsWith('--') && (si < 0 || i !== si + 1 || args[si].includes('=')))[0] ?? '.');
 
@@ -51,6 +54,7 @@ try {
 }
 
 const byClass = new Map();
+const mentionsOnly = [];
 for (const rec of log.split('\x1e')) {
   const [sha, date, subject, rawBody] = rec.replace(/^\n/, '').split('\x1f');
   if (!sha || rawBody === undefined) continue;
@@ -65,12 +69,15 @@ for (const rec of log.split('\x1e')) {
   const prose = [...body.matchAll(/closed at rung\s*(\d)\b/gi)].map((m) => Number(m[1]));
   const rungs = trailer.length ? trailer : prose;
   const rung = rungs.length ? Math.max(...rungs) : null;
+  // A fix carries both lines. A Class: line with no rung (a docs commit, a follow-up) is a mention, not a fix.
+  if (rung === null) { mentionsOnly.push(`${sha.slice(0, 9)} ${subject.slice(0, 60)}`); continue; }
   for (const c of new Set(classes)) {
     if (!byClass.has(c)) byClass.set(c, []);
     byClass.get(c).push({ sha: sha.slice(0, 9), date, subject, rung });
   }
 }
 
+const note = mentionsOnly.length ? `\n  ⚠ ${mentionsOnly.length} commit(s) name a class with no Rung: line, so they were not counted as fixes: ${mentionsOnly.slice(0, 3).join('; ')}${mentionsOnly.length > 3 ? ' …' : ''}` : '';
 if (!byClass.size) cannot(`no commit in ${DIR}${since ? ` since ${since}` : ''} carries a "Class:" line yet, so recurrence cannot be judged. Add "Class: <name>" and "Rung: <1-4>" to fix commits.`);
 
 const problems = [];
@@ -78,9 +85,7 @@ let recurring = 0;
 for (const [c, commits] of byClass) {
   if (commits.length < 2) continue;
   recurring++;
-  // Judge the newest commit that records a rung (git log lists newest first); a later mention with no rung does not
-  // reset the class. If none records a rung, the newest is judged and refused.
-  const newest = commits.find((x) => x.rung !== null) ?? commits[0];
+  const newest = commits[0]; // git log lists newest first
   if (newest.rung === null || newest.rung < 3) {
     const list = commits.map((x) => `${x.sha} ${x.date} rung ${x.rung ?? '?'} — ${x.subject.slice(0, 70)}`).join('\n      ');
     problems.push(`class "${c}" has been fixed ${commits.length} times and the newest fix is closed at ${newest.rung ? `rung ${newest.rung}` : 'no recorded rung'}. A recurring class needs rung 3 (a fresh-context read where it can come back) or rung 4 (make it impossible):\n      ${list}`);
@@ -90,6 +95,7 @@ for (const [c, commits] of byClass) {
 if (problems.length) {
   console.log(`recurrence-check: REFUSED — ${problems.length} recurring class(es) closed below rung 3`);
   for (const p of problems) console.log(`  ✗ ${p}`);
+  if (note) console.log(note.trimStart());
   process.exit(1);
 }
-console.log(`recurrence-check: OK — ${byClass.size} class(es) named in fix commits, ${recurring} recurring, each closed at rung 3 or 4`);
+console.log(`recurrence-check: OK — ${byClass.size} class(es) named in fix commits, ${recurring} recurring, each closed at rung 3 or 4` + note);
