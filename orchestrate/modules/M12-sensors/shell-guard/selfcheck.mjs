@@ -7,8 +7,7 @@
 // and the corpus's /tmp/x and /tmp/y are swapped for files inside it.
 
 import { spawnSync } from 'node:child_process';
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { cases } from './runner.mjs';
 
@@ -20,8 +19,8 @@ const B64 = Buffer.from(CONTENT).toString('base64').slice(0, 12);
 const refuseCases = (name, mode, root) => cases(mode === 'relative' ? name : `${root}/proj/${name}`, mode === 'relative' ? `${root}/proj` : `${root}/other`, { home: root })
   .filter((x) => x.expect === 'refuse');
 
-function runOne(i, name, mode, sh) {
-  const root = realpathSync(mkdtempSync(`${tmpdir()}/sg-self-`));
+function runOne(i, name, mode, sh, newFolder) {
+  const root = realpathSync(newFolder());
   try {
     if (/\/tmp\/[xy]/.test(root)) throw new Error(`temp folder ${root} would confuse the /tmp/x swap`);
     const dir = `${root}/proj`; const other = `${root}/other`; const file = `${dir}/${name}`;
@@ -43,7 +42,9 @@ function runOne(i, name, mode, sh) {
 }
 
 // mode 'relative': the target is the short name, asked from its folder; 'absolute': the full path, asked from elsewhere.
-export function touchCheck(name, { mode = 'relative', shells = ['/bin/bash'] } = {}) {
+// newFolder: makes a new empty folder for one run (tests pass tempDir from shared/test-tmp.mjs); each is removed after.
+export function touchCheck(name, { mode = 'relative', shells = ['/bin/bash'], newFolder } = {}) {
+  if (typeof newFolder !== 'function') throw new Error('touchCheck needs newFolder: a function that makes a new empty folder');
   // The cases reported are those for a stand-in folder of the same shape (same templates and forms, in the same order).
-  return refuseCases(name, mode, '/sg-self-root').map((c, i) => ({ ...c, touchedBy: shells.filter((sh) => runOne(i, name, mode, sh)) }));
+  return refuseCases(name, mode, '/sg-self-root').map((c, i) => ({ ...c, touchedBy: shells.filter((sh) => runOne(i, name, mode, sh, newFolder)) }));
 }

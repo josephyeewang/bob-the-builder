@@ -1,18 +1,17 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { fileURLToPath } from 'node:url';
-import { existsSync } from 'node:fs';
+import { existsSync, realpathSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { corpus, cases, pathForms, askHook, runCorpus, hostDead } from './runner.mjs';
 import { touchCheck } from './selfcheck.mjs';
-import { tempFolders } from '../test-tmp.mjs';
+import { tempDir } from '../../../shared/test-tmp.mjs';
 
 const fx = (f) => fileURLToPath(new URL(`./fixtures/${f}`, import.meta.url));
 const T = '.env.production';
 const node = process.execPath;
 // Temp folders, removed after the run (round 10 audit 3 minor 4: one held a planted file named like the protected one).
-const tmpIn = tempFolders(); // removed after the file, even on failure, and checked gone
-const tmp = () => tmpIn('sg-');
+const tmp = () => realpathSync(tempDir('sg-')); // removed after the file, even on failure, and checked gone (shared/test-tmp.mjs)
 
 test('the corpus covers every trick the row names, ~150+ refuse cases, and has allow cases', () => {
   const all = cases(T);
@@ -129,7 +128,7 @@ test('round 10: every refuse case touches the file, and corpus.dead is exactly t
   try {
     for (const name of [T, 'secret.prod']) {
       const groups = new Map();
-      for (const c of ['relative', 'absolute'].flatMap((mode) => touchCheck(name, { mode, shells }))) {
+      for (const c of ['relative', 'absolute'].flatMap((mode) => touchCheck(name, { mode, shells, newFolder: () => tempDir('sg-self-') }))) {
         const k = `${c.form} / ${c.tpl}`; groups.set(k, [...(groups.get(k) ?? []), c]);
       }
       const silent = (c) => !c.touchedBy.length;

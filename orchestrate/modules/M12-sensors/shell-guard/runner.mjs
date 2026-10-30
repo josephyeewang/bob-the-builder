@@ -15,10 +15,10 @@
 // Status: pending the real hook. Until it runs green against lane 2's installed hook at the join, R-0b-70 is not done.
 
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { homedir, tmpdir } from 'node:os';
-import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
+import { homedir } from 'node:os';
+import { basename, dirname, isAbsolute, resolve } from 'node:path';
 
 export const corpus = JSON.parse(readFileSync(new URL('./corpus.json', import.meta.url), 'utf8'));
 
@@ -40,11 +40,12 @@ function fromHome(abs, home) {
   return h && /^[A-Za-z0-9._\/-]+$/.test(h) && abs.startsWith(`${h}/`) ? abs.slice(h.length + 1) : null;
 }
 
-// Whether the temp folder's disk ignores case, as a Mac's does by default (round 10 audit 6 M-3: `cat .ENV.PRODUCTION`
-// reads the file there, and a guard comparing names exactly misses it). Checked once, on the temp folder's disk.
+// Whether the disk ignores case, as a Mac's does by default (round 10 audit 6 M-3: `cat .ENV.PRODUCTION`
+// reads the file there, and a guard comparing names exactly misses it). Checked once, on the disk this file is on (no
+// folder is made: shared/test-tmp.mjs owns every temp folder).
 export const CASELESS = (() => {
-  const d = mkdtempSync(join(tmpdir(), 'sg-case-'));
-  try { writeFileSync(join(d, 'a'), ''); return existsSync(join(d, 'A')); } finally { rmSync(d, { recursive: true, force: true }); }
+  const self = fileURLToPath(import.meta.url);
+  return existsSync(`${dirname(self)}/${basename(self).toUpperCase()}`);
 })();
 const swapCase = (t) => [...t].map((c) => (c === c.toUpperCase() ? c.toLowerCase() : c.toUpperCase())).join('');
 

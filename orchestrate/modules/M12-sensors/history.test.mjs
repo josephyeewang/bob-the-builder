@@ -1,13 +1,13 @@
 import { test, before } from 'node:test';
 import assert from 'node:assert/strict';
-import { writeFileSync, mkdirSync } from 'node:fs';
+import { writeFileSync, mkdirSync, realpathSync } from 'node:fs';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { makeHistory, makeGit, cardOf } from './history.mjs';
 import { FAKE } from './fakes.mjs';
-import { tempFolders } from './test-tmp.mjs';
+import { tempDir } from '../../shared/test-tmp.mjs';
 
-const tmp = tempFolders(); // removed after the file, even on failure
+const tmp = (prefix) => realpathSync(tempDir(prefix)); // removed after the file, even on failure (shared/test-tmp.mjs)
 
 let dir, src, clone;
 const g = (cwd, ...a) => execFileSync('git', a, { cwd, encoding: 'utf8' });

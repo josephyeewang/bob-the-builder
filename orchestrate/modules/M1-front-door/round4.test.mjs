@@ -2,17 +2,17 @@
 // phone) and L23 (the Air's health result written by a machine, dated by its own check). Each fails on the old code.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readdirSync, readFileSync } from 'node:fs';
+import { readdirSync, readFileSync, realpathSync } from 'node:fs';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { airHealthFile, checkAirHealthFile, airFactFromFile } from '../M12-sensors/air-health.mjs';
 import { airCheck, AIR_FACT, nextTripPush, briefAnswers } from './trip.mjs';
 import { outboxFile, checkOutboxFile } from './outbox.mjs';
-import { tempFolders } from '../M12-sensors/test-tmp.mjs';
+import { tempDir } from '../../shared/test-tmp.mjs';
 import { FAKE } from '../M12-sensors/fakes.mjs';
 
-const tmp = tempFolders(); // removed after the file, even on failure
+const tmp = (prefix) => realpathSync(tempDir(prefix)); // removed after the file, even on failure (shared/test-tmp.mjs)
 
 const T0 = Date.parse('2026-11-03T12:00:00Z');
 const at = (h) => new Date(T0 + h * 3600e3);
