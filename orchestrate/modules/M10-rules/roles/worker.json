@@ -19,7 +19,8 @@
   "restricted_mode": false,
   "outbox_kinds": [
     "report-",
-    "report-compact-"
+    "report-compact-",
+    "handin-"
   ],
   "auto_resume": {
     "1": false,
