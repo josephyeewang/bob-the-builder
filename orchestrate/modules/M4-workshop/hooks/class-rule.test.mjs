@@ -4,7 +4,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdirSync, writeFileSync, realpathSync, symlinkSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, dirname, basename } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { makeSnapshot } from './snapshot.mjs';
@@ -543,3 +543,50 @@ test('L46 round 4: a control character, a comment after a line-break, a here-str
   assert.match(prodGuard.decide(bash("git commit -m \"$(cat <<'EOF'\nx\nEOF\n)\"", W), w.args).reason, /git commit -F -/);
 });
 
+
+// Round 4 narrow check (L46): `$USER` and `$TMPDIR` were left as letters in a path, so a path through them named a
+// folder that does not exist and passed. They are filled in now, and any other variable in a path is refused.
+test('L46 round 4 check: $USER and $TMPDIR in a path are filled in; any other variable in a path is refused', () => {
+  const w = world();
+  const pf = [fold(w.envFile)];
+  // The worker's copy is <users>/<user>/work, as on a Mac (/Users/<name>/proj).
+  const user = basename(w.root);
+  const users = dirname(w.root);
+  const why = (c, more = {}) => prodGuard.folderWriteWhy(c, { cwd: w.work, protectedFiles: pf, home: w.home, user, tmpdir: w.root, ...more });
+  const refuse = [`rm -rf ${users}/$USER/work`, 'rm -rf ../../$USER/work', 'rm -rf ../../$USER/*', 'rm -rf ../../$USER', 'mv ../../$USER /tmp/x',
+    'rm -rf ../../${USER}/work', 'rm -rf $FOO/work', 'rm -rf $TMPDIR/work', 'rm -rf ${TMPDIR}', 'cd $FOO && rm -rf work', 'rm -rf $?/work', 'cp -r /tmp/a $1'];
+  for (const c of refuse) assert.ok(why(c), c);
+  // Without a value for $USER, a path through it is unknown, so refused.
+  for (const c of ['rm -rf ../../$USER', 'rm -rf /tmp/scratch-$USER']) assert.ok(why(c, { user: '' }), c);
+  for (const c of ['rm -rf $TMPDIR/build', 'rm -rf /tmp/$USER-scratch', 'rm -rf /tmp/${USER}-scratch', 'rm -rf ${TMPDIR}build', 'rm -rf build', 'mv a.txt $TMPDIR/']) {
+    assert.equal(why(c, { tmpdir: join(users, 'elsewhere') }), null, c);
+  }
+  // Through decide: the hook fills $USER from its own surroundings.
+  const was = process.env.USER;
+  process.env.USER = user;
+  try {
+    for (const c of ['rm -rf ../../$USER', `rm -rf ${users}/$USER/work`]) blocked(prodGuard.decide(bash(c, w.work), w.args), c);
+  } finally { if (was === undefined) delete process.env.USER; else process.env.USER = was; }
+  blocked(prodGuard.decide(bash('rm -rf $FOO/work', w.work), w.args), '$FOO');
+});
+
+// Round 4 narrow check (L46), Minor: a carriage return right before a line break is read as the shell reads it.
+test('L46 round 4 check: lines with Windows line ends are read as the shell reads them', () => {
+  const w = world();
+  const W = w.work;
+  const pass1 = (c) => passed(prodGuard.decide(bash(c, W), w.args), JSON.stringify(c));
+  const no = (c) => blocked(prodGuard.decide(bash(c, W), w.args), JSON.stringify(c));
+  pass1("git commit -F - <<'EOF'\r\nFix the thing\r\n\r\nMore words\r\nEOF\r\n");
+  pass1('git status\r\nnpm test\r\n');
+  // The end word carries the return, as in the shell: the line after it is a command.
+  no(`cat <<'EOF'\r\nhi\r\nEOF\r\nrm -rf ${W} \r\n`);
+  // `rm -rf <folder>` + return names a folder whose name ends in the return, in the shell as in the guard.
+  pass1(`rm -rf ${W}\r\n`);
+  // A body line "EOF" without the return does not end it in the shell either; the end-word line with the return does.
+  no(`cat <<EOF\r\nhi\nEOF\nx\r\nEOF\r\nrm -rf ${W}\n`);
+  // A backslash before the return does not join the lines: the next line is its own command.
+  no(`echo a \\\r\nrm -rf ${W} \r\n`);
+  // A return anywhere else is still refused.
+  for (const c of ['echo a\rrm -rf x', 'echo a\r', 'echo a\r\r\n']) no(c);
+  passed(noVerify.decide(bash("git commit -F - <<'EOF'\r\nmsg\r\nEOF\r\n", W)), 'no-verify: CRLF message');
+});

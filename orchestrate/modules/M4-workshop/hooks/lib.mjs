@@ -126,8 +126,9 @@ export function toolPaths(input) {
 
 // ---- shell lines ----
 
-/** A backslash before a line break joins the two lines, as the shell does (audit R-0b-44 round 2 MAT-1). */
-export const joinLines = (cmd) => String(cmd ?? '').replace(/\\\r?\n/g, '');
+/** A backslash before a line break joins the two lines, as the shell does (audit R-0b-44 round 2 MAT-1). A backslash
+ * before a carriage return is not one: the shell keeps the escaped return, then ends the command at the line break. */
+export const joinLines = (cmd) => String(cmd ?? '').replace(/\\\n/g, '');
 
 /**
  * The line with each here-document's body taken out, and the bodies (LEAD-CALLS L46; round 3 MAT-12). A body is text
@@ -147,8 +148,10 @@ export function heredocs(cmd) {
   let wordStart = true;
   const refuse = (why) => ({ text: s, bodies, why });
   // The shell keeps a carriage return, form feed or other control character inside a word, where the guard's
-  // reading could end it: refused whole (round 4 MAT-1).
-  if (/[\x00-\x08\x0b-\x1f\x7f]/.test(s)) return refuse('a control character (a carriage return, form feed, …) in the line');
+  // reading could end it: refused whole (round 4 MAT-1). A carriage return right before a line break (a line typed
+  // with Windows line ends) is let through and read as the shell reads it: a letter at the end of the word, the end
+  // word of a here-document included (L46 round 4 confirm, Minor).
+  if (/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]|\r(?!\n)/.test(s)) return refuse('a control character (a carriage return, form feed, …) in the line');
   for (let i = 0; i < s.length;) {
     const ch = s[i];
     if (q) {
@@ -186,10 +189,10 @@ export function heredocs(cmd) {
         if (dq) { if (d === dq) dq = null; else delim += d; continue; }
         if (d === "'" || d === '"') { dq = d; quoted = true; continue; }
         if (d === '\\' && k + 1 < s.length) { quoted = true; delim += s[k + 1]; k += 1; continue; }
-        if (/[\s;&|()<>]/.test(d)) break;
+        if (/[ \t\n;&|()<>]/.test(d)) break;
         delim += d;
       }
-      if (dq || !/^[A-Za-z_][A-Za-z0-9_.-]*$/.test(delim)) return refuse('a << whose end word is not a plain name');
+      if (dq || !/^[A-Za-z_][A-Za-z0-9_.-]*\r?$/.test(delim)) return refuse('a << whose end word is not a plain name');
       pending.push({ delim, dash, quoted });
       out += s.slice(i, k);
       i = k;
