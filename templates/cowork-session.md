@@ -1,4 +1,5 @@
 # Cowork Session Template
+<!-- living doc -->
 
 > Use when a build phase requires human-in-the-loop data collection, research, or manual enrichment that Claude assists with.
 > Common uses: vendor account setup, manual data enrichment, competitor research, content review, visual asset evaluation.

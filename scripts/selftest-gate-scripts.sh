@@ -699,6 +699,112 @@ expect "bob-stats: counts a labelled fix (1 of 2)" 0 "Labelled fixes: +1 +\\(50%
 mkdir -p "$SR/src"; : > "$SR/src/x.js"
 expect "repo-map: writes docs/repo-map.md" 0 "" -- bash -c "cd '$SR' && bash '$HERE/repo-map.sh' >/dev/null && grep -q '^# Repo Map' docs/repo-map.md"
 
+# ── 17. phase-report-check.mjs (D-033, Rule 4) ──────────────────────────────
+echo "phase-report-check.mjs"
+PR="$HERE/phase-report-check.mjs"; PD="$TMP/pr"; mkdir -p "$PD"
+printf '## Phase [N] Report\n### [A] Built\n- [list everything built]\n### [C] Mocked — *include only if anything was stubbed*\n- [list stubs]\n### [A] Spec Deviations\n- [list EVERY difference]\n- [if none, say "None"]\n### [O] Decisions to Log\n- [optional]\n' > "$PD/tpl.md"
+printf '## Phase 2 Report\n### Built\n- the login page\n### [A] Spec Deviations\n- None\n' > "$PD/good.md"
+expect "phase-report: a filled report (no [C] or [O] sections) -> OK" 0 "phase-report-check: OK" -- node "$PR" "$PD/good.md" --template "$PD/tpl.md"
+printf '## Phase 2 Report\n### Built\n- the login page\n' > "$PD/nodev.md"
+expect "phase-report: Spec Deviations left out -> REFUSED (Rule 4)" 1 'missing the "spec deviations" section' -- node "$PR" "$PD/nodev.md" --template "$PD/tpl.md"
+printf '## Phase 2 Report\n### Built\n- [list everything built]\n### Spec Deviations\n- None\n' > "$PD/ph.md"
+expect "phase-report: a placeholder line left in -> REFUSED" 1 "still the template's placeholder: - \\[list everything built\\]" -- node "$PR" "$PD/ph.md" --template "$PD/tpl.md"
+printf '## Phase 2 Report\n### Built\n- x\n### Mocked\n\n### Spec Deviations\n- None\n' > "$PD/c.md"
+expect "phase-report: an empty [C] section -> REFUSED, asks for N/A" 1 'write "N/A — <reason>"' -- node "$PR" "$PD/c.md" --template "$PD/tpl.md"
+printf '## Phase 2 Report\n### Built\n- x\n### Mocked\nN/A — nothing was stubbed\n### Spec Deviations\n- None\n' > "$PD/c2.md"
+expect "phase-report: a [C] section marked N/A -> OK" 0 "phase-report-check: OK" -- node "$PR" "$PD/c2.md" --template "$PD/tpl.md"
+expect "phase-report: Bob's own blank template -> REFUSED" 1 'the "built" section has nothing of its own' -- node "$PR" "$HERE/../templates/phase-report.md"
+expect "phase-report: no report file -> cannot run (exit 2, not a pass)" 2 "not a pass" -- node "$PR" "$PD/missing.md"
+
+# ── 18. autonomy-check.mjs (D-033, Rule 27) ─────────────────────────────────
+echo "autonomy-check.mjs"
+AC="$HERE/autonomy-check.mjs"
+ac_base() {
+  AD="$TMP/ac"; rm -rf "$AD"; mkdir -p "$AD/.claude/hooks" "$AD/.claude/agents"
+  cat > "$AD/.claude/settings.json" <<'JSON'
+{ "permissions": { "defaultMode": "default",
+    "ask": ["Bash(git push:*)", "Bash(*deploy*)"],
+    "deny": ["Bash(rm -rf:*)", "Bash(git push --force:*)", "Bash(git reset --hard:*)"] },
+  "hooks": { "Stop": [ { "hooks": [ { "type": "command", "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/green-gate.sh\"" } ] } ] } }
+JSON
+  printf 'MAX_ATTEMPTS=8\nif [ "$n" -gt "$MAX_ATTEMPTS" ]; then exit 0; fi\nTEST_CMD="npm test"\n' > "$AD/.claude/hooks/green-gate.sh"
+  printf -- '---\nname: reviewer\ntools: Read, Grep, Glob, Bash\n---\nReview.\n' > "$AD/.claude/agents/reviewer.md"
+}
+ac_base
+expect "autonomy: deny/ask rules, bounded gate, read-only reviewer -> OK" 0 "autonomy-check: OK" -- node "$AC" "$AD"
+ac_base; sed -i.bak 's/"defaultMode": "default"/"defaultMode": "auto"/' "$AD/.claude/settings.json"
+expect "autonomy: defaultMode auto in the project file -> REFUSED (it is ignored)" 1 "Claude Code ignores in a project file" -- node "$AC" "$AD"
+ac_base; sed -i.bak 's/"Bash(git reset --hard:\*)"/"Bash(ls:*)"/' "$AD/.claude/settings.json"
+expect "autonomy: no deny rule for git reset --hard -> REFUSED" 1 'no rule for "git reset --hard"' -- node "$AC" "$AD"
+ac_base; printf 'if grep -q stop_hook_active; then exit 0; fi\nTEST_CMD="npm test"\n' > "$AD/.claude/hooks/green-gate.sh"
+expect "autonomy: a gate guarded only by stop_hook_active -> REFUSED" 1 "no numeric retry limit" -- node "$AC" "$AD"
+ac_base; printf -- '---\nname: reviewer\ntools: Read, Edit, Bash\n---\n' > "$AD/.claude/agents/reviewer.md"
+expect "autonomy: a reviewer that can Edit -> REFUSED" 1 "must not edit" -- node "$AC" "$AD"
+ac_base; sed -i.bak 's/"permissions"/"env": { "PROD_DB_URL": "x" }, "permissions"/' "$AD/.claude/settings.json"
+expect "autonomy: a production key in settings.env -> REFUSED" 1 "never give an autonomous run production" -- node "$AC" "$AD"
+mkdir -p "$TMP/ac-none"
+expect "autonomy: no settings file -> cannot run (exit 2, not a pass)" 2 "Not a pass" -- node "$AC" "$TMP/ac-none"
+AI="$TMP/ac-init"; mkdir -p "$AI"; printf '[user]\n\tname = selftest\n\temail = selftest@example.com\n[commit]\n\tgpgsign = false\n' > "$TMP/ac-gitconfig"
+(cd "$AI" && GIT_CONFIG_GLOBAL="$TMP/ac-gitconfig" GIT_CONFIG_NOSYSTEM=1 bash "$HERE/bob-init.sh" p >/dev/null 2>&1)
+expect "autonomy: a fresh bob-init project -> only the unset test command is refused" 1 "\\[5\\] .*placeholder test command" -- node "$AC" "$AI/p"
+expect "autonomy: ...and nothing else in it is refused" 0 "" -- bash -c "node '$AC' '$AI/p' | grep -c '✗' | grep -qx 1"
+
+# ── 19. run-commands-check.mjs (D-033, Rule 26) ─────────────────────────────
+echo "run-commands-check.mjs"
+RC="$HERE/run-commands-check.mjs"; RD="$TMP/rc"; mkdir -p "$RD/.github/workflows" "$RD/jobs" "$RD/web" "$RD/scripts"
+printf '{"scripts":{"build":"next build","seed":"tsx scripts/seed.ts","nightly":"python3 jobs/nightly.py","pip":"python -m pip install x"}}\n' > "$RD/package.json"
+: > "$RD/scripts/seed.ts"; : > "$RD/web/build.sh"
+printf 'import sys\n\ndef main():\n    print(1)\n\nif __name__ == "__main__":\n    main()\n' > "$RD/jobs/nightly.py"
+printf 'jobs:\n  t:\n    steps:\n      - name: web\n        working-directory: web\n        # a comment between the folder and the command\n        run: |\n          bash ./build.sh\n          node $HOME/x.mjs\n' > "$RD/.github/workflows/ci.yml"
+expect "run-commands: every run target exists (incl. a step's working-directory) -> OK" 0 "run-commands-check: OK — 3 run command" -- node "$RC" "$RD"
+printf 'from jobs.nightly import main\n__all__ = ["main"]\n' > "$RD/jobs/old.py"
+printf '{"scripts":{"shim":"python3 jobs/old.py","gone":"node scripts/gone.mjs"}}\n' > "$RD/package.json"
+expect "run-commands: a moved script -> REFUSED" 1 'runs scripts/gone.mjs, which does not exist' -- node "$RC" "$RD"
+expect "run-commands: a shim that dropped its run block -> REFUSED" 1 'runs jobs/old.py, which has no .if __name__' -- node "$RC" "$RD"
+mkdir -p "$TMP/rc-none"
+expect "run-commands: no run commands -> cannot run (exit 2, not a pass)" 2 "not a pass" -- node "$RC" "$TMP/rc-none"
+expect "run-commands: Bob's own CI commands point at real files" 0 "run-commands-check: OK" -- node "$RC" "$HERE/.."
+
+# ── 20. recurrence-check.mjs (D-033, Rule 31) ───────────────────────────────
+echo "recurrence-check.mjs"
+RQ="$HERE/recurrence-check.mjs"; QR="$TMP/rq"; newrepo "$QR"
+git -C "$QR" commit -q --allow-empty -m "init"
+expect "recurrence: no Class: lines yet -> cannot judge (exit 2, not a pass)" 2 'carries a "Class:" line yet' -- node "$RQ" "$QR"
+git -C "$QR" commit -q --allow-empty -m "fix: empty read" -m "Class: read error as missing" -m "Rung: 1"
+expect "recurrence: a class fixed once -> OK" 0 "1 class\\(es\\) named in fix commits, 0 recurring" -- node "$RQ" "$QR"
+git -C "$QR" commit -q --allow-empty -m "fix: empty read again" -m "Class: Read-error-as-missing" -m "Rung: 2"
+expect "recurrence: fixed twice, newest at rung 2 -> REFUSED" 1 'class "read-error-as-missing" has been fixed 2 times' -- node "$RQ" "$QR"
+git -C "$QR" commit -q --allow-empty -m "fix: four-state result type" -m "closed at rung 4: the type cannot hold the bad state" -m "Class: read-error-as-missing"
+expect "recurrence: newest fix closed at rung 4 -> OK" 0 "1 recurring, each closed at rung 3 or 4" -- node "$RQ" "$QR"
+expect "recurrence: not a git repo -> cannot run (exit 2)" 2 "not a git repository" -- node "$RQ" "$TMP/rc-none"
+
+# ── 21. rule-tags-check.mjs (D-033, Rule 33) ────────────────────────────────
+echo "rule-tags-check.mjs"
+RT="$HERE/rule-tags-check.mjs"
+rt_base() {
+  TR="$TMP/rt"; rm -rf "$TR"; mkdir -p "$TR/scripts" "$TR/.github/workflows"
+  printf '| 1 | First | `SCRIPT` | 1 |\n| 2 | Second | `PROSE` | 1 |\n' > "$TR/build-protocol-core.md"
+  printf '## 1. Group\n\n<!-- Rule 1 -->\n\n1. **First.** Checked by `scripts/x.mjs`.\n\n<!-- Rule 2 -->\n\n2. **Second.**\n' > "$TR/rules.md"
+  : > "$TR/scripts/x.mjs"; : > "$TR/scripts/selftest-gate-scripts.sh"
+  printf 'jobs:\n  t:\n    steps:\n      - run: node scripts/x.mjs\n' > "$TR/.github/workflows/ci.yml"
+}
+rt_base
+expect "rule-tags: a SCRIPT rule whose script exists and runs in CI -> OK" 0 "1 of 2 rules are still written-only" -- node "$RT" --root "$TR"
+rt_base; printf 'jobs: {}\n' > "$TR/.github/workflows/ci.yml"
+expect "rule-tags: a script nothing runs -> FAIL" 1 "neither CI nor the self-test ever runs it" -- node "$RT" --root "$TR"
+rt_base; rm "$TR/scripts/x.mjs"
+expect "rule-tags: a named script that does not exist -> FAIL" 1 "scripts/x.mjs, which does not exist" -- node "$RT" --root "$TR"
+rt_base; printf '## 1. Group\n\n<!-- Rule 1 -->\n\n1. **First.**\n\n<!-- Rule 2 -->\n\n2. **Second.**\n' > "$TR/rules.md"
+expect "rule-tags: a SCRIPT tag whose rule names no script -> FAIL" 1 "names no script" -- node "$RT" --root "$TR"
+expect "rule-tags: Bob's own tags are all true" 0 "rule-tags-check: OK" -- node "$RT"
+
+# ── 22. bob-doctor.sh: the two design skills (D-033) ─────────────────────────
+echo "bob-doctor.sh"
+DH="$TMP/doc-home"; mkdir -p "$DH/.claude/skills"; ln -s "$(cd "$HERE/.." && pwd -P)/skill" "$DH/.claude/skills/bob"
+expect "bob-doctor: design skills not linked -> a warning with the line to paste" 0 "design-gallery is not installed.*ln -s" -- env HOME="$DH" bash "$HERE/bob-doctor.sh"
+ln -s "$(cd "$HERE/.." && pwd -P)/skills/design-gallery" "$DH/.claude/skills/design-gallery"
+expect "bob-doctor: a linked design skill -> reported as linked" 0 "design-gallery linked" -- env HOME="$DH" bash "$HERE/bob-doctor.sh"
+
 echo
 echo "selftest-gate-scripts: $PASS passed, $FAIL failed"
 [[ "$FAIL" -eq 0 ]]

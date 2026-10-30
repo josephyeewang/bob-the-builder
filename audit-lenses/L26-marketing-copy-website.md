@@ -27,7 +27,7 @@ source_frameworks:
 
 L28 (Wedge) checks whether the messaging is opinionated/sharp. L26 checks whether it's *clear*. The two are separate — a product can have a sharp wedge with muddy execution, or vice versa.
 
-Sub-streams Joe called out:
+Sub-streams Bob's author called out:
 1. **Contradiction hunting** — homepage says X, pricing page says Y, blog says Z
 2. **Simplifying / sharpening language** — Wiebe-style PAS, message hierarchy
 3. **Content relevance and linking** — internal-link graph, content-hub structure

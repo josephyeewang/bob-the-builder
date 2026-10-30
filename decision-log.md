@@ -522,6 +522,49 @@ The companion `audit-log.md` records *deferred* items (Defer verdicts that may s
 - **Consequences:** The core went from about 48.7 KB to about 40.6 KB, and the startup file from about 13.5 KB to about 8.8 KB. An installed Bob from before this change shows "latest=?" in its update offer for one cycle, because its update check looks for the old core line upstream; once updated, it reads `VERSION`. A session that needs the AUDIT or UPGRADE detail reads one more file. Text another session owns stays unchecked until that session fixes it and deletes its `SKIP` line.
 - **Revisit trigger:** the NEW-mode rewrite lands. Then delete the `SKIP` entries for the text it fixed, in the same change (a `SKIP` entry that hides nothing fails the check), and run the check over that text. Or: the check flags honest text it should allow.
 
+
+### D-033: Four more rules get a check, one rule's how-to keeps one home, and the method stops naming its author as the user
+
+- **Date:** 2026-10-29
+- **Status:** Accepted
+- **Context:** The audit of how Bob is organized (the one behind D-032) left eight smaller findings open:
+  - 28 of the 33 rules had nothing enforcing them, including the reconciliation rule (Rule 4) and the safety setup for hands-off builds (Rule 27).
+  - Rule 27's how-to was written out twice: in `rules.md`, and in the Supervised Autonomy section of `build-protocol.md`.
+  - "Tier 1" meant three different things in the core.
+  - The two design skills were installed on the author's machine only by hand.
+  - About 40 method lines spoke of "Joe" as if they were the reader.
+  - Several small findings:
+    - one retro was linked from nowhere;
+    - five dated files had no snapshot note;
+    - the integration playbooks' numbers L1–L11 clashed with the audit lenses L01–L38;
+    - the four history folders sat at the top level.
+- **Decision:**
+  - (1) **Five new checks**, each tied to a rule, tested in the self-test, and reached from the phase gate or CI:
+    - `scripts/phase-report-check.mjs` (Rule 4; Phase Gate 13). It refuses a phase report whose always-required sections are missing, empty, or still the template's placeholder text. It reads the section list from `templates/phase-report.md`, so that list keeps one home.
+    - `scripts/run-commands-check.mjs` (Rule 26 and Engineering Principle 8b; Phase Gate 14). It refuses a package script, CI step or Makefile line that runs a missing file, or a Python file with no run block that only imports or defines.
+    - `scripts/autonomy-check.mjs` (Rule 27). It runs before a hands-off phase and checks the deny and ask rules, a green gate with a retry limit and a real test command, a reviewer that cannot edit, no ignored `defaultMode: "auto"`, and no production key in the settings.
+    - `scripts/recurrence-check.mjs` (Rule 31). It reads `Class:` and `Rung:` lines in fix commits and refuses a class fixed twice whose newest fix is below rung 3.
+    - `scripts/rule-tags-check.mjs` (Rule 33, in Bob's CI). Every rule the index tags as checked must name a script that exists and that CI or the self-test runs.
+    - Each check exits 2 (cannot judge) rather than 0 when it has nothing to read (Rule 29).
+
+    The index now lists 24 rules as written-only, down from 28. Rule 22 (the pre-build gate) was not given a check here, because its text and the build manifest it would read are in the NEW mode, which the ORCHESTRATE session is rewriting.
+  - (2) Rule 27 in `rules.md` keeps the rule, its hard boundaries, the new setup check and a pointer. The how-to lives only in `build-protocol.md` § Supervised Autonomy. One detail that section lacked (prefer a reviewer from a different model family; diff the test files) stays in Rule 27 until the owner of that section adds it.
+  - (3) Rule 31's ladder steps are called rungs. The Minimum Viable Process groups are "Never skip / Skip with caution / Skip first". "Tier" now means only Rule 30's tiers.
+  - (4) `bob-doctor.sh` checks that both design skills are linked from the same Bob copy and prints the line to paste if not. The README install prompt asks for all three skills.
+  - (5) Method text says "the user" where it meant whoever is using Bob, and "Bob's author" where it records where an idea came from. Credit, licence and dated source lines keep the name. ORCHESTRATE's own files are left to their owner.
+  - (6) The playbooks are numbered P1–P11. The retros carry a snapshot note. Three living files carry `<!-- living doc -->`. The orphan retro is linked from Rule 32.
+- **Alternatives considered:**
+  - Group `evolutions/`, `retros/`, `lens-retros/` and `fixtures/` under one `history/` folder. Not done, by choice: `fixtures/` is test data that ORCHESTRATE's tests and the failure-mode check read; the others are linked from dated changelog and decision-log entries that must not be rewritten; and `AGENTS.md`'s file map already groups them as history. A cosmetic gain did not justify breaking those links.
+  - A recurrence check that guesses the class from the commit wording. Rejected: it would raise false alarms, and Rule 31 says a check that cries wolf gets muted. It reads explicit lines instead, and says so when there are none.
+  - Build a check for Rule 22 now. Deferred to the NEW-mode rewrite, for the reason above.
+- **Consequences:**
+  - The phase gate has 14 items.
+  - A project's fix commits need two short lines for the recurrence check to see them; without those lines it reports "cannot judge", never "clean".
+  - The run-commands check was calibrated before it shipped. Run across several real projects, it raised no false alarm once it learned to read each workflow step's own working folder; the first version flagged healthy commands in one of them. It catches both planted breaks in its test.
+  - The autonomy check, run on a fresh `bob-init` project, refuses only the test command the user has not filled in yet. That is deliberate: until it is filled in, the gate blocks every stop.
+- **Revisit trigger:**
+  - The NEW-mode rewrite lands: build the Rule 22 check, and fold Rule 27's leftover detail into the runbook.
+  - Or: any of the new checks raises a false alarm on a healthy project. Fix the check or remove it; never mute it.
 ---
 
 ## Anti-pattern reminder

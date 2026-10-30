@@ -3,7 +3,7 @@
 Distilled from the methodology notes of a real product's mockup-to-code transfer (a consumer AI app, Aug 2026).
 
 ## 1. DESIGN.md spec layer (the repeatability piece)
-Before building, capture the locked direction as a machine-readable `DESIGN.md`: tokens, type scale, spacing, radius, shadow, motion plan, and **forbidden defaults**. The coding agent reads it every session → consistent, on-brand, non-generic output. This is Joe's Principle #6 in file form: translate from a canonical source, not prose.
+Before building, capture the locked direction as a machine-readable `DESIGN.md`: tokens, type scale, spacing, radius, shadow, motion plan, and **forbidden defaults**. The coding agent reads it every session → consistent, on-brand, non-generic output. This is Engineering Principle 6 (Bob's) in file form: translate from a canonical source, not prose.
 - **In a Bob build the winning mock file stays the canonical input**, and `LOCKED-DESIGN.md` (Bob Step 5.5, `design-gallery` skill) is the map to it — its banner forbids building from its text. A `DESIGN.md` token file is an optional extra generated from that mock, never a substitute for it.
 - `npx brandmd <url>` — any live site → DESIGN.md + Tailwind tokens *(reported, verify)*.
 - `rohitg00/awesome-claude-design` — DESIGN.md prompt packs by aesthetic family; `google-labs-code/design.md` — Google's spec *(both verified)*.

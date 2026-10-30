@@ -23,7 +23,7 @@ source_frameworks:
 
 ## Why this lens exists / what other lenses miss
 
-Engineering audits assume the original author. L23 audits everything that breaks down when the original author isn't available — sick day, vacation, departure, scale-up hire, open-source contributor. Documentation is the operator-distinctive lens that engineering teams routinely under-invest in until it's too late. For products built by a single non-engineer (Joe's pattern) it's even more critical — when a contractor or future co-founder joins, can they contribute?
+Engineering audits assume the original author. L23 audits everything that breaks down when the original author isn't available — sick day, vacation, departure, scale-up hire, open-source contributor. Documentation is the operator-distinctive lens that engineering teams routinely under-invest in until it's too late. For products built by a single non-engineer (the pattern Bob is built for) it's even more critical — when a contractor or future co-founder joins, can they contribute?
 
 This lens also extends to USER documentation (help center, FAQ) — for products with users who need help understanding capabilities.
 

@@ -72,7 +72,7 @@ Before starting, assess project complexity:
 | 1 | Follow steps in order. Do not skip, merge, or reorder. | `PROSE` | 1 |
 | 2 | Stop at every human gate (`→ HG`). Wait for explicit approval. | `PROSE` | 1 |
 | 3 | Track current step. Resume from Build Manifest. | `PROSE` | 1 |
-| 4 | Reconciliation is non-optional after every build phase. | `PROSE` | 4 |
+| 4 | Reconciliation is non-optional after every build phase. | `SCRIPT` | 4 |
 | 5 | Specs are living documents — update during build when reality diverges. | `PROSE` | 1 |
 | 6 | **No silent refactoring.** List ALL changes. Explain WHY. Confirm no regression. | `PROSE` | 4 |
 | 7 | **No behavior drift.** Do NOT change previously built behavior unless current phase REQUIRES it. | `PROSE` | 4 |
@@ -94,14 +94,14 @@ Before starting, assess project complexity:
 | 23 | Living-doc coherence is a *triggered, mechanical* sweep — not a manual audit the human has to call (v2.29). | `SCRIPT` | 2 |
 | 24 | The Build-Integrity Loop — milestone audits are push, not pull; the build never forgets an earlier step or decision (v2.30). | `PROSE` | 4 |
 | 25 | Green ≠ Correct — the silent-failure forensics a data/analysis audit must actually perform (v2.31). | `PROSE` | 5 |
-| 26 | Keep the machine hermetic & refactor by invariant — the ENGINEERING silent-failures (v2.33). | `PROSE` | 4 |
-| 27 | Supervised Autonomy — collapse per-step gates to milestone gates on the BUILD phases only (v2.34). | `PROSE` | 4 |
+| 26 | Keep the machine hermetic & refactor by invariant — the ENGINEERING silent-failures (v2.33). | `SCRIPT` (in part) | 4 |
+| 27 | Supervised Autonomy — collapse per-step gates to milestone gates on the BUILD phases only (v2.34). | `SCRIPT` (in part) | 4 |
 | 28 | Structurally valid ≠ logically coherent — the SPEC-DOCUMENT silent-failures (v2.36). | `SCRIPT` | 2 |
 | 29 | A check with no inputs is not a passing check — gate lenses by ARTEFACT STATE (v2.37). | `PROSE` | 6 |
 | 30 | Done means fresh-eyes clean — a Tier-1 milestone is not complete until a context that did NOT build it has audited it and found zero MATERIAL findings (v2.39). | `PROSE` (clause d `SCRIPT`) | 5 |
-| 31 | The intervention ladder — when a class RECURS, escalate a tier; never just re-state the rule (v2.40). | `PROSE` | 7 |
+| 31 | The intervention ladder — when a class RECURS, climb a rung; never just re-state the rule (v2.40). | `SCRIPT` (in part) | 7 |
 | 32 | Incident intake — Bob learns from the field, not only from itself (v2.40). | `SCRIPT` (in part) | 7 |
-| 33 | Bob dogfoods Bob — an unenforced rule is a wish (v2.40). | `PROSE` (one clause `SCRIPT`) | 8 |
+| 33 | Bob dogfoods Bob — an unenforced rule is a wish (v2.40). | `PROSE` (two clauses `SCRIPT`) | 8 |
 
 **Failure stop conditions (STOP immediately if):**
 - Required behavior NOT in Behavioral Core (AI products)
@@ -194,6 +194,8 @@ A person working with Bob usually has rules in three places. **Write each rule o
 10. **Fresh-eyes clean on Tier-1 deliverables (v2.39, Rule 30):** For any phase whose output is Tier 1 (numbers/data someone acts on), a fresh-context auditor that did NOT build it has run and reports **zero Material findings**; the result is logged in `docs/audit-ledger.json` (Rule 30(d) fields; `audit-ledger-check.mjs` passes). A zero-finding audit was re-run once from a different angle; any content edited after the audit voided it (Rule 30(f)). Unrun, or Material findings open = stop condition. Tier 2/3 phases record their tier and skip.
 11. **Failing-test receipt per fix item (2026-10, D-016 — `SCRIPT`):** every fix/bug item in the phase **names the test command that proves it** — an item with no test command cannot pass this gate (a note alone is not proof). A session **different from the builder's** runs `node "$(realpath ~/.claude/skills/bob/..)/scripts/prove-test-fails.mjs" --commit <sha> --test "<cmd>" --fix <file>:<from>-<to>` and pastes the receipt into the phase report. The script works in a scratch copy at that exact commit: removes the fix lines → the test must FAIL; restores them → it must PASS. A test that stays green with the fix removed does not test the fix. Code-free phases record "no fix items" and skip.
 12. **Done-criteria unchanged since the phase began (2026-10, D-016 — `SCRIPT`):** `node "$(realpath ~/.claude/skills/bob/..)/scripts/check-bar.mjs" <phase-report.md>` passes — the fingerprint recorded at phase start still matches the done-criteria, or every change carries a dated "bar changed because…" line. Moving the finish line mid-phase without saying why = stop condition.
+13. **Phase report complete (2026-10-29, D-033, Rule 4 — `SCRIPT`):** `node "$(realpath ~/.claude/skills/bob/..)/scripts/phase-report-check.mjs" <phase-report.md>` passes — every always-required section is there and filled in, none still holds the template's placeholder text, and "Spec Deviations" says what diverged or "None".
+14. **Run commands still run (2026-10-29, D-033, Rule 26 — `SCRIPT`):** `node "$(realpath ~/.claude/skills/bob/..)/scripts/run-commands-check.mjs"` passes in the project — every file a package script, CI step or Makefile runs exists, and no Python one lost its run block.
 
 ---
 
@@ -201,7 +203,7 @@ A person working with Bob usually has rules in three places. **Write each rule o
 
 Bob's own named principles. Lenses and rules cite them by these numbers, so the numbers are stable.
 
-1. **Single source of truth.** One definition per concept — code, config, numbers, documents. Check before adding; a second copy is a future disagreement. The cure for a duplicate is deleting it (Rule 31 tier 4); Rule 28 covers duplication inside documents.
+1. **Single source of truth.** One definition per concept — code, config, numbers, documents. Check before adding; a second copy is a future disagreement. The cure for a duplicate is deleting it (Rule 31 rung 4); Rule 28 covers duplication inside documents.
 2. **Trace end to end.** Before fixing, follow the data from input to output and find where expected ≠ actual. Don't patch the symptom. (Debugging Protocol step 2; L31 turns it into an audit.)
 3. **Class-level fixes.** A bug in one place → grep the pattern and fix every instance; the grep is the list, not the incident's trace (Verification Additions; Rule 31).
 4. **Verify every change.** Never commit broken code: type-check + build on every turn, and "don't stop until green" (Step 6b hooks; Rule 27).
@@ -239,11 +241,11 @@ Three strikes: same fix fails 3x → STOP. Change approach entirely.
 
 ## MINIMUM VIABLE PROCESS
 
-| Tier 1 — Never Skip | Tier 2 — Skip With Caution | Tier 3 — Skip First |
+| Never skip | Skip with caution | Skip first |
 |---------------------|---------------------------|-------------------|
 | Reconciliation, Regression check, Scope lock, Class-level scan, Hot path test, AI eval re-run (AI products), Contract validation (code products) | Cross-cutting scan, Global invariants, Full Phase Report, Propagation, Cost guardrail | Adversarial reviews (spec phase, incl. 4c), Experience test, Second-model review |
 
-If Tier 2-3 skipped during build → MUST run at hardening.
+If anything in the last two columns was skipped during build → MUST run at hardening.
 
 ---
 
@@ -291,6 +293,7 @@ If Tier 2-3 skipped during build → MUST run at hardening.
 - **Merge guard (D-018):** `~/.claude/skills/bob/../scripts/hooks/merge-guard.mjs` + `templates/required-checks.json` — `bob-init` copies it into `.claude/hooks/` and writes `.claude/required-checks.json` (Step 6b item 6). Refuses a merge with a red required check and a direct push to main; empty list = "no CI yet" stage. Tests: `node --test "$(realpath ~/.claude/skills/bob/..)/scripts/hooks/merge-guard.test.mjs"`.
 - **Root-file pointer + status-date check (D-018):** `~/.claude/skills/bob/../scripts/doc-pointers-check.mjs` — run by `coherence-check.sh` class [8] (Rule 23(c)).
 - **Audit ledger (D-018):** `templates/audit-ledger.json` (bob-init → `docs/audit-ledger.json`) + `~/.claude/skills/bob/../scripts/audit-ledger-check.mjs [--streaks]` (Rule 30(d)).
+- **Rule checks (D-033):** `node "$(realpath ~/.claude/skills/bob/..)/scripts/phase-report-check.mjs" <report>` (Rule 4, Phase Gate 13) · `node "$(realpath ~/.claude/skills/bob/..)/scripts/run-commands-check.mjs" [DIR]` (Rule 26, Phase Gate 14) · `node "$(realpath ~/.claude/skills/bob/..)/scripts/autonomy-check.mjs" [DIR]` (Rule 27, before a hands-off phase) · `node "$(realpath ~/.claude/skills/bob/..)/scripts/recurrence-check.mjs" [DIR]` (Rule 31, reads fix commits' `Class:` / `Rung:` lines) · `node "$(realpath ~/.claude/skills/bob/..)/scripts/rule-tags-check.mjs"` (Rule 33, Bob's own CI). Each exits 2, never 0, when it has nothing to check (Rule 29).
 - **Daily dropped-work check (D-018):** `templates/loop-check.mjs` + `templates/loop-check.yml` (bob-init → `scripts/` + `.github/workflows/`) — stale PRs without a dated hold, open loops with no owner/due date/proof, an intake list over its cap, a scheduled job failing twice or silent, a missing heartbeat.
 - **Parallel sessions (D-018):** `templates/open-loops.md` — the one open-items list with one coordinator; rules in `build-protocol.md` §"Parallel sessions".
 - **UPGRADE (D-019):** `~/.claude/skills/bob/../scripts/bob-upgrade.mjs` (run from the project folder; report by default, `--apply`, `--interactive`, `--enforce`) + `~/.claude/skills/bob/../scripts/hooks/warn-only.mjs` (runs a hook warn-only) + `templates/bob-differences.md` (bob-init → `.bob/differences.md`). `bob-init` records what it installed in `.bob/installed.json`. Steps: `~/.claude/skills/bob/../modes/upgrade.md`. The commit-time document check is `~/.claude/skills/bob/../scripts/commit-sweep.sh` (D-020: one script for every hook that runs it; in blocking mode it judges the staged files).

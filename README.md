@@ -30,9 +30,14 @@
 ```
 Please install Bob the Builder from
 https://github.com/josephyeewang/bob-the-builder
-as a Claude Code skill, so I can type
-/bob in any project.
+as Claude Code skills: link its skill/ folder
+as ~/.claude/skills/bob, and its two design
+skills (skills/design-gallery and
+skills/design-mockups) under their own names,
+so I can type /bob in any project.
 ```
+
+To check the install at any time, ask Claude Code to run `bash ~/.claude/skills/bob/../scripts/bob-doctor.sh`. It explains anything missing in plain English.
 
 ---
 

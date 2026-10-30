@@ -14,7 +14,7 @@ This is Principle 7 (*Green ≠ Correct*) pointed at the audit itself.
 
 Principle 7 says a passing test suite verifies known-incident classes and syntactic success, not semantic correctness. Rule 30 (tiered definition of done) says Tier-1 work exits only after a fresh-context audit reports zero Material findings. **Both assume the audit covered the ground.** Neither has a mechanism that fails loudly when it didn't.
 
-The exact defect class Joe has hit repeatedly in data work — a 100%-null column read as "no signal," a collapse key that silently blended distinct entities — has the same shape here: *an absence presented as a result*. A lens that ran four of its fourteen check questions and reported no findings is the audit-layer version of the dead axis.
+The exact defect class Bob's author has hit repeatedly in data work — a 100%-null column read as "no signal," a collapse key that silently blended distinct entities — has the same shape here: *an absence presented as a result*. A lens that ran four of its fourteen check questions and reported no findings is the audit-layer version of the dead axis.
 
 Cloudflare's published run is the empirical anchor: **20,799 raw candidates → 7,245 actionable findings across their own repositories**, with the share of raw candidates thrown out at first validation falling **40% → 11%** (Cloudflare credits better context from their Recon phase for that — it is a candidate-quality number, not a rate of real bugs wrongly dismissed; corrected 2026-10-03 against the source blog), and one ~30k-line repository going from first look to opened pull request in **14 hours**. Their own reported figure for why one pass is not enough: *"a single run found roughly half of the vulnerabilities that repeated runs found in total."*
 
@@ -188,7 +188,7 @@ They cost two agent calls and they catch different things than every other agent
 
 ## 7. Running untrusted code — the fail-closed contract
 
-Any lens that *executes* target code (which `_execution-principle.md` actively pushes toward) is running code the audit does not trust, on Joe's machine. That needs a contract, not good intentions:
+Any lens that *executes* target code (which `_execution-principle.md` actively pushes toward) is running code the audit does not trust, on the user's machine. That needs a contract, not good intentions:
 
 - no outside network access;
 - a clean, minimal environment — never the ambient one, and never the real credentials;

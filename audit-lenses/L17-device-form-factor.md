@@ -13,7 +13,7 @@ source_frameworks:
   - Lighthouse mobile audit categories
   - Core Web Vitals (LCP, CLS, INP) — Google
   - Apple HIG touch targets (44pt) + Material (48dp) + WCAG 2.5.5 (44 CSS px AAA / 2.5.8 24×24 AA)
-  - "Joe.wang anecdote" — built for desktop, 100% of users tried it on mobile and it was garbage. Empirical anchor for mobile-blind product builds.
+  - "Founder anecdote" — built for desktop, 100% of users tried it on mobile and it was garbage. Empirical anchor for mobile-blind product builds.
 ---
 
 # L17 — Device & Form Factor
