@@ -654,3 +654,80 @@ test('L38: the account-age rule missing is told even when every step that reads 
   for (const s of ['stops', 'undo-starts', 'pass']) assert.equal(r.steps[s].ok, false, `control: ${s} failed`);
   assert.equal(w.calls.alerts.filter((a) => a.includes(`have no value for ${K.staleAfterMin}`)).length, 1, w.calls.alerts.join(' | '));
 });
+
+// Audit 0b-6 r4 MAT-2: the alert port that throws or rejects skips nothing.
+test('r4 MAT-2: an alert that throws, or rejects, skips no step: a cancel that fails to stop, then the undo still starts', async () => {
+  for (const [label, alert] of [['throws', () => { throw new Error('no network'); }], ['rejects', () => Promise.reject(new Error('no network'))]]) {
+    const running = [{ id: 'S-X', product: 'p1', kind: 'editing', card: 'X-1', pgid: 98 }];
+    const w = world([account(), usage(), card('X-1', { state: 'cancelled', session: 'S-X' }), ...undoEntries('U-1')], { over: {
+      alert, sessions: () => running, stopGroup: async () => ({ ok: false, reason: 'EPERM' }), board: () => { throw new Error('board unreadable'); } } });
+    const r = await w.pass();
+    assert.deepEqual(Object.keys(r.steps), STEPS, label);
+    for (const s of STEPS.filter((x) => x !== 'outage')) assert.equal(r.steps[s].ok, true, `${label}: ${s} ${r.steps[s].error ?? ''}`);
+    assert.equal(r.steps.outage.ok, false, `${label}: control, the outage step failed and its alert failed too`);
+    assert.ok(w.calls.launched.includes('U-1'), label);
+    await new Promise((ok) => setImmediate(ok));
+    assert.match(w.rec.read('fact', 'alert-failed')?.doc?.text ?? '', /an alert could not be sent: no network/, label);
+  }
+});
+
+// Audit 0b-6 r4 MAT-3: a port that blocks the thread itself. No timer in the main thread can fire, so
+// the watchdog thread ends the process; the next start breaks the lock and tells Joe.
+test('r4 MAT-3: `node main.mjs` blocked inside a synchronous port is ended by the watchdog; the next pass tells Joe', async () => {
+  const dir = tempDir('m11-blocked-');
+  const here = fileURLToPath(new URL('.', import.meta.url));
+  const wiring = join(dir, 'wiring.mjs');
+  writeFileSync(wiring, `import { recWith, rulesWith } from ${JSON.stringify(join(here, 'fixtures.test-helper.mjs'))};
+const rec = recWith([['product', 'p1', { state: 'active' }]]);
+export async function wire() {
+  const noop = () => [];
+  // The session list blocks the thread for a minute: no promise or timer can cut it short.
+  const block = () => { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 60000); return []; };
+  return { rec, rules: rulesWith(), ports: { alert: () => {}, board: noop, healthy: () => true, outboxSessions: noop, wait: async () => {}, leads: noop,
+    sessions: block, probe: () => null, launch: async () => ({ ok: false }), stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }),
+    hasSession: () => true, gateAlive: () => true, hasReviewer: () => true, startReviewer: async () => ({ ok: true }), filesOf: noop,
+    sendFrontDoor: async () => ({}), restartFrontDoor: async () => ({ ok: true }), startMinibase: async () => ({ ok: true }),
+    cleanup: { copiesRoot: ${JSON.stringify(dir)}, sealRoot: ${JSON.stringify(dir)}, mirrorFor: () => null } } };
+}
+`);
+  const lockFile = join(dir, 'pass.lock');
+  const config = join(dir, 'config.json');
+  writeFileSync(config, JSON.stringify({ wiring, lockFile, runDeadlineMs: 200 }));
+  const started = Date.now();
+  const r = spawnSync(process.execPath, [join(here, 'main.mjs'), config], { encoding: 'utf8', timeout: 40_000 });
+  assert.equal(r.signal, 'SIGKILL', `${r.status} ${r.stderr}`);
+  assert.ok(Date.now() - started < 30_000, 'ended by the watchdog, not by the port giving up after a minute');
+  assert.match(r.stderr, /the pass was blocked past 5200 ms; the watchdog ends it/);
+  assert.ok(JSON.parse(readFileSync(lockFile, 'utf8')).pid, 'the killed run left its lock');
+  // The next start breaks the dead lock and tells Joe, once a day.
+  const w = world([account(), usage()]);
+  const n = await runTick({ lockFile, rec: w.rec, rules: rulesWith({}, allow), now: T0, ports: w.ports });
+  assert.equal(n.ran, true);
+  assert.equal(w.calls.alerts.filter((a) => /the last Dispatcher pass .* was stopped before it finished/.test(a)).length, 1, w.calls.alerts.join(' | '));
+  // Control: a lock released normally is not told.
+  assert.equal((await runTick({ lockFile, rec: w.rec, rules: rulesWith({}, allow), now: T0 + MIN, ports: w.ports })).ran, true);
+  assert.equal(w.calls.alerts.filter((a) => /was stopped before it finished/.test(a)).length, 1);
+});
+
+test('r4 MAT-3: main() ends its watchdog when the pass finishes, so a normal run is never killed', async () => {
+  const dir = tempDir('m11-dog-');
+  const here = fileURLToPath(new URL('.', import.meta.url));
+  const wiring = join(dir, 'wiring.mjs');
+  writeFileSync(wiring, `import { recWith, rulesWith } from ${JSON.stringify(join(here, 'fixtures.test-helper.mjs'))};
+const rec = recWith();
+export async function wire() {
+  const noop = () => [];
+  return { rec, rules: rulesWith(), ports: { alert: () => {}, board: noop, healthy: () => true, outboxSessions: noop, wait: async () => {}, leads: noop,
+    sessions: noop, probe: () => null, launch: async () => ({ ok: false }), stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }),
+    hasSession: () => true, gateAlive: () => true, hasReviewer: () => true, startReviewer: async () => ({ ok: true }), filesOf: noop,
+    sendFrontDoor: async () => ({}), restartFrontDoor: async () => ({ ok: true }), startMinibase: async () => ({ ok: true }),
+    cleanup: { copiesRoot: ${JSON.stringify(dir)}, sealRoot: ${JSON.stringify(dir)}, mirrorFor: () => null } } };
+}
+`);
+  const config = join(dir, 'config.json');
+  writeFileSync(config, JSON.stringify({ wiring, lockFile: join(dir, 'pass.lock') }));
+  // In this process: a watchdog left running would kill the test run itself 5.2 s after the start.
+  assert.equal(await main([config], { now: T0, log: () => {}, watchdog: true, runDeadlineMs: 200 }), 0);
+  await new Promise((ok) => setTimeout(ok, 6_000));
+  assert.ok(true, 'still alive past the watchdog time');
+});

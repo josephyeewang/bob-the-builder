@@ -43,8 +43,17 @@ export const TERM_WAIT_MS = 10_000;
 const NEVER_PARKED = Object.freeze(['review', 'audit', 'merge', 'undo', 'readonly', 'lead', 'front_door']);
 const parkable = (s) => !NEVER_PARKED.includes(s.kind);
 const iso = (ms) => new Date(ms).toISOString();
-// A port that throws answers { ok: false, reason } for that one session (audit 0b-6 r2 MAT-7).
-async function guarded(f) { try { return await f(); } catch (e) { return { ok: false, reason: e?.message ?? String(e) }; } }
+// A port that throws, or does not answer within `ms`, answers { ok: false, reason } for that one session
+// (audit 0b-6 r2 MAT-7; r4 MAT-1: one stuck stop must not hold every later one).
+// A save (M4 save-work: several git calls) gets longer than a stop; both together fit the step's
+// STEP_DEADLINE_MS (tick.mjs).
+export const PORT_DEADLINE_MS = 30_000;
+export const SAVE_DEADLINE_MS = 75_000;
+export async function guarded(f, ms = PORT_DEADLINE_MS) {
+  let timer;
+  const late = new Promise((ok) => { timer = setTimeout(() => ok({ ok: false, reason: `it did not answer within ${ms} ms` }), ms); });
+  try { return await Promise.race([Promise.resolve().then(f), late]); } catch (e) { return { ok: false, reason: e?.message ?? String(e) }; } finally { clearTimeout(timer); }
+}
 
 /**
  * Tells Joe once per missing rules value, on the fact `factId` (audit MAT-2; 0b-6 r3 MAT-3: values only
@@ -124,7 +133,7 @@ function stopReason({ s, card, productDoc, b, compactions, split }) {
  * this as its own first step (LEAD-CALLS L38), so no other step's failure, an unreadable file or a bad
  * rule, can skip a cancel. Returns { stopping, stopped, running, bands, unknownSince, missing }.
  */
-export async function stopPass({ rec, rules, now, account, sessions, probe, stopGroup, saveWork, alert }) {
+export async function stopPass({ rec, rules, now, account, sessions, probe, stopGroup, saveWork, alert, portDeadlineMs = PORT_DEADLINE_MS, saveDeadlineMs = SAVE_DEADLINE_MS }) {
   const out = { stopping: [], stopped: [] };
   // A missing rules value starts nothing, but every stop still runs (audit MAT-2): Cancel needs no band.
   // Any other failure reading the rules (an unreadable file) is treated the same, never thrown before
@@ -137,8 +146,11 @@ export async function stopPass({ rec, rules, now, account, sessions, probe, stop
   const b = read(() => currentBands({ rec, rules, account, now }), HELD_BANDS);
   const { unknownSince } = recordBands({ rec, b, now, account });
 
-  // 3 + 4. Compactions and stops.
+  // 3 + 4. Compactions and stops. Which sessions stop is decided first; then every stop is called at
+  // once, then every save, each with its own time limit (audit 0b-6 r4 MAT-1): the step takes at most
+  // two port deadlines however many sessions stop, and one stuck stop holds no other.
   let running = [...sessions];
+  const due = [];
   for (const s of sessions) {
     const card = s.card ? rec.read('card', s.card)?.doc : null;
     // A probe that throws reads as "not at a safe point", so the late hard stop still applies (MAT-7).
@@ -165,13 +177,24 @@ export async function stopPass({ rec, rules, now, account, sessions, probe, stop
     const limit = pending.reason === 'cancel' ? cancelMs : parkMs;
     const late = now - Date.parse(pending.since) >= limit;
     if (!atSafePoint({ role: roleOf(s), size: p?.size, activity: p?.activity }) && !late) { out.stopping.push([s.id, pending.reason]); continue; }
-    const stopped = await guarded(() => stopGroup(s));
-    if (!stopped?.ok) {
-      // One alert per wanted stop, not one per pass (audit MIN-4).
-      if (!pending.fail_alerted) { alert(`session ${s.id} (card ${s.card}) could not be stopped: ${stopped?.reason ?? 'no answer'}`); pending = { ...pending, fail_alerted: true }; putFact(rec, STOP_FACT(s.id), pending, 'stop_failed'); }
-      out.stopping.push([s.id, pending.reason]); continue;
+    due.push({ s, pending, late });
+  }
+  const answers = await Promise.all(due.map(({ s }) => guarded(() => stopGroup(s), portDeadlineMs)));
+  const done = [];
+  due.forEach((d, i) => {
+    const { s, pending } = d;
+    const stopped = answers[i];
+    if (stopped?.ok) { done.push({ ...d, stopped }); return; }
+    // One alert per wanted stop, and again each day it fails (audit MIN-4; L38: no silent hold).
+    if (!pending.fail_alerted || !(now - Date.parse(pending.fail_alerted_at ?? '') < HOLD_REPEAT_MS)) {
+      alert(`session ${s.id} (card ${s.card}) could not be stopped: ${stopped?.reason ?? 'no answer'}`);
+      putFact(rec, STOP_FACT(s.id), { ...pending, fail_alerted: true, fail_alerted_at: iso(now) }, 'stop_failed');
     }
-    const saved = await guarded(() => saveWork(s));
+    out.stopping.push([s.id, pending.reason]);
+  });
+  const saves = await Promise.all(done.map(({ s }) => guarded(() => saveWork(s), saveDeadlineMs)));
+  for (const [i, { s, pending, late, stopped }] of done.entries()) {
+    const saved = saves[i];
     if (!saved?.ok) alert(`session ${s.id} stopped but its unsaved work was not saved: ${saved?.reason ?? 'no answer'}`);
     if (late) note(rec, `stop-note-${s.id}`, `session ${s.id} stopped without a safe point after ${Math.round((now - Date.parse(pending.since)) / 60_000)} min (${pending.reason})`, { now });
     moveAfterStop(rec, s.card, pending.reason, now);
@@ -200,8 +223,8 @@ export const HELD_BANDS = Object.freeze({ band: 'unknown', own_building: 'unknow
  * `stops` is the tick's own stopPass result; null when that step failed (then nothing new starts but
  * undo cards); left out, the pass runs stopPass itself.
  */
-export async function dispatcherPass({ rec, rules, now, account, sessions, probe, launch, stopGroup, saveWork, hostLock = () => null, pauseLead = () => {}, filesOf, alert, startsOff = null, tellMissing = true, stops }) {
-  const st = stops === undefined ? await stopPass({ rec, rules, now, account, sessions, probe, stopGroup, saveWork, alert }) : stops;
+export async function dispatcherPass({ rec, rules, now, account, sessions, probe, launch, stopGroup, saveWork, hostLock = () => null, pauseLead = () => {}, filesOf, alert, startsOff = null, tellMissing = true, stops, portDeadlineMs = PORT_DEADLINE_MS, saveDeadlineMs = SAVE_DEADLINE_MS }) {
+  const st = stops === undefined ? await stopPass({ rec, rules, now, account, sessions, probe, stopGroup, saveWork, alert, portDeadlineMs, saveDeadlineMs }) : stops;
   const out = { started: [], refused: [], stopping: st?.stopping ?? [], stopped: st?.stopped ?? [], resumed: [], notes: [] };
   const missing = [...(st?.missing ?? [])];
   const read = readOr(missing);
@@ -242,7 +265,9 @@ export async function dispatcherPass({ rec, rules, now, account, sessions, probe
       else waitOn(rec, id, { who: 'joe', what: 'limit_hit: the limit reset; Tier-1 work does not resume by itself', now, kind: 'limit_reset' });
     }
   }
-  if (unknownLong && !factDoc(rec, UNKNOWN_FACT)?.doc?.since?.startsWith?.(unknownSince)) {
+  // Once per stretch of unread usage, and again each day it lasts (L38).
+  const uf = factDoc(rec, UNKNOWN_FACT)?.doc;
+  if (unknownLong && (!uf?.since?.startsWith?.(unknownSince) || !(now - Date.parse(uf?.at ?? '') < HOLD_REPEAT_MS))) {
     putFact(rec, UNKNOWN_FACT, { since: unknownSince, at: iso(now) }, 'usage_unknown_alert');
     alert('usage has been unreadable for over a day; parked work waits on you');
   }
@@ -265,9 +290,10 @@ export async function dispatcherPass({ rec, rules, now, account, sessions, probe
     if (pf?.doc?.state === 'asked') continue;
     if (running.some((s) => s.product === product && parkable(s))) continue;
     // A failing port is that product's problem, told once, not a failed pass (audit 0b-6 r3 MIN-2).
-    const asked = await guarded(async () => { await pauseLead({ product }); return { ok: true }; });
+    const asked = await guarded(async () => { await pauseLead({ product }); return { ok: true }; }, portDeadlineMs);
     if (!asked.ok) {
-      if (pf?.doc?.reason !== asked.reason) { putFact(rec, PAUSE_FACT(product), { state: 'failed', reason: asked.reason, at: iso(now) }, 'pause_lead_failed'); alert(`the Lead of ${product} could not be asked to hand off: ${asked.reason}; tried again every pass`); }
+      // Once per reason, and again each day it fails (L38).
+      if (pf?.doc?.reason !== asked.reason || !(now - Date.parse(pf?.doc?.at ?? '') < HOLD_REPEAT_MS)) { putFact(rec, PAUSE_FACT(product), { state: 'failed', reason: asked.reason, at: iso(now) }, 'pause_lead_failed'); alert(`the Lead of ${product} could not be asked to hand off: ${asked.reason}; tried again every pass`); }
       continue;
     }
     putFact(rec, PAUSE_FACT(product), { state: 'asked', at: iso(now) }, 'pause_lead');
@@ -315,12 +341,15 @@ async function starts({ rec, rules, now, b, running, launch, out, alert, onlyUnd
     const card = { id, ...doc };
     const product = doc.product;
     if (onlyUndo && doc.kind !== 'undo') continue;
-    // An undo that cannot start is the way out of a bad change: Joe is told why, once per reason (audit 0b-6 r3 MAT-5).
+    // An undo that cannot start is the way out of a bad change: Joe is told why, once per reason and again
+    // each day (audit 0b-6 r3 MAT-5). The reason counts with its numbers out, so "runs 2 workers" and
+    // "runs 3 workers" are one cause (audit 0b-6 r4).
     const refuse = (reason) => {
       out.refused.push([id, reason]);
       const held = factDoc(rec, UNDO_HELD_FACT(id))?.doc;
-      if (doc.kind === 'undo' && (held?.reason !== reason || !(now - Date.parse(held?.at ?? '') < HOLD_REPEAT_MS))) {
-        putFact(rec, UNDO_HELD_FACT(id), { reason, at: iso(now) }, 'undo_held');
+      const cause = reason.replace(/\d+/g, 'N');
+      if (doc.kind === 'undo' && (held?.cause !== cause || !(now - Date.parse(held?.at ?? '') < HOLD_REPEAT_MS))) {
+        putFact(rec, UNDO_HELD_FACT(id), { reason, cause, at: iso(now) }, 'undo_held');
         alert(`your undo (card ${id}) is waiting: ${reason}`);
       }
     };

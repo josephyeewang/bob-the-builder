@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
-import { dispatcherPass, stopProcessGroup, STOP_FACT, LIMIT_FACT, UNDO_HELD_FACT, PAUSE_FACT, RULES_MISSING_FACT, rulesMissingAlert } from './pass.mjs';
+import { dispatcherPass, stopPass, undoStarts, stopProcessGroup, STOP_FACT, LIMIT_FACT, UNDO_HELD_FACT, PAUSE_FACT, RULES_MISSING_FACT, rulesMissingAlert } from './pass.mjs';
 import { USAGE_FACT, BAND_FACT } from './usage.mjs';
 import { OUTAGE_FACT } from './outage.mjs';
 import { KEYS as K } from './keys.mjs';
@@ -631,3 +631,110 @@ test('audit 0b-6 r3 MAT-3: the missing-values alert names only keys not told bef
   assert.equal(rec.read('fact', RULES_MISSING_FACT).doc.keys, 'b, c', 'an incomplete tick keeps what it did not read');
   assert.equal(alerts.length, 2);
 });
+
+// Audit 0b-6 r4 MAT-1: a time limit on every stop and save, and the stops side by side.
+test('r4 MAT-1: a stop that never answers holds no other stop; it is told, and again a day later', async () => {
+  const rec = recWith([['product', 'p1', { state: 'active' }], card('C-A', { state: 'cancelled' }), card('C-B', { state: 'cancelled' })]);
+  usageInto(rec);
+  const sessions = [{ id: 'S-A', product: 'p1', kind: 'editing', card: 'C-A', pgid: 50 }, { id: 'S-B', product: 'p1', kind: 'editing', card: 'C-B', pgid: 51 }];
+  const alerts = [];
+  const stopped = [];
+  const run = (at) => stopPass({ rec, rules: rulesWith(), now: at, account: ACCT, sessions, probe: () => idle, alert: (t) => alerts.push(t), portDeadlineMs: 50, saveDeadlineMs: 50,
+    stopGroup: (s) => (s.id === 'S-A' ? new Promise(() => {}) : (stopped.push(s.id), { ok: true, how: 'SIGTERM' })),
+    saveWork: async () => ({ ok: true }) });
+  const r = await run(T0);
+  assert.deepEqual(r.stopped, [['S-B', 'cancel']]);
+  assert.deepEqual(r.stopping, [['S-A', 'cancel']]);
+  assert.equal(alerts.length, 1, alerts.join(' | '));
+  assert.match(alerts[0], /session S-A \(card C-A\) could not be stopped: it did not answer within 50 ms/);
+  await run(T0 + MIN);
+  assert.equal(alerts.length, 1, 'once while it lasts');
+  await run(T0 + 25 * H);
+  assert.equal(alerts.length, 2, 'again a day later');
+});
+
+test('r4 MAT-1: the stops are called side by side, not one after another', async () => {
+  const rec = recWith([['product', 'p1', { state: 'active' }], card('C-A', { state: 'cancelled' }), card('C-B', { state: 'cancelled' })]);
+  usageInto(rec);
+  const sessions = [{ id: 'S-A', product: 'p1', kind: 'editing', card: 'C-A', pgid: 50 }, { id: 'S-B', product: 'p1', kind: 'editing', card: 'C-B', pgid: 51 }];
+  const called = new Set();
+  // A answers only once B's stop has been called too: one after another, A would time out.
+  const waitFor = (id) => new Promise((ok) => { const t = setInterval(() => { if (called.has(id)) { clearInterval(t); ok(); } }, 2); });
+  const r = await stopPass({ rec, rules: rulesWith(), now: T0, account: ACCT, sessions, probe: () => idle, alert: () => {}, portDeadlineMs: 300,
+    stopGroup: async (s) => { called.add(s.id); if (s.id === 'S-A') await waitFor('S-B'); return { ok: true, how: 'SIGTERM' }; },
+    saveWork: async (s) => { called.add(`save-${s.id}`); if (s.id === 'S-A') await waitFor('save-S-B'); return { ok: true }; } });
+  assert.deepEqual(r.stopped.map(([id]) => id).sort(), ['S-A', 'S-B']);
+  assert.equal(rec.read('fact', STOP_FACT('S-A')).doc.saved, true, 'the saves ran side by side too');
+});
+
+test('r4 MAT-1: a save that never answers is told, and the stopped card still moves', async () => {
+  const rec = recWith([['product', 'p1', { state: 'active' }], card('C-A', { state: 'cancelled' })]);
+  usageInto(rec);
+  const alerts = [];
+  const r = await stopPass({ rec, rules: rulesWith(), now: T0, account: ACCT, sessions: [{ id: 'S-A', product: 'p1', kind: 'editing', card: 'C-A', pgid: 50 }], probe: () => idle,
+    alert: (t) => alerts.push(t), saveDeadlineMs: 50, stopGroup: async () => ({ ok: true, how: 'SIGTERM' }), saveWork: () => new Promise(() => {}) });
+  assert.deepEqual(r.stopped, [['S-A', 'cancel']]);
+  assert.match(alerts.join(' | '), /S-A stopped but its unsaved work was not saved: it did not answer within 50 ms/);
+  assert.equal(rec.read('fact', STOP_FACT('S-A')).doc.saved, false);
+});
+
+test('r4 Minor: a Lead hand-off that fails, or never answers, is told again a day later', async () => {
+  for (const pauseLead of [() => { throw new Error('send failed'); }, () => new Promise(() => {})]) {
+    const w = world();
+    w.setProduct('p1', 'paused');
+    const alerts = () => w.calls.alerts.filter((a) => /could not be asked to hand off/.test(a));
+    const at = (min) => dispatcherPass({ rec: w.rec, rules: rulesWith(), now: T0 + min * MIN, account: ACCT, sessions: [], probe: () => idle, launch: async () => ({ ok: false }),
+      stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }), pauseLead, alert: (t) => w.calls.alerts.push(t), filesOf: filesOfCommits, portDeadlineMs: 50 });
+    await at(0);
+    await at(1);
+    assert.equal(alerts().length, 1, alerts().join(' | '));
+    await at(25 * 60);
+    assert.equal(alerts().length, 2, 'again a day later');
+  }
+});
+
+test('r4 Minor: a held undo whose reason changes only in a number is one cause', async () => {
+  const w = world([...undoEntries('U-1')]);
+  let n = 0;
+  const rules = rulesWith({}, { start_session: () => ({ decision: 'deny', reason: `the product waits ${++n} min` }) });
+  await w.pass(0, { rules });
+  await w.pass(1, { rules });
+  await w.pass(2, { rules });
+  assert.equal(w.calls.alerts.filter((a) => /your undo \(card U-1\) is waiting/.test(a)).length, 1, w.calls.alerts.join(' | '));
+  // A different reason is a new cause.
+  await w.pass(3, { rules: rulesWith({}, { start_session: { decision: 'deny', reason: 'another reason' } }) });
+  assert.equal(w.calls.alerts.filter((a) => /your undo \(card U-1\) is waiting/.test(a)).length, 2);
+});
+
+test('r4 MAT-5: during an outage the undo starts start nothing', async () => {
+  const rec = recWith([['product', 'p1', { state: 'active' }], ['fact', OUTAGE_FACT, { state: 'open' }], ...undoEntries('U-1')]);
+  const launched = [];
+  const r = await undoStarts({ rec, rules: rulesWith({}, { start_session: { decision: 'allow', reason: 'ok' } }), now: T0, bands: { band: 'green', own_building: 'open', prodBlocked: false },
+    running: [], launch: async (x) => { launched.push(x.card.id); return { ok: true, sessionId: 'S-1' }; }, filesOf: filesOfCommits, alert: () => {} });
+  assert.deepEqual(launched, []);
+  assert.deepEqual(r.started, []);
+  assert.ok(r.notes.includes('outage: nothing starts'));
+  assert.equal(rec.read('card', 'U-1').doc.state, 'ready');
+  // Control: the outage over, it starts.
+  const cur = rec.read('fact', OUTAGE_FACT);
+  rec.write({ actor: 'dispatcher', entity: 'fact', id: OUTAGE_FACT, expectRev: cur.rev, doc: { state: 'ended' } });
+  const r2 = await undoStarts({ rec, rules: rulesWith({}, { start_session: { decision: 'allow', reason: 'ok' } }), now: T0, bands: { band: 'green', own_building: 'open', prodBlocked: false },
+    running: [], launch: async (x) => { launched.push(x.card.id); return { ok: true, sessionId: 'S-1' }; }, filesOf: filesOfCommits, alert: () => {} });
+  assert.deepEqual(r2.started, ['U-1']);
+});
+
+test('r4 Minor: usage unread for over a day is told again each day it lasts', async () => {
+  const w = world([], { usage: null });
+  const told = () => w.calls.alerts.filter((a) => /usage has been unreadable for over a day/.test(a)).length;
+  await w.pass(0);
+  await w.pass(25 * 60);
+  assert.equal(told(), 1, w.calls.alerts.join(' | '));
+  await w.pass(26 * 60);
+  assert.equal(told(), 1);
+  await w.pass(50 * 60);
+  assert.equal(told(), 2, 'again a day later');
+});
+
+function usageInto(rec) {
+  rec.write({ actor: 'dispatcher', entity: 'fact', id: USAGE_FACT(ACCT), expectRev: 0, doc: usageFact({ ...GREEN, account: ACCT, now: T0 }) });
+}

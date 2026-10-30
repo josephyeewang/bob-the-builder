@@ -214,3 +214,24 @@ test('audit 0b-6 r2 / L27: an unknown kind is refused; an overnight run meets th
   // the named cap-free kinds still pass
   for (const kind of ['review', 'audit', 'merge', 'undo_merge', 'lead', 'front_door']) assert.equal(go({ kind, running: three }).ok, true, kind);
 });
+
+// Audit 0b-6 r4 MAT-5: the gate's own part of L40, asked directly. Only an undo that is an exact reverse
+// skips a missing cap value; the same undo not marked exact, or any other kind marked exact, is refused.
+test('L40 / r4 MAT-5: a missing cap is skipped only for an undo that is an exact reverse, and is still named', () => {
+  const rules = rulesWith({ [K.perState]: undefined });
+  const undo = { id: 'U-1', product: 'p1', tier: 2, kind: 'undo', files: ['src/u.js'] };
+  const ask = (kind, exactReverse) => startGate({ rules, rec: setup(), card: undo, kind, product: 'p1', b: GREEN, running: [], exactReverse });
+  const exact = ask('undo', true);
+  assert.equal(exact.ok, true, exact.reason);
+  assert.equal(exact.missing, K.perState);
+  for (const [kind, ex] of [['undo', false], ['undo', undefined], ['editing', true]]) {
+    const r = ask(kind, ex);
+    assert.equal(r.ok, false, `${kind} ${ex}`);
+    assert.equal(r.missing, K.perState, `${kind} ${ex}`);
+  }
+  // The files check still runs for the exact reverse: a running worker on the same file holds it.
+  const rec = setup({ cards: [card('w-u', ['src/u.js'])] });
+  const shared = startGate({ rules, rec, card: undo, kind: 'undo', product: 'p1', b: GREEN, running: [worker(0, 'p1', 'w-u')], exactReverse: true });
+  assert.equal(shared.ok, false);
+  assert.match(shared.reason, /shares src\/u\.js/);
+});

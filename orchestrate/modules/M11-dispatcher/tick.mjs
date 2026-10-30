@@ -81,15 +81,28 @@ export function actOnDead({ rec, now, restart, asks, cards = {} }) {
 }
 
 /**
+ * The alert port as every step gets it (audit 0b-6 r4 MAT-2): an alert that throws or rejects never
+ * fails a step, or skips the steps after it. The failure is left as a note in the record.
+ */
+export function safeAlert(rec, alert, now) {
+  const failed = (e) => { try { note(rec, 'alert-failed', `an alert could not be sent: ${e?.message ?? e}`, { now }); } catch { /* the record is unwritable too */ } };
+  return (text) => {
+    try { const r = alert(text); if (typeof r?.then === 'function') r.then(null, failed); } catch (e) { failed(e); }
+  };
+}
+
+/**
  * One full pass. `ports` holds every outside effect (see README, "The tick's ports"); each step reads
  * only the ports it needs. Returns { steps: { name: { ok, result | error } } }.
  */
 export async function tick({ rec, rules, now, ports: p }) {
   const res = {};
-  const alert = p.alert;
+  const alert = safeAlert(rec, p.alert, now);
   let bands = null;
   let running = [];
   const deadline = p.stepDeadlineMs ?? STEP_DEADLINE_MS;
+  // A time limit on each stop, save and Lead hand-off call; the defaults are pass.mjs's.
+  const portDeadlines = Object.fromEntries([['portDeadlineMs', p.portDeadlineMs], ['saveDeadlineMs', p.saveDeadlineMs]].filter(([, v]) => v !== undefined));
   const run = async (step, f) => {
     let timer;
     try {
@@ -116,7 +129,7 @@ export async function tick({ rec, rules, now, ports: p }) {
   // The safety acts, first and alone (L38).
   let stops = null;
   await run('stops', async () => {
-    stops = await stopPass({ rec, rules, now, account: acct.account, sessions: p.sessions(), probe: p.probe, stopGroup: p.stopGroup, saveWork: p.saveWork, alert });
+    stops = await stopPass({ rec, rules, now, account: acct.account, sessions: p.sessions(), probe: p.probe, stopGroup: p.stopGroup, saveWork: p.saveWork, alert, ...portDeadlines });
     missing.push(...stops.missing);
     return stops;
   });
@@ -161,7 +174,7 @@ export async function tick({ rec, rules, now, ports: p }) {
   });
   await run('pass', async () => {
     const r = await dispatcherPass({ rec, rules, now, account: acct.account, sessions: p.sessions(), probe: p.probe, launch: p.launch, stopGroup: p.stopGroup,
-      saveWork: p.saveWork, hostLock: p.hostLock, pauseLead: p.pauseLead, filesOf: p.filesOf, alert, startsOff: acct.reason, tellMissing: false, stops });
+      saveWork: p.saveWork, hostLock: p.hostLock, pauseLead: p.pauseLead, filesOf: p.filesOf, alert, startsOff: acct.reason, tellMissing: false, stops, ...portDeadlines });
     missing.push(...r.missing);
     bands = r.bands;
     running = r.running;
@@ -198,6 +211,12 @@ export async function tick({ rec, rules, now, ports: p }) {
 /** The login job's entry: one full pass under the single-instance lock (M16). */
 export async function runTick({ lockFile, lock = takePassLock, ...args }) {
   const l = lock(lockFile, { now: args.now });
+  // A lock left by a dead pass: the last run was killed (the run deadline, the watchdog in main.mjs, a
+  // crash) before it finished. Joe is told, once a day (L38); this pass runs as usual.
+  if (l.ok && l.broke) {
+    try { holdAlert({ rec: args.rec, cause: 'run-late', text: `the last Dispatcher pass (taken ${l.broke.taken_at ?? 'at an unknown time'}) was stopped before it finished; this pass runs as usual`, alert: safeAlert(args.rec, args.ports.alert, args.now), now: args.now }); }
+    catch { /* the record is unwritable: the pass itself will fail and tell */ }
+  }
   if (!l.ok) {
     note(args.rec, 'pass-lock-note', `a pass did not run: ${l.reason}`, { now: args.now });
     return { ran: false, reason: l.reason };

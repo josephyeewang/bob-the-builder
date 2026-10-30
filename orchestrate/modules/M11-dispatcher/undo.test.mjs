@@ -128,3 +128,86 @@ test('D8: a clean reverse, or no word from M6 yet, writes nothing', () => {
   assert.deepEqual(w2.step(), []);
   assert.equal(w2.calls.alerts.length, 0);
 });
+
+// Audit 0b-6 r4 MAT-4: each tap on its own, and no tap left untold (L38).
+test('r4 MAT-4: a tap whose files read throws holds no other tap, and is told once a day', () => {
+  const rec = recWith([['merge', 'M-1', merged()], ['merge', 'M-2', merged({ pr: 8, merge_commit_sha: OTHER })],
+    ['ask', 'A-1', ask()], ['ask', 'A-2', ask({ pr: 8, merge_commit_sha: OTHER })]]);
+  const alerts = [];
+  const step = (at) => undoStep({ rec, rules: R, now: at, alert: (t) => alerts.push(t),
+    filesOf: (s) => { if (s === SHA) throw new Error('mirror unreadable'); return ['src/b.js']; } });
+  const out = step(T0);
+  assert.deepEqual(out.find(([id]) => id === 'A-2'), ['A-2', 'undo card written']);
+  assert.ok(rec.read('card', UNDO_CARD('A-2')));
+  assert.match(out.find(([id]) => id === 'A-1')[1], /could not be read \(mirror unreadable\)/);
+  assert.equal(rec.read('ask', 'A-1').doc.state, 'answered');
+  step(T0 + 60_000);
+  assert.equal(alerts.length, 1, alerts.join(' | '));
+  assert.match(alerts[0], /your Undo tap \(ask A-1, PR 7\) is not acted on: it could not be read/);
+  step(T0 + 25 * 3_600_000);
+  assert.equal(alerts.length, 2, 'again a day later');
+});
+
+test('r4 MAT-4: every tap that is not acted on is told, once per tap and reason, and again a day later', () => {
+  const cases = [
+    [ask({ via: 'typed' }), R, /not a tap/],
+    [ask(), rulesWith(), /not counted/],
+    [ask({ pr: undefined }), R, /names no merged PR/],
+    [ask({ pr: 8 }), R, /no merged attempt matches/],
+  ];
+  for (const [a, rules, why] of cases) {
+    const rec = recWith([['merge', 'M-1', merged()], ['ask', 'A-1', a]]);
+    const alerts = [];
+    const step = (at) => undoStep({ rec, rules, now: at, filesOf: () => ['src/a.js'], alert: (t) => alerts.push(t) });
+    step(T0);
+    step(T0 + 60_000);
+    assert.equal(alerts.length, 1, `${why}: ${alerts.join(' | ')}`);
+    assert.match(alerts[0], why);
+    step(T0 + 25 * 3_600_000);
+    assert.equal(alerts.length, 2, `${why}: again a day later`);
+  }
+  // The files read answering nothing is told too; the record refusing the card, once a day.
+  {
+    const w = world([['merge', 'M-1', merged()], ['ask', 'A-1', ask()]], { files: null });
+    w.step();
+    assert.equal(w.calls.alerts.length, 1);
+    assert.match(w.calls.alerts[0], /files could not be read/);
+  }
+  // Two taps held for the same reason are each told: the alert is per tap, not per reason.
+  {
+    const rec = recWith([['merge', 'M-1', merged()], ['ask', 'A-1', ask({ via: 'typed' })], ['ask', 'A-2', ask({ via: 'typed' })]]);
+    const alerts = [];
+    undoStep({ rec, rules: R, now: T0, filesOf: () => ['src/a.js'], alert: (t) => alerts.push(t) });
+    assert.equal(alerts.length, 2, alerts.join(' | '));
+    assert.match(alerts.join('\n'), /ask A-1/);
+    assert.match(alerts.join('\n'), /ask A-2/);
+  }
+});
+
+// Audit 0b-6 r4 MAT-5: each part of the exact-reverse check (L40), planted alone.
+test('r4 MAT-5: exactReverse refuses a card that differs from the merge in any one way', async () => {
+  const { exactReverse } = await import('./undo.mjs');
+  const rec = recWith([['merge', 'M-1', merged({ state: 'merged' })], ['merge', 'M-2', merged({ state: 'refused' })]]);
+  const card = (over = {}) => ({ id: 'U-1', kind: 'undo', reverses: 'M-1', pr: 7, merge_commit_sha: SHA, files: ['src/a.js', 'src/b.js'], ...over });
+  const files = () => ['src/b.js', 'src/a.js'];
+  assert.deepEqual(exactReverse({ rec, card: card(), filesOf: files }), { ok: true }, 'control');
+  const notMerge = /not the reverse of a merge in the record/;
+  for (const [label, c, f, why] of [
+    ['a merge that did not land', card({ reverses: 'M-2' }), files, notMerge],
+    ['no merge of that id', card({ reverses: 'M-9' }), files, notMerge],
+    ['no merge named', card({ reverses: undefined }), files, notMerge],
+    ['another PR', card({ pr: 8 }), files, notMerge],
+    ['another commit', card({ merge_commit_sha: OTHER }), files, notMerge],
+    ['files unreadable', card(), () => null, /files could not be read/],
+    ['files throw', card(), () => { throw new Error('x'); }, /files could not be read/],
+    ['no files port', card(), undefined, /files could not be read/],
+    ['card has no list', card({ files: undefined }), files, /files could not be read/],
+    ['one file more', card({ files: ['src/a.js', 'src/b.js', 'src/c.js'] }), files, /does not match/],
+    ['one file less', card({ files: ['src/a.js'] }), files, /does not match/],
+    ['as many files, one other', card({ files: ['src/a.js', 'src/c.js'] }), files, /does not match/],
+  ]) {
+    const r = exactReverse({ rec, card: c, filesOf: f });
+    assert.equal(r.ok, false, label);
+    assert.match(r.reason, why, label);
+  }
+});

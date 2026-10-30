@@ -5,21 +5,37 @@
 //   { "wiring": "/abs/path/wiring.mjs", "lockFile": "/abs/path/dispatcher.lock" }
 // and, optionally, "runDeadlineMs" (a positive number; RUN_DEADLINE_MS when absent).
 // The wiring module (built with the module that joins the real ports, not in this folder) exports
-// `async function wire(config)` returning { rec, rules, ports } — see README, "The tick's ports".
+// `async function wire(config, { limitedSync })` returning { rec, rules, ports } — see README, "The tick's ports".
 // One run is one full pass under the single-instance lock. Exit 0 when the pass ran or another pass
 // was running; exit 1 when the config or the wiring could not be loaded (launchd logs stderr); exit 2
 // when the pass ran past RUN_DEADLINE_MS (audit 0b-6 r3 MAT-2), and Joe is told once a day (L38). The script then exits outright, so a
 // port that never answers cannot keep the process, and with it the pass lock, alive: the next start
 // finds the lock's pid dead and breaks it.
+// A port that blocks the thread outright (a synchronous call that never returns) stops every timer here
+// too, so the script also starts a watchdog thread (audit 0b-6 r4 MAT-3): WATCHDOG_MARGIN_MS after the
+// run deadline it ends the process from outside. The next start breaks the lock and tells Joe (tick.mjs
+// `runTick`).
 
 import { readFileSync, realpathSync } from 'node:fs';
 import { isAbsolute } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
-import { runTick, STEPS, STEP_DEADLINE_MS } from './tick.mjs';
+import { Worker } from 'node:worker_threads';
+import { runTick, safeAlert, STEPS, STEP_DEADLINE_MS } from './tick.mjs';
 import { holdAlert } from './pass.mjs';
+import { limitedSync } from './sync-limit.mjs';
 
 // Every step at its own deadline, plus a margin: past this the pass is stuck.
 export const RUN_DEADLINE_MS = STEPS.length * STEP_DEADLINE_MS + 60_000;
+export const WATCHDOG_MARGIN_MS = 5_000;
+
+/** A thread of its own that kills this process after `ms`, however blocked the main thread is. */
+export function startWatchdog(ms) {
+  const code = `const { workerData: d } = require('node:worker_threads');
+setTimeout(() => { require('node:fs').writeSync(2, 'dispatcher: the pass was blocked past ' + d.ms + ' ms; the watchdog ends it\\n'); process.kill(d.pid, 'SIGKILL'); }, d.ms);`;
+  const w = new Worker(code, { eval: true, workerData: { ms, pid: process.pid } });
+  w.unref();
+  return w;
+}
 
 export function readConfig(file) {
   const c = JSON.parse(readFileSync(file, 'utf8'));
@@ -28,7 +44,7 @@ export function readConfig(file) {
   return c;
 }
 
-export async function main(argv, { now = Date.now(), log = (s) => process.stderr.write(`${s}\n`), runDeadlineMs } = {}) {
+export async function main(argv, { now = Date.now(), log = (s) => process.stderr.write(`${s}\n`), runDeadlineMs, watchdog = false } = {}) {
   let config;
   let wired;
   try {
@@ -36,20 +52,24 @@ export async function main(argv, { now = Date.now(), log = (s) => process.stderr
     config = readConfig(argv[0]);
     const mod = await import(pathToFileURL(config.wiring).href);
     if (typeof mod.wire !== 'function') throw new Error('the wiring module has no wire()');
-    wired = await mod.wire(config);
+    // Every synchronous port runs its command through limitedSync (sync-limit.mjs): a time limit each.
+    wired = await mod.wire(config, { limitedSync });
   } catch (e) {
     log(`dispatcher: not started: ${e.message}`);
     return 1;
   }
   const limit = runDeadlineMs ?? config.runDeadlineMs ?? RUN_DEADLINE_MS;
+  const dog = watchdog ? startWatchdog(limit + WATCHDOG_MARGIN_MS) : null;
   let timer;
   const late = new Promise((ok) => { timer = setTimeout(() => ok({ late: true }), limit); });
   let r;
   try { r = await Promise.race([runTick({ lockFile: config.lockFile, now, ...wired }), late]); } finally { clearTimeout(timer); }
+  // Past the deadline the watchdog stays: the late alert below could block too.
+  if (!r.late) dog?.terminate();
   if (r.late) {
     log(`dispatcher: the pass did not finish within ${limit} ms; exiting so the next start can run`);
     // Joe is told too (L38), once a day: a stuck pass holds everything after the step it is stuck in.
-    try { holdAlert({ rec: wired.rec, cause: 'run-late', text: `a Dispatcher pass did not finish within ${limit} ms and was stopped; the next pass starts in a minute`, alert: wired.ports.alert, now }); }
+    try { holdAlert({ rec: wired.rec, cause: 'run-late', text: `a Dispatcher pass did not finish within ${limit} ms and was stopped; the next pass starts in a minute`, alert: safeAlert(wired.rec, wired.ports.alert, now), now }); }
     catch (e) { log(`dispatcher: the late pass could not be told: ${e?.message ?? e}`); }
     return 2;
   }
@@ -63,7 +83,7 @@ const realOf = (p) => { try { return realpathSync(p); } catch { return null; } }
 const self = realOf(fileURLToPath(import.meta.url));
 // A port left hanging keeps handles open; the unref'd timer exits a second later, after stderr is written.
 if (self && process.argv[1] && self === realOf(process.argv[1])) {
-  const code = await main(process.argv.slice(2));
+  const code = await main(process.argv.slice(2), { watchdog: true });
   process.exitCode = code;
   setTimeout(() => process.exit(code), 1000).unref();
 }

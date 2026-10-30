@@ -17,9 +17,11 @@ export function pidDead(pid) {
 }
 
 /**
- * Takes the lock. Returns { ok: true, release } or { ok: false, reason }. `dead(pid)` is for tests.
+ * Takes the lock. Returns { ok: true, release, broke } or { ok: false, reason }. `dead(pid)` is for tests.
  */
 export function takePassLock(file, { pid = process.pid, now = Date.now(), dead = pidDead } = {}) {
+  // `broke` is the dead pass's lock when this one broke it, so the caller can tell Joe.
+  let broke = null;
   for (let attempt = 0; attempt < 2; attempt++) {
     let fd;
     try { fd = openSync(file, 'wx', 0o600); } catch (e) {
@@ -28,12 +30,14 @@ export function takePassLock(file, { pid = process.pid, now = Date.now(), dead =
       try { held = JSON.parse(readFileSync(file, 'utf8')); } catch { return { ok: false, reason: 'the pass lock is unreadable; another pass may run' }; }
       if (!dead(held?.pid)) return { ok: false, reason: `another pass runs (pid ${held?.pid})` };
       try { unlinkSync(file); } catch { return { ok: false, reason: 'could not break a dead pass lock' }; }
+      broke = held;
       continue;
     }
     writeSync(fd, JSON.stringify({ pid, taken_at: new Date(now).toISOString() }));
     closeSync(fd);
     return {
       ok: true,
+      broke,
       release() {
         try { const h = JSON.parse(readFileSync(file, 'utf8')); if (h.pid === pid) unlinkSync(file); } catch { /* already gone */ }
       },
