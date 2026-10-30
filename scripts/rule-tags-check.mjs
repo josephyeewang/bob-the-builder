@@ -11,7 +11,9 @@
 //      (scripts/…, or templates/….mjs), and every script it names exists;
 //   2. every script so named is run by Bob's CI (.github/workflows/) or its self-test (scripts/selftest-gate-scripts.sh)
 //      — a check nothing runs is a wish with a file name;
-//   3. where a rule in rules.md carries its own tag ("31. `PROSE` — …"), it matches the index.
+//   3. where a rule in rules.md carries its own tag ("31. `PROSE` — …"), the whole tag matches the index.
+// "Run" means a line of CI or the self-test calls it (node/bash/sh/python), directly or through a variable;
+// a mention in a comment does not count.
 // It ends by printing how many rules are still written-only.
 //
 // Usage: node scripts/rule-tags-check.mjs [--root DIR]
@@ -41,10 +43,18 @@ const body = new Map();
 const parts = rd('rules.md').split(/^<!-- Rule (\d+) -->$/m);
 for (let i = 1; i < parts.length; i += 2) body.set(Number(parts[i]), parts[i + 1].split(/^## /m)[0]);
 
+// Lines that run something: comments are dropped, so naming a script in a comment does not count as running it.
 const runners = [
   ...fs.readdirSync(path.join(ROOT, '.github/workflows')).filter((f) => /\.ya?ml$/.test(f)).map((f) => rd(`.github/workflows/${f}`)),
   rd('scripts/selftest-gate-scripts.sh'),
-].join('\n');
+].join('\n').split('\n').filter((l) => !/^\s*#/.test(l));
+// A script runs when a line calls it: `node scripts/x.mjs`, `bash "$HERE/x.sh"`, `python3 x.py`, or `X="$HERE/x.mjs"` then `node "$X"`.
+const runs = (base) => {
+  const esc = base.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  if (runners.some((l) => new RegExp(`\\b(node|bash|sh|python3?)\\s+(--\\S+\\s+)*["']?[^\\s"']*\\b${esc}\\b`).test(l))) return true;
+  const vars = runners.map((l) => l.match(new RegExp(`^\\s*([A-Z_][A-Z0-9_]*)=["']?[^\\s"']*\\b${esc}["']?\\s*(;|$)`))?.[1]).filter(Boolean);
+  return vars.some((v) => runners.some((l) => new RegExp(`\\b(node|bash|sh|python3?)\\s+["']?\\$\\{?${v}\\b`).test(l)));
+};
 const SCRIPT_REF = /(?:~\/\.claude\/skills\/bob\/\.\.\/)?((?:scripts\/[\w./-]+|templates\/[\w.-]+)\.(?:mjs|js|sh|py))(?![\w.])/g;
 
 let prose = 0;
@@ -52,14 +62,16 @@ for (const [n, tag] of index) {
   const enforced = /`(SCRIPT|HOOK|GATE)`/.test(tag);
   if (!enforced) prose++;
   const text = body.get(n) ?? '';
-  const own = text.match(new RegExp(`^${n}\\. (\`[A-Z]+\`)`, 'm'))?.[1];
-  if (own && !tag.startsWith(own)) problems.push(`Rule ${n}: rules.md tags it ${own} but the index says ${tag}`);
+  // Compare the whole tag, ignoring emphasis marks: "`SCRIPT` *(in part)*" in rules.md = "`SCRIPT` (in part)" in the index.
+  const ownFull = text.match(new RegExp(`^${n}\\. ((?:\`[A-Z]+\`|\\*?\\([^)]*\\)\\*?|\\s)+) —`, 'm'))?.[1];
+  const flat = (t) => t.replace(/\*/g, '').replace(/\s+/g, ' ').trim();
+  if (ownFull && flat(ownFull) !== flat(tag)) problems.push(`Rule ${n}: rules.md tags it ${flat(ownFull)} but the index says ${flat(tag)}`);
   if (!enforced) continue;
   const named = [...new Set([...text.matchAll(SCRIPT_REF)].map((m) => m[1]))];
   if (!named.length) { problems.push(`Rule ${n} is tagged ${tag} but its text in rules.md names no script`); continue; }
   for (const s of named) {
     if (!fs.existsSync(path.join(ROOT, s))) { problems.push(`Rule ${n} names ${s}, which does not exist`); continue; }
-    if (!runners.includes(path.basename(s))) problems.push(`Rule ${n} names ${s}, but neither CI nor the self-test ever runs it`);
+    if (!runs(path.basename(s))) problems.push(`Rule ${n} names ${s}, but neither CI nor the self-test ever runs it`);
   }
 }
 
@@ -68,4 +80,4 @@ if (problems.length) {
   for (const p of problems) console.log(`  ✗ ${p}`);
   process.exit(1);
 }
-console.log(`rule-tags-check: OK — every enforcement tag names a script that exists and runs; ${prose} of ${index.size} rules are still written-only (PROSE)`);
+console.log(`rule-tags-check: OK — every enforcement tag names a script that exists and runs; ${prose} of ${index.size} rules have no script at all (some others are checked only in part)`);

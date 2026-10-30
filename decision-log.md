@@ -548,7 +548,7 @@ The companion `audit-log.md` records *deferred* items (Defer verdicts that may s
     - Each check exits 2 (cannot judge) rather than 0 when it has nothing to read (Rule 29).
 
     The index now lists 24 rules as written-only, down from 28. Rule 22 (the pre-build gate) was not given a check here, because its text and the build manifest it would read are in the NEW mode, which the ORCHESTRATE session is rewriting.
-  - (2) Rule 27 in `rules.md` keeps the rule, its hard boundaries, the new setup check and a pointer. The how-to lives only in `build-protocol.md` § Supervised Autonomy. One detail that section lacked (prefer a reviewer from a different model family; diff the test files) stays in Rule 27 until the owner of that section adds it.
+  - (2) Rule 27 in `rules.md` keeps the rule, its hard boundaries, the new setup check and a pointer. The how-to lives only in `build-protocol.md` § Supervised Autonomy. The one detail that section lacked (diff the test files; prefer a reviewer from a different model family) was added to its runbook step 4, with its owner's agreement.
   - (3) Rule 31's ladder steps are called rungs. The Minimum Viable Process groups are "Never skip / Skip with caution / Skip first". "Tier" now means only Rule 30's tiers.
   - (4) `bob-doctor.sh` checks that both design skills are linked from the same Bob copy and prints the line to paste if not. The README install prompt asks for all three skills.
   - (5) Method text says "the user" where it meant whoever is using Bob, and "Bob's author" where it records where an idea came from. Credit, licence and dated source lines keep the name. ORCHESTRATE's own files are left to their owner.
@@ -563,7 +563,7 @@ The companion `audit-log.md` records *deferred* items (Defer verdicts that may s
   - The run-commands check was calibrated before it shipped. Run across several real projects, it raised no false alarm once it learned to read each workflow step's own working folder; the first version flagged healthy commands in one of them. It catches both planted breaks in its test.
   - The autonomy check, run on a fresh `bob-init` project, refuses only the test command the user has not filled in yet. That is deliberate: until it is filled in, the gate blocks every stop.
 - **Revisit trigger:**
-  - The NEW-mode rewrite lands: build the Rule 22 check, and fold Rule 27's leftover detail into the runbook.
+  - The NEW-mode rewrite lands: build the Rule 22 check.
   - Or: any of the new checks raises a false alarm on a healthy project. Fix the check or remove it; never mute it.
 ---
 

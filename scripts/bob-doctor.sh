@@ -11,7 +11,7 @@
 #   3. build-protocol.md and build-protocol-core.md are readable via the SKILL.md's path form
 #   4. The install directory is a git repo with a valid remote
 #   5. The repo is on a known branch, no divergence, no uncommitted changes blocking updates
-#   6. The two design skills (design-gallery, design-mockups) are linked from this same Bob copy
+#   6. (section 5 below) The two design skills (design-gallery, design-mockups) are linked from this same Bob copy
 #
 # Exits 0 if everything is healthy; 1 if anything needs attention.
 # All output is plain English so a non-engineer can act on it.
@@ -126,8 +126,10 @@ for skill in design-gallery design-mockups; do
     have="$(cd "$link" 2>/dev/null && pwd -P)"
     if [[ "$have" == "$want" ]]; then
       note "$skill linked → $have"
-    else
+    elif [[ -L "$link" ]]; then
       warn "$skill points somewhere other than this Bob copy ($have). Design steps will use that copy, which may be out of date. To re-link it, paste in the Terminal app: ln -sfn \"$want\" \"$link\""
+    else
+      warn "$skill is a separate copied folder ($have), not a link to this Bob copy, so it will not get Bob's updates. To fix it, paste in the Terminal app: mv \"$link\" \"$link.old\" && ln -s \"$want\" \"$link\""
     fi
   else
     warn "$skill is not installed, so Bob's design step (5.5) can't run it. To install it, paste in the Terminal app: ln -s \"$want\" \"$link\""

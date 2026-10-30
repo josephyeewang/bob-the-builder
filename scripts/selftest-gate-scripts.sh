@@ -715,6 +715,13 @@ printf '## Phase 2 Report\n### Built\n- x\n### Mocked\nN/A — nothing was stubb
 expect "phase-report: a [C] section marked N/A -> OK" 0 "phase-report-check: OK" -- node "$PR" "$PD/c2.md" --template "$PD/tpl.md"
 expect "phase-report: Bob's own blank template -> REFUSED" 1 'the "built" section has nothing of its own' -- node "$PR" "$HERE/../templates/phase-report.md"
 expect "phase-report: no report file -> cannot run (exit 2, not a pass)" 2 "not a pass" -- node "$PR" "$PD/missing.md"
+printf '# Phase 2\n## 1. Built ✅\n- the login page\n## 2. Spec Deviations\n- None\n' > "$PD/h2.md"
+expect "phase-report: level-2, numbered headings with a status mark -> OK" 0 "phase-report-check: OK" -- node "$PR" "$PD/h2.md" --template "$PD/tpl.md"
+printf '## Phase 2 Report\n### Built\n- x\n### Mocked\n- *N/A — nothing stubbed* (say so explicitly if skipping).\n### Spec Deviations\n- No divergences found.\n' > "$PD/na.md"
+expect "phase-report: an italic N/A line and \"No divergences found\" count -> OK" 0 "phase-report-check: OK" -- node "$PR" "$PD/na.md" --template "$PD/tpl.md"
+printf '## Phase 2 Report\n### Built\n- x\n### Spec Deviations\n- None\n### Validation Results\n- all pass\n### Hot Path Results\n- login: PASS\n### Regression Check\n- phase 1 flows: PASS\n' > "$PD/short.md"
+expect "phase-report: a short report with --abbreviated -> OK" 0 "phase-report-check: OK" -- node "$PR" "$PD/short.md" --abbreviated
+expect "phase-report: ...the same short report checked in full -> REFUSED" 1 'missing the "implementation decisions" section' -- node "$PR" "$PD/short.md"
 
 # ── 18. autonomy-check.mjs (D-033, Rule 27) ─────────────────────────────────
 echo "autonomy-check.mjs"
@@ -737,12 +744,26 @@ expect "autonomy: defaultMode auto in the project file -> REFUSED (it is ignored
 ac_base; sed -i.bak 's/"Bash(git reset --hard:\*)"/"Bash(ls:*)"/' "$AD/.claude/settings.json"
 expect "autonomy: no deny rule for git reset --hard -> REFUSED" 1 'no rule for "git reset --hard"' -- node "$AC" "$AD"
 ac_base; printf 'if grep -q stop_hook_active; then exit 0; fi\nTEST_CMD="npm test"\n' > "$AD/.claude/hooks/green-gate.sh"
-expect "autonomy: a gate guarded only by stop_hook_active -> REFUSED" 1 "no numeric retry limit" -- node "$AC" "$AD"
+expect "autonomy: a gate guarded only by stop_hook_active -> REFUSED" 1 "numeric retry limit it checks" -- node "$AC" "$AD"
 ac_base; printf -- '---\nname: reviewer\ntools: Read, Edit, Bash\n---\n' > "$AD/.claude/agents/reviewer.md"
 expect "autonomy: a reviewer that can Edit -> REFUSED" 1 "must not edit" -- node "$AC" "$AD"
 ac_base; sed -i.bak 's/"permissions"/"env": { "PROD_DB_URL": "x" }, "permissions"/' "$AD/.claude/settings.json"
 expect "autonomy: a production key in settings.env -> REFUSED" 1 "never give an autonomous run production" -- node "$AC" "$AD"
+ac_base; sed -i.bak 's#"command": "bash#"command": "bash ~/.claude/hooks/notify.sh" } , { "type": "command", "command": "bash#' "$AD/.claude/settings.json"
+expect "autonomy: an extra personal Stop hook in ~/.claude -> still OK" 0 "autonomy-check: OK" -- node "$AC" "$AD"
+ac_base; printf 'MAX_ATTEMPTS="${MAX_ATTEMPTS:-8}"\nif [ "$n" -gt "$MAX_ATTEMPTS" ]; then exit 0; fi\nTEST_CMD="npm test"\n' > "$AD/.claude/hooks/green-gate.sh"
+expect "autonomy: an overridable retry limit (\${MAX:-8}) -> OK" 0 "autonomy-check: OK" -- node "$AC" "$AD"
+ac_base; sed -i.bak 's/"permissions"/"env": { "PRODUCT_TOUR": "1", "ENABLE_LIVE_PREVIEW": "1" }, "permissions"/' "$AD/.claude/settings.json"
+expect "autonomy: env keys that only contain PROD or LIVE inside a word -> OK" 0 "autonomy-check: OK" -- node "$AC" "$AD"
+ac_base; sed -i.bak 's/"Bash(\*deploy\*)"/"Bash(vercel:*)"/' "$AD/.claude/settings.json"
+expect "autonomy: deploy gated as vercel:* -> OK" 0 "autonomy-check: OK" -- node "$AC" "$AD"
+ac_base; printf -- '---\nname: reviewer\n---\nReview.\n' > "$AD/.claude/agents/reviewer.md"
+expect "autonomy: a reviewer with no tools line (inherits Edit) -> REFUSED" 1 "has no tools: line" -- node "$AC" "$AD"
+ac_base; printf -- '---\nname: reviewer\ntools:\n  - Read\n  - Edit\n---\n' > "$AD/.claude/agents/reviewer.md"
+expect "autonomy: a reviewer whose tools list (YAML form) has Edit -> REFUSED" 1 "can use Edit" -- node "$AC" "$AD"
 mkdir -p "$TMP/ac-none"
+mkdir -p "$TMP/ac-bare/.claude"; printf '{"permissions":{}}\n' > "$TMP/ac-bare/.claude/settings.json"
+expect "autonomy: settings but no Stop hook and no reviewer -> not set up (exit 2, not six failures)" 2 "not set up for supervised autonomy" -- node "$AC" "$TMP/ac-bare"
 expect "autonomy: no settings file -> cannot run (exit 2, not a pass)" 2 "Not a pass" -- node "$AC" "$TMP/ac-none"
 AI="$TMP/ac-init"; mkdir -p "$AI"; printf '[user]\n\tname = selftest\n\temail = selftest@example.com\n[commit]\n\tgpgsign = false\n' > "$TMP/ac-gitconfig"
 (cd "$AI" && GIT_CONFIG_GLOBAL="$TMP/ac-gitconfig" GIT_CONFIG_NOSYSTEM=1 bash "$HERE/bob-init.sh" p >/dev/null 2>&1)
@@ -763,6 +784,15 @@ expect "run-commands: a moved script -> REFUSED" 1 'runs scripts/gone.mjs, which
 expect "run-commands: a shim that dropped its run block -> REFUSED" 1 'runs jobs/old.py, which has no .if __name__' -- node "$RC" "$RD"
 mkdir -p "$TMP/rc-none"
 expect "run-commands: no run commands -> cannot run (exit 2, not a pass)" 2 "not a pass" -- node "$RC" "$TMP/rc-none"
+R2="$TMP/rc2"; mkdir -p "$R2"/client/scripts "$R2"/backend "$R2"/web/scripts "$R2"/alembic "$R2"/.github/workflows "$R2"/pkg
+: > "$R2/client/scripts/build.js"; : > "$R2/backend/manage.py"; : > "$R2/web/scripts/ci.sh"; : > "$R2/alembic/env.py"; : > "$R2/pkg/__init__.py"; printf 'dist\n' > "$R2/.gitignore"
+printf '{"scripts":{"build":"cd client && node scripts/build.js","start":"node dist/server.js","dev":"vite","mig":"python -m alembic upgrade head"}}\n' > "$R2/package.json"
+printf 'defaults:\n  run:\n    working-directory: web\njobs:\n  t:\n    steps:\n      - run: bash scripts/ci.sh\n  m:\n    steps:\n      - working-directory: ${{ matrix.dir }}\n        run: node x.mjs\n      - run: |\n          cd ../backend\n          python manage.py migrate\n' > "$R2/.github/workflows/a.yml"
+expect "run-commands: cd in a command or block, build output, workflow defaults, matrix folders, installed tools -> OK" 0 "run-commands-check: OK" -- node "$RC" "$R2"
+printf 'all:\n\tnode gone.mjs\n' > "$R2/Makefile"; printf '{"scripts":{"pk":"python -m pkg.missing"}}\n' > "$R2/package.json"
+expect "run-commands: a missing project module and a Makefile target -> REFUSED, each once" 1 "REFUSED — 2 run command" -- node "$RC" "$R2"
+mkdir -p "$TMP/rc-vite"; printf '{"scripts":{"dev":"vite","build":"vite build"}}\n' > "$TMP/rc-vite/package.json"
+expect "run-commands: an app whose scripts only call tools (vite) -> OK, not 'cannot run'" 0 "nothing here runs a project file directly" -- node "$RC" "$TMP/rc-vite"
 expect "run-commands: Bob's own CI commands point at real files" 0 "run-commands-check: OK" -- node "$RC" "$HERE/.."
 
 # ── 20. recurrence-check.mjs (D-033, Rule 31) ───────────────────────────────
@@ -770,12 +800,23 @@ echo "recurrence-check.mjs"
 RQ="$HERE/recurrence-check.mjs"; QR="$TMP/rq"; newrepo "$QR"
 git -C "$QR" commit -q --allow-empty -m "init"
 expect "recurrence: no Class: lines yet -> cannot judge (exit 2, not a pass)" 2 'carries a "Class:" line yet' -- node "$RQ" "$QR"
-git -C "$QR" commit -q --allow-empty -m "fix: empty read" -m "Class: read error as missing" -m "Rung: 1"
+git -C "$QR" commit -q --allow-empty -m "fix: empty read" -m "Class: read error as missing
+Rung: 1"
 expect "recurrence: a class fixed once -> OK" 0 "1 class\\(es\\) named in fix commits, 0 recurring" -- node "$RQ" "$QR"
-git -C "$QR" commit -q --allow-empty -m "fix: empty read again" -m "Class: Read-error-as-missing" -m "Rung: 2"
+git -C "$QR" commit -q --allow-empty -m "fix: empty read again" -m "Class: Read-error-as-missing
+Rung: 2"
 expect "recurrence: fixed twice, newest at rung 2 -> REFUSED" 1 'class "read-error-as-missing" has been fixed 2 times' -- node "$RQ" "$QR"
 git -C "$QR" commit -q --allow-empty -m "fix: four-state result type" -m "closed at rung 4: the type cannot hold the bad state" -m "Class: read-error-as-missing"
 expect "recurrence: newest fix closed at rung 4 -> OK" 0 "1 recurring, each closed at rung 3 or 4" -- node "$RQ" "$QR"
+git -C "$QR" commit -q --allow-empty -m "docs: how to write the lines" -m 'For example:
+\`\`\`
+Class: read-error-as-missing
+Rung: 1
+\`\`\`' -m "See Rule 31."
+expect "recurrence: a Class: line quoted in a docs commit is not a fix -> still OK" 0 "1 recurring, each closed at rung 3 or 4" -- node "$RQ" "$QR"
+git -C "$QR" commit -q --allow-empty -m "fix: two at once" -m "Class: stale-cache, read-error-as-missing
+Rung: 1"
+expect "recurrence: a comma list names two classes; the repeat one at rung 1 -> REFUSED" 1 'class "read-error-as-missing" has been fixed 4 times' -- node "$RQ" "$QR"
 expect "recurrence: not a git repo -> cannot run (exit 2)" 2 "not a git repository" -- node "$RQ" "$TMP/rc-none"
 
 # ── 21. rule-tags-check.mjs (D-033, Rule 33) ────────────────────────────────
@@ -789,9 +830,11 @@ rt_base() {
   printf 'jobs:\n  t:\n    steps:\n      - run: node scripts/x.mjs\n' > "$TR/.github/workflows/ci.yml"
 }
 rt_base
-expect "rule-tags: a SCRIPT rule whose script exists and runs in CI -> OK" 0 "1 of 2 rules are still written-only" -- node "$RT" --root "$TR"
+expect "rule-tags: a SCRIPT rule whose script exists and runs in CI -> OK" 0 "1 of 2 rules have no script at all" -- node "$RT" --root "$TR"
 rt_base; printf 'jobs: {}\n' > "$TR/.github/workflows/ci.yml"
 expect "rule-tags: a script nothing runs -> FAIL" 1 "neither CI nor the self-test ever runs it" -- node "$RT" --root "$TR"
+rt_base; printf 'jobs:\n  t:\n    steps:\n      # node scripts/x.mjs is checked elsewhere\n      - run: echo hi\n' > "$TR/.github/workflows/ci.yml"
+expect "rule-tags: a script named only in a comment -> FAIL" 1 "neither CI nor the self-test ever runs it" -- node "$RT" --root "$TR"
 rt_base; rm "$TR/scripts/x.mjs"
 expect "rule-tags: a named script that does not exist -> FAIL" 1 "scripts/x.mjs, which does not exist" -- node "$RT" --root "$TR"
 rt_base; printf '## 1. Group\n\n<!-- Rule 1 -->\n\n1. **First.**\n\n<!-- Rule 2 -->\n\n2. **Second.**\n' > "$TR/rules.md"

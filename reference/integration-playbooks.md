@@ -47,7 +47,7 @@
 
 ### P5. Anthropic SDK / Claude API
 
-- **Env vars:** `ANTHROPIC_API_KEY`. Use Vercel AI Gateway (see L11 below) if you want provider failover.
+- **Env vars:** `ANTHROPIC_API_KEY`. Use Vercel AI Gateway (see P11 below) if you want provider failover.
 - **Prompt caching:** for any prompt > ~1024 tokens that's reused across requests, mark cacheable sections with `cache_control: { type: 'ephemeral' }`. Saves ~90% on input cost for cached portion. Cache TTL is 5 minutes; refresh via a non-cached request when expiration matters.
 - **Skill to invoke (v2.7):** during Step 2d (eval set) and any phase touching AI prompts, invoke the `claude-api` skill for prompt-caching configuration guidance.
 - **Streaming:** use streaming for any user-facing AI output to keep perceived latency low. Server-sent events (SSE) is the default Vercel-compatible path.
@@ -61,7 +61,7 @@
 - **Provider abstraction (G7) shape:** wrap behind a `ModelProvider` interface so swapping Anthropic ↔ OpenAI is a one-file change. Common methods: `chat({ messages, model, tools? })`, `embed(text)`.
 - **Tool use:** OpenAI function calling has slightly different schema from Anthropic tool use. The provider abstraction should normalize.
 - **Common failure modes:** model deprecations (GPT-3.5 → GPT-4o → GPT-5 — code references stale model IDs); cost surprises (GPT-5 input is much more expensive than 4o-mini); response format inconsistency when requesting JSON without `response_format: { type: "json_object" }`.
-- **Eval/test:** same as L5 — eval set re-run at every phase.
+- **Eval/test:** same as P5 — eval set re-run at every phase.
 
 ### P7. pgvector (vector DB via Postgres)
 

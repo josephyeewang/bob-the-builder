@@ -10,15 +10,20 @@
 // CHECKS on the project at DIR (default: the current folder):
 //   1. every script file run by package.json "scripts", a .github/workflows/*.yml `run:` step or a Makefile recipe
 //      (`node x.mjs`, `python3 x.py`, `bash x.sh`, `tsx x.ts`, `./x.sh`, `python -m pkg.mod` …) exists — relative
-//      to the project, or to the step's `working-directory:` when the workflow sets one;
+//      to the folder the command runs in: the workflow's or job's `defaults.run.working-directory`, the step's own
+//      `working-directory:`, and any literal `cd <folder>` earlier in the same command or block;
 //   2. a Python file run as a script has a `__main__` block, unless it is plainly a script (top-level code beyond
 //      imports, definitions and constants). A file of only imports, or one that defines main() and never calls it,
 //      is the "imports cleanly, does nothing" shape.
-// Paths built from variables ($X, ${{ … }}) or absolute paths are not judged (they are listed as skipped).
+// Not judged (counted as skipped): paths or folders built from variables ($X, ${{ … }}), absolute or ~ paths, build
+// output (dist/, build/, out/, .next/, node_modules/, target/, or a folder the project's .gitignore lists — it does
+// not exist on a clean checkout), and `python -m` of a module that is not a package in the project (an installed tool).
+// Calibrated before it shipped: run across several real projects it raised no false alarm (D-033).
 //
 // Usage: node "$(realpath ~/.claude/skills/bob/..)/scripts/run-commands-check.mjs" [DIR]
-// Exit: 0 = every run command points at a file that runs · 1 = REFUSED · 2 = cannot run (no run commands found —
-//       nothing checked is not a pass, Rule 29).
+// Exit: 0 = every run command that names a project file points at one that runs (or nothing runs a project file
+//       directly, e.g. only `vite build`) · 1 = REFUSED · 2 = cannot run (no package.json, workflow or Makefile to
+//       read — nothing read is not a pass, Rule 29).
 
 import fs from 'node:fs';
 import path from 'node:path';
@@ -28,74 +33,99 @@ const rel = (p) => path.relative(DIR, p) || '.';
 const problems = [];
 const skipped = [];
 let checked = 0;
+let sources = 0;
 
-// Collect [source, command, base folder] for every run command.
+// Collect { where, text, base } for every run command; base null = the folder is built from a variable.
 const runs = [];
+const wd = (base, dir) => (base === null || /[$`{}~]/.test(dir) ? null : path.resolve(base, dir));
 if (fs.existsSync(path.join(DIR, 'package.json'))) {
+  sources++;
   try {
     const pkg = JSON.parse(fs.readFileSync(path.join(DIR, 'package.json'), 'utf8'));
-    for (const [k, v] of Object.entries(pkg.scripts ?? {})) runs.push([`package.json "${k}"`, String(v), DIR]);
+    for (const [k, v] of Object.entries(pkg.scripts ?? {})) runs.push({ where: `package.json "${k}"`, text: String(v), base: DIR });
   } catch (e) {
     problems.push(`package.json is not valid JSON (${e.message})`);
   }
 }
 const wfDir = path.join(DIR, '.github', 'workflows');
-if (fs.existsSync(wfDir)) {
-  for (const f of fs.readdirSync(wfDir).filter((f) => /\.ya?ml$/.test(f))) {
-    const lines = fs.readFileSync(path.join(wfDir, f), 'utf8').split('\n');
-    let jobWd = null;
-    for (let i = 0; i < lines.length; i++) {
-      const l = lines[i];
-      if (/^  [\w-]+:\s*$/.test(l)) jobWd = null; // a new job (two-space key under jobs:)
-      const d = l.match(/^(\s*)defaults:\s*$/);
-      if (d) {
-        for (let j = i + 1; j < lines.length && (!lines[j].trim() || lines[j].search(/\S/) > d[1].length); j++) {
-          const w = lines[j].match(/^\s*working-directory:\s*["']?([^"'#\s]+)/);
-          if (w) jobWd = w[1];
-        }
-      }
-      const m = l.match(/^(\s*)(?:-\s*)?run:\s*(.*)$/);
-      if (!m) continue;
-      // The step's own working-directory: anywhere in the same step (from its "- " line to the next step).
-      const runIndent = m[1].length;
-      let start = i;
-      if (!/^\s*-\s/.test(l)) while (start > 0 && !(/^\s*-\s/.test(lines[start]) && lines[start].search(/\S/) < runIndent)) start--;
-      const dash = lines[start].search(/\S/);
-      let end = i + 1;
-      while (end < lines.length) {
-        const e = lines[end], ind = e.search(/\S/);
-        if (e.trim() && !e.trim().startsWith('#') && (ind < dash || (ind === dash && /^\s*-\s/.test(e)))) break;
-        end++;
-      }
-      let stepWd = null;
-      for (let j = start; j < end; j++) {
-        const w = lines[j].match(/^\s*(?:-\s*)?working-directory:\s*["']?([^"'#\s]+)/);
-        if (w) stepWd = w[1];
-      }
-      const base = path.join(DIR, stepWd ?? jobWd ?? '.');
-      const where = `.github/workflows/${f}:${i + 1}`;
-      if (m[2].trim() && !/^[|>][-+]?\s*$/.test(m[2].trim())) runs.push([where, m[2], base]);
-      else {
-        const indent = (lines[i + 1] ?? '').search(/\S/);
-        for (let j = i + 1; j < lines.length && (lines[j].trim() === '' || lines[j].search(/\S/) >= indent); j++)
-          runs.push([`.github/workflows/${f}:${j + 1}`, lines[j], base]);
-      }
+const workflows = fs.existsSync(wfDir) ? fs.readdirSync(wfDir).filter((f) => /\.ya?ml$/.test(f)) : [];
+sources += workflows.length;
+const defaultsWd = (lines, i) => {
+  // `defaults:` → `run:` → `working-directory: X`, all indented under the defaults line.
+  const ind = lines[i].search(/\S/);
+  for (let j = i + 1; j < lines.length && (!lines[j].trim() || lines[j].search(/\S/) > ind); j++) {
+    const w = lines[j].match(/^\s*working-directory:\s*["']?([^"'#\s]+)/);
+    if (w) return w[1];
+  }
+  return null;
+};
+for (const f of workflows) {
+  const lines = fs.readFileSync(path.join(wfDir, f), 'utf8').split('\n');
+  let topKey = null, workflowWd = null, jobWd = null;
+  for (let i = 0; i < lines.length; i++) {
+    const l = lines[i];
+    const top = l.match(/^([\w-]+):/);
+    if (top) { topKey = top[1]; if (topKey === 'defaults') workflowWd = defaultsWd(lines, i); continue; }
+    if (topKey === 'jobs' && /^  [\w-]+:\s*$/.test(l)) { jobWd = null; continue; } // a new job
+    if (topKey === 'jobs' && /^    defaults:\s*$/.test(l)) { jobWd = defaultsWd(lines, i); continue; }
+    const m = l.match(/^(\s*)(?:-\s*)?run:\s*(.*)$/);
+    if (!m || topKey !== 'jobs') continue;
+    // The step's own working-directory: anywhere in the same step (from its "- " line to the next step).
+    const runIndent = m[1].length;
+    let start = i;
+    if (!/^\s*-\s/.test(l)) while (start > 0 && !(/^\s*-\s/.test(lines[start]) && lines[start].search(/\S/) < runIndent)) start--;
+    const dash = lines[start].search(/\S/);
+    let end = i + 1;
+    while (end < lines.length) {
+      const e = lines[end], ind = e.search(/\S/);
+      if (e.trim() && !e.trim().startsWith('#') && (ind < dash || (ind === dash && /^\s*-\s/.test(e)))) break;
+      end++;
+    }
+    let stepWd = null;
+    for (let j = start; j < end; j++) {
+      const w = lines[j].match(/^\s*(?:-\s*)?working-directory:\s*["']?([^"'#\s]+)/);
+      if (w) stepWd = w[1];
+    }
+    let base = DIR;
+    for (const d of [workflowWd, jobWd, stepWd]) if (d) base = wd(base, d);
+    const where = `.github/workflows/${f}:${i + 1}`;
+    if (m[2].trim() && !/^[|>][-+]?\s*$/.test(m[2].trim())) runs.push({ where, text: m[2], base });
+    else {
+      const indent = (lines[i + 1] ?? '').search(/\S/);
+      const block = [];
+      for (let j = i + 1; j < lines.length && (lines[j].trim() === '' || lines[j].search(/\S/) >= indent); j++) block.push(lines[j]);
+      runs.push({ where, text: block.join('\n'), base });
     }
   }
 }
-for (const mk of ['Makefile', 'makefile', 'GNUmakefile']) {
-  if (!fs.existsSync(path.join(DIR, mk))) continue;
-  fs.readFileSync(path.join(DIR, mk), 'utf8').split('\n').forEach((l, i) => {
-    if (l.startsWith('\t')) runs.push([`${mk}:${i + 1}`, l.trim().replace(/^[@-]+/, ''), DIR]);
+const seenMake = new Set();
+for (const mk of ['GNUmakefile', 'Makefile', 'makefile']) {
+  const p = path.join(DIR, mk);
+  if (!fs.existsSync(p) || seenMake.has(fs.statSync(p).ino)) continue; // one file on a case-insensitive disk
+  seenMake.add(fs.statSync(p).ino);
+  sources++;
+  fs.readFileSync(p, 'utf8').split('\n').forEach((l, i) => {
+    if (l.startsWith('\t')) runs.push({ where: `${mk}:${i + 1}`, text: l.trim().replace(/^[@-]+/, ''), base: DIR });
   });
+}
+
+if (!sources) {
+  process.stderr.write(`run-commands-check: no package.json, .github/workflows/*.yml or Makefile in ${DIR} — nothing to read, which is not a pass (Rule 29).\n`);
+  process.exit(2);
+}
+
+// Build output and ignored folders do not exist on a clean checkout, so a command that runs from them is not judged.
+const BUILT = new Set(['dist', 'build', 'out', '.next', '.nuxt', '.output', 'node_modules', 'target', 'coverage', '.venv', 'venv']);
+for (const l of fs.existsSync(path.join(DIR, '.gitignore')) ? fs.readFileSync(path.join(DIR, '.gitignore'), 'utf8').split('\n') : []) {
+  const t = l.trim().replace(/^\/|\/$/g, '');
+  if (t && !t.startsWith('#') && !t.startsWith('!') && !/[*?[\]]/.test(t) && !t.includes('/')) BUILT.add(t);
 }
 
 const INTERP = String.raw`(?:node|nodejs|deno run(?:\s+-\S+)*|bun(?: run)?|tsx|ts-node|npx\s+(?:tsx|ts-node)|python3?|uv run(?: python3?)?|poetry run python3?|bash|sh|zsh|ruby)`;
 const FILE = String.raw`["']?([^\s"';|&()<>]+\.(?:mjs|cjs|js|ts|mts|py|sh|rb))["']?`;
-const RUN_FILE = new RegExp(String.raw`(?:^|[\s;&|(])${INTERP}(?:\s+-[^\s]+)*\s+${FILE}`, 'g');
-const DOT_SLASH = new RegExp(String.raw`(?:^|[\s;&|(])(\.\.?\/[^\s"';|&()<>]+\.(?:sh|py|mjs|js|rb))`, 'g');
-const PY_M = /(?:^|[\s;&|(])python3?\s+(?:-[A-Za-z]+\s+)*-m\s+([A-Za-z_][\w.]*)/g;
-const STDLIB_M = new Set(['pip', 'venv', 'pytest', 'unittest', 'http.server', 'json.tool', 'build', 'twine', 'black', 'ruff', 'mypy', 'coverage', 'pyflakes', 'flake8', 'isort', 'pre_commit', 'site', 'ensurepip', 'compileall', 'doctest', 'timeit', 'cProfile', 'pdb', 'zipfile', 'tarfile', 'webbrowser', 'uvicorn', 'gunicorn', 'flask', 'django', 'streamlit', 'playwright', 'spacy', 'nltk']);
+const RUN_FILE = new RegExp(String.raw`(?:^|[\s(])${INTERP}(?:\s+-[^\s]+)*\s+${FILE}`, 'g');
+const DOT_SLASH = new RegExp(String.raw`(?:^|[\s(])(\.\.?\/[^\s"';|&()<>]+\.(?:sh|py|mjs|js|rb))`, 'g');
+const PY_M = /(?:^|[\s(])python3?\s+(?:-[A-Za-z]+\s+)*-m\s+([A-Za-z_][\w.]*)/g;
 
 function pyDoesNothing(src) {
   if (/__name__\s*==\s*['"]__main__['"]/.test(src)) return false;
@@ -105,34 +135,48 @@ function pyDoesNothing(src) {
 }
 
 function judge(where, file, base) {
-  if (/[$`{}*]/.test(file) || path.isAbsolute(file) || file.startsWith('~')) { skipped.push(`${where}: ${file}`); return; }
+  if (base === null || /[$`{}*]/.test(file) || path.isAbsolute(file) || file.startsWith('~')) { skipped.push(`${where}: ${file}`); return; }
   const full = path.resolve(base, file);
+  if (rel(full).split(path.sep).some((seg) => BUILT.has(seg))) { skipped.push(`${where}: ${file} (build output)`); return; }
   checked++;
   if (!fs.existsSync(full)) { problems.push(`${where}: runs ${file}, which does not exist (looked in ${rel(base)}/)`); return; }
   if (full.endsWith('.py') && pyDoesNothing(fs.readFileSync(full, 'utf8')))
     problems.push(`${where}: runs ${file}, which has no \`if __name__ == "__main__":\` block and only imports or defines — it would import cleanly, exit 0 and do nothing`);
 }
 
-for (const [where, cmd, base] of runs) {
-  const c = cmd.replace(/#.*$/, '');
-  // `bash ./x.sh` matches both patterns; judge each file once per command.
-  for (const f of new Set([...c.matchAll(RUN_FILE), ...c.matchAll(DOT_SLASH)].map((m) => m[1]))) judge(where, f, base);
-  for (const m of c.matchAll(PY_M)) {
-    const mod = m[1];
-    if (STDLIB_M.has(mod) || STDLIB_M.has(mod.split('.')[0])) continue;
-    const p = mod.replace(/\./g, '/');
-    const cands = [`${p}.py`, `${p}/__main__.py`, `src/${p}.py`, `src/${p}/__main__.py`];
-    const found = cands.find((x) => fs.existsSync(path.resolve(base, x)));
-    // A module that is not in the project is an installed package; only judge ones whose top folder is here.
-    const top = mod.split('.')[0];
-    if (!found && (fs.existsSync(path.resolve(base, top)) || fs.existsSync(path.resolve(base, 'src', top)))) {
+function judgeModule(where, mod, base) {
+  if (base === null) { skipped.push(`${where}: python -m ${mod}`); return; }
+  const parts = mod.split('.');
+  const p = parts.join('/');
+  for (const root of ['', 'src/']) {
+    const at = (x) => path.resolve(base, root + x);
+    if (parts.length === 1 && fs.existsSync(at(`${p}.py`))) {
       checked++;
-      problems.push(`${where}: runs python -m ${mod}, but neither ${p}.py nor ${p}/__main__.py exists`);
-    } else if (found) {
-      checked++;
-      if (found.endsWith('.py') && !found.endsWith('__main__.py') && pyDoesNothing(fs.readFileSync(path.resolve(base, found), 'utf8')))
-        problems.push(`${where}: runs python -m ${mod}; ${found} has no __main__ block and only imports or defines — it would do nothing`);
+      if (pyDoesNothing(fs.readFileSync(at(`${p}.py`), 'utf8'))) problems.push(`${where}: runs python -m ${mod}; ${root}${p}.py has no __main__ block and only imports or defines — it would do nothing`);
+      return;
     }
+    // Only a package that lives in the project is judged; anything else is an installed tool (pip, alembic, uvicorn …).
+    if (!fs.existsSync(at(`${parts[0]}/__init__.py`))) continue;
+    checked++;
+    if (fs.existsSync(at(`${p}/__main__.py`))) return;
+    if (parts.length > 1 && fs.existsSync(at(`${p}.py`))) {
+      if (pyDoesNothing(fs.readFileSync(at(`${p}.py`), 'utf8'))) problems.push(`${where}: runs python -m ${mod}; ${root}${p}.py has no __main__ block and only imports or defines — it would do nothing`);
+      return;
+    }
+    problems.push(`${where}: runs python -m ${mod}, but neither ${root}${p}.py nor ${root}${p}/__main__.py exists`);
+    return;
+  }
+}
+
+for (const { where, text, base } of runs) {
+  // Walk the command piece by piece so an earlier `cd folder` moves where later pieces run.
+  let cwd = base;
+  for (const piece of text.replace(/#.*$/gm, '').split(/\n|&&|\|\||;/)) {
+    const cd = piece.match(/^\s*\(?\s*(?:cd|pushd)\s+["']?([^\s"';)]+)["']?\s*\)?\s*$/) ?? piece.match(/^\s*\(?\s*(?:cd|pushd)\s+["']?([^\s"';)]+)/);
+    if (cd) { cwd = cd[1] === '-' ? null : wd(cwd, cd[1]); continue; }
+    // `bash ./x.sh` matches both patterns; judge each file once.
+    for (const f of new Set([...piece.matchAll(RUN_FILE), ...piece.matchAll(DOT_SLASH)].map((m) => m[1]))) judge(where, f, cwd);
+    for (const m of piece.matchAll(PY_M)) judgeModule(where, m[1], cwd);
   }
 }
 
@@ -141,8 +185,6 @@ if (problems.length) {
   for (const p of problems) console.log(`  ✗ ${p}`);
   process.exit(1);
 }
-if (!checked) {
-  process.stderr.write(`run-commands-check: found no run commands that name a project file in ${DIR} (package.json scripts, .github/workflows, Makefile) — nothing checked is not a pass.\n`);
-  process.exit(2);
-}
-console.log(`run-commands-check: OK — ${checked} run command(s) point at files that exist and run${skipped.length ? ` (${skipped.length} built from variables or absolute paths, not judged)` : ''}`);
+const note = skipped.length ? ` (${skipped.length} not judged: built from variables, absolute, or build output)` : '';
+if (!checked) console.log(`run-commands-check: OK — nothing here runs a project file directly (only tools such as \`vite build\`)${note}`);
+else console.log(`run-commands-check: OK — ${checked} run command(s) point at files that exist and run${note}`);

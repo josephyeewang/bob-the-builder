@@ -5,10 +5,12 @@
 // WHY. A field census found a defect class with a standing written rule that recurred ~40 times across six fixes.
 // Rule 31's own text named the missing enforcer: "mechanical detection of recurrence — a class name appearing in 2+
 // separate fix commits". This is it (D-033). It reads the fix commits' own words, so it needs one habit: a fix
-// commit says which class it fixes and which rung closed it, as trailer lines at the end of the message:
+// commit says which class it fixes and which rung closed it, as git trailer lines in the message's last paragraph:
 //
 //     Class: read-error-treated-as-missing
-//     Rung: 3            (or anywhere in the message: "closed at rung 3")
+//     Rung: 3            (if there is no Rung: line, "closed at rung 3" in the message, outside code blocks)
+//
+// Several classes go on one line, comma-separated, or on several Class: lines.
 //
 // CHECK: for every class named in two or more commits, the NEWEST of them must record rung 3 (a fresh-context read
 // at the moment the class can come back) or rung 4 (the defect made unrepresentable). Rung 1, rung 2 or no rung =
@@ -33,7 +35,8 @@ function cannot(message) {
 
 let log;
 try {
-  const cmd = ['-C', DIR, 'log', '--no-merges', '--format=%H%x1f%cs%x1f%s%x1f%B%x1e'];
+  // Git parses the trailers itself, so a "Class:" line quoted in a docs commit's body does not count.
+  const cmd = ['-C', DIR, 'log', '--no-merges', '--format=%H%x1f%cs%x1f%s%x1f%(trailers:key=Class,valueonly,separator=%x1d)%x1f%(trailers:key=Rung,valueonly,separator=%x1d)%x1f%b%x1e'];
   if (since) cmd.push(`--since=${since}`);
   log = execFileSync('git', cmd, { encoding: 'utf8', maxBuffer: 256 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'] });
 } catch {
@@ -42,11 +45,14 @@ try {
 
 const byClass = new Map();
 for (const rec of log.split('\x1e')) {
-  const [sha, date, subject, body] = rec.replace(/^\n/, '').split('\x1f');
+  const [sha, date, subject, classField, rungField, body] = rec.replace(/^\n/, '').split('\x1f');
   if (!sha || body === undefined) continue;
-  const classes = [...body.matchAll(/^\s*Class:\s*(.+?)\s*$/gim)].map((m) => m[1].toLowerCase().replace(/\s+/g, '-'));
+  const classes = classField.split(/[\x1d,]/).map((c) => c.trim().toLowerCase().replace(/\s+/g, '-')).filter(Boolean);
   if (!classes.length) continue;
-  const rungs = [...body.matchAll(/^\s*Rung:\s*(\d)\b|closed at rung\s*(\d)\b/gim)].map((m) => Number(m[1] ?? m[2]));
+  // The Rung: trailer wins; otherwise "closed at rung N" in the message, outside code blocks.
+  const trailer = rungField.split('\x1d').map((r) => r.match(/^\s*(\d)\b/)?.[1]).filter(Boolean).map(Number);
+  const prose = [...body.replace(/```[\s\S]*?```/g, '').matchAll(/closed at rung\s*(\d)\b/gi)].map((m) => Number(m[1]));
+  const rungs = trailer.length ? trailer : prose;
   const rung = rungs.length ? Math.max(...rungs) : null;
   for (const c of new Set(classes)) {
     if (!byClass.has(c)) byClass.set(c, []);

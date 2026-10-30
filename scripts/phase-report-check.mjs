@@ -13,9 +13,14 @@
 //   2. every [A] or [C] section present in the report has text of its own, not only lines copied from the template
 //      (a skipped [C] section says "N/A — reason");
 //   3. no line in the report is still the template's placeholder line, e.g. "- [list everything built — …]".
-// Headings match on their name, so "### [A] Built", "### Built" and "### Built (phase 3)" are all "Built".
+// Headings match on their name, at level 2–4, numbered or not, with any status mark after it: "### [A] Built",
+// "## Built", "### 1. Built" and "### Built ✅" are all "Built". A section line that starts "N/A", "None" or "No
+// divergences found" always counts as the section's own text.
 //
-// Usage: node "$(realpath ~/.claude/skills/bob/..)/scripts/phase-report-check.mjs" <phase-report.md> [--template FILE]
+// --abbreviated checks the short report the Minimum Viable Process allows ("Full Phase Report — use abbreviated"):
+// only Built, Spec Deviations, Validation Results, Hot Path Results and Regression Check are required.
+//
+// Usage: node "$(realpath ~/.claude/skills/bob/..)/scripts/phase-report-check.mjs" <phase-report.md> [--abbreviated] [--template FILE]
 // Exit: 0 = complete · 1 = REFUSED (each problem listed) · 2 = cannot run (no report, or the template is missing).
 
 import fs from 'node:fs';
@@ -24,6 +29,7 @@ import { fileURLToPath } from 'node:url';
 
 const args = process.argv.slice(2);
 const ti = args.indexOf('--template');
+const ABBREVIATED = args.includes('--abbreviated');
 const TEMPLATE = ti >= 0 ? args[ti + 1] : path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'templates', 'phase-report.md');
 const report = args.filter((a, i) => !a.startsWith('--') && (ti < 0 || i !== ti + 1))[0];
 
@@ -36,12 +42,15 @@ if (!fs.existsSync(report)) cannot(`no report at ${report} — nothing to check 
 if (!fs.existsSync(TEMPLATE)) cannot(`template not found at ${TEMPLATE}`);
 
 // "### [A] Global Invariant Check *(use …)*" → { kind: 'A', name: 'global invariant check' }
+// Any of "## Built", "### 1. Built", "### Built ✅" or "#### [A] Built (phase 3)" is the section "built".
 function heading(line) {
-  const m = line.match(/^###\s+(?:\[([ACO])\]\s+)?(.+?)\s*$/);
+  const m = line.match(/^#{2,4}\s+(?:\d+[.)]\s+)?(?:\[([ACO])\]\s+)?(.+?)\s*$/);
   if (!m) return null;
-  const name = m[2].split(/\s+\(|\s+—|\s+\*|\s+-\s/)[0].replace(/[*_`]/g, '').trim().toLowerCase();
+  const name = m[2].split(/\s+\(|\s+—|\s+\*|\s+-\s|\s*:/)[0].replace(/[*_`]/g, '').replace(/[^\p{L}\p{N}/ -]+/gu, '').trim().toLowerCase();
   return { kind: m[1] ?? null, name };
 }
+// A report heading matches a template section when its name starts with the template's ("built" ⊂ "built so far").
+const same = (mine, tpl) => mine === tpl || mine.startsWith(`${tpl} `);
 
 // A placeholder line is a list or heading line whose text is a [bracketed instruction], not a link, a tick box or a marker.
 const PLACEHOLDER = /\[(?![ xX]\])(?![ACO]\])[^\]]*[a-zA-Z][^\]]*\](?!\()/;
@@ -53,7 +62,7 @@ function sections(text) {
   text.split('\n').forEach((line, i) => {
     const h = heading(line);
     if (h) { cur = { ...h, line: i + 1, body: [] }; out.push(cur); return; }
-    if (/^#{1,2}\s/.test(line)) { cur = null; return; }
+    if (/^#\s/.test(line)) { cur = null; return; }
     if (cur) cur.body.push(line);
   });
   return out;
@@ -70,15 +79,22 @@ const text = fs.readFileSync(report, 'utf8');
 const mine = sections(text);
 const problems = [];
 
-for (const s of tplSections)
-  if (s.kind === 'A' && !mine.some((m) => m.name === s.name))
-    problems.push(`missing the "${s.name}" section — the template marks it [A], always required`);
+// --abbreviated: the short report the Minimum Viable Process allows under time pressure keeps only the sections it
+// lists as never skipped (what was built, what diverged, whether it passed, hot paths, regressions).
+const SHORT = ['built', 'spec deviations', 'validation results', 'hot path results', 'regression check'];
+const required = tplSections.filter((s) => s.kind === 'A' && (!ABBREVIATED || SHORT.includes(s.name)));
+for (const s of required)
+  if (!mine.some((m) => same(m.name, s.name)))
+    problems.push(`missing the "${s.name}" section — the template marks it [A], always required${ABBREVIATED ? ' (even in a short report)' : ''}`);
 
 for (const m of mine) {
-  const kind = m.kind ?? kindOf.get(m.name);
+  const tplName = [...kindOf.keys()].find((n) => same(m.name, n));
+  const kind = m.kind ?? kindOf.get(tplName);
   if (kind !== 'A' && kind !== 'C') continue;
   // Text of its own: not blank, not an italic instruction, and not a line copied unchanged from the template's section.
-  const own = m.body.filter((l) => l.trim() && !/^\s*\*[^*].*\*\s*$/.test(l) && !placeholders.has(norm(l)) && !tplLines.get(m.name)?.has(norm(l)));
+  // A line saying the section does not apply ("N/A — …", "None") always counts, even when the template suggests it.
+  const says = (l) => /^\s*(?:[-*]\s*)*\**\s*(N\/A|None|No divergences found)\b/i.test(l);
+  const own = m.body.filter((l) => l.trim() && (says(l) || (!/^\s*\*[^*].*\*\s*$/.test(l) && !placeholders.has(norm(l)) && !tplLines.get(tplName)?.has(norm(l)))));
   if (!own.length)
     problems.push(`line ${m.line}: the "${m.name}" section has nothing of its own${kind === 'C' ? ' — if it does not apply, write "N/A — <reason>"' : ''}${m.name === 'spec deviations' ? ' — if there were none, write "None" (Rule 4: "No divergences found")' : ''}`);
 }

@@ -118,6 +118,7 @@ bar-sha256: UNSET
 - Pattern identified: [description]
 - Codebase scan results: [N instances found, N fixed]
 - Remaining instances: [0 / list any deferred with rationale]
+- *The fix commit ends with two trailer lines, `Class: <kebab-case class name>` and `Rung: <1–4>` (Rule 31), so the recurrence check can see it.*
 
 ### [C] Experience Test — *include only if phase has user-facing output*
 - Expected experience: [from Build Manifest experience test field]
