@@ -1,0 +1,15 @@
+Parts of orchestrate/modules/M4-workshop/send-safe/ are a port of Agent Orchestrator by
+Orchestrator.inc, commit 1e478c5, licensed under the Apache License, Version 2.0 (see LICENSE
+in this folder).
+
+Files modified: ported from Go to JavaScript, with changes.
+  send-safe/activity.mjs       from backend/internal/domain/activity.go and
+                               backend/internal/lifecycle/manager.go (tool-flight precedence)
+  send-safe/claude-signals.mjs from backend/internal/adapters/agent/claudecode/activity.go
+  send-safe/guard.mjs          from backend/internal/sessionguard/guard.go
+  send-safe/toolflight.test.mjs from backend/internal/lifecycle/toolflight_test.go
+  send-safe/guard.test.mjs     partly from backend/internal/sessionguard/guard_test.go
+
+Main changes from the original: typed "[watchdog]" lines never lift a pause or count as an
+approval; a session that has sent no hook yet is never typed into by default; an unknown
+activity state is refused; the mutation-fence and unsent-draft variants are not ported.
