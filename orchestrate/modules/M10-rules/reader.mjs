@@ -42,7 +42,11 @@ export function blobSha(buf) {
 
 // products.json: [{ product, owner, repo, joe_github_id }]. Anything malformed → throw (the caller denies all).
 export function readProducts(file) {
-  const list = JSON.parse(readFileSync(file, 'utf8'));
+  return checkProducts(JSON.parse(readFileSync(file, 'utf8')));
+}
+
+// The same check on a list already in hand (first-cutover.mjs checks a new product's entry with it).
+export function checkProducts(list) {
   if (!Array.isArray(list)) throw new Error('products.json must be a list');
   const seen = new Set();
   for (const p of list) {
