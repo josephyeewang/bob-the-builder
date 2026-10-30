@@ -40,12 +40,13 @@ R-0b-82's decision and handoff code sit here although the row is tagged M11 (lan
    `checkOutboxFile` after lane 2's name and owner check, and passes idea text on through `cleanOutside`.
 3. Lane 2: stop and start the Front Door under its fixed name when `shouldRestartFrontDoor` says so, and deliver
    `makeFrontDoorHandoff`'s text (first prompt, or a read-only file outside the outbox).
-4. Lane 2: each Ledger pass calls `nextTripPush({ states, lastPushedIds, build })` (`states`: `{ id, state }` of the
+4. Lane 2: each Ledger pass calls `nextTripPush({ states, lastPushedIds, lastFailedIds, build })` (`states`: `{ id, state }` of the
    newest checked `state-` file per product, of which only `away` ones count; `build` = `buildTripBrief` with those ids). A result is sent to Joe's
    phone over the Front Door's push path and its `ids` stored as `lastPushedIds` (lead call L22); a result with
    `failed: true` (the brief couldn't be built) is pushed too, but its `ids` go to `lastFailedIds`, never
-   `lastPushedIds`, so the next passes keep trying and push the real brief once it builds. The pass also
-   writes the brief to the read-only file the skill quotes if Joe asks first, and runs `readPowerSource` with the
+   `lastPushedIds`, so the next passes keep trying and push the real brief once it builds; pass both lists back in
+   every time. The pass also writes each result's text (a brief or a failure) to the read-only file the skill quotes
+   if Joe asks first, and runs `readPowerSource` with the
    heartbeat. The skill quotes only a brief that names the ids it wrote (0b-8 audit round 3 M-3). If the push isn't
    ready by the first cutover, trip mode falls back to two replies ("filed", then the brief when Joe says "brief").
 5. Lane 2: its launch read-back checker replaces `readback.mjs` at the join; the two agree on EndConversation and on
@@ -63,6 +64,9 @@ R-0b-82's decision and handoff code sit here although the row is tagged M11 (lan
    Set, with `seenIds` every id taken in before, kept in the record so it survives a restart. Both are required: a
    result whose `checked` shows either skipped is pushed as "Not filed". Until this is wired, a "Filed" reply has no
    confirmation behind it.
+8. The rotate push says "the steps follow" (lead call L26 wording). Lane 2 (or the Lead's rotate flow): send Joe
+   the rotate steps for that name after the "Request taken" push. Until that is wired, the push promises steps that
+   don't come (0b-8 audit round 9 minor 3).
 
 ## Ledger: two lines per row (review-0b-8 MAT-10)
 

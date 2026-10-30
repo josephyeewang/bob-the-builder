@@ -71,7 +71,7 @@ test('L22: the brief is pushed once per new set of state files, and only when it
   assert.ok(nextTripPush({ states: away([...ids, '20261103-0920-ks']), lastPushedIds: p.ids, build: brief }), 'a new state file (the time zone answer) pushes again');
   assert.equal(nextTripPush({ states: away(ids), lastPushedIds: [], build: () => brief(['20261103-0915-kq']) }).failed, true, 'a brief missing an id is never sent; the failure is (round 8 minor 3)');
   assert.equal(nextTripPush({ states: [], build: brief }), null);
-  assert.equal(nextTripPush({ states: away(['../x']), build: brief }), null);
+  assert.equal(nextTripPush({ states: away(['../x']), build: brief }).failed, true); // round 9 minor 2: said, not silent
   assert.equal(nextTripPush({ states: away(ids), build: () => { throw new Error('x'); } }).failed, true); // round 7 minor 1: pushed as a failure
   const skill = readFileSync(new URL('./skill/orchestrate/SKILL.md', import.meta.url), 'utf8');
   assert.match(skill, /Filed: away <the products>\. The Mini confirms in a minute\./); // L26 replaced "Checking the Mini"

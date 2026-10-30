@@ -3,7 +3,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { checkOutboxFile, intakePush } from './outbox.mjs';
-import { buildTripBrief, nextTripPush } from './trip.mjs';
+import { buildTripBrief, nextTripPush, briefAnswers } from './trip.mjs';
+import { readFileSync } from 'node:fs';
 import { memoryRecord } from '../../shared/record.mjs';
 
 test('0b-8 audit round 7 M-1: no time zone and not on the Merge Gate → nothing says number work holds', () => {
@@ -38,4 +39,15 @@ test('0b-8 audit round 8 minor 2: a product with no Merge Gate value is "unknown
   const brief = buildTripBrief({ products: [{ name: 'testprod' }], tz: null, rec, facts: { get: () => null }, heartbeatProduct: 'testprod' });
   assert.match(brief, /testprod: Merge Gate status unknown/);
   assert.doesNotMatch(brief, /testprod still merges/);
+});
+
+test('0b-8 audit round 9 M-1 and minor 2: a failure names its ids so the skill can quote it; a bad id is a failure, not silence', () => {
+  const states = [{ id: '20261103-0915-kq', state: 'away' }];
+  const f = nextTripPush({ states, build: () => { throw new Error('x'); } });
+  assert.equal(briefAnswers(f.text, ['20261103-0915-kq']), true, 'the skill quotes the failure from the brief file');
+  const skill = readFileSync(new URL('./skill/orchestrate/SKILL.md', import.meta.url), 'utf8');
+  assert.doesNotMatch(skill, /it will come to your phone/);
+  const bad = nextTripPush({ states: [{ id: 'state-20261103-0915-kq.json', state: 'away' }], build: () => 'x' });
+  assert.equal(bad.failed, true);
+  assert.equal(nextTripPush({ states: [{ id: 'state-20261103-0915-kq.json', state: 'away' }], lastFailedIds: bad.ids, build: () => 'x' }), null, 'once');
 });

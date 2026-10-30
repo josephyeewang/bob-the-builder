@@ -64,15 +64,20 @@ export function briefAnswers(text, ids) {
 // built, or doesn't name every id, returns { text, ids, failed: true }: the Ledger pushes it and stores its ids as
 // lastFailedIds, NOT lastPushedIds, so it keeps trying every pass and pushes the real brief once it builds (0b-8
 // audit round 8 M-1); the failure itself is pushed once per id set (round 7 minor 1).
-export const TRIP_FAILED_TEXT = 'Trip brief failed: the Mini could not build it. It tries again every few minutes and pushes the brief when it can.';
+export const TRIP_FAILED_TEXT = 'The Mini could not build it. It tries again every few minutes and pushes the brief when it can.';
+// The failure names the ids on its first line like a brief does, so the brief file can hold it and the skill quotes it
+// when Joe says "brief" (0b-8 audit round 9 M-1: in the two-reply fallback a failure was otherwise never seen).
+const failedText = (ids) => `Trip brief failed; answers state files: ${ids.join(', ')}.\n${TRIP_FAILED_TEXT}`;
 export function nextTripPush({ states, lastPushedIds = [], lastFailedIds = [], build }) {
-  const away = (Array.isArray(states) ? states : []).filter((s) => s?.state === 'away').map((s) => s.id);
-  const ids = [...new Set(away.filter((i) => /^\d{8}-\d{4}-[a-z]{2}$/.test(String(i))))].sort();
+  const away = (Array.isArray(states) ? states : []).filter((s) => s?.state === 'away').map((s) => String(s.id));
+  const ids = [...new Set(away)].sort();
   if (!ids.length) return null;
+  const badId = ids.some((i) => !/^\d{8}-\d{4}-[a-z]{2}$/.test(i)); // a wiring bug: say so, never go quiet (round 9 minor 2)
   const last = new Set(Array.isArray(lastPushedIds) ? lastPushedIds : []);
   if (ids.every((x) => last.has(x))) return null;
   const failedBefore = new Set(Array.isArray(lastFailedIds) ? lastFailedIds : []);
-  const fail = () => (ids.every((x) => failedBefore.has(x)) ? null : { text: TRIP_FAILED_TEXT, ids, failed: true });
+  const fail = () => (ids.every((x) => failedBefore.has(x)) ? null : { text: badId ? failedText(['(not a file id)']) : failedText(ids), ids, failed: true });
+  if (badId) return fail();
   let text;
   try { text = build(ids); } catch { return fail(); } // the reason is not quoted: it could carry record text
   return briefAnswers(text, ids) ? { text, ids } : fail();
