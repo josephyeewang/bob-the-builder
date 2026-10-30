@@ -87,7 +87,8 @@ for (const [st, a, b] of changes) {
 // The run configs, as they are now, reduced to the lines that run things.
 const tracked = git('ls-files', '--cached', '--others', '--exclude-standard').split('\n').filter(Boolean);
 const CONFIG = /(^|\/)(package\.json|Makefile|makefile|GNUmakefile|[\w.-]+\.mk|Procfile|Dockerfile[\w.-]*|[\w.-]+\.Dockerfile|docker-compose[\w.-]*\.ya?ml|compose[\w.-]*\.ya?ml|\.gitlab-ci\.yml|vercel\.json|netlify\.toml|fly\.toml|pyproject\.toml|crontab|[\w.-]+\.cron)$/;
-const stripComment = (l) => (/^\s*#/.test(l) ? '' : l.replace(/\s#.*$/, ''));
+// Comments go; the list form of a command (`CMD ["python", "-m", "jobs.report"]`) reads like the plain form.
+const stripComment = (l) => (/^\s*#/.test(l) ? '' : l.replace(/\s#.*$/, '').replace(/["']\s*,\s*["']/g, ' '));
 function runLines(f, text) {
   const base = path.basename(f);
   if (base === 'package.json') {
@@ -202,7 +203,10 @@ function mentions(p, asScript = false, movedTo = null) {
         // so a YAML key (`  worker:`, `run: …`) is not mistaken for a module.
         const modRun = new RegExp(`(?:python[\\d.]*|\\$[({]?PYTHON\\w*[)}]?)(?:\\s+-(?!m\\b)[\\w-]+)*\\s+-m\\s+["']?(?:${mods.map(esc).join('|')})(?=$|[\\s"'])`);
         const modRef = new RegExp(`(?:^\\s*[\\w-]+\\s*=\\s*["']|["'\\s])(?:${mods.map(esc).join('|')}):(?=[A-Za-z_])`);
-        hit = modRun.test(l) || (!asScript && modRef.test(l));
+        // `mod:attr` only on a line that runs an app server or worker, or in pyproject's entry-point table — so a docker
+        // image tag (`app:latest`, `image: app:dev`) is not read as a module.
+        const runner = path.basename(f) === 'pyproject.toml' || /\b(uvicorn|gunicorn|hypercorn|daphne|celery|rq|dramatiq|huey|flask|waitress-serve)\b/.test(l);
+        hit = modRun.test(l) || (!asScript && runner && modRef.test(l));
       }
       if (hit) hits.push(`${f}:${at}`);
     }
@@ -214,7 +218,7 @@ const problems = [];
 for (const [oldPath, newPath] of gone)
   for (const where of mentions(oldPath, false, newPath))
     problems.push(`${where} still names ${oldPath}, which this change ${newPath ? `moved to ${newPath}` : 'deleted'}`);
-const hasMain = (src) => /^\s*if\s+__name__\s*==\s*['"]__main__['"]/m.test(src);
+const hasMain = (src) => /^\s*if\s+(?:__name__\s*==\s*['"]__main__['"]|['"]__main__['"]\s*==\s*__name__)/m.test(src);
 for (const [oldPath, newPath] of modifiedPy) {
   let before = '';
   try { before = git('show', `${base}:${oldPath}`); } catch { continue; }

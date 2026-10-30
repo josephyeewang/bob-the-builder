@@ -66,7 +66,14 @@ if (settings) {
   const prefixOf = (r) => r.replace(/\s+/g, ' ').match(/^Bash\((.*?)(?::\*|\*)?\)$/)?.[1];
   // A rule covers a command when its prefix starts the command: deny Bash(rm:*) covers "rm -rf"; Bash(git push origin
   // main:*) does not cover every "git push", and Bash(git push --force-with-lease:*) does not cover "git push --force".
-  const covers = (k, needle) => list(k).some((r) => { const pre = prefixOf(r); return pre !== undefined && !pre.includes('*') && needle.startsWith(pre.trim()); });
+  // A "*" inside a rule matches anything (Bash(git push * --force)); "git push -f" is the same command as "--force".
+  const alias = { 'git push --force': ['git push -f'] };
+  const covers = (k, needle) => list(k).some((r) => {
+    const pre = prefixOf(r);
+    if (pre === undefined) return false;
+    const re = new RegExp(`^${pre.trim().split('*').map((x) => x.replace(/[.+?^${}()|[\]\\]/g, '\\$&')).join('.*')}`);
+    return [needle, ...(alias[needle] ?? [])].some((n) => re.test(n) || (pre.includes('*') && re.test(`${n} x`)));
+  });
 
   if (perms.defaultMode === 'auto')
     bad(2, `${SETTINGS} sets defaultMode "auto", which Claude Code ignores in a project file — auto is NOT on. Turn it on with Shift+Tab (⏵⏵ auto mode on) or in ~/.claude/settings.json`);

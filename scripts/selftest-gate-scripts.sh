@@ -794,6 +794,8 @@ ac_base; printf '\xef\xbb\xbf\n---\nname: reviewer\ntools: Read, Grep\n---\n' > 
 expect "autonomy: a reviewer file starting with a BOM and a blank line -> OK" 0 "autonomy-check: OK" -- node "$AC" "$AD"
 ac_base; sed -i.bak 's/"Bash(git push --force:\*)"/"Bash(git push --force-with-lease:*)"/' "$AD/.claude/settings.json"
 expect "autonomy: deny --force-with-lease does not cover git push --force -> REFUSED" 1 'no rule for "git push --force"' -- node "$AC" "$AD"
+ac_base; sed -i.bak 's/"Bash(git push --force:\*)"/"Bash(git push -f:*)", "Bash(git push * --force)"/' "$AD/.claude/settings.json"
+expect "autonomy: deny git push -f and a wildcard rule cover git push --force -> OK" 0 "autonomy-check: OK" -- node "$AC" "$AD"
 mkdir -p "$TMP/ac-none"
 mkdir -p "$TMP/ac-bare/.claude"; printf '{"permissions":{}}\n' > "$TMP/ac-bare/.claude/settings.json"
 expect "autonomy: settings but no Stop hook and no reviewer -> not set up (exit 2, not six failures)" 2 "not set up for supervised autonomy" -- node "$AC" "$TMP/ac-bare"
@@ -914,6 +916,18 @@ mkdir -p "$T7/jobs/core"; cp "$T7/jobs/report.py" "$T7/jobs/core/report.py"; pri
 expect "run-commands: the wrap — old file made a shim beside a same-named new one — still run via working-directory and cd -> REFUSED twice" 1 "REFUSED — 2 run config line" -- node "$RC" "$T7"
 git -C "$T7" checkout -q HEAD -- jobs/report.py; printf 'from app.impl import *\n' > "$T7/services/api/app/job.py"
 expect "run-commands: a monorepo service's python -m module (read from its own folder) lost its run block -> REFUSED" 1 'services/api/Dockerfile:2 names services/api/app/job.py' -- node "$RC" "$T7"
+T8="$TMP/rc-r10"; newrepo "$T8"; mkdir -p "$T8/jobs"
+printf 'if __name__ == "__main__":\n    print(1)\n' > "$T8/jobs/report.py"; : > "$T8/jobs/__init__.py"; printf 'app = 1\n' > "$T8/app.py"
+printf 'FROM python\nCMD ["python", "jobs/report.py"]\n' > "$T8/Dockerfile"
+printf 'services:\n  r:\n    command: ["python", "-m", "jobs.report"]\n' > "$T8/compose.yml"
+printf 'image:\n\tdocker build -t app:latest .\n' > "$T8/Makefile"; printf 'web: gunicorn app:app\n' > "$T8/Procfile"
+git -C "$T8" add -A; git -C "$T8" commit -q -m base; git -C "$T8" checkout -q -b change
+git -C "$T8" mv app.py server.py; printf 'web: gunicorn server:app\n' > "$T8/Procfile"
+expect "run-commands: a docker image tag (app:latest) is not a module; the Procfile was updated -> OK" 0 "run-commands-check: OK" -- node "$RC" "$T8"
+printf 'from jobs.impl import *\n' > "$T8/jobs/report.py"
+expect "run-commands: lost run block run from Docker and compose list-form commands -> REFUSED twice" 1 "REFUSED — 2 run config line" -- node "$RC" "$T8"
+printf 'if "__main__" == __name__:\n    print(1)\n' > "$T8/jobs/report.py"
+expect "run-commands: the reversed comparison (\"__main__\" == __name__) is still a run block -> OK" 0 "run-commands-check: OK" -- node "$RC" "$T8"
 expect "run-commands: --base with no commit -> cannot run (exit 2)" 2 "needs a commit" -- node "$RC" "$T3" --base
 expect "run-commands: an unknown base commit -> cannot run (exit 2)" 2 "cannot be found" -- node "$RC" "$RD" --base nope
 SH="$TMP/rc-shallow"; git clone -q --depth 1 "file://$RD" "$SH" 2>/dev/null; git -C "$SH" checkout -q --detach; git -C "$SH" branch -q -D main; git -C "$SH" remote remove origin
