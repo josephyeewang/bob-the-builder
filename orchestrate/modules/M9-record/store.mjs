@@ -134,7 +134,9 @@ export function openStore({ root, ownerUid, alert = () => {}, now = () => Date.n
     return tmp;
   }
   function quarantine(entity, id, bytes, why) {
-    const q = join(P.quarantine, `${entity}-${id}-${now()}-${randomBytes(3).toString('hex')}.json`);
+    // Short whatever the names: a file placed by hand with a long name must not make the quarantine itself fail (round 7 M-1).
+    const tidy = (s) => String(s).replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 40);
+    const q = join(P.quarantine, `${tidy(entity)}-${tidy(id)}-${sha256(`${entity}/${id}`).slice(0, 12)}-${now()}-${randomBytes(3).toString('hex')}.json`);
     writeFileSync(q, bytes ?? '', { mode: 0o644 });
     chmodSync(q, 0o644);
     say({ type: 'tamper', entity, id, reason: why, quarantined: q });
@@ -260,7 +262,7 @@ export function openStore({ root, ownerUid, alert = () => {}, now = () => Date.n
           const ts = new Date(now()).toISOString();
           const out = writes.map((w) => {
             // Checked before any folder, temp or diary line is made: a name the disk can't hold would block every later write (round 6).
-            if (!safeName(w.entity) || !safeName(w.id)) throw new Error('bad entity or id');
+            if (!safeName(w.entity) || !safeName(w.id)) throw new Error(`bad entity or id: ${String(w.entity).slice(0, 40)}/${String(w.id).slice(0, 80)}`);
             const cur = index.get(keyOf(w.entity, w.id));
             const rev = (cur?.rev ?? 0) + 1;
             const bytes = docBytes(w.entity, w.id, rev, w.doc);

@@ -138,8 +138,8 @@ export const SESSION_ID = /^[A-Za-z0-9-]{1,128}$/;   // capped so an id made fro
 
 export function isActor(a) {
   if (SCRIPT_ACTORS.includes(a)) return true;
-  const m = /^([a-z_]+):([A-Za-z0-9-]{1,128})$/.exec(String(a));   // the session part is SESSION_ID
-  return !!m && AI_ROLES.includes(m[1]);
+  const m = /^([a-z_]+):(.+)$/s.exec(String(a));
+  return !!m && AI_ROLES.includes(m[1]) && SESSION_ID.test(m[2]);   // one session-id rule, not a copy (round 7 m-3)
 }
 
 function refused(reason) { return { ok: false, reason }; }
@@ -163,6 +163,8 @@ export function makeRecord(impl) {
       if (!Number.isInteger(w.expectRev) || w.expectRev < 0) return refused('expectRev must be the rev read (0 to create)');
       const missing = (REQUIRED_FIELDS[w.entity] ?? []).filter((f) => w.doc?.[f] === undefined || w.doc?.[f] === null || w.doc?.[f] === '');
       if (missing.length) return refused(`${w.entity} is missing ${missing.join(', ')}`);
+      // A launch names a session that can hand in: the outbox refuses any other session id (round 7 m-2).
+      if (w.entity === 'launch' && !SESSION_ID.test(w.doc.session_id)) return refused('a launch needs a session_id of letters, digits and dashes, at most 128');
       return guard(() => impl.write(w));
     },
     applyOutbox(tag, file) {

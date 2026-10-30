@@ -134,6 +134,15 @@ test('a card id that climbs out of the store touches nothing outside it (round 5
   assert.deepEqual(readdirSync(join(env.root, 'quarantine')), []);
 });
 
+test('a session claim needs a session id that session can hand in with (0b-2 audit round 7 m-2)', () => {
+  const env = setup({ prefix: 'm9-claim-' });
+  board(env);
+  for (const sid of ['S'.repeat(129), 'S_1']) {
+    const r = put(env.record, 'dispatcher', 'card', 'C-1', { state: 'claimed', claim: { ...sessionClaim(), session_id: sid } });
+    assert.match(r.reason, /session_id the session can hand in with/);
+  }
+});
+
 test('a lapse checks the card file first: a hand-edited card is quarantined and alerted, not silently replaced (0b-2 audit round 3 m-C)', () => {
   const env = setup({ prefix: 'm9-claim-' });
   board(env, ['C-1']);

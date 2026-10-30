@@ -2,7 +2,7 @@
 // (0b-2 M-4, M-7, R2-m3, m-5, m-6).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { appendFileSync, existsSync, readFileSync, readdirSync, statSync, writeFileSync, unlinkSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { PRODUCT, UID, must, put, rulesFor, seed, setup } from './fixtures.test-helper.mjs';
 import { openRecord } from './writer.mjs';
@@ -145,6 +145,21 @@ test('a document file with no diary line is corrupt to read, and quarantined on 
   assert.equal(r.ok, false);
   assert.match(r.reason, /no diary line/);
   assert.ok(!existsSync(join(env.root, 'docs', 'card', 'C-9.json')));
+});
+
+test('a file placed by hand with a long name is quarantined and alerted; the store keeps taking writes (0b-2 audit round 7 M-1)', () => {
+  const env = setup({ prefix: 'm9-store-' });
+  seed(env, 'card', 'C-0', card());
+  mkdirSync(join(env.root, 'docs', 'report'), { recursive: true });
+  writeFileSync(join(env.root, 'docs', 'report', `${'q'.repeat(240)}.json`), '{}');
+  mkdirSync(join(env.root, 'docs', 'e'.repeat(200)));
+  writeFileSync(join(env.root, 'docs', 'e'.repeat(200), `${'q'.repeat(240)}.json`), '{}');
+  const alerts = [];
+  const fresh = openRecord({ root: env.root, product: PRODUCT, ownerUid: UID, rules: env.rules, alert: (a) => alerts.push(a), now: () => env.clock.t });
+  must(put(fresh.record, 'approvals', 'card', 'C-0', { state: 'cancelled', cancel_reason: 'test' }), 'a write after the odd files');
+  assert.equal(alerts.filter((a) => a.type === 'tamper' && a.id === 'q'.repeat(240)).length, 2, 'both alerted with the full name');
+  assert.equal(readdirSync(join(env.root, 'quarantine')).length, 2);
+  assert.ok(!existsSync(join(env.root, 'docs', 'report', `${'q'.repeat(240)}.json`)));
 });
 
 test('recover(): a missing file or the previous version rolls forward quietly; any other change is restored and alerted (R2-m3)', () => {

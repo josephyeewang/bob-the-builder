@@ -42,6 +42,8 @@ test('a throwing store comes back as a refusal', () => {
 
 test('names are fixed', () => {
   assert.ok(isActor('reviewer:S-9') && !isActor('reviewer') && !isActor('boss:S-1'));
+  // The session part is SESSION_ID: at most 128, letters, digits and dashes (0b-2 audit round 7 m-3).
+  assert.ok(isActor(`reviewer:${'S'.repeat(128)}`) && !isActor(`reviewer:${'S'.repeat(129)}`) && !isActor('reviewer:S_1') && !isActor('reviewer:S-1\n'));
   assert.ok(STATES.card.includes('reverted') && WAIT_FIELDS.length === 4);
 });
 
@@ -51,6 +53,7 @@ test('required fields are refused when missing, on the fake as on the real recor
   assert.match(rec.write({ actor: 'dispatcher', entity: 'launch', id: 'L', expectRev: 0, doc: { session_id: 'S' } }).reason, /missing role, card, head, rev, launched_at/);
   const launch = { session_id: 'S-1', role: 'reviewer', card: 'C', head: 'a'.repeat(40), rev: 2, launched_at: '2026-10-29T00:00:00Z' };
   assert.equal(rec.write({ actor: 'dispatcher', entity: 'launch', id: 'L-1', expectRev: 0, doc: launch }).ok, true);
+  assert.match(rec.write({ actor: 'dispatcher', entity: 'launch', id: 'L-2', expectRev: 0, doc: { ...launch, session_id: 'S'.repeat(129) } }).reason, /launch needs a session_id/);
   assert.equal(rec.write({ actor: 'dispatcher', entity: 'verdict', id: 'V', expectRev: 0, doc: { session_id: 'S-1' } }).ok, false);
   assert.ok(Object.keys(REQUIRED_FIELDS).every((e) => ENTITIES.includes(e)));
 });

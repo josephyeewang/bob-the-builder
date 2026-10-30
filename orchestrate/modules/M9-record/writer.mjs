@@ -14,7 +14,7 @@
 
 import { hostname } from 'node:os';
 import { basename } from 'node:path';
-import { CARD_KINDS, ENTITIES, FINAL_STATES, REQUIRED_FIELDS, STATES, WAIT_FIELDS, WAIT_WHO, isOpen, makeRecord, timeoutFor } from '../../shared/record.mjs';
+import { CARD_KINDS, ENTITIES, FINAL_STATES, REQUIRED_FIELDS, SESSION_ID, STATES, WAIT_FIELDS, WAIT_WHO, isOpen, makeRecord, timeoutFor } from '../../shared/record.mjs';
 import { canonicalJson } from '../../shared/plan-fingerprint.mjs';
 import { CREATE_STATES, INTERNAL_MOVES, moveActors } from './moves.mjs';
 import { PLAN_INPUTS, actorName, fieldsAllowed, mayCreateKind } from './permissions.mjs';
@@ -86,7 +86,7 @@ export function openRecord({ root, product, ownerUid, rules, alert = () => {}, n
     if (claim.kind === 'session') {
       if (!Number.isInteger(claim.pid) || claim.pid <= 0) return no('a session claim needs the pid');
       if (typeof claim.pid_start !== 'string' || !claim.pid_start) return no('a session claim needs pid_start');
-      if (typeof claim.session_id !== 'string' || !claim.session_id) return no('a session claim needs session_id');
+      if (typeof claim.session_id !== 'string' || !SESSION_ID.test(claim.session_id)) return no('a session claim needs a session_id the session can hand in with (letters, digits, dashes; at most 128)');
     } else if (claim.kind === 'tab') {
       if (typeof claim.claim_id !== 'string' || !claim.claim_id) return no('a tab claim needs claim_id');
     } else return no('claim.kind must be session or tab');

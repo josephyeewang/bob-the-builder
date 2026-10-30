@@ -60,6 +60,7 @@ Claude Code has a native task list. We checked whether it could hold the claims:
 - **A disk error after the commit point** (the rename or the folder sync, once the diary line is down) is reported as "store error, tried again". The write did happen. A retried verdict is then stored twice, and a retried hand-in is refused with an `outbox_refused` fact although it went through. Same family as the round 1 crash gap; one write that also marks the file seen closes both.
 - **No test drives a real disk error (an `e.code`) inside an outbox apply.** The code retries it; that branch is unproven by a test.
 - **A verdict is not checked to come after its launch.** If the Dispatcher ever reused a session id for a second launch on a new head, a pass written before that launch would count. The Dispatcher (0b-9) must never reuse a session id.
+- **A store written before round 6 with an id over 200 characters** stops every write with "bad entity or id", not "damaged". No live store exists yet, so there is nothing to mend; a store made from now on can't get such a line.
 - **A hand-edited diary line naming `../x`** makes every later write fail with a plain error rather than "the diary is damaged". It can't reach outside the store; it only blocks writes until the owner repairs the diary.
 
 ## Running the tests
