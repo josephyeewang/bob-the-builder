@@ -18,9 +18,6 @@ const ALL = readdirSync(ROOT, { recursive: true }).map((n) => join(ROOT, n)).fil
 // Files that still make their own temp folder, with the prefix they use. Each lane deletes its line when it switches
 // to tempDir(); the first test fails if a listed file no longer needs the line, so the list can't go stale.
 const NOT_SWITCHED_YET = {
-  'modules/M1-front-door/round4.test.mjs': 'air-',
-  'modules/M12-sensors/history.test.mjs': 'hist-',
-  'modules/M12-sensors/shell-guard/runner.test.mjs': 'sg-',
 };
 
 // A nested run must not inherit this runner's NODE_TEST_CONTEXT, or it reports to us instead of running the files
