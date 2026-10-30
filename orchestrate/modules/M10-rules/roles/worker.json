@@ -1,0 +1,29 @@
+{
+  "role": "worker",
+  "model": "main",
+  "effort": {
+    "1": "high",
+    "2": "medium"
+  },
+  "effort_floor": "medium",
+  "effort_max": "xhigh",
+  "tools": [
+    "Read",
+    "Glob",
+    "Grep",
+    "Edit",
+    "Write",
+    "Bash"
+  ],
+  "permission_mode": "dontAsk",
+  "restricted_mode": false,
+  "outbox_kinds": [
+    "report-",
+    "report-compact-"
+  ],
+  "auto_resume": {
+    "1": false,
+    "2": true
+  },
+  "context": "context.worker"
+}

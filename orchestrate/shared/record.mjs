@@ -24,7 +24,34 @@
 export const SCRIPT_ACTORS = Object.freeze(['dispatcher', 'workshop', 'merge_gate', 'approvals', 'sensors', 'ledger',
   'live_check', 'joe']);
 export const AI_ROLES = Object.freeze(['lead', 'worker', 'reviewer', 'auditor', 'incident', 'scout', 'writer',
-  'front_door', 'thinking', 'learning']);
+  'front_door', 'thinking', 'learning', 'script']);
+
+// Outbox file kinds (design v4 §14.1.2 "Outbox names", lead call L2, 0b-2 round 2 R2-M9, round 3 R3-M2): the file name
+// starts with the kind. M10's role-profile loader refuses a kind not listed here or not listed for that role.
+//   kind → { roles, entity, mode }: `create` makes a new document with no header; `move` needs the
+//   { entity, id, expectRev } header. `entity: null` means the Store Writer has no rule for the kind yet, so
+//   applyOutbox refuses it (fails closed) until the 0b-2 build gives it one.
+export const OUTBOX_KINDS = Object.freeze(Object.fromEntries(Object.entries({
+  'report-': { roles: ['worker', 'reviewer', 'scout', 'writer', 'thinking', 'script'], entity: 'report', mode: 'create' },
+  'report-compact-': { roles: ['worker'], entity: 'report', mode: 'create' },
+  'state-compact-': { roles: ['front_door'], entity: 'report', mode: 'create' },
+  'handoff-': { roles: ['lead', 'learning'], entity: 'handoff', mode: 'create' },
+  'lesson-': { roles: ['learning'], entity: 'lesson', mode: 'create' },
+  'verdict-': { roles: ['reviewer', 'auditor'], entity: 'verdict', mode: 'move' },
+  'ask-request-': { roles: ['front_door', 'incident'], entity: 'ask', mode: 'create' },
+  'wish-': { roles: ['lead'], entity: null, mode: 'create' },
+  'think-': { roles: ['lead'], entity: null, mode: 'create' },
+  'scout-': { roles: ['lead'], entity: null, mode: 'create' },
+  'write-': { roles: ['lead'], entity: null, mode: 'create' },
+  'roadmap-': { roles: ['lead'], entity: 'card', mode: 'move' },
+  'history-': { roles: ['lead'], entity: null, mode: 'create' },
+  'request-': { roles: ['front_door'], entity: null, mode: 'create' },
+  'state-': { roles: ['front_door'], entity: null, mode: 'create' },
+  'idea-': { roles: ['front_door', 'thinking'], entity: null, mode: 'create' },
+  'check-': { roles: ['learning'], entity: null, mode: 'create' },
+  'prune-': { roles: ['learning'], entity: null, mode: 'create' },
+}).map(([k, v]) => [k, Object.freeze({ ...v, roles: Object.freeze(v.roles) })])));
+export const OUTBOX_KIND_PATTERN = /^[a-z]+(-[a-z]+)*-$/;
 
 export const ENTITIES = Object.freeze(['card', 'ask', 'go', 'verdict', 'session', 'merge', 'claim', 'fact', 'product',
   'handoff', 'report', 'lesson', 'launch', 'merge_request']);

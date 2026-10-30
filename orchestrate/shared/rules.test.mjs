@@ -63,3 +63,9 @@ test('the shapes are fixed', () => {
   assert.ok(isDecision(deny('x')) && isDecision(ask(2, 'x')) && !isDecision(deny('')));
   assert.ok(Object.isFrozen(ACTIONS) && RISKY_CLASSES.includes('unclassifiable'));
 });
+
+test('HOLD_REASONS names the two "wait" denies (0b-1 R3-m8)', async () => {
+  const { HOLD_REASONS } = await import('./rules.mjs');
+  assert.deepEqual([...HOLD_REASONS], ['held_tier1_hours', 'rules_not_adopted']);
+  assert.ok(Object.isFrozen(HOLD_REASONS));
+});

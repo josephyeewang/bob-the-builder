@@ -108,6 +108,13 @@ test('under docs/, only plain files are ordinary; runnable ones are unclassifiab
   assert.deepEqual(sql, ['schema', 'deletes', 'unclassifiable']);
 });
 
+test('ordinary docs follow the product\'s docs_paths (R3-m5)', () => {
+  const narrow = parsePolicy(fixture.replace(/^product:/m, 'docs_paths: [docs/research/**]\nproduct:')).policy;
+  assert.deepEqual(narrow.docs_paths, ['docs/research/**']);
+  assert.deepEqual(classifyChange(narrow, { files: [mod('docs/research/x.md')], declared_tier: 2 }).risky, []);
+  assert.deepEqual(classifyChange(narrow, { files: [mod('docs/notes.md')], declared_tier: 2 }).risky, ['unclassifiable']);
+});
+
 test('the SQL scans match whole statements only', () => {
   const code = (line) => run([mod('lib/x.ts', { added_lines: [line] })]).risky;
   assert.ok(code('TRUNCATE sessions').includes('deletes'));

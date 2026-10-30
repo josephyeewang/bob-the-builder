@@ -9,21 +9,25 @@
 //
 //   publishSnapshot(dir, { products: { <p>: { status, rules, rev } }, mac, pin_ok }, now)
 //   readSnapshot(dir, now)                       → { ok: true, body } | { ok: false, reason }
-//   askSnapshot(dir, now, action, { product })   → a decision (allow/deny), same shape as rules.may()
+//   snapshotAnswer(readSnapshot(dir, now), action, { product })   → a decision, same shape as rules.may()
+//
+// snapshotAnswer is the ONLY way a hook reads the snapshot (0b-1 R3-m1): reading protected_files straight from the
+// body would miss M10's built-in protected floor. A hook question added later becomes a named action here, includes
+// the floor, and gets a test that it equals the live answer.
 //
 // This file imports nothing that can reach the network (a test checks the import list).
 
 import { createHash } from 'node:crypto';
 import { readFileSync, writeFileSync, renameSync, statSync, chmodSync } from 'node:fs';
 import { join } from 'node:path';
-import { deny } from '../../shared/rules.mjs';
+import { allow, deny } from '../../shared/rules.mjs';
 
 export const SNAPSHOT_FILE = 'rules-snapshot.json';
 export const FORMAT = 1;
 export const MAX_AGE_MS = 300_000;
 export const MAX_FUTURE_MS = 60_000;
 export const STATUSES = Object.freeze(['ok', 'last_good', 'deny_all']);
-export const HOOK_ACTIONS = Object.freeze(['write_production']);
+export const HOOK_ACTIONS = Object.freeze(['write_production', 'snapshot_fresh']);
 
 // JSON with keys in a fixed order, so the same body always hashes the same.
 export function canonical(v) {
@@ -69,14 +73,16 @@ export function readSnapshot(dir, now = Date.now()) {
   return { ok: true, body: doc.body };
 }
 
-// Hook-time answers. In 0b every production write is denied (MAT-5); the snapshot still has to be good, so a broken
-// snapshot is reported as such rather than hidden behind the 0b rule.
-export function askSnapshot(dir, now, action, subject = {}) {
+// Hook-time answers, from a readSnapshot() result. Pure: no file or clock reads here.
+//   snapshot_fresh   → allow when the snapshot read cleanly (and, if a product is named, its rules are usable).
+//   write_production → always deny in 0b (MAT-5); a broken snapshot is reported as such, not hidden behind that rule.
+export function snapshotAnswer(snap, action, subject = {}) {
   if (!HOOK_ACTIONS.includes(action)) return { ...deny(`${action} is not answered from the snapshot`), rev: null };
-  const s = readSnapshot(dir, now);
-  if (!s.ok) return { ...deny(s.reason), rev: null };
-  const entry = s.body.products[subject.product];
+  if (!snap?.ok) return { ...deny(snap?.reason ?? 'snapshot unread'), rev: null };
+  if (action === 'snapshot_fresh' && subject.product === undefined) return { ...allow('snapshot fresh'), rev: null };
+  const entry = Object.hasOwn(snap.body.products, subject.product ?? '') ? snap.body.products[subject.product] : null;
   if (!entry) return { ...deny('unknown product'), rev: null };
   if (entry.status === 'deny_all') return { ...deny('rules unusable for this product'), rev: null };
+  if (action === 'snapshot_fresh') return { ...allow('snapshot fresh'), rev: entry.rev };
   return { ...deny('production writes are not allowed in this phase'), rev: entry.rev };
 }

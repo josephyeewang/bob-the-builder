@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, readFileSync, writeFileSync, chmodSync, statSync, unlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { publishSnapshot, readSnapshot, askSnapshot, SNAPSHOT_FILE, MAX_AGE_MS, MAX_FUTURE_MS } from './snapshot.mjs';
+import { publishSnapshot, readSnapshot, snapshotAnswer, SNAPSHOT_FILE, MAX_AGE_MS, MAX_FUTURE_MS } from './snapshot.mjs';
 
 const T = Date.parse('2026-10-29T12:00:00Z');
 const body = () => ({ products: { 'sample-app': { status: 'ok', rules: { caps: { editing_per_mac: 5 } }, rev: 'aaaaaaa:bbbbbbb' },
@@ -34,7 +34,7 @@ test('missing, unreadable, wrong format, damaged, stale, future or loosely-permi
     const d = fresh(); spoil(d);
     const r = readSnapshot(d, at);
     assert.equal(r.ok, false, name);
-    assert.equal(askSnapshot(d, at, 'write_production', { product: 'sample-app' }).decision, 'deny', name);
+    assert.equal(snapshotAnswer(readSnapshot(d, at), 'write_production', { product: 'sample-app' }).decision, 'deny', name);
   }
 });
 function edit(d, fn) { const f = join(d, SNAPSHOT_FILE); const x = JSON.parse(readFileSync(f, 'utf8')); fn(x); writeFileSync(f, JSON.stringify(x), { mode: 0o644 }); }
@@ -48,10 +48,20 @@ test('a deny_all product carries no rules, and anything else must carry rules an
 
 test('the snapshot answers hook-time questions only; in 0b every production write is denied', () => {
   const d = fresh();
-  assert.match(askSnapshot(d, T, 'start_session', { product: 'sample-app' }).reason, /not answered from the snapshot/);
-  assert.equal(askSnapshot(d, T, 'write_production', { product: 'sample-app' }).rev, 'aaaaaaa:bbbbbbb');
-  assert.match(askSnapshot(d, T, 'write_production', { product: 'off-app' }).reason, /unusable/);
-  assert.match(askSnapshot(d, T, 'write_production', { product: 'nope' }).reason, /unknown product/);
+  assert.match(snapshotAnswer(readSnapshot(d, T), 'start_session', { product: 'sample-app' }).reason, /not answered from the snapshot/);
+  assert.equal(snapshotAnswer(readSnapshot(d, T), 'write_production', { product: 'sample-app' }).rev, 'aaaaaaa:bbbbbbb');
+  assert.match(snapshotAnswer(readSnapshot(d, T), 'write_production', { product: 'off-app' }).reason, /unusable/);
+  assert.match(snapshotAnswer(readSnapshot(d, T), 'write_production', { product: 'nope' }).reason, /unknown product/);
+  assert.match(snapshotAnswer(readSnapshot(d, T), 'write_production', { product: '__proto__' }).reason, /unknown product/);
+});
+
+test('snapshot_fresh: allow only on a clean, fresh read (R3-m1)', () => {
+  const d = fresh();
+  assert.equal(snapshotAnswer(readSnapshot(d, T), 'snapshot_fresh').decision, 'allow');
+  assert.equal(snapshotAnswer(readSnapshot(d, T), 'snapshot_fresh', { product: 'sample-app' }).decision, 'allow');
+  assert.equal(snapshotAnswer(readSnapshot(d, T), 'snapshot_fresh', { product: 'off-app' }).decision, 'deny');
+  assert.equal(snapshotAnswer(readSnapshot(d, T + MAX_AGE_MS + 1), 'snapshot_fresh').decision, 'deny');
+  assert.equal(snapshotAnswer(undefined, 'snapshot_fresh').decision, 'deny');
 });
 
 test('snapshot.mjs imports nothing that can reach the network', () => {

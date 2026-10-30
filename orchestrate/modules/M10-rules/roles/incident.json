@@ -1,0 +1,18 @@
+{
+  "role": "incident",
+  "model": "main",
+  "effort": "high",
+  "effort_floor": "high",
+  "tools": [
+    "Read",
+    "Glob",
+    "Grep"
+  ],
+  "permission_mode": "dontAsk",
+  "restricted_mode": false,
+  "outbox_kinds": [
+    "ask-request-"
+  ],
+  "auto_resume": false,
+  "context": "context.incident"
+}

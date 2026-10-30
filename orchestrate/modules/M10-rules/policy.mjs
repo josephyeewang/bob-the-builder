@@ -32,7 +32,8 @@ export const KEYS = Object.freeze({
   'accounts.joe.github_id': { required: true, type: 'text' }, 'accounts.joe.tz': { required: true, type: 'text' },
   models: { required: true, type: 'map' },
   merge: { required: true, type: 'map' }, 'merge.queue.tier1_hours': { required: true, type: 'text' },
-  product: { required: true, type: 'map' }, 'product.cutover_stage': { required: true, type: 'text' },
+  product: { required: false, type: 'map' }, 'product.cutover_stage': { required: false, type: 'text' },
+  docs_paths: { required: false, type: 'list' },
   approvals: { required: false, type: 'map' }, 'approvals.decisions_dir': { required: false, type: 'text' },
   product_profile: { required: false, type: 'map' }, 'product_profile.required_checks': { required: false, type: 'list' },
   'product_profile.audit_workflow': { required: false, type: 'map' },
@@ -112,9 +113,23 @@ function check(raw) {
     const ok = type === 'map' ? isMap(v) : type === 'list' ? Array.isArray(v) : typeof v === 'string';
     if (!ok) bad(`${path} must be a ${type === 'text' ? 'single value' : type}`);
   }
+  // Optional; a missing stage reads as `first`, the stricter one (0b-1 R3-m4, R3-m10: a new key enters as optional).
   const stage = raw.product?.cutover_stage;
   if (stage !== undefined && !CUTOVER_STAGES.includes(stage)) bad('product.cutover_stage must be first or second');
   const p = structuredClone(raw);
+  p.product = { ...(raw.product ?? {}), cutover_stage: stage ?? 'first' };
+
+  // Which paths can hold ordinary docs. Until the code scanner (R-0b-100) exists, a rules edit can only narrow this
+  // inside docs/, never widen it to app files (0b-1 R3-m5).
+  const dp = raw.docs_paths ?? ['docs/**'];
+  patterns(strList(dp, 'docs_paths'), 'docs_paths');
+  for (const d of dp) {
+    if (!/^docs\/[^*?{]/.test(d) && d !== 'docs/**') bad(`docs_paths entry "${d}" must sit under docs/`);
+    // `docs/../app/**` would reach app files: refuse any `.` or `..` part, even inside {a,b}.
+    if (/(^|[/{,])\.\.?([/},]|$)/.test(d) || /[\\\0]|\/\//.test(d)) bad(`docs_paths entry "${d}" has a dot, empty or backslash part`);
+  }
+  if (!dp.length) bad('docs_paths must not be empty');
+  p.docs_paths = [...dp];
 
   const tierPaths = need(raw.tiers, 'paths', 'tiers');
   if (!Array.isArray(tierPaths)) bad('tiers.paths must be a list');

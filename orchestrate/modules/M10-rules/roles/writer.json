@@ -1,0 +1,20 @@
+{
+  "role": "writer",
+  "model": "sonnet",
+  "effort": "medium",
+  "effort_floor": "low",
+  "tools": [
+    "Read",
+    "Glob",
+    "Grep",
+    "Edit",
+    "Write"
+  ],
+  "permission_mode": "dontAsk",
+  "restricted_mode": false,
+  "outbox_kinds": [
+    "report-"
+  ],
+  "auto_resume": false,
+  "context": "context.writer"
+}

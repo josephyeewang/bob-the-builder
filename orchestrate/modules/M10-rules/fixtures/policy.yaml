@@ -256,7 +256,7 @@ audit_sizing:
   hand_dates_counts: tier2_plus_weekly_strict_check
   exit_tests: tier1
 
-# Which cutover this product is at (decides which checks run on its GitHub side). Required.
+# Which cutover this product is at (decides which checks run on its GitHub side). Optional: missing reads as first.
 product:
   cutover_stage: first
 

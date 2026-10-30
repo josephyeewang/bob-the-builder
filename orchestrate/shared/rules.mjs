@@ -40,6 +40,10 @@ export const ACTIONS = Object.freeze({
 export const RISKY_CLASSES = Object.freeze(['production_data', 'schema', 'protected', 'secrets_settings', 'deletes',
   'first_customer_visible', 'messages_people', 'unclassifiable']);
 
+// A deny whose reason is one of these means "wait, keep the place in the queue", not "refused" (0b-1 R3-m8). The
+// Merge Gate tests membership here; it never parses reason text.
+export const HOLD_REASONS = Object.freeze(['held_tier1_hours', 'rules_not_adopted']);
+
 export function allow(reason = 'allowed') { return { decision: ALLOW, reason }; }
 export function ask(tier, reason) { return { decision: ASK, tier, reason }; }
 export function deny(reason) { return { decision: DENY, reason }; }

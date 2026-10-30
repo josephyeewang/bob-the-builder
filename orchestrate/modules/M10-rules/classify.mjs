@@ -26,9 +26,7 @@ export const EFFECT_KEYS = Object.freeze(['production_data', 'schema', 'secrets_
 export const MAX_FILES = 3000;
 export const PLAIN_DOC_EXTENSIONS = Object.freeze(['md', 'txt', 'csv', 'json', 'yaml', 'yml', 'png', 'jpg', 'jpeg',
   'gif', 'svg', 'pdf']);
-const DOCS = compileList(['docs/**']);
 const PLAIN = new RegExp(`\\.(${PLAIN_DOC_EXTENSIONS.join('|')})$`, 'i');
-const plainDoc = (p) => Boolean(DOCS(p)) && PLAIN.test(p.split('/').pop());
 const LINK_MODES = new Set(['120000', '160000']);   // a symlink or a submodule: protected, whatever its path
 
 // Whole SQL statements only, so prose like "drop the feature" never matches (R2-M4(c)).
@@ -76,7 +74,7 @@ export function classifyChange(policy, change) {
     for (const p of touched) {
       if (m.protected(p)) { protectedPaths.add(p); add('protected', p); }
       if (m.tier1(p)) tier = 1;
-      if (!plainDoc(p)) add('unclassifiable', `scan_not_built: ${p}`);
+      if (!m.plainDoc(p)) add('unclassifiable', `scan_not_built: ${p}`);
       if (m.secrets(p)) add('secrets_settings', p);
       if (m.migrations(p)) add('schema', p);
       if (m.repair(p)) add('production_data', p);
@@ -90,7 +88,7 @@ export function classifyChange(policy, change) {
 
     // Text scans of added lines: only ever add a class. Plain docs are prose, so they are never scanned; files in the
     // migration, repair and sender folders always are, wherever those folders are.
-    const scan = !plainDoc(f.path) || m.migrations(f.path) || m.repair(f.path) || m.senders(f.path);
+    const scan = !m.plainDoc(f.path) || m.migrations(f.path) || m.repair(f.path) || m.senders(f.path);
     if (scan && Array.isArray(f.added_lines)) {
       const text = f.added_lines.join('\n');
       if (SCHEMA_SCANS.some((re) => re.test(text))) add('schema', `${f.path} (table change in added lines)`);
@@ -126,7 +124,10 @@ const list = (v) => (Array.isArray(v) ? v : v == null ? [] : [v]);
 function matchers(policy) {
   const ep = policy.effect_paths && typeof policy.effect_paths === 'object' ? policy.effect_paths : {};
   const tierPaths = Array.isArray(policy.tiers?.paths) ? policy.tiers.paths : [];
+  // Ordinary docs: a plain file inside the product's docs_paths (0b-1 R3-m5; parsePolicy fills the docs/** default).
+  const docs = compileList(Array.isArray(policy.docs_paths) ? policy.docs_paths : ['docs/**']);
   return {
+    plainDoc: (p) => Boolean(docs(p)) && PLAIN.test(p.split('/').pop()),
     missingEffectKeys: EFFECT_KEYS.filter((k) => !ep[k] || typeof ep[k] !== 'object'),
     protected: compileList([...PROTECTED_FLOOR, ...list(policy.protected_files)]),
     tier1: compileList(tierPaths.filter((t) => String(t?.tier) === '1').map((t) => t.pattern)),

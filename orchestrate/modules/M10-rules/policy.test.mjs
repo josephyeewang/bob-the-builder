@@ -87,10 +87,19 @@ test('a bad path pattern makes the file corrupt rather than matching nothing', (
   refused(swap('    - docs/research/**', "    - 'docs/{a,b'"), 'unclosed brace');
 });
 
-test('the cutover stage is required and is first or second', () => {
-  assert.ok(parsePolicy(fixture.replace('cutover_stage: first', 'cutover_stage: second')).ok);
+test('the cutover stage is first or second, and a missing one reads as first', () => {
+  assert.equal(parsePolicy(fixture.replace('cutover_stage: first', 'cutover_stage: second')).policy.product.cutover_stage, 'second');
   refused(fixture.replace('cutover_stage: first', 'cutover_stage: third'), 'stage');
-  refused(fixture.replace('  cutover_stage: first\n', ''), 'cutover_stage');
+  assert.equal(parsePolicy(fixture.replace('product:\n  cutover_stage: first\n', '')).policy.product.cutover_stage, 'first');
+});
+
+test('docs_paths defaults to docs/** and can only narrow inside docs/ (R3-m5)', () => {
+  assert.deepEqual([...parsePolicy(fixture).policy.docs_paths], ['docs/**']);
+  assert.ok(parsePolicy(`${fixture}\ndocs_paths: [docs/notes/**]\n`).ok);
+  for (const wide of ['"**"', 'package.json', '"**/docs/**"', 'app/**', '"docs*/**"', '"{docs,app}/**"', '"docs/../app/**"', '"docs/x/../../app/**"', '"docs/{a,..}/**"', '"docs/./x/**"', '"docs//x/**"', '[]']) {
+    const text = wide === '[]' ? `${fixture}\ndocs_paths: []\n` : `${fixture}\ndocs_paths: [${wide}]\n`;
+    assert.equal(parsePolicy(text).ok, false, wide);
+  }
 });
 
 test('one key table: every top-level key in the fixture is listed in KEYS', () => {
