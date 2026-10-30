@@ -78,8 +78,11 @@ test('0b-7 audit round 6 MAT-B: values in a list or object under a secret name a
   const d = rec.read('fact', 'mb').doc;
   const all = JSON.stringify(d);
   for (const bad of [plain, FAKE.dbPassword, FAKE.vercelClassic]) assert.equal(all.includes(bad), false, 'masked');
-  assert.equal(d.tokens.input, 12, 'a count under a count-like name is kept');
-  assert.equal(d.tokens.note, '[REDACTED:named-key]');
+  // fact.x has no shape, so under L25 the allow-list masks every value; the second layer alone does the same job.
+  const two = makeMasker({ env: {} }).maskDeep({ password: [plain], db_password: { value: FAKE.dbPassword, deeper: [{ x: plain }] }, tokens: { input: 12, note: plain } });
+  assert.equal(JSON.stringify(two).includes(plain), false);
+  assert.equal(two.tokens.input, 12, 'a count under a count-like name is kept');
+  assert.equal(two.tokens.note, '[REDACTED:named-key]');
 });
 
 test('0b-7 audit round 6 MAT-C: lower-case "<what>_key", passphrase and credentials are masked; our own ids are not', () => {

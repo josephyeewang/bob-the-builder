@@ -9,7 +9,8 @@ Vercel, the repo) and write facts into the record. Everything they write is mask
 | `mask.mjs`, `fakes.mjs` | R-0b-125 | Masks secrets at every depth; fake keys for tests are built at run time, never committed. |
 | `record-scan.mjs` | R-0b-125 | The weekly scan: an independent looser detector plus gitleaks when installed, with a planted control. |
 | `escape.mjs`, `fixtures/outside-text.json` | R-0b-126 | `cleanOutside(text, source)`: mask then fence outside text; fixtures with exact expected output. |
-| `facts.mjs` | R-0b-125 | The one fact writer (masks, writes only if unchanged since read). |
+| `fact-shapes.mjs` | R-0b-125, lead call L25 | The allow-list: each fact kind's fields and their types. Only those are stored as written; every other value, at any depth, is masked (its name kept). A kind with no shape keeps only `kind` and `ts`. A new fact kind needs a shape here (a test checks every `kind: 'fact.…'` in M1, M12 and M13). |
+| `facts.mjs` | R-0b-125 | The one fact writer (allow-list, then masks, writes only if unchanged since read). |
 | `pr-facts.mjs` | R-0b-74 | Each PR's changed files and diff summary, with checks, threads and "behind main". |
 | `history.mjs` | R-0b-75 | The repo-history file (main's first-parent log) and safe answers to history requests. |
 | `supported.mjs` | R-0b-71/72 | The one rule for "a supported main commit", per product stage. |
@@ -35,6 +36,8 @@ heartbeat says "usage: unknown" until it is).
   `fixtures/outside-text.json` end to end. Until then R-0b-126 is "half: intake wiring pending".
 - R-0b-70: run `node shell-guard/runner.mjs '<the installed hook command>'` against lane 2's guard; every miss goes
   to lane 2. Until it is green, R-0b-70 is pending.
+- Lead call L25: any lane that writes a fact through `facts.mjs` adds its kind to `fact-shapes.mjs` (ask lane 3);
+  without a shape every field but `kind` and `ts` is masked.
 - Push requests (`push-request-<key>` facts, written by M13) are delivered by the Front Door (lane 2's restart path).
 - Lead call L24: lane 2's Mini loop calls `checkNoPush` every pass with each token the Mini holds (the GitHub ones the
   Front Door and the robots use), and the probe from `outside-check.mjs`'s `writeProbe`. With no tokens passed it

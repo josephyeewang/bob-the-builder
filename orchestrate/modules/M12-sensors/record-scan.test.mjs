@@ -18,7 +18,8 @@ function weekOfRecord(writeRaw = null, env = SENSORS_ENV) {
   // A "week" of Sensors facts carrying every fake key in log lines, commit text and check output.
   for (let day = 0; day < 7; day++) {
     for (const [i, key] of ALL.entries()) {
-      w.put(`log-${day}-${i}`, { kind: 'fact.log', head_sha: 'c'.repeat(40), line: `day ${day}: auth failed with ${key} at src/app-2026.mjs` });
+      // A declared text field (lead call L25), so these lines reach the second masking layer rather than the allow-list.
+      w.put(`log-${day}-${i}`, { kind: 'fact.pr', head_sha: 'c'.repeat(40), title: `day ${day}: auth failed with ${key} at src/app-2026.mjs` });
     }
   }
   if (writeRaw) rec.write({ actor: 'sensors', entity: 'fact', id: 'raw', expectRev: 0, doc: { line: writeRaw } });
