@@ -12,6 +12,7 @@ See LANES.md for who builds this folder, and the build rows (0b-1, R-0b-13..19) 
 | `policy.mjs` | Reads and checks a rules file. A file that is half-right is "corrupt", never partly used. |
 | `paths.mjs` | The one path matcher (tiers, protected files, lanes), plus the protected floor that a rules file can add to but never remove from. |
 | `classify.mjs` | Works out a change's tier and risky classes from the files it touches. Pure, so the Mini and the GitHub-side checker give the same answer. |
+| `db-lines.mjs` | The deny-by-default line check (lead call L32): a line in a code file counts as a possible database change unless it is proven harmless. |
 | `engine.mjs` | The answers that `shared/rules.mjs` `makeRules()` wraps: start, push, merge, Mac-wide values, Tier-1 hours, exact reverse. |
 | `roles.mjs`, `roles/` | Loads the role profiles and refuses any profile that gives a role more than the design allows. |
 | `snapshot.mjs` | The small on-disk copy of the rules that hooks read without the network. |
@@ -62,7 +63,19 @@ await carryOver({ reviewed, current, between, catchUps, tier1MergesSince, gh: vi
 - **New keys enter as optional (R3-m10).** A key added to the rules later is optional, with a missing value read as the stricter choice, so an older rules file stays valid.
 - **The snapshot.** Its hash proves the file wasn't damaged. It does not prove who wrote it: the guard against a looser copy is that only its owner may write it (a file writable by others is refused). Hooks read it only through `snapshotAnswer`, which adds the protected floor.
 
-## Known limits (logged by the 0b-1 code audit, rounds 1 to 7)
+## Database changes in code: deny by default (lead call L32)
+
+Audit rounds 3 to 11 each found one more way of writing a database change that a list of patterns missed. So `db-lines.mjs` reads the other way round: every added or removed line in a code file counts as a possible database change (class `schema`, Tier 1, Joe's Approve) unless it is one of these:
+
+- blank, or a comment by itself in its own language (`//` outside `.sql`, `--` in `.sql`, `#` in script files, or a whole `/* … */`);
+- a plain SELECT read outside the migration and repair folders (no effect word, and only read calls such as `from`, `where`, `eq`, `count`);
+- in a test folder or test file, a line whose SQL and client words all sit inside plain strings (a fixture).
+
+Words are read after undoing escapes, folding look-alike letters and splitting camelCase and snake_case. Text built at run time (`'dr' + 'op'`, `chr(…)`, `fromCharCode`) and lines over 20,000 characters always count. A rename keeps the stricter reading of its two names. The pattern scans in `classify.mjs` stay; they only name the reason more clearly in the read-back.
+
+**What this changes.** A false alarm costs Joe one Approve tap; a miss costs live data. Every normal merge of code was already Tier 1, so nothing changes there. The visible change is the exact reverse: the undo of a code change now asks Joe unless every changed line is a comment, a blank line or a plain read. Only an undo of docs, or of comment-only code, goes through on its own after a failed audit.
+
+## Known limits (logged by the 0b-1 code audit, rounds 1 to 11)
 
 - **An exact-reverse push trusts its file list.** `push_branch` lets an exact reverse through, even while paused, when every file is in the subject's `reverses_files`. The caller fills that list from the reversed commit. The merge still needs `exact_reverse_ok`, which M10's `checkExactReverse` recomputes from GitHub, so a wrong list can only push a branch, never merge it.
 - **The last good rules on disk.** After a restart, the reader re-checks the saved copy's hash and parse, and uses it again after the next successful GitHub read. If that read finds a new, unapproved version, the saved copy stays the last good one (MAT-3). Anyone who can write the reader's private folder (owner-only) could change it, as they could change the code itself.
@@ -81,7 +94,8 @@ await carryOver({ reviewed, current, between, catchUps, tier1MergesSince, gh: vi
 - **An unchanged rules version skips the rewind check.** When `main`'s rules file is the same version as the one adopted, the reader answers "unchanged" before it checks whether `main` was rewound. The rules in force are the same text either way.
 - **A pattern can still name nothing.** `.` and `..` parts are refused, but a pattern that matches no file in the repository (a typo, or `[abc]`, which is read as a literal name) is accepted, so a protected entry can protect nothing. A typo in `migration_paths` or `repair_folder` also stops the folder rule from spotting a database change, including on an undo (the text scan still reads the lines). Brackets stay allowed because real file names use them (`[id].tsx`).
 - **A merge request needs no card id.** `push_branch` refuses a missing card id (MAT-5); `merge` answers from the files and the reverse fields only, so it doesn't require one.
-- **The table-change text scan is a backstop, not complete.** It reads code files' lines for common SQL and code-library forms, as written and again with comments blanked (`/* */`, nested, and `--` to the line end). It covers table, index, view and function statements, account and system statements (`create user`, `drop owned`, `alter system`, publications), grants and revokes, `delete from` and `truncate` (quoted names too), and the camelCase and snake_case calls of the common code libraries (`createTable`, `addColumn`, `drop_table`). It does not see a statement built from pieces at run time, a data `insert` or `update`, or a library call named some other way. It errs toward asking: a code comment such as "revoke the token from the cache", or a name like `createColumnHelper`, reads as a database change and makes the change Tier 1. No pattern can match the same text two ways, so a long run of spaces can't make it slow. A database change written another way (a query built from pieces, a data `insert` or `update` in code, a library call it doesn't know) is not seen. On a normal merge this doesn't matter, since every code file asks Joe; on an undo after a failed audit, the migration and repair folders are the real defence.
+- **Allowed lines are judged one at a time.** A plain SELECT line, a comment line or a test fixture is read on its own. A SELECT line inside a multi-line string whose other lines change the database still counts, because those other lines count. A test file's fixture strings are trusted only in test folders and test files; a test that runs SQL (a client word outside a string) counts.
+- **The pattern scans err toward asking.** A code comment such as "revoke the token from the cache", or a name like `createColumnHelper`, matches a pattern and makes the change Tier 1, even though the line check alone would let a comment through.
 - **The snapshot checks permission bits only.** macOS access-control lists on the folder or file are not read. Adding one needs the owner's own access, the same as editing the file.
 
 ## Repair files: what the check cannot see

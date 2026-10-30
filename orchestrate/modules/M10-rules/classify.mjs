@@ -16,6 +16,7 @@
 //                                           reads them at the parent commit); corrupt text = every file unclassifiable
 //   change = { files: [{ path, previous_path?, status, mode?, added_lines?, removed_lines? }], truncated?, declared_tier?, labels? }
 
+import { firstRiskyLine, isTestPath } from './db-lines.mjs';
 import { RISKY_CLASSES } from '../../shared/rules.mjs';
 import { PROTECTED_FLOOR, compileList, pathProblem } from './paths.mjs';
 import { parsePolicy } from './policy.mjs';
@@ -32,7 +33,7 @@ const LINK_MODES = new Set(['120000', '160000']);
 const FILE_MODES = new Set(['100644', '100755', '120000', '160000']);   // a symlink or a submodule: protected, whatever its path
 
 // Whole SQL statements only, so prose like "drop the feature" never matches (R2-M4(c)).
-// Rounds 7 and 8 widened it for the exact-reverse check: up to three words may stand between the verb and the object
+// Rounds 7 to 10 widened it for the exact-reverse check: up to five words may stand between the verb and the object
 // (`create unlogged table`, `create constraint trigger`), the text is scanned as written and again with SQL comments
 // blanked (`CREATE/**/TABLE`, nested `/* /* */ */`, `-- …` to the line end), and the usual code-library calls
 // (`createTable`, `schema.dropTableIfExists`, `op.drop_table`, `queryInterface.addColumn`) count, as do the account and
@@ -47,7 +48,8 @@ const SCHEMA_SCANS = [
 const sqlTexts = (lines) => {
   const raw = lines.join('\n');
   let t = raw;
-  for (let prev; prev !== t;) { prev = t; t = t.replace(/\/\*(?:(?!\/\*)[\s\S])*?\*\//g, ' '); }
+  // At most 50 passes, so deep nesting can't make it slow; whatever is left is still read by the line check (round 11).
+  for (let prev, pass = 0; prev !== t && pass < 50; pass++) { prev = t; t = t.replace(/\/\*(?:(?!\/\*)[\s\S])*?\*\//g, ' '); }
   return [raw, t, t.replace(/--[^\n]*/g, ' ')];
 };
 const scanHit = (scans, lines) => sqlTexts(lines).some((t) => scans.some((re) => re.test(t)));
@@ -145,17 +147,34 @@ export function classifyChange(policy, change) {
     }
     // Removed lines too: a change that removes a table statement undoes a database change (0b-9 M4, audit round 7).
     if (scan && isLines(f.removed_lines) && scanHit(SCHEMA_SCANS, f.removed_lines)) add('schema', `${f.path} (table change in removed lines)`);
+    // Deny by default (lead call L32): any line on either side that can't be proven harmless is a possible database
+    // change. The patterns above stay as the clearer reasons; this is the floor under them (db-lines.mjs).
+    if (scan) {
+      const opts = { path: f.path, migration: touched.some((p) => m.migrations(p) || m.repair(p)), test: touched.every(isTestPath) };
+      for (const side of ['added_lines', 'removed_lines']) {
+        const hit = isLines(f[side]) ? firstRiskyLine(f[side], opts) : null;
+        if (hit) add('schema', `${f.path} (${side.replace('_', ' ')}: line ${hit.n} may change the database: ${hit.why})`);
+      }
+    }
   }
 
-  // A `needs-joe` label adds `unclassifiable`; `needs-joe:<class>` adds that class. Neither removes one (MIN-3). Case
-  // and spaces at either end don't matter, and any other label starting `needs-joe` counts as unclassifiable (round 10).
+  // A `needs-joe` label adds `unclassifiable`; `needs-joe:<class>` adds that class. Neither removes one (MIN-3). Case,
+  // spaces, `_` or any dash between the words don't matter, and any other needs-joe label is unclassifiable (rounds 10, 11).
   for (const label of Array.isArray(change.labels) ? change.labels : []) {
-    const l = typeof label === 'string' ? label.trim().toLowerCase() : '';
-    if (!l.startsWith('needs-joe')) continue;
-    const cls = l.startsWith('needs-joe:') ? l.slice('needs-joe:'.length) : null;
+    const l = needsJoe(label);
+    if (l === null) continue;
+    const cls = l.startsWith(':') ? l.slice(1).trim() : null;
     add(cls && RISKY_CLASSES.includes(cls) ? cls : 'unclassifiable', `${label} label`);
   }
   return finish(reasons, protectedPaths, tier);
+}
+
+// A label's text after "needs joe" (in any spelling), or null when it isn't a needs-joe label.
+export function needsJoe(label) {
+  if (typeof label !== 'string') return null;
+  const l = label.normalize('NFKC').trim().toLowerCase();
+  const m = /^needs[\s_\u00ad\u2010-\u2015\u2212-]*joe/.exec(l);
+  return m ? l.slice(m[0].length).trim() : null;
 }
 
 function finish(reasons, protectedPaths, tier) {

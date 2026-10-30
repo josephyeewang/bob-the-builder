@@ -182,7 +182,9 @@ test('with unreadable rules the protected floor still applies (audit round 4, R3
 
 test('removed lines are scanned for table changes too: removing one undoes a database change (audit round 7)', () => {
   assert.ok(run([mod('lib/db/setup.ts', { removed_lines: ['await sql`CREATE TABLE users (id int)`'] })]).risky.includes('schema'));
-  assert.ok(!run([mod('lib/db/setup.ts', { removed_lines: ['const created = table;'] })]).risky.includes('schema'));
+  // Deny by default (lead call L32): any code line counts unless proven harmless; a comment by itself is.
+  assert.ok(run([mod('lib/db/setup.ts', { removed_lines: ['const created = table;'] })]).risky.includes('schema'));
+  assert.ok(!run([mod('lib/db/setup.ts', { removed_lines: ['// the old helper lived here'] })]).risky.includes('schema'));
   assert.ok(!run([mod('docs/research/x.md', { removed_lines: ['CREATE TABLE in prose'] })]).risky.includes('schema'), 'docs are prose');
   assert.match(run([mod('lib/a.ts', { removed_lines: 'CREATE TABLE x' })]).reasons.unclassifiable.join(), /removed_lines is not a list/);
 });
@@ -191,4 +193,21 @@ test('a mode that is not a string or number is unclassifiable; a rename out of a
   assert.deepEqual(run([{ path: 'app/x.ts', status: 'modified', mode: ['100644'] }]).risky, ['unclassifiable']);
   const moved = run([{ path: 'docs/notes/x.md', previous_path: 'docs/research/x.md', status: 'renamed' }]);
   assert.ok(moved.risky.includes('deletes'), JSON.stringify(moved));
+});
+
+test('deeply nested comments can\'t make the classifier slow (audit round 11)', () => {
+  const t0 = Date.now();
+  const c = run([mod('lib/x.ts', { added_lines: ['/* '.repeat(16000) + ' */'.repeat(16000)], removed_lines: [] })]);
+  assert.ok(Date.now() - t0 < 3000, `took ${Date.now() - t0} ms`);
+  assert.ok(c.risky.includes('schema'), 'a line that long is not read, so it counts');
+});
+
+test('a rename can\'t lend code the test-file or migration allowance of its old name (lead call L32)', () => {
+  const lib = (line, from) => mod('lib/x.ts', { status: 'renamed', previous_path: from, added_lines: [line], removed_lines: [] });
+  const libHit = (c) => (c.reasons.schema ?? []).some((r) => r.startsWith('lib/x.ts (added lines: line 1'));
+  assert.ok(!libHit(run([mod('test/x.test.ts', { added_lines: ["const q = 'optimize everything';"], removed_lines: [] })])), 'a fixture in a test file');
+  assert.ok(libHit(run([lib("const q = 'optimize everything';", 'test/x.test.ts')])), 'a test file renamed into code');
+  assert.ok(!libHit(run([mod('lib/x.ts', { added_lines: ['select id from users'], removed_lines: [] })])), 'a plain read in code');
+  assert.ok(libHit(run([lib('select id from users', 'db/migrations/1.sql')])), 'a migration renamed into code');
+  assert.ok(libHit(run([lib('select id from users', 'db/repairs/1.sql')])), 'a repair file renamed into code');
 });
