@@ -62,6 +62,7 @@ export function signalFromHook(event, payload = {}, at) {
     valid: true,
     state,
     event,
+    ...(event === 'ask-user-question-open' ? { reason: 'question' } : {}),
     toolName: typeof payload?.tool_name === 'string' ? payload.tool_name : '',
     toolUseId: typeof payload?.tool_use_id === 'string' ? payload.tool_use_id : '',
     prompt: typeof payload?.prompt === 'string' ? payload.prompt : undefined,

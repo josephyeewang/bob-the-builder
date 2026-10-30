@@ -23,7 +23,14 @@ export const Outcome = Object.freeze({
   SUPPRESSED_BUSY: 'suppressed_busy',
   SUPPRESSED_INPUT_GATED: 'suppressed_input_gated',
   SUPPRESSED_STARTUP_PENDING: 'suppressed_startup_pending',
+  SUPPRESSED_NOT_PERSON: 'suppressed_not_person', // ours: deliver() on an automated guard
 });
+
+// Ours (audit 0b-3 R29 MAT-3): every automated write carries the prefix, so M2 Approvals can
+// tell it from Joe's typing. Only a guard made by personGuard() may type an unprefixed line,
+// and the Dispatcher is never given one.
+const PERSON = Symbol('person');
+export const withWatchdogPrefix = (text) => `${WATCHDOG_PREFIX} ${String(text).replace(/^\s*\[watchdog\]\s*/i, '')}`;
 
 /**
  * store:     { getSession(id) -> record | null } (may be async, may throw)
@@ -34,7 +41,9 @@ export const Outcome = Object.freeze({
  * steersActiveTurn / acceptsWaitingInput: (harness) -> bool; missing means "no".
  */
 export class Guard {
-  constructor({ store, messenger, lease = null, startupGate = () => true, log = () => {} }) {
+  #forPerson;
+  constructor({ store, messenger, lease = null, startupGate = () => true, log = () => {}, [PERSON]: forPerson = false }) {
+    this.#forPerson = forPerson === true;
     this.store = store;
     this.messenger = messenger;
     this.lease = lease;
@@ -48,6 +57,7 @@ export class Guard {
 
   // The person typed it: refused only on a live decision (an idle prompt is where it belongs).
   deliver(id, text, opts) {
+    if (!this.#forPerson) { this.log({ id, outcome: Outcome.SUPPRESSED_NOT_PERSON }); return Promise.resolve({ outcome: Outcome.SUPPRESSED_NOT_PERSON }); }
     return this.#send(id, text, opts, (rec) => {
       if (this.awaitingStartup(rec)) return Outcome.SUPPRESSED_STARTUP_PENDING;
       if (rec.activity?.state === State.BLOCKED) return Outcome.SUPPRESSED_AWAITING_USER;
@@ -57,7 +67,7 @@ export class Guard {
 
   // Unasked-for: refused whenever the session waits on the person.
   nudge(id, text, opts) {
-    return this.#send(id, text, opts, (rec) => {
+    return this.#send(id, withWatchdogPrefix(text), opts, (rec) => {
       if (this.awaitingStartup(rec)) return Outcome.SUPPRESSED_STARTUP_PENDING;
       if (needsInput(rec.activity?.state)) return Outcome.SUPPRESSED_AWAITING_USER;
       return null;
@@ -66,10 +76,12 @@ export class Guard {
 
   // Must reach a session parked at its prompt, but never one on a live decision.
   nudgeUrgent(id, text, { acceptsWaitingInput, ...opts } = {}) {
-    return this.#send(id, text, opts, (rec) => {
+    return this.#send(id, withWatchdogPrefix(text), opts, (rec) => {
       if (this.awaitingStartup(rec)) return Outcome.SUPPRESSED_STARTUP_PENDING;
       const s = rec.activity?.state;
       if (s === State.BLOCKED) return Outcome.SUPPRESSED_AWAITING_USER;
+      // Ours: an open question is a decision, whatever the harness says about its prompt.
+      if (s === State.WAITING_INPUT && rec.activity?.reason === 'question') return Outcome.SUPPRESSED_AWAITING_USER;
       if (s === State.WAITING_INPUT && !acceptsWaitingInput?.(rec.harness)) return Outcome.SUPPRESSED_AWAITING_USER;
       return null;
     });
@@ -78,7 +90,7 @@ export class Guard {
   // Unasked-for and decided at the moment of typing: also refused mid-turn unless the
   // harness can be steered during a turn.
   nudgeCoordination(id, text, { steersActiveTurn, ...opts } = {}) {
-    return this.#send(id, text, opts, (rec) => {
+    return this.#send(id, withWatchdogPrefix(text), opts, (rec) => {
       if (this.awaitingStartup(rec)) return Outcome.SUPPRESSED_STARTUP_PENDING;
       const s = rec.activity?.state;
       if (needsInput(s)) return Outcome.SUPPRESSED_AWAITING_USER;
@@ -88,8 +100,10 @@ export class Guard {
   }
 
   async #send(id, text, { signal } = {}, refuse) {
-    const release = this.lease ? this.lease.acquire(id) : () => {};
-    if (!release) { this.log({ id, outcome: Outcome.SUPPRESSED_INPUT_GATED }); return { outcome: Outcome.SUPPRESSED_INPUT_GATED }; }
+    // Ours (MAT-4): the lease may be async; anything but a release function is a closed gate.
+    let release;
+    try { release = this.lease ? await this.lease.acquire(id) : () => {}; } catch { release = null; }
+    if (typeof release !== 'function') { this.log({ id, outcome: Outcome.SUPPRESSED_INPUT_GATED }); return { outcome: Outcome.SUPPRESSED_INPUT_GATED }; }
     try {
       let rec;
       try {
@@ -113,7 +127,7 @@ export class Guard {
       }
       return { outcome: Outcome.SENT };
     } finally {
-      release();
+      try { await release(); } catch (err) { this.log({ id, releaseError: err }); } // never hides a SENT
     }
   }
 
@@ -127,9 +141,13 @@ export class Guard {
 // rules, and every line starts with "[watchdog] ". Refused on blocked, waiting_input, active,
 // exited, not found, terminated, startup not finished, and any unknown or unreadable state.
 // (Whether a [watchdog] line can count as an approval is M2 Approvals' check, not this one.)
-export function sendSafe(guard, id, text, opts = {}) {
-  const line = `${WATCHDOG_PREFIX} ${String(text).replace(/^\s*\[watchdog\]\s*/i, '')}`;
-  return guard.nudgeCoordination(id, line, opts);
+export function sendSafe(guard, id, text, { signal } = {}) {
+  return guard.nudgeCoordination(id, text, { signal }); // no capability may be passed in (m5)
+}
+
+/** The only guard that may type an unprefixed line: the person's own typing, relayed. */
+export function personGuard(opts) {
+  return new Guard({ ...opts, [PERSON]: true });
 }
 
 // Types into a tmux pane: literal text, then Enter. Arguments are an array (no shell); text
@@ -138,10 +156,12 @@ export function tmuxMessenger({ run, targetFor }) {
   return {
     async send(id, text) {
       if (/[\u0000-\u001f\u007f]/.test(text)) throw new Error('text holds control characters');
+      // tmux reads an argument ending in ";" as a command separator and drops it (m2).
+      if (/;\s*$/.test(text)) throw new Error('text ends in ";"');
       const target = targetFor(id);
       if (!target || /[^A-Za-z0-9_.:%$@-]/.test(target)) throw new Error(`bad tmux target for ${id}`);
-      await run('tmux', ['send-keys', '-t', target, '-l', '--', text]);
-      await run('tmux', ['send-keys', '-t', target, 'Enter']);
+      // One tmux call, so no hook can land between the text and its Enter (m1).
+      await run('tmux', ['send-keys', '-t', target, '-l', '--', text, ';', 'send-keys', '-t', target, 'Enter']);
     },
   };
 }

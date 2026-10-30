@@ -2,7 +2,7 @@
 // (Apache-2.0), modified: see ../third_party/orchestrator-inc/NOTICE. The rest are ours.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { Guard, Outcome, sendSafe, tmuxMessenger } from './guard.mjs';
+import { Guard, Outcome, sendSafe, tmuxMessenger, personGuard } from './guard.mjs';
 import { ActivityTracker, MemoryStore, State } from './activity.mjs';
 import { signalFromHook, deriveActivityState } from './claude-signals.mjs';
 
@@ -11,7 +11,8 @@ function rig(rec, { lease, startupGate } = {}) {
   const sessions = new Map(rec ? [[rec.id, rec]] : []);
   const store = { getSession: async (id) => sessions.get(id) ?? null };
   const messenger = { send: async (id, text) => { sent.push({ id, text }); } };
-  return { sent, sessions, guard: new Guard({ store, messenger, lease, startupGate }) };
+  // personGuard: these upstream cases exercise deliver(), the person's own typing.
+  return { sent, sessions, guard: personGuard({ store, messenger, lease, startupGate }) };
 }
 const live = (state, extra = {}) => ({ id: 's-1', activity: { state }, firstSignalAt: 1, ...extra });
 
@@ -42,7 +43,7 @@ test('UnknownStateFailsClosed', async () => {
 
 test('StoreErrorFailsClosed', async () => {
   const sent = [];
-  const guard = new Guard({ store: { getSession: async () => { throw new Error('disk'); } }, messenger: { send: async (i, t) => sent.push(t) } });
+  const guard = personGuard({ store: { getSession: async () => { throw new Error('disk'); } }, messenger: { send: async (i, t) => sent.push(t) } });
   const res = await guard.deliver('s-1', 'x');
   assert.equal(res.outcome, Outcome.SUPPRESSED_UNKNOWN);
   assert.ok(res.error);
@@ -50,15 +51,17 @@ test('StoreErrorFailsClosed', async () => {
 });
 
 test('CancelledContextNeverWrites', async () => {
-  const r = rig(live(State.IDLE));
-  const ac = new AbortController(); ac.abort();
-  const res = await r.guard.deliver('s-1', 'x', { signal: ac.signal });
+  // Cancelled mid-flight, after the read began (audit m6), as upstream does.
+  const sent = [];
+  const ac = new AbortController();
+  const guard = personGuard({ store: { getSession: async () => { ac.abort(); return live(State.IDLE); } }, messenger: { send: async (i, t) => sent.push(t) } });
+  const res = await guard.deliver('s-1', 'x', { signal: ac.signal });
   assert.equal(res.outcome, Outcome.SUPPRESSED_UNKNOWN);
-  assert.equal(r.sent.length, 0);
+  assert.equal(sent.length, 0);
 });
 
 test('MessengerErrorIsSentPlusError', async () => {
-  const guard = new Guard({ store: { getSession: async () => live(State.IDLE) }, messenger: { send: async () => { throw new Error('pane gone'); } } });
+  const guard = personGuard({ store: { getSession: async () => live(State.IDLE) }, messenger: { send: async () => { throw new Error('pane gone'); } } });
   const res = await guard.deliver('s-1', 'x');
   assert.equal(res.outcome, Outcome.SENT);
   assert.ok(res.error);
@@ -85,12 +88,48 @@ test('StartupPendingBlocksEveryWrite', async () => {
 });
 
 test('InputLeaseCoversActualPaneWrite', async () => {
+  // As upstream: a messenger that blocks until we let it finish. The lease must still be held
+  // while the write is in progress (audit MAT-6: a non-blocking fake could not tell).
   const events = [];
+  let finish; const writing = new Promise((r) => { finish = r; });
+  let entered; const inWrite = new Promise((r) => { entered = r; });
   const lease = { acquire: () => { events.push('acquire'); return () => events.push('release'); } };
-  const guard = new Guard({ store: { getSession: async () => { events.push('read'); return live(State.IDLE); } },
-    messenger: { send: async () => { events.push('write'); } }, lease });
-  await guard.deliver('s-1', 'x');
-  assert.deepEqual(events, ['acquire', 'read', 'write', 'release']);
+  const guard = personGuard({ store: { getSession: async () => { events.push('read'); return live(State.IDLE); } },
+    messenger: { send: async () => { events.push('write-start'); entered(); await writing; events.push('write-end'); } }, lease });
+  const done = guard.deliver('s-1', 'x');
+  await inWrite;
+  await new Promise((r) => setImmediate(r));
+  assert.equal(events.includes('release'), false, 'lease released while the write was in progress');
+  finish();
+  await done;
+  assert.deepEqual(events, ['acquire', 'read', 'write-start', 'write-end', 'release']);
+});
+
+test('async lease: a refusing, throwing or odd lease is a closed gate; a granting one works (audit MAT-4)', async () => {
+  for (const acquire of [async () => null, async () => { throw new Error('x'); }, () => 'yes', async () => ({})]) {
+    const r = rig(live(State.IDLE), { lease: { acquire } });
+    assert.equal((await r.guard.deliver('s-1', 'x')).outcome, Outcome.SUPPRESSED_INPUT_GATED);
+    assert.equal(r.sent.length, 0);
+  }
+  let released = 0;
+  const ok = rig(live(State.IDLE), { lease: { acquire: async () => async () => { released += 1; } } });
+  assert.equal((await ok.guard.deliver('s-1', 'x')).outcome, Outcome.SENT);
+  assert.equal(released, 1);
+  const badRelease = rig(live(State.IDLE), { lease: { acquire: () => () => { throw new Error('release broke'); } } });
+  assert.equal((await badRelease.guard.deliver('s-1', 'x')).outcome, Outcome.SENT, 'a release error never hides the write');
+});
+
+test('every write path of an automated guard carries the prefix; deliver needs personGuard (audit MAT-3)', async () => {
+  const sent = [];
+  const store = { getSession: async () => live(State.IDLE) };
+  const g = new Guard({ store, messenger: { send: async (i, t) => sent.push(t) } });
+  const writers = Object.getOwnPropertyNames(Guard.prototype).filter((n) => n !== 'constructor' && n !== 'awaitingStartup');
+  assert.deepEqual(writers.sort(), ['deliver', 'nudge', 'nudgeCoordination', 'nudgeUrgent']);
+  assert.equal((await g.deliver('s-1', 'go ahead')).outcome, Outcome.SUPPRESSED_NOT_PERSON);
+  for (const m of ['nudge', 'nudgeUrgent', 'nudgeCoordination']) await g[m]('s-1', 'go ahead');
+  await sendSafe(g, 's-1', 'go ahead');
+  assert.equal(sent.length, 4);
+  for (const t of sent) assert.equal(t, '[watchdog] go ahead');
 });
 
 test('ClosedInputGateSuppressesBeforePaneWrite', async () => {
@@ -176,6 +215,9 @@ test('sendSafe refuses every state but idle (review 0b-3 M3)', async () => {
     assert.equal(r.sent.length, 0);
   }
   assert.equal((await sendSafe(rig(live(State.IDLE, { firstSignalAt: undefined })).guard, 's-1', 'x')).outcome, Outcome.SUPPRESSED_STARTUP_PENDING);
+  // No capability can be passed through sendSafe (audit m5).
+  const act = rig(live(State.ACTIVE));
+  assert.equal((await sendSafe(act.guard, 's-1', 'x', { steersActiveTurn: () => true })).outcome, Outcome.SUPPRESSED_BUSY);
 });
 
 test('an open AskUserQuestion is waiting on the person until it is answered', async () => {
@@ -194,6 +236,74 @@ test('an open AskUserQuestion is waiting on the person until it is answered', as
   assert.equal(store.get('L').activity.state, State.ACTIVE);
 });
 
+// Audit 0b-3 R29 MAT-1: nothing but the answer, a real prompt or the end lifts an open question.
+test('an open question survives idle notifications, stops, helper finishes and unknown tags', async () => {
+  const lifts = [
+    ['notification', { notification_type: 'idle_prompt' }],
+    ['notification', { notification_type: 'agent_completed' }],
+    ['stop', {}],
+    ['stop-failure', {}],
+    ['post-tool-use', { tool_name: 'AskUserQuestion', tool_use_id: 'other' }],
+    ['user-prompt-submit', { prompt: '[watchdog] WRAP' }],
+  ];
+  for (const [e, p] of lifts) {
+    const store = new MemoryStore();
+    const tracker = new ActivityTracker(store);
+    store.set('L', { id: 'L', activity: { state: State.ACTIVE, at: 0 }, firstSignalAt: 1 });
+    tracker.applySignal('L', signalFromHook('pre-tool-use', { tool_name: 'AskUserQuestion', tool_use_id: 'q1' }));
+    tracker.applySignal('L', signalFromHook(e, p));
+    tracker.applySignal('L', { valid: true, state: State.IDLE }); // untagged stray
+    assert.equal(store.get('L').activity.state, State.WAITING_INPUT, `${e} lifted the question`);
+    const guard = new Guard({ store: { getSession: (id) => store.get(id) }, messenger: { send: async () => assert.fail(`typed after ${e}`) } });
+    assert.equal((await sendSafe(guard, 'L', 'WRAP')).outcome, Outcome.SUPPRESSED_AWAITING_USER);
+    assert.equal((await guard.nudgeUrgent('L', 'WRAP', { acceptsWaitingInput: () => true })).outcome, Outcome.SUPPRESSED_AWAITING_USER, 'audit m4');
+  }
+  // A real prompt from the person does end it.
+  const store = new MemoryStore();
+  const tracker = new ActivityTracker(store);
+  store.set('L', { id: 'L', activity: { state: State.ACTIVE, at: 0 }, firstSignalAt: 1 });
+  tracker.applySignal('L', signalFromHook('pre-tool-use', { tool_name: 'AskUserQuestion', tool_use_id: 'q1' }));
+  tracker.applySignal('L', signalFromHook('user-prompt-submit', { prompt: 'never mind' }));
+  assert.equal(store.get('L').activity.state, State.ACTIVE);
+});
+
+test('a question opened while another dialog shows stays open after that dialog ends', async () => {
+  const store = new MemoryStore();
+  const tracker = new ActivityTracker(store);
+  store.set('L', { id: 'L', activity: { state: State.ACTIVE, at: 0 }, firstSignalAt: 1 });
+  const hook = (e, p) => tracker.applySignal('L', signalFromHook(e, p));
+  hook('pre-tool-use', { tool_name: 'Bash', tool_use_id: 'b1' });
+  hook('permission-request', { tool_name: 'Bash' });
+  hook('pre-tool-use', { tool_name: 'AskUserQuestion', tool_use_id: 'q1' });
+  assert.equal(store.get('L').activity.state, State.BLOCKED);
+  hook('post-tool-use', { tool_name: 'Bash', tool_use_id: 'b1' });
+  assert.equal(store.get('L').activity.state, State.WAITING_INPUT);
+  hook('notification', { notification_type: 'idle_prompt' });
+  assert.equal(store.get('L').activity.state, State.WAITING_INPUT);
+  const guard = new Guard({ store: { getSession: (id) => store.get(id) }, messenger: { send: async () => assert.fail('typed') } });
+  assert.equal((await sendSafe(guard, 'L', 'WRAP')).outcome, Outcome.SUPPRESSED_AWAITING_USER);
+  hook('post-tool-use', { tool_name: 'AskUserQuestion', tool_use_id: 'q1' });
+  assert.equal(store.get('L').activity.state, State.ACTIVE);
+});
+
+// Audit 0b-3 R29 MAT-2.
+test('late hooks never bring an exited session back; a real prompt does', () => {
+  for (const [e, p] of [['stop', {}], ['notification', { notification_type: 'idle_prompt' }], ['pre-tool-use', { tool_name: 'Read', tool_use_id: 'r' }], ['user-prompt-submit', { prompt: '[watchdog] x' }], [null]]) {
+    const store = new MemoryStore();
+    const tracker = new ActivityTracker(store);
+    store.set('S', { id: 'S', activity: { state: State.IDLE, at: 0 }, firstSignalAt: 1 });
+    tracker.applySignal('S', signalFromHook('session-end', { reason: 'logout' }));
+    assert.equal(store.get('S').activity.state, State.EXITED);
+    tracker.applySignal('S', e ? signalFromHook(e, p) : { valid: true, state: State.IDLE });
+    assert.equal(store.get('S').activity.state, State.EXITED, `${e} revived it`);
+  }
+  const store = new MemoryStore();
+  const tracker = new ActivityTracker(store);
+  store.set('S', { id: 'S', activity: { state: State.EXITED, at: 0 }, firstSignalAt: 1 });
+  tracker.applySignal('S', signalFromHook('user-prompt-submit', { prompt: 'hello' }));
+  assert.equal(store.get('S').activity.state, State.ACTIVE);
+});
+
 test('Claude hook mapping', () => {
   assert.equal(deriveActivityState('permission-request'), State.BLOCKED);
   assert.equal(deriveActivityState('notification', { notification_type: 'agent_needs_input' }), State.WAITING_INPUT);
@@ -210,8 +320,11 @@ test('tmux messenger: argument arrays, literal text, refuses control characters 
   const calls = [];
   const m = tmuxMessenger({ run: async (cmd, args) => calls.push([cmd, ...args]), targetFor: (id) => (id === 'bad' ? 'x;rm' : `orch:${id}`) });
   await m.send('w-1', '[watchdog] hi $(whoami)');
-  assert.deepEqual(calls, [['tmux', 'send-keys', '-t', 'orch:w-1', '-l', '--', '[watchdog] hi $(whoami)'], ['tmux', 'send-keys', '-t', 'orch:w-1', 'Enter']]);
+  // Text and Enter in one tmux call (audit m1).
+  assert.deepEqual(calls, [['tmux', 'send-keys', '-t', 'orch:w-1', '-l', '--', '[watchdog] hi $(whoami)', ';', 'send-keys', '-t', 'orch:w-1', 'Enter']]);
   await assert.rejects(m.send('w-1', 'line one\nline two'));
   await assert.rejects(m.send('bad', 'x'));
-  assert.equal(calls.length, 2);
+  await assert.rejects(m.send('w-1', '[watchdog] ends;'), /ends in/);
+  await assert.rejects(m.send('w-1', ';'), /ends in/);
+  assert.equal(calls.length, 1);
 });

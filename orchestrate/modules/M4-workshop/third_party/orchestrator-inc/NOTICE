@@ -1,6 +1,7 @@
 Parts of orchestrate/modules/M4-workshop/send-safe/ are a port of Agent Orchestrator by
-Orchestrator.inc, commit 1e478c5, licensed under the Apache License, Version 2.0 (see LICENSE
-in this folder).
+Orchestrator.inc (https://github.com/OrchestratorInc/agent-orchestrator), commit 1e478c5,
+Copyright 2026 Untrivial, licensed under the Apache License, Version 2.0 (see LICENSE in this
+folder).
 
 Files modified: ported from Go to JavaScript, with changes.
   send-safe/activity.mjs       from backend/internal/domain/activity.go and
@@ -10,6 +11,19 @@ Files modified: ported from Go to JavaScript, with changes.
   send-safe/toolflight.test.mjs from backend/internal/lifecycle/toolflight_test.go
   send-safe/guard.test.mjs     partly from backend/internal/sessionguard/guard_test.go
 
-Main changes from the original: typed "[watchdog]" lines never lift a pause or count as an
-approval; a session that has sent no hook yet is never typed into by default; an unknown
-activity state is refused; the mutation-fence and unsent-draft variants are not ported.
+Main changes from the original:
+  - typed "[watchdog]" lines never lift a pause or count as an approval, and every automated
+    write path (sendSafe and every nudge) adds that prefix; only a guard made for the person
+    may type without it;
+  - a signal with no event tag never lifts a pause (upstream: last writer wins);
+  - an open AskUserQuestion is tracked: only its own answer, a real prompt or the session's
+    end lifts it, and an urgent nudge never types into it;
+  - after the in-flight cap resets, no tool is named for a dialog until the next turn boundary;
+  - a session that has sent no hook yet is never typed into by default; an unknown activity
+    state is refused;
+  - the input lease may be async, and a refused, failed or odd lease means nothing is typed;
+  - tmux text and Enter go in one call, and text ending in ";" is refused;
+  - kept from upstream: late signals after the session ended are dropped unless a real prompt
+    restarts it;
+  - not ported: the mutation-fence and unsent-draft variants, the launch-id check, and the
+    adapters for other agents.

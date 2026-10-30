@@ -24,8 +24,9 @@ export const isSticky = (s) => s === State.WAITING_INPUT || s === State.BLOCKED;
 // The person is the one who unblocks: waiting for the next instruction, or on a decision.
 export const needsInput = (s) => s === State.WAITING_INPUT || s === State.BLOCKED;
 
-// Lost posts must not grow the in-flight map forever; at the cap it resets, which only
-// makes that session clear at the next turn boundary (fail-safe).
+// Lost posts must not grow the in-flight map forever; at the cap it resets. Ours: after a
+// reset the map may have lost the dialog's own tool, so no candidate is named until the next
+// turn boundary, and only that boundary clears a block (upstream named a same-name sibling).
 export const MAX_INFLIGHT_TOOLS = 128;
 
 const isPostToolUseEvent = (e) => e === 'post-tool-use' || e === 'post-tool-use-failure';
@@ -51,7 +52,8 @@ export class ActivityTracker {
     this.store = store;
     this.notify = notify;
     this.now = now;
-    this.flights = new Map(); // id -> { inflight: Map<toolUseId, toolName>, blockedCandidate }
+    // id -> { inflight: Map<toolUseId, toolName>, blockedCandidate, degraded, openAsk }
+    this.flights = new Map();
   }
 
   // Folds an event-tagged signal through the session's tool-flight state and returns the
@@ -64,18 +66,43 @@ export class ActivityTracker {
     if (!s.event) return isSticky(cur) ? suppressed : s;
     let fl = this.flights.get(id);
     const ensure = () => {
-      if (!fl) { fl = { inflight: new Map(), blockedCandidate: '' }; this.flights.set(id, fl); }
+      if (!fl) { fl = { inflight: new Map(), blockedCandidate: '', degraded: false, openAsk: null }; this.flights.set(id, fl); }
       return fl;
     };
 
     if (s.event === 'pre-tool-use') {
       if (s.toolUseId) {
         const f = ensure();
-        if (f.inflight.size >= MAX_INFLIGHT_TOOLS) f.inflight = new Map();
+        if (f.inflight.size >= MAX_INFLIGHT_TOOLS) { f.inflight = new Map(); f.degraded = true; f.blockedCandidate = ''; }
         f.inflight.set(s.toolUseId, s.toolName ?? '');
       }
     } else if (isPostToolUseEvent(s.event)) {
       if (fl) fl.inflight.delete(s.toolUseId);
+    }
+
+    // Ours (audit 0b-3 R29 MAT-1): an open AskUserQuestion waits on the person even while
+    // another dialog is showing. Remember it, and while it is open only its own answer, an
+    // escalation to blocked, a real prompt from the person or the session's end may move the
+    // state. Idle notifications, stops and helper traffic never do.
+    if (s.event === 'ask-user-question-open') ensure().openAsk = s.toolUseId || '*';
+    if (fl?.openAsk && s.event !== 'ask-user-question-open') {
+      const realPrompt = s.event === 'user-prompt-submit' && !isWatchdogText(s.prompt);
+      const ends = s.state === State.EXITED;
+      if (s.event === 'ask-user-question-answered') {
+        if (fl.openAsk !== '*' && s.toolUseId !== fl.openAsk) return suppressed;
+        fl.openAsk = null;
+        if (cur === State.BLOCKED) return suppressed; // the other dialog is still showing
+        return s;
+      }
+      if (realPrompt || ends) { this.flights.delete(id); return s; }
+      if (s.state !== State.BLOCKED) {
+        // The blocking tool's own post ends that dialog, but the question is still open.
+        if (cur === State.BLOCKED && isPostToolUseEvent(s.event) && fl.blockedCandidate && s.toolUseId === fl.blockedCandidate) {
+          fl.blockedCandidate = '';
+          return { ...s, state: State.WAITING_INPUT, reason: 'question' };
+        }
+        return suppressed;
+      }
     }
 
     if (s.state === State.BLOCKED) {
@@ -85,6 +112,7 @@ export class ActivityTracker {
       const f = ensure();
       // An identity-less duplicate (a bare Notification) must not erase the candidate.
       if (s.toolUseId || s.toolName) f.blockedCandidate = '';
+      if (f.degraded) return s; // the map may have lost the dialog's tool: name none
       if (s.toolUseId && f.inflight.has(s.toolUseId)) f.blockedCandidate = s.toolUseId;
       if (!f.blockedCandidate && s.toolName) {
         for (const [useId, name] of f.inflight) {
@@ -115,6 +143,8 @@ export class ActivityTracker {
     }
 
     if (isSticky(cur) && isToolUseEvent(s.event)) return suppressed; // background traffic can't clear waiting
+    // Ours: a notification never takes a session out of waiting (only a real boundary does).
+    if (isSticky(cur) && s.event === 'notification' && !needsInput(s.state)) return suppressed;
     // Ours: a [watchdog] line can't take a session out of "waiting on the person" either.
     if (isSticky(cur) && s.event === 'user-prompt-submit' && isWatchdogText(s.prompt)) return suppressed;
     if (isTurnBoundaryEvent(s.event)) this.flights.delete(id);
@@ -126,13 +156,18 @@ export class ActivityTracker {
     const rec = this.store.get(id);
     if (!rec || rec.terminated) return;
     let s = signal;
+    // Ours, as upstream (audit 0b-3 R29 MAT-2): an exited session's terminal may now be a plain
+    // shell. Late hooks from the old process never bring it back; only a real prompt does.
+    if (rec.activity.state === State.EXITED && s.state !== State.EXITED
+      && !(s.event === 'user-prompt-submit' && !isWatchdogText(s.prompt))) return;
     if (s.valid) s = this.applyToolPrecedence(id, rec.activity.state, s);
     if (!s.valid) return;
     const at = s.at ?? this.now();
     const prev = rec.activity.state;
     // A same-state repeat after the first signal is not a write.
-    if (prev === s.state && rec.firstSignalAt) return;
-    const next = { ...rec, activity: { state: s.state, at } };
+    if (prev === s.state && (rec.activity.reason ?? null) === (s.reason ?? null) && rec.firstSignalAt) return;
+    // `reason: 'question'` marks a wait on an open AskUserQuestion (nudgeUrgent never types into it).
+    const next = { ...rec, activity: { state: s.state, at, ...(s.reason ? { reason: s.reason } : {}) } };
     if (!next.firstSignalAt) next.firstSignalAt = at;
     if (s.state === State.EXITED) this.flights.delete(id); // no correlation survives an exit
     this.store.set(id, next);

@@ -182,3 +182,18 @@ test('SuppressedSignalEmitsNoNotification', () => {
   assert.equal(h.notes.length, entered);
 });
 
+
+// Audit 0b-3 R29 MAT-5: after the in-flight map resets at the cap, no tool is named for a
+// dialog, so a lost-and-reused tool's post cannot lift the block; only a turn boundary does.
+test('at the cap the session is degraded and only a turn boundary clears a block', async () => {
+  const { MAX_INFLIGHT_TOOLS } = await import('./activity.mjs');
+  const h = setup();
+  for (let i = 0; i < MAX_INFLIGHT_TOOLS; i += 1) h.apply(sig(State.ACTIVE, 'pre-tool-use', 'Read', `r${i}`));
+  h.apply(sig(State.ACTIVE, 'pre-tool-use', 'Bash', 'toolu_1')); // the reset happens here
+  h.apply(sig(State.BLOCKED, 'permission-request', 'Bash', 'toolu_1'));
+  assert.equal(h.stateOf(), State.BLOCKED);
+  h.apply(sig(State.ACTIVE, 'post-tool-use', 'Bash', 'toolu_1'));
+  assert.equal(h.stateOf(), State.BLOCKED, 'a degraded session named a tool');
+  h.apply(sig(State.IDLE, 'stop'));
+  assert.equal(h.stateOf(), State.IDLE);
+});
