@@ -134,7 +134,7 @@ test('every legal move succeeds for each listed actor when its condition holds',
             if (actor === 'workshop') next.head = 'c'.repeat(40);
             if (to === 'verified' || to === 'approved') {   // every way in needs a pass for the head (round 3 MAT-A)
               ok(env.record.write({ actor: 'dispatcher', entity: 'launch', id: `launch-${id}`, expectRev: 0, doc: { session_id: `R-${id}`, role: 'reviewer', card: id, head: HEAD, rev: 1, launched_at: iso(t) } }), 'launch');
-              env.store.transaction((tx) => tx.commit([{ entity: 'verdict', id: `verdict-${id}`, doc: { session_id: `R-${id}`, role: 'reviewer', card: id, head: HEAD, pass: true } }], { actor: `reviewer:R-${id}`, kind: 'verdict' }));
+              env.store.transaction((tx) => tx.commit([{ entity: 'verdict', id: `verdict-${id}`, doc: { session_id: `R-${id}`, role: 'reviewer', card: id, head: HEAD, pass: true, outbox_uid: 501 } }], { actor: `reviewer:R-${id}`, kind: 'verdict' }));
             }
             if (to === 'merged') { next.merge_commit = HEAD; seed(env, 'merge', `merged-${id}`, { state: 'merged', card: id, merge_commit: HEAD }); }
             const cardWrite = { entity: 'card', id, expectRev: env.record.read('card', id).rev, doc: next };

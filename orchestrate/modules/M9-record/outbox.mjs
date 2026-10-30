@@ -12,6 +12,12 @@
 //   `key` is the file's identity for "seen before": its real path and sha256 (R3-m7). An unsafe file that can't be read
 //   is keyed by its path and the reason, so the same refusal is reported once.
 //   `uids` maps a role to the uid that must own its files (the owner's user in production).
+//
+// A VERDICT (lead call L44). Every other role writes as the same Mac user, so a worker could forge a reviewer's verdict.
+// A verdict kind is read only when the review roles (REVIEW_ROLES) have a Mac user of their own: the role's uid is set
+// and is no other role's uid, and the role and session folders are owned by it and writable by no one else. The
+// result carries `owner_uid` (the review user) so the record can show where the verdict came from. Whether the session
+// was launched as a reviewer on that head is the record's check (writer.mjs), made in the same transaction.
 
 import { createHash } from 'node:crypto';
 import { closeSync, fstatSync, lstatSync, openSync, readSync, realpathSync, constants } from 'node:fs';
@@ -19,6 +25,18 @@ import { basename, dirname, join } from 'node:path';
 import { OUTBOX_KINDS, SESSION_ID } from '../../shared/record.mjs';
 
 export const MAX_OUTBOX_BYTES = 256 * 1024;
+export const REVIEW_ROLES = Object.freeze(['reviewer', 'auditor']);
+
+// Is the review user a separate Mac user? null when it is, else the reason (L44). Also used by the Merge Gate.
+export function reviewUserProblem(uids, role) {
+  if (!REVIEW_ROLES.includes(role)) return `${role} is not a review role`;
+  const own = uids?.[role];
+  if (!Number.isInteger(own)) return `no review user configured for ${role}`;
+  if (own === 0) return 'the review user may not be root';
+  const shared = Object.entries(uids ?? {}).filter(([r, u]) => !REVIEW_ROLES.includes(r) && u === own).map(([r]) => r);
+  if (shared.length) return `the review user is not a separate Mac user (shared with ${shared.join(', ')})`;
+  return null;
+}
 
 // The longest listed kind the name starts with (so `report-compact-x` is report-compact-, not report-).
 export function kindOf(name) {
@@ -55,6 +73,17 @@ export function readOutboxFile({ outboxRoot, uids = {}, tag, file }) {
 
   const owner = uids[tag.role];
   if (!Number.isInteger(owner)) return no(`no owner uid configured for ${tag.role} outboxes`);
+  if (spec.entity === 'verdict') {
+    const p = reviewUserProblem(uids, tag.role);
+    if (p) return no(`verdict refused: ${p}`);
+    try {
+      for (const d of [join(outboxRoot, tag.role), join(outboxRoot, tag.role, tag.sessionId)]) {
+        const st = lstatSync(d);
+        if (st.uid !== owner) return no(`verdict refused: outbox folder ${basename(d)} is not owned by the review user`);
+        if (st.mode & 0o022) return no(`verdict refused: outbox folder ${basename(d)} is writable by others than the review user`);
+      }
+    } catch { return no('verdict refused: the outbox folder could not be checked'); }
+  }
   let fd;
   // O_NONBLOCK: a FIFO can't hang the pass (0b-2 audit round 9 M5).
   try { fd = openSync(real, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); } catch (e) { return no(e?.code === 'ELOOP' ? 'file is a link' : `can't open file (${e?.code ?? 'error'})`); }
@@ -78,7 +107,7 @@ export function readOutboxFile({ outboxRoot, uids = {}, tag, file }) {
   let text;
   try { text = new TextDecoder('utf-8', { fatal: true }).decode(buf); } catch { return no('file is not valid UTF-8 text', key); }
 
-  if (spec.mode === 'create') return { ok: true, key, kind, spec, header: null, body: text, sha256, realpath: real };
+  if (spec.mode === 'create') return { ok: true, key, kind, spec, header: null, body: text, sha256, realpath: real, owner_uid: owner };
   const nl = text.indexOf('\n');
   const first = nl < 0 ? text : text.slice(0, nl);
   let header;
@@ -86,5 +115,5 @@ export function readOutboxFile({ outboxRoot, uids = {}, tag, file }) {
   if (!header || typeof header !== 'object' || Array.isArray(header)) return no('the header is not a JSON object', key);
   if (header.entity !== spec.entity) return no(`a ${kind} file's header must name entity ${spec.entity}`, key);
   if (header.fields !== undefined && (!header.fields || typeof header.fields !== 'object' || Array.isArray(header.fields))) return no('header fields must be an object', key);
-  return { ok: true, key, kind, spec, header, body: nl < 0 ? '' : text.slice(nl + 1), sha256, realpath: real };
+  return { ok: true, key, kind, spec, header, body: nl < 0 ? '' : text.slice(nl + 1), sha256, realpath: real, owner_uid: owner };
 }

@@ -22,7 +22,12 @@ export function setup({ values, prefix = 'm9-rec-', probe, faultAt, host = 'mac-
   const uids = Object.fromEntries(['lead', 'worker', 'reviewer', 'auditor', 'incident', 'scout', 'writer', 'front_door', 'thinking', 'learning', 'script'].map((r) => [r, UID]));
   const opened = openRecord({ root, product: PRODUCT, ownerUid: UID, rules, alert: (a) => alerts.push(a), now: () => clock.t, host,
     probe, faultAt, outbox: { root: outRoot, uids }, ...extra });
-  return { ...opened, base, root, outRoot, clock, alerts, rules };
+  // The review user (L44): reviewers and auditors write as a Mac user of their own. Tests run as one user, so this second
+  // view of the same store calls this test's user the review user and every other role someone else; verdicts go in here.
+  const reviewUids = Object.fromEntries(Object.keys(uids).map((r) => [r, r === 'reviewer' || r === 'auditor' ? UID : UID + 1]));
+  const review = openRecord({ root, product: PRODUCT, ownerUid: UID, rules, alert: (a) => alerts.push(a), now: () => clock.t, host,
+    probe, outbox: { root: outRoot, uids: reviewUids }, ...extra }).record;
+  return { ...opened, review, base, root, outRoot, clock, alerts, rules };
 }
 
 export const iso = (ms) => new Date(ms).toISOString();
