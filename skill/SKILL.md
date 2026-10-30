@@ -26,7 +26,7 @@ It prints exactly one line, `BOB_UPDATE: status=...`. It is throttled (one netwo
 
 This check must never block the session: if the script errors or is missing, proceed silently. It does NOT count as the "one startup question" — the update offer only appears when genuinely behind, and the mode question is still the only thing the user decides in the common (up-to-date) path.
 
-1. **Read the core protocol first**: `~/.claude/skills/bob/../build-protocol-core.md`. That file is the compact reference and contains the mode menu (NEW / AUDIT / EVOLVE / UPGRADE), complexity assessment, document hierarchy, and rules. (The skill at `~/.claude/skills/bob` is a symlink to wherever the user cloned Bob — `..` from there resolves to the repo root regardless of install location.)
+1. **Find Bob's folder, then read the core protocol first.** Run `realpath ~/.claude/skills/bob/..` in the shell; call the result BOB. Then read `BOB/build-protocol-core.md` by that absolute path, and every other Bob file named below the same way (the file-reading tool can't follow the `..` in `~/.claude/skills/bob/..`; `bash` and `cat` can). That file is the compact reference and contains the mode menu (NEW / AUDIT / EVOLVE / UPGRADE), complexity assessment, document hierarchy, and rules. (The skill at `~/.claude/skills/bob` is a symlink to wherever the user cloned Bob — `..` from there resolves to the repo root regardless of install location.)
 
 2. **Then follow the protocol's own instructions.** It tells you what to do next — including when to load the full reference at `~/.claude/skills/bob/../build-protocol.md` for templates, appendices, and architecture patterns.
 
