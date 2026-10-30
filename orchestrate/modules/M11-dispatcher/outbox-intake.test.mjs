@@ -246,3 +246,19 @@ test('audit 0b-6 r2 MIN-10 (round 1 MIN-12): a hand-in whose check throws is not
   assert.match(out[0].refused, /could not be checked: bad rules/);
   assert.match(w.calls.notes.join('\n'), /not used yet: could not be checked/);
 });
+
+test('audit 0b-6 r3 MIN-5 (J11): after an interrupted hand-in, a new copy under the same name is applied', async () => {
+  const { createHash } = await import('node:crypto');
+  const w = world();
+  const ob = mk(join(w.root, 'worker'));
+  writeFileSync(join(ob, 'report-C-1.md'), 'done');
+  const sha = createHash('sha256').update('done').digest('hex');
+  const rec = recWith([['card', 'C-1', { state: 'running' }], ['fact', 'outbox-S-1-report-C-1.md', { session: 'S-1', name: 'report-C-1.md', sha256: sha, state: 'applying' }]]);
+  const sessions = [{ sessionId: 'S-1', role: 'worker', outbox: ob, uid: UID, card: 'C-1' }];
+  await intakePass({ rec, sessions, ...w.ports });
+  assert.equal(rec.read('fact', 'outbox-S-1-report-C-1.md').doc.state, 'interrupted');
+  writeFileSync(join(ob, 'report-C-1.md'), 'done, again');
+  const out = await intakePass({ rec, sessions, ...w.ports });
+  assert.equal(out[0].applied, true, JSON.stringify(out));
+  assert.equal(rec.read('fact', 'outbox-S-1-report-C-1.md').doc.state, 'applied');
+});

@@ -93,7 +93,8 @@ export function editingLimits({ rules, product, productDoc, amberCaps }) {
  */
 export function startGate({ rules, rec, card, kind, product, b, running, lead }) {
   try {
-    const redRuns = need(rules, KEYS.redRuns, { type: 'list' });
+    // An undo needs no band value, so a missing red_runs never holds it (audit 0b-6 r3 MAT-3, L31).
+    const redRuns = kind === 'undo' || kind === 'undo_merge' ? [] : need(rules, KEYS.redRuns, { type: 'list' });
     const { tier, risky } = riskOf(rules, card);
     const band = mayStart({ b, kind, tier, risky, repair: card?.kind === 'repair', redRuns });
     if (!band.ok) return band;
@@ -124,7 +125,9 @@ export function startGate({ rules, rec, card, kind, product, b, running, lead })
     if (onMac >= lim.mac) return refuse(`the Mac already runs ${onMac} editing workers (cap ${lim.mac})`);
     return disjoint({ rules, card, product, others: mine.filter(writesFiles), rec });
   } catch (e) {
-    return refuse(`the rules have no value for ${e.key ?? e.message}: start nothing`);
+    // `missing` names the key, so the caller can tell Joe once (audit 0b-6 r3 MAT-3); a refusal alone was silent.
+    const missing = e.key ?? `the rules (${e.message})`;
+    return { ...refuse(`the rules have no value for ${missing}: start nothing`), missing };
   }
 }
 

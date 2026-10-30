@@ -217,9 +217,28 @@ function seal(bundle, sealRoot, card, now) {
   return { path: dest, sha256: createHash('sha256').update(readFileSync(dest)).digest('hex') };
 }
 
+// A staging folder older than this was left by a run that was killed (audit 0b-6 r3 MIN-6): the pass
+// lock means no other pass is using it, and the margin is far past any one pass.
+export const STALE_STAGING_MS = 60 * 60_000;
+
+/** Removes `.staging-*` folders in sealRoot older than STALE_STAGING_MS; never a link, never throws. */
+export function sweepStaging(sealRoot, now) {
+  const gone = [];
+  let names = [];
+  try { names = readdirSync(sealRoot).filter((n) => n.startsWith('.staging-')); } catch { return gone; }
+  for (const n of names) {
+    const p = join(sealRoot, n);
+    const s = st(p);
+    if (!s?.isDirectory() || now - s.mtimeMs <= STALE_STAGING_MS) continue;
+    try { rmSync(p, { recursive: true, force: true }); gone.push(n); } catch { /* tried again next pass */ }
+  }
+  return gone;
+}
+
 /** Every copy folder under copiesRoot, one at a time. `mirrorFor(cardDoc)` names the product's mirror. */
 export async function cleanupPass({ rec, rules, now, copiesRoot, sealRoot, mirrorFor, git, saveWork, alert }) {
   const out = [];
+  if (sealRoot) for (const n of sweepStaging(sealRoot, now)) out.push([n, { result: 'removed', reasons: ['a staging folder left by a killed run'] }]);
   let names = [];
   try { names = readdirSync(copiesRoot).filter((n) => !n.startsWith('.')); } catch { return out; }
   for (const card of names.sort()) {

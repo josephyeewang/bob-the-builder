@@ -177,3 +177,19 @@ test('audit MAT-10: the Front Door gone is restarted with its last handoff, at m
   assert.equal((await step(7, null)).includes('Front Door was missing; restarted'), false); // unknown is not missing
   assert.equal(handoffs.length, 2);
 });
+
+test('audit 0b-6 r3 MIN-5 (J8): a reading older than 5 min is unknown, not used', async () => {
+  const w = world();
+  w.read(0, { net: false });
+  assert.deepEqual(await w.step(4), ['network down: nothing done']);
+  assert.deepEqual(await w.step(6), ['network unknown: nothing done']);
+});
+
+test('audit 0b-6 r3 MIN-5 (J9): the network dropping clears the refused clock and the false count', async () => {
+  const w = world();
+  w.rec.write({ actor: 'dispatcher', entity: 'fact', id: LINK_FACT, expectRev: 0, doc: { false_streak: 1, attempts: 0, failures: 0, refused_since: iso(T0 - 9 * MIN) } });
+  w.read(0, { net: false });
+  await w.step(0);
+  const d = w.rec.read('fact', LINK_FACT).doc;
+  assert.deepEqual([d.refused_since, d.false_streak], [null, 0]);
+});

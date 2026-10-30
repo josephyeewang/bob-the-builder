@@ -43,7 +43,10 @@ export function leadInFlight({ rec, sessionId, outboxNames, questionOpen }) {
   if (questionOpen) return 'a question box is open';
   for (const name of outboxNames) {
     const used = rec.read('fact', `outbox-${sessionId}-${name}`)?.doc?.state;
-    if (name.startsWith('.') || !['applied', 'refused', 'interrupted'].includes(used)) return `outbox file ${name} not used yet`;
+    // A read-only request queued on a refusal (`waiting`, held by the red band or a cap) is not in flight:
+    // it could wait until the weekly reset, and the Lead's restart is never held by the budget (audit
+    // 0b-6 r3 MAT-4, L31). WRAP tells the Lead that queued requests do not carry over.
+    if (name.startsWith('.') || !['applied', 'refused', 'interrupted', 'waiting'].includes(used)) return `outbox file ${name} not used yet`;
   }
   // `claim` leaves the record's entities in 0b-2; only the ones the record still has are read.
   for (const entity of ['card', 'merge', 'ask', 'go', 'claim', 'report'].filter((e) => ENTITIES.includes(e))) {
@@ -105,7 +108,9 @@ export async function leadRestartStep({ rec, rules, now, lead, size, inFlight, s
   // Only a hand-off applied after WRAP counts (audit 0b-6 r2 MAT-3): an older one under the same name
   // would start the new Lead from an out-of-date note. No time recorded counts as older.
   const since = Date.parse(st.wrap_at ?? st.sent_at);
-  const fresh = used?.state === 'applied' && Date.parse(used.applied_at ?? '') >= since;
+  // Strictly after: intake and this step share one `now`, so a hand-off applied in the pass that sent WRAP
+  // was written before it (audit 0b-6 r3 MIN-3).
+  const fresh = used?.state === 'applied' && Date.parse(used.applied_at ?? '') > since;
   if (fresh) {
     const hcur = rec.read('handoff', `handoff-${sid}`);
     if (hcur?.doc?.sha256 !== used.sha256) {
@@ -145,4 +150,4 @@ export async function leadRestartStep({ rec, rules, now, lead, size, inFlight, s
   return 'gave up; the old Lead keeps running';
 }
 
-const wrapText = (sid, cap) => `WRAP: this session is large. Write your handoff to your outbox as ${HANDOFF_NAME(sid)}, under ${cap} tokens (about ${cap * 4} bytes), then reply DONE.`;
+const wrapText = (sid, cap) => `WRAP: this session is large. Write your handoff to your outbox as ${HANDOFF_NAME(sid)}, under ${cap} tokens (about ${cap * 4} bytes), then reply DONE. Requests still queued in your outbox do not carry over: name any you still need in the handoff.`;

@@ -82,7 +82,7 @@ export async function intakePass({ rec, sessions, wait, alert, note, startReadon
       // copy may be handed in under the same name.
       // A `starting` claim (audit 0b-6 r2 MIN-7) is the same for a read-only start: it may have started, so it is never started twice.
       const what = prev.doc.state === 'starting' ? 'its read-only session may or may not have started, and was not started again' : 'it may or may not have reached the record, and was not applied again';
-      put({ ...prev.doc, sha256: prev.doc.sha256, state: 'interrupted', at: new Date().toISOString() }, 'outbox_interrupted');
+      put({ ...prev.doc, sha256: prev.doc.sha256, state: 'interrupted', at: new Date(now).toISOString() }, 'outbox_interrupted');
       alert(`the hand-in of ${name} from ${s.role} ${s.sessionId} was interrupted; ${what}`);
     }
     if (prev) {

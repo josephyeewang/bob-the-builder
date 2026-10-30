@@ -45,6 +45,23 @@ const iso = (ms) => new Date(ms).toISOString();
 // A port that throws answers { ok: false, reason } for that one session (audit 0b-6 r2 MAT-7).
 async function guarded(f) { try { return await f(); } catch (e) { return { ok: false, reason: e?.message ?? String(e) }; } }
 
+/**
+ * Tells Joe once per missing rules value, on the fact `factId` (audit MAT-2; 0b-6 r3 MAT-3: values only
+ * the start gate reads are told too, once for the whole tick). A key leaves the fact when a pass no
+ * longer reports it; a pass in which some step failed (`complete` false) drops nothing, since that step
+ * reported nothing. A value the gate reads only for some cards can be told again when such a card comes
+ * back after a pass without one: once per return, never once per pass. Returns the joined key list.
+ */
+export function rulesMissingAlert({ rec, factId = RULES_MISSING_FACT, keys, alert, now, what = 'nothing new starts until they do; stops still run', complete = true }) {
+  const seen = [...new Set(keys)].sort();
+  const had = String(factDoc(rec, factId)?.doc?.keys ?? '').split(', ').filter(Boolean);
+  const fresh = seen.filter((k) => !had.includes(k));
+  const keep = complete ? seen : [...new Set([...had, ...seen])].sort();
+  if (keep.join(', ') !== had.join(', ')) putFact(rec, factId, { keys: keep.join(', ') || null, at: iso(now) }, keep.length ? 'rules_missing' : 'rules_missing_cleared');
+  if (fresh.length) alert(`the rules have no value for ${fresh.join(', ')}: ${what}`);
+  return seen.join(', ') || null;
+}
+
 /** Stops a process group: SIGTERM, then SIGKILL if still alive after 10 s. Ports for tests. */
 export async function stopProcessGroup({ pgid, kill = (p, s) => process.kill(-p, s), alive, sleep, waitMs = TERM_WAIT_MS }) {
   if (!Number.isInteger(pgid) || pgid <= 1) return { ok: false, reason: 'no process group to stop' };
@@ -88,11 +105,13 @@ function stopReason({ s, card, productDoc, b, compactions, split }) {
  *   pauseLead({ product }) -> any    (lead-restart's WRAP flow for a paused product)
  *   alert(text)
  */
-export async function dispatcherPass({ rec, rules, now, account, sessions, probe, launch, stopGroup, saveWork, hostLock = () => null, pauseLead = () => {}, alert, startsOff = null }) {
+export async function dispatcherPass({ rec, rules, now, account, sessions, probe, launch, stopGroup, saveWork, hostLock = () => null, pauseLead = () => {}, alert, startsOff = null, tellMissing = true }) {
   const out = { started: [], refused: [], stopping: [], stopped: [], resumed: [], notes: [] };
   // A missing rules value starts nothing, but every stop still runs (audit MAT-2): Cancel needs no band.
+  // Any other failure reading the rules (an unreadable file) is treated the same, never thrown before
+  // the stop loop (audit 0b-6 r3 MAT-1).
   const missing = [];
-  const read = (f, fallback) => { try { return f(); } catch (e) { if (!(e instanceof MissingKey)) throw e; missing.push(e.key); return fallback; } };
+  const read = (f, fallback) => { try { return f(); } catch (e) { missing.push(e instanceof MissingKey ? e.key : `the rules (${e?.message ?? e})`); return fallback; } };
   const cancelMs = read(() => minutes(rules, KEYS.cancelGraceMin), CANCEL_GRACE_FLOOR_MS);
   const parkMs = read(() => minutes(rules, KEYS.parkWaitMin), Infinity);
   const split = read(() => need(rules, KEYS.splitAfterCompactions), Infinity);
@@ -101,19 +120,13 @@ export async function dispatcherPass({ rec, rules, now, account, sessions, probe
   // 1. Bands.
   const b = read(() => currentBands({ rec, rules, account, now }), { band: 'unknown', own_building: 'unknown', pace: null, prodBlocked: true, reason: 'the rules lack a band value' });
   const { unknownSince } = recordBands({ rec, b, now, account });
-  if (missing.length) {
-    const key = [...new Set(missing)].sort().join(', ');
-    if (factDoc(rec, RULES_MISSING_FACT)?.doc?.keys !== key) {
-      putFact(rec, RULES_MISSING_FACT, { keys: key, at: iso(now) }, 'rules_missing');
-      alert(`the rules have no value for ${key}: nothing new starts until they do; stops still run`);
-    }
-    startsOff ??= `the rules have no value for ${key}`;
-  } else if (factDoc(rec, RULES_MISSING_FACT)?.doc?.keys) putFact(rec, RULES_MISSING_FACT, { keys: null, at: iso(now) }, 'rules_missing_cleared');
+  if (missing.length) startsOff ??= `the rules have no value for ${[...new Set(missing)].sort().join(', ')}`;
 
-  // 2. host.lock (m5).
-  const host = hostLock();
+  // 2. host.lock (m5). An unreadable file is "not known" and changes nothing (audit 0b-6 r3 MAT-1).
+  let host;
+  try { host = hostLock(); } catch (e) { host = undefined; out.notes.push(`host.lock unreadable: ${e?.message ?? e}`); }
   const seen = factDoc(rec, HOST_FACT);
-  if ((seen?.doc?.text ?? null) !== (host ?? null)) {
+  if (host !== undefined && (seen?.doc?.text ?? null) !== (host ?? null)) {
     putFact(rec, HOST_FACT, { text: host ?? null, at: iso(now) }, 'host_lock');
     if (host && /\bair\b/i.test(host)) { note(rec, 'host-lock-note', "who's-home file says Air; ignored for orchestrated products", { now }); out.notes.push('host.lock says Air'); }
   }
@@ -183,18 +196,29 @@ export async function dispatcherPass({ rec, rules, now, account, sessions, probe
     alert('usage has been unreadable for over a day; parked work waits on you');
   }
 
-  // 6. Starts.
+  // 6. Starts. When starts are off (no account reading, a rules value missing), undo cards still go
+  // through the gate (audit 0b-6 r3 MAT-5, L31): the gate itself refuses what it cannot check.
   if (factDoc(rec, OUTAGE_FACT)?.doc?.state === 'open') { out.notes.push('outage: nothing starts'); }
-  else if (startsOff) { out.notes.push(`nothing starts: ${startsOff}`); }
-  else await starts({ rec, rules, now, b, running, launch, out, alert });
+  else {
+    if (startsOff) out.notes.push(`nothing but undo cards starts: ${startsOff}`);
+    await starts({ rec, rules, now, b, running, launch, out, alert, onlyUndo: !!startsOff, missing });
+  }
+  // The tick tells Joe once for all its steps (`tellMissing` false); run alone, the pass tells him itself.
+  out.missing = missing;
+  if (tellMissing) rulesMissingAlert({ rec, keys: missing, alert, now });
 
   // 7. Paused products: the Lead hands off once its workers are parked.
   for (const { id: product, doc } of rec.list('product')) {
     const pf = factDoc(rec, PAUSE_FACT(product));
-    if (doc.state !== 'paused') { if (pf?.doc?.state === 'asked') putFact(rec, PAUSE_FACT(product), { state: 'cleared', at: iso(now) }, 'pause_cleared'); continue; }
+    if (doc.state !== 'paused') { if (['asked', 'failed'].includes(pf?.doc?.state)) putFact(rec, PAUSE_FACT(product), { state: 'cleared', at: iso(now) }, 'pause_cleared'); continue; }
     if (pf?.doc?.state === 'asked') continue;
     if (running.some((s) => s.product === product && parkable(s))) continue;
-    await pauseLead({ product });
+    // A failing port is that product's problem, told once, not a failed pass (audit 0b-6 r3 MIN-2).
+    const asked = await guarded(async () => { await pauseLead({ product }); return { ok: true }; });
+    if (!asked.ok) {
+      if (pf?.doc?.reason !== asked.reason) { putFact(rec, PAUSE_FACT(product), { state: 'failed', reason: asked.reason, at: iso(now) }, 'pause_lead_failed'); alert(`the Lead of ${product} could not be asked to hand off: ${asked.reason}; tried again every pass`); }
+      continue;
+    }
     putFact(rec, PAUSE_FACT(product), { state: 'asked', at: iso(now) }, 'pause_lead');
     out.notes.push(`Lead of ${product} asked to hand off`);
   }
@@ -215,7 +239,9 @@ function moveAfterStop(rec, cardId, reason, now) {
 const tierOf = (c) => (c.tier === 2 ? 2 : 1);
 const capRefusal = (r) => /cap|already runs|shares |runs alone/.test(r);
 
-async function starts({ rec, rules, now, b, running, launch, out, alert }) {
+export const UNDO_HELD_FACT = (card) => `undo-held-${card}`;
+
+async function starts({ rec, rules, now, b, running, launch, out, alert, onlyUndo = false, missing = [] }) {
   const amberish = b.band !== 'green' || b.own_building !== 'open';
   // A card meant for the Lead to plan (for: 'lead') is never started as a worker (audit MAT-4).
   const ready = rec.list('card').filter((c) => c.doc.state === 'ready' && c.doc.for !== 'lead');
@@ -226,13 +252,22 @@ async function starts({ rec, rules, now, b, running, launch, out, alert }) {
   for (const { id, rev, doc } of ready) {
     const card = { id, ...doc };
     const product = doc.product;
-    const refuse = (reason) => { out.refused.push([id, reason]); };
-    const may = rules.may('start_session', { card, product });
+    if (onlyUndo && doc.kind !== 'undo') continue;
+    // An undo that cannot start is the way out of a bad change: Joe is told why, once per reason (audit 0b-6 r3 MAT-5).
+    const refuse = (reason) => {
+      out.refused.push([id, reason]);
+      if (doc.kind === 'undo' && factDoc(rec, UNDO_HELD_FACT(id))?.doc?.reason !== reason) {
+        putFact(rec, UNDO_HELD_FACT(id), { reason, at: iso(now) }, 'undo_held');
+        alert(`your undo (card ${id}) is waiting: ${reason}`);
+      }
+    };
+    let may;
+    try { may = rules.may('start_session', { card, product }); } catch (e) { may = { decision: 'refuse', reason: `could not be asked (${e?.message ?? e})` }; }
     if (may.decision !== 'allow') { refuse(`rules: ${may.reason}`); continue; }
     if (amberish && tierOf(doc) === 2 && tier1Waiting.has(product)) { refuse('queued behind Tier-1 work in amber'); continue; }
     const kind = kindOf(doc);
     const g = startGate({ rules, rec, card, kind, product, b, running });
-    if (!g.ok) { if (amberish && tierOf(doc) === 1 && capRefusal(g.reason)) tier1Waiting.add(product); refuse(g.reason); continue; }
+    if (!g.ok) { if (g.missing) missing.push(g.missing); if (amberish && tierOf(doc) === 1 && capRefusal(g.reason)) tier1Waiting.add(product); refuse(g.reason); continue; }
     const claim = rec.write({ actor: 'dispatcher', entity: 'card', id, expectRev: rev, doc: { ...doc, state: 'claimed', claimed_at: iso(now), changed_at: iso(now), rules_rev: may.rev ?? rules.rev ?? null }, kind: 'claim' });
     if (!claim.ok) { refuse(`not claimed: ${claim.reason}`); continue; }
     let l;
@@ -249,6 +284,7 @@ async function starts({ rec, rules, now, b, running, launch, out, alert }) {
       doc: { session_id: l.sessionId, role: 'worker', kind, card: id, head: l.head ?? null, rev: started.rev ?? null, product: product ?? null, launched_at: iso(now) } });
     if (!lr.ok) alert(`card ${id}: session ${l.sessionId} started but its launch was not recorded (${lr.reason}); its merge will be refused`);
     running.push({ id: l.sessionId, product, kind, card: id, pgid: l.pgid });
+    if (factDoc(rec, UNDO_HELD_FACT(id))?.doc?.reason) putFact(rec, UNDO_HELD_FACT(id), { reason: null, at: iso(now) }, 'undo_started');
     out.started.push(id);
   }
 }

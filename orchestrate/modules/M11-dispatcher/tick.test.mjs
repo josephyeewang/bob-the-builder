@@ -1,6 +1,10 @@
 import { test } from 'node:test';
+import { fileURLToPath } from 'node:url';
 import assert from 'node:assert/strict';
-import { mkdirSync, writeFileSync, readFileSync, rmSync, symlinkSync } from 'node:fs';
+import { mkdirSync, writeFileSync, readFileSync, rmSync, symlinkSync, readdirSync } from 'node:fs';
+import { takePassLock } from './pass-lock.mjs';
+import { RESTART_FACT, HANDOFF_NAME } from './lead-restart.mjs';
+import { RULES_MISSING_FACT } from './pass.mjs';
 import { tempDir } from '../../shared/test-tmp.mjs';
 import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
@@ -96,7 +100,7 @@ test('MIN-9: no signed-in account, or a stale one, starts nothing; the stops sti
     const w = world([usage(), card('C-1'), ...facts]);
     const r = await w.pass();
     assert.deepEqual(w.calls.launched, [], label);
-    assert.ok(r.steps.pass.result.notes.some((x) => /nothing starts: the signed-in account/.test(x)), label);
+    assert.ok(r.steps.pass.result.notes.some((x) => /nothing but undo cards starts: the signed-in account/.test(x)), label);
   }
   const fresh = world([usage(), card('C-1'), account(T0 - 14 * MIN)]);
   await fresh.pass();
@@ -227,7 +231,7 @@ test('M16: two ticks started together: one runs, one exits with a diary line; th
 test('main.mjs: runs one tick through a wiring module named in the config; a bad config or wiring exits 1', async () => {
   const dir = tempDir('m11-main-');
   const wiring = join(dir, 'wiring.mjs');
-  const here = new URL('.', import.meta.url).pathname;
+  const here = fileURLToPath(new URL('.', import.meta.url));
   writeFileSync(wiring, `import { recWith, rulesWith } from ${JSON.stringify(join(here, 'fixtures.test-helper.mjs'))};
 export const seen = [];
 const rec = recWith();
@@ -267,7 +271,7 @@ export { rec };
 
 test('audit 0b-6 r2 MAT-1: `node main.mjs <config>` runs a tick as a script, also through a symlinked folder; with no config it exits 1', () => {
   const dir = tempDir('m11-entry-');
-  const here = new URL('.', import.meta.url).pathname;
+  const here = fileURLToPath(new URL('.', import.meta.url));
   const link = join(dir, 'link');
   symlinkSync(here, link);
   const out = join(dir, 'ran.json');
@@ -388,4 +392,148 @@ test('L27 sweep: a card missing any one field starts no more than the card with 
       if (['pr', 'session', 'head'].includes(field)) assert.ok(!got.merges.includes(id), `${id} without ${field} was requested`);
     }
   }
+});
+
+// ---- audit 0b-6 round 3 ----
+
+test('audit 0b-6 r3 MAT-2: a port that never answers fails its own step at the deadline; the later steps still run; one alert', async () => {
+  const w = world([account(), usage(), card('C-1')], { over: { launch: () => new Promise(() => {}), stepDeadlineMs: 100 } });
+  const r = await w.pass();
+  assert.equal(r.steps.pass.ok, false);
+  assert.match(r.steps.pass.error, /did not finish within 100 ms/);
+  for (const s of STEPS.filter((x) => x !== 'pass')) assert.equal(r.steps[s].ok, true, s);
+  assert.equal(w.calls.alerts.length, 1, w.calls.alerts.join(' | '));
+  assert.match(w.calls.alerts[0], /pass step failed: it did not finish/);
+  assert.equal(w.rec.read('fact', LAST_PASS_FACT).doc.steps.pass, 'failed');
+});
+
+test('audit 0b-6 r3 MAT-2: `node main.mjs` stuck on a port exits 2 at the run deadline, even with a timer left open, and the next start breaks the lock', () => {
+  const dir = tempDir('m11-stuck-');
+  const here = fileURLToPath(new URL('.', import.meta.url));
+  const wiring = join(dir, 'wiring.mjs');
+  writeFileSync(wiring, `import { recWith, rulesWith, usageFact } from ${JSON.stringify(join(here, 'fixtures.test-helper.mjs'))};
+import { ACCOUNT_FACT } from ${JSON.stringify(join(here, 'tick.mjs'))};
+import { USAGE_FACT } from ${JSON.stringify(join(here, 'usage.mjs'))};
+const now = Date.now();
+const rec = recWith([['product', 'p1', { state: 'active' }], ['fact', ACCOUNT_FACT, { account: 'a', observed_at: new Date(now).toISOString() }],
+  ['fact', USAGE_FACT('a'), usageFact({ week: 30, h5: 20, account: 'a', now })],
+  ['card', 'C-1', { state: 'ready', module: 'M-test', product: 'p1', tier: 2, files: ['src/a.js'], changed_at: new Date(now - 600000).toISOString() }]]);
+export async function wire() {
+  const noop = () => [];
+  return { rec, rules: rulesWith({}, { start_session: { decision: 'allow', reason: 'ok' } }), ports: { stepDeadlineMs: 600000, alert: () => {}, board: noop, healthy: () => true,
+    outboxSessions: noop, wait: async () => {}, leads: noop, sessions: noop, probe: () => null,
+    launch: () => new Promise(() => { setInterval(() => {}, 1000); }), stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }),
+    hasSession: () => true, gateAlive: () => true, hasReviewer: () => true, startReviewer: async () => ({ ok: true }), filesOf: noop,
+    sendFrontDoor: async () => ({}), restartFrontDoor: async () => ({ ok: true }), startMinibase: async () => ({ ok: true }),
+    cleanup: { copiesRoot: ${JSON.stringify(dir)}, sealRoot: ${JSON.stringify(dir)}, mirrorFor: () => null } } };
+}
+`);
+  const lockFile = join(dir, 'pass.lock');
+  const config = join(dir, 'config.json');
+  writeFileSync(config, JSON.stringify({ wiring, lockFile, runDeadlineMs: 300 }));
+  const r = spawnSync(process.execPath, [join(here, 'main.mjs'), config], { encoding: 'utf8', timeout: 30_000 });
+  assert.equal(r.signal, null, 'the script did not exit by itself');
+  assert.equal(r.status, 2, r.stderr);
+  assert.match(r.stderr, /did not finish within 300 ms/);
+  assert.ok(JSON.parse(readFileSync(lockFile, 'utf8')).pid, 'the stuck run left its lock');
+  const l = takePassLock(lockFile);
+  assert.equal(l.ok, true, l.reason);
+  l.release();
+  writeFileSync(join(dir, 'bad.json'), JSON.stringify({ wiring, lockFile, runDeadlineMs: -1 }));
+  assert.equal(spawnSync(process.execPath, [join(here, 'main.mjs'), join(dir, 'bad.json')], { encoding: 'utf8' }).status, 1);
+});
+
+test('audit 0b-6 r3 MAT-3 sweep: with any one rules value missing, either the tick does exactly what it does with all present, or one alert names the value; the undo merge is always requested', async () => {
+  const { VALUES } = await import('./fixtures.test-helper.mjs');
+  const told = (w, key) => w.calls.alerts.filter((a) => a.includes('have no value for') && a.includes(key));
+  const ctl = sweepWorld([usage(), card('C-1')], rulesWith({}, allow));
+  const base = await outcome(ctl);
+  assert.deepEqual(ctl.calls.alerts, [], 'control: no alert');
+  for (const key of Object.keys(VALUES)) {
+    const w = sweepWorld([usage(), card('C-1')], rulesWith({ [key]: undefined }, allow));
+    const got = await outcome(w);
+    assert.ok(got.merges.includes('U-1'), `${key}: the undo merge was held`);
+    const same = JSON.stringify(got) === JSON.stringify(base);
+    assert.ok(same || told(w, key).length === 1, `${key}: did less (${JSON.stringify(got)}) with ${told(w, key).length} alerts naming it: ${w.calls.alerts.join(' | ')}`);
+    const before = w.calls.alerts.length;
+    await w.pass(1);
+    assert.equal(w.calls.alerts.length, before, `${key}: alerted again on the next pass`);
+  }
+});
+
+test('audit 0b-6 r3 MAT-3: a value only the gate reads is told once for the whole tick, though the pass, the limits and the merges all ask; cleared once it is back', async () => {
+  const w = sweepWorld([usage(), card('C-1')], rulesWith({ [K.perState]: undefined }, allow));
+  await w.pass();
+  const named = w.calls.alerts.filter((a) => a.includes(K.perState));
+  assert.equal(named.length, 1, w.calls.alerts.join(' | '));
+  assert.equal(w.rec.read('fact', RULES_MISSING_FACT).doc.keys, K.perState);
+  await w.pass(1, { rules: rulesWith({}, allow) });
+  assert.equal(w.rec.read('fact', RULES_MISSING_FACT).doc.keys, null);
+});
+
+test('audit 0b-6 r3 MIN-1: a failing outage step still holds reviews and merges while the record says an outage is open', async () => {
+  const open = ['fact', OUTAGE_FACT, { id: 'o-1', state: 'open', started_at: iso(T0 - MIN), dead: [], board: 3, healthy_passes: 0 }];
+  const w = sweepWorld([usage(), open], rulesWith({}, allow));
+  w.ports.board = () => { throw new Error('board unreadable'); };
+  const got = await outcome(w);
+  assert.deepEqual([got.reviewers, got.merges.filter((m) => m !== 'U-1')], [[], []]);
+  assert.deepEqual(got.stops, ['S-X'], 'the cancel still stops');
+});
+
+// L31: the safety acts (a cancel, a red park, an undo start, an undo merge, the Lead's restart) are held
+// by no band. One world per band; two ticks each (audit 0b-6 r3 MAT-6, with MAT-4's queued request).
+test('audit 0b-6 r3 MAT-6 / MAT-4: in green, amber, red, unknown and with no account: a cancel stops, red parks, an undo starts and is merged, a large Lead with a queued request restarts', async () => {
+  const bands = {
+    green: [account(), usage()],
+    amber: [account(), ['fact', USAGE_FACT(ACCT), usageFact({ week: 20, h5: 75, account: ACCT, now: T0 })]],
+    red: [account(), ['fact', USAGE_FACT(ACCT), usageFact({ week: 90, h5: 20, account: ACCT, now: T0 })]],
+    unknown: [account(), ['fact', USAGE_FACT(ACCT), usageFact({ week: 30, h5: 20, account: ACCT, now: T0, observedAgoMin: 120 })]],
+    'no account': [usage()],
+  };
+  const root = tempDir('m11-l31-');
+  for (const [band, facts] of Object.entries(bands)) {
+    const outbox = join(root, band.replace(' ', '-'));
+    mkdirSync(outbox);
+    writeFileSync(join(outbox, 'think-q1.md'), 'Is A safe?');
+    const sent = [];
+    const starts = [];
+    let endedAt = T0;
+    const lead = { sessionId: 'L-1', product: 'p1' };
+    const stops = [];
+    const running = [{ id: 'S-X', product: 'p1', kind: 'editing', card: 'X-1', pgid: 98 }, { id: 'S-E', product: 'p1', kind: 'editing', card: 'E-1', pgid: 99 }];
+    const w = world([...facts,
+      card('X-1', { state: 'cancelled', session: 'S-X' }), card('E-1', { state: 'running', session: 'S-E' }),
+      card('U-2', { kind: 'undo', queue: 'front', go_free: true }),
+      card('U-1', { state: 'verified', kind: 'undo', pr: 8, session: 'S-0', head: HEAD }), ['verdict', 'U-1', { session_id: 'S-0', head: HEAD }]],
+    { over: {
+      sessions: () => running,
+      stopGroup: async (s) => { stops.push(s.id); return { ok: true, how: 'SIGTERM' }; },
+      outboxSessions: () => [{ sessionId: 'L-1', role: 'lead', outbox, uid: process.getuid(), product: 'p1' }],
+      leads: () => [{ lead, outboxNames: readdirSync(outbox), questionOpen: false,
+        size: { tokens: 300_000, turnEnded: true, endedAt, openTools: [], compactions: 0 },
+        send: async (t) => { sent.push(t); return { outcome: 'sent' }; },
+        stopSession: async () => ({ ok: true }), startLead: async (x) => { starts.push(x); return { ok: true, sessionId: 'L-2' }; } }],
+    } });
+    const r1 = await w.pass(0);
+    assert.ok(stops.includes('S-X'), `${band}: the cancel did not stop`);
+    assert.equal(stops.includes('S-E'), band === 'red', `${band}: the red park`);
+    assert.ok(w.calls.launched.includes('U-2'), `${band}: the undo card did not start (${JSON.stringify(r1.steps.pass.result?.refused)})`);
+    assert.ok(w.rec.read('merge_request', MERGE_REQUEST('U-1', HEAD)), `${band}: the undo merge was not requested`);
+    assert.deepEqual(r1.steps.leads.result, [['L-1', 'WRAP sent']], `${band}: ${JSON.stringify(r1.steps.leads.result)}`);
+    assert.match(sent[0], /queued in your outbox do not carry over/);
+    writeFileSync(join(outbox, HANDOFF_NAME('L-1')), 'the hand-off');
+    endedAt = T0 + MIN;
+    const r2 = await w.pass(2);
+    assert.deepEqual(r2.steps.leads.result, [['L-1', 'restarted']], `${band}: ${JSON.stringify(r2.steps.leads.result)}`);
+    assert.equal(w.rec.read('fact', RESTART_FACT('L-1')).doc.phase, 'done');
+    assert.equal(starts.length, 1);
+  }
+});
+
+test('audit 0b-6 r3 MAT-3: a value only the reviewer start asks for is told once over two ticks (the pass does not tell, or clear, it by itself)', async () => {
+  const w = world([account(), usage(), card('C-1', { state: 'in_review', changed_at: iso(T0 - 30 * MIN) })], { rules: rulesWith({ [K.redRuns]: undefined }, allow) });
+  await w.pass();
+  await w.pass(1);
+  assert.equal(w.calls.alerts.filter((a) => a.includes(K.redRuns)).length, 1, w.calls.alerts.join(' | '));
+  assert.deepEqual(w.calls.reviewers, [], 'the reviewer start is held');
 });

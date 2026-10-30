@@ -4,7 +4,7 @@ import { execFileSync } from 'node:child_process';
 import { mkdirSync, writeFileSync, existsSync, statSync, readFileSync, symlinkSync, readdirSync, rmSync, utimesSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { join, resolve, sep } from 'node:path';
-import { cleanupCopy, cleanupPass, ASK_ID, hashCopy, mirrorTree, ownCopy } from './cleanup.mjs';
+import { cleanupCopy, cleanupPass, ASK_ID, hashCopy, mirrorTree, ownCopy, STALE_STAGING_MS } from './cleanup.mjs';
 import { createSaveWork } from '../M4-workshop/git/save-work.mjs';
 import { git as safeGit, callLog } from '../M4-workshop/git/safe-git.mjs';
 import { PR_FACT } from './merges.mjs';
@@ -355,4 +355,41 @@ test('the staging folder is removed even when saving the work throws (temp-folde
   const w = world();
   await assert.rejects(clean(w, recFor(w), { saveWork: async () => { throw new Error('save-work crashed'); } }), /save-work crashed/);
   assert.deepEqual(readdirSync(w.sealRoot).filter((n) => n.startsWith('.staging-')), [], 'no staging folder left behind');
+});
+
+test('audit 0b-6 r3 MIN-6: a staging folder left by a killed run is removed at the next pass; a fresh one, a file and a link are left', async () => {
+  const dir = tempDir('m11-staging-');
+  const sealRoot = join(dir, 'sealed');
+  const copiesRoot = join(dir, 'copies');
+  mkdirSync(copiesRoot);
+  mkdirSync(join(sealRoot, '.staging-C-1-old', 'deep'), { recursive: true });
+  writeFileSync(join(sealRoot, '.staging-C-1-old', 'deep', 'x.bundle'), 'b');
+  mkdirSync(join(sealRoot, '.staging-C-2-fresh'));
+  writeFileSync(join(sealRoot, '.staging-file'), 'not a folder');
+  mkdirSync(join(dir, 'elsewhere'));
+  symlinkSync(join(dir, 'elsewhere'), join(sealRoot, '.staging-link'));
+  const now = Date.now();
+  const old = (now - STALE_STAGING_MS - 60_000) / 1000;
+  for (const n of ['.staging-C-1-old', '.staging-file']) utimesSync(join(sealRoot, n), old, old);
+  // The link's target is old too, so only the "never a link" check keeps the link.
+  utimesSync(join(dir, 'elsewhere'), old, old);
+  const out = await cleanupPass({ rec: recWith(), rules: R, now, copiesRoot, sealRoot, mirrorFor: () => null, alert: () => {} });
+  assert.deepEqual(out, [['.staging-C-1-old', { result: 'removed', reasons: ['a staging folder left by a killed run'] }]]);
+  assert.deepEqual(readdirSync(sealRoot).sort(), ['.staging-C-2-fresh', '.staging-file', '.staging-link']);
+  assert.ok(existsSync(join(dir, 'elsewhere')));
+});
+
+test("audit 0b-6 r3 MIN-5 (J7): Joe's delete is refused when the record now names another copy for the card; the copy stays", async () => {
+  const w = world();
+  writeFileSync(join(w.copy, 'a.txt'), 'changed\n');
+  const rec = recFor(w);
+  await clean(w, rec);
+  const cur = rec.read('ask', ASK_ID('C-1'));
+  rec.write({ actor: 'joe', entity: 'ask', id: ASK_ID('C-1'), expectRev: cur.rev, doc: { ...cur.doc, state: 'answered', answer: 'delete' } });
+  const c = rec.read('card', 'C-1');
+  rec.write({ actor: 'dispatcher', entity: 'card', id: 'C-1', expectRev: c.rev, doc: { ...c.doc, copy: join(w.dir, 'another') } });
+  const r = await clean(w, rec, { rules: COUNTED });
+  assert.equal(r.result, 'refused');
+  assert.match(r.reasons.join(' '), /record names another copy/);
+  assert.ok(existsSync(w.copy));
 });

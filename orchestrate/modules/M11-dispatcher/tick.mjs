@@ -15,16 +15,21 @@
 //   9. cleanup   — last, because it is the slowest (R-0b-57).
 // Each step runs in its own try/catch: one failing step never stops the rest. A failing step alerts
 // Joe once per distinct error (fact `step-error-<step>`), cleared when the step next succeeds. The
-// fact `last-full-pass` records when every step last ran and how each ended.
+// fact `last-full-pass` records when every step last ran and how each ended. Each step also has a
+// deadline (STEP_DEADLINE_MS, or the port `stepDeadlineMs`): a port that never answers fails its
+// step, and the later steps still run (audit 0b-6 r3 MAT-2). `main.mjs` bounds the whole run.
+// A rules value missing in any step (the main pass, or the start gate asked by the limits, the merges
+// or a read-only helper) is told to Joe once, for the whole tick, on the fact `rules-missing-alert`
+// (audit 0b-6 r3 MAT-3).
 //
 // The signed-in account comes from the record fact `signed-in-account` { account, observed_at }
 // (Sensors, lane 3). Missing, or older than usage.stale_after_min, means nothing new starts.
 
 import { KEYS, minutes } from './keys.mjs';
-import { outageStep } from './outage.mjs';
+import { outageStep, OUTAGE_FACT } from './outage.mjs';
 import { intakePass } from './outbox-intake.mjs';
 import { leadRestartStep, leadInFlight, handoffVet } from './lead-restart.mjs';
-import { dispatcherPass } from './pass.mjs';
+import { dispatcherPass, rulesMissingAlert } from './pass.mjs';
 import { startGate } from './gate.mjs';
 import { currentBands } from './usage.mjs';
 import { timeLimits, requestMerges } from './merges.mjs';
@@ -38,6 +43,7 @@ export const STEPS = Object.freeze(['outage', 'intake', 'leads', 'pass', 'limits
 export const ACCOUNT_FACT = 'signed-in-account';
 export const LAST_PASS_FACT = 'last-full-pass';
 export const STEP_ERROR_FACT = (step) => `step-error-${step}`;
+export const STEP_DEADLINE_MS = 120_000;
 const iso = (ms) => new Date(ms).toISOString();
 const putFact = (rec, id, doc, kind) => rec.write({ actor: 'dispatcher', entity: 'fact', id, expectRev: rec.read('fact', id)?.rev ?? 0, doc, kind });
 
@@ -78,9 +84,12 @@ export async function tick({ rec, rules, now, ports: p }) {
   const alert = p.alert;
   let bands = null;
   let running = [];
+  const deadline = p.stepDeadlineMs ?? STEP_DEADLINE_MS;
   const run = async (step, f) => {
+    let timer;
     try {
-      res[step] = { ok: true, result: await f() };
+      const late = new Promise((_, no) => { timer = setTimeout(() => no(new Error(`it did not finish within ${deadline} ms`)), deadline); });
+      res[step] = { ok: true, result: await Promise.race([Promise.resolve().then(f), late]) };
       if (rec.read('fact', STEP_ERROR_FACT(step))?.doc?.error) putFact(rec, STEP_ERROR_FACT(step), { error: null, at: iso(now) }, 'step_ok');
     } catch (e) {
       const error = String(e?.message ?? e);
@@ -89,10 +98,14 @@ export async function tick({ rec, rules, now, ports: p }) {
         putFact(rec, STEP_ERROR_FACT(step), { error, at: iso(now) }, 'step_error');
         alert(`the Dispatcher's ${step} step failed: ${error}; the other steps still ran`);
       }
-    }
+    } finally { clearTimeout(timer); }
   };
+  // Rules values missing anywhere this tick: told once, at the end.
+  const missing = [];
 
   let outageOpen = false;
+  // A failing outage step falls back on the record (audit 0b-6 r3 MIN-1): an open outage still holds.
+  try { outageOpen = rec.read('fact', OUTAGE_FACT)?.doc?.state === 'open'; } catch { outageOpen = true; }
   await run('outage', async () => {
     const board = p.board();
     const o = outageStep({ rec, rules, board, now, healthy: p.healthy(), resume: p.resume?.() ?? false, alert });
@@ -106,6 +119,7 @@ export async function tick({ rec, rules, now, ports: p }) {
     const acct = signedInAccount({ rec, rules, now });
     if (!acct.account) return { ok: false, reason: acct.reason };
     const g = startGate({ rules, rec, card: null, kind: 'readonly', product: x.product, b: currentBands({ rec, rules, account: acct.account, now }), running: p.sessions(), lead: x.lead });
+    if (!g.ok && g.missing) missing.push(g.missing);
     return g.ok ? p.startReadonly(x) : { ok: false, reason: g.reason };
   };
   await run('intake', () => intakePass({ rec, now, sessions: p.outboxSessions(), wait: p.wait, alert, note: (text) => note(rec, 'intake-note', text, { now }),
@@ -123,7 +137,8 @@ export async function tick({ rec, rules, now, ports: p }) {
   await run('pass', async () => {
     const acct = signedInAccount({ rec, rules, now });
     const r = await dispatcherPass({ rec, rules, now, account: acct.account, sessions: p.sessions(), probe: p.probe, launch: p.launch, stopGroup: p.stopGroup,
-      saveWork: p.saveWork, hostLock: p.hostLock, pauseLead: p.pauseLead, alert, startsOff: acct.reason });
+      saveWork: p.saveWork, hostLock: p.hostLock, pauseLead: p.pauseLead, alert, startsOff: acct.reason, tellMissing: false });
+    missing.push(...r.missing);
     bands = r.bands;
     running = r.running;
     return r;
@@ -134,8 +149,11 @@ export async function tick({ rec, rules, now, ports: p }) {
   const held = { band: 'unknown', own_building: 'unknown', pace: null, prodBlocked: true, reason: 'the main pass did not finish' };
   const startsHeld = outageOpen ? 'outage' : bands ? null : 'the main pass did not finish';
   await run('limits', () => timeLimits({ rec, rules, now, b: bands ?? held, running, hasSession: p.hasSession, gateAlive: p.gateAlive,
-    hasReviewer: p.hasReviewer, startReviewer: p.startReviewer, alert, startsHeld }));
-  await run('merges', () => requestMerges({ rec, rules, now, b: bands ?? held, running, startsHeld }));
+    hasReviewer: p.hasReviewer, startReviewer: p.startReviewer, alert, startsHeld, missing }));
+  await run('merges', () => requestMerges({ rec, rules, now, b: bands ?? held, running, startsHeld, missing }));
+  // A step that failed did not report what it lacked, so nothing already told is dropped this tick.
+  const complete = ['pass', 'limits', 'merges'].every((s) => res[s]?.ok);
+  try { rulesMissingAlert({ rec, keys: missing, alert, now, complete }); } catch (e) { alert(`the Dispatcher could not record missing rules values: ${e?.message ?? e}`); }
   await run('undo', () => undoStep({ rec, rules, now, filesOf: p.filesOf, alert }));
   await run('phone', () => phoneLinkStep({ rec, rules, now, send: p.sendFrontDoor, restartFrontDoor: p.restartFrontDoor, startMinibase: p.startMinibase,
     frontDoorAlive: p.frontDoorAlive, lastHandoff: p.frontDoorHandoff, alert }));

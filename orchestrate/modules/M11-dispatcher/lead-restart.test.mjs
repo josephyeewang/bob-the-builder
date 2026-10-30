@@ -230,3 +230,30 @@ test('audit 0b-6 r2 MAT-3: a handoff applied before the WRAP never restarts the 
   assert.notEqual(await v.step(ended(262_000, 2), 3), 'restarted');
   assert.equal(v.calls.stops, 0);
 });
+
+// ---- audit 0b-6 round 3 ----
+
+test('audit 0b-6 r3 MAT-4: a read-only request waiting on a refusal is not in flight; one not yet used still is', () => {
+  const rec = recWith([['fact', 'outbox-L-1-think-q1.md', { session: SID, name: 'think-q1.md', state: 'waiting', reason: 'the red band holds it' }],
+    ['fact', 'outbox-L-1-scout-q2.md', { session: SID, name: 'scout-q2.md', state: 'starting' }]]);
+  assert.equal(leadInFlight({ rec, sessionId: SID, outboxNames: ['think-q1.md'], questionOpen: false }), null);
+  assert.match(leadInFlight({ rec, sessionId: SID, outboxNames: ['think-q1.md', 'scout-q2.md'], questionOpen: false }), /scout-q2\.md not used yet/);
+});
+
+test('audit 0b-6 r3 MIN-3: a handoff applied in the same pass that sent WRAP is older than the WRAP and not used; Cosmetic 1: the re-ask time is not the WRAP time', async () => {
+  const w = world();
+  assert.equal(await w.step(ended(260_000, 1), 1), 'WRAP sent');
+  w.handIn(1_000);
+  await w.intake(1);
+  assert.notEqual(await w.step(ended(262_000, 2), 2), 'restarted');
+  assert.equal(w.calls.stops, 0);
+  // After a re-ask, a hand-off applied between the WRAP and the re-ask still counts (it is after the WRAP).
+  const v = world();
+  assert.equal(await v.step(ended(260_000, 1), 1), 'WRAP sent');
+  assert.equal(await v.step(ended(261_000, 2), 2), 're-asked');
+  v.handIn(1_000);
+  await v.intake(2.5);
+  const f = v.rec.read('fact', RESTART_FACT(SID));
+  v.rec.write({ actor: 'dispatcher', entity: 'fact', id: RESTART_FACT(SID), expectRev: f.rev, doc: { ...f.doc, sent_at: iso(T0 + 3 * MIN) } });
+  assert.equal(await v.step(ended(262_000, 4), 4), 'restarted');
+});

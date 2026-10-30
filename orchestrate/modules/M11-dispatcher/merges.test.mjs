@@ -231,3 +231,18 @@ test('audit 0b-6 r2 MAT-4 / MAT-6 / MIN-9: an undo is requested in red, unknown 
   // r2 M3: a card head that is not the verdict's head is not requested.
   assert.match(requestMerges({ rec: mk({ tier: 2, risky: [], files: ['src/a.js'], head: 'bbb' }), rules: R, now: T0, b: GREEN })[0][1], /another head/);
 });
+
+test('audit 0b-6 r3 MAT-3: a rules value the gate lacks is handed back to the tick, by the time limits and by the merge requests', async () => {
+  const { requestMerges } = await import('./merges.mjs');
+  const rules = rulesWith({ [K.redRuns]: undefined });
+  const rec = recWith([['product', 'p1', { state: 'active' }], ['card', 'C-1', { state: 'in_review', product: 'p1', tier: 2, changed_at: at(0) }]]);
+  const missing = [];
+  const moves = await timeLimits({ rec, rules, now: T0 + 15 * MIN, b: GREEN, ...ports({ hasReviewer: () => false }).p, missing });
+  assert.match(moves[0][1], /reviewer held/);
+  assert.deepEqual(missing, [K.redRuns]);
+  const rec2 = recWith([['product', 'p1', { state: 'active' }], ['card', 'C-2', { state: 'verified', product: 'p1', tier: 2, pr: 7, session: 'S-9', head: 'aaa' }],
+    ['verdict', 'C-2', { session_id: 'S-9', head: 'aaa' }]]);
+  const missing2 = [];
+  assert.match(requestMerges({ rec: rec2, rules, now: T0, b: GREEN, missing: missing2 })[0][1], /merge request held/);
+  assert.deepEqual(missing2, [K.redRuns]);
+});

@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
-import { dispatcherPass, stopProcessGroup, STOP_FACT, LIMIT_FACT } from './pass.mjs';
+import { dispatcherPass, stopProcessGroup, STOP_FACT, LIMIT_FACT, UNDO_HELD_FACT, PAUSE_FACT, RULES_MISSING_FACT, rulesMissingAlert } from './pass.mjs';
 import { USAGE_FACT, BAND_FACT } from './usage.mjs';
 import { OUTAGE_FACT } from './outage.mjs';
 import { KEYS as K } from './keys.mjs';
@@ -37,8 +37,9 @@ function world(entries = [], { usage = GREEN, over = {} } = {}) {
     launch: async (x) => { calls.launched.push(x.card.id); const a = launchAnswer(x); if (!a.ok) return a; const id = `S-${++n}`; sessions.push({ id, product: x.product, kind: x.kind, card: x.card.id, pgid: 100 + n }); return { ok: true, sessionId: id, pgid: 100 + n, head: 'head' in a ? a.head : 'h'.repeat(40) }; },
     stopGroup: async (s) => { calls.stops.push(s.id); const i = sessions.findIndex((x) => x.id === s.id); if (i >= 0) sessions.splice(i, 1); return { ok: true, how: 'SIGTERM' }; },
     saveWork: async (s) => { calls.saves.push(s.id); return { ok: true }; },
-    hostLock: () => extra.host ?? null,
-    pauseLead: ({ product }) => { calls.pauses.push([product, [...calls.stops]]); },
+    hostLock: extra.hostLock ?? (() => extra.host ?? null),
+    pauseLead: extra.pauseLead ?? (({ product }) => { calls.pauses.push([product, [...calls.stops]]); }),
+    startsOff: extra.startsOff ?? null,
     alert: (t) => calls.alerts.push(t),
   });
   const setCard = (id, patch) => { const c = rec.read('card', id); rec.write({ actor: 'dispatcher', entity: 'card', id, expectRev: c.rev, doc: { ...c.doc, ...patch } }); };
@@ -325,7 +326,7 @@ test('the time limits come from the rules', async () => {
   const m = world([card('C-2')], { over: { [K.parkWaitMin]: undefined } });
   const r = await m.pass();
   assert.deepEqual(r.started, []);
-  assert.ok(r.notes.some((n) => /nothing starts: .*park_wait_min/.test(n)), r.notes.join('; '));
+  assert.ok(r.notes.some((n) => /nothing but undo cards starts: .*park_wait_min/.test(n)), r.notes.join('; '));
   await m.pass(1);
   assert.equal(m.calls.alerts.filter((a) => /park_wait_min/.test(a)).length, 1, 'one alert, not one per pass');
 });
@@ -525,4 +526,107 @@ test('audit 0b-6 r2 MIN-10 (round 1 MIN-2, 3, 4): a cancel replaces a pending pa
     stopGroup: async () => ({ ok: false, reason: 'permission' }), saveWork: async () => ({ ok: true }), alert: (x) => alerts.push(x) };
   for (const m of [1, 2, 3]) await dispatcherPass({ ...base, now: T0 + m * MIN });
   assert.equal(alerts.filter((x) => /could not be stopped/.test(x)).length, 1);
+});
+
+// ---- audit 0b-6 round 3 ----
+
+// A cancelled card whose worker sits at a safe point: the first pass stops it, whatever else fails.
+const cancelledWorld = async () => {
+  const w = world([card('C-1')]);
+  await w.pass(0);
+  w.setCard('C-1', { state: 'cancelled' });
+  return { w, sid: w.sessions[0].id };
+};
+
+test('audit 0b-6 r3 MAT-1: a host.lock that cannot be read, or rules that cannot be read, never stop the stop loop: a cancel still stops', async () => {
+  {
+    const { w, sid } = await cancelledWorld();
+    const r = await w.pass(1, { hostLock: () => { throw Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' }); } });
+    assert.deepEqual(w.calls.stops, [sid]);
+    assert.ok(r.notes.some((n) => /host\.lock unreadable: EACCES/.test(n)), r.notes.join(' | '));
+  }
+  {
+    const { w, sid } = await cancelledWorld();
+    const good = rulesWith({}, { start_session: { decision: 'allow', reason: 'ok' } });
+    const broken = { ...good, get: () => { throw new Error('rules file unreadable'); } };
+    const r = await w.pass(1, { rules: broken });
+    assert.deepEqual(w.calls.stops, [sid]);
+    assert.ok(r.notes.some((n) => /nothing but undo cards starts: the rules have no value for the rules \(rules file unreadable\)/.test(n)), r.notes.join(' | '));
+    assert.equal(w.calls.alerts.filter((a) => /rules file unreadable/.test(a)).length, 1);
+    assert.equal(w.calls.launched.length, 1, 'nothing new started');
+  }
+});
+
+test('audit 0b-6 r3 MAT-5: with starts off (no account reading, or a rules value missing) an undo card still starts and nothing else does', async () => {
+  for (const [label, extra] of [['no account', { startsOff: 'the signed-in account is not known' }], ['park_wait_min missing', { rules: rulesWith({ [K.parkWaitMin]: undefined }) }]]) {
+    const w = world([card('C-1'), card('U-1', { kind: 'undo', queue: 'front', go_free: true })]);
+    if (extra.rules) extra.rules = rulesWith({ [K.parkWaitMin]: undefined }, startAnswer(w.rec));
+    const r = await w.pass(0, extra);
+    assert.deepEqual(r.started, ['U-1'], label);
+    assert.ok(!w.calls.launched.includes('C-1'), label);
+  }
+});
+
+test('audit 0b-6 r3 MAT-5: an undo that cannot start tells Joe why, once per reason, and the note clears when it starts', async () => {
+  const w = world([card('U-1', { kind: 'undo', queue: 'front', go_free: true })]);
+  // The rules refusing it holds an undo (as does an open outage); the undo's own alert says why.
+  const rules = rulesWith({}, { start_session: { decision: 'deny', reason: 'the product is paused' } });
+  await w.pass(0, { rules });
+  await w.pass(1, { rules });
+  const told = w.calls.alerts.filter((a) => /your undo \(card U-1\) is waiting: rules: the product is paused/.test(a));
+  assert.equal(told.length, 1, w.calls.alerts.join(' | '));
+  assert.equal(w.rec.read('fact', UNDO_HELD_FACT('U-1')).doc.reason, 'rules: the product is paused');
+  await w.pass(2);
+  assert.ok(w.calls.launched.includes('U-1'));
+});
+
+test('audit 0b-6 r3 MIN-2: a pauseLead port that throws is told once for that product and does not fail the pass; it is asked again next pass', async () => {
+  const w = world([]);
+  w.setProduct('p1', 'paused');
+  let n = 0;
+  const pauseLead = () => { n += 1; throw new Error('Lead not reachable'); };
+  const r = await w.pass(0, { pauseLead });
+  assert.ok(r.bands, 'the pass finished and gave its bands');
+  await w.pass(1, { pauseLead });
+  assert.equal(n, 2);
+  assert.equal(w.calls.alerts.filter((a) => /could not be asked to hand off: Lead not reachable/.test(a)).length, 1);
+  assert.equal(w.rec.read('fact', PAUSE_FACT('p1')).doc.state, 'failed');
+  await w.pass(2);
+  assert.equal(w.rec.read('fact', PAUSE_FACT('p1')).doc.state, 'asked');
+});
+
+test('audit 0b-6 r3 MAT-3: the pass alone tells Joe of a missing value once; a new missing value is told by itself', async () => {
+  const w = world([card('C-1')]);
+  const r1 = rulesWith({ [K.perState]: undefined }, startAnswer(w.rec));
+  await w.pass(0, { rules: r1 });
+  await w.pass(1, { rules: r1 });
+  assert.equal(w.calls.alerts.filter((a) => a.includes(K.perState)).length, 1, w.calls.alerts.join(' | '));
+  const r2 = rulesWith({ [K.perState]: undefined, [K.parkWaitMin]: undefined }, startAnswer(w.rec));
+  await w.pass(2, { rules: r2 });
+  const last = w.calls.alerts.at(-1);
+  assert.ok(last.includes(K.parkWaitMin) && !last.includes(K.perState), last);
+  // One of the two comes back: nothing new is missing, so nothing is told.
+  const told = () => w.calls.alerts.filter((a) => a.startsWith('the rules have no value')).length;
+  const before = told();
+  await w.pass(2.5, { rules: rulesWith({ [K.parkWaitMin]: undefined }, startAnswer(w.rec)) });
+  assert.equal(told(), before, w.calls.alerts.join(' | '));
+  await w.pass(3);
+  assert.equal(w.rec.read('fact', RULES_MISSING_FACT).doc.keys, null);
+});
+
+test('audit 0b-6 r3 MAT-3: the missing-values alert names only keys not told before; a shrinking set tells nothing', () => {
+  const rec = recWith();
+  const alerts = [];
+  const tell = (keys, complete = true) => rulesMissingAlert({ rec, keys, alert: (t) => alerts.push(t), now: T0, complete });
+  tell(['a', 'b']);
+  assert.equal(alerts.length, 1);
+  assert.match(alerts[0], /no value for a, b:/);
+  tell(['b']);
+  assert.equal(alerts.length, 1, 'one key came back: nothing to tell');
+  assert.equal(rec.read('fact', RULES_MISSING_FACT).doc.keys, 'b');
+  tell(['b', 'c']);
+  assert.match(alerts.at(-1), /no value for c:/);
+  tell([], false);
+  assert.equal(rec.read('fact', RULES_MISSING_FACT).doc.keys, 'b, c', 'an incomplete tick keeps what it did not read');
+  assert.equal(alerts.length, 2);
 });

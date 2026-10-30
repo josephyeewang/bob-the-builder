@@ -22,9 +22,9 @@ const fresh = (fact, attempt) => {
  * `gateAlive()` (the Merge Gate's process), `hasReviewer(cardId)`, `startReviewer(cardId)` -> { ok },
  * `alert(text)`. `b` = this pass's bands and `running` = the running sessions: a reviewer start goes
  * through the same start gate as every other start (audit MAT-5), so red holds it unless the rules'
- * red_runs lists reviews. `startsHeld` (a reason) skips reviewer starts this pass, uncounted. Returns the list of moves made, for the diary and the tests.
+ * red_runs lists reviews. `missing` collects rules values the gate lacked, for the tick to tell Joe. `startsHeld` (a reason) skips reviewer starts this pass, uncounted. Returns the list of moves made, for the diary and the tests.
  */
-export async function timeLimits({ rec, rules, now, b, running = [], hasSession, gateAlive, hasReviewer, startReviewer, alert, startsHeld = null }) {
+export async function timeLimits({ rec, rules, now, b, running = [], hasSession, gateAlive, hasReviewer, startReviewer, alert, startsHeld = null, missing = [] }) {
   const done = [];
   const lim = {
     claimed: minutes(rules, KEYS.claimedNoSessionMin), checking: minutes(rules, KEYS.checkingMaxMin),
@@ -43,7 +43,8 @@ export async function timeLimits({ rec, rules, now, b, running = [], hasSession,
         continue;
       }
       const g = startGate({ rules, rec, card: { id, ...doc }, kind: 'review', product: doc.product, b, running });
-      if (!g.ok) { done.push([id, `reviewer held: ${g.reason}`]); continue; }
+      // `missing` collects rules values the gate lacked, so the tick tells Joe once (audit 0b-6 r3 MAT-3).
+      if (!g.ok) { if (g.missing) missing.push(g.missing); done.push([id, `reviewer held: ${g.reason}`]); continue; }
       let r;
       try { r = await startReviewer(id); } catch (e) { r = { ok: false, reason: e.message }; }
       move(rec, 'card', id, r?.ok ? { reviewer_start_failures: 0 } : { reviewer_start_failures: fails + 1 }, { now, kind: 'reviewer_start' });
@@ -124,7 +125,7 @@ const READY_TO_MERGE = ['verified', 'approved'];
  * has no bands (`startsHeld`, a reason): then every other request is held (L31).
  * `session_id` is the worker session that made the head; `rev` is the card's record rev.
  */
-export function requestMerges({ rec, rules, now, b, running = [], startsHeld = null }) {
+export function requestMerges({ rec, rules, now, b, running = [], startsHeld = null, missing = [] }) {
   const done = [];
   for (const { id, rev, doc } of rec.list('card')) {
     if (!READY_TO_MERGE.includes(doc.state)) continue;
@@ -142,7 +143,7 @@ export function requestMerges({ rec, rules, now, b, running = [], startsHeld = n
     // When this pass has no bands (an outage, or the main pass failed), only undos are requested.
     if (startsHeld && doc.kind !== 'undo') { done.push([id, `merge request held: ${startsHeld}`]); continue; }
     const g = startGate({ rules, rec, card: { id, ...doc }, kind: doc.kind === 'undo' ? 'undo_merge' : 'merge', product: doc.product, b, running });
-    if (!g.ok) { done.push([id, `merge request held: ${g.reason}`]); continue; }
+    if (!g.ok) { if (g.missing) missing.push(g.missing); done.push([id, `merge request held: ${g.reason}`]); continue; }
     const w = rec.write({ actor: 'dispatcher', entity: 'merge_request', id: mid, expectRev: old?.rev ?? 0, kind: 'merge_request',
       doc: { card: id, pr: doc.pr, session_id: doc.session, head: verdict.head, rev, product: doc.product ?? null, requested_at: new Date(now).toISOString() } });
     done.push([id, w.ok ? (old ? 'merge requested again' : 'merge requested') : `merge request not recorded: ${w.reason}`]);

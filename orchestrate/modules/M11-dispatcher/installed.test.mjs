@@ -2,6 +2,7 @@
 // Dispatcher is reached through a linked folder, and the test runs exactly the command line,
 // environment and working folder the job file names: nothing is passed by hand.
 import { test } from 'node:test';
+import { fileURLToPath } from 'node:url';
 import assert from 'node:assert/strict';
 import { mkdirSync, writeFileSync, readFileSync, symlinkSync, existsSync } from 'node:fs';
 import { tempDir } from '../../shared/test-tmp.mjs';
@@ -9,7 +10,7 @@ import { join, dirname } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { loginJobPlist } from './login-job.mjs';
 
-const HERE = new URL('.', import.meta.url).pathname;
+const HERE = fileURLToPath(new URL('.', import.meta.url));
 const unesc = (s) => s.replace(/&quot;/g, '"').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
 const strings = (xml) => [...xml.matchAll(/<string>([^<]*)<\/string>/g)].map((m) => unesc(m[1]));
 const after = (xml, key) => xml.split(`<key>${key}</key>`)[1];
