@@ -127,7 +127,7 @@ function main() {
   }
 
   if (recorded !== current) {
-    fail(1, `REFUSED — the done-criteria changed since they were recorded (${recorded.slice(0, 12)}… → now ${current.slice(0, 12)}…) and no dated "bar changed because…" line explains it.\n  Fix: node scripts/check-bar.mjs --change "<why the bar moved>" ${file}`);
+    fail(1, `REFUSED — the done-criteria changed since they were recorded (${recorded.slice(0, 12)}… → now ${current.slice(0, 12)}…) and no dated "bar changed because…" line explains it.\n  Fix: node "$(realpath ~/.claude/skills/bob/..)/scripts/check-bar.mjs" --change "<why the bar moved>" ${file}`);
   }
   const note = changes.length ? ` (${changes.length} explained change${changes.length > 1 ? 's' : ''}, latest ${changes[changes.length - 1].date})` : ' (unchanged since phase start)';
   process.stdout.write(`check-bar: OK — bar matches ${current.slice(0, 12)}…${note}\n`);

@@ -147,7 +147,7 @@ print_other() {
       | .[:8] | if length == 0 then "      (no proposals found in it)" else (.[] | "      • " + (.[:220])) end
     ' "$f" 2>/dev/null || echo "      (not readable JSON)"
   done
-  echo "  Fix the format at the source: run 'bash scripts/lens-retro.sh --check <file>' at audit step A7.4."
+  echo "  Fix the format at the source: run 'bash ~/.claude/skills/bob/../scripts/lens-retro.sh --check <file>' at audit step A7.4."
 }
 
 if [[ "$VALID_COUNT" -eq 0 ]]; then

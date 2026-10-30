@@ -86,7 +86,11 @@ function canon(v) {
 const short = (c) => (c ? String(c).slice(0, 7) : "unknown");
 
 const BOB_COMMIT = (git("rev-parse", "HEAD") || "").trim() || null;
+// Bob's version is the one line in VERSION (D-032). A Bob from before D-032 kept it on the core's
+// "Core Reference for Build Protocol vN.N" line, so that is read when VERSION is missing.
 const BOB_VERSION = (() => {
+  const v = /^(v[0-9]+(?:\.[0-9]+)+)\s*$/m.exec(read(join(BOB_ROOT, "VERSION")) || "");
+  if (v) return v[1];
   const m = /Core Reference for Build Protocol (v[0-9]+(?:\.[0-9]+)+)/.exec(read(join(BOB_ROOT, "build-protocol-core.md")) || "");
   return m ? m[1] : "unknown";
 })();
