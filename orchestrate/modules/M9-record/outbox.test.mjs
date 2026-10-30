@@ -6,6 +6,7 @@ import { linkSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from 'n
 import { join } from 'node:path';
 import { AI_ROLES, OUTBOX_KINDS } from '../../shared/record.mjs';
 import { MAX_OUTBOX_BYTES, readOutboxFile } from './outbox.mjs';
+import { openRecord } from './writer.mjs';
 import { HEAD, HEAD2, PRODUCT, UID, leadCard, must, outboxFile, product, put, readyCard, roadmap, runCard, setup } from './fixtures.test-helper.mjs';
 
 const handin = (id, extra = {}) => `${JSON.stringify({ entity: 'card', id, from_state: 'running', to_state: 'in_review', fields: { summary: 'done' }, ...extra })}\n`;
@@ -97,16 +98,25 @@ test('every outbox kind × every AI role: applied only for the roles listed (R2-
   }
 });
 
-test('a file whose apply throws is refused once and marked seen, not retried every pass (0b-2 audit round 3 m-D)', () => {
+test('a file that meets a store error is alerted once and tried again after the repair, not lost (round 3 m-D, round 4 MAT-1)', () => {
   const env = setup({ prefix: 'm9-out-', faultAt: 'readback_wrong' });
   const tag = { role: 'worker', sessionId: 'S-1' };
   const f = outboxFile(env, 'worker', 'S-1', 'report-throws.md', 'body');
   env.alerts.length = 0;
   const first = env.record.applyOutbox(tag, f);
   assert.equal(first.ok, false);
-  assert.match(first.reason, /store error/);
-  assert.equal(env.record.applyOutbox(tag, f).skipped, true, 'seen');
-  assert.equal(env.alerts.filter((a) => a.type === 'refused').length, 1, 'one refusal');
+  assert.match(first.reason, /store error.*tried again/);
+  const second = env.record.applyOutbox(tag, f);
+  assert.equal(second.ok, false, 'still refused while the store is broken');
+  assert.notEqual(second.skipped, true, 'not marked seen');
+  assert.equal(env.alerts.filter((a) => a.type === 'refused').length, 1, 'one alert, not one per pass');
+  // The owner repairs the diary (drops the bad last line); the next pass applies the file.
+  const diary = join(env.root, 'diary.jsonl');
+  const lines = readFileSync(diary, 'utf8').split('\n').filter(Boolean);
+  writeFileSync(diary, lines.slice(0, -1).map((l) => `${l}\n`).join(''));
+  const fixed = openRecord({ root: env.root, product: PRODUCT, ownerUid: UID, rules: env.rules, alert: () => {}, now: () => env.clock.t, outbox: { root: env.outRoot, uids: { worker: UID } } });
+  must(fixed.record.applyOutbox(tag, f), 'applied after the repair');
+  assert.equal(fixed.record.list('report').length, 1);
 });
 
 test('the same file twice: one document and one diary line; a refused file twice: one alert (R2-M10, R3-m7)', () => {

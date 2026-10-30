@@ -292,6 +292,9 @@ test('a doc nested too deep is refused, so it can never freeze its card (0b-2 au
   let ok = 'x';
   for (let i = 0; i < 20; i++) ok = [ok];
   must(roadmapEdit(env, 'C-1', { brief: ok }), 'a shallow brief');
+  // The diary line's data too: one deep value would break every diary read (round 4 m-2).
+  refused(put(env.record, 'approvals', 'card', 'C-1', { needs_joe: false }, { data: deep }), /data is nested deeper than 32 levels/);
+  env.record.diary();
   must(put(env.record, 'approvals', 'card', 'C-1', { state: 'cancelled', cancel_reason: 'test' }), 'the card still takes writes');
 });
 
@@ -335,8 +338,13 @@ test('one merge at a time, and a verified card that needs the owner never enters
   refused(check('M-2', 'C-2'), /one merge at a time: M-1 is checking/);
   assert.equal(env.record.read('card', 'C-2').doc.state, 'approved', 'the pair is all or nothing');
   // The checking merge can't be re-pointed to put a second card into merging (0b-2 audit round 3 m-B).
-  refused(check('M-1', 'C-2'), /card is set when it is made|must be entering checking/);
+  refused(check('M-1', 'C-2'), /card is set when it is made/);
   refused(put(env.record, 'merge_gate', 'merge', 'M-2', { card: 'C-3' }), /card is set when it is made/);
+  // A merge already in checking can't be paired again to put its card into merging beside another (round 4 m-3).
+  seed(env, 'merge', 'M-9', { state: 'checking', card: 'C-2' });
+  const c2 = env.record.read('card', 'C-2');
+  refused(env.record.write({ actor: 'merge_gate', entity: 'merge', id: 'M-9', expectRev: env.record.read('merge', 'M-9').rev, doc: { state: 'checking', card: 'C-2', note: 'again' },
+    also: [{ entity: 'card', id: 'C-2', expectRev: c2.rev, doc: { ...c2.doc, state: 'merging' } }] }), /must be entering checking/);
   assert.equal(env.record.read('card', 'C-2').doc.state, 'approved');
 });
 

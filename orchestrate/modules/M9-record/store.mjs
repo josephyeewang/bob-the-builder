@@ -160,7 +160,8 @@ export function openStore({ root, ownerUid, alert = () => {}, now = () => Date.n
     if (bytes !== null && sha256(bytes) === entry.hash) return { ok: true };
     // Missing or the version before: a write that crashed between its diary line and its rename. Rolled forward quietly,
     // as recover() does, not reported as tamper (0b-2 audit round 3 m-A).
-    if (bytes === null || sha256(bytes) === entry.prevHash) { restore(entry); return { ok: true }; }
+    // Only a create (rev 1) can be left missing by a crash; a later version that is missing was removed by hand (round 4 m-1).
+    if ((bytes === null && entry.rev === 1) || (bytes !== null && sha256(bytes) === entry.prevHash)) { restore(entry); return { ok: true }; }
     quarantine(entity, id, bytes, bytes === null ? 'document file missing' : 'document changed outside the Store Writer');
     restore(entry);
     return { ok: false, reason: `${entity} ${id} was changed outside the Store Writer; restored from the diary and quarantined` };
@@ -193,7 +194,7 @@ export function openStore({ root, ownerUid, alert = () => {}, now = () => Date.n
       const bytes = readOrNull(docPath(e.entity, e.id));
       const h = bytes === null ? null : sha256(bytes);
       if (h === e.hash) continue;
-      if (bytes === null || h === e.prevHash) { restore(e); report.rolledForward.push(keyOf(e.entity, e.id)); continue; }
+      if ((bytes === null && e.rev === 1) || (bytes !== null && h === e.prevHash)) { restore(e); report.rolledForward.push(keyOf(e.entity, e.id)); continue; }
       quarantine(e.entity, e.id, bytes, 'document changed outside the Store Writer');
       restore(e);
       report.restored.push(keyOf(e.entity, e.id));

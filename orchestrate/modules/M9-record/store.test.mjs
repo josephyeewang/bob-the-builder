@@ -82,6 +82,21 @@ test('a document at its previous version (a crash before the rename) rolls forwa
   assert.deepEqual(readdirSync(join(env.root, 'quarantine')), []);
 });
 
+test('a later version deleted by hand is tamper, not a crash: alerted and quarantined, then restored (0b-2 audit round 4 m-1)', () => {
+  const env = setup({ prefix: 'm9-store-' });
+  seed(env, 'card', 'C-1', card());
+  seed(env, 'card', 'C-1', card({ module: 'M2' }));
+  unlinkSync(docFile(env, 'card', 'C-1'));
+  env.alerts.length = 0;
+  const r = env.record.write({ actor: 'approvals', entity: 'card', id: 'C-1', expectRev: 2, doc: card({ module: 'M2', state: 'cancelled', cancel_reason: 'x' }) });
+  assert.equal(r.ok, false);
+  assert.ok(env.alerts.some((a) => a.type === 'tamper'), `tamper alerted: ${JSON.stringify(env.alerts)} ${r.reason}`);
+  assert.equal(env.record.read('card', 'C-1').doc.module, 'M2', 'restored from the diary');
+  // A restart's recover() says the same.
+  unlinkSync(docFile(env, 'card', 'C-1'));
+  assert.deepEqual(env.store.recover().restored, ['card/C-1']);
+});
+
 test('a writer that lost the lock before the commit point writes nothing (0b-2 audit MIN-9)', () => {
   const env = setup({ prefix: 'm9-store-' });
   const lines = env.record.diary().length;

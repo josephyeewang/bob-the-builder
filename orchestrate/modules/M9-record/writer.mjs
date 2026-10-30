@@ -377,6 +377,8 @@ export function openRecord({ root, product, ownerUid, rules, alert = () => {}, n
 
   // One write, or the merge-check pair (merge → checking with its card → merging), all checked before any is written.
   function applyWrite(tx, w, actor, ctx = {}) {
+    // The diary line's data is held to the same depth as a doc, or one deep value breaks every diary read (round 4 m-2).
+    if (deeperThan(w.data ?? null, MAX_DOC_DEPTH)) return no(`data is nested deeper than ${MAX_DOC_DEPTH} levels`);
     const also = w.also ?? [];
     if (!Array.isArray(also) || also.length > 1) return no('a write carries at most one paired document');
     let pairCtx = {};
@@ -460,9 +462,16 @@ export function openRecord({ root, product, ownerUid, rules, alert = () => {}, n
         if (tx.seen(f.key)) return { ok: true, skipped: true };
         const ev = { actor: `${tag.role}:${tag.sessionId}`, file: basename(String(file)) };
         if (!f.ok) { tx.markSeen(f.key, 'refused'); return refuse({ ...ev, outbox: true }, f.reason); }
-        // A file whose apply throws is refused once and marked seen, not retried and re-alerted on every pass (round 3 m-D).
+        // A store error (a damaged diary, a lost lock) is not the file's fault: the file stays unseen and is tried again on
+        // the next pass, so nothing an AI handed in is lost; the owner is alerted once per file (round 3 m-D, round 4 MAT-1).
         let r;
-        try { r = applyParsed(tx, tag, f); } catch (e) { r = no(`store error: ${String(e?.message ?? e).slice(0, 200)}`); }
+        try { r = applyParsed(tx, tag, f); } catch (e) {
+          const reason = `store error: ${String(e?.message ?? e).slice(0, 200)}; the file will be tried again`;
+          const once = `store_error:${f.key}`;
+          if (tx.seen(once)) return no(reason);
+          tx.markSeen(once, 'alerted');
+          return refuse({ ...ev, outbox: true }, reason);
+        }
         tx.markSeen(f.key, r.ok ? 'applied' : 'refused');
         if (r.ok) return r;
         // A refused hand-in becomes a fact the session's watcher reads at once (R3-M4).
