@@ -57,22 +57,27 @@ export function questionBoxes(entries) {
   return [...boxes.values()];
 }
 
-// Joe's turns, oldest first: { at, kind: 'typed'|'answer', text, index }.
+// Joe's turns, oldest first: { at, kind: 'typed'|'answer'|'declined', text, index }. Anything Joe might have done counts
+// (0b-8 audit round 1, M-1): an image with no text, a question box he declined or interrupted (its result is an error;
+// counting a tool failure too only delays a restart), and his text after an injected block in the same entry.
 export function joeTurns(entries) {
   const boxIds = new Set(questionBoxes(entries).map((q) => q.callId));
   const out = [];
   entries.forEach((e, index) => {
     if (!isTurn(e) || e.type !== 'user') return;
     const bs = blocks(e);
-    const answers = bs.filter((b) => b.type === 'tool_result' && boxIds.has(b.tool_use_id) && b.is_error !== true);
+    const answers = bs.filter((b) => b.type === 'tool_result' && boxIds.has(b.tool_use_id));
     if (answers.length) {
       const text = answers.map((b) => (typeof b.content === 'string' ? b.content : blocks({ message: { content: b.content } }).map((x) => x.text ?? '').join(' '))).join('\n');
-      out.push({ at: at(e), kind: 'answer', text, index });
+      out.push({ at: at(e), kind: answers.every((b) => b.is_error === true) ? 'declined' : 'answer', text, index });
       return;
     }
     if (bs.some((b) => b.type === 'tool_result')) return; // a tool's own result
-    const text = textOf(e);
-    if (!text.trim() || isAutomated(text) || INJECTED.test(text)) return;
+    const own = bs.filter((b) => (b.type === 'text' && String(b.text ?? '').trim() && !INJECTED.test(String(b.text))) || b.type === 'image');
+    if (!own.length) return;
+    const first = own.find((b) => b.type === 'text');
+    if (first && isAutomated(first.text)) return;
+    const text = own.map((b) => (b.type === 'image' ? '[image]' : String(b.text))).join('\n');
     out.push({ at: at(e), kind: 'typed', text, index });
   });
   return out;

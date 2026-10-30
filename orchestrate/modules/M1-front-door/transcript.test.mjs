@@ -59,5 +59,6 @@ test('planted failures: a Dispatcher-typed "yes" cannot stand in for an answer; 
   assert.match(checkTapTest(errored).problems.join(), /q-c ended in an error/);
   assert.match(checkTapTest([asks(0, 'q-a'), result(1, 'q-a', 'Yes')]).problems.join(), /only 1 question boxes/);
   assert.equal(questionBoxes(errored).find((q) => q.callId === 'q-c').answer.isError, true);
-  assert.equal(joeTurns(errored).length, 2, 'an errored box result is not a turn of Joe\'s');
+  assert.equal(joeTurns(errored).length, 3, 'a declined box still counts as Joe acting (0b-8 audit round 1, M-1)');
+  assert.equal(joeTurns(errored).at(-1).kind, 'declined');
 });

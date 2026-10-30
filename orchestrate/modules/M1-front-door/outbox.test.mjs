@@ -29,7 +29,7 @@ test('MAT-7: a passed `until` leaves the product away (nothing returns to active
 });
 
 test('minor 10: an ambiguous or unknown time zone becomes null (number work holds) with a note', () => {
-  for (const tz of ['EST', 'Pacific', 'GMT+2', 'Etc/GMT-2', 'Mars/Olympus_Mons']) {
+  for (const tz of ['EST', 'Pacific', 'GMT+2', 'Etc/GMT-2', 'Mars/Olympus_Mons', 'etc/gmt+2', 'ETC/GMT-5', 'SystemV/EST5', 'Etc/UTC', 'GMT', 'EST5EDT', 'CET']) {
     const r = stateDoc({ product: 'test-product', state: 'away', tz });
     assert.equal(r.ok, true, tz);
     assert.equal(r.doc.tz, null, tz);
@@ -86,4 +86,15 @@ test('intake refuses anything outside the three shapes', () => {
   assert.equal(outboxFile('ask', '1', {}).ok, false);
   assert.equal(outboxFile('state', '../x', { product: 'p', state: 'paused' }).ok, false);
   assert.equal(stateDoc({ product: 'p', state: 'away', until: 'next week' }).ok, false);
+});
+
+test('0b-8 audit round 1 M-2: a fixed-offset zone in any spelling is null in the stored file, so number work holds', () => {
+  const r = checkOutboxFile('state-1.json', '{"product":"test-product","state":"away","until":"2026-11-07","tz":"etc/gmt+2"}');
+  assert.equal(r.ok, true); assert.equal(r.doc.tz, null); assert.match(r.note, /number work holds/);
+  assert.equal(checkTimeZone('europe/prague').tz, 'Europe/Prague');
+});
+
+test('0b-8 audit round 1 minor 7: a lone ">" between quoted paragraphs is accepted', () => {
+  assert.equal(checkOutboxFile('idea-20261103-0915-kq.md', '> first part\n>\n> second part\n').ok, true);
+  assert.equal(checkOutboxFile('idea-20261103-0915-kq.md', '> first part\nunquoted\n').ok, false);
 });

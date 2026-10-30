@@ -71,3 +71,37 @@ test('the 9,000-character budget holds; oldest turns go first; R6 six sections p
   assert.ok(huge.length <= HANDOFF_BUDGET_CHARS);
   assert.match(huge, /1 older message/);
 });
+
+test('0b-8 audit round 1 M-1: an image-only message, a declined question box, or text after an injected block at minute 14 resets quiet', () => {
+  const user = (min, content) => ({ ...typed(min, ''), message: { role: 'user', content } });
+  const cases = {
+    image: [user(14, [{ type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'AAAA' } }]), said(14, 'Got the screenshot.')],
+    declined: [asks(13, 'q-d'), result(14, 'q-d', 'The user declined to answer.', true), said(14, 'OK.')],
+    injectedThenJoe: [user(14, [{ type: 'text', text: '<system-reminder>note</system-reminder>' }, { type: 'text', text: 'actually wait' }]), said(14, 'Waiting.')],
+  };
+  for (const [name, tail] of Object.entries(cases)) {
+    const entries = [typed(0, 'hi'), said(1, 'hello'), ...tail];
+    const r = shouldRestartFrontDoor({ sizeTokens: 200_000, entries, now: at(16) });
+    assert.equal(r.restart, false, `${name}: ${r.reason}`);
+  }
+  // a line that is only injected text, or a Dispatcher line, still does not count
+  const injectedOnly = [typed(0, 'hi'), said(1, 'hello'), user(14, [{ type: 'text', text: '<task-notification>x</task-notification>' }]), said(14, 'ok')];
+  assert.equal(shouldRestartFrontDoor({ sizeTokens: 200_000, entries: injectedOnly, now: at(16) }).restart, true);
+});
+
+test('0b-8 audit round 1 minor 10: quiet runs from Joe\'s latest timed turn, not session start, when the last has no time', () => {
+  const noTime = { ...typed(0, 'later'), timestamp: undefined };
+  const entries = [typed(10, 'earlier'), said(10, 'ok'), noTime, said(11, 'ok')];
+  assert.equal(shouldRestartFrontDoor({ sizeTokens: 200_000, entries, now: at(16), startedAt: new Date(T0 - 3600e3).toISOString() }).restart, false);
+});
+
+test('0b-8 audit round 1 minors 1, 2: with 60 asks all 5 of Joe\'s turns survive; a key in an ask link or the re-read list is masked', () => {
+  const entries = [];
+  for (let i = 0; i < 5; i++) entries.push(typed(i, `message ${i} ${'x'.repeat(300)}`), said(i, `reply ${i} ${'y'.repeat(300)}`));
+  const openAsks = Array.from({ length: 60 }, (_, i) => ({ id: `ask-${i}`, what: `Approve change ${i} ${'z'.repeat(80)}`, link: i === 0 ? `https://example.invalid/pr/0?t=${FAKE.github}` : `https://example.invalid/pr/${i}` }));
+  const h = makeFrontDoorHandoff({ entries, openAsks, rereadList: [`notes/${FAKE.anthropic}.md`], now: at(30) });
+  assert.ok(h.length <= HANDOFF_BUDGET_CHARS);
+  for (let i = 0; i < 5; i++) assert.match(h, new RegExp(`message ${i} `));
+  assert.match(h, /and \d+ more: see the waiting list/);
+  assert.equal(h.includes(FAKE.github), false); assert.equal(h.includes(FAKE.anthropic), false);
+});

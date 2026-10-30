@@ -66,7 +66,7 @@ export function checkOutboxFile(name, text) {
   const [, kind, , ext] = m;
   if (kind === 'idea') {
     if (ext !== 'md') return refuse('an idea is a .md file');
-    if (!String(text).split('\n').filter((l) => l !== '').every((l) => l.startsWith('> '))) return refuse('idea text must be quoted on every line');
+    if (!String(text).split('\n').filter((l) => l !== '').every((l) => l === '>' || l.startsWith('> '))) return refuse('idea text must be quoted on every line');
     return { ok: true, kind, doc: { quoted: maskSecrets(String(text)).text } };
   }
   if (ext !== 'json') return refuse(`a ${kind} file is .json`);
