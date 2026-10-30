@@ -8,21 +8,23 @@
 //     that another program starts (the secret scanner) gets them too;
 //   - names the repository explicitly (GIT_DIR) and logs it, so a test can prove no call ran
 //     inside a worker's copy except save-work;
-//   - refuses a repository whose own config names a program under a name SAFE_CONFIG cannot pin
-//     ahead of time (a filter, diff or merge driver, a remote's upload program, a URL rewrite), and
-//     turns off outside diff programs and text conversion on every command that accepts the flags.
+//   - refuses a repository any of whose config files (its own, its worktrees', its submodules', found
+//     through a pointer file or commondir) sets a key not on a short list known to start nothing
+//     (LEAD-CALLS L49: deny by default), and turns off outside diff programs and text conversion on
+//     every command that accepts the flags.
 // Capability note: checked against Git 2.54.0 on 29 Oct 2026; requires git >= 2.42.
 
 import { spawn } from 'node:child_process';
-import { mkdtempSync, readFileSync, existsSync, readdirSync, lstatSync, rmSync, rmdirSync } from 'node:fs';
+import { mkdtempSync, readFileSync, existsSync, readdirSync, lstatSync, statSync, realpathSync, rmSync, rmdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, dirname, resolve } from 'node:path';
 
 export const MIN_GIT = [2, 42];
 
 // Settings that stop git from running any program a repository's own files could name, or fetching from
-// anywhere the call did not name (LEAD-CALLS L36: every key that can, not one at a time). They come last, so
-// they win over the repository's own config. `core.hooksPath` names a file, so no hook can be found under it.
+// anywhere the call did not name (LEAD-CALLS L36). Since L49 they are the second layer: a repository whose config
+// sets anything off the safe list is refused before git runs. They come last, so they win over the repository's
+// own config. `core.hooksPath` names a file, so no hook can be found under it.
 export const SAFE_CONFIG = Object.freeze([
   ['core.fsmonitor', 'false'],
   ['core.hooksPath', '/dev/null'],
@@ -32,7 +34,6 @@ export const SAFE_CONFIG = Object.freeze([
   ['core.sshCommand', '/usr/bin/false'],
   ['core.askPass', '/usr/bin/false'],
   ['core.attributesFile', '/dev/null'],
-  ['diff.external', ''],
   ['interactive.diffFilter', 'cat'],
   ['credential.helper', ''],
   // Signatures: never checked or made, so no signing program runs (a commit with a signature header and
@@ -54,8 +55,13 @@ export const SAFE_CONFIG = Object.freeze([
   ['fetch.recurseSubmodules', 'false'],
   ['push.recurseSubmodules', 'no'],
   ['transfer.bundleURI', 'false'],
+  ['fetch.bundleURI', ''],
   ['http.proxy', ''],
   ['protocol.ext.allow', 'never'],
+  // A repository nested in the work tree is never looked into, so its own config is never read (L49).
+  ['diff.ignoreSubmodules', 'all'],
+  ['status.submoduleSummary', 'false'],
+  ['diff.submodule', 'short'],
   ['protocol.file.allow', 'always'], // local bundles and the mirror are files
   ['transfer.fsckObjects', 'true'],
   ['fetch.fsckObjects', 'true'],
@@ -137,61 +143,155 @@ export function safeGitEnv({ gitDir, workTree, extraConfig = [] } = {}) {
   return env;
 }
 
-// Repository config keys that name a program, or a place to fetch from, under a name each repository picks, so
-// SAFE_CONFIG cannot pin them ahead of time (L36). A repository whose own config (or a file it includes) sets one
-// is refused. Keys as git lists them: section and key in lower case, the name between kept as written.
-export const NAMED_PROGRAM_KEY = /^(?:(?:filter|diff|merge|mergetool|difftool|trailer)\..+\.(?:clean|smudge|process|command|textconv|driver|cmd)|remote\..+\.(?:uploadpack|receivepack|vcs|promisor|proxy|partialclonefilter)|url\..+\.(?:insteadof|pushinsteadof)|credential\..+\.helper|submodule\..+\.update|http\..+\.proxy|extensions\.partialclone|core\.alternaterefscommand|core\.gitproxy)$/;
+// Repository config keys known to start no program and fetch from nowhere the call did not name (LEAD-CALLS L49).
+// Any other key in any of the repository's config files is a refusal that names it: deny by default, since pinning
+// one key at a time missed twice (L36; then hooks defined in config and bundle links). Keys as git lists them:
+// section and key in lower case, the name between kept as written. Checked against git 2.54.0, 30 Oct 2026.
+export const INERT_KEYS = Object.freeze(new Set([
+  'core.repositoryformatversion', 'core.bare', 'core.filemode', 'core.logallrefupdates', 'core.ignorecase',
+  'core.precomposeunicode', 'core.symlinks', 'extensions.objectformat', 'extensions.worktreeconfig',
+  'extensions.refstorage', 'user.name', 'user.email',
+]));
+const INERT_NAMED = /^(?:remote\.[^\n]+\.fetch|branch\.[^\n]+\.(?:remote|merge|rebase))$/;
+const URL_KEY = /^remote\.[^\n]+\.(?:url|pushurl)$/;
+// A plain https, ssh or file address, an scp-style ssh address, or a local path: never `<helper>::`, never a host
+// that starts like an option.
+export const PLAIN_URL = /^(?:(?:https|ssh|file):\/\/(?!-)[^\s]*|\/[^\s]*|[A-Za-z0-9._-]+@[A-Za-z0-9.-]+:(?!-)[^\s]+)$/;
+
+/** Whether `key` (as git lists it) with `value` is on the safe list. */
+export function inertSetting(key, value) {
+  if (INERT_KEYS.has(key) || INERT_NAMED.test(key)) return true;
+  return URL_KEY.test(key) && typeof value === 'string' && PLAIN_URL.test(value);
+}
+
+const statOf = (p) => { try { return statSync(p); } catch { return null; } };
+
+/**
+ * The folder git will use for `gitDir` and every config file it or its worktrees and submodules have, or { why }.
+ * A `.git` pointer file is followed (one step, as git does) and so is `commondir`.
+ */
+export function repoConfigFiles(gitDir) {
+  let dir = gitDir;
+  const s = statOf(dir);
+  if (s?.isFile()) {
+    const m = /^gitdir: (.+)$/m.exec(readFileSync(dir, 'utf8'));
+    if (!m) return { why: 'its .git is a file but not a pointer' };
+    dir = resolve(dirname(gitDir), m[1].trim());
+    if (!statOf(dir)?.isDirectory()) return { why: 'its .git pointer does not lead to a folder' };
+  } else if (!s?.isDirectory()) return { dir, files: [] };
+  let common = dir;
+  const cd = join(dir, 'commondir');
+  if (statOf(cd)) {
+    common = resolve(dir, readFileSync(cd, 'utf8').trim());
+    if (!statOf(common)?.isDirectory()) return { why: 'its commondir does not lead to a folder' };
+  }
+  const found = new Map();
+  const add = (f) => { const st = statOf(f); if (st) found.set(realpathSync(f), f); };
+  for (const base of new Set([dir, common])) {
+    add(join(base, 'config'));
+    add(join(base, 'config.worktree'));
+  }
+  for (const w of statOf(join(common, 'worktrees'))?.isDirectory() ? readdirSync(join(common, 'worktrees')) : []) {
+    add(join(common, 'worktrees', w, 'config'));
+    add(join(common, 'worktrees', w, 'config.worktree'));
+  }
+  // Submodules' own folders, nested to any depth (a submodule's name may hold slashes).
+  const seen = new Set();
+  let budget = 20000;
+  const walk = (d) => {
+    const real = realpathSync(d);
+    if (seen.has(real)) return;
+    seen.add(real);
+    for (const n of readdirSync(d)) {
+      if ((budget -= 1) < 0) throw new Error('too many files under modules');
+      const p = join(d, n);
+      const st = statOf(p);
+      if (st?.isDirectory()) walk(p);
+      else if (n === 'config' || n === 'config.worktree') add(p);
+    }
+  };
+  try {
+    for (const base of new Set([dir, common])) if (statOf(join(base, 'modules'))?.isDirectory()) walk(join(base, 'modules'));
+  } catch (e) { return { why: `its submodule folders could not be read: ${e.message}` }; }
+  return { dir, files: [...found.values()] };
+}
+
+/** The keys and values in one config file, read by git without following its includes, or { why }. */
+function readConfigFile(file, { gitBin, timeoutMs }) {
+  return new Promise((done) => {
+    const child = spawn(gitBin, ['config', '--file', file, '--no-includes', '--list', '-z'], { cwd: home(), env: safeGitEnv(), stdio: ['ignore', 'pipe', 'pipe'], timeout: timeoutMs });
+    const out = []; let err = '';
+    child.stdout.on('data', (d) => out.push(d));
+    child.stderr.on('data', (d) => { err += d; });
+    child.on('error', (e) => done({ why: e.message }));
+    child.on('close', (code) => {
+      if (code !== 0) return done({ why: err.trim().slice(0, 200) || `exit ${code}` });
+      const entries = Buffer.concat(out).toString('utf8').split('\0').filter((x) => x !== '').map((x) => {
+        const nl = x.indexOf('\n');
+        return nl < 0 ? [x, undefined] : [x.slice(0, nl), x.slice(nl + 1)];
+      });
+      done({ entries });
+    });
+  });
+}
+
+async function checkRepo(gitDir, { gitBin = 'git', timeoutMs = 30000 } = {}) {
+  let found;
+  try { found = repoConfigFiles(gitDir); } catch (e) { return { why: `its folders could not be read: ${e.message}` }; }
+  if (found.why) return { why: found.why };
+  const bad = [];
+  for (const f of found.files) {
+    const r = await readConfigFile(f, { gitBin, timeoutMs });
+    const where = f.startsWith(found.dir) ? f.slice(found.dir.length + 1) : f;
+    if (r.why) return { why: `its config ${where} could not be read: ${r.why}` };
+    for (const [k, v] of r.entries) if (!inertSetting(k, v)) bad.push(`${k} (${where})`);
+  }
+  if (bad.length) return { why: `its config sets what is not on the safe list: ${bad.join(', ')}` };
+  return { dir: found.dir };
+}
+
+/**
+ * Why the repository at `gitDir` must not be run, or null. Every config file it has is read, including what
+ * worktrees and submodules have and what a pointer file or commondir leads to; any key off the safe list is a
+ * refusal that names it, and so is an include. A folder with no config yet (git init, version) has nothing to
+ * read. A config that can't be read is a refusal: fail closed.
+ */
+export async function repoConfigWhy(gitDir, opts) {
+  return (await checkRepo(gitDir, opts)).why ?? null;
+}
 
 // Diff-family commands, which accept the two flags that turn off outside diff programs and text conversion.
 const DIFF_COMMANDS = new Set(['log', 'show', 'diff', 'diff-tree', 'diff-index', 'diff-files', 'whatchanged', 'format-patch', 'range-diff']);
 const NO_PROGRAMS = ['--no-ext-diff', '--no-textconv'];
+// Options before the command that take the next word as their value.
+const GLOBAL_WITH_VALUE = new Set(['-c', '-C', '--git-dir', '--work-tree', '--namespace', '--config-env', '--super-prefix']);
 
 /** `args` with the no-program flags right after a diff-family command (once each); other commands unchanged. */
 export function withNoPrograms(args) {
-  const i = args.findIndex((a) => !String(a).startsWith('-'));
-  if (i < 0 || !DIFF_COMMANDS.has(args[i])) return args;
+  let i = 0;
+  while (i < args.length) {
+    const a = String(args[i]);
+    if (GLOBAL_WITH_VALUE.has(a)) i += 2;
+    else if (a.startsWith('-')) i += 1;
+    else break;
+  }
+  if (i >= args.length || !DIFF_COMMANDS.has(args[i])) return args;
   const add = NO_PROGRAMS.filter((f) => !args.includes(f));
   return [...args.slice(0, i + 1), ...add, ...args.slice(i + 1)];
-}
-
-/**
- * Why the repository at `gitDir` must not be run, or null. Reads its own config (and what it includes) with the
- * safe settings; a key that names a program under a per-repository name is a refusal. A folder with no config
- * yet (git init, version) has nothing to read. A config that can't be read is a refusal: fail closed.
- */
-export function repoConfigWhy(gitDir, { gitBin = 'git', timeoutMs = 30000 } = {}) {
-  if (!existsSync(join(gitDir, 'config')) && !existsSync(join(gitDir, 'commondir'))) return Promise.resolve(null);
-  return new Promise((resolve) => {
-    const child = spawn(gitBin, ['config', '--list', '-z', '--show-scope', '--includes'], { cwd: home(), env: safeGitEnv({ gitDir }), stdio: ['ignore', 'pipe', 'pipe'], timeout: timeoutMs });
-    const out = []; let err = '';
-    child.stdout.on('data', (d) => out.push(d));
-    child.stderr.on('data', (d) => { err += d; });
-    child.on('error', (e) => resolve(`its config could not be read: ${e.message}`));
-    child.on('close', (code) => {
-      if (code !== 0) return resolve(`its config could not be read: ${err.trim().slice(0, 200)}`);
-      const f = Buffer.concat(out).toString('utf8').split('\0');
-      const bad = [];
-      for (let i = 0; i + 1 < f.length; i += 2) {
-        if (f[i] === 'command') continue;
-        const key = f[i + 1].split('\n')[0];
-        if (NAMED_PROGRAM_KEY.test(key)) bad.push(key);
-      }
-      resolve(bad.length ? `its config names a program or a place to fetch from: ${bad.join(', ')}` : null);
-    });
-  });
 }
 
 /**
  * Runs git. Never throws on a non-zero exit: returns { code, stdout: Buffer, stderr: string }.
  * `gitDir` is required; `cwd` defaults to a private empty folder so no repository is
  * discovered from the working folder. `purpose` names the step for the call log. A repository whose own
- * config names a program SAFE_CONFIG cannot pin is refused (code -1) before git runs in it.
+ * config sets anything off the safe list is refused (code -1) before git runs in it. Git is handed the folder the
+ * check read, so a pointer file can't be swapped between the check and the run.
  */
 export async function git(args, { gitDir, workTree, cwd, input, extraConfig, purpose = 'unnamed', timeoutMs = 120000, gitBin = 'git' } = {}) {
   if (!gitDir) return { code: -1, stdout: Buffer.alloc(0), stderr: 'safe-git: GIT_DIR is required' };
-  const why = await repoConfigWhy(gitDir, { gitBin });
-  if (why) return { code: -1, stdout: Buffer.alloc(0), stderr: `safe-git: refused: ${why}` };
-  const env = safeGitEnv({ gitDir, workTree, extraConfig });
+  const checked = await checkRepo(gitDir, { gitBin });
+  if (checked.why) return { code: -1, stdout: Buffer.alloc(0), stderr: `safe-git: refused: ${checked.why}` };
+  const env = safeGitEnv({ gitDir: checked.dir, workTree, extraConfig });
   const where = cwd ?? home();
   callLog.push({ purpose, gitDir, cwd: where, workTree: workTree ?? null, args: args.filter((a) => !/^http\..*extraheader/i.test(a)) });
   return new Promise((resolve) => {

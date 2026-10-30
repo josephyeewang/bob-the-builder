@@ -746,9 +746,10 @@ test('R-0b-46: a worker changing origin and its own main affects no other copy, 
   const snap = (dir) => readdirSync(dir, { recursive: true }).filter((p) => !String(p).startsWith('.git/objects') && !String(p).includes('index')).map((p) => { const f = join(dir, String(p)); return statSync(f).isFile() ? `${p}:${readFileSync(f, 'base64')}` : String(p); }).sort();
   const before = { second: snap(join(w.root, 'second')), mirror: snap(w.mirror) };
   await gitOk(['remote', 'add', 'origin', 'https://example.invalid/evil.git'], w.cg);
-  await gitOk(['config', 'core.hooksPath', '/tmp/evil-hooks'], w.cg);
   await gitOk(['update-ref', 'refs/remotes/origin/main', (await gitOk(['rev-parse', 'HEAD'], w.cg)).trim()], w.cg);
   await gitOk(['update-ref', 'refs/heads/main', (await gitOk(['commit-tree', '-m', 'evil', `${main}^{tree}`], w.cg)).trim()], w.cg);
+  // Last: once its config names a hooks folder, safe-git refuses the copy (L49).
+  await gitOk(['config', 'core.hooksPath', '/tmp/evil-hooks'], w.cg);
   assert.deepEqual(snap(join(w.root, 'second')), before.second);
   assert.deepEqual(snap(w.mirror), before.mirror);
   assert.equal((await gitOk(['rev-parse', 'refs/heads/main'], { gitDir: w.mirror })).trim(), main);
