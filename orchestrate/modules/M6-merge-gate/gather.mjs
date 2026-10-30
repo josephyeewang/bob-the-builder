@@ -157,7 +157,7 @@ export async function gatherFacts(ctx, merge) {
   f.firstCustomerNewFiles = Array.isArray(fcv) ? fcv : null;
 
   // The classification and the lane (M10).
-  const c = f.files ? rules.classify({ product, files: f.files, truncated: false, labels: f.pr?.labels ?? [] }) : null;
+  const c = f.files ? rules.classify({ product, files: f.files, truncated: false, labels: f.pr?.labels ?? [], declared_tier: card.doc.tier }) : null;
   f.tier = c && (c.tier === 1 || c.tier === 2) ? c.tier : null;
   const risky = c?.risky ?? ['unclassifiable'];
 

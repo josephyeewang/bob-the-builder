@@ -382,3 +382,17 @@ test('a mark that failed until the audit result landed is still posted, with an 
   assert.ok(after.doc.marked_at);
   assert.ok(w.alerts.some((a) => a.type === 'merge_marked_after_audit'));
 });
+
+// Audit round 3, Material: on M10's real engine a clean docs change with a Tier-2 go merges as Tier 2 (the card's
+// declared tier reaches the classification), and the needs-joe status says so.
+test('real rules: a clean docs change with a Tier-2 go merges, recorded and marked as Tier 2', async () => {
+  const w = world();
+  realRules(w, { deep: false });
+  verifiedCard(w, 'C-1', { files: { 'docs/guide.md': 'more words' } });
+  await gatePass(w.ctx);
+  const m = mergeOf(w);
+  assert.equal(m.doc.state, 'merged', JSON.stringify(m.doc));
+  assert.equal(m.doc.tier, 2);
+  const nj = await readNeedsJoe({ gh: w.g.gh, owner: 'sample-org', repo: 'sample-app', sha: m.doc.merge_commit, robotBotId: w.g.robotId });
+  assert.equal(nj.tier, 2);
+});

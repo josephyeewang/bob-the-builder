@@ -124,6 +124,12 @@ export async function gatePass(ctx) {
   // Returns STEPPED_ASIDE when this merge left the front without taking the lock or starting a catch-up, so the next
   // in the queue is served in the same pass (R-0b-90: a Tier-1 change held for the hours steps aside).
   async function serve(m) {
+    if (!markable(m.doc.card)) {
+      const reasons = ['the card id is too long for the robot\'s mark (80 characters at most)'];
+      move(m, 'refused', { reasons });
+      alert({ type: 'merge_refused', merge: m.id, card: m.doc.card, reasons });
+      return STEPPED_ASIDE;
+    }
     if (m.doc.state === 'catching_up') {
       await finishCatchUp(m);
       // Caught up: served now, before younger changes can put it behind main again.
@@ -132,7 +138,7 @@ export async function gatePass(ctx) {
     }
     const facts = await gatherFacts(ctx, m);
     // GitHub unreadable: refuse this one and stop, rather than refuse the whole queue in one pass.
-    const outage = !facts.pr || !SHA.test(facts.main?.sha ?? '');
+    const outage = !!facts.card && (!facts.pr || !SHA.test(facts.main?.sha ?? '') || facts.checks === null || facts.statuses === null || facts.compareStatus === null);
     // Behind main: catch up first (R-0b-89), never judge a head that can't land as judged.
     if ((facts.compareStatus === 'behind' || facts.compareStatus === 'diverged') && facts.pr?.state === 'open' && SHA.test(facts.pr?.head?.sha ?? '')) {
       if ((m.doc.catch_ups ?? []).length >= (ctx.maxCatchUps ?? MAX_CATCH_UPS)) { move(m, 'returned_to_builder', { reasons: [`caught up ${MAX_CATCH_UPS} times and still behind main`] }); return STEPPED_ASIDE; }
@@ -141,12 +147,6 @@ export async function gatePass(ctx) {
     const v = judge(facts);
     if (v.decision === 'refuse') { refuse(m, facts, v); return outage ? undefined : STEPPED_ASIDE; }
     if (v.decision === 'hold') { move(m, 'held', { hold: v.hold }); return STEPPED_ASIDE; }
-    if (!markable(m.doc.card)) {
-      const reasons = ['the card id is too long for the robot\'s mark (80 characters at most)'];
-      move(m, 'refused', { reasons });
-      alert({ type: 'merge_refused', merge: m.id, card: m.doc.card, reasons });
-      return STEPPED_ASIDE;
-    }
     return take(m, facts);
   }
 
@@ -157,6 +157,7 @@ export async function gatePass(ctx) {
     if (r?.status === 202) return step(m, 'catch_up_asked');
     // 422: a conflict, or the head moved under us. Either way the builder takes it back.
     move(fresh('merge', m.id), 'returned_to_builder', { reasons: [`catching up with main failed (${r?.status})`] });
+    return STEPPED_ASIDE;
   }
 
   async function finishCatchUp(m) {
