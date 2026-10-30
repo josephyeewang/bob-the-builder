@@ -4,7 +4,8 @@
 //
 // Capability note: NOT VERIFIED against the pinned Claude Code. Each name comes from the design
 // (v4 §14.1) and must be re-checked at every pin change (live proof L2, "names check"). Until a
-// name is confirmed by the read-back or a break-it test, the launch refuses (launch.mjs).
+// name is confirmed by the read-back or a break-it test, the launch refuses: `launch()` runs
+// `unconfirmedNames` on the rendered role file before check 1 (audit R-0b-44 M-1).
 
 export const FLAGS = Object.freeze({
   print: '-p',
@@ -108,3 +109,43 @@ export const INIT_FIELDS = Object.freeze({
 export const ALLOWED_SETTING_SOURCES = Object.freeze(['managed', 'flag']);
 
 export const MIN_CLAUDE_CODE = '2.1.295';
+
+// ---- which names are confirmed (audit R-0b-44 M-1) ----
+//
+// One entry per name the launcher writes: how it was proven (`readback:<start-message field>` or
+// `break-it:<test>`) and the Claude Code version it was proven on. An entry counts only for that
+// exact version, so a pin change makes every name unconfirmed until live proof L2 runs again.
+// Empty today: no name has been proven live yet, so every launch refuses (fail closed).
+export const CONFIRMED = Object.freeze({});
+
+// Keys whose children are data (plugin ids, variable names and values), not setting names.
+const DATA_KEYS = new Set([SETTINGS.enabledPlugins]);
+const VARS_KEY = SETTINGS.env;
+
+/** Every setting, hook field and hook event name in a rendered role file, plus its variable names. */
+export function namesIn(settings) {
+  const out = new Set();
+  const walk = (v, parent) => {
+    if (Array.isArray(v)) { for (const x of v) if (x && typeof x === 'object') walk(x, parent); return; }
+    if (!v || typeof v !== 'object') return;
+    for (const [k, x] of Object.entries(v)) {
+      out.add(k);
+      if (!DATA_KEYS.has(k) && k !== VARS_KEY) walk(x, k);
+      if (k === VARS_KEY && x && typeof x === 'object') for (const name of Object.keys(x)) out.add(name);
+    }
+  };
+  walk(settings, '');
+  return [...out].sort();
+}
+
+/**
+ * The names in `settings` (plus `flags`) not confirmed on `version`. Empty = the launch may go on.
+ * `confirmed` defaults to CONFIRMED; tests pass their own.
+ */
+export function unconfirmedNames({ settings, flags = [], version, confirmed = CONFIRMED }) {
+  if (typeof version !== 'string' || !version) return ['(no Claude Code version given)'];
+  return [...new Set([...namesIn(settings), ...flags])].filter((n) => {
+    const c = Object.hasOwn(confirmed, n) ? confirmed[n] : null;
+    return !(c && typeof c.by === 'string' && /^(readback|break-it):./.test(c.by) && c.version === version);
+  });
+}

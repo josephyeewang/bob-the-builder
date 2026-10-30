@@ -6,7 +6,8 @@
 // start message carries are named in settings-names.mjs (INIT_FIELDS); a missing one refuses.
 
 import { spawn } from 'node:child_process';
-import { FLAGS as F, INIT_FIELDS as I, ALLOWED_SETTING_SOURCES } from './settings-names.mjs';
+import { FLAGS as F, INIT_FIELDS as I, ALLOWED_SETTING_SOURCES, MIN_CLAUDE_CODE } from './settings-names.mjs';
+import { compareVersions } from './hooks-check.mjs';
 import { NEVER_TOOLS, ALWAYS_TOLERATED } from './role-profiles.mjs';
 
 const refuse = (reason) => ({ ok: false, reason });
@@ -34,7 +35,7 @@ export function findInit(text) {
 const names = (list) => (Array.isArray(list) ? list.map((x) => (typeof x === 'string' ? x : x?.name)).filter((x) => typeof x === 'string') : null);
 
 /** Compares a start message with the role. */
-export function checkInit(init, { role, profile }) {
+export function checkInit(init, { role, profile, pin }) {
   if (!init) return refuse('no start message');
   for (const k of [I.tools, I.mcpServers, I.plugins, I.skills, I.settingSources, I.permissionMode]) {
     if (!Object.hasOwn(init, k)) return refuse(`start message has no ${k}`);
@@ -54,14 +55,20 @@ export function checkInit(init, { role, profile }) {
   const sources = names(init[I.settingSources]);
   if (!sources || !sources.includes('flag') || sources.some((s) => !ALLOWED_SETTING_SOURCES.includes(s))) return refuse(`settings sources are ${sources?.join(',') ?? '?'}, want managed and --settings only`);
   if (init[I.permissionMode] !== profile.mode) return refuse(`permission mode is ${init[I.permissionMode]}, role has ${profile.mode}`);
-  return { ok: true, version: init[I.version] ?? null, role };
+  // The version the session itself reports: at least the floor, and the pin when one is given
+  // (audit R-0b-44 round 1, minor).
+  const v = init[I.version];
+  if (typeof v !== 'string' || !/^\d+\.\d+\.\d+$/.test(v)) return refuse('start message has no Claude Code version');
+  if (compareVersions(v, MIN_CLAUDE_CODE) < 0) return refuse(`the session runs Claude Code ${v}, below ${MIN_CLAUDE_CODE}`);
+  if (pin !== undefined && v !== pin) return refuse(`the session runs Claude Code ${v}, the rules pin ${pin}`);
+  return { ok: true, version: v, role };
 }
 
 /**
  * Runs the role headless, stops it as soon as the start message is in, and checks it.
  * `spawnFn` is for tests (a fake claude). Never waits more than `timeoutMs`.
  */
-export function readBack({ claudeBin, args, env, cwd, role, profile, spawnFn = spawn, timeoutMs = 60000 }) {
+export function readBack({ claudeBin, args, env, cwd, role, profile, pin, spawnFn = spawn, timeoutMs = 60000 }) {
   return new Promise((resolve) => {
     let out = '';
     let done = false;
@@ -73,8 +80,8 @@ export function readBack({ claudeBin, args, env, cwd, role, profile, spawnFn = s
     child.stdout.on('data', (d) => {
       out += d;
       const init = findInit(out);
-      if (init) finish(checkInit(init, { role, profile }));
+      if (init) finish(checkInit(init, { role, profile, pin }));
     });
-    child.on('close', () => finish(checkInit(findInit(out), { role, profile })));
+    child.on('close', () => finish(checkInit(findInit(out), { role, profile, pin })));
   });
 }

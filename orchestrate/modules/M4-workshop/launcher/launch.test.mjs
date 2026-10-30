@@ -13,6 +13,7 @@ import { roleArgs, checkInit, readBack } from './readback.mjs';
 import { roleEnv, checkRoleEnv, checkMachineWide } from './env-check.mjs';
 import { HOOKS_SOURCE, installHooks, checkHooks, checkVersion, pinnedBinary, productionProbe, checkSnapshot } from './hooks-check.mjs';
 import { emptyOutbox, readOutboxFile } from './outbox.mjs';
+import { namesIn, unconfirmedNames, FLAGS } from './settings-names.mjs';
 import { CHECKS, launch, installStep, needsInstall, checkBobFolder, lockedRunCommand, smokeTest, baselineTest } from './launch.mjs';
 import { removeProtected } from './worker-copy.mjs';
 import { makeSnapshot } from '../hooks/snapshot.mjs';
@@ -20,6 +21,22 @@ import { sha256 } from './role-profiles.mjs';
 import { memoryRecord } from '../../../shared/record.mjs';
 
 const tmp = () => realpathSync(mkdtempSync(join(tmpdir(), 'orch-launch-')));
+
+// The names check (audit R-0b-44 M-1): a real rendered role file and the start flags, with a
+// stand-in table that marks every name confirmed on the test version.
+const N_PATHS = {
+  copy: '/w/copy', outbox: '/w/outbox', hooksDir: '/w/hooks', snapshot: '/w/rules.json', node: '/w/node',
+  deny: { secrets: ['/w/secrets'], claudeHome: '/h/.claude', robotKeys: '/w/keys', record: '/w/record', otherCopies: ['/w/copy2'] },
+  bobFolder: '/w/bob', mirror: '/w/mirror.git',
+};
+const N_VERSION = '2.1.300';
+const N_FLAGS = Object.values(FLAGS).filter((f) => f.startsWith('-'));
+function NAMES(role, over = {}) {
+  const r = renderRoleSettings({ role, profile: DESIGN_PROFILES[role], paths: N_PATHS, product: { commands: { test: 'npm test' } } });
+  assert.equal(r.ok, true, `${role}: ${r.reason}`);
+  const confirmed = Object.fromEntries([...namesIn(r.settings), ...N_FLAGS].map((n) => [n, { by: 'readback:stand-in', version: N_VERSION }]));
+  return { settings: r.settings, flags: N_FLAGS, version: N_VERSION, confirmed, ...over };
+}
 
 // ---- the order (§14.1.3) ----
 
@@ -29,7 +46,7 @@ test('launch: the first failing check stops the launch; later checks never run a
     const called = [];
     const checks = Object.fromEntries(CHECKS.map((c) => [c.n, async () => { called.push(c.n); return c.n === k ? { ok: false, reason: 'planted' } : { ok: true }; }]));
     let started = 0;
-    const r = await launch({ role: 'worker', profile: worker, checks, start: async () => { started += 1; } });
+    const r = await launch({ role: 'worker', profile: worker, checks, start: async () => { started += 1; }, names: NAMES('worker') });
     assert.equal(r.ok, false);
     assert.equal(r.failedAt, k);
     assert.deepEqual(called, CHECKS.map((c) => c.n).filter((n) => n <= k), `check ${k}`);
@@ -40,14 +57,14 @@ test('launch: the first failing check stops the launch; later checks never run a
     const checks = Object.fromEntries(CHECKS.map((c) => [c.n, async () => ({ ok: true })]));
     checks[7] = bad;
     let started = 0;
-    const r = await launch({ role: 'worker', profile: worker, checks, start: async () => { started += 1; } });
+    const r = await launch({ role: 'worker', profile: worker, checks, start: async () => { started += 1; }, names: NAMES('worker') });
     assert.equal(r.failedAt, 7);
     assert.equal(started, 0);
   }
   // All pass: one start.
   const checks = Object.fromEntries(CHECKS.map((c) => [c.n, async () => ({ ok: true })]));
   let started = 0;
-  assert.equal((await launch({ role: 'worker', profile: worker, checks, start: async () => { started += 1; return 'w-1'; } })).ok, true);
+  assert.equal((await launch({ role: 'worker', profile: worker, checks, start: async () => { started += 1; return 'w-1'; }, names: NAMES('worker') })).ok, true);
   assert.equal(started, 1);
 });
 
@@ -55,14 +72,58 @@ test('launch: which checks apply to which role', async () => {
   const ran = async (role) => {
     const called = [];
     const checks = Object.fromEntries(CHECKS.map((c) => [c.n, async () => { called.push(c.n); return { ok: true }; }]));
-    await launch({ role, profile: DESIGN_PROFILES[role], checks, start: async () => {} });
+    await launch({ role, profile: DESIGN_PROFILES[role], checks, start: async () => {}, names: NAMES(role) });
     return called;
   };
   assert.deepEqual(await ran('worker'), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
   assert.deepEqual(await ran('lead'), [3, 5, 6, 7, 8, 9, 10, 12, 13]);
   assert.deepEqual(await ran('front_door'), [3, 5, 6, 7, 8, 9, 10, 12]);
-  assert.deepEqual(await ran('reviewer'), [1, 2, 3, 5, 6, 7, 8, 9, 10, 12, 13]);
+  // Every role with a shell runs the smoke test (check 11), not only the worker (audit R-0b-44 M-1).
+  assert.deepEqual(await ran('reviewer'), [1, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
+  assert.deepEqual(await ran('auditor'), [1, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
   assert.deepEqual(await ran('learning'), [3, 5, 6, 7, 8, 9, 10, 12, 13]);
+  // A shell added to a role that had none brings check 11 with it.
+  const called = [];
+  const checks = Object.fromEntries(CHECKS.map((c) => [c.n, async () => { called.push(c.n); return { ok: true }; }]));
+  const leadWithShell = { ...DESIGN_PROFILES.lead, tools: [...DESIGN_PROFILES.lead.tools, 'Bash'] };
+  await launch({ role: 'lead', profile: leadWithShell, checks, start: async () => {}, names: NAMES('lead') });
+  assert.ok(called.includes(11));
+});
+
+test('launch: a setting name not confirmed on the pinned version refuses before check 1 (audit R-0b-44 M-1)', async () => {
+  const run = async (names) => {
+    const called = [];
+    let started = 0;
+    const checks = Object.fromEntries(CHECKS.map((c) => [c.n, async () => { called.push(c.n); return { ok: true }; }]));
+    const r = await launch({ role: 'worker', profile: DESIGN_PROFILES.worker, checks, start: async () => { started += 1; }, names });
+    return { r, called, started };
+  };
+  const good = NAMES('worker');
+  assert.equal((await run(good)).r.ok, true);
+  const bad = [
+    ['no names given', undefined],
+    ['no role file', { ...good, settings: undefined }],
+    ['no version', { ...good, version: '' }],
+    ['another version', { ...good, version: '2.1.301' }],
+    ['one setting unconfirmed', { ...good, confirmed: Object.fromEntries(Object.entries(good.confirmed).filter(([k]) => k !== S.sandbox)) }],
+    ['one hook field unconfirmed', { ...good, confirmed: Object.fromEntries(Object.entries(good.confirmed).filter(([k]) => k !== H.command)) }],
+    ['one flag unconfirmed', { ...good, confirmed: Object.fromEntries(Object.entries(good.confirmed).filter(([k]) => k !== FLAGS.tools)) }],
+    ['a misspelt name in the file', { ...good, settings: { ...good.settings, sandbx: { enabled: true } } }],
+    ['proof of the wrong kind', { ...good, confirmed: { ...good.confirmed, [S.sandbox]: { by: 'guess', version: N_VERSION } } }],
+    ['proof on another version', { ...good, confirmed: { ...good.confirmed, [S.sandbox]: { by: 'readback:x', version: '2.1.299' } } }],
+    ['the shipped table (empty today)', { ...good, confirmed: undefined }],
+  ];
+  for (const [what, names] of bad) {
+    const { r, called, started } = await run(names);
+    assert.equal(r.ok, false, what);
+    assert.equal(r.failedAt, 0, what);
+    assert.deepEqual(called, [], what);
+    assert.equal(started, 0, what);
+  }
+  // The names inside the variables block and the plugin list are checked as names or skipped as data.
+  const withVars = { [S.env]: { SOME_VAR: '1' }, [S.enabledPlugins]: { 'x@y': false } };
+  assert.deepEqual(namesIn(withVars), ['SOME_VAR', S.enabledPlugins, S.env].sort());
+  assert.deepEqual(unconfirmedNames({ settings: withVars, version: N_VERSION, confirmed: {} }).sort(), ['SOME_VAR', S.enabledPlugins, S.env].sort());
 });
 
 // ---- check 6: headless read-back (R-0b-35, 34, 39, 43) ----
@@ -122,8 +183,11 @@ test('read-back: every mismatch or missing field means no start', async () => {
     ['no --settings source', { ...goodInit('worker'), setting_sources: ['managed'] }],
     ['another permission mode', { ...goodInit('worker'), permissionMode: 'bypassPermissions' }],
     ['tools not a list', { ...goodInit('worker'), tools: 'Read' }],
+    // The version the session reports (audit R-0b-44 round 1, minor).
+    ['a version below the floor', { ...goodInit('worker'), claude_code_version: '2.1.294' }],
+    ['a version that is not a version', { ...goodInit('worker'), claude_code_version: 'latest' }],
   ];
-  for (const k of ['tools', 'mcp_servers', 'plugins', 'skills', 'setting_sources', 'permissionMode']) {
+  for (const k of ['tools', 'mcp_servers', 'plugins', 'skills', 'setting_sources', 'permissionMode', 'claude_code_version']) {
     const i = goodInit('worker'); delete i[k]; bad.push([`no ${k}`, i]);
   }
   for (const [what, init] of bad) {
@@ -133,6 +197,10 @@ test('read-back: every mismatch or missing field means no start', async () => {
     const r = await readBack({ claudeBin: 'claude', args: [], env: {}, cwd: dir, role: 'worker', profile: worker, spawnFn: fake(init) });
     assert.equal(r.ok, false, what);
   }
+  // A session on another version than the pin refuses; on the pin it passes.
+  assert.equal(checkInit(goodInit('worker'), { role: 'worker', profile: worker, pin: '2.1.301' }).ok, false);
+  assert.equal(checkInit(goodInit('worker'), { role: 'worker', profile: worker, pin: '2.1.300' }).ok, true);
+  assert.equal((await readBack({ claudeBin: 'claude', args: [], env: {}, cwd: dir, role: 'worker', profile: worker, pin: '2.1.301', spawnFn: fake(goodInit('worker')) })).ok, false);
   // No start message: by the time limit, or because the program ended, or it would not start.
   assert.equal((await readBack({ claudeBin: 'claude', args: [], env: {}, cwd: dir, role: 'worker', profile: worker, spawnFn: fake('none'), timeoutMs: 300 })).reason, 'no start message in time');
   assert.equal((await readBack({ claudeBin: 'claude', args: [], env: {}, cwd: dir, role: 'worker', profile: worker, spawnFn: fake('none', { FAKE_EXIT: '1' }) })).ok, false);

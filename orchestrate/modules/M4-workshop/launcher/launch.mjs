@@ -7,7 +7,8 @@
 import { readdirSync, readFileSync, lstatSync } from 'node:fs';
 import { join, relative, sep } from 'node:path';
 import { sha256 } from './role-profiles.mjs';
-import { SETTINGS as S } from './settings-names.mjs';
+import { SETTINGS as S, unconfirmedNames } from './settings-names.mjs';
+import { hasShell } from './role-profiles.mjs';
 
 const refuse = (reason) => ({ ok: false, reason });
 
@@ -24,7 +25,9 @@ export const CHECKS = Object.freeze([
   { n: 8, name: 'rules snapshot fresh', applies: () => true },
   { n: 9, name: 'no stray keys', applies: () => true },
   { n: 10, name: 'machine-wide production block', applies: () => true },
-  { n: 11, name: 'baseline and smoke inside the lock-down', applies: (r) => r === 'worker' },
+  // The smoke (break-it) test runs for every role with a shell, so the reviewer's and auditor's
+  // sandbox is shown to be on too (audit R-0b-44 M-1); the baseline tests run for the worker only.
+  { n: 11, name: 'baseline and smoke inside the lock-down', applies: (r, profile) => r === 'worker' || (profile ? hasShell(profile) : false) },
   { n: 12, name: 'budget, caps and disjoint files', applies: () => true },
   { n: 13, name: 'Bob method folder', applies: (r, profile) => profile?.bobFolder === true },
 ]);
@@ -32,9 +35,13 @@ export const CHECKS = Object.freeze([
 /**
  * `checks[n]` is an async function (ctx) -> { ok, reason }. A missing port for a check that
  * applies is a refusal, never a pass. `start(ctx)` runs only when every check passed.
+ * `names` = { settings, flags, version, confirmed? }: the rendered role file, the start flags and
+ * the pinned Claude Code version. Before check 1, any name not confirmed on that version refuses.
  */
-export async function launch({ role, profile, checks, start, ctx = {} }) {
+export async function launch({ role, profile, checks, start, names, ctx = {} }) {
   const log = [];
+  const left = names && typeof names === 'object' && names.settings ? unconfirmedNames(names) : ['(no role file given to the names check)'];
+  if (left.length) return { ok: false, failedAt: 0, reason: `setting names not confirmed on the pinned Claude Code: ${left.join(', ')}`, log };
   for (const c of CHECKS) {
     if (!c.applies(role, profile)) { log.push({ n: c.n, skipped: true }); continue; }
     const port = checks?.[c.n];
