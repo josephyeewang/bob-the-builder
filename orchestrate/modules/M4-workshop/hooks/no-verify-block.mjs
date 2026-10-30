@@ -7,7 +7,9 @@ const SKIP_VARS = /(^|\s)(HUSKY|LEFTHOOK|SKIP|PRE_COMMIT_ALLOW_NO_CONFIG|GIT_CON
 
 export function decide(input) {
   if (input.tool_name !== 'Bash') return pass();
-  const cmd = joinLines(input.tool_input?.command);
+  // Read raw where a here-document matters: joining lines first could move where its body ends (L46).
+  const raw = String(input.tool_input?.command ?? '');
+  const cmd = joinLines(raw);
   if (/--no-verify\b/.test(cmd)) return block('--no-verify');
   if (/core\.hookspath/i.test(cmd)) return block('changing git\'s hooks folder');
   if (SKIP_VARS.test(cmd)) return block('a hook-skip variable');
@@ -17,10 +19,10 @@ export function decide(input) {
   if (words.some((w) => w.length >= 5 && '--no-verify'.startsWith(w.split('=')[0]))) return block('--no-verify (or a shortened form)');
   if (words.some((w) => /core\.hookspath/i.test(w))) return block('changing git\'s hooks folder');
   if (words.some((w) => SKIP_VARS.test(` ${w}`))) return block('a hook-skip variable');
-  const why = unreadable(cmd);
+  const why = unreadable(raw);
   if (why) return block(`${why}; write the command out plainly`);
   if (namesGitInternals(cmd)) return block('the command touches git\'s own settings or hooks files');
-  for (const c of shellCommands(cmd)) {
+  for (const c of shellCommands(raw)) {
     if (programOf(c) !== 'git') continue;
     const sub = c.findIndex((w, k) => k > 0 && ['commit', 'merge', 'push', 'am', 'rebase'].includes(w));
     if (sub < 0) continue;

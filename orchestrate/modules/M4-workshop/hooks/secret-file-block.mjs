@@ -45,7 +45,9 @@ function patternMeetsSecret(w, listed) {
   const parts = fold(w).split(sep);
   const names = [...SAMPLES, ...listed.map((l) => basename(fold(l)))];
   return parts.some((x) => {
-    if (!/[*?[]/.test(x)) return false;
+    // A part of stars alone (`**/node_modules`, `dist/*`) stands for any name, not a secret one in particular
+    // (L46; round 3 MAT-13, MAT-14). `***`, which follows links, is refused as a class (lib.mjs `unreadable`).
+    if (!/[*?[]/.test(x) || /^\*+$/.test(x)) return false;
     let re; try { re = globPart(x); } catch { return true; }
     return names.some((n) => re.test(n));
   });
@@ -103,6 +105,7 @@ export function decide(input, args) {
   }
   if (input.tool_name === 'Grep' || input.tool_name === 'Glob') {
     if (t.path != null && typeof t.path !== 'string') return block('the search folder is not a plain path');
+    if (input.tool_name === 'Glob' && typeof t.pattern !== 'string') return block('the search pattern is not plain text');
     const root = typeof t.path === 'string' ? (isAbsolute(t.path) ? t.path : typeof input.cwd === 'string' ? resolve(input.cwd, t.path) : null) : input.cwd;
     const home = process.env.HOME || homedir();
     const g = input.tool_name === 'Glob' ? t.pattern : (typeof t.glob === 'string' ? t.glob : '*');

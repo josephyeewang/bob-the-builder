@@ -244,7 +244,7 @@ test('L41: the secret guard reads a name after "="', () => {
 // path; a letter range that could spell a secret name is caught as a pattern.
 test('L41 (a): [ ] in a shell word is read as a pattern: route folders pass, a range spelling a secret is caught', () => {
   const w = world();
-  for (const c of ['cat app/[id]/page.tsx', 'ls app/[slug]/(group)', 'cat app/[...all]/page.tsx']) passed(secret.decide(bash(c, w.work), w.args), c);
+  for (const c of ['cat app/[id]/page.tsx', "ls 'app/[slug]/(group)'", 'cat app/[...all]/page.tsx']) passed(secret.decide(bash(c, w.work), w.args), c);
   for (const c of [`cat ${dot('[d-f]nv')}`, `cat ${dot('[a-z]nv')}.local`, `cat ${dot('[s]sh')}/config`]) blocked(secret.decide(bash(c, w.work), w.args), c);
   passed(secret.decide({ tool_name: 'Glob', tool_input: { pattern: 'app/[id]/**/*.tsx' }, cwd: w.work }, w.args), 'a route-folder search');
 });
@@ -341,7 +341,8 @@ test('L41 confirm: brace lists, rsync, tar/unzip folders, lost cd forms, links, 
   for (const c of ['rm -rf *', 'rsync -a --remove-source-files . /tmp/x/']) assert.match(prodGuard.decide(bash(c, w.outbox), w.args).reason ?? 'passed', /working folder/, c);
   passed(prodGuard.decide(bash('rsync -a . /tmp/x/', w.outbox), w.args), 'control: a copy out leaves the folder');
   const pf = [fold(w.envFile)];
-  assert.equal(prodGuard.folderWriteWhy('cd - && tar xf /tmp/a.tar', { cwd: w.outbox, protectedFiles: pf, home: w.work }), null, 'cd - is not cd home');
+  // `cd -` with no cd before it goes to a folder set before this call: not home, and not known (L45, round 2 minor).
+  assert.match(prodGuard.folderWriteWhy('cd - && tar xf /tmp/a.tar', { cwd: w.outbox, protectedFiles: pf, home: w.work }) ?? 'none', /can't follow/, 'cd - with no cd before it');
   assert.match(prodGuard.folderWriteWhy('cd work && tar xf /tmp/a.tar', { cwd: w.root, protectedFiles: [], cdpath: '/x' }) ?? 'none', /can't follow/, 'CDPATH set outside the line');
   assert.equal(prodGuard.folderWriteWhy('cd ./work && tar xf /tmp/a.tar', { cwd: w.outbox, protectedFiles: [], cdpath: '/x' }), null, 'a ./ cd ignores CDPATH');
   assert.equal(prodGuard.folderWriteWhy('cd /tmp && cd - && rm -rf x', { cwd: w.outbox, protectedFiles: pf }), null, 'cd - goes back to a folder already counted');
@@ -371,6 +372,12 @@ test('L41 confirm: a letter class fails closed, a zsh group reads whole, a trail
   assert.deepEqual(shellWords('cat a(b)c'), ['cat', 'a', '(', 'b', ')', 'c']);
   assert.deepEqual(shellWords('(cd x && ls)'), ['(', 'cd', 'x', '&', '&', 'ls', ')']);
   passed(secret.decide(bash("ls 'app/(group)/page.tsx'", w.work), w.args), 'a route group, quoted');
+  // Round 2 MAT-1: a quoted `|` is not a zsh choice; ordinary searches and filters pass both guards.
+  for (const c of ["jq '.items | length' package.json", "grep -E 'a|b' src/x.ts", "git log --grep='fix|feat'", "sed -E 's/(a|b)/c/' x", 'echo "a|b"', "rg 'x(a|b)'"]) {
+    passed(secret.decide(bash(c, w.work), w.args), `secret: ${c}`);
+    passed(prodGuard.decide(bash(c, w.work), w.args), `production: ${c}`);
+  }
+  assert.match(unreadable('cat x(a|b)y') ?? 'none', /zsh pattern group/, 'an unquoted choice is still refused');
   // Both readings are checked: a name inside brackets in code fed to a program is still seen (lane 3's corpus).
   blocked(prodGuard.decide(bash(`python3 - <<'X'\nprint(open('${ENV_PROD}').read())\nX`, w.work), w.args), 'a name in brackets, production');
   blocked(secret.decide(bash(`python3 - <<'X'\nprint(open('${w.home}/${dot('ss', 'h')}/id_x').read())\nX`, w.work), w.args), 'a name in brackets, secret');
@@ -385,4 +392,132 @@ test('L41 confirm: a letter class fails closed, a zsh group reads whole, a trail
   passed(secret.decide({ tool_name: 'Glob', tool_input: { pattern: '**' }, cwd: join(w.home, 'sub') }, w.args), 'control: ** below home reaches no secret');
   blocked(secret.decide({ tool_name: 'Glob', tool_input: { pattern: 'x', path: [w.home] }, cwd: w.work }, w.args), 'a search folder that is not a string');
   passed(secret.decide({ tool_name: 'Glob', tool_input: { pattern: 'src/**' }, cwd: w.work }, w.args), 'control: ** in the project');
+});
+
+// LEAD-CALLS L45: the confirm audit of L41, round 2, found new spellings of the same tricks, so each class is now
+// refused whole. Every round-2 Material is planted here; the controls are ordinary work that must still pass.
+test('L45: zsh groups and qualifiers, brace ranges, wrappers, short option names, cd forms, links, unpackers', () => {
+  const w = world();
+  const R = w.root;
+  const W = w.work;
+  mkdirSync(join(W, 'src'));
+  symlinkSync(W, join(R, 'lnk'));
+  symlinkSync(W, join(R, 'oldlink'));
+  const refuse = [
+    // MAT-2 to MAT-5: zsh groups anywhere in a word, in a command name, and glob qualifiers that run code
+    `rm -rf ${R}/w(o)rk`, `cd ${R} && rm -rf (w)ork`, `/bin/(r)m -rf ${W}`, 'fakeh(o)st deploy', `cd ${R} && ls -d o*(e:'rm -rf work':)`, 'ls *(+x)',
+    'ls (a|b)', 'a=(x y)', `cat =(ls ${W})`,
+    // MAT-6: a brace range
+    `rm -rf ${R}/wor{j..l}`, `rm -rf ${R}/{a..z}ork`,
+    // MAT-7, MAT-12, MAT-13: a long option by a shorter name
+    `tar -xf /tmp/a.tar --dir=${W}`, `tar --ext -f /tmp/a.tar -C ${W}`, `git -C ${W} stash push --al`, `zip -r --mov /tmp/a.zip ${W}`,
+    `cp -r --target=${W} /tmp/s`, `mv --target-directory=${W} /tmp/s`, `rsync -a /tmp/s/ /tmp/d/ --backup-dir=${W}`, `rm --rec ${W}`,
+    // MAT-12: git settings on the command line, and setting an alias
+    `git -c alias.x='clean -fdx' -C ${W} x`, "git config alias.x 'clean -fdx'", `git --config-env=alias.x=V -C ${W} x`,
+    // MAT-8: full paths kept from the archive, and unpackers not on the list while in a folder holding a protected file
+    'tar -xPf /tmp/evil.tar', 'tar -x --absolute-paths -f /tmp/a.tar', 'tar --extract --abs -f /tmp/a.tar',
+    `cd ${W}; cpio -idm < /tmp/a.cpio`, `cd ${W} && pax -r -f /tmp/a.pax`, `cd ${W} && aa extract -i /tmp/a.aar`,
+    // MAT-9: cd forms the guard can't follow
+    `cd ${R} && cd outbox work && tar xf /tmp/a.tar`, `cd ${R}; CDPATH+=..; cd work && tar xf /tmp/a.tar`,
+    `cd ${R}; setopt cdablevars; cd ${W} && tar xf /tmp/a.tar`, `shopt -s cdable_vars; cd ${W} && tar xf /tmp/a.tar`, 'cd +1 && tar xf /tmp/a.tar',
+    `cd ${R}; export CDPATH=${R}; cd .work && tar xf /tmp/a.tar`,
+    // MAT-10, MAT-11: a link made without ln, and a link among a wildcard's matches
+    `cp -R ${R}/oldlink /tmp/l && tar -C /tmp/l -xf /tmp/a.tar`, `tar -xf /tmp/a.tar -C ${R}/ln?`, `cp -r /tmp/evil/. ${R}/ln?`, `rm -rf ${R}/old*`,
+    // MAT-14: wrappers, and Homebrew's g-named tools
+    `nice -n 5 rm -rf ${W}`, `caffeinate -i rm -rf ${W}`, `sudo -u root rm -rf ${W}`, `env -u X rm -rf ${W}`, `timeout 5 rm -rf ${W}`,
+    `caffeinate -i ln -s ${W} /tmp/l`, `grm -rf ${W}`, `gcp -r /tmp/s ${W}`, `time -p rm -rf ${W}`,
+    // One case each that only its own check refuses (planted-failure gaps): a group after `&&` with its `)` stuck,
+    // a plain wrapper given an option that takes a value, zsh's two-word cd, and a cd after a shell option change.
+    `(r)m -rf ${W}`, `exec -a x rm -rf ${W}`, 'cd outbox work && tar xf /tmp/a.tar', 'shopt -s cdable_vars; cd zz && tar xf /tmp/a.tar',
+  ];
+  for (const c of refuse) blocked(prodGuard.decide(bash(c, w.outbox), w.args), c);
+  for (const c of [`cat (${dot('e')})nv.production`, `cat ${dot('(e)')}nv.production`]) {
+    blocked(prodGuard.decide(bash(c, W), w.args), `production: ${c}`);
+    blocked(secret.decide(bash(c, W), w.args), `secret: ${c}`);
+  }
+  // The shield: a delete of every name in the working folder, however the pattern is spelled.
+  for (const c of ['rm -rf [a-z]*', 'rm -rf .[!.]*', 'rsync -a --remove-source . /tmp/x/']) assert.match(prodGuard.decide(bash(c, w.outbox), w.args).reason ?? 'passed', /working folder/, c);
+  blocked(secret.decide({ tool_name: 'Glob', tool_input: { pattern: 5, path: w.home } }, w.args), 'a Glob pattern that is not text');
+  // Ordinary work still passes, from the project folder that holds the settings file.
+  const allow = ['rm -rf **/node_modules', "jq '.items | length' package.json", 'env NODE_ENV=test npm test', 'nohup npm start', 'time ls',
+    '(cd src && ls)', 'if (true); then ls; fi', 'git -C src status', 'npm test', 'cat <(ls)', 'rm -rf src/gen*', 'rm -rf src/*.tmp',
+    'find . \\( -name a -o -name b \\) -print', "git commit -m 'a (b) c'", 'tar -xf /tmp/a.tar -C /tmp/out', 'make build'];
+  for (const c of allow) passed(prodGuard.decide(bash(c, W), w.args), c);
+  passed(prodGuard.decide(bash('cpio -idm < /tmp/a.cpio', w.outbox), w.args), 'control: an unpacker away from protected files');
+  // Each cd no longer doubles the work: 30 of them stay quick.
+  const t = Date.now();
+  passed(prodGuard.decide(bash(`${'cd . ; '.repeat(30)}rm -rf src/gen`, W), w.args), 'thirty cds');
+  assert.ok(Date.now() - t < 3_000, 'thirty cds are checked quickly');
+});
+
+// LEAD-CALLS L46 (round 3 of the confirm audit): the five false refusals of ordinary work pass, the real-path tricks are
+// judged where the system takes them, and the remaining zsh tricks are refused as whole classes.
+test('L46: ordinary work passes, links and tar folders are judged on disk, shell options and functions are refused', () => {
+  const w = world();
+  const R = w.root;
+  const W = w.work;
+  mkdirSync(join(W, 'src'));
+  mkdirSync(join(W, 'dist'));
+  mkdirSync(join(w.outbox, 'deep', 'er'), { recursive: true });
+  // A link in the outbox to a folder inside the project: `l/..` is the project on disk, the outbox as text.
+  symlinkSync(join(W, 'src'), join(w.outbox, 'l'));
+  const pass1 = (c, cwd = W) => { passed(prodGuard.decide(bash(c, cwd), w.args), `production: ${c}`); passed(secret.decide(bash(c, cwd), w.args), `secret: ${c}`); };
+  // MAT-10 to MAT-14: false refusals.
+  for (const c of [
+    'git pull && rm -rf dist', 'rm -rf node_modules && rm -rf .next', 'npm ci && rm -rf dist',
+    'curl -s localhost:3000/health', 'lsof -i :3000', 'kill 1234', 'ps aux | grep node', 'docker compose up -d', 'cargo test', 'go test ./...', 'sqlite3 db.sqlite .tables', 'brew list',
+    'ls\n(cd src && npm test)', "git commit -F - <<'EOF'\nfeat(scope): add (x) for $5\nsrc/a.ts | 2 +-\nEOF", 'cat > notes.md <<EOF\nsee (a) and (b)\nEOF',
+    'rm -rf **/node_modules', 'ls src/*', 'rm -rf dist/*', "find . -not -path './node_modules/*' -name '*.ts'", 'set -euo pipefail; npm test',
+  ]) pass1(c);
+  // MAT-1, MAT-2: a link followed by `..`.
+  for (const c of ['rm -rf l/../../work', 'rm -rf l/..', 'cd -P l/.. && rm -rf ../work', 'cd l/.. && tar xf /tmp/a.tar', 'tar -xf /tmp/a.tar -C l/..', 'rm -rf l*/../x']) {
+    blocked(prodGuard.decide(bash(c, w.outbox), w.args), c);
+  }
+  // MAT-4, MAT-5: tar's -C values add up; a C inside the -f value is not a -C.
+  for (const c of ['tar -xf /tmp/a.tar -C deep -C ../../work', 'tar -xf /tmp/a.tar -C deep/er -C ../../.. -C work', 'git -C deep -C ../../work clean -n']) {
+    blocked(prodGuard.decide(bash(c, w.outbox), w.args), c);
+  }
+  for (const c of ['tar -xfCa.tar', 'tar -xfC /tmp/a.tar', 'tar -xf a.tar member -C /tmp/out', 'tar xf -Cfoo']) blocked(prodGuard.decide(bash(c, W), w.args), `from the project: ${c}`);
+  for (const c of ['tar -xf /tmp/a.tar -C /tmp/out', 'tar -xf /tmp/a.tar --exclude x -C /tmp/out', 'tar -C /tmp/out -xf /tmp/a.tar']) pass1(c);
+  // MAT-3, MAT-6 to MAT-9 and *** (once ** passes): refused as whole classes, by both guards.
+  for (const c of [
+    `export HOME=${R} && rm -rf ~/work`, `HOME=${R}; rm -rf ~/work`, `TMPDIR=${R} rm -rf $TMPDIR/work`, 'unset HOME; cd; rm -rf work', `read HOME <<< ${R}`, `printf -v HOME ${R}`,
+    '=rm -rf ../work', 'function f { rm -rf ../work; }; f', 'f () { rm -rf ../work; }; f', '() { rm -rf ../work }',
+    'setopt extendedglob; rm -rf ../wor#k', 'unsetopt bareglobqual', 'emulate sh', 'shopt -s extglob', 'set -o extendedglob', 'set -B', 'zmodload zsh/files', 'builtin setopt braceccl',
+    'rm -rf ../app<->', 'rm -rf ../w<1-9>', 'rm -rf ***/work', 'noglob rm -rf x',
+    'cat <<X\n$(id)\nX', 'x=1 && (( y = 1 << z ))\nrm -rf /', 'cat <<X\na\\\nX\nrm -rf ../work', "echo a # it's\ncat <<X\nb\nX",
+  ]) {
+    blocked(prodGuard.decide(bash(c, w.outbox), w.args), `production: ${c}`);
+    blocked(secret.decide(bash(c, w.outbox), w.args), `secret: ${c}`);
+  }
+  // A here-document's body is not commands, but its words are still read: a secret named in it is caught.
+  blocked(secret.decide(bash(`cat <<'X'\n${w.home}/${dot('ss', 'h')}/id_x\nX`, W), w.args), 'a secret named in a body');
+  // The command after a body is still a command.
+  blocked(prodGuard.decide(bash(`cat <<'X'\nhello\nX\nrm -rf ${W}`, w.outbox), w.args), 'a command after a body');
+  // An unpacker is still refused where a protected file is, and still runs elsewhere.
+  blocked(prodGuard.decide(bash('cpio -idm < /tmp/a.cpio', W), w.args), 'an unpacker in the project');
+  // A write after a command that can make a link is still refused (MAT-5).
+  blocked(prodGuard.decide(bash(`ln -s ${W} k && tar -C k -xf /tmp/a.tar`, w.outbox), w.args), 'a link made first');
+  // Secret names through a pattern that is not stars alone are still caught.
+  blocked(secret.decide(bash(`cat ${w.home}/${dot('ss?')}/id_x`, W), w.args), 'a ? in the key folder name');
+  blocked(prodGuard.decide(bash(`cat ${dot('e*')}`, W), w.args), 'a .e* word names the settings file');
+  // A body's lines are not commands: a production program or a merge named in it is text.
+  pass1("cat > notes.md <<'EOF'\nfakehost is our db tool\nEOF");
+  passed(merge.decide(bash("git commit -F - <<'EOF'\ngh pr merge is done by the lead\nEOF", W)), 'a merge named in a commit message');
+  // An end word that is not a plain name is refused, by both guards.
+  for (const c of ["cat <<'A B'\nx\nA B\nsetopt nullglob", "cat <<'A;B'\nx\nA;B\nsetopt nullglob"]) {
+    blocked(prodGuard.decide(bash(c, w.outbox), w.args), `production: ${c}`);
+    blocked(secret.decide(bash(c, w.outbox), w.args), `secret: ${c}`);
+  }
+  // Every guard reads the raw command for here-documents: joining lines first would hide a body line's backslash.
+  const hidden = 'cat <<X\na\\\nX\necho hi\nX';
+  blocked(prodGuard.decide(bash(hidden, w.outbox), w.args), 'production: a backslash hidden by joining lines');
+  blocked(merge.decide(bash(hidden, w.outbox)), 'merge: a backslash hidden by joining lines');
+  blocked(noVerify.decide(bash(hidden, w.outbox)), 'no-verify: a backslash hidden by joining lines');
+  // Every builtin that sets a variable by name counts.
+  for (const c of ['strftime -s HOME %s 0', 'zformat -f HOME x', 'zparseopts -A HOME x']) blocked(prodGuard.decide(bash(c, w.outbox), w.args), c);
+  // The old form's letters take their values in order: the archive is not a name, so the project is not judged.
+  pass1('tar xf /tmp/a.tar -C /tmp/out');
+  // git's -C values add up as tar's do.
+  assert.deepEqual(prodGuard.folderWrites(['git', '-C', 'a', '-C', '../b', 'clean', '-fdx']).targets, ['.', 'a', 'a/../b']);
 });

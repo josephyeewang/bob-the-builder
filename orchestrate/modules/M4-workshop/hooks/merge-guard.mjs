@@ -10,15 +10,17 @@ const MERGE_URL = /(api\.)?github\.com\/.*\/(merges?|pulls\/\d+\/merge)(\b|$)|\/
 
 export function decide(input) {
   if (input.tool_name !== 'Bash') return pass();
-  const cmd = joinLines(input.tool_input?.command);
+  // Read raw where a here-document matters: joining lines first could move where its body ends (L46).
+  const raw = String(input.tool_input?.command ?? '');
+  const cmd = joinLines(raw);
   if (MERGE_URL.test(cmd)) return block('the command reaches GitHub\'s merge address');
   // Shapes no hook can read are refused as a class (lib.mjs `unreadable`; audit R-0b-44 round 2 MAT-1).
-  const why = unreadable(cmd);
+  const why = unreadable(raw);
   if (why) return block(`${why}; write the command out plainly`);
   // git's settings by environment, or its own files, can turn a plain push into a push to main.
   if (shellWords(cmd).some((w) => /^GIT_CONFIG/i.test(w))) return block('git settings passed by environment');
   if (namesGitInternals(cmd)) return block('the command touches git\'s own settings or hooks files');
-  const cmds = shellCommands(cmd);
+  const cmds = shellCommands(raw);
   if (/graphql/i.test(cmd) && /merge/i.test(cmd)) return block('a GitHub query that merges');
   for (const c of cmds) {
     const prog = programOf(c);
