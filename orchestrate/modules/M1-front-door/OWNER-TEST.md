@@ -57,7 +57,8 @@ Claude records each result as the second ledger line for its row (README). Use t
   notification, then within a few minutes a
   phone notification holding the brief (lead call L22): the test product set to away, what waits on your go and the
   open risky asks (each with a link), the Mini check (online, logged in, battery backup), and the Air line. If the
-  push isn't wired yet, say `brief` and the Front Door quotes the same brief.
+  push isn't wired yet, say `brief` and the Front Door quotes the same brief (the L22 two-reply fallback). At the first
+  cutover, test both: the notification and `brief` must show the same brief.
 - If the Air line hasn't passed, on the Air: open Claude Code, type `/configaudit` and press Return. It sends the result
   to the Mini itself; you never type a count. Say `I'm away until Friday` again: the new brief's Air line passes.
 - Claude checks the test product's record really says away. Then **tap** it back to active. Typing "I'm back" files a
