@@ -48,6 +48,13 @@ Claude Code has a native task list. We checked whether it could hold the claims:
 - **A write refused at the read-back** (its diary line is down but reads back wrong) marks the store damaged; the owner decides whether that line stands. Only reachable with a test fault (audit round 3, cosmetic).
 - **A claim whose session record is missing is never broken** (deny by default, L32): the Dispatcher writes the session before the claim, so a missing one is a fault to look at, not a dead owner. A claimed card still lapses; a running one shows as overdue at its running limit, for the owner to look at.
 
+## Known gaps (audit round 5, logged, not fixed here)
+
+- **A hand-in for a card whose file was changed by hand is refused for good.** The card is restored and the owner alerted, but the outbox file is marked seen; the session hands in again.
+- **No `outbox_refused` fact while the diary is damaged.** The refusal still goes to `refusals.jsonl` and the alert; the fact waits until the owner repairs the diary.
+- **`recover()` on damage in the middle of the diary** (not a torn last line) rolls documents back to the last good line before it stops. Writes stay stopped until the owner repairs it, so nothing new is lost, but the documents show the older versions meanwhile.
+- **"Store busy" alerts on every pass** while another writer holds the lock, not once a day per cause (L38). Rare: the lock is held for milliseconds.
+
 ## Running the tests
 
 Plain Node, no packages:

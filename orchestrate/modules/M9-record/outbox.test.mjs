@@ -119,6 +119,20 @@ test('a file that meets a store error is alerted once and tried again after the 
   assert.equal(fixed.record.list('report').length, 1);
 });
 
+test('a file whose own content throws is refused and marked seen, not tried forever as a store error (round 5 m-1)', () => {
+  const env = setup({ prefix: 'm9-out-' });
+  product(env);
+  readyCard(env, 'C-1');
+  runCard(env, 'C-1');
+  const tag = { role: 'reviewer', sessionId: 'R-1', card: 'C-1' };
+  const f = outboxFile(env, 'reviewer', 'R-1', 'verdict-odd.md', `${JSON.stringify({ entity: 'verdict', card: 'C-1', expectRev: { toString: 1 }, fields: { head: HEAD, pass: true } })}\n`);
+  const first = env.record.applyOutbox(tag, f);
+  assert.equal(first.ok, false);
+  assert.match(first.reason, /could not be applied/);
+  assert.doesNotMatch(first.reason, /store error/);
+  assert.equal(env.record.applyOutbox(tag, f).skipped, true, 'marked seen: not tried again');
+});
+
 test('the same file twice: one document and one diary line; a refused file twice: one alert (R2-M10, R3-m7)', () => {
   const env = setup({ prefix: 'm9-out-' });
   const tag = { role: 'worker', sessionId: 'S-1' };

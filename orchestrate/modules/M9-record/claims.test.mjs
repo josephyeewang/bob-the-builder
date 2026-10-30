@@ -121,6 +121,19 @@ test('claim 7: only the holder may release a claim', () => {
   assert.match(env.record.release({ card: 'C-1', session_id: 'S-1' }).reason, /not claimed/);
 });
 
+test('a card id that climbs out of the store touches nothing outside it (round 5 m-2)', () => {
+  const env = setup({ prefix: 'm9-claim-' });
+  board(env);
+  const victim = join(env.root, '..', 'victim.json');
+  writeFileSync(victim, 'keep me');
+  const evil = '../../../victim';
+  assert.equal(env.record.release({ card: evil, session_id: 'S-1' }).ok, false);
+  assert.equal(env.record.breakIfDead({ card: evil }).ok, false);
+  assert.equal(env.record.read('card', evil), null);
+  assert.equal(readFileSync(victim, 'utf8'), 'keep me');
+  assert.deepEqual(readdirSync(join(env.root, 'quarantine')), []);
+});
+
 test('a lapse checks the card file first: a hand-edited card is quarantined and alerted, not silently replaced (0b-2 audit round 3 m-C)', () => {
   const env = setup({ prefix: 'm9-claim-' });
   board(env, ['C-1']);

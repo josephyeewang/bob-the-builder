@@ -101,7 +101,7 @@ export function makeLock({ dir, host = hostname(), timeoutMs = 10000, probe = re
         if (createWhole(dir, path, JSON.stringify(mine))) return { nonce: mine.nonce, broke };
         const h = readJson(path);
         if (isDead(h) && tryBreak(h)) { broke = true; continue; }
-        if (Date.now() > deadline) throw new Error(`store busy (lock held by pid ${h?.pid ?? '?'} on ${h?.host ?? '?'})`);
+        if (Date.now() > deadline) throw Object.assign(new Error(`store busy (lock held by pid ${h?.pid ?? '?'} on ${h?.host ?? '?'})`), { store: true });
         sleepMs(5 + Math.floor(Math.random() * 20));
       }
     },

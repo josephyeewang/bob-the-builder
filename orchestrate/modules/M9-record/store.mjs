@@ -65,7 +65,13 @@ export function openStore({ root, ownerUid, alert = () => {}, now = () => Date.n
 
   const lock = makeLock({ dir: root, host, timeoutMs: lockTimeoutMs, probe, disabled: testNoLock });
   const say = (event) => { try { alert({ at: new Date(now()).toISOString(), ...event }); } catch { /* the sink never stops a write */ } };
-  const docPath = (entity, id) => join(P.docs, entity, `${id}.json`);
+  // Every path from an id goes through here, so an id like ../../x can never name a file outside the store (round 5 m-2).
+  const docPath = (entity, id) => {
+    if (typeof entity !== 'string' || !SAFE_ID.test(entity) || typeof id !== 'string' || !SAFE_ID.test(id) || /^\.+$/.test(id)) throw new Error(`bad entity or id: ${String(id).slice(0, 80)}`);
+    return join(P.docs, entity, `${id}.json`);
+  };
+  // A failure of the store itself, not of what was asked of it: the outbox tries such a file again (round 5 m-1).
+  const storeFail = (msg) => Object.assign(new Error(msg), { store: true });
   const keyOf = (entity, id) => `${entity}/${id}`;
 
   // ---- the diary index, read forward from the last complete line ----
@@ -97,7 +103,7 @@ export function openStore({ root, ownerUid, alert = () => {}, now = () => Date.n
   function fstatOf(path) { const fd = openSync(path, constants.O_RDONLY); try { return fstatSync(fd).size; } finally { closeSync(fd); } }
   function refresh() {
     let fd;
-    try { fd = openSync(P.diary, constants.O_RDONLY); } catch (e) { throw new Error(`diary unreadable: ${e?.code ?? e}`); }
+    try { fd = openSync(P.diary, constants.O_RDONLY); } catch (e) { throw storeFail(`diary unreadable: ${e?.code ?? e}`); }
     try {
       const size = fstatSync(fd).size;
       if (size < offset) { reset(); }   // shorter than we read: cut by recover() in another process, or replaced; read again
@@ -248,7 +254,7 @@ export function openStore({ root, ownerUid, alert = () => {}, now = () => Date.n
         damaged: () => damaged,
         nextSeq: () => lastSeq + 1,
         commit(writes, meta) {
-          if (damaged) throw new Error(`the diary is damaged (${damaged}); writes stop until the owner repairs it`);
+          if (damaged) throw storeFail(`the diary is damaged (${damaged}); writes stop until the owner repairs it`);
           const ts = new Date(now()).toISOString();
           const out = writes.map((w) => {
             if (!SAFE_ID.test(w.id) || /^\.+$/.test(w.id)) throw new Error('bad id');
@@ -260,7 +266,7 @@ export function openStore({ root, ownerUid, alert = () => {}, now = () => Date.n
           });
           const temps = out.map((o) => writeDocFile(o.entity, o.id, o.bytes, 'w'));
           fault('temp_written');
-          if (!lock.holds(nonce)) { for (const t of temps) { try { unlinkSync(t); } catch { /* gone */ } } throw new Error('lost the store lock before the commit point'); }
+          if (!lock.holds(nonce)) { for (const t of temps) { try { unlinkSync(t); } catch { /* gone */ } } throw storeFail('lost the store lock before the commit point'); }
           const first = out[0];
           const line = { seq: lastSeq + 1, ts, actor: meta.actor, kind: meta.kind ?? 'write', entity: first.entity, id: first.id,
             from_state: first.from_state, to_state: first.to_state, rules_rev: meta.rules_rev ?? null, profile_version: meta.profile_version ?? null,
@@ -271,10 +277,10 @@ export function openStore({ root, ownerUid, alert = () => {}, now = () => Date.n
             const size = fstatSync(fd).size;
             try {
               if (faultAt !== undefined && (faultAt === 'diary_torn' || faultAt?.step === 'diary_torn')) { writeSync(fd, text.slice(0, Math.floor(text.length / 2))); fsyncSync(fd); fault('diary_torn'); }
-              if (faultAt === 'append_fails') { writeSync(fd, text.slice(0, Math.floor(text.length / 2))); throw new Error('test: the append failed partway'); }
+              if (faultAt === 'append_fails') { writeSync(fd, text.slice(0, Math.floor(text.length / 2))); throw storeFail('test: the append failed partway'); }
               const body = faultAt === 'readback_wrong' ? text.replace(`"seq":${line.seq},`, `"seq":${line.seq + 1},`) : text;
               const wrote = writeSync(fd, faultAt === 'short_write' ? body.slice(0, Math.floor(body.length / 2)) : body);
-              if (wrote !== Buffer.byteLength(body, 'utf8')) throw new Error(`diary append wrote ${wrote} of ${Buffer.byteLength(body, 'utf8')} bytes`);
+              if (wrote !== Buffer.byteLength(body, 'utf8')) throw storeFail(`diary append wrote ${wrote} of ${Buffer.byteLength(body, 'utf8')} bytes`);
               fsyncSync(fd);
             } catch (e) {
               // A part-written line (a full disk) is cut back off, so the next line doesn't join it and become unreadable
@@ -290,7 +296,7 @@ export function openStore({ root, ownerUid, alert = () => {}, now = () => Date.n
           if (!testNoLock && (damaged || lastSeq !== line.seq)) {
             recovered = false;
             for (const t of temps) { try { unlinkSync(t); } catch { /* gone */ } }
-            throw new Error(`the diary line didn't read back as seq ${line.seq}${damaged ? ` (${damaged})` : ''}`);
+            throw storeFail(`the diary line didn't read back as seq ${line.seq}${damaged ? ` (${damaged})` : ''}`);
           }
           out.forEach((o, i) => renameSync(temps[i], docPath(o.entity, o.id)));
           fault('renamed');
@@ -311,6 +317,7 @@ export function openStore({ root, ownerUid, alert = () => {}, now = () => Date.n
   // Reads come from the diary; the file is only checked. A file that is neither this version nor the one before (a write
   // between its commit point and its rename) is corrupt until the next write or recover() puts it right.
   function read(entity, id) {
+    if (typeof id !== 'string' || !SAFE_ID.test(id) || /^\.+$/.test(id) || typeof entity !== 'string' || !SAFE_ID.test(entity)) return null;
     refresh();
     const e = index.get(keyOf(entity, id));
     const bytes = readOrNull(docPath(entity, id));

@@ -263,6 +263,11 @@ test('verified needs a passing verdict for the current head from a reviewer laun
   // A passing verdict from a session never launched on this card doesn't count.
   must(apply('R-1', 'verdict-f.md', hdr({ head: HEAD, pass: true })), 'unlaunched verdict stored');
   refused(put(env.record, 'dispatcher', 'card', 'C-1', { state: 'verified' }), /no passing verdict/);
+  // A reviewer launched for another head doesn't verify this one (round 5 m-4).
+  must(env.record.write({ actor: 'dispatcher', entity: 'launch', id: 'launch-R-3', expectRev: 0,
+    doc: { session_id: 'R-3', role: 'reviewer', card: 'C-1', head: HEAD2, rev: 1, launched_at: iso(env.clock.t) } }), 'launch for another head');
+  must(apply('R-3', 'verdict-f2.md', hdr({ head: HEAD, pass: true })), 'a pass from a reviewer launched on another head');
+  refused(put(env.record, 'dispatcher', 'card', 'C-1', { state: 'verified' }), /no passing verdict/);
   launch(env, 'C-1', 'R-2');
   must(apply('R-2', 'verdict-g.md', hdr({ head: HEAD, pass: false })), 'a fail');
   refused(put(env.record, 'dispatcher', 'card', 'C-1', { state: 'verified' }), /no passing verdict/);
@@ -274,7 +279,12 @@ test('verified needs a passing verdict for the current head from a reviewer laun
   refused(put(env.record, 'workshop', 'card', 'C-1', { head: HEAD2 }), /sends it back to in_review/);
   must(put(env.record, 'workshop', 'card', 'C-1', { head: HEAD2, state: 'in_review' }), 'push after verify');
   // A head pushed while a verified card waits doesn't come back verified unreviewed (0b-2 audit round 3 MAT-A).
-  must(apply('R-2', 'verdict-j.md', hdr({ head: HEAD2, pass: true })), 'the pass for the new head');
+  // The new head needs a reviewer launched on it: R-2 was launched on the old one (round 5 m-4).
+  must(apply('R-2', 'verdict-j0.md', hdr({ head: HEAD2, pass: true })), 'a pass from the old head\'s reviewer');
+  refused(put(env.record, 'dispatcher', 'card', 'C-1', { state: 'verified' }), /no passing verdict for head bbbbbbb/);
+  must(env.record.write({ actor: 'dispatcher', entity: 'launch', id: 'launch-R-4', expectRev: 0,
+    doc: { session_id: 'R-4', role: 'reviewer', card: 'C-1', head: HEAD2, rev: 1, launched_at: iso(env.clock.t) } }), 'launch on the new head');
+  must(apply('R-4', 'verdict-j.md', hdr({ head: HEAD2, pass: true })), 'the pass for the new head');
   must(put(env.record, 'dispatcher', 'card', 'C-1', { state: 'verified' }), 'verified again');
   must(put(env.record, 'dispatcher', 'card', 'C-1', { state: 'waiting', wait: wait(env, { resume: 'continue', return_to: 'verified' }) }), 'paused');
   const HEAD3 = 'c'.repeat(40);

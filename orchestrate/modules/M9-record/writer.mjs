@@ -303,12 +303,12 @@ export function openRecord({ root, product, ownerUid, rules, alert = () => {}, n
     return { ok: true };
   }
 
-  // in_review → verified (R2-M7): a passing verdict for this head, from a reviewer or auditor launched on this card.
+  // in_review → verified (R2-M7): a passing verdict for this head, from a reviewer or auditor launched on this card for this head (round 5 m-4).
   function verdictFor(tx, cardId, doc) {
     if (typeof doc.head !== 'string' || !HEX40.test(doc.head)) return no('the card has no head to verify');
     const launches = tx.list('launch').filter((l) => l.doc.card === cardId && (l.doc.role === 'reviewer' || l.doc.role === 'auditor'));
     const ok = tx.list('verdict').find((v) => v.doc.card === cardId && v.doc.head === doc.head && v.doc.pass === true
-      && /^(reviewer|auditor):/.test(v.createdBy) && launches.some((l) => l.doc.session_id === v.doc.session_id && v.createdBy === `${l.doc.role}:${l.doc.session_id}`));
+      && /^(reviewer|auditor):/.test(v.createdBy) && launches.some((l) => l.doc.session_id === v.doc.session_id && l.doc.head === doc.head && v.createdBy === `${l.doc.role}:${l.doc.session_id}`));
     return ok ? { ok: true } : no(`no passing verdict for head ${doc.head.slice(0, 7)} from a reviewer launched on this card`);
   }
 
@@ -464,9 +464,14 @@ export function openRecord({ root, product, ownerUid, rules, alert = () => {}, n
         if (!f.ok) { tx.markSeen(f.key, 'refused'); return refuse({ ...ev, outbox: true }, f.reason); }
         // A store error (a damaged diary, a lost lock) is not the file's fault: the file stays unseen and is tried again on
         // the next pass, so nothing an AI handed in is lost; the owner is alerted once per file (round 3 m-D, round 4 MAT-1).
-        let r;
+        let r, storeErr;
         try { r = applyParsed(tx, tag, f); } catch (e) {
-          const reason = `store error: ${String(e?.message ?? e).slice(0, 200)}; the file will be tried again`;
+          // A throw from the file's own content (not the store, not the disk) refuses the file like any other refusal (round 5 m-1).
+          if (e?.store === true || typeof e?.code === 'string') storeErr = e;
+          else r = no(`the file could not be applied: ${String(e?.message ?? e).slice(0, 200)}`);
+        }
+        if (storeErr) {
+          const reason = `store error: ${String(storeErr?.message ?? storeErr).slice(0, 200)}; the file will be tried again`;
           const once = `store_error:${f.key}`;
           if (tx.seen(once)) return no(reason);
           tx.markSeen(once, 'alerted');
