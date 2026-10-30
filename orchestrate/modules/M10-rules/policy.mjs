@@ -32,7 +32,7 @@ export const KEYS = Object.freeze({
   'accounts.joe.github_id': { required: true, type: 'text' }, 'accounts.joe.tz': { required: true, type: 'text' },
   models: { required: true, type: 'map' },
   merge: { required: true, type: 'map' }, 'merge.queue.tier1_hours': { required: true, type: 'text' },
-  product: { required: false, type: 'map' }, 'product.cutover_stage': { required: false, type: 'text' },
+  product: { required: true, type: 'map' }, 'product.cutover_stage': { required: true, type: 'text' },
   approvals: { required: false, type: 'map' }, 'approvals.decisions_dir': { required: false, type: 'text' },
   product_profile: { required: false, type: 'map' }, 'product_profile.required_checks': { required: false, type: 'list' },
   'product_profile.audit_workflow': { required: false, type: 'map' },

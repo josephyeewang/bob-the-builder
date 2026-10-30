@@ -87,9 +87,10 @@ test('a bad path pattern makes the file corrupt rather than matching nothing', (
   refused(swap('    - docs/research/**', "    - 'docs/{a,b'"), 'unclosed brace');
 });
 
-test('the cutover stage is first or second when present', () => {
-  assert.ok(parsePolicy(`${fixture}\nproduct:\n  cutover_stage: first\n`).ok);
-  refused(`${fixture}\nproduct:\n  cutover_stage: third\n`, 'stage');
+test('the cutover stage is required and is first or second', () => {
+  assert.ok(parsePolicy(fixture.replace('cutover_stage: first', 'cutover_stage: second')).ok);
+  refused(fixture.replace('cutover_stage: first', 'cutover_stage: third'), 'stage');
+  refused(fixture.replace('  cutover_stage: first\n', ''), 'cutover_stage');
 });
 
 test('one key table: every top-level key in the fixture is listed in KEYS', () => {

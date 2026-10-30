@@ -256,6 +256,10 @@ audit_sizing:
   hand_dates_counts: tier2_plus_weekly_strict_check
   exit_tests: tier1
 
+# Which cutover this product is at (decides which checks run on its GitHub side). Required.
+product:
+  cutover_stage: first
+
 claude_code:
   pin: 2.1.300
   required_minimum: 2.1.295
