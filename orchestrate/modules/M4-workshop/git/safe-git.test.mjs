@@ -68,6 +68,11 @@ test('mirror check: the template passes, every planted extra is refused', async 
 });
 
 // Static check (review 0b-4 M5): no other file under orchestrate/ starts git itself.
+// Known exceptions, each with the lead's call and date. The test fails if a listed file stops starting git, so the
+// line is deleted in the change that routes it through safe-git.mjs.
+const KNOWN_EXCEPTIONS = {
+  'modules/M12-sensors/history.mjs': 'L36, 29 Oct 2026: lane 3 routes it through safe-git.mjs once this is on main',
+};
 test('no other orchestrate file spawns git directly', () => {
   const here = dirname(fileURLToPath(import.meta.url));
   const root = join(here, '..', '..', '..');
@@ -85,5 +90,6 @@ test('no other orchestrate file spawns git directly', () => {
     }
   };
   walk(root);
-  assert.deepEqual(offenders, []);
+  for (const f of Object.keys(KNOWN_EXCEPTIONS)) assert.ok(offenders.includes(f), `${f} no longer starts git: delete its line in KNOWN_EXCEPTIONS`);
+  assert.deepEqual(offenders.filter((f) => !(f in KNOWN_EXCEPTIONS)), []);
 });
