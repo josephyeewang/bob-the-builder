@@ -52,6 +52,8 @@ jobs:
         run: bash scripts/selftest-gate-scripts.sh
       - name: Blueprint checks prove their planted cases (D-029)
         run: bash scripts/blueprint/selftest-blueprint.sh
+      - name: ORCHESTRATE's tests (no dependencies, Node's own test runner)
+        run: node --test $(find orchestrate -name '*.test.mjs')
       - name: The lens count in audit-lenses/README.md matches the lens files
         run: |
           files=$(ls audit-lenses/L[0-9][0-9]-*.md | grep -vc stack-checklists)
