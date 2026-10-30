@@ -73,3 +73,14 @@ test('HOLD_REASONS names the two "wait" denies (0b-1 R3-m8)', async () => {
   assert.deepEqual([...HOLD_REASONS], ['held_tier1_hours', 'rules_not_adopted']);
   assert.ok(Object.isFrozen(HOLD_REASONS));
 });
+
+test('a throwing getter on the answer or on the change is a fail-closed answer, never an exception (audit round 9)', () => {
+  const trap = { reason: 'looks fine', get decision() { throw new Error('boom'); } };
+  const r = makeRules({ rev: 'x', may: () => trap, get: () => undefined, classify: () => ({ tier: 2, risky: [], reasons: {} }) });
+  assert.equal(r.may('merge', {}).decision, 'deny');
+  const change = { get files() { throw new Error('boom'); } };
+  const c = r.classify(change);
+  assert.deepEqual([c.tier, c.risky], [1, ['unclassifiable']]);
+  const sneaky = makeRules({ rev: 'x', may: () => allow('ok'), get: () => undefined, classify: () => ({ tier: 2, risky: ['schema', 'loose'], reasons: {} }) });
+  assert.deepEqual(sneaky.classify({ files: [] }).reasons, { unclassifiable: ['unknown risky class in classification'] }, 'an unknown class beside a known one');
+});

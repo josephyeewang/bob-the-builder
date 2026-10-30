@@ -27,7 +27,7 @@ See LANES.md for who builds this folder, and the build rows (0b-1, R-0b-13..19) 
 Plain Node, no packages:
 
 ```bash
-node --test orchestrate/modules/M10-rules/*.test.mjs orchestrate/shared/*.test.mjs
+node --test --test-timeout=20000 orchestrate/modules/M10-rules/*.test.mjs orchestrate/shared/*.test.mjs
 ```
 
 Every test uses the sample product `sample-org/sample-app` and fakes for GitHub, the clock and the record.
@@ -49,7 +49,7 @@ await carryOver({ reviewed, current, between, catchUps, tier1MergesSince, gh: vi
 ```
 
 - **Any error means "no".** Each returns a plain answer and never throws. A missing commit, a cut-off file list (GitHub lists at most 300 files in a compare; a recursive tree can be truncated) or an unknown file status makes the answer "no".
-- **The robot's merge mark is the caller's check.** `checkExactReverse` proves only that the files are an exact undo. That the robot made the merge (the other half of 0b-9 M4) is checked by the Merge Gate. What the undo still counts as (protected files, risky classes) is M10's `merge` answer. An undo that touches a database change (the `schema` or `production_data` class) always asks Joe, even when the reversed merge failed its audit (0b-9 M4). Because a code file can hold a table change outside the migration folders, the Merge Gate passes each code file's `removed_lines` and `added_lines` from the compare; a code file without both makes the undo ask Joe.
+- **The robot's merge mark is the caller's check.** `checkExactReverse` proves only that the files are an exact undo. That the robot made the merge (the other half of 0b-9 M4) is checked by the Merge Gate. What the undo still counts as (protected files, risky classes) is M10's `merge` answer. An undo that touches a database change (the `schema` or `production_data` class) always asks Joe, even when the reversed merge failed its audit (0b-9 M4). Because a code file can hold a table change outside the migration folders, the Merge Gate passes each code file's `removed_lines` and `added_lines` from the compare; a code file without both, or with both empty, makes the undo ask Joe. **When GitHub's compare leaves out a file's diff text (large or binary files), the Merge Gate must leave the line fields out, never pass `[]`.** An undo that puts back a `delete from` or `truncate` in code also asks, and so does any `needs-joe` or `needs-joe:<class>` label on the undone change.
 - **`carryOver` takes a git view as `gh`**, not the raw GitHub client.
 
 ## Notes for callers
@@ -81,7 +81,7 @@ await carryOver({ reviewed, current, between, catchUps, tier1MergesSince, gh: vi
 - **An unchanged rules version skips the rewind check.** When `main`'s rules file is the same version as the one adopted, the reader answers "unchanged" before it checks whether `main` was rewound. The rules in force are the same text either way.
 - **A pattern can still name nothing.** `.` and `..` parts are refused, but a pattern that matches no file in the repository (a typo, or `[abc]`, which is read as a literal name) is accepted, so a protected entry can protect nothing. A typo in `migration_paths` or `repair_folder` also stops the folder rule from spotting a database change, including on an undo (the text scan still reads the lines). Brackets stay allowed because real file names use them (`[id].tsx`).
 - **A merge request needs no card id.** `push_branch` refuses a missing card id (MAT-5); `merge` answers from the files and the reverse fields only, so it doesn't require one.
-- **The table-change text scan is a backstop, not complete.** It reads code files' lines for common SQL and code-library forms. A database change written another way (a query built from pieces, a data `insert` or `update` in code, a library call it doesn't know) is not seen. On a normal merge this doesn't matter, since every code file asks Joe; on an undo after a failed audit, the migration and repair folders are the real defence.
+- **The table-change text scan is a backstop, not complete.** It reads code files' lines for common SQL and code-library forms, as written and again with comments blanked (`/* */`, nested, and `--` to the line end). It errs toward asking: a code comment such as "revoke the token from the cache" reads as a grant change and makes the change Tier 1. A database change written another way (a query built from pieces, a data `insert` or `update` in code, a library call it doesn't know) is not seen. On a normal merge this doesn't matter, since every code file asks Joe; on an undo after a failed audit, the migration and repair folders are the real defence.
 - **The snapshot checks permission bits only.** macOS access-control lists on the folder or file are not read. Adding one needs the owner's own access, the same as editing the file.
 
 ## Repair files: what the check cannot see

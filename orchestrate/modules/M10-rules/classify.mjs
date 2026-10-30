@@ -33,12 +33,21 @@ const FILE_MODES = new Set(['100644', '100755', '120000', '160000']);   // a sym
 
 // Whole SQL statements only, so prose like "drop the feature" never matches (R2-M4(c)).
 // Rounds 7 and 8 widened it for the exact-reverse check: up to three words may stand between the verb and the object
-// (`create unlogged table`, `create constraint trigger`), SQL comments are blanked first (`CREATE/**/TABLE`), and the
-// usual code-library calls (`createTable`, `schema.dropTable`) count. A backstop, never complete (README).
+// (`create unlogged table`, `create constraint trigger`), the text is scanned as written and again with SQL comments
+// blanked (`CREATE/**/TABLE`, nested `/* /* */ */`, `-- …` to the line end), and the usual code-library calls
+// (`createTable`, `schema.dropTableIfExists`) count. A backstop, never complete (README).
 const SCHEMA_SCANS = [/\b(create|alter|drop)\b(\s+\w+){0,3}?\s+(table|index|function|procedure|trigger|policy|view|type|schema|extension|sequence|role|domain|rule|database)\b/i,
-  /\b(grant|revoke)\s+[\w\s,]+?\s+on\b/i, /\b(create|alter|drop|rename)(Table|Index|Column|Schema)\b/];
-const sqlText = (lines) => lines.join('\n').replace(/\/\*[\s\S]*?\*\//g, ' ');
-const isLines = (v) => Array.isArray(v) && v.every((l) => typeof l === 'string');
+  /\b(grant|revoke)\s+[\w\s,()."]+?\s+(on|to|from)\b/i, /\b(create|alter|drop|rename)(Table|Index|Column|Schema)\w*/];
+// The texts to scan: as written, then with comments blanked (innermost block comments first, so nesting unwinds).
+const sqlTexts = (lines) => {
+  const raw = lines.join('\n');
+  let t = raw;
+  for (let prev; prev !== t;) { prev = t; t = t.replace(/\/\*(?:(?!\/\*)[\s\S])*?\*\//g, ' '); }
+  return [raw, t, t.replace(/--[^\n]*/g, ' ')];
+};
+const scanHit = (scans, lines) => sqlTexts(lines).some((t) => scans.some((re) => re.test(t)));
+// Array.from turns a hole in a sparse list into undefined, so a list with holes is not "lines" (audit round 9).
+const isLines = (v) => Array.isArray(v) && Array.from(v).every((l) => typeof l === 'string');
 const DELETE_SCANS = [/\bdelete\s+from\b/i, /\btruncate\s+(table\s+)?\w/i, /\bdrop\s+(table|column|index|schema|database|view)\b/i];
 
 export function classifyWithRulesText(text, change) {
@@ -123,14 +132,14 @@ export function classifyChange(policy, change) {
     const scan = scanned(f.path) || (typeof f.previous_path === 'string' && scanned(f.previous_path));
     for (const field of ['added_lines', 'removed_lines']) if (f[field] !== undefined && !isLines(f[field])) add('unclassifiable', `${field} is not a list of lines: ${f.path}`);
     if (scan && isLines(f.added_lines)) {
-      const text = sqlText(f.added_lines);
-      if (SCHEMA_SCANS.some((re) => re.test(text))) add('schema', `${f.path} (table change in added lines)`);
-      if (DELETE_SCANS.some((re) => re.test(text))) add('deletes', `${f.path} (delete statement in added lines)`);
-      const pkg = m.packages.find((name) => importsPackage(text, name));
+      if (scanHit(SCHEMA_SCANS, f.added_lines)) add('schema', `${f.path} (table change in added lines)`);
+      if (scanHit(DELETE_SCANS, f.added_lines)) add('deletes', `${f.path} (delete statement in added lines)`);
+      const texts = sqlTexts(f.added_lines);
+      const pkg = m.packages.find((name) => texts.some((t) => importsPackage(t, name)));
       if (pkg) add('messages_people', `${f.path} (imports ${pkg})`);
     }
     // Removed lines too: a change that removes a table statement undoes a database change (0b-9 M4, audit round 7).
-    if (scan && isLines(f.removed_lines) && SCHEMA_SCANS.some((re) => re.test(sqlText(f.removed_lines)))) add('schema', `${f.path} (table change in removed lines)`);
+    if (scan && isLines(f.removed_lines) && scanHit(SCHEMA_SCANS, f.removed_lines)) add('schema', `${f.path} (table change in removed lines)`);
   }
 
   // A `needs-joe` label adds `unclassifiable`; `needs-joe:<class>` adds that class. Neither removes one (MIN-3).

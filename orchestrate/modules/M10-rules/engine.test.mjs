@@ -402,3 +402,39 @@ test('classify through the engine uses the product\'s adopted rules; a roles fil
   assert.deepEqual(w.rules.classify({ product: 'app', files: [file('docs/research/x.md')], declared_tier: 2 }).risky, []);
   assert.deepEqual(w.rules.classify({ files: [file('docs/research/x.md')], declared_tier: 2 }).risky, ['unclassifiable'], 'no product: unclassifiable');
 });
+
+test('merge: on an undo, every needs-joe label reaches Joe, whatever class it names (audit round 9)', () => {
+  const w = world({ states: { app: { state: 'paused' } }, now: AT_03 });
+  const code = file('lib/x.ts', 'modified', { added_lines: ['a'], removed_lines: ['b'] });
+  assert.equal(mergeOf(w, [code], reverse('failure')).decision, 'allow', 'no label: the failed-audit undo still goes');
+  for (const cls of ['secrets_settings', 'messages_people', 'deletes', 'first_customer_visible', 'made_up']) {
+    const r = mergeOf(w, [code], reverse('failure', { labels: [`needs-joe:${cls}`] }));
+    assert.deepEqual([r.decision, r.tier], ['ask', 1], cls);
+  }
+  assert.equal(mergeOf(w, [code], reverse('failure', { labels: ['needs-joe:secrets_settings'] })).reason, 'exact reverse Joe was asked to see');
+});
+
+test('merge: an undo that puts back a delete or truncate in code asks Joe; a code file with no lines on either side asks (audit round 9)', () => {
+  const w = world({ states: { app: { state: 'paused' } }, now: AT_03 });
+  for (const line of ['await sql`TRUNCATE users`', 'db.query("delete from users")']) {
+    assert.equal(mergeOf(w, [file('lib/x.ts', 'modified', { added_lines: [line], removed_lines: ['x'] })], reverse('failure')).reason, 'exact reverse of a database change', line);
+  }
+  assert.equal(mergeOf(w, [file('lib/x.ts', 'modified', { added_lines: [], removed_lines: [] })], reverse('failure')).reason, 'exact reverse of code without its lines');
+  assert.equal(mergeOf(w, [file('lib/x.ts', 'added', { added_lines: new Array(3), removed_lines: [] })], reverse('failure')).reason, 'exact reverse that could not be fully classified', 'a list with holes');
+});
+
+test('merge: undo edge cases with no other test (audit round 9 gaps)', () => {
+  const w = world({ states: { app: { state: 'paused' } }, now: AT_03 });
+  const doc = [file('docs/research/x.md')];
+  const t1 = mergeOf(w, doc, { declared_tier: 1, ...reverse('success') });
+  assert.deepEqual([t1.decision, t1.reason], ['ask', 'exact reverse of a merge whose audit passed'], 'a Tier-1 doc undo whose audit passed asks');
+  for (const ok of ['yes', 1, 'true']) assert.equal(mergeOf(w, doc, reverse('none', { exact_reverse_ok: ok })).decision, 'deny', `exact_reverse_ok ${JSON.stringify(ok)} is not proof`);
+  // The engine's own paused floor holds even when the rules file lets a paused product merge.
+  const loose = world({ policies: { app: pol(set('', '  paused:\n    start: none\n    tier1_merge: undo_only', '  paused:\n    start: none\n    tier1_merge: rules')) }, states: { app: { state: 'paused' } } });
+  assert.match(mergeOf(loose, doc).reason, /product is paused/);
+  for (const cls of ['createIndex', 'dropColumn', 'createSchema', 'knex.schema.dropTableIfExists("t")', 'createTableIfNotExists("t")',
+    'CREATE -- x\nTABLE users (a int)', 'CREATE /* a /* b */ c */ TABLE users (a int)', 'grant select(id) on users', 'GRANT anon TO authenticator']) {
+    const r = mergeOf(w, [file('lib/db.ts', 'modified', { added_lines: cls.split('\n'), removed_lines: ['x'] })], reverse('failure'));
+    assert.equal(r.reason, 'exact reverse of a database change', cls);
+  }
+});

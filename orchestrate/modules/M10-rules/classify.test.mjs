@@ -94,6 +94,7 @@ test('text scans of added lines add classes outside docs, never inside', () => {
   assert.ok(code(["import nodemailer from 'nodemailer'"]).includes('messages_people'));
   assert.ok(code(["const t = require('twilio/lib/rest')"]).includes('messages_people'));
   assert.ok(!code(["import x from 'nodemailer-mock'"]).includes('messages_people'));
+  assert.ok(code(["const t = require(/* mail */ 'nodemailer')"]).includes('messages_people'), 'a comment inside the call is blanked');
   assert.deepEqual(run([mod('docs/research/x.md', { added_lines: ['DROP TABLE users;'] })]).risky, []);
 });
 
@@ -184,4 +185,10 @@ test('removed lines are scanned for table changes too: removing one undoes a dat
   assert.ok(!run([mod('lib/db/setup.ts', { removed_lines: ['const created = table;'] })]).risky.includes('schema'));
   assert.ok(!run([mod('docs/research/x.md', { removed_lines: ['CREATE TABLE in prose'] })]).risky.includes('schema'), 'docs are prose');
   assert.match(run([mod('lib/a.ts', { removed_lines: 'CREATE TABLE x' })]).reasons.unclassifiable.join(), /removed_lines is not a list/);
+});
+
+test('a mode that is not a string or number is unclassifiable; a rename out of a delete-watched folder is a delete (audit round 9 gaps)', () => {
+  assert.deepEqual(run([{ path: 'app/x.ts', status: 'modified', mode: ['100644'] }]).risky, ['unclassifiable']);
+  const moved = run([{ path: 'docs/notes/x.md', previous_path: 'docs/research/x.md', status: 'renamed' }]);
+  assert.ok(moved.risky.includes('deletes'), JSON.stringify(moved));
 });
