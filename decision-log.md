@@ -546,10 +546,17 @@ The companion `audit-log.md` records *deferred* items (Defer verdicts that may s
     - `scripts/recurrence-check.mjs` (Rule 31). It reads `Class:` and `Rung:` lines in fix commits and refuses a class fixed twice whose newest fix is below rung 3.
     - `scripts/rule-tags-check.mjs` (Rule 33, in Bob's CI). Every rule the index tags as checked must name a script that exists and that CI or the self-test runs.
     - Each check exits 2 (cannot judge) rather than 0 when it has nothing to read (Rule 29).
+    - A fresh review found nine serious problems in the first version, most of them false alarms on healthy projects. All were fixed and turned into self-tests before release:
+      - the phase-report check now accepts other heading styles, any "N/A" or "None" line, and the short report the Minimum Viable Process allows (`--abbreviated`);
+      - the run-commands check follows `cd`, workflow and job defaults, matrix folders, build output and installed tools, and it passes an app whose scripts only call tools;
+      - the autonomy check ignores personal Stop hooks, accepts an overridable retry limit, refuses a reviewer with no tools line, and reports a project that was never set up as "cannot judge" rather than as six failures;
+      - the recurrence check reads only real git trailers;
+      - the rule-tags check needs a real call, not a mention in a comment, and compares the whole tag. It found that Rule 32 was tagged one way in `rules.md` and another in the index, and that was fixed.
+    - The Supervised Autonomy setup text no longer tells users to set `defaultMode` to "auto" in the project file, which the runbook and the new check both say does nothing.
 
     The index now lists 24 rules as written-only, down from 28. Rule 22 (the pre-build gate) was not given a check here, because its text and the build manifest it would read are in the NEW mode, which the ORCHESTRATE session is rewriting.
   - (2) Rule 27 in `rules.md` keeps the rule, its hard boundaries, the new setup check and a pointer. The how-to lives only in `build-protocol.md` § Supervised Autonomy. The one detail that section lacked (diff the test files; prefer a reviewer from a different model family) was added to its runbook step 4, with its owner's agreement.
-  - (3) Rule 31's ladder steps are called rungs. The Minimum Viable Process groups are "Never skip / Skip with caution / Skip first". "Tier" now means only Rule 30's tiers.
+  - (3) Rule 31's ladder steps are called rungs. The Minimum Viable Process groups are "Never skip / Skip with caution / Skip first". In the core and `rules.md`, "Tier" now means only Rule 30's tiers (a few lenses keep tiers of their own, such as L34's).
   - (4) `bob-doctor.sh` checks that both design skills are linked from the same Bob copy and prints the line to paste if not. The README install prompt asks for all three skills.
   - (5) Method text says "the user" where it meant whoever is using Bob, and "Bob's author" where it records where an idea came from. Credit, licence and dated source lines keep the name. ORCHESTRATE's own files are left to their owner.
   - (6) The playbooks are numbered P1–P11. The retros carry a snapshot note. Three living files carry `<!-- living doc -->`. The orphan retro is linked from Rule 32.
@@ -559,7 +566,8 @@ The companion `audit-log.md` records *deferred* items (Defer verdicts that may s
   - Build a check for Rule 22 now. Deferred to the NEW-mode rewrite, for the reason above.
 - **Consequences:**
   - The phase gate has 14 items.
-  - A project's fix commits need two short lines for the recurrence check to see them; without those lines it reports "cannot judge", never "clean".
+  - A project's fix commits need two short git trailer lines for the recurrence check to see them; the phase report's class-level scan section now says so. Without those lines it reports "cannot judge", never "clean".
+  - The autonomy check reads only the project's own settings, because personal rules do not travel with the project. A user whose deny rules live only in their personal settings is told to add them to the project.
   - The run-commands check was calibrated before it shipped. Run across several real projects, it raised no false alarm once it learned to read each workflow step's own working folder; the first version flagged healthy commands in one of them. It catches both planted breaks in its test.
   - The autonomy check, run on a fresh `bob-init` project, refuses only the test command the user has not filled in yet. That is deliberate: until it is filled in, the gate blocks every stop.
 - **Revisit trigger:**
