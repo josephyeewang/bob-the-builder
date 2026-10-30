@@ -8,7 +8,7 @@
 // `async function wire(config)` returning { rec, rules, ports } — see README, "The tick's ports".
 // One run is one full pass under the single-instance lock. Exit 0 when the pass ran or another pass
 // was running; exit 1 when the config or the wiring could not be loaded (launchd logs stderr); exit 2
-// when the pass ran past RUN_DEADLINE_MS (audit 0b-6 r3 MAT-2). The script then exits outright, so a
+// when the pass ran past RUN_DEADLINE_MS (audit 0b-6 r3 MAT-2), and Joe is told once a day (L38). The script then exits outright, so a
 // port that never answers cannot keep the process, and with it the pass lock, alive: the next start
 // finds the lock's pid dead and breaks it.
 
@@ -16,6 +16,7 @@ import { readFileSync, realpathSync } from 'node:fs';
 import { isAbsolute } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
 import { runTick, STEPS, STEP_DEADLINE_MS } from './tick.mjs';
+import { holdAlert } from './pass.mjs';
 
 // Every step at its own deadline, plus a margin: past this the pass is stuck.
 export const RUN_DEADLINE_MS = STEPS.length * STEP_DEADLINE_MS + 60_000;
@@ -45,7 +46,13 @@ export async function main(argv, { now = Date.now(), log = (s) => process.stderr
   const late = new Promise((ok) => { timer = setTimeout(() => ok({ late: true }), limit); });
   let r;
   try { r = await Promise.race([runTick({ lockFile: config.lockFile, now, ...wired }), late]); } finally { clearTimeout(timer); }
-  if (r.late) { log(`dispatcher: the pass did not finish within ${limit} ms; exiting so the next start can run`); return 2; }
+  if (r.late) {
+    log(`dispatcher: the pass did not finish within ${limit} ms; exiting so the next start can run`);
+    // Joe is told too (L38), once a day: a stuck pass holds everything after the step it is stuck in.
+    try { holdAlert({ rec: wired.rec, cause: 'run-late', text: `a Dispatcher pass did not finish within ${limit} ms and was stopped; the next pass starts in a minute`, alert: wired.ports.alert, now }); }
+    catch (e) { log(`dispatcher: the late pass could not be told: ${e?.message ?? e}`); }
+    return 2;
+  }
   if (!r.ran) log(`dispatcher: ${r.reason}`);
   return 0;
 }

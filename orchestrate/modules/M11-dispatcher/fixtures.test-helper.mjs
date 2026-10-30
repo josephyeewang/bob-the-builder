@@ -50,3 +50,15 @@ export function recWith(entries = []) {
   }
   return rec;
 }
+
+// An undo card as the undo step writes it (LEAD-CALLS L40): it reverses a merge in the record, with the
+// reversed commit's file list. `filesOfCommits` answers for every commit these fixtures made.
+const commitFiles = new Map();
+export const undoSha = (id) => Buffer.from(String(id)).toString('hex').padEnd(40, '0').slice(0, 40);
+export function undoEntries(id, over = {}, { product = 'p1', files = [`src/${id}.js`], pr = 7 } = {}) {
+  const sha = undoSha(id);
+  commitFiles.set(sha, files);
+  return [['merge', `MG-${id}`, { state: 'merged', pr, merge_commit_sha: sha, product }],
+    ['card', id, { state: 'ready', kind: 'undo', queue: 'front', go_free: true, module: 'M-test', product, tier: 2, files, pr, merge_commit_sha: sha, reverses: `MG-${id}`, changed_at: iso(T0 - 600_000), ...over }]];
+}
+export const filesOfCommits = (sha) => { if (!commitFiles.has(sha)) throw new Error(`no such commit ${sha}`); return commitFiles.get(sha); };

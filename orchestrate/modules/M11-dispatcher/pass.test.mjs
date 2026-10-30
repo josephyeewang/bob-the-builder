@@ -5,7 +5,7 @@ import { dispatcherPass, stopProcessGroup, STOP_FACT, LIMIT_FACT, UNDO_HELD_FACT
 import { USAGE_FACT, BAND_FACT } from './usage.mjs';
 import { OUTAGE_FACT } from './outage.mjs';
 import { KEYS as K } from './keys.mjs';
-import { rulesWith, recWith, usageFact, T0, MIN, H, iso } from './fixtures.test-helper.mjs';
+import { rulesWith, recWith, usageFact, undoEntries, filesOfCommits, T0, MIN, H, iso } from './fixtures.test-helper.mjs';
 
 const ACCT = 'acct-a';
 const GREEN = { week: 30, h5: 20 };
@@ -40,6 +40,7 @@ function world(entries = [], { usage = GREEN, over = {} } = {}) {
     hostLock: extra.hostLock ?? (() => extra.host ?? null),
     pauseLead: extra.pauseLead ?? (({ product }) => { calls.pauses.push([product, [...calls.stops]]); }),
     startsOff: extra.startsOff ?? null,
+    filesOf: extra.filesOf ?? filesOfCommits,
     alert: (t) => calls.alerts.push(t),
   });
   const setCard = (id, patch) => { const c = rec.read('card', id); rec.write({ actor: 'dispatcher', entity: 'card', id, expectRev: c.rev, doc: { ...c.doc, ...patch } }); };
@@ -185,7 +186,7 @@ test('M8 / R-0b-67: red parks running editing work at a safe point and holds cla
 });
 
 test('R-0b-67 / R-0b-68: in red, review / audit / merge sessions keep running and an undo card still starts', async () => {
-  const w = world([card('U-1', { kind: 'undo', queue: 'front', go_free: true })], { usage: RED });
+  const w = world([...undoEntries('U-1')], { usage: RED });
   w.sessions.push({ id: 'R-1', product: 'p1', kind: 'review', card: null }, { id: 'M-1', product: 'p1', kind: 'merge', card: null });
   const r = await w.pass();
   assert.deepEqual(w.calls.stops, []);
@@ -559,7 +560,7 @@ test('audit 0b-6 r3 MAT-1: a host.lock that cannot be read, or rules that cannot
 
 test('audit 0b-6 r3 MAT-5: with starts off (no account reading, or a rules value missing) an undo card still starts and nothing else does', async () => {
   for (const [label, extra] of [['no account', { startsOff: 'the signed-in account is not known' }], ['park_wait_min missing', { rules: rulesWith({ [K.parkWaitMin]: undefined }) }]]) {
-    const w = world([card('C-1'), card('U-1', { kind: 'undo', queue: 'front', go_free: true })]);
+    const w = world([card('C-1'), ...undoEntries('U-1')]);
     if (extra.rules) extra.rules = rulesWith({ [K.parkWaitMin]: undefined }, startAnswer(w.rec));
     const r = await w.pass(0, extra);
     assert.deepEqual(r.started, ['U-1'], label);
@@ -568,7 +569,7 @@ test('audit 0b-6 r3 MAT-5: with starts off (no account reading, or a rules value
 });
 
 test('audit 0b-6 r3 MAT-5: an undo that cannot start tells Joe why, once per reason, and the note clears when it starts', async () => {
-  const w = world([card('U-1', { kind: 'undo', queue: 'front', go_free: true })]);
+  const w = world([...undoEntries('U-1')]);
   // The rules refusing it holds an undo (as does an open outage); the undo's own alert says why.
   const rules = rulesWith({}, { start_session: { decision: 'deny', reason: 'the product is paused' } });
   await w.pass(0, { rules });

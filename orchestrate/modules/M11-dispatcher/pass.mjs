@@ -26,6 +26,7 @@ import { startGate } from './gate.mjs';
 import { atSafePoint } from './transcript.mjs';
 import { OUTAGE_FACT } from './outage.mjs';
 import { move, waitOn, note } from './moves.mjs';
+import { exactReverse } from './undo.mjs';
 import { FINAL_STATES } from '../../shared/record.mjs';
 
 export const STOP_FACT = (sid) => `stop-${sid}`;
@@ -57,9 +58,33 @@ export function rulesMissingAlert({ rec, factId = RULES_MISSING_FACT, keys, aler
   const had = String(factDoc(rec, factId)?.doc?.keys ?? '').split(', ').filter(Boolean);
   const fresh = seen.filter((k) => !had.includes(k));
   const keep = complete ? seen : [...new Set([...had, ...seen])].sort();
-  if (keep.join(', ') !== had.join(', ')) putFact(rec, factId, { keys: keep.join(', ') || null, at: iso(now) }, keep.length ? 'rules_missing' : 'rules_missing_cleared');
-  if (fresh.length) alert(`the rules have no value for ${fresh.join(', ')}: ${what}`);
+  // Still missing a day after the last alert: told again, all of them (LEAD-CALLS L38, once per cause per day).
+  const last = Date.parse(factDoc(rec, factId)?.doc?.alerted_at ?? factDoc(rec, factId)?.doc?.at ?? '');
+  const again = !fresh.length && keep.length && seen.length && Number.isFinite(last) && now - last >= HOLD_REPEAT_MS;
+  const tell = fresh.length ? fresh : again ? keep : [];
+  if (keep.join(', ') !== had.join(', ') || tell.length) {
+    const alertedAt = tell.length ? iso(now) : factDoc(rec, factId)?.doc?.alerted_at ?? null;
+    putFact(rec, factId, { keys: keep.join(', ') || null, at: iso(now), alerted_at: alertedAt }, keep.length ? 'rules_missing' : 'rules_missing_cleared');
+  }
+  if (tell.length) alert(`the rules have no value for ${tell.join(', ')}: ${what}`);
   return seen.join(', ') || null;
+}
+
+export const HOLD_FACT = (cause) => `hold-${cause}`;
+export const HOLD_REPEAT_MS = 24 * 60 * 60_000;
+
+/**
+ * No silent hold (LEAD-CALLS L38): anything that holds or blocks work tells Joe what and why, once per
+ * cause per day, on the fact `hold-<cause>`.
+ */
+export function holdAlert({ rec, cause, text, alert, now }) {
+  const f = factDoc(rec, HOLD_FACT(cause))?.doc;
+  const last = Date.parse(f?.alerted_at ?? '');
+  // Once per cause per day (L38): a changing detail in the text does not make it a new cause.
+  if (Number.isFinite(last) && now - last < HOLD_REPEAT_MS) return false;
+  putFact(rec, HOLD_FACT(cause), { text, alerted_at: iso(now) }, 'hold_alert');
+  alert(text);
+  return true;
 }
 
 /** Stops a process group: SIGTERM, then SIGKILL if still alive after 10 s. Ports for tests. */
@@ -95,41 +120,22 @@ function stopReason({ s, card, productDoc, b, compactions, split }) {
 }
 
 /**
- * One pass. Ports:
- *   sessions: the running sessions Mac-wide [{ id, product, kind, card, lead, role, pgid, bundle_files }]
- *   probe(s) -> { size, activity }   (transcript size incl. compactions, and the activity tracker)
- *   launch({ card, kind, product }) -> { ok, sessionId, pgid, reason }   (M4 launch)
- *   stopGroup(s) -> { ok, how }      (stopProcessGroup on the session's group)
- *   saveWork(s) -> { ok, reason }    (M4 save-work, inside the worker's lock-down)
- *   hostLock() -> string | null      (the host.lock text; its path is config)
- *   pauseLead({ product }) -> any    (lead-restart's WRAP flow for a paused product)
- *   alert(text)
+ * Steps 1, 3 and 4 alone: the bands, the compactions and the stops (cancels and parks). The tick runs
+ * this as its own first step (LEAD-CALLS L38), so no other step's failure, an unreadable file or a bad
+ * rule, can skip a cancel. Returns { stopping, stopped, running, bands, unknownSince, missing }.
  */
-export async function dispatcherPass({ rec, rules, now, account, sessions, probe, launch, stopGroup, saveWork, hostLock = () => null, pauseLead = () => {}, alert, startsOff = null, tellMissing = true }) {
-  const out = { started: [], refused: [], stopping: [], stopped: [], resumed: [], notes: [] };
+export async function stopPass({ rec, rules, now, account, sessions, probe, stopGroup, saveWork, alert }) {
+  const out = { stopping: [], stopped: [] };
   // A missing rules value starts nothing, but every stop still runs (audit MAT-2): Cancel needs no band.
   // Any other failure reading the rules (an unreadable file) is treated the same, never thrown before
   // the stop loop (audit 0b-6 r3 MAT-1).
   const missing = [];
-  const read = (f, fallback) => { try { return f(); } catch (e) { missing.push(e instanceof MissingKey ? e.key : `the rules (${e?.message ?? e})`); return fallback; } };
+  const read = readOr(missing);
   const cancelMs = read(() => minutes(rules, KEYS.cancelGraceMin), CANCEL_GRACE_FLOOR_MS);
   const parkMs = read(() => minutes(rules, KEYS.parkWaitMin), Infinity);
   const split = read(() => need(rules, KEYS.splitAfterCompactions), Infinity);
-  const unknownMaxMs = read(() => minutes(rules, KEYS.usageUnknownMaxMin), Infinity);
-
-  // 1. Bands.
-  const b = read(() => currentBands({ rec, rules, account, now }), { band: 'unknown', own_building: 'unknown', pace: null, prodBlocked: true, reason: 'the rules lack a band value' });
+  const b = read(() => currentBands({ rec, rules, account, now }), HELD_BANDS);
   const { unknownSince } = recordBands({ rec, b, now, account });
-  if (missing.length) startsOff ??= `the rules have no value for ${[...new Set(missing)].sort().join(', ')}`;
-
-  // 2. host.lock (m5). An unreadable file is "not known" and changes nothing (audit 0b-6 r3 MAT-1).
-  let host;
-  try { host = hostLock(); } catch (e) { host = undefined; out.notes.push(`host.lock unreadable: ${e?.message ?? e}`); }
-  const seen = factDoc(rec, HOST_FACT);
-  if (host !== undefined && (seen?.doc?.text ?? null) !== (host ?? null)) {
-    putFact(rec, HOST_FACT, { text: host ?? null, at: iso(now) }, 'host_lock');
-    if (host && /\bair\b/i.test(host)) { note(rec, 'host-lock-note', "who's-home file says Air; ignored for orchestrated products", { now }); out.notes.push('host.lock says Air'); }
-  }
 
   // 3 + 4. Compactions and stops.
   let running = [...sessions];
@@ -174,6 +180,51 @@ export async function dispatcherPass({ rec, rules, now, account, sessions, probe
     out.stopped.push([s.id, pending.reason]);
   }
 
+  return { ...out, running, bands: b, unknownSince, missing };
+}
+
+const readOr = (missing) => (f, fallback) => { try { return f(); } catch (e) { missing.push(e instanceof MissingKey ? e.key : `the rules (${e?.message ?? e})`); return fallback; } };
+export const HELD_BANDS = Object.freeze({ band: 'unknown', own_building: 'unknown', pace: null, prodBlocked: true, reason: 'the rules lack a band value' });
+
+/**
+ * One pass. Ports:
+ *   sessions: the running sessions Mac-wide [{ id, product, kind, card, lead, role, pgid, bundle_files }]
+ *   probe(s) -> { size, activity }   (transcript size incl. compactions, and the activity tracker)
+ *   launch({ card, kind, product }) -> { ok, sessionId, pgid, reason }   (M4 launch)
+ *   stopGroup(s) -> { ok, how }      (stopProcessGroup on the session's group)
+ *   saveWork(s) -> { ok, reason }    (M4 save-work, inside the worker's lock-down)
+ *   hostLock() -> string | null      (the host.lock text; its path is config)
+ *   pauseLead({ product }) -> any    (lead-restart's WRAP flow for a paused product)
+ *   filesOf(sha) -> [paths] | null   (the files a merge commit changed: an undo's exact-reverse check)
+ *   alert(text)
+ * `stops` is the tick's own stopPass result; null when that step failed (then nothing new starts but
+ * undo cards); left out, the pass runs stopPass itself.
+ */
+export async function dispatcherPass({ rec, rules, now, account, sessions, probe, launch, stopGroup, saveWork, hostLock = () => null, pauseLead = () => {}, filesOf, alert, startsOff = null, tellMissing = true, stops }) {
+  const st = stops === undefined ? await stopPass({ rec, rules, now, account, sessions, probe, stopGroup, saveWork, alert }) : stops;
+  const out = { started: [], refused: [], stopping: st?.stopping ?? [], stopped: st?.stopped ?? [], resumed: [], notes: [] };
+  const missing = [...(st?.missing ?? [])];
+  const read = readOr(missing);
+  const unknownMaxMs = read(() => minutes(rules, KEYS.usageUnknownMaxMin), Infinity);
+  let b = st?.bands;
+  let unknownSince = st?.unknownSince;
+  if (!st) {
+    b = read(() => currentBands({ rec, rules, account, now }), HELD_BANDS);
+    ({ unknownSince } = recordBands({ rec, b, now, account }));
+    startsOff ??= 'the stop step did not finish';
+  }
+  let running = st ? [...st.running] : [...sessions];
+  if (missing.length) startsOff ??= `the rules have no value for ${[...new Set(missing)].sort().join(', ')}`;
+
+  // 2. host.lock (m5). An unreadable file is "not known" and changes nothing (audit 0b-6 r3 MAT-1).
+  let host;
+  try { host = hostLock(); } catch (e) { host = undefined; out.notes.push(`host.lock unreadable: ${e?.message ?? e}`); }
+  const seen = factDoc(rec, HOST_FACT);
+  if (host !== undefined && (seen?.doc?.text ?? null) !== (host ?? null)) {
+    putFact(rec, HOST_FACT, { text: host ?? null, at: iso(now) }, 'host_lock');
+    if (host && /\bair\b/i.test(host)) { note(rec, 'host-lock-note', "who's-home file says Air; ignored for orchestrated products", { now }); out.notes.push('host.lock says Air'); }
+  }
+
   // 5. Resume parked work (M8).
   const unknownLong = b.band === 'unknown' && unknownSince && now - Date.parse(unknownSince) > unknownMaxMs;
   for (const { id, doc } of rec.list('card')) {
@@ -201,7 +252,7 @@ export async function dispatcherPass({ rec, rules, now, account, sessions, probe
   if (factDoc(rec, OUTAGE_FACT)?.doc?.state === 'open') { out.notes.push('outage: nothing starts'); }
   else {
     if (startsOff) out.notes.push(`nothing but undo cards starts: ${startsOff}`);
-    await starts({ rec, rules, now, b, running, launch, out, alert, onlyUndo: !!startsOff, missing });
+    await starts({ rec, rules, now, b, running, launch, out, alert, onlyUndo: !!startsOff, missing, filesOf });
   }
   // The tick tells Joe once for all its steps (`tellMissing` false); run alone, the pass tells him itself.
   out.missing = missing;
@@ -226,6 +277,17 @@ export async function dispatcherPass({ rec, rules, now, account, sessions, probe
   return { ...out, bands: b, running };
 }
 
+// Undo cards' starts, alone, before every other step (L38): the tick's own step, so a failure in the
+// main pass cannot keep an undo from starting. The gate still checks each one (L40).
+export async function undoStarts({ rec, rules, now, bands = HELD_BANDS, running = [], launch, filesOf, alert }) {
+  const out = { started: [], refused: [], notes: [] };
+  const missing = [];
+  if (factDoc(rec, OUTAGE_FACT)?.doc?.state === 'open') { out.notes.push('outage: nothing starts'); return { ...out, missing, running }; }
+  const live = [...running];
+  await starts({ rec, rules, now, b: bands, running: live, launch, out, alert, onlyUndo: true, missing, filesOf });
+  return { ...out, missing, running: live };
+}
+
 function moveAfterStop(rec, cardId, reason, now) {
   if (!cardId) return;
   if (reason === 'cancel') return move(rec, 'card', cardId, { stopped_at: iso(now) }, { now, kind: 'cancel_stopped' });
@@ -241,7 +303,7 @@ const capRefusal = (r) => /cap|already runs|shares |runs alone/.test(r);
 
 export const UNDO_HELD_FACT = (card) => `undo-held-${card}`;
 
-async function starts({ rec, rules, now, b, running, launch, out, alert, onlyUndo = false, missing = [] }) {
+async function starts({ rec, rules, now, b, running, launch, out, alert, onlyUndo = false, missing = [], filesOf }) {
   const amberish = b.band !== 'green' || b.own_building !== 'open';
   // A card meant for the Lead to plan (for: 'lead') is never started as a worker (audit MAT-4).
   const ready = rec.list('card').filter((c) => c.doc.state === 'ready' && c.doc.for !== 'lead');
@@ -256,7 +318,8 @@ async function starts({ rec, rules, now, b, running, launch, out, alert, onlyUnd
     // An undo that cannot start is the way out of a bad change: Joe is told why, once per reason (audit 0b-6 r3 MAT-5).
     const refuse = (reason) => {
       out.refused.push([id, reason]);
-      if (doc.kind === 'undo' && factDoc(rec, UNDO_HELD_FACT(id))?.doc?.reason !== reason) {
+      const held = factDoc(rec, UNDO_HELD_FACT(id))?.doc;
+      if (doc.kind === 'undo' && (held?.reason !== reason || !(now - Date.parse(held?.at ?? '') < HOLD_REPEAT_MS))) {
         putFact(rec, UNDO_HELD_FACT(id), { reason, at: iso(now) }, 'undo_held');
         alert(`your undo (card ${id}) is waiting: ${reason}`);
       }
@@ -266,8 +329,12 @@ async function starts({ rec, rules, now, b, running, launch, out, alert, onlyUnd
     if (may.decision !== 'allow') { refuse(`rules: ${may.reason}`); continue; }
     if (amberish && tierOf(doc) === 2 && tier1Waiting.has(product)) { refuse('queued behind Tier-1 work in amber'); continue; }
     const kind = kindOf(doc);
-    const g = startGate({ rules, rec, card, kind, product, b, running });
-    if (!g.ok) { if (g.missing) missing.push(g.missing); if (amberish && tierOf(doc) === 1 && capRefusal(g.reason)) tier1Waiting.add(product); refuse(g.reason); continue; }
+    // An undo starts only as the exact reverse of a merge in the record (LEAD-CALLS L40).
+    const exact = kind === 'undo' ? exactReverse({ rec, card, filesOf }) : null;
+    if (exact && !exact.ok) { refuse(`it is not an exact reverse: ${exact.reason}`); continue; }
+    const g = startGate({ rules, rec, card, kind, product, b, running, exactReverse: !!exact?.ok });
+    if (g.missing) missing.push(g.missing);
+    if (!g.ok) { if (amberish && tierOf(doc) === 1 && capRefusal(g.reason)) tier1Waiting.add(product); refuse(g.reason); continue; }
     const claim = rec.write({ actor: 'dispatcher', entity: 'card', id, expectRev: rev, doc: { ...doc, state: 'claimed', claimed_at: iso(now), changed_at: iso(now), rules_rev: may.rev ?? rules.rev ?? null }, kind: 'claim' });
     if (!claim.ok) { refuse(`not claimed: ${claim.reason}`); continue; }
     let l;

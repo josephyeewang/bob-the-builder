@@ -14,7 +14,7 @@ import { MERGE_REQUEST } from './merges.mjs';
 import { OUTAGE_FACT } from './outage.mjs';
 import { USAGE_FACT } from './usage.mjs';
 import { KEYS as K } from './keys.mjs';
-import { rulesWith, recWith, usageFact, T0, MIN, iso } from './fixtures.test-helper.mjs';
+import { rulesWith, recWith, usageFact, undoEntries, filesOfCommits, T0, MIN, iso } from './fixtures.test-helper.mjs';
 
 const ACCT = 'acct-a';
 const HEAD = 'h'.repeat(40);
@@ -40,7 +40,7 @@ function world(entries = [], { over = {}, rules = rulesWith({}, allow) } = {}) {
     launch: async ({ card: c, kind, product }) => { calls.launched.push(c.id); const id = `S-${++n}`; sessions.push({ id, product, kind, card: c.id, pgid: 100 + n }); return { ok: true, sessionId: id, pgid: 100 + n, head: HEAD }; },
     stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }), hostLock: () => null, pauseLead: async () => {},
     hasSession: () => true, gateAlive: () => true, hasReviewer: () => false, startReviewer: async (id) => { calls.reviewers.push(id); return { ok: true }; },
-    filesOf: () => [],
+    filesOf: filesOfCommits,
     sendFrontDoor: async () => ({ outcome: 'sent' }), restartFrontDoor: async () => ({ ok: true }), startMinibase: async () => ({ ok: true }),
     frontDoorAlive: () => null, frontDoorHandoff: () => null,
     cleanup: { copiesRoot: empty, sealRoot: empty, mirrorFor: () => null },
@@ -54,7 +54,7 @@ test('MAT-1: one tick runs every step once, in the fixed order, and records the 
   const w = world([account(), usage()]);
   const r = await w.pass();
   assert.deepEqual(Object.keys(r.steps), STEPS);
-  assert.deepEqual(STEPS, ['outage', 'intake', 'leads', 'pass', 'limits', 'merges', 'undo', 'phone', 'cleanup']);
+  assert.deepEqual(STEPS, ['stops', 'undo', 'undo-starts', 'outage', 'intake', 'leads', 'pass', 'limits', 'merges', 'phone', 'cleanup']);
   for (const s of STEPS) assert.equal(r.steps[s].ok, true, `${s}: ${r.steps[s].error}`);
   const last = w.rec.read('fact', LAST_PASS_FACT).doc;
   assert.equal(last.at, iso(T0));
@@ -67,7 +67,7 @@ test('MAT-1: a failing step never stops the rest; one alert per distinct error; 
   const w = world([account(), usage(), card('C-1')], { over: { board: () => { if (boom) throw new Error('board unreadable'); return []; } } });
   const r = await w.pass();
   assert.deepEqual([r.steps.outage.ok, r.steps.outage.error], [false, 'board unreadable']);
-  for (const s of STEPS.slice(1)) assert.equal(r.steps[s].ok, true, s);
+  for (const s of STEPS.filter((x) => x !== 'outage')) assert.equal(r.steps[s].ok, true, s);
   assert.deepEqual(w.calls.launched, ['C-1'], 'the main pass still started work');
   assert.equal(w.calls.alerts.length, 1);
   assert.match(w.calls.alerts[0], /outage step failed: board unreadable/);
@@ -89,10 +89,11 @@ test('MAT-1: every step is guarded, not only the first', async () => {
   mkdirSync(join(w.ports.cleanup.copiesRoot, 'C-9'));
   w.ports.cleanup.mirrorFor = thrower('mirror');
   const r = await w.pass();
-  for (const s of ['outage', 'intake', 'leads', 'pass', 'limits', 'cleanup']) assert.equal(r.steps[s].ok, false, s);
-  for (const s of ['merges', 'undo', 'phone']) assert.equal(r.steps[s].ok, true, s);
-  assert.equal(w.calls.alerts.length, 6);
-  assert.deepEqual(w.calls.alerts.map((a) => a.match(/Dispatcher's (\w+) step/)[1]), ['outage', 'intake', 'leads', 'pass', 'limits', 'cleanup']);
+  // An unreadable session list fails the stops and the undo starts too: neither acts on a guess.
+  const failed = ['stops', 'undo-starts', 'outage', 'intake', 'leads', 'pass', 'limits', 'cleanup'];
+  for (const s of failed) assert.equal(r.steps[s].ok, false, s);
+  for (const s of ['undo', 'merges', 'phone']) assert.equal(r.steps[s].ok, true, s);
+  assert.deepEqual(w.calls.alerts.map((a) => a.match(/Dispatcher's ([\w-]+) step/)?.[1]), failed);
 });
 
 test('MIN-9: no signed-in account, or a stale one, starts nothing; the stops still run', async () => {
@@ -420,7 +421,7 @@ const rec = recWith([['product', 'p1', { state: 'active' }], ['fact', ACCOUNT_FA
   ['card', 'C-1', { state: 'ready', module: 'M-test', product: 'p1', tier: 2, files: ['src/a.js'], changed_at: new Date(now - 600000).toISOString() }]]);
 export async function wire() {
   const noop = () => [];
-  return { rec, rules: rulesWith({}, { start_session: { decision: 'allow', reason: 'ok' } }), ports: { stepDeadlineMs: 600000, alert: () => {}, board: noop, healthy: () => true,
+  return { rec, rules: rulesWith({}, { start_session: { decision: 'allow', reason: 'ok' } }), ports: { stepDeadlineMs: 600000, alert: (t) => process.stderr.write('ALERT ' + t + '\\n'), board: noop, healthy: () => true,
     outboxSessions: noop, wait: async () => {}, leads: noop, sessions: noop, probe: () => null,
     launch: () => new Promise(() => { setInterval(() => {}, 1000); }), stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }),
     hasSession: () => true, gateAlive: () => true, hasReviewer: () => true, startReviewer: async () => ({ ok: true }), filesOf: noop,
@@ -435,6 +436,7 @@ export async function wire() {
   assert.equal(r.signal, null, 'the script did not exit by itself');
   assert.equal(r.status, 2, r.stderr);
   assert.match(r.stderr, /did not finish within 300 ms/);
+  assert.match(r.stderr, /ALERT a Dispatcher pass did not finish within 300 ms and was stopped/, 'Joe is told (L38)');
   assert.ok(JSON.parse(readFileSync(lockFile, 'utf8')).pid, 'the stuck run left its lock');
   const l = takePassLock(lockFile);
   assert.equal(l.ok, true, l.reason);
@@ -503,7 +505,7 @@ test('audit 0b-6 r3 MAT-6 / MAT-4: in green, amber, red, unknown and with no acc
     const running = [{ id: 'S-X', product: 'p1', kind: 'editing', card: 'X-1', pgid: 98 }, { id: 'S-E', product: 'p1', kind: 'editing', card: 'E-1', pgid: 99 }];
     const w = world([...facts,
       card('X-1', { state: 'cancelled', session: 'S-X' }), card('E-1', { state: 'running', session: 'S-E' }),
-      card('U-2', { kind: 'undo', queue: 'front', go_free: true }),
+      ...undoEntries('U-2'),
       card('U-1', { state: 'verified', kind: 'undo', pr: 8, session: 'S-0', head: HEAD }), ['verdict', 'U-1', { session_id: 'S-0', head: HEAD }]],
     { over: {
       sessions: () => running,
@@ -536,4 +538,119 @@ test('audit 0b-6 r3 MAT-3: a value only the reviewer start asks for is told once
   await w.pass(1);
   assert.equal(w.calls.alerts.filter((a) => a.includes(K.redRuns)).length, 1, w.calls.alerts.join(' | '));
   assert.deepEqual(w.calls.reviewers, [], 'the reviewer start is held');
+});
+
+// L38 (3): no silent hold. Each failure point, planted alone, gives exactly one alert over two ticks, and
+// one more a day later while it lasts. The facts are refreshed before the later tick so only the planted
+// cause remains.
+test('L38 sweep: each hold or failure is told exactly once over two ticks, and once more a day later', async () => {
+  const H25 = 25 * 60;
+  const red = (at) => ['fact', USAGE_FACT(ACCT), usageFact({ week: 90, h5: 20, account: ACCT, now: at })];
+  const unread = (at) => ['fact', USAGE_FACT(ACCT), usageFact({ week: 30, h5: 20, account: ACCT, now: at, observedAgoMin: 120 })];
+  const deny = { start_session: { decision: 'deny', reason: 'the product is paused' } };
+  const cases = [
+    ['account missing', (at) => [usage(at)], {}, /nothing new starts but undo cards: the signed-in account is not known/],
+    ['account stale', (at) => [usage(at), account(at - 16 * MIN)], {}, /nothing new starts but undo cards: the signed-in account reading is stale/],
+    ['band red', (at) => [account(at), red(at)], {}, /the usage band is red/],
+    ['band unknown', (at) => [account(at), unread(at)], {}, /the usage band is unknown/],
+    ['rules value missing', (at) => [account(at), usage(at)], { cards: [card('C-1')], rules: rulesWith({ [K.perState]: undefined }, allow) }, new RegExp(`have no value for ${K.perState.replace(/\./g, '\\.')}`)],
+    // A cancel whose stop never answers: the stops step hangs on every tick.
+    ['a step that hangs', (at) => [account(at), usage(at)], { cards: [card('X-1', { state: 'cancelled', session: 'S-X' })],
+      over: { sessions: () => [{ id: 'S-X', product: 'p1', kind: 'editing', card: 'X-1', pgid: 98 }], stopGroup: () => new Promise(() => {}), stepDeadlineMs: 50 } }, /stops step failed: it did not finish within 50 ms/],
+    ['a step that throws', (at) => [account(at), usage(at)], { over: { board: () => { throw new Error('board unreadable'); } } }, /outage step failed: board unreadable/],
+    ['an undo held', (at) => [account(at), usage(at)], { cards: undoEntries('U-9'), rules: rulesWith({}, deny) }, /your undo \(card U-9\) is waiting: rules: the product is paused/],
+  ];
+  const ctl = world([account(), usage()]);
+  await ctl.pass(0);
+  await ctl.pass(1);
+  assert.deepEqual(ctl.calls.alerts, [], 'control: nothing held, nothing told');
+  for (const [label, facts, opt, told] of cases) {
+    const w = world([...facts(T0), ...(opt.cards ?? [])], { over: opt.over ?? {}, ...(opt.rules ? { rules: opt.rules } : {}) });
+    await w.pass(0);
+    await w.pass(1);
+    assert.equal(w.calls.alerts.length, 1, `${label}: ${w.calls.alerts.join(' | ')}`);
+    assert.match(w.calls.alerts[0], told, label);
+    for (const [entity, id, doc] of facts(T0 + H25 * MIN)) {
+      const cur = w.rec.read(entity, id);
+      assert.equal(w.rec.write({ actor: 'dispatcher', entity, id, expectRev: cur?.rev ?? 0, doc }).ok, true);
+    }
+    await w.pass(H25);
+    const later = w.calls.alerts.slice(1);
+    assert.equal(later.filter((a) => told.test(a)).length, 1, `${label}, a day later: ${later.join(' | ')}`);
+    // Usage unread for a day is its own, documented cause (parked work then waits on Joe), told once.
+    const escalation = /usage has been unreadable for over a day/;
+    const others = later.filter((a) => !told.test(a));
+    assert.ok(others.length === 0 || (['account missing', 'account stale', 'band unknown'].includes(label) && others.length === 1 && escalation.test(others[0])), `${label}: ${others.join(' | ')}`);
+  }
+});
+
+// L40: a missing rules value holds an undo only when the undo needs it to stay safe. The undo's own check
+// (the exact reverse of a merge in the record, with the same files) decides; either way Joe is told.
+test('L40: with a cap value missing an exact-reverse undo starts and Joe is told the value; one the undo needs holds it; a wrong or unrecorded reverse holds', async () => {
+  const runOne = async (rules, entries, over = {}) => {
+    const w = world([account(), usage(), ...entries], { rules, over });
+    const r = await w.pass(0);
+    return { w, r };
+  };
+  // perState is a cap value: the exact reverse needs no cap to stay safe.
+  {
+    const { w, r } = await runOne(rulesWith({ [K.perState]: undefined }, allow), undoEntries('U-3'));
+    assert.ok(w.calls.launched.includes('U-3'), JSON.stringify(r.steps['undo-starts'].result));
+    assert.ok(w.calls.alerts.some((a) => a.includes(`have no value for ${K.perState}`)), w.calls.alerts.join(' | '));
+  }
+  // leadDailyCard decides whether two edits may run at once: without it the undo holds, and is told.
+  {
+    const { w } = await runOne(rulesWith({ [K.leadDailyCard]: undefined }, allow), undoEntries('U-4'));
+    assert.ok(!w.calls.launched.includes('U-4'));
+    assert.ok(w.calls.alerts.some((a) => a.includes(`have no value for ${K.leadDailyCard}`)), w.calls.alerts.join(' | '));
+    assert.ok(w.calls.alerts.some((a) => /your undo \(card U-4\) is waiting/.test(a)), w.calls.alerts.join(' | '));
+  }
+  // A file list that is not the reversed commit's: held, and told.
+  {
+    const [m, [, id, doc]] = undoEntries('U-5');
+    const { w } = await runOne(rulesWith({}, allow), [m, ['card', id, { ...doc, files: [...doc.files, 'src/other.js'] }]]);
+    assert.ok(!w.calls.launched.includes('U-5'));
+    assert.ok(w.calls.alerts.some((a) => /your undo \(card U-5\) is waiting: it is not an exact reverse: its file list does not match the reversed commit/.test(a)), w.calls.alerts.join(' | '));
+  }
+  // No merge in the record for it: held, and told.
+  {
+    const [, c] = undoEntries('U-6');
+    const { w } = await runOne(rulesWith({}, allow), [c]);
+    assert.ok(!w.calls.launched.includes('U-6'));
+    assert.ok(w.calls.alerts.some((a) => /your undo \(card U-6\) is waiting: it is not an exact reverse: it is not the reverse of a merge in the record/.test(a)), w.calls.alerts.join(' | '));
+  }
+  // The commit's files cannot be read: held, and told.
+  {
+    const { w } = await runOne(rulesWith({}, allow), undoEntries('U-7'), { filesOf: () => { throw new Error('mirror unreadable'); } });
+    assert.ok(!w.calls.launched.includes('U-7'));
+    assert.ok(w.calls.alerts.some((a) => /your undo \(card U-7\) is waiting: .*files could not be read/.test(a)), w.calls.alerts.join(' | '));
+  }
+  // Control: every value present, the exact reverse starts with no alert.
+  {
+    const { w } = await runOne(rulesWith({}, allow), undoEntries('U-8'));
+    assert.ok(w.calls.launched.includes('U-8'));
+    assert.deepEqual(w.calls.alerts, []);
+  }
+});
+
+test('L38: with the main pass failing (its session list unreadable), a cancel still stops and an undo card still starts, in their own steps', async () => {
+  let calls = 0;
+  const running = [{ id: 'S-X', product: 'p1', kind: 'editing', card: 'X-1', pgid: 98 }];
+  const stops = [];
+  // The first read (the stops step) answers; every later one throws.
+  const w = world([account(), usage(), card('X-1', { state: 'cancelled', session: 'S-X' }), ...undoEntries('U-1')], { over: {
+    sessions: () => { calls += 1; if (calls > 1) throw new Error('session list unreadable'); return running; },
+    stopGroup: async (s) => { stops.push(s.id); return { ok: true, how: 'SIGTERM' }; } } });
+  const r = await w.pass();
+  assert.equal(r.steps.pass.ok, false, 'control: the main pass failed');
+  assert.deepEqual(stops, ['S-X']);
+  assert.deepEqual(r.steps['undo-starts'].result.started, ['U-1']);
+  assert.ok(w.calls.launched.includes('U-1'));
+});
+
+test('L38: the account-age rule missing is told even when every step that reads the bands fails', async () => {
+  const w = world([account(), usage()], { rules: rulesWith({ [K.staleAfterMin]: undefined }, allow), over: { sessions: () => { throw new Error('session list unreadable'); } } });
+  const r = await w.pass();
+  for (const s of ['stops', 'undo-starts', 'pass']) assert.equal(r.steps[s].ok, false, `control: ${s} failed`);
+  assert.equal(w.calls.alerts.filter((a) => a.includes(`have no value for ${K.staleAfterMin}`)).length, 1, w.calls.alerts.join(' | '));
 });

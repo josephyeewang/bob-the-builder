@@ -72,3 +72,19 @@ export function undoStep({ rec, rules, now, filesOf, alert }) {
   }
   return out;
 }
+
+/**
+ * An undo card's own correctness check (LEAD-CALLS L40): it reverses a merge in the record (same PR,
+ * same merge commit, merged), and its file list is the reversed commit's, read again now. Only then may
+ * it start while a rules value is missing; it is asked of every undo start, so there is one rule.
+ */
+export function exactReverse({ rec, card, filesOf }) {
+  const m = typeof card.reverses === 'string' ? rec.read('merge', card.reverses)?.doc : null;
+  if (!m || !MERGED.includes(m.state) || m.pr !== card.pr || m.merge_commit_sha !== card.merge_commit_sha) return { ok: false, reason: 'it is not the reverse of a merge in the record' };
+  let files;
+  try { files = typeof filesOf === 'function' ? filesOf(card.merge_commit_sha) : null; } catch { files = null; }
+  if (!Array.isArray(files) || !Array.isArray(card.files)) return { ok: false, reason: 'the reversed commit\'s files could not be read' };
+  const set = (l) => [...new Set(l.map(String))].sort().join('\n');
+  if (set(files) !== set(card.files)) return { ok: false, reason: 'its file list does not match the reversed commit' };
+  return { ok: true };
+}

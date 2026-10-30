@@ -89,9 +89,10 @@ export function editingLimits({ rules, product, productDoc, amberCaps }) {
 /**
  * May this start now? `card` is the card doc (with id) or null for a session with no card; `kind` as
  * above; `b` the bands from usage.mjs; `running` the running sessions Mac-wide; `lead` the asking
- * Lead's session id for a read-only session.
+ * Lead's session id for a read-only session. `exactReverse` is true only when the caller has checked
+ * that an undo card is the exact reverse of a merge in the record (undo.mjs `exactReverse`).
  */
-export function startGate({ rules, rec, card, kind, product, b, running, lead }) {
+export function startGate({ rules, rec, card, kind, product, b, running, lead, exactReverse = false }) {
   try {
     // An undo needs no band value, so a missing red_runs never holds it (audit 0b-6 r3 MAT-3, L31).
     const redRuns = kind === 'undo' || kind === 'undo_merge' ? [] : need(rules, KEYS.redRuns, { type: 'list' });
@@ -118,12 +119,19 @@ export function startGate({ rules, rec, card, kind, product, b, running, lead })
     if (!isEditing({ kind })) return refuse(`unknown session kind ${kind}: start nothing`);
     const productDoc = rec.read('product', product)?.doc;
     if (!productDoc) return refuse(`no product record for ${product}`);
-    const lim = editingLimits({ rules, product, productDoc, amberCaps: band.amberCaps });
-    const onProduct = mine.filter(isEditing);
-    if (onProduct.length >= lim.product) return refuse(`the product already runs ${onProduct.length} editing worker(s) (cap ${lim.product})`);
-    const onMac = running.filter(isEditing).length;
-    if (onMac >= lim.mac) return refuse(`the Mac already runs ${onMac} editing workers (cap ${lim.mac})`);
-    return disjoint({ rules, card, product, others: mine.filter(writesFiles), rec });
+    // A cap is budget, not safety (LEAD-CALLS L40): an exact reverse whose cap value is missing skips that
+    // cap and names it, so Joe is still told. The files-don't-overlap check below is safety and still runs.
+    let lim = null;
+    let capMissing = null;
+    try { lim = editingLimits({ rules, product, productDoc, amberCaps: band.amberCaps }); } catch (e) { if (!(kind === 'undo' && exactReverse && e.key)) throw e; capMissing = e.key; }
+    if (lim) {
+      const onProduct = mine.filter(isEditing);
+      if (onProduct.length >= lim.product) return refuse(`the product already runs ${onProduct.length} editing worker(s) (cap ${lim.product})`);
+      const onMac = running.filter(isEditing).length;
+      if (onMac >= lim.mac) return refuse(`the Mac already runs ${onMac} editing workers (cap ${lim.mac})`);
+    }
+    const d = disjoint({ rules, card, product, others: mine.filter(writesFiles), rec });
+    return capMissing ? { ...d, missing: capMissing } : d;
   } catch (e) {
     // `missing` names the key, so the caller can tell Joe once (audit 0b-6 r3 MAT-3); a refusal alone was silent.
     const missing = e.key ?? `the rules (${e.message})`;
