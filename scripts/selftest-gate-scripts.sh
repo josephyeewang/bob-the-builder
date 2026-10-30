@@ -716,6 +716,8 @@ expect "phase-report: a [C] section marked N/A -> OK" 0 "phase-report-check: OK"
 expect "phase-report: Bob's own blank template -> REFUSED" 1 'the "built" section has nothing of its own' -- node "$PR" "$HERE/../templates/phase-report.md"
 printf '## Phase 2 Report\n### Built\n*Signup form, /api/signup, users migration.*\n### Spec Deviations\n- None\n' > "$PD/it.md"
 expect "phase-report: real text written in italics counts -> OK" 0 "phase-report-check: OK" -- node "$PR" "$PD/it.md" --template "$PD/tpl.md"
+printf '## Phase 2 Report\n### 3.1 Built\n- x\n### 3.2 Spec Deviations\nN/A\n' > "$PD/na-a.md"
+expect "phase-report: dotted numbers are read; N/A in an always-required section -> REFUSED" 1 'line 4: the "spec deviations" section has nothing of its own' -- node "$PR" "$PD/na-a.md" --template "$PD/tpl.md"
 expect "phase-report: no report file -> cannot run (exit 2, not a pass)" 2 "not a pass" -- node "$PR" "$PD/missing.md"
 printf '# Phase 2\n## 1. Built ✅\n- the login page\n## 2. Spec Deviations\n- None\n' > "$PD/h2.md"
 expect "phase-report: level-2, numbered headings with a status mark -> OK" 0 "phase-report-check: OK" -- node "$PR" "$PD/h2.md" --template "$PD/tpl.md"
@@ -784,6 +786,10 @@ ac_base; printf 'MAX_ATTEMPTS=8\nif [ "$n" -lt "$MAX_ATTEMPTS" ]; then npm test 
 expect "autonomy: a limit written as 'less than' (-lt \$MAX_ATTEMPTS) -> OK" 0 "autonomy-check: OK" -- node "$AC" "$AD"
 ac_base; sed -i.bak 's/"permissions"/"env": { "VITE_LIVE_RELOAD_URL": "x" }, "permissions"/' "$AD/.claude/settings.json"
 expect "autonomy: a dev-only LIVE setting that is not a key or secret -> OK" 0 "autonomy-check: OK" -- node "$AC" "$AD"
+ac_base; sed -i.bak 's/"permissions"/"env": { "PROD_URL": "https:\/\/example.com", "SKIP_PROD_DEPLOY": "1" }, "permissions"/' "$AD/.claude/settings.json"
+expect "autonomy: PROD in a setting that is not a secret (PROD_URL, SKIP_PROD_DEPLOY) -> OK" 0 "autonomy-check: OK" -- node "$AC" "$AD"
+ac_base; printf '\xef\xbb\xbf\n---\nname: reviewer\ntools: Read, Grep\n---\n' > "$AD/.claude/agents/reviewer.md"
+expect "autonomy: a reviewer file starting with a BOM and a blank line -> OK" 0 "autonomy-check: OK" -- node "$AC" "$AD"
 mkdir -p "$TMP/ac-none"
 mkdir -p "$TMP/ac-bare/.claude"; printf '{"permissions":{}}\n' > "$TMP/ac-bare/.claude/settings.json"
 expect "autonomy: settings but no Stop hook and no reviewer -> not set up (exit 2, not six failures)" 2 "not set up for supervised autonomy" -- node "$AC" "$TMP/ac-bare"
@@ -806,7 +812,9 @@ printf 'on:\n  push:\n    paths: ["old.py", "src/**"]\njobs:\n    build:\n      
 printf 'tools:\n\tbash tools/run.sh\n' > "$RD/Makefile"
 printf '[project.scripts]\nentry = "pkg.entry:main"\n[tool.ruff]\nexclude = ["old.py"]\n' > "$RD/pyproject.toml"
 git -C "$RD" add -A; git -C "$RD" commit -q -m "base"; RB="$(git -C "$RD" rev-parse HEAD)"
-expect "run-commands: nothing changed on main -> cannot judge without --base (exit 2)" 2 "no change to compare" -- node "$RC" "$RD"
+printf 'x\n' >> "$RD/notes.md"
+expect "run-commands: on main without --base, even with an uncommitted edit -> cannot judge (exit 2)" 2 "no branch point to compare with" -- node "$RC" "$RD"
+git -C "$RD" checkout -q -- notes.md
 expect "run-commands: nothing moved -> OK (any command shape)" 0 "0 script\\(s\\) moved or deleted" -- node "$RC" "$RD" --base "$RB"
 git -C "$RD" rm -q server.js
 expect "run-commands: a deleted file a wrapped package script still runs -> REFUSED" 1 'package.json:scripts.start still names server.js, which this change deleted' -- node "$RC" "$RD" --base "$RB"
@@ -833,6 +841,16 @@ expect "run-commands: a deleted executable with no extension a script still runs
 git -C "$RD" checkout -q "$RB" -- bin/serve
 git -C "$RD" rm -q --cached server.js; printf 'server.js\n' >> "$RD/.gitignore"
 expect "run-commands: a build output taken out of git but still on disk is not 'deleted' -> OK" 0 "run-commands-check: OK" -- node "$RC" "$RD" --base "$RB"
+T2="$TMP/rc-ts"; newrepo "$T2"; mkdir -p "$T2/src" "$T2/app" "$T2/tests"; printf 'dist/\n' > "$T2/.gitignore"
+printf 'console.log(1)\n' > "$T2/src/index.js"
+printf 'app = 1\nif __name__ == "__main__":\n    run(app)\n' > "$T2/app/main.py"; : > "$T2/app/__init__.py"
+printf 'import unittest\nif __name__ == "__main__":\n    unittest.main()\n' > "$T2/tests/test_api.py"
+printf '{"main":"dist/index.js","scripts":{"start":"node dist/index.js","test":"pytest tests/test_api.py"}}\n' > "$T2/package.json"
+printf 'FROM python\nCMD ["uvicorn", "app.main:app"]\n' > "$T2/Dockerfile"
+git -C "$T2" add -A; git -C "$T2" commit -q -m base; git -C "$T2" checkout -q -b change
+git -C "$T2" mv src/index.js src/index.ts
+printf 'app = 1\n' > "$T2/app/main.py"; printf 'import unittest\n' > "$T2/tests/test_api.py"
+expect "run-commands: a .js → .ts move whose build output keeps the name, and run blocks dropped from imported files (uvicorn app.main:app, pytest) -> OK" 0 "run-commands-check: OK" -- node "$RC" "$T2"
 expect "run-commands: an unknown base commit -> cannot run (exit 2)" 2 "cannot be found" -- node "$RC" "$RD" --base nope
 SH="$TMP/rc-shallow"; git clone -q --depth 1 "file://$RD" "$SH" 2>/dev/null; git -C "$SH" checkout -q --detach; git -C "$SH" branch -q -D main; git -C "$SH" remote remove origin
 expect "run-commands: a shallow detached clone with no main, no --base -> cannot judge (exit 2)" 2 "cannot tell where this change starts" -- node "$RC" "$SH"

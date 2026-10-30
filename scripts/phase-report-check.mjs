@@ -44,7 +44,7 @@ if (!fs.existsSync(TEMPLATE)) cannot(`template not found at ${TEMPLATE}`);
 // "### [A] Global Invariant Check *(use …)*" → { kind: 'A', name: 'global invariant check' }
 // Any of "## Built", "### 1. Built", "### Built ✅" or "#### [A] Built (phase 3)" is the section "built".
 function heading(line) {
-  const m = line.match(/^(#{2,4})\s+(?:\d+[.)]\s+)?(?:\[([ACO])\]\s+)?(.+?)\s*$/);
+  const m = line.match(/^(#{2,4})\s+(?:\d+(?:\.\d+)*[.)]?\s+)?(?:\[([ACO])\]\s+)?(.+?)\s*$/);
   if (!m) return null;
   const name = m[3].split(/\s+\(|\s+—|\s+\*|\s+-\s|\s*:/)[0].replace(/[*_`]/g, '').replace(/[^\p{L}\p{N}/ -]+/gu, '').trim().toLowerCase();
   // "### Deploy Verification — N/A (no integrations touched)" says in the heading that the section does not apply.
@@ -100,11 +100,13 @@ for (const m of mine) {
   const kind = m.kind ?? kindOf.get(tplName);
   if (kind !== 'A' && kind !== 'C') continue;
   // Text of its own: not blank, not an italic instruction, and not a line copied unchanged from the template's section.
-  // A line saying the section does not apply ("N/A — …", "None") always counts, even when the template suggests it.
-  const says = (l) => /^\s*(?:[-*]\s*)*\**\s*(N\/A|None|No divergences found)\b/i.test(l);
+  // A line saying there was nothing ("None", "No divergences found") always counts, even when the template suggests it.
+  // "N/A" (does not apply) counts only for a [C] section: an always-required section cannot be skipped.
+  const says = (l) => new RegExp(`^\\s*(?:[-*]\\s*)*\\**\\s*(${kind === 'C' ? 'N\\/A|' : ''}None|No divergences found)\\b`, 'i').test(l);
   // An italic line is the template's instruction only when the template has that same line; real text may be italic.
-  const own = m.body.filter((l) => l.trim() && (says(l) || (!placeholders.has(norm(l)) && !tplLines.get(tplName)?.has(norm(l)) && !tplItalic.has(norm(l)))));
-  if (!own.length && !m.saysNA)
+  const skip = (l) => kind === 'A' && /^\s*(?:[-*]\s*)*\**\s*N\/A\b/i.test(l);
+  const own = m.body.filter((l) => l.trim() && !skip(l) && (says(l) || (!placeholders.has(norm(l)) && !tplLines.get(tplName)?.has(norm(l)) && !tplItalic.has(norm(l)))));
+  if (!own.length && !(m.saysNA && kind === 'C'))
     problems.push(`line ${m.line}: the "${m.name}" section has nothing of its own${kind === 'C' ? ' — if it does not apply, write "N/A — <reason>"' : ''}${m.name === 'spec deviations' ? ' — if there were none, write "None" (Rule 4: "No divergences found")' : ''}`);
 }
 

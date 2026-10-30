@@ -21,7 +21,7 @@
 //      read, so it is a warning to check by hand;
 //   6. .claude/agents/reviewer.md exists and lists its tools, none of them Edit, Write, MultiEdit or NotebookEdit (a
 //      reviewer with no tools line inherits every tool, including Edit). Bash is allowed — the reviewer runs the tests;
-//   7. the settings' "env" block names no production credential (a key with PROD or PRODUCTION as a word, or LIVE on a key, secret, token or password).
+//   7. the settings' "env" block names no production credential (PROD, PRODUCTION or LIVE as a word on a key, secret, token, password or database URL).
 //
 // Usage: node "$(realpath ~/.claude/skills/bob/..)/scripts/autonomy-check.mjs" [DIR]
 // Exit: 0 = ready for a hands-off phase (warnings, if any, printed) · 1 = REFUSED (each problem listed) · 2 = cannot
@@ -110,13 +110,14 @@ if (settings) {
 
   const env = settings.env && typeof settings.env === 'object' ? Object.keys(settings.env) : [];
   for (const k of env)
-    // PROD / PRODUCTION as a word; LIVE only on a secret-looking key (STRIPE_LIVE_KEY, not ENABLE_LIVE_PREVIEW or VITE_LIVE_RELOAD_URL).
-    if (/(^|[_-])(PROD|PRODUCTION)($|[_-])/i.test(k) || (/(^|[_-])LIVE($|[_-])/i.test(k) && /KEY|SECRET|TOKEN|PASSWORD/i.test(k))) bad(7, `settings.env sets ${k} — never give an autonomous run production credentials; keep prod and dev separate`);
+    // PROD, PRODUCTION or LIVE as a word, on a secret-looking key: STRIPE_LIVE_KEY, PROD_DATABASE_URL — not PROD_URL,
+    // SKIP_PROD_DEPLOY, ENABLE_LIVE_PREVIEW or VITE_LIVE_RELOAD_URL.
+    if (/(^|[_-])(PROD|PRODUCTION|LIVE)($|[_-])/i.test(k) && /KEY|SECRET|TOKEN|PASSWORD|DATABASE_URL|DB_URL|DSN/i.test(k)) bad(7, `settings.env sets ${k} — never give an autonomous run production credentials; keep prod and dev separate`);
 }
 
 if (!fs.existsSync(at(REVIEWER))) bad(6, `no ${REVIEWER} — there is no fresh-context reviewer to invoke at the milestone`);
 else {
-  const front = fs.readFileSync(at(REVIEWER), 'utf8').replace(/\r\n/g, '\n').match(/^---\n([\s\S]*?)\n---/)?.[1] ?? '';
+  const front = fs.readFileSync(at(REVIEWER), 'utf8').replace(/^\uFEFF/, '').replace(/\r\n/g, '\n').replace(/^\s*\n/, '').match(/^---\n([\s\S]*?)\n---/)?.[1] ?? '';
   // A front-matter list, inline ("Read, Grep" or ["Read","Grep"]) or as YAML "- Read" lines; null when the key is absent.
   const listOf = (key) => {
     const line = front.match(new RegExp(`^${key}:[ \\t]*(.*)$`, 'm'));

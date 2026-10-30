@@ -17,16 +17,18 @@
 // `paths:` filters); Makefile, Procfile, Dockerfile, compose files, .gitlab-ci.yml, vercel.json, netlify.toml,
 // fly.toml, crontab files; pyproject.toml's [project.scripts] / [tool.poetry.scripts]. Comments are ignored. A file is
 // named by its path, its path from the config's folder, its Python module (`python -m pkg.job`, `"pkg.job:main"`), or
-// — only when no other file in the project has that name — its bare file name (so `cd jobs && python job.py` counts).
+// a tail of its path that no other file shares (so `cd jobs && python job.py` counts, and dist/index.js never stands
+// for src/index.js). For a lost __main__ block only a mention that runs the file as a script counts (python x.py,
+// ./x.py, python -m x) — `uvicorn app.main:app`, `pytest tests/x.py` and entry points import it and never needed one.
 // It is a text match, not a parse: it cannot see a command that was broken before the change, a name built from a
 // variable, or a file named somewhere other than the configs above.
 //
 // Usage: node "$(realpath ~/.claude/skills/bob/..)/scripts/run-commands-check.mjs" [DIR] [--base REF]
-//        Without --base it compares with where this branch left main or master (git merge-base). On main itself it
-//        compares the uncommitted change with HEAD. At a phase gate, pass the commit the phase started from.
+//        Without --base it compares with where this branch left main or master (git merge-base). On main or master
+//        itself it needs --base. At a phase gate, pass the commit the phase started from.
 // Exit: 0 = nothing named in a run config was moved, deleted or gutted · 1 = REFUSED · 2 = cannot run (not a git
-//       repository; the base cannot be found — e.g. a shallow CI clone without --base; or there is no change to
-//       compare: nothing compared is not a pass, Rule 29).
+//       repository; or no base — on main or master, or in a shallow CI clone, without --base: nothing compared is not
+//       a pass, Rule 29).
 
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
@@ -47,11 +49,10 @@ let ROOT;
 try { ROOT = git('rev-parse', '--show-toplevel').trim(); } catch { cannot(`${DIR} is not a git repository`); }
 
 let base = baseArg;
-let onMain = false;
 if (!base) {
   let branch = '';
   try { branch = git('rev-parse', '--abbrev-ref', 'HEAD').trim(); } catch { cannot(`${DIR} has no commits yet`); }
-  if (branch === 'main' || branch === 'master') { base = 'HEAD'; onMain = true; }
+  if (branch === 'main' || branch === 'master') cannot(`on ${branch} there is no branch point to compare with — pass --base REF (the commit the phase started from)`);
   else {
     for (const ref of ['main', 'origin/main', 'master', 'origin/master']) {
       try { base = git('merge-base', 'HEAD', ref).trim(); break; } catch { /* try the next */ }
@@ -63,7 +64,6 @@ try { git('rev-parse', '--verify', `${base}^{commit}`); } catch { cannot(`the ba
 
 // What changed since the base, working tree included: D = deleted, R = renamed (old → new), M = modified.
 const changes = git('diff', '-M', '--name-status', base, '--').split('\n').filter(Boolean).map((l) => l.split('\t'));
-if (onMain && !changes.length) cannot('on main with nothing changed since HEAD — there is no change to compare. Pass --base REF (e.g. the commit the phase started from)');
 const SCRIPT = /\.(mjs|cjs|js|ts|mts|py|sh|rb)$/;
 const executable = (p) => { try { return /^100755 /.test(git('ls-tree', base, '--', p)); } catch { return false; } };
 const ignored = (p) => { try { git('check-ignore', '-q', '--', p); return true; } catch { return false; } };
@@ -120,8 +120,7 @@ function runLines(f, text) {
 const configs = tracked.filter((f) => (CONFIG.test(f) && !f.includes('node_modules/')) || /^\.github\/workflows\/[^/]+\.ya?ml$/.test(f))
   .filter((f) => fs.existsSync(path.join(ROOT, f)))
   .map((f) => ({ f, lines: runLines(f, fs.readFileSync(path.join(ROOT, f), 'utf8')) }));
-const filesNamed = new Map();
-for (const f of tracked) if (fs.existsSync(path.join(ROOT, f))) filesNamed.set(path.basename(f), [...(filesNamed.get(path.basename(f)) ?? []), f]);
+const existing = tracked.filter((f) => fs.existsSync(path.join(ROOT, f)));
 
 const esc = (x) => x.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 // The Python module a file is run as: pkg/job.py → pkg.job, src/pkg/job.py → pkg.job, pkg/__main__.py → pkg.
@@ -134,23 +133,40 @@ function moduleOf(p) {
   if (parts[0] === 'src' && parts.length > 1) mods.push(parts.slice(1).join('.'));
   return mods;
 }
-// Where the run configs name `p`. A path form must start at a token edge (start, space, quote, =, (, :) — never after
-// a "/", so deleting the root run.sh does not match tools/run.sh while tools/run.sh still exists.
-// forMain: a pyproject entry point (`job = "pkg.job:main"`) calls a function, so it does not need a __main__ block.
-function mentions(p, forMain = false) {
+// Does a path written in a config mean `p`? It does when, read from the project root or from the config's folder, it
+// is p; or when it is a whole-segment tail of p ("scripts/build.sh" or "build.sh" for web/scripts/build.sh — a command
+// run from a sub-folder) that no other file in the project also ends with. "dist/index.js" is not a tail of
+// src/index.js, so a build output never stands for its source.
+function means(written, p, f) {
+  const w = written.replace(/^\.\//, '');
+  if (!w || /[$*{}]/.test(w)) return false;
+  if (w === p || path.normalize(path.join(path.dirname(f), w)) === p) return true;
+  if (!p.endsWith(`/${w}`)) return false;
+  return !existing.some((o) => o !== p && (o === w || o.endsWith(`/${w}`)));
+}
+const TOKEN = /[^\s"'=(),;:`[\]{}]+/g;
+// Where the run configs name `p`. asScript: count only a mention that runs the file as a script — after python (and
+// its flags) or uv/poetry run, as ./path, or as `-m module` — because only then does a lost __main__ block matter.
+// `uvicorn app.main:app`, `pytest tests/x.py` or a pyproject entry point import the file; they never needed the block.
+function mentions(p, asScript = false) {
   const hits = [];
+  const mods = moduleOf(p);
   for (const { f, lines } of configs) {
-    if (forMain && path.basename(f) === 'pyproject.toml') continue;
-    const fromConfig = path.relative(path.dirname(f), p);
-    const forms = [p, fromConfig, `./${p}`, `./${fromConfig}`];
-    const pathRe = new RegExp(`(^|[\\s"'=(:])(?:${[...new Set(forms)].map(esc).join('|')})(?=$|[\\s"';),:])`);
-    // The bare name may follow a "/" (a step's own working folder: `scripts/build.sh` for web/scripts/build.sh), but
-    // only when no other file in the project has that name.
-    const same = filesNamed.get(path.basename(p)) ?? [];
-    const bare = !same.length || (same.length === 1 && same[0] === p) ? new RegExp(`(^|[\\s"'=(:/])${esc(path.basename(p))}(?=$|[\\s"';),:])`) : null;
-    const mods = moduleOf(p);
-    const modRe = mods.length ? new RegExp(`(-m\\s+|^\\s*[\\w-]+\\s*=\\s*["']|["'])(?:${mods.map(esc).join('|')})(?=$|[\\s"':])`) : null;
-    for (const [at, l] of lines) if (pathRe.test(l) || bare?.test(l) || modRe?.test(l)) hits.push(`${f}:${at}`);
+    if (asScript && path.basename(f) === 'pyproject.toml') continue;
+    for (const [at, l] of lines) {
+      let hit = false;
+      for (const m of l.matchAll(TOKEN)) {
+        if (!means(m[0], p, f)) continue;
+        const before = l.slice(0, m.index);
+        if (!asScript || m[0].startsWith('./') || /(?:^|[\s"'(])(?:python[\d.]*|uv run(?: python[\d.]*)?|poetry run python[\d.]*)(?:\s+-[\w-]+)*\s+["']?$/.test(before)) { hit = true; break; }
+      }
+      if (!hit && mods.length) {
+        const modRun = new RegExp(`-m\\s+["']?(?:${mods.map(esc).join('|')})(?=$|[\\s"'])`);
+        const modRef = new RegExp(`(?:^\\s*[\\w-]+\\s*=\\s*["']|["'\\s])(?:${mods.map(esc).join('|')}):`);
+        hit = modRun.test(l) || (!asScript && modRef.test(l));
+      }
+      if (hit) hits.push(`${f}:${at}`);
+    }
   }
   return hits;
 }
