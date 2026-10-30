@@ -5,7 +5,7 @@
 import { basename, join, sep, isAbsolute, resolve } from 'node:path';
 import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { isMain, runHook, block, pass, toolPaths, shellWords, landingPath, realFolder, inside, fold, joinLines, unreadable, expandBraces, oddPath, oddWord, globRe } from './lib.mjs';
+import { isMain, runHook, block, pass, toolPaths, bothWords, landingPath, realFolder, inside, fold, joinLines, unreadable, expandBraces, oddPath, oddWord, globRe } from './lib.mjs';
 import { readSnapshot } from './snapshot.mjs';
 
 const SECRET_NAME = [
@@ -57,7 +57,9 @@ function patternMeetsSecret(w, listed) {
 const fixedFront = (g) => { const parts = g.split('/'); const i = parts.findIndex((x) => /[*?[]/.test(x)); return i < 0 ? g : parts.slice(0, i).join('/'); };
 const HOLDS = [...SECRET_FOLDERS, '.config'];
 function searchReachesSecret(g, root, listed, home, recursive) {
-  if (!recursive && !g.split('/').slice(0, -1).some((x) => /[*?[]/.test(x))) return false;
+  // A last part with `**` reaches every folder below as well (audit of L41, MAT-10).
+  const parts = g.split('/');
+  if (!recursive && !parts.slice(0, -1).some((x) => /[*?[]/.test(x)) && !parts[parts.length - 1].includes('**')) return false;
   const base = isAbsolute(g) ? fixedFront(g) || sep : root && isAbsolute(root) ? resolve(root, fixedFront(g)) : null;
   if (!base) return true; // no folder to judge the search from
   return [base, realFolder(base)].filter(Boolean).some((b) => HOLDS.some((n) => existsSync(join(b, n)))
@@ -100,6 +102,7 @@ export function decide(input, args) {
     if (g.split(/[,{}]/).some((x) => isSecretPath(bare(x), listed) || isSecretPath(x, listed) || patternMeetsSecret(anyName(x), listed))) return block('the search names secret files');
   }
   if (input.tool_name === 'Grep' || input.tool_name === 'Glob') {
+    if (t.path != null && typeof t.path !== 'string') return block('the search folder is not a plain path');
     const root = typeof t.path === 'string' ? (isAbsolute(t.path) ? t.path : typeof input.cwd === 'string' ? resolve(input.cwd, t.path) : null) : input.cwd;
     const home = process.env.HOME || homedir();
     const g = input.tool_name === 'Glob' ? t.pattern : (typeof t.glob === 'string' ? t.glob : '*');
@@ -113,7 +116,7 @@ export function decide(input, args) {
     // Shapes no hook can read are refused as a class first (lib.mjs `unreadable`; round 2 MIN-3).
     const why = unreadable(t.command);
     if (why) return block(`${why}; write the command out plainly`);
-    for (const word of shellWords(joinLines(t.command))) {
+    for (const word of bothWords(joinLines(t.command))) {
       for (const whole of expandBraces(word)) {
         const odd = oddWord(whole);
         if (odd) return block(odd);

@@ -8,7 +8,7 @@ import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { makeSnapshot } from './snapshot.mjs';
-import { expansionIn, expandBraces, unreadable, shellCommands, globRe } from './lib.mjs';
+import { expansionIn, expandBraces, unreadable, shellCommands, shellWords, globRe } from './lib.mjs';
 import * as merge from './merge-guard.mjs';
 import * as noVerify from './no-verify-block.mjs';
 import * as prodGuard from './production-write-guard.mjs';
@@ -309,4 +309,80 @@ test('L41 G2: a whole-folder write, delete, move, copy-onto or unpack over a fol
   const viaLink = join(w.root, 'via-link.json');
   writeFileSync(viaLink, makeSnapshot({ production: { env_files: [join(w.root, 'link', ENV_PROD)], programs: [], hosts: [] }, secrets: { paths: [] } }));
   blocked(prodGuard.decide(bash(`rm -rf ${w.work}`, w.root), { ...w.args, snapshot: viaLink }), 'listed through a link');
+});
+
+// Confirm audit of L41, Material 1-7: whole-folder write forms the first cut missed. Each is refused by the
+// production guard; the controls are ordinary work that must still pass.
+test('L41 confirm: brace lists, rsync, tar/unzip folders, lost cd forms, links, stash --all, zip -m, trash', () => {
+  const w = world();
+  mkdirSync(join(w.work, 'src'));
+  const W = w.work;
+  const refuse = [
+    // MAT-1: a brace list in the target
+    `rm -rf ${w.root}/{work,dist}`, `cd ${w.root} && rm -rf {work,x}`,
+    // MAT-2: rsync with an option after the names; every name is judged
+    `rsync -a --delete /tmp/e/ ${W}/ --exclude x`, `rsync -a /tmp/e/ ${W}/ -e ssh`, `rsync -a --remove-source-files ${W}/ /tmp/x/`,
+    // MAT-3: the unpack folder in a cluster, by bsdtar's long name, a later -C, unzip -od, the old form with C
+    `tar -xC ${W} -f /tmp/a.tar`, `tar -xvC ${W} -f /tmp/a.tar`, `tar -xvC${W} -f /tmp/a.tar`, `tar -xf /tmp/a.tar --cd ${W}`, `tar -xf /tmp/a.tar --cd=${W}`,
+    `tar -C ${w.outbox} -C ${W} -xf /tmp/a.tar`, `unzip -od ${W} /tmp/a.zip`, `tar xCf ${W} /tmp/a.tar`,
+    // MAT-4: a cd through CDPATH, cd - after OLDPWD is set, another user's home
+    `CDPATH=${w.root} cd work && tar xf /tmp/a.tar`, `export CDPATH=${w.root}; cd work; unzip /tmp/a.zip`, `OLDPWD=${W} cd - && tar xf /tmp/a.tar`,
+    'cd ~nobody/x && tar xf /tmp/a.tar', 'tar -xf /tmp/a.tar -C ~nobody/x',
+    // MAT-5: a link made in the same line
+    `ln -s ${W} l && tar -C l -xf /tmp/a.tar`, `ln -s ${W} l; cd l; unzip -o /tmp/a.zip`, `ln -s ${W} /tmp/l2 && tar -C /tmp/l2 -xf /tmp/a.tar`,
+    // MAT-6, MAT-7
+    `git -C ${W} stash --all`, `git -C ${W} stash -a`, `git -C ${W} stash push --all`, `zip -rm /tmp/a.zip ${W}`, `zip -r --move /tmp/a.zip ${W}`, `trash ${W}`,
+    // GNU cp's target folder
+    `cp -r -t ${W} /tmp/src`, `cp -r --target-directory=${W} /tmp/src`,
+  ];
+  for (const c of refuse) blocked(prodGuard.decide(bash(c, w.outbox), w.args), c);
+  for (const c of ['git stash -a', 'rm -rf {src,.}', 'rm -rf *']) blocked(prodGuard.decide(bash(c, W), w.args), `from the project: ${c}`);
+  // From a folder holding no protected file, a delete of everything in it, or one taking the files away, is shielded.
+  for (const c of ['rm -rf *', 'rsync -a --remove-source-files . /tmp/x/']) assert.match(prodGuard.decide(bash(c, w.outbox), w.args).reason ?? 'passed', /working folder/, c);
+  passed(prodGuard.decide(bash('rsync -a . /tmp/x/', w.outbox), w.args), 'control: a copy out leaves the folder');
+  const pf = [fold(w.envFile)];
+  assert.equal(prodGuard.folderWriteWhy('cd - && tar xf /tmp/a.tar', { cwd: w.outbox, protectedFiles: pf, home: w.work }), null, 'cd - is not cd home');
+  assert.match(prodGuard.folderWriteWhy('cd work && tar xf /tmp/a.tar', { cwd: w.root, protectedFiles: [], cdpath: '/x' }) ?? 'none', /can't follow/, 'CDPATH set outside the line');
+  assert.equal(prodGuard.folderWriteWhy('cd ./work && tar xf /tmp/a.tar', { cwd: w.outbox, protectedFiles: [], cdpath: '/x' }), null, 'a ./ cd ignores CDPATH');
+  assert.equal(prodGuard.folderWriteWhy('cd /tmp && cd - && rm -rf x', { cwd: w.outbox, protectedFiles: pf }), null, 'cd - goes back to a folder already counted');
+  // A cd through a link: a later `..` is taken on disk from where the link leads (the folder holding the file).
+  mkdirSync(join(w.outbox, 'a'));
+  symlinkSync(join(W, 'src'), join(w.outbox, 'a', 'lnk'));
+  for (const c of ['cd lnk && tar xf /tmp/a.tar -C ..', 'cd ln* && tar xf /tmp/a.tar -C ..']) blocked(prodGuard.decide(bash(c, join(w.outbox, 'a')), w.args), c);
+  // Ordinary work still passes, from the project folder that holds the settings file.
+  const allow = ['rm -rf *.egg-info', 'mv *.png src/', 'rm -rf src/gen*', 'rsync -a src/ /tmp/x/', 'tar -xf /tmp/a.tar -C /tmp/out', 'unzip -o /tmp/a.zip -d /tmp/out',
+    'git stash', 'git stash -u', 'git stash pop', 'zip -r /tmp/a.zip src', 'ln -s src lnk', 'cp -r src /tmp/x'];
+  for (const c of allow) passed(prodGuard.decide(bash(c, W), w.args), c);
+});
+
+// Confirm audit of L41, Material 8-10: letter classes, zsh groups in a word, and a search ending in `**`.
+test('L41 confirm: a letter class fails closed, a zsh group reads whole, a trailing ** search is judged', () => {
+  const w = world();
+  assert.throws(() => globRe('.[[:alpha:]]x'), /letter class/);
+  assert.throws(() => globRe('[[=e=]]'), /letter class/);
+  assert.throws(() => globRe('[[.a.]]'), /letter class/);
+  assert.equal(globRe('[a:]').test(':'), true, 'a plain : in a set is a letter');
+  for (const c of [`cat ${w.work}/${dot('[[:alpha:]]nv.production')}`, `cat ${w.work}/${dot('e(n)v.production')}`, `cat ${w.work}/${dot('(x|q)nv.production')}`]) {
+    blocked(prodGuard.decide(bash(c, w.outbox), w.args), `production: ${c}`);
+    blocked(secret.decide(bash(c, w.outbox), w.args), `secret: ${c}`);
+  }
+  blocked(secret.decide(bash(`cat ${w.home}/${dot('[[:alpha:]]sh')}/config`, w.outbox), w.args), 'a class spelling the key folder');
+  assert.deepEqual(shellWords('cat a(b)c', { groups: true }), ['cat', 'abc']);
+  assert.deepEqual(shellWords('cat a(b)c'), ['cat', 'a', '(', 'b', ')', 'c']);
+  assert.deepEqual(shellWords('(cd x && ls)'), ['(', 'cd', 'x', '&', '&', 'ls', ')']);
+  passed(secret.decide(bash("ls 'app/(group)/page.tsx'", w.work), w.args), 'a route group, quoted');
+  // Both readings are checked: a name inside brackets in code fed to a program is still seen (lane 3's corpus).
+  blocked(prodGuard.decide(bash(`python3 - <<'X'\nprint(open('${ENV_PROD}').read())\nX`, w.work), w.args), 'a name in brackets, production');
+  blocked(secret.decide(bash(`python3 - <<'X'\nprint(open('${w.home}/${dot('ss', 'h')}/id_x').read())\nX`, w.work), w.args), 'a name in brackets, secret');
+  const no = (input, what) => assert.match(secret.decide(input, w.args).reason ?? 'passed', /could reach into a folder holding secret files/, what);
+  symlinkSync(w.home, join(w.work, 'hl'));
+  mkdirSync(join(w.home, 'sub'));
+  no({ tool_name: 'Glob', tool_input: { pattern: '**', path: w.home } }, '** alone');
+  no({ tool_name: 'Glob', tool_input: { pattern: `${w.home}/**` } }, 'an absolute pattern ending in **');
+  no({ tool_name: 'Glob', tool_input: { pattern: '../home/**' }, cwd: w.work }, '.. then **');
+  no({ tool_name: 'Glob', tool_input: { pattern: 'hl/**' }, cwd: w.work }, 'a link to home then **');
+  no({ tool_name: 'Glob', tool_input: { pattern: '**' }, cwd: w.home }, '** from the home folder');
+  passed(secret.decide({ tool_name: 'Glob', tool_input: { pattern: '**' }, cwd: join(w.home, 'sub') }, w.args), 'control: ** below home reaches no secret');
+  blocked(secret.decide({ tool_name: 'Glob', tool_input: { pattern: 'x', path: [w.home] }, cwd: w.work }, w.args), 'a search folder that is not a string');
+  passed(secret.decide({ tool_name: 'Glob', tool_input: { pattern: 'src/**' }, cwd: w.work }, w.args), 'control: ** in the project');
 });
