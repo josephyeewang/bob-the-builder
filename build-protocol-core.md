@@ -41,7 +41,7 @@ Before starting, assess project complexity:
 |-------|----------|-------------|
 | **Light** | 1-3 subsystems, no AI, no multi-user, single surface | Skip Behavioral Core, skip Domain Specs if <3 subsystems, simplified Phase Report ([A] sections only), adversarial reviews at hardening only |
 | **Standard** | 3-8 subsystems, AI OR multi-user OR 3+ integrations | Full protocol (default) |
-| **Heavy** | Complex AI + multi-user + 5+ integrations + compliance | Full protocol + mandatory deploy verification every phase + mandatory second-model review at spec and hardening gates |
+| **Heavy** | Complex AI + multi-user + 5+ integrations + compliance | Full protocol + mandatory deploy verification every phase + mandatory second-model review (a model from a different family) at spec and hardening gates + integration test suite required before Phase 2 |
 
 **Mid-build reclassification:** If escalating to Heavy mid-build: (1) future phases follow Heavy requirements immediately, (2) run one-time catch-up audit on completed phases for the Standard→Heavy delta (deploy verification, second-model spec review), (3) log reclassification in Build Manifest. Do NOT re-run completed phases.
 
@@ -91,12 +91,12 @@ Before starting, assess project complexity:
 | 20 | Push harder than the user — surface the unknown-unknowns (v2.27). | `PROSE` | 2 |
 | 21 | Don't one-shot the foundations — iterate them WITH the human, and refuse to advance from mediocre (v2.27). | `PROSE` | 2 |
 | 22 | Never cross from design into build without the Pre-Build Review Gate (v2.28). | `PROSE` | 3 |
-| 23 | Living-doc coherence is a *triggered, mechanical* sweep — not a manual audit the human has to call (v2.29). | `SCRIPT` | 2 |
+| 23 | Living-doc coherence is a *triggered, mechanical* sweep — not a manual audit the human has to call (v2.29). | `SCRIPT` (in part) | 2 |
 | 24 | The Build-Integrity Loop — milestone audits are push, not pull; the build never forgets an earlier step or decision (v2.30). | `PROSE` | 4 |
 | 25 | Green ≠ Correct — the silent-failure forensics a data/analysis audit must actually perform (v2.31). | `PROSE` | 5 |
 | 26 | Keep the machine hermetic & refactor by invariant — the ENGINEERING silent-failures (v2.33). | `SCRIPT` (in part) | 4 |
 | 27 | Supervised Autonomy — collapse per-step gates to milestone gates on the BUILD phases only (v2.34). | `SCRIPT` (in part) | 4 |
-| 28 | Structurally valid ≠ logically coherent — the SPEC-DOCUMENT silent-failures (v2.36). | `SCRIPT` | 2 |
+| 28 | Structurally valid ≠ logically coherent — the SPEC-DOCUMENT silent-failures (v2.36). | `SCRIPT` (in part) | 2 |
 | 29 | A check with no inputs is not a passing check — gate lenses by ARTEFACT STATE (v2.37). | `PROSE` | 6 |
 | 30 | Done means fresh-eyes clean — a Tier-1 milestone is not complete until a context that did NOT build it has audited it and found zero MATERIAL findings (v2.39). | `PROSE` (clause d `SCRIPT`) | 5 |
 | 31 | The intervention ladder — when a class RECURS, climb a rung; never just re-state the rule (v2.40). | `SCRIPT` (in part) | 7 |
@@ -191,11 +191,11 @@ A person working with Bob usually has rules in three places. **Write each rule o
 7. **Regression check:** All prior-phase flows still work.
 8. **Global invariants:** All pass.
 9. **Spec consistency:** No drift detected.
-10. **Fresh-eyes clean on Tier-1 deliverables (v2.39, Rule 30):** For any phase whose output is Tier 1 (numbers/data someone acts on), a fresh-context auditor that did NOT build it has run and reports **zero Material findings**; the result is logged in `docs/audit-ledger.json` (Rule 30(d) fields; `audit-ledger-check.mjs` passes). A zero-finding audit was re-run once from a different angle; any content edited after the audit voided it (Rule 30(f)). Unrun, or Material findings open = stop condition. Tier 2/3 phases record their tier and skip.
-11. **Failing-test receipt per fix item (2026-10, D-016 — `SCRIPT`):** every fix/bug item in the phase **names the test command that proves it** — an item with no test command cannot pass this gate (a note alone is not proof). A session **different from the builder's** runs `node "$(realpath ~/.claude/skills/bob/..)/scripts/prove-test-fails.mjs" --commit <sha> --test "<cmd>" --fix <file>:<from>-<to>` and pastes the receipt into the phase report. The script works in a scratch copy at that exact commit: removes the fix lines → the test must FAIL; restores them → it must PASS. A test that stays green with the fix removed does not test the fix. Code-free phases record "no fix items" and skip.
+10. **Fresh-eyes clean on Tier-1 deliverables (v2.39, Rule 30):** For any phase whose output is Tier 1 (numbers/data someone acts on), a fresh-context auditor that did NOT build it has run and reports **zero Material findings**; the result is logged in `docs/audit-ledger.json` (Rule 30(d) fields; `audit-ledger-check.mjs --since <the date the phase started>` passes, so an entry for this phase exists). A zero-finding audit was re-run once from a different angle; any content edited after the audit voided it (Rule 30(f)). Unrun, or Material findings open = stop condition. Tier 2/3 phases record their tier and skip.
+11. **Failing-test receipt per fix item (2026-10, D-016 — `SCRIPT`):** every fix/bug item in the phase **names the test command that proves it** — an item with no test command cannot pass this gate (a note alone is not proof). A session **different from the builder's** runs `node "$(realpath ~/.claude/skills/bob/..)/scripts/prove-test-fails.mjs" --commit <sha> --test "<cmd>" --fix <file>:<from>-<to> --builder-session <the builder's session id>` (the last option makes the script refuse to run as the builder; without it, the receipt only records which session ran it) and pastes the receipt into the phase report. The script works in a scratch copy at that exact commit: removes the fix lines → the test must FAIL; restores them → it must PASS. A test that stays green with the fix removed does not test the fix. Code-free phases record "no fix items" and skip.
 12. **Done-criteria unchanged since the phase began (2026-10, D-016 — `SCRIPT`):** `node "$(realpath ~/.claude/skills/bob/..)/scripts/check-bar.mjs" <phase-report.md>` passes — the fingerprint recorded at phase start still matches the done-criteria, or every change carries a dated "bar changed because…" line. Moving the finish line mid-phase without saying why = stop condition.
 13. **Phase report complete (2026-10-29, D-033, Rule 4 — `SCRIPT` in part):** `node "$(realpath ~/.claude/skills/bob/..)/scripts/phase-report-check.mjs" <phase-report.md>` passes — every always-required section is there and filled in, none still holds the template's placeholder text, and "Spec Deviations" has text of its own, or says "None" / "No divergences found" (the check sees that it was filled in, not whether it is true — that is the reviewer's job). Add `--abbreviated` for the short report the Minimum Viable Process allows.
-14. **Nothing still names a file this change moved, deleted or gutted (2026-10-29, D-033, Rule 26 — `SCRIPT` in part):** `node "$(realpath ~/.claude/skills/bob/..)/scripts/run-commands-check.mjs" --base <commit the phase started from>` passes — no run config (package scripts, CI workflows, Makefile, Procfile, Dockerfile, compose files, schedules, pyproject entry points) still names a script the phase deleted or renamed, or a Python file that lost its `__main__` block. It matches names as text, so it judges the change, not how commands are written. It cannot see a command that was broken before the phase, a name built from a variable, an absolute path (as in a crontab), or a file named outside those configs. Pass `--base` on main or in CI; without it, it reports that it cannot judge.
+14. **Nothing still names a file this change moved, deleted or gutted (2026-10-29, D-033, Rule 26 — `SCRIPT` in part):** `node "$(realpath ~/.claude/skills/bob/..)/scripts/run-commands-check.mjs" --base <commit the phase started from>` passes — no run config (package scripts, CI workflows, Makefile, Procfile, Dockerfile, compose files, schedules, pyproject entry points) still names a script the phase deleted or renamed, or a Python file that lost its `__main__` block. A project with no run config at all gets exit 2 ("cannot judge"): record "no run configs" for this item, not a pass. It matches names as text, so it judges the change, not how commands are written. It cannot see a command that was broken before the phase, a name built from a variable, an absolute path (as in a crontab), or a file named outside those configs. Pass `--base` on main or in CI; without it, it reports that it cannot judge.
 15. **No recurring defect closed too low (2026-10-29, D-033, Rule 31 — `SCRIPT` in part):** if this phase fixed a defect, `node "$(realpath ~/.claude/skills/bob/..)/scripts/recurrence-check.mjs"` passes — a class of defect fixed twice was closed at rung 3 or 4. Fix commits carry `Class:` and `Rung:` lines; if none do yet, it reports it cannot judge — record that and skip.
 
 ---
@@ -244,7 +244,7 @@ Three strikes: same fix fails 3x → STOP. Change approach entirely.
 
 | Never skip | Skip with caution | Skip first |
 |---------------------|---------------------------|-------------------|
-| Reconciliation, Regression check, Scope lock, Class-level scan, Hot path test, AI eval re-run (AI products), Contract validation (code products) | Cross-cutting scan, Global invariants, Full Phase Report (short one: `--abbreviated`), Propagation, Cost guardrail | Adversarial reviews (spec phase, incl. 4c), Experience test, Second-model review |
+| Reconciliation, Regression check, Scope lock, Class-level scan, Hot path test, Liveness check on phase deltas, AI eval re-run (AI products), Contract validation (code products) | Cross-cutting scan, Global invariants, Full Phase Report (short one: `--abbreviated`), Propagation, Cost guardrail | Adversarial reviews (spec phase, incl. 4c), Experience test, Second-model review |
 
 If anything in the last two columns was skipped during build → MUST run at hardening.
 
@@ -256,14 +256,16 @@ If anything in the last two columns was skipped during build → MUST run at har
 - **S-complexity phases:** ~1 session (build + verify + reconcile)
 - **M-complexity phases:** 1-2 sessions. Fresh session if verify reveals significant issues.
 - **L-complexity phases:** 2-3 sessions. Consider splitting: build in session 1, verify + reconcile in session 2.
-- **Hardening audits:** 1 fresh session per audit (a/b/c/d/e). MUST be fresh sessions (writer/reviewer pattern).
+- **Hardening audits:** 1 fresh session per audit (one per audit listed at Step N+1 above). MUST be fresh sessions (writer/reviewer pattern).
 - **If a phase takes 3+ sessions:** it's likely too large — split it in the Build Manifest.
 
 ---
 
 ## SESSION START PROTOCOL
 
-1. Read CLAUDE.md silently.
+*Short form. The long form, with the first-time and resuming paths spelled out, is `build-protocol.md` Appendix C; keep the two in step.*
+
+1. Read CLAUDE.md silently, and `rules.md` group 1 ("Every session, every step"), as the RULES section above requires.
 2. Check `docs/build-manifest.md`:
    - **NO → first-time user / fresh project.** Follow the Streamlined Startup in the MODES section above (silent detection → one narration block → single mode question). Show the Journey Map only AFTER NEW mode is selected.
    - **YES → returning user.** Read it, identify current phase and status. Read relevant project memory. State a Pulse Report: "We're at Step [X]. Last session completed [Y]. Next up is [Z]. Progress: [bar]." Narrator Mode is silently ON — do not announce it.
@@ -280,12 +282,12 @@ If anything in the last two columns was skipped during build → MUST run at har
 - **Architecture Patterns (v2.4 additions):** G11 RAG Pipeline · G12 Agent / Tool-Use Loop · G13 Background Job Architecture · G14 Mobile App · G15 Browser Extension · G16 Real-time / Collaborative · G17 Voice / Audio Pipeline · G18 Marketplace.
 - **Integration Playbooks (v2.7):** `~/.claude/skills/bob/../reference/integration-playbooks.md` (was Appendix L) — 11 service-specific playbooks (Stripe, Supabase Auth, Resend, Twilio, Anthropic SDK, OpenAI, pgvector, Inngest, Sentry, PostHog, Vercel AI Gateway). Reference at Step 3a (tool choice) and at the Build Phase that wires the integration in.
 - **Skill Leverage Map (v2.7):** §10.5 of `build-protocol.md` — when to invoke which Claude Code skill (vercel:*, claude-api, security-review). Bob owns methodology; skills own current tactical detail.
-- **Scaffold script (v2.7):** `~/.claude/skills/bob/../scripts/bob-init.sh <project-name>` — invoked at Step 6c. Generates folder structure, project CLAUDE.md (with Bob reference), .claude/settings.json with default hooks, .gitignore, .env.example, and runs git init.
+- **Scaffold script (v2.7):** `~/.claude/skills/bob/../scripts/bob-init.sh <project-name>` — invoked at Step 6c. What it writes (about twenty files: AGENTS.md with the Bob reference and a one-line `@AGENTS.md` CLAUDE.md, the hooks, the daily check, the install record, and more) is listed in the script's own header; read it there rather than here.
 - **Repo map (v2.7):** `~/.claude/skills/bob/../scripts/repo-map.sh` — regenerated at every Reconcile step. Compressed view of repo Claude reads at session start.
 - Phase Report template: `templates/phase-report.md`
 - Behavioral Core template: `templates/behavioral-core.md`
 - AI Eval Set template: `templates/eval-set.md` (used in Step 2d and at AI phase gates)
-- Capability Traceability Matrix template: `templates/capability-traceability-matrix.md` (used in Step 5a-ii and at every Reconcile / A7i)
+- Capability Traceability Matrix template: `templates/capability-traceability-matrix.md` (used in Step 5a-ii and at every Reconcile / A7.3)
 - Decision Log entry: `templates/decision-log-entry.md`
 - Cowork Session: `templates/cowork-session.md`
 - **Scheduled / unattended work (D-015, D-017):** `templates/scheduled-work-protocol.md` — **load it whenever the product has anything that runs on a schedule or without a human watching** (cron, nightly pipelines, background jobs, L37). Ships with `templates/run-claim.mjs` (copy into the project; makes a double, crashed or simultaneous run harmless — `node run-claim.mjs --selftest`).
@@ -293,7 +295,7 @@ If anything in the last two columns was skipped during build → MUST run at har
 - **Guard hooks (D-017):** `~/.claude/skills/bob/../scripts/hooks/block-no-verify.js` + `~/.claude/skills/bob/../scripts/hooks/config-protection.js` (from ECC, MIT) — `bob-init` copies them into `.claude/hooks/` as PreToolUse hooks (Step 6b items 4–5).
 - **Merge guard (D-018):** `~/.claude/skills/bob/../scripts/hooks/merge-guard.mjs` + `templates/required-checks.json` — `bob-init` copies it into `.claude/hooks/` and writes `.claude/required-checks.json` (Step 6b item 6). Refuses a merge with a red required check and a direct push to main; empty list = "no CI yet" stage. Tests: `node --test "$(realpath ~/.claude/skills/bob/..)/scripts/hooks/merge-guard.test.mjs"`.
 - **Root-file pointer + status-date check (D-018):** `~/.claude/skills/bob/../scripts/doc-pointers-check.mjs` — run by `coherence-check.sh` class [8] (Rule 23(c)).
-- **Audit ledger (D-018):** `templates/audit-ledger.json` (bob-init → `docs/audit-ledger.json`) + `~/.claude/skills/bob/../scripts/audit-ledger-check.mjs [--streaks]` (Rule 30(d)).
+- **Audit ledger (D-018):** `templates/audit-ledger.json` (bob-init → `docs/audit-ledger.json`) + `~/.claude/skills/bob/../scripts/audit-ledger-check.mjs [--streaks] [--since YYYY-MM-DD]` (Rule 30(d)).
 - **Rule checks (D-033):** `node "$(realpath ~/.claude/skills/bob/..)/scripts/phase-report-check.mjs" <report>` (Rule 4, Phase Gate 13) · `node "$(realpath ~/.claude/skills/bob/..)/scripts/run-commands-check.mjs" [DIR] [--base REF]` (Rule 26, Phase Gate 14 — whether a run config still names what the change moved, deleted or gutted) · `node "$(realpath ~/.claude/skills/bob/..)/scripts/autonomy-check.mjs" [DIR]` (Rule 27, Supervised Autonomy runbook step 0) · `node "$(realpath ~/.claude/skills/bob/..)/scripts/recurrence-check.mjs" [DIR]` (Rule 31, Phase Gate 15; reads fix commits' `Class:` / `Rung:` lines) · `node "$(realpath ~/.claude/skills/bob/..)/scripts/rule-tags-check.mjs"` (Rule 33, Bob's own CI). Each exits 2 (cannot judge) when there is nothing to read, never 0 (Rule 29).
 - **Daily dropped-work check (D-018):** `templates/loop-check.mjs` + `templates/loop-check.yml` (bob-init → `scripts/` + `.github/workflows/`) — stale PRs without a dated hold, open loops with no owner/due date/proof, an intake list over its cap, a scheduled job failing twice or silent, a missing heartbeat.
 - **Parallel sessions (D-018):** `templates/open-loops.md` — the one open-items list with one coordinator; rules in `build-protocol.md` §"Parallel sessions".

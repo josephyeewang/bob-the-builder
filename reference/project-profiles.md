@@ -5,11 +5,11 @@
 
 *Used in Step 0.5. Each profile is an **additive addendum** to the core protocol — extra things to consider, never replacements. If addendum and core protocol conflict, core wins.*
 
-> **Maintenance note:** Profiles reflect best practice as of 2026-05-15. Tech in some of these (especially Tier-3 archetypes) moves fast. Verify against current sources when you actually start a project in that profile.
+> **Maintenance note:** Profiles reflect best practice as of 2026-05-15. Tech in some of these (especially the "Specialist" ones) moves fast. Verify against current sources when you actually start a project in that profile.
 
 ### Profile index
 
-| Profile | Pattern refs | Tier |
+| Profile | Pattern refs | How well Bob fits |
 |---|---|---|
 | K1. AI Chat / Copilot / Assistant | G3, G4, G11 (if RAG), G12 (if tools) | Core fit |
 | K2. Internal B2B Tool / Dashboard | G7, G9, G10 | Core fit |
@@ -18,14 +18,14 @@
 | K5. Agent / Tool-Use Workflow | G3, G4, G12, G13 | Core fit |
 | K6. Background Job-Heavy / Workflow Orchestration | G13 | Core fit |
 | K7. E-commerce / Subscriptions | G7, G9, G10 | Common |
-| K8. Marketplace / Two-Sided Platform | G10, G18 | Tier 3 |
+| K8. Marketplace / Two-Sided Platform | G10, G18 | Specialist |
 | K9. Content / Community | G8, G10 | Common |
-| K10. Real-time / Collaborative | G16 | Tier 3 |
-| K11. Mobile-First / Native | G14 | Tier 3 |
-| K12. Browser Extension | G15 | Tier 3 |
-| K13. Voice / Audio / Video | G17 | Tier 3 |
-| K14. Data Pipeline / ETL | G7, G13 | Tier 3 |
-| K15. SEO / Marketing Site | (specific addendum below) | Tier 2 |
+| K10. Real-time / Collaborative | G16 | Specialist |
+| K11. Mobile-First / Native | G14 | Specialist |
+| K12. Browser Extension | G15 | Specialist |
+| K13. Voice / Audio / Video | G17 | Specialist |
+| K14. Data Pipeline / ETL | G7, G13 | Specialist |
+| K15. SEO / Marketing Site | (specific addendum below) | Common |
 
 ### K1. AI Chat / Copilot / Assistant
 

@@ -60,7 +60,7 @@ if [ "$NEED_RECHECK" -eq 1 ] && git checkout-index -a --prefix="$SNAP/" 2>/dev/n
 else
   cat "$OUT"   # nothing unstaged (or the staged files could not be copied): the disk is what is committed
 fi
-echo "✗ Bob's document check failed on what you are committing (a gap in the decision log, a retired term, a broken"
-echo "  file pointer, or a stale status date — see above). Fix it and commit again."
+echo "✗ Bob's document check failed on what you are committing (a gap or a repeated number in the decision log, a"
+echo "  broken file pointer in AGENTS.md or CLAUDE.md, or a stale status date — see above). Fix it and commit again."
 echo "  If you are sure it is wrong, the owner can skip it once in the Terminal app: git commit --no-verify"
 exit 1

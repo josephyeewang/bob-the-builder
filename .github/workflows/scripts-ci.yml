@@ -56,6 +56,11 @@ jobs:
         run: bash scripts/blueprint/selftest-blueprint.sh
       - name: ORCHESTRATE's tests (no dependencies, Node's own test runner)
         run: node --test $(find orchestrate -name '*.test.mjs')
+      - name: The design skill's logo scripts still run (standard-library Python; PNG checks skip without a renderer)
+        run: |
+          cd skills/design-gallery/logo-kit
+          python3 tests/smoke_test.py
+          python3 tests/test_export_titles.py
       - name: Each kind of content still has one home (D-032)
         run: node scripts/one-home-check.mjs
       - name: Every rule tagged as checked names a script that exists and runs (D-033, Rule 33)

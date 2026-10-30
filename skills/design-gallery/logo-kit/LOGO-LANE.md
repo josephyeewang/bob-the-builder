@@ -12,7 +12,7 @@ does not cover them), the library search/catalog scripts, and the heavy presenta
 over-complex mark.
 
 All scripts are plain Python 3, no installs. Rendering uses whatever is present (cairosvg, rsvg-convert, Inkscape,
-headless Chrome, or macOS Quick Look). Paths below are relative to this `logo-kit/` folder.
+headless Chrome, or macOS Quick Look). Commands below use the installed path, so they work from any folder.
 
 ## Where it sits in the gallery
 
@@ -34,9 +34,9 @@ component with hard-coded colours and no font dependency.
    negative space. **No live `<text>` in a finished mark.** Save every iteration (`-v1`, `-v2`), never overwrite.
 5. **Test and refine — at least two loops.**
    ```bash
-   python3 scripts/svg_audit.py a.svg b.svg c.svg
-   python3 scripts/render_png.py a.svg b.svg c.svg --out-dir renders --size 512   # then LOOK at the PNGs
-   python3 scripts/preview_sheet.py a.svg b.svg c.svg --brand-color "#HEX" --refs rival1.svg rival2.svg -o /tmp/preview.html
+   python3 ~/.claude/skills/design-gallery/logo-kit/scripts/svg_audit.py a.svg b.svg c.svg
+   python3 ~/.claude/skills/design-gallery/logo-kit/scripts/render_png.py a.svg b.svg c.svg --out-dir renders --size 512   # then LOOK at the PNGs
+   python3 ~/.claude/skills/design-gallery/logo-kit/scripts/preview_sheet.py a.svg b.svg c.svg --brand-color "#HEX" --refs rival1.svg rival2.svg -o /tmp/preview.html
    ```
    **The preview sheet is required — a mark is not "done" (or shown as a concept) until it has been run and looked
    at.** Open the HTML in a browser and check, for every concept: **one-colour** black and white (does the idea
@@ -53,7 +53,7 @@ component with hard-coded colours and no font dependency.
    (the user's or anyone's): `references/critique.md`.
 6. **Show the concepts, then STOP.**
    ```bash
-   python3 scripts/concept_sheet.py a.svg b.svg c.svg --lockups a-lockup.svg b-lockup.svg c-lockup.svg \
+   python3 ~/.claude/skills/design-gallery/logo-kit/scripts/concept_sheet.py a.svg b.svg c.svg --lockups a-lockup.svg b-lockup.svg c-lockup.svg \
      --names "A" "B" "C" --notes "one-line idea A" "…" "…" --recommend 1 --greyscale -o concepts.png
    ```
    Greyscale first (colour starts taste debates). Show the image, one line per concept, a recommendation with one
@@ -61,9 +61,9 @@ component with hard-coded colours and no font dependency.
 7. **Kit (only after a yes).** Final geometry + optical corrections + a simplified small-size cut; 1–2 colours that
    still work in one colour and reversed; lockups (horizontal, stacked, symbol-only); then export:
    ```bash
-   python3 scripts/export_variants.py final-symbol.svg --title "Brand logo" --mono "#HEX" --icon-bg "#HEX" \
+   python3 ~/.claude/skills/design-gallery/logo-kit/scripts/export_variants.py final-symbol.svg --title "Brand logo" --mono "#HEX" --icon-bg "#HEX" \
      --web-icons --favicon-source final-symbol-small.svg      # favicon.ico, PNG icon set, webmanifest, <head> snippet
-   python3 scripts/export_variants.py final-horizontal.svg --title "Brand logo" --only black white mono --mono "#HEX" --png 1200
+   python3 ~/.claude/skills/design-gallery/logo-kit/scripts/export_variants.py final-horizontal.svg --title "Brand logo" --only black white mono --mono "#HEX" --png 1200
    ```
    Record the locked mark in the gallery's `LOCKED-DESIGN` doc like any other lock.
 

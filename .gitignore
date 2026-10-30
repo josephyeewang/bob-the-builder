@@ -16,6 +16,10 @@ build/
 .next/
 .vercel/
 
+# ── PYTHON CACHE ──
+__pycache__/
+*.pyc
+
 # ── LOGS ──
 *.log
 npm-debug.log*
