@@ -516,3 +516,24 @@ test('merge: undo gaps from audit round 14 — renames and copies, look-alike la
     assert.equal(d, n === 1 ? 'ask' : 'allow', `the database line shown on read ${n}`);
   }
 });
+
+test('merge: audit round 15 — any label outside plain ASCII reaches Joe; a flood of line lists answers quickly', () => {
+  const w = world({ states: { app: { state: 'paused' } }, now: AT_03 });
+  const undo = (files, extra = {}) => mergeOf(w, files, reverse('failure', extra));
+  const MISSED = ['needs-jøe', 'NEEDS-JØE', 'neeđs-joe', 'NEEĐS-JOE', 'NEEᏚS-JOE', 'needꮪ-joe', 'NEEᎠS-JOE', 'NEEDS-JᏫE', 'needs-jꮻe', 'needs-jⲟe',
+    'NEEDS-JⲞE', 'ⲚEEDS-JOE', 'needs-ʝoe', 'needs-ɉoe', 'пeeds-joe', 'needs™joe', 'needs℡joe', '🐛 bug', 'docs​', '_needs-joe', ':needs:joe', 'bug\u0000', 'docs\u007f', 'bug\t'];
+  for (const label of MISSED) {
+    assert.equal(undo([file('docs/research/x.md')], { labels: [label] }).decision, 'ask', JSON.stringify(label));
+    assert.equal(mergeOf(world({ now: AT_03 }), [file('docs/research/x.md')], { labels: [label] }).decision, 'deny', `held as Tier 1: ${JSON.stringify(label)}`);
+  }
+  assert.equal(undo([file('docs/research/x.md')], { labels: ['bug', 'docs: typo'] }).decision, 'allow', 'a plain label is not needs-joe');
+  // 300 code files sharing one list of 1,000,000 blank lines: the cap is on the whole change, so nothing is copied.
+  const blanks = new Array(1_000_000).fill('');
+  const holes = new Array(1_000_000);
+  for (const list of [blanks, holes]) {
+    const t0 = Date.now();
+    const files = Array.from({ length: 300 }, (_, i) => file(`lib/f${i}.ts`, 'modified', { added_lines: list, removed_lines: list }));
+    assert.notEqual(undo(files).decision, 'allow');
+    assert.ok(Date.now() - t0 < 3000, `took ${Date.now() - t0} ms`);
+  }
+});

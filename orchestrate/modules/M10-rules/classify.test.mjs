@@ -226,3 +226,26 @@ test('the classifier reads each file\'s lines once, and each line once, so every
   assert.equal(lineReads, 1);
   assert.ok(c2.risky.includes('schema'));
 });
+
+test('audit round 15: the direct classifier never throws; removed lines are read once; blank lines count toward the size cap', () => {
+  const fixture = readFileSync(new URL('./fixtures/policy.yaml', import.meta.url), 'utf8');
+  const boom = () => { throw new Error('boom'); };
+  for (const change of [{ get files() { return boom(); } }, { files: [{ get path() { return boom(); } }] },
+    { files: [{ path: 'lib/a.ts', status: 'modified', added_lines: { get length() { return boom(); }, __proto__: Array.prototype } }] },
+    { files: [{ path: 'docs/research/x.md', status: 'modified' }], get labels() { return boom(); } }]) {
+    const r = classifyWithRulesText(fixture, change);
+    assert.equal(r.tier, 1);
+    assert.ok(r.risky.includes('unclassifiable'));
+  }
+  const policy = parsePolicy(fixture).policy;
+  let reads = 0;
+  const f = { path: 'lib/a.ts', status: 'modified', added_lines: [''], get removed_lines() { reads++; return reads === 1 ? ['DROP TABLE x'] : ['']; } };
+  assert.ok(classifyChange(policy, { files: [f], declared_tier: 2 }).risky.includes('schema'));
+  assert.equal(reads, 1);
+  const big = classifyChange(policy, { files: [{ path: 'lib/a.ts', status: 'modified', added_lines: new Array(600_000).fill(''), removed_lines: new Array(399_000).fill('') }], declared_tier: 2 });
+  assert.equal(big.tier, 1);
+  const many = classifyChange(policy, { files: Array.from({ length: 6 }, (_, i) => ({ path: `lib/${i}.ts`, status: 'modified', added_lines: new Array(900_000).fill(''), removed_lines: [] })), declared_tier: 2 });
+  assert.ok(many.risky.includes('unclassifiable'), 'more than 1,000,000 lines in the change are not read');
+  const sized = classifyChange(policy, { files: [{ path: 'lib/a.ts', status: 'modified', added_lines: new Array(900_000).fill('xxxxx'), removed_lines: [] }], declared_tier: 2 });
+  assert.ok(sized.reasons.unclassifiable?.includes('too much changed text to read'), 'each line counts its length plus one');
+});

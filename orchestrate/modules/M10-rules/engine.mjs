@@ -277,7 +277,7 @@ export function makeEngine({ products, rulesState, productState, running, rolesD
       const unread = (f) => !Array.isArray(f.removed_lines) || !Array.isArray(f.added_lines)
         || (!f.removed_lines.length && !f.added_lines.length)
         || (f.status === 'removed' && !f.removed_lines.length) || (f.status === 'added' && !f.added_lines.length)
-        || f.status === 'renamed' || f.status === 'copied' || f.previous_path !== undefined;
+        || f.previous_path !== undefined;   // a rename or copy always has one (checkFiles)
       if (s.files.some((f) => (code.has(f.path) || code.has(f.previous_path)) && unread(f))) return ask(1, 'exact reverse of code without its lines');
       if (s.reversed_audit === 'failure') return allow('exact reverse of a merge whose audit failed');
       if (!c.risky.length && c.tier === 2) return allow('exact reverse of an ordinary change');

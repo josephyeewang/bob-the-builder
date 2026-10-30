@@ -8,7 +8,7 @@
 // FIRST CUTOVER, BY PATH ONLY. The scanner that follows imports and reads code (R-0b-100) is a second-cutover row.
 // Until it lands, a file is ordinary only if it sits under `docs/` AND is a plain file (an allow-listed extension):
 // anything else is `unclassifiable` (so it needs Joe's Approve), because we can't yet prove what it does. A `.mjs` or
-// `.mdx` under docs/ can still run (0b-1 round 2, R2-M4). The path classes below, and the text scans of added lines,
+// `.mdx` under docs/ can still run (0b-1 round 2, R2-M4). The path classes below, and the text scans of added and removed lines,
 // can only ADD a class, never clear one.
 //
 //   classifyChange(policy, change)        → { tier: 1|2, risky: [...], reasons: { class: [why…] }, protected: [paths] }
@@ -57,14 +57,22 @@ const scanHit = (scans, lines) => sqlTexts(lines).some((t) => scans.some((re) =>
 const isLines = (v) => Array.isArray(v) && Array.from(v).every((l) => typeof l === 'string');
 const DELETE_SCANS = [/\bdelete\s+from\b/i, /\btruncate\s+(table\s+)?(only\s+)?[\w"]/i, /\bdrop\s+(table|column|index|schema|database|view)\b/i];
 
+// The GitHub-side checker calls this directly, without the shared fail-closed wrapper, so a throw (a getter on the
+// change) is turned into an unclassifiable answer here, naming every file it can (audit round 15).
 export function classifyWithRulesText(text, change) {
-  const parsed = parsePolicy(text);
-  if (!parsed.ok) {
-    const r = classifyChange(null, change);
-    r.reasons.unclassifiable = [`rules at this commit are corrupt: ${parsed.reason}`];
-    return r;
+  try {
+    const parsed = parsePolicy(text);
+    if (!parsed.ok) {
+      const r = classifyChange(null, change);
+      r.reasons.unclassifiable = [`rules at this commit are corrupt: ${parsed.reason}`];
+      return r;
+    }
+    return classifyChange(parsed.policy, change);
+  } catch (e) {
+    let named = [];
+    try { named = Array.from(change.files, (f) => f?.path).filter((p) => typeof p === 'string'); } catch { /* no names */ }
+    return { tier: 1, risky: ['unclassifiable'], reasons: { unclassifiable: [`rules error: ${e?.message ?? 'unknown'}`] }, protected: [...new Set(named)].sort() };
   }
-  return classifyChange(parsed.policy, change);
 }
 
 export function classifyChange(policy, change) {
@@ -89,9 +97,10 @@ export function classifyChange(policy, change) {
     add('unclassifiable', 'no file list');
     return finish(reasons, protectedPaths, 1);
   }
-  // A change with more line text than this is not read line by line: it is unclassifiable (audit round 13).
+  // A change with more line text than this is not read line by line: it is unclassifiable (audit round 13). Each
+  // line counts its length plus one, so a flood of blank lines counts too (audit round 15).
   let text = 0;
-  for (const f of files) for (const side of ['added_lines', 'removed_lines']) if (isLines(f?.[side])) for (const l of f[side]) text += typeof l === 'string' ? l.length : 0;
+  for (const f of files) for (const side of ['added_lines', 'removed_lines']) if (isLines(f?.[side])) for (const l of f[side]) text += l.length + 1;
   const tooBig = text > MAX_CHANGE_TEXT;
   if (tooBig) add('unclassifiable', 'too much changed text to read');
   if (change.truncated !== undefined && change.truncated !== false) add('unclassifiable', change.truncated === true ? 'file list truncated' : 'truncated is not true or false');
@@ -163,10 +172,9 @@ export function classifyChange(policy, change) {
     }
   }
 
-  // A `needs-joe` label adds `unclassifiable`; `needs-joe:<class>` adds that class. Neither removes one (MIN-3). Case,
-  // accents, look-alike letters from other scripts, and anything that isn't a letter (digits, spaces, dots, invisible
-  // fillers) before or between the words don't matter (`[needs.joe]`, `needs1joe`), and any other needs-joe label is
-  // unclassifiable (rounds 10 to 14).
+  // A `needs-joe` label adds `unclassifiable`; `needs-joe:<class>` adds that class. Neither removes one (MIN-3). Case
+  // and anything that isn't a letter (digits, spaces, dots) before or between the words don't matter (`[needs.joe]`,
+  // `needs1joe`); any other needs-joe label, and any label not in plain ASCII, is unclassifiable (rounds 10 to 15).
   for (const label of Array.isArray(change.labels) ? change.labels : []) {
     const l = needsJoe(label);
     if (l === null) continue;
@@ -176,21 +184,25 @@ export function classifyChange(policy, change) {
   return finish(reasons, protectedPaths, tier);
 }
 
-// Letters from other scripts that look like the Latin ones in "needs joe": capitals are mapped before lowercasing (Greek
-// capital Nu lowercases to nu, which looks like v), the rest after (audit rounds 13 and 14). A label only ever makes
-// an answer stricter, so this guards against a mistyped label, not an attacker.
-const UPPER_LOOK_ALIKES = { 'Ν': 'n', 'Ε': 'e', 'Ο': 'o', 'Ϳ': 'j', 'Ѕ': 's', 'Ј': 'j', 'Е': 'e', 'О': 'o', 'Ꭻ': 'j', 'Ꭴ': 'o', 'Ꭼ': 'e' };
-const LOOK_ALIKES = { 'а': 'a', 'е': 'e', 'ё': 'e', 'о': 'o', 'с': 'c', 'ѕ': 's', 'ј': 'j', 'і': 'i', 'ԁ': 'd', 'ո': 'n', 'ο': 'o', 'ε': 'e', 'η': 'n', 'ν': 'v', 'ϳ': 'j', 'ꜱ': 's', 'ɴ': 'n', 'ᴇ': 'e', 'ᴏ': 'o', 'ᴊ': 'j', 'ᴅ': 'd', 'ȷ': 'j', 'օ': 'o',
-  'ꭻ': 'j', 'ꭴ': 'o', 'ꭼ': 'e', 'ꓠ': 'n', 'ꓰ': 'e', 'ꓓ': 'd', 'ꓢ': 's', 'ꓙ': 'j', 'ꓳ': 'o' };
 const MAX_CHANGE_TEXT = 5_000_000;
-const MAX_LINES = 1_000_000;   // a longer line list is not read: it is not a list of lines (audit round 14)
+const MAX_LINES = 1_000_000;   // more lines than this in one change are not read: they are not lists of lines (rounds 14, 15)
 
 // Each file and its line lists, read once. A getter or proxy can't show one list to one check and another to the
-// next: every check judges this copy (audit round 14). A list too long to read becomes a note, which no check takes
-// for lines. Throws on a hostile object; the shared interface turns a throw into a deny.
+// next: every check judges this copy (audit round 14). Once the change's lists hold more than MAX_LINES lines in all,
+// each further list becomes a note, which no check takes for lines, so a flood of lists is never copied (audit round
+// 15). Each list's length is read once. Throws on a hostile object; the shared interface turns a throw into a deny.
 export function readFilesOnce(files) {
   if (!Array.isArray(files)) return files;
-  const lines = (v) => (Array.isArray(v) ? (v.length > MAX_LINES ? `more than ${MAX_LINES} lines` : Array.from(v)) : v);
+  let left = MAX_LINES;
+  const lines = (v) => {
+    if (!Array.isArray(v)) return v;
+    const n = v.length;
+    if (!(n <= left)) { left = -1; return `more than ${MAX_LINES} lines in the change`; }
+    left -= n;
+    const copy = new Array(n);
+    for (let i = 0; i < n; i++) copy[i] = v[i];   // a hole reads as undefined, which no check takes for a line
+    return copy;
+  };
   return Array.from(files, (f) => {
     if (!f || typeof f !== 'object') return f;
     const copy = { ...f };
@@ -199,11 +211,13 @@ export function readFilesOnce(files) {
   });
 }
 
-// A label's text after "needs joe" (in any spelling), or null when it isn't a needs-joe label.
+// A label's text after "needs joe" (in any spelling), or null when it isn't a needs-joe label. A label with any
+// character outside printable ASCII counts as a plain needs-joe label: no list of look-alike letters from other
+// scripts is ever complete (audit rounds 13 to 15), and a false alarm costs Joe one tap (lead call L32).
 export function needsJoe(label) {
   if (typeof label !== 'string') return null;
-  const l = label.normalize('NFKD').replace(/[\p{M}\p{Cf}]/gu, '').replace(/./gsu, (c) => UPPER_LOOK_ALIKES[c] ?? c)
-    .toLowerCase().replace(/[^\x00-\x7f]/gu, (c) => LOOK_ALIKES[c] ?? c).replace(/[^a-z_:]/g, '');
+  if (/[^\x20-\x7e]/.test(label)) return '';
+  const l = label.toLowerCase().replace(/[^a-z_:]/g, '');
   const m = /^[_:]*needs[_:]*joe/.exec(l);
   return m ? l.slice(m[0].length) : null;
 }
