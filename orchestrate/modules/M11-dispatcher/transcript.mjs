@@ -33,6 +33,7 @@ const n = (x) => (typeof x === 'number' && Number.isFinite(x) && x >= 0 ? x : 0)
  * - compactions: the number of compaction boundaries.
  * - openTools: tool_use ids on the main chain with no tool_result yet.
  * - turnEnded: the last main-chain entry is an assistant message that ended its turn with no open tool.
+ * - endedAt: that entry's time (ms) when the turn ended and the entry has a readable timestamp, else null.
  */
 export function readSize(entries) {
   let last = -1;
@@ -57,7 +58,8 @@ export function readSize(entries) {
   }
   const tail = [...entries].reverse().find((e) => mainChain(e) && (e.type === 'assistant' || e.type === 'user'));
   const turnEnded = !!tail && tail.type === 'assistant' && tail.message?.stop_reason === 'end_turn' && open.size === 0;
-  return { tokens, compactions, turnEnded, openTools: [...open] };
+  const at = turnEnded ? Date.parse(tail.timestamp ?? '') : NaN;
+  return { tokens, compactions, turnEnded, endedAt: Number.isFinite(at) ? at : null, openTools: [...open] };
 }
 
 /** Reads a transcript file; a missing or unreadable file gives null (the caller treats it as unknown). */

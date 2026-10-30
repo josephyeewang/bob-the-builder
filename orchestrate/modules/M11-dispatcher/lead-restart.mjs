@@ -1,0 +1,116 @@
+// Restarting a large Lead from its own handoff (R-0b-63; design v4 §5.5; review 0b-6 M18, m8, m9).
+//
+// Trigger: the first finished turn past context.lead.soft with nothing in flight (no quiet-minutes
+// wait). Then:
+//   1. WRAP goes through sendSafe; if refused (the Lead is busy or waiting on an answer), it is tried
+//      again at the next finished turn;
+//   2. the Lead writes handoff-<session>.md to its outbox and replies DONE;
+//   3. the outbox intake checks the handoff is under context.handoff_cap.role, estimated as
+//      ceil(utf-8 bytes / 4) (`handoffVet`), and applies it; an oversize one is not used;
+//   4. once applied: a `handoff` entry, the old session stopped (its transcript kept), the new Lead
+//      started on the same profile with the handoff first.
+// A missing or oversize handoff gets one re-ask; after that the old Lead keeps running and Joe is
+// alerted. A Lead is never stopped without an applied handoff. A Lead read above
+// context.lead.hard + 50k means Claude Code's own compaction did not fire: alert once (m9).
+// The step's progress is the fact `lead-restart-<session>`.
+
+import { KEYS, need } from './keys.mjs';
+
+export const RESTART_FACT = (sid) => `lead-restart-${sid}`;
+export const HANDOFF_NAME = (sid) => `handoff-${sid}.md`;
+export const HARD_MARGIN = 50_000;
+const SID = /^[A-Za-z0-9-]+$/;
+const iso = (ms) => new Date(ms).toISOString();
+
+/** The handoff estimate (m8): ceil(utf-8 bytes / 4). */
+export const estimateTokens = (text) => Math.ceil(Buffer.byteLength(String(text), 'utf8') / 4);
+
+/** The intake's vet for handoff files: refuses one over the cap, so the session can write it again. */
+export const handoffVet = (rules) => ({ kind, text }) => {
+  if (kind !== 'handoff') return null;
+  const cap = need(rules, KEYS.handoffCapRole);
+  const est = estimateTokens(text);
+  return est > cap ? `the handoff is about ${est} tokens, over the ${cap} cap` : null;
+};
+
+/**
+ * Whether anything is in flight for this Lead (M18): a file in its outbox not yet used (or still
+ * being written), any record entry waiting on the Lead, or an open question box.
+ * `outboxNames`: the names in the Lead's outbox now. `questionOpen`: from the activity tracker.
+ */
+export function leadInFlight({ rec, sessionId, outboxNames, questionOpen }) {
+  if (questionOpen) return 'a question box is open';
+  for (const name of outboxNames) {
+    const used = rec.read('fact', `outbox-${sessionId}-${name}`)?.doc?.state;
+    if (name.startsWith('.') || (used !== 'applied' && used !== 'refused')) return `outbox file ${name} not used yet`;
+  }
+  for (const entity of ['card', 'merge', 'ask', 'go', 'claim', 'report']) {
+    for (const { id, doc } of rec.list(entity)) if (doc?.waiting?.who === 'lead' && doc.state !== 'closed') return `${entity} ${id} waits on the Lead`;
+  }
+  return null;
+}
+
+/**
+ * One pass for one Lead. `size` = readSize() of its transcript; `inFlight` = leadInFlight()'s
+ * answer; `send(text)` = sendSafe to this Lead -> { outcome }; `stopSession()`, `startLead({
+ * handoff })` -> { ok, reason }; `alert(text)`. Returns the action taken.
+ */
+export async function leadRestartStep({ rec, rules, now, lead, size, inFlight, send, stopSession, startLead, alert }) {
+  const sid = lead.sessionId;
+  if (!SID.test(String(sid))) return 'refused: a session id the outbox names cannot hold';
+  if (!size || size.tokens == null) return 'no size';
+  const soft = need(rules, KEYS.leadSoft);
+  const hard = need(rules, KEYS.leadHard);
+  const cap = need(rules, KEYS.handoffCapRole);
+  let cur = rec.read('fact', RESTART_FACT(sid));
+  let st = cur?.doc ?? { phase: 'none', reasks: 0 };
+  const save = (doc, kind) => {
+    const w = rec.write({ actor: 'dispatcher', entity: 'fact', id: RESTART_FACT(sid), expectRev: cur?.rev ?? 0, doc: { ...st, ...doc, changed_at: iso(now) }, kind });
+    if (w.ok) { cur = rec.read('fact', RESTART_FACT(sid)); st = cur.doc; }
+    return w;
+  };
+
+  if (size.tokens > hard + HARD_MARGIN && !st.hard_alerted) {
+    alert(`the Lead ${sid} is at ${size.tokens} tokens, past ${hard} + ${HARD_MARGIN}: its compaction did not happen`);
+    save({ hard_alerted: true }, 'lead_hard_alert');
+  }
+  if (['done', 'gave_up'].includes(st.phase)) return st.phase;
+  // Every move happens only at a finished turn: never WRAP mid-turn, never act on a turn in progress.
+  if (!size.turnEnded) return 'mid-turn';
+
+  if (st.phase === 'none') {
+    if (size.tokens <= soft) return 'under the soft line';
+    if (inFlight) return `waiting: ${inFlight}`;
+    const r = await send(wrapText(sid, cap));
+    if (r?.outcome !== 'sent') return `WRAP not sent (${r?.outcome ?? 'no answer'}); tried again at the next finished turn`;
+    save({ phase: 'wrap_sent', sent_at: iso(now), reasks: 0 }, 'lead_wrap');
+    return 'WRAP sent';
+  }
+
+  // wrap_sent or reasked: wait for the Lead's answer (a turn ended after the ask) or the handoff.
+  const used = rec.read('fact', `outbox-${sid}-${HANDOFF_NAME(sid)}`)?.doc;
+  const answered = size.endedAt != null && size.endedAt > Date.parse(st.sent_at);
+  if (used?.state === 'applied') {
+    const h = rec.write({ actor: 'dispatcher', entity: 'handoff', id: `handoff-${sid}`, expectRev: rec.read('handoff', `handoff-${sid}`)?.rev ?? 0,
+      doc: { session: sid, product: lead.product ?? null, name: HANDOFF_NAME(sid), sha256: used.sha256, at: iso(now) }, kind: 'handoff' });
+    if (!h.ok) return `handoff not recorded: ${h.reason}`;
+    await stopSession();
+    const started = await startLead({ handoff: `handoff-${sid}` });
+    save({ phase: 'done', restarted_at: iso(now), new_lead: started?.ok ? (started.sessionId ?? null) : null }, 'lead_restarted');
+    if (!started?.ok) alert(`the Lead ${sid} was stopped after its handoff, but the new Lead did not start: ${started?.reason ?? 'no answer'}`);
+    return started?.ok ? 'restarted' : 'stopped; new Lead failed to start';
+  }
+  if (!answered) return 'waiting for the handoff';
+  const why = used?.state === 'refused' ? 'the record refused it' : 'it is missing or over the cap';
+  if ((st.reasks ?? 0) < 1) {
+    const r = await send(`Your handoff was not used (${why}). Write ${HANDOFF_NAME(sid)} again, under ${cap} tokens (about ${cap * 4} bytes), then reply DONE.`);
+    if (r?.outcome !== 'sent') return `re-ask not sent (${r?.outcome ?? 'no answer'})`;
+    save({ phase: 'reasked', sent_at: iso(now), reasks: 1 }, 'lead_reask');
+    return 're-asked';
+  }
+  save({ phase: 'gave_up' }, 'lead_restart_gave_up');
+  alert(`the Lead ${sid} did not hand in a usable handoff after a second ask (${why}); it keeps running`);
+  return 'gave up; the old Lead keeps running';
+}
+
+const wrapText = (sid, cap) => `WRAP: this session is large. Write your handoff to your outbox as ${HANDOFF_NAME(sid)}, under ${cap} tokens (about ${cap * 4} bytes), then reply DONE.`;

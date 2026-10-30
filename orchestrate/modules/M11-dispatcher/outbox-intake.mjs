@@ -36,10 +36,12 @@ export function kindsFor(entry) {
  * `wait(ms)`: a sleep (tests pass a fake that moves the fake clock). `alert(text)` reaches Joe.
  * `startReadonly({ lead, profile, kind, brief, product })` asks the pass to start a read-only session.
  * `replyToLead({ lead, text })` leaves a report- note for the Lead. `note(text)` writes a diary line.
+ * `vet({ session, kind, text })` may refuse a file before it is used (null = fine); a vetted-out file
+ * is not marked as used, so the session can write it again under the same name (an oversize handoff).
  * Returns what happened to each file.
  */
 export async function intakePass({ rec, sessions, wait, alert, note, startReadonly, replyToLead,
-  list = (d) => readdirSync(d), look = statOf, read = readOutboxFile }) {
+  list = (d) => readdirSync(d), look = statOf, read = readOutboxFile, vet = () => null }) {
   const out = [];
   const seen = [];
   for (const s of sessions) {
@@ -73,6 +75,8 @@ export async function intakePass({ rec, sessions, wait, alert, note, startReadon
       alert(`${s.role} ${s.sessionId} handed in ${name} again with different content; the second copy was not used`);
       continue;
     }
+    const why = vet({ session: s, kind: file.kind, text: file.text });
+    if (why) { r.refused = why; note(`outbox file ${name} from ${s.role} ${s.sessionId} not used yet: ${why}`); continue; }
     // Claim the key first, so a crash after the apply cannot apply the file a second time.
     const claim = rec.write({ actor: 'dispatcher', entity: 'fact', id: key, expectRev: 0, doc: { session: s.sessionId, name, sha256: hash, state: 'applying' }, kind: 'outbox_claim' });
     if (!claim.ok) { r.refused = `could not record the hand-in: ${claim.reason}`; continue; }
