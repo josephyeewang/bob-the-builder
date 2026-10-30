@@ -15,7 +15,7 @@
 import { createHash } from 'node:crypto';
 import { hostname } from 'node:os';
 import { basename } from 'node:path';
-import { CARD_KINDS, ENTITIES, FINAL_STATES, REQUIRED_FIELDS, SESSION_ID, STATES, WAIT_FIELDS, WAIT_WHO, isOpen, makeRecord, timeoutFor } from '../../shared/record.mjs';
+import { CARD_KINDS, ENTITIES, FINAL_STATES, SESSION_ID, STATES, WAIT_FIELDS, WAIT_WHO, isOpen, makeRecord, missingFields, timeoutFor } from '../../shared/record.mjs';
 import { canonicalJson } from '../../shared/plan-fingerprint.mjs';
 import { CREATE_STATES, INTERNAL_MOVES, moveActors } from './moves.mjs';
 import { PLAN_INPUTS, actorName, fieldsAllowed, mayCreateKind } from './permissions.mjs';
@@ -107,7 +107,7 @@ export function openRecord({ root, product, ownerUid, rules, alert = () => {}, n
     // A doc nested thousands deep would be stored, then overflow the stack on every later write to it, freezing the card
     // for everyone (0b-2 audit round 3 MAT-B). Measured without recursion.
     if (deeperThan(w.doc, MAX_DOC_DEPTH)) return no(`doc is nested deeper than ${MAX_DOC_DEPTH} levels`);
-    const missing = (REQUIRED_FIELDS[entity] ?? []).filter((f) => w.doc[f] === undefined || w.doc[f] === null || w.doc[f] === '');
+    const missing = missingFields(entity, w.doc);
     if (missing.length) return no(`${entity} is missing ${missing.join(', ')}`);
     const cur = tx.current(entity, id);
     if (cur?.tampered) return no(cur.reason);
@@ -319,7 +319,11 @@ export function openRecord({ root, product, ownerUid, rules, alert = () => {}, n
   function checkAsk(old, doc, from, to, moving, changed) {
     const before = old.reask_count ?? 0;
     const after = doc.reask_count ?? 0;
-    if (changed.includes('reask_count') && !(moving && to === 'open' && before === 0 && after === 1)) return no('reask_count goes up by one, only with a first lapse back to open');
+    // The first lapse: back to open with the count 0 → 1. An ask already open (its box was released) lapses in place,
+    // which it says by setting lapsed_at in the same write (0b-5 M5-2).
+    const firstLapse = to === 'open' && before === 0 && after === 1 && (moving || (typeof doc.lapsed_at === 'string' && doc.lapsed_at !== old.lapsed_at));
+    if (changed.includes('reask_count') && !firstLapse) return no('reask_count goes up by one, only with a first lapse back to open');
+    if (moving && from === 'answered' && to === 'open' && !firstLapse) return no('an answered ask goes back to open only on its first lapse');
     if (moving && to === 'expired' && after !== 1) return no('an ask expires only after its one re-ask');
     return { ok: true };
   }

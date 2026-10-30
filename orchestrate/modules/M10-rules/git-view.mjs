@@ -13,6 +13,7 @@
 //   await view.files(base, head)   → [{ path, previous_path?, status }]  (base must be an ancestor of head)
 //   await view.entry(sha, path)    → { blob, mode } | null              (null = no file there)
 //   await view.onHistory(sha, tip) → true when sha is tip or one of its ancestors
+//   await view.isDir(sha, path)    → true when `path` is a folder at that commit (M2's go check refuses a folder)
 //
 // LIMITS WE DEPEND ON (claims about GitHub, so they expire: checked 2026-10-29 against REST API version 2022-11-28,
 // docs.github.com "Compare two commits" and "Get a tree"). A compare answer lists at most 300 files, so a list of
@@ -31,6 +32,7 @@ export function makeGitView({ gh, owner, repo }) {
   const base = `/repos/${owner}/${repo}`;
   const commits = new Map();
   const trees = new Map();
+  const folders = new Map();
   const sha = (s, what) => { if (typeof s !== 'string' || !SHA.test(s)) throw new Error(`${what} is not a full commit id`); return s; };
   const read = async (path) => {
     const r = await gh.get(`${base}${path}`);
@@ -56,12 +58,16 @@ export function makeGitView({ gh, owner, repo }) {
       if (j.truncated !== false) throw new Error(`file list of ${s.slice(0, 7)} is cut off or unknown`);
       if (!Array.isArray(j.tree)) throw new Error('odd tree answer');
       const m = new Map();
+      const dirs = new Set();
       for (const e of j.tree) {
-        if (e?.type === 'tree') continue;
+        if (e?.type === 'tree') { if (typeof e.path === 'string') dirs.add(e.path); continue; }
         if ((e?.type !== 'blob' && e?.type !== 'commit') || typeof e.path !== 'string' || !SHA.test(e.sha ?? '') || !MODES.has(e.mode)) throw new Error('odd tree entry');
         m.set(e.path, Object.freeze({ blob: e.sha, mode: e.mode }));
+        // Every folder above a file, whether or not the answer listed it as a tree entry.
+        for (let i = e.path.indexOf('/'); i > 0; i = e.path.indexOf('/', i + 1)) dirs.add(e.path.slice(0, i));
       }
       trees.set(s, m);
+      folders.set(s, dirs);
     }
     return trees.get(s);
   }
@@ -98,6 +104,7 @@ export function makeGitView({ gh, owner, repo }) {
       return c.files;
     },
     async entry(s, path) { return (await tree(s)).get(path) ?? null; },
+    async isDir(s, path) { await tree(s); return folders.get(s).has(String(path).replace(/\/+$/, '')); },
     async onHistory(s, tip) {
       const c = await compare(s, tip);
       return c.status === 'identical' || (c.status === 'ahead' && c.mergeBase === s);

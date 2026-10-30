@@ -41,3 +41,17 @@ test('a tree answer that does not say it is complete counts as cut off', async (
   await assert.rejects(view({ tree: { truncated: true, tree: [] } }).entry(B, 'x'), /cut off or unknown/);
   assert.equal(await view({ tree: { truncated: false, tree: [] } }).entry(B, 'x'), null);
 });
+
+test('isDir: a folder listed as a tree entry, or only implied by a file under it (0b-5 go check)', async () => {
+  const blob = (p) => ({ path: p, mode: '100644', type: 'blob', sha: S('d') });
+  const v = view({ tree: { truncated: false, tree: [{ path: 'src', mode: '040000', type: 'tree', sha: S('e') }, blob('src/a.mjs'), blob('lib/deep/b.mjs'), blob('top.md')] } });
+  assert.equal(await v.isDir(B, 'src'), true);
+  assert.equal(await v.isDir(B, 'src/'), true);
+  assert.equal(await v.isDir(B, 'lib'), true, 'implied by lib/deep/b.mjs');
+  assert.equal(await v.isDir(B, 'lib/deep'), true);
+  assert.equal(await v.isDir(B, 'src/a.mjs'), false);
+  assert.equal(await v.isDir(B, 'top.md'), false);
+  assert.equal(await v.isDir(B, 'nope'), false);
+  const cut = view({ tree: { truncated: true, tree: [] } });
+  await assert.rejects(cut.isDir(B, 'src'), /cut off/);
+});
