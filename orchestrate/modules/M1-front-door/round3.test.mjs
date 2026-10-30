@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { joeTurns, checkTapTest } from './transcript.mjs';
 import { shouldRestartFrontDoor } from './restart.mjs';
 import { outboxFile, checkOutboxFile } from './outbox.mjs';
-import { buildTripBrief, briefAnswers, airFactFromRequest, airCheck } from './trip.mjs';
+import { buildTripBrief, briefAnswers, airCheck } from './trip.mjs';
 import { memoryRecord } from '../../shared/record.mjs';
 import { readFileSync } from 'node:fs';
 import { typed, said, asks, result, T0, iso } from './fixtures.mjs';
@@ -68,17 +68,11 @@ test('0b-8 audit round 3 M-3: the brief names the state files it answers; one ma
   assert.match(skill, /lists\s+\*\*every\*\* `<id>`/);
 });
 
-test('0b-8 audit round 3 M-4: Joe\'s Air red count has a file shape and becomes the dated air-health fact the brief reads', () => {
-  const f = outboxFile('request', '20261103-0930-ab', { request: 'airhealth', red_count: 0 });
-  assert.equal(f.ok, true);
-  assert.equal(f.name, 'request-airhealth-20261103-0930-ab.json');
-  const c = checkOutboxFile(f.name, f.text);
-  assert.equal(c.ok, true);
-  for (const bad of [{ request: 'airhealth', red_count: -1 }, { request: 'airhealth', red_count: 1.5 }, { request: 'airhealth' }, { request: 'airhealth', red_count: 0, product: 'test-product' }, { request: 'wrapup', red_count: 0 }]) {
-    assert.equal(outboxFile('request', '20261103-0930-ac', bad).ok, false, JSON.stringify(bad));
-  }
-  const fact = airFactFromRequest(c.doc, () => new Date(T0));
-  assert.deepEqual(fact, { kind: 'fact.air-health', red_count: 0, told_at: new Date(T0).toISOString() });
-  assert.equal(airCheck({ facts: new Map([['air-health', fact]]), now: () => new Date(T0 + 3600e3) }).passed, true);
-  assert.equal(airFactFromRequest({ request: 'wrapup' }), null);
+test('0b-8 audit round 3 M-4, lead call L23: the Front Door can\'t file an Air count; its outbox check refuses the name', () => {
+  assert.equal(outboxFile('request', '20261103-0930-ab', { request: 'airhealth', red_count: 0 }).ok, false);
+  const c = checkOutboxFile('request-airhealth-20261103-0930-ab.json', '{"request":"airhealth","product":null,"name":null,"red_count":0}\n');
+  assert.equal(c.ok, false); assert.match(c.reason, /Air's own check/);
+  const skill = readFileSync(new URL('./skill/orchestrate/SKILL.md', import.meta.url), 'utf8');
+  assert.doesNotMatch(skill, /request-airhealth/); assert.match(skill, /Never ask Joe for a count/);
+  assert.doesNotMatch(airCheck({ facts: new Map(), now: () => new Date(T0) }).text, /reply here|how many/);
 });

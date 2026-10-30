@@ -50,10 +50,12 @@ Claude records each result as the second ledger line for its row (README). Use t
 ## 7. Trip dry run (R-0b-83)
 
 - **Type:** `I'm away until Friday` and answer the time zone with a city, such as `Europe/Prague`.
-- **You should see:** one reply: the test product set to away, what waits on your go and the open risky asks (each
-  with a link), the Mini check (online, logged in, battery backup), and the Air line.
-- If the Air line says "not known", on the Air: open Claude Code, type `/configaudit`, press Return, and reply to the
-  Front Door with how many red items it shows.
+- **You should see:** the reply "Filed. Checking the Mini, I'll send it in a minute.", then within a few minutes a
+  phone notification holding the brief (lead call L22): the test product set to away, what waits on your go and the
+  open risky asks (each with a link), the Mini check (online, logged in, battery backup), and the Air line. If the
+  push isn't wired yet, say `brief` and the Front Door quotes the same brief.
+- If the Air line hasn't passed, on the Air: open Claude Code, type `/configaudit` and press Return. It sends the result
+  to the Mini itself; you never type a count. Say `I'm away until Friday` again: the new brief's Air line passes.
 - Claude checks the test product's record really says away. Then **tap** it back to active. Typing "I'm back" files a
   request only; that is expected.
 

@@ -1,12 +1,13 @@
 // trip.mjs — the facts half of trip mode (R-0b-83; design v4 §7.2 R2; review-0b-8 MAT-8, MAT-9, minors 9, 10, 11).
 //
 // "I'm away until Friday" → the skill writes one `state-` file per product (away, until, tz; outbox.mjs) and replies
-// with the brief this file builds. The Front Door has no shell, so a Ledger pass writes the brief to a read-only file
-// the skill reads and quotes (the pass's wiring into lane 2's loop is a join item). This file decides the words; it
-// reads the record and facts and writes nothing.
+// "Checking the Mini, I'll send it in a minute." The Ledger then pushes the brief this file builds to Joe's phone,
+// once per new set of state files (nextTripPush; lead call L22), and also writes it to a read-only file the skill can
+// quote if Joe asks before the push arrives (the pass's wiring into lane 2's loop is a join item). This file decides
+// the words; it reads the record and facts and writes nothing.
 //
 // Freshness without a clock (0b-8 audit round 3 M-3): the Front Door knows the date but not the time, so it can't
-// test "good until". The brief's first line names the ids of the state files it answers (stateIds: the newest
+// test a brief's age. The brief's first line names the ids of the state files it answers (stateIds: the newest
 // state file per product, written for this request); the skill quotes only a brief that names every id it wrote,
 // which proves the brief was made after the request, and it repeats the made time so Joe sees its age.
 //
@@ -22,10 +23,8 @@ import { checkTimeZone } from './timezone.mjs';
 
 export const FRESH_MIN = 60;
 export const AIR_FACT = 'air-health';
-export const AIR_TOLD_FRESH_H = 24;
+export const AIR_FRESH_H = 24;
 export const MERGE_HOURS = '07:00–22:00';
-// The brief is a file a Ledger pass writes; the skill quotes it only while it is this fresh (0b-8 audit round 2 M-5).
-export const BRIEF_FRESH_MIN = 15;
 const OPEN_ASK = ['open', 'pushed'];
 
 // A time in the future is a wrong clock: unknown, never fresh (round 2 minor 8).
@@ -49,12 +48,6 @@ export function miniCheck({ facts, heartbeatProduct, now = () => new Date() }) {
   return { green: items.every((i) => i.state === 'green'), items };
 }
 
-// The Ledger's turn of a checked request-airhealth file into the air-health fact (round 3 M-4). told_at is when the
-// Ledger took the file in; the Front Door has no clock of its own.
-export function airFactFromRequest(doc, now = () => new Date()) {
-  if (doc?.request !== 'airhealth' || !Number.isInteger(doc.red_count) || doc.red_count < 0) return null;
-  return { kind: 'fact.air-health', red_count: doc.red_count, told_at: now().toISOString() };
-}
 
 // Does this brief answer these state files? True only when its first line lists every id (round 3 M-3).
 export function briefAnswers(text, ids) {
@@ -64,13 +57,28 @@ export function briefAnswers(text, ids) {
   return ids.every((id) => listed.has(id));
 }
 
+// Lead call L22: the brief goes to Joe's phone as a push, once per new set of state files. stateIds: the ids of the
+// newest checked state file per product; lastPushedIds: what the Ledger pushed last (it stores the returned ids);
+// build(ids) → the brief text. Returns { text, ids } to push, or null (nothing new, or a brief that doesn't name
+// every id, which is never sent).
+export function nextTripPush({ stateIds, lastPushedIds = [], build }) {
+  const ids = [...new Set((Array.isArray(stateIds) ? stateIds : []).filter((i) => /^\d{8}-\d{4}-[a-z]{2}$/.test(String(i))))].sort();
+  if (!ids.length) return null;
+  const last = [...new Set(Array.isArray(lastPushedIds) ? lastPushedIds : [])].sort();
+  if (last.length === ids.length && last.every((x, i) => x === ids[i])) return null;
+  let text;
+  try { text = build(ids); } catch { return null; }
+  return briefAnswers(text, ids) ? { text, ids } : null;
+}
+
 export function airCheck({ facts, now = () => new Date() }) {
+  // Dated by the Air's own check (M12-sensors/air-health.mjs; lead call L23), never by Joe's word or the take-in time.
   const a = facts.get(AIR_FACT);
-  const h = ageMin(a?.told_at, now().getTime()) / 60;
-  const passed = a && Number.isInteger(a.red_count) && a.red_count === 0 && h <= AIR_TOLD_FRESH_H;
-  if (passed) return { passed: true, text: `Air health check: passed (0 red, you told me ${a.told_at}).` };
-  const last = a?.told_at ? `${a.told_at}, ${a.red_count} red` : 'never';
-  return { passed: false, text: `Air health check: not known to the Mini; last result you told me: ${last}.\n  Step: on the Air, open Claude Code, type /configaudit and press Return; reply here with how many red items it shows (send "air 0 red" if none).` };
+  const h = ageMin(a?.checked_at, now().getTime()) / 60;
+  const passed = a && Number.isInteger(a.red_count) && a.red_count === 0 && h <= AIR_FRESH_H;
+  if (passed) return { passed: true, text: `Air health check: passed (0 red, checked on the Air ${a.checked_at}).` };
+  const last = a?.checked_at ? `${a.checked_at}, ${a.red_count} red` : 'never';
+  return { passed: false, text: `Air health check: not passed in the last ${AIR_FRESH_H} h; last check on the Air: ${last}.\n  Step: on the Air, open Claude Code, type /configaudit and press Return; it sends the result to the Mini itself.` };
 }
 
 // products: [{ name, on_merge_gate }]. tz: a checked IANA name or null. askExpiryH: from the rules (risky asks keep
@@ -81,7 +89,7 @@ export function buildTripBrief({ products, until = null, tz: tzIn = null, stateI
   const z = tzIn === null ? null : checkTimeZone(tzIn);
   const tz = z?.ok ? z.tz : null; // a zone that fails the check is no zone: number work holds (round 2 minor 9)
   const ids = stateIds.filter((i) => /^\d{8}-\d{4}-[a-z]{2}$/.test(String(i)));
-  out.push(`Brief made ${made.toISOString()}; good until ${new Date(made.getTime() + BRIEF_FRESH_MIN * 60e3).toISOString()}; answers state files: ${ids.join(', ') || 'none'}.`);
+  out.push(`Brief made ${made.toISOString()}; answers state files: ${ids.join(', ') || 'none'}.`);
   out.push(`Trip mode: ${products.map((p) => p.name).join(', ') || 'no products'} set to away${until ? ` until ${until}` : ''}. Only your tap brings a product back to active.`);
 
   out.push('', 'Time zone:');

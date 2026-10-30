@@ -15,6 +15,8 @@ Vercel, the repo) and write facts into the record. Everything they write is mask
 | `supported.mjs` | R-0b-71/72 | The one rule for "a supported main commit", per product stage. |
 | `vercel-reader.mjs`, `prod-watcher.mjs` | R-0b-71 | The production watcher: unsupported deploys, older version live, settings changed (never values). |
 | `outside-watch.mjs` | R-0b-72 | Every 10 min: is the hourly outside check still running, and which of its steps fail. Writes `outside-robot-merges-<product>` (last green time); `robotMergesGreen()` is the Merge Gate's one test (green within 120 min; lead calls L19, L20). The step counts only when the slot's public tag matches this product's; two failed runs, a 5-day gap or a first pass latch it shut until the owner's `cleared` time (0b-7 audit round 4). |
+| `outside-watch.mjs` (`checkNoPush`) | lead call L24 | Each pass, tests every Mini token against the outside repo; writes `outside-no-push` and raises a home alert if any can write. The Merge Gate stays shut without a green one from the last 120 min. The robot-merges step counts only with the newest run's repo-guard step green too. |
+| `air-health.mjs` | R-0b-84, lead call L23 | The Air's health result as a dated file a machine writes (`node air-health.mjs <red count> <folder>`); `checkAirHealthFile` and `airFactFromFile` date the fact by the check itself, never by when it arrived. Joe never types a count. |
 | `start-gate.mjs` | lead call L3 | The two Vercel facts lane 2's launcher gate reads: skip command equals the pinned one; no env name in both Preview and Production. `startGateOpen` decides (both ok, ≤120 min old). |
 | `device-checks.mjs` | R-0b-78 | The decisions behind the owner's private `/host` and `/configaudit` for the Air. |
 | `shell-guard/` | R-0b-70 | Shell-trick cases and a runner for the production guard (the guard is lane 2's R-0b-36). |
@@ -34,6 +36,12 @@ heartbeat says "usage: unknown" until it is).
 - R-0b-70: run `node shell-guard/runner.mjs '<the installed hook command>'` against lane 2's guard; every miss goes
   to lane 2. Until it is green, R-0b-70 is pending.
 - Push requests (`push-request-<key>` facts, written by M13) are delivered by the Front Door (lane 2's restart path).
+- Lead call L24: lane 2's Mini loop calls `checkNoPush` every pass with each token the Mini holds (the GitHub ones the
+  Front Door and the robots use), and the probe from `outside-check.mjs`'s `writeProbe`. With no tokens passed it
+  writes red, so a loop that forgets it keeps the gate shut.
+- Lead call L23: the owner's `/configaudit` on the Air ends by running `node air-health.mjs <red count> <folder>` into
+  the Mini's air-health folder (a synced folder the Front Door can't write); the Mini's intake runs
+  `checkAirHealthFile` on each new file and stores `airFactFromFile(doc)` under `air-health`.
 
 ## Owner steps (Joe), for the (b) halves
 
@@ -43,8 +51,8 @@ Plain steps; the lead turns each into paste-ready blocks with the real names.
    environment only. Then, on the Vercel **test** project, Claude runs the watcher once to confirm the field names
    (they were taken from Vercel's docs on 29 Oct 2026) and the five R-0b-71 cases: a normal deploy, a CLI deploy, a
    promotion of an older deploy, an env change, a cancelled build.
-2. **The Air** (R-0b-79): wire `device-checks.mjs` into your private `/host` and `/configaudit`, then run `/configaudit`
-   on the Air until it shows 0 red; push to the test repo from the Air with `git push --no-verify` and see GitHub
+2. **The Air** (R-0b-79): wire `device-checks.mjs` into your private `/host` and `/configaudit`, and have
+   `/configaudit` end by writing the air-health file (above). Then run `/configaudit` on the Air until it shows 0 red; push to the test repo from the Air with `git push --no-verify` and see GitHub
    refuse it.
 3. **A real week's scan** (R-0b-125): after a week of real facts, Claude writes one control fact holding a fake key,
    calls `scanRecordLoose` over every entity (its default) and `runGitleaks` on the record folder, and the scan counts

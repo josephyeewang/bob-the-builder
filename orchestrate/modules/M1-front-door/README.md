@@ -40,15 +40,19 @@ R-0b-82's decision and handoff code sit here although the row is tagged M11 (lan
    `checkOutboxFile` after lane 2's name and owner check, and passes idea text on through `cleanOutside`.
 3. Lane 2: stop and start the Front Door under its fixed name when `shouldRestartFrontDoor` says so, and deliver
    `makeFrontDoorHandoff`'s text (first prompt, or a read-only file outside the outbox).
-4. Lane 2: a Ledger pass writes `buildTripBrief`'s text to the read-only brief file the skill quotes, passing
-   `stateIds` (the ids of the newest checked `state-` file per product), and runs `readPowerSource` with the
-   heartbeat. The skill quotes only a brief that names the ids it wrote (0b-8 audit round 3 M-3), so trip mode takes
-   two replies: "filed", then the brief when Joe says "brief".
+4. Lane 2: each Ledger pass calls `nextTripPush({ stateIds, lastPushedIds, build })` (`stateIds`: the ids of the
+   newest checked `state-` file per product; `build` = `buildTripBrief` with those ids). A result is sent to Joe's
+   phone over the Front Door's push path and its `ids` stored as `lastPushedIds` (lead call L22). The pass also
+   writes the brief to the read-only file the skill quotes if Joe asks first, and runs `readPowerSource` with the
+   heartbeat. The skill quotes only a brief that names the ids it wrote (0b-8 audit round 3 M-3). If the push isn't
+   ready by the first cutover, trip mode falls back to two replies ("filed", then the brief when Joe says "brief").
 5. Lane 2: its launch read-back checker replaces `readback.mjs` at the join; the two agree on EndConversation and on
    settings sources (machine-wide + `--settings` only).
-6. The Air's health result: Joe tells the Front Door his red count; the skill writes `request-airhealth-<id>.json`
-   (`outbox.mjs`); intake checks it and the Ledger writes `airFactFromRequest(doc)` as the `air-health` fact
-   (0b-8 audit round 3 M-4). Lanes 1 and 2: the fourth request kind in the intake contract.
+6. The Air's health result (lead call L23): /configaudit on the Air runs `node M12-sensors/air-health.mjs <red count>
+   <folder>`, which writes a dated `request-airhealth-<time>-air.json` to the Mini's air-health folder (synced, and
+   one the Front Door can't write). Intake reads that folder only, checks each file with `checkAirHealthFile`, and the
+   Ledger stores `airFactFromFile(doc)` under `AIR_FACT` ('air-health'). The fact carries the check's own time, so a
+   late take-in is never fresh. The Front Door's outbox check refuses that name. Joe never types a count.
 
 ## Ledger: two lines per row (review-0b-8 MAT-10)
 

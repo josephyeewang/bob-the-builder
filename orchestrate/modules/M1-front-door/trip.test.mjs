@@ -30,7 +30,7 @@ test('MAT-9: no facts at all → every Mini item and the Air read "unknown", nev
   assert.deepEqual(m.items.map((i) => i.state), ['unknown', 'unknown', 'unknown']);
   const a = airCheck({ facts, now });
   assert.equal(a.passed, false);
-  assert.match(a.text, /last result you told me: never/);
+  assert.match(a.text, /last check on the Air: never/);
   assert.match(a.text, /type \/configaudit/);
 });
 
@@ -51,18 +51,18 @@ test('MAT-9: facts older than an hour are unknown; fresh ones are green; a fresh
 
 test('Air: passed only with 0 red told within 24 h', () => {
   const { facts } = world();
-  facts.put(AIR_FACT, { kind: 'fact.air-health', red_count: 0, told_at: ago(60) });
+  facts.put(AIR_FACT, { kind: 'fact.air-health', red_count: 0, checked_at: ago(60) });
   assert.equal(airCheck({ facts, now }).passed, true);
-  facts.put(AIR_FACT, { kind: 'fact.air-health', red_count: 2, told_at: ago(60) });
+  facts.put(AIR_FACT, { kind: 'fact.air-health', red_count: 2, checked_at: ago(60) });
   assert.match(airCheck({ facts, now }).text, /2 red/);
-  facts.put(AIR_FACT, { kind: 'fact.air-health', red_count: 0, told_at: ago(60 * 30) });
+  facts.put(AIR_FACT, { kind: 'fact.air-health', red_count: 0, checked_at: ago(60 * 30) });
   assert.equal(airCheck({ facts, now }).passed, false);
 });
 
 test('R-0b-83 brief: away line, time zone question, go items and risky asks with links, green Mini, Air', () => {
   const { rec, facts, w } = world();
   green(facts);
-  facts.put(AIR_FACT, { kind: 'fact.air-health', red_count: 0, told_at: ago(30) });
+  facts.put(AIR_FACT, { kind: 'fact.air-health', red_count: 0, checked_at: ago(30) });
   w('go', 'go-1', { state: 'waiting', wait: { who: 'joe', what: 'go on roadmap row 7', since: ago(100) }, link: 'https://example.invalid/roadmap#row-7' });
   w('go', 'go-2', { state: 'done' });
   w('ask', 'ask-1', { state: 'pushed', what: `delete the old table (pasted ${FAKE.github})`, link: 'https://example.invalid/pr/9' });
