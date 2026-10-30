@@ -297,7 +297,24 @@ export function unreadable(cmd) {
  * (the ligature ﬁ is f+i), case through upper then lower (long s ſ is s, ß is ss), invisible characters dropped.
  * The one definition: git/push-refusals.mjs re-exports it.
  */
-export const fold = (s) => String(s).normalize('NFKC').toUpperCase().toLowerCase().normalize('NFKC').replace(/\p{Default_Ignorable_Code_Point}/gu, '');
+// Upper then lower twice: capital sharp s lowers to sharp s, which only the second round turns into ss (L37).
+export const fold = (s) => String(s).normalize('NFKC').toUpperCase().toLowerCase().toUpperCase().toLowerCase().normalize('NFKC').replace(/\p{Default_Ignorable_Code_Point}/gu, '');
+
+/**
+ * Plain names only (LEAD-CALLS L37): a list of tricky letters is never finished, so the secret and
+ * protected-file guards refuse any path with a character outside ASCII letters, digits and `. _ - /`,
+ * plus `@ [ ] ( ) +` (scoped packages and route folders hold them; all plain ASCII, none folds).
+ * A path the fold changes beyond lower-casing always holds such a character, so this one test covers both.
+ * Returns the refusal reason, or null.
+ */
+export const PLAIN_PATH = /^[A-Za-z0-9._\-/@[\]()+]*$/;
+export const oddPath = (p) => (PLAIN_PATH.test(String(p)) ? null : `"${p}" is not a plain name (only ASCII letters, digits and . _ - / @ [ ] ( ) + are allowed)`);
+/**
+ * A shell word cannot be held to the path rule (messages, flags), so it is refused when the fold changes
+ * it beyond lower-casing or it holds a letter outside ASCII (L37; a look-alike on no list is caught too).
+ */
+export const oddWord = (w) => (fold(w) !== String(w).toLowerCase() || /[^\p{ASCII}]/u.test(String(w).replace(/[^\p{L}\p{M}\p{N}]/gu, ''))
+  ? `the word "${w}" holds a letter that is not plain ASCII` : null);
 
 /** The command names git's own settings or hooks files (`.git/config`, `.git/hooks/…`, `.git/info/…`). */
 // Each word's path is tidied first, so `.git/./config` and `.git//hooks` count (audit R-0b-44 round 3 MIN-1).

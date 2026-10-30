@@ -6,7 +6,7 @@
 // other roles write only inside their code copy (--copy) or the outbox.
 
 import { basename, dirname, sep } from 'node:path';
-import { isMain, runHook, block, pass, landingPath, inside, realFolder, linkedFile, fold } from './lib.mjs';
+import { isMain, runHook, block, pass, landingPath, inside, realFolder, linkedFile, fold, oddPath } from './lib.mjs';
 
 export const OUTBOX_ONLY_ROLES = Object.freeze(['lead', 'front_door', 'thinking', 'learning']);
 
@@ -31,6 +31,9 @@ export function decide(input, args) {
   const t = input.tool_input ?? {};
   const raw = typeof t.file_path === 'string' ? t.file_path : t.notebook_path;
   if (typeof raw !== 'string' || !raw) return block('no file path in the write');
+  // Plain names only (L37): checked before anything is folded or looked up.
+  const odd = oddPath(raw);
+  if (odd) return block(odd);
   const p = landingPath(raw);
   if (!p) return block(`"${raw}" is not a plain absolute path, or is a link to nowhere yet`);
   // The Write tool runs outside the shell sandbox, so a link or a second name here would land the

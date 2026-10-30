@@ -3,7 +3,7 @@
 // Belt and braces: the sandbox's read-deny list covers the same folders for the shell.
 
 import { basename, sep, isAbsolute, resolve } from 'node:path';
-import { isMain, runHook, block, pass, toolPaths, shellWords, landingPath, inside, fold, joinLines, unreadable, expandBraces } from './lib.mjs';
+import { isMain, runHook, block, pass, toolPaths, shellWords, landingPath, inside, fold, joinLines, unreadable, expandBraces, oddPath, oddWord } from './lib.mjs';
 import { readSnapshot } from './snapshot.mjs';
 
 const SECRET_NAME = [
@@ -65,10 +65,16 @@ export function decide(input, args) {
   const listed = snap.rules.secrets?.paths;
   if (!Array.isArray(listed)) return block('the rules snapshot lists no secret paths');
   const t = input.tool_input ?? {};
-  for (const p of toolPaths(input)) if (isSecretPath(p, listed, input.cwd)) return block(`"${p}" is a secret file`);
+  for (const p of toolPaths(input)) {
+    // Plain names first (L37): a look-alike letter the disk folds onto a secret's name never reaches the lists.
+    const odd = oddPath(input.tool_name === 'Glob' && p === t.pattern ? p.replace(/[*?{},!]/g, '') : p);
+    if (odd) return block(odd);
+    if (isSecretPath(p, listed, input.cwd)) return block(`"${p}" is a secret file`);
+  }
   // A search pattern counts with its wildcards taken out: `.env*` names `.env`.
   const bare = (g) => g.replace(/[*?[\]{}!]/g, '');
   for (const g of [input.tool_name === 'Grep' ? t.glob : null, input.tool_name === 'Glob' ? t.pattern : null]) {
+    if (typeof g === 'string' && oddPath(g.replace(/[*?{},!]/g, ''))) return block(oddPath(g.replace(/[*?{},!]/g, '')));
     if (typeof g === 'string' && g.split(/[,{}]/).some((x) => isSecretPath(bare(x), listed) || isSecretPath(x, listed))) return block('the search names secret files');
   }
   if (input.tool_name === 'Bash') {
@@ -79,6 +85,8 @@ export function decide(input, args) {
     if (why) return block(`${why}; write the command out plainly`);
     for (const word of shellWords(joinLines(t.command))) {
       for (const w of expandBraces(word)) {
+        const odd = oddWord(w);
+        if (odd) return block(odd);
         if (w.length > 1 && isSecretPath(w, listed, input.cwd)) return block(`the command names a secret file (${word})`);
         if (shortName(w, listed)) return block(`the command names a secret file by its short name (${word})`);
         if (patternMeetsSecret(w, listed)) return block(`the command's pattern could name a secret file (${word})`);

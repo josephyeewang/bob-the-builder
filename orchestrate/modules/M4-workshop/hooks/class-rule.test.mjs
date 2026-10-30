@@ -154,6 +154,38 @@ test('round 3 MAT-1: names spelled with letters a Mac disk folds to plain ones a
   blocked(prodGuard.decide(bash(`fakeho${LONG_S}t --x`, w.work), w.args), 'program spelled with long s');
 });
 
+// LEAD-CALLS L37: plain names only. The 11 letters the round 3 audit found a Mac disk opens as plain ones (long s,
+// sharp s and its capital, the seven joined pairs, the Kelvin sign), and one look-alike on no list (Cyrillic e),
+// are each refused by the secret guard (tool path, search, shell word) and the protected-file guard.
+test('L37: every one of the 11 letters, and a look-alike on no list, is refused by both guards; plain ASCII names pass', () => {
+  const w = world();
+  const a = { ...w.args, role: 'worker', copy: w.work };
+  const ELEVEN = ['ſ', 'ß', 'ẞ', 'ﬀ', 'ﬁ', 'ﬂ', 'ﬃ', 'ﬄ', 'ﬅ', 'ﬆ', 'K'];
+  const CYRILLIC_E = 'е';
+  assert.deepEqual(ELEVEN.map((c) => fold(c)), ['s', 'ss', 'ss', 'ff', 'fi', 'fl', 'ffi', 'ffl', 'st', 'st', 'k'], 'control: the fold opens all 11 as the disk does');
+  blocked(secret.decide({ tool_name: 'Read', tool_input: { file_path: join(w.home, '.\u1e9eh', 'config') } }, w.args), 'the key folder spelled with capital sharp s');
+  assert.equal(fold(CYRILLIC_E), CYRILLIC_E, 'control: the look-alike is on no list, and the fold leaves it alone');
+  for (const c of [...ELEVEN, CYRILLIC_E]) {
+    const name = `notes${c}.md`;
+    blocked(secret.decide({ tool_name: 'Read', tool_input: { file_path: join(w.work, name) } }, w.args), `Read ${name}`);
+    blocked(secret.decide({ tool_name: 'Glob', tool_input: { pattern: `**/${name}` } }, w.args), `Glob ${name}`);
+    blocked(secret.decide({ tool_name: 'Grep', tool_input: { pattern: 'x', glob: `*${c}*` } }, w.args), `Grep glob ${name}`);
+    blocked(secret.decide(bash(`cat ${name}`, w.work), w.args), `cat ${name}`);
+    const r = plain.decide({ tool_name: 'Write', tool_input: { file_path: join(w.work, name) } }, a);
+    blocked(r, `Write ${name}`);
+    assert.match(r.reason, /is not a plain name/, name);
+  }
+  // An invisible mark is no letter, but the fold drops it: refused in the shell as well (soft hyphen).
+  blocked(secret.decide(bash('cat notes\u00ad.md', w.work), w.args), 'a soft hyphen inside a shell word');
+  // Plain ASCII passes: capitals, scoped packages, route folders, and a dash in a message.
+  for (const p of ['src/App.tsx', 'node_modules/@types/x/index.d.ts', 'app/[id]/(group)/page.tsx', 'a+b.md']) {
+    passed(secret.decide({ tool_name: 'Read', tool_input: { file_path: join(w.work, p) } }, w.args), p);
+    passed(plain.decide({ tool_name: 'Write', tool_input: { file_path: join(w.work, p) } }, a), p);
+  }
+  passed(secret.decide({ tool_name: 'Glob', tool_input: { pattern: 'src/**/*.{ts,tsx}' } }, w.args), 'a plain search');
+  passed(secret.decide(bash('git commit -m "fix — tidy"', w.work), w.args), 'a dash in a message is not a letter');
+});
+
 test('round 3 MIN-1: every push is refused, paths are tidied before the git-files check, and secrets are matched by short name', () => {
   const w = world();
   for (const c of ['git switch -c main && git push origin HEAD', 'git checkout -B main && git push -u origin @', 'git push origin card/c-12', 'git send-pack x HEAD']) {
