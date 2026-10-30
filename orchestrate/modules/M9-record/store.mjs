@@ -67,7 +67,7 @@ function look(path) {
 // written or read: a link in their place must not let a refusal or a seen mark land outside the store (round 9).
 function plainFd(path, flags) {
   const fd = openSync(path, flags | constants.O_NOFOLLOW | constants.O_NONBLOCK);
-  try { if (!fstatSync(fd).isFile()) throw Object.assign(new Error(`${path} is not a plain file`), { store: true }); } catch (e) { closeSync(fd); throw e; }
+  try { const st = fstatSync(fd); if (!st.isFile() || st.nlink !== 1) throw Object.assign(new Error(`${path} is not a plain file with one name`), { store: true }); } catch (e) { closeSync(fd); throw e; }
   return fd;
 }
 function appendPlain(path, text) {
@@ -102,7 +102,8 @@ export function openStore({ root, ownerUid, alert = () => {}, now = () => Date.n
   function layoutProblem() {
     const kind = (p) => {
       let st; try { st = lstatSync(p); } catch (e) { return e?.code === 'ENOENT' ? 'none' : `unreadable (${e?.code ?? e})`; }
-      return st.isSymbolicLink() ? 'a link' : st.isDirectory() ? 'folder' : st.isFile() ? 'file' : 'not a plain file or folder';
+      // A file with a second name (a hard link) may be someone's file outside the store; writing it would change that (round 10 M1).
+      return st.isSymbolicLink() ? 'a link' : st.isDirectory() ? 'folder' : st.isFile() ? (st.nlink === 1 ? 'file' : 'a file with another name (a hard link)') : 'not a plain file or folder';
     };
     const r = kind(root);
     if (r !== 'folder' && r !== 'none') return `the store folder ${root} is ${r}`;
@@ -124,6 +125,13 @@ export function openStore({ root, ownerUid, alert = () => {}, now = () => Date.n
   // A failure of the store itself, not of what was asked of it: the outbox tries such a file again (round 5 m-1).
   const storeFail = (msg) => Object.assign(new Error(msg), { store: true });
   const keyOf = (entity, id) => `${entity}/${id}`;
+  // The Mac's default disk doesn't tell go-a.json from go-A.json, so an id differing from a stored one only in case would
+  // share its file: refused, never written (round 10 M2). Returns the stored id it clashes with, or null.
+  const caseClash = (entity, id) => {
+    const want = keyOf(entity, id).toLowerCase();
+    for (const k of index.keys()) if (k !== keyOf(entity, id) && k.toLowerCase() === want) return index.get(k).id;
+    return null;
+  };
 
   // ---- the diary index, read forward from the last complete line ----
   let index = new Map();
@@ -245,7 +253,7 @@ export function openStore({ root, ownerUid, alert = () => {}, now = () => Date.n
   }
 
   function recover() {
-    const report = { cut: 0, rolledForward: [], restored: [], quarantined: [], tempsRemoved: 0 };
+    const report = { cut: 0, rolledForward: [], restored: [], quarantined: [], skipped: [], tempsRemoved: 0 };
     // 1. A torn last line (no newline, or not JSON) is cut.
     const all = readFileSync(P.diary);
     let keep = all.length;
@@ -258,7 +266,7 @@ export function openStore({ root, ownerUid, alert = () => {}, now = () => Date.n
       try { JSON.parse(body.slice(lastStart)); } catch { keep = Buffer.byteLength(text.slice(0, lastStart), 'utf8'); text = text.slice(0, lastStart); }
     }
     if (keep !== all.length) {
-      const fd = openSync(P.diary, constants.O_RDWR);
+      const fd = plainFd(P.diary, constants.O_RDWR);
       try { ftruncateSync(fd, keep); fsyncSync(fd); } finally { closeSync(fd); }
       report.cut = all.length - keep;
       say({ type: 'diary_torn_line_cut', bytes: report.cut });
@@ -267,7 +275,9 @@ export function openStore({ root, ownerUid, alert = () => {}, now = () => Date.n
     reset();
     refresh();
     // 3. Documents: roll forward a missing file or the previous version; any other difference is tamper.
-    for (const e of index.values()) {
+    // One folder recovery can't put right (say, one the owner can't read) is alerted and skipped; it doesn't stop the others (round 10 m1).
+    const skip = (where, e) => { report.skipped.push(where); tellOnce({ type: 'recovery_skipped', reason: `${where}: ${String(e?.message ?? e).slice(0, 300)}` }); };
+    for (const e of index.values()) try {
       entityDir(e.entity, true);
       const bytes = docAt(docPath(e.entity, e.id));
       const h = bytes === null ? null : bytes === ODD ? ODD : sha256(bytes);
@@ -276,11 +286,11 @@ export function openStore({ root, ownerUid, alert = () => {}, now = () => Date.n
       quarantine(e.entity, e.id, docPath(e.entity, e.id), bytes === ODD ? 'not a plain readable file' : 'document changed outside the Store Writer');
       restore(e);
       report.restored.push(keyOf(e.entity, e.id));
-    }
+    } catch (err) { if (err?.store) throw err; skip(keyOf(e.entity, e.id), err); }
     // 4. Document files with no diary line.
     let entities = [];
     try { entities = readdirSync(P.docs); } catch { /* none */ }
-    for (const ent of entities) {
+    for (const ent of entities) try {
       if (IGNORED.has(ent)) continue;
       // Only a real folder is listed; a link or anything else at the top of docs/ is moved aside, never followed.
       if (!entityDir(ent, false)) { entityDir(ent, true); report.quarantined.push(keyOf(ent, '(folder)')); continue; }
@@ -294,7 +304,7 @@ export function openStore({ root, ownerUid, alert = () => {}, now = () => Date.n
         quarantine(ent, id, p, docAt(p) === ODD ? 'not a plain readable file' : 'document file has no diary line');
         report.quarantined.push(keyOf(ent, id));
       }
-    }
+    } catch (err) { if (err?.store) throw err; skip(`docs/${ent}`, err); }
     // 5. Temp files whose writer is gone (the pid starts the name). A live pid's file is left alone.
     for (const n of readdirSync(P.tmp)) {
       const pid = Number(/^(\d+)-/.exec(n)?.[1]);
@@ -325,6 +335,7 @@ export function openStore({ root, ownerUid, alert = () => {}, now = () => Date.n
       }
       const tx = {
         current(entity, id) {
+          { const other = safeName(entity) && safeName(id) ? caseClash(entity, id) : null; if (other !== null) throw new Error(`${entity} id ${id} differs from ${other} only in upper/lower case; pick another id`); }
           const chk = checkFile(entity, id);
           if (!chk.ok) return { tampered: true, reason: chk.reason };
           const e = index.get(keyOf(entity, id));
@@ -340,12 +351,15 @@ export function openStore({ root, ownerUid, alert = () => {}, now = () => Date.n
           const out = writes.map((w) => {
             // Checked before any folder, temp or diary line is made: a name the disk can't hold would block every later write (round 6).
             if (!safeName(w.entity) || !safeName(w.id)) throw new Error(`bad entity or id: ${String(w.entity).slice(0, 40)}/${String(w.id).slice(0, 80)}`);
+            const other = caseClash(w.entity, w.id);
+            if (other !== null) throw new Error(`${w.entity} id ${w.id} differs from ${other} only in upper/lower case; pick another id`);
             const cur = index.get(keyOf(w.entity, w.id));
             const rev = (cur?.rev ?? 0) + 1;
             const bytes = docBytes(w.entity, w.id, rev, w.doc);
             return { entity: w.entity, id: w.id, rev, from_state: cur?.doc?.state ?? null, to_state: w.doc?.state ?? null, doc: w.doc,
               doc_hash: sha256(bytes), prev_hash: cur?.hash ?? null, bytes };
           });
+          { const seen = new Map(); for (const o of out) { const k = keyOf(o.entity, o.id); const l = k.toLowerCase(); if (seen.has(l) && seen.get(l) !== k) throw new Error(`${o.entity} ids ${o.id} and ${seen.get(l).split('/')[1]} differ only in upper/lower case`); seen.set(l, k); } }
           const temps = out.map((o) => writeDocFile(o.entity, o.id, o.bytes, 'w'));
           fault('temp_written');
           if (!lock.holds(nonce)) { for (const t of temps) { try { unlinkSync(t); } catch { /* gone */ } } throw storeFail('lost the store lock before the commit point'); }
@@ -355,7 +369,7 @@ export function openStore({ root, ownerUid, alert = () => {}, now = () => Date.n
             data: meta.data ?? null, writes: out.map(({ bytes, ...w }) => w) };   // eslint-disable-line no-unused-vars
           const text = `${JSON.stringify(line)}\n`;
           try {
-            const fd = openSync(P.diary, constants.O_WRONLY | constants.O_APPEND);
+            const fd = plainFd(P.diary, constants.O_WRONLY | constants.O_APPEND);
             const size = fstatSync(fd).size;
             try {
               if (faultAt !== undefined && (faultAt === 'diary_torn' || faultAt?.step === 'diary_torn')) { writeSync(fd, text.slice(0, Math.floor(text.length / 2))); fsyncSync(fd); fault('diary_torn'); }
@@ -409,6 +423,7 @@ export function openStore({ root, ownerUid, alert = () => {}, now = () => Date.n
   function read(entity, id) {
     if (!safeName(entity) || !safeName(id)) return null;
     refresh();
+    if (caseClash(entity, id) !== null) return null;   // nothing is stored under this exact id; the file there is the other's
     const e = index.get(keyOf(entity, id));
     // read() doesn't hold the lock, so it moves nothing: an odd folder or file is reported corrupt (round 8 M1, M2).
     const bytes = entityDir(entity, false) ? docAt(docPath(entity, id)) : ODD;

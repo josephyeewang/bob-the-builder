@@ -2,7 +2,7 @@
 // (0b-2 M-4, M-7, R2-m3, m-5, m-6).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { appendFileSync, chmodSync, existsSync, lstatSync, mkdirSync, renameSync, symlinkSync, readFileSync, readdirSync, statSync, writeFileSync, unlinkSync } from 'node:fs';
+import { appendFileSync, chmodSync, existsSync, linkSync, lstatSync, mkdirSync, renameSync, symlinkSync, readFileSync, readdirSync, statSync, writeFileSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { PRODUCT, UID, must, put, rulesFor, seed, setup } from './fixtures.test-helper.mjs';
@@ -321,22 +321,6 @@ test('a link, FIFO or wrong kind of thing in place of any store name stops the s
   }
 });
 
-test('a folder the owner can\'t write stops the store with one named alert, not a raw error on every write (round 9 M6)', () => {
-  const env = setup({ prefix: 'm9-store-' });
-  seed(env, 'card', 'C-0', card());
-  const sub = join(env.root, 'docs', 'card', 'sub');
-  mkdirSync(sub);
-  chmodSync(sub, 0o000);
-  try {
-    const alerts = [];
-    const fresh = reopen(env, alerts);
-    for (let i = 0; i < 2; i++) assert.match(cancel(fresh.record).reason, /recovery stopped/);
-    const stops = alerts.filter((a) => a.type === 'recovery_stopped');
-    assert.equal(stops.length, 1, 'one alert, not one per write');
-    assert.match(stops[0].reason, /sub/, 'the alert names what is in the way');
-  } finally { chmodSync(sub, 0o755); }
-});
-
 test('a document copy that can\'t be put in place after the commit point: the write stands and is alerted, not reported refused (round 9 M7)', () => {
   const env = setup({ prefix: 'm9-store-' });
   seed(env, 'card', 'C-0', card());
@@ -379,4 +363,53 @@ test('a read never goes through a linked diary, even one identical to the real o
   const r = env.record.read('card', 'C-0');
   assert.equal(r?.corrupt, true, 'a perfect copy behind a link is not read');
   assert.ok(env.alerts.some((a) => a.type === 'store_layout' && a.reason.includes('diary.jsonl')), 'alerted, naming the diary');
+});
+
+// ---- 0b-2 audit round 10 ----
+test('a store file with a second name (a hard link) stops the store; the other file is not changed (round 10 M1)', () => {
+  for (const name of ['diary.jsonl', 'refusals.jsonl', 'outbox-seen.jsonl']) {
+    const env = setup({ prefix: 'm9-store-' });
+    seed(env, 'card', 'C-0', card());
+    const out = outsideDir(env, `hl-${name.replace('.', '_')}`);
+    const victim = join(out, 'victim.json');
+    const target = join(env.root, name);
+    unlinkSync(target);
+    linkSync(victim, target);
+    const before = snapshot(out);
+    const r = cancel(env.record);
+    assert.equal(r.ok, false, `${name}: the write is refused`);
+    assert.ok(env.alerts.some((a) => a.type === 'store_layout' && a.reason.includes(name) && /hard link/.test(a.reason)), `${name}: alerted`);
+    assert.throws(() => reopen(env), /hard link/, `${name}: a fresh writer won't open (and makes nothing readable)`);
+    assert.equal(snapshot(out), before, `${name}: the other file unchanged, mode and all`);
+  }
+});
+
+test('ids that differ only in upper/lower case are refused, never share a file (round 10 M2)', () => {
+  const env = setup({ prefix: 'm9-store-' });
+  seed(env, 'card', 'C-0', card());
+  const r = env.record.write({ actor: 'approvals', entity: 'card', id: 'c-0', expectRev: 0, doc: card() });
+  assert.equal(r.ok, false);
+  assert.match(r.reason, /only in upper\/lower case/);
+  assert.equal(env.alerts.filter((a) => a.type === 'tamper').length, 0, 'no false tamper alert');
+  assert.equal(env.record.read('card', 'C-0').rev, 1, 'the stored card reads cleanly');
+  assert.equal(env.record.read('card', 'c-0'), null, 'nothing is stored under the other spelling');
+  assert.deepEqual(env.record.list('card').map((c) => c.id), ['C-0']);
+});
+
+test('one entity folder recovery can\'t read is skipped with one alert; other writes go on (round 10 m1)', () => {
+  const env = setup({ prefix: 'm9-store-' });
+  seed(env, 'card', 'C-0', card());
+  const sub = join(env.root, 'docs', 'card', 'sub');
+  mkdirSync(sub);
+  chmodSync(sub, 0o000);
+  try {
+    const alerts = [];
+    const fresh = reopen(env, alerts);
+    must(cancel(fresh.record), 'a write elsewhere in the store goes through');
+    must(fresh.record.write({ actor: 'approvals', entity: 'card', id: 'C-0', expectRev: 2, doc: card({ state: 'cancelled', cancel_reason: 'again' }) }), 'and the next');
+    const skips = alerts.filter((a) => a.type === 'recovery_skipped');
+    assert.equal(skips.length, 1, 'one alert, not one per write');
+    assert.match(skips[0].reason, /sub/, 'the alert names what is in the way');
+    assert.equal(fresh.record.read('card', 'C-0').doc.cancel_reason, 'again', 'the writes went through');
+  } finally { chmodSync(sub, 0o755); }
 });

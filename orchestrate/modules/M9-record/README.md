@@ -73,6 +73,14 @@ Round 9 changed approach: rather than patching one store name at a time, one che
 - **macOS `._*` files** (left on some shared or external disks) are moved aside as odd, not ignored like `.DS_Store` (c2).
 - **The diary's own no-link open and the side files' plain-file check** sit behind the folder check. A planted break of either alone isn't caught, because the folder check already stops the same cases; they stay as a second guard.
 
+## Known gaps (audit round 10, logged, not fixed here)
+
+Round 10 added: a store file with a second name (a hard link) is a layout fault like a link; ids that differ only in upper/lower case are refused (the Mac's default disk would give them one file); one folder recovery can't read is skipped with one alert instead of stopping every write. What it leaves:
+
+- **`diary()` throws when the store can't be read**, where every other read call answers. Kept on purpose and written into `shared/record.mjs`: its callers walk every line, and an empty answer would read as "nothing happened".
+- **A document file with a second name** is read and replaced like any other (a replace never changes the other name's file); only the store's own diary and side files are refused for it.
+- **Two writes in one batch whose ids differ only in case** are refused by a check no test reaches: no caller writes such a batch today.
+
 ## Running the tests
 
 Plain Node, no packages:

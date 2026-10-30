@@ -25,6 +25,8 @@
 // appends none. write() and applyOutbox() never throw: any failure is { ok: false, reason }. read() of a corrupt document
 // gives { id, entity, corrupt: true, reason } with no doc (never null, which means "absent"); list() leaves corrupt ones
 // out, and a list that can't be read at all comes back as one such corrupt entry, so a caller never takes it for empty.
+// diary() is the one call that throws when the store can't be read: its callers walk every line, and an empty answer
+// would read as "nothing happened" (round 10 m2: fail closed by throwing, not by an empty list).
 
 // Plain-script actors write under their own name; AI roles only through applyOutbox, as `<role>:<sessionId>`.
 // `joe` writes nothing in 0b (the owner acts through `approvals`); it stays a name so old diary lines still parse.
