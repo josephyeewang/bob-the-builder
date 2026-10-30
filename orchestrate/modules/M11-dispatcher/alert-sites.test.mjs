@@ -108,3 +108,43 @@ test('L47 sweep, control: a direct send, a port handed to a step, or an alert ma
   ].join('\n')], ['alerts.mjs', 'await port(text); p.alert(x);']];
   assert.deepEqual(directSends(files).map((l) => l.split(':')[1]), ['1', '2', '3', '4', '5']);
 });
+
+// Audit 0b-6 r7 M2, as a class: every fact a told mark goes on has a step that drops the cause's queued
+// entry where the cause clears (`dropCause(rec, <the same fact>`), or a line here saying why a copy
+// delivered after the cause cleared is harmless.
+export const LATE_MARK_OK = Object.freeze({
+  HOLD_FACT: 'once per cause per day by design: a late copy is still a tell within that day',
+  UNKNOWN_FACT: 'the mark carries the stretch it was for (`since`), and a new stretch is told again',
+  factId: 'told keys count only while still in the last recorded set, so a key that left is told again',
+  RESTART_FACT: 'once per Lead session, and a session id is never reused',
+});
+
+// The fact names each told mark goes on: `fact: NAME` inside a tellThen call (a call `NAME(...)` or a bare name).
+export function markFacts(files) {
+  const out = new Set();
+  for (const [, text] of files) for (const m of text.matchAll(/tellThen\([^\n]*?\bfact:\s*([A-Za-z_$][\w$]*)/g)) out.add(m[1]);
+  return [...out].sort();
+}
+export function undroppedCauses(files) {
+  const all = files.map(([, t]) => t.replace(/\/\/.*$/gm, '')).join('\n');
+  return markFacts(files).filter((n) => !(n in LATE_MARK_OK) && !new RegExp(String.raw`dropCause\(\s*rec\s*,\s*${n}\b`).test(all));
+}
+
+test('r7 M2 sweep: every told mark has a place its cause clears, or a reason a late mark is harmless', () => {
+  const facts = markFacts(code());
+  assert.ok(facts.length >= 9, facts.join(', '));
+  assert.deepEqual(undroppedCauses(code()), []);
+  for (const n of Object.keys(LATE_MARK_OK)) assert.ok(facts.includes(n), `${n} is listed but no told mark goes on it`);
+});
+
+test('r7 M2 sweep, control: a mark with no drop and no reason is caught; a dropped one, a commented drop and a listed one are not', () => {
+  const files = [['x.mjs', [
+    "tellThen(alert, 't', { fact: NEW_FACT(id), fields: { told_at: 1 } });",
+    "tellThen(alert, 't', { fact: GONE_FACT(id), fields: { told_at: 1 } });",
+    "tellThen(alert, 't', { fact: QUIET_FACT, fields: { told: true } });",
+    "tellThen(alert, 't', { fact: HOLD_FACT(c), fields: { told_at: 1 } });",
+    'dropCause(rec, GONE_FACT(id));',
+    '// dropCause(rec, QUIET_FACT);',
+  ].join('\n')]];
+  assert.deepEqual(undroppedCauses(files), ['NEW_FACT', 'QUIET_FACT']);
+});

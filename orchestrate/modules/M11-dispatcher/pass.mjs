@@ -26,7 +26,7 @@ import { startGate } from './gate.mjs';
 import { atSafePoint } from './transcript.mjs';
 import { OUTAGE_FACT } from './outage.mjs';
 import { move, waitOn, note } from './moves.mjs';
-import { tellThen } from './alerts.mjs';
+import { tellThen, dropCause } from './alerts.mjs';
 import { exactReverse } from './undo.mjs';
 import { FINAL_STATES } from '../../shared/record.mjs';
 
@@ -174,7 +174,7 @@ export async function stopPass({ rec, rules, now, account, sessions, probe, stop
     const why = stopReason({ s, card, productDoc, b, compactions, split });
     const sf = factDoc(rec, STOP_FACT(s.id));
     let pending = sf?.doc?.state === 'pending' ? sf.doc : null;
-    if (!why && pending && pending.reason !== 'cancel') { putFact(rec, STOP_FACT(s.id), { ...pending, state: 'dropped', dropped_at: iso(now) }, 'stop_dropped'); pending = null; }
+    if (!why && pending && pending.reason !== 'cancel') { putFact(rec, STOP_FACT(s.id), { ...pending, state: 'dropped', dropped_at: iso(now) }, 'stop_dropped'); dropCause(rec, STOP_FACT(s.id)); pending = null; }
     if (why && (!pending || RANK[why] > (RANK[pending.reason] ?? 0))) {
       pending = { state: 'pending', reason: why, card: s.card, since: iso(now) };
       putFact(rec, STOP_FACT(s.id), pending, 'stop_wanted');
@@ -205,6 +205,7 @@ export async function stopPass({ rec, rules, now, account, sessions, probe, stop
     if (late) note(rec, `stop-note-${s.id}`, `session ${s.id} stopped without a safe point after ${Math.round((now - Date.parse(pending.since)) / 60_000)} min (${pending.reason})`, { now });
     moveAfterStop(rec, s.card, pending.reason, now);
     putFact(rec, STOP_FACT(s.id), { ...pending, state: 'done', stopped_at: iso(now), how: stopped.how, hard: late, saved: !!saved?.ok }, 'stop_done');
+    dropCause(rec, STOP_FACT(s.id));
     running = running.filter((x) => x.id !== s.id);
     out.stopped.push([s.id, pending.reason]);
   }
@@ -291,7 +292,7 @@ export async function dispatcherPass({ rec, rules, now, account, sessions, probe
   // 7. Paused products: the Lead hands off once its workers are parked.
   for (const { id: product, doc } of rec.list('product')) {
     const pf = factDoc(rec, PAUSE_FACT(product));
-    if (doc.state !== 'paused') { if (['asked', 'failed'].includes(pf?.doc?.state)) putFact(rec, PAUSE_FACT(product), { state: 'cleared', at: iso(now) }, 'pause_cleared'); continue; }
+    if (doc.state !== 'paused') { if (['asked', 'failed'].includes(pf?.doc?.state)) putFact(rec, PAUSE_FACT(product), { state: 'cleared', at: iso(now) }, 'pause_cleared'); dropCause(rec, PAUSE_FACT(product)); continue; }
     if (pf?.doc?.state === 'asked') continue;
     if (running.some((s) => s.product === product && parkable(s))) continue;
     // A failing port is that product's problem, told once, not a failed pass (audit 0b-6 r3 MIN-2).
@@ -306,6 +307,7 @@ export async function dispatcherPass({ rec, rules, now, account, sessions, probe
       continue;
     }
     putFact(rec, PAUSE_FACT(product), { state: 'asked', at: iso(now) }, 'pause_lead');
+    dropCause(rec, PAUSE_FACT(product));
     out.notes.push(`Lead of ${product} asked to hand off`);
   }
   // The tick's later steps (limits, merges) gate their starts on this pass's bands and sessions.
@@ -395,7 +397,7 @@ async function starts({ rec, rules, now, b, running, launch, out, alert, onlyUnd
       doc: { session_id: l.sessionId, role: 'worker', kind, card: id, head: l.head ?? null, rev: started.rev ?? null, product: product ?? null, launched_at: iso(now) } });
     if (!lr.ok) alert(`card ${id}: session ${l.sessionId} started but its launch was not recorded (${lr.reason}); its merge will be refused`);
     running.push({ id: l.sessionId, product, kind, card: id, pgid: l.pgid });
-    if (factDoc(rec, UNDO_HELD_FACT(id))?.doc?.reason) putFact(rec, UNDO_HELD_FACT(id), { reason: null, at: iso(now) }, 'undo_started');
+    if (factDoc(rec, UNDO_HELD_FACT(id))?.doc?.reason) { putFact(rec, UNDO_HELD_FACT(id), { reason: null, at: iso(now) }, 'undo_started'); dropCause(rec, UNDO_HELD_FACT(id)); }
     out.started.push(id);
   }
 }

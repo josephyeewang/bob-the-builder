@@ -21,13 +21,14 @@ import { isAbsolute } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
 import { Worker } from 'node:worker_threads';
 import { runTick, STEPS, STEP_DEADLINE_MS } from './tick.mjs';
-import { outbox, sendAlerts, ALERT_SEND_MS } from './alerts.mjs';
+import { outbox, sendAlerts, ALERT_SEND_MS, ALERT_BUDGET_MS } from './alerts.mjs';
 import { holdAlert } from './pass.mjs';
 import { limitedSync } from './sync-limit.mjs';
 
-// Every step at its own deadline, plus a margin: past this the pass is stuck.
-export const RUN_DEADLINE_MS = STEPS.length * STEP_DEADLINE_MS + 60_000;
-export const WATCHDOG_MARGIN_MS = 5_000;
+// Every step at its own deadline and the pass's two sends (alerts.mjs), plus a margin: past this the pass is stuck.
+export const RUN_DEADLINE_MS = STEPS.length * STEP_DEADLINE_MS + 2 * ALERT_BUDGET_MS + 20_000;
+// Room for the late alert's one send before the watchdog ends the process (audit 0b-6 r7 m1).
+export const WATCHDOG_MARGIN_MS = ALERT_SEND_MS + 5_000;
 
 /** A thread of its own that kills this process after `ms`, however blocked the main thread is. */
 export function startWatchdog(ms) {

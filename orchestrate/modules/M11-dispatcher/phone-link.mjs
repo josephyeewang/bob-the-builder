@@ -20,7 +20,7 @@
 
 import { KEYS, minutes } from './keys.mjs';
 import { note } from './moves.mjs';
-import { tellThen } from './alerts.mjs';
+import { tellThen, dropCause } from './alerts.mjs';
 
 export const LINK_FACT = 'phone-link';
 export const FACTS = Object.freeze({ network: 'network-up', reachable: 'frontdoor-reachable', minibase: 'minibase-running' });
@@ -90,6 +90,7 @@ export async function phoneLinkStep({ rec, rules, now, send, restartFrontDoor, s
     if (st.false_streak || st.refused_since) done.push('phone link back');
     Object.assign(st, { false_streak: 0, attempts: 0, failures: 0, told: false, refused_since: null, last_try_at: null });
     save();
+    dropCause(rec, LINK_FACT);
     return done;
   }
   if (fd.value === 'unknown') {

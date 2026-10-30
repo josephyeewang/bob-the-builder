@@ -793,3 +793,84 @@ test('r5 MAT-2: usage unknown and a failed Lead hand-off, with the first alert f
     assert.equal(sent.filter((t) => /could not be asked to hand off/.test(t)).length, 1, sent.join(' | '));
   }
 });
+
+// Audit 0b-6 r7 M2, the stop site: a failed stop's alert, still queued when the stop is dropped, leaves unsent.
+// Otherwise a later delivery would mark a new stop of the same session as told before that one ever failed.
+test('r7 M2: a dropped stop takes its queued alert with it; the next failed stop of that session is told', async () => {
+  const w = world([card('C-1', { state: 'running', session: 'S-A' })]);
+  const sessions = [{ id: 'S-A', product: 'p1', kind: 'editing', card: 'C-1', pgid: 50 }];
+  let atRest = true;
+  let up = false;
+  const got = [];
+  const run = (min) => stopPass({ rec: w.rec, rules: rulesWith(), now: T0 + min * MIN, account: ACCT, sessions, probe: () => (atRest ? idle : busy),
+    stopGroup: async () => ({ ok: false, reason: 'EPERM' }), saveWork: async () => ({ ok: true }), portDeadlineMs: 50, saveDeadlineMs: 50,
+    alert: (t) => { if (!up) throw new Error('no network'); got.push(t); return true; } });
+  w.setUsage(RED, T0);
+  await run(0);
+  assert.equal(got.length, 0);
+  w.setUsage(GREEN, T0 + MIN);
+  await run(1);
+  assert.equal(w.rec.read('fact', STOP_FACT('S-A')).doc.state, 'dropped');
+  // Wanted again, not yet at a safe point; the port is back.
+  w.setUsage(RED, T0 + 2 * MIN);
+  atRest = false; up = true;
+  await run(2);
+  assert.equal(got.length, 0, 'the alert of the dropped stop is not sent');
+  assert.ok(!w.rec.read('fact', STOP_FACT('S-A')).doc.told_at, 'the new stop is not marked told');
+  atRest = true;
+  w.setUsage(RED, T0 + 3 * MIN);
+  await run(3);
+  assert.equal(got.filter((t) => /S-A \(card C-1\) could not be stopped/.test(t)).length, 1, got.join(' | '));
+});
+
+// Audit 0b-6 r7 M2, the stop site: a stop that failed while the port was down and then succeeded leaves its
+// queued "could not be stopped" alert unsent, so the port coming back does not report a stop that went through.
+test('r7 M2: a stop that went through takes its queued failure alert with it', async () => {
+  const w = world([card('C-1', { state: 'running', session: 'S-A' })]);
+  const sessions = [{ id: 'S-A', product: 'p1', kind: 'editing', card: 'C-1', pgid: 50 }];
+  let up = false;
+  let works = false;
+  const got = [];
+  const run = (min, ss = sessions) => stopPass({ rec: w.rec, rules: rulesWith(), now: T0 + min * MIN, account: ACCT, sessions: ss, probe: () => idle,
+    stopGroup: async () => (works ? { ok: true, how: 'term' } : { ok: false, reason: 'EPERM' }), saveWork: async () => ({ ok: true }), portDeadlineMs: 50, saveDeadlineMs: 50,
+    alert: (t) => { if (!up) throw new Error('no network'); got.push(t); return true; } });
+  w.setUsage(RED, T0);
+  await run(0);
+  works = true;
+  await run(1);
+  assert.equal(w.rec.read('fact', STOP_FACT('S-A')).doc.state, 'done');
+  up = true;
+  await run(2, []);
+  assert.equal(got.filter((t) => /could not be stopped/.test(t)).length, 0, got.join(' | '));
+  assert.ok(!w.rec.read('fact', STOP_FACT('S-A')).doc.told_at);
+});
+
+// Audit 0b-6 r7 M2, the pause sites: a failed hand-off's alert, still queued when the product is unpaused or
+// its Lead is asked after all, leaves unsent. A late copy would report a hand-off that no longer fails, and
+// its mark would hide the next real failure of that product for a day.
+test('r7 M2: a hand-off alert queued while the port was down leaves when the pause clears or the Lead is asked', async () => {
+  for (const how of ['unpaused', 'asked']) {
+    const w = world([]);
+    w.setProduct('p2', 'paused');
+    const sent = [];
+    let down = true;
+    let fails = true;
+    const at = (min) => dispatcherPass({ rec: w.rec, rules: rulesWith(), now: T0 + min * MIN, account: ACCT, sessions: [], probe: () => idle, launch: async () => ({ ok: false }),
+      stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }), filesOf: filesOfCommits, portDeadlineMs: 50,
+      pauseLead: () => { if (fails) throw new Error('Lead not reachable'); }, alert: (t) => { if (down) throw new Error('down'); sent.push(t); return true; } });
+    const told = () => sent.filter((t) => /could not be asked to hand off/.test(t)).length;
+    await at(0);
+    if (how === 'unpaused') w.setProduct('p2', 'active'); else fails = false;
+    await at(1);
+    down = false;
+    await at(2);
+    assert.equal(told(), 0, `${how}: ${sent.join(' | ')}`);
+    if (how === 'unpaused') {
+      // Paused again within the day, and the hand-off fails again: told.
+      w.setProduct('p2', 'paused');
+      fails = true;
+      await at(3);
+      assert.equal(told(), 1, `${how}: ${sent.join(' | ')}`);
+    }
+  }
+});

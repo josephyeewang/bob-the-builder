@@ -1,7 +1,7 @@
 // The one outbox (alerts.mjs, LEAD-CALLS L47): the sender on its own.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { queueAlert, sendAlerts, outbox, ALERT_QUEUE_FACT } from './alerts.mjs';
+import { queueAlert, sendAlerts, outbox, dropCause, settleAlert, ALERT_QUEUE_FACT } from './alerts.mjs';
 import { recWith, T0 } from './fixtures.test-helper.mjs';
 
 const queue = (rec) => rec.read('fact', ALERT_QUEUE_FACT)?.doc?.entries ?? [];
@@ -69,4 +69,40 @@ test('L47: the outbox queues and answers at once; it never calls a port, waits o
   assert.equal(queue(rec).length, 1);
   gone = true;
   assert.equal(alert('again'), false);
+});
+
+// Audit 0b-6 r7 M2: a copy that was out when its cause cleared marks nothing when it settles, delivered or not.
+test('r7 M2: a copy settled after its cause cleared writes no mark and leaves no entry', async () => {
+  const rec = recWith();
+  queueAlert(rec, 'stop failed', { now: T0, mark: mark('f-1') });
+  const [out] = queue(rec);
+  dropCause(rec, 'f-1');
+  assert.equal(queue(rec).length, 0);
+  settleAlert(rec, out, true, T0);
+  assert.equal(rec.read('fact', 'f-1')?.doc?.told_at, undefined, 'no mark on a cleared cause');
+  settleAlert(rec, out, false, T0);
+  assert.equal(queue(rec).length, 0, 'a failed copy of a cleared cause is not queued again');
+  // Through the sender: a send out when the cause clears marks nothing at settle.
+  queueAlert(rec, 'stop failed', { now: T0, mark: mark('f-2') });
+  const r = await sendAlerts(rec, () => true, T0, { sendMs: 200, later: true });
+  dropCause(rec, 'f-2');
+  r.settle();
+  assert.equal(rec.read('fact', 'f-2')?.doc?.told_at, undefined);
+  assert.equal(queue(rec).length, 0);
+});
+
+// Audit 0b-6 r7 M1: with `later`, nothing settles until the safety steps are done, so the count of dropped
+// alerts is still in the queue for the second copy; it rides on the first one only.
+test('r7 M1: in a deferred send the dropped count rides on the first copy only', async () => {
+  const rec = recWith();
+  queueAlert(rec, 'one', { now: T0 });
+  queueAlert(rec, 'two', { now: T0 });
+  const d = rec.read('fact', ALERT_QUEUE_FACT);
+  rec.write({ actor: 'dispatcher', entity: 'fact', id: ALERT_QUEUE_FACT, expectRev: d.rev, doc: { ...d.doc, dropped: 3 } });
+  const got = [];
+  const r = await sendAlerts(rec, (t) => { got.push(t); return true; }, T0, { sendMs: 200, later: true });
+  r.settle();
+  assert.deepEqual(got, ['one (3 older alerts could not be sent and were dropped)', 'two']);
+  assert.equal(rec.read('fact', ALERT_QUEUE_FACT).doc.dropped, 0);
+  assert.equal(queue(rec).length, 0);
 });

@@ -8,9 +8,9 @@ import { RULES_MISSING_FACT } from './pass.mjs';
 import { tempDir } from '../../shared/test-tmp.mjs';
 import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
-import { tick, runTick, signedInAccount, actOnDead, STEPS, ACCOUNT_FACT, LAST_PASS_FACT, STEP_ERROR_FACT } from './tick.mjs';
-import { queueAlert, sendAlerts, ALERT_QUEUE_MAX, ALERT_QUEUE_FACT } from './alerts.mjs';
-import { main } from './main.mjs';
+import { tick, runTick, signedInAccount, actOnDead, STEPS, STEP_DEADLINE_MS, ACCOUNT_FACT, LAST_PASS_FACT, STEP_ERROR_FACT } from './tick.mjs';
+import { queueAlert, sendAlerts, ALERT_QUEUE_MAX, ALERT_QUEUE_FACT, ALERT_SEND_MS, ALERT_BUDGET_MS } from './alerts.mjs';
+import { main, WATCHDOG_MARGIN_MS, RUN_DEADLINE_MS } from './main.mjs';
 import { MERGE_REQUEST } from './merges.mjs';
 import { OUTAGE_FACT } from './outage.mjs';
 import { USAGE_FACT } from './usage.mjs';
@@ -720,23 +720,42 @@ test('r5 MAT-2: an alert that fails once is sent on the next pass, for a hold an
   }
 });
 
-test('r5 MAT-2 / L47: the outbox keeps the newest entries, one per cause or text, and counts what it dropped', async () => {
+// Audit 0b-6 r7 M3: the cap counts only entries that waited through a failed send. A burst queued while
+// sending works is all sent; once the port fails, the newest ALERT_QUEUE_MAX held entries stay.
+test('r7 M3: a burst is all sent while the port works; only entries held by a failed send are capped', async () => {
   const rec = recWith([]);
   for (let i = 0; i < ALERT_QUEUE_MAX + 5; i += 1) queueAlert(rec, `t${i}`, { now: T0 });
   queueAlert(rec, 't10', { now: T0 });
   queueAlert(rec, 'stop A first', { now: T0, mark: { fact: 'stop-A', fields: { told_at: 'x' } } });
   queueAlert(rec, 'stop A again', { now: T0, mark: { fact: 'stop-A', fields: { told_at: 'y' } } });
-  const d = rec.read('fact', ALERT_QUEUE_FACT).doc;
-  const texts = d.entries.map((e) => e.text);
-  assert.equal(texts.length, ALERT_QUEUE_MAX);
+  let d = rec.read('fact', ALERT_QUEUE_FACT).doc;
+  let texts = d.entries.map((e) => e.text);
+  assert.equal(texts.length, ALERT_QUEUE_MAX + 6, 'nothing dropped before a send failed');
   assert.equal(new Set(texts).size, texts.length);
-  assert.ok(texts.includes('t10') && !texts.includes('stop A first') && texts.at(-1) === 'stop A again', texts.join(' | '));
-  assert.equal(d.dropped, 6);
+  assert.ok(!texts.includes('stop A first') && texts.at(-1) === 'stop A again', texts.join(' | '));
+  assert.equal(d.dropped ?? 0, 0);
   const got = [];
   const r = await sendAlerts(rec, (t) => got.push(t), T0, { sendMs: 100, budgetMs: 60_000 });
-  assert.equal(r.sent, ALERT_QUEUE_MAX);
-  assert.match(got[0], /6 older alerts could not be sent/);
+  assert.equal(r.sent, ALERT_QUEUE_MAX + 6);
+  assert.ok(got.every((t) => !/could not be sent/.test(t)), got[0]);
   assert.equal(rec.read('fact', 'stop-A').doc.told_at, 'y', 'the mark of the copy delivered');
+  // The port is down: every entry is held, and the newest ALERT_QUEUE_MAX stay.
+  for (let i = 0; i < ALERT_QUEUE_MAX + 6; i += 1) queueAlert(rec, `u${i}`, { now: T0 });
+  await sendAlerts(rec, () => false, T0, { sendMs: 100 });
+  d = rec.read('fact', ALERT_QUEUE_FACT).doc;
+  texts = d.entries.map((e) => e.text);
+  assert.equal(texts.length, ALERT_QUEUE_MAX);
+  assert.equal(d.dropped, 6);
+  assert.ok(texts.includes('u0') && !texts.includes('u1') && texts.includes('u55'), 'the failed one goes to the back, the oldest held go: ' + texts.slice(0, 3).join(' | '));
+  // A new entry queued while the port is down is not held yet, so it is never dropped before its first try.
+  queueAlert(rec, 'fresh', { now: T0 });
+  assert.equal(rec.read('fact', ALERT_QUEUE_FACT).doc.entries.length, ALERT_QUEUE_MAX + 1);
+  const later = [];
+  await sendAlerts(rec, (t) => later.push(t), T0, { sendMs: 100, budgetMs: 60_000 });
+  assert.match(later[0], /6 older alerts could not be sent/);
+  assert.ok(later.slice(1).every((t) => !/could not be sent/.test(t)), 'the count rides on one copy');
+  assert.ok(later.includes('fresh'));
+  assert.deepEqual(rec.read('fact', ALERT_QUEUE_FACT).doc.entries, []);
 });
 
 // L47: no safety step waits on a send. The alert port hangs for good: the failed stop is told, the undo
@@ -789,7 +808,7 @@ test('r5 MAT-1: `node main.mjs` with a wiring that never finishes is ended by th
     const started = Date.now();
     const r = spawnSync(process.execPath, [join(here, 'main.mjs'), config], { encoding: 'utf8', timeout: 40_000, killSignal: 'SIGKILL' });
     assert.ok(Date.now() - started < 30_000, `${label}: ended by the watchdog, not by the test's own limit`);
-    assert.match(r.stderr, /the pass was blocked past 5200 ms; the watchdog ends it/, `${label}: ${r.status} ${r.signal} ${r.stderr}`);
+    assert.ok(r.stderr.includes(`the pass was blocked past ${200 + WATCHDOG_MARGIN_MS} ms; the watchdog ends it`), `${label}: ${r.status} ${r.signal} ${r.stderr}`);
   }
 });
 
@@ -819,7 +838,7 @@ export async function wire() {
   const r = spawnSync(process.execPath, [join(here, 'main.mjs'), config], { encoding: 'utf8', timeout: 40_000 });
   assert.equal(r.signal, 'SIGKILL', `${r.status} ${r.stderr}`);
   assert.ok(Date.now() - started < 30_000, 'ended by the watchdog, not by the port giving up after a minute');
-  assert.match(r.stderr, /the pass was blocked past 5200 ms; the watchdog ends it/);
+  assert.ok(r.stderr.includes(`the pass was blocked past ${200 + WATCHDOG_MARGIN_MS} ms; the watchdog ends it`), r.stderr);
   assert.ok(JSON.parse(readFileSync(lockFile, 'utf8')).pid, 'the killed run left its lock');
   // The next start breaks the dead lock and tells Joe, once a day.
   const w = world([account(), usage()]);
@@ -868,4 +887,65 @@ test('r5 m4: a step error that changes only in a number is told once; an untold 
   const f = down.rec.read('fact', 'step-error-outage')?.doc;
   assert.equal(f?.error, 'board unreadable');
   assert.ok(!f?.told_at, 'not marked told');
+});
+
+// Audit 0b-6 r7 M1: a pass blocked inside a safety step, every time. The alert the next start queues (the
+// lock it broke) still reaches the working port, because the tick's first send starts alongside the safety
+// steps instead of after them.
+test('r7 M1: a pass blocked every time still delivers the broken-lock alert to a working port', { timeout: 120_000 }, () => {
+  const dir = tempDir('m11-r7m1-');
+  const here = fileURLToPath(new URL('.', import.meta.url));
+  const sent = join(dir, 'sent.txt');
+  const wiring = join(dir, 'wiring.mjs');
+  writeFileSync(wiring, `import { recWith, rulesWith } from ${JSON.stringify(join(here, 'fixtures.test-helper.mjs'))};
+import { appendFileSync } from 'node:fs';
+const rec = recWith([['product', 'p1', { state: 'active' }]]);
+export async function wire() {
+  const noop = () => [];
+  const block = () => { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 60000); return []; };
+  return { rec, rules: rulesWith(), ports: { alert: async (t) => { appendFileSync(${JSON.stringify(sent)}, t + '\\n'); return true; }, board: noop, healthy: () => true, outboxSessions: noop, wait: async () => {}, leads: noop,
+    sessions: block, probe: () => null, launch: async () => ({ ok: false }), stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }),
+    hasSession: () => true, gateAlive: () => true, hasReviewer: () => true, startReviewer: async () => ({ ok: true }), filesOf: noop,
+    sendFrontDoor: async () => ({}), restartFrontDoor: async () => ({ ok: true }), startMinibase: async () => ({ ok: true }),
+    cleanup: { copiesRoot: ${JSON.stringify(dir)}, sealRoot: ${JSON.stringify(dir)}, mirrorFor: () => null } } };
+}
+`);
+  const config = join(dir, 'config.json');
+  writeFileSync(config, JSON.stringify({ wiring, lockFile: join(dir, 'pass.lock'), runDeadlineMs: 200 }));
+  for (let i = 0; i < 2; i += 1) {
+    const r = spawnSync(process.execPath, [join(here, 'main.mjs'), config], { encoding: 'utf8', timeout: 60_000 });
+    assert.equal(r.signal, 'SIGKILL', r.stderr);
+  }
+  let got = '';
+  try { got = readFileSync(sent, 'utf8'); } catch { /* nothing sent */ }
+  assert.match(got, /was stopped before it finished/, 'the broken-lock alert reached the working port');
+});
+
+// Audit 0b-6 r7 M2: a copy of an alert out while its cause clears marks nothing, so the next time the cause
+// comes back it is told. Here the stops step fails while the port is down, then works (the port is back and
+// the early send delivers the old copy alongside the step), then fails again within the day.
+test('r7 M2: a step error that cleared while its alert was out is told again when it comes back', async () => {
+  let broken = true;
+  let down = true;
+  const sent = [];
+  const w = world([account(), usage()], { over: {
+    sessions: () => { if (broken) throw new Error('no session list'); return []; },
+    alert: async (t) => { if (down) throw new Error('no network'); sent.push(t); return true; } } });
+  await w.pass(0);
+  assert.equal(sent.length, 0);
+  broken = false; down = false;
+  await w.pass(1);
+  assert.ok(!w.rec.read('fact', STEP_ERROR_FACT('stops'))?.doc?.told_cause, 'a cleared cause carries no told mark');
+  const before = sent.filter((t) => /stops step failed/.test(t)).length;
+  broken = true;
+  await w.pass(2);
+  assert.equal(sent.filter((t) => /stops step failed/.test(t)).length, before + 1, sent.join(' | '));
+});
+
+// Audit 0b-6 r7 m1: every step at its deadline, plus both sends at their budget, ends inside the run deadline,
+// and the watchdog leaves the late send its time.
+test('r7 m1: the run deadline holds every step and both sends; the watchdog margin holds the late send', () => {
+  assert.ok(RUN_DEADLINE_MS >= STEPS.length * STEP_DEADLINE_MS + 2 * ALERT_BUDGET_MS, `${RUN_DEADLINE_MS}`);
+  assert.ok(ALERT_BUDGET_MS >= ALERT_SEND_MS);
+  assert.ok(WATCHDOG_MARGIN_MS > ALERT_SEND_MS, `${WATCHDOG_MARGIN_MS}`);
 });

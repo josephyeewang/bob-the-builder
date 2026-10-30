@@ -42,7 +42,7 @@ import { undoStep } from './undo.mjs';
 import { phoneLinkStep } from './phone-link.mjs';
 import { cleanupPass } from './cleanup.mjs';
 import { move, waitOn, note } from './moves.mjs';
-import { outbox, tellThen, sendAlerts } from './alerts.mjs';
+import { outbox, tellThen, sendAlerts, dropCause } from './alerts.mjs';
 import { takePassLock } from './pass-lock.mjs';
 
 export const STEPS = Object.freeze(['stops', 'undo', 'undo-starts', 'outage', 'intake', 'leads', 'pass', 'limits', 'merges', 'phone', 'cleanup']);
@@ -87,8 +87,15 @@ export function actOnDead({ rec, now, restart, asks, cards = {} }) {
  */
 export async function tick({ rec, rules, now, ports: p }) {
   const res = {};
-  // Every alert is queued (alerts.mjs, L47): no step sends or waits on a send. The queue is sent at the end.
+  // Every alert is queued (alerts.mjs, L47): no step sends or waits on a send.
   const alert = outbox(rec, now);
+  const sendOpts = { ...(p.alertSendMs !== undefined && { sendMs: p.alertSendMs }) };
+  // What past passes left queued, the broken-lock alert among them, starts going out now, alongside the
+  // safety acts (audit 0b-6 r7 M1): a pass killed in any step, the first safety act included, still tells.
+  // Nothing awaits it until the safety acts are done, and what it delivered is marked only then, so no
+  // safety act has a fact changed under it. The port is called first, in this tick's first microtask, so
+  // it must start its send and return at once (README, "The tick's ports").
+  const early = sendAlerts(rec, p.alert, now, { ...sendOpts, later: true });
   let bands = null;
   let running = [];
   const deadline = p.stepDeadlineMs ?? STEP_DEADLINE_MS;
@@ -99,7 +106,7 @@ export async function tick({ rec, rules, now, ports: p }) {
     try {
       const late = new Promise((_, no) => { timer = setTimeout(() => no(new Error(`it did not finish within ${deadline} ms`)), deadline); });
       res[step] = { ok: true, result: await Promise.race([Promise.resolve().then(f), late]) };
-      if (rec.read('fact', STEP_ERROR_FACT(step))?.doc?.error) putFact(rec, STEP_ERROR_FACT(step), { error: null, at: iso(now) }, 'step_ok');
+      if (rec.read('fact', STEP_ERROR_FACT(step))?.doc?.error) { putFact(rec, STEP_ERROR_FACT(step), { error: null, at: iso(now) }, 'step_ok'); dropCause(rec, STEP_ERROR_FACT(step)); }
     } catch (e) {
       const error = String(e?.message ?? e);
       res[step] = { ok: false, error };
@@ -134,7 +141,9 @@ export async function tick({ rec, rules, now, ports: p }) {
     return { started: r.started, refused: r.refused, notes: r.notes };
   });
 
-  // Alerts a past pass could not send go out now, after the safety acts (audit 0b-6 r5 MAT-2).
+  // The early send finishes, and is marked, before any other step, so it never races a later step's writes.
+  const first = await early;
+  first.settle();
   let outageOpen = false;
   // A failing outage step falls back on the record (audit 0b-6 r3 MIN-1): an open outage still holds.
   try { outageOpen = rec.read('fact', OUTAGE_FACT)?.doc?.state === 'open'; } catch { outageOpen = true; }
@@ -199,8 +208,9 @@ export async function tick({ rec, rules, now, ports: p }) {
   await run('cleanup', () => cleanupPass({ rec, rules, now, ...p.cleanup, alert }));
 
   putFact(rec, LAST_PASS_FACT, { at: iso(now), steps: Object.fromEntries(STEPS.map((s) => [s, res[s]?.ok ? 'ok' : 'failed'])) }, 'full_pass');
-  // The one sender (alerts.mjs), last: every step, the safety acts first, has run before any send is waited on.
-  const alerts = await sendAlerts(rec, p.alert, now, { ...(p.alertSendMs !== undefined && { sendMs: p.alertSendMs }), budgetMs: deadline });
+  // The one sender (alerts.mjs) again, last: this pass's own alerts.
+  const last = await sendAlerts(rec, p.alert, now, sendOpts);
+  const alerts = { sent: first.sent + last.sent, failed: first.failed + last.failed, left: last.left };
   return { steps: res, alerts };
 }
 

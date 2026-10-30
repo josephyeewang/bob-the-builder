@@ -205,3 +205,23 @@ test('r5 MAT-2: a link alert that fails is told at the next try, once', async ()
     assert.equal(sent.filter((t) => /tries to reconnect it failed/.test(t)).length, 1, sent.join(' | '));
   }
 });
+
+// Audit 0b-6 r7 M2: the link came back while its alert was still queued. That copy leaves unsent, so it can
+// neither tell Joe about an outage that has passed nor mark the next outage as told.
+test('r7 M2: an outage alert queued while the port was down is dropped when the link comes back; the next outage is told', async () => {
+  const rec = recWith();
+  const fact = (id, value, atMin) => { const cur = rec.read('fact', id); rec.write({ actor: 'dispatcher', entity: 'fact', id, expectRev: cur?.rev ?? 0, doc: { value, observed_at: iso(T0 + atMin * MIN) } }); };
+  const read = (m, fd) => { fact(FACTS.network, true, m); fact(FACTS.reachable, fd, m); fact(FACTS.minibase, true, m); };
+  let up = false;
+  const got = [];
+  const port = (t) => { if (!up) throw new Error('no network'); got.push(t); return true; };
+  const step = (m) => withAlerts(rec, T0 + m * MIN, port, (a) => phoneLinkStep({ rec, rules: rulesWith(), now: T0 + m * MIN, send: async () => ({ outcome: 'sent' }), restartFrontDoor: async () => ({ ok: true }), startMinibase: async () => ({ ok: true }), alert: a }));
+  let m = 0;
+  for (; m <= 16; m += 1) { read(m, false); await step(m); }
+  assert.equal(got.length, 0);
+  assert.ok(rec.read('fact', 'alert-unsent').doc.entries.some((e) => e.mark?.fact === LINK_FACT), 'the outage alert is queued');
+  m = 17; read(m, true); up = true; await step(m);
+  assert.equal(got.length, 0, 'the passed outage is not told');
+  for (m = 18; m <= 60; m += 1) { read(m, false); await step(m); }
+  assert.equal(got.filter((t) => /cannot reach the Front Door/.test(t)).length, 1, got.join(' | '));
+});
