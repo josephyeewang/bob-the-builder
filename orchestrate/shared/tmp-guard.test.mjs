@@ -1,29 +1,42 @@
-// tmp-guard.test.mjs — the tests in lane 1's folders leave no temp folder behind, pass or fail (lead, 29 Oct 2026:
-// leftover test folders filled a Mac's disk). Run: node --test orchestrate/shared/
+// tmp-guard.test.mjs — orchestrate's tests leave no temp folder behind, pass or fail (lead, 29 Oct 2026: leftover
+// test folders filled a Mac's disk). Run: node --test orchestrate/shared/
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { tempDir } from './test-tmp.mjs';
-import { readdirSync, readFileSync, existsSync, writeFileSync, chmodSync } from 'node:fs';
-import { join, dirname } from 'node:path';
+import { tempDir, OURS } from './test-tmp.mjs';
+import { readdirSync, readFileSync, writeFileSync, chmodSync, existsSync } from 'node:fs';
+import { join, dirname, relative } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { spawnSync } from 'node:child_process';
 
 const here = dirname(fileURLToPath(import.meta.url));
-const FOLDERS = ['../modules/M10-rules', '../modules/M9-record', '../modules/M2-approvals', '../modules/M6-merge-gate', '.'].map((d) => join(here, d));
-const OURS = /^m(10|9|2|6)-/;
-const mjs = (dir) => (existsSync(dir) ? readdirSync(dir, { recursive: true }).filter((n) => n.endsWith('.mjs')).map((n) => join(dir, n)) : []);
+const ROOT = join(here, '..');   // orchestrate/
+const SELF = fileURLToPath(import.meta.url);
 const HELPER = join(here, 'test-tmp.mjs');
+const rel = (f) => relative(ROOT, f).split('\\').join('/');
+const ALL = readdirSync(ROOT, { recursive: true }).map((n) => join(ROOT, n)).filter((f) => f.endsWith('.mjs') && !f.includes('node_modules'));
+
+// Files that still make their own temp folder, with the prefix they use. Each lane deletes its line when it switches
+// to tempDir(); the first test fails if a listed file no longer needs the line, so the list can't go stale.
+const NOT_SWITCHED_YET = {
+  'modules/M1-front-door/round4.test.mjs': 'air-',
+  'modules/M12-sensors/history.test.mjs': 'hist-',
+  'modules/M12-sensors/shell-guard/runner.test.mjs': 'sg-',
+};
+
 // A nested run must not inherit this runner's NODE_TEST_CONTEXT, or it reports to us instead of running the files
 // (seen 29 Oct 2026: the whole-run check passed while the files it named left 57 folders).
 const cleanEnv = (extra = {}) => { const e = { ...process.env, ...extra }; delete e.NODE_TEST_CONTEXT; return e; };
 
-test('no code in these folders makes a temp folder except through test-tmp.mjs', () => {
-  for (const f of FOLDERS.flatMap(mjs)) {
-    if (f === HELPER || f === fileURLToPath(import.meta.url)) continue;
+test('no orchestrate code makes a temp folder except through test-tmp.mjs (bar the files not switched yet)', () => {
+  for (const f of ALL) {
+    if (f === HELPER || f === SELF) continue;
     const text = readFileSync(f, 'utf8');
-    assert.doesNotMatch(text, /mkdtemp|tmpdir\s*\(/, `${f} makes its own temp folder; use tempDir() from shared/test-tmp.mjs`);
-    if (/\btempDir\(/.test(text)) assert.match(text, /^import \{[^}]*\btempDir\b[^}]*\} from '[./]+(shared\/)?test-tmp\.mjs';$/m, `${f} must import tempDir at the top`);
+    const own = /mkdtemp|tmpdir\s*\(/.test(text);
+    if (rel(f) in NOT_SWITCHED_YET) assert.ok(own, `${rel(f)} no longer makes its own temp folder: delete its line in NOT_SWITCHED_YET`);
+    else assert.ok(!own, `${rel(f)} makes its own temp folder; use tempDir() from shared/test-tmp.mjs`);
+    if (/\btempDir\(/.test(text)) assert.match(text, /^import \{[^}]*\btempDir\b[^}]*\} from '[./]+(shared\/)?test-tmp\.mjs';$/m, `${rel(f)} must import tempDir at the top`);
   }
+  for (const f of Object.keys(NOT_SWITCHED_YET)) assert.ok(existsSync(join(ROOT, f)), `${f} is gone: delete its line in NOT_SWITCHED_YET`);
 });
 
 test('a test that fails still removes its temp folder, even one it locked', () => {
@@ -31,7 +44,7 @@ test('a test that fails still removes its temp folder, even one it locked', () =
 import { tempDir } from ${JSON.stringify(pathToFileURL(HELPER).href)};
 import { writeFileSync, chmodSync } from 'node:fs';
 test('planned failure', () => {
-  const d = tempDir('m10-guard-');
+  const d = tempDir('orch-guard-');
   writeFileSync(d + '/x.md', 'x'); chmodSync(d + '/x.md', 0o400); chmodSync(d, 0o500);
   console.log('DIR=' + d);
   throw new Error('planned');
@@ -43,19 +56,22 @@ test('planned failure', () => {
   assert.equal(existsSync(dir), false, `${dir} was left behind`);
 });
 
-test('a whole run of these folders\' tests leaves no m10-, m9-, m2- or m6- folder in the temp folder', () => {
-  const tmp = tempDir('m10-guardrun-');
-  const files = FOLDERS.flatMap(mjs).filter((f) => f.endsWith('.test.mjs') && f !== fileURLToPath(import.meta.url));
+test('a whole run of every orchestrate suite leaves no lane\'s temp folder behind', () => {
+  const tmp = tempDir('orch-guardrun-');
+  const files = ALL.filter((f) => f.endsWith('.test.mjs') && f !== SELF);
   assert.ok(files.length >= 10, 'found the test files');
-  const run = spawnSync(process.execPath, ['--test', ...files], { encoding: 'utf8', env: cleanEnv({ TMPDIR: tmp, TMP: tmp, TEMP: tmp }) });
+  const run = spawnSync(process.execPath, ['--test', ...files], { encoding: 'utf8', env: cleanEnv({ TMPDIR: tmp, TMP: tmp, TEMP: tmp }), maxBuffer: 64 * 1024 * 1024 });
   assert.equal(run.status, 0, run.stdout.slice(-2000) + run.stderr.slice(-2000));
-  assert.deepEqual(readdirSync(tmp).filter((n) => OURS.test(n)), []);
+  const tolerated = Object.values(NOT_SWITCHED_YET);
+  const left = readdirSync(tmp).filter((n) => OURS.test(n) && !tolerated.some((p) => n.startsWith(p)));
+  assert.deepEqual(left, []);
 });
 
-test('tempDir only takes a lane-1 prefix, so every folder it makes is one this guard looks for', () => {
-  for (const p of ['roles-', 'm10-', 'm10-x', 'x-m10-a-', '../m10-a-', 'm10-a/b-', 7]) assert.throws(() => tempDir(p), String(p));
-  // A folder made with the right prefix starts with one the guard checks.
-  assert.match(tempDir('m9-check-').split('/').pop(), OURS);
+test('tempDir only takes a known lane prefix, so every folder it makes is one this guard looks for', () => {
+  for (const p of ['m10-x', 'x-m10-a-', '../m10-a-', 'm10-a/b-', 'M10-', 'foo-', '-', 'm123-', 7]) assert.throws(() => tempDir(p), String(p));
+  for (const p of ['m1-', 'm4-a-', 'm11-', 'm12-x-', 'm13-', 'orch-', 'air-', 'sg-', 'hist-', 'roles-', 'scan-', 'm10-reader-', 'm9-b-c-']) {
+    assert.match(tempDir(p).split('/').pop(), OURS, p);
+  }
   writeFileSync(join(tempDir('m6-check-'), 'a'), 'a');
   chmodSync(tempDir('m2-check-'), 0o500);
 });

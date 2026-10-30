@@ -1,10 +1,11 @@
 // test-tmp.mjs — temp folders for tests that are always removed, pass or fail.
 //
-// WHY. Test temp folders that were never removed filled a Mac's disk (lead, 29 Oct 2026). Every test that needs a
-// folder asks here; tmp-guard.test.mjs fails any test file in these folders that calls mkdtemp itself.
+// WHY. Test temp folders that were never removed filled a Mac's disk (lead, 29 Oct 2026). Every orchestrate test that
+// needs a folder asks here; tmp-guard.test.mjs fails any orchestrate file that calls mkdtemp itself (bar the files it
+// lists as not switched yet) and any whole run that leaves one of these folders behind.
 //
 //   import { tempDir } from '../../shared/test-tmp.mjs';
-//   const dir = tempDir('m10-reader-');   // removed by an after() hook when this test file ends, even on failure
+//   const dir = tempDir('m10-reader-');   // a lane or module prefix (PREFIX below), then a name, then '-'   // removed by an after() hook when this test file ends, even on failure
 //
 // After removing them, the hook checks each folder is gone and fails the run if one is left. Import this module at
 // the top of the test file (a static import), never inside a test.
@@ -13,6 +14,10 @@ import { mkdtempSync, rmSync, existsSync, chmodSync, readdirSync, lstatSync } fr
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after } from 'node:test';
+
+// Every lane's prefixes: a module (m1-, m10-, ...) or one of the names lanes already use. The guard looks for these.
+export const PREFIX = /^(m\d{1,2}|orch|air|sg|hist|roles|scan)-([a-z0-9-]*-)?$/;
+export const OURS = /^(m\d{1,2}|orch|air|sg|hist|roles|scan)-/;
 
 const made = [];
 // Hooked when this file is first imported, at the top level: an after() first called inside a test body belongs to that
@@ -43,7 +48,7 @@ export function removeAll() {
 }
 
 export function tempDir(prefix) {
-  if (typeof prefix !== 'string' || !/^m(10|9|2|6)-[a-z0-9-]+-$/.test(prefix)) throw new Error(`temp prefix must look like m10-name-: ${prefix}`);
+  if (typeof prefix !== 'string' || !PREFIX.test(prefix)) throw new Error(`temp prefix must look like m10-name- or orch-: ${prefix}`);
   const dir = mkdtempSync(join(tmpdir(), prefix));
   made.push(dir);
   return dir;
