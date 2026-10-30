@@ -1,10 +1,11 @@
 # Audit Memory — Persistent History + Entry Experience
+<!-- living doc -->
 
-> Joe will not remember what audits were run, when, or which lenses were used. Bob's audit memory makes that irrelevant — every AUDIT mode entry surfaces history + offers four options.
+> The user will not remember what audits were run, when, or which lenses were used. Bob's audit memory makes that irrelevant — every AUDIT mode entry surfaces history + offers four options.
 
 ## Why audit memory matters
 
-The realistic UX: Joe types "let's audit the consumer app" or invokes AUDIT mode. He does NOT remember which lenses ran last time. He does NOT want to choose from a full lens menu cold. He wants Bob to remind him + offer sensible choices.
+The realistic UX: the user types "let's audit the consumer app" or invokes AUDIT mode. They do NOT remember which lenses ran last time. They do NOT want to choose from a full lens menu cold. They want Bob to remind them + offer sensible choices.
 
 This document defines:
 1. The audit-history file format
@@ -17,7 +18,7 @@ This document defines:
 | File | Purpose |
 |---|---|
 | `audit-artifacts/audit-history.json` | Machine-readable audit log; aggregation tooling reads/writes |
-| `audit-artifacts/audit-history.md` | Human-readable mirror; Joe reads when curious |
+| `audit-artifacts/audit-history.md` | Human-readable mirror; the user reads when curious |
 | `audit-artifacts/audit-summary-{YYYY-MM-DD}.md` | Per-run summary (from `_aggregation.md`) |
 | `audit-artifacts/L{NN}-{slug}-{YYYY-MM-DD}.md` | Per-lens report (one per lens per run) |
 | `audit-artifacts/L{NN}-{slug}-{YYYY-MM-DD}.json` | Per-lens JSON sidecar |
@@ -147,7 +148,7 @@ Which? (1 / 2 / 3 / 4)
 
 ### Step 5 — Wait for response
 
-`→ HG`. Do not auto-proceed. Joe picks.
+`→ HG`. Do not auto-proceed. The user picks.
 
 ### Step 6 — Confirm and run
 
@@ -218,7 +219,7 @@ Which?
 
 Each audit run logs `user_swaps_from_recommended`. Over time, if users consistently swap L09 out of Panel A or add L11 in, the selection rubric updates. This is how the rubric improves over usage.
 
-## Cross-machine handoff (Joe's multi-machine model)
+## Cross-machine handoff (the user's multi-machine setup)
 
 `audit-artifacts/` lives in the git repo, so audit history syncs seamlessly across a multi-machine setup. No special handoff logic needed beyond standard git.
 

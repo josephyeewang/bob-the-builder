@@ -1,5 +1,7 @@
 # Bob Dogfood Retro — a data product build (2026-06-18)
 
+> 📸 **Snapshot — not a living doc.** A point-in-time record kept for history; the rules it fed now live in `rules.md` and the failure-mode index.
+
 > Anonymized record of the build that produced **v2.26 + v2.27** (Rules 15–21, lenses L35–L36, the Maturity-Stage axis, the Divergent-Ideation step, default-early coverage, the deferred-actions template). This is the canonical instance of Bob's **build → multi-frame retro → harvest-into-protocol** loop. Keep it: the *origins* matter more than the changelog one-liners. Product-specific detail has been removed; only the process lessons remain.
 
 ## What happened

@@ -522,6 +522,67 @@ The companion `audit-log.md` records *deferred* items (Defer verdicts that may s
 - **Consequences:** The core went from about 48.7 KB to about 40.6 KB, and the startup file from about 13.5 KB to about 8.8 KB. An installed Bob from before this change shows "latest=?" in its update offer for one cycle, because its update check looks for the old core line upstream; once updated, it reads `VERSION`. A session that needs the AUDIT or UPGRADE detail reads one more file. Text another session owns stays unchecked until that session fixes it and deletes its `SKIP` line.
 - **Revisit trigger:** the NEW-mode rewrite lands. Then delete the `SKIP` entries for the text it fixed, in the same change (a `SKIP` entry that hides nothing fails the check), and run the check over that text. Or: the check flags honest text it should allow.
 
+
+### D-033: Four more rules get a check, one rule's how-to keeps one home, and the method stops naming its author as the user
+
+- **Date:** 2026-10-29
+- **Status:** Accepted
+- **Context:** The audit of how Bob is organized (the one behind D-032) left eight smaller findings open:
+  - 28 of the 33 rules had nothing enforcing them, including the reconciliation rule (Rule 4) and the safety setup for hands-off builds (Rule 27).
+  - Rule 27's how-to was written out twice: in `rules.md`, and in the Supervised Autonomy section of `build-protocol.md`.
+  - "Tier 1" meant three different things in the core.
+  - The two design skills were installed on the author's machine only by hand.
+  - About 40 method lines spoke of the author by name as if they were the reader.
+  - Several small findings:
+    - one retro was linked from nowhere;
+    - five files the consistency check flagged as dated carried neither a snapshot note nor a living-doc marker;
+    - the integration playbooks' numbers L1–L11 clashed with the audit lenses L01–L38;
+    - the four history folders sat at the top level.
+- **Decision:**
+  - (1) **Five new checks**, each tied to a rule, tested in the self-test, and reached from the phase gate (items 13–15), the Supervised Autonomy runbook (its new step 0) or Bob's CI:
+    - `scripts/phase-report-check.mjs` (Rule 4; Phase Gate 13). It refuses a phase report whose always-required sections are missing, empty, or still the template's placeholder text. It reads the section list from `templates/phase-report.md`, so that list keeps one home.
+    - `scripts/run-commands-check.mjs` (Rule 26 and Engineering Principle 8b; Phase Gate 14). It compares a change with git and refuses when a run config (package script, CI step, Makefile, Procfile, schedule …) still names a file the change deleted or renamed, or a Python file that lost its run block.
+    - `scripts/autonomy-check.mjs` (Rule 27; runbook step 0). It runs before a hands-off phase and checks the deny and ask rules, a green gate with a retry limit and a real test command, a reviewer that cannot edit, no ignored `defaultMode: "auto"`, and no production key in the settings.
+    - `scripts/recurrence-check.mjs` (Rule 31; Phase Gate 15). It reads `Class:` and `Rung:` lines in fix commits and refuses a class fixed twice whose newest fix is below rung 3.
+    - `scripts/rule-tags-check.mjs` (Rule 33, in Bob's CI). Every rule the index tags as checked must name a script that exists and that CI or the self-test runs.
+    - Each check exits 2 (cannot judge) rather than 0 when it has nothing to read (Rule 29).
+    - A fourth review, of the rebuilt run-commands check, found that it passed without comparing anything when there was no base (on main, in a shallow CI clone), that it read any mention of a file as "runs" (a workflow's `paths:` filter, package.json "files", a comment), and that it missed a module run with `python -m`. It now needs a base (or says it cannot judge), reads only the parts of each config that run things, and matches modules. CI fetches the full history and passes the pull request's base. A commit with a `Class:` line and no `Rung:` line now counts as a mention, not a fix.
+    - A third review found the remaining edge cases: italic text in a report, a retry limit written as a plain number, class names that differ only in case or a trailing full stop, and a later commit that names a class without a rung. Each was fixed and became a self-test. Rule 4 is tagged `SCRIPT` (in part), because the check can see that "Spec Deviations" was filled in, not that what it says is true.
+    - A fresh review found nine serious problems in the first version, most of them false alarms on healthy projects. All were fixed and turned into self-tests before release:
+      - the phase-report check now accepts other heading styles, "None" lines, "N/A" lines (in an always-required section only with a reason, from round 6), and the short report the Minimum Viable Process allows (`--abbreviated`);
+      - the run-commands check (first design, since replaced — see Consequences) learned to follow `cd`, workflow defaults and build output;
+      - the autonomy check ignores personal Stop hooks, accepts an overridable retry limit, refuses a reviewer with no tools line, and reports a project that was never set up as "cannot judge" rather than as six failures;
+      - the recurrence check reads the `Class:` / `Rung:` lines on their own lines outside code blocks;
+      - the rule-tags check needs a real call, not a mention in a comment, and compares the whole tag. It found that Rule 32 was tagged one way in `rules.md` and another in the index, and that was fixed.
+    - A second fresh review found eight more. They were fixed the same way, and again each became a self-test:
+      - the run-commands check was narrowed to commands it could read for sure (a third review still found shapes it got wrong, so it was rebuilt; see Consequences);
+      - the phase-report check keeps sub-headings inside their section, accepts "None" or "N/A — reason" in a heading, and reads the short-report list from the template;
+      - the autonomy check understands the hook quoting Claude Code's docs use, retry limits written in any language, and stricter deny rules;
+      - the recurrence check reads `Class:` / `Rung:` lines anywhere outside code blocks, so a Co-Authored-By line after them is fine;
+      - the rule-tags check matches a script's own path.
+
+      The review also showed that two tags claimed more than was wired, so the recurrence check became Phase Gate 15 and the autonomy check became step 0 of the Supervised Autonomy runbook.
+    - The Supervised Autonomy setup text no longer tells users to set `defaultMode` to "auto" in the project file, which the runbook and the new check both say does nothing.
+
+    The index now lists 24 rules as written-only, down from 28. Rule 22 (the pre-build gate) was not given a check here, because its text and the build manifest it would read are in the NEW mode, which the ORCHESTRATE session is rewriting.
+  - (2) Rule 27 in `rules.md` keeps the rule, its hard boundaries, the new setup check and a pointer. The how-to lives only in `build-protocol.md` § Supervised Autonomy. The one detail that section lacked (diff the test files; prefer a reviewer from a different model family) was added to its runbook step 4, with its owner's agreement.
+  - (3) Rule 31's ladder steps are called rungs. The Minimum Viable Process groups are "Never skip / Skip with caution / Skip first". In the core and `rules.md`, "Tier" now means only Rule 30's tiers (a few lenses keep tiers of their own, such as L34's).
+  - (4) `bob-doctor.sh` checks that both design skills are linked from the same Bob copy and prints the line to paste if not. The README install prompt asks for all three skills.
+  - (5) Method text says "the user" where it meant whoever is using Bob, and "Bob's author" where it records where an idea came from. Credit, licence and dated source lines keep the name. ORCHESTRATE's own files are left to their owner.
+  - (6) The playbooks are numbered P1–P11. The retros carry a snapshot note. Three living files carry `<!-- living doc -->`. The orphan retro is linked from Rule 32.
+- **Alternatives considered:**
+  - Group `evolutions/`, `retros/`, `lens-retros/` and `fixtures/` under one `history/` folder. Not done, by choice: `fixtures/` is test data that ORCHESTRATE's tests and the failure-mode check read; the others are linked from dated changelog and decision-log entries that must not be rewritten; and `AGENTS.md`'s file map already groups them as history. A cosmetic gain did not justify breaking those links.
+  - A recurrence check that guesses the class from the commit wording. Rejected: it would raise false alarms, and Rule 31 says a check that cries wolf gets muted. It reads explicit lines instead, and says so when there are none.
+  - Build a check for Rule 22 now. Deferred to the NEW-mode rewrite, for the reason above.
+- **Consequences:**
+  - The phase gate has 15 items.
+  - A project's fix commits need two short lines of their own for the recurrence check to see them; the phase report's class-level scan section now says so. Without those lines it reports "cannot judge", never "clean".
+  - The autonomy check reads only the project's own settings, because personal rules do not travel with the project. A user whose deny rules live only in their personal settings is told to add them to the project.
+  - The run-commands check was rebuilt after the third review. Its first design read every run command and judged whether the file it named existed. Each of three fresh reviews found new healthy command shapes it judged wrong: wrappers, subshells, monorepo filters, files made while the job runs, `.ONESHELL` Makefiles. That is three rounds of the same fix failing, so the approach was changed rather than patched a fourth time. It now judges the change: it asks git what the change deleted, renamed or stripped of its run block, and refuses only when a run config still names that file. Replayed one commit at a time over more than 1,600 commits of real history in six projects, it raised no false alarm. A sixth review replayed about 720 more real commits: one refusal, and it was a real break (a job moved into a package while a weekly workflow still ran it by its old name). The fifth and sixth reviews also found healthy changes it still refused, built on purpose rather than seen in history: a rename into rebuilt output, a zero-indented `paths:` list, a script moved together with its run folder, a build output named like the source it is built from, and a run block dropped from a file that is imported, not run. Each was fixed and became a self-test. A seventh review found one more: a file moved to a sub-folder under the same name and run by its bare name from a working folder. Such a line now counts when this change left it untouched, and is trusted when this change rewrote it to point at the new place. An eighth review found two more: a YAML key read as a Python module (`  worker:`), and a module turned into a package (`pkg/cli.py` → `pkg/cli/__init__.py`) read as a move. Both were fixed and became self-tests. A ninth review found the wrap itself slipping through: the old file made a shim beside a new file of the same name. An untouched line is now judged against the files that existed when it was written, so the shim is still caught. A tenth review replayed about 1,180 real commits with no false alarm and found one last gap: Docker's list form of a command (`CMD ["python", "x.py"]`), now read like the plain form. Each round's findings were narrower than the last; the tenth round's single serious one was fixed and tested, and the work shipped on that. On main or in a CI clone it needs `--base`, and without one it says it cannot judge. The cost is deliberate: it cannot see a command that was already broken before the change.
+  - The autonomy check, run on a fresh `bob-init` project, refuses only the test command the user has not filled in yet. That is deliberate: until it is filled in, the gate blocks every stop.
+- **Revisit trigger:**
+  - The NEW-mode rewrite lands: build the Rule 22 check.
+  - Or: any of the new checks raises a false alarm on a healthy project. Fix the check or remove it; never mute it.
 ---
 
 ## Anti-pattern reminder

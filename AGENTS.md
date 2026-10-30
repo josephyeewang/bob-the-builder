@@ -61,7 +61,7 @@ Bob's Step 1a requires every product to declare success metrics. Bob is a produc
 - **Fix-commit ratio in projects using Bob** — target <30% (baseline: prior projects ran 70%). *Current: unmeasured externally; requires per-project manual git-log analysis. See A7g findings (v2.10 changelog).*
 - **Deviation count declining over consecutive phases** — Build Manifest tracks this column per phase. *Current: unmeasured at adoption scale.*
 - **Audit findings at hardening** — target <10 critical items at Step [N+1]. *Current: unmeasured externally.*
-- **Non-engineer can complete a build end-to-end without engineer hand-holding** — qualitative. *Current: Joe (target persona) is the only verified data point.*
+- **Non-engineer can complete a build end-to-end without engineer hand-holding** — qualitative. *Current: Bob's author (the target persona) is the only verified data point.*
 
 **Honest gap:** four of five metrics above are structurally unmeasured because Bob has no telemetry by design. The Step [N+2] PR-back template (v2.11) is the lightweight feedback mechanism — users self-report after building with Bob. Don't expect statistical signal soon; expect a slow trickle of anecdotes.
 

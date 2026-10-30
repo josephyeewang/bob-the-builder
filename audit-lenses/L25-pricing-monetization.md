@@ -27,7 +27,7 @@ source_frameworks:
 
 Engineering audits ignore pricing. UX audits often stop at "is the pricing page well-designed." Both miss the strategic + mechanical reality: 72% of pricing innovations miss financial expectations (Ramanujam). Pricing models that don't track value (per-seat in a product that delivers value-per-task) cap revenue. Pricing pages that obscure costs torch trust. Cancel flows that violate FTC Click-to-Cancel rules (effective 2024) carry $51,744/violation/consumer fines.
 
-The 4 sub-streams Joe called out:
+The 4 sub-streams Bob's author called out:
 1. **Strategy** — model, tiers, positioning, value metric
 2. **Discoverability** — where pricing lives, clarity, no surprise costs
 3. **Competitor benchmarking** — anchored or anchoring

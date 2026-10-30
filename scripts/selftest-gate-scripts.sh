@@ -699,6 +699,318 @@ expect "bob-stats: counts a labelled fix (1 of 2)" 0 "Labelled fixes: +1 +\\(50%
 mkdir -p "$SR/src"; : > "$SR/src/x.js"
 expect "repo-map: writes docs/repo-map.md" 0 "" -- bash -c "cd '$SR' && bash '$HERE/repo-map.sh' >/dev/null && grep -q '^# Repo Map' docs/repo-map.md"
 
+# ── 17. phase-report-check.mjs (D-033, Rule 4) ──────────────────────────────
+echo "phase-report-check.mjs"
+PR="$HERE/phase-report-check.mjs"; PD="$TMP/pr"; mkdir -p "$PD"
+printf '## Phase [N] Report\n### [A] Built\n- [list everything built]\n### [C] Mocked — *include only if anything was stubbed*\n- [list stubs]\n### [A] Spec Deviations\n- [list EVERY difference]\n- [if none, say "None"]\n### [O] Decisions to Log\n- [optional]\n' > "$PD/tpl.md"
+printf '## Phase 2 Report\n### Built\n- the login page\n### [A] Spec Deviations\n- None\n' > "$PD/good.md"
+expect "phase-report: a filled report (no [C] or [O] sections) -> OK" 0 "phase-report-check: OK" -- node "$PR" "$PD/good.md" --template "$PD/tpl.md"
+printf '## Phase 2 Report\n### Built\n- the login page\n' > "$PD/nodev.md"
+expect "phase-report: Spec Deviations left out -> REFUSED (Rule 4)" 1 'missing the "spec deviations" section' -- node "$PR" "$PD/nodev.md" --template "$PD/tpl.md"
+printf '## Phase 2 Report\n### Built\n- [list everything built]\n### Spec Deviations\n- None\n' > "$PD/ph.md"
+expect "phase-report: a placeholder line left in -> REFUSED" 1 "still the template's placeholder: - \\[list everything built\\]" -- node "$PR" "$PD/ph.md" --template "$PD/tpl.md"
+printf '## Phase 2 Report\n### Built\n- x\n### Mocked\n\n### Spec Deviations\n- None\n' > "$PD/c.md"
+expect "phase-report: an empty [C] section -> REFUSED, asks for N/A" 1 'write "N/A — <reason>"' -- node "$PR" "$PD/c.md" --template "$PD/tpl.md"
+printf '## Phase 2 Report\n### Built\n- x\n### Mocked\nN/A — nothing was stubbed\n### Spec Deviations\n- None\n' > "$PD/c2.md"
+expect "phase-report: a [C] section marked N/A -> OK" 0 "phase-report-check: OK" -- node "$PR" "$PD/c2.md" --template "$PD/tpl.md"
+expect "phase-report: Bob's own blank template -> REFUSED" 1 'the "built" section has nothing of its own' -- node "$PR" "$HERE/../templates/phase-report.md"
+printf '## Phase 2 Report\n### Built\n*Signup form, /api/signup, users migration.*\n### Spec Deviations\n- None\n' > "$PD/it.md"
+expect "phase-report: real text written in italics counts -> OK" 0 "phase-report-check: OK" -- node "$PR" "$PD/it.md" --template "$PD/tpl.md"
+printf '## Phase 2 Report\n### 3.1 Built\n- x\n### 3.2 Spec Deviations\nN/A\n' > "$PD/na-a.md"
+expect "phase-report: dotted numbers are read; N/A in an always-required section -> REFUSED" 1 'line 4: the "spec deviations" section has nothing of its own' -- node "$PR" "$PD/na-a.md" --template "$PD/tpl.md"
+printf '## Phase 1 Report\n### Built\n- x\n### Spec Deviations: None\n### Assumptions Made\n- N/A — nothing assumed\n### Regression Check — N/A (phase 1, no earlier flows)\n' > "$PD/none.md"
+expect "phase-report: None in a heading, N/A with a reason in [A] sections -> OK" 0 "phase-report-check: OK" -- node "$PR" "$PD/none.md" --template "$PD/tpl.md"
+expect "phase-report: no report file -> cannot run (exit 2, not a pass)" 2 "not a pass" -- node "$PR" "$PD/missing.md"
+printf '# Phase 2\n## 1. Built ✅\n- the login page\n## 2. Spec Deviations\n- None\n' > "$PD/h2.md"
+expect "phase-report: level-2, numbered headings with a status mark -> OK" 0 "phase-report-check: OK" -- node "$PR" "$PD/h2.md" --template "$PD/tpl.md"
+printf '## Phase 2 Report\n### Built\n- x\n### Mocked\n- *N/A — nothing stubbed* (say so explicitly if skipping).\n### Spec Deviations\n- No divergences found.\n' > "$PD/na.md"
+expect "phase-report: an italic N/A line and \"No divergences found\" count -> OK" 0 "phase-report-check: OK" -- node "$PR" "$PD/na.md" --template "$PD/tpl.md"
+printf '## Phase 2 Report\n### Acceptance Bar\n- login works\n### Built\n- x\n#### Backend\n- /api/login\n### Spec Deviations\n- None\n### Validation Results\n- all pass\n### Hot Path Results\n- login: PASS\n### Regression Check\n- phase 1 flows: PASS\n### Acceptance Gate — met\n- yes\n### Deploy Verification — N/A (no integrations touched)\n' > "$PD/short.md"
+expect "phase-report: a short report with --abbreviated -> OK" 0 "phase-report-check: OK" -- node "$PR" "$PD/short.md" --abbreviated
+expect "phase-report: --abbreviated reads its list from the template (Acceptance Bar is on it)" 1 'missing the "acceptance bar" section' -- bash -c "sed '/Acceptance Bar/,/^- login works/d' '$PD/short.md' > '$PD/short2.md' && node '$PR' '$PD/short2.md' --abbreviated"
+expect "phase-report: ...the same short report checked in full -> REFUSED" 1 'missing the "implementation decisions" section' -- node "$PR" "$PD/short.md"
+
+# ── 18. autonomy-check.mjs (D-033, Rule 27) ─────────────────────────────────
+echo "autonomy-check.mjs"
+AC="$HERE/autonomy-check.mjs"
+ac_base() {
+  AD="$TMP/ac"; rm -rf "$AD"; mkdir -p "$AD/.claude/hooks" "$AD/.claude/agents"
+  cat > "$AD/.claude/settings.json" <<'JSON'
+{ "permissions": { "defaultMode": "default",
+    "ask": ["Bash(git push:*)", "Bash(*deploy*)"],
+    "deny": ["Bash(rm -rf:*)", "Bash(git push --force:*)", "Bash(git reset --hard:*)"] },
+  "hooks": { "Stop": [ { "hooks": [ { "type": "command", "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/green-gate.sh\"" } ] } ] } }
+JSON
+  printf 'MAX_ATTEMPTS=8\nif [ "$n" -gt "$MAX_ATTEMPTS" ]; then exit 0; fi\nTEST_CMD="npm test"\n' > "$AD/.claude/hooks/green-gate.sh"
+  printf -- '---\nname: reviewer\ntools: Read, Grep, Glob, Bash\n---\nReview.\n' > "$AD/.claude/agents/reviewer.md"
+}
+ac_base
+expect "autonomy: deny/ask rules, bounded gate, read-only reviewer -> OK" 0 "autonomy-check: OK" -- node "$AC" "$AD"
+ac_base; sed -i.bak 's/"defaultMode": "default"/"defaultMode": "auto"/' "$AD/.claude/settings.json"
+expect "autonomy: defaultMode auto in the project file -> REFUSED (it is ignored)" 1 "Claude Code ignores in a project file" -- node "$AC" "$AD"
+ac_base; sed -i.bak 's/"Bash(git reset --hard:\*)"/"Bash(ls:*)"/' "$AD/.claude/settings.json"
+expect "autonomy: no deny rule for git reset --hard -> REFUSED" 1 'no rule for "git reset --hard"' -- node "$AC" "$AD"
+ac_base; printf 'if grep -q stop_hook_active; then exit 0; fi\nTEST_CMD="npm test"\n' > "$AD/.claude/hooks/green-gate.sh"
+expect "autonomy: a gate guarded only by stop_hook_active -> REFUSED" 1 "numeric retry limit it checks" -- node "$AC" "$AD"
+ac_base; printf -- '---\nname: reviewer\ntools: Read, Edit, Bash\n---\n' > "$AD/.claude/agents/reviewer.md"
+expect "autonomy: a reviewer that can Edit -> REFUSED" 1 "must not edit" -- node "$AC" "$AD"
+ac_base; sed -i.bak 's/"permissions"/"env": { "PROD_DB_URL": "x" }, "permissions"/' "$AD/.claude/settings.json"
+expect "autonomy: a production key in settings.env -> REFUSED" 1 "never give an autonomous run production" -- node "$AC" "$AD"
+ac_base; sed -i.bak 's#"command": "bash#"command": "bash ~/.claude/hooks/notify.sh" } , { "type": "command", "command": "bash#' "$AD/.claude/settings.json"
+expect "autonomy: an extra personal Stop hook in ~/.claude -> still OK" 0 "autonomy-check: OK" -- node "$AC" "$AD"
+ac_base; printf 'MAX_ATTEMPTS="${MAX_ATTEMPTS:-8}"\nif [ "$n" -gt "$MAX_ATTEMPTS" ]; then exit 0; fi\nTEST_CMD="npm test"\n' > "$AD/.claude/hooks/green-gate.sh"
+expect "autonomy: an overridable retry limit (\${MAX:-8}) -> OK" 0 "autonomy-check: OK" -- node "$AC" "$AD"
+ac_base; sed -i.bak 's/"permissions"/"env": { "PRODUCT_TOUR": "1", "ENABLE_LIVE_PREVIEW": "1" }, "permissions"/' "$AD/.claude/settings.json"
+expect "autonomy: env keys that only contain PROD or LIVE inside a word -> OK" 0 "autonomy-check: OK" -- node "$AC" "$AD"
+ac_base; sed -i.bak 's/"Bash(\*deploy\*)"/"Bash(vercel:*)"/' "$AD/.claude/settings.json"
+expect "autonomy: deploy gated as vercel:* -> OK" 0 "autonomy-check: OK" -- node "$AC" "$AD"
+ac_base; printf -- '---\nname: reviewer\n---\nReview.\n' > "$AD/.claude/agents/reviewer.md"
+expect "autonomy: a reviewer with no tools line (inherits Edit) -> REFUSED" 1 "has no tools: line" -- node "$AC" "$AD"
+ac_base; printf -- '---\nname: reviewer\ntools:\n  - Read\n  - Edit\n---\n' > "$AD/.claude/agents/reviewer.md"
+expect "autonomy: a reviewer whose tools list (YAML form) has Edit -> REFUSED" 1 "can use Edit" -- node "$AC" "$AD"
+ac_base; sed -i.bak 's#"bash \\"$CLAUDE_PROJECT_DIR/.claude/hooks/green-gate.sh\\""#"\\"$CLAUDE_PROJECT_DIR\\"/.claude/hooks/green-gate.sh"#' "$AD/.claude/settings.json"
+expect "autonomy: the docs' hook quoting \"\$CLAUDE_PROJECT_DIR\"/… -> OK" 0 "autonomy-check: OK" -- node "$AC" "$AD"
+ac_base; printf 'const MAX_ATTEMPTS = 8;\nif (n > MAX_ATTEMPTS) process.exit(0);\nconst TEST_CMD = "npm test";\n' > "$AD/.claude/hooks/green-gate.sh"
+expect "autonomy: a retry limit written JavaScript-style (const X = 8; n > X) -> OK" 0 "autonomy-check: OK" -- node "$AC" "$AD"
+ac_base; printf 'max_attempts=8\n(( n >= max_attempts )) && exit 0\nTEST_CMD="npm test"\n' > "$AD/.claude/hooks/green-gate.sh"
+expect "autonomy: a lower-case limit used without \$ -> OK" 0 "autonomy-check: OK" -- node "$AC" "$AD"
+ac_base; sed -i.bak 's/"deny": \[[^]]*\]/"deny": ["Bash(rm:*)", "Bash(git push:*)", "Bash(git reset:*)"]/; s/"Bash(git push:\*)", "Bash(\*deploy\*)"/"Bash(*deploy*)"/' "$AD/.claude/settings.json"
+expect "autonomy: stricter deny rules (rm:*, git push:*, git reset:*) cover the basics -> OK" 0 "autonomy-check: OK" -- node "$AC" "$AD"
+ac_base; printf -- '---\r\nname: reviewer\r\ntools: Read, Grep\r\n---\r\n' > "$AD/.claude/agents/reviewer.md"
+expect "autonomy: a reviewer file with Windows line endings -> OK" 0 "autonomy-check: OK" -- node "$AC" "$AD"
+ac_base; printf -- '---\nname: reviewer\ndisallowedTools: Edit, Write, MultiEdit, NotebookEdit\n---\n' > "$AD/.claude/agents/reviewer.md"
+expect "autonomy: a reviewer that disallows every editing tool -> OK" 0 "autonomy-check: OK" -- node "$AC" "$AD"
+ac_base; printf 'n=$(( $(cat f 2>/dev/null || echo 0) + 1 ))\nif [ "$n" -ge 8 ]; then exit 0; fi\nTEST_CMD="npm test"\n' > "$AD/.claude/hooks/green-gate.sh"
+expect "autonomy: a limit written as a plain number (-ge 8) -> OK" 0 "autonomy-check: OK" -- node "$AC" "$AD"
+ac_base; printf 'TIMEOUT_LIMIT=30\ntimeout $TIMEOUT_LIMIT npm test || exit 2\n' > "$AD/.claude/hooks/green-gate.sh"
+expect "autonomy: a LIMIT variable that is never compared is not a retry limit -> REFUSED" 1 "numeric retry limit" -- node "$AC" "$AD"
+ac_base; printf 'MAX_ATTEMPTS=8\nif [ "$n" -lt "$MAX_ATTEMPTS" ]; then npm test || exit 2; fi\n' > "$AD/.claude/hooks/green-gate.sh"
+expect "autonomy: a limit written as 'less than' (-lt \$MAX_ATTEMPTS) -> OK" 0 "autonomy-check: OK" -- node "$AC" "$AD"
+ac_base; sed -i.bak 's/"permissions"/"env": { "VITE_LIVE_RELOAD_URL": "x" }, "permissions"/' "$AD/.claude/settings.json"
+expect "autonomy: a dev-only LIVE setting that is not a key or secret -> OK" 0 "autonomy-check: OK" -- node "$AC" "$AD"
+ac_base; sed -i.bak 's/"permissions"/"env": { "PROD_URL": "https:\/\/example.com", "SKIP_PROD_DEPLOY": "1" }, "permissions"/' "$AD/.claude/settings.json"
+expect "autonomy: PROD in a setting that is not a secret (PROD_URL, SKIP_PROD_DEPLOY) -> OK" 0 "autonomy-check: OK" -- node "$AC" "$AD"
+ac_base; printf '\xef\xbb\xbf\n---\nname: reviewer\ntools: Read, Grep\n---\n' > "$AD/.claude/agents/reviewer.md"
+expect "autonomy: a reviewer file starting with a BOM and a blank line -> OK" 0 "autonomy-check: OK" -- node "$AC" "$AD"
+ac_base; sed -i.bak 's/"Bash(git push --force:\*)"/"Bash(git push --force-with-lease:*)"/' "$AD/.claude/settings.json"
+expect "autonomy: deny --force-with-lease does not cover git push --force -> REFUSED" 1 'no rule for "git push --force"' -- node "$AC" "$AD"
+ac_base; sed -i.bak 's/"Bash(git push --force:\*)"/"Bash(git push -f:*)", "Bash(git push * --force)"/' "$AD/.claude/settings.json"
+expect "autonomy: deny git push -f and a wildcard rule cover git push --force -> OK" 0 "autonomy-check: OK" -- node "$AC" "$AD"
+mkdir -p "$TMP/ac-none"
+mkdir -p "$TMP/ac-bare/.claude"; printf '{"permissions":{}}\n' > "$TMP/ac-bare/.claude/settings.json"
+expect "autonomy: settings but no Stop hook and no reviewer -> not set up (exit 2, not six failures)" 2 "not set up for supervised autonomy" -- node "$AC" "$TMP/ac-bare"
+expect "autonomy: no settings file -> cannot run (exit 2, not a pass)" 2 "Not a pass" -- node "$AC" "$TMP/ac-none"
+AI="$TMP/ac-init"; mkdir -p "$AI"; printf '[user]\n\tname = selftest\n\temail = selftest@example.com\n[commit]\n\tgpgsign = false\n' > "$TMP/ac-gitconfig"
+(cd "$AI" && GIT_CONFIG_GLOBAL="$TMP/ac-gitconfig" GIT_CONFIG_NOSYSTEM=1 bash "$HERE/bob-init.sh" p >/dev/null 2>&1)
+expect "autonomy: a fresh bob-init project -> only the unset test command is refused" 1 "\\[5\\] .*placeholder test command" -- node "$AC" "$AI/p"
+expect "autonomy: ...and nothing else in it is refused" 0 "" -- bash -c "node '$AC' '$AI/p' | grep -c '✗' | grep -qx 1"
+
+# ── 19. run-commands-check.mjs (D-033, Rule 26) ─────────────────────────────
+echo "run-commands-check.mjs"
+RC="$HERE/run-commands-check.mjs"; RD="$TMP/rc"; newrepo "$RD"; mkdir -p "$RD/jobs" "$RD/web/scripts" "$RD/.github/workflows" "$RD/pkg" "$RD/tools" "$RD/bin"
+printf 'import sys\n\ndef main():\n    print(1)\n\nif __name__ == "__main__":\n    main()\n' > "$RD/jobs/nightly.py"
+cp "$RD/jobs/nightly.py" "$RD/pkg/job.py"; cp "$RD/jobs/nightly.py" "$RD/pkg/entry.py"; : > "$RD/pkg/__init__.py"
+printf 'console.log(1)\n' > "$RD/server.js"; printf 'echo\n' > "$RD/web/scripts/build.sh"; printf 'x\n' > "$RD/notes.md"
+printf 'echo\n' > "$RD/run.sh"; printf 'echo\n' > "$RD/tools/run.sh"; printf 'old\n' > "$RD/old.py"
+printf '#!/bin/sh\necho\n' > "$RD/bin/serve"; chmod +x "$RD/bin/serve"
+printf '{"scripts":{"start":"cross-env NODE_ENV=production node server.js","nightly":"(cd jobs && python3 nightly.py) || true","serve":"bin/serve"},"files":["old.py"]}\n' > "$RD/package.json"
+printf 'on:\n  push:\n    paths: ["old.py", "src/**"]\njobs:\n    build:\n        defaults:\n            run:\n                working-directory: web\n        steps:\n            - run: bash scripts/build.sh  # replaces old.py\n            - run: python -m pkg.job\n' > "$RD/.github/workflows/ci.yml"
+printf 'tools:\n\tbash tools/run.sh\n' > "$RD/Makefile"
+printf '[project.scripts]\nentry = "pkg.entry:main"\n[tool.ruff]\nexclude = ["old.py"]\n' > "$RD/pyproject.toml"
+git -C "$RD" add -A; git -C "$RD" commit -q -m "base"; RB="$(git -C "$RD" rev-parse HEAD)"
+printf 'x\n' >> "$RD/notes.md"
+expect "run-commands: on main without --base, even with an uncommitted edit -> cannot judge (exit 2)" 2 "no branch point to compare with" -- node "$RC" "$RD"
+git -C "$RD" checkout -q -- notes.md
+expect "run-commands: nothing moved -> OK (any command shape)" 0 "0 script\\(s\\) moved or deleted" -- node "$RC" "$RD" --base "$RB"
+git -C "$RD" rm -q server.js
+expect "run-commands: a deleted file a wrapped package script still runs -> REFUSED" 1 'package.json:scripts.start still names server.js, which this change deleted' -- node "$RC" "$RD" --base "$RB"
+expect "run-commands: ...the same with --base=REF before the folder" 1 'still names server.js' -- node "$RC" --base="$RB" "$RD"
+git -C "$RD" checkout -q "$RB" -- server.js
+git -C "$RD" mv web/scripts/build.sh web/scripts/make.sh
+expect "run-commands: a moved file a workflow runs from its working folder -> REFUSED" 1 'ci.yml:10 still names web/scripts/build.sh, which this change moved to web/scripts/make.sh' -- node "$RC" "$RD" --base "$RB"
+sed -i.bak 's#scripts/build.sh#scripts/make.sh#' "$RD/.github/workflows/ci.yml"; rm -f "$RD/.github/workflows/ci.yml.bak"
+expect "run-commands: ...and once the workflow names the new path -> OK" 0 "run-commands-check: OK" -- node "$RC" "$RD" --base "$RB"
+printf 'from jobs.core import main\n__all__ = ["main"]\n# if __name__ == "__main__":\n' > "$RD/jobs/nightly.py"
+expect "run-commands: a run file that lost its __main__ block (a commented one does not count; run via cd) -> REFUSED" 1 'names jobs/nightly.py, which lost its .if __name__' -- node "$RC" "$RD" --base "$RB"
+git -C "$RD" checkout -q "$RB" -- jobs/nightly.py
+printf 'from pkg.impl import main\n' > "$RD/pkg/job.py"
+expect "run-commands: a module run with python -m that lost its __main__ block -> REFUSED" 1 'ci.yml:11 names pkg/job.py, which lost its' -- node "$RC" "$RD" --base "$RB"
+git -C "$RD" checkout -q "$RB" -- pkg/job.py
+printf 'def main():\n    print(1)\n' > "$RD/pkg/entry.py"
+expect "run-commands: a pyproject entry point losing its __main__ block is fine (it calls the function) -> OK" 0 "run-commands-check: OK" -- node "$RC" "$RD" --base "$RB"
+git -C "$RD" checkout -q "$RB" -- pkg/entry.py
+git -C "$RD" rm -q old.py run.sh notes.md
+expect "run-commands: deleted files named only in paths: filters, a files list, a comment, a tool config, or under another folder's same name -> OK" 0 "run-commands-check: OK — .*script\\(s\\) moved or deleted" -- node "$RC" "$RD" --base "$RB"
+git -C "$RD" checkout -q "$RB" -- old.py run.sh notes.md
+git -C "$RD" rm -q bin/serve
+expect "run-commands: a deleted executable with no extension a script still runs -> REFUSED" 1 'still names bin/serve' -- node "$RC" "$RD" --base "$RB"
+git -C "$RD" checkout -q "$RB" -- bin/serve
+git -C "$RD" rm -q --cached server.js; printf 'server.js\n' >> "$RD/.gitignore"
+expect "run-commands: a build output taken out of git but still on disk is not 'deleted' -> OK" 0 "run-commands-check: OK" -- node "$RC" "$RD" --base "$RB"
+T2="$TMP/rc-ts"; newrepo "$T2"; mkdir -p "$T2/src" "$T2/app" "$T2/tests"; printf 'dist/\n' > "$T2/.gitignore"
+printf 'console.log(1)\n' > "$T2/src/index.js"
+printf 'app = 1\nif __name__ == "__main__":\n    run(app)\n' > "$T2/app/main.py"; : > "$T2/app/__init__.py"
+printf 'import unittest\nif __name__ == "__main__":\n    unittest.main()\n' > "$T2/tests/test_api.py"
+printf '{"main":"dist/index.js","scripts":{"start":"node dist/index.js","test":"pytest tests/test_api.py"}}\n' > "$T2/package.json"
+printf 'FROM python\nCMD ["uvicorn", "app.main:app"]\n' > "$T2/Dockerfile"
+git -C "$T2" add -A; git -C "$T2" commit -q -m base; git -C "$T2" checkout -q -b change
+git -C "$T2" mv src/index.js src/index.ts
+printf 'app = 1\n' > "$T2/app/main.py"; printf 'import unittest\n' > "$T2/tests/test_api.py"
+expect "run-commands: a .js → .ts move whose build output keeps the name, and run blocks dropped from imported files (uvicorn app.main:app, pytest) -> OK" 0 "run-commands-check: OK" -- node "$RC" "$T2"
+T3="$TMP/rc-r6"; newrepo "$T3"; mkdir -p "$T3/lib" "$T3/scripts" "$T3/jobs" "$T3/.github/workflows"
+printf 'module.exports = 1\n' > "$T3/lib/foo.js"; printf 'echo\n' > "$T3/scripts/deploy.sh"; printf 'echo\n' > "$T3/build.sh"
+printf 'if __name__ == "__main__":\n    print(1)\n' > "$T3/jobs/job.py"
+printf '{"main":"lib/foo.js"}\n' > "$T3/package.json"
+printf 'on:\n  push:\n    paths:\n    - scripts/deploy.sh\njobs:\n  t:\n    steps:\n      - run: ./build.sh\n' > "$T3/.github/workflows/ci.yml"
+printf 'job:\n\t.venv/bin/python -X dev jobs/job.py\n\t$(PYTHON) jobs/job.py\n' > "$T3/Makefile"
+git -C "$T3" add -A; git -C "$T3" commit -q -m base; git -C "$T3" checkout -q -b change
+mkdir -p "$T3/src"; git -C "$T3" mv lib/foo.js src/foo.ts; printf 'lib/\n' > "$T3/.gitignore"; printf 'module.exports = 1\n' > "$T3/lib/foo.js"
+git -C "$T3" rm -q scripts/deploy.sh; mkdir -p "$T3/scripts"; git -C "$T3" mv build.sh scripts/build.sh
+printf 'jobs:\n  t:\n    steps:\n      - working-directory: scripts\n        run: ./build.sh\n' > "$T3/.github/workflows/ci.yml"
+expect "run-commands: a rename into rebuilt output, a zero-indented paths: list, a script moved with its run folder -> OK" 0 "run-commands-check: OK" -- node "$RC" "$T3"
+printf 'from jobs.core import run\n' > "$T3/jobs/job.py"
+expect "run-commands: lost run block run by .venv/bin/python -X dev and by \$(PYTHON) -> REFUSED twice" 1 "REFUSED — 2 run config line" -- node "$RC" "$T3"
+git -C "$T3" checkout -q main 2>/dev/null || true
+T4="$TMP/rc-ff"; newrepo "$T4"; printf 'echo\n' > "$T4/a.sh"; printf '{"scripts":{"a":"bash a.sh"}}\n' > "$T4/package.json"
+git -C "$T4" add -A; git -C "$T4" commit -q -m base; git -C "$T4" checkout -q -b feat; git -C "$T4" rm -q a.sh; git -C "$T4" commit -q -m "drop a.sh"; git -C "$T4" branch -q -f main feat
+expect "run-commands: a branch already fast-forwarded into main, no --base -> cannot judge (exit 2), not a silent pass" 2 "adds nothing to main" -- node "$RC" "$T4"
+T5="$TMP/rc-r7"; newrepo "$T5"; mkdir -p "$T5/jobs" "$T5/tests" "$T5/bin" "$T5/pkg/cli" "$T5/.github/workflows"
+printf 'if __name__ == "__main__":\n    print(1)\n' > "$T5/jobs/report.py"
+printf 'import unittest\nif __name__ == "__main__":\n    unittest.main()\n' > "$T5/tests/test_core.py"
+printf '#!/bin/sh\necho\n' > "$T5/bin/test"; chmod +x "$T5/bin/test"; printf 'def main():\n    pass\n' > "$T5/pkg/cli/__init__.py"; : > "$T5/pkg/__init__.py"
+printf 'jobs:\n  test:\n    defaults:\n      run:\n        working-directory: jobs\n    steps:\n      - run: python report.py\n      - run: npm test\n' > "$T5/.github/workflows/ci.yml"
+printf 'test:\n\tpython -m pytest tests/test_core.py -q\n' > "$T5/Makefile"
+printf '[project.scripts]\nx = "pkg.cli:main"\n' > "$T5/pyproject.toml"
+git -C "$T5" add -A; git -C "$T5" commit -q -m base; git -C "$T5" checkout -q -b change
+printf 'import unittest\n' > "$T5/tests/test_core.py"; git -C "$T5" rm -q bin/test
+expect "run-commands: run block dropped from a test run by python -m pytest, an extensionless bin/test deleted while 'test' is a job name -> OK" 0 "run-commands-check: OK" -- node "$RC" "$T5"
+mkdir -p "$T5/jobs/core"; git -C "$T5" mv jobs/report.py jobs/core/report.py
+expect "run-commands: a file moved to a sub-folder under the same name, named by bare name from an untouched workflow line -> REFUSED" 1 'ci.yml:7 still names jobs/report.py, which this change moved to jobs/core/report.py' -- node "$RC" "$T5"
+git -C "$T5" mv jobs/core/report.py jobs/report.py; git -C "$T5" rm -q pkg/cli/__init__.py
+expect "run-commands: a package __init__.py an entry point still names (pkg.cli:main) is deleted -> REFUSED" 1 'pyproject.toml:2 still names pkg/cli/__init__.py' -- node "$RC" "$T5"
+T6="$TMP/rc-r8"; newrepo "$T6"; mkdir -p "$T6/mypkg" "$T6/app" "$T6/.github/workflows"
+printf 'print(1)\n' > "$T6/test.py"; printf 'print(1)\n' > "$T6/build.py"; printf 'print(1)\n' > "$T6/worker.py"; printf 'print(1)\n' > "$T6/api.py"
+printf 'def main():\n    pass\n' > "$T6/mypkg/cli.py"; : > "$T6/mypkg/__init__.py"
+printf 'jobs:\n  test:\n    steps:\n      - run: python -m pytest\n      - run: python -m build\n' > "$T6/.github/workflows/ci.yml"
+printf 'services:\n  worker:\n    command: python worker.py\n' > "$T6/docker-compose.yml"
+printf '[project.scripts]\nmycli = "mypkg.cli:main"\n' > "$T6/pyproject.toml"
+printf 'FROM python\nCMD ["python", "api.py"]\n' > "$T6/Dockerfile.prod"
+git -C "$T6" add -A; git -C "$T6" commit -q -m base; git -C "$T6" checkout -q -b change
+git -C "$T6" rm -q test.py; git -C "$T6" mv worker.py app/worker.py; sed -i.bak 's#python worker.py#python app/worker.py#' "$T6/docker-compose.yml"; rm -f "$T6/docker-compose.yml.bak"
+mkdir -p "$T6/mypkg/cli"; git -C "$T6" mv mypkg/cli.py mypkg/cli/__init__.py
+expect "run-commands: YAML keys named like a script (test:, worker:), a module turned into a package -> OK" 0 "run-commands-check: OK" -- node "$RC" "$T6"
+git -C "$T6" rm -q api.py
+expect "run-commands: a Dockerfile.prod that still runs a deleted file -> REFUSED" 1 'Dockerfile.prod:2 still names api.py' -- node "$RC" "$T6"
+git -C "$T6" checkout -q HEAD -- api.py; git -C "$T6" rm -q build.py
+expect "run-commands: deleting a root build.py that \`python -m build\` ran (a local module shadows the tool) -> REFUSED" 1 'ci.yml:5 still names build.py' -- node "$RC" "$T6"
+T7="$TMP/rc-r9"; newrepo "$T7"; mkdir -p "$T7/jobs" "$T7/src/lib" "$T7/services/api/app" "$T7/.github/workflows"
+printf 'if __name__ == "__main__":\n    print(1)\n' > "$T7/jobs/report.py"; cp "$T7/jobs/report.py" "$T7/services/api/app/job.py"; : > "$T7/services/api/app/__init__.py"
+printf 'module.exports = 1\n' > "$T7/src/lib/index.js"; printf '{"main":"index.js"}\n' > "$T7/package.json"
+printf 'jobs:\n  weekly:\n    steps:\n      - working-directory: jobs\n        run: python report.py\n' > "$T7/.github/workflows/ci.yml"
+printf 'report:\n\tcd jobs && python report.py\n' > "$T7/Makefile"
+printf 'FROM python\nCMD python -m app.job\n' > "$T7/services/api/Dockerfile"
+git -C "$T7" add -A; git -C "$T7" commit -q -m base; git -C "$T7" checkout -q -b change
+git -C "$T7" mv src/lib/index.js src/lib/index.ts
+expect "run-commands: npm's default \"main\": \"index.js\" does not stand for src/lib/index.js -> OK" 0 "run-commands-check: OK" -- node "$RC" "$T7"
+mkdir -p "$T7/jobs/core"; cp "$T7/jobs/report.py" "$T7/jobs/core/report.py"; printf 'from jobs.core.report import *\n' > "$T7/jobs/report.py"
+expect "run-commands: the wrap — old file made a shim beside a same-named new one — still run via working-directory and cd -> REFUSED twice" 1 "REFUSED — 2 run config line" -- node "$RC" "$T7"
+git -C "$T7" checkout -q HEAD -- jobs/report.py; printf 'from app.impl import *\n' > "$T7/services/api/app/job.py"
+expect "run-commands: a monorepo service's python -m module (read from its own folder) lost its run block -> REFUSED" 1 'services/api/Dockerfile:2 names services/api/app/job.py' -- node "$RC" "$T7"
+T8="$TMP/rc-r10"; newrepo "$T8"; mkdir -p "$T8/jobs"
+printf 'if __name__ == "__main__":\n    print(1)\n' > "$T8/jobs/report.py"; : > "$T8/jobs/__init__.py"; printf 'app = 1\n' > "$T8/app.py"
+printf 'FROM python\nCMD ["python", "jobs/report.py"]\n' > "$T8/Dockerfile"
+printf 'services:\n  r:\n    command: ["python", "-m", "jobs.report"]\n' > "$T8/compose.yml"
+printf 'image:\n\tdocker build -t app:latest .\n' > "$T8/Makefile"; printf 'web: gunicorn app:app\n' > "$T8/Procfile"
+git -C "$T8" add -A; git -C "$T8" commit -q -m base; git -C "$T8" checkout -q -b change
+git -C "$T8" mv app.py server.py; printf 'web: gunicorn server:app\n' > "$T8/Procfile"
+expect "run-commands: a docker image tag (app:latest) is not a module; the Procfile was updated -> OK" 0 "run-commands-check: OK" -- node "$RC" "$T8"
+printf 'from jobs.impl import *\n' > "$T8/jobs/report.py"
+expect "run-commands: lost run block run from Docker and compose list-form commands -> REFUSED twice" 1 "REFUSED — 2 run config line" -- node "$RC" "$T8"
+printf 'if "__main__" == __name__:\n    print(1)\n' > "$T8/jobs/report.py"
+expect "run-commands: the reversed comparison (\"__main__\" == __name__) is still a run block -> OK" 0 "run-commands-check: OK" -- node "$RC" "$T8"
+expect "run-commands: --base with no commit -> cannot run (exit 2)" 2 "needs a commit" -- node "$RC" "$T3" --base
+expect "run-commands: an unknown base commit -> cannot run (exit 2)" 2 "cannot be found" -- node "$RC" "$RD" --base nope
+SH="$TMP/rc-shallow"; git clone -q --depth 1 "file://$RD" "$SH" 2>/dev/null; git -C "$SH" checkout -q --detach; git -C "$SH" branch -q -D main; git -C "$SH" remote remove origin
+expect "run-commands: a shallow detached clone with no main, no --base -> cannot judge (exit 2)" 2 "cannot tell where this change starts" -- node "$RC" "$SH"
+mkdir -p "$TMP/rc-none"
+expect "run-commands: not a git repository -> cannot run (exit 2, not a pass)" 2 "not a git repository" -- node "$RC" "$TMP/rc-none"
+
+# ── 20. recurrence-check.mjs (D-033, Rule 31) ───────────────────────────────
+echo "recurrence-check.mjs"
+RQ="$HERE/recurrence-check.mjs"; QR="$TMP/rq"; newrepo "$QR"
+git -C "$QR" commit -q --allow-empty -m "init"
+expect "recurrence: no Class: lines yet -> cannot judge (exit 2, not a pass)" 2 'carries a "Class:" line yet' -- node "$RQ" "$QR"
+git -C "$QR" commit -q --allow-empty -m "fix: empty read" -m "Class: read error as missing
+Rung: 1"
+expect "recurrence: a class fixed once -> OK" 0 "1 class\\(es\\) named in fix commits, 0 recurring" -- node "$RQ" "$QR"
+git -C "$QR" commit -q --allow-empty -m "fix: empty read again" -m "Class: Read-error-as-missing
+Rung: 2"
+expect "recurrence: fixed twice, newest at rung 2 -> REFUSED" 1 'class "read-error-as-missing" has been fixed 2 times' -- node "$RQ" "$QR"
+git -C "$QR" commit -q --allow-empty -m "fix: four-state result type" -m "closed at rung 4: the type cannot hold the bad state" -m "Class: read-error-as-missing"
+expect "recurrence: newest fix closed at rung 4 -> OK" 0 "1 recurring, each closed at rung 3 or 4" -- node "$RQ" "$QR"
+git -C "$QR" commit -q --allow-empty -m "docs: how to write the lines" -m 'For example:
+```
+Class: read-error-as-missing
+Rung: 1
+```' -m "See Rule 31."
+expect "recurrence: a Class: line quoted in a docs commit is not a fix -> still OK" 0 "1 recurring, each closed at rung 3 or 4" -- node "$RQ" "$QR"
+git -C "$QR" commit -q --allow-empty -m "fix: retry the read" -m "Class: slow-read
+Rung: 1" -m "Co-Authored-By: Someone <someone@example.com>"
+git -C "$QR" commit -q --allow-empty -m "fix: retry the read again" -m "Class: slow-read
+Rung: 2" -m "Co-Authored-By: Someone <someone@example.com>"
+expect "recurrence: Class/Rung lines above a Co-Authored-By line are read -> REFUSED (slow-read twice, rung 2)" 1 'class "slow-read" has been fixed 2 times' -- node "$RQ" "$QR"
+git -C "$QR" commit -q --allow-empty -m "fix: make the slow read impossible" -m "Class: slow-read
+Rung: 4"
+git -C "$QR" commit -q --allow-empty -m "fix: two at once" -m "Class: stale-cache, read-error-as-missing
+Rung: 1"
+expect "recurrence: a comma list names two classes; the repeat one at rung 1 -> REFUSED" 1 'class "read-error-as-missing" has been fixed 4 times' -- node "$RQ" "$QR"
+git -C "$QR" commit -q --allow-empty -m "docs: name the class" -m "Class: slow-read"
+expect "recurrence: a later commit that names the class with no rung does not reset it (slow-read stays closed at rung 4)" 0 "" -- bash -c "! node '$RQ' '$QR' | grep -q 'class .slow-read.'"
+Q2="$TMP/rq2"; newrepo "$Q2"
+git -C "$Q2" commit -q --allow-empty -m "fix: a" -m "Class: stale-cache.
+Rung: 1"
+git -C "$Q2" commit -q --allow-empty -m "fix: b" -m "Class: Stale-Cache
+Rung: R3 (fresh-context review)"
+expect "recurrence: 'stale-cache.' and 'Stale-Cache' are one class; 'R3 (…)' reads as rung 3 -> OK" 0 "1 recurring, each closed at rung 3 or 4" -- node "$RQ" "$Q2"
+expect "recurrence: --since=DATE with nothing after it -> cannot judge (exit 2)" 2 "since 2099-01-01" -- node "$RQ" "$Q2" --since=2099-01-01
+Q3="$TMP/rq3"; newrepo "$Q3"
+expect "recurrence: a repo with no commits -> says so (exit 2)" 2 "has no commits yet" -- node "$RQ" "$Q3"
+expect "recurrence: --since with no date -> cannot run (exit 2)" 2 "needs a date" -- node "$RQ" "$Q2" --since
+Q4="$TMP/rq4"; newrepo "$Q4"; git -C "$Q4" commit -q --allow-empty -m "docs" -m "Class: slow-read"
+expect "recurrence: Class: lines but no Rung: anywhere -> says so (exit 2)" 2 "none records a Rung: line" -- node "$RQ" "$Q4"
+expect "recurrence: not a git repo -> cannot run (exit 2)" 2 "not a git repository" -- node "$RQ" "$TMP/rc-none"
+
+# ── 21. rule-tags-check.mjs (D-033, Rule 33) ────────────────────────────────
+echo "rule-tags-check.mjs"
+RT="$HERE/rule-tags-check.mjs"
+rt_base() {
+  TR="$TMP/rt"; rm -rf "$TR"; mkdir -p "$TR/scripts" "$TR/.github/workflows"
+  printf '| 1 | First | `SCRIPT` | 1 |\n| 2 | Second | `PROSE` | 1 |\n' > "$TR/build-protocol-core.md"
+  printf '## 1. Group\n\n<!-- Rule 1 -->\n\n1. **First.** Checked by `scripts/x.mjs`.\n\n<!-- Rule 2 -->\n\n2. **Second.**\n' > "$TR/rules.md"
+  : > "$TR/scripts/x.mjs"; : > "$TR/scripts/selftest-gate-scripts.sh"
+  printf 'jobs:\n  t:\n    steps:\n      - run: node scripts/x.mjs\n' > "$TR/.github/workflows/ci.yml"
+}
+rt_base
+expect "rule-tags: a SCRIPT rule whose script exists and runs in CI -> OK" 0 "1 of 2 rules have no script at all" -- node "$RT" --root "$TR"
+rt_base; printf 'jobs: {}\n' > "$TR/.github/workflows/ci.yml"
+expect "rule-tags: a script nothing runs -> FAIL" 1 "neither CI nor the self-test ever runs it" -- node "$RT" --root "$TR"
+rt_base; printf 'jobs:\n  t:\n    steps:\n      # node scripts/x.mjs is checked elsewhere\n      - run: echo hi\n' > "$TR/.github/workflows/ci.yml"
+expect "rule-tags: a script named only in a comment -> FAIL" 1 "neither CI nor the self-test ever runs it" -- node "$RT" --root "$TR"
+rt_base; printf 'jobs:\n  t:\n    steps:\n      - run: node scripts/foo-x.mjs\n' > "$TR/.github/workflows/ci.yml"
+expect "rule-tags: running a different script (foo-x.mjs) does not count for x.mjs -> FAIL" 1 "neither CI nor the self-test ever runs it" -- node "$RT" --root "$TR"
+rt_base; rm "$TR/scripts/x.mjs"
+expect "rule-tags: a named script that does not exist -> FAIL" 1 "scripts/x.mjs, which does not exist" -- node "$RT" --root "$TR"
+rt_base; printf '## 1. Group\n\n<!-- Rule 1 -->\n\n1. **First.**\n\n<!-- Rule 2 -->\n\n2. **Second.**\n' > "$TR/rules.md"
+expect "rule-tags: a SCRIPT tag whose rule names no script -> FAIL" 1 "names no script" -- node "$RT" --root "$TR"
+expect "rule-tags: Bob's own tags are all true" 0 "rule-tags-check: OK" -- node "$RT"
+
+# ── 22. bob-doctor.sh: the two design skills (D-033) ─────────────────────────
+echo "bob-doctor.sh"
+DH="$TMP/doc-home"; mkdir -p "$DH/.claude/skills"; ln -s "$(cd "$HERE/.." && pwd -P)/skill" "$DH/.claude/skills/bob"
+expect "bob-doctor: design skills not linked -> a warning with the line to paste" 0 "design-gallery is not installed.*ln -s" -- env HOME="$DH" bash "$HERE/bob-doctor.sh"
+ln -s "$(cd "$HERE/.." && pwd -P)/skills/design-gallery" "$DH/.claude/skills/design-gallery"
+expect "bob-doctor: a linked design skill -> reported as linked" 0 "design-gallery linked" -- env HOME="$DH" bash "$HERE/bob-doctor.sh"
+
 echo
 echo "selftest-gate-scripts: $PASS passed, $FAIL failed"
 [[ "$FAIL" -eq 0 ]]

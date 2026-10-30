@@ -1,5 +1,7 @@
 # Bob Field Retro — a data product's recurring-job arc (2026-09-19 → 22)
 
+> 📸 **Snapshot — not a living doc.** A point-in-time record kept for history; the rules it fed now live in `rules.md` and the failure-mode index.
+
 > Incident intake per Rule 32 (v2.40): what the field taught, filed as failure-mode CLASSES and method
 > lessons. Written by the sessions that did the work (a builder and a fresh-context integrator/auditor),
 > then harvested by a fresh-context agent against Bob's Rules 1–33 and the failure-mode index so only what

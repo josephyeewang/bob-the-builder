@@ -38,9 +38,9 @@ LOOKS. This lane decides what a page DOES to the visitor over time:
 3. **Its QA pass runs before the transfer diff.** Dead-scroll / contrast / phone composition
    findings get fixed in the page, then the normal fidelity-protocol adversarial diff runs.
 
-## Overrides — what to change from Nate's defaults for Joe's setup
+## Overrides — what to change from Nate's defaults for the user's setup
 
-| Nate's default | Joe's setup | Why |
+| Nate's default | The user's setup | Why |
 |---|---|---|
 | Asset generation through **kie.ai** (paid API key) | Generate stills/clips with the **design-mockups** skill (Nano Banana / Veo) and hand the files to scroll-craft as "assets you already have" (brief question 8) | Already paid for, already in the gallery numbering; no second image vendor |
 | "Nate's standing hero preference" — dimensional layered hero is mandatory | Treat as an OPTION, not a requirement. The **locked design wins**; a flat typographic hero is fine if the lock says so | The lock is canonical (fidelity-protocol rule 1) |
