@@ -397,7 +397,9 @@ async function starts({ rec, rules, now, b, running, launch, out, alert, onlyUnd
       doc: { session_id: l.sessionId, role: 'worker', kind, card: id, head: l.head ?? null, rev: started.rev ?? null, product: product ?? null, launched_at: iso(now) } });
     if (!lr.ok) alert(`card ${id}: session ${l.sessionId} started but its launch was not recorded (${lr.reason}); its merge will be refused`);
     running.push({ id: l.sessionId, product, kind, card: id, pgid: l.pgid });
-    if (factDoc(rec, UNDO_HELD_FACT(id))?.doc?.reason) { putFact(rec, UNDO_HELD_FACT(id), { reason: null, at: iso(now) }, 'undo_started'); dropCause(rec, UNDO_HELD_FACT(id)); }
+    if (factDoc(rec, UNDO_HELD_FACT(id))?.doc?.reason) putFact(rec, UNDO_HELD_FACT(id), { reason: null, at: iso(now) }, 'undo_started');
+    // Whether or not the hold was told: an alert still queued for it leaves unsent (audit 0b-6 r8 MAT-1).
+    dropCause(rec, UNDO_HELD_FACT(id));
     out.started.push(id);
   }
 }

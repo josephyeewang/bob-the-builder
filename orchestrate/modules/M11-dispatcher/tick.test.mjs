@@ -739,14 +739,19 @@ test('r7 M3: a burst is all sent while the port works; only entries held by a fa
   assert.equal(r.sent, ALERT_QUEUE_MAX + 6);
   assert.ok(got.every((t) => !/could not be sent/.test(t)), got[0]);
   assert.equal(rec.read('fact', 'stop-A').doc.told_at, 'y', 'the mark of the copy delivered');
-  // The port is down: every entry is held, and the newest ALERT_QUEUE_MAX stay.
+  // The port is down. Each failed send holds the one entry it tried (r8 MAT-2), so the cap starts dropping
+  // only once more than ALERT_QUEUE_MAX entries have each failed; the oldest failed go first.
   for (let i = 0; i < ALERT_QUEUE_MAX + 6; i += 1) queueAlert(rec, `u${i}`, { now: T0 });
   await sendAlerts(rec, () => false, T0, { sendMs: 100 });
+  d = rec.read('fact', ALERT_QUEUE_FACT).doc;
+  assert.equal(d.entries.length, ALERT_QUEUE_MAX + 6, 'one failed send drops nothing');
+  for (let i = 1; i < ALERT_QUEUE_MAX + 6; i += 1) await sendAlerts(rec, () => false, T0, { sendMs: 100 });
   d = rec.read('fact', ALERT_QUEUE_FACT).doc;
   texts = d.entries.map((e) => e.text);
   assert.equal(texts.length, ALERT_QUEUE_MAX);
   assert.equal(d.dropped, 6);
-  assert.ok(texts.includes('u0') && !texts.includes('u1') && texts.includes('u55'), 'the failed one goes to the back, the oldest held go: ' + texts.slice(0, 3).join(' | '));
+  assert.ok(d.entries.every((e) => e.held && e.tries === 1));
+  assert.ok(!texts.includes('u5') && texts.includes('u6') && texts.includes('u55'), 'the oldest failed go: ' + texts.slice(0, 3).join(' | '));
   // A new entry queued while the port is down is not held yet, so it is never dropped before its first try.
   queueAlert(rec, 'fresh', { now: T0 });
   assert.equal(rec.read('fact', ALERT_QUEUE_FACT).doc.entries.length, ALERT_QUEUE_MAX + 1);
@@ -948,4 +953,27 @@ test('r7 m1: the run deadline holds every step and both sends; the watchdog marg
   assert.ok(RUN_DEADLINE_MS >= STEPS.length * STEP_DEADLINE_MS + 2 * ALERT_BUDGET_MS, `${RUN_DEADLINE_MS}`);
   assert.ok(ALERT_BUDGET_MS >= ALERT_SEND_MS);
   assert.ok(WATCHDOG_MARGIN_MS > ALERT_SEND_MS, `${WATCHDOG_MARGIN_MS}`);
+});
+
+// Audit 0b-6 r8 MAT-2: a failed send holds only the entry it tried. One text the port always refuses, or one
+// timeout, ahead of a burst of more than ALERT_QUEUE_MAX drops nothing while the port takes everything else.
+test('r8 MAT-2: a refused text or one timeout ahead of a burst drops nothing while the port works', async () => {
+  for (const how of ['refused', 'timeout']) {
+    const rec = recWith([]);
+    queueAlert(rec, 'bad', { now: T0 });
+    for (let i = 0; i < 60; i += 1) queueAlert(rec, `b${i}`, { now: T0 });
+    const got = [];
+    let once = true;
+    const port = (t) => {
+      if (how === 'refused' ? t.startsWith('bad') : once) { once = false; return how === 'refused' ? false : new Promise(() => {}); }
+      got.push(t); return true;
+    };
+    for (let pass = 0; pass < 4; pass += 1) await sendAlerts(rec, port, T0, { sendMs: 30, budgetMs: 60_000 });
+    const d = rec.read('fact', ALERT_QUEUE_FACT).doc;
+    assert.equal(d.dropped ?? 0, 0, how);
+    assert.ok(got.every((t) => !/could not be sent/.test(t)), `${how}: ${got[0]}`);
+    for (let i = 0; i < 60; i += 1) assert.ok(got.includes(`b${i}`), `${how}: b${i} lost`);
+    if (how === 'refused') assert.deepEqual(d.entries.map((e) => e.text), ['bad']);
+    else assert.ok(got.includes('bad'));
+  }
 });

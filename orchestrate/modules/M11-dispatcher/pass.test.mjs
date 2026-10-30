@@ -874,3 +874,30 @@ test('r7 M2: a hand-off alert queued while the port was down leaves when the pau
     }
   }
 });
+
+// Audit 0b-6 r8 MAT-1: an undo held while the port was down was never marked told, so when it started the
+// queued alert was not dropped (the drop sat behind the told field). The stale copy then marked the hold told,
+// and a second hold of that card the same day went untold. Now the drop runs whenever the undo starts.
+test('r8 MAT-1: a held undo that starts before its alert is sent leaves no stale alert; a second hold that day is told', async () => {
+  const w = world([...undoEntries('U-1')]);
+  const deny = rulesWith({}, { start_session: { decision: 'deny', reason: 'the product is paused' } });
+  const allow = rulesWith({}, startAnswer(w.rec));
+  let down = true;
+  const sent = [];
+  const at = (min, rules) => dispatcherPass({ rec: w.rec, rules, now: T0 + min * MIN, account: ACCT, sessions: [], probe: () => idle,
+    launch: async () => ({ ok: true, sessionId: `S-${min}`, pgid: 300 + min, head: 'h'.repeat(40) }),
+    stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }), filesOf: filesOfCommits, portDeadlineMs: 50,
+    alert: (t) => { if (down) throw new Error('down'); sent.push(t); return true; } });
+  const told = () => sent.filter((t) => /your undo \(card U-1\) is waiting/.test(t)).length;
+  await at(0, deny);
+  await at(1, allow);
+  assert.equal(w.rec.read('card', 'U-1').doc.state, 'running');
+  down = false;
+  await at(2, allow);
+  assert.equal(told(), 0, sent.join(' | '));
+  assert.ok(!w.rec.read('fact', UNDO_HELD_FACT('U-1'))?.doc?.told_at, 'the stale copy wrote no told mark');
+  // The card comes back (a restart) and is held again the same day: told.
+  w.setCard('U-1', { state: 'ready', session: null });
+  await at(3, deny);
+  assert.equal(told(), 1, sent.join(' | '));
+});

@@ -100,8 +100,9 @@ export function settleAlert(rec, sent, ok, now, why = 'it was not delivered') {
   if (!e) return;
   const rest = entriesOf(d).filter((x) => x.id !== e.id);
   if (!ok) {
-    // Every entry still queued has now waited through a failed send, so the cap counts it.
-    const { entries, over } = capHeld([...rest, { ...e, tries: (e.tries ?? 0) + 1 }].map((x) => ({ ...x, held: true })));
+    // Only the entry that was tried is held, so the cap counts it; an entry not yet tried is never dropped
+    // (audit 0b-6 r8 MAT-2: one text the port always refuses, or one timeout, ahead of a burst).
+    const { entries, over } = capHeld([...rest, { ...e, held: true, tries: (e.tries ?? 0) + 1 }]);
     putFact(rec, ALERT_QUEUE_FACT, { ...d, entries, dropped: (d.dropped ?? 0) + over, error: `an alert could not be sent: ${why}`, at: iso(now) }, 'alert_failed');
     return;
   }
