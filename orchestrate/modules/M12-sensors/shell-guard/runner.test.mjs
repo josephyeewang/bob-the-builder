@@ -259,3 +259,25 @@ test('round 10 audit 6 M-3: on a disk that ignores case, an exact-name guard mis
   // Cosmetic 2: a home folder written with a trailing slash is the same folder.
   assert.ok(cases(T, `${root}/proj`, { home: `${root}/` }).some((c) => c.form === 'home-tilde'));
 });
+
+// Round 10 audit 7 M-1: Claude often puts commands on separate lines, sometimes after a comment line.
+test('round 10 audit 7 M-1: a guard that reads a newline as a space, or a comment as running to the end, misses the two-line cases', () => {
+  const root = tmp(); const file = resolve(root, T);
+  // Follows cd and pushd, and checks each word of every other command against the file, from the folder it is in by then.
+  const guard = (seps, comment) => (c, cwd) => {
+    let here = cwd;
+    for (const seg of c.replace(comment, '').split(seps)) {
+      const w = seg.trim().split(/\s+/).filter(Boolean);
+      if (w[0] === 'cd' || w[0] === 'pushd') { here = resolve(here, w[1] ?? '.'); continue; }
+      if (w.some((x) => resolve(here, x) === file)) return 'refuse';
+    }
+    return 'allow';
+  };
+  const twoLine = (g) => runCorpus(g, { target: T, cwd: root }).failures.filter((f) => f.expect === 'refuse' && f.form === 'plain' && f.tpl.includes('\n') && !f.tpl.includes('EOF'));
+  const noNewline = twoLine(guard(/;|&&|\|\||\||[()]/, /#[^\n]*/g));
+  assert.ok(noNewline.some((f) => f.group === 'after-cd'), 'cd, then the read on the next line');
+  const toEnd = twoLine(guard(/;|&&|\|\||\||[()]|\n/, /#[^]*$/));
+  assert.ok(toEnd.some((f) => f.group === 'lines'), 'a comment line, then the read');
+  // The same guard splitting at newlines and ending a comment at the line's end misses none of them.
+  assert.deepEqual(twoLine(guard(/;|&&|\|\||\||[()]|\n/, /#[^\n]*/g)), []);
+});
