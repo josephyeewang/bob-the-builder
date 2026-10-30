@@ -20,7 +20,7 @@ Vercel, the repo) and write facts into the record. Everything they write is mask
 | `air-health.mjs` | R-0b-84, lead call L23 | The Air's health result as a dated file a machine writes (`node air-health.mjs <red count> <folder>`); `checkAirHealthFile` and `airFactFromFile` date the fact by the check itself, never by when it arrived. Joe never types a count. |
 | `start-gate.mjs` | lead call L3 | The two Vercel facts lane 2's launcher gate reads: skip command equals the pinned one; no env name in both Preview and Production. Lane 2's shape: `start_gate.vercel_skip.<product>` / `start_gate.vercel_env.<product>`, `{ product, vercel_project, read_at, result }`. M4's startGate decides (≤10 min old), so the Sensors re-read every 5 min; `startGateOpen` is a test helper. |
 | `device-checks.mjs` | R-0b-78 | The decisions behind the owner's private `/host` and `/configaudit` for the Air. |
-| `shell-guard/` | R-0b-70 | Shell-trick cases and a runner for the production guard (the guard is lane 2's R-0b-36). |
+| `shell-guard/` | R-0b-70 | Shell-trick cases and a runner for the production guard (the guard is lane 2's R-0b-36); `selfcheck.mjs` proves each case really touches the file, each in a new folder, under bash and zsh; the pairs that touch nothing are listed as dead in `corpus.json`, and a test keeps that list exact on two names. |
 
 ## What is proven, and what is not yet
 
@@ -34,8 +34,10 @@ heartbeat says "usage: unknown" until it is).
 
 - R-0b-126: lane 1/2 intake (research, lesson and idea files, the Lead's input) must go through `cleanOutside` and pass
   `fixtures/outside-text.json` end to end. Until then R-0b-126 is "half: intake wiring pending".
-- R-0b-70: run `node shell-guard/runner.mjs '<the installed hook command>'` against lane 2's guard; every miss goes
-  to lane 2. Until it is green, R-0b-70 is pending.
+- R-0b-70: from the folder that holds the protected file, run `node <Bob's folder>/orchestrate/modules/M12-sensors/shell-guard/runner.mjs
+  '<the installed hook command>' <its short name>` and again with its absolute path; every miss goes to lane 2. Each
+  run also tries the absolute form and "change folder, then use the short name" (asked from the folder above). A path
+  with a space is refused; use a link without one. Until both runs are green, R-0b-70 is pending.
 - Lead call L25: any lane that writes a fact through `facts.mjs` adds its kind to `fact-shapes.mjs` (ask lane 3);
   without a shape every field but `kind` and `ts` is masked.
 - Lead call L3 (lane 2's contract): the Sensors' loop runs `readStartGate` for each product at least every

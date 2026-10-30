@@ -1,5 +1,5 @@
 {
-  "_about": "Shell-trick cases for the production guard (R-0b-70). {{P}} is replaced by every path form in runner.mjs (pathForms), so each template runs once per form. Every 'refuse' case must be refused; every 'allow' case must be allowed, so a guard that refuses everything also fails. Cases written for Bob, not copied from another project.",
+  "_about": "Shell-trick cases for the production guard (R-0b-70). {{P}} is replaced by every path form in runner.mjs (pathForms), so each template runs once per form; with a cwd, also in its absolute form. In 'refuse_after_cd', {{DIR}} is the protected file's folder and {{BASE}} its short name in every form. 'dead' lists the template and form pairs that no shell turns into a touch of the file (left out; selfcheck.mjs and a test keep the list exact). Every 'refuse' case must be refused; every 'allow' case must be allowed, so a guard that refuses everything also fails. Cases written for Bob, not copied from another project.",
   "refuse": {
     "write": [
       "echo x > {{P}}",
@@ -7,7 +7,7 @@
       "echo x | tee {{P}}",
       "cp /tmp/x {{P}}",
       "mv /tmp/x {{P}}",
-      "sed -i.bak 's/a/b/' {{P}}",
+      "sed -i.bak 's/^/x/' {{P}}",
       "dd if=/tmp/x of={{P}}",
       "truncate -s 0 {{P}}",
       "rm -f {{P}}",
@@ -32,10 +32,71 @@
       "eval \"cat {{P}}\"",
       "env A=1 cat {{P}}",
       "F={{P}}; cat \"$F\"",
-      "alias c=cat; c {{P}}",
+      "shopt -s expand_aliases 2>/dev/null; alias c=cat; eval \"c {{P}}\"",
       "echo {{P}} | xargs cat",
       "cat <<'EOF' > {{P}}\nx\nEOF",
       "true && cat {{P}}"
+    ]
+  },
+  "refuse_after_cd": [
+    "cd {{DIR}} && cat {{BASE}}",
+    "cd {{DIR}}; echo x > {{BASE}}",
+    "(cd {{DIR}} && cat {{BASE}})",
+    "pushd {{DIR}} >/dev/null && cat {{BASE}}"
+  ],
+  "dead": {
+    "cp /tmp/x {{P}}": [
+      "brace"
+    ],
+    "mv /tmp/x {{P}}": [
+      "brace"
+    ],
+    "dd if=/tmp/x of={{P}}": [
+      "glob",
+      "qmark",
+      "bracket",
+      "brace"
+    ],
+    "ln -sf /tmp/x {{P}}": [
+      "brace"
+    ],
+    "python3 -c \"open('{{P}}','w').write('x')\"": [
+      "backslash",
+      "glob",
+      "qmark",
+      "bracket",
+      "ansi-c",
+      "brace"
+    ],
+    "node -e \"require('fs').writeFileSync('{{P}}','x')\"": [
+      "empty-quotes",
+      "glob",
+      "qmark",
+      "bracket",
+      "ansi-c",
+      "brace"
+    ],
+    "base64 < {{P}}": [
+      "brace"
+    ],
+    "cp {{P}} /tmp/y": [
+      "brace"
+    ],
+    "bash -c 'cat {{P}}'": [
+      "ansi-c",
+      "hex-printf"
+    ],
+    "sh -c \"echo x > {{P}}\"": [
+      "glob",
+      "qmark",
+      "bracket",
+      "brace"
+    ],
+    "F={{P}}; cat \"$F\"": [
+      "glob",
+      "qmark",
+      "bracket",
+      "brace"
     ]
   },
   "allow": [
@@ -43,6 +104,13 @@
     "git status",
     "node --test",
     "cat README.md",
-    "echo hello > /tmp/scratch.txt"
+    "echo hello > /tmp/scratch.txt",
+    "git commit -m \"fix the typo\"",
+    "ls *.md",
+    "echo $HOME",
+    "cat ./README.md",
+    "grep -r 'TODO' src",
+    "cd src && ls ../docs",
+    "printf '%s\\n' done"
   ]
 }
