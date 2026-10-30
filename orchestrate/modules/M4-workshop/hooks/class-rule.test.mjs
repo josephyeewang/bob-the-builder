@@ -13,6 +13,9 @@ import * as merge from './merge-guard.mjs';
 import * as noVerify from './no-verify-block.mjs';
 import * as prodGuard from './production-write-guard.mjs';
 import * as secret from './secret-file-block.mjs';
+import * as plain from './plain-files.mjs';
+import { fold } from './lib.mjs';
+import { fold as pushFold } from '../git/push-refusals.mjs';
 import { tempDir } from '../../../shared/test-tmp.mjs';
 
 const dot = (...p) => `.${p.join('')}`;
@@ -130,4 +133,23 @@ test('MIN-3: the secret-file guard refuses variables, patterns and joined lines 
   ];
   for (const c of forms) blocked(secret.decide(bash(c, w.work), w.args), c);
   for (const c of ['ls', 'cat README.md', 'ls *.md', 'echo $HOME']) passed(secret.decide(bash(c, w.work), w.args), c);
+});
+
+// A Mac disk also opens long s (U+017F) as s, sharp s (U+00DF) as ss and the ligature U+FB01 as fi (audit R-0b-44
+// round 3 MAT-1, checked on disk). Characters are written as escapes so the source stays plain.
+test('round 3 MAT-1: names spelled with letters a Mac disk folds to plain ones are still refused', () => {
+  const w = world();
+  const LONG_S = '\u017f', SHARP_S = '\u00df', FI = '\ufb01';
+  const keyDir = dot('ss', 'h');
+  assert.equal(pushFold, fold, 'one fold, shared by the hooks and the push check');
+  assert.equal(fold(`.${LONG_S}sh`), keyDir);
+  assert.equal(fold(`.${SHARP_S}h`), keyDir);
+  assert.equal(fold(`.con${FI}g`), '.config');
+  assert.equal(fold('a\u00adb\u034fc'), 'abc', 'soft hyphen and other invisible marks dropped');
+  assert.equal(fold('\uff53\u2071'), 'si', 'compatibility forms (full-width s, superscript i) fold too: errs on the side of refusing');
+  const reads = [join(w.home, `.${LONG_S}sh`, 'config'), join(w.home, `.${SHARP_S}h`, 'config'), join(w.home, `.con${FI}g`, 'gh', 'hosts.yml')];
+  for (const p of reads) blocked(secret.decide({ tool_name: 'Read', tool_input: { file_path: p } }, w.args), p);
+  for (const c of [`cat ${w.home}/.${LONG_S}sh/config`, `cat ${w.home}/.con${FI}g/gh/hosts.yml`]) blocked(secret.decide(bash(c, w.work), w.args), c);
+  for (const p of [`.mcp.j${LONG_S}on`, `.v${LONG_S}code/settings.json`, `${LONG_S}KILL.md`, `.con${FI}g/x`]) assert.equal(plain.isSetupPath(join(w.work, p)), true, p);
+  blocked(prodGuard.decide(bash(`fakeho${LONG_S}t --x`, w.work), w.args), 'program spelled with long s');
 });

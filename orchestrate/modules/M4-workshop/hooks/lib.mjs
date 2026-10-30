@@ -43,7 +43,7 @@ async function readStdin(stream) {
  * having checked nothing, which lets every call through.
  */
 export function isMain(moduleUrl, argv1 = process.argv[1]) {
-  const real = (p) => { try { return realpathSync(p); } catch { return null; } };
+  const real = (p) => { try { return realpathSync.native(p); } catch { return null; } };
   const self = real(fileURLToPath(moduleUrl));
   return !!(self && argv1 && self === real(argv1));
 }
@@ -88,7 +88,7 @@ export function landingPath(p) {
     try { lstatSync(head); exists = true; } catch { /* missing: walk up */ }
     if (exists) {
       // A link whose target is missing would land the write at its target: refuse (audit R-0b-44 M-2).
-      try { const real = realpathSync(head); return tail.length ? join(real, ...tail.reverse()) : real; } catch { return null; }
+      try { const real = realpathSync.native(head); return tail.length ? join(real, ...tail.reverse()) : real; } catch { return null; }
     }
     const parent = dirname(head);
     if (parent === head) return null;
@@ -113,7 +113,7 @@ export function linkedFile(p) {
 export const inside = (child, parent) => child === parent || child.startsWith(parent.endsWith(sep) ? parent : parent + sep);
 
 /** Real path of a folder given on the command line (the outbox, the copy); null if missing. */
-export function realFolder(p) { try { return realpathSync(p); } catch { return null; } }
+export function realFolder(p) { try { return realpathSync.native(p); } catch { return null; } }
 
 // Every path a tool call names. Grep's and Glob's search folder counts; a missing one is the cwd.
 export function toolPaths(input) {
@@ -292,8 +292,12 @@ export function unreadable(cmd) {
   return null;
 }
 
-/** Case and invisible characters folded out, as a Mac disk compares names (audit R-0b-44 round 2 MAT-2). */
-export const fold = (s) => String(s).normalize('NFC').replace(/[\u200B-\u200F\u2060\uFEFF]/g, '').toLowerCase();
+/**
+ * Names folded as a Mac disk compares them (audit R-0b-44 round 2 MAT-2, round 3 MAT-1): compatibility forms
+ * (the ligature ﬁ is f+i), case through upper then lower (long s ſ is s, ß is ss), invisible characters dropped.
+ * The one definition: git/push-refusals.mjs re-exports it.
+ */
+export const fold = (s) => String(s).normalize('NFKC').toUpperCase().toLowerCase().normalize('NFKC').replace(/\p{Default_Ignorable_Code_Point}/gu, '');
 
 /** The command names git's own settings or hooks files (`.git/config`, `.git/hooks/…`, `.git/info/…`). */
 export const namesGitInternals = (cmd) => [joinLines(cmd), ...shellWords(String(cmd ?? ''))]

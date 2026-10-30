@@ -23,7 +23,9 @@ export const SUBMODULE_MODE = '160000';
 // The names Claude reads settings, skills or tool servers from (launch check 2 uses these too).
 export const CLAUDE_NAMES = Object.freeze([CLAUDE_DIR, ...FILE_NAMES]);
 
-export const fold = (s) => String(s).normalize('NFKC').toUpperCase().toLowerCase().normalize('NFKC').replace(/\p{Default_Ignorable_Code_Point}/gu, '');
+// One fold for names, shared with the hooks (audit R-0b-44 round 3 MAT-1).
+export { fold } from '../hooks/lib.mjs';
+import { fold } from '../hooks/lib.mjs';
 
 /** Why a path is refused, or null. `path` is a git path ('/'-separated). */
 export function refusedPath(path) {
