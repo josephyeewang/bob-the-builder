@@ -1,9 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { writeFileSync, mkdirSync, readdirSync, readFileSync, statSync } from 'node:fs';
+import { writeFileSync, mkdirSync, readdirSync, readFileSync, statSync, symlinkSync, utimesSync, existsSync } from 'node:fs';
 import { join, dirname, relative } from 'node:path';
-import { fileURLToPath } from 'node:url';
-import { safeGitEnv, git, gitOk, checkGitVersion, checkMirror, initMirror, MIRROR_CONFIG_TEMPLATE, SAFE_CONFIG } from './safe-git.mjs';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { spawnSync } from 'node:child_process';
+import { safeGitEnv, sweepStaleHomes, git, gitOk, checkGitVersion, checkMirror, initMirror, MIRROR_CONFIG_TEMPLATE, SAFE_CONFIG } from './safe-git.mjs';
 import { tempDir } from '../../../shared/test-tmp.mjs';
 
 const tmp = () => tempDir('orch-sg-');
@@ -92,4 +93,33 @@ test('no other orchestrate file spawns git directly', () => {
   walk(root);
   for (const f of Object.keys(KNOWN_EXCEPTIONS)) assert.ok(offenders.includes(f), `${f} no longer starts git: delete its line in KNOWN_EXCEPTIONS`);
   assert.deepEqual(offenders.filter((f) => !(f in KNOWN_EXCEPTIONS)), []);
+});
+
+test('start-up sweep removes only stale, empty git homes of ours (lead, 29 Oct 2026)', () => {
+  const d = tempDir('m4-homes-');
+  const now = Date.now();
+  const old = (now - 25 * 3600 * 1000) / 1000;
+  const mk = (n, { age = old, file = false } = {}) => { mkdirSync(join(d, n)); if (file) writeFileSync(join(d, n, 'x'), 'x'); utimesSync(join(d, n), age, age); };
+  mk('orch-git-home-stale');
+  mk('orch-git-home-fresh', { age: now / 1000 });
+  mk('orch-git-home-full', { file: true });
+  mk('other-stale');
+  mkdirSync(join(d, 'target'));
+  symlinkSync(join(d, 'target'), join(d, 'orch-git-home-link'));
+  assert.deepEqual(sweepStaleHomes({ dir: d, now }), ['orch-git-home-stale']);
+  assert.equal(existsSync(join(d, 'orch-git-home-stale')), false);
+  for (const n of ['orch-git-home-fresh', 'orch-git-home-full', 'other-stale', 'orch-git-home-link', 'target']) assert.ok(existsSync(join(d, n)), n);
+  assert.deepEqual(sweepStaleHomes({ dir: join(d, 'missing'), now }), []);
+});
+
+test('the sweep runs when safe-git first makes its git home', () => {
+  const d = tempDir('m4-homes-');
+  const old = (Date.now() - 25 * 3600 * 1000) / 1000;
+  mkdirSync(join(d, 'orch-git-home-stale')); utimesSync(join(d, 'orch-git-home-stale'), old, old);
+  const url = pathToFileURL(join(dirname(fileURLToPath(import.meta.url)), 'safe-git.mjs')).href;
+  const env = { ...process.env, TMPDIR: d }; delete env.NODE_TEST_CONTEXT;
+  const r = spawnSync(process.execPath, ['--input-type=module', '-e', `import { checkGitVersion } from ${JSON.stringify(url)}; await checkGitVersion();`], { encoding: 'utf8', env });
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(existsSync(join(d, 'orch-git-home-stale')), false);
+  assert.deepEqual(readdirSync(d).filter((n) => n.startsWith('orch-git-home-')), [], 'its own home is removed on exit');
 });

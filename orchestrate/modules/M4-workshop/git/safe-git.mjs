@@ -11,7 +11,7 @@
 // Capability note: checked against Git 2.54.0 on 29 Oct 2026; requires git >= 2.42.
 
 import { spawn } from 'node:child_process';
-import { mkdtempSync, readFileSync, existsSync, readdirSync, lstatSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, existsSync, readdirSync, lstatSync, rmSync, rmdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -40,10 +40,35 @@ export const SAFE_CONFIG = Object.freeze([
 
 const FIXED_PATH = '/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin';
 let privateHome = null;
-// The private git home is made once per process and removed when the process ends.
+const HOME_PREFIX = 'orch-git-home-';
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Remove this script's own empty git homes older than a day. The exit handler below doesn't run when a process is
+ * killed, so they pile up (lead, 29 Oct 2026). Only real folders (not links) with our prefix, owned by this user and
+ * empty: rmdirSync refuses a folder with anything in it. Never throws. Returns the names removed.
+ */
+export function sweepStaleHomes({ dir = tmpdir(), now = Date.now(), maxAgeMs = DAY_MS } = {}) {
+  const removed = [];
+  let names = [];
+  try { names = readdirSync(dir); } catch { return removed; }
+  for (const n of names) {
+    if (!n.startsWith(HOME_PREFIX)) continue;
+    try {
+      const st = lstatSync(join(dir, n));
+      if (!st.isDirectory() || st.uid !== process.getuid?.() || now - st.mtimeMs < maxAgeMs) continue;
+      rmdirSync(join(dir, n));
+      removed.push(n);
+    } catch { /* not empty, or gone already: leave it */ }
+  }
+  return removed;
+}
+
+// The private git home is made once per process and removed when the process ends; stale ones are swept first.
 const home = () => {
   if (!privateHome) {
-    privateHome = mkdtempSync(join(tmpdir(), 'orch-git-home-'));
+    sweepStaleHomes();
+    privateHome = mkdtempSync(join(tmpdir(), HOME_PREFIX));
     const made = privateHome;
     process.once('exit', () => rmSync(made, { recursive: true, force: true }));
   }
