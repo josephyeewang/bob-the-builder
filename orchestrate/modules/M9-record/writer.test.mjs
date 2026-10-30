@@ -205,6 +205,15 @@ test('ask re-asks: a lapse → open with count 1; a second lapse → expired; a 
   must(ask('A-2', { state: 'open' }), 'released');
   assert.equal(env.record.read('ask', 'A-2').doc.reask_count, 0);
   refused(ask('A-2', { reask_count: 1 }), /goes up by one, only with a first lapse/);
+  // An open ask lapses in place by setting lapsed_at, then expires straight from open (0b-5 M5-2).
+  must(ask('A-2', { reask_count: 1, lapsed_at: iso(env.clock.t) }), 'open ask lapses in place');
+  refused(ask('A-2', { lapsed_at: iso(env.clock.t + 1), reask_count: 2 }), /goes up by one/);
+  must(ask('A-2', { state: 'expired' }), 'second lapse from open');
+  // An answered ask goes back to open only on its first lapse, never as a released box (M5-2).
+  must(env.record.write({ actor: 'approvals', entity: 'ask', id: 'A-3', expectRev: 0, doc: { state: 'open', kind: 'question' } }));
+  must(ask('A-3', { state: 'pushed' })); must(ask('A-3', { state: 'answered' }));
+  refused(ask('A-3', { state: 'open' }), /answered ask goes back to open only on its first lapse/);
+  must(ask('A-3', { state: 'open', reask_count: 1 }), 'the 24-hour rule');
 });
 
 // ---------------- sessions (G2) ----------------

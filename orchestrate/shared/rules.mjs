@@ -22,7 +22,7 @@
 //   rules.rev                                                      // the loaded rules version, for diary lines
 
 export const ALLOW = 'allow';
-export const ASK = 'ask';     // allowed only with Joe's answer at `tier` (1 = his GitHub Approve, 2 = a tap)
+export const ASK = 'ask';     // allowed only with the owner's answer; `tier` is the channel (1 = their GitHub Approve, 2 = a tap)
 export const DENY = 'deny';
 
 // The acts a module may ask about. Anything else is denied. Owners in brackets ask; M10 answers.

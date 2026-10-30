@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { makeRecord, memoryRecord, isActor, STATES, FINAL_STATES, WAIT_FIELDS, REQUIRED_FIELDS, ENTITIES } from './record.mjs';
+import { makeRecord, memoryRecord, isActor, missingFields, STATES, FINAL_STATES, WAIT_FIELDS, REQUIRED_FIELDS, ENTITIES } from './record.mjs';
 
 test('create, read, update only if unchanged, one diary line per accepted write', () => {
   const rec = memoryRecord();
@@ -64,4 +64,12 @@ test('final states are real states, and every entity with states has a final lis
   }
   assert.deepEqual(Object.keys(FINAL_STATES).sort(), Object.keys(STATES).sort());
   assert.ok(STATES.merge.includes('queued') && FINAL_STATES.card.includes('failed'));
+});
+
+test('a launch names a card and head only for a worker, reviewer or auditor', () => {
+  const base = { session_id: 's-1', rev: 1, launched_at: '2026-10-30T00:00:00Z' };
+  assert.deepEqual(missingFields('launch', { ...base, role: 'front_door' }), []);
+  assert.deepEqual(missingFields('launch', { ...base, role: 'worker' }), ['card', 'head']);
+  assert.deepEqual(missingFields('launch', { ...base }), ['role', 'card', 'head'], 'no role: fail closed');
+  assert.deepEqual(missingFields('merge_request', {}), REQUIRED_FIELDS.merge_request);
 });

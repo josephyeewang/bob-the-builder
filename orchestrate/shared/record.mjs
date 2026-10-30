@@ -81,6 +81,14 @@ export const REQUIRED_FIELDS = Object.freeze({
   merge_request: ['card', 'pr', 'session_id', 'head', 'rev', 'requested_at'],
   verdict: ['session_id', 'head'],
 });
+// A launch names a card and head only for the roles that work on one card (0b-5: a Front Door or thinking session has
+// neither; with no role, all are needed). The one check both the fake and the real writer use.
+export const CARD_ROLES = Object.freeze(['worker', 'reviewer', 'auditor']);
+export function missingFields(entity, doc) {
+  const blank = (f) => doc?.[f] === undefined || doc?.[f] === null || doc?.[f] === '';
+  const need = (REQUIRED_FIELDS[entity] ?? []).filter((f) => entity !== 'launch' || !['card', 'head'].includes(f) || !doc?.role || CARD_ROLES.includes(doc.role));
+  return need.filter(blank);
+}
 
 // State models (design v3 §2.4, v4 §8 A4–A5, D8). The moves between them are M9's; the names are here.
 export const STATES = Object.freeze({
@@ -163,7 +171,7 @@ export function makeRecord(impl) {
       if (!ENTITIES.includes(w.entity)) return refused(`unknown entity "${w.entity}"`);
       if (typeof w.id !== 'string' || !/^[A-Za-z0-9._-]+$/.test(w.id) || w.id.length > 200 || /^\.+$/.test(w.id)) return refused('bad id');
       if (!Number.isInteger(w.expectRev) || w.expectRev < 0) return refused('expectRev must be the rev read (0 to create)');
-      const missing = (REQUIRED_FIELDS[w.entity] ?? []).filter((f) => w.doc?.[f] === undefined || w.doc?.[f] === null || w.doc?.[f] === '');
+      const missing = missingFields(w.entity, w.doc);
       if (missing.length) return refused(`${w.entity} is missing ${missing.join(', ')}`);
       // A launch names a session that can hand in: the outbox refuses any other session id (round 7 m-2).
       if (w.entity === 'launch' && !(typeof w.doc.session_id === 'string' && SESSION_ID.test(w.doc.session_id))) return refused('a launch needs a session_id of letters, digits and dashes, at most 128');
