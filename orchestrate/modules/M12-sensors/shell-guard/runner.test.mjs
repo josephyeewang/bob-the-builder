@@ -377,6 +377,9 @@ test('round 10 audit 9 M-4: allow-beside cases are asked from a folder that exis
     for (const c of beside) assert.ok(existsSync(c.cwd) && !resolve(root, target).startsWith(`${c.cwd}/`), `${target}: ${c.cwd}`);
   }
   assert.ok(!cases(T, root, { beside: null }).some((c) => c.group === 'allow-beside'), 'none when there is no such folder');
+  // Round 10 audit 10: the folder found is the one beside the file's, never a hidden one.
+  mkdirSync(`${root}/apps/.cache`);
+  assert.ok(cases(`apps/web/${T}`, root).filter((c) => c.group === 'allow-beside').every((c) => c.cwd === `${root}/apps/api`));
 });
 
 test('round 10 audit 9 M-5: run through a link to its folder, the runner still runs the corpus and fails a bad hook', async () => {
@@ -388,4 +391,31 @@ test('round 10 audit 9 M-5: run through a link to its folder, the runner still r
   const r = spawnSync(node, [`${root}/link/runner.mjs`, 'exit 2'], { cwd: root, encoding: 'utf8', env });
   assert.match(r.stdout, /cases as expected/);
   assert.equal(r.status, 1);
+});
+
+test('round 10 audit 10: a guard that skips here-doc bodies, or takes only lowercase cp flags, misses those reads', () => {
+  const root = tmp();
+  for (const target of [T, `apps/web/${T}`]) {
+    const file = resolve(root, target);
+    const holds = (d) => file.startsWith(`${d}/`);
+    const guard = ({ heredoc, cp }) => (c, cwd) => {
+      const text = heredoc ? c : c.replace(/<<'EOF'\n[\s\S]*?\nEOF/g, "<<'EOF'");
+      let here = cwd;
+      for (const seg of text.split(/;|&&|\|\||\||\n/)) {
+        const w = seg.trim().split(/[\s()<>'"]+/).filter(Boolean);
+        if (w[0] === 'cd') { here = resolve(here, w[1] ?? '.'); continue; }
+        if (w.some((x) => resolve(here, x) === file)) return 'refuse';
+        if (w[0] === 'cp' && cp.test(w[1] ?? '') && w.slice(2).some((x) => holds(resolve(here, x)))) return 'refuse';
+      }
+      return 'allow';
+    };
+    const missed = (opts, forms = () => true) => runCorpus(guard(opts), { target, cwd: root }).failures.filter((f) => f.expect === 'refuse' && forms(f.form)).map((f) => f.command);
+    const skipsBody = missed({ heredoc: false, cp: /^-\w*[rRa]/ });
+    assert.ok(skipsBody.some((m) => m.startsWith('python3 - <<')) && skipsBody.some((m) => m.startsWith('bash <<')), `${target}: here-doc body`);
+    const lower = missed({ heredoc: true, cp: /^-\w*r/ });
+    assert.ok(lower.some((m) => /cp -R /.test(m)) && lower.some((m) => /cp -a /.test(m)), `${target}: cp -R and -a`);
+    // (It reads no spelling but the plain one, so only the plain form, and the copies, which name no spelling.)
+    const both = missed({ heredoc: true, cp: /^-\w*[rRa]/ }, (form) => form === 'plain' || form === '-');
+    assert.ok(!both.some((m) => /<<'EOF'\n|^cp -[Ra] /.test(m)), `${target}: caught by a guard that does both`);
+  }
 });

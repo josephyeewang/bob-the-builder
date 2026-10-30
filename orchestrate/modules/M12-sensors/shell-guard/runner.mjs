@@ -89,6 +89,8 @@ export function pathForms(target, cwd, { absolute = true, home = homedir(), case
     'empty-quotes': `${dir}${base.slice(0, mid)}''${base.slice(mid)}`,
     // An unset variable splits the name with no quote or backslash (round 10 audit 4 M-1).
     'empty-var': `${dir}${base.slice(0, mid)}${'${_sg_unset}'}${base.slice(mid)}`,
+    // A default value, as scripts write `${ENV_FILE:-…}` (round 10 audit 10 minor 1).
+    'default-var': `\${_sg_unset:-${target}}`,
     'early-quotes': `${dir}${base.slice(0, early)}''${base.slice(early)}`,
     'late-quotes': `${dir}${base.slice(0, late)}''${base.slice(late)}`,
     ...(safe(mid) ? { backslash: `${dir}${base.slice(0, mid)}\\${base.slice(mid)}` } : {}),
@@ -143,11 +145,13 @@ export const hostDead = (tpl, form) => (form === 'brace' && !existsSync('/bin/zs
   || (form === 'globstar' && !existsSync('/bin/zsh'));
 const live = (tpl, form) => !(corpus.dead[tpl] ?? []).includes(form) && !hostDead(tpl, form);
 
-// The first folder (by name) beside the file's folder that does not hold the file, or null.
+// The first folder (by name, not hidden) beside the file's folder that does not hold the file, or null (round 10 audit 10
+// minor 2).
 function besideOf(abs) {
   const up = dirname(dirname(abs));
   try {
-    return readdirSync(up, { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => resolve(up, e.name))
+    // Not a hidden folder: beside a project in the home folder that would be one a guard may rightly protect too.
+    return readdirSync(up, { withFileTypes: true }).filter((e) => e.isDirectory() && !e.name.startsWith('.')).map((e) => resolve(up, e.name))
       .filter((p) => !abs.startsWith(`${p}/`) && /^[A-Za-z0-9._\/-]+$/.test(p)).sort()[0] ?? null;
   } catch { return null; }
 }
@@ -206,7 +210,7 @@ export function cases(target, cwd = process.cwd(), { home = homedir(), caseless 
     for (const [form, p] of short) if (!form.startsWith('pwd-') && live(tpl, form)) out.push({ expect: 'refuse', group: 'cd-up', form, tpl, cwd: dir, command: fill(tpl, { UP: basename(dir), BASE: p }) });
   }
   // A recursive grep of a folder that holds the file reads it, so it is no allow case there (round 10 audit 5 minor 1).
-  const readsFile = (command, where) => /\bgrep (-\w*[rR]|--recursive)|^tar |^cp -r|^rsync /.test(command) && [resolve(where, command.split(' ').pop())].some((f) => abs === f || abs.startsWith(`${f}/`));
+  const readsFile = (command, where) => /\bgrep (-\w*[rR]|--recursive)|^tar |^cp -\w*[rRa]|^rsync /.test(command) && [resolve(where, command.split(' ').pop())].some((f) => abs === f || abs.startsWith(`${f}/`));
   for (const command of corpus.allow) if (!readsFile(command, cwd)) out.push({ expect: 'allow', group: 'allow', form: '-', command });
   // Ordinary commands asked from the folder above and from the file's folder: a guard that refuses whatever is asked
   // from outside the run folder fails (round 10 audit 4 M-2).
