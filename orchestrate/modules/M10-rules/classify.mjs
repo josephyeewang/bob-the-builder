@@ -35,9 +35,14 @@ const FILE_MODES = new Set(['100644', '100755', '120000', '160000']);   // a sym
 // Rounds 7 and 8 widened it for the exact-reverse check: up to three words may stand between the verb and the object
 // (`create unlogged table`, `create constraint trigger`), the text is scanned as written and again with SQL comments
 // blanked (`CREATE/**/TABLE`, nested `/* /* */ */`, `-- …` to the line end), and the usual code-library calls
-// (`createTable`, `schema.dropTableIfExists`) count. A backstop, never complete (README).
-const SCHEMA_SCANS = [/\b(create|alter|drop)\b(\s+\w+){0,3}?\s+(table|index|function|procedure|trigger|policy|view|type|schema|extension|sequence|role|domain|rule|database)\b/i,
-  /\b(grant|revoke)\s+[\w\s,()."]+?\s+(on|to|from)\b/i, /\b(create|alter|drop|rename)(Table|Index|Column|Schema)\w*/];
+// (`createTable`, `schema.dropTableIfExists`, `op.drop_table`, `queryInterface.addColumn`) count, as do the account and
+// system statements (`create user`, `drop owned`, `alter system`). A backstop, never complete (README).
+// No repeated part can match the same text two ways, so a long run of spaces can't make a scan slow (audit round 10).
+const SCHEMA_SCANS = [
+  /\b(create|alter|drop)\b(?:\s+\w+){0,5}?\s+(table|index|function|procedure|trigger|policy|view|type|schema|extension|sequence|role|domain|rule|database|user|owned|publication|subscription|aggregate|operator|cast|tablespace|language|server|system|collation|conversion|statistics|transform|group)\b/i,
+  /\b(grant|revoke)\s+(?:[^\s;]+\s+){0,20}?(on|to|from)\b/i,
+  /\b(create|alter|drop|rename|add|remove|change)(Table|Index|Column|Schema|Constraint)\w*/,
+  /\b(create|alter|drop|rename|add|remove|change)_(table|index|column|schema|join_table|reference|foreign_key)\b/i];
 // The texts to scan: as written, then with comments blanked (innermost block comments first, so nesting unwinds).
 const sqlTexts = (lines) => {
   const raw = lines.join('\n');
@@ -48,7 +53,7 @@ const sqlTexts = (lines) => {
 const scanHit = (scans, lines) => sqlTexts(lines).some((t) => scans.some((re) => re.test(t)));
 // Array.from turns a hole in a sparse list into undefined, so a list with holes is not "lines" (audit round 9).
 const isLines = (v) => Array.isArray(v) && Array.from(v).every((l) => typeof l === 'string');
-const DELETE_SCANS = [/\bdelete\s+from\b/i, /\btruncate\s+(table\s+)?\w/i, /\bdrop\s+(table|column|index|schema|database|view)\b/i];
+const DELETE_SCANS = [/\bdelete\s+from\b/i, /\btruncate\s+(table\s+)?(only\s+)?[\w"]/i, /\bdrop\s+(table|column|index|schema|database|view)\b/i];
 
 export function classifyWithRulesText(text, change) {
   const parsed = parsePolicy(text);
@@ -142,13 +147,13 @@ export function classifyChange(policy, change) {
     if (scan && isLines(f.removed_lines) && scanHit(SCHEMA_SCANS, f.removed_lines)) add('schema', `${f.path} (table change in removed lines)`);
   }
 
-  // A `needs-joe` label adds `unclassifiable`; `needs-joe:<class>` adds that class. Neither removes one (MIN-3).
+  // A `needs-joe` label adds `unclassifiable`; `needs-joe:<class>` adds that class. Neither removes one (MIN-3). Case
+  // and spaces at either end don't matter, and any other label starting `needs-joe` counts as unclassifiable (round 10).
   for (const label of Array.isArray(change.labels) ? change.labels : []) {
-    if (label === 'needs-joe') add('unclassifiable', 'needs-joe label');
-    else if (typeof label === 'string' && label.startsWith('needs-joe:')) {
-      const cls = label.slice('needs-joe:'.length);
-      add(RISKY_CLASSES.includes(cls) ? cls : 'unclassifiable', `${label} label`);
-    }
+    const l = typeof label === 'string' ? label.trim().toLowerCase() : '';
+    if (!l.startsWith('needs-joe')) continue;
+    const cls = l.startsWith('needs-joe:') ? l.slice('needs-joe:'.length) : null;
+    add(cls && RISKY_CLASSES.includes(cls) ? cls : 'unclassifiable', `${label} label`);
   }
   return finish(reasons, protectedPaths, tier);
 }

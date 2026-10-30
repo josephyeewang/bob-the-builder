@@ -412,6 +412,7 @@ test('merge: on an undo, every needs-joe label reaches Joe, whatever class it na
     assert.deepEqual([r.decision, r.tier], ['ask', 1], cls);
   }
   assert.equal(mergeOf(w, [code], reverse('failure', { labels: ['needs-joe:secrets_settings'] })).reason, 'exact reverse Joe was asked to see');
+  assert.equal(mergeOf(w, [code], reverse('failure', { labels: [' NEEDS-JOE:Secrets_Settings '] })).reason, 'exact reverse Joe was asked to see', 'case and spaces (round 10)');
 });
 
 test('merge: an undo that puts back a delete or truncate in code asks Joe; a code file with no lines on either side asks (audit round 9)', () => {
@@ -437,4 +438,45 @@ test('merge: undo edge cases with no other test (audit round 9 gaps)', () => {
     const r = mergeOf(w, [file('lib/db.ts', 'modified', { added_lines: cls.split('\n'), removed_lines: ['x'] })], reverse('failure'));
     assert.equal(r.reason, 'exact reverse of a database change', cls);
   }
+});
+
+test('merge: an undo that puts back account, system or quoted-table SQL asks Joe (audit round 10)', () => {
+  const w = world({ states: { app: { state: 'paused' } }, now: AT_03 });
+  const lines = ['TRUNCATE "users"', 'truncate only "users" cascade', 'CREATE USER evil WITH SUPERUSER', 'ALTER USER app WITH SUPERUSER', 'DROP USER app',
+    'DROP OWNED BY app_user CASCADE', 'GRANT "app-reader" TO "svc-api"', 'REVOKE ALL ON users FROM anon', 'CREATE PUBLICATION p FOR ALL TABLES',
+    'ALTER SYSTEM SET x = 1', 'CREATE AGGREGATE a (int)', 'CREATE OPERATOR === (x)', 'CREATE CAST (a AS b)', 'CREATE TABLESPACE t LOCATION 1',
+    'CREATE OR REPLACE TEMP RECURSIVE VIEW v AS SELECT 1', "op.drop_table('users')", 'create_table :users do |t|', 'await queryInterface.addColumn("t", "c")',
+    "await queryInterface.removeColumn('t', 'c')"];
+  for (const line of lines) {
+    for (const side of ['added_lines', 'removed_lines']) {
+      if (side === 'removed_lines' && /^truncate/i.test(line)) continue;   // deletes are judged on what the undo puts back
+      const f = file('lib/db/x.ts', 'modified', { added_lines: ['y'], removed_lines: ['y'], [side]: [line] });
+      assert.equal(mergeOf(w, [f], reverse('failure')).reason, 'exact reverse of a database change', `${side}: ${line}`);
+    }
+  }
+});
+
+test('merge: the table scans stay fast on long runs of spaces or blank lines (audit round 10)', () => {
+  const w = world({ states: { app: { state: 'paused' } }, now: AT_03 });
+  const t0 = Date.now();
+  for (const added of [['const revoke' + ' '.repeat(5000)], ['grant', ...Array(2999).fill('')], ['create' + ' '.repeat(5000) + 'x'], ['grant ' + 'a '.repeat(3000)]]) {
+    mergeOf(w, [file('lib/x.ts', 'modified', { added_lines: added, removed_lines: added })], reverse('failure'));
+  }
+  assert.ok(Date.now() - t0 < 2000, `took ${Date.now() - t0} ms`);
+});
+
+test('merge: a needs-joe label is read whatever its case or spacing (audit round 10)', () => {
+  const w = world();
+  for (const label of ['Needs-Joe', ' needs-joe ', 'NEEDS-JOE:schema', 'needs-joe-review']) {
+    assert.equal(mergeOf(w, [file('docs/research/x.md')], { labels: [label] }).decision, 'ask', JSON.stringify(label));
+  }
+  assert.equal(mergeOf(w, [file('docs/research/x.md')], { labels: ['joe-says-hi'] }).decision, 'allow');
+});
+
+test('merge: undo gaps from audit round 10 — audit "none" on code asks; one empty side on a wholly removed or added file asks', () => {
+  const w = world({ states: { app: { state: 'paused' } }, now: AT_03 });
+  const code = file('lib/x.ts', 'modified', { added_lines: ['a'], removed_lines: ['b'] });
+  assert.equal(mergeOf(w, [code], reverse('none')).reason, 'exact reverse of a merge whose audit passed', 'an unaudited code undo is not ordinary');
+  assert.equal(mergeOf(w, [file('lib/x.ts', 'removed', { removed_lines: [], added_lines: ['a'] })], reverse('failure')).reason, 'exact reverse of code without its lines');
+  assert.equal(mergeOf(w, [file('lib/x.ts', 'added', { added_lines: [], removed_lines: ['a'] })], reverse('failure')).reason, 'exact reverse of code without its lines');
 });

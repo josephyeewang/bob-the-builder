@@ -267,7 +267,7 @@ export function makeEngine({ products, rulesState, productState, running, rolesD
       if (c.risky.includes('schema') || c.risky.includes('production_data')
         || (c.reasons.deletes ?? []).some((r) => r.includes('(delete statement'))) return ask(1, 'exact reverse of a database change');
       // Any needs-joe label, whatever class it names, reaches Joe on an undo (MIN-3, audit round 9).
-      if ((s.labels ?? []).some((l) => l.startsWith('needs-joe'))) return ask(1, 'exact reverse Joe was asked to see');
+      if ((s.labels ?? []).some((l) => l.trim().toLowerCase().startsWith('needs-joe'))) return ask(1, 'exact reverse Joe was asked to see');
       // A code file can hold a database change outside the migration folders, so the undo of one needs both sides of
       // its diff scanned: the lines it removes and the lines it puts back. Without them, with no lines on either side, or
       // with no lines for a file that was wholly removed or added, ask (audit rounds 7, 8 and 9).
