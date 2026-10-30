@@ -12,6 +12,7 @@
 // Options only tests pass: `now` (a fake clock), `host`, `probe` (fake process checks), `faultAt` (crash at a step),
 // `testNoLock` + `testNoRevCheck` (the mutation race, M-6: the race must be able to fail), `lockTimeoutMs`.
 
+import { createHash } from 'node:crypto';
 import { hostname } from 'node:os';
 import { basename } from 'node:path';
 import { CARD_KINDS, ENTITIES, FINAL_STATES, REQUIRED_FIELDS, SESSION_ID, STATES, WAIT_FIELDS, WAIT_WHO, isOpen, makeRecord, timeoutFor } from '../../shared/record.mjs';
@@ -404,7 +405,7 @@ export function openRecord({ root, product, ownerUid, rules, alert = () => {}, n
         const r = applyWrite(tx, w, w.actor);
         return r.ok ? r : refuse({ actor: w.actor, entity: w.entity, id: w.id }, r.reason);
       });
-    } catch (e) { return refuse({ actor: w?.actor, entity: w?.entity, id: w?.id }, `store error: ${String(e?.message ?? e).slice(0, 200)}`); }
+    } catch (e) { return refuse({ actor: w?.actor, entity: w?.entity, id: w?.id }, `${e?.caller ? '' : 'store error: '}${String(e?.message ?? e).slice(0, 200)}`); }
   }
 
   // ---- the outbox (R-0b-20, M-3, R2-M8 … R2-M10, R3-M4) ----
@@ -477,12 +478,14 @@ export function openRecord({ root, product, ownerUid, rules, alert = () => {}, n
           tx.markSeen(once, 'alerted');
           return refuse({ ...ev, outbox: true }, reason);
         }
-        tx.markSeen(f.key, r.ok ? 'applied' : 'refused');
-        if (r.ok) return r;
-        // A refused hand-in becomes a fact the session's watcher reads at once (R3-M4).
+        if (r.ok) { tx.markSeen(f.key, 'applied'); return r; }
+        // A refused hand-in becomes a fact the session's watcher reads at once (R3-M4). The fact goes down before the file is
+        // marked seen, so a kill between them can't lose it; its id comes from the file, so a replay doesn't write it twice (round 11 m1).
         if (f.kind === 'handin-') {
-          try { tx.commit([{ entity: 'fact', id: `outbox-refused-${tag.sessionId}-${tx.nextSeq()}`, doc: { type: 'outbox_refused', session: tag.sessionId, file: ev.file, reason: r.reason } }], meta('dispatcher', 'outbox_refused')); } catch { /* the refusal below still fires */ }
+          const id = `outbox-refused-${tag.sessionId}-${createHash('sha256').update(f.key).digest('hex').slice(0, 12)}`;
+          try { if (!tx.lookup('fact', id)) tx.commit([{ entity: 'fact', id, doc: { type: 'outbox_refused', session: tag.sessionId, file: ev.file, reason: r.reason } }], meta('dispatcher', 'outbox_refused')); } catch { /* the refusal below still fires */ }
         }
+        tx.markSeen(f.key, 'refused');
         return refuse({ ...ev, outbox: true }, r.reason);
       });
     } catch (e) { return refuse({ actor: `${tag?.role}:${tag?.sessionId}`, outbox: true }, `store error: ${String(e?.message ?? e).slice(0, 200)}`); }

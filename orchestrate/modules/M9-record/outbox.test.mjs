@@ -261,3 +261,26 @@ test('a FIFO in an outbox is refused at once, never waited on (0b-2 audit round 
   assert.equal(r.ok, false);
   assert.match(r.reason, /not a plain file|regular|file/);
 });
+
+test('a kill while a refused hand-in\'s fact is being written loses nothing: the retry writes the fact once, and a replay adds none (round 11 m1)', async () => {
+  const { spawnSync } = await import('node:child_process');
+  const { fileURLToPath } = await import('node:url');
+  const CHILD = fileURLToPath(new URL('./child.test-helper.mjs', import.meta.url));
+  const env = setup({ prefix: 'm9-out-' });
+  running(env);
+  const tag = { role: 'worker', sessionId: 'S-2', card: 'C-1' };
+  const outbox = { root: env.outRoot, uids: Object.fromEntries(AI_ROLES.concat('script').map((r) => [r, UID])) };
+  const file = outboxFile(env, 'worker', 'S-2', 'handin-1.md', handin('C-1'));
+  const r = spawnSync(process.execPath, [CHILD, JSON.stringify({ op: 'outbox', root: env.root, now: env.clock.t, faultAt: 'temp_written', outbox, tag, file })], { encoding: 'utf8', timeout: 60000 });
+  assert.equal(r.signal, 'SIGKILL', `the child dies writing the fact: ${r.stdout} ${r.stderr}`);
+  const fresh = openRecord({ root: env.root, product: PRODUCT, ownerUid: UID, rules: env.rules, host: 'mac-a', now: () => env.clock.t, outbox });
+  assert.equal(fresh.record.applyOutbox(tag, file).ok, false, 'the retry refuses it again');
+  const facts = () => fresh.record.list('fact').filter((x) => x.doc.type === 'outbox_refused');
+  assert.equal(facts().length, 1, 'the session hears of the refusal');
+  assert.equal(facts()[0].doc.session, 'S-2');
+  // A kill after the fact but before the seen mark replays the file: the fact is not written twice.
+  writeFileSync(join(env.root, 'outbox-seen.jsonl'), '');
+  fresh.record.applyOutbox(tag, file);
+  assert.equal(facts().length, 1, 'one fact per file');
+  assert.equal(fresh.record.diary().filter((l) => l.kind === 'outbox_refused').length, 1, 'and one diary line');
+});

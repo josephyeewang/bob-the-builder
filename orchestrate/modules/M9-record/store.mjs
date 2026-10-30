@@ -108,7 +108,10 @@ export function openStore({ root, ownerUid, alert = () => {}, now = () => Date.n
     const r = kind(root);
     if (r !== 'folder' && r !== 'none') return `the store folder ${root} is ${r}`;
     for (const d of ['docs', 'tmp', 'quarantine']) { const k = kind(join(root, d)); if (k !== 'folder' && k !== 'none') return `the store's ${d}/ is ${k}, not a folder`; }
-    for (const f of ['diary.jsonl', 'refusals.jsonl', 'outbox-seen.jsonl', 'lock', 'break.lock']) { const k = kind(join(root, f)); if (k !== 'file' && k !== 'none') return `the store's ${f} is ${k}, not a plain file`; }
+    for (const f of ['diary.jsonl', 'refusals.jsonl', 'outbox-seen.jsonl']) { const k = kind(join(root, f)); if (k !== 'file' && k !== 'none') return `the store's ${f} is ${k}, not a plain file`; }
+    // The lock files are made by a hard link from a temp name (lock.mjs createWhole), so a second name is normal for a moment
+    // and stays if the maker was killed; they are never written in place, so only a link or the wrong kind is refused (round 11 M1, M2).
+    for (const f of ['lock', 'break.lock']) { const k = kind(join(root, f)); if (k !== 'file' && k !== 'none' && !/hard link/.test(k)) return `the store's ${f} is ${k}, not a plain file`; }
     return null;
   }
   { const bad = layoutProblem(); if (bad) throw stopFor('store_layout', bad); }
@@ -310,6 +313,11 @@ export function openStore({ root, ownerUid, alert = () => {}, now = () => Date.n
       const pid = Number(/^(\d+)-/.exec(n)?.[1]);
       if (!Number.isInteger(pid) || processDead({ pid }, probe)) { try { unlinkSync(join(P.tmp, n)); report.tempsRemoved++; } catch { /* gone */ } }
     }
+    // 6. A lock maker's temp name (.lock-<pid>-…) left by a writer killed between its link and its unlink (round 11 M2).
+    for (const n of readdirSync(root)) {
+      const pid = Number(/^\.lock-(\d+)-[0-9a-f]+$/.exec(n)?.[1]);
+      if (Number.isInteger(pid) && processDead({ pid }, probe)) { try { unlinkSync(join(root, n)); report.tempsRemoved++; } catch { /* gone */ } }
+    }
     return report;
   }
 
@@ -335,7 +343,7 @@ export function openStore({ root, ownerUid, alert = () => {}, now = () => Date.n
       }
       const tx = {
         current(entity, id) {
-          { const other = safeName(entity) && safeName(id) ? caseClash(entity, id) : null; if (other !== null) throw new Error(`${entity} id ${id} differs from ${other} only in upper/lower case; pick another id`); }
+          { const other = safeName(entity) && safeName(id) ? caseClash(entity, id) : null; if (other !== null) throw Object.assign(new Error(`${entity} id ${id} differs from ${other} only in upper/lower case; pick another id`), { caller: true }); }
           const chk = checkFile(entity, id);
           if (!chk.ok) return { tampered: true, reason: chk.reason };
           const e = index.get(keyOf(entity, id));

@@ -81,6 +81,13 @@ Round 10 added: a store file with a second name (a hard link) is a layout fault 
 - **A document file with a second name** is read and replaced like any other (a replace never changes the other name's file); only the store's own diary and side files are refused for it.
 - **Two writes in one batch whose ids differ only in case** are refused by a check no test reaches: no caller writes such a batch today.
 
+## Known gaps (audit round 11, the last confirm under lead call L42)
+
+Round 11 fixed: the round-10 one-name rule wrongly caught the lock, which is made by a hard link from a temp name, so busy stores raised false alerts and a writer killed at the wrong moment stopped the store. The lock files are now exempt, and recovery clears a dead maker's temp name. A refused hand-in's fact now goes down before the file is marked seen, under an id taken from the file, so a kill can't lose it and a replay can't write it twice. What it leaves:
+
+- **A worker can hand in a reviewer's verdict (a lead call, outside L42's scope).** Every AI role writes its outbox as the same everyday Mac user, so "owned by the role's user" can't tell a worker from a reviewer. A worker that writes a passing verdict into a reviewer's outbox folder gets its own card verified. The fix is either one Mac user per role, or the Dispatcher taking verdicts only from a folder that the reviewer alone can write.
+- **An unreadable `docs/<entity>` folder alerts once per document in it**, not once per folder.
+
 ## Running the tests
 
 Plain Node, no packages:

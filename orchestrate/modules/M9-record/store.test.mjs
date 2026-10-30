@@ -390,6 +390,7 @@ test('ids that differ only in upper/lower case are refused, never share a file (
   const r = env.record.write({ actor: 'approvals', entity: 'card', id: 'c-0', expectRev: 0, doc: card() });
   assert.equal(r.ok, false);
   assert.match(r.reason, /only in upper\/lower case/);
+  assert.doesNotMatch(r.reason, /store error/, 'the caller\'s mistake, not the store\'s');
   assert.equal(env.alerts.filter((a) => a.type === 'tamper').length, 0, 'no false tamper alert');
   assert.equal(env.record.read('card', 'C-0').rev, 1, 'the stored card reads cleanly');
   assert.equal(env.record.read('card', 'c-0'), null, 'nothing is stored under the other spelling');
@@ -412,4 +413,29 @@ test('one entity folder recovery can\'t read is skipped with one alert; other wr
     assert.match(skips[0].reason, /sub/, 'the alert names what is in the way');
     assert.equal(fresh.record.read('card', 'C-0').doc.cancel_reason, 'again', 'the writes went through');
   } finally { chmodSync(sub, 0o755); }
+});
+
+test('text comes back exactly as written, escaped once and only once: literal \\n and \\", real newlines and fences (lead item from the outside-text check)', () => {
+  const env = setup({ prefix: 'm9-store-' });
+  const s = openStore({ root: env.root, ownerUid: UID });
+  const body = 'line\\n with a literal backslash-n, a \\" quote, a real\nnewline, and ```a fence```';
+  s.transaction((tx) => tx.commit([{ entity: 'fact', id: 'F-1', doc: { body } }], { actor: 'sensors' }));
+  assert.equal(s.read('fact', 'F-1').doc.body, body);
+  assert.equal(openStore({ root: env.root, ownerUid: UID }).read('fact', 'F-1').doc.body, body, 'and after a fresh open');
+  assert.equal(JSON.parse(readFileSync(join(env.root, 'docs', 'fact', 'F-1.json'), 'utf8')).doc.body, body, 'and in the document file');
+});
+
+test('a lock with a second name (made by link, its maker killed before the unlink) is normal: a dead one is broken and its temp name cleared (round 11 M1, M2)', () => {
+  const env = setup({ prefix: 'm9-store-' });
+  seed(env, 'card', 'C-0', card());
+  const temp = join(env.root, '.lock-999999-0a1b2c3d4e5f');
+  writeFileSync(temp, JSON.stringify({ pid: 999999, pid_start: 'x', host: 'mac-a', nonce: 'n1', at: 'x' }));
+  linkSync(temp, join(env.root, 'lock'));
+  const alerts = [];
+  const fresh = openRecord({ root: env.root, product: PRODUCT, ownerUid: UID, rules: env.rules, host: 'mac-a', alert: (a) => alerts.push(a), now: () => env.clock.t });
+  assert.equal(fresh.record.read('card', 'C-0').rev, 1, 'reads are not stopped');
+  must(cancel(fresh.record), 'the write goes through');
+  assert.equal(alerts.filter((a) => a.type === 'store_layout').length, 0, 'no false layout alert');
+  assert.ok(!existsSync(temp), 'the dead maker\'s temp name is cleared');
+  assert.ok(!existsSync(join(env.root, 'lock')), 'the lock is free');
 });
