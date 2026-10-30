@@ -630,3 +630,74 @@ test('cd-glob: after a plain cd into a real subfolder, globs and . are judged th
     assert.match(why('cd dist && rm -rf *', { protectedFiles: [fold(join(w.work, 'dist', 'sub', ENV_PROD))] }) ?? 'none', /holding a protected file/);
   } finally { chmodSync(join(w.work, 'locked'), 0o755); }
 });
+
+// #40 check, M1-M3 (one cause): the cd shortcut read `\s` as a word gap, which the shell does not. It now takes its
+// steps from the splitter's tokens and accepts only plain ASCII (spaces or tabs) in the cd part and its joiner.
+test('#40 check: a cd written with a line break, a return or any other blank keeps the old rule and is refused', () => {
+  const w = world();
+  for (const d of ['Dist2/deep', 'deep']) mkdirSync(join(w.work, d), { recursive: true });
+  const pf = [fold(w.envFile)];
+  const why = (c, more = {}) => prodGuard.folderWriteWhy(c, { cwd: w.work, protectedFiles: pf, home: w.home, cdpath: '', ...more });
+  const wasHome = process.env.HOME;
+  process.env.HOME = w.home;
+  try {
+    const no = (c, more) => {
+      assert.ok(why(c, more), `allowed: ${JSON.stringify(c)}`);
+      if (!more) blocked(prodGuard.decide(bash(c, w.work), w.args), JSON.stringify(c));
+    };
+    // M1: zsh reads `cd` alone, which goes home, then a command `Dist2`.
+    const home = [fold(join(w.home, '.config', 'gh', 'hosts.yml'))];
+    no('cd\nDist2; rm -rf .config', { protectedFiles: home });
+    no('cd\nDist2; rm -rf *');
+    // M2: the cd fails on a name ending in a return; the rest runs in the working folder.
+    const deep = [fold(join(w.work, 'deep', ENV_PROD))];
+    for (const c of ['cd Dist2\r\n; rm -rf *', 'cd Dist2\r\n; rm -rf .', 'cd Dist2 \r\n; rm -rf *']) no(c);
+    no('cd Dist2\r\n; rm -rf deep', { protectedFiles: deep });
+    // M3: U+2028 is no word gap in either shell; the cd fails.
+    for (const tail of ['rm -rf *', 'git clean -fdx', 'find . -delete']) no(`cd Dist2 ; ${tail}`);
+    // The plain forms still judge the rest from the subfolder.
+    assert.equal(why('cd Dist2 && rm -rf deep', { protectedFiles: deep }), null);
+    for (const c of ['cd Dist2 && rm -rf *', 'cd Dist2; rm -rf *', 'cd\tDist2\t&&\trm -rf *', 'cd Dist2;rm -rf *', '  cd Dist2 ; cd deep && rm -rf .']) {
+      assert.equal(why(c), null, JSON.stringify(c));
+      passed(prodGuard.decide(bash(c, w.work), w.args), JSON.stringify(c));
+    }
+    // A joiner run into another (a syntax error in the shell, or a zsh case ending) is not a plain step.
+    for (const c of ['cd Dist2;; rm -rf *', 'cd Dist2 &&& rm -rf *', 'cd Dist2;& rm -rf *', 'cd Dist2;| rm -rf *', 'cd Dist2 &&| rm -rf *']) assert.ok(why(c), c);
+    // Every blank that is not a space or a tab, between `cd` and the folder and between the folder and the joiner.
+    const blanks = [];
+    for (let c = 0; c <= 0xffff; c += 1) {
+      const ch = String.fromCharCode(c);
+      if (ch !== ' ' && ch !== '\t' && (/\s/.test(ch) || /[\p{White_Space}\p{Zs}\p{Zl}\p{Zp}]/u.test(ch))) blanks.push(ch);
+    }
+    blanks.push('᠎', '​', '⁠');
+    for (const ch of ['\r', '\n', '\v', '\f', '\u0085', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', '　', '﻿']) {
+      assert.ok(blanks.includes(ch), `the sweep holds U+${ch.charCodeAt(0).toString(16)}`);
+    }
+    for (const ch of blanks) {
+      for (const j of [';', '&&', ' ;', ' &&']) {
+        for (const c of [`cd${ch}Dist2${j} rm -rf *`, `cd ${ch}Dist2${j} rm -rf *`, `cd Dist2${ch}${j} rm -rf *`, `cd Dist2 ${ch}${j} rm -rf *`]) {
+          assert.ok(why(c), `allowed: ${JSON.stringify(c)}`);
+          blocked(prodGuard.decide(bash(c, w.work), w.args), JSON.stringify(c));
+        }
+      }
+    }
+  } finally { if (wasHome === undefined) delete process.env.HOME; else process.env.HOME = wasHome; }
+});
+
+// #40 check, Minor: bash 3.2 (/bin/bash on a Mac) lets a pattern starting with a dot match `..`.
+test('#40 check: a pattern starting with a dot counts as .. too (.?, .*, .[.])', () => {
+  const w = world();
+  mkdirSync(join(w.work, 'dist'), { recursive: true });
+  const pf = [fold(w.envFile)];
+  const why = (c, cwd = w.work) => prodGuard.folderWriteWhy(c, { cwd, protectedFiles: pf, home: w.home, cdpath: '' });
+  for (const c of ['cd dist && find .? -delete', 'cd dist && rm -rf .?/*', 'cd dist && rm -rf .[.]/*', 'cd dist && rm -rf .*', 'cd dist && rm -rf .*/*', 'cd dist && chmod -R 777 .?']) {
+    assert.ok(why(c), c);
+    blocked(prodGuard.decide(bash(c, w.work), w.args), c);
+  }
+  // On main too: from a folder below the protected file.
+  for (const c of ['rm -rf .?/*', 'find .? -delete', 'rm -rf ./.?/*']) assert.ok(why(c, join(w.work, 'dist')), c);
+  // A dot pattern that cannot match `..` stays allowed by this rule. (`.??*` and `.[a-z]*` could also name the
+  // production settings file, which the hook refuses on its own.)
+  for (const c of ['cd dist && rm -rf .??*', 'cd dist && rm -rf .cache*', 'cd dist && rm -rf .[a-z]*']) assert.equal(why(c), null, c);
+  passed(prodGuard.decide(bash('cd dist && rm -rf .cache*', w.work), w.args), '.cache*');
+});
