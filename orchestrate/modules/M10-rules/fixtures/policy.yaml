@@ -1,0 +1,283 @@
+# policy.yaml — the rules file for a generic TEST product ("sample-app"), used by M10 Rules' tests.
+# A real product keeps its own copy at orchestrate/policy.yaml on its GitHub main branch; M10 reads only that.
+# Every corrupt case in the tests is a one-line change to this file. Keys: design v4 §14.1.6.
+
+tiers:
+  paths:
+    - pattern: docs/blueprint/blueprint.yaml
+      tier: 2
+    - pattern: docs/blueprint/rows/**
+      tier: 2
+    - pattern: docs/blueprint/cards/**
+      tier: 2
+    - pattern: docs/blueprint/BLUEPRINT.md
+      tier: 2
+    - pattern: docs/blueprint/exit-tests.yaml
+      tier: 1
+    - pattern: docs/blueprint/decided.yaml
+      tier: 1
+    - pattern: tests/exit/**
+      tier: 1
+    - pattern: orchestrate/**
+      tier: 1
+
+# Added to M10's own floor (paths.mjs PROTECTED_FLOOR), which this file cannot shrink.
+# Claude Code's protected paths: code.claude.com/docs/en/permission-modes "Protected paths", checked 29 Oct 2026
+# against Claude Code 2.1.293. This list expires on the next claude_code.pin change: re-check it then.
+protected_files:
+  - .git/
+  - .config/git/
+  - .vscode/
+  - .idea/
+  - .husky/
+  - .cargo/
+  - .devcontainer/
+  - .yarn/
+  - .mvn/
+  - .claude/
+  - .gitconfig
+  - .gitmodules
+  - .bashrc
+  - .bash_profile
+  - .bash_login
+  - .bash_aliases
+  - .bash_logout
+  - .zshrc
+  - .zprofile
+  - .zshenv
+  - .zlogin
+  - .zlogout
+  - .profile
+  - .envrc
+  - .npmrc
+  - .yarnrc
+  - .yarnrc.yml
+  - .pnp.cjs
+  - .pnp.loader.mjs
+  - .pnpmfile.cjs
+  - bunfig.toml
+  - .bunfig.toml
+  - .bazelrc
+  - .bazelversion
+  - .bazeliskrc
+  - .pre-commit-config.yaml
+  - lefthook.yml
+  - lefthook.yaml
+  - .lefthook.yml
+  - .lefthook.yaml
+  - gradle-wrapper.properties
+  - maven-wrapper.properties
+  - .devcontainer.json
+  - .ripgreprc
+  - pyrightconfig.json
+  - .mcp.json
+  - .claude.json
+  - .gitleaks.toml
+  - .gitleaksignore
+  - scripts/orchestrate-audit/**
+
+lanes:
+  lead:
+    - docs/blueprint/**
+  docs:
+    - docs/*.md
+    - docs/domains/**
+  research:
+    - docs/research/**
+
+risky_acts: [production_data, schema, protected, secrets_settings, deletes, first_customer_visible, messages_people, unclassifiable]
+
+effect_paths:
+  production_data:
+    repair_folder: [db/repairs/]
+  schema:
+    migration_paths: [db/migrations/]
+  secrets_settings:
+    files: [next.config.*, middleware.ts, env.schema.ts]
+  deletes:
+    removed_file_paths: [docs/research/**, docs/blueprint/history/**, db/repairs/**, db/migrations/**]
+  first_customer_visible:
+    new_files_under: [app/]
+    flag_files: [lib/flags.ts]
+  messages_people:
+    sender_paths: [lib/mail/, lib/alerts/]
+    package_imports: [nodemailer, twilio]
+
+caps:
+  rounds: 3
+  editing_per_product: 3
+  editing_per_mac: 5
+  readonly_per_session: 4
+  scripts_per_product: 1
+  scripts_per_mac: 2
+  script_agents_max: 10
+  shakedown_workers: 1
+
+usage:
+  bands:
+    amber:
+      pace: 0.85
+      week: 70
+      h5: 70
+      own_building_share: 70
+    red:
+      pace: 1.0
+      week: 85
+      h5: 80
+  reserve_pct:
+    until_phase_2: 55
+    after: 15
+  no_tier1_prod_above: 90
+  stale_after_min: 15
+
+product_state_rules:
+  active:
+    start: within_caps
+    tier1_merge: rules
+  away:
+    start: within_caps
+    tier1_merge: tier1_hours_only
+  paused:
+    start: none
+    tier1_merge: undo_only
+  light:
+    start: editing_cap_1
+    tier1_merge: rules
+
+failure_classes:
+  stuck: retry
+  no_report: retry
+  test_red: retry
+  sent_back: joe
+
+timeouts:
+  card:
+    draft:
+      no_limit_reason: waits for the Lead's read-back and Joe's go
+    ready:
+      minutes: 1440
+      then: joe
+    claimed:
+      minutes: 30
+      then: ready
+    running:
+      minutes: 240
+      then: stuck
+    in_review:
+      minutes: 120
+      then: joe
+    verified:
+      minutes: 1440
+      then: joe
+    approved:
+      minutes: 1440
+      then: verified
+    merging:
+      minutes: 30
+      then: verified
+    merged:
+      minutes: 120
+      then: joe
+    waiting:
+      no_limit_reason: every wait carries its own next_check
+  ask:
+    open:
+      minutes: 720
+      then: expired
+    pushed:
+      minutes: 720
+      then: expired
+    answered:
+      minutes: 1440
+      then: expired
+  session:
+    preparing:
+      minutes: 15
+      then: stuck
+    running:
+      minutes: 240
+      then: stuck
+    waiting_input:
+      minutes: 60
+      then: stuck
+    waiting_limit:
+      no_limit_reason: ends when the usage limit resets
+    reporting:
+      minutes: 15
+      then: stuck
+    stuck:
+      minutes: 30
+      then: quarantined
+    retrying:
+      minutes: 30
+      then: stuck
+    quarantined:
+      no_limit_reason: only Joe releases a quarantined session
+    recycling:
+      minutes: 15
+      then: stuck
+  merge:
+    requested:
+      minutes: 60
+      then: refused
+    queued:
+      minutes: 1440
+      then: joe
+    catching_up:
+      minutes: 30
+      then: refused
+    held:
+      no_limit_reason: released by the merge window or Joe
+    returned_to_builder:
+      no_limit_reason: becomes a new card round
+    checking:
+      minutes: 30
+      then: refused
+    merging:
+      minutes: 15
+      then: refused
+    merged:
+      minutes: 120
+      then: joe
+  product:
+    light:
+      no_limit_reason: a product state, changed only by Joe
+    active:
+      no_limit_reason: a product state, changed only by Joe
+    away:
+      no_limit_reason: a product state, changed only by Joe
+    paused:
+      no_limit_reason: a product state, changed only by Joe
+
+audit_sizing:
+  tier1: until_zero_material
+  prose: one_pass
+  rendered: tests_only
+  hand_dates_counts: tier2_plus_weekly_strict_check
+  exit_tests: tier1
+
+claude_code:
+  pin: 2.1.300
+  required_minimum: 2.1.295
+
+accounts:
+  current: sample-org
+  joe:
+    github_id: 1000001
+    tz: America/New_York
+
+models:
+  main: claude-opus-5-5
+  sonnet: claude-sonnet-5-5
+  haiku: claude-haiku-5-5
+
+merge:
+  queue:
+    tier1_hours: 07:00-22:00
+
+bob:
+  pin: 0000000000000000000000000000000000000000
+  method_files: [build-protocol-core.md, build-protocol.md, audit-lenses/**, templates/**, scripts/blueprint/render-blueprint.mjs, orchestrate/modules/M10-rules/roles/**]
+
+roles_enabled:
+  script: none

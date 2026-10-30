@@ -61,6 +61,29 @@ export const FINAL_STATES = Object.freeze({
   product: [],
 });
 
+// "Open" cards: neither final nor merged. Derived here, never retyped (0b-1 round 2, R2-M7).
+export const OPEN_CARD_STATES = Object.freeze(STATES.card.filter((s) => !FINAL_STATES.card.includes(s) && s !== 'merged'));
+
+// The one reading of a state's time limit from the rules (0b-2 round 2, R2-M1). M9's overdue check and M10's
+// validator both call it. `timeouts.<entity>.<state>` is { minutes ≥ 1, then } or { no_limit_reason, recheck_max_min? }.
+//   → null for a final state; { minutes, then } | { no_limit_reason, recheck_max_min }; or undefined if the row is
+//     missing or malformed (the caller treats that as corrupt rules, never as "no limit").
+export function timeoutFor(rules, entity, state) {
+  if (!Object.hasOwn(STATES, entity) || !STATES[entity].includes(state)) return undefined;
+  if (FINAL_STATES[entity].includes(state)) return null;
+  const row = rules?.timeouts?.[entity]?.[state];
+  if (!row || typeof row !== 'object') return undefined;
+  const whole = (v) => (typeof v === 'number' || (typeof v === 'string' && /^[1-9]\d*$/.test(v))) && Number.isInteger(Number(v)) && Number(v) >= 1 ? Number(v) : undefined;
+  if (Object.hasOwn(row, 'no_limit_reason')) {
+    if (Object.hasOwn(row, 'minutes') || typeof row.no_limit_reason !== 'string' || !row.no_limit_reason.trim()) return undefined;
+    const recheck = row.recheck_max_min === undefined ? 1440 : whole(row.recheck_max_min);
+    return recheck === undefined ? undefined : { no_limit_reason: row.no_limit_reason, recheck_max_min: recheck };
+  }
+  const minutes = whole(row.minutes);
+  if (minutes === undefined || typeof row.then !== 'string' || !row.then) return undefined;
+  return { minutes, then: row.then };
+}
+
 // A wait must say who and what it waits on, since when, and when it is next checked (A5).
 export const WAIT_FIELDS = Object.freeze(['who', 'what', 'since', 'next_check']);
 
