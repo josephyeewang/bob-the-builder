@@ -53,8 +53,9 @@ step format applies; the Front Door or the Lead turns each into paste-ready step
    write access here. If any of this slips, the next run shows `product 1 / repo-guard: FAIL <reason>` and the Merge
    Gate shuts.
    **Prove the write test once:** the guard tells "this token can write" apart from "can't" by GitHub's answer to a
-   ref it will never create (403 or 404 = can't, 422 = can). That reading comes from GitHub's docs, not yet from a
-   real run (checked October 2026). So once, swap `CHECK_TOKEN` for a token that can write here and run the workflow
+   ref it will never create (403 or 404 = can't, 422 = can). The "can" half was seen live on 30 Oct 2026 (a login
+   that can write got 422, and no branch was made); the "can't" half is not yet checked live, and your first green
+   run with the read-only token shows it. So once, swap `CHECK_TOKEN` for a token that can write here and run the workflow
    by hand: it must show `FAIL check-token-can-write`. Then put the read-only token back.
 8. **Check it.** After the first hourly run, the Actions tab shows a green run.
 9. **Stop it on purpose** (Actions tab → the workflow → Disable workflow): within about 2 hours an issue

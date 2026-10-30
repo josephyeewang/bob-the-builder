@@ -63,9 +63,10 @@ class HttpError extends Error { constructor(status) { super(`http ${status}`); t
 
 // A write that can't succeed, to learn whether a token may write to a repo without changing anything: creating a
 // branch at the all-zero commit. 403 or 404 → the token can't write; 422 → it got past the permission check (it can
-// write; the commit just doesn't exist); anything else → unknown. Unverified that GitHub checks permission before
-// the commit (REST docs, 29 Oct 2026, don't say): the owner's set-up proves it once with a token that can write,
-// which must read "can-write" (README; Principle 9: void on an API change).
+// write; the commit just doesn't exist); anything else → unknown. The REST docs (29 Oct 2026) don't say GitHub checks
+// permission before the commit. Seen live on 30 Oct 2026: a login that can write got 422 ("can-write") and no branch
+// was made. Not yet checked live: a read-only token getting 403 or 404 ("no-write"); the outside repo's first green
+// repo-guard run with its read-only token shows it (README). Principle 9: both readings are void on an API change.
 export async function writeProbe(post, repo) {
   let status;
   try { status = await post(`/repos/${repo}/git/refs`, { ref: 'refs/heads/orchestrate-write-probe', sha: '0'.repeat(40) }); } catch { status = undefined; }
@@ -96,6 +97,9 @@ function coversDefault(conditions, def) {
 }
 
 // The outside repo's own lock (lead call L24). self = GITHUB_REPOSITORY, selfOwner = GITHUB_REPOSITORY_OWNER.
+// The rulesets read needs a public repo or GitHub Pro: on a private repo without Pro, GitHub answers 403 "Upgrade to
+// GitHub Pro or make this repository public" (checked live, 30 Oct 2026), and the check fails safe (FAIL check-error
+// 403). The outside repo is public by design.
 export async function repoGuard({ api, probe, self, selfOwner }) {
   if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(String(self ?? '')) || !selfOwner) return { ok: false, code: 'self-unknown' };
   const repo = await api(`/repos/${self}`);
@@ -190,7 +194,9 @@ export const CHECKS = {
   // Which main updates are due an audit run is judged by GitHub's own push times (the repository activity list), never
   // by a commit's date, which the pusher sets (0b-7 audit M-6). Each push, PR merge or queue merge to main that is
   // 30 min to 48 h old needs a successful audit run on the head it left. A first-parent commit dated in the future is
-  // a FAIL on its own. Activity list fields as GitHub documents them, 29 Oct 2026; not yet checked live (Principle 9).
+  // a FAIL on its own. Activity list fields as GitHub documents them, 29 Oct 2026. Seen live on 30 Oct 2026:
+  // activity_type, actor.login, timestamp, before and after, on push and branch_creation entries. Not yet checked
+  // live: pr_merge, merge_queue_merge and force_push entries (Principle 9).
   async 'audit-run'(p, { api, now }) {
     const { auditCheck } = resolveStage(p);
     if (!auditCheck) return { ok: true, code: 'not-applicable stage first' };
@@ -240,7 +246,9 @@ export const CHECKS = {
   },
   // The robot's main updates, judged by GitHub's own record of who moved main and when (the activity list), not by
   // commit authors, which the pusher sets. Activity fields and the compare file cap as GitHub documents them,
-  // 29 Oct 2026; not yet checked live (Principle 9). The list is read unpaged (it pages by cursor in a header this
+  // 29 Oct 2026. Seen live on 30 Oct 2026: the activity fields on push and branch_creation entries, and a push's
+  // compare files. Not yet checked live: pr_merge, merge_queue_merge and force_push entries, and the compare file cap
+  // (Principle 9). The list is read unpaged (it pages by cursor in a header this
   // reader doesn't see): a full page that still reaches into the window means the window isn't covered → FAIL.
   async 'robot-merges'(p, { api, docsLane = {}, acked = {}, owner = {}, now }) {
     const lane = docsLane[p.label];
