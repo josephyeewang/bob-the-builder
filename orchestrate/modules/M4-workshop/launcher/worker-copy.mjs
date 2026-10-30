@@ -114,6 +114,21 @@ export async function prepareWorkerCopy({ product, card, dest, lastBundle = null
     } else {
       await gitOk(['branch', branch, card.commit], opts('launch-branch'));
     }
+    // Lead call L4: a fix round starts from GitHub's copy of the branch when it is ahead (the
+    // push script keeps it in the mirror as refs/orchestrate/remote/<branch>). Only a
+    // fast-forward is taken; a branch that went another way is refused, never rewritten.
+    const remoteRef = `refs/orchestrate/remote/${branch}`;
+    const rr = await git(['rev-parse', '--verify', '-q', `${remoteRef}^{commit}`], { gitDir: mirror, purpose: 'launch-remote-branch' });
+    if (rr.code === 0) {
+      const remote = rr.stdout.toString().trim();
+      await gitOk(['fetch', '-q', '--no-tags', '--no-write-fetch-head', '--no-recurse-submodules', mirror, `${remoteRef}:refs/orchestrate/remote`], opts('launch-remote-fetch'));
+      if ((await git(['merge-base', '--is-ancestor', head, remote], opts('launch-remote-ff'))).code === 0) {
+        await gitOk(['update-ref', `refs/heads/${branch}`, remote, head], opts('launch-remote-ff'));
+        head = remote;
+      } else if ((await git(['merge-base', '--is-ancestor', remote, head], opts('launch-remote-ff'))).code !== 0) {
+        throw new Error('GitHub\'s copy of the card branch went another way; it is never rewritten');
+      }
+    }
     await gitOk(['checkout', '-q', '-f', branch], opts('launch-checkout'));
     const got = (await gitOk(['rev-parse', 'HEAD'], opts('launch-verify-head'))).trim();
     if (got !== head) throw new Error('checked-out commit is not the expected one');

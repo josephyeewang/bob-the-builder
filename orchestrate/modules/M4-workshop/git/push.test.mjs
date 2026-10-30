@@ -508,3 +508,177 @@ test('the mirror is checked before every push: a planted alternates file refuses
   writeFileSync(join(w.mirror, 'objects/info/alternates'), join(w.clone, '.git/objects') + '\n');
   await refusedAndUntouched(w, /alternates/);
 });
+
+// ---- R-0b-46: git never runs inside a worker's copy (save-work is the one, after its reset) ----
+import { createSaveWork, CLONE_CONFIG_TEMPLATE } from './save-work.mjs';
+import { prepareWorkerCopy } from '../launcher/worker-copy.mjs';
+import { readdirSync, statSync } from 'node:fs';
+
+const HOOK_NAMES = ['applypatch-msg', 'pre-applypatch', 'post-applypatch', 'pre-commit', 'pre-merge-commit', 'prepare-commit-msg', 'commit-msg', 'post-commit',
+  'pre-rebase', 'post-checkout', 'post-merge', 'pre-push', 'pre-receive', 'update', 'proc-receive', 'post-receive', 'post-update', 'reference-transaction',
+  'push-to-checkout', 'pre-auto-gc', 'post-rewrite', 'sendemail-validate', 'fsmonitor-watchman', 'p4-pre-submit', 'post-index-change'];
+
+/** Plants every program-running setting git has in the clone; each program writes a marker. */
+async function boobyTrap(w) {
+  const markers = join(w.root, 'markers');
+  mkdirSync(markers);
+  const prog = (name) => { const p = join(w.root, 'traps', name); mkdirSync(dirname(p), { recursive: true }); writeFileSync(p, `#!/bin/sh\ntouch ${JSON.stringify(join(markers, name))}\ncat\n`); chmodSync(p, 0o755); return p; };
+  // Committed first, so committing does not itself run the filter.
+  await w.commit('attributes', (c) => { writeFileSync(join(c, '.gitattributes'), '* filter=x diff=x\n'); writeFileSync(join(c, 'app.txt'), 'changed\n'); });
+  const hooks = join(w.root, 'traps', 'hooks');
+  mkdirSync(hooks, { recursive: true });
+  for (const h of HOOK_NAMES) { writeFileSync(join(hooks, h), `#!/bin/sh\ntouch ${JSON.stringify(join(markers, `hook-${h}`))}\n`); chmodSync(join(hooks, h), 0o755); }
+  const gd = join(w.clone, '.git');
+  mkdirSync(join(gd, 'hooks'), { recursive: true });
+  for (const h of HOOK_NAMES) copyFileSync(join(hooks, h), join(gd, 'hooks', h));
+  chmodSync(join(gd, 'hooks'), 0o755);
+  for (const h of HOOK_NAMES) chmodSync(join(gd, 'hooks', h), 0o755);
+  const inc = join(w.root, 'traps', 'included.cfg');
+  writeFileSync(inc, `[core]\n\tpager = ${prog('pager-inc')}\n[diff]\n\texternal = ${prog('diff-inc')}\n`);
+  const cfg = readFileSync(join(gd, 'config'), 'utf8') + [
+    '[core]', `\tfsmonitor = ${prog('fsmonitor')}`, `\thooksPath = ${hooks}`, `\tpager = ${prog('pager')}`, `\tsshCommand = ${prog('ssh')}`, `\taskPass = ${prog('askpass')}`,
+    '[diff]', `\texternal = ${prog('diff-external')}`, '[diff "x"]', `\ttextconv = ${prog('textconv')}`, `\tcommand = ${prog('diff-driver')}`,
+    '[filter "x"]', `\tclean = ${prog('clean')}`, `\tsmudge = ${prog('smudge')}`, `\tprocess = ${prog('process')}`, '\trequired = true',
+    '[remote "origin"]', '\turl = https://example.invalid/evil.git', '\tpushurl = https://example.invalid/evil.git',
+    '[uploadpack]', `\tpackObjectsHook = ${prog('pack-objects-hook')}`, '[credential]', `\thelper = !${prog('credential')}`,
+    '[include]', `\tpath = ${inc}`, '[includeIf "gitdir:/"]', `\tpath = ${inc}`, ''].join('\n');
+  writeFileSync(join(gd, 'config'), cfg);
+  mkdirSync(join(gd, 'info'), { recursive: true });
+  writeFileSync(join(gd, 'info', 'attributes'), '* filter=x diff=x\n');
+  writeFileSync(join(gd, 'config.worktree'), `[core]\n\tfsmonitor = ${prog('fsmonitor-wt')}\n`);
+  // The clone moves its own idea of GitHub's main.
+  writeFileSync(join(gd, 'packed-refs'), `${(await gitOk(['rev-parse', 'HEAD'], w.cg)).trim()} refs/remotes/origin/main\n`);
+  return { markers, fired: () => readdirSync(markers) };
+}
+
+const lockedRunner = () => { const r = { calls: 0 }; r.run = async (fn) => { r.calls++; return fn(); }; return r; };
+const underClone = (w, c) => [c.gitDir, c.cwd, c.workTree].some((p) => p && (p === w.clone || p.startsWith(w.clone + '/')));
+
+test('R-0b-46: a booby-trapped clone: save-work, the push, the launch check and the restart check run none of its programs', async () => {
+  const w = await world();
+  const mirrorCfg = readFileSync(join(w.mirror, 'config'));
+  const mirrorRefs = await gitOk(['for-each-ref'], { gitDir: w.mirror });
+  const trap = await boobyTrap(w);
+  callLog.length = 0;
+  const lock = lockedRunner();
+  const saved = await createSaveWork({ runLocked: lock.run })({ clone: w.clone, mirror: w.mirror, card: 'C-1', branch: 'card/c-1', outbox: w.outbox });
+  assert.equal(saved.ok, true, saved.reason);
+  assert.equal(lock.calls, 1, 'save-work did not run inside the lock-down');
+  assert.equal(readFileSync(join(w.clone, '.git', 'config'), 'utf8'), CLONE_CONFIG_TEMPLATE);
+  for (const f of ['hooks', 'config.worktree', 'info/attributes']) assert.ok(!existsSync(join(w.clone, '.git', f)), `${f} was left`);
+
+  const pushed = await w.push();
+  assert.equal(pushed.ok, true, pushed.reason);
+  // The push moved the mirror's card branch only; its config and every other ref are untouched.
+  assert.deepEqual(readFileSync(join(w.mirror, 'config')), mirrorCfg);
+  const refsNow = (await gitOk(['for-each-ref'], { gitDir: w.mirror })).split('\n').filter((l) => l && !l.includes('refs/heads/card/'));
+  assert.deepEqual(refsNow.join('\n'), mirrorRefs.trimEnd());
+
+  const main = (await gitOk(['rev-parse', 'refs/heads/main'], { gitDir: w.mirror })).trim();
+  const product = { repo: REPO, mirror: w.mirror };
+  const card = { id: 'C-1', repo: REPO, commit: main, branch: 'card/c-1' };
+  const launch = await prepareWorkerCopy({ product, card, dest: join(w.root, 'fresh') });
+  assert.equal(launch.ok, true, launch.reason);
+  // Restart from the bundle made out of the trapped clone (it carries `* filter=x`).
+  const restart = await prepareWorkerCopy({ product, card, dest: join(w.root, 'restarted'), lastBundle: saved.bundle });
+  assert.equal(restart.ok, true, restart.reason);
+  assert.ok(existsSync(join(w.root, 'restarted', '.gitattributes')), 'the restart did not check out the branch');
+
+  assert.deepEqual(trap.fired(), [], 'a planted program ran');
+  const inClone = callLog.filter((c) => underClone(w, c));
+  assert.ok(inClone.length > 0 && inClone.every((c) => c.purpose === 'save-work'), `git ran inside the worker copy: ${inClone.map((c) => c.purpose).join(', ')}`);
+});
+
+test('R-0b-46: positive control: the planted programs do run when git is used inside the clone the careless way', async () => {
+  const w = await world();
+  const trap = await boobyTrap(w);
+  const { spawnSync } = await import('node:child_process');
+  spawnSync('git', ['-C', w.clone, 'status'], { env: { PATH: '/usr/bin:/bin:/opt/homebrew/bin:/usr/local/bin', HOME: tmp() } });
+  spawnSync('git', ['-C', w.clone, 'diff', 'HEAD~1'], { env: { PATH: '/usr/bin:/bin:/opt/homebrew/bin:/usr/local/bin', HOME: tmp() } });
+  assert.ok(trap.fired().length > 0, 'the traps are not live, so the main test would prove nothing');
+});
+
+test('R-0b-46: save-work refuses a .git pointer file, a .git link, a foreign alternates file, and running outside the lock-down', async () => {
+  const w = await world();
+  const args = { clone: w.clone, mirror: w.mirror, card: 'C-1', branch: 'card/c-1', outbox: w.outbox };
+  const lock = lockedRunner();
+  const save = createSaveWork({ runLocked: lock.run });
+  assert.match((await createSaveWork({})(args)).reason, /lock-down/);
+  assert.match((await save({ ...args, branch: 'card/c-2' })).reason, /bad card branch/);
+
+  // Alternates naming the mirror's objects is allowed; anything else is refused.
+  const alt = join(w.clone, '.git', 'objects', 'info', 'alternates');
+  mkdirSync(dirname(alt), { recursive: true });
+  writeFileSync(alt, `${join(w.mirror, 'objects')}\n`);
+  assert.equal((await save(args)).ok, true);
+  writeFileSync(alt, `${join(w.gh, 'objects')}\n`);
+  assert.match((await save(args)).reason, /borrows objects/);
+  rmSync(alt);
+
+  // A gitdir: pointer to another repository.
+  const real = join(w.root, 'real-git');
+  renameSync(join(w.clone, '.git'), real);
+  writeFileSync(join(w.clone, '.git'), `gitdir: ${real}\n`);
+  callLog.length = 0;
+  assert.match((await save(args)).reason, /not a real folder/);
+  assert.equal(callLog.length, 0, 'git ran on a pointer file');
+  rmSync(join(w.clone, '.git'));
+  symlinkSync(real, join(w.clone, '.git'));
+  assert.match((await save(args)).reason, /not a real folder/);
+  assert.equal(callLog.length, 0);
+});
+
+test('R-0b-46: a worker changing origin and its own main affects no other copy, the mirror, or the Do-plane read of main', async () => {
+  const w = await world();
+  const main = (await gitOk(['rev-parse', 'refs/heads/main'], { gitDir: w.mirror })).trim();
+  const product = { repo: REPO, mirror: w.mirror };
+  const card = { id: 'C-1', repo: REPO, commit: main };
+  const second = await prepareWorkerCopy({ product, card: { ...card, id: 'C-2' }, dest: join(w.root, 'second') });
+  assert.equal(second.ok, true, second.reason);
+  const snap = (dir) => readdirSync(dir, { recursive: true }).filter((p) => !String(p).startsWith('.git/objects') && !String(p).includes('index')).map((p) => { const f = join(dir, String(p)); return statSync(f).isFile() ? `${p}:${readFileSync(f, 'base64')}` : String(p); }).sort();
+  const before = { second: snap(join(w.root, 'second')), mirror: snap(w.mirror) };
+  await gitOk(['remote', 'add', 'origin', 'https://example.invalid/evil.git'], w.cg);
+  await gitOk(['config', 'core.hooksPath', '/tmp/evil-hooks'], w.cg);
+  await gitOk(['update-ref', 'refs/remotes/origin/main', (await gitOk(['rev-parse', 'HEAD'], w.cg)).trim()], w.cg);
+  await gitOk(['update-ref', 'refs/heads/main', (await gitOk(['commit-tree', '-m', 'evil', `${main}^{tree}`], w.cg)).trim()], w.cg);
+  assert.deepEqual(snap(join(w.root, 'second')), before.second);
+  assert.deepEqual(snap(w.mirror), before.mirror);
+  assert.equal((await gitOk(['rev-parse', 'refs/heads/main'], { gitDir: w.mirror })).trim(), main);
+});
+
+test('R-0b-46: a planted alternates file in the mirror refuses the launch check and the restart check too', async () => {
+  const w = await world();
+  const main = (await gitOk(['rev-parse', 'refs/heads/main'], { gitDir: w.mirror })).trim();
+  writeFileSync(join(w.mirror, 'objects', 'info', 'alternates'), `${join(w.clone, '.git', 'objects')}\n`);
+  const product = { repo: REPO, mirror: w.mirror };
+  const card = { id: 'C-1', repo: REPO, commit: main };
+  assert.match((await prepareWorkerCopy({ product, card, dest: join(w.root, 'x1') })).reason, /alternates/);
+  await w.bundle(['refs/heads/card/c-1']);
+  assert.match((await prepareWorkerCopy({ product, card, dest: join(w.root, 'x2'), lastBundle: join(w.outbox, 'bundle-C-1.bundle') })).reason, /alternates/);
+  assert.match((await w.push()).reason, /alternates/);
+});
+
+test('L4 restart: the copy fast-forwards to GitHub\'s branch kept in the mirror; a branch that went another way is refused', async () => {
+  const w = await world();
+  const main = (await gitOk(['rev-parse', 'refs/heads/main'], { gitDir: w.mirror })).trim();
+  await w.commit('one', (c) => writeFileSync(join(c, 'app.txt'), 'one\n'));
+  await w.bundle(['refs/heads/card/c-1']);
+  const bundleHead = (await gitOk(['rev-parse', 'HEAD'], w.cg)).trim();
+  await w.commit('two, on GitHub', (c) => writeFileSync(join(c, 'app.txt'), 'two\n'));
+  const ahead = (await gitOk(['rev-parse', 'HEAD'], w.cg)).trim();
+  await gitOk(['fetch', '-q', w.clone, `refs/heads/card/c-1:refs/orchestrate/remote/card/c-1`], { gitDir: w.mirror });
+  const product = { repo: REPO, mirror: w.mirror };
+  const card = { id: 'C-1', repo: REPO, commit: main };
+  const lastBundle = join(w.outbox, 'bundle-C-1.bundle');
+  const r = await prepareWorkerCopy({ product, card, dest: join(w.root, 'ff'), lastBundle });
+  assert.equal(r.ok, true, r.reason);
+  assert.equal(r.head, ahead);
+  assert.notEqual(r.head, bundleHead);
+  // GitHub's copy behind the bundle: the bundle's head is kept.
+  await gitOk(['update-ref', 'refs/orchestrate/remote/card/c-1', main], { gitDir: w.mirror });
+  assert.equal((await prepareWorkerCopy({ product, card, dest: join(w.root, 'behind'), lastBundle })).head, bundleHead);
+  // Went another way: refused, nothing rewritten.
+  const other = (await gitOk(['commit-tree', '-p', main, '-m', 'elsewhere', `${main}^{tree}`], { gitDir: w.mirror })).trim();
+  await gitOk(['update-ref', 'refs/orchestrate/remote/card/c-1', other], { gitDir: w.mirror });
+  assert.match((await prepareWorkerCopy({ product, card, dest: join(w.root, 'diverged'), lastBundle })).reason, /went another way/);
+});
