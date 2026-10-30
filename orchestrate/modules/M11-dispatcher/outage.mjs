@@ -21,7 +21,7 @@ export function isDead(s, { now, quietMs }) {
 /**
  * One pass's outage step. `board` = [{ id, card, alive, ended, lastWriteAt }] for the sessions on
  * the board. `healthy` = network up and signed in and usage readable, this pass. `resume` = Joe
- * said resume. Returns { outage, ended, restart: [session ids], asks: [card ids] }; writes the
+ * said resume. Returns { outage, ended, restart: [session ids], asks: [card ids], cards: {session id: card} }; writes the
  * outage fact and raises at most one alert per outage.
  */
 export function outageStep({ rec, rules, board, now, healthy, resume = false, alert }) {
@@ -49,7 +49,7 @@ export function outageStep({ rec, rules, board, now, healthy, resume = false, al
   if (board.length && dead.length >= threshold) {
     const id = `outage-${new Date(now).toISOString()}`;
     const w = write({ id, state: 'open', started_at: new Date(now).toISOString(), dead: dead.map((s) => ({ id: s.id, card: s.card ?? null })), board: board.length, healthy_passes: 0 }, 'outage_start');
-    if (w.ok) alert({ id, text: `${dead.length} of ${board.length} running sessions stopped at once. Nothing will be restarted until the network, sign-in and usage are back, or you say resume.` });
+    if (w.ok) alert(`${dead.length} of ${board.length} running sessions stopped at once (${id}). Nothing will be restarted until the network, sign-in and usage are back, or you say resume.`);
     return { outage: true, ended: false, restart: [], asks: [] };
   }
   return { outage: false, ended: false, ...decide(rec, dead) };
@@ -59,10 +59,12 @@ export function outageStep({ rec, rules, board, now, healthy, resume = false, al
 function decide(rec, dead) {
   const restart = [];
   const asks = [];
+  const cards = {};
   for (const s of dead) {
     const card = s.card ? rec.read('card', s.card)?.doc : null;
-    if (card?.rerun_safe === true) restart.push(s.id);
+    if (card?.rerun_safe === true) { restart.push(s.id); cards[s.id] = s.card; }
     else if (s.card) asks.push(s.card);
   }
-  return { restart, asks };
+  // `cards` maps each restarted session to its card: a session held through an outage is off the board.
+  return { restart, asks, cards };
 }

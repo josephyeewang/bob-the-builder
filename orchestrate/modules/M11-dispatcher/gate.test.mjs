@@ -66,7 +66,7 @@ test('row 61 / M14: shakedown (cap 1) refuses a 2nd worker; a missing switch rea
 });
 
 test('row 61 / m3: scripts — a 2nd on one product and a 3rd on the Mac are refused; green only', () => {
-  const s = (prod, n) => ({ id: `X-${prod}-${n}`, product: prod, kind: 'script' });
+  const s = (prod, n) => ({ id: `X-${prod}-${n}`, product: prod, kind: 'script', card: 'w9' });
   assert.equal(go({ kind: 'script', running: [] }).ok, true);
   assert.equal(go({ kind: 'script', running: [s('p1', 0)] }).ok, false);
   assert.equal(go({ kind: 'script', product: 'p3', running: [s('p1', 0), s('p2', 0)] }).ok, false);
@@ -74,6 +74,9 @@ test('row 61 / m3: scripts — a 2nd on one product and a 3rd on the Mac are ref
   assert.equal(go({ kind: 'script', b: AMBER, running: [] }).ok, false);
   // scripts and editing workers have separate caps
   assert.equal(go({ kind: 'editing', running: [s('p1', 0)] }).ok, true);
+  // audit MAT-6: but a script writes files, so an editing card sharing its file waits
+  assert.match(go({ kind: 'editing', running: [s('p1', 0)], card: { id: 'new', product: 'p1', tier: 2, files: ['src/w9.js'] } }).reason, /shares src\/w9\.js/);
+  assert.equal(go({ kind: 'editing', running: [{ id: 'X-1', product: 'p1', kind: 'script' }] }).ok, false, 'a script with no card is not known to be disjoint');
 });
 
 test('row 61 / M13: two cards sharing one file (or a case-only twin) do not start together', () => {
@@ -172,4 +175,28 @@ test('fileSet: the daily card carries its patterns, others none', () => {
   const pats = ['docs/blueprint/cards/**'];
   assert.deepEqual(fileSet({ kind: 'daily', files: [] }, { dailyPatterns: pats }).patterns, pats);
   assert.deepEqual(fileSet({ files: ['a.js'] }, { dailyPatterns: pats }).patterns, []);
+});
+
+test('audit MAT-3: a card with no tier counts as Tier 1; the stricter of the card and the rules wins', () => {
+  const UNKNOWN = { band: 'unknown', own_building: 'unknown', prodBlocked: true };
+  const OVER90 = { band: 'green', own_building: 'open', prodBlocked: true };
+  const base = rulesWith();
+  const says = (tier, risky = []) => ({ may: (a, s) => base.may(a, s), get: (k, o) => base.get(k, o), classify: () => ({ tier, risky, reasons: {} }) });
+  const c = (extra) => ({ id: 'new', product: 'p1', files: ['src/new.js'], ...extra });
+  // unknown usage: no tier -> Tier 1 -> held; an explicit Tier 2 the rules agree with starts
+  assert.equal(go({ b: UNKNOWN, card: c({}) }).ok, false);
+  assert.equal(go({ b: UNKNOWN, card: c({ tier: 'two' }) }).ok, false);
+  assert.equal(go({ b: UNKNOWN, card: c({ tier: 2 }), rules: says(2) }).ok, true);
+  // the card says 2, the rules say 1: Tier 1
+  assert.equal(go({ b: UNKNOWN, card: c({ tier: 2 }), rules: says(1) }).ok, false);
+  // above 90%: production work with no tier is held; the rules' risky classes count too
+  assert.equal(go({ b: OVER90, card: c({ risky: ['production_data'] }) }).ok, false);
+  assert.equal(go({ b: OVER90, card: c({ tier: 2 }), rules: says(1, ['schema']) }).ok, false);
+  assert.equal(go({ b: OVER90, card: c({ tier: 2 }), rules: says(2, ['schema']) }).ok, true);
+});
+
+test('audit MIN-20 (G21): an editing card for a product with no record is refused', () => {
+  const r = go({ product: 'p9', card: { id: 'new', product: 'p9', tier: 2, files: ['src/new.js'] } });
+  assert.equal(r.ok, false);
+  assert.match(r.reason, /no product record for p9/);
 });

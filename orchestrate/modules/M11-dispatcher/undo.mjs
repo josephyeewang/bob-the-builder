@@ -16,6 +16,8 @@ export const REVERSE_FACT = (undoId) => `reverse-${undoId}`;
 const MERGED = ['merged', 'audited_ok', 'audit_flagged'];
 const SHA = /^[0-9a-f]{40}$/;
 const iso = (ms) => new Date(ms).toISOString();
+// The module an undo belongs to: the merged card's own (a card must name its module).
+const moduleOf = (rec, attempt) => (attempt.card ? rec.read('card', attempt.card)?.doc?.module : null) ?? attempt.module ?? null;
 
 /**
  * One pass. `filesOf(merge_commit_sha)` -> [paths] the commit changed (read from the mirror) or
@@ -37,8 +39,17 @@ export function undoStep({ rec, rules, now, filesOf, alert }) {
       if (!Array.isArray(files)) { out.push([id, 'the reversed commit\'s files could not be read']); continue; }
       const w = rec.write({ actor: 'dispatcher', entity: 'card', id: cardId, expectRev: 0, kind: 'undo_card',
         doc: { state: 'ready', kind: 'undo', go_free: true, queue: 'front', files, pr: doc.pr, merge_commit_sha: doc.merge_commit_sha,
-          product: attempt.doc.product ?? doc.product ?? null, reverses: attempt.id, from_ask: id, changed_at: iso(now) } });
-      if (!w.ok) { out.push([id, `undo card not recorded: ${w.reason}`]); continue; }
+          product: attempt.doc.product ?? doc.product ?? null, module: moduleOf(rec, attempt.doc) ?? doc.module ?? null, reverses: attempt.id, from_ask: id, changed_at: iso(now) } });
+      if (!w.ok) {
+        // Joe tapped Undo: a card that cannot be written (say, its module is unknown) is told to him once.
+        const fid = `undo-not-recorded-${id}`;
+        if (!rec.read('fact', fid)) {
+          const f = rec.write({ actor: 'dispatcher', entity: 'fact', id: fid, expectRev: 0, doc: { reason: w.reason, at: iso(now) }, kind: 'undo_not_recorded' });
+          if (f.ok) alert(`your Undo of PR ${doc.pr} could not be queued: ${w.reason}; the Lead has to queue it by hand`);
+        }
+        out.push([id, `undo card not recorded: ${w.reason}`]);
+        continue;
+      }
     }
     rec.write({ actor: 'dispatcher', entity: 'ask', id, expectRev: rev, doc: { ...doc, state: 'consumed', consumed_at: iso(now), card: cardId }, kind: 'ask_consumed' });
     out.push([id, 'undo card written']);
@@ -49,7 +60,9 @@ export function undoStep({ rec, rules, now, filesOf, alert }) {
     const r = rec.read('fact', REVERSE_FACT(id))?.doc;
     if (r?.state !== 'not_clean' || rec.read('card', FIX_CARD(id))) continue;
     const w = rec.write({ actor: 'dispatcher', entity: 'card', id: FIX_CARD(id), expectRev: 0, kind: 'undo_fix_card',
-      doc: { state: 'ready', kind: 'fix', for: 'lead', queue: 'front', product: doc.product ?? null, about: id, pr: doc.pr ?? null,
+      // Waiting on the Lead, never `ready` (audit MAT-4): the Lead plans it; the start loop never picks it up.
+      doc: { state: 'waiting', kind: 'fix', for: 'lead', queue: 'front', product: doc.product ?? null, module: doc.module ?? null, about: id, pr: doc.pr ?? null,
+        waiting: { who: 'lead', what: `plan the fix: the undo of PR ${doc.pr} could not be an exact reverse`, since: iso(now), next_check: iso(now + 60 * 60_000) },
         what: `the undo of PR ${doc.pr} could not be an exact reverse: ${r.reason ?? 'no reason given'}`, changed_at: iso(now) } });
     if (w.ok) {
       alert(`Undo of PR ${doc.pr} could not be done as an exact reverse; a fix card is first in the Lead's queue`);

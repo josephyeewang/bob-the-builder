@@ -24,7 +24,7 @@ function world() {
     rec, rules: over.rules ?? R, now: T0 + min * MIN, lead: { sessionId: SID, product: 'p' }, size,
     inFlight: over.inFlight ?? null,
     send: async (t) => { calls.sent.push(t); return { outcome }; },
-    stopSession: async () => { calls.stops += 1; },
+    stopSession: async () => { calls.stops += 1; return over.stopFails ? { ok: false, reason: 'still running' } : { ok: true }; },
     startLead: async (x) => { calls.starts.push(x); return over.startFails ? { ok: false, reason: 'no' } : { ok: true, sessionId: 'L-2' }; },
     alert: (t) => calls.alerts.push(t),
   });
@@ -163,4 +163,43 @@ test('the transcript reader gives the finished turn its time, or null', async ()
   assert.equal(readSize(parseTranscript(a({ timestamp: iso(T0) }))).endedAt, T0);
   assert.equal(readSize(parseTranscript(a({}))).endedAt, null);
   assert.equal(readSize(parseTranscript([a({ timestamp: iso(T0) }), line({ type: 'user', message: { content: 'go' }, timestamp: iso(T0 + 1) })].join('\n'))).endedAt, null);
+});
+
+test('audit MAT-8: a failed stop alerts once, starts no new Lead, and is tried again', async () => {
+  const w = world();
+  assert.equal(await w.step(ended(260_000), 1), 'WRAP sent');
+  w.handIn(1_000);
+  await w.intake();
+  assert.equal(await w.step(ended(265_000, 3), 3, { stopFails: true }), 'old Lead not stopped; tried again next pass');
+  assert.equal(await w.step(ended(265_000, 4), 4, { stopFails: true }), 'old Lead not stopped; tried again next pass');
+  assert.equal(w.calls.stops, 2);
+  assert.equal(w.calls.starts.length, 0, 'two Leads never run at once');
+  assert.equal(w.calls.alerts.filter((a) => /could not be stopped/.test(a)).length, 1);
+  assert.equal(await w.step(ended(265_000, 5), 5), 'restarted');
+  assert.equal(w.calls.stops, 3);
+  assert.deepEqual(w.calls.starts, [{ handoff: 'handoff-L-1' }]);
+});
+
+test('audit MIN-13: a handoff that was refused or not recorded never stops the old Lead', async () => {
+  const w = world();
+  assert.equal(await w.step(ended(260_000), 1), 'WRAP sent');
+  // the intake refused the handoff (the record would not take it): re-asked, never stopped
+  const key = `outbox-${SID}-handoff-${SID}.md`;
+  w.rec.write({ actor: 'dispatcher', entity: 'fact', id: key, expectRev: 0, doc: { session: SID, name: `handoff-${SID}.md`, sha256: 'x', state: 'refused' } });
+  assert.equal(await w.step(ended(265_000, 3), 3), 're-asked');
+  assert.match(w.calls.sent[1], /the record refused it/);
+  assert.equal(w.calls.stops, 0);
+  assert.equal(w.calls.starts.length, 0);
+  // applied, but the handoff entry cannot be written: not stopped
+  const w2 = world();
+  assert.equal(await w2.step(ended(260_000), 1), 'WRAP sent');
+  w2.handIn(1_000);
+  await w2.intake();
+  const realWrite = w2.rec.write.bind(w2.rec);
+  const rec = { read: (...a) => w2.rec.read(...a), list: (...a) => w2.rec.list(...a), write: (a) => (a.entity === 'handoff' ? { ok: false, reason: 'stale rev' } : realWrite(a)) };
+  const r = await leadRestartStep({ rec, rules: R, now: T0 + 3 * MIN, lead: { sessionId: SID }, size: ended(265_000, 3), inFlight: null,
+    send: async () => ({ outcome: 'sent' }), stopSession: async () => { w2.calls.stops += 1; return { ok: true }; }, startLead: async () => { w2.calls.starts.push(1); return { ok: true }; }, alert: () => {} });
+  assert.equal(r, 'handoff not recorded: stale rev');
+  assert.equal(w2.calls.stops, 0);
+  assert.equal(w2.calls.starts.length, 0);
 });

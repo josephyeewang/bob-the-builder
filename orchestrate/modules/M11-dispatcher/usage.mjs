@@ -96,18 +96,22 @@ export function currentBands({ rec, rules, account, now }) {
  * Running work is never stopped by amber; red parks running cards elsewhere (pass.mjs).
  */
 export function mayStart({ b, kind, tier, risky = [], repair = false, redRuns }) {
-  const tier1Prod = tier === 1 && (risky.includes('production_data') || risky.includes('schema') || repair);
+  // Fail closed (audit 0b-6 MAT-3): only an explicit Tier 2 is Tier 2. A missing or unknown tier counts
+  // as Tier 1 for every hold. `tier: null` means "no card" (a Lead's read-only session).
+  const t1 = tier !== 2 && tier !== null;
+  const tier1Prod = t1 && (risky.includes('production_data') || risky.includes('schema') || repair);
   const finishing = ['review', 'audit', 'merge'].includes(kind);
   if (kind === 'undo') return { ok: true };
-  if (tier1Prod && (b.prodBlocked || b.band === 'unknown')) return { ok: false, reason: 'no Tier-1 production work above the usage line or while usage is unknown' };
+  if (tier1Prod && b.band === 'unknown') return { ok: false, reason: 'usage is unknown: no Tier-1 production work' };
+  if (tier1Prod && b.prodBlocked) return { ok: false, reason: 'no Tier-1 production work above the usage line' };
   if (kind === 'lead' || kind === 'front_door') return { ok: true };
   if (finishing) {
     if (b.band === 'red' && !redRuns.includes(`${kind}s`)) return { ok: false, reason: `the red band holds ${kind}s` };
-    if (kind !== 'merge' && tier === 1 && b.band === 'unknown') return { ok: false, reason: 'usage is unknown: no Tier-1 start' };
+    if (kind !== 'merge' && t1 && b.band === 'unknown') return { ok: false, reason: 'usage is unknown: no Tier-1 start' };
     return { ok: true };
   }
   if (b.band === 'red') return { ok: false, reason: 'the red band: nothing new starts' };
-  if (tier === 1 && b.band === 'unknown') return { ok: false, reason: 'usage is unknown: no Tier-1 start' };
+  if (t1 && b.band === 'unknown') return { ok: false, reason: 'usage is unknown: no Tier-1 start' };
   if (kind === 'readonly') return { ok: true };
   // Own building: new editing workers, scripts and overnight runs the Dispatcher starts.
   if (b.own_building === 'full') return { ok: false, reason: 'ORCHESTRATE has used its share of the week' };

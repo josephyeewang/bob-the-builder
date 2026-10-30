@@ -8,7 +8,7 @@ const OTHER = 'b'.repeat(40);
 const COUNT = { count_approval: { decision: 'allow', reason: 'a counted tap' } };
 const R = rulesWith({}, COUNT);
 const ask = (over = {}) => ({ state: 'answered', kind: 'undo', via: 'tap', pr: 7, merge_commit_sha: SHA, answered_at: iso(T0), ...over });
-const merged = (over = {}) => ({ state: 'audited_ok', pr: 7, merge_commit_sha: SHA, product: 'p', card: 'C-1', ...over });
+const merged = (over = {}) => ({ state: 'audited_ok', pr: 7, merge_commit_sha: SHA, product: 'p', card: 'C-1', module: 'M-u', ...over });
 
 function world(entries, { files = ['src/a.js', 'src/b.js'] } = {}) {
   const rec = recWith(entries);
@@ -34,6 +34,16 @@ test('M21: an answered, counted tap naming a merged PR -> one go-free undo card 
   // asking again is harmless
   assert.deepEqual(w.step(), []);
   assert.equal(w.rec.list('card').length, 1);
+});
+
+test('an undo card the record refuses (no module known) alerts Joe once and leaves the ask answered', () => {
+  const w = world([['merge', 'M-1', merged({ module: undefined, card: null })], ['ask', 'A-1', ask()]]);
+  assert.match(w.step()[0][1], /undo card not recorded: card is missing module/);
+  assert.equal(w.calls.alerts.length, 1);
+  assert.match(w.calls.alerts[0], /PR 7 could not be queued/);
+  w.step();
+  assert.equal(w.calls.alerts.length, 1, 'once');
+  assert.equal(w.rec.read('ask', 'A-1').doc.state, 'answered');
 });
 
 test('M21: every merged state counts; a merge that did not land does not', () => {
@@ -99,7 +109,10 @@ test('D8: M6 says not clean -> a fix card first in the Lead\'s queue and one ale
   const w = world([['card', U, { state: 'running', kind: 'undo', pr: 7, product: 'p' }], ['fact', REVERSE_FACT(U), { state: 'not_clean', reason: 'a later change touched src/a.js' }]]);
   assert.deepEqual(w.step(), [[U, 'fix card written']]);
   const fix = w.rec.read('card', FIX_CARD(U)).doc;
-  assert.deepEqual([fix.kind, fix.for, fix.queue, fix.state, fix.about], ['fix', 'lead', 'front', 'ready', U]);
+  // audit MAT-4: the fix card waits on the Lead to plan it; it is never `ready` for a worker
+  assert.deepEqual([fix.kind, fix.for, fix.queue, fix.state, fix.about, fix.module], ['fix', 'lead', 'front', 'waiting', U, 'M-test']);
+  assert.equal(fix.waiting.who, 'lead');
+  for (const f of ['who', 'what', 'since', 'next_check']) assert.ok(fix.waiting[f], f);
   assert.match(fix.what, /a later change touched src\/a\.js/);
   assert.equal(w.calls.alerts.length, 1);
   assert.match(w.calls.alerts[0], /PR 7/);

@@ -135,3 +135,58 @@ test('an unreadable outbox is skipped, not fatal', async () => {
   const out = await intakePass({ rec: recWith(), sessions: [{ sessionId: 'S-1', role: 'worker', outbox: join(w.root, 'nope'), uid: UID }], ...w.ports });
   assert.equal(out[0].skipped, 'outbox unreadable');
 });
+
+test('audit MAT-6: a read-only request the start refuses waits, the Lead is told once, and it is tried again', async () => {
+  const w = world();
+  const ob = mk(join(w.root, 'lead'));
+  writeFileSync(join(ob, 'think-q9.md'), 'Is B safe?');
+  const rec = recWith();
+  const sessions = [{ sessionId: 'L-1', role: 'lead', outbox: ob, uid: UID, product: 'p1' }];
+  let allow = false;
+  const tries = [];
+  const startReadonly = (x) => { tries.push(x); return allow ? { ok: true } : { ok: false, reason: 'cap 4' }; };
+  for (let i = 0; i < 2; i += 1) await intakePass({ rec, sessions, ...w.ports, startReadonly });
+  const fact = rec.read('fact', 'outbox-L-1-think-q9.md').doc;
+  assert.equal(fact.state, 'waiting');
+  assert.equal(fact.tries, 2);
+  assert.equal(w.calls.replies.length, 1);
+  assert.match(w.calls.replies[0].text, /queued: cap 4/);
+  assert.equal(tries.length, 2);
+  allow = true;
+  await intakePass({ rec, sessions, ...w.ports, startReadonly });
+  assert.equal(rec.read('fact', 'outbox-L-1-think-q9.md').doc.state, 'applied');
+  await intakePass({ rec, sessions, ...w.ports, startReadonly });
+  assert.equal(tries.length, 3); // started once, never again
+  assert.equal(w.calls.replies.length, 1);
+});
+
+test('audit MAT-7: a claim left at applying becomes interrupted with one alert, is never applied again, and blocks no Lead restart', async () => {
+  const { createHash } = await import('node:crypto');
+  const { leadInFlight } = await import('./lead-restart.mjs');
+  const w = world();
+  const ob = mk(join(w.root, 'worker'));
+  writeFileSync(join(ob, 'report-C-1.md'), 'done');
+  const sha = createHash('sha256').update('done').digest('hex');
+  const rec = recWith([['fact', 'outbox-S-1-report-C-1.md', { session: 'S-1', name: 'report-C-1.md', sha256: sha, state: 'applying' }]]);
+  const sessions = [{ sessionId: 'S-1', role: 'worker', outbox: ob, uid: UID, card: 'C-1' }];
+  const out = await intakePass({ rec, sessions, ...w.ports });
+  assert.equal(out[0].already, true);
+  assert.notEqual(out[0].applied, true);
+  assert.equal(rec.read('fact', 'outbox-S-1-report-C-1.md').doc.state, 'interrupted');
+  assert.equal(w.calls.alerts.length, 1);
+  assert.match(w.calls.alerts[0], /interrupted/);
+  assert.equal(rec.diary().filter((l) => l.kind === 'outbox').length, 0);
+  await intakePass({ rec, sessions, ...w.ports });
+  assert.equal(w.calls.alerts.length, 1);
+  assert.equal(rec.diary().filter((l) => l.kind === 'outbox').length, 0);
+  assert.equal(leadInFlight({ rec, sessionId: 'S-1', outboxNames: ['report-C-1.md'], questionOpen: false }), null);
+});
+
+test("audit MIN-20 (I6): a worker's think file starts no read-only session", async () => {
+  const w = world();
+  const ob = mk(join(w.root, 'worker'));
+  writeFileSync(join(ob, 'think-q1.md'), 'Is A safe?');
+  const out = await intakePass({ rec: recWith(), sessions: [{ sessionId: 'S-1', role: 'worker', outbox: ob, uid: UID, card: 'C-1' }], ...w.ports });
+  assert.equal(w.calls.readonly.length, 0);
+  assert.ok(out[0].refused);
+});

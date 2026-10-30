@@ -68,25 +68,58 @@ export async function intakePass({ rec, sessions, wait, alert, note, startReadon
     }
     const hash = sha256(file.text);
     const key = appliedId(s.sessionId, name);
-    const prev = rec.read('fact', key);
+    let prev = rec.read('fact', key);
+    const put = (doc, kind) => {
+      const w = rec.write({ actor: 'dispatcher', entity: 'fact', id: key, expectRev: prev?.rev ?? 0, doc: { session: s.sessionId, name, sha256: hash, ...doc }, kind });
+      if (w.ok) prev = rec.read('fact', key);
+      return w;
+    };
+    if (prev?.doc?.state === 'applying') {
+      // A claim left by a pass that crashed or threw between the claim and the apply (audit MAT-7). The
+      // pass lock means no other pass is running, so it is not still in progress. Whether the record
+      // took the file is not known, so it is never applied a second time: Joe is told once, and a new
+      // copy may be handed in under the same name.
+      put({ ...prev.doc, sha256: prev.doc.sha256, state: 'interrupted', at: new Date().toISOString() }, 'outbox_interrupted');
+      alert(`the hand-in of ${name} from ${s.role} ${s.sessionId} was interrupted; it may or may not have reached the record, and was not applied again`);
+    }
     if (prev) {
-      if (prev.doc.sha256 === hash) { r.already = true; continue; }
-      r.refused = 'the same name with new content';
-      alert(`${s.role} ${s.sessionId} handed in ${name} again with different content; the second copy was not used`);
-      continue;
+      const was = prev.doc.state;
+      if (prev.doc.sha256 === hash && was !== 'waiting') { r.already = true; continue; }
+      // A file that was never used (refused or interrupted) may be handed in again with new content.
+      if (prev.doc.sha256 !== hash && !['refused', 'interrupted'].includes(was)) {
+        r.refused = 'the same name with new content';
+        alert(`${s.role} ${s.sessionId} handed in ${name} again with different content; the second copy was not used`);
+        continue;
+      }
     }
-    const why = vet({ session: s, kind: file.kind, text: file.text });
+    let why;
+    try { why = vet({ session: s, kind: file.kind, text: file.text }); } catch (e) { why = `could not be checked: ${e.message}`; } // audit MIN-12
     if (why) { r.refused = why; note(`outbox file ${name} from ${s.role} ${s.sessionId} not used yet: ${why}`); continue; }
-    // Claim the key first, so a crash after the apply cannot apply the file a second time.
-    const claim = rec.write({ actor: 'dispatcher', entity: 'fact', id: key, expectRev: 0, doc: { session: s.sessionId, name, sha256: hash, state: 'applying' }, kind: 'outbox_claim' });
-    if (!claim.ok) { r.refused = `could not record the hand-in: ${claim.reason}`; continue; }
+    // A Lead's read-only request starts its session first. Refused (at the cap, in red) -> the file waits
+    // and is tried again next pass (audit MAT-6); the Lead is told once that it is queued.
     if (s.role === 'lead' && Object.hasOwn(READONLY_REQUESTS, file.kind)) {
-      r.request = startReadonly({ lead: s.sessionId, profile: READONLY_REQUESTS[file.kind], kind: file.kind, brief: file.text, product: s.product });
+      let started;
+      try { started = await startReadonly({ lead: s.sessionId, profile: READONLY_REQUESTS[file.kind], kind: file.kind, brief: file.text, product: s.product }); }
+      catch (e) { started = { ok: false, reason: `the start failed: ${e.message}` }; }
+      r.request = started;
+      if (!started?.ok) {
+        const reason = started?.reason ?? 'no answer';
+        const told = prev?.doc?.state === 'waiting';
+        put({ state: 'waiting', reason, tries: (prev?.doc?.tries ?? 0) + 1 }, 'outbox_waiting');
+        if (!told) replyToLead({ lead: s.sessionId, text: `Your ${file.kind} request ${name} is queued: ${reason}. It starts by itself when it can.` });
+        r.waiting = reason;
+        continue;
+      }
     }
-    const applied = rec.applyOutbox({ role: s.role, sessionId: s.sessionId, card: s.card }, path);
+    // Claim the key first, so a crash after the apply cannot apply the file a second time.
+    const claim = put({ state: 'applying' }, 'outbox_claim');
+    if (!claim.ok) { r.refused = `could not record the hand-in: ${claim.reason}`; continue; }
+    let applied;
+    try { applied = rec.applyOutbox({ role: s.role, sessionId: s.sessionId, card: s.card }, path); }
+    catch (e) { applied = { ok: false, reason: e.message }; }
     r.applied = applied.ok;
     if (!applied.ok) { r.refused = applied.reason; alert(`the record refused ${name} from ${s.role} ${s.sessionId}: ${applied.reason}`); }
-    rec.write({ actor: 'dispatcher', entity: 'fact', id: key, expectRev: claim.rev, doc: { session: s.sessionId, name, sha256: hash, state: applied.ok ? 'applied' : 'refused' }, kind: 'outbox_applied' });
+    put({ state: applied.ok ? 'applied' : 'refused' }, 'outbox_applied');
   }
   return out;
 }

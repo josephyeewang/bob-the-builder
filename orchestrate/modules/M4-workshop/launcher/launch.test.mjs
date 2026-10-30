@@ -541,3 +541,73 @@ test('attacks from a worker: writing the store, pushing to main and appending an
   const rec = memoryRecord();
   assert.equal(rec.write({ actor: 'worker:s-1', entity: 'go', id: 'G-1', expectRev: 0, doc: { approved: true }, kind: 'approval' }).ok, false);
 });
+
+// ---- planted failures for each refusal line, checked by their own reasons (audit R-0b-44 M-6) ----
+
+test('check 7: a missing hook folder, no outbox kinds, a hook that is not a command or runs from elsewhere each refuse with their own reason', () => {
+  const w = hookWorld();
+  assert.equal(w.check({ hooksDir: join(w.root, 'none') }).reason, 'the hook folder is missing');
+  assert.equal(w.check({ kinds: [] }).reason, 'the role has no outbox kinds');
+  const edit = (fn) => { const s = structuredClone(w.settings); fn(s); return w.check({ settings: s }); };
+  const plainHook = (s) => s[S.hooks][E.preToolUse].find((m) => m[H.hooks][0][H.command].includes('/plain-files.mjs '))[H.hooks][0];
+  assert.equal(edit((s) => { plainHook(s)[H.type] = 'prompt'; }).reason, 'the plain-files hook is not a command');
+  // A full, working copy of the hooks in another folder: only the folder check can refuse it.
+  const other = join(w.root, 'other-hooks');
+  installHooks(other, w.source);
+  assert.equal(edit((s) => { const h = plainHook(s); h[H.command] = h[H.command].replace(join(w.hooksDir, 'plain-files.mjs'), join(other, 'plain-files.mjs')); }).reason,
+    'the plain-files hook runs a script outside the hook folder');
+  assert.equal(edit((s) => { const h = s[S.hooks][E.preCompact][0][H.hooks][0]; h[H.command] = h[H.command].replace(join(w.hooksDir, 'compact-note.mjs'), join(other, 'compact-note.mjs')); }).reason,
+    'a PreCompact hook runs a script outside the hook folder');
+  chmodSync(join(w.hooksDir, 'compact-note.mjs'), 0o644);
+  assert.match(w.check().reason, /^the (PreCompact|PostCompact|SessionStart) hook is not readable and runnable$/);
+});
+
+test('check 4: a role file that will not write, before or after the install, refuses with its own reason', async () => {
+  const paths = { copy: '/w/copy', outbox: '/w/outbox', hooksDir: '/w/hooks', snapshot: '/w/rules.json', node: '/w/node' };
+  const render = (phase) => renderRoleSettings({ role: 'worker', profile: DESIGN_PROFILES.worker, paths, product: { commands: { test: 'npm test' } }, registryHosts: ['registry.example.org'], phase });
+  const failOn = (n) => { let i = 0; return () => (++i === n ? { ok: false, reason: 'disk full' } : { ok: true }); };
+  let ran = false;
+  const install = async () => { ran = true; return { ok: true }; };
+  assert.equal((await installStep({ render, write: failOn(1), install, registryHosts: ['registry.example.org'] })).reason, 'install role file: disk full');
+  assert.equal(ran, false, 'no install without the install role file');
+  assert.equal((await installStep({ render, write: failOn(2), install, registryHosts: ['registry.example.org'] })).reason, 'session role file: disk full');
+});
+
+test('check 13: each Bob folder refusal gives its own reason', () => {
+  const d = tmp();
+  const bob = join(d, 'bob'); mkdirSync(bob);
+  writeFileSync(join(bob, 'rules.md'), 'r');
+  const manifest = { 'rules.md': sha256(Buffer.from('r')) };
+  const abs = bob.replace(/^\/+/, '');
+  const settings = { [S.permissions]: { [S.deny]: [`Edit(/${abs}/**)`, `Write(/${abs}/**)`] } };
+  const file = join(d, 'a-file'); writeFileSync(file, 'x');
+  assert.equal(checkBobFolder({ folder: file, manifest, settings }).reason, 'the Bob folder is not a plain folder');
+  assert.equal(checkBobFolder({ folder: bob, manifest: {}, settings }).reason, 'no pinned Bob file list');
+  const plant = (rel, fn) => { const p = join(bob, rel); mkdirSync(join(p, '..'), { recursive: true }); fn(p); const r = checkBobFolder({ folder: bob, manifest, settings }); rmSync(join(bob, rel.split('/')[0]), { recursive: true, force: true }); return r.reason; };
+  assert.equal(plant('link.md', (p) => symlinkSync(join(bob, 'rules.md'), p)), 'the Bob folder holds a link (link.md)');
+  assert.equal(plant('SKILL.md', (p) => writeFileSync(p, 's')), 'the Bob folder holds a skill (SKILL.md)');
+  assert.equal(plant('skills/a.md', (p) => writeFileSync(p, 's')), 'the Bob folder holds a skills folder (skills/a.md)');
+  assert.equal(plant('extra.md', (p) => writeFileSync(p, 's')), 'the Bob folder holds a file the pin does not (extra.md)');
+  assert.equal(checkBobFolder({ folder: bob, manifest, settings }).ok, true);
+});
+
+test('check 11: a smoke or baseline run that does not finish refuses with its own reason', async () => {
+  const boom = async () => { throw new Error('boom'); };
+  assert.equal((await smokeTest({ run: boom, markerExists: () => false })).reason, 'the smoke run did not finish: boom');
+  assert.equal((await baselineTest({ run: boom })).reason, 'the baseline run did not finish: boom');
+});
+
+test('check 3 and intake: a missing outbox, and an outbox entry that is a folder, refuse with their own reason', () => {
+  const d = tmp();
+  assert.equal(emptyOutbox(join(d, 'none'), { busy: () => [] }).reason, 'the outbox is missing');
+  mkdirSync(join(d, 'report-T-1.md'));
+  assert.equal(readOutboxFile(d, 'report-T-1.md', { kinds: ['report'], uid: process.getuid() }).reason, '"report-T-1.md" is not a plain file');
+});
+
+test('check 6 and 10: a start message missing a field, and a machine-wide file that is not JSON, refuse with their own reason', () => {
+  for (const k of ['tools', 'mcp_servers', 'plugins', 'skills', 'setting_sources', 'permissionMode']) {
+    const i = goodInit('worker'); delete i[k];
+    assert.equal(checkInit(i, { role: 'worker', profile: DESIGN_PROFILES.worker }).reason, `start message has no ${k}`);
+  }
+  assert.equal(checkMachineWide({ readFile: () => '{', path: '/w/managed.json' }).reason, 'machine-wide settings are missing or not JSON');
+});

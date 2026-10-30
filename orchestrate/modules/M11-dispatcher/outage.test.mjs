@@ -32,6 +32,8 @@ test('M9: a board of 4 with 2 killed in one pass restarts nothing and alerts onc
   assert.equal(r.outage, true);
   assert.deepEqual(r.restart, []);
   assert.equal(alerts.length, 1);
+  assert.equal(typeof alerts[0], 'string'); // audit cosmetic 2: every alert is plain text
+  assert.match(alerts[0], /2 of 4 running sessions stopped at once/);
   // the next passes during the outage: still nothing restarts, no second alert
   const later = [live('S3', 'C-3'), gone('S4', 'C-4')];
   const r2 = outageStep({ rec, rules: R, board: later, now: T0 + MIN, healthy: false, alert: (a) => alerts.push(a) });
@@ -85,7 +87,7 @@ test('M10 / m18: a card not safe to re-run is never restarted; it becomes an ask
   const r = outageStep({ rec, rules: R, board, now: T0, healthy: true, alert: () => {} });
   assert.deepEqual(r.restart, []);
   assert.deepEqual(r.asks, ['C-1']);
-  const r2 = outageStep({ rec: recWith([['card', 'C-2', { rerun_safe: 'yes' }]]), rules: R, board: [gone('S2', 'C-2'), live('a'), live('b')], now: T0, healthy: true, alert: () => {} });
+  const r2 = outageStep({ rec: recWith([['card', 'C-2', { state: 'running', rerun_safe: 'yes' }]]), rules: R, board: [gone('S2', 'C-2'), live('a'), live('b')], now: T0, healthy: true, alert: () => {} });
   assert.deepEqual(r2.asks, ['C-2']);
   // after an outage, an unsafe card is still an ask, not a restart
   const rec3 = recWith(cards(false));
@@ -140,4 +142,13 @@ test('pidDead: this process is alive; a finished child is dead; nonsense is not 
   assert.equal(pidDead(undefined), false);
   assert.equal(pidDead(-1), false);
   assert.equal(pidDead(1), false); // exists, may not be signalled: alive
+});
+
+test('audit O8: an outage whose fact the record refuses raises no alert', () => {
+  const real = recWith(cards());
+  const rec = { read: (...a) => real.read(...a), list: (...a) => real.list(...a), write: (a) => (a.entity === 'fact' && a.id === OUTAGE_FACT ? { ok: false, reason: 'stale rev' } : real.write(a)) };
+  const alerts = [];
+  const r = outageStep({ rec, rules: R, board: [gone('S1', 'C-1'), gone('S2', 'C-2'), live('S3', 'C-3'), live('S4', 'C-4')], now: T0, healthy: false, alert: (a) => alerts.push(a) });
+  assert.equal(r.outage, true);
+  assert.equal(alerts.length, 0);
 });

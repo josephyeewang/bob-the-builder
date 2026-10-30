@@ -117,11 +117,23 @@ export async function cleanupCopy({ rec, rules, now, card, copiesRoot, sealRoot,
   // An ask already answered: act on Joe's answer, once.
   if (ask && ask.doc.state === 'answered') {
     const del = ask.doc.answer === 'delete';
-    if (del && ownCopy(copy, copiesRoot, card, cardDoc).ok) rmSync(copy, { recursive: true, force: true });
-    rec.write({ actor: 'dispatcher', entity: 'ask', id: ASK_ID(card), expectRev: ask.rev, doc: { ...ask.doc, state: 'consumed', consumed_at: iso(now) }, kind: 'ask_consumed' });
-    return done(del ? 'deleted' : 'kept', [del ? 'Joe said delete' : 'Joe said keep']);
+    const consume = (extra = {}) => rec.write({ actor: 'dispatcher', entity: 'ask', id: ASK_ID(card), expectRev: ask.rev,
+      doc: { ...ask.doc, state: 'consumed', consumed_at: iso(now), kept_at_card_change: cardDoc?.changed_at ?? null, ...extra }, kind: 'ask_consumed' });
+    if (!del) { consume(); return done('kept', ['Joe said keep']); }
+    // A delete needs an answer M2 counted, as the undo tap does (audit MIN-5).
+    const counted = rules.may('count_approval', { ask: { id: ASK_ID(card), ...ask.doc } });
+    if (counted.decision !== 'allow') return done('refused', [`the delete answer was not counted: ${counted.reason}`]);
+    const own = ownCopy(copy, copiesRoot, card, cardDoc);
+    consume(own.ok ? {} : { not_deleted: own.reason });
+    if (!own.ok) return done('refused', [`Joe said delete, but ${own.reason}`]); // audit MIN-6
+    rmSync(copy, { recursive: true, force: true });
+    return done('deleted', ['Joe said delete']);
   }
   if (ask && ['open', 'pushed'].includes(ask.doc.state)) return { result: 'kept', reasons: ['waiting on the delete-copy ask'] };
+  // Joe said keep: the copy is left alone until the card moves again (audit MAT-9), never re-asked each pass.
+  if (ask && ask.doc.state === 'consumed' && ask.doc.answer === 'keep' && ask.doc.kept_at_card_change === (cardDoc?.changed_at ?? null)) {
+    return { result: 'kept', reasons: ['Joe said keep'] };
+  }
 
   const what = stage(rec, card);
   if (what === 'keep') return { result: 'kept', reasons: ['the card is still in flight'] };

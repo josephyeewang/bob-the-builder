@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { dispatcherPass, runPass, stopProcessGroup, STOP_FACT, LIMIT_FACT } from './pass.mjs';
+import { dispatcherPass, stopProcessGroup, STOP_FACT, LIMIT_FACT } from './pass.mjs';
 import { USAGE_FACT, BAND_FACT } from './usage.mjs';
 import { OUTAGE_FACT } from './outage.mjs';
 import { KEYS as K } from './keys.mjs';
@@ -16,7 +16,7 @@ const RED = { week: 90, h5: 20 };
 // M10's answer: a paused product starts nothing. This test file does not decide product state.
 const startAnswer = (rec) => ({ start_session: ({ product }) => (rec.read('product', product)?.doc?.state === 'paused'
   ? { decision: 'deny', reason: 'the product is paused' } : { decision: 'allow', reason: 'ok' }) });
-const card = (id, over = {}) => ['card', id, { state: 'ready', product: 'p1', tier: 2, files: [`src/${id}.js`], changed_at: iso(T0 - 10 * MIN), ...over }];
+const card = (id, over = {}) => ['card', id, { state: 'ready', module: 'M-test', product: 'p1', tier: 2, files: [`src/${id}.js`], changed_at: iso(T0 - 10 * MIN), ...over }];
 const idle = { size: { tokens: 1, turnEnded: false, openTools: [], compactions: 0 }, activity: { state: 'active' } };
 const busy = { size: { tokens: 1, turnEnded: false, openTools: ['t1'], compactions: 0 }, activity: { state: 'active' } };
 
@@ -36,7 +36,7 @@ function world(entries = [], { usage = GREEN, over = {} } = {}) {
   const pass = (min = 0, extra = {}) => dispatcherPass({
     rec, rules: extra.rules ?? rules, now: T0 + min * MIN, account: ACCT, sessions: [...sessions],
     probe: (s) => probes.get(s.id) ?? idle,
-    launch: async (x) => { calls.launched.push(x.card.id); const a = launchAnswer(x); if (!a.ok) return a; const id = `S-${++n}`; sessions.push({ id, product: x.product, kind: x.kind, card: x.card.id, pgid: 100 + n }); return { ok: true, sessionId: id, pgid: 100 + n }; },
+    launch: async (x) => { calls.launched.push(x.card.id); const a = launchAnswer(x); if (!a.ok) return a; const id = `S-${++n}`; sessions.push({ id, product: x.product, kind: x.kind, card: x.card.id, pgid: 100 + n }); return { ok: true, sessionId: id, pgid: 100 + n, head: 'head' in a ? a.head : 'h'.repeat(40) }; },
     stopGroup: async (s) => { calls.stops.push(s.id); const i = sessions.findIndex((x) => x.id === s.id); if (i >= 0) sessions.splice(i, 1); return { ok: true, how: 'SIGTERM' }; },
     saveWork: async (s) => { calls.saves.push(s.id); return { ok: true }; },
     hostLock: () => extra.host ?? null,
@@ -325,24 +325,29 @@ test('the time limits come from the rules', async () => {
   assert.equal(w.calls.stops.length, 0);
   await w.pass(6);
   assert.equal(w.calls.stops.length, 1);
-  await assert.rejects(() => world([], { over: { [K.parkWaitMin]: undefined } }).pass(), /park_wait_min/);
+  // audit MAT-2: a missing key no longer throws; the pass still runs its stops, starts nothing, alerts once
+  const m = world([card('C-2')], { over: { [K.parkWaitMin]: undefined } });
+  const r = await m.pass();
+  assert.deepEqual(r.started, []);
+  assert.ok(r.notes.some((n) => /nothing starts: .*park_wait_min/.test(n)), r.notes.join('; '));
+  await m.pass(1);
+  assert.equal(m.calls.alerts.filter((a) => /park_wait_min/.test(a)).length, 1, 'one alert, not one per pass');
 });
 
-test('M16: two passes started together: one runs, one exits with a diary line', async () => {
+test('R-0b-55: every start writes its launch record; a launch the record refuses alerts', async () => {
   const w = world([card('C-1')]);
-  const lockFile = join(mkdtempSync(join(tmpdir(), 'm11-pass-')), 'pass.lock');
-  let release;
-  const slow = new Promise((r) => { release = r; });
-  const args = { rec: w.rec, rules: rulesWith({}, startAnswer(w.rec)), now: T0, account: ACCT, sessions: [], probe: () => idle,
-    launch: async () => { await slow; return { ok: true, sessionId: 'S-1', pgid: 5 }; }, stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }), alert: () => {} };
-  const a = runPass({ lockFile, ...args });
-  const b = await runPass({ lockFile, ...args });
-  assert.equal(b.ran, false);
-  assert.match(b.reason, /another pass runs/);
-  assert.match(w.rec.read('fact', 'pass-lock-note').doc.text, /did not run/);
-  release();
-  assert.equal((await a).ran, true);
-  assert.equal((await runPass({ lockFile, ...args, rec: world([]).rec })).ran, true, 'the lock is released after a pass');
+  const r = await w.pass();
+  assert.deepEqual(r.started, ['C-1']);
+  const sid = w.sessions[0].id;
+  const l = w.rec.read('launch', sid).doc;
+  assert.deepEqual([l.session_id, l.role, l.card, l.head, l.rev, l.launched_at], [sid, 'worker', 'C-1', 'h'.repeat(40), w.rec.read('card', 'C-1').rev, iso(T0)]);
+  assert.equal(w.calls.alerts.length, 0);
+  // a launcher that names no head: the session runs, the record refuses the launch, Joe is told
+  const v = world([card('C-2')]);
+  v.refuseLaunch(() => ({ ok: true, head: undefined }));
+  await v.pass();
+  assert.equal(v.rec.read('launch', v.sessions[0].id), null);
+  assert.match(v.calls.alerts.join('\n'), /launch was not recorded .*head.*merge will be refused/);
 });
 
 test('M7: the stop sequence: SIGTERM, then SIGKILL after 10 s', async () => {
@@ -373,4 +378,63 @@ test('M7: a stop that fails alerts and leaves the card as it was; a failed save 
   await dispatcherPass({ ...base, now: T0 + 2 * MIN, stopGroup: async () => ({ ok: true, how: 'SIGTERM' }), saveWork: async () => ({ ok: false, reason: 'disk full' }), alert: (x) => alerts.push(x) });
   assert.match(alerts[1], /not saved: disk full/);
   assert.equal(w.rec.read('fact', STOP_FACT(sid)).doc.state, 'done');
+});
+
+test('audit MAT-2: a cancel still stops when the rules lack a value: cancel_grace_min missing uses the 2 min floor', async () => {
+  for (const key of [K.cancelGraceMin, K.parkWaitMin, K.redRuns]) {
+    const w = world([card('C-1')]);
+    await w.pass(0);
+    const sid = w.sessions[0].id;
+    w.setCard('C-1', { state: 'cancelled' });
+    w.probes.set(sid, busy);
+    const rules = rulesWith({ [key]: undefined }, startAnswer(w.rec));
+    await w.pass(1, { rules });
+    assert.equal(w.calls.stops.length, 0, `${key}: inside the grace`);
+    await w.pass(3, { rules });
+    assert.deepEqual(w.calls.stops, [sid], key);
+    assert.equal(w.rec.read('card', 'C-1').doc.state, 'cancelled');
+  }
+});
+
+test('audit MAT-4: a fix card the undo step writes is never started as a worker; nor is any card for the Lead', async () => {
+  const { undoStep, FIX_CARD, REVERSE_FACT, UNDO_CARD } = await import('./undo.mjs');
+  const U = UNDO_CARD('A-1');
+  const w = world([['card', U, { state: 'merged', kind: 'undo', pr: 7, product: 'p1', module: 'M-test', tier: 2 }],
+    ['fact', REVERSE_FACT(U), { state: 'not_clean', reason: 'a later change touched src/a.js' }],
+    card('L-1', { for: 'lead' })]);
+  const alerts = [];
+  undoStep({ rec: w.rec, rules: rulesWith(), now: T0, filesOf: () => [], alert: (t) => alerts.push(t) });
+  assert.ok(w.rec.read('card', FIX_CARD(U)));
+  const r = await w.pass(1);
+  assert.deepEqual(r.started, []);
+  assert.deepEqual(w.calls.launched, []);
+  assert.equal(w.rec.read('card', 'L-1').doc.state, 'ready');
+  assert.equal(w.rec.read('card', FIX_CARD(U)).doc.state, 'waiting');
+});
+
+test('audit MIN-20 (P13): parked work does not resume while the Dispatcher\'s own share of the week is full', async () => {
+  const wait = { who: 'dispatcher', what: 'usage_band', since: iso(T0 - MIN), next_check: iso(T0) };
+  const w = world([card('C-1', { state: 'waiting', waiting: wait })], { usage: { week: 50, h5: 10 } });
+  const r = await w.pass(1);
+  assert.deepEqual(r.resumed, []);
+  assert.equal(w.rec.read('card', 'C-1').doc.state, 'waiting');
+  w.setUsage({ week: 30, h5: 20 });
+  assert.deepEqual((await w.pass(2)).resumed, ['C-1']);
+});
+
+test('audit MIN-20 (P30): in red a review session with a card is never parked; an editing one is', async () => {
+  const w = world([card('C-1', { state: 'in_review' })], { usage: RED });
+  w.sessions.push({ id: 'R-1', product: 'p1', kind: 'review', card: 'C-1', pgid: 50 }, { id: 'E-1', product: 'p1', kind: 'editing', card: 'C-2', pgid: 51 });
+  w.rec.write({ actor: 'dispatcher', entity: 'card', id: 'C-2', expectRev: 0, doc: { state: 'running', module: 'M-test', product: 'p1', tier: 2 } });
+  await w.pass(0);
+  w.setUsage(RED, T0 + 16 * MIN);
+  await w.pass(16);
+  assert.deepEqual(w.calls.stops, ['E-1']);
+});
+
+test('audit MIN-20 (P33): the stop stops waiting as soon as the group is gone after SIGTERM', async () => {
+  let t = 0;
+  const r = await stopProcessGroup({ pgid: 42, kill: () => {}, alive: () => t < 1500, sleep: async (ms) => { t += ms; } });
+  assert.equal(r.how, 'SIGTERM');
+  assert.equal(t, 1500);
 });

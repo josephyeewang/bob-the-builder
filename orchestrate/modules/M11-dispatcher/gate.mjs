@@ -51,7 +51,22 @@ function overlaps(a, b) {
   return null;
 }
 
-const isEditing = (s) => s.kind === 'editing';
+// Undo workers are worker-profile sessions too (M14, audit MIN-7): they count toward the editing caps.
+const isEditing = (s) => s.kind === 'editing' || s.kind === 'undo';
+// Every session that writes files takes part in the files-don't-overlap check (audit MIN-16).
+const writesFiles = (s) => isEditing(s) || s.kind === 'script';
+
+/**
+ * The card's tier and risky classes, failing closed (audit MAT-3, MIN-15): the risky set is the card's
+ * own plus what rules.classify finds in its files, and the tier is the stricter of the two. A card with
+ * no tier is Tier 1. No card (a Lead's read-only session) is tier null.
+ */
+export function riskOf(rules, card) {
+  if (!card) return { tier: null, risky: [] };
+  const own = card.tier === 2 ? 2 : 1;
+  const c = rules.classify({ product: card.product, files: (card.files ?? []).map((path) => ({ path, status: 'modified' })), declared_tier: card.tier });
+  return { tier: own === 2 && c.tier === 2 ? 2 : 1, risky: [...new Set([...(card.risky ?? []), ...(c.risky ?? [])])] };
+}
 
 /** The editing caps for a product (M14). */
 export function editingLimits({ rules, product, productDoc, amberCaps }) {
@@ -76,7 +91,8 @@ export function editingLimits({ rules, product, productDoc, amberCaps }) {
 export function startGate({ rules, rec, card, kind, product, b, running, lead }) {
   try {
     const redRuns = need(rules, KEYS.redRuns, { type: 'list' });
-    const band = mayStart({ b, kind, tier: card?.tier, risky: card?.risky ?? [], repair: card?.kind === 'repair', redRuns });
+    const { tier, risky } = riskOf(rules, card);
+    const band = mayStart({ b, kind, tier, risky, repair: card?.kind === 'repair', redRuns });
     if (!band.ok) return band;
     const mine = running.filter((s) => s.product === product);
     if (kind === 'readonly') {
@@ -91,9 +107,9 @@ export function startGate({ rules, rec, card, kind, product, b, running, lead })
       const perMac = need(rules, KEYS.scriptsPerMac);
       if (mine.filter((s) => s.kind === 'script').length >= perProduct) return refuse(`the product already runs ${perProduct} script(s)`);
       if (running.filter((s) => s.kind === 'script').length >= perMac) return refuse(`the Mac already runs ${perMac} scripts`);
-      return { ok: true };
+      return disjoint({ rules, card, product, others: mine.filter(writesFiles), rec });
     }
-    if (kind !== 'editing') return { ok: true };
+    if (kind !== 'editing' && kind !== 'undo') return { ok: true };
     const productDoc = rec.read('product', product)?.doc;
     if (!productDoc) return refuse(`no product record for ${product}`);
     const lim = editingLimits({ rules, product, productDoc, amberCaps: band.amberCaps });
@@ -101,7 +117,7 @@ export function startGate({ rules, rec, card, kind, product, b, running, lead })
     if (onProduct.length >= lim.product) return refuse(`the product already runs ${onProduct.length} editing worker(s) (cap ${lim.product})`);
     const onMac = running.filter(isEditing).length;
     if (onMac >= lim.mac) return refuse(`the Mac already runs ${onMac} editing workers (cap ${lim.mac})`);
-    return disjoint({ rules, card, product, others: onProduct, rec });
+    return disjoint({ rules, card, product, others: mine.filter(writesFiles), rec });
   } catch (e) {
     return refuse(`the rules have no value for ${e.key ?? e.message}: start nothing`);
   }

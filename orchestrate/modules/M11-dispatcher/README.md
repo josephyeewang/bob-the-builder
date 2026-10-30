@@ -8,21 +8,42 @@ Every outside effect (launching, stopping, typing into a session, git, alerts) i
 
 | File | What it does | Rows |
 |---|---|---|
-| `pass.mjs` | The main pass: bands, host.lock, compactions, stops at a safe point, parked work resuming, starts, a paused product's Lead hand-off; `runPass` adds the one-pass-at-a-time lock | 55, 59, 64, 67 |
+| `main.mjs` | The runnable entry the login job starts: reads the config, loads the wiring, runs one tick | 55, 65 |
+| `tick.mjs` | One full Dispatcher pass: every step below in a fixed order, each in its own try/catch; `runTick` adds the one-pass-at-a-time lock | 55–60, 63, 64, 67, 68 |
+| `pass.mjs` | The main step: bands, host.lock, compactions, stops at a safe point, parked work resuming, starts (each writes its launch record), a paused product's Lead hand-off | 55, 59, 64, 67 |
 | `pass-lock.mjs` | Only one pass at a time | 55 (M16) |
+| `moves.mjs` | Small rev-checked record moves; every move stamps `changed_at`, every wait carries all its fields | all |
 | `gate.mjs` | The one start gate (band, caps, files don't overlap); also launch check 12 | 61, 67 |
 | `usage.mjs` | Usage bands from the usage fact | 67 |
 | `outage.mjs` | Dead sessions and outages | 56, 60 |
-| `merges.mjs` | Merge attempts and the time limits | 57 |
+| `merges.mjs` | Merge attempts, the time limits (reviewer starts go through the start gate) and merge requests | 57, 67, 68 |
 | `cleanup.mjs` | Removing a worker's copy only when proven merged, else seal and ask | 57 |
-| `transcript.mjs` | A session's size and safe point from its transcript | 58, 63, 64 |
-| `outbox-intake.mjs` | Using outbox files | 62 |
+| `transcript.mjs` | A session's size and safe point from its transcript | 62, 63, 64 |
+| `outbox-intake.mjs` | Using outbox files, and starting a Lead's read-only requests | 56, 58 |
 | `lead-restart.mjs` | The Lead's restart from its handoff | 63 |
 | `phone-link.mjs` | Network, phone link and Mini Base | 60 |
 | `undo.mjs` | The [Undo] tap | 68 |
 | `headless-result.mjs` | A headless worker's final result | 65 |
 | `login-job.mjs` | The login job file | 55, 65 |
 | `keys.mjs` | Every rules key this folder reads | all |
+
+## The tick's ports
+
+`tick()` takes every outside effect as a port, so the wiring module (written at the live proof) is the only place that touches the Mac. `main.mjs` reads a config file `{ wiring, lockFile }` (both absolute paths), imports the wiring module and calls its `wire(config)`, which returns `{ rec, rules, ports }`. The ports:
+
+| Port | Used by | What it does |
+|---|---|---|
+| `alert(text)` | every step | One plain-text message to Joe |
+| `board()`, `healthy()`, `resume()` | outage | The running sessions with their liveness; whether network, sign-in and usage are fine; whether Joe said resume |
+| `outboxSessions()`, `wait(ms)`, `startReadonly(x)`, `replyToLead(x)`, `intakeFs` | intake | The sessions and their outbox folders; the settle wait; a Lead's read-only start; a note back to the Lead; optional file-reading overrides for tests |
+| `leads()` | leads | Per Lead: `{ lead, size, outboxNames, questionOpen, send, stopSession, startLead }` |
+| `sessions()`, `probe`, `launch`, `stopGroup`, `saveWork`, `hostLock`, `pauseLead` | pass | As in `pass.mjs` |
+| `hasSession`, `gateAlive`, `hasReviewer`, `startReviewer` | limits | As in `merges.mjs` |
+| `filesOf` | undo | The files a merged PR changed |
+| `sendFrontDoor`, `restartFrontDoor`, `startMinibase`, `frontDoorAlive`, `frontDoorHandoff` | phone | As in `phone-link.mjs` |
+| `cleanup: { copiesRoot, sealRoot, mirrorFor, git, saveWork }` | cleanup | As in `cleanup.mjs` |
+
+Facts the tick writes: `signed-in-account` is read (missing or stale: nothing starts), `step-error-<step>` (one alert per distinct error, cleared on success), `last-full-pass` (when every step last ran and how each ended).
 
 ## Facts this folder reads or writes (the contracts)
 
@@ -40,6 +61,10 @@ Every outside effect (launching, stopping, typing into a session, git, alerts) i
 | `cleanup-<card>`, ask `delete-copy-<card>` | this folder | the cleanup proof and the ask to Joe |
 | `stop-<session>`, `compactions-<card>`, `host-lock-seen`, `pause-<product>`, `usage-unknown-alert` | this folder | the main pass's memory |
 | `reverse-<undo card>` | M6 (lane 1, 0b-9) | `{ state: clean / not_clean, reason }` |
+| `outbox-<session>-<file>` | this folder | `{ state: applying / applied / refused / interrupted / waiting, sha256, ... }` |
+| `step-error-<step>`, `last-full-pass` | this folder | the tick's memory |
+
+Record entries this folder writes besides cards and facts: `launch` (one per start: `{ session_id, role, card, head, rev, launched_at }`) and `merge_request` (`mr-<card>-<head>`: `{ card, pr, session_id, head, rev, requested_at }`).
 
 Card waits use `waiting` with every wait field. The causes this folder writes: `usage_band`, `limit_hit` (read), `needs_split`, `budget_stop`, `usage_unknown`.
 
@@ -62,6 +87,12 @@ Card waits use `waiting` with every wait field. The causes this folder writes: `
 | A parked card on a paused product goes back to `ready` | Deviation | The rules' `start_session` answer holds it while the product is paused, so it is not given a wait of its own. | The lead. | n/a |
 | Undo cards skip the caps | Deviation | An undo card is "go-free and first": it starts in any band and is not counted against the editing caps or the files check. | The lead. | n/a |
 | The headless result shape and the budget cap | Capability note, not yet checked (Principle 9) | The final result's fields and whether the budget cap works on a subscription login are unverified. `CHECKED_AGAINST` is empty and the code treats anything unreadable as a stop that needs Joe. | The builder, at the live proof, with the date and the Claude Code version. | Void at the next version pin. |
+| A paused product's Lead is not stopped after its handoff | Open item (audit 0b-6 Minor 11), deferred | On a pause the workers are parked first, then the Lead is asked to hand off. G8 says the Lead session then stops; today nothing stops it, so it stays open (idle) until Joe or the Lead's own wiring closes it. | The lead: stop it from here, or leave it to the Lead's launcher wiring. | Before the first real pause. |
+| The merge request's join with M6 | Contract for lane 1 (M6), to confirm | `session_id` is the worker session that made the head (the card's `session`), and `rev` is the card's record rev when the request is written. M6's refusal 11 must match on exactly these. | Lane 1. | With M6's refusal 11. |
+| The wiring module | Open item | `main.mjs` loads a wiring module that connects every port to the real Mac. It is written and checked at live proof 1, not in this folder's tests. | This lane. | At live proof 1. |
+| An interrupted hand-in is never applied again | Deviation, fails closed | If a pass dies between claiming an outbox file and applying it, the file is marked interrupted and Joe is told once; it is not re-applied, because whether the record took it is unknown. The session may hand in a new copy under the same name. | The lead. | n/a |
+| `runPass` removed | Changelog | `runTick` in `tick.mjs` is the one entry point, so the lock covers every step, not just the main pass. | n/a | n/a |
+| A worker's `think-` file | Note | Refused by the worker's list of kinds before the Lead-only check is reached, so the Lead-only check is a second guard that no test can isolate. | n/a | n/a |
 | The transcript format | Capability note, not yet checked (Principle 9) | The size, turn-end and compaction readings follow the format as reviewed, not as checked on the pinned version. | The builder, at the live proof. | Void at the next version pin. |
 
 ## Live proofs still to run (plain steps)

@@ -150,3 +150,30 @@ test('Mini Base down with the network up: started again at most every 5 min; a f
   ok.read(1, { mb: true }); await ok.step(1);
   assert.equal(ok.calls.minibase, 1);
 });
+
+test('audit MAT-10: the Front Door gone is restarted with its last handoff, at most once per 5 min; a failed restart alerts', async () => {
+  const rec = recWith();
+  const handoffs = [];
+  const alerts = [];
+  let ok = true;
+  const fact = (id, value, min) => rec.write({ actor: 'dispatcher', entity: 'fact', id, expectRev: rec.read('fact', id)?.rev ?? 0, doc: { value, observed_at: iso(T0 + min * MIN) } });
+  const step = (min, alive) => {
+    for (const id of [FACTS.network, FACTS.reachable, FACTS.minibase]) fact(id, true, min);
+    return phoneLinkStep({ rec, rules: rulesWith(), now: T0 + min * MIN, send: async () => ({ outcome: 'sent' }), startMinibase: async () => ({ ok: true }),
+      restartFrontDoor: async (x) => { handoffs.push(x.handoff); return ok ? { ok: true } : { ok: false, reason: 'did not start' }; },
+      frontDoorAlive: () => alive, lastHandoff: () => 'fd-handoff-7', alert: (t) => alerts.push(t) });
+  };
+  assert.deepEqual(await step(0, true), []);
+  assert.equal(handoffs.length, 0);
+  assert.deepEqual(await step(1, false), ['Front Door was missing; restarted']);
+  assert.deepEqual(handoffs, ['fd-handoff-7']);
+  assert.deepEqual(await step(5, false), ['Front Door missing; restarted recently, waiting']);
+  assert.equal(handoffs.length, 1);
+  ok = false;
+  assert.deepEqual(await step(6, false), ['Front Door was missing; restart failed']);
+  assert.equal(handoffs.length, 2);
+  assert.equal(alerts.length, 1);
+  assert.match(alerts[0], /did not restart: did not start/);
+  assert.equal((await step(7, null)).includes('Front Door was missing; restarted'), false); // unknown is not missing
+  assert.equal(handoffs.length, 2);
+});

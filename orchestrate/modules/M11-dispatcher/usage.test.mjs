@@ -166,3 +166,28 @@ test('the usage-band fact keeps both values and the unknown start time', () => {
   assert.equal(rec.read('fact', BAND_FACT).doc.own_building, 'full');
   assert.equal(rec.read('fact', BAND_FACT).doc.unknown_since, null);
 });
+
+test('audit MIN-20 (U6, U7): the pace edges are exact: pace 1.0 is amber, 0.85 is green, and the floor share itself counts', () => {
+  assert.equal(at(usageFact({ week: 50, h5: 10, gone: 0.5 })).pace, 1);
+  assert.equal(at(usageFact({ week: 50, h5: 10, gone: 0.5 })).band, 'amber');
+  assert.equal(at(usageFact({ week: 42.5, h5: 10, gone: 0.5 })).pace, 0.85);
+  assert.equal(at(usageFact({ week: 42.5, h5: 10, gone: 0.5 })).band, 'green');
+  const floor = at(usageFact({ week: 30, h5: 10, gone: 0.25 }), rulesWith({ [K.paceMinShare]: 0.25 }));
+  assert.equal(floor.pace, 1.2);
+  assert.equal(floor.band, 'red');
+});
+
+test('audit MIN-20 (U22): under unknown usage a Tier-1 review or audit is held; a merge request and Tier 2 are not', () => {
+  const unk = at(usageFact({ week: 10, h5: 10, observedAgoMin: 30 }));
+  const RR = ['reviews', 'audits', 'merges'];
+  assert.match(mayStart({ b: unk, kind: 'review', tier: 1, redRuns: RR }).reason, /no Tier-1 start/);
+  assert.equal(mayStart({ b: unk, kind: 'audit', tier: undefined, redRuns: RR }).ok, false);
+  assert.equal(mayStart({ b: unk, kind: 'review', tier: 2, redRuns: RR }).ok, true);
+  assert.equal(mayStart({ b: unk, kind: 'merge', tier: 1, redRuns: RR }).ok, true);
+});
+
+test('audit MIN-20 (K3): a negative, infinite or non-number rules value is missing, never used', async () => {
+  const { need } = await import('./keys.mjs');
+  for (const v of [-1, Infinity, NaN, '5', null]) assert.throws(() => need(rulesWith({ [K.redWeek]: v }), K.redWeek), MissingKey, String(v));
+  assert.equal(need(rulesWith({ [K.redWeek]: 0 }), K.redWeek), 0);
+});

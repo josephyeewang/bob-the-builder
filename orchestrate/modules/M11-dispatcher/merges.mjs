@@ -8,6 +8,7 @@
 
 import { KEYS, minutes } from './keys.mjs';
 import { move, waitOn, note, ageMs } from './moves.mjs';
+import { startGate } from './gate.mjs';
 
 export const PR_FACT = (n) => `pr-${n}`;
 const fresh = (fact, attempt) => {
@@ -19,9 +20,11 @@ const fresh = (fact, attempt) => {
 /**
  * One pass of the time limits. Ports: `hasSession(cardId)` (a live session for the card),
  * `gateAlive()` (the Merge Gate's process), `hasReviewer(cardId)`, `startReviewer(cardId)` -> { ok },
- * `alert(text)`. Returns the list of moves made, for the diary and the tests.
+ * `alert(text)`. `b` = this pass's bands and `running` = the running sessions: a reviewer start goes
+ * through the same start gate as every other start (audit MAT-5), so red holds it unless the rules'
+ * red_runs lists reviews. Returns the list of moves made, for the diary and the tests.
  */
-export function timeLimits({ rec, rules, now, hasSession, gateAlive, hasReviewer, startReviewer, alert }) {
+export async function timeLimits({ rec, rules, now, b, running = [], hasSession, gateAlive, hasReviewer, startReviewer, alert }) {
   const done = [];
   const lim = {
     claimed: minutes(rules, KEYS.claimedNoSessionMin), checking: minutes(rules, KEYS.checkingMaxMin),
@@ -37,7 +40,10 @@ export function timeLimits({ rec, rules, now, hasSession, gateAlive, hasReviewer
         if (waitOn(rec, id, { who: 'joe', what: 'no reviewer could be started', now }).ok) { alert(`card ${id}: no reviewer could be started twice`); done.push([id, 'in_review->waiting']); }
         continue;
       }
-      const r = startReviewer(id);
+      const g = startGate({ rules, rec, card: { id, ...doc }, kind: 'review', product: doc.product, b, running });
+      if (!g.ok) { done.push([id, `reviewer held: ${g.reason}`]); continue; }
+      let r;
+      try { r = await startReviewer(id); } catch (e) { r = { ok: false, reason: e.message }; }
       move(rec, 'card', id, r?.ok ? { reviewer_start_failures: 0 } : { reviewer_start_failures: fails + 1 }, { now, kind: 'reviewer_start' });
       done.push([id, r?.ok ? 'reviewer started' : 'reviewer start failed']);
     }
@@ -96,8 +102,38 @@ function refuse(rec, id, doc, reason, { now, alert }) {
     return out;
   }
   const verdict = rec.read('verdict', doc.card)?.doc;
-  const back = verdict && verdict.head_sha === doc.head_sha ? 'verified' : 'in_review';
+  const back = verdict && verdict.head === doc.head_sha ? 'verified' : 'in_review';
   move(rec, 'card', doc.card, { state: back, merge_refusals: [...seen, reason] }, { now, kind: 'merge_refused' });
   out.push([doc.card, `->${back}`]);
   return out;
+}
+
+export const MERGE_REQUEST = (card, head) => `mr-${card}-${String(head).slice(0, 12)}`;
+const READY_TO_MERGE = ['verified', 'approved'];
+
+/**
+ * Merge requests (R-0b-67, R-0b-68; review 0b-6 M23, D12). For each card the review passed (verified,
+ * or approved), whose verdict is for the card's current head and who has no request for that head
+ * yet, the Dispatcher stores a `merge_request` { card, pr, session_id, head, rev, requested_at }: the
+ * Merge Gate merges only a change with a stored request matching session, head and rev (refusal 11).
+ * The request goes through the start gate as kind 'merge', so red holds it unless red_runs lists
+ * merges, and no Tier-1 production change is requested above the usage line or while usage is unknown.
+ * `session_id` is the worker session that made the head; `rev` is the card's record rev.
+ */
+export function requestMerges({ rec, rules, now, b, running = [] }) {
+  const done = [];
+  for (const { id, rev, doc } of rec.list('card')) {
+    if (!READY_TO_MERGE.includes(doc.state)) continue;
+    const verdict = rec.read('verdict', id)?.doc;
+    if (!verdict?.head || doc.pr == null || !doc.session) { done.push([id, 'not ready: needs a verdict, a pull request and its session']); continue; }
+    if (doc.head != null && doc.head !== verdict.head) { done.push([id, 'the verdict is for another head']); continue; }
+    const mid = MERGE_REQUEST(id, verdict.head);
+    if (rec.read('merge_request', mid)) continue;
+    const g = startGate({ rules, rec, card: { id, ...doc }, kind: 'merge', product: doc.product, b, running });
+    if (!g.ok) { done.push([id, `merge request held: ${g.reason}`]); continue; }
+    const w = rec.write({ actor: 'dispatcher', entity: 'merge_request', id: mid, expectRev: 0, kind: 'merge_request',
+      doc: { card: id, pr: doc.pr, session_id: doc.session, head: verdict.head, rev, product: doc.product ?? null, requested_at: new Date(now).toISOString() } });
+    done.push([id, w.ok ? 'merge requested' : `merge request not recorded: ${w.reason}`]);
+  }
+  return done;
 }

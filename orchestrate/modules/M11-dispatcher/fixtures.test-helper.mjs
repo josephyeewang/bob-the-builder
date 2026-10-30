@@ -43,7 +43,9 @@ export function usageFact({ week, h5, gone = 0.5, account = 'acct-a', observedAg
 export function recWith(entries = []) {
   const rec = memoryRecord();
   for (const [entity, id, doc] of entries) {
-    const r = rec.write({ actor: 'dispatcher', entity, id, expectRev: 0, doc });
+    // The record requires a card's module; a fixture card that names none gets a test module.
+    const d = entity === 'card' && doc && !('module' in doc) ? { module: 'M-test', ...doc } : doc;
+    const r = rec.write({ actor: 'dispatcher', entity, id, expectRev: 0, doc: d });
     if (!r.ok) throw new Error(r.reason);
   }
   return rec;

@@ -1,11 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, existsSync, statSync, readFileSync, symlinkSync, readdirSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, existsSync, statSync, readFileSync, symlinkSync, readdirSync, rmSync, utimesSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join, resolve, sep } from 'node:path';
-import { cleanupCopy, cleanupPass, ASK_ID, hashCopy, mirrorTree } from './cleanup.mjs';
+import { cleanupCopy, cleanupPass, ASK_ID, hashCopy, mirrorTree, ownCopy } from './cleanup.mjs';
 import { createSaveWork } from '../M4-workshop/git/save-work.mjs';
 import { git as safeGit, callLog } from '../M4-workshop/git/safe-git.mjs';
 import { PR_FACT } from './merges.mjs';
@@ -229,6 +229,8 @@ test("M12 (e): a folder that is not this card's copy is never bundled, sealed or
   assert.ok(existsSync(w2.copy));
 });
 
+const COUNTED = rulesWith({}, { count_approval: { decision: 'allow', reason: 'counted' } });
+
 test("the ask: one per copy; Joe's answer is acted on once; a refusal to ask keeps the copy with an alert", async () => {
   const w = world();
   writeFileSync(join(w.copy, 'a.txt'), 'changed\n');
@@ -239,7 +241,10 @@ test("the ask: one per copy; Joe's answer is acted on once; a refusal to ask kee
   assert.equal(again.calls.length, 0, 'no second bundle while the ask is open');
   const cur = rec.read('ask', ASK_ID('C-1'));
   rec.write({ actor: 'joe', entity: 'ask', id: ASK_ID('C-1'), expectRev: cur.rev, doc: { ...cur.doc, state: 'answered', answer: 'delete' } });
-  assert.equal((await clean(w, rec)).result, 'deleted');
+  // audit: a "delete" is acted on only when the rules count it as Joe's approval
+  assert.equal((await clean(w, rec, { rules: rulesWith({}, { count_approval: { decision: 'deny', reason: 'not counted' } }) })).result, 'refused');
+  assert.ok(existsSync(w.copy));
+  assert.equal((await clean(w, rec, { rules: COUNTED })).result, 'deleted');
   assert.equal(existsSync(w.copy), false);
   assert.equal(theAsk(rec).state, 'consumed');
   // "keep" keeps it
@@ -250,6 +255,9 @@ test("the ask: one per copy; Joe's answer is acted on once; a refusal to ask kee
   const c2 = rec2.read('ask', ASK_ID('C-1'));
   rec2.write({ actor: 'joe', entity: 'ask', id: ASK_ID('C-1'), expectRev: c2.rev, doc: { ...c2.doc, state: 'answered', answer: 'keep' } });
   assert.equal((await clean(w2, rec2)).result, 'kept');
+  assert.ok(existsSync(w2.copy));
+  const later = await clean(w2, rec2);
+  assert.deepEqual([later.result, later.calls.length], ['kept', 0], 'a kept copy is not asked about again while the card is unchanged');
   assert.ok(existsSync(w2.copy));
   // the rules deny the ask: kept, one alert, no ask entry; an "allow" is still only an ask
   const w3 = world();
@@ -283,4 +291,40 @@ test('cleanupPass goes through every copy folder and skips one with no record', 
     git: guardedGit(w.copiesRoot), saveWork: locked, alert: () => {} });
   assert.deepEqual(out.map(([c, r]) => [c, r.result]), [['C-1', 'deleted'], ['C-9', 'kept']]);
   assert.ok(existsSync(join(w.copiesRoot, 'C-9')));
+});
+
+test('audit MIN-17: each copy-ownership check refuses on its own', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'm11-own-'));
+  const copiesRoot = join(dir, 'copies');
+  mkdirSync(join(copiesRoot, 'C-1'), { recursive: true });
+  mkdirSync(join(copiesRoot, 'C-2'));
+  const real = join(copiesRoot, 'C-1');
+  assert.deepEqual(ownCopy(real, copiesRoot, 'C-1', { copy: real }), { ok: true });
+  // a link that resolves to the right folder is still refused: only the real folder is the copy
+  const link = join(dir, 'link');
+  symlinkSync(real, link);
+  assert.deepEqual(ownCopy(link, copiesRoot, 'C-1', { copy: link }), { ok: false, reason: 'the copy is not a real folder' });
+  // a real folder that is another card's copy
+  assert.match(ownCopy(join(copiesRoot, 'C-2'), copiesRoot, 'C-1', {}).reason, /not this card's/);
+  assert.match(ownCopy(join(copiesRoot, 'C-2'), copiesRoot, 'C-1', { copy: join(copiesRoot, 'C-2') }).reason, /not this card's/);
+  // the record names another copy, or has no card
+  assert.match(ownCopy(real, copiesRoot, 'C-1', { copy: join(copiesRoot, 'C-2') }).reason, /another copy/);
+  assert.match(ownCopy(real, copiesRoot, 'C-1', null).reason, /not in the record/);
+  assert.match(ownCopy(join(copiesRoot, 'C-9'), copiesRoot, 'C-9', {}).reason, /no copy folder/);
+  writeFileSync(join(copiesRoot, 'C-3'), 'a file');
+  assert.match(ownCopy(join(copiesRoot, 'C-3'), copiesRoot, 'C-3', {}).reason, /not a real folder/);
+});
+
+test('audit MIN-20 (C10): an old bundle, or one outside the staging folder, is not proof; the copy is kept and asked about', async () => {
+  const w = world();
+  const old = await clean(w, recFor(w), { saveWork: async (a) => { const r = await locked(a); if (r.ok) utimesSync(r.bundle, new Date(T0 - 60 * MIN), new Date(T0 - 60 * MIN)); return r; } });
+  assert.notEqual(old.result, 'deleted');
+  assert.ok(existsSync(w.copy));
+  assert.match(old.reasons.join(), /not fresh/);
+  const w2 = world();
+  const stray = join(w2.dir, 'stray.bundle');
+  const out = await clean(w2, recFor(w2), { saveWork: async (a) => { const r = await locked(a); if (r.ok) execFileSync('cp', [r.bundle, stray]); return { ...r, bundle: stray }; } });
+  assert.notEqual(out.result, 'deleted');
+  assert.ok(existsSync(w2.copy));
+  assert.match(out.reasons.join(), /no fresh bundle/);
 });

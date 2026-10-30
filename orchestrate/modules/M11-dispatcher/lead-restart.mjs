@@ -15,6 +15,7 @@
 // The step's progress is the fact `lead-restart-<session>`.
 
 import { KEYS, need } from './keys.mjs';
+import { ENTITIES } from '../../shared/record.mjs';
 
 export const RESTART_FACT = (sid) => `lead-restart-${sid}`;
 export const HANDOFF_NAME = (sid) => `handoff-${sid}.md`;
@@ -42,9 +43,10 @@ export function leadInFlight({ rec, sessionId, outboxNames, questionOpen }) {
   if (questionOpen) return 'a question box is open';
   for (const name of outboxNames) {
     const used = rec.read('fact', `outbox-${sessionId}-${name}`)?.doc?.state;
-    if (name.startsWith('.') || (used !== 'applied' && used !== 'refused')) return `outbox file ${name} not used yet`;
+    if (name.startsWith('.') || !['applied', 'refused', 'interrupted'].includes(used)) return `outbox file ${name} not used yet`;
   }
-  for (const entity of ['card', 'merge', 'ask', 'go', 'claim', 'report']) {
+  // `claim` leaves the record's entities in 0b-2; only the ones the record still has are read.
+  for (const entity of ['card', 'merge', 'ask', 'go', 'claim', 'report'].filter((e) => ENTITIES.includes(e))) {
     for (const { id, doc } of rec.list(entity)) if (doc?.waiting?.who === 'lead' && doc.state !== 'closed') return `${entity} ${id} waits on the Lead`;
   }
   return null;
@@ -91,17 +93,27 @@ export async function leadRestartStep({ rec, rules, now, lead, size, inFlight, s
   const used = rec.read('fact', `outbox-${sid}-${HANDOFF_NAME(sid)}`)?.doc;
   const answered = size.endedAt != null && size.endedAt > Date.parse(st.sent_at);
   if (used?.state === 'applied') {
-    const h = rec.write({ actor: 'dispatcher', entity: 'handoff', id: `handoff-${sid}`, expectRev: rec.read('handoff', `handoff-${sid}`)?.rev ?? 0,
-      doc: { session: sid, product: lead.product ?? null, name: HANDOFF_NAME(sid), sha256: used.sha256, at: iso(now) }, kind: 'handoff' });
-    if (!h.ok) return `handoff not recorded: ${h.reason}`;
-    await stopSession();
+    const hcur = rec.read('handoff', `handoff-${sid}`);
+    if (hcur?.doc?.sha256 !== used.sha256) {
+      const h = rec.write({ actor: 'dispatcher', entity: 'handoff', id: `handoff-${sid}`, expectRev: hcur?.rev ?? 0,
+        doc: { session: sid, product: lead.product ?? null, name: HANDOFF_NAME(sid), sha256: used.sha256, at: iso(now) }, kind: 'handoff' });
+      if (!h.ok) return `handoff not recorded: ${h.reason}`;
+    }
+    // Two Leads never run at once (audit MAT-8): the new one starts only once the old one is stopped.
+    let stopped;
+    try { stopped = await stopSession(); } catch (e) { stopped = { ok: false, reason: e.message }; }
+    if (!stopped?.ok) {
+      if (!st.stop_alerted) alert(`the Lead ${sid} handed off but could not be stopped (${stopped?.reason ?? 'no answer'}); no new Lead starts until it is`);
+      save({ stop_alerted: true, stop_failed_at: iso(now) }, 'lead_stop_failed');
+      return 'old Lead not stopped; tried again next pass';
+    }
     const started = await startLead({ handoff: `handoff-${sid}` });
     save({ phase: 'done', restarted_at: iso(now), new_lead: started?.ok ? (started.sessionId ?? null) : null }, 'lead_restarted');
     if (!started?.ok) alert(`the Lead ${sid} was stopped after its handoff, but the new Lead did not start: ${started?.reason ?? 'no answer'}`);
     return started?.ok ? 'restarted' : 'stopped; new Lead failed to start';
   }
   if (!answered) return 'waiting for the handoff';
-  const why = used?.state === 'refused' ? 'the record refused it' : 'it is missing or over the cap';
+  const why = used?.state === 'refused' ? 'the record refused it' : used?.state === 'interrupted' ? 'its hand-in was interrupted' : 'it is missing or over the cap';
   if ((st.reasks ?? 0) < 1) {
     const r = await send(`Your handoff was not used (${why}). Write ${HANDOFF_NAME(sid)} again, under ${cap} tokens (about ${cap * 4} bytes), then reply DONE.`);
     if (r?.outcome !== 'sent') return `re-ask not sent (${r?.outcome ?? 'no answer'})`;

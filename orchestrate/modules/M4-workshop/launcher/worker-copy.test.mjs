@@ -2,7 +2,7 @@
 // their description, not ported code), and the Claude-only agent seam. All repos are throwaway.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync, mkdirSync, symlinkSync, readFileSync, existsSync, lstatSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, mkdirSync, symlinkSync, readFileSync, existsSync, lstatSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { gitOk, initMirror } from '../git/safe-git.mjs';
@@ -179,4 +179,57 @@ test('agent seam: only the Claude adapter exists, and it needs all five calls', 
   assert.equal(a.ok, true);
   assert.deepEqual(Object.keys(a.adapter), ['start', 'stop', 'status', 'report', 'usage']);
   assert.throws(() => agentAdapter('claude', { start() {} }), /needs stop/);
+});
+
+// ---- planted failures for each refusal line, checked by their own reasons (audit R-0b-44 M-6) ----
+
+test('check 1: a product with no mirror, and a card naming another branch, refuse with their own reason', async () => {
+  const dest = join(tmp(), 'w');
+  const c = 'a'.repeat(40);
+  assert.equal((await prepareWorkerCopy({ product: { repo: REPO }, card: card(c), dest })).reason, 'product has no repo or mirror in the rules');
+  assert.equal((await prepareWorkerCopy({ product: { repo: REPO, mirror: join(tmp(), 'none.git') }, card: card(c, { branch: 'card/other' }), dest })).reason,
+    'card branch "card/other" is not card/c-12');
+});
+
+// Main moves on with a change to its own Claude files; the card stays on the first commit.
+async function mainMovesOn(f, change) {
+  change(f.src);
+  const c2 = await commitAll(f.src, 'main 2');
+  await gitOk(['fetch', '-q', f.src, '+refs/heads/main:refs/heads/main'], { gitDir: f.mirror });
+  return c2;
+}
+
+test('check 2: main\'s protected file that is a link is never written as a file', async () => {
+  const f = await fixture();
+  const c2 = await mainMovesOn(f, (src) => symlinkSync('settings.json', join(src, '.claude', 'link.json')));
+  const dest = join(f.root, 'w');
+  const r = await prepareWorkerCopy({ product: f.product, card: card(c2), dest });
+  assert.equal(r.reason, 'main\'s .claude/link.json is not a plain file (mode 120000)');
+  assert.equal(existsSync(dest), false);
+});
+
+test('check 2: a branch that turns a folder into a link cannot get main\'s files written through it', async () => {
+  const f = await fixture();
+  const w = join(f.root, 'w-first');
+  assert.equal((await prepareWorkerCopy({ product: f.product, card: card(f.c1), dest: w })).ok, true);
+  const outside = join(f.root, 'outside'); mkdirSync(outside);
+  rmSync(join(w, 'pkg'), { recursive: true });
+  symlinkSync(outside, join(w, 'pkg'));
+  await commitAll(w, 'pkg becomes a link');
+  const bundle = join(f.root, 'bundle-C-12.bundle');
+  await gitOk(['bundle', 'create', '-q', bundle, 'refs/heads/card/c-12'], { gitDir: join(w, '.git'), cwd: w });
+  const r = await prepareWorkerCopy({ product: f.product, card: card(f.c1), dest: join(f.root, 'w2'), lastBundle: bundle });
+  assert.equal(r.reason, 'a link is on the way to pkg/CLAUDE.local.md');
+  assert.equal(existsSync(join(outside, 'CLAUDE.local.md')), false, 'nothing written outside the copy');
+});
+
+test('check 2: a protected file main names but the mirror cannot give refuses', async () => {
+  const f = await fixture();
+  // A main whose tree names a blob the mirror does not hold.
+  const o = { gitDir: f.mirror, purpose: 'test' };
+  const tree = (await gitOk(['mktree', '--missing'], { ...o, input: `100644 blob ${'b'.repeat(40)}\t.mcp.json\n` })).trim();
+  const c2 = (await gitOk(['commit-tree', tree, '-p', f.c1, '-m', 'main 2'], o)).trim();
+  await gitOk(['update-ref', 'refs/heads/main', c2], o);
+  const r = await prepareWorkerCopy({ product: f.product, card: card(f.c1), dest: join(f.root, 'w') });
+  assert.equal(r.reason, 'cannot read main\'s .mcp.json');
 });

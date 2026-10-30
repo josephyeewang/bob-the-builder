@@ -20,13 +20,13 @@
 // Product-state starts are M10's `may('start_session')` answer; this file does not repeat them.
 // Every outside effect is a port, so tests run on fakes.
 
-import { KEYS, need, minutes } from './keys.mjs';
+import { KEYS, need, minutes, MissingKey } from './keys.mjs';
 import { currentBands, recordBands } from './usage.mjs';
 import { startGate } from './gate.mjs';
 import { atSafePoint } from './transcript.mjs';
 import { OUTAGE_FACT } from './outage.mjs';
 import { move, waitOn, note } from './moves.mjs';
-import { takePassLock } from './pass-lock.mjs';
+import { FINAL_STATES } from '../../shared/record.mjs';
 
 export const STOP_FACT = (sid) => `stop-${sid}`;
 export const COMPACTION_FACT = (card) => `compactions-${card}`;
@@ -34,6 +34,9 @@ export const HOST_FACT = 'host-lock-seen';
 export const PAUSE_FACT = (product) => `pause-${product}`;
 export const LIMIT_FACT = (account) => `limit-hit-${account}`;
 export const UNKNOWN_FACT = 'usage-unknown-alert';
+export const RULES_MISSING_FACT = 'rules-missing-alert';
+// Used only when timeouts.cancel_grace_min itself is missing (audit MAT-2): Cancel must still stop.
+export const CANCEL_GRACE_FLOOR_MS = 2 * 60_000;
 export const TERM_WAIT_MS = 10_000;
 const PARKABLE = ['editing', 'script', 'overnight'];
 const iso = (ms) => new Date(ms).toISOString();
@@ -53,11 +56,16 @@ const roleOf = (s) => s.role ?? (s.kind === 'editing' || s.kind === 'script' ? '
 const factDoc = (rec, id) => rec.read('fact', id);
 const putFact = (rec, id, doc, kind) => rec.write({ actor: 'dispatcher', entity: 'fact', id, expectRev: rec.read('fact', id)?.rev ?? 0, doc, kind });
 
+// A stronger reason replaces a pending weaker one (audit MIN-2): cancel > needs_split > the rest.
+const RANK = { cancel: 3, needs_split: 2, card_ended: 1, red: 1, paused: 1 };
+
 /** Why this running session should stop now, or null. */
 function stopReason({ s, card, productDoc, b, compactions, split }) {
   if (!card) return null;
   if (card.state === 'cancelled') return 'cancel';
   if (!PARKABLE.includes(s.kind)) return null;
+  // A worker whose card has ended, or now waits on Joe, has nothing left to do (audit MIN-3).
+  if (FINAL_STATES.card.includes(card.state) || (card.state === 'waiting' && card.waiting?.who === 'joe')) return 'card_ended';
   if (compactions >= split) return 'needs_split';
   if (b.band === 'red') return 'red';
   if (productDoc?.state === 'paused') return 'paused';
@@ -75,23 +83,34 @@ function stopReason({ s, card, productDoc, b, compactions, split }) {
  *   pauseLead({ product }) -> any    (lead-restart's WRAP flow for a paused product)
  *   alert(text)
  */
-export async function dispatcherPass({ rec, rules, now, account, sessions, probe, launch, stopGroup, saveWork, hostLock = () => null, pauseLead = () => {}, alert }) {
+export async function dispatcherPass({ rec, rules, now, account, sessions, probe, launch, stopGroup, saveWork, hostLock = () => null, pauseLead = () => {}, alert, startsOff = null }) {
   const out = { started: [], refused: [], stopping: [], stopped: [], resumed: [], notes: [] };
-  const cancelMs = minutes(rules, KEYS.cancelGraceMin);
-  const parkMs = minutes(rules, KEYS.parkWaitMin);
-  const split = need(rules, KEYS.splitAfterCompactions);
-  const unknownMaxMs = minutes(rules, KEYS.usageUnknownMaxMin);
+  // A missing rules value starts nothing, but every stop still runs (audit MAT-2): Cancel needs no band.
+  const missing = [];
+  const read = (f, fallback) => { try { return f(); } catch (e) { if (!(e instanceof MissingKey)) throw e; missing.push(e.key); return fallback; } };
+  const cancelMs = read(() => minutes(rules, KEYS.cancelGraceMin), CANCEL_GRACE_FLOOR_MS);
+  const parkMs = read(() => minutes(rules, KEYS.parkWaitMin), Infinity);
+  const split = read(() => need(rules, KEYS.splitAfterCompactions), Infinity);
+  const unknownMaxMs = read(() => minutes(rules, KEYS.usageUnknownMaxMin), Infinity);
 
   // 1. Bands.
-  const b = currentBands({ rec, rules, account, now });
+  const b = read(() => currentBands({ rec, rules, account, now }), { band: 'unknown', own_building: 'unknown', pace: null, prodBlocked: true, reason: 'the rules lack a band value' });
   const { unknownSince } = recordBands({ rec, b, now, account });
+  if (missing.length) {
+    const key = [...new Set(missing)].sort().join(', ');
+    if (factDoc(rec, RULES_MISSING_FACT)?.doc?.keys !== key) {
+      putFact(rec, RULES_MISSING_FACT, { keys: key, at: iso(now) }, 'rules_missing');
+      alert(`the rules have no value for ${key}: nothing new starts until they do; stops still run`);
+    }
+    startsOff ??= `the rules have no value for ${key}`;
+  } else if (factDoc(rec, RULES_MISSING_FACT)?.doc?.keys) putFact(rec, RULES_MISSING_FACT, { keys: null, at: iso(now) }, 'rules_missing_cleared');
 
   // 2. host.lock (m5).
   const host = hostLock();
   const seen = factDoc(rec, HOST_FACT);
   if ((seen?.doc?.text ?? null) !== (host ?? null)) {
     putFact(rec, HOST_FACT, { text: host ?? null, at: iso(now) }, 'host_lock');
-    if (host && /air/i.test(host)) { note(rec, 'host-lock-note', "who's-home file says Air; ignored for orchestrated products", { now }); out.notes.push('host.lock says Air'); }
+    if (host && /\bair\b/i.test(host)) { note(rec, 'host-lock-note', "who's-home file says Air; ignored for orchestrated products", { now }); out.notes.push('host.lock says Air'); }
   }
 
   // 3 + 4. Compactions and stops.
@@ -112,7 +131,7 @@ export async function dispatcherPass({ rec, rules, now, account, sessions, probe
     const sf = factDoc(rec, STOP_FACT(s.id));
     let pending = sf?.doc?.state === 'pending' ? sf.doc : null;
     if (!why && pending && pending.reason !== 'cancel') { putFact(rec, STOP_FACT(s.id), { ...pending, state: 'dropped', dropped_at: iso(now) }, 'stop_dropped'); pending = null; }
-    if (why && (!pending || (why === 'cancel' && pending.reason !== 'cancel'))) {
+    if (why && (!pending || RANK[why] > (RANK[pending.reason] ?? 0))) {
       pending = { state: 'pending', reason: why, card: s.card, since: iso(now) };
       putFact(rec, STOP_FACT(s.id), pending, 'stop_wanted');
     }
@@ -121,7 +140,11 @@ export async function dispatcherPass({ rec, rules, now, account, sessions, probe
     const late = now - Date.parse(pending.since) >= limit;
     if (!atSafePoint({ role: roleOf(s), size: p?.size, activity: p?.activity }) && !late) { out.stopping.push([s.id, pending.reason]); continue; }
     const stopped = await stopGroup(s);
-    if (!stopped?.ok) { alert(`session ${s.id} (card ${s.card}) could not be stopped: ${stopped?.reason ?? 'no answer'}`); out.stopping.push([s.id, pending.reason]); continue; }
+    if (!stopped?.ok) {
+      // One alert per wanted stop, not one per pass (audit MIN-4).
+      if (!pending.fail_alerted) { alert(`session ${s.id} (card ${s.card}) could not be stopped: ${stopped?.reason ?? 'no answer'}`); pending = { ...pending, fail_alerted: true }; putFact(rec, STOP_FACT(s.id), pending, 'stop_failed'); }
+      out.stopping.push([s.id, pending.reason]); continue;
+    }
     const saved = await saveWork(s);
     if (!saved?.ok) alert(`session ${s.id} stopped but its unsaved work was not saved: ${saved?.reason ?? 'no answer'}`);
     if (late) note(rec, `stop-note-${s.id}`, `session ${s.id} stopped without a safe point after ${Math.round((now - Date.parse(pending.since)) / 60_000)} min (${pending.reason})`, { now });
@@ -154,7 +177,8 @@ export async function dispatcherPass({ rec, rules, now, account, sessions, probe
 
   // 6. Starts.
   if (factDoc(rec, OUTAGE_FACT)?.doc?.state === 'open') { out.notes.push('outage: nothing starts'); }
-  else await starts({ rec, rules, now, b, running, launch, out });
+  else if (startsOff) { out.notes.push(`nothing starts: ${startsOff}`); }
+  else await starts({ rec, rules, now, b, running, launch, out, alert });
 
   // 7. Paused products: the Lead hands off once its workers are parked.
   for (const { id: product, doc } of rec.list('product')) {
@@ -166,23 +190,27 @@ export async function dispatcherPass({ rec, rules, now, account, sessions, probe
     putFact(rec, PAUSE_FACT(product), { state: 'asked', at: iso(now) }, 'pause_lead');
     out.notes.push(`Lead of ${product} asked to hand off`);
   }
-  return out;
+  // The tick's later steps (limits, merges) gate their starts on this pass's bands and sessions.
+  return { ...out, bands: b, running };
 }
 
 function moveAfterStop(rec, cardId, reason, now) {
   if (!cardId) return;
   if (reason === 'cancel') return move(rec, 'card', cardId, { stopped_at: iso(now) }, { now, kind: 'cancel_stopped' });
+  if (reason === 'card_ended') return move(rec, 'card', cardId, { stopped_at: iso(now) }, { now, kind: 'ended_stopped' });
   if (reason === 'needs_split') return waitOn(rec, cardId, { who: 'lead', what: 'needs_split', now, kind: 'needs_split' });
   if (reason === 'red') return waitOn(rec, cardId, { who: 'dispatcher', what: 'usage_band', now, kind: 'park_red' });
   return move(rec, 'card', cardId, { state: 'ready', parked_for: 'paused' }, { now, kind: 'park_paused' });
 }
 
-const tierOf = (c) => (c.tier === 1 ? 1 : 2);
+// Only an explicit Tier 2 is Tier 2 (audit MAT-3).
+const tierOf = (c) => (c.tier === 2 ? 2 : 1);
 const capRefusal = (r) => /cap|already runs|shares |runs alone/.test(r);
 
-async function starts({ rec, rules, now, b, running, launch, out }) {
+async function starts({ rec, rules, now, b, running, launch, out, alert }) {
   const amberish = b.band !== 'green' || b.own_building !== 'open';
-  const ready = rec.list('card').filter((c) => c.doc.state === 'ready');
+  // A card meant for the Lead to plan (for: 'lead') is never started as a worker (audit MAT-4).
+  const ready = rec.list('card').filter((c) => c.doc.state === 'ready' && c.doc.for !== 'lead');
   ready.sort((x, y) => (y.doc.queue === 'front') - (x.doc.queue === 'front')
     || (amberish ? tierOf(x.doc) - tierOf(y.doc) : 0)
     || String(x.doc.changed_at ?? '').localeCompare(String(y.doc.changed_at ?? '')) || x.id.localeCompare(y.id));
@@ -206,18 +234,13 @@ async function starts({ rec, rules, now, b, running, launch, out }) {
       refuse(`launcher: ${l?.reason ?? 'no answer'}`);
       continue;
     }
-    move(rec, 'card', id, { state: 'running', session: l.sessionId }, { now, kind: 'started' });
+    const started = move(rec, 'card', id, { state: 'running', session: l.sessionId }, { now, kind: 'started' });
+    // The launch record (R-0b-55, D12): the Merge Gate merges only a head made by a session it names
+    // (refusal 5). `head` is the commit the copy started from; `rev` the card's rev once running.
+    const lr = rec.write({ actor: 'dispatcher', entity: 'launch', id: l.sessionId, expectRev: rec.read('launch', l.sessionId)?.rev ?? 0, kind: 'launch',
+      doc: { session_id: l.sessionId, role: 'worker', kind, card: id, head: l.head ?? null, rev: started.rev ?? null, product: product ?? null, launched_at: iso(now) } });
+    if (!lr.ok) alert(`card ${id}: session ${l.sessionId} started but its launch was not recorded (${lr.reason}); its merge will be refused`);
     running.push({ id: l.sessionId, product, kind, card: id, pgid: l.pgid });
     out.started.push(id);
   }
-}
-
-/** The login job's entry: one pass under the single-instance lock (M16). */
-export async function runPass({ lockFile, lock = takePassLock, ...args }) {
-  const l = lock(lockFile, { now: args.now });
-  if (!l.ok) {
-    note(args.rec, 'pass-lock-note', `a pass did not run: ${l.reason}`, { now: args.now });
-    return { ran: false, reason: l.reason };
-  }
-  try { return { ran: true, ...(await dispatcherPass(args)) }; } finally { l.release(); }
 }
