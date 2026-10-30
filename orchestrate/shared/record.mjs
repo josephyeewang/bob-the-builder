@@ -1,0 +1,104 @@
+// record.mjs — the one interface every module uses to read and write M9 Record (the Work Store).
+//
+// WHY. The record holds every card, ask, claim, wait and fact for a product, and only the Store Writer
+// (orchestrate/modules/M9-record/) writes it (rails A1–A5). Plain Do-plane scripts call write() under their own
+// actor name; AI sessions never do — the Dispatcher hands their outbox files to applyOutbox() tagged with the
+// session's role. This file fixes the call shapes and the names (actors, entities, states) so every lane uses
+// the same ones. The real store plugs in through makeRecord(); a test uses memoryRecord().
+//
+//   const rec = makeRecord(impl);
+//   rec.read('card', 'C-12')                     // → { id, doc, rev } or null
+//   rec.list('card')                             // → [{ id, doc, rev }, …]
+//   rec.write({ actor: 'dispatcher', entity: 'card', id: 'C-12', expectRev: 3, doc, kind: 'claim' })
+//                                                // → { ok: true, rev, seq } or { ok: false, reason }
+//   rec.applyOutbox({ role: 'worker', sessionId: 'S-4', card: 'C-12' }, '/path/report-C-12.md')
+//                                                // → { ok: true, … } or { ok: false, reason }
+//   rec.diary({ since: 0 })                      // → diary lines, oldest first
+//
+// RULES EVERY IMPLEMENTATION KEEPS. Every write is "only if unchanged since read": expectRev is the rev the caller
+// read (0 to create). A mismatch is refused. Every accepted write appends exactly one diary line; a refused one
+// appends none. write() and applyOutbox() never throw: any failure is { ok: false, reason }.
+
+// Plain-script actors write under their own name; AI roles only through applyOutbox, as `<role>:<sessionId>`.
+export const SCRIPT_ACTORS = Object.freeze(['dispatcher', 'workshop', 'merge_gate', 'approvals', 'sensors', 'ledger',
+  'live_check', 'joe']);
+export const AI_ROLES = Object.freeze(['lead', 'worker', 'reviewer', 'auditor', 'incident', 'scout', 'writer',
+  'front_door', 'thinking', 'learning']);
+
+export const ENTITIES = Object.freeze(['card', 'ask', 'go', 'verdict', 'session', 'merge', 'claim', 'fact', 'product',
+  'handoff', 'report', 'lesson']);
+
+// State models (design v3 §2.4, v4 §8 A4–A5, D8). The moves between them are M9's; the names are here.
+export const STATES = Object.freeze({
+  card: ['draft', 'ready', 'claimed', 'running', 'in_review', 'verified', 'approved', 'merging', 'merged', 'closed',
+    'waiting', 'failed', 'cancelled', 'closed_no_answer', 'reverted'],
+  ask: ['open', 'pushed', 'answered', 'consumed', 'expired', 'withdrawn'],
+  session: ['preparing', 'running', 'waiting_input', 'waiting_limit', 'reporting', 'ended', 'stuck', 'retrying',
+    'quarantined', 'recycling'],
+  merge: ['requested', 'checking', 'merging', 'merged', 'audited_ok', 'audit_flagged', 'refused'],
+  product: ['light', 'active', 'away', 'paused'],
+});
+
+// A wait must say who and what it waits on, since when, and when it is next checked (A5).
+export const WAIT_FIELDS = Object.freeze(['who', 'what', 'since', 'next_check']);
+
+export function isActor(a) {
+  if (SCRIPT_ACTORS.includes(a)) return true;
+  const m = /^([a-z_]+):([A-Za-z0-9-]+)$/.exec(String(a));
+  return !!m && AI_ROLES.includes(m[1]);
+}
+
+function refused(reason) { return { ok: false, reason }; }
+
+// Wrap an implementation so bad arguments and thrown errors come back as a refusal, never an exception.
+export function makeRecord(impl) {
+  const guard = (fn) => { try { const r = fn(); return r && typeof r.ok === 'boolean' ? r : refused('record gave no valid answer'); } catch (e) { return refused(`record error: ${e.message}`); } };
+  return Object.freeze({
+    read(entity, id) { return ENTITIES.includes(entity) ? impl.read(entity, id) : null; },
+    list(entity) { return ENTITIES.includes(entity) ? impl.list(entity) : []; },
+    diary(opts = {}) { return impl.diary(opts); },
+    write(w) {
+      if (!w || !isActor(w.actor)) return refused(`unknown actor "${w?.actor}"`);
+      if (!SCRIPT_ACTORS.includes(w.actor)) return refused('AI roles write only through their outbox');
+      if (!ENTITIES.includes(w.entity)) return refused(`unknown entity "${w.entity}"`);
+      if (typeof w.id !== 'string' || !/^[A-Za-z0-9._-]+$/.test(w.id)) return refused('bad id');
+      if (!Number.isInteger(w.expectRev) || w.expectRev < 0) return refused('expectRev must be the rev read (0 to create)');
+      return guard(() => impl.write(w));
+    },
+    applyOutbox(tag, file) {
+      if (!tag || !AI_ROLES.includes(tag.role)) return refused(`unknown role "${tag?.role}"`);
+      if (typeof tag.sessionId !== 'string' || !tag.sessionId) return refused('outbox tag needs the session id');
+      return guard(() => impl.applyOutbox(tag, file));
+    },
+  });
+}
+
+// For other modules' tests: an in-memory record that keeps the rev check and the diary, and nothing else (no
+// state moves, no who-may-change-what — those are M9's real Store Writer). applyOutbox records the hand-in only.
+export function memoryRecord() {
+  const docs = new Map();
+  const lines = [];
+  const key = (e, id) => `${e}/${id}`;
+  const log = (actor, kind, entity, id, from, to, data) => {
+    const line = { seq: lines.length + 1, ts: new Date().toISOString(), actor, kind, entity, id, from_state: from ?? null, to_state: to ?? null, data: data ?? null };
+    lines.push(line);
+    return line.seq;
+  };
+  return makeRecord({
+    read(entity, id) { const d = docs.get(key(entity, id)); return d ? structuredClone(d) : null; },
+    list(entity) { return [...docs.values()].filter((d) => d.entity === entity).map((d) => structuredClone(d)); },
+    diary({ since = 0 } = {}) { return lines.filter((l) => l.seq > since).map((l) => ({ ...l })); },
+    write({ actor, entity, id, expectRev, doc, kind = 'write' }) {
+      const cur = docs.get(key(entity, id));
+      if ((cur?.rev ?? 0) !== expectRev) return refused(`changed since read (rev ${cur?.rev ?? 0}, expected ${expectRev})`);
+      const rev = expectRev + 1;
+      docs.set(key(entity, id), { entity, id, doc: structuredClone(doc), rev });
+      const seq = log(actor, kind, entity, id, cur?.doc?.state, doc?.state);
+      return { ok: true, rev, seq };
+    },
+    applyOutbox(tag, file) {
+      const seq = log(`${tag.role}:${tag.sessionId}`, 'outbox', 'report', String(file).split('/').pop(), null, null, { card: tag.card ?? null });
+      return { ok: true, seq };
+    },
+  });
+}
