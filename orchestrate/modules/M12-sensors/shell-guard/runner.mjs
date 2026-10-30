@@ -151,7 +151,11 @@ const BRACE_LISTS = new Set(['brace', 'inner-brace', 'last-brace', 'inner-last-b
 export const hostDead = (tpl, form) => (BRACE_LISTS.has(form) && !existsSync('/bin/zsh') && /> ?(\{\{UP\}\}\/)?\{\{(P|BASE)\}\}/.test(tpl))
   || (form === 'ansi-c' && !SH_ANSI_C && tpl.startsWith('sh -c'))
   || (form === 'globstar' && !existsSync('/bin/zsh'));
-const live = (tpl, form) => !(corpus.dead[tpl] ?? []).includes(form) && !hostDead(tpl, form);
+// And the other way: GNU sed -i goes on past a missing file, and GNU dd takes the last of=, so with the real name after
+// "nothing" in a brace list they touch the file on Linux though not on a Mac (round 12 fix, Linux CI).
+const GNU = spawnSync('sed', ['--version'], { encoding: 'utf8' }).status === 0;
+export const hostLive = (tpl, form) => GNU && /last-brace$/.test(form) && /^(sed -i|dd )/.test(tpl);
+const live = (tpl, form) => (!(corpus.dead[tpl] ?? []).includes(form) || hostLive(tpl, form)) && !hostDead(tpl, form);
 
 // The first folder (by name, not hidden) beside the file's folder that does not hold the file, or null (round 10 audit 10
 // minor 2).

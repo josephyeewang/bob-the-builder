@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { fileURLToPath } from 'node:url';
 import { existsSync, mkdirSync, realpathSync } from 'node:fs';
 import { basename, dirname, resolve } from 'node:path';
-import { corpus, cases, pathForms, askHook, runCorpus, hostDead, caselessAt } from './runner.mjs';
+import { corpus, cases, pathForms, askHook, runCorpus, hostDead, hostLive, caselessAt } from './runner.mjs';
 import { touchCheck } from './selfcheck.mjs';
 import { tempDir } from '../../../shared/test-tmp.mjs';
 
@@ -123,7 +123,7 @@ test('round 10: the ansi-c form reaches the command intact (a string replacement
 // pairs that touch nothing there, and they are left out of both sides here (round 10 audit 3 M-4).
 test('round 10: every refuse case touches the file, and corpus.dead is exactly the pairs that do not, on two names', () => {
   const shells = ['/bin/bash', '/bin/zsh'].filter((s) => existsSync(s));
-  const listed = Object.entries(corpus.dead).flatMap(([tpl, forms]) => forms.filter((form) => !hostDead(tpl, form)).map((form) => `${form} / ${tpl}`)).sort();
+  const listed = Object.entries(corpus.dead).flatMap(([tpl, forms]) => forms.filter((form) => !hostDead(tpl, form) && !hostLive(tpl, form)).map((form) => `${form} / ${tpl}`)).sort();
   assert.ok(listed.length > 0);
   const saved = corpus.dead; corpus.dead = {};
   try {
