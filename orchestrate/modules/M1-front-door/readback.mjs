@@ -10,18 +10,30 @@
 export const ALWAYS_TOLERATED = Object.freeze(['EndConversation']);
 export const SETTING_SOURCES = Object.freeze(['flag', 'managed']);
 
-const list = (v) => (Array.isArray(v) ? v.map((x) => (typeof x === 'string' ? x : x?.name)).filter((x) => typeof x === 'string') : null);
+// An entry that is not a name (a string, or an object with a string name) makes the whole list unreadable, never
+// silently dropped (0b-8 audit round 2 M-4).
+const name = (x) => (typeof x === 'string' ? x : typeof x?.name === 'string' ? x.name : null);
+const list = (v) => (Array.isArray(v) && v.every((x) => name(x) !== null) ? v.map(name) : null);
 const same = (a, b) => JSON.stringify([...a].sort()) === JSON.stringify([...b].sort());
 
+// The reply's one read-back object: exactly one top-level {...} in it that parses as JSON (a ```json fence is fine).
+// Two objects (say "expected" and "actual") or none → null, never a guess at which one (round 2 minor 11).
+const topLevelSpans = (s) => {
+  const spans = []; let depth = 0; let start = -1; let inStr = false; let esc = false;
+  for (let k = 0; k < s.length; k++) {
+    const c = s[k];
+    if (inStr) { if (esc) esc = false; else if (c === '\\') esc = true; else if (c === '"') inStr = false; continue; }
+    if (c === '"' && depth > 0) inStr = true;
+    else if (c === '{') { if (depth++ === 0) start = k; }
+    else if (c === '}' && depth > 0 && --depth === 0) spans.push(s.slice(start, k + 1));
+  }
+  return spans;
+};
 export function extractReadback(reply) {
   if (reply && typeof reply === 'object') return reply;
-  const s = String(reply ?? '');
-  for (let i = s.indexOf('{'); i >= 0; i = s.indexOf('{', i + 1)) {
-    for (let j = s.lastIndexOf('}'); j > i; j = s.lastIndexOf('}', j - 1)) {
-      try { const o = JSON.parse(s.slice(i, j + 1)); if (o && typeof o === 'object' && !Array.isArray(o)) return o; } catch { /* keep looking */ }
-    }
-  }
-  return null;
+  const parse = (t) => { try { const o = JSON.parse(t); return o && typeof o === 'object' && !Array.isArray(o) ? o : null; } catch { return null; } };
+  const objs = topLevelSpans(String(reply ?? '')).map(parse).filter(Boolean);
+  return objs.length === 1 ? objs[0] : null;
 }
 
 export function checkPhoneReadback(reply, profile) {
@@ -30,14 +42,14 @@ export function checkPhoneReadback(reply, profile) {
   if (!r) return { ok: false, problems: ['no read-back object in the reply'] };
   const problems = [];
   const tools = list(r.tools);
-  if (!tools) problems.push('tools: missing');
+  if (!tools) problems.push('tools: missing or unreadable');
   else if (!same(tools.filter((t) => !ALWAYS_TOLERATED.includes(t)), profile.tools)) problems.push(`tools differ: got ${tools.join(', ')}; role has ${profile.tools.join(', ')}`);
   const skills = list(r.skills);
-  if (!skills) problems.push('skills: missing');
+  if (!skills) problems.push('skills: missing or unreadable');
   else if (!same(skills, profile.skills ?? [])) problems.push(`skills differ: got ${skills.join(', ') || 'none'}; role has ${(profile.skills ?? []).join(', ')}`);
   for (const k of ['mcp_servers', 'plugins', 'connectors']) {
     const v = list(r[k]);
-    if (!v) problems.push(`${k}: missing (an empty list is required, not an absent one)`);
+    if (!v) problems.push(`${k}: missing or unreadable (an empty list of names is required)`);
     else if (v.length) problems.push(`${k} loaded: ${v.join(', ')}`);
   }
   const src = list(r.setting_sources);

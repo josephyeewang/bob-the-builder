@@ -22,8 +22,10 @@ R-0b-82's decision and handoff code sit here although the row is tagged M11 (lan
 
 - **250k** is the launch compaction limit, owned by lane 2's launcher and the role profile; it fires whether or not a
   question is open. Nothing here restarts at 250k.
-- **Quiet** counts from Joe's last turn: a typed message or a question-box answer. Lines the Dispatcher types (always
-  starting `[watchdog]`), relays and injected notices don't count. **Question open** means a question box in the Front
+- **Quiet** counts from Joe's last timed turn: a typed message, an image or document he sent, a message he queued
+  while a turn ran, or a question-box answer (a declined box too). Lines the Dispatcher types (always starting
+  `[watchdog]`), a box "answered" by such a line, relays, side threads and injected notices don't count. If his newest
+  turn has no time, there is no restart. **Question open** means a question box in the Front
   Door's own log with no answer carrying its call ID; open asks in the record don't count.
 - **The handoff** is text only, masked and fenced, oldest turns cut first, Joe's newest turn last. Lane 2 delivers it.
 - **Merge hours** are the Merge Gate's to enforce. The brief states them only for products on the Merge Gate.

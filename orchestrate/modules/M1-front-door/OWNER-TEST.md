@@ -63,3 +63,17 @@ Claude records each result as the second ledger line for its row (README). Use t
   boxes. Tap each one from the phone.
 - Claude runs `checkTapTest` on each session's log: three answers, each matched to its question's call ID, with the
   time. A line the Dispatcher types can't count as an answer.
+- **For each box, the phone shows a notification.** Say so to Claude for each one.
+
+## 8a. The thinking session passes the same phone test (R-0b-84)
+
+- Repeat steps 1, 2 and 5 against the thinking session instead of the Front Door: reach it from the phone, ask it for
+  its read-back (Claude checks it with `readback.mjs` against the **thinking** role profile), and reach it again
+  after a Mini restart.
+
+## 8b. Typed keys can't answer a question box (R-0b-84, MAT-11; needs lane 2's Dispatcher)
+
+- With a question box open in the Front Door and not tapped, Claude has the Dispatcher send one line to it.
+- **You should see:** the box still open on the phone. Claude checks the log: no answer for that box's call ID, or an
+  answer `checkTapTest` reports as "typed automated text, not a tap". Then tap the box from the phone; it now passes.
+- Lane 2's Dispatcher must not type into a session while `openQuestions(log)` lists a box (join item).

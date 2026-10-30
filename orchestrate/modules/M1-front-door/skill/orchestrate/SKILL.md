@@ -38,9 +38,13 @@ Reply: "X is paused. Only your tap brings it back."
    `{"product":"X","state":"away","until":"<date as YYYY-MM-DD, or null>","tz":"<time zone, or null>"}`
 2. Time zone: ask once with a question box: "Which time zone will you be in? A city, such as Europe/Prague." Use the
    city-based name (Region/City, or UTC). If the answer is ambiguous (EST, "Pacific", GMT+2), ask once more. Until he
-   answers, write `"tz":null`: number work holds while tz is null; [Undo] still runs.
-3. Read the trip brief file named in your context and quote it in your reply as it is. It lists what waits on his go,
-   the open risky-act asks with links, the Mini check and the Air's health check. Don't add to it or soften it.
+   answers, write `"tz":null`: number work holds while tz is null; [Undo] still runs. After he answers, write a new
+   `state-<id>.json` for each product, the same as step 1 but with the time zone.
+3. Read the trip brief file named in your context. Its first line says when it was made and "good until" a time.
+   If the current time is past that, or the brief names other products, another until date or another time zone than
+   this request, don't quote it: say "Mini check: unknown (the brief is out of date); ask me again in a few minutes."
+   Otherwise quote it in your reply as it is. It lists what waits on his go, the open risky-act asks with links, the
+   Mini check and the Air's health check. Don't add to it or soften it.
 4. Only if Joe says the Mini will be turned off, the brief's freeze wording applies; otherwise don't mention it.
 Never write `"state":"active"`. A date passing does not bring anything back; only Joe's tap does.
 

@@ -10,7 +10,7 @@
 // not a question is open. Nothing here restarts at 250k.
 
 import { joeTurns, joeTurnsWithReplies, lastTurnFinished, openQuestions } from './transcript.mjs';
-import { cleanOutside } from '../M12-sensors/escape.mjs';
+import { stripControls, cleanOutside } from '../M12-sensors/escape.mjs';
 import { makeMasker } from '../M12-sensors/mask.mjs';
 
 const { maskSecrets } = makeMasker();
@@ -27,8 +27,11 @@ export function shouldRestartFrontDoor({ sizeTokens, entries, now = () => new Da
   if (sizeTokens <= RESTART_TOKENS) return no(`size ${sizeTokens} is not past ${RESTART_TOKENS}`);
   if (openQuestions(entries).length) return no('question open; compaction at 250k is the launcher\'s');
   if (!lastTurnFinished(entries)) return no('the last turn has not finished');
-  // The latest timed turn of Joe's; session start only when none has a time (0b-8 audit round 1, minor 10).
-  const timed = joeTurns(entries).map((t) => t.at).filter(Number.isFinite);
+  // The latest timed turn of Joe's; session start only when none has a time (0b-8 audit round 1, minor 10). If his
+  // newest turn has no time, quiet can't be measured from it: no restart (round 2 minor 1).
+  const all = joeTurns(entries);
+  if (all.length && !Number.isFinite(all.at(-1).at)) return no('Joe\'s newest turn has no time');
+  const timed = all.map((t) => t.at).filter(Number.isFinite);
   const last = timed.length ? Math.max(...timed) : (startedAt ? Date.parse(startedAt) : null);
   if (!Number.isFinite(last)) return no('no turn of Joe\'s to measure quiet from');
   const quiet = (now().getTime() - last) / 60e3;
@@ -42,7 +45,7 @@ export function makeFrontDoorHandoff({ entries, openAsks = [], strikes = 0, rere
   const clean = (s) => cleanOutside(String(s ?? ''), 'front-door-turn');
   const turns = joeTurnsWithReplies(entries).slice(-LAST_TURNS);
   // ids, links and paths come from the record and config: masked (never fenced, they are not prose); text is fenced.
-  const m = (v) => maskSecrets(String(v ?? '')).text;
+  const m = (v) => maskSecrets(stripControls(String(v ?? ''))).text;
   const asks = openAsks.map((a) => `- ${m(a.id)}: ${cleanOutside(String(a.what ?? ''), 'record-ask')}${a.link ? ` (${m(a.link)})` : ''}`);
 
   const render = (ts, askLines, dropped, askMore) => [

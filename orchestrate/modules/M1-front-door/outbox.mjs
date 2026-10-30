@@ -22,7 +22,9 @@ export const STATES_ALLOWED = Object.freeze(['paused', 'away']);
 export const REQUESTS = Object.freeze(['resume', 'wrapup', 'rotate']);
 const ID = /^[A-Za-z0-9-]{1,64}$/;
 const PRODUCT = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/;
-const KEY_NAME = /^[A-Z][A-Z0-9_]{1,63}$/;
+// A key's NAME: capitals with an underscore (STRIPE_KEY), never a key-ID shape (round 2 minor 6: AKIA…).
+const KEY_NAME = /^[A-Z][A-Z0-9]*_[A-Z0-9_]{1,62}$/;
+const KEY_ID = /^(?:AKIA|ASIA|AGPA|AIDA|AROA|ANPA|ANVA|AIPA)[A-Z0-9]{12,}$/;
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}(T[\d:.]+(Z|[+-]\d{2}:\d{2})?)?$/;
 const refuse = (reason) => ({ ok: false, reason });
 const { maskSecrets } = makeMasker();
@@ -38,7 +40,7 @@ export function stateDoc({ product, state, until = null, tz = null }) {
 export function requestDoc({ request, product = null, name = null }) {
   if (!REQUESTS.includes(request)) return refuse(`unknown request (allowed: ${REQUESTS.join(', ')})`);
   if (product !== null && !PRODUCT.test(String(product))) return refuse('no valid product name');
-  if (request === 'rotate' && !KEY_NAME.test(String(name ?? ''))) return refuse('rotate needs the key\'s name only (capitals, digits, _)');
+  if (request === 'rotate' && (!KEY_NAME.test(String(name ?? '')) || KEY_ID.test(String(name)))) return refuse('rotate needs the key\'s name only (capitals, digits, _)');
   if (request !== 'rotate' && name !== null) return refuse('only rotate carries a name');
   return { ok: true, doc: { request, product, name } };
 }
@@ -70,12 +72,16 @@ export function checkOutboxFile(name, text) {
     return { ok: true, kind, doc: { quoted: maskSecrets(String(text)).text } };
   }
   if (ext !== 'json') return refuse(`a ${kind} file is .json`);
+  // The skill never writes an escape; one can hide a key from the text check below (0b-8 audit round 2 M-2).
+  if (/\\u/i.test(String(text))) return refuse('the file holds an escape (\\u); write plain text');
   let doc; try { doc = JSON.parse(text); } catch { return refuse('not JSON'); }
   if (!doc || typeof doc !== 'object' || Array.isArray(doc)) return refuse('not an object');
   const allowed = kind === 'state' ? ['product', 'state', 'until', 'tz'] : ['request', 'product', 'name'];
   const extra = Object.keys(doc).filter((k) => !allowed.includes(k));
   if (extra.length) return refuse(`${extra.length} unexpected field(s); allowed: ${allowed.join(", ")}`);
   if (maskSecrets(String(text)).text !== String(text)) return refuse('the file holds something that looks like a key');
+  // And on the parsed values, which are what gets stored.
+  if (Object.values(doc).some((v) => typeof v === 'string' && maskSecrets(v).text !== v)) return refuse('the file holds something that looks like a key');
   const r = kind === 'state' ? stateDoc(doc) : requestDoc(doc);
   if (!r.ok) return r;
   if (kind === 'request' && !name.startsWith(`request-${r.doc.request}-`)) return refuse('file name and request differ');

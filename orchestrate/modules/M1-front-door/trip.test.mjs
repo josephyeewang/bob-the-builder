@@ -72,7 +72,7 @@ test('R-0b-83 brief: away line, time zone question, go items and risky asks with
   assert.match(text, /test-product, second set to away until 2026-11-07/);
   assert.match(text, /Which time zone will you be in\?.*number work holds; \[Undo\] still runs/);
   assert.match(text, /second still merges the way you run it today; the hours rule starts at the second cutover/);
-  assert.match(text, /Waiting on your go \(1\):\n- go-1: .*go on roadmap row 7.*\(https:\/\/example.invalid\/roadmap#row-7\)/);
+  assert.match(text, /Waiting on your go \(1\):\n- go go-1: .*go on roadmap row 7.*\(https:\/\/example.invalid\/roadmap#row-7\)/);
   assert.match(text, /Open risky-act asks \(2\); they still expire after 12 h/);
   assert.match(text, /ask-1: .*\(https:\/\/example.invalid\/pr\/9\)/);
   assert.match(text, /ask-3: .*RECORD ERROR: no pull request link/);

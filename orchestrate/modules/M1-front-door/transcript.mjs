@@ -9,13 +9,16 @@
 //   turn finished    the last conversation entry is the assistant's, and every tool call it made has a result.
 //
 // Log format as Claude Code wrote it on 29 Oct 2026 (CLI 2.1.309): entries {type: 'user'|'assistant', uuid,
-// timestamp, isMeta?, message: {content: string | blocks}}, blocks {type: 'text'|'tool_use'|'tool_result'}
-// (Principle 9: a format note; re-check on a CLI upgrade, the tests' fixtures follow it).
+// timestamp, isMeta?, isSidechain?, message: {content: string | blocks}}, blocks {type: 'text'|'image'|'document'|
+// 'tool_use'|'tool_result'}. A message Joe types while a turn runs may be logged only as {type: 'attachment',
+// attachment: {type: 'queued_command', prompt, timestamp?, origin: {kind: 'human'|'task-notification'|'peer'…}}}
+// (0b-8 audit round 2 M-1). Principle 9: a format note; re-check on a CLI upgrade, the tests' fixtures follow it.
 
 export const QUESTION_TOOL = 'AskUserQuestion';
 export const AUTOMATED_PREFIXES = Object.freeze(['[watchdog]', '[relay]', '[dispatcher]']);
 // Text Claude Code itself injects as a "user" entry: command output and notices, never Joe typing.
-const INJECTED = /^\s*<(local-command-stdout|local-command-stderr|task-notification|system-reminder|bash-stdout|bash-stderr)\b/;
+const INJECTED = /^\s*<(local-command-stdout|local-command-stderr|task-notification|system-reminder|bash-stdout|bash-stderr|cross-session-message|artifact-content-authored-by-others)\b/;
+export const INTERRUPTED = /^\s*\[Request interrupted by user/;
 
 export function parseLog(text) {
   const out = [];
@@ -31,7 +34,17 @@ const blocks = (e) => {
   if (typeof c === 'string') return [{ type: 'text', text: c }];
   return Array.isArray(c) ? c.filter((b) => b && typeof b === 'object') : [];
 };
-const isTurn = (e) => (e?.type === 'user' || e?.type === 'assistant') && !e.isMeta && !e.isCompactSummary;
+const isTurn = (e) => (e?.type === 'user' || e?.type === 'assistant') && !e.isMeta && !e.isCompactSummary && !e.isSidechain;
+// A message Joe queued while a turn ran (M-1): only a human origin; notices and other sessions' messages are not his.
+const queued = (e) => {
+  const a = e?.type === 'attachment' ? e.attachment : null;
+  if (!a || a.type !== 'queued_command' || e.isSidechain) return null;
+  if (!(a.origin?.kind === 'human' || (a.origin === undefined && a.humanTurn === true))) return null;
+  const text = typeof a.prompt === 'string' ? a.prompt : blocks({ message: { content: a.prompt } }).map((b) => b.text ?? '').join('\n');
+  return { text, at: Number.isFinite(Date.parse(a.timestamp)) ? Date.parse(a.timestamp) : at(e) };
+};
+// Drop repeated entries (the same uuid twice), keeping the first (round 2 minor 4).
+const unique = (entries) => { const seen = new Set(); return entries.filter((e) => !e?.uuid || (seen.has(e.uuid) ? false : seen.add(e.uuid))); };
 const at = (e) => { const t = Date.parse(e?.timestamp); return Number.isFinite(t) ? t : null; };
 export const textOf = (e) => blocks(e).filter((b) => b.type === 'text').map((b) => String(b.text ?? '')).join('\n');
 
@@ -43,41 +56,50 @@ export function isAutomated(text) {
 // Every question box in the log, each with its answer (the tool result with the same ID) or null.
 export function questionBoxes(entries) {
   const boxes = new Map();
-  for (const e of entries) {
+  for (const e of unique(entries)) {
     if (!isTurn(e)) continue;
     for (const b of blocks(e)) {
-      if (e.type === 'assistant' && b.type === 'tool_use' && b.name === QUESTION_TOOL && b.id) {
+      if (e.type === 'assistant' && b.type === 'tool_use' && b.name === QUESTION_TOOL && b.id && !boxes.has(b.id)) {
         boxes.set(b.id, { callId: b.id, askedAt: at(e), askedEntry: e.uuid ?? null, answer: null });
       }
       if (e.type === 'user' && b.type === 'tool_result' && boxes.has(b.tool_use_id) && !boxes.get(b.tool_use_id).answer) {
-        boxes.get(b.tool_use_id).answer = { at: at(e), entry: e.uuid ?? null, isError: b.is_error === true };
+        boxes.get(b.tool_use_id).answer = { at: at(e), entry: e.uuid ?? null, isError: b.is_error === true, automated: AUTOMATED_PREFIXES.some((p) => resultText(b).toLowerCase().includes(p)) };
       }
     }
   }
   return [...boxes.values()];
 }
 
+const resultText = (b) => (typeof b.content === 'string' ? b.content : blocks({ message: { content: b.content } }).map((x) => x.text ?? '').join(' '));
+
 // Joe's turns, oldest first: { at, kind: 'typed'|'answer'|'declined', text, index }. Anything Joe might have done counts
 // (0b-8 audit round 1, M-1): an image with no text, a question box he declined or interrupted (its result is an error;
 // counting a tool failure too only delays a restart), and his text after an injected block in the same entry.
+// A box answer holding an automated prefix ("[watchdog]…") is typed keys landing in the box, not Joe (M-7): not his.
+// A message queued while a turn ran counts (M-1); so does any block he sent that isn't a tool's result (a PDF too).
 export function joeTurns(entries) {
   const boxIds = new Set(questionBoxes(entries).map((q) => q.callId));
   const out = [];
+  const seen = new Set();
   entries.forEach((e, index) => {
+    if (e?.uuid) { if (seen.has(e.uuid)) return; seen.add(e.uuid); }
+    const q = queued(e);
+    if (q) { if (q.text.trim() && !isAutomated(q.text) && !INJECTED.test(q.text)) out.push({ at: q.at, kind: 'typed', text: q.text, index }); return; }
     if (!isTurn(e) || e.type !== 'user') return;
     const bs = blocks(e);
     const answers = bs.filter((b) => b.type === 'tool_result' && boxIds.has(b.tool_use_id));
     if (answers.length) {
-      const text = answers.map((b) => (typeof b.content === 'string' ? b.content : blocks({ message: { content: b.content } }).map((x) => x.text ?? '').join(' '))).join('\n');
+      const text = answers.map(resultText).join('\n');
+      if (AUTOMATED_PREFIXES.some((p) => text.toLowerCase().includes(p))) return;
       out.push({ at: at(e), kind: answers.every((b) => b.is_error === true) ? 'declined' : 'answer', text, index });
       return;
     }
     if (bs.some((b) => b.type === 'tool_result')) return; // a tool's own result
-    const own = bs.filter((b) => (b.type === 'text' && String(b.text ?? '').trim() && !INJECTED.test(String(b.text))) || b.type === 'image');
+    const own = bs.filter((b) => (b.type === 'text' ? String(b.text ?? '').trim() && !INJECTED.test(String(b.text)) : b.type !== 'tool_use'));
     if (!own.length) return;
     const first = own.find((b) => b.type === 'text');
     if (first && isAutomated(first.text)) return;
-    const text = own.map((b) => (b.type === 'image' ? '[image]' : String(b.text))).join('\n');
+    const text = own.map((b) => (b.type === 'text' ? String(b.text) : `[${String(b.type).replace(/[^a-z_]/g, '')}]`)).join('\n');
     out.push({ at: at(e), kind: 'typed', text, index });
   });
   return out;
@@ -96,6 +118,8 @@ export function joeTurnsWithReplies(entries) {
 export function lastTurnFinished(entries) {
   const turns = entries.filter(isTurn);
   const last = turns.at(-1);
+  // Joe pressing Esc ends the turn: Claude Code logs the interrupt line and runs nothing more (round 2 minor 3).
+  if (last?.type === 'user' && INTERRUPTED.test(textOf(last))) return true;
   if (!last || last.type !== 'assistant') return false;
   if (last.message?.stop_reason === 'tool_use') return false;
   const results = new Set();
@@ -108,10 +132,11 @@ export const openQuestions = (entries) => questionBoxes(entries).filter((q) => !
 // R-0b-84's checker: at least `expect` question boxes, each answered by a tool result carrying its own call ID.
 export function checkTapTest(entries, { expect = 3 } = {}) {
   const boxes = questionBoxes(entries);
-  const answered = boxes.filter((q) => q.answer && !q.answer.isError);
+  const answered = boxes.filter((q) => q.answer && !q.answer.isError && !q.answer.automated);
   const problems = [];
   if (boxes.length < expect) problems.push(`only ${boxes.length} question boxes in the log, ${expect} expected`);
   for (const q of boxes) if (!q.answer) problems.push(`question box ${q.callId} has no answer with its ID`);
   for (const q of boxes) if (q.answer?.isError) problems.push(`question box ${q.callId} ended in an error, not an answer`);
+  for (const q of boxes) if (q.answer?.automated) problems.push(`question box ${q.callId} was answered by typed automated text, not a tap`);
   return { ok: problems.length === 0 && answered.length >= expect, boxes: answered.map((q) => ({ callId: q.callId, askedAt: q.askedAt, answeredAt: q.answer.at, answerEntry: q.answer.entry })), problems };
 }

@@ -12,14 +12,19 @@
 import { cleanOutside } from '../M12-sensors/escape.mjs';
 import { POWER_FACT } from '../M12-sensors/power-source.mjs';
 import { STATUS_FACT } from '../M13-ledger/heartbeat.mjs';
+import { waitingItems } from '../M13-ledger/waiting.mjs';
+import { checkTimeZone } from './timezone.mjs';
 
 export const FRESH_MIN = 60;
 export const AIR_FACT = 'air-health';
 export const AIR_TOLD_FRESH_H = 24;
 export const MERGE_HOURS = '07:00–22:00';
+// The brief is a file a Ledger pass writes; the skill quotes it only while it is this fresh (0b-8 audit round 2 M-5).
+export const BRIEF_FRESH_MIN = 15;
 const OPEN_ASK = ['open', 'pushed'];
 
-const ageMin = (iso, now) => { const t = Date.parse(iso ?? ''); return Number.isFinite(t) ? (now - t) / 60e3 : Infinity; };
+// A time in the future is a wrong clock: unknown, never fresh (round 2 minor 8).
+const ageMin = (iso, now) => { const t = Date.parse(iso ?? ''); const a = Number.isFinite(t) ? (now - t) / 60e3 : Infinity; return a < -5 ? Infinity : Math.max(a, 0); };
 
 export function miniCheck({ facts, heartbeatProduct, now = () => new Date() }) {
   const t = now().getTime();
@@ -50,8 +55,12 @@ export function airCheck({ facts, now = () => new Date() }) {
 
 // products: [{ name, on_merge_gate }]. tz: a checked IANA name or null. askExpiryH: from the rules (risky asks keep
 // their own time limit while away).
-export function buildTripBrief({ products, until = null, tz = null, rec, facts, heartbeatProduct, miniGoingOff = false, askExpiryH = 12, now = () => new Date() }) {
+export function buildTripBrief({ products, until = null, tz: tzIn = null, rec, facts, heartbeatProduct, miniGoingOff = false, askExpiryH = 12, now = () => new Date() }) {
   const out = [];
+  const made = now();
+  const z = tzIn === null ? null : checkTimeZone(tzIn);
+  const tz = z?.ok ? z.tz : null; // a zone that fails the check is no zone: number work holds (round 2 minor 9)
+  out.push(`Brief made ${made.toISOString()}; good until ${new Date(made.getTime() + BRIEF_FRESH_MIN * 60e3).toISOString()}.`);
   out.push(`Trip mode: ${products.map((p) => p.name).join(', ') || 'no products'} set to away${until ? ` until ${until}` : ''}. Only your tap brings a product back to active.`);
 
   out.push('', 'Time zone:');
@@ -61,12 +70,20 @@ export function buildTripBrief({ products, until = null, tz = null, rec, facts, 
     else if (tz) out.push(`- ${p.name}: number work merges only ${MERGE_HOURS} ${tz}; a go you don't answer holds; [Undo] still runs.`);
   }
 
-  const goes = rec.list('go').filter(({ doc }) => doc && (doc.state === 'waiting' || doc.wait));
+  // M13's one waiting list (card, ask, go, merge, claim), only what waits on Joe (round 2 M-3, minor 12); an item with a
+  // record error is shown, since it might be his. Risky asks have their own section below.
   const asks = rec.list('ask').filter(({ doc }) => doc && OPEN_ASK.includes(doc.state));
-  const link = (doc, what) => (doc.link ? doc.link : `RECORD ERROR: no ${what} link in the record`);
-  out.push('', `Waiting on your go (${goes.length}):`);
-  for (const { id, doc } of goes) out.push(`- ${id}: ${cleanOutside(String(doc.wait?.what ?? doc.what ?? ''), 'record-ask')} (${link(doc, 'roadmap row')})`);
-  if (!goes.length) out.push('- none');
+  const askIds = new Set(asks.map((a) => a.id));
+  let goes; let listError = null;
+  try { goes = waitingItems(rec).filter((i) => (i.record_error || String(i.who ?? '').toLowerCase() === 'joe') && !(i.entity === 'ask' && askIds.has(i.id))); } catch { goes = []; listError = 'RECORD ERROR: the waiting list could not be read'; }
+  const link = (doc, what) => (doc?.link ? doc.link : `RECORD ERROR: no ${what} link in the record`);
+  out.push('', `Waiting on your go (${listError ? 'unknown' : goes.length}):`);
+  if (listError) out.push(`- ${listError}`);
+  for (const i of goes) {
+    const doc = rec.read(i.entity, i.id)?.doc;
+    out.push(`- ${i.entity} ${i.id}: ${i.record_error ?? cleanOutside(String(i.what ?? ''), 'record-ask')} (${link(doc, i.entity === 'go' ? 'roadmap row' : 'record')})`);
+  }
+  if (!goes.length && !listError) out.push('- none');
   out.push('', `Open risky-act asks (${asks.length}); they still expire after ${askExpiryH} h while you are away:`);
   for (const { id, doc } of asks) out.push(`- ${id}: ${cleanOutside(String(doc.what ?? doc.wait?.what ?? ''), 'record-ask')} (${link(doc, 'pull request')})`);
   if (!asks.length) out.push('- none');
