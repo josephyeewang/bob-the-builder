@@ -1,3 +1,43 @@
 # M9-record
 
-See LANES.md for who builds this folder, and the build rows for what.
+M9 Record is the one place a product's cards, asks, claims, waits and facts live, and the Store Writer is the one thing that writes it. Every other module reads and writes through `orchestrate/shared/record.mjs` (see `shared/README.md`); `openRecord()` here is what stands behind that interface in production.
+
+See LANES.md for who builds this folder, and the build rows (0b-2, R-0b-20..28) for what.
+
+## The files
+
+| File | What it does |
+|---|---|
+| `writer.mjs` | The Store Writer. `openRecord({ root, product, ownerUid, rules, alert, outbox })` checks every write against the rev read, the legal moves, who may change which fields, and each move's conditions (the ready rule, a passing verdict for the current head, a full wait, one merge at a time, the round cap). Refused writes go to `refusals.jsonl` with an alert and leave no diary line. Also: the outbox, claims (release, dead-owner break, lapse), the ready list and overdue. |
+| `store.mjs` | The files on disk: one diary line per write (`diary.jsonl`, the truth), one file per document, a lock. Folders 755, files 644, and it runs only as the store's owner. A document changed by hand is quarantined, restored from the diary and alerted. `recover()` after a crash cuts a torn last diary line and rolls each document forward. |
+| `lock.mjs` | The store lock, and the one "is this process dead?" check: gone means no such process, or a different start time (a reused pid). A process of another user counts as alive. |
+| `moves.mjs` | Every legal state move and who may make it. Anything not listed is refused. |
+| `permissions.mjs` | Who may create each entity and change which fields; which card kinds each creator may make. |
+| `ready.mjs` | The one ready rule, used by both the move into `ready` and the ready list. |
+| `outbox.mjs` | Reads an AI session's outbox file as hostile: no links, one name, the role's owner, 256 KB at most, a kind its role may send. |
+| `*.test.mjs` | The tests. `*.test-helper.mjs` are shared set-up, not tests. |
+
+## Claims
+
+A claim is a field on its card: set by `ready → claimed`, cleared when the card leaves claimed and running. A session's claim ends by a release from its holder, a lapse (claimed for longer than the card's `claimed` time limit), or a dead-owner break. A break needs all three of: the process gone, its session ended or gone, and no activity for `claims.stuck_min` minutes. If half or more of this Mac's claims look dead at once, none is broken (an outage) and Joe gets one alert. A claim from another Mac is never broken from this one. A tab's claim is never broken; it lapses when its heartbeat is older than `proposals.heartbeat_stale_min` or at the running limit.
+
+## Why our own store, not Claude Code's task list
+
+Claude Code has a native task list. We checked whether it could hold the claims: tests 3 (a claim on a stale read is refused), 4 (eight processes race, one wins) and 9 (a dead owner's claim is broken) cannot be expressed in it, so they were not run against it. Checked on Claude Code 2.1.312, 29 Oct 2026; this note is void at its next release, so check again then. Until it can, the claims stay in this store.
+
+## What the tests cover, and what they don't
+
+- **A kill is not a power cut.** The crash tests kill the writer with SIGKILL at every step of a write. On macOS, `fsync` doesn't force the disk's own cache to the platter (that needs `F_FULLFSYNC`), so a power cut could still lose the last write. Not tested.
+- **The nightly copy of the diary is not built yet.** When it is, it must mask anything private before it copies.
+- **The ready rule's dependency behaviour** is our own, written to behave like BMAD's (a cycle is refused, a missing dependency blocks, a dependency that will never merge waits on Joe). No upstream source was available to port.
+- **Joe's step:** in production the store's owner is a separate Mac user, and AI sessions write their outbox as Joe's user. The tests run as one user, so "a write as Joe's user fails" is tested by giving the writer a different owner uid. That the real other user gets "permission denied" is a check Joe runs once on the Mac.
+
+## Running the tests
+
+Plain Node, no packages:
+
+```bash
+node --test orchestrate/modules/M9-record/*.test.mjs
+```
+
+The pair walk in `moves.test.mjs` and the 8-process race take about a minute together.
