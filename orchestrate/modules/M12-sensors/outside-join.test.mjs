@@ -18,18 +18,19 @@ const fakeGit = (subject) => (args) => {
 test('R-0b-126: every kind the row names has an instruction-shaped planted case, all sources known', () => {
   for (const s of JOIN_SOURCES) {
     assert.ok(SOURCES.includes(s), s);
-    assert.ok(joinCases([s]).some((c) => c.instruction && c.text.includes(c.instruction)), s);
+    assert.ok(joinCases([s]).some((c) => c.instruction && [c.instruction].flat().every((i) => c.text.includes(i))), s);
   }
   for (const c of joinCases()) assert.equal(cleanOutside(c.text, c.source), c.expect, c.source);
 });
 
 test('R-0b-126: M12 and M13\'s own paths (commit subject, idea issue) land in the record in the exact fenced form', async () => {
   const commits = await checkOutsideJoin(({ text }) => ({ record: JSON.stringify(makeHistory({ git: fakeGit(text) }).historyFile()) }),
-    ['commit-subject']);
+    { sources: ['commit-subject'], where: ['record'] });
   assert.deepEqual(commits, []);
   // Planted failure: the same path with fencing switched off is caught.
   assert.notDeepEqual(await checkOutsideJoin(({ text }) =>
-    ({ record: JSON.stringify(makeHistory({ git: fakeGit(text), prepare: (s) => s }).historyFile()) }), ['commit-subject']), []);
+    ({ record: JSON.stringify(makeHistory({ git: fakeGit(text), prepare: (s) => s }).historyFile()) }),
+    { sources: ['commit-subject'], where: ['record'] }), []);
   const rec = memoryRecord();
   let n = 0;
   const ideas = await checkOutsideJoin(async ({ text }) => {
@@ -37,7 +38,7 @@ test('R-0b-126: M12 and M13\'s own paths (commit subject, idea issue) land in th
     const writer = makeFactWriter(rec, { actor: 'ledger' });
     await intakeIdeas({ gh: { listIdeaIssues: async () => [{ number: n, title: 'idea', body: text, user: { id: 7 } }] }, writer, ownerId: '7' });
     return { record: JSON.stringify(rec.read('fact', `idea-issue-${n}`)) };
-  }, ['idea-issue']);
+  }, { sources: ['idea-issue'], where: ['record'] });
   assert.deepEqual(ideas, []);
 });
 
@@ -50,15 +51,47 @@ test('R-0b-126: the join check passes a path that fences once, in a JSON record 
 });
 
 test('R-0b-126: the join check fails each wrong path: raw, unmasked, cleaned twice, or a raw copy beside the fence', async () => {
-  const whys = async (land) => new Set((await checkOutsideJoin(land)).map((m) => `${m.where}: ${m.why}`));
-  assert.ok((await whys(({ text }) => ({ leadInput: text }))).has('leadInput: the instruction appears outside a fence'));
-  assert.ok((await whys(({ text }) => ({ leadInput: text }))).has('leadInput: the exact fenced form is missing'));
-  assert.ok((await whys(({ source, text }) => ({ record: escapeOutside(text, source) }))).has('record: a planted fake key survived'));
-  assert.ok((await whys(({ source, text }) => ({ record: cleanOutside(cleanOutside(text, source), source) })))
+  const whys = async (land, opts) => new Set((await checkOutsideJoin(land, opts)).map((m) => `${m.where}: ${m.why}`));
+  const R = { where: ['record'] }; const L = { where: ['leadInput'] };
+  assert.ok((await whys(({ text }) => ({ leadInput: text }), L)).has('leadInput: outside text appears outside its exact fence'));
+  assert.ok((await whys(({ text }) => ({ leadInput: text }), L)).has('leadInput: the exact fenced form is missing'));
+  assert.ok((await whys(({ source, text }) => ({ record: escapeOutside(text, source) }), R)).has('record: a planted fake key survived'));
+  assert.ok((await whys(({ source, text }) => ({ record: cleanOutside(cleanOutside(text, source), source) }), R))
     .has('record: the exact fenced form is missing'));
-  const beside = await whys(({ source, text }) => ({ leadInput: `${cleanOutside(text, source)}\n(raw: ${text})` }));
-  assert.ok(beside.has('leadInput: the instruction appears outside a fence'));
+  const beside = await whys(({ source, text }) => ({ leadInput: `${cleanOutside(text, source)}\n(raw: ${text})` }), L);
+  assert.ok(beside.has('leadInput: outside text appears outside its exact fence'));
   assert.ok(beside.has('leadInput: a planted fake key survived'));
-  // A lane that writes only one of the two is checked on that one alone.
-  assert.deepEqual(await checkOutsideJoin(({ source, text }) => ({ record: cleanOutside(text, source) })), []);
+  // A lane that writes only one of the two names it in `where`; by default both are required.
+  assert.deepEqual(await checkOutsideJoin(({ source, text }) => ({ record: cleanOutside(text, source) }), R), []);
+  assert.ok((await whys(({ source, text }) => ({ record: cleanOutside(text, source) }))).has('leadInput: nothing written (not a string)'));
+});
+
+test('R-0b-126 audit round 1 M-1: a raw copy in a fence the lane wrote, after the breakout, re-cased or re-wrapped, is caught for every kind', async () => {
+  const fake = (source, text) => `<outside-text source="${source}">${text}</outside-text>`;
+  const lands = {
+    'own fence': ({ source, text }) => `${cleanOutside(text, source)}\n${fake(source, text)}`,
+    'after the breakout': ({ source, text }) => `${cleanOutside(text, source)}\n${text.split('</outside-text>').slice(1).join('') || text}`,
+    're-cased': ({ source, text }) => `${cleanOutside(text, source)}\n${text.toUpperCase()}`,
+    're-wrapped': ({ source, text }) => `${cleanOutside(text, source)}\n${text.split(' ').join('\n  ')}`,
+    'raw inside JSON twice': ({ source, text }) => JSON.stringify(JSON.stringify({ a: cleanOutside(text, source), b: text })),
+  };
+  for (const [name, f] of Object.entries(lands)) {
+    for (const s of JOIN_SOURCES) {
+      const m = await checkOutsideJoin((x) => ({ leadInput: f(x) }), { sources: [s], where: ['leadInput'] });
+      assert.ok(m.some((x) => x.why === 'outside text appears outside its exact fence'), `${name} / ${s}`);
+    }
+  }
+});
+
+test('R-0b-126 audit round 1 M-2: checking nothing never passes', async () => {
+  for (const land of [() => ({}), () => undefined, ({ text }) => ({ lead_input: text }), ({ source, text }) => ({ record: { body: cleanOutside(text, source) } })]) {
+    assert.equal((await checkOutsideJoin(land)).length, joinCases().length * 2);
+  }
+  for (const sources of [[], ['lesson'], 'research-file']) await assert.rejects(checkOutsideJoin(() => ({}), { sources }), /non-empty list/);
+  for (const where of [[], ['lead_input']]) await assert.rejects(checkOutsideJoin(() => ({}), { where }), /non-empty list/);
+});
+
+test('R-0b-126 audit round 1 minor 2: a document stringified twice, with the fence inside, passes', async () => {
+  assert.deepEqual(await checkOutsideJoin(({ source, text }) => ({ record: JSON.stringify(JSON.stringify({ body: cleanOutside(text, source) })) }),
+    { where: ['record'] }), []);
 });

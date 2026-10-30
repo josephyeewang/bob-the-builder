@@ -35,8 +35,12 @@ heartbeat says "usage: unknown" until it is).
 
 - R-0b-126: every other path that hands outside text to an AI calls `cleanOutside` once, at its write, and runs
   `checkOutsideJoin` in its own tests with its real path as `land`:
-  - lane 2's outbox intake and lane 1's Store Writer, for lesson- and idea- files into the record;
-  - the lead's Lead-input writer (M3), for research files and the record's text, into the Lead's input file.
+  - lane 2's outbox intake and lane 1's Store Writer, for lesson- and idea- files into the record:
+    `{ sources: ['lesson-file', 'idea-file'], where: ['record'] }`;
+  - the lead's Lead-input writer (M3), for research files and the record's text, into the Lead's input file: all five
+    sources, `where: ['leadInput']` (or both, when one path writes both).
+
+  An empty or misspelled list throws, and an output named in `where` but not handed back is a miss.
 
   Until each passes, R-0b-126 is "half: intake wiring pending". The other half, "the Lead takes no action on it", is
   R-0b-148's.
@@ -46,6 +50,9 @@ heartbeat says "usage: unknown" until it is).
   path; every miss goes to lane 2. The hook runs from that folder with `CLAUDE_PROJECT_DIR` set, as in Claude Code;
   only each case's `cwd` changes. Each run also tries the absolute form and "change folder, then use the short name"
   (asked from the folder above). A path with a space is refused. Until both runs are green, R-0b-70 is pending.
+- Lead call L35: a waiting item that waits on the product's owner says `wait.who: 'owner'` (the trip brief lists only
+  those). No writer on main sets `wait.who` yet; the record's actor name `joe` (shared/record.mjs) is a different field.
+  Pinning the allowed `who` values in shared/record.mjs is the lead's call.
 - Lead call L25: any lane that writes a fact through `facts.mjs` adds its kind to `fact-shapes.mjs` (ask lane 3);
   without a shape every field but `kind` and `ts` is masked.
 - Lead call L3 (lane 2's contract): the Sensors' loop runs `readStartGate` for each product at least every
