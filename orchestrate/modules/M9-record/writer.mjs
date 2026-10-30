@@ -25,6 +25,9 @@ import { processDead, realProbe } from './lock.mjs';
 import { openStore } from './store.mjs';
 
 const MIN = 60000;
+// The fewest dead-looking claims that count as an outage (lead call L43): one or two dead claims are broken one by one,
+// so a Mac with two claims can still break its one dead one.
+const OUTAGE_MIN = 3;
 const HEX40 = /^[0-9a-f]{40}$/;
 const KIND = /^[a-z_]{1,40}$/;
 const same = (a, b) => { try { return canonicalJson(a ?? null) === canonicalJson(b ?? null); } catch { return false; } };
@@ -530,7 +533,7 @@ export function openRecord({ root, product, ownerUid, rules, alert = () => {}, n
 
   function breakIfDead({ card } = {}, p = probe) {
     try {
-      return store.transaction((tx) => {
+      const out = store.transaction((tx) => {
         const c = tx.current('card', card);
         if (!c || c.tampered) return no(c?.reason ?? `no card ${card}`);
         if (c.doc.state !== 'claimed' && c.doc.state !== 'running') return no(`card ${card} is ${c.doc.state}; only a claimed or running card's claim is broken`);
@@ -542,11 +545,12 @@ export function openRecord({ root, product, ownerUid, rules, alert = () => {}, n
         const nowMs = now();
         const mine = deadness(tx, claim, p, nowMs, stuckMin);
         if (!mine.dead) return no(`owner not provably dead (${mine.why})`);
-        // An outage: half or more of this Mac's session claims look dead at once. Break none (M-5 item 3).
+        // An outage: at least OUTAGE_MIN of this Mac's session claims look dead at once, and they are half or more. Break
+        // none (M-5 item 3). Below that, each dead claim is broken on its own, with an alert (lead call L43).
         const board = tx.list('card').filter((e) => (e.doc.state === 'claimed' || e.doc.state === 'running') && e.doc.claim?.kind === 'session' && e.doc.claim.host === host);
-        if (board.length >= 2) {
+        if (board.length >= OUTAGE_MIN) {
           const dead = board.filter((e) => deadness(tx, e.doc.claim, p, nowMs, stuckMin).dead).length;
-          if (dead * 2 >= board.length) {
+          if (dead >= OUTAGE_MIN && dead * 2 >= board.length) {
             // One alert per Mac per day, not one per card per pass (L38; 0b-2 audit MIN-1).
             const key = `alert:claims_outage:${host}:${iso(nowMs).slice(0, 10)}`;
             if (!tx.seen(key)) { store.alert({ type: 'claims_outage', dead, of: board.length }); tx.markSeen(key, 'alerted'); }
@@ -554,8 +558,12 @@ export function openRecord({ root, product, ownerUid, rules, alert = () => {}, n
           }
         }
         const r = endClaim(tx, c, 'ready', 'claim_break', { session_id: claim.session_id, pid: claim.pid, why: mine.why });
-        return { ok: true, rev: r.rev, seq: r.seq };
+        return { ok: true, rev: r.rev, seq: r.seq, broke: { session_id: claim.session_id, why: mine.why } };
       });
+      // Each break is told to the owner, once the write is down (L43).
+      if (!out.ok) return out;
+      store.alert({ type: 'claim_broken', card, session_id: out.broke.session_id, why: out.broke.why });
+      return { ok: true, rev: out.rev, seq: out.seq };
     } catch (e) { return no(`store error: ${String(e?.message ?? e).slice(0, 200)}`); }
   }
 

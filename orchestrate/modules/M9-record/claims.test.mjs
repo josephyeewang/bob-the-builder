@@ -274,12 +274,12 @@ test('G1: no session record, another host, or no stuck_min in the rules: nothing
   assert.match(env.record.breakIfDead({ card: 'C-9' }).reason, /no card C-9/);
 });
 
-test('G1 outage: when half or more of this Mac\'s claims look dead at once, none is broken', () => {
+test('G1 outage: when 3 or more of this Mac\'s claims look dead and they are half or more, none is broken (L43)', () => {
   const ids = ['C-1', 'C-2', 'C-3', 'C-4'];
-  const make = (deadPids) => {
+  const make = (deadPids, list = ids) => {
     const env = setup({ prefix: 'm9-g1-', probe: fakeProbe({ dead: deadPids }) });
-    board(env, ids);
-    ids.forEach((id, i) => { runCard(env, id, sessionClaim({ session_id: `S-${i}`, pid: 100 + i })); session(env, `S-${i}`, { state: 'ended', pid: 100 + i, ago: 600 }); });
+    board(env, list);
+    list.forEach((id, i) => { runCard(env, id, sessionClaim({ session_id: `S-${i}`, pid: 100 + i })); session(env, `S-${i}`, { state: 'ended', pid: 100 + i, ago: 600 }); });
     return env;
   };
   const three = make([100, 101, 102]);
@@ -293,10 +293,28 @@ test('G1 outage: when half or more of this Mac\'s claims look dead at once, none
   three.clock.t += 24 * 60 * 60000;
   three.record.breakIfDead({ card: 'C-1' });
   assert.equal(three.alerts.filter((a) => a.type === 'claims_outage').length, 2);
+  // Fewer than 3 dead: each is broken on its own, with one alert per break (L43).
   const two = make([100, 101]);
-  assert.match(two.record.breakIfDead({ card: 'C-1' }).reason, /2 of 4/);
+  must(two.record.breakIfDead({ card: 'C-1' }), 'two of four dead: each is broken');
+  must(two.record.breakIfDead({ card: 'C-2' }), 'two of four dead: each is broken');
+  assert.deepEqual(two.alerts.filter((a) => a.type === 'claim_broken').map((a) => a.card), ['C-1', 'C-2']);
+  assert.equal(two.alerts.filter((a) => a.type === 'claims_outage').length, 0);
   const one = make([100]);
   must(one.record.breakIfDead({ card: 'C-1' }), 'one of four is broken');
+  // The two-claim Mac with one dead claim (the round 1 gap): broken, and alerted.
+  const pair = make([100], ['C-1', 'C-2']);
+  must(pair.record.breakIfDead({ card: 'C-1' }), 'one of two is broken');
+  assert.equal(pair.record.read('card', 'C-1').doc.state, 'ready');
+  assert.ok(pair.alerts.some((a) => a.type === 'claim_broken' && a.card === 'C-1' && a.session_id === 'S-0'));
+  // Both of two dead is under 3: each broken.
+  const both = make([100, 101], ['C-1', 'C-2']);
+  must(both.record.breakIfDead({ card: 'C-1' }), 'two of two dead is under the outage floor');
+  // 3 of 6 is half: an outage. 3 of 7 is under half: broken.
+  const six = ['C-1', 'C-2', 'C-3', 'C-4', 'C-5', 'C-6'];
+  assert.match(make([100, 101, 102], six).record.breakIfDead({ card: 'C-1' }).reason, /3 of 6 claims look dead at once; none is broken/);
+  must(make([100, 101, 102], [...six, 'C-7']).record.breakIfDead({ card: 'C-1' }), '3 of 7 is under half');
+  // A refused break raises no break alert.
+  assert.ok(!three.alerts.some((a) => a.type === 'claim_broken'));
 });
 
 test('a tab claim is never broken; it lapses when its heartbeat goes stale or at the running limit', () => {

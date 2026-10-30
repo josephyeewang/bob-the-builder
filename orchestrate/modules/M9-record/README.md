@@ -19,7 +19,7 @@ See LANES.md for who builds this folder, and the build rows (0b-2, R-0b-20..28) 
 
 ## Claims
 
-A claim is a field on its card: set by `ready → claimed`, cleared when the card leaves claimed and running. A session's claim ends by a release from its holder, a lapse (claimed for longer than the card's `claimed` time limit), or a dead-owner break. A break needs all three of: the process gone, its session ended or gone, and no activity for `claims.stuck_min` minutes. If half or more of this Mac's claims look dead at once, none is broken (an outage) and the owner gets one alert. A claim from another Mac is never broken from this one. A tab's claim is never broken; it lapses when its heartbeat is older than `proposals.heartbeat_stale_min` or at the running limit.
+A claim is a field on its card: set by `ready → claimed`, cleared when the card leaves claimed and running. A session's claim ends by a release from its holder, a lapse (claimed for longer than the card's `claimed` time limit), or a dead-owner break. A break needs all three of: the process gone, its session ended or gone, and no activity for `claims.stuck_min` minutes. If three or more of this Mac's claims look dead at once and they are half or more, none is broken (an outage) and the owner gets one alert a day. Below that, each dead claim is broken on its own and each break is alerted (lead call L43). A claim from another Mac is never broken from this one. A tab's claim is never broken; it lapses when its heartbeat is older than `proposals.heartbeat_stale_min` or at the running limit.
 
 ## Why our own store, not Claude Code's task list
 
@@ -36,7 +36,7 @@ Claude Code has a native task list. We checked whether it could hold the claims:
 
 - **A crash between applying an outbox file and marking it seen.** On restart the file is applied again: a hand-in is refused (and logged as a refusal it isn't), a verdict is stored twice. Both are harmless to the card's state; one write for both would close it.
 - **`merged → reverted` has no evidence check yet.** The reversing merge is the Merge Gate's to name (0b-9).
-- **Two claims, one dead.** The outage rule (half or more dead) stops a two-claim Mac from breaking its one dead claim on its own. That is a lead call to make, not a bug.
+- ~~**Two claims, one dead.**~~ Closed by lead call L43: an outage needs at least three dead-looking claims, so a two-claim Mac breaks its one dead claim.
 - **The outage raises an alert, not an ask.** Only `approvals` writes asks; the alert goes out on the owner's push path once a day (L38).
 
 ## Known gaps (audit round 2, logged, not fixed here)
@@ -87,6 +87,11 @@ Round 11 fixed: the round-10 one-name rule wrongly caught the lock, which is mad
 
 - **A worker can hand in a reviewer's verdict (a lead call, outside L42's scope).** Every AI role writes its outbox as the same everyday Mac user, so "owned by the role's user" can't tell a worker from a reviewer. A worker that writes a passing verdict into a reviewer's outbox folder gets its own card verified. The fix is either one Mac user per role, or the Dispatcher taking verdicts only from a folder that the reviewer alone can write.
 - **An unreadable `docs/<entity>` folder alerts once per document in it**, not once per folder.
+
+## Known gaps (lead call L43, logged, not fixed here)
+
+- **A kill between a claim break and its alert** leaves the break in the diary (a `claim_break` line) with no alert sent; the card is already back to ready, so nothing retries it. Same window as any crash; the outage alert has a seen mark, the per-break alert doesn't.
+- **A Mac with one or two claims breaks them all after a reboot**, since that is under the outage floor of three. That is what L43 asks for.
 
 ## Running the tests
 
