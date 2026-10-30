@@ -52,7 +52,7 @@ export class ActivityTracker {
     this.store = store;
     this.notify = notify;
     this.now = now;
-    // id -> { inflight: Map<toolUseId, toolName>, blockedCandidate, degraded, openAsks }
+    // id -> { inflight: Map<toolUseId, toolName>, blockedCandidate, degraded } (open questions live on the record)
     this.flights = new Map();
   }
 
@@ -66,7 +66,7 @@ export class ActivityTracker {
     if (!s.event) return isSticky(cur) ? suppressed : s;
     let fl = this.flights.get(id);
     const ensure = () => {
-      if (!fl) { fl = { inflight: new Map(), blockedCandidate: '', degraded: false, openAsks: [] }; this.flights.set(id, fl); }
+      if (!fl) { fl = { inflight: new Map(), blockedCandidate: '', degraded: false }; this.flights.set(id, fl); }
       return fl;
     };
 
@@ -85,20 +85,27 @@ export class ActivityTracker {
     // escalation to blocked, a real prompt from the person or the session's end may move the
     // state. Idle notifications, stops and helper traffic never do.
     // Every open question is remembered (audit round 2 MAT-1): two boxes can be open at once.
-    // A question with no id is kept as '*' and is ended only by an answer with no id.
-    if (s.event === 'ask-user-question-open') { const f = ensure(); (f.openAsks ??= []).push(s.toolUseId || '*'); }
-    if (fl?.openAsks?.length && s.event !== 'ask-user-question-open') {
+    // A question with no id is kept as '*' and is ended only by an answer with no id. The list
+    // is kept on the stored record, not only in memory (audit round 3 MAT-1), so a restarted
+    // tracker still knows it; a record that says "question" with no list counts as one question
+    // nobody can name ('?'), which only a real prompt or the session's end clears.
+    const rec = this.store.get(id) ?? {};
+    const asks = Array.isArray(rec.openAsks) ? [...rec.openAsks] : (rec.activity?.reason === 'question' ? ['?'] : []);
+    const keep = (list) => { const r = this.store.get(id); if (r) this.store.set(id, { ...r, openAsks: list }); };
+    if (s.event === 'ask-user-question-open') { asks.push(s.toolUseId || '*'); keep(asks); }
+    if (asks.length && s.event !== 'ask-user-question-open') {
       const realPrompt = s.event === 'user-prompt-submit' && !isWatchdogText(s.prompt);
       const ends = s.state === State.EXITED;
       if (s.event === 'ask-user-question-answered') {
-        const i = fl.openAsks.indexOf(s.toolUseId || '*');
+        const i = asks.indexOf(s.toolUseId || '*');
         if (i < 0) return suppressed; // not a question we know is open: stay waiting
-        fl.openAsks.splice(i, 1);
-        if (fl.openAsks.length) return suppressed; // another box is still on screen
+        asks.splice(i, 1);
+        keep(asks);
+        if (asks.length) return suppressed; // another box is still on screen
         if (cur === State.BLOCKED) return suppressed; // the other dialog is still showing
         return s;
       }
-      if (realPrompt || ends) { this.flights.delete(id); return s; }
+      if (realPrompt || ends) { keep([]); this.flights.delete(id); return s; }
       if (s.state !== State.BLOCKED) {
         // The blocking tool's own post ends that dialog, but the question is still open.
         if (cur === State.BLOCKED && isPostToolUseEvent(s.event) && fl.blockedCandidate && s.toolUseId === fl.blockedCandidate) {
@@ -161,7 +168,7 @@ export class ActivityTracker {
     const rec = this.store.get(id);
     if (!rec || typeof launchId !== 'string' || !launchId) return false;
     this.flights.delete(id);
-    this.store.set(id, { ...rec, launchId, firstSignalAt: null, activity: { state: State.ACTIVE, at: this.now() } });
+    this.store.set(id, { ...rec, launchId, firstSignalAt: null, openAsks: [], activity: { state: State.ACTIVE, at: this.now() } });
     return true;
   }
 
@@ -178,12 +185,13 @@ export class ActivityTracker {
       && !(s.event === 'user-prompt-submit' && !isWatchdogText(s.prompt))) return;
     if (s.valid) s = this.applyToolPrecedence(id, rec.activity.state, s);
     if (!s.valid) return;
+    const now = this.store.get(id) ?? rec; // precedence may have stored the open questions
     const at = s.at ?? this.now();
     const prev = rec.activity.state;
     // A same-state repeat after the first signal is not a write.
     if (prev === s.state && (rec.activity.reason ?? null) === (s.reason ?? null) && rec.firstSignalAt) return;
     // `reason: 'question'` marks a wait on an open AskUserQuestion (nudgeUrgent never types into it).
-    const next = { ...rec, activity: { state: s.state, at, ...(s.reason ? { reason: s.reason } : {}) } };
+    const next = { ...now, activity: { state: s.state, at, ...(s.reason ? { reason: s.reason } : {}) } };
     if (!next.firstSignalAt) next.firstSignalAt = at;
     if (s.state === State.EXITED) this.flights.delete(id); // no correlation survives an exit
     this.store.set(id, next);

@@ -394,3 +394,95 @@ test('a late hook from a stopped launch never moves the restarted session (audit
   assert.equal(store.get('L').firstSignalAt, 8);
   assert.equal(store.get('L').activity.state, State.IDLE);
 });
+
+// ---- audit rounds 2 and 3: one test per safety line that a planted bug could break ----
+
+function trackRig(start = State.ACTIVE) {
+  const store = new MemoryStore();
+  let t = new ActivityTracker(store);
+  store.set('S', { id: 'S', activity: { state: start, at: 0 }, firstSignalAt: 1 });
+  const hook = (e, p = {}) => { const s = signalFromHook(e, p); if (s) t.applySignal('S', s); };
+  const sent = [];
+  const guard = new Guard({ store: { getSession: (id) => store.get(id) }, messenger: { send: async (i, x) => sent.push(x) } });
+  return { store, hook, raw: (s) => t.applySignal('S', s), restart: () => { t = new ActivityTracker(store); }, tracker: () => t, sent, guard };
+}
+async function nothingTyped(r, what) {
+  assert.notEqual((await sendSafe(r.guard, 'S', 'WRAP')).outcome, Outcome.SENT, `${what}: sendSafe typed`);
+  assert.notEqual((await r.guard.nudgeUrgent('S', 'WRAP', { acceptsWaitingInput: () => true })).outcome, Outcome.SENT, `${what}: urgent nudge typed`);
+  assert.equal(r.sent.length, 0, what);
+}
+const askQ = (r, id = 'q1') => r.hook('pre-tool-use', { tool_name: 'AskUserQuestion', tool_use_id: id });
+const ansQ = (r, id = 'q1') => r.hook('post-tool-use', { tool_name: 'AskUserQuestion', tool_use_id: id });
+const idleNote = (r) => r.hook('notification', { notification_type: 'idle_prompt' });
+const blockOn = (r, id = 'b1') => { r.hook('pre-tool-use', { tool_name: 'Bash', tool_use_id: id }); r.hook('permission-request', { tool_name: 'Bash' }); };
+
+test('a question answered while a dialog is still open leaves the session blocked (A3)', async () => {
+  const r = trackRig(); blockOn(r); askQ(r); ansQ(r); idleNote(r);
+  assert.equal(r.store.get('S').activity.state, State.BLOCKED);
+  await nothingTyped(r, 'A3');
+});
+
+test('a helper tool finishing does not turn a dialog into a question wait (A6)', async () => {
+  const r = trackRig(); blockOn(r); askQ(r);
+  r.hook('pre-tool-use', { tool_name: 'Read', tool_use_id: 'h1' }); r.hook('post-tool-use', { tool_name: 'Read', tool_use_id: 'h1' });
+  ansQ(r); idleNote(r);
+  assert.equal(r.store.get('S').activity.state, State.BLOCKED);
+  await nothingTyped(r, 'A6');
+});
+
+test('after the blocking tool posts, the open question still refuses an urgent nudge (A8)', async () => {
+  const r = trackRig(); blockOn(r); askQ(r);
+  r.hook('post-tool-use', { tool_name: 'Bash', tool_use_id: 'b1' });
+  assert.deepEqual(r.store.get('S').activity.state, State.WAITING_INPUT);
+  assert.equal(r.store.get('S').activity.reason, 'question');
+  await nothingTyped(r, 'A8');
+});
+
+test('a question opened during another wait keeps its reason (A11)', async () => {
+  const r = trackRig(); r.hook('notification', { notification_type: 'agent_needs_input' }); askQ(r); r.hook('stop');
+  assert.equal(r.store.get('S').activity.reason, 'question');
+  await nothingTyped(r, 'A11');
+});
+
+test('after the in-flight cap resets, the old blocking tool is not named (D3)', async () => {
+  const { MAX_INFLIGHT_TOOLS } = await import('./activity.mjs');
+  const r = trackRig(); blockOn(r, 'A');
+  for (let i = 0; i < MAX_INFLIGHT_TOOLS + 1; i += 1) r.hook('pre-tool-use', { tool_name: 'Read', tool_use_id: `r${i}` });
+  r.hook('post-tool-use', { tool_name: 'Bash', tool_use_id: 'A' });
+  r.hook('notification', { notification_type: 'agent_completed' });
+  assert.equal(r.store.get('S').activity.state, State.BLOCKED);
+  await nothingTyped(r, 'D3');
+});
+
+test('an unknown event tag never lifts a block; an exit drops every in-flight record (B3, E3)', async () => {
+  const r = trackRig(); blockOn(r);
+  r.raw({ valid: true, state: State.ACTIVE, event: 'mystery' });
+  assert.equal(r.store.get('S').activity.state, State.BLOCKED);
+  await nothingTyped(r, 'B3');
+  r.hook('session-end', { reason: 'logout' });
+  assert.equal(r.store.get('S').activity.state, State.EXITED);
+  assert.equal(r.tracker().flights.has('S'), false);
+});
+
+test('a restarted tracker still knows every open question (audit round 3 MAT-1)', async () => {
+  // Two boxes, restart, one answered, idle notice: the other box is still open.
+  const two = trackRig(); askQ(two, 'q1'); askQ(two, 'q2'); two.restart(); ansQ(two, 'q1'); idleNote(two);
+  assert.equal(two.store.get('S').activity.state, State.WAITING_INPUT);
+  await nothingTyped(two, 'two boxes');
+  // One box, restart, a stop: still open.
+  const one = trackRig(); askQ(one); one.restart(); one.hook('stop'); idleNote(one);
+  assert.equal(one.store.get('S').activity.state, State.WAITING_INPUT);
+  await nothingTyped(one, 'one box');
+  // A record that says "question" but has no list (written before the list existed): only a
+  // real prompt clears it, never an answer we cannot match, a stop or an idle notice.
+  const old = trackRig();
+  old.store.set('S', { id: 'S', activity: { state: State.WAITING_INPUT, at: 0, reason: 'question' }, firstSignalAt: 1 });
+  ansQ(old, 'q9'); old.hook('stop'); idleNote(old);
+  assert.equal(old.store.get('S').activity.state, State.WAITING_INPUT);
+  await nothingTyped(old, 'no list');
+  old.hook('user-prompt-submit', { prompt: 'here is my answer' });
+  assert.equal(old.store.get('S').activity.state, State.ACTIVE);
+  // Answering all of them after a restart moves on.
+  const done = trackRig(); askQ(done, 'q1'); askQ(done, 'q2'); done.restart(); ansQ(done, 'q1'); ansQ(done, 'q2');
+  assert.notEqual(done.store.get('S').activity.state, State.WAITING_INPUT);
+});

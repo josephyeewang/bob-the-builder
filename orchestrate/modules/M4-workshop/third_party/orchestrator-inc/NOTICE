@@ -24,7 +24,9 @@ Main changes from the original:
   - the input lease may be async, and a refused, failed or odd lease means nothing is typed;
   - tmux text and Enter go in one call, and text ending in ";" is refused;
   - kept from upstream: late signals after the session ended are dropped unless a real prompt
-    restarts it, and hooks from a stopped launch (or naming none) are dropped once a restart
-    gives the session a new launch id;
+    restarts it;
+  - ported in part: the launch-id check. The tracker drops hooks from another launch once a
+    record carries a launch id; giving each launch an id and passing it to the hooks is not
+    built yet;
   - not ported: the mutation-fence and unsent-draft variants, and the
     adapters for other agents.
