@@ -4,15 +4,15 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync, mkdirSync, rmSync, symlinkSync, readFileSync, existsSync, renameSync, chmodSync, copyFileSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, mkdirSync, rmSync, symlinkSync, readFileSync, existsSync, renameSync, chmodSync, copyFileSync, linkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname, delimiter } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { gitOk, git, initMirror, callLog } from './safe-git.mjs';
 import { createPushScript, readBundleHeader, githubUrl } from './push.mjs';
 import { refusedPath } from './push-refusals.mjs';
-import { DO_PLANE_TOML, scanSecrets } from './gitleaks.mjs';
-import { startGate, factId, FACT1_MAX_AGE_MS, VERCEL_FACT_MAX_AGE_MS } from './start-gate.mjs';
+import { DO_PLANE_TOML, RULES_VERSION, scanSecrets } from './gitleaks.mjs';
+import { startGate, factId } from './start-gate.mjs';
 import { memoryRecord } from '../../../shared/record.mjs';
 import { fakeRules, allow, deny } from '../../../shared/rules.mjs';
 
@@ -25,8 +25,13 @@ const REPO = 'owner/test-repo';
 const ALNUM = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
 const fakeSecret = () => `ghp_${[...randomBytes(36)].map((b) => ALNUM[b % ALNUM.length]).join('')}`;
 
-const realGitleaks = (() => {
-  for (const d of (process.env.PATH ?? '').split(delimiter)) { const p = join(d, 'gitleaks'); if (d && existsSync(p)) return p; }
+// The real scanner, only when it is the pinned version (the vendored rules are that version's).
+const realGitleaks = await (async () => {
+  for (const d of (process.env.PATH ?? '').split(delimiter)) {
+    const p = join(d, 'gitleaks');
+    if (!d || !existsSync(p)) continue;
+    try { return (await import('node:child_process')).execFileSync(p, ['version'], { encoding: 'utf8' }).includes(RULES_VERSION) ? p : null; } catch { return null; }
+  }
   return null;
 })();
 
@@ -38,19 +43,21 @@ function makeFakeScanner(dir) {
   writeFileSync(bin, `#!${process.execPath}
 const fs = require('fs'); const a = process.argv.slice(2);
 const mode = fs.readFileSync(${JSON.stringify(mode)}, 'utf8').trim();
-if (a[0] === 'version') { console.log(mode === 'wrongversion' ? '1.0.0' : '9.9.9'); process.exit(0); }
+if (a[0] === 'version') { console.log(mode === 'wrongversion' ? '1.0.0' : '8.30.1'); process.exit(0); }
 const at = (f) => a[a.indexOf(f) + 1];
 if (at('--config') !== ${JSON.stringify(join(dir, 'do-plane.toml'))} || at('--gitleaks-ignore-path') !== ${JSON.stringify(join(dir, 'empty-ignore'))} || !a.includes('--ignore-gitleaks-allow')) process.exit(7);
 if (Object.keys(process.env).some((k) => k.startsWith('GITLEAKS'))) process.exit(8);
 fs.appendFileSync(${JSON.stringify(join(dir, 'calls'))}, a[0] + '\\n');
 if (mode === 'crash') process.exit(2);
-fs.writeFileSync(at('--report-path'), mode === 'leak' ? JSON.stringify([{ RuleID: 'fake-rule', File: 'x.txt' }]) : '[]');
+if (mode === 'noreport') process.exit(0);
+if (mode === 'stdinquit' && a[0] === 'stdin') process.exit(3);
+fs.writeFileSync(at('--report-path'), mode === 'leak' ? JSON.stringify([{ RuleID: 'fake-rule', File: 'x.txt' }]) : mode === 'badreport' ? 'not json' : '[]');
 process.exit(mode === 'leak' ? 1 : 0);
 `);
   chmodSync(bin, 0o755);
   writeFileSync(join(dir, 'do-plane.toml'), DO_PLANE_TOML);
   writeFileSync(join(dir, 'empty-ignore'), '');
-  return { setup: { bin, version: '9.9.9', config: join(dir, 'do-plane.toml'), ignoreFile: join(dir, 'empty-ignore') }, setMode: (m) => writeFileSync(mode, m), calls: () => (existsSync(join(dir, 'calls')) ? readFileSync(join(dir, 'calls'), 'utf8') : '') };
+  return { setup: { bin, version: '8.30.1', config: join(dir, 'do-plane.toml'), ignoreFile: join(dir, 'empty-ignore') }, setMode: (m) => writeFileSync(mode, m), calls: () => (existsSync(join(dir, 'calls')) ? readFileSync(join(dir, 'calls'), 'utf8') : '') };
 }
 
 // Positive control for the bypass cases: real gitleaks run the careless way (the branch's own
@@ -160,7 +167,7 @@ test('all good: pushes exactly refs/heads/<branch>, opens the PR, moves the mirr
   assert.equal(w.record.read('fact', 'push.C-1.a1').doc.result, 'pushed');
   assert.ok(!JSON.stringify(callLog).includes('robot-key-for-test'), 'the key appeared in a logged command');
   assert.ok(!callLog.some((c) => c.args.some((a) => /^\+/.test(a) && a.includes('card/'))), 'a forced push spec was used');
-  assert.match(w.fake.calls(), /git\nstdin/);
+  assert.match(w.fake.calls(), /git\ndir\nstdin/);
   const holding = await git(['rev-parse', '--verify', 'refs/orchestrate/incoming/C-1/a1'], { gitDir: w.mirror });
   assert.notEqual(holding.code, 0, 'the holding ref was left behind');
 });
@@ -302,8 +309,24 @@ test('a bundle swapped after the private copy is taken: the copy is what gets pu
   assert.match(await w.ghRefs(), new RegExp(`refs/heads/card/c-1 ${good}`));
 });
 
+test('a bundle swapped right after the private copy is taken, before any check: the copy is what gets checked and pushed', async () => {
+  const w = await world();
+  await w.commit('good', (c) => writeFileSync(join(c, 'a.txt'), 'a\n'));
+  const good = (await gitOk(['rev-parse', 'HEAD'], w.cg)).trim();
+  await w.bundle();
+  await w.commit('evil', (c) => writeFileSync(join(c, '.mcp.json'), '{}'));
+  const evil = join(w.root, 'evil.bundle');
+  await gitOk(['bundle', 'create', '-q', evil, 'refs/heads/card/c-1', '^refs/heads/main'], w.cg);
+  let swapped = false;
+  const r = await w.push({ afterStage: () => { copyFileSync(evil, join(w.outbox, 'bundle-C-1.bundle')); swapped = true; } });
+  assert.equal(swapped, true, 'the seam ran');
+  assert.equal(r.ok, true, r.reason);
+  assert.equal(r.tip, good);
+  assert.match(await w.ghRefs(), new RegExp(`refs/heads/card/c-1 ${good}`));
+});
+
 test('scanner problems refuse: a finding, a crash (exit 2), the wrong version, a missing binary, a changed config', async () => {
-  for (const [mode, re] of [['leak', /found 1 likely secret/], ['crash', /did not finish cleanly/], ['wrongversion', /pin is 9\.9\.9/]]) {
+  for (const [mode, re] of [['leak', /found 1 likely secret/], ['crash', /did not finish cleanly/], ['wrongversion', /pin is 8\.30\.1/], ['noreport', /did not finish cleanly/], ['badreport', /did not finish cleanly/]]) {
     const w = await world();
     await w.commit('work', (c) => writeFileSync(join(c, 'a.txt'), 'a\n'));
     await w.bundle();
@@ -381,6 +404,40 @@ test('real gitleaks: an inline gitleaks:allow comment does not hide a secret fro
   assert.match(r.reason, /likely secret/);
 });
 
+test('R-0b-47 MAT-1, real gitleaks: a secret in a folder or file the default rules skip is still stopped', { skip: realGitleaks ? false : 'skipped: gitleaks 8.30.1 not installed' }, async () => {
+  const scanner = await realScanner(tmp());
+  const old = join(tmp(), 'old.toml');
+  writeFileSync(old, '[extend]\nuseDefault = true\n');
+  for (const path of ['node_modules/a.js', 'package-lock.json', 'yarn.lock', 'pnpm-lock.yaml', 'docs/x.svg']) {
+    const w = await world({ scanner });
+    await w.commit('skipped place', (c) => { mkdirSync(dirname(join(c, path)), { recursive: true }); writeFileSync(join(c, path), `token = "${fakeSecret()}"\n`); });
+    // Positive control: the default rules, with their allow-list, let it through.
+    assert.equal(await scanAsCareless(w.clone, ['--config', old]), 0, `control: the default allow-list skips ${path}`);
+    await w.bundle();
+    const r = await refusedAndUntouched(w, /likely secret/);
+    assert.ok(r.reason.includes(path.split('/').at(-1)), path);
+  }
+});
+
+test('R-0b-47 MAT-2, real gitleaks: a secret in a file git calls binary is still stopped', { skip: realGitleaks ? false : 'skipped: gitleaks 8.30.1 not installed' }, async () => {
+  const scanner = await realScanner(tmp());
+  const w = await world({ scanner });
+  await w.commit('binary', (c) => writeFileSync(join(c, 'b.js'), Buffer.concat([Buffer.from([0, 1, 2, 0]), Buffer.from(`\nconst t = "${fakeSecret()}";\n`)])));
+  const sha = (await gitOk(['rev-parse', 'HEAD'], w.cg)).trim();
+  await gitOk(['push', '-q', w.mirror, 'HEAD:refs/heads/scan'], w.cg);
+  // Positive control: the git scan alone, without the files, misses it.
+  assert.deepEqual(await scanSecrets({ setup: scanner, mirror: w.mirror, shas: [sha], messages: [], privateDir: tmp() }), { ok: true });
+  await w.bundle();
+  const r = await refusedAndUntouched(w, /the file scan: .*likely secret/);
+  assert.match(r.reason, /b\.js/);
+});
+
+test('R-0b-47 MAT-1: the vendored rules have no allow-list and are all there', () => {
+  assert.doesNotMatch(DO_PLANE_TOML.replace(/^#.*$/gm, ''), /allowlist/i);
+  assert.ok((DO_PLANE_TOML.match(/^\[\[rules\]\]$/gm) ?? []).length > 200, 'the default rules are all there');
+  assert.doesNotMatch(DO_PLANE_TOML, /useDefault/);
+});
+
 test('start gate on a full push: a shut gate pushes nothing and raises one issue', async () => {
   const w = await world({ gate: { workflowRule: async () => ({ ok: false, reason: 'writes with a broad key' }) } });
   await w.commit('work', (c) => writeFileSync(join(c, 'a.txt'), 'a\n'));
@@ -402,7 +459,8 @@ test('start gate: each fact bad, missing, stale by 1 s, or for the wrong repo sh
   const runCases = [
     [{ ...goodRun, steps: [{ product: PRODUCT, conclusion: 'failure' }] }, /read-only/],
     [{ ...goodRun, steps: [{ product: 'other', conclusion: 'success' }] }, /read-only/],
-    [{ ...goodRun, run_at: iso(now - FACT1_MAX_AGE_MS - 1000) }, /2 hours/],
+    [{ ...goodRun, run_at: iso(now - 2 * 3600 * 1000 - 1000) }, /2 hours/], // the review's 2 hours, written out (MIN-3)
+    [{ ...goodRun, run_at: iso(now + 2 * 60 * 1000) }, /2 hours/], // dated in the future (MIN-2)
     [{ ...goodRun, workflow_path: '.github/workflows/other.yml' }, /pinned workflow/],
     [{ ...goodRun, event: 'push' }, /scheduled or manual/],
     [{ ...goodRun, head_branch: 'card/x' }, /not on main/],
@@ -420,13 +478,18 @@ test('start gate: each fact bad, missing, stale by 1 s, or for the wrong repo sh
   }
   for (const kind of ['vercel_skip', 'vercel_env']) {
     const good = { product: PRODUCT, vercel_project: 'prj_1', read_at: iso(now - 1000), result: true };
-    for (const [doc, re] of [[{ ...good, result: false }, /fails/], [{ ...good, read_at: iso(now - VERCEL_FACT_MAX_AGE_MS - 1000) }, /10 minutes/], [{ ...good, vercel_project: 'prj_2' }, /another project/], [{ ...good, product: 'p2' }, /another project/], [{ ...good, read_at: 'soon' }, /10 minutes/]]) {
+    for (const [doc, re] of [[{ ...good, result: false }, /fails/], [{ ...good, read_at: iso(now - 10 * 60 * 1000 - 1000) }, /10 minutes/], [{ ...good, read_at: iso(now + 2 * 60 * 1000) }, /10 minutes/], [{ ...good, vercel_project: 'prj_2' }, /another project/], [{ ...good, product: 'p2' }, /another project/], [{ ...good, read_at: 'soon' }, /10 minutes/]]) {
       w.writeFact(kind, doc);
       const { r, issues } = await gate({});
       assert.equal(r.ok, false, `${kind} ${JSON.stringify(doc)}`); assert.match(r.reason, re); assert.equal(issues.length, 1);
       w.writeFact(kind, good);
     }
   }
+  // Just inside each limit is still open, so the limits are not shorter than the review's either.
+  const inside = await gate({ readRun: async () => ({ ...goodRun, run_at: iso(now - 2 * 3600 * 1000 + 60 * 1000) }) });
+  assert.equal(inside.r.ok, true, inside.r.reason);
+  for (const kind of ['vercel_skip', 'vercel_env']) w.writeFact(kind, { product: PRODUCT, vercel_project: 'prj_1', read_at: iso(now - 10 * 60 * 1000 + 60 * 1000), result: true });
+  assert.equal((await gate({})).r.ok, true);
   const empty = await startGate({ ...base, record: memoryRecord(), readRun: async () => goodRun, cache: {}, issues: { upsert: async () => {} } });
   assert.match(empty.reason, /no fact yet/);
 });
@@ -499,6 +562,39 @@ test('inputs come from the record only; the branch, product and rules are checke
   }
   const r = await createPushScript(w.ports)('S-404');
   assert.match(r.reason, /no launch record/);
+});
+
+test('R-0b-47 MIN-5: a bundle over the size cap, or with a second hard link, is refused', async () => {
+  const w = await world();
+  await w.commit('work', (c) => writeFileSync(join(c, 'a.txt'), 'a\n'));
+  await w.bundle();
+  await refusedAndUntouched(w, /larger than 10 bytes/, { bundleCap: 10 });
+  linkSync(join(w.outbox, 'bundle-C-1.bundle'), join(w.root, 'second-name.bundle'));
+  await refusedAndUntouched(w, /more than one link/);
+});
+
+test('R-0b-47 MIN-11: a mirror holding grafts, shallow or a commit-graph refuses', async () => {
+  for (const f of ['info/grafts', 'shallow', 'objects/info/commit-graph', 'objects/info/commit-graphs']) {
+    const w = await world();
+    await w.commit('work', (c) => writeFileSync(join(c, 'a.txt'), 'a\n'));
+    await w.bundle();
+    mkdirSync(dirname(join(w.mirror, f)), { recursive: true });
+    if (f.endsWith('commit-graphs')) mkdirSync(join(w.mirror, f)); else writeFileSync(join(w.mirror, f), '');
+    await refusedAndUntouched(w, new RegExp(`mirror has ${f}`));
+  }
+});
+
+test('R-0b-47 MIN-1: a program that quits before reading its input is refused, and the process lives on', async () => {
+  const r = await git(['version'], { gitDir: tmp(), input: Buffer.alloc(16 * 1024 * 1024, 'x'), purpose: 'test' });
+  assert.equal(r.code, 0);
+  const w = await world();
+  await w.commit('work', (c) => writeFileSync(join(c, 'a.txt'), 'a\n'));
+  const sha = (await gitOk(['rev-parse', 'HEAD'], w.cg)).trim();
+  await gitOk(['push', '-q', w.mirror, 'HEAD:refs/heads/scan'], w.cg);
+  w.fake.setMode('stdinquit');
+  const s = await scanSecrets({ setup: w.ports.scanner, mirror: w.mirror, shas: [sha], messages: [[sha, 'x'.repeat(16 * 1024 * 1024)]], privateDir: tmp() });
+  assert.equal(s.ok, false);
+  assert.match(s.reason, /message: .*did not finish cleanly/);
 });
 
 test('the mirror is checked before every push: a planted alternates file refuses', async () => {

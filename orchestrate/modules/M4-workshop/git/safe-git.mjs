@@ -89,6 +89,7 @@ export function git(args, { gitDir, workTree, cwd, input, extraConfig, purpose =
     child.stderr.on('data', (d) => { err += d; });
     child.on('error', (e) => resolve({ code: -1, stdout: Buffer.alloc(0), stderr: String(e.message) }));
     child.on('close', (code, signal) => resolve({ code: code ?? (signal ? -1 : 0), stdout: Buffer.concat(out), stderr: err }));
+    child.stdin.on('error', () => { /* git closed its input early; its exit code decides */ });
     if (input != null) child.stdin.end(input); else child.stdin.end();
   });
 }
@@ -125,7 +126,8 @@ export function checkMirror(gitDir, { template = MIRROR_CONFIG_TEMPLATE } = {}) 
   const cfg = join(gitDir, 'config');
   if (!st(cfg)?.isFile()) return { ok: false, reason: 'mirror config is missing or not a plain file' };
   if (readFileSync(cfg, 'utf8') !== template) return { ok: false, reason: 'mirror config differs from the template' };
-  for (const f of ['config.worktree', 'objects/info/alternates', 'objects/info/http-alternates', 'info/attributes', 'commondir']) {
+  // info/grafts, shallow and the commit-graph files can change a commit's parents (R-0b-47 MIN-11).
+  for (const f of ['config.worktree', 'objects/info/alternates', 'objects/info/http-alternates', 'info/attributes', 'commondir', 'info/grafts', 'shallow', 'objects/info/commit-graph', 'objects/info/commit-graphs']) {
     if (st(join(gitDir, f))) return { ok: false, reason: `mirror has ${f}` };
   }
   const hooks = join(gitDir, 'hooks');

@@ -2,8 +2,9 @@
 // file names a card branch may never touch. M10's protected list imports these names rather than
 // copying them; the push refusals themselves stay this fixed list and never read the rules.
 //
-// A path is refused when, after folding (Unicode NFC, invisible "default ignorable" characters
-// removed, lower case, because a Mac's disk reads `.Claude` as `.claude`):
+// A path is refused when, after folding (Unicode NFKC so look-alike letters such as the long s
+// become plain ones, upper then lower case, invisible "default ignorable" characters removed;
+// a Mac's disk reads `.Claude` as `.claude`, review 0b-4 R-47 MAT-3):
 //   - any segment is `.claude` (a file, a folder or a link);
 //   - a `.github` segment is followed by `workflows` or `actions`, at any depth;
 //   - the last segment is `.mcp.json`, `claude.local.md`, `.gitmodules` or a Vercel config name;
@@ -22,7 +23,7 @@ export const SUBMODULE_MODE = '160000';
 // The names Claude reads settings, skills or tool servers from (launch check 2 uses these too).
 export const CLAUDE_NAMES = Object.freeze([CLAUDE_DIR, ...FILE_NAMES]);
 
-export const fold = (s) => String(s).normalize('NFC').replace(/\p{Default_Ignorable_Code_Point}/gu, '').toLowerCase();
+export const fold = (s) => String(s).normalize('NFKC').toUpperCase().toLowerCase().normalize('NFKC').replace(/\p{Default_Ignorable_Code_Point}/gu, '');
 
 /** Why a path is refused, or null. `path` is a git path ('/'-separated). */
 export function refusedPath(path) {
@@ -49,7 +50,7 @@ export function parseRawZ(buf) {
     const head = fields[i];
     const m = /^:(\d{6}) (\d{6}) ([0-9a-f]+) ([0-9a-f]+) ([A-Z])\d*$/.exec(head);
     if (!m) throw new Error(`unreadable change line "${head.slice(0, 80)}"`);
-    out.push({ oldMode: m[1], newMode: m[2], status: m[5], path: fields[i + 1] });
+    out.push({ oldMode: m[1], newMode: m[2], newId: m[4], status: m[5], path: fields[i + 1] });
   }
   return out;
 }

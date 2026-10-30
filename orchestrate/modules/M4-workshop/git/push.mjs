@@ -126,9 +126,11 @@ async function messages(mirror, shas) {
  *   pullRequests.upsert({ repo, branch, base, title, body, token })   opens or updates the PR
  *   testRemote(repo)        tests only: a local bare repo standing in for GitHub. Production
  *                           never passes it, so every address is https://github.com/<repo>.git.
+ *   afterStage()            tests only: runs right after the private copy is taken, so a test can
+ *                           swap the outbox bundle at the earliest moment (review R-0b-47 MAT-4).
  */
 export function createPushScript(deps) {
-  const { record, rules, privateDir, scanner, getRobotToken, readRun, workflowRule, issues, pullRequests, gateCache = {}, testRemote, bundleCap = BUNDLE_CAP, now = () => Date.now() } = deps;
+  const { record, rules, privateDir, scanner, getRobotToken, readRun, workflowRule, issues, pullRequests, gateCache = {}, testRemote, afterStage, bundleCap = BUNDLE_CAP, now = () => Date.now() } = deps;
 
   async function attempt(sessionId) {
     const s = record.read('session', sessionId)?.doc;
@@ -170,6 +172,7 @@ export function createPushScript(deps) {
     try {
       // 2. The private copy, its header and its check against the mirror.
       const copy = stageBundle(outbox, card, work, bundleCap);
+      await afterStage?.();
       const tip = readBundleHeader(copy, branch);
 
       // 3. Main (and the card branch) fresh from GitHub, then the bundle into the holding ref.
@@ -197,10 +200,13 @@ export function createPushScript(deps) {
       const commits = await newCommits(mirror, tip, ['refs/heads/main', ...(remoteTip ? [remoteRef] : [])]);
       if (!commits.length) no('the bundle holds no new commits');
       const why = [];
+      const blobs = new Map(); // every added or changed regular file, for the raw-bytes scan
       for (const [sha, parents] of commits) {
         if (parents.length === 0) no(`commit ${sha.slice(0, 12)} is a first commit`);
         if (parents.length > 1) no(`commit ${sha.slice(0, 12)} is a merge; a worker never merges`);
-        why.push(...refusedEntries(await changes(mirror, [sha])));
+        const ch = await changes(mirror, [sha]);
+        why.push(...refusedEntries(ch));
+        for (const e of ch) if (e.status !== 'D' && /^100(644|755)$/.test(e.newMode) && !blobs.has(e.newId)) blobs.set(e.newId, { id: e.newId, path: e.path });
       }
       const mb = (await gitOk(['merge-base', 'refs/heads/main', tip], { gitDir: mirror, purpose: 'push-paths' })).trim();
       const net = await changes(mirror, [mb, tip]);
@@ -210,7 +216,7 @@ export function createPushScript(deps) {
       // 5. The secret scan.
       const shas = commits.map(([s]) => s);
       for (const sha of shas) if (await addedAllowComment(mirror, sha)) no(`commit ${sha.slice(0, 12)} adds a "gitleaks:allow" comment`);
-      const scan = await scanSecrets({ setup: scanner, mirror, shas, messages: await messages(mirror, shas), privateDir: work });
+      const scan = await scanSecrets({ setup: scanner, mirror, shas, blobs: [...blobs.values()], messages: await messages(mirror, shas), privateDir: work });
       if (!scan.ok) no(scan.reason);
 
       // 6. The rules, then the start gate.

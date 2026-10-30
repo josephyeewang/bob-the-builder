@@ -24,7 +24,9 @@ export const OUTSIDE_EVENTS = Object.freeze(['schedule', 'workflow_dispatch']);
 export const factId = (kind, product) => `start_gate.${kind}.${product}`;
 
 const shut = (reason) => ({ ok: false, reason });
-const age = (now, at) => { const t = Date.parse(at); return Number.isFinite(t) ? now - t : Infinity; };
+export const FUTURE_ALLOWANCE_MS = 60 * 1000;
+// A date more than a minute ahead is not believed: it counts as stale (R-0b-47 MIN-2).
+const age = (now, at) => { const t = Date.parse(at); return Number.isFinite(t) && now - t >= -FUTURE_ALLOWANCE_MS ? now - t : Infinity; };
 
 /**
  * Fact 1. `readRun()` returns the outside check's newest run record, read keyless from its

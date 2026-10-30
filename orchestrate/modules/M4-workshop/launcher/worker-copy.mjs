@@ -14,8 +14,8 @@ import { join, resolve, sep, dirname, isAbsolute } from 'node:path';
 import { git, gitOk, checkMirror } from '../git/safe-git.mjs';
 import { CLAUDE_NAMES, fold } from '../git/push-refusals.mjs';
 
-// Names Claude reads settings, skills or tool servers from. Compared after NFC folding and
-// lower-casing, because a Mac's disk treats `.Claude` as `.claude`.
+// Names Claude reads settings, skills or tool servers from. Compared after `fold` (NFKC, case
+// round-trip, invisible characters removed), because a Mac's disk treats `.Claude` as `.claude`.
 // One definition, in ../git/push-refusals.mjs.
 export const PROTECTED_NAMES = CLAUDE_NAMES;
 export const isProtectedName = (n) => PROTECTED_NAMES.includes(fold(n));
