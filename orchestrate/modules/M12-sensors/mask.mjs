@@ -11,8 +11,11 @@
 //   2. Known shapes: GitHub, Vercel, Supabase, Anthropic and other `sk-` keys, JWTs, Bearer headers, passwords inside
 //      connection addresses, any value after a secret-sounding name, and generic high-entropy strings.
 //
-// NOT A SECRET. Commit SHAs (hex only) and file paths are never masked: the history file must stay equal to `git log`.
-// The generic rule needs upper case, lower case and a digit, so 40-character hex SHAs never match it.
+// NOT A SECRET (review-0b-7 M5). Commit SHAs, sha256 hashes, UUIDs and IDs with a known prefix (dpl_, prj_, team_) are
+// never matched by the generic rule; they are masked only when a secret-sounding name sits right before them. Typed
+// fields of a fact (sha, *_sha, id, uid, *_id, ts, *_at, created) are never masked by maskDeep at all: approval binding,
+// the history file and the watchers' dedup all depend on them being exact. RESIDUAL, said plainly: a bare hex secret, or
+// a bare 24-character Vercel classic token, with no name beside it is caught only if its exact value is known (layer 1).
 // The Vercel prefixed-token shape (`vc?_`) is assumed from public examples, not checked against a live key
 // (29 Oct 2026); Vercel's older 24-character tokens are caught by the name, flag and Bearer rules instead.
 
@@ -68,10 +71,17 @@ function entropy(s) {
 
 // A generic high-entropy run: mixed case and a digit (so never a hex SHA), high entropy, and not a path
 // (a run holding '/' together with '-' or '_' mixes two encodings, which no single key format does).
+// Things that look random but are identifiers, not secrets.
+export function isKnownId(t) {
+  return /^[0-9a-f]+$/i.test(t)
+    || /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(t)
+    || /^(?:dpl|prj|team|icfg|env|hook)_[A-Za-z0-9]+$/.test(t);
+}
+
 export function looksHighEntropy(s) {
   const t = s.replace(/=+$/, '');
   if (t.length < 32) return false;
-  if (/^[0-9a-f]+$/i.test(t)) return false;
+  if (isKnownId(t)) return false;
   if (!/[A-Z]/.test(t) || !/[a-z]/.test(t) || !/[0-9]/.test(t)) return false;
   if (t.includes('/') && /[-_]/.test(t)) return false;
   return entropy(t) >= 4.0;
@@ -97,6 +107,14 @@ function maskShapes(text, hits) {
   return out;
 }
 
+export const TYPED_KEY = /^(?:sha|id|uid|ts|created|[a-z0-9]+(?:_sha|_id|_at))$/;
+// A field is exempt only when BOTH its name is typed AND its value has a typed shape (review round 2: outside systems
+// put free text under names like `external_id`, so a name alone would let a token through unmasked).
+export function isTypedField(key, value) {
+  return TYPED_KEY.test(key) && typeof value === 'string' && value.length <= 128
+    && (isKnownId(value) || /^\d+$/.test(value) || /^\d{4}-\d\d-\d\dT\d\d:\d\d(?::\d\d(?:\.\d+)?)?(?:Z|[+-]\d\d:\d\d)$/.test(value));
+}
+
 // The Sensors' known credential values, gathered once per process from the environment the Sensors run in.
 // Tests pass their own planted env; nothing here prints or stores a value.
 export function makeMasker({ env = {}, protectedEnvKeys = [], protectedValues = [] } = {}) {
@@ -111,13 +129,14 @@ export function makeMasker({ env = {}, protectedEnvKeys = [], protectedValues = 
     out = maskShapes(out, hits);
     return { text: out, hits };
   }
-  // Every string in a fact, at any depth, keys included (a key name can carry a value too).
+  // Every string in a fact, at any depth, keys included (a key name can carry a value too) — except typed fields,
+  // whose short, space-free values are identifiers our own code put there.
   function maskDeep(v) {
     if (typeof v === 'string') return maskSecrets(v).text;
     if (Array.isArray(v)) return v.map(maskDeep);
     if (v && typeof v === 'object') {
       const o = {};
-      for (const [k, x] of Object.entries(v)) o[maskSecrets(k).text] = maskDeep(x);
+      for (const [k, x] of Object.entries(v)) o[maskSecrets(k).text] = isTypedField(k, x) ? x : maskDeep(x);
       return o;
     }
     return v;

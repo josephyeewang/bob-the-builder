@@ -75,3 +75,29 @@ test('planted failure: the scanner itself finds an unmasked key (so a 0 from it 
   assert.ok(findCredentials(`left in: ${FAKE.github}`).length >= 1);
   assert.ok(findCredentials(`left in: ${FAKE.generic}`).length >= 1);
 });
+
+// review-0b-7 M5 and round 2: identifiers stay exact; a typed NAME alone never exempts a value.
+test('SHAs, sha256 hashes, UUIDs and deployment ids pass through unchanged', () => {
+  const { maskSecrets } = makeMasker();
+  const ids = [
+    'a'.repeat(7) + run(33, 3).toLowerCase().replace(/[^0-9a-f]/g, 'e'),
+    run(64, 4).toLowerCase().replace(/[^0-9a-f]/g, 'c'),
+    '3f2b8c1e-9a4d-4e6f-8b2a-1c7d5e9f0a3b',
+    ['dpl', run(28, 5)].join('_'),
+    ['prj', run(28, 6)].join('_'),
+  ];
+  for (const id of ids) assert.equal(maskSecrets(`deploy ${id} ok`).text, `deploy ${id} ok`, id);
+});
+
+test('maskDeep keeps typed fields exact, but masks a token under a typed name', () => {
+  const { maskDeep } = makeMasker();
+  const sha = 'b'.repeat(40);
+  const uid = ['dpl', run(28, 7)].join('_');
+  const out = maskDeep({ head_sha: sha, uid, created_at: '2026-10-29T17:00:00Z', external_id: FAKE.github, run_id: '12345', note: FAKE.generic });
+  assert.equal(out.head_sha, sha);
+  assert.equal(out.uid, uid);
+  assert.equal(out.created_at, '2026-10-29T17:00:00Z');
+  assert.equal(out.run_id, '12345');
+  assert.equal(out.external_id, '[REDACTED:github]');
+  assert.ok(!JSON.stringify(out).includes(FAKE.generic));
+});

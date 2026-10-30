@@ -4,7 +4,7 @@ import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { makeHistory, makeGit, unescapePath, cardOf } from './history.mjs';
+import { makeHistory, makeGit, cardOf } from './history.mjs';
 import { FAKE } from './fakes.mjs';
 
 let dir, src, clone;
@@ -30,12 +30,12 @@ after(() => rmSync(dir, { recursive: true, force: true }));
 
 test('the history file equals git log on a fresh clone of main (sha, date, files, order)', () => {
   const h = makeHistory({ git: makeGit(src) }).historyFile();
-  const want = g(clone, 'log', '-n200', '--format=%H %aI', 'main').trim().split('\n');
+  const want = g(clone, 'log', '-n200', '--first-parent', '--format=%H %aI', 'main').trim().split('\n');
   assert.deepEqual(h.commits.map((c) => `${c.sha} ${c.date}`), want);
   assert.equal(h.head, g(clone, 'rev-parse', 'main').trim());
   for (const c of h.commits) {
     const files = g(clone, 'show', '--name-only', '--format=', c.sha).trim().split('\n').filter(Boolean);
-    assert.deepEqual(c.files.map(unescapePath), files, c.sha);
+    assert.deepEqual(c.files, files, c.sha);
   }
 });
 
@@ -75,7 +75,7 @@ test('a directory and a path with spaces and & are answered', () => {
 });
 
 test('planted hostile paths return "no such path" and no git command runs with them', () => {
-  for (const p of ['; rm -rf ~', ':(glob)**', '../../etc/passwd', '-n1', '$(touch pwned)', '', 'src/app.js\n; id', null, 42]) {
+  for (const p of ['; rm -rf ~', ':(glob)**', '../../etc/passwd', '-n1', '$(touch pwned)', '', 'src/app.js\n; id', null, 42, 'a'.repeat(4097), 'src\u0000x', '-src', 'src\u202Eexe.js']) {
     const calls = [];
     const git = makeGit(src, (args) => { calls.push(args); return execFileSync('git', args, { cwd: src, encoding: 'utf8' }); });
     const r = makeHistory({ git }).answer({ path: p });

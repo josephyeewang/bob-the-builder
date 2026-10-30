@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { escapeOutside, makePrepare, isFenced } from './escape.mjs';
+import { readFileSync } from 'node:fs';
+import { escapeOutside, makePrepare, isFenced, cleanOutside, CAP } from './escape.mjs';
 import { FAKE } from './fakes.mjs';
 
 // R-0b-126: planted instruction-shaped text lands quoted and escaped, matching the expected form exactly.
@@ -26,9 +27,31 @@ test('a reconstructed tag cannot survive (Gas City interleaved case)', () => {
   assert.equal((out.match(/<\/outside-text>/g) || []).length, 1);
 });
 
-test('long text is cut and the cut is said', () => {
-  const out = escapeOutside('x'.repeat(4010), 'check-output');
+test('a long one-line source is cut at 300 and the cut is said', () => {
+  const out = escapeOutside('x'.repeat(CAP + 10), 'commit-subject');
   assert.ok(out.endsWith('…[cut 10 characters]</outside-text>'));
+});
+
+test('review-0b-7 M8: a long research report arrives whole, never silently cut', () => {
+  const report = 'line of findings\n'.repeat(5000);
+  for (const src of ['research-file', 'lesson-file', 'idea-file', 'issue-body', 'check-output']) {
+    assert.equal(escapeOutside(report, src), `<outside-text source="${src}">${report}</outside-text>`);
+  }
+});
+
+test('terminal colour codes, zero-width and bidi characters are removed whole', () => {
+  assert.equal(escapeOutside('\u001b[1;31mERR\u001b[0m a​b﻿c⁦d', 'log-line'), '<outside-text source="log-line">ERR abcd</outside-text>');
+});
+
+test('the shared fixtures give exactly the expected form through cleanOutside', () => {
+  const { cases } = JSON.parse(readFileSync(new URL('./fixtures/outside-text.json', import.meta.url), 'utf8'));
+  assert.ok(cases.length >= 6);
+  for (const c of cases) {
+    const text = c.text.replace(/\{\{FAKE\.(\w+)\}\}/g, (_, k) => FAKE[k]);
+    const out = cleanOutside(text, c.source);
+    assert.equal(out, c.expect, c.source);
+    assert.ok(isFenced(out));
+  }
 });
 
 test('unknown source is labelled unknown, never trusted', () => {

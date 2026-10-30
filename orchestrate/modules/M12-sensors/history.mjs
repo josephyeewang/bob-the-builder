@@ -7,8 +7,10 @@
 // with an argument list, never a shell), and git reads it with --literal-pathspecs, so `:(glob)**` is just a name.
 // A path that isn't on `main` gets "no such path" and no git command runs with it at all: the check is a lookup in
 // the list of `main`'s paths, read once per pass.
-// Commit subjects and author names are masked and fenced like any outside text; file paths are kept exact (they are
-// what the Lead searches by) with only `& < >` escaped, so they can't form a tag.
+// Commit subjects and author names are masked and fenced like any outside text. File paths are NOT entity-escaped
+// (the Lead searches its copy by exact path; review-0b-7 Minor 4): they are validated and written as plain JSON
+// strings. A path with a control, bidi or zero-width character is left out and counted, never passed on.
+// The history file is the last 200 FIRST-PARENT commits of main, so it equals `git log --first-parent` on a fresh copy.
 
 import { execFileSync } from 'node:child_process';
 import { makePrepare } from './escape.mjs';
@@ -18,8 +20,13 @@ export const REQUEST_COMMITS = 50;
 const SEP = '\u001e';
 const END = '\u001f';
 
-export function escapePath(p) { return String(p).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
-export function unescapePath(p) { return String(p).replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&'); }
+export const MAX_PATH = 4096;
+const BAD_PATH_CHAR = /[\u0000-\u001F\u007F-\u009F\u200B-\u200F\u202A-\u202E\u2066-\u2069\uFEFF]/;
+
+// A path the record may carry: a non-empty string, at most 4096 characters, no control / bidi / zero-width character.
+export function validPath(p) { return typeof p === 'string' && p.length > 0 && p.length <= MAX_PATH && !BAD_PATH_CHAR.test(p); }
+// A Lead request path: also never starts with '-' (it could read as an option even in an argument list).
+export function validRequestPath(p) { return validPath(p) && !p.startsWith('-'); }
 
 // Card id from the subject ("[C-12] …", "card C-12", "(C-12)") or a "Card: C-12" trailer.
 export function cardOf(subject, body = '') {
@@ -50,8 +57,8 @@ function parseLog(out) {
 const FORMAT = `--format=${END}%H${SEP}%an${SEP}%aI${SEP}%s${SEP}BODY${SEP}%b${SEP}FILES${SEP}`;
 
 // Raw commits on `ref` (default main), newest first, optionally for one literal path.
-export function readLog(git, { ref = 'main', n = HISTORY_COMMITS, path = null } = {}) {
-  const args = ['log', `-n${n}`, '--name-only', FORMAT, ref];
+export function readLog(git, { ref = 'main', n = HISTORY_COMMITS, path = null, firstParent = false } = {}) {
+  const args = ['log', `-n${n}`, ...(firstParent ? ['--first-parent'] : []), '--name-only', FORMAT, ref];
   if (path !== null) args.push('--', path);
   return parseLog(git(args));
 }
@@ -63,13 +70,14 @@ export function makeHistory({ git, prepare = makePrepare(), ref = 'main' }) {
     date: c.date,
     subject: prepare(c.subject, 'commit-subject'),
     card: cardOf(c.subject, c.body),
-    files: c.files.map(escapePath),
+    files: c.files.filter(validPath),
+    ...(c.files.some((f) => !validPath(f)) ? { files_refused: c.files.filter((f) => !validPath(f)).length } : {}),
   });
 
   // The history file's content: the last 200 commits of main, each with its files, author and card.
   function historyFile() {
     const head = git(['rev-parse', ref]).trim();
-    return { ref, head, commits: readLog(git, { ref }).map(shape) };
+    return { ref, head, commits: readLog(git, { ref, firstParent: true }).map(shape) };
   }
 
   let pathSet = null;
@@ -85,9 +93,9 @@ export function makeHistory({ git, prepare = makePrepare(), ref = 'main' }) {
   // Answer one Lead history request ({ path }). Never throws.
   function answer(request) {
     const p = request && typeof request.path === 'string' ? request.path : null;
-    if (p === null || p.length === 0 || p.length > 1024 || !paths().has(p)) return { ok: false, answer: 'no such path' };
+    if (!validRequestPath(p) || !paths().has(p)) return { ok: false, answer: 'no such path' };
     try {
-      return { ok: true, path: escapePath(p), commits: readLog(git, { ref, n: REQUEST_COMMITS, path: p }).map(shape) };
+      return { ok: true, path: p, commits: readLog(git, { ref, n: REQUEST_COMMITS, path: p }).map(shape) };
     } catch {
       return { ok: false, answer: 'history unavailable' };
     }
