@@ -87,8 +87,9 @@ export async function findApprovingPull({ gh, owner, repo, commit, blob, after =
     const list = await read(`/commits?sha=${commit}&path=${encodeURIComponent(path)}&per_page=1`);
     if (!Array.isArray(list) || !list.length || !SHA.test(list[0]?.sha ?? '')) return { ok: false, reason: 'no commit on main changed the rules file' };
     const changed = list[0].sha;
-    const pulls = await read(`/commits/${changed}/pulls`);
+    const pulls = await read(`/commits/${changed}/pulls?per_page=100`);
     if (!Array.isArray(pulls)) throw new Error('odd pull request list');
+    if (pulls.length >= 100) throw new Error('100 or more pull requests carry the commit; the list may be cut off');
     const merged = [];
     for (const n of new Set(pulls.map((x) => x?.number))) {
       if (!Number.isSafeInteger(n) || n <= 0) throw new Error('odd pull request number');

@@ -115,3 +115,12 @@ test('fixture patterns that start with * or hold {…} are quoted (yaml-lite wou
     if (m && (m[1].startsWith('*') || m[1].includes('{'))) assert.match(m[1], /^['"]/, line);
   }
 });
+
+test('every effect_paths field is a list of readable patterns; a single value or a map is corrupt (audit round 4)', () => {
+  const text = readFileSync(new URL('./fixtures/policy.yaml', import.meta.url), 'utf8');
+  for (const [from, to] of [['repair_folder: [db/repairs/]', 'repair_folder: "{bad"'], ['flag_files: [lib/flags.ts]', 'flag_files: ""'],
+    ['migration_paths: [db/migrations/]', 'migration_paths:\n      a: b']]) {
+    assert.ok(text.includes(from), from);
+    assert.equal(parsePolicy(text.replace(from, to)).ok, false, to);
+  }
+});

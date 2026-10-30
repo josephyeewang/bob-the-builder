@@ -196,3 +196,17 @@ test('the stopgap allow-list only moves forward: an older pinned version pushed 
   assert.equal(v({ product: 'sample-app', blob: blobOn(r, a1), lastGoodBlob: blobOn(r, a0) }), true);
   assert.equal(v({ product: 'sample-app', blob: blobOn(r, a1), lastGoodBlob: 'f'.repeat(40) }), false);
 });
+
+test('a full page of pull requests is refused, since another merged one could be past it (audit round 4)', async () => {
+  const s = setup();
+  const b1 = s.r.commit([s.m0], { [RULES_PATH]: V2 });
+  const squash = s.r.commit([s.m0], { [RULES_PATH]: V2 });
+  s.r.pull({ number: 11, merged: true, head: b1, merge_commit_sha: squash, commits: [b1] });
+  s.r.linkPull(squash, 11);
+  s.r.main = squash;
+  const full = { get: async (p) => (p.endsWith('/pulls?per_page=100')
+    ? { status: 200, json: [{ number: 11 }, ...Array.from({ length: 99 }, (_, i) => ({ number: 100 + i }))] } : s.r.gh.get(p)) };
+  const r = await findApprovingPull({ gh: full, owner: 'sample-org', repo: 'sample-app', commit: squash, blob: blobOn(s.r, squash) });
+  assert.equal(r.ok, false);
+  assert.match(r.reason, /cut off/);
+});

@@ -113,7 +113,7 @@ export function fakeRepo({ owner = 'sample-org', repo = 'sample-app' } = {}) {
         const c = lastTouching(m[1], decodeURIComponent(m[2]));
         return ok(c ? [{ sha: c }] : []);
       }
-      if ((m = /^\/commits\/([0-9a-f]{40})\/pulls$/.exec(p))) {
+      if ((m = /^\/commits\/([0-9a-f]{40})\/pulls\?per_page=100$/.exec(p))) {
         return ok((commitPulls.get(m[1]) ?? []).map((num) => ({ number: num })));
       }
       if ((m = /^\/pulls\/(\d+)$/.exec(p))) {

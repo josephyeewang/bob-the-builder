@@ -28,7 +28,8 @@ export const MAX_FILES = 3000;
 export const PLAIN_DOC_EXTENSIONS = Object.freeze(['md', 'txt', 'csv', 'json', 'yaml', 'yml', 'png', 'jpg', 'jpeg',
   'gif', 'svg', 'pdf']);
 const PLAIN = new RegExp(`\\.(${PLAIN_DOC_EXTENSIONS.join('|')})$`, 'i');
-const LINK_MODES = new Set(['120000', '160000']);   // a symlink or a submodule: protected, whatever its path
+const LINK_MODES = new Set(['120000', '160000']);
+const FILE_MODES = new Set(['100644', '100755', '120000', '160000']);   // a symlink or a submodule: protected, whatever its path
 
 // Whole SQL statements only, so prose like "drop the feature" never matches (R2-M4(c)).
 const SCHEMA_SCANS = [/\b(create|alter|drop)\s+(table|index)\b/i, /\balter\s+table\s+\S+\s+(add|drop|alter)\s+column\b/i];
@@ -49,9 +50,17 @@ export function classifyChange(policy, change) {
   const protectedPaths = new Set();
   const add = (cls, why) => { (reasons[cls] ??= []).push(why); };
 
+  // With no usable rules, the built-in protected floor still applies: an answer must never come back with
+  // `protected: []` because the rules couldn't be read (audit round 4; R3-M3 asks Joe on any protected file).
+  const floorOnly = () => {
+    for (const f of Array.isArray(change?.files) ? change.files : []) {
+      for (const p of [f?.path, f?.previous_path]) if (typeof p === 'string' && !pathProblem(p) && FLOOR(p)) { protectedPaths.add(p); add('protected', p); }
+    }
+    return finish(reasons, protectedPaths, 1);
+  };
   if (!policy || typeof policy !== 'object') {
     add('unclassifiable', 'no readable rules at this commit');
-    return finish(reasons, protectedPaths, 1);
+    return floorOnly();
   }
   const files = change?.files;
   if (!Array.isArray(files)) {
@@ -63,7 +72,7 @@ export function classifyChange(policy, change) {
   if (files.length > MAX_FILES) add('unclassifiable', `more than ${MAX_FILES} files`);
 
   let m;
-  try { m = matchers(policy); } catch (e) { add('unclassifiable', `rules patterns unreadable: ${e.message}`); return finish(reasons, protectedPaths, 1); }
+  try { m = matchers(policy); } catch (e) { add('unclassifiable', `rules patterns unreadable: ${e.message}`); return floorOnly(); }
   for (const k of m.missingEffectKeys) add('unclassifiable', `effect_paths.${k} missing`);
 
   let tier = change.declared_tier === 2 ? 2 : 1;     // a missing or unknown declared tier counts as 1
@@ -85,7 +94,10 @@ export function classifyChange(policy, change) {
       if (m.senders(p)) add('messages_people', p);
       if (m.flags(p)) add('first_customer_visible', p);
     }
-    if (f.mode !== undefined && LINK_MODES.has(String(f.mode))) { protectedPaths.add(f.path); add('protected', `${f.path} (link or submodule)`); }
+    // git's six-digit spelling, as text or the same digits as a number; anything else (0o120000, '0120000') is unknown.
+    const mode = typeof f.mode === 'number' && Number.isSafeInteger(f.mode) ? String(f.mode) : f.mode;
+    if (mode !== undefined && !(typeof mode === 'string' && FILE_MODES.has(mode))) { add('unclassifiable', `unknown mode ${JSON.stringify(f.mode)}: ${JSON.stringify(f.path)}`); continue; }
+    if (mode !== undefined && LINK_MODES.has(mode)) { protectedPaths.add(f.path); add('protected', `${f.path} (link or submodule)`); }
     if (f.status === 'added' && m.newVisible(f.path)) add('first_customer_visible', f.path);
     // A repair file must be plain SQL that was added, or it can't be approved as written (0b-9 M8): the same
     // allow-list the repair job runs after the merge. For an added file, the added lines are the whole file.
@@ -129,6 +141,7 @@ function importsPackage(text, name) {
   return new RegExp(`(from\\s*|require\\(\\s*|import\\(\\s*|import\\s+)['"]${q}(/[^'"]*)?['"]`).test(text);
 }
 
+const FLOOR = compileList([...PROTECTED_FLOOR]);
 const list = (v) => (Array.isArray(v) ? v : v == null ? [] : [v]);
 
 function matchers(policy) {

@@ -155,7 +155,7 @@ function check(raw) {
     const entry = mapOf(need(ep, k, 'effect_paths'), `effect_paths.${k}`);
     for (const [field, v] of Object.entries(entry)) {
       if (field === 'package_imports') strList(v, `effect_paths.${k}.${field}`);
-      else if (Array.isArray(v)) patterns(v, `effect_paths.${k}.${field}`);
+      else patterns(v, `effect_paths.${k}.${field}`);       // a list of readable patterns, nothing else (audit round 4)
     }
   }
 

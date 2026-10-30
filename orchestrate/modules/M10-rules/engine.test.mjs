@@ -265,6 +265,17 @@ test('merge: an exact reverse with a cut-off file list asks Joe, even while paus
   assert.match(r.reason, /cut-off/);
 });
 
+test('merge: an exact reverse with rules that cannot be fully read asks Joe (audit round 4, R3-M3)', () => {
+  const broken = { ...pol(), effect_paths: { ...pol().effect_paths, production_data: { ...pol().effect_paths.production_data, repair_folder: '{bad' } } };
+  const w = world({ policies: { app: broken }, states: { app: { state: 'paused' } }, now: AT_03 });
+  const r = mergeOf(w, [file('orchestrate/policy.yaml'), file('.github/workflows/a.yml')], reverse('failure'));
+  assert.deepEqual([r.decision, r.tier], ['ask', 1]);
+  const label = world({ states: { app: { state: 'paused' } }, now: AT_03 });
+  assert.equal(mergeOf(label, [file('app/x.ts')], reverse('failure', { labels: ['needs-joe'] })).decision, 'ask', 'a needs-joe label is never skipped');
+  assert.equal(mergeOf(label, [file('app/x.ts')], reverse('failure')).decision, 'allow', 'unscanned code alone still reverses');
+  assert.notEqual(mergeOf(label, [file('app/x.ts')], reverse('failure', { reverses: [R] })).reason, 'exact reverse of a merge whose audit failed', 'reverses must be one id');
+});
+
 test('merge: truncated or labels of the wrong type are refused, never read as "no" (audit round 3)', () => {
   const w = world();
   for (const bad of [{ truncated: 'true' }, { truncated: 1 }, { labels: 'needs-joe' }, { labels: [1] }]) {

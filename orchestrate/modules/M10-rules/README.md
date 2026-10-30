@@ -62,7 +62,7 @@ await carryOver({ reviewed, current, between, catchUps, tier1MergesSince, gh: vi
 - **New keys enter as optional (R3-m10).** A key added to the rules later is optional, with a missing value read as the stricter choice, so an older rules file stays valid.
 - **The snapshot.** Its hash proves the file wasn't damaged. It does not prove who wrote it: the guard against a looser copy is that only its owner may write it (a file writable by others is refused). Hooks read it only through `snapshotAnswer`, which adds the protected floor.
 
-## Known limits (logged by the 0b-1 code audit, rounds 1 to 3)
+## Known limits (logged by the 0b-1 code audit, rounds 1 to 4)
 
 - **An exact-reverse push trusts its file list.** `push_branch` lets an exact reverse through, even while paused, when every file is in the subject's `reverses_files`. The caller fills that list from the reversed commit. The merge still needs `exact_reverse_ok`, which M10's `checkExactReverse` recomputes from GitHub, so a wrong list can only push a branch, never merge it.
 - **The last good rules on disk.** After a restart, the reader re-checks the saved copy's hash and parse, and uses it again after the next successful GitHub read. If that read finds a new, unapproved version, the saved copy stays the last good one (MAT-3). Anyone who can write the reader's private folder (owner-only) could change it, as they could change the code itself.
@@ -73,8 +73,10 @@ await carryOver({ reviewed, current, between, catchUps, tier1MergesSince, gh: vi
 - **Ordinary docs ignore letter case.** `DOCS/x.md` counts as a doc, as `docs/x.md` does (the Mac treats them as one folder). On GitHub they are two folders. Either way the file is still a plain doc by its extension, and a protected name is still protected.
 - **`docs/package.json` is an ordinary doc.** It only matters if `docs/` is ever made a package folder; that is a process step (R3-m11), not a check here.
 - **A large catch-up can hold an approved rules change.** The forward-only check reads a compare from the last good version, and a compare of 300 files or more is refused. If `main` moved that far, the change waits (fails closed); a hand re-seed adopts it.
+- **`checkExactReverse` trusts the caller's `main` and file list.** It does not check that the "before" commit it is given is the current `main`, or that the merge request's `files` are the merged commit's. The Merge Gate passes both from its own GitHub reads.
+- **The snapshot's `mac` and `pin_ok` fields are carried, not judged.** In 0b the snapshot answers only `write_production` (always no) and `snapshot_fresh`; a hook that needs a Mac-wide value gets a named action and a test first.
 - **The snapshot checks permission bits only.** macOS access-control lists on the folder or file are not read. Adding one needs the owner's own access, the same as editing the file.
 
 ## Repair files: what the check cannot see
 
-`repair-plain.mjs` is an allow-list and is stricter than the spec (see its header). An undeclared `repairs.max_statements` refuses every repair file. What it cannot see: a trigger, a custom operator or cast, a column default on the target table, a function called by attribute notation (`t.fn`), or a function named like a keyword it lets stand before `(` (`like`, `join`, `is`) runs code the file doesn't show. Each needs a function or trigger in the database first. Those are schema changes, which ship only as migrations under the `schema` class and always need Joe's Approve.
+`repair-plain.mjs` is an allow-list and is stricter than the spec (see its header). An undeclared `repairs.max_statements` refuses every repair file. What it cannot see: a trigger, a custom operator or cast, a column default, a view, a row-level security policy or a domain check on the target table, a function called by attribute notation (`t.fn`), or a function named like a keyword it lets stand before `(` (`like`, `join`, `is`) runs code the file doesn't show. Each needs a function or trigger in the database first. Those are schema changes, which ship only as migrations under the `schema` class and always need Joe's Approve.

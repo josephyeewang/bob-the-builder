@@ -16,7 +16,8 @@
 // PREPARE, COPY, LOAD, CREATE, ALTER, DROP, TRUNCATE, GRANT, REVOKE, SET, RESET, BEGIN, COMMIT, ROLLBACK outside a
 // literal (SET only as an UPDATE's own SET, DO only as ON CONFLICT DO); more than `repairs.max_statements`
 // statements (undeclared = refused); any call `name(` whose name isn't in `repairs.allowed_functions`; an `&` (a
-// U&"…" escaped name hides a call); a `(` straight after a quoted value or number.
+// U&"…" escaped name hides a call); a `(` straight after a quoted value or number; a space outside plain ASCII; a
+// name starting `pg_`, or information_schema (an UPDATE of pg_settings is a SET by another name).
 // Stricter than the spec, to stay closed: a backslash inside a quoted value (on some database settings it moves
 // where the value ends); a schema-qualified or quoted function name; `SELECT … INTO` (it creates a table); a psql
 // variable (`:name`); an alias column list without AS.
@@ -104,7 +105,7 @@ function tokenize(s) {
   const push = (t, v) => out.push({ t, v, depth });
   while (i < s.length) {
     const c = s[i];
-    if (/\s/.test(c)) { i++; continue; }
+    if (/[ \t\n\r\f\v]/.test(c)) { i++; continue; }          // ASCII spaces only: Postgres reads a no-break space as part of a name
     if (c === '-' && s[i + 1] === '-') { while (i < s.length && s[i] !== '\n' && s[i] !== '\r') i++; continue; }
     if (c === '/' && s[i + 1] === '*') {                   // block comments nest, as in Postgres
       let n = 1; i += 2;
@@ -186,6 +187,7 @@ function checkStatement(toks, n, allowed) {
   for (let i = 0; i < toks.length; i++) {
     const tok = toks[i];
     const prev = toks[i - 1];
+    if ((tok.t === 'word' || tok.t === 'qident') && /^(pg_|information_schema$)/i.test(tok.v)) no(`${where}: the system tables (${tok.v}) are not repair targets`);
     if (tok.t === 'word') {
       const w = tok.v.toLowerCase();
       if (w === 'into' && !isWord(prev, 'insert')) no(`${where}: INTO is allowed only in INSERT INTO (SELECT … INTO creates a table)`);

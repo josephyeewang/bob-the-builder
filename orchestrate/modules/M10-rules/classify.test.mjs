@@ -100,6 +100,11 @@ test('text scans of added lines add classes outside docs, never inside', () => {
 test('links and submodules are protected wherever they are', () => {
   assert.ok(run([mod('docs/research/link', { mode: '120000' })]).risky.includes('protected'));
   assert.ok(run([mod('docs/research/sub', { mode: 160000 })]).risky.includes('protected'));
+  // Any other spelling of a mode is unknown, never a plain doc (audit round 4).
+  for (const mode of [0o120000, '0120000', 120000.5, null, '644']) {
+    assert.ok(run([mod('docs/research/x.md', { mode })]).risky.includes('unclassifiable'), String(mode));
+  }
+  assert.deepEqual(run([mod('docs/research/x.md', { mode: '100644' })]).risky, []);
 });
 
 test('a truncated or oversized file list, a bad entry or a bad path is unclassifiable', () => {
@@ -155,4 +160,14 @@ test('rules given as text go through the same checker; corrupt text makes every 
   const r = classifyWithRulesText(`${fixture}\n__proto__:\n  tiers: loose\n`, { files: [mod('docs/research/x.md')], declared_tier: 2 });
   assert.deepEqual([r.tier, r.risky], [1, ['unclassifiable']]);
   assert.match(r.reasons.unclassifiable[0], /corrupt/);
+});
+
+test('with unreadable rules the protected floor still applies (audit round 4, R3-M3)', () => {
+  const files = [mod('orchestrate/policy.yaml'), { path: 'docs/a.yml', previous_path: '.github/workflows/a.yml', status: 'renamed' }];
+  const corrupt = classifyWithRulesText('not: [valid', { files, declared_tier: 2 });
+  assert.deepEqual(corrupt.protected, ['.github/workflows/a.yml', 'orchestrate/policy.yaml']);
+  const bad = classifyChange({ ...policy, effect_paths: { ...policy.effect_paths, production_data: { ...policy.effect_paths.production_data, repair_folder: '{bad' } } }, { files, declared_tier: 2 });
+  assert.match(bad.reasons.unclassifiable.join(), /patterns unreadable/);
+  assert.deepEqual(bad.protected, ['.github/workflows/a.yml', 'orchestrate/policy.yaml']);
+  assert.deepEqual(classifyChange(null, { files }).protected, ['.github/workflows/a.yml', 'orchestrate/policy.yaml']);
 });
