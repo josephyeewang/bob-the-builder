@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { hostStatusLine, prePushMessage, checkAirSetup } from './device-checks.mjs';
+import { hostStatusLine, prePushMessage, checkAirSetup, readOnlyScope } from './device-checks.mjs';
 
 const GOOD = { githubTokenScopes: ['contents:read', 'metadata:read'], pushCapableCredentials: [], chromeBlocksGithub: true, sessionNames: ['Air research', 'Air notes'], denyFileDecision: 'mini-only' };
 
@@ -42,4 +42,13 @@ test('a fact that could not be gathered is red, never green', () => {
   assert.equal(r.ok, false);
   assert.equal(r.red.length, 5);
   assert.ok(r.red.every((x) => /unknown|not recorded/.test(x)));
+});
+
+test('0b-7 audit round 3 M-D: only read-only scopes pass; public_repo, workflow and write in any spelling are red', () => {
+  for (const bad of [['public_repo', 'read:org'], ['workflow', 'public_repo'], ['contents: write'], ['Contents: Read and write'], ['contents:write'], ['admin:org'], ['repo'], ['gist'], ['delete_repo'], ['write:packages'], ['contents:read', 'actions:write'], ['']]) {
+    assert.equal(checkAirSetup({ ...GOOD, githubTokenScopes: bad }).ok, false, bad.join());
+  }
+  for (const ok of [['contents:read', 'metadata:read'], ['read:org', 'read:user', 'user:email'], []]) assert.equal(checkAirSetup({ ...GOOD, githubTokenScopes: ok }).ok, true, ok.join());
+  assert.equal(readOnlyScope('Contents:read'), false, 'one exact lowercase format');
+  assert.equal(checkAirSetup({ ...GOOD, githubTokenScopes: 'contents:read' }).ok, false, 'not a list');
 });

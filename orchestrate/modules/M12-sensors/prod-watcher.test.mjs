@@ -18,13 +18,14 @@ function fakeVercel() {
     envs: [{ id: 'env_1', key: 'DATABASE_URL', target: ['production'], type: 'encrypted', updatedAt: 1, value: FAKE.dbPassword }],
     project: { commandForIgnoringBuildStep: 'node scripts/skip.mjs', buildCommand: null, framework: 'nextjs', nodeVersion: '22.x', link: { type: 'github', org: 'o', repo: 'r', productionBranch: 'main' } },
     domains: [{ name: 'example.test' }],
+    answer: {}, // per list: an answer body that replaces the normal one (an error body, a renamed field)
   };
   const paths = [];
   const fetchJson = async (path) => {
     paths.push(path);
-    if (path.startsWith('/v6/deployments')) return { deployments: s.deployments };
-    if (/\/env\?/.test(path)) return { envs: s.envs };
-    if (/\/domains\?/.test(path)) return { domains: s.domains };
+    if (path.startsWith('/v6/deployments')) return s.answer.deployments ?? { deployments: s.deployments };
+    if (/\/env\?/.test(path)) return s.answer.envs ?? { envs: s.envs };
+    if (/\/domains\?/.test(path)) return s.answer.domains ?? { domains: s.domains };
     return { ...s.project, targets: { production: { id: s.live } } };
   };
   return { s, paths, reader: makeVercelReader(fetchJson, { projectId: 'prj_test' }) };
@@ -210,5 +211,19 @@ test('0b-7 audit round 2 M-2: a Vercel answer missing the fields the watcher rea
     breakIt(t);
     assert.deepEqual(kinds(await t.pass()), ['watcher-cannot-read'], name);
     assert.match([...t.gh.issues.values()][0].body, /shape the production watcher does not know/, name);
+  }
+});
+
+test('0b-7 audit round 3 M-C: an error body or renamed list field from Vercel raises "cannot read" on every pass, never "no deploys"', async () => {
+  for (const list of ['deployments', 'envs', 'domains']) {
+    const t = setup();
+    t.v.s.deployments = [dep(MAIN[0])]; t.v.s.live = t.v.s.deployments[0].uid;
+    await t.pass();
+    t.v.s.answer[list] = { error: { code: 'forbidden' } };
+    const d = dep(BRANCH, 'cli'); t.v.s.deployments = [d, ...t.v.s.deployments]; t.v.s.live = d.uid;
+    for (let i = 0; i < 2; i++) assert.deepEqual(kinds(await t.pass()), ['watcher-cannot-read'], list);
+    t.v.s.answer[list] = { [`${list}V2`]: [] };
+    assert.deepEqual(kinds(await t.pass()), ['watcher-cannot-read'], `${list} renamed`);
+    assert.equal(t.gh.issues.get(1).closed, false);
   }
 });

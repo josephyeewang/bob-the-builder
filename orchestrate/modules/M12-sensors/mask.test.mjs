@@ -118,3 +118,26 @@ test('a short exact value (FEATURE_KEY=1) is not masked everywhere; the old "tok
   assert.equal(m.maskSecrets('step 1 of 1').text, 'step 1 of 1');
   assert.equal(m.maskSecrets(`Authorization: token ${'a1'.repeat(20)}`).text.includes('a1a1a1'), false);
 });
+
+test('0b-7 audit round 3 M-A: a value under a secret-sounding key is masked whatever its shape, at any depth', () => {
+  const { maskDeep } = makeMasker({ env: {} });
+  // Built at run time (fakes.mjs rule): short values under 20 characters, below every shape and entropy rule.
+  const v = [run(17, 3), run(14, 5), run(4, 9), run(9, 13), run(8, 17)];
+  const out = maskDeep({ password: v[0], env: { STRIPE_SECRET_KEY: v[1], DB_PASSWORD: v[2], PIN_TOKEN: 123456 }, list: [{ api_key: v[3] }], deep: { a: { client_secret: v[4] } } });
+  const all = JSON.stringify(out);
+  for (const leaked of [...v, '123456']) assert.equal(all.includes(leaked), false, leaked);
+  assert.match(all, /REDACTED:named-key/);
+  const kept = maskDeep({ idempotency_key: 'push-1', kind: 'fact.x', key: 'product 1|alert|x', has_token: true, monkey: 'banana' });
+  assert.deepEqual(kept, { idempotency_key: 'push-1', kind: 'fact.x', key: 'product 1|alert|x', has_token: true, monkey: 'banana' }, 'ordinary keys and lowercase "key" untouched');
+});
+
+test('0b-7 audit round 3 M-B: a token at the end of a URL path is masked, by both the masker and the scan', () => {
+  const tok = [run(10, 21), run(12, 22), run(14, 23), run(16, 24), run(14, 25)].join('_').replace(/_(?=[^_]*$)/, '-');
+  const line = `POST https://chat.example.test/api/webhooks/1234567890/${tok} 204`;
+  const { maskSecrets } = makeMasker({ env: {} });
+  const r = maskSecrets(line);
+  assert.equal(r.text.includes(tok), false);
+  assert.match(r.text, /webhooks\/1234567890\/\[REDACTED:high-entropy\] 204/);
+  assert.ok(findCredentials(line).some((f) => f.kind === 'high-entropy' && line.slice(f.at).startsWith(tok)));
+  assert.equal(maskSecrets('src/components/very-long-file-name_for-testing/index.tsx').hits.length, 0, 'plain paths stay');
+});

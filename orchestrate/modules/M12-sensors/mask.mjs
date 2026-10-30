@@ -104,12 +104,22 @@ function maskShapes(text, hits) {
     });
   }
   out = out.replace(GENERIC, (run) => {
-    if (!looksHighEntropy(run)) return run;
-    hits.push('high-entropy');
-    return '[REDACTED:high-entropy]';
+    if (looksHighEntropy(run)) { hits.push('high-entropy'); return '[REDACTED:high-entropy]'; }
+    if (!run.includes('/')) return run;
+    // A token at the end of a URL path is taken into one run with the path before it (round 3 M-B): judge each segment.
+    return run.split('/').map((seg) => {
+      if (!looksHighEntropy(seg)) return seg;
+      hits.push('high-entropy');
+      return '[REDACTED:high-entropy]';
+    }).join('/');
   });
   return out;
 }
+
+// A key that names a secret (password, api_key, STRIPE_SECRET_KEY…) masks its whole value, as the "named" rule does
+// for the same pair written as text (round 3 M-A; R-0b-125 "any value after a secret-sounding name").
+const SECRET_KEY = new RegExp(`^${SECRET_NAME}$`, 'i');
+export const isSecretKey = (k) => SECRET_KEY.test(k) || (/^[A-Z0-9_]+$/.test(k) && CREDENTIAL_ENV_KEY_SUFFIX.test(k));
 
 export const TYPED_KEY = /^(?:sha|id|uid|ts|created|[a-z0-9]+(?:_sha|_id|_at))$/;
 // A field is exempt only when BOTH its name is typed AND its value has a typed shape (review round 2: outside systems
@@ -141,7 +151,12 @@ export function makeMasker({ env = process.env, protectedEnvKeys = [], protected
     if (Array.isArray(v)) return v.map(maskDeep);
     if (v && typeof v === 'object') {
       const o = {};
-      for (const [k, x] of Object.entries(v)) o[maskSecrets(k).text] = isTypedField(k, x) ? x : maskDeep(x);
+      for (const [k, x] of Object.entries(v)) {
+        let key = maskSecrets(k).text;
+        while (Object.hasOwn(o, key)) key += '~';
+        if (isSecretKey(k) && x !== null && x !== undefined && typeof x !== 'object' && !(typeof x === 'string' && x.length < 4) && typeof x !== 'boolean') o[key] = '[REDACTED:named-key]';
+        else o[key] = isTypedField(k, x) ? x : maskDeep(x);
+      }
       return o;
     }
     return v;
@@ -157,7 +172,11 @@ export function findCredentials(text, { env = {}, protectedValues = [] } = {}) {
   for (const { kind, re, group } of SHAPES) {
     for (const m of s.matchAll(re)) { if (m[group] && !m[group].startsWith('[REDACTED')) found.push({ kind, at: m.index }); }
   }
-  for (const m of s.matchAll(GENERIC)) if (looksHighEntropy(m[0])) found.push({ kind: 'high-entropy', at: m.index });
+  for (const m of s.matchAll(GENERIC)) {
+    if (looksHighEntropy(m[0])) { found.push({ kind: 'high-entropy', at: m.index }); continue; }
+    let at = m.index;
+    for (const seg of m[0].split('/')) { if (looksHighEntropy(seg)) found.push({ kind: 'high-entropy', at }); at += seg.length + 1; }
+  }
   return found;
 }
 

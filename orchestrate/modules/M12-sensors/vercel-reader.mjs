@@ -27,12 +27,19 @@ export const SETTING_FIELDS = Object.freeze([
   ['autoAssignCustomDomains', (p) => p.autoAssignCustomDomains],
 ]);
 
+// A list field that is missing or not a list is an unreadable answer, never "none" (round 3 M-C): the watcher's
+// catch raises "cannot read Vercel". The Mini's fetchJson must throw on any non-2xx answer.
+function list(r, field) {
+  if (!Array.isArray(r?.[field])) throw Object.assign(new Error(`Vercel answer has no ${field} list`), { shape: field });
+  return r[field];
+}
+
 export function makeVercelReader(fetchJson, { projectId, teamId } = {}) {
   const team = teamId ? { teamId } : {};
   return Object.freeze({
     async deployments() {
       const r = await fetchJson(`/v6/deployments?${q({ projectId, target: 'production', limit: 50, ...team })}`);
-      return (r.deployments ?? []).map((d) => ({
+      return list(r, 'deployments').map((d) => ({
         uid: d.uid, created: d.created ?? d.createdAt, state: d.readyState ?? d.state, target: d.target ?? 'production',
         source: d.source ?? null, sha: d.meta?.githubCommitSha ?? null,
       }));
@@ -43,14 +50,14 @@ export function makeVercelReader(fetchJson, { projectId, teamId } = {}) {
     },
     async envMeta() {
       const r = await fetchJson(`/v10/projects/${encodeURIComponent(projectId)}/env?${q(team)}`);
-      return (r.envs ?? []).map((e) => ({ id: e.id, key: e.key, target: Array.isArray(e.target) ? e.target : [e.target], type: e.type, updatedAt: e.updatedAt }));
+      return list(r, 'envs').map((e) => ({ id: e.id, key: e.key, target: Array.isArray(e.target) ? e.target : [e.target], type: e.type, updatedAt: e.updatedAt }));
     },
     async settings() {
       const p = await fetchJson(`/v9/projects/${encodeURIComponent(projectId)}?${q(team)}`);
       const d = await fetchJson(`/v9/projects/${encodeURIComponent(projectId)}/domains?${q(team)}`);
       const out = {};
       for (const [name, get] of SETTING_FIELDS) out[name] = get(p) ?? null;
-      out.productionDomains = (d.domains ?? []).filter((x) => !x.gitBranch).map((x) => x.name).sort();
+      out.productionDomains = list(d, 'domains').filter((x) => !x.gitBranch).map((x) => x.name).sort();
       return out;
     },
   });
