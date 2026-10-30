@@ -289,6 +289,7 @@ test('round 10 audit 8 M-1: the case-flip form follows the caseless option on an
   const root = tmp();
   assert.ok(!hostDead('cat {{P}}', 'case-flip'), 'never dropped for the machine running the runner');
   assert.equal(hostDead('cat {{P}}', 'globstar'), !existsSync('/bin/zsh'), 'round 10 audit 9: `**/` only where zsh is');
+  assert.equal(hostDead('echo x > {{P}}', 'inner-brace'), hostDead('echo x > {{P}}', 'brace'), 'round 10 audit 11: a brace inside the name, as one around it');
   assert.ok(cases(T, root, { caseless: true }).some((c) => c.form === 'case-flip'));
   // Minor 2: by default, the disk the file's folder is on.
   const flipped = `${dirname(root)}/${[...root.split('/').pop()].map((c) => (c === c.toUpperCase() ? c.toLowerCase() : c.toUpperCase())).join('')}`;
@@ -417,5 +418,19 @@ test('round 10 audit 10: a guard that skips here-doc bodies, or takes only lower
     // (It reads no spelling but the plain one, so only the plain form, and the copies, which name no spelling.)
     const both = missed({ heredoc: true, cp: /^-\w*[rRa]/ }, (form) => form === 'plain' || form === '-');
     assert.ok(!both.some((m) => /<<'EOF'\n|^cp -[Ra] /.test(m)), `${target}: caught by a guard that does both`);
+  }
+});
+
+test('round 10 audit 11: a guard reading brace pieces as names misses a brace inside the name; one judging by the asked folder misses cd then read', () => {
+  const root = tmp();
+  for (const target of [T, `apps/web/${T}`]) {
+    const file = resolve(root, target);
+    const pieces = (c, cwd) => (c.split(/[\s;&|()<>'"{},]+/).some((w) => w && (resolve(cwd, w) === file || w === basename(file))) ? 'refuse' : 'allow');
+    const missed = runCorpus(pieces, { target, cwd: root }).failures.filter((f) => f.expect === 'refuse');
+    assert.ok(missed.some((f) => f.form === 'inner-brace') && !missed.some((f) => f.form === 'brace'), `${target}: inner brace`);
+    // Refuses a no-folder read only when the folder it is asked from holds the file.
+    const asked = (c, cwd) => ((/grep -r|^tar |\btar cf .* \.$|cp -r \./m.test(c) && file.startsWith(`${cwd}/`)) || c.includes(file) ? 'refuse' : 'allow');
+    const missedCd = runCorpus(asked, { target, cwd: root }).failures.filter((f) => f.expect === 'refuse' && f.group === 'cd-here');
+    assert.equal(missedCd.length, corpus.refuse_cd_here.length, `${target}: every cd-then-read case`);
   }
 });

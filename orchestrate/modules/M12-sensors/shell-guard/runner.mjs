@@ -110,6 +110,8 @@ export function pathForms(target, cwd, { absolute = true, home = homedir(), case
     'base64-sub': `$(echo ${Buffer.from(target).toString('base64')} | base64 -d)`,
     'ansi-c': `$'${hex}'`,
     'brace': `${dir}{${base},nothing}`,
+    // A brace inside the name, as `.env.{example,production}` (round 10 audit 11 minor 1: braces only wrapped it whole).
+    'inner-brace': `${dir}${base.slice(0, mid)}{${base.slice(mid)},nothing}`,
     ...(dirGlob ? { 'dir-glob': dirGlob } : {}),
     // zsh's `**/` searches every folder below (round 10 audit 9 M-1); bash without globstar does not (hostDead).
     ...(isAbsolute(target) ? {} : { globstar: `**/${base}` }),
@@ -140,7 +142,7 @@ export function checkPath(p) {
 // nothing on this machine because a shell is missing: without zsh a brace after ">" is an error, and dash (Linux's sh)
 // does not read $'…' (round 10 audit 3 M-4); without zsh, `**/` is `*/` and finds no file in the folder itself.
 const SH_ANSI_C = spawnSync('sh', ['-c', "printf %s $'\\x41'"], { encoding: 'utf8' }).stdout === 'A';
-export const hostDead = (tpl, form) => (form === 'brace' && !existsSync('/bin/zsh') && /> ?(\{\{UP\}\}\/)?\{\{(P|BASE)\}\}/.test(tpl))
+export const hostDead = (tpl, form) => (/brace$/.test(form) && !existsSync('/bin/zsh') && /> ?(\{\{UP\}\}\/)?\{\{(P|BASE)\}\}/.test(tpl))
   || (form === 'ansi-c' && !SH_ANSI_C && tpl.startsWith('sh -c'))
   || (form === 'globstar' && !existsSync('/bin/zsh'));
 const live = (tpl, form) => !(corpus.dead[tpl] ?? []).includes(form) && !hostDead(tpl, form);
@@ -191,6 +193,9 @@ export function cases(target, cwd = process.cwd(), { home = homedir(), caseless 
   for (const where of [...new Set([dir, ...(holds(cwd) ? [cwd] : [])])]) {
     for (const tpl of corpus.refuse_here) if (live(tpl, '-')) out.push({ expect: 'refuse', group: 'here', form: '-', tpl, cwd: where, command: tpl });
   }
+  // Change into the file's folder, then read the folder there naming nothing, asked from / (round 10 audit 11 minor 2: a
+  // guard that judges a no-folder read by the folder it is asked from, not the one the cd leads to, passed).
+  for (const tpl of corpus.refuse_cd_here) if (live(tpl, '-')) out.push({ expect: 'refuse', group: 'cd-here', form: '-', tpl, cwd: '/', command: fill(tpl, { DIR: dir }) });
   // Change folder first, then name the file by its short name (in each form). Asked from the folder above, so a guard
   // that ignores the cd and reads the short name from its own folder misses it (0b-7 round 10 M-1); and from the run
   // folder, with a step up asked from the file's own folder, so a guard that refuses every case asked from elsewhere
