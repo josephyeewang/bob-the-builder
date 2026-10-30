@@ -1,0 +1,26 @@
+{
+  "role": "lead",
+  "model": "main",
+  "effort": "high",
+  "effort_floor": "high",
+  "tools": [
+    "Read",
+    "Glob",
+    "Grep",
+    "Write",
+    "AskUserQuestion"
+  ],
+  "permission_mode": "acceptEdits",
+  "restricted_mode": true,
+  "outbox_kinds": [
+    "wish-",
+    "think-",
+    "scout-",
+    "write-",
+    "handoff-",
+    "roadmap-",
+    "history-"
+  ],
+  "auto_resume": false,
+  "context": "context.lead"
+}

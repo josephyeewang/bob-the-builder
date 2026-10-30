@@ -14,8 +14,11 @@
 //   rules.get('caps.editing_per_mac', { product })                  // → a number from the rules, or undefined
 //   rules.classify(change)                                          // → { tier, risky: [...], reasons, protected } (D7)
 //     change = { product, files: [{ path, previous_path?, status: added|modified|removed|renamed|copied, mode?,
-//                added_lines? }], truncated?, declared_tier?, labels?, policy? }
-//     `policy` (the rules as of the parent commit) is passed GitHub-side; without it the current rules are used.
+//                added_lines?, removed_lines? }], truncated?, declared_tier?, labels? }
+//     Always judged by the current rules. A caller can't hand in rules of its own: any `policy` or `atCommit` field is
+//     dropped (round 2, R2-M10). The GitHub-side checker reads the parent commit's rules through M10's
+//     classifyWithRulesText instead.
+//   Gate only on may(). get() is for display and sizing; an undefined get() means "refuse", never "no limit".
 //   rules.rev                                                      // the loaded rules version, for diary lines
 
 export const ALLOW = 'allow';
@@ -37,6 +40,12 @@ export const ACTIONS = Object.freeze({
 export const RISKY_CLASSES = Object.freeze(['production_data', 'schema', 'protected', 'secrets_settings', 'deletes',
   'first_customer_visible', 'messages_people', 'unclassifiable']);
 
+// A deny whose reason is one of these means "wait, keep the place in the queue", not "refused" (0b-1 R3-m8). The
+// Merge Gate tests membership here; it never parses reason text.
+export const HOLD_REASONS = Object.freeze(['held_tier1_hours', 'rules_not_adopted']);
+
+const errText = (e) => { try { return String(e?.message ?? e); } catch { return 'unreadable error'; } };
+
 export function allow(reason = 'allowed') { return { decision: ALLOW, reason }; }
 export function ask(tier, reason) { return { decision: ASK, tier, reason }; }
 export function deny(reason) { return { decision: DENY, reason }; }
@@ -55,8 +64,12 @@ export function makeRules(impl) {
     get rev() { return rev(); },
     may(action, subject = {}) {
       if (!Object.hasOwn(ACTIONS, action)) return { ...deny(`unknown action "${action}"`), rev: rev() };
+      // Every field is read inside the try, so an answer whose getter throws is a deny too (audit round 9).
       let d;
-      try { d = impl.may(action, subject); } catch (e) { return { ...deny(`rules error: ${e.message}`), rev: rev() }; }
+      try {
+        const a = impl.may(action, subject);
+        d = a && typeof a === 'object' ? (a.decision === ASK ? { decision: a.decision, tier: a.tier, reason: a.reason } : { decision: a.decision, reason: a.reason }) : a;
+      } catch (e) { return { ...deny(`rules error: ${errText(e)}`), rev: rev() }; }
       if (!isDecision(d)) return { ...deny('rules gave no valid answer'), rev: rev() };
       return { ...d, rev: rev() };
     },
@@ -64,13 +77,32 @@ export function makeRules(impl) {
       try { return impl.get(key, opts); } catch { return undefined; }
     },
     // A change the rules can't classify counts as risky (D7), so a failure here is "unclassifiable", Tier 1.
+    // Any risky class or protected path makes it Tier 1, whatever the implementation said (R2-m2).
     classify(change) {
-      const failed = (reason) => ({ tier: 1, risky: ['unclassifiable'], reasons: { unclassifiable: [reason] } });
-      let c;
-      try { c = impl.classify(change); } catch (e) { return failed(`rules error: ${e.message}`); }
-      if (!c || (c.tier !== 1 && c.tier !== 2) || !Array.isArray(c.risky)) return failed('rules gave no valid classification');
-      if (c.risky.some((k) => !RISKY_CLASSES.includes(k))) return failed('unknown risky class in classification');
-      return c;
+      // With no trusted classification, every named file may be protected: never answer with an empty list (audit round 6).
+      // Reading the change can throw too (a getter), so the names are read inside a try (audit round 9).
+      const named = () => {
+        try { return Array.isArray(change?.files) ? Array.from(change.files, (f) => f?.path).filter((p) => typeof p === 'string') : []; } catch { return []; }
+      };
+      const failed = (reason) => ({ tier: 1, risky: ['unclassifiable'], reasons: { unclassifiable: [reason] }, protected: named() });
+      // Everything that reads the change or the answer sits inside the try, so any throw is a fail-closed answer.
+      try {
+        let asked = change;
+        if (change && typeof change === 'object') {
+          const { policy, atCommit, ...rest } = change;   // eslint-disable-line no-unused-vars
+          asked = rest;
+        }
+        let c;
+        try { c = impl.classify(asked); } catch (e) { return failed(`rules error: ${errText(e)}`); }
+        if (!c || (c.tier !== 1 && c.tier !== 2) || !Array.isArray(c.risky)) return failed('rules gave no valid classification');
+        const risky = [...c.risky];
+        if (risky.some((k) => !RISKY_CLASSES.includes(k))) return failed('unknown risky class in classification');
+        const reasons = c.reasons;
+        if (!reasons || typeof reasons !== 'object' || Array.isArray(reasons)) return failed('classification gave no reasons');
+        const prot = c.protected ?? [];
+        if (!Array.isArray(prot) || prot.some((p) => typeof p !== 'string')) return failed('classification gave a bad protected list');
+        return { tier: risky.length || prot.length ? 1 : c.tier, risky, reasons, protected: [...prot] };
+      } catch (e) { return failed(`rules error: ${errText(e)}`); }
     },
   });
 }

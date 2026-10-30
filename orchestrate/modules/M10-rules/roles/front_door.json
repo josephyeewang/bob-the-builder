@@ -1,0 +1,29 @@
+{
+  "role": "front_door",
+  "model": "sonnet",
+  "effort": "medium",
+  "effort_floor": "low",
+  "tools": [
+    "Read",
+    "Glob",
+    "Grep",
+    "Write",
+    "AskUserQuestion",
+    "PushNotification",
+    "Skill"
+  ],
+  "permission_mode": "acceptEdits",
+  "restricted_mode": true,
+  "outbox_kinds": [
+    "request-",
+    "state-",
+    "idea-",
+    "state-compact-",
+    "ask-request-"
+  ],
+  "auto_resume": false,
+  "context": "context.front_door",
+  "skills": [
+    "orchestrate"
+  ]
+}
