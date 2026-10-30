@@ -38,14 +38,24 @@ function envPrint(list) {
 const settingsPrint = (s) => Object.fromEntries(Object.entries(s).map(([k, v]) => [k, h(v)]));
 
 // evidence: Set of SHAs with stage-second evidence (the robot's merge-gate status). mainFirstParent: Set of main SHAs.
+const FINAL = ['READY', 'ERROR', 'CANCELED'];
+
 export async function watchOnce({ vercel, rulesEntry, mainFirstParent, evidence, writer, alerts, product }) {
   const id = stateFactId(product);
   const prev = writer.get(id);
-  const [deps, live, env, settings] = await Promise.all([vercel.deployments(), vercel.live(), vercel.envMeta(), vercel.settings()]);
-  const { stage, fallback } = resolveStage(rulesEntry);
-  const judge = (d) => isSupported(d, { stage, mainFirstParent, evidence });
   const out = [];
   const raise = async (kind, subject, title, body) => { out.push({ kind, subject, result: await alerts.raise({ key: `${product}|${kind}|${subject}`, title: `${product}: ${title}`, body }) }); };
+  const readKey = `${product}|watcher-cannot-read|vercel`;
+  let deps; let live; let env; let settings;
+  try {
+    [deps, live, env, settings] = await Promise.all([vercel.deployments(), vercel.live(), vercel.envMeta(), vercel.settings()]);
+  } catch (e) {
+    await raise('watcher-cannot-read', 'vercel', 'the production watcher cannot read Vercel', `The production watcher could not read Vercel${Number.isInteger(e?.status) ? ` (HTTP ${e.status})` : ''}. Production is not being watched until it can.`);
+    return out;
+  }
+  await alerts.clear({ key: readKey, note: 'The production watcher can read Vercel again.' });
+  const { stage, fallback } = resolveStage(rulesEntry);
+  const judge = (d) => isSupported(d, { stage, mainFirstParent, evidence });
 
   if (fallback) await raise('no-stage', 'rules', 'rules entry has no stage', 'The product\'s rules entry has no stage (first/second), so the watcher uses the strict rule. Add the stage to the rules entry.');
 
@@ -58,7 +68,9 @@ export async function watchOnce({ vercel, rulesEntry, mainFirstParent, evidence,
       if (!v.ok) await raise('unsupported-deploy', d.uid, 'production deploy that is not a supported main commit', `Deployment ${d.uid} went live in production: ${v.why}.${d.sha ? ` Commit ${d.sha}.` : ''}`);
     }
   }
-  for (const d of deps) seen.add(d.uid);
+  // Only a deploy in a final state is remembered: one first seen while still building is judged when it turns READY
+  // (0b-7 audit M-1).
+  for (const d of deps) if (FINAL.includes(d.state)) seen.add(d.uid);
 
   const newest = ready.filter((d) => judge(d).ok).sort((a, b) => b.created - a.created)[0] ?? null;
   const oldKey = `${product}|old-version-live|production`;

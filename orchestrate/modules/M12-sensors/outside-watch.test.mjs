@@ -44,6 +44,7 @@ test('stop the check on purpose → the Mini alerts within ~2 h (10-minute passe
   }
   assert.ok(alertedAt !== null && alertedAt <= 120, `alerted after ${alertedAt} min`);
   assert.equal(w.home.issues.size, 1, 'one issue, updated, not one per pass');
+  assert.equal(w.home.issues.get(1).comments.length, 0, 'the growing age edits silently, never comments (0b-7 audit M-3)');
   assert.match(w.home.issues.get(1).title, /stopped/);
   assert.ok(STOPPED_MIN < 120);
 });

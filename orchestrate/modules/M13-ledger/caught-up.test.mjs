@@ -11,7 +11,11 @@ const H = 3600e3;
 function setup() {
   let t = Date.parse('2026-11-03T08:00:00Z');
   const now = () => new Date(t);
-  const rec = memoryRecord();
+  // The in-memory record stamps the diary with the real clock; this wrapper stamps it with the test's clock instead.
+  const rec0 = memoryRecord(); const stamps = [];
+  const rec = { ...rec0,
+    write(w) { const r = rec0.write(w); if (r.ok) stamps[r.seq] = t; return r; },
+    diary(o) { return rec0.diary(o).map((l) => ({ ...l, ts: stamps[l.seq] ? new Date(stamps[l.seq]).toISOString() : l.ts })); } };
   const writer = makeFactWriter(rec, { actor: 'ledger', now });
   const issues = [];
   const gh = { listIdeaIssues: async () => issues };
@@ -73,4 +77,27 @@ test('a normal pass (under 15 minutes since the last good one) sends no push', a
   const s = setup();
   for (let i = 0; i < 10; i++) { s.tick(60e3); assert.equal((await s.pass()).returned, false); }
   assert.equal(s.pushes().length, 0);
+});
+
+test('0b-7 audit M-7: an ask that expired before the Mini went down is not listed again on the next return', async () => {
+  const s = setup();
+  s.ask('A-old', { state: 'expired', pr: 3 });
+  s.ask('A-yes', { state: 'answered', pr: 4 });
+  s.tick(10 * 60e3); await s.pass();
+  s.tick(2 * H);
+  s.ask('A-new', { state: 'expired', pr: 5 });
+  s.tick(H);
+  const r = await s.pass();
+  assert.deepEqual(r.expired, ['A-new']);
+  const text = s.pushes()[0].doc.text;
+  assert.match(text, /Expired, need a fresh Approve: PR 5\. /);
+  assert.match(text, /Approvals now going ahead: 0\./);
+});
+
+test('the owner match is numeric: "1001" from config works; a missing owner ID refuses', async () => {
+  const { intakeIdeas } = await import('./caught-up.mjs');
+  const writer = makeFactWriter(memoryRecord(), { actor: 'ledger' });
+  const gh = { listIdeaIssues: async () => [{ number: 1, title: 't', body: 'b', user: { id: 1001 } }, { number: 2, title: 't', body: 'b' }] };
+  assert.deepEqual((await intakeIdeas({ gh, writer, ownerId: '1001' })).filed, [1]);
+  await assert.rejects(intakeIdeas({ gh, writer, ownerId: undefined }), /numeric GitHub user ID/);
 });

@@ -22,13 +22,16 @@
 // ── Layer 1: Archon's exact-value redaction (port) ──
 const CREDENTIAL_ENV_KEY_SUFFIX = /(?:TOKEN|KEY|SECRET|PASSWORD)$/i;
 const CREDENTIAL_ENV_KEYS = new Set(['DATABASE_URL']);
+// Ours, not Archon's: an exact value shorter than this is not masked (FEATURE_KEY=1 would turn every "1" into
+// [REDACTED]); short secrets are left to the shape rules (0b-7 audit, minor).
+export const MIN_EXACT = 8;
 
 export function collectCredentialValues(env, protectedEnvKeys, protectedCredentialValues) {
   const explicitlyProtected = new Set(protectedEnvKeys);
   const values = Object.entries(env ?? {}).flatMap(([key, value]) =>
     value && (explicitlyProtected.has(key) || CREDENTIAL_ENV_KEYS.has(key) || CREDENTIAL_ENV_KEY_SUFFIX.test(key)) ? [value] : []);
   return [...new Set([...values, ...(protectedCredentialValues ?? [])])]
-    .filter((value) => typeof value === 'string' && value.length > 0)
+    .filter((value) => typeof value === 'string' && value.length >= MIN_EXACT)
     .sort((a, b) => b.length - a.length);
 }
 
@@ -54,6 +57,7 @@ const SHAPES = [
   { kind: 'jwt', re: /\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g, group: 0 },
   { kind: 'private-key', re: /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)/g, group: 0 },
   { kind: 'bearer', re: /\b(?:Bearer|Basic)\s+([A-Za-z0-9._~+/-]{12,}=*)/g, group: 1 },
+  { kind: 'bearer', re: /\bAuthorization:\s*token\s+([A-Za-z0-9_]{20,})/gi, group: 1 },
   { kind: 'flag', re: /--(?:token|password|api-key|secret)(?:=|\s+)("?)([^\s"']{6,})\1/g, group: 2 },
   { kind: 'url-password', re: /\b[a-z][a-z0-9+.-]*:\/\/[^\s:/@]+:([^\s@/]+)@/gi, group: 1 },
   { kind: 'named', re: new RegExp(`(?:^|[^A-Za-z0-9_])(${SECRET_NAME})("?\\s*[=:]\\s*)(["']?)([^\\s"',;}]{4,})`, 'gi'), group: 4 },
@@ -115,9 +119,10 @@ export function isTypedField(key, value) {
     && (isKnownId(value) || /^\d+$/.test(value) || /^\d{4}-\d\d-\d\dT\d\d:\d\d(?::\d\d(?:\.\d+)?)?(?:Z|[+-]\d\d:\d\d)$/.test(value));
 }
 
-// The Sensors' known credential values, gathered once per process from the environment the Sensors run in.
+// The Sensors' known credential values, gathered once per process from the environment the Sensors run in. That
+// environment is the default, so layer 1 is on wherever a masker is made without one (0b-7 audit M-4).
 // Tests pass their own planted env; nothing here prints or stores a value.
-export function makeMasker({ env = {}, protectedEnvKeys = [], protectedValues = [] } = {}) {
+export function makeMasker({ env = process.env, protectedEnvKeys = [], protectedValues = [] } = {}) {
   const values = collectCredentialValues(env, protectedEnvKeys, protectedValues);
   function maskSecrets(text) {
     if (text === null || text === undefined) return { text: text, hits: [] };

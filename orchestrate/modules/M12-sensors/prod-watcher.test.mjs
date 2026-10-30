@@ -169,3 +169,27 @@ test('stage second: a main Git deploy needs the merge-gate evidence', () => {
   assert.equal(isSupported(base, { stage: 'second', mainFirstParent: new Set(MAIN), evidence: new Set([MAIN[0]]) }).ok, true);
   assert.equal(isSupported({ source: 'git', sha: null }, { stage: 'first', mainFirstParent: new Set(MAIN) }).ok, false);
 });
+
+test('0b-7 audit M-1: a CLI deploy first seen while building is judged when it turns READY', async () => {
+  const t = setup();
+  await t.pass();
+  const d = dep(MAIN[2], 'cli', 'BUILDING'); t.v.s.deployments = [d];
+  assert.deepEqual(await t.pass(), []);
+  d.readyState = 'READY'; t.v.s.live = d.uid;
+  assert.deepEqual(kinds(await t.pass()), ['unsupported-deploy']);
+  assert.deepEqual(kinds(await t.pass()).filter((k) => k === 'unsupported-deploy'), [], 'judged once, not every pass');
+});
+
+test('a Vercel read error raises one "cannot read" alert, cleared when reading works again', async () => {
+  const t = setup();
+  await t.pass();
+  const good = t.v.s.deployments;
+  Object.defineProperty(t.v.s, 'deployments', { configurable: true, get() { throw Object.assign(new Error('x'), { status: 403 }); } });
+  assert.deepEqual(kinds(await t.pass()), ['watcher-cannot-read']);
+  await t.pass();
+  assert.equal(t.gh.issues.size, 1);
+  assert.match([...t.gh.issues.values()][0].body, /HTTP 403/);
+  Object.defineProperty(t.v.s, 'deployments', { configurable: true, writable: true, value: good });
+  await t.pass();
+  assert.equal([...t.gh.issues.values()][0].closed, true);
+});

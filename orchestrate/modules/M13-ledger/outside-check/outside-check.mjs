@@ -32,6 +32,8 @@ export const STALE_MIN = 70;
 const AUDIT_MIN_AGE = 30 * 60e3;
 const AUDIT_MAX_AGE = 48 * 3600e3;
 const FIRST_PARENT_MAX = 200;
+const FUTURE_SLACK = 10 * 60e3;
+const MAIN_UPDATES = ['push', 'force_push', 'pr_merge', 'merge_queue_merge'];
 
 class HttpError extends Error { constructor(status) { super(`http ${status}`); this.status = status; } }
 
@@ -84,18 +86,26 @@ export const CHECKS = {
     }
     return changed ? { ok: false, code: `audit-files-changed ${changed}` } : { ok: true, code: `${Object.keys(files).length} files` };
   },
+  // Which main updates are due an audit run is judged by GitHub's own push times (the repository activity list), never
+  // by a commit's date, which the pusher sets (0b-7 audit M-6). Each push, PR merge or queue merge to main that is
+  // 30 min to 48 h old needs a successful audit run on the head it left. A first-parent commit dated in the future is
+  // a FAIL on its own. Activity list fields as GitHub documents them, 29 Oct 2026; not yet checked live (Principle 9).
   async 'audit-run'(p, { api, now }) {
     const { auditCheck } = resolveStage(p);
     if (!auditCheck) return { ok: true, code: 'not-applicable stage first' };
     if (!p.audit_workflow) return { ok: false, code: 'no-audit-workflow-named' };
     const t = now();
-    const due = (await firstParent(api, p.repo)).filter((c) => {
-      const age = t - Date.parse(c.commit?.committer?.date);
+    const future = (await firstParent(api, p.repo, 100)).filter((c) => Date.parse(c.commit?.committer?.date) > t + FUTURE_SLACK);
+    if (future.length) return { ok: false, code: `commit-dated-in-future ${future.length}` };
+    const acts = await api(`/repos/${p.repo}/activity?ref=refs/heads/main&per_page=100`);
+    if (!Array.isArray(acts)) return { ok: false, code: 'activity-unreadable' };
+    const due = acts.filter((a) => MAIN_UPDATES.includes(a.activity_type) && /^[0-9a-f]{40}$/.test(a.after ?? '')).filter((a) => {
+      const age = t - Date.parse(a.timestamp);
       return age >= AUDIT_MIN_AGE && age <= AUDIT_MAX_AGE;
     });
     let missing = 0;
-    for (const c of due) if (!(await auditOk(api, p.repo, p.audit_workflow, c.sha))) missing += 1;
-    return missing ? { ok: false, code: `main-commit-without-audit ${missing}` } : { ok: true, code: `${due.length} commits` };
+    for (const a of due) if (!(await auditOk(api, p.repo, p.audit_workflow, a.after))) missing += 1;
+    return missing ? { ok: false, code: `main-update-without-audit ${missing}` } : { ok: true, code: `${due.length} main updates` };
   },
   async deploys(p, { api }) {
     const deps = (await api(`/repos/${p.repo}/deployments?per_page=50`)).filter((d) => String(d.environment ?? '').startsWith('Production'));
@@ -121,7 +131,10 @@ export const CHECKS = {
 export async function runOne(check, slot, { products, api, pinned, now = () => Date.now() }) {
   const label = `product ${slot}`;
   if (!CHECKS[check]) return { line: `${label} / ${check}: FAIL unknown-check`, ok: false, label };
+  // A missing, empty or malformed product list fails every slot: a silent green would switch the net off (0b-7 audit M-5).
+  if (!Array.isArray(products) || !products.length) return { line: `${label} / ${check}: FAIL products-missing`, ok: false, label };
   const p = products[slot - 1];
+  if (p !== undefined && (!p || typeof p !== 'object' || !p.repo)) return { line: `${label} / ${check}: FAIL product-entry-malformed`, ok: false, label };
   if (!p) return { line: `${label} / ${check}: ok slot-empty`, ok: true, label, empty: true };
   let r;
   try { r = await CHECKS[check]({ ...p, label }, { api, pinned, now }); }

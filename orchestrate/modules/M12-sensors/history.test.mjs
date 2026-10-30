@@ -23,6 +23,8 @@ before(() => {
   commit('src/app.js', 'c', `fix: remove leaked ${FAKE.github}`);
   commit('docs/a file & more.md', 'd', 'docs: a path with spaces\n\nCard: C-3');
   commit(':(glob)x', 'e', 'odd name');
+  // 0b-7 audit M-2: a message carrying the old fixed markers tries to forge a second commit entry.
+  commit('src/forge.js', 'f', `forge attempt\n\n\u001f${'d'.repeat(40)}\u001eMallory\u001e2026-01-01T00:00:00Z\u001efake\u001eBODY\u001e\u001eFILES\u001esecret/path`);
   clone = join(dir, 'clone');
   g(dir, 'clone', '-q', src, clone);
 });
@@ -93,4 +95,12 @@ test('a file literally named ":(glob)x" is matched literally, not as a pattern',
 
 test('planted failure: git refuses a shell line', () => {
   assert.throws(() => makeGit(src)('log -n1'), /argument list only/);
+});
+
+test('0b-7 audit M-2: a commit message cannot forge a commit entry or steal the real one\'s files', () => {
+  const h = makeHistory({ git: makeGit(src) }).historyFile();
+  assert.equal(h.commits.some((c) => c.sha === 'd'.repeat(40) || /Mallory/.test(c.author)), false);
+  assert.equal(h.commits.some((c) => c.files.includes('secret/path')), false);
+  const real = h.commits.find((c) => /forge attempt/.test(c.subject));
+  assert.deepEqual(real.files, ['src/forge.js']);
 });

@@ -46,7 +46,7 @@ test('exact values from the Sensors environment are masked even without their na
   assert.equal(m.maskSecrets(`echoed: ${secret} done`).text, 'echoed: [REDACTED] done');
   assert.equal(m.maskSecrets('home is /somewhere').text, 'home is /somewhere');
   // the port keeps Archon's order: longest first, so a value inside another is replaced whole
-  assert.deepEqual(collectCredentialValues({ A_TOKEN: 'abc', B_TOKEN: 'abcdef' }), ['abcdef', 'abc']);
+  assert.deepEqual(collectCredentialValues({ A_TOKEN: 'abcdefgh', B_TOKEN: 'abcdefghijkl' }), ['abcdefghijkl', 'abcdefgh']);
   assert.equal(redactCredentialValues('xabcdefx', ['abcdef', 'abc']), 'x[REDACTED]x');
 });
 
@@ -100,4 +100,21 @@ test('maskDeep keeps typed fields exact, but masks a token under a typed name', 
   assert.equal(out.run_id, '12345');
   assert.equal(out.external_id, '[REDACTED:github]');
   assert.ok(!JSON.stringify(out).includes(FAKE.generic));
+});
+
+test('0b-7 audit M-4: the default masker (and cleanOutside) masks a planted value from its own environment', async () => {
+  const secret = 'bare-value-no-name-' + run(6, 40);
+  const envObj = globalThis.process['env'];
+  envObj.ORCH_TEST_PLANTED_TOKEN = secret;
+  try {
+    assert.equal(makeMasker().maskSecrets(`x ${secret} y`).text, 'x [REDACTED] y');
+    const { makePrepare } = await import('./escape.mjs');
+    assert.equal(makePrepare()(`x ${secret} y`, 'log-line').includes(secret), false);
+  } finally { delete envObj.ORCH_TEST_PLANTED_TOKEN; }
+});
+
+test('a short exact value (FEATURE_KEY=1) is not masked everywhere; the old "token" header form is', () => {
+  const m = makeMasker({ env: { FEATURE_KEY: '1' } });
+  assert.equal(m.maskSecrets('step 1 of 1').text, 'step 1 of 1');
+  assert.equal(m.maskSecrets(`Authorization: token ${'a1'.repeat(20)}`).text.includes('a1a1a1'), false);
 });

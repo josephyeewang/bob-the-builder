@@ -34,12 +34,13 @@ export async function heartbeatOnce({ product, writer, gh, alerts, owner, probes
   const red = []; const lines = [];
   const set = async (kind, isRed, line, body) => {
     lines.push(`${isRed ? 'RED  ' : 'ok   '} ${line}`);
-    if (isRed) { red.push(kind); await alerts.raise({ key: key(kind), title: `${product}: heartbeat red: ${kind}`, body }); }
+    if (isRed) { red.push(kind); await alerts.raise({ key: key(kind), title: `${product}: heartbeat red: ${kind}`, body, status: `red:${kind}` }); }
     else await alerts.clear({ key: key(kind), note: `${kind} is green again.` });
   };
 
   const d = await probe(probes.dispatcherLastGood);
-  const dAge = d.ok && d.v ? Math.round((t - Date.parse(d.v)) / 60e3) : null;
+  const dParsed = d.ok && d.v ? Date.parse(d.v) : NaN;
+  const dAge = Number.isFinite(dParsed) ? Math.round((t - dParsed) / 60e3) : null;
   await set('dispatcher', dAge === null || !(dAge <= DISPATCHER_LATE_MIN),
     `last good Dispatcher pass: ${dAge === null ? 'unknown' : `${dAge} min ago`}`,
     `The Dispatcher's last good pass was ${dAge === null ? 'never recorded' : `${dAge} minutes ago`} (red after ${DISPATCHER_LATE_MIN}). Nothing new is being started or merged.`);
@@ -85,7 +86,7 @@ export async function heartbeatOnce({ product, writer, gh, alerts, owner, probes
     const step = [...USAGE_STEPS].reverse().find((s) => usage.pct >= s);
     lines.push(`${step ? 'warn ' : 'ok   '} usage: ${Math.round(usage.pct)} % of the ${usage.window} window`);
     const ukey = key(`usage-${usage.window}`);
-    if (step) await alerts.raise({ key: ukey, title: `${product}: Claude usage past ${USAGE_STEPS[0]} % (${usage.window})`, body: `Usage has passed ${step} % of the ${usage.window} window${usage.resets_at ? `; it resets ${usage.resets_at}` : ''}.` });
+    if (step) await alerts.raise({ key: ukey, title: `${product}: Claude usage past ${USAGE_STEPS[0]} % (${usage.window})`, body: `Usage has passed ${step} % of the ${usage.window} window${usage.resets_at ? `; it resets ${usage.resets_at}` : ''}.`, status: `step:${step}` });
     else await alerts.clear({ key: ukey, note: 'A new usage window has started.' });
   } else {
     lines.push('ok    usage: unknown');

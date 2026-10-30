@@ -17,17 +17,24 @@
 
 import { createHash } from 'node:crypto';
 import { makeFactWriter } from '../M12-sensors/facts.mjs';
+import { makeMasker } from '../M12-sensors/mask.mjs';
 
 const idOf = (key) => `alert-${createHash('sha256').update(key).digest('hex').slice(0, 16)}`;
 
 export function alertKey(product, kind, subject) { return `${product}|${kind}|${subject}`; }
 
-export function makeAlerts({ rec, gh, owner, actor = 'ledger', now = () => new Date(), writer = makeFactWriter(rec, { actor, now }) }) {
+export function makeAlerts({ rec, gh, owner, actor = 'ledger', now = () => new Date(), masker = makeMasker(), writer = makeFactWriter(rec, { actor, now, masker }) }) {
   const bodyOf = (s) => `${s.body}\n\n---\nfirst seen ${s.since} · last seen ${s.last} · seen ${s.count} times\n<!-- alert-key ${idOf(s.key)} -->`;
 
   // The condition holds now. Returns what happened: opened | updated | changed | suppressed (Joe closed it).
-  async function raise({ key, title, body }) {
+  // `status` is the condition's stable state; only a change of it comments (and so notifies). A body that carries a
+  // changing figure ("down 40 minutes") is edited silently (0b-7 audit M-3). Without a status, the body is the status.
+  // Title and body are masked before they are compared, stored or posted.
+  async function raise({ key, title: rawTitle, body: rawBody, status: rawStatus }) {
     const id = idOf(key);
+    const title = masker.maskSecrets(rawTitle).text;
+    const body = masker.maskSecrets(rawBody).text;
+    const status = rawStatus === undefined ? body : masker.maskSecrets(rawStatus).text;
     const t = now().toISOString();
     const s = writer.get(id);
     if (s && (s.status === 'open' || s.status === 'closed-by-owner')) {
@@ -36,13 +43,13 @@ export function makeAlerts({ rec, gh, owner, actor = 'ledger', now = () => new D
         return 'suppressed';
       }
       if (s.status === 'closed-by-owner') { writer.put(id, { ...s, kind: 'fact.alert', last: t }); return 'suppressed'; }
-      const next = { ...s, kind: 'fact.alert', last: t, count: s.count + 1, body };
+      const next = { ...s, kind: 'fact.alert', last: t, count: s.count + 1, body, status_text: status };
       await gh.edit(s.issue, bodyOf(next));
-      if (body !== s.body) { await gh.comment(s.issue, `Changed: ${body.split('\n')[0]}`); writer.put(id, next); return 'changed'; }
+      if (status !== (s.status_text ?? s.body)) { await gh.comment(s.issue, `Changed: ${body.split('\n')[0]}`); writer.put(id, next); return 'changed'; }
       writer.put(id, next);
       return 'updated';
     }
-    const st = { kind: 'fact.alert', key, title, body, status: 'open', since: t, last: t, count: 1 };
+    const st = { kind: 'fact.alert', key, title, body, status_text: status, status: 'open', since: t, last: t, count: 1 };
     st.issue = await gh.open({ title, body: bodyOf(st), assignee: owner });
     writer.put(id, st);
     return 'opened';

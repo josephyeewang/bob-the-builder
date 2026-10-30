@@ -25,7 +25,7 @@ import { makeMasker } from './mask.mjs';
 
 export const SOURCES = Object.freeze(['commit-subject', 'commit-author', 'research-file', 'idea-issue', 'lesson-file',
   'idea-file', 'check-output', 'check-name', 'log-line', 'pr-title', 'pr-file', 'review-thread', 'issue-body', 'issue-title',
-  'deploy-meta']);
+  'deploy-meta', 'front-door-turn', 'record-ask']);
 export const SINGLE_LINE = Object.freeze(['commit-subject', 'commit-author', 'pr-title', 'issue-title', 'check-name', 'deploy-meta']);
 export const CAP = 300;
 // The exact fenced form, for the cutover kit's Lead wording (R-0b-141…143) and the R-0b-148 checks.

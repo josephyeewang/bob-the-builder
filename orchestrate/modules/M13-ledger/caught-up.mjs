@@ -20,9 +20,11 @@ export const RETURN_GAP_MIN = 15;
 
 // gh.listIdeaIssues() → [{ number, title, body, user: { id, login } }] (open issues labelled `idea`, product repo).
 export async function intakeIdeas({ gh, writer, ownerId }) {
+  const owner = Number(ownerId);
+  if (!Number.isSafeInteger(owner) || owner <= 0) throw new Error('intakeIdeas needs the owner\'s numeric GitHub user ID');
   const filed = []; let ignored = 0;
   for (const i of await gh.listIdeaIssues()) {
-    if (i.user?.id !== ownerId) { ignored += 1; continue; }
+    if (Number(i.user?.id) !== owner) { ignored += 1; continue; }
     const id = `idea-issue-${i.number}`;
     if (writer.get(id)) continue;
     writer.put(id, { kind: 'fact.idea-issue', number: i.number, state: 'inbox',
@@ -39,9 +41,14 @@ export async function caughtUpOnce({ rec, gh, writer, ownerId, product, lastGood
   if (!(gapMin > RETURN_GAP_MIN)) return { returned: false, ...intake };
 
   const downSince = lastGoodPass;
+  // Only asks that reached their state while the Mini was down, judged by the record's diary (the time the record
+  // itself stamped), so an ask that expired weeks ago is not listed again on every return (0b-7 audit M-7).
+  const reached = new Map();
+  for (const l of rec.diary({ since: 0 })) if (l.entity === 'ask' && l.to_state) reached.set(l.id, { state: l.to_state, ts: l.ts });
+  const whileDown = (a) => reached.get(a.id)?.state === a.state && Date.parse(reached.get(a.id).ts) >= Date.parse(downSince);
   const asks = rec.list('ask').map((a) => ({ id: a.id, ...a.doc }));
-  const expired = asks.filter((a) => a.state === 'expired');
-  const waiting = asks.filter((a) => a.state === 'answered');
+  const expired = asks.filter((a) => a.state === 'expired' && whileDown(a));
+  const waiting = asks.filter((a) => a.state === 'answered' && whileDown(a));
   const ideasWhileDown = rec.list('fact').filter((f) => f.doc.kind === 'fact.idea-issue' && f.doc.ts >= downSince).length;
 
   const idem = createHash('sha256').update(`caught-up|${product}|${downSince}`).digest('hex').slice(0, 16);

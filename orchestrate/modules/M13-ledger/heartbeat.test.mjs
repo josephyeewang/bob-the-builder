@@ -47,6 +47,7 @@ test('stop the Dispatcher → heartbeat red and one alert; restart → cleared',
   assert.equal(al.length, 1);
   assert.match(al[0].title, /red: dispatcher/);
   assert.match(h.gh.issues.get(1).body, /RED: dispatcher/);
+  assert.equal(al[0].comments.length, 0, 'a changing "N minutes ago" edits silently, never comments (0b-7 audit M-3)');
   h.world.dispatcherRunning = true; h.tick(10); await h.pass();
   assert.equal(al[0].closed, true);
   assert.ok(DISPATCHER_LATE_MIN === 15);

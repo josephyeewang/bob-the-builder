@@ -30,6 +30,8 @@ function fakeGh(over = {}) {
     deployments: [{ id: 2, environment: 'Production – app', sha: sha('c'), created_at: iso(50) }, { id: 1, environment: 'Preview', sha: sha('f'), created_at: iso(40) }],
     statuses: { 2: 'success', 1: 'success' },
     perms: 'read',
+    // GitHub's own push times for main (the activity list): b pushed 120 min ago, c merged 60 min ago.
+    activity: [{ activity_type: 'pr_merge', after: sha('c'), timestamp: iso(60) }, { activity_type: 'push', after: sha('b'), timestamp: iso(120) }, { activity_type: 'branch_creation', after: sha('f'), timestamp: iso(100) }],
     ...over,
   };
   const calls = [];
@@ -39,6 +41,7 @@ function fakeGh(over = {}) {
     if (!path.startsWith(`/repos/${REPO}/`)) throw Object.assign(new Error('x'), { status: 404 });
     const rest = u.pathname.slice(`/repos/${REPO}`.length);
     if (rest === '/issues') return s.heartbeat;
+    if (rest === '/activity') return s.activity;
     if (rest === '/commits') return u.searchParams.get('page') === '1' ? s.commits : [];
     if (rest.startsWith('/actions/workflows/')) { const c = s.runs[u.searchParams.get('head_sha')]; return { workflow_runs: c ? [{ status: 'completed', conclusion: c }] : [] }; }
     if (rest.startsWith('/contents/')) { const f = s.files[decodeURIComponent(rest.slice(10))]; if (f === undefined) throw Object.assign(new Error('x'), { status: 404 }); return { content: Buffer.from(f).toString('base64') }; }
@@ -73,15 +76,37 @@ test('audit-files: a changed or deleted pinned file → FAIL; an empty pinned li
 });
 
 test('audit-run: a main first-parent commit with no finished audit run → FAIL; stage first → not applicable', async () => {
-  assert.match((await run('audit-run', fakeGh({ runs: { [sha('c')]: 'success' } }))).line, /FAIL main-commit-without-audit 1/);
+  assert.match((await run('audit-run', fakeGh({ runs: { [sha('c')]: 'success' } }))).line, /FAIL main-update-without-audit 1/);
   assert.match((await run('audit-run', fakeGh({ runs: { [sha('c')]: 'failure', [sha('b')]: 'success' } }))).line, /FAIL/);
   const first = await run('audit-run', fakeGh({ runs: {} }), product({ stage: 'first' }));
   assert.equal(first.ok, true); assert.match(first.line, /not-applicable/);
   assert.equal((await run('audit-run', fakeGh({ runs: {} }), product({ stage: 'first', post_merge_audit: true }))).ok, false);
   assert.equal((await run('audit-run', fakeGh({ runs: {} }), product({ stage: undefined }))).ok, false, 'missing stage = strict');
-  // the merged branch commit f is not first-parent and needs no run of its own
+  // the merged branch commit f is not a main update and needs no run of its own
   const gh = fakeGh(); await run('audit-run', gh);
   assert.equal(gh.calls.some((c) => c.includes(`head_sha=${sha('f')}`)), false);
+});
+
+test('0b-7 audit M-6: the window is GitHub\'s push time, not the commit\'s own date; a future-dated commit FAILs', async () => {
+  // c carries a committer date 72 h back, but GitHub says it reached main 60 min ago: it is still due.
+  const backdated = fakeGh({ runs: { [sha('b')]: 'success' } });
+  backdated.s.commits[0].commit.committer.date = iso(60 * 72);
+  assert.match((await run('audit-run', backdated)).line, /FAIL main-update-without-audit 1/);
+  const future = fakeGh();
+  future.s.commits[2].commit.committer.date = iso(-60 * 24);
+  assert.match((await run('audit-run', future)).line, /FAIL commit-dated-in-future 1/);
+  assert.match((await run('audit-run', fakeGh({ activity: { message: 'x' } }))).line, /FAIL activity-unreadable/);
+});
+
+test('0b-7 audit M-5: a missing, empty or malformed product list FAILs every slot, never "slot-empty"', async () => {
+  for (const products of [[], undefined, null, {}, { repo: REPO }]) {
+    const r = await runOne('heartbeat', 1, { products, api: fakeGh().api, pinned, now: () => NOW });
+    assert.equal(r.ok, false, JSON.stringify(products)); assert.match(r.line, /FAIL products-missing/);
+  }
+  const bad = await runOne('heartbeat', 2, { products: [product(), 'oops'], api: fakeGh().api, pinned, now: () => NOW });
+  assert.match(bad.line, /FAIL product-entry-malformed/);
+  const empty = await runOne('heartbeat', 3, { products: [product()], api: fakeGh().api, pinned, now: () => NOW });
+  assert.equal(empty.ok, true); assert.equal(empty.empty, true, 'a later empty slot is fine when the list has products');
 });
 
 test('deploys: live production on a non-main commit, or a main commit without audit evidence (stage second) → FAIL', async () => {

@@ -13,13 +13,11 @@
 // The history file is the last 200 FIRST-PARENT commits of main, so it equals `git log --first-parent` on a fresh copy.
 
 import { execFileSync } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
 import { makePrepare } from './escape.mjs';
 
 export const HISTORY_COMMITS = 200;
 export const REQUEST_COMMITS = 50;
-const SEP = '\u001e';
-const END = '\u001f';
-
 export const MAX_PATH = 4096;
 const BAD_PATH_CHAR = /[\u0000-\u001F\u007F-\u009F\u200B-\u200F\u202A-\u202E\u2066-\u2069\uFEFF]/;
 
@@ -41,26 +39,33 @@ export function makeGit(repoDir, runner = (args) => execFileSync('git', args, { 
   return (args) => { if (!Array.isArray(args)) throw new Error('git takes an argument list only'); return runner(['--literal-pathspecs', ...args]); };
 }
 
-function parseLog(out) {
+// Field and record markers are fresh random strings on every call: a commit message can hold any byte git allows,
+// including U+001E and U+001F, so a fixed marker would let a message forge a whole commit entry (0b-7 audit M-2).
+// A chunk whose sha is not 40 hex or whose date is not an ISO time is refused, never passed on.
+const ISO = /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:Z|[+-]\d\d:\d\d)$/;
+function markers() { const n = randomBytes(12).toString('hex'); return { SEP: `<${n}|s>`, END: `<${n}|e>`, BODY: `<${n}|b>`, FILES: `<${n}|f>` }; }
+
+function parseLog(out, m) {
   const commits = [];
-  for (const chunk of out.split(END)) {
+  for (const chunk of out.split(m.END)) {
     const c = chunk.replace(/^\n+/, '');
     if (!c.trim()) continue;
-    const [head, rest = ''] = c.split(`${SEP}BODY${SEP}`);
-    const [sha, author, date, subject] = head.split(SEP);
-    const [body, files = ''] = rest.split(`${SEP}FILES${SEP}`);
+    const [head, rest = ''] = c.split(m.BODY);
+    const [sha, author, date, subject] = head.split(m.SEP);
+    const [body, files = ''] = rest.split(m.FILES);
+    if (!/^[0-9a-f]{40}$/.test(sha ?? '') || !ISO.test(date ?? '')) throw new Error('git log output did not parse; refusing the history');
     commits.push({ sha, author, date, subject, body, files: files.split('\n').filter(Boolean) });
   }
   return commits;
 }
 
-const FORMAT = `--format=${END}%H${SEP}%an${SEP}%aI${SEP}%s${SEP}BODY${SEP}%b${SEP}FILES${SEP}`;
-
 // Raw commits on `ref` (default main), newest first, optionally for one literal path.
 export function readLog(git, { ref = 'main', n = HISTORY_COMMITS, path = null, firstParent = false } = {}) {
-  const args = ['log', `-n${n}`, ...(firstParent ? ['--first-parent'] : []), '--name-only', FORMAT, ref];
+  const m = markers();
+  const format = `--format=${m.END}%H${m.SEP}%an${m.SEP}%aI${m.SEP}%s${m.BODY}%b${m.FILES}`;
+  const args = ['log', `-n${n}`, ...(firstParent ? ['--first-parent'] : []), '--name-only', format, ref];
   if (path !== null) args.push('--', path);
-  return parseLog(git(args));
+  return parseLog(git(args), m);
 }
 
 export function makeHistory({ git, prepare = makePrepare(), ref = 'main' }) {

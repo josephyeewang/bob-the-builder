@@ -15,13 +15,23 @@ export const STOPPED_MIN = 90;
 // productAlerts: { 'product 1': alerts, … } from private config.
 export async function watchOutside({ fetchJson, repo, workflow = 'outside-check.yml', homeAlerts, productAlerts, now = () => Date.now() }) {
   const out = [];
-  const runs = (await fetchJson(`/repos/${repo}/actions/workflows/${workflow}/runs?event=schedule&per_page=10`)).workflow_runs ?? [];
+  const readKey = 'outside-check|watch-cannot-read|github';
+  let runs;
+  try {
+    runs = (await fetchJson(`/repos/${repo}/actions/workflows/${workflow}/runs?event=schedule&per_page=10`)).workflow_runs ?? [];
+  } catch (e) {
+    out.push(['cannot-read', await homeAlerts.raise({ key: readKey, title: 'The Mini cannot read the outside check\'s runs',
+      body: `Reading the outside-check repo's runs failed${Number.isInteger(e?.status) ? ` (HTTP ${e.status})` : ''}. Whether the outside check still runs is unknown until it can.`, status: 'cannot-read' })]);
+    return out;
+  }
+  out.push(['cannot-read', await homeAlerts.clear({ key: readKey, note: 'The Mini can read the outside check\'s runs again.' })]);
   const newest = runs.map((r) => Date.parse(r.created_at)).filter(Number.isFinite).sort((a, b) => b - a)[0];
   const age = newest === undefined ? Infinity : Math.round((now() - newest) / 60e3);
   const stoppedKey = 'outside-check|stopped|schedule';
   if (age > STOPPED_MIN) {
     out.push(['stopped', await homeAlerts.raise({ key: stoppedKey, title: 'The hourly outside check has stopped running',
-      body: newest === undefined ? 'The outside-check repo shows no scheduled run at all.' : `The newest scheduled outside-check run started ${age} minutes ago (more than ${STOPPED_MIN}). Open the outside-check repo's Actions tab: the schedule may be switched off.` })]);
+      body: newest === undefined ? 'The outside-check repo shows no scheduled run at all.' : `The newest scheduled outside-check run started ${age} minutes ago (more than ${STOPPED_MIN}). Open the outside-check repo's Actions tab: the schedule may be switched off.`,
+      status: newest === undefined ? 'no-runs' : 'stopped' })]);
   } else {
     out.push(['stopped', await homeAlerts.clear({ key: stoppedKey, note: 'The outside check is running again.' })]);
   }
