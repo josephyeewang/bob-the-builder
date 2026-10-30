@@ -10,7 +10,7 @@ in words.
 **Why.** "Reference-class anchoring decides the cluster" (design-mockups heuristic #1), and
 "Translate, Don't Paraphrase" (Engineering Principle 6): a real site is a source to port proportions
 from; a prose style is a ~70% approximation. Before Inspo, Round 1 could only use references the user
-already knew and named. (Verdict: joe.wang "Verdicts" note, Trying section, 2026-10-03.)
+already knew and named. (Adopted on trial 2026-10-03 after a tool review.)
 
 **Bob's author asked for this to run by default** (2026-10-03: *"incorporate inspo as default bc i wont
 remember to activate it"*). Do NOT ask whether to use it. Run it, say in one line that you did.
@@ -20,7 +20,7 @@ remember to activate it"*). Do NOT ask whether to use it. Run it, say in one lin
   runs for a homepage/hero. HTML-lane product dashboards: run it too, but with a smaller pull (5)
   since Inspo is mostly marketing sites.
 - **Skip it** (and say so in one line) when:
-  - the project is 🔴 client work product (e.g. Swarmer) — the hosted Inspo server receives the
+  - the project is 🔴 confidential client work — the hosted Inspo server receives the
     search text, and it can't be verified that they don't keep it. Use local mode instead only if
     it has been set up (`claude mcp add --scope user inspo-local -- npx -y inspo-mcp`); otherwise skip.
   - the `inspo` tools aren't available in this session (server down / removed) — proceed without,
@@ -49,13 +49,12 @@ remember to activate it"*). Do NOT ask whether to use it. Run it, say in one lin
 
 ## The trial (scores itself — record it, don't ask the user to remember)
 Inspo is in **Trying** until two website galleries have run with Round 0. After the user's Round 1
-rating, append one line to `inspo-trial-log.md` (this folder):
+rating, append one line to the **project's** trial log, `docs/design/inspo-trial-log.md` (create it from the header in this folder's `inspo-trial-log.md` if it is missing). Never write to the copy in Bob's folder: that folder is the shared install and a public repo.
 
 `<date> · <project> · refs liked: X/10 · Round-1 LIKEs: Inspo-based A of N vs archetype B of M`
 
-- **Keep** (→ promote to "Worth it" on joe.wang, drop the trial wording here): across the two
+- **Keep** (→ make it a settled default and drop the trial wording here): across the two
   runs, ≥3 of 10 refs LIKEd each time AND Inspo-based mockups get at least as many LIKEs as
   archetype ones.
-- **Drop** (→ `claude mcp remove inspo --scope user`, move to "Looked at, passed", delete this
-  step from SKILL.md): ≤1 ref LIKEd in a run, or Inspo-based mockups clearly lose.
+- **Drop** (→ `claude mcp remove inspo --scope user`, delete this step from SKILL.md): ≤1 ref LIKEd in a run, or Inspo-based mockups clearly lose.
 - After the second logged run, tell the user the result and the call in one short paragraph.

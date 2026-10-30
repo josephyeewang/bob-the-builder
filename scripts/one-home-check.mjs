@@ -133,7 +133,7 @@ const listIn = (dir, exts, deep = false) => (has(dir)
   : []);
 const sessionFiles = ['build-protocol-core.md', 'rules.md', 'skill/SKILL.md', 'build-protocol.md',
   ...listIn('modes', ['.md']), ...listIn('reference', ['.md']), ...listIn('templates', ['.md', '.json']),
-  ...listIn('audit-lenses', ['.md'], true)].filter(has);
+  ...listIn('audit-lenses', ['.md'], true), ...listIn('skills', ['.md'], true)].filter(has);
 const bobScripts = new Set(has('scripts') ? fs.readdirSync(path.join(ROOT, 'scripts'), { recursive: true }).map(String) : []);
 const used = new Map(SKIP.map((s) => [s, 0]));
 const NODE_OK = '"$(realpath ~/.claude/skills/bob/..)/scripts/';

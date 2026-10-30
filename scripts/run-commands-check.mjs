@@ -28,7 +28,8 @@
 //        itself it needs --base. At a phase gate, pass the commit the phase started from.
 // Exit: 0 = nothing named in a run config was moved, deleted or gutted · 1 = REFUSED · 2 = cannot run (not a git
 //       repository; or no base — on main or master, or in a shallow CI clone, without --base: nothing compared is not
-//       a pass, Rule 29).
+//       a pass, Rule 29; or no run config at all, so there was nothing to read — record the gate item as "no run
+//       configs", not as passed).
 
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
@@ -127,6 +128,10 @@ function runLines(f, text) {
 const configs = tracked.filter((f) => (CONFIG.test(f) && !f.includes('node_modules/')) || /^\.github\/(workflows\/[^/]+|actions\/.+\/action)\.ya?ml$/.test(f))
   .filter((f) => fs.existsSync(path.join(ROOT, f)))
   .map((f) => ({ f, lines: runLines(f, fs.readFileSync(path.join(ROOT, f), 'utf8')) }));
+if (!configs.length) {
+  console.log('run-commands-check: cannot judge — no run config in the repo (package.json, pyproject.toml, .github/workflows/*.yml, …), so nothing names a file this check could protect. Record "no run configs" at the gate; this is not a pass (Rule 29).');
+  process.exit(2);
+}
 const existing = tracked.filter((f) => fs.existsSync(path.join(ROOT, f)));
 
 // A config's run lines as they were at the base, to tell a line this change wrote from one it left alone.
@@ -234,4 +239,4 @@ if (problems.length) {
   for (const p of problems) console.log(`  ✗ ${p}`);
   process.exit(1);
 }
-console.log(`run-commands-check: OK — compared with ${base.slice(0, 12)}: ${gone.length} script(s) moved or deleted, ${modifiedPy.length} Python file(s) changed; no run config still names one that moved, went or lost its run block`);
+console.log(`run-commands-check: OK — read ${configs.length} run config(s); compared with ${base.slice(0, 12)}: ${gone.length} script(s) moved or deleted, ${modifiedPy.length} Python file(s) changed; no run config still names one that moved, went or lost its run block`);

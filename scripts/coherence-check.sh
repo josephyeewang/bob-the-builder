@@ -14,9 +14,10 @@
 #   .bob-retired-terms   one term per line; flagged if found in a LIVE (non-
 #                        changelog, non-decision-log) line. '#' lines are comments.
 #
-# Exit code: 0 = no hard problems; 1 = contiguity gap/dup OR retired-term residue OR (class 8) a pointer in the
+# Exit code: 0 = no hard problems; 1 = a decision-log gap or duplicate ID (section [1]) OR (section [8]) a pointer in the
 #   root AGENTS.md/CLAUDE.md that does not resolve, or a status page whose as-of date trails the decision log.
-# Version-string and cross-ref inventories are always informational (never fail).
+# Everything else is a review list for the reader and never fails: version strings, cross-refs, retired-term
+# residue (section [5]) and the rest.
 
 set -uo pipefail
 DOCS_DIR="${1:-./docs}"
@@ -40,7 +41,7 @@ echo "════════════════════════�
 echo " BOB COHERENCE SWEEP — $DOCS_DIR  (${#DOCS[@]} docs)"
 echo "════════════════════════════════════════════════════════════════"
 
-# ── Class 4: decision-log contiguity (gaps / dupes) + highest ID ─────────────
+# ── [1] (was class 4): decision-log contiguity (gaps / dupes) + highest ID ─────────────
 # Decision IDs that LEAD a markdown table row: '| D-073 |'. References elsewhere
 # (e.g. "per D-062") are intentionally ignored so we count entries, not mentions.
 echo
@@ -85,7 +86,7 @@ else
   fi
 fi
 
-# ── Class 4b: "synced through D-n" claims vs the actual highest ID ───────────
+# ── [2] (was class 4b): "synced through D-n" claims vs the actual highest ID ───────────
 echo
 echo "── [2] 'synced through D-n' / 'D-001…D-n' claims vs highest ($HIGHEST_ID) ──"
 HITS=$(grep -rniE 'synced through \**D-[0-9]+|D-001[…\.]+ *\**D-[0-9]+' "${DOCS[@]}" 2>/dev/null)
@@ -101,7 +102,7 @@ else
   echo "  (⚠ = lag to eyeball; not a hard fail — a claim may intentionally trail by one)"
 fi
 
-# ── Class 1: version-string inventory (eyeball cross-doc drift) ──────────────
+# ── [3] (was class 1): version-string inventory (eyeball cross-doc drift) ──────────────
 echo
 echo "── [3] Version strings (vN.N) per doc — scan for drift across index docs ──"
 for d in "${DOCS[@]}"; do
@@ -110,7 +111,7 @@ for d in "${DOCS[@]}"; do
   [ -n "$vs" ] && printf '  %-34s %s\n' "$(basename "$d"):" "$vs"
 done
 
-# ── Class 3: cross-reference inventory (§ / D / P / C / S refs) ──────────────
+# ── [4] (was class 3): cross-reference inventory (§ / D / P / C / S refs) ──────────────
 echo
 echo "── [4] Cross-ref token counts per doc (§ / D-n / P-n) ──"
 for d in "${DOCS[@]}"; do
@@ -121,7 +122,7 @@ for d in "${DOCS[@]}"; do
 done
 echo "  (resolve §/D targets semantically — the script counts, the reader judges)"
 
-# ── Class 5: retired-vocabulary residue — REVIEW LIST, not a hard fail ───────
+# ── [5]: retired-vocabulary residue — REVIEW LIST, not a hard fail ───────
 # Pure-grep can't distinguish genuine residue from a line that *names* a retired
 # term precisely to retire it ("corrects the earlier 'agent-first' over-rotation").
 # So this is a filtered candidate list for the reader to judge — never sets FAIL.
@@ -153,7 +154,7 @@ else
   [ "$ANY" -eq 0 ] && echo "  ✓ no retired-term residue survives the filter (snapshot/retirement-context excluded)"
 fi
 
-# ── Class 6: secondary/snapshot docs reading as live ────────────────────────
+# ── [6]: secondary/snapshot docs reading as live ────────────────────────
 echo
 echo "── [6] Dated/secondary docs — do they carry a snapshot banner? ──"
 for d in "${DOCS[@]}"; do
@@ -169,7 +170,7 @@ for d in "${DOCS[@]}"; do
 done
 echo "  (⚠ = consider a '📸 snapshot — not a living doc' banner, or '<!-- living doc -->' if it is one; not a hard fail)"
 
-# ── Class 7: code / SSOT drift (Rule 24, v2.30) — the .md-only sweep's blind spot ──
+# ── [7]: code / SSOT drift (Rule 24, v2.30) — the .md-only sweep's blind spot ──
 # Docs aren't the only source of truth: machine-readable contracts (contracts/*.ts,
 # *.sql, *.json) and schema files drift from the spec too (e.g. a stale "§2.4" comment
 # or a missing field the spec says the type "carries"). The script can't verify
@@ -204,7 +205,7 @@ else
   fi
 fi
 
-# ── Class 8: the always-read root file — pointers resolve; the status page is not stale (Rule 23(c), D-018) ──
+# ── [8]: the always-read root file — pointers resolve; the status page is not stale (Rule 23(c), D-018) ──
 # Every class above reads DOCS_DIR only, and the one file loaded into EVERY session (AGENTS.md / CLAUDE.md at the
 # repo root) sits outside it — so the most-read file was the one file no check looked at. In a real build a status
 # block there claimed a decision range months out of date while this sweep flagged the same claim

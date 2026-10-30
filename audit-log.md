@@ -7,6 +7,22 @@ This is the operational counterpart to `decision-log.md`. The decision log recor
 
 ---
 
+## Audit pass — v2.57 re-audit (2026-10-30), fixed in v2.59
+
+**Origin:** a fresh-context re-audit of v2.57, after the 29 Oct audit's fixes (v2.50–v2.56). 50 findings: 14 serious, 26 minor, 10 cosmetic. 18 were in the ORCHESTRATE lane's area and were handed to it with file and line evidence; Bob upkeep does not edit that lane's files.
+
+**Fixed in v2.59 (D-034):** all 7 of Bob upkeep's serious findings, and the minor and cosmetic ones that took under about ten minutes each.
+
+**Deferred (carried forward):**
+- A pre-push check for private names, which D-026 calls for. Not built yet.
+- Planted-problem tests for `spec-audit.py`, `failure-mode-check.sh`, the coherence check's sections, and the update check's states.
+- `lane-check.mjs` goes by two names in the docs.
+- The phase gate list is written in both the core and `build-protocol.md`. Kept both for now; the core covers the item that differed.
+
+**Handed to the ORCHESTRATE lane:** its 18 findings, plus three found while fixing: `bob-init.sh` still says the coherence check blocks retired terms; its settings comment should name the hook-skip variables; the Journey Map and the NEW mode's audit counts need the "six audits" wording.
+
+---
+
 ## EVOLVE pass — v2.24 (2026-05-29) — L34 internal+external axes made co-equal + external-execution mandated (evolution 002 continued)
 
 **Origin:** Joe's check — is L34 both internal (site/content mechanics) and external (run keyword searches, prompt AI engines, scan competitors, map topic landscape)?

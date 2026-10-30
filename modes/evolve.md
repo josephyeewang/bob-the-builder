@@ -16,7 +16,7 @@
 | Size | Criteria | Process Steps |
 |------|----------|---------------|
 | **Small** | 1-3 files, no new concepts, no spec impact | E2 → E3 → E4 |
-| **Medium** | 3-10 files, new behavior within existing subsystem, spec update needed | E2 → E3 → E4 → E5 |
+| **Medium** | 4-10 files, new behavior within existing subsystem, spec update needed | E2 → E3 → E4 → E5 |
 | **Large** | New subsystem, architectural change, cross-cutting concern, or Behavioral Core change | E2 → E3 → E4 → E5 → E6 |
 
 If unsure, classify one size up. Under-processing a Large change as Medium is how inconsistencies accumulate.

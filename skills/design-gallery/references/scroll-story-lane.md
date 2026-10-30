@@ -1,7 +1,7 @@
 # Lane 4 — Landing-page scroll story (via the `scroll-craft` plugin)
 
-**What this lane is for.** Marketing pages only: a product homepage, a launch page, joe.wang
-hero/section rewrites. Pages where the visitor's *scroll* is the storytelling device — the wheel
+**What this lane is for.** Marketing pages only: a product homepage, a launch page, a personal
+site's hero/section rewrites. Pages where the visitor's *scroll* is the storytelling device — the wheel
 scrubs a film, a frame pins while copy advances, numbers land, type assembles. It is NOT for
 product UI, dashboards, reports, or anything behind login (those stay in the HTML-mockup lane).
 
