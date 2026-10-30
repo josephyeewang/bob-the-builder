@@ -12,7 +12,7 @@
 // strings. A path with a control, bidi or zero-width character is left out and counted, never passed on.
 // The history file is the last 200 FIRST-PARENT commits of main, so it equals `git log --first-parent` on a fresh copy.
 
-import { execFileSync } from 'node:child_process';
+import { gitOk } from '../M4-workshop/git/safe-git.mjs';
 import { randomBytes } from 'node:crypto';
 import { makePrepare } from './escape.mjs';
 
@@ -34,8 +34,14 @@ export function cardOf(subject, body = '') {
   return s ? s[1] : null;
 }
 
-// git, always with an argument list. The runner is injectable so tests can see every call.
-export function makeGit(repoDir, runner = (args) => execFileSync('git', args, { cwd: repoDir, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 })) {
+// git, always with an argument list, through safe-git.mjs (lead call L36): an empty environment, no system or global
+// config, no hooks or programs the copy's own files could name, and the repository named by GIT_DIR. `gitDir` is the
+// copy's `.git` folder (or a bare mirror). The runner is injectable so tests can see every call; it may be async.
+// safe-git still reads the repository's own config, so the settings that make `git log` start a program (a signature
+// check names one) are pinned off here too (L36: a planted gpg.program ran on a plain log).
+export const HISTORY_CONFIG = Object.freeze([['log.showSignature', 'false'], ['log.mailmap', 'false'],
+  ...['gpg.program', 'gpg.openpgp.program', 'gpg.x509.program', 'gpg.ssh.program'].map((k) => [k, '/usr/bin/false'])]);
+export function makeGit(gitDir, runner = (args) => gitOk(args, { gitDir, purpose: 'history', extraConfig: HISTORY_CONFIG })) {
   return (args) => { if (!Array.isArray(args)) throw new Error('git takes an argument list only'); return runner(['--literal-pathspecs', ...args]); };
 }
 
@@ -60,12 +66,12 @@ function parseLog(out, m) {
 }
 
 // Raw commits on `ref` (default main), newest first, optionally for one literal path.
-export function readLog(git, { ref = 'main', n = HISTORY_COMMITS, path = null, firstParent = false } = {}) {
+export async function readLog(git, { ref = 'main', n = HISTORY_COMMITS, path = null, firstParent = false } = {}) {
   const m = markers();
   const format = `--format=${m.END}%H${m.SEP}%an${m.SEP}%aI${m.SEP}%s${m.BODY}%b${m.FILES}`;
   const args = ['log', `-n${n}`, ...(firstParent ? ['--first-parent'] : []), '--name-only', format, ref];
   if (path !== null) args.push('--', path);
-  return parseLog(git(args), m);
+  return parseLog(await git(args), m);
 }
 
 export function makeHistory({ git, prepare = makePrepare(), ref = 'main' }) {
@@ -80,15 +86,15 @@ export function makeHistory({ git, prepare = makePrepare(), ref = 'main' }) {
   });
 
   // The history file's content: the last 200 commits of main, each with its files, author and card.
-  function historyFile() {
-    const head = git(['rev-parse', ref]).trim();
-    return { ref, head, commits: readLog(git, { ref, firstParent: true }).map(shape) };
+  async function historyFile() {
+    const head = (await git(['rev-parse', ref])).trim();
+    return { ref, head, commits: (await readLog(git, { ref, firstParent: true })).map(shape) };
   }
 
   let pathSet = null;
-  function paths() {
+  async function paths() {
     if (!pathSet) {
-      const files = git(['ls-tree', '-r', '--name-only', '-z', ref]).split('\0').filter(Boolean);
+      const files = (await git(['ls-tree', '-r', '--name-only', '-z', ref])).split('\0').filter(Boolean);
       pathSet = new Set(files);
       for (const f of files) { const parts = f.split('/'); for (let i = 1; i < parts.length; i++) pathSet.add(parts.slice(0, i).join('/')); }
     }
@@ -96,11 +102,12 @@ export function makeHistory({ git, prepare = makePrepare(), ref = 'main' }) {
   }
 
   // Answer one Lead history request ({ path }). Never throws.
-  function answer(request) {
+  async function answer(request) {
     const p = request && typeof request.path === 'string' ? request.path : null;
-    if (!validRequestPath(p) || !paths().has(p)) return { ok: false, answer: 'no such path' };
+    if (!validRequestPath(p)) return { ok: false, answer: 'no such path' };
     try {
-      return { ok: true, path: p, commits: readLog(git, { ref, n: REQUEST_COMMITS, path: p }).map(shape) };
+      if (!(await paths()).has(p)) return { ok: false, answer: 'no such path' };
+      return { ok: true, path: p, commits: (await readLog(git, { ref, n: REQUEST_COMMITS, path: p })).map(shape) };
     } catch {
       return { ok: false, answer: 'history unavailable' };
     }
