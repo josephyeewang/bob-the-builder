@@ -4,11 +4,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { limitedSync, SYNC_PORT_MAX_BUFFER } from './sync-limit.mjs';
 import { main } from './main.mjs';
+import { tempDir } from '../../shared/test-tmp.mjs';
 
 const node = process.execPath;
 // A mark of its own, so the clean-up below ends only this file's children.
@@ -16,7 +16,7 @@ const MARK = `synclimit${process.pid}x${Date.now()}`;
 const HANG = `/*${MARK}*/ setInterval(() => {}, 1e9)`;
 
 test('a hung child is killed at its limit and answers "no answer"', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'sync-limit-'));
+  const dir = tempDir('m11-sync-limit-');
   try {
     const run = limitedSync(spawnSync);
     const t = Date.now();
@@ -80,7 +80,7 @@ test('every failure is "no answer", never a throw', () => {
 });
 
 test('main hands limitedSync to the wiring', async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'sync-limit-main-'));
+  const dir = tempDir('m11-sync-limit-main-');
   try {
     writeFileSync(join(dir, 'wiring.mjs'), "export async function wire(config, helpers) { globalThis.__helpers = helpers; throw new Error('stop here'); }\n");
     writeFileSync(join(dir, 'config.json'), JSON.stringify({ wiring: join(dir, 'wiring.mjs'), lockFile: join(dir, 'l.lock') }));
