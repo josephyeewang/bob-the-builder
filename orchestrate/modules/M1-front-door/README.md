@@ -55,9 +55,11 @@ R-0b-82's decision and handoff code sit here although the row is tagged M11 (lan
    carries the check's own time, so a late take-in is never fresh, and an older check never replaces a newer one. The Front Door's outbox check refuses that name. Joe never types a count.
 7. "Filed, then confirmed" (lead call L26). Lane 2: the Front Door's context file carries the product list (exact
    names), and for every Front Door file intake takes in or refuses, it pushes `intakePush(name, result)` to Joe's
-   phone ("Confirmed: …" or "Not filed: <reason>. Say it again."). Lanes 1 and 2: intake calls
-   `checkOutboxFile(name, text, { products, seenIds })`, with `seenIds` every id taken in before, kept in the record
-   so it survives a restart; the result's `checked` says both checks ran. Until this is wired, a "Filed" reply has no
+   phone ("Confirmed: …" for pause, away and idea; "Request taken: … nothing has happened yet" for resume, wrap up and
+   rotate; or "Not filed: <reason>. Say it again."), **only after the record write succeeded**; a failed write pushes
+   "Not filed". Lanes 1 and 2: intake calls `checkOutboxFile(name, text, { products, seenIds })`, both a list or a
+   Set, with `seenIds` every id taken in before, kept in the record so it survives a restart. Both are required: a
+   result whose `checked` shows either skipped is pushed as "Not filed". Until this is wired, a "Filed" reply has no
    confirmation behind it.
 
 ## Ledger: two lines per row (review-0b-8 MAT-10)

@@ -28,16 +28,29 @@ test('L26 planted: a reused id is refused, whether the seen ids come as a Set or
   assert.deepEqual(checkOutboxFile('idea-20261103-0915-kr.md', '> x\n').checked, { products: false, seenIds: false }, 'says when a check was skipped');
 });
 
-test('L26: every file taken in gets a "Confirmed" push naming what was filed', () => {
+test('L26 + round 6 M-1: "Confirmed" only where taking the file in is the act; a request push says nothing happened yet', () => {
   const push = (kind, id, input) => { const f = outboxFile(kind, id, input); return intakePush(f.name, checkOutboxFile(f.name, f.text, { products, seenIds: new Set() })); };
-  assert.equal(push('state', '20261103-0915-ka', { product: 'test-product', state: 'paused' }), 'Confirmed: pause test-product.');
-  assert.equal(push('state', '20261103-0915-kb', { product: 'test-product', state: 'away', until: '2026-11-07', tz: 'Europe/Prague' }), 'Confirmed: away test-product until 2026-11-07.');
-  const est = checkOutboxFile('state-20261103-0915-kc.json', '{"product":"test-product","state":"away","until":null,"tz":"EST"}', { products });
-  assert.match(intakePush('state-20261103-0915-kc.json', est), /^Confirmed: away test-product\. \(time zone not accepted/);
-  assert.equal(push('request', '20261103-0915-kd', { request: 'resume' }), 'Confirmed: resume all products.');
-  assert.equal(push('request', '20261103-0915-ke', { request: 'wrapup' }), 'Confirmed: wrap up.');
-  assert.equal(push('request', '20261103-0915-kf', { request: 'rotate', name: 'STRIPE_KEY' }), 'Confirmed: rotate STRIPE_KEY.');
+  assert.equal(push('state', '20261103-0915-ka', { product: 'test-product', state: 'paused' }), 'Confirmed: pause test-product. Only your tap brings it back.');
+  assert.equal(push('state', '20261103-0915-kb', { product: 'test-product', state: 'away', until: '2026-11-07', tz: 'Europe/Prague' }), 'Confirmed: away test-product until 2026-11-07, time zone Europe/Prague.');
+  assert.equal(push('state', '20261103-0915-kh', { product: 'test-product', state: 'away', until: '2026-11-07' }), 'Confirmed: away test-product until 2026-11-07, no time zone yet, so number work holds.', 'round 6 minor 4');
+  const est = checkOutboxFile('state-20261103-0915-kc.json', '{"product":"test-product","state":"away","until":null,"tz":"EST"}', { products, seenIds: [] });
+  assert.match(intakePush('state-20261103-0915-kc.json', est), /^Confirmed: away test-product, no time zone yet, so number work holds \(that time zone was not accepted; name a city/);
   assert.equal(push('idea', '20261103-0915-kg', 'try a darker header'), 'Confirmed: idea 20261103-0915-kg.');
+  const requests = [push('request', '20261103-0915-kd', { request: 'resume' }), push('request', '20261103-0915-ki', { request: 'resume', product: 'test-product' }),
+    push('request', '20261103-0915-ke', { request: 'wrapup' }), push('request', '20261103-0915-kf', { request: 'rotate', name: 'STRIPE_KEY' })];
+  assert.deepEqual(requests, ['Request taken: resume all products. Nothing resumes until you tap it.', 'Request taken: resume test-product. Nothing resumes until you tap it.',
+    'Request taken: wrap up. Nothing has wrapped up yet; the Lead does it when it runs.', 'Request taken: rotate STRIPE_KEY. The key is NOT rotated yet; the steps follow.']);
+  for (const p of requests) assert.doesNotMatch(p, /^Confirmed/);
+});
+
+test('0b-8 audit round 6 minors 1 and 3: a skipped or mis-passed check is never confirmed', () => {
+  const f = outboxFile('state', '20261103-0915-ka', { product: 'Test-Product', state: 'paused' });
+  assert.equal(intakePush(f.name, checkOutboxFile(f.name, f.text)), 'Not filed: the Mini could not check the product list and the file ids. Say it again.');
+  assert.equal(intakePush(f.name, checkOutboxFile(f.name, f.text, { products: ['Test-Product'] })).startsWith('Not filed'), true, 'seen ids missing');
+  const g = outboxFile('state', '20261103-0915-kb', { product: 'test', state: 'paused' });
+  assert.match(checkOutboxFile(g.name, g.text, { products: 'test-product,second-product', seenIds: [] }).reason, /wrong form/, 'a string is not a list');
+  assert.match(checkOutboxFile(g.name, g.text, { products, seenIds: {} }).reason, /wrong form/, 'an object is not a list');
+  assert.equal(checkOutboxFile(g.name, g.text, { products: new Set(['test']), seenIds: new Set() }).ok, true, 'a Set works');
 });
 
 test('L26 planted: a refusal push never carries a key', () => {

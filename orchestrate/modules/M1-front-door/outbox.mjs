@@ -84,20 +84,33 @@ export function checkOutboxFile(name, text, { products = null, seenIds = null } 
   const r = checkOne(name, text);
   if (!r.ok) return r;
   const id = /(\d{8}-\d{4}-[a-z]{2})\.(?:json|md)$/.exec(String(name))[1];
-  if (seenIds && (seenIds.has?.(id) || (Array.isArray(seenIds) && seenIds.includes(id)))) return refuse('this file id was used before');
-  if (products && r.doc.product != null && !products.includes(r.doc.product)) return refuse('that product is not on the product list');
-  return { ...r, id, checked: { products: !!products, seenIds: !!seenIds } };
+  // Only a list or a Set counts (round 6 minor 3: a string would match by substring, an object would pass silently).
+  const asSet = (v) => (v instanceof Set ? v : Array.isArray(v) ? new Set(v) : null);
+  if ((products !== null && !asSet(products)) || (seenIds !== null && !asSet(seenIds))) return refuse('intake passed the product list or the seen ids in the wrong form');
+  if (seenIds !== null && asSet(seenIds).has(id)) return refuse('this file id was used before');
+  if (products !== null && r.doc.product != null && !asSet(products).has(r.doc.product)) return refuse('that product is not on the product list');
+  return { ...r, id, checked: { products: products !== null, seenIds: seenIds !== null } };
 }
 
 // The push intake sends Joe for every Front Door file, taken in or refused (L26): the Front Door only ever says
-// "Filed"; this is the confirmation. Lane 2 sends it over the Front Door's push path.
+// "Filed"; this is the confirmation. Lane 2 sends it over the Front Door's push path, and only after the record write
+// succeeded (a failed write pushes "Not filed"). "Confirmed" only where taking the file in is the act itself (pause,
+// away, idea). A request does nothing yet, so its push says so (0b-8 audit round 6 M-1). A result whose product or
+// id check was skipped is never confirmed (round 6 minor 1).
 export function intakePush(name, result) {
-  if (!result?.ok) return `Not filed: ${maskSecrets(String(result?.reason ?? 'unknown reason')).text}. Say it again.`;
+  const no = (why) => `Not filed: ${maskSecrets(String(why)).text}. Say it again.`;
+  if (!result?.ok) return no(result?.reason ?? 'unknown reason');
+  if (result.checked?.products !== true || result.checked?.seenIds !== true) return no('the Mini could not check the product list and the file ids');
   const d = result.doc ?? {};
-  const what = result.kind === 'idea' ? `idea ${result.id ?? ''}`.trim()
-    : result.kind === 'state' ? `${d.state === 'away' ? 'away' : 'pause'} ${d.product}${d.until ? ` until ${String(d.until).slice(0, 10)}` : ''}`
-      : d.request === 'rotate' ? `rotate ${d.name}` : d.request === 'wrapup' ? 'wrap up' : `resume ${d.product ?? 'all products'}`;
-  return `Confirmed: ${what}.${result.note ? ` (${result.note})` : ''}`;
+  if (result.kind === 'idea') return `Confirmed: idea ${result.id ?? ''}.`.replace(' .', '.');
+  if (result.kind === 'state') {
+    if (d.state !== 'away') return `Confirmed: pause ${d.product}. Only your tap brings it back.`;
+    const tz = d.tz ? `time zone ${d.tz}` : `no time zone yet, so number work holds${result.note ? ' (that time zone was not accepted; name a city, such as Europe/Prague)' : ''}`;
+    return `Confirmed: away ${d.product}${d.until ? ` until ${String(d.until).slice(0, 10)}` : ''}, ${tz}.`;
+  }
+  if (d.request === 'rotate') return `Request taken: rotate ${d.name}. The key is NOT rotated yet; the steps follow.`;
+  if (d.request === 'wrapup') return 'Request taken: wrap up. Nothing has wrapped up yet; the Lead does it when it runs.';
+  return `Request taken: resume ${d.product ?? 'all products'}. Nothing resumes until you tap it.`;
 }
 
 function checkOne(name, text) {
