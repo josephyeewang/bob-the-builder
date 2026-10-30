@@ -9,10 +9,20 @@
 // scratch (safe-git's, which carries no GITLEAKS_* variable). The push script also refuses any
 // added line holding `gitleaks:allow` itself, in case a later version drops the flag.
 // The git scan reads patches, and a patch skips a file git thinks is binary, so every new file's
-// raw bytes are also written to the private scan folder and scanned there (R-0b-47 MAT-2).
+// raw bytes are also written to the private scan folder and scanned there (R-0b-47 MAT-2). That
+// `gitleaks dir` scan in turn skips a file whose first bytes mark it as an archive, a program, a
+// database or a PDF, and finds nothing in UTF-16 text, so each file is written three ways: as it
+// is, under its own name (rules that look at the name still fire); and, under a plain .txt name
+// (gitleaks also skips some endings, such as .tar), behind a text lead-in that hides the marker,
+// once as is and once with every zero byte removed (UTF-16 then reads as plain text); round 2
+// MAT-A. A .zip or .tar.gz is opened two levels deep. Content packed under another name, or
+// locked, cannot be read by any scan: the README lists it as an open item. A file over the size
+// cap is refused, not read (MIN-d).
 // Capability note: --ignore-gitleaks-allow, the default rules' allow-lists (global: node_modules,
-// lock files, images, fonts and more) and `gitleaks dir` reading a file with NUL bytes were checked
-// against gitleaks 8.30.1 on 29 Oct 2026. Void at the next pin: take that version's rules again.
+// lock files, images, fonts and more), `gitleaks dir` reading a file with NUL bytes, a type marker
+// at a file's start (but not after a 600-byte text lead-in) making `gitleaks dir` skip it, and
+// --max-archive-depth opening archives by their ending only, were checked against gitleaks 8.30.1
+// on 29 Oct 2026. Void at the next pin: take that version's rules again.
 // Clean means exit 0 and a report that reads as zero findings; anything else refuses.
 
 import { spawn } from 'node:child_process';
@@ -23,6 +33,8 @@ import { git, safeGitEnv } from './safe-git.mjs';
 
 export const RULES_VERSION = '8.30.1';
 export const DO_PLANE_TOML = readFileSync(new URL(`./rules-${RULES_VERSION}.gitleaks.toml`, import.meta.url), 'utf8');
+// The hash catches an accidental change to the rules file. It sits beside the code that reads it, so
+// it is no guard against someone who can edit both; only the Do-plane can edit either.
 export const DO_PLANE_SHA256 = 'b6dbe4e0be74fdcba5453b8ea0353ef6175bee578d292f63c2c24ccd74ce6081';
 const sha256 = (t) => createHash('sha256').update(t).digest('hex');
 const refuse = (reason) => ({ ok: false, reason });
@@ -69,11 +81,12 @@ const common = (setup, report) => ['--config', setup.config, '--gitleaks-ignore-
   '--redact', '--no-banner', '--exit-code', '1', '--report-format', 'json', '--report-path', report];
 
 /** One verdict from one gitleaks run. Findings come back redacted, with file and rule only. */
-function verdict(r, report) {
+function verdict(r, report, where = (f) => f || 'a commit message') {
   const found = readReport(report);
   if (r.code === 0 && found && found.length === 0) return { ok: true };
   if (r.code === 1 && found && found.length) {
-    return refuse(`the secret scan found ${found.length} likely secret(s): ${found.slice(0, 5).map((f) => `${f.RuleID ?? 'rule'} in ${f.File || 'a commit message'}`).join('; ')}`);
+    const list = [...new Set(found.map((f) => `${f.RuleID ?? 'rule'} in ${where(f.File)}`))];
+    return refuse(`the secret scan found ${found.length} likely secret(s): ${list.slice(0, 5).join('; ')}`);
   }
   return refuse(`the secret scan did not finish cleanly (exit ${r.code})`);
 }
@@ -82,12 +95,26 @@ function verdict(r, report) {
 // look at the name (a key file's ending) still see it.
 const safeName = (p) => (String(p).split('/').at(-1).replace(/[^A-Za-z0-9._-]/g, '_').replace(/^\.+$/, '_') || '_').slice(0, 120);
 
+// 600 bytes of plain text: far past where gitleaks looks for a file-type marker (up to byte 262).
+const LEAD_IN = Buffer.from('scan view, not part of the file\n'.repeat(19));
+export const MAX_FILE_BYTES = 32 * 1024 * 1024;
+export const MAX_TOTAL_BYTES = 256 * 1024 * 1024;
+const VIEWS = ['raw', 'text', 'nul'];
+const view = (k, buf) => (k === 'raw' ? buf : Buffer.concat([LEAD_IN, k === 'nul' ? buf.filter((x) => x !== 0) : buf]));
+
+// A finding's file, put back as the repo path: the scan folder's own path never reaches a refusal (MIN-b).
+const repoPath = (blobs) => (file) => {
+  const m = /(?:^|\/)files\/(?:raw|text|nul)\/(\d+)\//.exec(String(file ?? ''));
+  return m && blobs[Number(m[1])] ? String(blobs[Number(m[1])].path).slice(0, 200) : 'a new file';
+};
+
 /**
  * Scans the commits `shas` (all new, already checked) in the mirror, then every new file's raw
- * bytes (`blobs`: [{ id, path }], each added or changed regular file), then each commit's message
- * and author fields through stdin. `messages` is [[sha, text]].
+ * bytes (`blobs`: [{ id, path }], each added or changed file under each of its names), then each
+ * commit's own text through stdin. `messages` is [[sha, text]]: the whole commit object (every
+ * header line, the message) and the names of the files it touches.
  */
-export async function scanSecrets({ setup, mirror, shas, blobs = [], messages, privateDir }) {
+export async function scanSecrets({ setup, mirror, shas, blobs = [], messages, privateDir, maxFileBytes = MAX_FILE_BYTES, maxTotalBytes = MAX_TOTAL_BYTES }) {
   const c = await checkScanner(setup);
   if (!c.ok) return c;
   const dir = mkdtempSync(join(privateDir, 'scan-'));
@@ -101,24 +128,35 @@ export async function scanSecrets({ setup, mirror, shas, blobs = [], messages, p
     if (blobs.length) {
       const files = join(dir, 'files');
       mkdirSync(files, { mode: 0o700 });
+      for (const k of VIEWS) mkdirSync(join(files, k), { mode: 0o700 });
+      let total = 0;
       for (const [i, b] of blobs.entries()) {
+        const name = String(b.path).slice(0, 80);
         if (!/^[0-9a-f]{40}$/.test(String(b.id))) return refuse('a new file has no readable id');
+        const size = await git(['cat-file', '-s', b.id], { gitDir: mirror, purpose: 'push-scan-files' });
+        const n = Number(String(size.stdout).trim());
+        if (size.code !== 0 || !Number.isSafeInteger(n)) return refuse(`could not read the new file ${name}`);
+        total += n;
+        if (n > maxFileBytes) return refuse(`the new file ${name} is larger than ${maxFileBytes} bytes, too large to scan`);
+        if (total > maxTotalBytes) return refuse(`the new files come to more than ${maxTotalBytes} bytes, too much to scan`);
         const cat = await git(['cat-file', 'blob', b.id], { gitDir: mirror, purpose: 'push-scan-files' });
-        if (cat.code !== 0) return refuse(`could not read the new file ${String(b.path).slice(0, 80)}`);
-        const sub = join(files, String(i));
-        mkdirSync(sub, { mode: 0o700 });
-        writeFileSync(join(sub, safeName(b.path)), cat.stdout, { mode: 0o600, flag: 'wx' });
+        if (cat.code !== 0 || cat.stdout.length !== n) return refuse(`could not read the new file ${name}`);
+        for (const k of VIEWS) {
+          const sub = join(files, k, String(i));
+          mkdirSync(sub, { mode: 0o700 });
+          writeFileSync(join(sub, k === 'raw' ? safeName(b.path) : 'view.txt'), view(k, cat.stdout), { mode: 0o600, flag: 'wx' });
+        }
       }
       const fr = join(dir, 'files.json');
-      const f = await run(setup.bin, ['dir', files, ...common(setup, fr)], { env });
-      const fv = verdict(f, fr);
+      const f = await run(setup.bin, ['dir', files, '--max-archive-depth', '2', ...common(setup, fr)], { env });
+      const fv = verdict(f, fr, repoPath(blobs));
       if (!fv.ok) return refuse(`the file scan: ${fv.reason}`);
     }
     for (const [sha, text] of messages) {
       const rep = join(dir, `msg-${sha}.json`);
       const m = await run(setup.bin, ['stdin', ...common(setup, rep)], { env, input: text });
       const mv = verdict(m, rep);
-      if (!mv.ok) return refuse(`commit ${sha.slice(0, 12)} message: ${mv.reason}`);
+      if (!mv.ok) return refuse(`commit ${sha.slice(0, 12)} message, header lines or file names: ${mv.reason}`);
     }
     return { ok: true };
   } finally { rmSync(dir, { recursive: true, force: true }); }

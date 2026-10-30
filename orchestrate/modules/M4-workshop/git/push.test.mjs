@@ -8,6 +8,7 @@ import { mkdtempSync, writeFileSync, mkdirSync, rmSync, symlinkSync, readFileSyn
 import { tmpdir } from 'node:os';
 import { join, dirname, delimiter } from 'node:path';
 import { randomBytes } from 'node:crypto';
+import { gzipSync } from 'node:zlib';
 import { gitOk, git, initMirror, callLog } from './safe-git.mjs';
 import { createPushScript, readBundleHeader, githubUrl } from './push.mjs';
 import { refusedPath } from './push-refusals.mjs';
@@ -594,7 +595,7 @@ test('R-0b-47 MIN-1: a program that quits before reading its input is refused, a
   w.fake.setMode('stdinquit');
   const s = await scanSecrets({ setup: w.ports.scanner, mirror: w.mirror, shas: [sha], messages: [[sha, 'x'.repeat(16 * 1024 * 1024)]], privateDir: tmp() });
   assert.equal(s.ok, false);
-  assert.match(s.reason, /message: .*did not finish cleanly/);
+  assert.match(s.reason, /header lines or file names: .*did not finish cleanly/);
 });
 
 test('the mirror is checked before every push: a planted alternates file refuses', async () => {
@@ -777,4 +778,100 @@ test('L4 restart: the copy fast-forwards to GitHub\'s branch kept in the mirror;
   const other = (await gitOk(['commit-tree', '-p', main, '-m', 'elsewhere', `${main}^{tree}`], { gitDir: w.mirror })).trim();
   await gitOk(['update-ref', 'refs/orchestrate/remote/card/c-1', other], { gitDir: w.mirror });
   assert.match((await prepareWorkerCopy({ product, card, dest: join(w.root, 'diverged'), lastBundle })).reason, /went another way/);
+});
+
+// Files gitleaks dir skips or misreads when given as they are (round 2 MAT-A).
+const typed = (secret) => {
+  const s = Buffer.from(`key = "${secret}"\n`);
+  const pad = (n) => Buffer.alloc(n, 0);
+  const tar = Buffer.alloc(512, 0); tar.write('cfg.txt', 0); tar.write('ustar', 257);
+  // A packed .tar.gz: the secret is unreadable until the archive is opened.
+  const h = Buffer.alloc(512, 0);
+  h.write('cfg.txt', 0); h.write('0000644\0', 100); h.write('0000000\0', 108); h.write('0000000\0', 116);
+  h.write(`${s.length.toString(8).padStart(11, '0')}\0`, 124); h.write('00000000000\0', 136); h.write('        ', 148); h.write('0', 156); h.write('ustar\0', 257); h.write('00', 263);
+  h.write(`${[...h].reduce((a, b) => a + b, 0).toString(8).padStart(6, '0')}\0 `, 148);
+  const tgz = gzipSync(Buffer.concat([h, s, pad(512 - s.length), pad(1024)]));
+  return {
+    'pack.tar.gz': tgz,
+    'db.sqlite': Buffer.concat([Buffer.from('SQLite format 3\0'), pad(84), s]),
+    'pack.tar': Buffer.concat([tar, s, pad(100)]),
+    'pack.zip': Buffer.concat([Buffer.from([0x50, 0x4b, 0x03, 0x04]), pad(26), s]),
+    'tool.bin': Buffer.concat([Buffer.from([0x7f, 0x45, 0x4c, 0x46, 2, 1, 1, 0]), pad(56), s]),
+    'doc.pdf': Buffer.concat([Buffer.from('%PDF-1.4\n%\0\n'), s]),
+    'notes16.txt': Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from([...s].flatMap((b) => [b, 0]))]),
+  };
+};
+
+test('R-0b-47 round 2 MAT-A, real gitleaks: a secret in a file that looks like an archive, a program, a database, a PDF or UTF-16 text is stopped', { skip: realGitleaks ? false : 'skipped: gitleaks 8.30.1 not installed' }, async () => {
+  const scanner = await realScanner(tmp());
+  for (const [name, bytes] of Object.entries(typed(fakeSecret()))) {
+    // Positive control: gitleaks dir on the file as it is finds nothing.
+    const d = tmp(); mkdirSync(join(d, 'f')); writeFileSync(join(d, 'f', name), bytes);
+    const { spawnSync } = await import('node:child_process');
+    const c = spawnSync(realGitleaks, ['dir', join(d, 'f'), '--config', scanner.config, '--no-banner', '--exit-code', '1']);
+    assert.equal(c.status, 0, `control: gitleaks dir alone misses ${name}`);
+    const w = await world({ scanner });
+    await w.commit('typed', (c2) => { mkdirSync(join(c2, 'deep'), { recursive: true }); writeFileSync(join(c2, 'deep', name), bytes); });
+    await w.bundle();
+    const r = await refusedAndUntouched(w, /the file scan: .*likely secret/);
+    assert.ok(r.reason.includes(`deep/${name}`), `${name}: ${r.reason}`);
+    // MIN-b: the refusal names the repo path, never the private scan folder.
+    assert.doesNotMatch(r.reason, /scan-|files\/(raw|text|nul)/, name);
+  }
+});
+
+test('R-0b-47 round 2 MAT-B, real gitleaks: a secret in an extra commit header line or in a file name is stopped', { skip: realGitleaks ? false : 'skipped: gitleaks 8.30.1 not installed' }, async () => {
+  const scanner = await realScanner(tmp());
+  // (a) An invented header line, and a signature block, written straight into the commit object.
+  let w;
+  for (const header of [(x) => `x-note key = "${x}"`, (x) => `gpgsig -----BEGIN PGP SIGNATURE-----\n \n key = "${x}"\n -----END PGP SIGNATURE-----`]) {
+    w = await world({ scanner });
+    await w.commit('work', (c) => writeFileSync(join(c, 'a.txt'), 'a\n'));
+    const head = (await gitOk(['cat-file', 'commit', 'HEAD'], w.cg)).toString();
+    const secret = fakeSecret();
+    const forged = head.replace(/\n\n/, `\n${header(secret)}\n\n`);
+    const sha = (await gitOk(['hash-object', '-t', 'commit', '-w', '--literally', '--stdin'], { ...w.cg, input: forged })).trim();
+    await gitOk(['update-ref', 'refs/heads/card/c-1', sha], w.cg);
+    // Positive control: the message and author view the old scan read does not hold it.
+    assert.doesNotMatch(await gitOk(['log', '-1', '--format=%an <%ae>%n%cn <%ce>%n%B', sha], w.cg), new RegExp(secret));
+    await w.bundle();
+    await refusedAndUntouched(w, /header lines or file names: .*likely secret/);
+  }
+  // (b) A file whose name is the secret.
+  w = await world({ scanner });
+  const s2 = fakeSecret();
+  await w.commit('named', (c) => writeFileSync(join(c, `${s2}.txt`), 'nothing here\n'));
+  await w.bundle();
+  await refusedAndUntouched(w, /header lines or file names: .*likely secret/);
+});
+
+test('R-0b-47 round 2 MIN-a, MIN-c, real gitleaks: the same content under two names is scanned under both; an executable file is scanned', { skip: realGitleaks ? false : 'skipped: gitleaks 8.30.1 not installed' }, async () => {
+  const scanner = await realScanner(tmp());
+  const w = await world({ scanner });
+  const bytes = Buffer.concat([Buffer.from([0, 1, 2, 0]), Buffer.from(`\nconst t = "${fakeSecret()}";\n`)]);
+  await w.commit('twice', (c) => { writeFileSync(join(c, 'one.js'), bytes); writeFileSync(join(c, 'two.js'), bytes); writeFileSync(join(c, 'run.sh'), Buffer.concat([Buffer.from([0x7f, 0x45, 0x4c, 0x46, 0]), bytes])); chmodSync(join(c, 'run.sh'), 0o755); });
+  assert.match(await gitOk(['ls-files', '-s', 'run.sh'], w.cg), /^100755/);
+  await w.bundle();
+  const r = await refusedAndUntouched(w, /the file scan: .*likely secret/);
+  for (const n of ['one.js', 'two.js', 'run.sh']) assert.ok(r.reason.includes(n), `${n}: ${r.reason}`);
+});
+
+test('R-0b-47 round 2 MIN-d: a new file over the size cap, or new files over the total cap, are refused before they are read', async () => {
+  const w = await world();
+  await w.commit('big', (c) => { writeFileSync(join(c, 'a.txt'), 'a'.repeat(5000)); writeFileSync(join(c, 'b.txt'), 'b'.repeat(3000)); });
+  const sha = (await gitOk(['rev-parse', 'HEAD'], w.cg)).trim();
+  await gitOk(['push', '-q', w.mirror, 'HEAD:refs/heads/scan'], w.cg);
+  const ls = await gitOk(['ls-tree', 'HEAD'], w.cg);
+  const blobs = ls.trim().split('\n').map((l) => ({ id: l.split(/\s+/)[2], path: l.split('\t')[1] })).filter((b) => /^[ab]\.txt$/.test(b.path));
+  const scan = (o) => scanSecrets({ setup: w.ports.scanner, mirror: w.mirror, shas: [sha], blobs, messages: [], privateDir: tmp(), ...o });
+  const before = callLog.length;
+  let r = await scan({ maxFileBytes: 4000 });
+  assert.equal(r.ok, false);
+  assert.match(r.reason, /a\.txt is larger than 4000 bytes/);
+  assert.ok(!callLog.slice(before).some((c) => c.args[0] === 'cat-file' && c.args[1] === 'blob' && c.args[2] === blobs.find((b) => b.path === 'a.txt').id), 'the big file is never read');
+  r = await scan({ maxTotalBytes: 7000 });
+  assert.equal(r.ok, false);
+  assert.match(r.reason, /more than 7000 bytes/);
+  // Planted fault: under both caps the same scan passes.
+  assert.deepEqual(await scan({}), { ok: true });
 });

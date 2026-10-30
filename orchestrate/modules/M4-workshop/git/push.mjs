@@ -51,6 +51,7 @@ function stageBundle(outbox, card, dir, cap) {
     const st = fstatSync(fd);
     if (!st.isFile()) no('the bundle is not a plain file');
     if (st.nlink !== 1) no('the bundle has more than one link');
+    // A fast first refusal; the copy loop's own count below is the one that holds if the file grows.
     if (st.size > cap) no(`the bundle is larger than ${cap} bytes`);
     out = openSync(copy, C.O_WRONLY | C.O_CREAT | C.O_EXCL, 0o600);
     const buf = Buffer.alloc(1 << 20);
@@ -108,11 +109,15 @@ async function addedAllowComment(mirror, sha) {
   return r.stdout.toString('utf8').split('\n').some((l) => l.startsWith('+') && /gitleaks:allow/i.test(l));
 }
 
-async function messages(mirror, shas) {
-  const out = await gitOk(['log', '--no-walk=unsorted', '--format=%H%x00%an <%ae>%n%cn <%ce>%n%B%x00', ...shas], { gitDir: mirror, purpose: 'push-messages' });
-  const parts = out.split('\0');
+// Each commit's whole object (author, committer and every other header line, then the message;
+// R-0b-47 round 2 MAT-B) and the names of the files it touches, for the stdin scan.
+async function messages(mirror, shas, names) {
   const res = [];
-  for (let i = 0; i + 1 < parts.length; i += 2) res.push([parts[i].trim(), parts[i + 1]]);
+  for (const sha of shas) {
+    const r = await git(['cat-file', 'commit', sha], { gitDir: mirror, purpose: 'push-messages' });
+    if (r.code !== 0) no(`could not read commit ${sha.slice(0, 12)}`);
+    res.push([sha, `${r.stdout.toString('utf8')}\n${(names.get(sha) ?? []).join('\n')}\n`]);
+  }
   return res;
 }
 
@@ -200,13 +205,15 @@ export function createPushScript(deps) {
       const commits = await newCommits(mirror, tip, ['refs/heads/main', ...(remoteTip ? [remoteRef] : [])]);
       if (!commits.length) no('the bundle holds no new commits');
       const why = [];
-      const blobs = new Map(); // every added or changed regular file, for the raw-bytes scan
+      const blobs = new Map(); // every added or changed file under each of its names, for the raw-bytes scan
+      const names = new Map(); // the file names each commit touches, for the stdin scan
       for (const [sha, parents] of commits) {
         if (parents.length === 0) no(`commit ${sha.slice(0, 12)} is a first commit`);
         if (parents.length > 1) no(`commit ${sha.slice(0, 12)} is a merge; a worker never merges`);
         const ch = await changes(mirror, [sha]);
         why.push(...refusedEntries(ch));
-        for (const e of ch) if (e.status !== 'D' && /^100(644|755)$/.test(e.newMode) && !blobs.has(e.newId)) blobs.set(e.newId, { id: e.newId, path: e.path });
+        names.set(sha, ch.map((e) => e.path));
+        for (const e of ch) if (e.status !== 'D' && /^1(00644|00755|20000)$/.test(e.newMode)) blobs.set(`${e.newId} ${e.path}`, { id: e.newId, path: e.path });
       }
       const mb = (await gitOk(['merge-base', 'refs/heads/main', tip], { gitDir: mirror, purpose: 'push-paths' })).trim();
       const net = await changes(mirror, [mb, tip]);
@@ -216,7 +223,7 @@ export function createPushScript(deps) {
       // 5. The secret scan.
       const shas = commits.map(([s]) => s);
       for (const sha of shas) if (await addedAllowComment(mirror, sha)) no(`commit ${sha.slice(0, 12)} adds a "gitleaks:allow" comment`);
-      const scan = await scanSecrets({ setup: scanner, mirror, shas, blobs: [...blobs.values()], messages: await messages(mirror, shas), privateDir: work });
+      const scan = await scanSecrets({ setup: scanner, mirror, shas, blobs: [...blobs.values()], messages: await messages(mirror, shas, names), privateDir: work });
       if (!scan.ok) no(scan.reason);
 
       // 6. The rules, then the start gate.
