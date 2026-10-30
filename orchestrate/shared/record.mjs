@@ -20,13 +20,24 @@
 // appends none. write() and applyOutbox() never throw: any failure is { ok: false, reason }.
 
 // Plain-script actors write under their own name; AI roles only through applyOutbox, as `<role>:<sessionId>`.
+// `joe` writes nothing in 0b (Joe acts through `approvals`); it stays a name so old diary lines still parse.
 export const SCRIPT_ACTORS = Object.freeze(['dispatcher', 'workshop', 'merge_gate', 'approvals', 'sensors', 'ledger',
   'live_check', 'joe']);
 export const AI_ROLES = Object.freeze(['lead', 'worker', 'reviewer', 'auditor', 'incident', 'scout', 'writer',
   'front_door', 'thinking', 'learning']);
 
 export const ENTITIES = Object.freeze(['card', 'ask', 'go', 'verdict', 'session', 'merge', 'claim', 'fact', 'product',
-  'handoff', 'report', 'lesson']);
+  'handoff', 'report', 'lesson', 'launch', 'merge_request']);
+
+// Fields a document must carry on every write, checked here so a fake record refuses what the real one would.
+// launch and merge_request are the Dispatcher's (D12, refusals 5 and 11); a verdict names the session and head it is
+// for; a card names its module (held decisions, F3). Who may write which entity is M9's table, not this file's.
+export const REQUIRED_FIELDS = Object.freeze({
+  card: ['state', 'module'],
+  launch: ['session_id', 'role', 'card', 'head', 'rev', 'launched_at'],
+  merge_request: ['card', 'pr', 'session_id', 'head', 'rev', 'requested_at'],
+  verdict: ['session_id', 'head'],
+});
 
 // State models (design v3 §2.4, v4 §8 A4–A5, D8). The moves between them are M9's; the names are here.
 export const STATES = Object.freeze({
@@ -35,8 +46,19 @@ export const STATES = Object.freeze({
   ask: ['open', 'pushed', 'answered', 'consumed', 'expired', 'withdrawn'],
   session: ['preparing', 'running', 'waiting_input', 'waiting_limit', 'reporting', 'ended', 'stuck', 'retrying',
     'quarantined', 'recycling'],
-  merge: ['requested', 'checking', 'merging', 'merged', 'audited_ok', 'audit_flagged', 'refused'],
+  merge: ['requested', 'queued', 'catching_up', 'held', 'returned_to_builder', 'checking', 'merging', 'merged',
+    'audited_ok', 'audit_flagged', 'refused'],
   product: ['light', 'active', 'away', 'paused'],
+});
+
+// Final states need no time limit (A4); every other state has one or a named reason, in the rules' timeouts.
+// closed → reverted is the one move out of a final state (D8).
+export const FINAL_STATES = Object.freeze({
+  card: ['closed', 'failed', 'cancelled', 'closed_no_answer', 'reverted'],
+  ask: ['consumed', 'expired', 'withdrawn'],
+  session: ['ended'],
+  merge: ['audited_ok', 'audit_flagged', 'refused'],
+  product: [],
 });
 
 // A wait must say who and what it waits on, since when, and when it is next checked (A5).
@@ -63,6 +85,8 @@ export function makeRecord(impl) {
       if (!ENTITIES.includes(w.entity)) return refused(`unknown entity "${w.entity}"`);
       if (typeof w.id !== 'string' || !/^[A-Za-z0-9._-]+$/.test(w.id)) return refused('bad id');
       if (!Number.isInteger(w.expectRev) || w.expectRev < 0) return refused('expectRev must be the rev read (0 to create)');
+      const missing = (REQUIRED_FIELDS[w.entity] ?? []).filter((f) => w.doc?.[f] === undefined || w.doc?.[f] === null || w.doc?.[f] === '');
+      if (missing.length) return refused(`${w.entity} is missing ${missing.join(', ')}`);
       return guard(() => impl.write(w));
     },
     applyOutbox(tag, file) {

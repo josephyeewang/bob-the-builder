@@ -37,7 +37,7 @@ finding, never as a pass. Partial-lens runs are normal; record which checks were
 |---|---|---|---|
 | Backwards-reading | A shipped feature history | Convergence drift over the last 6-10 features (L28) · cult/adoption signals (L28) · Sean-Ellis inverse (L28) · "what did a customer ask for that we said no to" (L28) | no inputs — re-run after first release |
 | Architecture-derived | Technical design decided | **Anti-feature / "we will never X" list (L28)** · vendor-lock and dependency refusals (L22) | no inputs — re-run after the architecture contract exists |
-| Build-state | Running code | All of bands 1-3 (L01-L14), L31, L32, L37 | no inputs — re-run post-build |
+| Build-state | Running code | All of bands 1-3 (L01-L14, L31, L32, L37), except L36 (run it at spec time) and L38 (it can target the builder's own machine) | no inputs — re-run post-build |
 | Output-state | Generated output exists | L33 register/audience fit · L11 accuracy | no inputs — re-run once the product generates something |
 
 **Why this is a rule and not a nicety:** a lens run without inputs does not fail cleanly. It
@@ -164,7 +164,7 @@ An every-lens scrub generates many fix-commits, and on a live product those comp
 - If running Full Enchilada on live: batch fixes behind a **staging deploy + post-deploy verification** (L01 q13 / §A7.3 1b), or run during a **change-freeze window**, so compounding fixes don't ship unverified to prod.
 - Never apply a build-config/bundler/routing fix from an audit straight to prod without driving the deployed URL (§A7.3 1b).
 
-### New-lens inclusion triggers (v2.21–v2.22) — L31 / L32 / L33 / L34
+### New-lens inclusion triggers (v2.21–v2.40) — L31 to L36 and L38 (L37: see "Check-level prerequisites" above)
 
 These lenses are **profile-conditional**, not auto-included everywhere (anti-sprawl). Add them when the trigger fires:
 
@@ -175,6 +175,10 @@ These lenses are **profile-conditional**, not auto-included everywhere (anti-spr
 - **L34 SEO / AEO / GEO Discoverability** (v2.22) — include for **any product with a public website / marketing surface** (almost everything consumer- or B2B-facing). Tiers are independently runnable, so a user can request just the GEO tier. Skip pure internal tools / headless APIs with no web presence. Natural fit: Panels A, B, F, G, H, K — and the dedicated mini-panel below.
 
 - **L35 Capability Preservation (Guardrail-Neuter Check)** (v2.26) — include when the product's value rests on a **differentiating analytical / creative / generative / predictive capability** AND it has **safety / compliance / quality / honesty guardrails** that could over-reach (fintech, health, legal, security, content, any goal-seeking AI engine). It's the counterweight to L11/L13 — run it whenever you run heavy guardrail lenses on a capability-driven product. Also runs at **spec time** inside the Step-1c Independent Audit Panel as the "guardrail-neuter simulation." Skip thin wrappers / pure CRUD with no capability to neuter. Natural fit: Panels A, C, F, K — and mandatory where caution and capability are in tension.
+
+- **L36 AI-Forward / AI-Native** (v2.27) — when to run, from the lens itself: Every product, at spec time and at any major-version planning. The assistant running Bob is itself an AI and must bring AI-native capability to the table unprompted. Especially load-bearing when the spec was authored as a "feature list" rather than around an AI core.
+
+- **L38 Agent Setup & Extension Surface** (v2.40) — when to run, from the lens itself: Always for any product that loads third-party agent extensions (skills, plugins, MCP servers, sub-agents) or that IS agent tooling. Also run periodically against the BUILDER'S OWN machine — this is the only lens whose target can be the workstation rather than the product. Natural fit: Panel C (a methodology product run by an agent is agent tooling).
 
 A product hitting all three v2.21 triggers (consumer AI product with personal data + an analytical engine + generated output — the consumer-AI-app shape) should include those three on top of its base panel, plus L34 if it has a website, plus **L35 if it has a capability-vs-caution tension**. A pure internal CRUD tool (Panel D) adds none.
 

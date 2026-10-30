@@ -12,7 +12,10 @@
 //   const d = rules.may('push_branch', { product, card, files });   // → { decision, tier?, reason, rev }
 //   if (d.decision !== 'allow') refuse(d.reason);
 //   rules.get('caps.editing_per_mac', { product })                  // → a number from the rules, or undefined
-//   rules.classify({ product, files, diff })                        // → { tier, risky: [...], reasons } (D7)
+//   rules.classify(change)                                          // → { tier, risky: [...], reasons, protected } (D7)
+//     change = { product, files: [{ path, previous_path?, status: added|modified|removed|renamed|copied, mode?,
+//                added_lines? }], truncated?, declared_tier?, labels?, policy? }
+//     `policy` (the rules as of the parent commit) is passed GitHub-side; without it the current rules are used.
 //   rules.rev                                                      // the loaded rules version, for diary lines
 
 export const ALLOW = 'allow';
