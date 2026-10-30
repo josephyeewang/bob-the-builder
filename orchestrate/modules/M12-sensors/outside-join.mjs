@@ -16,11 +16,12 @@
 // lane must hand back (both by default); one missing is a miss, so a typo can't pass by checking nothing. `sources` must
 // be a non-empty list of JOIN_SOURCES; anything else throws. The Lead-input writer runs all five.
 //
-// A miss is any of: the exact expected form is absent; once every exact form is taken out, any instruction-shaped part
-// or planted tag is still there (compared ignoring case and spaces, so a raw copy can't hide in a fence the lane wrote
-// itself or in a re-wrapped line); or a planted fake key survives. Strings are compared as written and with JSON
-// escapes undone (up to three levels), so a JSON record passes. Hand back the text as written: a form indented line by
-// line (YAML block, nested list) does not match and fails closed.
+// A miss is any of: the exact expected form is absent; once every exact form is taken out, any run of RUN letters or
+// digits of the planted text is still there (deny by default: case, spaces, punctuation, backslashes, invisible
+// characters and fence tags are ignored, so a raw, partial, re-cased, re-wrapped or shell-quoted copy is caught, in a
+// fence the lane wrote itself or not; audit rounds 1-2); or a planted fake key survives. Strings are compared as written
+// and with JSON escapes undone (up to three levels), so a JSON record passes; CRLF line ends count as LF. Hand back the
+// text as written: a form indented or quoted line by line (YAML block, `> ` quote) does not match and fails closed.
 
 import { readFileSync } from 'node:fs';
 import { FAKE } from './fakes.mjs';
@@ -48,10 +49,11 @@ export function joinCases(sources = JOIN_SOURCES) {
 const unjson = (s) => s.replace(/\\(?:u([0-9a-fA-F]{4})|(.))/g, (_, u, ch) =>
   (u ? String.fromCharCode(parseInt(u, 16)) : ({ n: '\n', t: '\t', r: '\r', b: '\b', f: '\f' })[ch] ?? ch));
 const views = (s) => { const out = [s]; for (let i = 0; i < 3; i++) out.push(unjson(out.at(-1))); return out; };
-const squash = (s) => s.toLowerCase().replace(/[\s ]+/g, '');
-// What must never be left once the exact forms are out: the instruction parts and the planted tags (not the fence's own).
-const tells = (c) => [...[c.instruction ?? []].flat(), ...(c.text.match(/<[^<>]*>/g) ?? [])
-  .filter((t) => !/^<\/?outside-text\b/.test(t))].map(squash);
+// Letters and digits only, fence tags out: what a reader would still read as the words.
+const FENCE_TAG = /<\/?outside-text\b[^>]*>/g;
+const words = (s) => s.replace(FENCE_TAG, ' ').toLowerCase().replace(/[^\p{L}\p{N}]/gu, '');
+export const RUN = 12;
+const runs = (text) => { const w = words(text); const out = new Set(); for (let i = 0; i + RUN <= w.length; i++) out.add(w.slice(i, i + RUN)); return out; };
 
 export async function checkOutsideJoin(land, { sources = JOIN_SOURCES, where = JOIN_OUTPUTS } = {}) {
   checkList(where, JOIN_OUTPUTS, 'where');
@@ -62,10 +64,12 @@ export async function checkOutsideJoin(land, { sources = JOIN_SOURCES, where = J
       const miss = (why) => misses.push({ source: c.source, where: w, why });
       const raw = got?.[w];
       if (typeof raw !== 'string') { miss('nothing written (not a string)'); continue; }
-      const vs = views(raw);
-      if (!vs.some((v) => v.includes(c.expect))) miss('the exact fenced form is missing');
-      const left = vs.map((v) => squash(v.split(c.expect).join('')));
-      if (tells(c).some((t) => left.every((v) => v.includes(t)))) miss('outside text appears outside its exact fence');
+      const vs = views(raw).map((v) => v.replace(/\r\n/g, '\n'));
+      const hold = vs.filter((v) => v.includes(c.expect));
+      if (!hold.length) miss('the exact fenced form is missing');
+      // Each piece between the exact forms on its own, so text either side of a removed form can't join into a run.
+      const pieces = (hold.length ? hold : vs).flatMap((v) => v.split(c.expect)).map(words);
+      if ([...runs(c.text)].some((r) => pieces.some((p) => p.includes(r)))) miss('outside text appears outside its exact fence');
       if (Object.values(FAKE).some((k) => c.text.includes(k) && vs.some((v) => v.includes(k)))) miss('a planted fake key survived');
     }
   }

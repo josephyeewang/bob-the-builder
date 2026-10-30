@@ -95,3 +95,41 @@ test('R-0b-126 audit round 1 minor 2: a document stringified twice, with the fen
   assert.deepEqual(await checkOutsideJoin(({ source, text }) => ({ record: JSON.stringify(JSON.stringify({ body: cleanOutside(text, source) })) }),
     { where: ['record'] }), []);
 });
+
+test('R-0b-126 audit round 2: a backslashed, partial, disguised, entity-escaped or split raw copy is caught for every kind', async () => {
+  const at = (s, i) => `${s.slice(0, i)}\\${s.slice(i)}`;
+  const lands = {
+    'one backslash': ({ text }) => at(text, Math.floor(text.length / 2)),
+    'first 60 characters': ({ text }) => text.slice(0, 60),
+    'last 30 characters': ({ text }) => text.slice(-30),
+    'zero-width between letters': ({ text }) => [...text].join('\u200b'),
+    'hyphenated': ({ text }) => text.split(' ').join('-'),
+    'entity-escaped, no fence': ({ text }) => text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'),
+    'breakout outside the fence': ({ text }) => text.split('</outside-text>').at(-1),
+  };
+  for (const [name, f] of Object.entries(lands)) {
+    for (const c of joinCases()) {
+      if (!c.instruction) continue;
+      const m = await checkOutsideJoin(({ source, text }) => ({ leadInput: `${cleanOutside(text, source)}\n${f({ text })}` }),
+        { sources: [c.source], where: ['leadInput'] });
+      assert.ok(m.some((x) => x.why === 'outside text appears outside its exact fence'), `${name} / ${c.source}`);
+    }
+  }
+  // A raw copy split across the two outputs is caught in each.
+  const split = await checkOutsideJoin(({ source, text }) => {
+    const f = cleanOutside(text, source); const h = Math.floor(text.length / 2);
+    return { record: `${f}\n${text.slice(0, h)}`, leadInput: `${f}\n${text.slice(h)}` };
+  }, { sources: ['commit-subject'] });
+  assert.ok(split.some((x) => x.where === 'record') && split.some((x) => x.where === 'leadInput'));
+  // The hidden-characters case (no instruction): its raw copy is caught too.
+  const hidden = joinCases(['idea-file']).find((c) => c.text.includes('hidden'));
+  assert.ok((await checkOutsideJoin(({ source, text }) => ({ leadInput: `${cleanOutside(text, source)} ${text}` }),
+    { sources: ['idea-file'], where: ['leadInput'] })).some((x) => x.why.startsWith('outside text')), hidden.text);
+});
+
+test('R-0b-126 audit round 2 minor 4: a Lead-input file with CRLF line ends, or CRLF inside JSON, passes when correct', async () => {
+  assert.deepEqual(await checkOutsideJoin(({ source, text }) => {
+    const f = cleanOutside(text, source);
+    return { record: JSON.stringify({ body: f.replace(/\n/g, '\r\n') }), leadInput: `## New\r\n${f.replace(/\n/g, '\r\n')}\r\n` };
+  }), []);
+});
