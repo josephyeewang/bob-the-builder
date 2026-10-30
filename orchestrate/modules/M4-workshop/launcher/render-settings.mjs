@@ -4,7 +4,7 @@
 //
 // Allow rules come only from the product's declared commands, as exact strings. A wildcard, a
 // prefix rule or a shell joiner is refused outright, never rendered. There are no "ask" rules:
-// anything not allowed is refused, never put to Joe.
+// anything not allowed is refused, never put to the owner.
 
 import { writeFileSync, readFileSync, renameSync } from 'node:fs';
 import { join, dirname, basename } from 'node:path';
@@ -111,7 +111,7 @@ export function renderRoleSettings({ role, profile, paths, product = {}, rulesHo
       [S.failIfUnavailable]: true,
       [S.allowUnsandboxedCommands]: false,
       [S.network]: { [S.allowedDomains]: allowedDomains, [S.strictAllowlist]: true },
-      [S.filesystem]: { [S.denyRead]: denyPaths, [S.denyWrite]: [`${paths.outbox}/.*`, `${paths.outbox}/**/.*`] },
+      [S.filesystem]: { [S.denyRead]: denyPaths, [S.denyWrite]: [`${paths.outbox}/.*`, `${paths.outbox}/**/.*`, ...(paths.bobFolder ? [paths.bobFolder, `${paths.bobFolder}/**`] : [])] },
     },
     [S.hooks]: hooks,
     [S.env]: { [ENV.autoCompactWindow]: String(profile.compactWindow), [ENV.disableUpdates]: '1' },
@@ -137,8 +137,13 @@ export function checkSettings(obj, { machineWide = false, profile = null } = {})
   if (sb && sb[S.allowUnsandboxedCommands] === true) return refuse(`${machineWide ? 'machine-wide' : 'role'} settings allow unsandboxed commands`);
   for (const k of REFUSED_SETTINGS) if (obj && Object.hasOwn(obj, k)) return refuse(`${machineWide ? 'machine-wide' : 'role'} settings hold ${k}`);
   if (machineWide) {
-    // The machine-wide file may add deny rules, never allow, ask or extra hosts.
+    // The machine-wide file may add deny rules and hooks, never allow, ask, extra hosts or folders,
+    // a permission mode, variables, or a sandbox switched off (round 2 MIN-5).
     if (p?.[S.allow]?.length || p?.[S.ask]?.length) return refuse('machine-wide settings hold allow or ask rules');
+    if (p && Object.hasOwn(p, S.defaultMode)) return refuse('machine-wide settings set a permission mode');
+    if (p && Object.hasOwn(p, S.additionalDirectories)) return refuse('machine-wide settings add folders');
+    if (obj && Object.hasOwn(obj, S.env)) return refuse('machine-wide settings set variables');
+    if (sb && sb[S.sandboxEnabled] === false) return refuse('machine-wide settings switch the sandbox off');
     if (sb?.[S.network]?.[S.allowedDomains]?.length) return refuse('machine-wide settings add allowed hosts');
     return { ok: true };
   }

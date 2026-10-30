@@ -52,8 +52,11 @@ function overlaps(a, b) {
 }
 
 // Undo workers are worker-profile sessions too (M14, audit MIN-7): they count toward the editing caps.
-const isEditing = (s) => s.kind === 'editing' || s.kind === 'undo';
+// Overnight runs edit files too (audit 0b-6 r2, L27): they count toward the caps, never around them.
+const isEditing = (s) => s.kind === 'editing' || s.kind === 'undo' || s.kind === 'overnight';
 // Every session that writes files takes part in the files-don't-overlap check (audit MIN-16).
+// Sessions that finish work or answer the owner; they write no product files, so the caps do not apply.
+const CAP_FREE = Object.freeze(['review', 'audit', 'merge', 'undo_merge', 'lead', 'front_door']);
 const writesFiles = (s) => isEditing(s) || s.kind === 'script';
 
 /**
@@ -109,7 +112,9 @@ export function startGate({ rules, rec, card, kind, product, b, running, lead })
       if (running.filter((s) => s.kind === 'script').length >= perMac) return refuse(`the Mac already runs ${perMac} scripts`);
       return disjoint({ rules, card, product, others: mine.filter(writesFiles), rec });
     }
-    if (kind !== 'editing' && kind !== 'undo') return { ok: true };
+    // Only named kinds skip the caps; any other kind is refused, not let through (audit 0b-6 r2, L27).
+    if (CAP_FREE.includes(kind)) return { ok: true };
+    if (!isEditing({ kind })) return refuse(`unknown session kind ${kind}: start nothing`);
     const productDoc = rec.read('product', product)?.doc;
     if (!productDoc) return refuse(`no product record for ${product}`);
     const lim = editingLimits({ rules, product, productDoc, amberCaps: band.amberCaps });

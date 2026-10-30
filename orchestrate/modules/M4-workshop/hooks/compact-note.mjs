@@ -6,10 +6,9 @@
 // new context first. Nothing is ever written outside the outbox, and a link is never followed.
 // There is no "compact instructions" heading: that is not a real feature (§5.5, corrected 29 Oct).
 
-import { pathToFileURL } from 'node:url';
 import { openSync, writeSync, closeSync, readSync, fstatSync, lstatSync, constants as C } from 'node:fs';
 import { join } from 'node:path';
-import { runHook, block, pass, realFolder } from './lib.mjs';
+import { isMain, runHook, block, pass, realFolder } from './lib.mjs';
 
 export const NOTE_CAP = 8000;
 const EVENTS = ['PreCompact', 'PostCompact', 'SessionStart'];
@@ -54,4 +53,4 @@ export function decide(input, args, io = {}) {
   return pass();
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) runHook(decide);
+if (isMain(import.meta.url)) runHook(decide);

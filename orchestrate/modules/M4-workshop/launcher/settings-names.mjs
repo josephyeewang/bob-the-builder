@@ -50,6 +50,7 @@ export const SETTINGS = Object.freeze({
   disableSkillShellExecution: 'disableSkillShellExecution',
   disableBundledSkills: 'disableBundledSkills',
   apiKeyHelper: 'apiKeyHelper',
+  disableAllHooks: 'disableAllHooks',
 });
 
 export const HOOK_FIELDS = Object.freeze({
@@ -87,7 +88,7 @@ export const REFUSED_ENV = Object.freeze([
   'CODEX_API_KEY',
 ]);
 // A settings key that does the same from inside a settings file.
-export const REFUSED_SETTINGS = Object.freeze([SETTINGS.apiKeyHelper]);
+export const REFUSED_SETTINGS = Object.freeze([SETTINGS.apiKeyHelper, SETTINGS.disableAllHooks]);
 
 // Fields of the headless start message the read-back needs (review 0b-3 M6). Which ones the
 // pinned version really carries is NOT VERIFIED; a missing one refuses.

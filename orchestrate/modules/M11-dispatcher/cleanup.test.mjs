@@ -328,3 +328,25 @@ test('audit MIN-20 (C10): an old bundle, or one outside the staging folder, is n
   assert.ok(existsSync(w2.copy));
   assert.match(out.reasons.join(), /no fresh bundle/);
 });
+
+test('audit 0b-6 r2 MAT-5 / MAT-8 (C2): any answer but delete keeps the copy without re-asking, until the card moves again', async () => {
+  for (const answer of ['no', 'not yet', '']) {
+    const w = world();
+    writeFileSync(join(w.copy, 'a.txt'), 'changed\n');
+    const rec = recFor(w, { card: { changed_at: iso(T0 - 20 * MIN) } });
+    await clean(w, rec);
+    const a = rec.read('ask', ASK_ID('C-1'));
+    rec.write({ actor: 'joe', entity: 'ask', id: ASK_ID('C-1'), expectRev: a.rev, doc: { ...a.doc, state: 'answered', answer } });
+    assert.equal((await clean(w, rec)).result, 'kept', answer);
+    const later = await clean(w, rec);
+    assert.deepEqual([later.result, later.calls.length], ['kept', 0], `${JSON.stringify(answer)}: not bundled or asked again`);
+    assert.equal(theAsk(rec).state, 'consumed');
+    // the card moves: the copy is looked at, and asked about, again
+    const c = rec.read('card', 'C-1');
+    rec.write({ actor: 'dispatcher', entity: 'card', id: 'C-1', expectRev: c.rev, doc: { ...c.doc, changed_at: iso(T0 - MIN) } });
+    const moved = await clean(w, rec);
+    assert.ok(moved.calls.length > 0, `${JSON.stringify(answer)}: bundled again after the card moved`);
+    assert.equal(theAsk(rec).state, 'open');
+    assert.ok(existsSync(w.copy));
+  }
+});

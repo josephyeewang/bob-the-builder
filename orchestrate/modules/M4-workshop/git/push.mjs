@@ -22,7 +22,7 @@ import { join, isAbsolute } from 'node:path';
 import { git, gitOk, checkMirror, checkGitVersion } from './safe-git.mjs';
 import { parseRawZ, refusedEntries } from './push-refusals.mjs';
 import { scanSecrets } from './gitleaks.mjs';
-import { allowList } from './binary-files.mjs';
+import { allowList, maskPath } from './binary-files.mjs';
 import { startGate } from './start-gate.mjs';
 
 export const BUNDLE_CAP = 200 * 1024 * 1024;
@@ -251,7 +251,10 @@ export function createPushScript(deps) {
   /** Pushes one session's bundle. Never throws: { ok, ... } or { ok: false, reason }. */
   return async function pushCard(sessionId) {
     let res;
-    try { res = await attempt(sessionId); } catch (e) { res = { ok: false, reason: e instanceof Refusal ? e.message : `the push script failed: ${String(e.message).slice(0, 200)}` }; }
+    try { res = await attempt(sessionId); } catch (e) { res = { ok: false, reason: e instanceof Refusal ? e.message : `the push script failed: ${String(e.message).replace(/\/[^\s'":]+/g, '<path>').slice(0, 200)}` }; }
+    // Every reason is masked once, here, before the record: a secret used as a file name is cut to
+    // its first four characters, and git's own error text loses its folder paths (round 3 MIN-3, COS-4).
+    if (!res.ok) res = { ...res, reason: maskPath(res.reason) };
     const s = record.read('session', sessionId)?.doc ?? {};
     const id = `push.${CARD.test(String(s.card)) ? s.card : 'unknown'}.${ATTEMPT.test(String(s.attempt)) ? s.attempt : 'unknown'}`;
     const cur = record.read('fact', id);

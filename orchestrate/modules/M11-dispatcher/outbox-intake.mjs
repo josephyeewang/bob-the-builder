@@ -34,13 +34,14 @@ export function kindsFor(entry) {
 /**
  * `sessions`: the Dispatcher's session map, [{ sessionId, role, outbox, uid, card, product, request? }].
  * `wait(ms)`: a sleep (tests pass a fake that moves the fake clock). `alert(text)` reaches Joe.
- * `startReadonly({ lead, profile, kind, brief, product })` asks the pass to start a read-only session.
+ * `startReadonly({ lead, profile, kind, brief, product })` starts a read-only session through the wiring
+ *   port; the tick puts the start gate in front of it (audit 0b-6 r2 MAT-2), so it answers { ok, reason }.
  * `replyToLead({ lead, text })` leaves a report- note for the Lead. `note(text)` writes a diary line.
  * `vet({ session, kind, text })` may refuse a file before it is used (null = fine); a vetted-out file
  * is not marked as used, so the session can write it again under the same name (an oversize handoff).
  * Returns what happened to each file.
  */
-export async function intakePass({ rec, sessions, wait, alert, note, startReadonly, replyToLead,
+export async function intakePass({ rec, sessions, wait, alert, note, startReadonly, replyToLead, now = Date.now(),
   list = (d) => readdirSync(d), look = statOf, read = readOutboxFile, vet = () => null }) {
   const out = [];
   const seen = [];
@@ -74,13 +75,15 @@ export async function intakePass({ rec, sessions, wait, alert, note, startReadon
       if (w.ok) prev = rec.read('fact', key);
       return w;
     };
-    if (prev?.doc?.state === 'applying') {
+    if (prev?.doc?.state === 'applying' || prev?.doc?.state === 'starting') {
       // A claim left by a pass that crashed or threw between the claim and the apply (audit MAT-7). The
       // pass lock means no other pass is running, so it is not still in progress. Whether the record
       // took the file is not known, so it is never applied a second time: Joe is told once, and a new
       // copy may be handed in under the same name.
+      // A `starting` claim (audit 0b-6 r2 MIN-7) is the same for a read-only start: it may have started, so it is never started twice.
+      const what = prev.doc.state === 'starting' ? 'its read-only session may or may not have started, and was not started again' : 'it may or may not have reached the record, and was not applied again';
       put({ ...prev.doc, sha256: prev.doc.sha256, state: 'interrupted', at: new Date().toISOString() }, 'outbox_interrupted');
-      alert(`the hand-in of ${name} from ${s.role} ${s.sessionId} was interrupted; it may or may not have reached the record, and was not applied again`);
+      alert(`the hand-in of ${name} from ${s.role} ${s.sessionId} was interrupted; ${what}`);
     }
     if (prev) {
       const was = prev.doc.state;
@@ -98,13 +101,16 @@ export async function intakePass({ rec, sessions, wait, alert, note, startReadon
     // A Lead's read-only request starts its session first. Refused (at the cap, in red) -> the file waits
     // and is tried again next pass (audit MAT-6); the Lead is told once that it is queued.
     if (s.role === 'lead' && Object.hasOwn(READONLY_REQUESTS, file.kind)) {
+      // Claim first (audit 0b-6 r2 MIN-7): a crash between the start and the claim must not start a second helper.
+      const claimStart = put({ state: 'starting', tries: prev?.doc?.tries ?? 0 }, 'outbox_starting');
+      if (!claimStart.ok) { r.refused = `could not record the start: ${claimStart.reason}`; continue; }
       let started;
       try { started = await startReadonly({ lead: s.sessionId, profile: READONLY_REQUESTS[file.kind], kind: file.kind, brief: file.text, product: s.product }); }
       catch (e) { started = { ok: false, reason: `the start failed: ${e.message}` }; }
       r.request = started;
       if (!started?.ok) {
         const reason = started?.reason ?? 'no answer';
-        const told = prev?.doc?.state === 'waiting';
+        const told = (prev?.doc?.tries ?? 0) > 0;
         put({ state: 'waiting', reason, tries: (prev?.doc?.tries ?? 0) + 1 }, 'outbox_waiting');
         if (!told) replyToLead({ lead: s.sessionId, text: `Your ${file.kind} request ${name} is queued: ${reason}. It starts by itself when it can.` });
         r.waiting = reason;
@@ -119,7 +125,8 @@ export async function intakePass({ rec, sessions, wait, alert, note, startReadon
     catch (e) { applied = { ok: false, reason: e.message }; }
     r.applied = applied.ok;
     if (!applied.ok) { r.refused = applied.reason; alert(`the record refused ${name} from ${s.role} ${s.sessionId}: ${applied.reason}`); }
-    put({ state: applied.ok ? 'applied' : 'refused' }, 'outbox_applied');
+    // applied_at lets the Lead restart tell a hand-off written after WRAP from an older one (audit 0b-6 r2 MAT-3).
+    put({ state: applied.ok ? 'applied' : 'refused', applied_at: new Date(now).toISOString() }, 'outbox_applied');
   }
   return out;
 }

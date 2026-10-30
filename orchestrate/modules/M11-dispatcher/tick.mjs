@@ -25,6 +25,8 @@ import { outageStep } from './outage.mjs';
 import { intakePass } from './outbox-intake.mjs';
 import { leadRestartStep, leadInFlight, handoffVet } from './lead-restart.mjs';
 import { dispatcherPass } from './pass.mjs';
+import { startGate } from './gate.mjs';
+import { currentBands } from './usage.mjs';
 import { timeLimits, requestMerges } from './merges.mjs';
 import { undoStep } from './undo.mjs';
 import { phoneLinkStep } from './phone-link.mjs';
@@ -97,9 +99,20 @@ export async function tick({ rec, rules, now, ports: p }) {
     outageOpen = o.outage;
     return { ...o, acted: o.outage ? [] : actOnDead({ rec, now, restart: o.restart, asks: o.asks, cards: o.cards }) };
   });
-  await run('intake', () => intakePass({ rec, sessions: p.outboxSessions(), wait: p.wait, alert, note: (text) => note(rec, 'intake-note', text, { now }),
-    startReadonly: p.startReadonly, replyToLead: p.replyToLead, vet: handoffVet(rules), ...(p.intakeFs ?? {}) }));
+  // A Lead's read-only helper goes through the one start gate (audit 0b-6 r2 MAT-2): the red band, the
+  // read-only cap per Lead and an outage hold it here, whatever the wiring port does.
+  const startReadonly = async (x) => {
+    if (outageOpen) return { ok: false, reason: 'outage: nothing starts' };
+    const acct = signedInAccount({ rec, rules, now });
+    if (!acct.account) return { ok: false, reason: acct.reason };
+    const g = startGate({ rules, rec, card: null, kind: 'readonly', product: x.product, b: currentBands({ rec, rules, account: acct.account, now }), running: p.sessions(), lead: x.lead });
+    return g.ok ? p.startReadonly(x) : { ok: false, reason: g.reason };
+  };
+  await run('intake', () => intakePass({ rec, now, sessions: p.outboxSessions(), wait: p.wait, alert, note: (text) => note(rec, 'intake-note', text, { now }),
+    startReadonly, replyToLead: p.replyToLead, vet: handoffVet(rules), ...(p.intakeFs ?? {}) }));
+  // During an outage no WRAP is sent and no new Lead starts (audit 0b-6 r2 MIN-6).
   await run('leads', async () => {
+    if (outageOpen) return 'outage: the Lead step waits';
     const out = [];
     for (const l of p.leads()) {
       const inFlight = leadInFlight({ rec, sessionId: l.lead.sessionId, outboxNames: l.outboxNames, questionOpen: l.questionOpen });
@@ -115,11 +128,14 @@ export async function tick({ rec, rules, now, ports: p }) {
     running = r.running;
     return r;
   });
-  // Without this pass's bands, nothing that the bands gate may start (fail closed).
+  // Without this pass's bands nothing the bands gate is started or requested (fail closed, audit 0b-6
+  // r2 MIN-4): "unknown" would still let reviews and merges through while the real band may be red.
+  // The time limits themselves still run.
   const held = { band: 'unknown', own_building: 'unknown', pace: null, prodBlocked: true, reason: 'the main pass did not finish' };
+  const startsHeld = outageOpen ? 'outage' : bands ? null : 'the main pass did not finish';
   await run('limits', () => timeLimits({ rec, rules, now, b: bands ?? held, running, hasSession: p.hasSession, gateAlive: p.gateAlive,
-    hasReviewer: p.hasReviewer, startReviewer: outageOpen ? async () => ({ ok: false, reason: 'outage' }) : p.startReviewer, alert }));
-  await run('merges', () => (outageOpen ? [] : requestMerges({ rec, rules, now, b: bands ?? held, running })));
+    hasReviewer: p.hasReviewer, startReviewer: p.startReviewer, alert, startsHeld }));
+  await run('merges', () => requestMerges({ rec, rules, now, b: bands ?? held, running, startsHeld }));
   await run('undo', () => undoStep({ rec, rules, now, filesOf: p.filesOf, alert }));
   await run('phone', () => phoneLinkStep({ rec, rules, now, send: p.sendFrontDoor, restartFrontDoor: p.restartFrontDoor, startMinibase: p.startMinibase,
     frontDoorAlive: p.frontDoorAlive, lastHandoff: p.frontDoorHandoff, alert }));

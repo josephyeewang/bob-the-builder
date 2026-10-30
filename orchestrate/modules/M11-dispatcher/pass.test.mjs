@@ -209,12 +209,10 @@ test('M8: usage unknown for over a day -> parked work waits on Joe, one alert', 
   const parked = { state: 'waiting', product: 'p1', waiting: { who: 'dispatcher', what: 'usage_band', since: iso(T0), next_check: iso(T0) } };
   const w = world([['card', 'C-1', { ...parked, tier: 1 }]], { usage: null });
   await w.pass(0);
-  // unknown is not red: the card leaves the park, but as Tier 1 it does not start
-  assert.equal(w.rec.read('card', 'C-1').doc.state, 'ready');
-  w.setCard('C-1', parked);
+  // audit 0b-6 r2 MIN-2: while usage is unknown the card stays parked (the gate would hold it anyway)
+  assert.equal(w.rec.read('card', 'C-1').doc.waiting.what, 'usage_band');
   await w.pass(24 * 60);
-  assert.equal(w.rec.read('card', 'C-1').doc.state, 'ready', 'a day exactly is not over a day');
-  w.setCard('C-1', parked);
+  assert.equal(w.rec.read('card', 'C-1').doc.waiting.what, 'usage_band', 'a day exactly is not over a day');
   await w.pass(24 * 60 + 1);
   assert.equal(w.rec.read('card', 'C-1').doc.waiting.who, 'joe');
   await w.pass(24 * 60 + 2);
@@ -437,4 +435,96 @@ test('audit MIN-20 (P33): the stop stops waiting as soon as the group is gone af
   const r = await stopProcessGroup({ pgid: 42, kill: () => {}, alive: () => t < 1500, sleep: async (ms) => { t += ms; } });
   assert.equal(r.how, 'SIGTERM');
   assert.equal(t, 1500);
+});
+
+test('audit 0b-6 r2 MAT-7: a session whose probe, stop or save throws does not end the pass; a cancelled one after it still stops and starts still run', async () => {
+  const w = world([card('C-1'), card('C-2'), card('C-3')]);
+  await w.pass(0);
+  const [a, b] = w.sessions.map((s) => s.id);
+  w.setCard('C-1', { state: 'cancelled' });
+  w.setCard('C-2', { state: 'cancelled' });
+  w.rec.write({ actor: 'dispatcher', entity: 'card', id: 'C-4', expectRev: 0, doc: card('C-4')[2] });
+  const sessions = w.sessions.filter((s) => s.id === a || s.id === b);
+  const stops = [];
+  const alerts = [];
+  const base = { rec: w.rec, rules: rulesWith({}, startAnswer(w.rec)), account: ACCT, sessions, launch: async () => ({ ok: true, sessionId: 'S-new', pgid: 900, head: 'h'.repeat(40) }), alert: (x) => alerts.push(x) };
+  // Pass 1: A's probe throws; B is cancelled and idle.
+  let r = await dispatcherPass({ ...base, now: T0 + MIN, probe: (s) => { if (s.id === a) throw new Error('transcript unreadable'); return idle; },
+    stopGroup: async (s) => { stops.push(s.id); return { ok: true, how: 'SIGTERM' }; }, saveWork: async () => ({ ok: true }) });
+  assert.deepEqual(stops, [b], 'B stops although A threw first');
+  assert.deepEqual(r.stopping, [[a, 'cancel']], 'a throwing probe is not a safe point');
+  assert.ok(r.started.length >= 1, 'starts still run');
+  // Pass 2, past the grace: A is hard-stopped; its stop then its save throw and each becomes one alert.
+  r = await dispatcherPass({ ...base, sessions: sessions.filter((s) => s.id === a), now: T0 + 30 * MIN, probe: () => { throw new Error('transcript unreadable'); },
+    stopGroup: async () => { throw new Error('EPERM'); }, saveWork: async () => ({ ok: true }) });
+  assert.match(alerts.join('\n'), /could not be stopped: EPERM/);
+  r = await dispatcherPass({ ...base, sessions: sessions.filter((s) => s.id === a), now: T0 + 31 * MIN, probe: () => idle,
+    stopGroup: async () => ({ ok: true, how: 'SIGTERM' }), saveWork: async () => { throw new Error('disk gone'); } });
+  assert.deepEqual(r.stopped, [[a, 'cancel']]);
+  assert.match(alerts.join('\n'), /not saved: disk gone/);
+});
+
+test('audit 0b-6 r2 MAT-7: stopProcessGroup answers { ok: false } on EPERM instead of throwing, at SIGTERM and at SIGKILL', async () => {
+  const eperm = () => { throw Object.assign(new Error('x'), { code: 'EPERM' }); };
+  assert.deepEqual(await stopProcessGroup({ pgid: 42, kill: eperm, alive: () => true, sleep: async () => {} }), { ok: false, reason: 'EPERM' });
+  let n = 0;
+  const second = (p, sig) => { n += 1; if (sig === 'SIGKILL') eperm(); };
+  assert.deepEqual(await stopProcessGroup({ pgid: 42, kill: second, alive: () => true, sleep: async () => {}, waitMs: 1000 }), { ok: false, reason: 'EPERM' });
+  assert.equal(n, 2);
+});
+
+test('audit 0b-6 r2 / L27: a running session of a kind the Dispatcher does not know is parked in red, like editing work', async () => {
+  const w = world([card('C-1')], { usage: RED });
+  w.sessions.push({ id: 'X-1', product: 'p1', kind: 'nightly', card: 'C-1' });
+  const r = await w.pass();
+  // An unknown role waits for the stricter safe point (a finished turn); the stop is wanted all the same.
+  assert.deepEqual(r.stopping, [['X-1', 'red']]);
+  assert.equal(w.rec.read('fact', STOP_FACT('X-1')).doc.reason, 'red');
+});
+
+test('audit 0b-6 r2 MAT-8 (P4): in amber a card with no tier sorts as Tier 1, ahead of Tier 2 and with the Tier-1 hold', async () => {
+  const w = world([card('A2', { changed_at: iso(T0 - 60 * MIN) }), card('B0', { tier: undefined }), card('C1', { tier: 1 }), card('D0', { tier: undefined })], { usage: AMBER });
+  const r = await w.pass();
+  assert.deepEqual(r.started, ['B0', 'C1']);
+  assert.match(r.refused.find(([id]) => id === 'A2')[1], /queued behind Tier-1 work in amber/);
+});
+
+test('audit 0b-6 r2 MIN-2: a usage_band card resumes in green, not while usage is unknown', async () => {
+  const parked = { state: 'waiting', product: 'p1', tier: 2, files: ['src/p.js'], waiting: { who: 'dispatcher', what: 'usage_band', since: iso(T0), next_check: iso(T0) } };
+  const w = world([['card', 'C-1', parked]], { usage: null });
+  assert.deepEqual((await w.pass(0)).resumed, []);
+  w.setUsage(GREEN, T0 + MIN);
+  assert.deepEqual((await w.pass(1)).resumed, ['C-1']);
+});
+
+test('audit 0b-6 r2 MIN-10 (round 1 MIN-2, 3, 4): a cancel replaces a pending park; a card that ended or waits on Joe stops its worker; a failing stop alerts once', async () => {
+  // Rank: a red park is pending (mid-tool), then the card is cancelled: the stop is now a cancel.
+  const w = world([card('C-1')]);
+  await w.pass(0);
+  const sid = w.sessions[0].id;
+  w.probes.set(sid, busy);
+  w.setUsage(RED, T0 + MIN);
+  await w.pass(1);
+  assert.equal(w.rec.read('fact', STOP_FACT(sid)).doc.reason, 'red');
+  w.setCard('C-1', { state: 'cancelled' });
+  await w.pass(2);
+  assert.equal(w.rec.read('fact', STOP_FACT(sid)).doc.reason, 'cancel');
+  // Ended: in green, a worker whose card is done, or now waits on Joe, is stopped.
+  for (const patch of [{ state: 'closed' }, { state: 'failed' }, { state: 'waiting', waiting: { who: 'joe', what: 'approve' } }]) {
+    const e = world([card('C-2')]);
+    await e.pass(0);
+    const s2 = e.sessions[0].id;
+    e.setCard('C-2', patch);
+    const r = await e.pass(1);
+    assert.deepEqual(r.stopped, [[s2, 'card_ended']], JSON.stringify(patch));
+  }
+  // Once: a stop that keeps failing alerts on the first pass only.
+  const f = world([card('C-3')]);
+  await f.pass(0);
+  f.setCard('C-3', { state: 'cancelled' });
+  const alerts = [];
+  const base = { rec: f.rec, rules: rulesWith({}, startAnswer(f.rec)), account: ACCT, sessions: [...f.sessions], probe: () => idle, launch: async () => ({ ok: false }),
+    stopGroup: async () => ({ ok: false, reason: 'permission' }), saveWork: async () => ({ ok: true }), alert: (x) => alerts.push(x) };
+  for (const m of [1, 2, 3]) await dispatcherPass({ ...base, now: T0 + m * MIN });
+  assert.equal(alerts.filter((x) => /could not be stopped/.test(x)).length, 1);
 });

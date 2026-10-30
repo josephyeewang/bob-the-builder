@@ -1,14 +1,13 @@
 // The no-verify block (design v4 §14.1.5). A role never skips git's checks: no --no-verify, no
 // `commit -n`, no switching the hooks folder off, no hook-skip variables.
 
-import { pathToFileURL } from 'node:url';
-import { runHook, block, pass, shellCommands, shellWords, programOf, wrapperOf, builtCommandName, hasExpansion } from './lib.mjs';
+import { isMain, runHook, block, pass, shellCommands, shellWords, programOf, joinLines, unreadable, namesGitInternals } from './lib.mjs';
 
-const SKIP_VARS = /(^|\s)(HUSKY|LEFTHOOK|SKIP|PRE_COMMIT_ALLOW_NO_CONFIG|GIT_CONFIG_COUNT|GIT_CONFIG_PARAMETERS)=/;
+const SKIP_VARS = /(^|\s)(HUSKY|LEFTHOOK|SKIP|PRE_COMMIT_ALLOW_NO_CONFIG|GIT_CONFIG[A-Z0-9_]*)=/;
 
 export function decide(input) {
   if (input.tool_name !== 'Bash') return pass();
-  const cmd = String(input.tool_input?.command ?? '');
+  const cmd = joinLines(input.tool_input?.command);
   if (/--no-verify\b/.test(cmd)) return block('--no-verify');
   if (/core\.hookspath/i.test(cmd)) return block('changing git\'s hooks folder');
   if (SKIP_VARS.test(cmd)) return block('a hook-skip variable');
@@ -18,10 +17,9 @@ export function decide(input) {
   if (words.some((w) => w.length >= 5 && '--no-verify'.startsWith(w.split('=')[0]))) return block('--no-verify (or a shortened form)');
   if (words.some((w) => /core\.hookspath/i.test(w))) return block('changing git\'s hooks folder');
   if (words.some((w) => SKIP_VARS.test(` ${w}`))) return block('a hook-skip variable');
-  const wrap = wrapperOf(cmd);
-  if (wrap) return block(`"${wrap}" runs a string the guard can't check; run the command directly`);
-  if (builtCommandName(cmd)) return block('a command name built from a variable or substitution can\'t be checked');
-  if (hasExpansion(cmd) && shellCommands(cmd).some((c) => programOf(c) === 'git')) return block('a git command with a variable or substitution can\'t be checked; spell it out');
+  const why = unreadable(cmd);
+  if (why) return block(`${why}; write the command out plainly`);
+  if (namesGitInternals(cmd)) return block('the command touches git\'s own settings or hooks files');
   for (const c of shellCommands(cmd)) {
     if (programOf(c) !== 'git') continue;
     const sub = c.findIndex((w, k) => k > 0 && ['commit', 'merge', 'push', 'am', 'rebase'].includes(w));
@@ -32,4 +30,4 @@ export function decide(input) {
   return pass();
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) runHook(decide);
+if (isMain(import.meta.url)) runHook(decide);

@@ -6,14 +6,14 @@ import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { loginJobPlist } from './login-job.mjs';
 
-const OK = { label: 'org.example.dispatcher', node: '/opt/node/bin/node', script: '/srv/orch/dispatcher.mjs', path: '/opt/node/bin:/usr/bin:/bin', logDir: '/srv/orch/logs', workDir: '/srv/orch' };
+const OK = { label: 'org.example.dispatcher', node: '/opt/node/bin/node', script: '/srv/orch/dispatcher.mjs', config: '/srv/orch/config.json', path: '/opt/node/bin:/usr/bin:/bin', logDir: '/srv/orch/logs', workDir: '/srv/orch' };
 
 test('m4: the job runs every 60 s and at load, with an explicit PATH', () => {
   const t = loginJobPlist(OK);
   assert.match(t, /<key>StartInterval<\/key><integer>60<\/integer>/);
   assert.match(t, /<key>RunAtLoad<\/key><true\/>/);
   assert.match(t, /<key>PATH<\/key><string>\/opt\/node\/bin:\/usr\/bin:\/bin<\/string>/);
-  assert.match(t, /<array><string>\/opt\/node\/bin\/node<\/string><string>\/srv\/orch\/dispatcher\.mjs<\/string><\/array>/);
+  assert.match(t, /<array><string>\/opt\/node\/bin\/node<\/string><string>\/srv\/orch\/dispatcher\.mjs<\/string><string>\/srv\/orch\/config\.json<\/string><\/array>/);
   assert.match(t, /dispatcher\.err\.log/);
   assert.doesNotMatch(t, /UserName/);
   assert.match(loginJobPlist({ ...OK, userName: 'orchestrate' }), /<key>UserName<\/key><string>orchestrate<\/string>/);
@@ -31,6 +31,7 @@ test('m4: refuses a bad label, a relative path, a bad PATH or a bad user name', 
   assert.throws(() => loginJobPlist({ ...OK, label: '../x' }), /bad job label/);
   assert.throws(() => loginJobPlist({ ...OK, node: 'node' }), /node must be an absolute path/);
   assert.throws(() => loginJobPlist({ ...OK, script: 'a.mjs' }), /script must be/);
+  assert.throws(() => loginJobPlist({ ...OK, config: undefined }), /config must be/, 'audit 0b-6 r2 MAT-1: no config, no job');
   assert.throws(() => loginJobPlist({ ...OK, logDir: undefined }), /logDir must be/);
   assert.throws(() => loginJobPlist({ ...OK, workDir: '/a\nb' }), /workDir must be/);
   assert.throws(() => loginJobPlist({ ...OK, path: '/usr/bin:bin' }), /PATH must be/);

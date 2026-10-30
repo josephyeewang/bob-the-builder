@@ -133,7 +133,7 @@ test('M13: an editing card with no file list runs alone', () => {
   assert.equal(go({ running: [{ id: 'S-z', product: 'p1', kind: 'editing', card: 'nope' }] }).ok, false);
 });
 
-test('M20: thinking sessions count against the asking Lead, never the editing caps', () => {
+test('M20 (the start gate alone; the intake path is in tick.test): thinking sessions count against the asking Lead, never the editing caps', () => {
   const ro = (n, lead = 'L1') => ({ id: `R${n}`, product: 'p1', kind: 'readonly', lead });
   const rec = setup({ products: [product('p1', 'paused')] });
   const rules = rulesWith({ [K.editingPerProduct]: 0 });
@@ -199,4 +199,18 @@ test('audit MIN-20 (G21): an editing card for a product with no record is refuse
   const r = go({ product: 'p9', card: { id: 'new', product: 'p9', tier: 2, files: ['src/new.js'] } });
   assert.equal(r.ok, false);
   assert.match(r.reason, /no product record for p9/);
+});
+
+test('audit 0b-6 r2 / L27: an unknown kind is refused; an overnight run meets the caps and the files check; running overnight work counts', () => {
+  assert.match(go({ kind: 'nightly' }).reason, /unknown (session )?kind nightly/);
+  // past the band check too: the gate itself refuses a kind it does not know
+  assert.match(startGate({ rules: rulesWith(), rec: setup(), card: null, kind: 'readonly_x', product: 'p1', b: { band: 'green', own_building: 'open', prodBlocked: false }, running: [] }).reason, /unknown/);
+  const three = [worker(0), worker(1), worker(2)];
+  assert.match(go({ kind: 'overnight', running: three }).reason, /cap 3/);
+  assert.equal(go({ kind: 'overnight' }).ok, true);
+  const night = (n) => ({ ...worker(n), kind: 'overnight' });
+  assert.match(go({ running: [night(0), night(1), night(2)] }).reason, /cap 3/, 'overnight sessions count toward the editing cap');
+  assert.match(go({ card: { id: 'new', product: 'p1', tier: 2, files: ['src/w0.js'] }, running: [night(0)] }).reason, /src\/w0\.js|overlap|same file/i);
+  // the named cap-free kinds still pass
+  for (const kind of ['review', 'audit', 'merge', 'undo_merge', 'lead', 'front_door']) assert.equal(go({ kind, running: three }).ok, true, kind);
 });

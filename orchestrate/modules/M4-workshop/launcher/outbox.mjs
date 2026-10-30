@@ -18,7 +18,7 @@ const refuse = (reason) => ({ ok: false, reason });
 
 /**
  * `busy(outbox)` returns a list of running programs that hold the folder (empty when none).
- * `alert(message)` raises an alert to Joe. Never follows a link: entries are removed as entries.
+ * `alert(message)` raises an alert to the owner. Never follows a link: entries are removed as entries.
  */
 export function emptyOutbox(outbox, { busy, alert = () => {} }) {
   let st; try { st = lstatSync(outbox); } catch { return refuse('the outbox is missing'); }

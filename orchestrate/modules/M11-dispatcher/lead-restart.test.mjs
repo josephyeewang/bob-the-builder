@@ -29,7 +29,7 @@ function world() {
     alert: (t) => calls.alerts.push(t),
   });
   // The pass's own intake, with the handoff vet, over the Lead's real outbox folder.
-  const intake = () => intakePass({ rec, sessions: [{ sessionId: SID, role: 'lead', outbox, uid: UID }], wait: async () => {},
+  const intake = (min = 3) => intakePass({ rec, now: T0 + min * MIN, sessions: [{ sessionId: SID, role: 'lead', outbox, uid: UID }], wait: async () => {},
     alert: (t) => calls.alerts.push(t), note: () => {}, startReadonly: () => ({ ok: true }), replyToLead: () => {}, vet: handoffVet(R) });
   const handIn = (bytes) => writeFileSync(join(outbox, HANDOFF_NAME(SID)), 'x'.repeat(bytes));
   return { rec, calls, step, intake, handIn, outbox, refuse: (o) => { outcome = o; } };
@@ -134,6 +134,13 @@ test('M18: the new Lead failing to start alerts', async () => {
   await w.intake();
   assert.equal(await w.step(ended(261_000, 2), 2, { startFails: true }), 'stopped; new Lead failed to start');
   assert.equal(w.calls.alerts.length, 1);
+  // audit 0b-6 r2 MIN-1: tried again every pass, one alert in all, never a second stop; mid-turn does not block it.
+  assert.equal(await w.step(midTurn(261_000), 3, { startFails: true }), 'new Lead still not started; tried again next pass');
+  assert.equal(await w.step(null, 4), 'restarted', 'the stopped Lead\'s transcript need not be readable');
+  assert.equal(w.calls.alerts.length, 1);
+  assert.equal(w.calls.stops, 1);
+  assert.equal(w.calls.starts.length, 3);
+  assert.equal(phase(w.rec), 'done');
 });
 
 test('M18 / m9: 410k mid-turn sends no WRAP; above hard + 50k alerts once', async () => {
@@ -202,4 +209,24 @@ test('audit MIN-13: a handoff that was refused or not recorded never stops the o
   assert.equal(r, 'handoff not recorded: stale rev');
   assert.equal(w2.calls.stops, 0);
   assert.equal(w2.calls.starts.length, 0);
+});
+
+test('audit 0b-6 r2 MAT-3: a handoff applied before the WRAP never restarts the Lead; one applied after it does', async () => {
+  const w = world();
+  w.handIn(1_000);
+  await w.intake(0);
+  assert.equal(await w.step(ended(260_000), 1), 'WRAP sent');
+  // The Lead writes a new handoff under the same name: intake refuses it as new content.
+  w.handIn(2_000);
+  await w.intake(2);
+  assert.equal(await w.step(ended(262_000, 2), 3), 're-asked');
+  assert.equal(w.calls.stops, 0, 'never stopped on the old note');
+  assert.deepEqual(w.calls.starts, []);
+  assert.match(w.calls.sent[1], /already used before the WRAP/);
+  // An old fact with no time recorded counts as older too.
+  const v = world();
+  assert.equal(await v.step(ended(260_000), 1), 'WRAP sent');
+  v.rec.write({ actor: 'dispatcher', entity: 'fact', id: `outbox-${SID}-${HANDOFF_NAME(SID)}`, expectRev: 0, doc: { state: 'applied', sha256: 'a'.repeat(64) } });
+  assert.notEqual(await v.step(ended(262_000, 2), 3), 'restarted');
+  assert.equal(v.calls.stops, 0);
 });

@@ -22,9 +22,9 @@ const fresh = (fact, attempt) => {
  * `gateAlive()` (the Merge Gate's process), `hasReviewer(cardId)`, `startReviewer(cardId)` -> { ok },
  * `alert(text)`. `b` = this pass's bands and `running` = the running sessions: a reviewer start goes
  * through the same start gate as every other start (audit MAT-5), so red holds it unless the rules'
- * red_runs lists reviews. Returns the list of moves made, for the diary and the tests.
+ * red_runs lists reviews. `startsHeld` (a reason) skips reviewer starts this pass, uncounted. Returns the list of moves made, for the diary and the tests.
  */
-export async function timeLimits({ rec, rules, now, b, running = [], hasSession, gateAlive, hasReviewer, startReviewer, alert }) {
+export async function timeLimits({ rec, rules, now, b, running = [], hasSession, gateAlive, hasReviewer, startReviewer, alert, startsHeld = null }) {
   const done = [];
   const lim = {
     claimed: minutes(rules, KEYS.claimedNoSessionMin), checking: minutes(rules, KEYS.checkingMaxMin),
@@ -35,6 +35,8 @@ export async function timeLimits({ rec, rules, now, b, running = [], hasSession,
       if (move(rec, 'card', id, { state: 'ready', claim: null }, { now, kind: 'timeout' }).ok) done.push([id, 'claimed->ready']);
     }
     if (doc.state === 'in_review' && !hasReviewer(id) && ageMs(doc, now) >= lim.inReview) {
+      // An outage, or a pass with no bands, holds the start without counting it as a failure (audit 0b-6 r2 MIN-4, MIN-5).
+      if (startsHeld) { done.push([id, `reviewer held: ${startsHeld}`]); continue; }
       const fails = doc.reviewer_start_failures ?? 0;
       if (fails >= 2) {
         if (waitOn(rec, id, { who: 'joe', what: 'no reviewer could be started', now }).ok) { alert(`card ${id}: no reviewer could be started twice`); done.push([id, 'in_review->waiting']); }
@@ -114,26 +116,36 @@ const READY_TO_MERGE = ['verified', 'approved'];
 /**
  * Merge requests (R-0b-67, R-0b-68; review 0b-6 M23, D12). For each card the review passed (verified,
  * or approved), whose verdict is for the card's current head and who has no request for that head
- * yet, the Dispatcher stores a `merge_request` { card, pr, session_id, head, rev, requested_at }: the
+ * yet (or whose request is for an older rev of the card), the Dispatcher stores a `merge_request` { card, pr, session_id, head, rev, requested_at }: the
  * Merge Gate merges only a change with a stored request matching session, head and rev (refusal 11).
  * The request goes through the start gate as kind 'merge', so red holds it unless red_runs lists
  * merges, and no Tier-1 production change is requested above the usage line or while usage is unknown.
+ * An undo card's request goes as 'undo_merge', which no band holds (R-0b-68), even when this pass
+ * has no bands (`startsHeld`, a reason): then every other request is held (L31).
  * `session_id` is the worker session that made the head; `rev` is the card's record rev.
  */
-export function requestMerges({ rec, rules, now, b, running = [] }) {
+export function requestMerges({ rec, rules, now, b, running = [], startsHeld = null }) {
   const done = [];
   for (const { id, rev, doc } of rec.list('card')) {
     if (!READY_TO_MERGE.includes(doc.state)) continue;
     const verdict = rec.read('verdict', id)?.doc;
     if (!verdict?.head || doc.pr == null || !doc.session) { done.push([id, 'not ready: needs a verdict, a pull request and its session']); continue; }
-    if (doc.head != null && doc.head !== verdict.head) { done.push([id, 'the verdict is for another head']); continue; }
+    // The card must name its own head, and the verdict must be for it (audit 0b-6 r2 MIN-9): no head is no merge.
+    if (!doc.head) { done.push([id, 'not ready: the card names no head']); continue; }
+    if (doc.head !== verdict.head) { done.push([id, 'the verdict is for another head']); continue; }
     const mid = MERGE_REQUEST(id, verdict.head);
-    if (rec.read('merge_request', mid)) continue;
-    const g = startGate({ rules, rec, card: { id, ...doc }, kind: 'merge', product: doc.product, b, running });
+    // A request for an older rev of the card (M6 refused it and the card came back) is asked again
+    // (audit 0b-6 r2 MAT-6); the Merge Gate refuses a rev that is not the card's current one anyway.
+    const old = rec.read('merge_request', mid);
+    if (old && old.doc.rev === rev) continue;
+    // An undo is never held by the band (audit 0b-6 r2 MAT-4, L31): it is the way out of a bad change.
+    // When this pass has no bands (an outage, or the main pass failed), only undos are requested.
+    if (startsHeld && doc.kind !== 'undo') { done.push([id, `merge request held: ${startsHeld}`]); continue; }
+    const g = startGate({ rules, rec, card: { id, ...doc }, kind: doc.kind === 'undo' ? 'undo_merge' : 'merge', product: doc.product, b, running });
     if (!g.ok) { done.push([id, `merge request held: ${g.reason}`]); continue; }
-    const w = rec.write({ actor: 'dispatcher', entity: 'merge_request', id: mid, expectRev: 0, kind: 'merge_request',
+    const w = rec.write({ actor: 'dispatcher', entity: 'merge_request', id: mid, expectRev: old?.rev ?? 0, kind: 'merge_request',
       doc: { card: id, pr: doc.pr, session_id: doc.session, head: verdict.head, rev, product: doc.product ?? null, requested_at: new Date(now).toISOString() } });
-    done.push([id, w.ok ? 'merge requested' : `merge request not recorded: ${w.reason}`]);
+    done.push([id, w.ok ? (old ? 'merge requested again' : 'merge requested') : `merge request not recorded: ${w.reason}`]);
   }
   return done;
 }

@@ -10,6 +10,7 @@
 
 import { realpathSync, lstatSync } from 'node:fs';
 import { dirname, basename, join, isAbsolute, resolve, sep } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 export const BLOCK = 2;
 export const block = (reason) => ({ block: true, reason });
@@ -34,6 +35,17 @@ async function readStdin(stream) {
   const parts = [];
   for await (const c of stream) parts.push(c);
   return Buffer.concat(parts).toString('utf8');
+}
+
+/**
+ * Is this module the script node was started with? Real paths on both sides (L31): the hooks are
+ * reached through a linked folder, which spells the path differently, and a mismatch would exit 0
+ * having checked nothing, which lets every call through.
+ */
+export function isMain(moduleUrl, argv1 = process.argv[1]) {
+  const real = (p) => { try { return realpathSync(p); } catch { return null; } };
+  const self = real(fileURLToPath(moduleUrl));
+  return !!(self && argv1 && self === real(argv1));
 }
 
 /**
@@ -114,9 +126,13 @@ export function toolPaths(input) {
 
 // ---- shell lines ----
 
+/** A backslash before a line break joins the two lines, as the shell does (audit R-0b-44 round 2 MAT-1). */
+export const joinLines = (cmd) => String(cmd ?? '').replace(/\\\r?\n/g, '');
+
 /** Splits a shell line into words, roughly: quotes are removed, joiners split. For matching, not running. */
 export function shellWords(cmd) {
   if (typeof cmd !== 'string') return [];
+  cmd = joinLines(cmd);
   const words = [];
   let cur = '';
   let q = null;
@@ -136,16 +152,24 @@ export function shellWords(cmd) {
 export function shellCommands(cmd) {
   const cmds = [];
   let cur = [];
-  for (const w of shellWords(String(cmd).replace(/\n/g, ' ; '))) {
-    if ([';', '&', '|', '(', ')', '`', '$', '<', '>'].includes(w)) { if (cur.length) cmds.push(cur); cur = []; continue; }
+  // The word after `<` or `>` is a file, not a command: it stays out of the command list (the
+  // guards still see it among the words).
+  let redirect = false;
+  for (const w of shellWords(joinLines(cmd).replace(/\n/g, ' ; '))) {
+    if (w === '<' || w === '>') { redirect = true; continue; }
+    if (redirect && w === '&') continue;
+    if ([';', '&', '|', '(', ')', '`', '$'].includes(w)) { redirect = false; if (cur.length) cmds.push(cur); cur = []; continue; }
+    if (redirect) { redirect = false; continue; }
     cur.push(w);
   }
   if (cur.length) cmds.push(cur);
-  // Drop leading VAR=value words and wrappers that run the next word.
+  // Drop leading VAR=value words, the shell's own keywords (`then fakehost`) and wrappers that run
+  // the next word.
   return cmds.map((c) => {
     let i = 0;
     for (;;) {
       if (i < c.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(c[i])) { i += 1; continue; }
+      if (i < c.length && ['if', 'then', 'else', 'elif', 'do', 'while', 'until', '!', '{', '}'].includes(c[i])) { i += 1; continue; }
       if (i < c.length && ['env', 'command', 'exec', 'nohup', 'time', 'sudo', 'xargs', 'nice', 'builtin'].includes(basename(c[i]))) { i += 1; while (i < c.length && c[i].startsWith('-')) i += 1; continue; }
       break;
     }
@@ -183,3 +207,94 @@ export const builtCommandName = (cmd) => /(^|[;&|(\n{]|\b(then|do|else)\b)\s*([A
 
 /** Any substitution or variable anywhere in the line (even inside quotes). */
 export const hasExpansion = (cmd) => /[$`]/.test(String(cmd));
+
+// ---- the class rule: refuse what the guards can't read (audit R-0b-44 round 2 MAT-1, R-0b-70) ----
+//
+// Round 1 added one blocker per trick found, and the next audit found more tricks. So every shell
+// guard now first refuses, whatever it spells, any command the shell would rewrite before it runs
+// (a variable, a substitution, an escape-built word, a pattern in a command name) or that runs
+// commands its text does not show (a shell reading a file or its input, eval, xargs, find -exec,
+// env -S, inline code, an interpreter fed on its input, a program run by its path). What is left
+// is plain words, which the guards match. Even so these guards are a speed bump, not the wall: a
+// script in any language the worker writes and then runs (`node x.mjs`, `npm run x`) can do what
+// it likes. The walls are the sandbox (its no-write folders and network list), the push script
+// and GitHub's branch rules (README, open items).
+
+// Variables the launcher sets and the session cannot (each Bash call starts a fresh shell); `$?`
+// is a number. Any other `$name` could be empty or anything (`g${x}it`).
+const SAFE_VARS = new Set(['HOME', 'PWD', 'TMPDIR', 'USER', '?']);
+// Folders a program may be run from by its full path; anything else may be a file the session wrote.
+const SYSTEM_BIN = ['/bin', '/usr/bin', '/usr/sbin', '/sbin', '/usr/local/bin', '/opt/homebrew/bin'];
+
+/** The first shape in `cmd` a guard can't read, as a short phrase, or null. */
+export function expansionIn(cmd) {
+  const c = joinLines(cmd);
+  let q = null;
+  for (let i = 0; i < c.length; i += 1) {
+    const ch = c[i];
+    if (q === "'") { if (ch === "'") q = null; continue; }
+    if (ch === '\\') { i += 1; continue; }
+    if (q === '"' && ch === '"') { q = null; continue; }
+    if (!q && (ch === "'" || ch === '"')) { q = ch; continue; }
+    if (ch === '`') return 'a backtick substitution';
+    if (ch !== '$') continue;
+    const next = c[i + 1] ?? '';
+    if (next === '(') return 'a $( ) substitution';
+    if (next === "'" || next === '"') return 'an escape-built word ($\'…\')';
+    let name;
+    if (next === '{') { const end = c.indexOf('}', i); name = end < 0 ? '' : c.slice(i + 2, end); i = end < 0 ? c.length : end; }
+    else { name = /^([A-Za-z_][A-Za-z0-9_]*|.)/.exec(c.slice(i + 1))?.[0] ?? ''; i += name.length; }
+    if (!SAFE_VARS.has(name)) return `a variable ($${name || ' '}) the guard can't read`;
+  }
+  return null;
+}
+
+/** Comma lists in braces, expanded as the shell would (`a{b,c}` gives ab and ac); capped. */
+export function expandBraces(word, cap = 64) {
+  const out = [];
+  const walk = (w) => {
+    if (out.length >= cap) return;
+    const m = /\{([^{}]*,[^{}]*)\}/.exec(w);
+    if (!m) { out.push(w); return; }
+    for (const alt of m[1].split(',')) walk(w.slice(0, m.index) + alt + w.slice(m.index + m[0].length));
+  };
+  walk(String(word));
+  return out;
+}
+
+/** Why a guard can't read this command (refuse it), or null when it is plain words. */
+export function unreadable(cmd) {
+  const c = joinLines(cmd);
+  const exp = expansionIn(c);
+  if (exp) return exp;
+  const wrap = wrapperOf(c, { inline: true });
+  if (wrap) return `"${wrap}" runs code the guard can't check`;
+  if (/\|\s*(\S*\/)?(python[0-9.]*|node|perl|ruby|php|deno|bun|osascript|lua|tclsh)(\s+-\S+)*\s*($|[;&|)])/.test(c)
+    || /(^|[;&|(]\s*)(\S*\/)?(python[0-9.]*|node|perl|ruby|php|deno|bun|osascript|lua|tclsh)(\s+-\S+)*\s*<(?!\()/.test(c)) return 'an interpreter fed code on its input';
+  for (const words of shellCommands(c)) {
+    const prog = programOf(words);
+    const word0 = words[0];
+    if (SHELLS.includes(prog)) return `"${prog}" runs commands the guard can't see`;
+    if (!['[', '[['].includes(word0) && /[*?[\]{}]/.test(word0)) return 'a command name with a pattern in it';
+    if (word0.includes('/') && !SYSTEM_BIN.includes(word0.slice(0, word0.lastIndexOf('/')))) return `"${word0}" runs a file by its path`;
+    if (prog === 'find' && words.some((w) => /^-(exec|execdir|ok|okdir)$/.test(w))) return 'find -exec runs commands the guard can\'t see';
+    if (/^g?awk$/.test(prog) && words.slice(1).some((w) => /system\s*\(|\|\s*getline|\|\s*"/.test(w))) return 'awk running a command';
+  }
+  // `env -S "…"` splits one word into a command (shellCommands drops `env` and its flags).
+  const all = shellWords(c);
+  // xargs is dropped as a wrapper by shellCommands, so it is looked for among the words.
+  const feeder = all.find((w) => ['xargs', 'parallel'].includes(basename(w)));
+  if (feeder) return `"${basename(feeder)}" builds commands the guard can't see`;
+  for (let i = 0; i < all.length; i += 1) {
+    if (basename(all[i]) !== 'env') continue;
+    for (let k = i + 1; k < all.length && all[k].startsWith('-'); k += 1) if (/^(-[A-Za-z]*S|--split-string)/.test(all[k])) return 'env -S runs a string the guard can\'t check';
+  }
+  return null;
+}
+
+/** Case and invisible characters folded out, as a Mac disk compares names (audit R-0b-44 round 2 MAT-2). */
+export const fold = (s) => String(s).normalize('NFC').replace(/[\u200B-\u200F\u2060\uFEFF]/g, '').toLowerCase();
+
+/** The command names git's own settings or hooks files (`.git/config`, `.git/hooks/…`, `.git/info/…`). */
+export const namesGitInternals = (cmd) => [joinLines(cmd), ...shellWords(String(cmd ?? ''))]
+  .some((t) => /(^|[\/\s"'=:])\.git\/(config|hooks|info)(\b|\/|$)/i.test(t));

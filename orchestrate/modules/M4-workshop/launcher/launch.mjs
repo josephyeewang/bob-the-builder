@@ -134,7 +134,7 @@ export function checkBobFolder({ folder, manifest, settings }) {
 
 /**
  * The baseline and smoke runs go through the worker's own start: the worker's settings file,
- * Joe's user (no user switch), only the Bash tool. `roleArgs` builds the start command.
+ * the owner's user (no user switch), only the Bash tool. `roleArgs` builds the start command.
  */
 export function lockedRunCommand({ claudeBin, settingsFile, command, roleArgs, profile }) {
   if (typeof command !== 'string' || !command.trim()) return refuse('no command declared');

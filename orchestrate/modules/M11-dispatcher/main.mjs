@@ -8,9 +8,9 @@
 // One run is one full pass under the single-instance lock. Exit 0 when the pass ran or another pass
 // was running; exit 1 when the config or the wiring could not be loaded (launchd logs stderr).
 
-import { readFileSync } from 'node:fs';
+import { readFileSync, realpathSync } from 'node:fs';
 import { isAbsolute } from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { pathToFileURL, fileURLToPath } from 'node:url';
 import { runTick } from './tick.mjs';
 
 export function readConfig(file) {
@@ -37,4 +37,8 @@ export async function main(argv, { now = Date.now(), log = (s) => process.stderr
   return 0;
 }
 
-if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) process.exitCode = await main(process.argv.slice(2));
+// Run as a script, not when imported. Real paths on both sides (audit 0b-6 r2 MAT-1): a folder reached
+// through a symlink spells the path differently, and a mismatch here would exit 0 having done nothing.
+const realOf = (p) => { try { return realpathSync(p); } catch { return null; } };
+const self = realOf(fileURLToPath(import.meta.url));
+if (self && process.argv[1] && self === realOf(process.argv[1])) process.exitCode = await main(process.argv.slice(2));

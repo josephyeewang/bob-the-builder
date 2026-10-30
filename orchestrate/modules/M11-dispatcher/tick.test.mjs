@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, symlinkSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { tick, runTick, signedInAccount, actOnDead, STEPS, ACCOUNT_FACT, LAST_PASS_FACT, STEP_ERROR_FACT } from './tick.mjs';
@@ -140,14 +141,19 @@ test('M9: a held session restarts at the outage\'s end even though it left the b
 test('during an outage no reviewer starts and no merge is requested', async () => {
   const w = world([account(), usage(), ['fact', OUTAGE_FACT, { state: 'open', dead: [] }],
     card('R-1', { state: 'in_review', changed_at: iso(T0 - 60 * MIN) }),
-    card('V-1', { state: 'verified', pr: 7, session: 'S-0' }), ['verdict', 'V-1', { session_id: 'S-0', head: HEAD }]],
+    card('V-1', { state: 'verified', pr: 7, session: 'S-0', head: HEAD }), ['verdict', 'V-1', { session_id: 'S-0', head: HEAD }]],
   { over: { healthy: () => false } });
   const r = await w.pass();
   assert.deepEqual(w.calls.reviewers, []);
-  assert.equal(r.steps.limits.result.find(([id]) => id === 'R-1')[1], 'reviewer start failed');
+  assert.equal(r.steps.limits.result.find(([id]) => id === 'R-1')[1], 'reviewer held: outage');
   assert.equal(w.rec.read('merge_request', MERGE_REQUEST('V-1', HEAD)), null);
-  // an outage-held reviewer start counts as a failed try, so a long outage hands the card to Joe
-  assert.deepEqual(r.steps.merges.result, []);
+  // audit 0b-6 r2 MIN-5: an outage-held start is not a failed try, so a long outage does not hand the card to Joe
+  assert.equal(w.rec.read('card', 'R-1').doc.reviewer_start_failures ?? 0, 0);
+  for (let i = 1; i <= 3; i += 1) await w.pass(i);
+  assert.equal(w.rec.read('card', 'R-1').doc.state, 'in_review');
+  assert.match(r.steps.merges.result.find(([id]) => id === 'V-1')[1], /held: outage/);
+  // audit 0b-6 r2 MIN-6: no Lead step during an outage
+  assert.match(r.steps.leads.result, /outage/);
 });
 
 test('the limits and merges steps fall back to "hold" when the main pass did not finish', async () => {
@@ -157,6 +163,25 @@ test('the limits and merges steps fall back to "hold" when the main pass did not
   assert.equal(r.steps.pass.ok, false);
   assert.deepEqual(w.calls.reviewers, [], 'a review is a Tier-1 start held while usage is unknown');
   assert.match(r.steps.limits.result[0][1], /reviewer held/);
+  // audit 0b-6 r2 MIN-4: a Tier-2 review and a merge request are held too, though "unknown" would let them through
+  const v = world([account(), usage(), card('R-2', { state: 'in_review', tier: 2, changed_at: iso(T0 - 60 * MIN) }),
+    card('V-1', { state: 'verified', pr: 7, session: 'S-0', head: HEAD }), ['verdict', 'V-1', { session_id: 'S-0', head: HEAD }]],
+  { over: { sessions: () => { throw new Error('no session list'); } } });
+  const r2 = await v.pass();
+  assert.deepEqual(v.calls.reviewers, []);
+  assert.match(r2.steps.limits.result[0][1], /reviewer held: the main pass did not finish/);
+  assert.equal(v.rec.read('merge_request', MERGE_REQUEST('V-1', HEAD)), null);
+  assert.equal(v.rec.read('card', 'R-2').doc.reviewer_start_failures ?? 0, 0);
+  // L31: an undo is never held by the budget: with no bands, and during an outage, its merge request is still made.
+  for (const over of [{ sessions: () => { throw new Error('no session list'); } }, { healthy: () => false }]) {
+    const u = world([account(), usage(), ...(over.healthy ? [['fact', OUTAGE_FACT, { state: 'open', dead: [] }]] : []),
+      card('U-1', { state: 'verified', kind: 'undo', pr: 8, session: 'S-0', head: HEAD }), ['verdict', 'U-1', { session_id: 'S-0', head: HEAD }],
+      card('V-2', { state: 'verified', pr: 9, session: 'S-0', head: HEAD }), ['verdict', 'V-2', { session_id: 'S-0', head: HEAD }]], { over });
+    const r3 = await u.pass();
+    assert.notEqual(u.rec.read('merge_request', MERGE_REQUEST('U-1', HEAD)), null, Object.keys(over)[0]);
+    assert.equal(u.rec.read('merge_request', MERGE_REQUEST('V-2', HEAD)), null);
+    assert.match(r3.steps.merges.result.find(([id]) => id === 'V-2')[1], /merge request held/);
+  }
 });
 
 test('MAT-1 end to end: ready -> started with a launch record -> reviewed -> one merge request, over several ticks', async () => {
@@ -238,4 +263,129 @@ export { rec };
   assert.equal(logs.length, 3);
   assert.match(logs[1], /wiring must be an absolute path/);
   assert.match(logs[2], /no wire\(\)/);
+});
+
+test('audit 0b-6 r2 MAT-1: `node main.mjs <config>` runs a tick as a script, also through a symlinked folder; with no config it exits 1', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'm11-entry-'));
+  const here = new URL('.', import.meta.url).pathname;
+  const link = join(dir, 'link');
+  symlinkSync(here, link);
+  const out = join(dir, 'ran.json');
+  const wiring = join(dir, 'wiring.mjs');
+  writeFileSync(wiring, `import { writeFileSync } from 'node:fs';
+import { recWith, rulesWith } from ${JSON.stringify(join(here, 'fixtures.test-helper.mjs'))};
+import { LAST_PASS_FACT } from ${JSON.stringify(join(here, 'tick.mjs'))};
+const rec = recWith();
+process.on('exit', () => writeFileSync(${JSON.stringify(out)}, JSON.stringify(rec.read('fact', LAST_PASS_FACT)?.doc ?? null)));
+export async function wire() {
+  const noop = () => [];
+  return { rec, rules: rulesWith(), ports: { alert: () => {}, board: noop, healthy: () => true, outboxSessions: noop, wait: async () => {}, leads: noop,
+    sessions: noop, probe: () => null, launch: async () => ({ ok: false }), stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }),
+    hasSession: () => true, gateAlive: () => true, hasReviewer: () => true, startReviewer: async () => ({ ok: true }), filesOf: noop,
+    sendFrontDoor: async () => ({}), restartFrontDoor: async () => ({ ok: true }), startMinibase: async () => ({ ok: true }),
+    cleanup: { copiesRoot: ${JSON.stringify(dir)}, sealRoot: ${JSON.stringify(dir)}, mirrorFor: () => null } } };
+}
+`);
+  const config = join(dir, 'config.json');
+  writeFileSync(config, JSON.stringify({ wiring, lockFile: join(dir, 'pass.lock') }));
+  for (const script of [join(here, 'main.mjs'), join(link, 'main.mjs')]) {
+    rmSync(out, { force: true });
+    const r = spawnSync(process.execPath, [script, config], { encoding: 'utf8' });
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(JSON.parse(readFileSync(out, 'utf8'))?.at ?? '', /^\d{4}-/, `a tick ran via ${script === join(here, 'main.mjs') ? 'the real path' : 'the symlink'}`);
+  }
+  const bare = spawnSync(process.execPath, [join(link, 'main.mjs')], { encoding: 'utf8' });
+  assert.equal(bare.status, 1);
+  assert.match(bare.stderr, /usage: main\.mjs <config\.json>/);
+});
+
+test('audit 0b-6 r2 MAT-2: a Lead\'s read-only request goes through the start gate in the tick: red, the cap of 4, an outage and no signed-in account hold it; green starts it', async () => {
+  const lead = (dir) => { mkdirSync(dir, { recursive: true }); writeFileSync(join(dir, 'think-q1.md'), 'Is A safe?'); return [{ sessionId: 'L-1', role: 'lead', outbox: dir, uid: process.getuid(), product: 'p1' }]; };
+  const root = mkdtempSync(join(tmpdir(), 'm11-ro-'));
+  const run = async (name, entries, over = {}, signedIn = true) => {
+    const started = [];
+    const w = world([...(signedIn ? [account()] : []), ...entries], { over: { outboxSessions: () => lead(join(root, name)), startReadonly: async (x) => { started.push(x.kind); return { ok: true }; }, ...over } });
+    const r = await w.pass();
+    return { started, fact: w.rec.read('fact', 'outbox-L-1-think-q1.md')?.doc, r };
+  };
+  const red = await run('red', [['fact', USAGE_FACT(ACCT), usageFact({ week: 90, h5: 20, account: ACCT, now: T0 })]]);
+  assert.deepEqual(red.started, []);
+  assert.match(red.fact.reason, /red band/);
+  const four = Array.from({ length: 4 }, (_, i) => ({ id: `R-${i}`, product: 'p1', kind: 'readonly', lead: 'L-1' }));
+  const capped = await run('cap', [usage()], { sessions: () => four });
+  assert.deepEqual(capped.started, []);
+  assert.match(capped.fact.reason, /already has 4 read-only sessions/);
+  const out = await run('outage', [usage(), ['fact', OUTAGE_FACT, { id: 'o-1', state: 'open', started_at: iso(T0 - MIN), dead: [], board: 3, healthy_passes: 0 }]], { healthy: () => false });
+  assert.deepEqual(out.started, []);
+  assert.match(out.fact.reason, /outage/);
+  const none = await run('no-account', [usage()], {}, false);
+  assert.deepEqual(none.started, []);
+  assert.match(none.fact.reason, /signed-in account is not known/);
+  const ok = await run('green', [usage()]);
+  assert.deepEqual(ok.started, ['think']);
+  assert.equal(ok.fact.state, 'applied');
+});
+
+// ---- L27: the fail-open sweep ----
+
+const sweepWorld = (entries, rules) => {
+  const stops = [];
+  const running = [{ id: 'S-X', product: 'p1', kind: 'editing', card: 'X-1', pgid: 99 }];
+  const w = world([account(), ...entries,
+    card('X-1', { state: 'cancelled', session: 'S-X' }),
+    card('V-1', { state: 'verified', pr: 7, session: 'S-0', head: HEAD }), ['verdict', 'V-1', { session_id: 'S-0', head: HEAD }],
+    card('U-1', { state: 'verified', kind: 'undo', pr: 8, session: 'S-0', head: HEAD }), ['verdict', 'U-1', { session_id: 'S-0', head: HEAD }],
+    card('R-1', { state: 'in_review', changed_at: iso(T0 - 60 * MIN) })],
+  { rules, over: { sessions: () => running, stopGroup: async (s) => { stops.push(s.id); return { ok: true, how: 'SIGTERM' }; } } });
+  return { ...w, stops };
+};
+const outcome = async (w) => {
+  await w.pass();
+  return { launched: w.calls.launched, reviewers: w.calls.reviewers, stops: w.stops,
+    merges: ['V-1', 'U-1'].filter((id) => w.rec.read('merge_request', MERGE_REQUEST(id, HEAD))) };
+};
+const within = (got, base, what) => {
+  for (const k of ['launched', 'reviewers', 'merges']) for (const x of got[k]) assert.ok(base[k].includes(x), `${what}: ${k} ${x} is more than with every value present`);
+};
+
+test('L27 sweep: with any one rules value missing, the tick does no more than with all present, and a cancel still stops', async () => {
+  const { VALUES } = await import('./fixtures.test-helper.mjs');
+  const base = await outcome(sweepWorld([usage(), card('C-1')], rulesWith({}, allow)));
+  assert.deepEqual(base, { launched: ['C-1'], reviewers: ['R-1'], stops: ['S-X'], merges: ['V-1', 'U-1'] }, 'control');
+  for (const key of Object.keys(VALUES)) {
+    const got = await outcome(sweepWorld([usage(), card('C-1')], rulesWith({ [key]: undefined }, allow)));
+    within(got, base, key);
+    assert.deepEqual(got.stops, ['S-X'], `${key}: the cancel did not stop`);
+  }
+});
+
+test('L27 sweep: a card missing any one field starts no more than the card with every field', async () => {
+  // Usage unknown: Tier 2 starts, Tier 1 waits, so a field that decides the tier shows its effect.
+  const unknown = ['fact', USAGE_FACT(ACCT), usageFact({ week: 30, h5: 20, account: ACCT, now: T0, observedAgoMin: 120 })];
+  const full = card('C-1')[2];
+  const base = await outcome(sweepWorld([unknown, card('C-1')], rulesWith({}, allow)));
+  assert.deepEqual(base.launched, ['C-1'], 'control: a Tier-2 card starts while usage is unknown');
+  for (const field of Object.keys(full).filter((f) => f !== 'module' && f !== 'state')) {
+    const { [field]: _, ...rest } = full;
+    const got = await outcome(sweepWorld([unknown, ['card', 'C-1', rest]], rulesWith({}, allow)));
+    within(got, base, `card without ${field}`);
+    if (field === 'tier' || field === 'product') assert.deepEqual(got.launched, [], `card without ${field} started`);
+  }
+  // A card with no file list runs alone: never next to another worker in the same pass.
+  const { files: _f, ...noFiles } = full;
+  for (const order of [[['card', 'C-1', noFiles], card('C-2')], [card('C-2'), ['card', 'C-1', noFiles]]]) {
+    const got = await outcome(sweepWorld([usage(), ...order], rulesWith({}, allow)));
+    assert.equal(got.launched.length, 1, JSON.stringify(got.launched));
+  }
+  // The cards waiting to merge: without any one field, no request beyond the control's.
+  for (const id of ['V-1', 'U-1']) {
+    for (const field of ['pr', 'session', 'head', 'product', 'tier']) {
+      const w = sweepWorld([usage()], rulesWith({}, allow));
+      const c = w.rec.read('card', id);
+      const { [field]: _, ...rest } = c.doc;
+      w.rec.write({ actor: 'dispatcher', entity: 'card', id, expectRev: c.rev, doc: rest });
+      const got = await outcome(w);
+      if (['pr', 'session', 'head'].includes(field)) assert.ok(!got.merges.includes(id), `${id} without ${field} was requested`);
+    }
+  }
 });

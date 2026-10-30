@@ -190,3 +190,59 @@ test("audit MIN-20 (I6): a worker's think file starts no read-only session", asy
   assert.equal(w.calls.readonly.length, 0);
   assert.ok(out[0].refused);
 });
+
+test('audit 0b-6 r2 MIN-7: the file is claimed before its read-only session starts; a pass that died after the claim never starts a second helper', async () => {
+  const w = world();
+  const ob = mk(join(w.root, 'lead'));
+  writeFileSync(join(ob, 'think-q1.md'), 'Is A safe?');
+  const rec = recWith();
+  const sessions = [{ sessionId: 'L-1', role: 'lead', outbox: ob, uid: UID, product: 'p1' }];
+  let seen = null;
+  // The start sees the claim already in the record; then the pass "dies" before it answers.
+  const dies = () => { seen = rec.read('fact', 'outbox-L-1-think-q1.md')?.doc?.state; throw Object.assign(new Error('pass died'), { die: true }); };
+  await intakePass({ rec, sessions, ...w.ports, startReadonly: dies });
+  assert.equal(seen, 'starting');
+  // Simulate the crash leaving the claim (the catch turned it into "waiting"; put it back as a crash would leave it).
+  const cur = rec.read('fact', 'outbox-L-1-think-q1.md');
+  rec.write({ actor: 'dispatcher', entity: 'fact', id: 'outbox-L-1-think-q1.md', expectRev: cur.rev, doc: { ...cur.doc, state: 'starting' } });
+  const tries = [];
+  await intakePass({ rec, sessions, ...w.ports, startReadonly: (x) => { tries.push(x); return { ok: true }; } });
+  assert.deepEqual(tries, [], 'never started twice');
+  assert.equal(rec.read('fact', 'outbox-L-1-think-q1.md').doc.state, 'interrupted');
+  assert.match(w.calls.alerts.at(-1), /read-only session may or may not have started/);
+});
+
+test('audit 0b-6 r2 MAT-8 (I5, I6): a read-only start that throws, or an apply that throws, does not stop the next file', async () => {
+  const w = world();
+  const lead = mk(join(w.root, 'lead'));
+  writeFileSync(join(lead, 'think-q1.md'), 'Is A safe?');
+  writeFileSync(join(lead, 'scout-q2.md'), 'Where is B?');
+  const rec = recWith();
+  const sessions = [{ sessionId: 'L-1', role: 'lead', outbox: lead, uid: UID, product: 'p1' }];
+  const tries = [];
+  const out = await intakePass({ rec, sessions, ...w.ports, startReadonly: (x) => { tries.push(x.kind); if (tries.length === 1) throw new Error('port down'); return { ok: true }; } });
+  assert.equal(tries.length, 2, 'the second file was still handled');
+  assert.match(out.find((r) => r.waiting)?.waiting ?? '', /the start failed: port down/);
+  const worker = mk(join(w.root, 'worker'));
+  writeFileSync(join(worker, 'report-C-1.md'), 'one');
+  writeFileSync(join(worker, 'report-C-2.md'), 'two');
+  const inner = recWith();
+  let n = 0;
+  // The record handle is frozen, so the test wraps it in a plain object.
+  const rec2 = { read: (...a) => inner.read(...a), write: (...a) => inner.write(...a), list: (...a) => inner.list(...a),
+    applyOutbox: (...a) => { n += 1; if (n === 1) throw new Error('disk'); return inner.applyOutbox(...a); } };
+  const out2 = await intakePass({ rec: rec2, sessions: [{ sessionId: 'S-1', role: 'worker', outbox: worker, uid: UID, card: 'C-1' }], ...w.ports });
+  assert.equal(n, 2, 'the next file was still applied');
+  assert.deepEqual(out2.map((r) => r.applied), [false, true]);
+});
+
+test('audit 0b-6 r2 MIN-10 (round 1 MIN-12): a hand-in whose check throws is not used, with the reason', async () => {
+  const w = world();
+  const ob = mk(join(w.root, 'worker'));
+  writeFileSync(join(ob, 'report-C-1.md'), 'done');
+  const rec = recWith();
+  const out = await intakePass({ rec, sessions: [{ sessionId: 'S-1', role: 'worker', outbox: ob, uid: UID, card: 'C-1' }], ...w.ports, vet: () => { throw new Error('bad rules'); } });
+  assert.notEqual(out[0].applied, true);
+  assert.match(out[0].refused, /could not be checked: bad rules/);
+  assert.match(w.calls.notes.join('\n'), /not used yet: could not be checked/);
+});

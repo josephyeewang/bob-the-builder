@@ -38,16 +38,21 @@ export const RULES_MISSING_FACT = 'rules-missing-alert';
 // Used only when timeouts.cancel_grace_min itself is missing (audit MAT-2): Cancel must still stop.
 export const CANCEL_GRACE_FLOOR_MS = 2 * 60_000;
 export const TERM_WAIT_MS = 10_000;
-const PARKABLE = ['editing', 'script', 'overnight'];
+// Kinds that are never parked; every other kind, an unknown one included, is (audit 0b-6 r2, L27).
+const NEVER_PARKED = Object.freeze(['review', 'audit', 'merge', 'undo', 'readonly', 'lead', 'front_door']);
+const parkable = (s) => !NEVER_PARKED.includes(s.kind);
 const iso = (ms) => new Date(ms).toISOString();
+// A port that throws answers { ok: false, reason } for that one session (audit 0b-6 r2 MAT-7).
+async function guarded(f) { try { return await f(); } catch (e) { return { ok: false, reason: e?.message ?? String(e) }; } }
 
 /** Stops a process group: SIGTERM, then SIGKILL if still alive after 10 s. Ports for tests. */
 export async function stopProcessGroup({ pgid, kill = (p, s) => process.kill(-p, s), alive, sleep, waitMs = TERM_WAIT_MS }) {
   if (!Number.isInteger(pgid) || pgid <= 1) return { ok: false, reason: 'no process group to stop' };
-  try { kill(pgid, 'SIGTERM'); } catch (e) { if (e.code === 'ESRCH') return { ok: true, how: 'gone' }; throw e; }
+  // Any other error (EPERM, say) is an answer, not a throw (audit 0b-6 r2 MAT-7): one session must not end the pass.
+  try { kill(pgid, 'SIGTERM'); } catch (e) { if (e.code === 'ESRCH') return { ok: true, how: 'gone' }; return { ok: false, reason: e.code ?? e.message }; }
   for (let t = 0; t < waitMs; t += 500) { if (!alive(pgid)) return { ok: true, how: 'SIGTERM' }; await sleep(500); }
   if (!alive(pgid)) return { ok: true, how: 'SIGTERM' };
-  try { kill(pgid, 'SIGKILL'); } catch (e) { if (e.code !== 'ESRCH') throw e; }
+  try { kill(pgid, 'SIGKILL'); } catch (e) { if (e.code !== 'ESRCH') return { ok: false, reason: e.code ?? e.message }; }
   return { ok: true, how: 'SIGKILL' };
 }
 
@@ -63,7 +68,7 @@ const RANK = { cancel: 3, needs_split: 2, card_ended: 1, red: 1, paused: 1 };
 function stopReason({ s, card, productDoc, b, compactions, split }) {
   if (!card) return null;
   if (card.state === 'cancelled') return 'cancel';
-  if (!PARKABLE.includes(s.kind)) return null;
+  if (!parkable(s)) return null;
   // A worker whose card has ended, or now waits on Joe, has nothing left to do (audit MIN-3).
   if (FINAL_STATES.card.includes(card.state) || (card.state === 'waiting' && card.waiting?.who === 'joe')) return 'card_ended';
   if (compactions >= split) return 'needs_split';
@@ -117,7 +122,9 @@ export async function dispatcherPass({ rec, rules, now, account, sessions, probe
   let running = [...sessions];
   for (const s of sessions) {
     const card = s.card ? rec.read('card', s.card)?.doc : null;
-    const p = probe(s);
+    // A probe that throws reads as "not at a safe point", so the late hard stop still applies (MAT-7).
+    let p = null;
+    try { p = probe(s); } catch { p = null; }
     let compactions = 0;
     if (s.card) {
       const cf = factDoc(rec, COMPACTION_FACT(s.card));
@@ -139,13 +146,13 @@ export async function dispatcherPass({ rec, rules, now, account, sessions, probe
     const limit = pending.reason === 'cancel' ? cancelMs : parkMs;
     const late = now - Date.parse(pending.since) >= limit;
     if (!atSafePoint({ role: roleOf(s), size: p?.size, activity: p?.activity }) && !late) { out.stopping.push([s.id, pending.reason]); continue; }
-    const stopped = await stopGroup(s);
+    const stopped = await guarded(() => stopGroup(s));
     if (!stopped?.ok) {
       // One alert per wanted stop, not one per pass (audit MIN-4).
       if (!pending.fail_alerted) { alert(`session ${s.id} (card ${s.card}) could not be stopped: ${stopped?.reason ?? 'no answer'}`); pending = { ...pending, fail_alerted: true }; putFact(rec, STOP_FACT(s.id), pending, 'stop_failed'); }
       out.stopping.push([s.id, pending.reason]); continue;
     }
-    const saved = await saveWork(s);
+    const saved = await guarded(() => saveWork(s));
     if (!saved?.ok) alert(`session ${s.id} stopped but its unsaved work was not saved: ${saved?.reason ?? 'no answer'}`);
     if (late) note(rec, `stop-note-${s.id}`, `session ${s.id} stopped without a safe point after ${Math.round((now - Date.parse(pending.since)) / 60_000)} min (${pending.reason})`, { now });
     moveAfterStop(rec, s.card, pending.reason, now);
@@ -161,7 +168,8 @@ export async function dispatcherPass({ rec, rules, now, account, sessions, probe
     const what = doc.waiting?.what;
     if (what === 'usage_band') {
       if (unknownLong) { waitOn(rec, id, { who: 'joe', what: 'usage_unknown: usage has been unreadable for over a day', now, kind: 'usage_unknown' }); continue; }
-      if (b.band !== 'red' && b.own_building !== 'full') { move(rec, 'card', id, { state: 'ready', waiting: null, resumed_from: 'usage_band' }, { now, kind: 'resume' }); out.resumed.push(id); }
+      // Not while usage is unknown either (audit 0b-6 r2 MIN-2): the gate would hold it, so it would only churn.
+      if (b.band !== 'red' && b.band !== 'unknown' && b.own_building !== 'full') { move(rec, 'card', id, { state: 'ready', waiting: null, resumed_from: 'usage_band' }, { now, kind: 'resume' }); out.resumed.push(id); }
     } else if (what === 'limit_hit') {
       const lf = factDoc(rec, LIMIT_FACT(doc.account ?? account))?.doc;
       const resets = Date.parse(lf?.resets_at ?? '');
@@ -185,7 +193,7 @@ export async function dispatcherPass({ rec, rules, now, account, sessions, probe
     const pf = factDoc(rec, PAUSE_FACT(product));
     if (doc.state !== 'paused') { if (pf?.doc?.state === 'asked') putFact(rec, PAUSE_FACT(product), { state: 'cleared', at: iso(now) }, 'pause_cleared'); continue; }
     if (pf?.doc?.state === 'asked') continue;
-    if (running.some((s) => s.product === product && PARKABLE.includes(s.kind))) continue;
+    if (running.some((s) => s.product === product && parkable(s))) continue;
     await pauseLead({ product });
     putFact(rec, PAUSE_FACT(product), { state: 'asked', at: iso(now) }, 'pause_lead');
     out.notes.push(`Lead of ${product} asked to hand off`);

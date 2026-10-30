@@ -11,12 +11,13 @@ const LABEL = /^[A-Za-z0-9][A-Za-z0-9.-]{0,127}$/;
 const ABS = /^\/[^\0\n]*$/;
 
 /**
- * { label, node, script, path, logDir, workDir, userName? } -> the plist text.
+ * { label, node, script, config, path, logDir, workDir, userName? } -> the plist text.
+ * `config` is main.mjs's one argument; without it every run stops at once (audit 0b-6 r2 MAT-1).
  * Refuses (throws) a bad label or a non-absolute path.
  */
-export function loginJobPlist({ label, node, script, path, logDir, workDir, userName }) {
+export function loginJobPlist({ label, node, script, config, path, logDir, workDir, userName }) {
   if (!LABEL.test(String(label))) throw new Error('bad job label');
-  for (const [k, v] of Object.entries({ node, script, logDir, workDir })) if (!ABS.test(String(v))) throw new Error(`${k} must be an absolute path`);
+  for (const [k, v] of Object.entries({ node, script, config, logDir, workDir })) if (!ABS.test(String(v))) throw new Error(`${k} must be an absolute path`);
   if (typeof path !== 'string' || !path || path.split(':').some((p) => !ABS.test(p))) throw new Error('PATH must be absolute folders joined by ":"');
   const lines = [
     '<?xml version="1.0" encoding="UTF-8"?>',
@@ -24,7 +25,7 @@ export function loginJobPlist({ label, node, script, path, logDir, workDir, user
     '<plist version="1.0">',
     '<dict>',
     `  <key>Label</key>${str(label)}`,
-    `  <key>ProgramArguments</key><array>${str(node)}${str(script)}</array>`,
+    `  <key>ProgramArguments</key><array>${str(node)}${str(script)}${str(config)}</array>`,
     `  <key>EnvironmentVariables</key><dict><key>PATH</key>${str(path)}</dict>`,
     `  <key>WorkingDirectory</key>${str(workDir)}`,
     '  <key>StartInterval</key><integer>60</integer>',

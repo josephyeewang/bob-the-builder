@@ -14,6 +14,7 @@ import { createPushScript, readBundleHeader, githubUrl } from './push.mjs';
 import { refusedPath } from './push-refusals.mjs';
 import { DO_PLANE_TOML, RULES_VERSION, scanSecrets } from './gitleaks.mjs';
 import { crc32 } from './binary-files.mjs';
+import { chunk, makePng, ihdr } from './png-fixture.mjs';
 import { startGate, factId } from './start-gate.mjs';
 import { memoryRecord } from '../../../shared/record.mjs';
 import { fakeRules, allow, deny } from '../../../shared/rules.mjs';
@@ -53,8 +54,8 @@ fs.appendFileSync(${JSON.stringify(join(dir, 'calls'))}, a[0] + '\\n');
 if (mode === 'crash') process.exit(2);
 if (mode === 'noreport') process.exit(0);
 if (mode === 'stdinquit' && a[0] === 'stdin') process.exit(3);
-fs.writeFileSync(at('--report-path'), mode === 'leak' ? JSON.stringify([{ RuleID: 'fake-rule', File: 'x.txt' }]) : mode === 'badreport' ? 'not json' : '[]');
-process.exit(mode === 'leak' ? 1 : 0);
+fs.writeFileSync(at('--report-path'), mode === 'leak' ? JSON.stringify([{ RuleID: 'fake-rule', File: 'x.txt' }]) : mode === 'leakname' ? JSON.stringify([{ RuleID: 'fake-rule', File: 'docs/ghp_' + 'A1'.repeat(18) + '.txt' }]) : mode === 'badreport' ? 'not json' : '[]');
+process.exit(mode === 'leak' || mode === 'leakname' ? 1 : 0);
 `);
   chmodSync(bin, 0o755);
   writeFileSync(join(dir, 'do-plane.toml'), DO_PLANE_TOML);
@@ -781,12 +782,6 @@ test('L4 restart: the copy fast-forwards to GitHub\'s branch kept in the mirror;
   assert.match((await prepareWorkerCopy({ product, card, dest: join(w.root, 'diverged'), lastBundle })).reason, /went another way/);
 });
 
-// A small valid PNG (1x1, grey), with an optional plain tEXt chunk.
-const chunk = (type, data) => { const t = Buffer.from(type, 'latin1'); const len = Buffer.alloc(4); len.writeUInt32BE(data.length); const c = Buffer.alloc(4); c.writeUInt32BE(crc32(Buffer.concat([t, data]))); return Buffer.concat([len, t, data, c]); };
-function makePng({ text, extra = [] } = {}) {
-  const ihdr = Buffer.from([0, 0, 0, 1, 0, 0, 0, 1, 8, 0, 0, 0, 0]);
-  return Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), chunk('IHDR', ihdr), ...(text ? [chunk('tEXt', Buffer.from(`Comment\0${text}`, 'latin1'))] : []), ...extra, chunk('IDAT', deflateSync(Buffer.from([0, 128]))), chunk('IEND', Buffer.alloc(0))]);
-}
 // A one-file zip, stored (not packed); `locked` sets the "encrypted" flag a password lock sets.
 function makeZip(name, data, { locked = false } = {}) {
   const n = Buffer.from(name); const h = Buffer.alloc(30); h.writeUInt32LE(0x04034b50, 0); h.writeUInt16LE(20, 4); h.writeUInt16LE(locked ? 1 : 0, 6);
@@ -878,8 +873,6 @@ test('R-0b-47 round 2 MAT-A (L28), real gitleaks: a file that looks like an arch
     await w.bundle();
     const r = await refusedAndUntouched(w, /cannot be scanned for secrets/);
     assert.ok(r.reason.includes(`deep/${name}`), `${name}: ${r.reason}`);
-    // MIN-b: the refusal names the repo path, never the private scan folder.
-    assert.doesNotMatch(r.reason, /scan-|files\/(raw|text|nul)/, name);
   }
 });
 
@@ -918,6 +911,46 @@ test('R-0b-47 round 2 MIN-a, MIN-c, real gitleaks: an allowed image is still sca
   await w.bundle();
   const r = await refusedAndUntouched(w, /the file scan: .*likely secret/);
   for (const n of ['one.png', 'two.png', 'run.png']) assert.ok(r.reason.includes(`docs/${n}`), `${n}: ${r.reason}`);
+  // MIN-b: a finding names the repo path, never the private scan folder (moved here, round 3 COS-2).
+  assert.doesNotMatch(r.reason, /scan-|files\/(raw|text|nul|img)/);
+});
+
+test('R-0b-47 round 3 MIN-2 and MAT-1, real gitleaks: an allowed PNG hiding a secret as UTF-16 text or in its image data is refused', { skip: realGitleaks ? false : 'skipped: gitleaks 8.30.1 not installed' }, async () => {
+  const scanner = await realScanner(tmp());
+  const line = Buffer.from(`key = "${fakeSecret()}"\n`);
+  const pixels = Buffer.concat([Buffer.from([0]), line]);
+  const cases = {
+    'docs/utf16.png': makePng({ text: Buffer.from([...line].flatMap((b) => [b, 0])) }), // only the zero-bytes-removed view reads it
+    'docs/pixels.png': makePng({ head: ihdr({ w: line.length }), pixels }), // only the unpacked view reads it
+  };
+  for (const [path, bytes] of Object.entries(cases)) {
+    const w = await world({ scanner });
+    w.values['product.allowed_binaries'] = [{ path: 'docs/*.png', type: 'png' }];
+    await w.commit('img', (c) => { mkdirSync(join(c, 'docs'), { recursive: true }); writeFileSync(join(c, path), bytes); });
+    await w.bundle();
+    const r = await refusedAndUntouched(w, /the file scan: .*likely secret/);
+    assert.ok(r.reason.includes(path), `${path}: ${r.reason}`);
+  }
+});
+
+test('R-0b-47 round 3 MIN-1 and MIN-3: base64 of a packed file is refused, and a secret used as a file name never reaches the record in full', async () => {
+  let w = await world();
+  await w.commit('b64', (c) => writeFileSync(join(c, 'blob.txt'), `${gzipSync(Buffer.from(`key = "${fakeSecret()}"`)).toString('base64')}\n`));
+  await w.bundle();
+  await refusedAndUntouched(w, /blob\.txt holds packed data written out as text/);
+  w = await world();
+  const secret = fakeSecret();
+  await w.commit('named', (c) => writeFileSync(join(c, `${secret}.zip`), Buffer.from([0x50, 0x4b, 0x03, 0x04, 0, 0])));
+  await w.bundle();
+  const r = await refusedAndUntouched(w, /cannot be scanned for secrets/);
+  assert.ok(!r.reason.includes(secret.slice(4)), r.reason);
+  assert.ok(!JSON.stringify(w.record.read('fact', 'push.C-1.a1').doc).includes(secret.slice(4)), 'the record holds the secret');  // A finding in a file whose name is secret-shaped: the scan's own reason is masked the same way.
+  w = await world();
+  await w.commit('work', (c) => writeFileSync(join(c, 'a.txt'), 'a\n'));
+  await w.bundle();
+  w.fake.setMode('leakname');
+  const f = await refusedAndUntouched(w, /found 1 likely secret.*ghp_A1A1…\.txt/);
+  assert.ok(!f.reason.includes('A1'.repeat(18)), f.reason);
 });
 
 test('R-0b-47 round 2 MIN-d: a new file over the size cap, or new files over the total cap, are refused before they are read', async () => {

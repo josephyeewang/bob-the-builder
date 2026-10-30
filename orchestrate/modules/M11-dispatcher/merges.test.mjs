@@ -202,3 +202,32 @@ test('audit MIN-18 / MIN-19: after a gate crash only merged === true counts, and
   const none = recWith([['merge', 'M-1', { pr: 7, state: 'merging' }], ['fact', PR_FACT(7), { merged: true, observed_at: at(1) }]]);
   assert.deepEqual((await pass(none, 2, dead)).moves, [['M-1', 'waiting for a fresh PR reading']]);
 });
+
+test('audit 0b-6 r2 MAT-4 / MAT-6 / MIN-9: an undo is requested in red, unknown and above 90%; a refused request is asked again at the new rev; no head, no request', async () => {
+  const { requestMerges, MERGE_REQUEST } = await import('./merges.mjs');
+  const mk = (extra = {}) => recWith([['product', 'p1', { state: 'active' }], ['card', 'C-1', { state: 'verified', product: 'p1', tier: 1, pr: 7, session: 'S-9', head: 'aaa', files: ['db/schema.sql'], risky: ['schema'], ...extra }],
+    ['verdict', 'C-1', { session_id: 'S-9', head: 'aaa' }]]);
+  const RED = { band: 'red', own_building: 'open', prodBlocked: true };
+  const UNKNOWN = { band: 'unknown', own_building: 'unknown', prodBlocked: true };
+  const OVER90 = { band: 'green', own_building: 'open', prodBlocked: true };
+  for (const b of [RED, UNKNOWN, OVER90]) {
+    const rec = mk({ kind: 'undo' });
+    assert.deepEqual(requestMerges({ rec, rules: rulesWith({ [K.redRuns]: [] }), now: T0, b }), [['C-1', 'merge requested']], b.band);
+    // the same card, not an undo, is held
+    assert.match(requestMerges({ rec: mk(), rules: rulesWith({ [K.redRuns]: [] }), now: T0, b })[0][1], /merge request held/, b.band);
+  }
+  // MAT-6: refused, the card back to verified at a new rev -> a new request at that rev.
+  const rec = mk({ tier: 2, risky: [], files: ['src/a.js'] });
+  assert.deepEqual(requestMerges({ rec, rules: R, now: T0, b: GREEN }), [['C-1', 'merge requested']]);
+  const c = rec.read('card', 'C-1');
+  rec.write({ actor: 'dispatcher', entity: 'card', id: 'C-1', expectRev: c.rev, doc: { ...c.doc, merge_refusals: ['stale'] } });
+  assert.deepEqual(requestMerges({ rec, rules: R, now: T0 + MIN, b: GREEN }), [['C-1', 'merge requested again']]);
+  assert.equal(rec.read('merge_request', MERGE_REQUEST('C-1', 'aaa')).doc.rev, rec.read('card', 'C-1').rev);
+  assert.deepEqual(requestMerges({ rec, rules: R, now: T0 + 2 * MIN, b: GREEN }), [], 'once per rev');
+  // MIN-9: a card that names no head of its own is not requested.
+  const nohead = mk({ tier: 2, risky: [], files: ['src/a.js'], head: undefined });
+  assert.match(requestMerges({ rec: nohead, rules: R, now: T0, b: GREEN })[0][1], /names no head/);
+  assert.equal(nohead.read('merge_request', MERGE_REQUEST('C-1', 'aaa')), null);
+  // r2 M3: a card head that is not the verdict's head is not requested.
+  assert.match(requestMerges({ rec: mk({ tier: 2, risky: [], files: ['src/a.js'], head: 'bbb' }), rules: R, now: T0, b: GREEN })[0][1], /another head/);
+});

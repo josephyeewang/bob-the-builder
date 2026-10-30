@@ -1,6 +1,6 @@
 // R-0b-32, R-0b-39, R-0b-40 and R-0b-42 (the parts that run without a real Claude Code): role
 // profiles against the design ceiling, the rules snapshot, and the rendered role settings file.
-// The sandbox, network and compaction behaviour themselves are live checks (Joe/both steps).
+// The sandbox, network and compaction behaviour themselves are live checks (owner steps).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, writeFileSync, readFileSync } from 'node:fs';
@@ -184,6 +184,15 @@ test('a planted escape in the machine-wide file refuses every role (R-0b-32)', (
     { [S.sandbox]: { [S.network]: { [S.allowedDomains]: ['github.com'] } } },
     { [S.apiKeyHelper]: '/bin/echo' },
   ];
+  // Round 2 MIN-5: each with the reason it refuses for.
+  const more = [
+    [{ [S.env]: { X: '1' } }, /set variables/],
+    [{ [S.disableAllHooks]: true }, /hold disableAllHooks/],
+    [{ [S.permissions]: { [S.additionalDirectories]: ['/'] } }, /add folders/],
+    [{ [S.permissions]: { [S.defaultMode]: 'bypassPermissions' } }, /permission mode/],
+    [{ [S.sandbox]: { [S.sandboxEnabled]: false } }, /sandbox off/],
+  ];
+  for (const [m, why] of more) assert.match(checkSettings(m, { machineWide: true }).reason ?? '', why, JSON.stringify(m));
   for (const m of planted) assert.equal(checkSettings(m, { machineWide: true }).ok, false, JSON.stringify(m));
   assert.equal(checkSettings({ [S.permissions]: { [S.deny]: ['Read(//x/**)'] } }, { machineWide: true }).ok, true);
 });
@@ -242,4 +251,11 @@ test('render and check: an unknown role, a bad phase, a path with a space, a mis
   let n = 0;
   Object.defineProperty(shifting, 'shifting', { get: () => n++, enumerable: true });
   assert.equal(writeRoleSettings(join(tmp(), 'role.json'), shifting).reason, 'role settings read back differently');
+});
+
+test('round 2 MIN-4: the Bob folder is on the sandbox no-write list, so the shell cannot write it either', () => {
+  for (const role of ['worker', 'reviewer', 'lead']) {
+    const w = render(role).settings[S.sandbox][S.filesystem][S.denyWrite];
+    assert.ok(w.includes(PATHS.bobFolder) && w.includes(`${PATHS.bobFolder}/**`), role);
+  }
 });

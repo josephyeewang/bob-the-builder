@@ -9,7 +9,7 @@
 //   4. no Vercel variable is set in both Preview and Production. M12 Sensors read Vercel and write
 //      facts 3 and 4 into the record (L3); this file only reads them. Older than 10 minutes = shut.
 // Anything missing, malformed, for the wrong repo or project, or stale shuts the gate. A shut
-// gate raises one GitHub issue to Joe, updated rather than opened again while it stays shut.
+// gate raises one GitHub issue to the owner, updated rather than opened again while it stays shut.
 //
 // The fact shapes M12 must write (record entity 'fact'):
 //   id `start_gate.vercel_skip.<product>`, `start_gate.vercel_env.<product>`

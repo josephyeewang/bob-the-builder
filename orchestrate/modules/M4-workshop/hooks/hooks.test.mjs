@@ -38,7 +38,7 @@ function world({ rules } = {}) {
   return { root, outbox, copy, store, start, envFile, keys, snapshot, bin, marks };
 }
 const args = (w, role = 'worker', extra = {}) => ({ role, outbox: w.outbox, snapshot: w.snapshot, kinds: { worker: ['report'], lead: ['wish', 'ask', 'handoff'], front_door: ['request', 'state', 'idea'] }[role] ?? ['report'], copy: role === 'worker' ? w.copy : undefined, ...extra });
-const bash = (command) => ({ tool_name: 'Bash', tool_input: { command } });
+const bash = (command, cwd = '/') => ({ tool_name: 'Bash', tool_input: { command }, cwd });
 const write = (file_path) => ({ tool_name: 'Write', tool_input: { file_path, content: 'x' } });
 
 // Runs a hook script for real: a new Node process, the input on standard input.
@@ -57,7 +57,7 @@ test('plain-files: every blocked path exits 2 from the real script, no card made
   const w = world();
   const a = args(w);
   const blocked = [
-    join(w.copy, '.envrc'), join(w.copy, '.git', 'config'), join(w.copy, '.npmrc'), join(w.copy, '.vscode', 'settings.json'),
+    join(w.copy, '.envrc'), join(w.copy, '.git', 'config'), join(w.copy, '.npmrc'), join(w.copy, '.pnpmfile.cjs'), join(w.copy, '.vscode', 'settings.json'),
     join(w.copy, '.claude', 'skills', 'x', 'SKILL.md'), join(w.copy, '.mcp.json'), join(w.copy, 'lefthook.yml'),
     join(w.copy, 'pyrightconfig.json'), join(w.copy, 'pkg', '.Claude', 'settings.json'), join(w.start, 'notes.md'),
     join(w.store, 'card-C-1.json'), 'relative/path.txt', join(w.copy, '..', 'store', 'x.json'),
@@ -182,6 +182,11 @@ test('secret-file block refuses key and env files and listed folders, by tool an
   assert.equal(secret.decide(bash(`cp ${w.keys}/robot.pem /tmp/x`), a).block, true);
   assert.equal(secret.decide(bash('npm test'), a).block, false);
   assert.equal(runScript('secret-file-block', a, read(join(w.copy, '.env'))).code, 2);
+  // A listed folder spelled in another case, or with an invisible character, is the same folder.
+  for (const p of [w.keys.toUpperCase(), w.keys.replace('keys', 'k​eys')]) {
+    assert.equal(secret.decide(read(join(p, 'anything')), a).block, true, p);
+    assert.equal(secret.decide(bash(`cat ${p}/anything`), a).block, true, p);
+  }
 });
 
 test('shell splitting finds the real command behind variables and wrappers', () => {
@@ -224,4 +229,19 @@ test('compaction hooks never follow a link and refuse an unknown kind or event',
   assert.equal(runScript('compact-note', { ...a, event: 'Stop' }, { session_id: 'S-4' }).code, 2);
   assert.equal(runScript('compact-note', { ...a, event: 'PreCompact' }, { session_id: '../..' }).code, 2);
   assert.equal(compact.noteName('handoff', 'a/../b'), 'handoff-compact-ab.md');
+});
+
+test('L31: every hook still runs when reached the way it is installed: through a linked folder or a linked file', () => {
+  const w = world();
+  const a = args(w);
+  const dir = tmp();
+  symlinkSync(HERE, join(dir, 'linked'));
+  for (const name of ['plain-files', 'secret-file-block', 'production-write-guard', 'merge-guard', 'no-verify-block', 'compact-note']) {
+    symlinkSync(join(HERE, `${name}.mjs`), join(dir, `${name}.mjs`));
+    for (const script of [join(dir, 'linked', `${name}.mjs`), join(dir, `${name}.mjs`)]) {
+      // Bad input blocks; a script that skipped its body would exit 0 and let the call through.
+      assert.equal(runScript(name, { ...a, kind: 'report', event: 'PreCompact' }, 'not json', { script }).code, 2, script);
+    }
+  }
+  assert.equal(runScript('plain-files', a, write(join(w.copy, '.npmrc')), { script: join(dir, 'linked', 'plain-files.mjs') }).code, 2);
 });

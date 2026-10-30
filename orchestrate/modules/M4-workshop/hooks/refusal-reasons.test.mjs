@@ -25,7 +25,7 @@ function world(rules = { production: { env_files: ['/nowhere/settings.production
   return { root, outbox, copy, snapshot };
 }
 const args = (w, role = 'worker', extra = {}) => ({ role, outbox: w.outbox, snapshot: w.snapshot, kinds: role === 'lead' ? ['wish', 'ask', 'handoff'] : ['report'], copy: role === 'worker' ? w.copy : undefined, ...extra });
-const bash = (command) => ({ tool_name: 'Bash', tool_input: { command } });
+const bash = (command, cwd = '/') => ({ tool_name: 'Bash', tool_input: { command }, cwd });
 const write = (file_path) => ({ tool_name: 'Write', tool_input: { file_path, content: 'x' } });
 
 test('lib: a bad argument, a missing argument, input that is not an object and a hook with no decision each refuse with their own reason', async () => {

@@ -60,7 +60,6 @@ export function leadInFlight({ rec, sessionId, outboxNames, questionOpen }) {
 export async function leadRestartStep({ rec, rules, now, lead, size, inFlight, send, stopSession, startLead, alert }) {
   const sid = lead.sessionId;
   if (!SID.test(String(sid))) return 'refused: a session id the outbox names cannot hold';
-  if (!size || size.tokens == null) return 'no size';
   const soft = need(rules, KEYS.leadSoft);
   const hard = need(rules, KEYS.leadHard);
   const cap = need(rules, KEYS.handoffCapRole);
@@ -72,11 +71,22 @@ export async function leadRestartStep({ rec, rules, now, lead, size, inFlight, s
     return w;
   };
 
-  if (size.tokens > hard + HARD_MARGIN && !st.hard_alerted) {
+  const noSize = !size || size.tokens == null;
+  if (!noSize && size.tokens > hard + HARD_MARGIN && !st.hard_alerted) {
     alert(`the Lead ${sid} is at ${size.tokens} tokens, past ${hard} + ${HARD_MARGIN}: its compaction did not happen`);
     save({ hard_alerted: true }, 'lead_hard_alert');
   }
   if (['done', 'gave_up'].includes(st.phase)) return st.phase;
+  // The old Lead is stopped and the new one did not start (audit 0b-6 r2 MIN-1): try again every pass,
+  // whatever the old transcript says; Joe was told once.
+  if (st.phase === 'start_failed') {
+    let again;
+    try { again = await startLead({ handoff: `handoff-${sid}` }); } catch (e) { again = { ok: false, reason: e.message }; }
+    if (!again?.ok) return 'new Lead still not started; tried again next pass';
+    save({ phase: 'done', restarted_at: iso(now), new_lead: again.sessionId ?? null }, 'lead_restarted');
+    return 'restarted';
+  }
+  if (noSize) return 'no size';
   // Every move happens only at a finished turn: never WRAP mid-turn, never act on a turn in progress.
   if (!size.turnEnded) return 'mid-turn';
 
@@ -85,14 +95,18 @@ export async function leadRestartStep({ rec, rules, now, lead, size, inFlight, s
     if (inFlight) return `waiting: ${inFlight}`;
     const r = await send(wrapText(sid, cap));
     if (r?.outcome !== 'sent') return `WRAP not sent (${r?.outcome ?? 'no answer'}); tried again at the next finished turn`;
-    save({ phase: 'wrap_sent', sent_at: iso(now), reasks: 0 }, 'lead_wrap');
+    save({ phase: 'wrap_sent', sent_at: iso(now), wrap_at: iso(now), reasks: 0 }, 'lead_wrap');
     return 'WRAP sent';
   }
 
   // wrap_sent or reasked: wait for the Lead's answer (a turn ended after the ask) or the handoff.
   const used = rec.read('fact', `outbox-${sid}-${HANDOFF_NAME(sid)}`)?.doc;
   const answered = size.endedAt != null && size.endedAt > Date.parse(st.sent_at);
-  if (used?.state === 'applied') {
+  // Only a hand-off applied after WRAP counts (audit 0b-6 r2 MAT-3): an older one under the same name
+  // would start the new Lead from an out-of-date note. No time recorded counts as older.
+  const since = Date.parse(st.wrap_at ?? st.sent_at);
+  const fresh = used?.state === 'applied' && Date.parse(used.applied_at ?? '') >= since;
+  if (fresh) {
     const hcur = rec.read('handoff', `handoff-${sid}`);
     if (hcur?.doc?.sha256 !== used.sha256) {
       const h = rec.write({ actor: 'dispatcher', entity: 'handoff', id: `handoff-${sid}`, expectRev: hcur?.rev ?? 0,
@@ -107,13 +121,19 @@ export async function leadRestartStep({ rec, rules, now, lead, size, inFlight, s
       save({ stop_alerted: true, stop_failed_at: iso(now) }, 'lead_stop_failed');
       return 'old Lead not stopped; tried again next pass';
     }
-    const started = await startLead({ handoff: `handoff-${sid}` });
-    save({ phase: 'done', restarted_at: iso(now), new_lead: started?.ok ? (started.sessionId ?? null) : null }, 'lead_restarted');
-    if (!started?.ok) alert(`the Lead ${sid} was stopped after its handoff, but the new Lead did not start: ${started?.reason ?? 'no answer'}`);
-    return started?.ok ? 'restarted' : 'stopped; new Lead failed to start';
+    let started;
+    try { started = await startLead({ handoff: `handoff-${sid}` }); } catch (e) { started = { ok: false, reason: e.message }; }
+    if (!started?.ok) {
+      save({ phase: 'start_failed', stopped_at: iso(now) }, 'lead_start_failed');
+      alert(`the Lead ${sid} was stopped after its handoff, but the new Lead did not start: ${started?.reason ?? 'no answer'}; it is tried again every pass`);
+      return 'stopped; new Lead failed to start';
+    }
+    save({ phase: 'done', restarted_at: iso(now), new_lead: started.sessionId ?? null }, 'lead_restarted');
+    return 'restarted';
   }
   if (!answered) return 'waiting for the handoff';
-  const why = used?.state === 'refused' ? 'the record refused it' : used?.state === 'interrupted' ? 'its hand-in was interrupted' : 'it is missing or over the cap';
+  const why = used?.state === 'refused' ? 'the record refused it' : used?.state === 'interrupted' ? 'its hand-in was interrupted'
+    : used?.state === 'applied' ? 'a handoff under that name was already used before the WRAP' : 'it is missing or over the cap';
   if ((st.reasks ?? 0) < 1) {
     const r = await send(`Your handoff was not used (${why}). Write ${HANDOFF_NAME(sid)} again, under ${cap} tokens (about ${cap * 4} bytes), then reply DONE.`);
     if (r?.outcome !== 'sent') return `re-ask not sent (${r?.outcome ?? 'no answer'})`;

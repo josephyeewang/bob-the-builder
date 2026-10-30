@@ -100,7 +100,8 @@ export function checkHooks({ settings, hooksDir, source = HOOKS_SOURCE, kinds, c
       const [good, bad] = canned[name];
       if (!bad) return refuse(`no harmful probe for the ${name} hook`);
       for (const [input, want] of [[good, 0], [bad, 2]]) {
-        const r = run(node, [script, ...argv], { input: JSON.stringify(input), encoding: 'utf8', timeout: timeoutMs, killSignal: 'SIGKILL' });
+        // Every call carries the session's folder, as Claude Code's do; the guards refuse a shell call without one.
+        const r = run(node, [script, ...argv], { input: JSON.stringify({ cwd: copy ?? outbox, ...input }), encoding: 'utf8', timeout: timeoutMs, killSignal: 'SIGKILL' });
         if (r.error || r.signal) return refuse(`the ${name} hook did not answer within ${HOOK_TIMEOUT} s`);
         if (r.status !== want) return refuse(`the ${name} hook answered ${r.status} to a ${want === 0 ? 'harmless' : 'harmful'} call`);
         if (want === 0 && r.stdout && r.stdout.trim()) {

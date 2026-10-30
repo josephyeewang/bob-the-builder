@@ -3,7 +3,7 @@
 // Check 9, the run-key wrapper (review 0b-3 M8): a role's environment is built from a short list
 // of plain names, every variable on the refused list is stripped, and the launch refuses if any
 // is still there afterwards (or if a GitHub or other service key slipped in). A role never holds
-// a key: AI roles use Joe's signed-in Claude account only.
+// a key: AI roles use the owner's signed-in Claude account only.
 //
 // Check 10: the machine-wide settings file carries the production-write guard as a blocking hook
 // and no escape (excludedCommands, unsandboxed commands, allow or ask rules, extra hosts).

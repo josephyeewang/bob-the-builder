@@ -5,20 +5,18 @@
 // its own kinds. The Lead, Front Door, thinking room and Learning write nowhere but the outbox;
 // other roles write only inside their code copy (--copy) or the outbox.
 
-import { pathToFileURL } from 'node:url';
 import { basename, dirname, sep } from 'node:path';
-import { runHook, block, pass, landingPath, inside, realFolder, linkedFile } from './lib.mjs';
+import { isMain, runHook, block, pass, landingPath, inside, realFolder, linkedFile, fold } from './lib.mjs';
 
 export const OUTBOX_ONLY_ROLES = Object.freeze(['lead', 'front_door', 'thinking', 'learning']);
 
 // Folder names that hold tool settings, anywhere in a path (lower-cased compare).
 const SETUP_FOLDERS = ['.git', '.claude', '.vscode', '.idea', '.husky', '.devcontainer', '.config'];
 // File names that tools load on their own (lower-cased compare).
-const SETUP_FILES = ['.envrc', '.npmrc', '.yarnrc', '.yarnrc.yml', '.pnpmrc', '.mcp.json', 'claude.local.md',
+const SETUP_FILES = ['.envrc', '.npmrc', '.yarnrc', '.yarnrc.yml', '.pnpmrc', '.pnpmfile.cjs', '.mcp.json', 'claude.local.md',
   'lefthook.yml', 'lefthook.yaml', '.lefthook.yml', '.pre-commit-config.yaml', 'pyrightconfig.json', '.gitconfig',
   '.gitattributes', '.gitmodules', '.git', 'skill.md', '.tool-versions', '.nvmrc', '.node-version', '.direnv'];
 
-const fold = (s) => s.normalize('NFC').replace(/[​-‏⁠﻿]/g, '').toLowerCase();
 
 export function isSetupPath(p) {
   const parts = p.split(sep).map(fold);
@@ -56,4 +54,4 @@ export function decide(input, args) {
   return pass();
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) runHook(decide);
+if (isMain(import.meta.url)) runHook(decide);

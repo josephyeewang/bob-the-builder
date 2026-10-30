@@ -92,7 +92,7 @@ export function currentBands({ rec, rules, account, now }) {
 
 /**
  * What each band lets the Dispatcher start (rail G3, review M3, M4, M23, m2, m17). `kind` is one of
- * editing | script | overnight | readonly | review | audit | merge | undo | lead | front_door.
+ * editing | script | overnight | readonly | review | audit | merge | undo | undo_merge | lead | front_door.
  * Running work is never stopped by amber; red parks running cards elsewhere (pass.mjs).
  */
 export function mayStart({ b, kind, tier, risky = [], repair = false, redRuns }) {
@@ -101,7 +101,8 @@ export function mayStart({ b, kind, tier, risky = [], repair = false, redRuns })
   const t1 = tier !== 2 && tier !== null;
   const tier1Prod = t1 && (risky.includes('production_data') || risky.includes('schema') || repair);
   const finishing = ['review', 'audit', 'merge'].includes(kind);
-  if (kind === 'undo') return { ok: true };
+  // An undo, and the merge request for a finished undo (audit 0b-6 r2 MAT-4), are never held.
+  if (kind === 'undo' || kind === 'undo_merge') return { ok: true };
   if (tier1Prod && b.band === 'unknown') return { ok: false, reason: 'usage is unknown: no Tier-1 production work' };
   if (tier1Prod && b.prodBlocked) return { ok: false, reason: 'no Tier-1 production work above the usage line' };
   if (kind === 'lead' || kind === 'front_door') return { ok: true };

@@ -3,45 +3,79 @@
 // A scanner cannot see a secret inside a file it cannot read: a packed archive under any name, a
 // locked file, an image's compressed data. So by default every new or changed file must be plain
 // UTF-8 text with no zero byte, and anything else is refused. A product's rules entry may allow
-// named image and font types under named paths (`product.allowed_binaries`, for example
+// named PNG images under named paths (`product.allowed_binaries`, for example
 // [{ path: 'docs/**/*.png', type: 'png' }]). Even then the file's real type is read from its
 // bytes, never its name, so a zip renamed to .png is refused. Each allowed file is listed in the
 // push's read-back. Anything in the entry this file does not understand allows nothing.
 
+import { inflateSync } from 'node:zlib';
+
 const CRC = Array.from({ length: 256 }, (_, n) => { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; return c >>> 0; });
 export const crc32 = (b) => { let c = 0xffffffff; for (const x of b) c = CRC[(c ^ x) & 0xff] ^ (c >>> 8); return (c ^ 0xffffffff) >>> 0; };
 
-// A PNG is walked chunk by chunk: IHDR first, IEND last with nothing after it, every check sum
-// right, and no compressed text chunk (zTXt, iTXt), whose contents no scan could read.
-function png(b) {
-  if (b.length < 20 || !b.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) return false;
-  let at = 8; let first = true;
+// Only PNG is offered, and it is read in full (audit R-0b-47 round 3 MAT-1). The chunks must come
+// in order from a fixed list of plain kinds: IHDR first, IDAT runs together, IEND last with nothing
+// after it, every check sum right. Private chunks and every packed kind but the image data (zTXt,
+// iTXt, iCCP, eXIf, animation frames) are refused. The image data must unpack, as one stream with
+// nothing after it, to exactly the size the header states; the unpacked bytes go back for the scan.
+// Interlaced images are refused rather than sized. JPEG, GIF, WebP and fonts are not offered until
+// each is read as fully (an entry naming them allows nothing).
+const PLAIN_CHUNKS = new Set(['IHDR', 'PLTE', 'IDAT', 'IEND', 'tRNS', 'cHRM', 'gAMA', 'sBIT', 'sRGB', 'bKGD', 'hIST', 'pHYs', 'tIME', 'tEXt']);
+const CHANNELS = { 0: 1, 2: 3, 3: 1, 4: 2, 6: 4 };
+const DEPTHS = { 0: [1, 2, 4, 8, 16], 2: [8, 16], 3: [1, 2, 4, 8], 4: [8, 16], 6: [8, 16] };
+export const MAX_PIXEL_BYTES = 64 * 1024 * 1024;
+
+/** The unpacked image data of a PNG that passes every check above, or null. */
+export function pngPixels(b) {
+  if (b.length < 20 || !b.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) return null;
+  let at = 8; let first = true; let size = -1; const idat = []; let idatDone = false;
   while (at + 12 <= b.length) {
     const len = b.readUInt32BE(at);
     const type = b.subarray(at + 4, at + 8).toString('latin1');
-    if (at + 12 + len > b.length || !/^[A-Za-z]{4}$/.test(type)) return false;
-    if (crc32(b.subarray(at + 4, at + 8 + len)) !== b.readUInt32BE(at + 8 + len)) return false;
-    if ((first && type !== 'IHDR') || type === 'zTXt' || type === 'iTXt') return false;
+    if (at + 12 + len > b.length || !PLAIN_CHUNKS.has(type)) return null;
+    if (crc32(b.subarray(at + 4, at + 8 + len)) !== b.readUInt32BE(at + 8 + len)) return null;
+    const data = b.subarray(at + 8, at + 8 + len);
+    if (first !== (type === 'IHDR')) return null;
+    if (first) {
+      if (len !== 13) return null;
+      const [w, h, depth, color, comp, filter, lace] = [data.readUInt32BE(0), data.readUInt32BE(4), ...data.subarray(8, 13)];
+      if (!w || !h || !DEPTHS[color]?.includes(depth) || comp || filter || lace) return null;
+      size = h * (1 + Math.ceil((w * CHANNELS[color] * depth) / 8));
+      if (size > MAX_PIXEL_BYTES) return null;
+    }
     first = false;
+    if (type === 'IDAT') { if (idatDone) return null; idat.push(data); } else if (idat.length) idatDone = true;
     at += 12 + len;
-    if (type === 'IEND') return at === b.length;
+    if (type === 'IEND') {
+      if (at !== b.length || !idat.length) return null;
+      const packed = Buffer.concat(idat);
+      try {
+        const r = inflateSync(packed, { info: true, maxOutputLength: size + 1 });
+        return r.buffer.length === size && r.engine.bytesWritten === packed.length ? r.buffer : null;
+      } catch { return null; }
+    }
+  }
+  return null;
+}
+
+const MAGIC = { png: (b) => pngPixels(b) !== null };
+export const BINARY_TYPES = Object.freeze(Object.keys(MAGIC));
+
+// A secret can be a file's name. Any run of 20 or more letters and digits in a path
+// is cut to its first four before the path goes into a refusal or the record (round 3 MIN-3).
+export const maskPath = (p) => String(p).replace(/[A-Za-z0-9]{20,}/g, (m) => `${m.slice(0, 4)}…`);
+
+// Packed data written out as base64 (round 3 MIN-1): a long base64 run whose first bytes mark
+// gzip, zip, 7z, bzip2, xz or zstd. Deliberate encoding of other kinds still gets through; the
+// scan stops accidents and the named tricks.
+const PACKED_STARTS = [[0x1f, 0x8b, 0x08], [0x50, 0x4b, 0x03, 0x04], [0x37, 0x7a, 0xbc, 0xaf], [0x42, 0x5a, 0x68], [0xfd, 0x37, 0x7a, 0x58], [0x28, 0xb5, 0x2f, 0xfd]];
+export function packedAsText(text) {
+  for (const m of String(text).matchAll(/[A-Za-z0-9+/_-]{40,}/g)) {
+    const head = Buffer.from(m[0].slice(0, 8).replace(/-/g, '+').replace(/_/g, '/'), 'base64');
+    if (PACKED_STARTS.some((s) => s.every((x, i) => head[i] === x))) return true;
   }
   return false;
 }
-
-// Only a PNG is walked in full. The others are checked by their start and their end or stated
-// length, which stops a renamed file but not a file built to pass, so a product should name them
-// only under paths it trusts. Types with nothing to check but a start marker (ico, ttf, otf) are
-// not offered.
-const MAGIC = {
-  png,
-  jpeg: (b) => b.length >= 4 && b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff && b[b.length - 2] === 0xff && b[b.length - 1] === 0xd9,
-  gif: (b) => b.length >= 7 && /^GIF8[79]a$/.test(b.subarray(0, 6).toString('latin1')) && b[b.length - 1] === 0x3b,
-  webp: (b) => b.length >= 12 && b.subarray(0, 4).toString('latin1') === 'RIFF' && b.subarray(8, 12).toString('latin1') === 'WEBP' && b.readUInt32LE(4) + 8 === b.length,
-  woff: (b) => b.length >= 12 && b.subarray(0, 4).toString('latin1') === 'wOFF' && b.readUInt32BE(8) === b.length,
-  woff2: (b) => b.length >= 12 && b.subarray(0, 4).toString('latin1') === 'wOF2' && b.readUInt32BE(8) === b.length,
-};
-export const BINARY_TYPES = Object.freeze(Object.keys(MAGIC));
 
 /** True when the bytes are plain UTF-8 text with no zero byte. */
 export function isText(buf) {
@@ -74,11 +108,18 @@ export function allowList(entry) {
     && !e.path.split('/').includes('..') && BINARY_TYPES.includes(e.type)).map((e) => ({ re: globRe(e.path), type: e.type }));
 }
 
-/** { ok: true, binary: null } for text, { ok: true, binary: { path, type } } for an allowed one, else a refusal. */
+/**
+ * { ok: true, binary: null } for text, { ok: true, binary: { path, type }, unpacked } for an allowed
+ * one (`unpacked`: its image data, for the scan), else a refusal.
+ */
 export function checkFile(path, buf, list) {
-  if (isText(buf)) return { ok: true, binary: null };
+  const shown = maskPath(String(path).slice(0, 120));
+  if (isText(buf)) {
+    if (packedAsText(buf.toString('utf8'))) return { ok: false, reason: `the new file ${shown} holds packed data written out as text, which cannot be scanned for secrets` };
+    return { ok: true, binary: null };
+  }
   const type = realType(buf);
-  if (type && list.some((e) => e.type === type && e.re.test(path))) return { ok: true, binary: { path, type } };
-  const why = type ? `a ${type} file where the product's rules allow none` : 'not plain UTF-8 text, and not an allowed image or font';
-  return { ok: false, reason: `the new file ${String(path).slice(0, 120)} cannot be scanned for secrets: ${why}` };
+  if (type && list.some((e) => e.type === type && e.re.test(path))) return { ok: true, binary: { path, type }, unpacked: pngPixels(buf) };
+  const why = type ? `a ${type} file where the product's rules allow none` : 'not plain UTF-8 text, and not an allowed image';
+  return { ok: false, reason: `the new file ${shown} cannot be scanned for secrets: ${why}` };
 }

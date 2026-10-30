@@ -130,8 +130,9 @@ export async function cleanupCopy({ rec, rules, now, card, copiesRoot, sealRoot,
     return done('deleted', ['Joe said delete']);
   }
   if (ask && ['open', 'pushed'].includes(ask.doc.state)) return { result: 'kept', reasons: ['waiting on the delete-copy ask'] };
-  // Joe said keep: the copy is left alone until the card moves again (audit MAT-9), never re-asked each pass.
-  if (ask && ask.doc.state === 'consumed' && ask.doc.answer === 'keep' && ask.doc.kept_at_card_change === (cardDoc?.changed_at ?? null)) {
+  // Any answer but delete keeps it (audit 0b-6 r2 MAT-5, as the README says): the copy is left alone until
+  // the card moves again (audit MAT-9), never re-asked each pass.
+  if (ask && ask.doc.state === 'consumed' && ask.doc.answer !== 'delete' && ask.doc.kept_at_card_change === (cardDoc?.changed_at ?? null)) {
     return { result: 'kept', reasons: ['Joe said keep'] };
   }
 

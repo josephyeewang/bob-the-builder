@@ -9,17 +9,17 @@
 // scratch (safe-git's, which carries no GITLEAKS_* variable). The push script also refuses any
 // added line holding `gitleaks:allow` itself, in case a later version drops the flag.
 // The git scan reads patches, and a patch skips a file git thinks is binary, so every new file's
-// raw bytes are also written to the private scan folder and scanned there (R-0b-47 MAT-2). That
-// Only plain text, and images or fonts a product allows, get this far (binary-files.mjs, L28): any
-// other file is refused unread. The `gitleaks dir` scan in turn skips a file whose first bytes
-// mark it as an archive, a program, a database or a PDF, and finds nothing in UTF-16 text, so
-// each file is written three ways: as it
-// is, under its own name (rules that look at the name still fire); and, under a plain .txt name
-// (gitleaks also skips some endings, such as .tar), behind a text lead-in that hides the marker,
-// once as is and once with every zero byte removed (UTF-16 then reads as plain text); round 2
-// MAT-A. A .zip or .tar.gz is opened two levels deep. These views are a second line now that
-// such files are refused: they still read the text inside an allowed image. A file over the size
-// cap is refused, not read (MIN-d).
+// raw bytes are also written to the private scan folder and scanned there (R-0b-47 MAT-2). Only
+// plain text and PNG images a product allows get this far (binary-files.mjs, L28); any other
+// file is refused unread. Each file is written in up to four views: as it is, under its own name
+// (rules that look at the name still fire); under a plain .txt name behind a text lead-in, since
+// `gitleaks dir` skips a file whose first bytes mark it as an archive, a program or a PDF, and
+// skips some endings such as .tar; the same with every zero byte removed, since gitleaks finds
+// nothing in UTF-16 text (round 2 MAT-A); and, for an allowed PNG, its unpacked image data behind
+// the lead-in (round 3 MAT-1). A .zip or .tar.gz is opened two levels deep. The lead-in and the
+// archive opening are second lines now that packed files are refused, and no test fails without
+// them (round 3 COS-3); the zero-byte view still reads the text inside an allowed PNG. A file over
+// the size cap is refused, not read (MIN-d).
 // Capability note: --ignore-gitleaks-allow, the default rules' allow-lists (global: node_modules,
 // lock files, images, fonts and more), `gitleaks dir` reading a file with NUL bytes, a type marker
 // at a file's start (but not after a 600-byte text lead-in) making `gitleaks dir` skip it, and
@@ -102,12 +102,12 @@ const safeName = (p) => (String(p).split('/').at(-1).replace(/[^A-Za-z0-9._-]/g,
 const LEAD_IN = Buffer.from('scan view, not part of the file\n'.repeat(19));
 export const MAX_FILE_BYTES = 32 * 1024 * 1024;
 export const MAX_TOTAL_BYTES = 256 * 1024 * 1024;
-const VIEWS = ['raw', 'text', 'nul'];
+const VIEWS = ['raw', 'text', 'nul', 'img'];
 const view = (k, buf) => (k === 'raw' ? buf : Buffer.concat([LEAD_IN, k === 'nul' ? buf.filter((x) => x !== 0) : buf]));
 
 // A finding's file, put back as the repo path: the scan folder's own path never reaches a refusal (MIN-b).
 const repoPath = (blobs) => (file) => {
-  const m = /(?:^|\/)files\/(?:raw|text|nul)\/(\d+)\//.exec(String(file ?? ''));
+  const m = /(?:^|\/)files\/(?:raw|text|nul|img)\/(\d+)\//.exec(String(file ?? ''));
   return m && blobs[Number(m[1])] ? String(blobs[Number(m[1])].path).slice(0, 200) : 'a new file';
 };
 
@@ -137,7 +137,7 @@ export async function scanSecrets({ setup, mirror, shas, blobs = [], messages, p
       for (const k of VIEWS) mkdirSync(join(files, k), { mode: 0o700 });
       let total = 0;
       for (const [i, b] of blobs.entries()) {
-        const name = String(b.path).slice(0, 80);
+        const name = String(b.path).slice(0, 80); // masked with every reason, once, in push.mjs
         if (!/^[0-9a-f]{40}$/.test(String(b.id))) return refuse('a new file has no readable id');
         const size = await git(['cat-file', '-s', b.id], { gitDir: mirror, purpose: 'push-scan-files' });
         const n = Number(String(size.stdout).trim());
@@ -151,9 +151,11 @@ export async function scanSecrets({ setup, mirror, shas, blobs = [], messages, p
         if (!kind.ok) return refuse(kind.reason);
         if (kind.binary) binaries.push(kind.binary);
         for (const k of VIEWS) {
+          const bytes = k === 'img' ? kind.unpacked : cat.stdout;
+          if (!bytes) continue;
           const sub = join(files, k, String(i));
           mkdirSync(sub, { mode: 0o700 });
-          writeFileSync(join(sub, k === 'raw' ? safeName(b.path) : 'view.txt'), view(k, cat.stdout), { mode: 0o600, flag: 'wx' });
+          writeFileSync(join(sub, k === 'raw' ? safeName(b.path) : 'view.txt'), view(k, bytes), { mode: 0o600, flag: 'wx' });
         }
       }
       const fr = join(dir, 'files.json');
