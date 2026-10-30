@@ -309,3 +309,23 @@ test('round 4: huge paths answer quickly on every route, reasons stay short, nee
   for (const l of ['status: needs-joe', 'bot:needs-joe', 'please needs joe']) assert.equal(merge(r, [f('docs/research/a.md')], { labels: [l] }).decision, 'deny', l);
   assert.equal(merge(r, [f('docs/research/a.md')], { labels: ['docs', 'joe-review'] }).decision, 'allow');
 });
+
+test('round 5: a file list must give a whole-number count; huge lists answer quickly through the engine; the reader caps and edges are pinned', async () => {
+  const { needsJoe } = await import('./classify.mjs');
+  const r = rulesFor();
+  // MATERIAL-A: a list that lies about its count is refused by the check called directly, and through the engine.
+  for (const n of [-1, 'abc', {}, -0.5, 0.5, '1', true]) {
+    const files = new Proxy([f('lib/evil.ts'), f('.github/workflows/x.yml')], { get: (t, k) => (k === 'length' ? n : t[k]) });
+    assert.ok(docsLaneProblem(POL, change(files)), `direct ${String(n)}`);
+    assert.equal(merge(r, files).decision, 'deny', `engine ${String(n)}`);
+  }
+  // MINOR-1: the reader copies at most 1,000 labels and 3,000 files, so a huge empty list is quick.
+  let t0 = Date.now();
+  assert.equal(merge(r, [f('docs/research/a.md')], { labels: new Array(50_000_000) }).decision, 'deny');
+  assert.equal(merge(r, new Array(50_000_000)).decision, 'deny');
+  assert.ok(Date.now() - t0 < 1000, `took ${Date.now() - t0} ms`);
+  // MINOR-2: the docs check runs first, so its reason is the one given; needsJoe's own cap is 256.
+  assert.match(merge(r, [f('docs\\research\\a.md')]).reason, /^not this lane's change/);
+  assert.equal(needsJoe('a'.repeat(256)), null);
+  assert.equal(needsJoe('a'.repeat(257)), '');
+});

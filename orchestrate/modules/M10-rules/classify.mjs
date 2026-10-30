@@ -208,7 +208,9 @@ export function readFilesOnce(files) {
     return copy;
   };
   // A list past the cap is copied only to the cap: every check refuses MAX_FILES entries or more.
-  const n = Math.min(files.length, MAX_FILES);
+  const given = files.length;
+  if (!Number.isSafeInteger(given) || given < 0) return 'the file count is not a whole number';   // round 5
+  const n = Math.min(given, MAX_FILES);
   const out = new Array(n);
   for (let i = 0; i < n; i++) {
     const f = files[i];

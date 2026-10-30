@@ -201,23 +201,41 @@ export function makeEngine({ products, rulesState, productState, running, rolesD
     return out;
   }
 
-  const checkFiles = (files) => {
-    if (!Array.isArray(files) || !files.length) throw new Error('files missing');
-    for (const f of files) {
+  // Every route that takes files: a whole-number count under MAX_FILES, so no route runs long (L34 round 5, MATERIAL-B).
+  const checkFiles = (files, { fullListAsks = false } = {}) => {
+    if (!Array.isArray(files)) throw new Error('files missing');
+    const n = files.length;
+    if (!Number.isSafeInteger(n) || n < 1) throw new Error('files missing');
+    // The reader copies at most MAX_FILES, so a list that long may be cut off. The deep merge asks Joe about that itself.
+    if (n > MAX_FILES || (n === MAX_FILES && !fullListAsks)) throw new Error(`${MAX_FILES} files or more`);
+    for (let i = 0; i < n; i++) {
+      const f = files[i];
       if (!f || typeof f !== 'object' || !FILE_STATUSES.includes(f.status)) throw new Error('bad file entry');
       if ((f.status === 'renamed' || f.status === 'copied') && typeof f.previous_path !== 'string') throw new Error(`${f.status} with no old name`);
-      const bad = pathProblem(f.path) ?? (f.previous_path !== undefined ? pathProblem(f.previous_path) : null);
-      if (bad) throw new Error(`${bad}: ${JSON.stringify(String(f.path).slice(0, 80))}`);   // never the whole path (round 4)
+      for (const p of f.previous_path === undefined ? [f.path] : [f.path, f.previous_path]) {
+        const bad = pathProblem(p);
+        if (bad) throw new Error(`${bad}: ${JSON.stringify(String(p).slice(0, 80))}`);   // the bad path, never whole (rounds 4, 5)
+      }
     }
   };
+  // The reversed commit's file list as a set, read by position; null when it isn't a whole list (round 5, MATERIAL-B).
+  const fileSet = (v) => {
+    if (!Array.isArray(v)) return null;
+    const n = v.length;
+    if (!Number.isSafeInteger(n) || n < 0 || n > 1_000_000) return null;
+    const set = new Set();
+    for (let i = 0; i < n; i++) if (typeof v[i] === 'string') set.add(v[i]);
+    return set;
+  };
 
-  function pushBranch(s) {
+  function pushBranch(subject) {
+    const s = readSubjectOnce(subject);   // each field once, lists by position and capped, as merge reads them (round 5)
     const pol = policyOf(s.product);
     checkFiles(s.files);
     if (!s.card || typeof s.card !== 'object' || typeof s.card.id !== 'string' || !s.card.id) throw new Error('push_branch needs the card and its id');
     // The exact-reverse exception (R2-M8, R3-M3): every file is in the reversed commit's own list, in every state.
-    if (s.card?.kind === 'exact_reverse' && Array.isArray(s.reverses_files)
-      && s.files.every((f) => s.reverses_files.includes(f.path) && (f.previous_path === undefined || s.reverses_files.includes(f.previous_path)))) {
+    const reversed = s.card?.kind === 'exact_reverse' ? fileSet(s.reverses_files) : null;
+    if (reversed && s.files.every((f) => reversed.has(f.path) && (f.previous_path === undefined || reversed.has(f.previous_path)))) {
       return allow('exact reverse: every file is in the reversed commit');
     }
     const state = stateOf(s.product);
@@ -270,7 +288,7 @@ export function makeEngine({ products, rulesState, productState, running, rolesD
   function mergeDeep(subject) {
     const s = readSubjectOnce(subject);
     const pol = policyOf(s.product);
-    checkFiles(s.files);
+    checkFiles(s.files, { fullListAsks: true });
     // A field of the wrong type is a caller fault: refuse it rather than read it as "no" (audit round 3).
     if (s.truncated !== undefined && typeof s.truncated !== 'boolean') throw new Error('truncated must be true or false');
     if (s.labels !== undefined && (!Array.isArray(s.labels) || !s.labels.every((l) => typeof l === 'string'))) throw new Error('labels must be a list of names');

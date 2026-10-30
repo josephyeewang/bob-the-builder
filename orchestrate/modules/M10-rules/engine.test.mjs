@@ -204,6 +204,37 @@ test('push_branch while paused: only an exact reverse of the reversed commit\'s 
   // The old name of a rename counts too (audit round 2): renaming a workflow into a listed path is not a reverse.
   assert.match(w.rules.may('push_branch', { product: 'app', card, reverses_files: ['app/a.ts'], files: [file('app/a.ts', 'renamed', { previous_path: '.github/workflows/deploy.yml' })] }).reason, /paused/);
   assert.equal(w.rules.may('push_branch', { product: 'app', card, reverses_files: ['app/a.ts', 'app/old.ts'], files: [file('app/a.ts', 'renamed', { previous_path: 'app/old.ts' })] }).decision, 'allow');
+  // Size (L34 confirm audit round 5, MATERIAL-B): a reverse list is looked up, not scanned; 3,000 files or more are refused.
+  const many = Array.from({ length: 2999 }, (_, i) => file(`app/f${i}.ts`));
+  const list = [...Array.from({ length: 1_000_000 - 2999 }, (_, i) => `x/${i}`), ...many.map((f) => f.path)];
+  let t0 = Date.now();
+  assert.equal(w.rules.may('push_branch', { product: 'app', card, reverses_files: list, files: many }).decision, 'allow');
+  assert.ok(Date.now() - t0 < 3000, `took ${Date.now() - t0} ms`);
+  t0 = Date.now();
+  const huge = Array.from({ length: 60_000 }, (_, i) => file(`app/g${i}.ts`));
+  assert.equal(w.rules.may('push_branch', { product: 'app', card, reverses_files: huge.map((f) => f.path), files: huge }).decision, 'deny');
+  assert.ok(Date.now() - t0 < 1000, `took ${Date.now() - t0} ms`);
+  assert.equal(w.rules.may('push_branch', { product: 'app', card, reverses_files: [...list, 'y'], files: [file('app/f1.ts')] }).decision, 'deny', 'a list over 1,000,000 is not taken as proof');
+});
+
+test('push_branch checks every path, old names too, and the file count (L34 confirm audit round 5)', () => {
+  const w = world();
+  const card = { id: 'C-1', rows: [], doc: { lane: 'product' } };
+  const old = w.rules.may('push_branch', { product: 'app', card, files: [file('app/a.ts', 'renamed', { previous_path: 'docs\\blueprint\\rows\\R-1.yaml' })] });
+  assert.equal(old.decision, 'deny');
+  assert.match(old.reason, /docs\\\\blueprint/, 'the reason names the bad old name');
+  assert.equal(w.rules.may('push_branch', { product: 'app', card, files: Array.from({ length: 3000 }, (_, i) => file(`app/h${i}.ts`)) }).decision, 'deny');
+  // Each field is read once, as merge reads it: a getter can't answer one check one way and the next another.
+  let reads = 0;
+  const sly = { status: 'modified', get path() { reads++; return reads === 1 ? 'app/a.ts' : '.github/workflows/deploy.yml'; } };
+  assert.equal(w.rules.may('push_branch', { product: 'app', card, files: [sly] }).decision, 'allow');
+  assert.equal(reads, 1, 'the path is read once');
+  for (const n of [-1, 'abc', 0.5, true, 2 ** 32 - 1]) {
+    const files = new Proxy([file('app/a.ts')], { get: (t, k) => (k === 'length' ? n : t[k]) });
+    const t0 = Date.now();
+    assert.equal(w.rules.may('push_branch', { product: 'app', card, files }).decision, 'deny', String(n));
+    assert.ok(Date.now() - t0 < 500, String(n));
+  }
 });
 
 test('a rename or copy with no old name is refused by push and merge (audit round 2, MAT-7)', () => {

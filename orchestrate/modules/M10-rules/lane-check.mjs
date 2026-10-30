@@ -86,6 +86,7 @@ function problem(policy, change) {
   }
   if (!Array.isArray(files)) return 'no files';
   const count = files.length;
+  if (!Number.isSafeInteger(count) || count < 0) return 'the file count is not a whole number';   // round 5, MATERIAL-A
   if (!count) return 'no files';
   if (count >= MAX_FILES) return `${MAX_FILES} files or more`;
   for (let i = 0; i < count; i++) {
