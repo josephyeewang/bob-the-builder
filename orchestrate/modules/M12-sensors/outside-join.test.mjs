@@ -151,3 +151,30 @@ test('R-0b-126 audit round 3 M-1: a correct Lead-input file whose own safety not
 test('R-0b-126 audit round 3 minor 1: every named instruction part is at least RUN letters or digits long', () => {
   for (const c of joinCases()) for (const i of [c.instruction ?? []].flat()) assert.ok(i.replace(/[^\p{L}\p{N}]/gu, '').length >= RUN, i);
 });
+
+test('R-0b-126 audit round 4: a lane that keeps state between calls cannot hide a leak behind the baseline', async () => {
+  const fence = (x) => cleanOutside(x.text, x.source);
+  const caught = (m) => m.some((x) => x.why.startsWith('outside text'));
+  // M-1: one growing file shared by two checks; the lane leaks a raw preview line each time.
+  const file = [];
+  const preview = (x) => { file.push(fence(x), `> preview: ${x.text}`); return { record: fence(x), leadInput: file.join('\n') }; };
+  const three = ['research-file', 'idea-file', 'idea-issue'];
+  assert.ok(caught(await checkOutsideJoin(preview, { sources: three, where: ['record'] })) === false);
+  assert.ok(caught(await checkOutsideJoin(preview, { sources: three, where: ['leadInput'] })));
+  for (let i = 0; i < 2; i++) assert.ok(caught(await checkOutsideJoin(preview, { sources: ['research-file'], where: ['leadInput'] })), `run ${i}`);
+  // The same growing file, written correctly, passes on a second check too.
+  const good = []; const right = (x) => { good.push(fence(x)); return { leadInput: good.join('\n') }; };
+  for (let i = 0; i < 2; i++) assert.deepEqual(await checkOutsideJoin(right, { where: ['leadInput'] }), []);
+  // A second run where the lane writes nothing new fails: the form must be written by this call.
+  const frozen = good.join('\n');
+  assert.ok((await checkOutsideJoin(() => ({ leadInput: frozen }), { where: ['leadInput'] })).some((x) => x.why === 'the exact fenced form is missing'));
+  // M-2: a writer that rebuilds the file but fences only the newest item, every kind, keys unmasked.
+  const items = [];
+  const newest = (x) => { items.push(x); return { leadInput: items.map((y, k) => (k === items.length - 1 ? fence(y) : `old: ${y.text}`)).join('\n') }; };
+  const m2 = await checkOutsideJoin(newest, { where: ['leadInput'] });
+  assert.ok(caught(m2)); assert.ok(m2.some((x) => x.why.startsWith('a planted fake key')));
+  // The lag variant: last call's text echoed raw beside a correct fence.
+  let last = '';
+  const lag = (x) => { const out = `${fence(x)}\n${last}`; last = x.text; return { leadInput: out }; };
+  assert.ok(caught(await checkOutsideJoin(lag, { where: ['leadInput'] })));
+});
