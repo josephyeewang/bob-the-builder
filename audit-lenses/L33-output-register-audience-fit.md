@@ -28,7 +28,7 @@ L26 (Marketing, Copy & Website) audits **marketing surfaces** — homepage, land
 
 So the language users *actually read most* — the generated text the product produces in normal use — falls through the cracks. The consumer health-report app case: a diagnosis written in clinical jargon for a deliberately non-technical audience. That's not a marketing-copy problem (L26 skips it) and not a translation problem (L18) — it's an **output register / audience-fit** problem, and no lens owns it.
 
-There's a second half Joe named: **house presentation style.** Some products want a specific output structure — McKinsey-style answer-first with labeled takeaways and supporting detail after, or a strict "TL;DR → details" shape, or Diátaxis-typed docs. Whether generated output *conforms to the declared house structure* is a real, checkable quality bar that nothing currently checks.
+There's a second half Bob's author named: **house presentation style.** Some products want a specific output structure — McKinsey-style answer-first with labeled takeaways and supporting detail after, or a strict "TL;DR → details" shape, or Diátaxis-typed docs. Whether generated output *conforms to the declared house structure* is a real, checkable quality bar that nothing currently checks.
 
 L33 owns both: **register/jargon fit to audience** (ISO 24495 + readability + NN/g tone) and **structural conformance to house style** (Minto + the product's own format spec). It is routed as **actionable content**, like L26 — a jargon-laden diagnosis is a fixable defect, not a positioning opinion (so it does NOT go in the strategic-veto bucket with L27/L28).
 
@@ -56,7 +56,7 @@ L33 owns both: **register/jargon fit to audience** (ISO 24495 + readability + NN
 ## Source frameworks
 
 - **ISO 24495-1:2023 Plain Language** — four principles: **Relevance** (audience-appropriate, nothing superfluous), **Findability** (structure lets readers locate what they need), **Understandability** (wording/structure clear for the intended reader), **Usability** (reader can act on it). The audience-anchored definition of "clear."
-- **Minto Pyramid Principle** — answer/conclusion first, then MECE-grouped supporting points, each labeled; the canonical "McKinsey structure" Joe named (front-loaded takeaways, descriptions after).
+- **Minto Pyramid Principle** — answer/conclusion first, then MECE-grouped supporting points, each labeled; the canonical "McKinsey structure" Bob's author named (front-loaded takeaways, descriptions after).
 - **NN/g Tone-of-Voice 4 dimensions** — funny↔serious, formal↔casual, respectful↔irreverent, enthusiastic↔matter-of-fact; makes "register" a measurable target instead of a vibe.
 - **Flesch-Kincaid / reading-grade metrics** — quantify reading level of real output against the audience target.
 - **Microsoft Writing Style Guide / Google dev-docs style / Diátaxis** — reference house-style systems when the product hasn't declared its own.

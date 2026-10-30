@@ -50,7 +50,7 @@ component with hard-coded colours and no font dependency.
    size, it looks equally resolved; (4) *literalness* — a cup for coffee is not a concept. Full list:
    `references/testing-checklist.md`. The audit catches structure (live text, near-miss angles, tiny details);
    it does **not** catch ugly geometry — that is the render-and-look step's job. To critique an existing mark
-   (Joe's or anyone's): `references/critique.md`.
+   (the user's or anyone's): `references/critique.md`.
 6. **Show the concepts, then STOP.**
    ```bash
    python3 scripts/concept_sheet.py a.svg b.svg c.svg --lockups a-lockup.svg b-lockup.svg c-lockup.svg \

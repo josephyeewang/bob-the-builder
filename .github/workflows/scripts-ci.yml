@@ -42,6 +42,8 @@ jobs:
     # heading-style decision log and reported "no drift" over three duplicate decision IDs.
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # run-commands-check compares the change with its base commit
       - name: Configure git identity (the self-tests make commits in temp repos)
         run: |
           git config --global user.name "Bob CI"
@@ -56,6 +58,17 @@ jobs:
         run: node --test $(find orchestrate -name '*.test.mjs')
       - name: Each kind of content still has one home (D-032)
         run: node scripts/one-home-check.mjs
+      - name: Every rule tagged as checked names a script that exists and runs (D-033, Rule 33)
+        run: node scripts/rule-tags-check.mjs
+      - name: No run command points at a file this change moved or deleted (D-033, Rule 26 on Bob itself)
+        env:
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          if [ -n "$BASE" ] && git cat-file -e "$BASE^{commit}" 2>/dev/null; then
+            node scripts/run-commands-check.mjs . --base "$BASE"
+          else
+            echo "No base commit to compare with (a branch's first push) — skipped"
+          fi
       - name: The lens count in audit-lenses/README.md matches the lens files
         run: |
           files=$(ls audit-lenses/L[0-9][0-9]-*.md | grep -vc stack-checklists)

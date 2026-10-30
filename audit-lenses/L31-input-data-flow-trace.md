@@ -27,7 +27,7 @@ source_frameworks:
 
 L02 (Spec Fidelity) asks "does the capability exist?" L03 (Critical Capability Quality) asks "is this *one* capability A-grade?" — both look *vertically*, one capability at a time. Neither follows a single **input or data field horizontally across the whole system** to confirm it is handled at every step and reaches every place that needs it.
 
-This is the failure mode Joe named on a consumer health-report app: a medical document upload extracts **age and gender**, but those fields are used at intake and *never threaded through* the scoring / diagnosis / recommendation engines that should weight them. Every individual capability passes its own audit. The *flow* is broken in the seams between them — exactly where no per-capability lens looks.
+This is the failure mode Bob's author named on a consumer health-report app: a medical document upload extracts **age and gender**, but those fields are used at intake and *never threaded through* the scoring / diagnosis / recommendation engines that should weight them. Every individual capability passes its own audit. The *flow* is broken in the seams between them — exactly where no per-capability lens looks.
 
 The pattern generalizes far past health:
 - **Signup / account:** is the account actually created, the password hashed, the email **deduplicated** (or can one email register twice?), the verification state persisted, the session issued, the "deleted" path real?

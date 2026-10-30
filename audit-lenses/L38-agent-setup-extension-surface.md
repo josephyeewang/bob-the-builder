@@ -25,7 +25,7 @@ source_frameworks:
 
 Every other lens in this library audits **the thing being built**. This one audits **the thing doing the building**, and the extension surface of any agent product built with it.
 
-The gap is concrete and current. Bob is a multi-agent system. Joe runs Claude Code with a large, actively-growing set of third-party extensions: installed skills, marketplace plugins, MCP servers, per-project `.claude/` configs, hooks, and a `settings.json` synced across machines. **Every one of those is instructions or executable capability, authored elsewhere, loaded into a session that holds live credentials and writes to live products.** L04 audits the product's attack surface. L06 audits the dependency tree. Neither has ever looked at the agent's own extensions — and the standing `/verdict` habit of harvesting promising repos means that surface grows every month by design.
+The gap is concrete and current. Bob is a multi-agent system. Bob's author runs Claude Code with a large, actively-growing set of third-party extensions: installed skills, marketplace plugins, MCP servers, per-project `.claude/` configs, hooks, and a `settings.json` synced across machines. **Every one of those is instructions or executable capability, authored elsewhere, loaded into a session that holds live credentials and writes to live products.** L04 audits the product's attack surface. L06 audits the dependency tree. Neither has ever looked at the agent's own extensions — and the standing `/verdict` habit of harvesting promising repos means that surface grows every month by design.
 
 The threat is not hypothetical. The whole category is text files that an agent treats as instructions:
 - a skill file that says something the reader never intended to authorize;

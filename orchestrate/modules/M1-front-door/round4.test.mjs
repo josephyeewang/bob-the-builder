@@ -1,16 +1,18 @@
-// round4.test.mjs — planted cases for the 0b-8 audit round 4 findings and lead calls L22 (the brief pushed to Joe's
+// round4.test.mjs — planted cases for the 0b-8 audit round 4 findings and lead calls L22 (the brief pushed to the owner's
 // phone) and L23 (the Air's health result written by a machine, dated by its own check). Each fails on the old code.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readdirSync, readFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { readdirSync, readFileSync, realpathSync } from 'node:fs';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { airHealthFile, checkAirHealthFile, airFactFromFile } from '../M12-sensors/air-health.mjs';
 import { airCheck, AIR_FACT, nextTripPush, briefAnswers } from './trip.mjs';
 import { outboxFile, checkOutboxFile } from './outbox.mjs';
+import { tempDir } from '../../shared/test-tmp.mjs';
 import { FAKE } from '../M12-sensors/fakes.mjs';
+
+const tmp = (prefix) => realpathSync(tempDir(prefix)); // removed after the file, even on failure (shared/test-tmp.mjs)
 
 const T0 = Date.parse('2026-11-03T12:00:00Z');
 const at = (h) => new Date(T0 + h * 3600e3);
@@ -51,7 +53,7 @@ test('L23 planted: the air-health check refuses a wrong name, a mismatched or fu
 });
 
 test('L23: the command the Air runs writes one checked file to the folder it is given', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'air-'));
+  const dir = tmp('air-');
   const cli = fileURLToPath(new URL('../M12-sensors/air-health.mjs', import.meta.url));
   const name = execFileSync(process.execPath, [cli, '2', dir], { encoding: 'utf8' }).trim();
   assert.deepEqual(readdirSync(dir), [name]);

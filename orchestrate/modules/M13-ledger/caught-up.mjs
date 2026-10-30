@@ -1,7 +1,7 @@
 // caught-up.mjs — the phone's GitHub fallbacks while the Mini is down, and one "caught up" push when it is back
 // (R-0b-76; design v4 §7.2 R3; review-0b-7 M11, M12 and minors).
 //
-// While the Mini is down Joe still has GitHub on the phone: an idea is an issue with the `idea` label, an Approve is
+// While the Mini is down the owner still has GitHub on the phone: an idea is an issue with the `idea` label, an Approve is
 // the normal Approve on the PR (M2 reads it), and status is the heartbeat issue. This file runs on every Dispatcher pass
 // and does two things:
 //   1. idea intake: each open `idea` issue written by the OWNER (matched by numeric user ID, never by login, which can

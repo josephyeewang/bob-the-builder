@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseLog, joeTurns, joeTurnsWithReplies, questionBoxes, openQuestions, lastTurnFinished, checkTapTest } from './transcript.mjs';
+import { parseLog, ownerTurns, ownerTurnsWithReplies, questionBoxes, openQuestions, lastTurnFinished, checkTapTest } from './transcript.mjs';
 import { typed, said, asks, tool, result, meta, toLog, iso } from './fixtures.mjs';
 
 test('parseLog reads one entry per line and skips a torn last line', () => {
@@ -8,7 +8,7 @@ test('parseLog reads one entry per line and skips a torn last line', () => {
   assert.equal(parseLog(log).length, 2);
 });
 
-test('Joe\'s turns: typed messages and question-box answers; never Dispatcher, relay, injected or meta lines', () => {
+test('The owner\'s turns: typed messages and question-box answers; never Dispatcher, relay, injected or meta lines', () => {
   const entries = [
     typed(0, 'pause the test product'),
     said(1, 'Paused.'),
@@ -20,10 +20,10 @@ test('Joe\'s turns: typed messages and question-box answers; never Dispatcher, r
     asks(7, 'q-1'), result(8, 'q-1', 'Option A'),
     said(9, 'Done.'),
   ];
-  const turns = joeTurns(entries);
+  const turns = ownerTurns(entries);
   assert.deepEqual(turns.map((t) => [t.kind, t.text]), [['typed', 'pause the test product'], ['answer', 'Option A']]);
   assert.equal(turns[1].at, Date.parse(iso(8)));
-  assert.deepEqual(joeTurnsWithReplies(entries).map((t) => t.reply), ['Paused.', 'Done.']);
+  assert.deepEqual(ownerTurnsWithReplies(entries).map((t) => t.reply), ['Paused.', 'Done.']);
 });
 
 test('a question box is answered only by a tool result with its own call ID', () => {
@@ -32,7 +32,7 @@ test('a question box is answered only by a tool result with its own call ID', ()
   assert.equal(openQuestions([...entries, result(4, 'q-1', 'A')]).length, 0);
 });
 
-test('lastTurnFinished: false mid-tool-call, false on Joe\'s line, true after a final reply', () => {
+test('lastTurnFinished: false mid-tool-call, false on the owner\'s line, true after a final reply', () => {
   assert.equal(lastTurnFinished([typed(0, 'x'), tool(1, 't-1')]), false);
   assert.equal(lastTurnFinished([typed(0, 'x'), tool(1, 't-1'), result(1, 't-1', 'r')]), false);
   assert.equal(lastTurnFinished([typed(0, 'x'), tool(1, 't-1'), result(1, 't-1', 'r'), said(2, 'done')]), true);
@@ -59,6 +59,6 @@ test('planted failures: a Dispatcher-typed "yes" cannot stand in for an answer; 
   assert.match(checkTapTest(errored).problems.join(), /q-c ended in an error/);
   assert.match(checkTapTest([asks(0, 'q-a'), result(1, 'q-a', 'Yes')]).problems.join(), /only 1 question boxes/);
   assert.equal(questionBoxes(errored).find((q) => q.callId === 'q-c').answer.isError, true);
-  assert.equal(joeTurns(errored).length, 3, 'a declined box still counts as Joe acting (0b-8 audit round 1, M-1)');
-  assert.equal(joeTurns(errored).at(-1).kind, 'declined');
+  assert.equal(ownerTurns(errored).length, 3, 'a declined box still counts as the owner acting (0b-8 audit round 1, M-1)');
+  assert.equal(ownerTurns(errored).at(-1).kind, 'declined');
 });

@@ -37,6 +37,7 @@ export const KEYS = Object.freeze({
   approvals: { required: false, type: 'map' }, 'approvals.decisions_dir': { required: false, type: 'text' },
   product_profile: { required: false, type: 'map' }, 'product_profile.required_checks': { required: false, type: 'list' },
   'product_profile.audit_workflow': { required: false, type: 'map' },
+  'product_profile.checks_ignored': { required: false, type: 'list' }, 'product_profile.robot': { required: false, type: 'map' },   // M6
   repairs: { required: false, type: 'map' }, 'repairs.max_statements': { required: false, type: 'text' },
   'repairs.allowed_functions': { required: false, type: 'list' },
   roles_enabled: { required: false, type: 'map' }, onboarding: { required: false, type: 'map' },
@@ -47,6 +48,7 @@ export const KEYS = Object.freeze({
   shadow_run: { required: false, type: 'map' }, weekly_checks: { required: false, type: 'map' },
   quality: { required: false, type: 'map' }, learning: { required: false, type: 'map' },
   light_exit: { required: false, type: 'map' }, context: { required: false, type: 'map' },
+  claims: { required: false, type: 'map' },   // M9: claims.stuck_min, the quiet time before a dead owner's claim is broken (G1)
 });
 export const TOP_KEYS = Object.freeze(Object.keys(KEYS).filter((k) => !k.includes('.')));
 export const REQUIRED_KEYS = Object.freeze(TOP_KEYS.filter((k) => KEYS[k].required));

@@ -4,6 +4,8 @@
 
 > Section markers: **[A]** = Always required — omission is a failure condition. **[C]** = Conditional — required only when the stated condition applies; write "N/A — [reason]" when skipping. **[O]** = On-demand — include when relevant; omit entirely when not applicable.
 
+> **Short report:** Acceptance Bar, Built, Spec Deviations, Validation Results, Hot Path Results, Regression Check, Acceptance Gate. *(When time forces the abbreviated report the Minimum Viable Process allows, these [A] sections are still required; check it with `node "$(realpath ~/.claude/skills/bob/..)/scripts/phase-report-check.mjs" <report> --abbreviated`. Other [C] sections still apply when their condition does.)*
+
 ---
 
 ## Phase [N] Report
@@ -118,6 +120,7 @@ bar-sha256: UNSET
 - Pattern identified: [description]
 - Codebase scan results: [N instances found, N fixed]
 - Remaining instances: [0 / list any deferred with rationale]
+- *The fix commit message carries two lines of their own (e.g. just above Co-Authored-By), `Class: <kebab-case class name>` and `Rung: <1–4>` (Rule 31), so the recurrence check can see it.*
 
 ### [C] Experience Test — *include only if phase has user-facing output*
 - Expected experience: [from Build Manifest experience test field]

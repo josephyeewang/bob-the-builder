@@ -2,7 +2,7 @@
 // Each test fails on the code before the fix.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { joeTurns, lastTurnFinished, checkTapTest, questionBoxes } from './transcript.mjs';
+import { ownerTurns, lastTurnFinished, checkTapTest, questionBoxes } from './transcript.mjs';
 import { shouldRestartFrontDoor, makeFrontDoorHandoff } from './restart.mjs';
 import { outboxFile, checkOutboxFile } from './outbox.mjs';
 import { checkPhoneReadback, extractReadback } from './readback.mjs';
@@ -19,13 +19,13 @@ const queuedMsg = (min, prompt, kind = 'human') => ({ type: 'attachment', uuid: 
   attachment: { type: 'queued_command', prompt, timestamp: iso(min), origin: { kind } } });
 const user = (min, content, extra = {}) => ({ type: 'user', uuid: `uu-${min}-${Math.random()}`, timestamp: iso(min), message: { role: 'user', content }, ...extra });
 
-test('0b-8 audit round 2 M-1: a message Joe queued while a turn ran counts as his turn and resets quiet; a queued notice does not', () => {
+test('0b-8 audit round 2 M-1: a message the owner queued while a turn ran counts as their turn and resets quiet; a queued notice does not', () => {
   const base = [typed(0, 'hi'), said(1, 'hello')];
   const withQueued = [...base, queuedMsg(14, 'also check the second product'), said(14, 'ok')];
-  assert.deepEqual(joeTurns(withQueued).map((t) => t.text), ['hi', 'also check the second product']);
+  assert.deepEqual(ownerTurns(withQueued).map((t) => t.text), ['hi', 'also check the second product']);
   assert.equal(shouldRestartFrontDoor({ sizeTokens: 200_000, entries: withQueued, now: at(16) }).restart, false);
   const notice = [...base, queuedMsg(14, '<task-notification>done</task-notification>', 'task-notification'), said(14, 'ok')];
-  assert.equal(joeTurns(notice).length, 1);
+  assert.equal(ownerTurns(notice).length, 1);
   assert.equal(shouldRestartFrontDoor({ sizeTokens: 200_000, entries: notice, now: at(16) }).restart, true);
 });
 
@@ -59,9 +59,9 @@ function tripWorld() {
 }
 const brief = (x, extra = {}) => buildTripBrief({ products: [{ name: 'test-product', on_merge_gate: true }], until: '2026-11-07', tz: 'Europe/Prague', rec: x.rec, facts: x.facts, heartbeatProduct: 'mini', now: x.now, ...extra });
 
-test('0b-8 audit round 2 M-3: the brief lists what waits on Joe from the one waiting list (a held card too), not what waits on others; a record error shows', () => {
+test('0b-8 audit round 2 M-3: the brief lists what waits on the owner from the one waiting list (a held card too), not what waits on others; a record error shows', () => {
   const x = tripWorld();
-  x.w('card', 'card-4', { module: 'M1', state: 'waiting', wait: { who: 'joe', what: 'pick the launch date', since: x.ago(50) }, link: 'https://example.invalid/card/4' });
+  x.w('card', 'card-4', { module: 'M1', state: 'waiting', wait: { who: 'owner', what: 'pick the launch date', since: x.ago(50) }, link: 'https://example.invalid/card/4' });
   x.w('go', 'go-5', { state: 'waiting', wait: { who: 'dispatcher', what: 'build finishing', since: x.ago(10) } });
   // The record refuses a waiting doc without who/since at write time, so a bad row (an older doc) is planted on read.
   const bad = { id: 'merge-6', rev: 1, doc: { state: 'waiting', wait: { what: 'unclear' } } };
@@ -103,24 +103,24 @@ test('0b-8 audit round 2 minor 11: a reply with two read-back objects is refused
   assert.deepEqual(extractReadback(`note {"a": "}"} only`), { a: '}' });
 });
 
-test('0b-8 audit round 2 M-7: keys typed into an open box are not a tap and not Joe', () => {
+test('0b-8 audit round 2 M-7: keys typed into an open box are not a tap and not the owner', () => {
   const entries = [asks(0, 'q-a'), result(1, 'q-a', 'Yes'), asks(2, 'q-b'), result(3, 'q-b', 'Yes'), asks(4, 'q-c'), result(5, 'q-c', 'User answered: [watchdog] are you alive?')];
   const r = checkTapTest(entries);
   assert.equal(r.ok, false);
   assert.match(r.problems.join(), /q-c was answered by typed automated text/);
-  assert.equal(joeTurns(entries).length, 2);
+  assert.equal(ownerTurns(entries).length, 2);
 });
 
 test('0b-8 audit round 2 minors 2, 3, 4, 5: side threads, repeats, Esc and a sent document', () => {
   const side = [typed(0, 'hi'), said(1, 'ok'), { ...typed(14, 'subagent prompt'), isSidechain: true }];
-  assert.equal(joeTurns(side).length, 1);
+  assert.equal(ownerTurns(side).length, 1);
   const a = asks(0, 'q-1');
   const dup = [a, { ...asks(2, 'q-1'), uuid: a.uuid }, result(3, 'q-1', 'A')];
   assert.equal(questionBoxes(dup)[0].askedAt, Date.parse(iso(0)));
-  assert.equal(joeTurns([typed(0, 'x'), typed(0, 'x')].map((e) => ({ ...e, uuid: 'same' }))).length, 1);
+  assert.equal(ownerTurns([typed(0, 'x'), typed(0, 'x')].map((e) => ({ ...e, uuid: 'same' }))).length, 1);
   assert.equal(lastTurnFinished([typed(0, 'x'), said(1, 'working', 'tool_use'), typed(2, '[Request interrupted by user]')]), true);
   const doc = [user(14, [{ type: 'document', source: { type: 'base64', data: 'x' } }])];
-  assert.deepEqual(joeTurns(doc).map((t) => t.text), ['[document]']);
+  assert.deepEqual(ownerTurns(doc).map((t) => t.text), ['[document]']);
 });
 
 test('0b-8 audit round 2 minors 1, 7: newest turn with no time → no restart; control characters cannot split a key past the mask', () => {

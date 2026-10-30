@@ -3,11 +3,11 @@
 > Moved word for word from `build-protocol.md` on 2026-10-29 (D-030), so each mode and each reference lives in its own file. `build-protocol.md` keeps this heading as a pointer, so older references to it still lead here. A reference here to another Part, Step or Appendix means that section of [`build-protocol.md`](../build-protocol.md) unless it says otherwise (if that heading is now a pointer, the file it names).
 
 
-*Per-service playbooks for the most common integrations. Reference at Step 3 (Architecture Contract) when choosing tools, and at the relevant Build Phase when wiring the integration in. Each playbook is signposts, not exhaustive docs — verify current-state against the provider's docs.*
+*Per-service playbooks for the most common integrations, numbered P1–P11 (they were L1–L11 until 2026-10-29, which clashed with the audit lenses L01–L38). Reference at Step 3 (Architecture Contract) when choosing tools, and at the relevant Build Phase when wiring the integration in. Each playbook is signposts, not exhaustive docs — verify current-state against the provider's docs.*
 
 > **Maintenance note:** Tool docs and SDKs evolve. The shape of these problems is stable; the specific SDK versions, endpoint names, and pricing referenced here may drift. Use the playbook as a checklist; verify exact API surface against current docs when wiring up.
 
-### L1. Stripe (payments / subscriptions)
+### P1. Stripe (payments / subscriptions)
 
 - **Env vars:** `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`. Never expose secret key client-side.
 - **Provider abstraction (G7) shape:** `PaymentProvider` interface — `createCheckoutSession(input)`, `verifyWebhook(rawBody, signature)`, `getCustomer(id)`. Wrap because EU customers may push you toward alternatives (Paddle, Lemon Squeezy).
@@ -17,7 +17,7 @@
 - **Common failure modes:** webhook never verified → silent acceptance of forged events; non-idempotent retries → double-charges; subscription state diverges between Stripe and your DB (handle every relevant webhook: `customer.subscription.*`); refunds after a payout create a platform balance debt.
 - **Eval/test that proves it works:** end-to-end test mode purchase → webhook received → DB updated → confirmation email sent.
 
-### L2. Supabase Auth + RLS
+### P2. Supabase Auth + RLS
 
 - **Env vars:** `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY` (client), `SUPABASE_SERVICE_ROLE_KEY` (server-only — never client).
 - **RLS posture (mandatory):** enable RLS on **every** user-data table. Policy: `auth.uid() = user_id` (or group membership for shared data). See G10 for the full pattern.
@@ -26,7 +26,7 @@
 - **Common failure modes:** RLS not enabled on a table → cross-tenant data leak (the highest-severity Supabase bug); service role key leaked to client → full DB access for anyone; expired JWT not refreshed → silent 401s users can't recover from.
 - **Eval/test:** two test accounts; user A cannot read user B's rows under any combination of (logged out, wrong session, guessed ID).
 
-### L3. Resend (transactional email)
+### P3. Resend (transactional email)
 
 - **Env vars:** `RESEND_API_KEY`. Domain verification required for production sending.
 - **Provider abstraction (G7) shape:** `EmailProvider` interface — `send(to, subject, html, tags?)`. Wrap because email providers churn (Postmark, SendGrid alternatives all viable).
@@ -36,7 +36,7 @@
 - **Common failure modes:** unverified domain → all emails go to spam; sending marketing + transactional from the same domain → IP reputation degrades; no unsubscribe link on marketing emails → CAN-SPAM violation.
 - **Eval/test:** send a real test email to an external inbox; verify it doesn't hit spam.
 
-### L4. Twilio (SMS / voice)
+### P4. Twilio (SMS / voice)
 
 - **Env vars:** `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_PHONE_NUMBER`.
 - **Provider abstraction (G7) shape:** `SMSProvider` — `send(to, body)`, `verifyWebhook(req)`. Wrap because Twilio is expensive at scale; MessageBird, Plivo are alternatives.
@@ -45,9 +45,9 @@
 - **Common failure modes:** missing signature verification → forged inbound webhooks; non-E.164 phone numbers → silent failures (always normalize to `+15551234567` format); unregistered A2P → silently filtered messages with no error from Twilio; long-code-to-US rate limits (~1 msg/sec) → backed-up queues.
 - **Eval/test:** send a test SMS to your own number; reply; verify inbound webhook fires + signature validates.
 
-### L5. Anthropic SDK / Claude API
+### P5. Anthropic SDK / Claude API
 
-- **Env vars:** `ANTHROPIC_API_KEY`. Use Vercel AI Gateway (see L11 below) if you want provider failover.
+- **Env vars:** `ANTHROPIC_API_KEY`. Use Vercel AI Gateway (see P11 below) if you want provider failover.
 - **Prompt caching:** for any prompt > ~1024 tokens that's reused across requests, mark cacheable sections with `cache_control: { type: 'ephemeral' }`. Saves ~90% on input cost for cached portion. Cache TTL is 5 minutes; refresh via a non-cached request when expiration matters.
 - **Skill to invoke (v2.7):** during Step 2d (eval set) and any phase touching AI prompts, invoke the `claude-api` skill for prompt-caching configuration guidance.
 - **Streaming:** use streaming for any user-facing AI output to keep perceived latency low. Server-sent events (SSE) is the default Vercel-compatible path.
@@ -55,15 +55,15 @@
 - **Common failure modes:** prompt-cache misses because system prompt changed by one char → 10× cost; rate limits hit in production (handle 429 with backoff + queueing); long contexts (>100K tokens) silently degrading quality.
 - **Eval/test:** the Step 2d eval set IS the test. Drop in pass-rate vs prior phase = stop condition.
 
-### L6. OpenAI SDK (LLM alternative)
+### P6. OpenAI SDK (LLM alternative)
 
 - **Env vars:** `OPENAI_API_KEY`.
 - **Provider abstraction (G7) shape:** wrap behind a `ModelProvider` interface so swapping Anthropic ↔ OpenAI is a one-file change. Common methods: `chat({ messages, model, tools? })`, `embed(text)`.
 - **Tool use:** OpenAI function calling has slightly different schema from Anthropic tool use. The provider abstraction should normalize.
 - **Common failure modes:** model deprecations (GPT-3.5 → GPT-4o → GPT-5 — code references stale model IDs); cost surprises (GPT-5 input is much more expensive than 4o-mini); response format inconsistency when requesting JSON without `response_format: { type: "json_object" }`.
-- **Eval/test:** same as L5 — eval set re-run at every phase.
+- **Eval/test:** same as P5 — eval set re-run at every phase.
 
-### L7. pgvector (vector DB via Postgres)
+### P7. pgvector (vector DB via Postgres)
 
 - **Env vars:** Postgres connection string (typically reusing your Supabase / Neon DB).
 - **When to use:** small-to-medium RAG corpora (<10M chunks). Past that, dedicated vector DBs (Pinecone, Weaviate) outperform.
@@ -73,7 +73,7 @@
 - **Common failure modes:** dimension mismatch between stored embeddings and query embedding (cryptic SQL errors); no index → query times explode past ~100K rows; reindex during an embedding model migration takes hours, locking the table.
 - **Eval/test:** retrieval recall@k on a held-out QA set (per G11).
 
-### L8. Inngest (background jobs / workflow orchestration)
+### P8. Inngest (background jobs / workflow orchestration)
 
 - **Env vars:** `INNGEST_EVENT_KEY`, `INNGEST_SIGNING_KEY`.
 - **When to use:** event-driven async work, scheduled jobs, multi-step workflows with retries. Generous free tier. Alternative: Trigger.dev (similar), Vercel Workflow (Vercel-native, durable), DB-backed queue (simplest, less powerful).
@@ -82,7 +82,7 @@
 - **Common failure modes:** non-idempotent steps duplicating emails/charges on retry; concurrency limits not set → user spam blocks everyone else's jobs; missing dead-letter handling (Inngest has it built-in — enable it).
 - **Eval/test:** kill the worker mid-job; restart; verify job resumes correctly. Run two workers concurrently with the same job; verify no double-processing.
 
-### L9. Sentry (error monitoring)
+### P9. Sentry (error monitoring)
 
 - **Env vars:** `SENTRY_DSN`, `SENTRY_AUTH_TOKEN` (for releases).
 - **Setup at Step 6c:** install at repo init, not later. "We'll add monitoring before launch" never happens before something breaks.
@@ -92,7 +92,7 @@
 - **Common failure modes:** PII leaked in error context (user emails, payment metadata); alert fatigue (every error → page → ignored); source maps not uploaded → unreadable stack traces from prod.
 - **Eval/test:** throw a test error in prod; verify it appears in Sentry with a readable stack trace and no PII.
 
-### L10. PostHog (product analytics)
+### P10. PostHog (product analytics)
 
 - **Env vars:** `NEXT_PUBLIC_POSTHOG_KEY`, `NEXT_PUBLIC_POSTHOG_HOST`.
 - **What to track (mandatory):** every success metric and leading indicator from the Product Spec Step 1a maps to a PostHog event. This is the v2.4 success-metric instrumentation map made concrete.
@@ -101,7 +101,7 @@
 - **Common failure modes:** event spam (every page view + every click = useless data — track meaningful events only); naming inconsistency (`task_created` vs `taskCreated` vs `task created` — pick one convention in Architecture Contract); ad-blockers blocking client-side calls (mitigate with server-side capture for critical events).
 - **Eval/test:** trigger your north-star event manually; verify it appears in PostHog with the right properties.
 
-### L11. Vercel AI Gateway (LLM routing / failover)
+### P11. Vercel AI Gateway (LLM routing / failover)
 
 - **Env vars:** `AI_GATEWAY_API_KEY`. Replaces individual provider keys.
 - **When to use:** anytime you might want to swap LLM providers later, do cost-aware routing, or need failover. Drop-in replacement for direct SDK calls.

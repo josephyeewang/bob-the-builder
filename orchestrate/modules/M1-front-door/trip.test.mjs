@@ -63,7 +63,7 @@ test('R-0b-83 brief: away line, time zone question, go items and risky asks with
   const { rec, facts, w } = world();
   green(facts);
   facts.put(AIR_FACT, { kind: 'fact.air-health', red_count: 0, checked_at: ago(30) });
-  w('go', 'go-1', { state: 'waiting', wait: { who: 'joe', what: 'go on roadmap row 7', since: ago(100) }, link: 'https://example.invalid/roadmap#row-7' });
+  w('go', 'go-1', { state: 'waiting', wait: { who: 'owner', what: 'go on roadmap row 7', since: ago(100) }, link: 'https://example.invalid/roadmap#row-7' });
   w('go', 'go-2', { state: 'done' });
   w('ask', 'ask-1', { state: 'pushed', what: `delete the old table (pasted ${FAKE.github})`, link: 'https://example.invalid/pr/9' });
   w('ask', 'ask-2', { state: 'expired', what: 'old' });

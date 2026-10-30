@@ -33,7 +33,7 @@ every reader.
 
 | # | Failure mode | Owner | Fixture | Notes |
 |---|---|---|---|---|
-| A1 | A read ERROR treated as "no data" — the failure becomes an empty value | Rule 31 tier ladder; L13:125 (write path, AI only) | `fixtures/detection/001-error-vs-missing.md` | The read path had no owner before v2.40. **The dominant class of the 2026-09 wave (~40 recurrences).** |
+| A1 | A read ERROR treated as "no data" — the failure becomes an empty value | Rule 31 ladder; L13:125 (write path, AI only) | `fixtures/detection/001-error-vs-missing.md` | The read path had no owner before v2.40. **The dominant class of the 2026-09 wave (~40 recurrences).** |
 | A2 | Silent truncation of a paged source | Rule 25 (v2.33 LOADED-N vs `count(*)`); O5, O13; L37 q8 | `fixtures/detection/003-pagination-clamp.md` | Strong and mechanical — but scoped to the data lane. An ordinary paged HTTP API in app code is still unowned. |
 | A3 | A collapse/group/dedup key omitting a varying entity | Rule 25; L31 canonical defects | — | |
 | A4 | A dedup key derived from POSITION rather than asserted identity | **NONE** | — | A sizeable share of one source's rows were duplicates for months; every count inflated. |

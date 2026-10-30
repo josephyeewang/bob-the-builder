@@ -15,7 +15,7 @@ waiting on whom, and the "caught up" message after the Mini was away.
 
 As in M12: the code is tested against fakes; each row's real half needs the owner. Not done until both are.
 
-## Owner steps (Joe), for the (b) halves
+## Owner steps, for the (b) halves
 
 1. **Outside check:** the ten steps in `outside-check/README.md` (repo, read-only key via `/apikeys`, product list,
    pinned audit files, stop it on purpose, a week at 0 minutes, a second account's PR and issue, day 61).

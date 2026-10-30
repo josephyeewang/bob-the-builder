@@ -22,7 +22,7 @@ The product list is the `PRODUCTS` Actions secret, never a file:
 Slot 1 is the first entry. Each slot's only public name is "product N". At most 3 entries (more fails every slot). A product with no production site
 adds `"no_production": true`; otherwise "no live production deploy found" is a FAIL.
 
-## Owner steps (Joe)
+## Owner steps
 
 These are the real halves of R-0b-72's "done when"; Claude has tested the code only against fakes. Bob's plain-language
 step format applies; the Front Door or the Lead turns each into paste-ready steps with the real names.

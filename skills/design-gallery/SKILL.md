@@ -18,7 +18,7 @@ fidelity — fixed by the mock-is-canonical discipline in `templates/fidelity-pr
 | **HTML mockups** | Product UI, dashboards, data-dense surfaces — anything that must transfer to code EXACTLY | Numbered self-contained `.html` files on REAL product content + the rating board (`templates/gallery-index.html`) + live playground (`templates/playground-controls.html`) |
 | **Image comps** | Art direction, homepage/hero, moodboards, brand feel, logo *exploration* | The **design-mockups** skill (Nano Banana funnel, theme→variation, refs-by-number) — invoke it for this lane |
 | **SVG logo board** | Converging a mark once direction is known | One HTML file: each concept is a parameterized inline-SVG function, rendered across context tiles (light/dark, sizes, in-context lockups). The winner ships as ONE canonical component — hard-coded colors, **no font dependency** (a type-set mark breaks in favicon/OG/email; draw the glyphs as geometry), exported to favicon/OG from the same SVG. **Full procedure + scripts: `logo-kit/LOGO-LANE.md`** — brief → 8–12 one-line concepts → build 3 in SVG black-first → audit + render-and-look loop → concept sheet, then STOP for a pick → kit (favicon/app-icon/web-icon set, mono/reversed variants) |
-| **Scroll story** | Marketing pages ONLY (homepage, launch page, joe.wang) where the visitor's scroll tells the story — feeling curve, page grammar, scroll devices, one signature move, scroll QA | The **scroll-craft** plugin (`/nateherk-design:scroll-craft`), run AFTER the lock, with Joe-specific overrides in `references/scroll-story-lane.md` |
+| **Scroll story** | Marketing pages ONLY (homepage, launch page, a personal site) where the visitor's scroll tells the story — feeling curve, page grammar, scroll devices, one signature move, scroll QA | The **scroll-craft** plugin (`/nateherk-design:scroll-craft`), run AFTER the lock, with user-specific overrides in `references/scroll-story-lane.md` |
 
 Rule of thumb: image lane to FIND a direction cheaply; HTML lane the moment the surface is a
 real product UI (image comps can't be transferred exactly — HTML mockups ARE the spec).
@@ -120,7 +120,7 @@ counterfeit spec that mis-briefs every future session).
 - `templates/LOCKED-DESIGN.template.md` — the lock doc
 - `templates/fidelity-protocol.md` — the transfer discipline + CI gate snippet + checklist
 - `references/scroll-story-lane.md` — lane 4: when to use scroll-craft, how it sequences with
-  the lock, the overrides for Joe's setup (assets via design-mockups, hero preference optional)
+  the lock, the overrides for the user's setup (assets via design-mockups, hero preference optional)
 - `references/inspo-round-zero.md` — Round 0: real reference sites from Inspo (default for every
   website gallery), skip rules, and the trial; results logged in `references/inspo-trial-log.md`
 - `references/agent-ui-primitives.md` — the 24-piece checklist for agent/chat surfaces (from
