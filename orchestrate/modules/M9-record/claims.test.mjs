@@ -4,6 +4,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
+import { readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { pidStart, realProbe, sleepMs } from './lock.mjs';
 import { openRecord } from './writer.mjs';
 import { PRODUCT, UID, iso, must, product, put, readyCard, runCard, claimCard, rulesFor, seed, sessionClaim, setup } from './fixtures.test-helper.mjs';
@@ -117,6 +119,19 @@ test('claim 7: only the holder may release a claim', () => {
   claimCard(env, 'C-1');
   must(put(env.record, 'dispatcher', 'card', 'C-1', { state: 'running' }));
   assert.match(env.record.release({ card: 'C-1', session_id: 'S-1' }).reason, /not claimed/);
+});
+
+test('a lapse checks the card file first: a hand-edited card is quarantined and alerted, not silently replaced (0b-2 audit round 3 m-C)', () => {
+  const env = setup({ prefix: 'm9-claim-' });
+  board(env, ['C-1']);
+  claimCard(env, 'C-1');
+  const file = join(env.root, 'docs', 'card', 'C-1.json');
+  writeFileSync(file, readFileSync(file, 'utf8').replace('"claimed"', '"merged"'));
+  env.alerts.length = 0;
+  assert.deepEqual(env.record.lapseClaims(env.clock.t + 61 * MIN).lapsed, []);
+  assert.ok(env.alerts.some((a) => a.type === 'tamper'), 'tamper alerted');
+  assert.equal(readdirSync(join(env.root, 'quarantine')).length, 1, 'the edited file is kept');
+  assert.equal(env.record.read('card', 'C-1').doc.state, 'claimed', 'restored from the diary');
 });
 
 test('claim 8: a session claim that never starts lapses at its time limit, with a diary line', () => {

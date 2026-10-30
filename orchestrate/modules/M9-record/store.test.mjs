@@ -4,7 +4,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { appendFileSync, existsSync, readFileSync, readdirSync, statSync, writeFileSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
-import { PRODUCT, UID, rulesFor, seed, setup } from './fixtures.test-helper.mjs';
+import { PRODUCT, UID, must, put, rulesFor, seed, setup } from './fixtures.test-helper.mjs';
 import { openRecord } from './writer.mjs';
 import { openStore } from './store.mjs';
 
@@ -52,6 +52,34 @@ test('a torn line left by another writer is cut before a writer that already rec
   const fresh = openRecord({ root: env.root, product: PRODUCT, ownerUid: UID, rules: rulesFor(), alert: () => {} });
   assert.equal(fresh.record.read('card', 'C-1').doc.state, 'draft');
   assert.equal(fresh.record.read('card', 'C-2').doc.state, 'draft');
+});
+
+test('a short diary write is cut back and refused; a line that reads back wrong moves no document (0b-2 audit round 3 B2, B3)', () => {
+  const env = setup({ prefix: 'm9-store-' });
+  const diary = join(env.root, 'diary.jsonl');
+  const size = statSync(diary).size;
+  const short = openStore({ root: env.root, ownerUid: UID, faultAt: 'short_write' });
+  assert.throws(() => short.transaction((tx) => tx.commit([{ entity: 'card', id: 'C-1', doc: card() }], { actor: 'test', kind: 'seed' })), /wrote \d+ of \d+ bytes/);
+  assert.equal(statSync(diary).size, size, 'the short line is cut back');
+  assert.equal(existsSync(docFile(env, 'card', 'C-1')), false);
+  const wrong = openStore({ root: env.root, ownerUid: UID, alert: (a) => env.alerts.push(a), faultAt: 'readback_wrong' });
+  assert.throws(() => wrong.transaction((tx) => tx.commit([{ entity: 'card', id: 'C-1', doc: card() }], { actor: 'test', kind: 'seed' })), /didn't read back as seq 1/);
+  assert.equal(existsSync(docFile(env, 'card', 'C-1')), false, 'no document moved');
+  assert.deepEqual(readdirSync(join(env.root, 'tmp')), [], 'no temp file left');
+  assert.ok(wrong.damaged(), 'the store stops writing until the owner looks');
+});
+
+test('a document at its previous version (a crash before the rename) rolls forward quietly for a writer that already recovered (0b-2 audit round 3 m-A)', () => {
+  const env = setup({ prefix: 'm9-store-' });
+  seed(env, 'card', 'C-1', card());
+  const v1 = readFileSync(docFile(env, 'card', 'C-1'));
+  seed(env, 'card', 'C-1', card({ module: 'M2' }));
+  writeFileSync(docFile(env, 'card', 'C-1'), v1);
+  env.alerts.length = 0;
+  must(put(env.record, 'approvals', 'card', 'C-1', { state: 'cancelled', cancel_reason: 'a real write, which checks the file first' }));
+  assert.equal(env.record.read('card', 'C-1').doc.module, 'M2');
+  assert.deepEqual(env.alerts.filter((a) => a.type === 'tamper'), [], 'no false tamper alert');
+  assert.deepEqual(readdirSync(join(env.root, 'quarantine')), []);
 });
 
 test('a writer that lost the lock before the commit point writes nothing (0b-2 audit MIN-9)', () => {

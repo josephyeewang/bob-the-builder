@@ -100,6 +100,9 @@ export function openRecord({ root, product, ownerUid, rules, alert = () => {}, n
     const { entity, id } = w;
     if (!ENTITIES.includes(entity)) return no(`unknown entity "${entity}"`);
     if (!w.doc || typeof w.doc !== 'object' || Array.isArray(w.doc)) return no('doc must be an object');
+    // A doc nested thousands deep would be stored, then overflow the stack on every later write to it, freezing the card
+    // for everyone (0b-2 audit round 3 MAT-B). Measured without recursion.
+    if (deeperThan(w.doc, MAX_DOC_DEPTH)) return no(`doc is nested deeper than ${MAX_DOC_DEPTH} levels`);
     const missing = (REQUIRED_FIELDS[entity] ?? []).filter((f) => w.doc[f] === undefined || w.doc[f] === null || w.doc[f] === '');
     if (missing.length) return no(`${entity} is missing ${missing.join(', ')}`);
     const cur = tx.current(entity, id);
@@ -224,6 +227,17 @@ export function openRecord({ root, product, ownerUid, rules, alert = () => {}, n
   }
 
   const MERGE_DONE = Object.freeze(['merged', 'audited_ok', 'audit_flagged']);
+  const MAX_DOC_DEPTH = 32;
+  function deeperThan(value, max) {
+    const stack = [[value, 1]];
+    while (stack.length) {
+      const [v, d] = stack.pop();
+      if (!v || typeof v !== 'object') continue;
+      if (d > max) return true;
+      for (const k of Object.keys(v)) stack.push([v[k], d + 1]);
+    }
+    return false;
+  }
 
   function checkCardUpdate(tx, { id, old, doc, from, to, moving, changed, name, nowMs, ctx }) {
     if (old.kind === 'fix' && PLAN_INPUTS.some((f) => changed.includes(f))) return no('a fix card\'s plan is its root card\'s; it never changes');
@@ -268,7 +282,9 @@ export function openRecord({ root, product, ownerUid, rules, alert = () => {}, n
     if (moving && to === 'ready') { const r = readyCheck({ id, doc }, txView(tx, { entity: 'card', id, doc }), { rules, product }); if (!r.ok) return no(`not ready: ${r.reason}`); }
     if (moving && to === 'claimed') { const r = readyCheck({ id, doc }, txView(tx, { entity: 'card', id, doc }), { rules, product }); if (!r.ok) return no(`can't claim: ${r.reason}`); }
     if (moving && from === 'running' && to === 'in_review' && name === 'dispatcher' && old.claim?.kind !== 'tab') return no('a session\'s hand-in comes from its own outbox');
-    if (moving && from === 'in_review' && to === 'verified') { const r = verdictFor(tx, id, doc); if (!r.ok) return r; }
+    // Every way into verified or approved needs a passing verdict for the head the card has now: a head pushed while the
+    // card waited would otherwise come back verified unreviewed (0b-2 audit round 3 MAT-A).
+    if (moving && (to === 'verified' || to === 'approved')) { const r = verdictFor(tx, id, doc); if (!r.ok) return r; }
     if (moving && to === 'merging') {
       if (!ctx.mergeChecking) return no('a card moves to merging only in the same write as its merge enters checking');
       if (from === 'verified' && (doc.needs_joe || doc.approval_required)) return no('this card needs the owner\'s Approve before it merges');
@@ -324,6 +340,10 @@ export function openRecord({ root, product, ownerUid, rules, alert = () => {}, n
   }
 
   function checkMerge(tx, id, old, doc, from, to, moving, ctx, w) {
+    // A merge's card is fixed when it is made, and the pair's merge must itself be entering checking; otherwise a merge
+    // already checking could be re-pointed to put a second card into merging (0b-2 audit round 3 m-B).
+    if (old && old.card !== doc.card) return no('a merge\'s card is set when it is made and never changes');
+    if (ctx.cardMerging && !(moving && to === 'checking')) return no('the paired merge must be entering checking');
     if (moving && to === 'checking') {
       if (!ctx.cardMerging || ctx.cardMerging !== doc.card) return no('a merge enters checking only in the same write as its card moves to merging');
       const busy = tx.list('merge').filter((m) => m.id !== id && (m.doc.state === 'checking' || m.doc.state === 'merging'));
@@ -440,7 +460,9 @@ export function openRecord({ root, product, ownerUid, rules, alert = () => {}, n
         if (tx.seen(f.key)) return { ok: true, skipped: true };
         const ev = { actor: `${tag.role}:${tag.sessionId}`, file: basename(String(file)) };
         if (!f.ok) { tx.markSeen(f.key, 'refused'); return refuse({ ...ev, outbox: true }, f.reason); }
-        const r = applyParsed(tx, tag, f);
+        // A file whose apply throws is refused once and marked seen, not retried and re-alerted on every pass (round 3 m-D).
+        let r;
+        try { r = applyParsed(tx, tag, f); } catch (e) { r = no(`store error: ${String(e?.message ?? e).slice(0, 200)}`); }
         tx.markSeen(f.key, r.ok ? 'applied' : 'refused');
         if (r.ok) return r;
         // A refused hand-in becomes a fact the session's watcher reads at once (R3-M4).
@@ -529,6 +551,9 @@ export function openRecord({ root, product, ownerUid, rules, alert = () => {}, n
         for (const e of tx.list('card')) {
           const claim = e.doc.claim;
           if (!claim || (e.doc.state !== 'claimed' && e.doc.state !== 'running')) continue;
+          // Check the file before writing over it: a hand-edited card is quarantined and alerted, not silently replaced (round 3 m-C).
+          const chk = tx.current('card', e.id);
+          if (!chk || chk.tampered) continue;
           const since = Date.parse(e.stateSince);
           if (claim.kind === 'session') {
             if (e.doc.state === 'claimed' && claimed?.minutes && nowMs > since + claimed.minutes * MIN) {

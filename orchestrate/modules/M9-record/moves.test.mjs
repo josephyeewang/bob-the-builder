@@ -132,7 +132,7 @@ test('every legal move succeeds for each listed actor when its condition holds',
             if (to === 'waiting') next.wait = waitTo(from === 'running' ? 'ready' : from);
             if (from === 'ready' && to === 'claimed') next.claim = { kind: 'session', host: 'mac-a', pid: 7, pid_start: 'x', session_id: 'S-9' };
             if (actor === 'workshop') next.head = 'c'.repeat(40);
-            if (from === 'in_review' && to === 'verified') {
+            if (to === 'verified' || to === 'approved') {   // every way in needs a pass for the head (round 3 MAT-A)
               ok(env.record.write({ actor: 'dispatcher', entity: 'launch', id: `launch-${id}`, expectRev: 0, doc: { session_id: `R-${id}`, role: 'reviewer', card: id, head: HEAD, rev: 1, launched_at: iso(t) } }), 'launch');
               env.store.transaction((tx) => tx.commit([{ entity: 'verdict', id: `verdict-${id}`, doc: { session_id: `R-${id}`, role: 'reviewer', card: id, head: HEAD, pass: true } }], { actor: `reviewer:R-${id}`, kind: 'verdict' }));
             }

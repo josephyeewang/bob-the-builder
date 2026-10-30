@@ -27,6 +27,8 @@ import { dirname, isAbsolute, join } from 'node:path';
 import { makeLock, processDead, realProbe, sleepMs } from './lock.mjs';
 
 export const FAULT_POINTS = Object.freeze(['locked', 'temp_written', 'diary_torn', 'diary_written', 'renamed', 'dir_synced', 'released']);
+// Test faults that don't kill the process: a failed append, a short write, and a line that reads back wrong.
+const TEST_FAULTS = Object.freeze(['append_fails', 'short_write', 'readback_wrong']);
 // Not a kill: `append_fails` makes the diary append fail partway (a full disk), for the cut-back test.
 
 const SAFE_ID = /^[A-Za-z0-9._-]+$/;
@@ -53,7 +55,7 @@ export function openStore({ root, ownerUid, alert = () => {}, now = () => Date.n
   if (typeof process.getuid === 'function' && process.getuid() !== ownerUid) throw new Error(`the Store Writer runs only as the store's owner (uid ${ownerUid}), not uid ${process.getuid()}`);
   if (faultAt !== undefined) {
     const step = typeof faultAt === 'string' ? faultAt : faultAt?.step;
-    if (!FAULT_POINTS.includes(step) && step !== 'append_fails') throw new Error(`unknown fault point ${step}`);
+    if (!FAULT_POINTS.includes(step) && !TEST_FAULTS.includes(step)) throw new Error(`unknown fault point ${step}`);
   }
 
   const P = { docs: join(root, 'docs'), tmp: join(root, 'tmp'), quarantine: join(root, 'quarantine'), diary: join(root, 'diary.jsonl'),
@@ -156,6 +158,9 @@ export function openStore({ root, ownerUid, alert = () => {}, now = () => Date.n
       return { ok: false, reason: `${entity} ${id}: a document file with no diary line was found and quarantined` };
     }
     if (bytes !== null && sha256(bytes) === entry.hash) return { ok: true };
+    // Missing or the version before: a write that crashed between its diary line and its rename. Rolled forward quietly,
+    // as recover() does, not reported as tamper (0b-2 audit round 3 m-A).
+    if (bytes === null || sha256(bytes) === entry.prevHash) { restore(entry); return { ok: true }; }
     quarantine(entity, id, bytes, bytes === null ? 'document file missing' : 'document changed outside the Store Writer');
     restore(entry);
     return { ok: false, reason: `${entity} ${id} was changed outside the Store Writer; restored from the diary and quarantined` };
@@ -266,8 +271,9 @@ export function openStore({ root, ownerUid, alert = () => {}, now = () => Date.n
             try {
               if (faultAt !== undefined && (faultAt === 'diary_torn' || faultAt?.step === 'diary_torn')) { writeSync(fd, text.slice(0, Math.floor(text.length / 2))); fsyncSync(fd); fault('diary_torn'); }
               if (faultAt === 'append_fails') { writeSync(fd, text.slice(0, Math.floor(text.length / 2))); throw new Error('test: the append failed partway'); }
-              const wrote = writeSync(fd, text);
-              if (wrote !== Buffer.byteLength(text, 'utf8')) throw new Error(`diary append wrote ${wrote} of ${Buffer.byteLength(text, 'utf8')} bytes`);
+              const body = faultAt === 'readback_wrong' ? text.replace(`"seq":${line.seq},`, `"seq":${line.seq + 1},`) : text;
+              const wrote = writeSync(fd, faultAt === 'short_write' ? body.slice(0, Math.floor(body.length / 2)) : body);
+              if (wrote !== Buffer.byteLength(body, 'utf8')) throw new Error(`diary append wrote ${wrote} of ${Buffer.byteLength(body, 'utf8')} bytes`);
               fsyncSync(fd);
             } catch (e) {
               // A part-written line (a full disk) is cut back off, so the next line doesn't join it and become unreadable

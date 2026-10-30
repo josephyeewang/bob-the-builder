@@ -97,6 +97,18 @@ test('every outbox kind × every AI role: applied only for the roles listed (R2-
   }
 });
 
+test('a file whose apply throws is refused once and marked seen, not retried every pass (0b-2 audit round 3 m-D)', () => {
+  const env = setup({ prefix: 'm9-out-', faultAt: 'readback_wrong' });
+  const tag = { role: 'worker', sessionId: 'S-1' };
+  const f = outboxFile(env, 'worker', 'S-1', 'report-throws.md', 'body');
+  env.alerts.length = 0;
+  const first = env.record.applyOutbox(tag, f);
+  assert.equal(first.ok, false);
+  assert.match(first.reason, /store error/);
+  assert.equal(env.record.applyOutbox(tag, f).skipped, true, 'seen');
+  assert.equal(env.alerts.filter((a) => a.type === 'refused').length, 1, 'one refusal');
+});
+
 test('the same file twice: one document and one diary line; a refused file twice: one alert (R2-M10, R3-m7)', () => {
   const env = setup({ prefix: 'm9-out-' });
   const tag = { role: 'worker', sessionId: 'S-1' };

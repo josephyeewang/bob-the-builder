@@ -273,6 +273,26 @@ test('verified needs a passing verdict for the current head from a reviewer laun
   // A new head after verification sends it back to review.
   refused(put(env.record, 'workshop', 'card', 'C-1', { head: HEAD2 }), /sends it back to in_review/);
   must(put(env.record, 'workshop', 'card', 'C-1', { head: HEAD2, state: 'in_review' }), 'push after verify');
+  // A head pushed while a verified card waits doesn't come back verified unreviewed (0b-2 audit round 3 MAT-A).
+  must(apply('R-2', 'verdict-j.md', hdr({ head: HEAD2, pass: true })), 'the pass for the new head');
+  must(put(env.record, 'dispatcher', 'card', 'C-1', { state: 'verified' }), 'verified again');
+  must(put(env.record, 'dispatcher', 'card', 'C-1', { state: 'waiting', wait: wait(env, { resume: 'continue', return_to: 'verified' }) }), 'paused');
+  const HEAD3 = 'c'.repeat(40);
+  must(put(env.record, 'workshop', 'card', 'C-1', { head: HEAD3 }), 'a push while it waits');
+  refused(put(env.record, 'dispatcher', 'card', 'C-1', { state: 'verified' }), /no passing verdict for head ccccccc/);
+});
+
+test('a doc nested too deep is refused, so it can never freeze its card (0b-2 audit round 3 MAT-B)', () => {
+  const env = setup({ prefix: 'm9-wr-' });
+  product(env);
+  leadCard(env, 'C-1');
+  let deep = 'x';
+  for (let i = 0; i < 3000; i++) deep = [deep];
+  refused(roadmapEdit(env, 'C-1', { brief: deep }), /nested deeper than 32 levels/);
+  let ok = 'x';
+  for (let i = 0; i < 20; i++) ok = [ok];
+  must(roadmapEdit(env, 'C-1', { brief: ok }), 'a shallow brief');
+  must(put(env.record, 'approvals', 'card', 'C-1', { state: 'cancelled', cancel_reason: 'test' }), 'the card still takes writes');
 });
 
 // ---------------- merges ----------------
@@ -314,6 +334,10 @@ test('one merge at a time, and a verified card that needs the owner never enters
   must(check('M-1', 'C-1'), 'first merge');
   refused(check('M-2', 'C-2'), /one merge at a time: M-1 is checking/);
   assert.equal(env.record.read('card', 'C-2').doc.state, 'approved', 'the pair is all or nothing');
+  // The checking merge can't be re-pointed to put a second card into merging (0b-2 audit round 3 m-B).
+  refused(check('M-1', 'C-2'), /card is set when it is made|must be entering checking/);
+  refused(put(env.record, 'merge_gate', 'merge', 'M-2', { card: 'C-3' }), /card is set when it is made/);
+  assert.equal(env.record.read('card', 'C-2').doc.state, 'approved');
 });
 
 test('the audit result comes from a Sensors audit_run fact for the merged commit', () => {

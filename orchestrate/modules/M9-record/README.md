@@ -45,6 +45,7 @@ Claude Code has a native task list. We checked whether it could hold the claims:
 - **A fix card follows any failure**, not only a reviewer's send-back. Whether a crash or a timeout should get a fix round is a lead call.
 - **A cancelled fix card ends its parent's fixes.** The next round fixes the fix card, and a cancelled one can't be fixed; the Lead makes a new card with a new go.
 - **`verified` looks for a passing verdict on the current head** and does not also look for a failing one on the same head. Reviewer and auditor disagreeing on one head is for the Merge Gate (0b-9).
+- **A write refused at the read-back** (its diary line is down but reads back wrong) marks the store damaged; the owner decides whether that line stands. Only reachable with a test fault (audit round 3, cosmetic).
 - **A claim whose session record is missing is never broken** (deny by default, L32): the Dispatcher writes the session before the claim, so a missing one is a fault to look at, not a dead owner. A claimed card still lapses; a running one shows as overdue at its running limit, for the owner to look at.
 
 ## Running the tests
