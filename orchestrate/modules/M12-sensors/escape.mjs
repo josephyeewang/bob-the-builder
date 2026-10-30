@@ -34,19 +34,24 @@ export const OUTSIDE_FORM = '<outside-text source="SOURCE">ESCAPED TEXT</outside
 const ANSI = /\u001B(?:\[[0-?]*[ -\/]*[@-~]|\][^\u0007\u001B]*(?:\u0007|\u001B\\)|[@-Z\\-_])/g;
 const CONTROL = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F\u0080-\u009F\u200B-\u200F\u202A-\u202E\u2066-\u2069\uFEFF]/g;
 
+// Colour codes and invisible characters out, line ends as \n. Runs BEFORE masking: a colour code or zero-width
+// character inside a key breaks its shape, and stripping after masking would join a clear key back together
+// (0b-7 audit round 2, M-1).
+export const stripControls = (text) => String(text ?? '').replace(/\r\n?/g, '\n').replace(ANSI, '').replace(CONTROL, '');
+
 export function escapeOutside(text, source, { cap = SINGLE_LINE.includes(source) ? CAP : Infinity } = {}) {
   const src = SOURCES.includes(source) ? source : 'unknown';
-  let s = String(text ?? '').replace(/\r\n?/g, '\n').replace(ANSI, '').replace(CONTROL, '');
+  let s = stripControls(text);
   let tail = '';
   if (s.length > cap) { tail = `…[cut ${s.length - cap} characters]`; s = s.slice(0, cap); }
   s = s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
   return `<outside-text source="${src}">${s}${tail}</outside-text>`;
 }
 
-// Mask, then escape: the only way Sensors hand outside text onward.
+// Strip, mask, then escape: the only way Sensors hand outside text onward.
 export function makePrepare(maskerOpts) {
   const { maskSecrets } = makeMasker(maskerOpts);
-  return (text, source, opts) => escapeOutside(maskSecrets(text).text, source, opts);
+  return (text, source, opts) => escapeOutside(maskSecrets(stripControls(text)).text, source, opts);
 }
 
 // The one shared entry point other lanes' intake and the Lead-input writer call (review-0b-7 M7).

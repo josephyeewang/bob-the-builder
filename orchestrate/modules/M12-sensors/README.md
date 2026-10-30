@@ -45,4 +45,6 @@ Plain steps; the lead turns each into paste-ready blocks with the real names.
 2. **The Air** (R-0b-79): wire `device-checks.mjs` into your private `/host` and `/configaudit`, then run `/configaudit`
    on the Air until it shows 0 red; push to the test repo from the Air with `git push --no-verify` and see GitHub
    refuse it.
-3. **A real week's scan** (R-0b-125): after a week of real facts, Claude runs `record-scan.mjs` on the record folder.
+3. **A real week's scan** (R-0b-125): after a week of real facts, Claude writes one control fact holding a fake key,
+   calls `scanRecordLoose` over every entity (its default) and `runGitleaks` on the record folder, and the scan counts
+   only if it found the control and left no entity out.

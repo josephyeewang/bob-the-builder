@@ -17,7 +17,7 @@
 //   audit-run    when the rules say the post-merge audit is on (stage second, a missing stage, or post_merge_audit):
 //                every main first-parent commit 30 min to 48 h old has a finished, successful audit run → else FAIL.
 //   deploys      the newest GitHub deployment whose environment starts with "Production" and whose latest status is
-//                success must be a supported main commit (supported.mjs, a byte-for-byte copy of Bob's M12 one).
+//                success must be a supported main commit; none found → FAIL unless the entry says `no_production: true` (supported.mjs, a byte-for-byte copy of Bob's M12 one).
 //                GitHub deployments are created by the Git integration, so source is "git" here; a CLI deploy leaves
 //                no GitHub deployment and is the Mini's watcher's to see.
 //   permissions  the repo's Actions default token permission is "read".
@@ -27,6 +27,7 @@ import { createHash } from 'node:crypto';
 import { appendFileSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { resolveStage, isSupported } from './supported.mjs';
+import { SLOTS } from './workflow.mjs';
 
 export const STALE_MIN = 70;
 const AUDIT_MIN_AGE = 30 * 60e3;
@@ -34,6 +35,7 @@ const AUDIT_MAX_AGE = 48 * 3600e3;
 const FIRST_PARENT_MAX = 200;
 const FUTURE_SLACK = 10 * 60e3;
 const MAIN_UPDATES = ['push', 'force_push', 'pr_merge', 'merge_queue_merge'];
+const DEPLOY_PAGES = 10;
 
 class HttpError extends Error { constructor(status) { super(`http ${status}`); this.status = status; } }
 
@@ -99,7 +101,11 @@ export const CHECKS = {
     if (future.length) return { ok: false, code: `commit-dated-in-future ${future.length}` };
     const acts = await api(`/repos/${p.repo}/activity?ref=refs/heads/main&per_page=100`);
     if (!Array.isArray(acts)) return { ok: false, code: 'activity-unreadable' };
-    const due = acts.filter((a) => MAIN_UPDATES.includes(a.activity_type) && /^[0-9a-f]{40}$/.test(a.after ?? '')).filter((a) => {
+    // An update entry without the fields this reads is a FAIL, never "nothing due" (0b-7 audit round 2, M-3b).
+    const updates = acts.filter((a) => MAIN_UPDATES.includes(a?.activity_type));
+    const malformed = updates.filter((a) => !/^[0-9a-f]{40}$/.test(a.after ?? '') || !Number.isFinite(Date.parse(a.timestamp))).length;
+    if (malformed) return { ok: false, code: `activity-entry-malformed ${malformed}` };
+    const due = updates.filter((a) => {
       const age = t - Date.parse(a.timestamp);
       return age >= AUDIT_MIN_AGE && age <= AUDIT_MAX_AGE;
     });
@@ -107,8 +113,17 @@ export const CHECKS = {
     for (const a of due) if (!(await auditOk(api, p.repo, p.audit_workflow, a.after))) missing += 1;
     return missing ? { ok: false, code: `main-update-without-audit ${missing}` } : { ok: true, code: `${due.length} main updates` };
   },
+  // Every page is read (up to DEPLOY_PAGES), so previews newer than the live production deploy can't hide it; and a
+  // product with no live production deploy found is a FAIL unless its entry says it has none (0b-7 audit round 2, M-3a).
   async deploys(p, { api }) {
-    const deps = (await api(`/repos/${p.repo}/deployments?per_page=50`)).filter((d) => String(d.environment ?? '').startsWith('Production'));
+    const all = [];
+    for (let page = 1; page <= DEPLOY_PAGES; page++) {
+      const batch = await api(`/repos/${p.repo}/deployments?per_page=100&page=${page}`);
+      if (!Array.isArray(batch)) return { ok: false, code: 'deployments-unreadable' };
+      all.push(...batch);
+      if (batch.length < 100) break;
+    }
+    const deps = all.filter((d) => String(d.environment ?? '').startsWith('Production'));
     for (const d of deps.sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at))) {
       const [latest] = await api(`/repos/${p.repo}/deployments/${d.id}/statuses?per_page=1`);
       if (latest?.state !== 'success') continue;
@@ -119,7 +134,7 @@ export const CHECKS = {
       const v = isSupported({ source: 'git', sha: d.sha }, { stage, mainFirstParent: main, evidence });
       return v.ok ? { ok: true, code: 'supported' } : { ok: false, code: 'unsupported-production-deploy' };
     }
-    return { ok: true, code: 'no-live-production-deployment' };
+    return p.no_production === true ? { ok: true, code: 'no-production-by-entry' } : { ok: false, code: 'no-live-production-deployment' };
   },
   async permissions(p, { api }) {
     const r = await api(`/repos/${p.repo}/actions/permissions/workflow`);
@@ -133,6 +148,8 @@ export async function runOne(check, slot, { products, api, pinned, now = () => D
   if (!CHECKS[check]) return { line: `${label} / ${check}: FAIL unknown-check`, ok: false, label };
   // A missing, empty or malformed product list fails every slot: a silent green would switch the net off (0b-7 audit M-5).
   if (!Array.isArray(products) || !products.length) return { line: `${label} / ${check}: FAIL products-missing`, ok: false, label };
+  // A product past the last slot would never be checked; fail every slot rather than leave it unwatched (round 2 minor).
+  if (products.length > SLOTS) return { line: `${label} / ${check}: FAIL products-over-slots`, ok: false, label };
   const p = products[slot - 1];
   if (p !== undefined && (!p || typeof p !== 'object' || !p.repo)) return { line: `${label} / ${check}: FAIL product-entry-malformed`, ok: false, label };
   if (!p) return { line: `${label} / ${check}: ok slot-empty`, ok: true, label, empty: true };

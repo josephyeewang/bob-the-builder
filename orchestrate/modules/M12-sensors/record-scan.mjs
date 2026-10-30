@@ -6,11 +6,14 @@
 // allowlist (hex SHAs and hashes, UUIDs, dpl_/prj_/team_ IDs, our own [REDACTED:…] markers, the fence tags). It will
 // flag some harmless strings; every hit is listed with where it is, for a person to judge.
 //
-// A scan is valid only if it finds the planted control: a fake key (built at runtime) is scanned first and must be
-// found, otherwise the scan reports itself failed. When gitleaks is installed (a check tool, not a dependency) the
+// A scan is valid only if (a) it finds the planted control INSIDE the record it scanned: the caller writes a fake key
+// (built at runtime) into one document first, and a scan that never reaches it (wrong record, wrong entities, a walk
+// that skips fields) reports itself failed; and (b) no entity holding documents was left out of the scan (0b-7 audit
+// round 2, M-4: checking the control on a made-up string let an empty entity list pass as "0 found"). When gitleaks is installed (a check tool, not a dependency) the
 // caller can also run it over the record folder through runGitleaks(); it is skipped, and says so, when absent.
 
 import { execFileSync } from 'node:child_process';
+import { ENTITIES } from '../../shared/record.mjs';
 
 const RUN = /[A-Za-z0-9+/_=.-]{20,}/g;
 
@@ -46,19 +49,29 @@ export function looseFind(text) {
   return out;
 }
 
-// Scan every string in the record (docs of the named entities, keys included, and the diary).
-// Returns { valid, control_found, count, hits: [{ where, length }] } — never the matched text itself.
-export function scanRecordLoose(rec, entities, { control } = {}) {
-  const control_found = typeof control === 'string' && looseFind(`planted ${control} here`).length > 0;
+// Scan every string in the record (docs of the named entities, keys included, and the diary). Hits that are the
+// control itself are not counted. Returns { valid, control_found, unscanned, count, hits: [{ where, length }] } —
+// never the matched text itself.
+export function scanRecordLoose(rec, entities = ENTITIES, { control } = {}) {
+  const ok = typeof control === 'string' && looseFind(control).includes(control);
+  let control_found = false;
   const hits = [];
-  const walk = (v, where) => {
-    if (typeof v === 'string') { for (const t of looseFind(v)) hits.push({ where, length: t.length }); return; }
-    if (Array.isArray(v)) { v.forEach((x, i) => walk(x, `${where}[${i}]`)); return; }
-    if (v && typeof v === 'object') for (const [k, x] of Object.entries(v)) { walk(k, `${where}.<key>`); walk(x, `${where}.${k}`); }
+  const walk = (v, where, inDoc) => {
+    if (typeof v === 'string') {
+      for (const t of looseFind(v)) {
+        if (ok && t === control) { if (inDoc) control_found = true; continue; }
+        hits.push({ where, length: t.length });
+      }
+      return;
+    }
+    if (Array.isArray(v)) { v.forEach((x, i) => walk(x, `${where}[${i}]`, inDoc)); return; }
+    if (v && typeof v === 'object') for (const [k, x] of Object.entries(v)) { walk(k, `${where}.<key>`, inDoc); walk(x, `${where}.${k}`, inDoc); }
   };
-  for (const e of entities) for (const d of rec.list(e)) walk(d.doc, `${e}/${d.id}`);
-  for (const l of rec.diary({ since: 0 })) walk(l, `diary#${l.seq}`);
-  return { valid: control_found, control_found, count: hits.length, hits };
+  const list = Array.isArray(entities) ? entities : [];
+  for (const e of list) for (const d of rec.list(e)) walk(d.doc, `${e}/${d.id}`, true);
+  for (const l of rec.diary({ since: 0 })) walk(l, `diary#${l.seq}`, false);
+  const unscanned = ENTITIES.filter((e) => !list.includes(e) && rec.list(e).length > 0);
+  return { valid: control_found && unscanned.length === 0, control_found, unscanned, count: hits.length, hits };
 }
 
 // gitleaks over a folder, if installed. { ran:false, why } when it isn't; { ran:true, leaks:n } when it is.

@@ -45,7 +45,11 @@ function fakeGh(over = {}) {
     if (rest === '/commits') return u.searchParams.get('page') === '1' ? s.commits : [];
     if (rest.startsWith('/actions/workflows/')) { const c = s.runs[u.searchParams.get('head_sha')]; return { workflow_runs: c ? [{ status: 'completed', conclusion: c }] : [] }; }
     if (rest.startsWith('/contents/')) { const f = s.files[decodeURIComponent(rest.slice(10))]; if (f === undefined) throw Object.assign(new Error('x'), { status: 404 }); return { content: Buffer.from(f).toString('base64') }; }
-    if (rest === '/deployments') return s.deployments;
+    if (rest === '/deployments') {
+      if (!Array.isArray(s.deployments)) return s.deployments;
+      const per = Number(u.searchParams.get('per_page') ?? 30), page = Number(u.searchParams.get('page') ?? 1);
+      return s.deployments.slice((page - 1) * per, page * per);
+    }
     const st = /^\/deployments\/(\d+)\/statuses$/.exec(rest); if (st) return [{ state: s.statuses[st[1]] }];
     if (rest === '/actions/permissions/workflow') return { default_workflow_permissions: s.perms };
     if (s.status) throw Object.assign(new Error('x'), { status: s.status });
@@ -220,4 +224,29 @@ test('supported.mjs in the template is byte-identical to Bob\'s M12 copy (one de
 
 test('the template ships an empty pinned list (filled per product by the owner)', () => {
   assert.deepEqual(JSON.parse(readFileSync(new URL('./pinned-audit-files.json', import.meta.url), 'utf8')), {});
+});
+
+test('round 2 M-3a: the live production deploy is found behind 150 newer previews; none found or an unreadable list → FAIL', async () => {
+  const previews = Array.from({ length: 150 }, (_, i) => ({ id: 100 + i, environment: 'Preview', sha: sha('f'), created_at: iso(1) }));
+  const hidden = fakeGh({ deployments: [...previews, { id: 3, environment: 'Production', sha: sha('f'), created_at: iso(5) }], statuses: { 3: 'success' } });
+  assert.match((await run('deploys', hidden)).line, /FAIL unsupported-production-deploy/, 'old code read 50 and said ok');
+  const none = fakeGh({ deployments: previews });
+  assert.match((await run('deploys', none)).line, /FAIL no-live-production-deployment/);
+  assert.match((await run('deploys', none, product({ no_production: true }))).line, /ok no-production-by-entry/);
+  assert.match((await run('deploys', fakeGh({ deployments: { message: 'x' } }))).line, /FAIL deployments-unreadable/);
+});
+
+test('round 2 M-3b: a main-update entry with no usable time or commit → FAIL, never "nothing due"', async () => {
+  const noTime = fakeGh({ activity: [{ activity_type: 'push', after: sha('b') }] });
+  assert.match((await run('audit-run', noTime)).line, /FAIL activity-entry-malformed 1/);
+  const badAfter = fakeGh({ activity: [{ activity_type: 'pr_merge', after: 'zz', timestamp: iso(60) }] });
+  assert.match((await run('audit-run', badAfter)).line, /FAIL activity-entry-malformed 1/);
+  const otherKind = fakeGh({ activity: [{ activity_type: 'branch_creation', timestamp: 'nope' }] });
+  assert.doesNotMatch((await run('audit-run', otherKind)).line, /malformed/, 'only main updates are judged');
+});
+
+test('round 2 minor: more products than slots → FAIL on every slot', async () => {
+  const many = Array.from({ length: SLOTS + 1 }, () => product());
+  const r = await runOne('heartbeat', 1, { products: many, api: fakeGh().api, pinned, now: () => NOW });
+  assert.match(r.line, /FAIL products-over-slots/);
 });

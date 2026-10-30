@@ -22,6 +22,8 @@ function weekOfRecord(writeRaw = null, env = SENSORS_ENV) {
     }
   }
   if (writeRaw) rec.write({ actor: 'sensors', entity: 'fact', id: 'raw', expectRev: 0, doc: { line: writeRaw } });
+  // The planted control the scan must reach (written around the masker on purpose).
+  rec.write({ actor: 'sensors', entity: 'fact', id: 'scan-control', expectRev: 0, doc: { kind: 'fact.scan-control', line: `control ${FAKE.generic}` } });
   return rec;
 }
 
@@ -65,4 +67,20 @@ test('residual, recorded honestly: a bare 24-character Vercel classic token the 
   const r = scanRecordLoose(weekOfRecord(null, {}), ['fact'], { control: FAKE.generic });
   assert.equal(r.count, 7, 'one per day, all the bare Vercel classic token');
   assert.ok(r.hits.every((h) => h.length === FAKE.vercelClassic.length));
+});
+
+test('round 2 M-4: an empty entity list, a missed entity, or a control never planted makes the scan invalid', () => {
+  const rec = weekOfRecord();
+  const empty = scanRecordLoose(rec, [], { control: FAKE.generic });
+  assert.equal(empty.valid, false, 'old code: valid with count 0');
+  assert.deepEqual(empty.unscanned, ['fact']);
+  rec.write({ actor: 'sensors', entity: 'ask', id: 'a1', expectRev: 0, doc: { kind: 'ask', note: `leak ${FAKE.supabaseSecret}` } });
+  const partial = scanRecordLoose(rec, ['fact'], { control: FAKE.generic });
+  assert.equal(partial.valid, false);
+  assert.deepEqual(partial.unscanned, ['ask']);
+  const whole = scanRecordLoose(rec, undefined, { control: FAKE.generic });
+  assert.equal(whole.valid, true);
+  assert.ok(whole.hits.some((h) => h.where.startsWith('ask/a1')), 'the default scans every entity');
+  const otherKey = scanRecordLoose(weekOfRecord(), ['fact'], { control: FAKE.anthropic });
+  assert.equal(otherKey.valid, false, 'a control that is not in the record is not found');
 });

@@ -16,7 +16,8 @@ public too, so the check prints only "product N / <check>: ok|FAIL <reason code>
 
 The product list is the `PRODUCTS` Actions secret, never a file:
 `[{ "repo": "owner/name", "stage": "first", "post_merge_audit": false, "audit_workflow": "audit.yml", "robot": "robot-login" }]`.
-Slot 1 is the first entry. Each slot's only public name is "product N".
+Slot 1 is the first entry. Each slot's only public name is "product N". At most 3 entries (more fails every slot). A product with no production site
+adds `"no_production": true`; otherwise "no live production deploy found" is a FAIL.
 
 ## Owner steps (Joe)
 

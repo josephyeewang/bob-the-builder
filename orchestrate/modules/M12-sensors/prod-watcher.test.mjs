@@ -193,3 +193,22 @@ test('a Vercel read error raises one "cannot read" alert, cleared when reading w
   await t.pass();
   assert.equal([...t.gh.issues.values()][0].closed, true);
 });
+
+test('0b-7 audit round 2 M-2: a Vercel answer missing the fields the watcher reads raises "cannot read", never a quiet pass', async () => {
+  const cases = [
+    ['state under another name', (t) => { for (const d of t.v.s.deployments) { d.status = d.readyState; delete d.readyState; } }],
+    ['live id absent', (t) => { t.v.s.live = null; }],
+    ['production branch absent', (t) => { delete t.v.s.project.link.productionBranch; }],
+    ['link absent', (t) => { delete t.v.s.project.link; }],
+  ];
+  for (const [name, breakIt] of cases) {
+    const t = setup();
+    const d1 = dep(MAIN[0]);
+    t.v.s.deployments = [d1]; t.v.s.live = d1.uid;
+    await t.pass();
+    const rb = dep(BRANCH, 'cli'); t.v.s.deployments = [rb, d1]; t.v.s.live = rb.uid;
+    breakIt(t);
+    assert.deepEqual(kinds(await t.pass()), ['watcher-cannot-read'], name);
+    assert.match([...t.gh.issues.values()][0].body, /shape the production watcher does not know/, name);
+  }
+});

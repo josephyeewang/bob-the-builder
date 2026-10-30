@@ -39,6 +39,22 @@ const settingsPrint = (s) => Object.fromEntries(Object.entries(s).map(([k, v]) =
 
 // evidence: Set of SHAs with stage-second evidence (the robot's merge-gate status). mainFirstParent: Set of main SHAs.
 const FINAL = ['READY', 'ERROR', 'CANCELED'];
+// Vercel's deployment states as read on 29 Oct 2026 (Principle 9: re-check on a Vercel API change).
+export const KNOWN_STATES = Object.freeze(['QUEUED', 'INITIALIZING', 'BUILDING', 'READY', 'ERROR', 'CANCELED', 'DELETED']);
+
+// A missing field must never loosen the watch (0b-7 audit round 2, M-2): an answer in a shape the watcher doesn't know
+// is "cannot read", never a quiet pass.
+export function shapeProblems({ deps, live, settings }) {
+  const p = [];
+  if (!Array.isArray(deps)) return ['the deployment list is missing'];
+  const badState = deps.filter((d) => !KNOWN_STATES.includes(d?.state)).length;
+  if (badState) p.push(`${badState} deployment(s) with no known state`);
+  if (deps.some((d) => !d?.uid)) p.push('a deployment with no id');
+  if (deps.some((d) => d?.state === 'READY') && !live?.uid) p.push('ready deployments but no live production deployment id');
+  if (!settings || typeof settings !== 'object') p.push('the project settings are missing');
+  else for (const k of ['productionBranch', 'linkedRepo']) if (!settings[k]) p.push(`project setting ${k} is missing`);
+  return p;
+}
 
 export async function watchOnce({ vercel, rulesEntry, mainFirstParent, evidence, writer, alerts, product }) {
   const id = stateFactId(product);
@@ -51,6 +67,11 @@ export async function watchOnce({ vercel, rulesEntry, mainFirstParent, evidence,
     [deps, live, env, settings] = await Promise.all([vercel.deployments(), vercel.live(), vercel.envMeta(), vercel.settings()]);
   } catch (e) {
     await raise('watcher-cannot-read', 'vercel', 'the production watcher cannot read Vercel', `The production watcher could not read Vercel${Number.isInteger(e?.status) ? ` (HTTP ${e.status})` : ''}. Production is not being watched until it can.`);
+    return out;
+  }
+  const bad = shapeProblems({ deps, live, settings });
+  if (bad.length) {
+    await raise('watcher-cannot-read', 'vercel', 'the production watcher cannot read Vercel', `Vercel answered in a shape the production watcher does not know (${bad.join('; ')}). Production is not being watched until it can.`);
     return out;
   }
   await alerts.clear({ key: readKey, note: 'The production watcher can read Vercel again.' });

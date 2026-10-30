@@ -68,3 +68,17 @@ test('planted failure: an unescaped string is not fenced', () => {
   assert.equal(isFenced('<outside-text source="x">a<b</outside-text>'), false);
   assert.equal(isFenced('plain'), false);
 });
+
+test('0b-7 audit round 2 M-1: a key split by a colour code or a zero-width character is masked, not rejoined', () => {
+  const prep = makePrepare({ env: {} });
+  const zw = String.fromCharCode(0x200b);
+  const esc = String.fromCharCode(27);
+  for (const [input, secret] of [
+    [`${esc}[1m${FAKE.vercelPrefixed}${esc}[0m`, FAKE.vercelPrefixed],
+    [FAKE.github.slice(0, 2) + zw + FAKE.github.slice(2), FAKE.github],
+    [FAKE.githubShort.slice(0, 8) + zw + FAKE.githubShort.slice(8), FAKE.githubShort],
+    [`${esc}[33m${FAKE.anthropic}${esc}[0m`, FAKE.anthropic],
+  ]) {
+    for (const out of [prep(input, 'log-line'), cleanOutside(input, 'research-file')]) assert.equal(out.includes(secret), false, out);
+  }
+});
