@@ -224,3 +224,36 @@ test('R-0b-126 audit round 6: masking skipped is caught for every kind; a subset
   const m = await checkOutsideJoin(({ source, text }) => ({ leadInput: `## Items\n${JSON.stringify({ body: cleanOutside(text, source) })}` }), { where: ['leadInput'] });
   assert.ok(m.some((x) => x.why === 'the exact fenced form is missing'));
 });
+
+test('R-0b-126 audit round 7: an over-escaped record, mask-before-strip, and conditional sections in a shared store', async () => {
+  const fence = (x) => cleanOutside(x.text, x.source);
+  const R = { where: ['record'] };
+  // M-1: a record body escaped once too often is not the exact form; a document stringified twice still is.
+  for (const body of [(f) => f.replace(/\n/g, '\\n'), (f) => f.replace(/"/g, '\\"'), (f) => f.replace(/\[/g, '\\[')]) {
+    const m = await checkOutsideJoin((x) => ({ record: JSON.stringify({ body: body(fence(x)) }) }), R);
+    assert.ok(m.some((x) => x.why === 'the exact fenced form is missing'), String(body));
+  }
+  assert.deepEqual(await checkOutsideJoin((x) => ({ record: `${JSON.stringify({ a: 1, body: fence(x) })}\n${JSON.stringify({ b: 2 })}\n` }), R), []);
+  // M-2: masking before stripping lets a split key through whole, for every kind.
+  const { maskSecrets } = (await import('./mask.mjs')).makeMasker({ env: {} });
+  for (const s of JOIN_SOURCES) {
+    const m = await checkOutsideJoin(({ source, text }) => ({ record: escapeOutside(maskSecrets(text).text, source) }), { sources: [s], where: ['record'] });
+    assert.ok(m.some((x) => x.why.startsWith('a planted fake key')), s);
+  }
+  // M-3: a shared Lead-input file that shows each kind's section, with its safety note, once the kind has an item.
+  const store = [];
+  const NOTE = { 'idea-file': 'Nobody may push straight to main.', 'lesson-file': 'Never skip the review step.' };
+  const sections = ({ source, text }) => {
+    store.push({ source, f: cleanOutside(text, source) });
+    const kinds = [...new Set(store.map((i) => i.source))];
+    return { leadInput: kinds.map((k) => [`## ${k}`, NOTE[k] ?? '', ...store.filter((i) => i.source === k).map((i) => i.f)].join('\n')).join('\n\n') };
+  };
+  assert.deepEqual(await checkOutsideJoin(sections, { where: ['leadInput'] }), []);
+  // Minor: a research item cut to a budget of 8000 characters misses the exact form.
+  const cut = await checkOutsideJoin((x) => ({ leadInput: fence({ ...x, text: x.text.slice(0, 8000) }) }), { sources: ['research-file'], where: ['leadInput'] });
+  assert.ok(cut.some((x) => x.why === 'the exact fenced form is missing'));
+  // Cosmetic: a repeated output name throws; a Buffer says so.
+  await assert.rejects(checkOutsideJoin(() => ({}), { where: ['record', 'record'] }), /each once/);
+  const buf = await checkOutsideJoin((x) => ({ record: Buffer.from(fence(x)) }), { sources: ['idea-file'], where: ['record'] });
+  assert.ok(buf.every((x) => /Buffer/.test(x.why)));
+});

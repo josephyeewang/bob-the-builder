@@ -28,3 +28,12 @@ export const FAKE = Object.freeze({
   generic: run(48, 15),
   dbPassword: j('pw', run(14, 16)),
 });
+
+// A fixture's `{{FAKE.name}}` becomes that fake key; `{{FAKE.name:ansi}}` (or `:zw`, `:bel`) is the same key split in the
+// middle by a terminal code, a zero-width character or a bell, which a lane that masks before stripping lets through
+// whole (R-0b-126 audit round 7).
+const SPLIT = { ansi: '\u001b[0m', zw: '\u200b', bel: '\u0007' };
+export const fillFakes = (s) => s.replace(/\{\{FAKE\.(\w+)(?::(\w+))?\}\}/g, (_, k, sp) => {
+  const key = FAKE[k]; const h = key.length >> 1;
+  return sp ? `${key.slice(0, h)}${SPLIT[sp]}${key.slice(h)}` : key;
+});
