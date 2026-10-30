@@ -3,7 +3,7 @@
 // WHY. At the first cutover the robot merges only the docs and research lane. Fifteen audit rounds showed that
 // proving an arbitrary change harmless is a hard problem; the first cutover doesn't need it solved, only refused.
 // So this is one strict check by path: a change passes only when every file is a plain text doc inside the docs or
-// research lane, with nothing protected, nothing removed, no link, no run permission and no binary (L28). Anything
+// research lane, with nothing protected, nothing removed, no link or run permission in any mode given, and no binary (L28). Anything
 // else is refused, and MAIN merges it as today. The deep classifier (classify.mjs) stays for the second cutover.
 //
 //   docsLaneProblem(policy, change) → null when the change is the docs lane's, else the first reason it isn't
@@ -14,8 +14,15 @@
 import { compileList, pathProblem, PROTECTED_FLOOR } from './paths.mjs';
 import { needsJoe, MAX_FILES } from './classify.mjs';
 
-// The lane's floor: whatever the rules file says, the docs lane never reaches beyond these (engine.mjs uses the same).
-const DOCS_FLOOR = compileList(['docs/*.md', 'docs/domains/**', 'docs/research/**']);
+// The lane's floor: whatever the rules file says, the docs lane never reaches beyond these. The one definition;
+// engine.mjs imports it. Matching ignores case (for the Mac), so the folder names are also checked exactly below.
+export const DOCS_FLOOR = compileList(['docs/*.md', 'docs/domains/**', 'docs/research/**']);
+// Files other tools read as instructions or settings, wherever they sit (confirm audit of L34, m4).
+const NOT_DOCS = compileList(['**/AGENTS.override.md', '**/GEMINI.md', '**/package.json', '**/tsconfig*.json', '**/pull_request_template.md',
+  '**/PULL_REQUEST_TEMPLATE/**', '**/ISSUE_TEMPLATE/**', '**/CODEOWNERS', '**/FUNDING.yml', '**/SECURITY.md', '**/dependabot.yml']);
+// A path this long or deep is no doc; refusing it keeps the pattern checks quick (m1: 95 s at 2,000 folders).
+const MAX_PATH = 512;
+const MAX_DEPTH = 16;
 // Plain text only. No images, PDFs or other binaries (L28), and nothing that can run (`.mdx`, `.html`, `.svg`).
 const TEXT = /\.(md|txt|csv|json|yaml|yml)$/i;
 const STATUSES = ['added', 'modified', 'renamed', 'copied'];   // a removal is never the docs lane's here
@@ -51,22 +58,32 @@ function problem(policy, change) {
   if (change.truncated !== undefined && change.truncated !== false) return 'the file list may be cut off';
   if (change.declared_tier !== 2) return 'not declared Tier 2';
   if (change.labels !== undefined && !Array.isArray(change.labels)) return 'labels are not a list';
-  for (const l of list(change.labels)) {
+  // Lists are read by position: a list's own iterator can hide entries (m2).
+  const labels = change.labels === undefined ? [] : change.labels;
+  for (let i = 0, n = labels.length; i < n; i++) {
+    const l = labels[i];
     if (typeof l !== 'string') return 'a label is not text';
     if (needsJoe(l) !== null) return `label ${JSON.stringify(l)} asks for Joe`;
   }
   const files = change.files;
   if (!Array.isArray(files) || !files.length) return 'no files';
   if (files.length >= MAX_FILES) return `${MAX_FILES} files or more`;
-  for (const f of Array.from(files)) {
+  for (let i = 0, n = files.length; i < n; i++) {
+    const f = files[i];
     if (!f || typeof f !== 'object') return 'a file entry is not an object';
     const { path, previous_path: prev, status, mode } = f;
     if (!STATUSES.includes(status)) return `${JSON.stringify(path)}: status ${JSON.stringify(status)} is not the docs lane's`;
     if ((status === 'renamed' || status === 'copied') !== (prev !== undefined)) return `${JSON.stringify(path)}: an old name goes with a rename or copy only`;
     if (mode !== undefined && mode !== '100644' && mode !== 100644) return `${JSON.stringify(path)}: mode ${JSON.stringify(mode)} is a link, submodule or runnable file`;
     for (const p of prev === undefined ? [path] : [path, prev]) {
+      if (typeof p !== 'string' || p.length > MAX_PATH || p.split('/').length > MAX_DEPTH) return `${JSON.stringify(String(p).slice(0, 80))}: too long or too deep for a doc`;
       const bad = pathProblem(p);
       if (bad) return `${JSON.stringify(p)}: ${bad}`;
+      const seg = p.split('/');
+      // Exact case: on GitHub "Docs/" is another folder (m3). No hidden file or folder is a doc.
+      if (seg[0] !== 'docs' || (seg.length > 2 && seg[1] !== 'research' && seg[1] !== 'domains')) return `${p} is outside the docs and research lane`;
+      if (seg.some((x) => x.startsWith('.'))) return `${p} is a hidden file or folder`;
+      if (NOT_DOCS(p)) return `${p} is read by tools as instructions or settings`;
       if (!DOCS_FLOOR(p) || !inLane(p) || !docsPaths(p)) return `${p} is outside the docs and research lane`;
       if (!TEXT.test(p.split('/').pop())) return `${p} is not a plain text doc`;
       if (barred(p)) return `${p} is protected, Tier 1 or an effect path`;

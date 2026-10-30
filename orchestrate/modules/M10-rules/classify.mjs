@@ -191,6 +191,10 @@ const MAX_LINES = 1_000_000;   // more lines than this in one change are not rea
 // next: every check judges this copy (audit round 14). Once the change's lists hold more than MAX_LINES lines in all,
 // each further list becomes a note, which no check takes for lines, so a flood of lists is never copied (audit round
 // 15). Each list's length is read once. Throws on a hostile object; the shared interface turns a throw into a deny.
+// Each field is read by name, so one inherited from a class or hidden from a spread is still seen (confirm audit of
+// L34, M1); the list is read by position, never through its own iterator, which can hide entries (m2).
+const FILE_FIELDS = ['path', 'previous_path', 'status', 'mode', 'added_lines', 'removed_lines'];
+
 export function readFilesOnce(files) {
   if (!Array.isArray(files)) return files;
   let left = MAX_LINES;
@@ -203,12 +207,31 @@ export function readFilesOnce(files) {
     for (let i = 0; i < n; i++) copy[i] = v[i];   // a hole reads as undefined, which no check takes for a line
     return copy;
   };
-  return Array.from(files, (f) => {
-    if (!f || typeof f !== 'object') return f;
-    const copy = { ...f };
-    for (const side of ['added_lines', 'removed_lines']) if (side in copy) copy[side] = lines(copy[side]);
-    return copy;
-  });
+  // A list past the cap is copied only to the cap: every check refuses MAX_FILES entries or more.
+  const n = Math.min(files.length, MAX_FILES);
+  const out = new Array(n);
+  for (let i = 0; i < n; i++) {
+    const f = files[i];
+    if (!f || typeof f !== 'object') { out[i] = f; continue; }
+    const copy = {};
+    for (const k of FILE_FIELDS) { const v = f[k]; if (v !== undefined) copy[k] = k.endsWith('_lines') ? lines(v) : v; }
+    out[i] = copy;
+  }
+  return out;
+}
+
+// The merge subject's fields, each read once by name into a plain object; labels copied by position (L34 audit M1, m2).
+const SUBJECT_FIELDS = ['product', 'card', 'truncated', 'labels', 'declared_tier', 'kind', 'reverses', 'exact_reverse_ok', 'reversed_audit', 'reverses_files'];
+export function readSubjectOnce(subject) {
+  const s = {};
+  for (const k of SUBJECT_FIELDS) { const v = subject[k]; if (v !== undefined) s[k] = v; }
+  if (Array.isArray(s.labels)) {
+    const n = s.labels.length;
+    if (n > 1000) s.labels = 'more than 1000 labels';
+    else { const copy = new Array(n); for (let i = 0; i < n; i++) copy[i] = s.labels[i]; s.labels = copy; }
+  }
+  s.files = readFilesOnce(subject.files);
+  return s;
 }
 
 // A label's text after "needs joe" (in any spelling), or null when it isn't a needs-joe label. A label with any

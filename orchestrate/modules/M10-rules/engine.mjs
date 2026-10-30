@@ -17,11 +17,11 @@
 //                   true is the second cutover's deep classifier answer, built and tested but not yet switched on.
 
 import { allow, ask, deny } from '../../shared/rules.mjs';
-import { classifyChange, needsJoe, readFilesOnce, MAX_FILES } from './classify.mjs';
+import { classifyChange, needsJoe, readSubjectOnce, MAX_FILES } from './classify.mjs';
 import { compileList, pathProblem } from './paths.mjs';
 import { PRODUCT_STATES, HOURS, validZone, compareVersions } from './policy.mjs';
 import { loadRoles, profileFor } from './roles.mjs';
-import { docsLaneProblem } from './lane-check.mjs';
+import { docsLaneProblem, DOCS_FLOOR } from './lane-check.mjs';
 
 // Mac-wide keys and how they combine across products (MAT-10, R2-M5(b)). `*` = every key under that map.
 export const MAC_MIN = Object.freeze(['caps.editing_per_mac', 'caps.scripts_per_mac', 'caps.script_agents_max',
@@ -34,7 +34,7 @@ export const REVERSED_AUDIT = Object.freeze(['failure', 'success', 'none']);
 const SHA = /^[0-9a-f]{40}$/;
 const ROW_FILE = /^docs\/blueprint\/rows\/([^/]+)\.yaml$/i;   // case-folded like BLUEPRINT (audit round 7)
 const BLUEPRINT = compileList(['docs/blueprint/**']);
-const DOCS_LANE = compileList(['docs/*.md', 'docs/domains/**', 'docs/research/**']);
+const DOCS_LANE = DOCS_FLOOR;   // one definition, in lane-check.mjs
 const NOT_PRODUCT = compileList(['docs/blueprint/**', 'docs/*.md', 'docs/domains/**']);
 const FILE_STATUSES = ['added', 'modified', 'removed', 'renamed', 'copied'];
 const USAGE_FUTURE_MS = 60_000;
@@ -252,7 +252,7 @@ export function makeEngine({ products, rulesState, productState, running, rolesD
   // The first cutover's merge (L34): the docs lane only, by path. Anything else is refused and MAIN merges it as today.
   // An exact reverse of a docs-lane change passes the same check; it alone may merge while paused (MAT-8).
   function mergeDocsLane(subject) {
-    const s = { ...subject, files: readFilesOnce(subject.files) };
+    const s = readSubjectOnce(subject);
     const pol = policyOf(s.product);
     checkFiles(s.files);
     const why = docsLaneProblem(pol, s);
@@ -267,7 +267,7 @@ export function makeEngine({ products, rulesState, productState, running, rolesD
 
   // The second cutover's merge (cutover: second): the deep classifier. Off unless makeEngine gets deepMerge: true.
   function mergeDeep(subject) {
-    const s = { ...subject, files: readFilesOnce(subject.files) };
+    const s = readSubjectOnce(subject);
     const pol = policyOf(s.product);
     checkFiles(s.files);
     // A field of the wrong type is a caller fault: refuse it rather than read it as "no" (audit round 3).

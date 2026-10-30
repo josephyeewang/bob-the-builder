@@ -71,9 +71,10 @@ At the first cutover the robot merges only the docs and research lane, so `merge
 - every file is plain text by its name (`.md`, `.txt`, `.csv`, `.json`, `.yaml`, `.yml`): no images, PDFs or other binaries (L28), and nothing that can run (`.mdx`, `.html`, `.svg`);
 - nothing is protected, Tier 1 or an effect path (secrets, migrations, repairs, senders, flags, new customer-visible files) in the rules, and nothing is removed or renamed out of a folder where removals are watched;
 - no link, submodule or runnable file (a given `mode` must be `100644`), and an old name only on a rename or copy;
+- the folder names are exact (`docs/`, `research/`, `domains/`; on GitHub `Docs/` is another folder), no part of the path is hidden (starts with `.`), the path is at most 512 characters and 16 parts, and no file is one other tools read as instructions or settings (`AGENTS.override.md`, `GEMINI.md`, `package.json`, `tsconfig*.json`, pull request and issue templates, `CODEOWNERS` and the like);
 - the change is declared Tier 2, its file list is whole (not cut off, under 3,000 files) and no label asks for Joe (any `needs-joe` spelling, or any label outside plain ASCII).
 
-An exact reverse is held to the same check; while a product is paused (or its rules say `undo_only`) only an exact reverse of a docs-lane change merges. The check never throws: a field it can't read is a reason to refuse. The Merge Gate must pass each file's `mode` when GitHub gives one.
+The engine reads each field of the change by name and each list by position, so a field inherited from a class or hidden from a copy is still seen, and a list's own iterator can't hide an entry (confirm audit of L34). An exact reverse is held to the same check; while a product is paused (or its rules say `undo_only`) only an exact reverse of a docs-lane change merges. The check never throws: a field it can't read is a reason to refuse. GitHub's file list carries no `mode`, so a link or runnable file is caught only when the Merge Gate passes the mode; it must, whenever GitHub gives one.
 
 The deep classifier below (`classify.mjs`, `db-lines.mjs`) is `cutover: second`. It is built and tested, and `makeEngine({ deepMerge: true })` switches it on for `merge`; nothing does yet. `rules.classify()` still uses it for read-backs.
 

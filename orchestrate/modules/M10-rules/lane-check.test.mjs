@@ -135,3 +135,51 @@ test('merge at the first cutover: an undo_only state rule holds all but an exact
     assert.equal(merge(r, [f('docs/research/a.md')]).reason, 'docs lane', `deepMerge: ${JSON.stringify(deepMerge)}`);
   }
 });
+
+// Confirm audit of L34 (29 Oct 2026).
+test('fields inherited from a class or hidden from a copy are still read: a cut-off list, a needs-joe label or a link is refused (M1)', () => {
+  const r = rulesFor();
+  class Req { constructor(files) { this.product = 'app'; this.declared_tier = 2; this.files = files; this.card = { id: 'C-1' }; } }
+  class CutOff extends Req { get truncated() { return true; } }
+  class Asks extends Req { get labels() { return ['needs-joe']; } }
+  class LinkFile { constructor() { this.path = 'docs/research/a.md'; this.status = 'modified'; } get mode() { return '120000'; } }
+  assert.equal(r.may('merge', new Req([f('docs/research/a.md')])).decision, 'allow', 'a plain class instance in the lane');
+  for (const s of [new CutOff([f('docs/research/a.md')]), new Asks([f('docs/research/a.md')]), new Req([new LinkFile()])]) assert.equal(r.may('merge', s).decision, 'deny', s.constructor.name);
+  const hidden = (k, v, o) => Object.defineProperty(o, k, { value: v, enumerable: false });
+  assert.equal(r.may('merge', hidden('truncated', true, { product: 'app', declared_tier: 2, files: [f('docs/research/a.md')] })).decision, 'deny');
+  assert.equal(r.may('merge', hidden('labels', ['needs-joe'], { product: 'app', declared_tier: 2, files: [f('docs/research/a.md')] })).decision, 'deny');
+  assert.equal(r.may('merge', { product: 'app', declared_tier: 2, files: [hidden('mode', '120000', f('docs/research/a.md'))] }).decision, 'deny');
+});
+
+test('a list is read by position, so an iterator that hides an entry hides nothing (m2)', () => {
+  const r = rulesFor();
+  const quiet = (arr, shown) => Object.assign(arr, { [Symbol.iterator]: function* () { yield* shown; } });
+  assert.equal(merge(r, [f('docs/research/a.md')], { labels: quiet(['needs-joe'], []) }).decision, 'deny');
+  assert.equal(merge(r, quiet([f('docs/research/a.md'), f('lib/evil.ts')], [f('docs/research/a.md')])).decision, 'deny');
+  assert.ok(check(quiet([f('docs/research/a.md'), f('lib/evil.ts')], [f('docs/research/a.md')])));
+  assert.ok(check([f('docs/research/a.md')], { labels: quiet(['needs-joe'], []) }));
+});
+
+test('long or deep paths, other-case folders, hidden files and files tools read as settings are refused, quickly (m1, m3, m4)', () => {
+  const deep = `docs/research/${'a/'.repeat(2000)}x.md`;
+  const t = Date.now();
+  assert.ok(check(Array.from({ length: MAX_FILES - 1 }, (_, i) => f(`${deep}${i}`))));
+  assert.ok(Date.now() - t < 2000, 'answers in under 2 s');
+  for (const p of [`docs/research/${'a'.repeat(600)}.md`, `docs/research/${'a/'.repeat(15)}x.md`, 'DOCS/research/a.md', 'Docs/Research/A.MD', 'docs/Research/a.md',
+    'docs/research/AGENTS.override.md', 'docs/research/GEMINI.md', 'docs/research/.cursor/rules/x.md', 'docs/research/.x.md', 'docs/pull_request_template.md',
+    'docs/research/package.json', 'docs/research/tsconfig.json', 'docs/research/tsconfig.build.json', 'docs/research/ISSUE_TEMPLATE/bug.md']) {
+    assert.ok(check([f(p)]), p);
+  }
+  assert.equal(check([f(`docs/research/${'a/'.repeat(10)}x.md`)]), null, 'a fairly deep doc still passes');
+  assert.equal(check([f('docs/domains/Sales/Notes.md')]), null, 'case below the lane folder is the doc\'s own');
+});
+
+test('the rules\' docs_paths narrow the lane; a pause holds whatever the state rule says; a paused undo needs a known audit result (m5)', () => {
+  assert.ok(check([f('docs/research/a.md')], {}, { ...POL, docs_paths: ['docs/domains/**'] }));
+  assert.equal(check([f('docs/domains/a.md')], {}, { ...POL, docs_paths: ['docs/domains/**'] }), null);
+  const pausedRules = { ...POL, product_state_rules: { ...POL.product_state_rules, paused: { ...POL.product_state_rules.paused, tier1_merge: 'rules' } } };
+  assert.match(merge(rulesFor('paused', pausedRules), [f('docs/research/a.md')]).reason, /paused/);
+  for (const audit of ['bogus', undefined, 'SUCCESS']) {
+    assert.equal(merge(rulesFor('paused'), [f('docs/research/a.md')], { ...undo('failure'), reversed_audit: audit }).decision, 'deny', String(audit));
+  }
+});
