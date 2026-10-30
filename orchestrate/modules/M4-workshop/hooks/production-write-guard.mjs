@@ -9,7 +9,7 @@
 
 import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { readdirSync } from 'node:fs';
-import { homedir } from 'node:os';
+import { homedir, userInfo } from 'node:os';
 import { isMain, runHook, block, pass, toolPaths, shellCommands, bothWords, programOf, landingPath, realFolder, inside, joinLines, unreadable, expandBraces, fold, globRe } from './lib.mjs';
 import { readSnapshot } from './snapshot.mjs';
 
@@ -130,11 +130,14 @@ export function folderWrites(c) {
   return { targets: [], deletes: false };
 }
 
-// `~`, `$HOME` and `$PWD` at the front of a word, as the shell expands them (the class rule lets only these through).
-// The line is rewritten before it is split: `$HOME` becomes the home folder and `$PWD` a
-// mark that stands for every folder the command may be in by then.
+// `~`, `$HOME`, `$PWD`, `$USER` and `$TMPDIR`, as the shell expands them (the class rule lets only these through).
+// The line is rewritten before it is split: `$HOME`, `$USER` and `$TMPDIR` become their values and `$PWD` a
+// mark that stands for every folder the command may be in by then. A variable left over (one with no value
+// here, `$?`) makes its path unknown, and an unknown path is refused (L46 round 4 confirm: deny by default).
 const PWD_MARK = '@pwd@';
-const spellOut = (cmd, home) => cmd.replace(/\$(\{HOME\}|HOME(?![A-Za-z0-9_]))/g, home).replace(/\$(\{PWD\}|PWD(?![A-Za-z0-9_]))/g, PWD_MARK);
+const varRe = (name) => new RegExp(String.raw`\$(\{${name}\}|${name}(?![A-Za-z0-9_]))`, 'g');
+const spellOut = (cmd, vars) => Object.entries(vars).reduce((c, [name, v]) => (typeof v === 'string' && v ? c.replace(varRe(name), () => v) : c), cmd);
+const unknownWord = (w) => /[$`]/.test(w);
 // null for a word the guard can't place: another user's home folder (`~name/…`; audit of L41, MAT-4).
 function expand(w, home, cwds) {
   if (/^~[^/]/.test(w)) return null;
@@ -178,7 +181,7 @@ const linkTarget = (p) => { const r = realFolder(p); return r && r !== p ? r : n
  * or `pushd` adds where it leads (a subshell's `cd` may or may not still hold, so both count), and a `cd` the
  * guard can't follow makes every relative target unknown, which is refused.
  */
-export function folderWriteWhy(cmd, { cwd, protectedFiles, home = homedir(), projectDir = null, cdpath = process.env.CDPATH }) {
+export function folderWriteWhy(cmd, { cwd, protectedFiles, home = homedir(), user = process.env.USER || userInfo().username, tmpdir = process.env.TMPDIR, projectDir = null, cdpath = process.env.CDPATH }) {
   // A Set: each `cd` would otherwise double the list (audit of L41, round 2, minor).
   const cwds = new Set([cwd]);
   let lost = false;
@@ -193,7 +196,7 @@ export function folderWriteWhy(cmd, { cwd, protectedFiles, home = homedir(), pro
   let moved = false;
   const shielded = [cwd, ...(projectDir && isAbsolute(projectDir) ? [projectDir] : [])];
   const holdsProtected = (d) => [d, realFolder(d)].filter(Boolean).some((x) => protectedFiles.some((f) => inside(f, fold(x))));
-  for (const c of shellCommands(spellOut(cmd, home))) {
+  for (const c of shellCommands(spellOut(cmd, { HOME: home, PWD: PWD_MARK, USER: user, TMPDIR: tmpdir }))) {
     const prog = programOf(c);
     // A word list starting with an option is the rest of a command split at a quoted bracket (`find . \( -name a \)`).
     if (UNPACKERS.has(prog) && (lost || [...cwds].some(holdsProtected))) {
@@ -208,7 +211,7 @@ export function folderWriteWhy(cmd, { cwd, protectedFiles, home = homedir(), pro
       if (odd) lost = true;
       else if (to === undefined) cwds.add(home);
       else if (to === '-') { if (setOld || !moved) lost = true; /* else back to a folder already counted */ }
-      else if (/[*?[]/.test(to) || forms === null || (viaCdpath && !/^(\/|~|@pwd@|\.\.?(\/|$))/.test(to))) lost = true;
+      else if (/[*?[]/.test(to) || unknownWord(to) || forms === null || (viaCdpath && !/^(\/|~|@pwd@|\.\.?(\/|$))/.test(to))) lost = true;
       // Where the cd really lands counts too: after `cd <link>`, a later `..` is taken on disk from the link's target.
       // `cd -P l/..` goes up from the link's target: where the system takes the path counts too (round 3 MAT-2).
       else for (const x of forms) for (const base of [...cwds]) { const to2 = resolve(base, x); cwds.add(to2); const r = realFolder(to2); if (r) cwds.add(r); cwds.add(physical(base, x)); }
@@ -218,6 +221,7 @@ export function folderWriteWhy(cmd, { cwd, protectedFiles, home = homedir(), pro
     const { targets, deletes } = folderWrites(c);
     for (const t of targets.flatMap((x) => expandBraces(x))) {
       if (wrote) return `"${t}" is written as a whole after "${wrote}" in the same command; run it as a command of its own`;
+      if (unknownWord(t)) return `"${t}" is written as a whole, and the guard can't tell where a variable in it leads`;
       const forms = expand(t, home, [...cwds]);
       if (forms === null) return `"${t}" is written as a whole in a folder the guard can't place`;
       if (forms.some((f) => !isAbsolute(f)) && lost) return `"${t}" is written as a whole after a folder change the guard can't follow`;
