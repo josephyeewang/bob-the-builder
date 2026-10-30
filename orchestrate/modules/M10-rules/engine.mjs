@@ -256,7 +256,7 @@ export function makeEngine({ products, rulesState, productState, running, rolesD
     if (reverse) {
       // R3-M3, in this order. Pause and the hours window never hold an exact reverse. A cut-off file list can hide a
       // protected file, so it is never let through (MAT-6).
-      if (s.truncated === true || s.files.length > MAX_FILES) return ask(1, 'exact reverse with a cut-off file list');
+      if (s.truncated === true || s.files.length >= MAX_FILES) return ask(1, 'exact reverse with a cut-off file list');
       // Only "no scan built for this code" is expected on a reverse; any other unclassifiable reason (unreadable
       // rules, a bad entry, a label) means the protected check below can't be trusted, so ask (audit round 4).
       if ((c.reasons.unclassifiable ?? []).some((r) => !r.startsWith('scan_not_built:'))) return ask(1, 'exact reverse that could not be fully classified');

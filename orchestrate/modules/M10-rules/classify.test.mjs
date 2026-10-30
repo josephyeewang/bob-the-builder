@@ -109,8 +109,10 @@ test('links and submodules are protected wherever they are', () => {
 
 test('a truncated or oversized file list, a bad entry or a bad path is unclassifiable', () => {
   assert.ok(run([mod('docs/a.md')], { truncated: true }).risky.includes('unclassifiable'));
-  const many = Array.from({ length: MAX_FILES + 1 }, (_, i) => mod(`docs/research/${i}.md`));
-  assert.ok(run(many).risky.includes('unclassifiable'));
+  const many = Array.from({ length: MAX_FILES }, (_, i) => mod(`docs/research/${i}.md`));
+  assert.ok(run(many).risky.includes('unclassifiable'), 'exactly the limit may be cut off');
+  assert.deepEqual(run(many.slice(1)).risky, [], 'one under the limit is fine');
+  assert.ok(run([]).risky.includes('unclassifiable'), 'an empty file list is never Tier 2');
   assert.ok(run([{ path: 'docs/a.md', status: 'exploded' }]).risky.includes('unclassifiable'));
   assert.match(run([mod('docs/../orchestrate/policy.yaml')]).reasons.unclassifiable.join(), /dot segment/);
   assert.match(run([mod('docs/blueprint/x.md', { status: 'renamed', previous_path: 'doc\u017f/blueprint/x.md' })]).reasons.unclassifiable.join(), /non-ASCII/);
@@ -138,6 +140,11 @@ test('under docs/, only plain files are ordinary; runnable ones are unclassifiab
   }
   const sql = run([{ path: 'docs/x.sql', status: 'added', added_lines: ['DROP TABLE t;'] }]).risky;
   assert.deepEqual(sql, ['schema', 'deletes', 'unclassifiable']);
+});
+
+test('a docs folder elsewhere in the repository is never an ordinary doc (audit round 5)', () => {
+  assert.ok(run([mod('src/docs/config.json')]).risky.includes('unclassifiable'));
+  assert.ok(run([mod('lib/docs/payments/settings.yaml')]).risky.includes('unclassifiable'));
 });
 
 test('ordinary docs follow the product\'s docs_paths (R3-m5)', () => {

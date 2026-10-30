@@ -98,8 +98,25 @@ const int = (v, where) => (typeof v === 'string' && INT.test(v) ? Number(v) : ba
 const dec = (v, where) => (typeof v === 'string' && DEC.test(v) ? Number(v) : bad(`${where} must be a number ≥ 0`));
 const pct = (v, where) => { const n = dec(v, where); return n <= 100 ? n : bad(`${where} must be 0–100`); };
 const strList = (v, where) => (Array.isArray(v) && v.every((s) => typeof s === 'string' && s) ? v : bad(`${where} must be a list of text`));
-const patterns = (v, where) => { strList(v, where); for (const p of v) { try { compile(p); } catch (e) { bad(`${where}: ${e.message}`); } } return v; };
+// A pattern is read exactly as written: plain ASCII, no space at either end (the matcher trims, so ' docs/ ' would
+// not mean what a reviewer sees; audit round 5).
+const patterns = (v, where) => {
+  strList(v, where);
+  for (const p of v) {
+    if (!/^[\x20-\x7e]+$/.test(p) || p !== p.trim()) bad(`${where}: "${p}" must be plain ASCII with no space at either end`);
+    // Paths are matched as git writes them, so a `.` or `..` part can never match: refuse it rather than protect nothing.
+    if (/(^|[/{,])\.\.?([/},]|$)/.test(p)) bad(`${where}: "${p}" has a . or .. part, which never matches a path`);
+    try { compile(p); } catch (e) { bad(`${where}: ${e.message}`); }
+  }
+  return v;
+};
 const mapOf = (v, where) => (isMap(v) ? v : bad(`${where} must be a map`));
+
+// The fields classify.mjs reads, per class; a misspelt field would be ignored there, so it is refused here (audit round 5).
+export const EFFECT_FIELDS = Object.freeze({
+  production_data: ['repair_folder'], schema: ['migration_paths'], secrets_settings: ['files'], deletes: ['removed_file_paths'],
+  first_customer_visible: ['new_files_under', 'flag_files'], messages_people: ['sender_paths', 'package_imports'],
+});
 
 function check(raw) {
   for (const k of Object.keys(raw)) {
@@ -126,8 +143,8 @@ function check(raw) {
   patterns(strList(dp, 'docs_paths'), 'docs_paths');
   for (const d of dp) {
     if (!/^docs\/[^*?{]/.test(d) && d !== 'docs/**') bad(`docs_paths entry "${d}" must sit under docs/`);
-    // `docs/../app/**` would reach app files: refuse any `.` or `..` part, even inside {a,b}.
-    if (/(^|[/{,])\.\.?([/},]|$)/.test(d) || /[\\\0]|\/\//.test(d)) bad(`docs_paths entry "${d}" has a dot, empty or backslash part`);
+    // `docs/../app/**` would reach app files (a `.` or `..` part is refused for every list, above).
+    if (/[\\\0]|\/\//.test(d)) bad(`docs_paths entry "${d}" has an empty or backslash part`);
   }
   if (!dp.length) bad('docs_paths must not be empty');
   p.docs_paths = [...dp];
@@ -154,6 +171,7 @@ function check(raw) {
   for (const k of EFFECT_KEYS) {
     const entry = mapOf(need(ep, k, 'effect_paths'), `effect_paths.${k}`);
     for (const [field, v] of Object.entries(entry)) {
+      if (!EFFECT_FIELDS[k].includes(field)) bad(`effect_paths.${k}.${field} is not a known field (${EFFECT_FIELDS[k].join(', ')})`);
       if (field === 'package_imports') strList(v, `effect_paths.${k}.${field}`);
       else patterns(v, `effect_paths.${k}.${field}`);       // a list of readable patterns, nothing else (audit round 4)
     }

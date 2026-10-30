@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { makeRules, HOLD_REASONS } from '../../shared/rules.mjs';
 import { makeEngine } from './engine.mjs';
 import { parsePolicy } from './policy.mjs';
+import { MAX_FILES } from './classify.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const FIXTURE = readFileSync(join(here, 'fixtures/policy.yaml'), 'utf8');
@@ -263,6 +264,8 @@ test('merge: an exact reverse with a cut-off file list asks Joe, even while paus
   const r = mergeOf(w, [file('app/x.ts')], reverse('failure', { truncated: true }));
   assert.deepEqual([r.decision, r.tier], ['ask', 1]);
   assert.match(r.reason, /cut-off/);
+  const full = Array.from({ length: MAX_FILES }, (_, i) => file(`docs/research/${i}.md`));
+  assert.match(mergeOf(w, full, reverse('failure')).reason, /cut-off/, 'a list of exactly the limit may be cut off (audit round 5)');
 });
 
 test('merge: an exact reverse with rules that cannot be fully read asks Joe (audit round 4, R3-M3)', () => {

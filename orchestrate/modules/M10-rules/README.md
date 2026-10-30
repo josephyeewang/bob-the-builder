@@ -62,7 +62,7 @@ await carryOver({ reviewed, current, between, catchUps, tier1MergesSince, gh: vi
 - **New keys enter as optional (R3-m10).** A key added to the rules later is optional, with a missing value read as the stricter choice, so an older rules file stays valid.
 - **The snapshot.** Its hash proves the file wasn't damaged. It does not prove who wrote it: the guard against a looser copy is that only its owner may write it (a file writable by others is refused). Hooks read it only through `snapshotAnswer`, which adds the protected floor.
 
-## Known limits (logged by the 0b-1 code audit, rounds 1 to 4)
+## Known limits (logged by the 0b-1 code audit, rounds 1 to 5)
 
 - **An exact-reverse push trusts its file list.** `push_branch` lets an exact reverse through, even while paused, when every file is in the subject's `reverses_files`. The caller fills that list from the reversed commit. The merge still needs `exact_reverse_ok`, which M10's `checkExactReverse` recomputes from GitHub, so a wrong list can only push a branch, never merge it.
 - **The last good rules on disk.** After a restart, the reader re-checks the saved copy's hash and parse, and uses it again after the next successful GitHub read. If that read finds a new, unapproved version, the saved copy stays the last good one (MAT-3). Anyone who can write the reader's private folder (owner-only) could change it, as they could change the code itself.
@@ -75,6 +75,11 @@ await carryOver({ reviewed, current, between, catchUps, tier1MergesSince, gh: vi
 - **A large catch-up can hold an approved rules change.** The forward-only check reads a compare from the last good version, and a compare of 300 files or more is refused. If `main` moved that far, the change waits (fails closed); a hand re-seed adopts it.
 - **`checkExactReverse` trusts the caller's `main` and file list.** It does not check that the "before" commit it is given is the current `main`, or that the merge request's `files` are the merged commit's. The Merge Gate passes both from its own GitHub reads.
 - **The snapshot's `mac` and `pin_ok` fields are carried, not judged.** In 0b the snapshot answers only `write_production` (always no) and `snapshot_fresh`; a hook that needs a Mac-wide value gets a named action and a test first.
+- **Role profiles are read once.** The engine loads the role profiles once per Claude Code pin and keeps them until the Mini restarts. An edited profile takes effect on restart.
+- **One alert per rules problem, per rules version.** The reader raises an alert once for each product, reason and rules version. If GitHub goes unreachable a second time while the rules are unchanged, the deny still happens but no second alert is sent.
+- **Unknown product-state values load, then deny.** A rules file can name a `product_state_rules` value the engine doesn't know. The file is accepted and the engine denies that state at run time (fail closed), so the checker and the engine disagree on what is valid.
+- **An unchanged rules version skips the rewind check.** When `main`'s rules file is the same version as the one adopted, the reader answers "unchanged" before it checks whether `main` was rewound. The rules in force are the same text either way.
+- **A pattern can still name nothing.** `.` and `..` parts are refused, but a pattern that matches no file in the repository (a typo, or `[abc]`, which is read as a literal name) is accepted, so a protected entry can protect nothing. Brackets stay allowed because real file names use them (`[id].tsx`).
 - **The snapshot checks permission bits only.** macOS access-control lists on the folder or file are not read. Adding one needs the owner's own access, the same as editing the file.
 
 ## Repair files: what the check cannot see

@@ -69,7 +69,9 @@ export function classifyChange(policy, change) {
   }
   if (change.truncated !== undefined && change.truncated !== false) add('unclassifiable', change.truncated === true ? 'file list truncated' : 'truncated is not true or false');
   if (change.labels !== undefined && (!Array.isArray(change.labels) || !change.labels.every((l) => typeof l === 'string'))) add('unclassifiable', 'labels are not a list of names');
-  if (files.length > MAX_FILES) add('unclassifiable', `more than ${MAX_FILES} files`);
+  // GitHub's pull request file list stops at exactly MAX_FILES, so a list that long may be cut off (audit round 5).
+  if (files.length >= MAX_FILES) add('unclassifiable', `${MAX_FILES} files or more`);
+  if (!files.length) add('unclassifiable', 'no files');
 
   let m;
   try { m = matchers(policy); } catch (e) { add('unclassifiable', `rules patterns unreadable: ${e.message}`); return floorOnly(); }

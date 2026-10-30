@@ -96,7 +96,9 @@ test('the cutover stage is first or second, and a missing one reads as first', (
 test('docs_paths defaults to docs/** and can only narrow inside docs/ (R3-m5)', () => {
   assert.deepEqual([...parsePolicy(fixture).policy.docs_paths], ['docs/**']);
   assert.ok(parsePolicy(`${fixture}\ndocs_paths: [docs/notes/**]\n`).ok);
-  for (const wide of ['"**"', 'package.json', '"**/docs/**"', 'app/**', '"docs*/**"', '"{docs,app}/**"', '"docs/../app/**"', '"docs/x/../../app/**"', '"docs/{a,..}/**"', '"docs/./x/**"', '"docs//x/**"', '[]']) {
+  assert.ok(parsePolicy(`${fixture}\ndocs_paths: [docs/notes/]\n`).ok, 'a folder inside docs/ is anchored');
+  for (const wide of ['"**"', 'package.json', '"**/docs/**"', 'app/**', '"docs*/**"', '"{docs,app}/**"', '"docs/../app/**"', '"docs/x/../../app/**"', '"docs/{a,..}/**"', '"docs/./x/**"', '"docs//x/**"', '[]',
+    "'docs/ '", '"docs/\\t"', '"docs/\\u00a0"', '"docs/\\u3000"', '"docs/"', "' docs/research/**'", '"docs/rés/**"']) {
     const text = wide === '[]' ? `${fixture}\ndocs_paths: []\n` : `${fixture}\ndocs_paths: [${wide}]\n`;
     assert.equal(parsePolicy(text).ok, false, wide);
   }
@@ -123,4 +125,28 @@ test('every effect_paths field is a list of readable patterns; a single value or
     assert.ok(text.includes(from), from);
     assert.equal(parsePolicy(text.replace(from, to)).ok, false, to);
   }
+});
+
+test('every pattern list refuses a space at either end or a non-ASCII letter (audit round 5)', () => {
+  for (const [from, to] of [['flag_files: [lib/flags.ts]', "flag_files: ['lib/flags.ts ']"], ['repair_folder: [db/repairs/]', "repair_folder: [' db/repairs/']"],
+    ['sender_paths: [lib/mail/, lib/alerts/]', 'sender_paths: [lib/mail/, "lib/alérts/"]']]) {
+    assert.ok(fixture.includes(from), from);
+    assert.match(parsePolicy(fixture.replace(from, to)).reason, /plain ASCII/, to);
+  }
+});
+
+test('a misspelt effect_paths field is refused, not ignored (audit round 5)', () => {
+  for (const [from, to] of [['    files: [next.config.*', '    file: [next.config.*'], ['    migration_paths:', '    migration_path:']]) {
+    assert.ok(fixture.includes(from), from);
+    assert.match(parsePolicy(fixture.replace(from, to)).reason, /not a known field/, to);
+  }
+});
+
+test('a pattern with a . or .. part is refused in every list, since it can never match (audit round 5)', () => {
+  for (const [from, to] of [['flag_files: [lib/flags.ts]', 'flag_files: [./lib/flags.ts]'], ['repair_folder: [db/repairs/]', 'repair_folder: [db/../repairs/]'],
+    ['    - docs/research/**', "    - 'docs/{a,.}/**'"]]) {
+    assert.ok(fixture.includes(from), from);
+    assert.match(parsePolicy(fixture.replace(from, to)).reason, /\. or \.\. part/, to);
+  }
+  assert.ok(parsePolicy(fixture.replace('flag_files: [lib/flags.ts]', 'flag_files: [.prettierrc, lib/.flags.ts]')).ok, 'a name that starts with a dot is fine');
 });

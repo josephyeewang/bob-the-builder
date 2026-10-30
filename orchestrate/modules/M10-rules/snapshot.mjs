@@ -88,7 +88,8 @@ export function readSnapshot(dir, now = Date.now()) {
 // Hook-time answers, from a readSnapshot() result. Pure: no file or clock reads here.
 //   snapshot_fresh   → allow when the snapshot read cleanly (and, if a product is named, its rules are usable).
 //   write_production → always deny in 0b (MAT-5); a broken snapshot is reported as such, not hidden behind that rule.
-export function snapshotAnswer(snap, action, subject = {}) {
+export function snapshotAnswer(snap, action, subject) {
+  subject = subject && typeof subject === 'object' ? subject : {};
   if (!HOOK_ACTIONS.includes(action)) return { ...deny(`${action} is not answered from the snapshot`), rev: null };
   if (!snap?.ok) return { ...deny(snap?.reason ?? 'snapshot unread'), rev: null };
   if (action === 'snapshot_fresh' && subject.product === undefined) return { ...allow('snapshot fresh'), rev: null };

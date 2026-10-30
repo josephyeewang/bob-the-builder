@@ -125,3 +125,9 @@ test('a named pipe planted at the snapshot path is refused at once, not waited o
     { timeout: 5000, encoding: 'utf8' });
   assert.equal(JSON.parse(out).ok, false);
 });
+
+test('a missing or odd subject is read as none, never a throw (audit round 5)', () => {
+  const snap = readSnapshot(fresh(), T);
+  for (const subject of [null, 'x', 7]) assert.equal(snapshotAnswer(snap, 'snapshot_fresh', subject).decision, 'allow');
+  assert.equal(snapshotAnswer(snap, 'write_production', null).decision, 'deny');
+});
