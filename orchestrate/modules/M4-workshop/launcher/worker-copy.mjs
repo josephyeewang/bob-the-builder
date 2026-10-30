@@ -12,11 +12,12 @@
 import { lstatSync, readdirSync, rmSync, mkdirSync, writeFileSync, realpathSync } from 'node:fs';
 import { join, resolve, sep, dirname, isAbsolute } from 'node:path';
 import { git, gitOk, checkMirror } from '../git/safe-git.mjs';
+import { CLAUDE_NAMES, fold } from '../git/push-refusals.mjs';
 
 // Names Claude reads settings, skills or tool servers from. Compared after NFC folding and
 // lower-casing, because a Mac's disk treats `.Claude` as `.claude`.
-export const PROTECTED_NAMES = Object.freeze(['.claude', '.mcp.json', 'claude.local.md']);
-const fold = (n) => n.normalize('NFC').replace(/[­​-‏⁠-⁤﻿]/g, '').toLowerCase();
+// One definition, in ../git/push-refusals.mjs.
+export const PROTECTED_NAMES = CLAUDE_NAMES;
 export const isProtectedName = (n) => PROTECTED_NAMES.includes(fold(n));
 
 const SHA = /^[0-9a-f]{40}$/;
