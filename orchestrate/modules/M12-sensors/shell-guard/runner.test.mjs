@@ -1,15 +1,19 @@
-import { test } from 'node:test';
+import { after, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { fileURLToPath } from 'node:url';
-import { existsSync, mkdtempSync } from 'node:fs';
+import { existsSync, mkdtempSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, resolve } from 'node:path';
-import { corpus, cases, pathForms, askHook, runCorpus } from './runner.mjs';
+import { corpus, cases, pathForms, askHook, runCorpus, hostDead } from './runner.mjs';
 import { touchCheck } from './selfcheck.mjs';
 
 const fx = (f) => fileURLToPath(new URL(`./fixtures/${f}`, import.meta.url));
 const T = '.env.production';
 const node = process.execPath;
+// Temp folders, removed after the run (round 10 audit 3 minor 4: one held a planted file named like the protected one).
+const made = [];
+const tmp = () => { const d = realpathSync(mkdtempSync(`${tmpdir()}/sg-`)); made.push(d); return d; };
+after(() => { for (const d of made) rmSync(d, { recursive: true, force: true }); });
 
 test('the corpus covers every trick the row names, ~150+ refuse cases, and has allow cases', () => {
   const all = cases(T);
@@ -23,9 +27,8 @@ test('the corpus covers every trick the row names, ~150+ refuse cases, and has a
 
 test('every path form really names the protected file when the shell expands it', async () => {
   const { execFileSync } = await import('node:child_process');
-  const { mkdtempSync, writeFileSync, mkdirSync } = await import('node:fs');
-  const { tmpdir } = await import('node:os');
-  const dir = mkdtempSync(`${tmpdir()}/sg-`);
+  const { writeFileSync, mkdirSync } = await import('node:fs');
+  const dir = tmp();
   mkdirSync(`${dir}/x`);
   writeFileSync(`${dir}/${T}`, 'PLANTED\n');
   for (const [form, p] of Object.entries(pathForms(T))) {
@@ -36,7 +39,7 @@ test('every path form really names the protected file when the shell expands it'
 
 // In-process copies of the two fixture guards (spawning one process per case takes ~45 s); the protocol test below
 // checks they decide as the spawned fixture files do.
-const STRICT = new Set(corpus.allow); // the allow cases, word for word
+const STRICT = new Set(cases(T).filter((c) => c.expect === 'allow').map((c) => c.command)); // the allow cases, word for word
 const strict = (c) => (STRICT.has(c) ? 'allow' : 'refuse');
 const naive = (c) => (c.includes(T) ? 'refuse' : 'allow');
 
@@ -64,11 +67,12 @@ test('protocol: exit 2 and a JSON deny both count as refused; a crash or a hang 
 
 test('a guard that refuses everything fails too (the allow cases)', () => {
   const r = runCorpus('exit 2');
-  assert.equal(r.failures.length, corpus.allow.length);
+  assert.equal(r.failures.length, cases(T).filter((c) => c.expect === 'allow').length);
+  assert.ok(r.failures.some((f) => f.group === 'allow-near'));
 });
 
 test('0b-7 round 9 minor 5: an absolute form, and change-folder-first cases asked from the folder above', () => {
-  const dir = mkdtempSync(`${tmpdir()}/sg-`);
+  const dir = tmp();
   assert.equal(pathForms(T, dir).absolute, `${dir}/${T}`);
   assert.equal(pathForms(`${dir}/${T}`, dir).absolute, undefined, 'an absolute target is already its plain form');
   assert.equal(pathForms(`${dir}/${T}`)['dot-slash'], undefined, 'round 10 M-3: "./" before an absolute path makes it relative');
@@ -80,7 +84,7 @@ test('0b-7 round 9 minor 5: an absolute form, and change-folder-first cases aske
 });
 
 test('planted weak guards: relative-only misses the absolute form; cd-blind misses after-cd even from the file\'s folder', () => {
-  const dir = mkdtempSync(`${tmpdir()}/sg-`);
+  const dir = tmp();
   const target = `${dir}/${T}`;
   const relOnly = (c) => (new RegExp(`(^|[\\s'"(])${T.replace('.', '\\.')}`).test(c) ? 'refuse' : 'allow');
   assert.ok(runCorpus(relOnly, { target: T, cwd: dir }).failures.some((f) => f.form === 'absolute'));
@@ -99,21 +103,19 @@ test('round 10 M-2: a path with a space or shell character is refused, not run a
 });
 
 test('round 10: the ansi-c form reaches the command intact (a string replacement garbled `$\'`)', () => {
-  const ansi = cases(T, mkdtempSync(`${tmpdir()}/sg-`)).filter((c) => c.form === 'ansi-c');
+  const ansi = cases(T, tmp()).filter((c) => c.form === 'ansi-c');
   assert.ok(ansi.length > 20);
   for (const c of ansi) assert.ok(c.command.includes(pathForms(T)['ansi-c']), c.command);
 });
 
 // Every refuse case must really read or write the planted file under bash or zsh, in both runs the README names, and
 // the dead list must hold exactly the template and form pairs that touch nothing. Checked on two names, so the list
-// does not hang on one name's letters (round 10 audit 2 M-2). ~3,600 shell runs, about 30 s.
-// zsh, the Mac's shell, also writes through a brace form after ">"; bash calls it an ambiguous redirect. Without zsh
-// (a Linux CI box) those few cases are excused, by that exact shape.
-const zshOnly = (c) => c.form === 'brace' && /> ?\S*\{/.test(c.command);
+// does not hang on one name's letters (round 10 audit 2 M-2). ~4,000 shell runs, about 35 s.
+// corpus.dead is for a Mac; on a machine without zsh, or whose sh is dash (Linux CI), runner.mjs's hostDead drops the
+// pairs that touch nothing there, and they are left out of both sides here (round 10 audit 3 M-4).
 test('round 10: every refuse case touches the file, and corpus.dead is exactly the pairs that do not, on two names', () => {
   const shells = ['/bin/bash', '/bin/zsh'].filter((s) => existsSync(s));
-  const excuse = shells.includes('/bin/zsh') ? () => false : zshOnly;
-  const listed = Object.entries(corpus.dead).flatMap(([tpl, forms]) => forms.map((form) => `${form} / ${tpl}`)).sort();
+  const listed = Object.entries(corpus.dead).flatMap(([tpl, forms]) => forms.filter((form) => !hostDead(tpl, form)).map((form) => `${form} / ${tpl}`)).sort();
   assert.ok(listed.length > 0);
   const saved = corpus.dead; corpus.dead = {};
   try {
@@ -122,7 +124,7 @@ test('round 10: every refuse case touches the file, and corpus.dead is exactly t
       for (const c of ['relative', 'absolute'].flatMap((mode) => touchCheck(name, { mode, shells }))) {
         const k = `${c.form} / ${c.tpl}`; groups.set(k, [...(groups.get(k) ?? []), c]);
       }
-      const silent = (c) => !c.touchedBy.length && !excuse(c);
+      const silent = (c) => !c.touchedBy.length;
       const dead = [...groups].filter(([, cs]) => cs.every(silent)).map(([k]) => k).sort();
       const bad = [...groups].filter(([, cs]) => !cs.every(silent)).flatMap(([, cs]) => cs.filter(silent));
       assert.deepEqual(bad.map((c) => `[${c.group}/${c.form}] ${c.command}`), [], `${name}: cases that touch nothing`);
@@ -136,4 +138,25 @@ test('round 10 audit 2 M-3: a crude "refuse anything odd" guard fails: plain com
   const { failures } = runCorpus(crude);
   assert.ok(failures.filter((f) => f.expect === 'allow').length >= 5, 'allow cases it refuses');
   for (const form of ['qmark', 'bracket']) assert.ok(failures.some((f) => f.expect === 'refuse' && f.form === form), form);
+});
+
+test('round 10 audit 3 M-1: no guard that matches one piece of the name (or "\\x") passes', () => {
+  for (const name of [T, 'secret.prod']) {
+    const pieces = [...new Set([...Array(name.length - 2).keys()].map((i) => name.slice(i, i + 3)))];
+    for (const piece of pieces) {
+      const guard = (c) => (c.includes(piece) || c.includes('\\x') ? 'refuse' : 'allow');
+      const missed = runCorpus(guard, { target: name }).failures.filter((f) => f.expect === 'refuse');
+      assert.ok(missed.length > 0, `a guard matching "${piece}" passed for ${name}`);
+    }
+  }
+  assert.ok(runCorpus((c) => (/env|\\x/.test(c) ? 'refuse' : 'allow')).failures.length > 0, "the audit's guard");
+});
+
+test('round 10 audit 3 M-3: the hook runs from one folder with CLAUDE_PROJECT_DIR set; only the JSON cwd changes', () => {
+  const home = tmp(); const elsewhere = tmp();
+  const where = `[ "$(pwd -P)" = "$(cd "$CLAUDE_PROJECT_DIR" && pwd -P)" ] || exit 2`;
+  assert.equal(askHook(where, 'ls', { cwd: elsewhere, hookCwd: home }), 'allow');
+  assert.equal(askHook(where, 'ls', { cwd: elsewhere, hookCwd: home, projectDir: elsewhere }), 'refuse');
+  const seen = `"${node}" -e "const j=JSON.parse(require('fs').readFileSync(0,'utf8')); process.exit(j.cwd==='${elsewhere}'&&j.session_id&&j.tool_use_id ? 0 : 2)"`;
+  assert.equal(askHook(seen, 'ls', { cwd: elsewhere, hookCwd: home }), 'allow');
 });

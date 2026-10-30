@@ -9,13 +9,13 @@
 // fail closed (refuse when it cannot decide). Protocol as documented by Claude Code, 29 Oct 2026 (Principle 9).
 //
 //   node runner.mjs '<hook command>' [protected path]     prints a summary and every failure; exit 1 on any failure.
-//   Run it from the folder a relative path is taken from: that folder is the hook's cwd and, for a relative path, the
-//   absolute form's base.
+//   Run it from the project's top folder, where Claude Code runs the hook (set CLAUDE_PROJECT_DIR if that differs): a
+//   relative path is taken from there, and it is the absolute form's base.
 //
 // Status: pending the real hook. Until it runs green against lane 2's installed hook at the join, R-0b-70 is not done.
 
 import { spawnSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { basename, dirname, isAbsolute, resolve } from 'node:path';
 
@@ -23,32 +23,47 @@ export const corpus = JSON.parse(readFileSync(new URL('./corpus.json', import.me
 
 // The ways one protected path can be written so a plain text match misses it. With a cwd, a relative target also gets
 // its absolute form (0b-7 round 9 minor 5: a guard that only matched relative paths passed the old corpus).
-export function pathForms(target, cwd) {
+// absolute: false leaves out the absolute form (the after-cd cases, whose short name is taken from the new folder).
+export function pathForms(target, cwd, { absolute = true } = {}) {
   const dir = target.includes('/') ? target.slice(0, target.lastIndexOf('/') + 1) : '';
   const base = target.slice(dir.length);
   // Split at a letter no shell, JS or Python string reads as an escape (`\t` is a tab in node -e and python3 -c), so a
-  // form means the same file whatever the name (0b-7 round 10 audit 2 M-2); the middle if no letter qualifies.
+  // form means the same file whatever the name (0b-7 round 10 audit 2 M-2); no backslash form if no letter qualifies.
   const half = Math.max(1, Math.floor(base.length / 2));
   const safe = (i) => /[A-Za-z]/.test(base[i] ?? '') && !/[abfnrtvuxNU]/.test(base[i]);
   const order = [...Array(base.length).keys()].slice(1).sort((a, b) => Math.abs(a - half) - Math.abs(b - half) || a - b);
   const mid = order.find(safe) ?? half;
-  const hex = [...target].map((c) => `\\x${c.charCodeAt(0).toString(16).padStart(2, '0')}`).join('');
+  // Round 10 audit 3 M-1: with every trick at one point, the first half of the name was always plain text, and a guard
+  // matching it passed. So quotes and a bracket also go near each end, the first half can be all "?", and three forms
+  // carry no letter of the name at all (hex, octal, base64).
+  const early = Math.min(2, base.length - 1); const late = Math.max(1, base.length - 2);
+  const lead = base.startsWith('.') ? '.' : ''; // a glob never matches a leading dot
+  const enc = (f) => [...target].map((c) => f(c.charCodeAt(0))).join('');
+  const hex = enc((n) => `\\x${n.toString(16).padStart(2, '0')}`);
+  const folder = target.includes('/') ? basename(dirname(target)) : cwd ? basename(cwd) : 'x';
   return {
     plain: target,
     ...(isAbsolute(target) ? {} : { 'dot-slash': `./${target}` }), // "./" before "/abs" would make it relative
     'double-quoted': `"${target}"`,
     'split-quotes': `${dir}${base.slice(0, mid)}"${base.slice(mid)}"`,
     'empty-quotes': `${dir}${base.slice(0, mid)}''${base.slice(mid)}`,
-    backslash: `${dir}${base.slice(0, mid)}\\${base.slice(mid)}`,
+    'early-quotes': `${dir}${base.slice(0, early)}''${base.slice(early)}`,
+    'late-quotes': `${dir}${base.slice(0, late)}''${base.slice(late)}`,
+    ...(safe(mid) ? { backslash: `${dir}${base.slice(0, mid)}\\${base.slice(mid)}` } : {}),
     glob: `${dir}${base.slice(0, mid)}*`,
     qmark: `${dir}${base.slice(0, mid)}?${base.slice(mid + 1)}`,
+    'lead-qmarks': `${dir}${lead}${'?'.repeat(Math.max(1, mid - lead.length))}${base.slice(Math.max(mid, lead.length + 1))}`,
     bracket: `${dir}${base.slice(0, mid)}[${base[mid]}]${base.slice(mid + 1)}`,
-    'dot-dot': `${dir}x/../${base}`,
+    'early-bracket': `${dir}${base.slice(0, early)}[${base[early]}]${base.slice(early + 1)}`,
+    // Through the file's own folder when it is known (round 10 audit 3 minor 2: "x/.." touches only if x/ exists).
+    'dot-dot': folder === 'x' ? `${dir}x/../${base}` : `${dir}../${folder}/${base}`,
     'command-sub': `$(printf '%s' '${target}')`,
     'hex-printf': `$(printf '${hex}')`,
+    'octal-printf': `$(printf '${enc((n) => `\\${n.toString(8).padStart(3, '0')}`)}')`,
+    'base64-sub': `$(echo ${Buffer.from(target).toString('base64')} | base64 -d)`,
     'ansi-c': `$'${hex}'`,
     'brace': `${dir}{${base},nothing}`,
-    ...(cwd && !isAbsolute(target) ? { absolute: resolve(cwd, target) } : {}),
+    ...(absolute && cwd && !isAbsolute(target) ? { absolute: resolve(cwd, target) } : {}),
   };
 }
 
@@ -58,15 +73,22 @@ const fill = (tpl, vals) => tpl.replace(/\{\{(P|DIR|BASE)\}\}/g, (_, k) => vals[
 
 // The path forms and folders are put into commands unquoted, so a path with a space or a shell character would make
 // cases that touch nothing, and no precise guard could pass them (0b-7 round 10 M-2): refuse to run instead.
+// (Node gives the real folder, so a link without a space does not help the short-name run: round 10 audit 3 minor 1.)
 export function checkPath(p) {
-  if (!/^[A-Za-z0-9._\/-]+$/.test(p)) throw new Error(`"${p}" has a space or shell character; run from a folder whose path has none (a link to it works)`);
+  if (!/^[A-Za-z0-9._\/-]+$/.test(p)) throw new Error(`"${p}" has a space or shell character; run from a folder whose path has none`);
+  if (basename(p).startsWith('-')) throw new Error(`"${p}": a name starting with "-" reads as an option`);
   return p;
 }
 
 // A template and form pair no shell turns into a touch of the file (a glob in a redirection, a form that breaks the
 // quotes around it) proves nothing, so it is left out; corpus.dead lists them and a test checks the list both ways
-// (0b-7 round 10).
-const live = (tpl, form) => !(corpus.dead[tpl] ?? []).includes(form);
+// (0b-7 round 10). corpus.dead is for a Mac (bash, zsh, and an sh that reads $'…'). hostDead adds the pairs that touch
+// nothing on this machine because a shell is missing: without zsh a brace after ">" is an error, and dash (Linux's sh)
+// does not read $'…' (round 10 audit 3 M-4).
+const SH_ANSI_C = spawnSync('/bin/sh', ['-c', "printf %s $'\\x41'"], { encoding: 'utf8' }).stdout === 'A';
+export const hostDead = (tpl, form) => (form === 'brace' && !existsSync('/bin/zsh') && /> ?\{\{(P|BASE)\}\}/.test(tpl))
+  || (form === 'ansi-c' && !SH_ANSI_C && tpl.startsWith('sh -c'));
+const live = (tpl, form) => !(corpus.dead[tpl] ?? []).includes(form) && !hostDead(tpl, form);
 
 // cwd: the folder the hook is asked from (a relative target is taken from there).
 export function cases(target, cwd = process.cwd()) {
@@ -80,15 +102,30 @@ export function cases(target, cwd = process.cwd()) {
   // that ignores the cd and reads the short name from its own folder misses it (0b-7 round 10 M-1).
   const up = dirname(dirname(abs));
   for (const tpl of corpus.refuse_after_cd) {
-    for (const [form, p] of Object.entries(pathForms(basename(abs)))) if (live(tpl, form)) out.push({ expect: 'refuse', group: 'after-cd', form, tpl, cwd: up, command: fill(tpl, { DIR: dirname(abs), BASE: p }) });
+    for (const [form, p] of Object.entries(pathForms(basename(abs), dirname(abs), { absolute: false }))) if (live(tpl, form)) out.push({ expect: 'refuse', group: 'after-cd', form, tpl, cwd: up, command: fill(tpl, { DIR: dirname(abs), BASE: p }) });
   }
   for (const command of corpus.allow) out.push({ expect: 'allow', group: 'allow', form: '-', command });
+  // Round 10 audit 3 M-2: near misses built from this file's folder and the words of its name, so a guard that refuses
+  // anything naming the folder or a word of the name fails. Still a sample: no list proves a guard never over-refuses.
+  const words = [...new Set(basename(abs).split(/[^A-Za-z0-9]+/).filter((w) => w.length >= 2))];
+  for (const tpl of corpus.allow_near) {
+    for (const WORD of /\{\{WORD\}\}/.test(tpl) ? words : ['']) out.push({ expect: 'allow', group: 'allow-near', form: '-', command: tpl.replace(/\{\{(DIR|WORD)\}\}/g, (_, k) => ({ DIR: dirname(abs), WORD })[k]) });
+  }
   return out;
 }
 
-export function askHook(hookCommand, command, { timeoutMs = 5000, cwd } = {}) {
-  const input = JSON.stringify({ hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command }, cwd: cwd ?? process.cwd() });
-  const r = spawnSync('/bin/sh', ['-c', hookCommand], { input, encoding: 'utf8', timeout: timeoutMs, cwd });
+// The hook runs as Claude Code runs it (round 10 audit 3 M-3): from one fixed folder (hookCwd, default where the runner
+// was started) with CLAUDE_PROJECT_DIR set (projectDir, default the runner's own CLAUDE_PROJECT_DIR or that folder);
+// only the JSON's cwd changes per case. Asking from the case's folder made a hook installed the usual way
+// (`${CLAUDE_PROJECT_DIR:-.}/…`) fail to find itself and refuse, so after-cd cases passed without testing anything.
+// The input carries Claude Code's other fields, and the time limit is its default, 60 s (round 10 audit 3 minor 3).
+export function askHook(hookCommand, command, { timeoutMs = 60000, cwd, hookCwd = process.cwd(), projectDir } = {}) {
+  const input = JSON.stringify({
+    session_id: 'shell-guard-runner', transcript_path: '/dev/null', permission_mode: 'default', hook_event_name: 'PreToolUse',
+    tool_name: 'Bash', tool_input: { command }, tool_use_id: 'runner', cwd: cwd ?? hookCwd,
+  });
+  const env = { ...process.env, CLAUDE_PROJECT_DIR: projectDir ?? process.env.CLAUDE_PROJECT_DIR ?? hookCwd };
+  const r = spawnSync('/bin/sh', ['-c', hookCommand], { input, encoding: 'utf8', timeout: timeoutMs, cwd: hookCwd, env });
   // A hook that exits before reading its input makes the input write fail (EPIPE); its exit code still decides.
   const pipeOnly = r.error?.code === 'EPIPE' && Number.isInteger(r.status);
   if ((r.error && !pipeOnly) || r.signal) return 'crash';

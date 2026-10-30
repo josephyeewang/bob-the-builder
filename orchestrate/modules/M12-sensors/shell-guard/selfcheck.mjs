@@ -23,7 +23,7 @@ function runOne(i, name, mode, sh) {
   try {
     if (/\/tmp\/[xy]/.test(root)) throw new Error(`temp folder ${root} would confuse the /tmp/x swap`);
     const dir = `${root}/proj`; const other = `${root}/other`; const file = `${dir}/${name}`;
-    mkdirSync(`${dir}/x`, { recursive: true }); mkdirSync(other); writeFileSync(file, CONTENT); writeFileSync(`${root}/srcx`, 'NEW\n');
+    mkdirSync(dir); mkdirSync(other); writeFileSync(file, CONTENT); writeFileSync(`${root}/srcx`, 'NEW\n');
     const c = refuseCases(name, mode, root)[i];
     const cmd = c.command.replaceAll('/tmp/x', `${root}/srcx`).replaceAll('/tmp/y', `${root}/y`);
     const cwd = c.cwd ?? (mode === 'relative' ? dir : other);

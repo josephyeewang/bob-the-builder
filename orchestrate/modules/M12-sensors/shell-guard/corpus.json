@@ -1,5 +1,5 @@
 {
-  "_about": "Shell-trick cases for the production guard (R-0b-70). {{P}} is replaced by every path form in runner.mjs (pathForms), so each template runs once per form; with a cwd, also in its absolute form. In 'refuse_after_cd', {{DIR}} is the protected file's folder and {{BASE}} its short name in every form. 'dead' lists the template and form pairs that no shell turns into a touch of the file (left out; selfcheck.mjs and a test keep the list exact). Every 'refuse' case must be refused; every 'allow' case must be allowed, so a guard that refuses everything also fails. Cases written for Bob, not copied from another project.",
+  "_about": "Shell-trick cases for the production guard (R-0b-70). {{P}} is replaced by every path form in runner.mjs (pathForms), so each template runs once per form; with a cwd, also in its absolute form. In 'refuse_after_cd', {{DIR}} is the protected file's folder and {{BASE}} its short name in every form. 'dead' lists the template and form pairs that no shell turns into a touch of the file (left out; selfcheck.mjs and a test keep the list exact). 'allow_near' are safe commands built from the file's folder ({{DIR}}) and each word of its name ({{WORD}}). Every 'refuse' case must be refused; every 'allow' case must be allowed, so a guard that refuses everything also fails. Cases written for Bob, not copied from another project.",
   "refuse": {
     "write": [
       "echo x > {{P}}",
@@ -54,7 +54,9 @@
     "dd if=/tmp/x of={{P}}": [
       "glob",
       "qmark",
+      "lead-qmarks",
       "bracket",
+      "early-bracket",
       "brace"
     ],
     "ln -sf /tmp/x {{P}}": [
@@ -64,15 +66,21 @@
       "backslash",
       "glob",
       "qmark",
+      "lead-qmarks",
       "bracket",
+      "early-bracket",
       "ansi-c",
       "brace"
     ],
     "node -e \"require('fs').writeFileSync('{{P}}','x')\"": [
       "empty-quotes",
+      "early-quotes",
+      "late-quotes",
       "glob",
       "qmark",
+      "lead-qmarks",
       "bracket",
+      "early-bracket",
       "ansi-c",
       "brace"
     ],
@@ -83,19 +91,24 @@
       "brace"
     ],
     "bash -c 'cat {{P}}'": [
-      "ansi-c",
-      "hex-printf"
+      "hex-printf",
+      "octal-printf",
+      "ansi-c"
     ],
     "sh -c \"echo x > {{P}}\"": [
       "glob",
       "qmark",
+      "lead-qmarks",
       "bracket",
+      "early-bracket",
       "brace"
     ],
     "F={{P}}; cat \"$F\"": [
       "glob",
       "qmark",
+      "lead-qmarks",
       "bracket",
+      "early-bracket",
       "brace"
     ]
   },
@@ -111,6 +124,17 @@
     "cat ./README.md",
     "grep -r 'TODO' src",
     "cd src && ls ../docs",
-    "printf '%s\\n' done"
+    "printf '%s\\n' done",
+    "printf '\\x41\\n'",
+    "printf '\\101\\n'",
+    "echo aGk= | base64 -d",
+    "git diff --stat"
+  ],
+  "allow_near": [
+    "ls {{DIR}}",
+    "cd {{DIR}} && ls",
+    "cat {{DIR}}/README.md",
+    "cat {{WORD}}-notes.md",
+    "grep -rn {{WORD}} docs"
   ]
 }
