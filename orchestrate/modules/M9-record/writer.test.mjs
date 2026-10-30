@@ -261,7 +261,7 @@ test('verified needs a passing verdict for the current head from a reviewer laun
   must(put(env.record, 'workshop', 'card', 'C-1', { head: HEAD }));
   must(env.record.applyOutbox({ role: 'worker', sessionId: 'S-1', card: 'C-1' }, outboxFile(env, 'worker', 'S-1', 'handin-v.md', `${JSON.stringify({ entity: 'card', id: 'C-1', from_state: 'running', to_state: 'in_review' })}\n`)));
   const vfile = (sid, name, header) => outboxFile(env, 'reviewer', sid, name, `${JSON.stringify(header)}\n`);
-  const apply = (sid, name, header) => env.record.applyOutbox({ role: 'reviewer', sessionId: sid, card: 'C-1' }, vfile(sid, name, header));
+  const apply = (sid, name, header) => env.review.applyOutbox({ role: 'reviewer', sessionId: sid, card: 'C-1' }, vfile(sid, name, header));
   const hdr = (fields, over = {}) => ({ entity: 'verdict', card: 'C-1', expectRev: env.record.read('card', 'C-1').rev, fields, ...over });
   // The verdict file's own checks.
   refused(apply('R-1', 'verdict-a.md', hdr({ head: HEAD, pass: true, state: 'verified' })), /may not set state/);
@@ -269,27 +269,31 @@ test('verified needs a passing verdict for the current head from a reviewer laun
   refused(apply('R-1', 'verdict-c.md', hdr({ head: HEAD, pass: 'yes' })), /pass: true or false/);
   refused(apply('R-1', 'verdict-d.md', hdr({ head: HEAD, pass: true }, { card: 'C-2' })), /own card/);
   refused(apply('R-1', 'verdict-e.md', hdr({ head: HEAD, pass: true }, { expectRev: 1 })), /changed since read/);
-  // A passing verdict from a session never launched on this card doesn't count.
-  must(apply('R-1', 'verdict-f.md', hdr({ head: HEAD, pass: true })), 'unlaunched verdict stored');
+  // A verdict from a session the launcher never recorded is refused at intake (L44 planted case).
+  refused(apply('R-1', 'verdict-f.md', hdr({ head: HEAD, pass: true })), /no launch of reviewer session R-1 on C-1/);
   refused(put(env.record, 'dispatcher', 'card', 'C-1', { state: 'verified' }), /no passing verdict/);
   // A reviewer launched for another head doesn't verify this one (round 5 m-4).
   must(env.record.write({ actor: 'dispatcher', entity: 'launch', id: 'launch-R-3', expectRev: 0,
     doc: { session_id: 'R-3', role: 'reviewer', card: 'C-1', head: HEAD2, rev: 1, launched_at: iso(env.clock.t) } }), 'launch for another head');
-  must(apply('R-3', 'verdict-f2.md', hdr({ head: HEAD, pass: true })), 'a pass from a reviewer launched on another head');
+  refused(apply('R-3', 'verdict-f2.md', hdr({ head: HEAD, pass: true })), /no launch of reviewer session R-3 on C-1 at head aaaaaaa/);
   refused(put(env.record, 'dispatcher', 'card', 'C-1', { state: 'verified' }), /no passing verdict/);
   launch(env, 'C-1', 'R-2');
   must(apply('R-2', 'verdict-g.md', hdr({ head: HEAD, pass: false })), 'a fail');
   refused(put(env.record, 'dispatcher', 'card', 'C-1', { state: 'verified' }), /no passing verdict/);
-  must(apply('R-2', 'verdict-h.md', hdr({ head: HEAD2, pass: true })), 'a pass for another head');
+  // A verdict naming a head the session wasn't launched on is refused at intake (L44 planted case).
+  refused(apply('R-2', 'verdict-h.md', hdr({ head: HEAD2, pass: true })), /no launch of reviewer session R-2 on C-1 at head bbbbbbb/);
   refused(put(env.record, 'dispatcher', 'card', 'C-1', { state: 'verified' }), /no passing verdict for head aaaaaaa/);
-  must(apply('R-2', 'verdict-i.md', hdr({ head: HEAD, pass: true })), 'the pass');
+  // One verdict per session: R-2 already said fail, so a second file is refused and a pass needs a new launch.
+  refused(apply('R-2', 'verdict-i0.md', hdr({ head: HEAD, pass: true })), /already given its verdict/);
+  launch(env, 'C-1', 'R-5');
+  must(apply('R-5', 'verdict-i.md', hdr({ head: HEAD, pass: true })), 'the pass');
   must(put(env.record, 'dispatcher', 'card', 'C-1', { state: 'verified' }), 'verified');
   // A new head after verification sends it back to review.
   refused(put(env.record, 'workshop', 'card', 'C-1', { head: HEAD2 }), /sends it back to in_review/);
   must(put(env.record, 'workshop', 'card', 'C-1', { head: HEAD2, state: 'in_review' }), 'push after verify');
   // A head pushed while a verified card waits doesn't come back verified unreviewed (0b-2 audit round 3 MAT-A).
   // The new head needs a reviewer launched on it: R-2 was launched on the old one (round 5 m-4).
-  must(apply('R-2', 'verdict-j0.md', hdr({ head: HEAD2, pass: true })), 'a pass from the old head\'s reviewer');
+  refused(apply('R-2', 'verdict-j0.md', hdr({ head: HEAD2, pass: true })), /no launch of reviewer session R-2/);
   refused(put(env.record, 'dispatcher', 'card', 'C-1', { state: 'verified' }), /no passing verdict for head bbbbbbb/);
   must(env.record.write({ actor: 'dispatcher', entity: 'launch', id: 'launch-R-4', expectRev: 0,
     doc: { session_id: 'R-4', role: 'reviewer', card: 'C-1', head: HEAD2, rev: 1, launched_at: iso(env.clock.t) } }), 'launch on the new head');

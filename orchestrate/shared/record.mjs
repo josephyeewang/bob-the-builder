@@ -69,6 +69,11 @@ export const OUTBOX_KIND_PATTERN = /^[a-z]+(-[a-z]+)*-$/;
 export const ENTITIES = Object.freeze(['card', 'ask', 'go', 'verdict', 'session', 'merge', 'fact', 'product',
   'handoff', 'report', 'lesson', 'launch', 'merge_request']);
 
+// The reviewer's fixed checklist (design I1): one line per Quality leg, each with the worst finding on it. A reviewer
+// verdict missing a line is no verdict (Merge Gate refusal 5). An auditor's verdict says its Material count instead.
+export const VERDICT_CHECKLIST = Object.freeze(['correct', 'well_built', 'works_for_user', 'holds_up']);
+export const CHECKLIST_LEVELS = Object.freeze(['clean', 'cosmetic', 'minor', 'material']);
+
 // Card kinds (0b-2 R3-M3). Set once, at create, by the creator M9's permissions name. `exact_reverse` is the undo card.
 export const CARD_KINDS = Object.freeze(['ordinary', 'fix', 'exact_reverse', 'lead_daily_card', 'research_copy']);
 

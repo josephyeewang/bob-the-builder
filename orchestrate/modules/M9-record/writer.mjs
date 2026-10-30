@@ -15,7 +15,7 @@
 import { createHash } from 'node:crypto';
 import { hostname } from 'node:os';
 import { basename } from 'node:path';
-import { CARD_KINDS, ENTITIES, FINAL_STATES, SESSION_ID, STATES, WAIT_FIELDS, WAIT_WHO, isOpen, makeRecord, missingFields, timeoutFor } from '../../shared/record.mjs';
+import { CARD_KINDS, CHECKLIST_LEVELS, ENTITIES, FINAL_STATES, SESSION_ID, STATES, WAIT_FIELDS, WAIT_WHO, isOpen, makeRecord, missingFields, timeoutFor, VERDICT_CHECKLIST } from '../../shared/record.mjs';
 import { canonicalJson } from '../../shared/plan-fingerprint.mjs';
 import { CREATE_STATES, INTERNAL_MOVES, moveActors } from './moves.mjs';
 import { PLAN_INPUTS, actorName, fieldsAllowed, mayCreateKind } from './permissions.mjs';
@@ -307,12 +307,13 @@ export function openRecord({ root, product, ownerUid, rules, alert = () => {}, n
     return { ok: true };
   }
 
-  // in_review → verified (R2-M7): a passing verdict for this head, from a reviewer or auditor launched on this card for this head (round 5 m-4).
+  // in_review → verified (R2-M7): a passing verdict for this head, from a reviewer or auditor launched on this card for this head (round 5 m-4),
+  // read from the review user's own outbox (L44: outbox_uid is set only by the outbox intake).
   function verdictFor(tx, cardId, doc) {
     if (typeof doc.head !== 'string' || !HEX40.test(doc.head)) return no('the card has no head to verify');
     const launches = tx.list('launch').filter((l) => l.doc.card === cardId && (l.doc.role === 'reviewer' || l.doc.role === 'auditor'));
     const ok = tx.list('verdict').find((v) => v.doc.card === cardId && v.doc.head === doc.head && v.doc.pass === true
-      && /^(reviewer|auditor):/.test(v.createdBy) && launches.some((l) => l.doc.session_id === v.doc.session_id && l.doc.head === doc.head && v.createdBy === `${l.doc.role}:${l.doc.session_id}`));
+      && Number.isInteger(v.doc.outbox_uid) && /^(reviewer|auditor):/.test(v.createdBy) && launches.some((l) => l.doc.session_id === v.doc.session_id && l.doc.head === doc.head && v.createdBy === `${l.doc.role}:${l.doc.session_id}`));
     return ok ? { ok: true } : no(`no passing verdict for head ${doc.head.slice(0, 7)} from a reviewer launched on this card`);
   }
 
@@ -443,12 +444,23 @@ export function openRecord({ root, product, ownerUid, rules, alert = () => {}, n
       const c = tx.current('card', tag.card);
       if (!c || c.tampered) return no(c?.reason ?? `no card ${tag.card}`);
       if (c.rev !== h.expectRev) return no(`changed since read (rev ${c.rev}, expected ${h.expectRev})`);
-      const extra = Object.keys(fields).filter((k) => !['head', 'pass', 'notes'].includes(k));
+      const extra = Object.keys(fields).filter((k) => !['head', 'pass', 'notes', 'checklist', 'material'].includes(k));
       if (extra.length) return no(`a verdict may not set ${extra.join(', ')}`);
       if (typeof fields.head !== 'string' || !HEX40.test(fields.head)) return no('a verdict names the 40-hex head it reviewed');
       if (typeof fields.pass !== 'boolean') return no('a verdict says pass: true or false');
+      if (fields.checklist !== undefined) {
+        const cl = fields.checklist;
+        if (!cl || typeof cl !== 'object' || Array.isArray(cl) || Object.keys(cl).some((k) => !VERDICT_CHECKLIST.includes(k))
+          || Object.values(cl).some((v) => !CHECKLIST_LEVELS.includes(v))) return no(`checklist lines are ${VERDICT_CHECKLIST.join(', ')}, each ${CHECKLIST_LEVELS.join('|')}`);
+      }
+      if (fields.material !== undefined && !(Number.isInteger(fields.material) && fields.material >= 0)) return no('material is a whole-number count');
+      // L44: only a session the launcher recorded as this role, on this card, at this exact head, may give a verdict.
+      if (!tx.list('launch').some((l) => l.doc.session_id === tag.sessionId && l.doc.role === tag.role && l.doc.card === tag.card && l.doc.head === fields.head))
+        return no(`no launch of ${tag.role} session ${tag.sessionId} on ${tag.card} at head ${fields.head.slice(0, 7)}: a verdict counts only from a launched reviewer, for the head it was launched on`);
+      // One verdict per session (D12, 0b-9 M6): a reviewer that changes its mind is a new launch, never a second file.
+      if (tx.list('verdict').some((v) => v.doc.session_id === tag.sessionId)) return no(`session ${tag.sessionId} has already given its verdict; a second is refused`);
       const id = `verdict-${tag.sessionId}-${tx.nextSeq()}`;
-      const doc = { session_id: tag.sessionId, role: tag.role, card: tag.card, card_rev: c.rev, head: fields.head, pass: fields.pass, notes: fields.notes ?? null, text: f.body, source_key: f.key };
+      const doc = { session_id: tag.sessionId, role: tag.role, card: tag.card, card_rev: c.rev, head: fields.head, pass: fields.pass, notes: fields.notes ?? null, checklist: fields.checklist ?? null, material: fields.material ?? null, text: f.body, source_key: f.key, outbox_uid: f.owner_uid };
       return applyWrite(tx, { entity: 'verdict', id, expectRev: 0, doc, kind: 'verdict' }, actor);
     }
     if (f.kind === 'roadmap-') {

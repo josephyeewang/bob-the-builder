@@ -37,6 +37,7 @@ export const KEYS = Object.freeze({
   approvals: { required: false, type: 'map' }, 'approvals.decisions_dir': { required: false, type: 'text' },
   product_profile: { required: false, type: 'map' }, 'product_profile.required_checks': { required: false, type: 'list' },
   'product_profile.audit_workflow': { required: false, type: 'map' },
+  'product_profile.checks_ignored': { required: false, type: 'list' }, 'product_profile.robot': { required: false, type: 'map' },   // M6
   repairs: { required: false, type: 'map' }, 'repairs.max_statements': { required: false, type: 'text' },
   'repairs.allowed_functions': { required: false, type: 'list' },
   roles_enabled: { required: false, type: 'map' }, onboarding: { required: false, type: 'map' },
