@@ -84,7 +84,7 @@ export function classifyChange(policy, change) {
     add('unclassifiable', 'no readable rules at this commit');
     return floorOnly();
   }
-  const files = change?.files;
+  const files = readFilesOnce(change?.files);
   if (!Array.isArray(files)) {
     add('unclassifiable', 'no file list');
     return finish(reasons, protectedPaths, 1);
@@ -163,9 +163,10 @@ export function classifyChange(policy, change) {
     }
   }
 
-  // A `needs-joe` label adds `unclassifiable`; `needs-joe:<class>` adds that class. Neither removes one (MIN-3). Case and
-  // anything that isn't a letter or digit before or between the words don't matter (`[needs.joe]`), and any other
-  // needs-joe label is unclassifiable (rounds 10 to 12).
+  // A `needs-joe` label adds `unclassifiable`; `needs-joe:<class>` adds that class. Neither removes one (MIN-3). Case,
+  // accents, look-alike letters from other scripts, and anything that isn't a letter (digits, spaces, dots, invisible
+  // fillers) before or between the words don't matter (`[needs.joe]`, `needs1joe`), and any other needs-joe label is
+  // unclassifiable (rounds 10 to 14).
   for (const label of Array.isArray(change.labels) ? change.labels : []) {
     const l = needsJoe(label);
     if (l === null) continue;
@@ -175,16 +176,36 @@ export function classifyChange(policy, change) {
   return finish(reasons, protectedPaths, tier);
 }
 
-// Cyrillic and Greek letters that look like the Latin ones in "needs joe" (audit round 13).
-const LOOK_ALIKES = { 'а': 'a', 'е': 'e', 'ё': 'e', 'о': 'o', 'с': 'c', 'ѕ': 's', 'ј': 'j', 'і': 'i', 'ԁ': 'd', 'ո': 'n', 'ο': 'o', 'ε': 'e', 'η': 'n', 'ν': 'v', 'ϳ': 'j', 'ꜱ': 's', 'ɴ': 'n', 'ᴇ': 'e', 'ᴏ': 'o', 'ᴊ': 'j', 'ᴅ': 'd' };
+// Letters from other scripts that look like the Latin ones in "needs joe": capitals are mapped before lowercasing (Greek
+// capital Nu lowercases to nu, which looks like v), the rest after (audit rounds 13 and 14). A label only ever makes
+// an answer stricter, so this guards against a mistyped label, not an attacker.
+const UPPER_LOOK_ALIKES = { 'Ν': 'n', 'Ε': 'e', 'Ο': 'o', 'Ϳ': 'j', 'Ѕ': 's', 'Ј': 'j', 'Е': 'e', 'О': 'o', 'Ꭻ': 'j', 'Ꭴ': 'o', 'Ꭼ': 'e' };
+const LOOK_ALIKES = { 'а': 'a', 'е': 'e', 'ё': 'e', 'о': 'o', 'с': 'c', 'ѕ': 's', 'ј': 'j', 'і': 'i', 'ԁ': 'd', 'ո': 'n', 'ο': 'o', 'ε': 'e', 'η': 'n', 'ν': 'v', 'ϳ': 'j', 'ꜱ': 's', 'ɴ': 'n', 'ᴇ': 'e', 'ᴏ': 'o', 'ᴊ': 'j', 'ᴅ': 'd', 'ȷ': 'j', 'օ': 'o',
+  'ꭻ': 'j', 'ꭴ': 'o', 'ꭼ': 'e', 'ꓠ': 'n', 'ꓰ': 'e', 'ꓓ': 'd', 'ꓢ': 's', 'ꓙ': 'j', 'ꓳ': 'o' };
 const MAX_CHANGE_TEXT = 5_000_000;
+const MAX_LINES = 1_000_000;   // a longer line list is not read: it is not a list of lines (audit round 14)
+
+// Each file and its line lists, read once. A getter or proxy can't show one list to one check and another to the
+// next: every check judges this copy (audit round 14). A list too long to read becomes a note, which no check takes
+// for lines. Throws on a hostile object; the shared interface turns a throw into a deny.
+export function readFilesOnce(files) {
+  if (!Array.isArray(files)) return files;
+  const lines = (v) => (Array.isArray(v) ? (v.length > MAX_LINES ? `more than ${MAX_LINES} lines` : Array.from(v)) : v);
+  return Array.from(files, (f) => {
+    if (!f || typeof f !== 'object') return f;
+    const copy = { ...f };
+    for (const side of ['added_lines', 'removed_lines']) if (side in copy) copy[side] = lines(copy[side]);
+    return copy;
+  });
+}
 
 // A label's text after "needs joe" (in any spelling), or null when it isn't a needs-joe label.
 export function needsJoe(label) {
   if (typeof label !== 'string') return null;
-  const l = label.normalize('NFKD').replace(/[\p{M}\p{Cf}]/gu, '').toLowerCase().replace(/[^\x00-\x7f]/g, (c) => LOOK_ALIKES[c] ?? c).trim();
-  const m = /^[^\p{L}\p{N}]*needs[^\p{L}\p{N}]*joe/u.exec(l);
-  return m ? l.slice(m[0].length).trim() : null;
+  const l = label.normalize('NFKD').replace(/[\p{M}\p{Cf}]/gu, '').replace(/./gsu, (c) => UPPER_LOOK_ALIKES[c] ?? c)
+    .toLowerCase().replace(/[^\x00-\x7f]/gu, (c) => LOOK_ALIKES[c] ?? c).replace(/[^a-z_:]/g, '');
+  const m = /^[_:]*needs[_:]*joe/.exec(l);
+  return m ? l.slice(m[0].length) : null;
 }
 
 function finish(reasons, protectedPaths, tier) {

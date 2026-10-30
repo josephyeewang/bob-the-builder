@@ -15,7 +15,7 @@
 //     clock()       → ms since epoch; the only clock used (subject.now is ignored, R3-m9)
 
 import { allow, ask, deny } from '../../shared/rules.mjs';
-import { classifyChange, needsJoe, MAX_FILES } from './classify.mjs';
+import { classifyChange, needsJoe, readFilesOnce, MAX_FILES } from './classify.mjs';
 import { compileList, pathProblem } from './paths.mjs';
 import { PRODUCT_STATES, HOURS, validZone, compareVersions } from './policy.mjs';
 import { loadRoles, profileFor } from './roles.mjs';
@@ -246,7 +246,8 @@ export function makeEngine({ products, rulesState, productState, running, rolesD
     });
   }
 
-  function merge(s) {
+  function merge(subject) {
+    const s = { ...subject, files: readFilesOnce(subject.files) };
     const pol = policyOf(s.product);
     checkFiles(s.files);
     // A field of the wrong type is a caller fault: refuse it rather than read it as "no" (audit round 3).
@@ -270,11 +271,13 @@ export function makeEngine({ products, rulesState, productState, running, rolesD
       if ((s.labels ?? []).some((l) => needsJoe(l) !== null)) return ask(1, 'exact reverse Joe was asked to see');
       // A code file can hold a database change outside the migration folders, so the undo of one needs both sides of
       // its diff scanned: the lines it removes and the lines it puts back. Without them, with no lines on either side, or
-      // with no lines for a file that was wholly removed or added, ask (audit rounds 7, 8 and 9).
+      // with no lines for a file that was wholly removed or added, ask (audit rounds 7, 8 and 9). A renamed or copied
+      // file's diff shows only what changed from its source, never the content it carries over, so it asks too (round 14).
       const code = new Set((c.reasons.unclassifiable ?? []).filter((r) => r.startsWith('scan_not_built: ')).map((r) => r.slice('scan_not_built: '.length)));
       const unread = (f) => !Array.isArray(f.removed_lines) || !Array.isArray(f.added_lines)
         || (!f.removed_lines.length && !f.added_lines.length)
-        || (f.status === 'removed' && !f.removed_lines.length) || (f.status === 'added' && !f.added_lines.length);
+        || (f.status === 'removed' && !f.removed_lines.length) || (f.status === 'added' && !f.added_lines.length)
+        || f.status === 'renamed' || f.status === 'copied' || f.previous_path !== undefined;
       if (s.files.some((f) => (code.has(f.path) || code.has(f.previous_path)) && unread(f))) return ask(1, 'exact reverse of code without its lines');
       if (s.reversed_audit === 'failure') return allow('exact reverse of a merge whose audit failed');
       if (!c.risky.length && c.tier === 2) return allow('exact reverse of an ordinary change');

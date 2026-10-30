@@ -483,3 +483,36 @@ test('merge: undo gaps from audit round 10 — audit "none" on code asks; one em
   assert.equal(mergeOf(w, [file('lib/x.ts', 'removed', { removed_lines: [], added_lines: [''] })], reverse('failure')).reason, 'exact reverse of code without its lines');
   assert.equal(mergeOf(w, [file('lib/x.ts', 'added', { added_lines: [], removed_lines: [''] })], reverse('failure')).reason, 'exact reverse of code without its lines');
 });
+
+test('merge: undo gaps from audit round 14 — renames and copies, look-alike labels, huge line lists, lines that change between reads', () => {
+  const w = world({ states: { app: { state: 'paused' } }, now: AT_03 });
+  const undo = (files, extra = {}) => mergeOf(w, files, reverse('failure', extra));
+  // A renamed or copied file's diff never shows the content it carries over.
+  for (const f of [file('lib/run.sql', 'renamed', { previous_path: 'docs/research/a.md', added_lines: [''], removed_lines: [] }),
+    file('supabase/seed.sql', 'renamed', { previous_path: 'lib/a.sql', added_lines: [''], removed_lines: [] }),
+    file('supabase/migrations/0001.sql', 'copied', { previous_path: 'lib/a.sql', added_lines: [''], removed_lines: [] }),
+    file('scripts/x.sh', 'copied', { previous_path: 'docs/research/a.md', added_lines: [], removed_lines: [''] }),
+    file('lib/b.ts', 'modified', { previous_path: 'lib/a.ts', added_lines: [''], removed_lines: [''] })]) {
+    assert.equal(undo([f]).decision, 'ask', `${f.previous_path} -> ${f.path}`);
+  }
+  assert.equal(undo([file('docs/research/b.md', 'renamed', { previous_path: 'docs/research/a.md' })]).decision, 'allow', 'a doc renamed to a doc');
+  // Labels in other scripts or with invisible fillers, on a doc-only undo.
+  for (const label of ['ΝEEDS-JOE', 'Νeeds joe', 'needsㅤjoe', 'needsﾠjoe', 'needsᅟjoe', 'ㅤneeds-joe', 'needs-ȷoe', 'needs-jօe',
+    'ꓠꓰꓰꓓꓢ-ꓙꓳꓰ', 'needs-ᎫᎤᎬ', 'needs1joe', 'n e e d s joe']) {
+    assert.equal(undo([file('docs/research/x.md')], { labels: [label] }).decision, 'ask', JSON.stringify(label));
+  }
+  // A line list too long to read, even of empty lines, is quick and asks.
+  const t0 = Date.now();
+  assert.equal(undo([file('lib/a.ts', 'modified', { added_lines: new Array(2_000_001).fill(''), removed_lines: [''] })]).decision, 'ask');
+  assert.ok(Date.now() - t0 < 1500, `took ${Date.now() - t0} ms`);
+  // A code file with no removed_lines field asks, not just denies.
+  assert.equal(undo([file('lib/a.ts', 'modified', { added_lines: [''] })]).reason, 'exact reverse of code without its lines');
+  // A getter that shows a database change on only one read: the lines are read once, and every check judges that copy.
+  for (let n = 1; n <= 3; n++) {
+    let reads = 0;
+    const f = { path: 'lib/a.ts', status: 'modified', removed_lines: [''], get added_lines() { reads++; return reads === n ? ['DROP TABLE x'] : ['']; } };
+    const d = undo([f]).decision;
+    assert.equal(reads, 1, 'the lines are read once');
+    assert.equal(d, n === 1 ? 'ask' : 'allow', `the database line shown on read ${n}`);
+  }
+});

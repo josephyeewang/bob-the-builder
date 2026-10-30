@@ -211,3 +211,18 @@ test('a change with too much text to read is unclassifiable, and its lines are n
   assert.ok(c.reasons.unclassifiable.includes('too much changed text to read'));
   assert.equal(c.tier, 1);
 });
+
+test('the classifier reads each file\'s lines once, and each line once, so every check judges one copy (audit round 14)', () => {
+  const policy = parsePolicy(readFileSync(new URL('./fixtures/policy.yaml', import.meta.url), 'utf8')).policy;
+  let reads = 0;
+  const f = { path: 'lib/a.ts', status: 'modified', removed_lines: [''], get added_lines() { reads++; return reads === 1 ? ['DROP TABLE x'] : ['']; } };
+  const c = classifyChange(policy, { files: [f], declared_tier: 2 });
+  assert.equal(reads, 1);
+  assert.ok(c.risky.includes('schema'), 'the one copy read holds the database line');
+  let lineReads = 0;
+  const lines = [];
+  Object.defineProperty(lines, 0, { enumerable: true, get() { lineReads++; return lineReads === 1 ? 'DROP TABLE x' : ''; } });
+  const c2 = classifyChange(policy, { files: [{ path: 'lib/a.ts', status: 'modified', removed_lines: [''], added_lines: lines }], declared_tier: 2 });
+  assert.equal(lineReads, 1);
+  assert.ok(c2.risky.includes('schema'));
+});
