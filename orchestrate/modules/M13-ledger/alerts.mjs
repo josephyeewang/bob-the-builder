@@ -5,7 +5,7 @@
 // live, a Dispatcher down for an hour) would otherwise open ~60 issues an hour, and that volume can hit GitHub's rate
 // limits on the robot's token, the same token the Merge Gate and Approvals use. So each alert has a stable key
 // (product, kind, subject); the record keeps its state; a repeat only edits the open issue's body (silent); a comment,
-// which notifies, goes out only when the condition changes; the issue closes when the condition clears. If Joe closes
+// which notifies, goes out only when the condition changes; the issue closes when the condition clears. If the owner closes
 // it while the condition still holds, nothing reopens it until the condition has cleared and come back.
 //
 // Every alert is a robot GitHub issue assigned to the owner (login from private config, passed in). No mail, no
@@ -26,7 +26,7 @@ export function alertKey(product, kind, subject) { return `${product}|${kind}|${
 export function makeAlerts({ rec, gh, owner, actor = 'ledger', now = () => new Date(), masker = makeMasker(), writer = makeFactWriter(rec, { actor, now, masker }) }) {
   const bodyOf = (s) => `${s.body}\n\n---\nfirst seen ${s.since} · last seen ${s.last} · seen ${s.count} times\n<!-- alert-key ${idOf(s.key)} -->`;
 
-  // The condition holds now. Returns what happened: opened | updated | changed | suppressed (Joe closed it).
+  // The condition holds now. Returns what happened: opened | updated | changed | suppressed (the owner closed it).
   // `status` is the condition's stable state; only a change of it comments (and so notifies). A body that carries a
   // changing figure ("down 40 minutes") is edited silently (0b-7 audit M-3). Without a status, the body is the status.
   // Title and body are masked before they are compared, stored or posted.
@@ -55,7 +55,7 @@ export function makeAlerts({ rec, gh, owner, actor = 'ledger', now = () => new D
     return 'opened';
   }
 
-  // The condition no longer holds. Closes an open issue with a note; re-arms a Joe-closed one.
+  // The condition no longer holds. Closes an open issue with a note; re-arms a owner-closed one.
   async function clear({ key, note = 'Cleared: the condition no longer holds.' }) {
     const id = idOf(key);
     const s = writer.get(id);

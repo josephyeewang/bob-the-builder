@@ -1,7 +1,7 @@
 // round3.test.mjs — planted cases for the 0b-8 audit round 3 findings. Each test fails on the code before the fix.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { joeTurns, checkTapTest } from './transcript.mjs';
+import { ownerTurns, checkTapTest } from './transcript.mjs';
 import { shouldRestartFrontDoor } from './restart.mjs';
 import { outboxFile, checkOutboxFile } from './outbox.mjs';
 import { buildTripBrief, briefAnswers, airCheck } from './trip.mjs';
@@ -14,17 +14,17 @@ const at = (min) => () => new Date(T0 + min * 60e3);
 const queuedRaw = (min, attachment) => ({ type: 'attachment', uuid: `q3-${min}`, timestamp: iso(min),
   attachment: { type: 'queued_command', timestamp: iso(min), ...attachment } });
 
-test('0b-8 audit round 3 M-1: a queued image, or a queued message with no origin, is Joe acting; no restart 5 minutes later', () => {
+test('0b-8 audit round 3 M-1: a queued image, or a queued message with no origin, is the owner acting; no restart 5 minutes later', () => {
   const base = [typed(0, 'hi'), said(1, 'hello')];
   const image = [...base, queuedRaw(20, { prompt: [{ type: 'image', source: { type: 'base64', data: 'x' } }], origin: { kind: 'human' } }), said(22, 'got it')];
-  assert.deepEqual(joeTurns(image).map((t) => t.text), ['hi', '[image]']);
+  assert.deepEqual(ownerTurns(image).map((t) => t.text), ['hi', '[image]']);
   assert.equal(shouldRestartFrontDoor({ sizeTokens: 200_000, entries: image, now: at(25) }).restart, false);
   const noOrigin = [...base, queuedRaw(20, { prompt: 'and the other one', commandMode: 'prompt' }), said(22, 'ok')];
-  assert.equal(joeTurns(noOrigin).length, 2);
+  assert.equal(ownerTurns(noOrigin).length, 2);
   assert.equal(shouldRestartFrontDoor({ sizeTokens: 200_000, entries: noOrigin, now: at(25) }).restart, false);
-  // still not his: a notice, another session's message, a meta entry
+  // still not theirs: a notice, another session's message, a meta entry
   for (const a of [{ prompt: 'done', origin: { kind: 'task-notification' } }, { prompt: 'from lane 2', origin: { kind: 'peer' } }, { prompt: 'x', isMeta: true }]) {
-    assert.equal(joeTurns([...base, queuedRaw(20, a), said(22, 'ok')]).length, 1, JSON.stringify(a.origin ?? a));
+    assert.equal(ownerTurns([...base, queuedRaw(20, a), said(22, 'ok')]).length, 1, JSON.stringify(a.origin ?? a));
   }
 });
 
@@ -40,15 +40,15 @@ test('0b-8 audit round 3 M-2: a key in an outbox file name is refused, never wri
   assert.equal(checkOutboxFile('state-20261103-0915-kq.json', pause).ok, true);
 });
 
-test('0b-8 audit round 3 minor 1: a question that mentions [watchdog] does not hide Joe\'s real answer', () => {
+test('0b-8 audit round 3 minor 1: a question that mentions [watchdog] does not hide the owner\'s real answer', () => {
   const q = { ...asks(10, 'call-1', 'Should [watchdog] alerts go to the phone?') };
   const ans = { ...result(20, 'call-1', 'User has answered your questions: "Should [watchdog] alerts go to the phone?"="Yes". You can now continue.'),
     toolUseResult: { questions: [], answers: { 'Should [watchdog] alerts go to the phone?': 'Yes' } } };
   const log = [typed(0, 'hi'), said(1, 'hello'), q, ans, said(21, 'done')];
-  assert.equal(joeTurns(log).at(-1).kind, 'answer');
+  assert.equal(ownerTurns(log).at(-1).kind, 'answer');
   assert.equal(shouldRestartFrontDoor({ sizeTokens: 200_000, entries: log, now: at(25) }).restart, false);
   const typedKeys = { ...result(20, 'call-1', 'x'), toolUseResult: { questions: [], answers: { q: '[watchdog] still running?' } } };
-  assert.equal(joeTurns([typed(0, 'hi'), q, typedKeys]).length, 1, 'keys typed into the box are still not Joe');
+  assert.equal(ownerTurns([typed(0, 'hi'), q, typedKeys]).length, 1, 'keys typed into the box are still not the owner');
 });
 
 test('0b-8 audit round 3 M-3: the brief names the state files it answers; one made before them is never quoted', () => {
@@ -73,6 +73,6 @@ test('0b-8 audit round 3 M-4, lead call L23: the Front Door can\'t file an Air c
   const c = checkOutboxFile('request-airhealth-20261103-0930-ab.json', '{"request":"airhealth","product":null,"name":null,"red_count":0}\n');
   assert.equal(c.ok, false); assert.match(c.reason, /Air's own check/);
   const skill = readFileSync(new URL('./skill/orchestrate/SKILL.md', import.meta.url), 'utf8');
-  assert.doesNotMatch(skill, /request-airhealth/); assert.match(skill, /Never ask Joe for a count/);
+  assert.doesNotMatch(skill, /request-airhealth/); assert.match(skill, /Never ask the owner for a count/);
   assert.doesNotMatch(airCheck({ facts: new Map(), now: () => new Date(T0) }).text, /reply here|how many/);
 });

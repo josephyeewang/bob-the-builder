@@ -194,6 +194,41 @@ test('push_branch: lanes (MIN-1, R2-m7, R3-m5)', () => {
   assert.equal(r.decision, 'deny', 'the docs lane must lie inside docs_paths');
 });
 
+test('push_branch: no lane pushes under .github/ or a CODEOWNERS file, new or old name, any depth or case, not even an exact reverse (L39)', () => {
+  const w = world();
+  const push = (lane, files, card = {}, extra = {}) => w.rules.may('push_branch', { product: 'app', card: { id: 'C-1', rows: ['R-1'], doc: { lane }, ...card }, files, ...extra });
+  const bad = [
+    [file('.github/workflows/deploy.yml')],
+    [file('.github/actions/setup/action.yml', 'added')],
+    [file('.github/workflows/x.yml', 'renamed', { previous_path: 'app/x.yml' })],   // a rename into .github/
+    [file('app/x.yml', 'renamed', { previous_path: '.github/workflows/x.yml' })],   // and out of it
+    [file('.GitHub/Workflows/x.yml')],
+    [file('packages/web/.github/workflows/x.yml')],
+    [file('docs/research/.github/notes.md')],
+    [file('app/ok.ts'), file('.github/CODEOWNERS', 'removed')],
+    [file('CODEOWNERS')],                                            // GitHub also reads it at the root
+    [file('docs/CODEOWNERS', 'added')],                              // and in docs/
+    [file('docs/codeowners')],
+    [file('docs/x.md', 'renamed', { previous_path: 'CODEOWNERS' })], // moving it away removes it too
+    [file('CODEOWNERS', 'renamed', { previous_path: 'docs/x.md' })],
+  ];
+  for (const lane of ['product', 'docs', 'lead']) {
+    for (const files of bad) {
+      const r = push(lane, files, lane === 'lead' ? { kind: 'lead_daily_card' } : {});
+      assert.equal(r.decision, 'deny', `${lane} ${JSON.stringify(files)}`);
+      assert.match(r.reason, /L39/, `${lane} ${JSON.stringify(files)}`);
+    }
+  }
+  const undo = push('product', [file('.github/workflows/deploy.yml')], { kind: 'exact_reverse' }, { reverses_files: ['.github/workflows/deploy.yml'] });
+  assert.match(undo.reason, /L39/, 'an exact reverse is no way in');
+  for (const t of [true, 'yes', 1, null]) assert.match(push('product', [file('app/a.ts')], {}, { truncated: t }).reason, /cut off/, `truncated ${t}`);
+  assert.equal(push('product', [file('app/a.ts')], {}, { truncated: false }).decision, 'allow');
+  const rootUndo = push('product', [file('CODEOWNERS')], { kind: 'exact_reverse' }, { reverses_files: ['CODEOWNERS'] });
+  assert.match(rootUndo.reason, /L39/, 'nor is an exact reverse of CODEOWNERS');
+  for (const p of ['app/.githubx/a.ts', 'app/github/a.ts', 'app/x.github/a.ts', 'app/CODEOWNERS.md', 'app/codeowners-x.ts']) assert.equal(push('product', [file(p)]).decision, 'allow', p);
+  assert.ok(push('product', [file('.github/' + 'a'.repeat(4000))]).reason.length < 400, 'quotes at most 80 characters of a path');
+});
+
 test('push_branch while paused: only an exact reverse of the reversed commit\'s own files (R2-M8)', () => {
   const w = world({ states: { app: { state: 'paused' } } });
   const card = { id: 'C-9', rows: [], kind: 'exact_reverse', doc: { lane: 'product' } };
@@ -202,7 +237,7 @@ test('push_branch while paused: only an exact reverse of the reversed commit\'s 
   assert.equal(w.rules.may('push_branch', { product: 'app', card: { ...card, kind: 'undo' }, reverses_files: ['app/a.ts'], files: [file('app/a.ts')] }).decision, 'deny');
   assert.equal(w.rules.may('push_branch', { product: 'app', card: { ...card, kind: undefined }, files: [file('app/a.ts')] }).decision, 'deny');
   // The old name of a rename counts too (audit round 2): renaming a workflow into a listed path is not a reverse.
-  assert.match(w.rules.may('push_branch', { product: 'app', card, reverses_files: ['app/a.ts'], files: [file('app/a.ts', 'renamed', { previous_path: '.github/workflows/deploy.yml' })] }).reason, /paused/);
+  assert.match(w.rules.may('push_branch', { product: 'app', card, reverses_files: ['app/a.ts'], files: [file('app/a.ts', 'renamed', { previous_path: '.github/workflows/deploy.yml' })] }).reason, /L39/);
   assert.equal(w.rules.may('push_branch', { product: 'app', card, reverses_files: ['app/a.ts', 'app/old.ts'], files: [file('app/a.ts', 'renamed', { previous_path: 'app/old.ts' })] }).decision, 'allow');
   // Size (L34 confirm audit round 5, MATERIAL-B): a reverse list is looked up, not scanned; 3,000 files or more are refused.
   const many = Array.from({ length: 2999 }, (_, i) => file(`app/f${i}.ts`));

@@ -36,6 +36,11 @@ const ROW_FILE = /^docs\/blueprint\/rows\/([^/]+)\.yaml$/i;   // case-folded lik
 const BLUEPRINT = compileList(['docs/blueprint/**']);
 const DOCS_LANE = DOCS_FLOOR;   // one definition, in lane-check.mjs
 const NOT_PRODUCT = compileList(['docs/blueprint/**', 'docs/*.md', 'docs/domains/**']);
+// No lane may push a file under a `.github/` folder, at any depth or in any case, as a new or an old name (lead call L39):
+// a workflow there runs with the repo's own secrets on the next push. Nor a CODEOWNERS file, which GitHub reads at the
+// root, in docs/ and in .github/ to decide whose review a pull request needs (lead, after L39). Any depth, so both
+// places GitHub reads are covered with one pattern; a CODEOWNERS file elsewhere is inert, and refusing it costs nothing.
+const GITHUB_DIR = compileList(['.github/', '**/CODEOWNERS']);
 const FILE_STATUSES = ['added', 'modified', 'removed', 'renamed', 'copied'];
 const USAGE_FUTURE_MS = 60_000;
 
@@ -233,6 +238,11 @@ export function makeEngine({ products, rulesState, productState, running, rolesD
     const pol = policyOf(s.product);
     checkFiles(s.files);
     if (!s.card || typeof s.card !== 'object' || typeof s.card.id !== 'string' || !s.card.id) throw new Error('push_branch needs the card and its id');
+    // A cut-off list could hide any file, a .github/ one too: deny by default (L32, L39 audit m1).
+    if (s.truncated !== undefined && s.truncated !== false) return deny('the file list is cut off or truncated is not true or false');
+    // Before the exact-reverse exception, so not even an undo writes there (L39).
+    const gh = s.files.flatMap((f) => (f.previous_path === undefined ? [f.path] : [f.path, f.previous_path])).filter((p) => GITHUB_DIR(p));
+    if (gh.length) return deny(`.github/ and CODEOWNERS are never pushed by a lane (L39): ${gh.slice(0, 5).map((p) => JSON.stringify(p.slice(0, 80))).join(', ')}`);
     // The exact-reverse exception (R2-M8, R3-M3): every file is in the reversed commit's own list, in every state.
     const reversed = s.card?.kind === 'exact_reverse' ? fileSet(s.reverses_files) : null;
     if (reversed && s.files.every((f) => reversed.has(f.path) && (f.previous_path === undefined || reversed.has(f.previous_path)))) {
