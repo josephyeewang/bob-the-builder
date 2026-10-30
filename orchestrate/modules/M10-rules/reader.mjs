@@ -26,6 +26,7 @@ import { createHash } from 'node:crypto';
 import { readFileSync, writeFileSync, renameSync, mkdirSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { parsePolicy } from './policy.mjs';
+import { makeGitView } from './git-view.mjs';
 
 export const RULES_PATH = 'orchestrate/policy.yaml';
 export const BRANCH = 'main';
@@ -60,6 +61,52 @@ export function allowListVerifier(file) {
     let list;
     try { list = JSON.parse(readFileSync(file, 'utf8')); } catch { return false; }
     return Array.isArray(list?.[product]) && list[product].includes(blob);
+  };
+}
+
+// The lookup half of "Joe approved this rules version" (0b-1 R3-M2). A version is a candidate only through the pull
+// request that put it on main: start from the newest commit on main that changed the file, ask GitHub which pull
+// requests carry that commit, re-read each, and accept only when all three hold:
+//   - exactly one of them was merged into main;
+//   - its merge commit is on main's history (so it really landed, and wasn't rewritten away);
+//   - the file at the pull request's final head is byte-for-byte the version on main (what was reviewed is what runs).
+// Squash, merge-commit and rebase merges all pass; a direct push of a copied change, or a merge whose result differs
+// from the reviewed head, does not. Judging Joe's Approve on that pull request is 0b-5's part (`judge`).
+export async function findApprovingPull({ gh, owner, repo, commit, blob, path = RULES_PATH }) {
+  try {
+    if (!SHA.test(commit ?? '') || !SHA.test(blob ?? '')) return { ok: false, reason: 'no commit or version to look up' };
+    const base = `/repos/${owner}/${repo}`;
+    const read = async (q) => { const r = await gh.get(`${base}${q}`); if (r?.status !== 200) throw new Error(`GitHub answered ${r?.status} for ${q}`); return r.json; };
+    const list = await read(`/commits?sha=${commit}&path=${encodeURIComponent(path)}&per_page=1`);
+    if (!Array.isArray(list) || !list.length || !SHA.test(list[0]?.sha ?? '')) return { ok: false, reason: 'no commit on main changed the rules file' };
+    const changed = list[0].sha;
+    const pulls = await read(`/commits/${changed}/pulls`);
+    if (!Array.isArray(pulls)) throw new Error('odd pull request list');
+    const merged = [];
+    for (const n of new Set(pulls.map((x) => x?.number))) {
+      if (!Number.isSafeInteger(n) || n <= 0) throw new Error('odd pull request number');
+      const pr = await read(`/pulls/${n}`);                  // re-read: the list's own fields are not trusted
+      if (pr?.number === n && pr.merged === true && pr.base?.ref === BRANCH) merged.push(pr);
+    }
+    if (merged.length !== 1) return { ok: false, reason: `${merged.length} merged pull requests into main carry commit ${changed.slice(0, 7)}` };
+    const pr = merged[0];
+    if (!SHA.test(pr.merge_commit_sha ?? '') || !SHA.test(pr.head?.sha ?? '')) return { ok: false, reason: `pull request #${pr.number} has no merge commit or head` };
+    const view = makeGitView({ gh, owner, repo });
+    if (!(await view.onHistory(pr.merge_commit_sha, commit))) return { ok: false, reason: `pull request #${pr.number}'s merge commit is not on main` };
+    const atHead = await gh.get(`${base}/contents/${path}?ref=${pr.head.sha}`);
+    if (atHead?.status !== 200 || atHead.json?.sha !== blob) return { ok: false, reason: `the rules file at pull request #${pr.number}'s head is not the version on main` };
+    return { ok: true, pr: pr.number, head: pr.head.sha, merge_commit: pr.merge_commit_sha };
+  } catch (e) {
+    return { ok: false, reason: `could not look up the pull request: ${e.message}` };
+  }
+}
+
+// The approval check once 0b-5 lands: the lookup above, then 0b-5's judgement of Joe's Approve on that pull request.
+export function pullRequestVerifier({ judge }) {
+  return async (q) => {
+    const found = await findApprovingPull({ gh: q.gh, owner: q.owner, repo: q.repo, commit: q.commit, blob: q.blob });
+    if (!found.ok) return found;
+    return (await judge({ ...q, pr: found.pr, head: found.head })) === true ? true : { ok: false, reason: `pull request #${found.pr} has no Approve from Joe` };
   };
 }
 
@@ -158,8 +205,13 @@ export function makeReader({ gh, stateDir, products, verifyApproved, alert, now 
     // Whose approval counts is fixed BEFORE reading the new file: the last good rules, or products.json.
     const joeId = st.good ? st.good.policy.accounts.joe.github_id : p.joe_github_id;
     let approved = false;
-    try { approved = (await verify({ product: p.product, owner: p.owner, repo: p.repo, commit, blob, joeId, gh })) === true; } catch { approved = false; }
-    if (!approved) return keep(p, st, 'unapproved_rules_change', blob, `version ${blob.slice(0, 7)} has no approval from Joe`);
+    let why = `version ${blob.slice(0, 7)} has no approval from Joe`;
+    try {
+      const v = await verify({ product: p.product, owner: p.owner, repo: p.repo, commit, blob, joeId, gh });
+      approved = v === true;
+      if (!approved && typeof v?.reason === 'string') why += ` (${v.reason})`;
+    } catch (e) { why += ` (${e.message})`; }
+    if (!approved) return keep(p, st, 'unapproved_rules_change', blob, why);
 
     const good = { text, commit, blob, verified_at: new Date(now()).toISOString(), policy: parsed.policy };
     saveGood(p.product, good);
