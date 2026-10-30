@@ -93,7 +93,8 @@ test('a truncated or oversized file list, a bad entry or a bad path is unclassif
   const many = Array.from({ length: MAX_FILES + 1 }, (_, i) => mod(`docs/research/${i}.md`));
   assert.ok(run(many).risky.includes('unclassifiable'));
   assert.ok(run([{ path: 'docs/a.md', status: 'exploded' }]).risky.includes('unclassifiable'));
-  assert.ok(run([mod('docs/../orchestrate/policy.yaml')]).risky.includes('unclassifiable'));
+  assert.match(run([mod('docs/../orchestrate/policy.yaml')]).reasons.unclassifiable.join(), /dot segment/);
+  assert.match(run([mod('docs/blueprint/x.md', { status: 'renamed', previous_path: 'doc\u017f/blueprint/x.md' })]).reasons.unclassifiable.join(), /non-ASCII/);
   assert.ok(classifyChange(policy, {}).risky.includes('unclassifiable'));
   assert.ok(classifyChange(null, { files: [] }).risky.includes('unclassifiable'));
 });

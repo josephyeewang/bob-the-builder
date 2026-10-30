@@ -205,6 +205,15 @@ test('GitHub unreachable: last good for up to 300 s, then deny everything (MAT-3
   assert.deepEqual(s.alerts.map((a) => a.reason), ['rules_unreachable']);
 });
 
+test('a clock that goes backwards does not extend the 300 s grace (audit minor 6)', async () => {
+  const s = setup();
+  s.gh.commit(1, fixture);
+  await s.reader.refresh();
+  assert.equal(s.reader.state('sample-app').status, 'ok');
+  s.tick(-1);
+  assert.equal(s.reader.state('sample-app').status, 'deny_all');
+});
+
 test('after a restart, the last good version is re-checked and used only after GitHub agrees (MAT-3)', async () => {
   const s = setup();
   s.gh.commit(1, fixture);

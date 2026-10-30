@@ -114,6 +114,13 @@ const base = (gh) => ({ reviewed: { base: B0, head: H0 }, current: { base: B1, h
   catchUps: [{ pr: 7, before_sha: H0, after_sha: H1 }], tier1MergesSince: 0, gh });
 const edit = [{ path: 'docs/g.md', status: 'modified' }];
 
+test('a base given as the head itself (an empty change) never carries over (audit minor 3)', async () => {
+  const w = world({ 'docs/other.md': 'o2' });
+  const r = await carryOver({ ...w.args, reviewed: { base: w.H0, head: w.H0 }, current: { base: w.H1, head: w.H1 } });
+  assert.equal(r.review, false);
+  assert.match(r.reasons.join(), /no files/);
+});
+
 test('each rule alone: the scripted baseline carries over', async () => {
   assert.equal((await carryOver(base(scripted({ d0: edit, d1: edit })))).review, true);
 });

@@ -54,13 +54,20 @@ export function readProducts(file) {
   return list.map((p) => Object.freeze({ product: p.product, owner: p.owner, repo: p.repo, joe_github_id: p.joe_github_id }));
 }
 
-// The stopgap approval check until 0b-5: approved-rules.json = { "<product>": ["<blob sha>", ...] }, written by Joe's
-// runbook step. Missing or unreadable → nothing is approved.
+// The stopgap approval check until 0b-5: approved-rules.json = { "<product>": ["<blob sha>", ...] }, oldest first, written
+// by Joe's runbook step (a new version is appended). Missing or unreadable → nothing is approved.
 export function allowListVerifier(file) {
-  return ({ product, blob }) => {
+  return ({ product, blob, lastGoodBlob = null }) => {
     let list;
     try { list = JSON.parse(readFileSync(file, 'utf8')); } catch { return false; }
-    return Array.isArray(list?.[product]) && list[product].includes(blob);
+    if (!Array.isArray(list?.[product])) return false;
+    const at = list[product].lastIndexOf(blob);
+    if (at < 0) return false;
+    if (lastGoodBlob === null) return true;
+    // Forward only: a version is approved only if it was pinned after the current one, so an older pinned version
+    // can't be brought back by a direct push. A current version missing from the list approves nothing.
+    const cur = list[product].lastIndexOf(lastGoodBlob);
+    return cur >= 0 && at > cur;
   };
 }
 
@@ -72,7 +79,7 @@ export function allowListVerifier(file) {
 //   - the file at the pull request's final head is byte-for-byte the version on main (what was reviewed is what runs).
 // Squash, merge-commit and rebase merges all pass; a direct push of a copied change, or a merge whose result differs
 // from the reviewed head, does not. Judging Joe's Approve on that pull request is 0b-5's part (`judge`).
-export async function findApprovingPull({ gh, owner, repo, commit, blob, path = RULES_PATH }) {
+export async function findApprovingPull({ gh, owner, repo, commit, blob, after = null, path = RULES_PATH }) {
   try {
     if (!SHA.test(commit ?? '') || !SHA.test(blob ?? '')) return { ok: false, reason: 'no commit or version to look up' };
     const base = `/repos/${owner}/${repo}`;
@@ -93,6 +100,13 @@ export async function findApprovingPull({ gh, owner, repo, commit, blob, path = 
     if (!SHA.test(pr.merge_commit_sha ?? '') || !SHA.test(pr.head?.sha ?? '')) return { ok: false, reason: `pull request #${pr.number} has no merge commit or head` };
     const view = makeGitView({ gh, owner, repo });
     if (!(await view.onHistory(pr.merge_commit_sha, commit))) return { ok: false, reason: `pull request #${pr.number}'s merge commit is not on main` };
+    // It must have landed after the last good version, so an older approved pull request can't be replayed by a direct
+    // push that brings its version back (git's history then leads to the old pull request).
+    if (after !== null) {
+      if (!SHA.test(after)) return { ok: false, reason: 'odd last good commit' };
+      const c = await view.compare(after, pr.merge_commit_sha);
+      if (c.status !== 'ahead' || c.mergeBase !== after) return { ok: false, reason: `pull request #${pr.number} landed before the last good rules` };
+    }
     const atHead = await gh.get(`${base}/contents/${path}?ref=${pr.head.sha}`);
     if (atHead?.status !== 200 || atHead.json?.sha !== blob) return { ok: false, reason: `the rules file at pull request #${pr.number}'s head is not the version on main` };
     return { ok: true, pr: pr.number, head: pr.head.sha, merge_commit: pr.merge_commit_sha };
@@ -104,7 +118,7 @@ export async function findApprovingPull({ gh, owner, repo, commit, blob, path = 
 // The approval check once 0b-5 lands: the lookup above, then 0b-5's judgement of Joe's Approve on that pull request.
 export function pullRequestVerifier({ judge }) {
   return async (q) => {
-    const found = await findApprovingPull({ gh: q.gh, owner: q.owner, repo: q.repo, commit: q.commit, blob: q.blob });
+    const found = await findApprovingPull({ gh: q.gh, owner: q.owner, repo: q.repo, commit: q.commit, blob: q.blob, after: q.lastGood ?? null });
     if (!found.ok) return found;
     return (await judge({ ...q, pr: found.pr, head: found.head })) === true ? true : { ok: false, reason: `pull request #${found.pr} has no Approve from Joe` };
   };
@@ -207,7 +221,8 @@ export function makeReader({ gh, stateDir, products, verifyApproved, alert, now 
     let approved = false;
     let why = `version ${blob.slice(0, 7)} has no approval from Joe`;
     try {
-      const v = await verify({ product: p.product, owner: p.owner, repo: p.repo, commit, blob, joeId, gh });
+      const v = await verify({ product: p.product, owner: p.owner, repo: p.repo, commit, blob, joeId, gh,
+        lastGood: st.good?.commit ?? null, lastGoodBlob: st.good?.blob ?? null });
       approved = v === true;
       if (!approved && typeof v?.reason === 'string') why += ` (${v.reason})`;
     } catch (e) { why += ` (${e.message})`; }
@@ -239,7 +254,9 @@ export function makeReader({ gh, stateDir, products, verifyApproved, alert, now 
     state(product) {
       const st = states.get(product);
       if (!st) return { status: 'deny_all', policy: null, rev: null, reason: 'unknown product' };
-      const stale = st.lastFetchOk === null || now() - st.lastFetchOk > FETCH_GRACE_MS;
+      const t = now();
+      // A clock that went backwards doesn't extend the grace: a last read "in the future" counts as stale.
+      const stale = st.lastFetchOk === null || t - st.lastFetchOk > FETCH_GRACE_MS || t < st.lastFetchOk;
       if (st.deleted || !st.good || stale) return { status: 'deny_all', policy: null, rev: null, reason: st.reason };
       const g = st.good;
       const status = st.reason === 'adopted' || st.reason === 'unchanged' ? 'ok' : 'last_good';

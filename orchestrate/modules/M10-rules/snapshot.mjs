@@ -3,9 +3,9 @@
 //
 // WHY. A hook (for example the production-write guard) can't wait on GitHub. So the Do-plane writes this file every
 // pass, and the hook reads it. The file is refused, never "trusted anyway", if it is missing, damaged, not the
-// format we wrote, older than 300 s, from the future, or writable by anyone but its owner. It answers only hook-time
-// questions; starting a session needs the live state (product pause, running count, usage) and is answered by the
-// Do-plane only (R2-M6(a)).
+// format we wrote, older than 300 s, from the future, a link, or if the file or its folder is writable by anyone but
+// its owner. It answers only hook-time questions; starting a session needs the live state (product pause, running
+// count, usage) and is answered by the Do-plane only (R2-M6(a)).
 //
 //   publishSnapshot(dir, { products: { <p>: { status, rules, rev } }, mac, pin_ok }, now)
 //   readSnapshot(dir, now)                       → { ok: true, body } | { ok: false, reason }
@@ -18,7 +18,7 @@
 // This file imports nothing that can reach the network (a test checks the import list).
 
 import { createHash } from 'node:crypto';
-import { readFileSync, writeFileSync, renameSync, statSync, chmodSync } from 'node:fs';
+import { readFileSync, writeFileSync, renameSync, statSync, chmodSync, openSync, fstatSync, closeSync, constants } from 'node:fs';
 import { join } from 'node:path';
 import { allow, deny } from '../../shared/rules.mjs';
 
@@ -58,11 +58,23 @@ export function publishSnapshot(dir, body, now = Date.now()) {
 
 export function readSnapshot(dir, now = Date.now()) {
   const f = join(dir, SNAPSHOT_FILE);
-  let st; let doc;
-  try { st = statSync(f); } catch { return { ok: false, reason: 'snapshot missing' }; }
-  if (!st.isFile() || (st.mode & 0o022) !== 0) return { ok: false, reason: 'snapshot is writable by others' };
-  if (typeof process.getuid === 'function' && st.uid !== process.getuid()) return { ok: false, reason: 'snapshot owned by someone else' };
-  try { doc = JSON.parse(readFileSync(f, 'utf8')); } catch { return { ok: false, reason: 'snapshot unreadable' }; }
+  const mine = (st) => typeof process.getuid !== 'function' || st.uid === process.getuid();
+  // The folder too (MAT-9): anyone who can write the folder can swap the file for another.
+  let ds;
+  try { ds = statSync(dir); } catch { return { ok: false, reason: 'snapshot missing' }; }
+  if (!ds.isDirectory() || (ds.mode & 0o022) !== 0) return { ok: false, reason: 'snapshot folder is writable by others' };
+  if (!mine(ds)) return { ok: false, reason: 'snapshot folder owned by someone else' };
+  // Open once, refusing a symlink, then check and read that same open file, so it can't be swapped in between.
+  let fd; let doc;
+  try { fd = openSync(f, constants.O_RDONLY | constants.O_NOFOLLOW); } catch (e) {
+    return { ok: false, reason: e.code === 'ENOENT' ? 'snapshot missing' : 'snapshot is a link or unreadable' };
+  }
+  try {
+    const st = fstatSync(fd);
+    if (!st.isFile() || (st.mode & 0o022) !== 0) return { ok: false, reason: 'snapshot is writable by others' };
+    if (!mine(st)) return { ok: false, reason: 'snapshot owned by someone else' };
+    try { doc = JSON.parse(readFileSync(fd, 'utf8')); } catch { return { ok: false, reason: 'snapshot unreadable' }; }
+  } finally { closeSync(fd); }
   if (!doc || doc.format !== FORMAT) return { ok: false, reason: 'snapshot format unknown' };
   if (typeof doc.sha256 !== 'string' || hash(doc.body) !== doc.sha256) return { ok: false, reason: 'snapshot damaged' };
   const at = Date.parse(doc.written_at);

@@ -18,7 +18,7 @@ export const PROTECTED_FLOOR = Object.freeze([
 const fold = (s) => s.normalize('NFC').toLowerCase();
 
 // A path the matcher can trust: relative, `/`-separated, no `..`, no empty segment, no backslash or NUL.
-export function pathProblem(p) {
+function shapeProblem(p) {
   if (typeof p !== 'string' || p === '') return 'empty path';
   if (p.includes('\\') || p.includes('\0')) return 'backslash or NUL in path';
   if (p.startsWith('/')) return 'absolute path';
@@ -26,6 +26,14 @@ export function pathProblem(p) {
   if (segs.some((s) => s === '')) return 'empty path segment';
   if (segs.some((s) => s === '..' || s === '.')) return 'dot segment in path';
   return null;
+}
+
+// What a changed file's path must pass before any answer. Stricter than the matcher: letters outside plain ASCII are
+// refused, because the Mac's file system treats some pairs as the same name (ſ and s, ß and ss, ﬁ and fi) that no
+// simple fold can match, so a look-alike could slip past a protected path or a lane. The matcher itself still matches
+// such names, folding case and Unicode form where it can.
+export function pathProblem(p) {
+  return shapeProblem(p) ?? (/[^\x20-\x7e]/.test(p) ? 'non-ASCII letter or control character in path' : null);
 }
 
 function expandBraces(pat) {
@@ -68,7 +76,7 @@ export function compile(pattern) {
     return segs.map((s) => (s === '**' ? '**' : segRegex(s)));
   });
   return (path) => {
-    if (pathProblem(path)) return false;
+    if (shapeProblem(path)) return false;
     const segs = fold(path).split('/');
     return alternatives.some((pat) => matchSegs(pat, 0, segs, 0, new Map()));
   };

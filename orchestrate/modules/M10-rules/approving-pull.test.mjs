@@ -4,10 +4,10 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, mkdtempSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { makeReader, findApprovingPull, pullRequestVerifier, RULES_PATH } from './reader.mjs';
+import { makeReader, findApprovingPull, pullRequestVerifier, allowListVerifier, RULES_PATH } from './reader.mjs';
 import { fakeRepo } from './fixtures/fake-repo.mjs';
 
 const V1 = readFileSync(new URL('./fixtures/policy.yaml', import.meta.url), 'utf8');
@@ -111,6 +111,14 @@ test('two merged pull requests, a merge into another branch, or a merge commit o
   t.r.pull({ number: 18, merged: true, base: 'staging', head: c1, merge_commit_sha: c1, commits: [c1] });
   assert.match((await lookup(t.r, c1)).reason, /0 merged pull requests/);
 
+  const o = setup();                                                     // an open pull request is never the approving one
+  const e1 = o.r.commit([o.m0], { [RULES_PATH]: V2 });
+  const sq = o.r.commit([o.m0], { [RULES_PATH]: V2 });
+  o.r.pull({ number: 21, merged: false, head: e1, merge_commit_sha: sq, commits: [e1] });
+  o.r.linkPull(sq, 21);
+  o.r.main = sq;
+  assert.match((await lookup(o.r, sq)).reason, /0 merged pull requests/);
+
   const u = setup();
   const d1 = u.r.commit([u.m0], { [RULES_PATH]: V2 });
   const elsewhere = u.r.commit([u.m0], { 'docs/a.md': 'x' });
@@ -130,4 +138,61 @@ test('when Joe has not approved the pull request, it is not adopted; GitHub erro
   s.r.down = true;
   assert.match((await lookup(s.r, squash)).reason, /could not look up/);
   assert.equal((await findApprovingPull({ gh: s.r.gh, owner: 'o', repo: 'r', commit: 'abc', blob: 'def' })).ok, false);
+});
+
+// Audit M-1: git's history for the file follows the parent whose version is unchanged, so a direct-pushed merge that
+// takes an old pull request's version leads the lookup back to that old (approved) pull request.
+test('an older approved version brought back by a direct-pushed merge is not adopted: one alert', async () => {
+  const s = setup();
+  const LOOSE = V1.replace('  editing_per_mac: 5', '  editing_per_mac: 9');
+  const h10 = s.r.commit([s.m0], { [RULES_PATH]: LOOSE });
+  const mc10 = s.r.commit([s.m0, h10], { [RULES_PATH]: LOOSE }, { from: s.m0 });
+  s.r.pull({ number: 10, merged: true, head: h10, merge_commit_sha: mc10, commits: [h10] });
+  s.r.main = mc10;
+  await s.reader.refresh();
+  assert.equal(s.reader.state('sample-app').policy.caps.editing_per_mac, 9);
+  const h11 = s.r.commit([mc10], { [RULES_PATH]: V2 });
+  const sq11 = s.r.commit([mc10], { [RULES_PATH]: V2 });
+  s.r.pull({ number: 11, merged: true, head: h11, merge_commit_sha: sq11, commits: [h11] });
+  s.r.linkPull(sq11, 11);
+  s.r.main = sq11;
+  await s.reader.refresh();
+  assert.equal(s.reader.state('sample-app').policy.caps.editing_per_mac, 4);
+
+  const evil = s.r.commit([sq11, h10], { [RULES_PATH]: LOOSE }, { from: sq11 });   // no pull request, no Approve
+  s.r.main = evil;
+  assert.equal((await lookup(s.r, evil)).pr, 10, 'the fake follows git: the history leads to the old pull request');
+  await s.reader.refresh(); await s.reader.refresh();
+  assert.equal(s.reader.state('sample-app').status, 'last_good');
+  assert.equal(s.reader.state('sample-app').policy.caps.editing_per_mac, 4);
+  assert.equal(s.alerts.length, 1);
+  assert.match(s.alerts[0].detail, /#10 landed before the last good rules/);
+});
+
+test('the stopgap allow-list only moves forward: an older pinned version pushed again is not adopted', async () => {
+  const r = fakeRepo();
+  const dir = mkdtempSync(join(tmpdir(), 'm10-allow-'));
+  const a0 = r.commit([], { [RULES_PATH]: V3 });
+  r.main = a0;
+  const pin = (...shas) => writeFileSync(join(dir, 'approved-rules.json'), JSON.stringify({ 'sample-app': shas.map((c) => blobOn(r, c)) }));
+  pin(a0);
+  const alerts = [];
+  const reader = makeReader({ gh: r.gh, stateDir: dir, products: [PRODUCT], alert: (a) => alerts.push(a) });
+  await reader.refresh();
+  assert.equal(reader.state('sample-app').policy.caps.editing_per_mac, 3);
+  const a1 = r.commit([a0], { [RULES_PATH]: V2 });
+  r.main = a1;
+  pin(a0, a1);
+  await reader.refresh();
+  assert.equal(reader.state('sample-app').policy.caps.editing_per_mac, 4);
+  const a2 = r.commit([a1], { [RULES_PATH]: V3 });                       // the old pinned text, pushed forward
+  r.main = a2;
+  await reader.refresh();
+  assert.equal(reader.state('sample-app').status, 'last_good');
+  assert.equal(reader.state('sample-app').policy.caps.editing_per_mac, 4);
+  assert.deepEqual(alerts.map((a) => a.reason), ['unapproved_rules_change']);
+  // The verifier on its own: a version missing from the list, or a current version missing from it, approves nothing.
+  const v = allowListVerifier(join(dir, 'approved-rules.json'));
+  assert.equal(v({ product: 'sample-app', blob: blobOn(r, a1), lastGoodBlob: blobOn(r, a0) }), true);
+  assert.equal(v({ product: 'sample-app', blob: blobOn(r, a1), lastGoodBlob: 'f'.repeat(40) }), false);
 });

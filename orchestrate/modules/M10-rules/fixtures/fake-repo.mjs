@@ -64,14 +64,20 @@ export function fakeRepo({ owner = 'sample-org', repo = 'sample-app' } = {}) {
     for (const p of removed) out.push({ filename: p, status: 'removed', sha: A.get(p).blob });
     return out.sort((x, y) => (x.filename < y.filename ? -1 : 1));
   };
-  // The newest commit reachable from `tip` whose version of `path` differs from every parent (git's default
-  // history simplification: a merge that kept one parent's version is skipped).
-  const lastTouching = (tip, path) => [...ancestors(tip)].sort((x, y) => commits.get(y).n - commits.get(x).n).find((c) => {
-    const e = commits.get(c).files.get(path);
-    const ps = commits.get(c).parents;
-    if (!ps.length) return Boolean(e);
-    return ps.every((p) => { const o = commits.get(p).files.get(path); return (o?.blob ?? null) !== (e?.blob ?? null) || (o?.mode ?? null) !== (e?.mode ?? null); });
-  }) ?? null;
+  // git's default history simplification, as `git log -1 <tip> -- <path>` does it: walk back from tip; a commit whose
+  // version of `path` equals one of its parents' is skipped by following that parent (the first such one), so a merge
+  // that kept an old branch's version leads into that branch.
+  const same = (a, b) => (a?.blob ?? null) === (b?.blob ?? null) && (a?.mode ?? null) === (b?.mode ?? null);
+  const lastTouching = (tip, path) => {
+    let c = tip;
+    for (;;) {
+      const { files, parents } = commits.get(c);
+      if (!parents.length) return files.has(path) ? c : null;
+      const keep = parents.find((q) => same(commits.get(q).files.get(path), files.get(path)));
+      if (keep === undefined) return c;
+      c = keep;
+    }
+  };
   const treeSha = (sha) => createHash('sha1').update(`tree ${sha}`).digest('hex');
 
   const base = `/repos/${owner}/${repo}`;

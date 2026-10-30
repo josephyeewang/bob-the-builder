@@ -1,7 +1,7 @@
 // snapshot.test.mjs — the hook-time copy of the rules is refused whenever it can't be trusted (MAT-9, R2-M6).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, writeFileSync, chmodSync, statSync, unlinkSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync, chmodSync, statSync, unlinkSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { publishSnapshot, readSnapshot, snapshotAnswer, SNAPSHOT_FILE, MAX_AGE_MS, MAX_FUTURE_MS } from './snapshot.mjs';
@@ -29,6 +29,9 @@ test('missing, unreadable, wrong format, damaged, stale, future or loosely-permi
     ['future', () => {}, T - MAX_FUTURE_MS - 1],
     ['group-writable', (d) => chmodSync(join(d, SNAPSHOT_FILE), 0o664), T],
     ['other-writable', (d) => chmodSync(join(d, SNAPSHOT_FILE), 0o646), T],
+    ['folder group-writable', (d) => chmodSync(d, 0o775), T],
+    ['folder other-writable', (d) => chmodSync(d, 0o777), T],
+    ['a link to a good snapshot', (d) => { const real = fresh(); unlinkSync(join(d, SNAPSHOT_FILE)); symlinkSync(join(real, SNAPSHOT_FILE), join(d, SNAPSHOT_FILE)); }, T],
   ];
   for (const [name, spoil, at] of cases) {
     const d = fresh(); spoil(d);
@@ -69,4 +72,30 @@ test('snapshot.mjs imports nothing that can reach the network', () => {
   const imports = [...src.matchAll(/^import .* from '([^']+)';$/gm)].map((m) => m[1]).sort();
   assert.deepEqual(imports, ['../../shared/rules.mjs', 'node:crypto', 'node:fs', 'node:path']);
   assert.doesNotMatch(src, /fetch\(|node:https?|node:net|node:dgram|import\(/);
+});
+
+test('reading the snapshot works with no network at all: fetch throws (MAT-9, audit minor 2)', () => {
+  const d = fresh();
+  const real = globalThis.fetch;
+  globalThis.fetch = () => { throw new Error('network used'); };
+  try {
+    assert.equal(snapshotAnswer(readSnapshot(d, T), 'snapshot_fresh', { product: 'sample-app' }).decision, 'allow');
+  } finally { globalThis.fetch = real; }
+});
+
+test('the snapshot answer equals the live answer for every rules status (R2-M6(d), MIN-5)', async () => {
+  const { makeEngine } = await import('./engine.mjs');
+  const { makeRules } = await import('../../shared/rules.mjs');
+  const { parsePolicy } = await import('./policy.mjs');
+  const policy = parsePolicy(readFileSync(new URL('./fixtures/policy.yaml', import.meta.url), 'utf8')).policy;
+  const [C, B] = ['c'.repeat(40), 'b'.repeat(40)];
+  for (const status of ['ok', 'last_good', 'deny_all']) {
+    const live = makeRules(makeEngine({ products: ['sample-app'], productState: () => ({ state: 'active' }), running: () => 0,
+      rulesState: () => (status === 'deny_all' ? { status, policy: null } : { status, policy, commit: C, blob: B }),
+      rolesDir: new URL('./roles', import.meta.url).pathname, clock: () => T }));
+    const d = mkdtempSync(join(tmpdir(), 'm10-snap-'));
+    publishSnapshot(d, { products: { 'sample-app': status === 'deny_all' ? { status, rules: null, rev: null } : { status, rules: policy, rev: 'x' } } }, T);
+    const hook = snapshotAnswer(readSnapshot(d, T), 'write_production', { product: 'sample-app' });
+    assert.equal(hook.decision, live.may('write_production', { product: 'sample-app' }).decision, status);
+  }
 });

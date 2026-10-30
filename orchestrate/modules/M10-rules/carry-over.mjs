@@ -50,6 +50,9 @@ export async function carryOver({ reviewed, current, between, catchUps, tier1Mer
     }
 
     const [d0, d1] = await Promise.all([gh.files(B0, H0), gh.files(B1, H1)]);
+    // A reviewed change with no files carries nothing over (that is what a base given as the head itself looks like);
+    // an empty current change fails the file-list check below.
+    if (!d0.length) return no('the reviewed change lists no files against its base');
     const k0 = new Set(d0.map(key)); const k1 = new Set(d1.map(key));
     if (k0.size !== k1.size || [...k0].some((k) => !k1.has(k))) reasons.push('the change lists different files, renames or statuses');
     const paths = new Set([...touchedPaths(d0), ...touchedPaths(d1)]);

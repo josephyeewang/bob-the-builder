@@ -45,6 +45,12 @@ test('bad paths match nothing and are reported', () => {
   assert.equal(pathProblem('docs/a.md'), null);
 });
 
+test('a path with a non-ASCII letter is refused: the Mac treats look-alikes as the same file (audit minor 1)', () => {
+  for (const p of ['.mcp.j\u017fon', 'orche\u017ftrate/policy.yaml', 'AGENT\u017f.md', 'docs/stra\u00dfe.md', 'docs/\ufb01le.md', 'docs/caf\u00e9.md', 'docs/a\tb.md']) {
+    assert.match(pathProblem(p), /non-ASCII/, JSON.stringify(p));
+  }
+});
+
 test('an unreadable pattern throws, so the validator can call the file corrupt', () => {
   assert.throws(() => compile(''));
   assert.throws(() => compile('a/{b,c'));

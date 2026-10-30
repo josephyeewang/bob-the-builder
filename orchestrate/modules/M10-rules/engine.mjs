@@ -280,6 +280,7 @@ export function makeEngine({ products, rulesState, productState, running, rolesD
     },
     may(action, subject) {
       if (!subject || typeof subject !== 'object') return deny('no subject');
+      if (!Object.hasOwn(ANSWERS, action)) return deny(`unknown action "${action}"`);
       return ANSWERS[action](subject);
     },
     get(key, { product } = {}) {

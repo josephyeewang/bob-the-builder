@@ -175,6 +175,7 @@ test('push_branch: lanes (MIN-1, R2-m7, R3-m5)', () => {
   assert.equal(push('research', [file('docs/research/x.md')]).decision, 'deny', 'only the three lanes exist');
   assert.equal(push('product', [file('app/x.ts', 'renamed', { previous_path: 'docs/notes.md' })]).decision, 'deny', 'the old path counts');
   assert.equal(push('product', [file('../x.ts')]).decision, 'deny');
+  assert.match(push('product', [file('doc\u017f/blueprint/x.md')]).reason, /non-ASCII/, 'a look-alike of docs/ is not outside the docs lane');
   assert.equal(push('product', []).decision, 'deny');
   const narrow = world({ policies: { app: pol(set('', '\nproduct:', '\ndocs_paths: [docs/research/**]\nproduct:')) } });
   const r = narrow.rules.may('push_branch', { product: 'app', card: { id: 'C', rows: [], doc: { lane: 'docs' } }, files: [file('docs/notes.md')] });
@@ -260,6 +261,12 @@ test('actions not open in 0b are denied', () => {
   const w = world();
   for (const a of ['count_approval', 'delete_copy', 'write_production', 'flip_switch']) assert.equal(w.rules.may(a, { product: 'app' }).decision, 'deny', a);
   assert.match(w.rules.may('count_approval', {}).reason, /0b-5/);
+});
+
+test('the engine on its own denies an action it does not own, even an inherited name (audit minor 5)', () => {
+  const impl = makeEngine({ products: ['app'], rulesState: () => null, productState: () => null, running: () => 0,
+    rolesDir: join(here, 'roles'), clock: () => AT_10 });
+  for (const a of ['constructor', 'toString', '__proto__', 'nope']) assert.equal(impl.may(a, { product: 'app' }).decision, 'deny', a);
 });
 
 test('get(): per-product values, audit sizing, failure classes, the adopted version', () => {
