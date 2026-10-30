@@ -129,7 +129,7 @@ export async function watchOutside({ fetchJson, repo, workflow = 'outside-check.
       const cleared = Date.parse(ownerFile?.cleared?.[label]);
       if (redSince && green && Number.isFinite(cleared) && cleared >= Date.parse(redSince) && !(lastRed && cleared < Date.parse(lastRed))
         && cleared <= now() + 5 * 60e3) { redSince = null; latchWhy = null; }
-      const reason = !ownerFile ? `cannot read ${OWNER_FILE}` : !bound ? 'the slot tag does not match this product' : stepGreen ? 'step passed'
+      const reason = !stepsRead ? 'the Mini could not read the newest run\'s steps' : !ownerFile ? `cannot read ${OWNER_FILE}` : !bound ? 'the slot tag does not match this product' : stepGreen ? 'step passed'
         : guard?.conclusion === 'failure' ? 'the outside repo guard failed' : !guard && rm ? 'no repo-guard step in the newest run'
           : step ? `step ${step.conclusion ?? 'unfinished'}` : 'no robot-merges step in the newest run';
       const doc = { kind: 'fact.outside-robot-merges', product, label, at: nowIso,

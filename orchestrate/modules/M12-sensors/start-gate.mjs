@@ -61,6 +61,8 @@ export function startGateOpen({ read, product, now = () => Date.now() }) {
     let d = null;
     try { d = read(id); } catch { d = null; }
     if (!d) { problems.push(`${name}: no fact yet`); continue; }
+    // Two names can share a fact id ("a.b", "a-b"); the fact must be this product's (0b-7 audit round 8 minor 1).
+    if (d.product !== product) problems.push(`${name}: the fact belongs to another product name`);
     const age = (t - Date.parse(d.at)) / 60000;
     if (!Number.isFinite(age)) problems.push(`${name}: no readable time`);
     else if (age < -5) problems.push(`${name}: time is in the future`);

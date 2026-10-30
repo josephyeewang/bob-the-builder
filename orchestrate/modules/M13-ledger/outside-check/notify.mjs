@@ -21,26 +21,30 @@ export async function notify({ ran, failed, api, now = () => new Date() }) {
     const failing = failed.includes(title);
     if (failing) {
       if (i && i.state === 'open') { await api('PATCH', `/issues/${i.number}`, { body: bodyOf(title, i.body, stamp) }); done.push([title, 'updated']); continue; }
-      if (i && i.state === 'closed' && !(await clearedByBot(api, i))) { done.push([title, 'suppressed']); continue; }
+      if (i && i.state === 'closed' && !clearedByBot(i)) { done.push([title, 'suppressed']); continue; }
       await api('POST', '/issues', { title, body: bodyOf(title, '', stamp) });
       done.push([title, 'opened']);
     } else if (i && i.state === 'open') {
       await api('POST', `/issues/${i.number}/comments`, { body: CLEARED });
+      await api('PATCH', `/issues/${i.number}`, { body: markCleared(i.body, stamp) }); // the marker first, then close
       await api('PATCH', `/issues/${i.number}`, { state: 'closed' });
       done.push([title, 'cleared']);
-    } else if (i && i.state === 'closed' && !(await clearedByBot(api, i))) {
+    } else if (i && i.state === 'closed' && !clearedByBot(i)) {
       // The owner closed it mid-failure and it now passes: mark it cleared so the next failure opens a fresh one.
       await api('POST', `/issues/${i.number}/comments`, { body: CLEARED });
+      await api('PATCH', `/issues/${i.number}`, { body: markCleared(i.body, stamp) });
       done.push([title, 're-armed']);
     }
   }
   return done;
 }
 
-async function clearedByBot(api, issue) {
-  const cs = await api('GET', `/issues/${issue.number}/comments?per_page=100`);
-  return cs.some((c) => c.user?.login === BOT && c.body === CLEARED);
-}
+// "Cleared" is a line the bot writes into the issue's own body, never read from comments: the repo is public, so anyone
+// can comment, and a flood of 100 comments pushed the bot's "cleared" comment off the first page, which suppressed
+// every later failure (0b-7 audit round 8 M-1). Only the bot (and the owner) can edit the body of the bot's issue.
+const CLEARED_LINE = /^cleared at \S+$/m;
+const clearedByBot = (issue) => CLEARED_LINE.test(issue.body ?? '');
+const markCleared = (body, stamp) => `${String(body ?? '').replace(/\n*^cleared at \S+$/m, '')}\ncleared at ${stamp}`;
 
 function bodyOf(title, old, stamp) {
   const since = /^failing since (\S+)$/m.exec(old ?? '')?.[1] ?? stamp;
