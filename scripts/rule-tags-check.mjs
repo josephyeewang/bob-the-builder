@@ -17,7 +17,7 @@
 // It ends by printing how many rules are still written-only.
 //
 // Usage: node scripts/rule-tags-check.mjs [--root DIR]
-// Exit: 0 = every tag is true · 1 = a tag claims an enforcer that is missing or never run.
+// Exit: 0 = every tag is true · 1 = a tag claims an enforcer that is missing or never run · 2 = no index to read.
 
 import fs from 'node:fs';
 import path from 'node:path';
@@ -35,8 +35,8 @@ for (const l of rd('build-protocol-core.md').split('\n')) {
   if (m) index.set(Number(m[1]), m[2].trim());
 }
 if (!index.size) {
-  console.log('rule-tags-check: no rule index rows found in build-protocol-core.md');
-  process.exit(1);
+  process.stderr.write('rule-tags-check: no rule index rows found in build-protocol-core.md — nothing to check, which is not a pass\n');
+  process.exit(2);
 }
 
 const body = new Map();
@@ -45,7 +45,7 @@ for (let i = 1; i < parts.length; i += 2) body.set(Number(parts[i]), parts[i + 1
 
 // Lines that run something: comments are dropped, so naming a script in a comment does not count as running it.
 const runners = [
-  ...fs.readdirSync(path.join(ROOT, '.github/workflows')).filter((f) => /\.ya?ml$/.test(f)).map((f) => rd(`.github/workflows/${f}`)),
+  ...(fs.existsSync(path.join(ROOT, '.github/workflows')) ? fs.readdirSync(path.join(ROOT, '.github/workflows')) : []).filter((f) => /\.ya?ml$/.test(f)).map((f) => rd(`.github/workflows/${f}`)),
   rd('scripts/selftest-gate-scripts.sh'),
 ].join('\n').split('\n').filter((l) => !/^\s*#/.test(l) && !/^\s*(printf|echo|cat)\b/.test(l));
 // A script runs when a line calls it: `node scripts/x.mjs`, `bash "$HERE/x.sh"`, `python3 x.py`, or `X="$HERE/x.mjs"` then `node "$X"`.

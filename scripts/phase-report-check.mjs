@@ -18,7 +18,7 @@
 // divergences found" always counts as the section's own text.
 //
 // --abbreviated checks the short report the Minimum Viable Process allows ("Full Phase Report — use abbreviated"):
-// only Built, Spec Deviations, Validation Results, Hot Path Results and Regression Check are required.
+// only the sections on the template's "Short report:" line are required (read from there, so the list has one home).
 //
 // Usage: node "$(realpath ~/.claude/skills/bob/..)/scripts/phase-report-check.mjs" <phase-report.md> [--abbreviated] [--template FILE]
 // Exit: 0 = complete · 1 = REFUSED (each problem listed) · 2 = cannot run (no report, or the template is missing).
@@ -77,6 +77,7 @@ const tpl = fs.readFileSync(TEMPLATE, 'utf8');
 const tplSections = sections(tpl);
 const kindOf = new Map(tplSections.map((s) => [s.name, s.kind]));
 const tplLines = new Map(tplSections.map((s) => [s.name, new Set(s.body.map(norm))]));
+const tplItalic = new Set(tpl.split('\n').filter((l) => /^\s*\*[^*].*\*\s*$/.test(l)).map(norm));
 const placeholders = new Set();
 for (const l of tpl.split('\n')) if (/^\s*(?:[-*]|\d+\.|#{1,3})\s/.test(l) && PLACEHOLDER.test(l)) placeholders.add(norm(l));
 
@@ -101,7 +102,8 @@ for (const m of mine) {
   // Text of its own: not blank, not an italic instruction, and not a line copied unchanged from the template's section.
   // A line saying the section does not apply ("N/A — …", "None") always counts, even when the template suggests it.
   const says = (l) => /^\s*(?:[-*]\s*)*\**\s*(N\/A|None|No divergences found)\b/i.test(l);
-  const own = m.body.filter((l) => l.trim() && (says(l) || (!/^\s*\*[^*].*\*\s*$/.test(l) && !placeholders.has(norm(l)) && !tplLines.get(tplName)?.has(norm(l)))));
+  // An italic line is the template's instruction only when the template has that same line; real text may be italic.
+  const own = m.body.filter((l) => l.trim() && (says(l) || (!placeholders.has(norm(l)) && !tplLines.get(tplName)?.has(norm(l)) && !tplItalic.has(norm(l)))));
   if (!own.length && !m.saysNA)
     problems.push(`line ${m.line}: the "${m.name}" section has nothing of its own${kind === 'C' ? ' — if it does not apply, write "N/A — <reason>"' : ''}${m.name === 'spec deviations' ? ' — if there were none, write "None" (Rule 4: "No divergences found")' : ''}`);
 }

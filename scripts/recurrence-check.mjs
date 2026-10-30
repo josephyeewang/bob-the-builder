@@ -25,22 +25,29 @@ import { execFileSync } from 'node:child_process';
 import path from 'node:path';
 
 const args = process.argv.slice(2);
-const si = args.indexOf('--since');
-const since = si >= 0 ? args[si + 1] : null;
-const DIR = path.resolve(args.filter((a, i) => !a.startsWith('--') && (si < 0 || i !== si + 1))[0] ?? '.');
+const si = args.findIndex((a) => a === '--since' || a.startsWith('--since='));
+const since = si < 0 ? null : args[si].includes('=') ? args[si].slice('--since='.length) : args[si + 1];
+const unknown = args.find((a) => a.startsWith('--') && !a.startsWith('--since'));
+const DIR = path.resolve(args.filter((a, i) => !a.startsWith('--') && (si < 0 || i !== si + 1 || args[si].includes('=')))[0] ?? '.');
 
 function cannot(message) {
   process.stderr.write(`recurrence-check: ${message}\n`);
   process.exit(2);
 }
 
-let log;
+if (unknown) cannot(`unknown option ${unknown} (only --since DATE)`);
+try {
+  execFileSync('git', ['-C', DIR, 'rev-parse', '--git-dir'], { stdio: 'ignore' });
+} catch {
+  cannot(`${DIR} is not a git repository (or git is not installed)`);
+}
+let log = '';
 try {
   const cmd = ['-C', DIR, 'log', '--no-merges', '--format=%H%x1f%cs%x1f%s%x1f%b%x1e'];
   if (since) cmd.push(`--since=${since}`);
   log = execFileSync('git', cmd, { encoding: 'utf8', maxBuffer: 256 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'] });
 } catch {
-  cannot(`${DIR} is not a git repository (or git is not installed)`);
+  cannot(`${DIR} has no commits yet`);
 }
 
 const byClass = new Map();
@@ -51,10 +58,10 @@ for (const rec of log.split('\x1e')) {
   // inside a ``` code block and not indented, so a docs commit that quotes an example does not count.
   const body = rawBody.replace(/```[\s\S]*?```/g, '');
   const field = (key) => [...body.matchAll(new RegExp(`^${key}:[ \\t]*(.+?)[ \\t]*$`, 'gim'))].map((m) => m[1]);
-  const classes = field('Class').flatMap((v) => v.split(',')).map((c) => c.trim().toLowerCase().replace(/\s+/g, '-')).filter(Boolean);
+  const classes = field('Class').flatMap((v) => v.split(',')).map((c) => c.trim().toLowerCase().replace(/[.;!?]+$/, '').replace(/\s+/g, '-')).filter(Boolean);
   if (!classes.length) continue;
   // The Rung: line wins; otherwise "closed at rung N" in the message.
-  const trailer = field('Rung').map((r) => r.match(/^(\d)\b/)?.[1]).filter(Boolean).map(Number);
+  const trailer = field('Rung').map((r) => r.match(/(\d)/)?.[1]).filter(Boolean).map(Number); // "3", "R3 (fresh read)"
   const prose = [...body.matchAll(/closed at rung\s*(\d)\b/gi)].map((m) => Number(m[1]));
   const rungs = trailer.length ? trailer : prose;
   const rung = rungs.length ? Math.max(...rungs) : null;
@@ -71,7 +78,9 @@ let recurring = 0;
 for (const [c, commits] of byClass) {
   if (commits.length < 2) continue;
   recurring++;
-  const newest = commits[0]; // git log lists newest first
+  // Judge the newest commit that records a rung (git log lists newest first); a later mention with no rung does not
+  // reset the class. If none records a rung, the newest is judged and refused.
+  const newest = commits.find((x) => x.rung !== null) ?? commits[0];
   if (newest.rung === null || newest.rung < 3) {
     const list = commits.map((x) => `${x.sha} ${x.date} rung ${x.rung ?? '?'} — ${x.subject.slice(0, 70)}`).join('\n      ');
     problems.push(`class "${c}" has been fixed ${commits.length} times and the newest fix is closed at ${newest.rung ? `rung ${newest.rung}` : 'no recorded rung'}. A recurring class needs rung 3 (a fresh-context read where it can come back) or rung 4 (make it impossible):\n      ${list}`);

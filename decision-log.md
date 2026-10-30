@@ -541,11 +541,12 @@ The companion `audit-log.md` records *deferred* items (Defer verdicts that may s
 - **Decision:**
   - (1) **Five new checks**, each tied to a rule, tested in the self-test, and reached from the phase gate (items 13–15), the Supervised Autonomy runbook (its new step 0) or Bob's CI:
     - `scripts/phase-report-check.mjs` (Rule 4; Phase Gate 13). It refuses a phase report whose always-required sections are missing, empty, or still the template's placeholder text. It reads the section list from `templates/phase-report.md`, so that list keeps one home.
-    - `scripts/run-commands-check.mjs` (Rule 26 and Engineering Principle 8b; Phase Gate 14). It refuses a package script, CI step or Makefile line that runs a missing file, or a Python file with no run block that only imports or defines.
+    - `scripts/run-commands-check.mjs` (Rule 26 and Engineering Principle 8b; Phase Gate 14). It compares a change with git and refuses when a run config (package script, CI step, Makefile, Procfile, schedule …) still names a file the change deleted or renamed, or a Python file that lost its run block.
     - `scripts/autonomy-check.mjs` (Rule 27; runbook step 0). It runs before a hands-off phase and checks the deny and ask rules, a green gate with a retry limit and a real test command, a reviewer that cannot edit, no ignored `defaultMode: "auto"`, and no production key in the settings.
     - `scripts/recurrence-check.mjs` (Rule 31; Phase Gate 15). It reads `Class:` and `Rung:` lines in fix commits and refuses a class fixed twice whose newest fix is below rung 3.
     - `scripts/rule-tags-check.mjs` (Rule 33, in Bob's CI). Every rule the index tags as checked must name a script that exists and that CI or the self-test runs.
     - Each check exits 2 (cannot judge) rather than 0 when it has nothing to read (Rule 29).
+    - A third review found the remaining edge cases: italic text in a report, a retry limit written as a plain number, class names that differ only in case or a trailing full stop, and a later commit that names a class without a rung. Each was fixed and became a self-test. Rule 4 is tagged `SCRIPT` (in part), because the check can see that "Spec Deviations" was filled in, not that what it says is true.
     - A fresh review found nine serious problems in the first version, most of them false alarms on healthy projects. All were fixed and turned into self-tests before release:
       - the phase-report check now accepts other heading styles, any "N/A" or "None" line, and the short report the Minimum Viable Process allows (`--abbreviated`);
       - the run-commands check follows `cd`, workflow and job defaults, matrix folders, build output and installed tools, and it passes an app whose scripts only call tools;
@@ -553,7 +554,7 @@ The companion `audit-log.md` records *deferred* items (Defer verdicts that may s
       - the recurrence check reads only real git trailers;
       - the rule-tags check needs a real call, not a mention in a comment, and compares the whole tag. It found that Rule 32 was tagged one way in `rules.md` and another in the index, and that was fixed.
     - A second fresh review found eight more. They were fixed the same way, and again each became a self-test:
-      - the run-commands check now judges only a command that starts with an interpreter and a file it can read for sure, and skips the rest (monorepo filters, nested shells, files the same step writes, Windows paths, folders a checkout step fills);
+      - the run-commands check was narrowed to commands it could read for sure (a third review still found shapes it got wrong, so it was rebuilt; see Consequences);
       - the phase-report check keeps sub-headings inside their section, accepts "N/A" in a heading, and reads the short-report list from the template;
       - the autonomy check understands the hook quoting Claude Code's docs use, retry limits written in any language, and stricter deny rules;
       - the recurrence check reads `Class:` / `Rung:` lines anywhere outside code blocks, so a Co-Authored-By line after them is fine;
@@ -576,7 +577,7 @@ The companion `audit-log.md` records *deferred* items (Defer verdicts that may s
   - The phase gate has 15 items.
   - A project's fix commits need two short git trailer lines for the recurrence check to see them; the phase report's class-level scan section now says so. Without those lines it reports "cannot judge", never "clean".
   - The autonomy check reads only the project's own settings, because personal rules do not travel with the project. A user whose deny rules live only in their personal settings is told to add them to the project.
-  - The run-commands check was calibrated before it shipped. Run across several real projects, it raised no false alarm once it learned to read each workflow step's own working folder; the first version flagged healthy commands in one of them. It catches both planted breaks in its test.
+  - The run-commands check was rebuilt after the third review. Its first design read every run command and judged whether the file it named existed. Each of three fresh reviews found new healthy command shapes it judged wrong: wrappers, subshells, monorepo filters, files made while the job runs, `.ONESHELL` Makefiles. That is three rounds of the same fix failing, so the approach was changed rather than patched a fourth time. It now judges the change: it asks git what the change deleted, renamed or stripped of its run block, and refuses only when a run config still names that file. Run over long stretches of real history in several projects, it raised no false alarm. The cost is deliberate: it cannot see a command that was already broken before the change.
   - The autonomy check, run on a fresh `bob-init` project, refuses only the test command the user has not filled in yet. That is deliberate: until it is filled in, the gate blocks every stop.
 - **Revisit trigger:**
   - The NEW-mode rewrite lands: build the Rule 22 check.

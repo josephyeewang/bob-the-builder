@@ -15,8 +15,8 @@
 //   3. permissions.deny holds the destructive basics: rm -rf, git push --force, git reset --hard;
 //   4. permissions.ask stops at git push (refused if missing) and at a deploy or migrate command (a warning if none
 //      is recognised — deploy tools vary);
-//   5. a Stop hook runs a project green-gate script with a numeric retry limit it compares against (MAX_ATTEMPTS=8 or
-//      MAX_ATTEMPTS="${MAX_ATTEMPTS:-8}") and no longer holding bob-init's "EDIT … set TEST_CMD" placeholder. Other
+//   5. a Stop hook runs a project green-gate script that compares a counter with a retry limit of at least 2 (`-ge 8`,
+//      `-gt "$MAX_ATTEMPTS"` with MAX_ATTEMPTS=8 or "${MAX_ATTEMPTS:-8}", `n > MAX` in JavaScript or Python) and no longer holding bob-init's "EDIT … set TEST_CMD" placeholder. Other
 //      Stop hooks (a notifier in ~/.claude, say) are left alone; a gate run through `npm run …` or `make …` cannot be
 //      read, so it is a warning to check by hand;
 //   6. .claude/agents/reviewer.md exists and lists its tools, none of them Edit, Write, MultiEdit or NotebookEdit (a
@@ -89,10 +89,15 @@ if (settings) {
     if (!fs.existsSync(at(local))) { bad(5, `the Stop hook runs ${local}, which does not exist`); continue; }
     gates.push({ local, src: fs.readFileSync(at(local), 'utf8') });
   }
+  // A bounded gate compares a counter with a limit of at least 2: `-ge 8`, `-gt "$MAX_ATTEMPTS"`, `n > MAX_ATTEMPTS`,
+  // `(( n >= RETRIES ))` — the limit written as a number or held in a variable set to one (any name, any language).
   const limitOf = (src) => {
-    // MAX_ATTEMPTS=8 · MAX_ATTEMPTS="${MAX_ATTEMPTS:-8}" · const MAX_ATTEMPTS = 8 · max_attempts = 8 — then used again later.
-    for (const m of src.matchAll(/\b(?:(?:const|let|var|readonly|declare)\s+(?:-\w\s+)?)?([A-Za-z_]*(?:max|limit)[A-Za-z_]*)\s*=\s*["']?(?:\$\{\w+:-)?(\d+)/gi))
-      if (new RegExp(`(^|[^\\w])\\$?\\{?${m[1]}\\b`).test(src.replace(m[0], ''))) return m;
+    const nums = new Map();
+    for (const m of src.matchAll(/\b(?:(?:const|let|var|readonly|declare)\s+(?:-\w\s+)?)?([A-Za-z_]\w*)\s*=\s*["']?(?:\$\{\w+:-)?(\d+)\b/g)) nums.set(m[1], Number(m[2]));
+    for (const m of src.matchAll(/(?:-ge|-gt|>=|>)\s*["']?(?:\$\{?([A-Za-z_]\w*)\}?|(\d+)|([A-Za-z_]\w*))["']?/g)) {
+      const n = m[2] !== undefined ? Number(m[2]) : nums.get(m[1] ?? m[3]);
+      if (n >= 2) return m;
+    }
     return null;
   };
   if (!gates.length && !warnings.some((w) => w.includes('[5]')))

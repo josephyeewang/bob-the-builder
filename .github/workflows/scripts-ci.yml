@@ -58,7 +58,7 @@ jobs:
         run: node scripts/one-home-check.mjs
       - name: Every rule tagged as checked names a script that exists and runs (D-033, Rule 33)
         run: node scripts/rule-tags-check.mjs
-      - name: Every command Bob's CI runs points at a real file (D-033, Rule 26 on Bob itself)
+      - name: No run command points at a file this change moved or deleted (D-033, Rule 26 on Bob itself)
         run: node scripts/run-commands-check.mjs .
       - name: The lens count in audit-lenses/README.md matches the lens files
         run: |
