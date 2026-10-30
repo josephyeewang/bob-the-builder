@@ -88,7 +88,7 @@ export function checkPath(p) {
 // nothing on this machine because a shell is missing: without zsh a brace after ">" is an error, and dash (Linux's sh)
 // does not read $'…' (round 10 audit 3 M-4).
 const SH_ANSI_C = spawnSync('sh', ['-c', "printf %s $'\\x41'"], { encoding: 'utf8' }).stdout === 'A';
-export const hostDead = (tpl, form) => (form === 'brace' && !existsSync('/bin/zsh') && /> ?\{\{(P|BASE)\}\}/.test(tpl))
+export const hostDead = (tpl, form) => (form === 'brace' && !existsSync('/bin/zsh') && /> ?(\{\{UP\}\}\/)?\{\{(P|BASE)\}\}/.test(tpl))
   || (form === 'ansi-c' && !SH_ANSI_C && tpl.startsWith('sh -c'));
 const live = (tpl, form) => !(corpus.dead[tpl] ?? []).includes(form) && !hostDead(tpl, form);
 
