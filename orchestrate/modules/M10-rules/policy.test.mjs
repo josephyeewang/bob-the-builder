@@ -150,3 +150,13 @@ test('a pattern with a . or .. part is refused in every list, since it can never
   }
   assert.ok(parsePolicy(fixture.replace('flag_files: [lib/flags.ts]', 'flag_files: [.prettierrc, lib/.flags.ts]')).ok, 'a name that starts with a dot is fine');
 });
+
+test('the database folders can\'t be left out or empty, and the hours end at 24:00 at the latest (audit round 7)', () => {
+  for (const [from, to] of [['repair_folder: [db/repairs/]', 'repair_folder: []'], ['migration_paths: [db/migrations/]', 'migration_paths: []']]) {
+    assert.ok(fixture.includes(from), from);
+    assert.match(parsePolicy(fixture.replace(from, to)).reason, /at least one folder/, to);
+  }
+  // Leaving the field out entirely can't be written: the rules format has no empty map, and a missing key is refused.
+  refused(swap('  tier1_hours: 07:00-22:00', '  tier1_hours: 07:00-24:30'), 'past midnight');
+  assert.ok(parsePolicy(swap('  tier1_hours: 07:00-22:00', '  tier1_hours: 07:00-24:00')).ok);
+});

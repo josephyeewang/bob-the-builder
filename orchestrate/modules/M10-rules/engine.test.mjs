@@ -173,6 +173,13 @@ test('push_branch: lanes (MIN-1, R2-m7, R3-m5)', () => {
   assert.equal(push('lead', [file('docs/blueprint/BLUEPRINT.md')]).decision, 'deny');
   assert.equal(push('lead', [file('docs/blueprint/BLUEPRINT.md')], { kind: 'lead_daily_card' }).decision, 'allow');
   assert.equal(push('lead', [file('app/x.ts')], { kind: 'lead_daily_card' }).decision, 'deny');
+  for (const p of ['docs/blueprint/ROWS/R-9.yaml', 'docs/blueprint/Rows/R-9.yaml']) {   // a case variant is still a row file (audit round 7)
+    assert.equal(push('lead', [file(p, 'removed')], { kind: 'lead_daily_card' }).decision, 'deny', `${p} removed`);
+    assert.equal(push('lead', [file(p)], { kind: 'lead_daily_card' }).decision, 'deny', `${p} of another card`);
+  }
+  for (const card of [undefined, { doc: { lane: 'docs' } }, { id: '', doc: { lane: 'docs' } }, { id: 7, doc: { lane: 'docs' } }]) {   // MAT-5: a missing card id is a deny (audit round 7)
+    assert.equal(w.rules.may('push_branch', { product: 'app', card, files: [file('docs/research/x.md')] }).decision, 'deny', JSON.stringify(card));
+  }
   assert.match(push(undefined, [file('app/x.ts')]).reason, /no lane/, 'a missing lane is a deny');
   assert.match(push(undefined, [file('docs/blueprint/rows/R-1.yaml')]).reason, /no lane/, 'a missing lane never falls back to lead');
   assert.equal(push('research', [file('docs/research/x.md')]).decision, 'deny', 'only the three lanes exist');
@@ -276,6 +283,27 @@ test('merge: the undo of a database change asks Joe even after a failed audit, w
   }
 });
 
+test('merge: the undo of a database change found only in the text asks Joe (0b-9 M4, audit round 7)', () => {
+  const w = world({ states: { app: { state: 'paused' } }, now: AT_03 });
+  const undo = (lines, extra = {}) => mergeOf(w, [file('lib/db/setup.sql', 'removed', { removed_lines: lines })], reverse('failure', extra));
+  for (const line of ['CREATE TABLE users (id int);', 'create or replace function f() returns int as 1', 'CREATE TRIGGER t AFTER INSERT ON x',
+    'CREATE POLICY p ON users', 'GRANT SELECT ON users TO anon', 'CREATE MATERIALIZED VIEW v AS SELECT 1', 'alter type mood add value \'x\'']) {
+    assert.equal(undo([line]).reason, 'exact reverse of a database change', line);
+  }
+  assert.equal(undo(['export const x = 1;']).decision, 'allow', 'plain code with its removed lines still reverses');
+  assert.equal(mergeOf(w, [file('lib/db/setup.sql', 'removed')], reverse('failure')).reason, 'exact reverse of code without its removed lines');
+  assert.equal(mergeOf(w, [file('lib/a.ts', 'renamed', { previous_path: 'lib/b.ts' })], reverse('failure')).reason, 'exact reverse of code without its removed lines', 'a rename too');
+  assert.equal(mergeOf(w, [file('docs/research/x.md', 'renamed', { previous_path: 'lib/x.ts' })], reverse('failure')).reason, 'exact reverse of code without its removed lines', 'a rename from code to a doc');
+  assert.equal(mergeOf(w, [file('lib/a.ts', 'modified', { removed_lines: 'CREATE TABLE x' })], reverse('failure')).decision, 'ask', 'removed lines of the wrong type');
+  assert.equal(mergeOf(w, [file('docs/research/x.md')], reverse('failure')).decision, 'allow', 'a plain doc needs no lines');
+});
+
+test('merge: a needs-joe:protected label on an exact reverse asks Joe (audit round 7)', () => {
+  const w = world({ states: { app: { state: 'paused' } }, now: AT_03 });
+  const r = mergeOf(w, [file('docs/research/x.md')], reverse('failure', { labels: ['needs-joe:protected'] }));
+  assert.deepEqual([r.decision, r.reason], ['ask', 'exact reverse touches a protected file']);
+});
+
 test('merge: the Tier-1 hours window ends at 22:00 exactly (audit round 6)', () => {
   const w = world({ now: Date.parse('2026-10-15T02:00:00Z') });   // 22:00 New York
   assert.equal(mergeOf(w, [file('app/x.ts')], { declared_tier: 1 }).reason, 'held_tier1_hours');
@@ -289,8 +317,9 @@ test('merge: an exact reverse with rules that cannot be fully read asks Joe (aud
   const r = mergeOf(w, [file('orchestrate/policy.yaml'), file('.github/workflows/a.yml')], reverse('failure'));
   assert.deepEqual([r.decision, r.tier], ['ask', 1]);
   const label = world({ states: { app: { state: 'paused' } }, now: AT_03 });
+  const code = file('app/x.ts', 'modified', { removed_lines: ['export const x = 1;'] });
   assert.equal(mergeOf(label, [file('app/x.ts')], reverse('failure', { labels: ['needs-joe'] })).decision, 'ask', 'a needs-joe label is never skipped');
-  assert.equal(mergeOf(label, [file('app/x.ts')], reverse('failure')).decision, 'allow', 'unscanned code alone still reverses');
+  assert.equal(mergeOf(label, [code], reverse('failure')).decision, 'allow', 'unscanned code alone still reverses');
   assert.notEqual(mergeOf(label, [file('app/x.ts')], reverse('failure', { reverses: [R] })).reason, 'exact reverse of a merge whose audit failed', 'reverses must be one id');
 });
 
@@ -304,7 +333,7 @@ test('merge: truncated or labels of the wrong type are refused, never read as "n
 
 test('merge: the exact-reverse answer, in R3-M3\'s order', () => {
   const w = world({ states: { app: { state: 'paused' } }, now: AT_03 });
-  const flaggedTier1 = mergeOf(w, [file('app/x.ts')], { declared_tier: 1, ...reverse('failure') });
+  const flaggedTier1 = mergeOf(w, [file('app/x.ts', 'modified', { removed_lines: ['export const x = 1;'] })], { declared_tier: 1, ...reverse('failure') });
   assert.equal(flaggedTier1.decision, 'allow', 'reverse of a flagged Tier-1 merge, paused, 03:00');
   assert.deepEqual([mergeOf(w, [file('db/migrations/1.sql')], reverse('success')).decision, mergeOf(w, [file('db/migrations/1.sql')], reverse('success')).tier], ['ask', 1], 'risky reverse whose audit passed');
   assert.equal(mergeOf(w, [file('orchestrate/policy.yaml')], reverse('failure')).decision, 'ask', 'a protected reverse always asks');

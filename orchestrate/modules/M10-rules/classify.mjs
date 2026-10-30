@@ -32,7 +32,9 @@ const LINK_MODES = new Set(['120000', '160000']);
 const FILE_MODES = new Set(['100644', '100755', '120000', '160000']);   // a symlink or a submodule: protected, whatever its path
 
 // Whole SQL statements only, so prose like "drop the feature" never matches (R2-M4(c)).
-const SCHEMA_SCANS = [/\b(create|alter|drop)\s+(table|index)\b/i, /\balter\s+table\s+\S+\s+(add|drop|alter)\s+column\b/i];
+// Round 7 widened the object list (functions, triggers, policies, views, types, grants...) for the exact-reverse check.
+const SCHEMA_SCANS = [/\b(create(\s+or\s+replace)?|alter|drop)\s+(unique\s+)?(table|index|function|procedure|trigger|policy|view|materialized\s+view|type|schema|extension|sequence|role)\b/i,
+  /\balter\s+table\s+\S+\s+(add|drop|alter)\s+column\b/i, /\b(grant|revoke)\s+[\w\s,]+?\s+on\b/i];
 const DELETE_SCANS = [/\bdelete\s+from\b/i, /\btruncate\s+(table\s+)?\w/i, /\bdrop\s+(table|column|index|schema|database|view)\b/i];
 
 export function classifyWithRulesText(text, change) {
@@ -120,6 +122,9 @@ export function classifyChange(policy, change) {
       const pkg = m.packages.find((name) => importsPackage(text, name));
       if (pkg) add('messages_people', `${f.path} (imports ${pkg})`);
     }
+    // Removed lines too: a change that removes a table statement undoes a database change (0b-9 M4, audit round 7).
+    if (f.removed_lines !== undefined && !(Array.isArray(f.removed_lines) && f.removed_lines.every((l) => typeof l === 'string'))) add('unclassifiable', `removed_lines is not a list of lines: ${f.path}`);
+    else if (scan && Array.isArray(f.removed_lines) && SCHEMA_SCANS.some((re) => re.test(f.removed_lines.join('\n')))) add('schema', `${f.path} (table change in removed lines)`);
   }
 
   // A `needs-joe` label adds `unclassifiable`; `needs-joe:<class>` adds that class. Neither removes one (MIN-3).

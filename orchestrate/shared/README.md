@@ -29,9 +29,10 @@ rules.rev;                                                    // the rules versi
   | `count_approval` | denied until 0b-5 M2 Approvals switches it on |
   | `delete_copy`, `write_production`, `flip_switch` | denied in 0b |
 
-- `classify(change)` takes `{ product, files: [{ path, previous_path?, status, mode?, added_lines? }], truncated?, declared_tier?, labels? }`. It always uses the current rules: a `policy` or `atCommit` field is dropped, so a caller can't hand in looser rules. The GitHub-side checker reads the parent commit's rules with M10's `classifyWithRulesText`.
+- `classify(change)` takes `{ product, files: [{ path, previous_path?, status, mode?, added_lines?, removed_lines? }], truncated?, declared_tier?, labels? }`. It always uses the current rules: a `policy` or `atCommit` field is dropped, so a caller can't hand in looser rules. The GitHub-side checker reads the parent commit's rules with M10's `classifyWithRulesText`.
   - Until the effect-path scanner lands (second cutover), a changed file is ordinary only if it sits under `docs/` and is a plain file (`.md`, `.txt`, `.csv`, `.json`, `.yaml`, `.yml`, `.png`, `.jpg`, `.jpeg`, `.gif`, `.svg`, `.pdf`). Anything else comes back `unclassifiable`, Tier 1.
   - Any risky class or protected path makes the answer Tier 1, whatever the rules module returned.
+  - `removed_lines` are scanned for table changes too (removing one undoes a database change). On an exact-reverse merge, every code file must carry them, or the answer is "ask Joe".
   - If the rules can't classify a change at all, every file it names counts as protected (never an empty list).
 - `files` is always `[{ path, status, previous_path? }]`, with `previous_path` set for a rename or copy.
 - **Held, not refused.** A `deny` whose reason is in `HOLD_REASONS` (`held_tier1_hours`, `rules_not_adopted`) means "wait and keep the place in the queue". Test membership in the list; never parse reason text. M10 answers `held_tier1_hours`; the Merge Gate sets `rules_not_adopted` itself while the rules file at the expected parent differs from the adopted one (`get('rules.adopted', { product })` gives the full ids).

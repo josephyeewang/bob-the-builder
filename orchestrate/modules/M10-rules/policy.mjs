@@ -176,6 +176,10 @@ function check(raw) {
       else patterns(v, `effect_paths.${k}.${field}`);       // a list of readable patterns, nothing else (audit round 4)
     }
   }
+  // The database folders also drive 0b-9 M4's "never undone automatically": they can't be left out or empty (audit round 7).
+  for (const [k, field] of [['schema', 'migration_paths'], ['production_data', 'repair_folder']]) {
+    if (!Array.isArray(ep[k][field]) || !ep[k][field].length) bad(`effect_paths.${k}.${field} must list at least one folder`);
+  }
 
   for (const [k, v] of Object.entries(mapOf(raw.caps, 'caps'))) {
     if (k === 'per_state' || k === 'budget_per_card') continue;
@@ -245,7 +249,7 @@ function check(raw) {
   return deepFreeze(nullProto(p));
 }
 
-export const HOURS = /^([01]\d|2[0-3]):([0-5]\d)-([01]\d|2[0-4]):([0-5]\d)$/;
+export const HOURS = /^([01]\d|2[0-3]):([0-5]\d)-(?!24:(?!00$))([01]\d|2[0-4]):([0-5]\d)$/;   // ends at 24:00 at the latest (audit round 7)
 
 export function validZone(tz) {
   if (typeof tz !== 'string' || !tz) return false;

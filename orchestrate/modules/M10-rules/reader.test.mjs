@@ -130,12 +130,13 @@ test('a force push back to an older approved version is refused as main_rewound 
 });
 
 test("Joe's id comes from the last good rules, never the file being checked (R2-M1(a))", async () => {
-  const s = setup({ approve: ({ joeId }) => joeId === 1000001 });
-  s.gh.commit(1, fixture);
+  // The last good rules name Joe as 3000003, unlike products.json (1000001), so the id can't come from products.json (audit round 7).
+  const s = setup({ approve: ({ joeId }) => joeId === 1000001 || joeId === 3000003 });
+  s.gh.commit(1, fixture.replace('github_id: 1000001', 'github_id: 3000003'));
   await s.reader.refresh();
   s.gh.commit(2, fixture.replace('github_id: 1000001', 'github_id: 2000002'), 1);
   await s.reader.refresh();
-  assert.equal(s.verifyCalls.at(-1).joeId, 1000001);
+  assert.equal(s.verifyCalls.at(-1).joeId, 3000003);
   // On a first load, the id comes from products.json.
   const t = setup();
   t.gh.commit(1, fixture.replace('github_id: 1000001', 'github_id: 2000002'));

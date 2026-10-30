@@ -18,7 +18,8 @@
 // statements (undeclared = refused); any call `name(` whose name isn't in `repairs.allowed_functions`; an `&` (a
 // U&"…" escaped name hides a call); a `(` straight after a quoted value or number; a space outside plain ASCII; a
 // name starting `pg_`, or information_schema (an UPDATE of pg_settings is a SET by another name); a table in the
-// `cron` or `net` schema (a row there schedules SQL or sends a web request: a call by another name, audit round 6).
+// schema that runs jobs, sends requests or messages, or holds secrets (cron, net, pgmq, realtime, vault,
+// supabase_functions, pgsodium, graphql): a row there is a call by another name (audit rounds 6 and 7).
 // Stricter than the spec, to stay closed: a backslash inside a quoted value (on some database settings it moves
 // where the value ends); a schema-qualified or quoted function name; `SELECT … INTO` (it creates a table); a psql
 // variable (`:name`); an alias column list without AS.
@@ -29,6 +30,7 @@
 
 import { compileList } from './paths.mjs';
 
+const JOB_SCHEMAS = /^(cron|net|pgmq|realtime|vault|supabase_functions|pgsodium|graphql)$/i;
 export const DEFAULT_ALLOWED_FUNCTIONS = Object.freeze(['now', 'coalesce', 'lower', 'upper', 'trim', 'count', 'sum',
   'min', 'max', 'round', 'nullif', 'greatest', 'least']);
 export const BANNED_WORDS = Object.freeze(['do', 'call', 'execute', 'prepare', 'copy', 'load', 'create', 'alter',
@@ -189,7 +191,7 @@ function checkStatement(toks, n, allowed) {
     const tok = toks[i];
     const prev = toks[i - 1];
     if ((tok.t === 'word' || tok.t === 'qident') && /^(pg_|information_schema$)/i.test(tok.v)) no(`${where}: the system tables (${tok.v}) are not repair targets`);
-    if ((tok.t === 'word' || tok.t === 'qident') && /^(cron|net)$/i.test(tok.v) && isPunct(toks[i + 1], '.')) no(`${where}: the ${tok.v} schema runs jobs or requests and is not a repair target`);
+    if ((tok.t === 'word' || tok.t === 'qident') && JOB_SCHEMAS.test(tok.v) && isPunct(toks[i + 1], '.')) no(`${where}: the ${tok.v} schema runs jobs or requests and is not a repair target`);
     if (tok.t === 'word') {
       const w = tok.v.toLowerCase();
       if (w === 'into' && !isWord(prev, 'insert')) no(`${where}: INTO is allowed only in INSERT INTO (SELECT … INTO creates a table)`);

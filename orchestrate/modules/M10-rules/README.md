@@ -49,7 +49,7 @@ await carryOver({ reviewed, current, between, catchUps, tier1MergesSince, gh: vi
 ```
 
 - **Any error means "no".** Each returns a plain answer and never throws. A missing commit, a cut-off file list (GitHub lists at most 300 files in a compare; a recursive tree can be truncated) or an unknown file status makes the answer "no".
-- **The robot's merge mark is the caller's check.** `checkExactReverse` proves only that the files are an exact undo. That the robot made the merge (the other half of 0b-9 M4) is checked by the Merge Gate. What the undo still counts as (protected files, risky classes) is M10's `merge` answer. An undo that touches a database change (the `schema` or `production_data` class) always asks Joe, even when the reversed merge failed its audit (0b-9 M4).
+- **The robot's merge mark is the caller's check.** `checkExactReverse` proves only that the files are an exact undo. That the robot made the merge (the other half of 0b-9 M4) is checked by the Merge Gate. What the undo still counts as (protected files, risky classes) is M10's `merge` answer. An undo that touches a database change (the `schema` or `production_data` class) always asks Joe, even when the reversed merge failed its audit (0b-9 M4). Because a code file can hold a table change outside the migration folders, the Merge Gate passes each code file's `removed_lines` (the lines the reversed merge added); a code file without them makes the undo ask Joe.
 - **`carryOver` takes a git view as `gh`**, not the raw GitHub client.
 
 ## Notes for callers
@@ -62,7 +62,7 @@ await carryOver({ reviewed, current, between, catchUps, tier1MergesSince, gh: vi
 - **New keys enter as optional (R3-m10).** A key added to the rules later is optional, with a missing value read as the stricter choice, so an older rules file stays valid.
 - **The snapshot.** Its hash proves the file wasn't damaged. It does not prove who wrote it: the guard against a looser copy is that only its owner may write it (a file writable by others is refused). Hooks read it only through `snapshotAnswer`, which adds the protected floor.
 
-## Known limits (logged by the 0b-1 code audit, rounds 1 to 5)
+## Known limits (logged by the 0b-1 code audit, rounds 1 to 7)
 
 - **An exact-reverse push trusts its file list.** `push_branch` lets an exact reverse through, even while paused, when every file is in the subject's `reverses_files`. The caller fills that list from the reversed commit. The merge still needs `exact_reverse_ok`, which M10's `checkExactReverse` recomputes from GitHub, so a wrong list can only push a branch, never merge it.
 - **The last good rules on disk.** After a restart, the reader re-checks the saved copy's hash and parse, and uses it again after the next successful GitHub read. If that read finds a new, unapproved version, the saved copy stays the last good one (MAT-3). Anyone who can write the reader's private folder (owner-only) could change it, as they could change the code itself.
@@ -79,7 +79,8 @@ await carryOver({ reviewed, current, between, catchUps, tier1MergesSince, gh: vi
 - **One alert per rules problem, per rules version.** The reader raises an alert once for each product, reason and rules version. If GitHub goes unreachable a second time while the rules are unchanged, the deny still happens but no second alert is sent.
 - **Unknown product-state values load, then deny.** A rules file can name a `product_state_rules` value the engine doesn't know. The file is accepted and the engine denies that state at run time (fail closed), so the checker and the engine disagree on what is valid.
 - **An unchanged rules version skips the rewind check.** When `main`'s rules file is the same version as the one adopted, the reader answers "unchanged" before it checks whether `main` was rewound. The rules in force are the same text either way.
-- **A pattern can still name nothing.** `.` and `..` parts are refused, but a pattern that matches no file in the repository (a typo, or `[abc]`, which is read as a literal name) is accepted, so a protected entry can protect nothing. Brackets stay allowed because real file names use them (`[id].tsx`).
+- **A pattern can still name nothing.** `.` and `..` parts are refused, but a pattern that matches no file in the repository (a typo, or `[abc]`, which is read as a literal name) is accepted, so a protected entry can protect nothing. A typo in `migration_paths` or `repair_folder` also stops the folder rule from spotting a database change, including on an undo (the text scan still reads the lines). Brackets stay allowed because real file names use them (`[id].tsx`).
+- **A merge request needs no card id.** `push_branch` refuses a missing card id (MAT-5); `merge` answers from the files and the reverse fields only, so it doesn't require one.
 - **The snapshot checks permission bits only.** macOS access-control lists on the folder or file are not read. Adding one needs the owner's own access, the same as editing the file.
 
 ## Repair files: what the check cannot see

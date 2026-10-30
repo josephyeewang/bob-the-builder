@@ -178,3 +178,10 @@ test('with unreadable rules the protected floor still applies (audit round 4, R3
   assert.deepEqual(bad.protected, ['.github/workflows/a.yml', 'orchestrate/policy.yaml']);
   assert.deepEqual(classifyChange(null, { files }).protected, ['.github/workflows/a.yml', 'orchestrate/policy.yaml']);
 });
+
+test('removed lines are scanned for table changes too: removing one undoes a database change (audit round 7)', () => {
+  assert.ok(run([mod('lib/db/setup.ts', { removed_lines: ['await sql`CREATE TABLE users (id int)`'] })]).risky.includes('schema'));
+  assert.ok(!run([mod('lib/db/setup.ts', { removed_lines: ['const created = table;'] })]).risky.includes('schema'));
+  assert.ok(!run([mod('docs/research/x.md', { removed_lines: ['CREATE TABLE in prose'] })]).risky.includes('schema'), 'docs are prose');
+  assert.match(run([mod('lib/a.ts', { removed_lines: 'CREATE TABLE x' })]).reasons.unclassifiable.join(), /removed_lines is not a list/);
+});

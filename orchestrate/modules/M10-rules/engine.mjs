@@ -29,7 +29,7 @@ export const MAC_MATCH = Object.freeze(['claude_code.pin', 'models.*', 'accounts
 export const LANES = Object.freeze(['lead', 'docs', 'product']);
 export const REVERSED_AUDIT = Object.freeze(['failure', 'success', 'none']);
 const SHA = /^[0-9a-f]{40}$/;
-const ROW_FILE = /^docs\/blueprint\/rows\/([^/]+)\.yaml$/;
+const ROW_FILE = /^docs\/blueprint\/rows\/([^/]+)\.yaml$/i;   // case-folded like BLUEPRINT (audit round 7)
 const BLUEPRINT = compileList(['docs/blueprint/**']);
 const DOCS_LANE = compileList(['docs/*.md', 'docs/domains/**', 'docs/research/**']);
 const NOT_PRODUCT = compileList(['docs/blueprint/**', 'docs/*.md', 'docs/domains/**']);
@@ -211,6 +211,7 @@ export function makeEngine({ products, rulesState, productState, running, rolesD
   function pushBranch(s) {
     const pol = policyOf(s.product);
     checkFiles(s.files);
+    if (!s.card || typeof s.card !== 'object' || typeof s.card.id !== 'string' || !s.card.id) throw new Error('push_branch needs the card and its id');
     // The exact-reverse exception (R2-M8, R3-M3): every file is in the reversed commit's own list, in every state.
     if (s.card?.kind === 'exact_reverse' && Array.isArray(s.reverses_files)
       && s.files.every((f) => s.reverses_files.includes(f.path) && (f.previous_path === undefined || s.reverses_files.includes(f.previous_path)))) {
@@ -254,15 +255,19 @@ export function makeEngine({ products, rulesState, productState, running, rolesD
     const c = classifyChange(pol, { files: s.files, truncated: s.truncated, declared_tier: s.declared_tier, labels: s.labels });
     const reverse = s.kind === 'exact_reverse' && typeof s.reverses === 'string' && SHA.test(s.reverses) && s.exact_reverse_ok === true && REVERSED_AUDIT.includes(s.reversed_audit);
     if (reverse) {
-      // R3-M3, in this order, plus 0b-9 M4's database rule before the failed-audit allow. Pause and the hours window never hold an exact reverse. A cut-off file list can hide a
-      // protected file, so it is never let through (MAT-6).
+      // R3-M3, in this order, plus 0b-9 M4's database rule before the failed-audit allow. Pause and the hours window
+      // never hold an exact reverse. A cut-off file list can hide a protected file, so it is never let through (MAT-6).
       if (s.truncated === true || s.files.length >= MAX_FILES) return ask(1, 'exact reverse with a cut-off file list');
       // Only "no scan built for this code" is expected on a reverse; any other unclassifiable reason (unreadable
       // rules, a bad entry, a label) means the protected check below can't be trusted, so ask (audit round 4).
       if ((c.reasons.unclassifiable ?? []).some((r) => !r.startsWith('scan_not_built:'))) return ask(1, 'exact reverse that could not be fully classified');
-      if (c.protected.length) return ask(1, 'exact reverse touches a protected file');
+      if (c.protected.length || c.risky.includes('protected')) return ask(1, 'exact reverse touches a protected file');
       // 0b-9 M4: a database-change merge is never undone automatically, even after a failed audit (audit round 6).
       if (c.risky.includes('schema') || c.risky.includes('production_data')) return ask(1, 'exact reverse of a database change');
+      // A code file can hold a database change outside the migration folders, so the undo of one needs its removed
+      // lines (the lines the reversed merge added) to be scanned; without them, ask (audit round 7).
+      const code = new Set((c.reasons.unclassifiable ?? []).filter((r) => r.startsWith('scan_not_built: ')).map((r) => r.slice('scan_not_built: '.length)));
+      if (s.files.some((f) => (code.has(f.path) || code.has(f.previous_path)) && !Array.isArray(f.removed_lines))) return ask(1, 'exact reverse of code without its removed lines');
       if (s.reversed_audit === 'failure') return allow('exact reverse of a merge whose audit failed');
       if (!c.risky.length && c.tier === 2) return allow('exact reverse of an ordinary change');
       return ask(1, 'exact reverse of a merge whose audit passed');
