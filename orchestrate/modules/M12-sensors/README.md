@@ -15,6 +15,7 @@ Vercel, the repo) and write facts into the record. Everything they write is mask
 | `supported.mjs` | R-0b-71/72 | The one rule for "a supported main commit", per product stage. |
 | `vercel-reader.mjs`, `prod-watcher.mjs` | R-0b-71 | The production watcher: unsupported deploys, older version live, settings changed (never values). |
 | `outside-watch.mjs` | R-0b-72 | Every 10 min: is the hourly outside check still running, and which of its steps fail. |
+| `start-gate.mjs` | lead call L3 | The two Vercel facts lane 2's launcher gate reads: skip command equals the pinned one; no env name in both Preview and Production. `startGateOpen` decides (both ok, ≤120 min old). |
 | `device-checks.mjs` | R-0b-78 | The decisions behind the owner's private `/host` and `/configaudit` for the Air. |
 | `shell-guard/` | R-0b-70 | Shell-trick cases and a runner for the production guard (the guard is lane 2's R-0b-36). |
 

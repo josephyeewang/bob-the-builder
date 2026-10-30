@@ -53,7 +53,9 @@ export function cases(target) {
 export function askHook(hookCommand, command, { timeoutMs = 5000, cwd } = {}) {
   const input = JSON.stringify({ hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command }, cwd: cwd ?? process.cwd() });
   const r = spawnSync('/bin/sh', ['-c', hookCommand], { input, encoding: 'utf8', timeout: timeoutMs, cwd });
-  if (r.error || r.signal) return 'crash';
+  // A hook that exits before reading its input makes the input write fail (EPIPE); its exit code still decides.
+  const pipeOnly = r.error?.code === 'EPIPE' && Number.isInteger(r.status);
+  if ((r.error && !pipeOnly) || r.signal) return 'crash';
   if (r.status === 2) return 'refuse';
   if (r.status !== 0) return 'crash';
   try {
