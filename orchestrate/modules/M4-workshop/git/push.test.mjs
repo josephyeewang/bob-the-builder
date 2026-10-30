@@ -149,6 +149,7 @@ async function refusedAndUntouched(w, re, over) {
   assert.match(r.reason, re);
   assert.equal(await w.ghRefs(), before, 'GitHub changed on a refusal');
   assert.equal(w.record.read('fact', 'push.C-1.a1').doc.result, 'refused');
+  assert.deepEqual(readdirSync((over?.privateDir) ?? w.ports.privateDir), [], 'a work folder was left in the private folder (round 4 MIN-3)');
   return r;
 }
 
@@ -167,6 +168,7 @@ test('all good: pushes exactly refs/heads/<branch>, opens the PR, moves the mirr
   assert.equal(w.prs.length, 1);
   assert.equal(w.prs[0].branch, 'card/c-1');
   assert.equal(w.record.read('fact', 'push.C-1.a1').doc.result, 'pushed');
+  assert.deepEqual(readdirSync(w.ports.privateDir), [], 'a work folder was left in the private folder (round 4 MIN-3)');
   assert.ok(!JSON.stringify(callLog).includes('robot-key-for-test'), 'the key appeared in a logged command');
   assert.ok(!callLog.some((c) => c.args.some((a) => /^\+/.test(a) && a.includes('card/'))), 'a forced push spec was used');
   assert.match(w.fake.calls(), /git\ndir\nstdin/);
@@ -177,11 +179,11 @@ test('all good: pushes exactly refs/heads/<branch>, opens the PR, moves the mirr
 const REFUSED_PATHS = ['.github/workflows/x.yml', 'pkg/.github/workflows/x.yml', '.github/actions/a/action.yml', 'pkg/.github/actions/a/action.yml',
   '.claude/settings.json', 'src/.claude/skills/x/SKILL.md', '.mcp.json', 'a/b/.mcp.json', 'CLAUDE.local.md', 'docs/CLAUDE.local.md',
   ...['vercel.json', 'vercel.ts', 'vercel.js', 'vercel.mjs', 'vercel.cjs', 'vercel.mts'].flatMap((n) => [n, `apps/web/${n}`]),
-  '.Claude/settings.json', '.GitHub/Workflows/x.yml', 'VERCEL.JSON', '.git​hub/workflows/x.yml', '.cla­ude/x', '.gitmodules'];
+  '.github/CODEOWNERS', '.github/dependabot.yml', 'pkg/.github/x.yml', '.Claude/settings.json', '.GitHub/Workflows/x.yml', 'VERCEL.JSON', '.git​hub/workflows/x.yml', '.cla­ude/x', '.gitmodules'];
 
 test('the refusal list: every name, at the root and at depth, in any case and with invisible characters', () => {
   for (const p of REFUSED_PATHS) assert.ok(refusedPath(p), `${p} not refused`);
-  for (const p of ['README.md', '.github/CODEOWNERS', '.github/dependabot.yml', 'src/claude/x.js', 'vercel.json.md', 'my-vercel.json', 'workflows/x.yml', 'docs/.github.md']) assert.equal(refusedPath(p), null, `${p} wrongly refused`);
+  for (const p of ['README.md', '.github', 'src/claude/x.js', 'vercel.json.md', 'my-vercel.json', 'workflows/x.yml', 'docs/.github.md']) assert.equal(refusedPath(p), null, `${p} wrongly refused`);
 });
 
 test('every refused name, pushed for real at the root and at depth: refused, GitHub untouched', async () => {
@@ -198,6 +200,12 @@ test('a rename to a workflow file, a deleted workflow file, and add-then-remove 
   await w.commit('rename', () => renameSync(join(w.clone, 'app.txt'), join(w.clone, '.github/workflows/x.yml')));
   await w.bundle();
   await refusedAndUntouched(w, /\.github\/workflows/);
+
+  // L39: a rename into .github/ of a file GitHub would read outside workflows is refused too.
+  w = await world();
+  await w.commit('rename', () => renameSync(join(w.clone, 'app.txt'), join(w.clone, '.github/CODEOWNERS')));
+  await w.bundle();
+  await refusedAndUntouched(w, /touches a \.github folder.*CODEOWNERS|CODEOWNERS.*touches a \.github folder/);
 
   w = await world();
   await w.commit('delete', () => rmSync(join(w.clone, '.github/workflows/ci.yml')));
@@ -948,7 +956,7 @@ test('R-0b-47 round 3 MIN-1 and MIN-3: base64 of a packed file is refused, and a
   await w.commit('work', (c) => writeFileSync(join(c, 'a.txt'), 'a\n'));
   await w.bundle();
   w.fake.setMode('leakname');
-  const f = await refusedAndUntouched(w, /found 1 likely secret.*ghp_A1A1…\.txt/);
+  const f = await refusedAndUntouched(w, /found 1 likely secret.*ghp_…\.txt/);
   assert.ok(!f.reason.includes('A1'.repeat(18)), f.reason);
 });
 
@@ -970,4 +978,30 @@ test('R-0b-47 round 2 MIN-d: a new file over the size cap, or new files over the
   assert.match(r.reason, /more than 7000 bytes/);
   // Planted fault: under both caps the same scan passes.
   assert.deepEqual(await scan({}), { ok: true, binaries: [] });
+});
+
+test('R-0b-47 round 4 MIN-3: a git failure\'s reason carries no folder path, and the private folder is left empty', async () => {
+  const w = await world();
+  await w.commit('work', (c) => writeFileSync(join(c, 'app.txt'), 'changed\n'));
+  await w.bundle();
+  // A lock file on the mirror's branch makes the last git step fail with git's own error text.
+  const r = await w.push({ afterStage: () => { mkdirSync(join(w.mirror, 'refs/heads/card'), { recursive: true }); writeFileSync(join(w.mirror, 'refs/heads/card/c-1.lock'), ''); } });
+  assert.equal(r.ok, false);
+  assert.match(r.reason, /^the push script failed: git update-ref failed .*<path>/);
+  assert.ok(!r.reason.includes(w.root), r.reason);
+  assert.ok(!JSON.stringify(w.record.read('fact', 'push.C-1.a1').doc).includes(w.root), 'the record holds a folder path');
+  assert.deepEqual(readdirSync(w.ports.privateDir), []);
+});
+
+test('R-0b-47 round 4 MIN-1, real gitleaks: a secret laid across two rows of an allowed PNG is refused', { skip: realGitleaks ? false : 'skipped: gitleaks 8.30.1 not installed' }, async () => {
+  const scanner = await realScanner(tmp());
+  const line = Buffer.from(`key = "${fakeSecret()}"\n`);
+  const half = Math.ceil(line.length / 2);
+  const rows = [line.subarray(0, half), Buffer.concat([line.subarray(half), Buffer.alloc(2 * half - line.length, 0x20)])];
+  const w = await world({ scanner });
+  w.values['product.allowed_binaries'] = [{ path: 'docs/*.png', type: 'png' }];
+  const png = makePng({ head: ihdr({ w: half, h: 2 }), pixels: Buffer.concat([Buffer.from([0]), rows[0], Buffer.from([0]), rows[1]]) });
+  await w.commit('img', (c) => { mkdirSync(join(c, 'docs'), { recursive: true }); writeFileSync(join(c, 'docs/rows.png'), png); });
+  await w.bundle();
+  await refusedAndUntouched(w, /the file scan: .*likely secret.*docs\/rows\.png/);
 });

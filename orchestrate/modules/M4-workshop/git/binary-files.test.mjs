@@ -31,7 +31,7 @@ test('L28: a pattern matches whole paths only: ** spans folders, * stays within 
 test('L28: the real type is read from the bytes', () => {
   assert.equal(realType(Buffer.from('PK\x03\x04 not an image')), null);
   assert.equal(realType(makePng()), 'png');
-  assert.deepEqual(pngPixels(makePng()), Buffer.from([0, 128]));
+  assert.deepEqual(pngPixels(makePng()), Buffer.from([128]), 'the row without its filter byte');
 });
 
 test('round 3 MAT-1: only PNG is offered; JPEG, GIF, WebP and font files are not images it allows, and an entry naming them allows nothing', () => {
@@ -89,7 +89,7 @@ test('round 3 MAT-1: an allowed PNG comes back with its unpacked image data, for
   const b = makePng({ head: ihdr({ w: pixels.length - 1 }), pixels });
   const r = checkFile('docs/a.png', b, allowList([{ path: 'docs/*.png', type: 'png' }]));
   assert.deepEqual(r.binary, { path: 'docs/a.png', type: 'png' });
-  assert.deepEqual(r.unpacked, pixels);
+  assert.deepEqual(r.unpacked, pixels.subarray(1));
   assert.equal(checkFile('a.txt', Buffer.from('text'), []).unpacked, undefined);
 });
 
@@ -106,8 +106,56 @@ test('round 3 MIN-1: packed data written out as base64 in a text file is refused
 });
 
 test('round 3 MIN-3: a secret-shaped run in a path is cut to its first four characters', () => {
-  assert.equal(maskPath(`docs/ghp_${'A1'.repeat(18)}.zip`), 'docs/ghp_A1A1….zip');
+  assert.equal(maskPath(`docs/ghp_${'A1'.repeat(18)}.zip`), 'docs/ghp_….zip');
   assert.equal(maskPath('.github/workflows/evil.yml'), '.github/workflows/evil.yml');
   const r = checkFile(`ghp_${'A1'.repeat(18)}.zip`, Buffer.from([0, 1]), []);
   assert.doesNotMatch(r.reason, /A1A1A1/);
+});
+
+test('round 4 MIN-1: each row loses its filter byte, so a line laid across two rows reads as one', () => {
+  const line = Buffer.from('key = "abcdefgh"\n ');
+  const rows = [line.subarray(0, 9), line.subarray(9)];
+  const b = makePng({ head: ihdr({ w: 9, h: 2 }), pixels: Buffer.concat([Buffer.from([0]), rows[0], Buffer.from([0]), rows[1]]) });
+  assert.deepEqual(pngPixels(b), line);
+  assert.deepEqual(checkFile('docs/a.png', b, allowList([{ path: 'docs/*.png', type: 'png' }])).unpacked, line);
+});
+
+test('round 4 MIN-1: an allowed image whose pixels start like packed data is refused', () => {
+  const list = allowList([{ path: 'docs/*.png', type: 'png' }]);
+  for (const packed of [gzipSync(Buffer.from('key = "x"')), Buffer.from([0x78, 0x9c, 1, 2, 3]), makePng()]) {
+    const b = makePng({ head: ihdr({ w: packed.length }), pixels: Buffer.concat([Buffer.from([0]), packed]) });
+    assert.match(checkFile('docs/a.png', b, list).reason ?? '', /pixels start like packed data/);
+  }
+  assert.equal(checkFile('docs/a.png', makePng(), list).ok, true, 'control: plain pixels pass');
+});
+
+test('round 4 MIN-2 and MIN-3: every packed start, as base64 and as base64url with - or _ in its first characters, is refused', () => {
+  const starts = { gzip: [0x1f, 0x8b, 0x08], zip: [0x50, 0x4b, 0x03, 0x04], '7z': [0x37, 0x7a, 0xbc, 0xaf], bzip2: [0x42, 0x5a, 0x68], xz: [0xfd, 0x37, 0x7a, 0x58], zstd: [0x28, 0xb5, 0x2f, 0xfd],
+    zlib1: [0x78, 0x01], zlib5e: [0x78, 0x5e], zlib9c: [0x78, 0x9c], zlibda: [0x78, 0xda], png: [0x89, 0x50, 0x4e, 0x47] };
+  let early = 0;
+  for (const [name, s] of Object.entries(starts)) {
+    const b = Buffer.concat([Buffer.from(s), Buffer.alloc(40, 0xfb)]);
+    const url = b.toString('base64url');
+    if (/[-_]/.test(url.slice(0, 8))) early += 1;
+    for (const t of [b.toString('base64'), url]) assert.equal(packedAsText(t), true, `${name}: ${t}`);
+  }
+  assert.ok(early >= 5, `control: the url forms put - or _ in the first characters (${early})`);
+});
+
+test('round 4 MIN-3: an image bomb over 64 MB is refused without unpacking it in full', () => {
+  const list = allowList([{ path: 'docs/*.png', type: 'png' }]);
+  const big = makePng({ head: ihdr({ w: 8192, h: 8192 }), idat: deflateSync(Buffer.alloc(8192 * 8193)) });
+  const small = makePng({ idat: deflateSync(Buffer.alloc(70 * 1024 * 1024)) }); // says 1 by 1, unpacks to 70 MB
+  for (const b of [big, small]) {
+    assert.equal(pngPixels(b), null);
+    assert.equal(checkFile('docs/a.png', b, list).ok, false);
+  }
+});
+
+test('round 4 MIN-4: a UUID, or a long run split by - _ + = that holds a digit, is cut to its first four characters', () => {
+  assert.equal(maskPath('a/123e4567-e89b-12d3-a456-426614174000.txt'), 'a/123e….txt');
+  assert.equal(maskPath('k/abcd-1234-efgh-5678-ijkl.txt'), 'k/abcd….txt');
+  assert.equal(maskPath('a/abcdefab-cdef-abcd-efab-cdefabcdefab.txt'), 'a/abcd….txt', 'a UUID with no digit: only the UUID rule catches it');
+  assert.equal(maskPath('k/ab_cd+12=ef_gh34ij.txt'), 'k/ab_c….txt');
+  assert.equal(maskPath('docs/release-notes-for-everyone.md'), 'docs/release-notes-for-everyone.md', 'no digit: left as it is');
 });

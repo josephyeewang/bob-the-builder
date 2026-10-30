@@ -28,7 +28,7 @@ export const MAX_PIXEL_BYTES = 64 * 1024 * 1024;
 /** The unpacked image data of a PNG that passes every check above, or null. */
 export function pngPixels(b) {
   if (b.length < 20 || !b.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) return null;
-  let at = 8; let first = true; let size = -1; const idat = []; let idatDone = false;
+  let at = 8; let first = true; let size = -1; let row = 0; const idat = []; let idatDone = false;
   while (at + 12 <= b.length) {
     const len = b.readUInt32BE(at);
     const type = b.subarray(at + 4, at + 8).toString('latin1');
@@ -40,7 +40,8 @@ export function pngPixels(b) {
       if (len !== 13) return null;
       const [w, h, depth, color, comp, filter, lace] = [data.readUInt32BE(0), data.readUInt32BE(4), ...data.subarray(8, 13)];
       if (!w || !h || !DEPTHS[color]?.includes(depth) || comp || filter || lace) return null;
-      size = h * (1 + Math.ceil((w * CHANNELS[color] * depth) / 8));
+      row = 1 + Math.ceil((w * CHANNELS[color] * depth) / 8);
+      size = h * row;
       if (size > MAX_PIXEL_BYTES) return null;
     }
     first = false;
@@ -51,7 +52,12 @@ export function pngPixels(b) {
       const packed = Buffer.concat(idat);
       try {
         const r = inflateSync(packed, { info: true, maxOutputLength: size + 1 });
-        return r.buffer.length === size && r.engine.bytesWritten === packed.length ? r.buffer : null;
+        if (r.buffer.length !== size || r.engine.bytesWritten !== packed.length) return null;
+        // Each row starts with one filter byte; it is dropped so a secret that runs from one row into
+        // the next reads as one run (audit R-0b-47 round 4 MIN-1).
+        const out = Buffer.alloc(size - size / row);
+        for (let y = 0; y < size / row; y++) r.buffer.copy(out, y * (row - 1), y * row + 1, (y + 1) * row);
+        return out;
       } catch { return null; }
     }
   }
@@ -63,16 +69,24 @@ export const BINARY_TYPES = Object.freeze(Object.keys(MAGIC));
 
 // A secret can be a file's name. Any run of 20 or more letters and digits in a path
 // is cut to its first four before the path goes into a refusal or the record (round 3 MIN-3).
-export const maskPath = (p) => String(p).replace(/[A-Za-z0-9]{20,}/g, (m) => `${m.slice(0, 4)}…`);
+// Also any UUID-shaped run, and any run of 16 or more of letters, digits and - _ + = that holds a digit
+// (round 4 MIN-4): keys split into short parts.
+export const maskPath = (p) => String(p)
+  .replace(/[0-9A-Fa-f]{8}(?:-[0-9A-Fa-f]{4}){3}-[0-9A-Fa-f]{12}/g, (m) => `${m.slice(0, 4)}…`)
+  .replace(/[A-Za-z0-9_+=-]{16,}/g, (m) => (/[0-9]/.test(m) ? `${m.slice(0, 4)}…` : m))
+  .replace(/[A-Za-z0-9]{20,}/g, (m) => `${m.slice(0, 4)}…`);
 
 // Packed data written out as base64 (round 3 MIN-1): a long base64 run whose first bytes mark
-// gzip, zip, 7z, bzip2, xz or zstd. Deliberate encoding of other kinds still gets through; the
+// gzip, zip, 7z, bzip2, xz, zstd, raw zlib or a PNG (round 4 MIN-2: an embedded `data:` image). Deliberate encoding of other kinds still gets through; the
 // scan stops accidents and the named tricks.
-const PACKED_STARTS = [[0x1f, 0x8b, 0x08], [0x50, 0x4b, 0x03, 0x04], [0x37, 0x7a, 0xbc, 0xaf], [0x42, 0x5a, 0x68], [0xfd, 0x37, 0x7a, 0x58], [0x28, 0xb5, 0x2f, 0xfd]];
+const PACKED_STARTS = [[0x1f, 0x8b, 0x08], [0x50, 0x4b, 0x03, 0x04], [0x37, 0x7a, 0xbc, 0xaf], [0x42, 0x5a, 0x68], [0xfd, 0x37, 0x7a, 0x58], [0x28, 0xb5, 0x2f, 0xfd],
+  [0x78, 0x01], [0x78, 0x5e], [0x78, 0x9c], [0x78, 0xda], [0x89, 0x50, 0x4e, 0x47]];
+export const packedStart = (bytes) => PACKED_STARTS.some((s) => s.every((x, i) => bytes[i] === x));
 export function packedAsText(text) {
   for (const m of String(text).matchAll(/[A-Za-z0-9+/_-]{40,}/g)) {
-    const head = Buffer.from(m[0].slice(0, 8).replace(/-/g, '+').replace(/_/g, '/'), 'base64');
-    if (PACKED_STARTS.some((s) => s.every((x, i) => head[i] === x))) return true;
+    // Node's base64 reader takes the url letters - and _ as well, so both forms decode here.
+    const head = Buffer.from(m[0].slice(0, 8), 'base64');
+    if (packedStart(head)) return true;
   }
   return false;
 }
@@ -119,7 +133,11 @@ export function checkFile(path, buf, list) {
     return { ok: true, binary: null };
   }
   const type = realType(buf);
-  if (type && list.some((e) => e.type === type && e.re.test(path))) return { ok: true, binary: { path, type }, unpacked: pngPixels(buf) };
+  if (type && list.some((e) => e.type === type && e.re.test(path))) {
+    const unpacked = pngPixels(buf);
+    if (packedStart(unpacked)) return { ok: false, reason: `the new file ${shown} is an image whose pixels start like packed data, which cannot be scanned for secrets` };
+    return { ok: true, binary: { path, type }, unpacked };
+  }
   const why = type ? `a ${type} file where the product's rules allow none` : 'not plain UTF-8 text, and not an allowed image';
   return { ok: false, reason: `the new file ${shown} cannot be scanned for secrets: ${why}` };
 }

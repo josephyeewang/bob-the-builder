@@ -6,7 +6,8 @@
 // become plain ones, upper then lower case, invisible "default ignorable" characters removed;
 // a Mac's disk reads `.Claude` as `.claude`, review 0b-4 R-47 MAT-3):
 //   - any segment is `.claude` (a file, a folder or a link);
-//   - a `.github` segment is followed by `workflows` or `actions`, at any depth;
+//   - any folder segment is `.github`, at any depth: workflows, composite actions and every other file
+//     GitHub reads from there (LEAD-CALLS L39, every lane);
 //   - the last segment is `.mcp.json`, `claude.local.md`, `.gitmodules` or a Vercel config name;
 // and an entry is refused when its new mode is a link (120000) or a submodule (160000).
 // Every status counts (add, change, delete, type change): deleting a workflow file touches it.
@@ -32,7 +33,7 @@ export function refusedPath(path) {
   const parts = String(path).split('/').map(fold);
   if (parts.some((p) => p === CLAUDE_DIR)) return `touches a ${CLAUDE_DIR} folder or file`;
   for (let i = 0; i < parts.length - 1; i += 1) {
-    if (parts[i] === '.github' && GITHUB_DIRS.includes(parts[i + 1])) return `touches .github/${parts[i + 1]}`;
+    if (parts[i] === '.github') return GITHUB_DIRS.includes(parts[i + 1]) ? `touches .github/${parts[i + 1]}` : 'touches a .github folder';
   }
   const last = parts.at(-1);
   if (FILE_NAMES.includes(last)) return `touches ${last}`;
