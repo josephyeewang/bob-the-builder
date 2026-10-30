@@ -11,8 +11,9 @@ See LANES.md for who builds this folder, and the build rows (0b-1, R-0b-13..19) 
 | `reader.mjs` | Fetches each product's `orchestrate/policy.yaml` from GitHub `main` and adopts a new version only when Joe approved it. Otherwise it keeps the last good version and raises one alert, or denies everything. Also holds `findApprovingPull` and `pullRequestVerifier`. |
 | `policy.mjs` | Reads and checks a rules file. A file that is half-right is "corrupt", never partly used. |
 | `paths.mjs` | The one path matcher (tiers, protected files, lanes), plus the protected floor that a rules file can add to but never remove from. |
+| `lane-check.mjs` | The first cutover's merge check (L34): passes only a change that is wholly plain text docs in the docs or research lane. |
 | `classify.mjs` | Works out a change's tier and risky classes from the files it touches. Pure, so the Mini and the GitHub-side checker give the same answer. |
-| `db-lines.mjs` | The deny-by-default line check (lead call L32): a line in a code file counts as a possible database change unless it is proven harmless. |
+| `db-lines.mjs` | Second cutover. The deny-by-default line check (lead call L32): a line in a code file counts as a possible database change unless it is proven harmless. |
 | `engine.mjs` | The answers that `shared/rules.mjs` `makeRules()` wraps: start, push, merge, Mac-wide values, Tier-1 hours, exact reverse. |
 | `roles.mjs`, `roles/` | Loads the role profiles and refuses any profile that gives a role more than the design allows. |
 | `snapshot.mjs` | The small on-disk copy of the rules that hooks read without the network. |
@@ -63,7 +64,20 @@ await carryOver({ reviewed, current, between, catchUps, tier1MergesSince, gh: vi
 - **New keys enter as optional (R3-m10).** A key added to the rules later is optional, with a missing value read as the stricter choice, so an older rules file stays valid.
 - **The snapshot.** Its hash proves the file wasn't damaged. It does not prove who wrote it: the guard against a looser copy is that only its owner may write it (a file writable by others is refused). Hooks read it only through `snapshotAnswer`, which adds the protected floor.
 
-## Database changes in code: deny by default (lead call L32)
+## The first cutover's merge: the docs lane only (lead call L34)
+
+At the first cutover the robot merges only the docs and research lane, so `merge` answers by one strict path check (`lane-check.mjs`). A change passes only when all of these hold; otherwise the answer is deny, "not this lane's change; MAIN merges it as today":
+- every file, by its new name and any old name, is inside the rules file's `lanes.docs` or `lanes.research` patterns, inside `docs_paths`, and inside the built-in floor (`docs/*.md`, `docs/domains/**`, `docs/research/**`);
+- every file is plain text by its name (`.md`, `.txt`, `.csv`, `.json`, `.yaml`, `.yml`): no images, PDFs or other binaries (L28), and nothing that can run (`.mdx`, `.html`, `.svg`);
+- nothing is protected, Tier 1 or an effect path (secrets, migrations, repairs, senders, flags, new customer-visible files) in the rules, and nothing is removed or renamed out of a folder where removals are watched;
+- no link, submodule or runnable file (a given `mode` must be `100644`), and an old name only on a rename or copy;
+- the change is declared Tier 2, its file list is whole (not cut off, under 3,000 files) and no label asks for Joe (any `needs-joe` spelling, or any label outside plain ASCII).
+
+An exact reverse is held to the same check; while a product is paused (or its rules say `undo_only`) only an exact reverse of a docs-lane change merges. The check never throws: a field it can't read is a reason to refuse. The Merge Gate must pass each file's `mode` when GitHub gives one.
+
+The deep classifier below (`classify.mjs`, `db-lines.mjs`) is `cutover: second`. It is built and tested, and `makeEngine({ deepMerge: true })` switches it on for `merge`; nothing does yet. `rules.classify()` still uses it for read-backs.
+
+## Database changes in code: deny by default (lead call L32, second cutover)
 
 Audit rounds 3 to 11 each found one more way of writing a database change that a list of patterns missed. So `db-lines.mjs` reads the other way round: every added or removed line in a code file counts as a possible database change (class `schema`, Tier 1, Joe's Approve) unless it is blank (spaces and tabs only).
 

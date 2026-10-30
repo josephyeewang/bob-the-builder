@@ -20,7 +20,8 @@ const set = (key, from, to) => (t) => { assert.ok(t.includes(from), `fixture has
 const AT_10 = Date.parse('2026-10-14T14:00:00Z');
 const AT_03 = Date.parse('2026-10-14T07:00:00Z');
 
-function world({ policies = { app: pol() }, states = {}, run = {}, now = AT_10 } = {}) {
+// The deep classifier's tests (cutover: second) run with deepMerge on; docs-lane.test.mjs covers the first cutover.
+function world({ policies = { app: pol() }, states = {}, run = {}, now = AT_10, deep = true } = {}) {
   const products = Object.keys(policies);
   const reader = Object.fromEntries(products.map((p) => [p, policies[p] === null
     ? { status: 'deny_all', policy: null }
@@ -33,6 +34,7 @@ function world({ policies = { app: pol() }, states = {}, run = {}, now = AT_10 }
     running: ({ product }) => (product ? (w.run[product] ?? 0) : w.run.mac),
     rolesDir: join(here, 'roles'),
     clock: () => w.now,
+    deepMerge: deep,
   }));
   return w;
 }

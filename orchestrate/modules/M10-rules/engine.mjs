@@ -13,12 +13,15 @@
 //     running({ product }) / running({}) → editing sessions running for that product / on the whole Mac
 //     rolesDir      the role-profile folder (roles/), loaded against each claude_code.pin
 //     clock()       → ms since epoch; the only clock used (subject.now is ignored, R3-m9)
+//     deepMerge     false (the first cutover): a merge passes only the docs-lane path check (lane-check.mjs, L34).
+//                   true is the second cutover's deep classifier answer, built and tested but not yet switched on.
 
 import { allow, ask, deny } from '../../shared/rules.mjs';
 import { classifyChange, needsJoe, readFilesOnce, MAX_FILES } from './classify.mjs';
 import { compileList, pathProblem } from './paths.mjs';
 import { PRODUCT_STATES, HOURS, validZone, compareVersions } from './policy.mjs';
 import { loadRoles, profileFor } from './roles.mjs';
+import { docsLaneProblem } from './lane-check.mjs';
 
 // Mac-wide keys and how they combine across products (MAT-10, R2-M5(b)). `*` = every key under that map.
 export const MAC_MIN = Object.freeze(['caps.editing_per_mac', 'caps.scripts_per_mac', 'caps.script_agents_max',
@@ -68,7 +71,7 @@ const matches = (list, key) => list.some((pat) => {
   return a.length === b.length && a.every((s, i) => s === '*' || s === b[i]);
 });
 
-export function makeEngine({ products, rulesState, productState, running, rolesDir, clock }) {
+export function makeEngine({ products, rulesState, productState, running, rolesDir, clock, deepMerge = false }) {
   if (!Array.isArray(products) || !products.length) throw new Error('engine needs the product list');
   if (typeof clock !== 'function') throw new Error('engine needs a clock');
   const rolesByPin = new Map();
@@ -246,7 +249,24 @@ export function makeEngine({ products, rulesState, productState, running, rolesD
     });
   }
 
-  function merge(subject) {
+  // The first cutover's merge (L34): the docs lane only, by path. Anything else is refused and MAIN merges it as today.
+  // An exact reverse of a docs-lane change passes the same check; it alone may merge while paused (MAT-8).
+  function mergeDocsLane(subject) {
+    const s = { ...subject, files: readFilesOnce(subject.files) };
+    const pol = policyOf(s.product);
+    checkFiles(s.files);
+    const why = docsLaneProblem(pol, s);
+    if (why) return deny(`not this lane's change; MAIN merges it as today: ${why}`);
+    const reverse = s.kind === 'exact_reverse' && typeof s.reverses === 'string' && SHA.test(s.reverses) && s.exact_reverse_ok === true && REVERSED_AUDIT.includes(s.reversed_audit);
+    const state = stateOf(s.product);
+    const fileRule = at(pol, `product_state_rules.${state}.tier1_merge`);
+    if (!['rules', 'tier1_hours_only', 'undo_only'].includes(fileRule)) return deny(`product_state_rules.${state}.tier1_merge is not a known rule`);
+    if (!reverse && (state === 'paused' || fileRule === 'undo_only')) return deny(`product is ${state}: only an exact reverse may merge`);
+    return allow(reverse ? 'exact reverse of a docs-lane change' : 'docs lane');
+  }
+
+  // The second cutover's merge (cutover: second): the deep classifier. Off unless makeEngine gets deepMerge: true.
+  function mergeDeep(subject) {
     const s = { ...subject, files: readFilesOnce(subject.files) };
     const pol = policyOf(s.product);
     checkFiles(s.files);
@@ -295,7 +315,7 @@ export function makeEngine({ products, rulesState, productState, running, rolesD
   const ANSWERS = {
     start_session: startSession,
     push_branch: pushBranch,
-    merge,
+    merge: (subject) => (deepMerge === true ? mergeDeep(subject) : mergeDocsLane(subject)),
     count_approval: () => deny('not built until 0b-5 (M2)'),
     delete_copy: () => deny('nothing is deleted in 0b (keep, don\'t delete)'),
     write_production: () => deny('production writes are not allowed in this phase'),
