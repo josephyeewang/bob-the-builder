@@ -47,12 +47,18 @@ for (let i = 1; i < parts.length; i += 2) body.set(Number(parts[i]), parts[i + 1
 const runners = [
   ...fs.readdirSync(path.join(ROOT, '.github/workflows')).filter((f) => /\.ya?ml$/.test(f)).map((f) => rd(`.github/workflows/${f}`)),
   rd('scripts/selftest-gate-scripts.sh'),
-].join('\n').split('\n').filter((l) => !/^\s*#/.test(l));
+].join('\n').split('\n').filter((l) => !/^\s*#/.test(l) && !/^\s*(printf|echo|cat)\b/.test(l));
 // A script runs when a line calls it: `node scripts/x.mjs`, `bash "$HERE/x.sh"`, `python3 x.py`, or `X="$HERE/x.mjs"` then `node "$X"`.
-const runs = (base) => {
-  const esc = base.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  if (runners.some((l) => new RegExp(`\\b(node|bash|sh|python3?)\\s+(--\\S+\\s+)*["']?[^\\s"']*\\b${esc}\\b`).test(l))) return true;
-  const vars = runners.map((l) => l.match(new RegExp(`^\\s*([A-Z_][A-Z0-9_]*)=["']?[^\\s"']*\\b${esc}["']?\\s*(;|$)`))?.[1]).filter(Boolean);
+const escRe = (x) => x.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+// The script's own path (scripts/x.mjs, ../templates/x.mjs) or, inside the self-test, "$HERE/x.mjs" for one in scripts/.
+// "foo-x.mjs" or "templates/x.mjs" is a different file and does not count as running scripts/x.mjs.
+const runs = (rel) => {
+  const forms = [escRe(rel)];
+  if (rel.startsWith('scripts/')) forms.push(`\\$\\{?HERE\\}?"?/${escRe(rel.slice('scripts/'.length))}`);
+  const P = `(?:${forms.join('|')})(?=$|[\\s"';)])`;
+  const call = (target) => new RegExp(`\\b(node|bash|sh|python3?)\\s+(--\\S+\\s+)*["']?(?:[^\\s"']*/)?${target}`);
+  if (runners.some((l) => call(P).test(l) || call(`[^\\s"']*${P}`).test(l))) return true;
+  const vars = runners.map((l) => l.match(new RegExp(`^\\s*([A-Z_][A-Z0-9_]*)=["']?(?:[^\\s"']*/)?${P}`))?.[1]).filter(Boolean);
   return vars.some((v) => runners.some((l) => new RegExp(`\\b(node|bash|sh|python3?)\\s+["']?\\$\\{?${v}\\b`).test(l)));
 };
 const SCRIPT_REF = /(?:~\/\.claude\/skills\/bob\/\.\.\/)?((?:scripts\/[\w./-]+|templates\/[\w.-]+)\.(?:mjs|js|sh|py))(?![\w.])/g;
@@ -71,7 +77,7 @@ for (const [n, tag] of index) {
   if (!named.length) { problems.push(`Rule ${n} is tagged ${tag} but its text in rules.md names no script`); continue; }
   for (const s of named) {
     if (!fs.existsSync(path.join(ROOT, s))) { problems.push(`Rule ${n} names ${s}, which does not exist`); continue; }
-    if (!runs(path.basename(s))) problems.push(`Rule ${n} names ${s}, but neither CI nor the self-test ever runs it`);
+    if (!runs(s)) problems.push(`Rule ${n} names ${s}, but neither CI nor the self-test ever runs it`);
   }
 }
 

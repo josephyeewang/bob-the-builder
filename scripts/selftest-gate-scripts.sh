@@ -719,8 +719,9 @@ printf '# Phase 2\n## 1. Built ✅\n- the login page\n## 2. Spec Deviations\n- N
 expect "phase-report: level-2, numbered headings with a status mark -> OK" 0 "phase-report-check: OK" -- node "$PR" "$PD/h2.md" --template "$PD/tpl.md"
 printf '## Phase 2 Report\n### Built\n- x\n### Mocked\n- *N/A — nothing stubbed* (say so explicitly if skipping).\n### Spec Deviations\n- No divergences found.\n' > "$PD/na.md"
 expect "phase-report: an italic N/A line and \"No divergences found\" count -> OK" 0 "phase-report-check: OK" -- node "$PR" "$PD/na.md" --template "$PD/tpl.md"
-printf '## Phase 2 Report\n### Built\n- x\n### Spec Deviations\n- None\n### Validation Results\n- all pass\n### Hot Path Results\n- login: PASS\n### Regression Check\n- phase 1 flows: PASS\n' > "$PD/short.md"
+printf '## Phase 2 Report\n### Acceptance Bar\n- login works\n### Built\n- x\n#### Backend\n- /api/login\n### Spec Deviations\n- None\n### Validation Results\n- all pass\n### Hot Path Results\n- login: PASS\n### Regression Check\n- phase 1 flows: PASS\n### Acceptance Gate — met\n- yes\n### Deploy Verification — N/A (no integrations touched)\n' > "$PD/short.md"
 expect "phase-report: a short report with --abbreviated -> OK" 0 "phase-report-check: OK" -- node "$PR" "$PD/short.md" --abbreviated
+expect "phase-report: --abbreviated reads its list from the template (Acceptance Bar is on it)" 1 'missing the "acceptance bar" section' -- bash -c "sed '/Acceptance Bar/,/^- login works/d' '$PD/short.md' > '$PD/short2.md' && node '$PR' '$PD/short2.md' --abbreviated"
 expect "phase-report: ...the same short report checked in full -> REFUSED" 1 'missing the "implementation decisions" section' -- node "$PR" "$PD/short.md"
 
 # ── 18. autonomy-check.mjs (D-033, Rule 27) ─────────────────────────────────
@@ -761,6 +762,18 @@ ac_base; printf -- '---\nname: reviewer\n---\nReview.\n' > "$AD/.claude/agents/r
 expect "autonomy: a reviewer with no tools line (inherits Edit) -> REFUSED" 1 "has no tools: line" -- node "$AC" "$AD"
 ac_base; printf -- '---\nname: reviewer\ntools:\n  - Read\n  - Edit\n---\n' > "$AD/.claude/agents/reviewer.md"
 expect "autonomy: a reviewer whose tools list (YAML form) has Edit -> REFUSED" 1 "can use Edit" -- node "$AC" "$AD"
+ac_base; sed -i.bak 's#"bash \\"$CLAUDE_PROJECT_DIR/.claude/hooks/green-gate.sh\\""#"\\"$CLAUDE_PROJECT_DIR\\"/.claude/hooks/green-gate.sh"#' "$AD/.claude/settings.json"
+expect "autonomy: the docs' hook quoting \"\$CLAUDE_PROJECT_DIR\"/… -> OK" 0 "autonomy-check: OK" -- node "$AC" "$AD"
+ac_base; printf 'const MAX_ATTEMPTS = 8;\nif (n > MAX_ATTEMPTS) process.exit(0);\nconst TEST_CMD = "npm test";\n' > "$AD/.claude/hooks/green-gate.sh"
+expect "autonomy: a retry limit written JavaScript-style (const X = 8; n > X) -> OK" 0 "autonomy-check: OK" -- node "$AC" "$AD"
+ac_base; printf 'max_attempts=8\n(( n >= max_attempts )) && exit 0\nTEST_CMD="npm test"\n' > "$AD/.claude/hooks/green-gate.sh"
+expect "autonomy: a lower-case limit used without \$ -> OK" 0 "autonomy-check: OK" -- node "$AC" "$AD"
+ac_base; sed -i.bak 's/"deny": \[[^]]*\]/"deny": ["Bash(rm:*)", "Bash(git push:*)", "Bash(git reset:*)"]/; s/"Bash(git push:\*)", "Bash(\*deploy\*)"/"Bash(*deploy*)"/' "$AD/.claude/settings.json"
+expect "autonomy: stricter deny rules (rm:*, git push:*, git reset:*) cover the basics -> OK" 0 "autonomy-check: OK" -- node "$AC" "$AD"
+ac_base; printf -- '---\r\nname: reviewer\r\ntools: Read, Grep\r\n---\r\n' > "$AD/.claude/agents/reviewer.md"
+expect "autonomy: a reviewer file with Windows line endings -> OK" 0 "autonomy-check: OK" -- node "$AC" "$AD"
+ac_base; printf -- '---\nname: reviewer\ndisallowedTools: Edit, Write, MultiEdit, NotebookEdit\n---\n' > "$AD/.claude/agents/reviewer.md"
+expect "autonomy: a reviewer that disallows every editing tool -> OK" 0 "autonomy-check: OK" -- node "$AC" "$AD"
 mkdir -p "$TMP/ac-none"
 mkdir -p "$TMP/ac-bare/.claude"; printf '{"permissions":{}}\n' > "$TMP/ac-bare/.claude/settings.json"
 expect "autonomy: settings but no Stop hook and no reviewer -> not set up (exit 2, not six failures)" 2 "not set up for supervised autonomy" -- node "$AC" "$TMP/ac-bare"
@@ -791,6 +804,36 @@ printf 'defaults:\n  run:\n    working-directory: web\njobs:\n  t:\n    steps:\n
 expect "run-commands: cd in a command or block, build output, workflow defaults, matrix folders, installed tools -> OK" 0 "run-commands-check: OK" -- node "$RC" "$R2"
 printf 'all:\n\tnode gone.mjs\n' > "$R2/Makefile"; printf '{"scripts":{"pk":"python -m pkg.missing"}}\n' > "$R2/package.json"
 expect "run-commands: a missing project module and a Makefile target -> REFUSED, each once" 1 "REFUSED — 2 run command" -- node "$RC" "$R2"
+R3="$TMP/rc3"; mkdir -p "$R3"/backend "$R3"/web/scripts "$R3"/src "$R3"/.github/workflows
+: > "$R3/backend/manage.py"; : > "$R3/web/scripts/check.mjs"; : > "$R3/src/x.ts"
+cat > "$R3/package.json" <<'JSON'
+{"scripts":{"a":"pnpm --filter web exec node scripts/seed.mjs","b":"npm --prefix apps/web exec -- node scripts/seed.mjs","c":"node --import tsx ./src/x.ts","d":"echo \"usage: node cli.js\"","e":"node scripts\\build.js"}}
+JSON
+printf 'test:\n\tcd backend && \\\n\t  python manage.py test\n' > "$R3/Makefile"
+cat > "$R3/.github/workflows/w.yml" <<'YML'
+on: push
+jobs:
+    build:
+        defaults:
+            run:
+                working-directory: web
+        steps:
+            - uses: actions/checkout@v4
+              with:
+                  path: tools
+            - run: node scripts/check.mjs
+            - run: node ../tools/bin/lint.mjs
+            - run: |
+                curl -sL https://example.com/install.sh -o install.sh && bash install.sh
+                cat > smoke.py <<'PY'
+                print(1)
+                PY
+                python smoke.py
+                bash -c "cd sub && ./run.sh"
+            - shell: pwsh
+              run: python .\run.py
+YML
+expect "run-commands: monorepo filters, continued Makefile lines, 4-space jobs, files made at run time, nested shells, echo, Windows paths -> OK" 0 "run-commands-check: OK — 3 run command" -- node "$RC" "$R3"
 mkdir -p "$TMP/rc-vite"; printf '{"scripts":{"dev":"vite","build":"vite build"}}\n' > "$TMP/rc-vite/package.json"
 expect "run-commands: an app whose scripts only call tools (vite) -> OK, not 'cannot run'" 0 "nothing here runs a project file directly" -- node "$RC" "$TMP/rc-vite"
 expect "run-commands: Bob's own CI commands point at real files" 0 "run-commands-check: OK" -- node "$RC" "$HERE/.."
@@ -809,11 +852,18 @@ expect "recurrence: fixed twice, newest at rung 2 -> REFUSED" 1 'class "read-err
 git -C "$QR" commit -q --allow-empty -m "fix: four-state result type" -m "closed at rung 4: the type cannot hold the bad state" -m "Class: read-error-as-missing"
 expect "recurrence: newest fix closed at rung 4 -> OK" 0 "1 recurring, each closed at rung 3 or 4" -- node "$RQ" "$QR"
 git -C "$QR" commit -q --allow-empty -m "docs: how to write the lines" -m 'For example:
-\`\`\`
+```
 Class: read-error-as-missing
 Rung: 1
-\`\`\`' -m "See Rule 31."
+```' -m "See Rule 31."
 expect "recurrence: a Class: line quoted in a docs commit is not a fix -> still OK" 0 "1 recurring, each closed at rung 3 or 4" -- node "$RQ" "$QR"
+git -C "$QR" commit -q --allow-empty -m "fix: retry the read" -m "Class: slow-read
+Rung: 1" -m "Co-Authored-By: Someone <someone@example.com>"
+git -C "$QR" commit -q --allow-empty -m "fix: retry the read again" -m "Class: slow-read
+Rung: 2" -m "Co-Authored-By: Someone <someone@example.com>"
+expect "recurrence: Class/Rung lines above a Co-Authored-By line are read -> REFUSED (slow-read twice, rung 2)" 1 'class "slow-read" has been fixed 2 times' -- node "$RQ" "$QR"
+git -C "$QR" commit -q --allow-empty -m "fix: make the slow read impossible" -m "Class: slow-read
+Rung: 4"
 git -C "$QR" commit -q --allow-empty -m "fix: two at once" -m "Class: stale-cache, read-error-as-missing
 Rung: 1"
 expect "recurrence: a comma list names two classes; the repeat one at rung 1 -> REFUSED" 1 'class "read-error-as-missing" has been fixed 4 times' -- node "$RQ" "$QR"
@@ -835,6 +885,8 @@ rt_base; printf 'jobs: {}\n' > "$TR/.github/workflows/ci.yml"
 expect "rule-tags: a script nothing runs -> FAIL" 1 "neither CI nor the self-test ever runs it" -- node "$RT" --root "$TR"
 rt_base; printf 'jobs:\n  t:\n    steps:\n      # node scripts/x.mjs is checked elsewhere\n      - run: echo hi\n' > "$TR/.github/workflows/ci.yml"
 expect "rule-tags: a script named only in a comment -> FAIL" 1 "neither CI nor the self-test ever runs it" -- node "$RT" --root "$TR"
+rt_base; printf 'jobs:\n  t:\n    steps:\n      - run: node scripts/foo-x.mjs\n' > "$TR/.github/workflows/ci.yml"
+expect "rule-tags: running a different script (foo-x.mjs) does not count for x.mjs -> FAIL" 1 "neither CI nor the self-test ever runs it" -- node "$RT" --root "$TR"
 rt_base; rm "$TR/scripts/x.mjs"
 expect "rule-tags: a named script that does not exist -> FAIL" 1 "scripts/x.mjs, which does not exist" -- node "$RT" --root "$TR"
 rt_base; printf '## 1. Group\n\n<!-- Rule 1 -->\n\n1. **First.**\n\n<!-- Rule 2 -->\n\n2. **Second.**\n' > "$TR/rules.md"

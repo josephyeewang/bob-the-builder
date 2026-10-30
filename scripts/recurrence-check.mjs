@@ -5,7 +5,8 @@
 // WHY. A field census found a defect class with a standing written rule that recurred ~40 times across six fixes.
 // Rule 31's own text named the missing enforcer: "mechanical detection of recurrence — a class name appearing in 2+
 // separate fix commits". This is it (D-033). It reads the fix commits' own words, so it needs one habit: a fix
-// commit says which class it fixes and which rung closed it, as git trailer lines in the message's last paragraph:
+// commit says which class it fixes and which rung closed it, as two lines of their own (not indented, not in a code
+// block) anywhere in the message — usually just above the Co-Authored-By line:
 //
 //     Class: read-error-treated-as-missing
 //     Rung: 3            (if there is no Rung: line, "closed at rung 3" in the message, outside code blocks)
@@ -35,8 +36,7 @@ function cannot(message) {
 
 let log;
 try {
-  // Git parses the trailers itself, so a "Class:" line quoted in a docs commit's body does not count.
-  const cmd = ['-C', DIR, 'log', '--no-merges', '--format=%H%x1f%cs%x1f%s%x1f%(trailers:key=Class,valueonly,separator=%x1d)%x1f%(trailers:key=Rung,valueonly,separator=%x1d)%x1f%b%x1e'];
+  const cmd = ['-C', DIR, 'log', '--no-merges', '--format=%H%x1f%cs%x1f%s%x1f%b%x1e'];
   if (since) cmd.push(`--since=${since}`);
   log = execFileSync('git', cmd, { encoding: 'utf8', maxBuffer: 256 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'] });
 } catch {
@@ -45,13 +45,17 @@ try {
 
 const byClass = new Map();
 for (const rec of log.split('\x1e')) {
-  const [sha, date, subject, classField, rungField, body] = rec.replace(/^\n/, '').split('\x1f');
-  if (!sha || body === undefined) continue;
-  const classes = classField.split(/[\x1d,]/).map((c) => c.trim().toLowerCase().replace(/\s+/g, '-')).filter(Boolean);
+  const [sha, date, subject, rawBody] = rec.replace(/^\n/, '').split('\x1f');
+  if (!sha || rawBody === undefined) continue;
+  // Lines that start with "Class:" / "Rung:", anywhere in the message (above a Co-Authored-By line is fine) but not
+  // inside a ``` code block and not indented, so a docs commit that quotes an example does not count.
+  const body = rawBody.replace(/```[\s\S]*?```/g, '');
+  const field = (key) => [...body.matchAll(new RegExp(`^${key}:[ \\t]*(.+?)[ \\t]*$`, 'gim'))].map((m) => m[1]);
+  const classes = field('Class').flatMap((v) => v.split(',')).map((c) => c.trim().toLowerCase().replace(/\s+/g, '-')).filter(Boolean);
   if (!classes.length) continue;
-  // The Rung: trailer wins; otherwise "closed at rung N" in the message, outside code blocks.
-  const trailer = rungField.split('\x1d').map((r) => r.match(/^\s*(\d)\b/)?.[1]).filter(Boolean).map(Number);
-  const prose = [...body.replace(/```[\s\S]*?```/g, '').matchAll(/closed at rung\s*(\d)\b/gi)].map((m) => Number(m[1]));
+  // The Rung: line wins; otherwise "closed at rung N" in the message.
+  const trailer = field('Rung').map((r) => r.match(/^(\d)\b/)?.[1]).filter(Boolean).map(Number);
+  const prose = [...body.matchAll(/closed at rung\s*(\d)\b/gi)].map((m) => Number(m[1]));
   const rungs = trailer.length ? trailer : prose;
   const rung = rungs.length ? Math.max(...rungs) : null;
   for (const c of new Set(classes)) {

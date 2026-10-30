@@ -18,7 +18,11 @@
 // Not judged (counted as skipped): paths or folders built from variables ($X, ${{ … }}), absolute or ~ paths, build
 // output (dist/, build/, out/, .next/, node_modules/, target/, or a folder the project's .gitignore lists — it does
 // not exist on a clean checkout), and `python -m` of a module that is not a package in the project (an installed tool).
-// Calibrated before it shipped: run across several real projects it raised no false alarm (D-033).
+// Calibrated before it shipped (D-033): two fresh reviews tried many healthy command shapes on purpose (monorepo
+// filters, continued Makefile lines, heredocs, nested shells, Windows paths …), and each shape it got wrong was fixed
+// by skipping what it cannot read for sure; it then raised no false alarm on the real projects it was tried on. It
+// prefers missing a break to crying wolf. Shapes it does not read: pyproject.toml entry points, and folder changes
+// made any way other than a literal cd.
 //
 // Usage: node "$(realpath ~/.claude/skills/bob/..)/scripts/run-commands-check.mjs" [DIR]
 // Exit: 0 = every run command that names a project file points at one that runs (or nothing runs a project file
@@ -61,13 +65,26 @@ const defaultsWd = (lines, i) => {
 };
 for (const f of workflows) {
   const lines = fs.readFileSync(path.join(wfDir, f), 'utf8').split('\n');
-  let topKey = null, workflowWd = null, jobWd = null;
+  let topKey = null, workflowWd = null, jobWd = null, jobIndent = null;
+  // Folders a checkout step fills (`path: tools`) hold files that only exist once the job runs.
+  const checkedOut = new Set();
+  lines.forEach((l, i) => {
+    if (!/uses:\s*actions\/checkout/.test(l)) return;
+    for (let j = Math.max(0, i - 3); j < Math.min(lines.length, i + 8); j++) {
+      const pm = lines[j].match(/^\s*path:\s*["']?([^"'#\s]+)/);
+      if (pm) checkedOut.add(pm[1].split('/')[0]);
+    }
+  });
   for (let i = 0; i < lines.length; i++) {
     const l = lines[i];
     const top = l.match(/^([\w-]+):/);
-    if (top) { topKey = top[1]; if (topKey === 'defaults') workflowWd = defaultsWd(lines, i); continue; }
-    if (topKey === 'jobs' && /^  [\w-]+:\s*$/.test(l)) { jobWd = null; continue; } // a new job
-    if (topKey === 'jobs' && /^    defaults:\s*$/.test(l)) { jobWd = defaultsWd(lines, i); continue; }
+    if (top) { topKey = top[1]; jobIndent = null; if (topKey === 'defaults') workflowWd = defaultsWd(lines, i); continue; }
+    if (topKey === 'jobs' && l.trim() && !l.trim().startsWith('#')) {
+      const ind = l.search(/\S/);
+      if (jobIndent === null) jobIndent = ind;
+      if (ind === jobIndent && /^\s*[\w-]+:\s*$/.test(l)) { jobWd = null; continue; } // a new job, at any indent
+      if (ind > jobIndent && /^\s*defaults:\s*$/.test(l)) { jobWd = defaultsWd(lines, i); continue; }
+    }
     const m = l.match(/^(\s*)(?:-\s*)?run:\s*(.*)$/);
     if (!m || topKey !== 'jobs') continue;
     // The step's own working-directory: anywhere in the same step (from its "- " line to the next step).
@@ -89,12 +106,12 @@ for (const f of workflows) {
     let base = DIR;
     for (const d of [workflowWd, jobWd, stepWd]) if (d) base = wd(base, d);
     const where = `.github/workflows/${f}:${i + 1}`;
-    if (m[2].trim() && !/^[|>][-+]?\s*$/.test(m[2].trim())) runs.push({ where, text: m[2], base });
+    if (m[2].trim() && !/^[|>][-+]?\s*$/.test(m[2].trim())) runs.push({ where, text: m[2].trim().replace(/^(["'])(.*)\1$/, '$2'), base, checkedOut });
     else {
       const indent = (lines[i + 1] ?? '').search(/\S/);
       const block = [];
       for (let j = i + 1; j < lines.length && (lines[j].trim() === '' || lines[j].search(/\S/) >= indent); j++) block.push(lines[j]);
-      runs.push({ where, text: block.join('\n'), base });
+      runs.push({ where, text: block.join('\n'), base, checkedOut });
     }
   }
 }
@@ -104,9 +121,15 @@ for (const mk of ['GNUmakefile', 'Makefile', 'makefile']) {
   if (!fs.existsSync(p) || seenMake.has(fs.statSync(p).ino)) continue; // one file on a case-insensitive disk
   seenMake.add(fs.statSync(p).ino);
   sources++;
-  fs.readFileSync(p, 'utf8').split('\n').forEach((l, i) => {
-    if (l.startsWith('\t')) runs.push({ where: `${mk}:${i + 1}`, text: l.trim().replace(/^[@-]+/, ''), base: DIR });
-  });
+  const ml = fs.readFileSync(p, 'utf8').split('\n');
+  for (let i = 0; i < ml.length; i++) {
+    if (!ml[i].startsWith('\t')) continue;
+    // A recipe line ending in "\" continues on the next line: `cd backend && \` + `python manage.py test` is one command.
+    const start = i;
+    let text = ml[i].trim().replace(/^[@-]+/, '');
+    while (text.endsWith('\\') && i + 1 < ml.length) text = `${text.slice(0, -1)} ${ml[++i].trim()}`;
+    runs.push({ where: `${mk}:${start + 1}`, text, base: DIR });
+  }
 }
 
 if (!sources) {
@@ -121,11 +144,52 @@ for (const l of fs.existsSync(path.join(DIR, '.gitignore')) ? fs.readFileSync(pa
   if (t && !t.startsWith('#') && !t.startsWith('!') && !/[*?[\]]/.test(t) && !t.includes('/')) BUILT.add(t);
 }
 
-const INTERP = String.raw`(?:node|nodejs|deno run(?:\s+-\S+)*|bun(?: run)?|tsx|ts-node|npx\s+(?:tsx|ts-node)|python3?|uv run(?: python3?)?|poetry run python3?|bash|sh|zsh|ruby)`;
-const FILE = String.raw`["']?([^\s"';|&()<>]+\.(?:mjs|cjs|js|ts|mts|py|sh|rb))["']?`;
-const RUN_FILE = new RegExp(String.raw`(?:^|[\s(])${INTERP}(?:\s+-[^\s]+)*\s+${FILE}`, 'g');
-const DOT_SLASH = new RegExp(String.raw`(?:^|[\s(])(\.\.?\/[^\s"';|&()<>]+\.(?:sh|py|mjs|js|rb))`, 'g');
-const PY_M = /(?:^|[\s(])python3?\s+(?:-[A-Za-z]+\s+)*-m\s+([A-Za-z_][\w.]*)/g;
+// Only a command that STARTS with an interpreter and a file is judged, so `echo "usage: node cli.js"` is not a command.
+// Anything this cannot read for sure is skipped, never guessed: a nested shell (`bash -c "…"`), inline code (-e, -c),
+// a monorepo filter (--filter, --prefix, --workspace, -w, -C, --dir), a Windows path, a path built from a variable.
+const INTERPS = new Set(['node', 'nodejs', 'tsx', 'ts-node', 'bun', 'deno', 'python', 'python3', 'bash', 'sh', 'zsh', 'ruby']);
+const WRAPPERS = /^(?:(?:time|exec|sudo|env|command|nohup)\s+|npx\s+(?:--yes\s+|-y\s+)?|bunx\s+|pnpm\s+exec\s+|npm\s+exec\s+(?:--\s+)?|yarn\s+(?:exec\s+)?|uv\s+run\s+|poetry\s+run\s+|pipenv\s+run\s+|deno\s+run\s+(?:-\S+\s+)*|bun\s+run\s+)/;
+const UNKNOWN_DIR = /(?:^|\s)(?:--filter|--prefix|--workspace|--dir|--cwd|-w|-C)(?:[=\s]|$)/;
+const VALUE_OPTS = new Set(['--import', '-r', '--require', '--loader', '--experimental-loader', '--env-file', '-W', '-X', '--inspect-port']);
+const INLINE = new Set(['-e', '--eval', '-p', '--print', '-c']);
+const SCRIPT = /\.(?:mjs|cjs|js|ts|mts|py|sh|rb)$/;
+const unquote = (t) => t.replace(/^(["'])(.*)\1$/, '$2');
+
+// → { file } or { module } or null (not a command that runs a project file, or not readable for sure)
+function target(piece) {
+  let c = piece.trim().replace(/^\(\s*/, '').replace(/\)\s*$/, '');
+  c = c.replace(/^(?:[A-Za-z_]\w*=\S*\s+)+/, ''); // FOO=1 node x.js
+  if (UNKNOWN_DIR.test(c.split(/\s+/).slice(0, 4).join(' '))) return null;
+  for (let k = 0; k < 4 && WRAPPERS.test(c); k++) c = c.replace(WRAPPERS, '').replace(/^(?:[A-Za-z_]\w*=\S*\s+)+/, '');
+  const toks = c.split(/\s+/).map(unquote);
+  if (!toks[0]) return null;
+  if (/^\.\.?\//.test(toks[0])) return SCRIPT.test(toks[0]) ? { file: toks[0] } : null; // ./run.sh
+  if (!INTERPS.has(toks[0])) return null;
+  for (let k = 1; k < toks.length; k++) {
+    const t = toks[k];
+    if (INLINE.has(t)) return null;
+    if (t === '-m' && /^python/.test(toks[0])) return toks[k + 1] ? { module: toks[k + 1] } : null;
+    if (VALUE_OPTS.has(t)) { k++; continue; }
+    if (t.startsWith('-')) continue;
+    return SCRIPT.test(t) ? { file: t } : null;
+  }
+  return null;
+}
+
+// Strip heredoc bodies, and name the files a block writes (curl -o x, > x, tee x, cat > x) so running them is not judged.
+function prepare(text) {
+  const out = [];
+  const lines = text.split('\n');
+  for (let i = 0; i < lines.length; i++) {
+    out.push(lines[i]);
+    const h = lines[i].match(/<<-?\s*["']?(\w+)["']?/);
+    if (h) while (i + 1 < lines.length && lines[i + 1].trim() !== h[1]) i++;
+  }
+  const body = out.join('\n');
+  const written = new Set();
+  for (const m of body.matchAll(/(?:\s-o|--output[=\s]|>{1,2}|\btee(?:\s+-a)?)\s*["']?([^\s"';|&]+)/g)) written.add(path.normalize(m[1]));
+  return { body, written };
+}
 
 function pyDoesNothing(src) {
   if (/__name__\s*==\s*['"]__main__['"]/.test(src)) return false;
@@ -134,10 +198,10 @@ function pyDoesNothing(src) {
   return top.length > 0 && top.every(inert) && (top.every((l) => /^(import |from |__all__)/.test(l)) || /^def main\s*\(/m.test(src));
 }
 
-function judge(where, file, base) {
-  if (base === null || /[$`{}*]/.test(file) || path.isAbsolute(file) || file.startsWith('~')) { skipped.push(`${where}: ${file}`); return; }
+function judge(where, file, base, made = new Set()) {
+  if (base === null || /[$`{}*\\]/.test(file) || path.isAbsolute(file) || file.startsWith('~')) { skipped.push(`${where}: ${file}`); return; }
   const full = path.resolve(base, file);
-  if (rel(full).split(path.sep).some((seg) => BUILT.has(seg))) { skipped.push(`${where}: ${file} (build output)`); return; }
+  if (rel(full).split(path.sep).some((seg) => BUILT.has(seg) || made.has(seg)) || made.has(path.normalize(file))) { skipped.push(`${where}: ${file} (made at run time)`); return; }
   checked++;
   if (!fs.existsSync(full)) { problems.push(`${where}: runs ${file}, which does not exist (looked in ${rel(base)}/)`); return; }
   if (full.endsWith('.py') && pyDoesNothing(fs.readFileSync(full, 'utf8')))
@@ -168,15 +232,17 @@ function judgeModule(where, mod, base) {
   }
 }
 
-for (const { where, text, base } of runs) {
+for (const { where, text, base, checkedOut } of runs) {
+  const { body, written } = prepare(text.replace(/(^|\s)#.*$/gm, '$1'));
+  const made = new Set([...written, ...(checkedOut ?? [])]);
   // Walk the command piece by piece so an earlier `cd folder` moves where later pieces run.
   let cwd = base;
-  for (const piece of text.replace(/#.*$/gm, '').split(/\n|&&|\|\||;/)) {
-    const cd = piece.match(/^\s*\(?\s*(?:cd|pushd)\s+["']?([^\s"';)]+)["']?\s*\)?\s*$/) ?? piece.match(/^\s*\(?\s*(?:cd|pushd)\s+["']?([^\s"';)]+)/);
+  for (const piece of body.split(/\n|&&|\|\||;/)) {
+    const cd = piece.match(/^\s*\(?\s*(?:cd|pushd)\s+["']?([^\s"';)]+)/);
     if (cd) { cwd = cd[1] === '-' ? null : wd(cwd, cd[1]); continue; }
-    // `bash ./x.sh` matches both patterns; judge each file once.
-    for (const f of new Set([...piece.matchAll(RUN_FILE), ...piece.matchAll(DOT_SLASH)].map((m) => m[1]))) judge(where, f, cwd);
-    for (const m of piece.matchAll(PY_M)) judgeModule(where, m[1], cwd);
+    const t = target(piece);
+    if (t?.file) judge(where, t.file, cwd, made);
+    else if (t?.module) judgeModule(where, t.module, cwd);
   }
 }
 

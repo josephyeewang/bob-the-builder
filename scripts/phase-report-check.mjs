@@ -44,10 +44,12 @@ if (!fs.existsSync(TEMPLATE)) cannot(`template not found at ${TEMPLATE}`);
 // "### [A] Global Invariant Check *(use …)*" → { kind: 'A', name: 'global invariant check' }
 // Any of "## Built", "### 1. Built", "### Built ✅" or "#### [A] Built (phase 3)" is the section "built".
 function heading(line) {
-  const m = line.match(/^#{2,4}\s+(?:\d+[.)]\s+)?(?:\[([ACO])\]\s+)?(.+?)\s*$/);
+  const m = line.match(/^(#{2,4})\s+(?:\d+[.)]\s+)?(?:\[([ACO])\]\s+)?(.+?)\s*$/);
   if (!m) return null;
-  const name = m[2].split(/\s+\(|\s+—|\s+\*|\s+-\s|\s*:/)[0].replace(/[*_`]/g, '').replace(/[^\p{L}\p{N}/ -]+/gu, '').trim().toLowerCase();
-  return { kind: m[1] ?? null, name };
+  const name = m[3].split(/\s+\(|\s+—|\s+\*|\s+-\s|\s*:/)[0].replace(/[*_`]/g, '').replace(/[^\p{L}\p{N}/ -]+/gu, '').trim().toLowerCase();
+  // "### Deploy Verification — N/A (no integrations touched)" says in the heading that the section does not apply.
+  const saysNA = /(?:—|:|\(|-)\s*\**\s*(N\/A|None)\b/i.test(m[3]);
+  return { level: m[1].length, kind: m[2] ?? null, name, saysNA };
 }
 // A report heading matches a template section when its name starts with the template's ("built" ⊂ "built so far").
 const same = (mine, tpl) => mine === tpl || mine.startsWith(`${tpl} `);
@@ -56,13 +58,16 @@ const same = (mine, tpl) => mine === tpl || mine.startsWith(`${tpl} `);
 const PLACEHOLDER = /\[(?![ xX]\])(?![ACO]\])[^\]]*[a-zA-Z][^\]]*\](?!\()/;
 const norm = (l) => l.trim().replace(/\s+/g, ' ');
 
-function sections(text) {
+// Split a document into sections. A deeper heading that is not itself a template section ("#### Backend" under
+// "### Built") belongs to the section above it. Lines inside ``` fences are text, never headings.
+function sections(text, known = null) {
   const out = [];
-  let cur = null;
+  let cur = null, fence = false;
   text.split('\n').forEach((line, i) => {
-    const h = heading(line);
-    if (h) { cur = { ...h, line: i + 1, body: [] }; out.push(cur); return; }
-    if (/^#\s/.test(line)) { cur = null; return; }
+    if (/^\s*(```|~~~)/.test(line)) fence = !fence;
+    const h = fence ? null : heading(line);
+    if (h && !(known && cur && h.level > cur.level && !known.some((n) => same(h.name, n)))) { cur = { ...h, line: i + 1, body: [] }; out.push(cur); return; }
+    if (!fence && /^#\s/.test(line)) { cur = null; return; }
     if (cur) cur.body.push(line);
   });
   return out;
@@ -76,12 +81,14 @@ const placeholders = new Set();
 for (const l of tpl.split('\n')) if (/^\s*(?:[-*]|\d+\.|#{1,3})\s/.test(l) && PLACEHOLDER.test(l)) placeholders.add(norm(l));
 
 const text = fs.readFileSync(report, 'utf8');
-const mine = sections(text);
+const mine = sections(text, tplSections.map((t) => t.name));
 const problems = [];
 
-// --abbreviated: the short report the Minimum Viable Process allows under time pressure keeps only the sections it
-// lists as never skipped (what was built, what diverged, whether it passed, hot paths, regressions).
-const SHORT = ['built', 'spec deviations', 'validation results', 'hot path results', 'regression check'];
+// --abbreviated: the short report the Minimum Viable Process allows. Its sections are listed once, in the template's
+// "Short report" line, and read from there.
+const shortLine = tpl.match(/^>\s*\**Short report\b[^:]*:\**\s*(.+)$/m)?.[1];
+if (ABBREVIATED && !shortLine) cannot(`--abbreviated needs the template's "Short report:" line, and ${TEMPLATE} has none`);
+const SHORT = (shortLine ?? '').split(/\.(?:\s|$)/)[0].split(',').map((x) => x.replace(/[*_`]/g, '').trim().toLowerCase());
 const required = tplSections.filter((s) => s.kind === 'A' && (!ABBREVIATED || SHORT.includes(s.name)));
 for (const s of required)
   if (!mine.some((m) => same(m.name, s.name)))
@@ -95,7 +102,7 @@ for (const m of mine) {
   // A line saying the section does not apply ("N/A — …", "None") always counts, even when the template suggests it.
   const says = (l) => /^\s*(?:[-*]\s*)*\**\s*(N\/A|None|No divergences found)\b/i.test(l);
   const own = m.body.filter((l) => l.trim() && (says(l) || (!/^\s*\*[^*].*\*\s*$/.test(l) && !placeholders.has(norm(l)) && !tplLines.get(tplName)?.has(norm(l)))));
-  if (!own.length)
+  if (!own.length && !m.saysNA)
     problems.push(`line ${m.line}: the "${m.name}" section has nothing of its own${kind === 'C' ? ' — if it does not apply, write "N/A — <reason>"' : ''}${m.name === 'spec deviations' ? ' — if there were none, write "None" (Rule 4: "No divergences found")' : ''}`);
 }
 

@@ -62,7 +62,10 @@ if (settings) {
   // on another machine or in CI would not have them.
   const perms = settings.permissions ?? {};
   const list = (k) => (Array.isArray(perms[k]) ? perms[k] : []);
-  const covers = (k, needle) => list(k).some((r) => r.replace(/\s+/g, ' ').includes(needle));
+  // A rule covers a command when it names it, or when its prefix is shorter and still matches: deny Bash(rm:*) covers
+  // "rm -rf", deny Bash(git push:*) covers "git push --force".
+  const prefixOf = (r) => r.replace(/\s+/g, ' ').match(/^Bash\((.*?)(?::\*|\*)?\)$/)?.[1];
+  const covers = (k, needle) => list(k).some((r) => r.replace(/\s+/g, ' ').includes(needle) || (prefixOf(r) && needle.startsWith(prefixOf(r))));
 
   if (perms.defaultMode === 'auto')
     bad(2, `${SETTINGS} sets defaultMode "auto", which Claude Code ignores in a project file — auto is NOT on. Turn it on with Shift+Tab (⏵⏵ auto mode on) or in ~/.claude/settings.json`);
@@ -70,13 +73,15 @@ if (settings) {
   for (const needle of ['rm -rf', 'git push --force', 'git reset --hard'])
     if (!covers('deny', needle)) bad(3, `permissions.deny has no rule for "${needle}"`);
 
-  if (!covers('ask', 'git push')) bad(4, 'permissions.ask does not stop at "git push" — a milestone gate is missing');
+  if (!covers('ask', 'git push') && !covers('deny', 'git push')) bad(4, 'permissions.ask does not stop at "git push" — a milestone gate is missing');
   if (!list('ask').some((r) => /deploy|migrate|vercel|netlify|flyctl|\bfly\b|wrangler|heroku|db push|prisma|terraform apply|kubectl apply|supabase/.test(r)))
     warn(4, 'permissions.ask names no deploy or migrate command that this check recognises — make sure your deploy and database-change commands ask first');
 
   const stopCmds = (settings.hooks?.Stop ?? []).flatMap((h) => (h.hooks ?? []).map((x) => x.command ?? ''));
   const gates = [];
-  for (const c of stopCmds) {
+  for (const raw of stopCmds) {
+    // "$CLAUDE_PROJECT_DIR"/.claude/hooks/x.sh (the quoting Claude Code's docs use) is the same path as the unquoted form.
+    const c = raw.replace(/["']?\$\{?CLAUDE_PROJECT_DIR\}?["']?\//g, '$CLAUDE_PROJECT_DIR/');
     const script = c.match(/["']?((?:\$CLAUDE_PROJECT_DIR|\$\{CLAUDE_PROJECT_DIR\}|~|\$HOME|\/)?[\w./${}-]*\.(?:sh|mjs|js|py))["']?/)?.[1];
     if (!script) { if (/\b(npm|pnpm|yarn|bun) run\b|\bmake\b/.test(c)) warn(5, `the Stop hook "${c.slice(0, 60)}" runs through a task runner, so this check cannot see whether it is bounded — check it by hand`); continue; }
     const local = script.replace(/^(?:\$CLAUDE_PROJECT_DIR|\$\{CLAUDE_PROJECT_DIR\})\//, '');
@@ -85,8 +90,10 @@ if (settings) {
     gates.push({ local, src: fs.readFileSync(at(local), 'utf8') });
   }
   const limitOf = (src) => {
-    const m = src.match(/\b([A-Z_]*(?:MAX|LIMIT)[A-Z_]*)=["']?(?:\$\{\1:-)?(\d+)/);
-    return m && new RegExp(`\\$\\{?${m[1]}\\b`).test(src.replace(m[0], '')) ? m : null;
+    // MAX_ATTEMPTS=8 · MAX_ATTEMPTS="${MAX_ATTEMPTS:-8}" · const MAX_ATTEMPTS = 8 · max_attempts = 8 — then used again later.
+    for (const m of src.matchAll(/\b(?:(?:const|let|var|readonly|declare)\s+(?:-\w\s+)?)?([A-Za-z_]*(?:max|limit)[A-Za-z_]*)\s*=\s*["']?(?:\$\{\w+:-)?(\d+)/gi))
+      if (new RegExp(`(^|[^\\w])\\$?\\{?${m[1]}\\b`).test(src.replace(m[0], ''))) return m;
+    return null;
   };
   if (!gates.length && !warnings.some((w) => w.includes('[5]')))
     bad(5, 'no Stop hook runs a green-gate script in the project — nothing forces the build to be green before a phase ends');
@@ -104,18 +111,27 @@ if (settings) {
 
 if (!fs.existsSync(at(REVIEWER))) bad(6, `no ${REVIEWER} — there is no fresh-context reviewer to invoke at the milestone`);
 else {
-  const front = fs.readFileSync(at(REVIEWER), 'utf8').match(/^---\n([\s\S]*?)\n---/)?.[1] ?? '';
-  const line = front.match(/^tools:[ \t]*(.*)$/m);
-  if (!line) bad(6, `${REVIEWER} has no tools: line, so it inherits every tool, including Edit — list its tools (e.g. Read, Grep, Glob, Bash)`);
-  else {
-    let tools = line[1].trim();
-    if (!tools) { // YAML list form: "tools:" then "  - Read" lines
+  const front = fs.readFileSync(at(REVIEWER), 'utf8').replace(/\r\n/g, '\n').match(/^---\n([\s\S]*?)\n---/)?.[1] ?? '';
+  // A front-matter list, inline ("Read, Grep" or ["Read","Grep"]) or as YAML "- Read" lines; null when the key is absent.
+  const listOf = (key) => {
+    const line = front.match(new RegExp(`^${key}:[ \\t]*(.*)$`, 'm'));
+    if (!line) return null;
+    let v = line[1].trim();
+    if (!v) {
       const after = front.slice(front.indexOf(line[0]) + line[0].length).split('\n').slice(1);
-      tools = after.filter((l, i) => after.slice(0, i + 1).every((x) => /^\s*-\s/.test(x))).map((l) => l.replace(/^\s*-\s*/, '')).join(',');
+      const items = [];
+      for (const l of after) { if (!/^\s*-\s/.test(l)) break; items.push(l.replace(/^\s*-\s*/, '')); }
+      v = items.join(',');
     }
-    const editing = tools.replace(/[[\]"']/g, '').split(/[,\s]+/).filter((t) => /^(Edit|Write|NotebookEdit|MultiEdit)$/.test(t));
-    if (editing.length) bad(6, `${REVIEWER} can use ${editing.join(', ')} — a reviewer reviews; it must not edit the work it judges`);
-  }
+    return v.replace(/[[\]"']/g, '').split(/[,\s]+/).filter(Boolean);
+  };
+  const EDITORS = ['Edit', 'Write', 'MultiEdit', 'NotebookEdit'];
+  const tools = listOf('tools');
+  const denied = listOf('disallowedTools') ?? [];
+  if (!tools && !EDITORS.every((t) => denied.includes(t)))
+    bad(6, `${REVIEWER} has no tools: line, so it inherits every tool, including Edit — list its tools (e.g. Read, Grep, Glob, Bash) or disallow ${EDITORS.join(', ')}`);
+  const editing = (tools ?? []).filter((t) => EDITORS.includes(t) && !denied.includes(t));
+  if (editing.length) bad(6, `${REVIEWER} can use ${editing.join(', ')} — a reviewer reviews; it must not edit the work it judges`);
 }
 
 const tail = warnings.length ? `\n${warnings.join('\n')}` : '';

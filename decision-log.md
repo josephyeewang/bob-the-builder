@@ -535,15 +535,15 @@ The companion `audit-log.md` records *deferred* items (Defer verdicts that may s
   - About 40 method lines spoke of "Joe" as if they were the reader.
   - Several small findings:
     - one retro was linked from nowhere;
-    - five dated files had no snapshot note;
+    - five files the consistency check flagged as dated carried neither a snapshot note nor a living-doc marker;
     - the integration playbooks' numbers L1–L11 clashed with the audit lenses L01–L38;
     - the four history folders sat at the top level.
 - **Decision:**
-  - (1) **Five new checks**, each tied to a rule, tested in the self-test, and reached from the phase gate or CI:
+  - (1) **Five new checks**, each tied to a rule, tested in the self-test, and reached from the phase gate (items 13–15), the Supervised Autonomy runbook (its new step 0) or Bob's CI:
     - `scripts/phase-report-check.mjs` (Rule 4; Phase Gate 13). It refuses a phase report whose always-required sections are missing, empty, or still the template's placeholder text. It reads the section list from `templates/phase-report.md`, so that list keeps one home.
     - `scripts/run-commands-check.mjs` (Rule 26 and Engineering Principle 8b; Phase Gate 14). It refuses a package script, CI step or Makefile line that runs a missing file, or a Python file with no run block that only imports or defines.
-    - `scripts/autonomy-check.mjs` (Rule 27). It runs before a hands-off phase and checks the deny and ask rules, a green gate with a retry limit and a real test command, a reviewer that cannot edit, no ignored `defaultMode: "auto"`, and no production key in the settings.
-    - `scripts/recurrence-check.mjs` (Rule 31). It reads `Class:` and `Rung:` lines in fix commits and refuses a class fixed twice whose newest fix is below rung 3.
+    - `scripts/autonomy-check.mjs` (Rule 27; runbook step 0). It runs before a hands-off phase and checks the deny and ask rules, a green gate with a retry limit and a real test command, a reviewer that cannot edit, no ignored `defaultMode: "auto"`, and no production key in the settings.
+    - `scripts/recurrence-check.mjs` (Rule 31; Phase Gate 15). It reads `Class:` and `Rung:` lines in fix commits and refuses a class fixed twice whose newest fix is below rung 3.
     - `scripts/rule-tags-check.mjs` (Rule 33, in Bob's CI). Every rule the index tags as checked must name a script that exists and that CI or the self-test runs.
     - Each check exits 2 (cannot judge) rather than 0 when it has nothing to read (Rule 29).
     - A fresh review found nine serious problems in the first version, most of them false alarms on healthy projects. All were fixed and turned into self-tests before release:
@@ -552,6 +552,14 @@ The companion `audit-log.md` records *deferred* items (Defer verdicts that may s
       - the autonomy check ignores personal Stop hooks, accepts an overridable retry limit, refuses a reviewer with no tools line, and reports a project that was never set up as "cannot judge" rather than as six failures;
       - the recurrence check reads only real git trailers;
       - the rule-tags check needs a real call, not a mention in a comment, and compares the whole tag. It found that Rule 32 was tagged one way in `rules.md` and another in the index, and that was fixed.
+    - A second fresh review found eight more. They were fixed the same way, and again each became a self-test:
+      - the run-commands check now judges only a command that starts with an interpreter and a file it can read for sure, and skips the rest (monorepo filters, nested shells, files the same step writes, Windows paths, folders a checkout step fills);
+      - the phase-report check keeps sub-headings inside their section, accepts "N/A" in a heading, and reads the short-report list from the template;
+      - the autonomy check understands the hook quoting Claude Code's docs use, retry limits written in any language, and stricter deny rules;
+      - the recurrence check reads `Class:` / `Rung:` lines anywhere outside code blocks, so a Co-Authored-By line after them is fine;
+      - the rule-tags check matches a script's own path.
+
+      The review also showed that two tags claimed more than was wired, so the recurrence check became Phase Gate 15 and the autonomy check became step 0 of the Supervised Autonomy runbook.
     - The Supervised Autonomy setup text no longer tells users to set `defaultMode` to "auto" in the project file, which the runbook and the new check both say does nothing.
 
     The index now lists 24 rules as written-only, down from 28. Rule 22 (the pre-build gate) was not given a check here, because its text and the build manifest it would read are in the NEW mode, which the ORCHESTRATE session is rewriting.
@@ -565,7 +573,7 @@ The companion `audit-log.md` records *deferred* items (Defer verdicts that may s
   - A recurrence check that guesses the class from the commit wording. Rejected: it would raise false alarms, and Rule 31 says a check that cries wolf gets muted. It reads explicit lines instead, and says so when there are none.
   - Build a check for Rule 22 now. Deferred to the NEW-mode rewrite, for the reason above.
 - **Consequences:**
-  - The phase gate has 14 items.
+  - The phase gate has 15 items.
   - A project's fix commits need two short git trailer lines for the recurrence check to see them; the phase report's class-level scan section now says so. Without those lines it reports "cannot judge", never "clean".
   - The autonomy check reads only the project's own settings, because personal rules do not travel with the project. A user whose deny rules live only in their personal settings is told to add them to the project.
   - The run-commands check was calibrated before it shipped. Run across several real projects, it raised no false alarm once it learned to read each workflow step's own working folder; the first version flagged healthy commands in one of them. It catches both planted breaks in its test.
