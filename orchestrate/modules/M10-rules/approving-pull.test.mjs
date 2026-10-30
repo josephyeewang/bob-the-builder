@@ -4,8 +4,8 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, writeFileSync, mkdtempSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { tempDir } from '../../shared/test-tmp.mjs';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { makeReader, findApprovingPull, pullRequestVerifier, allowListVerifier, RULES_PATH } from './reader.mjs';
 import { fakeRepo } from './fixtures/fake-repo.mjs';
@@ -21,7 +21,7 @@ function setup() {
   r.main = m0;
   const alerts = [];
   const judged = [];
-  const reader = makeReader({ gh: r.gh, stateDir: mkdtempSync(join(tmpdir(), 'm10-pulls-')), products: [PRODUCT],
+  const reader = makeReader({ gh: r.gh, stateDir: tempDir('m10-pulls-'), products: [PRODUCT],
     alert: (a) => alerts.push(a), verifyApproved: pullRequestVerifier({ judge: (q) => { judged.push(q.pr); return true; } }) });
   return { r, m0, alerts, judged, reader };
 }
@@ -171,7 +171,7 @@ test('an older approved version brought back by a direct-pushed merge is not ado
 
 test('the stopgap allow-list only moves forward: an older pinned version pushed again is not adopted', async () => {
   const r = fakeRepo();
-  const dir = mkdtempSync(join(tmpdir(), 'm10-allow-'));
+  const dir = tempDir('m10-allow-');
   const a0 = r.commit([], { [RULES_PATH]: V3 });
   r.main = a0;
   const pin = (...shas) => writeFileSync(join(dir, 'approved-rules.json'), JSON.stringify({ 'sample-app': shas.map((c) => blobOn(r, c)) }));

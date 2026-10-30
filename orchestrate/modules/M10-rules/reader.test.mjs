@@ -2,8 +2,8 @@
 // keeps the last good version or denies (spec review 0b-1: MAT-1, MAT-3, MAT-4; round 2: R2-M1, R2-m4).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, writeFileSync, mkdtempSync, statSync, readdirSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { tempDir } from '../../shared/test-tmp.mjs';
+import { readFileSync, writeFileSync, statSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { makeReader, blobSha, readProducts, RULES_PATH, FETCH_GRACE_MS } from './reader.mjs';
@@ -39,7 +39,7 @@ function fakeGitHub() {
 }
 
 function setup({ approve = () => true, clock } = {}) {
-  const stateDir = mkdtempSync(join(tmpdir(), 'm10-reader-'));
+  const stateDir = tempDir('m10-reader-');
   const gh = fakeGitHub();
   const alerts = [];
   let t = 1_000_000;
@@ -86,7 +86,7 @@ test('the code never shells out or reads a local git copy (MAT-4, static check)'
 });
 
 test('a loosened local git copy changes nothing (MAT-4)', async () => {
-  const repo = mkdtempSync(join(tmpdir(), 'm10-local-'));
+  const repo = tempDir('m10-local-');
   execFileSync('git', ['init', '-q', repo]);
   execFileSync('mkdir', ['-p', join(repo, 'orchestrate')]);
   writeFileSync(join(repo, RULES_PATH), loose);
@@ -145,7 +145,7 @@ test("Joe's id comes from the last good rules, never the file being checked (R2-
 });
 
 test('with no allow-list, nothing is approved: a first load denies everything (R2-M1(d))', async () => {
-  const stateDir = mkdtempSync(join(tmpdir(), 'm10-reader-'));
+  const stateDir = tempDir('m10-reader-');
   const gh = fakeGitHub(); gh.commit(1, fixture);
   const alerts = [];
   const reader = makeReader({ gh, stateDir, products: [PRODUCT], alert: (a) => alerts.push(a) });
@@ -236,7 +236,7 @@ test('after a restart, the last good version is re-checked and used only after G
 test('an unknown product, and a malformed products list, deny', () => {
   const s = setup();
   assert.equal(s.reader.state('other-app').status, 'deny_all');
-  const dir = mkdtempSync(join(tmpdir(), 'm10-products-'));
+  const dir = tempDir('m10-products-');
   const f = join(dir, 'products.json');
   for (const bad of ['{}', '[{"product":"a"}]', '[{"product":"a","owner":"o","repo":"r"}]',
     '[{"product":"a/../b","owner":"o","repo":"r","joe_github_id":1}]',
@@ -249,7 +249,7 @@ test('an unknown product, and a malformed products list, deny', () => {
 });
 
 test('an alert sink that throws does not change the answer', async () => {
-  const stateDir = mkdtempSync(join(tmpdir(), 'm10-reader-'));
+  const stateDir = tempDir('m10-reader-');
   const gh = fakeGitHub(); gh.commit(1, fixture);
   const reader = makeReader({ gh, stateDir, products: [PRODUCT], verifyApproved: () => false, alert: () => { throw new Error('x'); } });
   await reader.refresh();

@@ -1,8 +1,8 @@
 // snapshot.test.mjs — the hook-time copy of the rules is refused whenever it can't be trusted (MAT-9, R2-M6).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, writeFileSync, chmodSync, statSync, unlinkSync, symlinkSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { tempDir } from '../../shared/test-tmp.mjs';
+import { readFileSync, writeFileSync, chmodSync, statSync, unlinkSync, symlinkSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { join } from 'node:path';
 import { publishSnapshot, readSnapshot, snapshotAnswer, SNAPSHOT_FILE, MAX_AGE_MS, MAX_FUTURE_MS } from './snapshot.mjs';
@@ -10,7 +10,7 @@ import { publishSnapshot, readSnapshot, snapshotAnswer, SNAPSHOT_FILE, MAX_AGE_M
 const T = Date.parse('2026-10-29T12:00:00Z');
 const body = () => ({ products: { 'sample-app': { status: 'ok', rules: { caps: { editing_per_mac: 5 } }, rev: 'aaaaaaa:bbbbbbb' },
   'off-app': { status: 'deny_all', rules: null, rev: null } }, mac: { editing_per_mac: 5 }, pin_ok: true });
-const fresh = () => { const d = mkdtempSync(join(tmpdir(), 'm10-snap-')); publishSnapshot(d, body(), T); return d; };
+const fresh = () => { const d = tempDir('m10-snap-'); publishSnapshot(d, body(), T); return d; };
 
 test('a fresh snapshot reads back exactly, mode 644', () => {
   const d = fresh();
@@ -44,7 +44,7 @@ test('missing, unreadable, wrong format, damaged, stale, future or loosely-permi
 function edit(d, fn) { const f = join(d, SNAPSHOT_FILE); const x = JSON.parse(readFileSync(f, 'utf8')); fn(x); writeFileSync(f, JSON.stringify(x), { mode: 0o644 }); }
 
 test('a deny_all product carries no rules, and anything else must carry rules and a version', () => {
-  const d = mkdtempSync(join(tmpdir(), 'm10-snap-'));
+  const d = tempDir('m10-snap-');
   assert.throws(() => publishSnapshot(d, { products: { a: { status: 'deny_all', rules: {}, rev: null } } }, T));
   assert.throws(() => publishSnapshot(d, { products: { a: { status: 'ok', rules: null, rev: 'x' } } }, T));
   assert.throws(() => publishSnapshot(d, { products: { a: { status: 'maybe', rules: {}, rev: 'x' } } }, T));
@@ -94,7 +94,7 @@ test('the snapshot answer equals the live answer for every rules status (R2-M6(d
     const live = makeRules(makeEngine({ products: ['sample-app'], productState: () => ({ state: 'active' }), running: () => 0,
       rulesState: () => (status === 'deny_all' ? { status, policy: null } : { status, policy, commit: C, blob: B }),
       rolesDir: new URL('./roles', import.meta.url).pathname, clock: () => T }));
-    const d = mkdtempSync(join(tmpdir(), 'm10-snap-'));
+    const d = tempDir('m10-snap-');
     publishSnapshot(d, { products: { 'sample-app': status === 'deny_all' ? { status, rules: null, rev: null } : { status, rules: policy, rev: 'x' } } }, T);
     const hook = snapshotAnswer(readSnapshot(d, T), 'write_production', { product: 'sample-app' });
     assert.equal(hook.decision, live.may('write_production', { product: 'sample-app' }).decision, status);

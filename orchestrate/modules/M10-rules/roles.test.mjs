@@ -3,9 +3,9 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, cpSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
+import { tempDir } from '../../shared/test-tmp.mjs';
+import { cpSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
 import { join, dirname } from 'node:path';
-import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { loadRoles, profileFor, TOOLS_CHECKED, NEVER_TOOLS, ROLE_FILES } from './roles.mjs';
 import { parsePolicy } from './policy.mjs';
@@ -29,7 +29,7 @@ const TABLE = {
 };
 
 function copyRoles() {
-  const dir = mkdtempSync(join(tmpdir(), 'roles-'));
+  const dir = tempDir('m10-roles-');
   cpSync(ROLES, dir, { recursive: true });
   return dir;
 }
@@ -38,7 +38,6 @@ function withEdit(role, edit) {
   const f = join(dir, `${role}.json`);
   writeFileSync(f, JSON.stringify(edit(JSON.parse(readFileSync(f, 'utf8')))));
   const r = loadRoles(dir, { pin: PIN });
-  rmSync(dir, { recursive: true });
   return r;
 }
 
@@ -70,7 +69,6 @@ test('the compaction kinds load (0b-2 R2-M9 pattern), and a banned key in the te
   const dir = copyRoles();
   writeFileSync(join(dir, 'scout.json'), readFileSync(join(dir, 'scout.json'), 'utf8').replace('{', '{"__proto__": {"tools": ["Agent"]},'));
   assert.match(loadRoles(dir, { pin: PIN }).reason, /banned key/);
-  rmSync(dir, { recursive: true });
 });
 
 test('a missing or extra role file is refused', () => {
@@ -80,7 +78,6 @@ test('a missing or extra role file is refused', () => {
   writeFileSync(join(dir, 'explore.json'), readFileSync(join(ROLES, 'explore.json')));
   writeFileSync(join(dir, 'learning.json'), '{}');
   assert.equal(loadRoles(dir, { pin: PIN }).ok, false);
-  rmSync(dir, { recursive: true });
 });
 
 test('the tool list expires with the Claude Code version it was checked against (R2-m8)', () => {
