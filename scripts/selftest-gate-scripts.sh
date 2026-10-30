@@ -886,6 +886,21 @@ mkdir -p "$T5/jobs/core"; git -C "$T5" mv jobs/report.py jobs/core/report.py
 expect "run-commands: a file moved to a sub-folder under the same name, named by bare name from an untouched workflow line -> REFUSED" 1 'ci.yml:7 still names jobs/report.py, which this change moved to jobs/core/report.py' -- node "$RC" "$T5"
 git -C "$T5" mv jobs/core/report.py jobs/report.py; git -C "$T5" rm -q pkg/cli/__init__.py
 expect "run-commands: a package __init__.py an entry point still names (pkg.cli:main) is deleted -> REFUSED" 1 'pyproject.toml:2 still names pkg/cli/__init__.py' -- node "$RC" "$T5"
+T6="$TMP/rc-r8"; newrepo "$T6"; mkdir -p "$T6/mypkg" "$T6/app" "$T6/.github/workflows"
+printf 'print(1)\n' > "$T6/test.py"; printf 'print(1)\n' > "$T6/build.py"; printf 'print(1)\n' > "$T6/worker.py"; printf 'print(1)\n' > "$T6/api.py"
+printf 'def main():\n    pass\n' > "$T6/mypkg/cli.py"; : > "$T6/mypkg/__init__.py"
+printf 'jobs:\n  test:\n    steps:\n      - run: python -m pytest\n      - run: python -m build\n' > "$T6/.github/workflows/ci.yml"
+printf 'services:\n  worker:\n    command: python worker.py\n' > "$T6/docker-compose.yml"
+printf '[project.scripts]\nmycli = "mypkg.cli:main"\n' > "$T6/pyproject.toml"
+printf 'FROM python\nCMD ["python", "api.py"]\n' > "$T6/Dockerfile.prod"
+git -C "$T6" add -A; git -C "$T6" commit -q -m base; git -C "$T6" checkout -q -b change
+git -C "$T6" rm -q test.py; git -C "$T6" mv worker.py app/worker.py; sed -i.bak 's#python worker.py#python app/worker.py#' "$T6/docker-compose.yml"; rm -f "$T6/docker-compose.yml.bak"
+mkdir -p "$T6/mypkg/cli"; git -C "$T6" mv mypkg/cli.py mypkg/cli/__init__.py
+expect "run-commands: YAML keys named like a script (test:, worker:), a module turned into a package -> OK" 0 "run-commands-check: OK" -- node "$RC" "$T6"
+git -C "$T6" rm -q api.py
+expect "run-commands: a Dockerfile.prod that still runs a deleted file -> REFUSED" 1 'Dockerfile.prod:2 still names api.py' -- node "$RC" "$T6"
+git -C "$T6" checkout -q HEAD -- api.py; git -C "$T6" rm -q build.py
+expect "run-commands: deleting a root build.py that \`python -m build\` ran (a local module shadows the tool) -> REFUSED" 1 'ci.yml:5 still names build.py' -- node "$RC" "$T6"
 expect "run-commands: --base with no commit -> cannot run (exit 2)" 2 "needs a commit" -- node "$RC" "$T3" --base
 expect "run-commands: an unknown base commit -> cannot run (exit 2)" 2 "cannot be found" -- node "$RC" "$RD" --base nope
 SH="$TMP/rc-shallow"; git clone -q --depth 1 "file://$RD" "$SH" 2>/dev/null; git -C "$SH" checkout -q --detach; git -C "$SH" branch -q -D main; git -C "$SH" remote remove origin
@@ -934,6 +949,8 @@ expect "recurrence: --since=DATE with nothing after it -> cannot judge (exit 2)"
 Q3="$TMP/rq3"; newrepo "$Q3"
 expect "recurrence: a repo with no commits -> says so (exit 2)" 2 "has no commits yet" -- node "$RQ" "$Q3"
 expect "recurrence: --since with no date -> cannot run (exit 2)" 2 "needs a date" -- node "$RQ" "$Q2" --since
+Q4="$TMP/rq4"; newrepo "$Q4"; git -C "$Q4" commit -q --allow-empty -m "docs" -m "Class: slow-read"
+expect "recurrence: Class: lines but no Rung: anywhere -> says so (exit 2)" 2 "none records a Rung: line" -- node "$RQ" "$Q4"
 expect "recurrence: not a git repo -> cannot run (exit 2)" 2 "not a git repository" -- node "$RQ" "$TMP/rc-none"
 
 # ── 21. rule-tags-check.mjs (D-033, Rule 33) ────────────────────────────────

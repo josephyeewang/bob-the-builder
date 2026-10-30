@@ -86,7 +86,7 @@ for (const [st, a, b] of changes) {
 
 // The run configs, as they are now, reduced to the lines that run things.
 const tracked = git('ls-files', '--cached', '--others', '--exclude-standard').split('\n').filter(Boolean);
-const CONFIG = /(^|\/)(package\.json|Makefile|makefile|GNUmakefile|Procfile|Dockerfile|docker-compose[\w.-]*\.ya?ml|compose\.ya?ml|\.gitlab-ci\.yml|vercel\.json|netlify\.toml|fly\.toml|pyproject\.toml|crontab|[\w.-]+\.cron)$/;
+const CONFIG = /(^|\/)(package\.json|Makefile|makefile|GNUmakefile|[\w.-]+\.mk|Procfile|Dockerfile[\w.-]*|[\w.-]+\.Dockerfile|docker-compose[\w.-]*\.ya?ml|compose[\w.-]*\.ya?ml|\.gitlab-ci\.yml|vercel\.json|netlify\.toml|fly\.toml|pyproject\.toml|crontab|[\w.-]+\.cron)$/;
 const stripComment = (l) => (/^\s*#/.test(l) ? '' : l.replace(/\s#.*$/, ''));
 function runLines(f, text) {
   const base = path.basename(f);
@@ -123,7 +123,7 @@ function runLines(f, text) {
     return filter >= 0 ? [] : [[i + 1, stripComment(l)]];
   });
 }
-const configs = tracked.filter((f) => (CONFIG.test(f) && !f.includes('node_modules/')) || /^\.github\/workflows\/[^/]+\.ya?ml$/.test(f))
+const configs = tracked.filter((f) => (CONFIG.test(f) && !f.includes('node_modules/')) || /^\.github\/(workflows\/[^/]+|actions\/.+\/action)\.ya?ml$/.test(f))
   .filter((f) => fs.existsSync(path.join(ROOT, f)))
   .map((f) => ({ f, lines: runLines(f, fs.readFileSync(path.join(ROOT, f), 'utf8')) }));
 const existing = tracked.filter((f) => fs.existsSync(path.join(ROOT, f)));
@@ -138,6 +138,7 @@ function baseLines(f) {
   }
   return baseCache.get(f);
 }
+const providedModules = new Set(existing.flatMap((f) => moduleOf(f)));
 const esc = (x) => x.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 // The Python module a file is run as: pkg/job.py → pkg.job, src/pkg/job.py → pkg.job, pkg/__main__.py and
 // pkg/__init__.py → pkg.
@@ -171,7 +172,8 @@ const TOKEN = /[^\s"'=(),;:`[\]{}]+/g;
 // `uvicorn app.main:app`, `pytest tests/x.py` or a pyproject entry point import the file; they never needed the block.
 function mentions(p, asScript = false, movedTo = null) {
   const hits = [];
-  const mods = moduleOf(p);
+  // A module some existing file still provides (pkg/cli.py → pkg/cli/__init__.py keeps "pkg.cli") is not gone.
+  const mods = moduleOf(p).filter((mod) => asScript || !providedModules.has(mod));
   for (const { f, lines } of configs) {
     if (asScript && path.basename(f) === 'pyproject.toml') continue;
     const unchanged = baseLines(f);
@@ -179,18 +181,21 @@ function mentions(p, asScript = false, movedTo = null) {
       let hit = false;
       for (const m of l.matchAll(TOKEN)) {
         if (!means(m[0], p, f, movedTo)) continue;
-        // A bare name that is also the moved file's own name is ambiguous: `working-directory: scripts` + `./build.sh`
-        // after build.sh → scripts/build.sh names the new file; `python report.py` from jobs/ after jobs/report.py →
-        // jobs/core/report.py is now broken. The line tells them apart: one this change wrote was pointed at the new
-        // place on purpose; one it left untouched still points where the file used to be.
+        // A bare name that is also the moved file's own name is ambiguous: after build.sh → scripts/build.sh, a line
+        // `./build.sh` may now run from `working-directory: scripts` (fine), and after jobs/report.py →
+        // jobs/core/report.py, `python report.py` from jobs/ is broken. The line decides: one this change rewrote was
+        // pointed at the new place on purpose; one it left untouched is counted — even if only its step's folder changed,
+        // so in that case also touch the line (or name the path).
         const w = m[0].replace(/^\.\//, '');
         if (movedTo && !w.includes('/') && (movedTo === w || movedTo.endsWith(`/${w}`)) && !unchanged.has(l.trim())) continue;
         const before = l.slice(0, m.index);
         if (!asScript || m[0].startsWith('./') || /(?:(?:^|[\s"'(/])(?:python[\d.]*|uv run(?: python[\d.]*)?|poetry run python[\d.]*)|\$[({]?PYTHON\w*[)}]?)(?:\s+-(?!m\b)[\w-]+(?:\s+[^\s"'-]\S*)?)*\s+["']?$/.test(before)) { hit = true; break; }
       }
       if (!hit && mods.length) {
-        const modRun = new RegExp(`-m\\s+["']?(?:${mods.map(esc).join('|')})(?=$|[\\s"'])`);
-        const modRef = new RegExp(`(?:^\\s*[\\w-]+\\s*=\\s*["']|["'\\s])(?:${mods.map(esc).join('|')}):`);
+        // `python -m pkg.job` (not `pytest -m marker`), and `pkg.job:main` / `app.main:app` — a colon followed by a name,
+        // so a YAML key (`  worker:`, `run: …`) is not mistaken for a module.
+        const modRun = new RegExp(`(?:python[\\d.]*|\\$[({]?PYTHON\\w*[)}]?)(?:\\s+-(?!m\\b)[\\w-]+)*\\s+-m\\s+["']?(?:${mods.map(esc).join('|')})(?=$|[\\s"'])`);
+        const modRef = new RegExp(`(?:^\\s*[\\w-]+\\s*=\\s*["']|["'\\s])(?:${mods.map(esc).join('|')}):(?=[A-Za-z_])`);
         hit = modRun.test(l) || (!asScript && modRef.test(l));
       }
       if (hit) hits.push(`${f}:${at}`);
@@ -209,6 +214,7 @@ for (const [oldPath, newPath] of modifiedPy) {
   try { before = git('show', `${base}:${oldPath}`); } catch { continue; }
   const now = fs.existsSync(path.join(ROOT, newPath)) ? fs.readFileSync(path.join(ROOT, newPath), 'utf8') : '';
   if (newPath.endsWith('__main__.py') || !hasMain(before) || hasMain(now)) continue;
+  if (newPath.endsWith('/__init__.py') && fs.existsSync(path.join(ROOT, path.dirname(newPath), '__main__.py'))) continue; // python -m pkg runs __main__.py
   for (const where of new Set([...mentions(newPath, true), ...(oldPath !== newPath ? mentions(oldPath, true) : [])]))
     problems.push(`${where} names ${newPath}, which lost its \`if __name__ == "__main__":\` block in this change — run as a script it would import cleanly, exit 0 and do nothing`);
 }

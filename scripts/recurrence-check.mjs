@@ -79,6 +79,7 @@ for (const rec of log.split('\x1e')) {
 }
 
 const note = mentionsOnly.length ? `\n  ⚠ ${mentionsOnly.length} commit(s) name a class with no Rung: line, so they were not counted as fixes: ${mentionsOnly.slice(0, 3).join('; ')}${mentionsOnly.length > 3 ? ' …' : ''}` : '';
+if (!byClass.size && mentionsOnly.length) cannot(`${mentionsOnly.length} commit(s) name a class, but none records a Rung: line, so none counts as a fix and recurrence cannot be judged.${note}`);
 if (!byClass.size) cannot(`no commit in ${DIR}${since ? ` since ${since}` : ''} carries a "Class:" line yet, so recurrence cannot be judged. Add "Class: <name>" and "Rung: <1-4>" to fix commits.`);
 
 const problems = [];
