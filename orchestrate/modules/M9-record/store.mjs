@@ -27,8 +27,9 @@ import { dirname, isAbsolute, join } from 'node:path';
 import { makeLock, processDead, realProbe, sleepMs } from './lock.mjs';
 
 export const FAULT_POINTS = Object.freeze(['locked', 'temp_written', 'diary_torn', 'diary_written', 'renamed', 'dir_synced', 'released']);
-// Test faults that don't kill the process: a failed append, a short write, and a line that reads back wrong.
-const TEST_FAULTS = Object.freeze(['append_fails', 'short_write', 'readback_wrong']);
+// Test faults that don't kill the process: a failed append, a short write, a line that reads back wrong, and a document
+// copy that can't be put in place after the commit point (a portable stand-in for a locked file or a full disk).
+const TEST_FAULTS = Object.freeze(['append_fails', 'short_write', 'readback_wrong', 'rename_fails']);
 // Not a kill: `append_fails` makes the diary append fail partway (a full disk), for the cut-back test.
 
 const SAFE_ID = /^[A-Za-z0-9._-]+$/;
@@ -405,6 +406,7 @@ export function openStore({ root, ownerUid, alert = () => {}, now = () => Date.n
           // Past the commit point the write stands: the diary line is the truth. A document copy that can't be put in place
           // (a locked file, a full disk) is alerted and left to the next recover(), never reported as a refused write (round 9 M7).
           try {
+            if (faultAt === 'rename_fails') throw Object.assign(new Error('test: the rename failed'), { code: 'EIO' });
             out.forEach((o, i) => renameSync(temps[i], docPath(o.entity, o.id)));
             fault('renamed');
             for (const ent of new Set(out.map((o) => o.entity))) fsyncPath(join(P.docs, ent));

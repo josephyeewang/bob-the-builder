@@ -324,15 +324,15 @@ test('a link, FIFO or wrong kind of thing in place of any store name stops the s
 test('a document copy that can\'t be put in place after the commit point: the write stands and is alerted, not reported refused (round 9 M7)', () => {
   const env = setup({ prefix: 'm9-store-' });
   seed(env, 'card', 'C-0', card());
-  const doc = join(env.root, 'docs', 'card', 'C-0.json');
-  execFileSync('chflags', ['uchg', doc]);
-  try {
-    const before = env.record.diary().length;
-    must(cancel(env.record), 'the write stands');
-    assert.equal(env.record.diary().length, before + 1);
-    assert.ok(env.alerts.some((a) => a.type === 'doc_copy_failed'));
-    assert.equal(readFileSync(join(env.root, 'refusals.jsonl'), 'utf8'), '', 'not logged as a refusal');
-  } finally { execFileSync('chflags', ['nouchg', doc]); }
+  // A test fault, not chflags or chmod: chflags is Mac-only (CI is Linux) and the store resets folder modes itself.
+  const alerts = [];
+  const broken = openRecord({ root: env.root, product: PRODUCT, ownerUid: UID, rules: env.rules, alert: (a) => alerts.push(a), now: () => env.clock.t, faultAt: 'rename_fails' }).record;
+  const before = broken.diary().length;
+  must(cancel(broken), 'the write stands');
+  assert.equal(broken.diary().length, before + 1);
+  assert.ok(alerts.some((a) => a.type === 'doc_copy_failed'));
+  assert.equal(readFileSync(join(env.root, 'refusals.jsonl'), 'utf8'), '', 'not logged as a refusal');
+  assert.equal(reopen(env).record.read('card', 'C-0').doc.state, 'cancelled', 'the next writer rolls the copy forward from the diary');
 });
 
 test('an indexed document replaced by a link to an identical outside copy is never read through (round 9 m4)', () => {
