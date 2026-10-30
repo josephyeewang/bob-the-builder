@@ -131,7 +131,7 @@ export function folderWrites(c) {
 }
 
 // `~`, `$HOME` and `$PWD` at the front of a word, as the shell expands them (the class rule lets only these through).
-// The word splitter breaks at `$`, so the line is rewritten first: `$HOME` becomes the home folder and `$PWD` a
+// The line is rewritten before it is split: `$HOME` becomes the home folder and `$PWD` a
 // mark that stands for every folder the command may be in by then.
 const PWD_MARK = '@pwd@';
 const spellOut = (cmd, home) => cmd.replace(/\$(\{HOME\}|HOME(?![A-Za-z0-9_]))/g, home).replace(/\$(\{PWD\}|PWD(?![A-Za-z0-9_]))/g, PWD_MARK);

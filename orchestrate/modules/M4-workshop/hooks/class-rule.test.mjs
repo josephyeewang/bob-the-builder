@@ -521,3 +521,25 @@ test('L46: ordinary work passes, links and tar folders are judged on disk, shell
   // git's -C values add up as tar's do.
   assert.deepEqual(prodGuard.folderWrites(['git', '-C', 'a', '-C', '../b', 'clean', '-fdx']).targets, ['.', 'a', 'a/../b']);
 });
+// Round 4 confirm audit (L46): real commands read as here-document text, and an unquoted $HOME refused.
+test('L46 round 4: a control character, a comment after a line-break, a here-string; and $HOME unquoted', () => {
+  const w = world();
+  const W = w.work;
+  const pass1 = (c) => passed(prodGuard.decide(bash(c, W), w.args), `production: ${c}`);
+  const both = (c) => { blocked(prodGuard.decide(bash(c, W), w.args), c); blocked(merge.decide(bash(c.replace(`rm -rf ${W}`, 'git push origin HEAD:main'), W)), c); };
+  for (const cc of ['\r', '\v', '\f', '\x1b']) both(`cat <<EOF${cc}\nhi\nEOF${cc}\nrm -rf ${W}\n`);
+  both(`echo a \\\n# <<EOF\nrm -rf ${W}\nEOF`);
+  both(`cat <<<hi\nrm -rf ${W}\nhi`);
+  // Not a comment: `a\` + `#` is the word a#, so the here-document is real and the rm line is its text.
+  pass1(`echo a\\\n# <<EOF\nrm -rf ${W}\nEOF`);
+  for (const c of ['ls $HOME/projects', 'cd $HOME/code && git status', 'cat $PWD/package.json', 'npm test; echo $?', 'npm test || echo failed $?', 'echo ${HOME}',
+    "jq . <<< '{\"a\":1}'", "wc -w <<< 'hello world'", "cat > Dockerfile <<'EOF'\nRUN apt-get update && \\\n  apt-get install -y x\nEOF"]) {
+    pass1(c);
+    passed(secret.decide(bash(c, W), w.args), c);
+    passed(merge.decide(bash(c, W)), c);
+    passed(noVerify.decide(bash(c, W)), c);
+  }
+  for (const c of ['$HOME/bin/x', '$USER', `rm -rf $PWD`, `rm -rf \${PWD}`, `cat > D <<EOF\nRUN a && \\\nEOF\nrm -rf ${W}\nEOF`]) blocked(prodGuard.decide(bash(c, W), w.args), c);
+  assert.match(prodGuard.decide(bash("git commit -m \"$(cat <<'EOF'\nx\nEOF\n)\"", W), w.args).reason, /git commit -F -/);
+});
+

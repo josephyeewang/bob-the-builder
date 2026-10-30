@@ -146,6 +146,9 @@ export function heredocs(cmd) {
   let q = null;
   let wordStart = true;
   const refuse = (why) => ({ text: s, bodies, why });
+  // The shell keeps a carriage return, form feed or other control character inside a word, where the guard's
+  // reading could end it: refused whole (round 4 MAT-1).
+  if (/[\x00-\x08\x0b-\x1f\x7f]/.test(s)) return refuse('a control character (a carriage return, form feed, …) in the line');
   for (let i = 0; i < s.length;) {
     const ch = s[i];
     if (q) {
@@ -155,6 +158,9 @@ export function heredocs(cmd) {
       i += 1;
       continue;
     }
+    // A backslash line-break joins two lines and leaves the word state as it was (round 4 MAT-2: `a \\` then `# <<X`
+    // is a comment).
+    if (ch === '\\' && s[i + 1] === '\n') { out += '\\\n'; i += 2; continue; }
     if (ch === '\\' && i + 1 < s.length) { out += ch + s[i + 1]; i += 2; wordStart = false; continue; }
     if (ch === "'" || ch === '"') { q = ch; out += ch; i += 1; wordStart = false; continue; }
     if (ch === '#' && wordStart) {
@@ -165,7 +171,9 @@ export function heredocs(cmd) {
       i = stop;
       continue;
     }
-    if (ch === '<' && s[i + 1] === '<' && s[i + 2] !== '<') {
+    // `<<<word` is a here-string: one word, no body (round 4 MAT-3).
+    if (ch === '<' && s[i + 1] === '<' && s[i + 2] === '<') { out += '<<<'; i += 3; wordStart = true; continue; }
+    if (ch === '<' && s[i + 1] === '<') {
       let k = i + 2;
       const dash = s[k] === '-';
       if (dash) k += 1;
@@ -200,7 +208,8 @@ export function heredocs(cmd) {
           if ((h.dash ? line.replace(/^\t+/, '') : line) === h.delim) break;
           lines.push(line);
         }
-        if (lines.some((l) => l.endsWith('\\'))) return refuse('a here-document line ending in a backslash');
+        // With a quoted end word the shell joins no body lines, so the end is where the guard reads it (round 4 Minor).
+        if (!h.quoted && lines.some((l) => l.endsWith('\\'))) return refuse('a here-document line ending in a backslash (quote the end word: <<\'EOF\')');
         bodies.push({ text: lines.join('\n'), quoted: h.quoted });
       }
       pending.length = 0;
@@ -243,6 +252,8 @@ export function shellWords(cmd, { groups = false } = {}) {
     if (ch === ')' && group) { group -= 1; continue; }
     if (ch === '|' && group) { cur += GROUP_CHOICE; continue; }
     // Only the blanks bash splits on: an odd space (U+00A0) stays inside the word, as in bash.
+    // `$NAME`, `${NAME}`, `$?` stay inside their word, as the shell reads them (round 4 MAT-4); only `$(` breaks it.
+    if (ch === '$' && cmd[i + 1] !== '(') { cur += ch; continue; }
     if (BLANK.test(ch) || ';&|()<>`$'.includes(ch)) { if (cur) words.push(cur); cur = ''; if (!BLANK.test(ch)) words.push(ch); continue; }
     cur += ch;
   }
@@ -353,7 +364,7 @@ export function expansionIn(cmd) {
     if (ch === '`') return 'a backtick substitution';
     if (ch !== '$') continue;
     const next = c[i + 1] ?? '';
-    if (next === '(') return 'a $( ) substitution';
+    if (next === '(') return 'a $( ) substitution (for a commit message, use git commit -F - <<\'EOF\')';
     if (next === "'" || next === '"') return 'an escape-built word ($\'…\')';
     let name;
     if (next === '{') { const end = c.indexOf('}', i); name = end < 0 ? '' : c.slice(i + 2, end); i = end < 0 ? c.length : end; }
@@ -529,6 +540,7 @@ export function unreadable(cmd) {
     if (word0 === 'function') return 'a function definition';
     if (SHELL_OPTIONS.includes(prog)) return `"${prog}" changes how the shell reads the line`;
     if (prog === 'set' && !plainSet(words)) return '"set" changing a shell option other than -e, -u, -x, -v or -o pipefail';
+    if (word0.includes('$')) return 'a command name taken from a variable';
     if (!['[', '[['].includes(word0) && /[*?[\]{}]/.test(word0)) return 'a command name with a pattern in it';
     if (word0.includes('/') && !SYSTEM_BIN.includes(word0.slice(0, word0.lastIndexOf('/')))) return `"${word0}" runs a file by its path`;
     if (prog === 'find' && words.some((w) => /^-(exec|execdir|ok|okdir)$/.test(w))) return 'find -exec runs commands the guard can\'t see';
