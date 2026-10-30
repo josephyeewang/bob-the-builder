@@ -396,3 +396,19 @@ test('real rules: a clean docs change with a Tier-2 go merges, recorded and mark
   const nj = await readNeedsJoe({ gh: w.g.gh, owner: 'sample-org', repo: 'sample-app', sha: m.doc.merge_commit, robotBotId: w.g.robotId });
   assert.equal(nj.tier, 2);
 });
+
+// Audit round 4, Material: the rules file gives an ignored check's app id as text ("777"); the gate still ignores it,
+// on the change's head and on main.
+test('an ignored check named in the rules with a text app id is ignored, on the head and on main', async () => {
+  const w = world({ values: { 'product_profile.checks_ignored': [{ app_id: '777', name: 'preview' }] } });
+  const head = verifiedCard(w);
+  const red = (sha) => [
+    { name: 'test', app: { id: 1 }, head_sha: sha, status: 'completed', conclusion: 'success' },
+    { name: 'preview', app: { id: 777 }, head_sha: sha, status: 'completed', conclusion: 'failure' },
+  ];
+  w.g.checks.set(head, red(head));
+  w.g.checks.set(w.g.main, red(w.g.main));
+  await gatePass(w.ctx);
+  const m = mergeOf(w);
+  assert.equal(m.doc.state, 'merged', JSON.stringify(m.doc.reasons));
+});

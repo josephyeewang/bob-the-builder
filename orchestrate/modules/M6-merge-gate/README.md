@@ -39,7 +39,7 @@ See LANES.md for who builds this folder, and the build rows (0b-9, R-0b-86..99) 
 ## What the tests cover, and what they don't
 
 - **GitHub is faked.** `fixtures/fake-gate-github.mjs` follows the REST shapes (API version 2022-11-28, checked 30 Oct 2026); the real API is not called.
-- **The planted tests use M10's real engine on its sample policy**, at both cutovers. The push script's half of R-0b-98 is lane 2's (R-0b-45).
+- **The planted tests and one clean docs merge use M10's real engine on its sample policy**, at both cutovers. The rules values those tests read (`rules.get`) still come from the test world, not from a parsed policy file, so a value's shape on the real reader (every value is text) is covered only where a test feeds text, as the ignored-check test does. The push script's half of R-0b-98 is lane 2's (R-0b-45).
 
 ## Not built here (logged)
 
@@ -48,6 +48,7 @@ See LANES.md for who builds this folder, and the build rows (0b-9, R-0b-86..99) 
 - **Built, proof pending:** R-0b-86, 92, 93, 94, 95 and 96 pass against the fake GitHub only. Each needs one run against a real test repository (the robot, the mark, the build-skip command on the deploy host) before it counts as done.
 - **Known small gaps (audit round 1, minor):** an undo trusts GitHub's merge commit without checking its parents; an older, untaken merge request for the same card can be taken later; a merge found left in `checking` is refused rather than judged again; `catching_up` has no time limit (it steps aside, so it doesn't block the queue); each judge asks GitHub once per recorded Tier-1 merge (fine at today's volume); the build-skip command leaves its temp folder behind; a catch-up can write to a branch the gate then refuses; putting a card back turns `approved` into `verified`; a catch-up counts any change of head as caught up. (Round 3:) a change still waiting on GitHub's catch-up commit steps aside and can be overtaken until it reaches the catch-up limit; if the mark posts but the needs-joe status keeps failing, each pass re-posts the mark, and at 100 statuses on one commit the readers give up; a mark that can never post raises the same alert every pass.
 - **A parent moved under a merge** (r3-m1) raises an alert with "Undo?" for the owner; the change is not re-judged at the real parent.
+- **An undo card must be declared Tier 2** to pass the first-cutover docs lane; the Dispatcher sets that tier (lane 2).
 - **The Lead's fix card and telling the owner** when an undo can't be reversed cleanly are lane 2's.
 - **Tab claim** on the gate's pass is not checked here.
 - **The build-skip command's length** against the deploy host's field limit is not verified.
@@ -64,3 +65,6 @@ See LANES.md for who builds this folder, and the build rows (0b-9, R-0b-86..99) 
 - Paste the build-skip command into the deploy host's project settings.
 - Create the robot (GitHub App), install it, and put its key in the orchestrate key folder (set up with `/apikeys`; the key is never read by a session).
 - Put the robot's numeric bot id in the rules (`product_profile.robot.bot_user_id`).
+- Name the required checks in the rules (`product_profile.required_checks`); with none, every change is refused (1, 2).
+- Allow undo cards without a go (`approvals.plan_go.go_free: [exact_reverse]`); without it every undo is refused (10).
+- Set M2's `approvals.push_windows` and `approvals.decisions_dir`; no Approve stands without them.

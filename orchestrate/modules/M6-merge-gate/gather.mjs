@@ -136,7 +136,9 @@ export async function gatherFacts(ctx, merge) {
   const head = SHA.test(f.pr?.head?.sha ?? '') ? f.pr.head.sha : null;
   const mainSha = await attempt(async () => { const s = (await json(gh, `${base}/git/ref/heads/main`)).object?.sha; if (!SHA.test(s ?? '')) throw new Error('no main'); return s; });
   f.requiredChecks = Array.isArray(get('product_profile.required_checks')) ? get('product_profile.required_checks') : null;
-  f.checksIgnored = Array.isArray(get('product_profile.checks_ignored')) ? get('product_profile.checks_ignored') : [];
+  // The rules file gives every value as text: an app id is turned into a number here, once, as botId does.
+  const ignoredRaw = get('product_profile.checks_ignored');
+  f.checksIgnored = Array.isArray(ignoredRaw) ? ignoredRaw.map((x) => ({ app_id: botId({ bot_user_id: x?.app_id }), name: x?.name })) : [];
   f.main = { sha: mainSha, green: mainSha && f.requiredChecks ? await attempt(() => mainGreen(gh, base, mainSha, f.requiredChecks, f.checksIgnored)) : null };
   f.checks = head ? await attempt(() => checksAt(gh, base, head)) : null;
   f.statuses = head ? await attempt(() => statusesAt(gh, base, head)) : null;
