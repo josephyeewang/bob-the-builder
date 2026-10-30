@@ -60,6 +60,10 @@ test('protocol: exit 2 and a JSON deny both count as refused; a crash or a hang 
     assert.equal(askHook(`"${node}" "${fx('naive-hook.mjs')}" '${T}'`, c), naive(c), c);
   }
   assert.equal(askHook(`"${node}" "${fx('odd-hooks.mjs')}" json-deny`, 'cat x'), 'refuse');
+  // Round 10 audit 4 minor 2: a deny without hookEventName may be ignored by Claude Code, so it is no pass either way.
+  assert.equal(askHook(`"${node}" "${fx('odd-hooks.mjs')}" json-deny-bare`, 'cat x'), 'crash');
+  // Round 10 audit 4 minor 1: the spawned stand-in allows every allow case, as its in-process copy does.
+  for (const c of cases(T).filter((x) => x.expect === 'allow')) assert.equal(askHook(`"${node}" "${fx('strict-hook.mjs')}"`, c.command, { cwd: c.cwd }), 'allow', c.command);
   assert.equal(askHook(`"${node}" "${fx('odd-hooks.mjs')}" crash`, 'cat x'), 'crash');
   assert.equal(askHook(`"${node}" "${fx('odd-hooks.mjs')}" hang`, 'cat x', { timeoutMs: 300 }), 'crash');
   assert.equal(askHook(`"${node}" "${fx('odd-hooks.mjs')}" allow-all`, 'cat x'), 'allow');
@@ -110,7 +114,7 @@ test('round 10: the ansi-c form reaches the command intact (a string replacement
 
 // Every refuse case must really read or write the planted file under bash or zsh, in both runs the README names, and
 // the dead list must hold exactly the template and form pairs that touch nothing. Checked on two names, so the list
-// does not hang on one name's letters (round 10 audit 2 M-2). ~4,000 shell runs, about 35 s.
+// does not hang on one name's letters (round 10 audit 2 M-2). ~7,000 shell runs, about 70 s.
 // corpus.dead is for a Mac; on a machine without zsh, or whose sh is dash (Linux CI), runner.mjs's hostDead drops the
 // pairs that touch nothing there, and they are left out of both sides here (round 10 audit 3 M-4).
 test('round 10: every refuse case touches the file, and corpus.dead is exactly the pairs that do not, on two names', () => {
@@ -159,4 +163,32 @@ test('round 10 audit 3 M-3: the hook runs from one folder with CLAUDE_PROJECT_DI
   assert.equal(askHook(where, 'ls', { cwd: elsewhere, hookCwd: home, projectDir: elsewhere }), 'refuse');
   const seen = `"${node}" -e "const j=JSON.parse(require('fs').readFileSync(0,'utf8')); process.exit(j.cwd==='${elsewhere}'&&j.session_id&&j.tool_use_id ? 0 : 2)"`;
   assert.equal(askHook(seen, 'ls', { cwd: elsewhere, hookCwd: home }), 'allow');
+});
+
+// Round 10 audit 4 M-1: a guard that undoes quotes, backslashes, globs and every $( ` $' still misses the file split by
+// an unset variable and the whole-folder reads.
+test('round 10 audit 4 M-1: a guard that undoes quoting and globs and refuses $( fails (empty variable, whole folder)', () => {
+  for (const name of [T, 'secret.prod']) {
+    const glob = (w) => new RegExp(`^${w.replace(/[.+^${}()|\\]/g, '\\$&').replace(/\*/g, '.*').replace(/\?/g, '.')}$`);
+    const guard = (c) => {
+      if (/\$\(|`|\$'/.test(c)) return 'refuse';
+      if (c.replace(/["'\\]/g, '').includes(name)) return 'refuse';
+      return c.split(/[\s;&|()<>'"=]+/).some((w) => /[*?[]/.test(w) && !w.includes('[') && glob(w.split('/').pop()).test(name)) ? 'refuse' : 'allow';
+    };
+    const missed = runCorpus(guard, { target: name }).failures.filter((f) => f.expect === 'refuse');
+    for (const g of ['folder']) assert.ok(missed.some((f) => f.group === g), `${name}: ${g}`);
+    assert.ok(missed.some((f) => f.form === 'empty-var'), `${name}: empty-var`);
+  }
+});
+
+// Round 10 audit 4 M-2: a guard that ignores cd, and refuses everything asked from outside the run folder, used to pass.
+test('round 10 audit 4 M-2: a cd-blind guard that refuses whatever is asked from elsewhere fails, top-level or in a subfolder', () => {
+  const root = tmp();
+  for (const target of [T, `apps/web/${T}`]) {
+    const file = resolve(root, target);
+    const guard = (c, cwd) => (cwd !== root || c.split(/[\s;&|()<>'"]+/).some((w) => w && resolve(cwd, w) === file) ? 'refuse' : 'allow');
+    const { failures } = runCorpus(guard, { target, cwd: root });
+    assert.ok(failures.some((f) => f.expect === 'refuse' && ['after-cd-here', 'cd-up'].includes(f.group)), `${target}: a cd case it allows`);
+    assert.ok(failures.some((f) => f.group === 'allow-elsewhere'), `${target}: ordinary commands asked from elsewhere`);
+  }
 });

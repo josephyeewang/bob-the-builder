@@ -47,6 +47,8 @@ export function pathForms(target, cwd, { absolute = true } = {}) {
     'double-quoted': `"${target}"`,
     'split-quotes': `${dir}${base.slice(0, mid)}"${base.slice(mid)}"`,
     'empty-quotes': `${dir}${base.slice(0, mid)}''${base.slice(mid)}`,
+    // An unset variable splits the name with no quote or backslash (round 10 audit 4 M-1).
+    'empty-var': `${dir}${base.slice(0, mid)}${'${_sg_unset}'}${base.slice(mid)}`,
     'early-quotes': `${dir}${base.slice(0, early)}''${base.slice(early)}`,
     'late-quotes': `${dir}${base.slice(0, late)}''${base.slice(late)}`,
     ...(safe(mid) ? { backslash: `${dir}${base.slice(0, mid)}\\${base.slice(mid)}` } : {}),
@@ -69,7 +71,7 @@ export function pathForms(target, cwd, { absolute = true } = {}) {
 
 // A function replacement, never a string: a string replacement reads `$'` (the ansi-c form) as "the text after the
 // match", which garbled every ansi-c case until 0b-7 round 10.
-const fill = (tpl, vals) => tpl.replace(/\{\{(P|DIR|BASE)\}\}/g, (_, k) => vals[k]);
+const fill = (tpl, vals) => tpl.replace(/\{\{(P|DIR|BASE|UP)\}\}/g, (_, k) => vals[k]);
 
 // The path forms and folders are put into commands unquoted, so a path with a space or a shell character would make
 // cases that touch nothing, and no precise guard could pass them (0b-7 round 10 M-2): refuse to run instead.
@@ -85,7 +87,7 @@ export function checkPath(p) {
 // (0b-7 round 10). corpus.dead is for a Mac (bash, zsh, and an sh that reads $'…'). hostDead adds the pairs that touch
 // nothing on this machine because a shell is missing: without zsh a brace after ">" is an error, and dash (Linux's sh)
 // does not read $'…' (round 10 audit 3 M-4).
-const SH_ANSI_C = spawnSync('/bin/sh', ['-c', "printf %s $'\\x41'"], { encoding: 'utf8' }).stdout === 'A';
+const SH_ANSI_C = spawnSync('sh', ['-c', "printf %s $'\\x41'"], { encoding: 'utf8' }).stdout === 'A';
 export const hostDead = (tpl, form) => (form === 'brace' && !existsSync('/bin/zsh') && /> ?\{\{(P|BASE)\}\}/.test(tpl))
   || (form === 'ansi-c' && !SH_ANSI_C && tpl.startsWith('sh -c'));
 const live = (tpl, form) => !(corpus.dead[tpl] ?? []).includes(form) && !hostDead(tpl, form);
@@ -98,13 +100,28 @@ export function cases(target, cwd = process.cwd()) {
   for (const [group, list] of Object.entries(corpus.refuse)) {
     for (const tpl of list) for (const [form, p] of Object.entries(forms)) if (live(tpl, form)) out.push({ expect: 'refuse', group, form, tpl, command: fill(tpl, { P: p }) });
   }
+  // Whole-folder reads and writes: no form of the name appears at all (round 10 audit 4 M-1).
+  const dir = dirname(abs); const up = dirname(dir);
+  for (const tpl of corpus.refuse_folder) if (live(tpl, '-')) out.push({ expect: 'refuse', group: 'folder', form: '-', tpl, command: fill(tpl, { DIR: dir }) });
   // Change folder first, then name the file by its short name (in each form). Asked from the folder above, so a guard
-  // that ignores the cd and reads the short name from its own folder misses it (0b-7 round 10 M-1).
-  const up = dirname(dirname(abs));
+  // that ignores the cd and reads the short name from its own folder misses it (0b-7 round 10 M-1); and from the run
+  // folder, with a step up asked from the file's own folder, so a guard that refuses every case asked from elsewhere
+  // still has to follow the cd (round 10 audit 4 M-2).
+  const short = Object.entries(pathForms(basename(abs), dir, { absolute: false }));
   for (const tpl of corpus.refuse_after_cd) {
-    for (const [form, p] of Object.entries(pathForms(basename(abs), dirname(abs), { absolute: false }))) if (live(tpl, form)) out.push({ expect: 'refuse', group: 'after-cd', form, tpl, cwd: up, command: fill(tpl, { DIR: dirname(abs), BASE: p }) });
+    for (const [form, p] of short) {
+      if (!live(tpl, form)) continue;
+      out.push({ expect: 'refuse', group: 'after-cd', form, tpl, cwd: up, command: fill(tpl, { DIR: dir, BASE: p }) });
+      out.push({ expect: 'refuse', group: 'after-cd-here', form, tpl, cwd, command: fill(tpl, { DIR: dir, BASE: p }) });
+    }
+  }
+  for (const tpl of corpus.refuse_cd_up) {
+    for (const [form, p] of short) if (live(tpl, form)) out.push({ expect: 'refuse', group: 'cd-up', form, tpl, cwd: dir, command: fill(tpl, { UP: basename(dir), BASE: p }) });
   }
   for (const command of corpus.allow) out.push({ expect: 'allow', group: 'allow', form: '-', command });
+  // Ordinary commands asked from the folder above and from the file's folder: a guard that refuses whatever is asked
+  // from outside the run folder fails (round 10 audit 4 M-2).
+  for (const command of corpus.allow_elsewhere) for (const where of [up, dir]) out.push({ expect: 'allow', group: 'allow-elsewhere', form: '-', cwd: where, command });
   // Round 10 audit 3 M-2: near misses built from this file's folder and the words of its name, so a guard that refuses
   // anything naming the folder or a word of the name fails. Still a sample: no list proves a guard never over-refuses.
   const words = [...new Set(basename(abs).split(/[^A-Za-z0-9]+/).filter((w) => w.length >= 2))];
@@ -133,7 +150,11 @@ export function askHook(hookCommand, command, { timeoutMs = 60000, cwd, hookCwd 
   if (r.status !== 0) return 'crash';
   try {
     const j = JSON.parse(r.stdout || '{}');
-    if (j?.hookSpecificOutput?.permissionDecision === 'deny' || j?.decision === 'block') return 'refuse';
+    // A deny counts only with Claude Code's documented hookEventName; without it, it may be ignored, so it is neither
+    // a refusal nor an allow (round 10 audit 4 minor 2).
+    const h = j?.hookSpecificOutput;
+    if (h?.permissionDecision === 'deny') return h.hookEventName === 'PreToolUse' ? 'refuse' : 'crash';
+    if (j?.decision === 'block') return 'refuse';
   } catch { /* plain output: not a deny */ }
   return 'allow';
 }

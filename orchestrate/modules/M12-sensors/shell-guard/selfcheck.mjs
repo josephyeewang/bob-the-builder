@@ -9,6 +9,7 @@
 import { spawnSync } from 'node:child_process';
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { dirname } from 'node:path';
 import { cases } from './runner.mjs';
 
 const CONTENT = 'echo PLANTED\n'; // `source` runs it, so a sourced read shows too
@@ -27,7 +28,9 @@ function runOne(i, name, mode, sh) {
     const c = refuseCases(name, mode, root)[i];
     const cmd = c.command.replaceAll('/tmp/x', `${root}/srcx`).replaceAll('/tmp/y', `${root}/y`);
     const cwd = c.cwd ?? (mode === 'relative' ? dir : other);
-    const r = spawnSync(sh, ['-c', cmd], { cwd, encoding: 'utf8', timeout: 3000 });
+    // Sealed from the user's shell set-up (round 10 audit 4 minor 4): no rc files, HOME inside the folder, a plain PATH.
+    const env = { PATH: `${dirname(process.execPath)}:/usr/bin:/bin`, HOME: root, LANG: 'C' }; // node's folder: node -e cases
+    const r = spawnSync(sh, [...(sh.endsWith('zsh') ? ['-f'] : []), '-c', cmd], { cwd, env, encoding: 'utf8', timeout: 10000 });
     const seen = (r.stdout ?? '') + (existsSync(`${root}/y`) ? readFileSync(`${root}/y`, 'utf8') : '');
     let changed = true;
     try { changed = lstatSync(file).isSymbolicLink() || readFileSync(file, 'utf8') !== CONTENT; } catch { /* gone: changed */ }

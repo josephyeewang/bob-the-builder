@@ -20,7 +20,7 @@ Vercel, the repo) and write facts into the record. Everything they write is mask
 | `air-health.mjs` | R-0b-84, lead call L23 | The Air's health result as a dated file a machine writes (`node air-health.mjs <red count> <folder>`); `checkAirHealthFile` and `airFactFromFile` date the fact by the check itself, never by when it arrived. Joe never types a count. |
 | `start-gate.mjs` | lead call L3 | The two Vercel facts lane 2's launcher gate reads: skip command equals the pinned one; no env name in both Preview and Production. Lane 2's shape: `start_gate.vercel_skip.<product>` / `start_gate.vercel_env.<product>`, `{ product, vercel_project, read_at, result }`. M4's startGate decides (≤10 min old), so the Sensors re-read every 5 min; `startGateOpen` is a test helper. |
 | `device-checks.mjs` | R-0b-78 | The decisions behind the owner's private `/host` and `/configaudit` for the Air. |
-| `shell-guard/` | R-0b-70 | Shell-trick cases and a runner for the production guard (the guard is lane 2's R-0b-36). `selfcheck.mjs` proves each case really touches the file, each in a new folder, under bash and zsh where present. The pairs that touch nothing on a Mac are listed as dead in `corpus.json` (a test keeps that list exact on two names); the runner also drops those that touch nothing on the machine it runs on (no zsh, or an sh without `$'…'`). The allow side, including near misses built from the file's folder and name, is a sample: it catches a guard that refuses too much, but cannot prove a guard never does. |
+| `shell-guard/` | R-0b-70 | Shell-trick cases and a runner for the production guard (the guard is lane 2's R-0b-36). `selfcheck.mjs` proves each case really touches the file, each in a new folder, under bash and zsh where present. The pairs that touch nothing on a Mac are listed as dead in `corpus.json` (a test keeps that list exact on two names); the runner also drops those that touch nothing on the machine it runs on (no zsh, or an sh without `$'…'`). Both sides are samples. The refuse side (many spellings of the path, whole-folder reads, change-folder cases asked from three places) catches the simple guards a test here builds, but cannot prove a guard blocks every way to reach the file. The allow side (ordinary commands, near misses built from the file's folder and name, commands asked from other folders) catches a guard that refuses too much, but cannot prove it never does. The cases are checked in a folder holding only the file; beside a similar name (say a `.local` copy) a glob form may match both. |
 
 ## What is proven, and what is not yet
 
@@ -34,8 +34,8 @@ heartbeat says "usage: unknown" until it is).
 
 - R-0b-126: lane 1/2 intake (research, lesson and idea files, the Lead's input) must go through `cleanOutside` and pass
   `fixtures/outside-text.json` end to end. Until then R-0b-126 is "half: intake wiring pending".
-- R-0b-70: from the project's top folder (where Claude Code runs the hook; set `CLAUDE_PROJECT_DIR` if the protected
-  file is not there), run `node <Bob's folder>/orchestrate/modules/M12-sensors/shell-guard/runner.mjs
+- R-0b-70: from the project's top folder (where Claude Code runs the hook; if you must run from elsewhere, set
+  `CLAUDE_PROJECT_DIR` to the top folder), run `node <Bob's folder>/orchestrate/modules/M12-sensors/shell-guard/runner.mjs
   '<the installed hook command, exactly as in settings>' <the file's path from there>` and again with its absolute
   path; every miss goes to lane 2. The hook runs from that folder with `CLAUDE_PROJECT_DIR` set, as in Claude Code;
   only each case's `cwd` changes. Each run also tries the absolute form and "change folder, then use the short name"

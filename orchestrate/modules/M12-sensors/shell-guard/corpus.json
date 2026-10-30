@@ -1,5 +1,5 @@
 {
-  "_about": "Shell-trick cases for the production guard (R-0b-70). {{P}} is replaced by every path form in runner.mjs (pathForms), so each template runs once per form; with a cwd, also in its absolute form. In 'refuse_after_cd', {{DIR}} is the protected file's folder and {{BASE}} its short name in every form. 'dead' lists the template and form pairs that no shell turns into a touch of the file (left out; selfcheck.mjs and a test keep the list exact). 'allow_near' are safe commands built from the file's folder ({{DIR}}) and each word of its name ({{WORD}}). Every 'refuse' case must be refused; every 'allow' case must be allowed, so a guard that refuses everything also fails. Cases written for Bob, not copied from another project.",
+  "_about": "Shell-trick cases for the production guard (R-0b-70). {{P}} is replaced by every path form in runner.mjs (pathForms), so each template runs once per form; with a cwd, also in its absolute form. 'refuse_folder' reads or writes the whole folder ({{DIR}}). 'refuse_cd_up' is asked from the file's folder and steps up ({{UP}} is that folder's name). 'allow_elsewhere' is asked from the folder above and the file's folder. In 'refuse_after_cd', {{DIR}} is the protected file's folder and {{BASE}} its short name in every form. 'dead' lists the template and form pairs that no shell turns into a touch of the file (left out; selfcheck.mjs and a test keep the list exact). 'allow_near' are safe commands built from the file's folder ({{DIR}}) and each word of its name ({{WORD}}). Every 'refuse' case must be refused; every 'allow' case must be allowed, so a guard that refuses everything also fails. Cases written for Bob, not copied from another project. Both sides are samples: passing them does not prove a guard protects the file in every way, or never refuses too much.",
   "refuse": {
     "write": [
       "echo x > {{P}}",
@@ -21,7 +21,10 @@
       "grep . {{P}}",
       "base64 < {{P}}",
       "source {{P}}",
-      "cp {{P}} /tmp/y"
+      "cp {{P}} /tmp/y",
+      "tail -n 1 {{P}}",
+      "awk 1 {{P}}",
+      "sort {{P}}"
     ],
     "wrapped": [
       "bash -c 'cat {{P}}'",
@@ -38,11 +41,22 @@
       "true && cat {{P}}"
     ]
   },
+  "refuse_folder": [
+    "grep -r . {{DIR}}",
+    "find {{DIR}} -type f -exec cat {} +",
+    "ls -A {{DIR}} | sed 's|^|{{DIR}}/|' | xargs cat",
+    "cat {{DIR}}/* {{DIR}}/.* 2>/dev/null",
+    "rm -rf {{DIR}}"
+  ],
   "refuse_after_cd": [
     "cd {{DIR}} && cat {{BASE}}",
     "cd {{DIR}}; echo x > {{BASE}}",
     "(cd {{DIR}} && cat {{BASE}})",
     "pushd {{DIR}} >/dev/null && cat {{BASE}}"
+  ],
+  "refuse_cd_up": [
+    "cd .. && cat {{UP}}/{{BASE}}",
+    "cd ..; echo x > {{UP}}/{{BASE}}"
   ],
   "dead": {
     "cp /tmp/x {{P}}": [
@@ -88,6 +102,9 @@
       "brace"
     ],
     "cp {{P}} /tmp/y": [
+      "brace"
+    ],
+    "sort {{P}}": [
       "brace"
     ],
     "bash -c 'cat {{P}}'": [
@@ -136,5 +153,10 @@
     "cat {{DIR}}/README.md",
     "cat {{WORD}}-notes.md",
     "grep -rn {{WORD}} docs"
+  ],
+  "allow_elsewhere": [
+    "ls",
+    "cat README.md",
+    "git status"
   ]
 }
