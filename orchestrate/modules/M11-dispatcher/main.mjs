@@ -47,19 +47,26 @@ export function readConfig(file) {
 export async function main(argv, { now = Date.now(), log = (s) => process.stderr.write(`${s}\n`), runDeadlineMs, watchdog = false } = {}) {
   let config;
   let wired;
+  // The watchdog starts first (audit 0b-6 r5 MAT-1): a wiring whose import or wire() never finishes would
+  // otherwise keep this process, and so every later start, from running. It starts on the default deadline
+  // and is replaced once the config names its own. Past it the process ends with a line on stderr; no alert
+  // can be sent then, since the alert port is what the wiring builds, so a run that never gets past the wiring
+  // shows as an old `last-full-pass` fact and a watchdog line in the login job's log every minute.
+  let dog = watchdog ? startWatchdog((runDeadlineMs ?? RUN_DEADLINE_MS) + WATCHDOG_MARGIN_MS) : null;
   try {
     if (!argv[0]) throw new Error('usage: main.mjs <config.json>');
     config = readConfig(argv[0]);
+    if (dog && runDeadlineMs === undefined && config.runDeadlineMs !== undefined) { dog.terminate(); dog = startWatchdog(config.runDeadlineMs + WATCHDOG_MARGIN_MS); }
     const mod = await import(pathToFileURL(config.wiring).href);
     if (typeof mod.wire !== 'function') throw new Error('the wiring module has no wire()');
     // Every synchronous port runs its command through limitedSync (sync-limit.mjs): a time limit each.
     wired = await mod.wire(config, { limitedSync });
   } catch (e) {
     log(`dispatcher: not started: ${e.message}`);
+    dog?.terminate();
     return 1;
   }
   const limit = runDeadlineMs ?? config.runDeadlineMs ?? RUN_DEADLINE_MS;
-  const dog = watchdog ? startWatchdog(limit + WATCHDOG_MARGIN_MS) : null;
   let timer;
   const late = new Promise((ok) => { timer = setTimeout(() => ok({ late: true }), limit); });
   let r;

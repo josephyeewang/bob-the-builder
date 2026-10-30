@@ -8,7 +8,7 @@ import { RULES_MISSING_FACT } from './pass.mjs';
 import { tempDir } from '../../shared/test-tmp.mjs';
 import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
-import { tick, runTick, signedInAccount, actOnDead, STEPS, ACCOUNT_FACT, LAST_PASS_FACT, STEP_ERROR_FACT } from './tick.mjs';
+import { tick, runTick, signedInAccount, actOnDead, safeAlert, resendAlerts, ALERT_QUEUE_MAX, STEPS, ACCOUNT_FACT, LAST_PASS_FACT, STEP_ERROR_FACT } from './tick.mjs';
 import { main } from './main.mjs';
 import { MERGE_REQUEST } from './merges.mjs';
 import { OUTAGE_FACT } from './outage.mjs';
@@ -667,7 +667,65 @@ test('r4 MAT-2: an alert that throws, or rejects, skips no step: a cancel that f
     assert.equal(r.steps.outage.ok, false, `${label}: control, the outage step failed and its alert failed too`);
     assert.ok(w.calls.launched.includes('U-1'), label);
     await new Promise((ok) => setImmediate(ok));
-    assert.match(w.rec.read('fact', 'alert-failed')?.doc?.text ?? '', /an alert could not be sent: no network/, label);
+    assert.match(w.rec.read('fact', 'alert-unsent')?.doc?.error ?? '', /no network/, label);
+  }
+});
+
+// Audit 0b-6 r5 MAT-2: a cause is marked told before its alert goes out, so an alert that fails would
+// silence that cause for a day. It is queued instead and sent again on the next pass.
+test('r5 MAT-2: an alert that fails once is sent on the next pass, for a hold and for a failed stop', async () => {
+  for (const [label, bad] of [['throws', () => { throw new Error('no network'); }], ['rejects', () => Promise.reject(new Error('no network'))]]) {
+    let down = true;
+    const sent = [];
+    const running = [{ id: 'S-X', product: 'p1', kind: 'editing', card: 'X-1', pgid: 98 }];
+    const w = world([usage(), card('X-1', { state: 'cancelled', session: 'S-X' })], { over: {
+      alert: (t) => (down ? bad(t) : sent.push(t)), sessions: () => running, stopGroup: async () => ({ ok: false, reason: 'EPERM' }) } });
+    await w.pass();
+    await new Promise((ok) => setImmediate(ok));
+    assert.deepEqual(sent, [], `${label}: control, nothing got through while alerts were down`);
+    const queued = w.rec.read('fact', 'alert-unsent')?.doc?.texts ?? [];
+    assert.ok(queued.some((t) => /could not be stopped/.test(t)) && queued.some((t) => /signed-in account/.test(t)), `${label}: ${queued.join(' | ')}`);
+    down = false;
+    await w.pass(1);
+    assert.equal(sent.filter((t) => /could not be stopped/.test(t)).length, 1, `${label}: ${sent.join(' | ')}`);
+    assert.equal(sent.filter((t) => /signed-in account/.test(t)).length, 1, `${label}: ${sent.join(' | ')}`);
+    assert.deepEqual(w.rec.read('fact', 'alert-unsent')?.doc?.texts, [], `${label}: the queue is empty once sent`);
+  }
+});
+
+test('r5 MAT-2: the unsent queue keeps the newest texts, once each, and counts what it dropped', () => {
+  const rec = recWith([]);
+  const send = safeAlert(rec, () => { throw new Error('down'); }, 0);
+  for (let i = 0; i < ALERT_QUEUE_MAX + 5; i += 1) send(`t${i}`);
+  send('t10');
+  const d = rec.read('fact', 'alert-unsent').doc;
+  assert.equal(d.texts.length, ALERT_QUEUE_MAX);
+  assert.equal(d.texts.at(-1), 't10');
+  assert.equal(new Set(d.texts).size, d.texts.length);
+  assert.equal(d.dropped, 5);
+  const got = [];
+  assert.equal(resendAlerts(rec, (t) => got.push(t), 1), ALERT_QUEUE_MAX);
+  assert.match(got[0], /5 older alerts could not be sent/);
+});
+
+// Audit 0b-6 r5 MAT-1: the watchdog starts before the wiring loads, so a wiring that never finishes
+// (an import that waits forever, a wire() that never answers, a wire() that blocks the thread) still ends.
+test('r5 MAT-1: `node main.mjs` with a wiring that never finishes is ended by the watchdog', () => {
+  const here = fileURLToPath(new URL('.', import.meta.url));
+  for (const [label, body] of [
+    ['import waits', 'await new Promise(() => {}); export async function wire() { return {}; }'],
+    ['wire() never answers', 'export function wire() { return new Promise(() => {}); }'],
+    ['wire() blocks', 'export function wire() { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 60000); return {}; }'],
+  ]) {
+    const dir = tempDir('m11-wiring-hang-');
+    const wiring = join(dir, 'wiring.mjs');
+    writeFileSync(wiring, `setInterval(() => {}, 1000);\n${body}\n`);
+    const config = join(dir, 'config.json');
+    writeFileSync(config, JSON.stringify({ wiring, lockFile: join(dir, 'pass.lock'), runDeadlineMs: 200 }));
+    const started = Date.now();
+    const r = spawnSync(process.execPath, [join(here, 'main.mjs'), config], { encoding: 'utf8', timeout: 40_000, killSignal: 'SIGKILL' });
+    assert.ok(Date.now() - started < 30_000, `${label}: ended by the watchdog, not by the test's own limit`);
+    assert.match(r.stderr, /the pass was blocked past 5200 ms; the watchdog ends it/, `${label}: ${r.status} ${r.signal} ${r.stderr}`);
   }
 });
 

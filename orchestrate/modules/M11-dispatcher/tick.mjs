@@ -82,13 +82,38 @@ export function actOnDead({ rec, now, restart, asks, cards = {} }) {
 
 /**
  * The alert port as every step gets it (audit 0b-6 r4 MAT-2): an alert that throws or rejects never
- * fails a step, or skips the steps after it. The failure is left as a note in the record.
+ * fails a step, or skips the steps after it. An alert that fails is not lost (audit 0b-6 r5 MAT-2): its
+ * text goes on the fact `alert-unsent`, and the next pass sends it again before its steps run
+ * (`resendAlerts`), until it goes through. So a step that marks a cause "told" before its alert fails
+ * still tells Joe, a pass later. The queue keeps at most ALERT_QUEUE_MAX texts, the newest; the oldest
+ * dropped are counted in the next text sent.
  */
+export const ALERT_QUEUE_FACT = 'alert-unsent';
+export const ALERT_QUEUE_MAX = 50;
+function queueAlert(rec, text, e, now) {
+  try {
+    const d = rec.read('fact', ALERT_QUEUE_FACT)?.doc ?? {};
+    const all = [...(Array.isArray(d.texts) ? d.texts : []).filter((t) => t !== text), text];
+    const over = Math.max(0, all.length - ALERT_QUEUE_MAX);
+    putFact(rec, ALERT_QUEUE_FACT, { texts: all.slice(over), dropped: (d.dropped ?? 0) + over, error: String(e?.message ?? e), at: iso(now) }, 'alert_failed');
+  } catch { /* the record is unwritable too: the pass itself fails and tells */ }
+}
 export function safeAlert(rec, alert, now) {
-  const failed = (e) => { try { note(rec, 'alert-failed', `an alert could not be sent: ${e?.message ?? e}`, { now }); } catch { /* the record is unwritable too */ } };
   return (text) => {
+    const failed = (e) => queueAlert(rec, text, e, now);
     try { const r = alert(text); if (typeof r?.then === 'function') r.then(null, failed); } catch (e) { failed(e); }
   };
+}
+
+/** Sends again every alert a past pass could not send (see `safeAlert`); one that fails again stays queued. */
+export function resendAlerts(rec, alert, now) {
+  const d = rec.read('fact', ALERT_QUEUE_FACT)?.doc;
+  const texts = Array.isArray(d?.texts) ? d.texts : [];
+  if (!texts.length) return 0;
+  putFact(rec, ALERT_QUEUE_FACT, { texts: [], dropped: 0, error: null, at: iso(now) }, 'alert_resent');
+  const send = safeAlert(rec, alert, now);
+  texts.forEach((t, i) => send(i === 0 && d.dropped ? `${t} (${d.dropped} older alerts could not be sent and were dropped)` : t));
+  return texts.length;
 }
 
 /**
@@ -141,6 +166,8 @@ export async function tick({ rec, rules, now, ports: p }) {
     return { started: r.started, refused: r.refused, notes: r.notes };
   });
 
+  // Alerts a past pass could not send go out now, after the safety acts (audit 0b-6 r5 MAT-2).
+  try { resendAlerts(rec, p.alert, now); } catch { /* the record is unreadable: the steps below fail and tell */ }
   let outageOpen = false;
   // A failing outage step falls back on the record (audit 0b-6 r3 MIN-1): an open outage still holds.
   try { outageOpen = rec.read('fact', OUTAGE_FACT)?.doc?.state === 'open'; } catch { outageOpen = true; }
