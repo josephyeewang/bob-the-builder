@@ -26,9 +26,13 @@ rules.rev;                                                    // the rules versi
   | `start_session` | `{ product, role, tier, editing, card?, usage? }` |
   | `push_branch` | `{ product, card: { id, rows }, files }` |
   | `merge` | `{ product, card, files, declared_tier, labels }` |
-  | `count_approval`, `delete_copy`, `write_production`, `flip_switch` | denied in 0b |
+  | `count_approval` | denied until 0b-5 M2 Approvals switches it on |
+  | `delete_copy`, `write_production`, `flip_switch` | denied in 0b |
 
-- `classify(change)` takes `{ product, files: [{ path, previous_path?, status, mode?, added_lines? }], truncated?, declared_tier?, labels?, policy? }`. Until the effect-path scanner lands (second cutover), any changed file outside `docs/` comes back `unclassifiable`, Tier 1. GitHub-side, `policy` is the rules as of the parent commit.
+- `classify(change)` takes `{ product, files: [{ path, previous_path?, status, mode?, added_lines? }], truncated?, declared_tier?, labels? }`. It always uses the current rules: a `policy` or `atCommit` field is dropped, so a caller can't hand in looser rules. The GitHub-side checker reads the parent commit's rules with M10's `classifyWithRulesText`.
+  - Until the effect-path scanner lands (second cutover), a changed file is ordinary only if it sits under `docs/` and is a plain file (`.md`, `.txt`, `.csv`, `.json`, `.yaml`, `.yml`, `.png`, `.jpg`, `.jpeg`, `.gif`, `.svg`, `.pdf`). Anything else comes back `unclassifiable`, Tier 1.
+  - Any risky class or protected path makes the answer Tier 1, whatever the rules module returned.
+- **Gate only on `may()`.** `get()` is for display and sizing. An undefined `get()` means refuse, never "no limit".
 - Tests: `fakeRules({ answers: { merge: allow('ok') }, values: { 'caps.rounds': 3 } })`. Unlisted actions are denied, as with the real rules.
 
 ### `record.mjs`: read and write M9 Record

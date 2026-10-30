@@ -14,8 +14,11 @@
 //   rules.get('caps.editing_per_mac', { product })                  // → a number from the rules, or undefined
 //   rules.classify(change)                                          // → { tier, risky: [...], reasons, protected } (D7)
 //     change = { product, files: [{ path, previous_path?, status: added|modified|removed|renamed|copied, mode?,
-//                added_lines? }], truncated?, declared_tier?, labels?, policy? }
-//     `policy` (the rules as of the parent commit) is passed GitHub-side; without it the current rules are used.
+//                added_lines? }], truncated?, declared_tier?, labels? }
+//     Always judged by the current rules. A caller can't hand in rules of its own: any `policy` or `atCommit` field is
+//     dropped (round 2, R2-M10). The GitHub-side checker reads the parent commit's rules through M10's
+//     classifyWithRulesText instead.
+//   Gate only on may(). get() is for display and sizing; an undefined get() means "refuse", never "no limit".
 //   rules.rev                                                      // the loaded rules version, for diary lines
 
 export const ALLOW = 'allow';
@@ -64,13 +67,22 @@ export function makeRules(impl) {
       try { return impl.get(key, opts); } catch { return undefined; }
     },
     // A change the rules can't classify counts as risky (D7), so a failure here is "unclassifiable", Tier 1.
+    // Any risky class or protected path makes it Tier 1, whatever the implementation said (R2-m2).
     classify(change) {
-      const failed = (reason) => ({ tier: 1, risky: ['unclassifiable'], reasons: { unclassifiable: [reason] } });
+      const failed = (reason) => ({ tier: 1, risky: ['unclassifiable'], reasons: { unclassifiable: [reason] }, protected: [] });
+      let asked = change;
+      if (change && typeof change === 'object') {
+        const { policy, atCommit, ...rest } = change;   // eslint-disable-line no-unused-vars
+        asked = rest;
+      }
       let c;
-      try { c = impl.classify(change); } catch (e) { return failed(`rules error: ${e.message}`); }
+      try { c = impl.classify(asked); } catch (e) { return failed(`rules error: ${e.message}`); }
       if (!c || (c.tier !== 1 && c.tier !== 2) || !Array.isArray(c.risky)) return failed('rules gave no valid classification');
       if (c.risky.some((k) => !RISKY_CLASSES.includes(k))) return failed('unknown risky class in classification');
-      return c;
+      if (!c.reasons || typeof c.reasons !== 'object' || Array.isArray(c.reasons)) return failed('classification gave no reasons');
+      const prot = c.protected ?? [];
+      if (!Array.isArray(prot) || prot.some((p) => typeof p !== 'string')) return failed('classification gave a bad protected list');
+      return { tier: c.risky.length || prot.length ? 1 : c.tier, risky: [...c.risky], reasons: c.reasons, protected: [...prot] };
     },
   });
 }

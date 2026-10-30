@@ -37,6 +37,26 @@ test('classify fails closed to unclassifiable Tier 1', () => {
     assert.deepEqual(c.risky, ['unclassifiable']);
   }
   assert.deepEqual(fakeRules().classify({ files: [] }).risky, []);
+  for (const classify of [() => ({ tier: 2, risky: [] }), () => ({ tier: 2, risky: [], reasons: [] }), () => ({ tier: 2, risky: [], reasons: {}, protected: 'x' })]) {
+    assert.deepEqual(fakeRules({ classify }).classify({ files: [] }).risky, ['unclassifiable']);
+  }
+});
+
+test('any risky class or protected path forces Tier 1 (R2-m2)', () => {
+  const risky = fakeRules({ classify: () => ({ tier: 2, risky: ['schema'], reasons: { schema: ['x'] } }) });
+  assert.equal(risky.classify({ files: [] }).tier, 1);
+  const prot = fakeRules({ classify: () => ({ tier: 2, risky: [], reasons: {}, protected: ['.husky/pre-commit'] }) });
+  assert.equal(prot.classify({ files: [] }).tier, 1);
+});
+
+test('a caller cannot hand classify looser rules (R2-M10)', () => {
+  let seen;
+  const r = fakeRules({ classify: (c) => { seen = c; return { tier: c.policy || c.atCommit ? 2 : 1, risky: [], reasons: {} }; } });
+  const change = { product: 'sample-app', files: [{ path: 'src/a.js', status: 'modified' }] };
+  const plain = r.classify(change);
+  const looser = r.classify({ ...change, policy: { tiers: { paths: [] } }, atCommit: 'abc' });
+  assert.deepEqual(looser, plain);
+  assert.ok(!('policy' in seen) && !('atCommit' in seen));
 });
 
 test('the shapes are fixed', () => {
