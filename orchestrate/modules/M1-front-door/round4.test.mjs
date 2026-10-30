@@ -69,7 +69,7 @@ test('L22: the brief is pushed once per new set of state files, and only when it
   assert.equal(briefAnswers(p.text, ids), true);
   assert.equal(nextTripPush({ states: away(ids), lastPushedIds: p.ids, build: brief }), null, 'the same request is not pushed twice');
   assert.ok(nextTripPush({ states: away([...ids, '20261103-0920-ks']), lastPushedIds: p.ids, build: brief }), 'a new state file (the time zone answer) pushes again');
-  assert.equal(nextTripPush({ states: away(ids), lastPushedIds: [], build: () => brief(['20261103-0915-kq']) }), null, 'a brief missing an id is never sent');
+  assert.equal(nextTripPush({ states: away(ids), lastPushedIds: [], build: () => brief(['20261103-0915-kq']) }).failed, true, 'a brief missing an id is never sent; the failure is (round 8 minor 3)');
   assert.equal(nextTripPush({ states: [], build: brief }), null);
   assert.equal(nextTripPush({ states: away(['../x']), build: brief }), null);
   assert.equal(nextTripPush({ states: away(ids), build: () => { throw new Error('x'); } }).failed, true); // round 7 minor 1: pushed as a failure

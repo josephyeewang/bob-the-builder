@@ -7,7 +7,7 @@ everything he asks for becomes one small file in its outbox and one short reply.
 |---|---|---|
 | `skill/orchestrate/SKILL.md` | R-0b-81 | The one skill: new idea, new project, pause, away, back, wrap up, rotate. "Not wired yet" for the rest. |
 | `outbox.mjs` | R-0b-81, 83 | The three file shapes (`state-`, `request-`, `idea-`) and intake's check. Never `state: active`; a key in any file refuses it; a product off the list or a reused id is refused (L26). `intakePush` is the confirmation Joe gets. |
-| `timezone.mjs` | R-0b-83 | A time zone counts only as a city-based name the system knows; anything ambiguous is null, which holds number work. |
+| `timezone.mjs` | R-0b-83 | A time zone counts only as a city-based name the system knows; anything ambiguous is null, which holds number work for products on the Merge Gate. |
 | `trip.mjs` | R-0b-83 | The trip brief: go items and risky asks with links, the Mini check (online, logged in, battery backup), the Air. |
 | `transcript.mjs` | R-0b-82, 84 | Reads the Front Door's own conversation log: Joe's turns, question boxes and their answers, "turn finished". |
 | `restart.mjs` | R-0b-82 | When to restart after a quiet spell (past 150k, quiet 15 min, no open question box, turn finished), and the ≤3k handoff. |
@@ -43,7 +43,8 @@ R-0b-82's decision and handoff code sit here although the row is tagged M11 (lan
 4. Lane 2: each Ledger pass calls `nextTripPush({ states, lastPushedIds, build })` (`states`: `{ id, state }` of the
    newest checked `state-` file per product, of which only `away` ones count; `build` = `buildTripBrief` with those ids). A result is sent to Joe's
    phone over the Front Door's push path and its `ids` stored as `lastPushedIds` (lead call L22); a result with
-   `failed: true` (the brief couldn't be built) is pushed and stored the same way. The pass also
+   `failed: true` (the brief couldn't be built) is pushed too, but its `ids` go to `lastFailedIds`, never
+   `lastPushedIds`, so the next passes keep trying and push the real brief once it builds. The pass also
    writes the brief to the read-only file the skill quotes if Joe asks first, and runs `readPowerSource` with the
    heartbeat. The skill quotes only a brief that names the ids it wrote (0b-8 audit round 3 M-3). If the push isn't
    ready by the first cutover, trip mode falls back to two replies ("filed", then the brief when Joe says "brief").

@@ -22,5 +22,20 @@ test('0b-8 audit round 7 minor 1: a brief that throws is pushed as a failure onc
   const states = [{ id: '20261103-0915-kq', state: 'away' }];
   const p = nextTripPush({ states, build: () => { throw new Error('record down'); } });
   assert.equal(p.failed, true); assert.match(p.text, /^Trip brief failed/); assert.deepEqual(p.ids, ['20261103-0915-kq']);
-  assert.equal(nextTripPush({ states, lastPushedIds: p.ids, build: () => { throw new Error('x'); } }), null, 'once per id set');
+  assert.equal(nextTripPush({ states, lastFailedIds: p.ids, build: () => { throw new Error('x'); } }), null, 'once per id set');
+});
+
+test('0b-8 audit round 8 M-1: after a failed brief the next healthy pass pushes the real brief; the failure push promises no retry Joe must do', () => {
+  const states = [{ id: '20261103-0915-kq', state: 'away' }];
+  const f = nextTripPush({ states, build: () => { throw new Error('record down'); } });
+  assert.equal(f.failed, true); assert.doesNotMatch(f.text, /Say "brief"/);
+  const ok = nextTripPush({ states, lastFailedIds: f.ids, build: (ids) => `Brief made x; answers state files: ${ids.join(', ')}.` });
+  assert.equal(ok.failed, undefined); assert.match(ok.text, /20261103-0915-kq/);
+});
+
+test('0b-8 audit round 8 minor 2: a product with no Merge Gate value is "unknown", never "still merges the way you run it today"', () => {
+  const rec = memoryRecord();
+  const brief = buildTripBrief({ products: [{ name: 'testprod' }], tz: null, rec, facts: { get: () => null }, heartbeatProduct: 'testprod' });
+  assert.match(brief, /testprod: Merge Gate status unknown/);
+  assert.doesNotMatch(brief, /testprod still merges/);
 });

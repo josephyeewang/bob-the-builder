@@ -8,7 +8,7 @@
 //   state-<id>.json    { "product": "<name>", "state": "paused" | "away", "until": "<ISO date>" | null, "tz": "<IANA>" | null }
 //                      Never "active": only Joe's tap returns a product to active (MAT-7). `until` is information and a
 //                      return reminder; nothing goes back to active on a date. A tz that is not a valid IANA name
-//                      becomes null, which holds number work (MAT-8, minor 10).
+//                      becomes null (MAT-8, minor 10); on the Merge Gate that holds number work.
 //   request-<what>-<id>.json   { "request": "resume" | "wrapup" | "rotate", "product": "<name>" | null, "name": "<KEY_NAME>" | null }
 //                      rotate carries the key's NAME only; any text that looks like a key refuses the whole file (B11).
 //                      The Air's health result is never a Front Door file: the Air's own check writes it, dated, to its
@@ -46,7 +46,7 @@ export function stateDoc({ product, state, until = null, tz = null }) {
   if (!STATES_ALLOWED.includes(state)) return refuse(`the Front Door may set only ${STATES_ALLOWED.join(' or ')}`); // the value is never echoed: it may hold pasted text
   if (until !== null && !(typeof until === 'string' && ISO_DATE.test(until) && Number.isFinite(Date.parse(until)) && realDay(until))) return refuse('until is not a date');
   const z = tz === null ? { ok: true, tz: null } : checkTimeZone(tz);
-  return { ok: true, doc: { product, state, until, tz: z.ok ? z.tz : null }, ...(z.ok ? {} : { note: `time zone not accepted (${z.reason}); number work holds until Joe names a city-based zone` }) };
+  return { ok: true, doc: { product, state, until, tz: z.ok ? z.tz : null }, ...(z.ok ? {} : { note: `time zone not accepted (${z.reason}); Joe needs to name a city-based zone; internal, never pushed as is` }) };
 }
 
 export function requestDoc({ request, product = null, name = null }) {

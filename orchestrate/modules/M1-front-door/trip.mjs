@@ -59,20 +59,23 @@ export function briefAnswers(text, ids) {
 
 // Lead call L22: the brief goes to Joe's phone as a push, once per new set of away files. states: [{ id, state }], the
 // newest checked state file per product; only "away" ones count, so a plain pause never pushes a trip brief (0b-8
-// audit round 5 M-1). lastPushedIds: what the Ledger pushed last (it stores the returned ids); build(ids) → the brief
-// text. Returns { text, ids } to push (failed: true when the build threw), or null (nothing new, or a brief that
-// doesn't name every id, never sent).
-export function nextTripPush({ states, lastPushedIds = [], build }) {
+// audit round 5 M-1). lastPushedIds: the ids of the last brief pushed; lastFailedIds: the ids of the last failure
+// pushed; build(ids) → the brief text. Returns { text, ids } to push, or null (nothing new). A brief that can't be
+// built, or doesn't name every id, returns { text, ids, failed: true }: the Ledger pushes it and stores its ids as
+// lastFailedIds, NOT lastPushedIds, so it keeps trying every pass and pushes the real brief once it builds (0b-8
+// audit round 8 M-1); the failure itself is pushed once per id set (round 7 minor 1).
+export const TRIP_FAILED_TEXT = 'Trip brief failed: the Mini could not build it. It tries again every few minutes and pushes the brief when it can.';
+export function nextTripPush({ states, lastPushedIds = [], lastFailedIds = [], build }) {
   const away = (Array.isArray(states) ? states : []).filter((s) => s?.state === 'away').map((s) => s.id);
   const ids = [...new Set(away.filter((i) => /^\d{8}-\d{4}-[a-z]{2}$/.test(String(i))))].sort();
   if (!ids.length) return null;
   const last = new Set(Array.isArray(lastPushedIds) ? lastPushedIds : []);
   if (ids.every((x) => last.has(x))) return null;
+  const failedBefore = new Set(Array.isArray(lastFailedIds) ? lastFailedIds : []);
+  const fail = () => (ids.every((x) => failedBefore.has(x)) ? null : { text: TRIP_FAILED_TEXT, ids, failed: true });
   let text;
-  // A brief that can't be built is pushed as a failure, once per id set, so Joe isn't left waiting for a brief that
-  // never comes (0b-8 audit round 7 minor 1). The reason is not quoted: it could carry record text.
-  try { text = build(ids); } catch { return { text: 'Trip brief failed: the Mini could not build it. Say "brief" to try again.', ids, failed: true }; }
-  return briefAnswers(text, ids) ? { text, ids } : null;
+  try { text = build(ids); } catch { return fail(); } // the reason is not quoted: it could carry record text
+  return briefAnswers(text, ids) ? { text, ids } : fail();
 }
 
 // The one wording for "the Mini is turning off"; the skill says it word for word, because once the Mini is off it
@@ -95,7 +98,7 @@ export function buildTripBrief({ products, until = null, tz: tzIn = null, stateI
   const out = [];
   const made = now();
   const z = tzIn === null ? null : checkTimeZone(tzIn);
-  const tz = z?.ok ? z.tz : null; // a zone that fails the check is no zone: number work holds (round 2 minor 9)
+  const tz = z?.ok ? z.tz : null; // a zone that fails the check is no zone (round 2 minor 9)
   const ids = stateIds.filter((i) => /^\d{8}-\d{4}-[a-z]{2}$/.test(String(i)));
   out.push(`Brief made ${made.toISOString()}; answers state files: ${ids.join(', ') || 'none'}.`);
   out.push(`Trip mode: ${products.map((p) => p.name).join(', ') || 'no products'} set to away${until ? ` until ${until}` : ''}. Only your tap brings a product back to active.`);
@@ -105,7 +108,8 @@ export function buildTripBrief({ products, until = null, tz: tzIn = null, stateI
   // work, and saying so would make Joe believe it was held (0b-8 audit round 7 M-1).
   if (!tz) out.push('- Which time zone will you be in? Name a city, such as Europe/Prague.');
   for (const p of products) {
-    if (!p.on_merge_gate) out.push(`- ${p.name} still merges the way you run it today; the hours rule starts at the second cutover.`);
+    if (typeof p.on_merge_gate !== 'boolean') out.push(`- ${p.name}: Merge Gate status unknown; ask before you leave.`);
+    else if (!p.on_merge_gate) out.push(`- ${p.name} still merges the way you run it today; the hours rule starts at the second cutover.`);
     else if (tz) out.push(`- ${p.name}: number work merges only ${MERGE_HOURS} ${tz}; a go you don't answer holds; [Undo] still runs.`);
     else out.push(`- ${p.name}: number work holds until you answer; [Undo] still runs.`);
   }

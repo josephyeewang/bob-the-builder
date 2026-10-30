@@ -33,7 +33,7 @@ test('minor 10: an ambiguous or unknown time zone becomes null (number work hold
     const r = stateDoc({ product: 'test-product', state: 'away', tz });
     assert.equal(r.ok, true, tz);
     assert.equal(r.doc.tz, null, tz);
-    assert.match(r.note, /number work holds/);
+    assert.match(r.note, /city-based zone/);
   }
   assert.equal(checkTimeZone('UTC').ok, true);
   assert.equal(checkTimeZone('America/New_York').tz, 'America/New_York');
@@ -90,7 +90,7 @@ test('intake refuses anything outside the three shapes', () => {
 
 test('0b-8 audit round 1 M-2: a fixed-offset zone in any spelling is null in the stored file, so number work holds', () => {
   const r = checkOutboxFile('state-20261103-0915-an.json', '{"product":"test-product","state":"away","until":"2026-11-07","tz":"etc/gmt+2"}');
-  assert.equal(r.ok, true); assert.equal(r.doc.tz, null); assert.match(r.note, /number work holds/);
+  assert.equal(r.ok, true); assert.equal(r.doc.tz, null); assert.match(r.note, /city-based zone/);
   assert.equal(checkTimeZone('europe/prague').tz, 'Europe/Prague');
 });
 
