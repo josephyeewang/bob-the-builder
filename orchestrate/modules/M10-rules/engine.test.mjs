@@ -194,7 +194,7 @@ test('push_branch: lanes (MIN-1, R2-m7, R3-m5)', () => {
   assert.equal(r.decision, 'deny', 'the docs lane must lie inside docs_paths');
 });
 
-test('push_branch: no lane pushes under .github/, new or old name, any depth or case, not even an exact reverse (L39)', () => {
+test('push_branch: no lane pushes under .github/ or a CODEOWNERS file, new or old name, any depth or case, not even an exact reverse (L39)', () => {
   const w = world();
   const push = (lane, files, card = {}, extra = {}) => w.rules.may('push_branch', { product: 'app', card: { id: 'C-1', rows: ['R-1'], doc: { lane }, ...card }, files, ...extra });
   const bad = [
@@ -206,6 +206,11 @@ test('push_branch: no lane pushes under .github/, new or old name, any depth or 
     [file('packages/web/.github/workflows/x.yml')],
     [file('docs/research/.github/notes.md')],
     [file('app/ok.ts'), file('.github/CODEOWNERS', 'removed')],
+    [file('CODEOWNERS')],                                            // GitHub also reads it at the root
+    [file('docs/CODEOWNERS', 'added')],                              // and in docs/
+    [file('docs/codeowners')],
+    [file('docs/x.md', 'renamed', { previous_path: 'CODEOWNERS' })], // moving it away removes it too
+    [file('CODEOWNERS', 'renamed', { previous_path: 'docs/x.md' })],
   ];
   for (const lane of ['product', 'docs', 'lead']) {
     for (const files of bad) {
@@ -218,7 +223,9 @@ test('push_branch: no lane pushes under .github/, new or old name, any depth or 
   assert.match(undo.reason, /L39/, 'an exact reverse is no way in');
   for (const t of [true, 'yes', 1, null]) assert.match(push('product', [file('app/a.ts')], {}, { truncated: t }).reason, /cut off/, `truncated ${t}`);
   assert.equal(push('product', [file('app/a.ts')], {}, { truncated: false }).decision, 'allow');
-  for (const p of ['app/.githubx/a.ts', 'app/github/a.ts', 'app/x.github/a.ts']) assert.equal(push('product', [file(p)]).decision, 'allow', p);
+  const rootUndo = push('product', [file('CODEOWNERS')], { kind: 'exact_reverse' }, { reverses_files: ['CODEOWNERS'] });
+  assert.match(rootUndo.reason, /L39/, 'nor is an exact reverse of CODEOWNERS');
+  for (const p of ['app/.githubx/a.ts', 'app/github/a.ts', 'app/x.github/a.ts', 'app/CODEOWNERS.md', 'app/codeowners-x.ts']) assert.equal(push('product', [file(p)]).decision, 'allow', p);
   assert.ok(push('product', [file('.github/' + 'a'.repeat(4000))]).reason.length < 400, 'quotes at most 80 characters of a path');
 });
 
