@@ -178,3 +178,33 @@ test('R-0b-126 audit round 4: a lane that keeps state between calls cannot hide 
   const lag = (x) => { const out = `${fence(x)}\n${last}`; last = x.text; return { leadInput: out }; };
   assert.ok(caught(await checkOutsideJoin(lag, { where: ['leadInput'] })));
 });
+
+test('R-0b-126 audit round 5: per-kind bugs, a first-call cache and wrong cuts are caught; a leak names its run', async () => {
+  const fence = (x) => cleanOutside(x.text, x.source);
+  const leak = (m) => m.find((x) => x.why.startsWith('outside text'));
+  for (const s of JOIN_SOURCES) {
+    // M-1 (a): the first line shown raw as a heading.
+    const title = await checkOutsideJoin((x) => ({ leadInput: `### ${x.text.split('\n')[0]}\n${fence(x)}` }), { sources: [s], where: ['leadInput'] });
+    assert.ok(leak(title), `raw title / ${s}`);
+    // M-1 (b): the previous item of the same kind shown raw.
+    const last = {};
+    const lag = (x) => { const out = `${fence(x)}\nLast time: ${last[x.source] ?? ''}`; last[x.source] = x.text; return { leadInput: out }; };
+    assert.ok(leak(await checkOutsideJoin(lag, { sources: [s], where: ['leadInput'] })), `per-kind lag / ${s}`);
+    // m1: a title kept from the lane's very first call, shown raw ever after (the canary goes first).
+    let kept;
+    const cache = (x) => { kept ??= x.text.split('\n')[0]; return { leadInput: `# ${kept}\n${fence(x)}` }; };
+    const m = leak(await checkOutsideJoin(cache, { sources: [s], where: ['leadInput'] }));
+    assert.ok(m && m.from === 'canary', `first-call cache / ${s}`);
+  }
+  // m2: a leak names the run and where it came from.
+  const raw = (await checkOutsideJoin(({ text }) => ({ leadInput: text }), { sources: ['lesson-file'], where: ['leadInput'] }))
+    .find((x) => x.from === 'lesson-file');
+  assert.ok(raw); assert.equal(raw.run.length, RUN);
+  // m4: a research file cut at 2000 characters, or a commit subject never cut, misses the exact form.
+  assert.ok(joinCases(['research-file']).some((c) => c.text.length > 5000));
+  assert.ok(joinCases(['commit-subject']).some((c) => /…\[cut \d+ characters\]<\/outside-text>$/.test(c.expect)));
+  const cut = await checkOutsideJoin((x) => ({ leadInput: fence({ ...x, text: x.text.slice(0, 2000) }) }), { sources: ['research-file'], where: ['leadInput'] });
+  assert.ok(cut.some((x) => x.why === 'the exact fenced form is missing'));
+  const whole = await checkOutsideJoin((x) => ({ leadInput: escapeOutside(x.text, x.source, { cap: Infinity }) }), { sources: ['commit-subject'], where: ['leadInput'] });
+  assert.ok(whole.some((x) => x.why === 'the exact fenced form is missing'));
+});
