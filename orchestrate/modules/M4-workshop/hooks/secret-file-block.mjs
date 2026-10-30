@@ -67,15 +67,22 @@ export function decide(input, args) {
   const t = input.tool_input ?? {};
   for (const p of toolPaths(input)) {
     // Plain names first (L37): a look-alike letter the disk folds onto a secret's name never reaches the lists.
-    const odd = oddPath(input.tool_name === 'Glob' && p === t.pattern ? p.replace(/[*?{},!]/g, '') : p);
+    // The Glob pattern is held to the plain-name rule in the search check below, with its wildcards out.
+    const odd = input.tool_name === 'Glob' && p === t.pattern ? null : oddPath(p);
     if (odd) return block(odd);
     if (isSecretPath(p, listed, input.cwd)) return block(`"${p}" is a secret file`);
   }
-  // A search pattern counts with its wildcards taken out: `.env*` names `.env`.
+  // A search pattern counts with its wildcards taken out (`.env*` names `.env`), and each part with a
+  // wildcard or a letter range is tried against the secret names it could match, as in the shell
+  // (a letter range in a dot-name; confirm audit of L37).
   const bare = (g) => g.replace(/[*?[\]{}!]/g, '');
+  // A part that is only stars (`**/`, `/*`) stands for every name; leaving it in would refuse every search.
+  const anyName = (x) => x.split(sep).map((q) => (/^\*+$/.test(q) ? 'x' : q)).join(sep);
   for (const g of [input.tool_name === 'Grep' ? t.glob : null, input.tool_name === 'Glob' ? t.pattern : null]) {
-    if (typeof g === 'string' && oddPath(g.replace(/[*?{},!]/g, ''))) return block(oddPath(g.replace(/[*?{},!]/g, '')));
-    if (typeof g === 'string' && g.split(/[,{}]/).some((x) => isSecretPath(bare(x), listed) || isSecretPath(x, listed))) return block('the search names secret files');
+    if (typeof g !== 'string') continue;
+    const odd = oddPath(g.replace(/[*?{},!]/g, ''));
+    if (odd) return block(odd);
+    if (g.split(/[,{}]/).some((x) => isSecretPath(bare(x), listed) || isSecretPath(x, listed) || patternMeetsSecret(anyName(x), listed))) return block('the search names secret files');
   }
   if (input.tool_name === 'Bash') {
     // Every word is checked, as written and as a path from the session's folder, so a short name

@@ -129,6 +129,15 @@ test('round 4 MIN-1: an allowed image whose pixels start like packed data is ref
   assert.equal(checkFile('docs/a.png', makePng(), list).ok, true, 'control: plain pixels pass');
 });
 
+test('confirm audit of round 4, Minor 1: packed data written out as text in a text note or in the pixels is refused', () => {
+  const list = allowList([{ path: 'docs/*.png', type: 'png' }]);
+  const b64 = Buffer.from(gzipSync(Buffer.from('key = "x"'.repeat(8))).toString('base64'));
+  const inNote = makePng({ extra: [chunk('tEXt', Buffer.concat([Buffer.from('Comment\0'), b64]))] });
+  const inPixels = makePng({ head: ihdr({ w: b64.length + 1 }), pixels: Buffer.concat([Buffer.from([0, 7]), b64]) });
+  for (const [name, b] of [['note', inNote], ['pixels', inPixels]]) assert.match(checkFile('docs/a.png', b, list).reason ?? '', /packed data written out as text/, name);
+  assert.equal(checkFile('docs/a.png', makePng({ extra: [chunk('tEXt', Buffer.from('Comment\0a plain note'))] }), list).ok, true, 'control: a plain note passes');
+});
+
 test('round 4 MIN-2 and MIN-3: every packed start, as base64 and as base64url with - or _ in its first characters, is refused', () => {
   const starts = { gzip: [0x1f, 0x8b, 0x08], zip: [0x50, 0x4b, 0x03, 0x04], '7z': [0x37, 0x7a, 0xbc, 0xaf], bzip2: [0x42, 0x5a, 0x68], xz: [0xfd, 0x37, 0x7a, 0x58], zstd: [0x28, 0xb5, 0x2f, 0xfd],
     zlib1: [0x78, 0x01], zlib5e: [0x78, 0x5e], zlib9c: [0x78, 0x9c], zlibda: [0x78, 0xda], png: [0x89, 0x50, 0x4e, 0x47] };

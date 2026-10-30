@@ -130,6 +130,7 @@ export function toolPaths(input) {
 export const joinLines = (cmd) => String(cmd ?? '').replace(/\\\r?\n/g, '');
 
 /** Splits a shell line into words, roughly: quotes are removed, joiners split. For matching, not running. */
+const BLANK = /[ \t\n]/;
 export function shellWords(cmd) {
   if (typeof cmd !== 'string') return [];
   cmd = joinLines(cmd);
@@ -141,7 +142,8 @@ export function shellWords(cmd) {
     if (q) { if (ch === q) q = null; else if (ch === '\\' && q === '"' && i + 1 < cmd.length) cur += cmd[++i]; else cur += ch; continue; }
     if (ch === '"' || ch === "'") { q = ch; continue; }
     if (ch === '\\' && i + 1 < cmd.length) { cur += cmd[++i]; continue; }
-    if (/\s/.test(ch) || ';&|()<>`$'.includes(ch)) { if (cur) words.push(cur); cur = ''; if (!/\s/.test(ch)) words.push(ch); continue; }
+    // Only the blanks bash splits on: an odd space (U+00A0) stays inside the word, as in bash.
+    if (BLANK.test(ch) || ';&|()<>`$'.includes(ch)) { if (cur) words.push(cur); cur = ''; if (!BLANK.test(ch)) words.push(ch); continue; }
     cur += ch;
   }
   if (cur) words.push(cur);

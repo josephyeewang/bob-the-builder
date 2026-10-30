@@ -135,6 +135,8 @@ export function checkFile(path, buf, list) {
   const type = realType(buf);
   if (type && list.some((e) => e.type === type && e.re.test(path))) {
     const unpacked = pngPixels(buf);
+    // Packed data written out as text in a text note or in the pixels (confirm audit of round 4, Minor 1).
+    if (packedAsText(buf.toString('latin1')) || (unpacked && packedAsText(unpacked.toString('latin1')))) return { ok: false, reason: `the new file ${shown} is an image holding packed data written out as text, which cannot be scanned for secrets` };
     if (packedStart(unpacked)) return { ok: false, reason: `the new file ${shown} is an image whose pixels start like packed data, which cannot be scanned for secrets` };
     return { ok: true, binary: { path, type }, unpacked };
   }

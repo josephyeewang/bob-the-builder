@@ -177,6 +177,14 @@ test('L37: every one of the 11 letters, and a look-alike on no list, is refused 
   }
   // An invisible mark is no letter, but the fold drops it: refused in the shell as well (soft hyphen).
   blocked(secret.decide(bash('cat notes\u00ad.md', w.work), w.args), 'a soft hyphen inside a shell word');
+  // Confirm audit of L37: a search pattern with a wildcard or a letter range that could match a secret is refused,
+  // and an odd space stays inside its shell word, as bash keeps it. Patterns are built at run time.
+  for (const g of [`${dot('en')}?`, `${dot('e')}*`, `${dot('e')}[l-o]v`, '.[!a]nv', '.[d-f]nv']) {
+    blocked(secret.decide({ tool_name: 'Grep', tool_input: { pattern: 'x', glob: g, path: w.work } }, w.args), `Grep glob ${g}`);
+    blocked(secret.decide({ tool_name: 'Glob', tool_input: { pattern: `**/${g}`, path: w.work } }, w.args), `Glob ${g}`);
+  }
+  blocked(secret.decide({ tool_name: 'Glob', tool_input: { pattern: `**/${dot('s')}[r-t]h/*` } }, w.args), 'Glob into the key folder by a letter range');
+  blocked(secret.decide(bash(`cat ${dot('e')}\u00a0nv`, w.work), w.args), 'an odd space inside a shell word');
   // Plain ASCII passes: capitals, scoped packages, route folders, and a dash in a message.
   for (const p of ['src/App.tsx', 'node_modules/@types/x/index.d.ts', 'app/[id]/(group)/page.tsx', 'a+b.md']) {
     passed(secret.decide({ tool_name: 'Read', tool_input: { file_path: join(w.work, p) } }, w.args), p);
