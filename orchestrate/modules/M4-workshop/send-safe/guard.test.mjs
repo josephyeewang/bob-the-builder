@@ -328,3 +328,69 @@ test('tmux messenger: argument arrays, literal text, refuses control characters 
   await assert.rejects(m.send('w-1', ';'), /ends in/);
   assert.equal(calls.length, 1);
 });
+
+test('two open questions: answering one leaves the session waiting on the other (audit round 2 MAT-1)', async () => {
+  const cases = [
+    ['q1', 'q2', 'q1'], // the first one answered first
+    ['q1', 'q2', 'q2'],
+    ['', 'q2', ''], // a question with no id is ended only by an answer with no id
+    ['q1', '', 'q1'],
+  ];
+  for (const [a, b, answered] of cases) {
+    const store = new MemoryStore();
+    const tracker = new ActivityTracker(store);
+    store.set('L', { id: 'L', activity: { state: State.ACTIVE, at: 0 }, firstSignalAt: 1 });
+    tracker.applySignal('L', signalFromHook('pre-tool-use', { tool_name: 'AskUserQuestion', tool_use_id: a }));
+    tracker.applySignal('L', signalFromHook('pre-tool-use', { tool_name: 'AskUserQuestion', tool_use_id: b }));
+    tracker.applySignal('L', signalFromHook('post-tool-use', { tool_name: 'AskUserQuestion', tool_use_id: answered }));
+    tracker.applySignal('L', signalFromHook('notification', { notification_type: 'idle_prompt' }));
+    assert.equal(store.get('L').activity.state, State.WAITING_INPUT, `${a}/${b} answered ${answered}`);
+    const guard = new Guard({ store: { getSession: (id) => store.get(id) }, messenger: { send: async () => assert.fail('typed into an open question') } });
+    assert.equal((await sendSafe(guard, 'L', 'WRAP')).outcome, Outcome.SUPPRESSED_AWAITING_USER);
+    assert.equal((await guard.nudgeUrgent('L', 'WRAP', { acceptsWaitingInput: () => true })).outcome, Outcome.SUPPRESSED_AWAITING_USER);
+  }
+  // An answer with no id does not end a question that has one.
+  const store = new MemoryStore();
+  const tracker = new ActivityTracker(store);
+  store.set('L', { id: 'L', activity: { state: State.ACTIVE, at: 0 }, firstSignalAt: 1 });
+  tracker.applySignal('L', signalFromHook('pre-tool-use', { tool_name: 'AskUserQuestion', tool_use_id: 'q1' }));
+  tracker.applySignal('L', signalFromHook('post-tool-use', { tool_name: 'AskUserQuestion' }));
+  assert.equal(store.get('L').activity.state, State.WAITING_INPUT);
+  // Both answered: the session moves on.
+  tracker.applySignal('L', signalFromHook('post-tool-use', { tool_name: 'AskUserQuestion', tool_use_id: 'q1' }));
+  assert.notEqual(store.get('L').activity.state, State.WAITING_INPUT);
+});
+
+test('a line the tmux sender refuses is reported as refused, not sent (audit round 2)', async () => {
+  const calls = [];
+  const messenger = tmuxMessenger({ run: async (cmd, args) => calls.push([cmd, ...args]), targetFor: (id) => (id === 'bad' ? 'x;rm' : `orch:${id}`) });
+  const sessions = new Map([['w-1', live(State.IDLE, { id: 'w-1' })], ['bad', live(State.IDLE, { id: 'bad' })]]);
+  const guard = new Guard({ store: { getSession: async (id) => sessions.get(id) ?? null }, messenger });
+  assert.equal((await sendSafe(guard, 'w-1', 'two\nlines')).outcome, Outcome.REFUSED_BY_SENDER);
+  assert.equal((await sendSafe(guard, 'w-1', 'WRAP;')).outcome, Outcome.REFUSED_BY_SENDER);
+  assert.equal((await sendSafe(guard, 'bad', 'WRAP')).outcome, Outcome.REFUSED_BY_SENDER);
+  assert.equal(calls.length, 0);
+  assert.equal((await sendSafe(guard, 'w-1', 'WRAP')).outcome, Outcome.SENT);
+  // A failure while typing is still "sent": part of the line may be on screen.
+  const failing = new Guard({ store: { getSession: async (id) => sessions.get(id) ?? null }, messenger: { send: async () => { throw new Error('pane gone'); } } });
+  assert.equal((await sendSafe(failing, 'w-1', 'WRAP')).outcome, Outcome.SENT);
+});
+
+test('a late hook from a stopped launch never moves the restarted session (audit m3)', async () => {
+  const store = new MemoryStore();
+  const tracker = new ActivityTracker(store);
+  store.set('L', { id: 'L', activity: { state: State.IDLE, at: 0 }, firstSignalAt: 1 });
+  assert.equal(tracker.beginLaunch('L', 'launch-2'), true);
+  assert.equal(store.get('L').firstSignalAt, null);
+  // The old process's stop and idle notice: dropped, so the startup gate stays shut.
+  tracker.applySignal('L', signalFromHook('stop', {}, 5, 'launch-1'));
+  tracker.applySignal('L', signalFromHook('notification', { notification_type: 'idle_prompt' }, 6, 'launch-1'));
+  tracker.applySignal('L', signalFromHook('stop', {}, 7)); // names no launch
+  assert.equal(store.get('L').firstSignalAt, null);
+  const guard = new Guard({ store: { getSession: (id) => store.get(id) }, messenger: { send: async () => assert.fail('typed into a starting session') } });
+  assert.equal((await sendSafe(guard, 'L', 'WRAP')).outcome, Outcome.SUPPRESSED_STARTUP_PENDING);
+  // The new launch's own hook counts.
+  tracker.applySignal('L', signalFromHook('stop', {}, 8, 'launch-2'));
+  assert.equal(store.get('L').firstSignalAt, 8);
+  assert.equal(store.get('L').activity.state, State.IDLE);
+});

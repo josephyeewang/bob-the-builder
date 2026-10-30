@@ -52,7 +52,7 @@ export function deriveActivityState(event, payload = {}) {
 // pre-tool-use reads waiting_input and its post (the answer) is its own event that may end
 // that wait. Neither is a tool event, so neither is folded into the tool-flight rule.
 export const ASK_TOOL = 'AskUserQuestion';
-export function signalFromHook(event, payload = {}, at) {
+export function signalFromHook(event, payload = {}, at, launchId) {
   let state = deriveActivityState(event, payload);
   if (!state) return null;
   const isAsk = payload?.tool_name === ASK_TOOL;
@@ -67,5 +67,6 @@ export function signalFromHook(event, payload = {}, at) {
     toolUseId: typeof payload?.tool_use_id === 'string' ? payload.tool_use_id : '',
     prompt: typeof payload?.prompt === 'string' ? payload.prompt : undefined,
     at,
+    ...(typeof launchId === 'string' && launchId ? { launchId } : {}),
   };
 }

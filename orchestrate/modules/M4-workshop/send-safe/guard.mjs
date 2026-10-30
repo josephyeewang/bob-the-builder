@@ -24,10 +24,11 @@ export const Outcome = Object.freeze({
   SUPPRESSED_INPUT_GATED: 'suppressed_input_gated',
   SUPPRESSED_STARTUP_PENDING: 'suppressed_startup_pending',
   SUPPRESSED_NOT_PERSON: 'suppressed_not_person', // ours: deliver() on an automated guard
+  REFUSED_BY_SENDER: 'refused_by_sender', // ours: the sender refused the line before typing anything
 });
 
 // Ours (audit 0b-3 R29 MAT-3): every automated write carries the prefix, so M2 Approvals can
-// tell it from Joe's typing. Only a guard made by personGuard() may type an unprefixed line,
+// tell it from the person's own typing. Only a guard made by personGuard() may type an unprefixed line,
 // and the Dispatcher is never given one.
 const PERSON = Symbol('person');
 export const withWatchdogPrefix = (text) => `${WATCHDOG_PREFIX} ${String(text).replace(/^\s*\[watchdog\]\s*/i, '')}`;
@@ -123,6 +124,8 @@ export class Guard {
       try {
         await this.messenger.send(id, text);
       } catch (err) {
+        // Ours (audit round 2): a line the sender refused was never typed, so it is not "sent".
+        if (err instanceof SenderRefusal) return { outcome: Outcome.REFUSED_BY_SENDER, error: err };
         return { outcome: Outcome.SENT, error: err }; // the write was attempted
       }
       return { outcome: Outcome.SENT };
@@ -150,16 +153,19 @@ export function personGuard(opts) {
   return new Guard({ ...opts, [PERSON]: true });
 }
 
+/** Thrown by a sender that refuses a line before typing any of it. */
+export class SenderRefusal extends Error {}
+
 // Types into a tmux pane: literal text, then Enter. Arguments are an array (no shell); text
 // with control characters is refused, since a newline inside it would submit early.
 export function tmuxMessenger({ run, targetFor }) {
   return {
     async send(id, text) {
-      if (/[\u0000-\u001f\u007f]/.test(text)) throw new Error('text holds control characters');
+      if (/[\u0000-\u001f\u007f]/.test(text)) throw new SenderRefusal('text holds control characters');
       // tmux reads an argument ending in ";" as a command separator and drops it (m2).
-      if (/;\s*$/.test(text)) throw new Error('text ends in ";"');
+      if (/;\s*$/.test(text)) throw new SenderRefusal('text ends in ";"');
       const target = targetFor(id);
-      if (!target || /[^A-Za-z0-9_.:%$@-]/.test(target)) throw new Error(`bad tmux target for ${id}`);
+      if (!target || /[^A-Za-z0-9_.:%$@-]/.test(target)) throw new SenderRefusal(`bad tmux target for ${id}`);
       // One tmux call, so no hook can land between the text and its Enter (m1).
       await run('tmux', ['send-keys', '-t', target, '-l', '--', text, ';', 'send-keys', '-t', target, 'Enter']);
     },

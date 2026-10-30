@@ -52,7 +52,7 @@ export class ActivityTracker {
     this.store = store;
     this.notify = notify;
     this.now = now;
-    // id -> { inflight: Map<toolUseId, toolName>, blockedCandidate, degraded, openAsk }
+    // id -> { inflight: Map<toolUseId, toolName>, blockedCandidate, degraded, openAsks }
     this.flights = new Map();
   }
 
@@ -66,7 +66,7 @@ export class ActivityTracker {
     if (!s.event) return isSticky(cur) ? suppressed : s;
     let fl = this.flights.get(id);
     const ensure = () => {
-      if (!fl) { fl = { inflight: new Map(), blockedCandidate: '', degraded: false, openAsk: null }; this.flights.set(id, fl); }
+      if (!fl) { fl = { inflight: new Map(), blockedCandidate: '', degraded: false, openAsks: [] }; this.flights.set(id, fl); }
       return fl;
     };
 
@@ -84,13 +84,17 @@ export class ActivityTracker {
     // another dialog is showing. Remember it, and while it is open only its own answer, an
     // escalation to blocked, a real prompt from the person or the session's end may move the
     // state. Idle notifications, stops and helper traffic never do.
-    if (s.event === 'ask-user-question-open') ensure().openAsk = s.toolUseId || '*';
-    if (fl?.openAsk && s.event !== 'ask-user-question-open') {
+    // Every open question is remembered (audit round 2 MAT-1): two boxes can be open at once.
+    // A question with no id is kept as '*' and is ended only by an answer with no id.
+    if (s.event === 'ask-user-question-open') { const f = ensure(); (f.openAsks ??= []).push(s.toolUseId || '*'); }
+    if (fl?.openAsks?.length && s.event !== 'ask-user-question-open') {
       const realPrompt = s.event === 'user-prompt-submit' && !isWatchdogText(s.prompt);
       const ends = s.state === State.EXITED;
       if (s.event === 'ask-user-question-answered') {
-        if (fl.openAsk !== '*' && s.toolUseId !== fl.openAsk) return suppressed;
-        fl.openAsk = null;
+        const i = fl.openAsks.indexOf(s.toolUseId || '*');
+        if (i < 0) return suppressed; // not a question we know is open: stay waiting
+        fl.openAsks.splice(i, 1);
+        if (fl.openAsks.length) return suppressed; // another box is still on screen
         if (cur === State.BLOCKED) return suppressed; // the other dialog is still showing
         return s;
       }
@@ -151,11 +155,23 @@ export class ActivityTracker {
     return s;
   }
 
-  // Applies one hook signal { valid, state, event, toolName, toolUseId, prompt, at }.
+  // Ours, as upstream's launch check (audit 0b-3 R29 m3): a restart under the same name gets a
+  // new launch id. Until its first hook it has sent no signal, so the startup gate stays shut.
+  beginLaunch(id, launchId) {
+    const rec = this.store.get(id);
+    if (!rec || typeof launchId !== 'string' || !launchId) return false;
+    this.flights.delete(id);
+    this.store.set(id, { ...rec, launchId, firstSignalAt: null, activity: { state: State.ACTIVE, at: this.now() } });
+    return true;
+  }
+
+  // Applies one hook signal { valid, state, event, toolName, toolUseId, prompt, at, launchId }.
   applySignal(id, signal) {
     const rec = this.store.get(id);
     if (!rec || rec.terminated) return;
     let s = signal;
+    // A late hook from a stopped launch (or one that names none) never moves the new one.
+    if (rec.launchId && s?.launchId !== rec.launchId) return;
     // Ours, as upstream (audit 0b-3 R29 MAT-2): an exited session's terminal may now be a plain
     // shell. Late hooks from the old process never bring it back; only a real prompt does.
     if (rec.activity.state === State.EXITED && s.state !== State.EXITED
