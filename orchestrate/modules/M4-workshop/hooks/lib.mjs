@@ -131,17 +131,24 @@ export const joinLines = (cmd) => String(cmd ?? '').replace(/\\\r?\n/g, '');
 
 /** Splits a shell line into words, roughly: quotes are removed, joiners split. For matching, not running. */
 const BLANK = /[ \t\n]/;
-export function shellWords(cmd) {
+export function shellWords(cmd, { groups = false } = {}) {
   if (typeof cmd !== 'string') return [];
   cmd = joinLines(cmd);
   const words = [];
   let cur = '';
   let q = null;
+  // With `groups`, a `(` inside a word is read as a zsh pattern group (`a(b)c` is `abc`; audit of L41, MAT-9): its
+  // brackets are dropped so the word reads whole, and a `|` inside it stays in the word (`unreadable` refuses that).
+  // Without it the line splits at every bracket, as before; the guards check both readings (`bothWords`).
+  let group = 0;
   for (let i = 0; i < cmd.length; i += 1) {
     const ch = cmd[i];
     if (q) { if (ch === q) q = null; else if (ch === '\\' && q === '"' && i + 1 < cmd.length) cur += cmd[++i]; else cur += ch; continue; }
     if (ch === '"' || ch === "'") { q = ch; continue; }
     if (ch === '\\' && i + 1 < cmd.length) { cur += cmd[++i]; continue; }
+    if (groups && ch === '(' && (cur || group)) { group += 1; continue; }
+    if (ch === ')' && group) { group -= 1; continue; }
+    if (ch === '|' && group) { cur += ch; continue; }
     // Only the blanks bash splits on: an odd space (U+00A0) stays inside the word, as in bash.
     if (BLANK.test(ch) || ';&|()<>`$'.includes(ch)) { if (cur) words.push(cur); cur = ''; if (!BLANK.test(ch)) words.push(ch); continue; }
     cur += ch;
@@ -149,6 +156,9 @@ export function shellWords(cmd) {
   if (cur) words.push(cur);
   return words;
 }
+
+/** Every word in both readings of the line: split at each bracket, and with zsh groups read whole. */
+export const bothWords = (cmd) => [...new Set([...shellWords(cmd), ...shellWords(cmd, { groups: true })])];
 
 /** The command line split into its commands (at ; && || | and newlines), each a word list. */
 export function shellCommands(cmd) {
@@ -280,7 +290,9 @@ export function globRe(g, flags = '') {
       const from = i + 1 + (not ? 1 : 0);
       const end = g.indexOf(']', from + 1);
       if (end > from) {
-        s += `[${not ? '^' : ''}${g.slice(from, end).replace(/[\\\]^[]/g, '\\$&')}]`;
+        // A letter class (`[[:alpha:]]`, `[[=e=]]`, `[[.a.]]`) is not modelled: callers refuse on the throw.
+        if (/\[[:=.]/.test(g.slice(from, end + 1))) throw new Error('a letter class in a pattern');
+        s +=`[${not ? '^' : ''}${g.slice(from, end).replace(/[\\\]^[]/g, '\\$&')}]`;
         i = end;
         continue;
       }
@@ -311,6 +323,7 @@ export function unreadable(cmd) {
   // `env -S "…"` splits one word into a command (shellCommands drops `env` and its flags).
   const all = shellWords(c);
   // xargs is dropped as a wrapper by shellCommands, so it is looked for among the words.
+  if (shellWords(c, { groups: true }).some((w) => w !== '|' && w.includes('|'))) return 'a zsh pattern group with a choice in it';
   const feeder = all.find((w) => ['xargs', 'parallel'].includes(basename(w)));
   if (feeder) return `"${basename(feeder)}" builds commands the guard can't see`;
   for (let i = 0; i < all.length; i += 1) {
