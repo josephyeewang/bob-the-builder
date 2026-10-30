@@ -22,14 +22,32 @@ For daily use, load `build-protocol-core.md` (compact reference). Load `build-pr
 ## File Structure
 
 ```
-build-protocol.md          ← Full reference: foundation, the NEW mode, the project checklist, session start, protocol evolution; points to the files below
-modes/                      ← The AUDIT and EVOLVE steps in full (audit.md, evolve.md)
-reference/                  ← Glossary, project profiles, architecture patterns, integration playbooks, anti-patterns, invariants
-build-protocol-core.md     ← Loaded into every session: modes, steps, gates, and a one-line index of the rules
+VERSION                     ← Bob's version, one line (D-032)
+skill/SKILL.md              ← The front door: what /bob loads first
+build-protocol-core.md      ← Loaded into every session: modes, steps, gates, and a one-line index of the rules
 rules.md                    ← Every numbered rule, filed by when it is needed
-templates/                  ← Extractable templates (phase report, behavioral core, etc.)
-README.md                   ← Public-facing project overview
+build-protocol.md           ← Full reference: foundation, the NEW mode, the project checklist, session start, protocol evolution; points to the files below
+modes/                      ← The AUDIT, EVOLVE and UPGRADE steps in full (audit.md, evolve.md, upgrade.md)
+reference/                  ← Glossary, project profiles, architecture patterns, integration playbooks, anti-patterns, invariants, what Bob covers
+audit-lenses/               ← The audit lens library: one file per lens, the list in README.md, panel choice in _selection-rubric.md
+templates/                  ← Templates a project copies (phase report, behavioral core, etc.); blueprint-roadmap/ is the Blueprint
+scripts/                    ← Bob's checks and tools (scripts/blueprint/ for the Blueprint, scripts/hooks/ for guard hooks)
+skills/                     ← The two design skills (design-gallery, design-mockups)
+orchestrate/                ← ORCHESTRATE, the multi-session loop (being built; its own README and LANES.md)
+decision-log.md, CHANGELOG.md, audit-log.md, evolutions/, retros/, lens-retros/, fixtures/  ← History: why things are the way they are
+README.md, SECURITY.md, CONTRIBUTING.md, LICENSE, third_party/, assets/                   ← The public face
+CLAUDE.md (imports this file), .github/workflows/scripts-ci.yml                           ← Instructions for Claude; the checks that run on every change
 ```
+
+## Who changes what (parallel sessions)
+
+When two or more sessions work on Bob at once, each area has one writer. A change another area needs goes to that area's owner, not into its files. `scripts/one-home-check.mjs` skips text whose owner has not fixed it yet; its `SKIP` list says which.
+
+| Area | Owner | Shared files both touch (pull first, keep edits small) |
+|---|---|---|
+| `orchestrate/`, `templates/blueprint-roadmap/`, `scripts/blueprint/` | ORCHESTRATE lead (lanes in `orchestrate/LANES.md`) | — |
+| The NEW mode and startup text: core "MODES" and "MODE: NEW", `build-protocol.md` Part II, the startup steps in `skill/SKILL.md`; `scripts/bob-init.sh`, `spec-audit.py`, `doc-pointers-check.mjs` | ORCHESTRATE lead | — |
+| Everything else | Bob upkeep | `VERSION` (one bump per change set; the ORCHESTRATE lanes bump once per milestone), `CHANGELOG.md`, `decision-log.md`, `.github/workflows/scripts-ci.yml` |
 
 ## Key Rules
 
@@ -49,7 +67,7 @@ Bob's Step 1a requires every product to declare success metrics. Bob is a produc
 
 ## Current Version
 
-**See the "Core Reference for Build Protocol vN.N" line near the end of `build-protocol-core.md`** — that one line is the version; `bob-upgrade.mjs` and `scripts/bob-update-check.sh` both read it there. The dated record of what changed is `CHANGELOG.md`; the reasons are in `decision-log.md`. (This section used to restate the version and fell behind — it said v2.31 while Bob was at v2.40 — so it now only points; D-020.)
+**Bob's version is the one line in `VERSION`** (D-032); `bob-upgrade.mjs`, `scripts/bob-update-check.sh` and CI read it there. Until D-032 it sat on the core's last line, so every change edited the file every session reads, and parallel sessions collided on it. The dated record of what changed is `CHANGELOG.md`; the reasons are in `decision-log.md`. (This section used to restate the version and fell behind, so it only points; D-020.)
 
 ## Release notes
 

@@ -454,7 +454,7 @@ echo "bob-upgrade.mjs"
 UG="$TMP/ug"; OB="$UG/bob"; mkdir -p "$OB"
 printf '[user]\n\tname = selftest\n\temail = selftest@example.com\n[core]\n\thooksPath = /dev/null\n[commit]\n\tgpgsign = false\n[init]\n\tdefaultBranch = main\n' > "$UG/gitconfig"
 cp -R "$HERE/../scripts" "$HERE/../templates" "$OB/"
-cp "$HERE/../build-protocol-core.md" "$HERE/../decision-log.md" "$OB/"
+cp "$HERE/../build-protocol-core.md" "$HERE/../decision-log.md" "$HERE/../VERSION" "$OB/"
 newrepo "$OB"
 echo "// an older line from an earlier Bob" >> "$OB/scripts/hooks/config-protection.js"
 git -C "$OB" add -A && git -C "$OB" commit -qm "older Bob (D-017)"
@@ -467,6 +467,10 @@ git -C "$OB" commit -qam "Config protection also guards the required-checks list
 scaffold fresh
 expect "bob-init writes an install record naming the Bob commit" 0 "\"bob_commit\": \"$OLD\"" -- cat "$UG/older/.bob/installed.json"
 expect "a fresh project: everything up to date" 0 "Nothing is out of date" -- ub fresh
+expect "bob-upgrade names Bob's version from VERSION (D-032)" 0 "Bob available here: $(head -1 "$HERE/../VERSION")" -- ub fresh
+mv "$OB/VERSION" "$OB/VERSION.off"; printf '\n*Core Reference for Build Protocol v9.9 — an older Bob*\n' >> "$OB/build-protocol-core.md"
+expect "bob-upgrade: a Bob from before VERSION -> reads the old core line" 0 "Bob available here: v9.9" -- ub fresh
+mv "$OB/VERSION.off" "$OB/VERSION"
 expect "a fresh project: the commit-time check starts blocking" 0 '"commit_sweep": "block"' -- cat "$UG/fresh/.bob/installed.json"
 # 'older': simulate pieces Bob added after this project was set up (gone, and never recorded).
 node -e '
@@ -624,6 +628,76 @@ if command -v jq >/dev/null 2>&1; then
 else
   echo "  SKIP  (jq not installed)"
 fi
+
+# ── 15. one-home-check.mjs (D-032) ───────────────────────────────────────────
+echo "one-home-check.mjs"
+OH="$HERE/one-home-check.mjs"; OR="$TMP/onehome"; OS="$TMP/onehome-skip.json"
+printf '[{"file":"build-protocol-core.md","heading":"## MODE: NEW","checks":["stubs"]}]\n' > "$OS"
+oh_base() {
+  rm -rf "$OR"; mkdir -p "$OR/audit-lenses" "$OR/modes" "$OR/scripts" "$OR/reference" "$OR/skill"
+  printf '| # | Rule | Enforced by | `rules.md` group |\n|---|---|---|---|\n| 1 | a | `PROSE` | 1 |\n| 2 | b | `SCRIPT` | 2 |\n\nRun `~/.claude/skills/bob/../scripts/foo.sh`. See `~/.claude/skills/bob/../reference/glossary.md` (was Appendix J).\n' > "$OR/build-protocol-core.md"
+  printf '## 1. First\n\n<!-- Rule 1 -->\n\n1. a\n\n## 2. Second\n\n<!-- Rule 2 -->\n\n2. b\n' > "$OR/rules.md"
+  printf -- '---\nid: L01\n---\n' > "$OR/audit-lenses/L01-a.md"; printf -- '---\nid: L02\n---\n' > "$OR/audit-lenses/L02-b.md"
+  printf '| 1. One | L01 | x |\n| 2. Two | L02 | y |\n' > "$OR/audit-lenses/README.md"
+  printf 'Panel A: L01-L02\n' > "$OR/audit-lenses/_selection-rubric.md"
+  printf '# Audit\n' > "$OR/modes/audit.md"; printf 'x\n' > "$OR/scripts/foo.sh"; printf 'g\n' > "$OR/reference/glossary.md"
+}
+oh_base
+expect "one-home: a clean tree -> OK" 0 "one-home-check: OK" -- node "$OH" --root "$OR"
+expect "one-home: Bob's own repo -> OK" 0 "one-home-check: OK" -- node "$OH"
+oh_base; printf '| 3 | c | `PROSE` | 1 |\n' >> "$OR/build-protocol-core.md"
+expect "one-home: an index row for a rule rules.md lacks -> FAIL" 1 "Rule 3 is in the index but not in rules.md" -- node "$OH" --root "$OR"
+oh_base; sed -i.bak 's/| `SCRIPT` | 2 |/| `SCRIPT` | 1 |/' "$OR/build-protocol-core.md"
+expect "one-home: an index row naming the wrong group -> FAIL" 1 "Rule 2 says group 1; rules.md files it in group 2" -- node "$OH" --root "$OR"
+oh_base; printf -- '---\nid: L03\n---\n' > "$OR/audit-lenses/L03-c.md"; printf '| 3. Three | L03 | z |\n' >> "$OR/audit-lenses/README.md"
+expect "one-home: a lens the rubric never names -> FAIL" 1 "L03 is never named, so no panel can include it" -- node "$OH" --root "$OR"
+oh_base; printf '| 1. Engineering | L01 | x |\n' >> "$OR/modes/audit.md"
+expect "one-home: a second lens band table -> FAIL" 1 "modes/audit.md:2: a lens band table" -- node "$OH" --root "$OR"
+oh_base; printf 'Run `node scripts/foo.sh` now.\n' >> "$OR/rules.md"
+expect "one-home: a short-form Bob script command -> FAIL" 1 "fails from a project" -- node "$OH" --root "$OR"
+oh_base; printf 'Read `~/.claude/skills/bob/../reference/gone.md`.\n' >> "$OR/modes/audit.md"
+expect "one-home: a Bob path that does not exist -> FAIL" 1 "names reference/gone.md, which does not exist in Bob" -- node "$OH" --root "$OR"
+oh_base; printf 'See Appendix K.\n' >> "$OR/build-protocol-core.md"
+expect "one-home: a reference to an appendix pointer -> FAIL" 1 "Appendix K. is a one-line pointer" -- node "$OH" --root "$OR"
+oh_base; printf '\n## 3. Third\n\n<!-- Rule 9 -->\n\n9. c\n' >> "$OR/rules.md"
+expect "one-home: a rule with no index row -> FAIL" 1 "Rule 9 has no row in the core's index" -- node "$OH" --root "$OR"
+oh_base; printf '| 1. One | L01 | x |\n' > "$OR/audit-lenses/README.md"
+expect "one-home: a lens missing from the lens README -> FAIL" 1 "L02 is not listed" -- node "$OH" --root "$OR"
+oh_base; printf -- '---\nid: L03\n---\n' > "$OR/audit-lenses/L03-c.md"; printf '| 3. Three | L03 | z |\n' >> "$OR/audit-lenses/README.md"
+printf 'Panel A: L01–L03\n' > "$OR/audit-lenses/_selection-rubric.md"
+expect "one-home: an en-dash range names the lens inside it (L02)" 0 "one-home-check: OK" -- node "$OH" --root "$OR"
+oh_base; printf 'Run `scripts/foo.sh <docs-dir>`.\n' >> "$OR/rules.md"
+expect "one-home: a bare Bob command with arguments -> FAIL" 1 "scripts/foo.sh …. only works inside Bob" -- node "$OH" --root "$OR"
+oh_base; mkdir -p "$OR/templates"; printf '{"note": "Check it with: node ~/.claude/skills/bob/../scripts/foo.sh"}\n' > "$OR/templates/t.json"
+expect "one-home: a command in a .json template is judged too" 1 "templates/t.json:1" -- node "$OH" --root "$OR"
+oh_base; printf 'Run `node ~/.claude/skills/bob/../scripts/foo.sh`.\n' >> "$OR/rules.md"
+expect "one-home: node through the link (node does not follow it) -> FAIL" 1 "fails from a project" -- node "$OH" --root "$OR"
+oh_base; printf 'Run `node "$(realpath ~/.claude/skills/bob/..)/scripts/foo.sh"`.\n' >> "$OR/rules.md"
+expect "one-home: node with the realpath form -> OK" 0 "one-home-check: OK" -- node "$OH" --root "$OR"
+oh_base; printf '```\nbash scripts/foo.sh\n```\n' >> "$OR/modes/audit.md"
+expect "one-home: a short-form command inside a fenced block -> FAIL" 1 "modes/audit.md:3: .scripts/foo.sh. only works" -- node "$OH" --root "$OR"
+oh_base; printf '## MODE: NEW — Steps\n\nNothing to hide.\n' >> "$OR/build-protocol-core.md"
+expect "one-home: a SKIP entry that hides nothing -> FAIL" 1 "no longer hides anything" -- node "$OH" --root "$OR" --skip "$OS"
+oh_base; printf '```\nscripts/foo.sh --all\n```\n' >> "$OR/modes/audit.md"
+expect "one-home: a bare Bob command inside a fenced block -> FAIL" 1 "modes/audit.md:3: .scripts/foo.sh …. only works" -- node "$OH" --root "$OR"
+oh_base; printf '[{"file":"rules.md","heading":"## 2","checks":["Bob paths"]}]\n' > "$TMP/oh-skip2.json"; printf '\n## 20. Later\n\nRun `bash scripts/foo.sh`.\n' >> "$OR/rules.md"
+expect "one-home: a SKIP heading does not match a longer heading (## 2 vs ## 20)" 1 "rules.md:.*only works inside Bob" -- node "$OH" --root "$OR" --skip "$TMP/oh-skip2.json"
+oh_base; printf 'Bob runs 3 ready-made audits.\n' > "$OR/README.md"
+expect "one-home: a README audit count that is wrong -> FAIL" 1 "says 3 audits; there are 2 lens files" -- node "$OH" --root "$OR"
+oh_base; printf '## MODE: NEW — Steps\n\nSee Appendix K.\n' >> "$OR/build-protocol-core.md"
+expect "one-home: the NEW section's appendix wording is skipped (SKIP list)" 0 "one-home-check: OK" -- node "$OH" --root "$OR" --skip "$OS"
+printf 'Run `bash scripts/foo.sh`.\n' >> "$OR/build-protocol-core.md"
+expect "one-home: ...but its Bob paths are still judged" 1 "scripts/foo.sh. only works inside Bob" -- node "$OH" --root "$OR" --skip "$OS"
+
+# ── 16. smoke tests: bob-update-check.sh · bob-stats.sh · repo-map.sh (D-032) ─
+echo "bob-update-check.sh · bob-stats.sh · repo-map.sh"
+expect "bob-update-check: one BOB_UPDATE line, never a failure" 0 "^BOB_UPDATE: status=[a-z]+" -- \
+  env HOME="$TMP/uc-home" bash "$HERE/bob-update-check.sh" --force
+SR="$TMP/stats"; newrepo "$SR"
+git -C "$SR" commit -q --allow-empty -m "feat: a"; git -C "$SR" commit -q --allow-empty -m "fix: b"
+expect "bob-stats: counts a labelled fix (1 of 2)" 0 "Labelled fixes: +1 +\\(50%\\)" -- bash -c "cd '$SR' && bash '$HERE/bob-stats.sh'"
+mkdir -p "$SR/src"; : > "$SR/src/x.js"
+expect "repo-map: writes docs/repo-map.md" 0 "" -- bash -c "cd '$SR' && bash '$HERE/repo-map.sh' >/dev/null && grep -q '^# Repo Map' docs/repo-map.md"
 
 echo
 echo "selftest-gate-scripts: $PASS passed, $FAIL failed"

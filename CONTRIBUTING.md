@@ -27,7 +27,7 @@ Likely-to-be-rejected contributions:
 
 - Shell scripts use `bash` (not `sh`) and `set -euo pipefail`.
 - Stay POSIX-portable across macOS BSD and Linux GNU userlands.
-- No external dependencies beyond standard Unix tools + `git`.
+- No external dependencies: shell scripts use standard Unix tools, `git` and (for `lens-retro.sh`) `jq`; the `.mjs` checks use Node's built-in modules only (no npm packages); the `.py` ones use Python 3's standard library only.
 
 ## Reviews
 
