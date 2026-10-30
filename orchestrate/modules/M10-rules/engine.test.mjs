@@ -242,10 +242,15 @@ test('push_branch while paused: only an exact reverse of the reversed commit\'s 
   // Size (L34 confirm audit round 5, MATERIAL-B): a reverse list is looked up, not scanned; 3,000 files or more are refused.
   const many = Array.from({ length: 2999 }, (_, i) => file(`app/f${i}.ts`));
   const list = [...Array.from({ length: 1_000_000 - 2999 }, (_, i) => `x/${i}`), ...many.map((f) => f.path)];
+  // Timed against the same list with one file, so a busy machine slows both alike (a fixed 3 s limit failed at 3,044 ms in a
+  // loaded full run). Reading the list costs the same either way; a scan per file would make 2,999 files ~3,000 times slower.
+  const timed = (files) => { const t = Date.now(); const d = w.rules.may('push_branch', { product: 'app', card, reverses_files: list, files }).decision; return [d, Date.now() - t]; };
+  const [oneDecision, oneMs] = timed([many[0]]);
+  const [allDecision, allMs] = timed(many);
+  assert.equal(oneDecision, 'allow');
+  assert.equal(allDecision, 'allow');
+  assert.ok(allMs < 5 * oneMs + 1000, `2,999 files took ${allMs} ms, one file ${oneMs} ms`);
   let t0 = Date.now();
-  assert.equal(w.rules.may('push_branch', { product: 'app', card, reverses_files: list, files: many }).decision, 'allow');
-  assert.ok(Date.now() - t0 < 3000, `took ${Date.now() - t0} ms`);
-  t0 = Date.now();
   const huge = Array.from({ length: 60_000 }, (_, i) => file(`app/g${i}.ts`));
   assert.equal(w.rules.may('push_branch', { product: 'app', card, reverses_files: huge.map((f) => f.path), files: huge }).decision, 'deny');
   assert.ok(Date.now() - t0 < 1000, `took ${Date.now() - t0} ms`);
