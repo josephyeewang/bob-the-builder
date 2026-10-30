@@ -190,7 +190,7 @@ When **≥3 retros** have accumulated (this matches F48's own revisit trigger �
 
 ### The ritual steps
 
-1. **Aggregate** — `bash scripts/lens-retro.sh` (optionally with project paths as args). It reads every retro JSON and produces a ranked report: per lens, how often it was flagged Noise, how often swapped out, how many change-requests target it, and how often it should-have-executed-but-read.
+1. **Aggregate** — `bash ~/.claude/skills/bob/../scripts/lens-retro.sh` (optionally with project paths as args). It reads every retro JSON and produces a ranked report: per lens, how often it was flagged Noise, how often swapped out, how many change-requests target it, and how often it should-have-executed-but-read.
 2. **Read the underlying retros** for each flagged lens — the script flags *candidates*; the prose tells you *why*.
 3. **Bob proposes a specific edit** per flagged lens (modify check question / add lens / split / drop / fix rubric / fix execution-mode), citing which retros support it.
 4. **`→ HG` — Joe applies the higher-order filter.** This is the load-bearing gate. **Convergence across retros is signal, not a verdict** — exactly the D-004 / F35 lesson (5 of 9 tools converged on sharded rules; Joe correctly rejected it anyway). A lens flagged Noise in 4 of 5 retros is a strong *candidate for review*, never an *automatic edit*. Joe approves / rejects each.

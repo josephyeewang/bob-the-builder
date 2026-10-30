@@ -54,6 +54,8 @@ jobs:
         run: bash scripts/blueprint/selftest-blueprint.sh
       - name: ORCHESTRATE's tests (no dependencies, Node's own test runner)
         run: node --test $(find orchestrate -name '*.test.mjs')
+      - name: Each kind of content still has one home (D-032)
+        run: node scripts/one-home-check.mjs
       - name: The lens count in audit-lenses/README.md matches the lens files
         run: |
           files=$(ls audit-lenses/L[0-9][0-9]-*.md | grep -vc stack-checklists)
@@ -62,9 +64,9 @@ jobs:
           test "$files" = "$stated" || { echo "audit-lenses/README.md states $stated lenses but there are $files lens files"; exit 1; }
       - name: CHANGELOG.md has an entry for the current version (D-027)
         run: |
-          ver=$(grep -oE 'Core Reference for Build Protocol v[0-9]+(\.[0-9]+)+' build-protocol-core.md | head -1 | grep -oE 'v[0-9.]+$' || true)
-          echo "core version: $ver"
-          test -n "$ver" || { echo "no 'Core Reference for Build Protocol vN.N' line in build-protocol-core.md"; exit 1; }
+          ver=$(grep -oE '^v[0-9]+(\.[0-9]+)+$' VERSION | head -1 || true)
+          echo "version: $ver"
+          test -n "$ver" || { echo "VERSION must hold one line like v2.50 (D-032)"; exit 1; }
           grep -qE "^\*?${ver//./\\.}[:  —]" CHANGELOG.md || { echo "CHANGELOG.md has no entry starting with $ver"; exit 1; }
       - name: No template is copied back into build-protocol.md (D-027)
         run: |

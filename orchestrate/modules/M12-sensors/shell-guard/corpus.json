@@ -1,0 +1,48 @@
+{
+  "_about": "Shell-trick cases for the production guard (R-0b-70). {{P}} is replaced by every path form in runner.mjs (pathForms), so each template runs once per form. Every 'refuse' case must be refused; every 'allow' case must be allowed, so a guard that refuses everything also fails. Cases written for Bob, not copied from another project.",
+  "refuse": {
+    "write": [
+      "echo x > {{P}}",
+      "printf 'x' >> {{P}}",
+      "echo x | tee {{P}}",
+      "cp /tmp/x {{P}}",
+      "mv /tmp/x {{P}}",
+      "sed -i.bak 's/a/b/' {{P}}",
+      "dd if=/tmp/x of={{P}}",
+      "truncate -s 0 {{P}}",
+      "rm -f {{P}}",
+      "ln -sf /tmp/x {{P}}",
+      "python3 -c \"open('{{P}}','w').write('x')\"",
+      "node -e \"require('fs').writeFileSync('{{P}}','x')\""
+    ],
+    "read": [
+      "cat {{P}}",
+      "head -n 5 {{P}}",
+      "grep . {{P}}",
+      "base64 < {{P}}",
+      "source {{P}}",
+      "cp {{P}} /tmp/y"
+    ],
+    "wrapped": [
+      "bash -c 'cat {{P}}'",
+      "sh -c \"echo x > {{P}}\"",
+      "(cat {{P}})",
+      "echo $(cat {{P}})",
+      "echo `cat {{P}}`",
+      "eval \"cat {{P}}\"",
+      "env A=1 cat {{P}}",
+      "F={{P}}; cat \"$F\"",
+      "alias c=cat; c {{P}}",
+      "echo {{P}} | xargs cat",
+      "cat <<'EOF' > {{P}}\nx\nEOF",
+      "true && cat {{P}}"
+    ]
+  },
+  "allow": [
+    "ls",
+    "git status",
+    "node --test",
+    "cat README.md",
+    "echo hello > /tmp/scratch.txt"
+  ]
+}

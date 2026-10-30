@@ -3,6 +3,28 @@
 
 > Moved word for word from `build-protocol.md` on 2026-10-29 (D-030), so each mode and each reference lives in its own file. `build-protocol.md` keeps this heading as a pointer, so older references to it still lead here. A reference here to another Part, Step or Appendix means that section of [`build-protocol.md`](../build-protocol.md) unless it says otherwise (if that heading is now a pointer, the file it names).
 
+## Summary (moved from the core on 2026-10-29, D-032)
+
+**A7: Multi-Lens Audit (v2.17; current list and count in `audit-lenses/README.md`)** — Always runs after remediation. v2.17 replaced the prior single A7a–A7j audit phase with a multi-lens library at `audit-lenses/`; it is now a **multi-lens library**, organized into 8 bands (lens IDs are append-only, so newer lenses sit in earlier bands — group by band, not ID arithmetic):
+
+**The lens list lives in one place:** `~/.claude/skills/bob/../audit-lenses/README.md` (section "The N bands and M lenses"), every lens with its band and the question it answers. Choose a panel with `~/.claude/skills/bob/../audit-lenses/_selection-rubric.md`. (Until 2026-10-29 shorter copies of the list sat in the core and in this file, and both had fallen behind; D-032.)
+
+**A7 sub-steps:**
+
+- **A7.0 — Entry.** Bob reads `audit-artifacts/audit-history.json` and proposes a Curated panel (6–10 lenses) based on project profile per `audit-lenses/_selection-rubric.md`. Offers four options: Same / Complementary Curated / **Full Enchilada (every lens)** / Custom. User confirms at `→ HG`.
+- **A7.1 — Sequential lens execution.** Each lens in a **fresh Claude Code session** (writer/reviewer pattern). Lens reads prior reports in `audit-artifacts/` to convert ~15% intentional overlap into confirmation, not noise. Each lens writes markdown + JSON sidecar, and its last step appends a `retro_fragment` to the sidecar (`audit-lenses/_lens-retro.md` Tier 1). The lens files' own output sections don't repeat this, so start every lens with the entry prompt in `build-protocol.md` §A7.1, which asks for it.
+- **A7.2 — Aggregation.** Per `audit-lenses/_aggregation.md`: dedup, honor L28 wedge vetoes, rank by severity × frequency × user-impact, produce `audit-artifacts/audit-summary-{date}.md`.
+- **A7.3 — Fix & Defer.** Replaces prior A7i. Fix Criticals, triage Majors at `→ HG`, register Defers in `audit-log.md` with revisit triggers, log Rejects in `decision-log.md`. L01 Liveness 5xx / function-throws findings remain *always Critical*. PR-back prompt (v2.13) offered.
+- **A7.4 — Lens Retro (v2.18, auto-emit; two-tier capture v2.18.1).** Bob automatically writes `audit-artifacts/audit-retro-{date}.{md,json}` — a critique of the *lenses as instruments* (signal verdict per lens, coverage gap no lens caught, ranked change-requests for Bob), distinct from the findings. **Captured in two tiers so fresh-session/compaction context loss can't degrade it:** each lens writes its `retro_fragment` live to its JSON sidecar (Tier 1); A7.4 reads those fragments off disk and adds cross-lens synthesis (Tier 2) — it never reconstructs from memory. Feeds the Lens Retro Ritual (`audit-lenses/_lens-retro.md`): `~/.claude/skills/bob/../scripts/lens-retro.sh` aggregates retros from `lens-retros/`; once ≥3 accumulate, a human-gated proposal edits specific lenses. **Bob never auto-edits its own lenses** (D-005). Before saving the retro, run `bash ~/.claude/skills/bob/../scripts/lens-retro.sh --check <retro.json>` — a retro in another shape is not tallied (2026-10-28: two of three real retros had invented their own fields). No `→ HG`.
+
+**Selection rubric (panel examples):** the panels, with the lenses in each and why, are in `~/.claude/skills/bob/../audit-lenses/_selection-rubric.md` ("Pre-baked Curated panels"). (A shorter copy of them sat here until 2026-10-29; D-032.)
+
+A7 can be re-invoked anytime; standard cadence = a Curated panel after each major phase + a Full Enchilada before launch. **As of v2.30 (Rule 24) this cadence is ENFORCED, not advisory** — the Curated panel + the Anti-Forgetting Gate auto-fire at each phase boundary and gate-block advancement (tracked in `audit-ledger.json`); the human no longer has to remember to call them.
+
+**A8: Re-entry** — After remediation + scoped hardening, Claude presents next-step options based on Build Manifest state: resume building unbuilt capabilities (→ NEW mode Step 7, with inherited hardening obligations attached to each phase), switch to EVOLVE for new features (including external-fit candidates from A7f/g/h), or re-invoke A7 mid-build to re-scope.
+
+---
+
 
 *Assessing an existing, partially-built product and aligning it to this process.*
 
@@ -139,21 +161,6 @@ For each lens in the selected panel, in foundation-first order (L01 → L02 → 
 - **On provider overload (429/529) or subagent socket-close**, retry with backoff; if the subagent keeps failing, fall back to running the lens inline in the main session. Lens *content* is independent of execution infrastructure — don't let an overload abort the panel.
 - **A lens is only "complete" once its sidecar (findings + `retro_fragment`) is on disk.** Until then, treat it as in-progress and resumable.
 
-The library covers 8 bands (lens IDs are append-only — L31–L33 added in v2.21, L34 in v2.22, L35–L36 later, L37 the perpetual data-fidelity crawler in v2.32, sitting in earlier bands; group by the band, not the number):
-
-| Band | Lenses | Question |
-|---|---|---|
-| 1. Engineering Foundation | L01–L06, **L31** | Does the code work, match spec, hold up to security / privacy / supply-chain? **L31:** does one input/field flow all the way through — stored, deduped, propagated to every consumer, terminal states resolved? |
-| 2. User Experience | L07–L10 | Can users navigate, trust, delight, recover? |
-| 3. AI Behavior | L11–L14, **L32** | Is the AI accurate, right-sized, safe, efficient? **L32:** is the analytical *method* sound (right inputs, defensible weights, valid assumptions) — for AI **and** deterministic logic? |
-| 4. Performance Economics | L15–L16 | What drives cost / speed / effectiveness — and where should we *invest more* for value? |
-| 5. Reach & Distribution | L17–L20, **L34** | Does it work on mobile, in other languages, for users with disabilities, and unfurl when shared? **L34:** will search / answer / generative engines find, rank, extract, and cite the site? (SEO / AEO / GEO, 4-tier funnel) |
-| 6. Operational | L21–L23 | Can ops see prod, survive vendor failures, hand off to new collaborators? |
-| 7. Strategic & Market | L24–L28, **L33** | Where do we win/lose, how do we price, do we sound clear, what would each persona say, are we sharpening our wedge or sanding it off? **L33:** does *generated in-product output* match the audience register/jargon + house structure? |
-| 8. Growth & Adoption | L29–L30 | Do users activate fast and return? |
-
-See `audit-lenses/README.md` for full lens inventory + provenance (the "we surveyed ~46 sources" claim).
-
 **Liveness execution remains in L01.** Bob's existing A7j Liveness Audit (v2.14, v2.15) is folded into L01 — the Hygiene & Liveness lens executes Knip / Vulture / Schemathesis / Playwright / Vitest / pytest / promptfoo per stack. Bob still orchestrates incumbent tooling per D-003 (no custom test harness).
 
 ---
@@ -201,7 +208,7 @@ After the fix & defer register, Bob **automatically** writes a lens retro — a 
 2. **The retro critiques the instrument, never restates the findings.** "L04 found unauth `/api/results`" is a finding (belongs in A7.2). "L04 was gold and executed via Schemathesis; L20 was noise for an SMS-only product; nothing modeled the provider-429 retry storm" is a retro — it teaches Bob something reusable.
 3. **A deeper critique can be run later** in a fresh session with the standalone retro prompt in `_lens-retro.md` §A — but the two-tier auto-emit guarantees a faithful retro always exists even if nobody asks.
 
-Retros feed the **Lens Retro Ritual** (`_lens-retro.md` §B): collected into `lens-retros/`, aggregated by `scripts/lens-retro.sh` once ≥3 accumulate, and turned into a human-gated proposal to edit specific lenses. **Bob never auto-edits its own lenses** — convergence across retros is signal, not a verdict (D-004 / F35 lesson; non-goal logged as D-005). Approved edits go through a normal EVOLVE + F47 dogfood.
+Retros feed the **Lens Retro Ritual** (`_lens-retro.md` §B): collected into `lens-retros/`, aggregated by `~/.claude/skills/bob/../scripts/lens-retro.sh` once ≥3 accumulate, and turned into a human-gated proposal to edit specific lenses. **Bob never auto-edits its own lenses** — convergence across retros is signal, not a verdict (D-004 / F35 lesson; non-goal logged as D-005). Approved edits go through a normal EVOLVE + F47 dogfood.
 
 `→ HG:` not required — A7.4 is a silent auto-write. The gate was A7.3.
 
