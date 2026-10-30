@@ -34,7 +34,7 @@ function world({ values = {}, mergeAnswer } = {}) {
     'product.cutover_stage': 'second',
     'product_profile.required_checks': ['test'],
     'product_profile.robot': { bot_user_id: g.robotId },
-    effect_paths: { first_customer_visible: { new_files_under: ['app/pages'] } },
+    effect_paths: { first_customer_visible: { new_files_under: ['app/pages/'] } },
     'rules.adopted': { blob: blobSha(Buffer.from(POLICY)) },
     ...values,
   };

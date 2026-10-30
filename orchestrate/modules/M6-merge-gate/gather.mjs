@@ -16,7 +16,8 @@
 // merge = { id, doc } — the merge document (doc.card, doc.pr, doc.request, doc.catch_ups).
 //
 // Rules keys read (all through rules.get, product-scoped): product.cutover_stage, product_profile.required_checks,
-// product_profile.checks_ignored, effect_paths, rules.adopted. A key the rules don't have refuses whatever reads it.
+// product_profile.checks_ignored, product_profile.robot, effect_paths, rules.adopted; and through M9 and M2,
+// approvals.plan_go.go_free and live_check.*. A key the rules don't have refuses whatever reads it.
 
 import { carryOver } from '../M10-rules/carry-over.mjs';
 import { checkExactReverse } from '../M10-rules/exact-reverse.mjs';

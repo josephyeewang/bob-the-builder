@@ -34,7 +34,7 @@ function clean(over = {}) {
     threads: { ok: true, unresolved: 0 },
     rulesAdopted: true,
     files: [{ path: 'src/a.js', status: 'modified' }],
-    firstCustomerNewFiles: ['app/pages'],
+    firstCustomerNewFiles: ['app/pages/'],
   };
   return over(f) ?? f;
 }
@@ -161,6 +161,13 @@ test('refusals 13 and 14 stand in with the owner\'s Approve, and log that they d
     assert.deepEqual(r.notes, [NOT_BUILT_LINE]);
   }
   assert.deepEqual(only(clean((f) => { f.firstCustomerNewFiles = null; })), [14]);
+  // The list is read as M10 reads it: patterns, at any depth for a plain folder.
+  for (const pats of [['app/**'], ['app/pages/*.tsx'], ['app/']]) {
+    for (const path of ['app/pages/new.tsx', 'web/app/pages/new.tsx']) {
+      if (path.startsWith('web/') && pats[0] !== 'app/') continue;
+      assert.deepEqual(only(clean((f) => { f.firstCustomerNewFiles = pats; f.files.push({ path, status: 'added' }); })), [14], `${pats} ${path}`);
+    }
+  }
 });
 
 test('odd input refuses, never throws', () => {

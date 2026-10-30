@@ -36,6 +36,7 @@
 
 import { VERDICT_CHECKLIST, CHECKLIST_LEVELS } from '../../shared/record.mjs';
 import { HOLD_REASONS } from '../../shared/rules.mjs';
+import { compileList } from '../M10-rules/paths.mjs';
 
 export const REFUSALS = Object.freeze({
   1: 'required checks red', 2: 'main red', 3: 'draft, out of date or not mergeable', 4: 'stacked', 5: 'no reviewer verdict',
@@ -114,10 +115,13 @@ function requestProblem(f) {
   return null;
 }
 
+// The list is read as M10 reads it: patterns (M10 paths.mjs), so `app/`, `app/**` and `app/pages/*.tsx` mean what
+// they mean to the classification. A pattern M10 can't read makes this unknown, which refuses.
 function customerFiles(f) {
   if (!Array.isArray(f.files) || !Array.isArray(f.firstCustomerNewFiles)) return null;
-  const under = (p) => f.firstCustomerNewFiles.some((d) => typeof d === 'string' && d && (p === d || p.startsWith(d.endsWith('/') ? d : `${d}/`)));
-  return f.files.filter((x) => x?.status !== 'removed' && typeof x?.path === 'string' && under(x.path));
+  let match;
+  try { match = compileList(f.firstCustomerNewFiles); } catch { return null; }
+  return f.files.filter((x) => x?.status !== 'removed' && typeof x?.path === 'string' && match(x.path) !== null);
 }
 
 export function judge(f) {
