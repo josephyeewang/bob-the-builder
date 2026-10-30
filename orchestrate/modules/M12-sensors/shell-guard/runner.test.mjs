@@ -290,6 +290,8 @@ test('round 10 audit 8 M-1: the case-flip form follows the caseless option on an
   assert.ok(!hostDead('cat {{P}}', 'case-flip'), 'never dropped for the machine running the runner');
   assert.equal(hostDead('cat {{P}}', 'globstar'), !existsSync('/bin/zsh'), 'round 10 audit 9: `**/` only where zsh is');
   assert.equal(hostDead('echo x > {{P}}', 'inner-brace'), hostDead('echo x > {{P}}', 'brace'), 'round 10 audit 11: a brace inside the name, as one around it');
+  for (const f of ['last-brace', 'inner-last-brace']) assert.equal(hostDead('echo x > {{P}}', f), hostDead('echo x > {{P}}', 'brace'), `round 12: ${f}`);
+  for (const f of ['home-brace', 'pwd-brace']) assert.ok(!hostDead('echo x > {{P}}', f), `round 12 minor 4: bash expands ${f} after ">"`);
   assert.ok(cases(T, root, { caseless: true }).some((c) => c.form === 'case-flip'));
   // Minor 2: by default, the disk the file's folder is on.
   const flipped = `${dirname(root)}/${[...root.split('/').pop()].map((c) => (c === c.toUpperCase() ? c.toLowerCase() : c.toUpperCase())).join('')}`;
@@ -432,5 +434,42 @@ test('round 10 audit 11: a guard reading brace pieces as names misses a brace in
     const asked = (c, cwd) => ((/grep -r|^tar |\btar cf .* \.$|cp -r \./m.test(c) && file.startsWith(`${cwd}/`)) || c.includes(file) ? 'refuse' : 'allow');
     const missedCd = runCorpus(asked, { target, cwd: root }).failures.filter((f) => f.expect === 'refuse' && f.group === 'cd-here');
     assert.equal(missedCd.length, corpus.refuse_cd_here.length, `${target}: every cd-then-read case`);
+  }
+});
+
+test('round 12: guards keeping a brace\'s first choice, judging only the file\'s own folder, reading grep\'s first option, or find only with -exec, miss cases', () => {
+  const root = tmp();
+  for (const target of [T, `apps/web/${T}`]) {
+    const file = resolve(root, target);
+    const words = (c) => c.split(/[\s;&|()<>'"]+/).filter(Boolean);
+    const named = (c, cwd, pick) => words(c).some((w) => { const v = w.replace(/\{([^{}]*)\}/g, (_, l) => pick(l)); return resolve(cwd, v) === file || basename(v) === basename(file); });
+    // A brace expanded to its first choice only, or with the braces dropped and the words split on commas.
+    for (const [name, guard] of [
+      ['first', (c, cwd) => (named(c, cwd, (l) => l.split(',')[0]) ? 'refuse' : 'allow')],
+      ['strip', (c, cwd) => (words(c).flatMap((w) => w.replace(/[{}]/g, '').split(',')).some((v) => resolve(cwd, v) === file || basename(v) === basename(file)) ? 'refuse' : 'allow')],
+    ]) {
+      const missed = runCorpus(guard, { target, cwd: root }).failures.filter((f) => f.expect === 'refuse');
+      assert.ok(missed.some((f) => f.form === 'last-brace') || missed.some((f) => f.form === 'inner-last-brace'), `${target}: ${name}`);
+    }
+    // Folder reads refused only of the file's own folder; grep refused only when its first option holds r; find only with -exec.
+    const reader = ({ eq, firstOpt, execOnly }) => (c, cwd) => {
+      if (c.includes(file) || basename(c).includes(basename(file))) return 'refuse';
+      let here = cwd;
+      for (const seg of c.split(/&&|;|\n/)) {
+        const w = words(seg);
+        if (w[0] === 'cd') { here = resolve(here, w[1] ?? '.'); continue; }
+        const dirs = w.slice(1).filter((x) => !x.startsWith('-')).map((x) => resolve(here, x));
+        const hit = (d) => (eq ? d === dirname(file) : file.startsWith(`${d}/`));
+        const rec = w[0] === 'grep' && (firstOpt ? /^-\w*[rR]|^--recursive/.test(w[1] ?? '') : w.some((x) => /^-\w*[rR]|^--recursive/.test(x)));
+        const find = w[0] === 'find' && (!execOnly || w.includes('-exec'));
+        const other = /^(tar|rsync|rm)$/.test(w[0]) || (w[0] === 'cp' && /^-\w*[rRa]/.test(w[1] ?? '')) || (w[0] === 'ls' && /xargs/.test(seg));
+        if ((rec || find || other) && (dirs.length ? dirs : [here]).some(hit)) return 'refuse';
+      }
+      return 'allow';
+    };
+    const miss = (o) => runCorpus(reader(o), { target, cwd: root }).failures.filter((f) => f.expect === 'refuse');
+    assert.ok(miss({ eq: true }).some((f) => f.group === 'folder-up'), `${target}: the folder above`);
+    assert.ok(miss({ firstOpt: true }).some((f) => /grep -n -r/.test(f.command)), `${target}: grep -n -r`);
+    assert.ok(miss({ execOnly: true }).some((f) => /find .*\| xargs/.test(f.command)), `${target}: find | xargs`);
   }
 });

@@ -112,6 +112,10 @@ export function pathForms(target, cwd, { absolute = true, home = homedir(), case
     'brace': `${dir}{${base},nothing}`,
     // A brace inside the name, as `.env.{example,production}` (round 10 audit 11 minor 1: braces only wrapped it whole).
     'inner-brace': `${dir}${base.slice(0, mid)}{${base.slice(mid)},nothing}`,
+    // The real name not first, as `.env.{example,production}` sorts (round 12 M-1: a guard keeping only a brace's first
+    // choice, or dropping the braces and splitting on commas, passed every brace form).
+    'last-brace': `${dir}{nothing,${base}}`,
+    'inner-last-brace': `${dir}${base.slice(0, mid)}{nothing,${base.slice(mid)}}`,
     ...(dirGlob ? { 'dir-glob': dirGlob } : {}),
     // zsh's `**/` searches every folder below (round 10 audit 9 M-1); bash without globstar does not (hostDead).
     ...(isAbsolute(target) ? {} : { globstar: `**/${base}` }),
@@ -139,10 +143,12 @@ export function checkPath(p) {
 // A template and form pair no shell turns into a touch of the file (a glob in a redirection, a form that breaks the
 // quotes around it) proves nothing, so it is left out; corpus.dead lists them and a test checks the list both ways
 // (0b-7 round 10). corpus.dead is for a Mac (bash, zsh, and an sh that reads $'…'). hostDead adds the pairs that touch
-// nothing on this machine because a shell is missing: without zsh a brace after ">" is an error, and dash (Linux's sh)
+// nothing on this machine because a shell is missing: without zsh a brace list after ">" is an error (not ${HOME} or
+// ${PWD}, which bash expands there: round 12 minor 4), and dash (Linux's sh)
 // does not read $'…' (round 10 audit 3 M-4); without zsh, `**/` is `*/` and finds no file in the folder itself.
 const SH_ANSI_C = spawnSync('sh', ['-c', "printf %s $'\\x41'"], { encoding: 'utf8' }).stdout === 'A';
-export const hostDead = (tpl, form) => (/brace$/.test(form) && !existsSync('/bin/zsh') && /> ?(\{\{UP\}\}\/)?\{\{(P|BASE)\}\}/.test(tpl))
+const BRACE_LISTS = new Set(['brace', 'inner-brace', 'last-brace', 'inner-last-brace']);
+export const hostDead = (tpl, form) => (BRACE_LISTS.has(form) && !existsSync('/bin/zsh') && /> ?(\{\{UP\}\}\/)?\{\{(P|BASE)\}\}/.test(tpl))
   || (form === 'ansi-c' && !SH_ANSI_C && tpl.startsWith('sh -c'))
   || (form === 'globstar' && !existsSync('/bin/zsh'));
 const live = (tpl, form) => !(corpus.dead[tpl] ?? []).includes(form) && !hostDead(tpl, form);
@@ -179,6 +185,9 @@ export function cases(target, cwd = process.cwd(), { home = homedir(), caseless 
   // Whole-folder reads and writes: no form of the name appears at all (round 10 audit 4 M-1).
   const dir = dirname(abs); const up = dirname(dir);
   for (const tpl of corpus.refuse_folder) if (live(tpl, '-')) out.push({ expect: 'refuse', group: 'folder', form: '-', tpl, command: fill(tpl, { DIR: dir }) });
+  // And the folder above the file's (round 12 minor 1: for a file at the top level the run folder is the file's folder,
+  // so a guard that checks only "is this the file's folder" passed).
+  for (const tpl of corpus.refuse_up_folder) if (live(tpl, '-')) out.push({ expect: 'refuse', group: 'folder-up', form: '-', tpl, command: fill(tpl, { DIR: up }) });
   // The same, and change-folder-first, with the folder written from home (round 10 audit 5 M-2).
   const hrel = fromHome(dir, home);
   const hdir = hrel !== null ? `~/${hrel}` : dir === home && fromHome(abs, home) !== null ? '~' : null;
@@ -215,7 +224,7 @@ export function cases(target, cwd = process.cwd(), { home = homedir(), caseless 
     for (const [form, p] of short) if (!form.startsWith('pwd-') && live(tpl, form)) out.push({ expect: 'refuse', group: 'cd-up', form, tpl, cwd: dir, command: fill(tpl, { UP: basename(dir), BASE: p }) });
   }
   // A recursive grep of a folder that holds the file reads it, so it is no allow case there (round 10 audit 5 minor 1).
-  const readsFile = (command, where) => /\bgrep (-\w*[rR]|--recursive)|^tar |^cp -\w*[rRa]|^rsync /.test(command) && [resolve(where, command.split(' ').pop())].some((f) => abs === f || abs.startsWith(`${f}/`));
+  const readsFile = (command, where) => /\bgrep (-\w+ )*(-\w*[rR]|--recursive)|^find .*\| *xargs|^tar |^cp -\w*[rRa]|^rsync /.test(command) && [resolve(where, command.split(' ').pop())].some((f) => abs === f || abs.startsWith(`${f}/`));
   for (const command of corpus.allow) if (!readsFile(command, cwd)) out.push({ expect: 'allow', group: 'allow', form: '-', command });
   // Ordinary commands asked from the folder above and from the file's folder: a guard that refuses whatever is asked
   // from outside the run folder fails (round 10 audit 4 M-2).
