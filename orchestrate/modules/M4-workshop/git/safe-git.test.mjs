@@ -1,13 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync, mkdirSync, readdirSync, readFileSync, statSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { writeFileSync, mkdirSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, dirname, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { safeGitEnv, git, gitOk, checkGitVersion, checkMirror, initMirror, MIRROR_CONFIG_TEMPLATE, SAFE_CONFIG } from './safe-git.mjs';
-import { tmpFolder } from '../tmp-folders.test-helper.mjs';
+import { tempDir } from '../../../shared/test-tmp.mjs';
 
-const tmp = () => tmpFolder('orch-sg-');
+const tmp = () => tempDir('orch-sg-');
 
 test('environment starts empty: no inherited GIT_* or other variables survive', () => {
   process.env.GIT_SSH_COMMAND = 'planted';

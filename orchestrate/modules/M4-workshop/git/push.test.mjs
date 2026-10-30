@@ -1,12 +1,10 @@
 // R-0b-45: the push script, against real git. A local bare repo stands in for GitHub (reached only
 // through the test harness's constructor argument). The secret scan uses a fake gitleaks for the
 // logic, and the real one, where installed, for the bypass cases.
-
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync, mkdirSync, rmSync, symlinkSync, readFileSync, existsSync, renameSync, chmodSync, copyFileSync, linkSync } from 'node:fs';
-import { tmpFolder } from '../tmp-folders.test-helper.mjs';
-import { tmpdir } from 'node:os';
+import { writeFileSync, mkdirSync, rmSync, symlinkSync, readFileSync, existsSync, renameSync, chmodSync, copyFileSync, linkSync } from 'node:fs';
+import { tempDir } from '../../../shared/test-tmp.mjs';
 import { join, dirname, delimiter } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { gzipSync, deflateSync } from 'node:zlib';
@@ -20,7 +18,7 @@ import { startGate, factId } from './start-gate.mjs';
 import { memoryRecord } from '../../../shared/record.mjs';
 import { fakeRules, allow, deny } from '../../../shared/rules.mjs';
 
-const tmp = (p = 'orch-push-') => tmpFolder(p);
+const tmp = (p = 'orch-push-') => tempDir(p);
 const WF = '.github/workflows/outside-check.yml';
 const PRODUCT = 'p1';
 const REPO = 'owner/test-repo';
@@ -120,7 +118,7 @@ async function world({ scanner: scannerOverride, gate = {} } = {}) {
   writeFact('vercel_skip', { product: PRODUCT, vercel_project: 'prj_1', read_at: fresh(), result: true });
   writeFact('vercel_env', { product: PRODUCT, vercel_project: 'prj_1', read_at: fresh(), result: true });
 
-  const fake = makeFakeScanner(mkdtempSync(join(root, 'scan-')));
+  const fake = makeFakeScanner((mkdirSync(join(root, 'scan')), join(root, 'scan')));
   const issues = []; const prs = [];
   const values = { 'product.repo': REPO, 'product.mirror': mirror, 'product.onboarded': true, 'product.default_branch': 'main', 'product.vercel_project': 'prj_1', 'outside_check.workflow': WF };
   const answers = { push_branch: allow('fine') };

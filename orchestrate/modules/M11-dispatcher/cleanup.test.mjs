@@ -1,20 +1,19 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, existsSync, statSync, readFileSync, symlinkSync, readdirSync, rmSync, utimesSync } from 'node:fs';
+import { mkdirSync, writeFileSync, existsSync, statSync, readFileSync, symlinkSync, readdirSync, rmSync, utimesSync } from 'node:fs';
 import { createHash } from 'node:crypto';
-import { tmpdir } from 'node:os';
 import { join, resolve, sep } from 'node:path';
 import { cleanupCopy, cleanupPass, ASK_ID, hashCopy, mirrorTree, ownCopy } from './cleanup.mjs';
 import { createSaveWork } from '../M4-workshop/git/save-work.mjs';
 import { git as safeGit, callLog } from '../M4-workshop/git/safe-git.mjs';
 import { PR_FACT } from './merges.mjs';
 import { rulesWith, recWith, T0, MIN, iso } from './fixtures.test-helper.mjs';
-import { tmpFolder } from '../M4-workshop/tmp-folders.test-helper.mjs';
+import { tempDir } from '../../shared/test-tmp.mjs';
 
 // Test set-up only: plain git with no user or machine config, in a throwaway folder.
 function world() {
-  const dir = tmpFolder('m11-cleanup-');
+  const dir = tempDir('m11-cleanup-');
   const env = { PATH: process.env.PATH, HOME: dir, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1',
     GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@localhost', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@localhost' };
   const run = (args, cwd = dir) => execFileSync('git', args, { cwd, env }).toString().trim();
@@ -295,7 +294,7 @@ test('cleanupPass goes through every copy folder and skips one with no record', 
 });
 
 test('audit MIN-17: each copy-ownership check refuses on its own', () => {
-  const dir = tmpFolder('m11-own-');
+  const dir = tempDir('m11-own-');
   const copiesRoot = join(dir, 'copies');
   mkdirSync(join(copiesRoot, 'C-1'), { recursive: true });
   mkdirSync(join(copiesRoot, 'C-2'));

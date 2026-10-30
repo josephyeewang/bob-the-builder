@@ -3,9 +3,8 @@
 // environment and working folder the job file names: nothing is passed by hand.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, symlinkSync, existsSync } from 'node:fs';
-import { tmpFolder } from '../M4-workshop/tmp-folders.test-helper.mjs';
-import { tmpdir } from 'node:os';
+import { mkdirSync, writeFileSync, readFileSync, symlinkSync, existsSync } from 'node:fs';
+import { tempDir } from '../../shared/test-tmp.mjs';
 import { join, dirname } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { loginJobPlist } from './login-job.mjs';
@@ -16,7 +15,7 @@ const strings = (xml) => [...xml.matchAll(/<string>([^<]*)<\/string>/g)].map((m)
 const after = (xml, key) => xml.split(`<key>${key}</key>`)[1];
 
 test('L31: one pass runs from the login job file as installed, through a linked folder, and writes its diary line', () => {
-  const root = tmpFolder('m11-installed-');
+  const root = tempDir('m11-installed-');
   const install = join(root, 'install');
   mkdirSync(install);
   symlinkSync(HERE, join(install, 'dispatcher'));

@@ -1,14 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync, existsSync, readFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { writeFileSync, existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
 import { outageStep, isDead, OUTAGE_FACT } from './outage.mjs';
 import { takePassLock, pidDead } from './pass-lock.mjs';
 import { KEYS as K } from './keys.mjs';
 import { rulesWith, recWith, T0, MIN } from './fixtures.test-helper.mjs';
-import { tmpFolder } from '../M4-workshop/tmp-folders.test-helper.mjs';
+import { tempDir } from '../../shared/test-tmp.mjs';
 
 const R = rulesWith();
 const live = (id, card) => ({ id, card, alive: true, ended: false, lastWriteAt: T0 - MIN });
@@ -107,7 +106,7 @@ test('the outage keys come from the rules', () => {
 });
 
 test('M16: two passes started together: one runs, one exits', () => {
-  const dir = tmpFolder('m11-lock-');
+  const dir = tempDir('m11-lock-');
   const f = join(dir, 'pass.lock');
   const a = takePassLock(f, { pid: 111, dead: () => false });
   const b = takePassLock(f, { pid: 222, dead: () => false });
@@ -120,7 +119,7 @@ test('M16: two passes started together: one runs, one exits', () => {
 });
 
 test('M16: the lock is broken only when its pid is provably dead', () => {
-  const dir = tmpFolder('m11-lock-');
+  const dir = tempDir('m11-lock-');
   const f = join(dir, 'pass.lock');
   writeFileSync(f, JSON.stringify({ pid: 999 }));
   assert.equal(takePassLock(f, { pid: 1, dead: () => false }).ok, false);

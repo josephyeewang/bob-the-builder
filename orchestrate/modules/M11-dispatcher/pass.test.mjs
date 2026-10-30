@@ -1,7 +1,5 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync } from 'node:fs';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { dispatcherPass, stopProcessGroup, STOP_FACT, LIMIT_FACT } from './pass.mjs';
 import { USAGE_FACT, BAND_FACT } from './usage.mjs';

@@ -3,17 +3,16 @@
 // scan.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, chmodSync, realpathSync, readdirSync, copyFileSync, appendFileSync, readFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdirSync, writeFileSync, chmodSync, realpathSync, readdirSync, copyFileSync, appendFileSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { DO_PLANE_TOML, RULES_VERSION, checkScanner, scanSecrets } from './gitleaks.mjs';
 import { parseRawZ } from './push-refusals.mjs';
 import { gitOk } from './safe-git.mjs';
 import { resetCloneGit, createSaveWork } from './save-work.mjs';
-import { tmpFolder } from '../tmp-folders.test-helper.mjs';
+import { tempDir } from '../../../shared/test-tmp.mjs';
 
-const tmp = () => realpathSync(tmpFolder('orch-git-refuse-'));
+const tmp = () => realpathSync(tempDir('orch-git-refuse-'));
 
 function scanner(versionLine = '8.30.1') {
   const d = tmp();

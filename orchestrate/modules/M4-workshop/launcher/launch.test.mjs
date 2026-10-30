@@ -2,9 +2,8 @@
 // Everything runs against fakes and throwaway folders: no real Claude session is started.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, chmodSync, cpSync, rmSync, linkSync, symlinkSync, realpathSync, readdirSync } from 'node:fs';
-import { tmpFolder } from '../tmp-folders.test-helper.mjs';
-import { tmpdir } from 'node:os';
+import { mkdirSync, writeFileSync, readFileSync, existsSync, chmodSync, cpSync, rmSync, linkSync, symlinkSync, realpathSync, readdirSync } from 'node:fs';
+import { tempDir } from '../../../shared/test-tmp.mjs';
 import { join } from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import { DESIGN_PROFILES } from './role-profiles.mjs';
@@ -21,7 +20,7 @@ import { makeSnapshot } from '../hooks/snapshot.mjs';
 import { sha256 } from './role-profiles.mjs';
 import { memoryRecord } from '../../../shared/record.mjs';
 
-const tmp = () => realpathSync(tmpFolder('orch-launch-'));
+const tmp = () => realpathSync(tempDir('orch-launch-'));
 
 // The names check (audit R-0b-44 M-1): a real rendered role file and the start flags, with a
 // stand-in table that marks every name confirmed on the test version.

@@ -3,8 +3,7 @@
 // script, fed canned tool calls; production programs are fakes that record whether they ran.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, symlinkSync, linkSync, chmodSync, readdirSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdirSync, writeFileSync, readFileSync, existsSync, symlinkSync, linkSync, chmodSync, readdirSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -16,10 +15,10 @@ import * as noVerify from './no-verify-block.mjs';
 import * as secret from './secret-file-block.mjs';
 import * as prodGuard from './production-write-guard.mjs';
 import * as compact from './compact-note.mjs';
-import { tmpFolder } from '../tmp-folders.test-helper.mjs';
+import { tempDir } from '../../../shared/test-tmp.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-const tmp = () => tmpFolder('orch-hook-');
+const tmp = () => tempDir('orch-hook-');
 
 function world({ rules } = {}) {
   const root = landingPath(tmp());

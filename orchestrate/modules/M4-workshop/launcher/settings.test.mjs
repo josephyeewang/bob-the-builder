@@ -3,16 +3,15 @@
 // The sandbox, network and compaction behaviour themselves are live checks (owner steps).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync, readFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { writeFileSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { DESIGN_PROFILES, NEVER_TOOLS, checkProfile, profilePort, fakeProfilePort, sha256, hasShell } from './role-profiles.mjs';
 import { parseSnapshot, readSnapshot, makeSnapshot, snapshotHash, SNAPSHOT_MAX_AGE_MS } from '../hooks/snapshot.mjs';
 import { renderAllowRules, renderRoleSettings, checkSettings, writeRoleSettings, POLICY_HOOKS, HOOK_TIMEOUT } from './render-settings.mjs';
 import { SETTINGS as S, ENV } from './settings-names.mjs';
-import { tmpFolder } from '../tmp-folders.test-helper.mjs';
+import { tempDir } from '../../../shared/test-tmp.mjs';
 
-const tmp = () => tmpFolder('orch-set-');
+const tmp = () => tempDir('orch-set-');
 
 const PATHS = {
   copy: '/w/copy', outbox: '/w/outbox', hooksDir: '/w/hooks', snapshot: '/w/rules.json', node: '/w/node',

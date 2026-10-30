@@ -1,15 +1,14 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync, symlinkSync, mkdirSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { writeFileSync, symlinkSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { intakePass, kindsFor } from './outbox-intake.mjs';
 import { recWith } from './fixtures.test-helper.mjs';
-import { tmpFolder } from '../M4-workshop/tmp-folders.test-helper.mjs';
+import { tempDir } from '../../shared/test-tmp.mjs';
 
 const UID = process.getuid();
 function world() {
-  const root = tmpFolder('m11-outbox-');
+  const root = tempDir('m11-outbox-');
   const calls = { alerts: [], notes: [], readonly: [], replies: [] };
   const ports = {
     wait: async () => {}, alert: (t) => calls.alerts.push(t), note: (t) => calls.notes.push(t),

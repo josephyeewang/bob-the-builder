@@ -1,12 +1,10 @@
 // The class rule for the shell guards (audit R-0b-44 round 2 MAT-1, MAT-2, MIN-3; R-0b-70): every
 // shape the round-2 probe got through, letter case on a Mac disk, and the lane-3 corpus's
 // remaining forms. Throwaway folders only; names of secret files are built at run time.
-
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, realpathSync } from 'node:fs';
+import { mkdirSync, writeFileSync, realpathSync } from 'node:fs';
 import { join } from 'node:path';
-import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { makeSnapshot } from './snapshot.mjs';
@@ -15,13 +13,13 @@ import * as merge from './merge-guard.mjs';
 import * as noVerify from './no-verify-block.mjs';
 import * as prodGuard from './production-write-guard.mjs';
 import * as secret from './secret-file-block.mjs';
-import { tmpFolder } from '../tmp-folders.test-helper.mjs';
+import { tempDir } from '../../../shared/test-tmp.mjs';
 
 const dot = (...p) => `.${p.join('')}`;
 const ENV_PROD = dot('en', 'v.production');
 
 function world() {
-  const root = realpathSync(tmpFolder('m4-class-'));
+  const root = realpathSync(tempDir('m4-class-'));
   const home = join(root, 'home');
   const work = join(root, 'work');
   const outbox = join(root, 'outbox');

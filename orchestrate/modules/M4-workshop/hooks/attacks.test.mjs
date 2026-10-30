@@ -2,8 +2,7 @@
 // the ordinary commands that must still pass (so a fix that blocks everything is caught too).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, linkSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdirSync, writeFileSync, symlinkSync, linkSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -14,12 +13,12 @@ import * as merge from './merge-guard.mjs';
 import * as noVerify from './no-verify-block.mjs';
 import * as secret from './secret-file-block.mjs';
 import * as prodGuard from './production-write-guard.mjs';
-import { tmpFolder } from '../tmp-folders.test-helper.mjs';
+import { tempDir } from '../../../shared/test-tmp.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
 function world() {
-  const root = landingPath(tmpFolder('orch-attack-'));
+  const root = landingPath(tempDir('orch-attack-'));
   const outbox = join(root, 'outbox'); mkdirSync(outbox);
   const copy = join(root, 'copy'); mkdirSync(copy);
   const home = join(root, 'home'); mkdirSync(join(home, 'Library', 'LaunchAgents'), { recursive: true });

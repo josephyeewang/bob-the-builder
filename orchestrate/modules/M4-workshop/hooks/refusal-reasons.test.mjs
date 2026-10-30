@@ -3,8 +3,7 @@
 // later line would still refuse for another reason.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, readdirSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdirSync, writeFileSync, symlinkSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { Readable } from 'node:stream';
 import { makeSnapshot } from './snapshot.mjs';
@@ -15,10 +14,10 @@ import * as noVerify from './no-verify-block.mjs';
 import * as secret from './secret-file-block.mjs';
 import * as prodGuard from './production-write-guard.mjs';
 import * as compact from './compact-note.mjs';
-import { tmpFolder } from '../tmp-folders.test-helper.mjs';
+import { tempDir } from '../../../shared/test-tmp.mjs';
 
 function world(rules = { production: { env_files: ['/nowhere/settings.production'], programs: ['fakehost'], hosts: ['db.prod.example.net'] }, secrets: { paths: [] } }) {
-  const root = landingPath(tmpFolder('orch-refuse-'));
+  const root = landingPath(tempDir('orch-refuse-'));
   const outbox = join(root, 'outbox'); mkdirSync(outbox);
   const copy = join(root, 'copy'); mkdirSync(copy);
   const snapshot = join(root, 'rules.json');
