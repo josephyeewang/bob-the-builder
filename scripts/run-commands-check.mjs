@@ -139,6 +139,7 @@ function baseLines(f) {
   return baseCache.get(f);
 }
 const providedModules = new Set(existing.flatMap((f) => moduleOf(f)));
+const baseFiles = git('ls-tree', '-r', '--name-only', base).split('\n').filter(Boolean);
 const esc = (x) => x.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 // The Python module a file is run as: pkg/job.py → pkg.job, src/pkg/job.py → pkg.job, pkg/__main__.py and
 // pkg/__init__.py → pkg.
@@ -156,15 +157,18 @@ function moduleOf(p) {
 // run from a sub-folder) that no other file in the project also ends with. "dist/index.js" is not a tail of
 // src/index.js, so a build output never stands for its source.
 // `movedTo` (a rename's new path) is left out of that "no other file" test: the moved file is the same file.
-function means(written, p, f, movedTo = null) {
+// `untouched`: the config line is unchanged since the base, so it was written when only the files at the base existed —
+// its tail is judged against those files (a shim jobs/report.py beside a new jobs/core/report.py does not make
+// `python report.py` ambiguous). `exactOnly`: package.json "main" / "bin" are read from the package folder, never via cd.
+function means(written, p, f, movedTo = null, untouched = false, exactOnly = false) {
   const w = written.replace(/^\.\//, '');
   if (!w || /[$*{}]/.test(w)) return false;
   if (w === p || path.normalize(path.join(path.dirname(f), w)) === p) return true;
-  if (!p.endsWith(`/${w}`)) return false;
+  if (exactOnly || !p.endsWith(`/${w}`)) return false;
   // An executable with no extension (bin/test, scripts/deploy) is named only as a path or as ./name, never by a bare
   // word — "test" or "dev" in a config is almost always something else.
   if (!/\.\w+$/.test(p) && !w.includes('/') && !written.startsWith('./')) return false;
-  return !existing.some((o) => o !== p && o !== movedTo && (o === w || o.endsWith(`/${w}`)));
+  return !(untouched ? baseFiles : existing).some((o) => o !== p && o !== movedTo && (o === w || o.endsWith(`/${w}`)));
 }
 const TOKEN = /[^\s"'=(),;:`[\]{}]+/g;
 // Where the run configs name `p`. asScript: count only a mention that runs the file as a script — after python (and
@@ -173,14 +177,16 @@ const TOKEN = /[^\s"'=(),;:`[\]{}]+/g;
 function mentions(p, asScript = false, movedTo = null) {
   const hits = [];
   // A module some existing file still provides (pkg/cli.py → pkg/cli/__init__.py keeps "pkg.cli") is not gone.
-  const mods = moduleOf(p).filter((mod) => asScript || !providedModules.has(mod));
   for (const { f, lines } of configs) {
+    const local = path.dirname(f) !== '.' && p.startsWith(`${path.dirname(f)}/`) ? moduleOf(path.relative(path.dirname(f), p)) : [];
+    const mods = [...new Set([...moduleOf(p), ...local])].filter((mod) => asScript || !providedModules.has(mod));
     if (asScript && path.basename(f) === 'pyproject.toml') continue;
     const unchanged = baseLines(f);
     for (const [at, l] of lines) {
       let hit = false;
       for (const m of l.matchAll(TOKEN)) {
-        if (!means(m[0], p, f, movedTo)) continue;
+        const exactOnly = path.basename(f) === 'package.json' && /^(main|bin)\b/.test(String(at));
+        if (!means(m[0], p, f, movedTo, unchanged.has(l.trim()), exactOnly)) continue;
         // A bare name that is also the moved file's own name is ambiguous: after build.sh → scripts/build.sh, a line
         // `./build.sh` may now run from `working-directory: scripts` (fine), and after jobs/report.py →
         // jobs/core/report.py, `python report.py` from jobs/ is broken. The line decides: one this change rewrote was

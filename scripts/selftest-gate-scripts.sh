@@ -901,6 +901,19 @@ git -C "$T6" rm -q api.py
 expect "run-commands: a Dockerfile.prod that still runs a deleted file -> REFUSED" 1 'Dockerfile.prod:2 still names api.py' -- node "$RC" "$T6"
 git -C "$T6" checkout -q HEAD -- api.py; git -C "$T6" rm -q build.py
 expect "run-commands: deleting a root build.py that \`python -m build\` ran (a local module shadows the tool) -> REFUSED" 1 'ci.yml:5 still names build.py' -- node "$RC" "$T6"
+T7="$TMP/rc-r9"; newrepo "$T7"; mkdir -p "$T7/jobs" "$T7/src/lib" "$T7/services/api/app" "$T7/.github/workflows"
+printf 'if __name__ == "__main__":\n    print(1)\n' > "$T7/jobs/report.py"; cp "$T7/jobs/report.py" "$T7/services/api/app/job.py"; : > "$T7/services/api/app/__init__.py"
+printf 'module.exports = 1\n' > "$T7/src/lib/index.js"; printf '{"main":"index.js"}\n' > "$T7/package.json"
+printf 'jobs:\n  weekly:\n    steps:\n      - working-directory: jobs\n        run: python report.py\n' > "$T7/.github/workflows/ci.yml"
+printf 'report:\n\tcd jobs && python report.py\n' > "$T7/Makefile"
+printf 'FROM python\nCMD python -m app.job\n' > "$T7/services/api/Dockerfile"
+git -C "$T7" add -A; git -C "$T7" commit -q -m base; git -C "$T7" checkout -q -b change
+git -C "$T7" mv src/lib/index.js src/lib/index.ts
+expect "run-commands: npm's default \"main\": \"index.js\" does not stand for src/lib/index.js -> OK" 0 "run-commands-check: OK" -- node "$RC" "$T7"
+mkdir -p "$T7/jobs/core"; cp "$T7/jobs/report.py" "$T7/jobs/core/report.py"; printf 'from jobs.core.report import *\n' > "$T7/jobs/report.py"
+expect "run-commands: the wrap — old file made a shim beside a same-named new one — still run via working-directory and cd -> REFUSED twice" 1 "REFUSED — 2 run config line" -- node "$RC" "$T7"
+git -C "$T7" checkout -q HEAD -- jobs/report.py; printf 'from app.impl import *\n' > "$T7/services/api/app/job.py"
+expect "run-commands: a monorepo service's python -m module (read from its own folder) lost its run block -> REFUSED" 1 'services/api/Dockerfile:2 names services/api/app/job.py' -- node "$RC" "$T7"
 expect "run-commands: --base with no commit -> cannot run (exit 2)" 2 "needs a commit" -- node "$RC" "$T3" --base
 expect "run-commands: an unknown base commit -> cannot run (exit 2)" 2 "cannot be found" -- node "$RC" "$RD" --base nope
 SH="$TMP/rc-shallow"; git clone -q --depth 1 "file://$RD" "$SH" 2>/dev/null; git -C "$SH" checkout -q --detach; git -C "$SH" branch -q -D main; git -C "$SH" remote remove origin
