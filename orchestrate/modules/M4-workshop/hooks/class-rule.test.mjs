@@ -244,7 +244,7 @@ test('L41: the secret guard reads a name after "="', () => {
 // path; a letter range that could spell a secret name is caught as a pattern.
 test('L41 (a): [ ] in a shell word is read as a pattern: route folders pass, a range spelling a secret is caught', () => {
   const w = world();
-  for (const c of ['cat app/[id]/page.tsx', 'ls app/[slug]/(group)', 'cat app/[...all]/page.tsx']) passed(secret.decide(bash(c, w.work), w.args), c);
+  for (const c of ['cat app/[id]/page.tsx', "ls 'app/[slug]/(group)'", 'cat app/[...all]/page.tsx']) passed(secret.decide(bash(c, w.work), w.args), c);
   for (const c of [`cat ${dot('[d-f]nv')}`, `cat ${dot('[a-z]nv')}.local`, `cat ${dot('[s]sh')}/config`]) blocked(secret.decide(bash(c, w.work), w.args), c);
   passed(secret.decide({ tool_name: 'Glob', tool_input: { pattern: 'app/[id]/**/*.tsx' }, cwd: w.work }, w.args), 'a route-folder search');
 });
@@ -341,7 +341,8 @@ test('L41 confirm: brace lists, rsync, tar/unzip folders, lost cd forms, links, 
   for (const c of ['rm -rf *', 'rsync -a --remove-source-files . /tmp/x/']) assert.match(prodGuard.decide(bash(c, w.outbox), w.args).reason ?? 'passed', /working folder/, c);
   passed(prodGuard.decide(bash('rsync -a . /tmp/x/', w.outbox), w.args), 'control: a copy out leaves the folder');
   const pf = [fold(w.envFile)];
-  assert.equal(prodGuard.folderWriteWhy('cd - && tar xf /tmp/a.tar', { cwd: w.outbox, protectedFiles: pf, home: w.work }), null, 'cd - is not cd home');
+  // `cd -` with no cd before it goes to a folder set before this call: not home, and not known (L45, round 2 minor).
+  assert.match(prodGuard.folderWriteWhy('cd - && tar xf /tmp/a.tar', { cwd: w.outbox, protectedFiles: pf, home: w.work }) ?? 'none', /can't follow/, 'cd - with no cd before it');
   assert.match(prodGuard.folderWriteWhy('cd work && tar xf /tmp/a.tar', { cwd: w.root, protectedFiles: [], cdpath: '/x' }) ?? 'none', /can't follow/, 'CDPATH set outside the line');
   assert.equal(prodGuard.folderWriteWhy('cd ./work && tar xf /tmp/a.tar', { cwd: w.outbox, protectedFiles: [], cdpath: '/x' }), null, 'a ./ cd ignores CDPATH');
   assert.equal(prodGuard.folderWriteWhy('cd /tmp && cd - && rm -rf x', { cwd: w.outbox, protectedFiles: pf }), null, 'cd - goes back to a folder already counted');
@@ -376,7 +377,7 @@ test('L41 confirm: a letter class fails closed, a zsh group reads whole, a trail
     passed(secret.decide(bash(c, w.work), w.args), `secret: ${c}`);
     passed(prodGuard.decide(bash(c, w.work), w.args), `production: ${c}`);
   }
-  assert.equal(unreadable('cat x(a|b)y'), 'a zsh pattern group with a choice in it', 'an unquoted choice is still refused');
+  assert.match(unreadable('cat x(a|b)y') ?? 'none', /zsh pattern group/, 'an unquoted choice is still refused');
   // Both readings are checked: a name inside brackets in code fed to a program is still seen (lane 3's corpus).
   blocked(prodGuard.decide(bash(`python3 - <<'X'\nprint(open('${ENV_PROD}').read())\nX`, w.work), w.args), 'a name in brackets, production');
   blocked(secret.decide(bash(`python3 - <<'X'\nprint(open('${w.home}/${dot('ss', 'h')}/id_x').read())\nX`, w.work), w.args), 'a name in brackets, secret');
@@ -391,4 +392,60 @@ test('L41 confirm: a letter class fails closed, a zsh group reads whole, a trail
   passed(secret.decide({ tool_name: 'Glob', tool_input: { pattern: '**' }, cwd: join(w.home, 'sub') }, w.args), 'control: ** below home reaches no secret');
   blocked(secret.decide({ tool_name: 'Glob', tool_input: { pattern: 'x', path: [w.home] }, cwd: w.work }, w.args), 'a search folder that is not a string');
   passed(secret.decide({ tool_name: 'Glob', tool_input: { pattern: 'src/**' }, cwd: w.work }, w.args), 'control: ** in the project');
+});
+
+// LEAD-CALLS L45: the confirm audit of L41, round 2, found new spellings of the same tricks, so each class is now
+// refused whole. Every round-2 Material is planted here; the controls are ordinary work that must still pass.
+test('L45: zsh groups and qualifiers, brace ranges, wrappers, short option names, cd forms, links, unpackers', () => {
+  const w = world();
+  const R = w.root;
+  const W = w.work;
+  mkdirSync(join(W, 'src'));
+  symlinkSync(W, join(R, 'lnk'));
+  symlinkSync(W, join(R, 'oldlink'));
+  const refuse = [
+    // MAT-2 to MAT-5: zsh groups anywhere in a word, in a command name, and glob qualifiers that run code
+    `rm -rf ${R}/w(o)rk`, `cd ${R} && rm -rf (w)ork`, `/bin/(r)m -rf ${W}`, 'fakeh(o)st deploy', `cd ${R} && ls -d o*(e:'rm -rf work':)`, 'ls *(+x)',
+    'ls (a|b)', 'a=(x y)', `cat =(ls ${W})`,
+    // MAT-6: a brace range
+    `rm -rf ${R}/wor{j..l}`, `rm -rf ${R}/{a..z}ork`,
+    // MAT-7, MAT-12, MAT-13: a long option by a shorter name
+    `tar -xf /tmp/a.tar --dir=${W}`, `tar --ext -f /tmp/a.tar -C ${W}`, `git -C ${W} stash push --al`, `zip -r --mov /tmp/a.zip ${W}`,
+    `cp -r --target=${W} /tmp/s`, `mv --target-directory=${W} /tmp/s`, `rsync -a /tmp/s/ /tmp/d/ --backup-dir=${W}`, `rm --rec ${W}`,
+    // MAT-12: git settings on the command line, and setting an alias
+    `git -c alias.x='clean -fdx' -C ${W} x`, "git config alias.x 'clean -fdx'", `git --config-env=alias.x=V -C ${W} x`,
+    // MAT-8: full paths kept from the archive, and unpackers not on the list while in a folder holding a protected file
+    'tar -xPf /tmp/evil.tar', 'tar -x --absolute-paths -f /tmp/a.tar', 'tar --extract --abs -f /tmp/a.tar',
+    `cd ${W}; cpio -idm < /tmp/a.cpio`, `cd ${W} && pax -r -f /tmp/a.pax`, `cd ${W} && aa extract -i /tmp/a.aar`,
+    // MAT-9: cd forms the guard can't follow
+    `cd ${R} && cd outbox work && tar xf /tmp/a.tar`, `cd ${R}; CDPATH+=..; cd work && tar xf /tmp/a.tar`,
+    `cd ${R}; setopt cdablevars; cd ${W} && tar xf /tmp/a.tar`, `shopt -s cdable_vars; cd ${W} && tar xf /tmp/a.tar`, 'cd +1 && tar xf /tmp/a.tar',
+    `cd ${R}; export CDPATH=${R}; cd .work && tar xf /tmp/a.tar`,
+    // MAT-10, MAT-11: a link made without ln, and a link among a wildcard's matches
+    `cp -R ${R}/oldlink /tmp/l && tar -C /tmp/l -xf /tmp/a.tar`, `tar -xf /tmp/a.tar -C ${R}/ln?`, `cp -r /tmp/evil/. ${R}/ln?`, `rm -rf ${R}/old*`,
+    // MAT-14: wrappers, and Homebrew's g-named tools
+    `nice -n 5 rm -rf ${W}`, `caffeinate -i rm -rf ${W}`, `sudo -u root rm -rf ${W}`, `env -u X rm -rf ${W}`, `timeout 5 rm -rf ${W}`,
+    `caffeinate -i ln -s ${W} /tmp/l`, `grm -rf ${W}`, `gcp -r /tmp/s ${W}`, `time -p rm -rf ${W}`,
+    // One case each that only its own check refuses (planted-failure gaps): a group after `&&` with its `)` stuck,
+    // a plain wrapper given an option that takes a value, zsh's two-word cd, and a cd after a shell option change.
+    `(r)m -rf ${W}`, `exec -a x rm -rf ${W}`, 'cd outbox work && tar xf /tmp/a.tar', 'shopt -s cdable_vars; cd zz && tar xf /tmp/a.tar',
+  ];
+  for (const c of refuse) blocked(prodGuard.decide(bash(c, w.outbox), w.args), c);
+  for (const c of [`cat (${dot('e')})nv.production`, `cat ${dot('(e)')}nv.production`]) {
+    blocked(prodGuard.decide(bash(c, W), w.args), `production: ${c}`);
+    blocked(secret.decide(bash(c, W), w.args), `secret: ${c}`);
+  }
+  // The shield: a delete of every name in the working folder, however the pattern is spelled.
+  for (const c of ['rm -rf [a-z]*', 'rm -rf .[!.]*', 'rsync -a --remove-source . /tmp/x/']) assert.match(prodGuard.decide(bash(c, w.outbox), w.args).reason ?? 'passed', /working folder/, c);
+  blocked(secret.decide({ tool_name: 'Glob', tool_input: { pattern: 5, path: w.home } }, w.args), 'a Glob pattern that is not text');
+  // Ordinary work still passes, from the project folder that holds the settings file.
+  const allow = ['rm -rf **/node_modules', "jq '.items | length' package.json", 'env NODE_ENV=test npm test', 'nohup npm start', 'time ls',
+    '(cd src && ls)', 'if (true); then ls; fi', 'git -C src status', 'npm test', 'cat <(ls)', 'rm -rf src/gen*', 'rm -rf src/*.tmp',
+    'find . \\( -name a -o -name b \\) -print', "git commit -m 'a (b) c'", 'tar -xf /tmp/a.tar -C /tmp/out', 'make build'];
+  for (const c of allow) passed(prodGuard.decide(bash(c, W), w.args), c);
+  passed(prodGuard.decide(bash('cpio -idm < /tmp/a.cpio', w.outbox), w.args), 'control: an unpacker away from protected files');
+  // Each cd no longer doubles the work: 30 of them stay quick.
+  const t = Date.now();
+  passed(prodGuard.decide(bash(`${'cd . ; '.repeat(30)}rm -rf src/gen`, W), w.args), 'thirty cds');
+  assert.ok(Date.now() - t < 3_000, 'thirty cds are checked quickly');
 });

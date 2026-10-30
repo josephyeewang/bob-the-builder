@@ -103,6 +103,7 @@ export function decide(input, args) {
   }
   if (input.tool_name === 'Grep' || input.tool_name === 'Glob') {
     if (t.path != null && typeof t.path !== 'string') return block('the search folder is not a plain path');
+    if (input.tool_name === 'Glob' && typeof t.pattern !== 'string') return block('the search pattern is not plain text');
     const root = typeof t.path === 'string' ? (isAbsolute(t.path) ? t.path : typeof input.cwd === 'string' ? resolve(input.cwd, t.path) : null) : input.cwd;
     const home = process.env.HOME || homedir();
     const g = input.tool_name === 'Glob' ? t.pattern : (typeof t.glob === 'string' ? t.glob : '*');

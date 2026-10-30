@@ -164,8 +164,12 @@ export function shellWords(cmd, { groups = false } = {}) {
 /** Every word in both readings of the line: split at each bracket, and with zsh groups read whole. */
 export const bothWords = (cmd) => [...new Set([...shellWords(cmd), ...shellWords(cmd, { groups: true })])];
 
+// Wrappers `shellCommands` reads past to the program they run; `unreadable` refuses every wrapper but the plain forms
+// it lets through (WRAPPERS below).
+const STRIPPED_WRAPPERS = ['env', 'command', 'exec', 'nohup', 'time', 'sudo', 'xargs', 'nice', 'builtin'];
+
 /** The command line split into its commands (at ; && || | and newlines), each a word list. */
-export function shellCommands(cmd) {
+export function shellCommands(cmd, { raw = false } = {}) {
   const cmds = [];
   let cur = [];
   // The word after `<` or `>` is a file, not a command: it stays out of the command list (the
@@ -179,6 +183,7 @@ export function shellCommands(cmd) {
     cur.push(w);
   }
   if (cur.length) cmds.push(cur);
+  if (raw) return cmds;
   // Drop leading VAR=value words, the shell's own keywords (`then fakehost`) and wrappers that run
   // the next word.
   return cmds.map((c) => {
@@ -186,14 +191,17 @@ export function shellCommands(cmd) {
     for (;;) {
       if (i < c.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(c[i])) { i += 1; continue; }
       if (i < c.length && ['if', 'then', 'else', 'elif', 'do', 'while', 'until', '!', '{', '}'].includes(c[i])) { i += 1; continue; }
-      if (i < c.length && ['env', 'command', 'exec', 'nohup', 'time', 'sudo', 'xargs', 'nice', 'builtin'].includes(basename(c[i]))) { i += 1; while (i < c.length && c[i].startsWith('-')) i += 1; continue; }
+      if (i < c.length && STRIPPED_WRAPPERS.includes(programOf([c[i]]))) { i += 1; while (i < c.length && c[i].startsWith('-')) i += 1; continue; }
       break;
     }
     return c.slice(i);
   }).filter((c) => c.length);
 }
 
-export const programOf = (words) => basename(words[0] ?? '');
+// Homebrew installs the GNU tools under a `g` name (`grm`, `gcp`); each is read as the tool it is (audit of L41, round 2,
+// MAT-14).
+const GNU_NAMES = new Set(['rm', 'cp', 'mv', 'ln', 'rmdir', 'install', 'chmod', 'chown', 'chgrp', 'find', 'xargs', 'tar', 'timeout', 'stdbuf', 'nice', 'env', 'nohup', 'cat', 'sed', 'awk', 'touch', 'mkdir', 'dd', 'tee', 'split', 'csplit', 'shred', 'truncate', 'mktemp', 'readlink', 'realpath', 'link', 'unlink', 'chroot', 'patch']);
+export const programOf = (words) => { const b = basename(words[0] ?? ''); return b.length > 1 && b[0] === 'g' && GNU_NAMES.has(b.slice(1)) ? b.slice(1) : b; };
 
 // ---- shell shapes no hook can check (audit R-0b-44 M-4, M-5) ----
 //
@@ -306,11 +314,82 @@ export function globRe(g, flags = '') {
   return new RegExp(`^${s}$`, flags);
 }
 
+// ---- deny by default for whole classes (LEAD-CALLS L45; audit of L41, round 2) ----
+//
+// Each round of that audit found new spellings of the same tricks, so these shapes are refused as classes rather
+// than read: a zsh group or glob qualifier, a brace range, a wrapper that runs the real program, and git settings
+// given on the command line. The hooks only stop slips and casual workarounds; folder ownership and the separate
+// Mac users are the wall (L34, L42, L45).
+
+// Programs that run another program. Only the plain forms are read through: `env NAME=value cmd`, and `nohup`,
+// `time`, `command`, `exec`, `builtin` with no options. Any other use, and every other wrapper, is refused (MAT-14).
+const WRAPPERS = ['env', 'command', 'exec', 'nohup', 'time', 'builtin', 'sudo', 'doas', 'su', 'runuser', 'nice', 'renice', 'ionice',
+  'caffeinate', 'timeout', 'stdbuf', 'chroot', 'arch', 'script', 'unbuffer', 'rlwrap', 'setsid', 'flock', 'taskset', 'chrt',
+  'watch', 'eatmydata', 'sandbox-exec', 'xcrun', 'nsenter', 'unshare', 'firejail', 'proxychains', 'proxychains4', 'torsocks', 'faketime', 'with-env', 'dotenv'];
+const PLAIN_WRAPPERS = ['nohup', 'time', 'command', 'exec', 'builtin'];
+const KEYWORDS = ['if', 'then', 'else', 'elif', 'do', 'while', 'until', '!', '{', '}'];
+
+/** The line with each quoted or escaped character replaced by `q`, so only the shell's own characters remain. */
+function bareText(c) {
+  let out = '';
+  let q = null;
+  for (let i = 0; i < c.length; i += 1) {
+    const ch = c[i];
+    if (q) { if (ch === q) q = null; else { if (ch === '\\' && q === '"') i += 1; out += 'q'; } continue; }
+    if (ch === '"' || ch === "'") { q = ch; continue; }
+    if (ch === '\\') { i += 1; out += 'q'; continue; }
+    out += ch;
+  }
+  return out;
+}
+
+/**
+ * A bracket the guards can't read: a `(` that does not start a subshell or a process substitution (`<(…)`), so a
+ * zsh pattern group (`w(o)rk`, `(.e)nv`, `ls (a|b)`), a glob qualifier (`*(e:…:)`, `*(+cmd)`), an array (`a=(…)`)
+ * or zsh's `=(…)`; and a `)` with a word stuck to its end (MAT-2 to MAT-5).
+ */
+function oddBracket(bare) {
+  for (let i = 0; i < bare.length; i += 1) {
+    const ch = bare[i];
+    if (ch === ')') {
+      const next = bare[i + 1];
+      if (next !== undefined && !/[\s;&|)<>]/.test(next)) return 'a bracket with a word stuck to it (a zsh pattern group)';
+      continue;
+    }
+    if (ch !== '(') continue;
+    const before = bare.slice(0, i);
+    const prev = before.trimEnd();
+    const attached = before.length > 0 && !/\s$/.test(before);
+    if (prev === '' || /[;&|(\n]$/.test(prev)) continue;
+    if (attached && /[<>]$/.test(prev)) continue;
+    const word = /(\S+)$/.exec(prev)?.[1];
+    if (!attached && KEYWORDS.includes(word) && (prev.length === word.length || /[\s;&|(]/.test(prev[prev.length - word.length - 1]))) continue;
+    return 'a bracket that is not a subshell (a zsh pattern group, glob qualifier or array)';
+  }
+  return null;
+}
+
 /** Why a guard can't read this command (refuse it), or null when it is plain words. */
 export function unreadable(cmd) {
   const c = joinLines(cmd);
   const exp = expansionIn(c);
   if (exp) return exp;
+  const bare = bareText(c);
+  const bracket = oddBracket(bare);
+  if (bracket) return bracket;
+  if (/\{[^{}\s]*\.\.[^{}\s]*\}/.test(bare)) return 'a brace range ({a..b})';
+  for (const raw of shellCommands(c, { raw: true })) {
+    let i = 0;
+    while (i < raw.length && (/^[A-Za-z_][A-Za-z0-9_]*=/.test(raw[i]) || KEYWORDS.includes(raw[i]))) i += 1;
+    while (i < raw.length) {
+      const prog = programOf([raw[i]]);
+      if (!WRAPPERS.includes(prog)) break;
+      const next = raw[i + 1];
+      if (prog === 'env') { i += 1; while (i < raw.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(raw[i])) i += 1; if (raw[i]?.startsWith('-')) return /^(-[A-Za-z]*S|--split-string)/.test(raw[i]) ? 'env -S runs a string the guard can\'t check' : '"env" with options runs a command the guard can\'t read; run it directly'; continue; }
+      if (PLAIN_WRAPPERS.includes(prog) && next !== undefined && !next.startsWith('-')) { i += 1; continue; }
+      return `"${prog}" runs another program the guard can't read; run it directly`;
+    }
+  }
   const wrap = wrapperOf(c, { inline: true });
   if (wrap) return `"${wrap}" runs code the guard can't check`;
   if (/\|\s*(\S*\/)?(python[0-9.]*|node|perl|ruby|php|deno|bun|osascript|lua|tclsh)(\s+-\S+)*\s*($|[;&|)])/.test(c)
@@ -323,6 +402,14 @@ export function unreadable(cmd) {
     if (word0.includes('/') && !SYSTEM_BIN.includes(word0.slice(0, word0.lastIndexOf('/')))) return `"${word0}" runs a file by its path`;
     if (prog === 'find' && words.some((w) => /^-(exec|execdir|ok|okdir)$/.test(w))) return 'find -exec runs commands the guard can\'t see';
     if (/^g?awk$/.test(prog) && words.slice(1).some((w) => /system\s*\(|\|\s*getline|\|\s*"/.test(w))) return 'awk running a command';
+    // git settings on the command line can rename any command (`-c alias.x='clean -fdx'`), and an alias set now
+    // runs later under a name the guards don't know (MAT-12).
+    if (prog === 'git') {
+      const sub = words.findIndex((w, k) => k > 0 && !w.startsWith('-') && !['-C', '-c', '--git-dir', '--work-tree', '--namespace', '--config-env'].includes(words[k - 1]));
+      const front = sub < 0 ? words.slice(1) : words.slice(1, sub);
+      if (front.some((w) => w === '-c' || w.startsWith('--config-env') || /^-c./.test(w))) return 'git settings given on the command line';
+      if (words[sub] === 'config' && words.slice(sub + 1).some((w) => /^alias\./i.test(w))) return 'a git alias being set';
+    }
   }
   // `env -S "…"` splits one word into a command (shellCommands drops `env` and its flags).
   const all = shellWords(c);
