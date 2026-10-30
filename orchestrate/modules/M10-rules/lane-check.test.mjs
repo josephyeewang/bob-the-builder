@@ -267,7 +267,7 @@ test('round 3: a hostile error message, long labels, a label count that is not a
   assert.ok(check([f('docs/research/' + 'a'.repeat(1_000_000) + '.md', 'removed')]).length < 300);
   // m-2, m-3.
   for (const p of ['docs/research/IFLOW.md', 'docs/research/CODEBUDDY.md', 'docs/research/x.instructions.md', 'docs/research/x.prompt.md',
-    'docs/research/x.agent.md', 'docs/research/llms.txt', 'docs/research/llms-full.txt', 'docs/CONTRIBUTING.md', 'docs/CODE_OF_CONDUCT.md',
+    'docs/research/x.agent.md', 'docs/research/x.chatmode.md', 'docs/research/llms.txt', 'docs/research/llms-full.txt', 'docs/CONTRIBUTING.md', 'docs/CODE_OF_CONDUCT.md',
     'docs/SUPPORT.md', 'docs/README.md', 'docs/GOVERNANCE.md']) assert.ok(check([f(p)]), p);
 });
 

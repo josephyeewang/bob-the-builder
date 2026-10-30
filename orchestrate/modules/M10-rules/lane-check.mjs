@@ -22,7 +22,7 @@ export const DOCS_FLOOR = compileList(['docs/*.md', 'docs/domains/**', 'docs/res
 const NOT_DOCS = compileList(['**/AGENTS.override.md', '**/AGENT.md', '**/GEMINI.md', '**/WARP.md', '**/CRUSH.md', '**/QWEN.md',
   '**/copilot-instructions.md', '**/CONVENTIONS.md', '**/SKILL.md', '**/commands/**', '**/skills/**', '**/agents/**', '**/rules/**',
   '**/pull_request_template.md', '**/PULL_REQUEST_TEMPLATE/**', '**/ISSUE_TEMPLATE/**', '**/SECURITY.md',
-  '**/IFLOW.md', '**/CODEBUDDY.md', '**/*.instructions.md', '**/*.prompt.md', '**/*.agent.md', '**/llms.txt', '**/llms-full.txt',
+  '**/IFLOW.md', '**/CODEBUDDY.md', '**/*.instructions.md', '**/*.prompt.md', '**/*.agent.md', '**/*.chatmode.md', '**/llms.txt', '**/llms-full.txt',
   // GitHub shows these as the repository's own pages (README in docs/ when the root has none): public, so ask-first (m-3).
   'docs/README.md', '**/CONTRIBUTING.md', '**/CODE_OF_CONDUCT.md', '**/SUPPORT.md', '**/GOVERNANCE.md']);
 // A path this long or deep is no doc; refusing it keeps the pattern checks quick (m1: 95 s at 2,000 folders).
