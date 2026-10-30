@@ -19,6 +19,7 @@
 import { RISKY_CLASSES } from '../../shared/rules.mjs';
 import { PROTECTED_FLOOR, compileList, pathProblem } from './paths.mjs';
 import { parsePolicy } from './policy.mjs';
+import { checkRepairFiles } from './repair-plain.mjs';
 
 export const STATUSES = Object.freeze(['added', 'modified', 'removed', 'renamed', 'copied']);
 export const EFFECT_KEYS = Object.freeze(['production_data', 'schema', 'secrets_settings', 'deletes',
@@ -83,6 +84,12 @@ export function classifyChange(policy, change) {
     }
     if (f.mode !== undefined && LINK_MODES.has(String(f.mode))) { protectedPaths.add(f.path); add('protected', `${f.path} (link or submodule)`); }
     if (f.status === 'added' && m.newVisible(f.path)) add('first_customer_visible', f.path);
+    // A repair file must be plain SQL that was added, or it can't be approved as written (0b-9 M8): the same
+    // allow-list the repair job runs after the merge. For an added file, the added lines are the whole file.
+    if (touched.some((p) => m.repair(p))) {
+      const text = Array.isArray(f.added_lines) ? f.added_lines.join('\n') : undefined;
+      for (const r of checkRepairFiles([{ ...f, text }], policy).refused) add('unclassifiable', `repair file not plain: ${r.path}: ${r.reason}`);
+    }
     const gone = f.status === 'removed' ? f.path : f.status === 'renamed' ? f.previous_path : null;
     if (gone && m.removed(gone)) add('deletes', gone);
 

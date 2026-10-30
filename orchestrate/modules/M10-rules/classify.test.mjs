@@ -61,6 +61,18 @@ test('effect paths add their class', () => {
   assert.ok(!run([mod('app/page.tsx')]).risky.includes('first_customer_visible'), 'only new files under app/');
 });
 
+test('a repair file is judged by the plain-statement allow-list before the merge (0b-9 M8)', () => {
+  const reasons = (f) => run([f]).reasons.unclassifiable ?? [];
+  const plain = { path: 'db/repairs/fix.sql', status: 'added', added_lines: ['UPDATE t SET a = lower(a);'] };
+  assert.ok(run([plain]).risky.includes('production_data'));
+  assert.ok(!reasons(plain).some((r) => /repair file not plain/.test(r)), 'a plain added repair file passes the allow-list');
+  assert.match(reasons({ ...plain, added_lines: ['SELECT pg_sleep(1);'] }).join(), /repair file not plain: .*pg_sleep/);
+  assert.match(reasons({ ...plain, status: 'modified' }).join(), /not added/);
+  assert.match(reasons({ path: 'db/repairs/run.js', status: 'added', added_lines: ['x'] }).join(), /not a \.sql file/);
+  assert.match(reasons({ path: 'db/repairs/fix.sql', status: 'added' }).join(), /text not given/);
+  assert.match(reasons({ path: 'db/other.sql', previous_path: 'db/repairs/a.sql', status: 'renamed' }).join(), /repair file not plain/);
+});
+
 test('text scans of added lines add classes outside docs, never inside', () => {
   const code = (lines) => run([mod('lib/x.ts', { added_lines: lines })]).risky;
   assert.ok(code(['await sql`ALTER TABLE users ADD COLUMN x int`']).includes('schema'));

@@ -38,6 +38,7 @@ export const KEYS = Object.freeze({
   product_profile: { required: false, type: 'map' }, 'product_profile.required_checks': { required: false, type: 'list' },
   'product_profile.audit_workflow': { required: false, type: 'map' },
   repairs: { required: false, type: 'map' }, 'repairs.max_statements': { required: false, type: 'text' },
+  'repairs.allowed_functions': { required: false, type: 'list' },
   roles_enabled: { required: false, type: 'map' }, onboarding: { required: false, type: 'map' },
   switches: { required: false, type: 'map' }, ladder: { required: false, type: 'map' },
   effort_floor: { required: false, type: 'map' }, waiting: { required: false, type: 'map' },
@@ -202,6 +203,14 @@ function check(raw) {
   if (typeof pin !== 'string' || !VERSION.test(pin)) bad('claude_code.pin must be a version like 2.1.300');
   if (compareVersions(pin, MIN_CLAUDE_CODE) < 0) bad(`claude_code.pin must be at least ${MIN_CLAUDE_CODE}`);
   if (Object.hasOwn(cc, 'required_minimum') && !(typeof cc.required_minimum === 'string' && VERSION.test(cc.required_minimum))) bad('claude_code.required_minimum must be a version');
+
+  // Repair files (0b-9 M8, r2-m4): a whole-number statement limit, and lower-case function names only.
+  if (raw.repairs?.max_statements !== undefined) p.repairs.max_statements = int(raw.repairs.max_statements, 'repairs.max_statements');
+  if (raw.repairs?.allowed_functions !== undefined) {
+    for (const f of strList(raw.repairs.allowed_functions, 'repairs.allowed_functions')) {
+      if (!/^[a-z_][a-z0-9_]*$/.test(f)) bad(`repairs.allowed_functions entry "${f}" must be a lower-case function name`);
+    }
+  }
 
   const joe = mapOf(need(raw.accounts, 'joe', 'accounts'), 'accounts.joe');
   p.accounts.joe.github_id = int(need(joe, 'github_id', 'accounts.joe'), 'accounts.joe.github_id');

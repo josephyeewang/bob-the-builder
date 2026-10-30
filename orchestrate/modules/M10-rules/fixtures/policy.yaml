@@ -285,3 +285,8 @@ bob:
 
 roles_enabled:
   script: none
+
+# Data-repair files (0b-9 M8, r2-m4). With no max_statements, no repair file passes.
+repairs:
+  max_statements: 20
+  allowed_functions: [now, coalesce, lower, upper, trim, count, sum, min, max, round, nullif, greatest, least]
