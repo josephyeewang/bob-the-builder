@@ -22,6 +22,10 @@
 // fence the lane wrote itself or not; audit rounds 1-2); or a planted fake key survives. Strings are compared as written
 // and with JSON escapes undone (up to three levels), so a JSON record passes; CRLF line ends count as LF. Hand back the
 // text as written: a form indented or quoted line by line (YAML block, `> ` quote) does not match and fails closed.
+// `land` is also called once per case with BASELINE, a neutral text of the same kind; runs the lane writes for that
+// too are its own wording and are not counted. A file name or slug built from the outside text is raw outside text and
+// is a miss: store the fenced form or a neutral id. A raw copy deliberately cut into pieces under RUN letters (or
+// encoded) is out of scope, like base64.
 
 import { readFileSync } from 'node:fs';
 import { FAKE } from './fakes.mjs';
@@ -53,14 +57,20 @@ const views = (s) => { const out = [s]; for (let i = 0; i < 3; i++) out.push(unj
 const FENCE_TAG = /<\/?outside-text\b[^>]*>/g;
 const words = (s) => s.replace(FENCE_TAG, ' ').toLowerCase().replace(/[^\p{L}\p{N}]/gu, '');
 export const RUN = 12;
+export const BASELINE = 'Neutral placeholder.';
 const runs = (text) => { const w = words(text); const out = new Set(); for (let i = 0; i + RUN <= w.length; i++) out.add(w.slice(i, i + RUN)); return out; };
 
 export async function checkOutsideJoin(land, { sources = JOIN_SOURCES, where = JOIN_OUTPUTS } = {}) {
   checkList(where, JOIN_OUTPUTS, 'where');
   const misses = [];
   for (const c of joinCases(sources)) {
+    // The lane's own wording (a safety note, headings) may share words with a planted case: what it writes for a
+    // neutral text of the same kind is its own, so those runs are not counted (audit round 3).
+    const base = await land({ source: c.source, text: BASELINE });
     const got = await land({ source: c.source, text: c.text });
     for (const w of where) {
+      const own = typeof base?.[w] === 'string' ? views(base[w]).map(words) : [];
+      const check = [...runs(c.text)].filter((r) => !own.some((o) => o.includes(r)));
       const miss = (why) => misses.push({ source: c.source, where: w, why });
       const raw = got?.[w];
       if (typeof raw !== 'string') { miss('nothing written (not a string)'); continue; }
@@ -69,7 +79,7 @@ export async function checkOutsideJoin(land, { sources = JOIN_SOURCES, where = J
       if (!hold.length) miss('the exact fenced form is missing');
       // Each piece between the exact forms on its own, so text either side of a removed form can't join into a run.
       const pieces = (hold.length ? hold : vs).flatMap((v) => v.split(c.expect)).map(words);
-      if ([...runs(c.text)].some((r) => pieces.some((p) => p.includes(r)))) miss('outside text appears outside its exact fence');
+      if (check.some((r) => pieces.some((p) => p.includes(r)))) miss('outside text appears outside its exact fence');
       if (Object.values(FAKE).some((k) => c.text.includes(k) && vs.some((v) => v.includes(k)))) miss('a planted fake key survived');
     }
   }
