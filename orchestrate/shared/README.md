@@ -50,3 +50,14 @@ rec.diary({ since: 0 });
 - `write` and `applyOutbox` never throw; any failure is `{ ok: false, reason }`.
 - The names (`SCRIPT_ACTORS`, `AI_ROLES`, `ENTITIES`, `STATES`, `FINAL_STATES`, `REQUIRED_FIELDS`, `WAIT_FIELDS`) are defined once, here.
 - Tests: `memoryRecord()` keeps the rev check and the diary only. The real Store Writer (M9) adds the legal state moves and who may change what, so code that passes on the fake can still be refused by the real one.
+
+## Test temp folders: `test-tmp.mjs`
+
+Every orchestrate test that needs a temp folder gets it here, so it is removed when the test file ends, pass or fail (leftover test folders filled a Mac's disk, 29 Oct 2026):
+
+```js
+import { tempDir } from '../../shared/test-tmp.mjs';   // a static import at the top, never inside a test
+const dir = tempDir('m12-history-');                    // a lane or module prefix: m1- to m99-, orch-, air-, sg-, hist-, roles-, scan-
+```
+
+`tmp-guard.test.mjs` fails any orchestrate file that calls `mkdtemp` itself, and runs every orchestrate suite with a private temp folder to check nothing is left. Files that haven't switched yet are listed in its `NOT_SWITCHED_YET`; delete your file's line when you switch.
