@@ -7,7 +7,10 @@
 //   - passes the safe settings through the environment (GIT_CONFIG_COUNT/KEY/VALUE), so a git
 //     that another program starts (the secret scanner) gets them too;
 //   - names the repository explicitly (GIT_DIR) and logs it, so a test can prove no call ran
-//     inside a worker's copy except save-work.
+//     inside a worker's copy except save-work;
+//   - refuses a repository whose own config names a program under a name SAFE_CONFIG cannot pin
+//     ahead of time (a filter, diff or merge driver, a remote's upload program, a URL rewrite), and
+//     turns off outside diff programs and text conversion on every command that accepts the flags.
 // Capability note: checked against Git 2.54.0 on 29 Oct 2026; requires git >= 2.42.
 
 import { spawn } from 'node:child_process';
@@ -17,15 +20,41 @@ import { join } from 'node:path';
 
 export const MIN_GIT = [2, 42];
 
-// Settings that stop git from running any program a repository's own files could name.
+// Settings that stop git from running any program a repository's own files could name, or fetching from
+// anywhere the call did not name (LEAD-CALLS L36: every key that can, not one at a time). They come last, so
+// they win over the repository's own config. `core.hooksPath` names a file, so no hook can be found under it.
 export const SAFE_CONFIG = Object.freeze([
   ['core.fsmonitor', 'false'],
   ['core.hooksPath', '/dev/null'],
   ['core.pager', 'cat'],
+  ['core.editor', '/usr/bin/false'],
+  ['sequence.editor', '/usr/bin/false'],
   ['core.sshCommand', '/usr/bin/false'],
   ['core.askPass', '/usr/bin/false'],
+  ['core.attributesFile', '/dev/null'],
   ['diff.external', ''],
+  ['interactive.diffFilter', 'cat'],
   ['credential.helper', ''],
+  // Signatures: never checked or made, so no signing program runs (a commit with a signature header and
+  // log.showSignature ran the repository's gpg.program on a plain `git log`).
+  ['gpg.program', '/usr/bin/false'],
+  ['gpg.openpgp.program', '/usr/bin/false'],
+  ['gpg.x509.program', '/usr/bin/false'],
+  ['gpg.ssh.program', '/usr/bin/false'],
+  ['gpg.ssh.defaultKeyCommand', '/usr/bin/false'],
+  ['log.showSignature', 'false'],
+  ['merge.verifySignatures', 'false'],
+  ['pull.verifySignatures', 'false'],
+  ['commit.gpgSign', 'false'],
+  ['tag.gpgSign', 'false'],
+  ['tag.forceSignAnnotated', 'false'],
+  ['push.gpgSign', 'false'],
+  // Fetches go only where the call names: no submodules, bundle links or proxy.
+  ['submodule.recurse', 'false'],
+  ['fetch.recurseSubmodules', 'false'],
+  ['push.recurseSubmodules', 'no'],
+  ['transfer.bundleURI', 'false'],
+  ['http.proxy', ''],
   ['protocol.ext.allow', 'never'],
   ['protocol.file.allow', 'always'], // local bundles and the mirror are files
   ['transfer.fsckObjects', 'true'],
@@ -96,6 +125,9 @@ export function safeGitEnv({ gitDir, workTree, extraConfig = [] } = {}) {
     SSH_ASKPASS: '/usr/bin/false',
     GIT_PAGER: 'cat',
     PAGER: 'cat',
+    GIT_EDITOR: '/usr/bin/false',
+    GIT_SEQUENCE_EDITOR: '/usr/bin/false',
+    GIT_NO_LAZY_FETCH: '1',
     GIT_OPTIONAL_LOCKS: '0',
     GIT_CONFIG_COUNT: String(cfg.length),
   };
@@ -105,18 +137,65 @@ export function safeGitEnv({ gitDir, workTree, extraConfig = [] } = {}) {
   return env;
 }
 
+// Repository config keys that name a program, or a place to fetch from, under a name each repository picks, so
+// SAFE_CONFIG cannot pin them ahead of time (L36). A repository whose own config (or a file it includes) sets one
+// is refused. Keys as git lists them: section and key in lower case, the name between kept as written.
+export const NAMED_PROGRAM_KEY = /^(?:(?:filter|diff|merge|mergetool|difftool|trailer)\..+\.(?:clean|smudge|process|command|textconv|driver|cmd)|remote\..+\.(?:uploadpack|receivepack|vcs|promisor|proxy|partialclonefilter)|url\..+\.(?:insteadof|pushinsteadof)|credential\..+\.helper|submodule\..+\.update|http\..+\.proxy|extensions\.partialclone|core\.alternaterefscommand|core\.gitproxy)$/;
+
+// Diff-family commands, which accept the two flags that turn off outside diff programs and text conversion.
+const DIFF_COMMANDS = new Set(['log', 'show', 'diff', 'diff-tree', 'diff-index', 'diff-files', 'whatchanged', 'format-patch', 'range-diff']);
+const NO_PROGRAMS = ['--no-ext-diff', '--no-textconv'];
+
+/** `args` with the no-program flags right after a diff-family command (once each); other commands unchanged. */
+export function withNoPrograms(args) {
+  const i = args.findIndex((a) => !String(a).startsWith('-'));
+  if (i < 0 || !DIFF_COMMANDS.has(args[i])) return args;
+  const add = NO_PROGRAMS.filter((f) => !args.includes(f));
+  return [...args.slice(0, i + 1), ...add, ...args.slice(i + 1)];
+}
+
+/**
+ * Why the repository at `gitDir` must not be run, or null. Reads its own config (and what it includes) with the
+ * safe settings; a key that names a program under a per-repository name is a refusal. A folder with no config
+ * yet (git init, version) has nothing to read. A config that can't be read is a refusal: fail closed.
+ */
+export function repoConfigWhy(gitDir, { gitBin = 'git', timeoutMs = 30000 } = {}) {
+  if (!existsSync(join(gitDir, 'config')) && !existsSync(join(gitDir, 'commondir'))) return Promise.resolve(null);
+  return new Promise((resolve) => {
+    const child = spawn(gitBin, ['config', '--list', '-z', '--show-scope', '--includes'], { cwd: home(), env: safeGitEnv({ gitDir }), stdio: ['ignore', 'pipe', 'pipe'], timeout: timeoutMs });
+    const out = []; let err = '';
+    child.stdout.on('data', (d) => out.push(d));
+    child.stderr.on('data', (d) => { err += d; });
+    child.on('error', (e) => resolve(`its config could not be read: ${e.message}`));
+    child.on('close', (code) => {
+      if (code !== 0) return resolve(`its config could not be read: ${err.trim().slice(0, 200)}`);
+      const f = Buffer.concat(out).toString('utf8').split('\0');
+      const bad = [];
+      for (let i = 0; i + 1 < f.length; i += 2) {
+        if (f[i] === 'command') continue;
+        const key = f[i + 1].split('\n')[0];
+        if (NAMED_PROGRAM_KEY.test(key)) bad.push(key);
+      }
+      resolve(bad.length ? `its config names a program or a place to fetch from: ${bad.join(', ')}` : null);
+    });
+  });
+}
+
 /**
  * Runs git. Never throws on a non-zero exit: returns { code, stdout: Buffer, stderr: string }.
  * `gitDir` is required; `cwd` defaults to a private empty folder so no repository is
- * discovered from the working folder. `purpose` names the step for the call log.
+ * discovered from the working folder. `purpose` names the step for the call log. A repository whose own
+ * config names a program SAFE_CONFIG cannot pin is refused (code -1) before git runs in it.
  */
-export function git(args, { gitDir, workTree, cwd, input, extraConfig, purpose = 'unnamed', timeoutMs = 120000, gitBin = 'git' } = {}) {
-  if (!gitDir) return Promise.resolve({ code: -1, stdout: Buffer.alloc(0), stderr: 'safe-git: GIT_DIR is required' });
+export async function git(args, { gitDir, workTree, cwd, input, extraConfig, purpose = 'unnamed', timeoutMs = 120000, gitBin = 'git' } = {}) {
+  if (!gitDir) return { code: -1, stdout: Buffer.alloc(0), stderr: 'safe-git: GIT_DIR is required' };
+  const why = await repoConfigWhy(gitDir, { gitBin });
+  if (why) return { code: -1, stdout: Buffer.alloc(0), stderr: `safe-git: refused: ${why}` };
   const env = safeGitEnv({ gitDir, workTree, extraConfig });
   const where = cwd ?? home();
   callLog.push({ purpose, gitDir, cwd: where, workTree: workTree ?? null, args: args.filter((a) => !/^http\..*extraheader/i.test(a)) });
   return new Promise((resolve) => {
-    const child = spawn(gitBin, ['--no-pager', ...args], { cwd: where, env, stdio: ['pipe', 'pipe', 'pipe'], timeout: timeoutMs });
+    const child = spawn(gitBin, ['--no-pager', ...withNoPrograms(args)], { cwd: where, env, stdio: ['pipe', 'pipe', 'pipe'], timeout: timeoutMs });
     const out = []; let err = '';
     child.stdout.on('data', (d) => out.push(d));
     child.stderr.on('data', (d) => { err += d; });

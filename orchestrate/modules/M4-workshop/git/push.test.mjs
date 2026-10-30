@@ -635,6 +635,8 @@ async function boobyTrap(w) {
   mkdirSync(hooks, { recursive: true });
   for (const h of HOOK_NAMES) { writeFileSync(join(hooks, h), `#!/bin/sh\ntouch ${JSON.stringify(join(markers, `hook-${h}`))}\n`); chmodSync(join(hooks, h), 0o755); }
   const gd = join(w.clone, '.git');
+  // Read before the traps go in: safe-git refuses a repository whose config names a program (L36).
+  const head = (await gitOk(['rev-parse', 'HEAD'], w.cg)).trim();
   mkdirSync(join(gd, 'hooks'), { recursive: true });
   for (const h of HOOK_NAMES) copyFileSync(join(hooks, h), join(gd, 'hooks', h));
   chmodSync(join(gd, 'hooks'), 0o755);
@@ -653,7 +655,7 @@ async function boobyTrap(w) {
   writeFileSync(join(gd, 'info', 'attributes'), '* filter=x diff=x\n');
   writeFileSync(join(gd, 'config.worktree'), `[core]\n\tfsmonitor = ${prog('fsmonitor-wt')}\n`);
   // The clone moves its own idea of GitHub's main.
-  writeFileSync(join(gd, 'packed-refs'), `${(await gitOk(['rev-parse', 'HEAD'], w.cg)).trim()} refs/remotes/origin/main\n`);
+  writeFileSync(join(gd, 'packed-refs'), `${head} refs/remotes/origin/main\n`);
   return { markers, fired: () => readdirSync(markers) };
 }
 
