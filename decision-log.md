@@ -489,6 +489,17 @@ The companion `audit-log.md` records *deferred* items (Defer verdicts that may s
 - **Consequences:** `build-protocol.md` is about 1,970 lines. The AUDIT steps are about 220 lines in one file. A reader following an old reference takes one extra hop through the pointer. Lens notes that called the retired steps A7f, A7g, A7h and A7i (replaced in v2.17) "existing" now say "prior (pre-v2.17)". The core names the new files by their full install path (`~/.claude/skills/bob/../modes/…`), as it does for `rules.md`, so they resolve from a user's project.
 - **Revisit trigger:** the Blueprint changes to the NEW mode and startup text have landed. Then do the second half: NEW mode to `modes/new.md`, and the core becomes a short index.
 
+
+### D-031: Bob ORCHESTRATE's code lives in Bob, under `orchestrate/`
+
+- **Date:** 2026-10-29
+- **Status:** Accepted
+- **Context:** ORCHESTRATE was designed as a Bob capability ("Bob ORCHESTRATE"). Its Blueprint module (M8) already lives in Bob's templates and scripts, but the design named no home for the other thirteen modules. The safety-rails build is starting in three parallel lanes, and each needs folders it alone writes.
+- **Decision:** All ORCHESTRATE code lives in Bob under `orchestrate/`: one folder per module (`orchestrate/modules/M<n>-<name>/`), shared helpers in `orchestrate/shared/`, and tests beside the code as `*.test.mjs`, run by Bob's CI with Node's own test runner. `orchestrate/LANES.md` names each folder's one writer. The code is generic: anything particular to one product or owner (its rules entry, accounts, schedule, keys) lives in that product's repo or the owner's private setup and is read as data.
+- **Alternatives considered:** A separate private repo for the code. Rejected: it splits one capability across two homes, and Bob projects could no longer pick it up through `/bob UPGRADE`. Keep only M8 in Bob. Rejected for the same reason.
+- **Consequences:** The safety rails' logic is public, so no guard may rely on its rules being secret. Its strength has to come from permissions, checks and keys held elsewhere, which the design already requires. Bob's CI grows one step. Lanes must keep product names out of tests and fixtures; the test product is generic.
+- **Revisit trigger:** a guard is found that only works if its logic is hidden.
+
 ---
 
 ## Anti-pattern reminder
