@@ -27,9 +27,31 @@ const NOT_SWITCHED_YET = {
 // (seen 29 Oct 2026: the whole-run check passed while the files it named left 57 folders).
 const cleanEnv = (extra = {}) => { const e = { ...process.env, ...extra }; delete e.NODE_TEST_CONTEXT; return e; };
 
-test('no orchestrate code makes a temp folder except through test-tmp.mjs (bar the files not switched yet)', () => {
+// Test code: a test file, a test helper or fixture, or any file that loads node:test. Only test code is held to
+// tempDir(). A production script may make its own run-time folder inside its private folder and remove it in a finally
+// or exit handler (LEAD-CALLS L36); the whole-run check below still fails any of those it leaves behind.
+const isTestCode = (f) => {
+  const r = rel(f);
+  const name = r.split('/').pop();
+  if (name.endsWith('.test.mjs') || name.startsWith('test-') || name === 'fixtures.mjs') return true;
+  if (r.split('/').slice(0, -1).some((d) => d === 'fixtures' || d === 'test' || d === 'tests')) return true;
+  return /from\s+['"]node:test['"]/.test(readFileSync(f, 'utf8'));
+};
+
+test('isTestCode: tests, helpers and fixtures are test code; production scripts are not', () => {
+  const fake = (r) => join(ROOT, r);
+  for (const r of ['modules/M1-front-door/round4.test.mjs', 'shared/test-tmp.mjs', 'modules/M1-front-door/fixtures.mjs',
+    'modules/M12-sensors/shell-guard/fixtures/naive-hook.mjs', 'test/kit.mjs']) assert.equal(isTestCode(fake(r)), true, r);
+  const d = tempDir('orch-kind-');
+  writeFileSync(join(d, 'push.mjs'), "import { mkdtempSync } from 'node:fs';\n");
+  assert.equal(isTestCode(join(d, 'push.mjs')), false, 'a production script is not test code');
+  writeFileSync(join(d, 'kit.mjs'), "import { test } from 'node:test';\n");
+  assert.equal(isTestCode(join(d, 'kit.mjs')), true, 'a helper that loads node:test is test code');
+});
+
+test('no orchestrate test code makes a temp folder except through test-tmp.mjs (bar the files not switched yet)', () => {
   for (const f of ALL) {
-    if (f === HELPER || f === SELF) continue;
+    if (f === HELPER || f === SELF || !isTestCode(f)) continue;
     const text = readFileSync(f, 'utf8');
     const own = /mkdtemp|tmpdir\s*\(/.test(text);
     if (rel(f) in NOT_SWITCHED_YET) assert.ok(own, `${rel(f)} no longer makes its own temp folder: delete its line in NOT_SWITCHED_YET`);
