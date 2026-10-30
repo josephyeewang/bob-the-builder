@@ -15,6 +15,9 @@ const putFact = (rec, id, doc, kind) => rec.write({ actor: 'dispatcher', entity:
 
 export const ALERT_QUEUE_FACT = 'alert-unsent';
 export const ALERT_QUEUE_MAX = 50;
+// The cap on entries not yet tried (the lead's check of #35, Minor): while the port is down each round tries
+// one entry, so without it the untried grow without limit. Well above a burst, so one burst is all sent.
+export const ALERT_UNTRIED_MAX = 200;
 export const ALERT_SEND_MS = 10_000;
 // One sender's time in a pass (audit 0b-6 r7 m1): the pass sends twice, at its start and at its end, and
 // every step at its deadline plus both sends fits inside main.mjs's run deadline.
@@ -23,20 +26,26 @@ export const ALERT_BUDGET_MS = 2 * ALERT_SEND_MS;
 const entriesOf = (d) => (Array.isArray(d?.entries) ? d.entries : []);
 // One cause, one entry: the key is the fact its told mark goes on, with the fields it sets.
 const keyOf = (mark) => (mark ? `${mark.fact}:${Object.keys(mark.fields ?? {}).sort().join(',')}` : null);
-// The cap counts only entries that have waited through a failed send (`held`; audit 0b-6 r7 M3): a burst
-// queued while sending works is all sent. The oldest held entries go first; the number dropped is told.
-const capHeld = (all) => {
-  const held = all.filter((e) => e.held);
-  const over = Math.max(0, held.length - ALERT_QUEUE_MAX);
-  const gone = new Set(held.slice(0, over).map((e) => e.id));
+// Two caps, each dropping its oldest first; the number dropped is told. Entries that have waited through a
+// failed send (`held`; audit 0b-6 r7 M3) keep ALERT_QUEUE_MAX, so a burst queued while sending works is all
+// sent. Entries not yet tried keep ALERT_UNTRIED_MAX, so a long outage cannot grow the queue without limit.
+const capQueue = (all) => {
+  let over = 0;
+  const gone = new Set();
+  for (const [isHeld, max] of [[true, ALERT_QUEUE_MAX], [false, ALERT_UNTRIED_MAX]]) {
+    const some = all.filter((e) => !!e.held === isHeld);
+    const n = Math.max(0, some.length - max);
+    for (const e of some.slice(0, n)) gone.add(e.id);
+    over += n;
+  }
   return { entries: all.filter((e) => !gone.has(e.id)), over };
 };
 
 /**
  * Queues one alert. `mark` = { fact, fields, kind }: written onto that fact (merged into it) once the alert
  * is delivered. A second alert for the same cause, or with the same text, replaces the queued one in place.
- * Of the entries that waited through a failed send, the queue keeps the newest ALERT_QUEUE_MAX; the dropped
- * are counted in the next text sent.
+ * Of the entries that waited through a failed send, the queue keeps the newest ALERT_QUEUE_MAX, and of those not
+ * yet tried the newest ALERT_UNTRIED_MAX; the dropped are counted in the next text sent.
  * Returns the entry's id, or null when the record refused it.
  */
 export function queueAlert(rec, text, { now, mark = null } = {}) {
@@ -47,7 +56,7 @@ export function queueAlert(rec, text, { now, mark = null } = {}) {
   const all = entriesOf(d).slice();
   const i = all.findIndex((e) => (key ? e.key === key : !e.key && e.text === entry.text));
   if (i >= 0) all[i] = entry; else all.push(entry);
-  const { entries, over } = capHeld(all);
+  const { entries, over } = capQueue(all);
   return putFact(rec, ALERT_QUEUE_FACT, { ...d, entries, next, dropped: (d.dropped ?? 0) + over }, 'alert_queued').ok === true ? entry.id : null;
 }
 
@@ -100,9 +109,10 @@ export function settleAlert(rec, sent, ok, now, why = 'it was not delivered') {
   if (!e) return;
   const rest = entriesOf(d).filter((x) => x.id !== e.id);
   if (!ok) {
-    // Only the entry that was tried is held, so the cap counts it; an entry not yet tried is never dropped
-    // (audit 0b-6 r8 MAT-2: one text the port always refuses, or one timeout, ahead of a burst).
-    const { entries, over } = capHeld([...rest, { ...e, held: true, tries: (e.tries ?? 0) + 1 }]);
+    // Only the entry that was tried is held, so the held cap counts it; an entry not yet tried counts only
+    // against the larger untried cap (audit 0b-6 r8 MAT-2: one text the port always refuses, or one timeout,
+    // ahead of a burst).
+    const { entries, over } = capQueue([...rest, { ...e, held: true, tries: (e.tries ?? 0) + 1 }]);
     putFact(rec, ALERT_QUEUE_FACT, { ...d, entries, dropped: (d.dropped ?? 0) + over, error: `an alert could not be sent: ${why}`, at: iso(now) }, 'alert_failed');
     return;
   }
