@@ -25,6 +25,8 @@ import { createHash } from 'node:crypto';
 export const DISPATCHER_LATE_MIN = 15;
 export const USAGE_STEPS = Object.freeze([50, 75, 90, 95]);
 const ISSUE_FACT = (product) => `heartbeat-issue-${product.replace(/[^A-Za-z0-9_-]/g, '-')}`;
+// The status fact the Front Door's trip check reads (review-0b-8 MAT-9): green only while `at` is under an hour old.
+export const STATUS_FACT = (product) => `heartbeat-${product.replace(/[^A-Za-z0-9_-]/g, '-')}`;
 
 async function probe(fn) { try { return { ok: true, v: await fn() }; } catch { return { ok: false, v: null }; } }
 
@@ -91,6 +93,9 @@ export async function heartbeatOnce({ product, writer, gh, alerts, owner, probes
   } else {
     lines.push('ok    usage: unknown');
   }
+
+  writer.put(STATUS_FACT(product), { kind: 'fact.heartbeat-status', product, at: t.toISOString(),
+    front_door_reachable: f.ok && f.v === true, signed_in: signedIn, login: signedIn ? acct.login : null, red });
 
   const body = `Orchestrate heartbeat. ${red.length ? `RED: ${red.join(', ')}` : 'All green.'}\nmini_alive_at: ${t.toISOString()}\n\n${lines.join('\n')}\n`;
   const issueId = ISSUE_FACT(product);

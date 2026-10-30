@@ -134,3 +134,19 @@ test('if the pinned issue is closed, the next pass opens a fresh one rather than
   assert.equal(h.gh.issues.size, 2);
   assert.equal(h.gh.issues.get(2).closed, false);
 });
+
+test('review-0b-8 MAT-9: each pass writes the status fact the trip check reads (reachable, signed in, time)', async () => {
+  const { STATUS_FACT } = await import('./heartbeat.mjs');
+  const h = setup();
+  await h.pass();
+  const s = h.writer.get(STATUS_FACT('product 1'));
+  assert.equal(s.at, '2026-11-03T12:00:00.000Z');
+  assert.equal(s.front_door_reachable, true);
+  assert.equal(s.signed_in, true);
+  assert.equal(s.login, 'account A');
+  h.world.fd = false; h.world.account = { signedIn: false }; h.tick(10);
+  await h.pass();
+  const s2 = h.writer.get(STATUS_FACT('product 1'));
+  assert.deepEqual([s2.front_door_reachable, s2.signed_in, s2.login], [false, false, null]);
+  assert.ok(s2.red.includes('front-door'));
+});
