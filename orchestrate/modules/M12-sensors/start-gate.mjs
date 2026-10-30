@@ -57,7 +57,9 @@ export async function readStartGate({ product, vercel, writer, pinnedSkip, verce
   const envDoc = doc({ kind: 'fact.start-gate-env' }, env);
   const w1 = writer.put(SKIP_FACT(product), skipDoc);
   const w2 = writer.put(ENV_FACT(product), envDoc);
-  return { skip: skipDoc, env: envDoc, written: !!(w1?.ok && w2?.ok) };
+  // The record takes ids of letters, digits, '.', '_' and '-' only; say so instead of a bare "not written" (round 9).
+  const badName = !/^[A-Za-z0-9._-]+$/.test(String(product));
+  return { skip: skipDoc, env: envDoc, written: !!(w1?.ok && w2?.ok), ...(badName ? { reason: 'the product name has characters a fact id cannot hold' } : {}) };
 }
 
 // Test helper only (lane 2: M4's startGate is the one gate). read(id) → the fact's doc or null. Never throws.

@@ -2,7 +2,8 @@
 // only `issues: write` here; the Mini's 10-minute watch puts the matching robot issue in the product's repo).
 //
 // Same rules as Bob's M13 alerts.mjs (review-0b-7 M10): a check still failing edits its open issue's body (silent; the
-// owner is notified once, when it opens); a check that passes again closes its issue with a "cleared" comment; an
+// owner is notified once, when it opens); a check that passes again closes its issue with a "cleared" comment and a
+// "cleared at <time>" line in the issue's body (the line, not the comment, is what counts; see below); an
 // issue the owner closed while the check still failed stays closed until a run sees it pass and fail again. Titles are
 // the step names ("product N / <check>"), so no product data appears.
 import { fileURLToPath } from 'node:url';
@@ -17,11 +18,18 @@ export async function notify({ ran, failed, api, now = () => new Date() }) {
   for (const i of all.sort((a, b) => a.number - b.number)) latest.set(i.title, i);
   const stamp = now().toISOString();
   for (const title of ran) {
+    // One GitHub error no longer stops the run: the other titles still get their issues, and the job ends red
+    // (0b-7 audit round 9 minor 2).
+    try { await one(title); } catch { done.push([title, 'error']); }
+  }
+  return done;
+
+  async function one(title) {
     const i = latest.get(title);
     const failing = failed.includes(title);
     if (failing) {
-      if (i && i.state === 'open') { await api('PATCH', `/issues/${i.number}`, { body: bodyOf(title, i.body, stamp) }); done.push([title, 'updated']); continue; }
-      if (i && i.state === 'closed' && !clearedByBot(i)) { done.push([title, 'suppressed']); continue; }
+      if (i && i.state === 'open') { await api('PATCH', `/issues/${i.number}`, { body: bodyOf(title, i.body, stamp) }); done.push([title, 'updated']); return; }
+      if (i && i.state === 'closed' && !clearedByBot(i)) { done.push([title, 'suppressed']); return; }
       await api('POST', '/issues', { title, body: bodyOf(title, '', stamp) });
       done.push([title, 'opened']);
     } else if (i && i.state === 'open') {
@@ -36,7 +44,6 @@ export async function notify({ ran, failed, api, now = () => new Date() }) {
       done.push([title, 're-armed']);
     }
   }
-  return done;
 }
 
 // "Cleared" is a line the bot writes into the issue's own body, never read from comments: the repo is public, so anyone
@@ -59,5 +66,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     return r.json();
   };
   const split = (s) => (s ?? '').split(',').filter(Boolean);
-  for (const [t, what] of await notify({ ran: split(process.env.RAN), failed: split(process.env.FAILED), api })) console.log(`${t}: ${what}`);
+  const done = await notify({ ran: split(process.env.RAN), failed: split(process.env.FAILED), api });
+  for (const [t, what] of done) console.log(`${t}: ${what}`);
+  if (done.some(([, what]) => what === 'error')) process.exitCode = 1;
 }
