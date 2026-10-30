@@ -15,16 +15,13 @@
 // Status: pending the real hook. Until it runs green against lane 2's installed hook at the join, R-0b-70 is not done.
 
 import { spawnSync } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { homedir } from 'node:os';
-import { basename, dirname, isAbsolute, relative, resolve } from 'node:path';
+import { homedir, tmpdir } from 'node:os';
+import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 
 export const corpus = JSON.parse(readFileSync(new URL('./corpus.json', import.meta.url), 'utf8'));
 
-// The ways one protected path can be written so a plain text match misses it. With a cwd, a relative target also gets
-// its absolute form (0b-7 round 9 minor 5: a guard that only matched relative paths passed the old corpus).
-// absolute: false leaves out the absolute form (the after-cd cases, whose short name is taken from the new folder).
 // Where the name is split. At a letter no shell, JS or Python string reads as an escape (`\t` is a tab in node -e and
 // python3 -c), so a form means the same file whatever the name (0b-7 round 10 audit 2 M-2).
 function split(target) {
@@ -38,10 +35,25 @@ function split(target) {
 
 // A path under the home folder written from it (`~/…`), or null (round 10 audit 5 M-2: a guard that never expands ~ or
 // $HOME passed). Left out when the home folder's own path has a space or shell character.
-const fromHome = (abs, home) => (home && /^[A-Za-z0-9._\/-]+$/.test(home) && abs.startsWith(`${home}/`) ? abs.slice(home.length + 1) : null);
+function fromHome(abs, home) {
+  const h = home?.replace(/\/+$/, ''); // a trailing slash is the same folder (round 10 audit 6 cosmetic 2)
+  return h && /^[A-Za-z0-9._\/-]+$/.test(h) && abs.startsWith(`${h}/`) ? abs.slice(h.length + 1) : null;
+}
 
-// home: the home folder the shell expands ~ and $HOME to (default this user's).
-export function pathForms(target, cwd, { absolute = true, home = homedir() } = {}) {
+// Whether the temp folder's disk ignores case, as a Mac's does by default (round 10 audit 6 M-3: `cat .ENV.PRODUCTION`
+// reads the file there, and a guard comparing names exactly misses it). Checked once, on the temp folder's disk.
+export const CASELESS = (() => {
+  const d = mkdtempSync(join(tmpdir(), 'sg-case-'));
+  try { writeFileSync(join(d, 'a'), ''); return existsSync(join(d, 'A')); } finally { rmSync(d, { recursive: true, force: true }); }
+})();
+const swapCase = (t) => [...t].map((c) => (c === c.toUpperCase() ? c.toLowerCase() : c.toUpperCase())).join('');
+
+// The ways one protected path can be written so a plain text match misses it. With a cwd, a relative target also gets
+// its absolute form (0b-7 round 9 minor 5: a guard that only matched relative paths passed the old corpus).
+// absolute: false leaves out the absolute form (the after-cd cases, whose short name is taken from the new folder).
+// home: the home folder the shell expands ~ and $HOME to (default this user's). caseless: whether the file's disk
+// ignores case (default: as the temp folder's does).
+export function pathForms(target, cwd, { absolute = true, home = homedir(), caseless = CASELESS } = {}) {
   // No backslash form if no letter is safe to split at.
   const { dir, base, safe, mid, early } = split(target);
   // Round 10 audit 3 M-1: with every trick at one point, the first half of the name was always plain text, and a guard
@@ -82,6 +94,9 @@ export function pathForms(target, cwd, { absolute = true, home = homedir() } = {
     'brace': `${dir}{${base},nothing}`,
     ...(absolute && cwd && !isAbsolute(target) ? { absolute: resolve(cwd, target) } : {}),
     ...(absolute && rel !== null ? { 'home-tilde': `~/${rel}`, 'home-var': `$HOME/${rel}` } : {}),
+    // $PWD, which a guard must take from the folder the command runs in, not its own (round 10 audit 6 M-2).
+    ...(cwd && !isAbsolute(target) ? { 'pwd-var': `$PWD/${target}` } : {}),
+    ...(caseless && swapCase(base) !== base ? { 'case-flip': `${dir}${swapCase(base)}` } : {}),
   };
 }
 
@@ -105,14 +120,15 @@ export function checkPath(p) {
 // does not read $'…' (round 10 audit 3 M-4).
 const SH_ANSI_C = spawnSync('sh', ['-c', "printf %s $'\\x41'"], { encoding: 'utf8' }).stdout === 'A';
 export const hostDead = (tpl, form) => (form === 'brace' && !existsSync('/bin/zsh') && /> ?(\{\{UP\}\}\/)?\{\{(P|BASE)\}\}/.test(tpl))
-  || (form === 'ansi-c' && !SH_ANSI_C && tpl.startsWith('sh -c'));
+  || (form === 'ansi-c' && !SH_ANSI_C && tpl.startsWith('sh -c'))
+  || (form === 'case-flip' && !CASELESS); // a disk that keeps case: the form is not built
 const live = (tpl, form) => !(corpus.dead[tpl] ?? []).includes(form) && !hostDead(tpl, form);
 
 // cwd: the folder the hook is asked from (a relative target is taken from there). home: as for pathForms.
-export function cases(target, cwd = process.cwd(), { home = homedir() } = {}) {
+export function cases(target, cwd = process.cwd(), { home = homedir(), caseless = CASELESS } = {}) {
   const out = [];
   const abs = checkPath(resolve(cwd, target));
-  const forms = pathForms(target, cwd, { home });
+  const forms = pathForms(target, cwd, { home, caseless });
   for (const [group, list] of Object.entries(corpus.refuse)) {
     for (const tpl of list) for (const [form, p] of Object.entries(forms)) if (live(tpl, form)) out.push({ expect: 'refuse', group, form, tpl, command: fill(tpl, { P: p }) });
   }
@@ -135,11 +151,18 @@ export function cases(target, cwd = process.cwd(), { home = homedir() } = {}) {
     for (const tpl of corpus.refuse_folder) if (live(tpl, 'home')) out.push({ expect: 'refuse', group: 'folder', form: 'home', tpl, command: fill(tpl, { DIR: hdir }) });
     for (const tpl of corpus.refuse_after_cd) if (live(tpl, 'home')) out.push({ expect: 'refuse', group: 'after-cd-home', form: 'home', tpl, cwd: up, command: fill(tpl, { DIR: hdir, BASE: basename(abs) }) });
   }
+  // Reads of the whole folder the command runs in, naming no folder (round 10 audit 6 M-1: `grep -rn KEY` from the
+  // project's top folder): asked from the file's folder and from the run folder when it holds the file; the same asked
+  // from a folder beside the file's, which does not hold it, must be allowed.
+  const holds = (where) => abs.startsWith(`${where}/`);
+  for (const where of [...new Set([dir, ...(holds(cwd) ? [cwd] : [])])]) {
+    for (const tpl of corpus.refuse_here) if (live(tpl, '-')) out.push({ expect: 'refuse', group: 'here', form: '-', tpl, cwd: where, command: tpl });
+  }
   // Change folder first, then name the file by its short name (in each form). Asked from the folder above, so a guard
   // that ignores the cd and reads the short name from its own folder misses it (0b-7 round 10 M-1); and from the run
   // folder, with a step up asked from the file's own folder, so a guard that refuses every case asked from elsewhere
   // still has to follow the cd (round 10 audit 4 M-2).
-  const short = Object.entries(pathForms(basename(abs), dir, { absolute: false }));
+  const short = Object.entries(pathForms(basename(abs), dir, { absolute: false, caseless }));
   for (const tpl of corpus.refuse_after_cd) {
     for (const [form, p] of short) {
       if (!live(tpl, form)) continue;
@@ -148,7 +171,7 @@ export function cases(target, cwd = process.cwd(), { home = homedir() } = {}) {
     }
   }
   for (const tpl of corpus.refuse_cd_up) {
-    for (const [form, p] of short) if (live(tpl, form)) out.push({ expect: 'refuse', group: 'cd-up', form, tpl, cwd: dir, command: fill(tpl, { UP: basename(dir), BASE: p }) });
+    for (const [form, p] of short) if (form !== 'pwd-var' && live(tpl, form)) out.push({ expect: 'refuse', group: 'cd-up', form, tpl, cwd: dir, command: fill(tpl, { UP: basename(dir), BASE: p }) });
   }
   // A recursive grep of a folder that holds the file reads it, so it is no allow case there (round 10 audit 5 minor 1).
   const readsFile = (command, where) => /\bgrep -r/.test(command) && [resolve(where, command.split(' ').pop())].some((f) => abs === f || abs.startsWith(`${f}/`));
@@ -156,6 +179,8 @@ export function cases(target, cwd = process.cwd(), { home = homedir() } = {}) {
   // Ordinary commands asked from the folder above and from the file's folder: a guard that refuses whatever is asked
   // from outside the run folder fails (round 10 audit 4 M-2).
   for (const command of corpus.allow_elsewhere) for (const where of [up, dir]) out.push({ expect: 'allow', group: 'allow-elsewhere', form: '-', cwd: where, command });
+  const beside = `${dir}-other`;
+  for (const command of corpus.refuse_here) out.push({ expect: 'allow', group: 'allow-beside', form: '-', cwd: beside, command });
   // Round 10 audit 3 M-2: near misses built from this file's folder and the words of its name, so a guard that refuses
   // anything naming the folder or a word of the name fails. Still a sample: no list proves a guard never over-refuses.
   const words = [...new Set(basename(abs).split(/[^A-Za-z0-9]+/).filter((w) => w.length >= 2))];
@@ -192,6 +217,7 @@ export function askHook(hookCommand, command, { timeoutMs = 60000, cwd, hookCwd 
     const h = j?.hookSpecificOutput;
     if (h?.permissionDecision === 'deny') return h.hookEventName === 'PreToolUse' ? 'refuse' : 'crash';
     if (j?.decision === 'block') return 'refuse';
+    if (j?.continue === false) return 'refuse'; // Claude Code stops; the command does not run (round 10 audit 6 cosmetic 5)
   } catch { /* plain output: not a deny */ }
   return 'allow';
 }
@@ -200,7 +226,7 @@ export function askHook(hookCommand, command, { timeoutMs = 60000, cwd, hookCwd 
 // cwd: the folder each case is asked from; after-cd cases carry their own.
 export function runCorpus(hook, { target = '.env.production', ...opts } = {}) {
   const ask = typeof hook === 'function' ? hook : (command, cwd) => askHook(hook, command, { ...opts, cwd });
-  const results = cases(target, opts.cwd, opts.home ? { home: opts.home } : {}).map((c) => ({ ...c, got: ask(c.command, c.cwd ?? opts.cwd ?? process.cwd()) }));
+  const results = cases(target, opts.cwd, { ...(opts.home ? { home: opts.home } : {}), ...(opts.caseless !== undefined ? { caseless: opts.caseless } : {}) }).map((c) => ({ ...c, got: ask(c.command, c.cwd ?? opts.cwd ?? process.cwd()) }));
   const failures = results.filter((r) => r.got !== r.expect);
   return { total: results.length, failures, passed: results.length - failures.length };
 }

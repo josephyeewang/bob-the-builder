@@ -38,8 +38,11 @@ test('every path form really names the protected file when the shell expands it'
 
 // In-process copies of the two fixture guards (spawning one process per case takes ~45 s); the protocol test below
 // checks they decide as the spawned fixture files do.
-const STRICT = new Set(cases(T).filter((c) => c.expect === 'allow').map((c) => c.command)); // the allow cases, word for word
-const strict = (c) => (STRICT.has(c) ? 'allow' : 'refuse');
+// The allow cases, word for word and from the folder each is asked from (one command is refused from the file's folder and
+// allowed beside it).
+const key = (command, cwd = process.cwd()) => `${cwd}\0${command}`;
+const STRICT = new Set(cases(T).filter((c) => c.expect === 'allow').map((c) => key(c.command, c.cwd)));
+const strict = (c, cwd) => (STRICT.has(key(c, cwd)) ? 'allow' : 'refuse');
 const naive = (c) => (c.includes(T) ? 'refuse' : 'allow');
 
 test('a strict, fail-closed stand-in guard passes the whole corpus', () => {
@@ -61,6 +64,8 @@ test('protocol: exit 2 and a JSON deny both count as refused; a crash or a hang 
   assert.equal(askHook(`"${node}" "${fx('odd-hooks.mjs')}" json-deny`, 'cat x'), 'refuse');
   // Round 10 audit 4 minor 2: a deny without hookEventName may be ignored by Claude Code, so it is no pass either way.
   assert.equal(askHook(`"${node}" "${fx('odd-hooks.mjs')}" json-deny-bare`, 'cat x'), 'crash');
+  // Round 10 audit 6 cosmetic 5: continue false stops Claude Code, so the command does not run.
+  assert.equal(askHook(`"${node}" "${fx('odd-hooks.mjs')}" continue-false`, 'cat x'), 'refuse');
   // Round 10 audit 4 minor 1: the spawned stand-in allows every allow case, as its in-process copy does.
   for (const c of cases(T).filter((x) => x.expect === 'allow')) assert.equal(askHook(`"${node}" "${fx('strict-hook.mjs')}"`, c.command, { cwd: c.cwd }), 'allow', c.command);
   assert.equal(askHook(`"${node}" "${fx('odd-hooks.mjs')}" crash`, 'cat x'), 'crash');
@@ -224,4 +229,34 @@ test('round 10 audit 5 minors: no recursive grep of a folder holding the file is
   const refuse = cases(T, root).filter((c) => c.expect === 'refuse');
   for (const form of ['not-bracket', 'caret-bracket']) assert.ok(refuse.some((c) => c.form === form), form);
   assert.ok(refuse.some((c) => c.command.startsWith('cd /; cd - ')), 'cd -');
+});
+
+// Round 10 audit 6: three routes a careful guard (variables, home, cd, globs, whole folders it is shown) still missed.
+test('round 10 audit 6 M-1: a guard that only looks at the paths named misses a read of the run folder that names none', () => {
+  const root = tmp();
+  for (const target of [T, `apps/web/${T}`]) {
+    const file = resolve(root, target);
+    const guard = (c, cwd) => (c.split(/[\s;&|()<>'"]+/).some((w) => w && (resolve(cwd, w) === file || file.startsWith(`${resolve(cwd, w)}/`))) ? 'refuse' : 'allow');
+    const { failures } = runCorpus(guard, { target, cwd: root });
+    assert.ok(failures.some((f) => f.group === 'here' && f.command.startsWith('grep -rn')), `${target}: grep -rn with no folder`);
+    assert.ok(cases(target, root).some((c) => c.group === 'allow-beside'), `${target}: the same, beside the folder, allowed`);
+  }
+});
+
+test('round 10 audit 6 M-2: a guard that takes $PWD from its own folder, or drops it, misses the $PWD forms', () => {
+  const root = tmp(); const file = resolve(root, T);
+  const by = (pwd) => (c, cwd) => (c.replaceAll('$PWD', pwd(cwd)).split(/[\s;&|()<>'"=]+/).some((w) => w && resolve(cwd, w) === file) ? 'refuse' : 'allow');
+  for (const pwd of [() => process.cwd(), () => '']) {
+    const missed = runCorpus(by(pwd), { target: T, cwd: root }).failures.filter((f) => f.expect === 'refuse');
+    assert.ok(missed.some((f) => f.form === 'pwd-var'), String(pwd));
+  }
+});
+
+test('round 10 audit 6 M-3: on a disk that ignores case, an exact-name guard misses the case-flipped name; none elsewhere', () => {
+  const root = tmp(); const file = resolve(root, T);
+  const exact = (c, cwd) => (c.split(/[\s;&|()<>'"=]+/).some((w) => w && resolve(cwd, w) === file) ? 'refuse' : 'allow');
+  assert.ok(runCorpus(exact, { target: T, cwd: root, caseless: true }).failures.some((f) => f.form === 'case-flip'));
+  assert.ok(!cases(T, root, { caseless: false }).some((c) => c.form === 'case-flip'));
+  // Cosmetic 2: a home folder written with a trailing slash is the same folder.
+  assert.ok(cases(T, `${root}/proj`, { home: `${root}/` }).some((c) => c.form === 'home-tilde'));
 });
