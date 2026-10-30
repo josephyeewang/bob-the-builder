@@ -92,6 +92,7 @@ export function openStore({ root, ownerUid, alert = () => {}, now = () => Date.n
     lines.push(line);
   }
 
+  function fstatOf(path) { const fd = openSync(path, constants.O_RDONLY); try { return fstatSync(fd).size; } finally { closeSync(fd); } }
   function refresh() {
     let fd;
     try { fd = openSync(P.diary, constants.O_RDONLY); } catch (e) { throw new Error(`diary unreadable: ${e?.code ?? e}`); }
@@ -223,7 +224,12 @@ export function openStore({ root, ownerUid, alert = () => {}, now = () => Date.n
     const release = () => { if (!released) { released = true; lock.release(nonce); } };
     try {
       fault('locked');
-      if (!recovered || broke) { lastRecovery = recover(); recovered = true; } else refresh();
+      if (!recovered || broke) { lastRecovery = recover(); recovered = true; } else {
+        refresh();
+        // Bytes after the last whole line, seen under the lock, are a torn line another writer left when it died; cut it
+        // before appending, or our line joins it and the diary becomes unreadable (0b-2 audit round 2 M-1).
+        if (!testNoLock && fstatOf(P.diary) > offset) lastRecovery = recover();
+      }
       const tx = {
         current(entity, id) {
           const chk = checkFile(entity, id);
@@ -260,7 +266,9 @@ export function openStore({ root, ownerUid, alert = () => {}, now = () => Date.n
             try {
               if (faultAt !== undefined && (faultAt === 'diary_torn' || faultAt?.step === 'diary_torn')) { writeSync(fd, text.slice(0, Math.floor(text.length / 2))); fsyncSync(fd); fault('diary_torn'); }
               if (faultAt === 'append_fails') { writeSync(fd, text.slice(0, Math.floor(text.length / 2))); throw new Error('test: the append failed partway'); }
-              writeSync(fd, text); fsyncSync(fd);
+              const wrote = writeSync(fd, text);
+              if (wrote !== Buffer.byteLength(text, 'utf8')) throw new Error(`diary append wrote ${wrote} of ${Buffer.byteLength(text, 'utf8')} bytes`);
+              fsyncSync(fd);
             } catch (e) {
               // A part-written line (a full disk) is cut back off, so the next line doesn't join it and become unreadable
               // (0b-2 audit MIN-7). If it can't be cut, writes stop until the owner looks.
@@ -270,6 +278,13 @@ export function openStore({ root, ownerUid, alert = () => {}, now = () => Date.n
           } catch (e) { for (const t of temps) { try { unlinkSync(t); } catch { /* gone */ } } throw e; }
           fault('diary_written');
           refresh();
+          // The line must read back as the next one, or the documents are not moved and the next write starts with recover().
+          // Both checks lean on the lock, so the lock-off mutation race (testNoLock) skips them.
+          if (!testNoLock && (damaged || lastSeq !== line.seq)) {
+            recovered = false;
+            for (const t of temps) { try { unlinkSync(t); } catch { /* gone */ } }
+            throw new Error(`the diary line didn't read back as seq ${line.seq}${damaged ? ` (${damaged})` : ''}`);
+          }
           out.forEach((o, i) => renameSync(temps[i], docPath(o.entity, o.id)));
           fault('renamed');
           for (const ent of new Set(out.map((o) => o.entity))) fsyncPath(join(P.docs, ent));

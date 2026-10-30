@@ -37,6 +37,23 @@ test('a diary append that fails partway is cut back, so the next write reads bac
   for (const l of readFileSync(join(env.root, 'diary.jsonl'), 'utf8').trim().split('\n')) JSON.parse(l);
 });
 
+test('a torn line left by another writer is cut before a writer that already recovered appends (0b-2 audit round 2 M-1)', () => {
+  const env = setup({ prefix: 'm9-store-' });
+  seed(env, 'card', 'C-1', card());   // env.store has now recovered once; later transactions only refresh
+  const diary = join(env.root, 'diary.jsonl');
+  const size = statSync(diary).size;
+  appendFileSync(diary, '{"seq":99,"half a line from a writer that died');
+  seed(env, 'card', 'C-2', card());
+  assert.equal(env.record.read('card', 'C-2').doc.state, 'draft');
+  const lines = readFileSync(diary, 'utf8').trim().split('\n');
+  for (const l of lines) JSON.parse(l);
+  assert.ok(statSync(diary).size > size, 'the new line was written after the cut');
+  // A fresh reader of the whole diary sees both cards and no damage.
+  const fresh = openRecord({ root: env.root, product: PRODUCT, ownerUid: UID, rules: rulesFor(), alert: () => {} });
+  assert.equal(fresh.record.read('card', 'C-1').doc.state, 'draft');
+  assert.equal(fresh.record.read('card', 'C-2').doc.state, 'draft');
+});
+
 test('a writer that lost the lock before the commit point writes nothing (0b-2 audit MIN-9)', () => {
   const env = setup({ prefix: 'm9-store-' });
   const lines = env.record.diary().length;

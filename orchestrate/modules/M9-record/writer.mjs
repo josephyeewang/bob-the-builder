@@ -223,11 +223,15 @@ export function openRecord({ root, product, ownerUid, rules, alert = () => {}, n
     return { ok: true };
   }
 
+  const MERGE_DONE = Object.freeze(['merged', 'audited_ok', 'audit_flagged']);
+
   function checkCardUpdate(tx, { id, old, doc, from, to, moving, changed, name, nowMs, ctx }) {
     if (old.kind === 'fix' && PLAN_INPUTS.some((f) => changed.includes(f))) return no('a fix card\'s plan is its root card\'s; it never changes');
     // The Lead edits the plan only of a card kind it may make (0b-2 audit MAT-1): a go-free card (exact_reverse,
     // research_copy) gets to ready with no go, so a changed plan on one would run with no go at all.
     if (PLAN_INPUTS.some((f) => changed.includes(f)) && !mayCreateKind(name, old.kind)) return no(`${name} may not change the plan of a ${old.kind} card`);
+    // Nor its brief, desired outcome or merge request (round 2 m5); needs_joe is a flag any setter may raise on any card.
+    if (['brief', 'desired', 'merge_requested'].some((f) => changed.includes(f)) && !mayCreateKind(name, old.kind)) return no(`${name} may not change a ${old.kind} card's brief, desired or merge request`);
     if (changed.includes('needs_joe')) {
       if (doc.needs_joe === true && !NEEDS_JOE_SETTERS.includes(name)) return no(`${name} may not set needs_joe`);
       if (doc.needs_joe !== true && name !== 'approvals') return no('only approvals clears needs_joe');
@@ -269,10 +273,11 @@ export function openRecord({ root, product, ownerUid, rules, alert = () => {}, n
       if (!ctx.mergeChecking) return no('a card moves to merging only in the same write as its merge enters checking');
       if (from === 'verified' && (doc.needs_joe || doc.approval_required)) return no('this card needs the owner\'s Approve before it merges');
     }
-    // merged needs its evidence: this card's merge document, merged, with the same commit (0b-2 audit MIN-4).
+    // merged needs its evidence: this card's merge document, merged (or already audited after), with the same commit
+    // (0b-2 audit MIN-4, round 2 m4).
     if (moving && to === 'merged') {
       if (typeof doc.merge_commit !== 'string' || !HEX40.test(doc.merge_commit)) return no('a merged card names its merge commit (merge_commit)');
-      if (!tx.list('merge').some((m) => m.doc.card === id && m.doc.state === 'merged' && m.doc.merge_commit === doc.merge_commit)) return no(`no merged merge document for ${id} at ${doc.merge_commit.slice(0, 7)}`);
+      if (!tx.list('merge').some((m) => m.doc.card === id && MERGE_DONE.includes(m.doc.state) && m.doc.merge_commit === doc.merge_commit)) return no(`no merged merge document for ${id} at ${doc.merge_commit.slice(0, 7)}`);
     }
     // The dispatcher's report fields go with their move (0b-2 audit MIN-3).
     if (name === 'dispatcher') {

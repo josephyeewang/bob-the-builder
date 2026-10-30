@@ -9,7 +9,7 @@ See LANES.md for who builds this folder, and the build rows (0b-2, R-0b-20..28) 
 | File | What it does |
 |---|---|
 | `writer.mjs` | The Store Writer. `openRecord({ root, product, ownerUid, rules, alert, outbox })` checks every write against the rev read, the legal moves, who may change which fields, and each move's conditions (the ready rule, a passing verdict for the current head, a full wait, one merge at a time, the round cap). Refused writes go to `refusals.jsonl` with an alert and leave no diary line. Also: the outbox, claims (release, dead-owner break, lapse), the ready list and overdue. |
-| `store.mjs` | The files on disk: one diary line per write (`diary.jsonl`, the truth), one file per document, a lock. Folders 755, files 644, and it runs only as the store's owner. A document changed by hand is quarantined, restored from the diary and alerted. `recover()` after a crash cuts a torn last diary line and rolls each document forward. |
+| `store.mjs` | The files on disk: one diary line per write (`diary.jsonl`, the truth), one file per document, a lock. Folders 755, files 644, and it runs only as the store's owner. A document changed by hand is quarantined, restored from the diary and alerted. `recover()` after a crash cuts a torn last diary line and rolls each document forward; a writer that finds a torn line under the lock recovers before it appends, and a line that doesn't read back stops the write before any document moves. |
 | `lock.mjs` | The store lock, and the one "is this process dead?" check: gone means no such process, or a different start time (a reused pid). A process of another user counts as alive. |
 | `moves.mjs` | Every legal state move and who may make it. Anything not listed is refused. |
 | `permissions.mjs` | Who may create each entity and change which fields; which card kinds each creator may make. |
@@ -38,6 +38,14 @@ Claude Code has a native task list. We checked whether it could hold the claims:
 - **`merged → reverted` has no evidence check yet.** The reversing merge is the Merge Gate's to name (0b-9).
 - **Two claims, one dead.** The outage rule (half or more dead) stops a two-claim Mac from breaking its one dead claim on its own. That is a lead call to make, not a bug.
 - **The outage raises an alert, not an ask.** Only `approvals` writes asks; the alert goes out on the owner's push path once a day (L38).
+
+## Known gaps (audit round 2, logged, not fixed here)
+
+- **A re-applied hand-in** (the crash gap above) also writes an `outbox_refused` fact that reads as a real refusal. Read it with the gap in mind until one write closes both.
+- **A fix card follows any failure**, not only a reviewer's send-back. Whether a crash or a timeout should get a fix round is a lead call.
+- **A cancelled fix card ends its parent's fixes.** The next round fixes the fix card, and a cancelled one can't be fixed; the Lead makes a new card with a new go.
+- **`verified` looks for a passing verdict on the current head** and does not also look for a failing one on the same head. Reviewer and auditor disagreeing on one head is for the Merge Gate (0b-9).
+- **A claim whose session record is missing is never broken** (deny by default, L32): the Dispatcher writes the session before the claim, so a missing one is a fault to look at, not a dead owner. A claimed card still lapses; a running one shows as overdue at its running limit, for the owner to look at.
 
 ## Running the tests
 

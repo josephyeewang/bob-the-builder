@@ -128,8 +128,14 @@ test('merged needs its merge document; the dispatcher\'s report fields go with t
   refused(put(env.record, 'merge_gate', 'card', 'C-1', { state: 'merged', merge_commit: HEAD }), /no merged merge document/, 'another commit');
   seed(env, 'merge', 'M-2', { state: 'merged', card: 'C-1', merge_commit: HEAD });
   must(put(env.record, 'merge_gate', 'card', 'C-1', { state: 'merged', merge_commit: HEAD }), 'merged with evidence');
+  // A merge already audited after merging is still the evidence (round 2 m4).
+  seed(env, 'card', 'C-3', { state: 'merging', product: PRODUCT, module: 'M1', kind: 'ordinary', round: 1, head: HEAD });
+  seed(env, 'merge', 'M-3', { state: 'audited_ok', card: 'C-3', merge_commit: HEAD2 });
+  must(put(env.record, 'merge_gate', 'card', 'C-3', { state: 'merged', merge_commit: HEAD2 }), 'merged, audit already in');
   readyCard(env, 'C-2');
   runCard(env, 'C-2');
+  // A session's hand-in comes only through its own outbox, never a dispatcher write (round 2 m1).
+  refused(put(env.record, 'dispatcher', 'card', 'C-2', { state: 'in_review' }), /hand-in comes from its own outbox/);
   refused(put(env.record, 'dispatcher', 'card', 'C-2', { failure: 'x' }), /failure only on a move into failed/);
   refused(put(env.record, 'dispatcher', 'card', 'C-2', { summary: 'x' }), /summary and report_ref only on a tab's hand-in/);
   refused(put(env.record, 'dispatcher', 'card', 'C-2', { state: 'waiting', wait: wait(env), summary: 'x' }), /only on a tab's hand-in/);
@@ -161,6 +167,7 @@ test('exact_reverse needs an answered Undo ask or an authenticated audit issue, 
   // The Lead may not rewrite a go-free card's plan, which would then go to ready with no go (0b-2 audit MAT-1).
   refused(roadmapEdit(env, 'U-2', { files: ['src/anything-else.mjs', 'src/other.mjs'] }), /lead may not change the plan of a exact_reverse card/);
   assert.deepEqual(env.record.read('card', 'U-2').doc.files, plan().files);
+  refused(roadmapEdit(env, 'U-2', { brief: 'now also do something else' }), /may not change a exact_reverse card's brief/, 'round 2 m5');
   must(put(env.record, 'dispatcher', 'card', 'U-1', { state: 'ready' }), 'ready with no go');
 });
 
