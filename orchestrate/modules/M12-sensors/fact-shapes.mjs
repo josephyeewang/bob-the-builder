@@ -43,8 +43,8 @@ export const SHAPES = Object.freeze({
     settings: { map: 'id' }, seen: ['id'], baseline: 'bool' },
   'fact.push-request': { idempotency_key: 'id', state: 'id', product: 'id', text: 'text' },
   'fact.signed-out': { product: 'id', signed_out: 'bool', since: 'time' },
-  'fact.start-gate-env': { product: 'id', at: 'time', ok: 'bool', reason: 'text', both: ['text'] },
-  'fact.start-gate-skip': { product: 'id', at: 'time', ok: 'bool', reason: 'text', command_sha256: 'id', pinned_sha256: 'id' },
+  'fact.start-gate-env': { product: 'id', vercel_project: 'id', read_at: 'time', result: 'bool', reason: 'text', both: ['text'] },
+  'fact.start-gate-skip': { product: 'id', vercel_project: 'id', read_at: 'time', result: 'bool', reason: 'text', command_sha256: 'id', pinned_sha256: 'id' },
 });
 
 // Every string and number at any depth is masked; names are kept (masked as text), so the fact still shows what was there.

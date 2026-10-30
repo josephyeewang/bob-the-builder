@@ -18,7 +18,7 @@ Vercel, the repo) and write facts into the record. Everything they write is mask
 | `outside-watch.mjs` | R-0b-72 | Every 10 min: is the hourly outside check still running, and which of its steps fail. Writes `outside-robot-merges-<product>` (last green time); `robotMergesGreen()` is the Merge Gate's one test (green within 120 min; lead calls L19, L20). The step counts only when the slot's public tag matches this product's; two failed runs, a 5-day gap or a first pass latch it shut until the owner's `cleared` time (0b-7 audit round 4). |
 | `outside-watch.mjs` (`checkNoPush`) | lead call L24 | Each pass, tests every Mini token against the outside repo; writes `outside-no-push` and raises a home alert if any can write. The Merge Gate stays shut without a green one from the last 120 min. The robot-merges step counts only with the newest run's repo-guard step green too. |
 | `air-health.mjs` | R-0b-84, lead call L23 | The Air's health result as a dated file a machine writes (`node air-health.mjs <red count> <folder>`); `checkAirHealthFile` and `airFactFromFile` date the fact by the check itself, never by when it arrived. Joe never types a count. |
-| `start-gate.mjs` | lead call L3 | The two Vercel facts lane 2's launcher gate reads: skip command equals the pinned one; no env name in both Preview and Production. `startGateOpen` decides (both ok, ≤120 min old). |
+| `start-gate.mjs` | lead call L3 | The two Vercel facts lane 2's launcher gate reads: skip command equals the pinned one; no env name in both Preview and Production. Lane 2's shape: `start_gate.vercel_skip.<product>` / `start_gate.vercel_env.<product>`, `{ product, vercel_project, read_at, result }`. M4's startGate decides (≤10 min old), so the Sensors re-read every 5 min; `startGateOpen` is a test helper. |
 | `device-checks.mjs` | R-0b-78 | The decisions behind the owner's private `/host` and `/configaudit` for the Air. |
 | `shell-guard/` | R-0b-70 | Shell-trick cases and a runner for the production guard (the guard is lane 2's R-0b-36). |
 
@@ -38,6 +38,9 @@ heartbeat says "usage: unknown" until it is).
   to lane 2. Until it is green, R-0b-70 is pending.
 - Lead call L25: any lane that writes a fact through `facts.mjs` adds its kind to `fact-shapes.mjs` (ask lane 3);
   without a shape every field but `kind` and `ts` is masked.
+- Lead call L3 (lane 2's contract): the Sensors' loop runs `readStartGate` for each product at least every
+  `START_GATE_READ_EVERY_MIN` (5) minutes, passing the rules entry's skip command and Vercel project. M4's startGate
+  treats a fact older than 10 minutes as shut. Checked end to end against lane 2's `vercelFact` on 29 Oct 2026.
 - Push requests (`push-request-<key>` facts, written by M13) are delivered by the Front Door (lane 2's restart path).
 - Lead call L24: lane 2's Mini loop calls `checkNoPush` every pass with each token the Mini holds (the GitHub ones the
   Front Door and the robots use), and the probe from `outside-check.mjs`'s `writeProbe`. With no tokens passed it

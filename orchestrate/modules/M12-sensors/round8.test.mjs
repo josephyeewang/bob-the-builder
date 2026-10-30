@@ -41,9 +41,9 @@ test('0b-7 audit round 8 M-1: a comment that copies the bot\'s words does not re
 
 test('0b-7 audit round 8 minor 1: a start-gate fact for "acme-app" does not open the gate for "acme.app"', () => {
   const at = new Date().toISOString();
-  const facts = { [SKIP_FACT('acme-app')]: { product: 'acme-app', at, ok: true }, [ENV_FACT('acme-app')]: { product: 'acme-app', at, ok: true } };
+  const facts = { [SKIP_FACT('acme-app')]: { product: 'acme-app', read_at: at, result: true }, [ENV_FACT('acme-app')]: { product: 'acme-app', read_at: at, result: true } };
   assert.equal(startGateOpen({ read: (id) => facts[id], product: 'acme-app' }).open, true);
-  const other = startGateOpen({ read: (id) => facts[id], product: 'acme.app' });
+  const other = startGateOpen({ read: (id) => facts[id] ?? facts[SKIP_FACT('acme-app')], product: 'acme.app' });
   assert.equal(other.open, false);
   assert.match(other.problems.join(), /another product name/);
 });
