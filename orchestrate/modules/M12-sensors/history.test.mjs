@@ -119,7 +119,7 @@ test('L36: the default runner goes through safe-git, naming the repository and t
 
 test('L36: a program the copy\'s own config names for a signature check never runs on a history read', async () => {
   // A repository whose newest commit carries a signature header, with log.showSignature and gpg.program planted in
-  // its own config: plain safe-git runs the program on `git log`; the history reader must not.
+  // its own config: plain git runs the program on `git log`; the history reader must not (safe-git refuses the repository).
   const d = tmp('hist-sig-');
   const r = join(d, 'r'); mkdirSync(r);
   g(r, 'init', '-q', '-b', 'main');
@@ -134,10 +134,10 @@ test('L36: a program the copy\'s own config names for a signature check never ru
   writeFileSync(join(d, 'evil.sh'), `#!/bin/sh\ntouch '${mark}'\nexit 1\n`, { mode: 0o755 });
   g(r, 'config', 'log.showSignature', 'true');
   g(r, 'config', 'gpg.program', join(d, 'evil.sh'));
-  const h = await makeHistory({ git: makeGit(join(r, '.git')) }).historyFile();
-  assert.equal(h.commits.length, 2);
+  // safe-git refuses a repository whose config sets keys off its safe list (LEAD-CALLS L49), naming each one.
+  await assert.rejects(makeHistory({ git: makeGit(join(r, '.git')) }).historyFile(), /not on the safe list: .*log\.showsignature.*gpg\.program/);
   assert.equal(existsSync(mark), false, 'the planted program ran');
-  // Control: without the history settings, the same read does run it (so the test can fail).
-  await gitOk(['log', '-n1', 'main'], { gitDir: join(r, '.git') });
-  assert.equal(existsSync(mark), true, 'control: plain safe-git should have run the planted program');
+  // Control: plain git (no safe-git) does run it on the same read, so the test can fail.
+  g(r, 'log', '-n1', 'main');
+  assert.equal(existsSync(mark), true, 'control: plain git should have run the planted program');
 });
