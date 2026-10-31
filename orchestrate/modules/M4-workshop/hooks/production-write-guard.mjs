@@ -8,9 +8,9 @@
 // A missing or stale snapshot, or one without that block, blocks every call (fail closed).
 
 import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path';
-import { accessSync, constants, readdirSync, statSync } from 'node:fs';
+import { readdirSync } from 'node:fs';
 import { homedir, userInfo } from 'node:os';
-import { isMain, runHook, block, pass, toolPaths, shellCommands, shellTokens, heredocs, bothWords, programOf, landingPath, realFolder, inside, joinLines, unreadable, expandBraces, fold, globRe } from './lib.mjs';
+import { isMain, runHook, block, pass, toolPaths, shellCommands, bothWords, programOf, landingPath, realFolder, inside, joinLines, unreadable, expandBraces, fold, globRe } from './lib.mjs';
 import { readSnapshot } from './snapshot.mjs';
 
 // ---- whole-folder writes (LEAD-CALLS L41 G2: deny by default) ----
@@ -172,69 +172,9 @@ function physical(base, p) {
   return cur;
 }
 // A `..` after a pattern (`l*/../work`) can climb out of whatever the pattern matched: not worked out, refused.
-// bash 3.2, /bin/bash on a Mac, lets a pattern starting with a dot match `..` (`.?`, `.*`, `.[.]`): each such part
-// counts as `..` too (#40 check, Minor). Past four such parts the path is not worked out (null).
-const DOTTY = (x) => x.startsWith('.') && /[*?[]/.test(x) && (() => { try { return globRe(x).test('..'); } catch { return true; } })();
-function asDots(p) {
-  const parts = p.split(sep);
-  const at = parts.flatMap((x, k) => (DOTTY(x) ? [k] : []));
-  if (at.length > 4) return null;
-  let out = [parts];
-  for (const k of at) out = out.flatMap((ps) => [ps, ps.map((x, j) => (j === k ? '..' : x))]);
-  return out.map((ps) => ps.join(sep));
-}
 const dotsAfterPattern = (p) => { const parts = p.split(sep); const k = parts.findIndex((x) => /[*?[]/.test(x)); return k >= 0 && parts.slice(k + 1).includes('..'); };
 
 const linkTarget = (p) => { const r = realFolder(p); return r && r !== p ? r : null; };
-
-// Changing a shell option anywhere in the line can change where a `cd` lands (`cdable_vars`; MAT-9).
-const OPTS_CHANGED = /(^|[\s;&|(])(setopt|unsetopt|shopt|enable)(\s|$)|(^|[\s;&|(])set\s+[-+]o/;
-
-// THE CD SHORTCUT (self-contained: `plainCds` and the two lines that call it; removing them restores the old rule).
-// A line that starts with plain `cd <folder>` steps, each joined to the next by `&&`, runs the rest in the last
-// folder for certain, when each is a real folder it can enter below the one before (lane 2 follow-up: the false
-// refusals of `cd dist && rm -rf *`). Deny by default (#40 round 3, LEAD-CALLS L53): it applies only when every
-// command after the cd steps is `rm` or `rmdir`, whose reach is their own arguments; any other command (git, find,
-// unzip, mv, rsync, chmod, …) can reach past its folder, so the line keeps the old rule. A `;` keeps it too: after a
-// failed cd the rest runs in the working folder. The rest is then judged from that folder alone, and the folder the
-// call runs in stays shielded. Anything else keeps the rule below, where every folder the line may be in counts: a
-// bracket, `||`, `|` or `&`, a variable, `~`, `..`, a pattern, a name starting with a dot or a dash, a folder that
-// is missing or leads out through a link, CDPATH, a changed shell option.
-// The steps are the command splitter's own tokens (`shellTokens`), the ones the rest of the hook judges; the
-// shortcut never reads the line another way (#40 check, M1-M3). Each step must also be written in plain ASCII: the
-// words and the joiner apart by spaces or tabs only. A line break, a return or any other blank (U+00A0, U+2028,
-// U+3000, …) in the cd part keeps the rule below, where the shell may go home or stay put.
-const PLAIN_DIR = /^(?:\.\/)?[A-Za-z0-9_][A-Za-z0-9._-]*(?:\/[A-Za-z0-9_][A-Za-z0-9._-]*)*\/?$/;
-const JOINERS = [';', '&', '|'];
-const SHORTCUT_ONLY = ['rm', 'rmdir'];
-const asText = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-function plainCds(cmd, cwd, cdpath) {
-  let rest = cmd;
-  let at = cwd;
-  if (OPTS_CHANGED.test(cmd) || heredocs(cmd).why) return { rest, at };
-  const viaCdpath = Boolean(cdpath) || /cdpath/i.test(cmd);
-  const t = shellTokens(cmd);
-  for (let i = 0; t[i] === 'cd' && PLAIN_DIR.test(t[i + 1] ?? '');) {
-    const dir = t[i + 1];
-    const joiner = t[i + 2] === '&' && t[i + 3] === '&' ? '&&' : null;
-    if (!joiner || JOINERS.includes(t[i + 2 + joiner.length])) break;
-    const m = new RegExp(`^[ \\t]*cd[ \\t]+${asText(dir)}[ \\t]*${asText(joiner)}`).exec(rest);
-    if (!m) break;
-    if (viaCdpath && !dir.startsWith('./')) break;
-    const to = resolve(at, dir);
-    const real = realFolder(to);
-    const from = realFolder(at) ?? at;
-    try { if (!real || real === from || !inside(real, from) || !statSync(real).isDirectory()) break; accessSync(real, constants.X_OK); } catch { break; }
-    at = to;
-    rest = rest.slice(m[0].length);
-    i += 2 + joiner.length;
-  }
-  // Every command after the cd steps, as written (no wrapper or VAR= stripped), is plain `rm` or `rmdir`, and none
-  // sits in a bracket or a substitution.
-  const only = () => !shellTokens(rest).some((w) => ['(', ')', '`', '$'].includes(w)) && shellCommands(rest, { raw: true }).every((c) => SHORTCUT_ONLY.includes(c[0]));
-  if (at !== cwd && !only()) return { rest: cmd, at: cwd };
-  return { rest, at };
-}
 
 /**
  * Why the command writes a folder holding a protected file, or null. `cwd` is where the call runs; every `cd`
@@ -242,13 +182,8 @@ function plainCds(cmd, cwd, cdpath) {
  * guard can't follow makes every relative target unknown, which is refused.
  */
 export function folderWriteWhy(cmd, { cwd, protectedFiles, home = homedir(), user = process.env.USER || userInfo().username, tmpdir = process.env.TMPDIR, projectDir = null, cdpath = process.env.CDPATH }) {
-  // A plain cd at the start moves the line for certain; the folder the call runs in stays shielded.
-  const shielded = [cwd, ...(projectDir && isAbsolute(projectDir) ? [projectDir] : [])];
-  const start = plainCds(cmd, cwd, cdpath);
-  cmd = start.rest;
   // A Set: each `cd` would otherwise double the list (audit of L41, round 2, minor).
-  // After a plain cd, where it really lands counts too, as for any cd below.
-  const cwds = new Set(start.at === cwd ? [cwd] : [start.at, realFolder(start.at) ?? start.at]);
+  const cwds = new Set([cwd]);
   let lost = false;
   // A whole-folder write after a command that can make a link is refused: the link may not exist yet when the guard
   // looks (`ln`, `cp -R <link> l`, an unpacked link; MAT-5, MAT-10). See MAKES_LINKS.
@@ -256,9 +191,10 @@ export function folderWriteWhy(cmd, { cwd, protectedFiles, home = homedir(), use
   // A `cd` searched through CDPATH (set any way: `CDPATH+=`, zsh's `cdpath`), after a shell option is changed
   // (`cdable_vars`), or `cd -` to a folder this line did not visit, lands where the guard can't tell (MAT-4, MAT-9).
   const viaCdpath = Boolean(cdpath) || /cdpath/i.test(cmd);
-  const optsChanged = OPTS_CHANGED.test(cmd);
+  const optsChanged = /(^|[\s;&|(])(setopt|unsetopt|shopt|enable)(\s|$)|(^|[\s;&|(])set\s+[-+]o/.test(cmd);
   const setOld = /(^|[\s;&|(])(export\s+)?OLDPWD=/.test(cmd);
   let moved = false;
+  const shielded = [cwd, ...(projectDir && isAbsolute(projectDir) ? [projectDir] : [])];
   const holdsProtected = (d) => [d, realFolder(d)].filter(Boolean).some((x) => protectedFiles.some((f) => inside(f, fold(x))));
   for (const c of shellCommands(spellOut(cmd, { HOME: home, PWD: PWD_MARK, USER: user, TMPDIR: tmpdir }))) {
     const prog = programOf(c);
@@ -289,9 +225,7 @@ export function folderWriteWhy(cmd, { cwd, protectedFiles, home = homedir(), use
       const forms = expand(t, home, [...cwds]);
       if (forms === null) return `"${t}" is written as a whole in a folder the guard can't place`;
       if (forms.some((f) => !isAbsolute(f)) && lost) return `"${t}" is written as a whole after a folder change the guard can't follow`;
-      const all = forms.map(asDots);
-      if (all.includes(null)) return `"${t}" has too many patterns starting with a dot, which may each match ".."`;
-      for (const f of all.flat()) {
+      for (const f of forms) {
         if (dotsAfterPattern(f)) return `"${t}" has a ".." after a pattern, which the guard can't place`;
         for (const abs of (isAbsolute(f) ? [sep] : [...cwds]).flatMap((b) => [resolve(b, f), physical(b, f)])) {
           const why = judge(t, abs, deletes, protectedFiles, shielded);

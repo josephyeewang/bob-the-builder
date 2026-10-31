@@ -271,10 +271,6 @@ export const bothWords = (cmd) => [...new Set([...shellWords(cmd), ...shellWords
 // it lets through (WRAPPERS below).
 const STRIPPED_WRAPPERS = ['env', 'command', 'exec', 'nohup', 'time', 'sudo', 'xargs', 'nice', 'builtin'];
 
-/** The words and joiners `shellCommands` splits the line at: a line break is a `;`, a here-document's body is
- * taken out (L46). The cd shortcut in production-write-guard.mjs reads the same tokens (#40 check). */
-export const shellTokens = (cmd) => shellWords(joinLines(heredocs(cmd).text).replace(/\n/g, ' ; '));
-
 /** The command line split into its commands (at ; && || | and newlines), each a word list. */
 export function shellCommands(cmd, { raw = false } = {}) {
   const cmds = [];
@@ -282,7 +278,8 @@ export function shellCommands(cmd, { raw = false } = {}) {
   // The word after `<` or `>` is a file, not a command: it stays out of the command list (the
   // guards still see it among the words).
   let redirect = false;
-  for (const w of shellTokens(cmd)) {
+  // A here-document's body is text fed to a program, not commands (L46).
+  for (const w of shellWords(joinLines(heredocs(cmd).text).replace(/\n/g, ' ; '))) {
     if (w === '<' || w === '>') { redirect = true; continue; }
     if (redirect && w === '&') continue;
     if ([';', '&', '|', '(', ')', '`', '$'].includes(w)) { redirect = false; if (cur.length) cmds.push(cur); cur = []; continue; }
