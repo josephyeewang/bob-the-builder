@@ -220,7 +220,7 @@ export const HELD_BANDS = Object.freeze({ band: 'unknown', own_building: 'unknow
  * One pass. Ports:
  *   sessions: the running sessions Mac-wide [{ id, product, kind, card, lead, role, pgid, bundle_files }]
  *   probe(s) -> { size, activity }   (transcript size incl. compactions, and the activity tracker)
- *   launch({ card, kind, product }) -> { ok, sessionId, pgid, reason }   (M4 launch)
+ *   launch({ card, kind, product }) -> { ok, sessionId, pgid, reason, account, configDir }   (M4 launch, through accountLaunch)
  *   stopGroup(s) -> { ok, how }      (stopProcessGroup on the session's group)
  *   saveWork(s) -> { ok, reason }    (M4 save-work, inside the worker's lock-down)
  *   hostLock() -> string | null      (the host.lock text; its path is config)
@@ -392,11 +392,12 @@ async function starts({ rec, rules, now, b, running, launch, out, alert, onlyUnd
     }
     const started = move(rec, 'card', id, { state: 'running', session: l.sessionId }, { now, kind: 'started' });
     // The launch record (R-0b-55, D12): the Merge Gate merges only a head made by a session it names
-    // (refusal 5). `head` is the commit the copy started from; `rev` the card's rev once running.
+    // (refusal 5). `head` is the commit the copy started from; `rev` the card's rev once running; `account` and
+    // `config_dir` the sign-in folder the session started in (R-1-89; null when the launch port does not say).
     const lr = rec.write({ actor: 'dispatcher', entity: 'launch', id: l.sessionId, expectRev: rec.read('launch', l.sessionId)?.rev ?? 0, kind: 'launch',
-      doc: { session_id: l.sessionId, role: 'worker', kind, card: id, head: l.head ?? null, rev: started.rev ?? null, product: product ?? null, launched_at: iso(now) } });
+      doc: { session_id: l.sessionId, role: 'worker', kind, card: id, head: l.head ?? null, rev: started.rev ?? null, product: product ?? null, account: l.account ?? null, config_dir: l.configDir ?? null, launched_at: iso(now) } });
     if (!lr.ok) alert(`card ${id}: session ${l.sessionId} started but its launch was not recorded (${lr.reason}); its merge will be refused`);
-    running.push({ id: l.sessionId, product, kind, card: id, pgid: l.pgid });
+    running.push({ id: l.sessionId, product, kind, card: id, pgid: l.pgid, account: l.account ?? null, config_dir: l.configDir ?? null });
     if (factDoc(rec, UNDO_HELD_FACT(id))?.doc?.reason) putFact(rec, UNDO_HELD_FACT(id), { reason: null, at: iso(now) }, 'undo_started');
     // Whether or not the hold was told: an alert still queued for it leaves unsent (audit 0b-6 r8 MAT-1).
     dropCause(rec, UNDO_HELD_FACT(id));

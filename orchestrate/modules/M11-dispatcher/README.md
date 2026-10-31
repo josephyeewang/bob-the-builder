@@ -27,6 +27,7 @@ Every outside effect (launching, stopping, typing into a session, git, alerts) i
 | `headless-result.mjs` | A headless worker's final result | 65 |
 | `login-job.mjs` | The login job file | 55, 65 |
 | `keys.mjs` | Every rules key this folder reads | all |
+| `account-ports.mjs` | The account switch's wrappers for the ports: `accountLaunch` (each new session starts in the account in use; the result names its folder), `acrossAccounts` (a session list over both account folders, merged), `stopInAccount` (a stop through the session's own folder) | R-1-89 |
 
 ## The tick's ports
 
@@ -43,6 +44,8 @@ Every outside effect (launching, stopping, typing into a session, git, alerts) i
 | `filesOf` | undo | The files a merged PR changed |
 | `sendFrontDoor`, `restartFrontDoor`, `startMinibase`, `frontDoorAlive`, `frontDoorHandoff` | phone | As in `phone-link.mjs` |
 | `cleanup: { copiesRoot, sealRoot, mirrorFor, git, saveWork }` | cleanup | As in `cleanup.mjs` |
+
+With two Claude accounts (R-1-89), the wiring wraps `launch`, the session lists and `stopGroup` with `account-ports.mjs`, so every launch names its folder and the lists and stops cover both folders; see "Two Claude accounts" below.
 
 Facts the tick writes: `signed-in-account` is read (missing or stale: nothing starts), `step-error-<step>` (one alert per distinct error, cleared on success), `last-full-pass` (when every step last ran and how each ended).
 
@@ -66,7 +69,7 @@ Facts the tick writes: `signed-in-account` is read (missing or stale: nothing st
 | `step-error-<step>`, `last-full-pass` | this folder | the tick's memory |
 | `rules-missing-alert`, `undo-held-<card>`, `hold-<cause>` | this folder | the rules values already told to Joe; the reason an undo card last waited; when each hold was last told (L38) |
 
-Record entries this folder writes besides cards and facts: `launch` (one per start: `{ session_id, role, card, head, rev, launched_at }`) and `merge_request` (`mr-<card>-<head>`: `{ card, pr, session_id, head, rev, requested_at }`).
+Record entries this folder writes besides cards and facts: `launch` (one per start: `{ session_id, role, card, head, rev, account, config_dir, launched_at }`; `account` and `config_dir` are the sign-in folder the session started in, null when the launch port does not say, R-1-89) and `merge_request` (`mr-<card>-<head>`: `{ card, pr, session_id, head, rev, requested_at }`).
 
 Card waits use `waiting` with every wait field. The causes this folder writes: `usage_band`, `limit_hit` (read), `needs_split`, `budget_stop`, `usage_unknown`.
 
@@ -117,6 +120,7 @@ Card waits use `waiting` with every wait field. The causes this folder writes: `
 | Logged from audit 0b-6 round 8 | Minor and Cosmetic, logged (MAT-1 and MAT-2 fixed under the lead's scoping, no round 9) | MAT-1 and MAT-2 fixed, above. m1: a delivered copy settles a newer queued copy for the same cause (a different reason text) along with it, so the newer text is told one pass later, not lost (`alerts.mjs` `settleAlert`). m2: a pass that blocks synchronously on every run can resend the broken-lock alert every minute (`tick.mjs` with the watchdog); before L47 nothing was sent at all. m3: `RUN_DEADLINE_MS` assumes the default `ALERT_SEND_MS`, so an `alertSendMs` set above 10 s can overrun the run deadline (`main.mjs`). m4: the dropped count could be lost in the deferred send if the queue resets between send and settle; reasoned, not reproduced. c1: a comment in `tick.test.mjs` said a new entry is never dropped before its first try, which was untrue until MAT-2; now true. | This lane. | At the next pass over M11. |
 | Logged from audit 0b-6 round 6 | Minor and Cosmetic, logged | m-1: the watchdog's clock starts before the wiring loads, so a slow wiring eats into the run's time (a priority call: the run still ends). m-2: a send that arrives after its deadline is sent again next pass (at least once by design, L47). m-3 (phone link told late): closed by the outbox, the mark is written when the copy is delivered. m-4 (the told sweep's blind spots): closed for other names, bracket writes and a write after a `tellThen`; a told field set through a variable key is still not caught by the sweep (the behavioral sweeps cover each real site). m-5 (a new rules key resets the day clock): fixed, test in `pass.test.mjs`. c-1: a late launch is spotted by its reason text. |
 | The transcript format | Capability note, not yet checked (Principle 9) | The size, turn-end and compaction readings follow the format as reviewed, not as checked on the pinned version. | The builder, at the live proof. | Void at the next version pin. |
+| Two Claude accounts (R-1-89) | Decided, with a capability note (Principle 9: checked 31 Oct 2026 on Claude Code 2.1.316) | Each account has its own sign-in folder, named by the folder variable `CLAUDE_CONFIG_DIR`: the sign-in, its `.claude.json` and its background-session list go with the folder. Account a is the folder used when the variable is unset (`~/.claude`) and runs with it unset, as today, so its `.claude.json` stays in the home folder; account b is `~/.claude-b`. The setup, `use` and `status` script is M4's `launcher/accounts.mjs`, because this folder may not start a process (`only-send-safe.test.mjs`). The wiring wraps four ports: `launch` with `accountLaunch` (its `env` goes into the launcher's `roleEnv(base, { extra })`, which keeps the folder variable and drops one set in the parent); `sessions()`, `board()` and `outboxSessions()` with `acrossAccounts` (the list port is run once per folder); `stopGroup` with `stopInAccount`. A folder whose list fails fails the step and Joe is told, so a session is never missed silently. A switch changes only the next launch: running sessions keep their folder until they end. The long-lived sign-in token is not used: it can't start Remote Control. | The lead, in the cutover kit (the real wiring and Joe's sign-in steps). | Re-check the folder behaviour at every version pin. |
 
 ## Live proofs still to run (plain steps)
 
