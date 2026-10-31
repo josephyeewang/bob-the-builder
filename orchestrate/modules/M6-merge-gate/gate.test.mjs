@@ -3,10 +3,10 @@
 // a GitHub refusal and a stopped pass each end where they should; behind main catches up; the queue order.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, readdirSync } from 'node:fs';
+import { readFileSync, readdirSync, unlinkSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { setup, product, leadCard, runCard, outboxFile, put, must, plan, PRODUCT, fingerprintFor, fullTimeouts } from '../M9-record/fixtures.test-helper.mjs';
+import { setup, product, leadCard, runCard, outboxFile, put, must, plan, PRODUCT, fingerprintFor, fullTimeouts, runnerLaunch, launch } from '../M9-record/fixtures.test-helper.mjs';
 import { fakeRules, allow, deny, makeRules } from '../../shared/rules.mjs';
 import { makeEngine } from '../M10-rules/engine.mjs';
 import { parsePolicy } from '../M10-rules/policy.mjs';
@@ -43,11 +43,13 @@ function world({ values = {}, mergeAnswer } = {}) {
     [NO_PUSH_FACT, { green: true, at: new Date(env.clock.t).toISOString() }]]);
   const view = makeGitView({ gh: g.gh, owner: 'sample-org', repo: 'sample-app' });
   const alerts = [];
-  const ctx = { record: env.record, rules, product: PRODUCT, gh: g.gh, owner: 'sample-org', repo: 'sample-app', view, now: () => env.clock.t, alert: (a) => alerts.push(a), readFact: (id) => facts.get(id) ?? null };
+  const ctx = { record: env.record, rules, product: PRODUCT, gh: g.gh, owner: 'sample-org', repo: 'sample-app', view, now: () => env.clock.t, alert: (a) => alerts.push(a), readFact: (id) => facts.get(id) ?? null,
+    reviewLaunches: { root: env.launchRoot, uids: env.reviewUids } };
   return { env, g, ctx, facts, alerts, root, values: vals };
 }
 
-// A card built, reviewed by a launched reviewer through the review outbox, verified, and asked to merge as pull #7.
+// A card built, reviewed by a reviewer the review runner launched (its own record, L65) through the review outbox,
+// verified, and asked to merge as pull #7.
 function verifiedCard(w, id = 'C-1', { pr = 7, files = { 'src/a.mjs': 'two' }, undo, request = true } = {}) {
   const { env, g } = w;
   if (undo) {
@@ -65,7 +67,7 @@ function verifiedCard(w, id = 'C-1', { pr = 7, files = { 'src/a.mjs': 'two' }, u
   must(put(env.record, 'workshop', 'card', id, { head }), 'head');
   must(env.record.applyOutbox({ role: 'worker', sessionId: 'S-1', card: id }, outboxFile(env, 'worker', 'S-1', `handin-${id}.md`, `${JSON.stringify({ entity: 'card', id, from_state: 'running', to_state: 'in_review' })}\n`)), 'in review');
   const sid = `R-${id}`;
-  must(env.record.write({ actor: 'dispatcher', entity: 'launch', id: `launch-${sid}`, expectRev: 0, doc: { session_id: sid, role: 'reviewer', card: id, head, rev: 1, launched_at: new Date(env.clock.t).toISOString() } }), 'launch');
+  runnerLaunch(env, id, sid, 'reviewer', head);
   const hdr = `${JSON.stringify({ entity: 'verdict', card: id, expectRev: env.record.read('card', id).rev, fields: { head, pass: true, checklist: CLEAN, material: 0 } })}\n`;
   must(env.review.applyOutbox({ role: 'reviewer', sessionId: sid, card: id }, outboxFile(env, 'reviewer', sid, `verdict-${id}.md`, hdr)), 'verdict');
   must(put(env.record, 'dispatcher', 'card', id, { state: 'verified' }), 'verified');
@@ -411,4 +413,40 @@ test('an ignored check named in the rules with a text app id is ignored, on the 
   await gatePass(w.ctx);
   const m = mergeOf(w);
   assert.equal(m.doc.state, 'merged', JSON.stringify(m.doc.reasons));
+});
+
+// ---- Lead call L65: the gate counts only the review runner's own launch records ----
+
+test('L65 planted: a verdict whose only launch is the Dispatcher\'s Record copy is refused (5) and never merged', async () => {
+  const w = world();
+  const head = verifiedCard(w);
+  // The runner's record is gone; the Dispatcher's copy in the Record says the same thing, and must not count.
+  unlinkSync(join(w.env.launchRoot, 'R-C-1.json'));
+  must(w.env.record.write({ actor: 'dispatcher', entity: 'launch', id: 'R-C-1', expectRev: 0, doc: { session_id: 'R-C-1', role: 'reviewer', card: 'C-1', head, rev: 1, launched_at: new Date(w.env.clock.t).toISOString() } }), 'the Record copy');
+  await gatePass(w.ctx);
+  const m = mergeOf(w);
+  assert.notEqual(m.doc.state, 'merged');
+  assert.ok(m.doc.reasons.some((x) => x.startsWith('5:') && /launched reviewer/.test(x)), m.doc.reasons.join(' | '));
+  assert.equal(w.g.writes.filter(([k]) => k === 'put').length, 0);
+  // The gathered facts hold no launch from the Record.
+  const f = await gatherFacts(w.ctx, m);
+  assert.deepEqual(f.launches, []);
+  void launch;
+});
+
+test('L65: with no review launches folder set, the gate refuses (5) and says why, never reading the Record', async () => {
+  const w = world();
+  verifiedCard(w);
+  delete w.ctx.reviewLaunches;
+  await gatePass(w.ctx);
+  const m = mergeOf(w);
+  assert.notEqual(m.doc.state, 'merged');
+  assert.ok(m.doc.reasons.some((x) => x.startsWith('5:') && /launch records could not be read: the gate has no review launches folder set/.test(x)), m.doc.reasons.join(' | '));
+  // A folder that fails M9's check refuses the same way.
+  const w2 = world();
+  verifiedCard(w2);
+  w2.ctx.reviewLaunches = { root: w2.env.launchRoot, uids: { ...w2.env.reviewUids, worker: w2.env.reviewUids.reviewer } };
+  await gatePass(w2.ctx);
+  const m2 = mergeOf(w2);
+  assert.ok(m2.doc.reasons.some((x) => x.startsWith('5:') && /shared with worker/.test(x)), m2.doc.reasons.join(' | '));
 });

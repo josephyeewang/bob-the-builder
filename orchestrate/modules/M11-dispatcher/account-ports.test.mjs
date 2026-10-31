@@ -1,6 +1,6 @@
 // The account switch on the Dispatcher's side (R-1-89 (c), L61): every port that starts a session starts it on the
 // account in use; every port that lists, checks or stops one covers both folders; a switch never moves a running
-// worker, reviewer or Lead, and the Front Door follows the account in use. Throwaway homes and fake ports only:
+// worker or Lead, and the Front Door follows the account in use. Throwaway homes and fake ports only:
 // nothing here starts a process.
 
 import { test } from 'node:test';
@@ -26,13 +26,13 @@ function home({ second = true } = {}) {
   return { h, A: join(h, ACCOUNTS.a), B: join(h, ACCOUNTS.b) };
 }
 
-// Fake per-folder ports: each folder has its own sessions, reviewers, Leads and Front Door, and logs every call with
+// Fake per-folder ports: each folder has its own sessions, Leads and Front Door, and logs every call with
 // the folder it was made in.
 function folders(h, A, B) {
   const log = [];
   const st = {
-    a: { sessions: [], reviewers: new Set(), leads: [], frontDoor: false, stopFrontDoorOk: true },
-    b: { sessions: [], reviewers: new Set(), leads: [], frontDoor: false, stopFrontDoorOk: true },
+    a: { sessions: [], leads: [], frontDoor: false, stopFrontDoorOk: true },
+    b: { sessions: [], leads: [], frontDoor: false, stopFrontDoorOk: true },
   };
   let n = 0;
   const inFolder = (ctx) => {
@@ -41,7 +41,6 @@ function folders(h, A, B) {
     const did = (what, extra = {}) => { log.push([what, ctx.signin, ...Object.values(extra)]); };
     return {
       launch: async (x) => { did('launch', { card: x.card.id }); const id = `S-${++n}`; s.sessions.push({ id, card: x.card.id, product: x.product, kind: x.kind }); return { ok: true, sessionId: id, pgid: 100 + n, head: 'h'.repeat(40) }; },
-      startReviewer: async (card) => { did('startReviewer', { card }); s.reviewers.add(card); return { ok: true }; },
       startReadonly: async (x) => { did('startReadonly', { lead: x.lead }); return { ok: true }; },
       startMinibase: async () => { did('startMinibase'); return { ok: true }; },
       sessions: () => s.sessions.map((x) => ({ ...x })),
@@ -53,7 +52,6 @@ function folders(h, A, B) {
         startLead: async (x, c) => { did('startLead', { lead: l, in: c?.signin }); st[c.signin].leads.push(`${l}+`); return { ok: true }; },
       })),
       hasSession: (card) => s.sessions.some((x) => x.card === card),
-      hasReviewer: (card) => s.reviewers.has(card),
       stopGroup: async (x) => { did('stopGroup', { id: x.id }); const i = s.sessions.findIndex((y) => y.id === x.id); if (i < 0) return { ok: false, how: 'not here' }; s.sessions.splice(i, 1); return { ok: true, how: 'SIGTERM' }; },
       frontDoorAlive: () => s.frontDoor,
       restartFrontDoor: async (x) => { did('restartFrontDoor', { handoff: x?.handoff ?? null }); s.frontDoor = true; return { ok: true }; },
@@ -79,12 +77,11 @@ test('R-1-89 / L61: every start port starts on the account in use, and says whic
     f.log.length = 0;
     const r = await Promise.all([
       f.ports.launch({ card: { id: `C-${name}` }, kind: 'build', product: 'p1' }),
-      f.ports.startReviewer(`C-${name}`),
       f.ports.startReadonly({ lead: 'L-1' }),
       f.ports.startMinibase(),
     ]);
     for (const x of r) assert.deepEqual([x.ok, x.signin, x.configDir], [true, inUse, dir]);
-    assert.deepEqual(f.log.map(([what, folder]) => [what, folder]), ['launch', 'startReviewer', 'startReadonly', 'startMinibase'].map((w) => [w, inUse]));
+    assert.deepEqual(f.log.map(([what, folder]) => [what, folder]), ['launch', 'startReadonly', 'startMinibase'].map((w) => [w, inUse]));
   }
   // The launcher is handed the folder variable for b only (account a runs with it unset).
   const seen = [];
@@ -102,7 +99,7 @@ test('R-1-89: no account to start on -> no start port starts anything', async ()
   for (const text of ['b\n', 'zz\n']) {
     writeFileSync(join(h, ACCOUNT_FILE), text);
     f.log.length = 0;
-    for (const p of ['launch', 'startReviewer', 'startReadonly', 'startMinibase', 'restartFrontDoor']) {
+    for (const p of ['launch', 'startReadonly', 'startMinibase', 'restartFrontDoor']) {
       const r = await f.ports[p](p === 'launch' ? { card: { id: 'C-1' } } : 'C-1');
       assert.equal(r.ok, false, p);
       assert.match(r.reason, text === 'b\n' ? /^no account to start on: account b's folder ~\/\.claude-b is not set up/ : /^no account to start on: .*names neither a nor b/, p);
@@ -149,13 +146,10 @@ test('R-1-89 / L61: the check ports say yes for a session in either folder, whic
   const { h, A, B } = home();
   const f = folders(h, A, B);
   await f.ports.launch({ card: { id: 'C-1' }, kind: 'build', product: 'p1' });
-  await f.ports.startReviewer('C-1');
   for (const name of ['b', 'a']) {
     assert.equal(useAccount({ home: h, name }).ok, true);
     assert.equal(f.ports.hasSession('C-1'), true, `after use ${name}`);
-    assert.equal(f.ports.hasReviewer('C-1'), true, `after use ${name}`);
     assert.equal(f.ports.hasSession('C-9'), false);
-    assert.equal(f.ports.hasReviewer('C-9'), false);
   }
   // L63: an unclear answer in one folder and no in the other is an error naming the folder and the answer, never a no.
   // A yes in either folder still wins. A failing or late check names its folder.
@@ -172,38 +166,27 @@ test('R-1-89 / L61: the check ports say yes for a session in either folder, whic
   assert.throws(() => inAnyAccount({ home: h, checkIn: async () => true })('C-1'), /must answer at once/);
 });
 
-test('R-1-89 / L61: after a switch, the time limits still see the old account\'s reviewer and start no second one', async () => {
-  const { h, A, B } = home();
-  const f = folders(h, A, B);
-  const rec = recWith([['card', 'C-1', { state: 'in_review', module: 'M-test', product: 'p1', tier: 2, files: ['src/a.js'], changed_at: iso(T0 - 600 * MIN) }]]);
-  await f.ports.startReviewer('C-1');
-  assert.equal(useAccount({ home: h, name: 'b' }).ok, true);
-  f.log.length = 0;
-  const done = await timeLimits({ rec, rules: rulesWith(), now: T0, b: { band: 'green' }, running: [], hasSession: f.ports.hasSession, gateAlive: () => true,
-    hasReviewer: f.ports.hasReviewer, startReviewer: f.ports.startReviewer, alert: () => {} });
-  assert.deepEqual(done, []);
-  assert.deepEqual(f.log, [], 'no second reviewer started');
-  assert.equal(rec.read('card', 'C-1').doc.state, 'in_review');
-});
+// Reviewers and auditors are no longer started on these accounts: the review runner starts them as `review`, on
+// review's own two folders (L65 m-5; M4 review-runner.test.mjs), so the account switch reaches them there.
 
-test('L63 (the reviewer\'s repro): after a switch, an unclear answer from the old account moves no card and starts no reviewer', async () => {
+test('L63 (the reviewer\'s repro): after a switch, an unclear answer from the old account moves no card', async () => {
   for (const odd of [null, undefined]) {
     const { h, A, B } = home();
     const f = folders(h, A, B);
     // Account a can't say (null, or no answer at all); account b, now in use, says no.
-    const ports = accountPorts({ home: h, inFolder: (ctx) => ({ ...f.inFolder(ctx), ...(ctx.signin === 'a' ? { hasSession: () => odd, hasReviewer: () => odd } : {}) }) });
+    const ports = accountPorts({ home: h, inFolder: (ctx) => ({ ...f.inFolder(ctx), ...(ctx.signin === 'a' ? { hasSession: () => odd } : {}) }) });
     assert.equal(useAccount({ home: h, name: 'b' }).ok, true);
     const old = iso(T0 - 600 * MIN);
-    for (const [state, port] of [['claimed', 'hasSession'], ['in_review', 'hasReviewer']]) {
+    for (const [state, port] of [['claimed', 'hasSession']]) {
       const rec = recWith([['card', 'C-1', { state, module: 'M-test', product: 'p1', tier: 2, files: ['src/a.js'], claim: state === 'claimed' ? { session: 'S-1' } : undefined, changed_at: old }]]);
       f.log.length = 0;
       const alerts = [];
       await assert.rejects(timeLimits({ rec, rules: rulesWith(), now: T0, b: { band: 'green' }, running: [], hasSession: ports.hasSession, gateAlive: () => true,
-        hasReviewer: ports.hasReviewer, startReviewer: ports.startReviewer, alert: (t) => alerts.push(t) }),
+        hasReviewer: () => true, requestReview: () => ({ ok: true }), alert: (t) => alerts.push(t) }),
         new RegExp(`^Error: account a \\(~/\\.claude\\): ${port} gave no clear answer \\(${String(odd)}\\)`), `${String(odd)}, ${state}`);
       const card = rec.read('card', 'C-1');
       assert.deepEqual([card.doc.state, card.rev], [state, 1], `${String(odd)}: the ${state} card stays`);
-      assert.deepEqual(f.log, [], `${String(odd)}: no reviewer started`);
+      assert.deepEqual(f.log, [], `${String(odd)}: nothing started`);
     }
   }
 });

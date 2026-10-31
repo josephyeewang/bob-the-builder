@@ -1,0 +1,122 @@
+// review-runner-main.test.mjs — lead call L65: the review runner's real ports, its installed-copy check, the account
+// copy and the two LaunchDaemon files. Nothing here starts claude, runs as another user or touches the system folder.
+
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { chmodSync, linkSync, mkdirSync, readFileSync, symlinkSync, writeFileSync, lstatSync } from 'node:fs';
+import { join } from 'node:path';
+import { installProblem, readCardFile, adminAnswer, sessionsFrom, realPorts, readConfig } from './review-runner-main.mjs';
+import { reviewDaemonPlists } from './review-daemons.mjs';
+import { readAccountFile, copyAccountTo, useAccount, ACCOUNT_FILE } from './accounts.mjs';
+import { tempDir } from '../../../shared/test-tmp.mjs';
+
+const ME = process.getuid();
+
+test('L65: the installed copy must be root\'s alone, with the runner, config and wiring inside it', () => {
+  const base = tempDir('m4-install-');
+  mkdirSync(join(base, 'a', 'b'), { recursive: true });
+  writeFileSync(join(base, 'a', 'b', 'x.mjs'), '');
+  for (const p of [base, join(base, 'a'), join(base, 'a', 'b')]) chmodSync(p, 0o755);
+  chmodSync(join(base, 'a', 'b', 'x.mjs'), 0o644);
+  // This test's user stands in for root.
+  assert.equal(installProblem(base, [join(base, 'a', 'b', 'x.mjs')], { owner: ME }), null);
+  // The real check wants root, which this user is not.
+  assert.match(installProblem(base, [], {}), /is not owned by root/);
+  assert.match(installProblem(base, ['/elsewhere/wiring.mjs'], { owner: ME }), /not inside the installed copy/);
+  assert.match(installProblem(base, [join(base, '..', 'x')], { owner: ME }), /not inside the installed copy/);
+  chmodSync(join(base, 'a', 'b', 'x.mjs'), 0o664);
+  assert.match(installProblem(base, [], { owner: ME }), /x\.mjs can be written by others than root/);
+  chmodSync(join(base, 'a', 'b', 'x.mjs'), 0o644);
+  symlinkSync('/tmp', join(base, 'a', 'l'));
+  assert.match(installProblem(base, [], { owner: ME }), /a\/l is a link/);
+});
+
+test('L65: a card is read from the Record read only, as the Record owner\'s plain file', () => {
+  const root = tempDir('m4-recread-');
+  mkdirSync(join(root, 'docs', 'card'), { recursive: true });
+  for (const p of [root, join(root, 'docs'), join(root, 'docs', 'card')]) chmodSync(p, 0o755);
+  const put = (id, body, mode = 0o644) => { const p = join(root, 'docs', 'card', `${id}.json`); writeFileSync(p, typeof body === 'string' ? body : JSON.stringify(body), { mode }); chmodSync(p, mode); return p; };
+  put('C-1', { entity: 'card', id: 'C-1', rev: 3, doc: { state: 'in_review', head: 'a'.repeat(40), tier: 1 } });
+  const read = (card, uid = ME) => readCardFile({ recordRoot: root, recordUid: uid, card });
+  assert.deepEqual(read('C-1'), { ok: true, doc: { state: 'in_review', head: 'a'.repeat(40), tier: 1 } });
+  assert.match(read('C-2').reason, /no such card/);
+  assert.match(read('../x').reason, /not a card id/);
+  assert.match(read('C-1', ME + 1).reason, /not the Record owner's alone/);
+  put('C-3', { entity: 'card', id: 'C-1', doc: {} });
+  assert.match(read('C-3').reason, /not a card document/);
+  put('C-4', '{');
+  assert.match(read('C-4').reason, /not JSON/);
+  put('C-5', { entity: 'card', id: 'C-5', doc: {} }, 0o666);
+  assert.match(read('C-5').reason, /not the Record's own plain file/);
+  symlinkSync(join(root, 'docs', 'card', 'C-1.json'), join(root, 'docs', 'card', 'C-6.json'));
+  assert.match(read('C-6').reason, /ELOOP/);
+  linkSync(join(root, 'docs', 'card', 'C-1.json'), join(root, 'docs', 'card', 'C-7.json'));
+  assert.match(read('C-7').reason, /not the Record's own plain file/);
+});
+
+test('L65 m-3: the admin answer is yes, no, or an error (which the runner counts as an admin)', () => {
+  assert.equal(adminAnswer({ status: 0, stdout: 'yes review is a member of admin\n' }), true);
+  assert.equal(adminAnswer({ status: 1, stdout: 'no review is NOT a member of admin\n' }), false);
+  assert.throws(() => adminAnswer({ status: null, stdout: '', error: { code: 'ETIMEDOUT' } }), /no answer \(ETIMEDOUT\)/);
+  assert.throws(() => adminAnswer({ status: 64, stdout: 'Group not found.' }), /no answer \(exit 64\)/);
+});
+
+test('L65 m-7: the session list keeps the pinned claude\'s processes, with their session ids', () => {
+  const bin = '/opt/pinned/claude';
+  const text = ['  101 /opt/pinned/claude -p --session-id S-1 --x', '  102 /opt/pinned/claude', '  103 /bin/zsh -c x',
+    '  104 /opt/pinned/claude-other', `  ${process.pid} /opt/pinned/claude --session-id me`, '  105 /opt/pinned/claude --session-id=S-2'].join('\n');
+  assert.deepEqual(sessionsFrom(text, bin), [{ pid: 101, sessionId: 'S-1' }, { pid: 102 }, { pid: 105, sessionId: 'S-2' }]);
+});
+
+test('L65 m-5: the account copy is a or b, root\'s; the runner falls back to the owner\'s own file, read only', () => {
+  const home = tempDir('m4-acct-');
+  chmodSync(home, 0o755);
+  mkdirSync(join(home, '.claude'));
+  mkdirSync(join(home, '.claude-b'));
+  const to = join(home, 'copy');
+  // No account file means a.
+  assert.deepEqual(copyAccountTo({ home, uid: ME, to }), { ok: true, account: 'a' });
+  assert.equal(useAccount({ home, name: 'b' }).ok, true);
+  // The owner's file can be read by others now (it says a or b, no secret).
+  assert.equal(lstatSync(join(home, ACCOUNT_FILE)).mode & 0o777, 0o644);
+  assert.deepEqual(copyAccountTo({ home, uid: ME, to }), { ok: true, account: 'b' });
+  assert.equal(readFileSync(to, 'utf8'), 'b\n');
+  assert.equal(lstatSync(to).mode & 0o777, 0o644);
+  assert.deepEqual(readAccountFile({ file: to, uid: ME }), { ok: true, account: 'b' });
+  assert.match(readAccountFile({ file: to, uid: 0 }).reason, /not owned by uid 0/);
+  assert.match(copyAccountTo({ home, uid: ME + 1, to }).reason, /not owned by uid/);
+  writeFileSync(join(home, 'odd'), 'c\n', { mode: 0o644 });
+  assert.match(readAccountFile({ file: join(home, 'odd'), uid: ME }).reason, /neither a nor b/);
+  symlinkSync(to, join(home, 'link'));
+  assert.match(readAccountFile({ file: join(home, 'link'), uid: ME }).reason, /is a link/);
+  // The runner's port: the copy first (root's, so here it fails), then the owner's file.
+  const c = { root: '/r', outboxRoot: '/o', reviewHome: '/h', uids: { reviewer: ME }, recordRoot: '/x', recordUid: ME, mirror: '/m', claudeBin: '/c', accountCopy: to, ownerHome: home, ownerUid: ME };
+  assert.equal(realPorts(c, {}).accountInUse(), 'b');
+  assert.equal(realPorts({ ...c, ownerUid: ME + 1 }, {}).accountInUse(), null);
+  assert.equal(realPorts({ ...c, ownerHome: join(home, 'nobody') }, {}).accountInUse(), 'a');
+});
+
+test('L65: the config names every path as a full path', () => {
+  const d = tempDir('m4-cfg-');
+  const good = { installRoot: '/i', root: '/r', outboxRoot: '/o', reviewHome: '/h', uids: {}, recordRoot: '/x', recordUid: 5, mirror: '/m', claudeBin: '/c', ownerHome: '/w', ownerUid: 5, wiring: '/i/w.mjs' };
+  writeFileSync(join(d, 'c.json'), JSON.stringify(good));
+  assert.equal(readConfig(join(d, 'c.json')).mirror, '/m');
+  writeFileSync(join(d, 'c.json'), JSON.stringify({ ...good, mirror: 'm' }));
+  assert.throws(() => readConfig(join(d, 'c.json')), /mirror must be an absolute path/);
+  writeFileSync(join(d, 'c.json'), JSON.stringify({ ...good, recordUid: '5' }));
+  assert.throws(() => readConfig(join(d, 'c.json')), /recordUid must be a uid/);
+});
+
+test('L65: the two LaunchDaemons run the installed copy and its own node, the runner as review', () => {
+  const p = reviewDaemonPlists({ label: 'org.example.orch', installRoot: '/I', config: '/I/review.json', reviewRoot: '/R', reviewHome: '/H', accountCopy: '/I/account', ownerHome: '/W', ownerUid: 501, logDir: '/L' });
+  assert.match(p.runner, /<key>UserName<\/key><string>review<\/string>/);
+  assert.match(p.runner, /<array><string>\/I\/bin\/node<\/string><string>\/I\/modules\/M4-workshop\/launcher\/review-runner-main\.mjs<\/string><string>\/I\/review\.json<\/string><\/array>/);
+  assert.match(p.runner, /<key>WatchPaths<\/key><array><string>\/R\/requests<\/string><\/array>/);
+  assert.match(p.runner, /<key>StartInterval<\/key><integer>60<\/integer>/);
+  assert.doesNotMatch(p.accountCopy, /UserName/);
+  assert.match(p.accountCopy, /<string>copy-to<\/string><string>\/I\/account<\/string><string>--home<\/string><string>\/W<\/string><string>--owner<\/string><string>501<\/string>/);
+  assert.match(p.accountCopy, /<key>WatchPaths<\/key><array><string>\/W\/\.claude-account<\/string><\/array>/);
+  for (const t of [p.runner, p.accountCopy]) assert.doesNotMatch(t, /homebrew|\/usr\/local/);
+  assert.throws(() => reviewDaemonPlists({ label: 'x y' }), /bad job label/);
+  assert.throws(() => reviewDaemonPlists({ label: 'x', installRoot: 'I' }), /installRoot must be an absolute path/);
+});

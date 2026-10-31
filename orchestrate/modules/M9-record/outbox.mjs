@@ -18,14 +18,31 @@
 // and is no other role's uid, and the role and session folders are owned by it and writable by no one else. The
 // result carries `owner_uid` (the review user) so the record can show where the verdict came from. Whether the session
 // was launched as a reviewer on that head is the record's check (writer.mjs), made in the same transaction.
+//
+// THE RUNNER'S LAUNCH RECORDS (lead call L65). The review runner (M4 review-runner.mjs) runs as `review`, makes each
+// review session's id itself, and writes `<launches folder>/<session id>.json` into a folder only `review` can write.
+// A verdict counts only when such a record names the same session, role, card and head. The Record's own `launch`
+// entries are written by the Dispatcher, which runs as the workers' Mac user, so for a review they never count. These
+// checks live here and nowhere else: the record's intake and verdict rule (writer.mjs) and the Merge Gate (M6
+// gather.mjs) call them.
+//
+//   reviewUid(uids) → { ok, uid } | { ok: false, reason }       the one Mac user both review roles run as
+//   runnerLaunchFor({ root, uids, role, card, head, sessionId }) → { ok, launch, key } | { ok: false, reason }
+//     `uid` in place of `uids`: the review user the intake already proved (a verdict's outbox_uid), for the verdict rule.
+//   runnerLaunches({ root, uids }) → { ok, launches: [{ doc, key }], refused: [{ name, reason }] } | { ok: false, reason }
 
 import { createHash } from 'node:crypto';
-import { closeSync, fstatSync, lstatSync, openSync, readSync, realpathSync, constants } from 'node:fs';
+import { closeSync, fstatSync, lstatSync, openSync, readdirSync, readSync, realpathSync, constants } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { OUTBOX_KINDS, SESSION_ID } from '../../shared/record.mjs';
+import { REVIEW_ROLES } from '../../shared/review-roles.mjs';
 
+export { REVIEW_ROLES };
 export const MAX_OUTBOX_BYTES = 256 * 1024;
-export const REVIEW_ROLES = Object.freeze(['reviewer', 'auditor']);
+export const MAX_LAUNCH_BYTES = 16 * 1024;
+export const LAUNCH_NAME = /^([A-Za-z0-9-]{1,128})\.json$/;
+const CARD_ID = /^[A-Za-z0-9._-]{1,200}$/;
+const HEX40 = /^[0-9a-f]{40}$/;
 
 // Is the review user a separate Mac user? null when it is, else the reason (L44). Also used by the Merge Gate.
 export function reviewUserProblem(uids, role) {
@@ -36,6 +53,93 @@ export function reviewUserProblem(uids, role) {
   const shared = Object.entries(uids ?? {}).filter(([r, u]) => !REVIEW_ROLES.includes(r) && u === own).map(([r]) => r);
   if (shared.length) return `the review user is not a separate Mac user (shared with ${shared.join(', ')})`;
   return null;
+}
+
+// The one Mac user both review roles run as: the runner is one process, so the reviewer and the auditor share it.
+export function reviewUid(uids) {
+  for (const r of REVIEW_ROLES) { const p = reviewUserProblem(uids, r); if (p) return { ok: false, reason: p }; }
+  if (new Set(REVIEW_ROLES.map((r) => uids[r])).size !== 1) return { ok: false, reason: 'the reviewer and the auditor must run as the same review user' };
+  return { ok: true, uid: uids[REVIEW_ROLES[0]] };
+}
+
+export function launchesFolderProblem(root, uid) {
+  if (typeof root !== 'string' || !root.startsWith('/')) return 'no review launches folder is configured';
+  let st;
+  try { st = lstatSync(root); } catch { return 'the review launches folder is missing'; }
+  if (st.isSymbolicLink()) return 'the review launches folder is a link';
+  if (!st.isDirectory()) return 'the review launches folder is not a folder';
+  if (st.uid !== uid) return 'the review launches folder is not owned by the review user';
+  if (st.mode & 0o022) return 'the review launches folder can be written by others than the review user';
+  return null;
+}
+
+// One launch record, read as the outbox reads a file: no link, a plain file with one name, review's own and writable by
+// no one else, small, and naming itself (the session id in the file is the one in its name).
+function readLaunch(root, uid, name) {
+  const no = (reason) => ({ ok: false, reason });
+  const m = LAUNCH_NAME.exec(name);
+  if (!m) return no(`${name.slice(0, 80)} is not a launch record name`);
+  let fd;
+  try { fd = openSync(join(root, name), constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); } catch (e) {
+    return no(e?.code === 'ELOOP' ? 'the launch record is a link' : e?.code === 'ENOENT' ? 'no launch record' : `the launch record can't be opened (${e?.code ?? 'error'})`);
+  }
+  let buf;
+  try {
+    const st = fstatSync(fd);
+    if (!st.isFile()) return no('the launch record is not a plain file');
+    if (st.nlink !== 1) return no('the launch record has more than one name (a hard link)');
+    if (st.uid !== uid) return no('the launch record is not owned by the review user');
+    if (st.mode & 0o022) return no('the launch record can be written by others than the review user');
+    if (st.size > MAX_LAUNCH_BYTES) return no(`the launch record is over ${MAX_LAUNCH_BYTES} bytes`);
+    buf = Buffer.alloc(st.size);
+    let got = 0;
+    while (got < buf.length) { const n = readSync(fd, buf, got, buf.length - got, got); if (!n) break; got += n; }
+    buf = buf.subarray(0, got);
+  } finally { closeSync(fd); }
+  let doc;
+  try { doc = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(buf)); } catch { return no('the launch record is not JSON'); }
+  if (!doc || typeof doc !== 'object' || Array.isArray(doc)) return no('the launch record is not a JSON object');
+  if (doc.session_id !== m[1]) return no('the launch record names another session than its file name');
+  if (!REVIEW_ROLES.includes(doc.role)) return no('the launch record names no review role');
+  if (typeof doc.card !== 'string' || !CARD_ID.test(doc.card)) return no('the launch record names no card');
+  if (typeof doc.head !== 'string' || !HEX40.test(doc.head)) return no('the launch record names no 40-hex head');
+  return { ok: true, doc, key: createHash('sha256').update(buf).digest('hex') };
+}
+
+/** The runner's launch record for one session, matching role, card and head; anything else is a refusal, never a throw. */
+export function runnerLaunchFor({ root, uids, uid, role, card, head, sessionId } = {}) {
+  const no = (reason) => ({ ok: false, reason });
+  if (!REVIEW_ROLES.includes(role)) return no(`${role} is not a review role`);
+  if (typeof sessionId !== 'string' || !SESSION_ID.test(sessionId)) return no('no session id of letters, digits and dashes');
+  const u = uid !== undefined ? (Number.isInteger(uid) && uid > 0 ? { ok: true, uid } : { ok: false, reason: 'no review user id' }) : reviewUid(uids);
+  if (!u.ok) return no(u.reason);
+  const bad = launchesFolderProblem(root, u.uid);
+  if (bad) return no(bad);
+  const r = readLaunch(root, u.uid, `${sessionId}.json`);
+  if (!r.ok) return no(`${r.reason} for session ${sessionId}`);
+  const d = r.doc;
+  if (d.role !== role) return no(`the runner launched session ${sessionId} as ${d.role}, not ${role}`);
+  if (d.card !== card) return no(`the runner launched session ${sessionId} on another card`);
+  if (d.head !== head) return no(`the runner launched session ${sessionId} on head ${d.head.slice(0, 7)}, not ${String(head).slice(0, 7)}`);
+  return { ok: true, launch: d, key: r.key };
+}
+
+/** Every launch record that passes the checks; a bad file is listed under `refused`, a bad folder refuses the lot. */
+export function runnerLaunches({ root, uids } = {}) {
+  const u = reviewUid(uids);
+  if (!u.ok) return { ok: false, reason: u.reason };
+  const bad = launchesFolderProblem(root, u.uid);
+  if (bad) return { ok: false, reason: bad };
+  let names;
+  try { names = readdirSync(root).sort(); } catch { return { ok: false, reason: 'the review launches folder could not be listed' }; }
+  const launches = []; const refused = [];
+  for (const name of names) {
+    // The runner writes `.<name>.tmp` first and renames it into place, so a half-written record is never under its name.
+    if (name.startsWith('.')) continue;
+    const r = readLaunch(root, u.uid, name);
+    if (r.ok) launches.push({ doc: r.doc, key: r.key }); else refused.push({ name, reason: r.reason });
+  }
+  return { ok: true, launches, refused };
 }
 
 // The longest listed kind the name starts with (so `report-compact-x` is report-compact-, not report-).

@@ -9,7 +9,8 @@
 import { KEYS, minutes } from './keys.mjs';
 import { move, waitOn, note, ageMs } from './moves.mjs';
 import { startGate } from './gate.mjs';
-import { SESSION_ID } from '../../shared/record.mjs';
+import { rolesFor } from '../M4-workshop/launcher/review-runner.mjs';
+import { relayReviewAlerts } from './review-requests.mjs';
 
 export const PR_FACT = (n) => `pr-${n}`;
 const fresh = (fact, attempt) => {
@@ -20,14 +21,19 @@ const fresh = (fact, attempt) => {
 
 /**
  * One pass of the time limits. Ports: `hasSession(cardId)` (a live session for the card),
- * `gateAlive()` (the Merge Gate's process), `hasReviewer(cardId)`, `startReviewer(cardId)` -> { ok, sessionId, head, role? } (the session
- * runs as the review user, M4 review-user.mjs; its launch is recorded here, L44),
- * `alert(text)`. `b` = this pass's bands and `running` = the running sessions: a reviewer start goes
+ * `gateAlive()` (the Merge Gate's process), `alert(text)`, and the review runner's (L65, review-requests.mjs):
+ * `hasReviewer(cardId, role, head)` (throws when the runner's status can't be trusted), `requestReview({ card, head, role })`
+ * -> { ok } | { ok: false, reason } (a request the runner checks; the Dispatcher never starts a review itself), and
+ * `reviewAlerts()` (the runner's alerts, told to Joe once). A card in review needs a reviewer, and an auditor too on
+ * Tier 1 (m-6). `b` = this pass's bands and `running` = the running sessions: a review request goes
  * through the same start gate as every other start (audit MAT-5), so red holds it unless the rules'
- * red_runs lists reviews. `missing` collects rules values the gate lacked, for the tick to tell Joe. `startsHeld` (a reason) skips reviewer starts this pass, uncounted. Returns the list of moves made, for the diary and the tests.
+ * red_runs lists reviews. `missing` collects rules values the gate lacked, for the tick to tell Joe. `startsHeld` (a reason) skips review requests this pass, uncounted.
+ * When the runner's status can't be read, no review is asked for, and the pass ends with that error once the other
+ * limits have run, so the tick tells Joe. Returns the list of moves made, for the diary and the tests.
  */
-export async function timeLimits({ rec, rules, now, b, running = [], hasSession, gateAlive, hasReviewer, startReviewer, alert, startsHeld = null, missing = [] }) {
+export async function timeLimits({ rec, rules, now, b, running = [], hasSession, gateAlive, hasReviewer, requestReview, reviewAlerts, alert, startsHeld = null, missing = [] }) {
   const done = [];
+  const statusErrors = [];
   const lim = {
     claimed: minutes(rules, KEYS.claimedNoSessionMin), checking: minutes(rules, KEYS.checkingMaxMin),
     reporting: minutes(rules, KEYS.reportingMaxMin), inReview: minutes(rules, KEYS.inReviewNoReviewerMin),
@@ -36,27 +42,38 @@ export async function timeLimits({ rec, rules, now, b, running = [], hasSession,
     if (doc.state === 'claimed' && !hasSession(id) && ageMs(doc, now) >= lim.claimed) {
       if (move(rec, 'card', id, { state: 'ready', claim: null }, { now, kind: 'timeout' }).ok) done.push([id, 'claimed->ready']);
     }
-    if (doc.state === 'in_review' && !hasReviewer(id) && ageMs(doc, now) >= lim.inReview) {
-      // An outage, or a pass with no bands, holds the start without counting it as a failure (audit 0b-6 r2 MIN-4, MIN-5).
-      if (startsHeld) { done.push([id, `reviewer held: ${startsHeld}`]); continue; }
-      const fails = doc.reviewer_start_failures ?? 0;
-      if (fails >= 2) {
-        if (waitOn(rec, id, { who: 'joe', what: 'no reviewer could be started', now }).ok) { alert(`card ${id}: no reviewer could be started twice`); done.push([id, 'in_review->waiting']); }
-        continue;
-      }
-      const g = startGate({ rules, rec, card: { id, ...doc }, kind: 'review', product: doc.product, b, running });
-      // `missing` collects rules values the gate lacked, so the tick tells Joe once (audit 0b-6 r3 MAT-3).
-      if (!g.ok) { if (g.missing) missing.push(g.missing); done.push([id, `reviewer held: ${g.reason}`]); continue; }
-      let r;
-      try { r = await startReviewer(id); } catch (e) { r = { ok: false, reason: e.message }; }
-      // A started reviewer counts only once its launch is recorded (L44): a verdict is taken only from a session the
-      // record names as a reviewer on this card at that head, so an unrecorded one could never pass the card.
-      const recorded = r?.ok ? recordReviewerLaunch({ rec, card: id, product: doc.product, started: r, now }) : null;
-      if (recorded && !recorded.ok) alert(`card ${id}: a reviewer started but its launch was not recorded (${recorded.reason}); its verdict will not count`);
-      const good = !!(r?.ok && recorded?.ok);
-      move(rec, 'card', id, good ? { reviewer_start_failures: 0 } : { reviewer_start_failures: fails + 1 }, { now, kind: 'reviewer_start' });
-      done.push([id, good ? 'reviewer started' : r?.ok ? 'reviewer started, not recorded' : 'reviewer start failed']);
+    if (doc.state !== 'in_review' || ageMs(doc, now) < lim.inReview) continue;
+    const want = [];
+    let unclear = false;
+    for (const role of rolesFor(doc)) {
+      let has;
+      try { has = await hasReviewer(id, role, doc.head); } catch (e) { unclear = true; statusErrors.push(e?.message ?? String(e)); break; }
+      if (has !== true && has !== false) { unclear = true; statusErrors.push(`hasReviewer gave no yes or no for card ${id}`); break; }
+      if (!has) want.push(role);
     }
+    if (unclear) { done.push([id, 'review not asked: the review runner\'s status could not be read']); continue; }
+    if (!want.length) continue;
+    // An outage, or a pass with no bands, holds the request without counting it as a failure (audit 0b-6 r2 MIN-4, MIN-5).
+    if (startsHeld) { done.push([id, `reviewer held: ${startsHeld}`]); continue; }
+    const fails = doc.reviewer_start_failures ?? 0;
+    if (fails >= 2) {
+      if (waitOn(rec, id, { who: 'joe', what: 'no reviewer could be asked for', now }).ok) { alert(`card ${id}: no reviewer could be asked for twice`); done.push([id, 'in_review->waiting']); }
+      continue;
+    }
+    const g = startGate({ rules, rec, card: { id, ...doc }, kind: 'review', product: doc.product, b, running });
+    // `missing` collects rules values the gate lacked, so the tick tells Joe once (audit 0b-6 r3 MAT-3).
+    if (!g.ok) { if (g.missing) missing.push(g.missing); done.push([id, `reviewer held: ${g.reason}`]); continue; }
+    const said = [];
+    let failed = false;
+    for (const role of want) {
+      let r;
+      try { r = await requestReview({ card: id, head: doc.head, role }); } catch (e) { r = { ok: false, reason: e?.message ?? String(e) }; }
+      if (r?.ok) said.push(`${role} requested`);
+      else { failed = true; said.push(`${role} request failed: ${r?.reason ?? 'no answer'}`); }
+    }
+    // The move resets the card's clock, so the next request for it is a full limit later.
+    move(rec, 'card', id, { reviewer_start_failures: failed ? fails + 1 : 0 }, { now, kind: 'review_request' });
+    done.push([id, said.join(', ')]);
   }
   // A session that has said it is reporting but handed in nothing in time: its card fails.
   for (const { id, doc } of rec.list('session')) {
@@ -82,29 +99,13 @@ export async function timeLimits({ rec, rules, now, b, running = [], hasSession,
       }
     }
   }
+  if (reviewAlerts) {
+    let list = null;
+    try { list = await reviewAlerts(); } catch (e) { statusErrors.push(e?.message ?? String(e)); }
+    if (list) relayReviewAlerts({ rec, alerts: list, alert, now });
+  }
+  if (statusErrors.length) throw new Error(`no review was asked for: ${statusErrors[0]}`);
   return done;
-}
-
-export const REVIEW_LAUNCH_ROLES = Object.freeze(['reviewer', 'auditor']);
-const HEX40 = /^[0-9a-f]{40}$/;
-
-/**
- * The launch record of a reviewer or auditor session (L44, D12). `started` is the launcher's answer:
- * { sessionId, head, role? } — `head` is the commit its copy was made from, so the verdict counts for that head only.
- * A session id is never reused: a launch already recorded under it is refused, never written over. → { ok } | { ok: false, reason }
- */
-export function recordReviewerLaunch({ rec, card, product = null, started, now }) {
-  const role = started?.role ?? 'reviewer';
-  if (!REVIEW_LAUNCH_ROLES.includes(role)) return { ok: false, reason: `"${String(role).slice(0, 40)}" is not a review role` };
-  const sid = started?.sessionId;
-  if (typeof sid !== 'string' || !SESSION_ID.test(sid)) return { ok: false, reason: 'the launcher gave no session id of letters, digits and dashes (at most 128)' };
-  if (typeof started.head !== 'string' || !HEX40.test(started.head)) return { ok: false, reason: 'the launcher did not say which head (40 hex) the copy was made from' };
-  const prev = rec.read('launch', sid);
-  if (prev) return { ok: false, reason: prev.corrupt ? `the launch record for session ${sid} can't be read` : `session id ${sid} was used before; a session id is never reused` };
-  const c = rec.read('card', card);
-  const w = rec.write({ actor: 'dispatcher', entity: 'launch', id: sid, expectRev: 0, kind: 'launch',
-    doc: { session_id: sid, role, kind: 'review', card, head: started.head, rev: c?.rev ?? null, product: product ?? null, launched_at: new Date(now).toISOString() } });
-  return w.ok ? { ok: true, sessionId: sid } : { ok: false, reason: w.reason };
 }
 
 function merged(rec, id, doc, pr, { now, alert }) {
