@@ -41,7 +41,7 @@ The one-line framing: **an installed skill is code you did not review, running w
 - ✅ **Always** — for products that load third-party agent extensions, or that *are* agent tooling (skills, plugins, MCP servers).
 - ✅ **Always** — before publishing any Bob-built skill/plugin others will install. You are the supply chain in that direction.
 - ✅ **Periodic, against the builder's own machine** — quarterly, and after any batch of new installs (e.g. a `/verdict` harvest round).
-- ✅ **Mandatory** — before granting any agent setup access to client work (🔴 zone) or to production credentials.
+- ✅ **Mandatory** — before granting any agent setup access to client work (🔴 zone; the three privacy zones are defined in `reference/glossary.md`) or to production credentials.
 - ⏸ Skip — products with no agent surface and no third-party extensions.
 
 ## Session setup

@@ -13,7 +13,7 @@
 #   5. The repo is on a known branch, no divergence, no uncommitted changes blocking updates
 #   6. (section 5 below) The two design skills (design-gallery, design-mockups) are linked from this same Bob copy
 #
-# Exits 0 if everything is healthy; 1 if anything needs attention.
+# Exits 1 if anything is broken (a ✗ line); 0 otherwise, including when there are only warnings.
 # All output is plain English so a non-engineer can act on it.
 
 set -uo pipefail
@@ -32,9 +32,10 @@ echo ""
 # 1. Skill symlink presence
 echo "1. Skill symlink (~/.claude/skills/bob)"
 if [[ -L "$SKILL_LINK" ]]; then
-  target=$(readlink "$SKILL_LINK")
-  note "symlink exists → $target"
-  if [[ ! -d "$target" ]]; then
+  note "symlink exists → $(readlink "$SKILL_LINK")"
+  # Resolve through the link itself, so a relative link works from any folder.
+  target="$(cd -P "$SKILL_LINK" 2>/dev/null && pwd -P)"
+  if [[ -z "$target" ]]; then
     fail "symlink target does not exist (dangling). Re-run the install one-liner from the README, or fix the symlink manually."
     target=""
   fi

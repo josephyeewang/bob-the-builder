@@ -27,8 +27,9 @@
 - **Class-level pattern scan** — When a bug is found, grep the entire codebase for the same pattern and fix all instances. Prevents fixing one symptom while identical bugs remain elsewhere.
 - **Hot path** — A 1-3 project-wide critical user flow defined in the Build Manifest (e.g., "user texts a task → AI interprets → task gets created → confirmation sent"). Tested at every phase gate. Failure is a stop condition.
 - **Capability Traceability Matrix** — A table mapping every capability in the Product Spec to a specific build phase. Prevents "we forgot to build feature X" at hardening.
-- **Hardening** — The audit phase after all build phases. Five fresh-session audits: security, adversarial/abuse, integration seams, data integrity, spec-code consistency. Each is a separate session with clean context (writer/reviewer pattern).
+- **Hardening** — The audit phase after all build phases. Six fresh-session audits: security, adversarial/abuse, integration seams, data integrity, spec-code consistency, liveness (the list is Step N+1 in `build-protocol-core.md`). Each is a separate session with clean context (writer/reviewer pattern).
 - **Deviation tracker** — Running count of spec-vs-code mismatches per phase. If not declining over 3 phases → trigger a process review.
+- **Privacy zones (🟢 / 🔵 / 🔴)** — Three labels for whose material a tool or session touches. 🟢 **personal**: your own notes and projects. 🔵 **capability**: reusable tools and methods (Bob itself), which may be public. 🔴 **client work**: someone else's confidential product or data. A tool that sends text to an outside service, or a note that carries a project's details, must not cross from 🔴 into 🔵 or 🟢. Used by the agent-setup audit lens (L38) and the design skills' skip rules.
 
 ### Specs & artifacts (v2.2 additions)
 

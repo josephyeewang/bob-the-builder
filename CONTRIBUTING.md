@@ -25,7 +25,7 @@ Likely-to-be-rejected contributions:
 
 ## Code in `scripts/`
 
-- Shell scripts use `bash` (not `sh`) and `set -euo pipefail`.
+- Shell scripts use `bash` (not `sh`) and `set -uo pipefail` (most leave out `-e` on purpose, so one failed check reports and the script carries on to the rest).
 - Stay POSIX-portable across macOS BSD and Linux GNU userlands.
 - No external dependencies: shell scripts use standard Unix tools, `git` and (for `lens-retro.sh`) `jq`; the `.mjs` checks use Node's built-in modules only (no npm packages); the `.py` ones use Python 3's standard library only.
 

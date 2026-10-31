@@ -1,7 +1,7 @@
 # BUILD PROTOCOL (version: the one line in `VERSION`, D-032)
 
 > A systematic framework for building, auditing, and evolving products with Claude Code.
-> Created: 2026-04-15. Last updated: 2026-09-13. Owner: Joe Wang.
+> Created: 2026-04-15. Last updated: see `CHANGELOG.md` and `git log` (a date here fell behind). Owner: Joe Wang.
 
 ---
 
@@ -49,7 +49,7 @@ The protocol prevents the three failure modes observed across these projects:
 
 Just tell Claude Code to read this file. You don't need to read it yourself — Claude will guide you.
 
-**Simplest invocation:** "Read ~/.claude/build-protocol.md and help me use it for my project."
+**Simplest invocation:** type `/bob` in Claude Code (the skill loads the core and asks which mode). Without the skill: "Read build-protocol-core.md in my Bob folder and help me use it for my project."
 
 Claude will then ask which mode fits your situation:
 
@@ -76,35 +76,19 @@ Present this menu and wait for selection:
 >
 > **Which one? (A / B / C / D)** — or say "I'm not sure" / describe what you're trying to do and I'll recommend one.
 
-After the user selects, Claude reads the relevant PART (II, III, or IV) and begins at Step 1 / A1 / E1. **UPGRADE** has no Part of its own: its steps (U1–U5) are in `build-protocol-core.md` §"MODE: UPGRADE" and the work is done by `scripts/bob-upgrade.mjs` (D-019). Claude does NOT need to read the entire document upfront — read Part I (Foundation, including §11 Narration Protocol) + the selected mode's section.
+After the user selects, Claude reads the relevant PART (II, III, or IV) and begins at Step 1 / A1 / E1. **UPGRADE** has no Part of its own: its steps (U1–U5) are in `modes/upgrade.md` and the work is done by `scripts/bob-upgrade.mjs` (D-019). Claude does NOT need to read the entire document upfront — read Part I (Foundation, including §11 Narration Protocol) + the selected mode's section.
 
 ---
 
 ### Direct Invocation (if you already know which mode)
 
-- **New product:** "Read ~/.claude/build-protocol.md. Use MODE: NEW to guide me through building [product name]. [Brief description of what it is.]"
-- **Audit existing:** "Read ~/.claude/build-protocol.md. Use MODE: AUDIT to assess the current state of this project."
-- **Evolve existing:** "Read ~/.claude/build-protocol.md. Use MODE: EVOLVE. I want to [describe the change]."
+- **New product:** "/bob — MODE: NEW. Guide me through building [product name]. [Brief description of what it is.]"
+- **Audit existing:** "/bob — MODE: AUDIT. Assess the current state of this project."
+- **Evolve existing:** "/bob — MODE: EVOLVE. I want to [describe the change]."
 
 ### Complexity Assessment
 
-Before selecting a mode, assess project complexity to determine the appropriate process weight:
-
-| Track | Criteria | What Changes |
-|-------|----------|-------------|
-| **Light** | 1-3 subsystems, no AI decisions, no multi-user, single integration surface | Skip Behavioral Core (Step 2). Skip Domain Specs if <3 subsystems — put details in Architecture Contract. Simplified Phase Report (always-required sections only). Skip adversarial reviews at spec phase — do them at hardening only. |
-| **Standard** | 3-8 subsystems, AI decisions OR multi-user OR 3+ external integrations | Full protocol as documented. This is the default. |
-| **Heavy** | Complex AI + multi-user + 5+ external integrations + compliance requirements | Full protocol + mandatory deployment verification at every phase + mandatory second-model review (ChatGPT) at spec and hardening gates + integration test suite required before Phase 2. |
-
-If unsure, start at Standard. You can escalate to Heavy mid-build if you discover unexpected complexity, but downgrading from Standard to Light mid-build is risky — you've already skipped the foundations.
-
-**Mid-build reclassification (escalating to Heavy):**
-
-If you discover mid-build that the project is more complex than initially assessed:
-1. **Future phases** follow Heavy requirements immediately (mandatory deploy verification every phase, mandatory second-model review at remaining spec and hardening gates)
-2. **Catch-up audit** on completed phases: run a one-time review covering the gaps between Standard and Heavy — specifically, deploy verification for any phases that touched external integrations, and second-model review of the Product Spec, Architecture Contract, and Behavioral Core (if they weren't reviewed at the higher bar)
-3. **Log the reclassification** in the Build Manifest with: date, which phase triggered it, rationale, and what catch-up work was done
-4. **Do NOT retroactively re-run** completed phases — the catch-up audit covers the delta
+The tracks (Light / Standard / Heavy), what each one changes, and what to do when a project turns out heavier mid-build live in one place: `build-protocol-core.md` §"COMPLEXITY ASSESSMENT". If unsure, start at Standard; moving up mid-build is fine, moving down is risky because the skipped foundations stay skipped.
 
 ### Rules for Claude Code
 
@@ -115,7 +99,7 @@ If you discover mid-build that the project is more complex than initially assess
 | Role | Who | What |
 |------|-----|------|
 | **Product scoping & decisions** | Human | Defines what to build, reviews and approves all work, resolves ambiguities, makes tradeoff calls |
-| **Adversarial review (specs)** | ChatGPT | Reviews Product Spec, Behavioral Core, and Architecture Contract for gaps and blind spots |
+| **Adversarial review (specs)** | A model from a different family than the builder | Reviews Product Spec, Behavioral Core, and Architecture Contract for gaps and blind spots |
 | **Drafting, building, verifying** | Claude Code | Writes specs, code, tests; runs validation; proposes reconciliations |
 
 ---
@@ -324,7 +308,7 @@ These are rough expectations, not commitments — actual session length depends 
 - **S-complexity phases:** ~1 session (build + verify + reconcile)
 - **M-complexity phases:** 1-2 sessions. Start a fresh session if verify reveals significant issues.
 - **L-complexity phases:** 2-3 sessions. Consider splitting: session 1 for build, session 2 for verify + reconcile.
-- **Hardening audits:** 1 session per audit (a/b/c/d/e). Each MUST be a fresh session (writer/reviewer pattern).
+- **Hardening audits:** 1 session per audit (the list is Step N+1 in `build-protocol-core.md`). Each MUST be a fresh session (writer/reviewer pattern).
 
 If a phase takes more than 3 sessions, it's likely too large — consider splitting it in the Build Manifest.
 
@@ -377,7 +361,7 @@ In a consumer task app, specs were written comprehensively upfront (good) but ne
 
 | Gate | When | Pass Criteria |
 |------|------|---------------|
-| **Spec Gate** | After all specs written (Steps 1-5 in NEW mode) | Specs are internally consistent; ChatGPT has reviewed Product Spec + Architecture + Behavioral Core |
+| **Spec Gate** | After all specs written (Steps 1-5 in NEW mode) | Specs are internally consistent; a model from a different family has reviewed Product Spec + Architecture + Behavioral Core |
 | **Phase Gate** | After each build phase (Na/Nb/Nc) | All checks below pass; specs reconciled; propagation complete |
 | **Hardening Gate** | After all build phases complete | Security audit, data integrity audit, and spec-code consistency audit all pass |
 | **Ship Gate** | Before launch | All hardening items resolved or explicitly deferred with rationale |
@@ -396,11 +380,11 @@ In a consumer task app, specs were written comprehensively upfront (good) but ne
 7. **Regression check:** Re-test critical flows from ALL prior phases. If any prior flow is broken → fix before advancing.
 8. **Global invariants:** Re-verify all project invariants (see Appendix E). If any violated → fix before advancing.
 9. **Spec consistency:** Confirm implementation still matches domain specs, Architecture Contract, and Behavioral Core. If drift detected → reconcile before advancing.
-10. **Fresh-eyes clean on Tier-1 deliverables (v2.39 — Rule 30):** Tier the phase's output by consequence — **Tier 1** = numbers or data someone acts on (financials, health data, scoring, pipelines, migrations, backfills, any join / collapse / dedup / group step, anything feeding a displayed figure); **Tier 2** = code without numbers; **Tier 3** = thinking work. For Tier 1: after the builder's own Rule-25 forensics, hand the artefacts + spec to a **fresh-context auditor** (a new subagent or session that did NOT build the phase) to run the scoped lens panel plus a plain re-read against the ask. Triage every finding **Material** (changes a displayed number, a decision, or data completeness) / **Minor** / **Cosmetic**. Material findings open = stop condition; fix and re-audit until zero. Log the audit in `docs/audit-ledger.json` — `{audit, ran, tier, class_of_work, material_found, material_remaining, minor, cosmetic, auditor_context}`, class from the ledger's fixed vocabulary — and run `node "$(realpath ~/.claude/skills/bob/..)/scripts/audit-ledger-check.mjs" docs/audit-ledger.json` (D-018). Three rules keep "clean" honest (Rule 30(f)): **a zero-finding audit is re-run once from a different angle** before it is accepted; **editing content an audit or receipt covered voids that proof** until it is re-run; **done means the observed end effect** (the message arrived, the served value changed, the first scheduled run produced its output) — never "merged" or "deployed". Tier 2/3 phases record their tier and skip. Never wait for the human to ask for this audit — it is the phase's exit, not a favor.
-11. **Failing-test receipt per fix item (2026-10, D-016):** Every fix or bug item in the phase must **name the test command that proves it**; an item with only a note ("fixed, checked by hand") cannot pass. A session **different from the builder's** — the milestone `reviewer` subagent or a new session — runs `node "$(realpath ~/.claude/skills/bob/..)/scripts/prove-test-fails.mjs" --commit <sha> --test "<cmd>" --fix <file>:<from>-<to>`. In a scratch copy at that exact commit it removes the named fix lines and requires the test to **FAIL**, then restores them and requires it to **PASS**, and prints a short receipt tied to the commit hash. Paste the receipt into the phase report. A test that stays green with the fix removed is not testing the fix → stop condition. *(Method ported from pullboard's guard-revert, MIT — see `third_party/README.md`. Pullboard itself accepted an item that named no test; Bob closes that gap by refusing such items.)*
+10. **Fresh-eyes clean on Tier-1 deliverables (v2.39 — Rule 30):** Tier the phase's output by consequence — **Tier 1** = numbers or data someone acts on (financials, health data, scoring, pipelines, migrations, backfills, any join / collapse / dedup / group step, anything feeding a displayed figure); **Tier 2** = code without numbers; **Tier 3** = thinking work. For Tier 1: after the builder's own Rule-25 forensics, hand the artefacts + spec to a **fresh-context auditor** (a new subagent or session that did NOT build the phase) to run the scoped lens panel plus a plain re-read against the ask. Triage every finding **Material** (changes a displayed number, a decision, or data completeness) / **Minor** / **Cosmetic**. Material findings open = stop condition; fix and re-audit until zero. Log the audit in `docs/audit-ledger.json` — `{audit, ran, tier, class_of_work, material_found, material_remaining, minor, cosmetic, auditor_context}`, class from the ledger's fixed vocabulary — and run `node "$(realpath ~/.claude/skills/bob/..)/scripts/audit-ledger-check.mjs" docs/audit-ledger.json --since <the date the phase started>` (D-018; `--since` fails the gate when no entry for this phase exists). Three rules keep "clean" honest (Rule 30(f)): **a zero-finding audit is re-run once from a different angle** before it is accepted; **editing content an audit or receipt covered voids that proof** until it is re-run; **done means the observed end effect** (the message arrived, the served value changed, the first scheduled run produced its output) — never "merged" or "deployed". Tier 2/3 phases record their tier and skip. Never wait for the human to ask for this audit — it is the phase's exit, not a favor.
+11. **Failing-test receipt per fix item (2026-10, D-016):** Every fix or bug item in the phase must **name the test command that proves it**; an item with only a note ("fixed, checked by hand") cannot pass. A session **different from the builder's** — the milestone `reviewer` subagent or a new session — runs `node "$(realpath ~/.claude/skills/bob/..)/scripts/prove-test-fails.mjs" --commit <sha> --test "<cmd>" --fix <file>:<from>-<to> --builder-session <the builder's session id>` (the last option makes the script refuse to run as the builder; without it, the receipt only records which session ran it). In a scratch copy at that exact commit it removes the named fix lines and requires the test to **FAIL**, then restores them and requires it to **PASS**, and prints a short receipt tied to the commit hash. Paste the receipt into the phase report. A test that stays green with the fix removed is not testing the fix → stop condition. *(Method ported from pullboard's guard-revert, MIT — see `third_party/README.md`. Pullboard itself accepted an item that named no test; Bob closes that gap by refusing such items.)*
 12. **Done-criteria unchanged since the phase began (2026-10, D-016):** When a phase starts, its done-criteria get a fingerprint (`node "$(realpath ~/.claude/skills/bob/..)/scripts/check-bar.mjs" --stamp <phase-report.md>`, recorded in the report's Acceptance Bar block). At the gate, `node "$(realpath ~/.claude/skills/bob/..)/scripts/check-bar.mjs" <phase-report.md>` recomputes it. If the criteria changed, the gate refuses unless the report carries a dated `bar changed because …` line, after which the new fingerprint is recorded. Quietly moving the finish line mid-phase is the failure this catches.
 13. **Phase report complete (2026-10-29, D-033 — Rule 4):** `node "$(realpath ~/.claude/skills/bob/..)/scripts/phase-report-check.mjs" <phase-report.md>` refuses a report whose always-required ([A]) sections are missing, empty or still the template's placeholder text — so reconciliation can no longer be skipped silently. If nothing diverged, "Spec Deviations" says "None" or "No divergences found" (either passes). A short report under time pressure (Minimum Viable Process) is checked with `--abbreviated`.
-14. **Nothing still names a file this change moved, deleted or gutted (2026-10-29, D-033 — Rule 26):** `node "$(realpath ~/.claude/skills/bob/..)/scripts/run-commands-check.mjs" --base <commit the phase started from>` asks git what the phase deleted, renamed or stripped of its `if __name__ == "__main__":` block, and refuses when a run config still names that file — package scripts, CI workflows (not their `paths:` filters), a Makefile, Procfile, Dockerfile, compose file, schedule or pyproject entry point; by path, by `python -m` module, or by bare file name when no other file has that name. Run it after any move, rename or wrap. It matches names as text: it cannot see a command that was broken before the phase, a name built from a variable, an absolute path (as in a crontab), or a file named outside those configs. On main or in a CI clone, pass `--base`; without one it reports that it cannot judge.
+14. **Nothing still names a file this change moved, deleted or gutted (2026-10-29, D-033 — Rule 26):** `node "$(realpath ~/.claude/skills/bob/..)/scripts/run-commands-check.mjs" --base <commit the phase started from>` asks git what the phase deleted, renamed or stripped of its `if __name__ == "__main__":` block, and refuses when a run config still names that file — package scripts, CI workflows (not their `paths:` filters), a Makefile, Procfile, Dockerfile, compose file, schedule or pyproject entry point; by path, by `python -m` module, or by bare file name when no other file has that name. With no run config in the project it exits 2 ("cannot judge"); record "no run configs" for this item. Run it after any move, rename or wrap. It matches names as text: it cannot see a command that was broken before the phase, a name built from a variable, an absolute path (as in a crontab), or a file named outside those configs. On main or in a CI clone, pass `--base`; without one it reports that it cannot judge.
 15. **No recurring defect closed too low (2026-10-29, D-033 — Rule 31):** when the phase fixed a defect, `node "$(realpath ~/.claude/skills/bob/..)/scripts/recurrence-check.mjs"` refuses a class of defect fixed twice whose newest fix is below rung 3 (a fresh-context read where it can come back, or making it impossible). It reads `Class:` and `Rung:` lines in fix commit messages; with none yet it reports it cannot judge — record that and skip.
 
 If ANY check fails → fix before proceeding. Do NOT advance to next phase with known regressions or invariant violations.
@@ -574,7 +558,7 @@ The rest of this protocol tells Claude *what to produce*. This section tells Cla
 
 #### 11.5 — Session Open Checklist (every NEW session)
 
-Before doing anything else (v2.9 streamlined):
+The full session-start steps are Appendix C (short form: `build-protocol-core.md` §"SESSION START PROTOCOL"). The narration part, before doing anything else (v2.9 streamlined):
 
 1. **Silently** check whether `docs/build-manifest.md` exists. **Yes** → returning user, condensed narration per §11.6. **No** → first-time user; show Journey Map (§11.4) AFTER mode selection, not before.
 2. **Do NOT announce narrator status.** Narrator Mode is silently ON. The user already knows — it's the default. Announcing it on every session is friction, not service. User can opt out with "terse mode" at any time.
@@ -1825,7 +1809,7 @@ Before starting Step 1 (Product Spec):
 
 **Step 0 — First-time vs. resuming check (v2.3, revised v2.9):**
 
-1. Read CLAUDE.md silently.
+1. Read CLAUDE.md silently, and `rules.md` group 1 ("Every session, every step").
 2. Check: does `docs/build-manifest.md` exist? **Silent filesystem check — never asked as a question.**
    - **NO → this is a first-time user / fresh project.** Switch to first-time-user path below.
    - **YES → this is a returning user.** Switch to resuming path below.

@@ -189,6 +189,11 @@ BLOCK|git config --global --unset core.hooksPath
 BLOCK|git config set core.hooksPath /tmp/x
 BLOCK|bash -c 'git -C repo config core.HooksPath ""'
 BLOCK|git config --local include.path ../other.cfg
+BLOCK|HUSKY=0 git commit -m x
+BLOCK|LEFTHOOK=0 git push
+BLOCK|SKIP=gitleaks git commit -m x
+BLOCK|export HUSKY=0; git commit -m x
+ALLOW|HUSKY=0 npm install
 ALLOW|git commit -m "docs: explain why we never use --no-verify"
 ALLOW|git log --grep=no-verify
 ALLOW|echo "--no-verify is banned"
@@ -381,6 +386,10 @@ PYM
 }
 lmut 'l["entries"]=[e("2026-10-0%d"%d,"ui",1,0) for d in range(1,6)] + [e("2026-10-01","outputs",1,1), e("2026-10-02","outputs",1,0), e("2026-10-03","outputs",2,3), e("2026-10-04","outputs",1,0,rounds=0)]' good
 expect "five clean Tier-1 ui audits -> propose Tier 2" 0 "ui +5  → propose Tier 2" -- node "$AL" "$L/good.json" --streaks
+expect "--since: an entry on or after the date -> OK" 0 "on or after 2026-10-05" -- node "$AL" "$L/good.json" --since 2026-10-05
+expect "--since: no entry since the phase began -> FAIL (Rule 29)" 1 "no audit logged on or after 2026-11-01" -- node "$AL" "$L/good.json" --since 2026-11-01
+expect "--since: the empty template -> FAIL, not OK" 1 "no audit logged" -- node "$AL" "$HERE/../templates/audit-ledger.json" --since 2026-10-01
+expect "--since without a date -> cannot judge (2)" 2 "needs a date" -- node "$AL" "$L/good.json" --since
 expect "Tier 2 and rounds=0 skipped; a Material stops the streak" 0 "outputs +1   stopped by: outputs@2026-10-01 .*1 Material" -- node "$AL" "$L/good.json" --streaks
 lmut 'l["entries"]=[e("2026-10-01","ingestion",1,0)]' badclass
 expect "a class outside the vocabulary -> FAIL" 1 'class_of_work "ingestion" is not in the vocabulary' -- node "$AL" "$L/badclass.json"
@@ -847,6 +856,8 @@ expect "run-commands: a deleted executable with no extension a script still runs
 git -C "$RD" checkout -q "$RB" -- bin/serve
 git -C "$RD" rm -q --cached server.js; printf 'server.js\n' >> "$RD/.gitignore"
 expect "run-commands: a build output taken out of git but still on disk is not 'deleted' -> OK" 0 "run-commands-check: OK" -- node "$RC" "$RD" --base "$RB"
+T0="$TMP/rc-noconfig"; newrepo "$T0"; printf '# notes\n' > "$T0/README.md"; git -C "$T0" add -A; git -C "$T0" commit -q -m base; T0B="$(git -C "$T0" rev-parse HEAD)"; git -C "$T0" checkout -q -b change; printf 'more\n' >> "$T0/README.md"; git -C "$T0" commit -qam more
+expect "run-commands: no run config at all -> cannot judge (exit 2), not OK (Rule 29)" 2 "cannot judge — no run config" -- node "$RC" "$T0" --base "$T0B"
 T2="$TMP/rc-ts"; newrepo "$T2"; mkdir -p "$T2/src" "$T2/app" "$T2/tests"; printf 'dist/\n' > "$T2/.gitignore"
 printf 'console.log(1)\n' > "$T2/src/index.js"
 printf 'app = 1\nif __name__ == "__main__":\n    run(app)\n' > "$T2/app/main.py"; : > "$T2/app/__init__.py"

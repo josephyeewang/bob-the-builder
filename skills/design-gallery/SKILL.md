@@ -122,7 +122,7 @@ counterfeit spec that mis-briefs every future session).
 - `references/scroll-story-lane.md` — lane 4: when to use scroll-craft, how it sequences with
   the lock, the overrides for the user's setup (assets via design-mockups, hero preference optional)
 - `references/inspo-round-zero.md` — Round 0: real reference sites from Inspo (default for every
-  website gallery), skip rules, and the trial; results logged in `references/inspo-trial-log.md`
+  website gallery), skip rules, and the trial; results logged in the project's `docs/design/inspo-trial-log.md` (header: `references/inspo-trial-log.md`)
 - `references/agent-ui-primitives.md` — the 24-piece checklist for agent/chat surfaces (from
   beautiful-ui); mock every state, re-tokenize before shipping
 - `logo-kit/LOGO-LANE.md` — lane 3 procedure: phases, concept checkpoint, craft pass, red flags;

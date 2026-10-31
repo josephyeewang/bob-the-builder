@@ -19,8 +19,13 @@
 // STREAKS (--streaks): per class, newest first; skip Tier 2/3 and rounds = 0; a clean Tier-1 entry extends; anything
 // else (Material found, tier or count unrecorded) stops. Five → "propose Tier 2".
 //
-// Usage:  node audit-ledger-check.mjs [docs/audit-ledger.json] [--streaks]
-// Exit:   0 = format OK · 1 = format problems (each printed) · 2 = file missing or not JSON.
+// SINCE (--since YYYY-MM-DD): also require at least one entry that ran on or after that date — the phase gate's
+// question "was THIS phase's audit logged?". Without it a well-formed ledger with no new entry (or none at all, as
+// in the shipped template) passes the format check, which says nothing about whether an audit ran (Rule 29).
+//
+// Usage:  node audit-ledger-check.mjs [docs/audit-ledger.json] [--streaks] [--since YYYY-MM-DD]
+// Exit:   0 = format OK (and, with --since, an entry since that date) · 1 = format problems, or no entry since the
+//         date · 2 = file missing or not JSON, or a --since value that is not a date.
 
 import { readFileSync } from "node:fs";
 
@@ -107,7 +112,13 @@ function computeStreaks(ledger) {
 
 function main() {
   const args = process.argv.slice(2);
-  const path = args.find((a) => !a.startsWith("--")) ?? "docs/audit-ledger.json";
+  const sinceAt = args.indexOf("--since");
+  const since = sinceAt >= 0 ? args[sinceAt + 1] : null;
+  if (sinceAt >= 0 && !/^\d{4}-\d{2}-\d{2}$/.test(since ?? "")) {
+    console.error("audit-ledger-check: --since needs a date, YYYY-MM-DD (the day the phase started).");
+    process.exit(2);
+  }
+  const path = args.find((a, i) => !a.startsWith("--") && !(sinceAt >= 0 && i === sinceAt + 1)) ?? "docs/audit-ledger.json";
   let ledger;
   try { ledger = JSON.parse(readFileSync(path, "utf8")); }
   catch (e) {
@@ -136,6 +147,17 @@ function main() {
     }
   }
   if (bad.length) { console.log(`audit-ledger-check: FAIL (${bad.length})`); process.exit(1); }
+  if (since) {
+    const recent = ledger.entries.filter((e) => typeof e?.ran === "string" && e.ran >= since);
+    if (!recent.length) {
+      console.log(`  ✗ no audit logged on or after ${since} — this phase's audit has not been recorded (or did not run)`);
+      console.log("audit-ledger-check: FAIL (1)");
+      process.exit(1);
+    }
+    console.log(`  ${recent.length} entr${recent.length === 1 ? "y" : "ies"} on or after ${since}`);
+  } else if (!ledger.entries.length) {
+    console.log("  (0 entries: the format is fine, but this does not show that any audit ran; a phase gate passes --since <phase start date>)");
+  }
   console.log("audit-ledger-check: OK");
 }
 

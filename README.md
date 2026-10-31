@@ -64,7 +64,7 @@ Bob asks one question — which mode (NEW / AUDIT / EVOLVE / UPGRADE) — and wa
 
 ## What it does EXACTLY
 
-Five things. Three are the modes you invoke; two are what Bob does *during* the modes.
+Six things. Four are the modes you invoke; two are what Bob does *during* the modes.
 
 ### 1. NEW — Build from scratch
 
@@ -165,7 +165,7 @@ Your rules for working with Claude usually end up in three places. Bob keeps eac
 | ❌ **Doesn't right-size effort** — treats a typo and a multi-file refactor with the same level of care | ✅ EVOLVE classifies every change Small / Medium / Large. Small = quick edit + smoke test. Large = full discipline. |
 | ❌ **Reads code and reasons about it** instead of running it — "this looks correct" ≠ "this works" | ✅ Bob's audits *execute* — drives the app through real user flows, hits the APIs, simulates signup-to-cancel. Running it catches what reading it doesn't. |
 | ❌ **Patches the symptom** you reported and leaves the same bug pattern in three other files | ✅ Class-level fixes: a bug in one place triggers a repo-wide grep for the same pattern. Fix once, fix all. |
-| ❌ **Calls it shipped** when the local build passes — even if prod is white-screening | ✅ Post-deploy verification: after every fix Bob hits the live URL and confirms the page actually renders before declaring done. |
+| ❌ **Calls it shipped** when the local build passes — even if prod is white-screening | ✅ Post-deploy verification: after a risky fix Bob hits the live URL and confirms the page actually renders before declaring done. |
 
 ---
 
@@ -189,4 +189,4 @@ Now, finally, the answer is: "Yes he can!" 🔨
 
 [MIT](LICENSE) — use it, fork it, adapt it, share it.
 
-A few pieces are adapted from other open-source projects (Google's elephant-goldfish-model, Apache-2.0; and, all MIT: pullboard, ECC — whose two guard hooks `bob-init` installs in every new project — Cloudflare's security-audit skill, GitHub Spec Kit, ai-employees and ai-security-checklist-prompt). Their licences and what was taken are listed in [`third_party/README.md`](third_party/README.md); those files keep their original licence.
+Some pieces are adapted from other open-source projects (among them ECC, whose two guard hooks `bob-init` installs in every new project). The full list, with each licence and what was taken, is [`third_party/README.md`](third_party/README.md); those files keep their original licence.
