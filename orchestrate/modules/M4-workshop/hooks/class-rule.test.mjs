@@ -8,7 +8,7 @@ import { join, dirname, basename } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { makeSnapshot } from './snapshot.mjs';
-import { expansionIn, expandBraces, unreadable, shellCommands, shellWords, globRe } from './lib.mjs';
+import { expansionIn, expandBraces, unreadable, shellCommands, shellWords, globRe, heredocs } from './lib.mjs';
 import * as merge from './merge-guard.mjs';
 import * as noVerify from './no-verify-block.mjs';
 import * as prodGuard from './production-write-guard.mjs';
@@ -589,4 +589,63 @@ test('L46 round 4 check: lines with Windows line ends are read as the shell read
   // A return anywhere else is still refused.
   for (const c of ['echo a\rrm -rf x', 'echo a\r', 'echo a\r\r\n']) no(c);
   passed(noVerify.decide(bash("git commit -F - <<'EOF'\r\nmsg\r\nEOF\r\n", W)), 'no-verify: CRLF message');
+});
+
+// Lane 2 follow-up (comment-quote): a quote, backtick or backslash in a comment made the guard read the next lines as
+// part of the comment's word, while bash and zsh end the comment at the line break and run them.
+test('comment-quote: a comment holding a quote, a backtick or a backslash is refused, with or without a here-document', () => {
+  const w = world();
+  const W = w.work;
+  mkdirSync(join(W, 'config'));
+  const second = join(W, 'config', ENV_PROD);
+  writeFileSync(second, 'Y=1\n');
+  writeFileSync(w.snapshot, makeSnapshot({ production: { env_files: [w.envFile, second], programs: ['fakehost', 'fakedb'], hosts: ['db.prod.example.net'] }, secrets: { paths: [join(w.home, '.config', 'gh', 'hosts.yml')] } }));
+  const pf = [w.envFile, second].map(fold);
+  const why = (c) => prodGuard.folderWriteWhy(c, { cwd: W, protectedFiles: pf, home: w.home, user: 'u', tmpdir: w.root, cdpath: '' });
+  const allHooks = (c, what) => {
+    blocked(prodGuard.decide(bash(c, W), w.args), `production: ${what}`);
+    blocked(secret.decide(bash(c, W), w.args), `secret: ${what}`);
+    blocked(merge.decide(bash(c, W)), `merge: ${what}`);
+    blocked(noVerify.decide(bash(c, W)), `no-verify: ${what}`);
+  };
+  // The repro, as the shells read it: both run the line after the comment.
+  for (const sh of ['/bin/bash', '/bin/zsh']) {
+    for (const mark of ["it's", 'a"b', 'a`b', 'foo \\']) {
+      const r = spawnSync(sh, ['-c', `echo A # ${mark}\necho HIDDEN`], { encoding: 'utf8', timeout: 10_000, stdio: ['ignore', 'pipe', 'pipe'] });
+      assert.match(r.stdout, /HIDDEN/, `${sh} runs the line after a comment holding ${mark}`);
+    }
+  }
+  const marks = ["'", '"', '`', '\\'];
+  const before = { 'start of line': (m) => `# it${m}s`, 'after ;': (m) => `ls; # it${m}s`, 'after &&': (m) => `ls && # it${m}s`, 'after a word': (m) => `ls # it${m}s`, 'after |': (m) => `ls | # it${m}s`, 'after a tab': (m) => `ls\t# it${m}s`, 'at the end': (m) => `ls # it${m}` };
+  const hidden = ['rm -rf config', 'rm -rf *', 'git clean -fdx', 'npm test'];
+  let n = 0;
+  for (const m of marks) {
+    for (const [where, line] of Object.entries(before)) {
+      assert.ok(heredocs(line(m)).why, `the comment check: ${where}, ${m}`);
+      for (const next of hidden) {
+        const c = `${line(m)}\n${next}`;
+        const what = `${where}, ${JSON.stringify(m)}, then ${next}`;
+        assert.ok(why(c), `folder rule: ${what}`);
+        allHooks(c, what);
+        n += 1;
+      }
+    }
+  }
+  assert.equal(n, 112);
+  // Also next to a here-document, as before, and inside a substitution in double quotes (refused as a substitution).
+  allHooks("echo a # it's\ncat <<X\nb\nX\nrm -rf config", 'with a here-document');
+  allHooks("echo \"$(echo a # it's\nrm -rf config\n)\"", 'in a substitution in double quotes');
+  // Controls: a # inside quotes or inside a word is not a comment; a comment with no such mark passes and ends at the
+  // line break, so the next line is still judged; a body line is text, not a comment.
+  const pass1 = (c) => { assert.equal(why(c), null, `folder rule: ${JSON.stringify(c)}`); passed(prodGuard.decide(bash(c, W), w.args), JSON.stringify(c)); passed(secret.decide(bash(c, W), w.args), `secret: ${JSON.stringify(c)}`); };
+  for (const c of ["echo '#x'", 'echo "a # b"', 'x=a#b', "echo '#x' \"it's\"", "echo \"a # it's\"", 'x=a#b"c"', "x=a#b && echo \"it's\"", "echo a#it\\'s", "echo \\#it\\'s", 'ls # fine\nnpm test', "git commit -F - <<'EOF'\n# it's done\nEOF"]) {
+    assert.equal(heredocs(c).why, null, `the comment check: ${JSON.stringify(c)}`);
+    pass1(c);
+  }
+  for (const c of ["echo '#x'\nrm -rf config", 'echo "a # b"\nrm -rf config', 'x=a#b\nrm -rf config', 'ls # fine\nrm -rf config']) {
+    assert.match(why(c) ?? 'none', /"config" is a folder holding a protected file/, `the next line is judged: ${JSON.stringify(c)}`);
+    blocked(prodGuard.decide(bash(c, W), w.args), JSON.stringify(c));
+  }
+  // The refusal says what to do.
+  assert.match(unreadable("ls # it's\nnpm test"), /comment holding a quote, a backtick or a backslash \(take the comment out\)/);
 });

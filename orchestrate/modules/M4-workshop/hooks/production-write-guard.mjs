@@ -10,7 +10,7 @@
 import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { readdirSync } from 'node:fs';
 import { homedir, userInfo } from 'node:os';
-import { isMain, runHook, block, pass, toolPaths, shellCommands, bothWords, programOf, landingPath, realFolder, inside, joinLines, unreadable, expandBraces, fold, globRe } from './lib.mjs';
+import { isMain, runHook, block, pass, toolPaths, shellCommands, bothWords, programOf, landingPath, realFolder, inside, joinLines, unreadable, heredocs, expandBraces, fold, globRe } from './lib.mjs';
 import { readSnapshot } from './snapshot.mjs';
 
 // ---- whole-folder writes (LEAD-CALLS L41 G2: deny by default) ----
@@ -182,6 +182,10 @@ const linkTarget = (p) => { const r = realFolder(p); return r && r !== p ? r : n
  * guard can't follow makes every relative target unknown, which is refused.
  */
 export function folderWriteWhy(cmd, { cwd, protectedFiles, home = homedir(), user = process.env.USER || userInfo().username, tmpdir = process.env.TMPDIR, projectDir = null, cdpath = process.env.CDPATH }) {
+  // Where the guard and the shell could split the line differently (a comment holding a quote, …), the command list
+  // below is not the shell's: refused here too, not only by `unreadable` (lane 2 follow-up: comment-quote).
+  const split = heredocs(cmd).why;
+  if (split) return `${split}; write the command out plainly`;
   // A Set: each `cd` would otherwise double the list (audit of L41, round 2, minor).
   const cwds = new Set([cwd]);
   let lost = false;

@@ -134,9 +134,9 @@ export const joinLines = (cmd) => String(cmd ?? '').replace(/\\\n/g, '');
  * The line with each here-document's body taken out, and the bodies (LEAD-CALLS L46; round 3 MAT-12). A body is text
  * fed to a program, not commands, so the shape checks and the command list skip it; the word checks still read it.
  * Where the guard and the shell could disagree on where a body ends, the line is refused (`why`): an end word that
- * is not a plain name (`1 << 2` is a shift, not a here-document), `<<` next to `((`, a body line ending in a
- * backslash, or a comment holding a quote. Read from the raw line: a backslash and line break inside a quoted body
- * stay as written.
+ * is not a plain name (`1 << 2` is a shift, not a here-document), `<<` next to `((`, or a body line ending in a
+ * backslash. A comment holding a quote, a backtick or a backslash is refused with or without a here-document. Read
+ * from the raw line: a backslash and line break inside a quoted body stay as written.
  */
 export function heredocs(cmd) {
   const s = String(cmd ?? '');
@@ -166,10 +166,13 @@ export function heredocs(cmd) {
     if (ch === '\\' && s[i + 1] === '\n') { out += '\\\n'; i += 2; continue; }
     if (ch === '\\' && i + 1 < s.length) { out += ch + s[i + 1]; i += 2; wordStart = false; continue; }
     if (ch === "'" || ch === '"') { q = ch; out += ch; i += 1; wordStart = false; continue; }
+    // A comment ends at the line break. The word splitter does not know comments, so a quote or backtick in one
+    // would open a word running into the next lines, and a backslash at its end would join them: the line is refused
+    // whether or not a here-document is present (lane 2 follow-up: comment-quote; `ls # it's` then `rm -rf x`).
     if (ch === '#' && wordStart) {
       const end = s.indexOf('\n', i);
       const stop = end < 0 ? s.length : end;
-      if (/['"]/.test(s.slice(i, stop))) quotedComment = true;
+      if (/['"`\\]/.test(s.slice(i, stop))) quotedComment = true;
       out += s.slice(i, stop);
       i = stop;
       continue;
@@ -223,8 +226,8 @@ export function heredocs(cmd) {
     i += 1;
     wordStart = /[\s;&|()<>]/.test(ch);
   }
+  if (quotedComment) return refuse('a comment holding a quote, a backtick or a backslash (take the comment out)');
   if (bodies.length || pending.length) {
-    if (quotedComment) return refuse('a comment holding a quote next to a here-document');
     if (/\(\(/.test(bareText(out))) return refuse('a << next to (( ))');
   }
   return { text: out, bodies, why: null };
