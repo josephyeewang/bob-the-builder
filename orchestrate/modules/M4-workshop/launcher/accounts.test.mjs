@@ -8,21 +8,27 @@ import { dirname, join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { tempDir } from '../../../shared/test-tmp.mjs';
-import { ACCOUNTS, ACCOUNT_FILE, OWN, SHARED, accountEnv, accountInUse, setupSecondFolder, useAccount } from './accounts.mjs';
+import { ACCOUNTS, ACCOUNT_FILE, OWN, accountEnv, accountInUse, isSetUp, readAuthStatus, setupSecondFolder, useAccount } from './accounts.mjs';
 import { checkRoleEnv, roleEnv } from './env-check.mjs';
 
 const SCRIPT = join(dirname(fileURLToPath(import.meta.url)), 'accounts.mjs');
 const lstat = (p) => { try { return lstatSync(p); } catch { return null; } };
 
+// The links the second folder must have, in the order they are made: named here, not taken from the code (L61 (2)).
+const LINKS = ['hooks', 'settings.json', 'settings.local.json', 'skills', 'agents', 'commands', 'plugins', 'keybindings.json',
+  'CLAUDE.md', 'projects'];
+const sorted = (a) => [...a].sort();
+
 // A home folder as a Mac user's looks: the first folder with everything the second one shares, plus a sign-in file
 // and the settings file Claude keeps beside the first folder. The sign-in files are made unreadable: nothing here may
-// need to read them.
-function home({ without = [] } = {}) {
+// need to read them. `firstAsLink`: `~/.claude` is a link to a real folder elsewhere in the home (L61 (5)).
+function home({ without = [], firstAsLink = false } = {}) {
   const h = realpathSync(tempDir('m4-acct-'));
   const A = join(h, ACCOUNTS.a);
+  if (firstAsLink) { mkdirSync(join(h, 'real-first')); symlinkSync(join(h, 'real-first'), A); }
   mkdirSync(join(A, 'hooks'), { recursive: true });
-  for (const d of ['skills', 'agents', 'plugins', 'projects']) if (!without.includes(d)) mkdirSync(join(A, d));
-  if (!without.includes('CLAUDE.md')) writeFileSync(join(A, 'CLAUDE.md'), '# instructions\n');
+  for (const d of ['skills', 'agents', 'commands', 'plugins', 'projects']) if (!without.includes(d)) mkdirSync(join(A, d));
+  for (const f of ['CLAUDE.md', 'keybindings.json', 'settings.local.json']) if (!without.includes(f)) writeFileSync(join(A, f), '{}\n');
   writeFileSync(join(A, 'hooks', 'mark.sh'), '#!/bin/sh\n: > "$MARKS/$1.$ACCT"\n', { mode: 0o755 });
   writeFileSync(join(A, 'settings.json'), JSON.stringify({
     hooks: {
@@ -43,10 +49,10 @@ test('accounts setup: the second folder links what it shares to the first folder
   const { h, A, B } = home();
   const r = setupSecondFolder({ home: h });
   assert.equal(r.ok, true, r.reason);
-  assert.deepEqual(r.made.sort(), [...SHARED].sort());
+  assert.deepEqual(r.made, LINKS, 'every link, in the fixed order');
   assert.equal(lstatSync(B).mode & 0o777, 0o700, 'the second folder is the user\'s alone');
   // Exactly the shared names, each a link to the first folder's own: nothing else, so no sign-in file is linked.
-  assert.deepEqual(entries(B), [...SHARED].sort().map((n) => [n, join(A, n)]));
+  assert.deepEqual(entries(B), sorted(LINKS).map((n) => [n, join(A, n)]));
   for (const own of OWN) assert.equal(lstat(join(B, own)), null, `${own} is not in the second folder`);
   for (const [n] of entries(B)) assert.ok(!OWN.some((o) => realpathSync(join(B, n)).endsWith(o)), `${n} leads to no sign-in file`);
   // A shared name missing from the first folder is left out, and named.
@@ -63,12 +69,64 @@ test('accounts setup: running it twice changes nothing', () => {
   const r = setupSecondFolder({ home: h });
   assert.equal(r.ok, true, r.reason);
   assert.deepEqual(r.made, []);
-  assert.deepEqual(r.kept.sort(), [...SHARED].sort());
+  assert.deepEqual(r.kept, LINKS);
   assert.deepEqual(entries(B), before);
 });
 
+test('accounts setup: a folder that can\'t be written is refused plainly, and a second run finishes a partial setup', () => {
+  // The home can't be written: the second folder can't be made.
+  const k = home();
+  chmodSync(k.h, 0o555);
+  let r;
+  try { r = setupSecondFolder({ home: k.h }); } finally { chmodSync(k.h, 0o755); }
+  assert.equal(r.ok, false);
+  assert.match(r.reason, /^could not write in ~\/\.claude-b \(EACCES\): 0 of 10 new links made; make the folder writable, then run setup again to finish$/);
+  assert.equal(lstat(k.B), null);
+  // The second folder is there and read-only: nothing is made, and the message says so.
+  const { h, A, B } = home();
+  mkdirSync(B, { mode: 0o500 });
+  try { r = setupSecondFolder({ home: h }); } finally { chmodSync(B, 0o700); }
+  assert.match(r.reason, /^could not write in ~\/\.claude-b \(EACCES\): 0 of 10 new links made;/);
+  assert.deepEqual(readdirSync(B), []);
+  // A setup cut short after three links: the next run keeps those and makes the rest, in order.
+  for (const n of LINKS.slice(0, 3)) symlinkSync(join(A, n), join(B, n));
+  r = setupSecondFolder({ home: h });
+  assert.equal(r.ok, true, r.reason);
+  assert.deepEqual(r.kept, LINKS.slice(0, 3));
+  assert.deepEqual(r.made, LINKS.slice(3));
+  assert.deepEqual(entries(B), sorted(LINKS).map((n) => [n, join(A, n)]));
+});
+
+test('accounts setup: ~/.claude may be a link to a folder the same user owns', () => {
+  const { h, A, B } = home({ firstAsLink: true });
+  const r = setupSecondFolder({ home: h });
+  assert.equal(r.ok, true, r.reason);
+  assert.deepEqual(r.made, LINKS);
+  // The links go through ~/.claude, so they follow it if it is pointed elsewhere.
+  assert.deepEqual(entries(B), sorted(LINKS).map((n) => [n, join(A, n)]));
+  assert.equal(realpathSync(join(B, 'hooks')), join(h, 'real-first', 'hooks'));
+  assert.equal(isSetUp(h, 'a'), true);
+  assert.equal(accountInUse({ home: h }).account, 'a');
+  assert.equal(setupSecondFolder({ home: h }).made.length, 0, 'twice changes nothing');
+  // A link that leads nowhere, to a file, or to the second folder is refused, and nothing is made.
+  for (const [what, make, want] of [
+    ['nowhere', (x) => symlinkSync(join(x.h, 'gone'), x.A), /nothing changed: ~\/\.claude is a link that leads nowhere/],
+    ['a file', (x) => { writeFileSync(join(x.h, 'f'), 'x'); symlinkSync(join(x.h, 'f'), x.A); }, /nothing changed: ~\/\.claude is a link to something that is not a folder/],
+    ['the second folder', (x) => { mkdirSync(x.B, { mode: 0o700 }); symlinkSync(x.B, x.A); }, /nothing changed: ~\/\.claude leads to ~\/\.claude-b/],
+  ]) {
+    const x = { h: realpathSync(tempDir('m4-acct-')) };
+    x.A = join(x.h, ACCOUNTS.a);
+    x.B = join(x.h, ACCOUNTS.b);
+    make(x);
+    const before = readdirSync(x.h).sort();
+    assert.match(setupSecondFolder({ home: x.h }).reason, want, what);
+    assert.deepEqual(readdirSync(x.h).sort(), before, `${what}: nothing made`);
+    if (lstat(x.B)) assert.deepEqual(readdirSync(x.B), []);
+  }
+});
+
 test('accounts setup: a target that is there and is not the expected link is refused, and nothing changes', () => {
-  for (const n of SHARED) {
+  for (const n of LINKS) {
     for (const plant of ['file', 'folder', 'other link']) {
       const { h, B } = home();
       mkdirSync(B, { mode: 0o700 });
@@ -209,4 +267,19 @@ test('accounts: the launcher\'s role environment carries the folder for account 
   assert.deepEqual(checkRoleEnv(a), { ok: true });
   assert.deepEqual(checkRoleEnv(b), { ok: true }, 'the folder variable is not a key');
   for (const v of Object.values(b)) assert.equal(typeof v, 'string');
+});
+
+test('accounts status: the answer is read for its four known fields only, so nothing else can come through', () => {
+  const token = ['sk', 'ant', 'oat01', 'Z'.repeat(40)].join('-');
+  const keys = ['readable', 'signedIn', 'method', 'plan', 'folderMatches'];
+  const r = readAuthStatus(JSON.stringify({ loggedIn: true, authMethod: 'claude.ai', subscriptionType: 'pro', configDirectory: '/d', plan: token, accessToken: token, nested: { loggedIn: true } }), '/d');
+  assert.deepEqual(r, { readable: true, signedIn: true, method: 'claude.ai', plan: 'pro', folderMatches: true });
+  assert.deepEqual(Object.keys(r), keys);
+  assert.ok(!JSON.stringify(r).includes(token));
+  // Signed in only when the answer itself says so: not from a nested or inherited field, not from a list.
+  assert.equal(readAuthStatus('{"nested":{"loggedIn":true}}', '/d').signedIn, false);
+  assert.equal(readAuthStatus('{"__proto__":{"loggedIn":true}}', '/d').signedIn, false);
+  assert.deepEqual(readAuthStatus('[{"loggedIn":true}]', '/d'), { readable: false });
+  assert.deepEqual(readAuthStatus('"signed in"', '/d'), { readable: false });
+  assert.equal(readAuthStatus('{"loggedIn":"true"}', '/d').signedIn, false, 'the word, not the value true, is not signed in');
 });

@@ -7,9 +7,10 @@
 // variable unset, exactly as today; account `b` is a second folder (`~/.claude-b`). A long-lived token
 // (`CLAUDE_CODE_OAUTH_TOKEN`) is not used: it can't start Remote Control, so the Front Door would break.
 //
-// The second folder shares everything but the sign-in: hooks, settings, skills, agents, plugins, the global
-// instructions and the projects folder (memory, transcripts) are links to the first folder's, so both accounts run
-// under the same safety hooks. The sign-in and `.claude.json` are never linked or copied.
+// The second folder shares everything but the sign-in: hooks, settings (and the local allow rules), skills, agents,
+// slash commands, plugins, key bindings, the global instructions and the projects folder (memory, transcripts) are
+// links to the first folder's, so both accounts run under the same safety hooks. The sign-in and `.claude.json` are
+// never linked or copied. The first folder may itself be a link to a folder the same user owns.
 //
 // Run as a script by the Mac user whose sessions it is for:
 //   node accounts.mjs setup        make the second folder and its links (twice changes nothing)
@@ -18,7 +19,7 @@
 // Nothing here reads a secret: the folders are only listed and linked, and `status` keeps a few named fields of
 // `claude auth status` and drops the rest.
 
-import { lstatSync, mkdirSync, readFileSync, readlinkSync, realpathSync, renameSync, symlinkSync, writeFileSync } from 'node:fs';
+import { lstatSync, mkdirSync, readFileSync, readlinkSync, realpathSync, renameSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -29,13 +30,17 @@ export const ACCOUNT_NAMES = Object.freeze(Object.keys(ACCOUNTS));
 // The one file naming the account in use, in the home folder: one line, `a` or `b`. Missing means `a`.
 export const ACCOUNT_FILE = '.claude-account';
 export const CONFIG_VAR = 'CLAUDE_CONFIG_DIR';
-// What the second folder shares with the first, by a link to the first folder's own.
-export const SHARED = Object.freeze(['hooks', 'settings.json', 'skills', 'agents', 'plugins', 'CLAUDE.md', 'projects']);
+// What the second folder shares with the first, by a link to the first folder's own, made in this order. The local
+// settings file holds only allow rules, so the safety hooks are the shared `settings.json`'s alone (L61 (3)).
+export const SHARED = Object.freeze(['hooks', 'settings.json', 'settings.local.json', 'skills', 'agents', 'commands', 'plugins',
+  'keybindings.json', 'CLAUDE.md', 'projects']);
 // What each folder keeps its own: the sign-in, and the settings file that goes with it. Never linked or copied.
 export const OWN = Object.freeze(['.claude.json', '.credentials.json']);
 
 const refuse = (reason) => ({ ok: false, reason });
 const lstat = (p) => { try { return lstatSync(p); } catch { return null; } };
+const stat = (p) => { try { return statSync(p); } catch { return null; } };
+const real = (p) => { try { return realpathSync(p); } catch { return null; } };
 const readLink = (p) => { try { return readlinkSync(p); } catch { return null; } };
 
 export const accountDir = (home, name) => join(home, ACCOUNTS[name]);
@@ -45,8 +50,23 @@ export const accountDir = (home, name) => join(home, ACCOUNTS[name]);
  * short list from the parent, so a folder variable set in the parent never reaches account a's session.
  */
 export const accountEnv = (home, name) => (name === 'a' ? {} : { [CONFIG_VAR]: accountDir(home, name) });
-/** Is the account's folder there as a real folder (not a link)? */
-export const isSetUp = (home, name) => !!lstat(accountDir(home, name))?.isDirectory();
+/**
+ * Is the account's folder there? The first may be a link to a folder (L61 (5)); the second must be a folder itself, so it
+ * can never be the first folder under another name.
+ */
+export const isSetUp = (home, name) => !!(name === 'a' ? stat : lstat)(accountDir(home, name))?.isDirectory();
+
+/** The first folder as setup accepts it: a folder, or a link to a folder this user owns. Null, or the reason it isn't. */
+function firstFolderProblem(A) {
+  const l = lstat(A);
+  if (!l) return `~/${ACCOUNTS.a} is not here`;
+  if (!l.isSymbolicLink()) return l.isDirectory() ? null : `~/${ACCOUNTS.a} is not a folder`;
+  const s = stat(A);
+  if (!s) return `~/${ACCOUNTS.a} is a link that leads nowhere`;
+  if (!s.isDirectory()) return `~/${ACCOUNTS.a} is a link to something that is not a folder`;
+  if (typeof process.getuid === 'function' && s.uid !== process.getuid()) return `~/${ACCOUNTS.a} is a link to a folder another user owns`;
+  return null;
+}
 
 /** The account new sessions start on: { account, dir, env } or { account: null, reason }. */
 export function accountInUse({ home = homedir() } = {}) {
@@ -84,9 +104,12 @@ export function setupSecondFolder({ home = homedir(), name = 'b' } = {}) {
   if (name === 'a' || !ACCOUNT_NAMES.includes(name)) return refuse('only the second account\'s folder is set up');
   const A = accountDir(home, 'a');
   const B = accountDir(home, name);
-  if (!lstat(A)?.isDirectory()) return refuse(`~/${ACCOUNTS.a} is not a folder here`);
+  const problem = firstFolderProblem(A);
+  if (problem) return refuse(`nothing changed: ${problem}`);
   const b = lstat(B);
   if (b && !b.isDirectory()) return refuse(`~/${ACCOUNTS[name]} is there and is not a folder (a link would share the sign-in)`);
+  const realA = real(A);
+  if (realA === B || (b && real(B) === realA)) return refuse(`nothing changed: ~/${ACCOUNTS.a} leads to ~/${ACCOUNTS[name]}, so the two accounts would be one folder`);
   const bad = [];
   for (const own of OWN) if (lstat(join(B, own))?.isSymbolicLink()) bad.push(`~/${ACCOUNTS[name]}/${own} is a link: the two accounts would share a sign-in`);
   const plan = { made: [], kept: [], skipped: [] };
@@ -100,8 +123,15 @@ export function setupSecondFolder({ home = homedir(), name = 'b' } = {}) {
     else bad.push(`~/${ACCOUNTS[name]}/${n} is there and is not the link to ~/${ACCOUNTS.a}/${n}`);
   }
   if (bad.length) return refuse(`nothing changed: ${bad.join('; ')}`);
-  if (!b) mkdirSync(B, { mode: 0o700 });
-  for (const n of plan.made) symlinkSync(join(A, n), join(B, n));
+  // A folder that can't be written (L61 (4)): a plain refusal saying how far it got. The links go in SHARED's order,
+  // and a second run keeps what is there and makes the rest.
+  const done = [];
+  try {
+    if (!b) mkdirSync(B, { mode: 0o700 });
+    for (const n of plan.made) { symlinkSync(join(A, n), join(B, n)); done.push(n); }
+  } catch (e) {
+    return refuse(`could not write in ~/${ACCOUNTS[name]} (${e.code ?? e.message}): ${done.length} of ${plan.made.length} new links made${done.length ? ` (${done.join(', ')})` : ''}; make the folder writable, then run setup again to finish`);
+  }
   return { ok: true, ...plan };
 }
 
@@ -116,13 +146,16 @@ const shown = (v) => (typeof v === 'string' && WORD.test(v) ? v : null);
 export function readAuthStatus(text, dir) {
   let j;
   try { j = JSON.parse(text); } catch { return { readable: false }; }
-  if (!j || typeof j !== 'object') return { readable: false };
+  if (!j || typeof j !== 'object' || Array.isArray(j)) return { readable: false };
+  // Only the four fields it knows, each read as the answer's own (not inherited); nothing else is looked at.
+  const field = (k) => (Object.hasOwn(j, k) ? j[k] : undefined);
+  const [loggedIn, authMethod, plan, folder] = ['loggedIn', 'authMethod', 'subscriptionType', 'configDirectory'].map(field);
   return {
     readable: true,
-    signedIn: j.loggedIn === true,
-    method: shown(j.authMethod),
-    plan: shown(j.subscriptionType),
-    folderMatches: typeof j.configDirectory === 'string' ? j.configDirectory === dir : null,
+    signedIn: loggedIn === true,
+    method: shown(authMethod),
+    plan: shown(plan),
+    folderMatches: typeof folder === 'string' ? folder === dir : null,
   };
 }
 
