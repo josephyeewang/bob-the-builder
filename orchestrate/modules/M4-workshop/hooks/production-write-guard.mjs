@@ -138,11 +138,20 @@ const PWD_MARK = '@pwd@';
 const varRe = (name) => new RegExp(String.raw`\$(\{${name}\}|${name}(?![A-Za-z0-9_]))`, 'g');
 const spellOut = (cmd, vars) => Object.entries(vars).reduce((c, [name, v]) => (typeof v === 'string' && v ? c.replace(varRe(name), () => v) : c), cmd);
 const unknownWord = (w) => /[$`]/.test(w);
+// bash 3.2 lets a pattern part that starts with `.` match `..` (`.?`, `.*`, `.[.]`, `.[!x]`; zsh never does), so such
+// a part may climb to the folder above. One the pattern maker can't read (`.[[:punct:]]`) counts as one that can.
+const mayBeParent = (part) => {
+  if (!part.startsWith('.') || !/[*?[]/.test(part)) return false;
+  try { return globRe(part).test('..'); } catch { return true; }
+};
 // null for a word the guard can't place: another user's home folder (`~name/…`; audit of L41, MAT-4).
+// A word with a part that may be `..` is judged both as written and with each such part read as `..` (lane 2
+// follow-up: dot-glob), so every command the folder rule judges gets it.
 function expand(w, home, cwds) {
   if (/^~[^/]/.test(w)) return null;
   const h = w.replace(/^~(?=\/|$)/, home);
-  return h.startsWith(PWD_MARK) ? cwds.map((c) => c + h.slice(PWD_MARK.length)) : [h];
+  const up = h.split(sep).map((x) => (mayBeParent(x) ? '..' : x)).join(sep);
+  return (up === h ? [h] : [h, up]).flatMap((x) => (x.startsWith(PWD_MARK) ? cwds.map((c) => c + x.slice(PWD_MARK.length)) : [x]));
 }
 // The fixed front of a path with a wildcard: `proj/a*/b` gives `proj`. A wildcard target is judged by that folder.
 const fixedFront = (p) => { const parts = p.split(sep); const i = parts.findIndex((x) => /[*?[]/.test(x)); return i < 0 ? p : parts.slice(0, i).join(sep) || sep; };
