@@ -4,10 +4,11 @@
 //          use a|b`), read at the start; the result names the folder (`signin`, `configDir`);
 //   list   (sessions, board, outboxSessions, leads): once per account folder, merged, each entry tagged with its folder,
 //          so after a switch the old account's sessions are still seen;
-//   check  (hasSession, hasReviewer): yes if either folder says yes;
+//   check  (hasSession, hasReviewer): yes if either folder says yes; an unclear answer is an error, never a no (L63);
 //   stop   (stopGroup, a Lead's stopSession): through the folder the session runs in, not the one in use;
 //   the Front Door: alive only when it runs on the account in use, so after a switch it is restarted there (the old
-//          one is stopped first), and the phone shows it under the account in use.
+//          one is stopped first), and the phone shows it under the account in use. It is the one session a switch
+//          moves (L62); one left running on the old account is stopped (`strayFrontDoor`).
 // A running worker, reviewer or Lead is never moved: a switch changes only where the next one starts.
 // "signin" here is the sign-in folder (a or b), not the usage account the tick's bands read.
 // No process is started here (only-send-safe.test.mjs); the wiring hands in the real per-folder ports (`accountPorts`).
@@ -79,21 +80,25 @@ export function acrossAccounts({ home, listIn, idOf = (s) => s?.id, what = 'sess
 }
 
 /**
- * A check port over every account folder: `checkIn(ctx, ...args)` -> true | false | null (unknown). True if any folder
- * says true; false only if every folder says false; otherwise null. A folder whose check fails fails the check, naming
- * the folder. These ports answer at once (the wiring runs them through limitedSync), so a late answer is an error.
+ * A check port over every account folder: `checkIn(ctx, ...args)` -> true | false. True if any folder says true; false
+ * only if every folder says false. Any other answer (null, undefined, text) from a folder, when none says true, is an
+ * error naming the folder and the answer, never a false (L63): the steps read false as "gone" (no session: the card goes
+ * back; no reviewer: one starts), so an unclear answer must fail the step and tell Joe, not guess absent. A folder whose
+ * check fails, or answers late, is an error the same way. These ports answer at once (the wiring runs them through
+ * limitedSync).
  */
 export function inAnyAccount({ home, checkIn, what = 'the session' }) {
   return (...args) => {
-    let unknown = false;
+    let unclear = null;
     for (const n of setUp(home)) {
       let r;
       try { r = checkIn(ctxOf(home, n), ...args); } catch (e) { throw new Error(`${where(n)}: ${what} could not be checked (${why(e)})`); }
       if (thenable(r)) throw new Error(`${where(n)}: ${what} could not be checked (the port must answer at once)`);
       if (r === true) return true;
-      if (r !== false) unknown = true;
+      if (r !== false) unclear ??= `${where(n)}: ${what} gave no clear answer (${r === undefined ? 'undefined' : JSON.stringify(r) ?? String(r)}); not read as "not there"`;
     }
-    return unknown ? null : false;
+    if (unclear) throw new Error(unclear);
+    return false;
   };
 }
 
@@ -135,36 +140,60 @@ export function acrossLeads({ home, listIn }) {
 }
 
 /**
- * The Front Door. `aliveIn(ctx)` -> true | false | null; `restartIn(ctx, x)` and `stopIn(ctx)` -> { ok, reason }.
- * `frontDoorAlive()` is true only when it runs on the account in use. When it runs only on the other account it says
- * false, so the phone step restarts it; `restartFrontDoor(x)` first stops the one still running on another account (a
- * Front Door it can't tell about, or can't stop, refuses the restart, so two never run under the one fixed name), then
- * starts it on the account in use.
+ * The Front Door, the one session that moves on a switch (L62): spec (d) needs it under the account in use in the phone
+ * app. `aliveIn(ctx)` -> true | false | null (null = not known); `restartIn(ctx, x)` and `stopIn(ctx)` -> { ok, reason }.
+ * - `frontDoorAlive()` is true only when it runs on the account in use. When it runs only on another account it says
+ *   false, so the phone step restarts it. An alive check that fails or answers late is an error naming the folder,
+ *   never a silent null (L63 m1): the phone step fails and Joe is told.
+ * - `restartFrontDoor(x)` first stops the one still running on another account (one it can't tell about, or can't stop,
+ *   refuses the restart, so two never run under the one fixed name), then starts it on the account in use.
+ * - `strayFrontDoor()` (L63 m2): while it runs on the account in use, a Front Door left running on another account is
+ *   stopped. -> { ok, stopped: [account], reason }; ok false (with the reason) when one can't be told about or stopped.
  */
 export function frontDoorPorts({ home, aliveIn, restartIn, stopIn }) {
-  const ask = (n) => { try { const r = aliveIn(ctxOf(home, n)); return thenable(r) ? null : r; } catch { return null; } };
+  const ask = (n) => {
+    let r;
+    try { r = aliveIn(ctxOf(home, n)); } catch (e) { throw new Error(`${where(n)}: whether the Front Door runs could not be checked (${why(e)})`); }
+    if (thenable(r)) throw new Error(`${where(n)}: whether the Front Door runs could not be checked (the port must answer at once)`);
+    return r;
+  };
   const frontDoorAlive = () => {
     const u = inUse(home);
     if (!u.ctx) return null;
-    const answers = setUp(home).map((n) => [n, ask(n)]);
-    if (answers.some(([n, a]) => n === u.ctx.signin && a === true)) return true;
-    if (answers.some(([, a]) => a === true)) return false;
-    return answers.some(([, a]) => a !== false) ? null : false;
+    const here = ask(u.ctx.signin);
+    if (here === true) return true;
+    if (here !== false) return null; // not known on the account in use: no restart, so two never run there
+    const elsewhere = setUp(home).filter((n) => n !== u.ctx.signin).map(ask);
+    return elsewhere.includes(true) || elsewhere.every((a) => a === false) ? false : null;
+  };
+  // Stops every Front Door running on an account other than the one in use. -> { ok, stopped, reason }.
+  const stopElsewhere = async (u) => {
+    const stopped = [];
+    for (const n of setUp(home).filter((m) => m !== u.ctx.signin)) {
+      let a;
+      try { a = ask(n); } catch (e) { return { ok: false, stopped, reason: why(e) }; }
+      if (a === false) continue;
+      if (a !== true) return { ok: false, stopped, reason: `can't tell whether a Front Door runs on ${where(n)}` };
+      let r;
+      try { r = await stopIn(ctxOf(home, n)); } catch (e) { r = { ok: false, reason: why(e) }; }
+      if (!r?.ok) return { ok: false, stopped, reason: `the Front Door still runs on ${where(n)} and did not stop (${r?.reason ?? 'no answer'})` };
+      stopped.push(n);
+    }
+    return { ok: true, stopped };
   };
   const restartFrontDoor = async (x) => {
     const u = inUse(home);
     if (!u.ctx) return { ok: false, reason: u.reason };
-    for (const n of setUp(home).filter((m) => m !== u.ctx.signin)) {
-      const a = ask(n);
-      if (a === false) continue;
-      if (a !== true) return { ok: false, reason: `can't tell whether the Front Door still runs on ${where(n)}; not restarted, so two don't run` };
-      let r;
-      try { r = await stopIn(ctxOf(home, n)); } catch (e) { r = { ok: false, reason: why(e) }; }
-      if (!r?.ok) return { ok: false, reason: `the Front Door still runs on ${where(n)} and did not stop (${r?.reason ?? 'no answer'})` };
-    }
+    const s = await stopElsewhere(u);
+    if (!s.ok) return { ok: false, reason: `${s.reason}; not restarted, so two don't run` };
     return tag(await restartIn(u.ctx, x), u.ctx);
   };
-  return { frontDoorAlive, restartFrontDoor };
+  const strayFrontDoor = async () => {
+    const u = inUse(home);
+    if (!u.ctx) return { ok: false, stopped: [], reason: u.reason };
+    return stopElsewhere(u);
+  };
+  return { frontDoorAlive, restartFrontDoor, strayFrontDoor };
 }
 
 // The per-folder ports the wiring gives `accountPorts`, by kind. The README's contract row lists the same.

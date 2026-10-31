@@ -56,15 +56,21 @@ export const accountEnv = (home, name) => (name === 'a' ? {} : { [CONFIG_VAR]: a
  */
 export const isSetUp = (home, name) => !!(name === 'a' ? stat : lstat)(accountDir(home, name))?.isDirectory();
 
-/** The first folder as setup accepts it: a folder, or a link to a folder this user owns. Null, or the reason it isn't. */
-function firstFolderProblem(A) {
+// This user's id, or null where the system has none (the owner check is then skipped).
+const currentUid = () => (typeof process.getuid === 'function' ? process.getuid() : null);
+
+/**
+ * The first folder as setup accepts it: a folder, or a link to a folder this user (`uid`) owns. Null, or the reason it
+ * isn't. `uid` is passed in so a test can stand in for another user without admin rights.
+ */
+function firstFolderProblem(A, uid) {
   const l = lstat(A);
   if (!l) return `~/${ACCOUNTS.a} is not here`;
   if (!l.isSymbolicLink()) return l.isDirectory() ? null : `~/${ACCOUNTS.a} is not a folder`;
   const s = stat(A);
   if (!s) return `~/${ACCOUNTS.a} is a link that leads nowhere`;
   if (!s.isDirectory()) return `~/${ACCOUNTS.a} is a link to something that is not a folder`;
-  if (typeof process.getuid === 'function' && s.uid !== process.getuid()) return `~/${ACCOUNTS.a} is a link to a folder another user owns`;
+  if (uid !== null && s.uid !== uid) return `~/${ACCOUNTS.a} is a link to a folder another user owns`;
   return null;
 }
 
@@ -99,12 +105,13 @@ export function useAccount({ home = homedir(), name }) {
  * `setup`: the second folder and its links. Every target is checked before anything changes, so a refusal changes
  * nothing; a second run finds every link in place and changes nothing.
  * Returns { ok, made: [names], kept: [names], skipped: [names with no first-folder original] } or { ok: false, reason }.
+ * `uid` is the user the first folder must belong to when it is a link (this user; a test passes another).
  */
-export function setupSecondFolder({ home = homedir(), name = 'b' } = {}) {
+export function setupSecondFolder({ home = homedir(), name = 'b', uid = currentUid() } = {}) {
   if (name === 'a' || !ACCOUNT_NAMES.includes(name)) return refuse('only the second account\'s folder is set up');
   const A = accountDir(home, 'a');
   const B = accountDir(home, name);
-  const problem = firstFolderProblem(A);
+  const problem = firstFolderProblem(A, uid);
   if (problem) return refuse(`nothing changed: ${problem}`);
   const b = lstat(B);
   if (b && !b.isDirectory()) return refuse(`~/${ACCOUNTS[name]} is there and is not a folder (a link would share the sign-in)`);

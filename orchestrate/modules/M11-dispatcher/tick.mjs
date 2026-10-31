@@ -204,7 +204,7 @@ export async function tick({ rec, rules, now, ports: p }) {
     }
   } catch (e) { alert(`the Dispatcher could not record a hold: ${e?.message ?? e}`); }
   await run('phone', () => phoneLinkStep({ rec, rules, now, send: p.sendFrontDoor, restartFrontDoor: p.restartFrontDoor, startMinibase: p.startMinibase,
-    frontDoorAlive: p.frontDoorAlive, lastHandoff: p.frontDoorHandoff, alert }));
+    frontDoorAlive: p.frontDoorAlive, strayFrontDoor: p.strayFrontDoor, lastHandoff: p.frontDoorHandoff, alert }));
   await run('cleanup', () => cleanupPass({ rec, rules, now, ...p.cleanup, alert }));
 
   putFact(rec, LAST_PASS_FACT, { at: iso(now), steps: Object.fromEntries(STEPS.map((s) => [s, res[s]?.ok ? 'ok' : 'failed'])) }, 'full_pass');

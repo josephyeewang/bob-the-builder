@@ -66,7 +66,7 @@ function folders(h, A, B) {
 test('R-1-89 / L61: every per-folder port named in the contract is wrapped', () => {
   const { h, A, B } = home();
   const f = folders(h, A, B);
-  const all = Object.values(PER_FOLDER_PORTS).flat().filter((p) => p !== 'stopFrontDoor');
+  const all = [...Object.values(PER_FOLDER_PORTS).flat().filter((p) => p !== 'stopFrontDoor'), 'strayFrontDoor'];
   for (const p of all) assert.equal(typeof f.ports[p], 'function', p);
   assert.deepEqual(Object.keys(f.ports).sort(), all.sort(), 'and nothing else');
 });
@@ -157,9 +157,17 @@ test('R-1-89 / L61: the check ports say yes for a session in either folder, whic
     assert.equal(f.ports.hasSession('C-9'), false);
     assert.equal(f.ports.hasReviewer('C-9'), false);
   }
-  // Unknown in one folder and no in the other: unknown. A failing or late check names its folder.
-  assert.equal(inAnyAccount({ home: h, checkIn: (ctx) => (ctx.signin === 'a' ? false : null) })('C-1'), null);
+  // L63: an unclear answer in one folder and no in the other is an error naming the folder and the answer, never a no.
+  // A yes in either folder still wins. A failing or late check names its folder.
+  for (const [odd, shown] of [[null, 'null'], [undefined, 'undefined'], ['no', '"no"'], [0, '0']]) {
+    for (const [first, second] of [['a', 'b'], ['b', 'a']]) {
+      const check = inAnyAccount({ home: h, checkIn: (ctx) => (ctx.signin === first ? odd : false), what: 'hasSession' });
+      assert.throws(() => check('C-1'), new RegExp(`^Error: account ${first} \\(~/\\.claude${first === 'b' ? '-b' : ''}\\): hasSession gave no clear answer \\(${shown}\\); not read as "not there"$`), `${shown} in ${first}, false in ${second}`);
+    }
+  }
   assert.equal(inAnyAccount({ home: h, checkIn: (ctx) => (ctx.signin === 'a' ? null : true) })('C-1'), true);
+  assert.equal(inAnyAccount({ home: h, checkIn: (ctx) => (ctx.signin === 'b' ? undefined : true) })('C-1'), true);
+  assert.equal(inAnyAccount({ home: h, checkIn: () => false })('C-1'), false);
   assert.throws(() => inAnyAccount({ home: h, checkIn: (ctx) => { if (ctx.signin === 'b') throw new Error('x'); return false; }, what: 'hasSession' })('C-1'), /^Error: account b \(~\/\.claude-b\): hasSession could not be checked \(x\)$/);
   assert.throws(() => inAnyAccount({ home: h, checkIn: async () => true })('C-1'), /must answer at once/);
 });
@@ -176,6 +184,28 @@ test('R-1-89 / L61: after a switch, the time limits still see the old account\'s
   assert.deepEqual(done, []);
   assert.deepEqual(f.log, [], 'no second reviewer started');
   assert.equal(rec.read('card', 'C-1').doc.state, 'in_review');
+});
+
+test('L63 (the reviewer\'s repro): after a switch, an unclear answer from the old account moves no card and starts no reviewer', async () => {
+  for (const odd of [null, undefined]) {
+    const { h, A, B } = home();
+    const f = folders(h, A, B);
+    // Account a can't say (null, or no answer at all); account b, now in use, says no.
+    const ports = accountPorts({ home: h, inFolder: (ctx) => ({ ...f.inFolder(ctx), ...(ctx.signin === 'a' ? { hasSession: () => odd, hasReviewer: () => odd } : {}) }) });
+    assert.equal(useAccount({ home: h, name: 'b' }).ok, true);
+    const old = iso(T0 - 600 * MIN);
+    for (const [state, port] of [['claimed', 'hasSession'], ['in_review', 'hasReviewer']]) {
+      const rec = recWith([['card', 'C-1', { state, module: 'M-test', product: 'p1', tier: 2, files: ['src/a.js'], claim: state === 'claimed' ? { session: 'S-1' } : undefined, changed_at: old }]]);
+      f.log.length = 0;
+      const alerts = [];
+      await assert.rejects(timeLimits({ rec, rules: rulesWith(), now: T0, b: { band: 'green' }, running: [], hasSession: ports.hasSession, gateAlive: () => true,
+        hasReviewer: ports.hasReviewer, startReviewer: ports.startReviewer, alert: (t) => alerts.push(t) }),
+        new RegExp(`^Error: account a \\(~/\\.claude\\): ${port} gave no clear answer \\(${String(odd)}\\)`), `${String(odd)}, ${state}`);
+      const card = rec.read('card', 'C-1');
+      assert.deepEqual([card.doc.state, card.rev], [state, 1], `${String(odd)}: the ${state} card stays`);
+      assert.deepEqual(f.log, [], `${String(odd)}: no reviewer started`);
+    }
+  }
 });
 
 test('R-1-89 / L61: stops go through the session\'s own folder; a Lead restarted after a switch comes back on the account in use', async () => {
@@ -227,18 +257,103 @@ test('R-1-89 / L61: the Front Door follows the account in use: after a switch it
   f.st.b.stopFrontDoorOk = false;
   f.log.length = 0;
   const r = await f.ports.restartFrontDoor({ handoff: 'h' });
-  assert.deepEqual(r, { ok: false, reason: 'the Front Door still runs on account b (~/.claude-b) and did not stop (still there)' });
+  assert.deepEqual(r, { ok: false, reason: 'the Front Door still runs on account b (~/.claude-b) and did not stop (still there); not restarted, so two don\'t run' });
   assert.deepEqual(f.log, [['stopFrontDoor', 'b']]);
   // Can't tell about the other account: not restarted either.
   const unsure = accountPorts({ home: h, inFolder: (ctx) => ({ ...f.inFolder(ctx), frontDoorAlive: () => (ctx.signin === 'b' ? null : false) }) });
-  assert.match((await unsure.restartFrontDoor({})).reason, /^can't tell whether the Front Door still runs on account b/);
+  assert.match((await unsure.restartFrontDoor({})).reason, /^can't tell whether a Front Door runs on account b \(~\/\.claude-b\); not restarted, so two don't run$/);
   assert.equal(unsure.frontDoorAlive(), null);
+  // Not known on the account in use: not known, even when it runs elsewhere (a restart could start a second one here).
+  const unsureHere = accountPorts({ home: h, inFolder: (ctx) => ({ ...f.inFolder(ctx), frontDoorAlive: () => (ctx.signin === 'a' ? null : true) }) });
+  assert.equal(unsureHere.frontDoorAlive(), null);
   // Not running anywhere: false, and the restart starts it on the account in use with nothing to stop.
   f.st.b.frontDoor = false;
   assert.equal(f.ports.frontDoorAlive(), false);
   f.log.length = 0;
   assert.equal((await f.ports.restartFrontDoor({ handoff: 'h' })).signin, 'a');
   assert.deepEqual(f.log, [['restartFrontDoor', 'a', 'h']]);
+});
+
+// The phone step as the tick runs it, with the wrapped Front Door ports, every link fact fresh at `now`.
+function phoneAt(f, now, over = {}) {
+  const { rec } = f;
+  for (const id of [FACTS.network, FACTS.reachable, FACTS.minibase]) rec.write({ actor: 'dispatcher', entity: 'fact', id, expectRev: rec.read('fact', id)?.rev ?? 0, doc: { value: true, observed_at: iso(now) } });
+  const p = { ...f.ports, ...over };
+  return withAlerts(rec, now, (t) => f.alerts.push(t), (alert) => phoneLinkStep({ rec, rules: rulesWith(), now, send: async () => ({ outcome: 'sent' }),
+    restartFrontDoor: p.restartFrontDoor, startMinibase: p.startMinibase, frontDoorAlive: p.frontDoorAlive, strayFrontDoor: p.strayFrontDoor, lastHandoff: () => 'handoff-fd', alert }));
+}
+
+test('L63 m1: an error in the Front Door\'s alive check is named and fails the phone step, never a silent "not known"', async () => {
+  const { h, A, B } = home();
+  const f = Object.assign(folders(h, A, B), { rec: recWith(), alerts: [] });
+  for (const [bad, said] of [[() => { throw new Error('list timed out'); }, 'list timed out'], [async () => true, 'the port must answer at once']]) {
+    for (const where of ['a', 'b']) {
+      assert.equal(useAccount({ home: h, name: where }).ok, true);
+      const ports = accountPorts({ home: h, inFolder: (ctx) => ({ ...f.inFolder(ctx), ...(ctx.signin === where ? { frontDoorAlive: bad } : {}) }) });
+      const dir = where === 'a' ? '~/\\.claude' : '~/\\.claude-b';
+      const named = new RegExp(`^Error: account ${where} \\(${dir}\\): whether the Front Door runs could not be checked \\(${said}\\)$`);
+      assert.throws(() => ports.frontDoorAlive(), named);
+      f.log.length = 0;
+      await assert.rejects(phoneAt(f, T0, ports), named, 'the step fails, so the tick tells Joe');
+      assert.deepEqual(f.log, [], 'nothing restarted');
+    }
+  }
+});
+
+test('L63 m2: while the Front Door runs on the account in use, one left on the other account is stopped (checked once per 5 min)', async () => {
+  const { h, A, B } = home();
+  const f = Object.assign(folders(h, A, B), { rec: recWith(), alerts: [] });
+  assert.equal(useAccount({ home: h, name: 'b' }).ok, true);
+  f.st.a.frontDoor = true;
+  f.st.b.frontDoor = true;
+  assert.equal(f.ports.frontDoorAlive(), true);
+  assert.deepEqual(await phoneAt(f, T0), ['Front Door left on another account; stopped']);
+  assert.deepEqual(f.log, [['stopFrontDoor', 'a']]);
+  assert.deepEqual([f.st.a.frontDoor, f.st.b.frontDoor, f.alerts], [false, true, []]);
+  // Checked at most once per 5 minutes.
+  f.st.a.frontDoor = true;
+  f.log.length = 0;
+  await phoneAt(f, T0 + 4 * MIN);
+  assert.deepEqual(f.log, [], 'not checked again within 5 minutes');
+  // It won't stop: Joe is told once, however many checks find it.
+  f.st.a.stopFrontDoorOk = false;
+  for (const m of [5, 10, 15]) assert.deepEqual(await phoneAt(f, T0 + m * MIN), ['Front Door on another account: not stopped']);
+  assert.equal(f.log.filter(([w]) => w === 'stopFrontDoor').length, 3, 'tried at each check');
+  assert.equal(f.alerts.length, 1, f.alerts.join(' | '));
+  assert.match(f.alerts[0], /^a Front Door may still run on the other account: the Front Door still runs on account a \(~\/\.claude\) and did not stop \(still there\)/);
+  // It stops: the cause clears, so the next time Joe is told again.
+  f.st.a.stopFrontDoorOk = true;
+  assert.deepEqual(await phoneAt(f, T0 + 20 * MIN), ['Front Door left on another account; stopped']);
+  f.st.a.frontDoor = true;
+  f.st.a.stopFrontDoorOk = false;
+  await phoneAt(f, T0 + 25 * MIN);
+  assert.equal(f.alerts.length, 2);
+  // Can't tell about the other account: told once the same way, nothing stopped.
+  const g = Object.assign(folders(h, A, B), { rec: recWith(), alerts: [] });
+  g.st.b.frontDoor = true;
+  const unsure = accountPorts({ home: h, inFolder: (ctx) => ({ ...g.inFolder(ctx), ...(ctx.signin === 'a' ? { frontDoorAlive: () => { throw new Error('no answer'); } } : {}) }) });
+  for (const m of [0, 5]) assert.deepEqual(await phoneAt(g, T0 + m * MIN, unsure), ['Front Door on another account: not stopped']);
+  assert.deepEqual([g.log, g.alerts.length], [[], 1]);
+  assert.match(g.alerts[0], /account a \(~\/\.claude\): whether the Front Door runs could not be checked \(no answer\)/);
+});
+
+test('L63 m4: a Front Door restart that keeps failing is told once, not every 5 minutes; told again after it ran', async () => {
+  const { h, A, B } = home();
+  const f = Object.assign(folders(h, A, B), { rec: recWith(), alerts: [] });
+  const failing = { restartFrontDoor: async () => ({ ok: false, reason: 'refused' }) };
+  for (const m of [0, 5, 10]) assert.deepEqual(await phoneAt(f, T0 + m * MIN, failing), ['Front Door was missing; restart failed']);
+  assert.deepEqual(f.alerts, ['the Front Door was not running and did not restart: refused']);
+  // It restarts and runs: the cause clears. Gone again and failing again: told again.
+  assert.deepEqual(await phoneAt(f, T0 + 15 * MIN), ['Front Door was missing; restarted']);
+  f.st.a.frontDoor = false;
+  await phoneAt(f, T0 + 20 * MIN, failing);
+  assert.equal(f.alerts.length, 2);
+  // It comes back by itself (seen running): the cause clears too.
+  f.st.a.frontDoor = true;
+  await phoneAt(f, T0 + 25 * MIN);
+  f.st.a.frontDoor = false;
+  await phoneAt(f, T0 + 30 * MIN, failing);
+  assert.equal(f.alerts.length, 3);
 });
 
 // The whole pass, as the tick runs it, with the ports wrapped.

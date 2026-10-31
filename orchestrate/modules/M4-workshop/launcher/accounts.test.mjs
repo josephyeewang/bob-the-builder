@@ -3,7 +3,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, realpathSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -123,6 +123,22 @@ test('accounts setup: ~/.claude may be a link to a folder the same user owns', (
     assert.deepEqual(readdirSync(x.h).sort(), before, `${what}: nothing made`);
     if (lstat(x.B)) assert.deepEqual(readdirSync(x.B), []);
   }
+});
+
+test('accounts setup (L63 m5): ~/.claude as a link to a folder another user owns is refused, and nothing changes', () => {
+  // The owner check is handed the user, so a test can stand in for another user without admin rights.
+  const { h, A } = home({ firstAsLink: true });
+  const own = statSync(join(h, 'real-first')).uid;
+  const before = readdirSync(h).sort();
+  for (const other of [own + 1, 0 === own ? 1 : 0]) {
+    assert.deepEqual(setupSecondFolder({ home: h, uid: other }), { ok: false, reason: 'nothing changed: ~/.claude is a link to a folder another user owns' }, `uid ${other}`);
+    assert.deepEqual(readdirSync(h).sort(), before, 'no second folder made');
+  }
+  // The same link, owned by the user setting up: accepted. A plain folder is never checked by owner (it is the home's).
+  assert.equal(setupSecondFolder({ home: h, uid: own }).ok, true);
+  assert.equal(lstat(A).isSymbolicLink(), true);
+  const plain = home();
+  assert.equal(setupSecondFolder({ home: plain.h, uid: own + 1 }).ok, true);
 });
 
 test('accounts setup: a target that is there and is not the expected link is refused, and nothing changes', () => {
