@@ -1,7 +1,8 @@
 // The one outbox (alerts.mjs, LEAD-CALLS L47): the sender on its own.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { queueAlert, sendAlerts, outbox, dropCause, settleAlert, ALERT_QUEUE_FACT, ALERT_QUEUE_MAX, ALERT_UNTRIED_MAX } from './alerts.mjs';
+import { queueAlert, sendAlerts, outbox, dropCause, settleAlert, droppedCount, ALERT_QUEUE_FACT, ALERT_QUEUE_MAX, ALERT_UNTRIED_MAX } from './alerts.mjs';
+import { holdAlert } from './pass.mjs';
 import { recWith, T0 } from './fixtures.test-helper.mjs';
 
 const queue = (rec) => rec.read('fact', ALERT_QUEUE_FACT)?.doc?.entries ?? [];
@@ -129,18 +130,19 @@ test('queue cap: a long outage keeps the queue within both caps; the dropped cou
   const texts = d.entries.map((e) => e.text);
   // Each pass tried (and held) the oldest untried entry, p0-0 to p0-11; p0-20 was never tried, so the untried cap took it.
   assert.ok(texts.includes(`p${PASSES - 1}-${PER_PASS - 1}`) && texts.includes('p0-1') && !texts.includes('p0-20'), 'the newest untried stay, the oldest go');
-  // A cause queued into the full queue is the one that goes, and is not counted: its step queues it again
-  // each pass until it is told (#39 check, m2, m3).
+  // A cause queued into the full queue is the one that goes (#39 check, m2, m3), and it is counted once however
+  // often it is queued and dropped again (L52).
   for (let p = 0; p < 5; p += 1) queueAlert(rec, 'stop A', { now: T0, mark: mark('stop-A') });
   assert.equal(queue(rec).filter((e) => e.key === 'stop-A:told_at').length, 0);
   assert.equal(rec.read('fact', ALERT_QUEUE_FACT).doc.dropped, d.dropped);
+  assert.deepEqual(causesDropped(rec), ['stop-A:told_at']);
   // The port is back: the first copy delivered carries the dropped count, the others do not, and the count resets.
   const got = [];
   await sendAlerts(rec, (t) => { got.push(t); return true; }, T0, { sendMs: 20, budgetMs: 60_000 });
   const told = got.filter((t) => /older alerts could not be sent and were dropped/.test(t));
   assert.equal(told.length, 1, 'told once');
-  assert.match(got[0], new RegExp(`\\(${n - got.length} older alerts could not be sent`));
-  assert.equal(rec.read('fact', ALERT_QUEUE_FACT).doc.dropped, 0);
+  assert.match(got[0], new RegExp(`\\(${n - got.length + 1} older alerts could not be sent`));
+  assert.equal(droppedAll(rec), 0);
   assert.equal(queue(rec).length, 0);
   // Its step queues the cause again on the next pass, and this time it is sent and marked.
   queueAlert(rec, 'stop A', { now: T0, mark: mark('stop-A') });
@@ -175,6 +177,8 @@ const setDropped = (rec, n) => {
   rec.write({ actor: 'dispatcher', entity: 'fact', id: ALERT_QUEUE_FACT, expectRev: d.rev, doc: { ...d.doc, dropped: n } });
 };
 const dropped = (rec) => rec.read('fact', ALERT_QUEUE_FACT).doc.dropped ?? 0;
+const droppedAll = (rec) => droppedCount(rec.read('fact', ALERT_QUEUE_FACT).doc);
+const causesDropped = (rec) => (rec.read('fact', ALERT_QUEUE_FACT).doc.dropped_causes ?? []).map((c) => c.key);
 const tickOver = () => new Promise((ok) => setImmediate(ok));
 
 // M1: a delivery took off only the count its text carried. Alerts dropped while the send was out are told next.
@@ -186,7 +190,8 @@ test('#39 M1: alerts dropped while a deferred send is out at the cap are told on
   const sending = sendAlerts(rec, p.port, T0, { sendMs: 5_000, budgetMs: 5_000, later: true });
   await tickOver();
   assert.deepEqual(p.got, ['b5 (5 older alerts could not be sent and were dropped)']);
-  for (let i = 0; i < 3; i += 1) queueAlert(rec, `during${i}`, { now: T0 });
+  // b5 is out for sending, so it does not count toward the cap (#39 round 2, m-B): four more drop three.
+  for (let i = 0; i < 4; i += 1) queueAlert(rec, `during${i}`, { now: T0 });
   assert.equal(dropped(rec), 8);
   p.open();
   (await sending).settle();
@@ -243,7 +248,12 @@ test('#39 m1: the cap never drops the entry being sent; its cause is marked once
   queueAlert(rec, 'stop A', { now: T0, mark: mark('stop-A') });
   queueAlert(rec, 'one more', { now: T0 });
   assert.ok(queue(rec).some((e) => e.key === 'stop-A:told_at'), 'the entry out for sending stays');
-  assert.equal(queue(rec)[1].text, 'b2', 'the oldest one-off went instead');
+  // It does not count toward the cap either (#39 round 2, m-B), so nothing goes.
+  const firstOneOff = () => queue(rec).find((e) => !e.key).text;
+  assert.equal(firstOneOff(), 'b1');
+  assert.equal(droppedAll(rec), 0);
+  queueAlert(rec, 'two more', { now: T0 });
+  assert.equal(firstOneOff(), 'b2', 'past the cap the oldest one-off goes');
   assert.equal(dropped(rec), 1);
   p.open();
   (await sending).settle();
@@ -254,20 +264,24 @@ test('#39 m1: the cap never drops the entry being sent; its cause is marked once
   queueAlert(rec, 'stop A', { now: T0, mark: mark('stop-A') });
   for (let i = 0; i < ALERT_UNTRIED_MAX; i += 1) queueAlert(rec, `c${i}`, { now: T0 });
   assert.ok(!queue(rec).some((e) => e.key), 'not out for sending, a cause goes first');
+  assert.deepEqual(causesDropped(rec), ['stop-A:told_at'], 'and is counted');
 });
 
-// m2, m3: past a cap, entries tied to a cause go first (their step queues them again); a one-off goes only
-// when none is left, and only one-offs count as dropped.
-test('#39 m2, m3: the untried cap drops entries tied to a cause first and does not count them', () => {
+// m2, m3: past a cap, entries tied to a cause go first; a one-off goes only when none is left. Every drop is
+// counted, a cause once (L52).
+test('#39 m2, m3: the untried cap drops entries tied to a cause first and counts each cause once', () => {
   const rec = recWith([]);
   queueAlert(rec, 'unsaved work in S-1', { now: T0 });
   for (let i = 0; i < ALERT_UNTRIED_MAX; i += 1) queueAlert(rec, `hold ${i}`, { now: T0, mark: mark(`hold-${i}`) });
   assert.equal(queue(rec)[0].text, 'unsaved work in S-1', 'the one-off stays');
   assert.ok(!queue(rec).some((e) => e.text === 'hold 0'), 'the oldest cause went');
   assert.equal(dropped(rec), 0);
-  // The dropped cause is queued again each pass: the count does not grow.
-  for (let pass = 0; pass < 5; pass += 1) queueAlert(rec, `hold ${pass}`, { now: T0, mark: mark(`hold-${pass}`) });
-  assert.equal(dropped(rec), 0);
+  assert.deepEqual(causesDropped(rec), ['hold-0:told_at']);
+  // The same cause queued and dropped again counts once.
+  for (let pass = 0; pass < 5; pass += 1) queueAlert(rec, 'hold 0', { now: T0, mark: mark('hold-0') });
+  assert.deepEqual(causesDropped(rec), ['hold-0:told_at', 'hold-1:told_at'], 'hold 0 back in pushed out hold 1; hold 0 never counts twice');
+  queueAlert(rec, 'hold 1', { now: T0, mark: mark('hold-1') });
+  assert.equal(droppedAll(rec), 3);
   assert.equal(queue(rec).length, ALERT_UNTRIED_MAX);
   // With no cause left, the oldest one-off goes and is counted.
   const rec2 = recWith([]);
@@ -276,7 +290,7 @@ test('#39 m2, m3: the untried cap drops entries tied to a cause first and does n
   assert.equal(queue(rec2)[0].text, 'one-off 1');
 });
 
-test('#39 m2, m3: the held cap drops entries tied to a cause first and does not count them', () => {
+test('#39 m2, m3: the held cap drops entries tied to a cause first and counts it', () => {
   const rec = recWith([]);
   const one = { id: 'h0', key: null, text: 'N sessions stopped', mark: null, queued_at: 'x', held: true, tries: 1 };
   const causes = Array.from({ length: ALERT_QUEUE_MAX }, (_, i) => ({ id: `h${i + 1}`, key: `hold-${i}:told_at`, text: `hold ${i}`, mark: mark(`hold-${i}`), queued_at: 'x', held: true, tries: 1 }));
@@ -286,4 +300,129 @@ test('#39 m2, m3: the held cap drops entries tied to a cause first and does not 
   assert.equal(q.filter((e) => e.held).length, ALERT_QUEUE_MAX);
   assert.ok(q.some((e) => e.id === 'h0') && !q.some((e) => e.id === 'h1'));
   assert.equal(dropped(rec), 0);
+  assert.deepEqual(causesDropped(rec), ['hold-0:told_at']);
+});
+
+// #39 round 2 (L52): every drop is counted. A one-shot mark is queued once and never again, so no rule may rest
+// on a step queueing its alert again.
+const deliverAll = async (rec) => { const got = []; await sendAlerts(rec, (t) => { got.push(t); return true; }, T0, { sendMs: 20, budgetMs: 60_000 }); return got; };
+
+test('#39 round 2 MAT-1: a one-shot cause dropped at the untried cap is counted and told', async () => {
+  const rec = recWith([]);
+  holdAlert({ rec, cause: 'run-late', text: 'a Dispatcher pass did not finish in time', alert: outbox(rec, T0), now: T0 });
+  for (let i = 0; i < ALERT_UNTRIED_MAX; i += 1) queueAlert(rec, `one-off ${i}`, { now: T0 });
+  assert.ok(!queue(rec).some((e) => e.key), 'the cause went first');
+  assert.equal(droppedAll(rec), 1, 'and is counted');
+  const got = await deliverAll(rec);
+  assert.equal(got[0], 'one-off 0 (1 older alerts could not be sent and were dropped)');
+  assert.equal(droppedAll(rec), 0, 'told, the count clears');
+  assert.equal(rec.read('fact', 'hold-run-late')?.doc?.told_at, undefined, 'its own alert was never delivered, so it is not marked told');
+});
+
+test('#39 round 2 MAT-1: a one-shot cause dropped at the held cap is counted and told', async () => {
+  const rec = recWith([]);
+  holdAlert({ rec, cause: 'launch-late-c-1', text: 'card c-1: the launcher did not answer', alert: outbox(rec, T0), now: T0 });
+  await sendAlerts(rec, () => false, T0, { sendMs: 20 });
+  const d = rec.read('fact', ALERT_QUEUE_FACT);
+  assert.equal(d.doc.entries[0].held, true, 'the cause waited through a failed send');
+  const ones = Array.from({ length: ALERT_QUEUE_MAX }, (_, i) => ({ id: `h${i}`, key: null, text: `held ${i}`, mark: null, queued_at: 'x', held: true, tries: 1 }));
+  rec.write({ actor: 'dispatcher', entity: 'fact', id: ALERT_QUEUE_FACT, expectRev: d.rev, doc: { ...d.doc, entries: [...d.doc.entries, ...ones] } });
+  queueAlert(rec, 'fresh', { now: T0 });
+  assert.ok(!queue(rec).some((e) => e.key), 'the held cause went first');
+  assert.equal(queue(rec).filter((e) => e.held).length, ALERT_QUEUE_MAX);
+  assert.equal(droppedAll(rec), 1);
+  const got = await deliverAll(rec);
+  assert.match(got[0], /\(1 older alerts could not be sent and were dropped\)$/);
+  assert.equal(droppedAll(rec), 0);
+});
+
+test('#39 round 2 m-A: a round started while another is out carries only what that one does not', async () => {
+  const rec = recWith([]);
+  for (let i = 0; i < ALERT_UNTRIED_MAX + 5; i += 1) queueAlert(rec, `b${i}`, { now: T0 });
+  assert.equal(droppedAll(rec), 5);
+  const gotA = [];
+  const roundA = sendAlerts(rec, (t) => { gotA.push(t); return new Promise((ok) => setTimeout(() => ok(true), 20)); }, T0, { sendMs: 50, budgetMs: 60, later: true });
+  await tickOver();
+  const b = held();
+  const roundB = sendAlerts(rec, b.port, T0, { sendMs: 5_000, budgetMs: 5_000, later: true });
+  await tickOver();
+  assert.match(gotA[0], /\(5 older alerts/);
+  assert.ok(!/older alerts/.test(b.got[0]), 'round B does not carry what round A has out');
+  for (let i = 0; i < 4; i += 1) queueAlert(rec, `during${i}`, { now: T0 });
+  const three = droppedAll(rec) - 5;
+  assert.equal(three, 3, 'three more dropped while both are out');
+  (await roundA).settle();
+  b.open();
+  (await roundB).settle();
+  assert.equal(droppedAll(rec), 3, 'both settled, the three are still to be told');
+  const got = await deliverAll(rec);
+  assert.match(got[0], /\(3 older alerts could not be sent and were dropped\)$/);
+  assert.equal(droppedAll(rec), 0);
+});
+
+test('#39 round 2 m-B: entries out for sending do not count toward the cap', async () => {
+  const rec = recWith([]);
+  for (let i = 0; i < ALERT_UNTRIED_MAX; i += 1) queueAlert(rec, `b${i}`, { now: T0 });
+  const r = await sendAlerts(rec, () => true, T0, { sendMs: 20, budgetMs: 60_000, later: true });
+  assert.equal(r.sent, ALERT_UNTRIED_MAX, 'all delivered, none settled yet');
+  queueAlert(rec, '3 sessions stopped', { now: T0 });
+  assert.ok(queue(rec).some((e) => e.text === '3 sessions stopped'), 'it survives');
+  assert.equal(droppedAll(rec), 0);
+  r.settle();
+  assert.deepEqual(queue(rec).map((e) => e.text), ['3 sessions stopped']);
+});
+
+test('#39 round 2 m-C: a one-off goes only when no cause is left in either class', () => {
+  const heldOnes = (n) => Array.from({ length: n }, (_, i) => ({ id: `h${i}`, key: null, text: `held ${i}`, mark: null, queued_at: 'x', held: true, tries: 1 }));
+  const causes = (n) => Array.from({ length: n }, (_, i) => ({ id: `c${i}`, key: `hold-${i}:told_at`, text: `hold ${i}`, mark: mark(`hold-${i}`), queued_at: 'x' }));
+  const start = (entries) => { const rec = recWith([]); rec.write({ actor: 'dispatcher', entity: 'fact', id: ALERT_QUEUE_FACT, expectRev: 0, doc: { entries, next: 1000 } }); return rec; };
+  // The held class is over its cap and the untried class holds a cause: the cause goes, not a held one-off.
+  const a = start([...heldOnes(ALERT_QUEUE_MAX + 1), ...causes(1)]);
+  queueAlert(a, 'fresh', { now: T0 });
+  assert.equal(queue(a).filter((e) => e.held).length, ALERT_QUEUE_MAX + 1, 'no held one-off went while a cause is left');
+  assert.deepEqual(queue(a).filter((e) => !e.held).map((e) => e.text), ['fresh']);
+  assert.equal(dropped(a), 0);
+  assert.deepEqual(causesDropped(a), ['hold-0:told_at']);
+  // Only as many go as the classes are over: one, the oldest cause.
+  const b = start([...heldOnes(ALERT_QUEUE_MAX + 1), ...causes(ALERT_UNTRIED_MAX - 1)]);
+  queueAlert(b, 'fresh', { now: T0 });
+  assert.equal(queue(b).filter((e) => e.held).length, ALERT_QUEUE_MAX + 1);
+  assert.ok(!queue(b).some((e) => e.id === 'c0') && queue(b).some((e) => e.text === 'fresh'), 'the oldest cause went');
+  assert.equal(queue(b).length, ALERT_QUEUE_MAX + ALERT_UNTRIED_MAX, 'and only it');
+  assert.deepEqual(causesDropped(b), ['hold-0:told_at']);
+  // The untried class is over with only one-offs, and the held class holds a cause: the cause goes.
+  const ones = Array.from({ length: ALERT_UNTRIED_MAX }, (_, i) => ({ id: `u${i}`, key: null, text: `u ${i}`, mark: null, queued_at: 'x' }));
+  const c = start([{ ...causes(1)[0], held: true, tries: 1 }, ...heldOnes(ALERT_QUEUE_MAX - 1), ...ones]);
+  queueAlert(c, 'fresh', { now: T0 });
+  assert.ok(!queue(c).some((e) => e.key) && queue(c).some((e) => e.id === 'u0'), 'the held cause went, not the oldest one-off');
+  assert.equal(queue(c).length, ALERT_QUEUE_MAX + ALERT_UNTRIED_MAX, 'and only it');
+  assert.equal(dropped(c), 0);
+  assert.equal(droppedAll(c), 1);
+  // No cause left anywhere: the over class's oldest one-off goes, and is counted.
+  const d = start(heldOnes(ALERT_QUEUE_MAX + 1));
+  queueAlert(d, 'fresh', { now: T0 });
+  assert.ok(!queue(d).some((e) => e.id === 'h0'));
+  assert.equal(dropped(d), 1);
+});
+
+test('#39 round 2: a dropped cause stops counting when it clears, or when an alert for it is delivered', async () => {
+  const rec = recWith([]);
+  queueAlert(rec, 'stop A', { now: T0, mark: mark('stop-A') });
+  queueAlert(rec, 'stop B', { now: T0, mark: mark('stop-B') });
+  for (let i = 0; i < ALERT_UNTRIED_MAX - 1; i += 1) queueAlert(rec, `one-off ${i}`, { now: T0 });
+  assert.deepEqual(causesDropped(rec), ['stop-A:told_at']);
+  queueAlert(rec, 'one more', { now: T0 });
+  assert.deepEqual(causesDropped(rec), ['stop-A:told_at', 'stop-B:told_at']);
+  dropCause(rec, 'stop-A');
+  assert.deepEqual(causesDropped(rec), ['stop-B:told_at'], 'a cleared cause no longer counts');
+  // stop B is queued again (in one-off 0's place) and delivered first: it does not count itself, and once told
+  // its drop clears.
+  const d = rec.read('fact', ALERT_QUEUE_FACT);
+  const again = { id: 'z1', key: 'stop-B:told_at', text: 'stop B', mark: mark('stop-B'), queued_at: 'x' };
+  rec.write({ actor: 'dispatcher', entity: 'fact', id: ALERT_QUEUE_FACT, expectRev: d.rev, doc: { ...d.doc, entries: [again, ...d.doc.entries.slice(1)] } });
+  const got = await deliverAll(rec);
+  assert.equal(got[0], 'stop B', 'its own drop is not counted in its own text');
+  assert.ok(!got.some((t) => /older alerts/.test(t)), 'nor in any later one: it was told');
+  assert.equal(rec.read('fact', 'stop-B').doc.told_at, 'now');
+  assert.equal(droppedAll(rec), 0);
 });
