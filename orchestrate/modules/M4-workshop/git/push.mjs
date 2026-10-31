@@ -156,6 +156,7 @@ export function createPushScript(deps) {
     if (typeof mirror !== 'string' || !isAbsolute(mirror)) no('the product has no mirror in the rules');
     if ([...NEVER, base].includes(branch) || branch.startsWith('orchestrate/')) no(`the branch "${branch}" may never be pushed`);
     const fmt = await git(['check-ref-format', '--branch', branch], { gitDir: mirror, purpose: 'push-branch-name' });
+    if (fmt.code === -1 && fmt.stderr.startsWith('safe-git: refused: ')) no(`mirror: ${fmt.stderr.slice('safe-git: refused: '.length)}`);
     if (fmt.code !== 0) no(`the branch "${branch}" is not a valid name`);
 
     const url = testRemote ? testRemote(repo) : githubUrl(repo);
@@ -170,7 +171,8 @@ export function createPushScript(deps) {
     let token;
     try { token = await getRobotToken(product); } catch { token = null; }
     if (typeof token !== 'string' || !token) no('no robot key for this product');
-    const auth = { extraConfig: tokenConfig(token) };
+    // The one address the network calls may name besides local paths (safe-git, L51).
+    const auth = { extraConfig: tokenConfig(token), address: url };
 
     const work = mkdtempSync(join(privateDir, 'push-'));
     const holding = `refs/orchestrate/incoming/${card}/${att}`;

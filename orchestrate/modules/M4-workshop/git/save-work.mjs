@@ -62,7 +62,7 @@ export function createSaveWork({ runLocked }) {
         // Written under a temporary name, then moved, so a half-written bundle is never read.
         const tmp = join(outbox, `.${bundleName(card)}.partial`);
         rmSync(tmp, { force: true });
-        await gitOk(['bundle', 'create', '-q', tmp, `refs/heads/${branch}`], { gitDir, purpose: 'save-work', extraConfig: [['core.symlinks', 'false']] });
+        await gitOk(['bundle', 'create', '-q', tmp, `refs/heads/${branch}`], { gitDir, purpose: 'save-work', extraConfig: [['core.symlinks', 'false']], allowObjects: [resolve(mirror, 'objects')] });
         const out = join(outbox, bundleName(card));
         if (st(out)?.isSymbolicLink()) rmSync(out);
         renameSync(tmp, out);
