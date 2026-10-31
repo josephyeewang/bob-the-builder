@@ -16,12 +16,16 @@
 //   node accounts.mjs setup        make the second folder and its links (twice changes nothing)
 //   node accounts.mjs use a|b      name the account new sessions start on (running sessions keep theirs)
 //   node accounts.mjs status       each folder: signed in or not, and the plan; no token, email or raw output
+//   node accounts.mjs copy-to <file> --home <dir> --owner <uid>
+//                                  copies which account that user's sessions start on into <file> (0644), for the review
+//                                  user, who starts its sessions on the same account in its own folders (L65 m-5). Run by
+//                                  root from the installed copy (review-account-copy.plist), never from the repository.
 // Nothing here reads a secret: the folders are only listed and linked, and `status` keeps a few named fields of
 // `claude auth status` and drops the rest.
 
-import { lstatSync, mkdirSync, readFileSync, readlinkSync, realpathSync, renameSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, closeSync, constants, fchmodSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readlinkSync, realpathSync, renameSync, statSync, symlinkSync, unlinkSync, writeFileSync, writeSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
@@ -96,9 +100,61 @@ export function useAccount({ home = homedir(), name }) {
   const st = lstat(f);
   if (st && !st.isFile()) return refuse(`${ACCOUNT_FILE} is there and is not a plain file`);
   const tmp = `${f}.${process.pid}.tmp`;
-  writeFileSync(tmp, `${name}\n`, { mode: 0o600 });
+  // Anyone may read which account is in use (it is a or b, no secret): the review runner reads it when the copy is missing.
+  writeFileSync(tmp, `${name}\n`, { mode: 0o644 });
   renameSync(tmp, f);
   return { ok: true, account: name };
+}
+
+/**
+ * An account file read by another user (the review runner, or root making the copy): never following a link or waiting
+ * on a pipe, a plain short file with one name, owned by `uid`, that no one else may write, holding a or b.
+ * → { ok, account } | { ok: false, reason }
+ */
+export function readAccountFile({ file, uid }) {
+  let fd;
+  try { fd = openSync(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); } catch (e) {
+    return refuse(e?.code === 'ENOENT' ? `${file} is missing` : e?.code === 'ELOOP' ? `${file} is a link` : `${file} can't be read (${e?.code ?? e})`);
+  }
+  try {
+    const st = fstatSync(fd);
+    if (!st.isFile() || st.nlink !== 1) return refuse(`${file} is not a plain file with one name`);
+    if (st.uid !== uid) return refuse(`${file} is not owned by uid ${uid}`);
+    if (st.mode & 0o022) return refuse(`${file} can be written by others`);
+    if (st.size > 64) return refuse(`${file} is too big`);
+    const name = readFileSync(fd, 'utf8').trim();
+    return ACCOUNT_NAMES.includes(name) ? { ok: true, account: name } : refuse(`${file} names neither a nor b`);
+  } finally { closeSync(fd); }
+}
+
+/**
+ * `copy-to`: the owner's account file (missing means a) copied to `to`, put in place in one step, mode 0644.
+ * `uid` is the owner whose file it is. Root runs it, so (L66) the folder `to` sits in must be root's (`dirOwner`, a test
+ * passes its own uid) and written by no one else, and the new file is made fresh, never through a link or over a file
+ * someone left there: otherwise it refuses. → { ok, account } | { ok: false, reason }
+ */
+export function copyAccountTo({ home, uid, to, dirOwner = 0 }) {
+  if (typeof to !== 'string' || !to.startsWith('/')) return refuse('copy-to needs a full path');
+  const dir = dirname(to);
+  const ds = lstat(dir);
+  if (!ds || ds.isSymbolicLink() || !ds.isDirectory()) return refuse(`${dir} is not a plain folder`);
+  if (ds.uid !== dirOwner) return refuse(`${dir} is not owned by uid ${dirOwner}`);
+  if (ds.mode & 0o022) return refuse(`${dir} can be written by others`);
+  const f = join(home, ACCOUNT_FILE);
+  let r = lstat(f) ? readAccountFile({ file: f, uid }) : { ok: true, account: 'a' };
+  if (!r.ok) return r;
+  const at = lstat(to);
+  if (at && !at.isFile()) return refuse(`${to} is there and is not a plain file`);
+  const tmp = `${to}.${process.pid}.tmp`;
+  let fd;
+  try { fd = openSync(tmp, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o644); } catch (e) {
+    return refuse(`${tmp} could not be made fresh (${e?.code ?? e})`);
+  }
+  try {
+    try { writeSync(fd, `${r.account}\n`); fchmodSync(fd, 0o644); } finally { closeSync(fd); }
+    renameSync(tmp, to);
+  } catch (e) { try { unlinkSync(tmp); } catch { /* gone */ } return refuse(`${to} could not be written (${e?.code ?? e})`); }
+  return { ok: true, account: r.account };
 }
 
 /**
@@ -200,7 +256,7 @@ export function claudeAuthStatus(claudeBin = 'claude') {
   };
 }
 
-function cli(argv, { home = homedir(), claudeBin = 'claude' } = {}) {
+function cli(argv, { home = homedir(), claudeBin = 'claude', owner } = {}) {
   const [cmd, arg] = argv;
   if (cmd === 'setup') {
     const r = setupSecondFolder({ home });
@@ -217,7 +273,11 @@ function cli(argv, { home = homedir(), claudeBin = 'claude' } = {}) {
     return r.ok ? [0, `New sessions start on account ${r.account}. Sessions already running keep their account until they end.`] : [1, `Refused: ${r.reason}`];
   }
   if (cmd === 'status') return [0, statusText({ home, authStatus: claudeAuthStatus(claudeBin) })];
-  return [2, 'Use: node accounts.mjs setup | use a|b | status'];
+  if (cmd === 'copy-to') {
+    const r = Number.isInteger(owner) ? copyAccountTo({ home, uid: owner, to: arg }) : refuse('copy-to needs --owner <uid>');
+    return r.ok ? [0, `Account ${r.account} copied to ${arg}.`] : [1, `Refused: ${r.reason}`];
+  }
+  return [2, 'Use: node accounts.mjs setup | use a|b | status | copy-to <file> --home <dir> --owner <uid>'];
 }
 
 const self = (() => { try { return realpathSync(fileURLToPath(import.meta.url)); } catch { return null; } })();
@@ -227,7 +287,11 @@ if (self && self === invoked) {
   const args = process.argv.slice(2);
   const k = args.indexOf('--claude');
   const claudeBin = k >= 0 ? args.splice(k, 2)[1] : 'claude';
-  const [code, text] = cli(args, { claudeBin });
+  const h = args.indexOf('--home');
+  const home = h >= 0 ? args.splice(h, 2)[1] : homedir();
+  const o = args.indexOf('--owner');
+  const owner = o >= 0 ? Number(args.splice(o, 2)[1]) : undefined;
+  const [code, text] = cli(args, { claudeBin, home, owner });
   (code ? process.stderr : process.stdout).write(`${text}\n`);
   process.exitCode = code;
 }

@@ -180,3 +180,8 @@ test('odd input refuses, never throws', () => {
   assert.ok(r.refusals.some((x) => x.n === 0));
   assert.match(verdictProblem({ card: { id: 'C-1', doc: { head: 'nope' } } }), /no head/);
 });
+
+test('L65: launches that could not be read refuse 5 with the reason', () => {
+  const f = clean((x) => { x.launches = null; x.launchesProblem = 'the review launches folder is missing'; });
+  assert.match(verdictProblem(f), /launch records could not be read: the review launches folder is missing/);
+});

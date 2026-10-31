@@ -3,10 +3,11 @@
 // a GitHub refusal and a stopped pass each end where they should; behind main catches up; the queue order.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, readdirSync } from 'node:fs';
+import { readFileSync, readdirSync, unlinkSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { setup, product, leadCard, runCard, outboxFile, put, must, plan, PRODUCT, fingerprintFor, fullTimeouts } from '../M9-record/fixtures.test-helper.mjs';
+import { setup, product, leadCard, runCard, outboxFile, put, must, plan, PRODUCT, fingerprintFor, fullTimeouts, runnerLaunch, launch } from '../M9-record/fixtures.test-helper.mjs';
 import { fakeRules, allow, deny, makeRules } from '../../shared/rules.mjs';
 import { makeEngine } from '../M10-rules/engine.mjs';
 import { parsePolicy } from '../M10-rules/policy.mjs';
@@ -43,11 +44,15 @@ function world({ values = {}, mergeAnswer } = {}) {
     [NO_PUSH_FACT, { green: true, at: new Date(env.clock.t).toISOString() }]]);
   const view = makeGitView({ gh: g.gh, owner: 'sample-org', repo: 'sample-app' });
   const alerts = [];
-  const ctx = { record: env.record, rules, product: PRODUCT, gh: g.gh, owner: 'sample-org', repo: 'sample-app', view, now: () => env.clock.t, alert: (a) => alerts.push(a), readFact: (id) => facts.get(id) ?? null };
+  // The gate's view of the Record knows the review user, as in production (its moves back to verified read the verdict
+  // file again, L66 M1); env.record is the same store.
+  const ctx = { record: env.review, rules, product: PRODUCT, gh: g.gh, owner: 'sample-org', repo: 'sample-app', view, now: () => env.clock.t, alert: (a) => alerts.push(a), readFact: (id) => facts.get(id) ?? null,
+    reviewLaunches: { root: env.launchRoot, uids: env.reviewUids, outbox: env.outRoot } };
   return { env, g, ctx, facts, alerts, root, values: vals };
 }
 
-// A card built, reviewed by a launched reviewer through the review outbox, verified, and asked to merge as pull #7.
+// A card built, reviewed by a reviewer the review runner launched (its own record, L65) through the review outbox,
+// verified, and asked to merge as pull #7.
 function verifiedCard(w, id = 'C-1', { pr = 7, files = { 'src/a.mjs': 'two' }, undo, request = true } = {}) {
   const { env, g } = w;
   if (undo) {
@@ -65,10 +70,10 @@ function verifiedCard(w, id = 'C-1', { pr = 7, files = { 'src/a.mjs': 'two' }, u
   must(put(env.record, 'workshop', 'card', id, { head }), 'head');
   must(env.record.applyOutbox({ role: 'worker', sessionId: 'S-1', card: id }, outboxFile(env, 'worker', 'S-1', `handin-${id}.md`, `${JSON.stringify({ entity: 'card', id, from_state: 'running', to_state: 'in_review' })}\n`)), 'in review');
   const sid = `R-${id}`;
-  must(env.record.write({ actor: 'dispatcher', entity: 'launch', id: `launch-${sid}`, expectRev: 0, doc: { session_id: sid, role: 'reviewer', card: id, head, rev: 1, launched_at: new Date(env.clock.t).toISOString() } }), 'launch');
+  runnerLaunch(env, id, sid, 'reviewer', head);
   const hdr = `${JSON.stringify({ entity: 'verdict', card: id, expectRev: env.record.read('card', id).rev, fields: { head, pass: true, checklist: CLEAN, material: 0 } })}\n`;
   must(env.review.applyOutbox({ role: 'reviewer', sessionId: sid, card: id }, outboxFile(env, 'reviewer', sid, `verdict-${id}.md`, hdr)), 'verdict');
-  must(put(env.record, 'dispatcher', 'card', id, { state: 'verified' }), 'verified');
+  must(put(env.review, 'dispatcher', 'card', id, { state: 'verified' }), 'verified');
   if (request) requestMerge(w, id, pr, head);
   return head;
 }
@@ -411,4 +416,66 @@ test('an ignored check named in the rules with a text app id is ignored, on the 
   await gatePass(w.ctx);
   const m = mergeOf(w);
   assert.equal(m.doc.state, 'merged', JSON.stringify(m.doc.reasons));
+});
+
+// ---- Lead call L65: the gate counts only the review runner's own launch records ----
+
+test('L65 planted: a verdict whose only launch is the Dispatcher\'s Record copy is refused (5) and never merged', async () => {
+  const w = world();
+  const head = verifiedCard(w);
+  // The runner's record is gone; the Dispatcher's copy in the Record says the same thing, and must not count.
+  unlinkSync(join(w.env.launchRoot, 'R-C-1.json'));
+  must(w.env.record.write({ actor: 'dispatcher', entity: 'launch', id: 'R-C-1', expectRev: 0, doc: { session_id: 'R-C-1', role: 'reviewer', card: 'C-1', head, rev: 1, launched_at: new Date(w.env.clock.t).toISOString() } }), 'the Record copy');
+  await gatePass(w.ctx);
+  const m = mergeOf(w);
+  assert.notEqual(m.doc.state, 'merged');
+  assert.ok(m.doc.reasons.some((x) => x.startsWith('5:') && /launched reviewer/.test(x)), m.doc.reasons.join(' | '));
+  assert.equal(w.g.writes.filter(([k]) => k === 'put').length, 0);
+  // The gathered facts hold no launch from the Record.
+  const f = await gatherFacts(w.ctx, m);
+  assert.deepEqual(f.launches, []);
+  void launch;
+});
+
+test('L66 M1 planted: a verdict row that says pass while its outbox file says fail is refused (5)', async () => {
+  const w = world();
+  verifiedCard(w);
+  // As if the reviewer had said fail and the Record row (which the workers' Mac user can write) were edited to pass: the
+  // file now says fail, and the row names that file, so only the file's own word differs.
+  const v = w.env.record.list('verdict')[0];
+  const file = v.doc.source_key.slice(0, v.doc.source_key.lastIndexOf('\0'));
+  writeFileSync(file, readFileSync(file, 'utf8').replace('"pass":true', '"pass":false'));
+  const key = `${file}\0${createHash('sha256').update(readFileSync(file)).digest('hex')}`;
+  w.env.store.transaction((tx) => tx.commit([{ entity: 'verdict', id: v.id, doc: { ...v.doc, source_key: key } }], { actor: v.doc.role + ':' + v.doc.session_id, kind: 'verdict' }));
+  assert.equal(w.env.record.read('verdict', v.id).doc.pass, true, 'the row says pass');
+  await gatePass(w.ctx);
+  const m = mergeOf(w);
+  assert.notEqual(m.doc.state, 'merged');
+  assert.ok(m.doc.reasons.some((x) => x.startsWith('5:') && /no passing reviewer verdict/.test(x)), m.doc.reasons.join(' | '));
+  // The file gone: refused, and refusal 5 says why the row did not count.
+  const w2 = world();
+  verifiedCard(w2);
+  const v2 = w2.env.record.list('verdict')[0];
+  unlinkSync(v2.doc.source_key.slice(0, v2.doc.source_key.lastIndexOf('\0')));
+  await gatePass(w2.ctx);
+  const m2 = mergeOf(w2);
+  assert.notEqual(m2.doc.state, 'merged');
+  assert.ok(m2.doc.reasons.some((x) => x.startsWith('5:') && /not counted: the verdict file of session R-C-1 fails its checks: file not found/.test(x)), m2.doc.reasons.join(' | '));
+});
+
+test('L65: with no review launches folder set, the gate refuses (5) and says why, never reading the Record', async () => {
+  const w = world();
+  verifiedCard(w);
+  delete w.ctx.reviewLaunches;
+  await gatePass(w.ctx);
+  const m = mergeOf(w);
+  assert.notEqual(m.doc.state, 'merged');
+  assert.ok(m.doc.reasons.some((x) => x.startsWith('5:') && /launch records could not be read: the gate has no review launches folder set/.test(x)), m.doc.reasons.join(' | '));
+  // A folder that fails M9's check refuses the same way.
+  const w2 = world();
+  verifiedCard(w2);
+  w2.ctx.reviewLaunches = { root: w2.env.launchRoot, uids: { ...w2.env.reviewUids, worker: w2.env.reviewUids.reviewer } };
+  await gatePass(w2.ctx);
+  const m2 = mergeOf(w2);
+  assert.ok(m2.doc.reasons.some((x) => x.startsWith('5:') && /shared with worker/.test(x)), m2.doc.reasons.join(' | '));
 });

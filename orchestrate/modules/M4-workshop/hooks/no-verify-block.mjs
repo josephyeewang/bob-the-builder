@@ -1,5 +1,6 @@
 // The no-verify block (design v4 §14.1.5). A role never skips git's checks: no --no-verify, no
-// `commit -n`, no switching the hooks folder off, no hook-skip variables.
+// `commit -n`, no switching the hooks folder off, no hook-skip variables. Nor the shell sandbox: a command asking to run
+// outside it (`dangerouslyDisableSandbox`) is refused for every role (L66 M3), as well as switched off in the settings.
 
 import { isMain, runHook, block, pass, shellCommands, shellWords, programOf, joinLines, unreadable, namesGitInternals } from './lib.mjs';
 
@@ -7,6 +8,7 @@ const SKIP_VARS = /(^|[ \t\n])(HUSKY|LEFTHOOK|SKIP|PRE_COMMIT_ALLOW_NO_CONFIG|GI
 
 export function decide(input) {
   if (input.tool_name !== 'Bash') return pass();
+  if (input.tool_input?.dangerouslyDisableSandbox !== undefined && input.tool_input.dangerouslyDisableSandbox !== false) return block('running a command outside the sandbox');
   // Read raw where a here-document matters: joining lines first could move where its body ends (L46).
   const raw = String(input.tool_input?.command ?? '');
   const cmd = joinLines(raw);

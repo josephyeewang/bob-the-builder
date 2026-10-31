@@ -6,7 +6,8 @@
 // wait, one merge at a time, the round cap). Anything that fails is refused, logged to refusals.jsonl with an alert,
 // and leaves no diary line.
 //
-//   const { record, store } = openRecord({ root, product, ownerUid, rules, alert, outbox: { root, uids } })
+//   const { record, store } = openRecord({ root, product, ownerUid, rules, alert, outbox: { root, uids, launches } })
+//   `outbox.launches` is the review runner's launch records folder (L65): a verdict counts only with a record there.
 //   record is shared/record.mjs's interface (makeRecord), so callers never see this file.
 //
 // Options only tests pass: `now` (a fake clock), `host`, `probe` (fake process checks), `faultAt` (crash at a step),
@@ -15,12 +16,12 @@
 import { createHash } from 'node:crypto';
 import { hostname } from 'node:os';
 import { basename } from 'node:path';
-import { CARD_KINDS, CHECKLIST_LEVELS, ENTITIES, FINAL_STATES, SESSION_ID, STATES, WAIT_FIELDS, WAIT_WHO, isOpen, makeRecord, missingFields, timeoutFor, VERDICT_CHECKLIST } from '../../shared/record.mjs';
+import { CARD_KINDS, ENTITIES, FINAL_STATES, SESSION_ID, STATES, WAIT_FIELDS, WAIT_WHO, isOpen, makeRecord, missingFields, timeoutFor } from '../../shared/record.mjs';
 import { canonicalJson } from '../../shared/plan-fingerprint.mjs';
 import { CREATE_STATES, INTERNAL_MOVES, moveActors } from './moves.mjs';
 import { PLAN_INPUTS, actorName, fieldsAllowed, mayCreateKind } from './permissions.mjs';
 import { readyCheck } from './ready.mjs';
-import { readOutboxFile } from './outbox.mjs';
+import { readOutboxFile, runnerLaunchFor, verdictFields, verdictFromFile } from './outbox.mjs';
 import { processDead, realProbe } from './lock.mjs';
 import { openStore } from './store.mjs';
 
@@ -308,13 +309,21 @@ export function openRecord({ root, product, ownerUid, rules, alert = () => {}, n
   }
 
   // in_review → verified (R2-M7): a passing verdict for this head, from a reviewer or auditor launched on this card for this head (round 5 m-4),
-  // read from the review user's own outbox (L44: outbox_uid is set only by the outbox intake).
+  // read from the review user's own outbox (L44). What counts is the verdict file itself, read again with every check
+  // (L66 M1): the row only says which file. The launch is the review runner's own record, read again here (L65); the
+  // Record's `launch` entries are the Dispatcher's and never count.
   function verdictFor(tx, cardId, doc) {
     if (typeof doc.head !== 'string' || !HEX40.test(doc.head)) return no('the card has no head to verify');
-    const launches = tx.list('launch').filter((l) => l.doc.card === cardId && (l.doc.role === 'reviewer' || l.doc.role === 'auditor'));
-    const ok = tx.list('verdict').find((v) => v.doc.card === cardId && v.doc.head === doc.head && v.doc.pass === true
-      && Number.isInteger(v.doc.outbox_uid) && /^(reviewer|auditor):/.test(v.createdBy) && launches.some((l) => l.doc.session_id === v.doc.session_id && l.doc.head === doc.head && v.createdBy === `${l.doc.role}:${l.doc.session_id}`));
-    return ok ? { ok: true } : no(`no passing verdict for head ${doc.head.slice(0, 7)} from a reviewer launched on this card`);
+    const ok = tx.list('verdict').find((v) => {
+      if (v.doc?.card !== cardId || v.doc?.head !== doc.head) return false;
+      const r = verdictFromFile({ outboxRoot: outbox.root, uids: outbox.uids, row: v });
+      if (!r.ok) return false;
+      const f = r.verdict;
+      if (f.card !== cardId || f.head !== doc.head || f.pass !== true || v.createdBy !== f.created_by) return false;
+      // The launch record must be the configured review user's, the same one that owns the verdict file.
+      return runnerLaunchFor({ root: outbox.launches, uids: outbox.uids, role: f.role, card: cardId, head: doc.head, sessionId: f.session_id }).ok;
+    });
+    return ok ? { ok: true } : no(`no passing verdict for head ${doc.head.slice(0, 7)} from a reviewer the review runner launched on this card`);
   }
 
   function checkAsk(old, doc, from, to, moving, changed) {
@@ -444,23 +453,17 @@ export function openRecord({ root, product, ownerUid, rules, alert = () => {}, n
       const c = tx.current('card', tag.card);
       if (!c || c.tampered) return no(c?.reason ?? `no card ${tag.card}`);
       if (c.rev !== h.expectRev) return no(`changed since read (rev ${c.rev}, expected ${h.expectRev})`);
-      const extra = Object.keys(fields).filter((k) => !['head', 'pass', 'notes', 'checklist', 'material'].includes(k));
-      if (extra.length) return no(`a verdict may not set ${extra.join(', ')}`);
-      if (typeof fields.head !== 'string' || !HEX40.test(fields.head)) return no('a verdict names the 40-hex head it reviewed');
-      if (typeof fields.pass !== 'boolean') return no('a verdict says pass: true or false');
-      if (fields.checklist !== undefined) {
-        const cl = fields.checklist;
-        if (!cl || typeof cl !== 'object' || Array.isArray(cl) || Object.keys(cl).some((k) => !VERDICT_CHECKLIST.includes(k))
-          || Object.values(cl).some((v) => !CHECKLIST_LEVELS.includes(v))) return no(`checklist lines are ${VERDICT_CHECKLIST.join(', ')}, each ${CHECKLIST_LEVELS.join('|')}`);
-      }
-      if (fields.material !== undefined && !(Number.isInteger(fields.material) && fields.material >= 0)) return no('material is a whole-number count');
-      // L44: only a session the launcher recorded as this role, on this card, at this exact head, may give a verdict.
-      if (!tx.list('launch').some((l) => l.doc.session_id === tag.sessionId && l.doc.role === tag.role && l.doc.card === tag.card && l.doc.head === fields.head))
-        return no(`no launch of ${tag.role} session ${tag.sessionId} on ${tag.card} at head ${fields.head.slice(0, 7)}: a verdict counts only from a launched reviewer, for the head it was launched on`);
+      const vf = verdictFields(h);
+      if (!vf.ok) return no(vf.reason);
+      // L44, L65: only a session the review runner launched as this role, on this card, at this exact head, may give a
+      // verdict. The runner's own record is the proof; a launch the Dispatcher wrote into the Record is not.
+      const rl = runnerLaunchFor({ root: outbox.launches, uids: outbox.uids, role: tag.role, card: tag.card, head: fields.head, sessionId: tag.sessionId });
+      if (!rl.ok) return no(`no launch of ${tag.role} session ${tag.sessionId} on ${tag.card} at head ${fields.head.slice(0, 7)} from the review runner (${rl.reason}): a verdict counts only from a session the runner launched, for the head it was launched on`);
       // One verdict per session (D12, 0b-9 M6): a reviewer that changes its mind is a new launch, never a second file.
       if (tx.list('verdict').some((v) => v.doc.session_id === tag.sessionId)) return no(`session ${tag.sessionId} has already given its verdict; a second is refused`);
       const id = `verdict-${tag.sessionId}-${tx.nextSeq()}`;
-      const doc = { session_id: tag.sessionId, role: tag.role, card: tag.card, card_rev: c.rev, head: fields.head, pass: fields.pass, notes: fields.notes ?? null, checklist: fields.checklist ?? null, material: fields.material ?? null, text: f.body, source_key: f.key, outbox_uid: f.owner_uid };
+      // For display: what counts is read again from the file each time (L66 M1).
+      const doc = { session_id: tag.sessionId, role: tag.role, card: tag.card, card_rev: c.rev, head: vf.head, pass: vf.pass, notes: vf.notes, checklist: vf.checklist, material: vf.material, text: f.body, source_key: f.key, outbox_uid: f.owner_uid, runner_launch: rl.key };
       return applyWrite(tx, { entity: 'verdict', id, expectRev: 0, doc, kind: 'verdict' }, actor);
     }
     if (f.kind === 'roadmap-') {

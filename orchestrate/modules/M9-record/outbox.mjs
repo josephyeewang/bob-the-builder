@@ -18,14 +18,44 @@
 // and is no other role's uid, and the role and session folders are owned by it and writable by no one else. The
 // result carries `owner_uid` (the review user) so the record can show where the verdict came from. Whether the session
 // was launched as a reviewer on that head is the record's check (writer.mjs), made in the same transaction.
+//
+// THE RUNNER'S LAUNCH RECORDS (lead call L65). The review runner (M4 review-runner.mjs) runs as `review`, makes each
+// review session's id itself, and writes `<launches folder>/<session id>.json` into a folder only `review` can write.
+// A verdict counts only when such a record names the same session, role, card and head. The Record's own `launch`
+// entries are written by the Dispatcher, which runs as the workers' Mac user, so for a review they never count. These
+// checks live here and nowhere else: the record's intake and verdict rule (writer.mjs) and the Merge Gate (M6
+// gather.mjs) call them.
+//
+//   reviewUid(uids) → { ok, uid } | { ok: false, reason }       the one Mac user both review roles run as
+//   runnerLaunchFor({ root, uids, role, card, head, sessionId }) → { ok, launch, key } | { ok: false, reason }
+//     `uid` in place of `uids`: the review user the intake already proved (a verdict's outbox_uid), for the verdict rule.
+//   runnerLaunches({ root, uids }) → { ok, launches: [{ doc, key }], refused: [{ name, reason }] } | { ok: false, reason }
+//
+// THE VERDICT ITSELF (lead call L66, M1). The Record is written by the Dispatcher, as the workers' Mac user, so what a
+// verdict row says (pass, checklist, head, who wrote it) is never what counts. `verdictFromFile` re-reads the file the
+// row came from, with every check readOutboxFile makes, and needs it to be the very file the row names (its
+// `source_key`: real path and sha256). What counts is what the file says, and the session and role come from the folder
+// it sits in. A session folder holding more than one verdict file counts none (one verdict per session, D12), so a row
+// can't pick the file the intake refused. The Merge Gate (M6 gather.mjs) and the record's verdict rule call it.
+//
+//   verdictFields(header) → { ok, card, head, pass, notes, checklist, material } | { ok: false, reason }
+//   verdictFromFile({ outboxRoot, uids, row }) →
+//     { ok, verdict: { role, session_id, card, head, pass, checklist, material, created_by, outbox_uid, source_key } } | { ok: false, reason }
 
 import { createHash } from 'node:crypto';
-import { closeSync, fstatSync, lstatSync, openSync, readSync, realpathSync, constants } from 'node:fs';
+import { closeSync, fstatSync, lstatSync, openSync, readdirSync, readSync, realpathSync, constants } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
-import { OUTBOX_KINDS, SESSION_ID } from '../../shared/record.mjs';
+import { CHECKLIST_LEVELS, OUTBOX_KINDS, SESSION_ID, VERDICT_CHECKLIST } from '../../shared/record.mjs';
+import { REVIEW_ROLES } from '../../shared/review-roles.mjs';
 
+export { REVIEW_ROLES };
 export const MAX_OUTBOX_BYTES = 256 * 1024;
-export const REVIEW_ROLES = Object.freeze(['reviewer', 'auditor']);
+export const MAX_LAUNCH_BYTES = 16 * 1024;
+export const LAUNCH_NAME = /^([A-Za-z0-9-]{1,128})\.json$/;
+// A card id: letters, digits, dot, dash and underscore, never `..` (L66), so it can't climb out of a folder it names.
+// The one definition: the review runner and the Dispatcher's requests use it too.
+export const CARD_ID = /^(?!.*\.\.)[A-Za-z0-9._-]{1,200}$/;
+const HEX40 = /^[0-9a-f]{40}$/;
 
 // Is the review user a separate Mac user? null when it is, else the reason (L44). Also used by the Merge Gate.
 export function reviewUserProblem(uids, role) {
@@ -36,6 +66,94 @@ export function reviewUserProblem(uids, role) {
   const shared = Object.entries(uids ?? {}).filter(([r, u]) => !REVIEW_ROLES.includes(r) && u === own).map(([r]) => r);
   if (shared.length) return `the review user is not a separate Mac user (shared with ${shared.join(', ')})`;
   return null;
+}
+
+// The one Mac user both review roles run as: the runner is one process, so the reviewer and the auditor share it.
+export function reviewUid(uids) {
+  for (const r of REVIEW_ROLES) { const p = reviewUserProblem(uids, r); if (p) return { ok: false, reason: p }; }
+  if (new Set(REVIEW_ROLES.map((r) => uids[r])).size !== 1) return { ok: false, reason: 'the reviewer and the auditor must run as the same review user' };
+  return { ok: true, uid: uids[REVIEW_ROLES[0]] };
+}
+
+export function launchesFolderProblem(root, uid) {
+  if (typeof root !== 'string' || !root.startsWith('/')) return 'no review launches folder is configured';
+  let st;
+  try { st = lstatSync(root); } catch { return 'the review launches folder is missing'; }
+  if (st.isSymbolicLink()) return 'the review launches folder is a link';
+  if (!st.isDirectory()) return 'the review launches folder is not a folder';
+  if (st.uid !== uid) return 'the review launches folder is not owned by the review user';
+  if (st.mode & 0o022) return 'the review launches folder can be written by others than the review user';
+  return null;
+}
+
+// One launch record, read as the outbox reads a file: no link, a plain file with one name, review's own and writable by
+// no one else, small, and naming itself (the session id in the file is the one in its name).
+function readLaunch(root, uid, name, fstat = fstatSync) {
+  const no = (reason) => ({ ok: false, reason });
+  const m = LAUNCH_NAME.exec(name);
+  if (!m) return no(`${name.slice(0, 80)} is not a launch record name`);
+  let fd;
+  try { fd = openSync(join(root, name), constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); } catch (e) {
+    return no(e?.code === 'ELOOP' ? 'the launch record is a link' : e?.code === 'ENOENT' ? 'no launch record' : `the launch record can't be opened (${e?.code ?? 'error'})`);
+  }
+  let buf;
+  try {
+    const st = fstat(fd);
+    if (!st.isFile()) return no('the launch record is not a plain file');
+    if (st.nlink !== 1) return no('the launch record has more than one name (a hard link)');
+    if (st.uid !== uid) return no('the launch record is not owned by the review user');
+    if (st.mode & 0o022) return no('the launch record can be written by others than the review user');
+    if (st.size > MAX_LAUNCH_BYTES) return no(`the launch record is over ${MAX_LAUNCH_BYTES} bytes`);
+    buf = Buffer.alloc(st.size);
+    let got = 0;
+    while (got < buf.length) { const n = readSync(fd, buf, got, buf.length - got, got); if (!n) break; got += n; }
+    buf = buf.subarray(0, got);
+  } finally { closeSync(fd); }
+  let doc;
+  try { doc = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(buf)); } catch { return no('the launch record is not JSON'); }
+  if (!doc || typeof doc !== 'object' || Array.isArray(doc)) return no('the launch record is not a JSON object');
+  if (doc.session_id !== m[1]) return no('the launch record names another session than its file name');
+  if (!REVIEW_ROLES.includes(doc.role)) return no('the launch record names no review role');
+  if (typeof doc.card !== 'string' || !CARD_ID.test(doc.card)) return no('the launch record names no card');
+  if (typeof doc.head !== 'string' || !HEX40.test(doc.head)) return no('the launch record names no 40-hex head');
+  return { ok: true, doc, key: createHash('sha256').update(buf).digest('hex') };
+}
+
+/** The runner's launch record for one session, matching role, card and head; anything else is a refusal, never a throw. */
+// `fstat` is a port, so a test can stand in for a record another user owns (L66).
+export function runnerLaunchFor({ root, uids, uid, role, card, head, sessionId, fstat } = {}) {
+  const no = (reason) => ({ ok: false, reason });
+  if (!REVIEW_ROLES.includes(role)) return no(`${role} is not a review role`);
+  if (typeof sessionId !== 'string' || !SESSION_ID.test(sessionId)) return no('no session id of letters, digits and dashes');
+  const u = uid !== undefined ? (Number.isInteger(uid) && uid > 0 ? { ok: true, uid } : { ok: false, reason: 'no review user id' }) : reviewUid(uids);
+  if (!u.ok) return no(u.reason);
+  const bad = launchesFolderProblem(root, u.uid);
+  if (bad) return no(bad);
+  const r = readLaunch(root, u.uid, `${sessionId}.json`, fstat);
+  if (!r.ok) return no(`${r.reason} for session ${sessionId}`);
+  const d = r.doc;
+  if (d.role !== role) return no(`the runner launched session ${sessionId} as ${d.role}, not ${role}`);
+  if (d.card !== card) return no(`the runner launched session ${sessionId} on another card`);
+  if (d.head !== head) return no(`the runner launched session ${sessionId} on head ${d.head.slice(0, 7)}, not ${String(head).slice(0, 7)}`);
+  return { ok: true, launch: d, key: r.key };
+}
+
+/** Every launch record that passes the checks; a bad file is listed under `refused`, a bad folder refuses the lot. */
+export function runnerLaunches({ root, uids, fstat } = {}) {
+  const u = reviewUid(uids);
+  if (!u.ok) return { ok: false, reason: u.reason };
+  const bad = launchesFolderProblem(root, u.uid);
+  if (bad) return { ok: false, reason: bad };
+  let names;
+  try { names = readdirSync(root).sort(); } catch { return { ok: false, reason: 'the review launches folder could not be listed' }; }
+  const launches = []; const refused = [];
+  for (const name of names) {
+    // The runner writes `.<name>.tmp` first and renames it into place, so a half-written record is never under its name.
+    if (name.startsWith('.')) continue;
+    const r = readLaunch(root, u.uid, name, fstat);
+    if (r.ok) launches.push({ doc: r.doc, key: r.key }); else refused.push({ name, reason: r.reason });
+  }
+  return { ok: true, launches, refused };
 }
 
 // The longest listed kind the name starts with (so `report-compact-x` is report-compact-, not report-).
@@ -116,4 +234,75 @@ export function readOutboxFile({ outboxRoot, uids = {}, tag, file }) {
   if (header.entity !== spec.entity) return no(`a ${kind} file's header must name entity ${spec.entity}`, key);
   if (header.fields !== undefined && (!header.fields || typeof header.fields !== 'object' || Array.isArray(header.fields))) return no('header fields must be an object', key);
   return { ok: true, key, kind, spec, header, body: nl < 0 ? '' : text.slice(nl + 1), sha256, realpath: real, owner_uid: owner };
+}
+
+/** A verdict file's header, checked: the one reading of what a verdict says, for the intake and for every later read. */
+export function verdictFields(h) {
+  const no = (reason) => ({ ok: false, reason });
+  if (!h || typeof h !== 'object' || Array.isArray(h) || h.entity !== 'verdict') return no('the header is not a verdict\'s');
+  const fields = h.fields ?? {};
+  if (!fields || typeof fields !== 'object' || Array.isArray(fields)) return no('header fields must be an object');
+  const extra = Object.keys(fields).filter((k) => !['head', 'pass', 'notes', 'checklist', 'material'].includes(k));
+  if (extra.length) return no(`a verdict may not set ${extra.join(', ')}`);
+  if (typeof h.card !== 'string' || !CARD_ID.test(h.card) || h.card.split('.').includes('')) return no('a verdict names its card');
+  if (typeof fields.head !== 'string' || !HEX40.test(fields.head)) return no('a verdict names the 40-hex head it reviewed');
+  if (typeof fields.pass !== 'boolean') return no('a verdict says pass: true or false');
+  if (fields.checklist !== undefined) {
+    const cl = fields.checklist;
+    if (!cl || typeof cl !== 'object' || Array.isArray(cl) || Object.keys(cl).some((k) => !VERDICT_CHECKLIST.includes(k))
+      || Object.values(cl).some((v) => !CHECKLIST_LEVELS.includes(v))) return no(`checklist lines are ${VERDICT_CHECKLIST.join(', ')}, each ${CHECKLIST_LEVELS.join('|')}`);
+  }
+  if (fields.material !== undefined && !(Number.isInteger(fields.material) && fields.material >= 0)) return no('material is a whole-number count');
+  return { ok: true, card: h.card, head: fields.head, pass: fields.pass, notes: fields.notes ?? null, checklist: fields.checklist ?? null, material: fields.material ?? null };
+}
+
+/**
+ * A review session's own verdict, judged as the intake judges it (L66): the one verdict file in its outbox folder, read
+ * with every check, for the card and head it was launched on. The review runner calls this when a session ends, so a
+ * verdict the intake would refuse counts as a failed start. → { ok, verdict } | { ok: false, none, reason } (`none` when
+ * nothing was handed in)
+ */
+export function sessionVerdict({ outboxRoot, uids, role, sessionId, card, head } = {}) {
+  const no = (reason, none = false) => ({ ok: false, none, reason });
+  try {
+    if (!REVIEW_ROLES.includes(role)) return no(`${role} is not a review role`);
+    if (typeof sessionId !== 'string' || !SESSION_ID.test(sessionId)) return no('no session id of letters, digits and dashes');
+    const dir = join(outboxRoot, role, sessionId);
+    let names;
+    try { names = readdirSync(dir).filter((n) => !n.startsWith('.') && kindOf(n) === 'verdict-'); } catch { return no('its outbox folder could not be listed'); }
+    if (!names.length) return no('no verdict was handed in', true);
+    if (names.length > 1) return no('more than one verdict file was left, so none counts');
+    const f = readOutboxFile({ outboxRoot, uids, tag: { role, sessionId }, file: join(dir, names[0]) });
+    if (!f.ok) return no(f.reason);
+    const v = verdictFields(f.header);
+    if (!v.ok) return no(v.reason);
+    if (v.card !== card) return no(`the verdict names card ${v.card}, not ${card}`);
+    if (v.head !== head) return no(`the verdict names head ${v.head.slice(0, 7)}, not ${String(head).slice(0, 7)}`);
+    return { ok: true, verdict: v };
+  } catch (e) { return no(`the verdict could not be read (${e?.code ?? e?.message ?? e})`); }
+}
+
+/** What a verdict row's own file says, read again with every check (L66 M1); a row whose file fails is a refusal, never a throw. */
+export function verdictFromFile({ outboxRoot, uids, row } = {}) {
+  const no = (reason) => ({ ok: false, reason });
+  try {
+    const d = row?.doc;
+    if (!d || typeof d !== 'object') return no('no verdict row');
+    if (!REVIEW_ROLES.includes(d.role)) return no('the verdict row names no review role');
+    if (typeof d.session_id !== 'string' || !SESSION_ID.test(d.session_id)) return no('the verdict row names no session');
+    const cut = typeof d.source_key === 'string' ? d.source_key.lastIndexOf('\0') : -1;
+    if (cut <= 0) return no(`the verdict row of session ${d.session_id} names no file`);
+    const file = d.source_key.slice(0, cut);
+    const f = readOutboxFile({ outboxRoot, uids, tag: { role: d.role, sessionId: d.session_id }, file });
+    if (!f.ok) return no(`the verdict file of session ${d.session_id} fails its checks: ${f.reason}`);
+    if (f.key !== d.source_key) return no(`the verdict file of session ${d.session_id} is not the one handed in (its content changed)`);
+    if (f.kind !== 'verdict-') return no(`the file of session ${d.session_id} is not a verdict`);
+    let names;
+    try { names = readdirSync(dirname(f.realpath)); } catch { return no(`the outbox of session ${d.session_id} could not be listed`); }
+    if (names.filter((n) => !n.startsWith('.') && kindOf(n) === 'verdict-').length !== 1) return no(`session ${d.session_id} left more than one verdict file, so none counts`);
+    const v = verdictFields(f.header);
+    if (!v.ok) return no(`the verdict file of session ${d.session_id}: ${v.reason}`);
+    return { ok: true, verdict: { role: d.role, session_id: d.session_id, card: v.card, head: v.head, pass: v.pass, checklist: v.checklist, material: v.material,
+      created_by: `${d.role}:${d.session_id}`, outbox_uid: f.owner_uid, source_key: f.key } };
+  } catch (e) { return no(`the verdict file could not be read (${e?.code ?? e?.message ?? e})`); }
 }

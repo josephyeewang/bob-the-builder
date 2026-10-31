@@ -28,6 +28,7 @@ const N_PATHS = {
   copy: '/w/copy', outbox: '/w/outbox', hooksDir: '/w/hooks', snapshot: '/w/rules.json', node: '/w/node',
   deny: { secrets: ['/w/secrets'], claudeHome: '/h/.claude', robotKeys: '/w/keys', record: '/w/record', otherCopies: ['/w/copy2'] },
   bobFolder: '/w/bob', mirror: '/w/mirror.git',
+  reviewWalls: { outboxRoot: '/r/outbox', launches: '/r/launches', status: '/r/status', requests: '/r/requests' },
 };
 const N_VERSION = '2.1.300';
 const N_FLAGS = Object.values(FLAGS).filter((f) => f.startsWith('-'));
@@ -37,6 +38,9 @@ function NAMES(role, over = {}) {
   const confirmed = Object.fromEntries([...namesIn(r.settings), ...N_FLAGS].map((n) => [n, { by: 'readback:stand-in', version: N_VERSION }]));
   return { settings: r.settings, flags: N_FLAGS, version: N_VERSION, confirmed, ...over };
 }
+
+// Stand-in Mac user ids (L44): the review roles have a user of their own; the launcher runs as 501.
+const UIDS = { lead: 501, worker: 501, front_door: 501, learning: 501, writer: 501, incident: 501, scout: 501, thinking: 501, reviewer: 503, auditor: 503 };
 
 // ---- the order (§14.1.3) ----
 
@@ -72,7 +76,7 @@ test('launch: which checks apply to which role', async () => {
   const ran = async (role) => {
     const called = [];
     const checks = Object.fromEntries(CHECKS.map((c) => [c.n, async () => { called.push(c.n); return { ok: true }; }]));
-    await launch({ role, profile: DESIGN_PROFILES[role], checks, start: async () => {}, names: NAMES(role) });
+    await launch({ role, profile: DESIGN_PROFILES[role], checks, start: async () => {}, names: NAMES(role), ctx: { uids: UIDS }, ownUid: () => UIDS[role] });
     return called;
   };
   assert.deepEqual(await ran('worker'), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
@@ -88,6 +92,45 @@ test('launch: which checks apply to which role', async () => {
   const leadWithShell = { ...DESIGN_PROFILES.lead, tools: [...DESIGN_PROFILES.lead.tools, 'Bash'] };
   await launch({ role: 'lead', profile: leadWithShell, checks, start: async () => {}, names: NAMES('lead') });
   assert.ok(called.includes(11));
+});
+
+test('L44, L65: a reviewer or auditor starts only as the review user (the runner); start gets runAs', async () => {
+  const all = () => {
+    const called = [];
+    return { called, checks: Object.fromEntries(CHECKS.map((c) => [c.n, async () => { called.push(c.n); return { ok: true }; }])) };
+  };
+  const { writer: _w, ...noWriter } = UIDS;
+  for (const role of ['reviewer', 'auditor']) {
+    for (const [uids, self, re] of [[undefined, 503, /no map of role to Mac user id/], [noWriter, 503, /leaves out writer/],
+      [{ ...UIDS, [role]: 501 }, 501, /not a separate Mac user/], [UIDS, 501, /started only by the review runner, running as the review user \(uid 503\), not uid 501/],
+      [{ ...UIDS, worker: 503 }, 503, /not a separate Mac user \(shared with worker\)/], [{ ...UIDS, [role]: 0 }, 0, /root/]]) {
+      const { called, checks } = all();
+      let started = 0;
+      const r = await launch({ role, profile: DESIGN_PROFILES[role], checks, start: async () => { started += 1; }, names: NAMES(role), ctx: { uids }, ownUid: () => self });
+      assert.equal(r.ok, false, `${role} ${re}`);
+      assert.equal(r.failedAt, 0);
+      assert.match(r.reason, new RegExp(`a ${role} runs only as the review user`));
+      assert.match(r.reason, re);
+      assert.deepEqual(called, []);
+      assert.equal(started, 0);
+    }
+    const { checks } = all();
+    let got;
+    const r = await launch({ role, profile: DESIGN_PROFILES[role], checks, start: async (ctx) => { got = ctx; return 'r-1'; }, names: NAMES(role), ctx: { uids: UIDS }, ownUid: () => 503 });
+    assert.equal(r.ok, true);
+    assert.deepEqual(got.runAs, { user: 'review', uid: 503 });
+    // With no stand-in, the launcher's own uid is used: this test runs as a user that is not 503's review user.
+    const own = await launch({ role, profile: DESIGN_PROFILES[role], checks, start: async () => {}, names: NAMES(role), ctx: { uids: { ...UIDS, reviewer: 1 + process.getuid(), auditor: 1 + process.getuid() } } });
+    assert.equal(own.ok, false);
+    assert.match(own.reason, new RegExp(`not uid ${process.getuid()}`));
+  }
+  // Every other role starts as the launcher's own user, with or without a uids map.
+  for (const role of ['worker', 'lead', 'writer']) {
+    const { checks } = all();
+    let got;
+    await launch({ role, profile: DESIGN_PROFILES[role], checks, start: async (ctx) => { got = ctx; }, names: NAMES(role) });
+    assert.equal(got.runAs, null, role);
+  }
 });
 
 test('launch: a setting name not confirmed on the pinned version refuses before check 1 (audit R-0b-44 M-1)', async () => {
@@ -305,7 +348,7 @@ function hookWorld(role = 'worker') {
   const rules = { production: { env_files: [join(root, 'prod.env')], programs: ['fakehost'], hosts: ['db.prod.example.net'] }, secrets: { paths: [keys] } };
   writeFileSync(snapshot, makeSnapshot(rules));
   const profile = DESIGN_PROFILES[role];
-  const r = renderRoleSettings({ productionFiles: [], role, profile, paths: { copy, outbox, hooksDir, snapshot, node: process.execPath, deny: { secrets: [keys] } }, product: { commands: { test: 'npm test' } } });
+  const r = renderRoleSettings({ productionFiles: [], role, profile, paths: { copy, outbox, hooksDir, snapshot, node: process.execPath, deny: { secrets: [keys] }, reviewWalls: { outboxRoot: join(root, 'ro'), launches: join(root, 'rl'), status: join(root, 'rs'), requests: join(root, 'rq') } }, product: { commands: { test: 'npm test' } } });
   assert.equal(r.ok, true, r.reason);
   const check = (over = {}) => checkHooks({ settings: r.settings, hooksDir, source, kinds: profile.outbox, copy, outbox, harmfulProduction: productionProbe(rules), timeoutMs: 1500, ...over });
   return { root, source, hooksDir, outbox, settings: r.settings, check, rules };

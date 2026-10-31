@@ -5,7 +5,7 @@ import { FINAL_STATES, SCRIPT_ACTORS, STATES, timeoutFor } from '../../shared/re
 import { readFileSync } from 'node:fs';
 import { parsePolicy } from '../M10-rules/policy.mjs';
 import { INTERNAL_MOVES, MOVES, moveActors } from './moves.mjs';
-import { HEAD, PRODUCT, fullTimeouts, iso, seed, setup } from './fixtures.test-helper.mjs';
+import { HEAD, PRODUCT, fullTimeouts, iso, passingVerdict, seed, setup } from './fixtures.test-helper.mjs';
 
 const ACTORS = SCRIPT_ACTORS.filter((a) => a !== 'joe');
 const GATE = /illegal move|may not move|made only by a claim break/;
@@ -133,8 +133,7 @@ test('every legal move succeeds for each listed actor when its condition holds',
             if (from === 'ready' && to === 'claimed') next.claim = { kind: 'session', host: 'mac-a', pid: 7, pid_start: 'x', session_id: 'S-9' };
             if (actor === 'workshop') next.head = 'c'.repeat(40);
             if (to === 'verified' || to === 'approved') {   // every way in needs a pass for the head (round 3 MAT-A)
-              ok(env.record.write({ actor: 'dispatcher', entity: 'launch', id: `launch-${id}`, expectRev: 0, doc: { session_id: `R-${id}`, role: 'reviewer', card: id, head: HEAD, rev: 1, launched_at: iso(t) } }), 'launch');
-              env.store.transaction((tx) => tx.commit([{ entity: 'verdict', id: `verdict-${id}`, doc: { session_id: `R-${id}`, role: 'reviewer', card: id, head: HEAD, pass: true, outbox_uid: 501 } }], { actor: `reviewer:R-${id}`, kind: 'verdict' }));
+              passingVerdict(env, id, `R-${id}`);
             }
             if (to === 'merged') { next.merge_commit = HEAD; seed(env, 'merge', `merged-${id}`, { state: 'merged', card: id, merge_commit: HEAD }); }
             const cardWrite = { entity: 'card', id, expectRev: env.record.read('card', id).rev, doc: next };
@@ -166,7 +165,9 @@ test('every legal move succeeds for each listed actor when its condition holds',
               also = [{ entity: 'card', id: doc.card, expectRev: c.rev, doc: { ...c.doc, state: 'merging' } }];
             }
           }
-          ok(env.record.write({ actor, ...write, ...(also ? { also } : {}) }), where);
+          // A move needing a verdict goes through the view that knows the review user (L66 M1: the file is read again).
+          const via = entity === 'card' && (to === 'verified' || to === 'approved') ? env.review : env.record;
+          ok(via.write({ actor, ...write, ...(also ? { also } : {}) }), where);
           passed++;
           // One merge at a time: finish this one so the next case can enter checking.
           if (also) seed(env, 'merge', write.id, { ...env.record.read('merge', write.id).doc, state: 'merged' });

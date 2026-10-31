@@ -10,6 +10,12 @@ import { writeFileSync, readFileSync, renameSync } from 'node:fs';
 import { join, dirname, basename } from 'node:path';
 import { SETTINGS as S, HOOK_FIELDS as H, HOOK_EVENTS as E, ENV, REFUSED_SETTINGS } from './settings-names.mjs';
 import { hasShell, DESIGN_PROFILES } from './role-profiles.mjs';
+import { REVIEW_ROLES } from '../../../shared/review-roles.mjs';
+
+// The review user's own folders (L66 M3): what a verdict counts from. A reviewer runs the change's tests by design, so
+// code a worker wrote runs as `review`; the shell sandbox, for Bash and everything it starts, may write none of them,
+// and the Write and Edit tools none but the outbox (where the verdict is written, through Write, which the hooks judge).
+export const REVIEW_WALLS = Object.freeze(['outboxRoot', 'launches', 'status', 'requests']);
 
 export const HOOK_TIMEOUT = 10;
 export const POLICY_HOOKS = Object.freeze({
@@ -45,7 +51,8 @@ const denyPair = (p) => [`Read(/${abs(p)}/**)`, `Edit(/${abs(p)}/**)`];
 
 /**
  * paths: { copy, outbox, hooksDir, snapshot, node, deny: { secrets: [], claudeHome, ssh, gh, robotKeys, record, otherCopies: [] },
- *          bobFolder?, extraOutboxes?: [] }
+ *          bobFolder?, extraOutboxes?: [], reviewWalls? }
+ * reviewWalls { outboxRoot, launches, status, requests }: needed for a reviewer or auditor (L66 M3), refused without.
  * product: { commands, hosts }         rulesHosts: the rules' allowed hosts; registryHosts: allowed during install only
  * phase: 'session' | 'install'
  * productionFiles: the rules' `production.env_files`. Each must be on the read-deny list, or the launch is refused
@@ -86,6 +93,15 @@ export function renderRoleSettings({ role, profile, paths, product = {}, rulesHo
     for (const pat of ['//**/.claude/**', '//**/.mcp.json', '//**/SKILL.md']) deny.push(`Read(${pat})`, `Edit(${pat})`, `Write(${pat})`);
   }
   if (paths.bobFolder) deny.push(`Edit(/${abs(paths.bobFolder)}/**)`, `Write(/${abs(paths.bobFolder)}/**)`);
+  const walls = [];
+  if (REVIEW_ROLES.includes(role)) {
+    const w = paths.reviewWalls ?? {};
+    for (const k of REVIEW_WALLS) {
+      if (typeof w[k] !== 'string' || !w[k].startsWith('/') || /[^A-Za-z0-9._/-]/.test(w[k]) || w[k].split('/').includes('..')) return refuse(`a ${role}'s settings need the review folder ${k} as a plain absolute path`);
+      walls.push(w[k].replace(/\/+$/, ''), `${w[k].replace(/\/+$/, '')}/**`);
+      if (k !== 'outboxRoot') deny.push(`Edit(/${abs(w[k])}/**)`, `Write(/${abs(w[k])}/**)`);
+    }
+  }
 
   // Hook arguments are words, so no path may hold a space or a shell character.
   for (const p of [paths.node, paths.hooksDir, paths.outbox, paths.snapshot, paths.copy]) {
@@ -116,7 +132,7 @@ export function renderRoleSettings({ role, profile, paths, product = {}, rulesHo
       [S.failIfUnavailable]: true,
       [S.allowUnsandboxedCommands]: false,
       [S.network]: { [S.allowedDomains]: allowedDomains, [S.strictAllowlist]: true },
-      [S.filesystem]: { [S.denyRead]: denyPaths, [S.denyWrite]: [`${paths.outbox}/.*`, `${paths.outbox}/**/.*`, ...(paths.bobFolder ? [paths.bobFolder, `${paths.bobFolder}/**`] : [])] },
+      [S.filesystem]: { [S.denyRead]: denyPaths, [S.denyWrite]: [`${paths.outbox}/.*`, `${paths.outbox}/**/.*`, ...(paths.bobFolder ? [paths.bobFolder, `${paths.bobFolder}/**`] : []), ...walls] },
     },
     [S.hooks]: hooks,
     [S.env]: { [ENV.autoCompactWindow]: String(profile.compactWindow), [ENV.disableUpdates]: '1' },

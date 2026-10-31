@@ -117,6 +117,7 @@ export const LATE_MARK_OK = Object.freeze({
   UNKNOWN_FACT: 'the mark carries the stretch it was for (`since`), and a new stretch is told again',
   factId: 'told keys count only while still in the last recorded set, so a key that left is told again',
   RESTART_FACT: 'once per Lead session, and a session id is never reused',
+  REVIEW_ALERT_FACT: 'one fact per review runner alert (its id and time), so a late mark is on an alert that has been told',
 });
 
 // The fact names each told mark goes on: `fact: NAME` inside a tellThen call (a call `NAME(...)` or a bare name).

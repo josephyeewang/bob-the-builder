@@ -167,6 +167,23 @@ test('no-verify block refuses every way of skipping git checks', () => {
   for (const c of ['git commit -m "no -n here"', 'git commit -am x', 'npm test', 'ls -n']) assert.equal(noVerify.decide(bash(c)).block, false, c);
 });
 
+test('L66 M3: a command asking to run outside the sandbox is refused for every role; a reviewer\'s Write of its verdict passes', () => {
+  for (const v of [true, 'true', 1, 'yes', {}]) {
+    const r = noVerify.decide({ tool_name: 'Bash', tool_input: { command: 'npm test', dangerouslyDisableSandbox: v }, cwd: '/' });
+    assert.equal(r.block, true, String(v));
+    assert.match(r.reason, /outside the sandbox/);
+  }
+  assert.equal(noVerify.decide({ tool_name: 'Bash', tool_input: { command: 'npm test', dangerouslyDisableSandbox: false }, cwd: '/' }).block, false);
+  assert.equal(noVerify.decide(bash('npm test')).block, false);
+  // From the real script too, for a reviewer.
+  const w = world();
+  const ra = args(w, 'reviewer', { kinds: ['verdict', 'report'] });
+  assert.equal(runScript('no-verify-block', ra, { tool_name: 'Bash', tool_input: { command: 'npm test', dangerouslyDisableSandbox: true }, cwd: '/' }).code, 2);
+  // The verdict is written with the Write tool, which the plain-files hook judges: a flat file of a kind of its own passes.
+  assert.equal(plain.decide(write(join(w.outbox, 'verdict-C-1.json')), ra).block, false);
+  assert.equal(runScript('plain-files', ra, write(join(w.outbox, 'verdict-C-1.json'))).code, 0);
+});
+
 test('secret-file block refuses key and env files and listed folders, by tool and in the shell', () => {
   const w = world();
   const a = args(w);
