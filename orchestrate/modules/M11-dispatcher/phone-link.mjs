@@ -14,7 +14,10 @@
 // - minibase-running false with the network up: start it again through the launcher, at most once
 //   every 5 min.
 // - The Front Door itself gone from the session list (audit MAT-10): restart it under its fixed name
-//   with its last handoff, at most once every 5 min; an alert if the restart fails.
+//   with its last handoff, at most once every 5 min; an alert if the restart fails, once until it
+//   runs again (L63 m4).
+// - Two accounts (L63 m2): while it runs on the account in use, a Front Door left on another account
+//   is stopped, checked at most once every 5 min; an alert, once, if it can't be stopped.
 // - A reading older than 5 min counts as unknown (audit MIN-10).
 // The step's memory is the fact `phone-link`. A reading counts once (by its observed_at).
 
@@ -23,6 +26,9 @@ import { note } from './moves.mjs';
 import { tellThen, dropCause } from './alerts.mjs';
 
 export const LINK_FACT = 'phone-link';
+// Once-per-cause marks (L63): a failed Front Door restart, and a Front Door left on another account that won't stop.
+export const FD_RESTART_FACT = 'phone-link-restart';
+export const FD_STRAY_FACT = 'phone-link-stray';
 export const FACTS = Object.freeze({ network: 'network-up', reachable: 'frontdoor-reachable', minibase: 'minibase-running' });
 export const RETRY_MS = 5 * 60_000;
 export const FALSE_READINGS = 2;
@@ -30,6 +36,12 @@ export const ALERT_AFTER_FAILURES = 3;
 export const REMOTE_CONTROL = '/remote-control';
 export const READING_MAX_AGE_MS = 5 * 60_000;
 const iso = (ms) => new Date(ms).toISOString();
+const toldOn = (rec, fact) => rec.read('fact', fact)?.doc?.told === true;
+// The cause cleared: its mark is reset, so the next time it happens Joe is told again.
+function clearTold(rec, now, fact) {
+  const c = rec.read('fact', fact);
+  if (c?.doc?.told) rec.write({ actor: 'dispatcher', entity: 'fact', id: fact, expectRev: c.rev, doc: { ...c.doc, told: false, changed_at: iso(now) }, kind: 'phone_link' });
+}
 
 const reading = (rec, id, now) => {
   const d = rec.read('fact', id)?.doc;
@@ -42,10 +54,11 @@ const reading = (rec, id, now) => {
 /**
  * One pass. Ports: `send(text)` = sendSafe to the Front Door -> { outcome }; `restartFrontDoor({
  * handoff })` and `startMinibase()` -> { ok, reason }; `frontDoorAlive()` -> true | false | null (from
- * the session list; null = not known); `lastHandoff()` -> the Front Door's last handoff id or null;
+ * the session list; null = not known); `strayFrontDoor()` -> { ok, stopped, reason } (two accounts: stops a Front
+ * Door left on another account; optional); `lastHandoff()` -> the Front Door's last handoff id or null;
  * `alert(text)`. Returns the list of actions taken.
  */
-export async function phoneLinkStep({ rec, rules, now, send, restartFrontDoor, startMinibase, frontDoorAlive = () => null, lastHandoff = () => null, alert }) {
+export async function phoneLinkStep({ rec, rules, now, send, restartFrontDoor, startMinibase, frontDoorAlive = () => null, strayFrontDoor = null, lastHandoff = () => null, alert }) {
   const stuckMs = minutes(rules, KEYS.frontDoorStuckMin);
   const cur = rec.read('fact', LINK_FACT);
   const st = { false_streak: 0, attempts: 0, failures: 0, ...(cur?.doc ?? {}) };
@@ -60,18 +73,39 @@ export async function phoneLinkStep({ rec, rules, now, send, restartFrontDoor, s
     return net.value === false ? ['network down: nothing done'] : ['network unknown: nothing done'];
   }
 
-  // The Front Door gone: restart it, whether or not anything was sent to it (audit MAT-10).
-  if (frontDoorAlive() === false) {
+  // The Front Door gone: restart it, whether or not anything was sent to it (audit MAT-10). A failed restart is told
+  // once per cause (L63 m4), not every 5 minutes; the cause clears when a restart works or it runs again.
+  const alive = frontDoorAlive();
+  if (alive === true) { clearTold(rec, now, FD_RESTART_FACT); dropCause(rec, FD_RESTART_FACT); }
+  if (alive === false) {
     if (now - Date.parse(st.fd_restarted_at ?? '') < RETRY_MS) done.push('Front Door missing; restarted recently, waiting');
     else {
       let r;
       try { r = await restartFrontDoor({ handoff: lastHandoff() }); } catch (e) { r = { ok: false, reason: e.message }; }
       st.fd_restarted_at = iso(now);
       note(rec, 'phone-link-note', 'the Front Door was not running; restarted under its fixed name', { now });
-      if (!r?.ok) alert(`the Front Door was not running and did not restart: ${r?.reason ?? 'no answer'}`);
+      if (r?.ok) { clearTold(rec, now, FD_RESTART_FACT); dropCause(rec, FD_RESTART_FACT); }
+      else if (!toldOn(rec, FD_RESTART_FACT)) tellThen(alert, `the Front Door was not running and did not restart: ${r?.reason ?? 'no answer'}`, { fact: FD_RESTART_FACT, fields: { told: true }, kind: 'front_door_restart' });
       done.push(r?.ok ? 'Front Door was missing; restarted' : 'Front Door was missing; restart failed');
       save();
       return done;
+    }
+  }
+
+  // Two accounts (L63 m2): while it runs on the account in use, one left running on another account is stopped, checked
+  // at most once every 5 minutes. A stop that fails, or an account that can't be told about, is told once per cause.
+  if (alive === true && strayFrontDoor && !(now - Date.parse(st.stray_checked_at ?? '') < RETRY_MS)) {
+    let r;
+    try { r = await strayFrontDoor(); } catch (e) { r = { ok: false, stopped: [], reason: e.message }; }
+    st.stray_checked_at = iso(now);
+    if (r?.stopped?.length) {
+      note(rec, 'phone-link-note', `a Front Door left running on account ${r.stopped.join(', ')} was stopped; it runs on the account in use`, { now });
+      done.push('Front Door left on another account; stopped');
+    }
+    if (r?.ok) { clearTold(rec, now, FD_STRAY_FACT); dropCause(rec, FD_STRAY_FACT); }
+    else {
+      if (!toldOn(rec, FD_STRAY_FACT)) tellThen(alert, `a Front Door may still run on the other account: ${r?.reason ?? 'no answer'}; two under the one name can confuse the phone`, { fact: FD_STRAY_FACT, fields: { told: true }, kind: 'front_door_stray' });
+      done.push('Front Door on another account: not stopped');
     }
   }
 
