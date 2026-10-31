@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { setup, product, readyCard, runCard, outboxFile, launch, HEAD, put, must, PRODUCT } from './fixtures.test-helper.mjs';
+import { setup, product, readyCard, runCard, outboxFile, runnerLaunch, HEAD, put, must, PRODUCT } from './fixtures.test-helper.mjs';
 
 test('smoke: draft → ready → claimed → running → hand-in → verified', () => {
   const env = setup();
@@ -13,7 +13,7 @@ test('smoke: draft → ready → claimed → running → hand-in → verified', 
   must(env.record.applyOutbox({ role: 'worker', sessionId: 'S-1', card: 'C-1' }, f), 'handin');
   assert.equal(env.record.read('card', 'C-1').doc.state, 'in_review');
   assert.equal(env.record.read('card', 'C-1').doc.claim, undefined);
-  launch(env, 'C-1', 'R-1');
+  runnerLaunch(env, 'C-1', 'R-1');
   const v = outboxFile(env, 'reviewer', 'R-1', 'verdict-1.md', `${JSON.stringify({ entity: 'verdict', card: 'C-1', expectRev: env.record.read('card', 'C-1').rev, fields: { head: HEAD, pass: true } })}\n`);
   must(env.review.applyOutbox({ role: 'reviewer', sessionId: 'R-1', card: 'C-1' }, v), 'verdict');
   must(put(env.record, 'dispatcher', 'card', 'C-1', { state: 'verified' }), 'verified');

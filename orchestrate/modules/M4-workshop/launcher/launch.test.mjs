@@ -39,7 +39,7 @@ function NAMES(role, over = {}) {
 }
 
 // Stand-in Mac user ids (L44): the review roles have a user of their own; the launcher runs as 501.
-const UIDS = { lead: 501, worker: 501, front_door: 501, learning: 501, writer: 501, reviewer: 503, auditor: 503 };
+const UIDS = { lead: 501, worker: 501, front_door: 501, learning: 501, writer: 501, incident: 501, scout: 501, thinking: 501, reviewer: 503, auditor: 503 };
 
 // ---- the order (§14.1.3) ----
 
@@ -75,7 +75,7 @@ test('launch: which checks apply to which role', async () => {
   const ran = async (role) => {
     const called = [];
     const checks = Object.fromEntries(CHECKS.map((c) => [c.n, async () => { called.push(c.n); return { ok: true }; }]));
-    await launch({ role, profile: DESIGN_PROFILES[role], checks, start: async () => {}, names: NAMES(role), ctx: { uids: UIDS, self: 501 } });
+    await launch({ role, profile: DESIGN_PROFILES[role], checks, start: async () => {}, names: NAMES(role), ctx: { uids: UIDS }, ownUid: () => UIDS[role] });
     return called;
   };
   assert.deepEqual(await ran('worker'), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
@@ -93,17 +93,19 @@ test('launch: which checks apply to which role', async () => {
   assert.ok(called.includes(11));
 });
 
-test('L44: a reviewer or auditor with no separate review user is refused before any check; start gets runAs', async () => {
+test('L44, L65: a reviewer or auditor starts only as the review user (the runner); start gets runAs', async () => {
   const all = () => {
     const called = [];
     return { called, checks: Object.fromEntries(CHECKS.map((c) => [c.n, async () => { called.push(c.n); return { ok: true }; }])) };
   };
+  const { writer: _w, ...noWriter } = UIDS;
   for (const role of ['reviewer', 'auditor']) {
-    for (const [uids, re] of [[undefined, /no review user id/], [{ ...UIDS, [role]: 501 }, /launcher's own user/],
-      [{ ...UIDS, worker: 503 }, /not a separate Mac user \(shared with worker\)/], [{ ...UIDS, [role]: 0 }, /root/]]) {
+    for (const [uids, self, re] of [[undefined, 503, /no map of role to Mac user id/], [noWriter, 503, /leaves out writer/],
+      [{ ...UIDS, [role]: 501 }, 501, /not a separate Mac user/], [UIDS, 501, /started only by the review runner, running as the review user \(uid 503\), not uid 501/],
+      [{ ...UIDS, worker: 503 }, 503, /not a separate Mac user \(shared with worker\)/], [{ ...UIDS, [role]: 0 }, 0, /root/]]) {
       const { called, checks } = all();
       let started = 0;
-      const r = await launch({ role, profile: DESIGN_PROFILES[role], checks, start: async () => { started += 1; }, names: NAMES(role), ctx: { uids, self: 501 } });
+      const r = await launch({ role, profile: DESIGN_PROFILES[role], checks, start: async () => { started += 1; }, names: NAMES(role), ctx: { uids }, ownUid: () => self });
       assert.equal(r.ok, false, `${role} ${re}`);
       assert.equal(r.failedAt, 0);
       assert.match(r.reason, new RegExp(`a ${role} runs only as the review user`));
@@ -113,9 +115,13 @@ test('L44: a reviewer or auditor with no separate review user is refused before 
     }
     const { checks } = all();
     let got;
-    const r = await launch({ role, profile: DESIGN_PROFILES[role], checks, start: async (ctx) => { got = ctx; return 'r-1'; }, names: NAMES(role), ctx: { uids: UIDS, self: 501 } });
+    const r = await launch({ role, profile: DESIGN_PROFILES[role], checks, start: async (ctx) => { got = ctx; return 'r-1'; }, names: NAMES(role), ctx: { uids: UIDS }, ownUid: () => 503 });
     assert.equal(r.ok, true);
     assert.deepEqual(got.runAs, { user: 'review', uid: 503 });
+    // With no stand-in, the launcher's own uid is used: this test runs as a user that is not 503's review user.
+    const own = await launch({ role, profile: DESIGN_PROFILES[role], checks, start: async () => {}, names: NAMES(role), ctx: { uids: { ...UIDS, reviewer: 1 + process.getuid(), auditor: 1 + process.getuid() } } });
+    assert.equal(own.ok, false);
+    assert.match(own.reason, new RegExp(`not uid ${process.getuid()}`));
   }
   // Every other role starts as the launcher's own user, with or without a uids map.
   for (const role of ['worker', 'lead', 'writer']) {

@@ -22,7 +22,8 @@
 //   requiredChecks [name], checksIgnored [{ app_id, name }]
 //   compareStatus 'ahead' | 'behind' | 'diverged' | 'identical' | null   main...head (refusal 12)
 //   carried { review, audit, reasons } | null   carry-over from H0 to the PR head (read only when they differ)
-//   verdicts [{ doc, createdBy }], launches [{ doc }]
+//   verdicts [{ doc, createdBy }], launches [{ doc }] | null   launches: the review runner's records only (L65); null
+//                                            when they could not be read, with launchesProblem saying why
 //   tier 1 | 2 | null                        M10's computed tier for the change
 //   exactReverse bool                        the change recomputes as an exact reverse (M10 exact-reverse.mjs)
 //   reversesGateMerge bool                   the reversed commit carries the robot's mark (first-cutover undo)
@@ -77,14 +78,16 @@ function checksProblem(f) {
 const checklistClean = (doc) => !!doc?.checklist && typeof doc.checklist === 'object'
   && VERDICT_CHECKLIST.every((k) => CHECKLIST_LEVELS.includes(doc.checklist[k]) && doc.checklist[k] !== 'material');
 
-// M9's own rule (writer.mjs verdictFor): a verdict counts only from a session the launcher recorded in that role on this
-// card at that head, handed in through its own review outbox (an integer outbox_uid, created as role:session).
+// M9's own rule (writer.mjs verdictFor): a verdict counts only from a session the review runner launched in that role on
+// this card at that head (its own record, which gather reads through M9's check, L65), handed in through its own review
+// outbox (an integer outbox_uid, created as role:session).
 const launched = (f, v, role, head) => Number.isInteger(v.doc?.outbox_uid) && v.createdBy === `${role}:${v.doc?.session_id}`
   && (Array.isArray(f.launches) ? f.launches : []).some((l) => l.doc?.card === f.card.id && l.doc?.role === role && l.doc?.head === head && l.doc?.session_id === v.doc.session_id);
 
 export function verdictProblem(f) {
   const head = f.card?.doc?.head;
   if (!SHA.test(head ?? '')) return 'the card has no head';
+  if (!Array.isArray(f.launches)) return `the review runner's launch records could not be read: ${f.launchesProblem ?? 'not gathered'}`;
   const vs = (Array.isArray(f.verdicts) ? f.verdicts : []).filter((v) => v?.doc?.card === f.card.id && v.doc.head === head);
   if (!vs.some((v) => launched(f, v, 'reviewer', head) && v.doc.pass === true && checklistClean(v.doc))) return `no passing reviewer verdict with a clean four-line checklist for ${head.slice(0, 7)} from a launched reviewer`;
   if (f.tier !== 1 && f.tier !== 2) return 'the change\'s tier is unknown';

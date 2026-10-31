@@ -8,7 +8,8 @@
 //   await gatherFacts(ctx, merge) → facts            (see refusals.mjs for every field)
 //   recordView(record) → { createdBy(entity, id), seqOf(entity, id), linesAfter(seq) }
 //   threadsQuery → the GraphQL text for refusal 7
-// ctx = { record, rules, product, gh, owner, repo, view, now, alert, approvals?, readRow? }
+// ctx = { record, rules, product, gh, owner, repo, view, now, alert, approvals?, readRow?, reviewLaunches }
+//   reviewLaunches { root, uids }: the review runner's launch records folder and the role → Mac user id map (L65)
 //   gh       GitHub client { get(path), post(path, body) } → { status, json }; graphql is POST /graphql
 //   view     makeGitView({ gh, owner, repo }) (M10)
 //   approvals M2's ctx { record, rules, product, now, alert, gh, owner, repo } (defaults from ctx)
@@ -27,6 +28,7 @@ import { approvalStands } from '../M2-approvals/schedule.mjs';
 import { askStore } from '../M2-approvals/ask-store.mjs';
 import { activeKind } from '../M2-approvals/kinds.mjs';
 import { goFreeKinds, rootOf } from '../M9-record/ready.mjs';
+import { runnerLaunches } from '../M9-record/outbox.mjs';
 import { readMark } from './mark.mjs';
 import { undoneBy } from './undo.mjs';
 import { parseYaml } from '../../../scripts/blueprint/yaml-lite.mjs';
@@ -204,9 +206,14 @@ export async function gatherFacts(ctx, merge) {
     }, { review: false, audit: false, reasons: ['carry-over could not be read'] });
   }
 
-  // The review (L44 rule; refusal 5).
+  // The review (L44 rule; refusal 5). A review's launch is the review runner's own record, read through M9's one check
+  // (L65); the Record's `launch` entries are written by the Dispatcher, as the workers' Mac user, so they are never read
+  // here. No folder setting, or a folder that fails the check, leaves no launches and refusal 5 names why.
   f.verdicts = record.list('verdict').map((v) => ({ doc: v.doc, createdBy: rv.createdBy('verdict', v.id) }));
-  f.launches = record.list('launch').map((l) => ({ doc: l.doc }));
+  let rl;
+  try { rl = ctx.reviewLaunches ? runnerLaunches({ root: ctx.reviewLaunches.root, uids: ctx.reviewLaunches.uids }) : { ok: false, reason: 'the gate has no review launches folder set' }; } catch (e) { rl = { ok: false, reason: `the review launches could not be read (${e?.message ?? e})` }; }
+  f.launches = rl.ok ? rl.launches.map((l) => ({ doc: l.doc })) : null;
+  f.launchesProblem = rl.ok ? null : rl.reason;
 
   // The owner's Approve (refusals 8, 13, 14): needed per M2, and standing on GitHub now.
   const apx = ctx.approvals ?? { record, rules, product, now: ctx.now, alert: ctx.alert ?? (() => {}), gh, owner, repo };

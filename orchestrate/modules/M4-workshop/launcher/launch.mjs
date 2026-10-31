@@ -39,15 +39,17 @@ export const CHECKS = Object.freeze([
  * applies is a refusal, never a pass. `start(ctx)` runs only when every check passed.
  * `names` = { settings, flags, version, confirmed? }: the rendered role file, the start flags and
  * the pinned Claude Code version. Before check 1, any name not confirmed on that version refuses.
- * A reviewer or auditor runs as the review user (L44): `ctx.uids` maps each role to its Mac user id, and a review
- * role with no separate user is refused before any check. `start` gets `runAs` (null for the other roles), and
- * builds its command with review-user.mjs `startCommand`; its outbox comes from `prepareReviewOutbox` (check 3).
+ * A reviewer or auditor runs as the review user (L44, L65): `ctx.uids` maps each role to its Mac user id, and a review
+ * role is refused before any check unless this launcher is itself running as that separate user, which only the
+ * review runner (review-runner.mjs) does. `ownUid()` is this process's uid (a port, so a test can stand in for
+ * another user; production leaves it out, m-2). `start` gets `runAs` (null for the other roles).
  */
-export async function launch({ role, profile, checks, start, names, ctx = {} }) {
+export async function launch({ role, profile, checks, start, names, ctx = {}, ownUid = () => process.getuid() }) {
   const log = [];
   let runAs = null;
   if (REVIEW_ROLES.includes(role)) {
-    const who = reviewUser({ role, uids: ctx.uids, ...(ctx.self !== undefined ? { self: ctx.self } : {}) });
+    let self; try { self = ownUid(); } catch { self = null; }
+    const who = reviewUser({ role, uids: ctx.uids, self });
     if (!who.ok) return { ok: false, failedAt: 0, reason: `a ${role} runs only as the review user: ${who.reason}`, log };
     runAs = who.runAs;
   }

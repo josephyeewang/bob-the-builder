@@ -1,15 +1,15 @@
 // The account switch's side of the Dispatcher (R-1-89 (c), L61). Every port that starts, lists, checks or stops a
 // session goes through here, so each one knows which sign-in folder it acts in:
-//   start  (launch, startReviewer, startReadonly, startMinibase, a Lead's startLead): in the account in use (`accounts.mjs
+//   start  (launch, startReadonly, startMinibase, a Lead's startLead): in the account in use (`accounts.mjs
 //          use a|b`), read at the start; the result names the folder (`signin`, `configDir`);
 //   list   (sessions, board, outboxSessions, leads): once per account folder, merged, each entry tagged with its folder,
 //          so after a switch the old account's sessions are still seen;
-//   check  (hasSession, hasReviewer): yes if either folder says yes; an unclear answer is an error, never a no (L63);
+//   check  (hasSession): yes if either folder says yes; an unclear answer is an error, never a no (L63);
 //   stop   (stopGroup, a Lead's stopSession): through the folder the session runs in, not the one in use;
 //   the Front Door: alive only when it runs on the account in use, so after a switch it is restarted there (the old
 //          one is stopped first), and the phone shows it under the account in use. It is the one session a switch
 //          moves (L62); one left running on the old account is stopped (`strayFrontDoor`).
-// A running worker, reviewer or Lead is never moved: a switch changes only where the next one starts.
+// A running worker or Lead is never moved: a switch changes only where the next one starts.
 // "signin" here is the sign-in folder (a or b), not the usage account the tick's bands read.
 // No process is started here (only-send-safe.test.mjs); the wiring hands in the real per-folder ports (`accountPorts`).
 
@@ -83,7 +83,7 @@ export function acrossAccounts({ home, listIn, idOf = (s) => s?.id, what = 'sess
  * A check port over every account folder: `checkIn(ctx, ...args)` -> true | false. True if any folder says true; false
  * only if every folder says false. Any other answer (null, undefined, text) from a folder, when none says true, is an
  * error naming the folder and the answer, never a false (L63): the steps read false as "gone" (no session: the card goes
- * back; no reviewer: one starts), so an unclear answer must fail the step and tell Joe, not guess absent. A folder whose
+ * back), so an unclear answer must fail the step and tell Joe, not guess absent. A folder whose
  * check fails, or answers late, is an error the same way. These ports answer at once (the wiring runs them through
  * limitedSync).
  */
@@ -198,9 +198,9 @@ export function frontDoorPorts({ home, aliveIn, restartIn, stopIn }) {
 
 // The per-folder ports the wiring gives `accountPorts`, by kind. The README's contract row lists the same.
 export const PER_FOLDER_PORTS = Object.freeze({
-  start: ['launch', 'startReviewer', 'startReadonly', 'startMinibase'],
+  start: ['launch', 'startReadonly', 'startMinibase'],
   list: ['sessions', 'board', 'outboxSessions', 'leads'],
-  check: ['hasSession', 'hasReviewer'],
+  check: ['hasSession'],
   stop: ['stopGroup'],
   frontDoor: ['frontDoorAlive', 'restartFrontDoor', 'stopFrontDoor'],
 });
@@ -221,7 +221,6 @@ export function accountPorts({ home, inFolder }) {
   const check = (name) => inAnyAccount({ home, checkIn: (ctx, ...a) => get(ctx, name)(...a), what: name });
   return {
     launch: accountLaunch({ home, launch: (x) => get(x, 'launch')(x) }),
-    startReviewer: start('startReviewer'),
     startReadonly: start('startReadonly'),
     startMinibase: start('startMinibase'),
     sessions: list('sessions'),
@@ -229,7 +228,6 @@ export function accountPorts({ home, inFolder }) {
     outboxSessions: list('outboxSessions', (s) => s?.sessionId),
     leads: acrossLeads({ home, listIn: (ctx) => get(ctx, 'leads')() }),
     hasSession: check('hasSession'),
-    hasReviewer: check('hasReviewer'),
     stopGroup: stopInAccount({ home, stopIn: (s, ctx) => get(ctx, 'stopGroup')(s) }),
     ...frontDoorPorts({ home, aliveIn: (ctx) => get(ctx, 'frontDoorAlive')(), restartIn: (ctx, x) => get(ctx, 'restartFrontDoor')(x), stopIn: (ctx) => get(ctx, 'stopFrontDoor')() }),
   };

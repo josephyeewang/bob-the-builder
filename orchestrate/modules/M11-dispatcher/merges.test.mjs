@@ -2,12 +2,12 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { timeLimits, PR_FACT } from './merges.mjs';
 import { KEYS as K } from './keys.mjs';
-import { rulesWith, recWith, T0, MIN, iso } from './fixtures.test-helper.mjs';
+import { rulesWith, recWith, T0, MIN, iso, withAlerts } from './fixtures.test-helper.mjs';
 
 const R = rulesWith();
 const ports = (over = {}) => {
   const alerts = [];
-  return { alerts, p: { hasSession: () => false, gateAlive: () => true, hasReviewer: () => true, startReviewer: () => ({ ok: true }), alert: (t) => alerts.push(t), ...over } };
+  return { alerts, p: { hasSession: () => false, gateAlive: () => true, hasReviewer: () => true, requestReview: () => ({ ok: true }), alert: (t) => alerts.push(t), ...over } };
 };
 const at = (min) => iso(T0 + min * MIN);
 const GREEN = { band: 'green', own_building: 'open', prodBlocked: false };
@@ -123,10 +123,10 @@ test('v3 §2.4: reporting over 10 min fails the card with no_report', async () =
   assert.equal(rec.read('session', 'S-1').doc.state, 'ended');
 });
 
-test('v3 §2.4: in_review with no reviewer after 15 min starts one; 2 failed starts go to Joe', async () => {
-  const rec = recWith([['card', 'C-1', { state: 'in_review', changed_at: at(0) }]]);
+test('v3 §2.4, L65: in_review with no reviewer after 15 min asks for one; 2 failed requests go to Joe', async () => {
+  const rec = recWith([['card', 'C-1', { state: 'in_review', head: 'a'.repeat(40), changed_at: at(0) }]]);
   let starts = 0;
-  const failing = { hasReviewer: () => false, startReviewer: () => { starts += 1; return { ok: false }; } };
+  const failing = { hasReviewer: () => false, requestReview: () => { starts += 1; return { ok: false, reason: 'the folder is full' }; } };
   await pass(rec, 14, failing);
   assert.equal(starts, 0);
   await pass(rec, 15, failing);
@@ -137,9 +137,11 @@ test('v3 §2.4: in_review with no reviewer after 15 min starts one; 2 failed sta
   assert.equal(rec.read('card', 'C-1').doc.state, 'waiting');
   assert.equal(rec.read('card', 'C-1').doc.waiting.who, 'joe');
   assert.equal(alerts.length, 1);
-  // a successful start resets the count
-  const ok = recWith([['card', 'C-2', { state: 'in_review', changed_at: at(0) }]]);
-  await pass(ok, 15, { hasReviewer: () => false, startReviewer: () => ({ ok: true, sessionId: 'R-1', head: 'a'.repeat(40) }) });
+  assert.match(alerts[0], /card C-1: no reviewer could be asked for twice/);
+  // a request written resets the count
+  const ok = recWith([['card', 'C-2', { state: 'in_review', head: 'a'.repeat(40), changed_at: at(0), reviewer_start_failures: 1 }]]);
+  const { moves } = await pass(ok, 15, { hasReviewer: () => false, requestReview: () => ({ ok: true }) });
+  assert.deepEqual(moves.find(([id]) => id === 'C-2'), ['C-2', 'reviewer requested']);
   assert.equal(ok.read('card', 'C-2').doc.reviewer_start_failures, 0);
 });
 
@@ -156,7 +158,7 @@ test('audit MAT-5: a reviewer start goes through the start gate: red holds it un
   const RED = { band: 'red', own_building: 'open', prodBlocked: false };
   const rec = recWith([['product', 'p1', { state: 'active' }], ['card', 'C-1', { state: 'in_review', product: 'p1', tier: 2, changed_at: at(0) }]]);
   let starts = 0;
-  const p = { ...ports({ hasReviewer: () => false, startReviewer: () => { starts += 1; return { ok: true }; } }).p };
+  const p = { ...ports({ hasReviewer: () => false, requestReview: () => { starts += 1; return { ok: true }; } }).p };
   const held = await timeLimits({ rec, rules: rulesWith({ [K.redRuns]: ['merges'] }), now: T0 + 15 * MIN, b: RED, ...p });
   assert.equal(starts, 0);
   assert.match(held.find(([id]) => id === 'C-1')[1], /reviewer held/);
@@ -247,59 +249,74 @@ test('audit 0b-6 r3 MAT-3: a rules value the gate lacks is handed back to the ti
   assert.deepEqual(missing2, [K.redRuns]);
 });
 
-// ---- L44: the reviewer's launch is recorded, so its verdict can count ----
+// ---- L65: the Dispatcher only asks; the review runner (as `review`) starts ----
 
-test('L44: a started reviewer is recorded as a launch on that card at the head its copy was made from', async () => {
-  const { recordReviewerLaunch } = await import('./merges.mjs');
-  const HEAD = '0123456789abcdef'.repeat(3).slice(0, 40);
-  const rec = recWith([['card', 'C-1', { state: 'in_review', product: 'p1', changed_at: at(0) }]]);
-  const { moves } = await pass(rec, 15, { hasReviewer: () => false, startReviewer: () => ({ ok: true, sessionId: 'R-1', head: HEAD }) });
-  assert.deepEqual(moves.find(([id]) => id === 'C-1'), ['C-1', 'reviewer started']);
-  const l = rec.read('launch', 'R-1').doc;
-  assert.deepEqual([l.session_id, l.role, l.card, l.head, l.product, l.rev], ['R-1', 'reviewer', 'C-1', HEAD, 'p1', rec.read('card', 'C-1').rev - 1]);
-  assert.equal(l.launched_at, iso(T0 + 15 * MIN));
-  // An auditor is recorded as an auditor.
-  const a = recWith([['card', 'C-2', { state: 'in_review' }]]);
-  assert.equal(recordReviewerLaunch({ rec: a, card: 'C-2', started: { sessionId: 'A-1', head: HEAD, role: 'auditor' }, now: T0 }).ok, true);
-  assert.equal(a.read('launch', 'A-1').doc.role, 'auditor');
+const HEAD = '0123456789abcdef'.repeat(3).slice(0, 40);
+
+test('L65: a card in review is asked a reviewer for, at its head; a Tier-1 card an auditor too (m-6)', async () => {
+  const asked = [];
+  const requestReview = (x) => { asked.push(x); return { ok: true }; };
+  const rec = recWith([
+    ['card', 'C-1', { state: 'in_review', head: HEAD, tier: 2, changed_at: at(0) }],
+    ['card', 'C-2', { state: 'in_review', head: HEAD, tier: 1, changed_at: at(0) }],
+  ]);
+  const seen = [];
+  const { moves } = await pass(rec, 15, { hasReviewer: (card, role, head) => { seen.push([card, role, head]); return false; }, requestReview });
+  assert.deepEqual(asked, [{ card: 'C-1', head: HEAD, role: 'reviewer' }, { card: 'C-2', head: HEAD, role: 'reviewer' }, { card: 'C-2', head: HEAD, role: 'auditor' }]);
+  assert.deepEqual(seen, [['C-1', 'reviewer', HEAD], ['C-2', 'reviewer', HEAD], ['C-2', 'auditor', HEAD]]);
+  assert.deepEqual(moves.filter(([id]) => id.startsWith('C-')), [['C-1', 'reviewer requested'], ['C-2', 'reviewer requested, auditor requested']]);
+  // The request resets the clock: nothing is asked again until a full limit later.
+  asked.length = 0;
+  await pass(rec, 29, { hasReviewer: () => false, requestReview });
+  assert.deepEqual(asked, []);
+  // A Tier-1 card with its reviewer running asks only for the auditor; with both running, nothing.
+  const r2 = recWith([['card', 'C-3', { state: 'in_review', head: HEAD, tier: 1, changed_at: at(0) }]]);
+  await pass(r2, 15, { hasReviewer: (c, role) => role === 'reviewer', requestReview });
+  assert.deepEqual(asked, [{ card: 'C-3', head: HEAD, role: 'auditor' }]);
+  asked.length = 0;
+  const r3 = recWith([['card', 'C-4', { state: 'in_review', head: HEAD, tier: 1, changed_at: at(0) }]]);
+  await pass(r3, 15, { hasReviewer: () => true, requestReview });
+  assert.deepEqual(asked, []);
+  // One role's request failing counts as a failed request.
+  const r4 = recWith([['card', 'C-5', { state: 'in_review', head: HEAD, tier: 1, changed_at: at(0) }]]);
+  const m4 = await pass(r4, 15, { hasReviewer: () => false, requestReview: ({ role }) => (role === 'auditor' ? { ok: false, reason: 'full' } : { ok: true }) });
+  assert.deepEqual(m4.moves.find(([id]) => id === 'C-5'), ['C-5', 'reviewer requested, auditor request failed: full']);
+  assert.equal(r4.read('card', 'C-5').doc.reviewer_start_failures, 1);
 });
 
-test('L44: a launch that can\'t be recorded is a failed start: Joe is told, its verdict will not count, and the count goes up', async () => {
-  const { recordReviewerLaunch } = await import('./merges.mjs');
-  const HEAD = 'a'.repeat(40);
-  const bad = [
-    [{ ok: true }, /no session id/],
-    [{ ok: true, sessionId: '../W-1', head: HEAD }, /no session id/],
-    [{ ok: true, sessionId: 'x'.repeat(129), head: HEAD }, /no session id/],
-    [{ ok: true, sessionId: 'R-1' }, /which head/],
-    [{ ok: true, sessionId: 'R-1', head: 'h'.repeat(40) }, /which head/],
-    [{ ok: true, sessionId: 'R-1', head: HEAD.slice(1) }, /which head/],
-    [{ ok: true, sessionId: 'R-1', head: HEAD, role: 'worker' }, /not a review role/],
-  ];
-  for (const [started, re] of bad) {
-    const rec = recWith([['card', 'C-1', { state: 'in_review', changed_at: at(0) }]]);
-    const { moves, alerts } = await pass(rec, 15, { hasReviewer: () => false, startReviewer: () => started });
-    assert.deepEqual(moves.find(([id]) => id === 'C-1'), ['C-1', 'reviewer started, not recorded'], JSON.stringify(started));
-    assert.equal(alerts.length, 1);
-    assert.match(alerts[0], re);
-    assert.match(alerts[0], /its verdict will not count/);
-    assert.equal(rec.read('card', 'C-1').doc.reviewer_start_failures, 1);
-    assert.equal(rec.list('launch').length, 0);
-    assert.equal(recordReviewerLaunch({ rec, card: 'C-1', started, now: T0 }).ok, false);
+test('L65: a status that can\'t be trusted asks for nothing, and the pass ends with that error after the other limits', async () => {
+  for (const hasReviewer of [() => { throw new Error('the review runner\'s status is 4 minutes old'); }, () => undefined, () => 'no']) {
+    let asked = 0;
+    const rec = recWith([['card', 'C-1', { state: 'in_review', head: HEAD, changed_at: at(0) }], ['card', 'C-2', { state: 'claimed', changed_at: at(0) }]]);
+    const { p } = ports({ hasReviewer, requestReview: () => { asked += 1; return { ok: true }; } });
+    await assert.rejects(() => timeLimits({ rec, rules: R, now: T0 + 15 * MIN, b: GREEN, ...p }), /no review was asked for: (the review runner's status is 4 minutes old|hasReviewer gave no yes or no for card C-1)/);
+    assert.equal(asked, 0, String(hasReviewer));
+    // The other limits still ran, and the card's count did not go up.
+    assert.equal(rec.read('card', 'C-2').doc.state, 'ready');
+    assert.equal(rec.read('card', 'C-1').doc.reviewer_start_failures ?? 0, 0);
   }
+  // The alerts read failing is the same error.
+  const rec = recWith();
+  await assert.rejects(() => timeLimits({ rec, rules: R, now: T0, b: GREEN, ...ports({ reviewAlerts: () => { throw new Error('the status is missing'); } }).p }), /no review was asked for: the status is missing/);
 });
 
-test('L44: a session id is never reused: a second launch under it is refused and the first is kept', async () => {
-  const { recordReviewerLaunch } = await import('./merges.mjs');
-  const HEAD = 'a'.repeat(40);
-  const rec = recWith([['card', 'C-1', { state: 'in_review' }], ['card', 'C-2', { state: 'in_review' }]]);
-  assert.equal(recordReviewerLaunch({ rec, card: 'C-1', started: { sessionId: 'R-1', head: HEAD }, now: T0 }).ok, true);
-  const again = recordReviewerLaunch({ rec, card: 'C-2', started: { sessionId: 'R-1', head: 'b'.repeat(40) }, now: T0 + MIN });
-  assert.equal(again.ok, false);
-  assert.match(again.reason, /session id R-1 was used before; a session id is never reused/);
-  assert.deepEqual([rec.read('launch', 'R-1').doc.card, rec.read('launch', 'R-1').doc.head], ['C-1', HEAD]);
-  // Through the pass: the second start counts as failed.
-  const { moves, alerts } = await pass(rec, 15, { hasReviewer: () => false, startReviewer: () => ({ ok: true, sessionId: 'R-1', head: HEAD }) });
-  assert.ok(moves.some(([, what]) => what === 'reviewer started, not recorded'));
-  assert.ok(alerts.some((t) => /never reused/.test(t)));
+test('L65: the runner\'s alerts are told to Joe once each; the same trouble at a later time is told again', async () => {
+  const { REVIEW_ALERT_FACT } = await import('./review-requests.mjs');
+  const rec = recWith();
+  const a1 = { id: 'gave-up-x', at: at(1), text: 'card C-1: 3 starts failed' };
+  const a2 = { id: 'review-admin', at: at(2), text: 'review is an admin' };
+  // As the tick runs it: queued, then sent, and the told mark written only once a copy is delivered.
+  const run = async (list, min, deliver = true) => {
+    const got = [];
+    const now = T0 + min * MIN;
+    await withAlerts(rec, now, (t) => { got.push(t); return deliver; }, (alert) => timeLimits({ rec, rules: R, now, b: GREEN, ...ports({ reviewAlerts: () => list }).p, alert }));
+    return got;
+  };
+  // Not delivered: not marked, so it is sent again.
+  assert.deepEqual(await run([a1], 2, false), ['review runner: card C-1: 3 starts failed']);
+  assert.equal(rec.read('fact', REVIEW_ALERT_FACT(a1))?.doc?.told_at, undefined);
+  assert.deepEqual(await run([a1, a2], 3), ['review runner: card C-1: 3 starts failed', 'review runner: review is an admin']);
+  assert.equal(rec.read('fact', REVIEW_ALERT_FACT(a1)).doc.told_at, at(3));
+  assert.deepEqual(await run([a1, a2], 4), []);
+  assert.deepEqual(await run([a1, { ...a2, at: at(5) }, { id: 7 }, null], 6), ['review runner: review is an admin']);
 });
