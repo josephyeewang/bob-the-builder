@@ -190,10 +190,14 @@ const linkTarget = (p) => { const r = realFolder(p); return r && r !== p ? r : n
 // Changing a shell option anywhere in the line can change where a `cd` lands (`cdable_vars`; MAT-9).
 const OPTS_CHANGED = /(^|[\s;&|(])(setopt|unsetopt|shopt|enable)(\s|$)|(^|[\s;&|(])set\s+[-+]o/;
 
-// A line that starts with plain `cd <folder>` steps, each joined to the next by `&&` or `;`, runs the rest in the
-// last folder for certain, when each is a real folder it can enter below the one before (lane 2 follow-up: the
-// false refusals of `cd dist && rm -rf *`). The rest is then judged from that folder alone, and the folder the call
-// runs in stays shielded. Anything else keeps the rule below, where every folder the line may be in counts: a
+// THE CD SHORTCUT (self-contained: `plainCds` and the two lines that call it; removing them restores the old rule).
+// A line that starts with plain `cd <folder>` steps, each joined to the next by `&&`, runs the rest in the last
+// folder for certain, when each is a real folder it can enter below the one before (lane 2 follow-up: the false
+// refusals of `cd dist && rm -rf *`). Deny by default (#40 round 3, LEAD-CALLS L53): it applies only when every
+// command after the cd steps is `rm` or `rmdir`, whose reach is their own arguments; any other command (git, find,
+// unzip, mv, rsync, chmod, …) can reach past its folder, so the line keeps the old rule. A `;` keeps it too: after a
+// failed cd the rest runs in the working folder. The rest is then judged from that folder alone, and the folder the
+// call runs in stays shielded. Anything else keeps the rule below, where every folder the line may be in counts: a
 // bracket, `||`, `|` or `&`, a variable, `~`, `..`, a pattern, a name starting with a dot or a dash, a folder that
 // is missing or leads out through a link, CDPATH, a changed shell option.
 // The steps are the command splitter's own tokens (`shellTokens`), the ones the rest of the hook judges; the
@@ -202,6 +206,7 @@ const OPTS_CHANGED = /(^|[\s;&|(])(setopt|unsetopt|shopt|enable)(\s|$)|(^|[\s;&|
 // U+3000, …) in the cd part keeps the rule below, where the shell may go home or stay put.
 const PLAIN_DIR = /^(?:\.\/)?[A-Za-z0-9_][A-Za-z0-9._-]*(?:\/[A-Za-z0-9_][A-Za-z0-9._-]*)*\/?$/;
 const JOINERS = [';', '&', '|'];
+const SHORTCUT_ONLY = ['rm', 'rmdir'];
 const asText = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 function plainCds(cmd, cwd, cdpath) {
   let rest = cmd;
@@ -211,7 +216,7 @@ function plainCds(cmd, cwd, cdpath) {
   const t = shellTokens(cmd);
   for (let i = 0; t[i] === 'cd' && PLAIN_DIR.test(t[i + 1] ?? '');) {
     const dir = t[i + 1];
-    const joiner = t[i + 2] === ';' ? ';' : t[i + 2] === '&' && t[i + 3] === '&' ? '&&' : null;
+    const joiner = t[i + 2] === '&' && t[i + 3] === '&' ? '&&' : null;
     if (!joiner || JOINERS.includes(t[i + 2 + joiner.length])) break;
     const m = new RegExp(`^[ \\t]*cd[ \\t]+${asText(dir)}[ \\t]*${asText(joiner)}`).exec(rest);
     if (!m) break;
@@ -224,6 +229,10 @@ function plainCds(cmd, cwd, cdpath) {
     rest = rest.slice(m[0].length);
     i += 2 + joiner.length;
   }
+  // Every command after the cd steps, as written (no wrapper or VAR= stripped), is plain `rm` or `rmdir`, and none
+  // sits in a bracket or a substitution.
+  const only = () => !shellTokens(rest).some((w) => ['(', ')', '`', '$'].includes(w)) && shellCommands(rest, { raw: true }).every((c) => SHORTCUT_ONLY.includes(c[0]));
+  if (at !== cwd && !only()) return { rest: cmd, at: cwd };
   return { rest, at };
 }
 
