@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { writeFileSync, mkdirSync, readdirSync, readFileSync, statSync, symlinkSync, utimesSync, existsSync, chmodSync, cpSync, rmSync, realpathSync, appendFileSync } from 'node:fs';
+import { writeFileSync, mkdirSync, readdirSync, readFileSync, statSync, symlinkSync, utimesSync, existsSync, chmodSync, cpSync, rmSync, realpathSync, appendFileSync, linkSync } from 'node:fs';
 import { join, dirname, relative } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { spawn, spawnSync } from 'node:child_process';
@@ -912,6 +912,32 @@ test('#32 round 3 (L51): every place a .git, a pointer, a commondir or a link in
   assert.equal((await git(['status', '--porcelain'], { gitDir: i.gd, workTree: i.d })).code, 0);
   assert.equal(await repoConfigWhy(join(w.root, 'victim-wt', '.git')), null);
   assert.equal(await repoConfigWhy(c.gd, { allowObjects: [join(v.gd, 'objects')] }), null);
+  // An object file with a second name is let through: a local clone hard-links its objects, and an object's name is its
+  // content, so it can't be another repository's anything else.
+  const ho = copyOf(w, 'hard-object');
+  const obj = join(v.gd, 'objects', vBlob.slice(0, 2), vBlob.slice(2));
+  mkdirSync(join(ho.gd, 'objects', vBlob.slice(0, 2)), { recursive: true });
+  linkSync(obj, join(ho.gd, 'objects', vBlob.slice(0, 2), vBlob.slice(2)));
+  assert.equal(await repoConfigWhy(ho.gd), null);
+
+  // Last, since it gives the victim's own files a second name too. A hard link is not a link to the walk above, but it
+  // is the same file as the other repository's (#32 cosmetic): a ref,
+  // packed-refs or config with a second name is refused. Control: git reads the victim's ref through it.
+  for (const [label, from, to, args] of [
+    ['hard-linked loose ref', join(v.gd, 'refs', 'heads', 'main'), ['refs', 'heads', 'hv'], ['rev-parse', 'refs/heads/hv']],
+    ['hard-linked packed-refs', join(v.gd, 'packed-refs'), ['packed-refs'], ['rev-parse', 'refs/heads/pv']],
+  ]) {
+    const k = copyOf(w, label.replace(/ /g, '-'));
+    const at = join(k.gd, ...to);
+    rmSync(at, { force: true });
+    linkSync(from, at);
+    await refused(label, k.gd, args, new RegExp(`its ${to.join('/')} has a second name \\(a hard link\\)`));
+    assert.equal((await rawGit(args, { gitDir: k.gd })).stdout.trim(), vMain, `control: git reads the victim's ref through the ${label}`);
+  }
+  const hc = copyOf(w, 'hard-config');
+  rmSync(join(hc.gd, 'config'));
+  linkSync(join(v.gd, 'config'), join(hc.gd, 'config'));
+  await refused('hard-linked config', hc.gd, ['status'], /its config has a second name \(a hard link\)/);
 });
 
 test('#32 round 3 (L51): the address a call allows is reached; the same address unallowed, or another one, is refused', async () => {
@@ -960,6 +986,21 @@ test('no hang: a git that never ends is stopped at the time limit, with everythi
   const t = await git(['--version'], { gitDir: '/dev/null', gitBin: tty });
   assert.equal(t.stdout.toString().trim(), 'none', 'git has no terminal to ask for a password on');
   assert.equal(safeGitEnv({}).GCM_INTERACTIVE, 'never');
+});
+
+// The terminal check above passes in any run that has no terminal of its own, so it can't show `detached` is on. This
+// one can (#32 cosmetic, H4): git leads a process group of its own, in a new session, so it can have no terminal,
+// whether or not this run has one.
+test('no hang (H4): git runs in a process group of its own, never this run\'s', async () => {
+  const d = tmp();
+  const group = join(d, 'group');
+  writeFileSync(group, '#!/bin/sh\necho "$$ $(/bin/ps -o pgid= -p $$)"\n');
+  chmodSync(group, 0o755);
+  const [pid, pgid] = (await git(['--version'], { gitDir: '/dev/null', gitBin: group })).stdout.toString().trim().split(/\s+/).map(Number);
+  assert.ok(pid > 0, 'the fake git said its process id');
+  assert.equal(pgid, pid, 'git leads a process group of its own');
+  const mine = spawnSync('/bin/ps', ['-o', 'pgid=', '-p', String(process.pid)], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 10_000 });
+  assert.notEqual(pgid, Number(mine.stdout.trim()), 'and not the group of this run');
 });
 
 // #32 round 4 (LEAD-CALLS L54): a reftable repository is refused, so its `tables.list` can never name another
