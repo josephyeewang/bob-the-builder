@@ -139,7 +139,7 @@ test('v3 §2.4: in_review with no reviewer after 15 min starts one; 2 failed sta
   assert.equal(alerts.length, 1);
   // a successful start resets the count
   const ok = recWith([['card', 'C-2', { state: 'in_review', changed_at: at(0) }]]);
-  await pass(ok, 15, { hasReviewer: () => false, startReviewer: () => ({ ok: true }) });
+  await pass(ok, 15, { hasReviewer: () => false, startReviewer: () => ({ ok: true, sessionId: 'R-1', head: 'a'.repeat(40) }) });
   assert.equal(ok.read('card', 'C-2').doc.reviewer_start_failures, 0);
 });
 
@@ -245,4 +245,61 @@ test('audit 0b-6 r3 MAT-3: a rules value the gate lacks is handed back to the ti
   const missing2 = [];
   assert.match(requestMerges({ rec: rec2, rules, now: T0, b: GREEN, missing: missing2 })[0][1], /merge request held/);
   assert.deepEqual(missing2, [K.redRuns]);
+});
+
+// ---- L44: the reviewer's launch is recorded, so its verdict can count ----
+
+test('L44: a started reviewer is recorded as a launch on that card at the head its copy was made from', async () => {
+  const { recordReviewerLaunch } = await import('./merges.mjs');
+  const HEAD = '0123456789abcdef'.repeat(3).slice(0, 40);
+  const rec = recWith([['card', 'C-1', { state: 'in_review', product: 'p1', changed_at: at(0) }]]);
+  const { moves } = await pass(rec, 15, { hasReviewer: () => false, startReviewer: () => ({ ok: true, sessionId: 'R-1', head: HEAD }) });
+  assert.deepEqual(moves.find(([id]) => id === 'C-1'), ['C-1', 'reviewer started']);
+  const l = rec.read('launch', 'R-1').doc;
+  assert.deepEqual([l.session_id, l.role, l.card, l.head, l.product, l.rev], ['R-1', 'reviewer', 'C-1', HEAD, 'p1', rec.read('card', 'C-1').rev - 1]);
+  assert.equal(l.launched_at, iso(T0 + 15 * MIN));
+  // An auditor is recorded as an auditor.
+  const a = recWith([['card', 'C-2', { state: 'in_review' }]]);
+  assert.equal(recordReviewerLaunch({ rec: a, card: 'C-2', started: { sessionId: 'A-1', head: HEAD, role: 'auditor' }, now: T0 }).ok, true);
+  assert.equal(a.read('launch', 'A-1').doc.role, 'auditor');
+});
+
+test('L44: a launch that can\'t be recorded is a failed start: Joe is told, its verdict will not count, and the count goes up', async () => {
+  const { recordReviewerLaunch } = await import('./merges.mjs');
+  const HEAD = 'a'.repeat(40);
+  const bad = [
+    [{ ok: true }, /no session id/],
+    [{ ok: true, sessionId: '../W-1', head: HEAD }, /no session id/],
+    [{ ok: true, sessionId: 'x'.repeat(129), head: HEAD }, /no session id/],
+    [{ ok: true, sessionId: 'R-1' }, /which head/],
+    [{ ok: true, sessionId: 'R-1', head: 'h'.repeat(40) }, /which head/],
+    [{ ok: true, sessionId: 'R-1', head: HEAD.slice(1) }, /which head/],
+    [{ ok: true, sessionId: 'R-1', head: HEAD, role: 'worker' }, /not a review role/],
+  ];
+  for (const [started, re] of bad) {
+    const rec = recWith([['card', 'C-1', { state: 'in_review', changed_at: at(0) }]]);
+    const { moves, alerts } = await pass(rec, 15, { hasReviewer: () => false, startReviewer: () => started });
+    assert.deepEqual(moves.find(([id]) => id === 'C-1'), ['C-1', 'reviewer started, not recorded'], JSON.stringify(started));
+    assert.equal(alerts.length, 1);
+    assert.match(alerts[0], re);
+    assert.match(alerts[0], /its verdict will not count/);
+    assert.equal(rec.read('card', 'C-1').doc.reviewer_start_failures, 1);
+    assert.equal(rec.list('launch').length, 0);
+    assert.equal(recordReviewerLaunch({ rec, card: 'C-1', started, now: T0 }).ok, false);
+  }
+});
+
+test('L44: a session id is never reused: a second launch under it is refused and the first is kept', async () => {
+  const { recordReviewerLaunch } = await import('./merges.mjs');
+  const HEAD = 'a'.repeat(40);
+  const rec = recWith([['card', 'C-1', { state: 'in_review' }], ['card', 'C-2', { state: 'in_review' }]]);
+  assert.equal(recordReviewerLaunch({ rec, card: 'C-1', started: { sessionId: 'R-1', head: HEAD }, now: T0 }).ok, true);
+  const again = recordReviewerLaunch({ rec, card: 'C-2', started: { sessionId: 'R-1', head: 'b'.repeat(40) }, now: T0 + MIN });
+  assert.equal(again.ok, false);
+  assert.match(again.reason, /session id R-1 was used before; a session id is never reused/);
+  assert.deepEqual([rec.read('launch', 'R-1').doc.card, rec.read('launch', 'R-1').doc.head], ['C-1', HEAD]);
+  // Through the pass: the second start counts as failed.
+  const { moves, alerts } = await pass(rec, 15, { hasReviewer: () => false, startReviewer: () => ({ ok: true, sessionId: 'R-1', head: HEAD }) });
+  assert.ok(moves.some(([, what]) => what === 'reviewer started, not recorded'));
+  assert.ok(alerts.some((t) => /never reused/.test(t)));
 });
