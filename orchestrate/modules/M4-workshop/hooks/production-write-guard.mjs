@@ -195,8 +195,8 @@ export function folderWriteWhy(cmd, { cwd, protectedFiles, home = homedir(), use
   // A `cd` searched through CDPATH (set any way: `CDPATH+=`, zsh's `cdpath`), after a shell option is changed
   // (`cdable_vars`), or `cd -` to a folder this line did not visit, lands where the guard can't tell (MAT-4, MAT-9).
   const viaCdpath = Boolean(cdpath) || /cdpath/i.test(cmd);
-  const optsChanged = /(^|[\s;&|(])(setopt|unsetopt|shopt|enable)(\s|$)|(^|[\s;&|(])set\s+[-+]o/.test(cmd);
-  const setOld = /(^|[\s;&|(])(export\s+)?OLDPWD=/.test(cmd);
+  const optsChanged = /(^|[ \t\n;&|(])(setopt|unsetopt|shopt|enable)([ \t\n]|$)|(^|[ \t\n;&|(])set[ \t\n]+[-+]o/.test(cmd);
+  const setOld = /(^|[ \t\n;&|(])(export[ \t\n]+)?OLDPWD=/.test(cmd);
   let moved = false;
   const shielded = [cwd, ...(projectDir && isAbsolute(projectDir) ? [projectDir] : [])];
   const holdsProtected = (d) => [d, realFolder(d)].filter(Boolean).some((x) => protectedFiles.some((f) => inside(f, fold(x))));

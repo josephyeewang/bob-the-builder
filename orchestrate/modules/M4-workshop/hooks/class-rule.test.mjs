@@ -3,9 +3,9 @@
 // remaining forms. Throwaway folders only; names of secret files are built at run time.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, writeFileSync, realpathSync, symlinkSync, chmodSync } from 'node:fs';
+import { mkdirSync, writeFileSync, realpathSync, symlinkSync, chmodSync, existsSync } from 'node:fs';
 import { join, dirname, basename } from 'node:path';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { makeSnapshot } from './snapshot.mjs';
 import { expansionIn, expandBraces, unreadable, shellCommands, shellWords, globRe, heredocs } from './lib.mjs';
@@ -608,8 +608,9 @@ test('comment-quote: a comment holding a quote, a backtick or a backslash is ref
     blocked(merge.decide(bash(c, W)), `merge: ${what}`);
     blocked(noVerify.decide(bash(c, W)), `no-verify: ${what}`);
   };
-  // The repro, as the shells read it: both run the line after the comment.
-  for (const sh of ['/bin/bash', '/bin/zsh']) {
+  // The repro, as the shells read it: both run the line after the comment (a shell that isn't installed is skipped:
+  // the CI machine has no zsh).
+  for (const sh of ['/bin/bash', '/bin/zsh'].filter((x) => existsSync(x))) {
     for (const mark of ["it's", 'a"b', 'a`b', 'foo \\']) {
       const r = spawnSync(sh, ['-c', `echo A # ${mark}\necho HIDDEN`], { encoding: 'utf8', timeout: 10_000, stdio: ['ignore', 'pipe', 'pipe'] });
       assert.match(r.stdout, /HIDDEN/, `${sh} runs the line after a comment holding ${mark}`);
@@ -740,4 +741,85 @@ test('#40 check: the dot-pattern forms main refuses stay refused', () => {
   const w = cdWorld();
   for (const c of ['cd dist && find .? -delete', 'cd dist && rm -rf .*']) w.no(c);
   assert.ok(w.why('find .? -delete', { cwd: join(w.work, 'dist') }), 'find .? from a subfolder');
+});
+
+// Lane 2 follow-up (unicode-space), from #42's fresh check: JavaScript's \s takes a no-break space, U+2028 and the
+// other Unicode spaces for a word gap, and the shells take them for letters. So in `echo x<U+2028>#<<EOF` the guard
+// saw a comment where the shells see the word `x<U+2028>#` and a real here-document, and the line after its end ran.
+// Every hook refuses a line holding such a character, and the guard's word gaps are the shells' (space, tab, line break).
+const runHookScript = (name, w, command) => new Promise((done) => {
+  const script = fileURLToPath(new URL(`./${name}`, import.meta.url));
+  const p = spawn(process.execPath, [script, '--role', 'builder', '--outbox', w.outbox, '--snapshot', w.snapshot], { stdio: ['pipe', 'pipe', 'pipe'], timeout: 60_000 });
+  p.stdout.resume();
+  p.stderr.resume();
+  p.on('close', (code) => done(code));
+  p.stdin.end(JSON.stringify(bash(command, w.work)));
+});
+test('unicode-space: a space the shells read as a letter is refused by every hook, run as the real scripts', async () => {
+  const w = world();
+  const W = w.work;
+  mkdirSync(join(W, 'config'));
+  const second = join(W, 'config', ENV_PROD);
+  writeFileSync(second, 'Y=1\n');
+  writeFileSync(w.snapshot, makeSnapshot({ production: { env_files: [w.envFile, second], programs: ['fakehost', 'fakedb'], hosts: ['db.prod.example.net'] }, secrets: { paths: [join(w.home, '.config', 'gh', 'hosts.yml')] } }));
+  const pf = [w.envFile, second].map(fold);
+  const why = (c) => prodGuard.folderWriteWhy(c, { cwd: W, protectedFiles: pf, home: w.home, user: 'u', tmpdir: w.root, cdpath: '' });
+  // Every character JavaScript's \s matches but space, tab and line break: \v, \f, \r and 19 Unicode spaces.
+  const odd = [];
+  for (let c = 0; c <= 0xffff; c += 1) { const ch = String.fromCharCode(c); if (/\s/.test(ch) && !' \t\n'.includes(ch)) odd.push(ch); }
+  assert.equal(odd.length, 22);
+  for (const ch of ['\v', '\f', '\r', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', '　', '﻿']) assert.ok(odd.includes(ch));
+  const hex = (ch) => `U+${ch.charCodeAt(0).toString(16).padStart(4, '0')}`;
+  // The shells: each one is a letter, so the here-document is real and the line after its end runs (echo only).
+  for (const sh of ['/bin/bash', '/bin/zsh'].filter((x) => existsSync(x))) {
+    for (const ch of odd) {
+      const r = spawnSync(sh, ['-c', `echo x${ch}#<<EOF\nit's\nEOF\necho HIDDEN`], { encoding: 'utf8', timeout: 10_000, stdio: ['ignore', 'pipe', 'pipe'] });
+      assert.match(r.stdout, /HIDDEN/, `${sh} runs the line after the here-document, with ${hex(ch)}`);
+    }
+  }
+  // What each hook must refuse, written plainly: refused as plain lines too.
+  const hooks = { 'production-write-guard.mjs': 'rm -rf config', 'secret-file-block.mjs': `cat ${dot('en', 'v')}`, 'merge-guard.mjs': 'gh pr merge 1', 'no-verify-block.mjs': 'git commit -n -m x' };
+  const at = {
+    'before #': (ch, d) => `echo x${ch}#<<EOF\nit's\nEOF\n${d}`,
+    'before <<': (ch, d) => `cat${ch}<<EOF\nit's\nEOF\n${d}`,
+    'between the program and its first word': (ch, d) => d.replace(' ', ch),
+    'at line start': (ch, d) => `${ch}${d}`,
+    // Deny by default: inside quotes the character is harmless, but the line is refused whole all the same.
+    'inside single quotes': (ch) => `echo 'a${ch}b'`,
+    'inside a commit message': (ch) => `git commit -m "a${ch}b"`,
+  };
+  const jobs = [];
+  for (const ch of odd) {
+    for (const [where, form] of Object.entries(at)) {
+      const pc = form(ch, hooks['production-write-guard.mjs']);
+      assert.ok(why(pc), `folder rule: ${where}, ${hex(ch)}`);
+      if (ch !== '\r' && ch !== '\v' && ch !== '\f') assert.match(heredocs(pc).why ?? 'none', /a space other than a plain space or tab/, `${where}, ${hex(ch)}`);
+      for (const [name, d] of Object.entries(hooks)) jobs.push({ name, c: form(ch, d), what: `${name}: ${where}, ${hex(ch)}` });
+    }
+  }
+  assert.equal(jobs.length, 22 * 6 * 4);
+  // A carriage return right before a line break stays let through (Windows line ends; L46 round 4).
+  const controls = ["echo 'a b'", 'git commit -m "a b"', 'echo a\tb', 'git status\r\nls\r\n'];
+  for (const c of controls) for (const name of Object.keys(hooks)) jobs.push({ name, c, what: `control, ${name}: ${JSON.stringify(c)}`, ok: true });
+  for (const [name, d] of Object.entries(hooks)) jobs.push({ name, c: d, what: `plain, ${name}: ${d}` });
+  const failed = [];
+  for (let k = 0; k < jobs.length; k += 8) {
+    const batch = jobs.slice(k, k + 8);
+    const codes = await Promise.all(batch.map((j) => runHookScript(j.name, w, j.c)));
+    batch.forEach((j, i) => { if (codes[i] !== (j.ok ? 0 : 2)) failed.push(`${j.what} (exit ${codes[i]})`); });
+  }
+  assert.deepEqual(failed, []);
+  // Belt and braces: a comment holding << is refused, so no gap read wrong can make a here-document a comment.
+  assert.match(heredocs('ls # see <<EOF').why ?? 'none', /a comment holding <</);
+  for (const c of ['ls # see <<EOF\nnpm test', 'ls #<<EOF\nit\nEOF\nnpm test', '# <<X']) {
+    blocked(prodGuard.decide(bash(c, W), w.args), `production: ${JSON.stringify(c)}`);
+    blocked(secret.decide(bash(c, W), w.args), `secret: ${JSON.stringify(c)}`);
+    blocked(merge.decide(bash(c, W)), `merge: ${JSON.stringify(c)}`);
+    blocked(noVerify.decide(bash(c, W)), `no-verify: ${JSON.stringify(c)}`);
+  }
+  // Not comments: << inside quotes or inside a word.
+  for (const c of ["echo '# <<x'", 'echo "a # <<b"', "x=a#<<EOF\nhi\nEOF"]) {
+    assert.equal(heredocs(c).why, null, JSON.stringify(c));
+    passed(prodGuard.decide(bash(c, W), w.args), JSON.stringify(c));
+  }
 });

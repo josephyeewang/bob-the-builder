@@ -135,7 +135,8 @@ export const joinLines = (cmd) => String(cmd ?? '').replace(/\\\n/g, '');
  * fed to a program, not commands, so the shape checks and the command list skip it; the word checks still read it.
  * Where the guard and the shell could disagree on where a body ends, the line is refused (`why`): an end word that
  * is not a plain name (`1 << 2` is a shift, not a here-document), `<<` next to `((`, or a body line ending in a
- * backslash. A comment holding a quote, a backtick or a backslash is refused with or without a here-document. Read
+ * backslash. A comment holding a quote, a backtick, a backslash or `<<` is refused with or without a here-document,
+ * and so is a line holding a space the shells read as a letter (a no-break or other Unicode space). Read
  * from the raw line: a backslash and line break inside a quoted body stay as written.
  */
 export function heredocs(cmd) {
@@ -144,6 +145,7 @@ export function heredocs(cmd) {
   const bodies = [];
   const pending = [];
   let quotedComment = false;
+  let heredocComment = false;
   let q = null;
   let wordStart = true;
   const refuse = (why) => ({ text: s, bodies, why });
@@ -152,6 +154,10 @@ export function heredocs(cmd) {
   // with Windows line ends) is let through and read as the shell reads it: a letter at the end of the word, the end
   // word of a here-document included (L46 round 4 confirm, Minor).
   if (/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]|\r(?!\n)/.test(s)) return refuse('a control character (a carriage return, form feed, …) in the line');
+  // The shells end a word only at a space, a tab or a line break. Any other space (a no-break space, U+2028, U+3000,
+  // U+FEFF, …) is a letter to them and a gap to JavaScript's \s, so the line is refused whole (lane 2 follow-up:
+  // unicode-space; `echo x<U+2028>#<<EOF` read as a comment). This is the first check `unreadable` makes.
+  if (/[^\S \t\n\r]/.test(s)) return refuse('a space other than a plain space or tab (a no-break or other Unicode space)');
   for (let i = 0; i < s.length;) {
     const ch = s[i];
     if (q) {
@@ -169,10 +175,12 @@ export function heredocs(cmd) {
     // A comment ends at the line break. The word splitter does not know comments, so a quote or backtick in one
     // would open a word running into the next lines, and a backslash at its end would join them: the line is refused
     // whether or not a here-document is present (lane 2 follow-up: comment-quote; `ls # it's` then `rm -rf x`).
+    // A comment holding `<<` is refused too, so a gap the guard reads wrong can't turn a here-document into a comment.
     if (ch === '#' && wordStart) {
       const end = s.indexOf('\n', i);
       const stop = end < 0 ? s.length : end;
       if (/['"`\\]/.test(s.slice(i, stop))) quotedComment = true;
+      if (s.slice(i, stop).includes('<<')) heredocComment = true;
       out += s.slice(i, stop);
       i = stop;
       continue;
@@ -224,9 +232,10 @@ export function heredocs(cmd) {
     }
     out += ch;
     i += 1;
-    wordStart = /[\s;&|()<>]/.test(ch);
+    wordStart = /[ \t\n;&|()<>]/.test(ch);
   }
   if (quotedComment) return refuse('a comment holding a quote, a backtick or a backslash (take the comment out)');
+  if (heredocComment) return refuse('a comment holding << (take the comment out)');
   if (bodies.length || pending.length) {
     if (/\(\(/.test(bareText(out))) return refuse('a << next to (( ))');
   }
@@ -334,7 +343,7 @@ export function wrapperOf(cmd, { inline = false } = {}) {
 }
 
 /** A command name that is a variable or a substitution: `$f deploy`, `$(echo x) deploy`. */
-export const builtCommandName = (cmd) => /(^|[;&|(\n{]|\b(then|do|else)\b)\s*([A-Za-z_][A-Za-z0-9_]*=\S*\s+)*["']?[$`]/.test(String(cmd));
+export const builtCommandName = (cmd) => /(^|[;&|(\n{]|\b(then|do|else)\b)[ \t\n]*([A-Za-z_][A-Za-z0-9_]*=[^ \t\n]*[ \t\n]+)*["']?[$`]/.test(String(cmd));
 
 /** Any substitution or variable anywhere in the line (even inside quotes). */
 export const hasExpansion = (cmd) => /[$`]/.test(String(cmd));
@@ -462,18 +471,18 @@ function oddBracket(bare) {
     const ch = bare[i];
     if (ch === ')') {
       const next = bare[i + 1];
-      if (next !== undefined && !/[\s;&|)<>]/.test(next)) return 'a bracket with a word stuck to it (a zsh pattern group)';
+      if (next !== undefined && !/[ \t\n;&|)<>]/.test(next)) return 'a bracket with a word stuck to it (a zsh pattern group)';
       continue;
     }
     if (ch !== '(') continue;
     const before = bare.slice(0, i);
     // Only blanks are trimmed: a bracket first on a new line starts a subshell (round 3 MAT-12).
     const prev = before.replace(/[ \t]+$/, '');
-    const attached = before.length > 0 && !/\s$/.test(before);
+    const attached = before.length > 0 && !/[ \t\n]$/.test(before);
     if (prev === '' || /[;&|(\n]$/.test(prev)) continue;
     if (attached && /[<>]$/.test(prev)) continue;
-    const word = /(\S+)$/.exec(prev)?.[1];
-    if (!attached && KEYWORDS.includes(word) && (prev.length === word.length || /[\s;&|(]/.test(prev[prev.length - word.length - 1]))) continue;
+    const word = /([^ \t\n]+)$/.exec(prev)?.[1];
+    if (!attached && KEYWORDS.includes(word) && (prev.length === word.length || /[ \t\n;&|(]/.test(prev[prev.length - word.length - 1]))) continue;
     return 'a bracket that is not a subshell (a zsh pattern group, glob qualifier or array)';
   }
   return null;
@@ -497,8 +506,8 @@ function plainSet(words) {
 // them anywhere (L46; round 3 MAT-3). Any assignment, and any builtin that sets a variable by name, is refused.
 const SAFE_NAMES = 'HOME|PWD|TMPDIR|USER';
 const SETS_SAFE_VAR = [
-  new RegExp(`(^|[\\s;&|(])(${SAFE_NAMES})(\\[[^\\]]*\\])?\\+?=`),
-  new RegExp(`(^|[\\s;&|(])(export|typeset|declare|local|readonly|integer|float|private|unset|read|vared|getopts|for|select|foreach|print|printf|zparseopts|let|strftime|zformat)(\\s[^;&|\\n]*?)?[\\s=,:(+-](${SAFE_NAMES})\\b`),
+  new RegExp(`(^|[ \\t\\n;&|(])(${SAFE_NAMES})(\\[[^\\]]*\\])?\\+?=`),
+  new RegExp(`(^|[ \\t\\n;&|(])(export|typeset|declare|local|readonly|integer|float|private|unset|read|vared|getopts|for|select|foreach|print|printf|zparseopts|let|strftime|zformat)([ \\t\\n][^;&|\\n]*?)?[ \\t\\n=,:(+-](${SAFE_NAMES})\\b`),
 ];
 
 /** Why a guard can't read this command (refuse it), or null when it is plain words. */
@@ -516,10 +525,10 @@ export function unreadable(cmd) {
   const bare = bareText(c);
   const bracket = oddBracket(bare);
   if (bracket) return bracket;
-  if (/\{[^{}\s]*\.\.[^{}\s]*\}/.test(bare)) return 'a brace range ({a..b})';
+  if (/\{[^{} \t\n]*\.\.[^{} \t\n]*\}/.test(bare)) return 'a brace range ({a..b})';
   // Whole classes (LEAD-CALLS L46; round 3 MAT-3, MAT-6 to MAT-9, and *** once ** is let through).
-  if (/\(\s*\)/.test(bare)) return 'a function definition';
-  if (/(^|[\s;&|(])=[^\s=]/.test(bare)) return 'a word starting with = (zsh runs the program it names)';
+  if (/\([ \t\n]*\)/.test(bare)) return 'a function definition';
+  if (/(^|[ \t\n;&|(])=[^ \t\n=]/.test(bare)) return 'a word starting with = (zsh runs the program it names)';
   if (/<\d*-\d*>/.test(bare)) return 'a zsh number range (<1-9>)';
   if (/\*\*\*/.test(bare)) return 'a *** pattern (it follows links into any folder)';
   if (SETS_SAFE_VAR.some((re) => re.test(bare))) return 'a line that sets HOME, PWD, TMPDIR or USER, which the guards read as fixed';
@@ -537,8 +546,8 @@ export function unreadable(cmd) {
   }
   const wrap = wrapperOf(c, { inline: true });
   if (wrap) return `"${wrap}" runs code the guard can't check`;
-  if (/\|\s*(\S*\/)?(python[0-9.]*|node|perl|ruby|php|deno|bun|osascript|lua|tclsh)(\s+-\S+)*\s*($|[;&|)])/.test(c)
-    || /(^|[;&|(]\s*)(\S*\/)?(python[0-9.]*|node|perl|ruby|php|deno|bun|osascript|lua|tclsh)(\s+-\S+)*\s*<(?!\()/.test(c)) return 'an interpreter fed code on its input';
+  if (/\|[ \t\n]*([^ \t\n]*\/)?(python[0-9.]*|node|perl|ruby|php|deno|bun|osascript|lua|tclsh)([ \t\n]+-[^ \t\n]+)*[ \t\n]*($|[;&|)])/.test(c)
+    || /(^|[;&|(][ \t\n]*)([^ \t\n]*\/)?(python[0-9.]*|node|perl|ruby|php|deno|bun|osascript|lua|tclsh)([ \t\n]+-[^ \t\n]+)*[ \t\n]*<(?!\()/.test(c)) return 'an interpreter fed code on its input';
   for (const words of shellCommands(c)) {
     const prog = programOf(words);
     const word0 = words[0];
@@ -550,7 +559,7 @@ export function unreadable(cmd) {
     if (!['[', '[['].includes(word0) && /[*?[\]{}]/.test(word0)) return 'a command name with a pattern in it';
     if (word0.includes('/') && !SYSTEM_BIN.includes(word0.slice(0, word0.lastIndexOf('/')))) return `"${word0}" runs a file by its path`;
     if (prog === 'find' && words.some((w) => /^-(exec|execdir|ok|okdir)$/.test(w))) return 'find -exec runs commands the guard can\'t see';
-    if (/^g?awk$/.test(prog) && words.slice(1).some((w) => /system\s*\(|\|\s*getline|\|\s*"/.test(w))) return 'awk running a command';
+    if (/^g?awk$/.test(prog) && words.slice(1).some((w) => /system[ \t\n]*\(|\|[ \t\n]*getline|\|[ \t\n]*"/.test(w))) return 'awk running a command';
     // git settings on the command line can rename any command (`-c alias.x='clean -fdx'`), and an alias set now
     // runs later under a name the guards don't know (MAT-12).
     if (prog === 'git') {
@@ -600,4 +609,4 @@ export const oddWord = (w) => (fold(w) !== String(w).toLowerCase() || /[^\p{ASCI
 /** The command names git's own settings or hooks files (`.git/config`, `.git/hooks/…`, `.git/info/…`). */
 // Each word's path is tidied first, so `.git/./config` and `.git//hooks` count (audit R-0b-44 round 3 MIN-1).
 export const namesGitInternals = (cmd) => [joinLines(cmd), ...shellWords(String(cmd ?? '')).flatMap((w) => [w, posix.normalize(w)])]
-  .some((t) => /(^|[\/\s"'=:])\.git\/(config|hooks|info)(\b|\/|$)/i.test(t));
+  .some((t) => /(^|[\/ \t\n"'=:])\.git\/(config|hooks|info)(\b|\/|$)/i.test(t));
