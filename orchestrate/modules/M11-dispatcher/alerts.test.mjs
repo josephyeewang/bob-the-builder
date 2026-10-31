@@ -426,3 +426,116 @@ test('#39 round 2: a dropped cause stops counting when it clears, or when an ale
   assert.equal(rec.read('fact', 'stop-B').doc.told_at, 'now');
   assert.equal(droppedAll(rec), 0);
 });
+
+// #39 round 3 (LEAD-CALLS L56): a delivery clears only the drops its text carried. A cause dropped again while
+// a send is out is told by a later text, never wiped by the earlier one (the reviewer's repros, plus the case
+// with no `dropCause` in between).
+const doc39 = (rec) => rec.read('fact', ALERT_QUEUE_FACT)?.doc ?? {};
+const toldIn = (texts) => texts.reduce((s, t) => s + Number(/\((\d+) older/.exec(t)?.[1] ?? 0), 0);
+const drain = async (rec, texts) => {
+  for (let i = 0; i < 400 && doc39(rec).entries?.length; i += 1) await sendAlerts(rec, (t) => { texts.push(t); }, T0, { sendMs: 50, budgetMs: 1e12, clock: () => 0 });
+};
+
+test('#39 round 3 (L56): dropCause, then the same cause dropped again during an unsettled delivery, is still told', async () => {
+  const rec = recWith([]);
+  queueAlert(rec, 'cause K, first time', { now: T0, mark: mark('hold-x') });
+  for (let i = 0; i < ALERT_UNTRIED_MAX; i += 1) queueAlert(rec, `u${i}`, { now: T0 });
+  assert.equal(droppedCount(doc39(rec)), 1);
+  const texts = [];
+  const a = await sendAlerts(rec, (t) => { texts.push(t); }, T0, { later: true, sendMs: 50, budgetMs: 1 });
+  assert.match(texts[0], /\(1 older alerts/);
+  dropCause(rec, 'hold-x');
+  queueAlert(rec, 'cause K, second time', { now: T0, mark: mark('hold-x') });
+  queueAlert(rec, 'one more', { now: T0 });
+  assert.equal(droppedCount(doc39(rec)), 1, 'the second drop of K is counted');
+  a.settle();
+  const after = droppedCount(doc39(rec));
+  assert.equal(after, 1, 'the earlier text did not carry the second drop, so its delivery leaves it');
+  texts.length = 0;
+  await drain(rec, texts);
+  assert.equal(toldIn(texts), 1, 'the second drop of K is told exactly once');
+  assert.equal(droppedCount(doc39(rec)), 0);
+});
+
+test('#39 round 3 (L56): K told by its own delivery, dropped again, then an older send carrying K settles: the new drop stays', async () => {
+  const rec = recWith([]);
+  queueAlert(rec, 'K first', { now: T0, mark: mark('hold-x') });
+  for (let i = 0; i < ALERT_UNTRIED_MAX; i += 1) queueAlert(rec, `u${i}`, { now: T0 });
+  const texts = [];
+  const a = await sendAlerts(rec, (t) => { texts.push(t); }, T0, { later: true, sendMs: 50, budgetMs: 1 });
+  queueAlert(rec, 'K again', { now: T0, mark: mark('hold-x') });
+  while (doc39(rec).entries.some((e) => e.key)) await sendAlerts(rec, (t) => { texts.push(t); }, T0, { sendMs: 50, budgetMs: 1 });
+  queueAlert(rec, 'K third', { now: T0, mark: mark('hold-x') });
+  for (let i = 0; i < ALERT_UNTRIED_MAX; i += 1) queueAlert(rec, `v${i}`, { now: T0 });
+  assert.equal(droppedCount(doc39(rec)), 1, 'K\'s own delivery cleared its first drop (out in u0, recheck N2); the new drop is listed');
+  a.settle();
+  assert.equal(droppedCount(doc39(rec)), 1, 'a text written before the new drop does not clear it');
+  texts.length = 0;
+  await drain(rec, texts);
+  assert.equal(toldIn(texts), 1, 'the new drop is told once');
+});
+
+test('#39 round 3 (L56): with no dropCause, a cause dropped again while the text carrying its first drop is out is listed anew and told', async () => {
+  const rec = recWith([]);
+  queueAlert(rec, 'K first', { now: T0, mark: mark('hold-x') });
+  for (let i = 0; i < ALERT_UNTRIED_MAX; i += 1) queueAlert(rec, `u${i}`, { now: T0 });
+  assert.equal(droppedCount(doc39(rec)), 1);
+  const texts = [];
+  const a = await sendAlerts(rec, (t) => { texts.push(t); }, T0, { later: true, sendMs: 50, budgetMs: 1 });
+  assert.match(texts[0], /\(1 older alerts/, 'u0 carries the first drop of K');
+  queueAlert(rec, 'K second', { now: T0, mark: mark('hold-x') });
+  queueAlert(rec, 'one more', { now: T0 });
+  assert.equal(droppedCount(doc39(rec)), 2, 'the second drop is listed: the only listing of K is out in a text written before it');
+  queueAlert(rec, 'K third', { now: T0, mark: mark('hold-x') }); // the untried class is full again: K goes at once
+  assert.equal(droppedCount(doc39(rec)), 2, 'a third drop while the second is still listed and not out adds nothing (once per cause)');
+  a.settle();
+  assert.equal(droppedCount(doc39(rec)), 1, 'the delivery clears only the drop its text carried');
+  texts.length = 0;
+  await drain(rec, texts);
+  assert.equal(toldIn(texts), 1, 'the later drop is told once');
+  assert.equal(droppedCount(doc39(rec)), 0);
+});
+
+// #39 round 3 recheck (LEAD-CALLS L56): the reviewer's over-count repros on the first L56 fix.
+test('#39 round 3 recheck (L56, N1): K dropped again while its listing is out in a send that then fails counts once', async () => {
+  const rec = recWith([]);
+  queueAlert(rec, 'K first', { now: T0, mark: mark('hold-x') });
+  for (let i = 0; i < ALERT_UNTRIED_MAX; i += 1) queueAlert(rec, `u${i}`, { now: T0 });
+  assert.equal(droppedCount(doc39(rec)), 1);
+  const a = await sendAlerts(rec, () => false, T0, { later: true, sendMs: 50, budgetMs: 1 }); // u0 carries K's drop; fails
+  queueAlert(rec, 'K again', { now: T0, mark: mark('hold-x') });
+  queueAlert(rec, 'one more', { now: T0 }); // K dropped again: listed anew, its first listing is out
+  a.settle(); // the send failed: the first listing is back
+  const texts = [];
+  await sendAlerts(rec, (t) => { texts.push(t); }, T0, { sendMs: 50, budgetMs: 1 });
+  assert.match(texts[0], /\(1 older alerts/, 'one cause, dropped twice, should count once (L52)');
+});
+
+test('#39 round 3 recheck (L56, N2): K told by its own alert clears its older drop out in a send that then fails', async () => {
+  const rec = recWith([]);
+  queueAlert(rec, 'K first', { now: T0, mark: mark('hold-x') });
+  for (let i = 0; i < ALERT_UNTRIED_MAX; i += 1) queueAlert(rec, `u${i}`, { now: T0 });
+  const a = await sendAlerts(rec, () => false, T0, { later: true, sendMs: 50, budgetMs: 1 }); // u0 carries K's drop; fails, unsettled
+  queueAlert(rec, 'K again', { now: T0, mark: mark('hold-x') }); // fits: u0 is out
+  // Deliver from the front until K's own copy is delivered and settled (rounds that settle at once).
+  const texts = [];
+  while (doc39(rec).entries.some((e) => e.key)) await sendAlerts(rec, (t) => { texts.push(t); }, T0, { sendMs: 50, budgetMs: 1 });
+  assert.ok(texts.includes('K again'));
+  a.settle(); // u0's failure: K's first listing is back
+  assert.equal(droppedCount(doc39(rec)), 0, 'K was told by its own alert; its older drop is not counted again');
+});
+
+test('#39 round 3 recheck (L56, N1): through an outage as tick.mjs runs it, one cause stays listed once', async () => {
+  const rec = recWith([]);
+  for (let i = 0; i < ALERT_UNTRIED_MAX + 60; i += 1) queueAlert(rec, `u${i}`, { now: T0 }); // full queue from an outage
+  const counts = [];
+  for (let pass = 0; pass < 10; pass += 1) {
+    const early = await sendAlerts(rec, () => false, T0, { later: true, sendMs: 50 }); // port down
+    queueAlert(rec, 'step stops failed', { now: T0, mark: mark('hold-x') }); // a step's cause, each pass
+    for (let j = 0; j < 3; j += 1) queueAlert(rec, `fresh ${pass}-${j}`, { now: T0 }); // and three new one-offs
+    early.settle();
+    await sendAlerts(rec, () => false, T0, { sendMs: 50 }); // the last send fails too
+    counts.push(doc39(rec).dropped_causes.length);
+  }
+  assert.ok(counts.at(-1) <= 1, 'one cause is listed once (L52)');
+});

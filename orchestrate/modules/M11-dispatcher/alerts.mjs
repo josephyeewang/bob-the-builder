@@ -10,6 +10,8 @@
 // When a cause clears, its step drops the cause's queued entry (`dropCause`, audit 0b-6 r7 M2), so a copy
 // delivered later can neither mark the next occurrence as told nor tell Joe about what has passed.
 
+import { randomUUID } from 'node:crypto';
+
 const iso = (ms) => new Date(ms).toISOString();
 const putFact = (rec, id, doc, kind) => rec.write({ actor: 'dispatcher', entity: 'fact', id, expectRev: rec.read('fact', id)?.rev ?? 0, doc, kind });
 
@@ -36,13 +38,28 @@ const outFor = (rec) => { if (!inFlightOf.has(rec)) inFlightOf.set(rec, new Set(
 const isInFlight = (rec, x) => [...outFor(rec)].some((sent) => sameAs(sent)(x));
 // Every drop is counted (L52): a one-off adds one to `dropped`; a cause-tied entry adds its cause to
 // `dropped_causes`, once however often it is queued and dropped again, and the cause leaves that list when an
-// alert for it is delivered or the cause clears (`dropCause`). The number told is both together.
+// alert for it is delivered or the cause clears (`dropCause`). The number told is both together. Each listed
+// drop has an id of its own (#39 round 3, L56): a delivery clears only the drops its text carried, or its own
+// cause's drops listed when it was sent, never one of the same cause dropped again while it was out.
 const causesOf = (d) => (Array.isArray(d?.dropped_causes) ? d.dropped_causes : []);
 export const droppedCount = (d) => (d?.dropped ?? 0) + causesOf(d).length;
-const addCauses = (d, gone) => {
-  const have = new Set(causesOf(d).map((c) => c.key));
-  const add = gone.filter((e) => e.key && !have.has(e.key) && have.add(e.key)).map((e) => ({ key: e.key, fact: e.mark?.fact ?? null }));
+// A cause already listed is not listed again, unless every drop of it listed is out in a send's text: that text
+// was written before this drop, so it is listed anew (#39 round 3, L56).
+const carriedIds = (rec) => new Set([...outFor(rec)].flatMap((s) => [...(s.carried?.causes ?? []), ...(s.carried?.own ?? [])]));
+const addCauses = (rec, d, gone) => {
+  const out = carriedIds(rec);
+  const have = new Set(causesOf(d).filter((c) => !out.has(c.id)).map((c) => c.key));
+  const add = gone.filter((e) => e.key && !have.has(e.key) && have.add(e.key)).map((e) => ({ key: e.key, fact: e.mark?.fact ?? null, id: randomUUID() }));
   return [...causesOf(d), ...add];
+};
+// Listings of one cause that are no longer out merge into the oldest (#39 round 3 recheck, N1): a send that
+// failed carrying a listing brings it back beside the one listed while it was out, and both stand for one cause.
+// So a cause has at most one listing that is not out, plus one per send still out, and the list cannot grow
+// through an outage.
+const mergeFree = (rec, list) => {
+  const out = carriedIds(rec);
+  const seen = new Set();
+  return list.filter((c) => out.has(c.id) || (!seen.has(c.key) && seen.add(c.key)));
 };
 // Two caps. Entries that have waited through a failed send (`held`; audit 0b-6 r7 M3) keep ALERT_QUEUE_MAX,
 // so a burst queued while sending works is all sent. Entries not yet tried keep ALERT_UNTRIED_MAX, so a long
@@ -62,7 +79,7 @@ const capQueue = (rec, all) => {
   return { entries: all.filter((e) => !gone.has(e.id)), dropped };
 };
 // The queue record after a cap: the one-offs dropped counted, the causes dropped listed.
-const withDrops = (d, entries, dropped) => ({ ...d, entries, dropped: (d.dropped ?? 0) + dropped.filter((e) => !e.key).length, dropped_causes: addCauses(d, dropped) });
+const withDrops = (rec, d, entries, dropped) => ({ ...d, entries, dropped: (d.dropped ?? 0) + dropped.filter((e) => !e.key).length, dropped_causes: mergeFree(rec, addCauses(rec, d, dropped)) });
 
 /**
  * Queues one alert. `mark` = { fact, fields, kind }: written onto that fact (merged into it) once the alert
@@ -80,7 +97,7 @@ export function queueAlert(rec, text, { now, mark = null } = {}) {
   const i = all.findIndex((e) => (key ? e.key === key : !e.key && e.text === entry.text));
   if (i >= 0) all[i] = entry; else all.push(entry);
   const { entries, dropped } = capQueue(rec, all);
-  return putFact(rec, ALERT_QUEUE_FACT, { ...withDrops(d, entries, dropped), next }, 'alert_queued').ok === true ? entry.id : null;
+  return putFact(rec, ALERT_QUEUE_FACT, { ...withDrops(rec, d, entries, dropped), next }, 'alert_queued').ok === true ? entry.id : null;
 }
 
 /**
@@ -121,13 +138,18 @@ export const textToSend = (e, n) => (n ? `${e.text} (${n} older alerts could not
 
 // What a send of `e` carries (#39 round 2, m-A): the dropped one-offs and causes no unsettled send carries
 // already. Its own cause is not carried: the alert itself tells it.
+// `causes` are the ids of the listed drops its text counts, `k` how many causes they are (listings of one cause
+// left by a restart count once); `own` the ids of every listing of its own cause now, out or not, which the
+// alert itself tells (#39 round 3, L56; recheck N2).
 const carryFor = (rec, d, e) => {
   const out = [...outFor(rec)];
   const n = Math.max(0, (d.dropped ?? 0) - out.reduce((sum, s) => sum + (s.carried?.n ?? 0), 0));
-  const taken = new Set(out.flatMap((s) => s.carried?.causes ?? []));
-  return { n, causes: causesOf(d).map((c) => c.key).filter((k) => k !== e.key && !taken.has(k)) };
+  const taken = carriedIds(rec);
+  const free = causesOf(d).filter((c) => !taken.has(c.id));
+  const others = free.filter((c) => c.key !== e.key);
+  return { n, causes: others.map((c) => c.id), k: new Set(others.map((c) => c.key)).size, own: e.key ? causesOf(d).filter((c) => c.key === e.key).map((c) => c.id) : [] };
 };
-const carriedCount = (c) => (c?.n ?? 0) + (c?.causes?.length ?? 0);
+const carriedCount = (c) => (c?.n ?? 0) + (c?.k ?? c?.causes?.length ?? 0);
 
 // The queued entry a send settles: the same one, or the copy its step queued for the same cause (or with
 // the same text) while the send was out. None, when its cause cleared meanwhile (`dropCause`).
@@ -149,15 +171,15 @@ export function settleAlert(rec, sent, ok, now, why = 'it was not delivered') {
     // against the larger untried cap (audit 0b-6 r8 MAT-2: one text the port always refuses, or one timeout,
     // ahead of a burst).
     const { entries, dropped } = capQueue(rec, [...entriesOf(d).filter((x) => x.id !== e.id), { ...e, held: true, tries: (e.tries ?? 0) + 1 }]);
-    putFact(rec, ALERT_QUEUE_FACT, { ...withDrops(d, entries, dropped), error: `an alert could not be sent: ${why}`, at: iso(now) }, 'alert_failed');
+    putFact(rec, ALERT_QUEUE_FACT, { ...withDrops(rec, d, entries, dropped), error: `an alert could not be sent: ${why}`, at: iso(now) }, 'alert_failed');
     return;
   }
-  const told = new Set([...(sent.carried?.causes ?? []), ...(sent.key ? [sent.key] : [])]);
-  if (!e && !carriedCount(sent.carried) && !causesOf(d).some((c) => told.has(c.key))) return;
+  const told = new Set([...(sent.carried?.causes ?? []), ...(sent.carried?.own ?? [])]);
+  if (!e && !carriedCount(sent.carried) && !causesOf(d).some((c) => told.has(c.id))) return;
   if (e && sent.mark?.fact) putFact(rec, sent.mark.fact, { ...rec.read('fact', sent.mark.fact)?.doc, ...sent.mark.fields }, sent.mark.kind ?? 'alert_told');
   const cur = rec.read('fact', ALERT_QUEUE_FACT)?.doc ?? {};
   const dropped = Math.max(0, (cur.dropped ?? 0) - (sent.carried?.n ?? 0));
-  const causes = causesOf(cur).filter((c) => !told.has(c.key));
+  const causes = causesOf(cur).filter((c) => !told.has(c.id));
   putFact(rec, ALERT_QUEUE_FACT, { ...cur, entries: entriesOf(cur).filter((x) => x.id !== e?.id), dropped, dropped_causes: causes, ...(e && { error: null, at: iso(now) }) }, 'alert_sent');
 }
 
