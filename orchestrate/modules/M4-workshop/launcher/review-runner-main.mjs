@@ -9,11 +9,13 @@
 // can write them (`installProblem`), so a copy installed wrong, or made writable later, starts nothing. The same goes
 // for what a review session runs (L66 M2): the claude program, the node this runs on and the hooks folder the
 // reviewer's settings point at are inside the installed copy and root's alone (`programsProblem`), or no review starts.
+// Every folder above the installed copy, up to /, must be root's and written by no one else too (item 20(b)): a folder
+// another user could write could have the copy renamed away and another put in its place.
 //
 // The config names every path; nothing here names a machine:
 //   { "installRoot": "/abs", "root": "/abs", "outboxRoot": "/abs", "reviewHome": "/abs",
 //     "uids": { "<role>": <uid>, ... },            every role of the design table (m-1); both review roles name review
-//     "recordRoot": "/abs", "recordUid": <uid>,     the Record, read only (its docs/card/<id>.json)
+//     "recordRoot": "/abs", "recordUid": <uid>,     the Record, read only (its docs/card/ and docs/verdict/)
 //     "mirror": "/abs",                             the git mirror, read only (refs/heads/card/<card>)
 //     "claudeBin": "/abs",                          the pinned claude program (checked on each pin bump, m-8), inside installRoot
 //     "hooksDir": "/abs",                           the hooks folder a reviewer's settings point at, inside installRoot
@@ -26,12 +28,13 @@
 // gets `claudeBin`, `node` and `hooksDir` (checked above) to run and to render the settings with. Exit 0 when the pass ran clean, 1 when it refused or could not run.
 
 import { closeSync, constants, fstatSync, lstatSync, openSync, readFileSync, readdirSync, realpathSync } from 'node:fs';
-import { isAbsolute, join, relative } from 'node:path';
+import { dirname, isAbsolute, join, relative } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { runnerPass, CARD_ID, isClaudeCommand } from './review-runner.mjs';
 import { STAMP } from './review-daemons.mjs';
-import { sessionVerdict } from '../../M9-record/outbox.mjs';
+import { sessionVerdict, verdictFromFile } from '../../M9-record/outbox.mjs';
+import { SESSION_ID } from '../../../shared/record.mjs';
 import { readAccountFile, ACCOUNT_FILE } from './accounts.mjs';
 import { REVIEW_USER } from './review-user.mjs';
 import { git } from '../git/safe-git.mjs';
@@ -51,9 +54,11 @@ export function readConfig(file) {
 
 /**
  * The installed copy: every folder and file under `installRoot` owned by `owner` (root) and written by no one else, no
- * links; and each of `files` inside it. `lstat` is a port so a test can stand in for root. Null, or the first problem.
+ * links; each of `files` inside it; and every folder above it, up to `top` (/), root's, written by no one else and not a
+ * link (item 20(b)). `lstat` is a port so a test can stand in for root, and `top` lets a test stop in its own throwaway
+ * folder. Null, or the first problem.
  */
-export function installProblem(installRoot, files, { owner = 0, lstat = lstatSync, list = readdirSync } = {}) {
+export function installProblem(installRoot, files, { owner = 0, lstat = lstatSync, list = readdirSync, top = '/' } = {}) {
   for (const f of files) {
     const rel = typeof f === 'string' && isAbsolute(f) ? relative(installRoot, f) : '..';
     if (rel === '' || rel.startsWith('..') || isAbsolute(rel)) return `${f} is not inside the installed copy ${installRoot}`;
@@ -62,6 +67,16 @@ export function installProblem(installRoot, files, { owner = 0, lstat = lstatSyn
     if (st.isSymbolicLink()) return `${f} is a link`;
     if (st.uid !== owner) return `${f} is not owned by root`;
     if (st.mode & 0o022) return `${f} can be written by others than root`;
+  }
+  const above = (p) => { const r = relative(top, p); return r === '..' || r.startsWith('../') || isAbsolute(r); };
+  if (!isAbsolute(top) || above(installRoot)) return `${installRoot} is not under ${top}`;
+  for (let p = dirname(installRoot); !above(p); p = dirname(p)) {
+    let st; try { st = lstat(p); } catch { return `${p}, above the installed copy, is missing`; }
+    if (st.isSymbolicLink()) return `${p}, above the installed copy, is a link (name the copy by its real path)`;
+    if (!st.isDirectory()) return `${p}, above the installed copy, is not a folder`;
+    if (st.uid !== owner) return `${p}, above the installed copy, is not owned by root`;
+    if (st.mode & 0o022) return `${p}, above the installed copy, can be written by others than root`;
+    if (p === top || p === dirname(p)) break;
   }
   const walk = (p) => {
     let st; try { st = lstat(p); } catch { return `${p} is missing`; }
@@ -83,24 +98,66 @@ export function programsProblem(c, { self, config, node = realpathSync(process.e
   return installProblem(c.installRoot, [self, config, c.wiring, c.claudeBin, node, c.hooksDir], opts);
 }
 
-/** A card from the Record, read only: docs/card/<id>.json, a plain file of the Record's owner that no one else writes. */
-export function readCardFile({ recordRoot, recordUid, card }) {
-  if (typeof card !== 'string' || !CARD_ID.test(card) || card.startsWith('.')) return { ok: false, reason: 'not a card id' };
-  for (const d of [recordRoot, join(recordRoot, 'docs'), join(recordRoot, 'docs', 'card')]) {
-    let st; try { st = lstatSync(d); } catch { return { ok: false, reason: `${d} is missing` }; }
-    if (st.isSymbolicLink() || !st.isDirectory()) return { ok: false, reason: `${d} is not a plain folder` };
-    if (st.uid !== recordUid || st.mode & 0o022) return { ok: false, reason: `${d} is not the Record owner's alone` };
-  }
-  const p = join(recordRoot, 'docs', 'card', `${card}.json`);
+// A folder of the Record: a plain folder of the Record's owner that no one else writes. Null, or the problem.
+function recordFolderProblem(d, recordUid) {
+  let st; try { st = lstatSync(d); } catch { return `${d} is missing`; }
+  if (st.isSymbolicLink() || !st.isDirectory()) return `${d} is not a plain folder`;
+  if (st.uid !== recordUid || st.mode & 0o022) return `${d} is not the Record owner's alone`;
+  return null;
+}
+
+// One document of the Record, read only: a plain file of the Record's owner that no one else writes, never a link.
+function readRecordFile(p, recordUid, entity, id, missing) {
   let fd;
-  try { fd = openSync(p, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); } catch (e) { return { ok: false, reason: e?.code === 'ENOENT' ? 'no such card' : `it can't be read (${e?.code ?? e})` }; }
+  try { fd = openSync(p, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); } catch (e) { return { ok: false, reason: e?.code === 'ENOENT' ? missing : `it can't be read (${e?.code ?? e})` }; }
   try {
     const st = fstatSync(fd);
     if (!st.isFile() || st.nlink !== 1 || st.uid !== recordUid || st.mode & 0o022 || st.size > MAX_CARD_BYTES) return { ok: false, reason: 'its file is not the Record\'s own plain file' };
     const d = JSON.parse(readFileSync(fd, 'utf8'));
-    if (d?.entity !== 'card' || d?.id !== card || !d.doc || typeof d.doc !== 'object') return { ok: false, reason: 'its file is not a card document' };
-    return { ok: true, doc: d.doc };
+    if (d?.entity !== entity || d?.id !== id || !d.doc || typeof d.doc !== 'object') return { ok: false, reason: `its file is not a ${entity} document` };
+    return { ok: true, doc: d.doc, rev: Number.isInteger(d.rev) ? d.rev : null };
   } catch { return { ok: false, reason: 'its file is not JSON' }; } finally { closeSync(fd); }
+}
+
+/** A card from the Record, read only: docs/card/<id>.json, with its revision (`rev`). */
+export function readCardFile({ recordRoot, recordUid, card }) {
+  if (typeof card !== 'string' || !CARD_ID.test(card) || card.startsWith('.')) return { ok: false, reason: 'not a card id' };
+  for (const d of [recordRoot, join(recordRoot, 'docs'), join(recordRoot, 'docs', 'card')]) {
+    const bad = recordFolderProblem(d, recordUid);
+    if (bad) return { ok: false, reason: bad };
+  }
+  return readRecordFile(join(recordRoot, 'docs', 'card', `${card}.json`), recordUid, 'card', card, 'no such card');
+}
+
+/**
+ * Whether the Record took a review session's verdict (item 20(a)): a verdict row of that session (docs/verdict/), for
+ * that role, card and head, whose file in review's outbox still reads true (M9 `verdictFromFile`, the same read the
+ * Merge Gate makes). → { ok: true } | { ok: false, reason }. A Record that can't be read throws, so the runner refuses
+ * the request without counting a try against the review.
+ */
+export function recordVerdictTaken({ recordRoot, recordUid, outboxRoot, uids, role, sessionId, card, head }) {
+  if (typeof sessionId !== 'string' || !SESSION_ID.test(sessionId)) return { ok: false, reason: 'the start names no session' };
+  for (const d of [recordRoot, join(recordRoot, 'docs')]) {
+    const bad = recordFolderProblem(d, recordUid);
+    if (bad) throw new Error(bad);
+  }
+  const dir = join(recordRoot, 'docs', 'verdict');
+  try { lstatSync(dir); } catch (e) { if (e?.code === 'ENOENT') return { ok: false, reason: 'the Record holds no verdicts yet' }; throw e; }
+  const bad = recordFolderProblem(dir, recordUid);
+  if (bad) throw new Error(bad);
+  const names = readdirSync(dir).filter((n) => n.startsWith(`verdict-${sessionId}-`) && n.endsWith('.json'));
+  let why = `the Record holds no verdict of session ${sessionId}`;
+  for (const n of names) {
+    const r = readRecordFile(join(dir, n), recordUid, 'verdict', n.slice(0, -'.json'.length), 'it is gone');
+    if (!r.ok) { why = `its verdict row ${n}: ${r.reason}`; continue; }
+    const d = r.doc;
+    if (d.session_id !== sessionId) continue;
+    if (d.role !== role || d.card !== card || d.head !== head) { why = `its verdict row names ${d.role} on ${d.card} at ${String(d.head).slice(0, 7)}`; continue; }
+    const f = verdictFromFile({ outboxRoot, uids, row: { doc: d } });
+    if (f.ok) return { ok: true };
+    why = f.reason;
+  }
+  return { ok: false, reason: why };
 }
 
 /** `dseditgroup` answers "yes ..." or "no ..."; anything else is not an answer (and the runner counts it as an admin). */
@@ -151,6 +208,7 @@ export function realPorts(c, wiring, { node = realpathSync(process.execPath) } =
     now: () => Date.now(), ownUid: () => process.getuid(),
     isAdmin: () => adminAnswer(run('/usr/sbin/dseditgroup', ['-o', 'checkmember', '-m', REVIEW_USER, 'admin'])),
     readCard: (card) => readCardFile({ recordRoot: c.recordRoot, recordUid: c.recordUid, card }),
+    verdictTaken: ({ role, sessionId, card, head }) => recordVerdictTaken({ recordRoot: c.recordRoot, recordUid: c.recordUid, outboxRoot: c.outboxRoot, uids: c.uids, role, sessionId, card, head }),
     currentHead: async (card) => {
       const r = await git(['rev-parse', '--verify', '-q', `refs/heads/card/${card.toLowerCase()}^{commit}`], { gitDir: c.mirror, purpose: 'review-runner-head', timeoutMs: CHILD_MS });
       if (r.code !== 0) throw new Error(`the card's branch is not in the mirror (${r.code})`);

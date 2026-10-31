@@ -6,7 +6,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { chmodSync, existsSync, fstatSync, linkSync, lstatSync, mkdirSync, readFileSync, readdirSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { runnerPass, readReviewStatus, needsRole, rolesFor, RETRY_MS, MAX_FAILED_STARTS, STATUS_STALE_MS, MAX_REQUEST_BYTES, MAX_STARTS_PER_PASS, MAX_PENDING, CARD_ID, readRequest } from './review-runner.mjs';
+import { runnerPass, readReviewStatus, needsRole, rolesFor, RETRY_MS, INTAKE_WAIT_MS, MAX_FAILED_STARTS, STATUS_STALE_MS, MAX_REQUEST_BYTES, MAX_STARTS_PER_PASS, MAX_PENDING, CARD_ID, readRequest } from './review-runner.mjs';
 import { runnerLaunchFor, runnerLaunches, sessionVerdict } from '../../M9-record/outbox.mjs';
 import { tempDir } from '../../../shared/test-tmp.mjs';
 
@@ -46,6 +46,7 @@ function world(over = {}) {
     start: async (x) => { starts.push(x); const p = ++pid; live.push({ pid: p, sessionId: x.sessionId }); return { ok: true, pid: p }; },
     accountInUse: () => 'a',
     handedIn: () => ({ ok: false, none: true }),
+    verdictTaken: () => ({ ok: true }),
     ...over,
   };
   const requests = join(root, 'requests');
@@ -268,6 +269,74 @@ test('L66: the launch record\'s owner check, through a stat port: a record anoth
   const all = runnerLaunches({ root, uids: UIDS, fstat: otherOwner });
   assert.deepEqual(all.launches, []);
   assert.match(all.refused[0].reason, /not owned by the review user/);
+});
+
+test('item 20(a) planted: the card changes while the reviewer works, so the verdict is refused; that is a failed start and Joe is told', async () => {
+  const w = await ready();
+  let rev = 4;
+  w.ctx.readCard = (c) => (w.cards.has(c) ? { ok: true, doc: w.cards.get(c), rev } : { ok: false });
+  w.ctx.handedIn = (x) => sessionVerdict({ outboxRoot: w.outboxRoot, uids: UIDS, ...x });
+  let taken = { ok: false, reason: 'the Record holds no verdict of session S-1' };
+  w.ctx.verdictTaken = () => taken;
+  const verdict = (sid, expectRev) => writeFileSync(join(w.outboxRoot, 'reviewer', sid, `verdict-${sid}.md`), `${JSON.stringify({ entity: 'verdict', card: 'C-1', expectRev, fields: { head: HEAD, pass: true } })}\n`, { mode: 0o644 });
+  w.ask();
+  await runnerPass(w.ctx);
+  // The reviewer read the card at revision 4; the card moves on to 5 while it works.
+  verdict('S-1', 4);
+  rev = 5;
+  w.end('S-1');
+  let r = await runnerPass(w.ctx);
+  assert.ok(r.alerts.some((a) => /handed in a verdict that is refused \(the card changed while it worked \(its revision is now 5; the verdict was written for 4\)\)\. It counts as a failed start/.test(a.text)), r.alerts.map((a) => a.text).join(' | '));
+  w.clock.t += RETRY_MS;
+  w.ask();
+  r = await runnerPass(w.ctx);
+  assert.deepEqual(r.started.map((s) => s.session_id), ['S-2'], 'a new review starts, so the card is not left waiting');
+  // A verdict the Record has already taken stands, even if the card moved on after.
+  verdict('S-2', 5);
+  rev = 6;
+  taken = { ok: true };
+  w.end('S-2');
+  r = await runnerPass(w.ctx);
+  assert.equal(r.alerts.length, 0, r.alerts.map((a) => a.text).join(' | '));
+  w.clock.t += RETRY_MS;
+  w.ask();
+  refusedFor(await runnerPass(w.ctx), /already started for card C-1 at aaaaaaa; one start per head/);
+});
+
+test('item 20(a) planted: a verdict the Record never takes is a failed start once the Record has had its time; Joe is told, 3 tries in all', async () => {
+  const w = await ready();
+  w.ctx.handedIn = () => ({ ok: true, verdict: { expect_rev: null } });
+  let taken = { ok: false, reason: 'session S-1 has already given its verdict; a second is refused' };
+  w.ctx.verdictTaken = () => taken;
+  w.ask();
+  await runnerPass(w.ctx);
+  w.end('S-1');
+  let r = await runnerPass(w.ctx);
+  assert.equal(r.alerts.length, 0, 'it looked handed in when it ended');
+  // Within the wait, the Record may not have read it yet: the request is refused, and nothing is counted.
+  w.ask();
+  refusedFor(await runnerPass(w.ctx), /ended less than 15 minutes ago, and the Record has not taken its verdict yet/);
+  // A Record that can't be read refuses the request and counts nothing either.
+  w.clock.t += INTAKE_WAIT_MS;
+  w.ctx.verdictTaken = () => { throw new Error('docs is not the Record owner\'s alone'); };
+  w.ask();
+  r = await runnerPass(w.ctx);
+  refusedFor(r, /whether the Record took the reviewer's verdict for card C-1 could not be read \(docs is not/);
+  assert.equal(r.started.length, 0);
+  w.ctx.verdictTaken = () => taken;
+  w.ask();
+  r = await runnerPass(w.ctx);
+  assert.ok(r.alerts.some((a) => /reviewer for card C-1 at aaaaaaa handed in a verdict the Record never took \(session S-1 has already given its verdict; a second is refused\)\. It counts as a failed start/.test(a.text)), r.alerts.map((a) => a.text).join(' | '));
+  assert.deepEqual(r.started.map((s) => s.session_id), ['S-2'], 'and a new review starts at once');
+  // Two more, and Joe is told no reviewer could be started.
+  taken = { ok: false, reason: 'the Record holds no verdict of session S-2' };
+  for (const sid of ['S-2', 'S-3']) { w.end(sid); await runnerPass(w.ctx); w.clock.t += INTAKE_WAIT_MS; w.ask(); await runnerPass(w.ctx); }
+  w.clock.t += INTAKE_WAIT_MS;
+  w.ask();
+  r = await runnerPass(w.ctx);
+  refusedFor(r, /3 starts of a reviewer for card C-1 at aaaaaaa failed; Joe is told/);
+  assert.ok(w.status().alerts.some((a) => /after 3 tries \(last: the Record never took its verdict: the Record holds no verdict of session S-2\)/.test(a.text)), w.status().alerts.map((a) => a.text).join(' | '));
+  assert.equal(w.starts.length, 3);
 });
 
 test('L65: a duplicate is refused: the same request id, or a second start while one runs, or after one has run', async () => {

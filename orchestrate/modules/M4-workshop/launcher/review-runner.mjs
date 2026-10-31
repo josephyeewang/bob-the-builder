@@ -44,6 +44,8 @@ import { checkReviewOutbox, reviewOutbox, uidsProblem } from './review-user.mjs'
 import { ACCOUNT_NAMES, accountDir, accountEnv } from './accounts.mjs';
 
 export const RETRY_MS = 15 * 60_000;
+// How long after a session ends the Record has to take its verdict before the start counts as failed (item 20(a)).
+export const INTAKE_WAIT_MS = 15 * 60_000;
 export const MAX_FAILED_STARTS = 3;
 export const STATUS_STALE_MS = 3 * 60_000;
 export const MAX_REQUEST_BYTES = 4096;
@@ -145,7 +147,10 @@ function writeLaunch(dir, sid, doc) {
  *   root, outboxRoot, uids (the M9 map; both review roles name the review user), reviewHome (review's home folder)
  *   now(), ownUid(), newId() (default randomUUID)
  *   isAdmin() → true | false; a throw counts as an admin (m-3)
- *   readCard(card) → { ok, doc } (the Record, read only)      currentHead(card, doc) → 40 hex (git, read only)
+ *   readCard(card) → { ok, doc, rev } (the Record, read only)      currentHead(card, doc) → 40 hex (git, read only)
+ *   verdictTaken({ role, sessionId, card, head }) → { ok: true } when the Record holds this session's verdict and its
+ *     file still reads true (M9 `verdictFromFile`); { ok: false, reason } when it doesn't; a throw when the Record can't
+ *     be read (item 20(a))
  *   sessions() → [{ pid, sessionId? }] the review sessions alive now     stop({ pid, sessionId })
  *   claudeBin, processName(pid) → the process's command line: nothing is stopped, and no start counts, unless it is
  *     claude's (`isClaudeCommand`)
@@ -154,7 +159,7 @@ function writeLaunch(dir, sid, doc) {
  *   accountInUse() → 'a' | 'b' (which sign-in folder of review's to start on)
  *   handedIn({ role, sessionId, outbox, card, head }) → { ok: true } when the ended session left a verdict the intake
  *     takes; { ok: false, none: true } when it left none; { ok: false, reason } when it left one the intake would refuse
- *     (M9 `sessionVerdict`)
+ *     (M9 `sessionVerdict`; its verdict carries the header's `expect_rev`)
  *   installedCommit() → the installed copy's commit stamp (40 hex), shown in the status
  * Returns { ok, error?, started: [...], refused: [...], stopped: [...], alerts: [...] } (also what status.json shows).
  */
@@ -240,6 +245,15 @@ export async function runnerPass(ctx) {
     const a = state.attempts[k] ?? { failures: 0 };
     let h;
     try { h = await ctx.handedIn({ role: r.role, sessionId: r.session_id, outbox: reviewOutbox({ outboxRoot: ctx.outboxRoot, role: r.role, sessionId: r.session_id }), card: r.card, head: r.head }); } catch (e) { h = { ok: false, reason: `its verdict could not be read (${e?.message ?? e})` }; }
+    // The intake also refuses a verdict written for an older revision of the card (M9 writer.mjs): judged here too,
+    // unless the Record has already taken it (item 20(a)).
+    if (h?.ok === true && Number.isInteger(h.verdict?.expect_rev)) {
+      let taken = null; try { taken = await ctx.verdictTaken({ role: r.role, sessionId: r.session_id, card: r.card, head: r.head }); } catch { taken = null; }
+      if (taken?.ok !== true) {
+        let c; try { c = await ctx.readCard(r.card); } catch { c = null; }
+        if (c?.ok && Number.isInteger(c.rev) && c.rev !== h.verdict.expect_rev) h = { ok: false, reason: `the card changed while it worked (its revision is now ${c.rev}; the verdict was written for ${h.verdict.expect_rev})` };
+      }
+    }
     if (h?.ok === true) state.attempts[k] = { ...a, started: true, ended_at: iso(now) };
     else {
       // A session that ended with nothing handed in, or with a verdict the intake would refuse, counts as a failed
@@ -288,8 +302,23 @@ export async function runnerPass(ctx) {
     if (gitHead !== head) { refuse(`the request names head ${head.slice(0, 7)}, but the card's branch is at ${String(gitHead ?? 'nothing').slice(0, 7)}`); continue; }
     const k = keyOf(card, head, role);
     if (state.running.some((r) => keyOf(r.card, r.head, r.role) === k)) { refuse(`a ${role} is already running for card ${card} at ${head.slice(0, 7)}`); continue; }
-    const a = state.attempts[k] ?? { failures: 0 };
-    if (a.started) { refuse(`a ${role} was already started for card ${card} at ${head.slice(0, 7)}; one start per head`); continue; }
+    let a = state.attempts[k] ?? { failures: 0 };
+    if (a.started) {
+      // One start per head, but only while the Record holds that session's verdict. A verdict the intake refused (the card
+      // changed, a second file) would leave the card waiting with no one told; once the Record has had its time, that
+      // counts as a failed start, Joe is told, and a new review may start (item 20(a)).
+      const sid = a.session_id;
+      let t;
+      try { t = await ctx.verdictTaken({ role, sessionId: sid, card, head }); } catch (e) { refuse(`whether the Record took the ${role}'s verdict for card ${card} could not be read (${e?.message ?? e})`); continue; }
+      if (t?.ok === true) { refuse(`a ${role} was already started for card ${card} at ${head.slice(0, 7)}; one start per head`); continue; }
+      const ended = Date.parse(a.ended_at ?? a.started_at ?? '');
+      const since = Number.isFinite(ended) ? ended : 0;
+      if (now - since < INTAKE_WAIT_MS) { refuse(`the ${role} for card ${card} at ${head.slice(0, 7)} ended less than 15 minutes ago, and the Record has not taken its verdict yet`); continue; }
+      const why = typeof t?.reason === 'string' && t.reason ? t.reason.slice(0, 300) : 'no reason given';
+      a = { ...a, started: false, failures: (a.failures ?? 0) + 1, last_failed_at: iso(since), last_reason: `the Record never took its verdict: ${why}` };
+      state.attempts[k] = a;
+      alert(`not-taken-${sid ?? k}`, `The ${role} for card ${card} at ${head.slice(0, 7)} handed in a verdict the Record never took (${why}). It counts as a failed start; a new one may start (${MAX_FAILED_STARTS} tries in all).`);
+    }
     if ((a.failures ?? 0) >= MAX_FAILED_STARTS) {
       refuse(`${MAX_FAILED_STARTS} starts of a ${role} for card ${card} at ${head.slice(0, 7)} failed; Joe is told`);
       alert(`gave-up-${k}`, `No ${role} could be started for card ${card} at ${head.slice(0, 7)} after ${MAX_FAILED_STARTS} tries (last: ${a.last_reason ?? 'ended with no verdict'}).`);

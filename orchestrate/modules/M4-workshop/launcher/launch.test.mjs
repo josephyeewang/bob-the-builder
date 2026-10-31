@@ -28,7 +28,7 @@ const N_PATHS = {
   copy: '/w/copy', outbox: '/w/outbox', hooksDir: '/w/hooks', snapshot: '/w/rules.json', node: '/w/node',
   deny: { secrets: ['/w/secrets'], claudeHome: '/h/.claude', robotKeys: '/w/keys', record: '/w/record', otherCopies: ['/w/copy2'] },
   bobFolder: '/w/bob', mirror: '/w/mirror.git',
-  reviewWalls: { outboxRoot: '/r/outbox', launches: '/r/launches', status: '/r/status', requests: '/r/requests' },
+  reviewWalls: { outboxRoot: '/r/outbox', runnerRoot: '/r/review' },
 };
 const N_VERSION = '2.1.300';
 const N_FLAGS = Object.values(FLAGS).filter((f) => f.startsWith('-'));
@@ -348,7 +348,7 @@ function hookWorld(role = 'worker') {
   const rules = { production: { env_files: [join(root, 'prod.env')], programs: ['fakehost'], hosts: ['db.prod.example.net'] }, secrets: { paths: [keys] } };
   writeFileSync(snapshot, makeSnapshot(rules));
   const profile = DESIGN_PROFILES[role];
-  const r = renderRoleSettings({ productionFiles: [], role, profile, paths: { copy, outbox, hooksDir, snapshot, node: process.execPath, deny: { secrets: [keys] }, reviewWalls: { outboxRoot: join(root, 'ro'), launches: join(root, 'rl'), status: join(root, 'rs'), requests: join(root, 'rq') } }, product: { commands: { test: 'npm test' } } });
+  const r = renderRoleSettings({ productionFiles: [], role, profile, paths: { copy, outbox, hooksDir, snapshot, node: process.execPath, deny: { secrets: [keys] }, reviewWalls: { outboxRoot: join(root, 'ro'), runnerRoot: join(root, 'rr') } }, product: { commands: { test: 'npm test' } } });
   assert.equal(r.ok, true, r.reason);
   const check = (over = {}) => checkHooks({ settings: r.settings, hooksDir, source, kinds: profile.outbox, copy, outbox, harmfulProduction: productionProbe(rules), timeoutMs: 1500, ...over });
   return { root, source, hooksDir, outbox, settings: r.settings, check, rules };

@@ -278,7 +278,8 @@ export function sessionVerdict({ outboxRoot, uids, role, sessionId, card, head }
     if (!v.ok) return no(v.reason);
     if (v.card !== card) return no(`the verdict names card ${v.card}, not ${card}`);
     if (v.head !== head) return no(`the verdict names head ${v.head.slice(0, 7)}, not ${String(head).slice(0, 7)}`);
-    return { ok: true, verdict: v };
+    // The card revision it was written for: the intake refuses it if the card has changed since (writer.mjs).
+    return { ok: true, verdict: { ...v, expect_rev: Number.isInteger(f.header.expectRev) ? f.header.expectRev : null } };
   } catch (e) { return no(`the verdict could not be read (${e?.code ?? e?.message ?? e})`); }
 }
 
