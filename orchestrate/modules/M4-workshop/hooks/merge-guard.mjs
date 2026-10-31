@@ -6,7 +6,7 @@ import { isMain, runHook, block, pass, shellCommands, shellWords, programOf, joi
 
 // Git settings that turn a plain push into a push to main, or rename a command.
 const PUSH_SETTINGS = /^(remote\..+\.(push|pushurl|url|mirror)|remote\.pushdefault|push\.default|alias\..+|core\.hookspath|url\..+\.(push)?insteadof|include\.path|includeif\..+)(=|$)/i;
-const MERGE_URL = /(api\.)?github\.com\/.*\/(merges?|pulls\/\d+\/merge)(\b|$)|\/repos\/[^\s]+\/(merges?|pulls\/\d+\/merge)\b/i;
+const MERGE_URL = /(api\.)?github\.com\/.*\/(merges?|pulls\/\d+\/merge)(\b|$)|\/repos\/[^ \t\n]+\/(merges?|pulls\/\d+\/merge)\b/i;
 
 export function decide(input) {
   if (input.tool_name !== 'Bash') return pass();
