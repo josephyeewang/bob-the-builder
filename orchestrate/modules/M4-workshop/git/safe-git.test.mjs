@@ -5,10 +5,12 @@ import { join, dirname, relative } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { spawn, spawnSync } from 'node:child_process';
 import { createServer } from 'node:net';
-import { safeGitEnv, sweepStaleHomes, git, gitOk, checkGitVersion, checkMirror, initMirror, MIRROR_CONFIG_TEMPLATE, SAFE_CONFIG, withNoPrograms, repoConfigWhy, repoConfigFiles, inertSetting, INERT_KEYS, pointerPath } from './safe-git.mjs';
+import { safeGitEnv, sweepStaleHomes, git, gitOk, checkGitVersion, checkMirror, initMirror, MIRROR_CONFIG_TEMPLATE, SAFE_CONFIG, withNoPrograms, repoConfigWhy, repoConfigFiles, inertSetting, INERT_KEYS, pointerPath, placeWhy } from './safe-git.mjs';
 import { tempDir } from '../../../shared/test-tmp.mjs';
 
 const tmp = () => tempDir('orch-sg-');
+// Plain git in the controls asks for nothing either (the lead's standing rule, 30 Oct 2026: no test may hang).
+const NO_PROMPT = { GIT_TERMINAL_PROMPT: '0', GIT_ASKPASS: '/usr/bin/false', SSH_ASKPASS: '/usr/bin/false', GCM_INTERACTIVE: 'never' };
 
 test('environment starts empty: no inherited GIT_* or other variables survive', () => {
   process.env.GIT_SSH_COMMAND = 'planted';
@@ -145,6 +147,7 @@ async function listener() {
   let hits = 0;
   const server = createServer((c) => { hits += 1; c.destroy(); });
   await new Promise((ok) => server.listen(0, '127.0.0.1', ok));
+  server.unref(); // a test that fails before close() still lets the run end
   return { url: `http://127.0.0.1:${server.address().port}`, hits: () => hits, reset: () => { hits = 0; }, close: () => new Promise((ok) => server.close(ok)) };
 }
 
@@ -153,9 +156,10 @@ function rawGit(args, { gitDir, workTree, input } = {}) {
   return new Promise((done) => {
     const child = spawn('git', ['--no-pager', ...withNoPrograms(args)], { cwd: tmp(), env: safeGitEnv({ gitDir, workTree }), stdio: ['pipe', 'pipe', 'pipe'], timeout: 60_000 });
     let err = '';
-    child.stdout.on('data', () => {});
+    let out = '';
+    child.stdout.on('data', (d) => { out += d; });
     child.stderr.on('data', (d) => { err += d; });
-    child.on('close', (code) => done({ code, stderr: err }));
+    child.on('close', (code) => done({ code, stdout: out, stderr: err }));
     child.stdin.on('error', () => {});
     child.stdin.end(input ?? '');
   });
@@ -217,6 +221,8 @@ async function everyCommand(w, d, run) {
     [['fetch', '-q', 'origin'], o], [['push', '-q', w.peer, 'main:refs/heads/main'], o],
     [['push', '--porcelain', '--atomic', '--no-verify', w.peer, 'main:refs/heads/p2'], o], [['ls-remote', '--heads', w.peer], o],
     [['merge-base', 'main', 'side'], o], [['check-ref-format', '--branch', 'main'], o],
+    // The forms with no place, where git would take one from the repository's config: refused since L51.
+    [['fetch', '-q'], o], [['ls-remote'], o], [['ls-remote', '--heads'], o], [['push', '-q'], o], [['pull', '-q'], o],
   ];
   const out = [];
   for (const [args, opts] of cmds) out.push([args.join(' '), await run(args, opts)]);
@@ -226,7 +232,7 @@ async function everyCommand(w, d, run) {
   return out;
 }
 
-test('L36/L49 sweep: every planted key is refused before git runs; the pins alone still start no program and reach no network', { timeout: 900_000 }, async () => {
+test('L36/L49 sweep: every planted key is refused before git runs; the pins alone still start no program and reach no network', { timeout: 120_000 }, async () => {
   const w = await trapWorld();
   const net = await listener();
   const markers = join(w.root, 'markers');
@@ -338,8 +344,8 @@ test('L36 sweep, control: the planted programs run when git is used the careless
   writeFileSync(join(w.gd, 'config'), `${readFileSync(join(w.gd, 'config'), 'utf8')}[log]\n\tshowSignature = true\n[gpg]\n\tprogram = ${prog('gpg')}\n[gpg "ssh"]\n\tprogram = ${prog('gpg-ssh')}\n\tallowedSignersFile = ${prog('signers')}\n[filter "x"]\n\tclean = ${prog('clean')}\n[diff "x"]\n\ttextconv = ${prog('textconv')}\n`);
   writeFileSync(join(w.d, '.gitattributes'), '* filter=x diff=x\n');
   writeFileSync(join(w.d, 'a.txt'), 'changed\n');
-  const env = { PATH: '/usr/bin:/bin:/opt/homebrew/bin:/usr/local/bin', HOME: w.root, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' };
-  for (const a of [['log', '-n4', '--format=%H %s', 'main'], ['add', '-A'], ['diff', '--cached']]) spawnSync('git', ['--no-pager', '-C', w.d, ...a], { env });
+  const env = { PATH: '/usr/bin:/bin:/opt/homebrew/bin:/usr/local/bin', HOME: w.root, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1', ...NO_PROMPT };
+  for (const a of [['log', '-n4', '--format=%H %s', 'main'], ['add', '-A'], ['diff', '--cached']]) spawnSync('git', ['--no-pager', '-C', w.d, ...a], { env, timeout: 60_000 });
   assert.deepEqual(readdirSync(markers).sort(), ['clean', 'gpg', 'gpg-ssh', 'textconv']);
   // The reported case through safe-git: refused (the textconv and filter keys) or no program run.
   rmSync(markers, { recursive: true }); mkdirSync(markers);
@@ -407,7 +413,7 @@ test('L36: a credential helper in the repository config never runs when git asks
 // LEAD-CALLS L49: deny by default. Every key the installed git documents, planted with a program as its value, is
 // refused and named, unless it is on the safe list; each key the list lets through, planted the same way or with a
 // network address, starts no program and reaches no network across every kind of command.
-test('L49 sweep: every key git lists is refused and named unless it is on the safe list; those let through start nothing', { timeout: 900_000 }, async () => {
+test('L49 sweep: every key git lists is refused and named unless it is on the safe list; those let through start nothing', { timeout: 120_000 }, async () => {
   const listed = spawnSync('git', ['help', '--config'], { encoding: 'utf8', env: safeGitEnv() }).stdout.split('\n')
     .filter((l) => /^[A-Za-z0-9][A-Za-z0-9.<>*_-]*$/.test(l) && l.includes('.'));
   assert.ok(listed.length > 900, `git listed only ${listed.length} keys`);
@@ -482,16 +488,19 @@ test('L49: a planted program behind a pointer file, a commondir, a worktree or a
     'submodule config': (d, gd) => { mkdirSync(join(gd, 'modules', 's'), { recursive: true }); writeFileSync(join(gd, 'modules', 's', 'config'), bad); },
     'nested submodule config': (d, gd) => { mkdirSync(join(gd, 'modules', 'a', 'modules', 'b/c'), { recursive: true }); writeFileSync(join(gd, 'modules', 'a', 'modules', 'b/c', 'config'), bad); },
   };
+  // Since #32 round 3 (L51) a pointer leads only to a linked worktree's folder, and a commondir only from one: these
+  // three are refused for where they lead, before any config is read.
+  const byPlace = { 'pointer file': /pointer leads to .*not a linked worktree/, 'relative pointer file': /pointer leads to .*not a linked worktree/, commondir: /commondir leads outside/ };
   for (const [name, put] of Object.entries(cases)) {
     const { why, r } = await planted(name.replace(/[^a-z]+/gi, '-'), put);
-    assert.match(why ?? '', /filter\.x\.clean/, name);
+    assert.match(why ?? '', byPlace[name] ?? /filter\.x\.clean/, name);
     assert.equal(r.code, -1, name);
   }
-  // A pointer file to a clean repository works, and git is handed the folder that was checked.
+  // A pointer file to a clean repository that is not a linked worktree is refused too (the worktree test covers the
+  // pointer git itself writes).
   const ok = await planted('clean-pointer', (d, gd) => { const p = join(d, 'ptr'); writeFileSync(p, `gitdir: ${gd}\n`); return p; });
-  assert.equal(ok.why, null);
-  assert.equal(ok.r.code, 0, ok.r.stderr);
-  assert.equal(repoConfigFiles(ok.gitDir).dir, realpathSync.native(join(ok.d, '.git')));
+  assert.match(ok.why ?? '', /not a linked worktree/);
+  assert.equal(ok.r.code, -1, ok.r.stderr);
   for (const p of ['not a pointer\n', 'gitdir: /nonexistent-folder\n']) {
     const f = join(ok.d, 'bad-ptr'); writeFileSync(f, p);
     assert.match(await repoConfigWhy(f) ?? '', /pointer/);
@@ -553,17 +562,15 @@ test('L49: a remote address is let through only as plain https, ssh, file or a l
 });
 
 test('L49: git is handed the folder the check read, not the pointer file', async () => {
-  const d = tmp();
-  const gd = join(d, '.git');
-  await gitOk(['init', '-q', d], { gitDir: gd });
-  const ptr = join(d, 'ptr');
-  writeFileSync(ptr, `gitdir: ${gd}\n`);
-  const fake = join(d, 'fake-git');
+  const w = await trapWorld();
+  const wt = join(w.root, 'wt');
+  await gitOk(['worktree', 'add', '-q', wt, 'side'], { gitDir: w.gd, workTree: w.d });
+  const fake = join(w.root, 'fake-git');
   writeFileSync(fake, '#!/bin/sh\n[ "$1" = config ] && exit 0\necho "$GIT_DIR|$GIT_COMMON_DIR"\n');
   chmodSync(fake, 0o755);
-  const r = await git(['status'], { gitDir: ptr, gitBin: fake });
-  const real = realpathSync.native(gd);
-  assert.equal(r.stdout.toString().trim(), `${real}|${real}`);
+  const r = await git(['status'], { gitDir: join(wt, '.git'), gitBin: fake });
+  const real = realpathSync.native(w.gd);
+  assert.equal(r.stdout.toString().trim(), `${real}/worktrees/wt|${real}`);
 });
 
 // #32 round 2: a hook named in config (git 2.54 runs these even with core.hooksPath pinned), and a repository copy.
@@ -593,7 +600,8 @@ test('#32 round 2 M1: a commondir git reads differently (a trailing space; a lin
   writeFileSync(join(b, 'HEAD'), readFileSync(join(w.gd, 'HEAD')));
   writeFileSync(join(b, 'commondir'), 'lnk/../x\n');
 
-  for (const [gitDir, mark, why] of [[a, markA, /commondir is not one path/], [b, markB, /hook\.x\.command/]]) {
+  // Since #32 round 3 (L51), B is refused for where its commondir leads (outside the repository) before any config is read.
+  for (const [gitDir, mark, why] of [[a, markA, /commondir is not one path/], [b, markB, /commondir leads outside the repository/]]) {
     assert.match(await repoConfigWhy(gitDir) ?? '', why, gitDir);
     const r = await git(['update-ref', 'refs/heads/zz', 'HEAD'], { gitDir });
     assert.equal(r.code, -1, r.stderr);
@@ -603,16 +611,23 @@ test('#32 round 2 M1: a commondir git reads differently (a trailing space; a lin
     assert.equal(existsSync(mark), true, `${gitDir}: control: the hook should run when git reads commondir itself`);
     rmSync(mark);
   }
-  // The clean side read the right way: B with the hook moved to B/x is let through, and git uses other/x, as checked.
-  rmSync(join(w.root, 'other', 'x'), { recursive: true });
-  cpSync(w.gd, join(w.root, 'other', 'x'), { recursive: true });
-  appendFileSync(join(b, 'x', 'config'), hookConfig(markB));
-  assert.equal(await repoConfigWhy(b), null);
-  const found = repoConfigFiles(b);
-  assert.equal(found.common, realpathSync.native(join(w.root, 'other', 'x')));
-  assert.equal((await git(['update-ref', 'refs/heads/zz', 'HEAD'], { gitDir: b })).code, 0);
+  // The link-then-.. read the right way, in a layout let through: a worktree's own folder M/worktrees/b whose commondir
+  // is lnk/../../../.., with lnk leading to M/worktrees/b/deep/x. Through the real folders that is M; by its text it
+  // would be the folder above M, whose config is hooked.
+  const m = join(w.root, 'M');
+  cpSync(w.gd, m, { recursive: true });
+  const adm = join(m, 'worktrees', 'b');
+  mkdirSync(join(adm, 'deep', 'x'), { recursive: true });
+  writeFileSync(join(adm, 'HEAD'), readFileSync(join(w.gd, 'HEAD')));
+  symlinkSync(join(adm, 'deep', 'x'), join(adm, 'lnk'));
+  writeFileSync(join(adm, 'commondir'), 'lnk/../../../..\n');
+  writeFileSync(join(w.root, 'config'), `[core]\n\trepositoryformatversion = 0\n${hookConfig(markB)}`);
+  assert.equal(await repoConfigWhy(adm), null);
+  const found = repoConfigFiles(adm);
+  assert.equal(found.common, realpathSync.native(m));
+  assert.equal((await git(['update-ref', 'refs/heads/zz', 'HEAD'], { gitDir: adm })).code, 0);
   assert.equal(existsSync(markB), false, 'git read a commondir other than the one checked');
-  assert.equal((await gitOk(['rev-parse', '--git-common-dir'], { gitDir: b })).trim(), found.common);
+  assert.equal((await gitOk(['rev-parse', '--git-common-dir'], { gitDir: adm })).trim(), found.common);
 });
 
 test('#32 round 2 M1: a pointer or commondir path is taken only when git and the check read it the same way', () => {
@@ -636,7 +651,7 @@ test('#32 round 2 M1: a missing or dangling .git is refused; only git init runs 
   assert.equal((await checkGitVersion()).ok, true, 'a call with no command opens no repository');
 });
 
-test('#32 round 2 M1: git and the check agree on every config file and folder, for every allowed command, on a linked worktree', { timeout: 300_000 }, async () => {
+test('#32 round 2 M1: git and the check agree on every config file and folder, for every allowed command, on a linked worktree', { timeout: 120_000 }, async () => {
   const w = await trapWorld();
   const wt = join(w.root, 'wt');
   await gitOk(['worktree', 'add', '-q', '-b', 'wt', wt, 'main'], { gitDir: w.gd, workTree: w.d });
@@ -670,8 +685,13 @@ test('#32 round 2 Minors 1 and 2: a remote named like an address, or a branch wh
   for (const name of ['a/b', 'x:y', `file://${w.root}/A`]) {
     for (const k of ['url', 'pushurl', 'fetch', 'gh-resolved']) assert.equal(inertSetting(`remote.${name}.${k}`, '/srv/r.git'), false, `${name} ${k}`);
   }
-  for (const v of ['origin', '.', 'up-stream_2']) assert.equal(inertSetting('branch.main.remote', v), true, v);
-  for (const v of ['ext::sh -c touch', '/srv/r.git', 'a:b', 'a/b', '-x', '', undefined, 'a b']) assert.equal(inertSetting('branch.main.remote', v), false, String(v));
+  for (const v of ['origin', 'up-stream_2', '.x', 'x.']) assert.equal(inertSetting('branch.main.remote', v), true, v);
+  // `.`, `..` and `~…` are refused since #32 round 3 (`branch.main.remote = ..` fetched the folder above).
+  for (const v of ['ext::sh -c touch', '/srv/r.git', 'a:b', 'a/b', '-x', '', undefined, 'a b', '.', '..', '~', '~x']) assert.equal(inertSetting('branch.main.remote', v), false, String(v));
+  for (const name of ['.', '..', '~', '~x']) {
+    for (const k of ['url', 'pushurl', 'fetch', 'gh-resolved']) assert.equal(inertSetting(`remote.${name}.${k}`, '/srv/r.git'), false, `${name} ${k}`);
+  }
+  for (const name of ['.x', 'x.y', 'a..b']) assert.equal(inertSetting(`remote.${name}.url`, '/srv/r.git'), true, name);
   const { d, gd } = copyOf(w, 'remote-name');
   appendFileSync(join(gd, 'config'), `[remote "file://${w.root}/A"]\n\turl = ${w.src}\n`);
   assert.match(await repoConfigWhy(gd) ?? '', /remote\.file:/);
@@ -736,4 +756,207 @@ test('#32 round 2 Minor 4: a borrowed-objects list is refused unless it names on
   assert.equal(await repoConfigWhy(gd), null, 'an empty list borrows nothing');
   writeFileSync(join(gd, 'objects', 'info', 'http-alternates'), '');
   assert.match(await repoConfigWhy(gd) ?? '', /http-alternates/);
+});
+
+// #32 round 3 (LEAD-CALLS L51): where git may go is named by the call, never by the repository's own files.
+test('#32 round 3 (L51): a command that reaches another repository runs only with an absolute path or the address the call allows', () => {
+  const ok = (args, address) => assert.equal(placeWhy(args, 0, address), null, args.join(' '));
+  const no = (args, why, address) => assert.match(placeWhy(args, 0, address) ?? '', why, args.join(' '));
+  ok(['fetch', '-q', '--no-tags', '--no-write-fetch-head', '--no-auto-gc', '--no-recurse-submodules', '/srv/mirror', 'main:main']);
+  ok(['push', '--porcelain', '--atomic', '--no-verify', '/srv/peer.git', 'a:refs/heads/b']);
+  ok(['ls-remote', '--heads', '/srv/peer.git', 'refs/heads/x']);
+  ok(['fetch', '-q', '--', '/srv/b.bundle', 'x:y']);
+  const gh = 'https://github.com/o/r';
+  ok(['ls-remote', '--heads', gh, 'refs/heads/x'], gh);
+  ok(['push', '--porcelain', gh, 'a:refs/heads/b'], gh);
+  for (const args of [['fetch'], ['fetch', '-q'], ['ls-remote'], ['ls-remote', '--heads'], ['push', '-q'], ['pull'], ['fetch', '-q', '--', ]]) no(args, /names no place/);
+  for (const place of ['origin', '.', '..', '~x', 'rel/path', 'file:///srv/r', 'git@host:r', 'ssh://host/r', gh]) {
+    for (const cmd of ['fetch', 'push', 'ls-remote', 'pull']) no([cmd, '-q', place, 'main'], /only an absolute local path/);
+  }
+  no(['fetch', gh], /only an absolute local path/, 'https://github.com/o/other');
+  no(['fetch', 'origin'], /only an absolute local path/, 'origin');
+  for (const opt of ['--all', '--multiple', '--upload-pack=/x', '--upload-pack', '--receive-pack=/x', '--exec=/x', '--repo=origin', '-o', '--server-option=x', '--depth=1', '--get-url', '--set-upstream', '-u']) {
+    no(['fetch', opt, '/srv/mirror'], /only plain switches/);
+  }
+  no(['fetch', '/srv/mirror', '--multiple', 'origin'], /only plain switches/);
+  for (const args of [['remote', 'update'], ['remote', 'add', 'x', '/srv/r'], ['submodule', 'update'], ['maintenance', 'run', '--task=prefetch'], ['send-pack', '--remote=origin', '/srv/r'], ['request-pull', 'main', 'origin'], ['archive', '--remote=origin', 'main'], ['archive', '--remote', 'origin', 'main'], ['lfs', 'fetch']]) {
+    no(args, /never runs it/);
+  }
+  ok(['archive', '--format=tar', 'main']);
+  for (const args of [['status'], ['log', '-1'], ['bundle', 'create', '-q', '/x.bundle', 'main'], ['init', '-q', '/x']]) assert.equal(placeWhy(args, 0), null, args.join(' '));
+});
+
+test('#32 round 3 M1 (L51): an origin planted as https, ssh, git@host: or a local path is never reached, by any allowed command', { timeout: 120_000 }, async () => {
+  const w = await trapWorld();
+  const net = await listener();
+  const port = net.url.split(':').pop();
+  const failures = [];
+  const plants = {
+    https: `https://127.0.0.1:${port}/x.git`,
+    ssh: `ssh://git@127.0.0.1:${port}/x.git`,
+    // This form carries no port, so its host never resolves: a broken rule fails fast, never dialling this machine's ssh server.
+    scp: 'git@scp-plant.invalid:x.git',
+    path: w.src,
+  };
+  const byName = [['fetch', '-q', 'origin'], ['fetch', '-q', 'origin', 'refs/heads/src-main:refs/heads/got'], ['fetch', '-q'], ['fetch', '-q', '--all'],
+    ['fetch', '-q', '--multiple', 'origin'], ['ls-remote'], ['ls-remote', 'origin'], ['ls-remote', '--heads'], ['push', '-q'], ['push', '-q', 'origin', 'main'],
+    ['pull', '-q'], ['pull', '-q', 'origin', 'src-main'], ['remote', 'update'], ['remote', 'show', 'origin'], ['submodule', 'update', '--remote'],
+    ['maintenance', 'run', '--task=prefetch'], ['archive', '--remote=origin', 'main'], ['fetch', '-q', w.src, '--multiple', 'origin']];
+  for (const [name, url] of Object.entries(plants)) {
+    const { d, gd } = copyOf(w, `origin-${name}`);
+    appendFileSync(join(gd, 'config'), `[remote "origin"]\n\turl = ${url}\n\tfetch = +refs/heads/*:refs/remotes/origin/*\n[branch "main"]\n\tremote = origin\n\tmerge = refs/heads/src-main\n`);
+    assert.equal(await repoConfigWhy(gd), null, `${name}: the planted origin is on the safe list, so only the place rule stops it`);
+    const o = { gitDir: gd, workTree: d };
+    for (const args of byName) {
+      const r = await git(args, o);
+      if (!(r.code === -1 && /^safe-git: refused: /.test(r.stderr))) failures.push(`${name}: ${args.join(' ')} ran (${r.code})`);
+    }
+    const peer = join(w.root, `peer-${name}.git`);
+    await gitOk(['init', '--bare', '-q', peer], { gitDir: peer });
+    const res = await everyCommand({ ...w, peer }, d, (args, opts) => git(args, opts));
+    // The commands that name an absolute path still work with the planted origin there.
+    for (const c of ['fetch -q --no-tags --no-write-fetch-head --no-auto-gc --no-recurse-submodules', 'push -q', 'ls-remote --heads']) {
+      const hit = res.find(([k]) => k.startsWith(c) && !k.endsWith(c));
+      if (hit?.[1].code !== 0) failures.push(`${name}: ${hit?.[0]} failed: ${hit?.[1].stderr}`);
+    }
+    if (net.hits()) failures.push(`${name}: reached the listener ${net.hits()} times`);
+    net.reset();
+    if (readdirSync(join(gd, 'refs')).includes('remotes') || existsSync(join(gd, 'refs', 'heads', 'got'))) failures.push(`${name}: the planted origin was fetched from`);
+    if (name === 'https') {
+      // Control: the pins alone (no place rule) let a by-name fetch reach the planted address.
+      await rawGit(['fetch', '-q', 'origin'], o);
+      if (!net.hits()) failures.push('control: a by-name fetch should reach the planted https origin with the pins alone');
+      net.reset();
+    }
+    if (name === 'path') {
+      await rawGit(['fetch', '-q', 'origin', 'refs/heads/src-main:refs/heads/got'], o);
+      if (!existsSync(join(gd, 'refs', 'heads', 'got'))) failures.push('control: a by-name fetch should take the planted local origin with the pins alone');
+    }
+  }
+  // Minor 1: a branch whose remote is .. is refused by the config check before the place rule is needed.
+  const up = copyOf(w, 'branch-dotdot');
+  appendFileSync(join(up.gd, 'config'), '[branch "main"]\n\tremote = ..\n\tmerge = refs/heads/main\n');
+  assert.match(await repoConfigWhy(up.gd) ?? '', /branch\.main\.remote/);
+  await net.close();
+  assert.deepEqual(failures, []);
+});
+
+test('#32 round 3 (L51): every place a .git, a pointer, a commondir or a link inside the repository leads stays inside it', async () => {
+  const w = await trapWorld();
+  // The victim: another repository with a commit and an object the copies do not have.
+  const v = copyOf(w, 'victim');
+  const vo = { gitDir: v.gd, workTree: v.d };
+  writeFileSync(join(v.d, 'secret.txt'), 'victim only\n');
+  await gitOk(['add', '-A'], vo);
+  await gitOk(['commit', '-q', '-m', 'victim secret'], vo);
+  const vMain = (await gitOk(['rev-parse', 'refs/heads/main'], vo)).trim();
+  const vBlob = (await gitOk(['rev-parse', 'main:secret.txt'], vo)).trim();
+  await gitOk(['worktree', 'add', '-q', join(w.root, 'victim-wt'), 'side'], vo);
+  const hasZz = () => existsSync(join(v.gd, 'refs', 'heads', 'zz'));
+  const refused = async (label, gitDir, args, why) => {
+    assert.match(await repoConfigWhy(gitDir) ?? '', why, label);
+    const r = await git(args, { gitDir });
+    assert.equal(r.code, -1, `${label}: ${r.stderr}`);
+    return r;
+  };
+
+  // The lead's four repros, each with its control (git reading the files itself goes to the victim).
+  const a = copyOf(w, 'commondir-victim');
+  writeFileSync(join(a.gd, 'commondir'), `${v.gd}\n`);
+  await refused('commondir', a.gd, ['update-ref', 'refs/heads/zz', 'HEAD'], /commondir leads outside the repository/);
+  assert.equal(hasZz(), false, 'a ref was written into the victim');
+  await rawGit(['update-ref', 'refs/heads/zz', 'HEAD'], { gitDir: a.gd });
+  assert.equal(hasZz(), true, 'control: with git reading commondir itself, the ref lands in the victim');
+  rmSync(join(v.gd, 'refs', 'heads', 'zz'));
+
+  const b = copyOf(w, 'pointer-victim');
+  rmSync(b.gd, { recursive: true });
+  writeFileSync(b.gd, `gitdir: ${v.gd}\n`);
+  const rb = await refused('pointer', b.gd, ['log', '-1', '--format=%s', 'main'], /pointer leads to .*not a linked worktree/);
+  assert.doesNotMatch(rb.stdout.toString(), /victim secret/);
+  assert.match((await rawGit(['log', '-1', '--format=%s', 'main'], { gitDir: b.gd })).stdout, /victim secret/, 'control: git follows the pointer to the victim');
+
+  const c = copyOf(w, 'objects-victim');
+  rmSync(join(c.gd, 'objects'), { recursive: true });
+  symlinkSync(join(v.gd, 'objects'), join(c.gd, 'objects'));
+  await refused('objects', c.gd, ['cat-file', '-e', vBlob], /its objects is a link to .*outside the repository/);
+  assert.equal((await rawGit(['cat-file', '-e', vBlob], { gitDir: c.gd })).code, 0, 'control: git reads the victim\'s objects');
+
+  const d = copyOf(w, 'ref-victim');
+  symlinkSync(join(v.gd, 'refs', 'heads', 'main'), join(d.gd, 'refs', 'heads', 'v'));
+  await refused('loose ref', d.gd, ['rev-parse', 'refs/heads/v'], /its refs\/heads\/v is a link to .*outside the repository/);
+  assert.equal((await rawGit(['rev-parse', 'refs/heads/v'], { gitDir: d.gd })).stdout.trim(), vMain, 'control: git reads the victim\'s ref');
+
+  // More of the same class.
+  const e = join(w.root, 'link-dotgit');
+  mkdirSync(e);
+  symlinkSync(v.gd, join(e, '.git'));
+  await refused('.git a link', join(e, '.git'), ['status'], /its \.git is a link/);
+  const f = join(w.root, 'other-worktree');
+  mkdirSync(f);
+  writeFileSync(join(f, '.git'), `gitdir: ${join(v.gd, 'worktrees', 'victim-wt')}\n`);
+  await refused('another worktree\'s folder', join(f, '.git'), ['status'], /does not name this pointer back/);
+  const g = copyOf(w, 'dangling');
+  symlinkSync(join(w.root, 'nowhere'), join(g.gd, 'info', 'gone'));
+  await refused('dangling link', g.gd, ['status'], /its info\/gone is a link that leads nowhere/);
+  const h = copyOf(w, 'packed-victim');
+  writeFileSync(join(v.gd, 'packed-refs'), `${vMain} refs/heads/pv\n`);
+  symlinkSync(join(v.gd, 'packed-refs'), join(h.gd, 'packed-refs'));
+  await refused('packed-refs', h.gd, ['rev-parse', 'refs/heads/pv'], /its packed-refs is a link to/);
+
+  // Let through: a link that stays inside, the victim's own worktree, and objects linked to a folder the call allows.
+  const i = copyOf(w, 'inside-link');
+  symlinkSync(join(i.gd, 'description'), join(i.gd, 'info', 'inside'));
+  assert.equal(await repoConfigWhy(i.gd), null);
+  assert.equal((await git(['status', '--porcelain'], { gitDir: i.gd, workTree: i.d })).code, 0);
+  assert.equal(await repoConfigWhy(join(w.root, 'victim-wt', '.git')), null);
+  assert.equal(await repoConfigWhy(c.gd, { allowObjects: [join(v.gd, 'objects')] }), null);
+});
+
+test('#32 round 3 (L51): the address a call allows is reached; the same address unallowed, or another one, is refused', async () => {
+  const w = await trapWorld();
+  const net = await listener();
+  const url = `${net.url.replace('http:', 'https:')}/x.git`;
+  const o = { gitDir: w.gd, workTree: w.d };
+  const r = await git(['ls-remote', '--heads', url], { ...o, address: url });
+  assert.notEqual(r.code, -1, r.stderr);
+  assert.ok(net.hits() > 0, 'the allowed address should be reached');
+  net.reset();
+  for (const address of [undefined, `${url}/other`, net.url]) {
+    const n = await git(['ls-remote', '--heads', url], { ...o, address });
+    assert.equal(n.code, -1, String(address));
+    assert.match(n.stderr, /only an absolute local path/);
+  }
+  assert.equal(net.hits(), 0);
+  await net.close();
+});
+
+// The lead's standing rule (30 Oct 2026): no call may wait forever. A stuck git, one that leaves a program holding
+// its output, and one whose program left its process group all end at the time limit; git gets no terminal.
+test('no hang: a git that never ends is stopped at the time limit, with everything it started', { timeout: 60_000 }, async () => {
+  const d = tmp();
+  const fake = (name, body) => { const f = join(d, name); writeFileSync(f, `#!/bin/sh\n${body}\n`); chmodSync(f, 0o755); return f; };
+  const stuck = fake('stuck', `/bin/sleep 20 & echo $! > ${d}/bg.pid\n/bin/sleep 20`);
+  const left = fake('left', `/usr/bin/perl -e 'use POSIX; exit if fork; POSIX::setsid(); sleep 4'\n/bin/sleep 20`);
+  const tty = fake('tty', 'if (exec 3</dev/tty) 2>/dev/null; then echo tty; else echo none; fi');
+  for (const [name, bin] of [['stuck', stuck], ['left its group', left]]) {
+    const t0 = Date.now();
+    const r = await git(['--version'], { gitDir: '/dev/null', gitBin: bin, timeoutMs: 500 });
+    assert.ok(Date.now() - t0 < 3000, `${name}: the call took ${Date.now() - t0} ms`);
+    assert.equal(r.code, -1, name);
+    assert.match(r.stderr, /git did not end within 500 ms and was stopped/, name);
+  }
+  const bg = Number(readFileSync(join(d, 'bg.pid'), 'utf8'));
+  await new Promise((ok) => setTimeout(ok, 200));
+  assert.throws(() => process.kill(bg, 0), /ESRCH/, 'the program the stuck git started was stopped with it');
+  // The config read before a command ends the same way, and the call is refused.
+  const repo = join(d, 'r');
+  await gitOk(['init', '-q', repo], { gitDir: join(repo, '.git') });
+  const t0 = Date.now();
+  const r = await git(['status'], { gitDir: join(repo, '.git'), workTree: repo, gitBin: stuck, timeoutMs: 500 });
+  assert.ok(Date.now() - t0 < 3000, `the config read took ${Date.now() - t0} ms`);
+  assert.match(r.stderr, /^safe-git: refused: its config .* could not be read: .*did not end within 500 ms/);
+  const t = await git(['--version'], { gitDir: '/dev/null', gitBin: tty });
+  assert.equal(t.stdout.toString().trim(), 'none', 'git has no terminal to ask for a password on');
+  assert.equal(safeGitEnv({}).GCM_INTERACTIVE, 'never');
 });

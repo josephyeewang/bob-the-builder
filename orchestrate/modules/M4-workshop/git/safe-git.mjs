@@ -21,10 +21,13 @@ import { join, isAbsolute } from 'node:path';
 
 export const MIN_GIT = [2, 42];
 
-// Settings that stop git from running any program a repository's own files could name, or fetching from
-// anywhere the call did not name (LEAD-CALLS L36). Since L49 they are the second layer: a repository whose config
-// sets anything off the safe list is refused before git runs. They come last, so they win over the repository's
-// own config. `core.hooksPath` names a file, so no hook can be found under it.
+// Settings that stop git from running any program a repository's own files could name, and from fetching
+// submodules, bundle links or through a proxy (LEAD-CALLS L36). Since L49 they are the second layer: a repository
+// whose config sets anything off the safe list is refused before git runs. They come last, so they win over the
+// repository's own config. `core.hooksPath` names a file, so no hook can be found under it. They reach only the git
+// this process starts: for a fetch from a local path, git clears GIT_CONFIG_COUNT before the source's upload side
+// runs (checked on git 2.54.0, 30 Oct 2026), which holds because that side ignores a repository's program keys.
+// Where git may go is decided by the call alone (L51): see `placeWhy`.
 export const SAFE_CONFIG = Object.freeze([
   ['core.fsmonitor', 'false'],
   ['core.hooksPath', '/dev/null'],
@@ -129,6 +132,7 @@ export function safeGitEnv({ gitDir, commonDir, workTree, extraConfig = [] } = {
     GIT_TERMINAL_PROMPT: '0',
     GIT_ASKPASS: '/usr/bin/false',
     SSH_ASKPASS: '/usr/bin/false',
+    GCM_INTERACTIVE: 'never',
     GIT_PAGER: 'cat',
     PAGER: 'cat',
     GIT_EDITOR: '/usr/bin/false',
@@ -144,10 +148,11 @@ export function safeGitEnv({ gitDir, commonDir, workTree, extraConfig = [] } = {
   return env;
 }
 
-// Repository config keys known to start no program and fetch from nowhere the call did not name (LEAD-CALLS L49).
-// Any other key in any of the repository's config files is a refusal that names it: deny by default, since pinning
-// one key at a time missed twice (L36; then hooks defined in config and bundle links). Keys as git lists them:
-// section and key in lower case, the name between kept as written. Checked against git 2.54.0, 30 Oct 2026.
+// Repository config keys known to start no program (LEAD-CALLS L49). A remote's address or a branch's remote may
+// sit here, but no call follows one: every command that reaches another repository must name the place itself
+// (L51, `placeWhy`). Any other key in any of the repository's config files is a refusal that names it: deny by
+// default, since pinning one key at a time missed twice (L36; then hooks defined in config and bundle links). Keys as
+// git lists them: section and key in lower case, the name between kept as written. Checked against git 2.54.0, 30 Oct 2026.
 export const INERT_KEYS = Object.freeze(new Set([
   'core.repositoryformatversion', 'core.bare', 'core.filemode', 'core.logallrefupdates', 'core.ignorecase',
   'core.precomposeunicode', 'core.symlinks', 'extensions.objectformat', 'extensions.worktreeconfig',
@@ -156,9 +161,11 @@ export const INERT_KEYS = Object.freeze(new Set([
   'core.autocrlf', 'core.untrackedcache', 'extensions.relativeworktrees',
 ]));
 // A remote's name never holds `:` or `/`: a remote with no address of its own is fetched from its name, so a name
-// like an address was a fetch from there (#32 round 2, Minors 1 and 2). `branch.<name>.remote` names one the same way.
-const REMOTE_NAME = '[^\\n:/]+';
-export const PLAIN_REMOTE = /^(?!-)[^\s:/]+$/;
+// like an address was a fetch from there (#32 round 2, Minors 1 and 2). `.`, `..` and a name starting with `~` are
+// refused too: `branch.main.remote = ..` fetched the folder above (#32 round 3). `branch.<name>.remote` names one the
+// same way.
+const REMOTE_NAME = '(?![~])(?!\\.\\.?\\.[a-z-]+$)[^\\n:/]+';
+export const PLAIN_REMOTE = /^(?![-~])(?!\.\.?$)[^\s:/]+$/;
 const INERT_NAMED = new RegExp(`^(?:remote\\.${REMOTE_NAME}\\.(?:fetch|gh-resolved)|branch\\.[^\\n]+\\.(?:merge|rebase|vscode-merge-base))$`);
 const REMOTE_KEY = /^branch\.[^\n]+\.remote$/;
 const URL_KEY = new RegExp(`^remote\\.${REMOTE_NAME}\\.(?:url|pushurl)$`);
@@ -197,23 +204,33 @@ export function pointerPath(buf, prefix = '') {
 // resolve would cancel `..` by its text). A relative path is joined to the text of the file's folder, as git joins it.
 const leadsTo = (file, p) => realpathSync.native(isAbsolute(p) ? p : `${file.slice(0, file.lastIndexOf('/') + 1)}${p}`);
 
+// Whether real path `p` is `folder` or inside it.
+const within = (p, folder) => p === folder || p.startsWith(`${folder}/`);
+
 /**
  * The real folders git will use for `gitDir` (`dir`, and `common` from its commondir) and every config file they,
  * their worktrees and their submodules have, or { why }. A `.git` pointer file and `commondir` are read here, once,
- * and git is handed both folders, so git never reads either itself (#32 round 2, M1). `{ missing: true }` comes with
- * the refusal when nothing is at `gitDir` (only `git init` may run there).
+ * and git is handed both folders, so git never reads either itself (#32 round 2, M1). Every place they lead must be
+ * inside the repository (#32 round 3, L51): `.git` is not a link; a pointer leads only to a linked worktree's own
+ * folder (`<common>/worktrees/<name>`) whose `gitdir` file names this pointer back; a commondir only from such a
+ * folder to the `<common>` two levels up; and every link inside `common` stays inside it (or inside the objects
+ * folders the call allows). `{ missing: true }` comes with the refusal when nothing is at `gitDir` (only `git init`
+ * may run there).
  */
 export function repoConfigFiles(gitDir, { allowObjects = [] } = {}) {
   const l = lstatOf(gitDir);
   if (!l) return { why: 'its .git is missing', missing: true };
   const s = statOf(gitDir);
   if (!s) return { why: 'its .git is a link that leads nowhere' };
+  if (l.isSymbolicLink()) return { why: `its .git is a link (to ${realpathSync.native(gitDir)}), not the repository's own folder` };
   let dir;
+  let pointer = false;
   if (s.isFile()) {
     const p = pointerPath(readFileSync(gitDir), 'gitdir: ');
     if (p === null) return { why: 'its .git is a file but not a pointer git and this check read the same way' };
     try { dir = leadsTo(gitDir, p); } catch { return { why: 'its .git pointer does not lead to a folder' }; }
     if (!statOf(dir)?.isDirectory()) return { why: 'its .git pointer does not lead to a folder' };
+    pointer = true;
   } else if (s.isDirectory()) dir = realpathSync.native(gitDir);
   else return { why: 'its .git is neither a folder nor a pointer file' };
   let common = dir;
@@ -224,7 +241,19 @@ export function repoConfigFiles(gitDir, { allowObjects = [] } = {}) {
     if (p === null) return { why: 'its commondir is not one path git and this check read the same way' };
     try { common = leadsTo(cd, p); } catch { return { why: 'its commondir does not lead to a folder' }; }
     if (!statOf(common)?.isDirectory()) return { why: 'its commondir does not lead to a folder' };
+    if (dir !== join(common, 'worktrees', dir.slice(dir.lastIndexOf('/') + 1))) {
+      return { why: `its commondir leads outside the repository, to ${common}` };
+    }
   }
+  if (pointer) {
+    if (common === dir) return { why: `its .git pointer leads to ${dir}, which is not a linked worktree's own folder` };
+    const back = join(dir, 'gitdir');
+    let named = null;
+    try { const p = lstatOf(back)?.isFile() ? pointerPath(readFileSync(back)) : null; named = p === null ? null : leadsTo(back, p); } catch { /* refused below */ }
+    if (named !== realpathSync.native(gitDir)) return { why: `its .git pointer leads to ${dir}, a worktree folder that does not name this pointer back` };
+  }
+  const outside = linkOutside(common, allowObjects);
+  if (outside) return { why: outside };
   const odd = oddFiles(dir, common, allowObjects);
   if (odd) return { why: odd };
   const found = new Map();
@@ -258,6 +287,39 @@ export function repoConfigFiles(gitDir, { allowObjects = [] } = {}) {
   return { dir, common, files: [...found.values()] };
 }
 
+// How many entries the walk for links reads before it gives up and refuses.
+const LINK_WALK_MAX = 1_000_000;
+
+/**
+ * The first link anywhere in `common` that leads outside it (and outside every folder in `allowObjects`), as a
+ * refusal that names it, or null (#32 round 3, L51). A link that leads nowhere is refused too. Links are not
+ * followed, so each folder is read once. An `objects` folder or a ref linked to another repository let git read or
+ * write there.
+ */
+function linkOutside(common, allowObjects) {
+  const allowed = allowObjects.map((p) => { try { return realpathSync.native(p); } catch { return null; } }).filter(Boolean);
+  let budget = LINK_WALK_MAX;
+  const stack = [common];
+  while (stack.length) {
+    const d = stack.pop();
+    let entries;
+    try { entries = readdirSync(d, { withFileTypes: true }); } catch (e) { return `its folder ${d} could not be read: ${e.code ?? e.message}`; }
+    if ((budget -= entries.length) < 0) return 'it has too many files to check for links';
+    for (const e of entries) {
+      const p = join(d, e.name);
+      if (e.isDirectory()) stack.push(p);
+      else if (e.isSymbolicLink()) {
+        let real = null;
+        try { real = realpathSync.native(p); } catch { /* leads nowhere */ }
+        const name = p.slice(common.length + 1);
+        if (real === null) return `its ${name} is a link that leads nowhere`;
+        if (!within(real, common) && !allowed.some((a) => within(real, a))) return `its ${name} is a link to ${real}, outside the repository`;
+      }
+    }
+  }
+  return null;
+}
+
 /**
  * Why files outside the config that can still send git elsewhere must stop the run, or null (#32 round 2, Minors 3
  * and 4): the old-style remote files (`remotes/<name>`, `branches/<name>`), which can name an address, and a
@@ -287,23 +349,41 @@ function oddFiles(dir, common, allowObjects) {
   return null;
 }
 
-/** The keys and values in one config file, read by git without following its includes, or { why }. */
-function readConfigFile(file, { gitBin, timeoutMs }) {
-  return new Promise((done) => {
-    const child = spawn(gitBin, ['config', '--file', file, '--no-includes', '--list', '-z'], { cwd: home(), env: safeGitEnv(), stdio: ['ignore', 'pipe', 'pipe'], timeout: timeoutMs });
-    const out = []; let err = '';
+/**
+ * Runs one git and resolves { code, stdout, stderr }; never throws. Git starts in a process group of its own with
+ * no terminal, so nothing it starts (ssh, a credential helper) can wait on a password typed there. At `timeoutMs`
+ * the whole group is killed and the call ends at once, even if a program that left the group keeps the output open
+ * (lead's standing rule, 30 Oct 2026: no call may wait forever).
+ */
+function runChild(bin, argv, { cwd, env, input = null, timeoutMs }) {
+  return new Promise((resolve) => {
+    const out = []; let err = ''; let ended = false; let timer = null;
+    const end = (r) => { if (ended) return; ended = true; clearTimeout(timer); resolve(r); };
+    let child;
+    try { child = spawn(bin, argv, { cwd, env, stdio: ['pipe', 'pipe', 'pipe'], detached: true }); } catch (e) { end({ code: -1, stdout: Buffer.alloc(0), stderr: String(e.message) }); return; }
+    timer = setTimeout(() => {
+      try { process.kill(-child.pid, 'SIGKILL'); } catch { /* the group has already ended */ }
+      for (const s of [child.stdin, child.stdout, child.stderr]) s.destroy();
+      end({ code: -1, stdout: Buffer.concat(out), stderr: `${err}safe-git: git did not end within ${timeoutMs} ms and was stopped` });
+    }, timeoutMs);
     child.stdout.on('data', (d) => out.push(d));
     child.stderr.on('data', (d) => { err += d; });
-    child.on('error', (e) => done({ why: e.message }));
-    child.on('close', (code) => {
-      if (code !== 0) return done({ why: err.trim().slice(0, 200) || `exit ${code}` });
-      const entries = Buffer.concat(out).toString('utf8').split('\0').filter((x) => x !== '').map((x) => {
-        const nl = x.indexOf('\n');
-        return nl < 0 ? [x, undefined] : [x.slice(0, nl), x.slice(nl + 1)];
-      });
-      done({ entries });
-    });
+    child.on('error', (e) => end({ code: -1, stdout: Buffer.alloc(0), stderr: String(e.message) }));
+    child.on('close', (code, signal) => end({ code: code ?? (signal ? -1 : 0), stdout: Buffer.concat(out), stderr: err }));
+    child.stdin.on('error', () => { /* git closed its input early; its exit code decides */ });
+    if (input != null) child.stdin.end(input); else child.stdin.end();
   });
+}
+
+/** The keys and values in one config file, read by git without following its includes, or { why }. */
+async function readConfigFile(file, { gitBin, timeoutMs }) {
+  const r = await runChild(gitBin, ['config', '--file', file, '--no-includes', '--list', '-z'], { cwd: home(), env: safeGitEnv(), timeoutMs });
+  if (r.code !== 0) return { why: r.stderr.trim().slice(0, 200) || `exit ${r.code}` };
+  const entries = r.stdout.toString('utf8').split('\0').filter((x) => x !== '').map((x) => {
+    const nl = x.indexOf('\n');
+    return nl < 0 ? [x, undefined] : [x.slice(0, nl), x.slice(nl + 1)];
+  });
+  return { entries };
 }
 
 // A config file's name for a refusal: from the repository's own folder, or from the common folder it shares.
@@ -356,6 +436,44 @@ const commandAt = (args) => {
   return i;
 };
 
+// Commands that reach another repository (LEAD-CALLS L51). Each runs only when the call itself names the place, as
+// its first word that is not an option: an absolute local path (the mirror, a bundle, a copy), or the one https
+// address the call passes as `address` (the push script's GitHub). Never a remote's name, and never the form with no
+// place, where git would take one from the repository's own config, which a worker can write.
+const NAMED_PLACE = new Set(['fetch', 'pull', 'push', 'ls-remote', 'clone']);
+// Commands that take the place from the repository's own files, or reach the network some other way: never run.
+const NEVER_RUN = new Set(['remote', 'submodule', 'maintenance', 'request-pull', 'send-pack', 'fetch-pack', 'backfill', 'http-fetch',
+  'http-push', 'upload-pack', 'receive-pack', 'upload-archive', 'daemon', 'instaweb', 'send-email', 'imap-send', 'svn', 'p4',
+  'cvsimport', 'cvsexportcommit', 'cvsserver', 'archimport', 'quiltimport', 'lfs', 'annex']);
+// The options a named-place command may carry. None takes a value, so none can hide the place or name another.
+const PLACE_FLAGS = new Set(['-q', '--quiet', '-v', '--verbose', '-n', '--no-tags', '--tags', '--no-write-fetch-head', '--no-auto-gc',
+  '--no-auto-maintenance', '--no-recurse-submodules', '--update-head-ok', '--porcelain', '--atomic', '--no-verify', '--heads', '--refs',
+  '-f', '--force', '--dry-run', '--progress', '--no-progress', '--exit-code', '--ff-only', '--no-rebase', '--no-edit']);
+
+/**
+ * Why a call must not run for where it could send git, or null (#32 round 3, L51). `at` is where the command is in
+ * `args`.
+ */
+export function placeWhy(args, at, address) {
+  const cmd = String(args[at]);
+  const rest = args.slice(at + 1).map(String);
+  if (NEVER_RUN.has(cmd) || (cmd === 'archive' && rest.some((a) => a.startsWith('--remote') || a.startsWith('--exec')))) {
+    return `git ${cmd} can reach another repository the call does not name, so safe-git never runs it`;
+  }
+  if (!NAMED_PLACE.has(cmd)) return null;
+  let place = null;
+  let options = true;
+  for (const a of rest) {
+    if (options && (a === '--' || a === '--end-of-options')) options = false;
+    else if (options && a.startsWith('-')) {
+      if (!PLACE_FLAGS.has(a)) return `git ${cmd} with ${a}: only plain switches may come with a command that reaches another repository`;
+    } else if (place === null) place = a;
+  }
+  if (place === null) return `git ${cmd} names no place, so git would take one from the repository's own config`;
+  if (place.startsWith('/') || (typeof address === 'string' && address.startsWith('https://') && place === address)) return null;
+  return `git ${cmd} names ${JSON.stringify(place)}: only an absolute local path, or the address the call allows, may be named`;
+}
+
 /** `args` with the no-program flags right after a diff-family command (once each); other commands unchanged. */
 export function withNoPrograms(args) {
   const i = commandAt(args);
@@ -370,31 +488,24 @@ export function withNoPrograms(args) {
  * discovered from the working folder. `purpose` names the step for the call log. A repository whose own
  * config sets anything off the safe list is refused (code -1) before git runs in it. Git is handed the real folders
  * the check read (GIT_DIR and GIT_COMMON_DIR), so it reads no pointer file or commondir itself. `allowObjects` names
- * the objects folders an alternates file may borrow from. Only `git init` runs where nothing is yet, and a call with
- * no command (`--version`) opens no repository, so it is not checked.
+ * the objects folders an alternates file may borrow from. A command that reaches another repository must name the
+ * place: an absolute path, or `address` (one https address) (L51). Only `git init` runs where nothing is yet, and a
+ * call with no command (`--version`) opens no repository, so it is not checked.
  */
-export async function git(args, { gitDir, workTree, cwd, input, extraConfig, allowObjects, purpose = 'unnamed', timeoutMs = 120000, gitBin = 'git' } = {}) {
+export async function git(args, { gitDir, workTree, cwd, input, extraConfig, allowObjects, address, purpose = 'unnamed', timeoutMs = 120000, gitBin = 'git' } = {}) {
   if (!gitDir) return { code: -1, stdout: Buffer.alloc(0), stderr: 'safe-git: GIT_DIR is required' };
   const at = commandAt(args);
   let dirs = { gitDir };
   if (at < args.length) {
-    const checked = await checkRepo(gitDir, { gitBin, allowObjects });
-    if (checked.why && !(checked.missing && args[at] === 'init')) return { code: -1, stdout: Buffer.alloc(0), stderr: `safe-git: refused: ${checked.why}` };
+    const checked = await checkRepo(gitDir, { gitBin, allowObjects, timeoutMs });
+    const why = checked.missing && args[at] === 'init' ? null : checked.why ?? placeWhy(args, at, address);
+    if (why) return { code: -1, stdout: Buffer.alloc(0), stderr: `safe-git: refused: ${why}` };
     if (!checked.why) dirs = { gitDir: checked.dir, commonDir: checked.common };
   }
   const env = safeGitEnv({ ...dirs, workTree, extraConfig });
   const where = cwd ?? home();
   callLog.push({ purpose, gitDir, cwd: where, workTree: workTree ?? null, args: args.filter((a) => !/^http\..*extraheader/i.test(a)) });
-  return new Promise((resolve) => {
-    const child = spawn(gitBin, ['--no-pager', ...withNoPrograms(args)], { cwd: where, env, stdio: ['pipe', 'pipe', 'pipe'], timeout: timeoutMs });
-    const out = []; let err = '';
-    child.stdout.on('data', (d) => out.push(d));
-    child.stderr.on('data', (d) => { err += d; });
-    child.on('error', (e) => resolve({ code: -1, stdout: Buffer.alloc(0), stderr: String(e.message) }));
-    child.on('close', (code, signal) => resolve({ code: code ?? (signal ? -1 : 0), stdout: Buffer.concat(out), stderr: err }));
-    child.stdin.on('error', () => { /* git closed its input early; its exit code decides */ });
-    if (input != null) child.stdin.end(input); else child.stdin.end();
-  });
+  return runChild(gitBin, ['--no-pager', ...withNoPrograms(args)], { cwd: where, env, input, timeoutMs });
 }
 
 /** Like git() but resolves stdout as text and refuses (throws) on a non-zero exit. */

@@ -171,7 +171,8 @@ export function createPushScript(deps) {
     let token;
     try { token = await getRobotToken(product); } catch { token = null; }
     if (typeof token !== 'string' || !token) no('no robot key for this product');
-    const auth = { extraConfig: tokenConfig(token) };
+    // The one address the network calls may name besides local paths (safe-git, L51).
+    const auth = { extraConfig: tokenConfig(token), address: url };
 
     const work = mkdtempSync(join(privateDir, 'push-'));
     const holding = `refs/orchestrate/incoming/${card}/${att}`;
