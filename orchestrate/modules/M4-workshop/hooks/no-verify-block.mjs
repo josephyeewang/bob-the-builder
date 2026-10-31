@@ -3,7 +3,7 @@
 
 import { isMain, runHook, block, pass, shellCommands, shellWords, programOf, joinLines, unreadable, namesGitInternals } from './lib.mjs';
 
-const SKIP_VARS = /(^|\s)(HUSKY|LEFTHOOK|SKIP|PRE_COMMIT_ALLOW_NO_CONFIG|GIT_CONFIG[A-Z0-9_]*)=/;
+const SKIP_VARS = /(^|[ \t\n])(HUSKY|LEFTHOOK|SKIP|PRE_COMMIT_ALLOW_NO_CONFIG|GIT_CONFIG[A-Z0-9_]*)=/;
 
 export function decide(input) {
   if (input.tool_name !== 'Bash') return pass();
