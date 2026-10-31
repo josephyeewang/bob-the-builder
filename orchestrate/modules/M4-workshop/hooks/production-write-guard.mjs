@@ -91,13 +91,14 @@ export function folderWrites(c) {
   if (['rmdir', 'mv', 'trash'].includes(prog)) return { targets: [...a, ...(prog === 'mv' ? optValues(c, 't', ['--target-directory']) : [])], deletes: true };
   // rsync reads options after the names too (`… dest/ --exclude x`), so its last word may not be where it writes,
   // and `--remove-source-files` deletes what it copies: every name it is given is judged (audit of L41, MAT-2, MAT-7).
-  // Every value of a long option too (`--backup-dir=dir`, `--temp-dir=dir`).
-  if (prog === 'rsync') return { targets: [...a, ...o.filter((w) => /^--[^=]+=/.test(w)).map((w) => w.slice(w.indexOf('=') + 1))], deletes: o.some((w) => longIs(w, '--remove-source-files')) };
+  // Every value of a long option too (`--backup-dir=dir`, `--temp-dir=dir`), and `-T` joined (`-T.tmp`, `-aT.tmp`; L60).
+  if (prog === 'rsync') return { targets: [...a, ...o.filter((w) => /^--[^=]+=/.test(w)).map((w) => w.slice(w.indexOf('=') + 1)), ...optValues(c, 'T', ['--temp-dir'])], deletes: o.some((w) => longIs(w, '--remove-source-files')) };
   // zip -m moves the files into the archive, deleting them (MAT-7).
   if (prog === 'zip' && (clusterHas(o, 'm') || o.some((w) => longIs(w, '--move')))) return { targets: a, deletes: true };
-  // A copy onto a folder: the last name is where it lands (cp only when it copies folders), or GNU cp's `-t dir`.
+  // A copy onto a folder: the last name is where it lands (cp only when it copies folders), or GNU cp's and install's
+  // `-t dir` (install's added under L60).
   if (['ditto', 'install'].includes(prog) || (prog === 'cp' && o.some((w) => RECURSIVE(w) || /^-[A-Za-z]*a/.test(w) || longIs(w, '--archive')))) {
-    return { targets: [...a.slice(-1), ...(prog === 'cp' ? optValues(c, 't', ['--target-directory']) : [])], deletes: false };
+    return { targets: [...a.slice(-1), ...(['cp', 'install'].includes(prog) ? optValues(c, 't', ['--target-directory']) : [])], deletes: false };
   }
   if (['tar', 'bsdtar', 'gtar'].includes(prog)) {
     // The mode letters: a first word without a dash (`tar xf`), or the short options (`-xf`), never a long one.
@@ -138,10 +139,23 @@ const PWD_MARK = '@pwd@';
 const varRe = (name) => new RegExp(String.raw`\$(\{${name}\}|${name}(?![A-Za-z0-9_]))`, 'g');
 const spellOut = (cmd, vars) => Object.entries(vars).reduce((c, [name, v]) => (typeof v === 'string' && v ? c.replace(varRe(name), () => v) : c), cmd);
 const unknownWord = (w) => /[$`]/.test(w);
-// null for a word the guard can't place: another user's home folder (`~name/…`; audit of L41, MAT-4).
+// bash 3.2 (/bin/bash on a Mac) lets a pattern part that starts with `.` match `.` and `..`: `.*` gives `. ..`, `.?`,
+// `.[.]` and `.[!x]` give `..` (zsh and bash 5.2 never do). Such a part may mean this folder or the one above, and a
+// word may hold several, so it is refused rather than read each way (LEAD-CALLS L59). The word comes with its quotes
+// and backslashes taken out, as the shell reads it (`\.?`, `'.'?` are `.?`). Inside `[...]` that quoting changes what
+// bash matches (`.[\^.]` holds `^` and `.`, and lists `..`), so a dot part holding `[` is refused whatever it holds
+// (L60; `.[!.]` too). One the pattern maker can't read counts as one that can match.
+const dotMayClimb = (part) => {
+  if (!part.startsWith('.') || !/[*?[]/.test(part)) return false;
+  if (part.includes('[')) return true;
+  try { const re = globRe(part); return re.test('.') || re.test('..'); } catch { return true; }
+};
+// The word's full forms, or why it can't be placed: another user's home folder (`~name/…`; audit of L41, MAT-4), or a
+// pattern part that may be `.` or `..` (lane 2 follow-up: dot-glob), so every command the folder rule judges gets it.
 function expand(w, home, cwds) {
-  if (/^~[^/]/.test(w)) return null;
+  if (/^~[^/]/.test(w)) return 'is written as a whole in a folder the guard can\'t place';
   const h = w.replace(/^~(?=\/|$)/, home);
+  if (h.split(sep).some(dotMayClimb)) return 'holds a pattern starting with a dot, which can mean this folder or the one above (name the files)';
   return h.startsWith(PWD_MARK) ? cwds.map((c) => c + h.slice(PWD_MARK.length)) : [h];
 }
 // The fixed front of a path with a wildcard: `proj/a*/b` gives `proj`. A wildcard target is judged by that folder.
@@ -215,7 +229,7 @@ export function folderWriteWhy(cmd, { cwd, protectedFiles, home = homedir(), use
       if (odd) lost = true;
       else if (to === undefined) cwds.add(home);
       else if (to === '-') { if (setOld || !moved) lost = true; /* else back to a folder already counted */ }
-      else if (/[*?[]/.test(to) || unknownWord(to) || forms === null || (viaCdpath && !/^(\/|~|@pwd@|\.\.?(\/|$))/.test(to))) lost = true;
+      else if (/[*?[]/.test(to) || unknownWord(to) || typeof forms === 'string' || (viaCdpath && !/^(\/|~|@pwd@|\.\.?(\/|$))/.test(to))) lost = true;
       // Where the cd really lands counts too: after `cd <link>`, a later `..` is taken on disk from the link's target.
       // `cd -P l/..` goes up from the link's target: where the system takes the path counts too (round 3 MAT-2).
       else for (const x of forms) for (const base of [...cwds]) { const to2 = resolve(base, x); cwds.add(to2); const r = realFolder(to2); if (r) cwds.add(r); cwds.add(physical(base, x)); }
@@ -227,7 +241,7 @@ export function folderWriteWhy(cmd, { cwd, protectedFiles, home = homedir(), use
       if (wrote) return `"${t}" is written as a whole after "${wrote}" in the same command; run it as a command of its own`;
       if (unknownWord(t)) return `"${t}" is written as a whole, and the guard can't tell where a variable in it leads`;
       const forms = expand(t, home, [...cwds]);
-      if (forms === null) return `"${t}" is written as a whole in a folder the guard can't place`;
+      if (typeof forms === 'string') return `"${t}" ${forms}`;
       if (forms.some((f) => !isAbsolute(f)) && lost) return `"${t}" is written as a whole after a folder change the guard can't follow`;
       for (const f of forms) {
         if (dotsAfterPattern(f)) return `"${t}" has a ".." after a pattern, which the guard can't place`;
