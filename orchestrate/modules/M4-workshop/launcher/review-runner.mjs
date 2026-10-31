@@ -9,8 +9,11 @@
 //   - `head` must be the card's head in the Record and its current head in git (read only);
 //   - the role must be reviewer or auditor;
 //   - nothing may already be running for that card, head and role;
-//   - per card, head and role there is one start; a start that failed (or a session that ended with no verdict) may be
-//     tried again after 15 minutes, 3 tries in all, and then Joe is told.
+//   - per card, head and role there is one start; a start that failed (or a session that ended with no verdict, or
+//     with one the intake would refuse, L66) may be tried again after 15 minutes, 3 tries in all, and then Joe is told.
+// Every request name is read each pass (L66): a name that is not a request's is moved aside into rejected/, so junk
+// can't hold real requests back, and more than 200 waiting is told to Joe. Only starts are capped, 50 a pass, oldest
+// first by when the runner first saw each request.
 // The runner makes the session id itself, and writes the launch record into launches/, which only review can write.
 // A verdict counts only when it matches one of those records (M9 outbox.mjs `runnerLaunchFor`); the Dispatcher's copy
 // in the Record never counts. status.json (anyone may read it) lists what is running and the alerts for Joe, with
@@ -18,21 +21,25 @@
 // error, never "no reviewer" (L63).
 //
 // The runner refuses to start anything when `review` is an admin (m-3), and stops any review session it did not start,
-// telling Joe (m-7). Every outside effect is a port, so the tests run on fakes: starting claude, git, the Record read,
+// telling Joe (m-7). It stops nothing that isn't claude: before a stop it reads the process's command through a port
+// (`processName`), so a pid reused by another program is left alone. The contract of `start` (L66): it returns claude's
+// own pid, never the launcher's, and the runner checks that too. The status carries the installed copy's commit stamp
+// (`installed_commit`), so the Dispatcher can tell Joe when the copy is behind main. Every outside effect is a port, so the tests run on fakes: starting claude, git, the Record read,
 // the admin check, the session list and the stop. review-runner-main.mjs joins the real ones.
 //
 // The review folder (`root`), owned by review:
 //   requests/    1733   anyone adds a request; only review reads and removes them
+//   rejected/    0700   files in requests/ whose names are not a request's, moved aside unread
 //   launches/    0755   the launch records (M9 reads them)
-//   status.json  0644   { written_at, ok, error, running, refused, alerts }
+//   status.json  0644   { written_at, ok, error, installed_commit, running, refused, alerts }
 //   state.json   0600   the runner's own memory: running sessions, tries per card, head and role, request ids seen
 
 import { closeSync, constants, fstatSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, unlinkSync, writeFileSync, chmodSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { REVIEW_ROLES } from '../../../shared/review-roles.mjs';
 import { SESSION_ID } from '../../../shared/record.mjs';
-import { launchesFolderProblem, reviewUid } from '../../M9-record/outbox.mjs';
+import { launchesFolderProblem, reviewUid, CARD_ID } from '../../M9-record/outbox.mjs';
 import { checkReviewOutbox, reviewOutbox, uidsProblem } from './review-user.mjs';
 import { ACCOUNT_NAMES, accountDir, accountEnv } from './accounts.mjs';
 
@@ -40,17 +47,21 @@ export const RETRY_MS = 15 * 60_000;
 export const MAX_FAILED_STARTS = 3;
 export const STATUS_STALE_MS = 3 * 60_000;
 export const MAX_REQUEST_BYTES = 4096;
-export const MAX_REQUESTS_PER_PASS = 50;
+export const MAX_STARTS_PER_PASS = 50;
+export const MAX_PENDING = 200;
 const KEEP_SEEN = 500;
 const KEEP_LIST = 50;
 export const REQUEST_NAME = /^[A-Za-z0-9-]{1,64}\.json$/;
 export const REQUEST_ID = /^[A-Za-z0-9-]{1,64}$/;
-export const CARD_ID = /^[A-Za-z0-9._-]{1,200}$/;
+export { CARD_ID };
 const HEX40 = /^[0-9a-f]{40}$/;
-export const FOLDERS = Object.freeze({ requests: 'requests', launches: 'launches', status: 'status.json', state: 'state.json' });
+export const FOLDERS = Object.freeze({ requests: 'requests', rejected: 'rejected', launches: 'launches', status: 'status.json', state: 'state.json' });
 const REQUEST_KEYS = ['card', 'head', 'request_id', 'role'];
 
 const iso = (t) => new Date(t).toISOString();
+
+/** Is a `ps` command line the pinned claude's? The one reading, for the session list and the check before a stop. */
+export const isClaudeCommand = (cmd, bin) => typeof cmd === 'string' && typeof bin === 'string' && bin.length > 0 && (cmd === bin || cmd.startsWith(`${bin} `));
 const keyOf = (card, head, role) => `${card}:${head}:${role}`;
 
 /** Does a card in this state need a session of this role? A reviewer for every card in review; an auditor too on Tier 1 (m-6). */
@@ -136,15 +147,23 @@ function writeLaunch(dir, sid, doc) {
  *   isAdmin() → true | false; a throw counts as an admin (m-3)
  *   readCard(card) → { ok, doc } (the Record, read only)      currentHead(card, doc) → 40 hex (git, read only)
  *   sessions() → [{ pid, sessionId? }] the review sessions alive now     stop({ pid, sessionId })
- *   start({ role, card, head, sessionId, outbox, configDir, env, signin }) → { ok, pid } | { ok: false, reason }
+ *   claudeBin, processName(pid) → the process's command line: nothing is stopped, and no start counts, unless it is
+ *     claude's (`isClaudeCommand`)
+ *   start({ role, card, head, sessionId, outbox, configDir, env, signin }) → { ok, pid } | { ok: false, reason }; the pid
+ *     is claude's own process, never the launcher's (L66)
  *   accountInUse() → 'a' | 'b' (which sign-in folder of review's to start on)
- *   handedIn({ role, sessionId, outbox }) → true when the ended session left a verdict
+ *   handedIn({ role, sessionId, outbox, card, head }) → { ok: true } when the ended session left a verdict the intake
+ *     takes; { ok: false, none: true } when it left none; { ok: false, reason } when it left one the intake would refuse
+ *     (M9 `sessionVerdict`)
+ *   installedCommit() → the installed copy's commit stamp (40 hex), shown in the status
  * Returns { ok, error?, started: [...], refused: [...], stopped: [...], alerts: [...] } (also what status.json shows).
  */
 export async function runnerPass(ctx) {
   const now = ctx.now();
   const newId = ctx.newId ?? randomUUID;
   const result = { ok: true, error: null, started: [], refused: [], stopped: [], alerts: [] };
+  let installed = null;
+  try { const c = await ctx.installedCommit?.(); installed = typeof c === 'string' && HEX40.test(c) ? c : null; } catch { installed = null; }
   // Who we are and where we write come first: a runner that is not review, or a folder that is not review's, writes nothing.
   const mapBad = uidsProblem(ctx.uids);
   const who = mapBad ? { ok: false, reason: mapBad } : reviewUid(ctx.uids);
@@ -155,7 +174,7 @@ export async function runnerPass(ctx) {
   const rootBad = folderProblem(ctx.root, uid);
   if (rootBad) return { ...result, ok: false, error: `the review folder: ${rootBad}`, wrote: false };
 
-  const P = { requests: join(ctx.root, FOLDERS.requests), launches: join(ctx.root, FOLDERS.launches), status: join(ctx.root, FOLDERS.status), state: join(ctx.root, FOLDERS.state) };
+  const P = { requests: join(ctx.root, FOLDERS.requests), rejected: join(ctx.root, FOLDERS.rejected), launches: join(ctx.root, FOLDERS.launches), status: join(ctx.root, FOLDERS.status), state: join(ctx.root, FOLDERS.state) };
   const st = readState(P.state);
   const state = st.ok ? st.state : { running: [], attempts: {}, seen: [], alerts: [], told: [] };
   // `at` is the alert's time; the Dispatcher tells each id and time once, so a trouble that keeps the state from being
@@ -169,7 +188,7 @@ export async function runnerPass(ctx) {
   };
   const fail = (error) => { result.ok = false; result.error = result.error ? `${result.error}; ${error}` : error; };
   const finish = () => {
-    const status = { written_at: iso(now), ok: result.ok, error: result.error,
+    const status = { written_at: iso(now), ok: result.ok, error: result.error, installed_commit: installed,
       running: state.running.map(({ card, head, role, session_id, started_at }) => ({ card, head, role, session_id, started_at })),
       refused: [...(state.refused ?? []), ...result.refused].slice(-KEEP_LIST), alerts: state.alerts };
     state.refused = status.refused;
@@ -194,9 +213,10 @@ export async function runnerPass(ctx) {
 
   try {
     ensureFolder(P.requests, 0o1733);
+    ensureFolder(P.rejected, 0o700);
     ensureFolder(P.launches, 0o755);
   } catch (e) { fail(`the review folders could not be made (${e?.code ?? e?.message})`); return finish(); }
-  const reqBad = folderProblem(P.requests, uid, 0o1733) ?? launchesFolderProblem(P.launches, uid);
+  const reqBad = folderProblem(P.requests, uid, 0o1733) ?? folderProblem(P.rejected, uid, 0o700) ?? launchesFolderProblem(P.launches, uid);
   if (reqBad) { fail(`the review folders: ${reqBad}`); return finish(); }
 
   // The sessions alive now. One the runner did not start is stopped, and Joe is told (m-7); one that ended leaves `running`.
@@ -205,30 +225,54 @@ export async function runnerPass(ctx) {
   const mine = new Set(state.running.map((r) => r.pid));
   for (const s of live) {
     if (mine.has(s.pid)) continue;
-    let stopped = true;
-    try { await ctx.stop(s); } catch { stopped = false; }
+    // The pid may have ended and been reused since the list: only a process that is still claude is stopped.
+    let cmd = null; try { cmd = await ctx.processName(s.pid); } catch { cmd = null; }
+    const isClaude = isClaudeCommand(cmd, ctx.claudeBin);
+    let stopped = false;
+    if (isClaude) { stopped = true; try { await ctx.stop(s); } catch { stopped = false; } }
     result.stopped.push({ pid: s.pid, sessionId: s.sessionId ?? null, stopped });
-    alert(`stray-${s.pid}-${s.sessionId ?? ''}`, `A review session the review runner did not start was found (process ${s.pid}${s.sessionId ? `, session ${s.sessionId}` : ''}) and ${stopped ? 'stopped' : 'could not be stopped'}.`);
+    const what = isClaude ? (stopped ? 'stopped' : 'could not be stopped') : 'not stopped, because the process is no longer claude';
+    alert(`stray-${s.pid}-${s.sessionId ?? ''}`, `A review session the review runner did not start was found (process ${s.pid}${s.sessionId ? `, session ${s.sessionId}` : ''}) and ${what}.`);
   }
   const alive = new Set(live.map((s) => s.pid));
   for (const r of state.running.filter((x) => !alive.has(x.pid))) {
     const k = keyOf(r.card, r.head, r.role);
     const a = state.attempts[k] ?? { failures: 0 };
-    let verdict = false;
-    try { verdict = await ctx.handedIn({ role: r.role, sessionId: r.session_id, outbox: reviewOutbox({ outboxRoot: ctx.outboxRoot, role: r.role, sessionId: r.session_id }) }); } catch { verdict = false; }
-    if (verdict) state.attempts[k] = { ...a, started: true, ended_at: iso(now) };
+    let h;
+    try { h = await ctx.handedIn({ role: r.role, sessionId: r.session_id, outbox: reviewOutbox({ outboxRoot: ctx.outboxRoot, role: r.role, sessionId: r.session_id }), card: r.card, head: r.head }); } catch (e) { h = { ok: false, reason: `its verdict could not be read (${e?.message ?? e})` }; }
+    if (h?.ok === true) state.attempts[k] = { ...a, started: true, ended_at: iso(now) };
     else {
-      // A session that ended with nothing handed in counts as a failed start: one more try after the wait, 3 in all.
-      state.attempts[k] = { ...a, started: false, failures: (a.failures ?? 0) + 1, last_failed_at: iso(now) };
-      alert(`ended-${r.session_id}`, `The ${r.role} for card ${r.card} at ${r.head.slice(0, 7)} ended without handing in a verdict.`);
+      // A session that ended with nothing handed in, or with a verdict the intake would refuse, counts as a failed
+      // start: Joe is told, and the next request may start a new review after the wait, 3 tries in all (L66).
+      const why = h && !h.none && typeof h.reason === 'string' ? h.reason.slice(0, 300) : null;
+      state.attempts[k] = { ...a, started: false, failures: (a.failures ?? 0) + 1, last_failed_at: iso(now), last_reason: why ? `its verdict was refused: ${why}` : 'ended with no verdict' };
+      alert(`ended-${r.session_id}`, why
+        ? `The ${r.role} for card ${r.card} at ${r.head.slice(0, 7)} handed in a verdict that is refused (${why}). It counts as a failed start; the next request may start a new one (${MAX_FAILED_STARTS} tries in all).`
+        : `The ${r.role} for card ${r.card} at ${r.head.slice(0, 7)} ended without handing in a verdict.`);
     }
   }
   state.running = state.running.filter((x) => alive.has(x.pid));
 
-  // The requests, oldest name first, at most 50 a pass; each is removed once read.
-  let names = [];
-  try { names = readdirSync(P.requests).filter((n) => !n.startsWith('.')).sort().slice(0, MAX_REQUESTS_PER_PASS); } catch (e) { fail(`the requests could not be listed (${e?.code ?? e})`); }
+  // Every request name, each pass (L66 starvation). A name that is not a request's is moved aside unread; the rest are
+  // taken oldest first by when this runner first saw them (a name can't buy a place in the queue), each removed once
+  // read. Only starts are capped: at most 50 a pass, and what is left waits for the next pass.
+  let all = [];
+  try { all = readdirSync(P.requests).filter((n) => !n.startsWith('.')); } catch (e) { fail(`the requests could not be listed (${e?.code ?? e})`); }
+  let moved = 0;
+  for (const n of all.filter((x) => !REQUEST_NAME.test(x))) {
+    try { renameSync(join(P.requests, n), join(P.rejected, `${now}-${randomUUID()}`)); moved += 1; } catch (e) { fail(`a file in requests/ could not be moved aside (${e?.code ?? e})`); break; }
+  }
+  if (moved) result.refused.push({ at: iso(now), request: null, card: null, role: null, request_id: null, reason: `${moved} file(s) whose names are not a request's were moved aside to rejected/` });
+  const firstSeen = state.first_seen ?? {};
+  const pending = all.filter((x) => REQUEST_NAME.test(x));
+  state.first_seen = Object.fromEntries(pending.map((n) => [n, firstSeen[n] ?? iso(now)]));
+  const names = pending.sort((x, y) => (state.first_seen[x] < state.first_seen[y] ? -1 : state.first_seen[x] > state.first_seen[y] ? 1 : x < y ? -1 : 1));
+  if (names.length > MAX_PENDING) alert('requests-pending', `${names.length} review requests are waiting (more than ${MAX_PENDING}); something may be asking far too often.`);
+  else state.told = state.told.filter((t) => t !== 'requests-pending');
+  let starts = 0;
   for (const name of names) {
+    if (starts >= MAX_STARTS_PER_PASS) break;
+    delete state.first_seen[name];
     const got = readRequest(P.requests, name);
     const refuse = (reason, req = got.req) => result.refused.push({ at: iso(now), request: name, card: req?.card ?? null, role: req?.role ?? null, request_id: req?.request_id ?? null, reason });
     if (!got.ok) { refuse(`the request ${got.reason}`); continue; }
@@ -254,6 +298,7 @@ export async function runnerPass(ctx) {
     if (a.last_failed_at && now - Date.parse(a.last_failed_at) < RETRY_MS) { refuse(`the last start of a ${role} for card ${card} failed less than 15 minutes ago`); continue; }
 
     // Start it: the session id is the runner's own, the outbox is made fresh, the launch record is written before the start.
+    starts += 1;
     const sid = newId();
     const failStart = (reason) => {
       state.attempts[k] = { ...a, started: false, failures: (a.failures ?? 0) + 1, last_failed_at: iso(now), last_reason: reason };
@@ -284,6 +329,10 @@ export async function runnerPass(ctx) {
       failStart(r?.reason ?? 'the start gave no process id');
       continue;
     }
+    // The pid must be claude's own (L66): one that is the launcher's would not match the session list, and the next pass
+    // would stop claude as a stray. The launch record stays, so a session that did start can still hand in a verdict.
+    let cmd = null; try { cmd = await ctx.processName(r.pid); } catch { cmd = null; }
+    if (!isClaudeCommand(cmd, ctx.claudeBin)) { failStart(`the start gave process ${r.pid}, which is not claude`); continue; }
     state.attempts[k] = { ...a, started: true, started_at: iso(now), session_id: sid };
     state.running.push({ card, head, role, session_id: sid, pid: r.pid, started_at: iso(now) });
     result.started.push({ card, head, role, session_id: sid, signin: acct });
@@ -299,9 +348,16 @@ export async function runnerPass(ctx) {
 export function readReviewStatus({ file, now, uid, stat = lstatSync }) {
   // The owner check is never skipped: a status anyone could write would say what runs.
   if (!Number.isInteger(uid) || uid < 0) throw new Error('the review user\'s uid is not known, so its status can\'t be checked');
+  // Its folder too: one someone else could write lets them swap the file between the check and the read.
+  let ds;
+  try { ds = stat(dirname(file)); } catch { throw new Error('the review runner\'s folder is missing'); }
+  if (ds.isSymbolicLink() || !ds.isDirectory()) throw new Error('the review runner\'s folder is not a plain folder');
+  if (ds.uid !== uid) throw new Error('the review runner\'s folder is not owned by the review user');
+  if (ds.mode & 0o022) throw new Error('the review runner\'s folder can be written by others');
   let st;
   try { st = stat(file); } catch { throw new Error('the review runner\'s status is missing'); }
   if (st.isSymbolicLink() || !st.isFile()) throw new Error('the review runner\'s status is not a plain file');
+  if (st.nlink !== 1) throw new Error('the review runner\'s status has more than one name');
   if (st.uid !== uid) throw new Error('the review runner\'s status is not owned by the review user');
   if (st.mode & 0o022) throw new Error('the review runner\'s status can be written by others');
   let s;
@@ -310,5 +366,6 @@ export function readReviewStatus({ file, now, uid, stat = lstatSync }) {
   if (!Number.isFinite(at) || !Array.isArray(s.running)) throw new Error('the review runner\'s status is not what the runner writes');
   if (now - at > STATUS_STALE_MS) throw new Error(`the review runner's status is ${Math.round((now - at) / 60_000)} minutes old; the runner may be stopped`);
   if (at - now > STATUS_STALE_MS) throw new Error('the review runner\'s status is dated in the future; a clock is wrong');
-  return { running: s.running, alerts: Array.isArray(s.alerts) ? s.alerts : [], ok: s.ok === true, error: s.error ?? null };
+  return { running: s.running, alerts: Array.isArray(s.alerts) ? s.alerts : [], ok: s.ok === true, error: s.error ?? null,
+    installed_commit: typeof s.installed_commit === 'string' && HEX40.test(s.installed_commit) ? s.installed_commit : null };
 }

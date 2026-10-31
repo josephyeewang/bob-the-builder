@@ -21,14 +21,17 @@
 //     "ownerHome": "/abs", "ownerUid": <uid>,       the fallback: the owner's own account file, read only
 //     "wiring": "/abs/wiring.mjs" }                 exports `start(x)` (review-runner.mjs `runnerPass`, `ctx.start`)
 // The wiring's start runs the launcher (launch.mjs, checks 1 to 13) for a reviewer or an auditor, with `--session-id`
-// set to the runner's id, and returns { ok, pid }. It gets `claudeBin`, `node` and `hooksDir` (checked above) to run and
-// to render the settings with. Exit 0 when the pass ran clean, 1 when it refused or could not run.
+// set to the runner's id, and returns { ok, pid }, where pid is claude's own process (L66: never the launcher's; the
+// runner checks the pid's command is the pinned claude before it counts the start, and before it stops anything). It
+// gets `claudeBin`, `node` and `hooksDir` (checked above) to run and to render the settings with. Exit 0 when the pass ran clean, 1 when it refused or could not run.
 
 import { closeSync, constants, fstatSync, lstatSync, openSync, readFileSync, readdirSync, realpathSync } from 'node:fs';
 import { isAbsolute, join, relative } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { runnerPass, CARD_ID } from './review-runner.mjs';
+import { runnerPass, CARD_ID, isClaudeCommand } from './review-runner.mjs';
+import { STAMP } from './review-daemons.mjs';
+import { sessionVerdict } from '../../M9-record/outbox.mjs';
 import { readAccountFile, ACCOUNT_FILE } from './accounts.mjs';
 import { REVIEW_USER } from './review-user.mjs';
 import { git } from '../git/safe-git.mjs';
@@ -108,6 +111,21 @@ export function adminAnswer(r) {
   throw new Error(`the admin check gave no answer (${r?.error?.code ?? `exit ${r?.status}`})`);
 }
 
+/**
+ * The installed copy's commit stamp (review-daemons.mjs `STAMP`), read as root's plain file: 40 hex, or null when it is
+ * missing or not root's alone (the status then shows none, and the Dispatcher tells Joe).
+ */
+export function readInstallStamp(installRoot, { owner = 0 } = {}) {
+  let fd;
+  try { fd = openSync(join(installRoot, STAMP), constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); } catch { return null; }
+  try {
+    const st = fstatSync(fd);
+    if (!st.isFile() || st.nlink !== 1 || st.uid !== owner || st.mode & 0o022 || st.size > 64) return null;
+    const t = readFileSync(fd, 'utf8').trim();
+    return /^[0-9a-f]{40}$/.test(t) ? t : null;
+  } catch { return null; } finally { closeSync(fd); }
+}
+
 /** `ps -o pid=,command=` lines → the processes of `bin`, with their --session-id; this process left out. */
 export function sessionsFrom(text, bin, self = process.pid) {
   const out = [];
@@ -116,7 +134,7 @@ export function sessionsFrom(text, bin, self = process.pid) {
     if (!m) continue;
     const pid = Number(m[1]);
     const cmd = m[2];
-    if (pid === self || !(cmd === bin || cmd.startsWith(`${bin} `))) continue;
+    if (pid === self || !isClaudeCommand(cmd, bin)) continue;
     const sid = /(?:^|\s)--session-id[ =]([A-Za-z0-9-]{1,128})(?:\s|$)/.exec(cmd)?.[1];
     out.push(sid ? { pid, sessionId: sid } : { pid });
   }
@@ -129,7 +147,7 @@ const run = (bin, args) => spawnSync(bin, args, { encoding: 'utf8', timeout: CHI
 export function realPorts(c, wiring, { node = realpathSync(process.execPath) } = {}) {
   const uid = c.uids.reviewer;
   return {
-    root: c.root, outboxRoot: c.outboxRoot, uids: c.uids, reviewHome: c.reviewHome,
+    root: c.root, outboxRoot: c.outboxRoot, uids: c.uids, reviewHome: c.reviewHome, claudeBin: c.claudeBin,
     now: () => Date.now(), ownUid: () => process.getuid(),
     isAdmin: () => adminAnswer(run('/usr/sbin/dseditgroup', ['-o', 'checkmember', '-m', REVIEW_USER, 'admin'])),
     readCard: (card) => readCardFile({ recordRoot: c.recordRoot, recordUid: c.recordUid, card }),
@@ -144,6 +162,12 @@ export function realPorts(c, wiring, { node = realpathSync(process.execPath) } =
       return sessionsFrom(r.stdout, c.claudeBin);
     },
     stop: ({ pid }) => { process.kill(pid, 'SIGTERM'); },
+    processName: (pid) => {
+      if (!Number.isInteger(pid) || pid <= 0) return null;
+      const r = run('/bin/ps', ['-o', 'command=', '-p', String(pid)]);
+      return r.status === 0 ? String(r.stdout).trim() : null;
+    },
+    installedCommit: () => readInstallStamp(c.installRoot),
     start: (x) => wiring.start({ ...x, claudeBin: c.claudeBin, node, hooksDir: c.hooksDir }),
     accountInUse: () => {
       const copy = c.accountCopy ? readAccountFile({ file: c.accountCopy, uid: 0 }) : { ok: false };
@@ -154,7 +178,7 @@ export function realPorts(c, wiring, { node = realpathSync(process.execPath) } =
       const r = readAccountFile({ file: own, uid: c.ownerUid });
       return r.ok ? r.account : null;
     },
-    handedIn: ({ outbox }) => readdirSync(outbox).some((n) => n.startsWith('verdict')),
+    handedIn: ({ role, sessionId, card, head }) => sessionVerdict({ outboxRoot: c.outboxRoot, uids: c.uids, role, sessionId, card, head }),
   };
 }
 

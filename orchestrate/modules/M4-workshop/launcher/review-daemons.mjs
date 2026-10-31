@@ -22,6 +22,14 @@ export const SCRIPTS = Object.freeze({
   accounts: 'modules/M4-workshop/launcher/accounts.mjs',
 });
 export const NODE = 'bin/node';
+// The commit stamp (L66): the install writes the commit it copied, 40 hex and a newline, into this file at the top of
+// the installed copy, root's like the rest. The runner shows it in its status; the Dispatcher tells Joe when it is not
+// main's. `installStamp(commit)` is the file's text.
+export const STAMP = 'installed-commit';
+export function installStamp(commit) {
+  if (typeof commit !== 'string' || !/^[0-9a-f]{40}$/.test(commit)) throw new Error('the commit stamp must be a 40-hex commit');
+  return `${commit}\n`;
+}
 
 function plist(entries) {
   return ['<?xml version="1.0" encoding="UTF-8"?>',

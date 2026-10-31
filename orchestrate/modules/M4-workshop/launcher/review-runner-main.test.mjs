@@ -5,7 +5,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { chmodSync, linkSync, mkdirSync, readFileSync, symlinkSync, writeFileSync, lstatSync } from 'node:fs';
 import { join } from 'node:path';
-import { installProblem, programsProblem, readCardFile, adminAnswer, sessionsFrom, realPorts, readConfig } from './review-runner-main.mjs';
+import { installProblem, programsProblem, readCardFile, adminAnswer, sessionsFrom, realPorts, readConfig, readInstallStamp } from './review-runner-main.mjs';
+import { STAMP, installStamp } from './review-daemons.mjs';
 import { reviewDaemonPlists } from './review-daemons.mjs';
 import { readAccountFile, copyAccountTo, useAccount, ACCOUNT_FILE } from './accounts.mjs';
 import { tempDir } from '../../../shared/test-tmp.mjs';
@@ -113,16 +114,16 @@ test('L65 m-5: the account copy is a or b, root\'s; the runner falls back to the
   mkdirSync(join(home, '.claude-b'));
   const to = join(home, 'copy');
   // No account file means a.
-  assert.deepEqual(copyAccountTo({ home, uid: ME, to }), { ok: true, account: 'a' });
+  assert.deepEqual(copyAccountTo({ home, uid: ME, to, dirOwner: ME }), { ok: true, account: 'a' });
   assert.equal(useAccount({ home, name: 'b' }).ok, true);
   // The owner's file can be read by others now (it says a or b, no secret).
   assert.equal(lstatSync(join(home, ACCOUNT_FILE)).mode & 0o777, 0o644);
-  assert.deepEqual(copyAccountTo({ home, uid: ME, to }), { ok: true, account: 'b' });
+  assert.deepEqual(copyAccountTo({ home, uid: ME, to, dirOwner: ME }), { ok: true, account: 'b' });
   assert.equal(readFileSync(to, 'utf8'), 'b\n');
   assert.equal(lstatSync(to).mode & 0o777, 0o644);
   assert.deepEqual(readAccountFile({ file: to, uid: ME }), { ok: true, account: 'b' });
   assert.match(readAccountFile({ file: to, uid: 0 }).reason, /not owned by uid 0/);
-  assert.match(copyAccountTo({ home, uid: ME + 1, to }).reason, /not owned by uid/);
+  assert.match(copyAccountTo({ home, uid: ME + 1, to, dirOwner: ME }).reason, /not owned by uid/);
   writeFileSync(join(home, 'odd'), 'c\n', { mode: 0o644 });
   assert.match(readAccountFile({ file: join(home, 'odd'), uid: ME }).reason, /neither a nor b/);
   symlinkSync(to, join(home, 'link'));
@@ -132,6 +133,63 @@ test('L65 m-5: the account copy is a or b, root\'s; the runner falls back to the
   assert.equal(realPorts(c, {}).accountInUse(), 'b');
   assert.equal(realPorts({ ...c, ownerUid: ME + 1 }, {}).accountInUse(), null);
   assert.equal(realPorts({ ...c, ownerHome: join(home, 'nobody') }, {}).accountInUse(), 'a');
+});
+
+test('L66: root\'s account copy goes only into a folder of root\'s alone, as a fresh file, never through a link', () => {
+  const home = tempDir('m4-acct-');
+  chmodSync(home, 0o755);
+  const dir = join(home, 'root-only');
+  mkdirSync(dir, { mode: 0o755 });
+  chmodSync(dir, 0o755);
+  const to = join(dir, 'copy');
+  assert.deepEqual(copyAccountTo({ home, uid: ME, to, dirOwner: ME }), { ok: true, account: 'a' });
+  // The folder must be root's (here this test's user stands in for root) ...
+  assert.match(copyAccountTo({ home, uid: ME, to }).reason, new RegExp(`${dir} is not owned by uid 0`));
+  // ... and no one else may write it.
+  chmodSync(dir, 0o775);
+  assert.match(copyAccountTo({ home, uid: ME, to, dirOwner: ME }).reason, /can be written by others/);
+  chmodSync(dir, 0o755);
+  // A link put where the new file is made, or a file left there, is never written through or over.
+  const bait = join(home, 'bait');
+  writeFileSync(bait, 'x\n', { mode: 0o644 });
+  symlinkSync(bait, `${to}.${process.pid}.tmp`);
+  assert.match(copyAccountTo({ home, uid: ME, to, dirOwner: ME }).reason, /could not be made fresh \(EEXIST\)/);
+  assert.equal(readFileSync(bait, 'utf8'), 'x\n');
+  // The folder as a link, or missing, refuses.
+  symlinkSync(dir, join(home, 'dir-link'));
+  assert.match(copyAccountTo({ home, uid: ME, to: join(home, 'dir-link', 'copy'), dirOwner: ME }).reason, /is not a plain folder/);
+  assert.match(copyAccountTo({ home, uid: ME, to: join(home, 'none', 'copy'), dirOwner: ME }).reason, /is not a plain folder/);
+});
+
+test('L66 version stamp: the install writes the commit; the runner reads it only as root\'s plain file', () => {
+  const C = 'e'.repeat(40);
+  assert.equal(installStamp(C), `${C}\n`);
+  for (const bad of ['main', 'E'.repeat(40), undefined]) assert.throws(() => installStamp(bad), /40-hex commit/);
+  const d = tempDir('m4-stamp-');
+  const f = join(d, STAMP);
+  assert.equal(readInstallStamp(d, { owner: ME }), null, 'missing');
+  writeFileSync(f, installStamp(C), { mode: 0o644 });
+  assert.equal(readInstallStamp(d, { owner: ME }), C);
+  assert.equal(readInstallStamp(d), null, 'not root\'s');
+  chmodSync(f, 0o666);
+  assert.equal(readInstallStamp(d, { owner: ME }), null, 'writable by others');
+  chmodSync(f, 0o644);
+  writeFileSync(f, 'main\n');
+  assert.equal(readInstallStamp(d, { owner: ME }), null, 'not a commit');
+  // The port hands it to the pass.
+  writeFileSync(f, installStamp(C));
+  assert.equal(realPorts({ installRoot: d, uids: { reviewer: ME } }, {}).installedCommit(), null, 'the real port wants root\'s');
+});
+
+test('L66 pid contract: the real port reads a process\'s command, and the verdict check is M9\'s', async () => {
+  const p = realPorts({ uids: { reviewer: ME }, claudeBin: '/pinned/claude', outboxRoot: '/nowhere' }, {});
+  assert.equal(p.claudeBin, '/pinned/claude');
+  assert.match(p.processName(process.pid), /node/);
+  for (const pid of [0, -1, 1.5, '12']) assert.equal(p.processName(pid), null);
+  // A session with no outbox folder has handed nothing in, and that is a failed try, never a throw.
+  const h = p.handedIn({ role: 'reviewer', sessionId: 'S-1', card: 'C-1', head: 'a'.repeat(40) });
+  assert.equal(h.ok, false);
+  assert.match(h.reason, /could not be listed/);
 });
 
 test('L65: the config names every path as a full path', () => {

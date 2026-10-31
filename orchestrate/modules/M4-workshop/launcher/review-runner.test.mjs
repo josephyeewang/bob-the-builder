@@ -4,10 +4,10 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, fstatSync, linkSync, lstatSync, mkdirSync, readFileSync, readdirSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { runnerPass, readReviewStatus, needsRole, rolesFor, RETRY_MS, MAX_FAILED_STARTS, STATUS_STALE_MS, MAX_REQUEST_BYTES } from './review-runner.mjs';
-import { runnerLaunchFor } from '../../M9-record/outbox.mjs';
+import { runnerPass, readReviewStatus, needsRole, rolesFor, RETRY_MS, MAX_FAILED_STARTS, STATUS_STALE_MS, MAX_REQUEST_BYTES, MAX_STARTS_PER_PASS, MAX_PENDING, CARD_ID, readRequest } from './review-runner.mjs';
+import { runnerLaunchFor, runnerLaunches, sessionVerdict } from '../../M9-record/outbox.mjs';
 import { tempDir } from '../../../shared/test-tmp.mjs';
 
 const ME = process.getuid();
@@ -17,6 +17,7 @@ const HEAD = 'a'.repeat(40);
 const HEAD2 = 'b'.repeat(40);
 const T0 = Date.parse('2026-10-31T12:00:00Z');
 const MIN = 60_000;
+const CLAUDE = '/pinned/claude';
 
 function world(over = {}) {
   const base = tempDir('m4-runner-');
@@ -33,7 +34,9 @@ function world(over = {}) {
   let n = 0;
   let pid = 1000;
   const ctx = {
-    root, outboxRoot, uids: UIDS, reviewHome: join(base, 'review-home'),
+    root, outboxRoot, uids: UIDS, reviewHome: join(base, 'review-home'), claudeBin: CLAUDE,
+    // The command of a live process: a fake claude for each live session (with its session id), nothing for any other.
+    processName: (p) => { const s = live.find((x) => x.pid === p); return s ? `${CLAUDE} --session-id ${s.sessionId ?? 'x'}` : null; },
     now: () => clock.t, ownUid: () => ME, newId: () => `S-${++n}`,
     isAdmin: async () => false,
     readCard: (c) => (cards.has(c) ? { ok: true, doc: cards.get(c) } : { ok: false }),
@@ -42,7 +45,7 @@ function world(over = {}) {
     stop: async (s) => { stops.push(s); const i = live.findIndex((x) => x.pid === s.pid); if (i >= 0) live.splice(i, 1); },
     start: async (x) => { starts.push(x); const p = ++pid; live.push({ pid: p, sessionId: x.sessionId }); return { ok: true, pid: p }; },
     accountInUse: () => 'a',
-    handedIn: () => false,
+    handedIn: () => ({ ok: false, none: true }),
     ...over,
   };
   const requests = join(root, 'requests');
@@ -102,7 +105,6 @@ test('L65 planted: a forged request is refused for each check, and nothing start
     ['a request that is not JSON', (w) => w.ask('{', 'bad.json'), /not JSON/],
     ['a request that is too big', (w) => w.ask({ card: 'C-1', request_id: 'big', role: 'reviewer' + ' '.repeat(MAX_REQUEST_BYTES) }), /too big/],
     ['a request that is a link', (w) => { writeFileSync(join(w.base, 'elsewhere.json'), JSON.stringify({ card: 'C-1', head: HEAD, role: 'reviewer', request_id: 'l' })); symlinkSync(join(w.base, 'elsewhere.json'), join(w.requests, 'l.json')); }, /is a link/],
-    ['a request with an odd name', (w) => w.ask({}, 'not ok.json'), /file name/],
   ];
   for (const [what, plant, re] of cases) {
     const w = await ready();
@@ -116,6 +118,158 @@ test('L65 planted: a forged request is refused for each check, and nothing start
   }
 });
 
+test('L66 starvation: a file whose name is not a request\'s is moved aside unread, every pass, with no cap', async () => {
+  const w = await ready();
+  // More junk names than the old 50-a-pass read, all sorting before the real request.
+  for (let i = 0; i < 120; i++) writeFileSync(join(w.requests, `0 junk ${i}.json`), 'x', { mode: 0o644 });
+  writeFileSync(join(w.requests, '!.json'), 'x', { mode: 0o644 });
+  w.ask();
+  const r = await runnerPass(w.ctx);
+  refusedFor(r, /121 file\(s\) whose names are not a request's were moved aside to rejected\//);
+  assert.deepEqual(r.started.map((s) => s.card), ['C-1'], 'the real request starts in the same pass');
+  assert.deepEqual(readdirSync(w.requests), []);
+  assert.equal(readdirSync(join(w.root, 'rejected')).length, 121);
+  assert.equal(lstatSync(join(w.root, 'rejected')).mode & 0o7777, 0o700);
+  // A rejected folder that is not review's alone stops the pass.
+  chmodSync(join(w.root, 'rejected'), 0o755);
+  assert.match((await runnerPass(w.ctx)).error, /rejected has mode 755, not 700/);
+});
+
+test('L66 starvation planted: only starts are capped, 50 a pass, oldest first by when the runner first saw each request', async () => {
+  const w = await ready();
+  const card = (i) => `C-${String(i).padStart(3, '0')}`;
+  for (let i = 1; i <= 150; i++) { w.cards.set(card(i), { state: 'in_review', head: HEAD, tier: 2 }); w.heads.set(card(i), HEAD); }
+  // A refused request is no start: these 60 are all read in the pass, uncounted.
+  for (let i = 0; i < 60; i++) w.ask({ card: 'C-404', request_id: `bad-${i}` });
+  for (let i = 1; i <= 100; i++) w.ask({ card: card(i), request_id: `z-${String(i).padStart(3, '0')}` });
+  let r = await runnerPass(w.ctx);
+  assert.equal(r.started.length, MAX_STARTS_PER_PASS);
+  assert.equal(r.refused.filter((x) => /C-404 is not in the Record/.test(x.reason)).length, 60);
+  assert.equal(readdirSync(w.requests).length, 50, 'the rest wait');
+  // Newer requests whose names sort first wait behind the older ones.
+  w.clock.t += MIN;
+  for (let i = 101; i <= 150; i++) w.ask({ card: card(i), request_id: `a-${String(i).padStart(3, '0')}` });
+  r = await runnerPass(w.ctx);
+  assert.deepEqual(r.started.map((s) => s.card), Array.from({ length: 50 }, (_, j) => card(51 + j)));
+  w.clock.t += MIN;
+  r = await runnerPass(w.ctx);
+  assert.deepEqual(r.started.map((s) => s.card), Array.from({ length: 50 }, (_, j) => card(101 + j)));
+  assert.deepEqual(readdirSync(w.requests), []);
+});
+
+test('L66 starvation: more than 200 requests waiting is told to Joe once', async () => {
+  const w = await ready();
+  for (let i = 0; i <= MAX_PENDING; i++) w.ask({ card: 'C-404', request_id: `p-${i}` });
+  let r = await runnerPass(w.ctx);
+  assert.ok(r.alerts.some((a) => /201 review requests are waiting \(more than 200\)/.test(a.text)));
+  for (let i = 0; i <= MAX_PENDING; i++) w.ask({ card: 'C-404', request_id: `p2-${i}` });
+  r = await runnerPass(w.ctx);
+  assert.equal(r.alerts.length, 0, 'told once while it lasts');
+  r = await runnerPass(w.ctx);
+  for (let i = 0; i <= MAX_PENDING; i++) w.ask({ card: 'C-404', request_id: `p3-${i}` });
+  assert.ok((await runnerPass(w.ctx)).alerts.some((a) => /requests are waiting/.test(a.text)), 'told again once it came back');
+});
+
+test('L66: a card id with .. is refused, in a request and in the shared definition', () => {
+  for (const id of ['a..b', '..', 'C-1/..', '...']) assert.equal(CARD_ID.test(id), false, id);
+  for (const id of ['C-1', 'c.1', 'R-0b-05']) assert.equal(CARD_ID.test(id), true, id);
+  const d = tempDir('m4-runner-');
+  writeFileSync(join(d, 'q.json'), JSON.stringify({ card: 'a..b', head: HEAD, role: 'reviewer', request_id: 'q' }));
+  assert.match(readRequest(d, 'q.json').reason, /card id is not a plain id/);
+});
+
+test('L66: a verdict the intake would refuse counts as a failed start; Joe is told and a new review may start, 3 tries in all', async () => {
+  const w = await ready();
+  // The real check (M9 sessionVerdict), on the real outbox: a verdict for another head is refused.
+  w.ctx.handedIn = (x) => sessionVerdict({ outboxRoot: w.outboxRoot, uids: UIDS, ...x });
+  const verdict = (sid, head) => writeFileSync(join(w.outboxRoot, 'reviewer', sid, `verdict-${sid}.md`), `${JSON.stringify({ entity: 'verdict', card: 'C-1', expectRev: 0, fields: { head, pass: true } })}\n`, { mode: 0o644 });
+  w.ask();
+  await runnerPass(w.ctx);
+  verdict('S-1', HEAD2);
+  w.end('S-1');
+  let r = await runnerPass(w.ctx);
+  assert.ok(r.alerts.some((a) => /reviewer for card C-1 at aaaaaaa handed in a verdict that is refused \(the verdict names head bbbbbbb, not aaaaaaa\)\. It counts as a failed start/.test(a.text)), r.alerts.map((a) => a.text).join(' | '));
+  w.clock.t += RETRY_MS;
+  w.ask();
+  r = await runnerPass(w.ctx);
+  assert.deepEqual(r.started.map((s) => s.session_id), ['S-2'], 'the next request starts a new review');
+  // Two verdict files count as none; a good one counts, and no further start is made for that head.
+  verdict('S-2', HEAD);
+  writeFileSync(join(w.outboxRoot, 'reviewer', 'S-2', 'verdict-again.md'), readFileSync(join(w.outboxRoot, 'reviewer', 'S-2', 'verdict-S-2.md')));
+  w.end('S-2');
+  r = await runnerPass(w.ctx);
+  assert.ok(r.alerts.some((a) => /more than one verdict file was left/.test(a.text)));
+  w.clock.t += RETRY_MS;
+  w.ask();
+  r = await runnerPass(w.ctx);
+  assert.deepEqual(r.started.map((s) => s.session_id), ['S-3']);
+  verdict('S-3', HEAD);
+  w.end('S-3');
+  r = await runnerPass(w.ctx);
+  assert.equal(r.alerts.length, 0, 'a good verdict tells nothing');
+  w.clock.t += RETRY_MS;
+  w.ask();
+  refusedFor(await runnerPass(w.ctx), /already started for card C-1 at aaaaaaa; one start per head/);
+  // The ports' answers by name: none handed in, or a refusal, are both failed tries; three of them end it.
+  assert.equal(sessionVerdict({ outboxRoot: w.outboxRoot, uids: UIDS, role: 'reviewer', sessionId: 'S-1', card: 'C-9', head: HEAD2 }).reason, 'the verdict names card C-1, not C-9');
+  mkdirSync(join(w.outboxRoot, 'reviewer', 'S-9'));
+  assert.deepEqual(sessionVerdict({ outboxRoot: w.outboxRoot, uids: UIDS, role: 'reviewer', sessionId: 'S-9', card: 'C-1', head: HEAD }), { ok: false, none: true, reason: 'no verdict was handed in' });
+  const x = await ready({ handedIn: () => ({ ok: false, reason: 'a verdict says pass: true or false' }) });
+  for (let i = 1; i <= MAX_FAILED_STARTS; i++) { x.ask(); await runnerPass(x.ctx); x.end(`S-${i}`); await runnerPass(x.ctx); x.clock.t += RETRY_MS; }
+  x.ask();
+  r = await runnerPass(x.ctx);
+  refusedFor(r, /3 starts of a reviewer for card C-1 at aaaaaaa failed; Joe is told/);
+  assert.ok(x.status().alerts.some((a) => /No reviewer could be started for card C-1 at aaaaaaa after 3 tries \(last: its verdict was refused: a verdict says pass/.test(a.text)));
+});
+
+test('L66 pid contract: a start counts only when its pid is claude\'s, and nothing but claude is ever stopped', async () => {
+  // The start returns the launcher's pid (not claude's): the start fails, and nothing is counted as running.
+  const w = await ready({ start: async () => ({ ok: true, pid: 4242 }) });
+  w.ask();
+  const r = await runnerPass(w.ctx);
+  refusedFor(r, /the start gave process 4242, which is not claude/);
+  assert.deepEqual(w.status().running, []);
+  // A stray whose pid is now another program's is left alone, and Joe is told.
+  const v = await ready();
+  v.live.push({ pid: 88, sessionId: 'gone' });
+  v.ctx.processName = (p) => (p === 88 ? '/usr/bin/vim notes.txt' : null);
+  const r2 = await runnerPass(v.ctx);
+  assert.deepEqual(v.stops, []);
+  assert.ok(r2.alerts.some((a) => /process 88, session gone\) and not stopped, because the process is no longer claude/.test(a.text)));
+  // A name that can't be read is not claude either.
+  v.ctx.processName = () => { throw new Error('ps failed'); };
+  v.live.push({ pid: 89 });
+  await runnerPass(v.ctx);
+  assert.deepEqual(v.stops, []);
+});
+
+test('L66 version stamp planted: the status carries the installed copy\'s commit, and the Dispatcher\'s read returns it', async () => {
+  const w = await ready({ installedCommit: () => HEAD2 });
+  await runnerPass(w.ctx);
+  assert.equal(w.status().installed_commit, HEAD2);
+  assert.equal(readReviewStatus({ file: join(w.root, 'status.json'), now: T0, uid: ME }).installed_commit, HEAD2);
+  // None, or not a commit, or a throw: the status says null.
+  for (const installedCommit of [() => null, () => 'main', () => { throw new Error('no stamp'); }]) {
+    const x = await ready({ installedCommit });
+    assert.equal(x.status().installed_commit, null);
+    assert.equal(readReviewStatus({ file: join(x.root, 'status.json'), now: T0, uid: ME }).installed_commit, null);
+  }
+});
+
+test('L66: the launch record\'s owner check, through a stat port: a record another user owns is refused', async () => {
+  const w = await ready();
+  w.ask();
+  await runnerPass(w.ctx);
+  const root = join(w.root, 'launches');
+  const q = { root, uids: UIDS, role: 'reviewer', card: 'C-1', head: HEAD, sessionId: 'S-1' };
+  assert.equal(runnerLaunchFor(q).ok, true);
+  const otherOwner = (fd) => { const st = fstatSync(fd); return Object.assign(Object.create(Object.getPrototypeOf(st)), st, { uid: OTHER }); };
+  assert.match(runnerLaunchFor({ ...q, fstat: otherOwner }).reason, /the launch record is not owned by the review user for session S-1/);
+  const all = runnerLaunches({ root, uids: UIDS, fstat: otherOwner });
+  assert.deepEqual(all.launches, []);
+  assert.match(all.refused[0].reason, /not owned by the review user/);
+});
+
 test('L65: a duplicate is refused: the same request id, or a second start while one runs, or after one has run', async () => {
   const w = await ready();
   w.ask({ request_id: 'same' });
@@ -125,7 +279,7 @@ test('L65: a duplicate is refused: the same request id, or a second start while 
   w.ask();
   refusedFor(await runnerPass(w.ctx), /a reviewer is already running for card C-1/);
   // It ends having handed in a verdict: no second start for the same head.
-  w.ctx.handedIn = () => true;
+  w.ctx.handedIn = () => ({ ok: true });
   w.end('S-1');
   w.ask();
   refusedFor(await runnerPass(w.ctx), /already started for card C-1 at aaaaaaa; one start per head/);
@@ -298,4 +452,16 @@ test('L65 planted: a status that is missing, stale, or writable by others is an 
   for (const uid of [undefined, null, '501', -1]) assert.throws(() => readReviewStatus({ file, now: T0, uid }), /uid is not known/, String(uid));
   // A status dated ahead of the clock does not stay fresh.
   assert.throws(() => readReviewStatus({ file, now: T0 - STATUS_STALE_MS - 1, uid: ME }), /dated in the future/);
+  // L66: a second name for the file, or a folder others can write or that is someone else's, is an error too.
+  linkSync(file, join(w.root, 'second-name.json'));
+  assert.throws(() => readReviewStatus({ file, now: T0, uid: ME }), /has more than one name/);
+  const v = await ready();
+  const vf = join(v.root, 'status.json');
+  chmodSync(v.root, 0o775);
+  assert.throws(() => readReviewStatus({ file: vf, now: T0, uid: ME }), /folder can be written by others/);
+  chmodSync(v.root, 0o755);
+  const stat = (p) => { const st = lstatSync(p); return p === v.root ? Object.assign(Object.create(Object.getPrototypeOf(st)), st, { uid: OTHER }) : st; };
+  assert.throws(() => readReviewStatus({ file: vf, now: T0, uid: ME, stat }), /folder is not owned by the review user/);
+  assert.throws(() => readReviewStatus({ file: join(v.base, 'none', 'status.json'), now: T0, uid: ME }), /folder is missing/);
+  assert.equal(readReviewStatus({ file: vf, now: T0, uid: ME }).ok, true);
 });

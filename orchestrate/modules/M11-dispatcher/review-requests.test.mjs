@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import { chmodSync, lstatSync, mkdirSync, readFileSync, readdirSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tempDir } from '../../shared/test-tmp.mjs';
-import { writeReviewRequest, reviewPorts } from './review-requests.mjs';
+import { writeReviewRequest, reviewPorts, statusAlerts } from './review-requests.mjs';
 import { STATUS_STALE_MS } from '../M4-workshop/launcher/review-runner.mjs';
 
 const ME = process.getuid();
@@ -85,4 +85,28 @@ test('L65: hasReviewer reads the runner\'s status: the card, role and head must 
   assert.throws(() => reviewPorts({ requests: dir, status: join(dir, 'none.json'), reviewUid: ME, now: () => now }).hasReviewer('C-1', 'reviewer', HEAD), /missing/);
   chmodSync(file, 0o666);
   assert.throws(() => p.hasReviewer('C-1', 'reviewer', HEAD), /written by others/);
+});
+
+test('L66: a failed runner pass and an installed copy behind main are told, each once per cause', () => {
+  const MAIN = 'c'.repeat(40);
+  const ok = { ok: true, error: null, installed_commit: MAIN, alerts: [], running: [] };
+  assert.deepEqual(statusAlerts(ok, () => MAIN), []);
+  // A failed pass: one alert per cause, the same id each time it is read.
+  const f1 = statusAlerts({ ...ok, ok: false, error: 'the requests could not be listed (EACCES)' }, () => MAIN);
+  assert.equal(f1.length, 1);
+  assert.match(f1[0].text, /last pass failed: the requests could not be listed \(EACCES\)/);
+  assert.deepEqual(statusAlerts({ ...ok, ok: false, error: 'the requests could not be listed (EACCES)' }, () => MAIN), f1);
+  assert.notEqual(statusAlerts({ ...ok, ok: false, error: 'another cause' }, () => MAIN)[0].id, f1[0].id);
+  // The stamp: behind main, or none, is told once per installed commit; without main's head, nothing.
+  const behind = statusAlerts({ ...ok, installed_commit: HEAD }, () => MAIN);
+  assert.equal(behind.length, 1);
+  assert.match(behind[0].text, /installed copy is at abababa, but main is at ccccccc/);
+  assert.equal(statusAlerts({ ...ok, installed_commit: HEAD }, () => 'd'.repeat(40))[0].id, behind[0].id, 'main moving on does not tell it again');
+  assert.match(statusAlerts({ ...ok, installed_commit: null }, () => MAIN)[0].text, /no commit stamp/);
+  for (const mainHead of [undefined, () => null, () => 'main', () => { throw new Error('no'); }]) assert.deepEqual(statusAlerts({ ...ok, installed_commit: HEAD }, mainHead), []);
+  // Through the ports, read from the real status file.
+  const dir = tempDir('m11-status-');
+  const file = status(dir, { written_at: new Date(T0).toISOString(), ok: false, error: 'the review user is an admin', installed_commit: HEAD, running: [], alerts: [{ id: 'x', at: 'y', text: 'z' }] });
+  const got = reviewPorts({ requests: dir, status: file, reviewUid: ME, now: () => T0, mainHead: () => MAIN }).reviewAlerts();
+  assert.deepEqual(got.map((a) => a.id.replace(/-[0-9a-f]{24}$/, '-#')), ['x', 'runner-failed-#', `stamp-${HEAD}`]);
 });

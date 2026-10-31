@@ -23,9 +23,9 @@
 // Nothing here reads a secret: the folders are only listed and linked, and `status` keeps a few named fields of
 // `claude auth status` and drops the rest.
 
-import { chmodSync, closeSync, constants, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readlinkSync, realpathSync, renameSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, closeSync, constants, fchmodSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readlinkSync, realpathSync, renameSync, statSync, symlinkSync, unlinkSync, writeFileSync, writeSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
@@ -129,19 +129,31 @@ export function readAccountFile({ file, uid }) {
 
 /**
  * `copy-to`: the owner's account file (missing means a) copied to `to`, put in place in one step, mode 0644.
- * `uid` is the owner whose file it is. → { ok, account } | { ok: false, reason }
+ * `uid` is the owner whose file it is. Root runs it, so (L66) the folder `to` sits in must be root's (`dirOwner`, a test
+ * passes its own uid) and written by no one else, and the new file is made fresh, never through a link or over a file
+ * someone left there: otherwise it refuses. → { ok, account } | { ok: false, reason }
  */
-export function copyAccountTo({ home, uid, to }) {
+export function copyAccountTo({ home, uid, to, dirOwner = 0 }) {
   if (typeof to !== 'string' || !to.startsWith('/')) return refuse('copy-to needs a full path');
+  const dir = dirname(to);
+  const ds = lstat(dir);
+  if (!ds || ds.isSymbolicLink() || !ds.isDirectory()) return refuse(`${dir} is not a plain folder`);
+  if (ds.uid !== dirOwner) return refuse(`${dir} is not owned by uid ${dirOwner}`);
+  if (ds.mode & 0o022) return refuse(`${dir} can be written by others`);
   const f = join(home, ACCOUNT_FILE);
   let r = lstat(f) ? readAccountFile({ file: f, uid }) : { ok: true, account: 'a' };
   if (!r.ok) return r;
   const at = lstat(to);
   if (at && !at.isFile()) return refuse(`${to} is there and is not a plain file`);
   const tmp = `${to}.${process.pid}.tmp`;
-  writeFileSync(tmp, `${r.account}\n`, { mode: 0o644 });
-  chmodSync(tmp, 0o644);
-  renameSync(tmp, to);
+  let fd;
+  try { fd = openSync(tmp, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o644); } catch (e) {
+    return refuse(`${tmp} could not be made fresh (${e?.code ?? e})`);
+  }
+  try {
+    try { writeSync(fd, `${r.account}\n`); fchmodSync(fd, 0o644); } finally { closeSync(fd); }
+    renameSync(tmp, to);
+  } catch (e) { try { unlinkSync(tmp); } catch { /* gone */ } return refuse(`${to} could not be written (${e?.code ?? e})`); }
   return { ok: true, account: r.account };
 }
 

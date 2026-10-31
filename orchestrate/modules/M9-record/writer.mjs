@@ -320,8 +320,8 @@ export function openRecord({ root, product, ownerUid, rules, alert = () => {}, n
       if (!r.ok) return false;
       const f = r.verdict;
       if (f.card !== cardId || f.head !== doc.head || f.pass !== true || v.createdBy !== f.created_by) return false;
-      // The review user is the one that owns the verdict file: the launch record must be that user's too.
-      return runnerLaunchFor({ root: outbox.launches, uid: f.outbox_uid, role: f.role, card: cardId, head: doc.head, sessionId: f.session_id }).ok;
+      // The launch record must be the configured review user's, the same one that owns the verdict file.
+      return runnerLaunchFor({ root: outbox.launches, uids: outbox.uids, role: f.role, card: cardId, head: doc.head, sessionId: f.session_id }).ok;
     });
     return ok ? { ok: true } : no(`no passing verdict for head ${doc.head.slice(0, 7)} from a reviewer the review runner launched on this card`);
   }

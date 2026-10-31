@@ -319,4 +319,10 @@ test('L65: the runner\'s alerts are told to Joe once each; the same trouble at a
   assert.equal(rec.read('fact', REVIEW_ALERT_FACT(a1)).doc.told_at, at(3));
   assert.deepEqual(await run([a1, a2], 4), []);
   assert.deepEqual(await run([a1, { ...a2, at: at(5) }, { id: 7 }, null], 6), ['review runner: review is an admin']);
+  // L66: the Dispatcher's own alerts from the status are told once per cause, however often the status says it.
+  const { statusAlerts } = await import('./review-requests.mjs');
+  const failed = statusAlerts({ ok: false, error: 'the review folders: requests is a link' });
+  assert.deepEqual(await run(failed, 7), ['review runner: Its last pass failed: the review folders: requests is a link.']);
+  assert.deepEqual(await run(statusAlerts({ ok: false, error: 'the review folders: requests is a link' }), 8), []);
+  assert.deepEqual(await run(statusAlerts({ ok: false, error: 'another cause' }), 9), ['review runner: Its last pass failed: another cause.']);
 });

@@ -52,7 +52,9 @@ export { REVIEW_ROLES };
 export const MAX_OUTBOX_BYTES = 256 * 1024;
 export const MAX_LAUNCH_BYTES = 16 * 1024;
 export const LAUNCH_NAME = /^([A-Za-z0-9-]{1,128})\.json$/;
-const CARD_ID = /^[A-Za-z0-9._-]{1,200}$/;
+// A card id: letters, digits, dot, dash and underscore, never `..` (L66), so it can't climb out of a folder it names.
+// The one definition: the review runner and the Dispatcher's requests use it too.
+export const CARD_ID = /^(?!.*\.\.)[A-Za-z0-9._-]{1,200}$/;
 const HEX40 = /^[0-9a-f]{40}$/;
 
 // Is the review user a separate Mac user? null when it is, else the reason (L44). Also used by the Merge Gate.
@@ -86,7 +88,7 @@ export function launchesFolderProblem(root, uid) {
 
 // One launch record, read as the outbox reads a file: no link, a plain file with one name, review's own and writable by
 // no one else, small, and naming itself (the session id in the file is the one in its name).
-function readLaunch(root, uid, name) {
+function readLaunch(root, uid, name, fstat = fstatSync) {
   const no = (reason) => ({ ok: false, reason });
   const m = LAUNCH_NAME.exec(name);
   if (!m) return no(`${name.slice(0, 80)} is not a launch record name`);
@@ -96,7 +98,7 @@ function readLaunch(root, uid, name) {
   }
   let buf;
   try {
-    const st = fstatSync(fd);
+    const st = fstat(fd);
     if (!st.isFile()) return no('the launch record is not a plain file');
     if (st.nlink !== 1) return no('the launch record has more than one name (a hard link)');
     if (st.uid !== uid) return no('the launch record is not owned by the review user');
@@ -118,7 +120,8 @@ function readLaunch(root, uid, name) {
 }
 
 /** The runner's launch record for one session, matching role, card and head; anything else is a refusal, never a throw. */
-export function runnerLaunchFor({ root, uids, uid, role, card, head, sessionId } = {}) {
+// `fstat` is a port, so a test can stand in for a record another user owns (L66).
+export function runnerLaunchFor({ root, uids, uid, role, card, head, sessionId, fstat } = {}) {
   const no = (reason) => ({ ok: false, reason });
   if (!REVIEW_ROLES.includes(role)) return no(`${role} is not a review role`);
   if (typeof sessionId !== 'string' || !SESSION_ID.test(sessionId)) return no('no session id of letters, digits and dashes');
@@ -126,7 +129,7 @@ export function runnerLaunchFor({ root, uids, uid, role, card, head, sessionId }
   if (!u.ok) return no(u.reason);
   const bad = launchesFolderProblem(root, u.uid);
   if (bad) return no(bad);
-  const r = readLaunch(root, u.uid, `${sessionId}.json`);
+  const r = readLaunch(root, u.uid, `${sessionId}.json`, fstat);
   if (!r.ok) return no(`${r.reason} for session ${sessionId}`);
   const d = r.doc;
   if (d.role !== role) return no(`the runner launched session ${sessionId} as ${d.role}, not ${role}`);
@@ -136,7 +139,7 @@ export function runnerLaunchFor({ root, uids, uid, role, card, head, sessionId }
 }
 
 /** Every launch record that passes the checks; a bad file is listed under `refused`, a bad folder refuses the lot. */
-export function runnerLaunches({ root, uids } = {}) {
+export function runnerLaunches({ root, uids, fstat } = {}) {
   const u = reviewUid(uids);
   if (!u.ok) return { ok: false, reason: u.reason };
   const bad = launchesFolderProblem(root, u.uid);
@@ -147,7 +150,7 @@ export function runnerLaunches({ root, uids } = {}) {
   for (const name of names) {
     // The runner writes `.<name>.tmp` first and renames it into place, so a half-written record is never under its name.
     if (name.startsWith('.')) continue;
-    const r = readLaunch(root, u.uid, name);
+    const r = readLaunch(root, u.uid, name, fstat);
     if (r.ok) launches.push({ doc: r.doc, key: r.key }); else refused.push({ name, reason: r.reason });
   }
   return { ok: true, launches, refused };
@@ -251,6 +254,32 @@ export function verdictFields(h) {
   }
   if (fields.material !== undefined && !(Number.isInteger(fields.material) && fields.material >= 0)) return no('material is a whole-number count');
   return { ok: true, card: h.card, head: fields.head, pass: fields.pass, notes: fields.notes ?? null, checklist: fields.checklist ?? null, material: fields.material ?? null };
+}
+
+/**
+ * A review session's own verdict, judged as the intake judges it (L66): the one verdict file in its outbox folder, read
+ * with every check, for the card and head it was launched on. The review runner calls this when a session ends, so a
+ * verdict the intake would refuse counts as a failed start. → { ok, verdict } | { ok: false, none, reason } (`none` when
+ * nothing was handed in)
+ */
+export function sessionVerdict({ outboxRoot, uids, role, sessionId, card, head } = {}) {
+  const no = (reason, none = false) => ({ ok: false, none, reason });
+  try {
+    if (!REVIEW_ROLES.includes(role)) return no(`${role} is not a review role`);
+    if (typeof sessionId !== 'string' || !SESSION_ID.test(sessionId)) return no('no session id of letters, digits and dashes');
+    const dir = join(outboxRoot, role, sessionId);
+    let names;
+    try { names = readdirSync(dir).filter((n) => !n.startsWith('.') && kindOf(n) === 'verdict-'); } catch { return no('its outbox folder could not be listed'); }
+    if (!names.length) return no('no verdict was handed in', true);
+    if (names.length > 1) return no('more than one verdict file was left, so none counts');
+    const f = readOutboxFile({ outboxRoot, uids, tag: { role, sessionId }, file: join(dir, names[0]) });
+    if (!f.ok) return no(f.reason);
+    const v = verdictFields(f.header);
+    if (!v.ok) return no(v.reason);
+    if (v.card !== card) return no(`the verdict names card ${v.card}, not ${card}`);
+    if (v.head !== head) return no(`the verdict names head ${v.head.slice(0, 7)}, not ${String(head).slice(0, 7)}`);
+    return { ok: true, verdict: v };
+  } catch (e) { return no(`the verdict could not be read (${e?.code ?? e?.message ?? e})`); }
 }
 
 /** What a verdict row's own file says, read again with every check (L66 M1); a row whose file fails is a refusal, never a throw. */

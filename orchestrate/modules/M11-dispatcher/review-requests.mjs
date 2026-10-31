@@ -5,8 +5,15 @@
 // What runs, and the runner's alerts for Joe, come back in the runner's status file; a status that is missing or
 // older than 3 minutes is an error, never "no reviewer" (L63).
 //
-//   reviewPorts({ requests, status, reviewUid, now, newId }) → { requestReview, hasReviewer, reviewAlerts }
+//   reviewPorts({ requests, status, reviewUid, now, newId, mainHead }) → { requestReview, hasReviewer, reviewAlerts }
+//   statusAlerts(status, mainHead)                            → the Dispatcher's own alerts from the status (L66)
 //   relayReviewAlerts({ rec, alerts, alert, now })            → tells Joe each runner alert once (a fact per alert)
+//
+// Besides the runner's own alerts, the Dispatcher tells Joe two things it reads in the status (L66), each once:
+//   - a pass that failed (`ok: false`), once per cause (its error text);
+//   - an installed copy whose commit stamp is not main's (or has no stamp), once per installed commit: reviews then run
+//     old code until the copy is updated. `mainHead()` is the wiring's port (main's commit, 40 hex); without it, or when
+//     it fails, there is no stamp check.
 //
 // Writing a file is all this does: no process is started here (only-send-safe.test.mjs).
 
@@ -41,14 +48,37 @@ export function writeReviewRequest({ dir, card, head, role, newId = randomUUID }
   return { ok: true, requestId: id };
 }
 
+const sha = (s) => createHash('sha256').update(String(s)).digest('hex').slice(0, 24);
+
+/**
+ * The Dispatcher's own alerts from a status (readReviewStatus's answer), in the runner's alert shape. `at` is fixed, so
+ * each is told once per id (REVIEW_ALERT_FACT keys on id and at).
+ */
+export function statusAlerts(s, mainHead) {
+  const out = [];
+  if (s?.ok === false) {
+    const why = typeof s.error === 'string' && s.error ? s.error.slice(0, 300) : 'no reason given';
+    out.push({ id: `runner-failed-${sha(why)}`, at: 'once', text: `Its last pass failed: ${why}.` });
+  }
+  let main = null;
+  try { main = mainHead ? mainHead() : null; } catch { main = null; }
+  if (typeof main === 'string' && HEX40.test(main) && s?.installed_commit !== main) {
+    const at = s?.installed_commit ?? null;
+    out.push({ id: `stamp-${at ?? 'none'}`, at: 'once', text: at
+      ? `Its installed copy is at ${at.slice(0, 7)}, but main is at ${main.slice(0, 7)}: reviews run the old code until the copy is updated.`
+      : 'Its installed copy has no commit stamp, so whether reviews run main\'s code can\'t be told.' });
+  }
+  return out;
+}
+
 /** The ports the time limits use. `status` is the runner's status.json; `reviewUid` the review user's uid. */
-export function reviewPorts({ requests, status, reviewUid, now = () => Date.now(), newId }) {
+export function reviewPorts({ requests, status, reviewUid, now = () => Date.now(), newId, mainHead }) {
   const read = () => readReviewStatus({ file: status, now: now(), uid: reviewUid });
   return {
     requestReview: ({ card, head, role }) => writeReviewRequest({ dir: requests, card, head, role, ...(newId ? { newId } : {}) }),
     // Throws when the status can't be trusted: an unclear answer is an error, never a no (L63).
     hasReviewer: (card, role, head) => read().running.some((r) => r.card === card && r.role === role && r.head === head),
-    reviewAlerts: () => read().alerts,
+    reviewAlerts: () => { const s = read(); return [...s.alerts, ...statusAlerts(s, mainHead)]; },
   };
 }
 
