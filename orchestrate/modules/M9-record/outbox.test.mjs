@@ -125,13 +125,15 @@ test('a file whose own content throws is refused and marked seen, not tried fore
   product(env);
   readyCard(env, 'C-1');
   runCard(env, 'C-1');
-  const tag = { role: 'reviewer', sessionId: 'R-1', card: 'C-1' };
-  const f = outboxFile(env, 'reviewer', 'R-1', 'verdict-odd.md', `${JSON.stringify({ entity: 'verdict', card: 'C-1', expectRev: { toString: 1 }, fields: { head: HEAD, pass: true } })}\n`);
-  const first = env.review.applyOutbox(tag, f);
+  // A card kind that can't be turned into text throws inside the writer's own checks (a verdict's expectRev used to;
+  // since L68 a verdict's revision is never read).
+  const tag = { role: 'lead', sessionId: 'L-1' };
+  const f = outboxFile(env, 'lead', 'L-1', 'roadmap-odd.md', `${JSON.stringify({ entity: 'card', id: 'C-9', expectRev: 0, fields: { module: 'M1', kind: { toString: 1 } } })}\n`);
+  const first = env.record.applyOutbox(tag, f);
   assert.equal(first.ok, false);
   assert.match(first.reason, /could not be applied/);
   assert.doesNotMatch(first.reason, /store error/);
-  assert.equal(env.review.applyOutbox(tag, f).skipped, true, 'marked seen: not tried again');
+  assert.equal(env.record.applyOutbox(tag, f).skipped, true, 'marked seen: not tried again');
 });
 
 test('a name too long for the disk never reaches the diary, so the store keeps taking writes (0b-2 audit round 6)', () => {

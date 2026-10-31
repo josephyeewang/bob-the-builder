@@ -28,7 +28,7 @@
 // gets `claudeBin`, `node` and `hooksDir` (checked above) to run and to render the settings with. Exit 0 when the pass ran clean, 1 when it refused or could not run.
 
 import { closeSync, constants, fstatSync, lstatSync, openSync, readFileSync, readdirSync, realpathSync } from 'node:fs';
-import { dirname, isAbsolute, join, relative } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { runnerPass, CARD_ID, isClaudeCommand } from './review-runner.mjs';
@@ -49,8 +49,29 @@ export function readConfig(file) {
   if (c.accountCopy !== undefined && (typeof c.accountCopy !== 'string' || !isAbsolute(c.accountCopy))) throw new Error('config: accountCopy must be an absolute path');
   for (const k of ['recordUid', 'ownerUid']) if (!Number.isInteger(c[k]) || c[k] < 0) throw new Error(`config: ${k} must be a uid`);
   if (!c.uids || typeof c.uids !== 'object') throw new Error('config: uids must map each role to a uid');
+  // The runner's folder and review's outbox are two walls (L68 (4)): review sessions write the outbox, and only the
+  // runner writes its launch and ended records. One inside the other (or the same folder) would let a session's
+  // folder stand where a runner's record is read. Compared on real paths, so a link can't hide it.
+  const r = realPath(c.root);
+  const o = realPath(c.outboxRoot);
+  if (inside(r, o) || inside(o, r)) throw new Error(`config: root (${c.root}) and outboxRoot (${c.outboxRoot}) must be two separate folders, neither inside the other`);
   return c;
 }
+
+/** A path's real path: its nearest folder that exists, with links resolved, and the rest of the path as given. */
+function realPath(p) {
+  let head = resolve(p);
+  const rest = [];
+  for (;;) {
+    try { return join(realpathSync(head), ...rest); } catch { /* not there yet */ }
+    const up = dirname(head);
+    if (up === head) return resolve(p);
+    rest.unshift(basename(head));
+    head = up;
+  }
+}
+/** Is `p` the folder `dir` or inside it? */
+const inside = (p, dir) => { const rel = relative(dir, p); return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel)); };
 
 /**
  * The installed copy: every folder and file under `installRoot` owned by `owner` (root) and written by no one else, no
@@ -131,9 +152,9 @@ export function readCardFile({ recordRoot, recordUid, card }) {
 
 /**
  * Whether the Record took a review session's verdict (item 20(a)): a verdict row of that session (docs/verdict/), for
- * that role, card and head, whose file in review's outbox still reads true (M9 `verdictFromFile`, the same read the
- * Merge Gate makes). → { ok: true } | { ok: false, reason }. A Record that can't be read throws, so the runner refuses
- * the request without counting a try against the review.
+ * that role, card and head, whose file in review's outbox still reads true (M9 `verdictFromFile`). → { ok: true } |
+ * { ok: false, reason }. A Record that can't be read throws. The runner only tells Joe what this says, and never starts
+ * a review again on it (L68): a worker can write the Record. The Merge Gate reads the verdict files itself.
  */
 export function recordVerdictTaken({ recordRoot, recordUid, outboxRoot, uids, role, sessionId, card, head }) {
   if (typeof sessionId !== 'string' || !SESSION_ID.test(sessionId)) return { ok: false, reason: 'the start names no session' };

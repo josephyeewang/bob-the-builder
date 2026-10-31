@@ -6,8 +6,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { chmodSync, existsSync, fstatSync, linkSync, lstatSync, mkdirSync, readFileSync, readdirSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { runnerPass, readReviewStatus, needsRole, rolesFor, RETRY_MS, INTAKE_WAIT_MS, MAX_FAILED_STARTS, STATUS_STALE_MS, MAX_REQUEST_BYTES, MAX_STARTS_PER_PASS, MAX_PENDING, CARD_ID, readRequest } from './review-runner.mjs';
-import { runnerLaunchFor, runnerLaunches, sessionVerdict } from '../../M9-record/outbox.mjs';
+import { runnerPass, readReviewStatus, needsRole, rolesFor, RETRY_MS, INTAKE_WAIT_MS, SWEEP_AFTER_MS, MAX_FAILED_STARTS, STATUS_STALE_MS, MAX_REQUEST_BYTES, MAX_STARTS_PER_PASS, MAX_PENDING, CARD_ID, readRequest } from './review-runner.mjs';
+import { headReviews, runnerEnded, runnerLaunchFor, runnerLaunches, sessionVerdict } from '../../M9-record/outbox.mjs';
 import { tempDir } from '../../../shared/test-tmp.mjs';
 
 const ME = process.getuid();
@@ -60,7 +60,9 @@ function world(over = {}) {
   };
   const status = () => JSON.parse(readFileSync(join(root, 'status.json'), 'utf8'));
   const end = (sid) => { const i = live.findIndex((x) => x.sessionId === sid); live.splice(i, 1); };
-  return { base, root, outboxRoot, clock, cards, heads, live, starts, stops, ctx, ask, status, end, requests };
+  // The runner's ended record of a session, as the Merge Gate reads it (M9 `runnerEnded`).
+  const ended = (sid, { role = 'reviewer', card = 'C-1', head = HEAD } = {}) => runnerEnded({ root: join(root, 'ended'), uids: UIDS, role, card, head, sessionId: sid });
+  return { base, root, outboxRoot, clock, cards, heads, live, starts, stops, ctx, ask, status, end, ended, requests };
 }
 // The first pass makes the folders; nothing is asked yet.
 async function ready(over) { const w = world(over); const r = await runnerPass(w.ctx); assert.equal(r.ok, true, r.error); return w; }
@@ -179,9 +181,9 @@ test('L66: a card id with .. is refused, in a request and in the shared definiti
   assert.match(readRequest(d, 'q.json').reason, /card id is not a plain id/);
 });
 
-test('L66: a verdict the intake would refuse counts as a failed start; Joe is told and a new review may start, 3 tries in all', async () => {
+test('L68 planted: a verdict that can\'t be counted holds the head: no new review starts on it, Joe is told, and the session is marked ended', async () => {
   const w = await ready();
-  // The real check (M9 sessionVerdict), on the real outbox: a verdict for another head is refused.
+  // The real check (M9 sessionVerdict, the Merge Gate's own read), on the real outbox: a verdict for another head can't be counted.
   w.ctx.handedIn = (x) => sessionVerdict({ outboxRoot: w.outboxRoot, uids: UIDS, ...x });
   const verdict = (sid, head) => writeFileSync(join(w.outboxRoot, 'reviewer', sid, `verdict-${sid}.md`), `${JSON.stringify({ entity: 'verdict', card: 'C-1', expectRev: 0, fields: { head, pass: true } })}\n`, { mode: 0o644 });
   w.ask();
@@ -189,38 +191,45 @@ test('L66: a verdict the intake would refuse counts as a failed start; Joe is to
   verdict('S-1', HEAD2);
   w.end('S-1');
   let r = await runnerPass(w.ctx);
-  assert.ok(r.alerts.some((a) => /reviewer for card C-1 at aaaaaaa handed in a verdict that is refused \(the verdict names head bbbbbbb, not aaaaaaa\)\. It counts as a failed start/.test(a.text)), r.alerts.map((a) => a.text).join(' | '));
+  assert.ok(r.alerts.some((a) => /reviewer for card C-1 at aaaaaaa handed in a verdict that can't be counted \(the verdict names head bbbbbbb, not aaaaaaa\)\. It counts as a failure, so this head can't pass; no new reviewer starts on it/.test(a.text)), r.alerts.map((a) => a.text).join(' | '));
+  assert.equal(w.ended('S-1').ok, true, 'marked ended');
+  assert.equal(w.ended('S-1').ended.handed_in, null);
+  // The Merge Gate's read: the session's verdict can't be counted, so it counts as a failure there.
+  const hr = headReviews({ launches: join(w.root, 'launches'), outboxRoot: w.outboxRoot, uids: UIDS, card: 'C-1', head: HEAD });
+  assert.deepEqual(hr.sessions.map((x) => [x.session_id, Boolean(x.problem)]), [['S-1', true]]);
+  // No new review on that head, however long it waits, and nothing more is told.
   w.clock.t += RETRY_MS;
   w.ask();
   r = await runnerPass(w.ctx);
-  assert.deepEqual(r.started.map((s) => s.session_id), ['S-2'], 'the next request starts a new review');
-  // Two verdict files count as none; a good one counts, and no further start is made for that head.
-  verdict('S-2', HEAD);
+  refusedFor(r, /already started for card C-1 at aaaaaaa; one start per head/);
+  assert.equal(r.alerts.length, 0);
+  assert.equal(w.starts.length, 1);
+  // A new head is a new review. Two verdict files there can't be counted either, and hold that head too.
+  w.cards.set('C-1', { state: 'in_review', head: HEAD2, tier: 2 });
+  w.heads.set('C-1', HEAD2);
+  w.ask({ head: HEAD2 });
+  assert.deepEqual((await runnerPass(w.ctx)).started.map((x) => x.session_id), ['S-2']);
+  verdict('S-2', HEAD2);
   writeFileSync(join(w.outboxRoot, 'reviewer', 'S-2', 'verdict-again.md'), readFileSync(join(w.outboxRoot, 'reviewer', 'S-2', 'verdict-S-2.md')));
   w.end('S-2');
   r = await runnerPass(w.ctx);
-  assert.ok(r.alerts.some((a) => /more than one verdict file was left/.test(a.text)));
+  assert.ok(r.alerts.some((a) => /more than one verdict file was left, so none counts\)\. It counts as a failure/.test(a.text)), r.alerts.map((a) => a.text).join(' | '));
   w.clock.t += RETRY_MS;
-  w.ask();
-  r = await runnerPass(w.ctx);
-  assert.deepEqual(r.started.map((s) => s.session_id), ['S-3']);
-  verdict('S-3', HEAD);
-  w.end('S-3');
-  r = await runnerPass(w.ctx);
-  assert.equal(r.alerts.length, 0, 'a good verdict tells nothing');
-  w.clock.t += RETRY_MS;
-  w.ask();
-  refusedFor(await runnerPass(w.ctx), /already started for card C-1 at aaaaaaa; one start per head/);
-  // The ports' answers by name: none handed in, or a refusal, are both failed tries; three of them end it.
+  w.ask({ head: HEAD2 });
+  refusedFor(await runnerPass(w.ctx), /already started for card C-1 at bbbbbbb; one start per head/);
+  assert.equal(w.starts.length, 2);
+  // A verdict that can't even be read holds as well: it is never a failed start.
+  const x = await ready({ handedIn: () => { throw new Error('the outbox could not be listed'); } });
+  x.ask(); await runnerPass(x.ctx); x.end('S-1');
+  r = await runnerPass(x.ctx);
+  assert.ok(r.alerts.some((a) => /can't be counted \(its verdict could not be read \(the outbox could not be listed\)\)/.test(a.text)));
+  x.clock.t += RETRY_MS; x.ask();
+  refusedFor(await runnerPass(x.ctx), /one start per head/);
+  assert.equal(x.starts.length, 1);
+  // The port's answers by name.
   assert.equal(sessionVerdict({ outboxRoot: w.outboxRoot, uids: UIDS, role: 'reviewer', sessionId: 'S-1', card: 'C-9', head: HEAD2 }).reason, 'the verdict names card C-1, not C-9');
   mkdirSync(join(w.outboxRoot, 'reviewer', 'S-9'));
   assert.deepEqual(sessionVerdict({ outboxRoot: w.outboxRoot, uids: UIDS, role: 'reviewer', sessionId: 'S-9', card: 'C-1', head: HEAD }), { ok: false, none: true, reason: 'no verdict was handed in' });
-  const x = await ready({ handedIn: () => ({ ok: false, reason: 'a verdict says pass: true or false' }) });
-  for (let i = 1; i <= MAX_FAILED_STARTS; i++) { x.ask(); await runnerPass(x.ctx); x.end(`S-${i}`); await runnerPass(x.ctx); x.clock.t += RETRY_MS; }
-  x.ask();
-  r = await runnerPass(x.ctx);
-  refusedFor(r, /3 starts of a reviewer for card C-1 at aaaaaaa failed; Joe is told/);
-  assert.ok(x.status().alerts.some((a) => /No reviewer could be started for card C-1 at aaaaaaa after 3 tries \(last: its verdict was refused: a verdict says pass/.test(a.text)));
 });
 
 test('L66 pid contract: a start counts only when its pid is claude\'s, and nothing but claude is ever stopped', async () => {
@@ -271,72 +280,106 @@ test('L66: the launch record\'s owner check, through a stat port: a record anoth
   assert.match(all.refused[0].reason, /not owned by the review user/);
 });
 
-test('item 20(a) planted: the card changes while the reviewer works, so the verdict is refused; that is a failed start and Joe is told', async () => {
+test('L68 planted: the card\'s revision moves between a verdict and its intake: nothing starts again, and Joe is told once the Record has had its time', async () => {
   const w = await ready();
   let rev = 4;
   w.ctx.readCard = (c) => (w.cards.has(c) ? { ok: true, doc: w.cards.get(c), rev } : { ok: false });
   w.ctx.handedIn = (x) => sessionVerdict({ outboxRoot: w.outboxRoot, uids: UIDS, ...x });
   let taken = { ok: false, reason: 'the Record holds no verdict of session S-1' };
   w.ctx.verdictTaken = () => taken;
-  const verdict = (sid, expectRev) => writeFileSync(join(w.outboxRoot, 'reviewer', sid, `verdict-${sid}.md`), `${JSON.stringify({ entity: 'verdict', card: 'C-1', expectRev, fields: { head: HEAD, pass: true } })}\n`, { mode: 0o644 });
   w.ask();
   await runnerPass(w.ctx);
-  // The reviewer read the card at revision 4; the card moves on to 5 while it works.
-  verdict('S-1', 4);
+  // The reviewer read the card at revision 4; the card moves on to 5 while it works. The verdict still counts (L68 (3)).
+  writeFileSync(join(w.outboxRoot, 'reviewer', 'S-1', 'verdict-S-1.md'), `${JSON.stringify({ entity: 'verdict', card: 'C-1', expectRev: 4, fields: { head: HEAD, pass: true } })}\n`, { mode: 0o644 });
   rev = 5;
   w.end('S-1');
   let r = await runnerPass(w.ctx);
-  assert.ok(r.alerts.some((a) => /handed in a verdict that is refused \(the card changed while it worked \(its revision is now 5; the verdict was written for 4\)\)\. It counts as a failed start/.test(a.text)), r.alerts.map((a) => a.text).join(' | '));
-  w.clock.t += RETRY_MS;
-  w.ask();
-  r = await runnerPass(w.ctx);
-  assert.deepEqual(r.started.map((s) => s.session_id), ['S-2'], 'a new review starts, so the card is not left waiting');
-  // A verdict the Record has already taken stands, even if the card moved on after.
-  verdict('S-2', 5);
-  rev = 6;
-  taken = { ok: true };
-  w.end('S-2');
-  r = await runnerPass(w.ctx);
   assert.equal(r.alerts.length, 0, r.alerts.map((a) => a.text).join(' | '));
+  assert.equal(w.ended('S-1').ended.handed_in, true);
+  // Within the wait, nothing is told; after it, the Record not having taken it is told once. Nothing starts again.
+  w.ask();
+  r = await runnerPass(w.ctx);
+  refusedFor(r, /already started for card C-1 at aaaaaaa; one start per head/);
+  assert.equal(r.alerts.length, 0);
+  w.clock.t += INTAKE_WAIT_MS;
+  w.ask();
+  r = await runnerPass(w.ctx);
+  refusedFor(r, /one start per head/);
+  assert.ok(r.alerts.some((a) => /reviewer for card C-1 at aaaaaaa handed in a verdict the Record has not taken \(the Record holds no verdict of session S-1\)\. Nothing starts again/.test(a.text)), r.alerts.map((a) => a.text).join(' | '));
   w.clock.t += RETRY_MS;
   w.ask();
-  refusedFor(await runnerPass(w.ctx), /already started for card C-1 at aaaaaaa; one start per head/);
+  r = await runnerPass(w.ctx);
+  refusedFor(r, /one start per head/);
+  assert.equal(r.alerts.length, 0, 'told once');
+  // A Record that can't be read is told the same way, and starts nothing either.
+  w.ctx.verdictTaken = () => { throw new Error('the Record is not its owner\'s alone'); };
+  for (let i = 0; i < MAX_FAILED_STARTS + 1; i++) { w.clock.t += INTAKE_WAIT_MS; w.ask(); refusedFor(await runnerPass(w.ctx), /one start per head/); }
+  assert.equal(w.starts.length, 1);
+  // The control: a Record that took the verdict tells nothing.
+  const x = await ready({ handedIn: () => ({ ok: true, verdict: {} }), verdictTaken: () => ({ ok: true }) });
+  x.ask(); await runnerPass(x.ctx); x.end('S-1'); await runnerPass(x.ctx);
+  x.clock.t += INTAKE_WAIT_MS; x.ask();
+  r = await runnerPass(x.ctx);
+  refusedFor(r, /one start per head/);
+  assert.equal(r.alerts.length, 0);
 });
 
-test('item 20(a) planted: a verdict the Record never takes is a failed start once the Record has had its time; Joe is told, 3 tries in all', async () => {
+test('L68: every session the runner launched is marked ended: when it ends, or by the sweep once it is lost track of', async () => {
+  // Ended with no verdict: marked, handed_in false, and its head may be tried again (the record gives it no say).
   const w = await ready();
-  w.ctx.handedIn = () => ({ ok: true, verdict: { expect_rev: null } });
-  let taken = { ok: false, reason: 'session S-1 has already given its verdict; a second is refused' };
-  w.ctx.verdictTaken = () => taken;
-  w.ask();
-  await runnerPass(w.ctx);
+  w.ask(); await runnerPass(w.ctx);
+  assert.equal(w.ended('S-1').none, true, 'not marked while it runs');
   w.end('S-1');
-  let r = await runnerPass(w.ctx);
-  assert.equal(r.alerts.length, 0, 'it looked handed in when it ended');
-  // Within the wait, the Record may not have read it yet: the request is refused, and nothing is counted.
-  w.ask();
-  refusedFor(await runnerPass(w.ctx), /ended less than 15 minutes ago, and the Record has not taken its verdict yet/);
-  // A Record that can't be read refuses the request and counts nothing either.
-  w.clock.t += INTAKE_WAIT_MS;
-  w.ctx.verdictTaken = () => { throw new Error('docs is not the Record owner\'s alone'); };
-  w.ask();
-  r = await runnerPass(w.ctx);
-  refusedFor(r, /whether the Record took the reviewer's verdict for card C-1 could not be read \(docs is not/);
-  assert.equal(r.started.length, 0);
-  w.ctx.verdictTaken = () => taken;
-  w.ask();
-  r = await runnerPass(w.ctx);
-  assert.ok(r.alerts.some((a) => /reviewer for card C-1 at aaaaaaa handed in a verdict the Record never took \(session S-1 has already given its verdict; a second is refused\)\. It counts as a failed start/.test(a.text)), r.alerts.map((a) => a.text).join(' | '));
-  assert.deepEqual(r.started.map((s) => s.session_id), ['S-2'], 'and a new review starts at once');
-  // Two more, and Joe is told no reviewer could be started.
-  taken = { ok: false, reason: 'the Record holds no verdict of session S-2' };
-  for (const sid of ['S-2', 'S-3']) { w.end(sid); await runnerPass(w.ctx); w.clock.t += INTAKE_WAIT_MS; w.ask(); await runnerPass(w.ctx); }
-  w.clock.t += INTAKE_WAIT_MS;
-  w.ask();
-  r = await runnerPass(w.ctx);
-  refusedFor(r, /3 starts of a reviewer for card C-1 at aaaaaaa failed; Joe is told/);
-  assert.ok(w.status().alerts.some((a) => /after 3 tries \(last: the Record never took its verdict: the Record holds no verdict of session S-2\)/.test(a.text)), w.status().alerts.map((a) => a.text).join(' | '));
-  assert.equal(w.starts.length, 3);
+  await runnerPass(w.ctx);
+  assert.equal(w.ended('S-1').ended.handed_in, false);
+  assert.equal(w.ended('S-1').ended.how, 'ended');
+  assert.equal(lstatSync(join(w.root, 'ended')).mode & 0o7777, 0o755);
+  assert.equal(lstatSync(join(w.root, 'ended', 'S-1.json')).mode & 0o777, 0o644);
+  const hr = headReviews({ launches: join(w.root, 'launches'), outboxRoot: w.outboxRoot, uids: UIDS, card: 'C-1', head: HEAD });
+  assert.deepEqual(hr.sessions.map((x) => [x.session_id, x.verdict, x.ended]), [['S-1', null, true]]);
+  // Never written over, by the sweep or anything else.
+  w.clock.t += SWEEP_AFTER_MS;
+  await runnerPass(w.ctx);
+  assert.equal(w.ended('S-1').ended.how, 'ended');
+
+  // A start whose pid isn't claude's leaves its launch record (the session may have started): the sweep marks it ended
+  // once its launch is 5 minutes old, on a pass where no live claude of review's is a stray.
+  const v = await ready({ start: async (x) => { v.starts.push(x); v.live.push({ pid: 7000, sessionId: x.sessionId }); return { ok: true, pid: 4242 }; } });
+  v.ctx.processName = (p) => (p === 7000 ? `${CLAUDE} --session-id S-1` : null);
+  v.ask();
+  refusedFor(await runnerPass(v.ctx), /the start gave process 4242, which is not claude/);
+  assert.equal(v.ended('S-1').none, true);
+  v.clock.t += SWEEP_AFTER_MS;
+  // The claude it did start is a stray: stopped, and nothing is swept on that pass.
+  let r = await runnerPass(v.ctx);
+  assert.deepEqual(v.stops.map((x) => x.pid), [7000]);
+  assert.equal(v.ended('S-1').none, true, 'not swept while a stray claude was live');
+  r = await runnerPass(v.ctx);
+  assert.equal(v.ended('S-1').ended.how, 'swept');
+  assert.ok(r.alerts.some((a) => /reviewer session S-1 for card C-1 at aaaaaaa was not being tracked by the review runner; it is now marked ended/.test(a.text)), r.alerts.map((a) => a.text).join(' | '));
+  assert.equal((await runnerPass(v.ctx)).alerts.length, 0, 'told once');
+
+  // A stray that can't be stopped holds the sweep back; a young launch isn't swept; a running one never is.
+  const u = await ready({ start: async () => ({ ok: true, pid: 4242 }) });
+  u.ask(); await runnerPass(u.ctx);
+  await runnerPass(u.ctx);
+  assert.equal(u.ended('S-1').none, true, 'under 5 minutes old');
+  u.clock.t += SWEEP_AFTER_MS;
+  u.live.push({ pid: 5000, sessionId: 'S-1' });
+  u.ctx.processName = (p) => (p === 5000 ? `${CLAUDE} --session-id S-1` : null);
+  u.ctx.stop = async () => { throw new Error('no such process'); };
+  await runnerPass(u.ctx);
+  await runnerPass(u.ctx);
+  assert.equal(u.ended('S-1').none, true, 'not swept while a claude it could not stop is live');
+  const t = await ready();
+  t.ask(); await runnerPass(t.ctx);
+  t.clock.t += 10 * SWEEP_AFTER_MS;
+  await runnerPass(t.ctx);
+  assert.equal(t.ended('S-1').none, true, 'a session it runs is never swept');
+
+  // An ended folder that is not review's alone stops the pass.
+  chmodSync(join(t.root, 'ended'), 0o775);
+  assert.match((await runnerPass(t.ctx)).error, /the ended records: the review launches folder can be written by others/);
 });
 
 test('L65: a duplicate is refused: the same request id, or a second start while one runs, or after one has run', async () => {

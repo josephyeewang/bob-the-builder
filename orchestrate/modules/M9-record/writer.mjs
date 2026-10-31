@@ -21,7 +21,7 @@ import { canonicalJson } from '../../shared/plan-fingerprint.mjs';
 import { CREATE_STATES, INTERNAL_MOVES, moveActors } from './moves.mjs';
 import { PLAN_INPUTS, actorName, fieldsAllowed, mayCreateKind } from './permissions.mjs';
 import { readyCheck } from './ready.mjs';
-import { readOutboxFile, runnerLaunchFor, verdictFields, verdictFromFile } from './outbox.mjs';
+import { headReviews, readOutboxFile, runnerLaunchFor, verdictFields, worstVerdict } from './outbox.mjs';
 import { processDead, realProbe } from './lock.mjs';
 import { openStore } from './store.mjs';
 
@@ -308,22 +308,19 @@ export function openRecord({ root, product, ownerUid, rules, alert = () => {}, n
     return { ok: true };
   }
 
-  // in_review → verified (R2-M7): a passing verdict for this head, from a reviewer or auditor launched on this card for this head (round 5 m-4),
-  // read from the review user's own outbox (L44). What counts is the verdict file itself, read again with every check
-  // (L66 M1): the row only says which file. The launch is the review runner's own record, read again here (L65); the
-  // Record's `launch` entries are the Dispatcher's and never count.
+  // in_review → verified (R2-M7): the review of this head passed, judged as the Merge Gate judges it (L68): every
+  // reviewer the review runner launched on this card at this head has its say, read from the runner's own records and
+  // each session's verdict file in review's outbox (L44, L65, L66 M1), never from the Record's rows. One reviewer must
+  // have passed, none failed and none be unsettled. An auditor that failed (or whose verdict can't be counted) holds it
+  // back too; one still running does not (the Merge Gate waits for it on a Tier-1 change).
   function verdictFor(tx, cardId, doc) {
     if (typeof doc.head !== 'string' || !HEX40.test(doc.head)) return no('the card has no head to verify');
-    const ok = tx.list('verdict').find((v) => {
-      if (v.doc?.card !== cardId || v.doc?.head !== doc.head) return false;
-      const r = verdictFromFile({ outboxRoot: outbox.root, uids: outbox.uids, row: v });
-      if (!r.ok) return false;
-      const f = r.verdict;
-      if (f.card !== cardId || f.head !== doc.head || f.pass !== true || v.createdBy !== f.created_by) return false;
-      // The launch record must be the configured review user's, the same one that owns the verdict file.
-      return runnerLaunchFor({ root: outbox.launches, uids: outbox.uids, role: f.role, card: cardId, head: doc.head, sessionId: f.session_id }).ok;
-    });
-    return ok ? { ok: true } : no(`no passing verdict for head ${doc.head.slice(0, 7)} from a reviewer the review runner launched on this card`);
+    const hr = headReviews({ launches: outbox.launches, outboxRoot: outbox.root, uids: outbox.uids, card: cardId, head: doc.head });
+    if (!hr.ok) return no(`the review of head ${doc.head.slice(0, 7)} could not be read: ${hr.reason}`);
+    const auditorsDone = hr.sessions.filter((s) => s.role !== 'auditor' || s.verdict || s.problem);
+    const p = worstVerdict(hr.sessions, 'reviewer', (v) => v.pass === true)
+      ?? worstVerdict(auditorsDone, 'auditor', (v) => v.pass === true && (v.material ?? 0) === 0, { needPass: false });
+    return p ? no(`${p} for head ${doc.head.slice(0, 7)}`) : { ok: true };
   }
 
   function checkAsk(old, doc, from, to, moving, changed) {
@@ -452,7 +449,8 @@ export function openRecord({ root, product, ownerUid, rules, alert = () => {}, n
       if (typeof tag.card !== 'string' || h.card !== tag.card) return no('a verdict names only the session\'s own card');
       const c = tx.current('card', tag.card);
       if (!c || c.tampered) return no(c?.reason ?? `no card ${tag.card}`);
-      if (c.rev !== h.expectRev) return no(`changed since read (rev ${c.rev}, expected ${h.expectRev})`);
+      // A verdict is matched on its card, its head and the session the runner launched (below), never on the card's
+      // revision (L68): the Dispatcher writes the card on every review request, so a long review would go stale.
       const vf = verdictFields(h);
       if (!vf.ok) return no(vf.reason);
       // L44, L65: only a session the review runner launched as this role, on this card, at this exact head, may give a

@@ -119,6 +119,18 @@ export function runnerLaunch(env, card, sid, role = 'reviewer', head = HEAD) {
   return p;
 }
 
+// The review runner's record that a session ended (L68): the launch record's fields plus ended_at, in `ended/` beside
+// the launch records.
+export function runnerEndedRecord(env, card, sid, role = 'reviewer', head = HEAD) {
+  const dir = join(env.base, 'ended');
+  mkdirSync(dir, { mode: 0o755, recursive: true });
+  chmodSync(dir, 0o755);
+  const p = join(dir, `${sid}.json`);
+  writeFileSync(p, JSON.stringify({ session_id: sid, role, card, head, launched_at: iso(env.clock.t), request_id: `q-${sid}`, ended_at: iso(env.clock.t), handed_in: false }), { mode: 0o644, flag: 'wx' });
+  chmodSync(p, 0o644);
+  return p;
+}
+
 // A passing verdict as the intake leaves it (L66 M1): the runner's launch record, the verdict file in the review outbox,
 // and the row naming that file. Put straight into the store, so a test can start with a card's review done. A move to
 // verified then goes through `env.review`, the view that knows the review user.

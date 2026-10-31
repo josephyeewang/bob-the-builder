@@ -3,7 +3,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, linkSync, mkdirSync, readFileSync, symlinkSync, unlinkSync, writeFileSync, lstatSync } from 'node:fs';
+import { chmodSync, linkSync, mkdirSync, readFileSync, realpathSync, symlinkSync, unlinkSync, writeFileSync, lstatSync } from 'node:fs';
 import { join } from 'node:path';
 import { installProblem, programsProblem, readCardFile, recordVerdictTaken, adminAnswer, sessionsFrom, realPorts, readConfig, readInstallStamp } from './review-runner-main.mjs';
 import { readOutboxFile } from '../../M9-record/outbox.mjs';
@@ -262,7 +262,8 @@ test('L66 pid contract: the real port reads a process\'s command, and the verdic
   // A session with no outbox folder has handed nothing in, and that is a failed try, never a throw.
   const h = p.handedIn({ role: 'reviewer', sessionId: 'S-1', card: 'C-1', head: 'a'.repeat(40) });
   assert.equal(h.ok, false);
-  assert.match(h.reason, /could not be listed/);
+  assert.equal(h.none, true);
+  assert.match(h.reason, /no verdict was handed in \(no outbox folder\)/);
 });
 
 test('L65: the config names every path as a full path', () => {
@@ -277,6 +278,23 @@ test('L65: the config names every path as a full path', () => {
   assert.throws(() => readConfig(join(d, 'c.json')), /hooksDir must be an absolute path/);
   writeFileSync(join(d, 'c.json'), JSON.stringify({ ...good, recordUid: '5' }));
   assert.throws(() => readConfig(join(d, 'c.json')), /recordUid must be a uid/);
+});
+
+test('L68 planted: the runner\'s folder and review\'s outbox are two walls: one inside the other, or the same, is refused', () => {
+  const d = realpathSync(tempDir('m4-cfg-'));
+  const good = { installRoot: '/i', root: join(d, 'review'), outboxRoot: join(d, 'outbox'), reviewHome: '/h', uids: {}, recordRoot: '/x', recordUid: 5, mirror: '/m', claudeBin: '/c', hooksDir: '/i/hooks', ownerHome: '/w', ownerUid: 5, wiring: '/i/w.mjs' };
+  const cfg = (over) => { writeFileSync(join(d, 'c.json'), JSON.stringify({ ...good, ...over })); return () => readConfig(join(d, 'c.json')); };
+  assert.equal(cfg({})().root, join(d, 'review'), 'two folders side by side');
+  assert.equal(cfg({ outboxRoot: join(d, 'review-outbox') })().outboxRoot, join(d, 'review-outbox'), 'a name that only starts the same is not inside');
+  const walls = /root .* and outboxRoot .* must be two separate folders, neither inside the other/;
+  assert.throws(cfg({ outboxRoot: join(d, 'review', 'outbox') }), walls, 'the outbox inside the runner\'s folder');
+  assert.throws(cfg({ root: join(d, 'outbox', 'review') }), walls, 'the runner\'s folder inside the outbox');
+  assert.throws(cfg({ outboxRoot: join(d, 'review') }), walls, 'the same folder');
+  assert.throws(cfg({ outboxRoot: `${join(d, 'review')}/./x/..` }), walls, 'the same folder, spelled another way');
+  // A link that names the outbox's place inside the runner's folder is seen through.
+  mkdirSync(join(d, 'review'));
+  symlinkSync(join(d, 'review'), join(d, 'alias'));
+  assert.throws(cfg({ outboxRoot: join(d, 'alias', 'outbox') }), walls, 'through a link');
 });
 
 test('L65: the two LaunchDaemons run the installed copy and its own node, the runner as review', () => {

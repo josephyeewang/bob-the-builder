@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import { chmodSync, linkSync, readFileSync, realpathSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
-import { setup, product, readyCard, runCard, outboxFile, launch, runnerLaunch, HEAD, HEAD2, UID, put, must } from './fixtures.test-helper.mjs';
+import { setup, product, readyCard, runCard, outboxFile, launch, runnerLaunch, runnerEndedRecord, HEAD, HEAD2, UID, put, must } from './fixtures.test-helper.mjs';
 import { reviewUserProblem, runnerLaunchFor, runnerLaunches, verdictFromFile } from './outbox.mjs';
 
 const refused = (r, re) => { assert.equal(r.ok, false, 'expected a refusal'); assert.match(r.reason, re); };
@@ -30,7 +30,8 @@ test('L44 planted: a verdict file in a worker\'s outbox is refused at intake', (
   // Even through the review view, the worker's folder is the worker's: the tag is the folder, never the file's say.
   refused(env.review.applyOutbox({ role: 'reviewer', sessionId: 'S-1', card: 'C-1' }, f), /no outbox folder for reviewer S-1/);
   assert.equal(env.record.list('verdict').length, 0);
-  refused(put(env.review, 'dispatcher', 'card', 'C-1', { state: 'verified' }), /no passing verdict/);
+  // The launched reviewer has handed nothing in, so the head is not verified (L68: and it is unsettled until it ends).
+  refused(put(env.review, 'dispatcher', 'card', 'C-1', { state: 'verified' }), /reviewer session R-1 has handed in no verdict and has not ended/);
 });
 
 test('L44 planted: a verdict naming the wrong head is refused at intake', () => {
@@ -81,13 +82,14 @@ test('L44: the accepted verdict records the review user, and a verdict without o
   runnerLaunch(env, 'C-1', 'R-1');
   must(env.review.applyOutbox({ role: 'reviewer', sessionId: 'R-1', card: 'C-1' }, outboxFile(env, 'reviewer', 'R-1', 'verdict-1.md', hdr({ head: HEAD, pass: false }))), 'a fail');
   assert.equal(env.record.list('verdict')[0].doc.outbox_uid, UID);
-  // A pass put in past the outbox (no outbox_uid) doesn't verify.
+  // A pass put in past the outbox (no outbox_uid) doesn't verify: the Record's rows are never read (L68).
   env.store.transaction((tx) => tx.commit([{ entity: 'verdict', id: 'verdict-planted', doc: { session_id: 'R-1', role: 'reviewer', card: 'C-1', head: HEAD, pass: true } }], { actor: 'reviewer:R-1', kind: 'verdict' }));
-  refused(put(env.review, 'dispatcher', 'card', 'C-1', { state: 'verified' }), /no passing verdict/);
+  refused(put(env.review, 'dispatcher', 'card', 'C-1', { state: 'verified' }), /reviewer session R-1 did not pass/);
   refused(env.review.applyOutbox({ role: 'reviewer', sessionId: 'R-1', card: 'C-1' }, outboxFile(env, 'reviewer', 'R-1', 'verdict-2.md', hdr({ head: HEAD, pass: true }))), /already given its verdict/);
+  // L68: a second launch that passes on the same head never outruns the fail.
   runnerLaunch(env, 'C-1', 'R-2');
   must(env.review.applyOutbox({ role: 'reviewer', sessionId: 'R-2', card: 'C-1' }, outboxFile(env, 'reviewer', 'R-2', 'verdict-3.md', hdr({ head: HEAD, pass: true }))), 'the pass');
-  must(put(env.review, 'dispatcher', 'card', 'C-1', { state: 'verified' }), 'verified');
+  refused(put(env.review, 'dispatcher', 'card', 'C-1', { state: 'verified' }), /reviewer session R-1/);
 });
 
 // ---- Lead call L65: only the review runner's own launch record makes a verdict count ----
@@ -99,7 +101,7 @@ test('L65 planted: a verdict whose only launch is the Dispatcher\'s Record copy 
   assert.equal(env.record.list('verdict').length, 0);
   // A verdict put in past the intake, with a Record copy for its launch, still verifies nothing.
   env.store.transaction((tx) => tx.commit([{ entity: 'verdict', id: 'verdict-planted', doc: { session_id: 'R-1', role: 'reviewer', card: 'C-1', head: HEAD, pass: true, outbox_uid: UID } }], { actor: 'reviewer:R-1', kind: 'verdict' }));
-  refused(put(env.review, 'dispatcher', 'card', 'C-1', { state: 'verified' }), /no passing verdict/);
+  refused(put(env.review, 'dispatcher', 'card', 'C-1', { state: 'verified' }), /no reviewer session handed in a pass/);
 });
 
 test('L65: the verdict rule reads the runner\'s record again, so a record gone or changed after intake verifies nothing', () => {
@@ -109,9 +111,9 @@ test('L65: the verdict rule reads the runner\'s record again, so a record gone o
   assert.match(env.record.list('verdict')[0].doc.runner_launch, /^[0-9a-f]{64}$/);
   const text = readFileSync(p, 'utf8');
   unlinkSync(p);
-  refused(put(env.review, 'dispatcher', 'card', 'C-1', { state: 'verified' }), /no passing verdict .* review runner launched/);
+  refused(put(env.review, 'dispatcher', 'card', 'C-1', { state: 'verified' }), /no reviewer session handed in a pass/);
   writeFileSync(p, text.replace('"reviewer"', '"auditor"'), { mode: 0o644 });
-  refused(put(env.review, 'dispatcher', 'card', 'C-1', { state: 'verified' }), /no passing verdict/);
+  refused(put(env.review, 'dispatcher', 'card', 'C-1', { state: 'verified' }), /no reviewer session handed in a pass/);
   unlinkSync(p);
   writeFileSync(p, text, { mode: 0o644 });
   must(put(env.review, 'dispatcher', 'card', 'C-1', { state: 'verified' }), 'verified');
@@ -163,39 +165,44 @@ test('L65: a runner launch record is read only from a safe file in a safe folder
 // ---- Lead call L66 M1: what a verdict says is read from its file, never from the Record row ----
 
 test('L66 M1 planted: a verdict row flipped to pass while its file says fail verifies nothing; a changed or second file neither', () => {
-  const { env, hdr } = inReview();
   const sha = (p) => createHash('sha256').update(readFileSync(p)).digest('hex');
-  const ids = {};
-  const row = (sid) => { ids[sid] ??= env.record.list('verdict').find((v) => v.doc.session_id === sid).id; return env.record.read('verdict', ids[sid]); };
-  const edit = (sid, over) => { const r = row(sid); env.store.transaction((tx) => tx.commit([{ entity: 'verdict', id: r.id, doc: { ...r.doc, ...over } }], { actor: `reviewer:${sid}`, kind: 'verdict' })); };
-  const opts = { outboxRoot: env.outRoot, uids: env.reviewUids };
+  const rowsOf = (env) => {
+    const ids = {};
+    const row = (sid) => { ids[sid] ??= env.record.list('verdict').find((v) => v.doc.session_id === sid).id; return env.record.read('verdict', ids[sid]); };
+    const edit = (sid, over) => { const r = row(sid); env.store.transaction((tx) => tx.commit([{ entity: 'verdict', id: r.id, doc: { ...r.doc, ...over } }], { actor: `reviewer:${sid}`, kind: 'verdict' })); };
+    return { row, edit, opts: { outboxRoot: env.outRoot, uids: env.reviewUids } };
+  };
   // The reviewer said fail; the row (the workers' Mac user can write the Record) is edited to say pass.
-  runnerLaunch(env, 'C-1', 'R-1');
-  must(env.review.applyOutbox({ role: 'reviewer', sessionId: 'R-1', card: 'C-1' }, outboxFile(env, 'reviewer', 'R-1', 'verdict-1.md', hdr({ head: HEAD, pass: false }))), 'a fail');
-  edit('R-1', { pass: true, checklist: { correct: 'clean', well_built: 'clean', works_for_user: 'clean', holds_up: 'clean' } });
-  assert.equal(row('R-1').doc.pass, true, 'the row says pass');
-  assert.equal(verdictFromFile({ ...opts, row: row('R-1') }).verdict.pass, false, 'the file says fail');
-  refused(put(env.review, 'dispatcher', 'card', 'C-1', { state: 'verified' }), /no passing verdict/);
-  // A real pass, then its file changed after intake: the row's source_key no longer matches, so it counts nothing.
+  {
+    const { env, hdr } = inReview();
+    const { row, edit, opts } = rowsOf(env);
+    runnerLaunch(env, 'C-1', 'R-1');
+    must(env.review.applyOutbox({ role: 'reviewer', sessionId: 'R-1', card: 'C-1' }, outboxFile(env, 'reviewer', 'R-1', 'verdict-1.md', hdr({ head: HEAD, pass: false }))), 'a fail');
+    edit('R-1', { pass: true, checklist: { correct: 'clean', well_built: 'clean', works_for_user: 'clean', holds_up: 'clean' } });
+    assert.equal(row('R-1').doc.pass, true, 'the row says pass');
+    assert.equal(verdictFromFile({ ...opts, row: row('R-1') }).verdict.pass, false, 'the file says fail');
+    refused(put(env.review, 'dispatcher', 'card', 'C-1', { state: 'verified' }), /reviewer session R-1 did not pass/);
+  }
+  // A real pass. verdictFromFile (still the check of a row, for the runner's "taken" alert) refuses a row whose file
+  // changed, another file of the session, or a file in another session's folder. The verify rule reads no row (L68).
+  const { env, hdr } = inReview();
+  const { row, edit, opts } = rowsOf(env);
   runnerLaunch(env, 'C-1', 'R-2');
   const f2 = outboxFile(env, 'reviewer', 'R-2', 'verdict-2.md', hdr({ head: HEAD, pass: true }));
   must(env.review.applyOutbox({ role: 'reviewer', sessionId: 'R-2', card: 'C-1' }, f2), 'the pass');
   const good = readFileSync(f2, 'utf8');
   writeFileSync(f2, `${good} `);
   refused(verdictFromFile({ ...opts, row: row('R-2') }), /not the one handed in/);
-  refused(put(env.review, 'dispatcher', 'card', 'C-1', { state: 'verified' }), /no passing verdict/);
-  // The row pointed at another file of the session (the second, which the intake refused): more than one verdict file
-  // in a session counts none.
   writeFileSync(f2, good);
   const f3 = outboxFile(env, 'reviewer', 'R-2', 'verdict-3.md', hdr({ head: HEAD, pass: true }));
   refused(env.review.applyOutbox({ role: 'reviewer', sessionId: 'R-2', card: 'C-1' }, f3), /already given its verdict/);
   edit('R-2', { source_key: `${realpathSync(f3)}\0${sha(f3)}` });
   refused(verdictFromFile({ ...opts, row: row('R-2') }), /more than one verdict file/);
-  refused(put(env.review, 'dispatcher', 'card', 'C-1', { state: 'verified' }), /no passing verdict/);
-  // A row naming a file in another session's folder is read as that folder's: the tag must match where the file is.
+  // Two verdict files in one session: it can't be counted, and that counts as a failure (L68).
+  refused(put(env.review, 'dispatcher', 'card', 'C-1', { state: 'verified' }), /R-2's verdict can't be counted, so it counts as a failure: more than one verdict file/);
+  outboxFile(env, 'reviewer', 'R-1', 'note-1.md', 'another session\'s folder\n');
   edit('R-2', { source_key: `${realpathSync(f2)}\0${sha(f2)}`, session_id: 'R-1' });
   refused(verdictFromFile({ ...opts, row: row('R-2') }), /not directly inside the reviewer outbox of session R-1/);
-  // A missing file, then (control) the one true file back alone: it verifies.
   edit('R-2', { session_id: 'R-2' });
   unlinkSync(f3);
   const moved = `${f2}.gone`;
@@ -203,5 +210,49 @@ test('L66 M1 planted: a verdict row flipped to pass while its file says fail ver
   refused(verdictFromFile({ ...opts, row: row('R-2') }), /file not found/);
   writeFileSync(f2, good); unlinkSync(moved);
   assert.equal(verdictFromFile({ ...opts, row: row('R-2') }).ok, true);
+  // The control: the one true file back alone verifies, whatever the row says.
+  edit('R-2', { pass: false, source_key: 'nothing' });
   must(put(env.review, 'dispatcher', 'card', 'C-1', { state: 'verified' }), 'verified');
+});
+
+test('L68 planted: verified takes the worst verdict: a failing auditor, a launch record that fails its checks, or an ended record for another head holds it back', () => {
+  const verify = (env) => put(env.review, 'dispatcher', 'card', 'C-1', { state: 'verified' });
+  const passed = () => {
+    const w = inReview();
+    runnerLaunch(w.env, 'C-1', 'R-1');
+    must(w.env.review.applyOutbox({ role: 'reviewer', sessionId: 'R-1', card: 'C-1' }, outboxFile(w.env, 'reviewer', 'R-1', 'verdict-1.md', w.hdr({ head: HEAD, pass: true }))), 'the reviewer passes');
+    return w;
+  };
+  // An auditor that found Material holds it back, even with the reviewer's pass and a later clean auditor.
+  {
+    const { env, hdr } = passed();
+    runnerLaunch(env, 'C-1', 'A-1', 'auditor');
+    must(env.review.applyOutbox({ role: 'auditor', sessionId: 'A-1', card: 'C-1' }, outboxFile(env, 'auditor', 'A-1', 'verdict-a1.md', hdr({ head: HEAD, pass: true, material: 2 }))), 'an audit with Material');
+    runnerLaunch(env, 'C-1', 'A-2', 'auditor');
+    must(env.review.applyOutbox({ role: 'auditor', sessionId: 'A-2', card: 'C-1' }, outboxFile(env, 'auditor', 'A-2', 'verdict-a2.md', hdr({ head: HEAD, pass: true, material: 0 }))), 'a later clean audit');
+    refused(verify(env), /the auditor session A-1 did not pass for head aaaaaaa/);
+  }
+  // A launch record that fails its checks: no review can be counted, so nothing is verified. The control: gone, it verifies.
+  {
+    const { env } = passed();
+    const junk = join(env.launchRoot, 'R-7.json');
+    writeFileSync(junk, '{', { mode: 0o644 });
+    refused(verify(env), /1 launch record\(s\) fail their checks, so no review can be counted \(R-7\.json: the launch record is not JSON\)/);
+    unlinkSync(junk);
+    must(verify(env), 'verified');
+  }
+  // A launched reviewer with no verdict file whose ended record names another head is not ended: it can't be counted.
+  {
+    const { env } = passed();
+    runnerLaunch(env, 'C-1', 'R-2');
+    refused(verify(env), /reviewer session R-2 has handed in no verdict and has not ended/);
+    runnerEndedRecord(env, 'C-1', 'R-2', 'reviewer', HEAD2);
+    refused(verify(env), /R-2's verdict can't be counted, so it counts as a failure: the ended record of session R-2 is for another role, card or head/);
+  }
+  {
+    const { env } = passed();
+    runnerLaunch(env, 'C-1', 'R-2');
+    runnerEndedRecord(env, 'C-1', 'R-2');
+    must(verify(env), 'ended with no verdict: no say');
+  }
 });

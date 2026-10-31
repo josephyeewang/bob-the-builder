@@ -7,7 +7,7 @@ import { readFileSync, readdirSync, unlinkSync, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { setup, product, leadCard, runCard, outboxFile, put, must, plan, PRODUCT, fingerprintFor, fullTimeouts, runnerLaunch, launch } from '../M9-record/fixtures.test-helper.mjs';
+import { setup, product, leadCard, runCard, outboxFile, put, must, plan, PRODUCT, fingerprintFor, fullTimeouts, runnerLaunch, runnerEndedRecord, launch } from '../M9-record/fixtures.test-helper.mjs';
 import { fakeRules, allow, deny, makeRules } from '../../shared/rules.mjs';
 import { makeEngine } from '../M10-rules/engine.mjs';
 import { parsePolicy } from '../M10-rules/policy.mjs';
@@ -429,11 +429,11 @@ test('L65 planted: a verdict whose only launch is the Dispatcher\'s Record copy 
   await gatePass(w.ctx);
   const m = mergeOf(w);
   assert.notEqual(m.doc.state, 'merged');
-  assert.ok(m.doc.reasons.some((x) => x.startsWith('5:') && /launched reviewer/.test(x)), m.doc.reasons.join(' | '));
+  assert.ok(m.doc.reasons.some((x) => x.startsWith('5:') && /no reviewer session handed in a pass/.test(x)), m.doc.reasons.join(' | '));
   assert.equal(w.g.writes.filter(([k]) => k === 'put').length, 0);
-  // The gathered facts hold no launch from the Record.
+  // The gathered facts hold no session from the Record.
   const f = await gatherFacts(w.ctx, m);
-  assert.deepEqual(f.launches, []);
+  assert.deepEqual(f.reviews, []);
   void launch;
 });
 
@@ -451,8 +451,8 @@ test('L66 M1 planted: a verdict row that says pass while its outbox file says fa
   await gatePass(w.ctx);
   const m = mergeOf(w);
   assert.notEqual(m.doc.state, 'merged');
-  assert.ok(m.doc.reasons.some((x) => x.startsWith('5:') && /no passing reviewer verdict/.test(x)), m.doc.reasons.join(' | '));
-  // The file gone: refused, and refusal 5 says why the row did not count.
+  assert.ok(m.doc.reasons.some((x) => x.startsWith('5:') && /the reviewer session R-C-1 did not pass/.test(x)), m.doc.reasons.join(' | '));
+  // The file gone: refused, and refusal 5 says the session has handed nothing in (the row is never read, L68).
   const w2 = world();
   verifiedCard(w2);
   const v2 = w2.env.record.list('verdict')[0];
@@ -460,7 +460,7 @@ test('L66 M1 planted: a verdict row that says pass while its outbox file says fa
   await gatePass(w2.ctx);
   const m2 = mergeOf(w2);
   assert.notEqual(m2.doc.state, 'merged');
-  assert.ok(m2.doc.reasons.some((x) => x.startsWith('5:') && /not counted: the verdict file of session R-C-1 fails its checks: file not found/.test(x)), m2.doc.reasons.join(' | '));
+  assert.ok(m2.doc.reasons.some((x) => x.startsWith('5:') && /R-C-1 has handed in no verdict and has not ended/.test(x)), m2.doc.reasons.join(' | '));
 });
 
 test('L65: with no review launches folder set, the gate refuses (5) and says why, never reading the Record', async () => {
@@ -470,7 +470,7 @@ test('L65: with no review launches folder set, the gate refuses (5) and says why
   await gatePass(w.ctx);
   const m = mergeOf(w);
   assert.notEqual(m.doc.state, 'merged');
-  assert.ok(m.doc.reasons.some((x) => x.startsWith('5:') && /launch records could not be read: the gate has no review launches folder set/.test(x)), m.doc.reasons.join(' | '));
+  assert.ok(m.doc.reasons.some((x) => x.startsWith('5:') && /records could not be read: the gate has no review launches folder set/.test(x)), m.doc.reasons.join(' | '));
   // A folder that fails M9's check refuses the same way.
   const w2 = world();
   verifiedCard(w2);
@@ -478,4 +478,53 @@ test('L65: with no review launches folder set, the gate refuses (5) and says why
   await gatePass(w2.ctx);
   const m2 = mergeOf(w2);
   assert.ok(m2.doc.reasons.some((x) => x.startsWith('5:') && /shared with worker/.test(x)), m2.doc.reasons.join(' | '));
+});
+
+// ---- Lead call L68: the worst verdict, read from review's own stores ----
+
+// A second reviewer the runner launched on the same head, with its own verdict file (or none).
+function secondReviewer(w, head, sid, { pass, checklist = CLEAN } = {}) {
+  runnerLaunch(w.env, 'C-1', sid, 'reviewer', head);
+  if (pass === undefined) return null;
+  return outboxFile(w.env, 'reviewer', sid, `verdict-${sid}.md`, `${JSON.stringify({ entity: 'verdict', card: 'C-1', expectRev: 0, fields: { head, pass, checklist } })}\n`);
+}
+
+test('L68 planted: try 1 fails and try 2 passes on one head → refused (5), never merged', async () => {
+  const w = world();
+  const head = verifiedCard(w);
+  // Try 1 said fail (its file is in review's outbox); try 2 (R-C-1, taken by the Record) passed.
+  secondReviewer(w, head, 'R-try1', { pass: false });
+  await gatePass(w.ctx);
+  const m = mergeOf(w);
+  assert.notEqual(m.doc.state, 'merged');
+  assert.ok(m.doc.reasons.some((x) => x.startsWith('5:') && /the reviewer session R-try1 did not pass/.test(x)), m.doc.reasons.join(' | '));
+  assert.equal(w.g.writes.filter(([k]) => k === 'put').length, 0);
+});
+
+test('L68 planted: a failing verdict whose Record row is gone (or never taken) still refuses (5)', async () => {
+  const w = world();
+  const head = verifiedCard(w);
+  secondReviewer(w, head, 'R-gone', { pass: false });
+  assert.ok(!w.env.record.list('verdict').some((v) => v.doc.session_id === 'R-gone'), 'the Record holds no row for the failing verdict');
+  await gatePass(w.ctx);
+  const m = mergeOf(w);
+  assert.notEqual(m.doc.state, 'merged');
+  assert.ok(m.doc.reasons.some((x) => x.startsWith('5:') && /R-gone did not pass/.test(x)), m.doc.reasons.join(' | '));
+});
+
+test('L68 planted: a launched reviewer with no verdict file and not marked ended → refused; once the runner marks it ended, it has no say', async () => {
+  const w = world();
+  const head = verifiedCard(w);
+  secondReviewer(w, head, 'R-quiet');
+  await gatePass(w.ctx);
+  const m = mergeOf(w);
+  assert.notEqual(m.doc.state, 'merged');
+  assert.ok(m.doc.reasons.some((x) => x.startsWith('5:') && /R-quiet has handed in no verdict and has not ended/.test(x)), m.doc.reasons.join(' | '));
+  // The same session marked ended by the runner: the passing one alone decides.
+  const w2 = world();
+  const head2 = verifiedCard(w2);
+  secondReviewer(w2, head2, 'R-quiet');
+  runnerEndedRecord(w2.env, 'C-1', 'R-quiet', 'reviewer', head2);
+  await gatePass(w2.ctx);
+  assert.equal(mergeOf(w2).doc.state, 'merged', JSON.stringify(mergeOf(w2).doc.reasons));
 });

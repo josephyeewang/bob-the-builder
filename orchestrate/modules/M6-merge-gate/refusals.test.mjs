@@ -1,5 +1,6 @@
 // refusals.test.mjs — every refusal planted alone: a clean change merges, and each planted fault refuses it for exactly
-// that one reason (R-0b-87 to R-0b-90, R-0b-97; L44's planted verdicts).
+// that one reason (R-0b-87 to R-0b-90, R-0b-97; L44's planted verdicts; L68's worst verdict). Which sessions and files
+// count is M9 headReviews' job (outbox.test.mjs); here the gate judges what it was handed.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { judge, verdictProblem, NOT_BUILT_LINE, FIRST_LANE_LINE, DAILY_CARD_LINE } from './refusals.mjs';
@@ -8,6 +9,11 @@ const H0 = 'a'.repeat(40);
 const H1 = 'b'.repeat(40);
 const MAIN = 'c'.repeat(40);
 const CLEAN = { correct: 'clean', well_built: 'minor', works_for_user: 'cosmetic', holds_up: 'clean' };
+
+// One session the review runner launched at H0, as M9 headReviews hands it over (L68).
+function session(role, sid, verdict, { ended = null, problem = null } = {}) {
+  return { role, session_id: sid, verdict: verdict ? { card: 'C-1', head: H0, notes: null, checklist: null, material: null, ...verdict } : null, ended, problem };
+}
 
 function clean(over = {}) {
   const f = {
@@ -23,8 +29,7 @@ function clean(over = {}) {
     checksIgnored: [],
     compareStatus: 'ahead',
     carried: null,
-    verdicts: [{ doc: { card: 'C-1', head: H0, session_id: 'R-1', pass: true, checklist: CLEAN, material: 0, outbox_uid: 501 }, createdBy: 'reviewer:R-1' }],
-    launches: [{ doc: { card: 'C-1', role: 'reviewer', head: H0, session_id: 'R-1' } }],
+    reviews: [session('reviewer', 'R-1', { pass: true, checklist: CLEAN })],
     tier: 2,
     exactReverse: false,
     reversesGateMerge: false,
@@ -56,14 +61,15 @@ const PLANTED = [
   [3, 'not mergeable', (f) => { f.pr.mergeable_state = 'dirty'; }],
   [3, 'closed', (f) => { f.pr.state = 'closed'; }],
   [4, 'stacked', (f) => { f.pr.base.ref = 'feature-x'; }],
-  [5, 'no verdict', (f) => { f.verdicts = []; }],
-  [5, 'a material checklist line', (f) => { f.verdicts[0].doc.checklist = { ...CLEAN, holds_up: 'material' }; }],
-  [5, 'a checklist line missing', (f) => { f.verdicts[0].doc.checklist = { correct: 'clean', well_built: 'clean', works_for_user: 'clean' }; }],
-  [5, 'L44: a verdict handed in through a worker outbox', (f) => { f.verdicts[0].createdBy = 'worker:R-1'; }],
-  [5, 'L44: a verdict naming the wrong head', (f) => { f.verdicts[0].doc.head = H1; }],
-  [5, 'L44: a verdict from an unrecorded session', (f) => { f.verdicts[0].doc.session_id = 'R-9'; f.verdicts[0].createdBy = 'reviewer:R-9'; }],
-  [5, 'L44: a verdict with no outbox uid (not from a review outbox)', (f) => { delete f.verdicts[0].doc.outbox_uid; }],
-  [5, 'L44: the reviewer launched on another head', (f) => { f.launches[0].doc.head = H1; }],
+  [5, 'no verdict', (f) => { f.reviews = []; }],
+  [5, 'a material checklist line', (f) => { f.reviews[0].verdict.checklist = { ...CLEAN, holds_up: 'material' }; }],
+  [5, 'a checklist line missing', (f) => { f.reviews[0].verdict.checklist = { correct: 'clean', well_built: 'clean', works_for_user: 'clean' }; }],
+  [5, 'L68: try 1 failed and try 2 passed on one head', (f) => { f.reviews.unshift(session('reviewer', 'R-0', { pass: false, checklist: CLEAN })); }],
+  [5, 'L68: a later reviewer passed, an earlier one\'s checklist was material', (f) => { f.reviews.unshift(session('reviewer', 'R-0', { pass: true, checklist: { ...CLEAN, correct: 'material' } })); }],
+  [5, 'L68: a launched reviewer with no verdict file, not marked ended', (f) => { f.reviews.push(session('reviewer', 'R-2', null, { ended: false })); }],
+  [5, 'L68: a launched reviewer whose verdict file can\'t be counted', (f) => { f.reviews.push(session('reviewer', 'R-2', null, { problem: 'more than one verdict file was left, so none counts' })); }],
+  [5, 'L68: only a reviewer that ended with no verdict', (f) => { f.reviews = [session('reviewer', 'R-2', null, { ended: true })]; }],
+  [5, 'L68: a Tier-2 change with a failing auditor', (f) => { f.reviews.push(session('auditor', 'A-1', { pass: false, material: 2 })); }],
   [5, 'Tier 1 without an auditor verdict', (f) => { f.tier = 1; f.approve.needed = false; }],
   [5, 'a head that moved, review not carried', (f) => { f.pr.head.sha = H1; f.checks[0].head_sha = H1; f.carried = { review: false, audit: false, reasons: ['x'] }; }],
   [6, 'a check for another commit', (f) => { f.checks.push({ name: 'other', app_id: 2, head_sha: H1, status: 'completed', conclusion: 'success' }); }],
@@ -90,14 +96,33 @@ for (const [n, name, plant] of PLANTED) {
 }
 
 test('Tier 1 passes with a launched auditor at 0 Material and a proven live check', () => {
-  const f = clean((f) => {
-    f.tier = 1;
-    f.verdicts.push({ doc: { card: 'C-1', head: H0, session_id: 'A-1', pass: true, material: 0, outbox_uid: 501 }, createdBy: 'auditor:A-1' });
-    f.launches.push({ doc: { card: 'C-1', role: 'auditor', head: H0, session_id: 'A-1' } });
-  });
+  const f = clean((f) => { f.tier = 1; f.reviews.push(session('auditor', 'A-1', { pass: true, material: 0 })); });
   assert.equal(judge(f).decision, 'merge');
-  f.verdicts[1].doc.material = 1;
+  f.reviews[1].verdict.material = 1;
   assert.deepEqual(only(f), [5]);
+});
+
+test('L68 planted: an auditor with Material > 0 and a later auditor with 0 on one head → refused', () => {
+  const f = clean((f) => { f.tier = 1; f.reviews.push(session('auditor', 'A-1', { pass: false, material: 2 }), session('auditor', 'A-2', { pass: true, material: 0 })); });
+  assert.deepEqual(only(f), [5]);
+  assert.match(judge(f).refusals[0].reason, /Tier 1: the auditor session A-1 did not pass/);
+  // Without the failing one, the same head merges.
+  f.reviews.splice(1, 1);
+  assert.equal(judge(f).decision, 'merge');
+});
+
+test('L68 planted: try 1 fails and try 2 passes on one head → refused, and says which session failed', () => {
+  const f = clean((f) => { f.reviews.unshift(session('reviewer', 'R-0', { pass: false, checklist: CLEAN })); });
+  assert.match(verdictProblem(f), /the reviewer session R-0 did not pass/);
+});
+
+test('L68: a session that ended with no verdict has no say; one still unsettled blocks', () => {
+  const f = clean((f) => { f.reviews.push(session('reviewer', 'R-2', null, { ended: true })); });
+  assert.equal(judge(f).decision, 'merge');
+  f.reviews[1].ended = false;
+  assert.match(verdictProblem(f), /R-2 has handed in no verdict and has not ended/);
+  f.reviews[1].ended = null;
+  assert.match(verdictProblem(f), /R-2 has handed in no verdict and has not ended/);
 });
 
 test('a caught-up head whose review (and Tier-1 audit) carried over merges', () => {
@@ -129,7 +154,7 @@ const reverse = (f) => {
   f.card.doc.kind = 'exact_reverse';
   f.exactReverse = true;
   f.reversesGateMerge = true;
-  f.verdicts = [];
+  f.reviews = [];
   f.request = null;
   f.checks[0].conclusion = 'failure';
   f.approve = { needed: true, why: ['the card needs the owner'], stands: false };
@@ -181,7 +206,7 @@ test('odd input refuses, never throws', () => {
   assert.match(verdictProblem({ card: { id: 'C-1', doc: { head: 'nope' } } }), /no head/);
 });
 
-test('L65: launches that could not be read refuse 5 with the reason', () => {
-  const f = clean((x) => { x.launches = null; x.launchesProblem = 'the review launches folder is missing'; });
-  assert.match(verdictProblem(f), /launch records could not be read: the review launches folder is missing/);
+test('L65: review records that could not be read refuse 5 with the reason', () => {
+  const f = clean((x) => { x.reviews = null; x.reviewsProblem = 'the review launches folder is missing'; });
+  assert.match(verdictProblem(f), /records could not be read: the review launches folder is missing/);
 });
