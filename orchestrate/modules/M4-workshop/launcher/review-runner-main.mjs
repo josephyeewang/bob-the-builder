@@ -6,19 +6,23 @@
 // so code there could be changed to run as `review`. The wall is the LaunchDaemon itself (root's, in the system
 // folder), which names the installed copy; this file can't guard its own loading. What the run adds is a tripwire:
 // before a pass it checks that the installed folder, the config and the wiring are still root's and that no one else
-// can write them (`installProblem`), so a copy installed wrong, or made writable later, starts nothing.
+// can write them (`installProblem`), so a copy installed wrong, or made writable later, starts nothing. The same goes
+// for what a review session runs (L66 M2): the claude program, the node this runs on and the hooks folder the
+// reviewer's settings point at are inside the installed copy and root's alone (`programsProblem`), or no review starts.
 //
 // The config names every path; nothing here names a machine:
 //   { "installRoot": "/abs", "root": "/abs", "outboxRoot": "/abs", "reviewHome": "/abs",
 //     "uids": { "<role>": <uid>, ... },            every role of the design table (m-1); both review roles name review
 //     "recordRoot": "/abs", "recordUid": <uid>,     the Record, read only (its docs/card/<id>.json)
 //     "mirror": "/abs",                             the git mirror, read only (refs/heads/card/<card>)
-//     "claudeBin": "/abs",                          the pinned claude program (checked on each pin bump, m-8)
+//     "claudeBin": "/abs",                          the pinned claude program (checked on each pin bump, m-8), inside installRoot
+//     "hooksDir": "/abs",                           the hooks folder a reviewer's settings point at, inside installRoot
 //     "accountCopy": "/abs",                        root's copy of the account in use (review-account-copy.plist)
 //     "ownerHome": "/abs", "ownerUid": <uid>,       the fallback: the owner's own account file, read only
 //     "wiring": "/abs/wiring.mjs" }                 exports `start(x)` (review-runner.mjs `runnerPass`, `ctx.start`)
 // The wiring's start runs the launcher (launch.mjs, checks 1 to 13) for a reviewer or an auditor, with `--session-id`
-// set to the runner's id, and returns { ok, pid }. Exit 0 when the pass ran clean, 1 when it refused or could not run.
+// set to the runner's id, and returns { ok, pid }. It gets `claudeBin`, `node` and `hooksDir` (checked above) to run and
+// to render the settings with. Exit 0 when the pass ran clean, 1 when it refused or could not run.
 
 import { closeSync, constants, fstatSync, lstatSync, openSync, readFileSync, readdirSync, realpathSync } from 'node:fs';
 import { isAbsolute, join, relative } from 'node:path';
@@ -29,7 +33,7 @@ import { readAccountFile, ACCOUNT_FILE } from './accounts.mjs';
 import { REVIEW_USER } from './review-user.mjs';
 import { git } from '../git/safe-git.mjs';
 
-const ABS = ['installRoot', 'root', 'outboxRoot', 'reviewHome', 'recordRoot', 'mirror', 'claudeBin', 'ownerHome', 'wiring'];
+const ABS = ['installRoot', 'root', 'outboxRoot', 'reviewHome', 'recordRoot', 'mirror', 'claudeBin', 'hooksDir', 'ownerHome', 'wiring'];
 const MAX_CARD_BYTES = 1024 * 1024;
 const CHILD_MS = 10_000;
 
@@ -48,8 +52,13 @@ export function readConfig(file) {
  */
 export function installProblem(installRoot, files, { owner = 0, lstat = lstatSync, list = readdirSync } = {}) {
   for (const f of files) {
-    const rel = relative(installRoot, f);
-    if (rel.startsWith('..') || isAbsolute(rel)) return `${f} is not inside the installed copy ${installRoot}`;
+    const rel = typeof f === 'string' && isAbsolute(f) ? relative(installRoot, f) : '..';
+    if (rel === '' || rel.startsWith('..') || isAbsolute(rel)) return `${f} is not inside the installed copy ${installRoot}`;
+    // Each named file itself too, so a missing one is named rather than passed over by the walk below.
+    let st; try { st = lstat(f); } catch { return `${f} is missing`; }
+    if (st.isSymbolicLink()) return `${f} is a link`;
+    if (st.uid !== owner) return `${f} is not owned by root`;
+    if (st.mode & 0o022) return `${f} can be written by others than root`;
   }
   const walk = (p) => {
     let st; try { st = lstat(p); } catch { return `${p} is missing`; }
@@ -61,6 +70,14 @@ export function installProblem(installRoot, files, { owner = 0, lstat = lstatSyn
     return null;
   };
   return walk(installRoot);
+}
+
+/**
+ * What a review session runs (L66 M2), named one by one: the runner itself, its config, the wiring, the claude
+ * program, the node this runs on and the hooks folder. Each must be inside the installed copy and root's alone.
+ */
+export function programsProblem(c, { self, config, node = realpathSync(process.execPath), ...opts } = {}) {
+  return installProblem(c.installRoot, [self, config, c.wiring, c.claudeBin, node, c.hooksDir], opts);
 }
 
 /** A card from the Record, read only: docs/card/<id>.json, a plain file of the Record's owner that no one else writes. */
@@ -109,7 +126,7 @@ export function sessionsFrom(text, bin, self = process.pid) {
 const run = (bin, args) => spawnSync(bin, args, { encoding: 'utf8', timeout: CHILD_MS, stdio: ['ignore', 'pipe', 'pipe'] });
 
 /** The real ports (the wiring gives `start`). */
-export function realPorts(c, wiring) {
+export function realPorts(c, wiring, { node = realpathSync(process.execPath) } = {}) {
   const uid = c.uids.reviewer;
   return {
     root: c.root, outboxRoot: c.outboxRoot, uids: c.uids, reviewHome: c.reviewHome,
@@ -127,7 +144,7 @@ export function realPorts(c, wiring) {
       return sessionsFrom(r.stdout, c.claudeBin);
     },
     stop: ({ pid }) => { process.kill(pid, 'SIGTERM'); },
-    start: (x) => wiring.start(x),
+    start: (x) => wiring.start({ ...x, claudeBin: c.claudeBin, node, hooksDir: c.hooksDir }),
     accountInUse: () => {
       const copy = c.accountCopy ? readAccountFile({ file: c.accountCopy, uid: 0 }) : { ok: false };
       if (copy.ok) return copy.account;
@@ -146,7 +163,7 @@ export async function main(argv, { log = (s) => process.stderr.write(`${s}\n`) }
   let c;
   try { c = readConfig(argv[0]); } catch (e) { log(`review runner: ${e.message}`); return 1; }
   const self = realpathSync(fileURLToPath(import.meta.url));
-  const bad = installProblem(c.installRoot, [self, realpathSync(argv[0]), c.wiring]);
+  const bad = programsProblem(c, { self, config: realpathSync(argv[0]) });
   if (bad) { log(`review runner: refused, the installed copy is not root's alone: ${bad}`); return 1; }
   let wiring;
   try { wiring = await import(pathToFileURL(c.wiring).href); } catch (e) { log(`review runner: the wiring could not be loaded (${e.message})`); return 1; }

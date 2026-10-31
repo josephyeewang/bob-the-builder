@@ -3,7 +3,8 @@
 // a GitHub refusal and a stopped pass each end where they should; behind main catches up; the queue order.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, readdirSync, unlinkSync } from 'node:fs';
+import { readFileSync, readdirSync, unlinkSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setup, product, leadCard, runCard, outboxFile, put, must, plan, PRODUCT, fingerprintFor, fullTimeouts, runnerLaunch, launch } from '../M9-record/fixtures.test-helper.mjs';
@@ -43,8 +44,10 @@ function world({ values = {}, mergeAnswer } = {}) {
     [NO_PUSH_FACT, { green: true, at: new Date(env.clock.t).toISOString() }]]);
   const view = makeGitView({ gh: g.gh, owner: 'sample-org', repo: 'sample-app' });
   const alerts = [];
-  const ctx = { record: env.record, rules, product: PRODUCT, gh: g.gh, owner: 'sample-org', repo: 'sample-app', view, now: () => env.clock.t, alert: (a) => alerts.push(a), readFact: (id) => facts.get(id) ?? null,
-    reviewLaunches: { root: env.launchRoot, uids: env.reviewUids } };
+  // The gate's view of the Record knows the review user, as in production (its moves back to verified read the verdict
+  // file again, L66 M1); env.record is the same store.
+  const ctx = { record: env.review, rules, product: PRODUCT, gh: g.gh, owner: 'sample-org', repo: 'sample-app', view, now: () => env.clock.t, alert: (a) => alerts.push(a), readFact: (id) => facts.get(id) ?? null,
+    reviewLaunches: { root: env.launchRoot, uids: env.reviewUids, outbox: env.outRoot } };
   return { env, g, ctx, facts, alerts, root, values: vals };
 }
 
@@ -70,7 +73,7 @@ function verifiedCard(w, id = 'C-1', { pr = 7, files = { 'src/a.mjs': 'two' }, u
   runnerLaunch(env, id, sid, 'reviewer', head);
   const hdr = `${JSON.stringify({ entity: 'verdict', card: id, expectRev: env.record.read('card', id).rev, fields: { head, pass: true, checklist: CLEAN, material: 0 } })}\n`;
   must(env.review.applyOutbox({ role: 'reviewer', sessionId: sid, card: id }, outboxFile(env, 'reviewer', sid, `verdict-${id}.md`, hdr)), 'verdict');
-  must(put(env.record, 'dispatcher', 'card', id, { state: 'verified' }), 'verified');
+  must(put(env.review, 'dispatcher', 'card', id, { state: 'verified' }), 'verified');
   if (request) requestMerge(w, id, pr, head);
   return head;
 }
@@ -432,6 +435,32 @@ test('L65 planted: a verdict whose only launch is the Dispatcher\'s Record copy 
   const f = await gatherFacts(w.ctx, m);
   assert.deepEqual(f.launches, []);
   void launch;
+});
+
+test('L66 M1 planted: a verdict row that says pass while its outbox file says fail is refused (5)', async () => {
+  const w = world();
+  verifiedCard(w);
+  // As if the reviewer had said fail and the Record row (which the workers' Mac user can write) were edited to pass: the
+  // file now says fail, and the row names that file, so only the file's own word differs.
+  const v = w.env.record.list('verdict')[0];
+  const file = v.doc.source_key.slice(0, v.doc.source_key.lastIndexOf('\0'));
+  writeFileSync(file, readFileSync(file, 'utf8').replace('"pass":true', '"pass":false'));
+  const key = `${file}\0${createHash('sha256').update(readFileSync(file)).digest('hex')}`;
+  w.env.store.transaction((tx) => tx.commit([{ entity: 'verdict', id: v.id, doc: { ...v.doc, source_key: key } }], { actor: v.doc.role + ':' + v.doc.session_id, kind: 'verdict' }));
+  assert.equal(w.env.record.read('verdict', v.id).doc.pass, true, 'the row says pass');
+  await gatePass(w.ctx);
+  const m = mergeOf(w);
+  assert.notEqual(m.doc.state, 'merged');
+  assert.ok(m.doc.reasons.some((x) => x.startsWith('5:') && /no passing reviewer verdict/.test(x)), m.doc.reasons.join(' | '));
+  // The file gone: refused, and refusal 5 says why the row did not count.
+  const w2 = world();
+  verifiedCard(w2);
+  const v2 = w2.env.record.list('verdict')[0];
+  unlinkSync(v2.doc.source_key.slice(0, v2.doc.source_key.lastIndexOf('\0')));
+  await gatePass(w2.ctx);
+  const m2 = mergeOf(w2);
+  assert.notEqual(m2.doc.state, 'merged');
+  assert.ok(m2.doc.reasons.some((x) => x.startsWith('5:') && /not counted: the verdict file of session R-C-1 fails its checks: file not found/.test(x)), m2.doc.reasons.join(' | '));
 });
 
 test('L65: with no review launches folder set, the gate refuses (5) and says why, never reading the Record', async () => {

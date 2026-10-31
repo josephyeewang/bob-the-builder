@@ -3,10 +3,11 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, linkSync, readFileSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, linkSync, readFileSync, realpathSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import { setup, product, readyCard, runCard, outboxFile, launch, runnerLaunch, HEAD, HEAD2, UID, put, must } from './fixtures.test-helper.mjs';
-import { reviewUserProblem, runnerLaunchFor, runnerLaunches } from './outbox.mjs';
+import { reviewUserProblem, runnerLaunchFor, runnerLaunches, verdictFromFile } from './outbox.mjs';
 
 const refused = (r, re) => { assert.equal(r.ok, false, 'expected a refusal'); assert.match(r.reason, re); };
 
@@ -29,7 +30,7 @@ test('L44 planted: a verdict file in a worker\'s outbox is refused at intake', (
   // Even through the review view, the worker's folder is the worker's: the tag is the folder, never the file's say.
   refused(env.review.applyOutbox({ role: 'reviewer', sessionId: 'S-1', card: 'C-1' }, f), /no outbox folder for reviewer S-1/);
   assert.equal(env.record.list('verdict').length, 0);
-  refused(put(env.record, 'dispatcher', 'card', 'C-1', { state: 'verified' }), /no passing verdict/);
+  refused(put(env.review, 'dispatcher', 'card', 'C-1', { state: 'verified' }), /no passing verdict/);
 });
 
 test('L44 planted: a verdict naming the wrong head is refused at intake', () => {
@@ -82,11 +83,11 @@ test('L44: the accepted verdict records the review user, and a verdict without o
   assert.equal(env.record.list('verdict')[0].doc.outbox_uid, UID);
   // A pass put in past the outbox (no outbox_uid) doesn't verify.
   env.store.transaction((tx) => tx.commit([{ entity: 'verdict', id: 'verdict-planted', doc: { session_id: 'R-1', role: 'reviewer', card: 'C-1', head: HEAD, pass: true } }], { actor: 'reviewer:R-1', kind: 'verdict' }));
-  refused(put(env.record, 'dispatcher', 'card', 'C-1', { state: 'verified' }), /no passing verdict/);
+  refused(put(env.review, 'dispatcher', 'card', 'C-1', { state: 'verified' }), /no passing verdict/);
   refused(env.review.applyOutbox({ role: 'reviewer', sessionId: 'R-1', card: 'C-1' }, outboxFile(env, 'reviewer', 'R-1', 'verdict-2.md', hdr({ head: HEAD, pass: true }))), /already given its verdict/);
   runnerLaunch(env, 'C-1', 'R-2');
   must(env.review.applyOutbox({ role: 'reviewer', sessionId: 'R-2', card: 'C-1' }, outboxFile(env, 'reviewer', 'R-2', 'verdict-3.md', hdr({ head: HEAD, pass: true }))), 'the pass');
-  must(put(env.record, 'dispatcher', 'card', 'C-1', { state: 'verified' }), 'verified');
+  must(put(env.review, 'dispatcher', 'card', 'C-1', { state: 'verified' }), 'verified');
 });
 
 // ---- Lead call L65: only the review runner's own launch record makes a verdict count ----
@@ -98,7 +99,7 @@ test('L65 planted: a verdict whose only launch is the Dispatcher\'s Record copy 
   assert.equal(env.record.list('verdict').length, 0);
   // A verdict put in past the intake, with a Record copy for its launch, still verifies nothing.
   env.store.transaction((tx) => tx.commit([{ entity: 'verdict', id: 'verdict-planted', doc: { session_id: 'R-1', role: 'reviewer', card: 'C-1', head: HEAD, pass: true, outbox_uid: UID } }], { actor: 'reviewer:R-1', kind: 'verdict' }));
-  refused(put(env.record, 'dispatcher', 'card', 'C-1', { state: 'verified' }), /no passing verdict/);
+  refused(put(env.review, 'dispatcher', 'card', 'C-1', { state: 'verified' }), /no passing verdict/);
 });
 
 test('L65: the verdict rule reads the runner\'s record again, so a record gone or changed after intake verifies nothing', () => {
@@ -108,12 +109,12 @@ test('L65: the verdict rule reads the runner\'s record again, so a record gone o
   assert.match(env.record.list('verdict')[0].doc.runner_launch, /^[0-9a-f]{64}$/);
   const text = readFileSync(p, 'utf8');
   unlinkSync(p);
-  refused(put(env.record, 'dispatcher', 'card', 'C-1', { state: 'verified' }), /no passing verdict .* review runner launched/);
+  refused(put(env.review, 'dispatcher', 'card', 'C-1', { state: 'verified' }), /no passing verdict .* review runner launched/);
   writeFileSync(p, text.replace('"reviewer"', '"auditor"'), { mode: 0o644 });
-  refused(put(env.record, 'dispatcher', 'card', 'C-1', { state: 'verified' }), /no passing verdict/);
+  refused(put(env.review, 'dispatcher', 'card', 'C-1', { state: 'verified' }), /no passing verdict/);
   unlinkSync(p);
   writeFileSync(p, text, { mode: 0o644 });
-  must(put(env.record, 'dispatcher', 'card', 'C-1', { state: 'verified' }), 'verified');
+  must(put(env.review, 'dispatcher', 'card', 'C-1', { state: 'verified' }), 'verified');
 });
 
 test('L65: a runner launch record is read only from a safe file in a safe folder', () => {
@@ -157,4 +158,50 @@ test('L65: a runner launch record is read only from a safe file in a safe folder
   assert.deepEqual(all.launches.map((l) => l.doc.session_id), ['R-1']);
   assert.deepEqual(all.refused.map((r) => r.name).sort(), ['R-2.json', 'R-3.json']);
   assert.match(runnerLaunches({ root: undefined, uids }).reason, /no review launches folder/);
+});
+
+// ---- Lead call L66 M1: what a verdict says is read from its file, never from the Record row ----
+
+test('L66 M1 planted: a verdict row flipped to pass while its file says fail verifies nothing; a changed or second file neither', () => {
+  const { env, hdr } = inReview();
+  const sha = (p) => createHash('sha256').update(readFileSync(p)).digest('hex');
+  const ids = {};
+  const row = (sid) => { ids[sid] ??= env.record.list('verdict').find((v) => v.doc.session_id === sid).id; return env.record.read('verdict', ids[sid]); };
+  const edit = (sid, over) => { const r = row(sid); env.store.transaction((tx) => tx.commit([{ entity: 'verdict', id: r.id, doc: { ...r.doc, ...over } }], { actor: `reviewer:${sid}`, kind: 'verdict' })); };
+  const opts = { outboxRoot: env.outRoot, uids: env.reviewUids };
+  // The reviewer said fail; the row (the workers' Mac user can write the Record) is edited to say pass.
+  runnerLaunch(env, 'C-1', 'R-1');
+  must(env.review.applyOutbox({ role: 'reviewer', sessionId: 'R-1', card: 'C-1' }, outboxFile(env, 'reviewer', 'R-1', 'verdict-1.md', hdr({ head: HEAD, pass: false }))), 'a fail');
+  edit('R-1', { pass: true, checklist: { correct: 'clean', well_built: 'clean', works_for_user: 'clean', holds_up: 'clean' } });
+  assert.equal(row('R-1').doc.pass, true, 'the row says pass');
+  assert.equal(verdictFromFile({ ...opts, row: row('R-1') }).verdict.pass, false, 'the file says fail');
+  refused(put(env.review, 'dispatcher', 'card', 'C-1', { state: 'verified' }), /no passing verdict/);
+  // A real pass, then its file changed after intake: the row's source_key no longer matches, so it counts nothing.
+  runnerLaunch(env, 'C-1', 'R-2');
+  const f2 = outboxFile(env, 'reviewer', 'R-2', 'verdict-2.md', hdr({ head: HEAD, pass: true }));
+  must(env.review.applyOutbox({ role: 'reviewer', sessionId: 'R-2', card: 'C-1' }, f2), 'the pass');
+  const good = readFileSync(f2, 'utf8');
+  writeFileSync(f2, `${good} `);
+  refused(verdictFromFile({ ...opts, row: row('R-2') }), /not the one handed in/);
+  refused(put(env.review, 'dispatcher', 'card', 'C-1', { state: 'verified' }), /no passing verdict/);
+  // The row pointed at another file of the session (the second, which the intake refused): more than one verdict file
+  // in a session counts none.
+  writeFileSync(f2, good);
+  const f3 = outboxFile(env, 'reviewer', 'R-2', 'verdict-3.md', hdr({ head: HEAD, pass: true }));
+  refused(env.review.applyOutbox({ role: 'reviewer', sessionId: 'R-2', card: 'C-1' }, f3), /already given its verdict/);
+  edit('R-2', { source_key: `${realpathSync(f3)}\0${sha(f3)}` });
+  refused(verdictFromFile({ ...opts, row: row('R-2') }), /more than one verdict file/);
+  refused(put(env.review, 'dispatcher', 'card', 'C-1', { state: 'verified' }), /no passing verdict/);
+  // A row naming a file in another session's folder is read as that folder's: the tag must match where the file is.
+  edit('R-2', { source_key: `${realpathSync(f2)}\0${sha(f2)}`, session_id: 'R-1' });
+  refused(verdictFromFile({ ...opts, row: row('R-2') }), /not directly inside the reviewer outbox of session R-1/);
+  // A missing file, then (control) the one true file back alone: it verifies.
+  edit('R-2', { session_id: 'R-2' });
+  unlinkSync(f3);
+  const moved = `${f2}.gone`;
+  writeFileSync(moved, good); unlinkSync(f2);
+  refused(verdictFromFile({ ...opts, row: row('R-2') }), /file not found/);
+  writeFileSync(f2, good); unlinkSync(moved);
+  assert.equal(verdictFromFile({ ...opts, row: row('R-2') }).ok, true);
+  must(put(env.review, 'dispatcher', 'card', 'C-1', { state: 'verified' }), 'verified');
 });

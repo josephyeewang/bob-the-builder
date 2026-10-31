@@ -16,7 +16,7 @@ test('smoke: draft → ready → claimed → running → hand-in → verified', 
   runnerLaunch(env, 'C-1', 'R-1');
   const v = outboxFile(env, 'reviewer', 'R-1', 'verdict-1.md', `${JSON.stringify({ entity: 'verdict', card: 'C-1', expectRev: env.record.read('card', 'C-1').rev, fields: { head: HEAD, pass: true } })}\n`);
   must(env.review.applyOutbox({ role: 'reviewer', sessionId: 'R-1', card: 'C-1' }, v), 'verdict');
-  must(put(env.record, 'dispatcher', 'card', 'C-1', { state: 'verified' }), 'verified');
+  must(put(env.review, 'dispatcher', 'card', 'C-1', { state: 'verified' }), 'verified');
   const kinds = env.record.diary().map((l) => l.kind);
   assert.ok(kinds.includes('claim'));
   assert.equal(env.alerts.filter((a) => a.type !== 'refused').length, 0, JSON.stringify(env.alerts));

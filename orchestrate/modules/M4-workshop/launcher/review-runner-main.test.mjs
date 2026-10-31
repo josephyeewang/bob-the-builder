@@ -5,7 +5,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { chmodSync, linkSync, mkdirSync, readFileSync, symlinkSync, writeFileSync, lstatSync } from 'node:fs';
 import { join } from 'node:path';
-import { installProblem, readCardFile, adminAnswer, sessionsFrom, realPorts, readConfig } from './review-runner-main.mjs';
+import { installProblem, programsProblem, readCardFile, adminAnswer, sessionsFrom, realPorts, readConfig } from './review-runner-main.mjs';
 import { reviewDaemonPlists } from './review-daemons.mjs';
 import { readAccountFile, copyAccountTo, useAccount, ACCOUNT_FILE } from './accounts.mjs';
 import { tempDir } from '../../../shared/test-tmp.mjs';
@@ -29,6 +29,44 @@ test('L65: the installed copy must be root\'s alone, with the runner, config and
   chmodSync(join(base, 'a', 'b', 'x.mjs'), 0o644);
   symlinkSync('/tmp', join(base, 'a', 'l'));
   assert.match(installProblem(base, [], { owner: ME }), /a\/l is a link/);
+});
+
+test('L66 M2: what a review runs (claude, node, the hooks folder) must be inside the installed copy and root\'s alone', async () => {
+  const base = tempDir('m4-progs-');
+  const out = tempDir('m4-progs-out-');
+  for (const d of ['bin', 'hooks', 'modules']) mkdirSync(join(base, d), { mode: 0o755 });
+  const files = { self: join(base, 'modules', 'runner.mjs'), config: join(base, 'review.json'), wiring: join(base, 'wiring.mjs'), claude: join(base, 'bin', 'claude'), node: join(base, 'bin', 'node') };
+  for (const f of Object.values(files)) writeFileSync(f, '', { mode: 0o644 });
+  writeFileSync(join(base, 'hooks', 'plain-files.mjs'), '', { mode: 0o644 });
+  for (const p of [base, join(base, 'bin'), join(base, 'hooks'), join(base, 'modules')]) chmodSync(p, 0o755);
+  for (const p of [out]) chmodSync(p, 0o755);
+  const c = { installRoot: base, wiring: files.wiring, claudeBin: files.claude, hooksDir: join(base, 'hooks') };
+  const check = (over = {}, node = files.node) => programsProblem({ ...c, ...over }, { self: files.self, config: files.config, node, owner: ME });
+  // This test's user stands in for root; with everything inside, nothing is wrong.
+  assert.equal(check(), null);
+  assert.match(programsProblem(c, { self: files.self, config: files.config, node: files.node }), /is not owned by root/);
+  // Each one outside the installed copy refuses, by name.
+  writeFileSync(join(out, 'claude'), '', { mode: 0o644 });
+  mkdirSync(join(out, 'hooks'), { mode: 0o755 });
+  writeFileSync(join(out, 'node'), '', { mode: 0o644 });
+  assert.match(check({ claudeBin: join(out, 'claude') }), new RegExp(`${join(out, 'claude')} is not inside the installed copy`));
+  assert.match(check({ hooksDir: join(out, 'hooks') }), new RegExp(`${join(out, 'hooks')} is not inside the installed copy`));
+  assert.match(check({}, join(out, 'node')), new RegExp(`${join(out, 'node')} is not inside the installed copy`));
+  assert.match(check({ hooksDir: `${base}/../${out.split('/').pop()}/hooks` }), /is not inside the installed copy/);
+  // One that others can write refuses, inside or not; so does a missing one, and the installed copy itself.
+  chmodSync(join(base, 'hooks'), 0o775);
+  assert.match(check(), new RegExp(`${join(base, 'hooks')} can be written by others than root`));
+  chmodSync(join(base, 'hooks'), 0o755);
+  chmodSync(files.claude, 0o666);
+  assert.match(check(), /bin\/claude can be written by others than root/);
+  chmodSync(files.claude, 0o644);
+  assert.match(check({ claudeBin: join(base, 'bin', 'gone') }), /bin\/gone is missing/);
+  assert.match(check({ hooksDir: base }), /is not inside the installed copy/);
+  // The ports hand what was checked to the wiring's start.
+  let got;
+  const ports = realPorts({ ...c, uids: { reviewer: ME } }, { start: (x) => { got = x; return { ok: true, pid: 1 }; } }, { node: files.node });
+  await ports.start({ role: 'reviewer' });
+  assert.deepEqual(got, { role: 'reviewer', claudeBin: files.claude, node: files.node, hooksDir: join(base, 'hooks') });
 });
 
 test('L65: a card is read from the Record read only, as the Record owner\'s plain file', () => {
@@ -98,11 +136,14 @@ test('L65 m-5: the account copy is a or b, root\'s; the runner falls back to the
 
 test('L65: the config names every path as a full path', () => {
   const d = tempDir('m4-cfg-');
-  const good = { installRoot: '/i', root: '/r', outboxRoot: '/o', reviewHome: '/h', uids: {}, recordRoot: '/x', recordUid: 5, mirror: '/m', claudeBin: '/c', ownerHome: '/w', ownerUid: 5, wiring: '/i/w.mjs' };
+  const good = { installRoot: '/i', root: '/r', outboxRoot: '/o', reviewHome: '/h', uids: {}, recordRoot: '/x', recordUid: 5, mirror: '/m', claudeBin: '/c', hooksDir: '/i/hooks', ownerHome: '/w', ownerUid: 5, wiring: '/i/w.mjs' };
   writeFileSync(join(d, 'c.json'), JSON.stringify(good));
   assert.equal(readConfig(join(d, 'c.json')).mirror, '/m');
   writeFileSync(join(d, 'c.json'), JSON.stringify({ ...good, mirror: 'm' }));
   assert.throws(() => readConfig(join(d, 'c.json')), /mirror must be an absolute path/);
+  const { hooksDir, ...noHooks } = good;
+  writeFileSync(join(d, 'c.json'), JSON.stringify(noHooks));
+  assert.throws(() => readConfig(join(d, 'c.json')), /hooksDir must be an absolute path/);
   writeFileSync(join(d, 'c.json'), JSON.stringify({ ...good, recordUid: '5' }));
   assert.throws(() => readConfig(join(d, 'c.json')), /recordUid must be a uid/);
 });

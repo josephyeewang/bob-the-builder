@@ -30,11 +30,22 @@
 //   runnerLaunchFor({ root, uids, role, card, head, sessionId }) → { ok, launch, key } | { ok: false, reason }
 //     `uid` in place of `uids`: the review user the intake already proved (a verdict's outbox_uid), for the verdict rule.
 //   runnerLaunches({ root, uids }) → { ok, launches: [{ doc, key }], refused: [{ name, reason }] } | { ok: false, reason }
+//
+// THE VERDICT ITSELF (lead call L66, M1). The Record is written by the Dispatcher, as the workers' Mac user, so what a
+// verdict row says (pass, checklist, head, who wrote it) is never what counts. `verdictFromFile` re-reads the file the
+// row came from, with every check readOutboxFile makes, and needs it to be the very file the row names (its
+// `source_key`: real path and sha256). What counts is what the file says, and the session and role come from the folder
+// it sits in. A session folder holding more than one verdict file counts none (one verdict per session, D12), so a row
+// can't pick the file the intake refused. The Merge Gate (M6 gather.mjs) and the record's verdict rule call it.
+//
+//   verdictFields(header) → { ok, card, head, pass, notes, checklist, material } | { ok: false, reason }
+//   verdictFromFile({ outboxRoot, uids, row }) →
+//     { ok, verdict: { role, session_id, card, head, pass, checklist, material, created_by, outbox_uid, source_key } } | { ok: false, reason }
 
 import { createHash } from 'node:crypto';
 import { closeSync, fstatSync, lstatSync, openSync, readdirSync, readSync, realpathSync, constants } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
-import { OUTBOX_KINDS, SESSION_ID } from '../../shared/record.mjs';
+import { CHECKLIST_LEVELS, OUTBOX_KINDS, SESSION_ID, VERDICT_CHECKLIST } from '../../shared/record.mjs';
 import { REVIEW_ROLES } from '../../shared/review-roles.mjs';
 
 export { REVIEW_ROLES };
@@ -220,4 +231,49 @@ export function readOutboxFile({ outboxRoot, uids = {}, tag, file }) {
   if (header.entity !== spec.entity) return no(`a ${kind} file's header must name entity ${spec.entity}`, key);
   if (header.fields !== undefined && (!header.fields || typeof header.fields !== 'object' || Array.isArray(header.fields))) return no('header fields must be an object', key);
   return { ok: true, key, kind, spec, header, body: nl < 0 ? '' : text.slice(nl + 1), sha256, realpath: real, owner_uid: owner };
+}
+
+/** A verdict file's header, checked: the one reading of what a verdict says, for the intake and for every later read. */
+export function verdictFields(h) {
+  const no = (reason) => ({ ok: false, reason });
+  if (!h || typeof h !== 'object' || Array.isArray(h) || h.entity !== 'verdict') return no('the header is not a verdict\'s');
+  const fields = h.fields ?? {};
+  if (!fields || typeof fields !== 'object' || Array.isArray(fields)) return no('header fields must be an object');
+  const extra = Object.keys(fields).filter((k) => !['head', 'pass', 'notes', 'checklist', 'material'].includes(k));
+  if (extra.length) return no(`a verdict may not set ${extra.join(', ')}`);
+  if (typeof h.card !== 'string' || !CARD_ID.test(h.card) || h.card.split('.').includes('')) return no('a verdict names its card');
+  if (typeof fields.head !== 'string' || !HEX40.test(fields.head)) return no('a verdict names the 40-hex head it reviewed');
+  if (typeof fields.pass !== 'boolean') return no('a verdict says pass: true or false');
+  if (fields.checklist !== undefined) {
+    const cl = fields.checklist;
+    if (!cl || typeof cl !== 'object' || Array.isArray(cl) || Object.keys(cl).some((k) => !VERDICT_CHECKLIST.includes(k))
+      || Object.values(cl).some((v) => !CHECKLIST_LEVELS.includes(v))) return no(`checklist lines are ${VERDICT_CHECKLIST.join(', ')}, each ${CHECKLIST_LEVELS.join('|')}`);
+  }
+  if (fields.material !== undefined && !(Number.isInteger(fields.material) && fields.material >= 0)) return no('material is a whole-number count');
+  return { ok: true, card: h.card, head: fields.head, pass: fields.pass, notes: fields.notes ?? null, checklist: fields.checklist ?? null, material: fields.material ?? null };
+}
+
+/** What a verdict row's own file says, read again with every check (L66 M1); a row whose file fails is a refusal, never a throw. */
+export function verdictFromFile({ outboxRoot, uids, row } = {}) {
+  const no = (reason) => ({ ok: false, reason });
+  try {
+    const d = row?.doc;
+    if (!d || typeof d !== 'object') return no('no verdict row');
+    if (!REVIEW_ROLES.includes(d.role)) return no('the verdict row names no review role');
+    if (typeof d.session_id !== 'string' || !SESSION_ID.test(d.session_id)) return no('the verdict row names no session');
+    const cut = typeof d.source_key === 'string' ? d.source_key.lastIndexOf('\0') : -1;
+    if (cut <= 0) return no(`the verdict row of session ${d.session_id} names no file`);
+    const file = d.source_key.slice(0, cut);
+    const f = readOutboxFile({ outboxRoot, uids, tag: { role: d.role, sessionId: d.session_id }, file });
+    if (!f.ok) return no(`the verdict file of session ${d.session_id} fails its checks: ${f.reason}`);
+    if (f.key !== d.source_key) return no(`the verdict file of session ${d.session_id} is not the one handed in (its content changed)`);
+    if (f.kind !== 'verdict-') return no(`the file of session ${d.session_id} is not a verdict`);
+    let names;
+    try { names = readdirSync(dirname(f.realpath)); } catch { return no(`the outbox of session ${d.session_id} could not be listed`); }
+    if (names.filter((n) => !n.startsWith('.') && kindOf(n) === 'verdict-').length !== 1) return no(`session ${d.session_id} left more than one verdict file, so none counts`);
+    const v = verdictFields(f.header);
+    if (!v.ok) return no(`the verdict file of session ${d.session_id}: ${v.reason}`);
+    return { ok: true, verdict: { role: d.role, session_id: d.session_id, card: v.card, head: v.head, pass: v.pass, checklist: v.checklist, material: v.material,
+      created_by: `${d.role}:${d.session_id}`, outbox_uid: f.owner_uid, source_key: f.key } };
+  } catch (e) { return no(`the verdict file could not be read (${e?.code ?? e?.message ?? e})`); }
 }

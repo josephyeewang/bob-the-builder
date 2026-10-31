@@ -1,7 +1,8 @@
 // fixtures.test-helper.mjs — shared set-up for M9's tests: a full set of time limits, a rules fake, a record in a temp
 // folder, and short-hands for making a card reach a state the honest way (every step through the writer).
 
-import { chmodSync, mkdirSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { chmodSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { planFingerprint } from '../../shared/plan-fingerprint.mjs';
 import { tempDir } from '../../shared/test-tmp.mjs';
@@ -115,6 +116,17 @@ export function runnerLaunch(env, card, sid, role = 'reviewer', head = HEAD) {
   const p = join(env.launchRoot, `${sid}.json`);
   writeFileSync(p, JSON.stringify({ session_id: sid, role, card, head, launched_at: iso(env.clock.t), request_id: `q-${sid}` }), { mode: 0o644, flag: 'wx' });
   chmodSync(p, 0o644);
+  return p;
+}
+
+// A passing verdict as the intake leaves it (L66 M1): the runner's launch record, the verdict file in the review outbox,
+// and the row naming that file. Put straight into the store, so a test can start with a card's review done. A move to
+// verified then goes through `env.review`, the view that knows the review user.
+export function passingVerdict(env, card, sid, head = HEAD) {
+  runnerLaunch(env, card, sid, 'reviewer', head);
+  const p = outboxFile(env, 'reviewer', sid, `verdict-${sid}.md`, `${JSON.stringify({ entity: 'verdict', card, expectRev: 0, fields: { head, pass: true } })}\n`);
+  const key = `${realpathSync(p)}\0${createHash('sha256').update(readFileSync(p)).digest('hex')}`;
+  env.store.transaction((tx) => tx.commit([{ entity: 'verdict', id: `verdict-${sid}`, doc: { session_id: sid, role: 'reviewer', card, head, pass: true, outbox_uid: UID, source_key: key } }], { actor: `reviewer:${sid}`, kind: 'verdict' }));
   return p;
 }
 

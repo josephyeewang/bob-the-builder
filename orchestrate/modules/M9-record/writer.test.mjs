@@ -271,36 +271,36 @@ test('verified needs a passing verdict for the current head from a reviewer laun
   refused(apply('R-1', 'verdict-e.md', hdr({ head: HEAD, pass: true }, { expectRev: 1 })), /changed since read/);
   // A verdict from a session the launcher never recorded is refused at intake (L44 planted case).
   refused(apply('R-1', 'verdict-f.md', hdr({ head: HEAD, pass: true })), /no launch of reviewer session R-1 on C-1/);
-  refused(put(env.record, 'dispatcher', 'card', 'C-1', { state: 'verified' }), /no passing verdict/);
+  refused(put(env.review, 'dispatcher', 'card', 'C-1', { state: 'verified' }), /no passing verdict/);
   // A reviewer launched for another head doesn't verify this one (round 5 m-4).
   runnerLaunch(env, 'C-1', 'R-3', 'reviewer', HEAD2);   // launched for another head
   refused(apply('R-3', 'verdict-f2.md', hdr({ head: HEAD, pass: true })), /no launch of reviewer session R-3 on C-1 at head aaaaaaa/);
-  refused(put(env.record, 'dispatcher', 'card', 'C-1', { state: 'verified' }), /no passing verdict/);
+  refused(put(env.review, 'dispatcher', 'card', 'C-1', { state: 'verified' }), /no passing verdict/);
   runnerLaunch(env, 'C-1', 'R-2');
   must(apply('R-2', 'verdict-g.md', hdr({ head: HEAD, pass: false })), 'a fail');
-  refused(put(env.record, 'dispatcher', 'card', 'C-1', { state: 'verified' }), /no passing verdict/);
+  refused(put(env.review, 'dispatcher', 'card', 'C-1', { state: 'verified' }), /no passing verdict/);
   // A verdict naming a head the session wasn't launched on is refused at intake (L44 planted case).
   refused(apply('R-2', 'verdict-h.md', hdr({ head: HEAD2, pass: true })), /no launch of reviewer session R-2 on C-1 at head bbbbbbb/);
-  refused(put(env.record, 'dispatcher', 'card', 'C-1', { state: 'verified' }), /no passing verdict for head aaaaaaa/);
+  refused(put(env.review, 'dispatcher', 'card', 'C-1', { state: 'verified' }), /no passing verdict for head aaaaaaa/);
   // One verdict per session: R-2 already said fail, so a second file is refused and a pass needs a new launch.
   refused(apply('R-2', 'verdict-i0.md', hdr({ head: HEAD, pass: true })), /already given its verdict/);
   runnerLaunch(env, 'C-1', 'R-5');
   must(apply('R-5', 'verdict-i.md', hdr({ head: HEAD, pass: true })), 'the pass');
-  must(put(env.record, 'dispatcher', 'card', 'C-1', { state: 'verified' }), 'verified');
+  must(put(env.review, 'dispatcher', 'card', 'C-1', { state: 'verified' }), 'verified');
   // A new head after verification sends it back to review.
   refused(put(env.record, 'workshop', 'card', 'C-1', { head: HEAD2 }), /sends it back to in_review/);
   must(put(env.record, 'workshop', 'card', 'C-1', { head: HEAD2, state: 'in_review' }), 'push after verify');
   // A head pushed while a verified card waits doesn't come back verified unreviewed (0b-2 audit round 3 MAT-A).
   // The new head needs a reviewer launched on it: R-2 was launched on the old one (round 5 m-4).
   refused(apply('R-2', 'verdict-j0.md', hdr({ head: HEAD2, pass: true })), /no launch of reviewer session R-2/);
-  refused(put(env.record, 'dispatcher', 'card', 'C-1', { state: 'verified' }), /no passing verdict for head bbbbbbb/);
+  refused(put(env.review, 'dispatcher', 'card', 'C-1', { state: 'verified' }), /no passing verdict for head bbbbbbb/);
   runnerLaunch(env, 'C-1', 'R-4', 'reviewer', HEAD2);   // launched on the new head
   must(apply('R-4', 'verdict-j.md', hdr({ head: HEAD2, pass: true })), 'the pass for the new head');
-  must(put(env.record, 'dispatcher', 'card', 'C-1', { state: 'verified' }), 'verified again');
+  must(put(env.review, 'dispatcher', 'card', 'C-1', { state: 'verified' }), 'verified again');
   must(put(env.record, 'dispatcher', 'card', 'C-1', { state: 'waiting', wait: wait(env, { resume: 'continue', return_to: 'verified' }) }), 'paused');
   const HEAD3 = 'c'.repeat(40);
   must(put(env.record, 'workshop', 'card', 'C-1', { head: HEAD3 }), 'a push while it waits');
-  refused(put(env.record, 'dispatcher', 'card', 'C-1', { state: 'verified' }), /no passing verdict for head ccccccc/);
+  refused(put(env.review, 'dispatcher', 'card', 'C-1', { state: 'verified' }), /no passing verdict for head ccccccc/);
 });
 
 test('a doc nested too deep is refused, so it can never freeze its card (0b-2 audit round 3 MAT-B)', () => {

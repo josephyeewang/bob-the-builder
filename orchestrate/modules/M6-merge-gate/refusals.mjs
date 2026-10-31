@@ -23,7 +23,9 @@
 //   compareStatus 'ahead' | 'behind' | 'diverged' | 'identical' | null   main...head (refusal 12)
 //   carried { review, audit, reasons } | null   carry-over from H0 to the PR head (read only when they differ)
 //   verdicts [{ doc, createdBy }], launches [{ doc }] | null   launches: the review runner's records only (L65); null
-//                                            when they could not be read, with launchesProblem saying why
+//                                            when they could not be read, with launchesProblem saying why. verdicts:
+//                                            what each verdict file says, read again (L66 M1); verdictsRefused [reason]
+//                                            for the rows whose file failed
 //   tier 1 | 2 | null                        M10's computed tier for the change
 //   exactReverse bool                        the change recomputes as an exact reverse (M10 exact-reverse.mjs)
 //   reversesGateMerge bool                   the reversed commit carries the robot's mark (first-cutover undo)
@@ -89,7 +91,8 @@ export function verdictProblem(f) {
   if (!SHA.test(head ?? '')) return 'the card has no head';
   if (!Array.isArray(f.launches)) return `the review runner's launch records could not be read: ${f.launchesProblem ?? 'not gathered'}`;
   const vs = (Array.isArray(f.verdicts) ? f.verdicts : []).filter((v) => v?.doc?.card === f.card.id && v.doc.head === head);
-  if (!vs.some((v) => launched(f, v, 'reviewer', head) && v.doc.pass === true && checklistClean(v.doc))) return `no passing reviewer verdict with a clean four-line checklist for ${head.slice(0, 7)} from a launched reviewer`;
+  const why = Array.isArray(f.verdictsRefused) && f.verdictsRefused.length ? ` (${f.verdictsRefused.length} verdict row(s) not counted: ${f.verdictsRefused[0]})` : '';
+  if (!vs.some((v) => launched(f, v, 'reviewer', head) && v.doc.pass === true && checklistClean(v.doc))) return `no passing reviewer verdict with a clean four-line checklist for ${head.slice(0, 7)} from a launched reviewer${why}`;
   if (f.tier !== 1 && f.tier !== 2) return 'the change\'s tier is unknown';
   if (f.tier === 1 && !vs.some((v) => launched(f, v, 'auditor', head) && v.doc.pass === true && v.doc.material === 0)) return `Tier 1: no auditor verdict with 0 Material for ${head.slice(0, 7)} from a launched auditor`;
   const prHead = f.pr?.head?.sha;
