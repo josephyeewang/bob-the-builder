@@ -635,6 +635,8 @@ async function boobyTrap(w) {
   mkdirSync(hooks, { recursive: true });
   for (const h of HOOK_NAMES) { writeFileSync(join(hooks, h), `#!/bin/sh\ntouch ${JSON.stringify(join(markers, `hook-${h}`))}\n`); chmodSync(join(hooks, h), 0o755); }
   const gd = join(w.clone, '.git');
+  // Read before the traps go in: safe-git refuses a repository whose config names a program (L36).
+  const head = (await gitOk(['rev-parse', 'HEAD'], w.cg)).trim();
   mkdirSync(join(gd, 'hooks'), { recursive: true });
   for (const h of HOOK_NAMES) copyFileSync(join(hooks, h), join(gd, 'hooks', h));
   chmodSync(join(gd, 'hooks'), 0o755);
@@ -653,7 +655,7 @@ async function boobyTrap(w) {
   writeFileSync(join(gd, 'info', 'attributes'), '* filter=x diff=x\n');
   writeFileSync(join(gd, 'config.worktree'), `[core]\n\tfsmonitor = ${prog('fsmonitor-wt')}\n`);
   // The clone moves its own idea of GitHub's main.
-  writeFileSync(join(gd, 'packed-refs'), `${(await gitOk(['rev-parse', 'HEAD'], w.cg)).trim()} refs/remotes/origin/main\n`);
+  writeFileSync(join(gd, 'packed-refs'), `${head} refs/remotes/origin/main\n`);
   return { markers, fired: () => readdirSync(markers) };
 }
 
@@ -699,8 +701,8 @@ test('R-0b-46: positive control: the planted programs do run when git is used in
   const w = await world();
   const trap = await boobyTrap(w);
   const { spawnSync } = await import('node:child_process');
-  spawnSync('git', ['-C', w.clone, 'status'], { env: { PATH: '/usr/bin:/bin:/opt/homebrew/bin:/usr/local/bin', HOME: tmp() } });
-  spawnSync('git', ['-C', w.clone, 'diff', 'HEAD~1'], { env: { PATH: '/usr/bin:/bin:/opt/homebrew/bin:/usr/local/bin', HOME: tmp() } });
+  spawnSync('git', ['-C', w.clone, 'status'], { env: { PATH: '/usr/bin:/bin:/opt/homebrew/bin:/usr/local/bin', HOME: tmp(), GIT_TERMINAL_PROMPT: '0', GIT_ASKPASS: '/usr/bin/false', SSH_ASKPASS: '/usr/bin/false', GCM_INTERACTIVE: 'never' }, timeout: 60_000 });
+  spawnSync('git', ['-C', w.clone, 'diff', 'HEAD~1'], { env: { PATH: '/usr/bin:/bin:/opt/homebrew/bin:/usr/local/bin', HOME: tmp(), GIT_TERMINAL_PROMPT: '0', GIT_ASKPASS: '/usr/bin/false', SSH_ASKPASS: '/usr/bin/false', GCM_INTERACTIVE: 'never' }, timeout: 60_000 });
   assert.ok(trap.fired().length > 0, 'the traps are not live, so the main test would prove nothing');
 });
 
@@ -743,10 +745,11 @@ test('R-0b-46: a worker changing origin and its own main affects no other copy, 
   assert.equal(second.ok, true, second.reason);
   const snap = (dir) => readdirSync(dir, { recursive: true }).filter((p) => !String(p).startsWith('.git/objects') && !String(p).includes('index')).map((p) => { const f = join(dir, String(p)); return statSync(f).isFile() ? `${p}:${readFileSync(f, 'base64')}` : String(p); }).sort();
   const before = { second: snap(join(w.root, 'second')), mirror: snap(w.mirror) };
-  await gitOk(['remote', 'add', 'origin', 'https://example.invalid/evil.git'], w.cg);
-  await gitOk(['config', 'core.hooksPath', '/tmp/evil-hooks'], w.cg);
+  await gitOk(['config', 'remote.origin.url', 'https://example.invalid/evil.git'], w.cg); // safe-git never runs `git remote` (L51)
   await gitOk(['update-ref', 'refs/remotes/origin/main', (await gitOk(['rev-parse', 'HEAD'], w.cg)).trim()], w.cg);
   await gitOk(['update-ref', 'refs/heads/main', (await gitOk(['commit-tree', '-m', 'evil', `${main}^{tree}`], w.cg)).trim()], w.cg);
+  // Last: once its config names a hooks folder, safe-git refuses the copy (L49).
+  await gitOk(['config', 'core.hooksPath', '/tmp/evil-hooks'], w.cg);
   assert.deepEqual(snap(join(w.root, 'second')), before.second);
   assert.deepEqual(snap(w.mirror), before.mirror);
   assert.equal((await gitOk(['rev-parse', 'refs/heads/main'], { gitDir: w.mirror })).trim(), main);
@@ -1004,4 +1007,14 @@ test('R-0b-47 round 4 MIN-1, real gitleaks: a secret laid across two rows of an 
   await w.commit('img', (c) => { mkdirSync(join(c, 'docs'), { recursive: true }); writeFileSync(join(c, 'docs/rows.png'), png); });
   await w.bundle();
   await refusedAndUntouched(w, /the file scan: .*likely secret.*docs\/rows\.png/);
+});
+
+// #32 round 3 (L51): safe-git runs a network command only to a local path or the one address the call allows. The
+// tests push to local folders, so this checks the source: every call that names GitHub's address allows exactly it.
+test('#32 round 3 (L51): every push-script call that names the GitHub address passes it as the allowed address', () => {
+  const src = readFileSync(new URL('./push.mjs', import.meta.url), 'utf8');
+  assert.match(src, /const auth = \{ extraConfig: tokenConfig\(token\), address: url \};/);
+  const calls = src.split('\n').filter((l) => /\bgit(Ok)?\(\[/.test(l) && /, url[,\]]/.test(l));
+  assert.equal(calls.length, 3, calls.join('\n'));
+  for (const l of calls) assert.match(l, /\.\.\.auth \}/, l);
 });
