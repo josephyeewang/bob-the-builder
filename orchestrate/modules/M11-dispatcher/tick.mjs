@@ -64,19 +64,28 @@ export function signedInAccount({ rec, rules, now }) {
   return { account: d.account, reason: null };
 }
 
-/** Acts on the outage step's answer (M10): safe cards go back to ready; any other card waits on Joe. */
-export function actOnDead({ rec, now, restart, asks, cards = {} }) {
+/**
+ * Acts on the outage step's answer (M10): safe cards go back to ready; any other card waits on Joe. Each card
+ * moved gets its own alert (L43(a), L38: no silent move); a card that already moved on is left alone, with no alert.
+ */
+export function actOnDead({ rec, now, restart, asks, cards = {}, alert = () => {} }) {
   const done = [];
   for (const sid of restart) {
     const cardId = cards[sid];
     const cur = cardId ? rec.read('card', cardId) : null;
     if (!cur || !['running', 'claimed'].includes(cur.doc.state)) continue;
-    if (move(rec, 'card', cardId, { state: 'ready', session: null, restarted_from: sid }, { now, kind: 'dead_restart' }).ok) done.push([cardId, 'ready again']);
+    if (move(rec, 'card', cardId, { state: 'ready', session: null, restarted_from: sid }, { now, kind: 'dead_restart' }).ok) {
+      done.push([cardId, 'ready again']);
+      alert(`card ${cardId}: its session ${sid} stopped; the card is marked safe to re-run, so it is back in the queue`);
+    }
   }
   for (const cardId of asks) {
     const cur = rec.read('card', cardId);
     if (!cur || !['running', 'claimed'].includes(cur.doc.state)) continue;
-    if (waitOn(rec, cardId, { who: 'joe', what: 'dead_session: its session stopped and the card is not marked safe to re-run', now, link: `card ${cardId}`, kind: 'dead_ask' }).ok) done.push([cardId, 'waiting on Joe']);
+    if (waitOn(rec, cardId, { who: 'joe', what: 'dead_session: its session stopped and the card is not marked safe to re-run', now, link: `card ${cardId}`, kind: 'dead_ask' }).ok) {
+      done.push([cardId, 'waiting on Joe']);
+      alert(`card ${cardId}: its session stopped and the card is not marked safe to re-run, so it waits on you`);
+    }
   }
   return done;
 }
@@ -151,7 +160,7 @@ export async function tick({ rec, rules, now, ports: p }) {
     const board = p.board();
     const o = outageStep({ rec, rules, board, now, healthy: p.healthy(), resume: p.resume?.() ?? false, alert });
     outageOpen = o.outage;
-    return { ...o, acted: o.outage ? [] : actOnDead({ rec, now, restart: o.restart, asks: o.asks, cards: o.cards }) };
+    return { ...o, acted: o.outage ? [] : actOnDead({ rec, now, restart: o.restart, asks: o.asks, cards: o.cards, alert }) };
   });
   // A Lead's read-only helper goes through the one start gate (audit 0b-6 r2 MAT-2): the red band, the
   // read-only cap per Lead and an outage hold it here, whatever the wiring port does.

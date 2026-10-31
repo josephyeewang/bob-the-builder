@@ -120,19 +120,24 @@ test('M10: outside an outage a dead session\'s safe card goes back to ready and 
   const r = await w.pass();
   assert.deepEqual(r.steps.outage.result.acted, [['C-1', 'ready again'], ['C-2', 'waiting on Joe']]);
   assert.deepEqual(w.calls.launched, ['C-1'], 'the safe card started again in the same tick');
+  // L43(a), L38: each card moved is its own alert to Joe.
+  assert.equal(w.calls.alerts.filter((a) => /card C-1: its session S-1 stopped; .* back in the queue/.test(a)).length, 1, w.calls.alerts.join(' | '));
+  assert.equal(w.calls.alerts.filter((a) => /card C-2: its session stopped .* waits on you/.test(a)).length, 1, w.calls.alerts.join(' | '));
   const c2 = w.rec.read('card', 'C-2').doc;
   assert.deepEqual([c2.state, c2.waiting.who, c2.waiting.link], ['waiting', 'joe', 'card C-2']);
   assert.match(c2.waiting.what, /dead_session/);
   // a card that already moved on is left alone
   const rec = recWith([card('C-5', { state: 'in_review' })]);
-  assert.deepEqual(actOnDead({ rec, now: T0, restart: ['S-5'], asks: ['C-5'], cards: { 'S-5': 'C-5' } }), []);
+  const told = [];
+  assert.deepEqual(actOnDead({ rec, now: T0, restart: ['S-5'], asks: ['C-5'], cards: { 'S-5': 'C-5' }, alert: (t) => told.push(t) }), []);
+  assert.deepEqual(told, [], 'a card that moved on gets no alert');
   assert.equal(rec.read('card', 'C-5').doc.state, 'in_review');
 });
 
 test('M9: a held session restarts at the outage\'s end even though it left the board', async () => {
   const gone = (id, c) => ({ id, card: c, alive: false, ended: true, lastWriteAt: T0 - 10 * MIN });
-  let board = [gone('S-1', 'C-1'), gone('S-2', 'C-2')];
-  const w = world([account(), usage(), card('C-1', { state: 'running', rerun_safe: true }), card('C-2', { state: 'running', rerun_safe: true })],
+  let board = [gone('S-1', 'C-1'), gone('S-2', 'C-2'), gone('S-3', 'C-3')];
+  const w = world([account(), usage(), card('C-1', { state: 'running', rerun_safe: true }), card('C-2', { state: 'running', rerun_safe: true }), card('C-3', { state: 'running', rerun_safe: true })],
     { over: { board: () => board } });
   await w.pass();
   assert.equal(w.rec.read('fact', OUTAGE_FACT).doc.state, 'open');
@@ -141,7 +146,7 @@ test('M9: a held session restarts at the outage\'s end even though it left the b
   await w.pass(1);
   await w.pass(2);
   assert.equal(w.rec.read('fact', OUTAGE_FACT).doc.state, 'ended');
-  assert.deepEqual(w.calls.launched.sort(), ['C-1', 'C-2']);
+  assert.deepEqual(w.calls.launched.sort(), ['C-1', 'C-2', 'C-3']);
 });
 
 test('during an outage no reviewer starts and no merge is requested', async () => {

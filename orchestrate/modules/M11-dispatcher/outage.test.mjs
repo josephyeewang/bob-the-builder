@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { writeFileSync, existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
-import { outageStep, isDead, OUTAGE_FACT } from './outage.mjs';
+import { outageStep, isDead, OUTAGE_FACT, OUTAGE_MIN_DEAD, OUTAGE_MIN_SHARE } from './outage.mjs';
 import { takePassLock, pidDead } from './pass-lock.mjs';
 import { KEYS as K } from './keys.mjs';
 import { rulesWith, recWith, T0, MIN } from './fixtures.test-helper.mjs';
@@ -24,23 +24,23 @@ test('G1: dead needs the process gone, the session ended and 5 quiet minutes', (
   assert.equal(isDead({ ...gone('a'), lastWriteAt: undefined }, { now: T0, quietMs: q }), false);
 });
 
-test('M9: a board of 4 with 2 killed in one pass restarts nothing and alerts once', () => {
+test('M9: a board of 4 with 3 killed in one pass restarts nothing and alerts once', () => {
   const rec = recWith(cards());
   const alerts = [];
-  const board = [gone('S1', 'C-1'), gone('S2', 'C-2'), live('S3', 'C-3'), live('S4', 'C-4')];
+  const board = [gone('S1', 'C-1'), gone('S2', 'C-2'), gone('S3', 'C-3'), live('S4', 'C-4')];
   const r = outageStep({ rec, rules: R, board, now: T0, healthy: false, alert: (a) => alerts.push(a) });
   assert.equal(r.outage, true);
   assert.deepEqual(r.restart, []);
   assert.equal(alerts.length, 1);
   assert.equal(typeof alerts[0], 'string'); // audit cosmetic 2: every alert is plain text
-  assert.match(alerts[0], /2 of 4 running sessions stopped at once/);
+  assert.match(alerts[0], /3 of 4 running sessions stopped at once/);
   // the next passes during the outage: still nothing restarts, no second alert
-  const later = [live('S3', 'C-3'), gone('S4', 'C-4')];
+  const later = [gone('S4', 'C-4')];
   const r2 = outageStep({ rec, rules: R, board: later, now: T0 + MIN, healthy: false, alert: (a) => alerts.push(a) });
   assert.equal(r2.outage, true);
   assert.deepEqual(r2.restart, []);
   assert.equal(alerts.length, 1);
-  assert.deepEqual(rec.read('fact', OUTAGE_FACT).doc.dead.map((d) => d.id), ['S1', 'S2', 'S4']);
+  assert.deepEqual(rec.read('fact', OUTAGE_FACT).doc.dead.map((d) => d.id), ['S1', 'S2', 'S3', 'S4']);
 });
 
 test('M9: a board of 4 with 1 killed restarts that one (if safe)', () => {
@@ -60,22 +60,22 @@ test('M9: a board of 4 with 1 killed restarts that one (if safe)', () => {
 
 test('M9: the outage ends after 2 healthy passes in a row, then safe cards restart', () => {
   const rec = recWith(cards());
-  const board = [gone('S1', 'C-1'), gone('S2', 'C-2'), live('S3', 'C-3'), live('S4', 'C-4')];
+  const board = [gone('S1', 'C-1'), gone('S2', 'C-2'), gone('S3', 'C-3'), live('S4', 'C-4')];
   outageStep({ rec, rules: R, board, now: T0, healthy: false, alert: () => {} });
-  const step = (healthy, extra = {}) => outageStep({ rec, rules: R, board: [live('S3', 'C-3'), live('S4', 'C-4')], now: T0 + MIN, healthy, alert: () => {}, ...extra });
+  const step = (healthy, extra = {}) => outageStep({ rec, rules: R, board: [live('S4', 'C-4')], now: T0 + MIN, healthy, alert: () => {}, ...extra });
   assert.equal(step(true).outage, true);
   assert.equal(step(false).outage, true); // the count starts again
   assert.equal(step(true).outage, true);
   const end = step(true);
   assert.equal(end.outage, false);
   assert.equal(end.ended, true);
-  assert.deepEqual(end.restart.sort(), ['S1', 'S2']);
+  assert.deepEqual(end.restart.sort(), ['S1', 'S2', 'S3']);
   assert.equal(rec.read('fact', OUTAGE_FACT).doc.ended_by, 'healthy');
 });
 
 test("M9: Joe's resume ends an outage", () => {
   const rec = recWith(cards());
-  outageStep({ rec, rules: R, board: [gone('S1', 'C-1'), gone('S2', 'C-2')], now: T0, healthy: false, alert: () => {} });
+  outageStep({ rec, rules: R, board: [gone('S1', 'C-1'), gone('S2', 'C-2'), gone('S3', 'C-3')], now: T0, healthy: false, alert: () => {} });
   const r = outageStep({ rec, rules: R, board: [], now: T0 + MIN, healthy: false, resume: true, alert: () => {} });
   assert.equal(r.ended, true);
   assert.equal(rec.read('fact', OUTAGE_FACT).doc.ended_by, 'joe');
@@ -91,18 +91,21 @@ test('M10 / m18: a card not safe to re-run is never restarted; it becomes an ask
   assert.deepEqual(r2.asks, ['C-2']);
   // after an outage, an unsafe card is still an ask, not a restart
   const rec3 = recWith(cards(false));
-  outageStep({ rec: rec3, rules: R, board: [gone('S1', 'C-1'), gone('S2', 'C-2')], now: T0, healthy: false, alert: () => {} });
+  assert.equal(outageStep({ rec: rec3, rules: R, board: [gone('S1', 'C-1'), gone('S2', 'C-2'), gone('S3', 'C-3')], now: T0, healthy: false, alert: () => {} }).outage, true);
   const end = outageStep({ rec: rec3, rules: R, board: [], now: T0, healthy: false, resume: true, alert: () => {} });
   assert.deepEqual(end.restart, []);
-  assert.deepEqual(end.asks.sort(), ['C-1', 'C-2']);
+  assert.deepEqual(end.asks.sort(), ['C-1', 'C-2', 'C-3']);
 });
 
 test('the outage keys come from the rules', () => {
   const rec = recWith(cards());
-  const board = [gone('S1', 'C-1'), live('S2', 'C-2'), live('S3', 'C-3'), live('S4', 'C-4')];
-  assert.equal(outageStep({ rec, rules: rulesWith({ [K.outageMinDead]: 1, [K.outageShare]: 0.25 }), board, now: T0, healthy: true, alert: () => {} }).outage, true);
+  const board = [gone('S1', 'C-1'), gone('S2', 'C-2'), gone('S3', 'C-3'), live('S4', 'C-4')];
+  assert.equal(outageStep({ rec, rules: R, board, now: T0, healthy: true, alert: () => {} }).outage, true);
+  // The rules may raise either number: 4 dead needed, or more than three quarters of the board, and 3 of 4 is no outage.
+  assert.equal(outageStep({ rec: recWith(cards()), rules: rulesWith({ [K.outageMinDead]: 4 }), board, now: T0, healthy: true, alert: () => {} }).outage, false);
+  assert.equal(outageStep({ rec: recWith(cards()), rules: rulesWith({ [K.outageShare]: 0.8 }), board, now: T0, healthy: true, alert: () => {} }).outage, false);
   assert.throws(() => outageStep({ rec: recWith(), rules: rulesWith({ [K.outageShare]: undefined }), board, now: T0, healthy: true, alert: () => {} }));
-  assert.equal(outageStep({ rec: recWith(cards()), rules: rulesWith({ [K.deadQuietMin]: 10 }), board: [gone('S1', 'C-1'), gone('S2', 'C-2')], now: T0, healthy: true, alert: () => {} }).outage, false);
+  assert.equal(outageStep({ rec: recWith(cards()), rules: rulesWith({ [K.deadQuietMin]: 10 }), board, now: T0, healthy: true, alert: () => {} }).outage, false);
 });
 
 test('M16: two passes started together: one runs, one exits', () => {
@@ -148,7 +151,45 @@ test('audit O8: an outage whose fact the record refuses raises no alert', () => 
   const real = recWith(cards());
   const rec = { read: (...a) => real.read(...a), list: (...a) => real.list(...a), write: (a) => (a.entity === 'fact' && a.id === OUTAGE_FACT ? { ok: false, reason: 'stale rev' } : real.write(a)) };
   const alerts = [];
-  const r = outageStep({ rec, rules: R, board: [gone('S1', 'C-1'), gone('S2', 'C-2'), live('S3', 'C-3'), live('S4', 'C-4')], now: T0, healthy: false, alert: (a) => alerts.push(a) });
+  const r = outageStep({ rec, rules: R, board: [gone('S1', 'C-1'), gone('S2', 'C-2'), gone('S3', 'C-3'), live('S4', 'C-4')], now: T0, healthy: false, alert: (a) => alerts.push(a) });
   assert.equal(r.outage, true);
   assert.equal(alerts.length, 0);
+});
+
+// ---- Lead call L43(a): an outage needs at least 3 dead and half the board or more ----
+
+test('L43(a): the floor is 3 dead and half the board, whatever lower numbers the rules give', () => {
+  assert.deepEqual([OUTAGE_MIN_DEAD, OUTAGE_MIN_SHARE], [3, 0.5]);
+  const is = (dead, alive, rules = R) => {
+    const board = [...Array.from({ length: dead }, (_, i) => gone(`D${i}`, 'C-1')), ...Array.from({ length: alive }, (_, i) => live(`L${i}`, 'C-2'))];
+    return outageStep({ rec: recWith(cards()), rules, board, now: T0, healthy: true, alert: () => {} }).outage;
+  };
+  // A small Mac: one or two dead sessions are never an outage, even when they are the whole board.
+  assert.equal(is(1, 0), false);
+  assert.equal(is(2, 0), false);
+  assert.equal(is(2, 1), false);
+  // 3 dead and half or more: an outage.
+  assert.equal(is(3, 0), true);
+  assert.equal(is(3, 3), true);
+  // 3 dead but under half: no outage.
+  assert.equal(is(3, 4), false);
+  assert.equal(is(4, 5), false);
+  assert.equal(is(5, 5), true);
+  // Rules below the floor do not lower it.
+  const low = rulesWith({ [K.outageMinDead]: 1, [K.outageShare]: 0.1 });
+  assert.equal(is(1, 3, low), false);
+  assert.equal(is(2, 0, low), false);
+  assert.equal(is(3, 5, low), false);
+  assert.equal(is(3, 3, low), true);
+});
+
+test('L43(a): a two-session Mac with both sessions dead handles each card on its own', () => {
+  const rec = recWith([['card', 'C-1', { state: 'running', rerun_safe: true }], ['card', 'C-2', { state: 'running' }]]);
+  const alerts = [];
+  const r = outageStep({ rec, rules: R, board: [gone('S1', 'C-1'), gone('S2', 'C-2')], now: T0, healthy: true, alert: (a) => alerts.push(a) });
+  assert.equal(r.outage, false);
+  assert.deepEqual(r.restart, ['S1']);
+  assert.deepEqual(r.asks, ['C-2']);
+  assert.equal(alerts.length, 0, 'no outage alert');
+  assert.equal(rec.read('fact', OUTAGE_FACT), null);
 });

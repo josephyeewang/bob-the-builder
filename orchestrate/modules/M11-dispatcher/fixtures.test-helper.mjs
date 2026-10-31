@@ -16,7 +16,7 @@ export const VALUES = Object.freeze({
   [K.leadDailyCard]: ['docs/blueprint/blueprint.yaml', 'docs/blueprint/cards/**', 'docs/blueprint/BLUEPRINT.md'],
   [K.cancelGraceMin]: 2, [K.parkWaitMin]: 15, [K.deadQuietMin]: 5, [K.claimedNoSessionMin]: 10, [K.checkingMaxMin]: 30,
   [K.reportingMaxMin]: 10, [K.inReviewNoReviewerMin]: 15, [K.frontDoorStuckMin]: 10, [K.usageUnknownMaxMin]: 1440,
-  [K.outageMinDead]: 2, [K.outageShare]: 0.5,
+  [K.outageMinDead]: 3, [K.outageShare]: 0.5,
   [K.leadSoft]: 250_000, [K.leadHard]: 400_000, [K.handoffCapRole]: 8_000, [K.splitAfterCompactions]: 2,
 });
 

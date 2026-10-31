@@ -2,8 +2,11 @@
 //
 // Dead (G1) = the process group is gone AND the session has ended AND its transcript has had no
 // write for timeouts.dead_quiet_min. The board = sessions meant to run that were running at the
-// previous pass, Mac-wide. If, within one pass, the newly dead reach max(outage.min_dead,
-// ceil(outage.share × board)), it is an outage: nothing restarts, and Joe gets one alert per outage.
+// previous pass, Mac-wide. If, within one pass, the newly dead reach max(3, outage.min_dead,
+// ceil(max(0.5, outage.share) × board)), it is an outage: nothing restarts, and Joe gets one alert per outage.
+// Lead call L43(a): an outage needs at least 3 dead AND half the board or more, so a small Mac is never frozen by
+// one or two dead sessions. The rules may raise either number, never lower it. Below that, each dead session is
+// handled on its own and Joe gets one alert per card (tick.mjs `actOnDead`).
 // The outage ends by itself after 2 passes in a row with the network up, the Mini signed in and
 // usage readable, or on Joe's "resume". Outside an outage, a dead session's card is restarted only
 // when `rerun_safe === true`; any other card becomes an ask (waiting on Joe), never a restart.
@@ -12,6 +15,8 @@ import { KEYS, need, minutes } from './keys.mjs';
 
 export const OUTAGE_FACT = 'outage';
 export const HEALTHY_PASSES = 2;
+export const OUTAGE_MIN_DEAD = 3;     // L43(a): the floor; the rules' outage.min_dead may raise it
+export const OUTAGE_MIN_SHARE = 0.5;  // L43(a): half the board or more; the rules' outage.share may raise it
 
 /** G1. `s` = { alive, ended, lastWriteAt } as observed this pass. Unknown parts are not dead. */
 export function isDead(s, { now, quietMs }) {
@@ -45,7 +50,7 @@ export function outageStep({ rec, rules, board, now, healthy, resume = false, al
     write({ ...cur.doc, healthy_passes: passes, dead: [...(cur.doc.dead ?? []), ...more] }, 'outage_pass');
     return { outage: true, ended: false, restart: [], asks: [] };
   }
-  const threshold = Math.max(minDead, Math.ceil(share * board.length));
+  const threshold = Math.max(OUTAGE_MIN_DEAD, minDead, Math.ceil(Math.max(OUTAGE_MIN_SHARE, share) * board.length));
   if (board.length && dead.length >= threshold) {
     const id = `outage-${new Date(now).toISOString()}`;
     const w = write({ id, state: 'open', started_at: new Date(now).toISOString(), dead: dead.map((s) => ({ id: s.id, card: s.card ?? null })), board: board.length, healthy_passes: 0 }, 'outage_start');
