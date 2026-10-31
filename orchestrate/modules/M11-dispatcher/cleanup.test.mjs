@@ -11,12 +11,14 @@ import { PR_FACT } from './merges.mjs';
 import { rulesWith, recWith, T0, MIN, iso } from './fixtures.test-helper.mjs';
 import { tempDir } from '../../shared/test-tmp.mjs';
 
-// Test set-up only: plain git with no user or machine config, in a throwaway folder.
+// Test set-up only: plain git with no user or machine config, in a throwaway folder. It never asks for a
+// password, never shares this run's terminal and is stopped at a minute (no test may hang, 30 Oct 2026).
 function world() {
   const dir = tempDir('m11-cleanup-');
   const env = { PATH: process.env.PATH, HOME: dir, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1',
-    GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@localhost', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@localhost' };
-  const run = (args, cwd = dir) => execFileSync('git', args, { cwd, env }).toString().trim();
+    GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@localhost', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@localhost',
+    GIT_TERMINAL_PROMPT: '0', GIT_ASKPASS: '/usr/bin/false', SSH_ASKPASS: '/usr/bin/false', GCM_INTERACTIVE: 'never' };
+  const run = (args, cwd = dir) => execFileSync('git', args, { cwd, env, stdio: ['ignore', 'pipe', 'pipe'], timeout: 60_000 }).toString().trim();
   const mirror = join(dir, 'mirror.git');
   run(['init', '-q', '--bare', '-b', 'main', mirror]);
   const work = join(dir, 'work');
