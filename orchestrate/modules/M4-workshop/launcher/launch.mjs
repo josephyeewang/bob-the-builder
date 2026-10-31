@@ -10,6 +10,7 @@ import { sha256 } from './role-profiles.mjs';
 import { SETTINGS as S, unconfirmedNames } from './settings-names.mjs';
 import { hasShell } from './role-profiles.mjs';
 import { checkSettings } from './render-settings.mjs';
+import { REVIEW_ROLES, reviewUser } from './review-user.mjs';
 
 const refuse = (reason) => ({ ok: false, reason });
 
@@ -38,9 +39,18 @@ export const CHECKS = Object.freeze([
  * applies is a refusal, never a pass. `start(ctx)` runs only when every check passed.
  * `names` = { settings, flags, version, confirmed? }: the rendered role file, the start flags and
  * the pinned Claude Code version. Before check 1, any name not confirmed on that version refuses.
+ * A reviewer or auditor runs as the review user (L44): `ctx.uids` maps each role to its Mac user id, and a review
+ * role with no separate user is refused before any check. `start` gets `runAs` (null for the other roles), and
+ * builds its command with review-user.mjs `startCommand`; its outbox comes from `prepareReviewOutbox` (check 3).
  */
 export async function launch({ role, profile, checks, start, names, ctx = {} }) {
   const log = [];
+  let runAs = null;
+  if (REVIEW_ROLES.includes(role)) {
+    const who = reviewUser({ role, uids: ctx.uids, ...(ctx.self !== undefined ? { self: ctx.self } : {}) });
+    if (!who.ok) return { ok: false, failedAt: 0, reason: `a ${role} runs only as the review user: ${who.reason}`, log };
+    runAs = who.runAs;
+  }
   const left = names && typeof names === 'object' && names.settings ? unconfirmedNames(names) : ['(no role file given to the names check)'];
   if (left.length) return { ok: false, failedAt: 0, reason: `setting names not confirmed on the pinned Claude Code: ${left.join(', ')}`, log };
   // The object handed in must itself be a locked-down role file, so an empty or partial one cannot pass
@@ -59,7 +69,7 @@ export async function launch({ role, profile, checks, start, names, ctx = {} }) 
     }
     log.push({ n: c.n, ok: true });
   }
-  const started = await start({ role, profile, ...ctx });
+  const started = await start({ role, profile, ...ctx, runAs });
   return { ok: true, log, started };
 }
 

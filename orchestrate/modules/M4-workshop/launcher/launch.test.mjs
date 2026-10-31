@@ -38,6 +38,9 @@ function NAMES(role, over = {}) {
   return { settings: r.settings, flags: N_FLAGS, version: N_VERSION, confirmed, ...over };
 }
 
+// Stand-in Mac user ids (L44): the review roles have a user of their own; the launcher runs as 501.
+const UIDS = { lead: 501, worker: 501, front_door: 501, learning: 501, writer: 501, reviewer: 503, auditor: 503 };
+
 // ---- the order (§14.1.3) ----
 
 test('launch: the first failing check stops the launch; later checks never run and nothing starts', async () => {
@@ -72,7 +75,7 @@ test('launch: which checks apply to which role', async () => {
   const ran = async (role) => {
     const called = [];
     const checks = Object.fromEntries(CHECKS.map((c) => [c.n, async () => { called.push(c.n); return { ok: true }; }]));
-    await launch({ role, profile: DESIGN_PROFILES[role], checks, start: async () => {}, names: NAMES(role) });
+    await launch({ role, profile: DESIGN_PROFILES[role], checks, start: async () => {}, names: NAMES(role), ctx: { uids: UIDS, self: 501 } });
     return called;
   };
   assert.deepEqual(await ran('worker'), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
@@ -88,6 +91,39 @@ test('launch: which checks apply to which role', async () => {
   const leadWithShell = { ...DESIGN_PROFILES.lead, tools: [...DESIGN_PROFILES.lead.tools, 'Bash'] };
   await launch({ role: 'lead', profile: leadWithShell, checks, start: async () => {}, names: NAMES('lead') });
   assert.ok(called.includes(11));
+});
+
+test('L44: a reviewer or auditor with no separate review user is refused before any check; start gets runAs', async () => {
+  const all = () => {
+    const called = [];
+    return { called, checks: Object.fromEntries(CHECKS.map((c) => [c.n, async () => { called.push(c.n); return { ok: true }; }])) };
+  };
+  for (const role of ['reviewer', 'auditor']) {
+    for (const [uids, re] of [[undefined, /no review user id/], [{ ...UIDS, [role]: 501 }, /launcher's own user/],
+      [{ ...UIDS, worker: 503 }, /not a separate Mac user \(shared with worker\)/], [{ ...UIDS, [role]: 0 }, /root/]]) {
+      const { called, checks } = all();
+      let started = 0;
+      const r = await launch({ role, profile: DESIGN_PROFILES[role], checks, start: async () => { started += 1; }, names: NAMES(role), ctx: { uids, self: 501 } });
+      assert.equal(r.ok, false, `${role} ${re}`);
+      assert.equal(r.failedAt, 0);
+      assert.match(r.reason, new RegExp(`a ${role} runs only as the review user`));
+      assert.match(r.reason, re);
+      assert.deepEqual(called, []);
+      assert.equal(started, 0);
+    }
+    const { checks } = all();
+    let got;
+    const r = await launch({ role, profile: DESIGN_PROFILES[role], checks, start: async (ctx) => { got = ctx; return 'r-1'; }, names: NAMES(role), ctx: { uids: UIDS, self: 501 } });
+    assert.equal(r.ok, true);
+    assert.deepEqual(got.runAs, { user: 'review', uid: 503 });
+  }
+  // Every other role starts as the launcher's own user, with or without a uids map.
+  for (const role of ['worker', 'lead', 'writer']) {
+    const { checks } = all();
+    let got;
+    await launch({ role, profile: DESIGN_PROFILES[role], checks, start: async (ctx) => { got = ctx; }, names: NAMES(role) });
+    assert.equal(got.runAs, null, role);
+  }
 });
 
 test('launch: a setting name not confirmed on the pinned version refuses before check 1 (audit R-0b-44 M-1)', async () => {
