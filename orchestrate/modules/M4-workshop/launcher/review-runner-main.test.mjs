@@ -3,9 +3,10 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, linkSync, mkdirSync, readFileSync, symlinkSync, writeFileSync, lstatSync } from 'node:fs';
+import { chmodSync, linkSync, mkdirSync, readFileSync, symlinkSync, unlinkSync, writeFileSync, lstatSync } from 'node:fs';
 import { join } from 'node:path';
-import { installProblem, programsProblem, readCardFile, adminAnswer, sessionsFrom, realPorts, readConfig, readInstallStamp } from './review-runner-main.mjs';
+import { installProblem, programsProblem, readCardFile, recordVerdictTaken, adminAnswer, sessionsFrom, realPorts, readConfig, readInstallStamp } from './review-runner-main.mjs';
+import { readOutboxFile } from '../../M9-record/outbox.mjs';
 import { STAMP, installStamp } from './review-daemons.mjs';
 import { reviewDaemonPlists } from './review-daemons.mjs';
 import { readAccountFile, copyAccountTo, useAccount, ACCOUNT_FILE } from './accounts.mjs';
@@ -20,16 +21,16 @@ test('L65: the installed copy must be root\'s alone, with the runner, config and
   for (const p of [base, join(base, 'a'), join(base, 'a', 'b')]) chmodSync(p, 0o755);
   chmodSync(join(base, 'a', 'b', 'x.mjs'), 0o644);
   // This test's user stands in for root.
-  assert.equal(installProblem(base, [join(base, 'a', 'b', 'x.mjs')], { owner: ME }), null);
+  assert.equal(installProblem(base, [join(base, 'a', 'b', 'x.mjs')], { owner: ME, top: base }), null);
   // The real check wants root, which this user is not.
   assert.match(installProblem(base, [], {}), /is not owned by root/);
-  assert.match(installProblem(base, ['/elsewhere/wiring.mjs'], { owner: ME }), /not inside the installed copy/);
-  assert.match(installProblem(base, [join(base, '..', 'x')], { owner: ME }), /not inside the installed copy/);
+  assert.match(installProblem(base, ['/elsewhere/wiring.mjs'], { owner: ME, top: base }), /not inside the installed copy/);
+  assert.match(installProblem(base, [join(base, '..', 'x')], { owner: ME, top: base }), /not inside the installed copy/);
   chmodSync(join(base, 'a', 'b', 'x.mjs'), 0o664);
-  assert.match(installProblem(base, [], { owner: ME }), /x\.mjs can be written by others than root/);
+  assert.match(installProblem(base, [], { owner: ME, top: base }), /x\.mjs can be written by others than root/);
   chmodSync(join(base, 'a', 'b', 'x.mjs'), 0o644);
   symlinkSync('/tmp', join(base, 'a', 'l'));
-  assert.match(installProblem(base, [], { owner: ME }), /a\/l is a link/);
+  assert.match(installProblem(base, [], { owner: ME, top: base }), /a\/l is a link/);
 });
 
 test('L66 M2: what a review runs (claude, node, the hooks folder) must be inside the installed copy and root\'s alone', async () => {
@@ -42,7 +43,7 @@ test('L66 M2: what a review runs (claude, node, the hooks folder) must be inside
   for (const p of [base, join(base, 'bin'), join(base, 'hooks'), join(base, 'modules')]) chmodSync(p, 0o755);
   for (const p of [out]) chmodSync(p, 0o755);
   const c = { installRoot: base, wiring: files.wiring, claudeBin: files.claude, hooksDir: join(base, 'hooks') };
-  const check = (over = {}, node = files.node) => programsProblem({ ...c, ...over }, { self: files.self, config: files.config, node, owner: ME });
+  const check = (over = {}, node = files.node) => programsProblem({ ...c, ...over }, { self: files.self, config: files.config, node, owner: ME, top: base });
   // This test's user stands in for root; with everything inside, nothing is wrong.
   assert.equal(check(), null);
   assert.match(programsProblem(c, { self: files.self, config: files.config, node: files.node }), /is not owned by root/);
@@ -70,6 +71,78 @@ test('L66 M2: what a review runs (claude, node, the hooks folder) must be inside
   assert.deepEqual(got, { role: 'reviewer', claudeBin: files.claude, node: files.node, hooksDir: join(base, 'hooks') });
 });
 
+test('item 20(b) planted: every folder above the installed copy, up to /, must be root\'s, written by no one else, and not a link', () => {
+  const base = tempDir('m4-above-');
+  const inst = join(base, 'p', 'q', 'inst');
+  mkdirSync(inst, { recursive: true });
+  for (const p of [base, join(base, 'p'), join(base, 'p', 'q'), inst]) chmodSync(p, 0o755);
+  const check = (opts = {}, root = inst) => installProblem(root, [], { owner: ME, top: base, ...opts });
+  assert.equal(check(), null);
+  chmodSync(join(base, 'p'), 0o775);
+  assert.match(check(), new RegExp(`${join(base, 'p')}, above the installed copy, can be written by others than root`));
+  chmodSync(join(base, 'p'), 0o757);
+  assert.match(check(), /p, above the installed copy, can be written by others than root/);
+  chmodSync(join(base, 'p'), 0o755);
+  chmodSync(base, 0o777);
+  assert.match(check(), new RegExp(`${base}, above the installed copy, can be written by others than root`), 'up to and with the top');
+  chmodSync(base, 0o755);
+  // Another user's folder above the copy (the stat port stands in for that user).
+  const other = (p) => { const st = lstatSync(p); return p === join(base, 'p', 'q') ? Object.assign(Object.create(Object.getPrototypeOf(st)), st, { uid: ME + 1 }) : st; };
+  assert.match(check({ lstat: other }), /q, above the installed copy, is not owned by root/);
+  // A link above the copy.
+  symlinkSync(join(base, 'p'), join(base, 'lp'));
+  assert.match(check({}, join(base, 'lp', 'q', 'inst')), /lp, above the installed copy, is a link/);
+  // The real check runs to /, which this throwaway folder's parents fail.
+  assert.match(installProblem(inst, [], { owner: ME }), /above the installed copy/);
+  assert.match(check({}, '/elsewhere'), /is not under/);
+});
+
+test('item 20(a): whether the Record took a session\'s verdict is read from its verdict row and the file it names', () => {
+  const rec = tempDir('m4-rectaken-');
+  const outboxRoot = tempDir('m4-rectaken-out-');
+  const uids = { reviewer: ME, auditor: ME };
+  const H = 'a'.repeat(40);
+  mkdirSync(join(rec, 'docs'), { mode: 0o755 });
+  for (const p of [rec, join(rec, 'docs'), outboxRoot]) chmodSync(p, 0o755);
+  const ask = (over = {}) => recordVerdictTaken({ recordRoot: rec, recordUid: ME, outboxRoot, uids, role: 'reviewer', sessionId: 'S-1', card: 'C-1', head: H, ...over });
+  assert.deepEqual(ask(), { ok: false, reason: 'the Record holds no verdicts yet' });
+  mkdirSync(join(rec, 'docs', 'verdict'), { mode: 0o755 });
+  chmodSync(join(rec, 'docs', 'verdict'), 0o755);
+  assert.equal(ask().reason, 'the Record holds no verdict of session S-1');
+  // The session's verdict file, and the row the intake would write for it.
+  for (const p of [join(outboxRoot, 'reviewer'), join(outboxRoot, 'reviewer', 'S-1')]) { mkdirSync(p, { mode: 0o755 }); chmodSync(p, 0o755); }
+  const file = join(outboxRoot, 'reviewer', 'S-1', 'verdict-S-1.md');
+  writeFileSync(file, `${JSON.stringify({ entity: 'verdict', card: 'C-1', expectRev: 2, fields: { head: H, pass: true } })}\n`, { mode: 0o644 });
+  const f = readOutboxFile({ outboxRoot, uids, tag: { role: 'reviewer', sessionId: 'S-1' }, file });
+  assert.equal(f.ok, true, f.reason);
+  const row = (doc, id = 'verdict-S-1-7') => writeFileSync(join(rec, 'docs', 'verdict', `${id}.json`), JSON.stringify({ entity: 'verdict', id, rev: 1, doc }), { mode: 0o644 });
+  const good = { session_id: 'S-1', role: 'reviewer', card: 'C-1', head: H, pass: true, source_key: f.key };
+  row(good);
+  assert.deepEqual(ask(), { ok: true });
+  // Another head, card or role is not this start's verdict.
+  assert.match(ask({ head: 'b'.repeat(40) }).reason, /names reviewer on C-1 at aaaaaaa/);
+  assert.match(ask({ card: 'C-2' }).reason, /names reviewer on C-1/);
+  assert.match(ask({ role: 'auditor' }).reason, /names reviewer on C-1/);
+  // A session whose id starts the same (S-1-2) is another session: its good verdict is not S-1's.
+  unlinkSync(join(rec, 'docs', 'verdict', 'verdict-S-1-7.json'));
+  for (const p of [join(outboxRoot, 'reviewer', 'S-1-2')]) { mkdirSync(p, { mode: 0o755 }); chmodSync(p, 0o755); }
+  const file2 = join(outboxRoot, 'reviewer', 'S-1-2', 'verdict-S-1-2.md');
+  writeFileSync(file2, readFileSync(file), { mode: 0o644 });
+  const f2 = readOutboxFile({ outboxRoot, uids, tag: { role: 'reviewer', sessionId: 'S-1-2' }, file: file2 });
+  row({ ...good, session_id: 'S-1-2', source_key: f2.key }, 'verdict-S-1-2-8');
+  assert.deepEqual(ask({ sessionId: 'S-1-2' }), { ok: true });
+  assert.equal(ask().reason, 'the Record holds no verdict of session S-1');
+  row(good);
+  // A row whose file has changed since (a second file written over the first) does not count.
+  writeFileSync(file, `${JSON.stringify({ entity: 'verdict', card: 'C-1', expectRev: 2, fields: { head: H, pass: false } })}\n`, { mode: 0o644 });
+  assert.match(ask().reason, /is not the one handed in/);
+  // A Record that isn't its owner's alone throws: the runner refuses the request and counts nothing.
+  chmodSync(join(rec, 'docs'), 0o775);
+  assert.throws(() => ask(), /is not the Record owner's alone/);
+  chmodSync(join(rec, 'docs'), 0o755);
+  assert.equal(ask({ sessionId: '../x' }).reason, 'the start names no session');
+});
+
 test('L65: a card is read from the Record read only, as the Record owner\'s plain file', () => {
   const root = tempDir('m4-recread-');
   mkdirSync(join(root, 'docs', 'card'), { recursive: true });
@@ -77,7 +150,7 @@ test('L65: a card is read from the Record read only, as the Record owner\'s plai
   const put = (id, body, mode = 0o644) => { const p = join(root, 'docs', 'card', `${id}.json`); writeFileSync(p, typeof body === 'string' ? body : JSON.stringify(body), { mode }); chmodSync(p, mode); return p; };
   put('C-1', { entity: 'card', id: 'C-1', rev: 3, doc: { state: 'in_review', head: 'a'.repeat(40), tier: 1 } });
   const read = (card, uid = ME) => readCardFile({ recordRoot: root, recordUid: uid, card });
-  assert.deepEqual(read('C-1'), { ok: true, doc: { state: 'in_review', head: 'a'.repeat(40), tier: 1 } });
+  assert.deepEqual(read('C-1'), { ok: true, doc: { state: 'in_review', head: 'a'.repeat(40), tier: 1 }, rev: 3 });
   assert.match(read('C-2').reason, /no such card/);
   assert.match(read('../x').reason, /not a card id/);
   assert.match(read('C-1', ME + 1).reason, /not the Record owner's alone/);
