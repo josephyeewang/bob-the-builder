@@ -187,6 +187,7 @@ function isGitExecutable(value) {
 // Only literal values from this supplied shell task are tracked. No host
 // environment, arbitrary expansion or external configuration is read.
 function gitEnvironmentOverride(environment, budget) {
+  if (HOOK_SKIP_ENV.some(name => environment.has(name))) return true; // BOB ADDITION
   const count = environment.get('GIT_CONFIG_COUNT') || '';
   budget.spend(count.length + environment.size + 1);
   // Git uses strtoul: leading ASCII whitespace/+ are accepted, trailing bytes
@@ -314,7 +315,7 @@ function checkGitWords(words, budget, start = 0, environmentOverride = false) {
   budget.spend((command?.length || 0) + 1);
   if (command === 'config') return checkGitConfigWrite(words, budget, index + 1); // BOB ADDITION
   if (!PROTECTED_GIT_COMMANDS.has(command)) return null;
-  if (override) return `BLOCKED: Overriding core.hooksPath is not allowed with git ${command}. Git hooks must not be bypassed.`;
+  if (override) return `BLOCKED: Overriding core.hooksPath (or setting a hook-skip variable such as HUSKY=0) is not allowed with git ${command}. Git hooks must not be bypassed.`;
   if (findGitBypassFlag(words, budget, index + 1, command)) {
     return `BLOCKED: --no-verify flag is not allowed with git ${command}. Git hooks must not be bypassed.`;
   }
@@ -357,7 +358,11 @@ const ENV_FLAG_OPTIONS = new Set(['-i', '--ignore-environment', '-0', '--null'])
 const SUDO_VALUE_OPTIONS = new Set(['-u', '--user', '-g', '--group', '-h', '--host', '-p', '--prompt', '-C', '-T', '-R', '-D']);
 const SUDO_FLAG_OPTIONS = new Set(['-n', '-E', '-H', '-S', '-k', '-K', '-b']);
 const SHELL_ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*\+?=/;
-const GIT_ENV_NAME = /^GIT_CONFIG_(?:COUNT|PARAMETERS|(?:KEY|VALUE)_[0-9]+)$/;
+const GIT_ENV_NAME = /^(?:GIT_CONFIG_(?:COUNT|PARAMETERS|(?:KEY|VALUE)_[0-9]+)|HUSKY|LEFTHOOK|SKIP)$/; // BOB ADDITION: + hook-skip variables
+// BOB ADDITION (2026-10-30): hook managers' own off switches. `HUSKY=0`, `LEFTHOOK=0` and pre-commit's
+// `SKIP=<hook ids>` switch the commit checks off without any flag; ORCHESTRATE's copy (M4 no-verify-block)
+// already blocked them. Any value set by the command counts.
+const HOOK_SKIP_ENV = ['HUSKY', 'LEFTHOOK', 'SKIP'];
 
 function isEnvSplitFlag(flag) {
   return flag === '-S' || flag === '--split-string'

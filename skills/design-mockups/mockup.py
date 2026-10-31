@@ -2,14 +2,14 @@
 """design-mockups CLI — generate homepage design comps for ANY project.
 
 Usage (from a project dir containing mockup.config.json, or with DESIGN_MOCKUP_CONFIG set):
-  python mockup.py archetypes [core|cinematic|modern|all]   # one comp per archetype (default all)
-  python mockup.py recipe                                   # config.content_recipe across the 12 STYLES
-  python mockup.py custom jobs.json [round-name]            # [{name,prompt,refs?,aspect?}, ...]
+  python3 mockup.py archetypes [core|cinematic|modern|all]   # one comp per archetype (default all)
+  python3 mockup.py recipe                                   # config.content_recipe across the 12 STYLES
+  python3 mockup.py custom jobs.json [round-name]            # [{name,prompt,refs?,aspect?}, ...]
                                                             #   refs = paths OR gallery NUMBERS (e.g. 117)
-  python mockup.py gallery ["Title"]                        # rebuild gallery-ALL.html (canonical numbering)
-  python mockup.py grouped [out_dir]                        # gallery-grouped.html — sections by style bucket
-  python mockup.py curated curation.json [out_dir]          # gallery-curated.html — your themes on top
-  python mockup.py reject <name-or-number>...               # prune: MOVE renders to out_dir/_deleted
+  python3 mockup.py gallery ["Title"]                        # rebuild gallery-ALL.html (canonical numbering)
+  python3 mockup.py grouped [out_dir]                        # gallery-grouped.html — sections by style bucket
+  python3 mockup.py curated curation.json [out_dir]          # gallery-curated.html — your themes on top
+  python3 mockup.py reject <name-or-number>...               # prune: MOVE renders to out_dir/_deleted
                                                             #   (never deleted; excluded from numbering)
 
 Gallery-only verbs (gallery/grouped/curated/reject) need no API key; out_dir comes from
@@ -24,6 +24,7 @@ Each generation run with a batch name also writes {round}-sheet.png + {round}-ga
 The archetype/style library lives in lib/archetypes.py. Prompt-craft heuristics are in SKILL.md.
 """
 import sys, os, json, pathlib
+sys.dont_write_bytecode = True  # never leave __pycache__/ in the shared skill folder
 HERE = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE / "lib"))
 import gen, archetypes, gallery  # noqa  (gen is config-LAZY: importing needs no config)

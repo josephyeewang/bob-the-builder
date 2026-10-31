@@ -583,6 +583,35 @@ The companion `audit-log.md` records *deferred* items (Defer verdicts that may s
 - **Revisit trigger:**
   - The NEW-mode rewrite lands: build the Rule 22 check.
   - Or: any of the new checks raises a false alarm on a healthy project. Fix the check or remove it; never mute it.
+
+### D-034: What Bob says about itself matches what it does, and the design skills stop writing into Bob's folder
+
+- **Date:** 2026-10-30
+- **Status:** Accepted
+- **Context:** A fresh-context re-audit of v2.57 found 50 problems: 14 serious, 26 minor, 10 cosmetic. 18 were in ORCHESTRATE's area and went to that lane. Bob upkeep's 7 serious ones were all cases of Bob's text claiming something its files did not do:
+  - Rule 24(c) told users to run a `--build-integrity` option that does not exist.
+  - Two checks said they block retired terms; they only warn.
+  - Part I of `build-protocol.md` still pointed at an install path Bob has not used since the skill, kept a second copy of the complexity table that had drifted from the core's, named one outside model by brand, and sent UPGRADE to the core instead of `modes/upgrade.md`.
+  - A design-skill file named a confidential client.
+  - The design skills wrote their trial log and Python cache into Bob's own folder, which every project shares.
+  - The image skill's commands said `python`, which is missing on a stock Mac, and never said it needs Pillow.
+  - `SECURITY.md` told users to pin a release tag Bob has never made, and did not list the hooks and workflow Bob installs in a project.
+- **Decision:**
+  - (1) Each claim was made true or taken out. Rule 24(c)'s option is marked planned, with its trigger and "do not call it". The checks' messages name only what really blocks. Part I points to `/bob`, to `modes/upgrade.md`, and to the core's complexity table (the core's row gained the two details only Part I had); it says "a model from a different family".
+  - (2) The design skills write their trial log to the project's `docs/design/`; Bob's copy is a header to copy. The mockup script does not write a Python cache, and `.gitignore` ignores one anyway. The commands say `python3`, and setup says to install Pillow.
+  - (3) `SECURITY.md` lists what runs in Bob's folder, what Bob installs in a project, and what the design skills send out. It says plainly that Bob has no release tags and how to stay on a version you trust.
+  - (4) The minor findings under about ten minutes each were fixed in the same change, among them: `block-no-verify` also refuses the hook managers' own off switches (`HUSKY=0`, `LEFTHOOK=0`, `SKIP=`), as ORCHESTRATE's copy already did; `audit-ledger-check.mjs --since <date>` fails when no audit ran in the phase; `run-commands-check.mjs` says "cannot judge" when a project has no run config (Rule 29); `one-home-check.mjs` reads the design skills too; the logo scripts' tests run in CI.
+- **Alternatives considered:**
+  - Remove Inspo from the design gallery's default. Not done, by the author's choice; the skip rule for confidential client work stays.
+  - Merge the phase gate list in the core and `build-protocol.md` into one. Deferred: the core already covers the one item that differed, and the merge touches text the ORCHESTRATE lane is rewriting.
+  - Fix the same claim in `bob-init.sh`. Not done here: the file is ORCHESTRATE's, so it was passed to that lane.
+- **Consequences:**
+  - Bob's copy of the trial log had no entries yet, so nothing had to move; each project starts its own log the first time Round 0 runs.
+  - `HUSKY=0 npm install` is still allowed; only a git commit or push with a hook-skip variable is refused.
+  - Deferred, listed in `audit-log.md`: a pre-push private-name check (D-026), planted-problem tests for four older checks, and the two names `lane-check.mjs` goes by.
+- **Revisit trigger:**
+  - Bob makes its first release tag: rewrite `SECURITY.md`'s supply-chain advice.
+  - Or: the next fresh audit finds another claim Bob's files do not back. Then the gap is in how claims get checked, not in one file.
 ---
 
 ## Anti-pattern reminder

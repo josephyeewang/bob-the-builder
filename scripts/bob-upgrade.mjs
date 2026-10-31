@@ -725,7 +725,7 @@ for (const [label, rows] of byLabel) {
       console.log(`      Reason recorded: ${DIFFS[p.id] || "(none — add one)"}`);
     } else if (g === "sweep-failing") {
       for (const pr of st.problems.slice(0, 12)) console.log(`      ${pr}`);
-      console.log(`      Until these are fixed the commit check only warns. Then switch it on: --enforce commit-sweep`);
+      console.log(`      Until these are fixed the commit check only warns. Then switch it on: --apply commit-sweep`);
     } else if (g === "sweep-ready") {
       console.log(`      Switch it on: --apply commit-sweep`);
     }

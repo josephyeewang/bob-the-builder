@@ -12,19 +12,20 @@ A reusable capability for producing Awwwards / One-Page-Love-caliber homepage di
 **Generic is a workflow problem, not a model problem. Explore as IMAGES (cheap, fast, artful), build as CODE (correct, data-wired, motion).** Never ask one tool to do both — that's what produces "AI slop." Image models originate art (texture, palette, type, mood, concept) that CSS can't; code originates correctness that images can't.
 
 ## Setup (one time)
+0. **Python 3 with Pillow** (the gallery and contact sheets draw with it): `python3 -m pip install --user Pillow`. Use `python3`; many Macs have no `python` command.
 1. **Google AI Studio API key** with **billing/prepay enabled** (image gen is a paid feature; Nano Banana Pro ≈ $0.13/image, so a 40-comp sweep ≈ $5). Get it at aistudio.google.com/apikey → add credits.
 2. Put the key in an env-style file (e.g. a project `.env.local`) as `GOOGLE_AI_API_KEY=...` (the toolkit reads it without printing it).
 3. Copy `config.example.json` → your project as `mockup.config.json`; fill in product_name, product_desc, headline, data_points, content_recipe, and point `api_key_file` at your key file. Set `out_dir`.
 
 ## Usage (from the project dir, or set DESIGN_MOCKUP_CONFIG)
 ```
-python ~/.claude/skills/design-mockups/mockup.py archetypes [core|cinematic|modern|all]  # 1 comp per style
-python ~/.claude/skills/design-mockups/mockup.py recipe        # your content_recipe across the 12 art-direction STYLES
-python ~/.claude/skills/design-mockups/mockup.py custom jobs.json [round]  # [{name,prompt,refs?}] — refs = paths OR gallery NUMBERS (117)
-python ~/.claude/skills/design-mockups/mockup.py gallery       # rebuild the consolidated searchable gallery of out_dir
-python ~/.claude/skills/design-mockups/mockup.py grouped [out_dir]           # auto-sectioned board (13 style buckets)
-python ~/.claude/skills/design-mockups/mockup.py curated curation.json [out_dir]  # user's themes on top (★ green), remainder always appended
-python ~/.claude/skills/design-mockups/mockup.py reject 23 45 old-name       # prune: MOVE to out/_deleted — never delete, numbering pool shrinks
+python3 ~/.claude/skills/design-mockups/mockup.py archetypes [core|cinematic|modern|all]  # 1 comp per style
+python3 ~/.claude/skills/design-mockups/mockup.py recipe        # your content_recipe across the 12 art-direction STYLES
+python3 ~/.claude/skills/design-mockups/mockup.py custom jobs.json [round]  # [{name,prompt,refs?}] — refs = paths OR gallery NUMBERS (117)
+python3 ~/.claude/skills/design-mockups/mockup.py gallery       # rebuild the consolidated searchable gallery of out_dir
+python3 ~/.claude/skills/design-mockups/mockup.py grouped [out_dir]           # auto-sectioned board (13 style buckets)
+python3 ~/.claude/skills/design-mockups/mockup.py curated curation.json [out_dir]  # user's themes on top (★ green), remainder always appended
+python3 ~/.claude/skills/design-mockups/mockup.py reject 23 45 old-name       # prune: MOVE to out/_deleted — never delete, numbering pool shrinks
 ```
 Every run also writes `_contact.png` + `gallery-ALL.html` (one searchable, NUMBERED board), and — when the batch has a round name — a per-round `{round}-sheet.png` + `{round}-gallery.html` pair. **Gallery numbers are the shared vocabulary**: they're stable (one canonical numbering in `lib/gallery.py`), the user gives feedback by number ("#117 but lighter"), curation section titles cite them ("like #117"), and `refs` resolve from them. curation.json: `[{"title":"THEME 1 — report hero (like #117)","nums":[117,94],"star":true}, ...]`.
 

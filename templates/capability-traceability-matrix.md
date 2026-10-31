@@ -6,7 +6,7 @@
 
 - Every capability in the Product Spec (Step 1a) MUST have a row here. No implicit capabilities.
 - Every row MUST have a phase assignment. Unassigned capabilities are a gap and must be resolved before Step 6.
-- Status updates happen at `[N]c: Reconcile` (after each build phase) and at A7i (after each hardening pass).
+- Status updates happen at `[N]c: Reconcile` (after each build phase) and at A7.3 (after each hardening pass).
 - At Step [N+1] hardening, every `E`-status row must be verifiable in code.
 
 ## Status codes
@@ -18,7 +18,7 @@
 | **F** | Future (not built, assigned to a later phase) |
 | **—** | Not applicable to this phase |
 
-## Hardening badges (set in A7i)
+## Hardening badges (set in A7.3)
 
 | Badge | Meaning |
 |-------|---------|
