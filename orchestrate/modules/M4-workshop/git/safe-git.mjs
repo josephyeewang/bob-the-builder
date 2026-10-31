@@ -298,10 +298,13 @@ const LINK_WALK_MAX = 1_000_000;
  * The first link anywhere in `common` that leads outside it (and outside every folder in `allowObjects`), as a
  * refusal that names it, or null (#32 round 3, L51). A link that leads nowhere is refused too. Links are not
  * followed, so each folder is read once. An `objects` folder or a ref linked to another repository let git read or
- * write there.
+ * write there. A file with a second name (a hard link) is refused the same way, since it may be another repository's
+ * file (#32 cosmetic); object files are let through, because a local clone hard-links them and an object's name is
+ * its content.
  */
 function linkOutside(common, allowObjects) {
   const allowed = allowObjects.map((p) => { try { return realpathSync.native(p); } catch { return null; } }).filter(Boolean);
+  const objects = join(common, 'objects');
   let budget = LINK_WALK_MAX;
   const stack = [common];
   while (stack.length) {
@@ -318,6 +321,10 @@ function linkOutside(common, allowObjects) {
         const name = p.slice(common.length + 1);
         if (real === null) return `its ${name} is a link that leads nowhere`;
         if (!within(real, common) && !allowed.some((a) => within(real, a))) return `its ${name} is a link to ${real}, outside the repository`;
+      } else if (e.isFile() && !within(p, objects)) {
+        const st = lstatOf(p);
+        if (!st) return `its ${p.slice(common.length + 1)} could not be read`;
+        if (st.nlink > 1) return `its ${p.slice(common.length + 1)} has a second name (a hard link), so it may be another repository's file`;
       }
     }
   }
