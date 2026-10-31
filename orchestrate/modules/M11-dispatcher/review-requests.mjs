@@ -6,14 +6,18 @@
 // older than 3 minutes is an error, never "no reviewer" (L63).
 //
 //   reviewPorts({ requests, status, reviewUid, now, newId, mainHead }) → { requestReview, hasReviewer, reviewAlerts }
-//   statusAlerts(status, mainHead)                            → the Dispatcher's own alerts from the status (L66)
+//   statusAlerts(status, mainHead, now)                       → the Dispatcher's own alerts from the status (L66)
 //   relayReviewAlerts({ rec, alerts, alert, now })            → tells Joe each runner alert once (a fact per alert)
 //
 // Besides the runner's own alerts, the Dispatcher tells Joe two things it reads in the status (L66), each once:
 //   - a pass that failed (`ok: false`), once per cause (its error text);
 //   - an installed copy whose commit stamp is not main's (or has no stamp), once per installed commit: reviews then run
-//     old code until the copy is updated. `mainHead()` is the wiring's port (main's commit, 40 hex); without it, or when
-//     it fails, there is no stamp check.
+//     old code until the copy is updated. `mainHead(installed)` is the wiring's port: `{ commit, since }`, main's commit
+//     (40 hex) and, in ms, when main first moved past the installed commit (the commit time of the oldest commit in
+//     `installed..main`; main's own commit time when there is no stamp or it is not on main). The updater copies main
+//     every 10 minutes (M4 review-updater.mjs), so a copy behind main is told only once it has stayed behind for
+//     STAMP_GRACE_MS (item 20(c)); no stamp, or no `since` (or one dated ahead), is told at once. A plain commit string
+//     counts as no `since`. Without the port, or when it fails, there is no stamp check.
 //
 // Writing a file is all this does: no process is started here (only-send-safe.test.mjs).
 
@@ -54,16 +58,23 @@ const sha = (s) => createHash('sha256').update(String(s)).digest('hex').slice(0,
  * The Dispatcher's own alerts from a status (readReviewStatus's answer), in the runner's alert shape. `at` is fixed, so
  * each is told once per id (REVIEW_ALERT_FACT keys on id and at).
  */
-export function statusAlerts(s, mainHead) {
+export const STAMP_GRACE_MS = 30 * 60_000;
+const AHEAD_MS = 5 * 60_000;
+
+export function statusAlerts(s, mainHead, now = Date.now()) {
   const out = [];
   if (s?.ok === false) {
     const why = typeof s.error === 'string' && s.error ? s.error.slice(0, 300) : 'no reason given';
     out.push({ id: `runner-failed-${sha(why)}`, at: 'once', text: `Its last pass failed: ${why}.` });
   }
-  let main = null;
-  try { main = mainHead ? mainHead() : null; } catch { main = null; }
+  let head = null;
+  try { head = mainHead ? mainHead(s?.installed_commit ?? null) : null; } catch { head = null; }
+  const main = typeof head === 'string' ? head : head?.commit;
   if (typeof main === 'string' && HEX40.test(main) && s?.installed_commit !== main) {
     const at = s?.installed_commit ?? null;
+    const since = Number.isFinite(head?.since) && head.since <= now + AHEAD_MS ? head.since : null;
+    // Behind main for less than the grace: the updater has not had its turn yet.
+    if (at && since !== null && now - since < STAMP_GRACE_MS) return out;
     out.push({ id: `stamp-${at ?? 'none'}`, at: 'once', text: at
       ? `Its installed copy is at ${at.slice(0, 7)}, but main is at ${main.slice(0, 7)}: reviews run the old code until the copy is updated.`
       : 'Its installed copy has no commit stamp, so whether reviews run main\'s code can\'t be told.' });
@@ -78,7 +89,7 @@ export function reviewPorts({ requests, status, reviewUid, now = () => Date.now(
     requestReview: ({ card, head, role }) => writeReviewRequest({ dir: requests, card, head, role, ...(newId ? { newId } : {}) }),
     // Throws when the status can't be trusted: an unclear answer is an error, never a no (L63).
     hasReviewer: (card, role, head) => read().running.some((r) => r.card === card && r.role === role && r.head === head),
-    reviewAlerts: () => { const s = read(); return [...s.alerts, ...statusAlerts(s, mainHead)]; },
+    reviewAlerts: () => { const s = read(); return [...s.alerts, ...statusAlerts(s, mainHead, now())]; },
   };
 }
 
