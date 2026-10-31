@@ -743,56 +743,80 @@ test('#40 check: the dot-pattern forms main refuses stay refused', () => {
   assert.ok(w.why('find .? -delete', { cwd: join(w.work, 'dist') }), 'find .? from a subfolder');
 });
 
-// Lane 2 follow-up (dot-glob): under bash 3.2 a pattern part that starts with `.` can match `..`, so `rm -rf .?/*`
-// reached the folder above. Such a part is judged both as written and as `..`, for every command the folder rule judges.
-test('dot-glob: a pattern part starting with . may be .., and is judged as the folder above', (t) => {
+// Lane 2 follow-up (dot-glob, LEAD-CALLS L59): under bash 3.2 a pattern part that starts with `.` can match `..`, and
+// `.*` matches `.` too, so `rm -rf .?/*` reached the folder above and `rm -rf .*/conf` this one. Reading such a part
+// two ways missed words holding two of them (round 2, M1 and M2), so any such part is refused, for every command the
+// folder rule judges.
+test('dot-glob: a pattern part starting with . that can match . or .. is refused', (t) => {
   const w = world();
   const P = w.work;
   const S = join(P, 'sub');
-  mkdirSync(join(S, 'a'), { recursive: true });
-  mkdirSync(join(S, 'conf'));
-  const second = join(S, 'conf', ENV_PROD);
-  writeFileSync(second, 'Y=1\n');
-  writeFileSync(w.snapshot, makeSnapshot({ production: { env_files: [w.envFile, second], programs: ['fakehost', 'fakedb'], hosts: ['db.prod.example.net'] }, secrets: { paths: [join(w.home, '.config', 'gh', 'hosts.yml')] } }));
-  const pf = [w.envFile, second].map(fold);
-  const why = (c, cwd) => prodGuard.folderWriteWhy(c, { cwd, protectedFiles: pf, home: w.home, user: 'u', tmpdir: w.root, cdpath: '' });
-  // The shells, on disk: bash 3.2 (the Mac's /bin/bash) matches `..` with each form; zsh never matches `.` or `..`.
-  // Skipped where that bash or zsh is not installed (CI runs Linux, whose newer bash skips `.` and `..` too).
+  for (const d of ['a/x', 'conf', 'x', '.k/deep', '.cache', '.next']) mkdirSync(join(S, d), { recursive: true });
+  mkdirSync(join(P, '.k', 'x'), { recursive: true });
+  // Protected files at the given places below P (`.` is P itself), and nowhere else.
+  const at = (rels) => {
+    const files = rels.map((r) => join(P, r, ENV_PROD));
+    for (const f of files) writeFileSync(f, 'X=1\n');
+    writeFileSync(w.snapshot, makeSnapshot({ production: { env_files: files, programs: ['fakehost', 'fakedb'], hosts: ['db.prod.example.net'] }, secrets: { paths: [join(w.home, '.config', 'gh', 'hosts.yml')] } }));
+    const pf = files.map(fold);
+    const why = (c, cwd = S) => prodGuard.folderWriteWhy(c, { cwd, protectedFiles: pf, home: w.home, user: 'u', tmpdir: w.root, cdpath: '' });
+    return {
+      why,
+      no: (c, cwd = S) => { assert.ok(why(c, cwd), `folder rule, ${rels}: ${JSON.stringify(c)}`); blocked(prodGuard.decide(bash(c, cwd), w.args), `production, ${rels}: ${JSON.stringify(c)}`); },
+      ok: (c, cwd = S) => { assert.equal(why(c, cwd), null, `folder rule, ${rels}: ${JSON.stringify(c)}`); passed(prodGuard.decide(bash(c, cwd), w.args), `production, ${rels}: ${JSON.stringify(c)}`); },
+    };
+  };
+  // The shells, on disk: bash 3.2 (the Mac's /bin/bash) matches `..` with each form, and `.*` matches `.` too; zsh
+  // never matches `.` or `..`. Skipped where that bash or zsh is not installed (CI runs Linux, whose bash 5.2 skips
+  // `.` and `..` too).
   const bash32 = /version 3\.2/.test(spawnSync('/bin/bash', ['--version'], { encoding: 'utf8', timeout: 10_000, stdio: ['ignore', 'pipe', 'pipe'] }).stdout ?? '');
   const forms = ['.?', '.*', '.[.]', '.[!x]', '.[[:punct:]]', '.?/*', 'a/.?/*', './.?/*'];
   const run = (sh, f, pre = '') => spawnSync(sh, ['-c', `${pre}cd sub && echo ${f}`], { cwd: P, encoding: 'utf8', timeout: 10_000, stdio: ['ignore', 'pipe', 'pipe'] }).stdout ?? '';
-  if (bash32) for (const f of forms) assert.match(run('/bin/bash', f), /(^|[ /])\.\.(\/|\s|$)/, `bash 3.2 matches .. with ${f}`);
-  else t.diagnostic('bash 3.2 not here: the shell check is skipped');
-  if (existsSync('/bin/zsh')) for (const f of forms) assert.doesNotMatch(run('/bin/zsh', f, 'setopt nonomatch; '), /(^|[ /])\.\.(\/|\s|$)/, `zsh does not match .. with ${f}`);
+  if (bash32) {
+    for (const f of forms) assert.match(run('/bin/bash', f), /(^|[ /])\.\.(\/|\s|$)/, `bash 3.2 matches .. with ${f}`);
+    for (const f of ['.*', '.**']) assert.match(run('/bin/bash', f), /(^| )\.( |$)/, `bash 3.2 matches . with ${f}`);
+    assert.equal(run('/bin/bash', '.*/conf').trim(), './conf', 'bash 3.2: .*/conf is ./conf');
+  } else t.diagnostic('bash 3.2 not here: the shell check is skipped');
+  if (existsSync('/bin/zsh')) {
+    for (const f of forms) assert.doesNotMatch(run('/bin/zsh', f, 'setopt nonomatch; '), /(^|[ /])\.\.(\/|\s|$)/, `zsh does not match .. with ${f}`);
+    for (const f of ['.*', '.**', '.*/conf']) assert.doesNotMatch(run('/bin/zsh', f, 'setopt nonomatch; '), /(^| )\.(\/| |\n|$)/, `zsh does not match . with ${f}`);
+  }
+  // The round-2 lines (M1: two dot parts in one word; M2: `.*` as this folder), each with the reviewer's placements.
+  for (const rels of [['sub/x'], ['.k/x']]) {
+    const k = at(rels);
+    for (const c of ['rm -rf .?/.?/x', 'chmod -R 777 .?/.?/x', 'rm -rf .*/.*/x', 'find .?/.?/x -delete']) k.no(c);
+  }
+  {
+    const k = at(['sub/conf']);
+    for (const c of ['rm -rf .*/conf', 'chmod -R 777 .*/conf', 'cp -R /tmp/in .*/conf', 'tar -xf a.tar -C .*/conf', 'rsync -a /tmp/in/ .*/conf/', 'rm -rf ./.*/conf', 'chmod -R 777 .**/conf']) k.no(c);
+    assert.match(k.why('rm -rf .*/conf') ?? 'none', /a pattern starting with a dot, which can mean this folder or the one above \(name the files\)/);
+  }
+  at(['sub/a/x']).no('rm -rf a/.*/x');
+  // Every spelling the shell reads as such a part (quotes and backslashes taken out, braces opened), refused.
+  const k = at(['.']);
+  const spellings = ['\\.?', "'.'?", "$'.'?", '{.,.}?', '.{?,x}', '.**', '.[!a]', '.[^a]', '.[\\.]', '.[].]', '..*', '.[.]*', '.[,-.]', '.[--.]', '.[-.]', '.[.-.]'];
+  for (const f of spellings) for (const c of [`rm -rf ${f}/*`, `chmod -R 777 ${f}/*`]) k.no(c);
   // Every form x every command the folder rule judges x run from the subfolder, or from the parent after `cd sub &&`.
   const commands = { rm: (f) => `rm -rf ${f}`, rmdir: (f) => `rmdir ${f}`, chmod: (f) => `chmod -R 777 ${f}`, chown: (f) => `chown -R u ${f}`, mv: (f) => `mv ${f} /tmp/out`, cp: (f) => `cp -R /tmp/in ${f}`, find: (f) => `find ${f} -delete`, 'git clean': (f) => `git clean -fdx -- ${f}` };
   let n = 0;
   for (const f of forms) {
-    for (const [name, make] of Object.entries(commands)) {
-      for (const [c, cwd] of [[make(f), S], [`cd sub && ${make(f)}`, P]]) {
-        const what = `${name}, ${f}, ${JSON.stringify(c)} from ${cwd === S ? 'sub' : 'the parent'}`;
-        assert.ok(why(c, cwd), `folder rule: ${what}`);
-        blocked(prodGuard.decide(bash(c, cwd), w.args), `production: ${what}`);
-        n += 1;
-      }
+    for (const make of Object.values(commands)) {
+      k.no(make(f));
+      k.no(`cd sub && ${make(f)}`, P);
+      n += 1;
     }
   }
-  assert.equal(n, 128);
-  // Also inside a longer path, and with a pattern on both sides.
-  for (const c of ['rm -rf a/../a/.?/*', 'chmod -R 777 ./a/.*/', 'rm -rf .[.]/sub/conf', 'cp -R /tmp/in .?/.?/*']) assert.ok(why(c, S), c);
-  // The word as written is still judged too: `.?/deep` matches `.k/deep` here, while `../deep` holds nothing.
-  const third = join(S, '.k', 'deep', ENV_PROD);
-  mkdirSync(dirname(third), { recursive: true });
-  writeFileSync(third, 'Z=1\n');
-  assert.match(prodGuard.folderWriteWhy('chmod -R 777 .?/deep', { cwd: S, protectedFiles: [...pf, fold(third)], home: w.home, user: 'u', tmpdir: w.root, cdpath: '' }) ?? 'none', /protected file/, 'as written');
-  assert.equal(prodGuard.folderWriteWhy('chmod -R 777 ../deep', { cwd: S, protectedFiles: [...pf, fold(third)], home: w.home, user: 'u', tmpdir: w.root, cdpath: '' }), null, 'the folder above holds no deep');
-  // Controls: no part here can be `..` (or nothing is written), so they pass, from the subfolder and after a cd.
-  for (const c of ['rm -rf .cache', 'rm -rf dist/.cache', 'rm -rf .x?', 'ls .?', 'rm -rf .x*', 'chmod -R 755 .cache', 'find .cache -delete', 'rm -rf a/.x?/*', 'rm -rf a/*', 'chmod -R 755 a/?']) {
-    for (const [line, cwd] of [[c, S], [`cd sub && ${c}`, P]]) {
-      assert.equal(why(line, cwd), null, `folder rule: ${JSON.stringify(line)}`);
-      passed(prodGuard.decide(bash(line, cwd), w.args), JSON.stringify(line));
-    }
-  }
+  assert.equal(n * 2, 128);
+  for (const c of ['rm -rf a/../a/.?/*', 'chmod -R 777 ./a/.*/', 'rm -rf .[.]/sub/conf', 'cp -R /tmp/in .?/.?/*', 'chmod -R 777 .?/deep']) k.no(c);
+  // Known cost, asserted so a loosening is made on purpose: the word is refused wherever it runs, protected file near or not.
+  assert.match(prodGuard.folderWriteWhy('chmod -R 755 .?/*', { cwd: w.root, protectedFiles: [], home: w.home, user: 'u', tmpdir: w.root, cdpath: '' }) ?? 'none', /pattern starting with a dot/);
+  // Controls: no part here can be `.` or `..` (or nothing is written), so they pass, from the subfolder and after a cd.
+  // Bash leaves a part that does not start with a written `.` as typed when nothing else matches (`[.]?`), and
+  // `.[!.]`, `.[]]` can't match `..`.
+  const controls = ['rm -rf .next', 'rm -rf .cache/*', 'ls .?', 'rm -rf .x?', 'rm -rf ./.cache/*', 'chmod -R 755 .k', 'rm -rf .cache', 'rm -rf dist/.cache',
+    'rm -rf .x*', 'chmod -R 755 .cache', 'find .cache -delete', 'rm -rf a/.x?/*', 'rm -rf a/*', 'chmod -R 755 a/?',
+    ...['[.]?', '[.][.]', '?[.]', '[!a-z]?', '.[!.]', '.[]]'].flatMap((f) => [`rm -rf ${f}/*`, `chmod -R 777 ${f}/*`])];
+  for (const c of controls) { k.ok(c); k.ok(`cd sub && ${c}`, P); }
 });
 
 // Lane 2 follow-up (unicode-space), from #42's fresh check: JavaScript's \s takes a no-break space, U+2028 and the

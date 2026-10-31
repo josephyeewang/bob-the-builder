@@ -138,20 +138,22 @@ const PWD_MARK = '@pwd@';
 const varRe = (name) => new RegExp(String.raw`\$(\{${name}\}|${name}(?![A-Za-z0-9_]))`, 'g');
 const spellOut = (cmd, vars) => Object.entries(vars).reduce((c, [name, v]) => (typeof v === 'string' && v ? c.replace(varRe(name), () => v) : c), cmd);
 const unknownWord = (w) => /[$`]/.test(w);
-// bash 3.2 lets a pattern part that starts with `.` match `..` (`.?`, `.*`, `.[.]`, `.[!x]`; zsh never does), so such
-// a part may climb to the folder above. One the pattern maker can't read (`.[[:punct:]]`) counts as one that can.
-const mayBeParent = (part) => {
+// bash 3.2 (/bin/bash on a Mac) lets a pattern part that starts with `.` match `.` and `..`: `.*` gives `. ..`, `.?`,
+// `.[.]` and `.[!x]` give `..` (zsh and bash 5.2 never do). Such a part may mean this folder or the one above, and a
+// word may hold several, so it is refused rather than read each way (LEAD-CALLS L59). The word comes with its quotes
+// and backslashes taken out, as the shell reads it (`\.?`, `'.'?` are `.?`). One the pattern maker can't read
+// (`.[[:punct:]]`) counts as one that can match.
+const dotMayClimb = (part) => {
   if (!part.startsWith('.') || !/[*?[]/.test(part)) return false;
-  try { return globRe(part).test('..'); } catch { return true; }
+  try { const re = globRe(part); return re.test('.') || re.test('..'); } catch { return true; }
 };
-// null for a word the guard can't place: another user's home folder (`~name/…`; audit of L41, MAT-4).
-// A word with a part that may be `..` is judged both as written and with each such part read as `..` (lane 2
-// follow-up: dot-glob), so every command the folder rule judges gets it.
+// The word's full forms, or why it can't be placed: another user's home folder (`~name/…`; audit of L41, MAT-4), or a
+// pattern part that may be `.` or `..` (lane 2 follow-up: dot-glob), so every command the folder rule judges gets it.
 function expand(w, home, cwds) {
-  if (/^~[^/]/.test(w)) return null;
+  if (/^~[^/]/.test(w)) return 'is written as a whole in a folder the guard can\'t place';
   const h = w.replace(/^~(?=\/|$)/, home);
-  const up = h.split(sep).map((x) => (mayBeParent(x) ? '..' : x)).join(sep);
-  return (up === h ? [h] : [h, up]).flatMap((x) => (x.startsWith(PWD_MARK) ? cwds.map((c) => c + x.slice(PWD_MARK.length)) : [x]));
+  if (h.split(sep).some(dotMayClimb)) return 'holds a pattern starting with a dot, which can mean this folder or the one above (name the files)';
+  return h.startsWith(PWD_MARK) ? cwds.map((c) => c + h.slice(PWD_MARK.length)) : [h];
 }
 // The fixed front of a path with a wildcard: `proj/a*/b` gives `proj`. A wildcard target is judged by that folder.
 const fixedFront = (p) => { const parts = p.split(sep); const i = parts.findIndex((x) => /[*?[]/.test(x)); return i < 0 ? p : parts.slice(0, i).join(sep) || sep; };
@@ -224,7 +226,7 @@ export function folderWriteWhy(cmd, { cwd, protectedFiles, home = homedir(), use
       if (odd) lost = true;
       else if (to === undefined) cwds.add(home);
       else if (to === '-') { if (setOld || !moved) lost = true; /* else back to a folder already counted */ }
-      else if (/[*?[]/.test(to) || unknownWord(to) || forms === null || (viaCdpath && !/^(\/|~|@pwd@|\.\.?(\/|$))/.test(to))) lost = true;
+      else if (/[*?[]/.test(to) || unknownWord(to) || typeof forms === 'string' || (viaCdpath && !/^(\/|~|@pwd@|\.\.?(\/|$))/.test(to))) lost = true;
       // Where the cd really lands counts too: after `cd <link>`, a later `..` is taken on disk from the link's target.
       // `cd -P l/..` goes up from the link's target: where the system takes the path counts too (round 3 MAT-2).
       else for (const x of forms) for (const base of [...cwds]) { const to2 = resolve(base, x); cwds.add(to2); const r = realFolder(to2); if (r) cwds.add(r); cwds.add(physical(base, x)); }
@@ -236,7 +238,7 @@ export function folderWriteWhy(cmd, { cwd, protectedFiles, home = homedir(), use
       if (wrote) return `"${t}" is written as a whole after "${wrote}" in the same command; run it as a command of its own`;
       if (unknownWord(t)) return `"${t}" is written as a whole, and the guard can't tell where a variable in it leads`;
       const forms = expand(t, home, [...cwds]);
-      if (forms === null) return `"${t}" is written as a whole in a folder the guard can't place`;
+      if (typeof forms === 'string') return `"${t}" ${forms}`;
       if (forms.some((f) => !isAbsolute(f)) && lost) return `"${t}" is written as a whole after a folder change the guard can't follow`;
       for (const f of forms) {
         if (dotsAfterPattern(f)) return `"${t}" has a ".." after a pattern, which the guard can't place`;
