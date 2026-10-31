@@ -91,13 +91,14 @@ export function folderWrites(c) {
   if (['rmdir', 'mv', 'trash'].includes(prog)) return { targets: [...a, ...(prog === 'mv' ? optValues(c, 't', ['--target-directory']) : [])], deletes: true };
   // rsync reads options after the names too (`… dest/ --exclude x`), so its last word may not be where it writes,
   // and `--remove-source-files` deletes what it copies: every name it is given is judged (audit of L41, MAT-2, MAT-7).
-  // Every value of a long option too (`--backup-dir=dir`, `--temp-dir=dir`).
-  if (prog === 'rsync') return { targets: [...a, ...o.filter((w) => /^--[^=]+=/.test(w)).map((w) => w.slice(w.indexOf('=') + 1))], deletes: o.some((w) => longIs(w, '--remove-source-files')) };
+  // Every value of a long option too (`--backup-dir=dir`, `--temp-dir=dir`), and `-T` joined (`-T.tmp`, `-aT.tmp`; L60).
+  if (prog === 'rsync') return { targets: [...a, ...o.filter((w) => /^--[^=]+=/.test(w)).map((w) => w.slice(w.indexOf('=') + 1)), ...optValues(c, 'T', ['--temp-dir'])], deletes: o.some((w) => longIs(w, '--remove-source-files')) };
   // zip -m moves the files into the archive, deleting them (MAT-7).
   if (prog === 'zip' && (clusterHas(o, 'm') || o.some((w) => longIs(w, '--move')))) return { targets: a, deletes: true };
-  // A copy onto a folder: the last name is where it lands (cp only when it copies folders), or GNU cp's `-t dir`.
+  // A copy onto a folder: the last name is where it lands (cp only when it copies folders), or GNU cp's and install's
+  // `-t dir` (install's added under L60).
   if (['ditto', 'install'].includes(prog) || (prog === 'cp' && o.some((w) => RECURSIVE(w) || /^-[A-Za-z]*a/.test(w) || longIs(w, '--archive')))) {
-    return { targets: [...a.slice(-1), ...(prog === 'cp' ? optValues(c, 't', ['--target-directory']) : [])], deletes: false };
+    return { targets: [...a.slice(-1), ...(['cp', 'install'].includes(prog) ? optValues(c, 't', ['--target-directory']) : [])], deletes: false };
   }
   if (['tar', 'bsdtar', 'gtar'].includes(prog)) {
     // The mode letters: a first word without a dash (`tar xf`), or the short options (`-xf`), never a long one.
@@ -141,10 +142,12 @@ const unknownWord = (w) => /[$`]/.test(w);
 // bash 3.2 (/bin/bash on a Mac) lets a pattern part that starts with `.` match `.` and `..`: `.*` gives `. ..`, `.?`,
 // `.[.]` and `.[!x]` give `..` (zsh and bash 5.2 never do). Such a part may mean this folder or the one above, and a
 // word may hold several, so it is refused rather than read each way (LEAD-CALLS L59). The word comes with its quotes
-// and backslashes taken out, as the shell reads it (`\.?`, `'.'?` are `.?`). One the pattern maker can't read
-// (`.[[:punct:]]`) counts as one that can match.
+// and backslashes taken out, as the shell reads it (`\.?`, `'.'?` are `.?`). Inside `[...]` that quoting changes what
+// bash matches (`.[\^.]` holds `^` and `.`, and lists `..`), so a dot part holding `[` is refused whatever it holds
+// (L60; `.[!.]` too). One the pattern maker can't read counts as one that can match.
 const dotMayClimb = (part) => {
   if (!part.startsWith('.') || !/[*?[]/.test(part)) return false;
+  if (part.includes('[')) return true;
   try { const re = globRe(part); return re.test('.') || re.test('..'); } catch { return true; }
 };
 // The word's full forms, or why it can't be placed: another user's home folder (`~name/…`; audit of L41, MAT-4), or a
