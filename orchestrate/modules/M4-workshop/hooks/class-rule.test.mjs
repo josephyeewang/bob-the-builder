@@ -311,6 +311,30 @@ test('L41 G2: a whole-folder write, delete, move, copy-onto or unpack over a fol
   blocked(prodGuard.decide(bash(`rm -rf ${w.work}`, w.root), { ...w.args, snapshot: viaLink }), 'listed through a link');
 });
 
+test('lane 2 follow-up (rsync vs cp -r): a copy of a folder holding a protected file is refused the same way by each copy program', () => {
+  const w = world();
+  mkdirSync(join(w.work, 'src'));
+  const W = w.work;
+  const why = (c, cwd = W) => prodGuard.decide(bash(c, cwd), w.args).reason ?? 'passed';
+  // From the folder holding the settings file: copied out whole, refused with the copy reason, whichever program.
+  for (const [c, t] of [['rsync -a ./ /tmp/y', './'], ['cp -r ./ /tmp/y', './'], ['cp -R . /tmp/y', '.'], ['cp -a . /tmp/y', '.'], ['ditto . /tmp/y', '.'],
+    [`cp -R ${W} /tmp/y`, W], ['cp -R -t /tmp/y .', '.'], ['cp -r --target-directory=/tmp/y src .', '.'], ['rsync -a . /tmp/y --exclude x', '.'],
+    ['rsync -av ../work/ /tmp/y/', '../work/'], ['cp -R src/.. /tmp/y', 'src/..'], ['cp -R {src,.} /tmp/y', '.']]) {
+    assert.equal(why(c), `"${t}" is a folder holding a protected file, copied out as a whole`, c);
+  }
+  // From another folder, by its path, and the listed secret (a folder above it) too.
+  assert.equal(why(`cp -R ${W} /tmp/y`, w.outbox), `"${W}" is a folder holding a protected file, copied out as a whole`);
+  assert.equal(why(`rsync -a ${W}/ /tmp/y/`, w.outbox), `"${W}/" is a folder holding a protected file, copied out as a whole`);
+  assert.equal(why('cp -R .config /tmp/y', w.home), '".config" is a folder holding a protected file, copied out as a whole');
+  // Copied onto it still says written.
+  assert.equal(why(`rsync -a /tmp/src/ ${W}/`, w.outbox), `"${W}/" is a folder holding a protected file, written as a whole`);
+  assert.equal(why(`cp -R /tmp/src ${W}`, w.outbox), `"${W}" is a folder holding a protected file, written as a whole`);
+  // Controls: a copy of a folder holding no protected file, and a plain file copy, pass from the same folder.
+  for (const c of ['cp -r src /tmp/x', 'rsync -a src/ /tmp/x/', 'ditto src /tmp/x', 'cp -R -t /tmp/x src', 'cp a.txt /tmp/x']) passed(prodGuard.decide(bash(c, W), w.args), c);
+  passed(prodGuard.decide(bash('rsync -a . /tmp/x/', w.outbox), w.args), 'control: the outbox holds no protected file');
+  passed(prodGuard.decide(bash('cp -R . /tmp/x', w.outbox), w.args), 'control: cp the same');
+});
+
 // Confirm audit of L41, Material 1-7: whole-folder write forms the first cut missed. Each is refused by the
 // production guard; the controls are ordinary work that must still pass.
 test('L41 confirm: brace lists, rsync, tar/unzip folders, lost cd forms, links, stash --all, zip -m, trash', () => {

@@ -18,8 +18,10 @@ import { readSnapshot } from './snapshot.mjs';
 // A command that writes, deletes, moves or unpacks a whole folder never names the file inside it, so the name
 // checks below can't see it touch a production settings file. Such a command is refused when its target folder
 // holds a protected file (a production settings file or a listed secret path), and a recursive delete of the
-// session's folder, the project or any folder above them is always refused. Reads of a whole folder (`grep -r`,
-// `tar c`) are left to the sandbox's read-deny list, the wall for reads.
+// session's folder, the project or any folder above them is always refused. A copy of a whole folder (`cp -R`,
+// `ditto`, `rsync`) is judged on what it copies as well: one holding a protected file is refused, since the copy
+// lands where nothing guards it. Other reads of a whole folder (`grep -r`, `tar c`) are left to the sandbox's
+// read-deny list, the wall for reads.
 
 // A long option counts under every name it shortens (`--ext` is `--extract`, `--al` is `--all`): GNU tools, bsdtar
 // and git all take a short form (L45; audit of L41, round 2, MAT-7, MAT-12, MAT-13).
@@ -77,6 +79,21 @@ function tarDirs(c, letters) {
   }
   const steps = chain(dirs);
   return !steps.length || named ? ['.', ...steps] : steps;
+}
+
+/**
+ * What a copy program copies out as a whole (lane 2 follow-up: rsync vs cp -r): the names before where it lands, or
+ * every name when the landing folder is given by `-t`. A copy of a folder holding a protected file puts that file
+ * where nothing guards it, so `cp -R`, `ditto` and `rsync` are judged the same way on what they copy.
+ */
+export function folderCopies(c) {
+  const prog = programOf(c);
+  const o = opts(c);
+  const a = args(c);
+  const recursive = prog === 'cp' && o.some((w) => RECURSIVE(w) || /^-[A-Za-z]*a/.test(w) || longIs(w, '--archive'));
+  if (!recursive && !['ditto', 'rsync'].includes(prog)) return [];
+  const toFolder = prog === 'cp' && optValues(c, 't', ['--target-directory']).length;
+  return toFolder ? a : a.slice(0, -1);
 }
 
 /**
@@ -237,16 +254,20 @@ export function folderWriteWhy(cmd, { cwd, protectedFiles, home = homedir(), use
       continue;
     }
     const { targets, deletes } = folderWrites(c);
-    for (const t of targets.flatMap((x) => expandBraces(x))) {
-      if (wrote) return `"${t}" is written as a whole after "${wrote}" in the same command; run it as a command of its own`;
-      if (unknownWord(t)) return `"${t}" is written as a whole, and the guard can't tell where a variable in it leads`;
+    // What a copy copies out is judged first, so its refusal says "copied out" (rsync's names are judged as written
+    // too, below, since any of them may be where it writes).
+    const items = [...folderCopies(c).map((x) => [x, true]), ...targets.map((x) => [x, false])].flatMap(([x, copied]) => expandBraces(x).map((y) => [y, copied]));
+    for (const [t, copied] of items) {
+      const how = copied ? 'copied out' : 'written';
+      if (wrote) return `"${t}" is ${how} as a whole after "${wrote}" in the same command; run it as a command of its own`;
+      if (unknownWord(t)) return `"${t}" is ${how} as a whole, and the guard can't tell where a variable in it leads`;
       const forms = expand(t, home, [...cwds]);
-      if (typeof forms === 'string') return `"${t}" ${forms}`;
-      if (forms.some((f) => !isAbsolute(f)) && lost) return `"${t}" is written as a whole after a folder change the guard can't follow`;
+      if (typeof forms === 'string') return `"${t}" ${forms.replace('written', how)}`;
+      if (forms.some((f) => !isAbsolute(f)) && lost) return `"${t}" is ${how} as a whole after a folder change the guard can't follow`;
       for (const f of forms) {
         if (dotsAfterPattern(f)) return `"${t}" has a ".." after a pattern, which the guard can't place`;
         for (const abs of (isAbsolute(f) ? [sep] : [...cwds]).flatMap((b) => [resolve(b, f), physical(b, f)])) {
-          const why = judge(t, abs, deletes, protectedFiles, shielded);
+          const why = judge(t, abs, !copied && deletes, protectedFiles, shielded, how);
           if (why) return why;
         }
       }
@@ -284,7 +305,7 @@ function onDisk(front, pp, cap = 500) {
 // the start of its path below the fixed front matches the pattern (`**` any number of parts, so `**/node_modules`
 // reaches only what is inside a node_modules; MAT-15), and each match on disk is followed to where it really leads
 // (a link among the matches; MAT-11).
-function judge(t, abs, deletes, protectedFiles, shielded) {
+function judge(t, abs, deletes, protectedFiles, shielded, how = 'written') {
   const parts = abs.split(sep);
   const first = parts.findIndex((x) => /[*?[]/.test(x));
   const front = fixedFront(abs);
@@ -294,7 +315,7 @@ function judge(t, abs, deletes, protectedFiles, shielded) {
   }
   const folders = [front, realFolder(front) ?? front].map(fold);
   const reached = (x) => folders.some((d) => (pp ? x !== d && inside(x, d) && matchesFront(pp, x.slice(d.length).split(sep).filter(Boolean)) : inside(x, d)));
-  if (protectedFiles.some(reached)) return `"${t}" is a folder holding a protected file, written as a whole`;
+  if (protectedFiles.some(reached)) return `"${t}" is a folder holding a protected file, ${how} as a whole`;
   if (pp) {
     const found = onDisk(front, pp);
     if (found === null) return `"${t}" matches too many names to check`;
