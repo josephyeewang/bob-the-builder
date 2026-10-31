@@ -156,7 +156,11 @@ export function safeGitEnv({ gitDir, commonDir, workTree, extraConfig = [] } = {
 export const INERT_KEYS = Object.freeze(new Set([
   'core.repositoryformatversion', 'core.bare', 'core.filemode', 'core.logallrefupdates', 'core.ignorecase',
   'core.precomposeunicode', 'core.symlinks', 'extensions.objectformat', 'extensions.worktreeconfig',
-  'extensions.refstorage', 'user.name', 'user.email',
+  'user.name', 'user.email',
+  // Not `extensions.refstorage` (#32 round 4, LEAD-CALLS L54): a reftable repository's `reftable/tables.list` names
+  // its ref files by path, so a worker could list another repository's refs and have compaction delete its file. No
+  // caller uses reftable; a repository that names any ref format is refused. git 2.54.0 writes no such key for the
+  // default (files) format, checked 30 Oct 2026.
   // Common in ordinary repositories (#32 round 2, Minor 6); the L49 sweep plants each with a program and an address.
   'core.autocrlf', 'core.untrackedcache', 'extensions.relativeworktrees',
 ]));
@@ -457,7 +461,8 @@ const PLACE_FLAGS = new Set(['-q', '--quiet', '-v', '--verbose', '-n', '--no-tag
 export function placeWhy(args, at, address) {
   const cmd = String(args[at]);
   const rest = args.slice(at + 1).map(String);
-  if (NEVER_RUN.has(cmd) || (cmd === 'archive' && rest.some((a) => a.startsWith('--remote') || a.startsWith('--exec')))) {
+  // `remote-https <name>` and the other transport helpers take the address from the remote's name (#32 round 4, L54).
+  if (NEVER_RUN.has(cmd) || cmd.startsWith('remote-') || (cmd === 'archive' && rest.some((a) => a.startsWith('--remote') || a.startsWith('--exec')))) {
     return `git ${cmd} can reach another repository the call does not name, so safe-git never runs it`;
   }
   if (!NAMED_PLACE.has(cmd)) return null;

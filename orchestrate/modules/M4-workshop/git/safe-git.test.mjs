@@ -779,7 +779,8 @@ test('#32 round 3 (L51): a command that reaches another repository runs only wit
     no(['fetch', opt, '/srv/mirror'], /only plain switches/);
   }
   no(['fetch', '/srv/mirror', '--multiple', 'origin'], /only plain switches/);
-  for (const args of [['remote', 'update'], ['remote', 'add', 'x', '/srv/r'], ['submodule', 'update'], ['maintenance', 'run', '--task=prefetch'], ['send-pack', '--remote=origin', '/srv/r'], ['request-pull', 'main', 'origin'], ['archive', '--remote=origin', 'main'], ['archive', '--remote', 'origin', 'main'], ['lfs', 'fetch']]) {
+  for (const args of [['remote', 'update'], ['remote', 'add', 'x', '/srv/r'], ['submodule', 'update'], ['maintenance', 'run', '--task=prefetch'], ['send-pack', '--remote=origin', '/srv/r'], ['request-pull', 'main', 'origin'], ['archive', '--remote=origin', 'main'], ['archive', '--remote', 'origin', 'main'], ['lfs', 'fetch'],
+    ['remote-https', 'origin'], ['remote-http', 'origin'], ['remote-ext', 'x'], ['remote-fd', '0'], ['remote-ftp', 'origin']]) {
     no(args, /never runs it/);
   }
   ok(['archive', '--format=tar', 'main']);
@@ -959,4 +960,33 @@ test('no hang: a git that never ends is stopped at the time limit, with everythi
   const t = await git(['--version'], { gitDir: '/dev/null', gitBin: tty });
   assert.equal(t.stdout.toString().trim(), 'none', 'git has no terminal to ask for a password on');
   assert.equal(safeGitEnv({}).GCM_INTERACTIVE, 'never');
+});
+
+// #32 round 4 (LEAD-CALLS L54): a reftable repository is refused, so its `tables.list` can never name another
+// repository's ref files.
+test('#32 round 4 (L54): a repository in the reftable ref format is refused before git runs; the other repository keeps its refs', async () => {
+  const d = tmp();
+  const env = { ...process.env, GIT_TERMINAL_PROMPT: '0', GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@example.invalid', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@example.invalid' };
+  const plain = (args, cwd) => spawnSync('git', args, { cwd, env, stdio: 'pipe', timeout: 60_000 });
+  for (const name of ['other', 'worker']) {
+    const r = join(d, name);
+    mkdirSync(r);
+    assert.equal(plain(['init', '-q', '--ref-format=reftable', r], d).status, 0);
+    assert.equal(plain(['commit', '-q', '--allow-empty', '-m', 'x'], r).status, 0);
+  }
+  const ot = join(d, 'other', '.git', 'reftable');
+  const table = readdirSync(ot).find((f) => f.endsWith('.ref'));
+  appendFileSync(join(d, 'worker', '.git', 'reftable', 'tables.list'), `../../../other/.git/reftable/${table}\n`);
+  const gd = join(d, 'worker', '.git');
+  const wt = join(d, 'worker');
+  assert.match(await repoConfigWhy(gd) ?? '', /extensions\.refstorage/);
+  const sha = plain(['rev-parse', 'HEAD'], wt).stdout.toString().trim();
+  assert.notEqual((await git(['for-each-ref'], { gitDir: gd, workTree: wt })).code, 0);
+  assert.notEqual((await git(['update-ref', 'refs/heads/z', sha], { gitDir: gd, workTree: wt })).code, 0);
+  assert.ok(readdirSync(ot).includes(table), 'the other repository keeps its ref file');
+  // Control: a repository in the default format names no ref format and is let through.
+  const p = join(d, 'plain');
+  mkdirSync(p);
+  assert.equal(plain(['init', '-q', p], d).status, 0);
+  assert.equal(await repoConfigWhy(join(p, '.git')), null);
 });
