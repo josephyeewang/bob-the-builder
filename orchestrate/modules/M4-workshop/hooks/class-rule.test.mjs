@@ -3,7 +3,7 @@
 // remaining forms. Throwaway folders only; names of secret files are built at run time.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, writeFileSync, realpathSync, symlinkSync } from 'node:fs';
+import { mkdirSync, writeFileSync, realpathSync, symlinkSync, chmodSync } from 'node:fs';
 import { join, dirname, basename } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -101,12 +101,12 @@ test('MAT-1 and R-0b-70: the production guard refuses every round-2 and corpus f
 test('R-0b-70: run as the real script with --role, --outbox and --snapshot, ls and git status pass and a write is refused', () => {
   const w = world();
   const script = fileURLToPath(new URL('./production-write-guard.mjs', import.meta.url));
-  const run = (command) => spawnSync(process.execPath, [script, '--role', 'builder', '--outbox', w.outbox, '--snapshot', w.snapshot], { input: JSON.stringify(bash(command, w.work)), encoding: 'utf8' }).status;
+  const run = (command) => spawnSync(process.execPath, [script, '--role', 'builder', '--outbox', w.outbox, '--snapshot', w.snapshot], { input: JSON.stringify(bash(command, w.work)), encoding: 'utf8', timeout: 60_000 }).status;
   assert.equal(run('ls'), 0);
   assert.equal(run('git status'), 0);
   assert.equal(run(`echo x > ${ENV_PROD}`), 2);
   // Without the arguments every call is refused, which is why the corpus must be run with them.
-  assert.equal(spawnSync(process.execPath, [script], { input: JSON.stringify(bash('ls', w.work)), encoding: 'utf8' }).status, 2);
+  assert.equal(spawnSync(process.execPath, [script], { input: JSON.stringify(bash('ls', w.work)), encoding: 'utf8', timeout: 60_000 }).status, 2);
 });
 
 test('MAT-2: the secret-file guard compares names as a Mac disk does, ignoring letter case', () => {
@@ -589,4 +589,96 @@ test('L46 round 4 check: lines with Windows line ends are read as the shell read
   // A return anywhere else is still refused.
   for (const c of ['echo a\rrm -rf x', 'echo a\r', 'echo a\r\r\n']) no(c);
   passed(noVerify.decide(bash("git commit -F - <<'EOF'\r\nmsg\r\nEOF\r\n", W)), 'no-verify: CRLF message');
+});
+
+// #40 (lane 2 follow-up, cd-glob): a shortcut that judged the rest of a `cd <folder> && …` line from the subfolder
+// alone was tried for three rounds (fresh checks found 3, 1 and 1 Material) and dropped under LEAD-CALLS L53. The
+// folder rule is main's: every folder the line may be in counts, the working folder included. These tests keep the
+// forms each round found refused, and pin the false refusals as a known cost, so a future loosening changes them on
+// purpose.
+function cdWorld() {
+  const w = world();
+  for (const d of ['dist/sub', 'Dist2/deep', 'deep', 'locked', 'config']) mkdirSync(join(w.work, d), { recursive: true });
+  writeFileSync(join(w.work, 'dist', 'a.txt'), 'x');
+  writeFileSync(join(w.work, 'notdir'), 'x');
+  symlinkSync(w.root, join(w.work, 'out'));
+  symlinkSync(join(w.work, 'dist'), join(w.work, 'in'));
+  symlinkSync(w.outbox, join(w.work, 'ob'));
+  chmodSync(join(w.work, 'notdir'), 0o755);
+  // A second protected file, in a folder of its own, for the reviewer's `rm -rf config` forms.
+  const configEnv = join(w.work, 'config', ENV_PROD);
+  writeFileSync(configEnv, 'X=1\n');
+  writeFileSync(w.snapshot, makeSnapshot({ production: { env_files: [w.envFile, configEnv], programs: ['fakehost', 'fakedb'], hosts: ['db.prod.example.net'] }, secrets: { paths: [join(w.home, '.config', 'gh', 'hosts.yml')] } }));
+  const pf = [fold(w.envFile), fold(configEnv)];
+  const why = (c, more = {}) => prodGuard.folderWriteWhy(c, { cwd: w.work, protectedFiles: pf, home: w.home, cdpath: '', ...more });
+  const no = (c, more) => {
+    assert.ok(why(c, more), `allowed: ${JSON.stringify(c)}`);
+    if (!more) blocked(prodGuard.decide(bash(c, w.work), w.args), JSON.stringify(c));
+  };
+  return { ...w, why, no };
+}
+
+test('L53 known false refusal: a plain cd into a subfolder does not move where globs and . are judged', () => {
+  const w = cdWorld();
+  // Each of these deletes only inside the subfolder, but the working folder holds a protected file and the rule
+  // judges from there too. Refused on purpose (the cost of L53).
+  for (const c of ['cd dist && rm -rf *', 'cd dist; rm -rf *', 'cd dist && rm -rf .', 'cd dist && rm -rf ./*', 'cd ./dist && rm -rf *', 'cd dist/ && rm -rf *',
+    'cd dist/sub && rm -rf *', 'cd dist && cd sub && rm -rf .', 'cd dist ; rm -rf * && ls', 'cd in && rm -rf *', 'cd dist && rm -rf * && rmdir sub',
+    'cd\tdist\t&&\trm -rf *', 'cd dist&&rm -rf *', 'cd dist && find . -delete', 'cd dist && git clean -fdx']) w.no(c);
+  // The workarounds the README gives pass: name the subfolder. (Running `rm -rf *` from the subfolder is no
+  // workaround: main's rule refuses a bare `*` in the folder the call runs in, whatever it holds.)
+  for (const [c, cwd] of [['rm -rf dist/*', w.work], ['rm -rf dist', w.work], ['rm -rf dist/sub', w.work]]) {
+    assert.equal(prodGuard.folderWriteWhy(c, { cwd, protectedFiles: [fold(w.envFile)], home: w.home, cdpath: '' }), null, c);
+    passed(prodGuard.decide(bash(c, cwd), w.args), c);
+  }
+});
+
+test('#40, all rounds: every form a check found stays refused, as are the reviewer\'s background and later-step forms', () => {
+  const w = cdWorld();
+  chmodSync(join(w.work, 'locked'), 0o600);
+  try {
+    // The first build's own refusal list.
+    for (const c of ['cd dist && rm -rf ../*', 'cd dist; rm -rf ..', 'cd dist && rm -rf ../.', 'cd dist || rm -rf *', '(cd dist); rm -rf *', '(cd dist && true); rm -rf *',
+      '(cd dist; true); rm -rf *', 'cd ob && rm -rf *', 'cd nope; rm -rf *', 'cd notdir; rm -rf *', 'cd locked; rm -rf *', 'cd out && rm -rf *', 'cd dist & rm -rf *',
+      'cd dist | rm -rf *', 'cd dist && cd .. && rm -rf *', 'cd dist; cd -; rm -rf *', 'cd .. && rm -rf *', 'cd dist/.. && rm -rf *', 'cd d* && rm -rf *',
+      'cd -P dist && rm -rf ../*', 'ls; cd dist && rm -rf *', 'cd dist && rm -rf * ; cd .. ; rm -rf *', 'rm -rf *', 'if cd dist; then true; fi; rm -rf *',
+      'CDPATH=/x; cd dist; rm -rf *', 'cd dist && setopt cdablevars && rm -rf *']) w.no(c);
+    w.no('cd dist && rm -rf *', { cdpath: '/x' });
+    // Round 2 (M1-M3): a line break, a return or a non-ASCII blank in the cd part.
+    w.no('cd\nDist2; rm -rf .config', { protectedFiles: [fold(join(w.home, '.config', 'gh', 'hosts.yml'))] });
+    for (const c of ['cd\nDist2; rm -rf *', 'cd Dist2\r\n; rm -rf *', 'cd Dist2\r\n; rm -rf .', 'cd Dist2 \r\n; rm -rf *']) w.no(c);
+    w.no('cd Dist2\r\n; rm -rf deep', { protectedFiles: [fold(join(w.work, 'deep', ENV_PROD))] });
+    for (const tail of ['rm -rf *', 'git clean -fdx', 'find . -delete']) w.no(`cd Dist2 ; ${tail}`);
+    for (const c of ['cd Dist2;; rm -rf *', 'cd Dist2 &&& rm -rf *', 'cd Dist2;& rm -rf *', 'cd Dist2;| rm -rf *', 'cd Dist2 &&| rm -rf *']) w.no(c);
+    const blanks = [];
+    for (let c = 0; c <= 0xffff; c += 1) {
+      const ch = String.fromCharCode(c);
+      if (ch !== ' ' && ch !== '\t' && (/\s/.test(ch) || /[\p{White_Space}\p{Zs}\p{Zl}\p{Zp}]/u.test(ch))) blanks.push(ch);
+    }
+    blanks.push('᠎', '​', '⁠');
+    for (const ch of ['\r', '\n', '\v', '\f', '\u0085', ' ', ' ', ' ', '　', '﻿']) assert.ok(blanks.includes(ch), `the sweep holds U+${ch.charCodeAt(0).toString(16)}`);
+    for (const ch of blanks) for (const j of [';', '&&', ' ;', ' &&']) {
+      for (const c of [`cd${ch}Dist2${j} rm -rf *`, `cd ${ch}Dist2${j} rm -rf *`, `cd Dist2${ch}${j} rm -rf *`, `cd Dist2 ${ch}${j} rm -rf *`]) w.no(c);
+    }
+    // Round 3 (M1): git clean with a path and git stash -a reach the whole repository; and other commands after the cd.
+    for (const c of ['cd Dist2 && git clean -fdx :/', 'cd Dist2 && git clean -fdx ..', 'cd Dist2 && git clean -fdx -- ../', "cd Dist2 && git clean -fdx ':(top)'",
+      'cd Dist2 && git clean -fdx -e x :/', 'cd Dist2 && git stash --all', 'cd Dist2 && git stash -a', 'cd Dist2 && git stash push -a',
+      'cd Dist2 && unzip -: x.zip', 'cd Dist2 && rm -rf * && find . -delete', 'cd Dist2 && rm -rf * | cat', 'cd Dist2 && sudo rm -rf *', 'cd Dist2 && command rm -rf *',
+      'cd Dist2 && X=1 rm -rf *', 'cd Dist2 && { rm -rf *; }', 'cd Dist2 && (rm -rf *)', 'cd Dist2 && chmod -R 777 .', 'cd Dist2 && mv * /tmp/x',
+      'cd Dist2; rm -rf *', 'cd Dist2 ; rm -rf .', 'cd Dist2 && cd deep; rm -rf *']) w.no(c);
+    blocked(prodGuard.decide(bash('cd Dist2 && rm -rf $(echo *)', w.work), w.args), 'a substitution');
+    // Round 4 (the reviewer's Material and Minors): under bash a later `&` backgrounds the whole `cd … && rm x`, so
+    // what follows runs in the working folder; so does what follows `||`, `;` or a line break.
+    for (const c of ['cd dist && rm x & rm -rf config', 'cd dist && rm -rf x&rm -rf config', 'cd dist && rmdir sub & rm -rf *', 'cd dist && cd sub && rm x & rm -rf *',
+      'cd dist && rm x || rm -rf config', 'cd dist && rm x ; rm -rf config', 'cd dist && rm x\nrm -rf config']) w.no(c);
+  } finally { chmodSync(join(w.work, 'locked'), 0o755); }
+});
+
+// #40 check, Minor: bash 3.2 (/bin/bash on a Mac) lets a pattern starting with a dot match `..`. The fix for it left
+// with the shortcut (L53 keeps main's rule as it is); the forms main refuses stay refused. The rest is open, with the
+// lead (lane2-to-lead.md, item 7).
+test('#40 check: the dot-pattern forms main refuses stay refused', () => {
+  const w = cdWorld();
+  for (const c of ['cd dist && find .? -delete', 'cd dist && rm -rf .*']) w.no(c);
+  assert.ok(w.why('find .? -delete', { cwd: join(w.work, 'dist') }), 'find .? from a subfolder');
 });
