@@ -2,18 +2,17 @@
 // watch-only token file. Same stand-in Mac as the other setup tests (fake-mac.test-helper.mjs). PLANT tests break one clause
 // each and name the check that catches it. The last tests run read-only tools on this Mac.
 
-import test from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, statSync, symlinkSync, writeFileSync, rmSync } from 'node:fs';
+import { chmodSync, mkdirSync, readFileSync, statSync, symlinkSync, writeFileSync, rmSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DEFAULT_PROPOSALS_PARENT, ROOT_CONFIG_PATH, folderTable, mirrorPath, ownerTapsPath, parseConfig, proposalRows } from './layout.mjs';
 import { readSecretFromTty, realIo } from './mac.mjs';
 import { aclEntries, apply, check } from './users-folders.mjs';
 import { checkProposals, checkSafeDirectory, checkToken, planProposals, planSafeDirectory, planToken, tokenPath, tokenProblem } from './extras.mjs';
 import { main, parseArgs, planCommand } from './setup.mjs';
-import { fakeMac } from './fake-mac.test-helper.mjs';
+import { fakeMac, macTest as test } from './fake-mac.test-helper.mjs';
+import { tempDir } from '../shared/test-tmp.mjs';
 
 const BASE = '/Library/orch-test';
 const RAW = { base: BASE, owner: 'sam', products: ['alpha', 'beta'] };
@@ -21,7 +20,7 @@ const cfg = parseConfig(RAW);
 const SECRET = 'github_pat_11AAAAAAA0abcdefghijklmnop_QRSTUVWXYZ0123456789abcdef';   // a made-up one, never real
 const sink = () => { const lines = []; return { lines, out: (s) => lines.push(s), err: (s) => lines.push(`ERR ${s}`) }; };
 
-function cfgFile(raw = RAW) { const d = mkdtempSync(join(tmpdir(), 'extras-cfg-')); const f = join(d, 'c.json'); writeFileSync(f, JSON.stringify(raw)); return f; }
+function cfgFile(raw = RAW) { const d = tempDir('orch-extras-cfg-'); const f = join(d, 'c.json'); writeFileSync(f, JSON.stringify(raw)); return f; }
 
 /** Root reads only the root-owned config at the fixed place; a run without root passes --config. Returns the argv. */
 function withConfig(mac, file, raw, args) {
@@ -299,7 +298,7 @@ test('REAL: stty and the terminal read refuse cleanly when there is no terminal 
 });
 
 test('REAL: ls -led and chmod -h parse the proposals access-list entry exactly (the tool\'s own wording on this Mac)', { skip: !isDarwin }, () => {
-  const d = mkdtempSync(join(tmpdir(), 'extras-real-')); const f = join(d, 'p'); mkdirSync(f, { mode: 0o700 });
+  const d = tempDir('orch-extras-real-'); const f = join(d, 'p'); mkdirSync(f, { mode: 0o700 });
   const io = realIo();
   assert.equal(io.run('/bin/chmod', ['+a', 'user:daemon allow list,search,readattr,readextattr,readsecurity,file_inherit,directory_inherit', f]).status, 0);
   assert.deepEqual(aclEntries(io, f).entries, ['user:daemon allow directory_inherit,file_inherit,list,readattr,readextattr,readsecurity,search']);
@@ -307,7 +306,7 @@ test('REAL: ls -led and chmod -h parse the proposals access-list entry exactly (
 });
 
 test('REAL: git config --global --get-all of an unset key exits 1 (what planSafeDirectory relies on)', { skip: !isDarwin }, () => {
-  const home = mkdtempSync(join(tmpdir(), 'extras-home-'));
+  const home = tempDir('orch-extras-home-');
   const r = spawnSync('/usr/bin/git', ['config', '--global', '--get-all', 'safe.directory'], { encoding: 'utf8', env: { PATH: '/usr/bin:/bin', HOME: home, GIT_CONFIG_NOSYSTEM: '1' } });
   assert.equal(r.status, 1, r.stderr);
   const add = spawnSync('/usr/bin/git', ['config', '--global', '--add', 'safe.directory', '/x/mirror'], { encoding: 'utf8', env: { PATH: '/usr/bin:/bin', HOME: home, GIT_CONFIG_NOSYSTEM: '1' } });
