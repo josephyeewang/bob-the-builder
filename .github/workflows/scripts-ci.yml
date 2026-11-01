@@ -35,6 +35,24 @@ jobs:
       - name: Check fixture citations and re-count the scoreboard
         run: bash scripts/failure-mode-check.sh
 
+  orchestrate-setup-macos:
+    name: ORCHESTRATE's Mac setup tests (macOS)
+    runs-on: macos-latest
+    # The setup commands drive the Mac's own tools (dscl, ls -le, chmod +a), which the Linux check lacks. There each test
+    # that needs them is skipped with "needs macOS tools; run by the macOS job"; this job is the one that runs them.
+    # orchestrate/setup/ci-job.test.mjs fails if this job goes missing.
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Configure git identity (the setup tests run the updater against a local repository)
+        run: |
+          git config --global user.name "Bob CI"
+          git config --global user.email "ci@example.com"
+      - name: Setup tests, with the Mac's own tools
+        run: node --test orchestrate/setup/*.test.mjs
+
   bob-self-check:
     name: Bob's own docs pass Bob's checks
     runs-on: ubuntu-latest
