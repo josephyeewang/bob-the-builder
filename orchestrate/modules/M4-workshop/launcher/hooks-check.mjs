@@ -51,7 +51,7 @@ export function checkVersion({ claudeBin, root, pin, run = (bin, a) => execFileS
 // One harmless and one harmful canned call per hook. The harmful one must be blocked (exit 2).
 export function probes({ copy, outbox, kind }) {
   return {
-    'plain-files': [{ tool_name: 'Write', tool_input: { file_path: `${outbox}${sep}${kind}-probe-1.md` } }, { tool_name: 'Write', tool_input: { file_path: `${copy ?? outbox}${sep}.git${sep}config` } }],
+    'plain-files': [{ tool_name: 'Write', tool_input: { file_path: `${outbox}${sep}${kind}probe-1.md` } }, { tool_name: 'Write', tool_input: { file_path: `${copy ?? outbox}${sep}.git${sep}config` } }],
     'secret-file-block': [{ tool_name: 'Bash', tool_input: { command: 'true' } }, { tool_name: 'Read', tool_input: { file_path: `${outbox}${sep}.env` } }],
     'production-write-guard': [{ tool_name: 'Bash', tool_input: { command: 'true' } }, null],
     'merge-guard': [{ tool_name: 'Bash', tool_input: { command: 'true' } }, { tool_name: 'Bash', tool_input: { command: 'git push origin HEAD:main' } }],

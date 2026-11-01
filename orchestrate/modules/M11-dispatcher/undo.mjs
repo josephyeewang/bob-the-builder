@@ -1,7 +1,7 @@
 // The [Undo] tap (R-0b-68; design v4 D8; review 0b-6 M21; L72, L74).
 //
 // M11 acts only on an `ask` of kind undo that approvals marked `answered` by a tap with the choice Undo, that M2
-// counted (rules.may('count_approval') allows it), and whose card is merged with a merge commit the record holds. It
+// counted (shared/approval.mjs answerCounts: M10's count_approval answers "ask" at the tap's tier, L81), and whose card is merged with a merge commit the record holds. It
 // writes one undo card per ask: M9's kind exact_reverse, its `source` naming the ask (the reversed commit comes from
 // the source, never from a field on the card: M6 undo.mjs undoneBy), with the reversed commit's files, created in
 // draft and moved to ready (go-free). The Record lets one exact_reverse card per ask, so asking again is harmless; the
@@ -16,6 +16,7 @@ import { note, move } from './moves.mjs';
 import { holdAlert } from './pass.mjs';
 import { undoneBy } from '../M6-merge-gate/undo.mjs';
 import { factFrom, PLAN_INPUTS } from '../M9-record/permissions.mjs';
+import { answerCounts } from '../../shared/approval.mjs';
 
 export const UNDO_CARD = (askId) => `undo-${askId}`;
 export const FIX_CARD = (undoId) => `fix-${undoId}`;
@@ -60,8 +61,9 @@ async function tap({ rec, rules, now, filesOf, alert, out, held, id, doc }) {
   if (a?.channel !== 'tap') return await held('not-tap', 'not a tap: nothing');
   // "Keep" is an answer too: only the Undo choice (the ask's first) undoes.
   if (a.choice !== (doc.choices?.[0] ?? 'Undo') || a.approves !== true) return;
-  const counted = rules.may('count_approval', { ask: { id, ...doc } });
-  if (counted.decision !== 'allow') return await held('not-counted', `not counted: ${counted.reason}`);
+  // The one approval check M2 made when it recorded the answer, asked again now (L81).
+  const counted = answerCounts(rules, doc, { approves: true });
+  if (!counted.ok) return await held('not-counted', `not counted: ${counted.reason}`);
   const target = typeof doc.card === 'string' ? rec.read('card', doc.card) : null;
   const commit = target?.doc?.merge_commit;
   if (!SHA.test(String(commit ?? ''))) return await held('no-merge', 'its card has no merge commit in the record');

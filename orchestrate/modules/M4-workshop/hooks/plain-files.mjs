@@ -1,7 +1,7 @@
 // The plain-files check (launch check 3, R-0b-38; PreToolUse on Write|Edit|NotebookEdit).
 //
 // A role writes plain files only: never a tool or setup file (git, editor, package-manager, hook
-// or Claude config), and in its outbox only a flat file named `<kind>-<id>.md|json|txt` of one of
+// or Claude config), and in its outbox only a flat file named `<kind><id>.md|json|txt` of one of
 // its own kinds. The Lead, Front Door, thinking room and Learning write nowhere but the outbox;
 // other roles write only inside their code copy (--copy) or the outbox.
 
@@ -25,7 +25,17 @@ export function isSetupPath(p) {
   return SETUP_FILES.includes(name) || /^\.env(\..*)?$/.test(name);
 }
 
-export const OUTBOX_NAME = /^([a-z]+)-[A-Za-z0-9-]+\.(md|json|txt)$/;
+export const OUTBOX_NAME = /^[a-z]+-[A-Za-z0-9-]+\.(md|json|txt)$/;
+
+// A name's kind, read as M9 reads it (L82 M-1): the longest listed prefix the name starts with. `kinds` is the role's
+// own list (--kinds), `notKinds` the longer listed kinds it may not hand in (--not-kinds); both come from the one
+// shared table through the launcher. Null when the name is none of the role's own.
+export function kindIn(name, kinds, notKinds = []) {
+  let best = null;
+  // A kind is a name prefix, so it ends in a dash; anything else (an old first-word list) matches nothing.
+  for (const k of [...kinds, ...notKinds]) if (typeof k === 'string' && /^[a-z]+(-[a-z]+)*-$/.test(k) && name.startsWith(k) && name.length > k.length && (!best || k.length > best.length)) best = k;
+  return best !== null && kinds.includes(best) ? best : null;
+}
 
 export function decide(input, args) {
   const t = input.tool_input ?? {};
@@ -45,9 +55,9 @@ export function decide(input, args) {
 
   if (inside(p, outbox)) {
     if (dirname(p) !== outbox) return block('outbox files must sit directly in the outbox');
-    const m = OUTBOX_NAME.exec(basename(p));
-    if (!m) return block(`"${basename(p)}" is not an outbox file name`);
-    if (!args.kinds.includes(m[1])) return block(`the ${args.role} role may not hand in "${m[1]}" files`);
+    const name = basename(p);
+    if (!OUTBOX_NAME.test(name)) return block(`"${name}" is not an outbox file name`);
+    if (!kindIn(name, args.kinds, args.notKinds)) return block(`the ${args.role} role may not hand in "${name}"`);
     return pass();
   }
   if (OUTBOX_ONLY_ROLES.includes(args.role)) return block(`the ${args.role} role writes only to its outbox`);

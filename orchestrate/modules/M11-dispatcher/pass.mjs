@@ -23,7 +23,7 @@
 
 import { KEYS, need, minutes, MissingKey } from './keys.mjs';
 import { currentBands, recordBands } from './usage.mjs';
-import { startGate } from './gate.mjs';
+import { startGate, riskOf } from './gate.mjs';
 import { atSafePoint } from './transcript.mjs';
 import { OUTAGE_FACT } from './outage.mjs';
 import { randomUUID } from 'node:crypto';
@@ -120,6 +120,8 @@ export async function stopProcessGroup({ pgid, kill = (p, s) => process.kill(-p,
 // An undo card is M9's kind exact_reverse (L74); the session kind stays 'undo'.
 const isUndo = (card) => card.kind === 'exact_reverse';
 const kindOf = (card) => (isUndo(card) ? 'undo' : card.kind === 'script' ? 'script' : 'editing');
+// The M10 profile a start is asked for: a script card runs the script profile, every other start a worker.
+const startRole = (kind) => (kind === 'script' ? 'script' : 'worker');
 const roleOf = (s) => s.role ?? (s.kind === 'editing' || s.kind === 'script' ? 'worker' : s.kind);
 const factDoc = (rec, id) => rec.read('fact', id);
 const putFact = (rec, id, doc, kind) => rec.write({ actor: 'dispatcher', entity: 'fact', id, expectRev: rec.read('fact', id)?.rev ?? 0, doc, kind });
@@ -382,7 +384,12 @@ async function starts({ rec, rules, now, b, running, launch, out, alert, onlyUnd
       }
     };
     let may;
-    try { may = rules.may('start_session', { card, product }); } catch (e) { may = { decision: 'refuse', reason: `could not be asked (${e?.message ?? e})` }; }
+    // M10's start_session reads product, role, tier (1 or 2), editing and, for Tier 1, the usage reading's time
+    // (L81 sweep: asked with the card alone, the real engine refused every start). The tier is the one the start
+    // gate holds on (riskOf: the card's and the files' stricter); the role is the M10 profile the card runs.
+    try {
+      may = rules.may('start_session', { product, card, role: startRole(kindOf(doc)), tier: riskOf(rules, card).tier, editing: true, ...(b?.read_at ? { usage: { read_at: b.read_at } } : {}) });
+    } catch (e) { may = { decision: 'refuse', reason: `could not be asked (${e?.message ?? e})` }; }
     if (may.decision !== 'allow') { await refuse(`rules: ${may.reason}`); continue; }
     if (amberish && tierOf(doc) === 2 && tier1Waiting.has(product)) { await refuse('queued behind Tier-1 work in amber'); continue; }
     const kind = kindOf(doc);

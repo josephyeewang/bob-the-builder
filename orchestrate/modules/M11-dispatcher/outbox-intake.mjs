@@ -16,6 +16,7 @@ import { createHash } from 'node:crypto';
 import { readdirSync, lstatSync } from 'node:fs';
 import { join } from 'node:path';
 import { readOutboxFile, OUTBOX_NAME } from '../M4-workshop/launcher/outbox.mjs';
+import { outboxKindOf } from '../../shared/record-names.mjs';
 import { DESIGN_PROFILES } from '../M4-workshop/launcher/role-profiles.mjs';
 
 export const READONLY_REQUESTS = Object.freeze({ think: 'reviewer', scout: 'scout', write: 'writer' });
@@ -25,9 +26,9 @@ const sha256 = (s) => createHash('sha256').update(s).digest('hex');
 const appliedId = (sessionId, name) => `intake-applied-${sessionId}-${name}`;
 const statOf = (p) => { try { const s = lstatSync(p); return `${s.size}:${s.mtimeMs}`; } catch { return null; } };
 
-/** The kinds a session may hand in: its role's, except a read-only request session hands back report-. */
+/** The kinds a session may hand in (name prefixes, L82 M-1): its role's, except a read-only request session hands back report-. */
 export function kindsFor(entry) {
-  if (entry.request) return ['report'];
+  if (entry.request) return ['report-'];
   return [...(DESIGN_PROFILES[entry.role]?.outbox ?? [])];
 }
 
@@ -60,10 +61,10 @@ export async function intakePass({ rec, sessions, wait, alert, note, startReadon
     const file = read(s.outbox, name, { kinds, uid: s.uid });
     if (!file.ok) {
       r.refused = file.reason;
-      const m = OUTBOX_NAME.exec(name);
+      const k = OUTBOX_NAME.test(name) ? outboxKindOf(name) : null;
       note(`outbox file ${name} from ${s.role} ${s.sessionId} refused: ${file.reason}`);
-      if (s.role === 'lead' && m && !kinds.includes(m[1])) {
-        replyToLead({ lead: s.sessionId, text: `Your file ${name} was not used: "${m[1]}" is not a kind you can hand in (${kinds.join(', ')}).` });
+      if (s.role === 'lead' && OUTBOX_NAME.test(name) && !kinds.includes(k)) {
+        replyToLead({ lead: s.sessionId, text: `Your file ${name} was not used: it is not a kind you can hand in (${kinds.join(', ')}).` });
       } else alert(`an outbox file from ${s.role} ${s.sessionId} was refused: ${file.reason}`);
       continue;
     }
@@ -100,19 +101,20 @@ export async function intakePass({ rec, sessions, wait, alert, note, startReadon
     if (why) { r.refused = why; note(`outbox file ${name} from ${s.role} ${s.sessionId} not used yet: ${why}`); continue; }
     // A Lead's read-only request starts its session first. Refused (at the cap, in red) -> the file waits
     // and is tried again next pass (audit MAT-6); the Lead is told once that it is queued.
-    if (s.role === 'lead' && Object.hasOwn(READONLY_REQUESTS, file.kind)) {
+    const word = file.kind.slice(0, -1);   // the request's word: think-, scout-, write- -> think, scout, write
+    if (s.role === 'lead' && Object.hasOwn(READONLY_REQUESTS, word)) {
       // Claim first (audit 0b-6 r2 MIN-7): a crash between the start and the claim must not start a second helper.
       const claimStart = put({ state: 'starting', tries: prev?.doc?.tries ?? 0 }, 'outbox_starting');
       if (!claimStart.ok) { r.refused = `could not record the start: ${claimStart.reason}`; continue; }
       let started;
-      try { started = await startReadonly({ lead: s.sessionId, profile: READONLY_REQUESTS[file.kind], kind: file.kind, brief: file.text, product: s.product }); }
+      try { started = await startReadonly({ lead: s.sessionId, profile: READONLY_REQUESTS[word], kind: word, brief: file.text, product: s.product }); }
       catch (e) { started = { ok: false, reason: `the start failed: ${e.message}` }; }
       r.request = started;
       if (!started?.ok) {
         const reason = started?.reason ?? 'no answer';
         const told = (prev?.doc?.tries ?? 0) > 0;
         put({ state: 'waiting', reason, tries: (prev?.doc?.tries ?? 0) + 1 }, 'outbox_waiting');
-        if (!told) replyToLead({ lead: s.sessionId, text: `Your ${file.kind} request ${name} is queued: ${reason}. It starts by itself when it can.` });
+        if (!told) replyToLead({ lead: s.sessionId, text: `Your ${word} request ${name} is queued: ${reason}. It starts by itself when it can.` });
         r.waiting = reason;
         continue;
       }

@@ -30,6 +30,7 @@ import { note } from './moves.mjs';
 import { createAsk } from '../M2-approvals/binding.mjs';
 import { writeDoc } from '../M2-approvals/ask-store.mjs';
 import { sensorsFact } from './sensor-facts.mjs';
+import { answerCounts } from '../../shared/approval.mjs';
 
 export const ASK_ID = (card) => `delete-copy-${card}`;
 export const CLEANUP_FACT = (card) => `cleanup-${card}`;
@@ -152,8 +153,8 @@ export async function cleanupCopy({ rec, rules, now, card, copiesRoot, sealRoot,
     const consume = (extra = {}) => writeDoc(rec, 'ask', ask, { ...ask.doc, state: 'consumed', consumed_at: iso(now), kept_at_card_change: cardChange(rec, card), ...extra });
     if (!del) { consume(); return done('kept', ['Joe said keep']); }
     // A delete needs an answer M2 counted, as the undo tap does (audit MIN-5).
-    const counted = rules.may('count_approval', { ask: { id: ASK_ID(card), ...ask.doc } });
-    if (counted.decision !== 'allow') return done('refused', [`the delete answer was not counted: ${counted.reason}`]);
+    const counted = answerCounts(rules, ask.doc, { approves: true });   // the one approval check (L81)
+    if (!counted.ok) return done('refused', [`the delete answer was not counted: ${counted.reason}`]);
     const own = ownCopy(copy, copiesRoot, card, named);
     consume(own.ok ? {} : { not_deleted: own.reason });
     if (!own.ok) return done('refused', [`Joe said delete, but ${own.reason}`]); // audit MIN-6

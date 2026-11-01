@@ -41,7 +41,7 @@ test('a published profile can never widen a role', () => {
   const w = DESIGN_PROFILES.worker;
   assert.match(checkProfile('worker', { ...w, tools: [...w.tools, 'Agent'] }).reason, /never-list/);
   assert.match(checkProfile('lead', { ...DESIGN_PROFILES.lead, tools: [...DESIGN_PROFILES.lead.tools, 'Bash'] }).reason, /outside the design/);
-  assert.match(checkProfile('worker', { ...w, outbox: ['report', 'roadmap'] }).reason, /outbox kinds/);
+  assert.match(checkProfile('worker', { ...w, outbox: ['report-', 'roadmap-'] }).reason, /outbox kinds/);
   assert.match(checkProfile('worker', { ...w, mode: 'bypassPermissions' }).reason, /mode/);
   assert.match(checkProfile('worker', { ...w, restricted: false }).reason, /not restricted/);
   assert.match(checkProfile('worker', { ...w, compactWindow: 0 }).reason, /compaction/);

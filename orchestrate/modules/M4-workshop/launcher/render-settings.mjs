@@ -9,7 +9,7 @@
 import { writeFileSync, readFileSync, renameSync } from 'node:fs';
 import { join, dirname, basename } from 'node:path';
 import { SETTINGS as S, HOOK_FIELDS as H, HOOK_EVENTS as E, ENV, REFUSED_SETTINGS } from './settings-names.mjs';
-import { hasShell, DESIGN_PROFILES } from './role-profiles.mjs';
+import { hasShell, DESIGN_PROFILES, shadowKindsFor } from './role-profiles.mjs';
 import { REVIEW_ROLES } from '../../../shared/review-roles.mjs';
 
 // The review user's own folders (L66 M3): what a verdict counts from. A reviewer runs the change's tests by design, so
@@ -112,8 +112,11 @@ export function renderRoleSettings({ role, profile, paths, product = {}, rulesHo
   }
   // Only a worker and the writer change files in a code copy; every other role writes its outbox only.
   const copyArg = ['worker', 'writer'].includes(role) ? ` --copy ${paths.copy}` : '';
+  // The longer listed kinds this role may not hand in, so the hook reads a name's kind as M9 does (L82 M-1).
+  const shadow = shadowKindsFor(role);
+  const notKinds = shadow.length ? ` --not-kinds ${shadow.join(',')}` : '';
   const hookCmd = (name, extra = '') =>
-    `${paths.node} ${join(paths.hooksDir, `${name}.mjs`)} --role ${role} --outbox ${paths.outbox} --snapshot ${paths.snapshot} --kinds ${profile.outbox.join(',')}${copyArg}${extra}`;
+    `${paths.node} ${join(paths.hooksDir, `${name}.mjs`)} --role ${role} --outbox ${paths.outbox} --snapshot ${paths.snapshot} --kinds ${profile.outbox.join(',')}${notKinds}${copyArg}${extra}`;
   const hooks = { [E.preToolUse]: [] };
   for (const [name, matcher] of Object.entries(POLICY_HOOKS)) {
     hooks[E.preToolUse].push({ [H.matcher]: matcher, [H.hooks]: [{ [H.type]: 'command', [H.command]: hookCmd(name), [H.timeout]: HOOK_TIMEOUT, [H.onFailure]: 'block' }] });

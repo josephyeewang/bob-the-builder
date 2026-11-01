@@ -28,6 +28,7 @@ export function parseArgs(argv) {
   for (const need of ['role', 'outbox', 'snapshot']) if (!out[need]) throw new Error(`missing --${need}`);
   if (!isAbsolute(out.outbox) || (out.copy && !isAbsolute(out.copy))) throw new Error('paths must be absolute');
   out.kinds = out.kinds ? out.kinds.split(',').filter(Boolean) : [];
+  out.notKinds = out['not-kinds'] ? out['not-kinds'].split(',').filter(Boolean) : [];
   return out;
 }
 

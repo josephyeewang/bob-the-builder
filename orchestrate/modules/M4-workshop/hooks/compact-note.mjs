@@ -21,7 +21,9 @@ export function decide(input, args, io = {}) {
   const stdout = io.stdout ?? ((t) => process.stdout.write(t));
   const now = io.now ?? (() => new Date());
   if (!EVENTS.includes(args.event)) return block(`unknown compaction event ${args.event}`);
-  if (!/^[a-z]+$/.test(args.kind ?? '') || !args.kinds.includes(args.kind)) return block('the note kind is not one of the role\'s outbox kinds');
+  // The note's kind is a first word (handoff, report, state…); a role's kinds are name prefixes (L82 M-1), so the word
+  // must start one of them. Which notes M9 then takes in is M9's table's call: see the M4 README's open item.
+  if (!/^[a-z]+$/.test(args.kind ?? '') || !args.kinds.some((k) => k.startsWith(`${args.kind}-`))) return block('the note kind is not one of the role\'s outbox kinds');
   const outbox = realFolder(args.outbox);
   if (!outbox || lstatSync(args.outbox).isSymbolicLink()) return block('the outbox is missing or a link');
   const sid = input.session_id;

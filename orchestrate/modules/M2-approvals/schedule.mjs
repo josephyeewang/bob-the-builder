@@ -24,6 +24,7 @@
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { activeKind } from '../../shared/asks.mjs';
+import { answerCounts } from '../../shared/approval.mjs';
 import { askStore, writeDoc } from './ask-store.mjs';
 import { releaseBoxes, releaseSessions } from './binding.mjs';
 import { openDecision } from './decision.mjs';
@@ -187,10 +188,12 @@ export async function readApprove(ctx, id, { view, catchUps = [] } = {}) {
   const c = await countApprove({ gh: ctx.gh, view, owner: ctx.owner, repo: ctx.repo, pr: doc.pr, githubId: cfg.githubId, raisedAt: doc.raised_at, catchUps });
   if (!c.ok) return { ok: true, counted: false, reason: c.reason, ...(c.line ? { line: c.line } : {}) };
   if ((ms(c.review.submitted_at) ?? Infinity) >= lapseAt(doc)) return { ok: true, counted: false, lapsed: true };
-  const verdict = ctx.rules.may('count_approval', { product: ctx.product, card: doc.card, ask_kind: doc.kind, channel: 'github_review', tier: doc.tier ?? null, risky: doc.risky ?? [] });
-  if (verdict.decision !== 'ask' || verdict.tier !== 1) { ctx.alert({ type: 'approval_not_counted', ask: id, reason: verdict.reason }); return { ok: true, counted: false }; }
   const binding = { kind: 'github_review', pr: doc.pr, review_id: c.review.id, commit_id: c.review.commit_id, submitted_at: c.review.submitted_at, carried: c.carried };
-  const w = writeDoc(ctx.record, 'ask', a, { ...doc, state: 'answered', answer: { channel: 'github_review', choice: 'approve', approves: true, declined: false, head: c.head, binding, at: iso(ctx.now()) } });
+  const answer = { channel: 'github_review', choice: 'approve', approves: true, declined: false, head: c.head, binding, at: iso(ctx.now()) };
+  // The one approval check, on the answer as it will be recorded (L81).
+  const counted = answerCounts(ctx.rules, { ...doc, answer }, { product: ctx.product });
+  if (!counted.ok) { ctx.alert({ type: 'approval_not_counted', ask: id, reason: counted.reason }); return { ok: true, counted: false }; }
+  const w = writeDoc(ctx.record, 'ask', a, { ...doc, state: 'answered', answer });
   if (!w.ok) return fail(`the record refused the answer: ${w.reason}`);
   return { ok: true, counted: true, head: c.head };
 }

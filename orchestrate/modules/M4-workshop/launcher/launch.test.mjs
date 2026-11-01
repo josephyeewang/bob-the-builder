@@ -473,18 +473,22 @@ test('intake: only a plain, single-link file of the role user, with an allowed n
   const d = tmp();
   const outbox = join(d, 'outbox'); mkdirSync(outbox);
   const uid = process.getuid();
-  writeFileSync(join(outbox, 'ask-T-0001.json'), '{"q":1}');
-  assert.deepEqual(readOutboxFile(outbox, 'ask-T-0001.json', { kinds: ['ask'], uid }), { ok: true, kind: 'ask', text: '{"q":1}' });
+  writeFileSync(join(outbox, 'ask-request-T-0001.json'), '{"q":1}');
+  assert.deepEqual(readOutboxFile(outbox, 'ask-request-T-0001.json', { kinds: ['ask-request-'], uid }), { ok: true, kind: 'ask-request-', text: '{"q":1}' });
   writeFileSync(join(outbox, 'report-T-1.md'), 'x');
-  assert.equal(readOutboxFile(outbox, 'report-T-1.md', { kinds: ['report'], uid: uid + 1 }).ok, false, 'another owner');
+  assert.equal(readOutboxFile(outbox, 'report-T-1.md', { kinds: ['report-'], uid: uid + 1 }).ok, false, 'another owner');
   linkSync(join(outbox, 'report-T-1.md'), join(d, 'second-link'));
-  assert.equal(readOutboxFile(outbox, 'report-T-1.md', { kinds: ['report'], uid }).ok, false, 'hard link');
+  assert.equal(readOutboxFile(outbox, 'report-T-1.md', { kinds: ['report-'], uid }).ok, false, 'hard link');
   writeFileSync(join(d, 'elsewhere'), 'x'); symlinkSync(join(d, 'elsewhere'), join(outbox, 'report-T-2.md'));
-  assert.equal(readOutboxFile(outbox, 'report-T-2.md', { kinds: ['report'], uid }).ok, false, 'link');
+  assert.equal(readOutboxFile(outbox, 'report-T-2.md', { kinds: ['report-'], uid }).ok, false, 'link');
   mkdirSync(join(outbox, 'report-T-3.md'));
-  assert.equal(readOutboxFile(outbox, 'report-T-3.md', { kinds: ['report'], uid }).ok, false, 'folder');
-  assert.equal(readOutboxFile(outbox, 'ask-T-0001.json', { kinds: ['report'], uid }).ok, false, 'not this role\'s kind');
-  for (const n of ['.ask-T-1.json', 'ask_T.json', 'ask-T-1.sh', '../ask-T-1.json', 'ASK-T-1.json']) assert.equal(readOutboxFile(outbox, n, { kinds: ['ask'], uid }).ok, false, n);
+  assert.equal(readOutboxFile(outbox, 'report-T-3.md', { kinds: ['report-'], uid }).ok, false, 'folder');
+  assert.equal(readOutboxFile(outbox, 'ask-request-T-0001.json', { kinds: ['report-'], uid }).ok, false, 'not this role\'s kind');
+  // An old first-word kind list matches nothing (L82 M-1): kinds are the shared table's name prefixes.
+  assert.equal(readOutboxFile(outbox, 'ask-request-T-0001.json', { kinds: ['ask'], uid }).ok, false, 'a first-word kind');
+  writeFileSync(join(outbox, 'ask-T-0002.json'), '{}');
+  assert.match(readOutboxFile(outbox, 'ask-T-0002.json', { kinds: ['ask-request-'], uid }).reason, /not a kind this role may hand in/, 'no listed kind');
+  for (const n of ['.ask-request-T-1.json', 'ask_T.json', 'ask-request-T-1.sh', '../ask-request-T-1.json', 'ASK-request-T-1.json']) assert.equal(readOutboxFile(outbox, n, { kinds: ['ask-request-'], uid }).ok, false, n);
 });
 
 // ---- check 4: the install step (R-0b-33) ----
@@ -644,7 +648,7 @@ test('check 3 and intake: a missing outbox, and an outbox entry that is a folder
   const d = tmp();
   assert.equal(emptyOutbox(join(d, 'none'), { busy: () => [] }).reason, 'the outbox is missing');
   mkdirSync(join(d, 'report-T-1.md'));
-  assert.equal(readOutboxFile(d, 'report-T-1.md', { kinds: ['report'], uid: process.getuid() }).reason, '"report-T-1.md" is not a plain file');
+  assert.equal(readOutboxFile(d, 'report-T-1.md', { kinds: ['report-'], uid: process.getuid() }).reason, '"report-T-1.md" is not a plain file');
 });
 
 test('check 6 and 10: a start message missing a field, and a machine-wide file that is not JSON, refuse with their own reason', () => {

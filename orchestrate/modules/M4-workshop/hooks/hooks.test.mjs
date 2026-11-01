@@ -3,6 +3,7 @@
 // script, fed canned tool calls; production programs are fakes that record whether they ran.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { outboxKindsFor, shadowKindsFor } from '../launcher/role-profiles.mjs';
 import { mkdirSync, writeFileSync, readFileSync, existsSync, symlinkSync, linkSync, chmodSync, readdirSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -37,13 +38,15 @@ function world({ rules } = {}) {
   for (const p of ['fakehost', 'fakedb']) { writeFileSync(join(bin, p), `#!/bin/sh\ntouch "${marks}/${p}"\n`); chmodSync(join(bin, p), 0o755); }
   return { root, outbox, copy, store, start, envFile, keys, snapshot, bin, marks };
 }
-const args = (w, role = 'worker', extra = {}) => ({ role, outbox: w.outbox, snapshot: w.snapshot, kinds: { worker: ['report'], lead: ['wish', 'ask', 'handoff'], front_door: ['request', 'state', 'idea'] }[role] ?? ['report'], copy: role === 'worker' ? w.copy : undefined, ...extra });
+// The role's kinds as the launcher hands them over: from the one shared table (L82 M-1).
+const args = (w, role = 'worker', extra = {}) => ({ role, outbox: w.outbox, snapshot: w.snapshot, kinds: outboxKindsFor(role), notKinds: shadowKindsFor(role), copy: role === 'worker' ? w.copy : undefined, ...extra });
 const bash = (command, cwd = '/') => ({ tool_name: 'Bash', tool_input: { command }, cwd });
 const write = (file_path) => ({ tool_name: 'Write', tool_input: { file_path, content: 'x' } });
 
 // Runs a hook script for real: a new Node process, the input on standard input.
 function runScript(name, a, input, opts = {}) {
   const argv = ['--role', a.role, '--outbox', a.outbox, '--snapshot', a.snapshot, '--kinds', a.kinds.join(',')];
+  if (a.notKinds?.length) argv.push('--not-kinds', a.notKinds.join(','));
   if (a.copy) argv.push('--copy', a.copy);
   if (a.kind) argv.push('--kind', a.kind);
   if (a.event) argv.push('--event', a.event);
@@ -76,7 +79,9 @@ test('plain-files: every blocked path exits 2 from the real script, no card made
 
 test('plain-files: the Lead and Front Door write only to their outbox, by their own kinds', () => {
   const w = world();
-  assert.equal(plain.decide(write(join(w.outbox, 'ask-T-0001.json')), args(w, 'lead')).block, false);
+  assert.equal(plain.decide(write(join(w.outbox, 'wish-T-0001.json')), args(w, 'lead')).block, false);
+  // The Lead has no ask- kind in the shared table (L82 M-1 sweep), so the hook refuses it as M9 would.
+  assert.equal(plain.decide(write(join(w.outbox, 'ask-T-0001.json')), args(w, 'lead')).block, true);
   assert.equal(plain.decide(write(join(w.copy, 'src', 'a.js')), args(w, 'lead')).block, true);
   assert.equal(plain.decide(write(join(w.outbox, 'report-T-1.md')), args(w, 'lead')).block, true);
   assert.equal(plain.decide(write(join(w.outbox, 'state-compact-S1.md')), args(w, 'front_door')).block, false);
@@ -177,7 +182,7 @@ test('L66 M3: a command asking to run outside the sandbox is refused for every r
   assert.equal(noVerify.decide(bash('npm test')).block, false);
   // From the real script too, for a reviewer.
   const w = world();
-  const ra = args(w, 'reviewer', { kinds: ['verdict', 'report'] });
+  const ra = args(w, 'reviewer');
   assert.equal(runScript('no-verify-block', ra, { tool_name: 'Bash', tool_input: { command: 'npm test', dangerouslyDisableSandbox: true }, cwd: '/' }).code, 2);
   // The verdict is written with the Write tool, which the plain-files hook judges: a flat file of a kind of its own passes.
   assert.equal(plain.decide(write(join(w.outbox, 'verdict-C-1.json')), ra).block, false);
