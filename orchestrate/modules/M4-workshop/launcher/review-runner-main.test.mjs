@@ -4,7 +4,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { chmodSync, fstatSync, linkSync, mkdirSync, readFileSync, realpathSync, symlinkSync, unlinkSync, writeFileSync, lstatSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { templateFile } from './review-settings.mjs';
 import { installProblem, programsProblem, readCardFile, recordVerdictTaken, adminAnswer, sessionsFrom, realPorts, readConfig, readInstallStamp, readJoeTaps } from './review-runner-main.mjs';
 import { readOutboxFile } from '../../M9-record/outbox.mjs';
 import { STAMP, installStamp } from './review-daemons.mjs';
@@ -42,11 +43,23 @@ test('L66 M2: what a review runs (claude, node, the hooks folder) must be inside
   const files = { self: join(base, 'modules', 'runner.mjs'), config: join(base, 'review.json'), wiring: join(base, 'wiring.mjs'), claude: join(base, 'bin', 'claude'), node: join(base, 'bin', 'node') };
   for (const f of Object.values(files)) writeFileSync(f, '', { mode: 0o644 });
   writeFileSync(join(base, 'hooks', 'plain-files.mjs'), '', { mode: 0o644 });
-  for (const p of [base, join(base, 'bin'), join(base, 'hooks'), join(base, 'modules')]) chmodSync(p, 0o755);
+  // Each review role's settings template (L67), where the updater copies it in with the rest of the folder.
+  const tdir = dirname(templateFile(base, 'reviewer'));
+  mkdirSync(tdir, { recursive: true });
+  for (const r of ['reviewer', 'auditor']) writeFileSync(templateFile(base, r), '{}', { mode: 0o644 });
+  for (const p of [base, join(base, 'bin'), join(base, 'hooks'), join(base, 'modules'), join(base, 'modules', 'M4-workshop'), dirname(tdir), tdir]) chmodSync(p, 0o755);
   for (const p of [out]) chmodSync(p, 0o755);
   const c = { installRoot: base, wiring: files.wiring, claudeBin: files.claude, hooksDir: join(base, 'hooks') };
   const check = (over = {}, node = files.node) => programsProblem({ ...c, ...over }, { self: files.self, config: files.config, node, owner: ME, top: base });
   // This test's user stands in for root; with everything inside, nothing is wrong.
+  assert.equal(check(), null);
+  // A template that is missing, or one others can write, refuses by name (L67).
+  unlinkSync(templateFile(base, 'auditor'));
+  assert.match(check(), /templates\/auditor\.settings\.json is missing/);
+  writeFileSync(templateFile(base, 'auditor'), '{}', { mode: 0o644 });
+  chmodSync(templateFile(base, 'reviewer'), 0o666);
+  assert.match(check(), /templates\/reviewer\.settings\.json can be written by others than root/);
+  chmodSync(templateFile(base, 'reviewer'), 0o644);
   assert.equal(check(), null);
   assert.match(programsProblem(c, { self: files.self, config: files.config, node: files.node }), /is not owned by root/);
   // Each one outside the installed copy refuses, by name.
@@ -70,7 +83,9 @@ test('L66 M2: what a review runs (claude, node, the hooks folder) must be inside
   let got;
   const ports = realPorts({ ...c, uids: { reviewer: ME } }, { start: (x) => { got = x; return { ok: true, pid: 1 }; } }, { node: files.node });
   await ports.start({ role: 'reviewer' });
-  assert.deepEqual(got, { role: 'reviewer', claudeBin: files.claude, node: files.node, hooksDir: join(base, 'hooks') });
+  const { settingsFor, ...rest } = got;
+  assert.deepEqual(rest, { role: 'reviewer', claudeBin: files.claude, node: files.node, hooksDir: join(base, 'hooks') });
+  assert.equal(typeof settingsFor, 'function', 'and the settings maker, bound to this session (review-settings.test.mjs)');
 });
 
 test('item 20(b) planted: every folder above the installed copy, up to /, must be root\'s, written by no one else, and not a link', () => {

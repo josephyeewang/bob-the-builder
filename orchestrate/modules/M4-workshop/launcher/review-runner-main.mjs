@@ -24,7 +24,11 @@
 //     "ownerTaps": "/abs",                          optional: Joe's "review again" taps (L70 point 3), a folder of the
 //                                                   owner's that no one else writes, holding <session>.json files of
 //                                                   the owner's; the Front Door, which runs as Joe, writes them
-//     "wiring": "/abs/wiring.mjs" }                 exports `start(x)` (review-runner.mjs `runnerPass`, `ctx.start`)
+//     "wiring": "/abs/wiring.mjs",                  exports `start(x)` (review-runner.mjs `runnerPass`, `ctx.start`)
+//     "snapshot": "/abs", "bobFolder": "/abs",      the session settings' fixed paths (L67 addendum 2, review-settings.mjs):
+//     "deny": ["/abs", ...],                        the rules snapshot (inside root), the Bob folder, the read-deny list,
+//     "reviewCopies": "/abs", "workerCopies": "/abs" }  and the review copies' folder, apart from the workers' copies'
+//                                                   folder (which the deny list covers whole); read only at a start
 // The wiring's start runs the launcher (launch.mjs, checks 1 to 13) for a reviewer or an auditor, with `--session-id`
 // set to the runner's id, and returns { ok, pid }, where pid is claude's own process (L66: never the launcher's; the
 // runner checks the pid's command is the pinned claude before it counts the start, and before it stops anything). It
@@ -33,6 +37,10 @@
 // prompt must include (L69 point 4), as quoted data from an earlier reviewer and never as instructions: the wiring
 // renders them with `earlierBlock` (review-runner.mjs, L70 point 5; since L71 C3 the runner passes the rendered block, a
 // string the wiring puts in the prompt as it is). `ok: false` from start means claude was never spawned (L71 point 2).
+// The session's settings (L67): once it has made the review copy, the wiring calls `settingsFor(copy)`, which fills the
+// role's root-owned template (templates/, copied in by the updater) with this session's outbox and copy and the config's
+// fixed paths, checks it, and writes it to <root>/settings/<session>.json → { ok, file } or { ok: false, reason }. The
+// wiring launches with `--settings <file>` and no other settings; on a refusal it starts nothing and returns ok: false.
 // Joe's taps: only a plain handler for Joe's button, running as Joe, writes `ownerTaps`; the Front Door's own tools get
 // a deny rule on that folder, and the handler removes a tap once the status lists it in `taps_read` (L71 points 5, C1).
 // Exit 0 when the pass ran clean, 1 when it refused or could not run.
@@ -49,6 +57,8 @@ import { SESSION_ID } from '../../../shared/record.mjs';
 import { readAccountFile, ACCOUNT_FILE } from './accounts.mjs';
 import { REVIEW_USER } from './review-user.mjs';
 import { git } from '../git/safe-git.mjs';
+import { sessionSettings, templateFile } from './review-settings.mjs';
+import { REVIEW_ROLES } from '../../../shared/review-roles.mjs';
 
 const ABS = ['installRoot', 'root', 'outboxRoot', 'reviewHome', 'recordRoot', 'mirror', 'claudeBin', 'hooksDir', 'ownerHome', 'wiring'];
 const MAX_CARD_BYTES = 1024 * 1024;
@@ -152,10 +162,11 @@ export function installProblem(installRoot, files, { owner = 0, lstat = lstatSyn
 
 /**
  * What a review session runs (L66 M2), named one by one: the runner itself, its config, the wiring, the claude
- * program, the node this runs on and the hooks folder. Each must be inside the installed copy and root's alone.
+ * program, the node this runs on, the hooks folder and each review role's settings template (L67). Each must be inside
+ * the installed copy and root's alone.
  */
 export function programsProblem(c, { self, config, node = realpathSync(process.execPath), ...opts } = {}) {
-  return installProblem(c.installRoot, [self, config, c.wiring, c.claudeBin, node, c.hooksDir], opts);
+  return installProblem(c.installRoot, [self, config, c.wiring, c.claudeBin, node, c.hooksDir, ...REVIEW_ROLES.map((r) => templateFile(c.installRoot, r))], opts);
 }
 
 // A folder of the Record: a plain folder of the Record's owner that no one else writes. Null, or the problem.
@@ -333,7 +344,8 @@ export function realPorts(c, wiring, { node = realpathSync(process.execPath) } =
       return r.status === 0 ? String(r.stdout).trim() : null;
     },
     installedCommit: () => readInstallStamp(c.installRoot),
-    start: (x) => wiring.start({ ...x, claudeBin: c.claudeBin, node, hooksDir: c.hooksDir }),
+    start: (x) => wiring.start({ ...x, claudeBin: c.claudeBin, node, hooksDir: c.hooksDir,
+      settingsFor: (copy) => sessionSettings(c, { role: x.role, sessionId: x.sessionId, copy, node }) }),
     accountInUse: () => {
       const copy = c.accountCopy ? readAccountFile({ file: c.accountCopy, uid: 0 }) : { ok: false };
       if (copy.ok) return copy.account;
