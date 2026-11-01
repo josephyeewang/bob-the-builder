@@ -30,12 +30,12 @@ function framesHere() {
   const stack = new Error().stack ?? '';
   Error.stackTraceLimit = was;
   return stack.split('\n').slice(2).flatMap((l) => {
-    const x = /^\s*at (?:async )?(?:(.*?) \()?(.*?)(?::\d+){1,2}\)?$/.exec(l);
+    const x = /^\s*at (?:async )?(?:(.*?) \()?(.*?):(\d+)(?::\d+)?\)?$/.exec(l);
     if (!x) return [];
     let file = x[2];
     if (file.startsWith('file://')) { try { file = fileURLToPath(file); } catch { /* keep it */ } }
     const fn = (x[1] ?? '').replace(/^new /, '').replace(/ \[as [^\]]+\]$/, '').split('.').pop();
-    return [{ fn, file }];
+    return [{ fn, file, line: Number(x[3]) }];
   });
 }
 function logCall(outcome) {

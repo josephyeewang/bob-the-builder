@@ -19,6 +19,8 @@
 //     that it was safe while M13 raise never answers false is withdrawn (L143 M-4): open, lane 3. Todo, failing.
 //   - heartbeat account-changed: the same: the new login is saved after a raise whose answer is not looked at. Todo.
 //   - tellThen (M11): hands back the alert's answer as it is: false when lost, a throw as a throw. Passes (L143).
+//   - safeAlert (M2, landed with #87): answers false when the alert answers false or throws, and counts both in
+//     alerts_failed; it never throws, so a caller records an alert as given only on true. Passes (L143 rerun).
 // Lane 3 may change only the three todo markers here, when its fix lands (L143).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -29,6 +31,7 @@ import { makeVercelReader } from '../modules/M12-sensors/vercel-reader.mjs';
 import { watchOnce } from '../modules/M12-sensors/prod-watcher.mjs';
 import { heartbeatOnce } from '../modules/M13-ledger/heartbeat.mjs';
 import { tellThen } from '../modules/M11-dispatcher/alerts.mjs';
+import { safeAlert } from '../modules/M2-approvals/research-ask.mjs';
 import { fakeAlert } from './fake-alert.test-helper.mjs';
 
 const DEFECT = 'L139: a found defect, reported to the lead; this goes green when the code is fixed';
@@ -163,4 +166,14 @@ test("tellThen hands back the alert's answer: false when it is lost, and a throw
   assert.deepEqual(lost.calls[0], ['t', { mark }], 'and hands the mark to the alert, which writes it only on delivery');
   assert.throws(() => tellThen(fakeAlert({ throws: new Error('down') }), 't', mark), /down/, 'threw: tellThen throws');
   assert.equal(tellThen(fakeAlert(), 't', mark), true, 'sent: true');
+});
+
+test('safeAlert answers false when the alert is lost, whether it answers false or throws, and counts both (L143 contract)', () => {
+  const failed = { n: 0 };
+  assert.equal(safeAlert({ alert: fakeAlert({ answer: false }) }, failed)({ type: 't' }), false, 'answered false: safeAlert answers false');
+  assert.equal(failed.n, 1);
+  assert.equal(safeAlert({ alert: fakeAlert({ throws: new Error('down') }) }, failed)({ type: 't' }), false, 'threw: safeAlert answers false, and does not throw');
+  assert.equal(failed.n, 2, 'both counted in alerts_failed');
+  assert.equal(safeAlert({ alert: fakeAlert() }, failed)({ type: 't' }), true, 'sent: true');
+  assert.equal(failed.n, 2);
 });

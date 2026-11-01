@@ -426,8 +426,9 @@ test('controls: the run-time proof fails a test that never reaches the code, ign
   try {
     mkdirSync(join(dir, 'test')); mkdirSync(join(dir, 'm'));
     copyFileSync(join(ROOT, HELPER), join(dir, HELPER));
-    writeFileSync(join(dir, 'm/c.mjs'), 'export function closeIt(alert, rec) {\n  const sent = alert("x");\n  if (sent !== false) rec.push("told");\n  return sent;\n}\n');
-    const imp = "import { test } from 'node:test';\nimport assert from 'node:assert/strict';\nimport { fakeAlert } from '../test/fake-alert.test-helper.mjs';\nimport { closeIt } from './c.mjs';\n";
+    writeFileSync(join(dir, 'm/c.mjs'), 'export function closeIt(alert, rec) {\n  const sent = alert("x");\n  if (sent !== false) rec.push("told");\n  return sent;\n}\n'
+      + 'export function guard(alert) {\n  return (a) => {\n    try { return alert(a) !== false; } catch { return false; }\n  };\n}\nexport function other() { return 1; }\n');
+    const imp = "import { test } from 'node:test';\nimport assert from 'node:assert/strict';\nimport { fakeAlert } from '../test/fake-alert.test-helper.mjs';\nimport { closeIt, guard } from './c.mjs';\n";
     writeFileSync(join(dir, 'm/c.test.mjs'), `${imp}
 test('honest', () => {
   const rec = []; assert.equal(closeIt(fakeAlert({ answer: false }), rec), false); assert.deepEqual(rec, []);
@@ -443,6 +444,10 @@ test('ignores the throw', () => {
   try { closeIt(fakeAlert({ throws: new Error('down') }), []); } catch { /* not looked at */ }
 });
 test('skipped', (t) => { t.skip('later'); });
+test('closure', () => {
+  assert.equal(guard(fakeAlert({ answer: false }))('x'), false);
+  assert.equal(guard(fakeAlert({ throws: new Error('down') }))('x'), false);
+});
 `);
     const target = [{ file: 'm/c.mjs', fn: 'closeIt' }];
     const why = (name, opts) => runtimeProblems(dir, 'm/c.test.mjs', name, target, opts).join(' | ');
@@ -453,6 +458,10 @@ test('skipped', (t) => { t.skip('later'); });
     assert.match(why('ignores the throw'), /still passes when the failing alert answers true/, 'a test that never checks the throw');
     assert.match(why('skipped'), /skipped or a todo/, 't.skip() in the body');
     assert.match(why('no such test'), /did not run/, 'a name that is not a test');
+    // The closure a wrapper hands back has no name on the stack; a frame on a line inside the function counts (safeAlert).
+    const closure = (fn) => runtimeProblems(dir, 'm/c.test.mjs', 'closure', [{ file: 'm/c.mjs', fn }]).join(' | ');
+    assert.equal(closure('guard'), '', 'the closure guard hands back is reached inside guard');
+    assert.match(closure('other'), /never reached a fakeAlert that answered false/, 'but not inside a function it never ran');
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 

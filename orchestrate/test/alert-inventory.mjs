@@ -588,6 +588,12 @@ export function fnBody(src, fn) {
   const b = blocks(m, pairs(m)).find((x) => x.kind === 'fn' && x.name === fn);
   return b ? short(squash(mask(src.slice(b.open, b.close + 1), { commentsOnly: true }))) : null;
 }
+/** The first and last line of the first function named `fn` in `src`, or null when there is none. */
+export function fnLines(src, fn) {
+  const m = mask(src);
+  const b = blocks(m, pairs(m)).find((x) => x.kind === 'fn' && x.name === fn);
+  return b ? [lineOf(m, b.open), lineOf(m, b.close)] : null;
+}
 /** Does `testSrc` (at `testRel`) import `fileRel`? Both relative to orchestrate/. */
 export function importsFile(testSrc, testRel, fileRel) {
   for (const x of mask(testSrc, { commentsOnly: true }).matchAll(/\bfrom\s*['"](\.{1,2}\/[^'"]+)['"]/g)) {
@@ -667,7 +673,12 @@ export function runtimeProblems(root, testRel, name, targets, { answerUnused = n
   for (const t of targets) {
     let abs = join(root, t.file);
     try { abs = realpathSync(abs); } catch { /* a stack frame names the real path; keep this one */ }
-    const reached = (outcome) => plain.log.some((l) => l.outcome === outcome && l.frames.some((f) => f.file === abs && (t.fn === '(top)' || f.fn === t.fn)));
+    // Reached: a frame in the target's file, named as the function or on a line inside it (an anonymous closure it
+    // hands back, such as safeAlert's, has no name of its own on the stack).
+    let span = null;
+    try { span = fnLines(readFileSync(join(root, t.file), 'utf8'), t.fn); } catch { span = null; }
+    const inFn = (f) => t.fn === '(top)' || f.fn === t.fn || (span && f.line >= span[0] && f.line <= span[1]);
+    const reached = (outcome) => plain.log.some((l) => l.outcome === outcome && l.frames.some((f) => f.file === abs && inFn(f)));
     if (!reached('false')) out.push(`${t.file} ${t.fn} never reached a fakeAlert that answered false`);
     if (!reached('threw')) out.push(`${t.file} ${t.fn} never reached a fakeAlert that threw`);
   }
