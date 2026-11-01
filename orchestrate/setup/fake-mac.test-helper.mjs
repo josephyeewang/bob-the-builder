@@ -22,7 +22,7 @@ export function fakeMac({ euid: as = 0, users = {}, admins = [] } = {}) {
     failNextDsclCreate: false,  // a test sets this to make the next dscl -create fail once
     sudoRules: new Set(),       // users a sudo rule names (`sudo -l -U` then says they may run sudo)
     nodeProblemText: null,      // a test sets this to make the node program look like one root must not run
-    aclPrincipals: { orchestrate: 'daemon' },   // access-list names that exist only on the Mini are stood in for by a real user here
+    aclPrincipals: { orchestrate: 'daemon' },   // access-list names that exist only on the always-on Mac are stood in for by a real user here
   };
   const at = (p) => join(prefix, p);
   mkdirSync(at('/Library'), { recursive: true });
@@ -90,7 +90,7 @@ export function fakeMac({ euid: as = 0, users = {}, admins = [] } = {}) {
         const who = args[args.indexOf('-U') + 1];
         return mac.sudoRules.has(who) ? { status: 0, stdout: `User ${who} may run the following commands on this-mac:\n    (ALL) ALL\n`, stderr: '' } : { status: 1, stdout: `User ${who} is not allowed to run sudo on this-mac.\n`, stderr: '' };
       }
-      // The real ls and chmod, so their refusals are the real ones. A principal that exists only on the Mini (orchestrate)
+      // The real ls and chmod, so their refusals are the real ones. A principal that exists only on the always-on Mac (orchestrate)
       // is swapped for a real user of this Mac on the way in and back on the way out.
       if (cmd === '/bin/ls') {
         const r = real(cmd, args);
