@@ -16,7 +16,9 @@ function world({ kind = 'decision', ...over } = {}) {
   g.repo.main = g.repo.commit([], { 'README.md': 'hi' });
   Object.assign(t.ctx, { gh: g.gh, owner: 'sample-org', repo: 'sample-app' });
   const fields = kind === 'go_t1'
-    ? { id: 'G-1', kind, card: 'C-1', title: 'Billing export', tier: 1, fingerprint: 'f'.repeat(64), files: ['src/a.mjs'] }
+    ? { id: 'G-1', kind, card: 'C-1', title: 'Billing export', tier: 1, fingerprint: 'f'.repeat(64), files: ['src/a.mjs'], extra: {
+      fingerprint_inputs: { files: ['src/a.mjs'], done_bar: ['the export matches the ledger', 'audited until 0 Material'], plan_sha256: 'e'.repeat(64), main_commit: 'a'.repeat(40) },
+      plan_check: { pass: true, material: 0, plan_sha256: 'e'.repeat(64), reviewer_session: 'S-review', author_session: 'S-lead' } } }
     : { id: 'D-1', kind, card: 'C-1', title: 'Which export format', choices: ['CSV', 'JSON', 'Parquet'], recommended: 'CSV' };
   const r = createAsk(t.ctx, { ...fields, ...over });
   assert.equal(r.ok, true, r.reason);

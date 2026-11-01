@@ -171,8 +171,17 @@ test('Tier 1: the go is a decision pull request; a listed file changed on main i
   const w = world();
   const plan = { tier: 1, plan_sha256: 'e'.repeat(64), main_commit: w.M0, files: ['src/a.mjs'] };
   const rows = card(w, 'T', plan, { 'R-1': row('R-1', { tier: 1 }) });
-  const r = await raiseGo(w.t.ctx, { cardId: 'T', rows, view: w.view, mainSha: w.M0 });
+  const pass = { pass: true, material: 0, plan_sha256: 'e'.repeat(64), reviewer_session: 'S-review', author_session: 'S-lead' };
+  // R-0b-138: no go is asked before a fresh plan reviewer passed this plan with 0 Material.
+  for (const [bad, why] of [[undefined, /fresh plan reviewer's pass/], [{ ...pass, material: 1 }, /0 Material/], [{ ...pass, pass: false }, /0 Material/],
+    [{ ...pass, plan_sha256: 'd'.repeat(64) }, /another version/], [{ ...pass, reviewer_session: 'S-lead' }, /session that wrote it/], [{ ...pass, reviewer_session: '' }, /names its reviewer/]]) {
+    const no = await raiseGo(w.t.ctx, { cardId: 'T', rows, view: w.view, mainSha: w.M0, planCheck: bad });
+    assert.equal(no.ok, false); assert.match(no.reason, why);
+  }
+  assert.equal(askStore(w.t.record).asks().length, 0, 'nothing asked without the pass');
+  const r = await raiseGo(w.t.ctx, { cardId: 'T', rows, view: w.view, mainSha: w.M0, planCheck: pass });
   assert.equal(r.ok, true, r.reason);
+  assert.deepEqual(askStore(w.t.record).ask(r.id).doc.plan_check, pass);
   assert.equal(askStore(w.t.record).ask(r.id).doc.kind, 'go_t1');
   const { pr } = await openDecision(w.t.ctx, r.id);
   const file = JSON.parse(w.g.repo.files(w.g.pulls.get(pr).head).get('decisions/go-T.json').text);

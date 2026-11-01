@@ -27,6 +27,7 @@ import { activeKind } from '../../shared/asks.mjs';
 import { askStore, writeDoc } from './ask-store.mjs';
 import { releaseBoxes, releaseSessions } from './binding.mjs';
 import { openDecision } from './decision.mjs';
+import { goText, goView } from './go-view.mjs';
 import { countApprove, requestReview } from './github-review.mjs';
 import { MERGE_APPROVE_MS, UNDO_OPEN_QUESTION_LINE, URGENT_REPUSH_MS, dueWindow, lapseAt, readConfig, zoneFor } from './kinds.mjs';
 
@@ -111,7 +112,11 @@ async function push(ctx, a, { urgent, win, anyBound, nowMs }, events) {
   };
   if (k.channel === 'tap') {
     if (typeof ctx.push !== 'function') { ctx.alert({ type: 'approvals_no_push', ask: a.id }); return; }
-    const event = { ask: a.id, card: doc.card, kind: doc.kind, urgent, ...(doc.kind === 'undo' && anyBound ? { line: UNDO_OPEN_QUESTION_LINE } : {}) };
+    // A go push carries the go view (R-0b-138/139): the plan in three lines and the files it allows. One that can't be
+    // shown is held, never sent bare.
+    let view = null;
+    if (k.go) { const v = goView(doc); if (!v.ok) { ctx.alert({ type: 'go_not_shown', ask: a.id, reason: v.reason }); return; } view = goText(v); }
+    const event = { ask: a.id, card: doc.card, kind: doc.kind, urgent, ...(doc.kind === 'undo' && anyBound ? { line: UNDO_OPEN_QUESTION_LINE } : {}), ...(view ? { view } : {}) };
     let sent = false;
     try { sent = (await ctx.push(event)) === true; } catch { sent = false; }
     if (!sent) { ctx.alert({ type: 'push_not_sent', ask: a.id }); return; }

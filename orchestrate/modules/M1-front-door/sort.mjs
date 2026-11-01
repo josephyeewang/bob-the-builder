@@ -38,12 +38,23 @@ const LINE = { new: 'Start a new project', evolve: 'Change an existing product',
 const ON_GO = { new: 'On Go: I file nothing; you open a session on the Mini and say `bob NEW <name>`.',
   think: 'On Go: I file a request; the Mini opens a thinking room on the main model.' };
 
+// Number work (Tier 1, R-0b-138): words that say the change touches figures someone acts on. The Lead sets the tier;
+// these only change what the read-back promises, so a miss here is caught at planning, never skipped.
+export const NUMBER_CUES = Object.freeze(['number', 'price', 'pricing', 'revenue', 'score', 'scoring', 'total', 'billing',
+  'payment', 'invoice', 'money', 'migration', 'migrate', 'backfill', 'forecast', 'metric', 'dedup', 'join ']);
+export function numberWork(text) {
+  const t = ` ${String(text ?? '').toLowerCase().replace(/\s+/g, ' ')} `;
+  return NUMBER_CUES.some((c) => t.includes(c));
+}
+export const TIER1_ON_GO = 'On Go: I file it, and the Lead is planning it now. It is number work (Tier 1), so your go comes only after a fresh plan reviewer passes the plan, and the change is audited until 0 Material.';
+
 // The three-line read-back. `what` is the owner's words, already masked by the caller; it is shortened, never quoted whole.
-export function readBack({ mode, product = null, what = '' }) {
+export function readBack({ mode, product = null, what = '', tier1 = false }) {
   if (!MODES.includes(mode)) return { ok: false, reason: 'unknown mode' };
   const short = String(what).replace(/\s+/g, ' ').trim().slice(0, 80);
   const lines = [`${LINE[mode]}${product ? `: ${product}` : ''}.`, `What you said: ${short || '(nothing)'}`,
-    ON_GO[mode] ?? `On Go: I file a ${mode} request; nothing happens until the Lead picks it up.`];
+    (tier1 && mode === 'evolve') ? TIER1_ON_GO
+      : ON_GO[mode] ?? `On Go: I file a ${mode} request; nothing happens until the Lead picks it up.`];
   return { ok: true, lines, options: [...READBACK_OPTIONS] };
 }
 
