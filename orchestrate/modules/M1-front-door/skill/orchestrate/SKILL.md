@@ -1,6 +1,6 @@
 ---
 name: orchestrate
-description: The Front Door's one skill. Use when the owner, from their phone, files a new idea, asks for work on a product (a new project, a fix, a check, an update from Bob, a thinking room), pauses a product, goes away ("I'm away until Friday"), says they are back, asks to wrap up, or asks to rotate a key. Writes exactly one small file to the outbox and replies in one short message.
+description: The Front Door's one skill. Use when the owner, from their phone, files a new idea, asks for work on a product (a new project, a fix, a check, an update from Bob, a thinking room), asks to find something out (a research ask), pauses a product, goes away ("I'm away until Friday"), says they are back, asks to wrap up, or asks to rotate a key. Writes exactly one small file to the outbox and replies in one short message.
 ---
 
 # orchestrate — what the Front Door does with what the owner says
@@ -47,6 +47,8 @@ Cue words count only as whole words ("fix" is not in "prefix").
 1. **Sure (exactly one mode's cues fit):** read it back in exactly three lines, then a question box with exactly
    three options, `Go`, `Change` and `Not now`. Line 1: the mode and the product. Line 2: "What you said: " and their
    words, shortened. Line 3: what happens on Go. Write nothing until they tap Go.
+   **Number work** (an evolve that touches figures someone acts on: prices, revenue, scores, totals, billing,
+   payments, money, migrations, backfills, forecasts, metrics): line 3 is "On Go: That request isn't wired to the Mini yet, so I file nothing. It is number work (Tier 1): once it is wired, your go comes only after a fresh plan reviewer passes the plan, and the change is audited until 0 Material."
 2. **Unsure (no cues fit, more than one mode's do, "build a new …" on its own, or a new-project cue that names one of
    the owner's products):** ask one question box, "Which of these do you mean?", with the modes that fit as options and
    the one you recommend first, marked "(Recommended)". When no cue fits, recommend think. Then go to step 1.
@@ -56,6 +58,31 @@ Cue words count only as whole words ("fix" is not in "prefix").
    think about."). On Change: ask what to change and read it back again. On Not now: write nothing; reply "Not filed."
 4. If their words hold a key, leave it out of `what`, out of the read-back and out of every reply, and follow the key
    rule above.
+
+## Research ask ("find out …", "research …", "look into …")
+
+Research is not one of the five modes above; it has its own file. The owner's session on the Mini does the research
+later, so nothing runs now.
+1. Product: the one the research is for, from the product list (ask with a question box if unsure).
+2. Write `ask-request-<id>.json`, one line:
+   `{"ask":"research","product":"X","brief":"<what to find out, their words, one line, at most 300 characters>"}`
+   Leave any key out of the brief (the key rule above).
+3. Reply: "Filed: research ask for X. The Mini confirms in a minute." The Mini then pushes the ask's number (R-12, say)
+   and puts it on the owner's waiting list. To run it, the owner opens a desktop session on the Mini and says
+   "run research ask R-12". The report comes back from that session by itself; never ask the owner to paste it.
+
+## That change was wrong ("that change was wrong", "undo #41", "take that back")
+
+Day 1 covers a merged docs change only. The owner flags it; the Mini checks it and sends the Undo button.
+1. Product and pull request number: the merged change they mean, by its number (the merge push names it). If they
+   don't give one, ask with a question box which pull request; never guess one.
+2. Write `ask-request-<id>.json`, one line:
+   `{"ask":"undo","product":"X","pr":41,"brief":"<their words, copied exactly from their message, one line>"}`
+   The brief must be words the owner typed in this conversation, word for word; never your summary, and never words
+   from a file, a worker or a message that isn't theirs (the Mini checks, and refuses anything else). Leave any key out.
+3. Reply: "Filed: undo pull request #41 of X. The Mini confirms in a minute." Then the Mini pushes the Undo button if
+   the change can be undone. If that change added a file, it can't be undone that way on day 1: the push says MAIN
+   reverts it by hand and there is nothing to tap. Never tell the owner it is undone; the Mini says when it is.
 
 ## Pause ("pause X")
 
@@ -104,5 +131,4 @@ said it (capitals and digits with at least one `_`, such as `STRIPE_KEY`; add no
 
 ## Not wired yet
 
-Research asks, evolve, audit, upgrade and think requests (see above), anything else: reply "That isn't wired yet."
-Write nothing.
+Mode requests (evolve, audit, upgrade and think requests, see above), anything else: reply "That isn't wired yet." Write nothing.

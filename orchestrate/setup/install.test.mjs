@@ -43,6 +43,10 @@ async function origin(root) {
   writeFileSync(join(seed, 'orchestrate', 'a.txt'), 'one\n');
   mkdirSync(dirname(join(seed, 'orchestrate', SCRIPTS.updater)), { recursive: true });
   writeFileSync(join(seed, 'orchestrate', SCRIPTS.updater), '// the updater, as the copy holds it\n');
+  mkdirSync(join(seed, 'orchestrate', 'modules/M4-workshop/launcher'), { recursive: true });
+  writeFileSync(join(seed, 'orchestrate', 'modules/M4-workshop/launcher/review-wiring.mjs'), '// the review wiring, as main holds it\n');
+  mkdirSync(join(seed, 'scripts/blueprint'), { recursive: true });
+  writeFileSync(join(seed, 'scripts/blueprint/yaml-lite.mjs'), '// the file outside orchestrate/ the copy imports\n');
   await gitOk(['add', '-A'], sg); await gitOk(['commit', '-q', '-m', 'first'], sg);
   await gitOk(['push', '-q', '-f', bare, 'HEAD:refs/heads/main'], sg);
   return bare;
@@ -54,18 +58,16 @@ async function world({ euid = 0 } = {}) {
   const ext = tempDir('orch-setup-ext-');
   const bare = await origin(ext);
   // The runner's config, as the lead's wiring would hand it over, and the three things it names.
-  mkdirSync(join(ext, 'wiring'));
-  writeFileSync(join(ext, 'wiring', 'wiring.json'), '{}\n');
   writeFileSync(join(ext, 'claude-bin'), '#!/bin/sh\n'); chmodSync(join(ext, 'claude-bin'), 0o755);
   mkdirSync(join(ext, 'hooks')); writeFileSync(join(ext, 'hooks', 'h.sh'), '#!/bin/sh\n'); chmodSync(join(ext, 'hooks', 'h.sh'), 0o755);
   const root = mac.at(`${BASE}/install/orchestrate`);
-  writeFileSync(join(ext, 'review.json'), JSON.stringify({ installRoot: root, wiring: `${root}/wiring/wiring.json`, claudeBin: `${root}/claude-bin`, hooksDir: `${root}/hooks` }));
+  writeFileSync(join(ext, 'review.json'), JSON.stringify({ installRoot: root, wiring: `${root}/modules/M4-workshop/launcher/review-wiring.mjs`, claudeBin: `${root}/claude-bin`, hooksDir: `${root}/hooks` }));
   mkdirSync(join(mac.prefix, 'gitbin'));
   writeFileSync(join(mac.prefix, 'gitbin', 'git'), `#!/bin/sh\nexec '${GIT}' "$@"\n`); chmodSync(join(mac.prefix, 'gitbin', 'git'), 0o755);
   writeFileSync(join(ext, 'node'), '#!/bin/sh\n'); chmodSync(join(ext, 'node'), 0o755);
   const raw = {
     base: BASE, owner: 'sam', products: ['alpha'], address: 'https://example.invalid/org/repo.git', label: LABEL,
-    runnerConfig: join(ext, 'review.json'), extras: [join(ext, 'wiring'), join(ext, 'claude-bin'), join(ext, 'hooks')],
+    runnerConfig: join(ext, 'review.json'), extras: [join(ext, 'claude-bin'), join(ext, 'hooks')],
     gitBin: join(mac.prefix, 'gitbin', 'git'), nodeBin: join(ext, 'node'),
   };
   const cfgFile = join(ext, 'install.json'); writeFileSync(cfgFile, JSON.stringify(raw));
@@ -93,6 +95,8 @@ const installed = async () => { const w = await world(); const r = w.run(['insta
 const placed = async () => { const w = await installed(); const r = w.run(['daemons', 'place']); assert.equal(r.code, 0, r.text); return w; };
 const failed = (res) => res.filter((r) => !r.ok);
 const realCopy = (w) => join(w.mac.at(`${BASE}/install`), readdirSync(w.mac.at(`${BASE}/install`)).find((n) => n.startsWith('orchestrate.v-')));
+/** The copy itself: the versioned folder's orchestrate/ (the stamp and the outside files sit beside it, in the folder). */
+const copyOf = (w) => join(realCopy(w), 'orchestrate');
 const plistFile = (w, job) => w.mac.at(`/Library/LaunchDaemons/${LABEL}.${job}.plist`);
 
 // ───────────────────────────── config and the pins to the launcher's own modules ─────────────────────────────
@@ -142,7 +146,8 @@ test('the updater\'s own config names everything the updater insists it keeps', 
   const w = await world();
   const uc = updaterConfigFor(w.mac, w.cfg);
   for (const k of Object.keys(MUST_KEEP)) assert.ok(uc.keep.includes(k), `keep lacks ${k}`);
-  for (const e of ['wiring', 'claude-bin', 'hooks']) assert.ok(uc.keep.includes(e), e);
+  for (const e of ['claude-bin', 'hooks']) assert.ok(uc.keep.includes(e), e);
+  assert.ok(!uc.keep.includes('wiring'), 'the wiring is the copy\'s own code from main, never carried as an extra (#82)');
   assert.equal(uc.installRoot, w.mac.at(installPaths(w.cfg).installRoot));
 });
 
@@ -167,9 +172,10 @@ test('install: the real updater accepts the layout; every item passes; the work 
   assert.deepEqual(w.updaterRuns, [0]);
   assert.equal(failed(checkInstall(w.mac, w.cfg)).length, 0, JSON.stringify(failed(checkInstall(w.mac, w.cfg))));
   assert.equal(existsSync(w.mac.at(`${BASE}/install-work`)), false, 'work folder left behind');
-  const copy = realCopy(w);
-  for (const n of [NODE, UPDATER_CONFIG, RUNNER_CONFIG, STAMP, 'wiring/wiring.json', 'claude-bin', 'hooks/h.sh', 'a.txt']) assert.ok(existsSync(join(copy, n)), n);
-  const stamp = readFileSync(join(copy, STAMP), 'utf8').trim();
+  const folder = realCopy(w); const copy = copyOf(w);
+  for (const n of [NODE, UPDATER_CONFIG, RUNNER_CONFIG, 'modules/M4-workshop/launcher/review-wiring.mjs', 'claude-bin', 'hooks/h.sh', 'a.txt']) assert.ok(existsSync(join(copy, n)), n);
+  assert.ok(existsSync(join(folder, STAMP)), 'the stamp is at the top of the versioned folder'); assert.ok(existsSync(join(folder, 'scripts/blueprint/yaml-lite.mjs')), 'the outside file is beside the copy');
+  const stamp = readFileSync(join(folder, STAMP), 'utf8').trim();
   assert.match(stamp, /^[0-9a-f]{40}$/);
   const uc = JSON.parse(readFileSync(join(copy, UPDATER_CONFIG), 'utf8'));
   assert.equal(uc.installRoot, w.mac.at(`${BASE}/install/orchestrate`));
@@ -194,9 +200,16 @@ test('install: refuses a runner config for another place, or one that names thin
   writeFileSync(w.cfg.runnerConfig, JSON.stringify({ installRoot: '/somewhere/else', wiring: '/somewhere/else/w' }));
   let r = w.run(['install']);
   assert.equal(r.code, 1); assert.match(r.text, /installRoot must be/);
-  writeFileSync(w.cfg.runnerConfig, JSON.stringify({ installRoot: w.root, wiring: `${w.root}/not-carried/w.json` }));
+  const wiring = `${w.root}/modules/M4-workshop/launcher/review-wiring.mjs`;
+  writeFileSync(w.cfg.runnerConfig, JSON.stringify({ installRoot: w.root, wiring, claudeBin: `${w.root}/not-carried/claude` }));
   r = w.run(['install']);
   assert.equal(r.code, 1); assert.match(r.text, /not inside any of the extras/);
+  // The wiring is the copy's own code file from main: one outside modules/ or shared/ (an extra's path, a plain json) is refused.
+  for (const bad of [`${w.root}/not-carried/w.json`, `${w.root}/claude-bin`, `${w.root}/modules/x.json`, `${w.root}/modules/../x.mjs`, '/elsewhere/review-wiring.mjs']) {
+    writeFileSync(w.cfg.runnerConfig, JSON.stringify({ installRoot: w.root, wiring: bad }));
+    r = w.run(['install']);
+    assert.equal(r.code, 1, bad); assert.match(r.text, /own code files|is not inside/, bad);
+  }
   writeFileSync(w.cfg.runnerConfig, 'not json');
   r = w.run(['install']);
   assert.equal(r.code, 1); assert.match(r.text, /can't be read as JSON/);
@@ -227,7 +240,7 @@ test('install: something other than root\'s link where the copy belongs is refus
 
 test('PLANT install: an ACL on an install folder → "none of the … install folders has an access list" FAILS', { skip: !isDarwin }, async () => {
   const w = await installed();
-  const r = spawnSync('/bin/chmod', ['+a', 'everyone allow write', join(realCopy(w), 'hooks')]); assert.equal(r.status, 0);
+  const r = spawnSync('/bin/chmod', ['+a', 'everyone allow write', join(copyOf(w), 'hooks')]); assert.equal(r.status, 0);
   const bad = failed(checkInstall(w.mac, w.cfg));
   assert.ok(bad.some((b) => /access list/.test(b.what)), JSON.stringify(bad));
 });
@@ -240,7 +253,7 @@ test('PLANT install: a folder above the copy that others can write → the "root
 
 test('PLANT install: a file in the copy that others can write → the same item FAILS', async () => {
   const w = await installed();
-  chmodSync(join(realCopy(w), UPDATER_CONFIG), 0o666);
+  chmodSync(join(copyOf(w), UPDATER_CONFIG), 0o666);
   assert.ok(failed(checkInstall(w.mac, w.cfg)).some((b) => /written by no one else/.test(b.what)));
 });
 
@@ -261,12 +274,12 @@ test('PLANT install: the commit stamp is gone → the stamp item FAILS; a stamp 
 
 test('PLANT install: review.json names another copy → "names this copy" FAILS; a thing it names is missing → "exists in the copy" FAILS', async () => {
   const w = await installed();
-  const f = join(realCopy(w), RUNNER_CONFIG);
+  const f = join(copyOf(w), RUNNER_CONFIG);
   const good = readFileSync(f, 'utf8');
   writeFileSync(f, good.replace(/"installRoot":"[^"]*"/, '"installRoot":"/elsewhere"'));
   assert.ok(failed(checkInstall(w.mac, w.cfg)).some((b) => /names this copy/.test(b.what)));
   writeFileSync(f, good);
-  rmSync(join(realCopy(w), 'claude-bin'));
+  rmSync(join(copyOf(w), 'claude-bin'));
   assert.ok(failed(checkInstall(w.mac, w.cfg)).some((b) => /claudeBin exists/.test(b.what)));
 });
 
@@ -283,7 +296,7 @@ test('check-install: exit 1 with a FAIL line when something is wrong, 0 when all
   const w = await installed();
   let r = w.run(['check-install']);
   assert.equal(r.code, 0, r.text); assert.match(r.text, /all \d+ PASS/);
-  chmodSync(join(realCopy(w), UPDATER_CONFIG), 0o666);
+  chmodSync(join(copyOf(w), UPDATER_CONFIG), 0o666);
   r = w.run(['check-install']);
   assert.equal(r.code, 1); assert.match(r.text, /FAIL/);
   assert.throws(() => parseArgs(['check-install', '--config', 'x', '--dry-run']), /never changes/);

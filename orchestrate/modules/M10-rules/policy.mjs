@@ -10,7 +10,7 @@
 // tabs and duplicate keys. It returns every value as a string, so numbers and versions are converted here.
 
 import { parseYaml } from '../../../scripts/blueprint/yaml-lite.mjs';
-import { RISKY_CLASSES } from '../../shared/rules.mjs';
+import { RISKY_CLASSES, WHOLE_TEXT, DECIMAL_TEXT } from '../../shared/rules.mjs';
 import { STATES, FINAL_STATES, timeoutFor } from '../../shared/record.mjs';
 import { compile } from './paths.mjs';
 import { EFFECT_KEYS } from './classify.mjs';
@@ -49,6 +49,7 @@ export const KEYS = Object.freeze({
   quality: { required: false, type: 'map' }, learning: { required: false, type: 'map' },
   light_exit: { required: false, type: 'map' }, context: { required: false, type: 'map' },
   claims: { required: false, type: 'map' },   // M9: claims.stuck_min, the quiet time before a dead owner's claim is broken (G1)
+  outage: { required: false, type: 'map' },   // M11: outage.min_dead (whole number), outage.share (0 to 1) (L104 O-1)
 });
 export const TOP_KEYS = Object.freeze(Object.keys(KEYS).filter((k) => !k.includes('.')));
 export const REQUIRED_KEYS = Object.freeze(TOP_KEYS.filter((k) => KEYS[k].required));
@@ -56,8 +57,8 @@ export const CUTOVER_STAGES = Object.freeze(['first', 'second']);
 export const PRODUCT_STATES = Object.freeze(['active', 'away', 'paused', 'light']);
 export const FAILURE_ACTIONS = Object.freeze(['retry', 'quarantine', 'joe']);
 const BANNED_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
-const INT = /^(0|[1-9]\d*)$/;
-const DEC = /^(0|[1-9]\d*)(\.\d+)?$/;
+const INT = WHOLE_TEXT;     // the one definition, shared with rules.num() and rules.dec() (L104)
+const DEC = DECIMAL_TEXT;
 const VERSION = /^\d+\.\d+\.\d+$/;
 
 class Corrupt extends Error {}
@@ -99,6 +100,7 @@ const need = (obj, key, where) => (isMap(obj) && Object.hasOwn(obj, key) && obj[
 const int = (v, where) => (typeof v === 'string' && INT.test(v) ? Number(v) : bad(`${where} must be a whole number ≥ 0`));
 const dec = (v, where) => (typeof v === 'string' && DEC.test(v) ? Number(v) : bad(`${where} must be a number ≥ 0`));
 const pct = (v, where) => { const n = dec(v, where); return n <= 100 ? n : bad(`${where} must be 0–100`); };
+const share = (v, where) => { const n = dec(v, where); return n <= 1 ? n : bad(`${where} must be 0–1`); };
 const strList = (v, where) => (Array.isArray(v) && v.every((s) => typeof s === 'string' && s) ? v : bad(`${where} must be a list of text`));
 // A pattern is read exactly as written: plain ASCII, no space at either end (the matcher trims, so ' docs/ ' would
 // not mean what a reviewer sees; audit round 5).
@@ -185,6 +187,8 @@ function check(raw) {
 
   for (const [k, v] of Object.entries(mapOf(raw.caps, 'caps'))) {
     if (k === 'per_state' || k === 'budget_per_card') continue;
+    // caps.shakedown is the one flag among the caps (M11, L104 O-1): exactly true or false, kept as the reader's text.
+    if (k === 'shakedown') { if (v !== 'true' && v !== 'false') bad('caps.shakedown must be true or false'); continue; }
     p.caps[k] = int(v, `caps.${k}`);
   }
 
@@ -197,6 +201,8 @@ function check(raw) {
   for (const [k, v] of Object.entries(mapOf(need(u, 'reserve_pct', 'usage'), 'usage.reserve_pct'))) p.usage.reserve_pct[k] = pct(v, `usage.reserve_pct.${k}`);
   p.usage.no_tier1_prod_above = pct(need(u, 'no_tier1_prod_above', 'usage'), 'usage.no_tier1_prod_above');
   p.usage.stale_after_min = int(need(u, 'stale_after_min', 'usage'), 'usage.stale_after_min');
+  // M11's pace floor, a share of the week from 0 to 1 (L13, L104).
+  if (u.pace_min_share !== undefined && u.pace_min_share !== null) p.usage.pace_min_share = share(u.pace_min_share, 'usage.pace_min_share');
 
   const psr = mapOf(raw.product_state_rules, 'product_state_rules');
   for (const s of PRODUCT_STATES) mapOf(need(psr, s, 'product_state_rules'), `product_state_rules.${s}`);
@@ -217,7 +223,19 @@ function check(raw) {
       p.timeouts[entity][s] = row;
     }
   }
-  for (const entity of Object.keys(to)) if (!Object.hasOwn(STATES, entity)) bad(`timeouts.${entity} is not a record entity`);
+  // Beside the record entities, timeouts holds single minute limits M11 reads (timeouts.cancel_grace_min and the rest,
+  // L104 O-1): a key ending in _min with a whole number. Anything else is a misspelt entity, and refused.
+  for (const [k, v] of Object.entries(to)) {
+    if (Object.hasOwn(STATES, k)) continue;
+    if (/^[a-z][a-z0-9_]*_min$/.test(k) && !isMap(v) && !Array.isArray(v)) { p.timeouts[k] = int(v, `timeouts.${k}`); continue; }
+    bad(`timeouts.${k} is not a record entity`);
+  }
+  if (raw.outage !== undefined && raw.outage !== null) {
+    const o = mapOf(raw.outage, 'outage');
+    for (const k of Object.keys(o)) if (k !== 'min_dead' && k !== 'share') bad(`outage.${k} is not a known key (min_dead, share)`);
+    if (o.min_dead !== undefined) p.outage.min_dead = int(o.min_dead, 'outage.min_dead');
+    if (o.share !== undefined) p.outage.share = share(o.share, 'outage.share');
+  }
 
   const as = mapOf(raw.audit_sizing, 'audit_sizing');
   for (const k of ['tier1', 'prose', 'rendered', 'exit_tests']) need(as, k, 'audit_sizing');

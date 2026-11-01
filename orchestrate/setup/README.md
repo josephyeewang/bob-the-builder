@@ -66,7 +66,7 @@ A config that does not parse is reported as "not valid JSON": the file's own tex
 
 Extra config keys (the same file): `address` (https address of the repository), `label` (starts the jobs' names),
 `runnerConfig` (full path of the review runner's prepared `review.json`, whose `installRoot` is `<base>/install/orchestrate`),
-`extras` (full paths of the files and folders the runner config names: its wiring, claude program and hooks), and
+`extras` (full paths of the files and folders the runner config names: its claude program and hooks; the wiring and the budget module are the copy's own code, named `<base>/install/orchestrate/modules/...`, never extras), and
 optionally `gitBin` (default `/usr/bin/git`) and `nodeBin` (default: the node running the command).
 Every name, path and layout rule comes from the launcher's own modules (`install-check.mjs`, `review-daemons.mjs`,
 `review-updater.mjs`); `install.test.mjs` pins the two copies it cannot import (the label rule, the updater's file set).

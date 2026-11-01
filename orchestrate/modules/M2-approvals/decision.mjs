@@ -19,6 +19,7 @@
 import { activeKind } from '../../shared/asks.mjs';
 import { askStore, writeDoc } from './ask-store.mjs';
 import { ownerVerdict, requestReview } from './github-review.mjs';
+import { goMarkdown, goView } from './go-view.mjs';
 import { GO_EMPTY_LINE, LETTER_LINE, lapseAt, readConfig } from './kinds.mjs';
 
 const SHA = /^[0-9a-f]{40}$/;
@@ -68,6 +69,14 @@ export async function openDecision(ctx, id) {
   const l = load(ctx, id); if (!l.ok) return l;
   const { a } = l;
   if (a.doc.state !== 'open' || a.doc.pr) return fail(`ask ${id} is ${a.doc.state}${a.doc.pr ? ` with pull request ${a.doc.pr}` : ''}`);
+  // A Tier-1 go's body is the go view (R-0b-138/139): the plan in three lines and the fold of files it allows, the
+  // same list the decision file holds. A go that can't be shown (no fresh plan pass) is not sent.
+  let body = `Ask ${id}. Answer with a review.`;
+  if (a.doc.kind === 'go_t1') {
+    const v = goView(a.doc);
+    if (!v.ok) return fail(`the go can't be shown: ${v.reason}`);
+    body = `${goMarkdown(v)}\nAsk ${id}.\n`;
+  }
   const base = `/repos/${ctx.owner}/${ctx.repo}`;
   try {
     const main = await ctx.gh.get(`${base}/git/ref/heads/main`);
@@ -79,7 +88,7 @@ export async function openDecision(ctx, id) {
     const path = filePath(cfg, id, a.doc);
     const put = await ctx.gh.put(`${base}/contents/${path.split('/').map(encodeURIComponent).join('/')}`, { message: title(a.doc), content: Buffer.from(fileText(id, a.doc)).toString('base64'), branch });
     if (put?.status !== 201 && put?.status !== 200) return fail(`could not write the decision file (${put?.status})`);
-    const pr = await ctx.gh.post(`${base}/pulls`, { title: title(a.doc), head: branch, base: 'main', body: `Ask ${id}. Answer with a review.` });
+    const pr = await ctx.gh.post(`${base}/pulls`, { title: title(a.doc), head: branch, base: 'main', body });
     const number = pr?.json?.number;
     if (pr?.status !== 201 || !Number.isSafeInteger(number)) return fail(`could not open the pull request (${pr?.status})`);
     const req = await requestReview({ gh: ctx.gh, owner: ctx.owner, repo: ctx.repo, pr: number, githubId: cfg.githubId });
