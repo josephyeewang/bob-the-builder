@@ -10,6 +10,7 @@
 //                      return reminder; nothing goes back to active on a date. A tz that is not a valid IANA name
 //                      becomes null (MAT-8, minor 10); on the Merge Gate that holds number work.
 //   request-<what>-<id>.json   { "request": "resume" | "wrapup" | "rotate", "product": "<name>" | null, "name": "<KEY_NAME>" | null }
+//                      A mode request (evolve, audit, upgrade, think; sort.mjs, R-0b-137) adds "what", the owner's words.
 //                      rotate carries the key's NAME only; any text that looks like a key refuses the whole file (B11).
 //                      The Air's health result is never a Front Door file: the Air's own check writes it, dated, to its
 //                      own folder (M12-sensors/air-health.mjs; lead call L23), so a request-airhealth name is refused here.
@@ -19,10 +20,11 @@
 import { makeMasker } from '../M12-sensors/mask.mjs';
 import { stripControls } from '../M12-sensors/escape.mjs';
 import { checkTimeZone } from './timezone.mjs';
+import { MODE_REQUESTS } from './sort.mjs';
 
 export const FRONT_DOOR_KINDS = Object.freeze(['request', 'state', 'idea']);
 export const STATES_ALLOWED = Object.freeze(['paused', 'away']);
-export const REQUESTS = Object.freeze(['resume', 'wrapup', 'rotate']);
+export const REQUESTS = Object.freeze(['resume', 'wrapup', 'rotate', ...MODE_REQUESTS]);
 // The id the skill writes: date, time, two letters (20261103-0915-kq). Nothing longer fits, so a key can't ride in a file
 // name into the record's diary (0b-8 audit round 3 M-2).
 export const OUTBOX_ID = /^\d{8}-\d{4}-[a-z]{2}$/;
@@ -50,12 +52,18 @@ export function stateDoc({ product, state, until = null, tz = null }) {
   return { ok: true, doc: { product, state, until, tz: z.ok ? z.tz : null }, ...(z.ok ? {} : { note: `time zone not accepted (${z.reason}); the owner needs to name a city-based zone; internal, never pushed as is` }) };
 }
 
-export function requestDoc({ request, product = null, name = null }) {
+// A mode request (R-0b-137) carries the owner's words as `what`: one line, at most 300 characters, masked by the
+// file check; no other request carries it.
+export function requestDoc({ request, product = null, name = null, what }) {
   if (!REQUESTS.includes(request)) return refuse(`unknown request (allowed: ${REQUESTS.join(', ')})`);
   if (product !== null && !isName(product)) return refuse('no valid product name');
   if (request === 'rotate' && (!KEY_NAME.test(String(name ?? '')) || KEY_ID.test(String(name)))) return refuse('rotate needs the key\'s name only (capitals and digits with at least one _, such as STRIPE_KEY)');
   if (request !== 'rotate' && name !== null) return refuse('only rotate carries a name');
-  return { ok: true, doc: { request, product, name } };
+  if (!MODE_REQUESTS.includes(request)) return what === undefined ? { ok: true, doc: { request, product, name } } : refuse('only a mode request carries what');
+  if (request !== 'think' && product === null) return refuse(`a ${request} request names its product`);
+  // Control and invisible characters are refused, not stripped: one could split a key past the mask (round 4 minor 1).
+  if (typeof what !== 'string' || !what.trim() || what.length > 300 || /[\u0000-\u001f\u007f]/.test(what) || new RegExp(INVISIBLE.source).test(what)) return refuse('what is one line of the owner\'s words, at most 300 characters');
+  return { ok: true, doc: { request, product, name, what } };
 }
 
 // Invisible characters and terminal codes go before masking (strip, then mask, as cleanOutside does), so a key split
@@ -112,6 +120,7 @@ export function intakePush(name, result) {
     return `Confirmed: away ${d.product}${d.until ? ` until ${String(d.until).slice(0, 10)}` : ''}, ${tz}.`;
   }
   if (d.request === 'rotate') return `Request taken: rotate ${d.name}. The key is NOT rotated yet; the steps follow.`;
+  if (MODE_REQUESTS.includes(d.request)) return `Request taken: ${d.request}${d.product ? ` ${d.product}` : ''}. Nothing has started yet${d.request === 'think' ? '; the Mini opens the thinking room' : '; the Lead picks it up when it runs'}.`;
   if (d.request === 'wrapup') return 'Request taken: wrap up. Nothing has wrapped up yet; the Lead does it when it runs.';
   return `Request taken: resume ${d.product ?? 'all products'}. Nothing resumes until you tap it.`;
 }
@@ -119,7 +128,7 @@ export function intakePush(name, result) {
 function checkOne(name, text) {
   if (/^request-airhealth-/.test(String(name))) return refuse('the Air\'s health file comes from the Air\'s own check, never the Front Door');
   // A request word belongs only in a request name (0b-8 audit round 4 cosmetic: no state-resume-<id>).
-  const m = /^(?:(request)-(resume|wrapup|rotate)|(state|idea))-(\d{8}-\d{4}-[a-z]{2})\.(json|md)$/.exec(String(name));
+  const m = new RegExp(`^(?:(request)-(${REQUESTS.join('|')})|(state|idea))-(\\d{8}-\\d{4}-[a-z]{2})\\.(json|md)$`).exec(String(name));
   if (!m || maskSecrets(String(name)).text !== String(name)) return refuse('not a Front Door outbox file name');
   const kind = m[1] ?? m[3]; const ext = m[5];
   if (kind === 'idea') {
@@ -134,7 +143,7 @@ function checkOne(name, text) {
   if (/\\u/i.test(String(text))) return refuse('the file holds an escape (\\u); write plain text');
   let doc; try { doc = JSON.parse(text); } catch { return refuse('not JSON'); }
   if (!doc || typeof doc !== 'object' || Array.isArray(doc)) return refuse('not an object');
-  const allowed = kind === 'state' ? ['product', 'state', 'until', 'tz'] : ['request', 'product', 'name'];
+  const allowed = kind === 'state' ? ['product', 'state', 'until', 'tz'] : ['request', 'product', 'name', ...(MODE_REQUESTS.includes(doc.request) ? ['what'] : [])];
   const extra = Object.keys(doc).filter((k) => !allowed.includes(k));
   if (extra.length) return refuse(`${extra.length} unexpected field(s); allowed: ${allowed.join(", ")}`);
   if (maskSecrets(String(text)).text !== String(text)) return refuse('the file holds something that looks like a key');

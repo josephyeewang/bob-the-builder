@@ -1,6 +1,6 @@
 ---
 name: orchestrate
-description: The Front Door's one skill. Use when the owner, from their phone, files a new idea, starts a project, pauses a product, goes away ("I'm away until Friday"), says they are back, asks to wrap up, or asks to rotate a key. Writes exactly one small file to the outbox and replies in one short message.
+description: The Front Door's one skill. Use when the owner, from their phone, files a new idea, asks for work on a product (a new project, a fix, a check, an update from Bob, a thinking room), pauses a product, goes away ("I'm away until Friday"), says they are back, asks to wrap up, or asks to rotate a key. Writes exactly one small file to the outbox and replies in one short message.
 ---
 
 # orchestrate — what the Front Door does with what the owner says
@@ -30,9 +30,29 @@ Rules that hold for every file:
 Write `idea-<id>.md`: the owner's words exactly as they said them, with `> ` at the start of every line. Nothing else in the file.
 Reply: **"Filed: idea <id>. The Mini confirms in a minute."** Do not suggest a tier, a module or a [Go].
 
-## New project ("start a new project called X")
+## A piece of work: sort it into a Bob mode, read it back, wait for [Go]
 
-Write nothing. Reply: **"To start X, open a session on the Mini and say `bob NEW X`."**
+When the owner asks for work on a product, sort it into one of five modes by these cue words:
+
+| Mode | Cue words | On [Go] |
+|---|---|---|
+| new | "start a new project", "new project", "build a new" | Write nothing. Reply: **"To start X, open a session on the Mini and say `bob NEW X`."** |
+| evolve | "fix", "add", "change", "improve" | Write `request-evolve-<id>.json` |
+| audit | "is this right", "is that right", "check whether", "audit" | Write `request-audit-<id>.json` |
+| upgrade | "update from Bob", "upgrade from Bob", "bob upgrade" | Write `request-upgrade-<id>.json` |
+| think | "let's think about", "think through", "brainstorm" | Write `request-think-<id>.json`; the Mini opens a thinking room on the main model |
+
+1. **Sure (exactly one mode's cues fit):** read it back in exactly three lines, then a question box with exactly
+   three options, `Go`, `Change` and `Not now`. Line 1: the mode and the product. Line 2: "What you said: " and their
+   words, shortened. Line 3: what happens on Go. Write nothing until they tap Go.
+2. **Unsure (no cues fit, or more than one mode's do):** ask one question box, "Which of these do you mean?", with the
+   modes that fit as options and the one you recommend first, marked "(Recommended)". Then go to step 1.
+3. **On Go**, write the file in one line, with `<mode>` the mode's name:
+   `{"request":"<mode>","product":"X","name":null,"what":"<their words, one line, at most 300 characters>"}`
+   (`product` may be null only for think). Reply: "Filed: <mode> X. The Mini confirms in a minute."
+   On Change: ask what to change and read it back again. On Not now: write nothing; reply "Not filed."
+4. If their words hold a key, leave it out of `what`, out of the read-back and out of every reply, and follow the key
+   rule above.
 
 ## Pause ("pause X")
 
@@ -81,4 +101,4 @@ said it (capitals and digits with at least one `_`, such as `STRIPE_KEY`; add no
 
 ## Not wired yet
 
-Thinking room, research asks, anything else: reply "That isn't wired yet." Write nothing.
+Research asks, anything else: reply "That isn't wired yet." Write nothing.
