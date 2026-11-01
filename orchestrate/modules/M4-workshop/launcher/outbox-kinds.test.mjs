@@ -15,7 +15,7 @@ import { DESIGN_PROFILES, outboxKindsFor, shadowKindsFor } from './role-profiles
 import { renderRoleSettings, POLICY_HOOKS, HOOK_FAILS_CLOSED } from './render-settings.mjs';
 import { SETTINGS as S, HOOK_FIELDS as H, HOOK_EVENTS as E } from './settings-names.mjs';
 import { readOutboxFile } from './outbox.mjs';
-import { decide } from '../hooks/plain-files.mjs';
+import { decide, kindIn } from '../hooks/plain-files.mjs';
 import { parseArgs } from '../hooks/lib.mjs';
 import { setup, UID } from '../../M9-record/fixtures.test-helper.mjs';
 
@@ -28,7 +28,7 @@ const REVIEW_WALLS = { outboxRoot: '/r/outbox', runnerRoot: '/r/review' };
 // The plain-files hook's arguments exactly as the launcher renders them for this role and outbox.
 function hookArgv(role, outbox) {
   const r = renderRoleSettings({ productionFiles: [], role, profile: DESIGN_PROFILES[role], product: { commands: { test: 'npm test' } },
-    paths: { copy: '/w/copy', outbox, hooksDir: '/w/hooks', snapshot: '/w/rules.json', node: '/w/node', deny: { secrets: ['/w/secrets'] }, reviewWalls: REVIEW_WALLS } });
+    paths: { copy: '/w/copy', outbox, hooksDir: '/w/hooks', snapshot: '/w/rules.json', node: '/w/node', notes: '/w/notes', deny: { secrets: ['/w/secrets'] }, reviewWalls: REVIEW_WALLS } });
   assert.equal(r.ok, true, r.reason);
   const entry = r.settings[S.hooks][E.preToolUse].find((e) => e[H.matcher] === POLICY_HOOKS['plain-files']);
   // The command ends with the shell's fail-closed tail (HOOK_FAILS_CLOSED), which is not one of the hook's arguments.
@@ -71,7 +71,8 @@ test('L82 M-1: for every role, M4\'s kinds are exactly the shared table\'s, and 
 
 test('L82 M-1: every role × every listed kind and look-alike: the hook, M4\'s intake read and M9 agree with the table', () => {
   const env = setup({ prefix: 'm4-kinds-' });
-  const looks = ['ask-other-1.md', 'notes-1.md', 'report-compact-1.md', 'state-compact-1.md', 'handoff-compact-1.md', 'reports-1.md', 'ask-1.md'];
+  const looks = ['ask-other-1.md', 'notes-1.md', 'report-compact-1.md', 'state-compact-1.md', 'handoff-compact-1.md', 'reports-1.md', 'ask-1.md',
+    'verdict-compact-S1.md', 'proposal-compact-1.md', 'report-x-compact-1.md', 'state-compact-compact-1.md'];
   const names = [...Object.keys(OUTBOX_KINDS).map((k, i) => `${k}p${i}.md`), ...looks];
   let n = 0;
   const swept = [];
@@ -88,13 +89,72 @@ test('L82 M-1: every role × every listed kind and look-alike: the hook, M4\'s i
   for (const p of pairs) assert.ok(swept.includes(p), `${p} was swept`);
 });
 
+// L101: a compaction note (`-compact-` in its name) is only ever a `-compact-` kind, at the hook, M4's read and M9.
+test('L101: a reviewer\'s verdict-compact- note is refused everywhere; a Lead\'s handoff-compact- is no handoff; the worker\'s and Front Door\'s notes pass', () => {
+  const env = setup({ prefix: 'm4-kinds-' });
+  const none = { hook: false, m4: false, m9: false };
+  const all = { hook: true, m4: true, m9: true };
+  for (const [role, name, want] of [
+    ['reviewer', 'verdict-compact-S1.md', none], ['auditor', 'verdict-compact-S1.md', none],
+    ['lead', 'handoff-compact-L1.md', none], ['thinking', 'proposal-compact-T1.md', none],
+    ['worker', 'report-compact-W1.md', all], ['front_door', 'state-compact-F1.md', all],
+  ]) {
+    assert.deepEqual(judge(env, role, `N-${role}`, name), want, `${role} handing in ${name}`);
+  }
+  assert.equal(outboxKindOf('verdict-compact-S1.md'), null, 'never a verdict');
+  assert.equal(outboxKindOf('handoff-compact-L1.md'), null, 'never a handoff');
+  assert.equal(outboxKindOf('report-compact-W1.md'), 'report-compact-');
+  // And a verdict the reviewer really hands in still is one.
+  assert.deepEqual(judge(env, 'reviewer', 'N-v', 'verdict-S1.md'), all);
+});
+
+test('L101: the hook\'s kindIn and the shared outboxKindOf give every role the same kind for every name', () => {
+  const names = [...Object.keys(OUTBOX_KINDS).flatMap((k) => [`${k}a.md`, `${k}compact-a.md`, `${k.replace(/-$/, '')}-compact-a.md`]), 'verdict-compact-S1.md', 'x-1.md'];
+  for (const role of LAUNCHED) {
+    for (const name of names) {
+      const shared = outboxKindOf(name);
+      const want = shared !== null && OUTBOX_KINDS[shared].roles.includes(role) ? shared : null;
+      assert.equal(kindIn(name, outboxKindsFor(role), shadowKindsFor(role)), want, `${role}: ${name}`);
+    }
+  }
+});
+
+test('L101: the rendered compaction hooks name a notes folder apart from the outbox for every role without a -compact- kind', () => {
+  for (const role of LAUNCHED) {
+    const outbox = `/w/outbox/${role}`;
+    const r = renderRoleSettings({ productionFiles: [], role, profile: DESIGN_PROFILES[role], product: { commands: { test: 'npm test' } },
+      paths: { copy: '/w/copy', outbox, hooksDir: '/w/hooks', snapshot: '/w/rules.json', node: '/w/node', notes: `/w/notes/${role}`, deny: { secrets: ['/w/secrets'] }, reviewWalls: REVIEW_WALLS } });
+    assert.equal(r.ok, true, r.reason);
+    const inOutbox = DESIGN_PROFILES[role].outbox.includes(`${DESIGN_PROFILES[role].compactKind}-compact-`);
+    assert.equal(inOutbox, ['worker', 'front_door'].includes(role), `${role}: only the worker and the Front Door keep the note in the outbox`);
+    for (const ev of [E.preCompact, E.postCompact, E.sessionStart]) {
+      let seen = 0;
+      for (const e of r.settings[S.hooks][ev] ?? []) {
+        const cmd = e[H.hooks][0][H.command];
+        if (!cmd.includes('compact-note.mjs')) continue;
+        seen += 1;
+        assert.equal(cmd.includes(` --notes /w/notes/${role}`), !inOutbox, `${role} ${ev}: ${cmd}`);
+      }
+      assert.equal(seen, 1, `${role}: one ${ev} compaction hook`);
+    }
+    if (!inOutbox) {
+      const bare = renderRoleSettings({ productionFiles: [], role, profile: DESIGN_PROFILES[role], product: { commands: { test: 'npm test' } },
+        paths: { copy: '/w/copy', outbox, hooksDir: '/w/hooks', snapshot: '/w/rules.json', node: '/w/node', deny: { secrets: ['/w/secrets'] }, reviewWalls: REVIEW_WALLS } });
+      assert.equal(bare.ok, false, `${role}: no notes folder is refused`);
+      const inside = renderRoleSettings({ productionFiles: [], role, profile: DESIGN_PROFILES[role], product: { commands: { test: 'npm test' } },
+        paths: { copy: '/w/copy', outbox, hooksDir: '/w/hooks', snapshot: '/w/rules.json', node: '/w/node', notes: `${outbox}/notes`, deny: { secrets: ['/w/secrets'] }, reviewWalls: REVIEW_WALLS } });
+      assert.equal(inside.ok, false, `${role}: a notes folder inside the outbox is refused`);
+    }
+  }
+});
+
 test('L82 M-1: a published profile that lists fewer kinds is refused at the hook for the ones it leaves out, as at M4\'s read', () => {
   const env = setup({ prefix: 'm4-kinds-' });
   const outbox = join(env.outRoot, 'worker', 'N-1');
   mkdirSync(outbox, { recursive: true });
   const profile = { ...DESIGN_PROFILES.worker, outbox: ['report-'] };
   const r = renderRoleSettings({ productionFiles: [], role: 'worker', profile, product: { commands: { test: 'npm test' } },
-    paths: { copy: '/w/copy', outbox, hooksDir: '/w/hooks', snapshot: '/w/rules.json', node: '/w/node', deny: { secrets: ['/w/secrets'] }, reviewWalls: REVIEW_WALLS } });
+    paths: { copy: '/w/copy', outbox, hooksDir: '/w/hooks', snapshot: '/w/rules.json', node: '/w/node', notes: '/w/notes', deny: { secrets: ['/w/secrets'] }, reviewWalls: REVIEW_WALLS } });
   assert.equal(r.ok, true, r.reason);
   const cmd = r.settings[S.hooks][E.preToolUse].find((e) => e[H.matcher] === POLICY_HOOKS['plain-files'])[H.hooks][0][H.command];
   const args = parseArgs(cmd.slice(0, -HOOK_FAILS_CLOSED.length).split(' ').slice(2));

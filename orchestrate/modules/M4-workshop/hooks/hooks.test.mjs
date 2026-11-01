@@ -25,6 +25,7 @@ function world({ rules } = {}) {
   const root = landingPath(tmp());
   const outbox = join(root, 'outbox'); mkdirSync(outbox);
   const copy = join(root, 'copy'); mkdirSync(copy);
+  const notes = join(root, 'notes'); mkdirSync(notes);
   const store = join(root, 'store'); mkdirSync(store);
   const start = join(root, 'start'); mkdirSync(start);
   const envFile = join(root, 'prod-app', 'settings.production'); mkdirSync(dirname(envFile)); writeFileSync(envFile, 'X=1\n');
@@ -36,7 +37,7 @@ function world({ rules } = {}) {
   const bin = join(root, 'bin'); mkdirSync(bin);
   const marks = join(root, 'marks'); mkdirSync(marks);
   for (const p of ['fakehost', 'fakedb']) { writeFileSync(join(bin, p), `#!/bin/sh\ntouch "${marks}/${p}"\n`); chmodSync(join(bin, p), 0o755); }
-  return { root, outbox, copy, store, start, envFile, keys, snapshot, bin, marks };
+  return { root, outbox, copy, notes, store, start, envFile, keys, snapshot, bin, marks };
 }
 // The role's kinds as the launcher hands them over: from the one shared table (L82 M-1).
 const args = (w, role = 'worker', extra = {}) => ({ role, outbox: w.outbox, snapshot: w.snapshot, kinds: outboxKindsFor(role), notKinds: shadowKindsFor(role), copy: role === 'worker' ? w.copy : undefined, ...extra });
@@ -48,6 +49,7 @@ function runScript(name, a, input, opts = {}) {
   const argv = ['--role', a.role, '--outbox', a.outbox, '--snapshot', a.snapshot, '--kinds', a.kinds.join(',')];
   if (a.notKinds?.length) argv.push('--not-kinds', a.notKinds.join(','));
   if (a.copy) argv.push('--copy', a.copy);
+  if (a.notes) argv.push('--notes', a.notes);
   if (a.kind) argv.push('--kind', a.kind);
   if (a.event) argv.push('--event', a.event);
   const r = spawnSync(process.execPath, [opts.script ?? join(HERE, `${name}.mjs`), ...argv], { input: typeof input === 'string' ? input : JSON.stringify(input), encoding: 'utf8', timeout: 10000 });
@@ -218,17 +220,23 @@ test('shell splitting finds the real command behind variables and wrappers', () 
 
 // ---- compaction notes (R-0b-42) ----
 
-test('compaction hooks write one note in the outbox, with an allowed name, and nothing elsewhere', () => {
-  for (const [role, kind] of [['lead', 'handoff'], ['worker', 'report'], ['front_door', 'state']]) {
+// L101: only a role whose kinds list `<kind>-compact-` (the worker, the Front Door) keeps the note in its outbox; every
+// other role keeps it in its notes folder, which the Record never reads, and the hook shows it again from there.
+test('compaction hooks write one note: in the outbox for a role with a -compact- kind, else in its notes folder, nothing elsewhere', () => {
+  for (const [role, kind, inOutbox] of [['lead', 'handoff', false], ['worker', 'report', true], ['front_door', 'state', true], ['reviewer', 'verdict', false], ['auditor', 'verdict', false]]) {
     const w = world();
-    const a = { ...args(w, role), kind };
+    const a = { ...args(w, role), kind, notes: inOutbox ? undefined : w.notes };
     for (const event of ['PreCompact', 'PostCompact']) {
       const r = runScript('compact-note', { ...a, event }, { session_id: 'S-1', trigger: 'auto', hook_event_name: event });
-      assert.equal(r.code, 0, r.stderr);
+      assert.equal(r.code, 0, `${role}: ${r.stderr}`);
     }
-    assert.deepEqual(readdirSync(w.outbox), [`${kind}-compact-S-1.md`]);
-    assert.match(readFileSync(join(w.outbox, `${kind}-compact-S-1.md`), 'utf8'), /PreCompact \(auto\)[\s\S]*PostCompact/);
+    const home = inOutbox ? w.outbox : w.notes;
+    assert.deepEqual(readdirSync(home), [`${kind}-compact-S-1.md`], role);
+    assert.deepEqual(readdirSync(inOutbox ? w.notes : w.outbox), [], `${role}: nothing in the other folder`);
+    assert.match(readFileSync(join(home, `${kind}-compact-S-1.md`), 'utf8'), /PreCompact \(auto\)[\s\S]*PostCompact/);
     assert.equal(plain.OUTBOX_NAME.test(`${kind}-compact-S-1.md`), true);
+    // The name's kind, by the one rule: the outbox roles' note is their -compact- kind; any other role's is none of its kinds.
+    assert.equal(plain.kindIn(`${kind}-compact-S-1.md`, a.kinds, a.notKinds), inOutbox ? `${kind}-compact-` : null, role);
     assert.deepEqual(readdirSync(w.copy), []);
     const s = runScript('compact-note', { ...a, event: 'SessionStart' }, { session_id: 'S-1', source: 'compact' });
     assert.equal(s.code, 0);
@@ -239,18 +247,26 @@ test('compaction hooks write one note in the outbox, with an allowed name, and n
 
 test('compaction hooks never follow a link and refuse an unknown kind or event', () => {
   const w = world();
-  const a = { ...args(w, 'lead'), kind: 'handoff' };
+  const a = { ...args(w, 'lead'), kind: 'handoff', notes: w.notes };
+  // A good note first, so each refusal below is for its own reason (L101: not a missing notes folder).
+  assert.equal(runScript('compact-note', { ...a, event: 'PreCompact' }, { session_id: 'S-1' }).code, 0);
   const target = join(w.store, 'x.md');
-  symlinkSync(target, join(w.outbox, 'handoff-compact-S-2.md'));
+  symlinkSync(target, join(w.notes, 'handoff-compact-S-2.md'));
   assert.equal(runScript('compact-note', { ...a, event: 'PreCompact' }, { session_id: 'S-2' }).code, 2);
   assert.equal(existsSync(target), false, 'the planted link was followed');
   writeFileSync(join(w.root, 'other.md'), '');
-  linkSync(join(w.root, 'other.md'), join(w.outbox, 'handoff-compact-S-3.md'));
+  linkSync(join(w.root, 'other.md'), join(w.notes, 'handoff-compact-S-3.md'));
   assert.equal(runScript('compact-note', { ...a, event: 'PreCompact' }, { session_id: 'S-3' }).code, 2, 'a hard link is refused');
   assert.equal(runScript('compact-note', { ...a, kind: 'report', event: 'PreCompact' }, { session_id: 'S-4' }).code, 2);
   assert.equal(runScript('compact-note', { ...a, event: 'Stop' }, { session_id: 'S-4' }).code, 2);
   assert.equal(runScript('compact-note', { ...a, event: 'PreCompact' }, { session_id: '../..' }).code, 2);
   assert.equal(compact.noteName('handoff', 'a/../b'), 'handoff-compact-ab.md');
+  // L101: a Lead's note never goes in the outbox: no notes folder, or one inside the outbox, is refused.
+  assert.equal(runScript('compact-note', { ...a, notes: undefined, event: 'PreCompact' }, { session_id: 'S-5' }).code, 2, 'no notes folder');
+  const within = join(w.outbox, 'n'); mkdirSync(within);
+  assert.equal(runScript('compact-note', { ...a, notes: within, event: 'PreCompact' }, { session_id: 'S-5' }).code, 2, 'a notes folder inside the outbox');
+  assert.deepEqual(readdirSync(within), []);
+  assert.equal(readdirSync(w.outbox).length, 1, 'nothing but the planted folder in the outbox');
 });
 
 test('L31: every hook still runs when reached the way it is installed: through a linked folder or a linked file', () => {

@@ -27,7 +27,7 @@ function direct(role, v) {
   return renderRoleSettings({
     role, profile: DESIGN_PROFILES[role], productionFiles: [],
     paths: {
-      copy: v.copy, outbox: v.outbox, hooksDir: v.hooks, snapshot: v.snapshot, node: v.node, bobFolder: v.bob,
+      copy: v.copy, outbox: v.outbox, hooksDir: v.hooks, snapshot: v.snapshot, node: v.node, bobFolder: v.bob, notes: v.notes,
       deny: { secrets: v.deny },
       reviewWalls: Object.fromEntries(REVIEW_WALLS.map((k) => [k, v[`wall_${k}`]])),
     },
@@ -65,7 +65,7 @@ function machine(role = 'reviewer') {
 const run = (m, { c = {}, x = {} } = {}, opts = {}) => sessionSettings({ ...m.c, ...c }, { ...m.x, ...x }, { owner: ME, uid: ME, ...opts });
 
 const MADE_UP = {
-  outbox: '/o/reviewer/s-1', copy: '/rc/card-1', node: '/i/bin/node', hooks: '/i/hooks', snapshot: '/r/rules.json', bob: '/bob',
+  outbox: '/o/reviewer/s-1', copy: '/rc/card-1', notes: '/r/notes/s-1', node: '/i/bin/node', hooks: '/i/hooks', snapshot: '/r/rules.json', bob: '/bob',
   deny: ['/sec/a', '/home/claude', '/wc'], wall_outboxRoot: '/o', wall_runnerRoot: '/r',
 };
 
@@ -115,6 +115,10 @@ test('L67: a session\'s settings are filled, checked and written to the runner\'
     assert.equal(v.node, join(m.real, 'bin', 'node'));
     assert.equal(v.hooks, join(m.real, 'hooks'));
     assert.equal(v.outbox, join(m.c.outboxRoot, role, m.x.sessionId));
+    // L101: the session's compaction notes folder is the runner's own (0700), apart from the outbox.
+    assert.equal(v.notes, join(m.c.root, 'notes', m.x.sessionId));
+    assert.equal(lstatSync(v.notes).mode & 0o777, 0o700);
+    assert.match(readFileSync(r.file, 'utf8'), new RegExp(`--notes ${v.notes.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} `));
     assert.deepEqual(v.deny, [...m.c.deny, m.c.workerCopies], 'the workers\' copies folder is denied whole');
     assert.equal(v.wall_outboxRoot, m.c.outboxRoot);
     assert.equal(v.wall_runnerRoot, m.c.root);

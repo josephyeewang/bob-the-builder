@@ -14,7 +14,7 @@ import { tempDir } from '../../../shared/test-tmp.mjs';
 const tmp = () => tempDir('orch-set-');
 
 const PATHS = {
-  copy: '/w/copy', outbox: '/w/outbox', hooksDir: '/w/hooks', snapshot: '/w/rules.json', node: '/w/node',
+  copy: '/w/copy', outbox: '/w/outbox', hooksDir: '/w/hooks', snapshot: '/w/rules.json', node: '/w/node', notes: '/w/notes',
   deny: { secrets: ['/w/secrets'], claudeHome: '/h/.claude', ssh: '/h/.ssh', gh: '/h/.config/gh', robotKeys: '/w/keys', record: '/w/record', otherCopies: ['/w/copy2'] },
   bobFolder: '/w/bob', mirror: '/w/mirror.git',
   reviewWalls: { outboxRoot: '/r/outbox', runnerRoot: '/r/review' },

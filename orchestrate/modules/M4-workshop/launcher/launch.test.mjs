@@ -25,7 +25,7 @@ const tmp = () => realpathSync(tempDir('orch-launch-'));
 // The names check (audit R-0b-44 M-1): a real rendered role file and the start flags, with a
 // stand-in table that marks every name confirmed on the test version.
 const N_PATHS = {
-  copy: '/w/copy', outbox: '/w/outbox', hooksDir: '/w/hooks', snapshot: '/w/rules.json', node: '/w/node',
+  copy: '/w/copy', outbox: '/w/outbox', hooksDir: '/w/hooks', snapshot: '/w/rules.json', node: '/w/node', notes: '/w/notes',
   deny: { secrets: ['/w/secrets'], claudeHome: '/h/.claude', robotKeys: '/w/keys', record: '/w/record', otherCopies: ['/w/copy2'] },
   bobFolder: '/w/bob', mirror: '/w/mirror.git',
   reviewWalls: { outboxRoot: '/r/outbox', runnerRoot: '/r/review' },
@@ -343,12 +343,13 @@ function hookWorld(role = 'worker') {
   installHooks(hooksDir, source);
   const outbox = join(root, 'outbox'); mkdirSync(outbox);
   const copy = join(root, 'copy'); mkdirSync(copy);
+  const notes = join(root, 'notes'); mkdirSync(notes);
   const keys = join(root, 'keys'); mkdirSync(keys);
   const snapshot = join(root, 'rules.json');
   const rules = { production: { env_files: [join(root, 'prod.env')], programs: ['fakehost'], hosts: ['db.prod.example.net'] }, secrets: { paths: [keys] } };
   writeFileSync(snapshot, makeSnapshot(rules));
   const profile = DESIGN_PROFILES[role];
-  const r = renderRoleSettings({ productionFiles: [], role, profile, paths: { copy, outbox, hooksDir, snapshot, node: process.execPath, deny: { secrets: [keys] }, reviewWalls: { outboxRoot: join(root, 'ro'), runnerRoot: join(root, 'rr') } }, product: { commands: { test: 'npm test' } } });
+  const r = renderRoleSettings({ productionFiles: [], role, profile, paths: { copy, outbox, hooksDir, snapshot, node: process.execPath, notes, deny: { secrets: [keys] }, reviewWalls: { outboxRoot: join(root, 'ro'), runnerRoot: join(root, 'rr') } }, product: { commands: { test: 'npm test' } } });
   assert.equal(r.ok, true, r.reason);
   const check = (over = {}) => checkHooks({ settings: r.settings, hooksDir, source, kinds: profile.outbox, copy, outbox, harmfulProduction: productionProbe(rules), timeoutMs: 1500, ...over });
   return { root, source, hooksDir, outbox, settings: r.settings, check, rules };
@@ -361,6 +362,21 @@ test('check 7: the installed hooks pass, for a worker and for the Lead', () => {
     assert.equal(r.ok, true, `${role}: ${r.reason}`);
     assert.deepEqual(readdirSync(w.outbox), [], 'the probes write nothing');
   }
+});
+
+// L101: a Lead's (or any role without a -compact- kind) compaction hook must name a notes folder apart from the outbox.
+test('L101: check 7 refuses a compaction hook that keeps a Lead\'s note in its outbox, or a notes folder inside it', () => {
+  const w = hookWorld('lead');
+  const swap = (fn) => {
+    const s = structuredClone(w.settings);
+    for (const ev of [E.preCompact, E.postCompact, E.sessionStart]) for (const e of s[S.hooks][ev] ?? []) for (const h of e[H.hooks]) h[H.command] = fn(h[H.command]);
+    return s;
+  };
+  assert.match(w.check({ settings: swap((c) => c.replace(/ --notes \S+/, '')) }).reason, /names no notes folder/);
+  assert.match(w.check({ settings: swap((c) => c.replace(/ --notes \S+/, ` --notes ${w.outbox}/notes`)) }).reason, /not apart from the outbox/);
+  // The worker keeps its note in the outbox by its own kind: no notes folder is asked of it.
+  const k = hookWorld('worker');
+  assert.equal(k.check().ok, true);
 });
 
 test('check 7: for each of the five hooks, a missing, unreadable, failing, odd-answering, always-passing or slow script refuses', () => {
@@ -509,7 +525,7 @@ test('intake: only a plain, single-link file of the role user, with an allowed n
 
 test('check 4: the registry is allowed for the install step only', async () => {
   const profile = DESIGN_PROFILES.worker;
-  const paths = { copy: '/w/copy', outbox: '/w/outbox', hooksDir: '/w/hooks', snapshot: '/w/rules.json', node: '/w/node' };
+  const paths = { copy: '/w/copy', outbox: '/w/outbox', hooksDir: '/w/hooks', snapshot: '/w/rules.json', node: '/w/node', notes: '/w/notes' };
   const registryHosts = ['registry.example.org'];
   const render = (phase) => renderRoleSettings({ productionFiles: [], role: 'worker', profile, paths, product: { commands: { test: 'npm test' } }, registryHosts, phase });
   const written = [];
@@ -624,7 +640,7 @@ test('check 7: a missing hook folder, no outbox kinds, a hook that is not a comm
 });
 
 test('check 4: a role file that will not write, before or after the install, refuses with its own reason', async () => {
-  const paths = { copy: '/w/copy', outbox: '/w/outbox', hooksDir: '/w/hooks', snapshot: '/w/rules.json', node: '/w/node' };
+  const paths = { copy: '/w/copy', outbox: '/w/outbox', hooksDir: '/w/hooks', snapshot: '/w/rules.json', node: '/w/node', notes: '/w/notes' };
   const render = (phase) => renderRoleSettings({ productionFiles: [], role: 'worker', profile: DESIGN_PROFILES.worker, paths, product: { commands: { test: 'npm test' } }, registryHosts: ['registry.example.org'], phase });
   const failOn = (n) => { let i = 0; return () => (++i === n ? { ok: false, reason: 'disk full' } : { ok: true }); };
   let ran = false;
