@@ -23,8 +23,9 @@ test('L65: the installed copy must be root\'s alone, with the runner, config and
   chmodSync(join(base, 'a', 'b', 'x.mjs'), 0o644);
   // This test's user stands in for root.
   assert.equal(installProblem(base, [join(base, 'a', 'b', 'x.mjs')], { owner: ME, top: base }), null);
-  // The real check wants root, which this user is not.
-  assert.match(installProblem(base, [], {}), /is not owned by root/);
+  // The real owner check wants root, which this user is not. The walk stops at the test's folder, so what is above the
+  // temp folder on this machine (a link, or a folder anyone can write) can't answer first.
+  assert.match(installProblem(base, [], { top: base }), /is not owned by root/);
   assert.match(installProblem(base, ['/elsewhere/wiring.mjs'], { owner: ME, top: base }), /not inside the installed copy/);
   assert.match(installProblem(base, [join(base, '..', 'x')], { owner: ME, top: base }), /not inside the installed copy/);
   chmodSync(join(base, 'a', 'b', 'x.mjs'), 0o664);
@@ -435,8 +436,9 @@ test('L71 planted: root and outboxRoot, and every folder above them, are root\'s
   // Missing, or not under the top.
   assert.throws(cfg({ outboxRoot: join(mid, 'none') }), /config: outboxRoot: .*\/srv\/none is missing/);
   assert.throws(cfg({}, { top: join(d, 'elsewhere') }), /is not under/);
-  // The real walk, with no ports: a throwaway folder under the shared temp folder is never root's or review's alone.
-  assert.throws(cfg({}, {}), /config: root: /);
+  // The real walk, with no ports: with the review uid named as another user's, the test's own throwaway folder (checked
+  // first) is neither root's nor review's, so the walk refuses on any machine, whatever the folders above the temp folder.
+  assert.throws(cfg({ uids: uidsOf(ME + 1) }, {}), /config: root: .*\/srv\/review is not owned by root or the review user/);
 });
 
 // L71 point 4: a second name for the install stamp can't change root's bytes, so it reads the same.
