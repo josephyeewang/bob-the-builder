@@ -19,10 +19,10 @@ export const ALWAYS_TOLERATED = Object.freeze(['EndConversation']);
 export const outboxKindsFor = (role) => Object.keys(OUTBOX_KINDS).filter((k) => OUTBOX_KINDS[k].roles.includes(role));
 // The listed kinds a role may NOT hand in that start with one it may (a scout's `report-compact-`). A file's kind is the
 // longest listed prefix of its name (shared outboxKindOf); the hook can't load the table, so it is handed these too.
-export const shadowKindsFor = (role) => {
-  const own = outboxKindsFor(role);
-  return Object.keys(OUTBOX_KINDS).filter((k) => !own.includes(k) && own.some((o) => k.startsWith(o)));
-};
+// `own` is the kinds actually handed to the hook (a published profile may list fewer than the design), so a kind the
+// profile leaves out is refused at the hook, as M4's intake read refuses it, not only later.
+export const shadowKindsFor = (role, own = outboxKindsFor(role)) =>
+  Object.keys(OUTBOX_KINDS).filter((k) => !own.includes(k) && own.some((o) => k.startsWith(o)));
 
 const p = (o) => Object.freeze({ ...o, tools: Object.freeze(o.tools), outbox: Object.freeze(o.outbox) });
 

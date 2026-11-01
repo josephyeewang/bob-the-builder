@@ -156,3 +156,18 @@ test('L79: a go or ask whose M9 schema may carry a link but lacks one still show
   assert.match(t, /- ask-9: .*drop the old table.*\(RECORD ERROR: no pull request link in the record\)/);
   assert.match(t, /- card card-10: .*pick a name.*\(card card-10\)/);
 });
+
+test('L84 minor 3: a research ask waiting on the owner (M2, who \'joe\') is listed as waiting on your go, not as a risky act', () => {
+  const x = tripWorld();
+  x.w('ask', 'ask-r1', { state: 'open', kind: 'research', what: 'run the research', wait: { who: 'joe', what: 'run the research on pricing', since: x.ago(20) } });
+  x.w('ask', 'ask-9', { state: 'open', what: 'drop the old table' });
+  const t = brief(x);
+  // The goes section comes first, then the risky-act asks.
+  const goes = t.slice(t.indexOf('Waiting on your go'), t.indexOf('Open risky-act asks'));
+  const risky = t.slice(t.indexOf('Open risky-act asks'));
+  assert.match(goes, /Waiting on your go \(1\):/);
+  assert.match(goes, /- ask ask-r1: .*run the research on pricing.*\(ask ask-r1\)/);
+  assert.match(risky, /Open risky-act asks \(1\)/);
+  assert.equal(risky.includes('ask-r1'), false, 'a research ask is no risky act');
+  assert.match(risky, /- ask-9: .*drop the old table/);
+});

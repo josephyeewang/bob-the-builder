@@ -113,7 +113,7 @@ export function renderRoleSettings({ role, profile, paths, product = {}, rulesHo
   // Only a worker and the writer change files in a code copy; every other role writes its outbox only.
   const copyArg = ['worker', 'writer'].includes(role) ? ` --copy ${paths.copy}` : '';
   // The longer listed kinds this role may not hand in, so the hook reads a name's kind as M9 does (L82 M-1).
-  const shadow = shadowKindsFor(role);
+  const shadow = shadowKindsFor(role, profile.outbox);
   const notKinds = shadow.length ? ` --not-kinds ${shadow.join(',')}` : '';
   const hookCmd = (name, extra = '') =>
     `${paths.node} ${join(paths.hooksDir, `${name}.mjs`)} --role ${role} --outbox ${paths.outbox} --snapshot ${paths.snapshot} --kinds ${profile.outbox.join(',')}${notKinds}${copyArg}${extra}`;

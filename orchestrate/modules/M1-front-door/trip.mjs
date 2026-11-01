@@ -28,6 +28,8 @@ export const AIR_FACT = 'air-health';
 export const AIR_FRESH_H = 24;
 export const MERGE_HOURS = '07:00–22:00';
 const OPEN_ASK = ['open', 'pushed'];
+// The kind M2's research asks carry (lane 3, research-ask.mjs): open, waiting on the owner to run the session.
+const RESEARCH_ASK = 'research';
 
 // A time in the future is a wrong clock: unknown, never fresh (round 2 minor 8).
 const ageMin = (iso, now) => { const t = Date.parse(iso ?? ''); const a = Number.isFinite(t) ? (now - t) / 60e3 : Infinity; return a < -5 ? Infinity : Math.max(a, 0); };
@@ -127,11 +129,14 @@ export function buildTripBrief({ products, until = null, tz: tzIn = null, stateI
 
   // M13's one waiting list (card, ask, go, merge, claim), only what waits on the owner (round 2 M-3, minor 12); an item with a
   // record error is shown, since it might be theirs. Risky asks have their own section below.
-  const asks = rec.list('ask').filter(({ doc }) => doc && OPEN_ASK.includes(doc.state));
+  // A research ask (M2) is no risky act: it waits on the owner to run a session, so it is listed with the goes (L84 m-3).
+  const isResearch = (doc) => doc?.kind === RESEARCH_ASK;
+  const asks = rec.list('ask').filter(({ doc }) => doc && OPEN_ASK.includes(doc.state) && !isResearch(doc));
   const askIds = new Set(asks.map((a) => a.id));
   let goes; let listError = null;
-  // A card waits on the owner by M9's own name for it (L79); a go or ask doc says 'owner'.
-  const onOwner = (i) => String(i.who ?? '').toLowerCase() === (i.entity === 'card' ? OWNER_WAIT_WHO : 'owner');
+  // A card waits on the owner by M9's own name for it (L79), and so does a research ask (L84 m-3); a go or other ask says
+  // 'owner'.
+  const onOwner = (i) => { const who = String(i.who ?? '').toLowerCase(); return who === (i.entity === 'card' ? OWNER_WAIT_WHO : 'owner') || (i.entity === 'ask' && who === OWNER_WAIT_WHO); };
   // A card parked for a paused product resumes by itself on unpause: shown apart, not as a go owed (L85 m-5).
   const parked = (i) => !i.record_error && i.entity === 'card' && i.what === PAUSED_WAIT_WHAT;
   let paused = [];
@@ -143,7 +148,8 @@ export function buildTripBrief({ products, until = null, tz: tzIn = null, stateI
   // A kind whose M9 schema lets no writer set a `link` (a card) is named, not linked (L79); a kind that may carry one
   // but lacks it is a record error.
   const mayLink = (entity) => Object.keys(WRITERS[entity] ?? {}).some((actor) => [true, false].some((create) => { const f = fieldsAllowed(entity, actor, { create }); return f === '*' || Boolean(f?.has?.('link')); }));
-  const link = (doc, what, entity, id) => (doc?.link ? doc.link : !mayLink(entity) ? `${entity} ${id}` : `RECORD ERROR: no ${what} link in the record`);
+  // A research ask has nothing to link to (its line says what to run), so it is named too.
+  const link = (doc, what, entity, id) => (doc?.link ? doc.link : !mayLink(entity) || isResearch(doc) ? `${entity} ${id}` : `RECORD ERROR: no ${what} link in the record`);
   out.push('', `Waiting on your go (${listError ? 'unknown' : goes.length}):`);
   if (listError) out.push(`- ${listError}`);
   for (const i of goes) {
