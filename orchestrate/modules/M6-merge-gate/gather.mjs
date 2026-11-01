@@ -8,7 +8,7 @@
 //   await gatherFacts(ctx, merge) → facts            (see refusals.mjs for every field)
 //   recordView(record) → { createdBy(entity, id), seqOf(entity, id), linesAfter(seq) }
 //   threadsQuery → the GraphQL text for refusal 7
-//   threads(gh, owner, repo, pr) → { ok, unresolved } (a failed read throws, message starts with the HTTP status); linesOf(patch) → added/removed lines
+//   threads(gh, owner, repo, pr) → { ok, unresolved } (a failed read throws, message starts with the HTTP status; a 200 carrying errors says "GitHub answered 200 but with an error: the review threads could not be read"); linesOf(patch) → added/removed lines
 // ctx = { record, rules, product, gh, owner, repo, view, now, alert, approvals?, readRow?, reviewLaunches }
 //   reviewLaunches { root, uids, outbox }: the review runner's launch records folder (its ended records sit beside it,
 //     L68), the role → Mac user id map (L65), and review's outbox root, where each session's verdict file is read

@@ -53,6 +53,7 @@ function world({ policy = POLICY, mode = 'draft' } = {}) {
     }
     if (path === '/graphql') {
       if (state.graphql) return { status: state.graphql, json: null };
+      if (state.gqlErrors) return { status: 200, json: { errors: [{ message: 'x' }] } };
       const nodes = threadsOf.get(body.variables.pr) ?? [];
       return { status: 200, json: { data: { repository: { pullRequest: { reviewThreads: { totalCount: state.total ?? nodes.length, nodes } } } } } };
     }
@@ -786,7 +787,7 @@ test('R3 audit probe G: an explanations file the summary user cannot reach is no
   const folder = tempDir('m6-watch-owner-'); const sub = join(folder, 'home'); mkdirSync(sub); const file = join(sub, 'explanations.json');
   writeFileSync(file, JSON.stringify({ ['a'.repeat(40)]: 'fine' })); chmodSync(sub, 0o000);
   const r = readExplanations(file, { ownerUid: UID }); chmodSync(sub, 0o755);
-  assert.ok(!(r.ok && r.owner === UID && Object.keys(r.explanations).length === 0), `an unreachable file reads as "the owner's file, empty": ${JSON.stringify(r)}`);
+  assert.equal(r.ok, false, JSON.stringify(r)); assert.match(r.problem, /could not be reached/); assert.equal(r.owner, null);
 });
 
 test('R3 audit probe H: real pass + real summary output names refusal 8 next to 9 (no hand-written line)', async () => {
@@ -1038,10 +1039,11 @@ test('R4 MAT-A (probe R3P1) a direct push at 23:20 on the end day, held back at 
   assert.equal(s.judged, 1); assert.equal(s.disagreements, 1); assert.equal(s.ok, false);
 });
 
-test('R4 MAT-A edge: a direct push first seen up to 2 hours after the end day ends counts in the end day; later does not', async () => {
+test('R4 MAT-A edge: after a clean pass at 00:30 that did not see it, a direct push first seen up to 2 hours past midnight counts in the end day; later does not', async () => {
   for (const [at, counts] of [['2026-11-10T01:59:00Z', 1], ['2026-11-10T02:00:00Z', 1], ['2026-11-10T02:01:00Z', 0]]) {
     const w = world(); await dayPasses(w);
-    w.push({ 'docs/z.md': 'z' }, '2026-11-09T22:00:00Z');
+    await w.pass('2026-11-10T00:30:00Z');
+    w.push({ 'docs/z.md': 'z' }, '2026-11-10T00:35:00Z');
     await w.pass(at);
     assert.equal(summary({ dir: w.dir, endDay: '2026-11-09', explanations: NOEX }).judged, counts, at);
   }
@@ -1085,13 +1087,15 @@ test('R4 m-2 (N22) a "not judged" line carries the rules it was tried under', as
   assert.equal(nj.rules, H(POLICY));
 });
 
-test('R4 m-2 (N24) a commit that was "not judged" and judged on a retry is not stuck, and the week still counts', async () => {
+test('R4 m-2 (N24) a commit that was "not judged" and judged on a retry is not stuck, and the week still counts (clock runs forward)', async () => {
   const w = world(); await w.pass(PIN_AT);
+  await w.pass('2026-11-03T12:00:00Z');
   const b = w.land({ 'docs/b.md': 'b' }, { at: '2026-11-04T09:00:00Z' });
   w.state.graphql = 502;
   await w.pass('2026-11-04T12:00:00Z');
   w.state.graphql = null;
-  for (const d of ['03', '04', '05', '06', '07', '08', '09']) await w.pass(`2026-11-${d}T13:00:00Z`);
+  await w.pass('2026-11-04T13:00:00Z');
+  for (const d of ['05', '06', '07', '08', '09']) await w.pass(`2026-11-${d}T12:00:00Z`);
   await w.pass('2026-11-10T00:30:00Z');
   const s = week(w);
   assert.deepEqual(s.stuck, []); assert.ok(w.judged().some((l) => l.sha === b.merge));
@@ -1106,4 +1110,80 @@ test('R4 m-5 the summary names the earliest end day that could count: day 7 afte
   const out = [];
   await main(['summary', '--dir', v.dir, '--end-day', '2026-11-09', '--explanations', join(v.dir, 'none.json'), '--owner-uid', String(UID)], { out: (x) => out.push(x), err: () => {} });
   assert.match(out.join('\n'), /earliest end day that could count: 2026-11-10/);
+});
+
+// ───────────────────────────── round 5 (audit r4 of #86: the end-day boundary)
+
+const show = (s) => JSON.stringify({ ok: s.ok, judged: s.judged, dis: s.disagreements, stuck: s.stuck, reasons: s.reasons });
+
+test('R5 MAT-B (R4P4) two failed passes after midnight: a 23:45 end-day push still counts', async () => {
+  const w = world(); await dayPasses(w); await w.pass('2026-11-09T23:30:00Z');
+  w.push({ 'docs/z.md': 'z' }, '2026-11-09T23:45:00Z');
+  w.hooks.push([new RegExp(`${BASE}/commits/main$`), 502]);
+  await w.pass('2026-11-10T00:45:00Z'); await w.pass('2026-11-10T01:45:00Z');
+  w.hooks.length = 0;
+  await w.pass('2026-11-10T02:45:00Z');
+  const s = week(w);
+  assert.equal(s.disagreements, 1, show(s)); assert.equal(s.ok, false);
+});
+
+test('R5 MAT-B (R4P5) the Mac asleep 23:31 to 02:30: a 23:40 end-day push still counts', async () => {
+  const w = world(); await dayPasses(w); await w.pass('2026-11-09T23:30:00Z');
+  w.push({ 'docs/z.md': 'z' }, '2026-11-09T23:40:00Z');
+  await w.pass('2026-11-10T02:30:00Z');
+  const s = week(w);
+  assert.equal(s.disagreements, 1, show(s)); assert.equal(s.ok, false);
+});
+
+test('R5 MAT-B (R4P6) one missed pass plus a minute of drift: a 23:59:30 push, next pass at 02:00:30, still counts', async () => {
+  const w = world(); await dayPasses(w); await w.pass('2026-11-09T23:59:00Z');
+  w.push({ 'docs/z.md': 'z' }, '2026-11-09T23:59:30Z');
+  w.hooks.push([new RegExp(`${BASE}/commits/main$`), 502]);
+  await w.pass('2026-11-10T00:59:30Z');
+  w.hooks.length = 0;
+  await w.pass('2026-11-10T02:00:30Z');
+  const s = week(w);
+  assert.equal(s.disagreements, 1, show(s)); assert.equal(s.ok, false);
+});
+
+test('R5 MAT-B (R4P7) a day with only an early pass: a push at 01:00 on the end day first seen the next day at 04:00 counts', async () => {
+  const w = world(); await w.pass(PIN_AT);
+  for (const d of ['03', '04', '05', '06', '07', '08']) await w.pass(`2026-11-${d}T12:00:00Z`);
+  await w.pass('2026-11-09T00:30:00Z');
+  w.push({ 'docs/z.md': 'z' }, '2026-11-09T01:00:00Z');
+  await w.pass('2026-11-10T04:00:00Z');
+  const s = week(w);
+  assert.ok(!s.ok || s.disagreements === 1, show(s));
+});
+
+test('R5 m-B the first reason a commit was "not judged" is kept: a second, different reason after the allowance does not move first-seen', async () => {
+  const w = world(); await dayPasses(w);
+  const sha = w.push({ 'docs/z.md': 'z' }, '2026-11-09T23:20:00Z');
+  await w.pass('2026-11-09T23:50:00Z');                       // held back: under an hour old
+  w.hooks.push([new RegExp(`${BASE}/commits/${sha}$`), 502]);
+  await w.pass('2026-11-10T00:50:00Z');                       // a different reason, after the allowance
+  w.hooks.length = 0;
+  await w.pass('2026-11-10T01:50:00Z');
+  const l = w.judged().find((x) => x.sha === sha);
+  assert.equal(l.seen_at, '2026-11-09T23:50:00Z', JSON.stringify(w.lines().filter((x) => x.sha === sha)));
+  assert.equal(week(w).disagreements, 1);
+});
+
+test('R5 Q12 a GraphQL error carried in a 200 reads with its pinned wording, not as an HTTP failure', async () => {
+  const w = world(); await w.pass(PIN_AT);
+  w.land({ 'docs/a.md': 'two' });
+  w.state.gqlErrors = true;
+  await w.pass('2026-11-03T12:00:00Z');
+  const nj = w.lines().find((l) => l.not_judged_reason);
+  assert.equal(nj.not_judged_reason, 'GitHub answered 200 but with an error: the review threads could not be read');
+});
+
+test('R5 cosmetics: a bad explanations file prints one "could not be used" line, with no "user none" and no doubled "does not count"', async () => {
+  const w = world(); await w.pass(PIN_AT);
+  const f = join(w.dir, 'e.json'); writeFileSync(f, '{ not json'); chmodSync(f, 0o644);
+  const out = [];
+  await main(['summary', '--dir', w.dir, '--end-day', '2026-11-09', '--explanations', f, '--owner-uid', String(UID)], { out: (x) => out.push(x), err: () => {} });
+  const text = out.join('\n');
+  assert.doesNotMatch(text, /user none/); assert.doesNotMatch(text, /does not count[^\n]*does not count/);
+  assert.match(text, /explanations: the file could not be used/);
 });

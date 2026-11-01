@@ -423,9 +423,11 @@ export function summary({ dir, endDay, explanations: ex = { ok: true, explanatio
   // A direct push counts on the day a pass first saw it (its own date is the committer's to set); every judged line found
   // after the pin counts, an early date clamped to the first day of the window. Only a date past the end day is out.
   const countedDay = (l) => day((l.direct ? l.seen_at : l.merged_at) ?? l.seen_at ?? l.at);
-  // When it is unclear which week a commit belongs to, it counts IN: a direct push first seen up to the hold-back (1 hour)
-  // plus one pass interval (1 hour) after the end day's midnight is counted in the end day.
-  const lateGrace = (l) => l.direct && Date.parse(l.seen_at ?? l.at) <= end + 86_400_000 + EDGE_MS;
+  // When it is unclear which week a commit belongs to, it counts IN: a direct push first seen at or before the first CLEAN pass
+  // at or after the end day's midnight is counted in the end day (a failed or missed pass cannot push it out), with 2 hours
+  // (the hold-back plus one pass interval) kept as a floor.
+  const firstFinal = clean.map((l) => Date.parse(l.at)).filter((t) => t >= end + 86_400_000).sort((x, y) => x - y)[0] ?? -Infinity;
+  const lateGrace = (l) => l.direct && Date.parse(l.seen_at ?? l.at) <= Math.max(end + 86_400_000 + EDGE_MS, firstFinal);
   const inWindow = judgedLines.filter((l) => countedDay(l) <= endDay || lateGrace(l));
   const dis = inWindow.filter((l) => l.verdict !== VERDICTS[0]);
   out.judged = inWindow.length; out.wouldMerge = inWindow.length - dis.length; out.disagreements = dis.length;

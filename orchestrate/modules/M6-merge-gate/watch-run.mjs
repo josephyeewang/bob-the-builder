@@ -75,8 +75,8 @@ export async function main(argv, { out = (s) => process.stdout.write(`${s}\n`), 
     const s = summary({ dir: o.dir, endDay: o.endDay, explanations: ex });
     out(`days (UTC, by merge time): ${s.days.length ? `${s.days[0]} to ${s.days.at(-1)}` : 'none'}; window starts ${s.windowStart ?? 'never'}; days with no clean pass: ${s.missingDays.length ? s.missingDays.join(', ') : 'none'}`);
     out(`commits judged: ${s.judged}; would merge: ${s.wouldMerge}; disagreements with MAIN: ${s.disagreements}; unexplained: ${s.unexplained.length}; passes with a problem: ${s.failedPasses}`);
-    out(s.explanationsOwner === null && !s.explanationsProblem ? 'explanations: no file was read (there is none yet, so every disagreement is unexplained)' : `explanations from the file owned by user ${s.explanationsOwner ?? 'none'}${s.explanationsProblem ? ` (does not count: ${s.explanationsProblem})` : ''}`);
-    out(`the earliest end day that could count: ${s.earliestEndDay ?? 'unknown'} (the end of the seventh full UTC day since the first pass; an earlier end day cannot count); you gave ${o.endDay}`);
+    out(s.explanationsOwner === null && !s.explanationsProblem ? 'explanations: no file was read (there is none yet, so every disagreement is unexplained)' : s.explanationsProblem ? `explanations: the file could not be used (${s.explanationsProblem})` : `explanations from the file owned by user ${s.explanationsOwner}`);
+    out(`the earliest end day that could count: ${s.earliestEndDay ?? 'unknown'} (the end of the seventh full UTC day since the first pass after the latest rules restart; an earlier end day cannot count); you gave ${o.endDay}`);
     for (const u of s.unexplained) out(`UNEXPLAINED  ${u.sha}${u.pr ? ` (pull ${u.pr})` : ' (direct push)'}: ${u.verdict}${u.refusals?.length ? ` — ${u.refusals.map((r) => `${r.n}: ${r.reason}`).join('; ')}` : ''}`);
     for (const r of s.reasons) out(`BECAUSE  ${r}`);
     out(s.ok ? 'THE WEEK COUNTS.' : 'THE WEEK DOES NOT COUNT YET.');
