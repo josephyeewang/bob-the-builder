@@ -67,5 +67,19 @@ See LANES.md for who builds this folder, and the build rows (0b-9, R-0b-86..99) 
 - Create the robot (GitHub App), install it, and put its key in the orchestrate key folder (set up with `/apikeys`; the key is never read by a session).
 - Put the robot's numeric bot id in the rules (`product_profile.robot.bot_user_id`).
 - Name the required checks in the rules (`product_profile.required_checks`); with none, every change is refused (1, 2).
-- Allow undo cards without a go (`approvals.plan_go.go_free: [exact_reverse]`); without it every undo is refused (10).
+- Allow undo cards without a go, in the map form (block lines: the rules reader refuses `{…}`). The list form
+  `[exact_reverse]` gives no go-free kinds at all (#79), so the gate refuses every undo and the first-cutover fit check
+  refuses the file. Without `exact_reverse: true` every undo is refused (10).
+
+  ```yaml
+  approvals:
+    plan_go:
+      go_free:
+        exact_reverse: true
+        lead_daily_card: []
+  ```
+
+  At the first cutover the Lead is not on the product, so `lead_daily_card` is `[]` (L96), and the fit check refuses
+  any other list until the Dispatcher reads it with the rules' own path language (L120). `[]` is not go-free (L115 M-C):
+  goFreeKinds counts `lead_daily_card` only when it names at least one path.
 - Set M2's `approvals.push_windows` and `approvals.decisions_dir`; no Approve stands without them.
