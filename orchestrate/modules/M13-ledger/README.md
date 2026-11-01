@@ -6,7 +6,7 @@ waiting on whom, and the "caught up" message after the Mini was away.
 | File | Row | What it does |
 |---|---|---|
 | `alerts.mjs` | R-0b-71/73, L143 | One updated robot issue per alert condition; a comment only when it changes; closed when it clears. A GitHub call that answers false, or an open with no issue number, makes `raise`/`clear` answer false and save nothing, so the next pass tries again. |
-| `heartbeat.mjs` | R-0b-73, L143 | The pinned heartbeat issue, rewritten every 10 min; an alert per red fact; signed-out; account switch; usage steps. The new login is saved only once its change alert (or planned-switch push request) went out; each unplanned switch is its own alert, so a repeat switch to the same account is a fresh notice (L152). |
+| `heartbeat.mjs` | R-0b-73, L143 | The pinned heartbeat issue, rewritten every 10 min; an alert per red fact; signed-out; account switch; usage steps. The new login is saved only once its change alert (unplanned) or push request (planned) went out, on every path: a lost or refused one is told again on the next pass. Every switch is counted and its notice carries that number and the saved record's time, so a repeat switch to the same account, planned or not, is a fresh notice, and a lost count never reuses a closed one (L152, L158). |
 | `caught-up.mjs` | R-0b-76 | Idea issues from the owner (by numeric user ID) into the inbox; one "caught up" push after the Mini was away. |
 | `waiting.mjs` | R-0b-77 | Who / what / since for every waiting item, from the record; a missing field shows as a record error. |
 | `outside-check/` | R-0b-72 | The template for the hourly outside check's own public repo (its README has the owner steps). |

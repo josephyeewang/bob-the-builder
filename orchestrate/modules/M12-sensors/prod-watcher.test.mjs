@@ -373,14 +373,17 @@ function lossy(kind, how) {
 const CONDITIONS = {
   'watcher-cannot-read': { rules: { stage: 'first' }, make: (t) => { t.v.s.answer.deployments = { error: { code: 'forbidden' } }; } },
   'watcher-cannot-read (odd shape)': { kind: 'watcher-cannot-read', rules: { stage: 'first' }, make: (t) => { t.v.s.deployments = [dep(MAIN[0], 'git', 'NEW_STATE')]; } },
-  'no-stage': { rules: {}, make: () => {} },
+  // The no-stage condition already holds on the baseline pass, so its "lost" raise is a repeat, not a first notice (#98
+  // r1 c3); it still demands a raise on every pass, which is what a "remember it" plant breaks.
+  'no-stage': { rules: {}, make: () => {}, repeat: true },
   'old-version-live': { rules: { stage: 'first' }, before: (t) => { const d1 = dep(MAIN[0]); const d2 = dep(MAIN[1]); t.v.s.deployments = [d2, d1]; t.v.s.live = d2.uid; t.d1 = d1; }, make: (t) => { t.v.s.live = t.d1.uid; } },
   'unsupported-deploy': { rules: { stage: 'first' }, make: (t) => { const d = dep(BRANCH, 'cli'); t.v.s.deployments = [d, ...t.v.s.deployments]; t.v.s.live = d.uid; } },
 };
 for (const [name, c] of Object.entries(CONDITIONS)) {
   const kind = c.kind ?? name;
   for (const how of ['false', 'throw']) {
-    test(`L153: a ${name} raise that ${how === 'throw' ? 'threw' : 'answered false'} is raised again on the next pass`, async () => {
+    const what = `${c.repeat ? 'repeat ' : ''}${name}`;
+    test(`L153: ${/^[aeiou]/.test(what) ? 'an' : 'a'} ${what} raise that ${how === 'throw' ? 'threw' : 'answered false'} is raised again on the next pass`, async () => {
       const { raise, st } = lossy(kind, how);
       const t = lossSetup(raise, c.rules);
       c.before?.(t);

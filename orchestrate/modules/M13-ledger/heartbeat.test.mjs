@@ -182,7 +182,10 @@ function lossSetup(raise, refuse = () => false) {
   let planned = null;
   // The real clear can answer false (L143); nothing the pass saves may hang on it (L152 m1).
   const alerts = { raise, clear: async () => false };
-  const pass = () => heartbeatOnce({ product: 'product 1', writer, gh: fakeIssues(), alerts, owner: 'owner', probes, plannedSwitch: planned, now });
+  // One GitHub for the whole test: a fresh one per pass forgot the pinned issue the last pass opened (the strict
+  // isClosed found it, #98 r1 m2).
+  const gh = fakeIssues();
+  const pass = () => heartbeatOnce({ product: 'product 1', writer, gh, alerts, owner: 'owner', probes, plannedSwitch: planned, now });
   return { base, writer, world, pass, tick: () => { t += 10 * 60e3; }, plan: (p) => { planned = p; } };
 }
 const changed = (raise) => raise.texts.filter((a) => /\|heartbeat\|account-changed-/.test(a.key)).map((a) => a.key.split('-').pop());
@@ -292,6 +295,100 @@ test('L152 MAT-1: a saved login from before the count (no switches field) counts
   h.world.account = { signedIn: true, login: 'account B' }; await h.pass();
   assert.equal(acctIssues(h.gh).length, 1);
   assert.equal(h.writer.get('heartbeat-account-product-1').switches, 1);
+});
+
+const pushReqs = (h) => h.rec.list('fact').filter((f) => f.doc.kind === 'fact.push-request');
+const acctRec = (h) => h.writer.get('heartbeat-account-product-1');
+
+test('L158 MAT-A: a plan to B that stays in config: A→B pushes, B→A alerts, A→B again pushes again, through the real alerts', async () => {
+  const h = setup();
+  h.plan({ to: 'account B', at: '2026-11-03T11:00:00Z' });
+  await h.pass();
+  h.world.account = { signedIn: true, login: 'account B' }; h.tick(10); await h.pass();
+  assert.equal(pushReqs(h).length, 1);
+  h.world.account = { signedIn: true, login: 'account A' }; h.tick(10); await h.pass();
+  assert.equal(acctIssues(h.gh).length, 1, 'B→A was not planned: an alert');
+  h.world.account = { signedIn: true, login: 'account B' }; h.tick(10); await h.pass();
+  assert.equal(pushReqs(h).length, 2, 'the second A→B is its own push request, not the first one found again');
+  assert.deepEqual([acctRec(h).login, acctRec(h).switches], ['account B', 3], 'every switch, planned or not, is counted');
+  for (let i = 0; i < 3; i++) { h.tick(10); await h.pass(); }
+  assert.equal(pushReqs(h).length, 2, 'no switch, no push');
+  assert.equal(acctRec(h).switches, 3);
+});
+
+test('L158 m1: A → signed out → B is one notice and one counted switch, through the real alerts', async () => {
+  const h = setup();
+  await h.pass();
+  h.world.account = { signedIn: false }; h.tick(10); await h.pass();
+  assert.equal(acctRec(h).login, 'account A', 'a signed-out pass leaves the saved login alone');
+  const before = acctIssues(h.gh).length;
+  h.world.account = { signedIn: true, login: 'account B' }; h.tick(10); await h.pass();
+  assert.equal(acctIssues(h.gh).length - before, 1);
+  assert.match(acctIssues(h.gh).at(-1)[1].body, /now signed in as account B \(was account A\)/);
+  assert.deepEqual([acctRec(h).login, acctRec(h).switches], ['account B', 1]);
+});
+
+test('L158 m3: a count lost to a rewrite (an older build, a hand edit) never reuses a closed alert: the next A→B is told', async () => {
+  for (const lost of [{}, { switches: 0 }, { switches: 'x' }]) {
+    const h = setup();
+    await h.pass();
+    h.world.account = { signedIn: true, login: 'account B' }; h.tick(10); await h.pass();
+    h.gh.ownerCloses(acctIssues(h.gh)[0][0]);
+    h.writer.put('heartbeat-account-product-1', { kind: 'fact.heartbeat-account', product: 'product 1', login: 'account A', ...lost });
+    const before = notices(h.gh);
+    h.tick(10); await h.pass();
+    assert.equal(notices(h.gh) - before, 1, `rewritten with ${JSON.stringify(lost)}: the owner is told`);
+    assert.equal(acctIssues(h.gh).length, 2, 'a new issue, not the closed one answering "suppressed"');
+    assert.equal(acctRec(h).login, 'account B');
+  }
+});
+
+test('L158 m3: the same on the planned path: a lost count with the plan still standing pushes the next A→B again', async () => {
+  const h = setup();
+  h.plan({ to: 'account B', at: '2026-11-03T11:00:00Z' });
+  await h.pass();
+  h.world.account = { signedIn: true, login: 'account B' }; h.tick(10); await h.pass();
+  assert.equal(pushReqs(h).length, 1);
+  h.writer.put('heartbeat-account-product-1', { kind: 'fact.heartbeat-account', product: 'product 1', login: 'account A' });
+  h.tick(10); await h.pass();
+  assert.equal(pushReqs(h).length, 2, 'not the first switch\'s push request found again');
+  assert.equal(acctRec(h).login, 'account B');
+});
+
+test('L158 m3: an alert that went out but whose account save was refused is retried under the same key, so one switch is one notice', async () => {
+  let refuse = false;
+  const raise = sink();
+  const h = lossSetup(raise, (id) => refuse && /^heartbeat-account-/.test(id));
+  await h.pass();
+  h.world.login = 'account B'; refuse = true; h.tick(); await h.pass();
+  assert.equal(savedLogin(h), 'account A', 'the save was refused');
+  refuse = false; h.tick(); await h.pass();
+  const keys = raise.texts.filter((a) => /\|heartbeat\|account-changed-/.test(a.key)).map((a) => a.key);
+  assert.equal(keys.length, 2);
+  assert.equal(keys[0], keys[1], 'the retry finds the same alert (a silent repeat), not a second notice');
+  assert.equal(savedLogin(h), 'account B');
+});
+
+test('L158 m2: a saved pinned issue that is not an issue number reopens without asking GitHub about it', async () => {
+  for (const bad of ['[REDACTED:wrong-shape]', '7', 0, -1, 1.5, null]) {
+    const h = setup();
+    h.writer.put('heartbeat-issue-product-1', { kind: 'fact.heartbeat-issue', product: 'product 1', issue: bad });
+    const asked = [];
+    const isClosed = h.gh.isClosed;
+    h.gh.isClosed = async (i) => { asked.push(i); if (typeof i !== 'number') throw new Error(`asked GitHub about ${JSON.stringify(i)}`); return isClosed(i); };
+    await h.pass();
+    assert.deepEqual(asked, [], `issue ${JSON.stringify(bad)}: never asked`);
+    assert.equal(h.gh.calls.filter(([c]) => c === 'open').length, 1, 'opened a fresh pinned issue');
+    assert.equal(h.writer.get('heartbeat-issue-product-1').issue, 1);
+  }
+});
+
+test('L158 m2: the stand-in GitHub refuses questions about issues it never opened', async () => {
+  const gh = fakeIssues();
+  await assert.rejects(gh.isClosed(1), /no issue 1/);
+  await assert.rejects(gh.isClosed('[REDACTED:wrong-shape]'), /not an issue number/);
+  const i = await gh.open({ title: 't', body: 'b' });
+  assert.equal(await gh.isClosed(i), false);
 });
 
 test('L152 m3: a pinned-issue open with no issue number is not saved, and the next pass opens it again', async () => {
