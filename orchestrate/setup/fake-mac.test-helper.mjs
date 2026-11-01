@@ -4,17 +4,17 @@
 // invalid, a write with no value is a bad call, a record that is not there reads as exit 56; chown needs root; mkdir
 // needs the parent and refuses an existing folder (those two are the real mkdir's own refusals, since it is the real one).
 
-import { realpathSync, fchmodSync, lstatSync, mkdirSync, mkdtempSync } from 'node:fs';
+import { realpathSync, fchmodSync, lstatSync, mkdirSync, mkdtempSync, readdirSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { secureFolder } from './mac.mjs';
+import { readConfigFile, secureFile, secureFolder, writeNewFile } from './mac.mjs';
 
 export function fakeMac({ euid: as = 0, users = {}, admins = [] } = {}) {
   const prefix = realpathSync(mkdtempSync(join(tmpdir(), 'setup-test-')));
   const mac = {
     as, prefix, rootUid: process.getuid(),
-    users: new Map(Object.entries({ joe: { UniqueID: '65001', PrimaryGroupID: '20', UserShell: '/bin/zsh', NFSHomeDirectory: '/Users/joe' }, ...users })),
+    users: new Map(Object.entries({ sam: { UniqueID: '65001', PrimaryGroupID: '20', UserShell: '/bin/zsh', NFSHomeDirectory: '/Users/sam' }, ...users })),
     groups: new Map([['staff', { PrimaryGroupID: '20' }], ['admin', { PrimaryGroupID: '80' }]]),
     admins: new Set(admins),
     owners: new Map(),          // logical path → { uid, gid } set by chown
@@ -39,7 +39,9 @@ export function fakeMac({ euid: as = 0, users = {}, admins = [] } = {}) {
       if (!name || !table.has(name)) return { status: 56, stdout: '', stderr: '<dscl_cmd> DS Error: -14136 (eDSRecordNotFound)' };
       const a = table.get(name);
       // the real dscl says "No such key" on stderr and exits 0
-      return { status: 0, stdout: rest.filter((k) => a[k] !== undefined).map((k) => `${k}: ${a[k]}\n`).join(''), stderr: rest.filter((k) => a[k] === undefined).map((k) => `No such key: ${k}\n`).join('') };
+      // The password hash is readable by root only: for anyone else the real dscl answers as if it were not there.
+      const seen = (k) => a[k] !== undefined && !(k === 'ShadowHashData' && mac.as !== 0);
+      return { status: 0, stdout: rest.filter(seen).map((k) => `${k}: ${a[k]}\n`).join(''), stderr: rest.filter((k) => !seen(k)).map((k) => `No such key: ${k}\n`).join('') };
     }
     if (flag === '-create') {
       if (mac.as !== 0) return { status: 40, stdout: '', stderr: '<main> attribute status: eDSPermissionError\n<dscl_cmd> DS Error: -14120 (eDSPermissionError)' };
@@ -115,6 +117,21 @@ export function fakeMac({ euid: as = 0, users = {}, admins = [] } = {}) {
         chmod: (fd, mode) => { mac.log.push(`chmod ${mode.toString(8)} ${p}`); fchmodSync(fd, mode); },
       });
     },
+    // A new file (never over an existing one or a link) and its owner and mode, as the real ones do it.
+    write(p, text, mode) { mac.log.push(`write ${p}`); writeNewFile(at(p), text, mode); mac.owners.set(p, { uid: mac.rootUid, gid: 0 }); },
+    secureFile(p, want) {
+      secureFile(at(p), want, {
+        chown: (fd, uid, gid) => {
+          if (mac.as !== 0) { const e = new Error('EPERM: operation not permitted, fchown'); e.code = 'EPERM'; throw e; }
+          mac.log.push(`chown ${uid}:${gid} ${p}`); mac.owners.set(p, { uid, gid });
+        },
+        chmod: (fd, mode) => { mac.log.push(`chmod ${mode.toString(8)} ${p}`); fchmodSync(fd, mode); },
+      });
+    },
+    list: (p) => readdirSync(at(p)),
+    // The real reader (links, plain file, owner, mode, folders above); `configOwner` stands in for the file's owner (a test is not root).
+    readConfig: (p, { strict = false } = {}) => readConfigFile(strict ? at(p) : p, { strict, rootUid: mac.rootUid, top: prefix, ownerOf: (st) => mac.configOwner ?? st.uid }),
+    configOwner: null,
     nodeProblem: () => mac.nodeProblemText,
   });
   return mac;
