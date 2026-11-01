@@ -689,3 +689,29 @@ test('PLANT refusal 8: a docs change the owner labelled needs-joe → refusal 8 
   const v = world(); await v.pass(PIN_AT); v.land({ 'docs/a.md': 'two' }); await v.pass();
   assert.equal(v.judged()[0].verdict, VERDICTS[0]);
 });
+
+test('PLANT the second-cutover branch: where the lane rule says "ask" (nothing hard broken), refusal 8 stands alone → "would ask for the owner\'s Approve"; with any hard refusal added it is "would refuse" (caught by: the hard/soft split in judgeMerged)', async () => {
+  const rs = await draftRulesFor();
+  const askEngine = { classify: (c) => rs.engine.classify(c), get: (k, o) => rs.engine.get(k, o), may: () => ({ decision: 'ask', reason: 'a Tier 1 change needs the owner', tier: 1 }) };
+  const head = 'b'.repeat(40);
+  const facts = { direct: false, sha: 'a'.repeat(40), headSha: head, pr: 5, prBase: 'main', labels: [], statuses: [], threads: { ok: true, unresolved: 0 },
+    checks: [{ name: 'test', app: { id: 1 }, head_sha: head, status: 'completed', conclusion: 'success' }], files: [{ path: 'docs/a.md', status: 'modified' }] };
+  const v = judgeMerged(facts, { ...rs, engine: askEngine });
+  assert.deepEqual(v.refusals.map((x) => x.n), [8], JSON.stringify(v));
+  assert.equal(v.verdict, VERDICTS[1]);
+  // a hard refusal beside it (an unresolved review thread) makes it a plain refusal
+  const w = judgeMerged({ ...facts, threads: { ok: true, unresolved: 1 } }, { ...rs, engine: askEngine });
+  assert.deepEqual(w.refusals.map((x) => x.n).sort(), [7, 8]);
+  assert.equal(w.verdict, VERDICTS[2]);
+});
+
+test('the summary prints that a disagreement needed the owner\'s Approve when the verdict was "would refuse" (refusal 8 beside 9)', async () => {
+  const sha = 'd'.repeat(40);
+  const dir = handLog({ extra: [{ sha, at: '2026-11-04T09:00:00Z', merged_at: '2026-11-04T08:00:00Z', pr: 7, verdict: VERDICTS[2], refusals: [{ n: 9, reason: 'first cutover: docs lane only (x)' }, { n: 8, reason: 'needs the owner\'s Approve: risky: unclassifiable' }], not_judged: [...NOT_JUDGED] }] });
+  const s = summary({ dir, endDay: '2026-11-09', explanations: NOEX });
+  assert.equal(s.ok, false); assert.equal(s.unexplained.length, 1);
+  const out = []; const { main } = await import('./watch-run.mjs');
+  await main(['summary', '--dir', dir, '--end-day', '2026-11-09', '--explanations', join(dir, 'none.json'), '--owner-uid', String(UID)], { out: (x) => out.push(x), err: () => {} });
+  const line = out.find((x) => x.startsWith('UNEXPLAINED'));
+  assert.ok(line && /would refuse/.test(line) && /8: needs the owner's Approve/.test(line), JSON.stringify(out));
+});
