@@ -11,7 +11,7 @@
 // The Store Writer adds conditions on top (ready rule, verdict for the head, wait fields, reask count, one merge at a
 // time); this file says only which pairs exist and whose they are.
 
-import { STATES } from '../../shared/record.mjs';
+import { STATES } from '../../shared/record-names.mjs';
 
 const freeze = (o) => Object.freeze(Object.fromEntries(Object.entries(o).map(([k, v]) => [k, Object.freeze(Object.fromEntries(Object.entries(v).map(([t, a]) => [t, Object.freeze(a)])))])));
 

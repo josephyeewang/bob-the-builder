@@ -2,7 +2,9 @@
 // Dispatcher file holds them. A test that wants a different number overrides one key.
 
 import { fakeRules } from '../../shared/rules.mjs';
-import { memoryRecord } from '../../shared/record.mjs';
+import { SCRIPT_ACTORS, STATES, memoryRecord } from '../../shared/record.mjs';
+import { CREATE_STATES, INTERNAL_MOVES, MOVES, moveActors } from '../M9-record/moves.mjs';
+import { fieldsAllowed } from '../M9-record/permissions.mjs';
 import { KEYS as K } from './keys.mjs';
 import { outbox, sendAlerts } from './alerts.mjs';
 
@@ -41,13 +43,64 @@ export function usageFact({ week, h5, gone = 0.5, account = 'acct-a', observedAg
   };
 }
 
+// A record holding `entries` ([entity, id, doc]), each reached the way the real Record allows (L72): made in a state
+// its maker may make it in, by a script M9 lets make it, then moved one legal step at a time, each step by a script
+// M9 lets make it. A field only some other script may set is set by that script; one no script may set is refused, so
+// a test can't start from a document the real Record would never hold. The claim goes in on the move into claimed,
+// the wait on the move into waiting, the failure on the move into failed.
+const MOVE_FIELDS = Object.freeze({ claimed: 'claim', waiting: 'wait', failed: 'failure' });
+// `joe` writes nothing (the owner acts through approvals), so he never seeds a step.
+const SCRIPTS = SCRIPT_ACTORS.filter((a) => a !== 'joe');
+const scripts = (actors) => (actors ?? []).filter((a) => SCRIPTS.includes(a));
+function pathTo(entity, target) {
+  const starts = Object.entries(CREATE_STATES[entity] ?? {}).filter(([, a]) => scripts(a).length).map(([s]) => s);
+  const seen = new Map(starts.map((s) => [s, [s]]));
+  const queue = [...starts];
+  while (queue.length) {
+    const s = queue.shift();
+    if (s === target) return seen.get(s);
+    for (const to of Object.keys(MOVES[entity]?.[s] ?? {})) {
+      if (seen.has(to) || INTERNAL_MOVES[entity]?.[s]?.includes(to) || !scripts(moveActors(entity, s, to)).length) continue;
+      seen.set(to, [...seen.get(s), to]);
+      queue.push(to);
+    }
+  }
+  return null;
+}
+function seedOne(rec, entity, id, doc) {
+  const must = (r, what) => { if (!r.ok) throw new Error(`recWith ${entity} ${id}: ${what}: ${r.reason}`); return r; };
+  const stateful = Object.hasOwn(STATES, entity);
+  const path = stateful ? pathTo(entity, doc.state) : [undefined];
+  if (!path) throw new Error(`recWith ${entity} ${id}: no script reaches ${doc.state}`);
+  const atMove = new Set(Object.values(MOVE_FIELDS));
+  const fields = Object.keys(doc).filter((f) => f !== 'state' && !(entity === 'card' && atMove.has(f)));
+  const mayCreate = (a) => { const s = fieldsAllowed(entity, a, { create: true }); return s && (!stateful || CREATE_STATES[entity][path[0]]?.includes(a)) ? s : null; };
+  const makers = SCRIPTS.filter((a) => mayCreate(a));
+  if (!makers.length) throw new Error(`recWith ${entity} ${id}: no script may make a ${entity}`);
+  const maker = makers.find((a) => { const s = mayCreate(a); return s === '*' || fields.every((f) => s.has(f)); }) ?? makers[0];
+  const allowed = mayCreate(maker);
+  const first = Object.fromEntries(fields.filter((f) => allowed === '*' || allowed.has(f)).map((f) => [f, doc[f]]));
+  must(rec.write({ actor: maker, entity, id, expectRev: 0, doc: stateful ? { ...first, state: path[0] } : first }), `made by ${maker}`);
+  // The rest, each by a script that may set it.
+  for (const f of fields.filter((x) => !(x in first))) {
+    const cur = rec.read(entity, id);
+    const by = SCRIPTS.find((a) => { const s = fieldsAllowed(entity, a, { state: cur.doc.state }); return s === '*' || s?.has(f); });
+    if (!by) throw new Error(`recWith ${entity} ${id}: no script may set ${f} on a ${entity}`);
+    must(rec.write({ actor: by, entity, id, expectRev: cur.rev, doc: { ...cur.doc, [f]: doc[f] } }), `${f} set by ${by}`);
+  }
+  for (const to of path.slice(1)) {
+    const cur = rec.read(entity, id);
+    const by = scripts(moveActors(entity, cur.doc.state, to))[0];
+    const extra = entity === 'card' && MOVE_FIELDS[to] && doc[MOVE_FIELDS[to]] !== undefined ? { [MOVE_FIELDS[to]]: doc[MOVE_FIELDS[to]] } : {};
+    must(rec.write({ actor: by, entity, id, expectRev: cur.rev, doc: { ...cur.doc, ...extra, state: to } }), `${cur.doc.state} → ${to} by ${by}`);
+  }
+}
 export function recWith(entries = []) {
   const rec = memoryRecord();
   for (const [entity, id, doc] of entries) {
     // The record requires a card's module; a fixture card that names none gets a test module.
     const d = entity === 'card' && doc && !('module' in doc) ? { module: 'M-test', ...doc } : doc;
-    const r = rec.write({ actor: 'dispatcher', entity, id, expectRev: 0, doc: d });
-    if (!r.ok) throw new Error(r.reason);
+    seedOne(rec, entity, id, d);
   }
   return rec;
 }

@@ -11,7 +11,7 @@
 //   actorName is a script actor, or an AI role (the part before ':' in `role:session`).
 //   fieldsAllowed(entity, actor, { create, state }) → Set of fields, or '*' (any), or null (may not write at all)
 
-import { OUTBOX_KINDS, CARD_KINDS } from '../../shared/record.mjs';
+import { OUTBOX_KINDS, CARD_KINDS } from '../../shared/record-names.mjs';
 
 // Fields a card is created with; never changed after create (R3-m5). Plan inputs are separate below.
 export const CARD_CREATE_ONLY = Object.freeze(['product', 'module', 'lane', 'kind', 'depends_on', 'what', 'fix_of', 'source', 'research_ask']);

@@ -20,9 +20,8 @@ import { createHash } from 'node:crypto';
 import { hostname } from 'node:os';
 import { basename } from 'node:path';
 import { CARD_KINDS, ENTITIES, FINAL_STATES, SESSION_ID, STATES, WAIT_FIELDS, WAIT_WHO, isOpen, makeRecord, missingFields, timeoutFor } from '../../shared/record.mjs';
-import { canonicalJson } from '../../shared/plan-fingerprint.mjs';
-import { CREATE_STATES, INTERNAL_MOVES, moveActors } from './moves.mjs';
-import { PLAN_INPUTS, actorName, fieldsAllowed, mayCreateKind } from './permissions.mjs';
+import { guardWrite, same } from './guard.mjs';
+import { PLAN_INPUTS, actorName, mayCreateKind } from './permissions.mjs';
 import { readyCheck } from './ready.mjs';
 import { PASSES, headReviews, readOutboxFile, runnerLaunchFor, verdictFields, worstVerdict } from './outbox.mjs';
 import { processDead, realProbe } from './lock.mjs';
@@ -34,7 +33,6 @@ const MIN = 60000;
 const OUTAGE_MIN = 3;
 const HEX40 = /^[0-9a-f]{40}$/;
 const KIND = /^[a-z_]{1,40}$/;
-const same = (a, b) => { try { return canonicalJson(a ?? null) === canonicalJson(b ?? null); } catch { return false; } };
 const no = (reason) => ({ ok: false, reason });
 const iso = (ms) => new Date(ms).toISOString();
 const NEEDS_JOE_SETTERS = ['lead', 'dispatcher', 'merge_gate'];
@@ -120,17 +118,14 @@ export function openRecord({ root, product, ownerUid, rules, alert = () => {}, n
       return no(`changed since read (rev ${cur?.rev ?? 0}, expected ${w.expectRev})${holder}`);
     }
     const nowMs = now();
-    const doc = structuredClone(w.doc);
-    const stateful = Object.hasOwn(STATES, entity);
-    if (stateful && !STATES[entity].includes(doc.state)) return no(`unknown ${entity} state "${doc.state}"`);
+    if (!cur && testNoRevCheck && w.expectRev !== 0) return no('no such document');
+    // Who may set which fields and make which move: the one check the test stand-in makes too (guard.mjs, L72).
+    const g = guardWrite({ entity, id, actor, old: cur?.doc ?? null, doc: w.doc });
+    if (!g.ok) return g;
+    const doc = g.doc;
 
     // ---------- create ----------
     if (!cur) {
-      if (testNoRevCheck && w.expectRev !== 0) return no('no such document');
-      const allowed = fieldsAllowed(entity, actor, { create: true });
-      if (!allowed) return no(`${name} may not create ${entity}`);
-      if (allowed !== '*') { const extra = Object.keys(doc).filter((f) => !allowed.has(f)); if (extra.length) return no(`${name} may not set ${extra.join(', ')} on a new ${entity}`); }
-      if (stateful && !(CREATE_STATES[entity]?.[doc.state] ?? []).includes(name)) return no(`${name} may not create a ${entity} in ${doc.state}`);
       if (entity === 'product' && id !== product) return no(`this record is product ${product}'s`);
       if (entity === 'ask') { if (doc.reask_count !== undefined && doc.reask_count !== 0) return no('a new ask starts at reask_count 0'); doc.reask_count = 0; }
       if (entity === 'merge_request') {
@@ -149,28 +144,7 @@ export function openRecord({ root, product, ownerUid, rules, alert = () => {}, n
 
     // ---------- update ----------
     const old = cur.doc;
-    const from = old.state;
-    const to = doc.state;
-    const moving = stateful && from !== to;
-    if (moving) {
-      if (INTERNAL_MOVES[entity]?.[from]?.includes(to)) return no(`${entity} ${from} → ${to} is made only by a claim break or lapse`);
-      const actors = moveActors(entity, from, to);
-      if (!actors) return no(`illegal move: ${entity} ${from} → ${to}`);
-      if (!actors.includes(name)) return no(`${name} may not move ${entity} ${from} → ${to}`);
-    }
-    // Fields the move itself ends: the claim when a card leaves claimed or running (R3-M4), the wait when it leaves a
-    // waiting state, a paused product's return_to.
-    const cleared = [];
-    if (entity === 'card' && moving && (from === 'claimed' || from === 'running') && to !== 'claimed' && to !== 'running') { delete doc.claim; cleared.push('claim'); }
-    if (moving && (from === 'waiting' || from === 'waiting_input' || from === 'waiting_limit')) { delete doc.wait; cleared.push('wait'); }
-    if (entity === 'product' && moving && from === 'paused') { delete doc.return_to; cleared.push('return_to'); }
-
-    const keys = new Set([...Object.keys(old), ...Object.keys(doc)]);
-    const changed = [...keys].filter((k) => k !== 'state' && !cleared.includes(k) && !same(old[k], doc[k]));
-    const allowed = fieldsAllowed(entity, actor, { state: from });
-    if (!allowed) return no(`${name} may not change ${entity}`);
-    if (allowed !== '*') { const bad = changed.filter((f) => !allowed.has(f)); if (bad.length) return no(`${name} may not change ${bad.join(', ')} on ${entity} ${id}`); }
-    if (!moving && !changed.length) return no('nothing changed');
+    const { from, to, moving, changed } = g;
 
     if (entity === 'card') { const r = checkCardUpdate(tx, { id, old, doc, from, to, moving, changed, name, nowMs, ctx }); if (!r.ok) return r; }
     if (entity === 'ask') { const r = checkAsk(old, doc, from, to, moving, changed); if (!r.ok) return r; }

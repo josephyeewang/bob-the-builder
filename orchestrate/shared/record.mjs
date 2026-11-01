@@ -28,41 +28,17 @@
 // diary() is the one call that throws when the store can't be read: its callers walk every line, and an empty answer
 // would read as "nothing happened" (round 10 m2: fail closed by throwing, not by an empty list).
 
+import { CARD_KINDS, OUTBOX_KINDS, OUTBOX_KIND_PATTERN, STATES } from './record-names.mjs';
+export { CARD_KINDS, OUTBOX_KINDS, OUTBOX_KIND_PATTERN, STATES };
+// The test stand-in's field and move check is M9's own (L72); guard.mjs needs only record-names.mjs, so no load loop.
+import { guardWrite } from '../modules/M9-record/guard.mjs';
+
 // Plain-script actors write under their own name; AI roles only through applyOutbox, as `<role>:<sessionId>`.
 // `joe` writes nothing in 0b (the owner acts through `approvals`); it stays a name so old diary lines still parse.
 export const SCRIPT_ACTORS = Object.freeze(['dispatcher', 'workshop', 'merge_gate', 'approvals', 'sensors', 'ledger',
   'live_check', 'joe']);
 export const AI_ROLES = Object.freeze(['lead', 'worker', 'reviewer', 'auditor', 'incident', 'scout', 'writer',
   'front_door', 'thinking', 'learning', 'script']);
-
-// Outbox file kinds (design v4 §14.1.2 "Outbox names", lead call L2, 0b-2 round 2 R2-M9, round 3 R3-M2): the file name
-// starts with the kind. M10's role-profile loader refuses a kind not listed here or not listed for that role.
-//   kind → { roles, entity, mode }: `create` makes a new document with no header; `move` needs the
-//   { entity, id, expectRev } header. `entity: null` means the Store Writer has no rule for the kind yet, so
-//   applyOutbox refuses it (fails closed) until the 0b-2 build gives it one.
-export const OUTBOX_KINDS = Object.freeze(Object.fromEntries(Object.entries({
-  'report-': { roles: ['worker', 'reviewer', 'scout', 'writer', 'thinking', 'script'], entity: 'report', mode: 'create' },
-  'report-compact-': { roles: ['worker'], entity: 'report', mode: 'create' },
-  'state-compact-': { roles: ['front_door'], entity: 'report', mode: 'create' },
-  'handoff-': { roles: ['lead', 'learning'], entity: 'handoff', mode: 'create' },
-  'handin-': { roles: ['worker'], entity: 'card', mode: 'move' },   // the worker's running → in_review (0b-2 R3-M4)
-  'lesson-': { roles: ['learning'], entity: 'lesson', mode: 'create' },
-  'verdict-': { roles: ['reviewer', 'auditor'], entity: 'verdict', mode: 'move' },
-  // Stored as an inert request document; only approvals turns it into an ask (0b-2 R3-M2), so it is never an `ask` here.
-  'ask-request-': { roles: ['front_door', 'incident'], entity: 'report', mode: 'create' },
-  'wish-': { roles: ['lead'], entity: null, mode: 'create' },
-  'think-': { roles: ['lead'], entity: null, mode: 'create' },
-  'scout-': { roles: ['lead'], entity: null, mode: 'create' },
-  'write-': { roles: ['lead'], entity: null, mode: 'create' },
-  'roadmap-': { roles: ['lead'], entity: 'card', mode: 'move' },
-  'history-': { roles: ['lead'], entity: null, mode: 'create' },
-  'request-': { roles: ['front_door'], entity: null, mode: 'create' },
-  'state-': { roles: ['front_door'], entity: null, mode: 'create' },
-  'idea-': { roles: ['front_door', 'thinking'], entity: null, mode: 'create' },
-  'check-': { roles: ['learning'], entity: null, mode: 'create' },
-  'prune-': { roles: ['learning'], entity: null, mode: 'create' },
-}).map(([k, v]) => [k, Object.freeze({ ...v, roles: Object.freeze(v.roles) })])));
-export const OUTBOX_KIND_PATTERN = /^[a-z]+(-[a-z]+)*-$/;
 
 // A claim is a field on its card, set and cleared in the same write as the card's move (0b-2 R2-M6); `claim` stays
 // a diary kind only.
@@ -73,9 +49,6 @@ export const ENTITIES = Object.freeze(['card', 'ask', 'go', 'verdict', 'session'
 // verdict missing a line is no verdict (Merge Gate refusal 5). An auditor's verdict says its Material count instead.
 export const VERDICT_CHECKLIST = Object.freeze(['correct', 'well_built', 'works_for_user', 'holds_up']);
 export const CHECKLIST_LEVELS = Object.freeze(['clean', 'cosmetic', 'minor', 'material']);
-
-// Card kinds (0b-2 R3-M3). Set once, at create, by the creator M9's permissions name. `exact_reverse` is the undo card.
-export const CARD_KINDS = Object.freeze(['ordinary', 'fix', 'exact_reverse', 'lead_daily_card', 'research_copy']);
 
 // Fields a document must carry on every write, checked here so a fake record refuses what the real one would.
 // launch and merge_request are the Dispatcher's (D12, refusals 5 and 11); a verdict names the session and head it is
@@ -94,18 +67,6 @@ export function missingFields(entity, doc) {
   const need = (REQUIRED_FIELDS[entity] ?? []).filter((f) => entity !== 'launch' || !['card', 'head'].includes(f) || !doc?.role || CARD_ROLES.includes(doc.role));
   return need.filter(blank);
 }
-
-// State models (design v3 §2.4, v4 §8 A4–A5, D8). The moves between them are M9's; the names are here.
-export const STATES = Object.freeze({
-  card: ['draft', 'ready', 'claimed', 'running', 'in_review', 'verified', 'approved', 'merging', 'merged', 'closed',
-    'waiting', 'failed', 'cancelled', 'closed_no_answer', 'reverted'],
-  ask: ['open', 'pushed', 'answered', 'consumed', 'expired', 'withdrawn'],
-  session: ['preparing', 'running', 'waiting_input', 'waiting_limit', 'reporting', 'ended', 'stuck', 'retrying',
-    'quarantined', 'recycling'],
-  merge: ['requested', 'queued', 'catching_up', 'held', 'returned_to_builder', 'checking', 'merging', 'merged',
-    'audited_ok', 'audit_flagged', 'refused'],
-  product: ['light', 'active', 'away', 'paused'],
-});
 
 // Final states need no time limit (A4); every other state has one or a named reason, in the rules' timeouts.
 // closed → reverted is the one move out of a final state (D8).
@@ -197,8 +158,10 @@ export function makeRecord(impl) {
   });
 }
 
-// For other modules' tests: an in-memory record that keeps the rev check and the diary, and nothing else (no
-// state moves, no who-may-change-what — those are M9's real Store Writer). applyOutbox records the hand-in only.
+// For other modules' tests: an in-memory record that keeps the rev check, the diary, and M9's own check of who may
+// set which fields and make which move (M9-record/guard.mjs, imported, not copied: L72). A stand-in looser than the
+// real Record let writes pass every test that the real one refuses. What it still does not check is the rest of the
+// Store Writer: the ready rule, a claim's and a wait's shape, verdicts and merges. applyOutbox records the hand-in only.
 // The claim fakes are simple: ready() is every `ready` card with no claim, release() hands a claimed card back when the
 // session holds it, breakIfDead() never breaks (the fake can't tell a dead owner), overdue() and lapseClaims() find none.
 export function memoryRecord() {
@@ -217,8 +180,10 @@ export function memoryRecord() {
     write({ actor, entity, id, expectRev, doc, kind = 'write' }) {
       const cur = docs.get(key(entity, id));
       if ((cur?.rev ?? 0) !== expectRev) return refused(`changed since read (rev ${cur?.rev ?? 0}, expected ${expectRev})`);
+      const g = guardWrite({ entity, id, actor, old: cur?.doc ?? null, doc });
+      if (!g.ok) return refused(g.reason);
       const rev = expectRev + 1;
-      docs.set(key(entity, id), { entity, id, doc: structuredClone(doc), rev });
+      docs.set(key(entity, id), { entity, id, doc: g.doc, rev });
       const seq = log(actor, kind, entity, id, cur?.doc?.state, doc?.state);
       return { ok: true, rev, seq };
     },

@@ -4,16 +4,43 @@ import { makeRecord, memoryRecord, isActor, missingFields, STATES, FINAL_STATES,
 
 test('create, read, update only if unchanged, one diary line per accepted write', () => {
   const rec = memoryRecord();
-  const w1 = rec.write({ actor: 'dispatcher', entity: 'card', id: 'C-1', expectRev: 0, doc: { state: 'ready', module: 'm' } });
+  const w1 = rec.write({ actor: 'dispatcher', entity: 'card', id: 'C-1', expectRev: 0, doc: { state: 'draft', module: 'm' } });
   assert.deepEqual([w1.ok, w1.rev], [true, 1]);
-  assert.deepEqual(rec.read('card', 'C-1').doc, { state: 'ready', module: 'm' });
-  const stale = rec.write({ actor: 'dispatcher', entity: 'card', id: 'C-1', expectRev: 0, doc: { state: 'claimed', module: 'm' } });
+  assert.deepEqual(rec.read('card', 'C-1').doc, { state: 'draft', module: 'm' });
+  assert.equal(rec.write({ actor: 'dispatcher', entity: 'card', id: 'C-1', expectRev: 1, doc: { state: 'ready', module: 'm' } }).rev, 2);
+  const stale = rec.write({ actor: 'dispatcher', entity: 'card', id: 'C-1', expectRev: 1, doc: { state: 'claimed', module: 'm' } });
   assert.equal(stale.ok, false);
   assert.match(stale.reason, /changed since read/);
-  assert.equal(rec.write({ actor: 'dispatcher', entity: 'card', id: 'C-1', expectRev: 1, doc: { state: 'claimed', module: 'm' } }).rev, 2);
+  assert.equal(rec.write({ actor: 'dispatcher', entity: 'card', id: 'C-1', expectRev: 2, doc: { state: 'claimed', module: 'm' } }).rev, 3);
   const d = rec.diary();
-  assert.equal(d.length, 2);
-  assert.deepEqual([d[1].from_state, d[1].to_state, d[1].actor], ['ready', 'claimed', 'dispatcher']);
+  assert.equal(d.length, 3);
+  assert.deepEqual([d[2].from_state, d[2].to_state, d[2].actor], ['ready', 'claimed', 'dispatcher']);
+});
+
+// L72: the stand-in refuses what M9 refuses on who may write what, with M9's own check (guard.mjs), and keeps no line.
+test('the stand-in refuses a field or a move M9 does not allow that actor, as the real Record does', () => {
+  const rec = memoryRecord();
+  const make = (actor, entity, id, doc) => rec.write({ actor, entity, id, expectRev: 0, doc });
+  assert.equal(make('dispatcher', 'card', 'C-1', { state: 'draft', module: 'm' }).ok, true);
+  const at = (doc, actor = 'dispatcher') => { const c = rec.read('card', 'C-1'); return rec.write({ actor, entity: 'card', id: 'C-1', expectRev: c.rev, doc: { ...c.doc, ...doc } }); };
+  // A field outside the dispatcher's list.
+  assert.match(at({ changed_at: '2026-10-01T00:00:00Z' }).reason, /dispatcher may not change changed_at on card C-1/);
+  // A field set at create that the maker may not set.
+  assert.match(make('dispatcher', 'card', 'C-2', { state: 'draft', module: 'm', go_free: true }).reason, /may not set go_free on a new card/);
+  // A state the maker may not create in, a move not in the table, a move by the wrong actor.
+  assert.match(make('dispatcher', 'card', 'C-3', { state: 'running', module: 'm' }).reason, /may not create a card in running/);
+  assert.match(at({ state: 'merged' }).reason, /illegal move: card draft → merged/);
+  assert.match(at({ state: 'cancelled' }).reason, /dispatcher may not move card draft → cancelled/);
+  // claimed → ready only by release, break or lapse.
+  assert.equal(at({ state: 'ready' }).ok, true);
+  assert.equal(at({ state: 'claimed', claim: { kind: 'session', session_id: 'S-1', host: 'h' } }).ok, true);
+  assert.match(at({ state: 'ready' }).reason, /made only by a claim break or lapse/);
+  // Who may create an entity at all: the dispatcher writes no facts.
+  assert.match(make('dispatcher', 'fact', 'F-1', { text: 'x' }).reason, /dispatcher may not create fact/);
+  // The claim a move ends goes with it: leaving claimed by release clears it.
+  assert.equal(rec.release({ card: 'C-1', session_id: 'S-1' }).ok, true);
+  assert.equal(rec.read('card', 'C-1').doc.claim, undefined);
+  assert.equal(rec.diary().length, 4);
 });
 
 test('AI roles cannot call write; bad arguments are refused, not thrown', () => {
