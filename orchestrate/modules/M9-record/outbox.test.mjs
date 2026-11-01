@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import { linkSync, mkdirSync, readFileSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { join } from 'node:path';
-import { AI_ROLES, OUTBOX_KINDS } from '../../shared/record.mjs';
+import { AI_ROLES, OUTBOX_KINDS, notARecord } from '../../shared/record.mjs';
 import { MAX_OUTBOX_BYTES, kindOf, readOutboxFile, sessionVerdict } from './outbox.mjs';
 import { openRecord } from './writer.mjs';
 import { HEAD, HEAD2, PRODUCT, UID, leadCard, must, outboxFile, product, put, readyCard, roadmap, runCard, setup } from './fixtures.test-helper.mjs';
@@ -87,6 +87,7 @@ test('every outbox kind × every AI role: applied only for the roles listed (R2-
       const r = env.record.applyOutbox({ role, sessionId: sid, card: 'C-x' }, outboxFile(env, role, sid, `${kind}${n}.md`, text));
       const where = `${kind} from ${role}: ${r.reason}`;
       if (!spec.roles.includes(role)) { assert.equal(r.ok, false, where); assert.match(r.reason, /is not listed for/, where); continue; }
+      if (spec.record === 'none') { assert.deepEqual(r, notARecord(kind), where); assert.ok(!env.record.diary().some((e) => e.actor === `${role}:${sid}`), where); continue; }
       if (!spec.entity) { assert.equal(r.ok, false, where); assert.match(r.reason, /no record rule yet/, where); continue; }
       if (spec.mode === 'create') {
         assert.equal(r.ok, true, where);

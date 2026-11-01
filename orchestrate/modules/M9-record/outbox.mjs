@@ -11,6 +11,7 @@
 //
 //   readOutboxFile({ outboxRoot, uids, tag, file }) →
 //     { ok: true, key, kind, spec, header, body, sha256, realpath } | { ok: false, key, reason }
+//     | notARecord(kind) for a `record: 'none'` kind (think-, scout-, write-; L140): not refused, handled by M11 intake
 //   `key` is the file's identity for "seen before": its real path and sha256 (R3-m7). An unsafe file that can't be read
 //   is keyed by its path and the reason, so the same refusal is reported once.
 //   `uids` maps a role to the uid that must own its files (the owner's user in production).
@@ -73,7 +74,7 @@
 import { createHash } from 'node:crypto';
 import { closeSync, fstatSync, lstatSync, openSync, readdirSync, readSync, realpathSync, constants } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
-import { CHECKLIST_LEVELS, OUTBOX_KINDS, SESSION_ID, VERDICT_CHECKLIST, outboxKind } from '../../shared/record.mjs';
+import { CHECKLIST_LEVELS, OUTBOX_KINDS, SESSION_ID, VERDICT_CHECKLIST, notARecord, outboxKind } from '../../shared/record.mjs';
 import { REVIEW_ROLES } from '../../shared/review-roles.mjs';
 
 export { REVIEW_ROLES };
@@ -407,6 +408,8 @@ export function readOutboxFile({ outboxRoot, uids = {}, tag, file }) {
   if (!kind) return no(`no outbox kind for file name ${name.slice(0, 80)}`);
   const spec = OUTBOX_KINDS[kind];
   if (!spec.roles.includes(tag.role)) return no(`outbox kind ${kind} is not listed for ${tag.role}`);
+  // Not a record (L140): the file is handledBy's, so M9 neither reads it nor marks it seen; applyOutbox answers NOT_A_RECORD.
+  if (spec.record === 'none') return notARecord(kind);
   if (!spec.entity) return no(`outbox kind ${kind} has no record rule yet`);
 
   const owner = uids[tag.role];

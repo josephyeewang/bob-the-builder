@@ -11,7 +11,7 @@ import assert from 'node:assert/strict';
 import { setup, outboxFile } from './fixtures.test-helper.mjs';
 import { memoryRecord, OUTBOX_KINDS, AI_ROLES } from '../../shared/record.mjs';
 
-const NAME_REASONS = /^(no outbox kind for file name|outbox kind \S+ is not listed for|outbox kind \S+ has no record rule yet)/;
+const NAME_REASONS = /^(no outbox kind for file name|outbox kind \S+ is not listed for|outbox kind \S+ has no record rule yet|not_a_record$)/;
 const EXTRA = ['notakind-X1.md', 'report-.md', 'REPORT-X1.md', 'report-X.1.md', 'report-X1.MD', 'report-X1.md.txt',
   'report_X1.md', 'report-X1', 'report-é.md', 'verdict-compact-S1.md'];
 

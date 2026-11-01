@@ -57,7 +57,7 @@ rec.lapseClaims(now);
 ```
 
 - **Claims are a field on the card** (`claim`), set by `ready → claimed` and cleared when the card leaves claimed and running. `claimed → ready` and `running → ready` are never a plain write: they happen only through `release`, `breakIfDead` or `lapseClaims`.
-- **Outbox kinds** (`OUTBOX_KINDS`) are the file-name prefixes each AI role may send. A worker hands its card in with `handin-` (running → in_review). An `ask-request-` is stored as an inert report; only `approvals` turns it into an ask.
+- **Outbox kinds** (`OUTBOX_KINDS`) are the file-name prefixes each AI role may send. A worker hands its card in with `handin-` (running → in_review). An `ask-request-` is stored as an inert report; only `approvals` turns it into an ask. Every other report kind names who reads it (`reader`), the join item it waits for (`pending`), why nothing writes it yet (`latent`) or why it is kept (`kept`); a `record: 'none'` kind (think-, scout-, write-) is not a record at all, and `applyOutbox` answers `not_a_record` (`isNotARecord`) so M11 intake handles it (L140).
 - **Plan fingerprint**: `plan-fingerprint.mjs` is the one fingerprint a go binds to. M2 Approvals stores it on the go; M9 recomputes it at `draft → ready`. Its `cleanPath` is the one rule for a plan's file path (L87).
 - **Plan review pass**: `plan-review.mjs` is the one shape of a fresh plan reviewer's pass, which a Tier-1 go needs. `planPass` builds it from M3's read of the reviewer's answer plus ids the reviewer can't write (the card, its fingerprint, and the two sessions from the launch records). M2's `planCheckProblem` checks it (L87).
 

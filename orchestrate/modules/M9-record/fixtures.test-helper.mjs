@@ -6,7 +6,7 @@ import { chmodSync, mkdirSync, readFileSync, readdirSync, realpathSync, writeFil
 import { join } from 'node:path';
 import { planFingerprint } from '../../shared/plan-fingerprint.mjs';
 import { tempDir } from '../../shared/test-tmp.mjs';
-import { openRecord } from './writer.mjs';
+import { openRecordWithStore } from './writer.mjs';
 import { HEAD, PRODUCT, UID, rulesFor } from './rules.test-helper.mjs';
 
 export { PRODUCT, HEAD, HEAD2, UID, fullTimeouts, rulesFor } from './rules.test-helper.mjs';
@@ -26,12 +26,12 @@ export function setup({ values, prefix = 'm9-rec-', probe, faultAt, host = 'mac-
   const alerts = [];
   const rules = rulesFor(values);
   const uids = Object.fromEntries(['lead', 'worker', 'reviewer', 'auditor', 'incident', 'scout', 'writer', 'front_door', 'thinking', 'learning', 'script'].map((r) => [r, UID]));
-  const opened = openRecord({ root, product: PRODUCT, ownerUid: UID, rules, alert: (a) => alerts.push(a), now: () => clock.t, host,
+  const opened = openRecordWithStore({ root, product: PRODUCT, ownerUid: UID, rules, alert: (a) => alerts.push(a), now: () => clock.t, host,
     probe, faultAt, outbox: { root: outRoot, uids, launches: launchRoot, ...(treeOf ? { treeOf } : {}) }, ...extra });
   // The review user (L44): reviewers and auditors write as a Mac user of their own. Tests run as one user, so this second
   // view of the same store calls this test's user the review user and every other role someone else; verdicts go in here.
   const reviewUids = Object.fromEntries(Object.keys(uids).map((r) => [r, r === 'reviewer' || r === 'auditor' ? UID : UID + 1]));
-  const review = openRecord({ root, product: PRODUCT, ownerUid: UID, rules, alert: (a) => alerts.push(a), now: () => clock.t, host,
+  const review = openRecordWithStore({ root, product: PRODUCT, ownerUid: UID, rules, alert: (a) => alerts.push(a), now: () => clock.t, host,
     probe, outbox: { root: outRoot, uids: reviewUids, launches: launchRoot, ...(treeOf ? { treeOf } : {}) }, ...extra }).record;
   return { ...opened, review, base, root, outRoot, launchRoot, reviewUids, clock, alerts, rules };
 }

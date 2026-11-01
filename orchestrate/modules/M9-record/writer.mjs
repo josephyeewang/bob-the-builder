@@ -19,7 +19,7 @@
 import { createHash } from 'node:crypto';
 import { hostname } from 'node:os';
 import { basename } from 'node:path';
-import { CARD_KINDS, ENTITIES, FINAL_STATES, SESSION_ID, STATES, WAIT_FIELDS, WAIT_WHO, isOpen, makeRecord, missingFields, timeoutFor } from '../../shared/record.mjs';
+import { CARD_KINDS, ENTITIES, FINAL_STATES, SESSION_ID, STATES, WAIT_FIELDS, WAIT_WHO, isOpen, makeRecord, isNotARecord, missingFields, notARecord, timeoutFor } from '../../shared/record.mjs';
 import { canonicalJson } from '../../shared/plan-fingerprint.mjs';
 import { CREATE_STATES, INTERNAL_MOVES, moveActors } from './moves.mjs';
 import { PLAN_INPUTS, actorName, fieldsAllowed, mayCreateKind } from './permissions.mjs';
@@ -39,7 +39,7 @@ const no = (reason) => ({ ok: false, reason });
 const iso = (ms) => new Date(ms).toISOString();
 const NEEDS_JOE_SETTERS = ['lead', 'dispatcher', 'merge_gate'];
 
-export function openRecord({ root, product, ownerUid, rules, alert = () => {}, now = () => Date.now(), host = hostname(),
+export function openRecordWithStore({ root, product, ownerUid, rules, alert = () => {}, now = () => Date.now(), host = hostname(),
   probe = realProbe, outbox = {}, profileVersion = null, faultAt, testNoLock = false, testNoRevCheck = false, lockTimeoutMs } = {}) {
   if (typeof product !== 'string' || !/^[A-Za-z0-9._-]+$/.test(product)) throw new Error('the record needs its product name');
   if (!rules || typeof rules.get !== 'function') throw new Error('the record needs the rules (shared/rules.mjs)');
@@ -495,6 +495,8 @@ export function openRecord({ root, product, ownerUid, rules, alert = () => {}, n
 
   function applyOutbox(tag, file) {
     const f = readOutboxFile({ outboxRoot: outbox.root, uids: outbox.uids, tag, file });
+    // A kind that is not a record (L140) is handed back untouched: no seen mark, no diary line, no refusal, no alert.
+    if (isNotARecord(f)) return notARecord(f.kind);
     try {
       return store.transaction((tx) => {
         if (tx.seen(f.key)) return { ok: true, skipped: true };
@@ -680,4 +682,11 @@ export function openRecord({ root, product, ownerUid, rules, alert = () => {}, n
     write, applyOutbox, ready, overdue, release, breakIfDead, lapseClaims,
   };
   return { record: makeRecord(impl), store, impl, recover: () => store.recover() };
+}
+
+// What every caller gets: the Record and recover(), never the raw store or impl, which commit without check()
+// (#91 r3 MIN-1). openRecordWithStore is M9's own tests' (the N9 scan refuses it outside modules/M9-record/).
+export function openRecord(opts) {
+  const { record, recover } = openRecordWithStore(opts);
+  return { record, recover };
 }

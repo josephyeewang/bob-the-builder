@@ -1837,6 +1837,9 @@ Object.defineProperties(__bob_e, {
   SCRIPT_ACTORS: { get: () => SCRIPT_ACTORS, enumerable: true },
   AI_ROLES: { get: () => AI_ROLES, enumerable: true },
   OUTBOX_KINDS: { get: () => OUTBOX_KINDS, enumerable: true },
+  NOT_A_RECORD: { get: () => NOT_A_RECORD, enumerable: true },
+  notARecord: { get: () => notARecord, enumerable: true },
+  isNotARecord: { get: () => isNotARecord, enumerable: true },
   OUTBOX_KIND_PATTERN: { get: () => OUTBOX_KIND_PATTERN, enumerable: true },
   OUTBOX_NAME: { get: () => OUTBOX_NAME, enumerable: true },
   outboxKind: { get: () => outboxKind, enumerable: true },
@@ -1901,30 +1904,54 @@ const AI_ROLES = Object.freeze(['lead', 'worker', 'reviewer', 'auditor', 'incide
 // Outbox file kinds (design v4 §14.1.2 "Outbox names", lead call L2, 0b-2 round 2 R2-M9, round 3 R3-M2): the file name
 // starts with the kind. M10's role-profile loader refuses a kind not listed here or not listed for that role.
 //   kind → { roles, entity, mode }: `create` makes a new document with no header; `move` needs the
-//   { entity, id, expectRev } header. `entity: null` means the Store Writer has no rule for the kind yet, so
-//   applyOutbox refuses it (fails closed) until the 0b-2 build gives it one.
+//   { entity, id, expectRev } header.
+// Every kind is one of two things (L137, L140):
+//   - a record kind, with an entity. A kind stored as a report is inert: nothing acts on it unless a reader picks it up,
+//     so each one says who reads it. `reader: '<file>:<fn>[, <file>:<fn>]'` names a live reader. `pending: '<module> join
+//     item(s) <n>, lane <n>'` names the join item in that module's README that wires one. `latent: '<why>'` says why
+//     nothing writes it today. `kept: '<why>'` (only the three kinds written before L140) says storing it is the point.
+//     M9's outbox-kinds.test fails on a report kind with none of them (no kind is a black hole).
+//   - not a record: `record: 'none'` with `handledBy`, the module that takes the file in itself. applyOutbox answers
+//     NOT_A_RECORD for it (see notARecord below), which is neither stored nor refused.
+// A kind with neither is refused (fails closed). The test fails on one, so none is listed today.
+const NONE = (roles) => ({ roles, entity: null, mode: 'create', record: 'none', handledBy: 'M11-dispatcher/outbox-intake.mjs' });
 const OUTBOX_KINDS = Object.freeze(Object.fromEntries(Object.entries({
-  'report-': { roles: ['worker', 'reviewer', 'scout', 'writer', 'thinking', 'script'], entity: 'report', mode: 'create' },
-  'report-compact-': { roles: ['worker'], entity: 'report', mode: 'create' },
-  'state-compact-': { roles: ['front_door'], entity: 'report', mode: 'create' },
+  'report-': { roles: ['worker', 'reviewer', 'scout', 'writer', 'thinking', 'script'], entity: 'report', mode: 'create',
+    kept: 'a session\'s own account of its work, kept with the card for the history and for audits; nothing acts on it' },
+  'report-compact-': { roles: ['worker'], entity: 'report', mode: 'create',
+    kept: 'the worker\'s note at a compaction, kept for the history; nothing acts on it' },
+  'state-compact-': { roles: ['front_door'], entity: 'report', mode: 'create',
+    kept: 'the Front Door\'s note at a compaction, kept for the history; nothing acts on it' },
   'handoff-': { roles: ['lead', 'learning'], entity: 'handoff', mode: 'create' },
   'handin-': { roles: ['worker'], entity: 'card', mode: 'move' },   // the worker's running → in_review (0b-2 R3-M4)
   'lesson-': { roles: ['learning'], entity: 'lesson', mode: 'create' },
   'verdict-': { roles: ['reviewer', 'auditor'], entity: 'verdict', mode: 'move' },
   // Stored as an inert request document; only approvals turns it into an ask (0b-2 R3-M2), so it is never an `ask` here.
-  'ask-request-': { roles: ['front_door', 'incident'], entity: 'report', mode: 'create' },
-  'wish-': { roles: ['lead'], entity: null, mode: 'create' },
-  'think-': { roles: ['lead'], entity: null, mode: 'create' },
-  'scout-': { roles: ['lead'], entity: null, mode: 'create' },
-  'write-': { roles: ['lead'], entity: null, mode: 'create' },
+  'ask-request-': { roles: ['front_door', 'incident'], entity: 'report', mode: 'create',
+    reader: 'M2-approvals/research-ask.mjs:openResearchAsks, M2-approvals/undo-flag.mjs:openUndoFlags' },
+  'wish-': { roles: ['lead'], entity: 'report', mode: 'create', latent: 'no Lead prompt writes one yet; only the M10 lead profile lists it' },
+  // A request for a read-only session: M11's intake starts it and records the hand-in itself (L140).
+  'think-': NONE(['lead']),
+  'scout-': NONE(['lead']),
+  'write-': NONE(['lead']),
   'roadmap-': { roles: ['lead'], entity: 'card', mode: 'move' },
-  'history-': { roles: ['lead'], entity: null, mode: 'create' },
-  'request-': { roles: ['front_door'], entity: null, mode: 'create' },
-  'state-': { roles: ['front_door'], entity: null, mode: 'create' },
-  'idea-': { roles: ['front_door', 'thinking'], entity: null, mode: 'create' },
-  'check-': { roles: ['learning'], entity: null, mode: 'create' },
-  'prune-': { roles: ['learning'], entity: null, mode: 'create' },
+  'history-': { roles: ['lead'], entity: 'report', mode: 'create', latent: 'no Lead prompt writes one yet, and M12 history.mjs answer() has no caller' },
+  // The skill writes request-resume/wrapup/rotate today; nothing acts on a stored one until lane 2 wires the push
+  // (item 7) and the mode requests (item 9). Stored, it can't set a product's state: only the owner's tap does.
+  'request-': { roles: ['front_door'], entity: 'report', mode: 'create', pending: 'M1 join items 7 and 9, lane 2' },
+  // Never a product write by an AI: lane 2's Ledger pass reads the newest checked state- per product for the trip brief.
+  'state-': { roles: ['front_door'], entity: 'report', mode: 'create', pending: 'M1 join item 4, lane 2' },
+  'idea-': { roles: ['front_door', 'thinking'], entity: 'report', mode: 'create', pending: 'M1 join item 2, lane 2' },
+  'check-': { roles: ['learning'], entity: 'report', mode: 'create', latent: 'its only role, learning, is NEVER_STARTED (M10 roles.mjs)' },
+  'prune-': { roles: ['learning'], entity: 'report', mode: 'create', latent: 'its only role, learning, is NEVER_STARTED (M10 roles.mjs)' },
 }).map(([k, v]) => [k, Object.freeze({ ...v, roles: Object.freeze(v.roles) })])));
+// applyOutbox's answer for a `record: 'none'` kind: not stored, not refused, no diary line, no refusal, no alert.
+// The file is handledBy's; a caller tests for it with isNotARecord, never by matching the reason text.
+const NOT_A_RECORD = 'not_a_record';
+function notARecord(kind) {
+  return { ok: false, notARecord: true, reason: NOT_A_RECORD, kind, handledBy: OUTBOX_KINDS[kind]?.handledBy ?? null };
+}
+const isNotARecord = (r) => r?.notARecord === true && r?.reason === NOT_A_RECORD;
 const OUTBOX_KIND_PATTERN = /^[a-z]+(-[a-z]+)*-$/;
 // The one outbox file name rule: `<kind>-<id>.(md|json|txt)`, ASCII letters, digits and dashes only. The write hook
 // and the M4 intake check names with the same pattern (they keep their own copies for now, L121), and M9 applies it
@@ -2110,6 +2137,7 @@ function memoryRecord() {
       // The same role and record-rule checks as M9's readOutboxFile, in its order and with its reasons (L129 M-1).
       const spec = OUTBOX_KINDS[kind];
       if (!spec.roles.includes(tag?.role)) return refused(`outbox kind ${kind} is not listed for ${tag?.role}`);
+      if (spec.record === 'none') return notARecord(kind);
       if (!spec.entity) return refused(`outbox kind ${kind} has no record rule yet`);
       const seq = log(`${tag.role}:${tag.sessionId}`, 'outbox', 'report', String(file).split('/').pop(), null, null, { card: tag.card ?? null });
       return { ok: true, seq };

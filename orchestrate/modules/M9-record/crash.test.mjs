@@ -10,7 +10,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { FAULT_POINTS, docBytes, sha256 } from './store.mjs';
 import { HEAD, HEAD2, PRODUCT, UID, iso, rulesFor, seed, setup } from './fixtures.test-helper.mjs';
-import { openRecord } from './writer.mjs';
+import { openRecordWithStore } from './writer.mjs';
 import { sleepMs } from './lock.mjs';
 
 const CHILD = fileURLToPath(new URL('./child.test-helper.mjs', import.meta.url));
@@ -18,7 +18,7 @@ const run = (args) => spawnSync(process.execPath, [CHILD, JSON.stringify(args)],
 
 // Reopen the store as a new process would, recover, and check it whole.
 function checkWhole(root, cases) {
-  const { store, record } = openRecord({ root, product: PRODUCT, ownerUid: UID, rules: rulesFor(), host: 'mac-a', lockTimeoutMs: 5000 });
+  const { store, record } = openRecordWithStore({ root, product: PRODUCT, ownerUid: UID, rules: rulesFor(), host: 'mac-a', lockTimeoutMs: 5000 });
   const report = store.recover();
   const lines = store.lines();
   lines.forEach((l, i) => assert.equal(l.seq, i + 1, 'diary seq has a gap'));
@@ -62,7 +62,7 @@ for (const kind of KINDS) {
       const committed = !['locked', 'temp_written', 'diary_torn'].includes(step);
       const cases = kind.cases(env, before).map((c) => ({ ...c, before: committed ? c.after : c.before, after: c.after }));
       if (!committed && cases[0].before === undefined) {
-        const { store, record } = openRecord({ root: env.root, product: PRODUCT, ownerUid: UID, rules: rulesFor(), host: 'mac-a', lockTimeoutMs: 5000 });
+        const { store, record } = openRecordWithStore({ root: env.root, product: PRODUCT, ownerUid: UID, rules: rulesFor(), host: 'mac-a', lockTimeoutMs: 5000 });
         store.recover();
         assert.equal(record.read(cases[0].entity, cases[0].id), null, 'a create killed before its diary line leaves nothing');
         assert.ok(!existsSync(join(env.root, 'lock')), 'lock is free');
@@ -81,7 +81,7 @@ test('a torn diary line is cut, alerted, and the write is lost whole', () => {
   const r = run({ op: 'write', root: env.root, faultAt: 'diary_torn', w: { actor: 'workshop', entity: 'card', id: 'C-1', expectRev: 1, doc: { ...env.record.read('card', 'C-1').doc, head: HEAD2 } } });
   assert.equal(r.signal, 'SIGKILL');
   const alerts = [];
-  const { store, record } = openRecord({ root: env.root, product: PRODUCT, ownerUid: UID, rules: rulesFor(), host: 'mac-a', alert: (a) => alerts.push(a) });
+  const { store, record } = openRecordWithStore({ root: env.root, product: PRODUCT, ownerUid: UID, rules: rulesFor(), host: 'mac-a', alert: (a) => alerts.push(a) });
   const report = store.recover();
   assert.ok(report.cut > 0, 'the torn bytes were cut');
   assert.ok(alerts.some((a) => a.type === 'diary_torn_line_cut'));

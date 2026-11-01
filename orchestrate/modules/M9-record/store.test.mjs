@@ -6,7 +6,7 @@ import { appendFileSync, chmodSync, existsSync, linkSync, lstatSync, mkdirSync, 
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { PRODUCT, UID, must, put, rulesFor, seed, setup } from './fixtures.test-helper.mjs';
-import { openRecord } from './writer.mjs';
+import { openRecordWithStore } from './writer.mjs';
 import { openStore } from './store.mjs';
 
 const card = (extra = {}) => ({ state: 'draft', product: PRODUCT, module: 'M1', kind: 'ordinary', round: 1, ...extra });
@@ -50,7 +50,7 @@ test('a torn line left by another writer is cut before a writer that already rec
   for (const l of lines) JSON.parse(l);
   assert.ok(statSync(diary).size > size, 'the new line was written after the cut');
   // A fresh reader of the whole diary sees both cards and no damage.
-  const fresh = openRecord({ root: env.root, product: PRODUCT, ownerUid: UID, rules: rulesFor(), alert: () => {} });
+  const fresh = openRecordWithStore({ root: env.root, product: PRODUCT, ownerUid: UID, rules: rulesFor(), alert: () => {} });
   assert.equal(fresh.record.read('card', 'C-1').doc.state, 'draft');
   assert.equal(fresh.record.read('card', 'C-2').doc.state, 'draft');
 });
@@ -116,7 +116,7 @@ test('the writer refuses to start as anyone but the store owner (M-7 a), and nee
   assert.throws(() => openStore({ root: env.root, ownerUid: UID + 1 }), /runs only as the store's owner/);
   assert.throws(() => openStore({ root: 'relative/store', ownerUid: UID }), /absolute/);
   assert.throws(() => openStore({ root: env.root }), /owner uid/);
-  assert.throws(() => openRecord({ root: env.root, product: PRODUCT, ownerUid: UID + 1, rules: rulesFor() }), /owner/);
+  assert.throws(() => openRecordWithStore({ root: env.root, product: PRODUCT, ownerUid: UID + 1, rules: rulesFor() }), /owner/);
 });
 
 test('a document edited outside the writer: the next write to it is refused, alerted, quarantined and restored (M-7 b)', () => {
@@ -156,7 +156,7 @@ test('a file placed by hand with a long name is quarantined and alerted; the sto
   mkdirSync(join(env.root, 'docs', 'e'.repeat(200)));
   writeFileSync(join(env.root, 'docs', 'e'.repeat(200), `${'q'.repeat(240)}.json`), '{}');
   const alerts = [];
-  const fresh = openRecord({ root: env.root, product: PRODUCT, ownerUid: UID, rules: env.rules, alert: (a) => alerts.push(a), now: () => env.clock.t });
+  const fresh = openRecordWithStore({ root: env.root, product: PRODUCT, ownerUid: UID, rules: env.rules, alert: (a) => alerts.push(a), now: () => env.clock.t });
   must(put(fresh.record, 'approvals', 'card', 'C-0', { state: 'cancelled', cancel_reason: 'test' }), 'a write after the odd files');
   assert.equal(alerts.filter((a) => a.type === 'tamper' && a.id === 'q'.repeat(240)).length, 2, 'both alerted with the full name');
   assert.equal(readdirSync(join(env.root, 'quarantine')).length, 2);
@@ -179,7 +179,7 @@ test('odd things in docs/ (folders, links, unreadable files) are moved aside, ne
   chmodSync(join(docs, 'card', 'C-7.json'), 0o000);                      // an indexed document the owner can't read
   writeFileSync(join(docs, 'card', '.DS_Store'), 'finder');               // Finder's clutter
   const alerts = [];
-  const fresh = openRecord({ root: env.root, product: PRODUCT, ownerUid: UID, rules: env.rules, alert: (a) => alerts.push(a), now: () => env.clock.t });
+  const fresh = openRecordWithStore({ root: env.root, product: PRODUCT, ownerUid: UID, rules: env.rules, alert: (a) => alerts.push(a), now: () => env.clock.t });
   for (let i = 0; i < 2; i++) must(put(fresh.record, 'approvals', 'card', i ? 'C-7' : 'C-0', { state: 'cancelled', cancel_reason: 'test' }), `write ${i}`);
   assert.equal(readFileSync(join(outside, 'victim.json'), 'utf8'), 'keep me', 'nothing outside the store is deleted');
   assert.equal(readFileSync(join(outside, 'secret.txt'), 'utf8'), 'OUTSIDE-TEXT');
@@ -250,7 +250,7 @@ test('a broken diary (a gap or a changed line) marks the store damaged: writes s
   const lines = readFileSync(diary, 'utf8').trim().split('\n');
   const second = JSON.parse(lines[1]); second.writes[0].doc.state = 'merged';
   writeFileSync(diary, `${lines[0]}\n${JSON.stringify(second)}\n`);
-  const fresh = openRecord({ root: env.root, product: PRODUCT, ownerUid: UID, rules: rulesFor(), alert: (a) => env.alerts.push(a) });
+  const fresh = openRecordWithStore({ root: env.root, product: PRODUCT, ownerUid: UID, rules: rulesFor(), alert: (a) => env.alerts.push(a) });
   assert.match(String(fresh.store.damaged()), /doc_hash/);
   const r = fresh.record.write({ actor: 'dispatcher', entity: 'card', id: 'C-3', expectRev: 0, doc: card({ kind: 'fix' }) });
   assert.equal(r.ok, false);
@@ -275,7 +275,7 @@ test('a lock left by a dead process is broken; one held by a live process is not
   seed(env, 'card', 'C-1', card());
   assert.ok(!existsSync(join(env.root, 'lock')));
   writeFileSync(join(env.root, 'lock'), JSON.stringify({ pid: process.ppid, pid_start: null, host: 'mac-a', nonce: 'n2', at: 'x' }));
-  const busy = openRecord({ root: env.root, product: PRODUCT, ownerUid: UID, rules: rulesFor(), host: 'mac-a', lockTimeoutMs: 200 });
+  const busy = openRecordWithStore({ root: env.root, product: PRODUCT, ownerUid: UID, rules: rulesFor(), host: 'mac-a', lockTimeoutMs: 200 });
   const r = busy.record.write({ actor: 'workshop', entity: 'card', id: 'C-1', expectRev: 1, doc: card({ head: 'c'.repeat(40) }) });
   assert.equal(r.ok, false);
   assert.match(r.reason, /store busy/);
@@ -291,7 +291,7 @@ const outsideDir = (env, tag) => { const d = join(env.root, '..', `outside-${tag
 const snapshot = (d) => JSON.stringify(readdirSync(d).sort().map((n) => [n, lstatSync(join(d, n)).mode, lstatSync(join(d, n)).isFile() ? readFileSync(join(d, n), 'utf8') : null]).concat([[d, lstatSync(d).mode]]));
 // Written straight, not read first: a read of a stopped store reports the card corrupt, and the test is about the write.
 const cancel = (record, id = 'C-0') => record.write({ actor: 'approvals', entity: 'card', id, expectRev: 1, doc: card({ state: 'cancelled', cancel_reason: 'test' }) });
-const reopen = (env, alerts = []) => openRecord({ root: env.root, product: PRODUCT, ownerUid: UID, rules: env.rules, alert: (a) => alerts.push(a), now: () => env.clock.t });
+const reopen = (env, alerts = []) => openRecordWithStore({ root: env.root, product: PRODUCT, ownerUid: UID, rules: env.rules, alert: (a) => alerts.push(a), now: () => env.clock.t });
 
 test('a link, FIFO or wrong kind of thing in place of any store name stops the store with an alert naming it, touching nothing outside (round 9 M1-M4, m1-m3)', { timeout: 60000 }, () => {
   const cases = [
@@ -326,7 +326,7 @@ test('a document copy that can\'t be put in place after the commit point: the wr
   seed(env, 'card', 'C-0', card());
   // A test fault, not chflags or chmod: chflags is Mac-only (CI is Linux) and the store resets folder modes itself.
   const alerts = [];
-  const broken = openRecord({ root: env.root, product: PRODUCT, ownerUid: UID, rules: env.rules, alert: (a) => alerts.push(a), now: () => env.clock.t, faultAt: 'rename_fails' }).record;
+  const broken = openRecordWithStore({ root: env.root, product: PRODUCT, ownerUid: UID, rules: env.rules, alert: (a) => alerts.push(a), now: () => env.clock.t, faultAt: 'rename_fails' }).record;
   const before = broken.diary().length;
   must(cancel(broken), 'the write stands');
   assert.equal(broken.diary().length, before + 1);
@@ -432,7 +432,7 @@ test('a lock with a second name (made by link, its maker killed before the unlin
   writeFileSync(temp, JSON.stringify({ pid: 999999, pid_start: 'x', host: 'mac-a', nonce: 'n1', at: 'x' }));
   linkSync(temp, join(env.root, 'lock'));
   const alerts = [];
-  const fresh = openRecord({ root: env.root, product: PRODUCT, ownerUid: UID, rules: env.rules, host: 'mac-a', alert: (a) => alerts.push(a), now: () => env.clock.t });
+  const fresh = openRecordWithStore({ root: env.root, product: PRODUCT, ownerUid: UID, rules: env.rules, host: 'mac-a', alert: (a) => alerts.push(a), now: () => env.clock.t });
   assert.equal(fresh.record.read('card', 'C-0').rev, 1, 'reads are not stopped');
   must(cancel(fresh.record), 'the write goes through');
   assert.equal(alerts.filter((a) => a.type === 'store_layout').length, 0, 'no false layout alert');
