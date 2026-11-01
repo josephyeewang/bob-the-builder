@@ -14,7 +14,8 @@
 //                     email address: the probe maps it. Signed out → a `signed-out` fact and one alert; nothing here
 //                     restarts anything (the Dispatcher owns that loop and reads the fact). A change to the account
 //                     named by a planned switch → one push request "switch the phone app to account <B> too"
-//                     (idempotent: the same switch never pushes twice); an unplanned change → an alert.
+//                     (idempotent: the same switch never pushes twice); an unplanned change → an alert of its own
+//                     (keyed by a switch count, so a second switch to the same account is a fresh notice, L152).
 //   usage             from the usage fact (R-0b-66) when there is one, else "unknown". Crossing 50/75/90/95 % of a
 //                     window → one alert per window, its body naming the highest threshold (a higher one comments
 //                     once; the next window clears it).
@@ -24,6 +25,7 @@ import { createHash } from 'node:crypto';
 
 export const DISPATCHER_LATE_MIN = 15;
 export const USAGE_STEPS = Object.freeze([50, 75, 90, 95]);
+const ISSUE = (n) => Number.isSafeInteger(n) && n > 0;
 const ISSUE_FACT = (product) => `heartbeat-issue-${product.replace(/[^A-Za-z0-9_-]/g, '-')}`;
 // The status fact the Front Door's trip check reads (review-0b-8 MAT-9): green only while `at` is under an hour old.
 export const STATUS_FACT = (product) => `heartbeat-${product.replace(/[^A-Za-z0-9_-]/g, '-')}`;
@@ -68,7 +70,14 @@ export async function heartbeatOnce({ product, writer, gh, alerts, owner, probes
     'The Mini is signed out of Claude. Sessions cannot start; the Dispatcher will not restart in a loop. Sign the Mini back in.');
 
   const lastId = `heartbeat-account-${product.replace(/[^A-Za-z0-9_-]/g, '-')}`;
-  const last = writer.get(lastId)?.login ?? null;
+  const lastRec = writer.get(lastId);
+  const last = lastRec?.login ?? null;
+  // Unplanned switches are counted, and each one's alert carries its number (L152 MAT-1): keyed by the login alone, a
+  // second switch to the same account found the first one's alert, so it was 'suppressed' (the owner had closed it) or
+  // a silent body edit (still open), and the owner was never told. Retries of one switch keep the same number, because
+  // the count is saved only with the new login.
+  const switches = Number.isSafeInteger(lastRec?.switches) && lastRec.switches >= 0 ? lastRec.switches : 0;
+  let nextSwitches = switches;
   // The new login is saved only once its change alert went out: a raise that answered false keeps the old login, so
   // the next pass raises the change again (L143). A throw stops the pass before the save, the same way.
   let told = true;
@@ -80,11 +89,12 @@ export async function heartbeatOnce({ product, writer, gh, alerts, owner, probes
       if (!writer.get(pid)) told = writer.put(pid, { kind: 'fact.push-request', idempotency_key: idem, state: 'requested', product,
         text: `The Mini switched to ${acct.login}: switch the phone app to ${acct.login} too.` })?.ok === true;
     } else {
-      told = await alerts.raise({ key: key(`account-changed-${acct.login}`), title: `${product}: the Mini's Claude account changed`,
+      nextSwitches = switches + 1;
+      told = await alerts.raise({ key: key(`account-changed-${nextSwitches}-${acct.login}`), title: `${product}: the Mini's Claude account changed`,
         body: `The Mini is now signed in as ${acct.login} (was ${last}) and no switch was planned.` }) !== false;
     }
   }
-  if (signedIn && told) writer.put(lastId, { kind: 'fact.heartbeat-account', product, login: acct.login });
+  if (signedIn && told) writer.put(lastId, { kind: 'fact.heartbeat-account', product, login: acct.login, switches: nextSwitches });
 
   const u = await probe(probes.usage);
   const usage = u.ok ? u.v : null;
@@ -104,7 +114,11 @@ export async function heartbeatOnce({ product, writer, gh, alerts, owner, probes
   const body = `Orchestrate heartbeat. ${red.length ? `RED: ${red.join(', ')}` : 'All green.'}\nmini_alive_at: ${t.toISOString()}\n\n${lines.join('\n')}\n`;
   const issueId = ISSUE_FACT(product);
   const known = writer.get(issueId)?.issue;
-  if (known && !(await gh.isClosed(known))) await gh.edit(known, body);
-  else writer.put(issueId, { kind: 'fact.heartbeat-issue', product, issue: await gh.open({ title: 'Orchestrate heartbeat (pinned)', body, assignee: owner, labels: ['orchestrate-heartbeat'] }) });
+  if (ISSUE(known) && !(await gh.isClosed(known))) await gh.edit(known, body);
+  else {
+    // An open with no issue number is not saved, so the next pass opens it again (L152 m3).
+    const issue = await gh.open({ title: 'Orchestrate heartbeat (pinned)', body, assignee: owner, labels: ['orchestrate-heartbeat'] });
+    if (ISSUE(issue)) writer.put(issueId, { kind: 'fact.heartbeat-issue', product, issue });
+  }
   return { red, body };
 }
