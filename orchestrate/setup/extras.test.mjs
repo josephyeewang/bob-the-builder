@@ -309,3 +309,56 @@ test('REAL: git config --global --get-all of an unset key exits 1 (what planSafe
   const got = spawnSync('/usr/bin/git', ['config', '--global', '--get-all', 'safe.directory'], { encoding: 'utf8', env: { PATH: '/usr/bin:/bin', HOME: home, GIT_CONFIG_NOSYSTEM: '1' } });
   assert.equal(got.stdout, '/x/mirror\n');
 });
+
+// ───────────────────────────────────────────── prove-token (L99 (3))
+
+/** A stand-in for GitHub that refuses what GitHub refuses: no/wrong bearer → 401; the write answers what `write` says. */
+function github(w, { write = 403, prs = [{ number: 7, title: 'A title' }] } = {}) {
+  w.mac.github = (url, init) => {
+    if (init.headers.Authorization !== `Bearer ${SECRET}`) return { status: 401, text: '{"message":"Bad credentials"}' };
+    const u = new URL(url);
+    if (u.host !== 'api.github.com') return { status: 404, text: '' };
+    if ((init.method ?? 'GET') === 'GET' && /^\/repos\/org\/repo\/pulls$/.test(u.pathname)) return { status: 200, text: JSON.stringify(prs) };
+    if (init.method === 'PATCH' && /^\/repos\/org\/repo\/pulls\/7$/.test(u.pathname)) { w.patched = JSON.parse(init.body); return { status: write, text: '{"message":"Resource not accessible by personal access token"}' }; }
+    return { status: 404, text: '' };
+  };
+}
+const withToken = () => { const w = world(); w.mac.secretInput = SECRET; assert.equal(w.run(['token']).code, 0); return w; };
+const prove = async (w) => { const lines = []; const code = await main(['prove-token', '--config', w.file, '--repo', 'org/repo'], { io: w.mac, out: (s) => lines.push(s), err: (s) => lines.push(`ERR ${s}`) }); return { code, text: lines.join('\n') }; };
+
+test('prove-token: the read works and the no-op write (the title set to itself) comes back 403 → PASS; only status numbers are printed', async () => {
+  const w = withToken(); github(w);
+  const r = await prove(w);
+  assert.equal(r.code, 0, r.text); assert.match(r.text, /PASS .*open pull requests works/); assert.match(r.text, /PASS .*pull request #7's title set to itself\) is refused with 403/);
+  assert.deepEqual(w.patched, { title: 'A title' });
+  assert.deepEqual(w.mac.fetchLog.map((x) => x.method), ['GET', 'PATCH']);
+  assert.ok(!r.text.includes(SECRET) && !r.text.includes('Resource not accessible'));
+});
+
+test('PLANT a token that CAN write (the no-op write answers 200) → FAIL that says to revoke it, exit 1', async () => {
+  const w = withToken(); github(w, { write: 200 });
+  const r = await prove(w); assert.equal(r.code, 1); assert.match(r.text, /FAIL .*THE WRITE WENT THROUGH.*Revoke it/);
+});
+
+test('PLANT any other answer to the write (404, 422, 500) is not proof → FAIL', async () => {
+  for (const write of [404, 422, 500]) { const w = withToken(); github(w, { write }); const r = await prove(w); assert.equal(r.code, 1, String(write)); assert.match(r.text, new RegExp(`answered ${write}, not 403`)); }
+});
+
+test('PLANT a token GitHub does not accept (read answers 401) → FAIL on the read, no write is tried', async () => {
+  const w = withToken(); github(w); w.mac.github = () => ({ status: 401, text: '' });
+  const r = await prove(w); assert.equal(r.code, 1); assert.match(r.text, /answered 401/); assert.deepEqual(w.mac.fetchLog.map((x) => x.method), ['GET']);
+});
+
+test('prove-token: no open pull request, no network, no token file, a bad repo name → each FAILs plainly; no write without a pull request', async () => {
+  let w = withToken(); github(w, { prs: [] }); let r = await prove(w); assert.equal(r.code, 1); assert.match(r.text, /none was found/); assert.deepEqual(w.mac.fetchLog.map((x) => x.method), ['GET']);
+  w = withToken(); w.mac.github = null; r = await prove(w); assert.equal(r.code, 1); assert.match(r.text, /no answer \(ENOTFOUND\)/);
+  w = world(); github(w); r = await prove(w); assert.equal(r.code, 1); assert.match(r.text, /could not be read/); assert.equal(w.mac.fetchLog.length, 0);
+  assert.throws(() => parseArgs(['prove-token', '--config', 'x']), /needs --repo/);
+  assert.throws(() => parseArgs(['check', '--config', 'x', '--repo', 'a/b']), /only for prove-token/);
+  w = withToken(); github(w); const lines = []; assert.equal(await main(['prove-token', '--config', w.file, '--repo', '../x'], { io: w.mac, out: (s) => lines.push(s), err: (s) => lines.push(s) }), 1); assert.equal(w.mac.fetchLog.length, 0);
+});
+
+test('PLANT a token file holding something that is not a token → FAIL before any call is made', async () => {
+  const w = withToken(); github(w); writeFileSync(w.mac.at(tokenPath(cfg)), 'not a token at all, just words that are long enough\n');
+  const r = await prove(w); assert.equal(r.code, 1); assert.match(r.text, /does not look like one/); assert.equal(w.mac.fetchLog.length, 0);
+});

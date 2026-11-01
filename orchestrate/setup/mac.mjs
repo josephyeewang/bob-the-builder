@@ -117,6 +117,8 @@ export function realIo({ prefix = '' } = {}) {
     secureFile: (p, want) => secureFile(at(p), want),
     nodeProblem: () => nodeProblemOf(process.execPath),
     readSecret: (prompt) => readSecretFromTty(prompt),
+    // Plain fetch for the one place the setup talks to GitHub (prove-token). → { status, text }; a time limit; redirects are not followed.
+    fetch: async (url, init) => { const r = await fetch(url, { ...init, redirect: 'manual', signal: AbortSignal.timeout(20_000) }); return { status: r.status, text: await r.text() }; },
     // For the install and the job files. `src` is a real path outside the prefix (a file of this repository, the node program).
     readText: (p) => readFileSync(at(p), 'utf8'),
     write: (p, text, mode) => writeNewFile(at(p), text, mode),

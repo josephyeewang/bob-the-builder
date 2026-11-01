@@ -155,3 +155,40 @@ export function checkToken(io, cfg) {
   }
   return [{ ok: why.length === 0, what, ...(why.length ? { why: why.join('; ') } : {}) }];
 }
+
+// ───────────────────────────────────────────── prove the token is watch-only (R-0b-161, L99 (3))
+
+const REPO = /^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/;
+export const repoProblem = (r) => (typeof r === 'string' && REPO.test(r) && !r.split('/').some((s) => s === '.' || s === '..') ? null : '--repo must look like owner/name');
+const API = 'https://api.github.com';
+
+/**
+ * Two calls with the token, plain fetch: (1) a read lists the repository's open pull requests and must work; (2) a write that
+ * changes nothing (an open pull request's title set to itself) must come back 403. Anything else FAILs, and a write that went
+ * through says to revoke the token. Only status numbers are ever printed: never the token, never what GitHub sent back.
+ * Runs as root (it reads the token file) or as orchestrate. → [{ ok, what, why? }]
+ */
+export async function proveToken(io, cfg, { repo }) {
+  const out = []; const item = (ok, what, why) => out.push({ ok, what, ...(ok ? {} : { why }) });
+  const bad = repoProblem(repo); if (bad) { item(false, 'the repository is named', bad); return out; }
+  let token;
+  try { token = io.readText(tokenPath(cfg)).trim(); } catch { item(false, 'the token file can be read', `${tokenPath(cfg)} could not be read (run with sudo, after the token step)`); return out; }
+  if (tokenProblem(token)) { item(false, 'the token file holds a token', 'it does not look like one; store it again'); return out; }
+  const call = async (path, init = {}) => {
+    try {
+      const r = await io.fetch(`${API}${path}`, { ...init, headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28', 'User-Agent': 'orchestrate-setup', ...(init.body ? { 'Content-Type': 'application/json' } : {}) } });
+      return { status: r.status, text: r.text };
+    } catch (e) { return { status: 0, text: '', error: String(e?.code ?? e?.name ?? 'network error') }; }
+  };
+  const list = await call(`/repos/${repo}/pulls?state=open&per_page=1`);
+  item(list.status === 200, `reading ${repo}'s open pull requests works`, list.status === 0 ? `no answer (${list.error})` : `GitHub answered ${list.status}`);
+  if (list.status !== 200) return out;
+  let pr = null; try { pr = JSON.parse(list.text)[0] ?? null; } catch { /* below */ }
+  if (!pr || !Number.isInteger(pr.number) || typeof pr.title !== 'string') { item(false, 'there is an open pull request to try the write on', 'none was found; open a pull request, or use a repository that has one, and run this again'); return out; }
+  const w = await call(`/repos/${repo}/pulls/${pr.number}`, { method: 'PATCH', body: JSON.stringify({ title: pr.title }) });
+  item(w.status === 403, `a write that changes nothing (pull request #${pr.number}'s title set to itself) is refused with 403`,
+    w.status >= 200 && w.status < 300 ? 'THE WRITE WENT THROUGH: this token can change things. Revoke it at GitHub now (Settings → Developer settings → Personal access tokens), then make a read-only one'
+      : w.status === 0 ? `no answer (${w.error}); not proven. If in doubt, revoke it`
+        : `GitHub answered ${w.status}, not 403, so read-only is not proven; check the token's permissions at GitHub, or revoke it`);
+  return out;
+}

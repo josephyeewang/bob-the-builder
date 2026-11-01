@@ -17,6 +17,7 @@
 //   safe-directory       --config <f> [--dry-run]    the owner's git trusts exactly the mirror folder        (root, runs git as the owner)
 //   check-safe-directory --config <f>                                                                      (read only; sudo to look)
 //   token                --config <f> [--dry-run]    save the watch-only token (typed hidden, never shown)  (root)
+//   prove-token          --config <f> --repo <owner/name>   read works, a no-op write is refused 403   (read only on GitHub; sudo to read the file)
 //   check-token          --config <f>                the token file's owner, mode and size (never its text)  (read only; sudo to look)
 //
 // `--root-prefix <dir>` is for tests only (every folder path is put under it; the Mac's user records are not) and is
@@ -32,32 +33,34 @@ import { apply, check, plan } from './users-folders.mjs';
 import { proofCommands, runProofs } from './proofs.mjs';
 import { checkInstall, parseInstallConfig, planInstall, spawnUpdater } from './install.mjs';
 import { checkDaemons, list, planLoad, planPlace, planReloadAccount, planUnload } from './daemons.mjs';
-import { checkProposals, checkSafeDirectory, checkToken, planProposals, planSafeDirectory, planToken } from './extras.mjs';
+import { proveToken, checkProposals, checkSafeDirectory, checkToken, planProposals, planSafeDirectory, planToken } from './extras.mjs';
 
 const USAGE = 'usage: node setup.mjs <users-folders|check|proofs|install|check-install|daemons place|load|unload|list|check|reload-account|proposals|check-proposals|safe-directory|check-safe-directory|token|check-token> --config <file> [--dry-run] [--main <commit>]';
 const DAEMON_SUBS = ['place', 'load', 'unload', 'list', 'check', 'reload-account'];
-const COMMANDS = ['users-folders', 'check', 'proofs', 'install', 'check-install', 'daemons', 'proposals', 'check-proposals', 'safe-directory', 'check-safe-directory', 'token', 'check-token'];
-const READ_ONLY = ['check', 'check-install', 'check-proposals', 'check-safe-directory', 'check-token'];
-const PLAIN_CONFIG = ['users-folders', 'check', 'proofs', 'proposals', 'check-proposals', 'safe-directory', 'check-safe-directory', 'token', 'check-token'];
+const COMMANDS = ['users-folders', 'check', 'proofs', 'install', 'check-install', 'daemons', 'proposals', 'check-proposals', 'safe-directory', 'check-safe-directory', 'token', 'check-token', 'prove-token'];
+const READ_ONLY = ['check', 'check-install', 'check-proposals', 'check-safe-directory', 'check-token', 'prove-token'];
+const PLAIN_CONFIG = ['users-folders', 'check', 'proofs', 'proposals', 'check-proposals', 'safe-directory', 'check-safe-directory', 'token', 'check-token', 'prove-token'];
 
 export function parseArgs(argv) {
   const cmd = argv[0];
   if (!COMMANDS.includes(cmd)) throw new Error(`first word must be ${COMMANDS.join(', ')}`);
   let rest = argv.slice(1); let sub = null;
   if (cmd === 'daemons') { sub = rest[0]; rest = rest.slice(1); if (!DAEMON_SUBS.includes(sub)) throw new Error(`daemons needs one of ${DAEMON_SUBS.join(', ')}`); }
-  const o = { cmd, sub, config: null, dry: false, prefix: '', main: null };
+  const o = { cmd, sub, config: null, dry: false, prefix: '', main: null, repo: null };
   for (let i = 0; i < rest.length; i++) {
     const a = rest[i];
     if (a === '--dry-run') o.dry = true;
-    else if (a === '--config' || a === '--root-prefix' || a === '--main') {
+    else if (a === '--config' || a === '--root-prefix' || a === '--main' || a === '--repo') {
       const v = rest[++i];
       if (typeof v !== 'string' || v.startsWith('--')) throw new Error(`${a} needs a value`);
-      if (a === '--config') o.config = v; else if (a === '--main') { if (!/^[0-9a-f]{40}$/.test(v)) throw new Error('--main must be a 40-hex commit'); o.main = v; } else o.prefix = v;
+      if (a === '--config') o.config = v; else if (a === '--main') { if (!/^[0-9a-f]{40}$/.test(v)) throw new Error('--main must be a 40-hex commit'); o.main = v; } else if (a === '--repo') o.repo = v; else o.prefix = v;
     } else throw new Error(`argument ${i + 1} is not one this command takes (it is not shown, in case it is a secret)`);
   }
   if (!o.config) throw new Error('--config <file> is required');
   const readOnly = READ_ONLY.includes(cmd) || (cmd === 'daemons' && (sub === 'list' || sub === 'check'));
   if (readOnly && o.dry) throw new Error('this command never changes anything, so --dry-run does not apply');
+  if (o.repo !== null && cmd !== 'prove-token') throw new Error('--repo is only for prove-token');
+  if (cmd === 'prove-token' && !o.repo) throw new Error('prove-token needs --repo owner/name');
   if (o.main && cmd !== 'check-install') throw new Error('--main is only for check-install');
   return o;
 }
@@ -98,6 +101,7 @@ export function main(argv, { io: given, runUpdater = spawnUpdater, out = (s) => 
   if (o.cmd === 'check-proposals') return report(checkProposals(io, cfg), out);
   if (o.cmd === 'check-safe-directory') return report(checkSafeDirectory(io, cfg), out);
   if (o.cmd === 'check-token') return report(checkToken(io, cfg), out);
+  if (o.cmd === 'prove-token') return proveToken(io, cfg, { repo: o.repo }).then((res) => report(res, out));
   if (o.cmd === 'daemons' && o.sub === 'check') return report(checkDaemons(io, cfg), out);
   if (o.cmd === 'daemons' && o.sub === 'list') {
     for (const j of list(io, cfg)) out(j.loaded ? `${j.label}: loaded, ${j.state}, last exit ${j.lastExit}` : `${j.label}: not loaded${j.error ? ` (${j.error})` : ''}`);
@@ -131,4 +135,4 @@ export function main(argv, { io: given, runUpdater = spawnUpdater, out = (s) => 
   return bad.length ? 1 : 0;
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) process.exitCode = main(process.argv.slice(2));
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) Promise.resolve(main(process.argv.slice(2))).then((c) => { process.exitCode = c; });

@@ -20,7 +20,8 @@ export function fakeMac({ euid: as = 0, users = {}, admins = [] } = {}) {
     owners: new Map(),          // logical path → { uid, gid } set by chown
     log: [],                    // every changing call, in order
     failNextDsclCreate: false,  // a test sets this to make the next dscl -create fail once
-    gitSafe: new Map(),         // user → their `git config --global` safe.directory values
+    fetchLog: [], github: null,
+    gitSafe: new Map(),        // user → their `git config --global` safe.directory values
     secretInput: null,          // what the stand-in terminal returns for the hidden read (null = there is no terminal)
     secretPrompts: [],          // every prompt shown
     sudoRules: new Set(),      // users a sudo rule names (`sudo -l -U` then says they may run sudo)
@@ -133,6 +134,8 @@ export function fakeMac({ euid: as = 0, users = {}, admins = [] } = {}) {
     secure(p, want) { secureFolder(at(p), want, ports(p)); },
     secureFile(p, want) { secureFile(at(p), want, ports(p)); },
     nodeProblem: () => mac.nodeProblemText,
+    // A stand-in for GitHub: a test sets mac.github = (url, init) => ({ status, text }). Every call is kept (the token is in init.headers).
+    fetch: async (url, init) => { mac.fetchLog.push({ url, method: init?.method ?? 'GET' }); if (!mac.github) throw Object.assign(new Error('offline'), { code: 'ENOTFOUND' }); return mac.github(url, init); },
     readSecret(prompt) { mac.secretPrompts.push(prompt); if (mac.secretInput === null) throw new Error('there is no terminal to type the token into; run this in the Terminal app'); return mac.secretInput; },
     // The install and the job files. The real calls, on the prefixed place; a write needs the parent folder (like the real one)
     // and makes a NEW file only (like the real one: it never overwrites or follows a link).
