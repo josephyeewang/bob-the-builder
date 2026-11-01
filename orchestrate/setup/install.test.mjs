@@ -114,6 +114,13 @@ test('PIN: the label rule here is the launcher\'s (review-daemons.mjs refuses wh
   }
 });
 
+test('PIN: LABEL_RE is the same pattern text as LABEL in review-daemons.mjs (delete the copy when lane 2 exports it)', () => {
+  const src = readFileSync(resolve(HERE, '..', SCRIPTS.daemons ?? 'modules/M4-workshop/launcher/review-daemons.mjs'), 'utf8');
+  const theirs = /^(?:export )?const LABEL = (\/.+\/);?\s*$/m.exec(src)?.[1];
+  assert.ok(theirs, 'could not find LABEL in review-daemons.mjs');
+  assert.equal(String(LABEL_RE), theirs);
+});
+
 test('PIN: the updater\'s bootstrap copy carries every file the updater imports (a missing one would break root\'s first run)', () => {
   const orch = resolve(HERE, '..');
   const seen = new Set(); const todo = [SCRIPTS.updater];
