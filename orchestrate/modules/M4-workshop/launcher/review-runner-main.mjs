@@ -24,7 +24,10 @@
 //     "ownerTaps": "/abs",                          optional: Joe's "review again" taps (L70 point 3), a folder of the
 //                                                   owner's that no one else writes, holding <session>.json files of
 //                                                   the owner's; the Front Door, which runs as Joe, writes them
-//     "wiring": "/abs/wiring.mjs",                  exports `start(x)` (review-runner.mjs `runnerPass`, `ctx.start`)
+//     "wiring": "<installRoot>/modules/M4-workshop/launcher/review-wiring.mjs",
+//                                                   exports `start(x)` (review-runner.mjs `runnerPass`, `ctx.start`);
+//                                                   the wiring and the budget module must be the copy's own .mjs files
+//                                                   under its modules/ or shared/ folder, never copy items (L132 M-1)
 //     "snapshot": "/abs", "bobFolder": "/abs",      the session settings' fixed paths (L67 addendum 2, review-settings.mjs):
 //     "deny": ["/abs", ...],                        the rules snapshot (inside root), the Bob folder, the read-deny list,
 //     "reviewCopies": "/abs", "workerCopies": "/abs",   and the review copies' folder, apart from the workers' copies'
@@ -32,7 +35,7 @@
 //                                                   daemon start (R-0b-163), so a typo stops the daemon, not each review
 //     "pin": "x.y.z", "machineWide": "/abs",       the Claude Code version the rules pin (launch checks 0, 6, 7) and the
 //                                                   machine-wide settings file (check 10)
-//     "bobManifest": "/abs", "budget": "/abs",      optional, inside installRoot and root's: the pinned Bob folder's file
+//     "bobManifest": "/abs", "budget": "/abs.mjs",  optional, inside installRoot and root's: the pinned Bob folder's file
 //                                                   list { path: sha256 } (check 13), and a module exporting
 //                                                   budget(config) → M11's own check12 inputs { rules, rec, bandsNow,
 //                                                   runningNow } (check 12). Missing, that check has no port and the
@@ -70,7 +73,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { runnerPass, CARD_ID, isClaudeCommand } from './review-runner.mjs';
-import { installProblem, readInstallStamp, aclProblem, currentCopy, copyPath } from './install-check.mjs';
+import { installProblem, readInstallStamp, aclProblem, currentCopy, copyPath, copyReady, copyModuleProblem, RUNNER_MODULES } from './install-check.mjs';
 import { sessionVerdict, verdictFromFile } from '../../M9-record/outbox.mjs';
 import { SESSION_ID } from '../../../shared/record.mjs';
 import { readAccountFile, ACCOUNT_FILE } from './accounts.mjs';
@@ -196,13 +199,26 @@ export function programsProblem(c, { self, config, node = realpathSync.native(pr
   const extra = [c.budget, c.bobManifest].filter((p) => typeof p === 'string');
   const bad = installProblem(c.installRoot, [self, config, c.wiring, c.claudeBin, node, c.hooksDir, ...REVIEW_ROLES.map((r) => templateFile(c.installRoot, r)), ...extra], opts);
   if (bad) return bad;
-  const owner = opts.owner ?? 0;
-  const cur = currentCopy(c.installRoot, { owner, ...(opts.lstat ? { lstat: opts.lstat } : {}), ...(opts.readlink ? { readlink: opts.readlink } : {}) });
-  if (!cur.real) return cur.problem;
-  if (!cur.link) return `${c.installRoot} is a plain folder, not the installed copy's link (the install step makes the link)`;
-  const stamp = readInstallStamp(c.installRoot, { owner });
-  if (stamp !== cur.commit) return `the copy's commit stamp (${stamp ?? 'none'}) is not the commit its folder is named for (${cur.commit})`;
-  return null;
+  // The two the runner imports must also be the copy's own code files (L132 M-1). installProblem, just above, has
+  // already refused one outside the copy, missing, a link or not root's alone; this says where inside it may be.
+  for (const k of RUNNER_MODULES) {
+    if (typeof c[k] !== 'string') continue;
+    const why = runnerModuleProblem(c.installRoot, c[k], opts);
+    if (why) return `the runner's ${k}, ${c[k]}, ${why}`;
+  }
+  return copyReady(c.installRoot, { owner: opts.owner ?? 0, ...(opts.lstat ? { lstat: opts.lstat } : {}), ...(opts.readlink ? { readlink: opts.readlink } : {}) });
+}
+
+// Null, or why `p`, inside the copy (installProblem checked that), is not one of its own code files (L132 M-1).
+function runnerModuleProblem(installRoot, p, { owner = 0, lstat = lstatSync, readlink } = {}) {
+  const cur = currentCopy(installRoot, { owner, lstat, ...(readlink ? { readlink } : {}) });
+  if (!cur.real) return null;
+  const rel = [installRoot, cur.real].map((b) => relative(b, p)).find((r) => r !== '' && !r.startsWith('..') && !isAbsolute(r));
+  if (!rel) return null;
+  const why = copyModuleProblem(rel);
+  if (why) return why;
+  let st; try { st = lstat(join(cur.real, rel)); } catch { return 'is missing'; }
+  return st.isFile() ? null : 'is not a file';
 }
 
 // A folder of the Record: a plain folder of the Record's owner that no one else writes. Null, or the problem.
@@ -481,7 +497,7 @@ export async function main(argv, { log = (s) => process.stderr.write(`${s}\n`), 
   try { c = readConfigFn(argv[0]); } catch (e) { log(`review runner: ${e.message}`); return 1; }
   const self = realpathSync.native(fileURLToPath(import.meta.url));
   const bad = programs(c, { self, config: realpathSync.native(argv[0]) });
-  if (bad) { log(`review runner: refused, the installed copy is not root's alone: ${bad}`); return 1; }
+  if (bad) { log(`review runner: refused, the installed copy is not one it may run (root's alone, its link, its stamp): ${bad}`); return 1; }
   let wiring;
   try { wiring = await import(pathToFileURL(c.wiring).href); } catch (e) { log(`review runner: the wiring could not be loaded (${e.message})`); return 1; }
   const notReady = readyProblem(c, wiring, write ? { write } : {});
