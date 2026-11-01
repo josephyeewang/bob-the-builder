@@ -17,5 +17,7 @@ More exceptions (1 Nov 2026), each limited to the files named:
 - **Lane 2, M6 `gate.mjs` (L94):** only `recover()` and `land()` and their tests, so a lost merge answer is recorded as refused for good (L102).
 - **Lane 4, M12 (L97):** new files only, `M12-sensors/loop.mjs` and `M12-sensors/probes/`, for the Sensors loop and its probes (R-0b-169). Existing M12 files stay lane 3's.
 - **Lane 1, M11 `gate.mjs` lines 17-23 (L105):** only to switch that check to the shared `pathKey`. The rest of M11 stays lane 2's.
+- **Lane 4, M6 (L107):** new files only, `M6-merge-gate/watch-only.mjs`, `watch-run.mjs` and their tests, for the watch-only week (R-0b-122). Existing M6 files stay lane 1's and lane 2's as above.
+- **Lane 4, CI (L109):** the one macOS job in `.github/workflows/scripts-ci.yml` that runs the setup tests, and its guard test. The other jobs stay the lead's.
 
 Only rows tagged `cutover: first` are built before the first cutover. Rows tagged `cutover: second` wait until after it.
