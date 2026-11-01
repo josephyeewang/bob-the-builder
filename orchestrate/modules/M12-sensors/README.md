@@ -12,7 +12,8 @@ Vercel, the repo) and write facts into the record. Everything they write is mask
 | `outside-join.mjs` | R-0b-126 | The join check other lanes run: `checkOutsideJoin(land)` puts each planted case (an instruction-shaped string for each of commit subject, research file, idea issue, lesson file and idea file) through a lane's real path and fails it unless the record and the Lead's input file hold the exact fenced form, no run of 12 letters or digits of the planted text anywhere outside that form (case, spacing, punctuation and invisible characters ignored) and no planted key. Words the lane writes for a neutral text first (a safety note, headings) are its own wording; every output, the neutral calls too, is checked for every case so far, so a lane that leaks an earlier item or shares state between checks is caught. Each call must be a new item, and the form must be written by that call. A path that reformats the form (indents or quotes it line by line), fails too, by design; a file name built from the outside text counts as a miss (it is raw outside text). A canary call goes first, so a lane that keeps something from its first call is caught. A record the check can't read (nested more than 200 levels) is a miss, never a pass. M12 and M13's own paths (commit subjects, idea issues) pass it. |
 | `fact-shapes.mjs` | R-0b-125, lead call L25 | The allow-list: each fact kind's fields and their types. Only those are stored as written; every other value, at any depth, is masked (its name kept). A kind with no shape keeps only `kind` and `ts`. A new fact kind needs a shape here (a test checks every `kind: 'fact.…'` in M1, M12 and M13). |
 | `facts.mjs` | R-0b-125 | The one fact writer (allow-list, then masks token shapes and known values, writes only if unchanged since read). No second masking by field name: the allow-list did that, and a name rule misfired on map keys an outside system chose (round 7). |
-| `pr-facts.mjs` | R-0b-74 | Each PR's changed files and diff summary, with checks, threads and "behind main". |
+| `pr-facts.mjs` | R-0b-74 | Each PR's changed files and diff summary, with checks, threads and "behind main". With R-0b-168 also `state`, `merged` (only a literal true), `merge_commit_sha` (null unless merged) and `observed_at`, taken after every read returned. |
+| `state-facts.mjs` | R-0b-168 | The other readings the Dispatcher (M11) decides on: `usage-<account>`, `signed-in-account`, `network-up`, `frontdoor-reachable`, `minibase-running`, `limit-hit-<account>`. Each takes its reading from a port and stamps `observed_at` after it returns; the ids are M11's own, imported. `m11-readers.test.mjs` runs each real writer into the real record and M11's own readers over it, and checks the list of families M11 reads (its README table until lane 2's `READ_FACTS` lands) against M11's ids and these writers. The device reads behind the ports (the usage screen, the network and Mini Base probes) are not built yet: see below. |
 | `history.mjs` | R-0b-75, lead call L36 | The repo-history file (main's first-parent log) and safe answers to history requests. Async; git runs only through lane 2's `safe-git.mjs`, given the copy's `.git` folder, with the signature settings that would start a program pinned off (`HISTORY_CONFIG`). |
 | `supported.mjs` | R-0b-71/72 | The one rule for "a supported main commit", per product stage. |
 | `vercel-reader.mjs`, `prod-watcher.mjs` | R-0b-71 | The production watcher: unsupported deploys, older version live, settings changed (never values). |
@@ -28,8 +29,9 @@ Vercel, the repo) and write facts into the record. Everything they write is mask
 Every row has two halves (review-0b-7 M1). **(a)** The code, tested against fakes: all the `*.test.mjs` here.
 **(b)** The same thing for real, which needs the owner's accounts. Rows stay open until (b) is done.
 
-Not here on purpose: the N14 ref watch (second cutover); usage numbers (R-0b-66, milestone 0b-6, not built yet: the
-heartbeat says "usage: unknown" until it is).
+Not here on purpose: the N14 ref watch (second cutover); the usage numbers' source (R-0b-66, milestone 0b-6, not built
+yet: the heartbeat says "usage: unknown" until it is). `writeUsageFact` writes whatever that source reads, so only the
+port is missing.
 
 ## Join items (other lanes or the lead)
 
