@@ -21,9 +21,44 @@
 // back on the owner's waiting list, or a `request`, which stops a report from ever opening): each a string of at most
 // 500 characters, a finite number, or null, and never a field already on the ask. (A research ask's open → consumed
 // joins once the record's research move is on main.)
-// No module outside M2 imports writeDoc: consume-ask.test.mjs fails on one that does.
+// No module outside M2 calls writeDoc. The fence is writeDoc itself (L124 m-1): it reads who called it from the call
+// stack and refuses a caller whose file is not in M2's folder (both sides real paths, case-folded where file names
+// ignore case). consume-ask.test.mjs's scan of import routes stays as an early warning, not the fence.
+// Its limit: it stops honest mistakes, not hostile code. A caller can still reach it through an M2 function that hands
+// writeDoc out, or by code with no file of its own (eval, new Function), which is refused, as is a caller it can't name.
+
+import { realpathSync } from 'node:fs';
+import { dirname, sep } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const ACTOR = 'approvals';
+const HERE = fileURLToPath(import.meta.url);
+const CASELESS = process.platform === 'darwin' || process.platform === 'win32';
+const fold = (p) => (CASELESS ? p.toLowerCase() : p);
+const real = (p) => { try { return fold(realpathSync.native(p)); } catch { return null; } };
+const M2_DIR = real(dirname(HERE));
+
+// The file of the function that called writeDoc, as a real path, or null when there is none to name.
+function callerFile() {
+  const prep = Error.prepareStackTrace;
+  const limit = Error.stackTraceLimit;
+  let frames;
+  try {
+    Error.stackTraceLimit = 3;
+    Error.prepareStackTrace = (_, f) => f;
+    frames = new Error().stack;
+  } finally {
+    Error.prepareStackTrace = prep;
+    Error.stackTraceLimit = limit;
+  }
+  // frames[0] is callerFile, frames[1] writeDoc, frames[2] its caller.
+  const name = Array.isArray(frames) ? frames[2]?.getFileName?.() : null;
+  if (typeof name !== 'string' || !name) return null;
+  let path = name;
+  if (name.startsWith('file:')) { try { path = fileURLToPath(name); } catch { return null; } }
+  else if (!name.startsWith('/') && !/^[A-Za-z]:[\\/]/.test(name)) return null;
+  return real(path);
+}
 
 export function lastWriters(record) {
   const by = new Map();
@@ -52,6 +87,10 @@ export function askStore(record) {
 }
 
 export function writeDoc(record, entity, cur, doc) {
+  const from = callerFile();
+  if (!M2_DIR || !from || !from.startsWith(`${M2_DIR}${sep}`)) {
+    return { ok: false, reason: `writeDoc is M2's own writer; it was called from ${from ?? 'code with no file'}` };
+  }
   return record.write({ actor: ACTOR, entity, id: cur.id, expectRev: cur.rev ?? 0, doc });
 }
 

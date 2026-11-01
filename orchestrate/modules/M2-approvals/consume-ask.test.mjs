@@ -3,7 +3,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readdirSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { env, must } from './fixtures.test-helper.mjs';
@@ -99,12 +99,38 @@ test('L95 Minor 10: consumeAsk refuses an ask whose last diary line another acto
   assert.equal(t.record.read('ask', 'D-1').doc.state, 'answered');
 });
 
+// ---- the fence: writeDoc refuses a caller outside M2 (L124 m-1) ----
+
+test('L124 m-1: writeDoc refuses a caller whose file is outside M2, or code with no file, and writes nothing', async () => {
+  const t = world('answered');
+  const dir = join(t.base, 'outside');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, 'caller.mjs'), 'export const call = (fn, ...a) => fn(...a);\n');
+  const { call } = await import(pathToFileURL(join(dir, 'caller.mjs')).href);
+  const a = askStore(t.record).ask('D-1');
+  const before = t.record.read('ask', 'D-1');
+  const outside = call(writeDoc, t.record, 'ask', a, { ...a.doc, state: 'consumed', consumed_at: 'x' });
+  assert.equal(outside.ok, false);
+  assert.match(outside.reason, /writeDoc is M2's own writer; it was called from .*outside[\\/]caller\.mjs$/i);
+  const nofile = new Function('w', 'r', 'a', 'return w(r, "ask", a, { ...a.doc, state: "consumed", consumed_at: "x" })')(writeDoc, t.record, a);
+  assert.equal(nofile.ok, false);
+  assert.match(nofile.reason, /called from code with no file/);
+  assert.deepEqual(t.record.read('ask', 'D-1'), before, 'nothing written');
+  // A module outside M2 still closes an ask through consumeAsk: writeDoc's caller is then M2's own.
+  assert.equal(call(consumeAsk, t.ctx, 'D-1').ok, true);
+  assert.equal(doc(t).state, 'consumed');
+});
+
 // ---- no module outside M2 imports writeDoc ----
 
+// The fence is writeDoc's own caller check (L124 m-1, tested below); this scan is an early warning only, so it is not
+// grown to chase every route (a string holding // or /*, require kept in a variable, new Function, eval).
 // L117 m-5: comments are cut first (a comment between the keyword and the path hid a route), every specifier is
 // resolved as a URL from the file (relative, absolute, percent-encoded, file://, a query or hash), and every
 // non-literal import(), require() or createRequire anywhere under orchestrate/ fails unless it is on ALLOWED below.
-const uncomment = (t) => t.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/(^|[^:/\\'"`])\/\/.*$/gm, '$1');
+// A run of slashes inside a path is one slash, as Node reads it (L124 m-1: `..//M2-approvals` was cut as a comment).
+const oneSlash = (t) => t.replace(/(?<=[\w.])\/{2,}(?=[\w.])/g, '/');
+const uncomment = (t) => oneSlash(t).replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/(^|[^:/\\'"`])\/\/.*$/gm, '$1');
 // Static `import … from` / `export … from`, with any quote (a backtick is matched too, so a check never depends on it).
 const STATIC = /\b(?:import|export)\s*([^;]*?)\s*from\s*(['"`])([^'"`]+)\2/g;
 // A dynamic import or require whose argument is one plain string (no `${`), and every dynamic import or require.
@@ -135,9 +161,17 @@ function filesUnder(dir) {
 }
 
 // Where a specifier points, resolved the way Node resolves a path or file URL. A bare package name points at no file of ours.
+// Compared as a real path (a symlinked folder), case-folded where file names ignore case (L124 m-1).
+const CASELESS = process.platform === 'darwin' || process.platform === 'win32';
+function norm(p) {
+  const q = p.replace(/\/{2,}/g, '/');
+  let r = q;
+  try { r = realpathSync.native(q); } catch { /* not there: compare as written */ }
+  return CASELESS ? r.toLowerCase() : r;
+}
 function target(file, spec) {
   if (!/^(?:\.{1,2}\/|\/|file:)/.test(spec)) return null;
-  try { return fileURLToPath(new URL(spec, pathToFileURL(file))); } catch { return null; }
+  try { return norm(fileURLToPath(new URL(spec, pathToFileURL(file)))); } catch { return null; }
 }
 
 // Every file under `orchestrate/` (L95, audit stack r3 Minor 8: not only modules/) that reaches writeDoc:
@@ -148,11 +182,11 @@ function target(file, spec) {
 //     (an export, an object, a return, an alias), since an outside module could then reach it through that file.
 export function writeDocImporters(orchRoot, allowed = ALLOWED) {
   const m2 = resolve(orchRoot, 'modules', 'M2-approvals');
-  const store = join(m2, 'ask-store.mjs');
+  const store = norm(join(m2, 'ask-store.mjs'));
   const self = fileURLToPath(import.meta.url);
   const found = [];
   for (const f of filesUnder(orchRoot)) {
-    if (f === store || f === self) continue;
+    if (norm(f) === store || f === self) continue;
     const text = uncomment(readFileSync(f, 'utf8'));
     const rel = relative(orchRoot, f);
     const computed = [...text.matchAll(CALL_ANY)].length - [...text.matchAll(CALL_LIT)].length + (text.match(/\bcreateRequire\b/g) ?? []).length;
@@ -220,13 +254,18 @@ test('planted: every route to writeDoc is caught, from any folder of orchestrate
     'creq.mjs': "import { createRequire } from 'node:module';\nconst r = createRequire(import.meta.url);\nconst s = r('../M2-approvals/ask-store.mjs');\n",
     'cjs.cjs': "const { writeDoc } = require('../M2-approvals/ask-store.mjs');\n",
     'commented.mjs': "// import { writeDoc } from '../M2-approvals/ask-store.mjs';\nimport { askStore } from '../M2-approvals/ask-store.mjs';\n",
+    'dslash.mjs': "import { writeDoc } from '..//M2-approvals/ask-store.mjs';\n", // L124 m-1
+    'linked.mjs': "import { writeDoc } from '../m2-link/ask-store.mjs';\n", // through a symlinked folder
+    'caseins.mjs': "import { writeDoc } from '../M2-approvals/Ask-Store.mjs';\n", // one file where names ignore case
+    'notstore.mjs': "import { writeDoc } from '../M2-approvals/ask-store-old.mjs';\n", // another file
   };
+  symlinkSync(m2, join(root, 'modules', 'm2-link'));
   for (const [name, text] of Object.entries(cases)) writeFileSync(join(root, 'modules', 'M11-dispatcher', name), text);
   writeFileSync(join(root, 'shared', 'outside.mjs'), "import { writeDoc } from '../modules/M2-approvals/ask-store.mjs';\n");
   const got = writeDocImporters(root).sort();
   const want = [
     ...['named', 'renamed', 'star', 'reexport', 'dynamic', 'template', 'computed', 'interp', 'absolute', 'fileurl', 'required', 'dquote', 'dqcall', 'sub/deep',
-      'other', 'concat', 'pct', 'comment', 'creq'].map((n) => `modules/M11-dispatcher/${n}.mjs`),
+      'other', 'concat', 'pct', 'comment', 'creq', 'dslash', 'linked', ...(CASELESS ? ['caseins'] : [])].map((n) => `modules/M11-dispatcher/${n}.mjs`),
     'modules/M11-dispatcher/cjs.cjs',
     ...Object.keys(m2cases).map((n) => `modules/M2-approvals/${n}`),
     'shared/outside.mjs',

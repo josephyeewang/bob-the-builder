@@ -140,12 +140,15 @@ export async function openUndoFlags(ctx, { entriesOf, addedBy } = {}) {
     notSaved: 'undo_refused_state_not_saved' });
   // MAIN's alert for every open by-hand ask not yet told, rebuilt from the ask; marked only once it went through (L117 m-2).
   const handAsks = askStore(record).asks().filter((a) => a.doc.kind === BY_HAND_KIND && a.doc.product === product && a.doc.state === 'open');
+  // A write that throws here is counted in alerts_failed and the pass goes on (L124 m-2); the ask is alerted again next pass.
   for (const a of handAsks.filter((x) => !x.doc.main_alert_sent_at)) {
     const files = Array.isArray(a.doc.added_files) ? a.doc.added_files : [];
-    if (alert({ type: 'undo_by_hand', ask: a.id, card: a.doc.card, pr: a.doc.pr, commit: a.doc.merge_commit_sha, files })) {
-      const m = markSent(ctx, a.id, [BY_HAND_KIND], 'main_alert_sent_at');
-      if (!m.ok) alert({ type: 'undo_by_hand_mark_failed', ask: a.id, reason: m.reason });
-    }
+    try {
+      if (alert({ type: 'undo_by_hand', ask: a.id, card: a.doc.card, pr: a.doc.pr, commit: a.doc.merge_commit_sha, files })) {
+        const m = markSent(ctx, a.id, [BY_HAND_KIND], 'main_alert_sent_at');
+        if (!m.ok) alert({ type: 'undo_by_hand_mark_failed', ask: a.id, reason: m.reason });
+      }
+    } catch { failed.n += 1; }
   }
   // Every open by-hand ask whose push is not marked sent, rebuilt from what the ask holds (trusted asks only).
   const byHand = askStore(record).asks()

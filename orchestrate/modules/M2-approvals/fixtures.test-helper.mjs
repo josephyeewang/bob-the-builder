@@ -35,8 +35,11 @@ export function env({ values = {}, answers = {} } = {}) {
   const rules = fakeRules({ values: { timeouts: fullTimeouts(), ...CONFIG, ...values }, answers: { count_approval: countApproval, ...answers } });
   const alerts = [];
   const copies = makeTranscriptCopies({ root: join(e.base, 'copies') });
-  const ctx = { record: e.record, rules, product: PRODUCT, copies, now: () => e.clock.t, alert: (a) => alerts.push(a) };
-  return { ...e, ctx, alerts, log: (sid) => join(e.base, `${sid}.jsonl`) };
+  // The sink answers like M11's outbox (L124 M-1): true once queued; set sink.answer = false and it refuses, queuing nothing.
+  const sink = { answer: true };
+  const alert = (a) => { if (sink.answer === false) return false; alerts.push(a); return true; };
+  const ctx = { record: e.record, rules, product: PRODUCT, copies, now: () => e.clock.t, alert };
+  return { ...e, ctx, alerts, sink, log: (sid) => join(e.base, `${sid}.jsonl`) };
 }
 
 // A session the Dispatcher launched (front_door / thinking / lead / worker …).

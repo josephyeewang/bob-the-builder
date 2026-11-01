@@ -47,10 +47,15 @@ export const claimedAsk = (text) => { try { return JSON.parse(String(text ?? '')
 // An alert sink that throws must not end the pass: what it opened is still handed back (L95, stack r3 Minor 1). The
 // count of alerts that could not be given is handed back too, since nothing else can say so. It answers whether the
 // alert went through (no sink: it did not), so a caller records an alert as given only then (L117 m-1).
+// "Went through" means the sink neither threw nor answered false (L124 M-1): M11's outbox(rec, now), the one real sink,
+// never throws and answers false when the record refuses the queue write. Both failures count in alerts_failed.
 export function safeAlert(ctx, failed) {
   return (a) => {
     if (typeof ctx.alert !== 'function') return false;
-    try { ctx.alert(a); return true; } catch { failed.n += 1; return false; }
+    try {
+      if (ctx.alert(a) === false) { failed.n += 1; return false; }
+      return true;
+    } catch { failed.n += 1; return false; }
   };
 }
 

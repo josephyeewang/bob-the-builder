@@ -384,3 +384,101 @@ test('L117 c2: consumeAsk reads each note value once, so a getter cannot pass th
   assert.equal(t.record.read('ask', 'D-2').doc.not_deleted, 'ok');
   assert.equal(reads, 1);
 });
+
+// ---- L124 (the #87 round-2 recheck) ----
+
+const ADDED = async () => ['docs/new-page.md'];
+const mainAlerts = (t) => t.alerts.filter((a) => a.type === 'undo_by_hand');
+const handAsk = (t) => askStore(t.record).asks().find((a) => a.doc.kind === BY_HAND_KIND);
+
+test('L124 M-1: a sink that answers false is not a delivery: counted, nothing marked, and alerted once it goes through', async () => {
+  const t = withState(m2env()); merged(t); flag(t); badResearch(t);
+  t.sink.answer = false;
+  const r1 = openResearchAsks(t.ctx);
+  const u1 = await openUndoFlags(t.ctx, { entriesOf: said(WORDS), addedBy: ADDED });
+  assert.ok(r1.alerts_failed >= 1, 'research counts the refused alert');
+  assert.ok(u1.alerts_failed >= 1, 'undo counts the refused alert');
+  assert.equal(handAsk(t).doc.main_alert_sent_at, undefined, 'MAIN\'s alert is not marked sent');
+  t.sink.answer = true;
+  for (let i = 0; i < 2; i += 1) { openResearchAsks(t.ctx); await openUndoFlags(t.ctx, { entriesOf: said(WORDS), addedBy: ADDED }); }
+  assert.equal(t.alerts.filter((a) => a.kind === 'ask_request_refused').length, 1);
+  assert.equal(mainAlerts(t).length, 1);
+  assert.ok(handAsk(t).doc.main_alert_sent_at);
+});
+
+test('L124 M-1: through M11\'s real outbox() over a refused queue write, nothing is marked, and the next working pass alerts', async () => {
+  const { outbox } = await import('../M11-dispatcher/alerts.mjs');
+  const box = outbox({ read: () => null, write: () => ({ ok: false, reason: 'busy' }) }, 0);
+  assert.equal(box('x'), false, 'the real outbox answers false; it does not throw');
+  const t = withState(m2env()); merged(t); flag(t); badResearch(t);
+  // The README's text adapter (item 12): outbox takes text.
+  const refusing = { ...t.ctx, alert: (a) => box(JSON.stringify(a)) };
+  const r1 = openResearchAsks(refusing);
+  const u1 = await openUndoFlags(refusing, { entriesOf: said(WORDS), addedBy: ADDED });
+  assert.ok(r1.alerts_failed >= 1 && u1.alerts_failed >= 1);
+  assert.equal(handAsk(t).doc.main_alert_sent_at, undefined);
+  for (let i = 0; i < 2; i += 1) { openResearchAsks(t.ctx); await openUndoFlags(t.ctx, { entriesOf: said(WORDS), addedBy: ADDED }); }
+  assert.equal(t.alerts.filter((a) => a.kind === 'ask_request_refused').length, 1);
+  assert.equal(mainAlerts(t).length, 1);
+});
+
+test('L124 m-2: a record write that throws in MAIN\'s alert loop is counted and the pass still hands back byHand', async () => {
+  const t = m2env(); merged(t); flag(t);
+  await openUndoFlags({ ...t.ctx, alert: () => false }, { entriesOf: said(WORDS), addedBy: ADDED });
+  const id = handAsk(t).id;
+  const record = { ...t.record, write: (w) => { if (w.doc?.main_alert_sent_at) throw new Error('disk full'); return t.record.write(w); } };
+  const r = await openUndoFlags({ ...t.ctx, record }, { entriesOf: said(WORDS), addedBy: ADDED });
+  assert.ok(r.alerts_failed >= 1);
+  assert.deepEqual(r.byHand.map((b) => b.id), [id]);
+  assert.equal(handAsk(t).doc.main_alert_sent_at, undefined);
+  await openUndoFlags(t.ctx, { entriesOf: said(WORDS), addedBy: ADDED });
+  assert.ok(handAsk(t).doc.main_alert_sent_at, 'marked on the next pass that can write');
+});
+
+test('L124 m-3: MAIN is alerted only for this product\'s open by-hand asks, and a refused mark is alerted', async () => {
+  const t = m2env(); merged(t); flag(t);
+  await openUndoFlags({ ...t.ctx, alert: () => false }, { entriesOf: said(WORDS), addedBy: ADDED });
+  const a = handAsk(t);
+  // Another product's copy of the same ask, never told.
+  must(writeDoc(t.record, 'ask', { id: 'U-other', rev: 0 }, { ...a.doc, product: 'other-product' }));
+  // A closed one, never told: the same ask walked out of open.
+  must(writeDoc(t.record, 'ask', { id: 'U-closed', rev: 0 }, { ...a.doc }));
+  const c = askStore(t.record).ask('U-closed');
+  must(writeDoc(t.record, 'ask', c, { ...c.doc, state: 'pushed', raised_at: new Date(t.clock.t).toISOString(), raised_reask: 0 }));
+  await openUndoFlags(t.ctx, { entriesOf: said(WORDS), addedBy: ADDED });
+  assert.deepEqual(mainAlerts(t).map((x) => x.ask), [a.id], 'not the other product\'s, not the closed one');
+  // A mark the record refuses is alerted, and MAIN's alert stays due.
+  const u = m2env(); merged(u); flag(u);
+  await openUndoFlags({ ...u.ctx, alert: () => false }, { entriesOf: said(WORDS), addedBy: ADDED });
+  const record = { ...u.record, write: (w) => (w.doc?.main_alert_sent_at ? { ok: false, reason: 'busy' } : u.record.write(w)) };
+  await openUndoFlags({ ...u.ctx, record }, { entriesOf: said(WORDS), addedBy: ADDED });
+  const failed = u.alerts.filter((x) => x.type === 'undo_by_hand_mark_failed');
+  assert.equal(failed.length, 1);
+  assert.equal(failed[0].ask, handAsk(u).id);
+  assert.equal(handAsk(u).doc.main_alert_sent_at, undefined);
+});
+
+test('L124 m-4: a research caller that follows README item 10 sends each push once over three passes', () => {
+  const t = m2env();
+  must(t.record.applyOutbox({ role: 'front_door', sessionId: 'F-1' }, m9file(t, 'front_door', 'F-1', 'ask-request-20261103-0915-rp.json', `{"ask":"research","product":"${PRODUCT}","brief":"find out z"}\n`)));
+  const sent = [];
+  for (let pass = 0; pass < 3; pass += 1) {
+    // Item 10: send each opened[].push, then markResearchPushSent(ctx, id).
+    const r = openResearchAsks(t.ctx);
+    for (const o of r.opened) { sent.push(o.push); must(markResearchPushSent(t.ctx, o.id)); }
+  }
+  assert.equal(sent.length, 1);
+});
+
+test('L124 c2: a push already marked sent is refused a second mark, and the first time is kept', async () => {
+  const t = m2env(); merged(t); flag(t);
+  const r = await openUndoFlags(t.ctx, { entriesOf: said(WORDS), addedBy: ADDED });
+  const id = r.byHand[0].id;
+  must(markByHandPushSent(t.ctx, id));
+  const first = handAsk(t).doc.push_sent_at;
+  t.clock.t += MIN;
+  const again = markByHandPushSent(t.ctx, id);
+  assert.equal(again.ok, false);
+  assert.match(again.reason, /push_sent_at is already set/);
+  assert.equal(handAsk(t).doc.push_sent_at, first);
+});

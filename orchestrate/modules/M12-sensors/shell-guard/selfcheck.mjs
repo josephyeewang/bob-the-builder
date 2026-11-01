@@ -25,7 +25,8 @@ const refuseCases = (name, mode, root) => cases(mode === 'relative' ? name : `${
 
 // Runs one shell command in a process group of its own (perl's setpgrp, then exec, so the shell keeps its pid and leads
 // the group), so a timeout kills every process the case started, not only the shell: a killed attempt's child can't
-// write after its folder is gone (L117 m-4). Without perl it runs the shell alone.
+// write after its folder is gone (L117 m-4). The group is killed after a normal exit too, so a child the case left in
+// the background can't either (L124 c1). Without perl it runs the shell alone.
 const PERL = ['/usr/bin/perl', '/bin/perl'].find((f) => existsSync(f));
 const GROUP = 'setpgrp(0, 0); exec { $ARGV[0] } @ARGV; print STDERR "selfcheck-exec-failed: $!\\n"; exit 127';
 // → { r, unsure }: unsure when the run can't say what it did: any spawn error (a timeout, ENOENT, EAGAIN under load,
@@ -33,7 +34,7 @@ const GROUP = 'setpgrp(0, 0); exec { $ARGV[0] } @ARGV; print STDERR "selfcheck-e
 export function runShell(sh, args, { cwd, env, timeout }) {
   const argv = PERL ? [PERL, ['-e', GROUP, sh, ...args]] : [sh, args];
   const r = spawnSync(argv[0], argv[1], { cwd, env, encoding: 'utf8', timeout, killSignal: 'SIGKILL' });
-  if (PERL && r.pid && (r.error || r.signal)) { try { process.kill(-r.pid, 'SIGKILL'); } catch { /* the group is gone */ } }
+  if (PERL && r.pid) { try { process.kill(-r.pid, 'SIGKILL'); } catch { /* the group is gone */ } }
   const unsure = Boolean(r.error) || (r.signal !== null && r.signal !== undefined) || r.status === null || (PERL && r.status === 127 && (r.stderr ?? '').startsWith('selfcheck-exec-failed: '));
   return { r, unsure };
 }

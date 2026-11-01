@@ -93,7 +93,9 @@ R-0b-82's decision and handoff code sit here although the row is tagged M11 (lan
    files that merge added (lane 2: git, read-only). An `opened[]` ask is pushed by M2's schedule pass (urgent, with the
    undo text as `view`). Send each `byHand[].push` to the owner, then call `markByHandPushSent(ctx, id)` for it;
    anything not marked is handed back next pass. MAIN's `undo_by_hand` alert is the pass's own: it goes out through
-   `ctx.alert` on every pass until it goes through. Lane 2's M11
+   `ctx.alert` on every pass until it goes through: the sink neither threw nor answered `false` (L124 M-1). A sink
+   that throws or answers false is counted in the pass's `alerts_failed`. M11's `outbox(rec, now)` takes text, so the
+   wiring passes it an adapter, e.g. `(a) => box(JSON.stringify(a))`; its `true` means queued, which is kept. Lane 2's M11
    undo step writes the exact_reverse card from an answered Undo ask (it joins on the ask's `card`, `pr`,
    `merge_commit_sha` and `module`, L81); the test uses a labelled stand-in for it until lane 2's PR is up.
 
