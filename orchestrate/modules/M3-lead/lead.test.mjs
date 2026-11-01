@@ -96,6 +96,11 @@ test('wait.who takes only the pinned values', () => {
   // L87 m-7: the two times are ISO times.
   assert.ok(waitProblems(w('joe', { since: 'yesterday' })).some((p) => p.includes('wait.since must be an ISO time')));
   assert.ok(waitProblems(w('joe', { next_check: 'soon' })).some((p) => p.includes('wait.next_check')));
+  // L93 m-7: real dates, not the shape alone.
+  for (const bad of ['2026-13-45T99:99Z', '2026-02-30T10:00Z', '2026-11-01T24:00Z', '2026-11-01T10:60Z', '2026-11-01T10:00:61Z', '2026-11-01T10:00+25:00']) {
+    assert.ok(waitProblems(w('joe', { since: bad })).some((p) => p.includes('wait.since must be an ISO time')), bad);
+  }
+  for (const good of ['2026-11-01T10:00Z', '2028-02-29T23:59:59.5Z', '2026-11-01T10:00-08:00']) assert.deepEqual(waitProblems(w('joe', { since: good, next_check: good })), [], good);
 });
 
 test('a brief needs all four parts and plain paths', () => {
@@ -303,14 +308,24 @@ test('L87 M-2: the handoff template in the Lead\'s wording is the reader\'s shap
   assert.ok(HANDOFF_TEMPLATE.startsWith('# Lead handoff\n'));
   assert.ok(LEAD_WORDING.includes(HANDOFF_WORDING));
   assert.ok(HANDOFF_WORDING.endsWith(HANDOFF_TEMPLATE));
-  // The template itself reads, so a Lead that fills it in keeps the shape.
-  const t = readHandoff(HANDOFF_TEMPLATE);
+  // L93 m-2: the bare template is refused, and so is one filled in only in part; a filled copy reads.
+  assert.match(readHandoff(HANDOFF_TEMPLATE).reason, /still holds the template's/);
+  const fill = (t, pairs) => pairs.reduce((x, [a, b]) => x.replace(a, b), t);
+  const parts = [['<the product and session you hold>', 'Lead of notes-app, session S-7'], ['<the card id you were working on, or none>', 'C-3'],
+    ['<the one next thing you were about to do>', 'send C-4'], ['<what it was about>', 'export format'], ['<what was decided>', 'Markdown only'],
+    ['<when>', '1 Nov'], ['<a message still to answer or act on>', 'answer the owner on dark mode'], ['<a request you sent that is still waiting>', 'ask the owner about pricing']];
+  const t = readHandoff(fill(HANDOFF_TEMPLATE, parts));
   assert.ok(t.ok, t.reason);
   assert.ok(t.messages.some((m) => m.startsWith('queued: ')));
+  for (let i = 0; i < parts.length; i++) {
+    const half = fill(HANDOFF_TEMPLATE, parts.filter((_, j) => j !== i));
+    assert.ok(!readHandoff(half).ok, `a template with ${parts[i][0]} left in is refused`);
+  }
+  assert.ok(!readHandoff(fill(HANDOFF_TEMPLATE, [parts[0], parts[2]])).ok, 'only Claim and Next step filled in → refused');
   assert.ok(HANDOFF_WORDING.includes('- queued: <the request>'));
 });
 
-test('L87 M-2 (c): hand-typed notes a Lead might write: the vet refuses those that don\'t read, before any stop', () => {
+test('L87 M-2 (c): hand-typed notes a Lead might write: handoffProblem refuses those that don\'t read (the vet and the stop wait for #68)', () => {
   const good = '# Lead handoff\n\n## Claim\nLead of notes-app, session S-7\n\n## Open card\nC-3\n\n## Next step\nsend C-4\n\n## Decisions\n- export format: Markdown only (decided 1 Nov)\n\n## Messages\n- queued: ask the owner about pricing\n';
   assert.equal(handoffProblem(good), null);
   for (const bad of [

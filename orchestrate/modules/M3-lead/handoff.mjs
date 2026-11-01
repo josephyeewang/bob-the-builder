@@ -10,9 +10,13 @@
 //   ## Decisions      "- <about>: <what was decided> (<when>)", one per line, or "none"
 //   ## Messages       the messages still to answer or act on, one per line, or "none"; queued requests as "- queued: …"
 // Every heading must be there, once, in this order; a handoff missing one is refused, so a restart never starts from
-// half a note. `handoffProblem` is the check the Dispatcher's vet runs before the old Lead is stopped (L87 M-2), so a
-// note that doesn't read is re-asked for while the old Lead is still there. The resume card is what the restarted Lead
+// half a note. A line still holding one of the template's placeholders (`<…>`) is refused too, so a template filled in
+// only in part never reads (L93 m-2). `handoffProblem` is the check for the Dispatcher's vet (L87 M-2). NOT WIRED YET:
+// M-2 (b) and the rest of (c) wait for #68 (M11 lead-restart handoffVet runs it before the old Lead is stopped, a note
+// that doesn't read is asked for again, and the old Lead is not stopped). The resume card is what the restarted Lead
 // reads first.
+
+import { HANDOFF_TEMPLATE } from './lead-wording.mjs';
 
 export const HEADS = Object.freeze(['Claim', 'Open card', 'Next step', 'Decisions', 'Messages']);
 const NONE = 'none';
@@ -48,6 +52,8 @@ export function readHandoff(text) {
     return [head.trim(), rest.join('\n').trim()];
   }));
   for (const k of ['Claim', 'Next step']) if (!body[k] || body[k] === NONE) return { ok: false, reason: `the handoff has no ${k}` };
+  const held = placeholders().find((p) => s.includes(p));
+  if (held) return { ok: false, reason: `the handoff still holds the template's ${held}: fill in every part, or write none` };
   const isNone = (v) => !v || v === NONE || v === `- ${NONE}`;
   const lines = (k) => (isNone(body[k]) ? [] : body[k].split('\n').map((l) => l.trim()).filter(Boolean));
   const decisions = [];
@@ -60,7 +66,12 @@ export function readHandoff(text) {
   return { ok: true, claim: body.Claim, open_card: isNone(body['Open card']) ? null : body['Open card'], next: body['Next step'], decisions, messages };
 }
 
-/** The Dispatcher's vet (M11 lead-restart handoffVet): null when the note can be resumed from, else why not. */
+/** The template's placeholders, read when first needed (the wording imports nothing from here). */
+let PLACEHOLDERS = null;
+const placeholders = () => (PLACEHOLDERS ??= [...new Set(HANDOFF_TEMPLATE.match(/<[^<>\n]+>/g))]);
+
+/** The check for the Dispatcher's vet (M11 lead-restart handoffVet, once #68 is in): null when the note can be resumed
+ *  from, else why not. */
 export function handoffProblem(text) {
   const h = readHandoff(text);
   return h.ok ? null : h.reason;

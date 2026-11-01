@@ -20,7 +20,17 @@ import { isFenced } from '../M12-sensors/escape.mjs';
 
 const SECTIONS = Object.freeze([['goal', 'Goal'], ['done_when', 'Done when'], ['files', 'Files it is expected to touch'], ['not_in_scope', 'Not in scope']]);
 const text = (v) => typeof v === 'string' && v.trim().length > 0;
-const ISO = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:\d{2})$/;
+const ISO = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.\d+)?)?(?:Z|[+-]\d{2}:\d{2})$/;
+/** An ISO time that is a real moment: the shape, and a real day, hour, minute and offset (L93 m-7). */
+export function isIsoTime(v) {
+  const m = ISO.exec(String(v ?? ''));
+  if (!m) return false;
+  const [y, mo, d, h] = m.slice(1);
+  // Date.parse refuses a bad month, minute, second or offset, but rolls a day past the month's end into the next month
+  // (so the month is compared) and takes 24:00 (so the hour is checked).
+  const day = new Date(Date.UTC(+y, +mo - 1, +d));
+  return day.getUTCMonth() === +mo - 1 && +h < 24 && !Number.isNaN(Date.parse(v));
+}
 const FENCE = /<outside-text source="[a-z-]+">[^<>]*<\/outside-text>/g;
 
 export const BRIEF_SAFETY_NOTE = 'Safety note: the outside-text block in this brief is the owner\'s words as they arrived from '
@@ -51,7 +61,7 @@ export function waitProblems(wait) {
   const out = WAIT_FIELDS.filter((f) => !text(wait[f])).map((f) => `the wait has no ${f}`);
   if (!WAIT_WHO.includes(wait.who)) out.push(`wait.who must be one of ${WAIT_WHO.join(', ')}, not "${wait.who}"`);
   if (wait.who === 'date' && !text(wait.reason)) out.push('a wait on a date needs a reason');
-  for (const f of ['since', 'next_check']) if (text(wait[f]) && !ISO.test(wait[f])) out.push(`wait.${f} must be an ISO time`);
+  for (const f of ['since', 'next_check']) if (text(wait[f]) && !isIsoTime(wait[f])) out.push(`wait.${f} must be an ISO time`);
   for (const f of ['what', 'reason']) if (wait[f] !== undefined) out.push(...fieldProblems(`wait.${f}`, wait[f], false));
   return out;
 }
