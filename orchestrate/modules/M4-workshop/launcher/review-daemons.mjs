@@ -37,6 +37,8 @@ function plist(entries) {
     '<plist version="1.0">', '<dict>', ...entries.map((e) => `  ${e}`), '</dict>', '</plist>', ''].join('\n');
 }
 const arr = (xs) => `<array>${xs.map(str).join('')}</array>`;
+// Export only (lane 4, LANES.md): the setup step's hourly watch-only job is built with this one plist builder and label rule.
+export { plist, str, arr, LABEL, ABS };
 
 /**
  * { label, installRoot, config, reviewRoot, reviewHome, accountCopy, ownerHome, ownerUid, logDir } → { runner, accountCopy }
