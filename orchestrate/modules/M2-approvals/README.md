@@ -10,12 +10,13 @@ See LANES.md for who builds this folder, and the build rows (0b-5, R-0b-48..53) 
 |---|---|
 | `kinds.mjs` | The fixed lines the Front Door shows word for word, the reading of the owner's settings (push windows, zones, lapse times), `dueWindow` (is now a push window?) and `lapseAt` (when this round of an ask runs out). Ask kinds themselves are shared names in `shared/asks.mjs`. |
 | `payload.mjs` | The exact question box for an ask, written on the ask when it is created (plain and "still open" versions). |
-| `ask-store.mjs` | Reads and writes asks and gos through the M9 writer as `approvals`; an ask or go last written by anyone else is not trusted and is alerted. |
+| `ask-store.mjs` | Reads and writes asks and gos through the M9 writer as `approvals`; an ask or go last written by anyone else is not trusted and is alerted. `writeDoc` is for M2's own files; another module closes an ask only through `consumeAsk(ctx, id, note)` (answered → consumed, the note may only add new fields; L85 m-3), and `consume-ask.test.mjs` fails on a module outside M2 that imports `writeDoc`. |
 | `transcript-copy.mjs` | M2's tamper-checked copy of a launched session's conversation log. Taps are read from the copy, never from the live file. |
 | `binding.mjs` | When a tap counts (R-0b-48): the box must match the payload exactly, be asked in a Front Door or thinking session the Dispatcher launched, and be answered by a tap while the ask is still in its round. `createAsk` lives here. |
 | `github-review.mjs` | When a GitHub Approve counts (R-0b-49): the owner's account by numeric id, an Approve on the exact commit (or one it carries over to), given after the ask was raised. |
 | `decision.mjs` | Decisions as small decision pull requests (R-0b-50): Approve with no text is the recommended choice, a one-letter text picks another, "Request changes" declines. The pull request is closed unmerged once the answer is recorded. A Tier-1 go is a decision pull request too, answered only by an empty Approve. |
 | `go.mjs` | The owner's go on one plan of one card (R-0b-52, R-0b-53): when an Approve ask is needed at all, raising the go, recording it, the merge-time check that a change stays inside it, and the Tier-1 re-check when main moves. |
+| `research-ask.mjs` | Research asks (R-0b-136): turns the Front Door's `ask-request-` report into an open research ask `R-<n>` whose wait puts it on "waiting on you"; gives the owner's desktop session the brief by number (`researchBrief`); takes it off the list once its research_copy card exists (`landResearch`). |
 | `schedule.mjs` | When asks go out and run out (R-0b-51, R-0b-53): push windows, urgent re-pushes, lapse and the one re-ask, the 24-hour void of an unmerged approval, held decisions. |
 | `*.test.mjs` | The tests. `fixtures.test-helper.mjs` and `fixtures/` are shared set-up (a real M9 record, a fake GitHub), not tests. |
 
@@ -34,7 +35,8 @@ See LANES.md for who builds this folder, and the build rows (0b-5, R-0b-48..53) 
 
 ## Not built here (logged)
 
-- **Ask-request intake.** Other modules can't yet file a request for M2 to ask something; asks are created by M2's own callers.
+- **Ask-request intake, other than research.** Only the Front Door's research ask is turned into an ask (R-0b-136); an incident's `ask-request-` is refused and alerted.
+- **A research ask never closes.** The record has no move from open to consumed, so a landed research ask stays open with no wait; one copy card per ask still holds (M9 writer).
 - **An old Tier-1 go pull request is not closed** when its plan changes and a new go is raised.
 - **Cards have no `rows` field.** The Lead's plan passes the rows to `raiseGo`; M10's lane rule reads `card.rows`, which a card can't hold yet.
 
