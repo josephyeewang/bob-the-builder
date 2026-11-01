@@ -230,6 +230,20 @@ test('m7: the real io is wired to the real checks (secure goes through secureFol
   assert.match(nodeProblemOf('/usr/local/bin/node', { lstat, realpath: (p) => p }), /written by others/);
 });
 
+test('n2: the real io reads the fixed config strictly and its mkdir refuses a folder that already exists (plants C10, B16)', { skip: process.getuid?.() === 0 }, () => {
+  const dir = mkdtempSync(join(tmpdir(), 'setup-io2-'));
+  const io = realIo({ prefix: dir });
+  writeFileSync(join(dir, 'cfg.json'), '{"base":"/x"}', { mode: 0o644 });
+  // strict (the fixed place): a file this user owns is NOT root's → refused. A non-strict read (--config, no sudo) takes it.
+  // A realIo that read strict paths non-strictly (C10) would accept it, and this fails.
+  assert.throws(() => io.readConfig('/cfg.json', { strict: true }), /root|owner|owned/i);
+  assert.match(String(io.readConfig(join(dir, 'cfg.json'), { strict: false })), /"base":"\/x"/);
+  // mkdir is not recursive and not quiet about an existing folder (B16): a base someone else made must stop the run.
+  io.mkdir('/fresh', 0o755);
+  assert.throws(() => io.mkdir('/fresh', 0o755), /EEXIST|exists/);
+  assert.throws(() => io.mkdir('/no/parent', 0o755), /ENOENT|no such/i);
+});
+
 test('m8 and the table: the orchestrate entry on a worker outbox folder can list, read and clear (delete_child), nothing more; the proofs cover the outbox folders', () => {
   assert.deepEqual([...ORCHESTRATE_READ_ACL.perms].sort(), ['delete_child', 'directory_inherit', 'file_inherit', 'list', 'readattr', 'readextattr', 'readsecurity', 'search']);
   const names = proofList(cfg).map((p) => p.what).join('\n');

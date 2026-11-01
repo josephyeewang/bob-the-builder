@@ -27,7 +27,7 @@ import { realIo, rootProblem } from './mac.mjs';
 import { guarded } from './guard.mjs';
 import { apply, check, plan } from './users-folders.mjs';
 import { proofCommands, runProofs } from './proofs.mjs';
-import { checkInstall, parseInstallConfig, planInstall, spawnUpdater } from './install.mjs';
+import { checkInstall, parseInstallConfig, planInstall, rootMadeEntries, spawnUpdater } from './install.mjs';
 import { checkDaemons, list, planLoad, planPlace, planUnload } from './daemons.mjs';
 
 const USAGE = 'usage: node setup.mjs <users-folders|check|proofs|install|check-install|daemons place|load|unload|list|check> [--config <file>, without sudo only] [--dry-run] [--main <commit>]';
@@ -96,7 +96,7 @@ export function main(argv, { io: given, runUpdater = spawnUpdater, out = (s) => 
     cfg = ['users-folders', 'check', 'proofs'].includes(o.cmd) ? parseConfig(raw) : parseInstallConfig(raw);
   } catch (e) { err(`${e.message}\n${USAGE}`); return 2; }
 
-  if (o.cmd === 'check') return report(check(io, cfg), out);
+  if (o.cmd === 'check') return report(check(io, cfg, { alsoKnown: rootMadeEntries(cfg) }), out);
   if (o.cmd === 'check-install') return report(checkInstall(io, cfg, { main: o.main }), out);
   if (o.cmd === 'daemons' && o.sub === 'check') return report(checkDaemons(io, cfg), out);
   if (o.cmd === 'daemons' && o.sub === 'list') {
@@ -121,7 +121,7 @@ export function main(argv, { io: given, runUpdater = spawnUpdater, out = (s) => 
   if (!planned.ops.length) out(planned.installed ? 'nothing to do: already installed.' : 'nothing to do: already as needed.');
   if (o.dry) { for (const x of planned.ops) out(`would run: ${x.text}`); out(`dry run: ${planned.ops.length} step(s), nothing changed.`); return 0; }
   try { apply(planned.ops, { log: (t) => out(`run: ${t}`) }); } catch (e) { err(`stopped: ${e.message}. Run it again after fixing that; it picks up where it stopped.`); return 1; }
-  const after = o.cmd === 'users-folders' ? check(io, cfg) : o.cmd === 'install' ? checkInstall(io, cfg)
+  const after = o.cmd === 'users-folders' ? check(io, cfg, { alsoKnown: rootMadeEntries(cfg) }) : o.cmd === 'install' ? checkInstall(io, cfg)
     : o.sub === 'place' ? checkDaemons(io, cfg).filter((r) => !/is loaded$/.test(r.what)) : o.sub === 'load' ? checkDaemons(io, cfg).filter((r) => /is loaded$/.test(r.what)) : null;
   if (!after) { out('done.'); return 0; }
   const bad = after.filter((r) => !r.ok);
