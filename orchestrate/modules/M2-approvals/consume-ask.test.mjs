@@ -161,13 +161,12 @@ function filesUnder(dir) {
 }
 
 // Where a specifier points, resolved the way Node resolves a path or file URL. A bare package name points at no file of ours.
-// Compared as a real path (a symlinked folder), case-folded where file names ignore case (L124 m-1).
+// Compared as a real path as the disk spells it (L124 m-1): a symlinked folder, or another letter case on macOS, where
+// file names ignore case, gives the one real name. A path that is not there is compared as written.
 const CASELESS = process.platform === 'darwin' || process.platform === 'win32';
 function norm(p) {
   const q = p.replace(/\/{2,}/g, '/');
-  let r = q;
-  try { r = realpathSync.native(q); } catch { /* not there: compare as written */ }
-  return CASELESS ? r.toLowerCase() : r;
+  try { return realpathSync.native(q); } catch { return q; }
 }
 function target(file, spec) {
   if (!/^(?:\.{1,2}\/|\/|file:)/.test(spec)) return null;

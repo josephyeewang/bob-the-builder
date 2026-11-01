@@ -392,6 +392,9 @@ const mainAlerts = (t) => t.alerts.filter((a) => a.type === 'undo_by_hand');
 const handAsk = (t) => askStore(t.record).asks().find((a) => a.doc.kind === BY_HAND_KIND);
 
 test('L124 M-1: a sink that answers false is not a delivery: counted, nothing marked, and alerted once it goes through', async () => {
+  // README item 12 says what "goes through" means, and that outbox takes text.
+  assert.match(README, /the sink neither threw nor answered `false` \(L124 M-1\)/);
+  assert.match(README, /`outbox\(rec, now\)` takes text/);
   const t = withState(m2env()); merged(t); flag(t); badResearch(t);
   t.sink.answer = false;
   const r1 = openResearchAsks(t.ctx);

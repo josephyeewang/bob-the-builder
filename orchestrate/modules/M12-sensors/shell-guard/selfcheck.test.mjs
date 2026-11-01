@@ -42,3 +42,13 @@ test('L117 m-3, m-4: a case that can never finish stops the check, naming it, af
   assert.equal(new Set(made).size, 4);
   for (const f of made) assert.equal(existsSync(f), false, `${f} was removed`);
 });
+
+test('L124 c1: after a normal exit the case\'s background processes are killed too, so none writes afterwards', () => {
+  const d = tempDir('sg-sc-');
+  const late = join(d, 'late');
+  const { unsure, r } = runShell('/bin/sh', ['-c', `(sleep 1; echo x > ${late}) > /dev/null 2>&1 & exit 0`], { cwd: d, env: ENV, timeout: 5000 });
+  assert.equal(unsure, false, 'a normal exit is a real run');
+  assert.equal(r.status, 0);
+  spawnSync('/bin/sleep', ['1.6']);
+  assert.equal(existsSync(late), false, 'the background child left behind was killed with the group');
+});

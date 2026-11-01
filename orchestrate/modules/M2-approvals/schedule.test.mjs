@@ -209,6 +209,18 @@ test('missing settings: nothing is pushed and the owner is alerted once', async 
   assert.equal(w.t.alerts.filter((a) => a.type === 'approvals_config').length, 1);
 });
 
+test('L130: a config alert the sink refuses (answers false, as M11\'s outbox does) is not kept as sent, so it goes out next pass', async () => {
+  const w = world({ 'approvals.push_windows': [] });
+  yesNo(w);
+  w.t.sink.answer = false;
+  await w.at(W8);
+  assert.equal(w.t.alerts.filter((a) => a.type === 'approvals_config').length, 0);
+  w.t.sink.answer = true;
+  await w.at(W17);
+  await w.at(W17 + HOUR);
+  assert.equal(w.t.alerts.filter((a) => a.type === 'approvals_config').length, 1, 'once it goes through, then not again');
+});
+
 test('a push that was not sent is tried again next pass, and records nothing', async () => {
   const w = world();
   let up = false;
