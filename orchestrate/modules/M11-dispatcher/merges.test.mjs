@@ -157,6 +157,23 @@ test('L85 M-1 (a): still open past timeouts.merging_open_max_min after the mergi
   assert.deepEqual(states(u.rec), ['merging', 'merging']);
 });
 
+test('L89: no fresh PR reading past timeouts.merging_open_max_min: still merging, Joe told once', async () => {
+  // The Merge Gate stopped mid-merge and the Sensors never read the PR again (the limit is 15 min).
+  const { rec } = gone();
+  const p1 = await pass(rec, 14, dead);
+  assert.deepEqual([p1.moves, p1.alerts], [[['M-1', 'waiting for a fresh PR reading']], []], 'under the limit: wait, no alert');
+  const p2 = await pass(rec, 20, dead);
+  assert.deepEqual(states(rec), ['merging', 'merging'], 'the outcome is unknown, so the merge stays merging');
+  assert.equal(p2.alerts.length, 1);
+  assert.match(p2.alerts[0], /merge M-1: the Merge Gate stopped mid-merge and PR 7 has had no fresh reading for 20 min/);
+  const p3 = await pass(rec, 40, dead);
+  assert.deepEqual([states(rec), p3.alerts], [['merging', 'merging'], []], 'told once');
+  // A reading that comes after all settles it as before.
+  reading(rec, 41, { state: 'closed', merged: true, merge_commit_sha: MC });
+  await pass(rec, 42, dead);
+  assert.equal(rec.read('merge', 'M-1').doc.state, 'merged');
+});
+
 test('L85 M-1: M6 itself never records refused on an open reading unless the Dispatcher says it is open too long', () => {
   const rec = recWith([cardMerging, merging()]);
   const open = { state: 'open', merged: false, head_sha: HA };
@@ -205,10 +222,28 @@ test('L85 M-1 (b): an interrupted merge GitHub shows merged at an unjudged head 
   const r3 = recWith([['card', 'C-3', { state: 'verified', head: HA }], ['merge', 'M-3', { card: 'C-3', pr: 9, state: 'refused', reasons: ['interrupted'], judged_head: HA, changed_at: at(0) }], ['fact', PR_FACT(9), { merged: true, head_sha: HA, observed_at: at(1) }]]);
   assert.equal((await pass(r3, 2)).alerts.length, 1);
   assert.equal(r3.read('merge', 'M-3').doc.state, 'refused');
-  // a refused{timeout} merge is not reconciled this way
+  // a refused{timeout} merge is not reconciled, but no refusal wording is silent (L94 point 3): the owner is told once
   const r2 = recWith([['merge', 'M-2', { pr: 8, state: 'refused', reasons: ['timeout'], changed_at: at(0) }], ['fact', PR_FACT(8), { merged: true, observed_at: at(1) }]]);
-  assert.deepEqual((await pass(r2, 2)).alerts, []);
-  assert.equal(r2.read('fact', RECONCILED_FACT('M-2')), null);
+  const told = (await pass(r2, 2)).alerts;
+  assert.deepEqual(told, ['merge M-2 was refused (timeout) but PR 8 shows merged; check the card and its audit']);
+  assert.equal(r2.read('merge', 'M-2').doc.state, 'refused');
+  assert.ok(r2.read('fact', RECONCILED_FACT('M-2')));
+  assert.deepEqual((await pass(r2, 3)).alerts, [], 'told once');
+});
+
+test('L94 point 3: a refused merge whose PR another merge already landed is neither reconciled nor told; the gate\'s own "merged outside" refusal is not told twice', async () => {
+  const rec = recWith([
+    ['card', 'C-1', { state: 'merged', head: HA, merge_commit: MC }],
+    ['merge', 'M-1', { card: 'C-1', pr: 7, state: 'refused', reasons: ['interrupted'], judged_head: HA, changed_at: at(0) }],
+    ['merge', 'M-2', { card: 'C-1', pr: 7, state: 'merged', judged_head: HA, merge_commit: MC, changed_at: at(2) }],
+    ['fact', PR_FACT(7), { state: 'closed', merged: true, merge_commit_sha: MC, head_sha: HA, observed_at: at(3) }],
+    ['merge', 'M-3', { card: 'C-3', pr: 9, state: 'refused', reasons: ['merged outside the gate, at a head the gate did not judge'], judged_head: HA, changed_at: at(0) }],
+    ['fact', PR_FACT(9), { state: 'closed', merged: true, merge_commit_sha: MC, head_sha: HB, observed_at: at(3) }],
+  ]);
+  const { moves, alerts } = await pass(rec, 4);
+  assert.deepEqual(alerts, []);
+  assert.deepEqual(moves.filter(([id]) => id === 'M-1' || id === 'M-3'), []);
+  assert.equal(rec.read('merge', 'M-1').doc.state, 'refused');
 });
 
 test('v3 §2.4: reporting over 10 min fails the card with no_report', async () => {

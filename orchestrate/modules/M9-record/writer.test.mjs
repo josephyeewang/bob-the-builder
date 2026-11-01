@@ -435,6 +435,11 @@ test('L85 M-1 (b): an interrupted merge becomes merged only with the Sensors rea
   refused(rec('M-1', 'pr-7'), /does not show this PR merged/, 'not merged');
   must(env.record.write({ actor: 'sensors', entity: 'fact', id: 'pr-7', expectRev: env.record.read('fact', 'pr-7').rev, doc: { ...env.record.read('fact', 'pr-7').doc, merged: true } }));
   refused(put(env.record, 'dispatcher', 'merge', 'M-1', { state: 'merged', merge_commit: HEAD }, { data: { fact: 'pr-7' } }), /./, 'only the Merge Gate');
+  // L94 m-B: the reading must be Sensors' own, not just named pr-<n>. A pr-5 entry another role put below the writer
+  // (the second wall: the fact families stop it at the writer too) is no reading.
+  seed(env, 'merge', 'M-5', { state: 'refused', reasons: ['interrupted'], card: 'C-5', pr: 5, judged_head: HEAD2 });
+  env.store.transaction((tx) => tx.commit([{ entity: 'fact', id: 'pr-5', doc: { merged: true, merge_commit_sha: HEAD, head_sha: HEAD2, observed_at: iso(env.clock.t) } }], { actor: 'merge_gate', kind: 'seed' }));
+  refused(rec('M-5', 'pr-5'), /Sensors reading of this merge's PR/, 'a pr- entry Sensors did not make');
   must(rec('M-1', 'pr-7'));
 });
 

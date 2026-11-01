@@ -16,10 +16,12 @@
 //   node accounts.mjs setup        make the second folder and its links (twice changes nothing)
 //   node accounts.mjs use a|b      name the account new sessions start on (running sessions keep theirs)
 //   node accounts.mjs status       each folder: signed in or not, and the plan; no token, email or raw output
-//   node accounts.mjs copy-to <file> --home <dir> --owner <uid>
+//   node accounts.mjs copy-to <file> --home <dir> --owner <uid> --install <the installed copy>
 //                                  copies which account that user's sessions start on into <file> (0644), for the review
 //                                  user, who starts its sessions on the same account in its own folders (L65 m-5). Run by
-//                                  root from the installed copy (review-account-copy.plist), never from the repository.
+//                                  root from the installed copy (review-account-copy.plist), never from the repository:
+//                                  it refuses unless this file and its node are in that copy, root's alone (L75 c-1).
+//                                  As the account copy, root runs this file and install-check.mjs, nothing else.
 // Nothing here reads a secret: the folders are only listed and linked, and `status` keeps a few named fields of
 // `claude auth status` and drops the rest.
 
@@ -28,6 +30,7 @@ import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { installProblem } from './install-check.mjs';
 
 export const ACCOUNTS = Object.freeze({ a: '.claude', b: '.claude-b' });
 export const ACCOUNT_NAMES = Object.freeze(Object.keys(ACCOUNTS));
@@ -158,6 +161,18 @@ export function copyAccountTo({ home, uid, to, dirOwner = 0 }) {
 }
 
 /**
+ * `copy-to` as root runs it (L75 c-1): only from the installed copy `install`, with this file (`self`) and the node
+ * running it (`node`) in it and the copy root's alone (`installProblem`; `owner` and `top` stand in for root and `/` in a
+ * test), then copyAccountTo. → as copyAccountTo.
+ */
+export function copyFromInstalledCopy({ install, home, uid, to, self = selfFile, node = nodeFile(), owner = 0, top = '/' }) {
+  if (typeof install !== 'string' || !install.startsWith('/')) return refuse('copy-to needs --install <the installed copy>');
+  const bad = installProblem(install, [self, node], { owner, top });
+  if (bad) return refuse(`it runs only from the installed copy, root's alone: ${bad}`);
+  return copyAccountTo({ home, uid, to, dirOwner: owner });
+}
+
+/**
  * `setup`: the second folder and its links. Every target is checked before anything changes, so a refusal changes
  * nothing; a second run finds every link in place and changes nothing.
  * Returns { ok, made: [names], kept: [names], skipped: [names with no first-folder original] } or { ok: false, reason }.
@@ -256,7 +271,7 @@ export function claudeAuthStatus(claudeBin = 'claude') {
   };
 }
 
-function cli(argv, { home = homedir(), claudeBin = 'claude', owner } = {}) {
+function cli(argv, { home = homedir(), claudeBin = 'claude', owner, install } = {}) {
   const [cmd, arg] = argv;
   if (cmd === 'setup') {
     const r = setupSecondFolder({ home });
@@ -274,13 +289,15 @@ function cli(argv, { home = homedir(), claudeBin = 'claude', owner } = {}) {
   }
   if (cmd === 'status') return [0, statusText({ home, authStatus: claudeAuthStatus(claudeBin) })];
   if (cmd === 'copy-to') {
-    const r = Number.isInteger(owner) ? copyAccountTo({ home, uid: owner, to: arg }) : refuse('copy-to needs --owner <uid>');
+    const r = Number.isInteger(owner) ? copyFromInstalledCopy({ install, home, uid: owner, to: arg }) : refuse('copy-to needs --owner <uid>');
     return r.ok ? [0, `Account ${r.account} copied to ${arg}.`] : [1, `Refused: ${r.reason}`];
   }
-  return [2, 'Use: node accounts.mjs setup | use a|b | status | copy-to <file> --home <dir> --owner <uid>'];
+  return [2, 'Use: node accounts.mjs setup | use a|b | status | copy-to <file> --home <dir> --owner <uid> --install <the installed copy>'];
 }
 
 const self = (() => { try { return realpathSync(fileURLToPath(import.meta.url)); } catch { return null; } })();
+const selfFile = self ?? fileURLToPath(import.meta.url);
+function nodeFile() { try { return realpathSync.native(process.execPath); } catch { return process.execPath; } }
 const invoked = (() => { try { return process.argv[1] ? realpathSync(process.argv[1]) : null; } catch { return null; } })();
 if (self && self === invoked) {
   // `--claude <path>` points `status` at another claude program (the tests use a fake).
@@ -291,7 +308,9 @@ if (self && self === invoked) {
   const home = h >= 0 ? args.splice(h, 2)[1] : homedir();
   const o = args.indexOf('--owner');
   const owner = o >= 0 ? Number(args.splice(o, 2)[1]) : undefined;
-  const [code, text] = cli(args, { claudeBin, home, owner });
+  const i = args.indexOf('--install');
+  const install = i >= 0 ? args.splice(i, 2)[1] : undefined;
+  const [code, text] = cli(args, { claudeBin, home, owner, install });
   (code ? process.stderr : process.stdout).write(`${text}\n`);
   process.exitCode = code;
 }

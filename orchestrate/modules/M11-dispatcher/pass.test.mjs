@@ -207,9 +207,9 @@ test('R-0b-67 / R-0b-68: in red, review / audit / merge sessions keep running an
 });
 
 test('M8: limit_hit -> after the reset Tier 2 goes back to ready, Tier 1 waits on Joe', async () => {
-  // A card waits on the usage limit (WAIT_WHO usage); the account is the pass's own, not a card field.
+  // A card waits on the usage limit (WAIT_WHO usage); a wait that names no account waits on the pass's own.
   const wait = (tier) => ({ state: 'waiting', tier, wait: { who: 'usage', what: 'limit_hit', since: iso(T0), next_check: iso(T0) } });
-  const w = world([['card', 'T2', { ...wait(2), product: 'p1', files: ['src/t2.js'] }], ['card', 'T1', { ...wait(1), product: 'p1' }], ['fact', LIMIT_FACT(ACCT), { resets_at: iso(T0 + 30 * MIN) }]]);
+  const w = world([['card', 'T2', { ...wait(2), product: 'p1', files: ['src/t2.js'] }], ['card', 'T1', { ...wait(1), product: 'p1' }], ['fact', LIMIT_FACT(ACCT), { resets_at: iso(T0 + 30 * MIN), observed_at: iso(T0 + MIN) }]]);
   await w.pass(10);
   assert.equal(w.rec.read('card', 'T2').doc.state, 'waiting');
   w.setUsage(GREEN, T0 + 31 * MIN);
@@ -217,6 +217,43 @@ test('M8: limit_hit -> after the reset Tier 2 goes back to ready, Tier 1 waits o
   assert.ok(['ready', 'running'].includes(w.rec.read('card', 'T2').doc.state));
   const t1 = w.rec.read('card', 'T1').doc;
   assert.deepEqual([t1.state, t1.wait.who], ['waiting', 'joe']);
+});
+
+test('L97: a card parked on account b\'s limit reads b\'s reading, not the pass\'s account', async () => {
+  // Two accounts: the pass runs as a; card B waits on b's limit, card A on a's. a's limit resets at +30 min, b's at +90.
+  // The wait names the account (M9 keeps a wait's extra fields; it lets no script put an account on the card).
+  const wait = (files, acct) => ({ state: 'waiting', tier: 2, product: 'p1', files, wait: { who: 'usage', what: 'limit_hit', since: iso(T0), next_check: iso(T0), ...(acct ? { account: acct } : {}) } });
+  const w = world([
+    ['card', 'A', wait(['src/a.js'])], ['card', 'B', wait(['src/b.js'], 'acct-b')],
+    ['fact', LIMIT_FACT(ACCT), { resets_at: iso(T0 + 30 * MIN), observed_at: iso(T0 + MIN) }],
+    ['fact', LIMIT_FACT('acct-b'), { resets_at: iso(T0 + 90 * MIN), observed_at: iso(T0 + MIN) }],
+  ]);
+  const r1 = await w.pass(31);
+  assert.deepEqual(r1.resumed, ['A'], 'only the card on a, whose limit reset');
+  assert.equal(w.rec.read('card', 'B').doc.state, 'waiting', "b's limit has not reset");
+  const r2 = await w.pass(91);
+  assert.deepEqual(r2.resumed, ['B']);
+});
+
+test('L97 M-3: a limit reading from before the card began to wait, or with no reset time, resumes nothing', async () => {
+  // C waits since +20 min; the only reading was taken at +1 min (an earlier limit, reset at +10). D's reading is new but
+  // has no reset time (resets_at null, as the writer leaves it when the reset is unknown).
+  const wait = (since, files, acct) => ({ state: 'waiting', tier: 2, product: 'p1', files, wait: { who: 'usage', what: 'limit_hit', since: iso(T0 + since * MIN), next_check: iso(T0 + since * MIN), ...(acct ? { account: acct } : {}) } });
+  const w = world([
+    ['card', 'C', { ...wait(20, ['src/c.js']), changed_at: iso(T0 + 20 * MIN) }],
+    ['card', 'D', wait(0, ['src/d.js'], 'acct-d')],
+    ['fact', LIMIT_FACT(ACCT), { resets_at: iso(T0 + 10 * MIN), observed_at: iso(T0 + MIN) }],
+    ['fact', LIMIT_FACT('acct-d'), { resets_at: null, observed_at: iso(T0 + MIN) }],
+  ]);
+  const r = await w.pass(60);
+  assert.deepEqual(r.resumed, []);
+  assert.equal(w.rec.read('card', 'C').doc.state, 'waiting');
+  assert.equal(w.rec.read('card', 'D').doc.state, 'waiting');
+  // A new reading for C's limit, taken after its wait began and reset since: C resumes.
+  const cur = w.rec.read('fact', LIMIT_FACT(ACCT));
+  w.rec.write({ actor: 'sensors', entity: 'fact', id: LIMIT_FACT(ACCT), expectRev: cur.rev, doc: { resets_at: iso(T0 + 50 * MIN), observed_at: iso(T0 + 25 * MIN) } });
+  const r2 = await w.pass(61);
+  assert.deepEqual(r2.resumed, ['C']);
 });
 
 test('M8: usage unknown for over a day -> parked work waits on Joe, one alert', async () => {

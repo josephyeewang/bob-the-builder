@@ -391,6 +391,20 @@ test('check 7: for each of the five hooks, a missing, unreadable, failing, odd-a
   }
 });
 
+test('L75 caveat (c): check 7 refuses a hook command that does not exit 2 when it fails to run', () => {
+  for (const role of ['worker', 'lead']) {
+    const w = hookWorld(role);
+    const settings = structuredClone(w.settings);
+    const [event, groups] = Object.entries(settings.hooks)[0];
+    const h = groups[0].hooks[0];
+    assert.match(h.command, / \|\| exit 2$/, `${role} ${event}`);
+    h.command = h.command.replace(/ \|\| exit 2$/, '');
+    const r = w.check({ settings });
+    assert.equal(r.ok, false, role);
+    assert.match(r.reason, /does not exit 2 when it fails to run/);
+  }
+});
+
 test('check 7: a differing or extra file, or an entry that does not block within 10 s, refuses', () => {
   const differs = hookWorld();
   writeFileSync(join(differs.hooksDir, 'lib.mjs'), `${readFileSync(join(differs.hooksDir, 'lib.mjs'), 'utf8')}\n// changed\n`);

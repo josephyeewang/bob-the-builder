@@ -12,7 +12,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { AI_ROLES, OUTBOX_KINDS, outboxKindOf } from '../../../shared/record.mjs';
 import { DESIGN_PROFILES, outboxKindsFor, shadowKindsFor } from './role-profiles.mjs';
-import { renderRoleSettings, POLICY_HOOKS } from './render-settings.mjs';
+import { renderRoleSettings, POLICY_HOOKS, HOOK_FAILS_CLOSED } from './render-settings.mjs';
 import { SETTINGS as S, HOOK_FIELDS as H, HOOK_EVENTS as E } from './settings-names.mjs';
 import { readOutboxFile } from './outbox.mjs';
 import { decide } from '../hooks/plain-files.mjs';
@@ -31,7 +31,10 @@ function hookArgv(role, outbox) {
     paths: { copy: '/w/copy', outbox, hooksDir: '/w/hooks', snapshot: '/w/rules.json', node: '/w/node', deny: { secrets: ['/w/secrets'] }, reviewWalls: REVIEW_WALLS } });
   assert.equal(r.ok, true, r.reason);
   const entry = r.settings[S.hooks][E.preToolUse].find((e) => e[H.matcher] === POLICY_HOOKS['plain-files']);
-  const words = entry[H.hooks][0][H.command].split(' ');
+  // The command ends with the shell's fail-closed tail (HOOK_FAILS_CLOSED), which is not one of the hook's arguments.
+  const cmd = entry[H.hooks][0][H.command];
+  assert.ok(cmd.endsWith(HOOK_FAILS_CLOSED));
+  const words = cmd.slice(0, -HOOK_FAILS_CLOSED.length).split(' ');
   assert.match(words[1], /plain-files\.mjs$/);
   return words.slice(2);
 }
@@ -94,7 +97,7 @@ test('L82 M-1: a published profile that lists fewer kinds is refused at the hook
     paths: { copy: '/w/copy', outbox, hooksDir: '/w/hooks', snapshot: '/w/rules.json', node: '/w/node', deny: { secrets: ['/w/secrets'] }, reviewWalls: REVIEW_WALLS } });
   assert.equal(r.ok, true, r.reason);
   const cmd = r.settings[S.hooks][E.preToolUse].find((e) => e[H.matcher] === POLICY_HOOKS['plain-files'])[H.hooks][0][H.command];
-  const args = parseArgs(cmd.split(' ').slice(2));
+  const args = parseArgs(cmd.slice(0, -HOOK_FAILS_CLOSED.length).split(' ').slice(2));
   for (const [name, want] of [['report-a.md', true], ['report-compact-a.md', false], ['handin-a.md', false]]) {
     assert.equal(!decide(write(join(outbox, name)), args).block, want, `hook: ${name}`);
     writeFileSync(join(outbox, name), 'x\n');

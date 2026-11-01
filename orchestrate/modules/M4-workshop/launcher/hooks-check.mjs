@@ -11,7 +11,7 @@ import { readFileSync, readdirSync, accessSync, copyFileSync, chmodSync, mkdirSy
 import { join, dirname, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync, execFileSync } from 'node:child_process';
-import { POLICY_HOOKS, HOOK_TIMEOUT } from './render-settings.mjs';
+import { POLICY_HOOKS, HOOK_TIMEOUT, HOOK_FAILS_CLOSED } from './render-settings.mjs';
 import { SETTINGS as S, HOOK_FIELDS as H, HOOK_EVENTS as E, MIN_CLAUDE_CODE, FLAGS } from './settings-names.mjs';
 import { sha256 } from './role-profiles.mjs';
 import { readSnapshot } from '../hooks/snapshot.mjs';
@@ -59,7 +59,12 @@ export function probes({ copy, outbox, kind }) {
   };
 }
 
-function splitCommand(cmd) { return cmd.split(' '); } // render-settings refuses spaces inside paths
+// render-settings refuses spaces inside paths. Every command must end with HOOK_FAILS_CLOSED (L75 (c)), so a hook that
+// can't run blocks; the words before it are the node, the script and its arguments. → the words, or null.
+function splitCommand(cmd) {
+  if (typeof cmd !== 'string' || !cmd.endsWith(HOOK_FAILS_CLOSED)) return null;
+  return cmd.slice(0, -HOOK_FAILS_CLOSED.length).split(' ');
+}
 
 /** The production guard's harmful probe: run the first program the rules list as production. */
 export const productionProbe = (rules) => {
@@ -94,7 +99,9 @@ export function checkHooks({ settings, hooksDir, source = HOOKS_SOURCE, kinds, c
       if (h[H.type] !== 'command') return refuse(`the ${name} hook is not a command`);
       if (h[H.onFailure] !== 'block') return refuse(`the ${name} hook does not block on failure`);
       if (h[H.timeout] !== HOOK_TIMEOUT) return refuse(`the ${name} hook's time limit is not ${HOOK_TIMEOUT} s`);
-      const [node, script, ...argv] = splitCommand(h[H.command]);
+      const words = splitCommand(h[H.command]);
+      if (!words) return refuse(`the ${name} hook does not exit 2 when it fails to run`);
+      const [node, script, ...argv] = words;
       if (script !== join(hooksDir, `${name}.mjs`)) return refuse(`the ${name} hook runs a script outside the hook folder`);
       try { accessSync(script, C.R_OK | C.X_OK); } catch { return refuse(`the ${name} hook is not readable and runnable`); }
       const [good, bad] = canned[name];
@@ -116,7 +123,9 @@ export function checkHooks({ settings, hooksDir, source = HOOKS_SOURCE, kinds, c
     if (event === E.preToolUse) continue;
     for (const m of list ?? []) for (const h of m?.[H.hooks] ?? []) {
       if (h[H.type] !== 'command' || h[H.onFailure] !== 'block' || h[H.timeout] !== HOOK_TIMEOUT) return refuse(`a ${event} hook does not block on failure within ${HOOK_TIMEOUT} s`);
-      const script = splitCommand(h[H.command] ?? '')[1];
+      const words = splitCommand(h[H.command]);
+      if (!words) return refuse(`a ${event} hook does not exit 2 when it fails to run`);
+      const script = words[1];
       if (script !== join(hooksDir, 'compact-note.mjs')) return refuse(`a ${event} hook runs a script outside the hook folder`);
       try { accessSync(script, C.R_OK | C.X_OK); } catch { return refuse(`the ${event} hook is not readable and runnable`); }
     }

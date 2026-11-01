@@ -28,7 +28,7 @@ import { isProtectedName } from '../M4-workshop/launcher/worker-copy.mjs';
 import { PR_FACT } from './merges.mjs';
 import { note } from './moves.mjs';
 import { createAsk } from '../M2-approvals/binding.mjs';
-import { writeDoc } from '../M2-approvals/ask-store.mjs';
+import { consumeAsk } from '../M2-approvals/ask-store.mjs';
 import { sensorsFact } from './sensor-facts.mjs';
 import { answerCounts } from '../../shared/approval.mjs';
 
@@ -150,7 +150,8 @@ export async function cleanupCopy({ rec, rules, now, card, copiesRoot, sealRoot,
   // writer (L74), never written as the Dispatcher. Yes is delete.
   if (ask && ask.doc.state === 'answered') {
     const del = ask.doc.answer?.choice === 'Yes' && ask.doc.answer?.approves === true;
-    const consume = (extra = {}) => writeDoc(rec, 'ask', ask, { ...ask.doc, state: 'consumed', consumed_at: iso(now), kept_at_card_change: cardChange(rec, card), ...extra });
+    // Through M2's consumeAsk (lane 3 m-3, #72): no module outside M2 writes an ask itself.
+    const consume = (extra = {}) => consumeAsk({ record: rec, now: () => now }, ask.id, { kept_at_card_change: cardChange(rec, card), ...extra });
     if (!del) { consume(); return done('kept', ['Joe said keep']); }
     // A delete needs an answer M2 counted, as the undo tap does (audit MIN-5).
     const counted = answerCounts(rules, ask.doc, { approves: true });   // the one approval check (L81)

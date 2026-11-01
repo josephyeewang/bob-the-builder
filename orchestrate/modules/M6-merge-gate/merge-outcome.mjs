@@ -22,9 +22,43 @@
 //     An interrupted merge (refused, reasons include 'interrupted') whose Sensors reading `factId` shows its PR merged
 //     with a merge commit at the judged head → merged, and its card (verified or approved) → merged; the gate's next
 //     pass runs the post-merge audit as for any merged merge. Merged at another head, or no merge commit: left refused,
-//     and told. The Record's writer checks the same reading again.
+//     and told. The Record's writer checks the same reading again. The merge gets reconciled_at (its reasons keep
+//     'interrupted' as the history of what happened).
+//
+// Shared by both callers, the gate's own recover() and the Dispatcher's time limits (L94: one decision function):
+//   PR_FACT(n) → 'pr-<n>', Sensors' reading of pull request n.
+//   prReadingAfter(record, prNumber, mergeId) → the reading's doc, only when Sensors made it and its observed_at is
+//     after the merge's last write by the Record's clock; else null.
+//   openTooLong(record, mergeId, now, limitMs) → true once the merge's last write is at least limitMs old (an age the
+//     Record can't give counts as too long, so the limit only ever fires rather than waits forever); false when the
+//     limit itself is unknown.
+//   prReading(pr) → GitHub's pull request answer in the reading's shape { state, merged, merge_commit_sha, head_sha }.
 
 import { markReverted } from './undo.mjs';
+import { factFrom } from '../M9-record/permissions.mjs';
+
+export const PR_FACT = (n) => `pr-${n}`;
+// The refusal for a PR merged at a head the gate did not judge; whoever writes it has told the owner.
+export const MERGED_OUTSIDE = 'merged outside the gate, at a head the gate did not judge';
+
+export function prReadingAfter(record, prNumber, mergeId) {
+  if (prNumber == null) return null;
+  const id = PR_FACT(prNumber);
+  const f = record.read('fact', id);
+  if (!f?.doc || f.corrupt || !factFrom('sensors', { id, createdBy: record.meta?.('fact', id)?.createdBy ?? null }, 'pr-')) return null;
+  const seen = Date.parse(f.doc.observed_at ?? '');
+  const changed = Date.parse(record.meta?.('merge', mergeId)?.ts ?? '');
+  return Number.isFinite(seen) && Number.isFinite(changed) && seen > changed ? f.doc : null;
+}
+
+export function openTooLong(record, mergeId, now, limitMs) {
+  if (!Number.isFinite(limitMs)) return false;
+  const t = Date.parse(record.meta?.('merge', mergeId)?.ts ?? '');
+  const at = typeof now === 'function' ? now() : now;
+  return Number.isFinite(t) ? at - t >= limitMs : true;
+}
+
+export const prReading = (pr) => ({ state: pr?.state ?? null, merged: pr?.merged === true, merge_commit_sha: pr?.merge_commit_sha ?? null, head_sha: pr?.head?.sha ?? null });
 
 const ACTOR = 'merge_gate';
 const SHA = /^[0-9a-f]{40}$/;
@@ -51,7 +85,7 @@ export function settleMerge({ record, alert = () => {}, now }, id, { pr = null, 
   }
   let why = reason;
   if (pr?.merged === true) {
-    why = 'merged outside the gate, at a head the gate did not judge';
+    why = MERGED_OUTSIDE;
     alert({ type: 'merge_gate_unsure', merge: id, note: `pull request #${m.doc.pr} merged at ${short(pr.head_sha)}, not the judged ${short(m.doc.judged_head)}` });
   }
   if (typeof why !== 'string' || !why) return { ok: false, reason: 'a refusal needs its reason' };
@@ -69,7 +103,7 @@ export function reconcileMerge({ record, alert = () => {}, now }, id, { pr, fact
     alert({ type: 'merge_gate_unsure', merge: id, note: `pull request #${m.doc.pr} merged at ${short(pr.head_sha)}, not the judged ${short(m.doc.judged_head)}, or with no merge commit; merge ${id} stays refused` });
     return { ok: false, told: true, reason: `merged at ${short(pr.head_sha)}, not the judged ${short(m.doc.judged_head)}, or with no merge commit` };
   }
-  const w = record.write({ actor: ACTOR, entity: 'merge', id, expectRev: m.rev, doc: { ...m.doc, state: 'merged', merge_commit: pr.merge_commit_sha, merged_at: iso() }, kind: 'merge_outcome', data: { fact: factId } });
+  const w = record.write({ actor: ACTOR, entity: 'merge', id, expectRev: m.rev, doc: { ...m.doc, state: 'merged', merge_commit: pr.merge_commit_sha, merged_at: iso(), reconciled_at: iso() }, kind: 'merge_outcome', data: { fact: factId } });
   if (!w.ok) { alert({ type: 'merge_gate_write_refused', merge: id, to: 'merged', reason: w.reason }); return { ok: false, reason: `the reconcile was refused: ${w.reason}` }; }
   const card = m.doc.card ? record.read('card', m.doc.card) : null;
   if (!card?.doc) return { ok: true, card: null };
