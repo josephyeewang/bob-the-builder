@@ -288,7 +288,12 @@ export async function dispatcherPass({ rec, rules, now, account, sessions, probe
     // A wait's `what` names what it waits on; leaving waiting clears the wait (M9), and the diary keeps the move's kind.
     const what = doc.wait?.what;
     if (what === 'usage_band') {
-      if (unknownLong) { waitOn(rec, id, { who: 'joe', what: 'usage_unknown: usage has been unreadable for over a day', now, kind: 'usage_unknown' }); continue; }
+      // No card waits on Joe silently (L138 m4): this one is told, until delivered, besides the stretch's own alert below.
+      if (unknownLong) {
+        waitOnJoe(rec, id, { what: 'usage_unknown: usage has been unreadable for over a day', now, kind: 'usage_unknown', alert,
+          text: `card ${id}: usage has been unreadable for over a day, so it can't resume by itself; it waits on you` });
+        continue;
+      }
       // Not while usage is unknown either (audit 0b-6 r2 MIN-2): the gate would hold it, so it would only churn.
       if (b.band !== 'red' && b.band !== 'unknown' && b.own_building !== 'full') { if (move(rec, 'card', id, { state: 'ready' }, { kind: 'resume_usage_band' }).ok) out.resumed.push(id); }
     } else if (what === 'limit_hit') {

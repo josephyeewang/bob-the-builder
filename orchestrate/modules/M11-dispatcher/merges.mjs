@@ -21,12 +21,19 @@ import { startGate } from './gate.mjs';
 import { rolesFor } from '../M4-workshop/launcher/review-runner.mjs';
 import { relayReviewAlerts } from './review-requests.mjs';
 import { settleMerge, reconcileMerge, prReadingAfter, openTooLong as tooLongOpen, PR_FACT, MERGED_OUTSIDE, MERGED_OUTSIDE_UNTOLD, refusedTwice } from '../M6-merge-gate/merge-outcome.mjs';
-import { textAlerts, tellThen, alertText, heldAlerts } from './alerts.mjs';
+import { textAlerts, tellThen, alertText, heldAlerts, isQueued } from './alerts.mjs';
 import { sensorsFact as fromSensors } from './sensor-facts.mjs';
+import { FINAL_STATES } from '../../shared/record.mjs';
 
 // The pull request reading and the open-too-long clock are M6's, shared with the gate's own recover() (L94).
 export { PR_FACT };
 export const RECONCILED_FACT = (mergeId) => `reconciled-${mergeId}`;
+/**
+ * What M6 said while reconciling an interrupted merge that GitHub shows merged (L138 MAT-3): { text, at }, and
+ * `told_at` once a copy is delivered. The merge is merged by then, so nothing else would ask again: each pass re-tells
+ * a text with no told_at that is not already queued.
+ */
+export const RECONCILE_TELL_FACT = (mergeId) => `merge-reconcile-tell-${mergeId}`;
 /** The note that Joe was told a stopped merge has had no fresh PR reading past its limit (L89), so he is told once. */
 export const UNREAD_FACT = (mergeId) => `merge-unread-${mergeId}`;
 /** The note that Joe was told a repeat refusal could not be put on him (L116 M-1), once per card per refusal count. */
@@ -35,6 +42,28 @@ const iso = (ms) => new Date(ms).toISOString();
 // A told note's fields (the shape moves.mjs note() writes), as the mark of the alert it records: the one way this file
 // says the owner was told is tellThen, so the note is written only once the alert is delivered (L127; sendAlerts).
 const noted = (text, now) => ({ text, at: iso(now) });
+
+// The held alerts of a reconcile made (MAT-3): the text is recorded, then told through tellThen, whose mark (told_at)
+// is written only once a copy is delivered; retellReconciles asks again each pass until then. A text the Record would
+// not keep has no fact to ask again from, so it is told now either way, and the list says when that was not taken.
+function tellReconcile(rec, id, text, { alert, now }) {
+  const f = RECONCILE_TELL_FACT(id);
+  const cur = rec.read('fact', f);
+  const w = rec.write({ actor: 'dispatcher', entity: 'fact', id: f, expectRev: cur?.rev ?? 0, doc: { text, at: iso(now) }, kind: 'note' });
+  if (!w.ok) return [id, alert(text) === false ? `reconciled, not told: ${w.reason}, and the alert was not taken` : `reconciled, told once: ${w.reason}`];
+  tellThen(alert, text, { fact: RECONCILE_TELL_FACT(id), fields: { told_at: iso(now) }, kind: 'note' });
+  return [id, 'reconciled: told until delivered'];
+}
+function retellReconciles(rec, { alert, now }) {
+  const out = [];
+  for (const f of rec.list('fact')) {
+    if (!f.id.startsWith(RECONCILE_TELL_FACT('')) || !f.doc?.text || f.doc.told_at || isQueued(rec, f.id)) continue;
+    const mergeId = f.id.slice(RECONCILE_TELL_FACT('').length);
+    tellThen(alert, f.doc.text, { fact: RECONCILE_TELL_FACT(mergeId), fields: { told_at: iso(now) }, kind: 'note' });
+    out.push([mergeId, 'reconciled: told again']);
+  }
+  return out;
+}
 
 const fresh = (rec, prNumber, mergeId) => prReadingAfter(rec, prNumber, mergeId);
 const LANDED = ['checking', 'merging', 'merged', 'audited_ok', 'audit_flagged'];
@@ -57,6 +86,7 @@ const sensorsFact = (rec, id) => fromSensors(rec, id, 'pr-');
 export async function timeLimits({ rec, rules, now, b, running = [], gateAlive, hasReviewer, requestReview, reviewAlerts, alert, startsHeld = null, missing = [] }) {
   const done = [];
   const statusErrors = [];
+  done.push(...retellReconciles(rec, { alert, now }));
   // The limits are per-product keys, which the real engine answers only for a named product (L110, the M-1 class):
   // each is read for its card's product, where it is used, once per product per pass (L116 m2). A key the product's
   // rules lack skips only the step that needs it: that entry is listed, untouched, and the key goes back, with the
@@ -184,7 +214,12 @@ export async function timeLimits({ rec, rules, now, b, running = [], gateAlive, 
           // sends them as the one told alert, with this file's own line when M6 did not say why itself.
           const said = [];
           const r = reconcileMerge({ record: rec, alert: heldAlerts(said), now }, id, { pr, factId: PR_FACT(doc.pr) });
-          if (r.ok) { for (const e of said) textAlerts(alert)(e); done.push([id, 'interrupted, then merged: reconciled']); if (r.card) done.push([r.card, '->merged']); continue; }
+          if (r.ok) {
+            done.push([id, 'interrupted, then merged: reconciled']);
+            if (r.card) done.push([r.card, '->merged']);
+            if (said.length) done.push(tellReconcile(rec, id, said.map((e) => alertText(e)).join('; '), { alert, now }));
+            continue;
+          }
           const own = r.told ? [] : [`merge ${id} was recorded as interrupted but PR ${doc.pr} shows merged, and it could not be recorded merged (${r.reason}); check the card and its audit`];
           text = [...said.map((e) => alertText(e)), ...own].join('; ');
         }
@@ -244,10 +279,32 @@ function settled(rec, id, r, { now, alert }) {
 }
 
 // One record per request, never changed (L74: merge_request is create-only). The id is the card, its head and how many
-// refusals the gate has recorded (L129): a refusal is a new request, an edit to the card at the same head is not.
+// of this card's merges at this head have ENDED other than merged (L129, L138 MAT-2): a merge that ended is a new
+// request, an edit to the card at the same head is not. Every way the gate puts a card back ends its merge (a refusal
+// settleMerge records, check() refusing or holding at the lock, recover() in checking, refusal 8), so none of them
+// leaves the card waiting on a request already taken. The repeat ask still counts only attempts.merge_refusals (L116 m7).
 // The gate reads the id only as a key (its own merge names it; gather reads it back by id).
-export const MERGE_REQUEST = (card, head, refusals) => `mr-${card}-${String(head).slice(0, 12)}-r${refusals}`;
+export const MERGE_REQUEST = (card, head, ended) => `mr-${card}-${String(head).slice(0, 12)}-r${ended}`;
 const READY_TO_MERGE = ['verified', 'approved'];
+// A merge that ended without merging: a final merge state that a merged merge never reaches (M9: merged moves only to
+// audited_ok or audit_flagged).
+export const ENDED_UNMERGED = Object.freeze(FINAL_STATES.merge.filter((s) => !['audited_ok', 'audit_flagged'].includes(s)));
+/**
+ * `card`'s merges at `head` that ended without merging (the head is the one each request named): how many, and the
+ * newest card rev any of their requests was made at (null when none ended).
+ */
+export function endedMerges(rec, card, head) {
+  let n = 0;
+  let rev = null;
+  for (const m of rec.list('merge')) {
+    if (m.doc?.card !== card || !ENDED_UNMERGED.includes(m.doc.state)) continue;
+    const q = rec.read('merge_request', m.doc.request)?.doc;
+    if (q?.head !== head) continue;
+    n += 1;
+    if (Number.isInteger(q.rev) && (rev === null || q.rev > rev)) rev = q.rev;
+  }
+  return { n, rev };
+}
 
 // The worker session that made the card's work: its newest worker launch (the Dispatcher's own launch records).
 function workerSession(rec, cardId) {
@@ -298,8 +355,13 @@ export function requestMerges({ rec, rules, now, b, running = [], startsHeld = n
       done.push([id, pr?.many ? `not ready: ${pr.many} pull requests show head ${doc.head.slice(0, 7)}` : 'not ready: needs a pull request and its session']);
       continue;
     }
-    const mid = MERGE_REQUEST(id, doc.head, (doc.attempts?.merge_refusals ?? []).length);
+    const ended = endedMerges(rec, id, doc.head);
+    const mid = MERGE_REQUEST(id, doc.head, ended.n);
     if (rec.read('merge_request', mid)) continue;
+    // A merge the gate ended while the card did not change (refused on what it judged, say a red check) is not asked
+    // for again on every pass: each would be refused, and told to Joe, the same way. Any put-back changes the card (it went
+    // through merging), and so do refusal 8's needs_joe and Joe's Approve, so each of those is asked for again.
+    if (ended.rev !== null && rev <= ended.rev) { done.push([id, 'not requested again: the gate ended its merge and the card has not changed since']); continue; }
     const again = rec.list('merge_request').some((q) => q.doc?.card === id);
     // An undo is never held by the band (audit 0b-6 r2 MAT-4, L31): it is the way out of a bad change.
     // When this pass has no bands (an outage, or the main pass failed), only undos are requested.

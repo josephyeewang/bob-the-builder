@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { timeLimits, requestMerges, MERGE_REQUEST, PR_FACT, RECONCILED_FACT } from './merges.mjs';
+import { timeLimits, requestMerges, MERGE_REQUEST, PR_FACT, RECONCILED_FACT, RECONCILE_TELL_FACT } from './merges.mjs';
 import { KEYS as K } from './keys.mjs';
 import { settleMerge, reconcileMerge, openTooLong, prReadingAfter } from '../M6-merge-gate/merge-outcome.mjs';
 import { rulesWith, recWith, change, seed, setClock, undoEntries, T0, MIN, iso, withAlerts } from './fixtures.test-helper.mjs';
@@ -389,6 +389,11 @@ const requests = (rec) => rec.list('merge_request').map((q) => q.doc);
 const RISKY = (risky) => ({ classify: () => ({ tier: 1, risky, reasons: {} }) });
 // requestMerges has no quiet alert default (L116 m4): a test that expects no alert fails on one.
 const noAlert = (t) => assert.fail(`unexpected alert: ${t}`);
+// The gate ends the merge it made from the newest request (L138 MAT-2): every put-back, refused or not, ends one.
+const endMerge = (rec, reasons = ['refused']) => {
+  const q = rec.list('merge_request').map((x) => x.id).sort().at(-1);
+  seed(rec, 'merge', `merge-${q}`, { state: 'refused', card: rec.read('merge_request', q).doc.card, pr: 7, request: q, reasons, catch_ups: [] });
+};
 
 test('audit MAT-5: a merge request is held in red without merges, and for Tier-1 production work above 90%; otherwise written once', () => {
   const RED = { band: 'red', own_building: 'open', prodBlocked: false };
@@ -418,6 +423,7 @@ test('L129: an edit to the card at the same head makes no second request; a refu
   assert.ok(rec.read('card', 'C-1').rev > rev0, 'the card has a new rev');
   assert.deepEqual(requestMerges({ alert: noAlert, rec, rules: R, now: T0 + MIN, b: GREEN }), []);
   assert.equal(requests(rec).length, 1, 'no second request for an edit');
+  endMerge(rec, ['GitHub did not merge the judged head']);
   change(rec, 'card', 'C-1', { attempts: { merge_asks: 0, merge_refusals: ['GitHub did not merge the judged head'] } });
   assert.deepEqual(requestMerges({ alert: noAlert, rec, rules: R, now: T0 + 2 * MIN, b: GREEN }), [['C-1', 'merge requested again']]);
   assert.ok(rec.read('merge_request', MERGE_REQUEST('C-1', HA, 1)));
@@ -467,6 +473,7 @@ test('audit 0b-6 r2 MAT-4 / MAT-6 / MIN-9: an undo is requested in red, unknown 
   // MAT-6: the card changes (a new rev) -> a new request at that rev, once.
   const rec = readyRec();
   assert.deepEqual(requestMerges({ alert: noAlert, rec, rules: R, now: T0, b: GREEN }), [['C-1', 'merge requested']]);
+  endMerge(rec, ['stale']);
   change(rec, 'card', 'C-1', { attempts: { merge_refusals: ['stale'] } });
   assert.deepEqual(requestMerges({ alert: noAlert, rec, rules: R, now: T0 + MIN, b: GREEN }), [['C-1', 'merge requested again']]);
   assert.ok(rec.read('merge_request', MERGE_REQUEST('C-1', HA, 1)));
@@ -485,9 +492,11 @@ test('L110 m-1: the gate refusing the same merge twice in a row (here GitHub\'s 
   const go = (min) => requestMerges({ rec, rules: R, now: T0 + min * MIN, b: GREEN, alert: (t) => alerts.push(t) });
   assert.deepEqual(go(0), [['C-1', 'merge requested']]);
   // The gate refuses it (land(): settleMerge puts the card back to verified with the reason): it is asked again once.
+  endMerge(rec, [NO]);
   change(rec, 'card', 'C-1', { attempts: { merge_refusals: [NO] } });
   assert.deepEqual(go(1), [['C-1', 'merge requested again']]);
   // Refused again for the same reason: Joe is asked, and no third request is written.
+  endMerge(rec, [NO]);
   change(rec, 'card', 'C-1', { attempts: { merge_refusals: [NO, NO] } });
   assert.deepEqual(go(2), [['C-1', 'waiting on joe']]);
   const c = rec.read('card', 'C-1').doc;
@@ -643,3 +652,47 @@ test('N5: an in_review card read first (15 min) does not lend its limit to a che
   await pass(rec, 20);
   assert.equal(rec.read('merge', 'M-1').doc.state, 'checking', '20 min is under checking_max_min (30)');
 });
+
+// L138 MAT-3 (and m1): what M6 says while reconciling is told until a copy is delivered. The merge is merged by then,
+// so nothing else would ask again. The real outbox; the Record's clock runs ahead of the tick's.
+// Two ways the first copy is lost: the port refuses the send (the entry stays queued and goes out next pass), or the
+// outbox refuses the entry (nothing is queued, so the next pass queues it again from the recorded text).
+for (const lost of ['send refused', 'queue refused']) {
+  test(`L138 MAT-3: a reconcile whose card moved on is told on a later pass (${lost}), exactly once`, async () => {
+    const rec = recWith([
+      ['card', 'C-1', { state: 'running', head: HB }],
+      ['merge', 'M-1', { card: 'C-1', pr: 7, state: 'refused', reasons: ['interrupted'], judged_head: HA, changed_at: at(5) }],
+      ['fact', PR_FACT(7), { state: 'closed', merged: true, merge_commit_sha: MC, head_sha: HA, observed_at: at(6) }],
+    ]);
+    let answer = lost !== 'send refused';
+    let queueOk = lost !== 'queue refused';
+    const got = [];
+    const port = (t) => { got.push(typeof t === 'string' ? t : t.text); return answer; };
+    const tickAt = async (min) => {
+      const now = T0 + min * MIN;
+      setClock(rec.base ?? rec, now + 1500);
+      const { p } = ports();
+      return withAlerts(rec.base ?? rec, now, port, (real) => {
+        const alert = Object.assign((t, o) => (queueOk ? real(t, o) : false), { queues: true });
+        return timeLimits({ rec, rules: R, now, b: GREEN, ...p, alert });
+      });
+    };
+    const moves = await tickAt(7);
+    assert.deepEqual(moves, [['M-1', 'interrupted, then merged: reconciled'], ['M-1', 'reconciled: told until delivered']]);
+    assert.equal(rec.read('merge', 'M-1').doc.state, 'merged');
+    assert.equal(rec.read('card', 'C-1').doc.state, 'running', 'a card that moved on is not moved');
+    assert.equal(got.length, lost === 'send refused' ? 1 : 0);
+    assert.match(rec.read('fact', RECONCILE_TELL_FACT('M-1')).doc.text, /merge M-1 is recorded merged, but card C-1 is running/);
+    assert.equal(rec.read('fact', RECONCILE_TELL_FACT('M-1')).doc.told_at, undefined, 'a lost copy marks nothing');
+    answer = true;
+    queueOk = true;
+    const again = await tickAt(8);
+    assert.deepEqual(again, lost === 'queue refused' ? [['M-1', 'reconciled: told again']] : [], 'a queued entry is not queued twice');
+    const told = got.filter((t) => /merge M-1 is recorded merged, but card C-1 is running/.test(t));
+    assert.equal(told.length, lost === 'send refused' ? 2 : 1, 'delivered on the next pass');
+    assert.ok(rec.read('fact', RECONCILE_TELL_FACT('M-1')).doc.told_at, 'marked once delivered');
+    const n = got.length;
+    for (const min of [9, 10, 11]) assert.deepEqual(await tickAt(min), []);
+    assert.equal(got.length, n, 'told exactly once once delivered (P20)');
+  });
+}

@@ -20,7 +20,7 @@ import { gatePass, queueOrder, NOT_GREEN_LINE } from './gate.mjs';
 import { readMark } from './mark.mjs';
 import { readNeedsJoe } from './checker-entry.mjs';
 import { gatherFacts } from './gather.mjs';
-import { timeLimits } from '../M11-dispatcher/merges.mjs';
+import { timeLimits, requestMerges } from '../M11-dispatcher/merges.mjs';
 import { MERGED_OUTSIDE, MERGED_OUTSIDE_UNTOLD } from './merge-outcome.mjs';
 
 const POLICY = 'tiers: {}\n';
@@ -935,4 +935,107 @@ test('L70 planted: a failing verdict file with a second name still refuses the m
   assert.notEqual(m.doc.state, 'merged');
   assert.ok(m.doc.reasons.some((x) => x.startsWith('5:') && /the reviewer session R-C-1 did not pass/.test(x)), m.doc.reasons.join(' | '));
   assert.ok(!m.doc.reasons.some((x) => /can't be counted|more than one name/.test(x)), m.doc.reasons.join(' | '));
+});
+
+// L138 MAT-2: every way the gate puts a card back ends its merge, so the Dispatcher's next pass asks for the merge again
+// (M11 requestMerges, its real id rule, over this real Record); a merge ended while the card did not change is not
+// asked for on every pass.
+const M11_RULES = fakeRules({ values: { 'usage.red_runs': [] } });
+const GREEN_BAND = { band: 'green', own_building: 'open', prodBlocked: false };
+function dispatcherAsks(w, id = 'C-1', { pr = 7, head } = {}) {
+  const { env } = w;
+  if (!env.record.read('launch', 'launch-S-1')) launch(env, id, 'S-1', 'worker');
+  const f = env.record.read('fact', `pr-${pr}`);
+  const reading = { type: 'pr', head_sha: head, state: 'open', merged: false, observed_at: new Date(env.clock.t).toISOString() };
+  must(env.record.write({ actor: 'sensors', entity: 'fact', id: `pr-${pr}`, expectRev: f?.rev ?? 0, doc: reading }), 'pr reading');
+  return requestMerges({ rec: env.record, rules: M11_RULES, now: env.clock.t, b: GREEN_BAND, alert: (t) => assert.fail(`unexpected alert: ${t}`) });
+}
+const mergesOf = (w, id = 'C-1') => w.env.record.list('merge').filter((m) => m.doc.card === id).sort((a, b) => (a.id < b.id ? -1 : 1));
+
+test('L138 MAT-2: check() refuses at the lock and puts the card back; the next Dispatcher pass asks again, and that merge lands', async () => {
+  const w = world();
+  const head = verifiedCard(w, 'C-1', { request: false });
+  assert.deepEqual(dispatcherAsks(w, 'C-1', { head }), [['C-1', 'merge requested']]);
+  // The check turns red between the queue's judgement and the one under the lock.
+  const base = w.ctx.record;
+  w.ctx.record = Object.create(base, { write: { value: (x) => {
+    const r = base.write(x);
+    if (r.ok && x.entity === 'merge' && x.doc?.state === 'checking') w.g.checks.set(head, [{ name: 'test', app: { id: 1 }, head_sha: head, status: 'completed', conclusion: 'failure' }]);
+    return r;
+  } } });
+  await gatePass(w.ctx);
+  w.ctx.record = base;
+  assert.deepEqual(mergesOf(w).map((m) => m.doc.state), ['refused']);
+  assert.equal(cardOf(w).state, 'verified', 'put back by check()');
+  assert.equal((cardOf(w).attempts?.merge_refusals ?? []).length, 0, 'not a refusal the repeat ask counts (L116 m7)');
+  w.g.checks.delete(head);
+  tick(w, 1);
+  assert.deepEqual(dispatcherAsks(w, 'C-1', { head }), [['C-1', 'merge requested again']]);
+  assert.equal(w.env.record.list('merge_request').length, 2);
+  await gatePass(w.ctx);
+  assert.deepEqual(mergesOf(w).map((m) => m.doc.state), ['refused', 'merged']);
+  assert.equal(cardOf(w).state, 'merged');
+});
+
+test('L138 MAT-2: recover() refuses a merge stopped in checking and puts the card back; the next Dispatcher pass asks again', async () => {
+  const w = world(limited());
+  const head = verifiedCard(w, 'C-1', { request: false });
+  assert.deepEqual(dispatcherAsks(w, 'C-1', { head }), [['C-1', 'merge requested']]);
+  const base = w.ctx.record;
+  w.ctx.record = Object.create(base, { read: { value: (e, id) => {
+    if (e === 'card' && mergeOf(w)?.doc.state === 'checking') throw new Error('the gate process stopped');
+    return base.read(e, id);
+  } } });
+  await gatePass(w.ctx).catch(() => {});
+  w.ctx.record = base;
+  tick(w, 1);
+  await gatePass(w.ctx);
+  assert.deepEqual(mergesOf(w).map((m) => [m.doc.state, m.doc.reasons]), [['refused', ['GitHub did not merge the judged head']]]);
+  assert.equal(cardOf(w).state, 'verified', 'put back by recover()');
+  tick(w, 1);
+  assert.deepEqual(dispatcherAsks(w, 'C-1', { head }), [['C-1', 'merge requested again']]);
+  await gatePass(w.ctx);
+  assert.equal(cardOf(w).state, 'merged');
+});
+
+test('L138 MAT-2: refusal 8 sets needs_joe; once Joe approves the card at the same head, the next Dispatcher pass asks again', async () => {
+  const w = world({ values: { 'product.cutover_stage': 'second' } });
+  realRules(w, { deep: true });
+  const head = verifiedCard(w, 'C-1', { files: PLANTED['a risky act with no Approve'].files, request: false });
+  assert.deepEqual(dispatcherAsks(w, 'C-1', { head }), [['C-1', 'merge requested']]);
+  await gatePass(w.ctx);
+  const first = mergesOf(w);
+  assert.deepEqual(first.map((m) => m.doc.state), ['refused']);
+  assert.ok(first[0].doc.reasons.some((x) => x.startsWith('8:')), first[0].doc.reasons.join(' | '));
+  assert.equal(cardOf(w).needs_joe, true);
+  // While it waits on his Approve the Record takes no request for it (M9), and says so each pass.
+  tick(w, 1);
+  assert.deepEqual(dispatcherAsks(w, 'C-1', { head }), [['C-1', 'merge request not recorded: card C-1 is verified and needs the owner; no merge request yet']]);
+  assert.equal(w.env.record.list('merge_request').length, 1);
+  // Joe approves (the same head): asked again.
+  must(put(w.env.review, 'approvals', 'card', 'C-1', { state: 'approved' }), 'approved');
+  tick(w, 1);
+  assert.deepEqual(dispatcherAsks(w, 'C-1', { head }), [['C-1', 'merge requested again']]);
+  assert.equal(w.env.record.list('merge_request').length, 2);
+});
+
+test('L138 MAT-2: a merge the gate refused while the card did not change is not asked for again on every pass', async () => {
+  const w = world();
+  const head = verifiedCard(w, 'C-1', { request: false });
+  w.g.checks.set(head, [{ name: 'test', app: { id: 1 }, head_sha: head, status: 'completed', conclusion: 'failure' }]);
+  assert.deepEqual(dispatcherAsks(w, 'C-1', { head }), [['C-1', 'merge requested']]);
+  await gatePass(w.ctx);
+  assert.deepEqual(mergesOf(w).map((m) => m.doc.state), ['refused']);
+  assert.equal(cardOf(w).state, 'verified', 'refused in the queue: the card never left verified');
+  for (let i = 0; i < 3; i++) {
+    tick(w, 1);
+    assert.deepEqual(dispatcherAsks(w, 'C-1', { head }), [['C-1', 'not requested again: the gate ended its merge and the card has not changed since']]);
+    await gatePass(w.ctx);
+  }
+  assert.equal(w.env.record.list('merge_request').length, 1);
+  assert.equal(w.env.record.list('merge').length, 1, 'no refusal (and no alert) per pass');
+  // The card changes (an edit at the same head): asked again.
+  must(put(w.env.record, 'dispatcher', 'card', 'C-1', { attempts: { merge_asks: 0 } }), 'a change');
+  tick(w, 1);
+  assert.deepEqual(dispatcherAsks(w, 'C-1', { head }), [['C-1', 'merge requested again']]);
 });

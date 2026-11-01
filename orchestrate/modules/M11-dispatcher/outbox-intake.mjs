@@ -18,9 +18,21 @@ import { join } from 'node:path';
 import { readOutboxFile, OUTBOX_NAME } from '../M4-workshop/launcher/outbox.mjs';
 import { DESIGN_PROFILES } from '../M4-workshop/launcher/role-profiles.mjs';
 import { tellThen, isQueued } from './alerts.mjs';
+import { OUTBOX_KINDS } from '../../shared/record.mjs';
 
 export const READONLY_REQUESTS = Object.freeze({ think: 'reviewer', scout: 'scout', write: 'writer' });
 export const SETTLE_MS = 2000;
+
+// L140: a kind whose only job is to start something has no record rule, so the Record has nothing to take from it
+// (the real one answers "no record rule yet"). Once its read-only session starts, the hand-in is done: it is marked
+// applied here, with no applyOutbox call and no alert. Lane 1's table marks such kinds `record: 'none'`; until then a
+// read-only request kind with no entity is the same thing.
+export const startsOnly = (kind) => {
+  const spec = OUTBOX_KINDS[`${kind}-`];
+  return Boolean(spec) && (spec.record === 'none' || (!spec.entity && Object.hasOwn(READONLY_REQUESTS, kind)));
+};
+// The answer applyOutbox gives a `record: 'none'` kind (L140): handled, not refused.
+const notARecord = (applied) => applied?.not_a_record === true || applied?.outcome === 'not_a_record';
 
 const sha256 = (s) => createHash('sha256').update(s).digest('hex');
 const appliedId = (sessionId, name) => `intake-applied-${sessionId}-${name}`;
@@ -46,6 +58,9 @@ export async function intakePass({ rec, sessions, wait, alert, note, startReadon
   list = (d) => readdirSync(d), look = statOf, read = readOutboxFile, vet = () => null }) {
   const out = [];
   const seen = [];
+  // L138 m3: a refused or interrupted hand-in is told until a copy is delivered, from its recorded fact, whether or
+  // not its file is still in the outbox (a file removed before the tell went out is still told).
+  retellHandIns(rec, alert);
   for (const s of sessions) {
     let names;
     try { names = list(s.outbox).filter((n) => !n.startsWith('.')); } catch { out.push({ session: s.sessionId, skipped: 'outbox unreadable' }); continue; }
@@ -90,9 +105,6 @@ export async function intakePass({ rec, sessions, wait, alert, note, startReadon
     }
     if (prev) {
       const was = prev.doc.state;
-      if (['refused', 'interrupted'].includes(was) && prev.doc.alert_text && prev.doc.told_state !== was && !isQueued(rec, key)) {
-        tellThen(alert, prev.doc.alert_text, { fact: appliedId(s.sessionId, name), fields: { told_state: was }, kind: 'outbox_told' });
-      }
       if (prev.doc.sha256 === hash && was !== 'waiting') { r.already = true; continue; }
       // A file that was never used (refused or interrupted) may be handed in again with new content.
       if (prev.doc.sha256 !== hash && !['refused', 'interrupted'].includes(was)) {
@@ -122,6 +134,13 @@ export async function intakePass({ rec, sessions, wait, alert, note, startReadon
         r.waiting = reason;
         continue;
       }
+      // L140: the session started, and that was the hand-in's whole job.
+      if (startsOnly(file.kind)) {
+        put({ state: 'applied', started: true, applied_at: new Date(now).toISOString() }, 'outbox_applied');
+        r.applied = true;
+        r.started = true;
+        continue;
+      }
     }
     // Claim the key first, so a crash after the apply cannot apply the file a second time.
     const claim = put({ state: 'applying' }, 'outbox_claim');
@@ -129,6 +148,8 @@ export async function intakePass({ rec, sessions, wait, alert, note, startReadon
     let applied;
     try { applied = rec.applyOutbox({ role: s.role, sessionId: s.sessionId, card: s.card }, path); }
     catch (e) { applied = { ok: false, reason: e.message }; }
+    // L140: a kind with no record rule is handled, not refused, so it is no alert.
+    if (notARecord(applied)) applied = { ok: true, not_a_record: true };
     r.applied = applied.ok;
     // applied_at lets the Lead restart tell a hand-off written after WRAP from an older one (audit 0b-6 r2 MAT-3).
     // A refusal is recorded with its text first, then told until delivered (L130 M8).
@@ -142,4 +163,16 @@ export async function intakePass({ rec, sessions, wait, alert, note, startReadon
     }
   }
   return out;
+}
+
+// Each pass, before any file is looked at: every recorded hand-in left refused or interrupted, with its text, not
+// marked told for that state and not already queued, is told again (L130 M7, M8; L138 m3).
+function retellHandIns(rec, alert) {
+  for (const f of rec.list('fact')) {
+    if (!f.doc?.session || !f.doc?.name || f.id !== appliedId(f.doc.session, f.doc.name)) continue;
+    const was = f.doc.state;
+    if (!['refused', 'interrupted'].includes(was) || !f.doc.alert_text || f.doc.told_state === was) continue;
+    if (isQueued(rec, appliedId(f.doc.session, f.doc.name))) continue;
+    tellThen(alert, f.doc.alert_text, { fact: appliedId(f.doc.session, f.doc.name), fields: { told_state: was }, kind: 'outbox_told' });
+  }
 }

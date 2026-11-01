@@ -69,3 +69,50 @@ test('L130: a tell recorded for an older wait is not re-told under a newer one',
   assert.deepEqual(await w.pass(), []);
   assert.deepEqual(w.got, []);
 });
+
+// L138 MAT-1: the Record stamps a wait with its own clock. The tick's `now` runs behind it here, so the wait's stored
+// since is not the since the tick asked for; the tell is matched on the stored one.
+for (const skew of [5, 1500]) {
+  test(`L138 MAT-1: the Record's clock ${skew} ms ahead of the tick; a refused first tell is told on a later pass, exactly once`, async () => {
+    const w = world();
+    let answer = false;
+    const port = (t) => { w.got.push(typeof t === 'string' ? t : t.text); return answer; };
+    const tickNow = () => w.E.clock.t - skew;
+    const r = await withAlerts(w.E.record, tickNow(), port, (alert) => waitOnJoe(w.E.record, 'C-1', { text: 'card C-1 needs you', alert, now: tickNow(), ...ask }));
+    assert.equal(r.ok, true, r.reason);
+    assert.equal(w.card().wait.since, new Date(w.E.clock.t).toISOString(), 'the Record stamped its own time');
+    assert.notEqual(w.card().wait.since, w.tell().since, 'not the time the tick asked at');
+    assert.equal(w.tell().wait_since, w.card().wait.since, 'the stored since is copied onto the tell');
+    assert.deepEqual(w.got, ['card C-1 needs you'], 'sent once and refused');
+    assert.equal(w.tell().told_since, undefined, 'a refused send marks nothing');
+    answer = true;
+    const passAt = () => withAlerts(w.E.record, tickNow(), port, (alert) => retellWaits({ rec: w.E.record, alert }));
+    w.E.clock.t += MIN;
+    await passAt();
+    assert.deepEqual(w.got, ['card C-1 needs you', 'card C-1 needs you'], 'told again on the next pass');
+    assert.equal(w.tell().told_since, w.card().wait.since, 'marked told for the stored wait');
+    for (let i = 0; i < 3; i++) { w.E.clock.t += MIN; assert.deepEqual(await passAt(), []); }
+    assert.equal(w.got.length, 2, 'told exactly once once delivered (P20)');
+  });
+}
+
+test('L138 MAT-1: a wait whose stored since could not be copied onto the tell is matched by the window, copied, then told', async () => {
+  const w = world();
+  const real = w.E.record;
+  let refuse = true;
+  const rec = Object.create(real, { write: { value: (x) => (refuse && x.entity === 'fact' && x.id === WAIT_TELL_FACT('C-1') && x.doc?.wait_since ? { ok: false, reason: 'busy' } : real.write(x)) } });
+  const r = await withAlerts(rec, w.E.clock.t - 1500, w.port, (alert) => waitOnJoe(rec, 'C-1', { text: 'needs you', alert, now: w.E.clock.t - 1500, ...ask }));
+  assert.equal(r.ok, true, r.reason);
+  assert.equal(w.card().state, 'waiting');
+  assert.equal(w.tell().wait_since, undefined, 'the copy was refused');
+  assert.deepEqual(w.got, [], 'nothing queued under a since the tell does not hold');
+  refuse = false;
+  w.E.clock.t += MIN;
+  assert.deepEqual(await w.pass(), [['C-1', 'told again: waits on joe']]);
+  assert.equal(w.tell().wait_since, w.card().wait.since, 'copied on by the next pass');
+  assert.equal(w.tell().told_since, w.card().wait.since);
+  assert.deepEqual(w.got, ['needs you']);
+  w.E.clock.t += MIN;
+  assert.deepEqual(await w.pass(), []);
+  assert.equal(w.got.length, 1);
+});
