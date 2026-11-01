@@ -2167,7 +2167,7 @@ const FACT_FAMILIES = Object.freeze(Object.fromEntries(Object.entries({
   dispatcher: ['unsent-alerts', 'outage', 'rules-missing-alert', 'compactions-', 'stop-', 'host-lock-', 'pause-',
     'undo-held-', 'undo-note-', 'step-error-', 'last-full-pass', 'band-usage', 'unknown-usage-alert', 'lead-restart-',
     'phone-link', 'phone-link-', 'intake-applied-', 'intake-note', 'hold-', 'review-alert-', 'reconciled-', 'cleanup-',
-    'pass-lock-note', 'tab-heartbeat-'],
+    'pass-lock-note', 'tab-heartbeat-', 'merge-unread-'],
   live_check: [],
 }).map(([k, v]) => [k, Object.freeze(v)])));
 
@@ -2293,6 +2293,7 @@ const { createHash } = __bob_node_crypto;
 Object.defineProperties(__bob_e, {
   TIER1_BAR: { get: () => TIER1_BAR, enumerable: true },
   canonicalJson: { get: () => canonicalJson, enumerable: true },
+  cleanPath: { get: () => cleanPath, enumerable: true },
   planFingerprint: { get: () => planFingerprint, enumerable: true },
 });
 // plan-fingerprint.mjs — the one fingerprint of a card's plan, which the owner's go binds to (0b-5 M7, 0b-2 R2-M12, R2-M5).
@@ -2327,11 +2328,13 @@ function canonicalJson(v) {
   throw new Error(`cannot fingerprint a ${typeof v}`);
 }
 
+// The one rule for a plan's file path, exported so a plan's wave check (M3) compares the same cleaned form (L87 M-1).
+// Returns the cleaned path, or null when it is not one plain path.
 function cleanPath(p) {
   if (typeof p !== 'string' || !p) return null;
   let q = p.normalize('NFC');
   while (q.startsWith('./')) q = q.slice(2);
-  if (!q || q.endsWith('/') || q.startsWith('/') || /[*?[\]{}]/.test(q) || q.includes('\\') || q.split('/').some((s) => s === '' || s === '.' || s === '..')) return null;
+  if (!q || q.endsWith('/') || q.startsWith('/') || /[*?[\]{}]/.test(q) || q.includes('\\') || /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/.test(q) || q.split('/').some((s) => s === '' || s === '.' || s === '..')) return null;
   return q;
 }
 

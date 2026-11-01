@@ -57,14 +57,16 @@ Facts the tick writes: `signed-in-account` is read (missing or stale: nothing st
 
 ## Facts this folder reads or writes (the contracts)
 
+For a fact M12 writes, the shape is the fields this folder reads, the same list as `READ_FACTS` in `read-facts.mjs` (read-facts.test.mjs keeps the two equal). The writer may store more; it must store these.
+
 | Fact id | Written by | Shape |
 |---|---|---|
-| `usage-<account>` | M12 Sensors (lane 3), to the review's M5 contract | `{ account, observed_at, source, week: {used_pct, resets_at}, h5: {used_pct, resets_at} }` |
+| `usage-<account>` | M12 Sensors (lane 3), to the review's M5 contract | `{ account, observed_at, week: {used_pct, resets_at}, h5: {used_pct, resets_at} }` |
 | `band-usage` | this folder | `{ band: green/amber/red/unknown, own_building, reason, account, decided_at, unknown_since }` |
 | `signed-in-account` | M12 | `{ account, observed_at }` |
 | `pr-<n>` | M12 | `{ state, merged, merge_commit_sha, head_sha, observed_at }` |
 | `outage` | this folder | `{ state: open/ended, ... }` |
-| `limit-hit-<account>` | M12 (screen rules) or a worker's exit result | `{ resets_at }` |
+| `limit-hit-<account>` | M12 (screen rules) or a worker's exit result | `{ resets_at, observed_at }` |
 | `network-up`, `frontdoor-reachable`, `minibase-running` | M12 | `{ value: true / false / "unknown", observed_at }` |
 | `phone-link` | this folder | the phone-link step's memory |
 | `lead-restart-<session>` | this folder | the Lead restart's phase |
@@ -87,7 +89,7 @@ Card waits use `waiting` with every wait field (`wait`: who, what, since, next_c
 
 ## New rules keys (for lane 1's schema)
 
-`usage.pace_min_share`, `caps.shakedown`, `usage.bands.amber.editing_per_product`, `usage.bands.amber.editing_per_mac`, `timeouts.cancel_grace_min`, `timeouts.park_wait_min`, `timeouts.dead_quiet_min`, `timeouts.claimed_no_session_min`, `timeouts.checking_max_min`, `timeouts.reporting_max_min`, `timeouts.in_review_no_reviewer_min`, `timeouts.front_door_stuck_min`, `timeouts.usage_unknown_max_min`, `outage.min_dead`, `outage.share`. The list is `NEW_KEYS` in `keys.mjs`. `claims.stuck_min` is read too (L72), from the Record's own key, not a new one. A missing key refuses (start nothing), except the two defaults there: the pace floor (L13) and shakedown on.
+`usage.pace_min_share`, `caps.shakedown`, `usage.bands.amber.editing_per_product`, `usage.bands.amber.editing_per_mac`, `timeouts.cancel_grace_min`, `timeouts.park_wait_min`, `timeouts.dead_quiet_min`, `timeouts.checking_max_min`, `timeouts.merging_open_max_min`, `timeouts.reporting_max_min`, `timeouts.in_review_no_reviewer_min`, `timeouts.front_door_stuck_min`, `timeouts.usage_unknown_max_min`, `outage.min_dead`, `outage.share`. The list is `NEW_KEYS` in `keys.mjs`. `claims.stuck_min` is read too (L72), from the Record's own key, not a new one. A missing key refuses (start nothing), except the two defaults there: the pace floor (L13) and shakedown on.
 
 ## Open items and deviations (written down so they are not lost)
 

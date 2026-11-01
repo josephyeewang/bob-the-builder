@@ -19,22 +19,22 @@ import { move, waitOn, note, ageMs } from './moves.mjs';
 import { startGate } from './gate.mjs';
 import { rolesFor } from '../M4-workshop/launcher/review-runner.mjs';
 import { relayReviewAlerts } from './review-requests.mjs';
-import { settleMerge, reconcileMerge } from '../M6-merge-gate/merge-outcome.mjs';
+import { settleMerge, reconcileMerge, prReadingAfter, openTooLong as tooLongOpen, PR_FACT, MERGED_OUTSIDE } from '../M6-merge-gate/merge-outcome.mjs';
 import { textAlerts } from './alerts.mjs';
 import { sensorsFact as fromSensors } from './sensor-facts.mjs';
 
-export const PR_FACT = (n) => `pr-${n}`;
+// The pull request reading and the open-too-long clock are M6's, shared with the gate's own recover() (L94).
+export { PR_FACT };
 export const RECONCILED_FACT = (mergeId) => `reconciled-${mergeId}`;
+/** The note that Joe was told a stopped merge has had no fresh PR reading past its limit (L89), so he is told once. */
+export const UNREAD_FACT = (mergeId) => `merge-unread-${mergeId}`;
 const iso = (ms) => new Date(ms).toISOString();
 
+const fresh = (rec, prNumber, mergeId) => prReadingAfter(rec, prNumber, mergeId);
+const LANDED = ['checking', 'merging', 'merged', 'audited_ok', 'audit_flagged'];
+const landedElsewhere = (rec, id, doc) => rec.list('merge').some((m) => m.id !== id && m.doc?.pr === doc.pr && LANDED.includes(m.doc.state));
 // A Sensors reading is proof only from Sensors' own family, made by Sensors (L74 addendum).
 const sensorsFact = (rec, id) => fromSensors(rec, id, 'pr-');
-const fresh = (rec, prNumber, mergeId) => {
-  const f = prNumber == null ? null : sensorsFact(rec, PR_FACT(prNumber));
-  const seen = Date.parse(f?.doc?.observed_at ?? '');
-  const changed = Date.parse(rec.meta('merge', mergeId)?.ts ?? '');
-  return Number.isFinite(seen) && Number.isFinite(changed) && seen > changed ? f.doc : null;
-};
 
 /**
  * One pass of the time limits. Ports: `gateAlive()` (the Merge Gate's process), `alert(text)`, and the review
@@ -104,23 +104,39 @@ export async function timeLimits({ rec, rules, now, b, running = [], gateAlive, 
       done.push(...settled(rec, id, settleMerge({ record: rec, alert: textAlerts(alert), now }, id, { reason: 'timeout' }), { now, alert }));
     } else if (doc.state === 'merging' && !gateAlive()) {
       const pr = fresh(rec, doc.pr, id);
-      if (!pr) { done.push([id, 'waiting for a fresh PR reading']); continue; }
+      if (!pr) {
+        // No reading since the merge's last write, so the outcome is unknown and the merge stays merging (never refused
+        // on no word). Past the merging limit, Joe is told once (L89): the Sensors may not be reading this PR at all.
+        const since = (ms) => (Number.isFinite(ms) ? `${Math.round(ms / 60_000)} min` : 'longer than the merging limit');
+        if (tooLongOpen(rec, id, now, lim.mergingOpen) && !rec.read('fact', UNREAD_FACT(id))) {
+          alert(`merge ${id}: the Merge Gate stopped mid-merge and PR ${doc.pr} has had no fresh reading for ${since(ageMs(rec, 'merge', id, now, { since: 'write' }))}; it stays merging until the Sensors read the PR (check that they are running)`);
+          note(rec, UNREAD_FACT(id), `merge ${id}: no fresh reading of PR ${doc.pr} past the merging limit; the owner was told`, { now });
+        }
+        done.push([id, 'waiting for a fresh PR reading']); continue;
+      }
       // Never refused while the outcome is unknown: GitHub may still be finishing the merge (L85 M-1 a).
       const final = pr.merged === true || pr.state === 'closed';
-      const openTooLong = !final && ageMs(rec, 'merge', id, now, { since: 'write' }) >= lim.mergingOpen;
+      const openTooLong = !final && tooLongOpen(rec, id, now, lim.mergingOpen);
       if (!final && !openTooLong) { done.push([id, 'merge outcome not known yet: the PR is still open']); continue; }
       const r = settleMerge({ record: rec, alert: textAlerts(alert), now }, id, { pr, reason: 'interrupted', openTooLong });
       if (openTooLong && r.ok && r.outcome === 'refused') alert(`merge ${id}: the Merge Gate stopped mid-merge and PR ${doc.pr} is still open after ${Math.round(lim.mergingOpen / 60_000)} min; recorded as interrupted, and the card goes back to be merged again`);
       done.push(...settled(rec, id, r, { now, alert }));
-    } else if (doc.state === 'refused' && (doc.reasons ?? []).includes('interrupted') && !rec.read('fact', RECONCILED_FACT(id))) {
-      // GitHub later shows an interrupted merge merged: M6's reconcile records it merged when it was merged at the judged
-      // head (L85 M-1 b). Otherwise it stays refused, the owner is told once, and the note keeps it from being told again.
+    } else if (doc.state === 'refused' && !(doc.reasons ?? []).includes(MERGED_OUTSIDE) && !rec.read('fact', RECONCILED_FACT(id)) && !landedElsewhere(rec, id, doc)) {
+      // A refused merge whose PR GitHub later shows merged, by a reading after the refusal. An interrupted one goes to
+      // M6's reconcile, which records it merged when it was merged at the judged head (L85 M-1 b). Any other refusal, or
+      // a reconcile that can't be made, stays refused and the owner is told once (L94 point 3: no refusal wording is
+      // silent); the note keeps it from being told again. Skipped when another merge of the same PR is under way or
+      // merged: that merge is the PR's record, so this one is neither reconciled nor told (the PR is merged once).
       const pr = fresh(rec, doc.pr, id);
       if (pr?.merged === true) {
-        const r = reconcileMerge({ record: rec, alert: textAlerts(alert), now }, id, { pr, factId: PR_FACT(doc.pr) });
-        if (r.ok) { done.push([id, 'interrupted, then merged: reconciled']); if (r.card) done.push([r.card, '->merged']); continue; }
-        if (!r.told) alert(`merge ${id} was recorded as interrupted but PR ${doc.pr} shows merged, and it could not be recorded merged (${r.reason}); check the card and its audit`);
-        note(rec, RECONCILED_FACT(id), `merge ${id} was recorded as interrupted but PR ${doc.pr} shows merged; the owner was told`, { now });
+        if ((doc.reasons ?? []).includes('interrupted')) {
+          const r = reconcileMerge({ record: rec, alert: textAlerts(alert), now }, id, { pr, factId: PR_FACT(doc.pr) });
+          if (r.ok) { done.push([id, 'interrupted, then merged: reconciled']); if (r.card) done.push([r.card, '->merged']); continue; }
+          if (!r.told) alert(`merge ${id} was recorded as interrupted but PR ${doc.pr} shows merged, and it could not be recorded merged (${r.reason}); check the card and its audit`);
+        } else {
+          alert(`merge ${id} was refused (${(doc.reasons ?? []).join('; ') || 'no reason given'}) but PR ${doc.pr} shows merged; check the card and its audit`);
+        }
+        note(rec, RECONCILED_FACT(id), `merge ${id} was recorded as refused but PR ${doc.pr} shows merged; the owner was told`, { now });
         done.push([id, 'refused but merged: told']);
       }
     }

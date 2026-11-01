@@ -273,9 +273,14 @@ export async function dispatcherPass({ rec, rules, now, account, sessions, probe
       // Not while usage is unknown either (audit 0b-6 r2 MIN-2): the gate would hold it, so it would only churn.
       if (b.band !== 'red' && b.band !== 'unknown' && b.own_building !== 'full') { if (move(rec, 'card', id, { state: 'ready' }, { kind: 'resume_usage_band' }).ok) out.resumed.push(id); }
     } else if (what === 'limit_hit') {
-      const lf = sensorsFact(rec, LIMIT_FACT(account))?.doc;
+      // The limit of the account the card waits on (L97: parked on a's limit, it reads a's fact, not the pass's). The wait names it
+      // (`wait.account`, set by whoever parks the card; M9 lets no script put an account on the card itself). Only a
+      // reading taken after the card began to wait: an older one is an earlier limit, already reset (L97 M-3). A reading
+      // with no reset time (`resets_at` null) or no `observed_at` resumes nothing.
+      const lf = sensorsFact(rec, LIMIT_FACT(doc.wait?.account ?? account))?.doc;
+      const seen = Date.parse(lf?.observed_at ?? '');
       const resets = Date.parse(lf?.resets_at ?? '');
-      if (!Number.isFinite(resets) || now < resets) continue;
+      if (!(seen > Date.parse(doc.wait?.since ?? '')) || !Number.isFinite(resets) || now < resets) continue;
       if (doc.tier === 2) { if (move(rec, 'card', id, { state: 'ready' }, { kind: 'resume_limit_hit' }).ok) out.resumed.push(id); }
       else waitOn(rec, id, { who: 'joe', what: 'limit_hit: the limit reset; Tier-1 work does not resume by itself', now, kind: 'limit_reset' });
     } else if (what === PAUSED_WAIT_WHAT) {

@@ -149,7 +149,8 @@ test('0b-8 audit round 2 minors 1, 7: newest turn with no time → no restart; c
 test('L79: a go or ask whose M9 schema may carry a link but lacks one still shows RECORD ERROR; a card is named', () => {
   const x = tripWorld();
   x.w('go', 'go-8', { state: 'waiting', wait: { who: 'owner', what: 'go on row 8', since: x.ago(20) } });
-  x.w('ask', 'ask-9', { state: 'open', what: 'drop the old table' });
+  // A risky-act ask (an active kind, shared/asks.mjs; #62 lists only those) that should carry a pull request link.
+  x.w('ask', 'ask-9', { state: 'open', kind: 'risky_approve', what: 'drop the old table' });
   x.w('card', 'card-10', { module: 'M1', state: 'waiting', wait: { who: 'joe', what: 'pick a name', since: x.ago(30) } });
   const t = brief(x);
   assert.match(t, /- go go-8: .*go on row 8.*\(RECORD ERROR: no roadmap row link in the record\)/);
