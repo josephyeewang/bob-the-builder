@@ -2,12 +2,11 @@
 // as root and never against this Mac's users. Each "PLANT" test breaks one clause of the setup and says which check
 // catches it. The last tests run the real read-only tools (dscl -read, dseditgroup, ls -led, chmod -h, stat) on this Mac.
 
-import test from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { tempDir } from '../shared/test-tmp.mjs';
 import { REVIEW_USER } from '../modules/M4-workshop/launcher/review-user.mjs';
 import { readOutboxFile } from '../modules/M9-record/outbox.mjs';
 import { AI_ROLES } from '../shared/record.mjs';
@@ -17,12 +16,12 @@ import { nodeProblemOf, realIo, secureFolder } from './mac.mjs';
 import { aclEntries, adminAnswer, apply, check, parseDscl, plan, readUser } from './users-folders.mjs';
 import { runProofs } from './proofs.mjs';
 import { main } from './setup.mjs';
-import { fakeMac } from './fake-mac.test-helper.mjs';
+import { fakeMac, macTest as test } from './fake-mac.test-helper.mjs';
 
 const RAW = { base: '/Library/orch-test', owner: 'sam', products: ['alpha', 'beta'] };
 const cfg = parseConfig(RAW);
 const sink = () => { const lines = []; return { lines, out: (s) => lines.push(s), err: (s) => lines.push(`ERR ${s}`) }; };
-const cfgFile = () => { const d = mkdtempSync(join(tmpdir(), 'setup-cfg-')); const f = join(d, 'c.json'); writeFileSync(f, JSON.stringify(RAW)); return f; };
+const cfgFile = () => { const d = tempDir('orch-setup-cfg-'); const f = join(d, 'c.json'); writeFileSync(f, JSON.stringify(RAW)); return f; };
 // As root the command reads the root-owned config at the fixed place and takes no --config (NEW-1); without root it is given one.
 const putRootConfig = (mac, raw = RAW) => { const f = mac.at(ROOT_CONFIG_PATH); rmSync(f, { force: true }); writeFileSync(f, JSON.stringify(raw)); chmodSync(f, 0o644); return f; };
 const run = (mac, args, raw = RAW) => {
@@ -569,7 +568,7 @@ test('PLANT the access-list step finds a link where the folder was → refused, 
 });
 
 test('REAL chmod -h -N on a link acts on the link, not on what it points to (the flag the setup relies on)', { skip: !isDarwin }, () => {
-  const d = mkdtempSync(join(tmpdir(), 'setup-link-')); const target = join(d, 't'); mkdirSync(target);
+  const d = tempDir('orch-setup-link-'); const target = join(d, 't'); mkdirSync(target);
   assert.equal(spawnSync('/bin/chmod', ['+a', 'user:daemon allow list,search', target]).status, 0);
   symlinkSync(target, join(d, 'l'));
   const r = spawnSync('/bin/chmod', ['-h', '-N', join(d, 'l')], { encoding: 'utf8' });
@@ -579,7 +578,7 @@ test('REAL chmod -h -N on a link acts on the link, not on what it points to (the
 });
 
 test('secureFolder: refuses a link, a file, a replaced folder; changes a real one through its handle', () => {
-  const d = mkdtempSync(join(tmpdir(), 'setup-secure-')); const f = join(d, 'f'); mkdirSync(f, { mode: 0o700 });
+  const d = tempDir('orch-setup-secure-'); const f = join(d, 'f'); mkdirSync(f, { mode: 0o700 });
   const calls = [];
   const ports = { chown: (fd, u, g) => calls.push(['chown', u, g]), chmod: (fd, m) => calls.push(['chmod', m]) };
   const ino = statSync(f).ino; const dev = statSync(f).dev;
@@ -718,7 +717,7 @@ test('usage errors exit 2, and an unknown argument is never echoed (it could be 
   }
   const s = sink(); assert.equal(main(['users-folders', 'sk-ant-SECRETSECRET', '--config', cfgFile()], { io: fakeMac(), out: s.out, err: s.err }), 2);
   assert.ok(!s.lines.join('\n').includes('SECRETSECRET'), 'an unknown argument was printed');
-  const bad = join(mkdtempSync(join(tmpdir(), 'setup-cfg-')), 'c.json'); writeFileSync(bad, '{"base":"/Users/x","owner":"sam"}');
+  const bad = join(tempDir('orch-setup-cfg-'), 'c.json'); writeFileSync(bad, '{"base":"/Users/x","owner":"sam"}');
   const s2 = sink(); assert.equal(main(['check', '--config', bad], { io: fakeMac(), out: s2.out, err: s2.err }), 2);
 });
 
@@ -748,7 +747,7 @@ test('REAL dscl -list: both lists the id census reads give "name  number" lines'
 });
 
 test('REAL ls -led: the access-list lines the check reads have the shape aclEntries parses (an inherited entry shows `inherited`)', { skip: !isDarwin }, () => {
-  const d = mkdtempSync(join(tmpdir(), 'setup-acl-')); const f = join(d, 'f'); mkdirSync(f);
+  const d = tempDir('orch-setup-acl-'); const f = join(d, 'f'); mkdirSync(f);
   assert.equal(spawnSync('/bin/chmod', ['-h', '+a', 'user:daemon allow list,search,readattr,readextattr,readsecurity,file_inherit,directory_inherit', f]).status, 0);
   const io = realIo();
   assert.deepEqual(aclEntries(io, f).entries, ['user:daemon allow directory_inherit,file_inherit,list,readattr,readextattr,readsecurity,search']);
@@ -764,7 +763,7 @@ test('REAL dseditgroup: a service user is not an admin; the answer is "no"', { s
 });
 
 test('REAL check on this Mac with a real throwaway prefix: reads only, FAILs for the users that do not exist, changes nothing', { skip: !isDarwin }, () => {
-  const prefix = realpathOf(mkdtempSync(join(tmpdir(), 'setup-real-')));
+  const prefix = realpathOf(tempDir('orch-setup-real-'));
   mkdirSync(join(prefix, 'Library'));
   const io = realIo({ prefix });
   io.rootUid = process.getuid();
@@ -781,7 +780,7 @@ test('REAL check on this Mac with a real throwaway prefix: reads only, FAILs for
 });
 
 test('REAL plan with a real throwaway prefix on this Mac: reads only; the real dscl lists give three different ids in 600-699 and nothing is made', { skip: !isDarwin }, () => {
-  const prefix = realpathOf(mkdtempSync(join(tmpdir(), 'setup-real-')));
+  const prefix = realpathOf(tempDir('orch-setup-real-'));
   mkdirSync(join(prefix, 'Library'));
   const io = realIo({ prefix }); io.rootUid = process.getuid();
   const p = plan(io, { ...cfg, owner: 'root' });

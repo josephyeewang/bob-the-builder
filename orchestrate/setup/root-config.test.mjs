@@ -2,18 +2,17 @@
 // is never adopted, and the smaller fixes (m1-m9). Each PLANT breaks one clause and says which check catches it. The pattern
 // for every NEW-1 plant: the command must stop with ZERO root steps (the stand-in's log is empty, no user, no folder).
 
-import test from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { tempDir } from '../shared/test-tmp.mjs';
 import { BASE_MARKER, ORCHESTRATE_READ_ACL, ROOT_CONFIG_PATH, USERS, WORKER_ROLES, baseMarkerPath, folderTable, parseConfig } from './layout.mjs';
 import { nodeProblemOf, readConfigFile, realIo } from './mac.mjs';
 import { apply, check, plan } from './users-folders.mjs';
 import { proofList } from './proofs.mjs';
 import { main } from './setup.mjs';
-import { fakeMac } from './fake-mac.test-helper.mjs';
+import { fakeMac, macTest as test } from './fake-mac.test-helper.mjs';
 
 const RAW = { base: '/Library/orch-test', owner: 'sam', products: ['alpha'] };
 const cfg = parseConfig(RAW);
@@ -63,7 +62,7 @@ test('PLANT NEW-1 no config at the fixed place → refused with a plain reason; 
   const mac = fakeMac();
   const r = go(mac, ['users-folders']);
   assert.equal(r.code, 2, r.text); assert.match(r.text, /config file was not found/); noRootStep(mac);
-  const home = join(mkdtempSync(join(tmpdir(), 'setup-home-')), 'c.json'); writeFileSync(home, JSON.stringify(RAW));
+  const home = join(tempDir('orch-setup-home-'), 'c.json'); writeFileSync(home, JSON.stringify(RAW));
   const r2 = go(mac, ['users-folders', '--config', home]);
   assert.equal(r2.code, 2, r2.text); assert.match(r2.text, /as root this reads only/); noRootStep(mac);
   assert.equal(go(mac, ['check', '--config', home]).code, 2, 'also for a sudo check');
@@ -71,7 +70,7 @@ test('PLANT NEW-1 no config at the fixed place → refused with a plain reason; 
 
 test('a config that does not parse is reported without a byte of the file (m4); a folder or a link is no config either', () => {
   const mac = fakeMac(); mac.as = 501;
-  const dir = mkdtempSync(join(tmpdir(), 'setup-cfg-')); const bad = join(dir, 'c.json'); writeFileSync(bad, '{"token": "SECRETVALUE-123" oops');
+  const dir = tempDir('orch-setup-cfg-'); const bad = join(dir, 'c.json'); writeFileSync(bad, '{"token": "SECRETVALUE-123" oops');
   const r = go(mac, ['check', '--config', bad]);
   assert.equal(r.code, 2); assert.match(r.text, /not valid JSON/); assert.ok(!/SECRETVALUE/.test(r.text));
   const link = join(dir, 'l.json'); symlinkSync(bad, link);
@@ -82,7 +81,7 @@ test('a config that does not parse is reported without a byte of the file (m4); 
 });
 
 test('readConfigFile: a plain file only, not too big, and the strict rules need root\'s own file', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'setup-cfg-')); const f = join(dir, 'c.json'); writeFileSync(f, '{}'); chmodSync(f, 0o644);
+  const dir = tempDir('orch-setup-cfg-'); const f = join(dir, 'c.json'); writeFileSync(f, '{}'); chmodSync(f, 0o644);
   assert.equal(readConfigFile(f), '{}');
   assert.equal(readConfigFile(f, { strict: true, rootUid: process.getuid(), top: dir }), '{}');
   assert.throws(() => readConfigFile(f, { strict: true, rootUid: process.getuid() + 1, top: dir }), /not owned by root/);
@@ -217,7 +216,7 @@ test('m3: a `sudo check` and a `sudo proofs --dry-run` refuse a node program oth
 });
 
 test('m7: the real io is wired to the real checks (secure goes through secureFolder; nodeProblem through nodeProblemOf)', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'setup-io-')); const sub = join(dir, 'f'); mkdirSync(sub); chmodSync(sub, 0o777);
+  const dir = tempDir('orch-setup-io-'); const sub = join(dir, 'f'); mkdirSync(sub); chmodSync(sub, 0o777);
   const io = realIo({ prefix: dir });
   io.secure('/f', { uid: process.getuid(), mode: 0o700 });
   assert.equal(statSync(sub).mode & 0o7777, 0o700);
