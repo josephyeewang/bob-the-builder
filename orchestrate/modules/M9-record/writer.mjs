@@ -169,6 +169,12 @@ export function openRecord({ root, product, ownerUid, rules, alert = () => {}, n
     const changed = [...keys].filter((k) => k !== 'state' && !cleared.includes(k) && !same(old[k], doc[k]));
     const allowed = fieldsAllowed(entity, actor, { state: from });
     if (!allowed) return no(`${name} may not change ${entity}`);
+    // Only the writer that created a fact or handoff may update it (L118 M1). The readers that trust a fact's writer
+    // (an exact_reverse card's undo_issue, an audit result's audit_run) read createdBy, which is the first writer only,
+    // so a second writer rewriting the contents would forge them.
+    if ((entity === 'fact' || entity === 'handoff') && tx.lookup(entity, id)?.createdBy !== String(actor)) {
+      return no(`only ${tx.lookup(entity, id)?.createdBy ?? 'its creator'} may change ${entity} ${id}`);
+    }
     if (allowed !== '*') { const bad = changed.filter((f) => !allowed.has(f)); if (bad.length) return no(`${name} may not change ${bad.join(', ')} on ${entity} ${id}`); }
     if (!moving && !changed.length) return no('nothing changed');
 
@@ -670,6 +676,7 @@ export function openRecord({ root, product, ownerUid, rules, alert = () => {}, n
     read: (entity, id) => store.read(entity, id),
     list: (entity) => store.list(entity),
     diary: (opts) => store.lines(opts),
+    createdBy: (entity, id) => store.meta(entity, id)?.createdBy ?? null,
     write, applyOutbox, ready, overdue, release, breakIfDead, lapseClaims,
   };
   return { record: makeRecord(impl), store, impl, recover: () => store.recover() };

@@ -57,8 +57,11 @@ export async function gatePass(ctx) {
   const start = robotMergesGreen({ read: readFact, product, now });
   if (!start.open) return { ran: false, reason: NOT_GREEN_LINE, problems: start.problems, did };
 
-  const write = (entity, cur, fields, extra = {}) => record.write({ actor: ACTOR, entity, id: cur.id, expectRev: cur.rev ?? 0, doc: { ...(cur.doc ?? {}), ...fields }, ...extra });
+  // Rewrites a document it just read, so it passes that read's rev: an update, never a create (L118 c3).
+  const write = (entity, cur, fields, extra = {}) => record.write({ actor: ACTOR, entity, id: cur.id, expectRev: cur.rev, doc: { ...(cur.doc ?? {}), ...fields }, ...extra });
   const fresh = (entity, id) => record.read(entity, id);
+  // Audit results come from Sensors alone (L118 m9): an audit_run fact any other writer made is not read.
+  const auditRuns = () => record.list('fact').filter((x) => x.doc?.type === 'audit_run' && record.createdBy('fact', x.id) === 'sensors');
   const step = (m, name, more = {}) => { did.push({ merge: m.id, step: name, ...more }); };
   const move = (m, state, fields = {}) => {
     const r = write('merge', fresh('merge', m.id), { state, ...fields });
@@ -96,9 +99,10 @@ export async function gatePass(ctx) {
     if (card?.doc?.state === 'merging' || !m.doc.marked_at) await complete(m, m.doc.merge_commit);
   }
 
-  // 3. Audit results (R-0b-93): only a Sensors audit_run fact for the merge commit moves a merged merge.
+  // 3. Audit results (R-0b-93): only a Sensors audit_run fact for the merge commit moves a merged merge. An audit_run
+  // another writer made is not one (L118 m9): M9 would refuse the move anyway, and taking it first would hide the real one.
   for (const m of merges().filter((x) => x.doc.state === 'merged' && SHA.test(x.doc.merge_commit ?? ''))) {
-    const f = record.list('fact').find((x) => x.doc?.type === 'audit_run' && x.doc.commit === m.doc.merge_commit && ['success', 'failure'].includes(x.doc.conclusion));
+    const f = auditRuns().find((x) => x.doc.commit === m.doc.merge_commit && ['success', 'failure'].includes(x.doc.conclusion));
     if (!f) continue;
     const to = f.doc.conclusion === 'success' ? 'audited_ok' : 'audit_flagged';
     const r = record.write({ actor: ACTOR, entity: 'merge', id: m.id, expectRev: m.rev, doc: { ...m.doc, state: to, audited_at: iso() }, data: { fact: f.id } });
@@ -251,7 +255,7 @@ export async function gatePass(ctx) {
     if (r.ok) {
       step(m, 'marked');
       // An audit that already ran on this commit read it with no mark: it needs running again.
-      if (m.doc.state !== 'merged' || record.list('fact').some((x) => x.doc?.type === 'audit_run' && x.doc.commit === sha)) alert({ type: 'merge_marked_after_audit', merge: m.id, commit: sha, ask_owner: 'Re-run the audit on this commit?' });
+      if (m.doc.state !== 'merged' || auditRuns().some((x) => x.doc.commit === sha)) alert({ type: 'merge_marked_after_audit', merge: m.id, commit: sha, ask_owner: 'Re-run the audit on this commit?' });
     } else alert({ type: 'merge_gate_write_refused', merge: m.id, to: 'marked', reason: r.reason });
   }
 

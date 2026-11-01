@@ -67,13 +67,17 @@ test('update: every listed field passes the field check for its actor and is ref
         // approvals only clears needs_joe (the setters are tested on the other side of the same field).
         const clearing = entity === 'card' && field === 'needs_joe' && actor === 'approvals';
         if (clearing) doc.needs_joe = true;
-        seed(env, entity, id, doc);
+        // Only a fact's or handoff's creator may update it (L118 M1), so those are seeded as the actor that updates.
+        const owned = entity === 'fact' || entity === 'handoff';
+        if (owned) env.store.transaction((tx) => tx.commit([{ entity, id, doc }], { actor, kind: 'seed' }));
+        else seed(env, entity, id, doc);
         const cur = env.record.read(entity, id);
         const r = env.record.write({ actor, entity, id, expectRev: cur.rev, doc: { ...cur.doc, [field]: clearing ? false : value(field) } });
         const allowed = fieldsAllowed(entity, actor, { state: cur.doc.state });
         const listed = allowed === '*' || (allowed instanceof Set && allowed.has(field));
         const where = `${entity}.${field} as ${actor}: ${r.reason}`;
-        if (listed) { if (!r.ok) assert.doesNotMatch(r.reason, FIELD_GATE, where); }
+        if (listed && owned) assert.ok(r.ok, where);   // the creator's own update goes through
+        else if (listed) { if (!r.ok) assert.doesNotMatch(r.reason, FIELD_GATE, where); }
         else { assert.equal(r.ok, false, where); assert.match(r.reason, FIELD_GATE, where); }
         checked++;
       }

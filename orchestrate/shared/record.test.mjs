@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { makeRecord, memoryRecord, isActor, missingFields, STATES, FINAL_STATES, WAIT_FIELDS, REQUIRED_FIELDS, ENTITIES } from './record.mjs';
+import { makeRecord, memoryRecord, outboxKind, isActor, missingFields, STATES, FINAL_STATES, WAIT_FIELDS, REQUIRED_FIELDS, ENTITIES } from './record.mjs';
 
 test('create, read, update only if unchanged, one diary line per accepted write', () => {
   const rec = memoryRecord();
@@ -72,4 +72,16 @@ test('a launch names a card and head only for a worker, reviewer or auditor', ()
   assert.deepEqual(missingFields('launch', { ...base, role: 'worker' }), ['card', 'head']);
   assert.deepEqual(missingFields('launch', { ...base }), ['role', 'card', 'head'], 'no role: fail closed');
   assert.deepEqual(missingFields('merge_request', {}), REQUIRED_FIELDS.merge_request);
+});
+
+test('L121: the stand-in refuses a file name with no outbox kind, as the real M9 does', () => {
+  const rec = memoryRecord();
+  for (const name of ['/o/notakind-C-1.md', '/o/verdict-compact\u2011S1.md', '/o/report-.md']) {
+    const r = rec.applyOutbox({ role: 'worker', sessionId: 'S-4' }, name);
+    assert.equal(r.ok, false, name);
+    assert.match(r.reason, /no outbox kind/, name);
+  }
+  assert.equal(rec.diary().length, 0);
+  assert.equal(outboxKind('report-C-1.md'), 'report-');
+  assert.equal(outboxKind('ask-request-1.md'), 'ask-request-', 'the longest kind wins');
 });

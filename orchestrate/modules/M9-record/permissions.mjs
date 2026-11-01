@@ -64,7 +64,8 @@ export const WRITERS = Object.freeze({
   // Facts at a fixed id are read and written again with the read rev, so each writer that does so may update (L112):
   // the Sensors' readings and the Ledger's alerts (M12 facts.mjs), the Dispatcher's alert queue, notes, usage band,
   // outage and restart facts (M11), and the Workshop's push fact (M4 push.mjs). live_check only ever creates.
-  // The real-code check is test/record-writes.test.mjs: every write site in a module must have its row here.
+  // The real-code check is modules/M9-record/write-sites.test.mjs: every write site in a module must have its row here,
+  // and every row here is used by a write site or says why not. Only a fact's creator may change it (L118 M1, writer.mjs).
   fact: Object.freeze({ sensors: ANY, ledger: ANY, dispatcher: ANY, workshop: ANY, live_check: createOnly() }),
   product: Object.freeze({ approvals: ANY }),
   // The Dispatcher writes the restart handoff for a Lead that stopped, and rewrites it on the next stop (M11
@@ -74,8 +75,9 @@ export const WRITERS = Object.freeze({
   // learning is Phase 1 (0b-1 MAT-11): listed so its row exists, but no learning session starts in 0b.
   lesson: Object.freeze({ dispatcher: createOnly(), learning: ANY }),
   launch: Object.freeze({ dispatcher: createOnly() }),
-  // A refused request for an older rev is asked again over the same id (M11 merges.mjs, audit 0b-6 r2 MAT-6; L112).
-  merge_request: Object.freeze({ dispatcher: ANY }),
+  // Create-only (L118 M2): a request asked again gets its own id (lane 2, mr-<card>-<head12>-r<n>), so no one rewrites one
+  // the Merge Gate may already be reading.
+  merge_request: Object.freeze({ dispatcher: createOnly() }),
 });
 
 export const actorName = (actor) => String(actor).split(':')[0];

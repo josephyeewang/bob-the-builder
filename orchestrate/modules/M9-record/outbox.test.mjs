@@ -6,7 +6,7 @@ import { linkSync, mkdirSync, readFileSync, symlinkSync, unlinkSync, writeFileSy
 import { execFileSync } from 'node:child_process';
 import { join } from 'node:path';
 import { AI_ROLES, OUTBOX_KINDS } from '../../shared/record.mjs';
-import { MAX_OUTBOX_BYTES, readOutboxFile } from './outbox.mjs';
+import { MAX_OUTBOX_BYTES, kindOf, readOutboxFile, sessionVerdict } from './outbox.mjs';
 import { openRecord } from './writer.mjs';
 import { HEAD, HEAD2, PRODUCT, UID, leadCard, must, outboxFile, product, put, readyCard, roadmap, runCard, setup } from './fixtures.test-helper.mjs';
 
@@ -320,4 +320,19 @@ test('a store error writing a refused hand-in\'s fact leaves the file unseen, tr
   const again = fresh.record.applyOutbox(tag, file);
   assert.equal(again.skipped, undefined, 'not skipped: the file was never marked seen');
   assert.equal(fresh.record.list('fact').filter((x) => x.doc.type === 'outbox_refused').length, 1, 'the session hears of it on the retry');
+});
+
+test('L121: a name that only looks like an outbox name (U+2011 for the hyphen) has no kind at M9, as at the hook and M4', () => {
+  const env = setup({ prefix: 'm9-out-' });
+  const odd = 'verdict-compact\u2011S1.md';
+  assert.equal(kindOf(odd), null);
+  assert.equal(kindOf('verdict-compact-S1.md'), 'verdict-');
+  assert.equal(kindOf('verdict-.md'), null, 'a kind with nothing after it is not a name');
+  const r = env.record.applyOutbox({ role: 'reviewer', sessionId: 'R-1' }, outboxFile(env, 'reviewer', 'R-1', odd, 'x'));
+  assert.equal(r.ok, false);
+  assert.match(r.reason, /no outbox kind for file name/);
+  // The session's verdict reader does not take it as a verdict either.
+  const v = sessionVerdict({ outboxRoot: env.outRoot, uids: {}, role: 'reviewer', sessionId: 'R-1', card: 'C-1', head: HEAD });
+  assert.equal(v.ok, false);
+  assert.equal(v.none, true, v.reason);
 });

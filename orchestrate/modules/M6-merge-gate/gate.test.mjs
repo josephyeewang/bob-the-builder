@@ -120,10 +120,14 @@ test('a clean card merges: paired write, squash merge of the judged head, card m
   assert.deepEqual(mark, { ok: true, card: 'C-1', head, pr: 7 });
   assert.deepEqual(w.alerts, []);
 
-  // The audit result comes only from a Sensors audit_run fact for that commit.
+  // The audit result comes only from a Sensors audit_run fact for that commit. A success the Ledger wrote, listed
+  // first, is not read (L118 m9): taking it would have the real Record refuse the move and hide the Sensors result.
+  must(w.env.record.write({ actor: 'ledger', entity: 'fact', id: 'audit-0', expectRev: 0, doc: { type: 'audit_run', commit: m.doc.merge_commit, conclusion: 'success' } }), 'ledger fact');
   must(w.env.record.write({ actor: 'sensors', entity: 'fact', id: 'audit-1', expectRev: 0, doc: { type: 'audit_run', commit: m.doc.merge_commit, conclusion: 'failure' } }), 'fact');
+  assert.equal(w.env.record.createdBy('fact', 'audit-0'), 'ledger');
   await gatePass(w.ctx);
   assert.equal(mergeOf(w).doc.state, 'audit_flagged');
+  assert.deepEqual(w.alerts, []);
 });
 
 test('the undo route: a flagged merge\'s exact reverse goes first, merges with no Approve, and the undone card is reverted', async () => {

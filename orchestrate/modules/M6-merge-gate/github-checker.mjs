@@ -1838,6 +1838,8 @@ Object.defineProperties(__bob_e, {
   AI_ROLES: { get: () => AI_ROLES, enumerable: true },
   OUTBOX_KINDS: { get: () => OUTBOX_KINDS, enumerable: true },
   OUTBOX_KIND_PATTERN: { get: () => OUTBOX_KIND_PATTERN, enumerable: true },
+  OUTBOX_NAME: { get: () => OUTBOX_NAME, enumerable: true },
+  outboxKind: { get: () => outboxKind, enumerable: true },
   ENTITIES: { get: () => ENTITIES, enumerable: true },
   VERDICT_CHECKLIST: { get: () => VERDICT_CHECKLIST, enumerable: true },
   CHECKLIST_LEVELS: { get: () => CHECKLIST_LEVELS, enumerable: true },
@@ -1874,6 +1876,7 @@ Object.defineProperties(__bob_e, {
 //   rec.applyOutbox({ role: 'worker', sessionId: 'S-4', card: 'C-12' }, '/path/report-C-12.md')
 //                                                // → { ok: true, … } or { ok: false, reason }
 //   rec.diary({ since: 0 })                      // → diary lines, oldest first
+//   rec.createdBy('fact', 'F-1')                 // → the actor that first wrote it, or null (unknown or absent)
 //   rec.ready()                                  // → cards that may start now (M9's ready rule)
 //   rec.overdue(now)                             // → [{ entity, id, state, since, limit }] past their time limit
 //   rec.release({ card, session_id })            // the claim's holder gives the card back (claimed → ready)
@@ -1923,6 +1926,17 @@ const OUTBOX_KINDS = Object.freeze(Object.fromEntries(Object.entries({
   'prune-': { roles: ['learning'], entity: null, mode: 'create' },
 }).map(([k, v]) => [k, Object.freeze({ ...v, roles: Object.freeze(v.roles) })])));
 const OUTBOX_KIND_PATTERN = /^[a-z]+(-[a-z]+)*-$/;
+// The one outbox file name rule: `<kind>-<id>.(md|json|txt)`, ASCII letters, digits and dashes only. The write hook
+// and the M4 intake check names with the same pattern (they keep their own copies for now, L121), and M9 applies it
+// before it takes a kind from a name, so a name the hook refuses (a U+2011 dash, a dot in the id) has no kind anywhere.
+const OUTBOX_NAME = /^([a-z]+)-[A-Za-z0-9-]+\.(md|json|txt)$/;
+// The longest listed kind a good name starts with (so `report-compact-x.md` is report-compact-, not report-), or null.
+function outboxKind(name) {
+  if (typeof name !== 'string' || !OUTBOX_NAME.test(name)) return null;
+  let best = null;
+  for (const k of Object.keys(OUTBOX_KINDS)) if (name.startsWith(k) && name.length > k.length && (!best || k.length > best.length)) best = k;
+  return best;
+}
 
 // A claim is a field on its card, set and cleared in the same write as the card's move (0b-2 R2-M6); `claim` stays
 // a diary kind only.
@@ -2029,6 +2043,9 @@ function makeRecord(impl) {
     read(entity, id) { if (!ENTITIES.includes(entity)) return null; try { return impl.read(entity, id); } catch (e) { return corrupt(entity, id, e); } },
     list(entity) { if (!ENTITIES.includes(entity)) return []; try { return impl.list(entity); } catch (e) { return [corrupt(entity, null, e)]; } },
     diary(opts = {}) { return impl.diary(opts); },
+    // Who first wrote a document. A reader that trusts a fact only from one writer (the Merge Gate's audit_run) checks
+    // this; an implementation that can't say gives null, which trusts nothing (L118 m9).
+    createdBy(entity, id) { try { const r = optional('createdBy', () => null)(entity, id); return typeof r === 'string' ? r : null; } catch { return null; } },
     write(w) {
       if (!w || !isActor(w.actor)) return refused(`unknown actor "${w?.actor}"`);
       if (!SCRIPT_ACTORS.includes(w.actor)) return refused('AI roles write only through their outbox');
@@ -2064,6 +2081,7 @@ function makeRecord(impl) {
 function memoryRecord() {
   const docs = new Map();
   const lines = [];
+  const creators = new Map();
   const key = (e, id) => `${e}/${id}`;
   const log = (actor, kind, entity, id, from, to, data) => {
     const line = { seq: lines.length + 1, ts: new Date().toISOString(), actor, kind, entity, id, from_state: from ?? null, to_state: to ?? null, data: data ?? null };
@@ -2074,15 +2092,20 @@ function memoryRecord() {
     read(entity, id) { const d = docs.get(key(entity, id)); return d ? structuredClone(d) : null; },
     list(entity) { return [...docs.values()].filter((d) => d.entity === entity).map((d) => structuredClone(d)); },
     diary({ since = 0 } = {}) { return lines.filter((l) => l.seq > since).map((l) => ({ ...l })); },
+    createdBy(entity, id) { return creators.get(key(entity, id)) ?? null; },
     write({ actor, entity, id, expectRev, doc, kind = 'write' }) {
       const cur = docs.get(key(entity, id));
       if ((cur?.rev ?? 0) !== expectRev) return refused(`changed since read (rev ${cur?.rev ?? 0}, expected ${expectRev})`);
       const rev = expectRev + 1;
       docs.set(key(entity, id), { entity, id, doc: structuredClone(doc), rev });
+      if (!creators.has(key(entity, id))) creators.set(key(entity, id), actor);
       const seq = log(actor, kind, entity, id, cur?.doc?.state, doc?.state);
       return { ok: true, rev, seq };
     },
     applyOutbox(tag, file) {
+      // Like the real M9, a file whose name has no outbox kind is refused, never logged as handed in (L121).
+      const name = String(file).split('/').pop();
+      if (!outboxKind(name)) return refused(`no outbox kind for file name ${name.slice(0, 80)}`);
       const seq = log(`${tag.role}:${tag.sessionId}`, 'outbox', 'report', String(file).split('/').pop(), null, null, { card: tag.card ?? null });
       return { ok: true, seq };
     },
