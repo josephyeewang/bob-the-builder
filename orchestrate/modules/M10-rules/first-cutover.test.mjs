@@ -2,7 +2,7 @@
 // engine. Run: node --test orchestrate/modules/M10-rules/
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { makeRules } from '../../shared/rules.mjs';
@@ -18,24 +18,40 @@ import { readConfig } from '../M2-approvals/kinds.mjs';
 import { botId } from '../M6-merge-gate/gather.mjs';
 import { goFreeKinds } from '../M9-record/ready.mjs';
 import { KEYS as M11_KEYS, NEW_KEYS as M11_NEW_KEYS, need } from '../M11-dispatcher/keys.mjs';
+import { startGate } from '../M11-dispatcher/gate.mjs';
+import { bands } from '../M11-dispatcher/usage.mjs';
+import { handoffVet } from '../M11-dispatcher/lead-restart.mjs';
+import { KNOWN, numeric } from './known-gaps.mjs';
+import { M11_WITH_PRODUCT, m11Scope } from './first-cutover.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const SAMPLE = readFileSync(join(here, 'fixtures/policy.yaml'), 'utf8');
 const swap = (t, from, to) => { assert.ok(t.includes(from), `text has ${from}`); return t.replace(from, to); };
 const ENTRY = { product: 'sample-app', owner: 'sample-org', repo: 'sample-app', joe_github_id: 1000001 };
 
-// Reasons the real readers give today on any rules file, because the rules engine hands numbers over as text
-// (LEAD-CALLS L96: parseYaml('n: 30') gives "30"). They go when the step-2 sweeps land: lane 1's M9 sweep
-// (heartbeat_stale_min) and lane 2's M11 sweep (context.*, caps.per_state). The test 'the pending reasons are exactly
-// these' then fails, and this list is cut to what is left; at [] the todo test below passes.
+// Reasons the real readers give today on any rules file, each a known gap in the readers, not in the file, and labeled
+// so in the check's own output (known-gaps.mjs; L96 m-D, L115). They go as these land:
+//   - numbers as text (L96): lane 2's M11 sweep (context.*, caps.per_state); and the heartbeat when this check calls
+//     lane 1's heartbeatLimit(rules, product), which #79 exports from writer.mjs with num() (L115 m-A);
+//   - M11's Mac-wide reads of product keys (L115 M-A): #79 makes usage.red_runs Mac-wide; lane 2's L104 sweep passes the
+//     product at the four context.* reads.
+// The test 'the pending reasons are exactly these' then fails, and this list is cut to what is left; at [] the todo
+// test below passes.
+const SCOPE = (k) => `M11: ${k} is read without the product, so the real engine gives none${KNOWN.scope}`;
+const TEXT = (k) => `M11: ${k} must be a number${KNOWN.text}`;
 const PENDING = Object.freeze([
-  'M9: proposals.heartbeat_stale_min must be a whole number of minutes, at least 1',
-  'M11: context.lead.soft must be a number',
-  'M11: context.lead.hard must be a number',
-  'M11: context.handoff_cap.role must be a number',
-  'M11: context.worker.split_after_compactions must be a number',
-  'M11: caps.per_state must give a number for active, away, paused, light (editingLimits refuses it)',
+  `M9: proposals.heartbeat_stale_min must be a whole number of minutes, at least 1${KNOWN.text}`,
+  SCOPE('usage.red_runs'),
+  SCOPE('context.lead.soft'), TEXT('context.lead.soft'),
+  SCOPE('context.lead.hard'), TEXT('context.lead.hard'),
+  SCOPE('context.handoff_cap.role'), TEXT('context.handoff_cap.role'),
+  SCOPE('context.worker.split_after_compactions'), TEXT('context.worker.split_after_compactions'),
+  `M11: caps.per_state must give a number for active, away, paused, light (editingLimits refuses it)${KNOWN.text}`,
 ]);
+// The keys the pending reasons are about, by gap.
+const keyOf = (x) => x.match(/^M(?:9|11): (\S+) /)[1];
+const PENDING_SCOPE = PENDING.filter((x) => x.endsWith(KNOWN.scope)).map(keyOf);
+const PENDING_TEXT = PENDING.filter((x) => x.endsWith(KNOWN.text)).map(keyOf);
 const fit = (...a) => firstCutoverProblems(...a).filter((x) => !PENDING.includes(x));
 
 // The keys the merge gate (M6), Approvals (M2), the Record (M9) and the Dispatcher (M11) read (L86): go_free in the
@@ -168,34 +184,69 @@ const rulesOf = (text) => {
     clock: () => Date.parse('2026-10-14T14:00:00Z'),
   }));
 };
-// A key named by a pending reason is left out here, as fit() leaves out the reason.
-const pendingKey = (k) => PENDING.some((x) => x.startsWith(`M9: ${k} `) || x.startsWith(`M11: ${k} `));
-const M11_TYPE = { perState: 'object', shakedown: 'boolean', leadDailyCard: 'list', redRuns: 'list' };
+// How M11's sources read each KEYS entry: name → the scopes ('product' | 'mac') its need()/minutes() calls use, read
+// from the files' text, independent of first-cutover.mjs's own list (L115 M-A).
+const M11_DIR = join(here, '../M11-dispatcher');
+const M11_SOURCES = readdirSync(M11_DIR).filter((f) => f.endsWith('.mjs') && !f.endsWith('.test.mjs') && f !== 'keys.mjs');
+export function m11SourceScopes(files = Object.fromEntries(M11_SOURCES.map((f) => [f, readFileSync(join(M11_DIR, f), 'utf8')]))) {
+  const scopes = new Map();
+  let calls = 0;
+  let matched = 0;
+  for (const text of Object.values(files)) {
+    calls += [...text.matchAll(/\b(?:need|minutes)\(rules, /g)].length;
+    for (const m of text.matchAll(/\b(?:need|minutes)\(rules, KEYS\.(\w+)(?:, (\{[^}]*\}))?\)/g)) {
+      matched += 1;
+      const scope = m[2] && /\bproduct\b/.test(m[2]) ? 'product' : 'mac';
+      scopes.set(m[1], new Set([...(scopes.get(m[1]) ?? []), scope]));
+    }
+  }
+  return { scopes, unread: calls - matched };
+}
 
 // What the modules' real readers say about a rules file, called here on their own, not through the fit check:
 // M2's readConfig; M6's botId, its required-checks read (a list of check names, gather.mjs:142) and goFreeKinds for
-// undo cards; M9's readyCheck on an undo card in each product state; M11's need() on every key it reads (but NEW_KEYS),
-// with its callers' types. M9's heartbeat limit is read inline in writer.mjs, so the missing-key tests cover it.
+// undo cards; M9's readyCheck on an undo card in each product state; M11's real startGate for every session kind, its
+// bands() and handoff check, and need() on every other key it reads (but NEW_KEYS) at the type and the scope its
+// sources use (L115 M-A). The pending gaps are mended first (a Mac-wide read of a pending scope key gets the product's
+// value, a pending number given as text is made a number), so the rest of each reader is still tested.
 function readersAccept(text) {
-  const rules = rulesOf(text);
-  if (!rules) return false;
+  const real = rulesOf(text);
+  if (!real) return false;
   const product = 'sample-app';
   const p = { product };
+  const rules = {
+    get: (k, o) => {
+      let v = real.get(k, o);
+      if (v === undefined && !o?.product && PENDING_SCOPE.includes(k)) v = real.get(k, p);
+      return PENDING_TEXT.includes(k) ? numeric(v) : v;
+    },
+    classify: (c) => real.classify(c),
+  };
   const checks = rules.get('product_profile.required_checks', p);
-  const m2 = readConfig(rules, product).ok;
-  const m6 = botId(rules.get('product_profile.robot', p)) !== null && Array.isArray(checks) && checks.every((c) => typeof c === 'string' && c)
-    && goFreeKinds(rules, product).includes('exact_reverse');
+  const m2 = readConfig(real, product).ok;
+  const m6 = botId(real.get('product_profile.robot', p)) !== null && Array.isArray(checks) && checks.every((c) => typeof c === 'string' && c)
+    && goFreeKinds(real, product).includes('exact_reverse');
   const creator = Object.keys(CARD_CREATORS).find((a) => CARD_CREATORS[a].includes('exact_reverse'));
   const m9 = PRODUCT_STATES.every((state) => {
     const view = { get: (e) => (e === 'product' ? { id: product, doc: { state } } : null), list: () => [], createdBy: () => creator };
-    const r = readyCheck({ id: 'C-t', doc: { product, kind: 'exact_reverse', round: 1, depends_on: [] } }, view, { rules, product });
+    const r = readyCheck({ id: 'C-t', doc: { product, kind: 'exact_reverse', round: 1, depends_on: [] } }, view, { rules: real, product });
     return r.ok || / no work starts$/.test(r.reason);
   });
-  const m11 = Object.entries(M11_KEYS).filter(([, k]) => !M11_NEW_KEYS.includes(k) && !pendingKey(k)).every(([name, key]) => {
-    try { need(rules, key, { product, type: M11_TYPE[name] ?? 'number' }); return true; } catch { return false; }
-  });
-  return m2 && m6 && m9 && m11;
+  const rec = { read: (e) => (e === 'product' ? { doc: { state: 'active' } } : null), list: () => [] };
+  const card = { id: 'C-1', product, kind: 'editing', tier: 2, files: ['docs/research/note.md'] };
+  const b = { band: 'green', own_building: 'open', prodBlocked: false };
+  const gate = START_KINDS.every((kind) => !startGate({ rules, rec, card, kind, product, b, running: [], lead: 'S-lead' }).missing);
+  const fine = (f) => { try { f(); return true; } catch { return false; } };
+  const others = fine(() => bands({ rules, reading: { ok: false, reason: 'no reading' }, now: 0 }))
+    && fine(() => handoffVet(rules)({ kind: 'handoff', text: 'x' }));
+  const { scopes } = m11SourceScopes();
+  const m11 = Object.entries(M11_KEYS).filter(([, k]) => !M11_NEW_KEYS.includes(k)).every(([name, key]) => [...(scopes.get(name) ?? [])].every((scope) => {
+    try { need(rules, key, { ...(scope === 'product' ? p : {}), type: M11_TYPE[name] ?? 'number' }); return true; } catch { return false; }
+  }));
+  return m2 && m6 && m9 && gate && others && m11;
 }
+const M11_TYPE = { perState: 'object', shakedown: 'boolean', leadDailyCard: 'list', redRuns: 'list' };
+const START_KINDS = ['editing', 'undo', 'overnight', 'script', 'readonly', 'review', 'audit', 'merge', 'undo_merge', 'lead', 'front_door'];
 
 const GO_FREE_BLOCK = '    go_free:\n      exact_reverse: true\n      lead_daily_card:\n        - docs/blueprint/daily/**\n';
 // [name, make, policy]: a policy variant is one the fit check refuses on purpose while today's readers accept it; the
@@ -224,15 +275,51 @@ const VARIANTS = [
   ['no stale_after_min', (t) => swap(t, '  stale_after_min: 15\n', '')],
   // L96 m-1, m-2, m-3: policy the fit check holds on purpose.
   ['no required checks', (t) => swap(t, 'required_checks: [build, test]', 'required_checks: []'), 'policy: the gate would check nothing (L96 m-1)'],
-  ['exact_reverse: false', (t) => swap(t, 'exact_reverse: true', 'exact_reverse: false'), 'go_free values: goFreeKinds reads keys only until lane 1 adopts goFreeOn'],
+  ['exact_reverse: false', (t) => swap(t, 'exact_reverse: true', 'exact_reverse: false'), 'go_free values: goFreeKinds reads keys only until lane 1 adopts goFreeOn (L115 M-C; this tripwire fails when it does)'],
   ['ordinary: true, so the Lead\'s cards skip the go', (t) => swap(t, '      exact_reverse: true\n', '      exact_reverse: true\n      ordinary: true\n'), 'go_free values: only the known kinds'],
   ['research_copy: yes', (t) => swap(t, '      exact_reverse: true\n', '      exact_reverse: true\n      research_copy: yes\n'), 'go_free values: a flag is true or false'],
   ['an empty daily-card pattern', (t) => swap(t, '        - docs/blueprint/daily/**\n', "        - ''\n"), 'M10\'s pattern rule (L96 m-3)'],
   ['an unclosed { in a daily-card pattern', (t) => swap(t, '        - docs/blueprint/daily/**\n', "        - 'docs/{a'\n"), 'M10\'s pattern rule (L96 m-3)'],
+  ['a non-ASCII daily-card pattern', (t) => swap(t, '        - docs/blueprint/daily/**\n', '        - docs/dé/**\n'), 'M10\'s pattern rule (L96 m-3)'],
+  ['a good daily-card pattern, then a bad one', (t) => swap(t, '        - docs/blueprint/daily/**\n', "        - docs/blueprint/daily/**\n        - ''\n"), 'M10\'s pattern rule (L96 m-3)'],
+  // L115 M-B: patterns M10 compile reads one way and M11's matcher another.
+  ...['docs/daily/', "'docs/{daily,weekly}/**'", 'daily.md', "'docs/dail?.md'", '/docs/x.md'].map((pat) => [`the daily-card pattern ${pat}`,
+    (t) => swap(t, '        - docs/blueprint/daily/**\n', `        - ${pat}\n`), 'one path language: M11 matches it differently (L115 M-B)']),
 ];
 
-test('the pending reasons are exactly these, on the fixture as given', () => {
+test('the pending reasons are exactly these, on the fixture as given, and each says it is known (L96 m-D, L115)', () => {
   assert.deepEqual(firstCutoverProblems(FIRST, ENTRY), [...PENDING]);
+  for (const x of PENDING) assert.ok(Object.values(KNOWN).some((k) => x.endsWith(k)), x);
+  assert.deepEqual(PENDING_SCOPE, ['usage.red_runs', 'context.lead.soft', 'context.lead.hard', 'context.handoff_cap.role', 'context.worker.split_after_compactions']);
+});
+
+test('the fit check reads each M11 key at the scope M11\'s sources read it (L115 M-A)', () => {
+  const { scopes, unread } = m11SourceScopes();
+  assert.equal(unread, 0, 'every need()/minutes() call in M11 names a KEYS entry the scan can read');
+  for (const [name] of Object.entries(M11_KEYS)) {
+    const src = [...(scopes.get(name) ?? [])];
+    if (!src.length) continue;
+    assert.deepEqual(src, [m11Scope(name)], `${name}: M11 reads it ${src.join(' and ')}, the fit check ${m11Scope(name)}`);
+  }
+  for (const name of M11_WITH_PRODUCT) assert.ok(scopes.has(name), `${name} is on the with-product list but M11 never reads it`);
+  // The O1 and O2 plants, on copies: a caller that drops its product, or one that adds it, fails the match.
+  const gate = readFileSync(join(M11_DIR, 'gate.mjs'), 'utf8');
+  const drop = (from, to) => { assert.ok(gate.includes(from)); return m11SourceScopes({ 'gate.mjs': gate.replace(from, to) }).scopes; };
+  assert.deepEqual([...drop('need(rules, KEYS.readonlyPerSession, { product })', 'need(rules, KEYS.readonlyPerSession)').get('readonlyPerSession')], ['mac']);
+  assert.deepEqual([...drop("need(rules, KEYS.leadDailyCard, { product, type: 'list' })", "need(rules, KEYS.leadDailyCard, { type: 'list' })").get('leadDailyCard')], ['mac']);
+  assert.deepEqual([...drop("need(rules, KEYS.redRuns, { type: 'list' })", "need(rules, KEYS.redRuns, { product, type: 'list' })").get('redRuns')], ['product']);
+  assert.equal(m11SourceScopes({ 'x.mjs': 'need(rules, key)' }).unread, 1);
+});
+
+test('the real startGate refuses every start but an undo on the fixture today, for usage.red_runs (L115 M-A)', () => {
+  const rules = rulesOf(FIRST);
+  const rec = { read: (e) => (e === 'product' ? { doc: { state: 'active' } } : null), list: () => [] };
+  const card = { id: 'C-1', product: 'sample-app', kind: 'editing', tier: 2, files: ['docs/research/note.md'] };
+  const b = { band: 'green', own_building: 'open', prodBlocked: false };
+  for (const kind of START_KINDS) {
+    const r = startGate({ rules, rec, card, kind, product: 'sample-app', b, running: [], lead: 'S-lead' });
+    assert.equal(r.missing, kind === 'undo' || kind === 'undo_merge' ? (kind === 'undo' ? 'caps.per_state' : undefined) : 'usage.red_runs', kind);
+  }
 });
 
 test.todo('the fixture is fit with no pending reasons (after the L96 step-2 sweeps)', () => {
@@ -271,7 +358,7 @@ test('every key the Dispatcher reads is checked, not one (L96 M-2)', () => {
 
 test('go_free values are read: only the known kinds, a flag exactly true or false (L96 m-2)', () => {
   const by = Object.fromEntries(VARIANTS.map(([n, m]) => [n, m(FIRST)]));
-  assert.deepEqual(fit(by['exact_reverse: false'], ENTRY), ['M6: approvals.plan_go.go_free.exact_reverse must be true, or every undo is refused']);
+  assert.deepEqual(fit(by['exact_reverse: false'], ENTRY), ['M6: approvals.plan_go.go_free.exact_reverse must be true at the first cutover']);
   assert.deepEqual(fit(by['ordinary: true, so the Lead\'s cards skip the go'], ENTRY), ['M9: approvals.plan_go.go_free.ordinary is not a go-free kind (only exact_reverse, research_copy, lead_daily_card)']);
   assert.deepEqual(fit(by['research_copy: yes'], ENTRY), ['M9: approvals.plan_go.go_free.research_copy must be true or false']);
   // The text a rules file gives ("true") is read as true; research_copy: true is a known kind.
@@ -282,13 +369,22 @@ test('go_free values are read: only the known kinds, a flag exactly true or fals
   assert.equal(goFreeOn(rules, 'sample-app', 'research_copy'), false, 'a kind the map does not name');
   assert.equal(goFreeOn(rulesOf(swap(FIRST, '      lead_daily_card:\n        - docs/blueprint/daily/**\n', '      lead_daily_card: docs/x\n')), 'sample-app', 'lead_daily_card'), false, 'a pattern kind whose value is not a list');
   assert.equal(goFreeOn(rulesOf(by['exact_reverse: false']), 'sample-app', 'exact_reverse'), false);
+  assert.equal(goFreeOn(rulesOf(by['an empty lead_daily_card (the Lead is not on the product)']), 'sample-app', 'lead_daily_card'), false, '[] means no daily card, so not go-free (L115 m-F)');
   assert.equal(goFreeOn(rulesOf(by['ordinary: true, so the Lead\'s cards skip the go']), 'sample-app', 'ordinary'), false);
 });
 
 test('daily-card patterns are read with M10\'s pattern rule (L96 m-3)', () => {
   const by = Object.fromEntries(VARIANTS.map(([n, m]) => [n, m(FIRST)]));
-  assert.deepEqual(fit(by['an empty daily-card pattern'], ENTRY), ['M9: approvals.plan_go.go_free.lead_daily_card: "" can\'t be read: empty pattern']);
-  assert.deepEqual(fit(by['an unclosed { in a daily-card pattern'], ENTRY), ['M9: approvals.plan_go.go_free.lead_daily_card: "docs/{a" can\'t be read: unclosed { in pattern "docs/{a"']);
+  const M11P = (pat) => `M11: approvals.plan_go.go_free.lead_daily_card: "${pat}" is matched differently by M11 (no { } ? , no leading or trailing /, and it needs a /)${KNOWN.pattern}`;
+  assert.deepEqual(fit(by['an empty daily-card pattern'], ENTRY), ['M9: approvals.plan_go.go_free.lead_daily_card: "" can\'t be read: empty pattern', M11P('')]);
+  assert.deepEqual(fit(by['an unclosed { in a daily-card pattern'], ENTRY), ['M9: approvals.plan_go.go_free.lead_daily_card: "docs/{a" can\'t be read: unclosed { in pattern "docs/{a"', M11P('docs/{a')]);
+  // L115 m-C: the ASCII line, and every pattern in the list, not only the first.
+  assert.deepEqual(fit(by['a non-ASCII daily-card pattern'], ENTRY), ['M9: approvals.plan_go.go_free.lead_daily_card: "docs/dé/**" is not a plain-ASCII pattern']);
+  assert.deepEqual(fit(by['a good daily-card pattern, then a bad one'], ENTRY), ['M9: approvals.plan_go.go_free.lead_daily_card: "" can\'t be read: empty pattern', M11P('')]);
+  // L115 M-B: each pattern M10 compile accepts but M11 matches differently is refused, with the known label.
+  for (const pat of ['docs/daily/', 'docs/{daily,weekly}/**', 'daily.md', 'docs/dail?.md', '/docs/x.md']) {
+    assert.deepEqual(fit(by[`the daily-card pattern ${pat.includes('{') || pat.includes('?') ? `'${pat}'` : pat}`], ENTRY), [M11P(pat)], pat);
+  }
 });
 
 test('the fit check refuses a file without go_free, naming it (the L86 plant)', () => {

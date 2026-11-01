@@ -16,8 +16,9 @@ import { goFreeKinds, readyCheck } from './ready.mjs';
 import { CARD_CREATORS } from './permissions.mjs';
 import { PRODUCT_STATES } from '../M10-rules/policy.mjs';
 import { compile } from '../M10-rules/paths.mjs';
+import { KNOWN, numeric } from '../M10-rules/known-gaps.mjs';
 
-const GO_FREE_KEY = 'approvals.plan_go.go_free';
+export const GO_FREE_KEY = 'approvals.plan_go.go_free';
 
 export const REQUIRED_KEYS = Object.freeze([
   GO_FREE_KEY,
@@ -34,21 +35,21 @@ export const OPTIONAL_KEYS = Object.freeze([
 export const GO_FREE = Object.freeze({
   exact_reverse: 'flag',
   research_copy: 'flag',
-  lead_daily_card: 'patterns',   // M11's list of the daily card's files; [] when the Lead is not on the product
+  lead_daily_card: 'patterns',   // M11's list of the daily card's files; [] when the Lead is not on the product (not go-free)
 });
 
 // Exactly true or false, as the rules file writes it (yaml-lite gives text). Replaced by rules.flag once M10 has it.
 const flagOf = (v) => (v === true || v === 'true' ? true : v === false || v === 'false' ? false : undefined);
 
 // Is this kind go-free in the rules? A known kind, with a value of its shape: a flag kind exactly true, a pattern kind a
-// list. The value-reading rule that goFreeKinds (ready.mjs, lane 1's) is to adopt; until then the fit check holds
+// non-empty list ([] means the Lead is not on the product, so no daily card: L115 m-F). The value-reading rule that goFreeKinds (ready.mjs, lane 1's) is to adopt; until then the fit check holds
 // files where the two would differ.
 export function goFreeOn(rules, product, kind) {
   let v;
   try { v = rules.get(GO_FREE_KEY, { product }); } catch { return false; }
   if (!v || typeof v !== 'object' || Array.isArray(v) || !Object.hasOwn(v, kind)) return false;
   if (GO_FREE[kind] === 'flag') return flagOf(v[kind]) === true;
-  if (GO_FREE[kind] === 'patterns') return Array.isArray(v[kind]);
+  if (GO_FREE[kind] === 'patterns') return Array.isArray(v[kind]) && v[kind].length > 0;
   return false;
 }
 
@@ -94,8 +95,11 @@ export function policyProblems(rules, product) {
     byReason.set(reason, [...(byReason.get(reason) ?? []), state]);
   }
   for (const [reason, states] of byReason) out.push(`M9: no card is ever ready in a ${states.join(' or ')} product: ${reason}`);
-  // writer.mjs's own rule for the tab heartbeat limit (a whole number of minutes, at least 1).
+  // The tab heartbeat limit: a whole number of minutes, at least 1. This copies writer.mjs's rule until lane 1 exports
+  // heartbeatLimit(rules, product) from writer.mjs in #79 (L115 m-A); then this calls it. A value the engine gave as text
+  // that would pass as a number is the known L96 gap, said as such.
   const stale = get('proposals.heartbeat_stale_min');
-  if (!Number.isInteger(stale) || stale < 1) out.push('M9: proposals.heartbeat_stale_min must be a whole number of minutes, at least 1');
+  const wholeMin = (x) => Number.isInteger(x) && x >= 1;
+  if (!wholeMin(stale)) out.push(`M9: proposals.heartbeat_stale_min must be a whole number of minutes, at least 1${wholeMin(numeric(stale)) ? KNOWN.text : ''}`);
   return [...new Set(out)];
 }

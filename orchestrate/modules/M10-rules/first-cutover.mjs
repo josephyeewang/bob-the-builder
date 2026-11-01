@@ -14,7 +14,8 @@
 // policyProblems that calls its own readers (M9 runs its real readyCheck; M11's entry below runs its real need() and
 // editingLimits). The fit check takes the union of those lists, says which are missing, and runs each module's check on
 // M10's real engine over this file. What is policy rather than a reader's need (a non-empty required_checks) is a line
-// of its own here, labeled as policy.
+// of its own here, labeled as policy. A reason that is a known gap in the readers, not in the file (numbers as text,
+// M11's scope and pattern reads: known-gaps.mjs), says so on its end; the file is still refused for it.
 
 import { fileURLToPath } from 'node:url';
 import { parseYaml } from '../../../scripts/blueprint/yaml-lite.mjs';
@@ -28,25 +29,47 @@ import * as M9 from '../M9-record/required-keys.mjs';
 import { KEYS as M11_KEYS, NEW_KEYS as M11_NEW_KEYS, need } from '../M11-dispatcher/keys.mjs';
 import { editingLimits } from '../M11-dispatcher/gate.mjs';
 import { PRODUCT_STATES } from './policy.mjs';
+import { KNOWN, asNumbers } from './known-gaps.mjs';
 
 // M11 has no required-keys file of its own yet (lane 2's folder), so its entry is built here from M11's own exports:
 // every key in KEYS except NEW_KEYS (keys the rules schema can't hold yet; when lane 1 adds one, lane 2 takes it off
-// NEW_KEYS and it is checked here with no change), each read by M11's need() with the type its caller asks for, plus
-// the real editingLimits for every product state.
+// NEW_KEYS and it is checked here with no change), each read by M11's need() with the type and the scope its callers use
+// (L115 M-A: with the product, or Mac-wide with none), plus the real editingLimits for every product state.
 const M11_TYPES = Object.freeze({ perState: 'object', shakedown: 'boolean', leadDailyCard: 'list', redRuns: 'list' });
+// The keys M11's callers read with the product; they read every other key Mac-wide. A test reads the M11 sources and
+// fails when a caller's scope and this list differ.
+export const M11_WITH_PRODUCT = Object.freeze(['perState', 'editingPerProduct', 'amberEditingPerProduct', 'shakedown',
+  'shakedownWorkers', 'readonlyPerSession', 'scriptsPerProduct', 'leadDailyCard']);
+export const m11Scope = (name) => (M11_WITH_PRODUCT.includes(name) ? 'product' : 'mac');
 const M11_READ = Object.freeze(Object.entries(M11_KEYS).filter(([, k]) => !M11_NEW_KEYS.includes(k)));
+// A daily-card pattern M11's own matcher (gate.mjs matches()) would read differently from M10 compile (L115 M-B).
+const M11_PATTERN_DIFFERS = (p) => /[{}?,]/.test(p) || p.startsWith('/') || p.endsWith('/') || !p.includes('/');
 const M11 = Object.freeze({
   REQUIRED_KEYS: Object.freeze(M11_READ.map(([, k]) => k)),
   policyProblems(rules, product) {
     const out = [];
+    const reads = (r, key, opts) => { try { need(r, key, opts); return true; } catch { return false; } };
     for (const [name, key] of M11_READ) {
       const type = M11_TYPES[name] ?? 'number';
-      try { need(rules, key, { product, type }); } catch { out.push(`M11: ${key} must be ${type === 'object' ? 'an' : 'a'} ${type}`); }
+      const a = type === 'object' ? 'an' : 'a';
+      const withProduct = { product, type };
+      if (reads(rules, key, m11Scope(name) === 'product' ? withProduct : { type })) continue;
+      // Read Mac-wide, a product key gives nothing on the real engine (L115): a reason of its own.
+      if (m11Scope(name) === 'mac' && rules.get(key, {}) === undefined && rules.get(key, { product }) !== undefined) {
+        out.push(`M11: ${key} is read without the product, so the real engine gives none${KNOWN.scope}`);
+      }
+      if (reads(rules, key, withProduct)) continue;
+      out.push(`M11: ${key} must be ${a} ${type}${reads(asNumbers(rules), key, withProduct) ? KNOWN.text : ''}`);
     }
     if (!out.some((x) => x.startsWith(`M11: ${M11_KEYS.perState} `))) {
-      const bad = PRODUCT_STATES.filter((state) => { try { editingLimits({ rules, product, productDoc: { state }, amberCaps: false }); return false; } catch { return true; } });
-      if (bad.length) out.push(`M11: ${M11_KEYS.perState} must give a number for ${bad.join(', ')} (editingLimits refuses it)`);
+      const limits = (r, state) => { try { editingLimits({ rules: r, product, productDoc: { state }, amberCaps: false }); return true; } catch { return false; } };
+      const bad = PRODUCT_STATES.filter((state) => !limits(rules, state));
+      const text = bad.every((state) => limits(asNumbers(rules), state));
+      if (bad.length) out.push(`M11: ${M11_KEYS.perState} must give a number for ${bad.join(', ')} (editingLimits refuses it)${text ? KNOWN.text : ''}`);
     }
+    let daily = [];
+    try { daily = need(rules, M11_KEYS.leadDailyCard, { product, type: 'list' }); } catch { /* said above */ }
+    for (const p of daily) if (M11_PATTERN_DIFFERS(p)) out.push(`M11: ${M11_KEYS.leadDailyCard}: "${p}" is matched differently by M11 (no { } ? , no leading or trailing /, and it needs a /)${KNOWN.pattern}`);
     return out;
   },
 });

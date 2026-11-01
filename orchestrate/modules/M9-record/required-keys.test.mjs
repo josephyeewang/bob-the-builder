@@ -25,13 +25,13 @@ export function keysRead(text, call) {
 }
 
 function recordReads(ready = read('ready.mjs'), writer = read('writer.mjs')) {
-  const r = keysRead(ready, String.raw`\brules\??\.get`);
+  const r = keysRead(ready, String.raw`\brules\??\.get(?:\?\.)?`);
   // writer.mjs reads through one helper, `const get = (key) => rules.get(key, { product })`; its view's
   // `get(entity, id) {` is the record's own get, not a rules read.
   const helper = 'const get = (key) => rules.get(key, { product });';
   assert.ok(writer.includes(helper), 'writer.mjs reads the rules through its one get helper');
   const w = keysRead(writer.replace(helper, '').replace(/\n\s*get\(entity, id\) \{/, '\n'), String.raw`(?<![.\w])get`);
-  const wr = keysRead(writer.replace(helper, ''), String.raw`\brules\??\.get`);
+  const wr = keysRead(writer.replace(helper, ''), String.raw`\brules\??\.get(?:\?\.)?`);
   return { keys: new Set([...r.keys, ...w.keys, ...wr.keys]), nonLiteral: r.nonLiteral + w.nonLiteral + wr.nonLiteral };
 }
 
@@ -53,6 +53,8 @@ test('the drift reader catches a new read in readyCheck, in double quotes, and a
   assert.ok([...plant("rules.get('caps.new_m9_key', { product });").keys].some((k) => !list.includes(k)));
   assert.ok([...plant('rules.get("caps.new_m9_key", { product });').keys].some((k) => !list.includes(k)));
   assert.equal(plant('rules.get(KEY, { product });').nonLiteral, 1);
+  // L115 m-B, the O5 plant: an optional-call read is a read too.
+  assert.ok([...plant("rules?.get?.('caps.new_m9_key', { product });").keys].some((k) => !list.includes(k)));
   const writer = read('writer.mjs');
   assert.ok([...recordReads(ready, writer.replace("get('caps.rounds')", 'get(`caps.other`)')).keys].includes('caps.other'));
 });

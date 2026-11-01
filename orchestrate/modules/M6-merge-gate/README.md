@@ -76,7 +76,8 @@ See LANES.md for who builds this folder, and the build rows (0b-9, R-0b-86..99) 
     plan_go:
       go_free:
         exact_reverse: true
-        lead_daily_card:
-          - docs/blueprint/daily/**
+        lead_daily_card: []
   ```
+
+  At the first cutover the Lead is not on the product, so `lead_daily_card` is `[]` (L96); `[]` is not go-free.
 - Set M2's `approvals.push_windows` and `approvals.decisions_dir`; no Approve stands without them.
