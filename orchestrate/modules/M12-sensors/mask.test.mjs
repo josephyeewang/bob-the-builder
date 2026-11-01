@@ -74,6 +74,11 @@ test('maskDeep masks every string at any depth, keys included', () => {
 test('planted failure: the scanner itself finds an unmasked key (so a 0 from it means something)', () => {
   assert.ok(findCredentials(`left in: ${FAKE.github}`).length >= 1);
   assert.ok(findCredentials(`left in: ${FAKE.generic}`).length >= 1);
+  // L84 6: an all-upper-case access-key id (a planted fake, built from parts) is found and masked.
+  const keyId = ['AK', 'IA', 'Q7XP3ZL9M2K4T8WB'].join('');
+  assert.ok(findCredentials(`id=${keyId} next`).some((f) => f.kind === 'access-key-id'));
+  assert.doesNotMatch(makeMasker({ env: {} }).maskSecrets(`the id is ${keyId}.`).text, new RegExp(keyId));
+  assert.equal(findCredentials('AKIAWORD is not a key; AKIA1234 is too short').length, 0);
 });
 
 // review-0b-7 M5 and round 2: identifiers stay exact; a typed NAME alone never exempts a value.
