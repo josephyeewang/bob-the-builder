@@ -3,11 +3,11 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, linkSync, readFileSync, realpathSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, fstatSync, linkSync, lstatSync, readFileSync, realpathSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import { setup, product, readyCard, runCard, outboxFile, launch, runnerLaunch, runnerEndedRecord, runnerAsideRecord, CLEAN_CHECKLIST, HEAD, HEAD2, UID, put, must } from './fixtures.test-helper.mjs';
-import { reviewUserProblem, runnerLaunchFor, runnerLaunches, verdictFromFile } from './outbox.mjs';
+import { headReviews, reviewUserProblem, runnerLaunchFor, runnerLaunches, verdictFromFile } from './outbox.mjs';
 
 const refused = (r, re) => { assert.equal(r.ok, false, 'expected a refusal'); assert.match(r.reason, re); };
 
@@ -137,11 +137,12 @@ test('L65: a runner launch record is read only from a safe file in a safe folder
   assert.match(q({ card: 'C-2' }).reason, /another card/);
   assert.match(q({ head: HEAD2 }).reason, /not bbbbbbb/);
   assert.match(q({ role: 'worker' }).reason, /not a review role/);
-  // The file: others may not write it, it has one name, it is not a link, and it names itself.
+  // The file: others may not write it, it is not a link, and it names itself. A second name is no fault (L70 point 1):
+  // anyone can make one, and it can't change review's bytes.
   chmodSync(p, 0o666);
   try { assert.match(q().reason, /written by others/); } finally { chmodSync(p, 0o644); }
   linkSync(p, join(env.base, 'second-name'));
-  try { assert.match(q().reason, /more than one name/); } finally { unlinkSync(join(env.base, 'second-name')); }
+  try { assert.equal(q().ok, true, q().reason); } finally { unlinkSync(join(env.base, 'second-name')); }
   symlinkSync(p, join(env.launchRoot, 'R-2.json'));
   assert.match(q({ sessionId: 'R-2' }).reason, /is a link/);
   writeFileSync(join(env.launchRoot, 'R-3.json'), JSON.stringify({ session_id: 'R-1', role: 'reviewer', card: 'C-1', head: HEAD }), { mode: 0o644 });
@@ -374,4 +375,107 @@ test('L69 planted: the record\'s tree port: a fail at another head with this hea
   must(e2.review.applyOutbox({ role: 'reviewer', sessionId: 'R-2', card: 'C-1' }, outboxFile(e2, 'reviewer', 'R-2', 'verdict-2.md', h2({ head: HEAD, pass: true }))), 'the pass');
   runnerEndedRecord(e2, 'C-1', 'R-2', 'reviewer', HEAD);
   refused(verify(e2), /the tree of head aaaaaaa could not be read \(no such commit\)/);
+});
+
+// L70 point 1: a second name made by another user can't change review's bytes, so it is no fault in review's stores.
+// The round-2 attack: a worker hard-links a failing verdict (or a failing auditor's launch record) so it can't be
+// counted, then a tap would drop its say. Now the fail simply counts.
+test('L70 planted: a hard-linked failing verdict, or a failing auditor\'s hard-linked launch record, still counts as a fail', () => {
+  const verify = (env) => put(env.review, 'dispatcher', 'card', 'C-1', { state: 'verified' });
+  const { env, hdr } = inReview();
+  runnerLaunch(env, 'C-1', 'R-1', 'reviewer', HEAD);
+  const f = outboxFile(env, 'reviewer', 'R-1', 'verdict-1.md', `${JSON.stringify({ entity: 'verdict', card: 'C-1', expectRev: 0, fields: { head: HEAD, pass: false, notes: 'the loop never ends' } })}\n`);
+  runnerEndedRecord(env, 'C-1', 'R-1', 'reviewer', HEAD);
+  linkSync(f, join(env.base, 'worker-made-name'));
+  runnerLaunch(env, 'C-1', 'R-2', 'reviewer', HEAD);
+  must(env.review.applyOutbox({ role: 'reviewer', sessionId: 'R-2', card: 'C-1' }, outboxFile(env, 'reviewer', 'R-2', 'verdict-2.md', hdr({ head: HEAD, pass: true }))), 'the pass');
+  runnerEndedRecord(env, 'C-1', 'R-2', 'reviewer', HEAD);
+  const hr = headReviews({ launches: env.launchRoot, outboxRoot: env.outRoot, uids: env.reviewUids, card: 'C-1', head: HEAD });
+  assert.deepEqual(hr.sessions.map((x) => [x.session_id, x.problem, x.verdict?.pass]), [['R-1', null, false], ['R-2', null, true]]);
+  refused(verify(env), /the reviewer session R-1 did not pass/);
+  // A failing auditor whose launch record has a second name: its fail counts, it is no bad record.
+  const { env: e2, hdr: h2 } = inReview();
+  runnerLaunch(e2, 'C-1', 'R-2', 'reviewer', HEAD);
+  must(e2.review.applyOutbox({ role: 'reviewer', sessionId: 'R-2', card: 'C-1' }, outboxFile(e2, 'reviewer', 'R-2', 'verdict-2.md', h2({ head: HEAD, pass: true }))), 'the pass');
+  runnerEndedRecord(e2, 'C-1', 'R-2', 'reviewer', HEAD);
+  const lp = runnerLaunch(e2, 'C-1', 'A-1', 'auditor', HEAD);
+  outboxFile(e2, 'auditor', 'A-1', 'verdict-a.md', `${JSON.stringify({ entity: 'verdict', card: 'C-1', expectRev: 0, fields: { head: HEAD, pass: false, material: 2 } })}\n`);
+  runnerEndedRecord(e2, 'C-1', 'A-1', 'auditor', HEAD);
+  linkSync(lp, join(e2.base, 'worker-made-launch-name'));
+  const rl = runnerLaunches({ root: e2.launchRoot, uids: e2.reviewUids });
+  assert.deepEqual(rl.refused, []);
+  refused(verify(e2), /the auditor session A-1 did not pass/);
+  // A worker's own outbox still refuses a second name: there the worker owns the file.
+  const { env: e3 } = inReview();
+  const wf = outboxFile(e3, 'worker', 'S-9', 'handin-9.md', `${JSON.stringify({ entity: 'card', id: 'C-1', from_state: 'in_review', to_state: 'running' })}\n`);
+  linkSync(wf, join(e3.base, 'second'));
+  const r = e3.record.applyOutbox({ role: 'worker', sessionId: 'S-9', card: 'C-1' }, wf);
+  assert.equal(r.ok, false);
+  assert.match(String(r.reason ?? r.error ?? JSON.stringify(r)), /more than one name/);
+  // And review's own verdict file may not be writable by others.
+  const { env: e4 } = inReview();
+  runnerLaunch(e4, 'C-1', 'R-1', 'reviewer', HEAD);
+  const f4 = outboxFile(e4, 'reviewer', 'R-1', 'verdict-1.md', `${JSON.stringify({ entity: 'verdict', card: 'C-1', expectRev: 0, fields: { head: HEAD, pass: true, checklist: CLEAN_CHECKLIST } })}\n`);
+  runnerEndedRecord(e4, 'C-1', 'R-1', 'reviewer', HEAD);
+  chmodSync(f4, 0o666);
+  const h4 = headReviews({ launches: e4.launchRoot, outboxRoot: e4.outRoot, uids: e4.reviewUids, card: 'C-1', head: HEAD });
+  assert.match(h4.sessions[0].problem, /file can be written by others than the review user/);
+});
+
+// L70 P4: a record's tie to a card is read only when its standing is good. Bytes in a file review does not own say
+// nothing, so they can't freeze a card; the same bytes with good standing (a bad head) refuse that card.
+test('L70 P4 planted: a launch record review does not own ties to no card; one review owns with a bad head refuses its card', () => {
+  const { env } = inReview();
+  const p = join(env.launchRoot, 'X-1.json');
+  writeFileSync(p, JSON.stringify({ session_id: 'X-1', role: 'reviewer', card: 'C-1', head: HEAD, launched_at: '2026-10-01T12:00:00.000Z' }), { mode: 0o644 });
+  const ino = lstatSync(p).ino;
+  const fstat = (fd) => { const st = fstatSync(fd); return st.ino === ino ? Object.assign(Object.create(Object.getPrototypeOf(st)), st, { uid: UID + 5 }) : st; };
+  const hr = headReviews({ launches: env.launchRoot, outboxRoot: env.outRoot, uids: env.reviewUids, card: 'C-1', head: HEAD, fstat });
+  assert.equal(hr.ok, true, hr.reason);
+  assert.deepEqual(hr.skipped.map((x) => x.name), ['X-1.json']);
+  assert.match(hr.skipped[0].reason, /not owned by the review user/);
+  // The control: review's own record with a bad head is tied to C-1 and refuses it.
+  writeFileSync(p, JSON.stringify({ session_id: 'X-1', role: 'reviewer', card: 'C-1', head: 'short' }), { mode: 0o644 });
+  const h2 = headReviews({ launches: env.launchRoot, outboxRoot: env.outRoot, uids: env.reviewUids, card: 'C-1', head: HEAD });
+  assert.equal(h2.ok, false);
+  assert.match(h2.reason, /the launch record X-1\.json of card C-1 fails its checks/);
+});
+
+// L70 P7, P8, P12: the set-aside record must say Joe set it aside, and match the session's card, role and head; the
+// ended record must name a verdict file in the one format. Each that fails is a problem, which refuses.
+test('L70 P7 P8 P12 planted: a set-aside record not by Joe, or for another card, role or head, and an ended record with a bad sha, refuse', () => {
+  const write = (dir, sid, doc) => writeFileSync(join(dir, `${sid}.json`), JSON.stringify(doc), { mode: 0o644, flag: 'wx' });
+  const aside = (env) => join(env.base, 'set-aside');
+  const one = (over, endedOver) => {
+    const { env } = inReview();
+    runnerLaunch(env, 'C-1', 'R-1', 'reviewer', HEAD);
+    if (endedOver) {
+      runnerEndedRecord(env, 'C-1', 'R-1', 'reviewer', HEAD, { sha: endedOver });
+    } else {
+      runnerEndedRecord(env, 'C-1', 'R-1', 'reviewer', HEAD);
+      runnerAsideRecord(env, 'C-9', 'R-0');   // makes the folder; another session's
+      write(aside(env), 'R-1', { session_id: 'R-1', role: 'reviewer', card: 'C-1', head: HEAD, set_aside_at: '2026-10-01T12:00:00.000Z', by: 'joe', ...over });
+    }
+    return headReviews({ launches: env.launchRoot, outboxRoot: env.outRoot, uids: env.reviewUids, card: 'C-1', head: HEAD }).sessions[0];
+  };
+  assert.equal(one({}).aside, true, 'the control: Joe\'s own record sets it aside');
+  assert.match(one({ by: 'dispatcher' }).problem, /does not say Joe set it aside/);
+  assert.match(one({ set_aside_at: 'soon' }).problem, /does not say Joe set it aside, and when/);
+  assert.match(one({ card: 'C-2' }).problem, /for another role, card or head/);
+  assert.match(one({ role: 'auditor' }).problem, /for another role, card or head/);
+  assert.match(one({ head: HEAD2 }).problem, /for another role, card or head/);
+  for (const bad of ['xyz', 'E'.repeat(64), 'e'.repeat(63), 'NONE']) assert.match(one(null, bad).problem, /does not say what verdict file it ended with/, bad);
+  assert.equal(one(null, 'none').silent, true, 'the control: none is a silent end');
+});
+
+// L70 P11: the record's move to verified takes a silent auditor as a failure, as the Merge Gate does.
+test('L70 P11 planted: verified with an auditor that ended silent is refused, as at the gate', () => {
+  const verify = (env) => put(env.review, 'dispatcher', 'card', 'C-1', { state: 'verified' });
+  const { env, hdr } = inReview();
+  runnerLaunch(env, 'C-1', 'R-2', 'reviewer', HEAD);
+  must(env.review.applyOutbox({ role: 'reviewer', sessionId: 'R-2', card: 'C-1' }, outboxFile(env, 'reviewer', 'R-2', 'verdict-2.md', hdr({ head: HEAD, pass: true }))), 'the pass');
+  runnerEndedRecord(env, 'C-1', 'R-2', 'reviewer', HEAD);
+  runnerLaunch(env, 'C-1', 'A-1', 'auditor', HEAD);
+  runnerEndedRecord(env, 'C-1', 'A-1', 'auditor', HEAD, { sha: 'none' });
+  refused(verify(env), /the auditor session A-1 ended without handing in a verdict, which counts as a failure/);
 });

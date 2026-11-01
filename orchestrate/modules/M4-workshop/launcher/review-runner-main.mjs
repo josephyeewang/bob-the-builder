@@ -21,17 +21,23 @@
 //     "hooksDir": "/abs",                           the hooks folder a reviewer's settings point at, inside installRoot
 //     "accountCopy": "/abs",                        root's copy of the account in use (review-account-copy.plist)
 //     "ownerHome": "/abs", "ownerUid": <uid>,       the fallback: the owner's own account file, read only
+//     "ownerTaps": "/abs",                          optional: Joe's "review again" taps (L70 point 3), a folder of the
+//                                                   owner's that no one else writes, holding <session>.json files of
+//                                                   the owner's; the Front Door, which runs as Joe, writes them
 //     "wiring": "/abs/wiring.mjs" }                 exports `start(x)` (review-runner.mjs `runnerPass`, `ctx.start`)
 // The wiring's start runs the launcher (launch.mjs, checks 1 to 13) for a reviewer or an auditor, with `--session-id`
 // set to the runner's id, and returns { ok, pid }, where pid is claude's own process (L66: never the launcher's; the
 // runner checks the pid's command is the pinned claude before it counts the start, and before it stops anything). It
 // gets `claudeBin`, `node` and `hooksDir` (checked above) to run and to render the settings with, and `earlier`: the
 // card's earlier failing verdicts for this role on other trees, [{ session_id, head, notes }], which the reviewer's
-// prompt must include (L69 point 4). Exit 0 when the pass ran clean, 1 when it refused or could not run.
+// prompt must include (L69 point 4), as quoted data from an earlier reviewer and never as instructions: the wiring
+// renders them with `earlierBlock` (review-runner.mjs, L70 point 5). Exit 0 when the pass ran clean, 1 when it refused
+// or could not run.
 
 import { closeSync, constants, fstatSync, lstatSync, openSync, readFileSync, readdirSync, realpathSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { runnerPass, CARD_ID, isClaudeCommand } from './review-runner.mjs';
 import { STAMP } from './review-daemons.mjs';
@@ -49,6 +55,7 @@ export function readConfig(file) {
   const c = JSON.parse(readFileSync(file, 'utf8'));
   for (const k of ABS) if (typeof c?.[k] !== 'string' || !isAbsolute(c[k])) throw new Error(`config: ${k} must be an absolute path`);
   if (c.accountCopy !== undefined && (typeof c.accountCopy !== 'string' || !isAbsolute(c.accountCopy))) throw new Error('config: accountCopy must be an absolute path');
+  if (c.ownerTaps !== undefined && (typeof c.ownerTaps !== 'string' || !isAbsolute(c.ownerTaps))) throw new Error('config: ownerTaps must be an absolute path');
   for (const k of ['recordUid', 'ownerUid']) if (!Number.isInteger(c[k]) || c[k] < 0) throw new Error(`config: ${k} must be a uid`);
   if (!c.uids || typeof c.uids !== 'object') throw new Error('config: uids must map each role to a uid');
   // The runner's folder and review's outbox are two walls (L68 (4)): review sessions write the outbox, and only the
@@ -206,6 +213,43 @@ export function readInstallStamp(installRoot, { owner = 0 } = {}) {
   } catch { return null; } finally { closeSync(fd); }
 }
 
+const TAP_NAME = /^([A-Za-z0-9-]{1,128})\.json$/;
+const MAX_TAP_BYTES = 4096;
+/**
+ * Joe's "review again" taps (L70 point 3): files in a folder of the owner's that no one else writes (and whose own
+ * folder no one else writes either, so it can't be swapped), each a plain file of the owner's that no one else writes,
+ * named <session>.json and holding { "session_id": "<session>" }. Nothing the workers' Mac user writes can be one: not
+ * the Dispatcher, the Record or requests/. A file that fails a check is ignored. No folder configured → none. A folder
+ * that fails its check is a throw (the pass says why). Each tap has a key (name, time and bytes), so it is read once.
+ * `lstat` and `fstat` are ports for a test. → [{ session_id, key }]
+ */
+export function readJoeTaps({ dir, ownerUid, lstat = lstatSync, fstat = fstatSync } = {}) {
+  if (dir === undefined) return [];
+  if (typeof dir !== 'string' || !isAbsolute(dir) || !Number.isInteger(ownerUid) || ownerUid < 0) throw new Error('the taps folder or the owner\'s uid is not set');
+  for (const [p, what] of [[dir, 'the taps folder'], [dirname(dir), 'the folder above the taps folder']]) {
+    let st; try { st = lstat(p); } catch (e) { throw new Error(`${what} is missing (${e?.code ?? e})`); }
+    if (st.isSymbolicLink() || !st.isDirectory()) throw new Error(`${what} is not a plain folder`);
+    if (st.uid !== ownerUid && !(p !== dir && st.uid === 0)) throw new Error(`${what} is not owned by the owner`);
+    if (st.mode & 0o022) throw new Error(`${what} can be written by others than the owner`);
+  }
+  const out = [];
+  for (const name of readdirSync(dir).sort()) {
+    const m = TAP_NAME.exec(name);
+    if (!m) continue;
+    let fd;
+    try { fd = openSync(join(dir, name), constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); } catch { continue; }
+    try {
+      const st = fstat(fd);
+      if (!st.isFile() || st.uid !== ownerUid || st.mode & 0o022 || st.size > MAX_TAP_BYTES) continue;
+      const buf = readFileSync(fd);
+      let doc; try { doc = JSON.parse(buf.toString('utf8')); } catch { continue; }
+      if (!doc || typeof doc !== 'object' || doc.session_id !== m[1] || !SESSION_ID.test(m[1])) continue;
+      out.push({ session_id: m[1], key: `${name}:${st.mtimeMs}:${createHash('sha256').update(buf).digest('hex')}` });
+    } catch { continue; } finally { closeSync(fd); }
+  }
+  return out;
+}
+
 /** `ps -o pid=,command=` lines → the processes of `bin`, with their --session-id; this process left out. */
 export function sessionsFrom(text, bin, self = process.pid) {
   const out = [];
@@ -244,8 +288,8 @@ export function realPorts(c, wiring, { node = realpathSync(process.execPath) } =
       if (r.code !== 0) throw new Error(`the head's tree is not in the mirror (${r.code})`);
       return r.stdout.toString('utf8').trim();
     },
-    // Joe's "review again" taps (L69): a port now, wired to the phone link at the cutover. None until then.
-    setAsideByJoe: () => [],
+    // Joe's "review again" taps (L70 point 3): only the owner's own files; none until `ownerTaps` is set.
+    setAsideByJoe: () => readJoeTaps({ dir: c.ownerTaps, ownerUid: c.ownerUid }),
     sessions: () => {
       const r = run('/bin/ps', ['-U', String(uid), '-o', 'pid=', '-o', 'command=']);
       if (r.status !== 0 && r.status !== 1) throw new Error(`ps failed (${r.error?.code ?? `exit ${r.status}`})`);

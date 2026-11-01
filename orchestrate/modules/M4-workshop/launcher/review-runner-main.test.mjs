@@ -3,9 +3,9 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, linkSync, mkdirSync, readFileSync, realpathSync, symlinkSync, unlinkSync, writeFileSync, lstatSync } from 'node:fs';
+import { chmodSync, fstatSync, linkSync, mkdirSync, readFileSync, realpathSync, symlinkSync, unlinkSync, writeFileSync, lstatSync } from 'node:fs';
 import { join } from 'node:path';
-import { installProblem, programsProblem, readCardFile, recordVerdictTaken, adminAnswer, sessionsFrom, realPorts, readConfig, readInstallStamp } from './review-runner-main.mjs';
+import { installProblem, programsProblem, readCardFile, recordVerdictTaken, adminAnswer, sessionsFrom, realPorts, readConfig, readInstallStamp, readJoeTaps } from './review-runner-main.mjs';
 import { readOutboxFile } from '../../M9-record/outbox.mjs';
 import { STAMP, installStamp } from './review-daemons.mjs';
 import { reviewDaemonPlists } from './review-daemons.mjs';
@@ -342,4 +342,58 @@ test('L69: the real tree port reads a head\'s tree from the mirror; an amend wit
   await assert.rejects(ports.treeOf('C-1', 'HEAD'), /the head is not 40 hex/);
   // Joe's taps: none until the phone link is wired.
   assert.deepEqual(ports.setAsideByJoe(), []);
+});
+
+// L70 point 3: a "review again" tap is a file of Joe's own Mac user, in a folder of his that no one else writes. Nothing
+// the workers' Mac user writes can be one.
+test('L70 planted: Joe\'s taps are read only as the owner\'s own files, in the owner\'s own folder', () => {
+  const ME = process.getuid();
+  const base = tempDir('m4-taps-');
+  chmodSync(base, 0o755);
+  const dir = join(base, 'taps');
+  mkdirSync(dir, { mode: 0o755 }); chmodSync(dir, 0o755);
+  const tap = (sid, doc = { session_id: sid }, mode = 0o644) => { const p = join(dir, `${sid}.json`); writeFileSync(p, typeof doc === 'string' ? doc : JSON.stringify(doc), { mode }); chmodSync(p, mode); return p; };
+  assert.deepEqual(readJoeTaps({ dir: undefined, ownerUid: ME }), [], 'none configured: none');
+  const p1 = tap('S-1');
+  let got = readJoeTaps({ dir, ownerUid: ME });
+  assert.deepEqual(got.map((t) => t.session_id), ['S-1']);
+  assert.match(got[0].key, /^S-1\.json:[0-9.]+:[0-9a-f]{64}$/);
+  assert.equal(readJoeTaps({ dir, ownerUid: ME })[0].key, got[0].key, 'the same tap has the same key');
+  // The folder: the owner's, a plain folder, written by no one else; the same for the folder above it.
+  assert.throws(() => readJoeTaps({ dir, ownerUid: ME + 1 }), /the taps folder is not owned by the owner/);
+  chmodSync(dir, 0o777);
+  try { assert.throws(() => readJoeTaps({ dir, ownerUid: ME }), /the taps folder can be written by others than the owner/); } finally { chmodSync(dir, 0o755); }
+  chmodSync(dir, 0o775);
+  try { assert.throws(() => readJoeTaps({ dir, ownerUid: ME }), /the taps folder can be written by others than the owner/); } finally { chmodSync(dir, 0o755); }
+  chmodSync(base, 0o777);
+  try { assert.throws(() => readJoeTaps({ dir, ownerUid: ME }), /the folder above the taps folder can be written by others than the owner/); } finally { chmodSync(base, 0o755); }
+  symlinkSync(dir, join(base, 'alias'));
+  assert.throws(() => readJoeTaps({ dir: join(base, 'alias'), ownerUid: ME }), /the taps folder is not a plain folder/);
+  assert.throws(() => readJoeTaps({ dir: join(base, 'missing'), ownerUid: ME }), /the taps folder is missing/);
+  const above = (uid) => (p) => { const st = lstatSync(p); return p === base ? Object.assign(Object.create(Object.getPrototypeOf(st)), st, { uid }) : st; };
+  assert.throws(() => readJoeTaps({ dir, ownerUid: ME, lstat: above(ME + 7) }), /the folder above the taps folder is not owned by the owner/);
+  assert.equal(readJoeTaps({ dir, ownerUid: ME, lstat: above(0) }).length, 1, 'the folder above may be root\'s');
+  // A file of another user (the workers') is ignored; so is one others may write, a link, a misnamed or bad one.
+  const ino = lstatSync(p1).ino;
+  const other = (fd) => { const st = fstatSync(fd); return st.ino === ino ? Object.assign(Object.create(Object.getPrototypeOf(st)), st, { uid: ME + 1 }) : st; };
+  assert.deepEqual(readJoeTaps({ dir, ownerUid: ME, fstat: other }), [], 'a tap file owned by the workers\' user is ignored');
+  chmodSync(p1, 0o666);
+  try { assert.deepEqual(readJoeTaps({ dir, ownerUid: ME }), []); } finally { chmodSync(p1, 0o644); }
+  unlinkSync(p1);
+  writeFileSync(join(base, 'elsewhere.json'), JSON.stringify({ session_id: 'S-2' }), { mode: 0o644 });
+  symlinkSync(join(base, 'elsewhere.json'), join(dir, 'S-2.json'));
+  tap('S-3', { session_id: 'S-4' });
+  tap('S-5', '{');
+  tap('S-6', { session_id: 'S-6', pad: 'x'.repeat(5000) });
+  writeFileSync(join(dir, 'S-7.txt'), JSON.stringify({ session_id: 'S-7' }), { mode: 0o644 });
+  mkdirSync(join(dir, 'S-8.json'));
+  tap('S-9');
+  assert.deepEqual(readJoeTaps({ dir, ownerUid: ME }).map((t) => t.session_id), ['S-9']);
+  // The config names the folder as an absolute path, or not at all.
+  const d = realpathSync(tempDir('m4-cfg-'));
+  const good = { installRoot: '/i', root: join(d, 'review'), outboxRoot: join(d, 'outbox'), reviewHome: '/h', uids: {}, recordRoot: '/x', recordUid: 5, mirror: '/m', claudeBin: '/c', hooksDir: '/i/hooks', ownerHome: '/w', ownerUid: 5, wiring: '/i/w.mjs' };
+  const cfg = (over) => { writeFileSync(join(d, 'c.json'), JSON.stringify({ ...good, ...over })); return () => readConfig(join(d, 'c.json')); };
+  assert.equal(cfg({})().ownerTaps, undefined);
+  assert.equal(cfg({ ownerTaps: '/t' })().ownerTaps, '/t');
+  assert.throws(cfg({ ownerTaps: 'taps' }), /ownerTaps must be an absolute path/);
 });

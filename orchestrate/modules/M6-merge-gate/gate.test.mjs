@@ -3,7 +3,7 @@
 // a GitHub refusal and a stopped pass each end where they should; behind main catches up; the queue order.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, readdirSync, unlinkSync, writeFileSync } from 'node:fs';
+import { linkSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -649,4 +649,22 @@ test('L69 planted: the gate reads the head\'s tree; a fail at another head with 
   assert.notEqual((await w2.ctx.view.commit(h2)).tree, 'd'.repeat(40));
   await gatePass(w2.ctx);
   assert.equal(mergeOf(w2).doc.state, 'merged', mergeOf(w2).doc.reasons?.join(' | '));
+});
+
+// L70 point 1, the round-2 attack at the gate: a worker gives review's failing verdict file a second name. That can't
+// change review's bytes, so the fail is read and counts (refusal 5 "did not pass"), never "can't be counted".
+test('L70 planted: a failing verdict file with a second name still refuses the merge as a fail (5)', async () => {
+  const w = world();
+  verifiedCard(w);
+  const v = w.env.record.list('verdict')[0];
+  const file = v.doc.source_key.slice(0, v.doc.source_key.lastIndexOf('\0'));
+  writeFileSync(file, readFileSync(file, 'utf8').replace('"pass":true', '"pass":false'));
+  unlinkSync(join(w.env.base, 'ended', 'R-C-1.json'));
+  runnerEndedRecord(w.env, 'C-1', 'R-C-1', 'reviewer', w.env.record.read('card', 'C-1').doc.head);
+  linkSync(file, join(w.env.base, 'worker-made-name'));
+  await gatePass(w.ctx);
+  const m = mergeOf(w);
+  assert.notEqual(m.doc.state, 'merged');
+  assert.ok(m.doc.reasons.some((x) => x.startsWith('5:') && /the reviewer session R-C-1 did not pass/.test(x)), m.doc.reasons.join(' | '));
+  assert.ok(!m.doc.reasons.some((x) => /can't be counted|more than one name/.test(x)), m.doc.reasons.join(' | '));
 });

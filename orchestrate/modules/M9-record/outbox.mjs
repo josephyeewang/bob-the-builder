@@ -3,8 +3,10 @@
 // WHY. AI sessions never write the record. They drop files in their own outbox, `<outboxRoot>/<role>/<sessionId>/`,
 // and the Dispatcher hands each file to the Store Writer. The file is written by an AI, so it is read as hostile:
 //   - the role and session come from where the file really is (realpath), never from what it says;
-//   - it is opened without following a link, and must be a plain file with one name, owned by the role's user, ≤ 256 KB,
-//     so a link to a key file can't be copied into the record;
+//   - it is opened without following a link, and must be a plain file owned by the role's user, ≤ 256 KB, so a link to a
+//     key file can't be copied into the record; in a worker's outbox it must have one name, and in review's it may have
+//     more (L70 point 1: any user can make a second name there, and it can't change review's bytes) but no one else may
+//     write it;
 //   - its kind comes from its name, and must be listed for that role in shared OUTBOX_KINDS.
 //
 //   readOutboxFile({ outboxRoot, uids, tag, file }) →
@@ -112,14 +114,18 @@ export function launchesFolderProblem(root, uid) {
   return null;
 }
 
-// One launch record, read as the outbox reads a file: no link, a plain file with one name, review's own and writable by
-// no one else, small, and naming itself (the session id in the file is the one in its name). The launch, ended and
-// set-aside records are all read here.
+// One launch record, read as the outbox reads a file: no link, a plain file, review's own and writable by no one else,
+// small, and naming itself (the session id in the file is the one in its name). The launch, ended and set-aside records
+// are all read here.
+//
+// A second name is no fault here (L70 point 1): any Mac user can hard-link a file in a folder it can search, and these
+// folders are 0755 so the gate can read them, but a second name can't change the bytes, which stay review's, 0644, in
+// review's folder. Counting it would let a worker turn a failing session's record into a bad one.
 //
 // A record that fails its checks still says what it can (L69 point 3): `sid` from its name, and `tie`, the card (and
-// role, head and tree, when well formed) its bytes name. Only review can write in these folders, so the bytes are the
-// runner's; what fails is usually the file's standing (a hard link someone made to it raises its link count). So a bad
-// record refuses only the card it belongs to, not every card.
+// role, head and tree, when well formed) its bytes name. The tie is read only when the file's standing is good (owner,
+// mode, a plain file; L70 P4): bytes in a file review does not own say nothing. So a bad record refuses only the card it
+// belongs to, not every card.
 function readLaunch(root, uid, name, fstat = fstatSync) {
   const m = LAUNCH_NAME.exec(name);
   let tie = null;
@@ -134,9 +140,9 @@ function readLaunch(root, uid, name, fstat = fstatSync) {
     const st = fstat(fd);
     if (!st.isFile()) return no('the launch record is not a plain file');
     if (st.size > MAX_LAUNCH_BYTES) return no(`the launch record is over ${MAX_LAUNCH_BYTES} bytes`);
-    standing = st.nlink !== 1 ? 'the launch record has more than one name (a hard link)'
-      : st.uid !== uid ? 'the launch record is not owned by the review user'
-        : st.mode & 0o022 ? 'the launch record can be written by others than the review user' : null;
+    standing = st.uid !== uid ? 'the launch record is not owned by the review user'
+      : st.mode & 0o022 ? 'the launch record can be written by others than the review user' : null;
+    if (standing) return no(standing);
     buf = Buffer.alloc(st.size);
     let got = 0;
     while (got < buf.length) { const n = readSync(fd, buf, got, buf.length - got, got); if (!n) break; got += n; }
@@ -148,7 +154,6 @@ function readLaunch(root, uid, name, fstat = fstatSync) {
     tie = { card: doc.card };
     if (REVIEW_ROLES.includes(doc.role) && HEX40.test(doc.head ?? '') && doc.session_id === m[1]) Object.assign(tie, { role: doc.role, head: doc.head, tree: HEX40.test(doc.tree ?? '') ? doc.tree : null });
   }
-  if (standing) return no(standing);
   if (doc === null) return no('the launch record is not JSON');
   if (!doc || typeof doc !== 'object' || Array.isArray(doc)) return no('the launch record is not a JSON object');
   if (doc.session_id !== m[1]) return no('the launch record names another session than its file name');
@@ -322,7 +327,7 @@ export function headReviews({ launches, outboxRoot, uids, card, head, tree, fsta
   return { ok: true, sessions, skipped };
 }
 
-// The card a record of the runner's names, whatever its standing; null when it names none.
+// The card a record of the runner's names, when its standing is good (L70 P4); null when it names none.
 function readLaunchQuiet(root, uid, sid, fstat) {
   try { lstatSync(root); } catch { return null; }
   const r = readLaunch(root, uid, `${sid}.json`, fstat);
@@ -413,8 +418,12 @@ export function readOutboxFile({ outboxRoot, uids = {}, tag, file }) {
   try {
     const st = fstatSync(fd);
     if (!st.isFile()) return no('not a plain file');
-    if (st.nlink !== 1) return no('file has more than one name (a hard link)');
+    // A second name is a fault in a worker's outbox (the worker owns the file, so it could change it through the other
+    // name), but not in review's (L70 point 1): another user's link can't change review's 0644 bytes, and counting it
+    // would let a worker turn a failing verdict into one that can't be counted. Owner, mode, folders and sha still hold.
+    if (st.nlink !== 1 && !REVIEW_ROLES.includes(tag.role)) return no('file has more than one name (a hard link)');
     if (st.uid !== owner) return no(`file is owned by uid ${st.uid}, not the ${tag.role} outbox owner`);
+    if (REVIEW_ROLES.includes(tag.role) && st.mode & 0o022) return no('file can be written by others than the review user');
     if (st.size > MAX_OUTBOX_BYTES) return no(`file is ${st.size} bytes, over ${MAX_OUTBOX_BYTES}`);
     buf = Buffer.alloc(st.size);
     let got = 0;
