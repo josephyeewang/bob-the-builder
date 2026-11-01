@@ -133,3 +133,24 @@ test('L131: across products a Dispatcher-wide key is the smallest value (dead_qu
   // One product leaves front_door_stuck_min out: missing, never the other product's value.
   assert.throws(() => need(rulesFromText({ app: quiet(30), web: FIXTURE }), KEYS.frontDoorStuckMin), MissingKey);
 });
+
+// L134 M-1: #68 gate.mjs reads timeouts.merging_open_max_min through minutes(). Before the typed reads, a text value
+// gave a NaN limit, so "open past the limit" was never true and an interrupted merge was never refused (4 M6 gate
+// tests red after the #68 merge-forward). Here the limit comes from the real rules text and is a number.
+test("L134 M-1: a merge open past timeouts.merging_open_max_min is past its limit when the rules come in as text", () => {
+  const withOpen = (v) => FIXTURE.replace(/^timeouts:\n/m, `timeouts:\n  merging_open_max_min: ${v}\n`);
+  const rules = rulesFromText(withOpen("45"));
+  const limit = minutes(rules, "timeouts.merging_open_max_min", o);
+  assert.equal(limit, 45 * 60_000);
+  const pastLimit = (openFor) => openFor > limit;
+  assert.equal(pastLimit(46 * 60_000), true, "open 46 min: refused as interrupted");
+  assert.equal(pastLimit(44 * 60_000), false, "open 44 min: still waiting");
+  // A value that is not a whole number never becomes a limit (NaN would make every comparison false): the rules file
+  // is refused at load, and a reader handed such text anyway finds the key missing.
+  for (const bad of ["soon", "45.5", "-1"]) {
+    assert.throws(() => rulesFromText(withOpen(bad)), /merging_open_max_min must be a whole number/, bad);
+    assert.throws(() => minutes(fakeRules({ values: { "timeouts.merging_open_max_min": bad } }), "timeouts.merging_open_max_min", o), MissingKey, bad);
+  }
+  // The same through a fake that hands text, as other modules' tests do.
+  assert.equal(minutes(fakeRules({ values: { "timeouts.merging_open_max_min": 45 } }), "timeouts.merging_open_max_min", o), 45 * 60_000);
+});
