@@ -16,7 +16,7 @@ export const VALUES = Object.freeze({
   [K.editingPerProduct]: 3, [K.editingPerMac]: 5, [K.perState]: { light: 1, active: 3, away: 3, paused: 0 },
   [K.shakedown]: false, [K.shakedownWorkers]: 1, [K.scriptsPerProduct]: 1, [K.scriptsPerMac]: 2, [K.readonlyPerSession]: 4,
   [K.leadDailyCard]: ['docs/blueprint/blueprint.yaml', 'docs/blueprint/cards/**', 'docs/blueprint/BLUEPRINT.md'],
-  [K.cancelGraceMin]: 2, [K.parkWaitMin]: 15, [K.deadQuietMin]: 5, [K.claimsStuckMin]: 5, [K.checkingMaxMin]: 30,
+  [K.cancelGraceMin]: 2, [K.parkWaitMin]: 15, [K.deadQuietMin]: 5, [K.claimsStuckMin]: 5, [K.checkingMaxMin]: 30, [K.mergingOpenMaxMin]: 15,
   [K.reportingMaxMin]: 10, [K.inReviewNoReviewerMin]: 15, [K.frontDoorStuckMin]: 10, [K.usageUnknownMaxMin]: 1440,
   [K.outageMinDead]: 3, [K.outageShare]: 0.5,
   [K.leadSoft]: 250_000, [K.leadHard]: 400_000, [K.handoffCapRole]: 8_000, [K.splitAfterCompactions]: 2,

@@ -32,7 +32,7 @@ import { move, waitOn, note } from './moves.mjs';
 import { sensorsFact } from './sensor-facts.mjs';
 import { tellThen, dropCause } from './alerts.mjs';
 import { exactReverse } from './undo.mjs';
-import { FINAL_STATES, OWNER_WAIT_WHO } from '../../shared/record.mjs';
+import { FINAL_STATES, OWNER_WAIT_WHO, PAUSED_WAIT_WHAT } from '../../shared/record.mjs';
 
 export const STOP_FACT = (sid) => `stop-${sid}`;
 export const COMPACTION_FACT = (card) => `compactions-${card}`;
@@ -278,7 +278,7 @@ export async function dispatcherPass({ rec, rules, now, account, sessions, probe
       if (!Number.isFinite(resets) || now < resets) continue;
       if (doc.tier === 2) { if (move(rec, 'card', id, { state: 'ready' }, { kind: 'resume_limit_hit' }).ok) out.resumed.push(id); }
       else waitOn(rec, id, { who: 'joe', what: 'limit_hit: the limit reset; Tier-1 work does not resume by itself', now, kind: 'limit_reset' });
-    } else if (what === 'paused') {
+    } else if (what === PAUSED_WAIT_WHAT) {
       // A card parked for a paused product goes back to ready once the product is no longer paused.
       if (rec.read('product', doc.product)?.doc?.state !== 'paused' && move(rec, 'card', id, { state: 'ready' }, { kind: 'resume_paused' }).ok) out.resumed.push(id);
     }
@@ -345,7 +345,7 @@ function moveAfterStop(rec, cardId, reason, now) {
   if (rec.read('card', cardId)?.doc?.state !== 'running') return null;
   if (reason === 'needs_split') return waitOn(rec, cardId, { who: 'dependency', what: 'needs_split', now, kind: 'needs_split' });
   if (reason === 'red') return waitOn(rec, cardId, { who: 'usage', what: 'usage_band', now, kind: 'park_red' });
-  return waitOn(rec, cardId, { who: 'joe', what: 'paused', now, kind: 'park_paused' });
+  return waitOn(rec, cardId, { who: OWNER_WAIT_WHO, what: PAUSED_WAIT_WHAT, now, kind: 'park_paused' });
 }
 
 // Only an explicit Tier 2 is Tier 2 (audit MAT-3).

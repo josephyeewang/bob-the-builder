@@ -70,6 +70,8 @@ test('0b-8 audit round 2 M-3: the brief lists what waits on the owner from the o
   // waiting on usage is not the owner's.
   x.w('card', 'card-4', { module: 'M1', state: 'waiting', wait: { who: 'joe', what: 'pick the launch date', since: x.ago(50) } });
   x.w('card', 'card-7', { module: 'M1', state: 'waiting', wait: { who: 'usage', what: 'the weekly limit', since: x.ago(40) } });
+  // L85 m-5: a card parked for a paused product (M11's park) is no go owed; it resumes on unpause.
+  x.w('card', 'card-9', { module: 'M1', state: 'waiting', wait: { who: 'joe', what: 'paused', since: x.ago(30) } });
   x.w('go', 'go-5', { state: 'waiting', wait: { who: 'dispatcher', what: 'build finishing', since: x.ago(10) } });
   // The record refuses a waiting doc without who/since at write time, so a bad row (an older doc) is planted on read.
   const bad = { id: 'merge-6', rev: 1, doc: { state: 'waiting', wait: { what: 'unclear' } } };
@@ -81,6 +83,8 @@ test('0b-8 audit round 2 M-3: the brief lists what waits on the owner from the o
   assert.equal(t.includes('the weekly limit'), false, 'a usage wait is not the owner\'s');
   assert.match(t, /record error: merge merge-6 is waiting with no who, since/);
   assert.equal(t.includes('build finishing'), false);
+  assert.equal(/- card card-9: /.test(t), false, 'a paused park is not waiting on your go');
+  assert.match(t, /Parked while their product is paused; they resume when you unpause \(1\):\n- card card-9\n/);
 });
 
 test('0b-8 audit round 2 M-5, minors 8, 9: the brief is stamped with when it was made and good until; a future heartbeat is unknown; a bad zone holds number work', () => {

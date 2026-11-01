@@ -151,7 +151,17 @@ test('exact_reverse needs an answered Undo ask or an authenticated audit issue, 
   refused(er('U-0', undefined), /needs an answered Undo ask/);
   must(env.record.write({ actor: 'approvals', entity: 'ask', id: 'A-1', expectRev: 0, doc: { state: 'open', kind: 'undo' } }));
   refused(er('U-0', { ask: 'A-1' }), /needs an answered Undo ask/, 'an open ask is not an answer');
-  seed(env, 'ask', 'A-1', { state: 'answered', kind: 'undo', reask_count: 0 });
+  // L85 m-2: answered with no answer, or with Keep, or Undo not approving, is no go for a reverse.
+  const A1 = { state: 'answered', kind: 'undo', reask_count: 0, choices: ['Undo', 'Keep'] };
+  seed(env, 'ask', 'A-1', A1);
+  refused(er('U-0', { ask: 'A-1' }), /needs an answered Undo ask/, 'answered with no answer');
+  seed(env, 'ask', 'A-1', { ...A1, answer: { channel: 'tap', choice: 'Keep', approves: false, at: iso(env.clock.t) } });
+  refused(er('U-0', { ask: 'A-1' }), /needs an answered Undo ask/, 'Keep');
+  seed(env, 'ask', 'A-1', { ...A1, answer: { channel: 'tap', choice: 'Keep', approves: true, at: iso(env.clock.t) } });
+  refused(er('U-0', { ask: 'A-1' }), /needs an answered Undo ask/, 'Keep, even marked approving');
+  seed(env, 'ask', 'A-1', { ...A1, answer: { channel: 'tap', choice: 'Undo', approves: false, at: iso(env.clock.t) } });
+  refused(er('U-0', { ask: 'A-1' }), /needs an answered Undo ask/, 'Undo, not approving');
+  seed(env, 'ask', 'A-1', { ...A1, answer: { channel: 'tap', choice: 'Undo', approves: true, at: iso(env.clock.t) } });
   seed(env, 'ask', 'A-2', { state: 'answered', kind: 'question', reask_count: 0 });
   refused(er('U-0', { ask: 'A-2' }), /needs an answered Undo ask/, 'another kind of ask');
   // Look-alikes (L74 addendum): the workshop's own fact of the same type, a Sensors fact outside undo-issue-, and a fact
@@ -400,6 +410,32 @@ test('the audit result comes from a Sensors audit_run fact for the merged commit
   refused(audit('audited_ok', 'audit-run-other'), /for another commit/);
   refused(audit('audited_ok', 'audit-run-bad'), /concluded failure, so the merge is audit_flagged/);
   must(audit('audit_flagged', 'audit-run-bad'));
+});
+
+test('L85 M-1 (b): an interrupted merge becomes merged only with the Sensors reading of its PR, merged at the judged head', () => {
+  const env = setup({ prefix: 'm9-wr-' });
+  seed(env, 'merge', 'M-1', { state: 'refused', reasons: ['interrupted'], card: 'C-1', pr: 7, judged_head: HEAD2 });
+  seed(env, 'merge', 'M-2', { state: 'refused', reasons: ['timeout'], card: 'C-2', pr: 8, judged_head: HEAD2 });
+  const reading = (id, doc) => must(env.record.write({ actor: 'sensors', entity: 'fact', id, expectRev: 0, doc: { merged: true, merge_commit_sha: HEAD, head_sha: HEAD2, observed_at: iso(env.clock.t), ...doc } }));
+  reading('pr-7', {});
+  reading('pr-8', {});
+  reading('pr-6', {});
+  must(env.record.write({ actor: 'workshop', entity: 'fact', id: 'push.pr-7', expectRev: 0, doc: { merged: true, merge_commit_sha: HEAD, head_sha: HEAD2 } }));
+  const rec = (id, fact, patch = {}) => put(env.record, 'merge_gate', 'merge', id, { state: 'merged', merge_commit: HEAD, merged_at: iso(env.clock.t), ...patch }, { data: { fact } });
+  refused(rec('M-2', 'pr-8'), /only an interrupted merge is reconciled/);
+  refused(rec('M-1', undefined), /Sensors reading of this merge's PR/);
+  refused(rec('M-1', 'push.pr-7'), /Sensors reading of this merge's PR/);
+  refused(rec('M-1', 'pr-6'), /Sensors reading of this merge's PR/, 'another PR');
+  refused(rec('M-1', 'pr-7', { merge_commit: undefined }), /names its merge commit/);
+  refused(rec('M-1', 'pr-7', { merge_commit: 'f'.repeat(40) }), /does not show this PR merged at the judged head with this commit/);
+  refused(rec('M-1', 'pr-7', { judged_head: HEAD }), /judged head never changes/);
+  must(env.record.write({ actor: 'sensors', entity: 'fact', id: 'pr-7', expectRev: env.record.read('fact', 'pr-7').rev, doc: { ...env.record.read('fact', 'pr-7').doc, head_sha: HEAD } }));
+  refused(rec('M-1', 'pr-7'), /does not show this PR merged at the judged head/, 'merged at another head');
+  must(env.record.write({ actor: 'sensors', entity: 'fact', id: 'pr-7', expectRev: env.record.read('fact', 'pr-7').rev, doc: { ...env.record.read('fact', 'pr-7').doc, head_sha: HEAD2, merged: false } }));
+  refused(rec('M-1', 'pr-7'), /does not show this PR merged/, 'not merged');
+  must(env.record.write({ actor: 'sensors', entity: 'fact', id: 'pr-7', expectRev: env.record.read('fact', 'pr-7').rev, doc: { ...env.record.read('fact', 'pr-7').doc, merged: true } }));
+  refused(put(env.record, 'dispatcher', 'merge', 'M-1', { state: 'merged', merge_commit: HEAD }, { data: { fact: 'pr-7' } }), /./, 'only the Merge Gate');
+  must(rec('M-1', 'pr-7'));
 });
 
 // ---------------- overdue ----------------

@@ -142,7 +142,7 @@ test('L72 contract: review request: an in_review card with no reviewer is asked 
   assert.deepEqual(done, [['C-1', 'reviewer request failed: runner down']]);
   assert.deepEqual(asked, [{ card: 'C-1', head: HEAD, role: 'reviewer' }]);
   const c = w.rec.read('card', 'C-1').doc;
-  assert.deepEqual([c.state, c.attempts], ['in_review', { reviewer_starts: 1 }]);
+  assert.deepEqual([c.state, c.attempts], ['in_review', { reviewer_starts: 1, review_requests: 1 }]);
   assert.equal(diaryKinds(w.rec, 'C-1').at(-1), 'review_request');
   // A second failure a full limit later, then the third goes to Joe: in_review → waiting.
   w.env.clock.t += 16 * MIN;
@@ -186,6 +186,43 @@ test('L72 contract: merge request: a verified card with its PR and worker sessio
   assert.deepEqual([w.rec.read('merge', 'MG-1').doc.state, w.rec.read('card', 'C-1').doc.state], ['refused', 'verified']);
   assert.deepEqual(w.rec.read('card', 'C-1').doc.attempts.merge_refusals, ['timeout']);
   assert.equal(writes.some(([a, e]) => a === 'dispatcher' && (e === 'merge' || e === 'card')), false, 'no Dispatcher write of a merge outcome');
+});
+
+test('L85 M-1 contract: an interrupted merge waits while its PR is open, is refused past the limit, and is reconciled to merged', async () => {
+  const w = world();
+  await inReview(w);
+  passingVerdict(w.env, 'C-1', 'R-1', HEAD);
+  must(put(w.env.review, 'dispatcher', 'card', 'C-1', { state: 'verified' }), 'verified');
+  must(w.rec.write({ actor: 'merge_gate', entity: 'merge', id: 'MG-1', expectRev: 0, doc: { state: 'requested', card: 'C-1', pr: 7, head: HEAD, product: PRODUCT } }), 'merge requested');
+  must(put(w.rec, 'merge_gate', 'merge', 'MG-1', { state: 'queued' }), 'merge queued');
+  const mg = w.rec.read('merge', 'MG-1');
+  const cd = w.rec.read('card', 'C-1');
+  must(w.rec.write({ actor: 'merge_gate', entity: 'merge', id: 'MG-1', expectRev: mg.rev, doc: { ...mg.doc, state: 'checking', judged_head: HEAD },
+    also: [{ entity: 'card', id: 'C-1', expectRev: cd.rev, doc: { ...cd.doc, state: 'merging' } }] }), 'merge checking, card merging');
+  must(put(w.rec, 'merge_gate', 'merge', 'MG-1', { state: 'merging' }), 'merging');
+  // The gate dies after asking GitHub to merge. Sensors' readings of PR 7:
+  const read = (doc) => { const f = w.rec.read('fact', 'pr-7'); must(w.rec.write({ actor: 'sensors', entity: 'fact', id: 'pr-7', expectRev: f?.rev ?? 0, doc: { head_sha: HEAD, observed_at: iso(w.env.clock.t), ...doc } }), 'pr reading'); };
+  const alerts = [];
+  const run = () => timeLimits({ rec: w.env.review, rules: w.rules, now: w.env.clock.t, b: GREEN_BANDS, running: [], gateAlive: () => false, hasReviewer: async () => true, requestReview: async () => ({ ok: true }), alert: (t) => alerts.push(t) });
+  w.env.clock.t += MIN;
+  read({ state: 'open', merged: false });
+  w.env.clock.t += MIN;
+  assert.deepEqual(await run(), [['MG-1', 'merge outcome not known yet: the PR is still open']]);
+  assert.equal(w.rec.read('merge', 'MG-1').doc.state, 'merging');
+  w.env.clock.t += 15 * MIN;
+  read({ state: 'open', merged: false });
+  w.env.clock.t += 1000;
+  assert.deepEqual(await run(), [['MG-1', 'refused:interrupted'], ['C-1', '->verified']]);
+  assert.equal(alerts.length, 1);
+  // GitHub finishes the merge after all: the Merge Gate's reconcile, checked by the real Record.
+  w.env.clock.t += MIN;
+  read({ state: 'closed', merged: true, merge_commit_sha: 'c'.repeat(40) });
+  w.env.clock.t += 1000;
+  assert.deepEqual(await run(), [['MG-1', 'interrupted, then merged: reconciled'], ['C-1', '->merged']]);
+  const m = w.rec.read('merge', 'MG-1').doc;
+  const c = w.rec.read('card', 'C-1').doc;
+  assert.deepEqual([m.state, m.merge_commit, c.state, c.merge_commit], ['merged', 'c'.repeat(40), 'merged', 'c'.repeat(40)]);
+  assert.equal(alerts.length, 1);
 });
 
 // ---- L72 (5): the planted cases, on the real Record (and the stand-in where the case is the guard's) ----

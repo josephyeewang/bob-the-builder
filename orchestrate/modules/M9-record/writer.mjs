@@ -170,7 +170,10 @@ export function openRecord({ root, product, ownerUid, rules, alert = () => {}, n
       const src = doc.source;
       const ask = typeof src?.ask === 'string' ? tx.lookup('ask', src.ask) : null;
       const fact = typeof src?.fact === 'string' ? tx.lookup('fact', src.fact) : null;
-      const askOk = ask && ask.doc.kind === 'undo' && (ask.doc.state === 'answered' || ask.doc.state === 'consumed');
+      // The answer must be the Undo choice, approving (L85 m-2): an answered Keep, or no answer, is no go for a reverse.
+      const undoChoice = ask?.doc?.choices?.[0] ?? 'Undo';
+      const askOk = ask && ask.doc.kind === 'undo' && (ask.doc.state === 'answered' || ask.doc.state === 'consumed')
+        && ask.doc.answer?.choice === undoChoice && ask.doc.answer?.approves === true;
       const factOk = factFrom('sensors', fact, 'undo-issue-') && fact.doc.type === 'undo_issue' && fact.doc.authenticated === true;
       if (!askOk && !factOk) return no('an exact_reverse card needs an answered Undo ask or an authenticated audit issue (source)');
       // One reverse per piece of evidence (0b-2 audit MAT-2): one answered Undo is never the go for many cards.
@@ -331,6 +334,16 @@ export function openRecord({ root, product, ownerUid, rules, alert = () => {}, n
       if (!ctx.cardMerging || ctx.cardMerging !== doc.card) return no('a merge enters checking only in the same write as its card moves to merging');
       const busy = tx.list('merge').filter((m) => m.id !== id && (m.doc.state === 'checking' || m.doc.state === 'merging'));
       if (busy.length) return no(`one merge at a time: ${busy[0].id} is ${busy[0].doc.state}`);
+    }
+    // refused → merged (L85 M-1 b): only an interrupted merge, only with a Sensors pr- reading of this merge's PR that
+    // shows it merged, at the head the gate judged, with this merge commit.
+    if (moving && from === 'refused') {
+      if (!(old.reasons ?? []).includes('interrupted')) return no('only an interrupted merge is reconciled');
+      if (typeof doc.merge_commit !== 'string' || !HEX40.test(doc.merge_commit)) return no('a reconciled merge names its merge commit (merge_commit)');
+      if (doc.judged_head !== old.judged_head) return no('a merge\'s judged head never changes');
+      const f = typeof w.data?.fact === 'string' ? tx.lookup('fact', w.data.fact) : null;
+      if (!factFrom('sensors', f, 'pr-') || f.id !== `pr-${old.pr}`) return no('a reconcile comes from the Sensors reading of this merge\'s PR (data.fact)');
+      if (f.doc.merged !== true || f.doc.head_sha !== old.judged_head || f.doc.merge_commit_sha !== doc.merge_commit) return no('the PR reading does not show this PR merged at the judged head with this commit');
     }
     if (moving && from === 'merged') {
       const f = typeof w.data?.fact === 'string' ? tx.lookup('fact', w.data.fact) : null;

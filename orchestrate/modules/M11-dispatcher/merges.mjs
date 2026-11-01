@@ -4,8 +4,11 @@
 // The Dispatcher never calls GitHub, and never writes a merge's outcome: whether a merge happened is the Merge Gate's
 // decision (L74 b3). It keeps the timing: a merge stuck in checking past its limit, or in merging while the gate's
 // process is gone, is handed to M6's settleMerge, which writes as merge_gate. It reads Sensors' fact `pr-<n>` =
-// { merged, merge_commit_sha, head_sha, observed_at } and decides only on a reading observed after the merge's last
-// write (the Record's own time, rec.meta); otherwise it waits a pass. Merges are M6's documents:
+// { state, merged, merge_commit_sha, head_sha, observed_at } and decides only on a reading observed after the merge's
+// last write (the Record's own time, rec.meta); otherwise it waits a pass. An interrupted merge is settled only on a
+// final answer (L85 M-1 a): merged, or closed and not merged; a PR still open is waited on until
+// timeouts.merging_open_max_min after the merging write, then refused-interrupted and Joe is told. An interrupted merge
+// GitHub later shows merged goes to M6's reconcileMerge (L85 M-1 b). Merges are M6's documents:
 // { card, pr, state, judged_head, merge_commit, reasons, ... }.
 //
 // A claimed card whose session never started is the Record's to lapse (lapseClaims, claims.unlaunched_min; tick.mjs),
@@ -16,7 +19,7 @@ import { move, waitOn, note, ageMs } from './moves.mjs';
 import { startGate } from './gate.mjs';
 import { rolesFor } from '../M4-workshop/launcher/review-runner.mjs';
 import { relayReviewAlerts } from './review-requests.mjs';
-import { settleMerge } from '../M6-merge-gate/merge-outcome.mjs';
+import { settleMerge, reconcileMerge } from '../M6-merge-gate/merge-outcome.mjs';
 import { textAlerts } from './alerts.mjs';
 import { sensorsFact as fromSensors } from './sensor-facts.mjs';
 
@@ -50,6 +53,7 @@ export async function timeLimits({ rec, rules, now, b, running = [], gateAlive, 
   const statusErrors = [];
   const lim = {
     checking: minutes(rules, KEYS.checkingMaxMin), reporting: minutes(rules, KEYS.reportingMaxMin), inReview: minutes(rules, KEYS.inReviewNoReviewerMin),
+    mergingOpen: minutes(rules, KEYS.mergingOpenMaxMin),
   };
   for (const { id, doc } of rec.list('card')) {
     // The clock is the card's last write: a review request writes its count, so the next one is a full limit later.
@@ -83,7 +87,9 @@ export async function timeLimits({ rec, rules, now, b, running = [], gateAlive, 
       if (r?.ok) said.push(`${role} requested`);
       else { failed = true; said.push(`${role} request failed: ${r?.reason ?? 'no answer'}`); }
     }
-    move(rec, 'card', id, { attempts: { ...(doc.attempts ?? {}), reviewer_starts: failed ? fails + 1 : 0 } }, { kind: 'review_request' });
+    // review_requests goes up on every request, so this write always changes the card and its write time, the clock of
+    // the next request, moves (L85 m-1): a second success in a row would otherwise change nothing and be refused.
+    move(rec, 'card', id, { attempts: { ...(doc.attempts ?? {}), reviewer_starts: failed ? fails + 1 : 0, review_requests: (doc.attempts?.review_requests ?? 0) + 1 } }, { kind: 'review_request' });
     done.push([id, said.join(', ')]);
   }
   // A session that has said it is reporting but handed in nothing in time: its card fails.
@@ -99,13 +105,21 @@ export async function timeLimits({ rec, rules, now, b, running = [], gateAlive, 
     } else if (doc.state === 'merging' && !gateAlive()) {
       const pr = fresh(rec, doc.pr, id);
       if (!pr) { done.push([id, 'waiting for a fresh PR reading']); continue; }
-      done.push(...settled(rec, id, settleMerge({ record: rec, alert: textAlerts(alert), now }, id, { pr, reason: 'interrupted' }), { now, alert }));
+      // Never refused while the outcome is unknown: GitHub may still be finishing the merge (L85 M-1 a).
+      const final = pr.merged === true || pr.state === 'closed';
+      const openTooLong = !final && ageMs(rec, 'merge', id, now, { since: 'write' }) >= lim.mergingOpen;
+      if (!final && !openTooLong) { done.push([id, 'merge outcome not known yet: the PR is still open']); continue; }
+      const r = settleMerge({ record: rec, alert: textAlerts(alert), now }, id, { pr, reason: 'interrupted', openTooLong });
+      if (openTooLong && r.ok && r.outcome === 'refused') alert(`merge ${id}: the Merge Gate stopped mid-merge and PR ${doc.pr} is still open after ${Math.round(lim.mergingOpen / 60_000)} min; recorded as interrupted, and the card goes back to be merged again`);
+      done.push(...settled(rec, id, r, { now, alert }));
     } else if (doc.state === 'refused' && (doc.reasons ?? []).includes('interrupted') && !rec.read('fact', RECONCILED_FACT(id))) {
-      // A refused merge stays refused (the Record has no move out of it): when GitHub later shows it merged, the owner
-      // is told once, and the note keeps it from being told again.
+      // GitHub later shows an interrupted merge merged: M6's reconcile records it merged when it was merged at the judged
+      // head (L85 M-1 b). Otherwise it stays refused, the owner is told once, and the note keeps it from being told again.
       const pr = fresh(rec, doc.pr, id);
       if (pr?.merged === true) {
-        alert(`merge ${id} was recorded as interrupted but PR ${doc.pr} shows merged; check the card and its audit`);
+        const r = reconcileMerge({ record: rec, alert: textAlerts(alert), now }, id, { pr, factId: PR_FACT(doc.pr) });
+        if (r.ok) { done.push([id, 'interrupted, then merged: reconciled']); if (r.card) done.push([r.card, '->merged']); continue; }
+        if (!r.told) alert(`merge ${id} was recorded as interrupted but PR ${doc.pr} shows merged, and it could not be recorded merged (${r.reason}); check the card and its audit`);
         note(rec, RECONCILED_FACT(id), `merge ${id} was recorded as interrupted but PR ${doc.pr} shows merged; the owner was told`, { now });
         done.push([id, 'refused but merged: told']);
       }

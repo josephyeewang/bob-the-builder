@@ -76,7 +76,8 @@ export function missingFields(entity, doc) {
 }
 
 // Final states need no time limit (A4); every other state has one or a named reason, in the rules' timeouts.
-// closed → reverted is the one move out of a final state (D8).
+// closed → reverted is a move out of a final state (D8); the other is merge refused → merged, the Merge Gate's
+// reconcile of an interrupted merge GitHub shows merged (L85 M-1 b; M9 moves.mjs and its writer check).
 export const FINAL_STATES = Object.freeze({
   card: ['closed', 'failed', 'cancelled', 'closed_no_answer', 'reverted'],
   ask: ['consumed', 'expired', 'withdrawn'],
@@ -118,6 +119,9 @@ export const WAIT_FIELDS = Object.freeze(['who', 'what', 'since', 'next_check'])
 export const WAIT_RETURN_FIELDS = Object.freeze(['resume', 'return_to']);
 // A card waiting on the owner says this `who` (L79): readers compare against it, never a string of their own.
 export const OWNER_WAIT_WHO = 'joe';
+// A card parked because its product is paused waits on the owner with this `what`, and resumes by itself when the
+// product is unpaused (M11 pass.mjs). So it is no go the owner owes: the trip brief shows it apart (L85 m-5).
+export const PAUSED_WAIT_WHAT = 'paused';
 export const WAIT_WHO = Object.freeze([OWNER_WAIT_WHO, 'usage', 'dependency', 'incident', 'date']);   // `date` also needs a reason
 export { SESSION_ID };   // one rule, in record-names.mjs (the guard reads it too)
 

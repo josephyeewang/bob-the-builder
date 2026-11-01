@@ -23,9 +23,12 @@ export const WRITER_FIELDS = Object.freeze(['round']);
 // A card's `attempts`: the counts that drive a decision (L74). Each key has one writer, the role that adds to it, and
 // a shape. A count that is only shown or logged is never kept on the card; the diary has it.
 //   reviewer_starts  how many review requests in a row failed to start a reviewer (two → the owner is asked)
+//   review_requests  how many review requests the Dispatcher has made for the card: it goes up on every request, so the
+//                    write always changes something and the card's write time (the next request's clock) moves (L85 m-1)
 //   merge_refusals   the reasons the gate refused this card's merges (the same reason twice → the owner is asked)
 export const ATTEMPTS = Object.freeze({
   reviewer_starts: Object.freeze({ writer: 'dispatcher', shape: 'count' }),
+  review_requests: Object.freeze({ writer: 'dispatcher', shape: 'count' }),
   merge_refusals: Object.freeze({ writer: 'merge_gate', shape: 'reasons' }),
 });
 
