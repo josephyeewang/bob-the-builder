@@ -69,18 +69,22 @@ export async function heartbeatOnce({ product, writer, gh, alerts, owner, probes
 
   const lastId = `heartbeat-account-${product.replace(/[^A-Za-z0-9_-]/g, '-')}`;
   const last = writer.get(lastId)?.login ?? null;
+  // The new login is saved only once its change alert went out: a raise that answered false keeps the old login, so
+  // the next pass raises the change again (L143). A throw stops the pass before the save, the same way.
+  let told = true;
   if (signedIn && last && last !== acct.login) {
     if (plannedSwitch?.to === acct.login) {
       const idem = createHash('sha256').update(`switch|${last}|${acct.login}|${plannedSwitch.at ?? ''}`).digest('hex').slice(0, 16);
       const pid = `push-request-${idem}`;
-      if (!writer.get(pid)) writer.put(pid, { kind: 'fact.push-request', idempotency_key: idem, state: 'requested', product,
-        text: `The Mini switched to ${acct.login}: switch the phone app to ${acct.login} too.` });
+      // A refused write of the push request is a lost notice too: the old login stays.
+      if (!writer.get(pid)) told = writer.put(pid, { kind: 'fact.push-request', idempotency_key: idem, state: 'requested', product,
+        text: `The Mini switched to ${acct.login}: switch the phone app to ${acct.login} too.` })?.ok === true;
     } else {
-      await alerts.raise({ key: key(`account-changed-${acct.login}`), title: `${product}: the Mini's Claude account changed`,
-        body: `The Mini is now signed in as ${acct.login} (was ${last}) and no switch was planned.` });
+      told = await alerts.raise({ key: key(`account-changed-${acct.login}`), title: `${product}: the Mini's Claude account changed`,
+        body: `The Mini is now signed in as ${acct.login} (was ${last}) and no switch was planned.` }) !== false;
     }
   }
-  if (signedIn) writer.put(lastId, { kind: 'fact.heartbeat-account', product, login: acct.login });
+  if (signedIn && told) writer.put(lastId, { kind: 'fact.heartbeat-account', product, login: acct.login });
 
   const u = await probe(probes.usage);
   const usage = u.ok ? u.v : null;

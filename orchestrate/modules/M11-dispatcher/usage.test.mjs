@@ -188,6 +188,8 @@ test('audit MIN-20 (U22): under unknown usage a Tier-1 review or audit is held; 
 
 test('audit MIN-20 (K3): a negative, infinite or non-number rules value is missing, never used', async () => {
   const { need } = await import('./keys.mjs');
-  for (const v of [-1, Infinity, NaN, '5', null]) assert.throws(() => need(rulesWith({ [K.redWeek]: v }), K.redWeek), MissingKey, String(v));
+  // The rules file is text (L123): "5" is the value 5; text that is not a plain decimal is missing.
+  for (const v of [-1, Infinity, NaN, '5x', ' 5', '1e3', '-5', '', null]) assert.throws(() => need(rulesWith({ [K.redWeek]: v }), K.redWeek), MissingKey, String(v));
   assert.equal(need(rulesWith({ [K.redWeek]: 0 }), K.redWeek), 0);
+  assert.equal(need(rulesWith({ [K.redWeek]: '5' }), K.redWeek), 5);
 });

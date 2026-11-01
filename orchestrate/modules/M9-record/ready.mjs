@@ -20,11 +20,24 @@ import { mayCreateKind } from './permissions.mjs';
 
 const MAX_CHAIN = 64;
 
+// The card kinds that may be go-free, and how each one's value says so (L115 M-C, m-F). A key's presence is never
+// enough: `exact_reverse: false` must not let an undo merge with no go (M6 gather.mjs reads this list).
+//   flag     — go-free only when the value is exactly true (rules.flag);
+//   patterns — go-free only when the value is a non-empty list of file patterns ([] means the product has no such card).
+export const GO_FREE = Object.freeze({ exact_reverse: 'flag', research_copy: 'flag', lead_daily_card: 'patterns' });
+// The rules map that names them (one home; lane 3's required-keys check imports it from here).
+export const GO_FREE_KEY = 'approvals.plan_go.go_free';
+
+export function goFreeOn(rules, product, kind) {
+  if (!Object.hasOwn(GO_FREE, kind)) return false;
+  const key = `${GO_FREE_KEY}.${kind}`;
+  if (GO_FREE[kind] === 'flag') return rules?.flag?.(key, { product }) === true;
+  const v = rules?.get?.(key, { product });
+  return Array.isArray(v) && v.length > 0 && v.every((x) => typeof x === 'string' && x !== '');
+}
+
 export function goFreeKinds(rules, product) {
-  const v = rules.get('approvals.plan_go.go_free', { product });
-  if (Array.isArray(v)) return v.filter((x) => typeof x === 'string');
-  if (v && typeof v === 'object') return Object.keys(v);
-  return [];
+  return Object.keys(GO_FREE).filter((k) => goFreeOn(rules, product, k));
 }
 
 // The round-1 card a fix descends from (R2-M5): its go covers every fix round.
@@ -99,8 +112,8 @@ export function readyCheck(card, view, { rules, product }) {
   try {
     if (!card?.doc || typeof card.doc !== 'object') return { ok: false, reason: 'no card' };
     if (card.doc.product !== product) return { ok: false, reason: `card belongs to product ${card.doc.product}, not ${product}` };
-    const cap = rules.get('caps.rounds', { product });
-    if (!Number.isInteger(cap) || cap < 1) return { ok: false, reason: 'no round cap in the rules (caps.rounds)' };
+    const cap = rules.num('caps.rounds', { product });
+    if (cap === undefined || cap < 1) return { ok: false, reason: 'no round cap in the rules (caps.rounds)' };
     if (!Number.isInteger(card.doc.round) || card.doc.round < 1) return { ok: false, reason: 'card has no round' };
     if (card.doc.round > cap) return { ok: false, reason: `round ${card.doc.round} is over the cap of ${cap}` };
     for (const check of [depsCheck(card, view), productCheck(card, view, rules, product), goCheck(card, view, rules, product)]) if (!check.ok) return check;
