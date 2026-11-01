@@ -118,12 +118,14 @@ test('L123 / L104 / L131: usage.pace_min_share 0.5 in the text is 0.5 in M11\'s 
   assert.deepEqual([...rules.engine.noProductReads, ...dflt.engine.noProductReads], [], 'bands() reads no per-product key without its product');
 });
 
-test('L131: across products a Dispatcher-wide key is the smallest value; one product without it leaves it missing', () => {
+test('L131: across products a Dispatcher-wide key is the smallest value (dead_quiet_min the largest); one product without it leaves it missing', () => {
   const two = rulesFromText({ app: withPace('0.5'), web: withPace('0.3') });
   assert.equal(need(two, KEYS.paceMinShare), 0.3);
   const quiet = (n) => FIXTURE.replace(/^timeouts:\n/m, `timeouts:\n  front_door_stuck_min: ${n}\n  dead_quiet_min: ${n}\n  usage_unknown_max_min: ${n}\n`);
   const t = rulesFromText({ app: `${quiet(30)}\noutage:\n  min_dead: 3\n  share: 0.6\n`, web: `${quiet(20)}\noutage:\n  min_dead: 2\n  share: 0.7\n` });
-  for (const k of [KEYS.frontDoorStuckMin, KEYS.deadQuietMin, KEYS.usageUnknownMaxMin]) assert.equal(need(t, k), 20, k);
+  for (const k of [KEYS.frontDoorStuckMin, KEYS.usageUnknownMaxMin]) assert.equal(need(t, k), 20, k);
+  // dead_quiet_min is the largest (L131 follow-up): a session is called dead only once every product's limit has passed.
+  assert.equal(need(t, KEYS.deadQuietMin), 30);
   assert.equal(need(t, KEYS.outageMinDead), 2);
   assert.equal(need(t, KEYS.outageShare), 0.6);
   // One product leaves pace_min_share out: the Mac-wide value is missing, so the default stands in (it is absent, not bad).

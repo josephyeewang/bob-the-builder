@@ -81,16 +81,16 @@ export function exactFlag(v) {
 
 // Mac-wide keys and how M10 combines them across products (MAT-10, R2-M5(b)). `*` = every key under that map. A read
 // of any other key needs its product: with none it is missing, in the engine and in fakeRules alike (L104 O-1, L110).
-// The Dispatcher-wide keys (L131) govern nothing with one product: the Front Door, an outage, the account's usage. Each
-// is the smallest value across products, which acts and tells Joe soonest: a stuck Front Door is restarted sooner; a
-// session counts as dead, and an outage is declared, sooner; a card waits on Joe sooner while usage is unreadable; the
-// pace check starts earlier in the week. timeouts.dead_quiet_min pulls both ways (sooner also means sooner restarts),
-// and is flagged to the lead in the PR.
+// The Dispatcher-wide keys (L131) govern nothing with one product: the Front Door, an outage, the account's usage. Most
+// are the smallest value across products, which acts and tells Joe soonest: a stuck Front Door is restarted sooner; an
+// outage is declared sooner; a card waits on Joe sooner while usage is unreadable; the pace check starts earlier in the
+// week. timeouts.dead_quiet_min is the largest (L131 follow-up): calling a working session dead and restarting it could
+// put two sessions on one card, while a longer wait only tells Joe later, and the outage floors still apply.
 export const MAC_MIN = Object.freeze(['caps.editing_per_mac', 'caps.scripts_per_mac', 'caps.script_agents_max',
   'usage.bands.*.*', 'usage.no_tier1_prod_above', 'usage.stale_after_min',
-  'timeouts.front_door_stuck_min', 'timeouts.dead_quiet_min', 'timeouts.usage_unknown_max_min',
+  'timeouts.front_door_stuck_min', 'timeouts.usage_unknown_max_min',
   'outage.min_dead', 'outage.share', 'usage.pace_min_share']);
-export const MAC_MAX = Object.freeze(['usage.reserve_pct.*', 'claude_code.required_minimum']);
+export const MAC_MAX = Object.freeze(['usage.reserve_pct.*', 'claude_code.required_minimum', 'timeouts.dead_quiet_min']);
 export const MAC_MATCH = Object.freeze(['claude_code.pin', 'models.*', 'accounts.current', 'accounts.joe.tz']);
 // Lists read for the whole Mac, combined strictest-wins: only what every product's list names (L96). usage.red_runs is
 // the kinds of session that may still start in the red band; the band is the account's, not one product's, so a read
