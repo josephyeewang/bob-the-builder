@@ -8,20 +8,20 @@
 // times: as it is (the wrapper must reach a fake that answered false and one that threw), then with fakeAlert's false
 // turned into true, then with its throw turned into true (each must make the test fail).
 //
-// What these show (1 Nov 2026, reported to the lead under L139: a todo here is a found defect, not a missing test):
+// What these show (1 Nov 2026; the three that were todos under L139, found defects, are plain tests since lane 3's fix
+// landed in #96):
 //   - heartbeat `set`: a red fact is raised again every pass while it is red, so a lost raise is retried. Passes.
-//   - M13 `raise` (alerts.mjs): a GitHub call that throws makes raise throw and saves nothing. Passes. A GitHub call
-//     that ANSWERS false (or no issue number) is taken as sent: `comment` false loses the change notice for good, and
-//     `open` with no number stores an open alert with no issue, which every later pass reads as closed by the owner.
-//     Todo, failing.
-//   - prod-watcher `raise`: a throw stops the pass before the new baseline is saved. Passes. An answer of false is put
-//     in `out` and the baseline is saved anyway, so a lost setting-change alert is never raised again. The L135 ruling
-//     that it was safe while M13 raise never answers false is withdrawn (L143 M-4): open, lane 3. Todo, failing.
-//   - heartbeat account-changed: the same: the new login is saved after a raise whose answer is not looked at. Todo.
+//   - M13 `raise` (alerts.mjs): a GitHub call that throws makes raise throw and saves nothing. A GitHub call that
+//     answers false (or `open` with no issue number) makes raise answer false and saves nothing that stops the next
+//     try. Passes since #96.
+//   - prod-watcher `raise`: a throw stops the pass before the new baseline is saved; an answer of false keeps the old
+//     baseline (and a deploy unseen), so the change is raised again next pass. Passes since #96.
+//   - heartbeat account-changed: the new login is saved only when raise did not answer false. Passes since #96. Its
+//     inventory entry stays open all the same: #96's audit found that a repeat switch counts 'suppressed' as told
+//     (lane 3 follow-up).
 //   - tellThen (M11): hands back the alert's answer as it is: false when lost, a throw as a throw. Passes (L143).
 //   - safeAlert (M2, landed with #87): answers false when the alert answers false or throws, and counts both in
 //     alerts_failed; it never throws, so a caller records an alert as given only on true. Passes (L143 rerun).
-// Lane 3 may change only the three todo markers here, when its fix lands (L143).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { memoryRecord } from '../shared/record.mjs';
@@ -33,8 +33,6 @@ import { heartbeatOnce } from '../modules/M13-ledger/heartbeat.mjs';
 import { tellThen } from '../modules/M11-dispatcher/alerts.mjs';
 import { safeAlert } from '../modules/M2-approvals/research-ask.mjs';
 import { fakeAlert } from './fake-alert.test-helper.mjs';
-
-const DEFECT = 'L139: a found defect, reported to the lead; this goes green when the code is fixed';
 
 // ---- M13 raise ----
 
@@ -50,7 +48,7 @@ async function m13Throws(failing) {
   assert.equal(later.a.state('k').status_text, 's1', 'and the change is not saved, so the next pass comments again');
 }
 test('M13 raise: a GitHub call that throws makes raise throw and saves nothing that stops the next try (L139)', () => m13Throws(() => fakeAlert({ throws: new Error('github down') })));
-test('M13 raise never takes a lost GitHub call as sent: answering false, or throwing (L139 contract)', { todo: DEFECT }, async () => {
+test('M13 raise never takes a lost GitHub call as sent: answering false, or throwing (L139 contract)', async () => {
   await m13Throws(() => fakeAlert({ throws: new Error('github down') }));
   const noIssue = m13({ open: fakeAlert({ answer: false }) });
   await noIssue.a.raise({ key: 'k', title: 't', body: 'b' }).catch(() => {});
@@ -94,7 +92,7 @@ async function watcherThrows(raise) {
 }
 const settingDown = () => fakeAlert({ throws: (a) => a.key.includes('|setting-changed|') && 'github down' });
 test('prod-watcher raise: a raise that throws stops the pass before the new baseline is saved (L139)', () => watcherThrows(settingDown()));
-test('prod-watcher raise never takes a lost raise as sent: answering false, or throwing (L139 contract)', { todo: DEFECT }, async () => {
+test('prod-watcher raise never takes a lost raise as sent: answering false, or throwing (L139 contract)', async () => {
   await watcherThrows(fakeAlert({ throws: (a) => a.key.includes('|setting-changed|') && 'github down' }));
   const raise = fakeAlert({ answer: false });
   const w = watcher(raise);
@@ -140,7 +138,7 @@ test('heartbeat set never takes a lost raise as sent: a red fact is raised again
   await d.pass().catch(() => {});
   assert.equal(raisedFor(down, 'front-door'), 2, 'threw: raised again on the next pass');
 });
-test('heartbeat account-changed never takes a lost raise as sent: answering false, or throwing (L139)', { todo: DEFECT }, async () => {
+test('heartbeat account-changed never takes a lost raise as sent: answering false, or throwing (L139)', async () => {
   const down = fakeAlert({ throws: (a) => a.key.includes('account-changed') && 'github down' });
   const d = heart(down);
   await d.pass().catch(() => {});
