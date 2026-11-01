@@ -10,16 +10,22 @@
 //   products  optional; one folder set per product.
 
 import { join, posix } from 'node:path';
+import { AI_ROLES } from '../shared/record.mjs';
+import { REVIEW_ROLES } from '../shared/review-roles.mjs';
 
 // The three plain-script Mac users (L44, R-0b-05). `review` is also REVIEW_USER in the launcher; the setup test pins them equal.
 export const USERS = Object.freeze(['orchestrate', 'pages', 'review']);
-export const USER_ID_RANGE = Object.freeze({ low: 301, high: 499 });   // below 500: hidden from the login screen by macOS convention
+// New user numbers come from here, a range Apple does not hand out (it uses the low hundreds for its own accounts, and a
+// macOS update can add one at any time). What hides these users from the login screen is IsHidden=1, not the number (L90 M5).
+export const USER_ID_RANGE = Object.freeze({ low: 600, high: 699 });
 export const NO_SHELL = '/usr/bin/false';
 
 const NAME = /^[a-z_][a-z0-9_.-]{0,31}$/;
 const PRODUCT = /^[a-z0-9][a-z0-9-]{0,63}$/;
 const BASE = /^\/[A-Za-z0-9._/-]+$/;
-const FORBIDDEN_UNDER = ['/Users', '/Applications', '/tmp', '/private/tmp', '/var/tmp', '/private/var/tmp', '/Volumes'];
+// Folders other users can write; compared without regard to case (the Mac's disk treats /users and /Users as one).
+// The chain check (guard.mjs) is the real wall: it runs before root changes anything. This only gives a clear early error.
+export const FORBIDDEN_UNDER = Object.freeze(['/Users', '/Applications', '/tmp', '/private/tmp', '/var/tmp', '/private/var/tmp', '/Volumes', '/opt', '/usr/local']);
 
 /** The checked config, or a thrown Error naming the first problem. */
 export function parseConfig(raw) {
@@ -30,7 +36,8 @@ export function parseConfig(raw) {
   }
   const b = posix.normalize(base).replace(/\/$/, '');
   if (b.split('/').length < 3) throw new Error('config: base must be a folder of its own, one level below a top-level folder (for example /Library/orchestrate)');
-  for (const f of FORBIDDEN_UNDER) if (b === f || b.startsWith(`${f}/`)) throw new Error(`config: base must not be under ${f} (a folder others can write)`);
+  const lower = b.toLowerCase();
+  for (const f of FORBIDDEN_UNDER) if (lower === f.toLowerCase() || lower.startsWith(`${f.toLowerCase()}/`)) throw new Error(`config: base must not be under ${f} (a folder others can write)`);
   if (typeof owner !== 'string' || !NAME.test(owner)) throw new Error('config: owner must be the owner\'s Mac user name');
   if (USERS.includes(owner) || owner === 'root') throw new Error(`config: owner must be the person's own Mac user, not ${owner}`);
   if (!Array.isArray(products) || products.length > 50 || products.some((p) => typeof p !== 'string' || !PRODUCT.test(p)) || new Set(products).size !== products.length) {
@@ -42,9 +49,24 @@ export function parseConfig(raw) {
 /** Where a user's home folder is (also what its Mac record names). */
 export const homeOf = (cfg, user) => join(cfg.base, 'home', user);
 
+/** The roles whose outbox folders the workers' Mac user owns: every AI role except the review roles (read from the shared lists). */
+export const WORKER_ROLES = Object.freeze(AI_ROLES.filter((r) => !REVIEW_ROLES.includes(r)));
+
 /**
- * Every folder the setup makes, parents first: { path, owner, mode, why }. `owner` is root, one of USERS, or 'owner'
+ * The one access-list entry on a worker role's outbox folder (L90 M2): the record's intake runs as `orchestrate`, so it
+ * may list, search and read what is in the folder, with inheritance so the session folders and files made there carry
+ * it. Exactly this and nothing else: `check` compares the entry list exactly.
+ */
+export const ORCHESTRATE_READ_ACL = Object.freeze({ who: 'user:orchestrate', perms: Object.freeze(['list', 'search', 'readattr', 'readextattr', 'readsecurity', 'file_inherit', 'directory_inherit']) });
+
+/** An access-list entry as `ls -le` prints it, with its permissions sorted: "user:orchestrate allow directory_inherit,file_inherit,list,...". */
+export const aclText = (e) => `${e.who} allow ${[...e.perms].sort().join(',')}`;
+
+/**
+ * Every folder the setup makes, parents first: { path, owner, mode, why, acl }. `owner` is root, one of USERS, or 'owner'
  * (the person's own user). Modes are the exact modes, no more and no less (v4 §14.1.4): the check compares them exactly.
+ * `acl` is the exact access list the folder has (no entry at all unless named here): the check compares it exactly, a
+ * missing or an extra entry FAILs, and the apply puts it right.
  */
 export function folderTable(cfg) {
   const p = (...s) => join(cfg.base, ...s);
@@ -64,10 +86,13 @@ export function folderTable(cfg) {
     [p('global-rules'), 'orchestrate', 0o755, 'plain-text copy of the global rules'],
     [p('claude-code'), 'orchestrate', 0o755, 'the roles\' pinned Claude Code copies'],
     [p('review'), 'review', 0o755, 'the review runner\'s folder (its subfolders are made by the runner)'],
-    [p('review-outbox'), 'review', 0o755, 'review sessions\' outboxes: only review writes them (L44)'],
     [p('review-copies'), 'review', 0o755, 'the review sessions\' copies of the code under review'],
     [p('worker-copies'), 'owner', 0o755, 'the workers\' clones (kept apart from the review copies)'],
-    [p('outboxes'), 'owner', 0o700, 'the roles\' outboxes (one per role, made at launch)'],
+    // The one outbox root (L71): root's, so no role's Mac user can rename another role's folder away. Under it one folder
+    // per role, so the record's intake and the Merge Gate read every role through the same root (L90 M1).
+    [p('outboxes'), 'root', 0o755, 'the outbox root (L71): one folder per role under it'],
+    ...REVIEW_ROLES.map((r) => [p('outboxes', r), 'review', 0o755, `the ${r}'s outboxes: only review writes them (L44); others read`]),
+    ...WORKER_ROLES.map((r) => [p('outboxes', r), 'owner', 0o750, `the ${r}'s outboxes (the workers' user writes; orchestrate reads through one access-list entry)`, [ORCHESTRATE_READ_ACL]]),
     ...(cfg.products.length ? [[p('products'), 'root', 0o755, 'one folder set per product']] : []),
     ...cfg.products.flatMap((prod) => [
       [p('products', prod), 'orchestrate', 0o755, `${prod}: its folders`],
@@ -77,5 +102,5 @@ export function folderTable(cfg) {
       [p('products', prod, 'pages-in'), 'orchestrate', 0o755, `${prod}: the page builder's input`],
     ]),
   ];
-  return rows.map(([path, owner, mode, why]) => ({ path, owner, mode, why }));
+  return rows.map(([path, owner, mode, why, acl = []]) => ({ path, owner, mode, why, acl }));
 }

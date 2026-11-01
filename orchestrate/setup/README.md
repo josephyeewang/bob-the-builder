@@ -14,20 +14,31 @@ Config file (JSON), for example `~/orchestrate-setup.json`:
 { "base": "/Library/orchestrate", "owner": "<your Mac user>", "products": ["<product>"] }
 ```
 
-`base` is root's and must not sit under `/Users`, `/Applications` or `/tmp` (the review runner refuses a wall in a
-folder others can write).
+`base` is root's and must not sit under `/Users`, `/Applications`, `/tmp`, `/Volumes`, `/opt` or `/usr/local`, in any letter
+case (the review runner refuses a wall in a folder others can write).
 
 | Command | What it does | Root? |
 |---|---|---|
 | `node setup.mjs users-folders --config <file> --dry-run` | prints every step it would take; changes nothing | no |
-| `sudo node setup.mjs users-folders --config <file>` | makes the three users (hidden, shell `/usr/bin/false`, password `*`, own group, never admin), then the folders (owner, group, exact mode, access list cleared), then runs `check` | yes |
-| `node setup.mjs check --config <file>` | read only: `PASS` or `FAIL` per item; exit 1 on any FAIL | no |
+| `sudo /usr/local/bin/node setup.mjs users-folders --config <file>` | makes the three users (ids 600-699, all different; hidden, shell `/usr/bin/false`, password `*`, own group, never admin), then the folders (owner, group, exact mode, exact access list), then runs `check` | yes |
+| `node setup.mjs check --config <file>` | read only: `PASS`, `FAIL` or `SKIP` per item; exit 1 on any FAIL. Before setup it lists about 30 FAILs, which is expected. The sudo-rule item is `SKIP` unless run as root | no |
+| `sudo /usr/local/bin/node setup.mjs proofs --config <file>` | runs, as the owner's user, the "cannot" proofs: the record, hooks, settings, launcher, lead-main and claude-code copies cannot be written and the robot keys cannot be read (two controls first) | yes |
 
-- Run it twice and the second run does nothing. A cut-off run is finished by the next one.
-- A user or group that exists but is wrong (an admin, a login shell, not hidden, another home) is **refused, not
-  changed**: the command lists the problem and changes nothing. A folder under the base that is wrong gets its owner,
-  mode and access list put right. A link where a folder belongs is refused.
-- It never sets or reads a password.
+- Run it twice and the second run does nothing. A run cut off at any step is finished by the next one: it writes only
+  the attributes that are missing and deletes nothing.
+- A user or group that exists but is wrong (an admin, a login shell, not hidden, another home, a password, an id outside
+  600-699, root's id, or an id another account uses) is **refused, not changed**: the command lists the problem and changes
+  nothing. A folder under the base that is wrong gets its owner, group, mode and access list put right.
+- **Root never follows a link.** Before any step, every folder above the base is checked to be root's alone (no link, not
+  writable by others, no access list); the same check is the first step of the run, so a change between the plan and the
+  run stops it before anything is done. Each folder is then changed through an open handle (a link, or a folder swapped
+  since the plan, is refused), all folders are made first, and children are handed over before their parents.
+- **One outbox root.** `outboxes/` is root's 0755; under it `reviewer/` and `auditor/` belong to `review` (0755) and each
+  worker role has a folder owned by the workers' user (0750) with one access-list entry letting `orchestrate` list and
+  read, with inheritance. `check` compares the access list exactly: a missing or an extra entry FAILs.
+- Root runs only a node program that is root's alone with every folder above it (the nodejs.org install in
+  `/usr/local/bin`; a Homebrew node is refused). `--root-prefix` is for tests and is refused when running as root.
+- It never sets or reads a password. An unknown argument is never printed back (it could be a secret).
 - Not in this part: the install and the background jobs (part 2); the ownerTaps and proposals folders, the account job
   reload and the Keychain token (part 3).
 

@@ -9,13 +9,18 @@
 // nobody else made it) gets its owner, mode and access list put right, since the base is where these folders live.
 // Users: hidden, no login shell (/usr/bin/false), a password that matches nothing ('*'), not in the admin group, and a
 // group of the same name as their only group. Never an admin; a user that is one is refused, not changed.
+//
+// Root never works under a folder others can change (L90 M3): the first step of every run is the chain check on the
+// folders above the base, and it is the first op of the apply as well. Folders are never changed through a link (M4): see
+// mac.mjs `secure`. New folders are made while still root's, parents first; owners and modes are set deepest first, so
+// a parent that a robot user will own is handed over last.
 
-import { dirname } from 'node:path';
-import { aclProblem, chainProblem } from '../modules/M4-workshop/launcher/install-check.mjs';
-import { NO_SHELL, USERS, USER_ID_RANGE, folderTable, homeOf } from './layout.mjs';
+import { NO_SHELL, USERS, USER_ID_RANGE, aclText, folderTable, homeOf } from './layout.mjs';
+import { baseChainProblem, guardOp } from './guard.mjs';
 
 const DSCL = '/usr/bin/dscl';
 const DSEDIT = '/usr/sbin/dseditgroup';
+const SUDO = '/usr/bin/sudo';
 const dscl = (io, args) => io.run(DSCL, ['.', ...args]);
 
 /** `dscl -read` output → { key: value }. Tolerates "dsAttrTypeNative:" prefixes and a value on the next line. */
@@ -50,14 +55,16 @@ export function adminAnswer(io, name) {
   return word === 'no' ? 'no' : (word === 'yes' ? 'yes' : 'unknown');
 }
 
-function usedIds(io, except = null) {
+/** Every id in use: { uids: [[name, id]], ugids: [[name, id]] (users' main groups), gids: [[name, id]] }. Throws if a list cannot be read. */
+function census(io) {
   const read = (path, key) => {
     const r = dscl(io, ['-list', path, key]);
     if (r.status !== 0) throw new Error(`could not list ${path} (${r.stderr.trim().slice(0, 120)})`);
-    return r.stdout.split('\n').map((l) => l.trim().split(/\s+/)).filter((w) => w[0] !== except).map((w) => Number(w[1])).filter(Number.isInteger);
+    return r.stdout.split('\n').map((l) => l.trim().split(/\s+/)).filter((w) => w.length >= 2).map((w) => [w[0], Number(w[1])]).filter(([, n]) => Number.isInteger(n));
   };
-  return new Set([...read('/Users', 'UniqueID'), ...read('/Users', 'PrimaryGroupID'), ...read('/Groups', 'PrimaryGroupID')]);
+  return { uids: read('/Users', 'UniqueID'), ugids: read('/Users', 'PrimaryGroupID'), gids: read('/Groups', 'PrimaryGroupID') };
 }
+const usedIds = (c, except = null) => new Set([...c.uids, ...c.ugids, ...c.gids].filter(([n]) => n !== except).map(([, id]) => id));
 
 const op = (text, run) => ({ text, run });
 const dsclOp = (io, args) => op(`dscl . ${args.map((a) => (/^[\w/.:-]+$/.test(a) ? a : JSON.stringify(a))).join(' ')}`, () => {
@@ -69,6 +76,7 @@ const dsclOp = (io, args) => op(`dscl . ${args.map((a) => (/^[\w/.:-]+$/.test(a)
 // reads as exit 56; a missing attribute is just absent from the answer (the real dscl prints "No such key" and exits 0).
 const USER_KEYS = ['UniqueID', 'PrimaryGroupID', 'UserShell', 'NFSHomeDirectory', 'IsHidden', 'RealName', 'Password'];
 const GROUP_KEYS = ['PrimaryGroupID', 'Password'];
+const LOGIN_KEYS = ['AuthenticationAuthority', 'ShadowHashData'];   // a password or other way to sign in; a robot user has neither
 function readRecord(io, kind, name, keys) {
   const r = dscl(io, ['-read', `/${kind}/${name}`, ...keys]);
   if (r.status !== 0) return { exists: false, error: r.status === 56 ? null : r.stderr.trim().slice(0, 200), attrs: {} };
@@ -77,18 +85,23 @@ function readRecord(io, kind, name, keys) {
   return { exists: true, attrs };
 }
 
+const inRange = (n) => Number.isInteger(n) && n >= USER_ID_RANGE.low && n <= USER_ID_RANGE.high;
+
 /**
  * Users: { ops, problems, ids: { name: { uid, gid } } } for the three users and `cfg.owner`.
  * A user or group that is only partly there (a run cut off half way) is FINISHED, never deleted or overwritten: if every
  * attribute already set matches the table, only the missing ones are written; if any set one differs, nothing is
- * changed and the problem names it. An admin is refused whatever else is true.
+ * changed and the problem names it. An admin is refused whatever else is true. New ids come from USER_ID_RANGE; an id in
+ * use by any other user or group, or by two of the three, is refused.
  */
 export function planUsers(io, cfg) {
   const ops = []; const problems = []; const ids = {};
   const owner = readUser(io, cfg.owner);
   if (!owner.exists) problems.push(`the owner's Mac user ${cfg.owner} was not found${owner.error ? ` (${owner.error})` : ''}`);
   else ids.owner = { uid: owner.uid, gid: owner.gid };
-  let used = null;
+  let c;
+  try { c = census(io); } catch (e) { return { ops, problems: [...problems, e.message], ids }; }
+  const allocated = new Set();
   for (const name of USERS) {
     const U = readRecord(io, 'Users', name, USER_KEYS); const G = readRecord(io, 'Groups', name, GROUP_KEYS);
     if (U.error || G.error) { problems.push(`could not look up ${name}: ${U.error ?? G.error}`); continue; }
@@ -99,26 +112,32 @@ export function planUsers(io, cfg) {
       if (U.attrs.PrimaryGroupID !== undefined && G.attrs.PrimaryGroupID !== undefined && U.attrs.PrimaryGroupID !== G.attrs.PrimaryGroupID) bad.push(`its main group is ${U.attrs.PrimaryGroupID}, not the group ${name} (${G.attrs.PrimaryGroupID})`);
       else bad.push(`its ids disagree (${idWords.map(([w, v]) => `${w} ${v}`).join(', ')})`);
     }
+    // Every id already set must be a number in the setup's range, never root's: a stray one (an old group, a user cut off
+    // with a bad number) is named, not taken over.
+    for (const [w, v] of idWords) {
+      const n = Number(v);
+      if (!Number.isInteger(n)) bad.push(`${w} ${v} is not a number`);
+      else if (n === 0) bad.push(`${w} is root's id (0)`);
+      else if (!inRange(n)) bad.push(`${w} ${n} is outside ${USER_ID_RANGE.low}-${USER_ID_RANGE.high}, the numbers this setup uses`);
+    }
     let id = idWords.length ? Number(idWords[0][1]) : null;
-    if (id !== null && !Number.isInteger(id)) { bad.push(`its id ${idWords[0][1]} is not a number`); id = null; }
-    if (id === 0) bad.push('its id is root\'s');
     if (U.exists) {
       if (U.attrs.UserShell !== undefined && U.attrs.UserShell !== NO_SHELL) bad.push(`its shell is ${U.attrs.UserShell}, not ${NO_SHELL}`);
       if (U.attrs.IsHidden !== undefined && U.attrs.IsHidden !== '1') bad.push('it is not hidden');
       if (U.attrs.NFSHomeDirectory !== undefined && U.attrs.NFSHomeDirectory !== home) bad.push(`its home is ${U.attrs.NFSHomeDirectory}, not ${home}`);
+      if (U.attrs.Password !== undefined && U.attrs.Password !== '*') bad.push('it has a password set (it must be \'*\', which matches nothing)');
       if (adminAnswer(io, name) !== 'no') bad.push('it is an admin (or that could not be checked)');
     }
     if (bad.length) { problems.push(`${name} exists but is not as needed: ${bad.join('; ')}. Nothing was changed; fix it in System Settings or delete the user, then run again`); continue; }
-    try {
-      if (id !== null) { if (usedIds(io, name).has(id)) { problems.push(`${name}: its id ${id} is also used by another user or group; nothing was changed`); continue; } }
-      else {
-        used ??= usedIds(io);
-        id = USER_ID_RANGE.low;
-        while (id <= USER_ID_RANGE.high && used.has(id)) id += 1;
-        if (id > USER_ID_RANGE.high) { problems.push(`no free id between ${USER_ID_RANGE.low} and ${USER_ID_RANGE.high} for ${name}`); continue; }
-        used.add(id);
-      }
-    } catch (e) { problems.push(e.message); continue; }
+    if (id !== null) {
+      if (usedIds(c, name).has(id) || allocated.has(id)) { problems.push(`${name}: its id ${id} is also used by another user or group; nothing was changed`); continue; }
+    } else {
+      const used = usedIds(c);
+      id = USER_ID_RANGE.low;
+      while (id <= USER_ID_RANGE.high && (used.has(id) || allocated.has(id))) id += 1;
+      if (id > USER_ID_RANGE.high) { problems.push(`no free id between ${USER_ID_RANGE.low} and ${USER_ID_RANGE.high} for ${name}`); continue; }
+    }
+    allocated.add(id);
     ids[name] = { uid: id, gid: id };
     // Fresh, or finishing a half-made one: write only what is missing, group first (so a cut-off run leaves the same shapes).
     const want = (rec, kind, pairs) => {
@@ -132,70 +151,132 @@ export function planUsers(io, cfg) {
 }
 
 const ownerIds = (io, ids, who) => (who === 'root' ? { uid: io.rootUid, gid: 0 } : ids[who]);
-const aclOf = (io, path) => aclProblem([io.at(path)], { run: (c, a) => io.run(c, a) });
 const modeText = (m) => m.toString(8).padStart(3, '0');
+const expectedAcl = (row) => row.acl.map(aclText).sort();
 
-/** Folders: { ops, problems }, given the ids from planUsers. Parents first, so a made folder is there for the next. */
+/**
+ * The access-list entries `ls -led` shows on `path`, normalised: { entries: ['user:x allow a,b'], error }. An entry that came
+ * from the folder above (`inherited`) is shown as such, so it never equals an expected entry (a made folder may not keep one).
+ */
+export function aclEntries(io, path) {
+  const r = io.run('/bin/ls', ['-led', io.at(path)]);
+  if (r.status !== 0) return { entries: [], error: `could not read the access list (${r.stderr.trim().slice(0, 100)})` };
+  const entries = [];
+  for (const line of r.stdout.split('\n')) {
+    if (!/^\s+\d+: /.test(line)) continue;
+    const m = /^\s+\d+: (user|group):(\S+) (inherited )?(allow|deny) (\S+)\s*$/.exec(line);
+    entries.push(m ? `${m[1]}:${m[2]}${m[3] ? ' inherited' : ''} ${m[4]} ${m[5].split(',').sort().join(',')}` : `unreadable entry: ${line.trim().slice(0, 80)}`);
+  }
+  return { entries: entries.sort(), error: null };
+}
+
+/** Set a folder's access list to exactly `row.acl`, on the folder itself (never through a link). */
+function aclOp(io, row) {
+  return op(`set the access list of ${row.path} to ${row.acl.length ? row.acl.map(aclText).join('; ') : 'none'}`, () => {
+    const st = io.lstat(row.path);
+    if (st.isSymbolicLink() || !st.isDirectory()) throw new Error(`${row.path} is now ${st.isSymbolicLink() ? 'a link' : 'not a folder'}; its access list was not touched`);
+    const run = (args) => {
+      const r = io.run('/bin/chmod', ['-h', ...args, io.at(row.path)]);
+      if (r.status !== 0) throw new Error(`could not set the access list of ${row.path} (${r.stderr.trim().slice(0, 120)})`);
+    };
+    // -h: act on the path itself even if it was swapped for a link a moment ago.
+    run(['-N']);
+    for (const e of row.acl) run(['+a', `${e.who} allow ${e.perms.join(',')}`]);
+  });
+}
+
+/** Folders: { ops, problems }, given the ids from planUsers. New folders first (parents first), then owners and modes deepest first. */
 export function planFolders(io, cfg, ids) {
-  const ops = []; const problems = [];
+  const problems = []; const made = new Map();
+  const makes = []; const fixes = [];
   for (const row of folderTable(cfg)) {
     const want = ownerIds(io, ids, row.owner);
     if (!want) { problems.push(`${row.path}: no id for ${row.owner}, so its owner can't be set`); continue; }
     let st = null;
     try { st = io.lstat(row.path); } catch (e) { if (e?.code !== 'ENOENT') { problems.push(`${row.path} could not be read (${e?.code ?? e})`); continue; } }
+    const modeDo = (gid, ino) => op(`set owner and mode of ${row.path}: chown ${want.uid}:${gid ?? 'same group'}, chmod ${modeText(row.mode)}   (${row.owner})`,
+      () => io.secure(row.path, { uid: want.uid, gid, mode: row.mode, ...(ino ?? made.get(row.path) ?? {}) }));
     if (st === null) {
-      ops.push(
-        op(`mkdir -m 700 ${row.path}`, () => io.mkdir(row.path, 0o700)),
-        op(`chown ${want.uid}:${want.gid} ${row.path}   (${row.owner})`, () => io.chown(row.path, want.uid, want.gid)),
-        op(`chmod ${modeText(row.mode)} ${row.path}`, () => io.chmod(row.path, row.mode)),
-      );
+      makes.push(op(`mkdir -m 700 ${row.path}`, () => { io.mkdir(row.path, 0o700); const s = io.lstat(row.path); made.set(row.path, { ino: s.ino, dev: s.dev }); }));
+      fixes.push([modeDo(want.gid), aclOp(io, row)]);
       continue;
     }
     if (st.isSymbolicLink() || !st.isDirectory()) { problems.push(`${row.path} exists but is ${st.isSymbolicLink() ? 'a link' : 'not a folder'}; nothing was changed`); continue; }
     const wantGid = row.owner === 'owner' ? undefined : want.gid;
-    if (st.uid !== want.uid || (wantGid !== undefined && st.gid !== wantGid)) ops.push(op(`chown ${want.uid}:${wantGid ?? st.gid} ${row.path}   (${row.owner})`, () => io.chown(row.path, want.uid, wantGid ?? st.gid)));
-    if ((st.mode & 0o7777) !== row.mode) ops.push(op(`chmod ${modeText(row.mode)} ${row.path}`, () => io.chmod(row.path, row.mode)));
-    if (aclOf(io, row.path)) ops.push(op(`chmod -N ${row.path}   (clear its access list)`, () => {
-      const r = io.run('/bin/chmod', ['-N', io.at(row.path)]);
-      if (r.status !== 0) throw new Error(`could not clear the access list of ${row.path} (${r.stderr.trim().slice(0, 120)})`);
-    }));
+    const group = [];
+    if (st.uid !== want.uid || (wantGid !== undefined && st.gid !== wantGid) || (st.mode & 0o7777) !== row.mode) group.push(modeDo(wantGid, { ino: st.ino, dev: st.dev }));
+    const acl = aclEntries(io, row.path);
+    if (acl.error) { problems.push(`${row.path}: ${acl.error}`); continue; }
+    if (JSON.stringify(acl.entries) !== JSON.stringify(expectedAcl(row))) group.push(aclOp(io, row));
+    if (group.length) fixes.push(group);
   }
-  return { ops, problems };
+  return { ops: [...makes, ...fixes.reverse().flat()], problems };
 }
 
-/** Both parts: { ops, problems }. Folders are planned against the ids the users will have, so one dry run shows everything. */
+/** Both parts: { ops, problems }. The chain above the base is checked first; with a problem there, no op at all. */
 export function plan(io, cfg) {
+  const above = baseChainProblem(io, cfg);
+  if (above) return { ops: [], problems: [`the folders above ${cfg.base} are not safe for root to work in: ${above}. Nothing was changed.`] };
   const u = planUsers(io, cfg);
   const f = planFolders(io, cfg, u.ids);
-  return { ops: [...u.ops, ...f.ops], problems: [...u.problems, ...f.problems] };
+  const ops = [...u.ops, ...f.ops];
+  return { ops: ops.length ? [guardOp(io, cfg), ...ops] : ops, problems: [...u.problems, ...f.problems] };
 }
 
 export function apply(ops, { log = () => {} } = {}) {
   for (const o of ops) { log(o.text); o.run(); }
 }
 
-/** Read only. → [{ ok, what, why? }], one per item. */
+const SUDO_NOT_ALLOWED = /is not allowed to run sudo/;
+
+/** Read only. → [{ ok, what, why?, skip? }], one per item. A `skip` item is not a FAIL: it needs root to be read. */
 export function check(io, cfg) {
   const out = [];
   const item = (ok, what, why) => out.push({ ok, what, ...(ok ? {} : { why }) });
+  const skip = (what, why) => out.push({ ok: true, skip: true, what, why });
   const ids = {};
+  let c = null; let censusError = null;
+  try { c = census(io); } catch (e) { censusError = e.message; }
   for (const name of USERS) {
     const u = readUser(io, name); const g = readGroup(io, name);
     item(u.exists, `user ${name} exists`, u.error ?? 'not found');
     if (!u.exists) continue;
     ids[name] = { uid: u.uid, gid: u.gid };
     item(u.uid !== 0, `user ${name} is not root`, 'its id is 0');
+    item(inRange(u.uid), `user ${name}'s id is in ${USER_ID_RANGE.low}-${USER_ID_RANGE.high}`, `id is ${u.uid}`);
     item(g.exists && g.gid === u.gid, `user ${name}'s main group is the group ${name}`, `group ${name}: ${g.exists ? g.gid : 'missing'}, user's main group: ${u.gid}`);
+    if (c) {
+      const sharers = c.uids.filter(([n, id]) => id === u.uid && n !== name).map(([n]) => n);
+      item(sharers.length === 0, `user ${name}'s id belongs to no other user`, `also the id of ${sharers.join(', ')}`);
+      const groupSharers = c.gids.filter(([n, id]) => id === u.gid && n !== name).map(([n]) => n);
+      item(groupSharers.length === 0, `group ${name}'s id belongs to no other group`, `also the id of group ${groupSharers.join(', ')}`);
+    } else item(false, `user ${name}'s id is used by no other account`, censusError);
     item(u.shell === NO_SHELL, `user ${name} has no login shell`, `shell is ${u.shell || 'unset'}`);
     item(u.hidden, `user ${name} is hidden`, 'IsHidden is not 1');
     item(u.home === homeOf(cfg, name), `user ${name}'s home is ${homeOf(cfg, name)}`, `home is ${u.home || 'unset'}`);
     const a = adminAnswer(io, name);
     item(a === 'no', `user ${name} is not an admin`, a === 'yes' ? 'it is an admin' : 'the admin check gave no clear answer');
+    // No way to sign in: a password that matches nothing, and no authentication record or password hash.
+    const rec = readRecord(io, 'Users', name, ['Password', ...LOGIN_KEYS]);
+    item(rec.attrs.Password === '*', `user ${name} has no password (it is '*')`, `Password is ${rec.attrs.Password === undefined ? 'unset' : 'something else'}`);
+    const login = LOGIN_KEYS.filter((k) => rec.attrs[k] !== undefined);
+    item(login.length === 0, `user ${name} has no sign-in record`, `it has ${login.join(', ')}`);
+    if (io.euid() === 0) {
+      const s = io.run(SUDO, ['-n', '-l', '-U', name]);
+      item(SUDO_NOT_ALLOWED.test(`${s.stdout}\n${s.stderr}`), `user ${name} has no sudo rule`, `sudo says: ${`${s.stdout} ${s.stderr}`.replace(/\s+/g, ' ').trim().slice(0, 120)}`);
+    } else skip(`user ${name} has no sudo rule`, 'needs root to read; run check with sudo');
   }
   const o = readUser(io, cfg.owner);
   item(o.exists, `owner ${cfg.owner} exists`, 'not found');
   if (o.exists) ids.owner = { uid: o.uid, gid: o.gid };
-  const above = chainProblem(io.at(dirname(cfg.base)), { owner: io.rootUid, top: io.prefix || '/' });
+  {
+    const uids = [0, ...(ids.owner ? [ids.owner.uid] : []), ...USERS.filter((n) => ids[n]).map((n) => ids[n].uid)];
+    const gids = USERS.filter((n) => ids[n]).map((n) => ids[n].gid);
+    const dup = uids.filter((x, i) => uids.indexOf(x) !== i);
+    item(dup.length === 0, 'the three users, the owner and root all have different ids', `shared id(s): ${[...new Set(dup)].join(', ')}`);
+    item(new Set(gids).size === gids.length, 'the three users have different groups', `shared group id(s) among ${gids.join(', ')}`);
+  }
+  const above = baseChainProblem(io, cfg);
   item(above === null, `folders above ${cfg.base} are root's alone, no links, no access lists`, above);
   for (const row of folderTable(cfg)) {
     const what = `${row.path} (${row.owner}, ${modeText(row.mode)})`;
@@ -210,8 +291,14 @@ export function check(io, cfg) {
       if (row.owner !== 'owner' && st.gid !== want.gid) why.push(`group is ${st.gid}, want ${want.gid}`);
     }
     if ((st.mode & 0o7777) !== row.mode) why.push(`mode is ${modeText(st.mode & 0o7777)}, want ${modeText(row.mode)}`);
-    const acl = aclOf(io, row.path);
-    if (acl) why.push(acl.replace(/^.*? has an access list.*$/, 'has an access list (ACL)'));
+    const acl = aclEntries(io, row.path);
+    if (acl.error) why.push(acl.error);
+    else {
+      const want2 = expectedAcl(row);
+      const missing = want2.filter((e) => !acl.entries.includes(e)); const extra = acl.entries.filter((e) => !want2.includes(e));
+      if (missing.length) why.push(`access list is missing: ${missing.join('; ')}`);
+      if (extra.length) why.push(`access list has an entry that is not wanted: ${extra.join('; ')}`);
+    }
     item(why.length === 0, what, why.join('; '));
   }
   return out;
