@@ -96,7 +96,7 @@ const FIRST = [
   (t) => swap(t, '  shakedown_workers: 1\n', '  shakedown_workers: 1\n  shakedown: true\n'),
   (t) => swap(t, '      own_building_share: 70\n', '      own_building_share: 70\n      editing_per_product: 1\n      editing_per_mac: 2\n'),
   (t) => swap(t, '  red_runs: [undo]\n', '  red_runs: [undo]\n  pace_min_share: 0.143\n'),
-  (t) => swap(t, 'timeouts:\n  card:\n', `timeouts:\n${TIMEOUT_MINUTES}  card:\n`),
+  (t) => swap(t, '\ntimeouts:\n', `\ntimeouts:\n${TIMEOUT_MINUTES}`),
   (t) => `${t}${MODULE_PART}`,
 ].reduce((t, f) => f(t), SAMPLE);
 
@@ -251,10 +251,13 @@ function readersAccept(text) {
     const r = readyCheck({ id: 'C-t', doc: { product, kind: 'exact_reverse', round: 1, depends_on: [] } }, view, { rules: real, product });
     return r.ok || / no work starts$/.test(r.reason);
   });
-  const rec = { read: (e) => (e === 'product' ? { doc: { state: 'active' } } : null), list: () => [] };
   const card = { id: 'C-1', product, kind: 'editing', tier: 2, files: ['docs/research/note.md'] };
   const b = { band: 'green', own_building: 'open', prodBlocked: false };
-  const gate = START_KINDS.every((kind) => !startGate({ rules, rec, card, kind, product, b, running: [], lead: 'S-lead' }).missing);
+  // Every product state, as the real Dispatcher may meet any (#77 r6 m-3): editingLimits reads caps.per_state.<state>.
+  const gate = PRODUCT_STATES.every((state) => {
+    const rec = { read: (e) => (e === 'product' ? { doc: { state } } : null), list: () => [] };
+    return START_KINDS.every((kind) => !startGate({ rules, rec, card, kind, product, b, running: [], lead: 'S-lead' }).missing);
+  });
   const fine = (f) => { try { f(); return true; } catch { return false; } };
   const others = fine(() => bands({ rules, reading: { ok: false, reason: 'no reading' }, now: 0 }))
     && fine(() => handoffVet(rules)({ kind: 'handoff', text: 'x' }));
@@ -440,6 +443,39 @@ test('every NEW_KEYS key parsePolicy accepts is checked for presence and type (#
     // The wrong type (a list) is refused, by one reason that names the key.
     const wrong = fit(FIRST.replace(`${lines[0]}\n`, `${lines[0].replace(/:.*/, ': [x]')}\n`), ENTRY);
     assert.ok(wrong.length === 1 && wrong[0].includes(key.split('.').slice(-2).join('.')), `${key} as a list: ${wrong.join(' | ')}`);
+  }
+});
+
+// #77 r6 m-1: the fit check's own type test, on the keys whose type parsePolicy does not check, so only the fit check
+// stands between a wrong value and a Dispatcher that refuses it. Each value here is one parsePolicy accepts.
+test('a value parsePolicy accepts but the Dispatcher refuses is refused, naming the key (#77 r6 m-1)', () => {
+  const cases = [
+    ['    soft: 120000\n', '    soft: abc\n', 'context.lead.soft'],
+    ['    hard: 160000\n', '    hard: 1.5\n', 'context.lead.hard'],
+    ['    role: 3\n', '    role: three\n', 'context.handoff_cap.role'],
+    ['    split_after_compactions: 2\n', '    split_after_compactions: "2x"\n', 'context.worker.split_after_compactions'],
+    ['      editing_per_product: 1\n', '      editing_per_product: 1.5\n', 'usage.bands.amber.editing_per_product'],
+    ['      editing_per_mac: 2\n', '      editing_per_mac: 1.5\n', 'usage.bands.amber.editing_per_mac'],
+    ['    light: 1\n', '    light: 1.5\n', 'caps.per_state'],
+    ['    light: 1\n', '    light: abc\n', 'caps.per_state'],
+    ['  per_state:\n    active: 1\n    away: 1\n    paused: 0\n    light: 1\n', '  per_state: 1\n', 'caps.per_state'],
+  ];
+  for (const [from, to, key] of cases) {
+    const text = swap(FIRST, from, to);
+    assert.ok(rulesOf(text), `parsePolicy accepts ${to.trim()}`);
+    assert.equal(readersAccept(text), false, `the readers refuse ${to.trim()}`);
+    const got = fit(text, ENTRY);
+    assert.ok(got.length === 1 && got[0].startsWith(`M11: ${key} must `), `${to.trim()}: ${got.join(' | ')}`);
+  }
+});
+
+// #77 r6 m-3, a ruling: the fit check may be stricter than the readers, never looser. A missing pace_min_share or
+// shakedown is refused although need() gives a default for each; the first cutover names every value it runs on.
+test('the fit check may be stricter than the readers, never looser: a key need() defaults is still required (#77 r6 m-3)', () => {
+  for (const [from, key] of [['  pace_min_share: 0.143\n', 'usage.pace_min_share'], ['  shakedown: true\n', 'caps.shakedown']]) {
+    const text = swap(FIRST, from, '');
+    assert.equal(readersAccept(text), true, `${key}: the readers default it`);
+    assert.deepEqual(fit(text, ENTRY), [`${key} is missing (M11 reads it)`]);
   }
 });
 

@@ -13,7 +13,6 @@
 // two together until gather imports this list.
 
 import { botId } from './gather.mjs';
-import { goFreeKinds } from '../M9-record/ready.mjs';
 import { goFreeOn, GO_FREE_KEY } from '../M9-record/ready.mjs';
 
 export const REQUIRED_KEYS = Object.freeze([
@@ -36,6 +35,6 @@ export function policyProblems(rules, product) {
   // gather.mjs:142 reads a list of check names. An empty list is the fit check's policy line (L96 m-1), not the gate's.
   if (!Array.isArray(checks) || !checks.every((c) => typeof c === 'string' && c)) out.push('M6: product_profile.required_checks must be a list of check names');
   if (botId(get('product_profile.robot')) === null) out.push('M6: product_profile.robot.bot_user_id must be the robot\'s numeric id');
-  if (!goFreeKinds(rules, product).includes('exact_reverse') || !goFreeOn(rules, product, 'exact_reverse')) out.push(`M6: ${GO_FREE_KEY}.exact_reverse must be true at the first cutover`);
+  if (!goFreeOn(rules, product, 'exact_reverse')) out.push(`M6: ${GO_FREE_KEY}.exact_reverse must be true at the first cutover`);
   return out;
 }

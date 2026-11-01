@@ -1,7 +1,8 @@
 // required-keys.test.mjs — the gate's key list matches what the gate's sources read (L86 10; #77 r5 MAT-1, m-3). The
 // reader is M10's rules-reads.test-helper.mjs, the one M2's and M9's tests share (L123), so it sees every read form:
 // get/num/dec/flag, plain or ?., a gather-style get( helper, and the Dispatcher's need(rules, KEYS.x / minutes(rules,
-// KEYS.x (#68 reads the merge time limit in gate.mjs that way). It runs over every M6 source file but the generated
+// KEYS.x, the rules reached directly or through a path ending in rules (#68 reads the merge time limit in gate.mjs as
+// minutes(ctx.rules, KEYS.x, #77 r6 MAT-1); any other need( or minutes( call fails as unreadable). It runs over every M6 source file but the generated
 // checker bundle, whose code is each source module's own, tested where it lives. Every rules key read must be listed,
 // every listed key must be read, and a read whose key can't be named fails.
 import { test } from 'node:test';
@@ -61,14 +62,18 @@ test('the reader catches a new read in any M6 file, in every form, and a key it 
   // #68's form: the Dispatcher's minutes()/need() with a KEYS name, in gate.mjs.
   const k68 = Object.entries(M11_KEYS).find(([, k]) => !listed(LIST, k));
   assert.ok(k68, 'an M11 key the gate does not list');
-  for (const call of [`minutes(rules, KEYS.${k68[0]}, { product })`, `need(rules, KEYS.${k68[0]})`]) {
+  // #68's real call reaches the rules through ctx (gate.mjs: minutes(ctx.rules, KEYS.mergingOpenMaxMin, …), #77 r6 MAT-1).
+  for (const call of [`minutes(rules, KEYS.${k68[0]}, { product })`, `need(rules, KEYS.${k68[0]})`,
+    `minutes(ctx.rules, KEYS.${k68[0]}, { product: ctx.product })`, `need(this.rules, KEYS.${k68[0]})`, `minutes(ctx?.rules, KEYS.${k68[0]})`]) {
     assert.deepEqual(unlisted(plant('gate.mjs', `const t = ${call};`).keys), [k68[1]], call);
   }
   for (const [file, line] of [['gather.mjs', 'const x = get(KEY);'], ['gate.mjs', 'const t = minutes(rules, KEYS.noSuchKey);'],
-    ['gate.mjs', 'const t = need(rules, key);'], ['undo.mjs', 'const x = rules.num(`caps.${what}`, { product });']]) {
+    ['gate.mjs', 'const t = need(rules, key);'], ['gate.mjs', 'const t = minutes(ctx.config, KEYS.cancelGraceMin);'],
+    ['gate.mjs', 'const t = need(r, KEYS.cancelGraceMin);'], ['gate.mjs', 'const t = minutes(ctx.rules, KEYS.noSuchKey);'], ['undo.mjs', 'const x = rules.num(`caps.${what}`, { product });']]) {
     assert.equal(plant(file, line).nonLiteral, 1, `${file}: ${line}`);
   }
   // m-1: a key inside a listed map that is not the go-free map is not covered by that map.
   assert.equal(listed(['effect_paths'], 'effect_paths.new_field'), false);
+  assert.equal(listed(['timeouts'], 'timeouts.merging_open_max_min'), false, '#77 r6 m-2: timeouts is not the go-free map');
   assert.equal(listed([GO_FREE_KEY], `${GO_FREE_KEY}.exact_reverse`), true);
 });

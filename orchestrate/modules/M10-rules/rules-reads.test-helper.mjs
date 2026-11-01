@@ -4,9 +4,10 @@
 // A read is a call whose first argument names a rules key:
 //   rules.get( / rules.num( / rules.dec( / rules.flag(, each also as rules?.x?.( (L123: the typed reads, L104), and
 //   a module's own helper named in `helpers` (writer.mjs's get( and num(), called bare, and
-//   need(rules, KEYS.x / minutes(rules, KEYS.x, the Dispatcher's readers, with KEYS.x looked up in `keyMaps` (M11's KEYS;
-//   #68 reads timeouts.merging_open_max_min in M6 gate.mjs this way). A need(rules, / minutes(rules, whose key is not
-//   KEYS.<a name in the map> is counted in nonLiteral.
+//   need(rules, KEYS.x / minutes(rules, KEYS.x, the Dispatcher's readers, with KEYS.x looked up in `keyMaps` (M11's KEYS).
+//   The rules may be reached through a path ending in `rules` (ctx.rules, this.rules?.): #68 reads
+//   timeouts.merging_open_max_min in M6 gate.mjs as minutes(ctx.rules, KEYS.x (#77 r6 MAT-1). Any other need( or
+//   minutes( call (another first argument, or a key that is not KEYS.<a name in the map>) is counted in nonLiteral.
 // The key is a literal in any quote kind, or a name bound in the same file by `const NAME = <literal>;`. A template key's
 // ${…} is expanded: ${state} over the product states, ${kind} over the go-free kinds (goFreeOn's
 // `${GO_FREE_KEY}.${kind}`, L123), and a const name to its value. Anything else is counted in nonLiteral, so a key the
@@ -26,6 +27,8 @@ const NAME = String.raw`[A-Za-z_$][\w$]*`;
 export const code = (text) => text.split('\n').filter((l) => !/^\s*\/\//.test(l)).join('\n');
 const VARS = Object.freeze({ state: PRODUCT_STATES, kind: Object.keys(GO_FREE) });
 const MAX_DEPTH = 4;
+// The rules object, reached directly or through a path ending in `rules` (ctx.rules, this.rules, a?.rules), #77 r6 MAT-1.
+const RULES = String.raw`(?<![\w$.])(?:${NAME}\??\.)*rules`;
 
 export function rulesReads(text, { helpers = [], keyMaps = {} } = {}) {
   const src = code(text);
@@ -43,7 +46,7 @@ export function rulesReads(text, { helpers = [], keyMaps = {} } = {}) {
     return out;
   };
   const valueOf = (name, depth = 0) => { const c = consts.get(name); return c.quote === '`' ? expand(c.body, depth) : [c.body]; };
-  const call = new RegExp(String.raw`(?:\brules\??\.(?:get|num|dec|flag)(?:\?\.)?` + (helpers.length ? `|(?<![.\\w])(?:${helpers.join('|')})` : '') + String.raw`)\(\s*`, 'g');
+  const call = new RegExp(String.raw`(?:${RULES}\??\.(?:get|num|dec|flag)(?:\?\.)?` + (helpers.length ? `|(?<![.\\w])(?:${helpers.join('|')})` : '') + String.raw`)\(\s*`, 'g');
   const keys = new Set();
   let nonLiteral = 0;
   for (const m of src.matchAll(call)) {
@@ -54,9 +57,12 @@ export function rulesReads(text, { helpers = [], keyMaps = {} } = {}) {
     if (!got) { nonLiteral += 1; continue; }
     for (const k of got) keys.add(k);
   }
-  // The Dispatcher's readers: need(rules, KEYS.x …) and minutes(rules, KEYS.x …).
-  for (const m of src.matchAll(/\b(?:need|minutes)\(\s*rules\s*,\s*/g)) {
-    const ref = new RegExp(String.raw`^(${NAME})\.(${NAME})\s*[,)]`).exec(src.slice(m.index + m[0].length));
+  // The Dispatcher's readers: need(rules, KEYS.x …) and minutes(rules, KEYS.x …), the rules as above. A call with any
+  // other first argument can't be named, so it counts as unreadable rather than being skipped (#77 r6 MAT-1).
+  for (const m of src.matchAll(/(?<![\w$.])(?:need|minutes)\(\s*/g)) {
+    const arg = new RegExp(String.raw`^${RULES}\s*,\s*`).exec(src.slice(m.index + m[0].length));
+    if (!arg) { nonLiteral += 1; continue; }
+    const ref = new RegExp(String.raw`^(${NAME})\.(${NAME})\s*[,)]`).exec(src.slice(m.index + m[0].length + arg[0].length));
     const key = ref && Object.hasOwn(keyMaps, ref[1]) && Object.hasOwn(keyMaps[ref[1]], ref[2]) ? keyMaps[ref[1]][ref[2]] : null;
     if (typeof key === 'string') keys.add(key); else nonLiteral += 1;
   }

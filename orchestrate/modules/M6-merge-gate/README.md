@@ -68,8 +68,8 @@ See LANES.md for who builds this folder, and the build rows (0b-9, R-0b-86..99) 
 - Put the robot's numeric bot id in the rules (`product_profile.robot.bot_user_id`).
 - Name the required checks in the rules (`product_profile.required_checks`); with none, every change is refused (1, 2).
 - Allow undo cards without a go, in the map form (block lines: the rules reader refuses `{…}`). The list form
-  `[exact_reverse]` works for the gate but not for the Dispatcher, which reads `lead_daily_card` from the same map, so
-  the first-cutover fit check refuses it (L86). Without `exact_reverse` every undo is refused (10).
+  `[exact_reverse]` gives no go-free kinds at all (#79), so the gate refuses every undo and the first-cutover fit check
+  refuses the file. Without `exact_reverse: true` every undo is refused (10).
 
   ```yaml
   approvals:
@@ -80,6 +80,6 @@ See LANES.md for who builds this folder, and the build rows (0b-9, R-0b-86..99) 
   ```
 
   At the first cutover the Lead is not on the product, so `lead_daily_card` is `[]` (L96), and the fit check refuses
-  any other list until the Dispatcher reads it with the rules' own path language (L120). `[]` is not go-free after
-  lane 1's L115 M-C; until then goFreeKinds counts the key.
+  any other list until the Dispatcher reads it with the rules' own path language (L120). `[]` is not go-free (L115 M-C):
+  goFreeKinds counts `lead_daily_card` only when it names at least one path.
 - Set M2's `approvals.push_windows` and `approvals.decisions_dir`; no Approve stands without them.
