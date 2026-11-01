@@ -47,7 +47,7 @@ function world({ policy = POLICY, mode = 'draft' } = {}) {
       }
       if ((m = new RegExp(`^${BASE}/pulls/(\\d+)$`).exec(path))) {
         const r = await g.gh.get(path);
-        return r.status === 200 ? { status: 200, json: { ...r.json, merged_at: mergedAt.get(Number(m[1])) ?? null, base: { ref: prBase.get(Number(m[1])) ?? 'main' } } } : r;
+        return r.status === 200 ? { status: 200, json: { ...r.json, labels: labelsOf.get(Number(m[1])) ?? [], merged_at: mergedAt.get(Number(m[1])) ?? null, base: { ref: prBase.get(Number(m[1])) ?? 'main' } } } : r;
       }
       return g.gh.get(path);
     }
@@ -64,6 +64,7 @@ function world({ policy = POLICY, mode = 'draft' } = {}) {
   };
   const client = readOnlyClient({ token: () => 'a-token-that-is-long-enough', fetchFn });
   let n = 100;
+  const labelsOf = new Map();
   const land = (files, { checks, thread, at = '2026-11-03T10:00:00Z', base = 'main', merged = true } = {}) => {
     const number = ++n;
     const head = g.commit([g.main], files, { from: g.main });
@@ -85,7 +86,7 @@ function world({ policy = POLICY, mode = 'draft' } = {}) {
   const pass = (at = '2026-11-03T12:00:00Z', rules = rulesOf()) => watchPass({ gh: client, owner: OWNER, repo: REPO, dir, rules, now: () => at });
   const lines = () => readLog(dir);
   const judged = () => lines().filter((l) => l.sha && !l.pin && !l.pass && !l.not_judged_reason);
-  return { state, g, client, land, push, dir, pass, lines, judged, hooks, asked, dates, root, rulesOf, mergedAt };
+  return { labelsOf, state, g, client, land, push, dir, pass, lines, judged, hooks, asked, dates, root, rulesOf, mergedAt };
 }
 
 /** A week: the pin pass at 3 Nov 00:00Z, a pass at noon each day to the 9th, and the last pass just after the 9th ends. */
@@ -670,4 +671,21 @@ test('PLANT a "not judged" line with no later judged line, on otherwise clean pa
 test('PLANT a pass that says the pin left main but lists no problem → not a clean pass', () => {
   const s = summary({ dir: handLog({ passFlags: { pin_ok: false } }), endDay: '2026-11-09', explanations: NOEX });
   assert.equal(s.ok, false);
+});
+
+test('PLANT refusal 8: a docs change the owner labelled needs-joe → refusal 8 (needs the owner\'s Approve) is listed, beside the lane refusal 9, which makes the verdict "would refuse" (caught by: approveNeeded in judgeMerged)', async () => {
+  const w = await (async () => { const x = world(); await x.pass(PIN_AT); return x; })();
+  const { number } = w.land({ 'docs/a.md': 'two' });
+  w.labelsOf.set(number, [{ name: 'needs-joe' }]);
+  await w.pass();
+  const l = w.judged()[0];
+  // The real lane rule also turns away anything that needs the owner (refusal 9, a hard one), so at the first cutover 8 never
+  // stands alone and "would ask for the owner's Approve" cannot be reached with the real rules; the 8 line must still be there.
+  assert.deepEqual(l.refusals.map((x) => x.n).sort(), [8, 9], JSON.stringify(l));
+  assert.match(l.refusals.find((x) => x.n === 8).reason, /needs the owner's Approve: risky: unclassifiable/);
+  assert.equal(l.verdict, VERDICTS[2]);
+  assert.deepEqual(l.risky, ['unclassifiable']);
+  // the same change without the label is a plain "would merge": the label is what moved it
+  const v = world(); await v.pass(PIN_AT); v.land({ 'docs/a.md': 'two' }); await v.pass();
+  assert.equal(v.judged()[0].verdict, VERDICTS[0]);
 });
