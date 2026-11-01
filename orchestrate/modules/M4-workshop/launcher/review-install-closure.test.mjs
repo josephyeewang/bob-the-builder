@@ -12,7 +12,7 @@
 // checkout by an absolute path fails too).
 //
 // What a real import cannot see, two scans read (L106 M-1 (b), (c)): an `import()` or require that runs only later,
-// whose target is not a plain string (only the config-named wiring, on WIRING_CALLS, may be), and a path written in the
+// whose target is not a plain string (only a module the config names, on CONFIG_IMPORTS, may be), and a path written in the
 // code that leads from the module's folder out of orchestrate/ to a file the updater does not install. The scans read
 // code through a small reader (`lex`) that knows strings, templates, regular expressions and comments, so text inside
 // a string can't hide code from them, and code can't hide inside what looks like a comment. The reader is itself
@@ -37,12 +37,16 @@ const ID = [['user.name', 'test'], ['user.email', 'test@example.invalid']];
 const GIT = spawnSync('/usr/bin/which', ['git'], { encoding: 'utf8' }).stdout.trim();
 const BUILTIN = new Set([...builtinModules, ...builtinModules.map((m) => `node:${m}`)]);
 
-// The only `import()` calls whose target is not a plain string: the wiring, which names a file of the copy's own items
-// (the config's `wiring`), not a repository file; the install step supplies it. Each is listed with its file and its
-// exact call, so a second computed import in the same file is still refused, and an entry no longer in its file fails.
-const WIRING_CALLS = Object.freeze([
+// The only `import()` calls whose target is not a plain string: a module named by its program's config, the wiring
+// (M11's and the review runner's) and the runner's budget module (check 12's inputs, L83 M-3). The runner's own check
+// (`programsProblem`) refuses a wiring or a budget module outside the installed copy or not root's alone, and a module
+// of the repository that one of them names is imported for real here like every other. Each is listed with its file
+// and its exact call, so a second computed import in the same file is still refused, and an entry no longer in its
+// file fails.
+const CONFIG_IMPORTS = Object.freeze([
   ['modules/M11-dispatcher/main.mjs', 'import(pathToFileURL(config.wiring).href)'],
   ['modules/M4-workshop/launcher/review-runner-main.mjs', 'import(pathToFileURL(c.wiring).href)'],
+  ['modules/M4-workshop/launcher/review-runner-main.mjs', 'import(pathToFileURL(c.budget).href)'],
 ]);
 // Modules whose whole body is a test fixture's hook: each reads a hook's input on stdin and exits while it loads. Each
 // child is given such an input; a module on this list must exit while it loads, and any other module must not.
@@ -202,7 +206,7 @@ function staticImports({ code, lits }) {
  * every load that runs later and names a file node can't know until then, and every path written from the module's
  * folder that leaves orchestrate/ for a file the updater does not install. → [why…]
  */
-export function hiddenLoads(text, { file, rel, real, folder, outside = OUTSIDE_FILES, wiring = WIRING_CALLS }) {
+export function hiddenLoads(text, { file, rel, real, folder, outside = OUTSIDE_FILES, wiring = CONFIG_IMPORTS }) {
   const bad = [];
   let lx;
   try { lx = lex(text); } catch (e) { return [`${rel}: the reader could not read it (${e.message})`]; }
@@ -214,7 +218,7 @@ export function hiddenLoads(text, { file, rel, real, folder, outside = OUTSIDE_F
     if (allowed.includes(call)) continue;
     bad.push(`${rel}:${lineOf(code, m.index)} imports a name made at run time (${call.slice(0, 120)}), which neither node nor this test can follow`);
   }
-  for (const [f, call] of wiring) if (f === rel && !code.replace(/\s+/g, '').includes(call)) bad.push(`${rel}: the wiring call ${call} listed for it is not there`);
+  for (const [f, call] of wiring) if (f === rel && !code.replace(/\s+/g, '').includes(call)) bad.push(`${rel}: the config-named import ${call} listed for it is not there`);
   for (const m of code.matchAll(/(?<![\w$.])(?:createRequire|require)\s*\(/g)) bad.push(`${rel}:${lineOf(code, m.index)} loads with require, which this test does not follow`);
   const leaves = (p) => {
     const to = resolve(dirname(file), p);
@@ -323,7 +327,7 @@ test('L92 item 4, L106 M-1: every module of the installed copy loads from the co
   const mods = modulesOf(real).map((f) => ({ file: f, rel: relative(real, f).split(sep).join('/') }));
   for (const s of Object.values(SCRIPTS)) assert.ok(mods.some((m) => m.rel === s), `the plist script ${s} is in the copy`);
   for (const f of Object.keys(EXITS_ON_LOAD)) assert.ok(mods.some((m) => m.rel === f), `${f}, on EXITS_ON_LOAD, is in the copy`);
-  for (const [f] of WIRING_CALLS) assert.ok(mods.some((m) => m.rel === f), `${f}, on WIRING_CALLS, is in the copy`);
+  for (const [f] of CONFIG_IMPORTS) assert.ok(mods.some((m) => m.rel === f), `${f}, on CONFIG_IMPORTS, is in the copy`);
 
   // The scans, over every module.
   const hidden = mods.flatMap((m) => hiddenLoads(readFileSync(m.file, 'utf8'), { ...m, real, folder }));
@@ -403,7 +407,14 @@ test('L106 M-1 (b), (c): the scans find a load the real import cannot see', () =
   assert.deepEqual(scan('modules/M11-dispatcher/main.mjs', wiring), []);
   assert.equal(scan('modules/M11-dispatcher/other.mjs', wiring).length, 1);
   assert.equal(scan('modules/M11-dispatcher/main.mjs', `${wiring}const b = await import(pathToFileURL(config.more).href);\n`).length, 1);
-  assert.match(scan('modules/M11-dispatcher/main.mjs', 'export const none = 1;\n').join('|'), /the wiring call .* is not there/);
+  assert.match(scan('modules/M11-dispatcher/main.mjs', 'export const none = 1;\n').join('|'), /the config-named import .* is not there/);
+  // The runner's budget import is allowed in the runner only, not in M11's main.
+  const budget = 'budget = await (await import(pathToFileURL(c.budget).href)).budget(c);\n';
+  assert.equal(scan('modules/M11-dispatcher/main.mjs', `${wiring}${budget}`).length, 1);
+  const runner = 'modules/M4-workshop/launcher/review-runner-main.mjs';
+  const runnerWiring = 'wiring = await import(pathToFileURL(c.wiring).href);\n';
+  assert.deepEqual(scan(runner, `${runnerWiring}${budget}`), []);
+  assert.match(scan(runner, runnerWiring).join('|'), /the config-named import import\(pathToFileURL\(c\.budget\)\.href\) listed for it is not there/);
   assert.equal(scan('a/b.mjs', "import { createRequire } from 'node:module';\nconst require = createRequire(import.meta.url);\nrequire('./x.cjs');\n").length, 2);
   // The auditor's plant B: a read, done later, of a file outside orchestrate/, in each way a path is written.
   for (const text of [

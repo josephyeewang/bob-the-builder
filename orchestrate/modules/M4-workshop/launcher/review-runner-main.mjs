@@ -27,10 +27,29 @@
 //     "wiring": "/abs/wiring.mjs",                  exports `start(x)` (review-runner.mjs `runnerPass`, `ctx.start`)
 //     "snapshot": "/abs", "bobFolder": "/abs",      the session settings' fixed paths (L67 addendum 2, review-settings.mjs):
 //     "deny": ["/abs", ...],                        the rules snapshot (inside root), the Bob folder, the read-deny list,
-//     "reviewCopies": "/abs", "workerCopies": "/abs" }  and the review copies' folder, apart from the workers' copies'
-//                                                   folder (which the deny list covers whole); read only at a start
-// The wiring's start runs the launcher (launch.mjs, checks 1 to 13) for a reviewer or an auditor, with `--session-id`
-// set to the runner's id, and returns { ok, pid }, where pid is claude's own process (L66: never the launcher's; the
+//     "reviewCopies": "/abs", "workerCopies": "/abs",   and the review copies' folder, apart from the workers' copies'
+//                                                   folder (which the deny list covers whole). All five are checked at
+//                                                   daemon start (R-0b-163), so a typo stops the daemon, not each review
+//     "pin": "x.y.z", "machineWide": "/abs",       the Claude Code version the rules pin (launch checks 0, 6, 7) and the
+//                                                   machine-wide settings file (check 10)
+//     "bobManifest": "/abs", "budget": "/abs",      optional, inside installRoot and root's: the pinned Bob folder's file
+//                                                   list { path: sha256 } (check 13), and a module exporting
+//                                                   budget(config) → M11's own check12 inputs { rules, rec, bandsNow,
+//                                                   runningNow } (check 12). Missing, that check has no port and the
+//                                                   launcher refuses it
+//     "rules": { "production": { "env_files": [], "programs": [], "hosts": [] }, "secrets": { "paths": [] } } }
+//                                                   the rules the review sessions' hooks read: each run writes them to
+//                                                   `snapshot`, well inside the hooks' 5-minute limit (item 7)
+// The wiring (review-wiring.mjs) exports `start` and nothing else (R-0b-163, L78 n4): a wiring with any other export is
+// refused at daemon start. Each review copy is <reviewCopies>/<session>: the runner names it, the wiring fills it with
+// `makeCopy`, and the runner removes it once that session's ended record is written (L77 m9).
+// The wiring's start sends every review session through the launcher (L83 M-3): launch.mjs's own launch(), checks 1
+// to 13, with the ports in review-launch.mjs, built from `launchInputs` (realPorts below). A check that applies and has
+// no port is refused there, so until lane 2 declares check 2 not applicable to the review roles (their role profile),
+// and until the config names `budget` (check 12) and `bobManifest` (check 13), no review starts; nor, today, while check
+// 0 finds a setting name not yet confirmed on the pinned Claude Code (settings-names.mjs CONFIRMED, live proof) or
+// check 13 reads the Bob folder's rules in another form than render-settings writes them (lane 2, L83 report). Once every check
+// passed, it launches claude with `--session-id` set to the runner's id, and returns { ok, pid }, where pid is claude's own process (L66: never the launcher's; the
 // runner checks the pid's command is the pinned claude before it counts the start, and before it stops anything). It
 // gets `claudeBin`, `node` and `hooksDir` (checked above) to run and to render the settings with, and `earlier`: the
 // card's earlier failing verdicts for this role on other trees, [{ session_id, head, notes }], which the reviewer's
@@ -45,9 +64,9 @@
 // a deny rule on that folder, and the handler removes a tap once the status lists it in `taps_read` (L71 points 5, C1).
 // Exit 0 when the pass ran clean, 1 when it refused or could not run.
 
-import { closeSync, constants, fstatSync, lstatSync, openSync, readFileSync, readdirSync, realpathSync } from 'node:fs';
+import { closeSync, constants, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, rmSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { runnerPass, CARD_ID, isClaudeCommand } from './review-runner.mjs';
@@ -56,11 +75,19 @@ import { sessionVerdict, verdictFromFile } from '../../M9-record/outbox.mjs';
 import { SESSION_ID } from '../../../shared/record.mjs';
 import { readAccountFile, ACCOUNT_FILE } from './accounts.mjs';
 import { REVIEW_USER } from './review-user.mjs';
-import { git } from '../git/safe-git.mjs';
+import { git, gitOk } from '../git/safe-git.mjs';
 import { sessionSettings, templateFile } from './review-settings.mjs';
 import { REVIEW_ROLES } from '../../../shared/review-roles.mjs';
+import { removeProtected, restoreMainCopies } from './worker-copy.mjs';
+import { writeSnapshot } from '../hooks/snapshot.mjs';
 
-const ABS = ['installRoot', 'root', 'outboxRoot', 'reviewHome', 'recordRoot', 'mirror', 'claudeBin', 'hooksDir', 'ownerHome', 'wiring'];
+const ABS = ['installRoot', 'root', 'outboxRoot', 'reviewHome', 'recordRoot', 'mirror', 'claudeBin', 'hooksDir', 'ownerHome', 'wiring',
+  'snapshot', 'bobFolder', 'reviewCopies', 'workerCopies', 'machineWide'];
+const OPTIONAL_ABS = ['accountCopy', 'ownerTaps', 'bobManifest', 'budget'];
+const PIN = /^\d+\.\d+\.\d+$/;
+// The one export a wiring may have (R-0b-163, L78 n4).
+export const WIRING_EXPORTS = Object.freeze(['start']);
+const absList = (v) => Array.isArray(v) && v.every((p) => typeof p === 'string' && isAbsolute(p));
 const MAX_CARD_BYTES = 1024 * 1024;
 const CHILD_MS = 10_000;
 
@@ -73,8 +100,17 @@ const CHILD_MS = 10_000;
 export function readConfig(file, { lstat = lstatSync, top = '/', acl = aclProblem } = {}) {
   const c = JSON.parse(readFileSync(file, 'utf8'));
   for (const k of ABS) if (typeof c?.[k] !== 'string' || !isAbsolute(c[k])) throw new Error(`config: ${k} must be an absolute path`);
-  if (c.accountCopy !== undefined && (typeof c.accountCopy !== 'string' || !isAbsolute(c.accountCopy))) throw new Error('config: accountCopy must be an absolute path');
-  if (c.ownerTaps !== undefined && (typeof c.ownerTaps !== 'string' || !isAbsolute(c.ownerTaps))) throw new Error('config: ownerTaps must be an absolute path');
+  for (const k of OPTIONAL_ABS) if (c[k] !== undefined && (typeof c[k] !== 'string' || !isAbsolute(c[k]))) throw new Error(`config: ${k} must be an absolute path`);
+  if (!absList(c.deny) || c.deny.length === 0) throw new Error('config: deny must list absolute paths');
+  if (typeof c.pin !== 'string' || !PIN.test(c.pin)) throw new Error('config: pin must be the Claude Code version the rules pin (x.y.z)');
+  // No path may be / itself (L83 minor 3): a deny of / denies nothing the template can name, and a bobFolder of / would
+  // attach the whole disk read-only as the method folder.
+  for (const [k, p] of [...[...ABS, ...OPTIONAL_ABS].map((k) => [k, c[k]]), ...c.deny.map((p) => ['deny', p])]) {
+    if (typeof p === 'string' && resolve(p) === '/') throw new Error(`config: ${k} may not be / itself`);
+  }
+  const prod = c.rules?.production;
+  if (!prod || !['env_files', 'programs', 'hosts'].every((k) => Array.isArray(prod[k]) && prod[k].every((v) => typeof v === 'string'))) throw new Error('config: rules.production must list env_files, programs and hosts');
+  if (!absList(prod.env_files) || (c.rules.secrets !== undefined && !absList(c.rules.secrets?.paths))) throw new Error('config: the rules\' env_files and secrets.paths must be absolute paths');
   for (const k of ['recordUid', 'ownerUid']) if (!Number.isInteger(c[k]) || c[k] < 0) throw new Error(`config: ${k} must be a uid`);
   if (!c.uids || typeof c.uids !== 'object') throw new Error('config: uids must map each role to a uid');
   // The runner's folder and review's outbox are two walls (L68 (4)): review sessions write the outbox, and only the
@@ -84,6 +120,21 @@ export function readConfig(file, { lstat = lstatSync, top = '/', acl = aclProble
   const r = realPath(c.root).toLowerCase();
   const o = realPath(c.outboxRoot).toLowerCase();
   if (inside(r, o) || inside(o, r)) throw new Error(`config: root (${c.root}) and outboxRoot (${c.outboxRoot}) must be two separate folders, neither inside the other`);
+  // The rules snapshot is the runner's own file, behind its wall (item 7); the review copies sit apart from the workers'.
+  const snap = realPath(c.snapshot).toLowerCase();
+  if (snap === r || !inside(snap, r)) throw new Error(`config: snapshot (${c.snapshot}) must be a file inside root (${c.root})`);
+  const rc = realPath(c.reviewCopies).toLowerCase();
+  const wc = realPath(c.workerCopies).toLowerCase();
+  if (inside(rc, wc) || inside(wc, rc)) throw new Error('config: reviewCopies and workerCopies must be two separate folders, neither inside the other');
+  // A review copy is the session's own to write (L83 minor 3): inside the runner's folder or the outbox root it would
+  // stand behind (or over) a wall the session must not write past, and either inside it would sit in a folder the
+  // session writes.
+  for (const [k, p] of [['root', r], ['outboxRoot', o]]) {
+    if (inside(rc, p) || inside(p, rc)) throw new Error(`config: reviewCopies and ${k} must be two separate folders, neither inside the other`);
+  }
+  // The Bob folder is attached read-only; inside a review copy, a session could change it.
+  const bob = realPath(c.bobFolder).toLowerCase();
+  if (inside(bob, rc) || inside(rc, bob)) throw new Error('config: bobFolder and reviewCopies must be two separate folders, neither inside the other');
   const owners = [0, c.uids.reviewer].filter((u) => Number.isInteger(u) && u >= 0);
   for (const k of ['root', 'outboxRoot']) {
     const bad = wallProblem(c[k], owners, { lstat, top, acl });
@@ -136,11 +187,14 @@ export { installProblem, readInstallStamp };
 /**
  * What a review session runs (L66 M2), named one by one: the runner itself, its config, the wiring, the claude
  * program, the node this runs on, the hooks folder and each review role's settings template (L67). Each must be inside
- * the installed copy and root's alone. installRoot must be the copy's link (L75 c-7): a plain folder can't be updated
+ * the installed copy and root's alone, and so must the budget module and the Bob file list when the config names them
+ * (L83 M-3: the first runs inside the runner, the second decides launch check 13). installRoot must be the copy's link (L75 c-7): a plain folder can't be updated
  * whole, so the runner refuses one, and the copy's commit stamp must be the commit its folder is named for.
  */
 export function programsProblem(c, { self, config, node = realpathSync.native(process.execPath), ...opts } = {}) {
-  const bad = installProblem(c.installRoot, [self, config, c.wiring, c.claudeBin, node, c.hooksDir, ...REVIEW_ROLES.map((r) => templateFile(c.installRoot, r))], opts);
+  // The budget module runs inside the runner and the Bob file list decides check 13 (L83 M-3): root's alone too.
+  const extra = [c.budget, c.bobManifest].filter((p) => typeof p === 'string');
+  const bad = installProblem(c.installRoot, [self, config, c.wiring, c.claudeBin, node, c.hooksDir, ...REVIEW_ROLES.map((r) => templateFile(c.installRoot, r)), ...extra], opts);
   if (bad) return bad;
   return copyReady(c.installRoot, { owner: opts.owner ?? 0, ...(opts.lstat ? { lstat: opts.lstat } : {}), ...(opts.readlink ? { readlink: opts.readlink } : {}) });
 }
@@ -164,6 +218,29 @@ function readRecordFile(p, recordUid, entity, id, missing) {
     if (d?.entity !== entity || d?.id !== id || !d.doc || typeof d.doc !== 'object') return { ok: false, reason: `its file is not a ${entity} document` };
     return { ok: true, doc: d.doc, rev: Number.isInteger(d.rev) ? d.rev : null };
   } catch { return { ok: false, reason: 'its file is not JSON' }; } finally { closeSync(fd); }
+}
+
+// A plain file of `owner`'s that no one else writes, read whole without following a link. → its text, or throws.
+function readOwnFile(p, owner) {
+  const fd = openSync(p, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  try {
+    const st = fstatSync(fd);
+    if (!st.isFile() || st.uid !== owner || st.mode & 0o022 || st.size > MAX_CARD_BYTES) throw new Error(`${p} is not ${owner}'s own plain file`);
+    return readFileSync(fd, 'utf8');
+  } finally { closeSync(fd); }
+}
+
+/**
+ * The programs that hold a folder open (launch check 3's `busy` port): lsof's process ids, none when it finds nothing.
+ * lsof exits 1 both when nothing holds the folder and on some errors, so a 1 counts as none only with nothing printed
+ * on either stream; anything else throws, and the check refuses.
+ */
+export function holdersOf(dir, { runFn = run } = {}) {
+  const r = runFn('/usr/sbin/lsof', ['-t', '+D', dir]);
+  const out = String(r.stdout ?? '').trim();
+  if (r.status === 0) return out.split('\n').filter(Boolean);
+  if (r.status === 1 && !out && !String(r.stderr ?? '').trim()) return [];
+  throw new Error(`lsof failed (${r.error?.code ?? `exit ${r.status}`})`);
 }
 
 /** A card from the Record, read only: docs/card/<id>.json, with its revision (`rev`). */
@@ -269,9 +346,55 @@ export function sessionsFrom(text, bin, self = process.pid) {
 
 const run = (bin, args) => spawnSync(bin, args, { encoding: 'utf8', timeout: CHILD_MS, stdio: ['ignore', 'pipe', 'pipe'] });
 
+/** A session's review copy: the one path the wiring fills and the runner removes (L77 m9, L78 c4). */
+export function reviewCopyPath(c, sessionId) {
+  if (typeof sessionId !== 'string' || !SESSION_ID.test(sessionId)) throw new Error('not a session id');
+  return join(c.reviewCopies, sessionId);
+}
+
+/**
+ * The review copy (launch checks 1 and 2 for a review role): a new folder holding the card's branch at `head` from the
+ * mirror, with main beside it for the diff, what the branch brought under a protected name removed and main's own put
+ * back, as for a worker's copy (worker-copy.mjs). A folder already there is refused, never reused. → { ok } | { ok: false, reason }
+ */
+export async function prepareReviewCopy({ mirror, card, head, dest }) {
+  if (typeof card !== 'string' || !CARD_ID.test(card)) return { ok: false, reason: 'not a card id' };
+  if (typeof head !== 'string' || !/^[0-9a-f]{40}$/.test(head)) return { ok: false, reason: 'the head is not 40 hex' };
+  try { lstatSync(dest); return { ok: false, reason: `${dest} is there already` }; } catch { /* good */ }
+  mkdirSync(dest, { mode: 0o700 });
+  const branch = `card/${card.toLowerCase()}`;
+  const opts = (purpose) => ({ gitDir: join(dest, '.git'), workTree: dest, cwd: dest, purpose, timeoutMs: 120_000 });
+  try {
+    // Born on a branch name nothing fetches into: git refuses to fetch into the branch a folder is on, and a plain
+    // init sits on main.
+    await gitOk(['init', '-q', '--initial-branch=review-copy-unborn', dest], opts('review-copy-init'));
+    await gitOk(['fetch', '-q', '--no-tags', '--no-write-fetch-head', '--no-recurse-submodules', mirror, `${head}:refs/heads/${branch}`, 'refs/heads/main:refs/heads/main'], opts('review-copy-fetch'));
+    await gitOk(['checkout', '-q', '-f', branch], opts('review-copy-checkout'));
+    if ((await gitOk(['rev-parse', 'HEAD'], opts('review-copy-head'))).trim() !== head) throw new Error('the checked-out commit is not the head');
+    removeProtected(dest);
+    await restoreMainCopies({ mirror, dest });
+    return { ok: true };
+  } catch (e) {
+    rmSync(dest, { recursive: true, force: true });
+    return { ok: false, reason: e?.message ?? String(e) };
+  }
+}
+
 /** The real ports (the wiring gives `start`). */
-export function realPorts(c, wiring, { node = realpathSync.native(process.execPath), owner = 0 } = {}) {
+export function realPorts(c, wiring, { node = realpathSync.native(process.execPath), owner = 0, budget = null, log = (s) => process.stderr.write(`${s}\n`) } = {}) {
   const uid = c.uids.reviewer;
+  // What the launch checks read for one session (review-launch.mjs reviewChecks, L83 M-3).
+  const launchInputs = (x, hooksDir) => {
+    const card = readCardFile({ recordRoot: c.recordRoot, recordUid: c.recordUid, card: x.card });
+    let bobManifest = null;
+    if (c.bobManifest) { try { bobManifest = JSON.parse(readOwnFile(c.bobManifest, owner)); } catch { bobManifest = null; } }
+    return {
+      pin: c.pin, hooksDir, reviewHome: c.reviewHome, rules: c.rules, snapshot: c.snapshot, writeSnapshot,
+      machineWide: c.machineWide, busy: holdersOf, alert: (t) => log(`review runner: ${x.sessionId}: ${t}`),
+      ownUid: () => process.getuid(), uids: c.uids, cardDoc: card.ok ? card.doc : null, budget,
+      bobFolder: c.bobFolder, bobManifest,
+    };
+  };
   return {
     root: c.root, outboxRoot: c.outboxRoot, uids: c.uids, reviewHome: c.reviewHome, claudeBin: c.claudeBin,
     now: () => Date.now(), ownUid: () => process.getuid(),
@@ -309,9 +432,14 @@ export function realPorts(c, wiring, { node = realpathSync.native(process.execPa
     // start is refused; the next pass starts it.
     start: (x) => {
       const hooksDir = copyPath(c.installRoot, currentCopy(c.installRoot, { owner }), c.hooksDir);
-      return wiring.start({ ...x, claudeBin: c.claudeBin, node, hooksDir,
-        settingsFor: (copy) => sessionSettings({ ...c, hooksDir }, { role: x.role, sessionId: x.sessionId, copy, node }, { owner }) });
+      const copy = reviewCopyPath(c, x.sessionId);
+      return wiring.start({ ...x, claudeBin: c.claudeBin, node, hooksDir, copy, spawn, launchInputs: launchInputs(x, hooksDir),
+        makeCopy: () => prepareReviewCopy({ mirror: c.mirror, card: x.card, head: x.head, dest: copy }),
+        settingsFor: (dir) => sessionSettings({ ...c, hooksDir }, { role: x.role, sessionId: x.sessionId, copy: dir, node }, { owner }) });
     },
+    // Only once the session's ended record is written (review-runner.mjs `markEnded`, L77 m9). rmSync removes a link,
+    // never what it points at.
+    removeCopy: (sessionId) => rmSync(reviewCopyPath(c, sessionId), { recursive: true, force: true }),
     accountInUse: () => {
       const copy = c.accountCopy ? readAccountFile({ file: c.accountCopy, uid: 0 }) : { ok: false };
       if (copy.ok) return copy.account;
@@ -325,17 +453,41 @@ export function realPorts(c, wiring, { node = realpathSync.native(process.execPa
   };
 }
 
-export async function main(argv, { log = (s) => process.stderr.write(`${s}\n`) } = {}) {
+/**
+ * The last two steps before a pass (L78, L77 (2)): the loaded wiring must export exactly `start` (a second export is a
+ * second door the runner never checks), and the rules snapshot the review sessions' hooks read is written from the
+ * runner's own config; the hooks refuse every call once it is 5 minutes old, so each pass writes it afresh.
+ * `write` is a port for a test. Returns what is wrong, or null.
+ */
+export function readyProblem(c, wiring, { write = writeSnapshot } = {}) {
+  const names = Object.keys(wiring ?? {}).sort();
+  if (names.length !== WIRING_EXPORTS.length || names.some((n, i) => n !== WIRING_EXPORTS[i])) return `the wiring must export only start, not ${names.join(', ') || 'nothing'}`;
+  if (typeof wiring.start !== 'function') return 'the wiring has no start';
+  try { write(c.snapshot, c.rules); } catch (e) { return `the rules snapshot could not be written (${e?.code ?? e?.message})`; }
+  return null;
+}
+
+// `ports` stand in for the walls in a test (the config reader, the root-owned check and the pass); production leaves them out.
+export async function main(argv, { log = (s) => process.stderr.write(`${s}\n`), ports = {} } = {}) {
+  const { readConfigFn = readConfig, programs = programsProblem, pass = runnerPass, write } = ports;
   if (!argv[0]) { log('usage: review-runner-main.mjs <config.json>'); return 1; }
   let c;
-  try { c = readConfig(argv[0]); } catch (e) { log(`review runner: ${e.message}`); return 1; }
+  try { c = readConfigFn(argv[0]); } catch (e) { log(`review runner: ${e.message}`); return 1; }
   const self = realpathSync.native(fileURLToPath(import.meta.url));
-  const bad = programsProblem(c, { self, config: realpathSync.native(argv[0]) });
+  const bad = programs(c, { self, config: realpathSync.native(argv[0]) });
   if (bad) { log(`review runner: refused, the installed copy is not one it may run (root's alone, its link, its stamp): ${bad}`); return 1; }
   let wiring;
   try { wiring = await import(pathToFileURL(c.wiring).href); } catch (e) { log(`review runner: the wiring could not be loaded (${e.message})`); return 1; }
-  if (typeof wiring.start !== 'function') { log('review runner: the wiring has no start'); return 1; }
-  const r = await runnerPass(realPorts(c, wiring));
+  const notReady = readyProblem(c, wiring, write ? { write } : {});
+  if (notReady) { log(`review runner: ${notReady}`); return 1; }
+  // Launch check 12's inputs (L83 M-3): M11's own, from the budget module the config names. One that can't be loaded
+  // or answers nothing leaves check 12 with no port, so the launcher refuses every start; the pass still runs.
+  let budget = null;
+  if (c.budget) {
+    try { budget = await (await import(pathToFileURL(c.budget).href)).budget(c); } catch (e) { log(`review runner: the budget module could not be loaded (${e.message}); no review starts`); }
+    if (budget && !['rules', 'rec', 'bandsNow', 'runningNow'].every((k) => budget[k])) { log('review runner: the budget module gave no rules, rec, bandsNow and runningNow; no review starts'); budget = null; }
+  }
+  const r = await pass(realPorts(c, wiring, { budget, log }));
   for (const s of r.started) log(`started ${s.role} ${s.session_id} for ${s.card} at ${s.head.slice(0, 7)}`);
   for (const x of r.refused) log(`refused ${x.request}: ${x.reason}`);
   if (!r.ok) log(`review runner: ${r.error}`);
