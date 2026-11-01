@@ -115,6 +115,7 @@ export function folderTable(cfg) {
     ...USERS.map((u) => [homeOf(cfg, u), u, 0o700, `${u}'s home`]),
     [p('keys'), 'orchestrate', 0o700, 'robot keys: nothing else reads them'],
     [p('private'), 'orchestrate', 0o700, 'private data: attempt logs, raw facts before masking'],
+    [p('watch'), 'orchestrate', 0o700, 'the watch-only week: the log of what the Merge Gate would have done, and the written explanations'],
     [p('hooks'), 'orchestrate', 0o755, 'hook copies and the rules snapshot: read and run by others, written by orchestrate'],
     [p('settings'), 'orchestrate', 0o755, 'role settings files'],
     [p('launcher'), 'orchestrate', 0o755, 'the launcher'],

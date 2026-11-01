@@ -27,6 +27,7 @@ import { makeGitView } from '../M10-rules/git-view.mjs';
 import { classifyChange } from '../M10-rules/classify.mjs';
 import { docsLaneProblem } from '../M10-rules/lane-check.mjs';
 import { parsePolicy } from '../M10-rules/policy.mjs';
+import { MAX_BYTES, RULES_PATH, blobSha } from '../M10-rules/reader.mjs';
 import { threadsQuery } from './gather.mjs';
 
 export const NOT_JUDGED = Object.freeze([5, 10, 11, 2, 12]);
@@ -161,17 +162,32 @@ const readLog = (dir) => {
 };
 
 /**
- * One pass: lists the commits on main since `since` (an ISO time), judges each one not already in the log, appends a line
- * per commit and one pass line. → { judged, skipped, problems }. Never writes to GitHub.
+ * The product's rules file AS IT STANDS AT `sha` (read from GitHub through the same read-only client; never a local copy,
+ * never an older version). → { policy } or { reason }. The text must be the blob GitHub names, and must parse.
  */
-export async function watchPass({ gh, owner, repo, policyText, dir, since, now = () => new Date().toISOString() }) {
+export async function rulesAt({ gh, owner, repo, sha }) {
+  try {
+    const j = await get(gh, `/repos/${owner}/${repo}/contents/${RULES_PATH}?ref=${sha}`);
+    if (!SHA.test(j?.sha ?? '') || j.encoding !== 'base64' || typeof j.content !== 'string') return { reason: 'the rules file answer was odd' };
+    const buf = Buffer.from(j.content, 'base64');
+    if (buf.length > MAX_BYTES || buf.length !== j.size || blobSha(buf) !== j.sha) return { reason: 'the rules file does not match the version GitHub named' };
+    const parsed = parsePolicy(buf.toString('utf8'));
+    return parsed.ok ? { policy: parsed.policy } : { reason: `the rules file is not usable (${parsed.reason})` };
+  } catch (e) { return { reason: `the rules file could not be read (${String(e?.message ?? e).slice(0, 60)})` }; }
+}
+
+/**
+ * One pass: lists the commits on main since `since` (an ISO time), judges each one not already in the log against the rules
+ * AS THEY STOOD AT THAT COMMIT, appends a line per commit and one pass line. A commit whose rules could not be read is
+ * logged `not_judged` with the reason (and tried again next pass); it is never judged against other rules, and the pass
+ * has a problem, so its day does not count. → { judged, skipped, problems }. Never writes to GitHub.
+ */
+export async function watchPass({ gh, owner, repo, dir, since, now = () => new Date().toISOString() }) {
   if (!NAME.test(owner ?? '') || !NAME.test(repo ?? '')) throw new Error('watch needs an owner and repo');
-  const parsed = parsePolicy(policyText);
   const at = now();
   const problems = [];
   const log = (o) => appendFileSync(join(dir, 'log.jsonl'), `${JSON.stringify(o)}\n`, { mode: 0o600 });
-  if (!parsed.ok) { problems.push(`the rules file is not usable (${parsed.reason})`); log({ pass: true, at, judged: 0, problems }); return { judged: 0, skipped: 0, problems }; }
-  const seen = new Set(readLog(dir).filter((l) => l.sha).map((l) => l.sha));
+  const seen = new Set(readLog(dir).filter((l) => l.sha && !l.not_judged_reason).map((l) => l.sha));
   let commits;
   try {
     commits = [];
@@ -185,7 +201,13 @@ export async function watchPass({ gh, owner, repo, policyText, dir, since, now =
   let judged = 0; let skipped = 0;
   for (const c of commits.reverse()) {
     if (seen.has(c.sha)) { skipped++; continue; }
-    const facts = await gatherMerged({ gh, owner, repo, policy: parsed.policy, sha: c.sha });
+    const rules = await rulesAt({ gh, owner, repo, sha: c.sha });
+    if (!rules.policy) {
+      problems.push(`${c.sha.slice(0, 8)}: not judged, ${rules.reason}`);
+      log({ sha: c.sha, at, merged_at: c.commit?.committer?.date ?? null, not_judged_reason: rules.reason });
+      continue;
+    }
+    const facts = await gatherMerged({ gh, owner, repo, policy: rules.policy, sha: c.sha });
     const v = judgeMerged(facts);
     log({ sha: c.sha, at, merged_at: c.commit?.committer?.date ?? null, pr: facts.pr, merged_by: facts.mergedBy ?? c.author?.login ?? null, direct: facts.direct, ...v });
     judged++;
@@ -206,7 +228,7 @@ export function summary({ dir, endDay, days = 7 }) {
   // A pass that could not list main or read the rules covers nothing: that day still has a hole.
   const passDays = new Set(lines.filter((l) => l.pass && !(l.problems?.length)).map((l) => day(l.at)));
   const missingDays = wanted.filter((d) => !passDays.has(d));
-  const commits = lines.filter((l) => l.sha && wanted.includes(day(l.at)));
+  const commits = lines.filter((l) => l.sha && !l.not_judged_reason && wanted.includes(day(l.at)));
   const disagreements = commits.filter((l) => l.verdict !== VERDICTS[0]);
   const unexplained = disagreements.filter((l) => typeof explanations[l.sha] !== 'string' || !explanations[l.sha].trim());
   const failedPasses = lines.filter((l) => l.pass && wanted.includes(day(l.at)) && l.problems?.length).length;

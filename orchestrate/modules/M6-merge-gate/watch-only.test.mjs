@@ -3,10 +3,11 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { chmodSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { tempDir } from '../../shared/test-tmp.mjs';
+import { blobSha } from '../M10-rules/reader.mjs';
 import { fakeGateGitHub } from './fixtures/fake-gate-github.mjs';
 import { VERDICTS, judgeMerged, readOnlyClient, summary, tokenFile, watchPass } from './watch-only.mjs';
 
@@ -20,9 +21,19 @@ function world() {
   const root = g.commit([], { 'docs/a.md': 'one', 'src/a.mjs': 'one' });
   g.main = root;
   const mains = [];
+  const rules = new Map();   // commit → the rules text at it (null = not there); a commit not listed has POLICY
+  const refs = [];           // every commit the rules were asked for
   const gh = {
     ...g.gh,
     get: async (path) => {
+      const rf = /^\/repos\/[^/]+\/[^/]+\/contents\/orchestrate\/policy\.yaml\?ref=([0-9a-f]{40})$/.exec(path);
+      if (rf) {
+        refs.push(rf[1]);
+        const text = rules.has(rf[1]) ? rules.get(rf[1]) : POLICY;
+        if (text === null) return { status: 404, json: null };
+        const buf = Buffer.from(text, 'utf8');
+        return { status: 200, json: { sha: blobSha(buf), size: buf.length, encoding: 'base64', content: buf.toString('base64') } };
+      }
       if (/^\/repos\/[^/]+\/[^/]+\/commits\?sha=main&since=/.test(path)) return { status: 200, json: mains.map((sha) => ({ sha, commit: { committer: { date: '2026-11-03T10:00:00Z' } }, author: { login: 'joe-login' } })) };
       return g.gh.get(path);
     },
@@ -41,10 +52,10 @@ function world() {
     return { number, merge, head };
   };
   const push = (files) => { const sha = g.commit([g.main], files, { from: g.main }); g.main = sha; mains.push(sha); return sha; };
-  const dir = mkdtempSync(join(tmpdir(), 'watch-'));
-  const pass = (at = '2026-11-03T12:00:00Z') => watchPass({ gh, owner: 'sample-org', repo: 'sample-app', policyText: POLICY, dir, since: SINCE, now: () => at });
+  const dir = tempDir('m6-watch-');
+  const pass = (at = '2026-11-03T12:00:00Z') => watchPass({ gh, owner: 'sample-org', repo: 'sample-app', dir, since: SINCE, now: () => at });
   const lines = () => readFileSync(join(dir, 'log.jsonl'), 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
-  return { g, gh, land, push, dir, pass, lines };
+  return { g, gh, land, push, dir, pass, lines, rules, refs };
 }
 
 test('a docs-only change with green checks and no open threads would merge', async () => {
@@ -126,19 +137,52 @@ test('nothing is written to GitHub: the only POST is the read-only threads query
   assert.ok(w.g.writes.every(([m, p]) => m === 'post' && p === '/graphql'), JSON.stringify(w.g.writes.map((x) => x.slice(0, 2))));
 });
 
-test('PLANT the rules file is unusable → the pass says so, judges nothing, and the day is NOT covered', async () => {
+test('PLANT the rules file is unusable at that commit → "not judged" with the reason, the day is NOT covered, and the next pass tries again', async () => {
   const w = world();
-  w.land({ 'docs/a.md': 'two' });
-  const r = await watchPass({ gh: w.gh, owner: 'sample-org', repo: 'sample-app', policyText: 'not: [valid', dir: w.dir, since: SINCE, now: () => '2026-11-03T12:00:00Z' });
+  const m = w.land({ 'docs/a.md': 'two' });
+  w.rules.set(m.merge, 'not: [valid');
+  const r = await w.pass();
   assert.equal(r.judged, 0); assert.ok(r.problems.length);
+  const l = w.lines().find((x) => x.sha);
+  assert.match(l.not_judged_reason, /not usable/); assert.equal(l.verdict, undefined, 'no verdict is written without rules');
   const s = summary({ dir: w.dir, endDay: '2026-11-03', days: 1 });
-  assert.deepEqual(s.missingDays, ['2026-11-03']); assert.equal(s.ok, false);
+  assert.deepEqual(s.missingDays, ['2026-11-03']); assert.equal(s.ok, false); assert.equal(s.judged, 0);
+  w.rules.delete(m.merge);   // the rules become readable: the same commit is judged now (it was not marked as done)
+  const again = await w.pass('2026-11-03T13:00:00Z');
+  assert.equal(again.judged, 1); assert.equal(again.skipped, 0);
+});
+
+test('PLANT the rules file is missing (404) at one commit → that commit is not judged, the next one is, and no commit is judged against other rules', async () => {
+  const w = world();
+  const a = w.land({ 'docs/a.md': 'two' }); const b = w.land({ 'docs/a.md': 'three' });
+  w.rules.set(a.merge, null);
+  const r = await w.pass();
+  assert.equal(r.judged, 1, 'the commit with readable rules is judged');
+  const lines = w.lines().filter((x) => x.sha);
+  assert.match(lines.find((x) => x.sha === a.merge).not_judged_reason, /could not be read/);
+  assert.equal(lines.find((x) => x.sha === a.merge).verdict, undefined);
+  assert.equal(lines.find((x) => x.sha === b.merge).verdict, VERDICTS[0]);
+  assert.equal(r.problems.length, 1);
+});
+
+test('PLANT the text GitHub sends does not match the version it named → not judged', async () => {
+  const w = world(); w.land({ 'docs/a.md': 'two' });
+  const altered = { ...w.gh, get: async (p) => { const x = await w.gh.get(p); return /contents\/orchestrate\/policy/.test(p) ? { status: 200, json: { ...x.json, content: Buffer.from('product: {}\n').toString('base64') } } : x; } };
+  const r = await watchPass({ gh: altered, owner: 'sample-org', repo: 'sample-app', dir: w.dir, since: SINCE, now: () => '2026-11-03T12:00:00Z' });
+  assert.equal(r.judged, 0); assert.match(r.problems[0], /does not match the version GitHub named/);
+});
+
+test('the rules are read AT the commit being judged: one read per judged commit, each named by that commit\'s own id', async () => {
+  const w = world();
+  const a = w.land({ 'docs/a.md': 'two' }); const b = w.land({ 'docs/a.md': 'three' });
+  await w.pass();
+  assert.deepEqual([...w.refs].sort(), [a.merge, b.merge].sort());
 });
 
 test('PLANT main cannot be listed (GitHub down) → a pass line with the problem, no silent hole', async () => {
   const w = world();
   const down = { ...w.gh, get: async () => { throw new Error('network down'); } };
-  const r = await watchPass({ gh: down, owner: 'sample-org', repo: 'sample-app', policyText: POLICY, dir: w.dir, since: SINCE, now: () => '2026-11-03T12:00:00Z' });
+  const r = await watchPass({ gh: down, owner: 'sample-org', repo: 'sample-app', dir: w.dir, since: SINCE, now: () => '2026-11-03T12:00:00Z' });
   assert.match(r.problems[0], /could not be listed/);
   assert.equal(summary({ dir: w.dir, endDay: '2026-11-03', days: 1 }).ok, false);
 });
@@ -180,7 +224,7 @@ test('the client can only read: no write verb, no other host path, no other quer
 });
 
 test('the token file must be the runner\'s own private file; its text never appears in an error', () => {
-  const d = mkdtempSync(join(tmpdir(), 'watch-tok-'));
+  const d = tempDir('m6-watch-tok-');
   const f = join(d, 'watch-only-token');
   const SECRET = 'github_pat_11BBBBBBB0abcdefghijklmnop_QRSTUVWXYZ0123456789abcdef';
   writeFileSync(f, `${SECRET}\n`); chmodSync(f, 0o600);
@@ -198,13 +242,12 @@ test('watch-run: arguments are checked and never echoed; once runs a pass with a
   assert.throws(() => parseArgs(['once', 'ODD-LOOKING-ARG']), (e) => !e.message.includes('ODD-LOOKING-ARG'));
   assert.throws(() => parseArgs(['once', '--repo', 'a/b']), /required/);
   assert.throws(() => parseArgs(['summary', '--dir', 'x', '--end-day', 'tomorrow']), /YYYY-MM-DD/);
-  const d = mkdtempSync(join(tmpdir(), 'watch-cli-'));
+  const d = tempDir('m6-watch-cli-');
   const tok = join(d, 't'); const SECRET = 'github_pat_11CCCCCCC0abcdefghijklmnop_QRSTUVWXYZ0123456789abcdef';
   writeFileSync(tok, SECRET); chmodSync(tok, 0o600);
-  writeFileSync(join(d, 'policy.yaml'), POLICY);
   const out = []; const errs = []; const calls = [];
   const fetchFn = async (url, init) => { calls.push([init.method, url]); return { status: 200, json: async () => [] }; };
-  const code = await run(['once', '--repo', 'sample-org/sample-app', '--dir', join(d, 'w'), '--token-file', tok, '--policy-file', join(d, 'policy.yaml'), '--since', SINCE], { out: (s) => out.push(s), err: (s) => errs.push(s), fetchFn });
+  const code = await run(['once', '--repo', 'sample-org/sample-app', '--dir', join(d, 'w'), '--token-file', tok, '--since', SINCE], { out: (s) => out.push(s), err: (s) => errs.push(s), fetchFn });
   assert.equal(code, 0, errs.join('\n'));
   assert.ok(calls.length > 0 && calls.every(([m]) => m === 'GET'));
   assert.ok(![...out, ...errs].join('\n').includes(SECRET));

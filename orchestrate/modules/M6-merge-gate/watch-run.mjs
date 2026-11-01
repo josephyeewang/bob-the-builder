@@ -1,19 +1,19 @@
 #!/usr/bin/env node
 // watch-run.mjs — the command for the watch-only week (R-0b-122). Run as the scripts' own Mac user (`orchestrate`).
 //
-//   node watch-run.mjs once    --repo <owner/name> --dir <folder> --token-file <file> --policy-file <file> --since <ISO time>
+//   node watch-run.mjs once    --repo <owner/name> --dir <folder> --token-file <file> --since <ISO time>
 //   node watch-run.mjs summary --dir <folder> --end-day <YYYY-MM-DD> [--days 7]
 //
 // `once` is one pass (a background job runs it every hour); it writes only into --dir. It never prints the token, never
 // writes to GitHub (see watch-only.mjs). `summary` is read only and exits 0 only when the week counts. Exit: 0 fine,
 // 1 the week does not count / a pass had a problem, 2 usage.
 
-import { readFileSync, mkdirSync } from 'node:fs';
+import { mkdirSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import { readOnlyClient, summary, tokenFile, watchPass } from './watch-only.mjs';
 
-const OPTS = ['--repo', '--dir', '--token-file', '--policy-file', '--since', '--end-day', '--days'];
-const USAGE = 'usage: node watch-run.mjs once --repo owner/name --dir <folder> --token-file <file> --policy-file <file> --since <ISO time> | summary --dir <folder> --end-day <YYYY-MM-DD> [--days N]';
+const OPTS = ['--repo', '--dir', '--token-file', '--since', '--end-day', '--days'];
+const USAGE = 'usage: node watch-run.mjs once --repo owner/name --dir <folder> --token-file <file> --since <ISO time> | summary --dir <folder> --end-day <YYYY-MM-DD> [--days N]';
 
 export function parseArgs(argv) {
   const cmd = argv[0];
@@ -26,7 +26,7 @@ export function parseArgs(argv) {
     if (typeof v !== 'string' || v.startsWith('--')) throw new Error(`${a} needs a value`);
     o[a.slice(2).replace(/-([a-z])/g, (_, c) => c.toUpperCase())] = v;
   }
-  const need = cmd === 'once' ? ['repo', 'dir', 'tokenFile', 'policyFile', 'since'] : ['dir', 'endDay'];
+  const need = cmd === 'once' ? ['repo', 'dir', 'tokenFile', 'since'] : ['dir', 'endDay'];
   for (const k of need) if (!o[k]) throw new Error(`--${k.replace(/[A-Z]/g, (c) => `-${c.toLowerCase()}`)} is required`);
   if (cmd === 'once' && !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(o.repo)) throw new Error('--repo must be owner/name');
   if (cmd === 'once' && Number.isNaN(Date.parse(o.since))) throw new Error('--since must be a time like 2026-11-03T00:00:00Z');
@@ -46,12 +46,10 @@ export async function main(argv, { out = (s) => process.stdout.write(`${s}\n`), 
     out(s.ok ? 'THE WEEK COUNTS.' : 'THE WEEK DOES NOT COUNT YET.');
     return s.ok ? 0 : 1;
   }
-  let policyText;
-  try { policyText = readFileSync(o.policyFile, 'utf8'); } catch { err('the rules file could not be read'); return 2; }
   const [owner, repo] = o.repo.split('/');
   const gh = readOnlyClient({ token: tokenFile(o.tokenFile), ...(fetchFn ? { fetchFn } : {}) });
   try {
-    const r = await watchPass({ gh, owner, repo, policyText, dir: o.dir, since: o.since });
+    const r = await watchPass({ gh, owner, repo, dir: o.dir, since: o.since });
     out(`judged ${r.judged} new commit(s); ${r.skipped} already in the log.`);
     for (const p of r.problems) err(`PROBLEM  ${p}`);
     return r.problems.length ? 1 : 0;
