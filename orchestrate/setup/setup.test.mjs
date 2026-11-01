@@ -125,20 +125,27 @@ test('users skip ids already taken', () => {
   assert.ok(!ids.includes(301) && !ids.includes(302), String(ids));
 });
 
-test('a run cut off half way is finished by the next run', () => {
-  const mac = fakeMac();
-  let calls = 0;
-  const real = mac.run;
-  mac.run = (c, a) => { if (c === '/usr/bin/dscl' && a[1] === '-create' && ++calls === 15) return { status: 1, stdout: '', stderr: 'injected failure' }; return real(c, a); };
-  const r1 = run(mac, ['users-folders']);
-  assert.equal(r1.code, 1);
-  assert.match(r1.text, /stopped: .*Run it again/);
-  mac.run = real;
-  // The half-made user is refused rather than overwritten, until the person looks at it.
-  const r2 = run(mac, ['users-folders']);
-  assert.equal(r2.code, 1);
-  assert.match(r2.text, /PROBLEM .*(exists but is not as needed|exists without)/);
-  assert.match(r2.text, /nothing was changed/);
+test('a run cut off at ANY step is finished by the next run: nothing deleted, only the missing attributes written', () => {
+  const total = (() => { const m = fakeMac(); assert.equal(run(m, ['users-folders']).code, 0); return m.log.filter((l) => l.startsWith('dscl -create')).length; })();
+  assert.ok(total >= 30, String(total));
+  for (let cut = 1; cut <= total; cut++) {
+    const mac = fakeMac();
+    let calls = 0;
+    const real = mac.run;
+    mac.run = (c, a) => { if (c === '/usr/bin/dscl' && a[1] === '-create' && ++calls === cut) return { status: 1, stdout: '', stderr: 'injected failure' }; return real(c, a); };
+    const r1 = run(mac, ['users-folders']);
+    assert.equal(r1.code, 1, `cut ${cut}`);
+    assert.match(r1.text, /stopped: .*Run it again/);
+    mac.run = real;
+    const before = mac.log.length;
+    const r2 = run(mac, ['users-folders']);
+    assert.equal(r2.code, 0, `cut ${cut}: ${r2.text}`);
+    assert.deepEqual(fails(mac), [], `cut ${cut}`);
+    // finishing writes only what was missing: no attribute is written twice over the two runs
+    const creates = mac.log.filter((l) => l.startsWith('dscl -create') && l.split(' ').length > 3);
+    assert.equal(new Set(creates).size, creates.length, `cut ${cut}: an attribute was written twice`);
+    assert.ok(mac.log.slice(before).every((l) => !l.includes('-delete')), 'nothing is ever deleted');
+  }
 });
 
 test('check on an untouched Mac: FAIL lines and exit 1', () => {
@@ -250,9 +257,43 @@ test('PLANT the owner user missing → refused, nothing changed', () => {
   assert.equal(r.code, 1); assert.match(r.text, /owner's Mac user joe was not found/); assert.equal(mac.log.length, 0);
 });
 
-test('PLANT a stray group named like a user → refused, nothing changed', () => {
+test('a group named like a user, with no user yet: the user is made to match it (its id is kept)', () => {
   const mac = fakeMac(); mac.groups.set('pages', { PrimaryGroupID: '333' });
-  const r = run(mac, ['users-folders']); assert.equal(r.code, 1); assert.match(r.text, /a group named pages exists without the user/); assert.equal(mac.log.length, 0);
+  const r = run(mac, ['users-folders']); assert.equal(r.code, 0, r.text);
+  assert.equal(mac.users.get('pages').UniqueID, '333'); assert.equal(mac.users.get('pages').PrimaryGroupID, '333');
+  assert.deepEqual(fails(mac), []);
+});
+
+// FINISH-A-HALF-MADE-USER plants: each set attribute that differs from the table must stop the run, naming it, changing nothing.
+const half = (user, group) => { const mac = fakeMac(); mac.users.set('pages', user); if (group) mac.groups.set('pages', group); return mac; };
+for (const [name, mac, want] of [
+  ['a login shell already set', () => half({ UserShell: '/bin/zsh' }), /pages exists but is not as needed: its shell is \/bin\/zsh/],
+  ['a visible user (IsHidden 0)', () => half({ IsHidden: '0' }), /it is not hidden/],
+  ['another home folder', () => half({ NFSHomeDirectory: '/Users/pages' }), /its home is \/Users\/pages/],
+  ['the user\'s id and its group\'s id disagree', () => half({ UniqueID: '400', PrimaryGroupID: '400' }, { PrimaryGroupID: '401' }), /main group is 400, not the group pages \(401\)/],
+  ['the user\'s id differs from its main group (no group yet)', () => half({ UniqueID: '400', PrimaryGroupID: '401' }), /ids disagree/],
+  ['root\'s id', () => half({ UniqueID: '0', PrimaryGroupID: '0' }), /its id is root's/],
+  ['a group id another group already uses (staff, 20)', () => half({}, { PrimaryGroupID: '20' }), /also used by another user or group/],
+  ['an admin', () => { const m = half({ UniqueID: '400', PrimaryGroupID: '400' }, { PrimaryGroupID: '400' }); m.admins.add('pages'); return m; }, /it is an admin/],
+]) {
+  test(`PLANT finish-a-half-made-user: ${name} → refused naming it, nothing changed, nothing deleted`, () => {
+    const m = mac(); const r = run(m, ['users-folders']);
+    assert.equal(r.code, 1, r.text); assert.match(r.text, want); assert.match(r.text, /nothing was changed/i);
+    assert.deepEqual(m.log, [], 'something was changed');
+  });
+}
+
+test('finish-a-half-made-user: a user with only some attributes set (all matching) is completed, and a second run does nothing', () => {
+  const mac = half({ UserShell: '/usr/bin/false', IsHidden: '1' }, { PrimaryGroupID: '350' });
+  const dry = run(mac, ['users-folders', '--dry-run']);
+  assert.equal(dry.code, 0, dry.text); assert.equal(mac.log.length, 0);
+  assert.ok(!/dscl \. -create \/Users\/pages UserShell/.test(dry.text), 'rewrote a set attribute');
+  assert.match(dry.text, /UniqueID 350/);
+  const r = run(mac, ['users-folders']); assert.equal(r.code, 0, r.text);
+  assert.deepEqual(fails(mac), []);
+  const n = mac.log.length;
+  assert.match(run(mac, ['users-folders']).text, /nothing to do/);
+  assert.equal(mac.log.length, n);
 });
 
 test('usage errors exit 2', () => {

@@ -50,11 +50,11 @@ export function adminAnswer(io, name) {
   return word === 'no' ? 'no' : (word === 'yes' ? 'yes' : 'unknown');
 }
 
-function usedIds(io) {
+function usedIds(io, except = null) {
   const read = (path, key) => {
     const r = dscl(io, ['-list', path, key]);
     if (r.status !== 0) throw new Error(`could not list ${path} (${r.stderr.trim().slice(0, 120)})`);
-    return r.stdout.split('\n').map((l) => Number(l.trim().split(/\s+/)[1])).filter(Number.isInteger);
+    return r.stdout.split('\n').map((l) => l.trim().split(/\s+/)).filter((w) => w[0] !== except).map((w) => Number(w[1])).filter(Number.isInteger);
   };
   return new Set([...read('/Users', 'UniqueID'), ...read('/Users', 'PrimaryGroupID'), ...read('/Groups', 'PrimaryGroupID')]);
 }
@@ -65,7 +65,24 @@ const dsclOp = (io, args) => op(`dscl . ${args.map((a) => (/^[\w/.:-]+$/.test(a)
   if (r.status !== 0) throw new Error(`dscl ${args.slice(0, 2).join(' ')} failed (${r.stderr.trim().slice(0, 160)})`);
 });
 
-/** Users: { ops, problems, ids: { name: { uid, gid } } } for the three users and `cfg.owner`. */
+// A record read: every attribute the setup writes, so a half-made one shows which are still missing. A missing record
+// reads as exit 56; a missing attribute is just absent from the answer (the real dscl prints "No such key" and exits 0).
+const USER_KEYS = ['UniqueID', 'PrimaryGroupID', 'UserShell', 'NFSHomeDirectory', 'IsHidden', 'RealName', 'Password'];
+const GROUP_KEYS = ['PrimaryGroupID', 'Password'];
+function readRecord(io, kind, name, keys) {
+  const r = dscl(io, ['-read', `/${kind}/${name}`, ...keys]);
+  if (r.status !== 0) return { exists: false, error: r.status === 56 ? null : r.stderr.trim().slice(0, 200), attrs: {} };
+  const attrs = parseDscl(r.stdout);
+  for (const k of Object.keys(attrs)) if (attrs[k] === '') delete attrs[k];
+  return { exists: true, attrs };
+}
+
+/**
+ * Users: { ops, problems, ids: { name: { uid, gid } } } for the three users and `cfg.owner`.
+ * A user or group that is only partly there (a run cut off half way) is FINISHED, never deleted or overwritten: if every
+ * attribute already set matches the table, only the missing ones are written; if any set one differs, nothing is
+ * changed and the problem names it. An admin is refused whatever else is true.
+ */
 export function planUsers(io, cfg) {
   const ops = []; const problems = []; const ids = {};
   const owner = readUser(io, cfg.owner);
@@ -73,41 +90,43 @@ export function planUsers(io, cfg) {
   else ids.owner = { uid: owner.uid, gid: owner.gid };
   let used = null;
   for (const name of USERS) {
-    const u = readUser(io, name); const g = readGroup(io, name);
-    if (u.exists) {
-      const bad = [];
-      if (!g.exists) bad.push('it has no group of its own name');
-      else if (u.gid !== g.gid) bad.push(`its main group is ${u.gid}, not the group ${name} (${g.gid})`);
-      if (u.uid === 0) bad.push('its id is root\'s');
-      if (u.shell !== NO_SHELL) bad.push(`its shell is ${u.shell || 'unset'}, not ${NO_SHELL}`);
-      if (!u.hidden) bad.push('it is not hidden');
-      if (u.home !== homeOf(cfg, name)) bad.push(`its home is ${u.home || 'unset'}, not ${homeOf(cfg, name)}`);
-      if (adminAnswer(io, name) !== 'no') bad.push('it is an admin (or that could not be checked)');
-      if (bad.length) problems.push(`${name} exists but is not as needed: ${bad.join('; ')}. Nothing was changed; fix it in System Settings or delete the user, then run again`);
-      else ids[name] = { uid: u.uid, gid: u.gid };
-      continue;
+    const U = readRecord(io, 'Users', name, USER_KEYS); const G = readRecord(io, 'Groups', name, GROUP_KEYS);
+    if (U.error || G.error) { problems.push(`could not look up ${name}: ${U.error ?? G.error}`); continue; }
+    const home = homeOf(cfg, name);
+    const bad = [];
+    const idWords = [['its group', G.attrs.PrimaryGroupID], ['its id', U.attrs.UniqueID], ['its main group', U.attrs.PrimaryGroupID]].filter(([, v]) => v !== undefined);
+    if (new Set(idWords.map(([, v]) => v)).size > 1) {
+      if (U.attrs.PrimaryGroupID !== undefined && G.attrs.PrimaryGroupID !== undefined && U.attrs.PrimaryGroupID !== G.attrs.PrimaryGroupID) bad.push(`its main group is ${U.attrs.PrimaryGroupID}, not the group ${name} (${G.attrs.PrimaryGroupID})`);
+      else bad.push(`its ids disagree (${idWords.map(([w, v]) => `${w} ${v}`).join(', ')})`);
     }
-    if (u.error) { problems.push(`could not look up ${name}: ${u.error}`); continue; }
-    if (g.exists) { problems.push(`a group named ${name} exists without the user; nothing was changed`); continue; }
-    try { used ??= usedIds(io); } catch (e) { problems.push(e.message); continue; }
-    let id = USER_ID_RANGE.low;
-    while (id <= USER_ID_RANGE.high && used.has(id)) id += 1;
-    if (id > USER_ID_RANGE.high) { problems.push(`no free id between ${USER_ID_RANGE.low} and ${USER_ID_RANGE.high} for ${name}`); continue; }
-    used.add(id);
+    let id = idWords.length ? Number(idWords[0][1]) : null;
+    if (id !== null && !Number.isInteger(id)) { bad.push(`its id ${idWords[0][1]} is not a number`); id = null; }
+    if (id === 0) bad.push('its id is root\'s');
+    if (U.exists) {
+      if (U.attrs.UserShell !== undefined && U.attrs.UserShell !== NO_SHELL) bad.push(`its shell is ${U.attrs.UserShell}, not ${NO_SHELL}`);
+      if (U.attrs.IsHidden !== undefined && U.attrs.IsHidden !== '1') bad.push('it is not hidden');
+      if (U.attrs.NFSHomeDirectory !== undefined && U.attrs.NFSHomeDirectory !== home) bad.push(`its home is ${U.attrs.NFSHomeDirectory}, not ${home}`);
+      if (adminAnswer(io, name) !== 'no') bad.push('it is an admin (or that could not be checked)');
+    }
+    if (bad.length) { problems.push(`${name} exists but is not as needed: ${bad.join('; ')}. Nothing was changed; fix it in System Settings or delete the user, then run again`); continue; }
+    try {
+      if (id !== null) { if (usedIds(io, name).has(id)) { problems.push(`${name}: its id ${id} is also used by another user or group; nothing was changed`); continue; } }
+      else {
+        used ??= usedIds(io);
+        id = USER_ID_RANGE.low;
+        while (id <= USER_ID_RANGE.high && used.has(id)) id += 1;
+        if (id > USER_ID_RANGE.high) { problems.push(`no free id between ${USER_ID_RANGE.low} and ${USER_ID_RANGE.high} for ${name}`); continue; }
+        used.add(id);
+      }
+    } catch (e) { problems.push(e.message); continue; }
     ids[name] = { uid: id, gid: id };
-    ops.push(
-      dsclOp(io, ['-create', `/Groups/${name}`]),
-      dsclOp(io, ['-create', `/Groups/${name}`, 'PrimaryGroupID', String(id)]),
-      dsclOp(io, ['-create', `/Groups/${name}`, 'Password', '*']),
-      dsclOp(io, ['-create', `/Users/${name}`]),
-      dsclOp(io, ['-create', `/Users/${name}`, 'UserShell', NO_SHELL]),
-      dsclOp(io, ['-create', `/Users/${name}`, 'RealName', name]),
-      dsclOp(io, ['-create', `/Users/${name}`, 'UniqueID', String(id)]),
-      dsclOp(io, ['-create', `/Users/${name}`, 'PrimaryGroupID', String(id)]),
-      dsclOp(io, ['-create', `/Users/${name}`, 'NFSHomeDirectory', homeOf(cfg, name)]),
-      dsclOp(io, ['-create', `/Users/${name}`, 'IsHidden', '1']),
-      dsclOp(io, ['-create', `/Users/${name}`, 'Password', '*']),
-    );
+    // Fresh, or finishing a half-made one: write only what is missing, group first (so a cut-off run leaves the same shapes).
+    const want = (rec, kind, pairs) => {
+      if (!rec.exists) ops.push(dsclOp(io, ['-create', `/${kind}/${name}`]));
+      for (const [k, v] of pairs) if (rec.attrs[k] === undefined) ops.push(dsclOp(io, ['-create', `/${kind}/${name}`, k, v]));
+    };
+    want(G, 'Groups', [['PrimaryGroupID', String(id)], ['Password', '*']]);
+    want(U, 'Users', [['UserShell', NO_SHELL], ['RealName', name], ['UniqueID', String(id)], ['PrimaryGroupID', String(id)], ['NFSHomeDirectory', home], ['IsHidden', '1'], ['Password', '*']]);
   }
   return { ops, problems, ids };
 }
