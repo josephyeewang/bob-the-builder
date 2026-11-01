@@ -14,6 +14,7 @@
 
 import { botId } from './gather.mjs';
 import { goFreeKinds } from '../M9-record/ready.mjs';
+import { goFreeOn } from '../M9-record/required-keys.mjs';
 
 export const REQUIRED_KEYS = Object.freeze([
   'product_profile.required_checks',      // with none, every change is refused (refusals 1, 2)
@@ -32,8 +33,9 @@ export function policyProblems(rules, product) {
   const get = (key) => { try { return rules.get(key, { product }); } catch { return undefined; } };
   const out = [];
   const checks = get('product_profile.required_checks');
-  if (!Array.isArray(checks) || !checks.length || !checks.every((c) => typeof c === 'string' && c)) out.push('M6: product_profile.required_checks must name at least one check');
+  // gather.mjs:142 reads a list of check names. An empty list is the fit check's policy line (L96 m-1), not the gate's.
+  if (!Array.isArray(checks) || !checks.every((c) => typeof c === 'string' && c)) out.push('M6: product_profile.required_checks must be a list of check names');
   if (botId(get('product_profile.robot')) === null) out.push('M6: product_profile.robot.bot_user_id must be the robot\'s numeric id');
-  if (!goFreeKinds(rules, product).includes('exact_reverse')) out.push('M6: approvals.plan_go.go_free must name exact_reverse, or every undo is refused');
+  if (!goFreeKinds(rules, product).includes('exact_reverse') || !goFreeOn(rules, product, 'exact_reverse')) out.push('M6: approvals.plan_go.go_free.exact_reverse must be true, or every undo is refused');
   return out;
 }

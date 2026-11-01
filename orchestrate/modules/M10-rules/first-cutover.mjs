@@ -10,9 +10,11 @@
 //   entry = the product's products.json entry { product, owner, repo, joe_github_id }, checked as reader.mjs reads it
 //   existing = the Mac's products.json list as it stands, so a reused product name is caught here, not as a Mac-wide deny
 //
-// The keys other modules need (L86 2, 9): each module that reads the rules exports its own REQUIRED_KEYS and
-// policyProblems (its own reading code). The fit check takes the union of those lists, says which are missing, and
-// runs each module's check on M10's real engine over this file, so it can't pass a file a module can't use.
+// The keys other modules need (L86 2, 9; L96): each module that reads the rules exports the keys it reads and a
+// policyProblems that calls its own readers (M9 runs its real readyCheck; M11's entry below runs its real need() and
+// editingLimits). The fit check takes the union of those lists, says which are missing, and runs each module's check on
+// M10's real engine over this file. What is policy rather than a reader's need (a non-empty required_checks) is a line
+// of its own here, labeled as policy.
 
 import { fileURLToPath } from 'node:url';
 import { parseYaml } from '../../../scripts/blueprint/yaml-lite.mjs';
@@ -23,15 +25,29 @@ import { makeRules } from '../../shared/rules.mjs';
 import * as M6 from '../M6-merge-gate/required-keys.mjs';
 import * as M2 from '../M2-approvals/required-keys.mjs';
 import * as M9 from '../M9-record/required-keys.mjs';
-import { KEYS as M11_KEYS, need } from '../M11-dispatcher/keys.mjs';
+import { KEYS as M11_KEYS, NEW_KEYS as M11_NEW_KEYS, need } from '../M11-dispatcher/keys.mjs';
+import { editingLimits } from '../M11-dispatcher/gate.mjs';
+import { PRODUCT_STATES } from './policy.mjs';
 
-// M11 has no required-keys file of its own yet (lane 2's folder): its one product key, and its own need() reading it.
+// M11 has no required-keys file of its own yet (lane 2's folder), so its entry is built here from M11's own exports:
+// every key in KEYS except NEW_KEYS (keys the rules schema can't hold yet; when lane 1 adds one, lane 2 takes it off
+// NEW_KEYS and it is checked here with no change), each read by M11's need() with the type its caller asks for, plus
+// the real editingLimits for every product state.
+const M11_TYPES = Object.freeze({ perState: 'object', shakedown: 'boolean', leadDailyCard: 'list', redRuns: 'list' });
+const M11_READ = Object.freeze(Object.entries(M11_KEYS).filter(([, k]) => !M11_NEW_KEYS.includes(k)));
 const M11 = Object.freeze({
-  REQUIRED_KEYS: Object.freeze([M11_KEYS.leadDailyCard]),
+  REQUIRED_KEYS: Object.freeze(M11_READ.map(([, k]) => k)),
   policyProblems(rules, product) {
-    let v;
-    try { v = need(rules, M11_KEYS.leadDailyCard, { product, type: 'list' }); } catch { return [`M11: ${M11_KEYS.leadDailyCard} must be a list of file patterns`]; }
-    return v.length ? [] : [`M11: ${M11_KEYS.leadDailyCard} must list at least one file pattern`];
+    const out = [];
+    for (const [name, key] of M11_READ) {
+      const type = M11_TYPES[name] ?? 'number';
+      try { need(rules, key, { product, type }); } catch { out.push(`M11: ${key} must be ${type === 'object' ? 'an' : 'a'} ${type}`); }
+    }
+    if (!out.some((x) => x.startsWith(`M11: ${M11_KEYS.perState} `))) {
+      const bad = PRODUCT_STATES.filter((state) => { try { editingLimits({ rules, product, productDoc: { state }, amberCaps: false }); return false; } catch { return true; } });
+      if (bad.length) out.push(`M11: ${M11_KEYS.perState} must give a number for ${bad.join(', ')} (editingLimits refuses it)`);
+    }
+    return out;
   },
 });
 export const READERS = Object.freeze({ M6, M2, M9, M11 });
@@ -67,6 +83,9 @@ export function firstCutoverProblems(text, entry, existing = []) {
     if (!Array.isArray(p.effect_paths[k][f]) || !p.effect_paths[k][f].length) out.push(`effect_paths.${k}.${f} must list at least one path`);
   }
   if (!p.protected_files.length) out.push('protected_files must list at least one path');
+  // Policy (L96 m-1): with no required check the gate would check nothing, so the first cutover names at least one.
+  const checks = p.product_profile?.required_checks;
+  if (Array.isArray(checks) && !checks.length) out.push('product_profile.required_checks must name at least one check (policy)');
   out.push(...moduleProblems(p, typeof entry?.product === 'string' && entry.product ? entry.product : 'product'));
   if (entry !== undefined) {
     let e;
@@ -93,7 +112,7 @@ export function moduleProblems(policy, product) {
     out.push(`${k} is missing (${by.join(', ')} read${by.length === 1 ? 's' : ''} it)`);
   }
   // Every module's own check runs; a reason about a key already named as missing is not said twice.
-  const named = (x) => [...missing].some((k) => x.includes(`${k} `));
+  const named = (x) => [...missing].some((k) => x.includes(`${k} `) || x.includes(`${k}.`));
   for (const m of Object.values(READERS)) out.push(...m.policyProblems(rules, product).filter((x) => !named(x)));
   return out;
 }
