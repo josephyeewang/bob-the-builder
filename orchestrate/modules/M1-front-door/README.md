@@ -72,7 +72,9 @@ R-0b-82's decision and handoff code sit here although the row is tagged M11 (lan
    `request-think-` like the other requests (same `checkOutboxFile`, same push, "Request taken: … Nothing has started
    yet"). The Lead acts on evolve, audit and upgrade as Bob runs on that product; think opens a thinking room on the
    rules' `models.main`. `what` is the owner's words, one line, already checked for keys; pass it on through
-   `cleanOutside`. NEW files nothing: the owner opens their own session. Until this is wired, the request sits unread.
+   `cleanOutside`. NEW files nothing: the owner opens their own session. Until this is wired (the record gives `request-`
+   no entity, shared/record.mjs), the skill files no mode request and never says "Filed": it tells the owner to start it
+   in their own session (audit kit-lane3 r1 Minor 9). Wiring it also means turning the skill's step 3 back on.
 
 ## Ledger: two lines per row (review-0b-8 MAT-10)
 
