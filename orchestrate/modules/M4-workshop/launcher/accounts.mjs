@@ -30,7 +30,7 @@ import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { installProblem } from './install-check.mjs';
+import { installProblem, copyReady } from './install-check.mjs';
 
 export const ACCOUNTS = Object.freeze({ a: '.claude', b: '.claude-b' });
 export const ACCOUNT_NAMES = Object.freeze(Object.keys(ACCOUNTS));
@@ -163,12 +163,15 @@ export function copyAccountTo({ home, uid, to, dirOwner = 0 }) {
 /**
  * `copy-to` as root runs it (L75 c-1): only from the installed copy `install`, with this file (`self`) and the node
  * running it (`node`) in it and the copy root's alone (`installProblem`; `owner` and `top` stand in for root and `/` in a
- * test), then copyAccountTo. → as copyAccountTo.
+ * test), and the copy one the updater finished, its link and stamp as the runner wants them (`copyReady`, L106 m-1),
+ * then copyAccountTo. → as copyAccountTo.
  */
 export function copyFromInstalledCopy({ install, home, uid, to, self = selfFile, node = nodeFile(), owner = 0, top = '/' }) {
   if (typeof install !== 'string' || !install.startsWith('/')) return refuse('copy-to needs --install <the installed copy>');
   const bad = installProblem(install, [self, node], { owner, top });
   if (bad) return refuse(`it runs only from the installed copy, root's alone: ${bad}`);
+  const unready = copyReady(install, { owner });
+  if (unready) return refuse(`it runs only from an installed copy the updater finished: ${unready}`);
   return copyAccountTo({ home, uid, to, dirOwner: owner });
 }
 

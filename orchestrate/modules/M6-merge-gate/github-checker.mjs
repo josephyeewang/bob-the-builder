@@ -724,9 +724,9 @@ function compileList(patterns) {
 
 // ---- orchestrate/modules/M10-rules/policy.mjs ----
 __bob_def('orchestrate/modules/M10-rules/policy.mjs', ['scripts/blueprint/yaml-lite.mjs', 'orchestrate/shared/rules.mjs', 'orchestrate/shared/record.mjs', 'orchestrate/modules/M10-rules/paths.mjs', 'orchestrate/modules/M10-rules/classify.mjs'], function (__bob_e, __bob_i) {
-let parseYaml, RISKY_CLASSES, STATES, FINAL_STATES, timeoutFor, compile, EFFECT_KEYS;
+let parseYaml, RISKY_CLASSES, WHOLE_TEXT, DECIMAL_TEXT, STATES, FINAL_STATES, timeoutFor, compile, EFFECT_KEYS;
 __bob_i('scripts/blueprint/yaml-lite.mjs', (m) => { parseYaml = m.parseYaml; });
-__bob_i('orchestrate/shared/rules.mjs', (m) => { RISKY_CLASSES = m.RISKY_CLASSES; });
+__bob_i('orchestrate/shared/rules.mjs', (m) => { RISKY_CLASSES = m.RISKY_CLASSES; WHOLE_TEXT = m.WHOLE_TEXT; DECIMAL_TEXT = m.DECIMAL_TEXT; });
 __bob_i('orchestrate/shared/record.mjs', (m) => { STATES = m.STATES; FINAL_STATES = m.FINAL_STATES; timeoutFor = m.timeoutFor; });
 __bob_i('orchestrate/modules/M10-rules/paths.mjs', (m) => { compile = m.compile; });
 __bob_i('orchestrate/modules/M10-rules/classify.mjs', (m) => { EFFECT_KEYS = m.EFFECT_KEYS; });
@@ -790,6 +790,7 @@ const KEYS = Object.freeze({
   quality: { required: false, type: 'map' }, learning: { required: false, type: 'map' },
   light_exit: { required: false, type: 'map' }, context: { required: false, type: 'map' },
   claims: { required: false, type: 'map' },   // M9: claims.stuck_min, the quiet time before a dead owner's claim is broken (G1)
+  outage: { required: false, type: 'map' },   // M11: outage.min_dead (whole number), outage.share (0 to 1) (L104 O-1)
 });
 const TOP_KEYS = Object.freeze(Object.keys(KEYS).filter((k) => !k.includes('.')));
 const REQUIRED_KEYS = Object.freeze(TOP_KEYS.filter((k) => KEYS[k].required));
@@ -797,8 +798,8 @@ const CUTOVER_STAGES = Object.freeze(['first', 'second']);
 const PRODUCT_STATES = Object.freeze(['active', 'away', 'paused', 'light']);
 const FAILURE_ACTIONS = Object.freeze(['retry', 'quarantine', 'joe']);
 const BANNED_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
-const INT = /^(0|[1-9]\d*)$/;
-const DEC = /^(0|[1-9]\d*)(\.\d+)?$/;
+const INT = WHOLE_TEXT;     // the one definition, shared with rules.num() and rules.dec() (L104)
+const DEC = DECIMAL_TEXT;
 const VERSION = /^\d+\.\d+\.\d+$/;
 
 class Corrupt extends Error {}
@@ -840,6 +841,7 @@ const need = (obj, key, where) => (isMap(obj) && Object.hasOwn(obj, key) && obj[
 const int = (v, where) => (typeof v === 'string' && INT.test(v) ? Number(v) : bad(`${where} must be a whole number ≥ 0`));
 const dec = (v, where) => (typeof v === 'string' && DEC.test(v) ? Number(v) : bad(`${where} must be a number ≥ 0`));
 const pct = (v, where) => { const n = dec(v, where); return n <= 100 ? n : bad(`${where} must be 0–100`); };
+const share = (v, where) => { const n = dec(v, where); return n <= 1 ? n : bad(`${where} must be 0–1`); };
 const strList = (v, where) => (Array.isArray(v) && v.every((s) => typeof s === 'string' && s) ? v : bad(`${where} must be a list of text`));
 // A pattern is read exactly as written: plain ASCII, no space at either end (the matcher trims, so ' docs/ ' would
 // not mean what a reviewer sees; audit round 5).
@@ -926,6 +928,8 @@ function check(raw) {
 
   for (const [k, v] of Object.entries(mapOf(raw.caps, 'caps'))) {
     if (k === 'per_state' || k === 'budget_per_card') continue;
+    // caps.shakedown is the one flag among the caps (M11, L104 O-1): exactly true or false, kept as the reader's text.
+    if (k === 'shakedown') { if (v !== 'true' && v !== 'false') bad('caps.shakedown must be true or false'); continue; }
     p.caps[k] = int(v, `caps.${k}`);
   }
 
@@ -938,6 +942,8 @@ function check(raw) {
   for (const [k, v] of Object.entries(mapOf(need(u, 'reserve_pct', 'usage'), 'usage.reserve_pct'))) p.usage.reserve_pct[k] = pct(v, `usage.reserve_pct.${k}`);
   p.usage.no_tier1_prod_above = pct(need(u, 'no_tier1_prod_above', 'usage'), 'usage.no_tier1_prod_above');
   p.usage.stale_after_min = int(need(u, 'stale_after_min', 'usage'), 'usage.stale_after_min');
+  // M11's pace floor, a share of the week from 0 to 1 (L13, L104).
+  if (u.pace_min_share !== undefined && u.pace_min_share !== null) p.usage.pace_min_share = share(u.pace_min_share, 'usage.pace_min_share');
 
   const psr = mapOf(raw.product_state_rules, 'product_state_rules');
   for (const s of PRODUCT_STATES) mapOf(need(psr, s, 'product_state_rules'), `product_state_rules.${s}`);
@@ -958,7 +964,19 @@ function check(raw) {
       p.timeouts[entity][s] = row;
     }
   }
-  for (const entity of Object.keys(to)) if (!Object.hasOwn(STATES, entity)) bad(`timeouts.${entity} is not a record entity`);
+  // Beside the record entities, timeouts holds single minute limits M11 reads (timeouts.cancel_grace_min and the rest,
+  // L104 O-1): a key ending in _min with a whole number. Anything else is a misspelt entity, and refused.
+  for (const [k, v] of Object.entries(to)) {
+    if (Object.hasOwn(STATES, k)) continue;
+    if (/^[a-z][a-z0-9_]*_min$/.test(k) && !isMap(v) && !Array.isArray(v)) { p.timeouts[k] = int(v, `timeouts.${k}`); continue; }
+    bad(`timeouts.${k} is not a record entity`);
+  }
+  if (raw.outage !== undefined && raw.outage !== null) {
+    const o = mapOf(raw.outage, 'outage');
+    for (const k of Object.keys(o)) if (k !== 'min_dead' && k !== 'share') bad(`outage.${k} is not a known key (min_dead, share)`);
+    if (o.min_dead !== undefined) p.outage.min_dead = int(o.min_dead, 'outage.min_dead');
+    if (o.share !== undefined) p.outage.share = share(o.share, 'outage.share');
+  }
 
   const as = mapOf(raw.audit_sizing, 'audit_sizing');
   for (const k of ['tier1', 'prose', 'rendered', 'exit_tests']) need(as, k, 'audit_sizing');
@@ -2111,11 +2129,24 @@ Object.defineProperties(__bob_e, {
   ACTIONS: { get: () => ACTIONS, enumerable: true },
   RISKY_CLASSES: { get: () => RISKY_CLASSES, enumerable: true },
   HOLD_REASONS: { get: () => HOLD_REASONS, enumerable: true },
+  WHOLE_TEXT: { get: () => WHOLE_TEXT, enumerable: true },
+  DECIMAL_TEXT: { get: () => DECIMAL_TEXT, enumerable: true },
+  wholeNumber: { get: () => wholeNumber, enumerable: true },
+  decimal: { get: () => decimal, enumerable: true },
+  exactFlag: { get: () => exactFlag, enumerable: true },
+  MAC_MIN: { get: () => MAC_MIN, enumerable: true },
+  MAC_MAX: { get: () => MAC_MAX, enumerable: true },
+  MAC_MATCH: { get: () => MAC_MATCH, enumerable: true },
+  MAC_LIST_ALL: { get: () => MAC_LIST_ALL, enumerable: true },
+  keyMatches: { get: () => keyMatches, enumerable: true },
+  isMacKey: { get: () => isMacKey, enumerable: true },
   allow: { get: () => allow, enumerable: true },
   ask: { get: () => ask, enumerable: true },
   deny: { get: () => deny, enumerable: true },
   isDecision: { get: () => isDecision, enumerable: true },
   makeRules: { get: () => makeRules, enumerable: true },
+  asReaderText: { get: () => asReaderText, enumerable: true },
+  OLD_VALUES_UNTIL_STEP_2: { get: () => OLD_VALUES_UNTIL_STEP_2, enumerable: true },
   fakeRules: { get: () => fakeRules, enumerable: true },
 });
 // rules.mjs — the one interface every module uses to ask M10 Rules "may X happen?".
@@ -2131,7 +2162,10 @@ Object.defineProperties(__bob_e, {
 //   const rules = makeRules(impl);
 //   const d = rules.may('push_branch', { product, card, files });   // → { decision, tier?, reason, rev }
 //   if (d.decision !== 'allow') refuse(d.reason);
-//   rules.get('caps.editing_per_mac', { product })                  // → a number from the rules, or undefined
+//   rules.get('caps.editing_per_mac', { product })                  // → the value as the rules hold it, or undefined
+//   rules.num('claims.stuck_min', { product })                      // → a whole number ≥ 0, or undefined (L96)
+//   rules.dec('usage.pace_min_share', { product })                  // → a number ≥ 0 that may have a fraction, or undefined (L104)
+//   rules.flag('product.onboarded', { product })                    // → true or false, or undefined (L96)
 //   rules.classify(change)                                          // → { tier, risky: [...], reasons, protected } (D7)
 //     change = { product, files: [{ path, previous_path?, status: added|modified|removed|renamed|copied, mode?,
 //                added_lines?, removed_lines? }], truncated?, declared_tier?, labels? }
@@ -2139,6 +2173,10 @@ Object.defineProperties(__bob_e, {
 //     dropped (round 2, R2-M10). The GitHub-side checker reads the parent commit's rules through M10's
 //     classifyWithRulesText instead.
 //   Gate only on may(). get() is for display and sizing; an undefined get() means "refuse", never "no limit".
+//   The rules file is text, and its reader converts only some keys, so get() can hand back "30" or "true" (L96). Whole
+//   numbers are read through num(), numbers with a fraction through dec(), and true/false through flag() (L104); get()
+//   is for text, maps and lists only. orchestrate/test/rules-typed-reads.test.mjs fails on a module that checks a get()
+//   value as a number or a flag, and fakeRules() hands every value back as text, as the real reader does.
 //   rules.rev                                                      // the loaded rules version, for diary lines
 
 const ALLOW = 'allow';
@@ -2164,6 +2202,51 @@ const RISKY_CLASSES = Object.freeze(['production_data', 'schema', 'protected', '
 // Merge Gate tests membership here; it never parses reason text.
 const HOLD_REASONS = Object.freeze(['held_tier1_hours', 'rules_not_adopted']);
 
+// The one definition of a rules number (L104): M10's parsePolicy checks the file with these two, and num() and dec()
+// read with them, so "030" or "-30" is refused by both. A whole number is 0 or digits with no leading zero; a decimal
+// adds an optional fraction (".5", "1.", "1e-3", "+1" and "-0.1" are refused). No rules number is negative.
+const WHOLE_TEXT = /^(0|[1-9]\d*)$/;
+const DECIMAL_TEXT = /^(0|[1-9]\d*)(\.\d+)?$/;
+
+// The one conversion for a rules number or flag (L96, L104). A whole number is a safe integer ≥ 0 the reader already
+// converted, or text matching WHOLE_TEXT; a decimal is a finite number ≥ 0, or text matching DECIMAL_TEXT. Anything else
+// ("3x", "1.5" for a whole number, " 3", "") is missing, so the caller refuses as it does for a key that isn't there.
+// A flag is exactly true or false, as the reader's text or as a value; "yes", "True", 1 and "" are missing.
+function wholeNumber(v) {
+  if (typeof v === 'number') return Number.isSafeInteger(v) && v >= 0 ? v + 0 : undefined;   // + 0 turns -0 into 0
+  if (typeof v !== 'string' || !WHOLE_TEXT.test(v)) return undefined;
+  const n = Number(v);
+  return Number.isSafeInteger(n) ? n : undefined;
+}
+function decimal(v) {
+  if (typeof v === 'number') return Number.isFinite(v) && v >= 0 ? v + 0 : undefined;
+  if (typeof v !== 'string' || !DECIMAL_TEXT.test(v)) return undefined;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : undefined;
+}
+function exactFlag(v) {
+  if (v === true || v === 'true') return true;
+  if (v === false || v === 'false') return false;
+  return undefined;
+}
+
+// Mac-wide keys and how M10 combines them across products (MAT-10, R2-M5(b)). `*` = every key under that map. A read
+// of any other key needs its product: with none it is missing, in the engine and in fakeRules alike (L104 O-1, L110).
+const MAC_MIN = Object.freeze(['caps.editing_per_mac', 'caps.scripts_per_mac', 'caps.script_agents_max',
+  'usage.bands.*.*', 'usage.no_tier1_prod_above', 'usage.stale_after_min']);
+const MAC_MAX = Object.freeze(['usage.reserve_pct.*', 'claude_code.required_minimum']);
+const MAC_MATCH = Object.freeze(['claude_code.pin', 'models.*', 'accounts.current', 'accounts.joe.tz']);
+// Lists read for the whole Mac, combined strictest-wins: only what every product's list names (L96). usage.red_runs is
+// the kinds of session that may still start in the red band; the band is the account's, not one product's, so a read
+// with no product answers it. An item one product leaves out is held for all.
+const MAC_LIST_ALL = Object.freeze(['usage.red_runs']);
+const keyMatches = (list, key) => list.some((pat) => {
+  const a = pat.split('.'); const b = key.split('.');
+  return a.length === b.length && a.every((s, i) => s === '*' || s === b[i]);
+});
+const isMacKey = (key) => typeof key === 'string'
+  && [MAC_MIN, MAC_MAX, MAC_MATCH, MAC_LIST_ALL].some((list) => keyMatches(list, key));
+
 const errText = (e) => { try { return String(e?.message ?? e); } catch { return 'unreadable error'; } };
 
 function allow(reason = 'allowed') { return { decision: ALLOW, reason }; }
@@ -2178,6 +2261,7 @@ function isDecision(d) {
 }
 
 // Wrap an implementation { may(action, subject), get(key, opts), classify(change), rev } so every call fails closed.
+// num() and flag() are built here over the implementation's get(), so a fake and the real engine convert the same way.
 function makeRules(impl) {
   const rev = () => { try { return impl?.rev ?? null; } catch { return null; } };
   return Object.freeze({
@@ -2195,6 +2279,15 @@ function makeRules(impl) {
     },
     get(key, opts = {}) {
       try { return impl.get(key, opts); } catch { return undefined; }
+    },
+    num(key, opts = {}) {
+      try { return wholeNumber(impl.get(key, opts)); } catch { return undefined; }
+    },
+    dec(key, opts = {}) {
+      try { return decimal(impl.get(key, opts)); } catch { return undefined; }
+    },
+    flag(key, opts = {}) {
+      try { return exactFlag(impl.get(key, opts)); } catch { return undefined; }
     },
     // A change the rules can't classify counts as risky (D7), so a failure here is "unclassifiable", Tier 1.
     // Any risky class or protected path makes it Tier 1, whatever the implementation said (R2-m2).
@@ -2227,9 +2320,54 @@ function makeRules(impl) {
   });
 }
 
+// What the rules file's reader (yaml-lite) gives for a value: every number and true/false as its text, inside lists and
+// maps too. fakeRules hands values back this way, so a test that passes 30 sees "30", as a module does on the real
+// file, and a reader that skips num/dec/flag fails its own tests (L104). M10's rulesFromText builds from real text.
+function asReaderText(v) {
+  if (typeof v === 'number' || typeof v === 'boolean') return String(v);
+  if (Array.isArray(v)) return v.map(asReaderText);
+  if (v && typeof v === 'object' && Object.getPrototypeOf(v) === Object.prototype) {
+    return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, asReaderText(x)]));
+  }
+  return v;
+}
+
+// The test files that still read numbers and flags the old way, so the text values above turn them red (L104). Until
+// the PR named on each entry moves its module onto num/dec/flag, a fake made from one of these files hands values
+// back as given. This list only shrinks (L123): orchestrate/test/rules-typed-reads.test.mjs fails on a file named here
+// that is gone, on an entry with no owner or no PR, and on a list longer than its pinned count.
+const M11_TYPED = Object.freeze({ owner: 'lane 1', pr: 'M11 typed reads (L123)' });
+const OLD_VALUES_UNTIL_STEP_2 = Object.freeze({
+  'modules/M4-workshop/git/push.test.mjs': { owner: 'lane 2', pr: 'M4 push.mjs typed reads (L96 step 2)' },
+  'modules/M11-dispatcher/account-ports.test.mjs': M11_TYPED,
+  'modules/M11-dispatcher/gate.test.mjs': M11_TYPED,
+  'modules/M11-dispatcher/lead-restart.test.mjs': M11_TYPED,
+  'modules/M11-dispatcher/merges.test.mjs': M11_TYPED,
+  'modules/M11-dispatcher/outage.test.mjs': M11_TYPED,
+  'modules/M11-dispatcher/pass.test.mjs': M11_TYPED,
+  'modules/M11-dispatcher/phone-link.test.mjs': M11_TYPED,
+  'modules/M11-dispatcher/tick.test.mjs': M11_TYPED,
+  'modules/M11-dispatcher/usage.test.mjs': M11_TYPED,
+  'modules/M11-dispatcher/fixtures.test-helper.mjs': M11_TYPED,   // tick.test.mjs's main.mjs runs build their fakes here
+});
+// Whether a fake is being made from one of those files: read once, from where fakeRules was called. A listed test
+// file counts wherever it is on the call stack. A listed helper counts only in a child process a test started (no
+// test file on the stack at all), so the helper's other callers still get text.
+function madeFromOldValuesFile() {
+  const stack = String(new Error().stack ?? '').replaceAll('\\', '/');
+  const on = (f) => stack.includes(`/orchestrate/${f}:`);
+  const listed = Object.keys(OLD_VALUES_UNTIL_STEP_2);
+  if (listed.some((f) => f.endsWith('.test.mjs') && on(f))) return true;
+  return !/\.test\.mjs:/.test(stack) && listed.some((f) => f.endsWith('.test-helper.mjs') && on(f));
+}
+
 // For other modules' tests: answers from a table { [action]: decision | (subject) => decision }, values from
-// `values`, classification from `classify`. Unlisted actions are denied, as with the real rules.
+// `values` (handed back as the reader's text, above), classification from `classify`. Unlisted actions are denied, as
+// with the real rules. A per-product key read with no product is missing, as with the real rules (L110), so with the
+// text values the fake refuses what the engine refuses.
 function fakeRules({ answers = {}, values = {}, classify, rev = 'fake-1' } = {}) {
+  const old = madeFromOldValuesFile();
+  const asRead = old ? (v) => v : asReaderText;
   return makeRules({
     rev,
     may(action, subject) {
@@ -2237,7 +2375,11 @@ function fakeRules({ answers = {}, values = {}, classify, rev = 'fake-1' } = {})
       if (a === undefined) return deny(`fake rules: no answer for "${action}"`);
       return typeof a === 'function' ? a(subject) : a;
     },
-    get(key) { return values[key]; },
+    // As the engine: a per-product key read with no product is missing (L110); a Mac-wide key needs none.
+    get(key, { product } = {}) {
+      if (!old && !isMacKey(key) && (product === undefined || product === null)) return undefined;
+      return Object.hasOwn(values, key) ? asRead(values[key]) : undefined;
+    },
     classify(change) { return classify ? classify(change) : { tier: 2, risky: [], reasons: {} }; },
   });
 }

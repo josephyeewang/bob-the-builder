@@ -4,7 +4,7 @@
 // no upstream source was available to port.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { goFreeKinds, readyCheck, rootOf } from './ready.mjs';
+import { GO_FREE, goFreeKinds, goFreeOn, readyCheck, rootOf } from './ready.mjs';
 import { PRODUCT, fingerprintFor, must, plan, product, put, readyCard, rulesFor, seed, setup } from './fixtures.test-helper.mjs';
 
 // An in-memory view: cards by id, gos, the product state, and who created each card.
@@ -61,14 +61,30 @@ test('go-free kinds: listed in the rules AND made by their one allowed creator',
   assert.match(check('C-1', d, view({ cards: { 'C-1': d }, creators: { 'C-1': null } })).reason, /unknown writer/);
   const er = card({ kind: 'exact_reverse' });
   assert.equal(check('C-1', er, view({ cards: { 'C-1': er }, creators: { 'C-1': 'dispatcher' } })).ok, true);
-  // Planted: a go-free kind the rules don't list needs a go.
-  const notListed = rulesFor({ 'approvals.plan_go.go_free': ['lead_daily_card'] });
+  // Planted: a go-free kind the rules don't list needs a go; so does one listed as false (L115 M-C).
+  const notListed = rulesFor({ 'approvals.plan_go.go_free.exact_reverse': undefined });
+  assert.match(check('C-1', er, view({ cards: { 'C-1': er }, creators: { 'C-1': 'dispatcher' } }), rulesFor({ 'approvals.plan_go.go_free.exact_reverse': false })).reason, /no go from the owner/);
   assert.match(check('C-1', er, view({ cards: { 'C-1': er }, creators: { 'C-1': 'dispatcher' } }), notListed).reason, /no go from the owner/);
   // An ordinary card is never go-free, whatever the rules list.
   const ord = card();
-  assert.match(check('C-1', ord, view({ cards: { 'C-1': ord } }), rulesFor({ 'approvals.plan_go.go_free': ['ordinary_typo'] })).reason, /no go/);
-  assert.deepEqual(goFreeKinds(rulesFor({ 'approvals.plan_go.go_free': { lead_daily_card: true } }), PRODUCT), ['lead_daily_card']);
-  assert.deepEqual(goFreeKinds(rulesFor({ 'approvals.plan_go.go_free': 'lead_daily_card' }), PRODUCT), []);
+  assert.match(check('C-1', ord, view({ cards: { 'C-1': ord } }), rulesFor({ 'approvals.plan_go.go_free.ordinary': true })).reason, /no go/);
+});
+
+test('L115 M-C, m-F: a kind is go-free by its value, never by its key being there', () => {
+  const kinds = (over) => goFreeKinds(rulesFor(over), PRODUCT);
+  assert.deepEqual(Object.keys(GO_FREE), ['exact_reverse', 'research_copy', 'lead_daily_card']);
+  assert.deepEqual(kinds({}), ['exact_reverse', 'lead_daily_card']);
+  // flag kinds: exactly true only (text or value).
+  for (const v of [false, 'false', 'yes', 1, 'True', '', null, undefined, {}, []]) assert.ok(!goFreeOn(rulesFor({ 'approvals.plan_go.go_free.exact_reverse': v }), PRODUCT, 'exact_reverse'), String(v));
+  assert.ok(goFreeOn(rulesFor({ 'approvals.plan_go.go_free.exact_reverse': 'true' }), PRODUCT, 'exact_reverse'));
+  assert.deepEqual(kinds({ 'approvals.plan_go.go_free.research_copy': true }), ['exact_reverse', 'research_copy', 'lead_daily_card']);
+  // patterns kinds: a non-empty list of patterns; [] means no daily card on this product (m-F).
+  for (const v of [[], [''], true, 'docs/daily.md', {}, [{}], [['docs/daily.md']]]) assert.ok(!goFreeOn(rulesFor({ 'approvals.plan_go.go_free.lead_daily_card': v }), PRODUCT, 'lead_daily_card'), JSON.stringify(v));
+  // The rules file is text, so `[3]` there reads as the pattern '3' (L123 c-2): a pattern, not a refused value.
+  assert.ok(goFreeOn(rulesFor({ 'approvals.plan_go.go_free.lead_daily_card': [3] }), PRODUCT, 'lead_daily_card'));
+  // A kind outside GO_FREE is never go-free, and a product with no rules has none.
+  assert.equal(goFreeOn(rulesFor({ 'approvals.plan_go.go_free.ordinary': true }), PRODUCT, 'ordinary'), false);
+  assert.deepEqual(goFreeKinds(rulesFor({ 'approvals.plan_go.go_free.exact_reverse': undefined, 'approvals.plan_go.go_free.lead_daily_card': undefined }), PRODUCT), []);
 });
 
 test('the product: paused (or no product record) starts nothing; light and away start some', () => {

@@ -3,7 +3,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, existsSync, fstatSync, linkSync, mkdirSync, readFileSync, realpathSync, symlinkSync, unlinkSync, writeFileSync, lstatSync } from 'node:fs';
+import { chmodSync, existsSync, fstatSync, linkSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, unlinkSync, writeFileSync, lstatSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { templateFile } from './review-settings.mjs';
@@ -44,14 +44,16 @@ test('L66 M2: what a review runs (claude, node, the hooks folder) must be inside
   // The copy as the updater lays it out (L75 M-1): a versioned folder and root's link to it, named through the link.
   const top = tempDir('m4-progs-');
   const C = 'c'.repeat(40);
-  const realBase = join(top, `inst.v-${C}`);
-  mkdirSync(realBase, { mode: 0o755 });
+  // L92 item 4: the link names orchestrate/ inside the versioned folder; the stamp is at the top of that folder.
+  const vFolder = join(top, `inst.v-${C}`);
+  const realBase = join(vFolder, 'orchestrate');
+  mkdirSync(realBase, { recursive: true, mode: 0o755 });
   const base = join(top, 'inst');
-  symlinkSync(`inst.v-${C}`, base);
-  writeFileSync(join(realBase, STAMP), installStamp(C), { mode: 0o644 });
+  symlinkSync(`inst.v-${C}/orchestrate`, base);
+  writeFileSync(join(vFolder, STAMP), installStamp(C), { mode: 0o644 });
   const out = tempDir('m4-progs-out-');
   for (const d of ['bin', 'hooks', 'modules']) mkdirSync(join(base, d), { mode: 0o755 });
-  const files = { self: join(base, 'modules', 'runner.mjs'), config: join(base, 'review.json'), wiring: join(base, 'wiring.mjs'), claude: join(base, 'bin', 'claude'), node: join(base, 'bin', 'node') };
+  const files = { self: join(base, 'modules', 'runner.mjs'), config: join(base, 'review.json'), wiring: join(base, 'modules', 'wiring.mjs'), claude: join(base, 'bin', 'claude'), node: join(base, 'bin', 'node') };
   for (const f of Object.values(files)) writeFileSync(f, '', { mode: 0o644 });
   writeFileSync(join(base, 'hooks', 'plain-files.mjs'), '', { mode: 0o644 });
   // Each review role's settings template (L67), where the updater copies it in with the rest of the folder.
@@ -65,12 +67,12 @@ test('L66 M2: what a review runs (claude, node, the hooks folder) must be inside
   // This test's user stands in for root; with everything inside, nothing is wrong.
   assert.equal(check(), null);
   // The stamp must be the commit the folder is named for; and a plain folder where the link should be is refused (c-7).
-  writeFileSync(join(realBase, STAMP), installStamp('d'.repeat(40)), { mode: 0o644 });
+  writeFileSync(join(vFolder, STAMP), installStamp('d'.repeat(40)), { mode: 0o644 });
   assert.match(check(), /the copy's commit stamp \(d{40}\) is not the commit its folder is named for \(c{40}\)/);
-  writeFileSync(join(realBase, STAMP), installStamp(C), { mode: 0o644 });
+  writeFileSync(join(vFolder, STAMP), installStamp(C), { mode: 0o644 });
   const byReal = (f) => f.replace(base, realBase);
   assert.match(programsProblem({ installRoot: realBase, wiring: byReal(files.wiring), claudeBin: byReal(files.claude), hooksDir: join(realBase, 'hooks') },
-    { self: byReal(files.self), config: byReal(files.config), node: byReal(files.node), owner: ME, top }), /inst\.v-c{40} is a plain folder, not the installed copy's link/);
+    { self: byReal(files.self), config: byReal(files.config), node: byReal(files.node), owner: ME, top }), /inst\.v-c{40}\/orchestrate is a plain folder, not the installed copy's link/);
   // A template that is missing, or one others can write, refuses by name (L67).
   unlinkSync(templateFile(base, 'auditor'));
   assert.match(check(), /templates\/auditor\.settings\.json is missing/);
@@ -97,6 +99,42 @@ test('L66 M2: what a review runs (claude, node, the hooks folder) must be inside
   chmodSync(files.claude, 0o644);
   assert.match(check({ claudeBin: join(base, 'bin', 'gone') }), /bin\/gone is missing/);
   assert.match(check({ hooksDir: base }), /is not inside the installed copy/);
+  // L132 M-1: the wiring and the budget module, which the runner imports, must be the copy's own code files, .mjs files
+  // under its modules/ or shared/ folder. A copy item the install step put at the top of the copy, a folder or the
+  // config is refused: the runner would import it and fail on its first import of the copy's own files.
+  const own = /is not one of the copy's own code files \(a \.mjs file under its modules\/ or shared\/ folder\)/;
+  writeFileSync(join(base, 'kept-wiring.mjs'), '', { mode: 0o644 });
+  writeFileSync(join(base, 'modules', 'x.js'), '', { mode: 0o644 });
+  mkdirSync(join(base, 'shared'), { mode: 0o755 });
+  chmodSync(join(base, 'shared'), 0o755);
+  writeFileSync(join(base, 'shared', 'b.mjs'), '', { mode: 0o644 });
+  mkdirSync(join(base, 'modules', 'dir.mjs'), { mode: 0o755 });
+  chmodSync(join(base, 'modules', 'dir.mjs'), 0o755);
+  for (const k of ['wiring', 'budget']) {
+    const at = (p) => check({ [k]: p });
+    const says = (p, re) => assert.match(at(p), new RegExp(`^the runner's ${k}, ${p.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}, ${re.source}`), `${k} = ${p}`);
+    says(join(base, 'kept-wiring.mjs'), own);
+    says(files.config, own);
+    says(join(base, 'modules', 'M4-workshop'), own);
+    says(join(base, 'modules', 'dir.mjs'), /is not a file/);
+    says(join(base, 'modules', 'x.js'), own);
+    // One of the copy's own modules is accepted, under modules/ or shared/, named through the link or by its real path.
+    assert.equal(at(files.self), null, `${k}: a module under modules/`);
+    assert.equal(at(join(base, 'shared', 'b.mjs')), null, `${k}: a module under shared/`);
+    assert.equal(at(byReal(files.self)), null, `${k}: by its real path`);
+  }
+  // m-b (audit r2 N22): the budget module is on the root's-alone check like the wiring. One outside the copy, others can
+  // write, or a link is refused by that check, by name; without the budget on it, these pass.
+  writeFileSync(join(out, 'budget.mjs'), '', { mode: 0o644 });
+  assert.match(check({ budget: join(out, 'budget.mjs') }), new RegExp(`^${join(out, 'budget.mjs')} is not inside the installed copy`));
+  assert.match(check({ budget: join(base, 'modules', 'gone.mjs') }), new RegExp(`^${join(base, 'modules', 'gone.mjs')} is missing`));
+  symlinkSync(files.self, join(base, 'modules', 'link.mjs'));
+  assert.match(check({ budget: join(base, 'modules', 'link.mjs') }), new RegExp(`^${join(base, 'modules', 'link.mjs')} is a link`));
+  unlinkSync(join(base, 'modules', 'link.mjs'));
+  for (const p of [join(base, 'kept-wiring.mjs'), join(base, 'modules', 'x.js'), join(base, 'shared', 'b.mjs')]) unlinkSync(p);
+  rmSync(join(base, 'modules', 'dir.mjs'), { recursive: true });
+  rmSync(join(base, 'shared'), { recursive: true });
+  assert.equal(check(), null);
   // The ports hand what was checked to the wiring's start.
   let got;
   const ports = realPorts({ ...c, uids: { reviewer: ME } }, { start: (x) => { got = x; return { ok: true, pid: 1 }; } }, { node: files.node, owner: ME });
@@ -284,13 +322,15 @@ test('L75 c-1: root\'s account copy runs only from the installed copy, root\'s a
   const top = tempDir('m4-acctcopy-');
   chmodSync(top, 0o755);
   const C = 'c'.repeat(40);
-  const real = join(top, `inst.v-${C}`);
+  const real = join(top, `inst.v-${C}`, 'orchestrate');
   mkdirSync(join(real, 'bin'), { recursive: true, mode: 0o755 });
   const install = join(top, 'inst');
-  symlinkSync(`inst.v-${C}`, install);
+  symlinkSync(`inst.v-${C}/orchestrate`, install);
   const self = join(real, 'accounts.mjs');
   const node = join(real, 'bin', 'node');
   for (const f of [self, node]) writeFileSync(f, '', { mode: 0o644 });
+  const stamp = join(top, `inst.v-${C}`, STAMP);
+  writeFileSync(stamp, `${C}\n`, { mode: 0o644 });
   const home = join(top, 'home');
   mkdirSync(home, { mode: 0o755 });
   const dir = join(top, 'root-only');
@@ -306,6 +346,13 @@ test('L75 c-1: root\'s account copy runs only from the installed copy, root\'s a
   chmodSync(self, 0o644);
   assert.match(go({ owner: ME + 1 }).reason, /is not owned by uid/);
   assert.match(go({ install: undefined }).reason, /copy-to needs --install <the installed copy>/);
+  // L106 m-1: a copy the updater did not finish (no stamp, or another commit's) is refused, as the runner refuses it.
+  unlinkSync(stamp);
+  assert.match(go().reason, /runs only from an installed copy the updater finished: the copy's commit stamp \(none at .*installed-commit\) is not the commit its folder is named for/);
+  writeFileSync(stamp, `${'d'.repeat(40)}\n`, { mode: 0o644 });
+  assert.match(go().reason, /stamp \(d{40}\) is not the commit/);
+  writeFileSync(stamp, `${C}\n`, { mode: 0o644 });
+  assert.deepEqual(go(), { ok: true, account: 'a' });
   // Run as the script from the repository, as a mistaken plist would: refused, and nothing is written.
   const script = join(dirname(new URL(import.meta.url).pathname), 'accounts.mjs');
   const to2 = join(dir, 'copy2');

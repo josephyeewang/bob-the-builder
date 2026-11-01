@@ -17,7 +17,7 @@ import { realpathSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { LABEL, SCRIPTS } from '../modules/M4-workshop/launcher/review-daemons.mjs';
-import { NODE, RUNNER_CONFIG, STAMP, UPDATER_CONFIG, aclProblem, currentCopy, installProblem, readInstallStamp } from '../modules/M4-workshop/launcher/install-check.mjs';
+import { NODE, RUNNER_CONFIG, RUNNER_MODULES, STAMP, UPDATER_CONFIG, aclProblem, copyModuleProblem, currentCopy, installProblem, readInstallStamp } from '../modules/M4-workshop/launcher/install-check.mjs';
 import { MUST_KEEP, RUNNER_NAMES } from '../modules/M4-workshop/launcher/review-updater.mjs';
 import { parseConfig } from './layout.mjs';
 
@@ -42,7 +42,7 @@ export function parseInstallConfig(raw) {
   if (!PLAIN_ABS(runnerConfig)) throw new Error('config: runnerConfig must be the full path of the review runner\'s prepared config file');
   if (!PLAIN_ABS(nodeBin)) throw new Error('config: nodeBin must be a full path');
   if (!Array.isArray(extras) || extras.length > 20 || extras.some((e) => !PLAIN_ABS(e) || !KEEP_NAME.test(posix.basename(e)) || [...Object.keys(MUST_KEEP), STAMP, UPDATER_CONFIG, RUNNER_CONFIG].includes(posix.basename(e)))) {
-    throw new Error('config: extras must be full paths of files or folders to carry into the copy (the review runner\'s wiring, its claude program, its hooks), each with a plain name of its own');
+    throw new Error('config: extras must be full paths of files or folders to carry into the copy (the review runner\'s claude program and its hooks), each with a plain name of its own');
   }
   return { ...base, address, gitBin, label, runnerConfig, extras, nodeBin };
 }
@@ -96,7 +96,14 @@ export function planInstall(io, cfg, { readSource, runUpdater }) {
   try { rc = JSON.parse(readSource(cfg.runnerConfig)); } catch (e) { problems.push(`the runner config ${cfg.runnerConfig} can't be read as JSON (${e.code ?? e.message})`); }
   if (rc && (typeof rc !== 'object' || rc.installRoot !== io.at(P.installRoot))) problems.push(`the runner config's installRoot must be ${io.at(P.installRoot)}`);
   const names = rc ? RUNNER_NAMES.filter((n) => typeof rc[n] === 'string') : [];
-  for (const n of names) if (!cfg.extras.some((e) => rc[n].startsWith(`${io.at(P.installRoot)}/${posix.basename(e)}`))) problems.push(`the runner config's ${n} (${rc[n]}) is not inside any of the extras the copy carries, so the first update would refuse it`);
+  const inCopy = io.at(P.installRoot);
+  for (const n of names) {
+    if (RUNNER_MODULES.includes(n)) {   // the wiring and the budget module are the copy's own code files from main, never extras (#82)
+      const rel = rc[n].startsWith(`${inCopy}/`) ? rc[n].slice(inCopy.length + 1) : null;
+      const why = rel === null ? `is not inside ${inCopy}` : copyModuleProblem(rel);
+      if (why) problems.push(`the runner config's ${n} (${rc[n]}) ${why}; name it ${inCopy}/modules/... (the first update would refuse it)`);
+    } else if (!cfg.extras.some((e) => rc[n] === `${inCopy}/${posix.basename(e)}` || rc[n].startsWith(`${inCopy}/${posix.basename(e)}/`))) problems.push(`the runner config's ${n} (${rc[n]}) is not inside any of the extras the copy carries, so the first update would refuse it`);
+  }
   if (problems.length) return { ops, problems, installed: false };
 
   const dir = (p, mode, text) => [op(text ?? `mkdir ${p}`, () => { try { io.mkdir(p, 0o700); } catch (e) { if (e.code !== 'EEXIST') throw e; } }), ...rootOwned(io, p, mode, 'dir')];
