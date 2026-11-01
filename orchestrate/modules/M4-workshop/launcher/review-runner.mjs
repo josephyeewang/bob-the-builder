@@ -45,18 +45,21 @@
 //   launches/    0755   the launch records (M9 reads them)
 //   ended/       0755   the ended records, one per launched session once it has ended (M9 `runnerEnded` reads them)
 //   set-aside/   0755   Joe's "review again": one record per session Joe set aside (M9 `runnerAside` reads them)
+//   packages/    0755   one folder per session holding the review package it was given (change.diff), and
+//                       <session>.sha256, its pin; a session reads them and never writes (M-1 (c), L83)
 //   status.json  0644   { written_at, ok, error, installed_commit, running, refused, alerts, taps_read }
 //                       (`taps_read`: the keys of Joe's taps the runner has read; the Front Door removes those taps)
 //   state.json   0600   the runner's own memory: running sessions, tries per card, head and role, request ids seen
 
 import { closeSync, constants, fstatSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, renameSync, unlinkSync, writeFileSync, chmodSync } from 'node:fs';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { dirname, join } from 'node:path';
 import { REVIEW_ROLES } from '../../../shared/review-roles.mjs';
 import { SESSION_ID } from '../../../shared/record.mjs';
 import { ASIDE_FOLDER, ENDED_FOLDER, NEVER_RAN, PASSES, launchesFolderProblem, reviewUid, runnerEnded, runnerLaunches, CARD_ID } from '../../M9-record/outbox.mjs';
 import { checkReviewOutbox, reviewOutbox, uidsProblem } from './review-user.mjs';
 import { ACCOUNT_NAMES, accountDir, accountEnv } from './accounts.mjs';
+import { DIFF_NAME } from '../../M5-review-audit/review-package.mjs';
 
 export const RETRY_MS = 15 * 60_000;
 // How long after a session ends the Record has to take its verdict before Joe is told (item 20(a); L68: told, never restarted).
@@ -78,7 +81,7 @@ const HEX64 = /^[0-9a-f]{64}$/;
 // The earlier failing verdicts' notes a new reviewer gets in its prompt (L69 point 4): the newest few, each cut short.
 export const MAX_EARLIER = 5;
 export const MAX_EARLIER_NOTES = 4000;
-export const FOLDERS = Object.freeze({ requests: 'requests', rejected: 'rejected', launches: 'launches', ended: ENDED_FOLDER, aside: ASIDE_FOLDER, status: 'status.json', state: 'state.json' });
+export const FOLDERS = Object.freeze({ requests: 'requests', rejected: 'rejected', launches: 'launches', ended: ENDED_FOLDER, aside: ASIDE_FOLDER, packages: 'packages', status: 'status.json', state: 'state.json' });
 const REQUEST_KEYS = ['card', 'head', 'request_id', 'role'];
 
 const iso = (t) => new Date(t).toISOString();
@@ -218,6 +221,43 @@ function writeLaunch(dir, sid, doc) {
   return final;
 }
 
+// The review package's pin (audit R-0b-147 M-1 (c), L83). The wiring writes a session's package into
+// packages/<session>/ (M5 reviewPackage), a folder of the runner's that the session can read but never write (the
+// runnerRoot wall), and hands back its sha256. The runner pins that sha256 at once, in packages/<session>.sha256,
+// written once and never over, and before the session's verdict counts it reads the package again: a package that is
+// gone, changed, a link, or not the runner's own, or a session with no pin, makes the verdict `refused` (fail closed).
+const PIN_MAX = 128;
+function readOwn(path, uid, max = Infinity) {
+  let fd;
+  try { fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); } catch (e) { return { ok: false, reason: e?.code === 'ELOOP' ? 'it is a link' : e?.code === 'ENOENT' ? 'it is gone' : `it can't be read (${e?.code ?? e})` }; }
+  try {
+    const st = fstatSync(fd);
+    if (!st.isFile()) return { ok: false, reason: 'it is not a plain file' };
+    if (st.uid !== uid) return { ok: false, reason: 'it is not the review runner\'s own' };
+    if (st.mode & 0o022) return { ok: false, reason: 'it can be written by others' };
+    if (st.size > max) return { ok: false, reason: 'it is too big' };
+    return { ok: true, bytes: readFileSync(fd) };
+  } finally { closeSync(fd); }
+}
+export function pinPackage(dir, sessionId, sha) {
+  if (!HEX64.test(sha ?? '')) throw new Error('the package\'s sha256 is not 64 hex');
+  writeFileSync(join(dir, `${sessionId}.sha256`), `${sha}\n`, { mode: 0o644, flag: 'wx' });
+}
+/** → null when the package is the one pinned, else why not. */
+export function packageProblem({ dir, sessionId, uid }) {
+  const pin = readOwn(join(dir, `${sessionId}.sha256`), uid, PIN_MAX);
+  if (!pin.ok) return `the review package it was given has no pin the runner can read (${pin.reason})`;
+  const want = pin.bytes.toString('utf8').trim();
+  if (!HEX64.test(want)) return 'the review package\'s pin is not a sha256';
+  const folder = join(dir, sessionId);
+  const fb = folderProblem(folder, uid);
+  if (fb) return `the review package's folder: ${fb}`;
+  const got = readOwn(join(folder, DIFF_NAME), uid);
+  if (!got.ok) return `the review package's diff: ${got.reason}`;
+  const sha = createHash('sha256').update(got.bytes).digest('hex');
+  return sha === want ? null : `the review package changed while the session ran (its diff's sha256 is ${sha.slice(0, 12)}, not the ${want.slice(0, 12)} it was given)`;
+}
+
 /**
  * One pass. `ctx`:
  *   root, outboxRoot, uids (the M9 map; both review roles name the review user), reviewHome (review's home folder)
@@ -233,8 +273,10 @@ function writeLaunch(dir, sid, doc) {
  *   sessions() → [{ pid, sessionId? }] the review sessions alive now     stop({ pid, sessionId })
  *   claudeBin, processName(pid) → the process's command line: nothing is stopped, and no start counts, unless it is
  *     claude's (`isClaudeCommand`)
- *   start({ role, card, head, tree, sessionId, outbox, configDir, env, signin, earlier }) → { ok, pid } | { ok: false,
- *     reason }; the pid is claude's own process, never the launcher's (L66). `ok: false` means claude was never spawned
+ *   start({ role, card, head, tree, sessionId, outbox, configDir, env, signin, earlier, packageDir }) → { ok, pid,
+ *     package_sha256 } | { ok: false, reason, package_sha256? }; packageDir is <root>/packages/<session>, where the
+ *     wiring writes the review package (M5 reviewPackage `dir`), and package_sha256 is its diff's sha256, which the
+ *     runner pins. The pid is claude's own process, never the launcher's (L66). `ok: false` means claude was never spawned
  *     (L71 point 2): a start that spawned it and then failed returns its pid, or the runner can't tell it ran. `earlier`
  *     is the card's earlier failing verdicts for this role on other trees, newest first (L69), already rendered as quoted
  *     data (`earlierBlock`, L71 C3: the wiring puts the string in the prompt as it is), '' when there are none
@@ -265,7 +307,7 @@ export async function runnerPass(ctx) {
   const rootBad = folderProblem(ctx.root, uid);
   if (rootBad) return { ...result, ok: false, error: `the review folder: ${rootBad}`, wrote: false };
 
-  const P = { requests: join(ctx.root, FOLDERS.requests), rejected: join(ctx.root, FOLDERS.rejected), launches: join(ctx.root, FOLDERS.launches), ended: join(ctx.root, FOLDERS.ended), aside: join(ctx.root, FOLDERS.aside), status: join(ctx.root, FOLDERS.status), state: join(ctx.root, FOLDERS.state) };
+  const P = { requests: join(ctx.root, FOLDERS.requests), rejected: join(ctx.root, FOLDERS.rejected), launches: join(ctx.root, FOLDERS.launches), ended: join(ctx.root, FOLDERS.ended), aside: join(ctx.root, FOLDERS.aside), packages: join(ctx.root, FOLDERS.packages), status: join(ctx.root, FOLDERS.status), state: join(ctx.root, FOLDERS.state) };
   const st = readState(P.state);
   const state = st.ok ? st.state : { running: [], attempts: {}, seen: [], alerts: [], told: [] };
   // `at` is the alert's time; the Dispatcher tells each id and time once, so a trouble that keeps the state from being
@@ -310,9 +352,11 @@ export async function runnerPass(ctx) {
     ensureFolder(P.launches, 0o755);
     ensureFolder(P.ended, 0o755);
     ensureFolder(P.aside, 0o755);
+    ensureFolder(P.packages, 0o755);
   } catch (e) { fail(`the review folders could not be made (${e?.code ?? e?.message})`); return finish(); }
   const reqBad = folderProblem(P.requests, uid, 0o1733) ?? folderProblem(P.rejected, uid, 0o700) ?? launchesFolderProblem(P.launches, uid)
-    ?? ((b) => b && `the ended records: ${b}`)(launchesFolderProblem(P.ended, uid)) ?? ((b) => b && `the set-aside records: ${b}`)(launchesFolderProblem(P.aside, uid));
+    ?? ((b) => b && `the ended records: ${b}`)(launchesFolderProblem(P.ended, uid)) ?? ((b) => b && `the set-aside records: ${b}`)(launchesFolderProblem(P.aside, uid))
+    ?? ((b) => b && `the review packages: ${b}`)(folderProblem(P.packages, uid, 0o755));
   if (reqBad) { fail(`the review folders: ${reqBad}`); return finish(); }
 
   // The sessions alive now. One the runner did not start is stopped, and Joe is told (m-7); one that ended leaves `running`.
@@ -360,14 +404,19 @@ export async function runnerPass(ctx) {
     // Its role and session folders must still be review's own (L71 point 1): one renamed, swapped or opened to others
     // could make a fail read as silence. Then nothing it holds counts, and it holds, with no tap.
     const walls = checkReviewOutbox({ outboxRoot: ctx.outboxRoot, role: doc.role, sessionId: doc.session_id, uid });
+    // And the package it was given must be the one the runner pinned (M-1 (c)): one changed while it ran shaped what it
+    // read, so nothing it holds counts.
+    const pkgBad = walls.ok ? packageProblem({ dir: P.packages, sessionId: doc.session_id, uid }) : null;
     let h;
     // Finalize first (R-0b-145): the finding-checker works on this session's own verdict file only, in place, so the
     // sha256 below is that of the finalized file. One that can't be finalized is left as written, and judged as it is.
-    if (walls.ok && ctx.finalize) {
+    // Not for a session whose package changed: its verdict counts for nothing, whatever its findings say.
+    if (walls.ok && !pkgBad && ctx.finalize) {
       let z; try { z = await ctx.finalize({ role: doc.role, sessionId: doc.session_id, card: doc.card, head: doc.head }); } catch (e) { z = { ok: false, reason: e?.message ?? String(e) }; }
       if (z?.ok !== true && z?.none !== true) alert(`finalize-${doc.session_id}`, `The findings in the ${doc.role} session ${doc.session_id}'s verdict could not be checked (${String(z?.reason ?? 'no reason given').slice(0, 300)}); the verdict is judged as it was written.`);
     }
     if (!walls.ok) h = { ok: false, reason: `its outbox fails its checks: ${walls.reason}` };
+    else if (pkgBad) h = { ok: false, reason: pkgBad };
     else try { h = await ctx.handedIn({ role: doc.role, sessionId: doc.session_id, outbox: reviewOutbox({ outboxRoot: ctx.outboxRoot, role: doc.role, sessionId: doc.session_id }), card: doc.card, head: doc.head }); } catch (e) { h = { ok: false, reason: `its verdict could not be read (${e?.message ?? e})` }; }
     const sha = h?.ok === true && HEX64.test(h.verdict?.sha256 ?? '') ? h.verdict.sha256 : null;
     const said = sha ?? (h?.ok !== true && h?.none === true ? 'none' : 'refused');
@@ -592,7 +641,11 @@ export async function runnerPass(ctx) {
       writeLaunch(P.launches, sid, { session_id: sid, role, card, head, tree, request_id: rid, launched_at: iso(now), signin: acct, config_dir: configDir });
     } catch (e) { failStart(`its launch record could not be written (${e?.code ?? e?.message})`); continue; }
     let r;
-    try { r = await ctx.start({ role, card, head, tree, sessionId: sid, outbox, configDir, env: accountEnv(ctx.reviewHome, acct), signin: acct, earlier: earlierBlock(earlier), ...(audited ? { audited } : {}) }); } catch (e) { r = { ok: false, reason: e?.message ?? String(e) }; }
+    try { r = await ctx.start({ role, card, head, tree, sessionId: sid, outbox, configDir, env: accountEnv(ctx.reviewHome, acct), signin: acct, earlier: earlierBlock(earlier), packageDir: join(P.packages, sid), ...(audited ? { audited } : {}) }); } catch (e) { r = { ok: false, reason: e?.message ?? String(e) }; }
+    // The package's sha256 is pinned at once, whatever the start says next, so any end of this session checks it.
+    if (HEX64.test(r?.package_sha256 ?? '')) {
+      try { pinPackage(P.packages, sid, r.package_sha256); } catch (e) { alert(`pin-${sid}`, `The review package of session ${sid} could not be pinned (${e?.code ?? e?.message}); its verdict will not count.`); }
+    }
     if (!r?.ok || !Number.isInteger(r.pid)) {
       // Claude never ran: the one case a start is tried again on its own (L69 point 1). Only when it really never ran
       // (L70 point 4): no live claude of review's carries its session id, and then (L71 point 2: the list first, so a

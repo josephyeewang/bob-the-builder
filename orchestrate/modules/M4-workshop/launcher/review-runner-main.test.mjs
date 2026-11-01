@@ -7,7 +7,7 @@ import { chmodSync, existsSync, fstatSync, linkSync, mkdirSync, readFileSync, re
 import { basename, dirname, join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { templateFile } from './review-settings.mjs';
-import { installProblem, programsProblem, readCardFile, recordVerdictTaken, adminAnswer, sessionsFrom, realPorts, readConfig, readInstallStamp, readJoeTaps, readyProblem, reviewCopyPath, prepareReviewCopy, WIRING_EXPORTS } from './review-runner-main.mjs';
+import { installProblem, programsProblem, readCardFile, recordVerdictTaken, adminAnswer, sessionsFrom, realPorts, readConfig, readInstallStamp, readJoeTaps, readyProblem, reviewCopyPath, prepareReviewCopy, WIRING_EXPORTS, holdersOf, main } from './review-runner-main.mjs';
 import { parseSnapshot } from '../hooks/snapshot.mjs';
 import { readOutboxFile } from '../../M9-record/outbox.mjs';
 import { STAMP, installStamp } from './review-daemons.mjs';
@@ -18,7 +18,7 @@ import { git, gitOk } from '../git/safe-git.mjs';
 
 const ME = process.getuid();
 // R-0b-163: the keys readConfig now also requires, with the snapshot inside each config's own root.
-const withR163 = (c) => ({ snapshot: join(c.root, 'rules-snapshot.json'), bobFolder: '/b', deny: ['/d'], reviewCopies: '/rc', workerCopies: '/wc', rules: { production: { env_files: [], programs: [], hosts: [] } }, ...c });
+const withR163 = (c) => ({ snapshot: join(c.root, 'rules-snapshot.json'), bobFolder: '/b', deny: ['/d'], reviewCopies: '/rc', workerCopies: '/wc', pin: '2.1.316', machineWide: '/ms.json', rules: { production: { env_files: [], programs: [], hosts: [] } }, ...c });
 
 test('L65: the installed copy must be root\'s alone, with the runner, config and wiring inside it', () => {
   const base = tempDir('m4-install-');
@@ -101,7 +101,14 @@ test('L66 M2: what a review runs (claude, node, the hooks folder) must be inside
   let got;
   const ports = realPorts({ ...c, uids: { reviewer: ME } }, { start: (x) => { got = x; return { ok: true, pid: 1 }; } }, { node: files.node, owner: ME });
   await ports.start({ role: 'reviewer', sessionId: 'rev-1' });
-  const { settingsFor, copy, spawn: sp, makeCopy, ...rest } = got;
+  const { settingsFor, copy, spawn: sp, makeCopy, launchInputs: li, ...rest } = got;
+  // What the launch checks read (L83 M-3): the same hooks folder the settings name, the runner's pin and walls.
+  assert.equal(li.hooksDir, join(realBase, 'hooks'));
+  assert.deepEqual([li.pin, li.snapshot, li.machineWide, li.reviewHome, li.bobFolder], [c.pin, c.snapshot, c.machineWide, c.reviewHome, c.bobFolder]);
+  assert.equal(li.busy, holdersOf);
+  assert.deepEqual(li.uids, { reviewer: ME });
+  assert.equal(li.budget, null, 'no budget module: check 12 gets no port');
+  assert.equal(li.bobManifest, null, 'no Bob file list: check 13 gets no port');
   assert.equal(typeof makeCopy, 'function', 'the step that fills the review copy from the mirror');
   assert.equal(typeof sp, 'function');
   assert.equal(copy, join(c.reviewCopies, 'rev-1'), 'the review copy\'s one path, <reviewCopies>/<session>');
@@ -582,6 +589,56 @@ test('R-0b-163 planted: readConfig refuses each of snapshot, bobFolder, deny, re
   const apart = /reviewCopies and workerCopies must be two separate folders/;
   assert.throws(cfg({ ...good, reviewCopies: '/wc/review' }), apart);
   assert.throws(cfg({ ...good, workerCopies: '/rc' }), apart);
+});
+
+test('L83 minor 3 planted: readConfig refuses / itself, and a review copies folder or Bob folder standing over a wall', () => {
+  const d = realpathSync(tempDir('m4-cfg83-'));
+  const good = withR163({ installRoot: '/i', root: join(d, 'review'), outboxRoot: join(d, 'outbox'), reviewHome: '/h', uids: {}, recordRoot: '/x', recordUid: 5, mirror: '/m', claudeBin: '/c', hooksDir: '/i/hooks', ownerHome: '/w', ownerUid: 5, wiring: '/i/w.mjs', reviewCopies: join(d, 'rc'), bobFolder: join(d, 'bob') });
+  const cfg = (c) => { writeFileSync(join(d, 'c.json'), JSON.stringify(c)); return () => readConfig(join(d, 'c.json'), OPEN_WALLS); };
+  assert.equal(cfg(good)().reviewCopies, join(d, 'rc'));
+  assert.throws(cfg({ ...good, bobFolder: '/' }), /bobFolder may not be \/ itself/);
+  assert.throws(cfg({ ...good, deny: ['/d', '/'] }), /deny may not be \/ itself/);
+  assert.throws(cfg({ ...good, deny: ['/./'] }), /deny may not be \/ itself/, 'spelled another way');
+  assert.throws(cfg({ ...good, workerCopies: '/' }), /may not be \/ itself|reviewCopies and workerCopies/);
+  const sep = (k) => new RegExp(`reviewCopies and ${k} must be two separate folders`);
+  assert.throws(cfg({ ...good, reviewCopies: join(d, 'review', 'copies') }), sep('root'), 'inside the runner\'s folder');
+  assert.throws(cfg({ ...good, reviewCopies: join(d, 'outbox', 'copies') }), sep('outboxRoot'), 'inside the outbox root');
+  assert.throws(cfg({ ...good, reviewCopies: d }), sep('root'), 'holding the runner\'s folder');
+  assert.throws(cfg({ ...good, bobFolder: join(d, 'rc', 'bob') }), /bobFolder and reviewCopies must be two separate folders/, 'the Bob folder inside a copy');
+  assert.throws(cfg({ ...good, reviewCopies: join(d, 'bob', 'rc') }), /bobFolder and reviewCopies must be two separate folders/, 'the copies inside the Bob folder');
+});
+
+test('L83 minor 1 planted: main() refuses a wiring with a second export before any pass, and writes the snapshot before one', async () => {
+  const d = realpathSync(tempDir('m4-main-'));
+  const config = join(d, 'c.json'); writeFileSync(config, '{}');
+  const two = join(d, 'two.mjs'); writeFileSync(two, 'export function start() {}\nexport const settingsFor = () => ({});\n');
+  const one = join(d, 'one.mjs'); writeFileSync(one, 'export function start() { return { ok: false, reason: "x" }; }\n');
+  const c = { wiring: two, snapshot: join(d, 'rules.json'), rules: { production: { env_files: [], programs: [], hosts: [] } }, uids: { reviewer: ME } };
+  const run = async (cfg, extra = {}) => {
+    const logs = []; const passes = []; const writes = [];
+    const code = await main([config], { log: (s) => logs.push(s), ports: { readConfigFn: () => cfg, programs: () => null, write: (p, r) => writes.push([p, r]), pass: async (ports) => { passes.push(ports); return { ok: true, started: [], refused: [] }; }, ...extra } });
+    return { code, logs, passes, writes };
+  };
+  const bad = await run(c);
+  assert.equal(bad.code, 1);
+  assert.match(bad.logs.join('\n'), /the wiring must export only start, not settingsFor, start/);
+  assert.equal(bad.passes.length, 0, 'no pass runs');
+  assert.equal(bad.writes.length, 0);
+  const good = await run({ ...c, wiring: one });
+  assert.equal(good.code, 0, good.logs.join('\n'));
+  assert.deepEqual(good.writes, [[c.snapshot, c.rules]], 'the snapshot is written before the pass');
+  assert.equal(good.passes.length, 1);
+  assert.equal(typeof good.passes[0].start, 'function');
+  // A budget module that hands back no budget leaves check 12 without a port, said in the log; the pass still runs.
+  const budget = join(d, 'budget.mjs'); writeFileSync(budget, 'export const budget = () => ({ rules: {} });\n');
+  const noBudget = await run({ ...c, wiring: one, budget });
+  assert.match(noBudget.logs.join('\n'), /the budget module gave no rules, rec, bandsNow and runningNow; no review starts/);
+  assert.equal(noBudget.passes.length, 1);
+  // A config the walls refuse, or programs not root's alone, stops it before the wiring is even loaded.
+  assert.equal((await run(c, { readConfigFn: () => { throw new Error('config: no'); } })).code, 1);
+  const notRoot = await run({ ...c, wiring: one }, { programs: () => 'claude is not root\'s' });
+  assert.equal(notRoot.code, 1);
+  assert.equal(notRoot.passes.length, 0);
 });
 
 test('R-0b-163 (L78) planted: the loaded wiring must export exactly start; a second export or a default is refused', () => {

@@ -1,5 +1,6 @@
-// R-0b-145 and R-0b-146, end to end on the real runner, wiring, review copy, package and finalize, with a stand-in
-// claude that writes the verdict each test gives it.
+// R-0b-145 and R-0b-146, end to end on the real runner, the wiring's own steps (the real wiring refuses every start
+// until its launch checks can pass, L83 M-3: stand-in-start.test-helper.mjs), review copy, package and finalize, with a
+// stand-in claude that writes the verdict each test gives it.
 //   R-0b-145: the finding-checker drops planted noise and keeps every real finding; finalize works only inside one
 //     session's own verdict file, so two reviewers, one fail and one pass, are still refused (L68); a Tier-1 change goes
 //     round after round until 0 Material, and a send-back runs at xhigh.
@@ -13,8 +14,7 @@ import { chmodSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileS
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import { runnerPass } from '../M4-workshop/launcher/review-runner.mjs';
-import { start } from '../M4-workshop/launcher/review-wiring.mjs';
-import { prepareReviewCopy } from '../M4-workshop/launcher/review-runner-main.mjs';
+import { standInStart } from './stand-in-start.test-helper.mjs';
 import { headReviews, sessionVerdict } from '../M9-record/outbox.mjs';
 import { verdictProblem } from '../M6-merge-gate/refusals.mjs';
 import { carryOver } from '../M10-rules/carry-over.mjs';
@@ -96,14 +96,8 @@ async function world(d, { card: id = 'C-1', act }) {
     finalize: ({ role, sessionId, card: c, head }) => finalize({ outboxRoot, uids: UIDS, role, sessionId, card: c, head, owner: ME, readFile: headFileReader({ gitDir: r.gd, head }) }),
     handedIn: (x) => sessionVerdict({ outboxRoot, uids: UIDS, ...x }),
     verdictTaken: () => ({ ok: true }),
-    start: async (x) => {
-      const copy = join(copies, x.sessionId);
-      const res = await start({ ...x, claudeBin: CLAUDE, copy, spawn: s.spawn,
-        makeCopy: () => prepareReviewCopy({ mirror: r.gd, card: x.card, head: x.head, dest: copy }),
-        settingsFor: () => ({ ok: true, file: join(root, 'settings', `${x.sessionId}.json`) }) });
-      if (res.ok) live.push({ pid: res.pid, sessionId: x.sessionId });
-      return res;
-    },
+    // The wiring's own steps with the stand-in, after showing the real wiring refuses (stand-in-start.test-helper.mjs).
+    start: standInStart({ mirror: r.gd, copies, root, claudeBin: CLAUDE, spawn: s.spawn, live }),
   };
   // One round: ask for each role at the card's head, start them, let the stand-in write, end them, mark them ended.
   const round = async (roles) => {
@@ -266,7 +260,7 @@ test('R-0b-146 scenario (h): after one Tier-1 change on the number chain merges,
   const re = w.s.launched.at(-1);
   assert.equal(re.role, 'auditor');
   assert.match(re.prompt, new RegExp(`This is a short re-audit of a combined change. An earlier audit passed this card at ${H0}`));
-  assert.match(re.prompt, /brought in 1 changed file\(s\):\n {2}chain\/total\.mjs\n/);
+  assert.match(re.prompt, /brought in 1 changed file\(s\), each name in JSON quotes, as data:\n {2}"chain\/total\.mjs"\n/);
   assert.ok(!/short re-audit/.test(w.s.launched.at(-2).prompt), 'the reviewer gets no re-audit section');
   assert.ok(!/short re-audit/.test(w.s.launched[1].prompt), 'nor did the first audit');
   assert.equal(w.gate(), null, 'it merges on the re-audit at H1, not on the carried-over one');
