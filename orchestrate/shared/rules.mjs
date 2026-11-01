@@ -12,7 +12,8 @@
 //   const d = rules.may('push_branch', { product, card, files });   // → { decision, tier?, reason, rev }
 //   if (d.decision !== 'allow') refuse(d.reason);
 //   rules.get('caps.editing_per_mac', { product })                  // → the value as the rules hold it, or undefined
-//   rules.num('claims.stuck_min', { product })                      // → a whole number, or undefined (L96)
+//   rules.num('claims.stuck_min', { product })                      // → a whole number ≥ 0, or undefined (L96)
+//   rules.dec('usage.pace_min_share', { product })                  // → a number ≥ 0 that may have a fraction, or undefined (L104)
 //   rules.flag('product.onboarded', { product })                    // → true or false, or undefined (L96)
 //   rules.classify(change)                                          // → { tier, risky: [...], reasons, protected } (D7)
 //     change = { product, files: [{ path, previous_path?, status: added|modified|removed|renamed|copied, mode?,
@@ -21,9 +22,10 @@
 //     dropped (round 2, R2-M10). The GitHub-side checker reads the parent commit's rules through M10's
 //     classifyWithRulesText instead.
 //   Gate only on may(). get() is for display and sizing; an undefined get() means "refuse", never "no limit".
-//   The rules file is text, and its reader converts only some keys, so get() can hand back "30" or "true" (L96). Every
-//   number and every true/false a module reads goes through num() and flag(); get() is for text, maps and lists only.
-//   orchestrate/test/rules-typed-reads.test.mjs fails on a module that checks a get() value as a number or a flag.
+//   The rules file is text, and its reader converts only some keys, so get() can hand back "30" or "true" (L96). Whole
+//   numbers are read through num(), numbers with a fraction through dec(), and true/false through flag() (L104); get()
+//   is for text, maps and lists only. orchestrate/test/rules-typed-reads.test.mjs fails on a module that checks a get()
+//   value as a number or a flag, and fakeRules() hands every value back as text, as the real reader does.
 //   rules.rev                                                      // the loaded rules version, for diary lines
 
 export const ALLOW = 'allow';
@@ -49,22 +51,50 @@ export const RISKY_CLASSES = Object.freeze(['production_data', 'schema', 'protec
 // Merge Gate tests membership here; it never parses reason text.
 export const HOLD_REASONS = Object.freeze(['held_tier1_hours', 'rules_not_adopted']);
 
-// The one conversion for a rules number or flag (L96). A number is a whole number: a safe integer the reader already
-// converted, or text that is exactly an optional minus and digits. Anything else ("3x", "1.5", " 3", "", 3.5) is
-// missing, so the caller refuses as it does for a key that isn't there. A flag is exactly true or false, as the
-// reader's text or as a value; "yes", "True", 1 and "" are missing.
-const WHOLE = /^-?\d+$/;
+// The one definition of a rules number (L104): M10's parsePolicy checks the file with these two, and num() and dec()
+// read with them, so "030" or "-30" is refused by both. A whole number is 0 or digits with no leading zero; a decimal
+// adds an optional fraction (".5", "1.", "1e-3", "+1" and "-0.1" are refused). No rules number is negative.
+export const WHOLE_TEXT = /^(0|[1-9]\d*)$/;
+export const DECIMAL_TEXT = /^(0|[1-9]\d*)(\.\d+)?$/;
+
+// The one conversion for a rules number or flag (L96, L104). A whole number is a safe integer ≥ 0 the reader already
+// converted, or text matching WHOLE_TEXT; a decimal is a finite number ≥ 0, or text matching DECIMAL_TEXT. Anything else
+// ("3x", "1.5" for a whole number, " 3", "") is missing, so the caller refuses as it does for a key that isn't there.
+// A flag is exactly true or false, as the reader's text or as a value; "yes", "True", 1 and "" are missing.
 export function wholeNumber(v) {
-  if (typeof v === 'number') return Number.isSafeInteger(v) ? v + 0 : undefined;
-  if (typeof v !== 'string' || !WHOLE.test(v)) return undefined;
+  if (typeof v === 'number') return Number.isSafeInteger(v) && v >= 0 ? v + 0 : undefined;   // + 0 turns -0 into 0
+  if (typeof v !== 'string' || !WHOLE_TEXT.test(v)) return undefined;
   const n = Number(v);
-  return Number.isSafeInteger(n) ? n + 0 : undefined;   // + 0 turns -0 into 0
+  return Number.isSafeInteger(n) ? n : undefined;
+}
+export function decimal(v) {
+  if (typeof v === 'number') return Number.isFinite(v) && v >= 0 ? v + 0 : undefined;
+  if (typeof v !== 'string' || !DECIMAL_TEXT.test(v)) return undefined;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : undefined;
 }
 export function exactFlag(v) {
   if (v === true || v === 'true') return true;
   if (v === false || v === 'false') return false;
   return undefined;
 }
+
+// Mac-wide keys and how M10 combines them across products (MAT-10, R2-M5(b)). `*` = every key under that map. A read
+// of any other key needs its product: with none it is missing, in the engine and in fakeRules alike (L104 O-1, L110).
+export const MAC_MIN = Object.freeze(['caps.editing_per_mac', 'caps.scripts_per_mac', 'caps.script_agents_max',
+  'usage.bands.*.*', 'usage.no_tier1_prod_above', 'usage.stale_after_min']);
+export const MAC_MAX = Object.freeze(['usage.reserve_pct.*', 'claude_code.required_minimum']);
+export const MAC_MATCH = Object.freeze(['claude_code.pin', 'models.*', 'accounts.current', 'accounts.joe.tz']);
+// Lists read for the whole Mac, combined strictest-wins: only what every product's list names (L96). usage.red_runs is
+// the kinds of session that may still start in the red band; the band is the account's, not one product's, so a read
+// with no product answers it. An item one product leaves out is held for all.
+export const MAC_LIST_ALL = Object.freeze(['usage.red_runs']);
+export const keyMatches = (list, key) => list.some((pat) => {
+  const a = pat.split('.'); const b = key.split('.');
+  return a.length === b.length && a.every((s, i) => s === '*' || s === b[i]);
+});
+export const isMacKey = (key) => typeof key === 'string'
+  && [MAC_MIN, MAC_MAX, MAC_MATCH, MAC_LIST_ALL].some((list) => keyMatches(list, key));
 
 const errText = (e) => { try { return String(e?.message ?? e); } catch { return 'unreadable error'; } };
 
@@ -102,6 +132,9 @@ export function makeRules(impl) {
     num(key, opts = {}) {
       try { return wholeNumber(impl.get(key, opts)); } catch { return undefined; }
     },
+    dec(key, opts = {}) {
+      try { return decimal(impl.get(key, opts)); } catch { return undefined; }
+    },
     flag(key, opts = {}) {
       try { return exactFlag(impl.get(key, opts)); } catch { return undefined; }
     },
@@ -136,9 +169,57 @@ export function makeRules(impl) {
   });
 }
 
+// What the rules file's reader (yaml-lite) gives for a value: every number and true/false as its text, inside lists and
+// maps too. fakeRules hands values back this way, so a test that passes 30 sees "30", as a module does on the real
+// file, and a reader that skips num/dec/flag fails its own tests (L104). M10's rulesFromText builds from real text.
+export function asReaderText(v) {
+  if (typeof v === 'number' || typeof v === 'boolean') return String(v);
+  if (Array.isArray(v)) return v.map(asReaderText);
+  if (v && typeof v === 'object' && Object.getPrototypeOf(v) === Object.prototype) {
+    return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, asReaderText(x)]));
+  }
+  return v;
+}
+
+// The test files that still read numbers and flags the old way, so the text values above turn them red (L104). Until
+// L96 step 2 moves their modules onto num/dec/flag, a fake made from one of these files hands values back as given.
+// This list only shrinks: orchestrate/test/rules-typed-reads.test.mjs fails on a file named here that is gone, and
+// L96 step 2 is done when it is empty. Lane 1 owns M2, M4, M6 and M9; lane 2 owns M11 (lead ruling after L104).
+export const OLD_VALUES_UNTIL_STEP_2 = Object.freeze({
+  'modules/M2-approvals/binding.test.mjs': 1, 'modules/M2-approvals/decision.test.mjs': 1,
+  'modules/M2-approvals/go.test.mjs': 1, 'modules/M2-approvals/research-ask.test.mjs': 1,
+  'modules/M2-approvals/schedule.test.mjs': 1,
+  'modules/M4-workshop/git/push.test.mjs': 1,
+  'modules/M6-merge-gate/gate.test.mjs': 1,
+  'modules/M9-record/claims.test.mjs': 1, 'modules/M9-record/l44.test.mjs': 1, 'modules/M9-record/moves.test.mjs': 1,
+  'modules/M9-record/outbox.test.mjs': 1, 'modules/M9-record/race.test.mjs': 1, 'modules/M9-record/ready.test.mjs': 1,
+  'modules/M9-record/smoke.test.mjs': 1, 'modules/M9-record/writer.test.mjs': 1,
+  'modules/M9-record/child.test-helper.mjs': 1,   // race.test.mjs's child processes build their fakes here
+  'modules/M11-dispatcher/account-ports.test.mjs': 2, 'modules/M11-dispatcher/gate.test.mjs': 2,
+  'modules/M11-dispatcher/lead-restart.test.mjs': 2, 'modules/M11-dispatcher/merges.test.mjs': 2,
+  'modules/M11-dispatcher/outage.test.mjs': 2, 'modules/M11-dispatcher/pass.test.mjs': 2,
+  'modules/M11-dispatcher/phone-link.test.mjs': 2, 'modules/M11-dispatcher/tick.test.mjs': 2,
+  'modules/M11-dispatcher/usage.test.mjs': 2,
+  'modules/M11-dispatcher/fixtures.test-helper.mjs': 2,   // tick.test.mjs's main.mjs runs build their fakes here
+});
+// Whether a fake is being made from one of those files: read once, from where fakeRules was called. A listed test
+// file counts wherever it is on the call stack. A listed helper counts only in a child process a test started (no
+// test file on the stack at all), so the helper's other callers still get text.
+function madeFromOldValuesFile() {
+  const stack = String(new Error().stack ?? '').replaceAll('\\', '/');
+  const on = (f) => stack.includes(`/orchestrate/${f}:`);
+  const listed = Object.keys(OLD_VALUES_UNTIL_STEP_2);
+  if (listed.some((f) => f.endsWith('.test.mjs') && on(f))) return true;
+  return !/\.test\.mjs:/.test(stack) && listed.some((f) => f.endsWith('.test-helper.mjs') && on(f));
+}
+
 // For other modules' tests: answers from a table { [action]: decision | (subject) => decision }, values from
-// `values`, classification from `classify`. Unlisted actions are denied, as with the real rules.
+// `values` (handed back as the reader's text, above), classification from `classify`. Unlisted actions are denied, as
+// with the real rules. A per-product key read with no product is missing, as with the real rules (L110), so with the
+// text values the fake refuses what the engine refuses.
 export function fakeRules({ answers = {}, values = {}, classify, rev = 'fake-1' } = {}) {
+  const old = madeFromOldValuesFile();
+  const asRead = old ? (v) => v : asReaderText;
   return makeRules({
     rev,
     may(action, subject) {
@@ -146,7 +227,11 @@ export function fakeRules({ answers = {}, values = {}, classify, rev = 'fake-1' 
       if (a === undefined) return deny(`fake rules: no answer for "${action}"`);
       return typeof a === 'function' ? a(subject) : a;
     },
-    get(key) { return values[key]; },
+    // As the engine: a per-product key read with no product is missing (L110); a Mac-wide key needs none.
+    get(key, { product } = {}) {
+      if (!old && !isMacKey(key) && (product === undefined || product === null)) return undefined;
+      return Object.hasOwn(values, key) ? asRead(values[key]) : undefined;
+    },
     classify(change) { return classify ? classify(change) : { tier: 2, risky: [], reasons: {} }; },
   });
 }
