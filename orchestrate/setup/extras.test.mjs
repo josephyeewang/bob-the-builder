@@ -8,7 +8,7 @@ import { chmodSync, mkdirSync, mkdtempSync, readFileSync, statSync, symlinkSync,
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { DEFAULT_PROPOSALS_PARENT, folderTable, mirrorPath, ownerTapsPath, parseConfig, proposalRows } from './layout.mjs';
+import { DEFAULT_PROPOSALS_PARENT, ROOT_CONFIG_PATH, folderTable, mirrorPath, ownerTapsPath, parseConfig, proposalRows } from './layout.mjs';
 import { readSecretFromTty, realIo } from './mac.mjs';
 import { aclEntries, apply, check } from './users-folders.mjs';
 import { checkProposals, checkSafeDirectory, checkToken, planProposals, planSafeDirectory, planToken, tokenPath, tokenProblem } from './extras.mjs';
@@ -16,12 +16,18 @@ import { main, parseArgs, planCommand } from './setup.mjs';
 import { fakeMac } from './fake-mac.test-helper.mjs';
 
 const BASE = '/Library/orch-test';
-const RAW = { base: BASE, owner: 'joe', products: ['alpha', 'beta'] };
+const RAW = { base: BASE, owner: 'sam', products: ['alpha', 'beta'] };
 const cfg = parseConfig(RAW);
 const SECRET = 'github_pat_11AAAAAAA0abcdefghijklmnop_QRSTUVWXYZ0123456789abcdef';   // a made-up one, never real
 const sink = () => { const lines = []; return { lines, out: (s) => lines.push(s), err: (s) => lines.push(`ERR ${s}`) }; };
 
 function cfgFile(raw = RAW) { const d = mkdtempSync(join(tmpdir(), 'extras-cfg-')); const f = join(d, 'c.json'); writeFileSync(f, JSON.stringify(raw)); return f; }
+
+/** Root reads only the root-owned config at the fixed place; a run without root passes --config. Returns the argv. */
+function withConfig(mac, file, raw, args) {
+  if (mac.as !== 0) return [...args, '--config', file];
+  const f = mac.at(ROOT_CONFIG_PATH); rmSync(f, { force: true }); writeFileSync(f, JSON.stringify(raw)); chmodSync(f, 0o644); return args;
+}
 
 /** The throwaway Mac with part 1 done, and the shared folder the proposals parent goes in. Every call the Mac saw is kept. */
 function world({ raw = RAW } = {}) {
@@ -30,7 +36,7 @@ function world({ raw = RAW } = {}) {
   const calls = []; const realRun = mac.run;
   mac.run = (cmd, args) => { calls.push([cmd, ...args]); return realRun(cmd, args); };
   const file = cfgFile(raw);
-  const run = (args) => { const s = sink(); const code = main([...args, '--config', file], { io: mac, out: s.out, err: s.err }); return { code, text: s.lines.join('\n') }; };
+  const run = (args) => { const s = sink(); const code = main(withConfig(mac, file, raw, args), { io: mac, out: s.out, err: s.err }); return { code, text: s.lines.join('\n') }; };
   const first = run(['users-folders']); assert.equal(first.code, 0, first.text);
   return { mac, run, calls, cfg: parseConfig(raw), file };
 }
@@ -50,7 +56,7 @@ test('users-folders makes the ownerTaps folder for the owner; check passes', () 
   const w = world();
   const st = statSync(w.mac.at(ownerTapsPath(cfg)));
   assert.equal(st.mode & 0o7777, 0o755);
-  assert.equal(w.mac.owners.get(ownerTapsPath(cfg)).uid, Number(w.mac.users.get('joe').UniqueID));
+  assert.equal(w.mac.owners.get(ownerTapsPath(cfg)).uid, Number(w.mac.users.get('sam').UniqueID));
   assert.deepEqual(failing(check(w.mac, cfg)), []);
 });
 
@@ -86,7 +92,7 @@ test('proposals: makes the parent and one folder per product with the exact owne
   const r = w.run(['proposals']); assert.equal(r.code, 0, r.text);
   assert.equal(statSync(w.mac.at(PARENT)).mode & 0o7777, 0o711);
   assert.equal(w.mac.owners.get(PARENT).uid, w.mac.rootUid);
-  const joe = Number(w.mac.users.get('joe').UniqueID);
+  const joe = Number(w.mac.users.get('sam').UniqueID);
   for (const prod of ['alpha', 'beta']) {
     const f = `${PARENT}/${prod}`;
     assert.equal(statSync(w.mac.at(f)).mode & 0o7777, 0o700); assert.equal(w.mac.owners.get(f).uid, joe);
@@ -108,7 +114,7 @@ test('proposals --dry-run prints every step and changes nothing', () => {
 test('proposals refuses when not root; the check twin runs without root and SKIPs the as-other-user proofs, saying so', () => {
   const w = world(); w.mac.as = 1234;
   const r = w.run(['proposals']); assert.equal(r.code, 2); assert.match(r.text, /must run as root/);
-  const c = w.run(['check-proposals']); assert.match(c.text, /SKIP .*needs root/);
+  const c = w.run(['check-proposals']); assert.match(c.text, /NEEDS ROOT .*needs root/);
 });
 
 test('PLANT a proposals parent someone else made first → plan gives no steps and says so (planProposals refuses a parent not owned by root)', () => {
@@ -177,23 +183,23 @@ test('proposals refuses with no orchestrate user, no owner, or no products, and 
 test('safe-directory: the owner\'s git is told the mirror path, run AS the owner (never root writing into their home); a second run does nothing', () => {
   const w = world();
   const r = w.run(['safe-directory']); assert.equal(r.code, 0, r.text);
-  assert.deepEqual(w.mac.gitSafe.get('joe'), [mirrorPath(cfg)]);
+  assert.deepEqual(w.mac.gitSafe.get('sam'), [mirrorPath(cfg)]);
   const sudo = w.calls.filter((c) => c[2] === '-H' || c.includes('/usr/bin/git')).flat();
-  assert.ok(sudo.includes('-u') && sudo.includes('joe'), 'git did not run as the owner');
+  assert.ok(sudo.includes('-u') && sudo.includes('sam'), 'git did not run as the owner');
   const n = w.mac.log.length; const again = w.run(['safe-directory']); assert.match(again.text, /nothing to do/); assert.equal(w.mac.log.length, n);
   assert.equal(w.run(['check-safe-directory']).code, 0);
 });
 
 test('PLANT safe.directory = * → refused with a plain sentence, nothing changed; the check FAILs', () => {
-  const w = world(); w.mac.gitSafe.set('joe', ['*']);
-  const r = w.run(['safe-directory']); assert.equal(r.code, 1); assert.match(r.text, /trusts every folder/); assert.deepEqual(w.mac.gitSafe.get('joe'), ['*']);
+  const w = world(); w.mac.gitSafe.set('sam', ['*']);
+  const r = w.run(['safe-directory']); assert.equal(r.code, 1); assert.match(r.text, /trusts every folder/); assert.deepEqual(w.mac.gitSafe.get('sam'), ['*']);
   assert.match(failing(checkSafeDirectory(w.mac, w.cfg)).map((x) => x.why).join(), /every folder/);
 });
 
 test('PLANT the mirror path missing → check-safe-directory FAILs; dry run prints the exact command and changes nothing', () => {
   const w = world();
   assert.match(failing(checkSafeDirectory(w.mac, w.cfg)).map((x) => x.why).join(), /not in its safe\.directory list/);
-  const r = w.run(['safe-directory', '--dry-run']); assert.match(r.text, /would run: as joe: git config --global --add safe\.directory .*\/mirror/); assert.equal(w.mac.gitSafe.get('joe'), undefined);
+  const r = w.run(['safe-directory', '--dry-run']); assert.match(r.text, /would run: as sam: git config --global --add safe\.directory .*\/mirror/); assert.equal(w.mac.gitSafe.get('sam'), undefined);
 });
 
 test('safe-directory needs root; without it the plan says so and git is not run', () => {
@@ -275,7 +281,7 @@ test('PLANT the token file readable by others (0644) → check-token FAILs on th
 
 test('check-token without root SKIPs and says why; it never opens the file', () => {
   const w = world(); w.mac.as = 1234;
-  const c = w.run(['check-token']); assert.equal(c.code, 0); assert.match(c.text, /SKIP .*needs root/);
+  const c = w.run(['check-token']); assert.equal(c.code, 3); assert.match(c.text, /NEEDS ROOT .*needs root/);
 });
 
 test('unknown arguments are never echoed (a token pasted by mistake as an argument must not reach the screen)', () => {
@@ -324,7 +330,7 @@ function github(w, { write = 403, prs = [{ number: 7, title: 'A title' }] } = {}
   };
 }
 const withToken = () => { const w = world(); w.mac.secretInput = SECRET; assert.equal(w.run(['token']).code, 0); return w; };
-const prove = async (w) => { const lines = []; const code = await main(['prove-token', '--config', w.file, '--repo', 'org/repo'], { io: w.mac, out: (s) => lines.push(s), err: (s) => lines.push(`ERR ${s}`) }); return { code, text: lines.join('\n') }; };
+const prove = async (w) => { const lines = []; const code = await main(withConfig(w.mac, w.file, RAW, ['prove-token', '--repo', 'org/repo']), { io: w.mac, out: (s) => lines.push(s), err: (s) => lines.push(`ERR ${s}`) }); return { code, text: lines.join('\n') }; };
 
 test('prove-token: the read works and the no-op write (the title set to itself) comes back 403 → PASS; only status numbers are printed', async () => {
   const w = withToken(); github(w);
@@ -355,7 +361,7 @@ test('prove-token: no open pull request, no network, no token file, a bad repo n
   w = world(); github(w); r = await prove(w); assert.equal(r.code, 1); assert.match(r.text, /could not be read/); assert.equal(w.mac.fetchLog.length, 0);
   assert.throws(() => parseArgs(['prove-token', '--config', 'x']), /needs --repo/);
   assert.throws(() => parseArgs(['check', '--config', 'x', '--repo', 'a/b']), /only for prove-token/);
-  w = withToken(); github(w); const lines = []; assert.equal(await main(['prove-token', '--config', w.file, '--repo', '../x'], { io: w.mac, out: (s) => lines.push(s), err: (s) => lines.push(s) }), 1); assert.equal(w.mac.fetchLog.length, 0);
+  w = withToken(); github(w); const lines = []; assert.equal(await main(withConfig(w.mac, w.file, RAW, ['prove-token', '--repo', '../x']), { io: w.mac, out: (s) => lines.push(s), err: (s) => lines.push(s) }), 1); assert.equal(w.mac.fetchLog.length, 0);
 });
 
 test('PLANT a token file holding something that is not a token → FAIL before any call is made', async () => {

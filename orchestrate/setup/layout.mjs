@@ -1,4 +1,4 @@
-// The Mini's one-time setup, part 1 (R-0b-05): which Mac users exist and which folders they own, as data.
+// The always-on Mac's one-time setup, part 1 (R-0b-05): which Mac users exist and which folders they own, as data.
 // One definition: the setup commands (setup.mjs) and their `check` both read this table, and nothing else lists these
 // folders. Nothing here names a product or a person: the base folder, the owner's Mac user and the product names come
 // from the config file (README).
@@ -19,6 +19,14 @@ export const USERS = Object.freeze(['orchestrate', 'pages', 'review']);
 // macOS update can add one at any time). What hides these users from the login screen is IsHidden=1, not the number (L90 M5).
 export const USER_ID_RANGE = Object.freeze({ low: 600, high: 699 });
 export const NO_SHELL = '/usr/bin/false';
+// Root takes its orders from ONE file at a fixed place, root's own (NEW-1, L100): never from a home folder, where the
+// person's own user could change it between a read-back and the run. The person edits a copy in their home, then a
+// single `sudo install -o root -g wheel -m 0644` puts it here (README). Root reads it with mac.mjs `readConfigFile`.
+export const ROOT_CONFIG_PATH = '/Library/orchestrate-setup.json';
+// The note root leaves in the base the moment it makes it (NEW-1): a base that exists without it was not made by this setup
+// and is refused, never adopted. It sits in the base so a second base has its own.
+export const BASE_MARKER = '.made-by-setup';
+export const baseMarkerPath = (cfg) => join(cfg.base, BASE_MARKER);
 
 const NAME = /^[a-z_][a-z0-9_.-]{0,31}$/;
 const PRODUCT = /^[a-z0-9][a-z0-9-]{0,63}$/;
@@ -68,7 +76,7 @@ export function proposalRows(cfg) {
   const parent = proposalsParentOf(cfg);
   return [
     { path: parent, owner: 'root', mode: 0o711, why: 'the proposals parent: root\'s, traverse only', acl: [] },
-    ...cfg.products.map((prod) => ({ path: join(parent, prod), owner: 'owner', mode: 0o700, why: `${prod}: proposals (only the owner writes; orchestrate reads)`, acl: [ORCHESTRATE_READ_ACL] })),
+    ...cfg.products.map((prod) => ({ path: join(parent, prod), owner: 'owner', mode: 0o700, why: `${prod}: proposals (only the owner writes; orchestrate reads)`, acl: [PROPOSALS_READ_ACL] })),
   ];
 }
 
@@ -83,7 +91,11 @@ export const WORKER_ROLES = Object.freeze(AI_ROLES.filter((r) => !REVIEW_ROLES.i
  * may list, search and read what is in the folder, with inheritance so the session folders and files made there carry
  * it. Exactly this and nothing else: `check` compares the entry list exactly.
  */
-export const ORCHESTRATE_READ_ACL = Object.freeze({ who: 'user:orchestrate', perms: Object.freeze(['list', 'search', 'readattr', 'readextattr', 'readsecurity', 'file_inherit', 'directory_inherit']) });
+// `delete_child` (L100 m8): the record's intake may clear a hand-in once it is taken in; the worker seals its own file 0440.
+export const ORCHESTRATE_READ_ACL = Object.freeze({ who: 'user:orchestrate', perms: Object.freeze(['list', 'search', 'readattr', 'readextattr', 'readsecurity', 'delete_child', 'file_inherit', 'directory_inherit']) });
+// The proposals folders are read only for orchestrate: no delete_child (that is for the outbox folders, which it clears).
+export const PROPOSALS_READ_ACL = Object.freeze({ who: 'user:orchestrate', perms: Object.freeze(['list', 'search', 'readattr', 'readextattr', 'readsecurity', 'file_inherit', 'directory_inherit']) });
+
 
 /** An access-list entry as `ls -le` prints it, with its permissions sorted: "user:orchestrate allow directory_inherit,file_inherit,list,...". */
 export const aclText = (e) => `${e.who} allow ${[...e.perms].sort().join(',')}`;
@@ -122,12 +134,15 @@ export function folderTable(cfg) {
     ...WORKER_ROLES.map((r) => [p('outboxes', r), 'owner', 0o750, `the ${r}'s outboxes (the workers' user writes; orchestrate reads through one access-list entry)`, [ORCHESTRATE_READ_ACL]]),
     ...(cfg.products.length ? [[p('products'), 'root', 0o755, 'one folder set per product']] : []),
     ...cfg.products.flatMap((prod) => [
-      [p('products', prod), 'orchestrate', 0o755, `${prod}: its folders`],
+      // Root's (L100 m2): its children belong to different users, and a folder one of them owns could rename another's away.
+      [p('products', prod), 'root', 0o755, `${prod}: its folders`],
       [p('products', prod, 'store'), 'orchestrate', 0o755, `${prod}: the record (the owner reads it)`],
       [p('products', prod, 'pages'), 'pages', 0o755, `${prod}: built pages (only pages writes them)`],
       [p('products', prod, 'handoffs'), 'orchestrate', 0o755, `${prod}: handoff copies`],
       [p('products', prod, 'pages-in'), 'orchestrate', 0o755, `${prod}: the page builder's input`],
     ]),
   ];
-  return rows.map(([path, owner, mode, why, acl = []]) => ({ path, owner, mode, why, acl }));
+  // `group`: 'root' pins the folder's group to wheel (0) where the mode gives its group any access and the owner is the
+  // person's own user, whose Mac group would otherwise be taken as it comes (L100 m1). Set on apply, compared in check.
+  return rows.map(([path, owner, mode, why, acl = []]) => ({ path, owner, mode, why, acl, ...(owner === 'owner' && (mode & 0o070) ? { group: 'root' } : {}) }));
 }

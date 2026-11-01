@@ -8,13 +8,13 @@ import { chmodSync, cpSync, fchmodSync, lstatSync, mkdirSync, mkdtempSync, readF
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { secureFile, secureFolder, writeNewFile } from './mac.mjs';
+import { readConfigFile, secureFile, secureFolder, writeNewFile } from './mac.mjs';
 
 export function fakeMac({ euid: as = 0, users = {}, admins = [] } = {}) {
   const prefix = realpathSync(mkdtempSync(join(tmpdir(), 'setup-test-')));   // real: the updater compares real paths
   const mac = {
     as, prefix, rootUid: process.getuid(),
-    users: new Map(Object.entries({ joe: { UniqueID: '65001', PrimaryGroupID: '20', UserShell: '/bin/zsh', NFSHomeDirectory: '/Users/joe' }, ...users })),
+    users: new Map(Object.entries({ sam: { UniqueID: '65001', PrimaryGroupID: '20', UserShell: '/bin/zsh', NFSHomeDirectory: '/Users/sam' }, ...users })),
     groups: new Map([['staff', { PrimaryGroupID: '20' }], ['admin', { PrimaryGroupID: '80' }]]),
     admins: new Set(admins),
     owners: new Map(),          // logical path → { uid, gid } set by chown
@@ -43,7 +43,9 @@ export function fakeMac({ euid: as = 0, users = {}, admins = [] } = {}) {
       if (!name || !table.has(name)) return { status: 56, stdout: '', stderr: '<dscl_cmd> DS Error: -14136 (eDSRecordNotFound)' };
       const a = table.get(name);
       // the real dscl says "No such key" on stderr and exits 0
-      return { status: 0, stdout: rest.filter((k) => a[k] !== undefined).map((k) => `${k}: ${a[k]}\n`).join(''), stderr: rest.filter((k) => a[k] === undefined).map((k) => `No such key: ${k}\n`).join('') };
+      // The password hash is readable by root only: for anyone else the real dscl answers as if it were not there.
+      const seen = (k) => a[k] !== undefined && !(k === 'ShadowHashData' && mac.as !== 0);
+      return { status: 0, stdout: rest.filter(seen).map((k) => `${k}: ${a[k]}\n`).join(''), stderr: rest.filter((k) => !seen(k)).map((k) => `No such key: ${k}\n`).join('') };
     }
     if (flag === '-create') {
       if (mac.as !== 0) return { status: 40, stdout: '', stderr: '<main> attribute status: eDSPermissionError\n<dscl_cmd> DS Error: -14120 (eDSPermissionError)' };
@@ -133,6 +135,9 @@ export function fakeMac({ euid: as = 0, users = {}, admins = [] } = {}) {
     // The setup's one way to change an owner and mode: the real handle-based change, with chown stood in for (a test is not root).
     secure(p, want) { secureFolder(at(p), want, ports(p)); },
     secureFile(p, want) { secureFile(at(p), want, ports(p)); },
+    // The real reader (links, plain file, owner, mode, folders above); `configOwner` stands in for the file's owner (a test is not root).
+    readConfig: (p, { strict = false } = {}) => readConfigFile(strict ? at(p) : p, { strict, rootUid: mac.rootUid, top: prefix, ownerOf: (st) => mac.configOwner ?? st.uid }),
+    configOwner: null,
     nodeProblem: () => mac.nodeProblemText,
     // A stand-in for GitHub: a test sets mac.github = (url, init) => ({ status, text }). Every call is kept (the token is in init.headers).
     fetch: async (url, init) => { mac.fetchLog.push({ url, method: init?.method ?? 'GET' }); if (!mac.github) throw Object.assign(new Error('offline'), { code: 'ENOTFOUND' }); return mac.github(url, init); },

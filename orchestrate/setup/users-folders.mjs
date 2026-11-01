@@ -15,7 +15,7 @@
 // mac.mjs `secure`. New folders are made while still root's, parents first; owners and modes are set deepest first, so
 // a parent that a robot user will own is handed over last.
 
-import { NO_SHELL, USERS, USER_ID_RANGE, aclText, folderTable, homeOf } from './layout.mjs';
+import { BASE_MARKER, NO_SHELL, USERS, USER_ID_RANGE, aclText, baseMarkerPath, folderTable, homeOf } from './layout.mjs';
 import { baseChainProblem, guardOp } from './guard.mjs';
 
 const DSCL = '/usr/bin/dscl';
@@ -75,7 +75,7 @@ const dsclOp = (io, args) => op(`dscl . ${args.map((a) => (/^[\w/.:-]+$/.test(a)
 // A record read: every attribute the setup writes, so a half-made one shows which are still missing. A missing record
 // reads as exit 56; a missing attribute is just absent from the answer (the real dscl prints "No such key" and exits 0).
 const USER_KEYS = ['UniqueID', 'PrimaryGroupID', 'UserShell', 'NFSHomeDirectory', 'IsHidden', 'RealName', 'Password'];
-const GROUP_KEYS = ['PrimaryGroupID', 'Password'];
+const GROUP_KEYS = ['PrimaryGroupID', 'Password', 'GroupMembership', 'NestedGroups'];   // a robot's own group has no members (L100 m9)
 const LOGIN_KEYS = ['AuthenticationAuthority', 'ShadowHashData'];   // a password or other way to sign in; a robot user has neither
 function readRecord(io, kind, name, keys) {
   const r = dscl(io, ['-read', `/${kind}/${name}`, ...keys]);
@@ -120,6 +120,7 @@ export function planUsers(io, cfg) {
       else if (n === 0) bad.push(`${w} is root's id (0)`);
       else if (!inRange(n)) bad.push(`${w} ${n} is outside ${USER_ID_RANGE.low}-${USER_ID_RANGE.high}, the numbers this setup uses`);
     }
+    for (const k of ['GroupMembership', 'NestedGroups']) if (G.attrs[k] !== undefined) bad.push(`its group has ${k} set (${k === 'GroupMembership' ? 'members' : 'nested groups'}); it must have none`);
     let id = idWords.length ? Number(idWords[0][1]) : null;
     if (U.exists) {
       if (U.attrs.UserShell !== undefined && U.attrs.UserShell !== NO_SHELL) bad.push(`its shell is ${U.attrs.UserShell}, not ${NO_SHELL}`);
@@ -145,12 +146,15 @@ export function planUsers(io, cfg) {
       for (const [k, v] of pairs) if (rec.attrs[k] === undefined) ops.push(dsclOp(io, ['-create', `/${kind}/${name}`, k, v]));
     };
     want(G, 'Groups', [['PrimaryGroupID', String(id)], ['Password', '*']]);
-    want(U, 'Users', [['UserShell', NO_SHELL], ['RealName', name], ['UniqueID', String(id)], ['PrimaryGroupID', String(id)], ['NFSHomeDirectory', home], ['IsHidden', '1'], ['Password', '*']]);
+    // The safe settings first (no shell, hidden, no password), the number last: a record cut off half way is never a usable account (L100 m6).
+    want(U, 'Users', [['UserShell', NO_SHELL], ['IsHidden', '1'], ['Password', '*'], ['RealName', name], ['NFSHomeDirectory', home], ['PrimaryGroupID', String(id)], ['UniqueID', String(id)]]);
   }
   return { ops, problems, ids };
 }
 
 const ownerIds = (io, ids, who) => (who === 'root' ? { uid: io.rootUid, gid: 0 } : ids[who]);
+/** The group a folder must have, or undefined when the person's own group is taken as it comes: a robot user's own, or wheel where the table pins it (L100 m1). */
+const wantGidOf = (row, want) => (row.group === 'root' ? 0 : row.owner === 'owner' ? undefined : want.gid);
 const modeText = (m) => m.toString(8).padStart(3, '0');
 const expectedAcl = (row) => row.acl.map(aclText).sort();
 
@@ -171,10 +175,13 @@ export function aclEntries(io, path) {
 }
 
 /** Set a folder's access list to exactly `row.acl`, on the folder itself (never through a link). */
-function aclOp(io, row) {
+function aclOp(io, row, seen = null) {
   return op(`set the access list of ${row.path} to ${row.acl.length ? row.acl.map(aclText).join('; ') : 'none'}`, () => {
     const st = io.lstat(row.path);
     if (st.isSymbolicLink() || !st.isDirectory()) throw new Error(`${row.path} is now ${st.isSymbolicLink() ? 'a link' : 'not a folder'}; its access list was not touched`);
+    // The very folder the plan saw (L100 m2): one swapped in since is not touched.
+    const want = seen?.() ?? null;
+    if (want && (st.ino !== want.ino || st.dev !== want.dev)) throw new Error(`${row.path} is not the folder the plan saw (it was replaced); its access list was not touched`);
     const run = (args) => {
       const r = io.run('/bin/chmod', ['-h', ...args, io.at(row.path)]);
       if (r.status !== 0) throw new Error(`could not set the access list of ${row.path} (${r.stderr.trim().slice(0, 120)})`);
@@ -186,7 +193,7 @@ function aclOp(io, row) {
 }
 
 /** Folders: { ops, problems }, given the ids from planUsers. New folders first (parents first), then owners and modes deepest first. */
-export function planFolders(io, cfg, ids, rows = folderTable(cfg)) {
+export function planFolders(io, cfg, ids, rows = folderTable(cfg), { afterBase = [] } = {}) {
   const problems = []; const made = new Map();
   const makes = []; const fixes = [];
   for (const row of rows) {
@@ -198,27 +205,55 @@ export function planFolders(io, cfg, ids, rows = folderTable(cfg)) {
       () => io.secure(row.path, { uid: want.uid, gid, mode: row.mode, ...(ino ?? made.get(row.path) ?? {}) }));
     if (st === null) {
       makes.push(op(`mkdir -m 700 ${row.path}`, () => { io.mkdir(row.path, 0o700); const s = io.lstat(row.path); made.set(row.path, { ino: s.ino, dev: s.dev }); }));
-      fixes.push([modeDo(want.gid), aclOp(io, row)]);
+      if (row.path === cfg.base) makes.push(...afterBase);   // root's note goes in the moment root has made the base
+      fixes.push([modeDo(wantGidOf(row, want)), aclOp(io, row, () => made.get(row.path))]);
       continue;
     }
     if (st.isSymbolicLink() || !st.isDirectory()) { problems.push(`${row.path} exists but is ${st.isSymbolicLink() ? 'a link' : 'not a folder'}; nothing was changed`); continue; }
-    const wantGid = row.owner === 'owner' ? undefined : want.gid;
+    // A folder under the base is root's or the one user it is for (NEW-1): one owned by anyone else was put there by someone
+    // else, and is not adopted (that would hand root's later work, and the next owner, to whoever made it).
+    if (st.uid !== io.rootUid && st.uid !== want.uid) { problems.push(`${row.path} is owned by uid ${st.uid}, who is neither root nor ${row.owner}; it was not made by this setup and is not taken over. Nothing was changed`); continue; }
+    const wantGid = wantGidOf(row, want);
     const group = [];
     if (st.uid !== want.uid || (wantGid !== undefined && st.gid !== wantGid) || (st.mode & 0o7777) !== row.mode) group.push(modeDo(wantGid, { ino: st.ino, dev: st.dev }));
     const acl = aclEntries(io, row.path);
     if (acl.error) { problems.push(`${row.path}: ${acl.error}`); continue; }
-    if (JSON.stringify(acl.entries) !== JSON.stringify(expectedAcl(row))) group.push(aclOp(io, row));
+    if (JSON.stringify(acl.entries) !== JSON.stringify(expectedAcl(row))) group.push(aclOp(io, row, () => ({ ino: st.ino, dev: st.dev })));
     if (group.length) fixes.push(group);
   }
   return { ops: [...makes, ...fixes.reverse().flat()], problems };
+}
+
+/**
+ * Null, or why the base is not one this setup made; `fresh` when it does not exist yet (root will make it). A base that is
+ * already there must hold root's note (BASE_MARKER): a plain file, root's, written by no one else. Without it the folder was
+ * made by someone else (perhaps with hooks already planted in it) and is refused, never adopted (NEW-1).
+ */
+export function baseProblem(io, cfg) {
+  let st;
+  try { st = io.lstat(cfg.base); } catch (e) { return e?.code === 'ENOENT' ? { fresh: true } : { problem: `${cfg.base} could not be read (${e?.code ?? e})` }; }
+  const m = baseMarkerPath(cfg);
+  const why = `${cfg.base} already exists but was not made by this setup (it has no root-owned ${BASE_MARKER} note in it). It is not taken over. If it is yours, move it away or pick another base in the config; nothing was changed`;
+  if (st.isSymbolicLink() || !st.isDirectory()) return { problem: `${cfg.base} exists but is ${st.isSymbolicLink() ? 'a link' : 'not a folder'}; nothing was changed` };
+  let ms; try { ms = io.lstat(m); } catch { return { problem: why }; }
+  if (ms.isSymbolicLink() || ms.isDirectory() || ms.uid !== io.rootUid || (ms.mode & 0o022)) return { problem: why };
+  return {};
 }
 
 /** Both parts: { ops, problems }. The chain above the base is checked first; with a problem there, no op at all. */
 export function plan(io, cfg) {
   const above = baseChainProblem(io, cfg);
   if (above) return { ops: [], problems: [`the folders above ${cfg.base} are not safe for root to work in: ${above}. Nothing was changed.`] };
+  const b = baseProblem(io, cfg);
+  if (b.problem) return { ops: [], problems: [b.problem] };
   const u = planUsers(io, cfg);
-  const f = planFolders(io, cfg, u.ids);
+  // Root's note goes in right after root makes the base (so a run cut off half way can be picked up, and a base that was
+  // there before the run never has one).
+  const marker = [{
+    text: `write ${baseMarkerPath(cfg)} (root's note that this setup made ${cfg.base})`,
+    run: () => { io.write(baseMarkerPath(cfg), 'made by the orchestrate setup; delete the whole folder to start over\n', 0o444); io.secureFile(baseMarkerPath(cfg), { uid: io.rootUid, gid: 0, mode: 0o444 }); },
+  }];
+  const f = planFolders(io, cfg, u.ids, folderTable(cfg), { afterBase: b.fresh ? marker : [] });
   const ops = [...u.ops, ...f.ops];
   return { ops: ops.length ? [guardOp(io, cfg), ...ops] : ops, problems: [...u.problems, ...f.problems] };
 }
@@ -259,8 +294,14 @@ export function check(io, cfg) {
     // No way to sign in: a password that matches nothing, and no authentication record or password hash.
     const rec = readRecord(io, 'Users', name, ['Password', ...LOGIN_KEYS]);
     item(rec.attrs.Password === '*', `user ${name} has no password (it is '*')`, `Password is ${rec.attrs.Password === undefined ? 'unset' : 'something else'}`);
-    const login = LOGIN_KEYS.filter((k) => rec.attrs[k] !== undefined);
-    item(login.length === 0, `user ${name} has no sign-in record`, `it has ${login.join(', ')}`);
+    // The password hash can be read by root only: a check that cannot see it says so (NEEDS ROOT), it never says PASS (L100 m5).
+    const login = (io.euid() === 0 ? LOGIN_KEYS : LOGIN_KEYS.filter((k) => k !== 'ShadowHashData')).filter((k) => rec.attrs[k] !== undefined);
+    if (login.length) item(false, `user ${name} has no sign-in record`, `it has ${login.join(', ')}`);
+    else if (io.euid() === 0) item(true, `user ${name} has no sign-in record`);
+    else skip(`user ${name} has no sign-in record`, 'needs root to read the password hash; run check with sudo');
+    const grec = readRecord(io, 'Groups', name, GROUP_KEYS);
+    const members = ['GroupMembership', 'NestedGroups'].filter((k) => grec.attrs[k] !== undefined);
+    item(members.length === 0, `group ${name} has no members and no nested groups`, `it has ${members.join(', ')}`);
     if (io.euid() === 0) {
       const s = io.run(SUDO, ['-n', '-l', '-U', name]);
       item(SUDO_NOT_ALLOWED.test(`${s.stdout}\n${s.stderr}`), `user ${name} has no sudo rule`, `sudo says: ${`${s.stdout} ${s.stderr}`.replace(/\s+/g, ' ').trim().slice(0, 120)}`);
@@ -278,12 +319,14 @@ export function check(io, cfg) {
   }
   const above = baseChainProblem(io, cfg);
   item(above === null, `folders above ${cfg.base} are root's alone, no links, no access lists`, above);
-  folderChecks(io, folderTable(cfg), ids, item);
+  { const b = baseProblem(io, cfg); item(!b.problem && !b.fresh, `${cfg.base} was made by this setup (root's ${BASE_MARKER} note is in it)`, b.problem ?? 'the base does not exist'); }
+  const tableRows = folderTable(cfg);
+  folderChecks(io, tableRows, ids, item, { known: new Set([...tableRows.map((r) => r.path), baseMarkerPath(cfg)]) });
   return out;
 }
 
-/** The owner, group, mode and exact access list of each row's folder → item(ok, what, why). Read only. */
-export function folderChecks(io, rows, ids, item) {
+/** The owner, group, mode and exact access list of each row's folder → item(ok, what, why). Read only. `known`: the paths a root-owned folder may hold. */
+export function folderChecks(io, rows, ids, item, { known = new Set(rows.map((r) => r.path)) } = {}) {
   for (const row of rows) {
     const what = `${row.path} (${row.owner}, ${modeText(row.mode)})`;
     let st; try { st = io.lstat(row.path); } catch { item(false, what, 'missing'); continue; }
@@ -294,7 +337,15 @@ export function folderChecks(io, rows, ids, item) {
     if (!want) why.push(`no id for ${row.owner}`);
     else {
       if (st.uid !== want.uid) why.push(`owner is uid ${st.uid}, want ${want.uid} (${row.owner})`);
-      if (row.owner !== 'owner' && st.gid !== want.gid) why.push(`group is ${st.gid}, want ${want.gid}`);
+      const wantGid = wantGidOf(row, want);
+      if (wantGid !== undefined && st.gid !== wantGid) why.push(`group is ${st.gid}, want ${wantGid}`);
+    }
+    // A folder only root writes holds only what the table names (and the base its note): anything else was put there by
+    // someone, and could be code root or a robot will run (NEW-1).
+    if (row.owner === 'root') {
+      let names = null; try { names = io.list(row.path); } catch { why.push('its contents could not be listed'); }
+      const extra = (names ?? []).filter((n) => !known.has(`${row.path}/${n}`));
+      if (extra.length) why.push(`holds ${extra.length === 1 ? 'an entry' : 'entries'} the setup did not make: ${extra.slice(0, 5).join(', ')}`);
     }
     if ((st.mode & 0o7777) !== row.mode) why.push(`mode is ${modeText(st.mode & 0o7777)}, want ${modeText(row.mode)}`);
     const acl = aclEntries(io, row.path);
