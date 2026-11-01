@@ -1,4 +1,6 @@
-// alert-answer-scan.mjs — the source scan behind alert-answer.test.mjs (lead call L130).
+// alert-answer-scan.mjs — the source scan (lead call L130). Since L135 it is a helper, not the gate: it suggests where
+// an inventory entry needs a close look (`node orchestrate/test/alert-inventory.mjs` prints its hints), and its
+// wrappers / standIns / silentDefaults feed alert-inventory.test.mjs's lists. alert-answer.test.mjs holds its controls.
 //
 // The class: code calls an alert, ignores whether it was delivered, then writes something that says it was (a "told"
 // mark, a card moved to wait on Joe, a note that the owner was told, a state that stops the ask coming again) or answers
@@ -15,6 +17,7 @@
 //
 // It is a scan, not a parser. Strings, template literals, regex literals and comments are blanked first, so a word in a
 // text never counts, and a call is found by its name. What it cannot see is listed at the top of alert-answer.test.mjs.
+// With `wholeFn` (L135 item 3), a write anywhere in the enclosing named function counts, before or after the call.
 
 // The alert-like names (L130). A member call counts whatever its object (`ctx.alert`, `store.alert`, `homeAlerts.raise`).
 export const ALERT_NAMES = Object.freeze(['alert', 'outbox', 'say', 'tellOnce', 'notify', 'raise']);
@@ -22,32 +25,68 @@ const BEFORE_LINES = 6;
 const AFTER_LINES = 8;
 const GUARD_LINES = 10;
 
-// Blank strings, template literals (with their ${ }), regex literals and comments to spaces, keeping every newline and index.
-// With `keepTemplates`, a template literal's text stays as code: a test that writes a script out from a template
+// Blank strings, template literals' text, regex literals and comments to spaces, keeping every newline and index. The
+// code inside a template's ${ } stays code, so `${alert(x)}` is still a call.
+// With `keepTemplates`, a template literal's text stays as code too: a test that writes a script out from a template
 // (`ports: { alert: () => {} }` inside backticks) still shows its stand-in.
-export function mask(src, { keepTemplates = false } = {}) {
+// With `commentsOnly`, only comments are blanked (the body hash in alert-inventory.mjs ignores a comment change).
+export function mask(src, { keepTemplates = false, commentsOnly = false } = {}) {
   const out = src.split('');
   const n = src.length;
   let i = 0;
   let prevSig = '';
   let prevWord = '';
-  const blank = (a, b) => { for (let k = a; k < b; k += 1) if (out[k] !== '\n') out[k] = ' '; };
+  const blankAll = (a, b) => { for (let k = a; k < b; k += 1) if (out[k] !== '\n') out[k] = ' '; };
+  const blank = (a, b) => { if (!commentsOnly) blankAll(a, b); };
+  // Pure skippers: the index of a quote's closing quote; just past a template; the `}` that closes a `${`.
+  const skipQuote = (j) => { const q = src[j]; for (j += 1; j < n; j += 1) { if (src[j] === '\\') { j += 1; continue; } if (src[j] === q || src[j] === '\n') return j; } return n; };
+  const skipTemplate = (j) => {
+    for (j += 1; j < n; j += 1) {
+      if (src[j] === '\\') { j += 1; continue; }
+      if (src[j] === '`') return j + 1;
+      if (src[j] === '$' && src[j + 1] === '{') j = interpEnd(j + 2);
+    }
+    return n;
+  };
+  const interpEnd = (j) => {
+    let depth = 0;
+    for (; j < n; j += 1) {
+      const c = src[j];
+      if (c === '\'' || c === '"') { j = skipQuote(j); continue; }
+      if (c === '`') { j = skipTemplate(j) - 1; continue; }
+      if (c === '/' && src[j + 1] === '/') { const e = src.indexOf('\n', j); j = e < 0 ? n : e; continue; }
+      if (c === '/' && src[j + 1] === '*') { const e = src.indexOf('*/', j + 2); j = e < 0 ? n : e + 1; continue; }
+      if (c === '{') depth += 1;
+      else if (c === '}') { if (depth === 0) return j; depth -= 1; }
+    }
+    return n;
+  };
   while (i < n) {
     const c = src[i];
     const d = src[i + 1];
-    if (c === '/' && d === '/') { const e = src.indexOf('\n', i); const end = e < 0 ? n : e; blank(i, end); i = end; continue; }
-    if (c === '/' && d === '*') { const e = src.indexOf('*/', i + 2); const end = e < 0 ? n : e + 2; blank(i, end); i = end; continue; }
+    if (c === '/' && d === '/') { const e = src.indexOf('\n', i); const end = e < 0 ? n : e; blankAll(i, end); i = end; continue; }
+    if (c === '/' && d === '*') { const e = src.indexOf('*/', i + 2); const end = e < 0 ? n : e + 2; blankAll(i, end); i = end; continue; }
     if (c === '`' && keepTemplates) { prevSig = c; prevWord = ''; i += 1; continue; }
-    if (c === '\'' || c === '"' || c === '`') {
+    if (c === '`') {
       let j = i + 1;
-      let depth = 0;
+      let lit = j;
       for (; j < n; j += 1) {
         if (src[j] === '\\') { j += 1; continue; }
-        if (c === '`' && src[j] === '$' && src[j + 1] === '{') { depth += 1; j += 1; continue; }
-        if (c === '`' && depth > 0 && src[j] === '}') { depth -= 1; continue; }
-        if (src[j] === c && depth === 0) break;
-        if (c !== '`' && src[j] === '\n') break;
+        if (src[j] === '`') break;
+        if (src[j] === '$' && src[j + 1] === '{') {
+          blank(lit, j);
+          const end = interpEnd(j + 2);
+          const inner = mask(src.slice(j + 2, end), { commentsOnly });
+          for (let k = 0; k < inner.length; k += 1) out[j + 2 + k] = inner[k];
+          j = end; lit = end + 1;
+        }
       }
+      blank(lit, j);
+      i = j + 1; prevSig = c; prevWord = '';
+      continue;
+    }
+    if (c === '\'' || c === '"') {
+      const j = skipQuote(i);
       blank(i + 1, j);
       i = j + 1; prevSig = c; prevWord = '';
       continue;
@@ -86,7 +125,7 @@ export function pairs(m) {
   return match;
 }
 
-const lineOf = (text, i) => { let n = 1; for (let k = 0; k < i; k += 1) if (text.charCodeAt(k) === 10) n += 1; return n; };
+export const lineOf = (text, i) => { let n = 1; for (let k = 0; k < i; k += 1) if (text.charCodeAt(k) === 10) n += 1; return n; };
 const prevIdx = (m, i) => { let k = i - 1; while (k >= 0 && /\s/.test(m[k])) k -= 1; return k; };
 const nextIdx = (m, i) => { let k = i; while (k < m.length && /\s/.test(m[k])) k += 1; return k; };
 // The word ending at index `end` and the index just before it.
@@ -125,18 +164,19 @@ function blockKind(m, match, open) {
   return { kind: 'fn', name: w };   // `function name(`, `async function name(`, a method `name(args) {`
 }
 
-function blocks(m, match) {
+export function blocks(m, match) {
   const out = [];
   for (let i = 0; i < m.length; i += 1) if (m[i] === '{' && match.has(i)) out.push({ open: i, close: match.get(i), ...blockKind(m, match, i) });
   return out;
 }
 const innermost = (bl, i) => { let best = null; for (const b of bl) if (b.open < i && i <= b.close && (!best || b.open > best.open)) best = b; return best; };
-function fnAt(bl, i) {
+export function fnAt(bl, i) {
   let best = null;
   for (const b of bl) if (b.kind === 'fn' && b.name && b.open < i && i < b.close && (!best || b.open > best.open)) best = b;
   return best?.name ?? '(top)';
 }
-const fnBlockAt = (bl, i) => { let best = null; for (const b of bl) if (b.kind === 'fn' && b.open < i && i < b.close && (!best || b.open > best.open)) best = b; return best; };
+export const namedFnBlockAt = (bl, i) => { let best = null; for (const b of bl) if (b.kind === 'fn' && b.name && b.open < i && i < b.close && (!best || b.open > best.open)) best = b; return best; };
+export const fnBlockAt = (bl, i) => { let best = null; for (const b of bl) if (b.kind === 'fn' && b.open < i && i < b.close && (!best || b.open > best.open)) best = b; return best; };
 
 // Names handed in as `alert:` (`{ alert: tell }` in parameters or an argument), so `tell(...)` is an alert too.
 export function handedNames(m) {
@@ -148,7 +188,9 @@ export function handedNames(m) {
 // What counts as a write near an alert (L130): a record write, put or commit, a note, waitOn or a move, a saved state
 // file (writeFileSync, save), markSeen, and a told mark (`told`, `sent`, `alerted`, `notified`, `warned`: set to
 // something other than false or null, or added or pushed to). `return true` counts in the alert's own block only (b).
-export const WRITE_CALL = /(?<![\w$])(?:write\w*|put\w*|commit\w*|save\w*|markSeen|waitOn|move\w*|note|addNote|applyOutbox)\s*(?:\?\.)?\s*\(/g;
+// L135 item 3 widens it: renameSync, rmSync, unlinkSync, ftruncateSync, appendFileSync, and `.set(` / `.update(` /
+// `.add(` (a seen-set or a store that stops the alert coming again).
+export const WRITE_CALL = /(?<![\w$])(?:write\w*|put\w*|commit\w*|save\w*|markSeen|waitOn|move\w*|note|addNote|applyOutbox|rename\w*|rm\w*|unlink\w*|f?truncate\w*|append\w*)\s*(?:\?\.)?\s*\(|\.\s*(?:set|update|add)\s*(?:\?\.)?\s*\(/g;
 const TOLD = String.raw`(?:told|sent|alerted|notified|warned)\w*`;
 export const TOLD_MARK = new RegExp(String.raw`(?<![\w$])${TOLD}\s*(?:\.(?:add|push|set)\s*\(|=(?![=>])\s*(?!false\b|null\b)|:\s*true\b)|\[\s*${TOLD}\s*\]\s*=(?!=)`, 'g');
 const RETURN_TRUE = /\breturn\s+true\b/g;
@@ -264,8 +306,11 @@ function statementHead(m, match, calleeStart) {
   return m[p] === ')' ? wordBefore(m, prevIdx(m, match.get(p)))[1] + 1 : calleeStart;
 }
 
-// Every flagged alert-site in one file's source: [{ line, fn, call, text, why }].
-export function alertSites(src) {
+// Every flagged alert-site in one file's source: [{ line, fn, call, text, why }]. Since L135 this is a helper: it
+// suggests which alert-inventory.json entries are likely open, and decides nothing.
+// `wholeFn`: look for a write anywhere in the enclosing function (before or after, any block, any guard) instead of
+// the windows below; that is the wider, noisier "possible" hint (L135 item 3).
+export function alertSites(src, { wholeFn = false } = {}) {
   const m = mask(src);
   const match = pairs(m);
   const bl = blocks(m, match);
@@ -273,7 +318,7 @@ export function alertSites(src) {
   const safe = [...m.matchAll(/(?:\bfunction\s+|\b(?:const|let|var)\s+)(safe[A-Z][\w$]*)/g)].map((y) => y[1]);
   const names = [...new Set([...ALERT_NAMES, ...handedNames(m), ...safe])];
   const carriers = new Set();
-  const out = sitesFor(src, m, match, bl, names, carriers);
+  const out = sitesFor(src, m, match, bl, names, carriers, { wholeFn });
   // One step out (L133): a function of this file that drops an alert's answer, and answers nothing itself, is an alert
   // whose answer is lost, so a plain call to it (not `x.name(`) next to a write is a site too. That catches the write-first shape: `if (write(...)) closeX()`,
   // where closeX ignores its alert, ends the retry before anyone is told.
@@ -282,13 +327,13 @@ export function alertSites(src) {
   const silent = (n) => bl.filter((b) => b.kind === 'fn' && b.name === n).every((b) => !/\breturn\s+[^\s;}]/.test(m.slice(b.open + 1, b.close)));
   const isWrite = (n) => { WRITE_CALL.lastIndex = 0; return WRITE_CALL.test(`${n}(`); };
   const extra = [...carriers].filter((n) => defined.has(n) && !names.includes(n) && n !== 'tellThen' && !isWrite(n) && silent(n));
-  if (extra.length) out.push(...sitesFor(src, m, match, bl, extra, null, { bare: true }).map((x) => ({ ...x, carrier: true })));
+  if (extra.length) out.push(...sitesFor(src, m, match, bl, extra, null, { bare: true, wholeFn }).map((x) => ({ ...x, carrier: true })));
   return out.sort((a, b) => a.line - b.line);
 }
 
 // The sites for calls to `names`; `carriers` (when given) collects each function that holds a call whose answer is dropped.
 // `bare`: only plain calls count, not member calls (`events.push(` is not the file's own `push(`).
-function sitesFor(src, m, match, bl, names, carriers, { bare = false } = {}) {
+function sitesFor(src, m, match, bl, names, carriers, { bare = false, wholeFn = false } = {}) {
   const nameRe = new RegExp(String.raw`(?<![\w$])(${names.join('|')})\s*(?:\?\.\s*)?\(`, 'g');
   const lines = src.split('\n');
   const out = [];
@@ -311,7 +356,18 @@ function sitesFor(src, m, match, bl, names, carriers, { bare = false } = {}) {
       calleeStart = k + 1;
     }
     const st = asStatement(m, match, calleeStart, close);
-    if (!st) continue;
+    if (!st) {
+      // The answer is used. Whole-function mode still hints a write BEFORE it (L133, audit #93 r1 M-2): a state that
+      // stops a re-ask, written first, stands whatever the alert answers.
+      if (!wholeFn) continue;
+      const fnN = namedFnBlockAt(bl, nameAt);
+      const before = writesIn(m, fnN ? fnN.open + 1 : 0, calleeStart);
+      if (!before.length) continue;
+      const line = lineOf(m, nameAt);
+      out.push({ line, fn: fnAt(bl, nameAt), call: src.slice(calleeStart, open).replace(/\s+/g, ''), text: lines[line - 1].trim(),
+        why: `written before it: ${[...new Set(before.map((w) => w.what))].join(', ')}`, before: true });
+      continue;
+    }
     if (carriers) carriers.add(fnAt(bl, nameAt));
     const callEnd = m[nextIdx(m, close + 1)] === ';' ? nextIdx(m, close + 1) + 1 : close + 1;
     const fnB = fnBlockAt(bl, nameAt);
@@ -330,10 +386,16 @@ function sitesFor(src, m, match, bl, names, carriers, { bare = false } = {}) {
     const neg = [];
     for (const g of guards) { const v = guardVars(m.slice(g.open + 1, g.close), g.negated); pos.push(...v.pos.map((n) => [n, g])); neg.push(...v.neg); }
     const writes = [];
+    if (wholeFn) {
+      const fnN = namedFnBlockAt(bl, nameAt) ?? fnB;
+      const a = fnN ? fnN.open + 1 : 0;
+      const z = fnN ? fnN.close : m.length;
+      writes.push(...writesIn(m, a, z, { returnTrue: true }).filter((w) => w.at < calleeStart || w.at >= close));
+    }
     // 1. Earlier in its own block: before the call, or before the `if` / `else` / `for` whose braceless body it is. A
     // try or catch body is see-through, so the lines before the try count too.
     const stmtAt = st.braceless ? (st.guard ? wordBefore(m, prevIdx(m, st.guard.open))[1] + 1 : statementHead(m, match, calleeStart)) : calleeStart;
-    if (own) {
+    if (own && !wholeFn) {
       writes.push(...writesIn(m, Math.max(own.open + 1, linesBack(m, stmtAt, BEFORE_LINES)), stmtAt, { skipVars: neg }).filter((w) => innermost(bl, w.at) === own));
       if (['try', 'catch', 'finally'].includes(own.kind)) {
         let tryAt = own.open;
@@ -345,8 +407,8 @@ function sitesFor(src, m, match, bl, names, carriers, { bare = false } = {}) {
       }
     }
     // 2. A guard's test, when the branch runs on a write that went through, and the `x = ...` of a guarding `x.ok`.
-    for (const g of guards) if (!g.negated) writes.push(...writesIn(m, g.open, g.close));
-    for (const [v, g] of pos) {
+    if (!wholeFn) for (const g of guards) if (!g.negated) writes.push(...writesIn(m, g.open, g.close));
+    for (const [v, g] of wholeFn ? [] : pos) {
       const ifAt = wordBefore(m, prevIdx(m, g.open))[1] + 1;
       const from = Math.max(fnOpen + 1, linesBack(m, ifAt, BEFORE_LINES));
       let last = null;
@@ -360,7 +422,7 @@ function sitesFor(src, m, match, bl, names, carriers, { bare = false } = {}) {
     let blk = innermost(bl, from > callEnd ? from - 1 : calleeStart);
     if (st.braceless && blk && from > blk.close) blk = innermost(bl, blk.open);
     let first = true;
-    while (from < limit) {
+    while (!wholeFn && from < limit) {
       const end = Math.min(blk ? blk.close : m.length, limit);
       const { stop, jumped } = untilJump(m, from, end);
       writes.push(...writesIn(m, from, stop, { returnTrue: first }));
@@ -380,8 +442,10 @@ function sitesFor(src, m, match, bl, names, carriers, { bare = false } = {}) {
 }
 
 // A wrapper: a function named like an alert (ALERT_NAMES, or safeX / textX / tellX) that calls an alert.
-// It must hand back the inner call's answer unchanged: each alert call in it is `return <call>` (or a concise arrow's
-// body), and it has no `return true`. Returns every wrapper in one file's source: [{ fn, line, passes, why }].
+// It must hand back the inner call's answer: each alert call in it is `return <call>` (or a concise arrow's body), or
+// is tested `=== false` / `!== false` (#87's safeAlert: false on false, true otherwise, the same as `!== false`; L135).
+// `return true` is allowed only in a wrapper that tests the answer, and no `catch` in it may return true.
+// Returns every wrapper in one file's source: [{ fn, line, passes, why }].
 export const isWrapperName = (n) => ALERT_NAMES.includes(n) || /^(?:safe|text|tell)[A-Z]/.test(n);
 export function wrappers(src) {
   const m = mask(src);
@@ -403,44 +467,99 @@ export function wrappers(src) {
       .filter((i) => wordBefore(m, prevIdx(m, i))[0] !== 'function' && m[nextIdx(m, (match.get(m.indexOf('(', i)) ?? i) + 1)] !== '{');
     if (!calls.length) continue;
     const bad = [];
+    let tests = 0;
     for (const i of calls) {
       let s = i;
       for (;;) { const p = prevIdx(m, s); if (m[p] !== '.') break; const [w, k] = wordBefore(m, prevIdx(m, m[p - 1] === '?' ? p - 1 : p)); if (!w) break; s = k + 1; }
       const before = prevIdx(m, s);
       const returned = wordBefore(m, before)[0] === 'return' || (m[before] === '>' && m[before - 1] === '=') || (b.concise && s === nextIdx(m, b.a));
-      if (!returned) bad.push(`line ${lineOf(m, i)} does not return the alert's answer`);
+      const close = match.get(m.indexOf('(', i));
+      const tested = close !== undefined && /^\s*[!=]==\s*false\b/.test(m.slice(close + 1, close + 20));
+      if (tested) tests += 1;
+      if (!returned && !tested) bad.push(`line ${lineOf(m, i)} does not return the alert's answer`);
     }
-    if (/\breturn\s+true\b/.test(m.slice(b.a, b.z))) bad.push('it returns true');
+    const body = m.slice(b.a, b.z);
+    if (/\breturn\s+true\b/.test(body) && !tests) bad.push('it returns true');
+    for (const c of body.matchAll(/\bcatch\b\s*(?:\([^()]*\))?\s*\{/g)) {
+      const o = b.a + c.index + c[0].length - 1;
+      if (/\breturn\s+true\b/.test(m.slice(o, match.get(o) ?? o))) bad.push('its catch returns true');
+    }
     out.push({ fn: b.fn, line: lineOf(m, b.at), passes: bad.length === 0, why: bad.join('; ') });
   }
   return out;
 }
 
-// Alert stand-ins in test code: an alert (or notify) port made from a function literal instead of fakeAlert().
+// Alert stand-ins in test code: an alert port made from anything but fakeAlert() (L130; widened by L135 item 6).
+// The port names: alert, notify, say, raise, an `alerts: { raise }` object. Not flagged (they already run the lost
+// path; the test says to move them to fakeAlert): a stand-in whose body is `false` or that throws.
+const PORT = String.raw`(?:alert|notify|say|raise)`;
 const STANDIN = [
-  /\b(?:alert|notify)\s*:\s*(?:async\s+)?(?:\([^()]*\)|[A-Za-z_$][\w$]*)\s*=>/g,                              // alert: (a) => alerts.push(a)
-  /\b(?:alert|notify)\s*:\s*(?:async\s+)?function\b/g,                                                       // alert: function (a) {}
-  /(?:\b(?:const|let|var)\s+|\.)(?:alert|notify)\s*=\s*(?:async\s+)?(?:\([^()]*\)|[A-Za-z_$][\w$]*)\s*=>/g,  // const alert = (t) =>, ctx.alert = (a) =>
-  /\b(?:alert|notify)\s*\?\?\s*\(?\s*(?:\([^()]*\)|[A-Za-z_$][\w$]*)\s*=>/g,                                  // alert ?? ((t) => ...)
-  /\b(?:alert|notify)\s*=\s*(?:async\s+)?\(\s*[^()]*\)\s*=>/g,                                                // a parameter default: { alert = () => {} }
-  /\b(?:alert|notify)\s*:\s*[\w$.]+\.push\.bind\b/g,                                                         // alert: alerts.push.bind(alerts)
-  /^\s*(?:async\s+)?(?:alert|notify)\s*\([^()]*\)\s*\{/gm,                                                   // alert(a) { ... } in an object
+  new RegExp(String.raw`\b${PORT}\s*:\s*(?:async\s+)?(?:\([^()]*\)|[A-Za-z_$][\w$]*)\s*=>`, 'g'),                    // alert: (a) => alerts.push(a)
+  new RegExp(String.raw`\b${PORT}\s*:\s*(?:async\s+)?function\b`, 'g'),                                                // alert: function (a) {}
+  new RegExp(String.raw`(?:\b(?:const|let|var)\s+|\.)${PORT}\s*=\s*(?:async\s+)?(?:\([^()]*\)|[A-Za-z_$][\w$]*)\s*=>`, 'g'), // const alert = (t) =>, ctx.alert = (a) =>
+  new RegExp(String.raw`(?:\b(?:const|let|var)\s+|\.)${PORT}\s*=\s*(?:async\s+)?function\b`, 'g'),                    // ctx.alert = function () {}
+  new RegExp(String.raw`\b${PORT}\s*\?\?\s*\(?\s*(?:\([^()]*\)|[A-Za-z_$][\w$]*)\s*=>`, 'g'),                       // alert ?? ((t) => ...)
+  new RegExp(String.raw`\b${PORT}\s*=\s*(?:async\s+)?\(\s*[^()]*\)\s*=>`, 'g'),                                         // a parameter default: { alert = () => {} }
+  new RegExp(String.raw`\b${PORT}\s*:\s*[\w$.]+\.push\.bind\b`, 'g'),                                                  // alert: alerts.push.bind(alerts)
+  new RegExp(String.raw`^\s*(?:async\s+)?${PORT}\s*\([^()]*\)\s*\{`, 'gm'),                                            // alert(a) { ... } in an object
+  new RegExp(String.raw`\bfunction\s+${PORT}\s*\(`, 'g'),                                                                // function alert(t) { ... }
+  new RegExp(String.raw`\b${PORT}\s*[:=]\s*(?:[\w$]+\.)?mock\.fn\s*\(`, 'g'),                                          // alert: mock.fn()
+  new RegExp(String.raw`\b${PORT}\s*:\s*(?:noop|sink|ignore)\b`, 'g'),                                                    // alert: noop
+  /\bfakeIssues\s*\(/g,                                                                                                 // M13's GitHub stand-in: every raise succeeds
 ];
+// A stand-in that already answers false or throws (its body after `=>`, or a function's first statement).
+const LOSES = /^\s*(?:false\b|\(\s*false\s*\)|\{\s*(?:throw\b|return\s+false\b))/;
 export function standIns(src) {
   const m = mask(src, { keepTemplates: true });
-  const lines = new Set();
-  for (const re of STANDIN) { re.lastIndex = 0; for (const x of m.matchAll(re)) lines.add(lineOf(m, x.index)); }
+  const lines = new Map();
   const text = src.split('\n');
-  return [...lines].sort((a, b) => a - b).map((line) => ({ line, text: text[line - 1].trim() }));
+  // Named sinks: `alert: sink` where the file makes `sink` from a function literal.
+  const fns = new Set([...m.matchAll(/(?:\bfunction\s+([A-Za-z_$][\w$]*)|\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s+)?(?:function\b|\([^()]*\)\s*=>|[A-Za-z_$][\w$]*\s*=>))/g)].map((y) => y[1] ?? y[2]));
+  const res = [...STANDIN, new RegExp(String.raw`\b${PORT}\s*:\s*([A-Za-z_$][\w$]*)\s*(?=[,}])`, 'g')];
+  for (const re of res) {
+    re.lastIndex = 0;
+    for (const x of m.matchAll(re)) {
+      if (re === res[res.length - 1] && !fns.has(x[1])) continue;
+      if (re === res[res.length - 1] && /^fakeAlert$/.test(x[1])) continue;
+      const after = m.slice(x.index + x[0].length, x.index + x[0].length + 60);
+      const line = lineOf(m, x.index);
+      if (/=>$/.test(x[0]) && LOSES.test(after)) { if (!lines.has(line)) lines.set(line, 'loses'); continue; }
+      lines.set(line, 'standin');
+    }
+  }
+  return [...lines].filter(([, k]) => k === 'standin').map(([line]) => line).sort((a, b) => a - b).map((line) => ({ line, text: text[line - 1].trim() }));
+}
+/** Stand-ins that already answer false or throw: not flagged, but the test names them so they move to fakeAlert. */
+export function losingStandIns(src) {
+  const m = mask(src, { keepTemplates: true });
+  const out = [];
+  for (const re of STANDIN.slice(0, 6)) {
+    re.lastIndex = 0;
+    for (const x of m.matchAll(re)) if (/=>$/.test(x[0]) && LOSES.test(m.slice(x.index + x[0].length, x.index + x[0].length + 60))) out.push(lineOf(m, x.index));
+  }
+  return [...new Set(out)].sort((a, b) => a - b);
 }
 
-// A production alert that answers nothing: a parameter default `alert = () => {}`, or a handed-in `alert:` that only
-// logs. Under `if (alert(...) !== false)` its undefined counts as sent, so a lost alert passes the allowed form.
+// A production alert that answers nothing: under `if (alert(...) !== false)` its undefined counts as sent, so a lost
+// alert passes the allowed form (widened by L135 item 6). The forms:
+//   alert = () => {}, alert = (t) => {}, alert = () => undefined, alert = noop      a parameter default
+//   { alert: tell = () => {} }                                                     the same, renamed
+//   ctx.alert ?? (() => {}), alert: ctx.alert ?? noop                               a fallback
+//   alert: (t) => log(t), alert: (t) => console.error(t)                            a port that only logs
+//   ctx.alert?.(x), alert?.(x)                                                      an absent alert answers undefined
+const NAME = String.raw`(?:[\w$]*[Aa]lerts?|notify|say|tellOnce|raise)`;
+const NOTHING = String.raw`(?:(?:async\s*)?\([^()]*\)\s*=>\s*(?:\{\s*\}|undefined\b|void\s+0\b|null\b)|noop\b)`;
+const SILENT_FORMS = [
+  new RegExp(String.raw`\b${NAME}\s*(?::\s*[A-Za-z_$][\w$]*\s*)?=(?![=>])\s*\(?\s*${NOTHING}`, 'g'),
+  new RegExp(String.raw`\b${NAME}\s*\?\?\s*\(?\s*${NOTHING}`, 'g'),
+  new RegExp(String.raw`\b${NAME}\s*:\s*(?:async\s+)?(?:\([^()]*\)|[A-Za-z_$][\w$]*)\s*=>\s*(?:\{\s*\}|log\s*\(|console\.\w+\s*\(|process\.std\w+\.write\s*\()`, 'g'),
+  new RegExp(String.raw`\b${NAME}\s*:\s*${NOTHING}`, 'g'),
+  new RegExp(String.raw`(?<![\w$])(?:alert|notify|say)\s*\?\.\s*\(`, 'g'),
+];
 export function silentDefaults(src) {
   const m = mask(src);
   const text = src.split('\n');
   const at = new Set();
-  for (const x of m.matchAll(/\b(?:alert|notify)\s*=\s*\(\s*\)\s*=>\s*\{\s*\}/g)) at.add(lineOf(m, x.index));
-  for (const x of m.matchAll(/\b(?:alert|notify)\s*:\s*(?:async\s+)?(?:\([^()]*\)|[A-Za-z_$][\w$]*)\s*=>\s*(?:\{\s*\}|log\s*\(|console\.\w+\s*\(|process\.std\w+\.write\s*\()/g)) at.add(lineOf(m, x.index));
+  for (const re of SILENT_FORMS) { re.lastIndex = 0; for (const x of m.matchAll(re)) at.add(lineOf(m, x.index)); }
   return [...at].sort((a, b) => a - b).map((line) => ({ line, text: text[line - 1].trim() }));
 }
