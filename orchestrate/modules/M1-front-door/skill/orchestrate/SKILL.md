@@ -36,21 +36,24 @@ When the owner asks for work on a product, sort it into one of five modes by the
 
 | Mode | Cue words | On [Go] |
 |---|---|---|
-| new | "start a new project", "new project", "build a new" | Write nothing. Reply: **"To start X, open a session on the Mini and say `bob NEW X`."** |
-| evolve | "fix", "add", "change", "improve" | Write `request-evolve-<id>.json` |
-| audit | "is this right", "is that right", "check whether", "audit" | Write `request-audit-<id>.json` |
-| upgrade | "update from Bob", "upgrade from Bob", "bob upgrade" | Write `request-upgrade-<id>.json` |
-| think | "let's think about", "think through", "brainstorm" | Write `request-think-<id>.json`; the Mini opens a thinking room on the main model |
+| new | "start a new project", "new project" | Write nothing. Reply: **"To start X, open a session on the Mini and say `bob NEW X`."** |
+| evolve | "fix", "add", "change", "improve" | Not wired yet: write nothing (step 3) |
+| audit | "is this right", "is that right", "check whether", "audit" | Not wired yet: write nothing (step 3) |
+| upgrade | "update from Bob", "upgrade from Bob", "bob upgrade" | Not wired yet: write nothing (step 3) |
+| think | "let's think about", "think through", "brainstorm" | Not wired yet: write nothing (step 3) |
+
+Cue words count only as whole words ("fix" is not in "prefix").
 
 1. **Sure (exactly one mode's cues fit):** read it back in exactly three lines, then a question box with exactly
    three options, `Go`, `Change` and `Not now`. Line 1: the mode and the product. Line 2: "What you said: " and their
    words, shortened. Line 3: what happens on Go. Write nothing until they tap Go.
-2. **Unsure (no cues fit, or more than one mode's do):** ask one question box, "Which of these do you mean?", with the
-   modes that fit as options and the one you recommend first, marked "(Recommended)". Then go to step 1.
-3. **On Go**, write the file in one line, with `<mode>` the mode's name:
-   `{"request":"<mode>","product":"X","name":null,"what":"<their words, one line, at most 300 characters>"}`
-   (`product` may be null only for think). Reply: "Filed: <mode> X. The Mini confirms in a minute."
-   On Change: ask what to change and read it back again. On Not now: write nothing; reply "Not filed."
+2. **Unsure (no cues fit, more than one mode's do, "build a new …" on its own, or a new-project cue that names one of
+   the owner's products):** ask one question box, "Which of these do you mean?", with the modes that fit as options and
+   the one you recommend first, marked "(Recommended)". When no cue fits, recommend think. Then go to step 1.
+3. **On Go**: for new, the reply in the table. Evolve, audit, upgrade and think requests are not wired to the Mini yet,
+   so write nothing and never say "Filed". Reply: **"That isn't wired yet, so nothing was filed. To start it now, open a
+   session on the Mini and say `bob <MODE> X`."** (for think: "…open a session on the Mini and say what you want to
+   think about."). On Change: ask what to change and read it back again. On Not now: write nothing; reply "Not filed."
 4. If their words hold a key, leave it out of `what`, out of the read-back and out of every reply, and follow the key
    rule above.
 
@@ -113,4 +116,4 @@ said it (capitals and digits with at least one `_`, such as `STRIPE_KEY`; add no
 
 ## Not wired yet
 
-Anything else: reply "That isn't wired yet." Write nothing.
+Mode requests (evolve, audit, upgrade and think requests, see above), anything else: reply "That isn't wired yet." Write nothing.
