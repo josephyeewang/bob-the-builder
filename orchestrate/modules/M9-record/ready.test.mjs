@@ -79,7 +79,9 @@ test('L115 M-C, m-F: a kind is go-free by its value, never by its key being ther
   assert.ok(goFreeOn(rulesFor({ 'approvals.plan_go.go_free.exact_reverse': 'true' }), PRODUCT, 'exact_reverse'));
   assert.deepEqual(kinds({ 'approvals.plan_go.go_free.research_copy': true }), ['exact_reverse', 'research_copy', 'lead_daily_card']);
   // patterns kinds: a non-empty list of patterns; [] means no daily card on this product (m-F).
-  for (const v of [[], [''], true, 'docs/daily.md', {}, [3]]) assert.ok(!goFreeOn(rulesFor({ 'approvals.plan_go.go_free.lead_daily_card': v }), PRODUCT, 'lead_daily_card'), JSON.stringify(v));
+  for (const v of [[], [''], true, 'docs/daily.md', {}, [{}], [['docs/daily.md']]]) assert.ok(!goFreeOn(rulesFor({ 'approvals.plan_go.go_free.lead_daily_card': v }), PRODUCT, 'lead_daily_card'), JSON.stringify(v));
+  // The rules file is text, so `[3]` there reads as the pattern '3' (L123 c-2): a pattern, not a refused value.
+  assert.ok(goFreeOn(rulesFor({ 'approvals.plan_go.go_free.lead_daily_card': [3] }), PRODUCT, 'lead_daily_card'));
   // A kind outside GO_FREE is never go-free, and a product with no rules has none.
   assert.equal(goFreeOn(rulesFor({ 'approvals.plan_go.go_free.ordinary': true }), PRODUCT, 'ordinary'), false);
   assert.deepEqual(goFreeKinds(rulesFor({ 'approvals.plan_go.go_free.exact_reverse': undefined, 'approvals.plan_go.go_free.lead_daily_card': undefined }), PRODUCT), []);

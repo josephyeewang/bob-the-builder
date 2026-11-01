@@ -3,7 +3,7 @@
 // on the real Record.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { HEAD, PRODUCT, iso, must, passingVerdict, product, put, readyCard, seed, setup } from './fixtures.test-helper.mjs';
+import { HEAD, PRODUCT, iso, must, outboxFile, passingVerdict, product, put, readyCard, seed, setup } from './fixtures.test-helper.mjs';
 import { heartbeatLimit } from './writer.mjs';
 import { fakeRules } from '../../shared/rules.mjs';
 import { MOVES } from './moves.mjs';
@@ -53,4 +53,76 @@ test('L116, the real Record: approved → waiting (resume continue, return_to ap
   const c = env.record.read('card', 'C-1').doc;
   assert.equal(c.state, 'approved');
   assert.equal(c.wait, undefined, 'the return clears the wait');
+});
+
+// L123 m-2, m-3, m-4 on the real Record: an approved card put on the owner.
+function approvedWaiting(prefix) {
+  const env = setup({ prefix });
+  product(env);
+  readyCard(env, 'C-1');
+  seed(env, 'card', 'C-1', { ...env.record.read('card', 'C-1').doc, state: 'approved', head: HEAD });
+  const wait = (over = {}) => ({ who: 'joe', what: 'the merge was refused twice', since: iso(env.clock.t), next_check: iso(env.clock.t + 30 * MIN), resume: 'continue', return_to: 'approved', ...over });
+  return { env, wait };
+}
+
+test('L123 m-2: only the dispatcher brings a waiting card back to approved', () => {
+  const { env, wait } = approvedWaiting('m9-l123a-');
+  must(put(env.record, 'dispatcher', 'card', 'C-1', { state: 'waiting', wait: wait() }), 'approved → waiting');
+  passingVerdict(env, 'C-1', 'R-1');
+  for (const actor of ['lead', 'workshop', 'merge_gate', 'approvals']) {
+    const r = put(env.review, actor, 'card', 'C-1', { state: 'approved' });
+    assert.equal(r.ok, false, `${actor}: ${r.reason}`);
+    assert.equal(env.record.read('card', 'C-1').doc.state, 'waiting', actor);
+  }
+  // The lead is an AI role: its one way to move a card is a roadmap- file in its outbox. That is refused too.
+  const move = `${JSON.stringify({ entity: 'card', id: 'C-1', expectRev: env.record.read('card', 'C-1').rev, from_state: 'waiting', to_state: 'approved' })}\n`;
+  const viaOutbox = env.record.applyOutbox({ role: 'lead', sessionId: 'L-1' }, outboxFile(env, 'lead', 'L-1', 'roadmap-C-1.md', move));
+  assert.equal(viaOutbox.ok, false, viaOutbox.reason);
+  assert.match(viaOutbox.reason, /may not move card waiting → approved/);
+  assert.equal(env.record.read('card', 'C-1').doc.state, 'waiting', 'lead outbox');
+  must(put(env.review, 'dispatcher', 'card', 'C-1', { state: 'approved' }), 'the dispatcher may');
+});
+
+test('L123 m-3: an approved card waits only with resume continue, back to approved (probe A refused)', () => {
+  const { env, wait } = approvedWaiting('m9-l123b-');
+  for (const over of [{ resume: 'retry', return_to: 'ready' }, { resume: 'retry', return_to: 'approved' }, { resume: 'continue', return_to: 'ready' },
+    { resume: 'continue', return_to: 'verified' }, { resume: 'continue', return_to: 'in_review' }, { resume: null, return_to: null }]) {
+    const r = put(env.record, 'dispatcher', 'card', 'C-1', { state: 'waiting', wait: wait(over) });
+    assert.equal(r.ok, false, JSON.stringify(over));
+    assert.equal(env.record.read('card', 'C-1').doc.state, 'approved');
+  }
+  assert.match(put(env.record, 'dispatcher', 'card', 'C-1', { state: 'waiting', wait: wait({ resume: 'retry', return_to: 'ready' }) }).reason, /approved card waits only with resume: continue/);
+  must(put(env.record, 'dispatcher', 'card', 'C-1', { state: 'waiting', wait: wait() }), 'continue → approved');
+});
+
+test('L123 m-4: a head pushed while an approved card waits sends it back through review, never straight to approved (probe B)', () => {
+  const { env, wait } = approvedWaiting('m9-l123c-');
+  const OTHER = (c) => c.repeat(40);
+  // The caller cannot pick the head the wait remembers.
+  must(put(env.record, 'dispatcher', 'card', 'C-1', { state: 'waiting', wait: wait({ head: OTHER('f') }) }), 'approved → waiting');
+  assert.equal(env.record.read('card', 'C-1').doc.wait.head, HEAD);
+  // A re-check keeps it.
+  env.clock.t += MIN * 5;
+  must(put(env.record, 'dispatcher', 'card', 'C-1', { wait: wait({ head: OTHER('d') }) }), 're-check');
+  assert.equal(env.record.read('card', 'C-1').doc.wait.head, HEAD);
+  const NEW = OTHER('b');
+  must(put(env.record, 'workshop', 'card', 'C-1', { head: NEW }), 'a new head while it waits');
+  passingVerdict(env, 'C-1', 'R-2', NEW);
+  const r = put(env.review, 'dispatcher', 'card', 'C-1', { state: 'approved' });
+  assert.equal(r.ok, false);
+  assert.match(r.reason, /head changed while the card waited/);
+  // It goes back to in_review, and from there through verified to approved as any new head does.
+  assert.equal(put(env.record, 'dispatcher', 'card', 'C-1', { state: 'ready' }).ok, false, 'only in_review');
+  must(put(env.record, 'dispatcher', 'card', 'C-1', { state: 'in_review' }), 'waiting → in_review');
+  const c = env.record.read('card', 'C-1').doc;
+  assert.equal(c.state, 'in_review');
+  assert.equal(c.wait, undefined);
+});
+
+test('L123 m-4: with the head unchanged, the way back is approved only', () => {
+  const { env, wait } = approvedWaiting('m9-l123d-');
+  must(put(env.record, 'dispatcher', 'card', 'C-1', { state: 'waiting', wait: wait() }), 'approved → waiting');
+  const r = put(env.record, 'dispatcher', 'card', 'C-1', { state: 'in_review' });
+  assert.equal(r.ok, false);
+  assert.match(r.reason, /returns only to approved/);
 });

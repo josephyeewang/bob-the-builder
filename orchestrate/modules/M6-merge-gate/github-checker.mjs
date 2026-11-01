@@ -2333,25 +2333,22 @@ function asReaderText(v) {
 }
 
 // The test files that still read numbers and flags the old way, so the text values above turn them red (L104). Until
-// L96 step 2 moves their modules onto num/dec/flag, a fake made from one of these files hands values back as given.
-// This list only shrinks: orchestrate/test/rules-typed-reads.test.mjs fails on a file named here that is gone, and
-// L96 step 2 is done when it is empty. Lane 1 owns M2, M4, M6 and M9; lane 2 owns M11 (lead ruling after L104).
+// the PR named on each entry moves its module onto num/dec/flag, a fake made from one of these files hands values
+// back as given. This list only shrinks (L123): orchestrate/test/rules-typed-reads.test.mjs fails on a file named here
+// that is gone, on an entry with no owner or no PR, and on a list longer than its pinned count.
+const M11_TYPED = Object.freeze({ owner: 'lane 1', pr: 'M11 typed reads (L123)' });
 const OLD_VALUES_UNTIL_STEP_2 = Object.freeze({
-  'modules/M2-approvals/binding.test.mjs': 1, 'modules/M2-approvals/decision.test.mjs': 1,
-  'modules/M2-approvals/go.test.mjs': 1, 'modules/M2-approvals/research-ask.test.mjs': 1,
-  'modules/M2-approvals/schedule.test.mjs': 1,
-  'modules/M4-workshop/git/push.test.mjs': 1,
-  'modules/M6-merge-gate/gate.test.mjs': 1,
-  'modules/M9-record/claims.test.mjs': 1, 'modules/M9-record/l44.test.mjs': 1, 'modules/M9-record/moves.test.mjs': 1,
-  'modules/M9-record/outbox.test.mjs': 1, 'modules/M9-record/race.test.mjs': 1, 'modules/M9-record/ready.test.mjs': 1,
-  'modules/M9-record/smoke.test.mjs': 1, 'modules/M9-record/writer.test.mjs': 1,
-  'modules/M9-record/child.test-helper.mjs': 1,   // race.test.mjs's child processes build their fakes here
-  'modules/M11-dispatcher/account-ports.test.mjs': 2, 'modules/M11-dispatcher/gate.test.mjs': 2,
-  'modules/M11-dispatcher/lead-restart.test.mjs': 2, 'modules/M11-dispatcher/merges.test.mjs': 2,
-  'modules/M11-dispatcher/outage.test.mjs': 2, 'modules/M11-dispatcher/pass.test.mjs': 2,
-  'modules/M11-dispatcher/phone-link.test.mjs': 2, 'modules/M11-dispatcher/tick.test.mjs': 2,
-  'modules/M11-dispatcher/usage.test.mjs': 2,
-  'modules/M11-dispatcher/fixtures.test-helper.mjs': 2,   // tick.test.mjs's main.mjs runs build their fakes here
+  'modules/M4-workshop/git/push.test.mjs': { owner: 'lane 2', pr: 'M4 push.mjs typed reads (L96 step 2)' },
+  'modules/M11-dispatcher/account-ports.test.mjs': M11_TYPED,
+  'modules/M11-dispatcher/gate.test.mjs': M11_TYPED,
+  'modules/M11-dispatcher/lead-restart.test.mjs': M11_TYPED,
+  'modules/M11-dispatcher/merges.test.mjs': M11_TYPED,
+  'modules/M11-dispatcher/outage.test.mjs': M11_TYPED,
+  'modules/M11-dispatcher/pass.test.mjs': M11_TYPED,
+  'modules/M11-dispatcher/phone-link.test.mjs': M11_TYPED,
+  'modules/M11-dispatcher/tick.test.mjs': M11_TYPED,
+  'modules/M11-dispatcher/usage.test.mjs': M11_TYPED,
+  'modules/M11-dispatcher/fixtures.test-helper.mjs': M11_TYPED,   // tick.test.mjs's main.mjs runs build their fakes here
 });
 // Whether a fake is being made from one of those files: read once, from where fakeRules was called. A listed test
 // file counts wherever it is on the call stack. A listed helper counts only in a child process a test started (no

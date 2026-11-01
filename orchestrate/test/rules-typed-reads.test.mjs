@@ -132,15 +132,17 @@ test('L104: fakeRules hands every value back as the reader\'s text, so a test th
   assert.equal(rules.flag('f', P), false);
 });
 
-test('L104: the files still handed old values are named, exist, and belong to a lane; the list only shrinks', () => {
+test('L104, L123: the files still handed old values are named, exist, name an owner and the PR that removes them; the list only shrinks', () => {
   const names = Object.keys(OLD_VALUES_UNTIL_STEP_2);
   for (const f of names) {
     assert.ok(existsSync(join(ORCH, f)), `${f} is on the old-values list but is gone: take it off`);
     assert.ok(/\.test(?:-helper)?\.mjs$/.test(f), `${f} is a test file or a test helper`);
-    assert.ok([1, 2].includes(OLD_VALUES_UNTIL_STEP_2[f]), `${f} names its lane`);
+    const e = OLD_VALUES_UNTIL_STEP_2[f];
+    assert.ok(['lane 1', 'lane 2'].includes(e?.owner), `${f} names its owner`);
+    assert.ok(typeof e?.pr === 'string' && e.pr.trim() !== '', `${f} names the PR that takes it off`);
   }
-  // Pinned at the ruling's count (26 files: 16 lane 1, 10 lane 2). Step 2 takes files off; nothing is added.
-  assert.ok(names.length <= 26, `the old-values list grew to ${names.length}`);
+  // Pinned at r3's count (L123: 11 files, lane 2's M4 push test and 10 for the M11 typed reads PR). Only down from here.
+  assert.ok(names.length <= 11, `the old-values list grew to ${names.length}`);
   // This file is not on it, so its fakes hand text back (the test above).
   assert.equal(fakeRules({ values: { n: 30 } }).get('n', P), '30');
 });
