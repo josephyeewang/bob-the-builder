@@ -2232,9 +2232,16 @@ function exactFlag(v) {
 
 // Mac-wide keys and how M10 combines them across products (MAT-10, R2-M5(b)). `*` = every key under that map. A read
 // of any other key needs its product: with none it is missing, in the engine and in fakeRules alike (L104 O-1, L110).
+// The Dispatcher-wide keys (L131) govern nothing with one product: the Front Door, an outage, the account's usage. Most
+// are the smallest value across products, which acts and tells Joe soonest: a stuck Front Door is restarted sooner; an
+// outage is declared sooner; a card waits on Joe sooner while usage is unreadable; the pace check starts earlier in the
+// week. timeouts.dead_quiet_min is the largest (L131 follow-up): calling a working session dead and restarting it could
+// put two sessions on one card, while a longer wait only tells Joe later, and the outage floors still apply.
 const MAC_MIN = Object.freeze(['caps.editing_per_mac', 'caps.scripts_per_mac', 'caps.script_agents_max',
-  'usage.bands.*.*', 'usage.no_tier1_prod_above', 'usage.stale_after_min']);
-const MAC_MAX = Object.freeze(['usage.reserve_pct.*', 'claude_code.required_minimum']);
+  'usage.bands.*.*', 'usage.no_tier1_prod_above', 'usage.stale_after_min',
+  'timeouts.front_door_stuck_min', 'timeouts.usage_unknown_max_min',
+  'outage.min_dead', 'outage.share', 'usage.pace_min_share']);
+const MAC_MAX = Object.freeze(['usage.reserve_pct.*', 'claude_code.required_minimum', 'timeouts.dead_quiet_min']);
 const MAC_MATCH = Object.freeze(['claude_code.pin', 'models.*', 'accounts.current', 'accounts.joe.tz']);
 // Lists read for the whole Mac, combined strictest-wins: only what every product's list names (L96). usage.red_runs is
 // the kinds of session that may still start in the red band; the band is the account's, not one product's, so a read
@@ -2336,19 +2343,13 @@ function asReaderText(v) {
 // the PR named on each entry moves its module onto num/dec/flag, a fake made from one of these files hands values
 // back as given. This list only shrinks (L123): orchestrate/test/rules-typed-reads.test.mjs fails on a file named here
 // that is gone, on an entry with no owner or no PR, and on a list longer than its pinned count.
-const M11_TYPED = Object.freeze({ owner: 'lane 1', pr: 'M11 typed reads (L123)' });
 const OLD_VALUES_UNTIL_STEP_2 = Object.freeze({
   'modules/M4-workshop/git/push.test.mjs': { owner: 'lane 2', pr: 'M4 push.mjs typed reads (L96 step 2)' },
-  'modules/M11-dispatcher/account-ports.test.mjs': M11_TYPED,
-  'modules/M11-dispatcher/gate.test.mjs': M11_TYPED,
-  'modules/M11-dispatcher/lead-restart.test.mjs': M11_TYPED,
-  'modules/M11-dispatcher/merges.test.mjs': M11_TYPED,
-  'modules/M11-dispatcher/outage.test.mjs': M11_TYPED,
-  'modules/M11-dispatcher/pass.test.mjs': M11_TYPED,
-  'modules/M11-dispatcher/phone-link.test.mjs': M11_TYPED,
-  'modules/M11-dispatcher/tick.test.mjs': M11_TYPED,
-  'modules/M11-dispatcher/usage.test.mjs': M11_TYPED,
-  'modules/M11-dispatcher/fixtures.test-helper.mjs': M11_TYPED,   // tick.test.mjs's main.mjs runs build their fakes here
+  // M11 reads typed (L123); these five stay red only because their modules read per-product keys with no product
+  // (merges.mjs time limits, pass.mjs:149-151, lead-restart.mjs context.*). Lane 2 passes the product (L104 O-1, L131).
+  // The helper is for tick.test's child `node main.mjs`, which runs a whole pass on the helper's rules.
+  ...Object.fromEntries(['pass.test', 'tick.test', 'merges.test', 'lead-restart.test', 'account-ports.test', 'fixtures.test-helper']
+    .map((n) => [`modules/M11-dispatcher/${n}.mjs`, { owner: 'lane 2', pr: 'M11 per-product reads pass the product (L104 O-1 step 2, L131)' }])),
 });
 // Whether a fake is being made from one of those files: read once, from where fakeRules was called. A listed test
 // file counts wherever it is on the call stack. A listed helper counts only in a child process a test started (no
