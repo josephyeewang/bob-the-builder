@@ -72,9 +72,9 @@
 //   PASSES { reviewer, auditor }, checklistClean(verdict)    each role's own pass, the one definition (L69 point 6)
 
 import { createHash } from 'node:crypto';
-import { closeSync, fstatSync, lstatSync, openSync, readdirSync, readSync, realpathSync, constants } from 'node:fs';
+import { closeSync, fstatSync, lstatSync, openSync, readdirSync, readSync, constants } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
-import { CHECKLIST_LEVELS, OUTBOX_KINDS, SESSION_ID, VERDICT_CHECKLIST, notARecord, outboxKind } from '../../shared/record.mjs';
+import { CHECKLIST_LEVELS, OUTBOX_KINDS, SESSION_ID, VERDICT_CHECKLIST, notARecord, outboxKind, outboxPlace } from '../../shared/record.mjs';
 import { REVIEW_ROLES } from '../../shared/review-roles.mjs';
 
 export { REVIEW_ROLES };
@@ -387,21 +387,10 @@ export const kindOf = outboxKind;
 export function readOutboxFile({ outboxRoot, uids = {}, tag, file }) {
   const given = typeof file === 'string' ? file : '';
   const no = (reason, key = `${given}\0${reason}`) => ({ ok: false, key, reason });
-  if (!given) return no('no file');
-  if (!tag || typeof tag.role !== 'string' || typeof tag.sessionId !== 'string' || !SESSION_ID.test(tag.sessionId)) return no('bad outbox tag');
-  if (typeof outboxRoot !== 'string' || !outboxRoot) return no('no outbox root configured');
-
-  let real; let folder;
-  try { real = realpathSync(given); } catch { return no('file not found'); }
-  // The role and session folders themselves may not be links: a session folder linked to another's would hand that
-  // session's files in under this tag (0b-2 audit MIN-5).
-  try {
-    for (const p of [join(outboxRoot, tag.role), join(outboxRoot, tag.role, tag.sessionId)]) if (lstatSync(p).isSymbolicLink()) return no(`outbox folder ${basename(p)} is a link`);
-    folder = realpathSync(join(outboxRoot, tag.role, tag.sessionId));
-  } catch { return no(`no outbox folder for ${tag.role} ${tag.sessionId}`); }
-  if (dirname(real) !== folder) return no(`file is not directly inside the ${tag.role} outbox of session ${tag.sessionId}`);
-  // The name given must be the file itself, not a link to it: realpath follows links, O_NOFOLLOW checks the last part.
-  if (basename(given) !== basename(real)) return no('file is a link');
+  // Where the file is (missing, a link, the wrong folder): the one check, shared with the stand-in (L151 m7).
+  const place = outboxPlace({ outboxRoot, tag, file });
+  if (!place.ok) return no(place.reason);
+  const { real } = place;
 
   const name = basename(real);
   const kind = kindOf(name);

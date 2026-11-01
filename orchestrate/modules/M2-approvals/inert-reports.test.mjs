@@ -31,9 +31,11 @@ function storeAll(t) {
   return n;
 }
 
-test('L140: every report kind but ask-request- is listed, the seven new ones included (the test reads something)', () => {
+test('L140: every report kind but ask-request- is listed, the new ones included (the test reads something)', () => {
   const kinds = OTHER_REPORT_KINDS.map(([k]) => k).sort();
-  for (const k of ['wish-', 'history-', 'request-', 'state-', 'idea-', 'check-', 'prune-', 'report-']) assert.ok(kinds.includes(k), k);
+  for (const k of ['wish-', 'history-', 'idea-', 'check-', 'prune-', 'report-']) assert.ok(kinds.includes(k), k);
+  // request- and state- are refused until their consumers land (L151 M-1), so they are not stored reports.
+  for (const k of ['request-', 'state-']) assert.ok(!kinds.includes(k), k);
 });
 
 test('L140 condition 3: the research-ask and undo passes pass over every report that is not an ask-request-', async () => {

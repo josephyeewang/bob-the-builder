@@ -97,7 +97,7 @@ export const UNUSED_GRANTS = Object.freeze([
   { grant: 'report script create', reason: 'an AI role: its documents come in through its outbox (M9 writer.mjs applyOutbox), never a write() call' },
   { grant: 'report front_door create', reason: 'an AI role: its documents come in through its outbox (M9 writer.mjs applyOutbox), never a write() call' },
   { grant: 'report incident create', reason: 'an AI role: its documents come in through its outbox (M9 writer.mjs applyOutbox), never a write() call' },
-  { grant: 'report lead create', reason: 'an AI role: its wish-, history-, request-, state- and idea- files come in through its outbox (M9 writer.mjs applyOutbox, L140), never a write() call' },
+  { grant: 'report lead create', reason: 'an AI role: its wish- and history- files (both latent, L151) come in through its outbox (M9 writer.mjs applyOutbox, L140), never a write() call' },
   { grant: 'report learning create', reason: 'an AI role: its check- and prune- files come in through its outbox (M9 writer.mjs applyOutbox, L140), never a write() call; learning is NEVER_STARTED in 0b' },
   { grant: 'lesson learning create', reason: 'an AI role: its documents come in through its outbox (M9 writer.mjs applyOutbox), never a write() call' },
   { grant: 'lesson learning update', reason: 'an AI role: its documents come in through its outbox (M9 writer.mjs applyOutbox), never a write() call; learning is Phase 1, so no learning session starts in 0b' },

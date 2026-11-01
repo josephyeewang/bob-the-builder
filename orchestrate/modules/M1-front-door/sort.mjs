@@ -5,8 +5,8 @@
 // must match CUES) and the checks a reply must pass. What each mode files on [Go]:
 //   new      nothing: the owner starts a Bob NEW session themselves ("open a session on the Mini and say bob NEW X")
 //   evolve, audit, upgrade, think   nothing yet (audit kit-lane3 r1 Minor 9): the record takes no mode request until join
-//            item 9 lands (the record has a `request-` entity since L140, but intake doesn't take mode requests in
-//            yet and the skill's step 3 is off), so the skill files nothing and never says "Filed"; it tells the
+//            item 9 lands (the record refuses `request-` until items 7, 8 and 9 land (L151), and intake doesn't
+//            take mode requests in yet; the skill's step 3 is off), so the skill files nothing and never says "Filed"; it tells the
 //            owner how to start it themselves. The file shape stays checked here
 //            (request-<mode>-<id>.json { request, product, name: null, what }, outbox.mjs) for when it is wired.
 
