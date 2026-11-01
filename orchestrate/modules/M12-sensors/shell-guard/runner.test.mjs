@@ -118,10 +118,11 @@ test('round 10: the ansi-c form reaches the command intact (a string replacement
 
 // Every refuse case must really read or write the planted file under bash or zsh, in both runs the README names, and
 // the dead list must hold exactly the template and form pairs that touch nothing. Checked on two names, so the list
-// does not hang on one name's letters (round 10 audit 2 M-2). ~7,000 shell runs, about 70 s.
+// does not hang on one name's letters (round 10 audit 2 M-2). Several thousand shell runs, a few at once; past
+// selfcheck.mjs's time budget the check fails, "guard not verified", never passes.
 // corpus.dead is for a Mac; on a machine without zsh, or whose sh is dash (Linux CI), runner.mjs's hostDead drops the
 // pairs that touch nothing there, and they are left out of both sides here (round 10 audit 3 M-4).
-test('round 10: every refuse case touches the file, and corpus.dead is exactly the pairs that do not, on two names', () => {
+test('round 10: every refuse case touches the file, and corpus.dead is exactly the pairs that do not, on two names', async () => {
   const shells = ['/bin/bash', '/bin/zsh'].filter((s) => existsSync(s));
   const listed = Object.entries(corpus.dead).flatMap(([tpl, forms]) => forms.filter((form) => !hostDead(tpl, form) && !hostLive(tpl, form)).map((form) => `${form} / ${tpl}`)).sort();
   assert.ok(listed.length > 0);
@@ -129,7 +130,9 @@ test('round 10: every refuse case touches the file, and corpus.dead is exactly t
   try {
     for (const name of [T, 'secret.prod']) {
       const groups = new Map();
-      for (const c of ['relative', 'absolute'].flatMap((mode) => touchCheck(name, { mode, shells, newFolder: () => tempDir('sg-self-') }))) {
+      const checked = [];
+      for (const mode of ['relative', 'absolute']) checked.push(...await touchCheck(name, { mode, shells, newFolder: () => tempDir('sg-self-') }));
+      for (const c of checked) {
         const k = `${c.form} / ${c.tpl}`; groups.set(k, [...(groups.get(k) ?? []), c]);
       }
       const silent = (c) => !c.touchedBy.length;
