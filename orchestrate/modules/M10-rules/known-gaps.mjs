@@ -11,8 +11,17 @@ export const KNOWN = Object.freeze({
   scopeRedRuns: ' (known: M11 reads this key without the product, L115; waits on lane 1\'s #79)',
   scopeContext: ' (known: M11 reads this key without the product, L115; waits on lane 2\'s L104 sweep)',
 });
-/** The scope label for a key M11 reads Mac-wide, naming that key's owner. */
-export const scopeLabel = (key) => (key.startsWith('context.') ? KNOWN.scopeContext : KNOWN.scopeRedRuns);
+// Each key with a known scope gap, and the label naming its owner (L125 c-1). A key not here gets no label, so a new
+// scope gap is not labelled known by default, and the pending-reasons test fails on it until it is placed here.
+export const SCOPE_OWNERS = Object.freeze({
+  'usage.red_runs': 'scopeRedRuns',
+  'context.lead.soft': 'scopeContext',
+  'context.lead.hard': 'scopeContext',
+  'context.handoff_cap.role': 'scopeContext',
+  'context.worker.split_after_compactions': 'scopeContext',
+});
+/** The scope label for a key M11 reads Mac-wide, naming that key's owner; '' for a key with no known gap. */
+export const scopeLabel = (key) => (Object.hasOwn(SCOPE_OWNERS, key) ? KNOWN[SCOPE_OWNERS[key]] : '');
 
 // A rules value the real engine gave as text that would be a number: "30", "0.5", not "", " 3" or "3x". Lists are left
 // alone; a map's values are converted one level down (caps.per_state).

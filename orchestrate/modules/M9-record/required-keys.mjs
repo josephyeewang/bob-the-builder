@@ -53,6 +53,9 @@ export function goFreeOn(rules, product, kind) {
   return false;
 }
 
+// A pattern as the reason prints it: text in quotes; anything else (a map, a list, null) is named, never converted, since
+// yaml-lite's maps have no prototype and can't be turned into text (L125 m-1).
+const shown = (p) => (typeof p === 'string' ? `"${p}"` : 'a non-text entry');
 function patternProblem(p) {
   if (typeof p !== 'string' || /[^\x20-\x7e]/.test(p)) return 'is not a plain-ASCII pattern';
   try { compile(p); return null; } catch (e) { return `can't be read: ${e.message}`; }
@@ -71,7 +74,7 @@ export function policyProblems(rules, product) {
       else if (shape === 'flag' && flagOf(value) === undefined) out.push(`M9: ${GO_FREE_KEY}.${kind} must be true or false`);
       else if (shape === 'patterns') {
         if (!Array.isArray(value)) out.push(`M9: ${GO_FREE_KEY}.${kind} must be a list of file patterns`);
-        else for (const p of value) { const why = patternProblem(p); if (why) out.push(`M9: ${GO_FREE_KEY}.${kind}: "${p}" ${why}`); }
+        else for (const p of value) { const why = patternProblem(p); if (why) out.push(`M9: ${GO_FREE_KEY}.${kind}: ${shown(p)} ${why}`); }
       }
     }
   }

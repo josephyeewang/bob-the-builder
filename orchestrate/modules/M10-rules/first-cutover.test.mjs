@@ -21,7 +21,7 @@ import { KEYS as M11_KEYS, NEW_KEYS as M11_NEW_KEYS, need } from '../M11-dispatc
 import { startGate } from '../M11-dispatcher/gate.mjs';
 import { bands } from '../M11-dispatcher/usage.mjs';
 import { handoffVet } from '../M11-dispatcher/lead-restart.mjs';
-import { KNOWN, numeric, scopeLabel } from './known-gaps.mjs';
+import { KNOWN, SCOPE_OWNERS, numeric, scopeLabel } from './known-gaps.mjs';
 import { DAILY_CARD_RULE, M11_WITH_PRODUCT, m11Scope } from './first-cutover.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -306,6 +306,9 @@ test('the pending reasons are exactly these, on the fixture as given, and each s
   });
   assert.equal(scopeLabel('usage.red_runs'), KNOWN.scopeRedRuns);
   assert.equal(scopeLabel('context.lead.soft'), KNOWN.scopeContext);
+  // L125 c-1: owners are named key by key; any other key gets no label, so it can't pass as known.
+  for (const k of ['caps.readonly_per_session', 'timeouts.cancel_grace_min', 'anything.at.all', 'context.other', 'constructor']) assert.equal(scopeLabel(k), '', k);
+  assert.deepEqual(Object.keys(SCOPE_OWNERS), PENDING_SCOPE, 'the map names exactly the pending scope gaps');
   for (const x of PENDING) assert.match(x, / \(known: /, x);
   assert.deepEqual(PENDING_SCOPE, ['usage.red_runs', 'context.lead.soft', 'context.lead.hard', 'context.handoff_cap.role', 'context.worker.split_after_compactions']);
 });
@@ -407,8 +410,24 @@ test('daily-card patterns: M9\'s pattern rule, then no list at all until M11 rea
   assert.deepEqual(fit(by['one daily-card pattern'], ENTRY), [DAILY_CARD_RULE]);
   for (const pat of DAILY_FORMS) assert.deepEqual(fit(by[`the daily-card pattern ${pat}`], ENTRY), [DAILY_CARD_RULE], pat);
   assert.deepEqual(fit(DAILY('docs/a/**', 'docs/b/**')(FIRST), ENTRY), [DAILY_CARD_RULE], 'one reason for the list, not one per pattern');
+  // L125 m-1: a map entry is named, not printed (yaml-lite's map can't become text), and the check does not crash.
+  const listOf = (body) => swap(FIRST, '      lead_daily_card: []\n', `      lead_daily_card:${body}`);
+  assert.deepEqual(fit(listOf('\n        - a: b\n'), ENTRY), PRINT_MAP);
+  // L125 c-3: a plain value instead of a list gets the "list" reasons only: no rule, no label.
+  assert.deepEqual(fit(listOf(' docs/x.md\n'), ENTRY), PRINT_SCALAR);
   assert.deepEqual(fit(FIRST, ENTRY), []);
 });
+
+// L125 m-1: a map entry in the daily list (lane 2's M11 says "must be a list" too: c-2, its own wording).
+const PRINT_MAP = [
+  'M9: approvals.plan_go.go_free.lead_daily_card: a non-text entry is not a plain-ASCII pattern',
+  'M11: approvals.plan_go.go_free.lead_daily_card must be a list',
+];
+// L125 c-3: a plain value instead of a list: both "list" reasons, and neither the L120 rule nor a known label.
+const PRINT_SCALAR = [
+  'M9: approvals.plan_go.go_free.lead_daily_card must be a list of file patterns',
+  'M11: approvals.plan_go.go_free.lead_daily_card must be a list',
+];
 
 test('the fit check refuses a file without go_free, naming it (the L86 plant)', () => {
   assert.deepEqual(fit(VARIANTS[1][1](FIRST), ENTRY), [
