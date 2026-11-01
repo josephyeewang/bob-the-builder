@@ -280,6 +280,8 @@ test('L75 c-1: root\'s account copy runs only from the installed copy, root\'s a
   const self = join(real, 'accounts.mjs');
   const node = join(real, 'bin', 'node');
   for (const f of [self, node]) writeFileSync(f, '', { mode: 0o644 });
+  const stamp = join(top, `inst.v-${C}`, STAMP);
+  writeFileSync(stamp, `${C}\n`, { mode: 0o644 });
   const home = join(top, 'home');
   mkdirSync(home, { mode: 0o755 });
   const dir = join(top, 'root-only');
@@ -295,6 +297,13 @@ test('L75 c-1: root\'s account copy runs only from the installed copy, root\'s a
   chmodSync(self, 0o644);
   assert.match(go({ owner: ME + 1 }).reason, /is not owned by uid/);
   assert.match(go({ install: undefined }).reason, /copy-to needs --install <the installed copy>/);
+  // L106 m-1: a copy the updater did not finish (no stamp, or another commit's) is refused, as the runner refuses it.
+  unlinkSync(stamp);
+  assert.match(go().reason, /runs only from an installed copy the updater finished: the copy's commit stamp \(none at .*installed-commit\) is not the commit its folder is named for/);
+  writeFileSync(stamp, `${'d'.repeat(40)}\n`, { mode: 0o644 });
+  assert.match(go().reason, /stamp \(d{40}\) is not the commit/);
+  writeFileSync(stamp, `${C}\n`, { mode: 0o644 });
+  assert.deepEqual(go(), { ok: true, account: 'a' });
   // Run as the script from the repository, as a mistaken plist would: refused, and nothing is written.
   const script = join(dirname(new URL(import.meta.url).pathname), 'accounts.mjs');
   const to2 = join(dir, 'copy2');

@@ -220,6 +220,11 @@ export function previousCopy(installRoot) {
  * (L73 M1). → what was removed, for the log.
  */
 export function clearLeftovers(installRoot, { current = null } = {}) {
+  // `current` is the versioned folder itself, beside installRoot (L106 m-5): anything else (the copy inside it, a path
+  // elsewhere) would leave the copy in use among the leftovers, so it is refused before anything is removed.
+  if (current !== null && (dirname(current) !== dirname(installRoot) || versionCommit(installRoot, basename(current)) === null)) {
+    throw new Error(`clearLeftovers: ${current} is not a versioned folder beside ${installRoot}`);
+  }
   const done = [];
   const previous = previousCopy(installRoot);
   for (const d of leftovers(installRoot)) {
@@ -358,7 +363,7 @@ export async function updateOnce(c, { first = null, owner = 0, top = '/', write 
     if (bad) return refuse(`the folder of ${what}: ${bad}`);
   }
   const cur = currentCopy(c.installRoot, { owner });
-  if (first && !cur.missing) return refuse('there is already an installed copy; --first is only for the install step');
+  if (first && !cur.missing) return refuse(cur.old ? cur.problem : 'there is already an installed copy; --first is only for the install step');
   if (!first && cur.missing) return refuse('there is no installed copy; run the install step');
   if (!first && cur.problem) return refuse(cur.problem);
   if (!first && !cur.link) return refuse(`${c.installRoot} is a plain folder, not the copy's link the updater flips; run the install step`);

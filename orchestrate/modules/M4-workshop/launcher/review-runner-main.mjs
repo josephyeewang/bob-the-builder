@@ -51,7 +51,7 @@ import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { runnerPass, CARD_ID, isClaudeCommand } from './review-runner.mjs';
-import { installProblem, readInstallStamp, aclProblem, currentCopy, copyPath } from './install-check.mjs';
+import { installProblem, readInstallStamp, aclProblem, currentCopy, copyPath, copyReady } from './install-check.mjs';
 import { sessionVerdict, verdictFromFile } from '../../M9-record/outbox.mjs';
 import { SESSION_ID } from '../../../shared/record.mjs';
 import { readAccountFile, ACCOUNT_FILE } from './accounts.mjs';
@@ -142,13 +142,7 @@ export { installProblem, readInstallStamp };
 export function programsProblem(c, { self, config, node = realpathSync.native(process.execPath), ...opts } = {}) {
   const bad = installProblem(c.installRoot, [self, config, c.wiring, c.claudeBin, node, c.hooksDir, ...REVIEW_ROLES.map((r) => templateFile(c.installRoot, r))], opts);
   if (bad) return bad;
-  const owner = opts.owner ?? 0;
-  const cur = currentCopy(c.installRoot, { owner, ...(opts.lstat ? { lstat: opts.lstat } : {}), ...(opts.readlink ? { readlink: opts.readlink } : {}) });
-  if (!cur.real) return cur.problem;
-  if (!cur.link) return `${c.installRoot} is a plain folder, not the installed copy's link (the install step makes the link)`;
-  const stamp = readInstallStamp(c.installRoot, { owner });
-  if (stamp !== cur.commit) return `the copy's commit stamp (${stamp ?? 'none'}) is not the commit its folder is named for (${cur.commit})`;
-  return null;
+  return copyReady(c.installRoot, { owner: opts.owner ?? 0, ...(opts.lstat ? { lstat: opts.lstat } : {}), ...(opts.readlink ? { readlink: opts.readlink } : {}) });
 }
 
 // A folder of the Record: a plain folder of the Record's owner that no one else writes. Null, or the problem.
@@ -337,7 +331,7 @@ export async function main(argv, { log = (s) => process.stderr.write(`${s}\n`) }
   try { c = readConfig(argv[0]); } catch (e) { log(`review runner: ${e.message}`); return 1; }
   const self = realpathSync.native(fileURLToPath(import.meta.url));
   const bad = programsProblem(c, { self, config: realpathSync.native(argv[0]) });
-  if (bad) { log(`review runner: refused, the installed copy is not root's alone: ${bad}`); return 1; }
+  if (bad) { log(`review runner: refused, the installed copy is not one it may run (root's alone, its link, its stamp): ${bad}`); return 1; }
   let wiring;
   try { wiring = await import(pathToFileURL(c.wiring).href); } catch (e) { log(`review runner: the wiring could not be loaded (${e.message})`); return 1; }
   if (typeof wiring.start !== 'function') { log('review runner: the wiring has no start'); return 1; }

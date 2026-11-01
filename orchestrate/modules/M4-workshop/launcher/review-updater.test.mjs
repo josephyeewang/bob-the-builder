@@ -14,9 +14,9 @@ import { tempDir } from '../../../shared/test-tmp.mjs';
 import { gitOk, callLog, ROOT_PATH, safeGitEnv } from '../git/safe-git.mjs';
 import { SCRIPTS, UPDATE_EVERY_S, updaterPlist } from './review-daemons.mjs';
 import { STAMP, SOURCE, OUTSIDE_FILES, NODE, UPDATER_CONFIG, RUNNER_CONFIG, installProblem, chainProblem, currentCopy, aclProblem, versionName, mainSeenFile, readMainSeen, readInstallStamp,
-  nextMainSeen, behindSince } from './install-check.mjs';
+  nextMainSeen, behindSince, copyReady } from './install-check.mjs';
 import { updateOnce, writeNew, leftovers as updaterLeftovers, parseTree, parseBatch, readUpdaterConfig, main, MAIN, PREVIOUS, CLONE_MADE,
-  cloneLocks, gitIsRunning, gitToolsProblem } from './review-updater.mjs';
+  cloneLocks, gitIsRunning, gitToolsProblem, previousCopy, clearLeftovers } from './review-updater.mjs';
 
 const ME = process.getuid();
 const ID = [['user.name', 'test'], ['user.email', 'test@example.invalid']];
@@ -261,6 +261,14 @@ test('L73 point 1: at every step of an update the path launchd starts from names
     whole(where);
     const d = join(w.root, `image-${images.length}`);
     cpSync(inst, d, { recursive: true, verbatimSymlinks: true });
+    // The new versioned folder, as a run killed here leaves it, holds its stamp only once every other file is in it
+    // (L106 m-2: a second guard on the stamp being written last, beside L73 point 2's).
+    const nv = join(d, versionName(w.installRoot, main2));
+    if (existsSync(join(nv, STAMP))) {
+      for (const n of [join(SOURCE, NODE), join(SOURCE, 'a.txt'), join(SOURCE, SCRIPTS.updater), join(SOURCE, RUNNER_CONFIG), ...OUTSIDE_FILES]) {
+        assert.equal(existsSync(join(nv, n)), true, `${where}: the new copy has its stamp only once ${n} is in it`);
+      }
+    }
     images.push({ where, d });
   };
   const write = (file, data, mode) => { writeNew(file, data, mode); freeze(`after writing ${basename(file)}`); };
@@ -441,10 +449,13 @@ test('L92 item 4: the copy\'s link names exactly <name>.v-<commit>/orchestrate, 
   mkdirSync(join(inst, v, 'other'));
   // The old form (straight to the versioned folder), another subfolder, a deeper path, `..`, `.`, a doubled or
   // trailing slash, an absolute path, a folder that is not a versioned name, a commit not in lower-case hex.
-  for (const to of [v, `${v}/other`, `${v}/${SOURCE}/modules`, `${v}/../${v}/${SOURCE}`, `./${v}/${SOURCE}`, `${v}/./${SOURCE}`, `${v}/${SOURCE}/`,
-    `${v}//${SOURCE}`, join(inst, v, SOURCE), `x/${SOURCE}`, `${basename(w.installRoot)}.v-${'E'.repeat(40)}/${SOURCE}`]) {
+  for (const to of [`${v}/other`, `${v}/${SOURCE}/modules`, `${v}/../${v}/${SOURCE}`, `./${v}/${SOURCE}`, `${v}/./${SOURCE}`, `${v}/${SOURCE}/`,
+    `${v}//${SOURCE}`, join(inst, v, SOURCE), `x/${SOURCE}`, `${basename(w.installRoot)}.v-${'E'.repeat(40)}/${SOURCE}`,
+    `${v}/${SOURCE}/..`, `${v}x/${SOURCE}`, `../${basename(inst)}/${v}/${SOURCE}`]) {
     assert.match(relink(to) ?? 'accepted', SHAPE, `the link ${to} is refused`);
   }
+  // The old form (L106 m-3) has its own message: what it is and what to do.
+  assert.match(relink(v) ?? 'accepted', /is an install from before the copy's layout changed/);
   rmSync(join(inst, v, 'other'), { recursive: true });
   // A link at the versioned folder, or at orchestrate inside it, even when the name has the right shape.
   const v2 = versionName(w.installRoot, E40);
@@ -971,4 +982,92 @@ test('L75 c-2, c-3, c-6: the config is checked before it is read, names plain pa
   mkdirSync(join(w.root, 'other-home'), { mode: 0o700 });
   symlinkSync(join(w.root, 'other-home'), home);
   assert.match((await updateOnce(w.c, w.o)).reason, /git's home: .*clone\.git\.home is not a plain folder/);
+});
+
+/**
+ * The layout an updater from before L92 item 4 made: the link names the versioned folder, which is the copy itself,
+ * with the stamp inside it. Made here from a new-shape install of the same commit.
+ */
+function oldShape(w) {
+  const inst = dirname(w.installRoot);
+  const v = vOf(linkOf(w));
+  rmSync(w.installRoot);
+  renameSync(join(inst, v), join(inst, 'was'));
+  renameSync(join(inst, 'was', SOURCE), join(inst, v));
+  renameSync(join(inst, 'was', STAMP), join(inst, v, STAMP));
+  rmSync(join(inst, 'was'), { recursive: true });
+  symlinkSync(v, w.installRoot);
+  return v;
+}
+
+test('L106 m-3, m-2: an install from before L92 item 4 is refused everywhere, nothing changed, and Joe is told to remove the link and run the install step again', async () => {
+  const w = await world();
+  assert.equal((await updateOnce(w.c, { ...w.o, first: w.keepSeed })).ok, true);
+  await moveMain(w, 'later\n');
+  const v = oldShape(w);
+  const inst = dirname(w.installRoot);
+  const before = snapshot(inst);
+  const told = new RegExp(`${esc(w.installRoot)} is an install from before the copy's layout changed \\(L92 item 4\\): its link names the folder ${esc(v)} itself, not ${esc(v)}/${SOURCE}\\. Nothing was changed.*remove the old link, then run the install step again .*--first <seed folder>.*to paste in Terminal: sudo /bin/rm ${esc(w.installRoot)}$`);
+  // The update, the install step, the runner's and the account copy's check, and the install check all say it.
+  assert.match((await updateOnce(w.c, w.o)).reason, told);
+  assert.match((await updateOnce(w.c, { ...w.o, first: w.keepSeed })).reason, told);
+  assert.match(copyReady(w.installRoot, { owner: ME }), told);
+  assert.match(installProblem(w.installRoot, [], { owner: ME, top: w.root }), told);
+  assert.equal(currentCopy(w.installRoot, { owner: ME }).old, true);
+  assert.equal(readInstallStamp(w.installRoot, { owner: ME }), null);
+  const now = snapshot(inst);
+  for (const k of Object.keys({ ...before, ...now })) if (!k.includes(basename(mainSeenFile(w.installRoot)))) assert.equal(now[k], before[k], `nothing changed: ${k}`);
+  // Doing what it says: the link alone is removed, and the install step makes the new shape and clears the old folder.
+  rmSync(w.installRoot);
+  const r = await updateOnce(w.c, { ...w.o, first: w.keepSeed });
+  assert.equal(r.ok, true, r.reason);
+  assert.equal(linkOf(w), into(versionName(w.installRoot, r.commit)));
+  assert.equal(stampOf(w), r.commit);
+  assert.equal(copyReady(w.installRoot, { owner: ME }), null);
+  assert.equal(existsSync(join(inst, v, STAMP)), false, 'the old folder is cleared');
+  assert.deepEqual(leftovers(w), []);
+});
+
+test('L106 m-1: a copy the updater did not finish (no stamp, or another commit\'s) is not ready, though its link is good', async () => {
+  const w = await world();
+  assert.equal((await updateOnce(w.c, { ...w.o, first: w.keepSeed })).ok, true);
+  const folder = join(dirname(w.installRoot), vOf(linkOf(w)));
+  assert.equal(copyReady(w.installRoot, { owner: ME }), null);
+  rmSync(join(folder, STAMP));
+  assert.match(copyReady(w.installRoot, { owner: ME }), new RegExp(`the copy's commit stamp \\(none at ${esc(join(folder, STAMP))}\\) is not the commit its folder is named for \\(${w.main1}\\)`));
+  // A stamp written inside orchestrate/ (where a hand install might put it) is not read (L106 m-6).
+  writeFileSync(join(folder, SOURCE, STAMP), `${w.main1}\n`, { mode: 0o644 });
+  assert.match(copyReady(w.installRoot, { owner: ME }), /stamp \(none at /);
+  writeFileSync(join(folder, STAMP), `${E40}\n`, { mode: 0o644 });
+  assert.match(copyReady(w.installRoot, { owner: ME }), new RegExp(`stamp \\(${E40}\\) is not the commit its folder is named for`));
+  // The updater still replaces such a copy: it does not ask copyReady.
+  const main2 = await moveMain(w, 'mend\n');
+  const r = await updateOnce(w.c, w.o);
+  assert.deepEqual([r.ok, r.commit], [true, main2], r.reason);
+  assert.equal(copyReady(w.installRoot, { owner: ME }), null);
+});
+
+test('L106 m-7, m-5: an old-shape .prev is not kept, and the leftover clean-up takes only a versioned folder beside the copy as the one in use', async () => {
+  const w = await world();
+  assert.equal((await updateOnce(w.c, { ...w.o, first: w.keepSeed })).ok, true);
+  const main2 = await moveMain(w, 'two\n');
+  assert.equal((await updateOnce(w.c, w.o)).ok, true);
+  const inst = dirname(w.installRoot);
+  const v1 = versionName(w.installRoot, w.main1);
+  assert.equal(previousCopy(w.installRoot), join(inst, v1));
+  // `.prev` as an updater from before L92 item 4 wrote it: straight at the versioned folder.
+  const prev = `${w.installRoot}${PREVIOUS}`;
+  rmSync(prev);
+  symlinkSync(v1, prev);
+  assert.equal(previousCopy(w.installRoot), null, 'the old shape is not a previous copy');
+  const cur = currentCopy(w.installRoot, { owner: ME });
+  // m-5: the copy inside the versioned folder, or a path elsewhere, is refused, and nothing is removed.
+  for (const bad of [cur.real, join(w.root, 'elsewhere', versionName(w.installRoot, main2)), join(inst, 'not-a-version')]) {
+    assert.throws(() => clearLeftovers(w.installRoot, { current: bad }), /is not a versioned folder beside/, bad);
+    assert.equal(existsSync(join(inst, v1)), true, `${bad}: nothing removed`);
+  }
+  assert.deepEqual(clearLeftovers(w.installRoot, { current: cur.folder }), [`removed ${v1}`]);
+  assert.equal(existsSync(join(inst, v1)), false, 'the folder an old-shape .prev names is removed');
+  assert.equal(currentCopy(w.installRoot, { owner: ME }).commit, main2);
+  assert.equal(copyReady(w.installRoot, { owner: ME }), null);
 });

@@ -83,7 +83,7 @@ export function statusAlerts(s, mainHead, now = Date.now()) {
     if (at && since !== null && now - since < STAMP_GRACE_MS) return out;
     out.push({ id: `stamp-${at ?? 'none'}`, at: 'once', text: at
       ? `Its installed copy is at ${at.slice(0, 7)}, but main is at ${main.slice(0, 7)}: reviews run the old code until the copy is updated.`
-      : 'Its installed copy has no commit stamp, so whether reviews run main\'s code can\'t be told.' });
+      : 'Its installed copy has no commit stamp where it is read, installed-commit at the top of the <name>.v-<commit> folder the copy\'s link names (beside orchestrate/, not inside it), so whether reviews run main\'s code can\'t be told. An install from before the copy\'s layout changed has none there; the review runner\'s log says what to do.' });
   }
   return out;
 }

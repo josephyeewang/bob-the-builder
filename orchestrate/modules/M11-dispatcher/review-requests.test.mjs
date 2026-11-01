@@ -102,7 +102,7 @@ test('L66: a failed runner pass and an installed copy behind main are told, each
   assert.equal(behind.length, 1);
   assert.match(behind[0].text, /installed copy is at abababa, but main is at ccccccc/);
   assert.equal(statusAlerts({ ...ok, installed_commit: HEAD }, () => 'd'.repeat(40))[0].id, behind[0].id, 'main moving on does not tell it again');
-  assert.match(statusAlerts({ ...ok, installed_commit: null }, () => MAIN)[0].text, /no commit stamp/);
+  assert.match(statusAlerts({ ...ok, installed_commit: null }, () => MAIN)[0].text, /no commit stamp where it is read, installed-commit at the top of the <name>\.v-<commit> folder/);
   for (const mainHead of [undefined, () => null, () => 'main', () => { throw new Error('no'); }]) assert.deepEqual(statusAlerts({ ...ok, installed_commit: HEAD }, mainHead), []);
   // Through the ports, read from the real status file.
   const dir = tempDir('m11-status-');

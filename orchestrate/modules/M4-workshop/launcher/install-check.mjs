@@ -14,7 +14,9 @@
 // new one, never on nothing. A plain folder at installRoot is still a copy to these checks; the updater and the review
 // runner refuse one (L75 c-7), since only a link can be flipped whole.
 //
-//   currentCopy(installRoot)            → { real, folder, link, commit } | { missing } | { problem }
+//   currentCopy(installRoot)            → { real, folder, link, commit } | { missing } | { problem, old? }
+//   copyReady(installRoot)              → null, or why the copy is not one a LaunchDaemon may run: the link, and a
+//                                         stamp that is the commit its folder is named for (L106 m-1)
 //   copyPath(installRoot, cur, p)       → `p` named through the link, as the same path in the folder it names
 //   installProblem(installRoot, files)  → null, or why the copy (and the folders above it) is not root's alone
 //   chainProblem(path)                  → null, or why `path` and every folder above it is not root's alone
@@ -29,9 +31,11 @@ import { spawnSync } from 'node:child_process';
 // The repository folder the copy is made of, and the folder inside the versioned folder that the link names.
 export const SOURCE = 'orchestrate';
 // The files outside SOURCE that the installed code imports, at their repository paths (L92 item 4, the install
-// closure). The updater installs exactly these beside SOURCE; review-install-closure.test.mjs builds a copy as the
-// updater does and fails when any entry point imports a file outside SOURCE that is not listed here. Copying one into
-// orchestrate/ instead would make two sources of it.
+// closure). The updater installs exactly these beside SOURCE. review-install-closure.test.mjs installs a copy as the
+// updater does, deletes the repository it came from, and imports every non-test module of the copy for real; it fails
+// when any of them loads a file outside the copy, or names one in a way that only runs later (a dynamic import of a
+// name made at run time, a path leading out of SOURCE) that is not listed here (L106 M-1). Copying one into orchestrate/
+// instead would make two sources of it.
 export const OUTSIDE_FILES = Object.freeze(['scripts/blueprint/yaml-lite.mjs']);
 
 export const NODE = 'bin/node';
@@ -74,6 +78,7 @@ export function currentCopy(installRoot, { owner = 0, lstat = lstatSync, readlin
   if (st.uid !== owner) return { problem: `${installRoot}, the copy's link, is not owned by ${ownerName(owner)}` };
   let to; try { to = readlink(installRoot); } catch (e) { return { problem: `${installRoot} can't be read (${e.code ?? e.message})` }; }
   const parts = String(to).split('/');
+  if (parts.length === 1 && versionCommit(installRoot, parts[0]) !== null) return { problem: oldInstall(installRoot, parts[0]), old: true };
   const commit = parts.length === 2 && parts[1] === SOURCE ? versionCommit(installRoot, parts[0]) : null;
   if (commit === null) return { problem: `${installRoot} points at ${JSON.stringify(String(to).slice(0, 200))}, not ${SOURCE} in a copy folder beside it` };
   const folder = join(dirname(installRoot), parts[0]);
@@ -84,6 +89,32 @@ export function currentCopy(installRoot, { owner = 0, lstat = lstatSync, readlin
     if (t.uid !== owner) return { problem: `${p}, which ${installRoot} points into, is not owned by ${ownerName(owner)}` };
   }
   return { real, folder, link: true, commit };
+}
+
+/**
+ * What Joe is told about an install from before L92 item 4, whose link names the versioned folder `v` itself (L106
+ * m-3). Nothing is changed: the updater, the runner and the account copy refuse it, and the install step refuses
+ * while the link is there. Removing the link (only the link: no slash at the end) lets the install step make the new
+ * shape; it clears the old folder itself.
+ */
+export function oldInstall(installRoot, v) {
+  return `${installRoot} is an install from before the copy's layout changed (L92 item 4): its link names the folder ${v} itself, not ${v}/${SOURCE}. Nothing was changed, and reviews do not start until it is put right. To put it right, remove the old link, then run the install step again (the updater once as root with --first <seed folder>). The removal, to paste in Terminal: sudo /bin/rm ${shellQuote(installRoot)}`;
+}
+const shellQuote = (p) => (/^[A-Za-z0-9_./-]+$/.test(p) ? p : `'${String(p).replace(/'/g, "'\\''")}'`);
+
+/**
+ * The installed copy as a LaunchDaemon may run it (L106 m-1): the copy's link, not a plain folder (L75 c-7), and a
+ * commit stamp that is the commit its folder is named for. A copy whose stamp is missing or another's was not
+ * finished by the updater (which writes the stamp last), or was made by hand. The updater itself does not ask this:
+ * it must still be able to replace such a copy. Null, or the problem. `lstat` and `readlink` are ports for a test.
+ */
+export function copyReady(installRoot, { owner = 0, lstat = lstatSync, readlink = readlinkSync } = {}) {
+  const cur = currentCopy(installRoot, { owner, lstat, readlink });
+  if (!cur.real) return cur.problem;
+  if (!cur.link) return `${installRoot} is a plain folder, not the installed copy's link (the install step makes the link)`;
+  const stamp = readInstallStamp(installRoot, { owner });
+  if (stamp !== cur.commit) return `the copy's commit stamp (${stamp ?? `none at ${join(cur.folder, STAMP)}`}) is not the commit its folder is named for (${cur.commit})`;
+  return null;
 }
 
 /**
