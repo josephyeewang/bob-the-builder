@@ -11,11 +11,15 @@ Import these, never the module folders behind them. Each has a fake for your own
 ```js
 import { makeRules, fakeRules, ACTIONS, RISKY_CLASSES } from '../../shared/rules.mjs';
 const d = rules.may('push_branch', { product, card, files });  // { decision: 'allow'|'ask'|'deny', tier?, reason, rev }
-rules.get('caps.editing_per_mac', { product });               // a value from the rules (Mac-wide ones: strictest across products)
+rules.get('caps.editing_per_mac', { product });               // a value as the rules hold it (Mac-wide ones: strictest across products)
+rules.num('claims.stuck_min', { product });                   // a whole number or undefined: every number is read this way (L96)
+rules.dec('usage.pace_min_share', { product });               // a number ≥ 0 with an optional fraction, or undefined (L104)
+rules.flag('product.onboarded', { product });                 // exactly true or false, or undefined: every flag is read this way (L96)
 rules.classify(change);                                       // { tier: 1|2, risky: [...RISKY_CLASSES], reasons, protected }
 rules.rev;                                                    // the rules version, stamped on diary lines
 ```
 
+- **Numbers and flags only through `num()`, `dec()` and `flag()`.** The rules file is text and the reader converts only some keys, so `get()` can hand back `"30"` (L96). `wholeNumber`, `decimal` and `exactFlag` are the one conversion, over `WHOLE_TEXT` and `DECIMAL_TEXT`, which M10's checker also uses (L104). `fakeRules()` hands every value back as the reader's text (`asReaderText`), so a test that passes `30` sees `"30"`. The guard is `orchestrate/test/rules-typed-reads.test.mjs`.
 - **It never throws and fails closed.** An unknown action, an error, or no readable rules is `deny`. A classification that fails is `unclassifiable`, Tier 1.
 - `ask` means allowed only with the owner's answer, and `tier` names the answer channel: `tier: 1` is their own GitHub Approve, `tier: 2` a tap on M2's question box.
 - Actions (`ACTIONS`): `start_session`, `write_production`, `push_branch`, `merge`, `count_approval`, `delete_copy`, `flip_switch`. A new one is added here first, by lane 1.
