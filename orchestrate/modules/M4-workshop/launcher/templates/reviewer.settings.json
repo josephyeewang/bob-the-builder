@@ -1,0 +1,154 @@
+{
+  "permissions": {
+    "defaultMode": "dontAsk",
+    "allow": [],
+    "deny": [
+      "Read(//__orch_deny__/**)",
+      "Edit(//__orch_deny__/**)",
+      "Write(//__orch_outbox__/.*)",
+      "Edit(//__orch_outbox__/.*)",
+      "Write(//__orch_outbox__/**/.*)",
+      "Edit(//__orch_outbox__/**/.*)",
+      "Edit(//__orch_bob__/**)",
+      "Write(//__orch_bob__/**)",
+      "Edit(//__orch_wall_runnerRoot__/**)",
+      "Write(//__orch_wall_runnerRoot__/**)"
+    ],
+    "ask": [],
+    "additionalDirectories": [
+      "/__orch_outbox__",
+      "/__orch_bob__"
+    ]
+  },
+  "sandbox": {
+    "enabled": true,
+    "failIfUnavailable": true,
+    "allowUnsandboxedCommands": false,
+    "network": {
+      "allowedDomains": [],
+      "strictAllowlist": true
+    },
+    "filesystem": {
+      "denyRead": [
+        "/__orch_deny__"
+      ],
+      "denyWrite": [
+        "/__orch_outbox__/.*",
+        "/__orch_outbox__/**/.*",
+        "/__orch_bob__",
+        "/__orch_bob__/**",
+        "/__orch_wall_outboxRoot__",
+        "/__orch_wall_outboxRoot__/**",
+        "/__orch_wall_runnerRoot__",
+        "/__orch_wall_runnerRoot__/**"
+      ]
+    }
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Write|Edit|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/__orch_node__ /__orch_hooks__/plain-files.mjs --role reviewer --outbox /__orch_outbox__ --snapshot /__orch_snapshot__ --kinds verdict || exit 2",
+            "timeout": 10,
+            "onFailure": "block"
+          }
+        ]
+      },
+      {
+        "matcher": "Read|Grep|Glob|Edit|Write|NotebookEdit|Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/__orch_node__ /__orch_hooks__/secret-file-block.mjs --role reviewer --outbox /__orch_outbox__ --snapshot /__orch_snapshot__ --kinds verdict || exit 2",
+            "timeout": 10,
+            "onFailure": "block"
+          }
+        ]
+      },
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/__orch_node__ /__orch_hooks__/production-write-guard.mjs --role reviewer --outbox /__orch_outbox__ --snapshot /__orch_snapshot__ --kinds verdict || exit 2",
+            "timeout": 10,
+            "onFailure": "block"
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/__orch_node__ /__orch_hooks__/merge-guard.mjs --role reviewer --outbox /__orch_outbox__ --snapshot /__orch_snapshot__ --kinds verdict || exit 2",
+            "timeout": 10,
+            "onFailure": "block"
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/__orch_node__ /__orch_hooks__/no-verify-block.mjs --role reviewer --outbox /__orch_outbox__ --snapshot /__orch_snapshot__ --kinds verdict || exit 2",
+            "timeout": 10,
+            "onFailure": "block"
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "matcher": "auto|manual",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/__orch_node__ /__orch_hooks__/compact-note.mjs --role reviewer --outbox /__orch_outbox__ --snapshot /__orch_snapshot__ --kinds verdict --kind verdict --event PreCompact || exit 2",
+            "timeout": 10,
+            "onFailure": "block"
+          }
+        ]
+      }
+    ],
+    "PostCompact": [
+      {
+        "matcher": "auto|manual",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/__orch_node__ /__orch_hooks__/compact-note.mjs --role reviewer --outbox /__orch_outbox__ --snapshot /__orch_snapshot__ --kinds verdict --kind verdict --event PostCompact || exit 2",
+            "timeout": 10,
+            "onFailure": "block"
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "matcher": "compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/__orch_node__ /__orch_hooks__/compact-note.mjs --role reviewer --outbox /__orch_outbox__ --snapshot /__orch_snapshot__ --kinds verdict --kind verdict --event SessionStart || exit 2",
+            "timeout": 10,
+            "onFailure": "block"
+          }
+        ]
+      }
+    ]
+  },
+  "env": {
+    "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "300000",
+    "DISABLE_UPDATES": "1"
+  },
+  "disableClaudeAiConnectors": true,
+  "enabledPlugins": {},
+  "crossSessionInbound": "refuse",
+  "disableSkillShellExecution": true,
+  "disableBundledSkills": true
+}
