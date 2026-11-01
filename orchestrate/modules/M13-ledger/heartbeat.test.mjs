@@ -150,3 +150,86 @@ test('review-0b-8 MAT-9: each pass writes the status fact the trip check reads (
   assert.deepEqual([s2.front_door_reachable, s2.signed_in, s2.login], [false, false, null]);
   assert.ok(s2.red.includes('front-door'));
 });
+
+// ---- L143: the new login is saved only once its change alert went out ----
+
+// A plain alert stand-in that can lose the alert (L145): `decide(alert)` gives the raise's answer, or throws.
+function sink(decide = () => true) {
+  const raise = async (a) => { raise.texts.push(a); const r = decide(a); raise.answers.push(r); return r; };
+  raise.texts = []; raise.answers = [];
+  raise.reset = () => { raise.texts.length = 0; raise.answers.length = 0; };
+  return raise;
+}
+const downWhen = (cond) => (a) => { if (cond(a)) throw new Error('github down'); return true; };
+
+// The record writer runs on its own fixed clock, apart from the heartbeat's tick (L143). `refuse` makes the record
+// refuse writes to fact ids it matches.
+function lossSetup(raise, refuse = () => false) {
+  let t = Date.parse('2026-11-03T12:00:00Z');
+  const now = () => new Date(t);
+  const base = memoryRecord();
+  const rec = { read: (...a) => base.read(...a), list: (...a) => base.list(...a), write: (w) => (refuse(w.id) ? { ok: false, reason: 'refused (test)' } : base.write(w)) };
+  const writer = makeFactWriter(rec, { actor: 'ledger', now: () => new Date('2026-01-01T00:00:00Z') });
+  const world = { login: 'account A' };
+  const probes = {
+    dispatcherLastGood: async () => new Date(t - 60e3).toISOString(),
+    rulesReadable: async () => true,
+    frontDoorReachable: async () => true,
+    account: async () => ({ signedIn: true, login: world.login }),
+    usage: async () => null,
+  };
+  let planned = null;
+  const alerts = { raise, clear: async () => 'none' };
+  const pass = () => heartbeatOnce({ product: 'product 1', writer, gh: fakeIssues(), alerts, owner: 'owner', probes, plannedSwitch: planned, now });
+  return { base, writer, world, pass, tick: () => { t += 10 * 60e3; }, plan: (p) => { planned = p; } };
+}
+const changed = (raise) => raise.texts.filter((a) => /\|heartbeat\|account-changed-/.test(a.key)).map((a) => a.key.split('-').pop());
+const savedLogin = (h) => h.writer.get('heartbeat-account-product-1')?.login;
+
+test('L143: an account change whose raise answered false keeps the old login, so the next pass raises it again', async () => {
+  let lose = true;
+  const raise = sink(() => !lose);
+  const h = lossSetup(raise);
+  await h.pass();
+  h.world.login = 'account B';
+  h.tick(); await h.pass();
+  assert.deepEqual(changed(raise), ['account B']);
+  assert.equal(savedLogin(h), 'account A');
+  lose = false;
+  h.tick(); await h.pass();
+  assert.deepEqual(changed(raise), ['account B', 'account B'], 'raised again');
+  assert.equal(savedLogin(h), 'account B');
+  h.tick(); await h.pass();
+  assert.equal(changed(raise).length, 2, 'sent: not raised a third time');
+});
+
+test('L143: an account change whose raise threw keeps the old login', async () => {
+  let down = true;
+  const raise = sink(downWhen((a) => down && /account-changed/.test(a.key)));
+  const h = lossSetup(raise);
+  await h.pass();
+  h.world.login = 'account B';
+  h.tick(); await assert.rejects(h.pass(), /github down/);
+  assert.equal(savedLogin(h), 'account A');
+  down = false;
+  h.tick(); await h.pass();
+  assert.equal(changed(raise).length, 2);
+  assert.equal(savedLogin(h), 'account B');
+});
+
+test('L143: a planned switch whose push request the record refused keeps the old login, so the next pass writes it', async () => {
+  let refuse = true;
+  const raise = sink();
+  const h = lossSetup(raise, (id) => refuse && id.startsWith('push-request-'));
+  await h.pass();
+  h.plan({ to: 'account B', at: '2026-11-03' });
+  h.world.login = 'account B';
+  h.tick(); await h.pass();
+  assert.equal(h.base.list('fact').filter((f) => f.doc.kind === 'fact.push-request').length, 0);
+  assert.equal(savedLogin(h), 'account A');
+  refuse = false;
+  h.tick(); await h.pass();
+  assert.equal(h.base.list('fact').filter((f) => f.doc.kind === 'fact.push-request').length, 1);
+  assert.equal(savedLogin(h), 'account B');
+  assert.deepEqual(changed(raise), [], 'a planned switch raises nothing');
+});
