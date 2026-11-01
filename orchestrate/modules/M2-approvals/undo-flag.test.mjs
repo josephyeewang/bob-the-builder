@@ -7,7 +7,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { seed, plan, HEAD, HEAD2 } from '../M9-record/fixtures.test-helper.mjs';
+import { seed, plan, leadCard, rev, roadmap, HEAD, HEAD2 } from '../M9-record/fixtures.test-helper.mjs';
 import { outboxFile as m9file } from '../M9-record/fixtures.test-helper.mjs';
 import { checkOutboxFile, outboxFile } from '../M1-front-door/outbox.mjs';
 import { queueOrder } from '../M6-merge-gate/gate.mjs';
@@ -15,16 +15,23 @@ import { markReverted, undoneBy } from '../M6-merge-gate/undo.mjs';
 import { env as m2env, must, PRODUCT, session, write, box, tap, typed } from './fixtures.test-helper.mjs';
 import { processSession } from './binding.mjs';
 import { schedulePass } from './schedule.mjs';
-import { BY_HAND_KIND, mergedDocsChange, openUndoFlags, saidByOwner } from './undo-flag.mjs';
+import { BY_HAND_KIND, markByHandPushSent, mergedDocsChange, openUndoFlags, saidByOwner } from './undo-flag.mjs';
+import { askStore, consumeAsk, markPushSent, markSent, writeDoc } from './ask-store.mjs';
+import { markResearchPushSent, openResearchAsks } from './research-ask.mjs';
+import { createAsk } from './binding.mjs';
 
 const MIN = 60_000;
 const SID = 'FD-1';
 const WORDS = 'that change was wrong, undo pull request 41';
 const SKILL = readFileSync(new URL('../M1-front-door/skill/orchestrate/SKILL.md', import.meta.url), 'utf8');
 
-// A docs change the Merge Gate merged: its card (merged, live) and its merge document.
+// A docs change the Merge Gate merged: its card (merged, live) and its merge document. The card is made through the
+// real writer (L95, stack r3 Minor 6), so it holds only what a real card can: its create-only `what` and a `brief` the
+// Lead may edit, never a `title`. Only the end of its moves (merged, the commit) is seeded on the writer's document.
 function merged(t, card = 'C-7', pr = 41, commit = HEAD, over = {}) {
-  seed(t, 'card', card, { state: 'merged', product: PRODUCT, lane: 'docs', title: 'Pricing page copy', merge_commit: commit, ...plan({ module: 'docs', files: ['docs/pricing.md'] }), ...over });
+  const { state = 'merged', merge_commit = commit, ...create } = over;
+  const made = leadCard(t, card, { lane: 'docs', what: 'Pricing page copy', brief: 'the Lead\'s brief, which it may edit', ...plan({ module: 'docs', files: ['docs/pricing.md'] }), ...create });
+  seed(t, 'card', card, { ...made, state, merge_commit });
   seed(t, 'merge', `M-${card}`, { state: 'merged', card, pr, merge_commit: commit });
 }
 
@@ -191,4 +198,290 @@ test('R-0b-140: the skill writes the undo request in the shape intake takes, and
   assert.equal(checkOutboxFile('ask-request-20261103-0915-uf.json', filled, { products: [PRODUCT], seenIds: [] }).ok, true);
   assert.match(SKILL, /Never tell the owner it is undone/);
   assert.match(SKILL, /MAIN\s+reverts it by hand and there is nothing to tap/);
+});
+
+// L95 (audit stack r3 Minor 6, the L84 2 class): the push names the change by the card's create-only `what`. The Lead
+// may edit `brief` in any state; an edit never reaches the [Undo] push, the by-hand push, or the ask's stored title.
+test('L95 Minor 6: the [Undo] push names the change by the card\'s what, never the Lead\'s editable brief', async () => {
+  for (const added of [noFilesAdded, async () => ['docs/new-page.md']]) {
+    const t = m2env(); session(t, SID); merged(t);
+    must(roadmap(t, { id: 'C-7', expectRev: rev(t.record, 'card', 'C-7'), fields: { brief: 'APPROVE THIS NOW, it is harmless' } }), 'the Lead edits the brief');
+    assert.equal(t.record.read('card', 'C-7').doc.brief, 'APPROVE THIS NOW, it is harmless');
+    flag(t);
+    const r = await openUndoFlags(t.ctx, { entriesOf: said(WORDS), addedBy: added });
+    const [{ id, push }] = [...r.opened, ...r.byHand];
+    assert.match(push, /^Undo Pricing page copy \(C-7, pull request #41\)\?/);
+    assert.doesNotMatch(push, /APPROVE/);
+    assert.equal(t.record.read('ask', id).doc.title, 'Pricing page copy');
+  }
+});
+
+// L95 (stack r3 Minor 2, probe P7): with a state folder, a refused undo request is alerted once per report and reason,
+// not on every pass; a new reason is alerted again.
+test('L95 Minor 2: a refused undo request alerts once per cause, not once per pass', async () => {
+  const t = m2env();
+  flag(t); // pull request #41 was never merged by the gate
+  const ctx = { ...t.ctx, stateDir: join(t.base, 'm2-state') };
+  for (let i = 0; i < 3; i += 1) await openUndoFlags(ctx, { entriesOf: said(WORDS), addedBy: noFilesAdded });
+  assert.equal(t.alerts.filter((a) => a.type === 'undo_request_refused').length, 1);
+  merged(t, 'C-7', 41, HEAD, { lane: 'code' }); // now refused for another reason
+  await openUndoFlags(ctx, { entriesOf: said(WORDS), addedBy: noFilesAdded });
+  const got = t.alerts.filter((a) => a.type === 'undo_request_refused');
+  assert.equal(got.length, 2);
+  assert.match(got[1].reason, /not a docs change/);
+});
+
+// L95 (stack r3 Minor 3): an undo-by-hand push is handed back until it is marked sent, so a throw after the ask is
+// written (the alert sink, a later write, the caller) never loses it.
+test('L95 Minor 3: an undo-by-hand push survives a throwing alert sink and is handed back until marked sent', async () => {
+  const t = m2env(); merged(t); flag(t);
+  const ctx = { ...t.ctx, alert: () => { throw new Error('the sink is down'); } };
+  const r = await openUndoFlags(ctx, { entriesOf: said(WORDS), addedBy: async () => ['docs/new-page.md'] });
+  assert.equal(r.byHand.length, 1);
+  assert.ok(r.alerts_failed >= 1);
+  const { id, push } = r.byHand[0];
+  // The caller never sent it: the next pass hands back the same push, rebuilt from the ask.
+  const again = await openUndoFlags(t.ctx, { entriesOf: said(WORDS), addedBy: async () => ['docs/new-page.md'] });
+  assert.deepEqual(again.byHand, [{ id, push }]);
+  must(markByHandPushSent(t.ctx, id), 'mark sent');
+  assert.deepEqual((await openUndoFlags(t.ctx, { entriesOf: said(WORDS), addedBy: noFilesAdded })).byHand, []);
+  assert.equal(markPushSent(t.ctx, id, ['research']).ok, false, 'only the kinds named');
+  // An unknown file list is rebuilt as unknown, not as "no files".
+  const u = m2env(); merged(u); flag(u);
+  await openUndoFlags({ ...u.ctx, alert: () => { throw new Error('down'); } }, { entriesOf: said(WORDS), addedBy: async () => null });
+  assert.match((await openUndoFlags(u.ctx, { entriesOf: said(WORDS) })).byHand[0].push, /file list couldn't be read/);
+});
+
+// L95 (stack r3 Minor 1, for the undo pass): a throw on one undo request (here the record, on its first ask write) is
+// refused with the reason and ends nothing: the other request still opens, and the refused one opens on a later pass.
+test('L95 Minor 1: a throw on one undo request refuses only that request', async () => {
+  const t = m2env(); session(t, SID);
+  merged(t, 'C-7', 41); merged(t, 'C-8', 42);
+  const W2 = 'that change was wrong too, undo pull request 42';
+  flag(t); flag(t, { pr: 42, brief: W2, id: '20261103-0915-ub' });
+  const real = t.record.write.bind(t.record);
+  let asks = 0;
+  const write = (w) => { if (w.entity === 'ask' && ++asks === 1) throw new Error('disk full'); return real(w); };
+  const r = await openUndoFlags({ ...t.ctx, record: { ...t.record, write } }, { entriesOf: said(WORDS, W2), addedBy: noFilesAdded });
+  assert.equal(r.opened.length, 1, JSON.stringify(r));
+  assert.equal(r.refused.length, 1);
+  assert.equal(r.refused[0].reason, 'the pass failed on it');
+  assert.match(r.refused[0].error, /disk full/);
+  const r2 = await openUndoFlags(t.ctx, { entriesOf: said(WORDS, W2), addedBy: noFilesAdded });
+  assert.equal(r2.opened.length, 1, JSON.stringify(r2));
+});
+
+
+// ---- L117 (the #87 recheck) ----
+
+const README = readFileSync(new URL('../M1-front-door/README.md', import.meta.url), 'utf8');
+// A research ask request from an incident session: refused every pass ("only from the Front Door").
+function badResearch(t, id = '20261103-0915-rz') {
+  must(t.record.applyOutbox({ role: 'incident', sessionId: 'I-1' }, m9file(t, 'incident', 'I-1', `ask-request-${id}.json`, `{"ask":"research","product":"${PRODUCT}","brief":"find out x"}\n`)));
+}
+const withState = (t) => { t.ctx.stateDir = join(t.base, 'm2-state'); return t; };
+const sinkDownOnce = (t) => { let n = 0; return { ...t.ctx, alert: (a) => { if (n++ === 0) throw new Error('down'); t.alerts.push(a); } }; };
+
+test('L117 M-1: a caller that follows the README sends each push once over three passes', async () => {
+  // The README's join items 10 and 12 name the wrappers and say what happens to a push not marked.
+  assert.match(README, /markResearchPushSent\(ctx, id\)/);
+  assert.match(README, /markByHandPushSent\(ctx, id\)/);
+  assert.equal((README.match(/anything not marked is handed back next pass/g) ?? []).length, 2);
+  assert.doesNotMatch(README, /once and send MAIN/);
+  const t = m2env(); merged(t); flag(t);
+  const sent = [];
+  for (let pass = 0; pass < 3; pass += 1) {
+    // Item 12: push each byHand[].push, then markByHandPushSent(ctx, id).
+    const r = await openUndoFlags(t.ctx, { entriesOf: said(WORDS), addedBy: async () => ['docs/new-page.md'] });
+    for (const b of r.byHand) { sent.push(b.push); must(markByHandPushSent(t.ctx, b.id)); }
+  }
+  assert.equal(sent.length, 1);
+  assert.equal(t.alerts.filter((a) => a.type === 'undo_by_hand').length, 1, 'MAIN told once');
+});
+
+test('L117 m-1: a refusal alert lost to a throwing sink is alerted on the next pass, then never again', async () => {
+  const t = withState(m2env()); badResearch(t);
+  openResearchAsks(sinkDownOnce(t));
+  openResearchAsks(t.ctx); openResearchAsks(t.ctx);
+  assert.equal(t.alerts.filter((a) => a.kind === 'ask_request_refused').length, 1);
+  const u = withState(m2env()); merged(u); flag(u, { role: 'incident', sid: 'I-1' });
+  await openUndoFlags(sinkDownOnce(u), { entriesOf: said(WORDS), addedBy: noFilesAdded });
+  for (let i = 0; i < 2; i += 1) await openUndoFlags(u.ctx, { entriesOf: said(WORDS), addedBy: noFilesAdded });
+  assert.equal(u.alerts.filter((a) => a.type === 'undo_request_refused').length, 1);
+});
+
+test('L117 m-2: MAIN\'s by-hand alert is sent again until it goes through, then marked and never sent again', async () => {
+  const t = m2env(); merged(t); flag(t);
+  const files = async () => ['docs/new-page.md'];
+  await openUndoFlags({ ...t.ctx, alert: () => { throw new Error('down'); } }, { entriesOf: said(WORDS), addedBy: files });
+  const id = askStore(t.record).asks().find((a) => a.doc.kind === BY_HAND_KIND).id;
+  assert.equal(askStore(t.record).ask(id).doc.main_alert_sent_at, undefined);
+  await openUndoFlags(t.ctx, { entriesOf: said(WORDS), addedBy: files });
+  await openUndoFlags(t.ctx, { entriesOf: said(WORDS), addedBy: files });
+  const got = t.alerts.filter((a) => a.type === 'undo_by_hand');
+  assert.equal(got.length, 1);
+  assert.deepEqual({ ask: got[0].ask, card: got[0].card, pr: got[0].pr, commit: got[0].commit, files: got[0].files }, { ask: id, card: 'C-7', pr: 41, commit: HEAD, files: ['docs/new-page.md'] });
+  assert.ok(askStore(t.record).ask(id).doc.main_alert_sent_at);
+  // With no alert sink at all, nothing is marked told.
+  const u = m2env(); merged(u); flag(u);
+  await openUndoFlags({ ...u.ctx, alert: undefined }, { entriesOf: said(WORDS), addedBy: files });
+  assert.equal(askStore(u.record).asks().find((a) => a.doc.kind === BY_HAND_KIND).doc.main_alert_sent_at, undefined);
+});
+
+test('L117 m-6: the research and undo passes sharing one state folder each alert their refusal once over three passes', async () => {
+  const t = withState(m2env()); merged(t); badResearch(t); flag(t, { role: 'incident', sid: 'I-1' });
+  for (let i = 0; i < 3; i += 1) { openResearchAsks(t.ctx); await openUndoFlags(t.ctx, { entriesOf: said(WORDS), addedBy: noFilesAdded }); }
+  assert.equal(t.alerts.filter((a) => a.kind === 'ask_request_refused').length, 1);
+  assert.equal(t.alerts.filter((a) => a.type === 'undo_request_refused').length, 1);
+});
+
+test('L117 m-7: on an unmarked ask, a wrong kind, a non-open ask and a missing kinds list are each refused, leaving it unmarked', async () => {
+  const t = m2env(); merged(t); flag(t);
+  await openUndoFlags(t.ctx, { entriesOf: said(WORDS), addedBy: async () => ['docs/new-page.md'] });
+  const id = askStore(t.record).asks().find((a) => a.doc.kind === BY_HAND_KIND).id;
+  const wrong = markPushSent(t.ctx, id, ['research']);
+  assert.equal(wrong.ok, false); assert.match(wrong.reason, /is not a research ask/);
+  assert.equal(markResearchPushSent(t.ctx, id).ok, false, 'the research wrapper never marks a by-hand ask');
+  const none = markPushSent(t.ctx, id);
+  assert.equal(none.ok, false); assert.doesNotMatch(none.reason, / {2}/, 'L117 c3: no double space');
+  const field = markSent(t.ctx, id, [BY_HAND_KIND], 'consumed_at');
+  assert.equal(field.ok, false); assert.match(field.reason, /consumed_at is not a sent mark/, 'only a sent mark');
+  assert.equal(askStore(t.record).ask(id).doc.consumed_at, undefined);
+  assert.equal(askStore(t.record).ask(id).doc.push_sent_at, undefined);
+  // A non-open ask of the right kind, never marked: a decision ask walked to pushed.
+  must(createAsk(t.ctx, { id: 'D-1', kind: 'decision', card: 'C-7', title: 'Which', choices: ['A', 'B'], recommended: 'A' }));
+  const a = askStore(t.record).ask('D-1');
+  must(writeDoc(t.record, 'ask', a, { ...a.doc, state: 'pushed', raised_at: new Date(t.clock.t).toISOString(), raised_reask: 0 }));
+  const r = markPushSent(t.ctx, 'D-1', ['decision']);
+  assert.equal(r.ok, false); assert.match(r.reason, /is pushed, not open/);
+  assert.equal(askStore(t.record).ask('D-1').doc.push_sent_at, undefined);
+});
+
+test('L117 c1: a pass that throws with a new message each time alerts its refusal once, with the message in `error`', () => {
+  const t = withState(m2env());
+  must(t.record.applyOutbox({ role: 'front_door', sessionId: 'F-1' }, m9file(t, 'front_door', 'F-1', 'ask-request-20261103-0915-rq.json', `{"ask":"research","product":"${PRODUCT}","brief":"find out y"}\n`)));
+  let n = 0;
+  const record = { ...t.record, list: (e) => t.record.list(e).map((x) => (e !== 'report' ? x
+    : { ...x, doc: { ...x.doc, get source() { throw new Error(`boom ${n += 1}`); } } })) };
+  for (let i = 0; i < 3; i += 1) openResearchAsks({ ...t.ctx, record });
+  const got = t.alerts.filter((a) => a.kind === 'ask_request_refused');
+  assert.equal(got.length, 1);
+  assert.equal(got[0].reason, 'the pass failed on it');
+  assert.match(got[0].error, /^boom \d+$/);
+});
+
+test('L117 c2: consumeAsk reads each note value once, so a getter cannot pass the check with one value and write another', () => {
+  const t = m2env(); merged(t);
+  must(createAsk(t.ctx, { id: 'D-2', kind: 'decision', card: 'C-7', title: 'Which', choices: ['A', 'B'], recommended: 'A' }));
+  const at = new Date(t.clock.t).toISOString();
+  for (const [s, add] of [['pushed', { raised_at: at, raised_reask: 0 }], ['answered', { answer: { channel: 'github_review', choice: 'A', approves: true, at } }]]) {
+    const a = askStore(t.record).ask('D-2');
+    must(writeDoc(t.record, 'ask', a, { ...a.doc, ...add, state: s }), s);
+  }
+  let reads = 0;
+  const note = { get not_deleted() { reads += 1; return reads === 1 ? 'ok' : { big: 'x'.repeat(6000) }; } };
+  must(consumeAsk(t.ctx, 'D-2', note));
+  assert.equal(t.record.read('ask', 'D-2').doc.not_deleted, 'ok');
+  assert.equal(reads, 1);
+});
+
+// ---- L124 (the #87 round-2 recheck) ----
+
+const ADDED = async () => ['docs/new-page.md'];
+const mainAlerts = (t) => t.alerts.filter((a) => a.type === 'undo_by_hand');
+const handAsk = (t) => askStore(t.record).asks().find((a) => a.doc.kind === BY_HAND_KIND);
+
+test('L124 M-1: a sink that answers false is not a delivery: counted, nothing marked, and alerted once it goes through', async () => {
+  // README item 12 says what "goes through" means, and that outbox takes text.
+  assert.match(README, /the sink neither threw nor answered `false` \(L124 M-1\)/);
+  assert.match(README, /`outbox\(rec, now\)` takes text/);
+  const t = withState(m2env()); merged(t); flag(t); badResearch(t);
+  t.sink.answer = false;
+  const r1 = openResearchAsks(t.ctx);
+  const u1 = await openUndoFlags(t.ctx, { entriesOf: said(WORDS), addedBy: ADDED });
+  assert.ok(r1.alerts_failed >= 1, 'research counts the refused alert');
+  assert.ok(u1.alerts_failed >= 1, 'undo counts the refused alert');
+  assert.equal(handAsk(t).doc.main_alert_sent_at, undefined, 'MAIN\'s alert is not marked sent');
+  t.sink.answer = true;
+  for (let i = 0; i < 2; i += 1) { openResearchAsks(t.ctx); await openUndoFlags(t.ctx, { entriesOf: said(WORDS), addedBy: ADDED }); }
+  assert.equal(t.alerts.filter((a) => a.kind === 'ask_request_refused').length, 1);
+  assert.equal(mainAlerts(t).length, 1);
+  assert.ok(handAsk(t).doc.main_alert_sent_at);
+});
+
+test('L124 M-1: through M11\'s real outbox() over a refused queue write, nothing is marked, and the next working pass alerts', async () => {
+  const { outbox } = await import('../M11-dispatcher/alerts.mjs');
+  const box = outbox({ read: () => null, write: () => ({ ok: false, reason: 'busy' }) }, 0);
+  assert.equal(box('x'), false, 'the real outbox answers false; it does not throw');
+  const t = withState(m2env()); merged(t); flag(t); badResearch(t);
+  // The README's text adapter (item 12): outbox takes text.
+  const refusing = { ...t.ctx, alert: (a) => box(JSON.stringify(a)) };
+  const r1 = openResearchAsks(refusing);
+  const u1 = await openUndoFlags(refusing, { entriesOf: said(WORDS), addedBy: ADDED });
+  assert.ok(r1.alerts_failed >= 1 && u1.alerts_failed >= 1);
+  assert.equal(handAsk(t).doc.main_alert_sent_at, undefined);
+  for (let i = 0; i < 2; i += 1) { openResearchAsks(t.ctx); await openUndoFlags(t.ctx, { entriesOf: said(WORDS), addedBy: ADDED }); }
+  assert.equal(t.alerts.filter((a) => a.kind === 'ask_request_refused').length, 1);
+  assert.equal(mainAlerts(t).length, 1);
+});
+
+test('L124 m-2: a record write that throws in MAIN\'s alert loop is counted and the pass still hands back byHand', async () => {
+  const t = m2env(); merged(t); flag(t);
+  await openUndoFlags({ ...t.ctx, alert: () => false }, { entriesOf: said(WORDS), addedBy: ADDED });
+  const id = handAsk(t).id;
+  const record = { ...t.record, write: (w) => { if (w.doc?.main_alert_sent_at) throw new Error('disk full'); return t.record.write(w); } };
+  const r = await openUndoFlags({ ...t.ctx, record }, { entriesOf: said(WORDS), addedBy: ADDED });
+  assert.ok(r.alerts_failed >= 1);
+  assert.deepEqual(r.byHand.map((b) => b.id), [id]);
+  assert.equal(handAsk(t).doc.main_alert_sent_at, undefined);
+  await openUndoFlags(t.ctx, { entriesOf: said(WORDS), addedBy: ADDED });
+  assert.ok(handAsk(t).doc.main_alert_sent_at, 'marked on the next pass that can write');
+});
+
+test('L124 m-3: MAIN is alerted only for this product\'s open by-hand asks, and a refused mark is alerted', async () => {
+  const t = m2env(); merged(t); flag(t);
+  await openUndoFlags({ ...t.ctx, alert: () => false }, { entriesOf: said(WORDS), addedBy: ADDED });
+  const a = handAsk(t);
+  // Another product's copy of the same ask, never told.
+  must(writeDoc(t.record, 'ask', { id: 'U-other', rev: 0 }, { ...a.doc, product: 'other-product' }));
+  // A closed one, never told: the same ask walked out of open.
+  must(writeDoc(t.record, 'ask', { id: 'U-closed', rev: 0 }, { ...a.doc }));
+  const c = askStore(t.record).ask('U-closed');
+  must(writeDoc(t.record, 'ask', c, { ...c.doc, state: 'pushed', raised_at: new Date(t.clock.t).toISOString(), raised_reask: 0 }));
+  await openUndoFlags(t.ctx, { entriesOf: said(WORDS), addedBy: ADDED });
+  assert.deepEqual(mainAlerts(t).map((x) => x.ask), [a.id], 'not the other product\'s, not the closed one');
+  // A mark the record refuses is alerted, and MAIN's alert stays due.
+  const u = m2env(); merged(u); flag(u);
+  await openUndoFlags({ ...u.ctx, alert: () => false }, { entriesOf: said(WORDS), addedBy: ADDED });
+  const record = { ...u.record, write: (w) => (w.doc?.main_alert_sent_at ? { ok: false, reason: 'busy' } : u.record.write(w)) };
+  await openUndoFlags({ ...u.ctx, record }, { entriesOf: said(WORDS), addedBy: ADDED });
+  const failed = u.alerts.filter((x) => x.type === 'undo_by_hand_mark_failed');
+  assert.equal(failed.length, 1);
+  assert.equal(failed[0].ask, handAsk(u).id);
+  assert.equal(handAsk(u).doc.main_alert_sent_at, undefined);
+});
+
+test('L124 m-4: a research caller that follows README item 10 sends each push once over three passes', () => {
+  const t = m2env();
+  must(t.record.applyOutbox({ role: 'front_door', sessionId: 'F-1' }, m9file(t, 'front_door', 'F-1', 'ask-request-20261103-0915-rp.json', `{"ask":"research","product":"${PRODUCT}","brief":"find out z"}\n`)));
+  const sent = [];
+  for (let pass = 0; pass < 3; pass += 1) {
+    // Item 10: send each opened[].push, then markResearchPushSent(ctx, id).
+    const r = openResearchAsks(t.ctx);
+    for (const o of r.opened) { sent.push(o.push); must(markResearchPushSent(t.ctx, o.id)); }
+  }
+  assert.equal(sent.length, 1);
+});
+
+test('L124 c2: a push already marked sent is refused a second mark, and the first time is kept', async () => {
+  const t = m2env(); merged(t); flag(t);
+  const r = await openUndoFlags(t.ctx, { entriesOf: said(WORDS), addedBy: ADDED });
+  const id = r.byHand[0].id;
+  must(markByHandPushSent(t.ctx, id));
+  const first = handAsk(t).doc.push_sent_at;
+  t.clock.t += MIN;
+  const again = markByHandPushSent(t.ctx, id);
+  assert.equal(again.ok, false);
+  assert.match(again.reason, /push_sent_at is already set/);
+  assert.equal(handAsk(t).doc.push_sent_at, first);
 });

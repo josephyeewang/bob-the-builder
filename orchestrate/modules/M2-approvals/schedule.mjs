@@ -39,14 +39,15 @@ const iso = (ms) => new Date(ms).toISOString();
 const ms = (s) => { const t = Date.parse(s ?? ''); return Number.isFinite(t) ? t : null; };
 const fail = (reason, extra = {}) => ({ ok: false, reason, ...extra });
 
-// The config alert goes out once per distinct problem, not every pass (round 2 m2-6).
+// The config alert goes out once per distinct problem, not every pass (round 2 m2-6). It is kept as sent only when the
+// sink did not answer false (L130: M11's outbox answers false when it could not queue); a throw stops before the write.
 function configAlert(ctx, reason) {
   const file = join(ctx.stateDir, 'config-alert.json');
   if (reason === null) { rmSync(file, { force: true }); return; }
   let last = null;
   try { last = existsSync(file) ? JSON.parse(readFileSync(file, 'utf8')).reason : null; } catch { last = null; }
   if (last === reason) return;
-  ctx.alert({ type: 'approvals_config', reason });
+  if (ctx.alert({ type: 'approvals_config', reason }) === false) return;
   mkdirSync(ctx.stateDir, { recursive: true });
   writeFileSync(file, `${JSON.stringify({ reason })}\n`);
 }

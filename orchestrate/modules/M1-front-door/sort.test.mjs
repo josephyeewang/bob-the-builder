@@ -106,6 +106,11 @@ test('R-0b-137 / B11 planted: a secret typed in chat is not repeated, and rotate
   const rb = readBack({ mode: 'evolve', product: 'test-product', what: `fix the upload, the id is ${keyId}` });
   assert.doesNotMatch(rb.lines.join('\n'), /Q7XP3ZL9|AKIAQ7/);
   assert.equal(repeatsSecret(`the id is ${keyId}`, `What you said: ${keyId.slice(2, 16)}`), true);
+  // L95 (stack r3 Minor 5): nor the A3T family, nor an id glued to a word character.
+  for (const id of [['A3', 'TX', 'Q7XP3ZL9M2K4T8WB'].join(''), `ID_${keyId}`, `${keyId}x`]) {
+    const b = readBack({ mode: 'evolve', product: 'test-product', what: `fix the upload, the id is ${id}` });
+    assert.doesNotMatch(b.lines.join('\n'), /Q7XP3ZL9/, id);
+  }
   // Minor 6: a generic key straddling the 80-character cut is masked first, and a part of a key is caught.
   const GENERIC = ['Zq8', 'Lm2Xv9Rt4Kp7Wn3Hs6Yd1Bf5Gc0Jx8'].join(''); // planted fake, no vendor prefix
   const long = `${'please fix the chart on the pricing page, it shows '.padEnd(65, 'x')} token ${GENERIC} thanks`;
