@@ -13,11 +13,12 @@
 // files, done_when, plan document, main commit), or written by the plan's own author (raiseGo checks the same before
 // the ask exists; this is the second lock, at the point the owner would see it). goView also recomputes the go's
 // fingerprint from the inputs it shows, so a pass can't be matched to a fingerprint that isn't the plan's (audit
-// kit-lane3 r1 M-2). A file path with a control character is refused (Minor 2: a newline would break the fold), and
+// kit-lane3 r1 M-2). A file path with a control character is refused (Minor 2: a newline would break the fold): goView
+// rebuilds the fingerprint with the shared planFingerprint, whose path rule refuses them (L84 5, #71), and
 // the lines in the decision pull request body are escaped (Minor 3: the title is the Lead's text).
 
 import { createHash } from 'node:crypto';
-import { TIER1_BAR, canonicalJson } from '../../shared/plan-fingerprint.mjs';
+import { TIER1_BAR, canonicalJson, planFingerprint } from '../../shared/plan-fingerprint.mjs';
 
 const fail = (reason) => ({ ok: false, reason });
 const firstLine = (s) => String(s ?? '').split('\n').map((l) => l.trim()).find(Boolean)?.slice(0, 160) ?? '';
@@ -40,9 +41,6 @@ export function planCheckProblem(check, { fingerprint, card, planSha256 } = {}) 
   return null;
 }
 
-// A path the fold can show as one line: no control characters (Minor 2). The fingerprint's own path check is shared/'s.
-// eslint-disable-next-line no-control-regex
-export const unsafePath = (f) => typeof f !== 'string' || /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/.test(f);
 const sha256 = (s) => createHash('sha256').update(s, 'utf8').digest('hex');
 
 export function goView(doc) {
@@ -52,7 +50,12 @@ export function goView(doc) {
   const files = doc.files;
   if (!Array.isArray(files) || !files.length) return fail('a go lists its files');
   if (canonicalJson(files) !== canonicalJson(inp.files)) return fail('the files shown are not the files the go binds');
-  if (files.some(unsafePath)) return fail('a file path holds a control character');
+  // The plan the go shows must be one the shared fingerprint accepts and gives this go's fingerprint (L84 5): its path
+  // rule is the one place a control character in a file path is refused, so the fold always shows one path a line.
+  const re = planFingerprint({ product: inp.product, card_id: inp.card_id, tier: inp.tier, files: inp.files,
+    done_when: inp.done_bar[0], plan_sha256: inp.plan_sha256, main_commit: inp.main_commit });
+  if (!re.ok) return fail(`the go's plan is not one plain plan: ${re.reason}`);
+  if (re.sha256 !== doc.fingerprint) return fail('the go\'s fingerprint is not the plan it shows');
   const tier = doc.tier;
   if (tier !== 1 && tier !== 2) return fail('the go names no tier');
   if (doc.kind !== (tier === 1 ? 'go_t1' : 'go_t2')) return fail('the go\'s kind is not its tier\'s');

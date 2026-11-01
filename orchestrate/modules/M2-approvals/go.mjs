@@ -26,7 +26,7 @@ import { canonicalJson, planFingerprint } from '../../shared/plan-fingerprint.mj
 import { activeKind } from '../../shared/asks.mjs';
 import { askStore, writeDoc } from './ask-store.mjs';
 import { createAsk } from './binding.mjs';
-import { planCheckProblem, unsafePath } from './go-view.mjs';
+import { planCheckProblem } from './go-view.mjs';
 
 // What a change may edit in its own row file without a new go (M2-4): status only. Every other field is the plan.
 export const ROW_STATUS_FIELDS = Object.freeze(['status', 'done', 'receipts', 'progress', 'date', 'done_at']);
@@ -115,7 +115,6 @@ export async function raiseGo(ctx, { cardId, rows, view, mainSha, planCheck } = 
   if (bad) return fail(bad);
   const fp = fingerprintOf(ctx.product, cardId, d);
   if (!fp.ok) return fail(`the plan can't be fingerprinted: ${fp.reason}`);
-  if (fp.inputs.files.some(unsafePath)) return fail('a file path holds a control character');
   if (d.tier === 1) { const no = planCheckProblem(planCheck, { fingerprint: fp.sha256, card: cardId, planSha256: fp.inputs.plan_sha256 }); if (no) return fail(no); }
   // Tier 1 checks folders at the plan's main commit; Tier 2 at main as it is now.
   const folder = await folderIn(view, d.tier === 1 ? d.main_commit : mainSha, fp.inputs.files);

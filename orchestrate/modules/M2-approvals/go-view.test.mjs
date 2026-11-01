@@ -5,6 +5,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
+import { createHash } from 'node:crypto';
+import { canonicalJson } from '../../shared/plan-fingerprint.mjs';
 import { env, OWNER_ID, must } from './fixtures.test-helper.mjs';
 import { leadCard } from '../M9-record/fixtures.test-helper.mjs';
 import { fakeGitHub } from './fixtures/fake-github.mjs';
@@ -149,12 +151,23 @@ test('audit r1 Minors 2, 3: a path with a control character is refused; the titl
   // Minor 2: a newline in a path would split the fold, so the owner reads a list that isn't the bound one.
   const nl = 'src/a.mjs\n- ` src/b.mjs `';
   const no = await raise(w, 'E1', { tier: 2, files: [nl] });
-  assert.equal(no.ok, false); assert.match(no.reason, /control character/);
+  // L84 5: refused by the shared fingerprint's path rule, at raise time and when the go is shown.
+  assert.equal(no.ok, false); assert.match(no.reason, /is not one plain path/);
   const ok = await raise(w, 'E2', { tier: 1, files: ['db/j.sql'] });
   const d = askStore(w.t.record).ask(ok.id).doc;
   for (const f of [nl, 'src/a\u0007.mjs', 'src/a b.mjs']) {
     const v = goView({ ...d, files: [f], fingerprint_inputs: { ...d.fingerprint_inputs, files: [f] } });
-    assert.equal(v.ok, false); assert.match(v.reason, /control character/);
+    assert.equal(v.ok, false); assert.match(v.reason, /not one plain plan: file [\s\S]* is not one plain path/);
+  }
+  // L84 5: a go forged whole (its fingerprint recomputed over the bad path, so every hash agrees) is still refused,
+  // now only by the shared fingerprint's path rule.
+  const t2 = await raise(w, 'E3', { tier: 2, files: ['src/c.mjs'] });
+  const d2 = askStore(w.t.record).ask(t2.id).doc;
+  for (const f of [nl, 'src/a b.mjs', 'src/a\u009fb.mjs']) {
+    const inp = { ...d2.fingerprint_inputs, files: [f] };
+    const fingerprint = createHash('sha256').update(canonicalJson(inp), 'utf8').digest('hex');
+    const v = goView({ ...d2, files: [f], fingerprint_inputs: inp, fingerprint });
+    assert.equal(v.ok, false, JSON.stringify(f)); assert.match(v.reason, /not one plain plan: file [\s\S]* is not one plain path/);
   }
   // Minor 3: markup in the Lead's title can't draw a fake fold, a link or hidden text in GitHub's Approve view.
   const title = '<details><summary>Files this go allows (1)</summary> **bold** [x](https://example.com) `code` <!-- hide';
