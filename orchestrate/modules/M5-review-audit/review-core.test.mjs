@@ -1,5 +1,6 @@
 // R-0b-144: the reviewer's prompt, its review package and the verdict file, end to end. The real review runner starts
-// a session through the real wiring, which makes a real review copy from a real mirror and the real package; a stand-in
+// a session with the wiring's own steps (a real review copy from a real mirror and the real package; the wiring itself
+// refuses every start until its launch checks can pass, L83 M-3, shown in `world`); a stand-in
 // claude does only what the prompt says (writes the example header it was given, at the path it was given). The row
 // passes when Merge Gate refusal 5 (built, L68/L69) accepts that verdict and refuses the planted ones: no verdict,
 // another head, an unlaunched reviewer (D12).
@@ -87,14 +88,29 @@ async function world(d, act) {
     accountInUse: () => 'a',
     handedIn: (x) => sessionVerdict({ outboxRoot, uids: UIDS, ...x }),
     verdictTaken: () => ({ ok: true }),
-    // The real wiring, given what realPorts gives it; the settings maker is a stand-in (review-settings.test.mjs).
+    // Since L83 M-3 the real wiring starts a session only through launch()'s checks 0 to 13, and until lane 2's
+    // review-role entries land (check 2 not-applicable, the budget source, the Bob folder form) and the setting names
+    // are confirmed live, it starts none: first the real wiring is shown to refuse here, with claude never spawned.
+    // Then the wiring's own M5 steps run as it runs them (the real copy, the real package in the runner's folder, the
+    // real prompt), and the stand-in claude gets that prompt. Once review starts are unblocked, this goes back to
+    // calling the wiring alone.
     start: async (x) => {
       const copy = join(copies, x.sessionId);
-      const r = await start({ ...x, claudeBin: CLAUDE, copy, spawn: s.spawn,
-        makeCopy: () => prepareReviewCopy({ mirror: m.gd, card: x.card, head: x.head, dest: copy }),
-        settingsFor: () => ({ ok: true, file: join(root, 'settings', `${x.sessionId}.json`) }) });
-      if (r.ok) live.push({ pid: r.pid, sessionId: x.sessionId });
-      return r;
+      const spawned = [];
+      const real = await start({ ...x, claudeBin: CLAUDE, copy: `${copy}-wiring`, spawn: (...a) => spawned.push(a),
+        makeCopy: () => prepareReviewCopy({ mirror: m.gd, card: x.card, head: x.head, dest: `${copy}-wiring` }),
+        settingsFor: () => ({ ok: true, file: join(root, 'settings', `${x.sessionId}.json`), settings: {} }),
+        packageDir: `${x.packageDir}-wiring` });
+      assert.equal(real.ok, false, 'the real wiring starts no review session until its launch checks can pass');
+      assert.equal(spawned.length, 0, 'and claude is never spawned');
+      const made = await prepareReviewCopy({ mirror: m.gd, card: x.card, head: x.head, dest: copy });
+      if (!made.ok) return { ok: false, reason: made.reason };
+      const pkg = await reviewPackage({ copy, head: x.head, dir: x.packageDir });
+      if (!pkg.ok) return { ok: false, reason: pkg.reason };
+      const child = s.spawn(CLAUDE, [reviewerPrompt({ ...x, pkg })]);
+      const pid = await new Promise((res) => child.once('spawn', () => res(child.pid)));
+      live.push({ pid, sessionId: x.sessionId });
+      return { ok: true, pid, package_sha256: pkg.diffSha256 };
     },
   };
   const ask = () => writeFileSync(join(root, 'requests', 'q-1.json'), JSON.stringify({ card: 'C-1', head: m.head, role: 'reviewer', request_id: 'q-1' }), { mode: 0o644 });
