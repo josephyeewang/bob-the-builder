@@ -330,7 +330,12 @@ function closeBy(w, pr, fn) {
   const real = w.t.ctx.gh;
   w.t.ctx.gh = { ...real, patch: (path, body) => (path.endsWith(`/pulls/${pr}`) && body?.state === 'closed' ? fn(() => real.patch(path, body)) : real.patch(path, body)) };
 }
-const settle = () => new Promise((r) => setTimeout(r, 50));
+// Waits until the close is reached (the process is then "dead" mid-close), not a fixed time: a slow machine can't
+// check the record before the code under test got there.
+async function reached(seen) {
+  for (let i = 0; i < 10000 && !seen.close; i += 1) await new Promise((r) => setImmediate(r));
+  assert.ok(seen.close, 'the close was reached');
+}
 
 test('L142 m2: the mark is on the record with the answer before the close; a crash during the close is finished by the next pass', async () => {
   const w = world();
@@ -338,11 +343,12 @@ test('L142 m2: the mark is on the record with the answer before the close; a cra
   await w.at(W8);
   const pr = ask(w, 'D-1').pr;
   let hang = true;
-  closeBy(w, pr, (go) => (hang ? NEVER() : go()));
+  const seen = { close: 0 };
+  closeBy(w, pr, (go) => { seen.close += 1; return hang ? NEVER() : go(); });
   w.g.review(pr, { state: 'APPROVED', commit_id: w.g.pulls.get(pr).head, submitted_at: w.t.clock.t + MIN });
   w.t.clock.t += 2 * MIN;
   readDecision(w.t.ctx, 'D-1'); // never settles: the process dies here
-  await settle();
+  await reached(seen);
   assert.equal(ask(w, 'D-1').state, 'answered');
   assert.equal(ask(w, 'D-1').pr_close_due, true, 'the mark was written with the answer, before the close');
   assert.equal(w.g.pulls.get(pr).state, 'open');
@@ -359,9 +365,10 @@ test('L142 m3: the retry keeps the mark on the record while its close is in flig
   const { pr, close, restore } = await answeredWithFailingClose(w, { sink: 'false' });
   close.fail = false; restore();
   let hang = true;
-  closeBy(w, pr, (go) => (hang ? NEVER() : go()));
+  const seen = { close: 0 };
+  closeBy(w, pr, (go) => { seen.close += 1; return hang ? NEVER() : go(); });
   w.at(w.t.clock.t + HOUR); // the retry's close never answers: the process dies here
-  await settle();
+  await reached(seen);
   assert.equal(ask(w, 'D-1').pr_close_due, true, 'the mark stays until the close or the alert has answered');
   hang = false;
   await w.at(w.t.clock.t + HOUR);
@@ -402,6 +409,27 @@ test('L142 m4: a GitHub client that throws before it answers is a failed close; 
   assert.equal(ask(w, 'U-1').state, 'pushed');
   assert.deepEqual(w.pushes.slice(before).map((p) => p.ask), ['U-1'], "the other ask's push went out");
   assert.equal(ask(w, 'D-1').pr_close_due, true, 'still due: retried next pass');
+  assert.equal(w.g.pulls.get(pr).state, 'open');
+});
+
+test('L142 m4, sink answers true: a GitHub client that throws is a failed close that tells Joe once, and the mark comes off', async () => {
+  const w = world();
+  must(createAsk(w.t.ctx, { id: 'D-1', kind: 'decision', card: 'C-1', title: 'Which format', choices: ['CSV', 'JSON'], recommended: 'CSV' }));
+  await w.at(W8);
+  const pr = ask(w, 'D-1').pr;
+  let tries = 0;
+  closeBy(w, pr, () => { tries += 1; throw new Error('client bug'); });
+  w.g.review(pr, { state: 'APPROVED', commit_id: w.g.pulls.get(pr).head, submitted_at: w.t.clock.t + MIN });
+  w.t.clock.t += 2 * MIN;
+  const d = await readDecision(w.t.ctx, 'D-1');
+  assert.deepEqual([d.ok, d.counted], [true, true], 'the answer is still counted');
+  assert.equal(tries, 1);
+  assert.equal(notClosed(w).length, 1, 'the throw is a failed close: Joe is told');
+  assert.equal(notClosed(w)[0].pr, pr);
+  assert.equal(ask(w, 'D-1').pr_close_due, undefined, 'told, so the mark comes off');
+  await w.at(w.t.clock.t + HOUR);
+  assert.equal(tries, 1, 'not retried once Joe was told');
+  assert.equal(notClosed(w).length, 1, 'told once');
   assert.equal(w.g.pulls.get(pr).state, 'open');
 });
 
