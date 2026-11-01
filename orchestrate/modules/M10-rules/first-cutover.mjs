@@ -23,30 +23,29 @@ import { parseYaml } from '../../../scripts/blueprint/yaml-lite.mjs';
 import { parsePolicy, EFFECT_FIELDS } from './policy.mjs';
 import { checkProducts } from './reader.mjs';
 import { makeEngine } from './engine.mjs';
-import { makeRules } from '../../shared/rules.mjs';
+import { isMacKey, makeRules } from '../../shared/rules.mjs';
 import * as M6 from '../M6-merge-gate/required-keys.mjs';
 import * as M2 from '../M2-approvals/required-keys.mjs';
 import * as M9 from '../M9-record/required-keys.mjs';
 import { KEYS as M11_KEYS, NEW_KEYS as M11_NEW_KEYS, need } from '../M11-dispatcher/keys.mjs';
 import { editingLimits } from '../M11-dispatcher/gate.mjs';
 import { PRODUCT_STATES } from './policy.mjs';
-import { KNOWN, asNumbers, scopeLabel } from './known-gaps.mjs';
+import { KNOWN, SCOPE_OWNERS, asNumbers, scopeLabel } from './known-gaps.mjs';
 
 // M11 has no required-keys file of its own yet (lane 2's folder), so its entry is built here from M11's own exports:
 // every key in KEYS except NEW_KEYS (keys the rules schema can't hold yet; when lane 1 adds one, lane 2 takes it off
-// NEW_KEYS and it is checked here with no change), each read by M11's need() with the type and the scope its callers use
-// (L115 M-A: with the product, or Mac-wide with none), plus the real editingLimits for every product state.
+// NEW_KEYS and it is checked here with no change), each read by M11's need() with its type at the key's own scope,
+// plus the real editingLimits for every product state.
 const M11_TYPES = Object.freeze({ perState: 'object', shakedown: 'boolean', leadDailyCard: 'list', redRuns: 'list' });
 // L120: M11's gate.mjs matches() reads daily-card patterns with a matcher of its own, and no list of forms it reads
 // differently from M10 compile was ever complete (`docs/blueprint/**/daily.md`, a leading `**/`, spaces at either end).
 // Until lane 2 moves matches() onto compile, any non-empty list is refused, as a rule; L96 already says [] at the first
 // cutover. M9's ASCII and compile checks still run, and a list M9 refuses gets only M9's reasons (L120 m-2).
 export const DAILY_CARD_RULE = `${M11_KEYS.leadDailyCard}: daily-card file lists are not allowed until the Dispatcher reads them with the rules' own path language (L120)`;
-// The keys M11's callers read with the product; they read every other key Mac-wide. A test reads the M11 sources and
-// fails when a caller's scope and this list differ.
-export const M11_WITH_PRODUCT = Object.freeze(['perState', 'editingPerProduct', 'amberEditingPerProduct', 'shakedown',
-  'shakedownWorkers', 'readonlyPerSession', 'scriptsPerProduct', 'leadDailyCard']);
-export const m11Scope = (name) => (M11_WITH_PRODUCT.includes(name) ? 'product' : 'mac');
+// A key's scope is the rules' own (L131): Mac-wide when shared/rules.mjs isMacKey(key) says so, per product otherwise.
+// No list of M11's here: a test reads M11's sources and fails when a caller reads a key at another scope, except a key
+// in known-gaps.mjs SCOPE_OWNERS, which M11 still reads Mac-wide (lane 2's L104 sweep) and the check below names.
+export const m11Scope = (key) => (isMacKey(key) ? 'mac' : 'product');
 const M11_READ = Object.freeze(Object.entries(M11_KEYS).filter(([, k]) => !M11_NEW_KEYS.includes(k)));
 const M11 = Object.freeze({
   REQUIRED_KEYS: Object.freeze(M11_READ.map(([, k]) => k)),
@@ -57,12 +56,11 @@ const M11 = Object.freeze({
       const type = M11_TYPES[name] ?? 'number';
       const a = type === 'object' ? 'an' : 'a';
       const withProduct = { product, type };
-      if (reads(rules, key, m11Scope(name) === 'product' ? withProduct : { type })) continue;
-      // Read Mac-wide, a product key gives nothing on the real engine (L115): a reason of its own.
-      if (m11Scope(name) === 'mac' && rules.get(key, {}) === undefined && rules.get(key, { product }) !== undefined) {
+      // A per-product key M11 still reads Mac-wide (known-gaps.mjs SCOPE_OWNERS): the real Dispatcher gets none (L115).
+      if (Object.hasOwn(SCOPE_OWNERS, key) && m11Scope(key) === 'product' && rules.get(key, {}) === undefined && rules.get(key, { product }) !== undefined) {
         out.push(`M11: ${key} is read without the product, so the real engine gives none${scopeLabel(key)}`);
       }
-      if (reads(rules, key, withProduct)) continue;
+      if (reads(rules, key, m11Scope(key) === 'product' ? withProduct : { type })) continue;
       out.push(`M11: ${key} must be ${a} ${type}${reads(asNumbers(rules), key, withProduct) ? KNOWN.text : ''}`);
     }
     if (!out.some((x) => x.startsWith(`M11: ${M11_KEYS.perState} `))) {

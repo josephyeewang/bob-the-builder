@@ -5,7 +5,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { REQUIRED_KEYS, OPTIONAL_KEYS } from './required-keys.mjs';
-import { GO_FREE_KEY } from '../M9-record/required-keys.mjs';
+import { GO_FREE_KEY } from '../M9-record/ready.mjs';
 
 const here = new URL('.', import.meta.url);
 

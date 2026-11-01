@@ -14,7 +14,7 @@
 
 import { botId } from './gather.mjs';
 import { goFreeKinds } from '../M9-record/ready.mjs';
-import { goFreeOn, GO_FREE_KEY } from '../M9-record/required-keys.mjs';
+import { goFreeOn, GO_FREE_KEY } from '../M9-record/ready.mjs';
 
 export const REQUIRED_KEYS = Object.freeze([
   'product_profile.required_checks',      // with none, every change is refused (refusals 1, 2)

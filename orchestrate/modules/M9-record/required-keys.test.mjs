@@ -1,60 +1,64 @@
 // required-keys.test.mjs — the Record's key list matches every rules read in ready.mjs and writer.mjs (L86 2, 9;
-// L96 M-1, m-4): every key read is listed, every listed key is read, in any quote kind, template keys included, and a
-// read whose key isn't written out fails the test.
+// L96 M-1, m-4; L123): every key read is listed, every listed key is read, in any quote kind and through the typed reads
+// (num, dec, flag, plain or ?.), template and const-named keys included, and a read whose key can't be named fails.
+// The reader is M10's rules-reads.test-helper.mjs, which M2's test shares.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { REQUIRED_KEYS, OPTIONAL_KEYS } from './required-keys.mjs';
-import { PRODUCT_STATES } from '../M10-rules/policy.mjs';
+import { GO_FREE, GO_FREE_KEY } from './ready.mjs';
+import { listed, readsListed, rulesReads } from '../M10-rules/rules-reads.test-helper.mjs';
 
 const read = (f) => readFileSync(new URL(f, import.meta.url), 'utf8');
-const LITERAL = String.raw`\s*(['"\x60])((?:(?!\1)[^\\])*)\1`;
-
-// The keys a file reads through `call(` (rules.get or writer.mjs's own get helper), with a template key expanded over
-// the product states; and every call whose key isn't a literal.
-export function keysRead(text, call) {
-  const keys = new Set();
-  for (const m of text.matchAll(new RegExp(`${call}\\(${LITERAL}`, 'g'))) {
-    const k = m[2];
-    if (m[1] === '`' && /\$\{[^}]*\}/.test(k)) for (const s of PRODUCT_STATES) keys.add(k.replace(/\$\{[^}]*\}/, s));
-    else keys.add(k);
-  }
-  const calls = [...text.matchAll(new RegExp(`${call}\\(`, 'g'))].length;
-  const literal = [...text.matchAll(new RegExp(`${call}\\(${LITERAL}`, 'g'))].length;
-  return { keys, nonLiteral: calls - literal };
-}
+const LIST = [...REQUIRED_KEYS, ...OPTIONAL_KEYS];
+// writer.mjs reads through two helpers, called bare: get( and num(. Their own lines pass a variable, so they are taken
+// out; its view's `get(entity, id) {` is the record's own get, not a rules read.
+const HELPERS = ['const get = (key) => rules.get(key, { product });', 'const num = (key) => rules.num(key, { product });'];
 
 function recordReads(ready = read('ready.mjs'), writer = read('writer.mjs')) {
-  const r = keysRead(ready, String.raw`\brules\??\.get(?:\?\.)?`);
-  // writer.mjs reads through one helper, `const get = (key) => rules.get(key, { product })`; its view's
-  // `get(entity, id) {` is the record's own get, not a rules read.
-  const helper = 'const get = (key) => rules.get(key, { product });';
-  assert.ok(writer.includes(helper), 'writer.mjs reads the rules through its one get helper');
-  const w = keysRead(writer.replace(helper, '').replace(/\n\s*get\(entity, id\) \{/, '\n'), String.raw`(?<![.\w])get`);
-  const wr = keysRead(writer.replace(helper, ''), String.raw`\brules\??\.get(?:\?\.)?`);
-  return { keys: new Set([...r.keys, ...w.keys, ...wr.keys]), nonLiteral: r.nonLiteral + w.nonLiteral + wr.nonLiteral };
+  let w = writer;
+  for (const h of HELPERS) { assert.ok(w.includes(h), `writer.mjs has its helper: ${h}`); w = w.replace(h, ''); }
+  w = w.replace(/\n\s*get\(entity, id\) \{/, '\n');
+  const r = rulesReads(ready);
+  const x = rulesReads(w, { helpers: ['get', 'num'] });
+  return { keys: new Set([...r.keys, ...x.keys]), nonLiteral: r.nonLiteral + x.nonLiteral };
 }
+const unlisted = (keys) => [...keys].filter((k) => !listed(LIST, k));
 
 test('every rules key ready.mjs and writer.mjs read is on the Record\'s list, and every listed key is read', () => {
   const { keys, nonLiteral } = recordReads();
-  assert.equal(nonLiteral, 0, 'every rules read names its key as a literal');
-  const list = [...REQUIRED_KEYS, ...OPTIONAL_KEYS];
-  for (const k of keys) assert.ok(list.includes(k), `the Record reads ${k}, which required-keys.mjs doesn't list`);
-  for (const k of list) assert.ok(keys.has(k), `required-keys.mjs lists ${k}, which the Record doesn't read`);
-  assert.ok(keys.has('product_state_rules.light.start') && keys.has('caps.rounds'));
+  assert.equal(nonLiteral, 0, 'every rules read names its key');
+  assert.deepEqual(unlisted(keys), [], 'every key read is listed');
+  for (const k of LIST) assert.ok(readsListed(keys, k), `required-keys.mjs lists ${k}, which the Record doesn't read`);
+  // The template key over the states, the typed reads, and goFreeOn's computed key over every go-free kind (L123).
+  for (const k of ['product_state_rules.light.start', 'caps.rounds', 'claims.stuck_min', 'proposals.heartbeat_stale_min',
+    ...Object.keys(GO_FREE).map((kind) => `${GO_FREE_KEY}.${kind}`)]) assert.ok(keys.has(k), k);
 });
 
-test('the drift reader catches a new read in readyCheck, in double quotes, and a computed key (the P9 and P10 plants, on copies)', () => {
+test('the drift reader catches a new read in readyCheck in every form, and a key it can\'t name (the P9, P10, O5 and L123 plants, on copies)', () => {
   const ready = read('ready.mjs');
-  const at = ready.indexOf("const cap = rules.get('caps.rounds'");
-  assert.ok(at > 0);
-  const plant = (line) => recordReads(`${ready.slice(0, at)}${line}\n    ${ready.slice(at)}`);
-  const list = [...REQUIRED_KEYS, ...OPTIONAL_KEYS];
-  assert.ok([...plant("rules.get('caps.new_m9_key', { product });").keys].some((k) => !list.includes(k)));
-  assert.ok([...plant('rules.get("caps.new_m9_key", { product });').keys].some((k) => !list.includes(k)));
-  assert.equal(plant('rules.get(KEY, { product });').nonLiteral, 1);
-  // L115 m-B, the O5 plant: an optional-call read is a read too.
-  assert.ok([...plant("rules?.get?.('caps.new_m9_key', { product });").keys].some((k) => !list.includes(k)));
+  const at = ready.indexOf("const cap = rules.num('caps.rounds'");
+  assert.ok(at > 0, 'readyCheck reads caps.rounds through rules.num');
+  const plant = (line, text = ready) => recordReads(`${text.slice(0, at)}${line}\n    ${text.slice(at)}`);
+  const NEW = 'caps.new_m9_key';
+  for (const line of [
+    `rules.get('${NEW}', { product });`, `rules.get("${NEW}", { product });`, `rules?.get?.('${NEW}', { product });`,
+    `rules.num('${NEW}', { product });`, `rules?.num?.('${NEW}', { product });`,
+    `rules.flag('${NEW}', { product });`, `rules?.flag?.('${NEW}', { product });`,
+    `rules.dec('${NEW}', { product });`, `rules?.dec?.('${NEW}', { product });`,
+    `const k9 = '${NEW}'; rules.num(k9, { product });`,
+  ]) assert.deepEqual(unlisted(plant(line).keys), [NEW], line);
+  for (const line of ['rules.get(KEY, { product });', 'rules?.flag?.(key2, { product });', 'rules.num(`caps.${what}`, { product });'])
+    assert.equal(plant(line).nonLiteral, 1, line);
+  // goFreeOn's computed key: a changed map name, or a ${…} the reader can't name, is caught.
+  const gf = 'const key = `${GO_FREE_KEY}.${kind}`;';
+  assert.ok(ready.includes(gf), 'goFreeOn builds its key from GO_FREE_KEY and the kind');
+  assert.ok(unlisted(recordReads(ready.replace(gf, 'const key = `${GO_FREE_KEY}_x.${kind}`;')).keys).length > 0);
+  assert.equal(recordReads(ready.replace(gf, 'const key = `${GO_FREE_KEY}.${other}`;')).nonLiteral, 2, 'both reads of key');
+  assert.ok(unlisted(recordReads(ready.replace("export const GO_FREE_KEY = 'approvals.plan_go.go_free';", "export const GO_FREE_KEY = 'approvals.go_free';")).keys).length > 0);
+  // writer.mjs: its helpers and its own typed read.
   const writer = read('writer.mjs');
-  assert.ok([...recordReads(ready, writer.replace("get('caps.rounds')", 'get(`caps.other`)')).keys].includes('caps.other'));
+  assert.deepEqual(unlisted(recordReads(ready, writer.replace("num('caps.rounds')", 'num(`caps.other`)')).keys), ['caps.other']);
+  assert.deepEqual(unlisted(recordReads(ready, writer.replace("get('timeouts')", "get('timeouts2')")).keys), ['timeouts2']);
+  assert.deepEqual(unlisted(recordReads(ready, writer.replace("rules?.num?.('proposals.heartbeat_stale_min'", "rules?.num?.('proposals.heartbeat_x'")).keys), ['proposals.heartbeat_x']);
 });

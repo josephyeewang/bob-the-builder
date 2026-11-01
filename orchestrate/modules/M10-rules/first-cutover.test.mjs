@@ -12,7 +12,8 @@ import { docsLaneProblem } from './lane-check.mjs';
 import { firstCutoverProblems, PATH_ONLY_EFFECTS, MODULE_KEYS, READERS } from './first-cutover.mjs';
 import { readyCheck } from '../M9-record/ready.mjs';
 import { CARD_CREATORS } from '../M9-record/permissions.mjs';
-import { goFreeOn } from '../M9-record/required-keys.mjs';
+import { goFreeOn } from '../M9-record/ready.mjs';
+import { heartbeatLimit } from '../M9-record/writer.mjs';
 import { PRODUCT_STATES } from './policy.mjs';
 import { readConfig } from '../M2-approvals/kinds.mjs';
 import { botId } from '../M6-merge-gate/gather.mjs';
@@ -22,7 +23,7 @@ import { startGate } from '../M11-dispatcher/gate.mjs';
 import { bands } from '../M11-dispatcher/usage.mjs';
 import { handoffVet } from '../M11-dispatcher/lead-restart.mjs';
 import { KNOWN, SCOPE_OWNERS, numeric, scopeLabel } from './known-gaps.mjs';
-import { DAILY_CARD_RULE, M11_WITH_PRODUCT, m11Scope } from './first-cutover.mjs';
+import { DAILY_CARD_RULE, m11Scope } from './first-cutover.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const SAMPLE = readFileSync(join(here, 'fixtures/policy.yaml'), 'utf8');
@@ -31,17 +32,15 @@ const ENTRY = { product: 'sample-app', owner: 'sample-org', repo: 'sample-app', 
 
 // Reasons the real readers give today on any rules file, each a known gap in the readers, not in the file, and labeled
 // so in the check's own output (known-gaps.mjs; L96 m-D, L115). They go as these land:
-//   - numbers as text (L96): lane 2's M11 sweep (context.*, caps.per_state); and the heartbeat when this check calls
-//     lane 1's heartbeatLimit(rules, product), which #79 exports from writer.mjs with num() (L115 m-A);
-//   - M11's Mac-wide reads of product keys (L115 M-A): #79 makes usage.red_runs Mac-wide; lane 2's L104 sweep passes the
-//     product at the four context.* reads.
+//   - numbers as text (L96): lane 2's M11 sweep (context.*, caps.per_state). (The heartbeat's went with #79: this check
+//     now calls writer.mjs heartbeatLimit, which reads through num(), L123.)
+//   - M11's Mac-wide reads of per-product keys (L115 M-A, L131): lane 2's L104 sweep passes the product at the four
+//     context.* reads. (usage.red_runs's went with #79, which made it Mac-wide in shared/rules.mjs.)
 // The test 'the pending reasons are exactly these' then fails, and this list is cut to what is left; at [] the todo
 // test below passes.
 const SCOPE = (k) => `M11: ${k} is read without the product, so the real engine gives none${scopeLabel(k)}`;
 const TEXT = (k) => `M11: ${k} must be a number${KNOWN.text}`;
 const PENDING = Object.freeze([
-  `M9: proposals.heartbeat_stale_min must be a whole number of minutes, at least 1${KNOWN.text}`,
-  SCOPE('usage.red_runs'),
   SCOPE('context.lead.soft'), TEXT('context.lead.soft'),
   SCOPE('context.lead.hard'), TEXT('context.lead.hard'),
   SCOPE('context.handoff_cap.role'), TEXT('context.handoff_cap.role'),
@@ -50,7 +49,7 @@ const PENDING = Object.freeze([
 ]);
 // The keys the pending reasons are about, by gap.
 const keyOf = (x) => x.match(/^M(?:9|11): (\S+) /)[1];
-const PENDING_SCOPE = PENDING.filter((x) => x.endsWith(KNOWN.scopeRedRuns) || x.endsWith(KNOWN.scopeContext)).map(keyOf);
+const PENDING_SCOPE = PENDING.filter((x) => x.endsWith(KNOWN.scopeContext)).map(keyOf);
 const PENDING_TEXT = PENDING.filter((x) => x.endsWith(KNOWN.text)).map(keyOf);
 const fit = (...a) => firstCutoverProblems(...a).filter((x) => !PENDING.includes(x));
 
@@ -284,7 +283,8 @@ const VARIANTS = [
   ['no stale_after_min', (t) => swap(t, '  stale_after_min: 15\n', '')],
   // L96 m-1, m-2, m-3: policy the fit check holds on purpose.
   ['no required checks', (t) => swap(t, 'required_checks: [build, test]', 'required_checks: []'), 'policy: the gate would check nothing (L96 m-1)'],
-  ['exact_reverse: false', (t) => swap(t, 'exact_reverse: true', 'exact_reverse: false'), 'go_free values: goFreeKinds reads keys only until lane 1 adopts goFreeOn (L115 M-C; this tripwire fails when it does)'],
+  // #79 put goFreeOn in goFreeKinds, so the readers refuse it too: the L115 M-C tripwire fired, and it is no longer a policy line.
+  ['exact_reverse: false', (t) => swap(t, 'exact_reverse: true', 'exact_reverse: false')],
   ['ordinary: true, so the Lead\'s cards skip the go', (t) => swap(t, '      exact_reverse: true\n', '      exact_reverse: true\n      ordinary: true\n'), 'go_free values: only the known kinds'],
   ['research_copy: yes', (t) => swap(t, '      exact_reverse: true\n', '      exact_reverse: true\n      research_copy: yes\n'), 'go_free values: a flag is true or false'],
   ['an empty daily-card pattern', DAILY("''"), 'M10\'s pattern rule (L96 m-3)'],
@@ -302,26 +302,42 @@ test('the pending reasons are exactly these, on the fixture as given, and each s
   for (const [name, k] of Object.entries(KNOWN)) assert.match(k, /^ \(known: .+, L\d+; waits on .+\)$/, name);
   // L120 c-2: each label's ruling, and the owner it waits on.
   assert.deepEqual(Object.fromEntries(Object.entries(KNOWN).map(([n, k]) => [n, k.match(/, (L\d+); waits on (.+)\)$/).slice(1)])), {
-    text: ['L96', 'step 2'], scopeRedRuns: ['L115', 'lane 1\'s #79'], scopeContext: ['L115', 'lane 2\'s L104 sweep'],
+    text: ['L96', 'step 2'], scopeContext: ['L115', 'lane 2\'s L104 sweep'],
   });
-  assert.equal(scopeLabel('usage.red_runs'), KNOWN.scopeRedRuns);
+  // usage.red_runs's gap went with #79 (L131): it is Mac-wide in the rules, and M11 reads it so.
+  assert.equal(scopeLabel('usage.red_runs'), '');
   assert.equal(scopeLabel('context.lead.soft'), KNOWN.scopeContext);
   // L125 c-1: owners are named key by key; any other key gets no label, so it can't pass as known.
   for (const k of ['caps.readonly_per_session', 'timeouts.cancel_grace_min', 'anything.at.all', 'context.other', 'constructor']) assert.equal(scopeLabel(k), '', k);
   assert.deepEqual(Object.keys(SCOPE_OWNERS), PENDING_SCOPE, 'the map names exactly the pending scope gaps');
   for (const x of PENDING) assert.match(x, / \(known: /, x);
-  assert.deepEqual(PENDING_SCOPE, ['usage.red_runs', 'context.lead.soft', 'context.lead.hard', 'context.handoff_cap.role', 'context.worker.split_after_compactions']);
+  assert.deepEqual(PENDING_SCOPE, ['context.lead.soft', 'context.lead.hard', 'context.handoff_cap.role', 'context.worker.split_after_compactions']);
 });
 
-test('the fit check reads each M11 key at the scope M11\'s sources read it (L115 M-A)', () => {
+// L131: the fit check reads each key at the rules' own scope (shared/rules.mjs isMacKey), and M11's sources must read it
+// there too (L105 (2)), but for the known gaps in SCOPE_OWNERS, which must still be gaps. NEW_KEYS are skipped.
+test('the fit check reads each M11 key at the rules\' own scope, and M11\'s sources read it there but for the known gaps (L131, L115 M-A)', () => {
   const { scopes, unread } = m11SourceScopes();
   assert.equal(unread, 0, 'every need()/minutes() call in M11 names a KEYS entry the scan can read');
-  for (const [name] of Object.entries(M11_KEYS)) {
+  for (const k of ['usage.red_runs', 'usage.bands.red.pace', 'caps.editing_per_mac']) assert.equal(m11Scope(k), 'mac', k);
+  for (const k of ['caps.per_state', 'caps.readonly_per_session', 'context.lead.soft', 'approvals.plan_go.go_free.lead_daily_card']) assert.equal(m11Scope(k), 'product', k);
+  const gaps = [];
+  let checked = 0;
+  for (const [name, key] of Object.entries(M11_KEYS)) {
+    if (M11_NEW_KEYS.includes(key)) continue;
     const src = [...(scopes.get(name) ?? [])];
     if (!src.length) continue;
-    assert.deepEqual(src, [m11Scope(name)], `${name}: M11 reads it ${src.join(' and ')}, the fit check ${m11Scope(name)}`);
+    checked += 1;
+    if (Object.hasOwn(SCOPE_OWNERS, key)) {
+      assert.equal(m11Scope(key), 'product', `${key}: a known gap is a per-product key`);
+      assert.deepEqual(src, ['mac'], `${key}: M11 now reads it ${src.join(' and ')}, so it comes off SCOPE_OWNERS`);
+      gaps.push(key);
+      continue;
+    }
+    assert.deepEqual(src, [m11Scope(key)], `${name}: M11 reads it ${src.join(' and ')}, the rules make it ${m11Scope(key)}`);
   }
-  for (const name of M11_WITH_PRODUCT) assert.ok(scopes.has(name), `${name} is on the with-product list but M11 never reads it`);
+  assert.ok(checked >= 15, `checked ${checked}`);
+  assert.deepEqual(gaps, Object.keys(SCOPE_OWNERS), 'every known gap is one M11 still has');
   // The O1 and O2 plants, on copies: a caller that drops its product, or one that adds it, fails the match.
   const gate = readFileSync(join(M11_DIR, 'gate.mjs'), 'utf8');
   const drop = (from, to) => { assert.ok(gate.includes(from)); return m11SourceScopes({ 'gate.mjs': gate.replace(from, to) }).scopes; };
@@ -334,15 +350,17 @@ test('the fit check reads each M11 key at the scope M11\'s sources read it (L115
   assert.deepEqual([...m11SourceScopes({ 'x.mjs': "need(rules, KEYS.redRuns, { product: p, type: 'list' })" }).scopes.get('redRuns')], ['product']);
 });
 
-test('the real startGate refuses every start but undo_merge on the fixture today: undo for caps.per_state, the rest for usage.red_runs (L115 M-A)', () => {
+// Since #79 usage.red_runs is read Mac-wide and gives [undo], so no start is refused for it. The starts that read
+// caps.per_state (editing, overnight, undo) are refused for its numbers as text (the KNOWN.text gap, lane 2's M11 sweep);
+// when that sweep lands this test fails, and the todo below can pass.
+test('the real startGate refuses editing, overnight and undo on the fixture today, for caps.per_state, and no start for usage.red_runs (L115 M-A, L131)', () => {
   const rules = rulesOf(FIRST);
   const rec = { read: (e) => (e === 'product' ? { doc: { state: 'active' } } : null), list: () => [] };
   const card = { id: 'C-1', product: 'sample-app', kind: 'editing', tier: 2, files: ['docs/research/note.md'] };
   const b = { band: 'green', own_building: 'open', prodBlocked: false };
-  for (const kind of START_KINDS) {
-    const r = startGate({ rules, rec, card, kind, product: 'sample-app', b, running: [], lead: 'S-lead' });
-    assert.equal(r.missing, kind === 'undo' || kind === 'undo_merge' ? (kind === 'undo' ? 'caps.per_state' : undefined) : 'usage.red_runs', kind);
-  }
+  const got = Object.fromEntries(START_KINDS.map((kind) => [kind, startGate({ rules, rec, card, kind, product: 'sample-app', b, running: [], lead: 'S-lead' }).missing ?? null]));
+  const PER_STATE = ['editing', 'overnight', 'undo'];
+  assert.deepEqual(got, Object.fromEntries(START_KINDS.map((kind) => [kind, PER_STATE.includes(kind) ? 'caps.per_state' : null])));
 });
 
 test.todo('the fixture is fit with no pending reasons (after the L96 step-2 sweeps)', () => {
@@ -376,7 +394,8 @@ test('every key the Dispatcher reads is checked, not one (L96 M-2)', () => {
   const m11 = READERS.M11.REQUIRED_KEYS;
   assert.deepEqual([...m11], Object.values(M11_KEYS).filter((k) => !M11_NEW_KEYS.includes(k)));
   assert.ok(m11.length >= 20, `${m11.length} keys`);
-  assert.deepEqual(fit(swap(FIRST, '  red_runs: [undo]\n', '  red_runs: undo\n'), ENTRY), ['M11: usage.red_runs must be a list']);
+  // A Mac-wide list key the products give as a plain value: the real engine combines lists only, so it gives none (#79).
+  assert.deepEqual(fit(swap(FIRST, '  red_runs: [undo]\n', '  red_runs: undo\n'), ENTRY), ['usage.red_runs is missing (M11 reads it)']);
 });
 
 test('go_free values are read: only the known kinds, a flag exactly true or false (L96 m-2)', () => {
@@ -438,12 +457,14 @@ test('the fit check refuses a file without go_free, naming it (the L86 plant)', 
 
 test('go_free in the list form is refused: one map serves goFreeKinds and M11\'s need() together (L86 9)', () => {
   const list = VARIANTS[2][1](FIRST);
-  assert.ok(goFreeKinds(rulesOf(list), 'sample-app').includes('exact_reverse'), 'M9 and M6 read the list form');
+  // Since #79, goFreeKinds reads each kind through goFreeOn, so the list form gives M9 and M6 no go-free kind either.
+  assert.deepEqual(goFreeKinds(rulesOf(list), 'sample-app'), [], 'M9 and M6 read no kind from the list form');
   assert.throws(() => need(rulesOf(list), M11_KEYS.leadDailyCard, { product: 'sample-app', type: 'list' }), /no value/);
   assert.ok(fit(list, ENTRY).some((x) => /must be a map/.test(x)));
   // The map form: both readers get what they need from the same file.
   const rules = rulesOf(FIRST);
-  assert.deepEqual(goFreeKinds(rules, 'sample-app'), ['exact_reverse', 'lead_daily_card']);
+  // lead_daily_card: [] names no daily card, so it is not go-free (goFreeOn, L115 m-F; #79).
+  assert.deepEqual(goFreeKinds(rules, 'sample-app'), ['exact_reverse']);
   assert.deepEqual(need(rules, M11_KEYS.leadDailyCard, { product: 'sample-app', type: 'list' }), []);
 });
 
@@ -462,6 +483,21 @@ test('the fit check\'s keys are the union of the modules\' own lists, and nothin
   const union = new Set(Object.values(READERS).flatMap((m) => m.REQUIRED_KEYS));
   assert.deepEqual(new Set(MODULE_KEYS), union);
   for (const k of ['product_profile.robot.bot_user_id', 'approvals.plan_go.go_free', 'approvals.push_windows', 'approvals.decisions_dir', M11_KEYS.leadDailyCard, 'caps.rounds', 'product_state_rules.light.start', M11_KEYS.redRuns]) assert.ok(union.has(k), k);
+});
+
+// L123 O3: the fit check's heartbeat line is writer.mjs's own heartbeatLimit, so it refuses exactly what the writer can't
+// use: 0, a negative, a fraction or a word, and a missing key; a whole number of minutes passes.
+test('the heartbeat limit is refused exactly when writer.mjs heartbeatLimit gives none (L123 O3)', () => {
+  const HB = 'M9: proposals.heartbeat_stale_min must be a whole number of minutes, at least 1';
+  const at = (v) => swap(FIRST, 'heartbeat_stale_min: 30', `heartbeat_stale_min: ${v}`);
+  for (const v of ['0', '-1', '1.5', 'abc', "''"]) {
+    assert.equal(heartbeatLimit(rulesOf(at(v)), 'sample-app'), undefined, v);
+    assert.ok(fit(at(v), ENTRY).includes(HB), `${v}: ${fit(at(v), ENTRY).join(' | ')}`);
+  }
+  for (const v of ['1', '30', '240']) {
+    assert.equal(heartbeatLimit(rulesOf(at(v)), 'sample-app'), Number(v), v);
+    assert.deepEqual(fit(at(v), ENTRY), [], v);
+  }
 });
 
 test('L120 m-1: a value that is wrong, not a number given as text, gets no known label', () => {
