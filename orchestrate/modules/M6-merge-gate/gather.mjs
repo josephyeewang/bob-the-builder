@@ -85,7 +85,7 @@ async function mainGreen(gh, base, sha, required, ignoredList) {
   return runs.every(good) && sts.every((s) => s.state === 'success');
 }
 
-const linesOf = (patch) => {
+export const linesOf = (patch) => {
   if (typeof patch !== 'string') return {};
   const added = []; const removed = [];
   for (const l of patch.split('\n')) {

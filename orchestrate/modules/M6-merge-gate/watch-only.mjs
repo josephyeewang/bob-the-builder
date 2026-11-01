@@ -20,14 +20,14 @@
 //
 // THE WEEK. The first pass pins main's head (the pin); nothing before it is judged and the window starts at that pass.
 // Every pass proves the pin is still an ancestor of main's head (GitHub compare: ahead or identical), then walks main's
-// first-parent chain from head back to the pin or to a commit already judged, so a commit can't slip between passes.
-// Days are UTC, by `merged_at`. A different rules draft restarts the week (a new pin).
+// first-parent chain from head back to the pin every pass (skipping commits already judged), so a commit can't slip between passes.
+// Days are UTC, by `merged_at` (a direct push: by when a pass first saw it); the first counted day is the day after the pin. A different rules draft restarts the week (a new pin).
 //
 // FILES (in `dir`, the runner's own folder): log.jsonl (one JSON line per commit, pin or pass), rules-draft.yaml, watch.lock.
-// Explanations are NOT in `dir`: they come from a file the owner's Mac user owns, in a folder only that user can write.
+// Explanations are NOT in `dir`: they come from a file the owner's Mac user owns, in a folder only that user can write (`<base>/watch-notes`, which orchestrate can read).
 // The token is read from a file the runner's own user owns, mode 0600; never put in a log line, an error or an argument.
 
-import { closeSync, constants, fstatSync, openSync, readFileSync, appendFileSync, existsSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import { closeSync, constants, fstatSync, openSync, readFileSync, appendFileSync, existsSync, statSync, lstatSync, unlinkSync, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -37,7 +37,7 @@ import { parsePolicy } from '../M10-rules/policy.mjs';
 import { MAX_BYTES, RULES_PATH, blobSha, findApprovingPull } from '../M10-rules/reader.mjs';
 import { approveNeeded } from '../M2-approvals/go.mjs';
 import { makeRules } from '../../shared/rules.mjs';
-import { botId, threadsQuery } from './gather.mjs';
+import { botId, linesOf, threadsQuery } from './gather.mjs';
 import { judge } from './refusals.mjs';
 
 export const NOT_JUDGED = Object.freeze([2, 3, 5, 10, 11, 12, 13]);
@@ -128,6 +128,7 @@ export function draftRules({ dir, sha256: pinned }) {
  * request that put them on main, merged, whose head holds the same file). Reasons start with the HTTP status.
  */
 export function githubRules({ gh, owner, repo }) {
+  let last = null; // the last version approved in this pass: { commit, blob }; the next different version must have landed after it (M10's replay guard)
   return {
     kind: 'github', id: null,
     async at(parent) {
@@ -140,8 +141,11 @@ export function githubRules({ gh, owner, repo }) {
       if (!SHA.test(j.sha ?? '') || !buf || buf.length > MAX_BYTES || buf.length !== j.size || blobSha(buf) !== j.sha) return { reason: `HTTP 200: the rules file at ${parent.slice(0, 7)} does not match the version GitHub named` };
       const parsed = parsePolicy(buf.toString('utf8'));
       if (!parsed.ok) return { reason: `HTTP 200: the rules file at ${parent.slice(0, 7)} is not usable (${parsed.reason})` };
-      const ok = await findApprovingPull({ gh, owner, repo, commit: parent, blob: j.sha });
-      if (!ok.ok) return { reason: `not approved: ${ok.reason}` };
+      if (!(last && last.blob === j.sha)) {
+        const ok = await findApprovingPull({ gh, owner, repo, commit: parent, blob: j.sha, after: last?.commit ?? null });
+        if (!ok.ok) { const st = /GitHub answered (\d{3})/.exec(ok.reason ?? ''); return { reason: `${st ? `HTTP ${st[1]}: ` : ''}not approved: ${ok.reason}` }; }
+        last = { commit: parent, blob: j.sha };
+      }
       return { policy: parsed.policy, engine: engineFor(parsed.policy, parent, j.sha), id: j.sha };
     },
   };
@@ -183,17 +187,11 @@ export function judgeMerged(facts, rules) {
   };
   const j = judge(f);
   const refusals = j.refusals.filter((r) => !NJ.includes(r.n));
-  const hard = refusals.filter((r) => r.n !== 8 && r.n !== 14);
+  // Only a refusal 8 that says the owner's Approve is NEEDED can be "would ask"; refusal 14 and an Approve check that could not run are refusals.
+  const hard = refusals.filter((r) => !(r.n === 8 && /needs the owner's Approve|the rules ask for the owner's Approve/.test(r.reason ?? '')));
   const verdict = hard.length ? VERDICTS[2] : refusals.length ? VERDICTS[1] : j.decision === 'hold' ? VERDICTS[3] : VERDICTS[0];
   return { verdict, refusals, tier, risky, not_judged: NJ, assumed: ASSUMED, ...(j.hold ? { hold: j.hold } : {}) };
 }
-
-const linesOf = (patch) => {
-  if (typeof patch !== 'string') return {};
-  const added = []; const removed = [];
-  for (const l of patch.split('\n')) { if (l.startsWith('+') && !l.startsWith('+++')) added.push(l.slice(1)); else if (l.startsWith('-') && !l.startsWith('---')) removed.push(l.slice(1)); }
-  return { added_lines: added, removed_lines: removed };
-};
 
 /**
  * Gathers the facts for one commit on main. → { unreadable: "<reason>" } when a read FAILED (the commit is tried again
@@ -202,7 +200,7 @@ const linesOf = (patch) => {
 export async function gatherMerged({ gh, owner, repo, policy, sha, now = () => Date.now() }) {
   const base = `/repos/${owner}/${repo}`;
   const view = makeGitView({ gh, owner, repo });
-  const fail = (what, e) => { const err = new Error(`${what}: ${failText(e)}`); err.unreadable = true; throw err; };
+  const fail = (what, e) => { const err = new Error(`${failText(e)}: ${what}`); err.unreadable = true; throw err; };
   const get = async (path, what) => {
     let r; try { r = await gh.get(path); } catch (e) { fail(what, e); }
     if (r?.status !== 200 || r.json == null) fail(what, `HTTP ${r?.status}`);
@@ -214,11 +212,12 @@ export async function gatherMerged({ gh, owner, repo, policy, sha, now = () => D
     if (!Array.isArray(pulls)) fail('the pull requests for the commit', 'odd answer');
     const listed = pulls.filter((p) => Number.isInteger(p?.number));
     const commitTime = Date.parse((await get(`${base}/commits/${sha}`, 'the commit')).commit?.committer?.date ?? '');
-    if (listed.length === 0 && Number.isFinite(commitTime) && now() - commitTime < FRESH_MS) fail('the pull requests for the commit', 'an empty list for a commit under an hour old; GitHub may not have linked it yet');
+    if (!Number.isFinite(commitTime)) fail('the commit', 'it has no readable date');
+    if (listed.length === 0 && now() - commitTime < FRESH_MS) fail('the pull requests for the commit', 'an empty list for a commit under an hour old; GitHub may not have linked it yet');
     if (listed.length === 0) return { direct: true, sha, mergedAt: new Date(commitTime).toISOString(), mergedBy: null, pr: null };
     const num = (listed.find((p) => p.merge_commit_sha === sha) ?? listed[0]).number;
     const pr = await get(`${base}/pulls/${num}`, `pull request ${num}`);
-    if (pr.merged !== true) return { direct: true, sha, mergedAt: Number.isFinite(commitTime) ? new Date(commitTime).toISOString() : null, mergedBy: null, pr: null };
+    if (pr.merged !== true) return { direct: true, sha, mergedAt: new Date(commitTime).toISOString(), mergedBy: null, pr: null };
     const headSha = SHA.test(pr?.head?.sha ?? '') ? pr.head.sha : fail(`pull request ${num}`, 'no head');
     const parent = c?.parents?.[0] ?? fail('the commit', 'no parent');
     const cmp = await get(`${base}/compare/${parent}...${sha}`, 'the change');
@@ -296,8 +295,9 @@ export async function watchPass({ gh, owner, repo, dir, rules, now = () => new D
 async function pass({ gh, owner, repo, dir, rules, at, now, maxWalk }) {
   const base = `/repos/${owner}/${repo}`;
   const problems = [];
+  let ruleId = null;
   const log = (o) => appendLine(dir, o);
-  const done = (head, pin, judged, skipped) => { log({ pass: true, at, head, pin_sha: pin, pin_ok: pinOk, rules: rules.id ?? rules.kind, judged, skipped, problems }); return { judged, skipped, problems }; };
+  const done = (head, pin, judged, skipped) => { log({ pass: true, at, head, pin_sha: pin, pin_ok: pinOk, rules: ruleId ?? rules.kind, judged, skipped, problems }); return { judged, skipped, problems }; };
   let pinOk = false;
   const lines = readLog(dir);
   let head;
@@ -309,9 +309,10 @@ async function pass({ gh, owner, repo, dir, rules, at, now, maxWalk }) {
   // The pin: main's head at the first pass of this rules draft; a different draft restarts the week (a new pin).
   const pins = lines.filter((l) => l.pin === true && SHA.test(l.sha ?? ''));
   let pin = pins.at(-1) ?? null;
-  const draftId = rules.kind === 'draft' ? rules.id : null;
-  if (!pin || (draftId && pin.rules !== draftId)) {
-    pin = { pin: true, at, sha: head, how: 'main\'s head at the first pass', rules: draftId ?? rules.kind, ...(pin ? { restart_of: pin.sha, why: 'the rules draft changed' } : {}) };
+  // A draft with no pinned hash is a setup fault, not a different draft: it never restarts the week.
+  ruleId = rules.kind === 'draft' ? (rules.id ?? pin?.rules ?? 'draft') : rules.kind;
+  if (!pin || pin.rules !== ruleId) {
+    pin = { pin: true, at, sha: head, how: 'main\'s head at the first pass', rules: ruleId, ...(pin ? { restart_of: pin.sha, why: pin.rules === 'github' || ruleId === 'github' ? 'the rules source changed' : 'the rules draft changed' } : {}) };
     log(pin); pinOk = true;
     return done(head, pin.sha, 0, 0);
   }
@@ -321,17 +322,20 @@ async function pass({ gh, owner, repo, dir, rules, at, now, maxWalk }) {
     if (r?.status !== 200) throw new Error(`HTTP ${r?.status}`);
     if (r.json?.status === 'ahead' || r.json?.status === 'identical') pinOk = true; else problems.push(`the pin ${pin.sha.slice(0, 7)} is no longer an ancestor of main (compare says ${r.json?.status})`);
   } catch (e) { problems.push(`the pin could not be checked against main (${failText(e)})`); }
+  // The rules draft must be the pinned one at every pass, even when no commit needs judging (a swapped draft shows up here).
+  if (rules.kind === 'draft') { const r0 = await rules.at(head); if (!r0.policy) problems.push(`the rules draft check failed: ${r0.reason}`); }
   const judgedShas = new Set(lines.filter((l) => isCommit(l) && !l.not_judged_reason && l.at >= pin.at).map((l) => l.sha));
-  // Walk main's first-parent chain from head back to the pin or to a commit already judged.
+  // Walk main's first-parent chain from head back to the pin, every pass. Commits already judged are skipped, not a place to
+  // stop: a newer judged commit must not hide an older one whose read failed.
   const chain = [];
   let reachedStop = false;
   if (pinOk) {
     const view = makeGitView({ gh, owner, repo });
     try {
       for (let s = head, n = 0; ; n++) {
-        if (s === pin.sha || judgedShas.has(s)) { reachedStop = true; break; }
+        if (s === pin.sha) { reachedStop = true; break; }
         if (n >= maxWalk) break;
-        chain.push(s);
+        if (!judgedShas.has(s)) chain.push(s);
         const c = await view.commit(s);
         if (!c.parents?.length) break;
         s = c.parents[0];
@@ -339,22 +343,22 @@ async function pass({ gh, owner, repo, dir, rules, at, now, maxWalk }) {
     } catch (e) { problems.push(`main's history could not be walked (${failText(e)})`); reachedStop = true; }
     if (!reachedStop) problems.push(`main's history did not lead back to the pin within ${maxWalk} commits`);
   }
-  let judged = 0; let skipped = 0;
+  let judged = 0; const skipped = 0;
   const notJudgedBefore = new Map(lines.filter((l) => isCommit(l) && l.not_judged_reason).map((l) => [l.sha, l.not_judged_reason]));
   for (const sha of chain.reverse()) {
     if (problems.length && !pinOk) break;
-    let parent = null;
-    try { parent = (await makeGitView({ gh, owner, repo }).commit(sha)).parents?.[0] ?? null; } catch (e) { problems.push(`${sha.slice(0, 8)}: not judged, the commit could not be read (${failText(e)})`); continue; }
     const notJudged = (reason) => {
       problems.push(`${sha.slice(0, 8)}: not judged, ${reason}`);
-      if (notJudgedBefore.get(sha) !== reason) { log({ sha, at, not_judged_reason: reason }); notJudgedBefore.set(sha, reason); }
+      if (notJudgedBefore.get(sha) !== reason) { log({ sha, at, rules: ruleId, not_judged_reason: reason }); notJudgedBefore.set(sha, reason); }
     };
+    let parent = null;
+    try { parent = (await makeGitView({ gh, owner, repo }).commit(sha)).parents?.[0] ?? null; } catch (e) { notJudged(`${failText(e)}: the commit could not be read`); continue; }
     const r = await rules.at(parent);
     if (!r.policy) { notJudged(r.reason); continue; }
     const facts = await gatherMerged({ gh, owner, repo, policy: r.policy, sha, now: () => Date.parse(at) });
     if (facts.unreadable) { notJudged(facts.unreadable); continue; }
     const v = judgeMerged(facts, r);
-    log({ sha, at, merged_at: facts.mergedAt, pr: facts.pr, merged_by: facts.mergedBy, direct: facts.direct, rules: r.id, ...v });
+    log({ sha, at, seen_at: at, merged_at: facts.mergedAt, pr: facts.pr, merged_by: facts.mergedBy, direct: facts.direct, rules: r.id ?? ruleId, ...v });
     judged++;
   }
   return done(head, pin.sha, judged, skipped);
@@ -369,8 +373,10 @@ async function pass({ gh, owner, repo, dir, rules, at, now, maxWalk }) {
 export function readExplanations(path, { ownerUid }) {
   if (!path) return { ok: true, explanations: {}, owner: null, problem: null };
   const bad = (problem) => ({ ok: false, explanations: {}, owner: null, problem });
-  if (!existsSync(path)) return { ok: true, explanations: {}, owner: ownerUid, problem: null };
   try {
+    let there = true;
+    try { lstatSync(path); } catch (e) { if (e?.code === 'ENOENT') there = false; else throw e; }
+    if (!there) return { ok: true, explanations: {}, owner: ownerUid, problem: null };
     const { buf, st } = readPlain(path, 1_000_000);
     const dst = statSync(dirname(path));
     if (st.uid !== ownerUid) return bad(`the explanations file is owned by user ${st.uid}, not the owner's user ${ownerUid}`);
@@ -379,7 +385,7 @@ export function readExplanations(path, { ownerUid }) {
     const o = JSON.parse(buf.toString('utf8'));
     if (!o || typeof o !== 'object' || Array.isArray(o)) return bad('the explanations file is not a list of commit: reason');
     return { ok: true, explanations: o, owner: st.uid, problem: null };
-  } catch (e) { return bad(`the explanations file could not be read (${failText(e)})`); }
+  } catch (e) { return bad(`the explanations file could not be reached, so it does not count (${e?.code === 'EACCES' ? 'no permission to look' : failText(e)})`); }
 }
 
 /**
@@ -395,19 +401,25 @@ export function summary({ dir, endDay, explanations: ex = { ok: true, explanatio
   if (!/^\d{4}-\d{2}-\d{2}$/.test(endDay ?? '') || new Date(`${endDay}T00:00:00Z`).toISOString().slice(0, 10) !== endDay) { out.reasons.push('the end day is not a real date'); return out; }
   if (!pin) { out.reasons.push('no pass has run yet (no pin)'); return out; }
   const end = Date.parse(`${endDay}T00:00:00Z`);
-  for (let t = Date.parse(`${day(pin.at)}T00:00:00Z`); t <= end; t += 86_400_000) out.days.push(new Date(t).toISOString().slice(0, 10));
+  // The first counted day is the day AFTER the pin, unless the pin is exactly midnight: the pin day is only part of a day.
+  const pinDay = Date.parse(`${day(pin.at)}T00:00:00Z`);
+  for (let t = Date.parse(pin.at) === pinDay ? pinDay : pinDay + 86_400_000; t <= end; t += 86_400_000) out.days.push(new Date(t).toISOString().slice(0, 10));
   const after = lines.filter((l) => !l.corrupt && l.at >= pin.at);
-  const cleanPass = (l) => l.pass === true && !(l.problems?.length) && l.pin_sha === pin.sha && l.pin_ok === true && SHA.test(l.head ?? '');
+  const cleanPass = (l) => l.pass === true && !(l.problems?.length) && l.pin_sha === pin.sha && l.pin_ok === true && l.rules === pin.rules && SHA.test(l.head ?? '');
   const clean = after.filter(cleanPass);
   const cleanDays = new Set(clean.map((l) => day(l.at)));
   out.missingDays = out.days.filter((d) => !cleanDays.has(d));
   out.failedPasses = after.filter((l) => l.pass === true && !cleanPass(l)).length;
-  const judgedLines = after.filter((l) => isCommit(l) && !l.not_judged_reason);
+  const rulesOk = (l) => pin.rules === 'github' || l.rules === pin.rules;
+  const judgedLines = after.filter((l) => isCommit(l) && !l.not_judged_reason && rulesOk(l));
   const seen = new Map();
   for (const l of judgedLines) seen.set(l.sha, (seen.get(l.sha) ?? 0) + 1);
   out.duplicates = [...seen].filter(([, n]) => n > 1).map(([sha]) => sha);
   out.stuck = [...new Set(after.filter((l) => isCommit(l) && l.not_judged_reason).map((l) => l.sha))].filter((sha) => !seen.has(sha));
-  const inWindow = judgedLines.filter((l) => out.days.includes(day(l.merged_at ?? l.at)));
+  // A direct push counts on the day a pass first saw it (its own date is the committer's to set); every judged line found
+  // after the pin counts, an early date clamped to the first day of the window. Only a date past the end day is out.
+  const countedDay = (l) => day((l.direct ? l.seen_at : l.merged_at) ?? l.seen_at ?? l.at);
+  const inWindow = judgedLines.filter((l) => countedDay(l) <= endDay);
   const dis = inWindow.filter((l) => l.verdict !== VERDICTS[0]);
   out.judged = inWindow.length; out.wouldMerge = inWindow.length - dis.length; out.disagreements = dis.length;
   out.unexplained = (ex.ok ? dis.filter((l) => typeof ex.explanations[l.sha] !== 'string' || !ex.explanations[l.sha].trim()) : dis).map((l) => ({ sha: l.sha, pr: l.pr, verdict: l.verdict, refusals: l.refusals }));

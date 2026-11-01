@@ -120,7 +120,8 @@ export function folderTable(cfg) {
     ...USERS.map((u) => [homeOf(cfg, u), u, 0o700, `${u}'s home`]),
     [p('keys'), 'orchestrate', 0o700, 'robot keys: nothing else reads them'],
     [p('private'), 'orchestrate', 0o700, 'private data: attempt logs, raw facts before masking'],
-    [p('watch'), 'orchestrate', 0o700, 'the watch-only week: the log of what the Merge Gate would have done, and the written explanations'],
+    [p('watch'), 'orchestrate', 0o700, 'the watch-only week: the log of what the Merge Gate would have done, and the rules draft'],
+    [watchNotesPath(cfg), 'owner', 0o755, 'the watch-only week\'s written explanations: the owner writes, orchestrate and the summary only read'],
     [p('hooks'), 'orchestrate', 0o755, 'hook copies and the rules snapshot: read and run by others, written by orchestrate'],
     [p('settings'), 'orchestrate', 0o755, 'role settings files'],
     [p('launcher'), 'orchestrate', 0o755, 'the launcher'],
@@ -156,3 +157,4 @@ export function folderTable(cfg) {
 
 /** The rules draft the watch-only week judges by (R-0b-122): root's copy, in orchestrate's watch folder; the config holds its hash. */
 export const watchRulesPath = (cfg) => join(cfg.base, 'watch', 'rules-draft.yaml');
+export const watchNotesPath = (cfg) => join(cfg.base, 'watch-notes');

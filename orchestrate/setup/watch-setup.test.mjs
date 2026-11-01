@@ -7,7 +7,7 @@ import { createHash } from 'node:crypto';
 import { chmodSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
-import { ROOT_CONFIG_PATH, parseConfig, watchRulesPath } from './layout.mjs';
+import { ROOT_CONFIG_PATH, folderTable, parseConfig, watchNotesPath, watchRulesPath } from './layout.mjs';
 import { parseInstallConfig } from './install.mjs';
 import { jobsFor, plistTexts, checkDaemons, planPlace } from './daemons.mjs';
 import { checkWatchRules, planWatchRules, watchPlist, WATCH_RUN } from './watch-setup.mjs';
@@ -171,4 +171,19 @@ test('PLANT watch-rules: the watch folder owned by someone other than orchestrat
   const r = w.run(['watch-rules', '--rules-source', w.src]);
   assert.equal(r.code, 1); assert.match(r.text, /not orchestrate's own 0700 folder/);
   assert.throws(() => statSync(w.mac.at(watchRulesPath(w.cfg))));
+});
+
+test('R3 MAT-6 the explanations folder is the owner\'s, readable by orchestrate and the summary, and every folder above it can be walked through (caught by: the exact folder-table check)', () => {
+  const cfg = parseConfig(RAW);
+  const rows = folderTable(cfg);
+  const row = rows.find((r) => r.path === watchNotesPath(cfg));
+  assert.ok(row, 'there is a folder for the explanations');
+  assert.equal(row.owner, 'owner'); assert.equal(row.mode, 0o755);
+  assert.notEqual(row.path, join(cfg.base, 'watch'), 'it is NOT inside the orchestrate-only watch folder');
+  let dir = row.path;
+  while (dir.startsWith(cfg.base)) {
+    const r = rows.find((x) => x.path === dir);
+    assert.ok(r && (r.mode & 0o005) === 0o005, `${dir} lets others read and walk through`);
+    dir = join(dir, '..');
+  }
 });

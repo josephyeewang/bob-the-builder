@@ -70,7 +70,7 @@ function world({ policy = POLICY, mode = 'draft' } = {}) {
     const head = g.commit([g.main], files, { from: g.main });
     g.openPull({ number, head, files });
     if (checks) g.checks.set(head, checks);
-    threadsOf.set(number, thread ? [{ isResolved: false, comments: { nodes: [{ author: { __typename: 'User' } }] } }] : []);
+    threadsOf.set(number, thread ? [{ isResolved: false, comments: { nodes: [{ author: { __typename: thread === 'bot' ? 'Bot' : 'User' } }] } }] : []);
     prBase.set(number, base);
     const p = g.pulls.get(number);
     const merge = g.commit([g.main], files, { from: g.main });
@@ -287,7 +287,7 @@ test('a commit with an OLD committer date, pushed after the pin, is still judged
   assert.equal((await w.pass()).judged, 1);
 });
 
-test('the walk stops at a commit already judged: only new commits are looked at', async () => {
+test('the walk goes back to the pin every pass; a commit already judged is skipped, never judged or gathered again', async () => {
   const w = world(); await w.pass(PIN_AT);
   w.land({ 'docs/a.md': 'two' }); await w.pass('2026-11-03T12:00:00Z');
   const first = w.judged()[0].sha;
@@ -295,7 +295,7 @@ test('the walk stops at a commit already judged: only new commits are looked at'
   const before = w.asked.length;
   const r = await w.pass('2026-11-03T13:00:00Z');
   assert.equal(r.judged, 1);
-  assert.ok(w.asked.slice(before).every(([, p]) => !p.includes(`/commits/${first}`)), 'the judged commit is not read again');
+  assert.deepEqual(w.asked.slice(before).filter(([, p]) => p.includes(first) && /pulls|check-runs|status/.test(p)), [], 'the judged commit is not gathered again');
   assert.equal(w.judged().length, 2);
 });
 
@@ -503,11 +503,11 @@ test('PLANT a damaged log line → the week does not count (P8)', async () => {
   assert.equal(s.corrupt, 1); assert.equal(s.ok, false);
 });
 
-test('days are UTC, by merged_at, not by when the commit was judged', async () => {
+test('days are UTC, by merged_at; a date past the end day is not in the week', async () => {
   const w = world(); await w.pass(PIN_AT);
   w.land({ 'docs/a.md': 'two' }, { at: '2026-11-02T23:59:00Z' });   // merged before the window's first day, judged on it
   await weekOf(w);
-  assert.equal(week(w).judged, 0, 'a merge from before the window is not in it');
+  assert.equal(week(w).judged, 1, 'found on the walk after the pin: counted, an early date clamped to the first day (M4)');
 });
 
 // disagreements and explanations
@@ -551,7 +551,7 @@ test('PLANT a damaged explanations file → "does not count" with a reason, not 
   const folder = tempDir('m6-watch-owner-'); chmodSync(folder, 0o755);
   const file = join(folder, 'explanations.json'); writeFileSync(file, '{oops'); chmodSync(file, 0o644);
   const ex = readExplanations(file, { ownerUid: UID });
-  assert.equal(ex.ok, false); assert.match(ex.problem, /could not be read/);
+  assert.equal(ex.ok, false); assert.match(ex.problem, /does not count/);
 });
 
 test('PLANT an explanations file that is a link is not followed (O_NOFOLLOW)', async () => {
@@ -714,4 +714,235 @@ test('the summary prints that a disagreement needed the owner\'s Approve when th
   await main(['summary', '--dir', dir, '--end-day', '2026-11-09', '--explanations', join(dir, 'none.json'), '--owner-uid', String(UID)], { out: (x) => out.push(x), err: () => {} });
   const line = out.find((x) => x.startsWith('UNEXPLAINED'));
   assert.ok(line && /would refuse/.test(line) && /8: needs the owner's Approve/.test(line), JSON.stringify(out));
+});
+
+// ───────────────────────────── round 3: the auditor's probes, kept as tests
+const flaky = (w, re, times = 1) => { let n = times; const orig = w.client.get; return (path) => { if (n > 0 && re.test(path)) { n--; return true; } return false; }; };
+
+test('R3 audit probe A: a failed read on a commit that is not the newest is retried next pass', async () => {
+  const w = world(); await w.pass(PIN_AT);
+  const b = w.land({ 'docs/b.md': 'b' });
+  w.land({ 'docs/c.md': 'c' });
+  w.hooks.push([new RegExp(`/pulls/${b.number}$`), 500]);
+  await w.pass('2026-11-03T12:00:00Z');
+  w.hooks.length = 0;
+  await w.pass('2026-11-03T13:00:00Z');
+  const shas = w.judged().map((l) => l.sha);
+  assert.ok(shas.includes(b.merge), `B was never retried: judged=${JSON.stringify(shas)}; lines=${JSON.stringify(w.lines().map(l=>l.not_judged_reason||l.verdict||(l.pass?'pass':'pin')))}`);
+});
+
+test('R3 audit probe B: a commit whose own read fails on the judging loop is never silently dropped', async () => {
+  const w = world(); await w.pass(PIN_AT);
+  const b = w.land({ 'docs/b.md': 'b' });
+  w.land({ 'docs/c.md': 'c' });
+  let seen = 0; const re = new RegExp(`/git/commits/${b.merge}$`);
+  // fail the SECOND read of B's commit (the walk reads it first, the judging loop reads it again)
+  w.hooks.push([{ test: (p) => re.test(p) && ++seen === 2 }, 502]);
+  await w.pass('2026-11-03T12:00:00Z');
+  w.hooks.length = 0;
+  for (const d of ['04','05','06','07','08','09']) await w.pass(`2026-11-${d}T12:00:00Z`);
+  await w.pass('2026-11-10T00:30:00Z');
+  const s = week(w);
+  const judged = w.judged().map((l) => l.sha);
+  const stuck = s.stuck;
+  assert.ok(judged.includes(b.merge) || stuck.includes(b.merge) || !s.ok, `B silently missing, week ok=${s.ok}, reasons=${JSON.stringify(s.reasons)}, seen=${seen}`);
+});
+
+test('R3 audit probe C: a direct push of an older commit (old committer date) is counted as a disagreement', async () => {
+  const w = world(); await w.pass(PIN_AT);
+  const sha = w.push({ 'docs/z.md': 'z' }, '2026-10-20T10:00:00Z');   // committed 2 weeks ago, pushed now
+  await weekOf(w);
+  const l = w.judged().find((x) => x.sha === sha);
+  assert.ok(l, 'judged');
+  assert.equal(l.verdict, VERDICTS[2]);
+  const s = week(w);
+  assert.equal(s.ok, false, `the week COUNTS with an unexplained direct push: ${JSON.stringify({ judged: s.judged, dis: s.disagreements, reasons: s.reasons, merged_at: l.merged_at })}`);
+});
+
+test('R3 audit probe D: a pin at 23:59 on day 1 does not make a 7-day week out of 6 days and a minute', async () => {
+  const w = world();
+  await w.pass('2026-11-03T23:59:00Z');
+  for (const d of ['04','05','06','07','08','09']) await w.pass(`2026-11-${d}T12:00:00Z`);
+  await w.pass('2026-11-10T00:30:00Z');
+  const s = week(w);
+  assert.equal(s.ok, false, `counts with window start ${s.windowStart}, days ${s.days.join(',')}`);
+});
+
+test('R3 audit probe E: the draft file swapped mid-week with no merges that day leaves that day without a clean pass', async () => {
+  const w = world(); await w.pass(PIN_AT);
+  writeFileSync(join(w.dir, DRAFT_FILE), POLICY + '\n# other\n');
+  const r = await w.pass('2026-11-04T12:00:00Z');
+  assert.ok(r.problems.length > 0, 'a pass with the wrong draft in place is clean');
+});
+
+test('R3 audit probe F: a commit with no committer date does not crash the pass', async () => {
+  const w = world(); await w.pass(PIN_AT);
+  const sha = w.push({ 'docs/z.md': 'z' }, 'not a date');
+  let err = null; try { await w.pass(); } catch (e) { err = e; }
+  assert.equal(err, null, String(err));
+});
+
+test('R3 audit probe G: an explanations file the summary user cannot reach is not reported as read from the owner', () => {
+  const folder = tempDir('m6-watch-owner-'); const sub = join(folder, 'home'); mkdirSync(sub); const file = join(sub, 'explanations.json');
+  writeFileSync(file, JSON.stringify({ ['a'.repeat(40)]: 'fine' })); chmodSync(sub, 0o000);
+  const r = readExplanations(file, { ownerUid: UID }); chmodSync(sub, 0o755);
+  assert.ok(!(r.ok && r.owner === UID && Object.keys(r.explanations).length === 0), `an unreachable file reads as "the owner's file, empty": ${JSON.stringify(r)}`);
+});
+
+test('R3 audit probe H: real pass + real summary output names refusal 8 next to 9 (no hand-written line)', async () => {
+  const w = world(); await w.pass(PIN_AT);
+  const { number } = w.land({ 'docs/a.md': 'two' }); w.labelsOf.set(number, [{ name: 'needs-joe' }]);
+  await weekOf(w);
+  const out = [];
+  await main(['summary', '--dir', w.dir, '--end-day', '2026-11-09', '--explanations', join(w.dir, 'none.json'), '--owner-uid', String(UID)], { out: (x) => out.push(x), err: () => {} });
+  const line = out.find((x) => x.startsWith('UNEXPLAINED'));
+  assert.ok(line && /would refuse/.test(line) && /8: needs the owner's Approve/.test(line), JSON.stringify(out));
+});
+
+test('R3 audit probe I: a merge commit (two parents) that brings main in: first-parent walk judges the merge, not the branch commits', async () => {
+  const w = world(); await w.pass(PIN_AT);
+  const before = w.g.main;
+  const side = w.g.commit([before], { 'docs/side.md': 's' }, { from: before });
+  const merge = w.g.commit([before, side], { 'docs/side.md': 's' }, { from: before });
+  w.g.main = merge; w.dates.set(merge, '2026-11-03T10:00:00Z');
+  const r = await w.pass();
+  const shas = w.lines().filter((l) => l.sha && !l.pin).map((l) => l.sha);
+  assert.ok(shas.includes(merge) && !shas.includes(side), JSON.stringify({ r, shas }));
+});
+
+test('R3 audit probe J: rules-source switched from draft to github mid-week restarts the week or makes the pass unclean', async () => {
+  const w = world(); await w.pass(PIN_AT);
+  const gr = githubRules({ gh: w.client, owner: OWNER, repo: REPO });
+  const r = await w.pass('2026-11-04T12:00:00Z', gr);
+  const pins = w.lines().filter((l) => l.pin);
+  assert.ok(pins.length > 1 || r.problems.length > 0, `switching rules kind leaves a clean pass under the draft pin: ${JSON.stringify(w.lines().at(-1))}`);
+});
+
+test('R3 audit probe K: rate limit (403) on the pulls read → not judged, retried, reason starts with HTTP 403', async () => {
+  const w = world(); await w.pass(PIN_AT);
+  const b = w.land({ 'docs/b.md': 'b' });
+  w.hooks.push([/\/commits\/[0-9a-f]{40}\/pulls/, 403]);
+  const r = await w.pass();
+  const nj = w.lines().find((l) => l.not_judged_reason);
+  assert.ok(nj && /HTTP 403/.test(nj.not_judged_reason), JSON.stringify(nj));
+  w.hooks.length = 0; await w.pass('2026-11-03T13:00:00Z');
+  assert.ok(w.judged().some((l) => l.sha === b.merge));
+});
+
+// ───────────────────────────── round 3: the week's edges, one test per clause
+
+test('R3 MAT-5 a pin at noon makes the first counted day the next day: 6 days is not a week, 7 is (X15)', async () => {
+  const w = world(); await w.pass('2026-11-03T12:00:00Z');
+  for (const d of ['04', '05', '06', '07', '08', '09']) await w.pass(`2026-11-${d}T12:00:00Z`);
+  await w.pass('2026-11-10T00:30:00Z');
+  const six = summary({ dir: w.dir, endDay: '2026-11-09', explanations: NOEX });
+  assert.deepEqual(six.days, ['2026-11-04', '2026-11-05', '2026-11-06', '2026-11-07', '2026-11-08', '2026-11-09']);
+  assert.equal(six.ok, false); assert.ok(six.reasons.some((r) => /needs 7/.test(r)), JSON.stringify(six.reasons));
+  await w.pass('2026-11-10T12:00:00Z'); await w.pass('2026-11-11T00:30:00Z');
+  const seven = summary({ dir: w.dir, endDay: '2026-11-10', explanations: NOEX });
+  assert.equal(seven.days.length, 7); assert.equal(seven.ok, true, JSON.stringify(seven.reasons));
+});
+
+test('R3 MAT-5 a pin at exactly midnight counts its own day', async () => {
+  const w = world(); await w.pass(PIN_AT);
+  assert.equal(summary({ dir: w.dir, endDay: '2026-11-09', explanations: NOEX }).days[0], '2026-11-03');
+});
+
+test('R3 MAT-4 a direct push is counted on the day a pass first saw it, whatever old date its commit carries; seen_at is on the line', async () => {
+  const w = world(); await w.pass(PIN_AT);
+  const old = w.push({ 'docs/z.md': 'z' }, '2026-10-20T10:00:00Z');
+  await weekOf(w);
+  const l = w.judged().find((x) => x.sha === old);
+  assert.ok(l.seen_at, 'it carries the time a pass saw it');
+  const s = week(w);
+  assert.equal(s.judged, 1, 'counted by when it was seen: an old date is not a way out of the week');
+  assert.equal(s.disagreements, 1); assert.equal(s.ok, false);
+});
+
+test('R3 MAT-4 a direct push dated in the future is never silently dropped: it stays "not judged", so the week fails', async () => {
+  const w = world(); await w.pass(PIN_AT);
+  const future = w.push({ 'docs/y.md': 'y' }, '2027-01-01T00:00:00Z');
+  await weekOf(w);
+  const s = week(w);
+  assert.deepEqual(s.stuck, [future]); assert.equal(s.ok, false);
+});
+
+test('R3 MAT-4 a pull request merged after the end day is not in the week; one found early is counted on the first day', async () => {
+  const w = world(); await w.pass(PIN_AT);
+  w.land({ 'docs/a.md': 'two' }, { at: '2026-11-12T10:00:00Z' });
+  await weekOf(w);
+  assert.equal(week(w).judged, 0);
+});
+
+test('R3 m-c a pass line judged on other rules is not a clean pass, and neither is a judged line on other rules', async () => {
+  const w = world(); await w.pass(PIN_AT);
+  w.land({ 'docs/a.md': 'two' }, { at: '2026-11-04T09:00:00Z' });
+  await weekOf(w);
+  assert.equal(week(w).ok, true);
+  const text = readFileSync(join(w.dir, 'log.jsonl'), 'utf8').split('\n').filter(Boolean).map((x) => { const o = JSON.parse(x); if (o.pass && o.at.startsWith('2026-11-05')) o.rules = 'f'.repeat(64); return JSON.stringify(o); }).join('\n');
+  writeFileSync(join(w.dir, 'log.jsonl'), `${text}\n`);
+  const s = week(w);
+  assert.ok(s.missingDays.includes('2026-11-05'), JSON.stringify(s));
+});
+
+test('R3 X14 a bot\'s unresolved thread is not a person waiting; a person\'s is', async () => {
+  const w = world(); await w.pass(PIN_AT);
+  w.land({ 'docs/a.md': 'two' }, { thread: 'bot' });
+  w.land({ 'docs/b.md': 'two' }, { thread: 'user' });
+  await w.pass();
+  const [bot, person] = w.judged();
+  assert.equal(bot.verdict, VERDICTS[0], JSON.stringify(bot));
+  assert.equal(person.verdict, VERDICTS[2]); assert.ok(person.refusals.some((r) => r.n === 7));
+});
+
+test('R3 m-b the draft swapped for other text makes the pass carry a problem even with nothing to judge', async () => {
+  const w = world(); await w.pass(PIN_AT);
+  writeFileSync(join(w.dir, DRAFT_FILE), `${POLICY}\n# other\n`);
+  const r = await w.pass('2026-11-04T12:00:00Z');
+  assert.ok(r.problems.some((p) => /not the pinned one/.test(p)), JSON.stringify(r.problems));
+});
+
+test('R3 m-a a commit with no readable date is "not judged" with a reason, never a crash or a guessed day', async () => {
+  const w = world(); await w.pass(PIN_AT);
+  const sha = w.push({ 'docs/z.md': 'z' }, 'not a date');
+  const r = await w.pass();
+  assert.ok(r.problems.some((p) => /no readable date/.test(p)), JSON.stringify(r.problems));
+  assert.ok(w.lines().some((l) => l.sha === sha && l.not_judged_reason));
+});
+
+test('R3 MAT-3 a failed second read of a commit writes a "not judged" line with the reason (not only a pass problem)', async () => {
+  const w = world(); await w.pass(PIN_AT);
+  const b = w.land({ 'docs/b.md': 'b' });
+  let seen = 0; const re = new RegExp(`/git/commits/${b.merge}$`);
+  w.hooks.push([{ test: (p) => re.test(p) && ++seen === 2 }, 502]);
+  await w.pass('2026-11-03T12:00:00Z');
+  const nj = w.lines().find((l) => l.sha === b.merge && l.not_judged_reason);
+  assert.ok(nj && /502/.test(nj.not_judged_reason), JSON.stringify(w.lines()));
+  w.hooks.length = 0; await w.pass('2026-11-03T13:00:00Z');
+  assert.ok(w.judged().some((l) => l.sha === b.merge), 'retried and judged');
+});
+
+test('R3 MAT-4 a backdated direct push first seen after the end day is not in the week', async () => {
+  const w = world(); await w.pass(PIN_AT);
+  await weekOf(w);
+  w.push({ 'docs/z.md': 'z' }, '2026-11-05T10:00:00Z');
+  await w.pass('2026-11-11T12:00:00Z');
+  assert.equal(week(w).judged, 0);
+});
+
+test('R3 m-c a judged line carrying other rules than the pin is not counted', async () => {
+  const w = world(); await w.pass(PIN_AT);
+  w.land({ 'docs/a.md': 'two' }, { at: '2026-11-04T09:00:00Z' });
+  await weekOf(w);
+  const text = readFileSync(join(w.dir, 'log.jsonl'), 'utf8').split('\n').filter(Boolean).map((x) => { const o = JSON.parse(x); if (o.sha && !o.pin && !o.pass) o.rules = 'e'.repeat(64); return JSON.stringify(o); }).join('\n');
+  writeFileSync(join(w.dir, 'log.jsonl'), `${text}\n`);
+  assert.equal(week(w).judged, 0);
+});
+
+test('R3 cosmetic: a failed read\'s reason starts with the HTTP status', async () => {
+  const w = world(); await w.pass(PIN_AT);
+  w.land({ 'docs/b.md': 'b' });
+  w.hooks.push([/\/check-runs/, 500]);
+  await w.pass();
+  assert.match(w.lines().find((l) => l.not_judged_reason).not_judged_reason, /^HTTP 500/);
 });
