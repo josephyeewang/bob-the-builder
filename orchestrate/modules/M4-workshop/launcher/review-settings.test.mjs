@@ -6,6 +6,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
+import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import {
   renderTemplate, templateText, templateFile, spotsProblem, fillTemplate, onlySpotsChanged, realPathProblem, slotValues,
@@ -33,12 +34,16 @@ function direct(role, v) {
   });
 }
 
-// A throwaway machine: the installed copy (with the committed templates), the runner's folder, the outboxes, the Bob
-// folder, a secrets folder, and the review and workers' copies folders apart.
+// A throwaway machine: the installed copy (with the committed templates) as the updater lays it out, a versioned folder
+// and root's link to it (L75 M-1), the runner's folder, the outboxes, the Bob folder, a secrets folder, and the review
+// and workers' copies folders apart. node and the hooks are named through the link, as the runner's config names them.
+const V = `install.v-${'c'.repeat(40)}`;
 function machine(role = 'reviewer') {
   const base = realpathSync(tempDir('m4-tpl-'));
   const d = (...p) => { const x = join(base, ...p); mkdirSync(x, { recursive: true }); return x; };
-  const installRoot = d('install');
+  const real = d(V);
+  const installRoot = join(base, 'install');
+  symlinkSync(V, installRoot);
   mkdirSync(dirname(templateFile(installRoot, 'reviewer')), { recursive: true });
   for (const r of REVIEW_ROLES) { copyFileSync(committed(r), templateFile(installRoot, r)); chmodSync(templateFile(installRoot, r), 0o644); }
   const node = join(d('install', 'bin'), 'node');
@@ -55,7 +60,7 @@ function machine(role = 'reviewer') {
     installRoot, root, outboxRoot, hooksDir, snapshot, bobFolder: d('bob'),
     deny: [d('secrets'), join(base, 'not-made-yet')], reviewCopies: d('review-copies'), workerCopies: d('worker-copies'),
   };
-  return { base, d, c, x: { role, sessionId: sid, copy: d('review-copies', 'card-1'), node } };
+  return { base, d, c, real, x: { role, sessionId: sid, copy: d('review-copies', 'card-1'), node } };
 }
 const run = (m, { c = {}, x = {} } = {}, opts = {}) => sessionSettings({ ...m.c, ...c }, { ...m.x, ...x }, { owner: ME, uid: ME, ...opts });
 
@@ -105,7 +110,10 @@ test('L67: a session\'s settings are filled, checked and written to the runner\'
     assert.equal(r.file, join(m.c.root, SETTINGS_DIR, `${m.x.sessionId}.json`));
     assert.equal(lstatSync(r.file).mode & 0o777, 0o600);
     assert.equal(lstatSync(dirname(r.file)).mode & 0o777, 0o700);
-    const v = slotValues(m.c, m.x).values;
+    const v = slotValues(m.c, m.x, { owner: ME }).values;
+    // L75 M-1: node and the hooks by the copy folder's real path, never through root's link.
+    assert.equal(v.node, join(m.real, 'bin', 'node'));
+    assert.equal(v.hooks, join(m.real, 'hooks'));
     assert.equal(v.outbox, join(m.c.outboxRoot, role, m.x.sessionId));
     assert.deepEqual(v.deny, [...m.c.deny, m.c.workerCopies], 'the workers\' copies folder is denied whole');
     assert.equal(v.wall_outboxRoot, m.c.outboxRoot);
@@ -167,7 +175,7 @@ test('L67: the outbox must be the session\'s own folder in its role\'s outbox, a
   assert.match(run(m, { x: { sessionId: '../sess-1' } }).reason, /not a session id/);
   assert.match(run(m, { x: { role: 'worker' } }).reason, /worker is not a review role/);
   // The auditor's folder for the same session is not the reviewer's.
-  const a = slotValues(m.c, { ...m.x, role: 'auditor' });
+  const a = slotValues(m.c, { ...m.x, role: 'auditor' }, { owner: ME });
   assert.equal(a.values.outbox, join(m.c.outboxRoot, 'auditor', m.x.sessionId));
   rmSync(ob, { recursive: true });
   symlinkSync(m.d('elsewhere-outbox'), ob);
@@ -191,8 +199,13 @@ test('L67: the copy must be a plain folder inside the review copies, which sit a
   assert.match(run(m, { c: { reviewCopies: m.d('worker-copies', 'review') }, x: { copy: m.d('worker-copies', 'review', 'card-1') } }).reason, /must be apart/);
   assert.match(run(m, { c: { workerCopies: rc } }).reason, /must be apart/);
   // A name that only starts like the workers' folder is apart from it.
-  const v = slotValues({ ...m.c, reviewCopies: m.d('worker-copies-x') }, { ...m.x, copy: m.d('worker-copies-x', 'c') });
+  const v = slotValues({ ...m.c, reviewCopies: m.d('worker-copies-x') }, { ...m.x, copy: m.d('worker-copies-x', 'c') }, { owner: ME });
   assert.equal(v.ok, true, v.reason);
+  // X1: "apart" is compared without case, even where the disk's case check is not there to catch it first (a realpath
+  // that answers any name as it is).
+  const wc = m.c.workerCopies;
+  const shout = join(dirname(wc), basename(wc).toUpperCase(), 'review');
+  assert.match(slotValues({ ...m.c, reviewCopies: shout }, { ...m.x, copy: join(shout, 'card-1') }, { owner: ME, realpath: (p) => p }).reason ?? 'ok', /must be apart/);
 });
 
 test('L67: each machine value is a real plain path under its expected root', () => {
@@ -209,6 +222,9 @@ test('L67: each machine value is a real plain path under its expected root', () 
   assert.match(run(m, { c: { hooksDir: m.d('hooks') } }).reason, /hooks: .* is not inside the installed copy/);
   assert.match(run(m, { c: { snapshot: join(m.base, 'rules.json') } }).reason, /snapshot: .* is not inside the runner's folder/);
   assert.match(run(m, { c: { outboxRoot: `${m.c.outboxRoot}/` } }).reason, /is not in its plain form/);
+  // node or the hooks named by another copy folder's real path, beside the one the link names.
+  const other = m.d(`install.v-${'d'.repeat(40)}`, 'hooks');
+  assert.match(run(m, { c: { hooksDir: other } }).reason, /hooks: .* is not inside the installed copy \(.*install\.v-c{40}\)/);
   assert.equal(realPathProblem('/a/./b'), '/a/./b is not in its plain form');
   assert.equal(realPathProblem('/a//b'), '/a//b is not in its plain form');
 });
@@ -285,4 +301,56 @@ test('L67: the runner hands the wiring a settings maker bound to the session\'s 
   const r = got.settingsFor(m.x.copy);
   assert.equal(r.ok, false);
   assert.match(r.reason, /the auditor template is not root's/);
+});
+
+test('L75 M-1: the installed copy must be root\'s link to a versioned folder; a plain folder or a bad link is refused', () => {
+  const m = machine();
+  assert.equal(run(m).ok, true, 'through the link, as the config names it');
+  // The reviewer's probe: the runner's config naming the paths by the folder's real path works the same.
+  const m2 = machine();
+  assert.equal(run(m2, { c: { hooksDir: join(m2.real, 'hooks') }, x: { node: join(m2.real, 'bin', 'node') } }).ok, true);
+  // A plain folder where the link should be.
+  const m3 = machine();
+  assert.match(run(m3, { c: { installRoot: m3.real } }).reason, /is a plain folder, not the installed copy's link/);
+  // The link of another owner's, or naming a folder that is missing.
+  assert.match(run(m, {}, { owner: ME + 1 }).reason, /not root's|is not owned by uid/);
+  rmSync(m.c.installRoot);
+  symlinkSync(`install.v-${'e'.repeat(40)}`, m.c.installRoot);
+  assert.match(run(m).reason, /the reviewer template can't be opened|the installed copy: .* which is missing/);
+  assert.match(slotValues(m.c, m.x, { owner: ME }).reason, /^the installed copy: .*install\.v-e{40}, which is missing/);
+});
+
+test('L75 caveat (c): every hook command exits 2 when its node or script is gone or crashes, so a hook never fails open', () => {
+  for (const role of REVIEW_ROLES) {
+    const m = machine(role);
+    const r = run(m);
+    assert.equal(r.ok, true, r.reason);
+    const cmds = [];
+    for (const groups of Object.values(r.settings.hooks)) for (const g of groups) for (const h of g.hooks) cmds.push(h.command);
+    assert.ok(cmds.length >= 3, role);
+    const sh = (cmd) => spawnSync('/bin/sh', ['-c', cmd], { input: '{}', encoding: 'utf8', timeout: 20_000, env: { PATH: '/usr/bin:/bin' } });
+    const node = join(m.real, 'bin', 'node');
+    // A node that runs and allows: the wrapper lets its answer through.
+    writeFileSync(node, '#!/bin/sh\nexit 0\n');
+    chmodSync(node, 0o755);
+    for (const cmd of cmds) assert.equal(sh(cmd).status, 0, `${role}: ${cmd}`);
+    // One that blocks (2), and one that crashes (1): both exit 2.
+    writeFileSync(node, '#!/bin/sh\nexit 2\n');
+    for (const cmd of cmds) assert.equal(sh(cmd).status, 2, cmd);
+    writeFileSync(node, '#!/bin/sh\nkill -SEGV $$\n');
+    for (const cmd of cmds) assert.equal(sh(cmd).status, 2, cmd);
+    // The session's copy folder gone (an update after the one that kept it): node is missing (127), still 2.
+    rmSync(m.real, { recursive: true });
+    for (const cmd of cmds) {
+      const x = sh(cmd);
+      assert.equal(x.status, 2, `${cmd}: ${x.stderr}`);
+    }
+  }
+  // The check refuses settings with a hook command that is not wrapped.
+  const m = machine();
+  const r = run(m);
+  const t = structuredClone(r.settings);
+  const h = Object.values(t.hooks)[0][0].hooks[0];
+  h.command = h.command.replace(/ \|\| exit 2$/, '');
+  assert.match(checkSettings(t, { profile: DESIGN_PROFILES.reviewer }).reason ?? 'ok', /does not exit 2 when it fails to run/);
 });

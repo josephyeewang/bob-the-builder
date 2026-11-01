@@ -65,7 +65,7 @@ export function reviewDaemonPlists({ label, installRoot, config, reviewRoot, rev
   ]);
   const copy = plist([
     `<key>Label</key>${str(`${label}.review-account`)}`,
-    `<key>ProgramArguments</key>${arr([node, join(installRoot, SCRIPTS.accounts), 'copy-to', accountCopy, '--home', ownerHome, '--owner', String(ownerUid)])}`,
+    `<key>ProgramArguments</key>${arr([node, join(installRoot, SCRIPTS.accounts), 'copy-to', accountCopy, '--home', ownerHome, '--owner', String(ownerUid), '--install', installRoot])}`,
     `<key>EnvironmentVariables</key><dict><key>PATH</key>${str(path)}</dict>`,
     '<key>WorkingDirectory</key><string>/</string>',
     '<key>Umask</key><integer>18</integer>',

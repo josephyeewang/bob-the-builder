@@ -6,21 +6,26 @@
 //   1. checks that every folder it will write in (the copy's and the clone's) and every folder above them is root's
 //      alone, and that the copy whose own items it carries over (or the install step's seed) is root's alone, before it
 //      writes, renames or removes anything (L73 M1);
-//   2. removes what a cut-off run left beside the copy: any versioned folder or link the copy's link does not name. It
-//      never puts one of them in place;
+//   2. removes what a cut-off run left beside the copy: any versioned folder or link the copy's link does not name,
+//      except the copy the last update replaced (`PREVIOUS`), and a clone that was never finished. It never puts one of
+//      them in place;
 //   3. fetches `main` (and only main, by its full name) from the repository's https address into its own bare clone,
-//      through safe-git (no hooks, no repository config, no other place), with a git only root can change (`gitBin`)
-//      and a PATH only root can write (ROOT_PATH);
+//      through safe-git (no hooks, no repository config, no other place), with a git only root can change (`gitBin`,
+//      and on a Mac the developer folder /usr/bin/git hands over to, with its helpers: `gitToolsProblem`), a PATH only
+//      root can write (ROOT_PATH) and a home folder of root's beside the clone (`gitHome`), never /tmp;
 //   4. when main's commit differs from the stamp, writes the files under `orchestrate/` at that commit into a new
 //      folder beside the copy (`<installRoot>.v-<commit>`), straight from git's objects: no checkout, no work tree;
 //      copies in the copy's own items that are not in the repository (`keep`: its node, its configs, the wiring, the
 //      claude program) from the copy in place, then writes the commit stamp last;
-//   5. checks the new folder is root's alone (`installProblem`), then flips the copy's link to it with one rename and
-//      removes the old folder;
+//   5. checks the new folder is root's alone (`installProblem`) and holds what the runner's config names in the copy
+//      (its wiring, the claude program, the hooks), then flips the copy's link to it with one rename. The folder it
+//      replaced is kept through one more update (`PREVIOUS`, L75 (a)): a review session started on it names its node
+//      and hooks by that folder's real path, and keeps them while it runs; every older one is removed;
 //   6. notes, in root's own record beside the copy, when it first saw main ahead of the copy (install-check.mjs
 //      `mainSeenFile`), for the Dispatcher's stamp alert.
-// Root runs only the updater's own small module set, from main: this file, install-check.mjs and safe-git.mjs, which
-// import nothing but Node's own modules (the test checks). It runs nothing from the repository it copies: only git and
+// As the updater, root runs only its own small module set, from main: this file, install-check.mjs and safe-git.mjs,
+// which import nothing but Node's own modules (the test checks; root's one other script, the account copy, is
+// accounts.mjs with install-check.mjs). It runs nothing from the repository it copies: only git and
 // file copies. The rename that flips the link is atomic, so installRoot names a whole copy at every moment and the
 // LaunchDaemons always find their node and scripts (L73 point 1).
 //
@@ -34,11 +39,12 @@
 // Exit 0 when the copy is at main (updated or already there), 1 when it refused or could not run.
 
 import { closeSync, constants, copyFileSync, fchmodSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync,
-  readdirSync, realpathSync, renameSync, rmSync, symlinkSync, writeSync } from 'node:fs';
-import { basename, dirname, isAbsolute, join } from 'node:path';
+  readdirSync, readlinkSync, realpathSync, renameSync, rmSync, symlinkSync, writeSync } from 'node:fs';
+import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
+import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { git, checkMirror, MIRROR_CONFIG_TEMPLATE, ROOT_PATH } from '../git/safe-git.mjs';
-import { STAMP, NODE, UPDATER_CONFIG, RUNNER_CONFIG, installStamp, installProblem, chainProblem, currentCopy, readInstallStamp,
+import { git, checkMirror, useGitHome, MIRROR_CONFIG_TEMPLATE, ROOT_PATH } from '../git/safe-git.mjs';
+import { STAMP, NODE, UPDATER_CONFIG, RUNNER_CONFIG, installStamp, installProblem, chainProblem, aclProblem, currentCopy, readInstallStamp,
   versionName, versionCommit, mainSeenFile, readMainSeen, nextMainSeen } from './install-check.mjs';
 
 export const MAIN = 'refs/heads/main';
@@ -50,6 +56,16 @@ const NAME = /^(?!\.\.?$)[A-Za-z0-9._-]{1,128}$/;
 const HTTPS = /^https:\/\/[A-Za-z0-9.-]+(:\d+)?\/[^\s]+$/;
 const FILE_MODES = { 100644: 0o644, 100755: 0o755 };
 const GIT_MS = 300_000;
+// The runner's config keys that name something in the copy the repository does not hold (L75 m-4): `keep` must carry
+// each over, or the first update would drop it. Checked in the new copy before the flip.
+export const RUNNER_NAMES = Object.freeze(['wiring', 'claudeBin', 'hooksDir']);
+// The link naming the copy the last update replaced (L75 (a)), `<installRoot>.prev`, root's, beside the copy. Only
+// root writes in that folder, so it is root's doing. It only keeps that folder from being removed; nothing is ever put
+// in place from it.
+export const PREVIOUS = '.prev';
+// The clone is made under `<clone>.new-<pid>`, finished with this file in it, then renamed in (L75 m-1): a clone
+// without it was cut off while being made, and is made again.
+export const CLONE_MADE = 'orch-clone-made';
 
 const refuse = (reason) => ({ ok: false, reason });
 const there = (p) => { try { lstatSync(p); return true; } catch { return false; } };
@@ -60,7 +76,8 @@ const there = (p) => { try { lstatSync(p); return true; } catch { return false; 
  */
 export function readUpdaterConfig(file, { localAddress = false } = {}) {
   const c = JSON.parse(readFileSync(file, 'utf8'));
-  for (const k of ['installRoot', 'clone', 'gitBin']) if (typeof c?.[k] !== 'string' || !isAbsolute(c[k]) || c[k].includes('..') || c[k] === '/') throw new Error(`config: ${k} must be an absolute path`);
+  // In its plain form (L75 c-3): no `.`, `..`, doubled or trailing `/`, so a name can't stand for another.
+  for (const k of ['installRoot', 'clone', 'gitBin']) if (typeof c?.[k] !== 'string' || !isAbsolute(c[k]) || resolve(c[k]) !== c[k] || c[k].includes('..') || c[k] === '/') throw new Error(`config: ${k} must be an absolute path in its plain form`);
   if (!addressOk(c.address, localAddress)) throw new Error('config: address must be an https address');
   if (!Array.isArray(c.keep) || c.keep.some((n) => typeof n !== 'string' || !NAME.test(n) || n === STAMP)) throw new Error('config: keep must list plain top-level names');
   for (const [n, what] of Object.entries(MUST_KEEP)) if (!c.keep.includes(n)) throw new Error(`config: keep must hold ${n} (${what})`);
@@ -144,41 +161,144 @@ function copyItem(from, to) {
 
 /**
  * What a cut-off run can leave beside the copy, in name order: versioned folders (`<name>.v-<commit>`) and links
- * not yet flipped in (`<name>.link-<commit>`). Anything else there is not the updater's and is left alone. `list` is a
- * port, since a disk may list a folder in any order.
+ * not yet flipped in (`<name>.link-<commit>`, `<name>.prev-<commit>`). Anything else there is not the updater's and is
+ * left alone. `list` is a port, since a disk may list a folder in any order.
  */
 export function leftovers(installRoot, { list = readdirSync } = {}) {
   const base = basename(installRoot);
   let names = [];
   try { names = list(dirname(installRoot)); } catch { return []; }
-  const pre = `${base}.link-`;
-  return names.filter((n) => versionCommit(installRoot, n) !== null || (n.startsWith(pre) && HEX40.test(n.slice(pre.length))))
+  const temp = (n) => [`${base}.link-`, `${base}${PREVIOUS}-`].some((pre) => n.startsWith(pre) && HEX40.test(n.slice(pre.length)));
+  return names.filter((n) => versionCommit(installRoot, n) !== null || temp(n))
     .sort().map((n) => join(dirname(installRoot), n));
 }
 
+/** The folder `<installRoot>.prev` names (a versioned folder beside the copy), or null. */
+export function previousCopy(installRoot) {
+  const link = `${installRoot}${PREVIOUS}`;
+  let to; try { if (!lstatSync(link).isSymbolicLink()) return null; to = readlinkSync(link); } catch { return null; }
+  return versionCommit(installRoot, to) === null ? null : join(dirname(installRoot), to);
+}
+
 /**
- * Removes every leftover except `current` (the folder the copy's link names). Nothing found here is ever put in place:
- * the copy is only ever a folder this run made and checked (L73 M1). → what was removed, for the log.
+ * Removes every leftover except `current` (the folder the copy's link names) and the copy the last update replaced
+ * (previousCopy). Nothing found here is ever put in place: the copy is only ever a folder this run made and checked
+ * (L73 M1). → what was removed, for the log.
  */
 export function clearLeftovers(installRoot, { current = null } = {}) {
   const done = [];
+  const previous = previousCopy(installRoot);
   for (const d of leftovers(installRoot)) {
     if (d === current) continue;
+    if (d === previous) continue;
     rmSync(d, { recursive: true, force: true });
     done.push(`removed ${basename(d)}`);
   }
   return done;
 }
 
-/** A new bare clone in the mirror's shape (no hooks, the fixed config), made with root's git. */
-async function makeClone(clone, g) {
-  const r = await git(['init', '--bare', '-q', clone], { ...g, purpose: 'updater-init' });
+/**
+ * A new bare clone in the mirror's shape (no hooks, the fixed config), made with root's git under `<clone>.new-<pid>`
+ * and renamed in once it is whole, with CLONE_MADE in it (L75 m-1). A cut-off leaves only a `.new-` folder, which the
+ * next run removes. No template folder: git copies nothing in from its own install.
+ */
+async function makeClone(clone, g, { write, step }) {
+  const pre = `${basename(clone)}.new-`;
+  for (const n of readdirSync(dirname(clone))) if (n.startsWith(pre)) rmSync(join(dirname(clone), n), { recursive: true, force: true });
+  const tmp = `${clone}.new-${process.pid}`;
+  const r = await git(['init', '--bare', '-q', '--template=', tmp], { ...g, gitDir: tmp, purpose: 'updater-init' });
   if (r.code !== 0) throw new Error(`git init failed: ${r.stderr.trim().slice(0, 200)}`);
-  const cfg = join(clone, 'config');
+  step('clone-init');
+  const cfg = join(tmp, 'config');
   rmSync(cfg);
-  writeNew(cfg, Buffer.from(MIRROR_CONFIG_TEMPLATE), 0o644);
-  rmSync(join(clone, 'hooks'), { recursive: true, force: true });
-  rmSync(join(clone, 'description'), { force: true });
+  step('clone-config-removed');
+  write(cfg, Buffer.from(MIRROR_CONFIG_TEMPLATE), 0o644);
+  step('clone-config');
+  rmSync(join(tmp, 'hooks'), { recursive: true, force: true });
+  rmSync(join(tmp, 'description'), { force: true });
+  step('clone-hooks');
+  write(join(tmp, CLONE_MADE), Buffer.from('made whole by the updater\n'), 0o644);
+  step('clone-marked');
+  renameSync(tmp, clone);
+}
+
+/**
+ * The lock files a git cut off part way leaves in the clone (`*.lock` at its top and under refs/): while one is there,
+ * every fetch fails. → their paths.
+ */
+export function cloneLocks(clone) {
+  const out = [];
+  const look = (d, deep) => {
+    let names = []; try { names = readdirSync(d); } catch { return; }
+    for (const n of names) {
+      const p = join(d, n);
+      let st; try { st = lstatSync(p); } catch { continue; }
+      if (st.isFile() && n.endsWith('.lock')) out.push(p);
+      else if (deep && st.isDirectory() && !st.isSymbolicLink()) look(p, true);
+    }
+  };
+  look(clone, false);
+  look(join(clone, 'refs'), true);
+  return out.sort();
+}
+
+/**
+ * Is any git running on this Mac (`ps`, as root sees every process)? A lock is removed only when none is (L75 m-1): a
+ * git that is still running holds its lock rightly. A `ps` that fails counts as yes.
+ */
+export function gitIsRunning({ run = spawnSync } = {}) {
+  const r = run('/bin/ps', ['-A', '-o', 'comm='], { encoding: 'utf8', env: { PATH: ROOT_PATH, LC_ALL: 'C' }, timeout: 10_000 });
+  if (r.error || r.status !== 0) return true;
+  return String(r.stdout).split('\n').some((l) => /^git(?:-|$)/.test(basename(l.trim())));
+}
+
+/**
+ * Git's home folder for root (L75 c-6): `<clone>.home`, root's own (0700), in the clone's folder, whose chain was
+ * checked. Made when missing. → null, or why it can't be used.
+ */
+export function gitHome(clone, { owner = 0 } = {}) {
+  const dir = `${clone}.home`;
+  try { lstatSync(dir); } catch { mkdirSync(dir, { mode: 0o700 }); }
+  const st = lstatSync(dir);
+  if (st.isSymbolicLink() || !st.isDirectory()) return { problem: `${dir} is not a plain folder` };
+  if (st.uid !== owner || st.mode & 0o077) return { problem: `${dir} is not root's own folder (0700)` };
+  return { dir };
+}
+
+/**
+ * On a Mac, /usr/bin/git only hands over to the git in the developer folder `xcode-select -p` names, which an admin can
+ * point at an app folder they own (L75 m-3). That folder, its git and every helper in its libexec/git-core (where git
+ * looks for its own programs) must be root's alone: each helper that is a link must lead inside the folder. Another
+ * git is checked by its own chain alone. `run` and `platform` are ports for a test. → null, or the problem.
+ */
+export function gitToolsProblem(gitBin, { platform = process.platform, run = spawnSync, owner = 0, top = '/', realpath = realpathSync.native } = {}) {
+  if (platform !== 'darwin' || gitBin !== '/usr/bin/git') return null;
+  const r = run('/usr/bin/xcode-select', ['-p'], { encoding: 'utf8', env: { PATH: ROOT_PATH, LC_ALL: 'C' }, timeout: 10_000 });
+  const named = String(r.stdout ?? '').trim();
+  if (r.error || r.status !== 0 || !isAbsolute(named) || named.includes('\n')) return 'xcode-select names no developer folder';
+  let dev; try { dev = realpath(named); } catch { return `the developer folder ${named} is missing`; }
+  const devBad = chainProblem(dev, { owner, top });
+  if (devBad) return `the developer folder: ${devBad}`;
+  const gitBad = chainProblem(join(dev, 'usr', 'bin', 'git'), { owner, top });
+  if (gitBad) return `the developer folder's git: ${gitBad}`;
+  const core = join(dev, 'usr', 'libexec', 'git-core');
+  const seen = [];
+  const walk = (p) => {
+    let st; try { st = lstatSync(p); } catch { return `${p} is missing`; }
+    if (st.isSymbolicLink()) {
+      let to; try { to = realpath(p); } catch { return `${p} leads nowhere`; }
+      const rel = relative(dev, to);
+      return rel === '' || rel.startsWith('..') || isAbsolute(rel) ? `${p} leads outside the developer folder` : null;
+    }
+    if (st.uid !== owner) return `${p} is not owned by ${owner === 0 ? 'root' : `uid ${owner}`}`;
+    if (st.mode & 0o022) return `${p} can be written by others than root`;
+    seen.push(p);
+    if (!st.isDirectory()) return null;
+    for (const n of readdirSync(p)) { const bad = walk(join(p, n)); if (bad) return bad; }
+    return null;
+  };
+  const coreBad = chainProblem(dirname(core), { owner, top }) ?? walk(core) ?? aclProblem(seen);
+  return coreBad ? `git's helpers: ${coreBad}` : null;
 }
 
 /** Root's record of main, replaced whole: written beside it, then renamed over it. */
@@ -196,7 +316,7 @@ function writeMainSeen(installRoot, state, write) {
  * `step` is told each step done (ports, so a test can stop a run at any point); `now` is the clock; `localAddress` as
  * for readUpdaterConfig. → { ok, changed, commit, recovered } or { ok: false, reason }.
  */
-export async function updateOnce(c, { first = null, owner = 0, top = '/', write = writeNew, step = () => {}, now = Date.now, localAddress = false } = {}) {
+export async function updateOnce(c, { first = null, owner = 0, top = '/', write = writeNew, step = () => {}, now = Date.now, localAddress = false, rename = renameSync, gitRunning = gitIsRunning } = {}) {
   if (!addressOk(c.address, localAddress)) return refuse('the address must be an https address');
   // L73 M1: before root writes, renames or removes anything, every folder above where it does is root's alone.
   for (const [what, p] of [['the copy', dirname(c.installRoot)], ['the clone', dirname(c.clone)]]) {
@@ -215,12 +335,30 @@ export async function updateOnce(c, { first = null, owner = 0, top = '/', write 
   const recovered = clearLeftovers(c.installRoot, { current: cur.real ?? null });
   step('cleared');
 
+  const home = gitHome(c.clone, { owner });
+  if (home.problem) return refuse(`git's home: ${home.problem}`);
+  useGitHome(home.dir);
   const g = { gitDir: c.clone, gitBin: c.gitBin, timeoutMs: GIT_MS, path: ROOT_PATH };
-  if (!there(c.clone)) { await makeClone(c.clone, g); step('cloned'); }
+  // A clone that is there is root's alone before anything is done in it. One with no CLONE_MADE was cut off while being
+  // made, or is from before it: made again (L75 m-1).
+  if (there(c.clone)) {
+    const was = chainProblem(c.clone, { owner, top });
+    if (was) return refuse(`the clone: ${was}`);
+    if (!there(join(c.clone, CLONE_MADE))) { rmSync(c.clone, { recursive: true, force: true }); recovered.push('removed a clone that was never finished'); }
+  }
+  if (!there(c.clone)) { await makeClone(c.clone, g, { write, step }); step('cloned'); }
   const chain = chainProblem(c.clone, { owner, top });
   if (chain) return refuse(`the clone: ${chain}`);
   const m = checkMirror(c.clone);
   if (!m.ok) return refuse(`the clone was refused: ${m.reason}`);
+  // A git cut off part way (the fetch's time limit) leaves its lock, and every fetch after it fails. Removed only when no
+  // git is running (L75 m-1).
+  const locks = cloneLocks(c.clone);
+  if (locks.length) {
+    if (gitRunning()) return refuse(`the clone holds ${locks.map((x) => basename(x)).join(', ')} and a git is running; the next run tries again`);
+    for (const x of locks) { rmSync(x, { force: true }); recovered.push(`removed ${relative(c.clone, x)} from the clone`); }
+  }
+  step('fetching');
 
   // Only main, by its full name, into main: never HEAD, a tag or another branch.
   const f = await git(['fetch', '-q', '--no-tags', '--no-write-fetch-head', '--no-auto-gc', '--no-recurse-submodules', c.address, `+${MAIN}:${MAIN}`],
@@ -230,17 +368,17 @@ export async function updateOnce(c, { first = null, owner = 0, top = '/', write 
   const commit = rp.stdout.toString('utf8').trim();
   if (rp.code !== 0 || !HEX40.test(commit)) return refuse('main has no commit in the clone');
 
-  const r = await swapIn(c, { commit, cur, from, first, owner, write, step, g });
+  const r = await swapIn(c, { commit, cur, from, first, owner, write, step, g, rename });
   // Root's record of main, after every fetch that worked, whatever the update did (item 20(c), L73 point 7(b)).
   try {
     const file = mainSeenFile(c.installRoot);
-    writeMainSeen(c.installRoot, nextMainSeen(readMainSeen(file, { owner }), { commit, installed: readInstallStamp(c.installRoot, { owner }), now: now() }), write);
+    writeMainSeen(c.installRoot, nextMainSeen(readMainSeen(file, { owner, top }), { commit, installed: readInstallStamp(c.installRoot, { owner }), now: now() }), write);
     step('noted');
   } catch (e) { return refuse(`${r.ok ? 'the copy is at main, but ' : `${r.reason}; and `}root's record of main could not be written (${e.code ?? e.message})`); }
   return r.ok ? { ...r, recovered } : r;
 }
 
-async function swapIn(c, { commit, cur, from, first, owner, write, step, g }) {
+async function swapIn(c, { commit, cur, from, first, owner, write, step, g, rename }) {
   if (!first && readInstallStamp(c.installRoot, { owner }) === commit) return { ok: true, changed: false, commit };
 
   const ls = await git(['ls-tree', '-r', '-z', '--full-tree', `${commit}:${SOURCE}`], { ...g, purpose: 'updater-list' });
@@ -270,6 +408,8 @@ async function swapIn(c, { commit, cur, from, first, owner, write, step, g }) {
       copyItem(join(from, n), join(next, n));
       step(`kept ${n}`);
     }
+    const missing = runnerNamesMissing(c.installRoot, next);
+    if (missing) throw new Error(missing);
     // Last, so a folder with a stamp is a whole one (L73 point 2).
     write(join(next, STAMP), Buffer.from(installStamp(commit)), 0o644);
     step('stamped');
@@ -280,25 +420,52 @@ async function swapIn(c, { commit, cur, from, first, owner, write, step, g }) {
     return refuse(`the new copy was not made (${e.message}); the old one stays`);
   }
   // The flip (L73 point 1): a new link beside the copy's, then one rename over it. The rename is atomic, so
-  // installRoot names the old copy or the new one at every moment, never nothing.
+  // installRoot names the old copy or the new one at every moment, never nothing. Before it, `.prev` is set to the copy
+  // in place (L75 (a)), so that copy is kept through one more update.
   const link = join(dirname(c.installRoot), `${basename(c.installRoot)}.link-${commit}`);
+  const prevLink = `${c.installRoot}${PREVIOUS}-${commit}`;
+  const undo = (e) => {
+    rmSync(link, { force: true });
+    rmSync(prevLink, { force: true });
+    rmSync(next, { recursive: true, force: true });
+    return refuse(`the new copy could not be put in place (${e.code ?? e.message}); the old one stays`);
+  };
   try {
     symlinkSync(name, link);
-  } catch (e) {
-    rmSync(next, { recursive: true, force: true });
-    return refuse(`the new copy could not be put in place (${e.code ?? e.message}); the old one stays`);
-  }
+  } catch (e) { return undo(e); }
   step('linked');
-  try {
-    renameSync(link, c.installRoot);
-  } catch (e) {
-    rmSync(link, { force: true });
-    rmSync(next, { recursive: true, force: true });
-    return refuse(`the new copy could not be put in place (${e.code ?? e.message}); the old one stays`);
+  if (cur.real) {
+    try {
+      symlinkSync(basename(cur.real), prevLink);
+      rename(prevLink, `${c.installRoot}${PREVIOUS}`);
+    } catch (e) { return undo(e); }
+    step('kept the previous');
   }
+  try {
+    rename(link, c.installRoot);
+  } catch (e) { return undo(e); }
   step('flipped');
-  if (cur.real && cur.real !== next) { rmSync(cur.real, { recursive: true, force: true }); step('removed the old copy'); }
+  // Every older copy goes; the new one and the one it replaced stay.
+  clearLeftovers(c.installRoot, { current: next });
+  step('removed the older copies');
   return { ok: true, changed: true, commit };
+}
+
+/**
+ * Null, or what the new copy `next` lacks of what the runner's config names in the copy (RUNNER_NAMES, L75 m-4): the
+ * config is the one just copied into `next` (one of `keep`), and each path it names through installRoot must be there.
+ * A name it does not set, or sets outside the copy, is the runner's own check.
+ */
+function runnerNamesMissing(installRoot, next) {
+  let rc; try { rc = JSON.parse(readFileSync(join(next, RUNNER_CONFIG), 'utf8')); } catch { return `the new copy's ${RUNNER_CONFIG} is not JSON`; }
+  for (const k of RUNNER_NAMES) {
+    const v = rc?.[k];
+    if (typeof v !== 'string' || !isAbsolute(v)) continue;
+    const rel = relative(installRoot, v);
+    if (rel === '' || rel.startsWith('..') || isAbsolute(rel)) continue;
+    if (!there(join(next, rel))) return `the new copy has no ${rel}, the runner's ${k}: keep must hold ${rel.split('/')[0]}`;
+  }
+  return null;
 }
 
 /**
@@ -308,17 +475,20 @@ async function swapIn(c, { commit, cur, from, first, owner, write, step, g }) {
  * anyone else could have changed. `localAddress` is for tests only (readUpdaterConfig), and so is `pathDirs`, the
  * folders of that PATH (always checked as root's, to `/`), so a test can name one that fails.
  */
-export async function main(argv, { log = (s) => process.stderr.write(`${s}\n`), uid = process.getuid(), owner = 0, top = '/', self = me, write, step, now, localAddress = false, pathDirs = ROOT_PATH.split(':') } = {}) {
+export async function main(argv, { log = (s) => process.stderr.write(`${s}\n`), uid = process.getuid(), owner = 0, top = '/', self = me, write, step, now, localAddress = false, pathDirs = ROOT_PATH.split(':'), gitTools = gitToolsProblem, rename, gitRunning } = {}) {
   if (uid !== owner) { log('updater: it runs as root only'); return 1; }
   const [file, flag, seed] = argv;
   if (!file || (flag !== undefined && (flag !== '--first' || !seed || !isAbsolute(seed)))) { log('usage: review-updater.mjs <updater.json> [--first <seed folder>]'); return 1; }
-  let c;
-  try { c = readUpdaterConfig(file, { localAddress }); } catch (e) { log(`updater: ${e.message}`); return 1; }
   let config;
   try { config = realpathSync.native(file); } catch (e) { log(`updater: the config can't be found (${e.code ?? e.message})`); return 1; }
-  const bad = flag ? chainProblem(config, { owner, top }) : installProblem(c.installRoot, [config, self, join(c.installRoot, NODE)], { owner, top });
-  if (bad) { log(`updater: ${flag ? 'the config: ' : ''}${bad}`); return 1; }
-  const gb = chainProblem(c.gitBin, { owner, top });
+  // The config and every folder above it are root's alone before a word of it is read (L75 c-2).
+  const cb = chainProblem(config, { owner, top });
+  if (cb) { log(`updater: the config: ${cb}`); return 1; }
+  let c;
+  try { c = readUpdaterConfig(config, { localAddress }); } catch (e) { log(`updater: ${e.message}`); return 1; }
+  const bad = flag ? null : installProblem(c.installRoot, [config, self, join(c.installRoot, NODE)], { owner, top });
+  if (bad) { log(`updater: ${bad}`); return 1; }
+  const gb = chainProblem(c.gitBin, { owner, top }) ?? gitTools(c.gitBin);
   if (gb) { log(`updater: git: ${gb}`); return 1; }
   // The folders on root's PATH are the system's own, root's on every Mac: checked as root's whatever `owner` stands in.
   for (const d of pathDirs) {
@@ -327,7 +497,7 @@ export async function main(argv, { log = (s) => process.stderr.write(`${s}\n`), 
     if (pb) { log(`updater: PATH: ${pb}`); return 1; }
   }
   let r;
-  try { r = await updateOnce(c, { first: flag ? seed : null, owner, top, localAddress, ...(write ? { write } : {}), ...(step ? { step } : {}), ...(now ? { now } : {}) }); } catch (e) { r = refuse(e.message); }
+  try { r = await updateOnce(c, { first: flag ? seed : null, owner, top, localAddress, ...(write ? { write } : {}), ...(step ? { step } : {}), ...(now ? { now } : {}), ...(rename ? { rename } : {}), ...(gitRunning ? { gitRunning } : {}) }); } catch (e) { r = refuse(e.message); }
   for (const x of r.recovered ?? []) log(`updater: ${x}`);
   if (!r.ok) { log(`updater: ${r.reason}`); return 1; }
   if (r.changed) log(`updater: the copy is now at ${r.commit}`);

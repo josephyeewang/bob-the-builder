@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import { chmodSync, lstatSync, mkdirSync, readFileSync, readdirSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tempDir } from '../../shared/test-tmp.mjs';
-import { writeReviewRequest, reviewPorts, statusAlerts, STAMP_GRACE_MS } from './review-requests.mjs';
+import { writeReviewRequest, reviewPorts, statusAlerts, mainSeenHead, STAMP_GRACE_MS } from './review-requests.mjs';
 import { STATUS_STALE_MS } from '../M4-workshop/launcher/review-runner.mjs';
 
 const ME = process.getuid();
@@ -139,4 +139,36 @@ test('item 20(c) planted: a copy behind main is told only once it has stayed beh
   const file = status(dir, { written_at: new Date(T0).toISOString(), ok: true, error: null, installed_commit: HEAD, running: [], alerts: [] });
   const at = (ms) => reviewPorts({ requests: dir, status: file, reviewUid: ME, now: () => T0, mainHead: () => ({ commit: MAIN, since: T0 - ms }) }).reviewAlerts().length;
   assert.deepEqual([at(60_000), at(STAMP_GRACE_MS + 60_000)], [0, 1]);
+});
+
+test('L75 m-2: the stamp alert waits from root\'s record of main, read the way the updater writes it', () => {
+  const MAIN = 'c'.repeat(40);
+  const top = tempDir('m11-seen-');
+  chmodSync(top, 0o755);
+  const installRoot = join(top, 'inst');
+  const file = `${installRoot}.main-seen.json`;
+  const write = (s, mode = 0o644) => { writeFileSync(file, JSON.stringify(s), { mode }); chmodSync(file, mode); };
+  const port = (over = {}) => mainSeenHead({ installRoot, main: () => MAIN, owner: ME, top, ...over });
+  // The updater has seen this head: its own `since`.
+  write({ commit: MAIN, since: T0 - 5 * MINUTE, installed: HEAD, checked_at: T0 - MINUTE });
+  assert.deepEqual(port()(HEAD), { commit: MAIN, since: T0 - 5 * MINUTE });
+  const ok = { ok: true, error: null, installed_commit: HEAD, alerts: [], running: [] };
+  assert.deepEqual(statusAlerts(ok, port(), T0), [], 'inside the grace');
+  assert.equal(statusAlerts(ok, port(), T0 + STAMP_GRACE_MS).length, 1);
+  // Main moved after the last fetch: from that fetch.
+  write({ commit: 'd'.repeat(40), since: T0 - 9 * MINUTE, installed: HEAD, checked_at: T0 - 2 * MINUTE });
+  assert.deepEqual(port()(HEAD), { commit: MAIN, since: T0 - 2 * MINUTE });
+  // A record others can write, of another owner's, or missing: no `since`, so the alert is told at once.
+  write({ commit: MAIN, since: T0, installed: HEAD, checked_at: T0 }, 0o666);
+  assert.deepEqual(port()(HEAD), { commit: MAIN, since: null });
+  write({ commit: MAIN, since: T0, installed: HEAD, checked_at: T0 });
+  assert.deepEqual(port({ owner: ME + 1 })(HEAD), { commit: MAIN, since: null });
+  assert.equal(statusAlerts(ok, port({ owner: ME + 1 }), T0).length, 1);
+  assert.deepEqual(port({ installRoot: join(top, 'none') })(HEAD), { commit: MAIN, since: null });
+  // reviewPorts builds it from installRoot and main; the record must be root's, so this test user's is not trusted.
+  const dir = tempDir('m11-seenp-');
+  const sfile = join(dir, 'status.json');
+  writeFileSync(sfile, JSON.stringify({ written_at: new Date(T0).toISOString(), ...ok }), { mode: 0o644 });
+  const got = reviewPorts({ requests: dir, status: sfile, reviewUid: ME, now: () => T0, installRoot, main: () => MAIN }).reviewAlerts();
+  assert.deepEqual(got.map((a) => a.id), [`stamp-${HEAD}`]);
 });

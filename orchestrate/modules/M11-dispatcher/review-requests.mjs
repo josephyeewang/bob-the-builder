@@ -5,7 +5,9 @@
 // What runs, and the runner's alerts for Joe, come back in the runner's status file; a status that is missing or
 // older than 3 minutes is an error, never "no reviewer" (L63).
 //
-//   reviewPorts({ requests, status, reviewUid, now, newId, mainHead }) → { requestReview, hasReviewer, reviewAlerts }
+//   reviewPorts({ requests, status, reviewUid, now, newId, mainHead, installRoot, main })
+//                                                             → { requestReview, hasReviewer, reviewAlerts }
+//   mainSeenHead({ installRoot, main, owner, top })           → the mainHead port, from root's record of main (L75 m-2)
 //   statusAlerts(status, mainHead, now)                       → the Dispatcher's own alerts from the status (L66)
 //   relayReviewAlerts({ rec, alerts, alert, now })            → tells Joe each runner alert once (a fact per alert)
 //
@@ -19,7 +21,8 @@
 //     this head. Never a commit's date, which the commit's author sets (L73 point 7(b)). The updater copies main every
 //     10 minutes (M4 review-updater.mjs), so a copy behind main is told only once it has stayed behind for
 //     STAMP_GRACE_MS (item 20(c)); no stamp, or no `since` (or one dated ahead), is told at once. A plain commit string
-//     counts as no `since`. Without the port, or when it fails, there is no stamp check.
+//     counts as no `since`. Without the port, or when it fails, there is no stamp check. `mainSeenHead` builds the port
+//     from that record (L75 m-2), and reviewPorts builds it when given `installRoot` and `main` (main's commit, a port).
 //
 // Writing a file is all this does: no process is started here (only-send-safe.test.mjs).
 
@@ -27,6 +30,7 @@ import { closeSync, constants, fstatSync, linkSync, openSync, unlinkSync, writeS
 import { createHash, randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { readReviewStatus, REQUEST_ID, CARD_ID } from '../M4-workshop/launcher/review-runner.mjs';
+import { behindSince, mainSeenFile, readMainSeen } from '../M4-workshop/launcher/install-check.mjs';
 import { REVIEW_ROLES } from '../../shared/review-roles.mjs';
 import { tellThen } from './alerts.mjs';
 
@@ -84,8 +88,24 @@ export function statusAlerts(s, mainHead, now = Date.now()) {
   return out;
 }
 
-/** The ports the time limits use. `status` is the runner's status.json; `reviewUid` the review user's uid. */
-export function reviewPorts({ requests, status, reviewUid, now = () => Date.now(), newId, mainHead }) {
+/**
+ * The mainHead port statusAlerts takes (L75 m-2): main's commit (`main()`, the wiring's) and since when the copy has
+ * been behind it, from root's record beside the copy (`readMainSeen`: root's alone, or no `since`, so a behind copy is
+ * told at once). `owner` and `top` stand in for root and `/` in a test.
+ */
+export function mainSeenHead({ installRoot, main, owner = 0, top = '/' }) {
+  return () => {
+    const commit = main();
+    return { commit, since: behindSince(readMainSeen(mainSeenFile(installRoot), { owner, top }), commit) };
+  };
+}
+
+/**
+ * The ports the time limits use. `status` is the runner's status.json; `reviewUid` the review user's uid. The stamp check
+ * uses `mainHead`, or, given `installRoot` and `main`, mainSeenHead's.
+ */
+export function reviewPorts({ requests, status, reviewUid, now = () => Date.now(), newId, mainHead, installRoot, main }) {
+  if (!mainHead && installRoot && main) mainHead = mainSeenHead({ installRoot, main });
   const read = () => readReviewStatus({ file: status, now: now(), uid: reviewUid });
   return {
     requestReview: ({ card, head, role }) => writeReviewRequest({ dir: requests, card, head, role, ...(newId ? { newId } : {}) }),

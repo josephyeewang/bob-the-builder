@@ -1,16 +1,18 @@
 // What the installed copy must be, and the few facts about it that root's updater and the review runner both read
-// (L66, item 19, L73). Root runs this file (review-updater.mjs imports it), so it imports nothing but Node's own
-// modules: root runs only the updater's own small module set, from main (L73 point 5; review-updater.test.mjs checks
-// every import).
+// (L66, item 19, L73). Root runs this file (review-updater.mjs and accounts.mjs import it), so it imports nothing but
+// Node's own modules. Root runs two small module sets from the installed copy, each checked import by import in
+// review-updater.test.mjs: the updater's (review-updater.mjs, this file, safe-git.mjs) and the account copy's
+// (accounts.mjs and this file), and nothing else of the repository (L73 point 5, c-1).
 //
 // The layout (L73 point 1). `installRoot` is a link, root's, in a folder only root can write. It names a folder beside
 // it, `<name>.v-<commit>`, which holds the copy. The updater makes a new versioned folder, then flips the link with one
 // rename, which the system makes atomic: every path a LaunchDaemon starts from (installRoot/bin/node and the scripts)
 // names a whole copy at every moment of an update, and a run cut off anywhere leaves the link on the old copy or the
-// new one, never on nothing. A plain folder at installRoot is still a copy to these checks; only the updater needs the
-// link.
+// new one, never on nothing. A plain folder at installRoot is still a copy to these checks; the updater and the review
+// runner refuse one (L75 c-7), since only a link can be flipped whole.
 //
 //   currentCopy(installRoot)            → { real, link, commit } | { missing } | { problem }
+//   copyPath(installRoot, cur, p)       → `p` named through the link, as the same path in the folder it names
 //   installProblem(installRoot, files)  → null, or why the copy (and the folders above it) is not root's alone
 //   chainProblem(path)                  → null, or why `path` and every folder above it is not root's alone
 //   aclProblem(paths)                   → null, or the first path that has an access list (ACL)
@@ -64,6 +66,18 @@ export function currentCopy(installRoot, { owner = 0, lstat = lstatSync, readlin
   let t; try { t = lstat(real); } catch { return { problem: `${installRoot} points at ${to}, which is missing` }; }
   if (!t.isDirectory()) return { problem: `${real}, which ${installRoot} points at, is not a folder` };
   return { real, link: true, commit };
+}
+
+/**
+ * `p`, named through installRoot (the copy's link), as the same path in the folder the link names now (`cur.real`,
+ * from currentCopy). A path already inside cur.real, or outside the copy, comes back as it is, for the caller's
+ * own check. A review session's settings name node and the hooks this way (L75 M-1): by the folder's real path, which
+ * the updater keeps through one more update (review-updater.mjs `PREVIOUS`).
+ */
+export function copyPath(installRoot, cur, p) {
+  if (typeof p !== 'string' || !cur?.real) return p;
+  const rel = relative(installRoot, p);
+  return rel === '' || rel.startsWith('..') || isAbsolute(rel) ? p : join(cur.real, rel);
 }
 
 const LS_BATCH = 200;
@@ -140,7 +154,8 @@ export function installProblem(installRoot, files, { owner = 0, lstat = lstatSyn
     if (st.uid !== owner) return `${f} is not owned by ${ownerName(owner)}`;
     if (st.mode & 0o022) return `${f} can be written by others than root`;
   }
-  const seen = [];
+  // The copy's link too, when it is one: an access list on it is refused like one on any folder above (c-4).
+  const seen = cur.link ? [installRoot] : [];
   for (let p = dirname(installRoot); !above(p); p = dirname(p)) {
     let st; try { st = lstat(p); } catch { return `${p}, above the installed copy, is missing`; }
     if (st.isSymbolicLink()) return `${p}, above the installed copy, is a link (name the copy by its real path)`;
@@ -193,9 +208,11 @@ function readRootFile(file, { owner, max }) {
  */
 export const mainSeenFile = (installRoot) => `${installRoot}.main-seen.json`;
 
-export function readMainSeen(file, { owner = 0 } = {}) {
+export function readMainSeen(file, { owner = 0, top = '/', lstat = lstatSync, acl = aclProblem } = {}) {
   const t = readRootFile(file, { owner, max: 4096 });
   if (t === null) return null;
+  // Root's alone the whole way (c-5): its folder and every folder above it, and no access list on the file or on them.
+  if (chainProblem(dirname(file), { owner, top, lstat, acl: (ps) => acl([file, ...ps]) })) return null;
   let s; try { s = JSON.parse(t); } catch { return null; }
   if (!s || typeof s.commit !== 'string' || !HEX40.test(s.commit)) return null;
   if (!Number.isSafeInteger(s.since) || !Number.isSafeInteger(s.checked_at)) return null;

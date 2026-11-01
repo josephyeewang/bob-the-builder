@@ -105,6 +105,16 @@ export function sweepStaleHomes({ dir = tmpdir(), now = Date.now(), maxAgeMs = D
   return removed;
 }
 
+/**
+ * Use `dir` as git's home for the rest of this process, in place of a private one in the temp folder: root's updater
+ * names a folder of its own beside its clone (L75 c-6), since root's temp folder is /tmp, which everyone can write in.
+ * The caller makes and checks `dir`; it is never removed here.
+ */
+export function useGitHome(dir) {
+  if (typeof dir !== 'string' || !dir.startsWith('/')) throw new Error('useGitHome needs an absolute folder');
+  privateHome = dir;
+}
+
 // The private git home is made once per process and removed when the process ends; stale ones are swept first.
 const home = () => {
   if (!privateHome) {

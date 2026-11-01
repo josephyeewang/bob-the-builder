@@ -11,7 +11,7 @@ import { installProblem, programsProblem, readCardFile, recordVerdictTaken, admi
 import { readOutboxFile } from '../../M9-record/outbox.mjs';
 import { STAMP, installStamp } from './review-daemons.mjs';
 import { reviewDaemonPlists } from './review-daemons.mjs';
-import { readAccountFile, copyAccountTo, useAccount, ACCOUNT_FILE } from './accounts.mjs';
+import { readAccountFile, copyAccountTo, copyFromInstalledCopy, useAccount, ACCOUNT_FILE } from './accounts.mjs';
 import { tempDir } from '../../../shared/test-tmp.mjs';
 import { git, gitOk } from '../git/safe-git.mjs';
 
@@ -38,7 +38,14 @@ test('L65: the installed copy must be root\'s alone, with the runner, config and
 });
 
 test('L66 M2: what a review runs (claude, node, the hooks folder) must be inside the installed copy and root\'s alone', async () => {
-  const base = tempDir('m4-progs-');
+  // The copy as the updater lays it out (L75 M-1): a versioned folder and root's link to it, named through the link.
+  const top = tempDir('m4-progs-');
+  const C = 'c'.repeat(40);
+  const realBase = join(top, `inst.v-${C}`);
+  mkdirSync(realBase, { mode: 0o755 });
+  const base = join(top, 'inst');
+  symlinkSync(`inst.v-${C}`, base);
+  writeFileSync(join(realBase, STAMP), installStamp(C), { mode: 0o644 });
   const out = tempDir('m4-progs-out-');
   for (const d of ['bin', 'hooks', 'modules']) mkdirSync(join(base, d), { mode: 0o755 });
   const files = { self: join(base, 'modules', 'runner.mjs'), config: join(base, 'review.json'), wiring: join(base, 'wiring.mjs'), claude: join(base, 'bin', 'claude'), node: join(base, 'bin', 'node') };
@@ -51,9 +58,16 @@ test('L66 M2: what a review runs (claude, node, the hooks folder) must be inside
   for (const p of [base, join(base, 'bin'), join(base, 'hooks'), join(base, 'modules'), join(base, 'modules', 'M4-workshop'), dirname(tdir), tdir]) chmodSync(p, 0o755);
   for (const p of [out]) chmodSync(p, 0o755);
   const c = { installRoot: base, wiring: files.wiring, claudeBin: files.claude, hooksDir: join(base, 'hooks') };
-  const check = (over = {}, node = files.node) => programsProblem({ ...c, ...over }, { self: files.self, config: files.config, node, owner: ME, top: base });
+  const check = (over = {}, node = files.node) => programsProblem({ ...c, ...over }, { self: files.self, config: files.config, node, owner: ME, top });
   // This test's user stands in for root; with everything inside, nothing is wrong.
   assert.equal(check(), null);
+  // The stamp must be the commit the folder is named for; and a plain folder where the link should be is refused (c-7).
+  writeFileSync(join(realBase, STAMP), installStamp('d'.repeat(40)), { mode: 0o644 });
+  assert.match(check(), /the copy's commit stamp \(d{40}\) is not the commit its folder is named for \(c{40}\)/);
+  writeFileSync(join(realBase, STAMP), installStamp(C), { mode: 0o644 });
+  const byReal = (f) => f.replace(base, realBase);
+  assert.match(programsProblem({ installRoot: realBase, wiring: byReal(files.wiring), claudeBin: byReal(files.claude), hooksDir: join(realBase, 'hooks') },
+    { self: byReal(files.self), config: byReal(files.config), node: byReal(files.node), owner: ME, top }), /inst\.v-c{40} is a plain folder, not the installed copy's link/);
   // A template that is missing, or one others can write, refuses by name (L67).
   unlinkSync(templateFile(base, 'auditor'));
   assert.match(check(), /templates\/auditor\.settings\.json is missing/);
@@ -82,10 +96,11 @@ test('L66 M2: what a review runs (claude, node, the hooks folder) must be inside
   assert.match(check({ hooksDir: base }), /is not inside the installed copy/);
   // The ports hand what was checked to the wiring's start.
   let got;
-  const ports = realPorts({ ...c, uids: { reviewer: ME } }, { start: (x) => { got = x; return { ok: true, pid: 1 }; } }, { node: files.node });
+  const ports = realPorts({ ...c, uids: { reviewer: ME } }, { start: (x) => { got = x; return { ok: true, pid: 1 }; } }, { node: files.node, owner: ME });
   await ports.start({ role: 'reviewer' });
   const { settingsFor, ...rest } = got;
-  assert.deepEqual(rest, { role: 'reviewer', claudeBin: files.claude, node: files.node, hooksDir: join(base, 'hooks') });
+  // The hooks by the copy folder's real path (L75 M-1), as the session's settings name them.
+  assert.deepEqual(rest, { role: 'reviewer', claudeBin: files.claude, node: files.node, hooksDir: join(realBase, 'hooks') });
   assert.equal(typeof settingsFor, 'function', 'and the settings maker, bound to this session (review-settings.test.mjs)');
 });
 
@@ -252,6 +267,43 @@ test('L66: root\'s account copy goes only into a folder of root\'s alone, as a f
   assert.match(copyAccountTo({ home, uid: ME, to: join(home, 'none', 'copy'), dirOwner: ME }).reason, /is not a plain folder/);
 });
 
+test('L75 c-1: root\'s account copy runs only from the installed copy, root\'s alone, with its own node', () => {
+  const top = tempDir('m4-acctcopy-');
+  chmodSync(top, 0o755);
+  const C = 'c'.repeat(40);
+  const real = join(top, `inst.v-${C}`);
+  mkdirSync(join(real, 'bin'), { recursive: true, mode: 0o755 });
+  const install = join(top, 'inst');
+  symlinkSync(`inst.v-${C}`, install);
+  const self = join(real, 'accounts.mjs');
+  const node = join(real, 'bin', 'node');
+  for (const f of [self, node]) writeFileSync(f, '', { mode: 0o644 });
+  const home = join(top, 'home');
+  mkdirSync(home, { mode: 0o755 });
+  const dir = join(top, 'root-only');
+  mkdirSync(dir, { mode: 0o755 });
+  const to = join(dir, 'copy');
+  const go = (over = {}) => copyFromInstalledCopy({ install, home, uid: ME, to, self, node, owner: ME, top, ...over });
+  assert.deepEqual(go(), { ok: true, account: 'a' });
+  assert.equal(readFileSync(to, 'utf8'), 'a\n');
+  assert.match(go({ self: join(top, 'accounts.mjs') }).reason, /runs only from the installed copy, root's alone: .*accounts\.mjs is not inside the installed copy/);
+  assert.match(go({ node: process.execPath }).reason, /is not inside the installed copy/);
+  chmodSync(self, 0o666);
+  assert.match(go().reason, /accounts\.mjs can be written by others than root/);
+  chmodSync(self, 0o644);
+  assert.match(go({ owner: ME + 1 }).reason, /is not owned by uid/);
+  assert.match(go({ install: undefined }).reason, /copy-to needs --install <the installed copy>/);
+  // Run as the script from the repository, as a mistaken plist would: refused, and nothing is written.
+  const script = join(dirname(new URL(import.meta.url).pathname), 'accounts.mjs');
+  const to2 = join(dir, 'copy2');
+  const r = spawnSync(process.execPath, [script, 'copy-to', to2, '--home', home, '--owner', String(ME), '--install', install], { encoding: 'utf8', timeout: 20_000, env: { PATH: '/usr/bin:/bin', HOME: home } });
+  assert.equal(r.status, 1, r.stderr);
+  assert.match(r.stderr, /Refused: it runs only from the installed copy, root's alone/);
+  assert.equal(existsSync(to2), false);
+  const r2 = spawnSync(process.execPath, [script, 'copy-to', to2, '--home', home, '--owner', String(ME)], { encoding: 'utf8', timeout: 20_000, env: { PATH: '/usr/bin:/bin', HOME: home } });
+  assert.match(r2.stderr, /copy-to needs --install/);
+});
+
 test('L66 version stamp: the install writes the commit; the runner reads it only as root\'s plain file', () => {
   const C = 'e'.repeat(40);
   assert.equal(installStamp(C), `${C}\n`);
@@ -325,7 +377,7 @@ test('L65: the two LaunchDaemons run the installed copy and its own node, the ru
   assert.match(p.runner, /<key>WatchPaths<\/key><array><string>\/R\/requests<\/string><\/array>/);
   assert.match(p.runner, /<key>StartInterval<\/key><integer>60<\/integer>/);
   assert.doesNotMatch(p.accountCopy, /UserName/);
-  assert.match(p.accountCopy, /<string>copy-to<\/string><string>\/I\/account<\/string><string>--home<\/string><string>\/W<\/string><string>--owner<\/string><string>501<\/string>/);
+  assert.match(p.accountCopy, /<string>copy-to<\/string><string>\/I\/account<\/string><string>--home<\/string><string>\/W<\/string><string>--owner<\/string><string>501<\/string><string>--install<\/string><string>\/I<\/string>/);
   assert.match(p.accountCopy, /<key>WatchPaths<\/key><array><string>\/W\/\.claude-account<\/string><\/array>/);
   for (const t of [p.runner, p.accountCopy]) assert.doesNotMatch(t, /homebrew|\/usr\/local/);
   assert.throws(() => reviewDaemonPlists({ label: 'x y' }), /bad job label/);

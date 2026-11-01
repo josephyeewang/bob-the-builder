@@ -51,7 +51,7 @@ import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { runnerPass, CARD_ID, isClaudeCommand } from './review-runner.mjs';
-import { installProblem, readInstallStamp, aclProblem } from './install-check.mjs';
+import { installProblem, readInstallStamp, aclProblem, currentCopy, copyPath } from './install-check.mjs';
 import { sessionVerdict, verdictFromFile } from '../../M9-record/outbox.mjs';
 import { SESSION_ID } from '../../../shared/record.mjs';
 import { readAccountFile, ACCOUNT_FILE } from './accounts.mjs';
@@ -136,10 +136,19 @@ export { installProblem, readInstallStamp };
 /**
  * What a review session runs (L66 M2), named one by one: the runner itself, its config, the wiring, the claude
  * program, the node this runs on, the hooks folder and each review role's settings template (L67). Each must be inside
- * the installed copy and root's alone.
+ * the installed copy and root's alone. installRoot must be the copy's link (L75 c-7): a plain folder can't be updated
+ * whole, so the runner refuses one, and the copy's commit stamp must be the commit its folder is named for.
  */
 export function programsProblem(c, { self, config, node = realpathSync.native(process.execPath), ...opts } = {}) {
-  return installProblem(c.installRoot, [self, config, c.wiring, c.claudeBin, node, c.hooksDir, ...REVIEW_ROLES.map((r) => templateFile(c.installRoot, r))], opts);
+  const bad = installProblem(c.installRoot, [self, config, c.wiring, c.claudeBin, node, c.hooksDir, ...REVIEW_ROLES.map((r) => templateFile(c.installRoot, r))], opts);
+  if (bad) return bad;
+  const owner = opts.owner ?? 0;
+  const cur = currentCopy(c.installRoot, { owner, ...(opts.lstat ? { lstat: opts.lstat } : {}), ...(opts.readlink ? { readlink: opts.readlink } : {}) });
+  if (!cur.real) return cur.problem;
+  if (!cur.link) return `${c.installRoot} is a plain folder, not the installed copy's link (the install step makes the link)`;
+  const stamp = readInstallStamp(c.installRoot, { owner });
+  if (stamp !== cur.commit) return `the copy's commit stamp (${stamp ?? 'none'}) is not the commit its folder is named for (${cur.commit})`;
+  return null;
 }
 
 // A folder of the Record: a plain folder of the Record's owner that no one else writes. Null, or the problem.
@@ -267,7 +276,7 @@ export function sessionsFrom(text, bin, self = process.pid) {
 const run = (bin, args) => spawnSync(bin, args, { encoding: 'utf8', timeout: CHILD_MS, stdio: ['ignore', 'pipe', 'pipe'] });
 
 /** The real ports (the wiring gives `start`). */
-export function realPorts(c, wiring, { node = realpathSync.native(process.execPath) } = {}) {
+export function realPorts(c, wiring, { node = realpathSync.native(process.execPath), owner = 0 } = {}) {
   const uid = c.uids.reviewer;
   return {
     root: c.root, outboxRoot: c.outboxRoot, uids: c.uids, reviewHome: c.reviewHome, claudeBin: c.claudeBin,
@@ -301,8 +310,14 @@ export function realPorts(c, wiring, { node = realpathSync.native(process.execPa
       return r.status === 0 ? String(r.stdout).trim() : null;
     },
     installedCommit: () => readInstallStamp(c.installRoot),
-    start: (x) => wiring.start({ ...x, claudeBin: c.claudeBin, node, hooksDir: c.hooksDir,
-      settingsFor: (copy) => sessionSettings(c, { role: x.role, sessionId: x.sessionId, copy, node }) }),
+    // The hooks by the real path of the folder the copy's link names now (L75 M-1), the same path the settings name,
+    // so the launcher's hook check (check 7) and the settings agree. A flip between the two makes them differ, and the
+    // start is refused; the next pass starts it.
+    start: (x) => {
+      const hooksDir = copyPath(c.installRoot, currentCopy(c.installRoot, { owner }), c.hooksDir);
+      return wiring.start({ ...x, claudeBin: c.claudeBin, node, hooksDir,
+        settingsFor: (copy) => sessionSettings({ ...c, hooksDir }, { role: x.role, sessionId: x.sessionId, copy, node }, { owner }) });
+    },
     accountInUse: () => {
       const copy = c.accountCopy ? readAccountFile({ file: c.accountCopy, uid: 0 }) : { ok: false };
       if (copy.ok) return copy.account;

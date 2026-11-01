@@ -15,7 +15,8 @@ import { gitOk, callLog, ROOT_PATH, safeGitEnv } from '../git/safe-git.mjs';
 import { SCRIPTS, UPDATE_EVERY_S, updaterPlist } from './review-daemons.mjs';
 import { STAMP, NODE, UPDATER_CONFIG, RUNNER_CONFIG, installProblem, chainProblem, currentCopy, aclProblem, versionName, mainSeenFile, readMainSeen,
   nextMainSeen, behindSince } from './install-check.mjs';
-import { updateOnce, writeNew, leftovers as updaterLeftovers, parseTree, parseBatch, readUpdaterConfig, main, MAIN } from './review-updater.mjs';
+import { updateOnce, writeNew, leftovers as updaterLeftovers, parseTree, parseBatch, readUpdaterConfig, main, MAIN, PREVIOUS, CLONE_MADE,
+  cloneLocks, gitIsRunning, gitToolsProblem } from './review-updater.mjs';
 
 const ME = process.getuid();
 const ID = [['user.name', 'test'], ['user.email', 'test@example.invalid']];
@@ -90,8 +91,12 @@ function snapshot(dir) {
   return out;
 }
 const linkOf = (w) => { try { return readlinkSync(w.installRoot); } catch { return null; } };
-/** What is beside the copy other than its link, the folder the link names and root's record of main. */
-const leftovers = (w) => readdirSync(dirname(w.installRoot)).filter((n) => ![basename(w.installRoot), linkOf(w), basename(mainSeenFile(w.installRoot))].includes(n));
+const prevOf = (w) => { try { return readlinkSync(`${w.installRoot}${PREVIOUS}`); } catch { return null; } };
+/**
+ * What is beside the copy other than its link, the folder the link names, the link to the copy the last update replaced
+ * and that folder (L75 (a)), and root's record of main.
+ */
+const leftovers = (w) => readdirSync(dirname(w.installRoot)).filter((n) => ![basename(w.installRoot), linkOf(w), `${basename(w.installRoot)}${PREVIOUS}`, prevOf(w), basename(mainSeenFile(w.installRoot))].includes(n));
 const stampOf = (w) => readFileSync(join(w.installRoot, STAMP), 'utf8').trim();
 const moveMain = async (w, text) => { w.put('orchestrate/a.txt', text); const m = await w.commit(`main: ${text.trim()}`); await w.push(MAIN); return m; };
 
@@ -153,7 +158,17 @@ test('item 19: at main already, nothing is touched; when main moves, the copy fo
   assert.equal(readFileSync(join(w.installRoot, NODE), 'utf8'), 'a node\n');
   assert.equal(existsSync(join(w.installRoot, 'evil.txt')), false);
   assert.equal(existsSync(w.marker), false);
-  assert.deepEqual(leftovers(w), [], 'the old copy is removed once the new one is in place');
+  // L75 (a): the copy it replaced is kept through one more update, named by `.prev`; nothing else is left.
+  const first = versionName(w.installRoot, w.main1);
+  assert.equal(prevOf(w), first);
+  assert.equal(readFileSync(join(dirname(w.installRoot), first, 'a.txt'), 'utf8'), 'one\n', 'whole, as it was');
+  assert.deepEqual(leftovers(w), []);
+  const main3 = await moveMain(w, 'three\n');
+  const r3 = await updateOnce(w.c, w.o);
+  assert.deepEqual([r3.ok, r3.commit], [true, main3], r3.reason);
+  assert.equal(prevOf(w), versionName(w.installRoot, main2));
+  assert.equal(existsSync(join(dirname(w.installRoot), first)), false, 'the one before it is removed');
+  assert.deepEqual(leftovers(w), []);
 });
 
 test('item 19 planted: only main is copied, never another branch the remote\'s HEAD points at', async () => {
@@ -244,7 +259,7 @@ test('L73 point 1: at every step of an update the path launchd starts from names
   assert.equal(r.ok, true, r.reason);
   whole('at the end');
   const names = images.map((x) => x.where);
-  for (const n of ['after cleared', 'after folder', `after writing ${STAMP}`, 'after stamped', 'after linked', 'after flipped', 'after removed the old copy', 'after noted']) {
+  for (const n of ['after cleared', 'after fetching', 'after folder', `after writing ${STAMP}`, 'after stamped', 'after linked', 'after kept the previous', 'after flipped', 'after removed the older copies', 'after noted']) {
     assert.ok(names.includes(n), `no image ${n}`);
   }
   for (const { where, d } of images) {
@@ -337,12 +352,15 @@ test('L73 M1 probe B: a folder planted beside the copy is never put in place, an
   rmSync(oldStyle, { recursive: true });
   assert.deepEqual(leftovers(w), []);
 
-  // A copy whose node others can write is refused before anything is copied from it.
+  // A copy whose node others can write is refused before anything is copied from it, or removed beside it (R3).
   chmodSync(join(w.installRoot, NODE), 0o777);
   await moveMain(w, 'eight\n');
   const before = snapshot(w.installRoot);
+  const planted = plant(versionName(w.installRoot, E40));
   assert.match((await updateOnce(w.c, w.o)).reason, /the installed copy is not root's alone: .*bin\/node can be written by others than root/);
   assert.deepEqual(snapshot(w.installRoot), before);
+  assert.equal(existsSync(planted), true, 'nothing beside the copy is removed before the copy is checked');
+  rmSync(planted, { recursive: true });
   assert.deepEqual(leftovers(w), []);
   chmodSync(join(w.installRoot, NODE), 0o755);
 
@@ -352,8 +370,22 @@ test('L73 M1 probe B: a folder planted beside the copy is never put in place, an
   const tmp = join(w.root, 'tmp-link');
   symlinkSync(elsewhere, tmp);
   renameSync(tmp, w.installRoot);
-  assert.match((await updateOnce(w.c, w.o)).reason, /orchestrate points at .*elsewhere.*, not a copy folder beside it/);
+  // A short token, since the path is cut at 200 characters in the message (L75 m-5).
+  assert.match((await updateOnce(w.c, w.o)).reason, /orchestrate points at "\/[^"]*", not a copy folder beside it/);
   assert.match(installProblem(w.installRoot, [], { owner: ME, top: w.root }), /not a copy folder beside it/);
+  // A link that names a sibling by a name that is not a versioned one (K3), or a versioned name that is a file (K2).
+  rmSync(w.installRoot);
+  cpSync(elsewhere, join(inst, 'elsewhere'), { recursive: true });
+  symlinkSync('elsewhere', w.installRoot);
+  assert.match(currentCopy(w.installRoot, { owner: ME }).problem, /orchestrate points at "elsewhere", not a copy folder beside it/);
+  rmSync(join(inst, 'elsewhere'), { recursive: true });
+  rmSync(w.installRoot);
+  writeFileSync(join(inst, versionName(w.installRoot, E40)), '');
+  symlinkSync(versionName(w.installRoot, E40), w.installRoot);
+  assert.match(currentCopy(w.installRoot, { owner: ME }).problem, /is not a folder/);
+  rmSync(join(inst, versionName(w.installRoot, E40)));
+  rmSync(w.installRoot);
+  symlinkSync(elsewhere, w.installRoot);
   // A link of another owner's; a plain folder where the link should be.
   assert.match(currentCopy(w.installRoot, { owner: ME + 1 }).problem, new RegExp(`the copy's link, is not owned by uid ${ME + 1}`));
   rmSync(w.installRoot);
@@ -482,6 +514,11 @@ test('item 19, L73 point 6: the daemon\'s run checks it is root, that its config
   assert.match(lines.pop(), /the clone: .*clone\.git can be written by others than root/);
   chmodSync(w.c.clone, 0o755);
   assert.equal(await main([conf], { ...o, self }), 0, lines.join('\n'));
+  // L75 m-3: the git root runs is checked past its own chain too (on a Mac, the developer folder /usr/bin/git hands over to).
+  const asked = [];
+  assert.equal(await main([conf], { ...o, self, gitTools: (g) => { asked.push(g); return 'the developer folder: a planted problem'; } }), 1);
+  assert.match(lines.pop(), /^updater: git: the developer folder: a planted problem$/);
+  assert.deepEqual(asked, [gitBin]);
   // A folder on root's PATH that is not root's alone (here: this test's own folder, which is not root's).
   assert.equal(await main([conf], { ...o, self, pathDirs: [join(w.root, 'gitbin')] }), 1);
   assert.match(lines.pop(), /updater: PATH: .*gitbin is not owned by root/);
@@ -518,7 +555,7 @@ test('item 19, L73 points 3 and 4: the config names absolute paths, an https add
 test('L73 point 7(b): the stamp alert\'s "since" is when the updater first saw main ahead of the copy, by its own clock, kept while the copy stays behind', async () => {
   const w = await world();
   const file = mainSeenFile(w.installRoot);
-  const seen = () => readMainSeen(file, { owner: ME });
+  const seen = () => readMainSeen(file, { owner: ME, top: w.root });
   const failing = (file2, data, mode) => { if (file2.includes('.v-')) throw new Error('the disk filled up'); return writeNew(file2, data, mode); };
   assert.equal((await updateOnce(w.c, { ...w.o, first: w.keepSeed, now: () => 1_000 })).ok, true);
   assert.deepEqual(seen(), { commit: w.main1, since: 1_000, installed: w.main1, checked_at: 1_000 });
@@ -548,10 +585,22 @@ test('L73 point 7(b): the stamp alert\'s "since" is when the updater first saw m
   assert.equal(nextMainSeen({ commit: main4, since: 99_000, installed: main3, checked_at: 20_000 }, { commit: main4, installed: main3, now: 21_000 }).since, 21_000);
   chmodSync(file, 0o666);
   assert.equal(seen(), null);
+  chmodSync(file, 0o644);
+  assert.notEqual(seen(), null);
+  // Its folder others can write (c-5): not read either.
+  chmodSync(dirname(file), 0o777);
+  assert.equal(seen(), null);
+  chmodSync(dirname(file), 0o755);
+  // S1: a copy that changed while main stayed ahead starts the clock again.
+  const a = 'a'.repeat(40);
+  const b = 'b'.repeat(40);
+  assert.equal(nextMainSeen({ commit: main4, since: 1_000, installed: a, checked_at: 2_000 }, { commit: main4, installed: b, now: 3_000 }).since, 3_000);
+  assert.equal(nextMainSeen({ commit: main4, since: 1_000, installed: a, checked_at: 2_000 }, { commit: main4, installed: a, now: 3_000 }).since, 1_000);
 });
 
-test('L73 point 5: root runs only the updater\'s own small module set, which imports nothing but Node\'s own', () => {
+test('L73 point 5, L75 c-1: root runs only two small module sets, the updater\'s and the account copy\'s, which import nothing but Node\'s own', () => {
   const here = dirname(fileURLToPath(import.meta.url));
+  const set = (entry) => {
   const found = new Set();
   const visit = (file) => {
     if (found.has(file)) return;
@@ -569,8 +618,11 @@ test('L73 point 5: root runs only the updater\'s own small module set, which imp
       visit(resolve(dirname(file), s));
     }
   };
-  visit(join(here, 'review-updater.mjs'));
-  assert.deepEqual([...found].map((f) => f.slice(dirname(here).length + 1)).sort(), ['git/safe-git.mjs', 'launcher/install-check.mjs', 'launcher/review-updater.mjs']);
+  visit(join(here, entry));
+  return [...found].map((f) => f.slice(dirname(here).length + 1)).sort();
+  };
+  assert.deepEqual(set('review-updater.mjs'), ['git/safe-git.mjs', 'launcher/install-check.mjs', 'launcher/review-updater.mjs']);
+  assert.deepEqual(set('accounts.mjs'), ['launcher/accounts.mjs', 'launcher/install-check.mjs']);
 });
 
 test('L73 point 7(c): the access-list reader, on both systems\' ls output, and failing closed', () => {
@@ -647,4 +699,196 @@ test('item 19: the updater\'s LaunchDaemon runs as root every 10 minutes, from t
   assert.match(p, /<key>PATH<\/key><string>\/usr\/bin:\/bin:\/usr\/sbin:\/sbin<\/string>/);
   assert.throws(() => updaterPlist({ label: 'x y', installRoot: '/I', logDir: '/L' }), /bad job label/);
   assert.throws(() => updaterPlist({ label: 'x', installRoot: 'I', logDir: '/L' }), /installRoot must be an absolute path/);
+});
+
+test('L75 C1, C4, A1, A3: every folder up to the top is checked, on the link layout too, and every path\'s access list is read', async () => {
+  const w = await world();
+  assert.equal((await updateOnce(w.c, { ...w.o, first: w.keepSeed })).ok, true);
+  await moveMain(w, 'c1\n');
+  // C1: a folder two above the copy (here the top) that others can write stops the run before anything else.
+  chmodSync(w.root, 0o777);
+  try {
+    assert.match((await updateOnce(w.c, w.o)).reason, /^the folder of the copy: .* can be written by others than root/);
+  } finally { chmodSync(w.root, 0o755); }
+  // C4: the walk above the copy runs when installRoot is the link.
+  const inst = dirname(w.installRoot);
+  chmodSync(inst, 0o777);
+  try {
+    assert.match(installProblem(w.installRoot, [], { owner: ME, top: w.root }), /inst, above the installed copy, can be written by others than root/);
+  } finally { chmodSync(inst, 0o755); }
+  // A1, A3, c-4: the access lists of the link, every folder above it and every path of the copy, however many.
+  const real = realpathSync.native(w.installRoot);
+  mkdirSync(join(real, 'many'));
+  for (let i = 0; i < 250; i++) writeFileSync(join(real, 'many', `f${String(i).padStart(3, '0')}`), '');
+  const got = [];
+  assert.equal(installProblem(w.installRoot, [], { owner: ME, top: w.root, acl: (ps) => { got.push(...ps); return null; } }), null);
+  for (const p of [w.installRoot, inst, w.root, real, join(real, 'many', 'f000'), join(real, 'many', 'f249')]) assert.ok(got.includes(p), `${p} is not read`);
+  assert.ok(got.length > 250);
+  assert.match(installProblem(w.installRoot, [], { owner: ME, top: w.root, acl: (ps) => (ps.includes(join(real, 'many', 'f249')) ? 'f249 has an access list (ACL)' : null) }), /f249 has an access list/);
+});
+
+test('L75 F3: a flip that fails leaves the copy in place whole, and no new folder or link behind', async () => {
+  const w = await world();
+  assert.equal((await updateOnce(w.c, { ...w.o, first: w.keepSeed })).ok, true);
+  await moveMain(w, 'f3\n');
+  const before = snapshot(w.installRoot);
+  for (const failAt of [`${w.installRoot}${PREVIOUS}`, w.installRoot]) {
+    const rename = (a, b) => { if (b === failAt) { const e = new Error('no'); e.code = 'EIO'; throw e; } return renameSync(a, b); };
+    const r = await updateOnce(w.c, { ...w.o, rename });
+    assert.match(r.reason, /the new copy could not be put in place \(EIO\); the old one stays/, failAt);
+    assert.deepEqual(snapshot(w.installRoot), before, failAt);
+    assert.equal(linkOf(w), versionName(w.installRoot, w.main1), failAt);
+    assert.deepEqual(leftovers(w), [], failAt);
+  }
+  const r = await updateOnce(w.c, w.o);
+  assert.equal(r.ok, true, r.reason);
+  assert.equal(readFileSync(join(w.installRoot, 'a.txt'), 'utf8'), 'f3\n');
+});
+
+test('L75 m-1: an install cut off at any step, inside the clone\'s making and the fetch too, is put right by the next run', async () => {
+  const steps = ['clone-init', 'clone-config-removed', 'clone-config', 'clone-hooks', 'clone-marked', 'cloned', 'fetching', 'cleared', 'folder', 'stamped', 'linked', 'flipped', 'noted'];
+  const cutAt = [];
+  for (const at of steps) {
+    const w = await world();
+    let cut = false;
+    try { await updateOnce(w.c, { ...w.o, first: w.keepSeed, step: (n) => { if (n === at) { cut = true; throw new Error('CUT'); } } }); } catch (e) { assert.equal(e.message, 'CUT'); }
+    if (cut) cutAt.push(at);
+    const cur = currentCopy(w.installRoot, { owner: ME });
+    const r = await updateOnce(w.c, cur.missing ? { ...w.o, first: w.keepSeed } : w.o);
+    assert.equal(r.ok, true, `${at}: ${r.reason}`);
+    assert.equal(stampOf(w), w.main1, at);
+    assert.equal(lstatSync(w.installRoot).isSymbolicLink(), true, at);
+    assert.deepEqual(leftovers(w), [], at);
+    assert.equal(existsSync(join(w.c.clone, CLONE_MADE)), true, at);
+    assert.deepEqual(readdirSync(w.root).filter((n) => n.startsWith(`${basename(w.c.clone)}.new-`)), [], `${at}: no half-made clone is left`);
+    const again = await updateOnce(w.c, w.o);
+    assert.deepEqual([again.ok, again.changed], [true, false], `${at}: ${again.reason}`);
+  }
+  assert.deepEqual(cutAt, steps, 'every step was reached and cut');
+  // A clone from before the marker, or one a cut-off left without it, is made again.
+  const w = await world();
+  assert.equal((await updateOnce(w.c, { ...w.o, first: w.keepSeed })).ok, true);
+  rmSync(join(w.c.clone, CLONE_MADE));
+  await moveMain(w, 'remade\n');
+  const r = await updateOnce(w.c, w.o);
+  assert.equal(r.ok, true, r.reason);
+  assert.ok(r.recovered.includes('removed a clone that was never finished'));
+  assert.equal(readFileSync(join(w.installRoot, 'a.txt'), 'utf8'), 'remade\n');
+});
+
+test('L75 m-1: a lock a cut-off git left in the clone is removed only when no git is running', async () => {
+  const w = await world();
+  assert.equal((await updateOnce(w.c, { ...w.o, first: w.keepSeed })).ok, true);
+  writeFileSync(join(w.c.clone, 'refs', 'heads', 'main.lock'), '');
+  writeFileSync(join(w.c.clone, 'packed-refs.lock'), '');
+  assert.deepEqual(cloneLocks(w.c.clone), [join(w.c.clone, 'packed-refs.lock'), join(w.c.clone, 'refs', 'heads', 'main.lock')]);
+  await moveMain(w, 'locked\n');
+  const busy = await updateOnce(w.c, { ...w.o, gitRunning: () => true });
+  assert.match(busy.reason, /the clone holds packed-refs\.lock, main\.lock and a git is running; the next run tries again/);
+  assert.equal(existsSync(join(w.c.clone, 'refs', 'heads', 'main.lock')), true, 'a running git keeps its lock');
+  const r = await updateOnce(w.c, { ...w.o, gitRunning: () => false });
+  assert.equal(r.ok, true, r.reason);
+  assert.ok(r.recovered.includes('removed refs/heads/main.lock from the clone'), r.recovered.join(', '));
+  assert.ok(r.recovered.includes('removed packed-refs.lock from the clone'));
+  assert.equal(readFileSync(join(w.installRoot, 'a.txt'), 'utf8'), 'locked\n');
+  assert.deepEqual(cloneLocks(w.c.clone), []);
+  // Who is running: any program named git or git-something; a `ps` that fails counts as one.
+  const ps = (stdout, status = 0) => () => ({ status, stdout });
+  assert.equal(gitIsRunning({ run: ps('launchd\n/usr/bin/git\nzsh\n') }), true);
+  assert.equal(gitIsRunning({ run: ps('launchd\n/Library/Developer/CommandLineTools/usr/libexec/git-core/git-remote-https\n') }), true);
+  assert.equal(gitIsRunning({ run: ps('launchd\nzsh\ngithub-desktop\nnode\n') }), false);
+  assert.equal(gitIsRunning({ run: ps('', 1) }), true);
+  assert.equal(gitIsRunning({ run: () => ({ error: new Error('no ps') }) }), true);
+});
+
+test('L75 m-3: on a Mac, the developer folder /usr/bin/git hands over to, its git and every helper must be root\'s alone', () => {
+  const root = realpathSync.native(tempDir('m4-devdir-'));
+  const dev = join(root, 'CommandLineTools');
+  mkdirSync(join(dev, 'usr', 'bin'), { recursive: true });
+  mkdirSync(join(dev, 'usr', 'libexec', 'git-core', 'sub'), { recursive: true });
+  writeFileSync(join(dev, 'usr', 'bin', 'git'), '');
+  chmodSync(join(dev, 'usr', 'bin', 'git'), 0o755);
+  writeFileSync(join(dev, 'usr', 'libexec', 'git-core', 'git-remote-https'), '');
+  writeFileSync(join(dev, 'usr', 'libexec', 'git-core', 'sub', 'x'), '');
+  symlinkSync('../../bin/git', join(dev, 'usr', 'libexec', 'git-core', 'git-fetch'));
+  const calls = [];
+  const xs = (out, status = 0) => (bin, args, o) => { calls.push([bin, ...args, o.env.PATH]); return { status, stdout: out }; };
+  const opts = { platform: 'darwin', owner: ME, top: root };
+  assert.equal(gitToolsProblem('/usr/bin/git', { ...opts, run: xs(`${dev}\n`) }), null);
+  assert.deepEqual(calls.pop(), ['/usr/bin/xcode-select', '-p', ROOT_PATH]);
+  assert.equal(gitToolsProblem('/usr/bin/git', { ...opts, platform: 'linux', run: () => { throw new Error('not called'); } }), null);
+  assert.equal(gitToolsProblem('/opt/git/bin/git', { ...opts, run: () => { throw new Error('not called'); } }), null, 'another git is checked by its own chain');
+  assert.match(gitToolsProblem('/usr/bin/git', { ...opts, run: xs('', 2) }), /xcode-select names no developer folder/);
+  assert.match(gitToolsProblem('/usr/bin/git', { ...opts, run: xs('relative/path\n') }), /names no developer folder/);
+  assert.match(gitToolsProblem('/usr/bin/git', { ...opts, run: xs(join(root, 'none')) }), /the developer folder .*none is missing/);
+  // A developer folder an admin can change, its git, a helper, a link that leads out.
+  chmodSync(dev, 0o777);
+  assert.match(gitToolsProblem('/usr/bin/git', { ...opts, run: xs(dev) }), /^the developer folder: .*CommandLineTools can be written by others than root/);
+  chmodSync(dev, 0o755);
+  assert.match(gitToolsProblem('/usr/bin/git', { ...opts, owner: ME + 1, run: xs(dev) }), /is not owned by uid/);
+  chmodSync(join(dev, 'usr', 'bin', 'git'), 0o775);
+  assert.match(gitToolsProblem('/usr/bin/git', { ...opts, run: xs(dev) }), /^the developer folder's git: .*bin\/git can be written by others than root/);
+  chmodSync(join(dev, 'usr', 'bin', 'git'), 0o755);
+  chmodSync(join(dev, 'usr', 'libexec', 'git-core', 'sub', 'x'), 0o666);
+  assert.match(gitToolsProblem('/usr/bin/git', { ...opts, run: xs(dev) }), /^git's helpers: .*sub\/x can be written by others than root/);
+  chmodSync(join(dev, 'usr', 'libexec', 'git-core', 'sub', 'x'), 0o644);
+  symlinkSync(join(root, 'elsewhere'), join(dev, 'usr', 'libexec', 'git-core', 'git-evil'));
+  writeFileSync(join(root, 'elsewhere'), '');
+  assert.match(gitToolsProblem('/usr/bin/git', { ...opts, run: xs(dev) }), /git-evil leads outside the developer folder/);
+  rmSync(join(dev, 'usr', 'libexec', 'git-core', 'git-evil'));
+  assert.equal(gitToolsProblem('/usr/bin/git', { ...opts, run: xs(dev) }), null);
+  // The developer folder named through a link is checked at its real place.
+  symlinkSync(dev, join(root, 'dev-link'));
+  assert.equal(gitToolsProblem('/usr/bin/git', { ...opts, run: xs(join(root, 'dev-link')) }), null);
+});
+
+test('L75 m-4: a new copy must hold what the runner\'s config names in it (wiring, claude, the hooks), or the update is refused', async () => {
+  const w = await world();
+  writeFileSync(join(w.keepSeed, RUNNER_CONFIG), `${JSON.stringify({ wiring: join(w.installRoot, 'wiring', 'w.mjs'), claudeBin: '/usr/local/bin/claude', hooksDir: join(w.installRoot, 'modules') })}\n`);
+  const r = await updateOnce(w.c, { ...w.o, first: w.keepSeed });
+  assert.match(r.reason, /the new copy was not made \(the new copy has no wiring\/w\.mjs, the runner's wiring: keep must hold wiring\)/);
+  assert.equal(existsSync(w.installRoot), false);
+  assert.deepEqual(leftovers(w), []);
+  mkdirSync(join(w.keepSeed, 'wiring'));
+  writeFileSync(join(w.keepSeed, 'wiring', 'w.mjs'), '');
+  writeFileSync(join(w.keepSeed, RUNNER_CONFIG), `${JSON.stringify({ wiring: join(w.installRoot, 'wiring', 'w.mjs'), claudeBin: join(w.installRoot, 'claude', 'bin') })}\n`);
+  const c = { ...w.c, keep: [...w.c.keep, 'wiring'] };
+  assert.match((await updateOnce(c, { ...w.o, first: w.keepSeed })).reason, /has no claude\/bin, the runner's claudeBin: keep must hold claude/);
+  writeFileSync(join(w.keepSeed, RUNNER_CONFIG), `${JSON.stringify({ wiring: join(w.installRoot, 'wiring', 'w.mjs'), claudeBin: '/usr/local/bin/claude' })}\n`);
+  const ok = await updateOnce(c, { ...w.o, first: w.keepSeed });
+  assert.equal(ok.ok, true, ok.reason);
+  assert.equal(existsSync(join(w.installRoot, 'wiring', 'w.mjs')), true);
+  writeFileSync(join(w.installRoot, RUNNER_CONFIG), 'not json\n');
+  await moveMain(w, 'm4\n');
+  assert.match((await updateOnce(c, w.o)).reason, /the new copy's review\.json is not JSON/);
+});
+
+test('L75 c-2, c-3, c-6: the config is checked before it is read, names plain paths, and root\'s git keeps its home beside the clone', async () => {
+  const w = await world();
+  const lines = [];
+  const o = { ...w.o, log: (s) => lines.push(s), uid: ME };
+  // c-2: a config in a folder others can write is refused by its chain, before a word of it is read.
+  const open = join(w.root, 'open');
+  mkdirSync(open);
+  chmodSync(open, 0o777);
+  writeFileSync(join(open, 'u.json'), 'not json');
+  assert.equal(await main([join(open, 'u.json')], o), 1);
+  assert.match(lines.pop(), /^updater: the config: .*open can be written by others than root/);
+  // c-3
+  const f = join(w.root, 'plain.json');
+  for (const bad of ['/I/o/', '/I/./o', '/I//o']) {
+    writeFileSync(f, JSON.stringify({ ...w.c, installRoot: bad }));
+    assert.throws(() => readUpdaterConfig(f, { localAddress: true }), /installRoot must be an absolute path in its plain form/, bad);
+  }
+  // c-6: git's home is root's own folder beside the clone, never /tmp.
+  assert.equal((await updateOnce(w.c, { ...w.o, first: w.keepSeed })).ok, true);
+  const home = `${w.c.clone}.home`;
+  assert.equal(lstatSync(home).mode & 0o777, 0o700);
+  assert.equal(safeGitEnv({ path: ROOT_PATH }).HOME, home);
+  chmodSync(home, 0o755);
+  assert.match((await updateOnce(w.c, w.o)).reason, /git's home: .*clone\.git\.home is not root's own folder \(0700\)/);
+  rmSync(home, { recursive: true });
+  mkdirSync(join(w.root, 'other-home'), { mode: 0o700 });
+  symlinkSync(join(w.root, 'other-home'), home);
+  assert.match((await updateOnce(w.c, w.o)).reason, /git's home: .*clone\.git\.home is not a plain folder/);
 });

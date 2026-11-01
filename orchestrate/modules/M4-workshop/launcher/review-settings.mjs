@@ -25,10 +25,11 @@
 import { closeSync, constants, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, writeFileSync, writeSync } from 'node:fs';
 import { dirname, isAbsolute, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { renderRoleSettings, checkSettings, REVIEW_WALLS } from './render-settings.mjs';
+import { renderRoleSettings, checkSettings, REVIEW_WALLS, HOOK_FAILS_CLOSED } from './render-settings.mjs';
 import { DESIGN_PROFILES } from './role-profiles.mjs';
 import { REVIEW_ROLES } from '../../../shared/review-roles.mjs';
 import { SESSION_ID } from '../../../shared/record.mjs';
+import { copyPath, currentCopy } from './install-check.mjs';
 
 export const TEMPLATE_DIR = 'modules/M4-workshop/launcher/templates';
 export const SETTINGS_DIR = 'settings';
@@ -82,7 +83,7 @@ export const SPOTS = Object.freeze([
   ['sandbox.filesystem.denyRead[]', `^${one('deny')}$`],
   ['sandbox.filesystem.denyWrite[]', `^${one('outbox')}/(?:\\*\\*/)?\\.\\*$`],
   ['sandbox.filesystem.denyWrite[]', `^${any([...WALLS_ALL, 'bob'])}(?:/\\*\\*)?$`],
-  [/^hooks\.[A-Za-z]+\[\]\.hooks\[\]\.command$/, `^${one('node')} ${one('hooks')}/[a-z-]+\\.mjs --role (?:reviewer|auditor) --outbox ${one('outbox')} --snapshot ${one('snapshot')} --kinds [a-z,]+(?: --kind [a-z]+ --event [A-Za-z]+)?$`],
+  [/^hooks\.[A-Za-z]+\[\]\.hooks\[\]\.command$/, `^${one('node')} ${one('hooks')}/[a-z-]+\\.mjs --role (?:reviewer|auditor) --outbox ${one('outbox')} --snapshot ${one('snapshot')} --kinds [a-z,]+(?: --kind [a-z]+ --event [A-Za-z]+)?${esc(HOOK_FAILS_CLOSED)}$`],
 ].map(([at, re]) => Object.freeze({ at, re: new RegExp(re) })));
 
 function walk(x, path, visit) {
@@ -203,8 +204,16 @@ export function slotValues(c, { role, sessionId, copy, node }, ports = {}) {
     const bad = realPathProblem(c[k], ports);
     if (bad) return refuse(`${k}: ${bad}`);
   }
+  // The installed copy as it is now (L75 M-1): installRoot is root's link, and node and the hooks are named by the real
+  // path of the folder it names, so every value below passes the no-link check. The updater keeps that folder through
+  // one more update, and each hook command exits 2 if its node or script is gone, so a session that outlives its copy
+  // is blocked, never let through (render-settings.mjs `hookCmd`).
+  const cur = currentCopy(c.installRoot, { owner: ports.owner ?? 0, lstat });
+  if (!cur.real) return refuse(`the installed copy: ${cur.problem}`);
+  if (!cur.link) return refuse(`${c.installRoot} is a plain folder, not the installed copy's link`);
   const values = {
-    outbox: join(c.outboxRoot, role, sessionId), copy, node, hooks: c.hooksDir, snapshot: c.snapshot, bob: c.bobFolder,
+    outbox: join(c.outboxRoot, role, sessionId), copy, node: copyPath(c.installRoot, cur, node), hooks: copyPath(c.installRoot, cur, c.hooksDir),
+    snapshot: c.snapshot, bob: c.bobFolder,
     deny: [...c.deny, c.workerCopies],
   };
   for (const k of REVIEW_WALLS) {
@@ -226,7 +235,7 @@ export function slotValues(c, { role, sessionId, copy, node }, ports = {}) {
   // A second guard (L73 C1): "apart" and "inside the review copies' folder" above already rule this out.
   if (inside(w, copy.toLowerCase())) return refuse(`copy: ${copy} is inside the workers' copies' folder, which the reviewer may not read`);
   if (dirname(values.outbox) !== join(c.outboxRoot, role) || !isDir(values.outbox, lstat)) return refuse(`outbox: ${values.outbox} is not the session's folder in its role's outbox`);
-  for (const k of ['node', 'hooks']) if (!inside(c.installRoot, values[k])) return refuse(`${k}: ${values[k]} is not inside the installed copy`);
+  for (const k of ['node', 'hooks']) if (!inside(cur.real, values[k])) return refuse(`${k}: ${values[k]} is not inside the installed copy (${cur.real})`);
   if (!inside(c.root, values.snapshot)) return refuse(`snapshot: ${values.snapshot} is not inside the runner's folder`);
   return { ok: true, values };
 }
@@ -258,7 +267,7 @@ export function sessionSettings(c, { role, sessionId, copy, node }, { owner = 0,
   if (!t.ok) return t;
   const spot = spotsProblem(t.template);
   if (spot) return refuse(`the ${role} template: ${spot}`);
-  const v = slotValues(c, { role, sessionId, copy, node }, ports);
+  const v = slotValues(c, { role, sessionId, copy, node }, { owner, ...ports });
   if (!v.ok) return v;
   const settings = fill(t.template, v.values);
   const changed = onlySpotsChanged(t.template, settings, v.values);
