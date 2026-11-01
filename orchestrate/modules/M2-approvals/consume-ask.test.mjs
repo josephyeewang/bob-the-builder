@@ -194,6 +194,7 @@ export const ALLOWED = Object.freeze({
   'modules/M11-dispatcher/tick.test.mjs': 1,
   'modules/M4-workshop/git/refusal-reasons.test.mjs': 1,
   'modules/M4-workshop/hooks/attacks.test.mjs': 1,
+  'modules/M4-workshop/launcher/review-install-closure.test.mjs': 14, // #82: an import scanner's own test text (L142 m1, lead's OK)
   'modules/M4-workshop/launcher/review-runner-main.mjs': 2,
   'modules/M4-workshop/launcher/review-updater.test.mjs': 1,
   'modules/M6-merge-gate/build-checker.test.mjs': 1,

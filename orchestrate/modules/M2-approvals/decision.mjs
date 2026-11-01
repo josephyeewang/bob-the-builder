@@ -110,7 +110,10 @@ export async function openDecision(ctx, id) {
 // nothing to retry it, and Joe never told.
 export async function closeDecisionPr(ctx, id, doc) {
   if (!activeKind(doc.kind)?.decision_pr || !Number.isSafeInteger(doc.pr)) return true;
-  const c = await ctx.gh.patch(`/repos/${ctx.owner}/${ctx.repo}/pulls/${doc.pr}`, { state: 'closed' }).catch((e) => ({ status: String(e?.message ?? e) }));
+  // A client that throws before it returns a promise (a bug, a missing method) is a failed close too, never a stopped
+  // pass: retryClose runs this every pass, so a throw here would stop every push (L142 m4).
+  let c;
+  try { c = await ctx.gh.patch(`/repos/${ctx.owner}/${ctx.repo}/pulls/${doc.pr}`, { state: 'closed' }); } catch (e) { c = { status: String(e?.message ?? e) }; }
   if (c?.status === 200) return true;
   try { return ctx.alert({ type: 'decision_pr_not_closed', ask: id, pr: doc.pr, reason: String(c?.status) }) !== false; } catch { return false; }
 }

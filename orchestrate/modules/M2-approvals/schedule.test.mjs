@@ -10,7 +10,7 @@ import { env, OWNER_ID, session, write, box, PRODUCT, must } from './fixtures.te
 import { leadCard, put } from '../M9-record/fixtures.test-helper.mjs';
 import { fakeGitHub } from './fixtures/fake-github.mjs';
 import { makeGitView } from '../M10-rules/git-view.mjs';
-import { askStore, writeDoc } from './ask-store.mjs';
+import { askStore, consumeAsk, writeDoc } from './ask-store.mjs';
 import { createAsk, processSession } from './binding.mjs';
 import { readDecision } from './decision.mjs';
 import { approvalStands, heldBy, readApprove, schedulePass } from './schedule.mjs';
@@ -321,6 +321,88 @@ test('L135: a close that works first time leaves no mark, and a mark whose clear
   const r = await w.at(w.t.clock.t + HOUR);
   assert.equal(ask(w, 'D-1').pr_close_due, undefined);
   assert.ok(r.events.some((e) => e.type === 'decision_pr_close_retried'));
+});
+
+// L142 (r4 probes P-A, P-D, P-F; plants R1, R2, R5): the crash order is pinned, not only that a mark exists. A close
+// that never answers stands for a process that dies while the close is in flight.
+const NEVER = () => new Promise(() => {});
+function closeBy(w, pr, fn) {
+  const real = w.t.ctx.gh;
+  w.t.ctx.gh = { ...real, patch: (path, body) => (path.endsWith(`/pulls/${pr}`) && body?.state === 'closed' ? fn(() => real.patch(path, body)) : real.patch(path, body)) };
+}
+const settle = () => new Promise((r) => setTimeout(r, 50));
+
+test('L142 m2: the mark is on the record with the answer before the close; a crash during the close is finished by the next pass', async () => {
+  const w = world();
+  must(createAsk(w.t.ctx, { id: 'D-1', kind: 'decision', card: 'C-1', title: 'Which format', choices: ['CSV', 'JSON'], recommended: 'CSV' }));
+  await w.at(W8);
+  const pr = ask(w, 'D-1').pr;
+  let hang = true;
+  closeBy(w, pr, (go) => (hang ? NEVER() : go()));
+  w.g.review(pr, { state: 'APPROVED', commit_id: w.g.pulls.get(pr).head, submitted_at: w.t.clock.t + MIN });
+  w.t.clock.t += 2 * MIN;
+  readDecision(w.t.ctx, 'D-1'); // never settles: the process dies here
+  await settle();
+  assert.equal(ask(w, 'D-1').state, 'answered');
+  assert.equal(ask(w, 'D-1').pr_close_due, true, 'the mark was written with the answer, before the close');
+  assert.equal(w.g.pulls.get(pr).state, 'open');
+  hang = false;
+  const r = await w.at(w.t.clock.t + HOUR);
+  assert.equal(w.g.pulls.get(pr).state, 'closed');
+  assert.equal(ask(w, 'D-1').pr_close_due, undefined);
+  assert.ok(r.events.some((e) => e.type === 'decision_pr_close_retried'));
+  assert.equal(notClosed(w).length, 0);
+});
+
+test('L142 m3: the retry keeps the mark on the record while its close is in flight; a crash there is finished by the next pass', async () => {
+  const w = world();
+  const { pr, close, restore } = await answeredWithFailingClose(w, { sink: 'false' });
+  close.fail = false; restore();
+  let hang = true;
+  closeBy(w, pr, (go) => (hang ? NEVER() : go()));
+  w.at(w.t.clock.t + HOUR); // the retry's close never answers: the process dies here
+  await settle();
+  assert.equal(ask(w, 'D-1').pr_close_due, true, 'the mark stays until the close or the alert has answered');
+  hang = false;
+  await w.at(w.t.clock.t + HOUR);
+  assert.equal(w.g.pulls.get(pr).state, 'closed');
+  assert.equal(ask(w, 'D-1').pr_close_due, undefined);
+  assert.equal(notClosed(w).length, 0);
+});
+
+test('L142 c3: an answered ask consumed while its close is still due is still retried, and stays consumed', async () => {
+  const w = world();
+  const { pr, close, restore } = await answeredWithFailingClose(w, { sink: 'false' });
+  must(consumeAsk(w.t.ctx, 'D-1'));
+  assert.equal(ask(w, 'D-1').state, 'consumed');
+  assert.equal(ask(w, 'D-1').pr_close_due, true, 'consuming keeps the mark');
+  close.fail = false; restore();
+  await w.at(w.t.clock.t + HOUR);
+  assert.equal(w.g.pulls.get(pr).state, 'closed');
+  assert.equal(ask(w, 'D-1').pr_close_due, undefined);
+  assert.equal(ask(w, 'D-1').state, 'consumed');
+});
+
+test('L142 m4: a GitHub client that throws before it answers is a failed close; the pass goes on and another ask is still pushed', async () => {
+  const w = world();
+  must(createAsk(w.t.ctx, { id: 'D-1', kind: 'decision', card: 'C-1', title: 'Which format', choices: ['CSV', 'JSON'], recommended: 'CSV' }));
+  await w.at(W8);
+  const pr = ask(w, 'D-1').pr;
+  closeBy(w, pr, () => { throw new Error('client bug'); });
+  w.t.sink.answer = false;
+  w.g.review(pr, { state: 'APPROVED', commit_id: w.g.pulls.get(pr).head, submitted_at: w.t.clock.t + MIN });
+  w.t.clock.t += 2 * MIN;
+  const d = await readDecision(w.t.ctx, 'D-1');
+  assert.deepEqual([d.ok, d.counted], [true, true], 'the answer is still counted');
+  assert.equal(ask(w, 'D-1').pr_close_due, true);
+  must(createAsk(w.t.ctx, { id: 'U-1', kind: 'undo', card: 'C-2', title: 'Undo it' }));
+  const before = w.pushes.length;
+  const r = await w.at(w.t.clock.t + HOUR);
+  assert.equal(r.ok, true, 'the pass finished');
+  assert.equal(ask(w, 'U-1').state, 'pushed');
+  assert.deepEqual(w.pushes.slice(before).map((p) => p.ask), ['U-1'], "the other ask's push went out");
+  assert.equal(ask(w, 'D-1').pr_close_due, true, 'still due: retried next pass');
+  assert.equal(w.g.pulls.get(pr).state, 'open');
 });
 
 test('a held decision is not raised while a card on its module is open; closing it raises the ask in the next window', async () => {
