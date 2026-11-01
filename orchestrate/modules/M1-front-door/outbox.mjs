@@ -17,6 +17,9 @@
 //   ask-request-<id>.json   { "ask": "research", "product": "<name>", "brief": "<one line, at most 300 characters>" }
 //                      The owner's "find out X" (R-0b-136). Intake checks it here, then hands it to the record, which keeps
 //                      it as an inert report; only M2 Approvals turns it into a research ask (M2 research-ask.mjs).
+//   ask-request-<id>.json   { "ask": "undo", "product": "<name>", "pr": <pull request number>, "brief": "<the owner's words>" }
+//                      The owner's "that change was wrong" about a merged change (R-0b-140). Inert here too; only M2
+//                      undo-flag.mjs turns it into an undo ask, and only when the words are in a real turn of the owner's.
 //   idea-<id>.md       the idea exactly as the owner said it, quoted ("> " on every line), masked; never acted on as an
 //                      instruction. Intake hands the quoted text on through cleanOutside (source "idea-file").
 
@@ -26,7 +29,7 @@ import { checkTimeZone } from './timezone.mjs';
 import { MODE_REQUESTS } from './sort.mjs';
 
 export const FRONT_DOOR_KINDS = Object.freeze(['request', 'state', 'idea', 'ask-request']);
-export const ASK_REQUESTS = Object.freeze(['research']);
+export const ASK_REQUESTS = Object.freeze(['research', 'undo']);
 export const STATES_ALLOWED = Object.freeze(['paused', 'away']);
 export const REQUESTS = Object.freeze(['resume', 'wrapup', 'rotate', ...MODE_REQUESTS]);
 // The id the skill writes: date, time, two letters (20261103-0915-kq). Nothing longer fits, so a key can't ride in a file
@@ -73,11 +76,15 @@ export function requestDoc({ request, product = null, name = null, what }) {
 const oneLine = (v) => typeof v === 'string' && !!v.trim() && v.length <= 300 && !/[\u0000-\u001f\u007f]/.test(v) && !new RegExp(INVISIBLE.source).test(v);
 
 // A research ask (R-0b-136): the product it is for, and the brief, the owner's words in one line.
-export function askRequestDoc({ ask, product, brief }) {
+// An undo ask (R-0b-140): the same, plus the merged pull request the owner says was wrong.
+export const askRequestFields = (ask) => (ask === 'undo' ? ['ask', 'product', 'pr', 'brief'] : ['ask', 'product', 'brief']);
+export function askRequestDoc({ ask, product, pr, brief }) {
   if (!ASK_REQUESTS.includes(ask)) return refuse(`unknown ask (allowed: ${ASK_REQUESTS.join(', ')})`);
-  if (!isName(product)) return refuse('a research ask names its product');
+  if (!isName(product)) return refuse(`a${ask === 'undo' ? 'n undo' : ' research'} ask names its product`);
   if (!oneLine(brief)) return refuse('the brief is one line of the owner\'s words, at most 300 characters');
-  return { ok: true, doc: { ask, product, brief } };
+  if (ask !== 'undo') return pr === undefined ? { ok: true, doc: { ask, product, brief } } : refuse('only an undo ask names a pull request');
+  if (!Number.isSafeInteger(pr) || pr < 1) return refuse('an undo ask names the merged pull request by its number');
+  return { ok: true, doc: { ask, product, pr, brief } };
 }
 
 // Invisible characters and terminal codes go before masking (strip, then mask, as cleanOutside does), so a key split
@@ -133,6 +140,7 @@ export function intakePush(name, result) {
     const tz = d.tz ? `time zone ${d.tz}` : `no time zone yet; the trip brief says what that means for each product${result.note ? ' (that time zone was not accepted; name a city, such as Europe/Prague)' : ''}`;
     return `Confirmed: away ${d.product}${d.until ? ` until ${String(d.until).slice(0, 10)}` : ''}, ${tz}.`;
   }
+  if (result.kind === 'ask-request' && d.ask === 'undo') return `Request taken: undo pull request #${d.pr} of ${d.product}. Nothing is undone yet; the Undo button comes next if that change can be undone.`;
   if (result.kind === 'ask-request') return `Request taken: research ask for ${d.product}. Nothing has started yet; it goes on your waiting list with its number.`;
   if (d.request === 'rotate') return `Request taken: rotate ${d.name}. The key is NOT rotated yet; the steps follow.`;
   if (MODE_REQUESTS.includes(d.request)) return `Request taken: ${d.request}${d.product ? ` ${d.product}` : ''}. Nothing has started yet${d.request === 'think' ? '; the Mini opens the thinking room' : '; the Lead picks it up when it runs'}.`;
@@ -158,7 +166,7 @@ function checkOne(name, text) {
   if (/\\u/i.test(String(text))) return refuse('the file holds an escape (\\u); write plain text');
   let doc; try { doc = JSON.parse(text); } catch { return refuse('not JSON'); }
   if (!doc || typeof doc !== 'object' || Array.isArray(doc)) return refuse('not an object');
-  const allowed = kind === 'state' ? ['product', 'state', 'until', 'tz'] : kind === 'ask-request' ? ['ask', 'product', 'brief'] : ['request', 'product', 'name', ...(MODE_REQUESTS.includes(doc.request) ? ['what'] : [])];
+  const allowed = kind === 'state' ? ['product', 'state', 'until', 'tz'] : kind === 'ask-request' ? askRequestFields(doc.ask) : ['request', 'product', 'name', ...(MODE_REQUESTS.includes(doc.request) ? ['what'] : [])];
   const extra = Object.keys(doc).filter((k) => !allowed.includes(k));
   if (extra.length) return refuse(`${extra.length} unexpected field(s); allowed: ${allowed.join(", ")}`);
   if (maskSecrets(String(text)).text !== String(text)) return refuse('the file holds something that looks like a key');

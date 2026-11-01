@@ -31,6 +31,8 @@ function nextId(record) {
   return `R-${(n.length ? Math.max(...n) : 0) + 1}`;
 }
 
+export const claimedAsk = (text) => { try { return JSON.parse(String(text ?? ''))?.ask; } catch { return undefined; } };
+
 export function openResearchAsks(ctx) {
   const { record, product, now } = ctx;
   const st = askStore(record);
@@ -39,6 +41,8 @@ export function openResearchAsks(ctx) {
   for (const rep of record.list('report')) {
     const d = rep.doc;
     if (!d || d.kind !== 'ask-request-' || done.has(rep.id)) continue;
+    // An undo request is undo-flag.mjs's (R-0b-140), which runs every check itself; this pass only routes on the claim.
+    if (claimedAsk(d.text) === 'undo') continue;
     const no = (reason) => { refused.push({ report: rep.id, reason }); };
     if (d.role !== 'front_door') { no('an ask request comes only from the Front Door'); continue; }
     const r = checkOutboxFile(String(d.source ?? ''), String(d.text ?? ''));
