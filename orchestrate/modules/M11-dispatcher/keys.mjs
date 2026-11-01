@@ -87,3 +87,5 @@ export function need(rules, key, { product, type = 'number' } = {}) {
 
 /** Minutes from the rules, as milliseconds. */
 export const minutes = (rules, key, opts) => need(rules, key, opts) * 60_000;
+/** How a missing per-product value is listed for Joe: the key, and the product it is missing for (L116 c1). */
+export const missingFor = (key, product) => (product ? `${key} for ${product}` : key);

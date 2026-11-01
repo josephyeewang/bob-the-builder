@@ -2171,7 +2171,7 @@ const FACT_FAMILIES = Object.freeze(Object.fromEntries(Object.entries({
   dispatcher: ['unsent-alerts', 'outage', 'rules-missing-alert', 'compactions-', 'stop-', 'host-lock-', 'pause-',
     'undo-held-', 'undo-note-', 'step-error-', 'last-full-pass', 'band-usage', 'unknown-usage-alert', 'lead-restart-',
     'phone-link', 'phone-link-', 'intake-applied-', 'intake-note', 'hold-', 'review-alert-', 'reconciled-', 'cleanup-',
-    'pass-lock-note', 'tab-heartbeat-', 'merge-unread-'],
+    'pass-lock-note', 'tab-heartbeat-', 'merge-unread-', 'merge-ask-refused-'],
   live_check: [],
 }).map(([k, v]) => [k, Object.freeze(v)])));
 

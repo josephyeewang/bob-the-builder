@@ -8,7 +8,9 @@ import assert from 'node:assert/strict';
 import { dispatcherPass } from './pass.mjs';
 import { actOnDead } from './tick.mjs';
 import { KEYS } from './keys.mjs';
-import { timeLimits, requestMerges, MERGE_REQUEST } from './merges.mjs';
+import { timeLimits, requestMerges, MERGE_REQUEST, ASK_REFUSED_FACT } from './merges.mjs';
+import { LIMIT_NO_ACCOUNT } from './pass.mjs';
+import { settleMerge } from '../M6-merge-gate/merge-outcome.mjs';
 import { waitOn } from './moves.mjs';
 import { outageStep, OUTAGE_FACT } from './outage.mjs';
 import { USAGE_FACT } from './usage.mjs';
@@ -107,7 +109,7 @@ test('L72 contract: dead restart: a provably dead owner\'s claim is broken by th
   const missing = [];
   const other = actOnDead({ rec: w.rec, rules: onlyFor('another-product'), now: w.env.clock.t, restart: [l.sessionId], asks: [], cards: { [l.sessionId]: 'C-1' }, missing });
   assert.deepEqual(other, [['C-1', `not restarted: the rules have no ${KEYS.claimsStuckMin} for ${prod}`]]);
-  assert.deepEqual(missing, [KEYS.claimsStuckMin]);
+  assert.deepEqual(missing, [`${KEYS.claimsStuckMin} for ${prod}`]);
   assert.equal(w.rec.read('card', 'C-1').doc.state, 'running');
   const done = actOnDead({ rec: w.rec, rules: onlyFor(prod), now: w.env.clock.t, restart: [l.sessionId], asks: [], cards: { [l.sessionId]: 'C-1' } });
   assert.deepEqual(done, [['C-1', 'ready again']]);
@@ -171,7 +173,7 @@ test('L72 contract: merge request: a verified card with its PR and worker sessio
   must(put(w.env.review, 'dispatcher', 'card', 'C-1', { state: 'verified' }), 'verified');
   // Sensors' PR reading at the card's head.
   must(w.rec.write({ actor: 'sensors', entity: 'fact', id: 'pr-7', expectRev: 0, doc: { type: 'pr', head_sha: HEAD, at: iso(w.env.clock.t) } }), 'pr reading');
-  const args = { rec: w.rec, rules: w.rules, now: w.env.clock.t, b: GREEN_BANDS, running: [] };
+  const args = { rec: w.rec, rules: w.rules, now: w.env.clock.t, b: GREEN_BANDS, running: [], alert: (t) => assert.fail(`unexpected alert: ${t}`) };
   assert.deepEqual(requestMerges(args), [['C-1', 'merge requested']]);
   const { rev } = w.rec.read('card', 'C-1');
   const q = w.rec.read('merge_request', MERGE_REQUEST('C-1', HEAD, rev));
@@ -312,4 +314,94 @@ test('L72 (5): two dead out of ten is no outage; three dead out of five is', () 
   assert.equal(three.outage, true);
   assert.equal(w.rec.read('fact', OUTAGE_FACT).doc.state, 'open', 'the real Record takes the Dispatcher\'s outage fact');
   assert.equal(alerts.length, 1);
+});
+
+// ---- L116 m5: the repeat-refusal ask and the m-4 re-wait, on the real Record (a stand-in allows writes M9 refuses) ----
+
+// A verified card C-1 with its PR reading, through the honest steps.
+async function verifiedCard(w) {
+  await inReview(w);
+  passingVerdict(w.env, 'C-1', 'R-1', HEAD);
+  must(put(w.env.review, 'dispatcher', 'card', 'C-1', { state: 'verified' }), 'verified');
+  must(w.rec.write({ actor: 'sensors', entity: 'fact', id: 'pr-7', expectRev: 0, doc: { type: 'pr', head_sha: HEAD, at: iso(w.env.clock.t) } }), 'pr reading');
+}
+// The gate takes a merge of C-1 into checking and refuses it for `reason` (M6 settleMerge, as merge_gate, the way
+// land() records a 405): the card goes back to verified with the reason in attempts.merge_refusals.
+function gateRefuses(w, mgId, reason) {
+  must(w.rec.write({ actor: 'merge_gate', entity: 'merge', id: mgId, expectRev: 0, doc: { state: 'requested', card: 'C-1', pr: 7, head: HEAD, product: PRODUCT } }), `${mgId} requested`);
+  must(put(w.rec, 'merge_gate', 'merge', mgId, { state: 'queued' }), `${mgId} queued`);
+  const mg = w.rec.read('merge', mgId);
+  const cd = w.rec.read('card', 'C-1');
+  must(w.rec.write({ actor: 'merge_gate', entity: 'merge', id: mgId, expectRev: mg.rev, doc: { ...mg.doc, state: 'checking', judged_head: HEAD },
+    also: [{ entity: 'card', id: 'C-1', expectRev: cd.rev, doc: { ...cd.doc, state: 'merging' } }] }), `${mgId} checking`);
+  const r = settleMerge({ record: w.env.review, now: w.env.clock.t }, mgId, { reason });
+  assert.equal(r.ok, true, r.reason);
+  assert.equal(w.rec.read('card', 'C-1').doc.state, 'verified');
+}
+
+test('L116 m5 contract: two same refusals send the card to Joe once, merge_asks in the same write; after his answer it is requested again, and a third asks again', async () => {
+  const w = world();
+  await verifiedCard(w);
+  gateRefuses(w, 'MG-1', '405');
+  gateRefuses(w, 'MG-2', '405');
+  const alerts = [];
+  const args = () => ({ rec: w.rec, rules: w.rules, now: w.env.clock.t, b: GREEN_BANDS, running: [], alert: (t) => alerts.push(t) });
+  assert.deepEqual(requestMerges(args()), [['C-1', 'waiting on joe']]);
+  const c = w.rec.read('card', 'C-1').doc;
+  assert.deepEqual([c.state, c.wait.who, c.wait.return_to, c.attempts.merge_asks, c.attempts.merge_refusals], ['waiting', 'joe', 'verified', 2, ['405', '405']]);
+  assert.equal(alerts.length, 1);
+  assert.match(alerts[0], /card C-1: the merge was refused twice for the same reason \(405\)/);
+  assert.deepEqual(requestMerges(args()), [], 'a waiting card is not requested');
+  assert.equal(alerts.length, 1);
+  // Joe's answer puts it back where it waited from (the Dispatcher's move back to return_to, M9): it is requested
+  // again, not sent straight back to him.
+  must(put(w.env.review, 'dispatcher', 'card', 'C-1', { state: 'verified', wait: undefined }), 'Joe answers');
+  assert.deepEqual(requestMerges(args()), [['C-1', 'merge requested']]);
+  assert.equal(alerts.length, 1);
+  // A third same refusal asks once more.
+  w.env.clock.t += MIN;
+  gateRefuses(w, 'MG-3', '405');
+  assert.deepEqual(requestMerges(args()), [['C-1', 'waiting on joe']]);
+  assert.deepEqual([w.rec.read('card', 'C-1').doc.attempts.merge_asks, alerts.length], [3, 2]);
+});
+
+test('L116 M-1 contract: an approved card refused twice the same way, whose ask the Record refuses, is told to Joe once and not lost', async () => {
+  const w = world();
+  await verifiedCard(w);
+  gateRefuses(w, 'MG-1', '409');
+  gateRefuses(w, 'MG-2', '409');
+  must(put(w.env.review, 'approvals', 'card', 'C-1', { state: 'approved' }), 'approved');
+  const alerts = [];
+  const args = () => ({ rec: w.rec, rules: w.rules, now: w.env.clock.t, b: GREEN_BANDS, running: [], alert: (t) => alerts.push(t) });
+  // M9 has no approved → waiting yet (lane 1 adds it in #79 r2; this test then asserts waiting on joe instead).
+  const first = requestMerges(args());
+  assert.equal(first.length, 1);
+  assert.match(first[0][1], /^not sent to joe: .*approved/);
+  assert.equal(alerts.length, 1);
+  assert.match(alerts[0], /card C-1: the merge was refused twice for the same reason \(409\), but the card could not be put on you to decide/);
+  assert.ok(w.rec.read('fact', ASK_REFUSED_FACT('C-1', 2)), 'told once, remembered');
+  assert.equal(w.rec.read('card', 'C-1').doc.state, 'approved');
+  assert.equal(w.rec.list('merge_request').length, 0, 'not requested again');
+  w.env.clock.t += MIN;
+  assert.match(requestMerges(args())[0][1], /^not sent to joe/);
+  assert.equal(alerts.length, 1, 'not told again');
+  // A new refusal is a new count: Joe is told again (the told-once note is per card and refusal count).
+  gateRefuses(w, 'MG-3', '409');
+  must(put(w.env.review, 'approvals', 'card', 'C-1', { state: 'approved' }), 'approved again');
+  assert.match(requestMerges(args())[0][1], /^not sent to joe/);
+  assert.equal(alerts.length, 2);
+  assert.ok(w.rec.read('fact', ASK_REFUSED_FACT('C-1', 3)));
+});
+
+test('L116 m5 contract (L110 m-4): a limit_hit wait naming no account is re-waited on Joe by the pass, on the real Record, told once', async () => {
+  const w = world();
+  readyCard(w.env, 'C-1');
+  await w.pass();
+  must(waitOn(w.rec, 'C-1', { who: 'usage', what: 'limit_hit', now: w.env.clock.t }), 'parked on a limit, no account');
+  w.env.clock.t += 2 * MIN;
+  const r = await w.pass();
+  assert.deepEqual(r.resumed, []);
+  const c = w.rec.read('card', 'C-1').doc;
+  assert.deepEqual([c.state, c.wait.who, c.wait.what, c.wait.resume, c.wait.return_to], ['waiting', 'joe', LIMIT_NO_ACCOUNT, 'retry', 'ready']);
+  assert.ok(diaryKinds(w.rec, 'C-1').includes('limit_no_account'));
 });

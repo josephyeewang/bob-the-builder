@@ -14,7 +14,7 @@
 // A claimed card whose session never started is the Record's to lapse (lapseClaims, claims.unlaunched_min; tick.mjs),
 // not this file's.
 
-import { KEYS, minutes, MissingKey } from './keys.mjs';
+import { KEYS, minutes, MissingKey, missingFor } from './keys.mjs';
 import { move, waitOn, note, ageMs } from './moves.mjs';
 import { startGate } from './gate.mjs';
 import { rolesFor } from '../M4-workshop/launcher/review-runner.mjs';
@@ -28,6 +28,8 @@ export { PR_FACT };
 export const RECONCILED_FACT = (mergeId) => `reconciled-${mergeId}`;
 /** The note that Joe was told a stopped merge has had no fresh PR reading past its limit (L89), so he is told once. */
 export const UNREAD_FACT = (mergeId) => `merge-unread-${mergeId}`;
+/** The note that Joe was told a repeat refusal could not be put on him (L116 M-1), once per card per refusal count. */
+export const ASK_REFUSED_FACT = (cardId, refusals) => `merge-ask-refused-${cardId}-${refusals}`;
 const iso = (ms) => new Date(ms).toISOString();
 
 const fresh = (rec, prNumber, mergeId) => prReadingAfter(rec, prNumber, mergeId);
@@ -52,32 +54,31 @@ export async function timeLimits({ rec, rules, now, b, running = [], gateAlive, 
   const done = [];
   const statusErrors = [];
   // The limits are per-product keys, which the real engine answers only for a named product (L110, the M-1 class):
-  // each entry's are read for its card's product, once per product per pass. A product whose rules lack one gets no
-  // limits this pass: its entries are listed, untouched, and the key is handed back for the tick to tell Joe.
-  const byProduct = new Map();
-  const limOf = (cardId) => {
+  // each is read for its card's product, where it is used, once per product per pass (L116 m2). A key the product's
+  // rules lack skips only the step that needs it: that entry is listed, untouched, and the key goes back, with the
+  // product, for the tick to tell Joe. Settling a merge GitHub has already finished needs no limit at all.
+  const read = new Map();
+  const limOf = (cardId, name) => {
     const product = cardId ? rec.read('card', cardId)?.doc?.product ?? null : null;
-    if (!byProduct.has(product)) {
-      const o = { product: product ?? undefined };
+    const k = `${product}\0${name}`;
+    if (!read.has(k)) {
       let v;
-      try {
-        v = { checking: minutes(rules, KEYS.checkingMaxMin, o), reporting: minutes(rules, KEYS.reportingMaxMin, o),
-          inReview: minutes(rules, KEYS.inReviewNoReviewerMin, o), mergingOpen: minutes(rules, KEYS.mergingOpenMaxMin, o) };
-      } catch (e) {
+      try { v = { ms: minutes(rules, KEYS[name], { product: product ?? undefined }) }; } catch (e) {
         if (!(e instanceof MissingKey)) throw e;
-        if (!missing.includes(e.key)) missing.push(e.key);
+        const what = missingFor(e.key, product);
+        if (!missing.includes(what)) missing.push(what);
         v = { none: `no time limit: the rules have no ${e.key} for ${product ?? 'its product'}` };
       }
-      byProduct.set(product, v);
+      read.set(k, v);
     }
-    return byProduct.get(product);
+    return read.get(k);
   };
   for (const { id, doc } of rec.list('card')) {
     if (doc.state !== 'in_review') continue;
-    const lim = limOf(id);
+    const lim = limOf(id, 'inReviewNoReviewerMin');
     if (lim.none) { done.push([id, lim.none]); continue; }
     // The clock is the card's last write: a review request writes its count, so the next one is a full limit later.
-    if (ageMs(rec, 'card', id, now, { since: 'write' }) < lim.inReview) continue;
+    if (ageMs(rec, 'card', id, now, { since: 'write' }) < lim.ms) continue;
     const want = [];
     let unclear = false;
     for (const role of rolesFor(doc)) {
@@ -115,37 +116,48 @@ export async function timeLimits({ rec, rules, now, b, running = [], gateAlive, 
   // A session that has said it is reporting but handed in nothing in time: its card fails.
   for (const { id, doc } of rec.list('session')) {
     if (doc.state !== 'reporting') continue;
-    const lim = limOf(doc.card);
+    // A session that names no card has no product, so no product's limit applies; it is listed, and no rules value is
+    // said to be missing (L116 m7).
+    if (!doc.card) { done.push([id, 'no time limit: the session names no card, so no product\'s limit applies']); continue; }
+    const lim = limOf(doc.card, 'reportingMaxMin');
     if (lim.none) { done.push([id, lim.none]); continue; }
-    if (ageMs(rec, 'session', id, now) < lim.reporting) continue;
+    if (ageMs(rec, 'session', id, now) < lim.ms) continue;
     const card = doc.card ? rec.read('card', doc.card) : null;
     if (card && card.doc.state === 'running' && move(rec, 'card', doc.card, { state: 'failed', failure: 'no_report' }, { kind: 'timeout' }).ok) done.push([doc.card, 'reporting->failed']);
     move(rec, 'session', id, { state: 'ended', reason: 'no_report' }, { kind: 'timeout' });
   }
   for (const { id, doc } of rec.list('merge')) {
-    const timed = doc.state === 'checking' || (doc.state === 'merging' && !gateAlive());
-    const lim = timed ? limOf(doc.card) : {};
-    if (lim.none) { done.push([id, lim.none]); continue; }
-    if (doc.state === 'checking' && ageMs(rec, 'merge', id, now) >= lim.checking) {
-      done.push(...settled(rec, id, settleMerge({ record: rec, alert: textAlerts(alert), now }, id, { reason: 'timeout' }), { now, alert }));
+    if (doc.state === 'checking') {
+      const lim = limOf(doc.card, 'checkingMaxMin');
+      if (lim.none) { done.push([id, lim.none]); continue; }
+      if (ageMs(rec, 'merge', id, now) >= lim.ms) done.push(...settled(rec, id, settleMerge({ record: rec, alert: textAlerts(alert), now }, id, { reason: 'timeout' }), { now, alert }));
     } else if (doc.state === 'merging' && !gateAlive()) {
       const pr = fresh(rec, doc.pr, id);
       if (!pr) {
         // No reading since the merge's last write, so the outcome is unknown and the merge stays merging (never refused
         // on no word). Past the merging limit, Joe is told once (L89): the Sensors may not be reading this PR at all.
+        const lim = limOf(doc.card, 'mergingOpenMaxMin');
+        if (lim.none) { done.push([id, `waiting for a fresh PR reading; ${lim.none}`]); continue; }
         const since = (ms) => (Number.isFinite(ms) ? `${Math.round(ms / 60_000)} min` : 'longer than the merging limit');
-        if (tooLongOpen(rec, id, now, lim.mergingOpen) && !rec.read('fact', UNREAD_FACT(id))) {
+        if (tooLongOpen(rec, id, now, lim.ms) && !rec.read('fact', UNREAD_FACT(id))) {
           alert(`merge ${id}: the Merge Gate stopped mid-merge and PR ${doc.pr} has had no fresh reading for ${since(ageMs(rec, 'merge', id, now, { since: 'write' }))}; it stays merging until the Sensors read the PR (check that they are running)`);
           note(rec, UNREAD_FACT(id), `merge ${id}: no fresh reading of PR ${doc.pr} past the merging limit; the owner was told`, { now });
         }
         done.push([id, 'waiting for a fresh PR reading']); continue;
       }
-      // Never refused while the outcome is unknown: GitHub may still be finishing the merge (L85 M-1 a).
+      // Never refused while the outcome is unknown: GitHub may still be finishing the merge (L85 M-1 a). A final answer
+      // (merged, or closed and not merged) is settled with no limit read (L116 m2).
       const final = pr.merged === true || pr.state === 'closed';
-      const openTooLong = !final && tooLongOpen(rec, id, now, lim.mergingOpen);
+      let openMs = null;
+      if (!final) {
+        const lim = limOf(doc.card, 'mergingOpenMaxMin');
+        if (lim.none) { done.push([id, `merge outcome not known yet: the PR is still open; ${lim.none}`]); continue; }
+        openMs = lim.ms;
+      }
+      const openTooLong = !final && tooLongOpen(rec, id, now, openMs);
       if (!final && !openTooLong) { done.push([id, 'merge outcome not known yet: the PR is still open']); continue; }
       const r = settleMerge({ record: rec, alert: textAlerts(alert), now }, id, { pr, reason: 'interrupted', openTooLong });
-      if (openTooLong && r.ok && r.outcome === 'refused') alert(`merge ${id}: the Merge Gate stopped mid-merge and PR ${doc.pr} is still open after ${Math.round(lim.mergingOpen / 60_000)} min; recorded as interrupted, and the card goes back to be merged again`);
+      if (openTooLong && r.ok && r.outcome === 'refused') alert(`merge ${id}: the Merge Gate stopped mid-merge and PR ${doc.pr} is still open after ${Math.round(openMs / 60_000)} min; recorded as interrupted, and the card goes back to be merged again`);
       done.push(...settled(rec, id, r, { now, alert }));
     } else if (doc.state === 'refused' && !(doc.reasons ?? []).includes(MERGED_OUTSIDE) && !rec.read('fact', RECONCILED_FACT(id)) && !landedElsewhere(rec, id, doc)) {
       // A refused merge whose PR GitHub later shows merged, by a reading after the refusal. An interrupted one goes to
@@ -180,13 +192,27 @@ export async function timeLimits({ rec, rules, now, b, running = [], gateAlive, 
 // paths that see it: a merge this file settles, and requestMerges, which sees the gate's own refusals (a timeout, an
 // interruption, GitHub's 405, 409 or 422) before it would request the card again. Joe is asked once per repeat:
 // attempts.merge_asks is set to the number of reasons in the same write, and the card waits until he answers.
+// What counts: only a refusal the gate records in attempts.merge_refusals. The gate's put-backs that are not
+// refusals (check() finding the card not ready, recover() putting back a merge left in checking) add no reason, so
+// they never count toward a repeat (L116 m7 ruling). The reasons carry over to a new head: after a new head, one
+// refusal that matches the last one before it asks Joe at once (L116 c3; reasons that alternate never ask).
+// When the Record refuses the ask (an approved card, until M9 lets approved wait; a rev race), Joe is told once per
+// card and refusal count, so no card stalls without him knowing (L116 M-1).
 function askOnRepeat(rec, id, { now, alert, pr }) {
   const card = rec.read('card', id);
   const why = card?.doc ? refusedTwice(card.doc) : null;
   if (!why) return null;
+  const n = card.doc.attempts.merge_refusals.length;
   const w = waitOn(rec, id, { who: 'joe', what: `merge refused twice: ${why}`, now, link: pr != null ? `PR ${pr}` : undefined,
-    attempts: { merge_asks: card.doc.attempts.merge_refusals.length } });
-  if (!w.ok) return [id, `not sent to joe: ${w.reason}`];
+    attempts: { merge_asks: n } });
+  if (!w.ok) {
+    const told = ASK_REFUSED_FACT(id, n);
+    if (!rec.read('fact', told)) {
+      alert(`card ${id}: the merge was refused twice for the same reason (${why}), but the card could not be put on you to decide (${w.reason}); it is not merged or asked for again until you look at it`);
+      note(rec, told, `card ${id}: the ask after ${n} refusals was refused (${w.reason}); the owner was told`, { now });
+    }
+    return [id, `not sent to joe: ${w.reason}`];
+  }
   alert(`card ${id}: the merge was refused twice for the same reason (${why})`);
   return [id, 'waiting on joe'];
 }
@@ -233,14 +259,17 @@ function prOf(rec, head) {
  * verdict for the head it has now, counted from the review sessions' own files (M9 verdictFor), and the Merge Gate
  * counts them again. The Record's verdict rows are not proof, so the Dispatcher does not read them.
  */
-export function requestMerges({ rec, rules, now, b, running = [], startsHeld = null, missing = [], alert = () => {} }) {
+export function requestMerges({ rec, rules, now, b, running = [], startsHeld = null, missing = [], alert }) {
+  // No quiet default (L116 m4): a card sent to Joe is told through this alert, so a caller must give one.
+  if (typeof alert !== 'function') throw new TypeError('requestMerges needs an alert');
   const done = [];
   for (const { id, rev, doc } of rec.list('card')) {
     if (!READY_TO_MERGE.includes(doc.state)) continue;
     // The same refusal twice in a row: Joe is asked, and no new request is made (L110 m-1).
     if (refusedTwice(doc)) {
       const pr = doc.head ? prOf(rec, doc.head) : null;
-      done.push(askOnRepeat(rec, id, { now, alert, pr: typeof pr === 'number' ? pr : null }));
+      const asked = askOnRepeat(rec, id, { now, alert, pr: typeof pr === 'number' ? pr : null });
+      if (asked) done.push(asked);
       continue;
     }
     // The card must name its own head (audit 0b-6 r2 MIN-9): no head is no merge.

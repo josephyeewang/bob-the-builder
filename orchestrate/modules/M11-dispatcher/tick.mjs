@@ -32,7 +32,7 @@
 // The signed-in account comes from the record fact `signed-in-account` { account, observed_at }
 // (Sensors, lane 3). Missing, or older than usage.stale_after_min, means nothing new starts.
 
-import { KEYS, minutes, need, MissingKey } from './keys.mjs';
+import { KEYS, minutes, need, MissingKey, missingFor } from './keys.mjs';
 import { sensorsFact } from './sensor-facts.mjs';
 import { outageStep, OUTAGE_FACT } from './outage.mjs';
 import { intakePass } from './outbox-intake.mjs';
@@ -83,7 +83,8 @@ export function actOnDead({ rec, rules, now, restart, asks, cards = {}, alert = 
     // product (L110 m-2); the missing value is told with the others.
     try { need(rules, KEYS.claimsStuckMin, { product: cur.doc.product }); } catch (e) {
       if (!(e instanceof MissingKey)) throw e;
-      if (!missing.includes(e.key)) missing.push(e.key);
+      const what = missingFor(e.key, cur.doc.product);
+      if (!missing.includes(what)) missing.push(what);
       done.push([cardId, `not restarted: the rules have no ${e.key} for ${cur.doc.product ?? 'its product'}`]);
       continue;
     }
