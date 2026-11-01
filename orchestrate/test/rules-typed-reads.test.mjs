@@ -23,10 +23,7 @@ const ORCH = join(here, '..');
 // empty when step 2 is done.
 // Counts are lines: a read checked and then compared on the next line counts twice (L104 widened the scan).
 export const NOT_YET_SWEPT = Object.freeze({
-  'modules/M2-approvals/kinds.mjs': { count: 1, lane: 1, what: 'accounts.joe.github_id (through rules?.get?.)' },
   'modules/M4-workshop/git/push.mjs': { count: 1, lane: 1, what: 'product.onboarded !== true' },
-  'modules/M9-record/ready.mjs': { count: 2, lane: 1, what: 'caps.rounds (checked, then compared)' },
-  'modules/M9-record/writer.mjs': { count: 5, lane: 1, what: 'caps.rounds (2), claims.stuck_min (2), proposals.heartbeat_stale_min' },
   'modules/M11-dispatcher/gate.mjs': { count: 1, lane: 2, what: 'caps.per_state.<state>' },
   'modules/M11-dispatcher/keys.mjs': { count: 2, lane: 2, what: "need()'s number and boolean types" },
 });
@@ -51,7 +48,7 @@ export function scanOrchestrate(root = ORCH) {
 
 test('L96 guard: no module outside M10 checks a rules value as a number or a flag, except the reads not yet swept', () => {
   const found = scanOrchestrate();
-  const lines = (r) => found[r].map((p) => `  ${r}:${p.line} ${p.why}: ${p.text}`).join('\n');
+  const lines = (r) => (found[r] ?? []).map((p) => `  ${r}:${p.line} ${p.why}: ${p.text}`).join('\n');
   const fresh = Object.keys(found).filter((r) => !Object.hasOwn(NOT_YET_SWEPT, r));
   assert.deepEqual(fresh, [], `read numbers with rules.num() and flags with rules.flag() (L96):\n${fresh.map(lines).join('\n')}`);
   for (const [r, { count }] of Object.entries(NOT_YET_SWEPT)) {

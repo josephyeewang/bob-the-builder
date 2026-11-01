@@ -32,7 +32,8 @@ function world({ values = {}, mergeAnswer } = {}) {
   g.main = root;
   const vals = {
     timeouts: fullTimeouts(),
-    'approvals.plan_go.go_free': ['lead_daily_card', 'exact_reverse'],
+    'approvals.plan_go.go_free.lead_daily_card': ['docs/daily/*.md'],
+    'approvals.plan_go.go_free.exact_reverse': true,
     'product.cutover_stage': 'second',
     'product_profile.required_checks': ['test'],
     'product_profile.robot': { bot_user_id: g.robotId },

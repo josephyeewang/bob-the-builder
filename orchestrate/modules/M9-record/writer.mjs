@@ -39,12 +39,21 @@ const no = (reason) => ({ ok: false, reason });
 const iso = (ms) => new Date(ms).toISOString();
 const NEEDS_JOE_SETTERS = ['lead', 'dispatcher', 'merge_gate'];
 
+// How long a tab claim may go without a heartbeat, in minutes, or undefined when the rules set none (L115 m-A): the
+// one reading, so lane 3's fit check calls this instead of copying it.
+export function heartbeatLimit(rules, product) {
+  const n = rules?.num?.('proposals.heartbeat_stale_min', { product });
+  return n !== undefined && n >= 1 ? n : undefined;
+}
+
 export function openRecord({ root, product, ownerUid, rules, alert = () => {}, now = () => Date.now(), host = hostname(),
   probe = realProbe, outbox = {}, profileVersion = null, faultAt, testNoLock = false, testNoRevCheck = false, lockTimeoutMs } = {}) {
   if (typeof product !== 'string' || !/^[A-Za-z0-9._-]+$/.test(product)) throw new Error('the record needs its product name');
   if (!rules || typeof rules.get !== 'function') throw new Error('the record needs the rules (shared/rules.mjs)');
   const store = openStore({ root, ownerUid, alert, now, host, probe, faultAt, testNoLock, lockTimeoutMs });
   const get = (key) => rules.get(key, { product });
+  // Rules numbers through the one conversion (L96 step 2): text or an integer, else missing.
+  const num = (key) => rules.num(key, { product });
   const timeouts = () => ({ timeouts: get('timeouts') });
 
   // A view over the record for the ready rule: inside a transaction it reads the locked index, outside it reads the store.
@@ -222,8 +231,8 @@ export function openRecord({ root, product, ownerUid, rules, alert = () => {}, n
       if (!ask || ask.doc.kind !== 'research' || !isOpen('ask', ask.doc.state)) return no('a research_copy card needs an open research ask (research_ask)');
       if (tx.list('card').some((c) => c.doc.kind === 'research_copy' && c.doc.research_ask === doc.research_ask)) return no(`ask ${doc.research_ask} already has its research_copy card`);
     }
-    const cap = get('caps.rounds');
-    if (!Number.isInteger(cap) || cap < 1) return no('no round cap in the rules (caps.rounds)');
+    const cap = num('caps.rounds');
+    if (cap === undefined || cap < 1) return no('no round cap in the rules (caps.rounds)');
     if (doc.round > cap) {
       const t = timeoutFor(timeouts(), 'card', 'waiting');
       if (!t) return no('the rules have no card waiting limit');
@@ -568,8 +577,8 @@ export function openRecord({ root, product, ownerUid, rules, alert = () => {}, n
         const claim = c.doc.claim;
         if (claim?.kind !== 'session') return no('a tab claim is never broken; it lapses');
         if (claim.host !== host) return no(`claim is from host ${claim.host}; never broken from here`);
-        const stuckMin = get('claims.stuck_min');
-        if (!Number.isInteger(stuckMin) || stuckMin < 1) return no('the rules set no claims.stuck_min, so no claim is broken');
+        const stuckMin = num('claims.stuck_min');
+        if (stuckMin === undefined || stuckMin < 1) return no('the rules set no claims.stuck_min, so no claim is broken');
         const nowMs = now();
         const mine = deadness(tx, claim, p, nowMs, stuckMin);
         if (!mine.dead) return no(`owner not provably dead (${mine.why})`);
@@ -603,7 +612,7 @@ export function openRecord({ root, product, ownerUid, rules, alert = () => {}, n
         const claimed = timeoutFor(t, 'card', 'claimed');
         const running = timeoutFor(t, 'card', 'running');
         const waitT = timeoutFor(t, 'card', 'waiting');
-        const stale = get('proposals.heartbeat_stale_min');
+        const stale = heartbeatLimit(rules, product);
         const lapsed = [];
         for (const e of tx.list('card')) {
           const claim = e.doc.claim;
