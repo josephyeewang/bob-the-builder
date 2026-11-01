@@ -1,48 +1,74 @@
-// required-keys.test.mjs — the gate's key list matches what gather.mjs reads (L86 10). gather.mjs can't import the
-// list yet (#67 edits it), so this reads its text: every rules key it reads must be on the list, and every listed
-// key must be read. The follow-up after #67 has gather.mjs import the list, and this test then checks the import.
+// required-keys.test.mjs — the gate's key list matches what the gate's sources read (L86 10; #77 r5 MAT-1, m-3). The
+// reader is M10's rules-reads.test-helper.mjs, the one M2's and M9's tests share (L123), so it sees every read form:
+// get/num/dec/flag, plain or ?., a gather-style get( helper, and the Dispatcher's need(rules, KEYS.x / minutes(rules,
+// KEYS.x (#68 reads the merge time limit in gate.mjs that way). It runs over every M6 source file but the generated
+// checker bundle, whose code is each source module's own, tested where it lives. Every rules key read must be listed,
+// every listed key must be read, and a read whose key can't be named fails.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { REQUIRED_KEYS, OPTIONAL_KEYS } from './required-keys.mjs';
 import { GO_FREE_KEY } from '../M9-record/ready.mjs';
+import { KEYS as M11_KEYS } from '../M11-dispatcher/keys.mjs';
+import { listed, readsListed, rulesReads } from '../M10-rules/rules-reads.test-helper.mjs';
 
 const here = new URL('.', import.meta.url);
+const LIST = [...REQUIRED_KEYS, ...OPTIONAL_KEYS];
+const BUNDLE = 'github-checker.mjs';
+// The product-scoped get( helper gather.mjs and required-keys.mjs read through; its own line passes a variable, so it
+// is taken out and its calls are read as the reads.
+const HELPER = 'const get = (key) => { try { return rules.get(key, { product }); } catch { return undefined; } };';
+export const SOURCES = readdirSync(here).filter((f) => f.endsWith('.mjs') && !f.endsWith('.test.mjs') && f !== BUNDLE).sort();
+const read = (f) => readFileSync(new URL(f, here), 'utf8');
 
-// The rules keys a reader file reads: get('…') / rules.get('…') with a fixed key, and go_free through goFreeKinds.
-const code = (text) => text.split('\n').filter((l) => !/^\s*\/\//.test(l)).join('\n');
-const LIT = /(?<![.\w])get\(\s*(['"`])((?:(?!\1)[^\\])*)\1/g;
-// A get( whose key isn't a literal (L96 m-4): a computed key would slip past the list.
-export const nonLiteral = (text) => [...code(text).matchAll(/(?<![.\w])get\(/g)].length - [...code(text).matchAll(LIT)].length;
-export function keysRead(text) {
-  const keys = new Set([...code(text).matchAll(LIT)].map((m) => m[2]));
-  if (/\bgoFreeKinds\(/.test(text)) keys.add(GO_FREE_KEY);
-  return keys;
+/** The rules keys one M6 source reads, and how many reads it can't name. */
+export function fileReads(text) {
+  const own = text.includes(HELPER);
+  const r = rulesReads(own ? text.replace(HELPER, '') : text, { helpers: own ? ['get'] : [], keyMaps: { KEYS: M11_KEYS } });
+  // goFreeKinds and goFreeOn read the go-free map (M9 ready.mjs), under its own key.
+  if (/\bgoFree(?:Kinds|On)\(/.test(text)) r.keys.add(GO_FREE_KEY);
+  return r;
 }
-// A key is covered when it is listed, or when it is the map a listed key sits in (product_profile.robot → bot_user_id).
-export const covered = (k, list) => list.some((x) => x === k || x.startsWith(`${k}.`));
+export function gateReads(files = Object.fromEntries(SOURCES.map((f) => [f, read(f)]))) {
+  const keys = new Set();
+  let nonLiteral = 0;
+  for (const text of Object.values(files)) { const r = fileReads(text); r.keys.forEach((k) => keys.add(k)); nonLiteral += r.nonLiteral; }
+  return { keys, nonLiteral };
+}
+// A read of a map that holds a listed key is covered by it (gather reads product_profile.robot for its bot_user_id).
+const unlisted = (keys) => [...keys].filter((k) => !listed(LIST, k) && !LIST.some((x) => x.startsWith(`${k}.`)));
 
-test('every rules key gather.mjs reads is on the gate\'s list, and every listed key is read', () => {
-  const text = readFileSync(new URL('gather.mjs', here), 'utf8');
-  const read = keysRead(text);
-  assert.ok(read.size >= 6, `found ${[...read]}`);
-  const list = [...REQUIRED_KEYS, ...OPTIONAL_KEYS];
-  for (const k of read) assert.ok(covered(k, list), `gather.mjs reads ${k}, which required-keys.mjs doesn't list`);
-  for (const k of list) assert.ok([...read].some((r) => r === k || k.startsWith(`${r}.`)), `required-keys.mjs lists ${k}, which gather.mjs doesn't read`);
-  // Every read goes through the one product-scoped helper, so a read with a computed key can't slip past the list.
-  assert.equal([...text.matchAll(/\brules\.get\(/g)].length, 1, 'gather.mjs reads the rules only through get()');
-  assert.equal(nonLiteral(text), 0, 'every get() in gather.mjs names its key as a literal');
+test('every rules key the gate\'s sources read is on the gate\'s list, and every listed key is read', () => {
+  assert.ok(SOURCES.includes('gather.mjs') && SOURCES.includes('gate.mjs') && SOURCES.length >= 10, SOURCES.join(', '));
+  assert.match(read(BUNDLE), /^\/\/ github-checker\.mjs — GENERATED by build-checker\.mjs/, 'the one file left out is the generated bundle');
+  const { keys, nonLiteral } = gateReads();
+  assert.ok(keys.size >= 6, `found ${[...keys]}`);
+  assert.equal(nonLiteral, 0, 'every rules read in M6 names its key');
+  assert.deepEqual(unlisted(keys), [], 'every key read is listed');
+  for (const k of LIST) assert.ok(readsListed(keys, k) || [...keys].some((r) => k.startsWith(`${r}.`)), `required-keys.mjs lists ${k}, which no M6 source reads`);
+  assert.ok(read('gather.mjs').includes(HELPER), 'gather.mjs reads through its get( helper');
 });
 
-test('the text reader finds a key added to gather.mjs (the drift plant, on a copy)', () => {
-  const text = `${readFileSync(new URL('gather.mjs', here), 'utf8')}\nconst x = get('product_profile.new_key');\n`;
-  const list = [...REQUIRED_KEYS, ...OPTIONAL_KEYS];
-  assert.ok([...keysRead(text)].some((k) => !covered(k, list)));
-});
-
-test('the text reader sees double quotes and a computed key (L96 m-4, on copies)', () => {
-  const text = readFileSync(new URL('gather.mjs', here), 'utf8');
-  const list = [...REQUIRED_KEYS, ...OPTIONAL_KEYS];
-  assert.ok([...keysRead(`${text}\nconst x = get("product_profile.new_key");\n`)].some((k) => !covered(k, list)));
-  assert.equal(nonLiteral(`${text}\nconst x = get(KEY);\n`), 1);
+test('the reader catches a new read in any M6 file, in every form, and a key it can\'t name (drift plants, on copies)', () => {
+  const NEW = 'product_profile.new_key';
+  const plant = (file, line) => gateReads({ ...Object.fromEntries(SOURCES.map((f) => [f, read(f)])), [file]: `${read(file)}\n${line}\n` });
+  for (const [file, line] of [
+    ['gather.mjs', `const x = get('${NEW}');`], ['gather.mjs', `const x = get("${NEW}");`],
+    // m-3, the P16 plant: a typed read beside gather's helper.
+    ['gather.mjs', `const x = rules?.num?.('${NEW}', { product });`], ['gather.mjs', `const x = rules.flag('${NEW}', { product });`],
+    ['refusals.mjs', `const x = rules.get('${NEW}', { product });`], ['mark.mjs', `const x = rules?.dec?.('${NEW}', { product });`],
+  ]) assert.deepEqual(unlisted(plant(file, line).keys), [NEW], `${file}: ${line}`);
+  // #68's form: the Dispatcher's minutes()/need() with a KEYS name, in gate.mjs.
+  const k68 = Object.entries(M11_KEYS).find(([, k]) => !listed(LIST, k));
+  assert.ok(k68, 'an M11 key the gate does not list');
+  for (const call of [`minutes(rules, KEYS.${k68[0]}, { product })`, `need(rules, KEYS.${k68[0]})`]) {
+    assert.deepEqual(unlisted(plant('gate.mjs', `const t = ${call};`).keys), [k68[1]], call);
+  }
+  for (const [file, line] of [['gather.mjs', 'const x = get(KEY);'], ['gate.mjs', 'const t = minutes(rules, KEYS.noSuchKey);'],
+    ['gate.mjs', 'const t = need(rules, key);'], ['undo.mjs', 'const x = rules.num(`caps.${what}`, { product });']]) {
+    assert.equal(plant(file, line).nonLiteral, 1, `${file}: ${line}`);
+  }
+  // m-1: a key inside a listed map that is not the go-free map is not covered by that map.
+  assert.equal(listed(['effect_paths'], 'effect_paths.new_field'), false);
+  assert.equal(listed([GO_FREE_KEY], `${GO_FREE_KEY}.exact_reverse`), true);
 });

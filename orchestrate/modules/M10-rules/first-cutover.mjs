@@ -23,19 +23,20 @@ import { parseYaml } from '../../../scripts/blueprint/yaml-lite.mjs';
 import { parsePolicy, EFFECT_FIELDS } from './policy.mjs';
 import { checkProducts } from './reader.mjs';
 import { makeEngine } from './engine.mjs';
-import { isMacKey, makeRules } from '../../shared/rules.mjs';
+import { isMacKey, keyMatches, makeRules, MAC_LIST_ALL } from '../../shared/rules.mjs';
 import * as M6 from '../M6-merge-gate/required-keys.mjs';
 import * as M2 from '../M2-approvals/required-keys.mjs';
 import * as M9 from '../M9-record/required-keys.mjs';
-import { KEYS as M11_KEYS, NEW_KEYS as M11_NEW_KEYS, need } from '../M11-dispatcher/keys.mjs';
+import { KEYS as M11_KEYS, need } from '../M11-dispatcher/keys.mjs';
 import { editingLimits } from '../M11-dispatcher/gate.mjs';
 import { PRODUCT_STATES } from './policy.mjs';
 import { KNOWN, SCOPE_OWNERS, asNumbers, scopeLabel } from './known-gaps.mjs';
 
 // M11 has no required-keys file of its own yet (lane 2's folder), so its entry is built here from M11's own exports:
-// every key in KEYS except NEW_KEYS (keys the rules schema can't hold yet; when lane 1 adds one, lane 2 takes it off
-// NEW_KEYS and it is checked here with no change), each read by M11's need() with its type at the key's own scope,
-// plus the real editingLimits for every product state.
+// every key in KEYS, NEW_KEYS included, each read by M11's need() with its type at the key's own scope, plus the real
+// editingLimits for every product state. NEW_KEYS once meant "the rules schema can't hold these yet", and this check
+// skipped them; since #79 parsePolicy holds every one, so the skip let a file the Dispatcher can't run on pass (#77 r5
+// MAT-1). A test fails if any M11 key is left out here.
 const M11_TYPES = Object.freeze({ perState: 'object', shakedown: 'boolean', leadDailyCard: 'list', redRuns: 'list' });
 // L120: M11's gate.mjs matches() reads daily-card patterns with a matcher of its own, and no list of forms it reads
 // differently from M10 compile was ever complete (`docs/blueprint/**/daily.md`, a leading `**/`, spaces at either end).
@@ -46,7 +47,7 @@ export const DAILY_CARD_RULE = `${M11_KEYS.leadDailyCard}: daily-card file lists
 // No list of M11's here: a test reads M11's sources and fails when a caller reads a key at another scope, except a key
 // in known-gaps.mjs SCOPE_OWNERS, which M11 still reads Mac-wide (lane 2's L104 sweep) and the check below names.
 export const m11Scope = (key) => (isMacKey(key) ? 'mac' : 'product');
-const M11_READ = Object.freeze(Object.entries(M11_KEYS).filter(([, k]) => !M11_NEW_KEYS.includes(k)));
+const M11_READ = Object.freeze(Object.entries(M11_KEYS));
 const M11 = Object.freeze({
   REQUIRED_KEYS: Object.freeze(M11_READ.map(([, k]) => k)),
   policyProblems(rules, product) {
@@ -131,7 +132,11 @@ export function moduleProblems(policy, product) {
   const missing = new Set(MODULE_KEYS.filter((k) => { const v = rules.get(k, { product }); return v === undefined || v === null; }));
   for (const k of missing) {
     const by = Object.entries(READERS).filter(([, m]) => m.REQUIRED_KEYS.includes(k)).map(([n]) => n);
-    out.push(`${k} is missing (${by.join(', ')} read${by.length === 1 ? 's' : ''} it)`);
+    // A Mac-wide list the file gives as a plain value: the engine combines lists only, so it gives none (#79); the
+    // file's fault is the shape, so the reason says so (L144 m-2).
+    const own = k.split('.').reduce((v, s) => (v && typeof v === 'object' && Object.hasOwn(v, s) ? v[s] : undefined), policy);
+    const shape = keyMatches(MAC_LIST_ALL, k) && own !== undefined && own !== null && !Array.isArray(own);
+    out.push(`${k} ${shape ? 'must be a list' : 'is missing'} (${by.join(', ')} read${by.length === 1 ? 's' : ''} it)`);
   }
   // Every module's own check runs; a reason about a key already named as missing is not said twice.
   const named = (x) => [...missing].some((k) => x.includes(`${k} `) || x.includes(`${k}.`));
