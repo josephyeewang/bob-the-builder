@@ -44,7 +44,9 @@ test('refused: missing inputs, a folder pattern, odd paths, and Tier 1 without i
     [{ files: [] }, /no file list/], [{ files: 'src/a.mjs' }, /no file list/], [{ done_when: '  ' }, /no done_when/],
     [{ tier: 1 }, /plan_sha256/], [{ tier: 1, plan_sha256: 'a'.repeat(64) }, /main_commit/],
   ];
-  for (const p of ['src/*', 'src/?.mjs', 'src/[ab].mjs', 'src/{a,b}.mjs', '/abs/a.mjs', 'src/', '../a.mjs', 'src/../a.mjs', 'src//a.mjs', 'src\\a.mjs', '', 7]) {
+  for (const p of ['src/*', 'src/?.mjs', 'src/[ab].mjs', 'src/{a,b}.mjs', '/abs/a.mjs', 'src/', '../a.mjs', 'src/../a.mjs', 'src//a.mjs', 'src\\a.mjs', '', 7,
+    // Control characters and the two Unicode line breaks (L84 fix 5): M9 has no check of its own.
+    'src/a\nb.mjs', 'src/a\u2028b.mjs', 'src/a\u2029b.mjs', 'src/a\u0000.mjs', 'src/a\u007f.mjs', 'src/\u009fx.mjs']) {
     bad.push([{ files: [p] }, /is not one plain path/]);
   }
   for (const [over, pattern] of bad) {
@@ -53,6 +55,7 @@ test('refused: missing inputs, a folder pattern, odd paths, and Tier 1 without i
     assert.match(r.reason, pattern, JSON.stringify(over));
   }
   assert.equal(planFingerprint(undefined).ok, false);
+  assert.equal(fp({ files: ['src/a-b_c.mjs'] }).ok, true);
 });
 
 test('canonicalJson sorts keys at every level and refuses what JSON can\'t say', () => {
