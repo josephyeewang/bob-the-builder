@@ -24,8 +24,6 @@ const ORCH = join(here, '..');
 // Counts are lines: a read checked and then compared on the next line counts twice (L104 widened the scan).
 export const NOT_YET_SWEPT = Object.freeze({
   'modules/M4-workshop/git/push.mjs': { count: 1, lane: 1, what: 'product.onboarded !== true' },
-  'modules/M11-dispatcher/gate.mjs': { count: 1, lane: 2, what: 'caps.per_state.<state>' },
-  'modules/M11-dispatcher/keys.mjs': { count: 2, lane: 2, what: "need()'s number and boolean types" },
 });
 
 const skip = (r) => !r.endsWith('.mjs') || r.endsWith('.test.mjs') || /test-helper/.test(r)
@@ -141,8 +139,9 @@ test('L104, L123: the files still handed old values are named, exist, name an ow
     assert.ok(['lane 1', 'lane 2'].includes(e?.owner), `${f} names its owner`);
     assert.ok(typeof e?.pr === 'string' && e.pr.trim() !== '', `${f} names the PR that takes it off`);
   }
-  // Pinned at r3's count (L123: 11 files, lane 2's M4 push test and 10 for the M11 typed reads PR). Only down from here.
-  assert.ok(names.length <= 11, `the old-values list grew to ${names.length}`);
+  // Pinned at the M11 typed reads PR's count (L123, L131: lane 2's M4 push test, and 5 M11 tests red only because their
+  // modules read per-product keys with no product, plus the helper tick.test's child process uses). Only down from here.
+  assert.ok(names.length <= 7,`the old-values list grew to ${names.length}`);
   // This file is not on it, so its fakes hand text back (the test above).
   assert.equal(fakeRules({ values: { n: 30 } }).get('n', P), '30');
 });
