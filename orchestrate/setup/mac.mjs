@@ -2,7 +2,9 @@
 // Everything the setup does to the machine goes through an `io` like this one, so a test can stand in for the Mac (a
 // fake root folder prefix and a stand-in for dscl, see setup.test.mjs) and `--dry-run` can print instead of act.
 //
-//   io.at(path)             the real place of a logical path (prefix + path); the prefix is '' on the Mini
+//   io.at(path)             the real place of a logical path (prefix + path); the prefix is '' on the real Mac
+//   io.readConfig(path, {strict})   the config text; strict = root's own file at the fixed place (see readConfigFile)
+//   io.write/secureFile/list   make a new file (never overwrites), set a file's owner and mode, list a folder
 //   io.run(cmd, args)       → { status, stdout, stderr }; a fixed PATH, no shell, a time limit
 //   io.lstat/mkdir          on the logical path
 //   io.secure(path, want)   set a folder's owner and mode WITHOUT following a link (L90 M4): see secureFolder
@@ -19,7 +21,7 @@
 
 import { closeSync, constants, cpSync, fchmodSync, fchownSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, readlinkSync, realpathSync, rmSync, writeSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { chainProblem } from '../modules/M4-workshop/launcher/install-check.mjs';
 
 /**
@@ -64,6 +66,31 @@ export function writeNewFile(real, data, mode) {
   try { const b = Buffer.isBuffer(data) ? data : Buffer.from(data, 'utf8'); let off = 0; while (off < b.length) off += writeSync(fd, b, off, b.length - off); } finally { closeSync(fd); }
 }
 
+/**
+ * The text of a config file, read through ONE open handle and never through a link (NEW-1, L100 m4). Always: a plain file,
+ * not too big. `strict` (root, and the fixed config place): also root's own, written by no one else, and every folder above
+ * it root's alone. Errors name the problem and never show a byte of the file (it may hold anything). `ownerOf` and `chain`
+ * are ports for a test, which is not root.
+ */
+export function readConfigFile(real, { strict = false, rootUid = 0, top = '/', ownerOf = (st) => st.uid, chain = chainProblem } = {}) {
+  let fd;
+  try { fd = openSync(real, constants.O_RDONLY | constants.O_NOFOLLOW); } catch (e) {
+    throw new Error(e?.code === 'ELOOP' ? 'the config is a link, and a link is not followed' : e?.code === 'ENOENT' ? 'the config file was not found' : `the config could not be opened (${e?.code ?? 'error'})`);
+  }
+  try {
+    const st = fstatSync(fd);
+    if (!st.isFile()) throw new Error('the config is not a plain file');
+    if (st.size > 65536) throw new Error('the config is far bigger than a config can be');
+    if (strict) {
+      if (ownerOf(st) !== rootUid) throw new Error('the config is not owned by root, so root will not take orders from it');
+      if (st.mode & 0o022) throw new Error('the config can be written by others than root, so root will not take orders from it');
+      const above = chain(dirname(real), { owner: rootUid, top });
+      if (above) throw new Error(`the folder the config is in is not root's alone (${above})`);
+    }
+    return readFileSync(fd, 'utf8');
+  } finally { closeSync(fd); }
+}
+
 /** Why root should not run the node program that is running now, or null: its file, and every folder above it, must be root's alone (L90 m4). */
 export function nodeProblemOf(execPath, { rootUid = 0, top = '/', lstat = lstatSync, realpath = realpathSync } = {}) {
   let real; try { real = realpath(execPath); } catch { return `could not find the real place of ${execPath}`; }
@@ -90,6 +117,8 @@ export function realIo({ prefix = '' } = {}) {
     mkdir: (p, mode) => mkdirSync(at(p), { mode }),
     secure: (p, want) => secureFolder(at(p), want),
     secureFile: (p, want) => secureFile(at(p), want),
+    // The fixed config place is a logical path (under the prefix); a path the person named with --config is a real one.
+    readConfig: (p, { strict = false } = {}) => readConfigFile(strict ? at(p) : p, { strict, rootUid: 0, top: prefix || '/' }),
     nodeProblem: () => nodeProblemOf(process.execPath),
     // For the install and the job files. `src` is a real path outside the prefix (a file of this repository, the node program).
     readText: (p) => readFileSync(at(p), 'utf8'),

@@ -12,18 +12,25 @@ import { REVIEW_USER } from '../modules/M4-workshop/launcher/review-user.mjs';
 import { readOutboxFile } from '../modules/M9-record/outbox.mjs';
 import { AI_ROLES } from '../shared/record.mjs';
 import { REVIEW_ROLES } from '../shared/review-roles.mjs';
-import { ORCHESTRATE_READ_ACL, USERS, USER_ID_RANGE, WORKER_ROLES, aclText, folderTable, homeOf, parseConfig } from './layout.mjs';
+import { BASE_MARKER, ORCHESTRATE_READ_ACL, ROOT_CONFIG_PATH, USERS, USER_ID_RANGE, WORKER_ROLES, aclText, folderTable, homeOf, parseConfig } from './layout.mjs';
 import { nodeProblemOf, realIo, secureFolder } from './mac.mjs';
 import { aclEntries, adminAnswer, apply, check, parseDscl, plan, readUser } from './users-folders.mjs';
 import { runProofs } from './proofs.mjs';
 import { main } from './setup.mjs';
 import { fakeMac } from './fake-mac.test-helper.mjs';
 
-const RAW = { base: '/Library/orch-test', owner: 'joe', products: ['alpha', 'beta'] };
+const RAW = { base: '/Library/orch-test', owner: 'sam', products: ['alpha', 'beta'] };
 const cfg = parseConfig(RAW);
 const sink = () => { const lines = []; return { lines, out: (s) => lines.push(s), err: (s) => lines.push(`ERR ${s}`) }; };
 const cfgFile = () => { const d = mkdtempSync(join(tmpdir(), 'setup-cfg-')); const f = join(d, 'c.json'); writeFileSync(f, JSON.stringify(RAW)); return f; };
-const run = (mac, args) => { const s = sink(); const code = main([...args, '--config', cfgFile()], { io: mac, out: s.out, err: s.err }); return { code, text: s.lines.join('\n') }; };
+// As root the command reads the root-owned config at the fixed place and takes no --config (NEW-1); without root it is given one.
+const putRootConfig = (mac, raw = RAW) => { const f = mac.at(ROOT_CONFIG_PATH); rmSync(f, { force: true }); writeFileSync(f, JSON.stringify(raw)); chmodSync(f, 0o644); return f; };
+const run = (mac, args, raw = RAW) => {
+  const s = sink(); let argv = args;
+  if (mac.as === 0) putRootConfig(mac, raw); else argv = [...args, '--config', cfgFile()];
+  const code = main(argv, { io: mac, out: s.out, err: s.err });
+  return { code, text: s.lines.join('\n') };
+};
 const applied = () => { const mac = fakeMac(); const r = run(mac, ['users-folders']); assert.equal(r.code, 0, r.text); return mac; };
 const fails = (mac) => check(mac, cfg).filter((r) => !r.ok);
 const isDarwin = process.platform === 'darwin';
@@ -42,7 +49,7 @@ test('config: refusals', () => {
     { ...RAW, owner: 'review' }, { ...RAW, owner: 'root' }, { ...RAW, owner: 'Bad Name' },
     { ...RAW, products: ['a', 'a'] }, { ...RAW, products: ['../x'] }, { ...RAW, products: 'x' }, null, [],
   ]) assert.throws(() => parseConfig(bad), /config/, JSON.stringify(bad));
-  assert.deepEqual(parseConfig({ base: '/Library/x/', owner: 'joe' }), { base: '/Library/x', owner: 'joe', products: [] });
+  assert.deepEqual(parseConfig({ base: '/Library/x/', owner: 'sam' }), { base: '/Library/x', owner: 'sam', products: [] });
 });
 
 test('config: every forbidden folder is refused, in any letter case (K15: /Volumes, /opt and /usr/local included)', () => {
@@ -94,7 +101,7 @@ test('dry run: prints every step, changes nothing, needs no root', () => {
   assert.match(r.text, /would run: dscl \. -create \/Users\/review UserShell \/usr\/bin\/false/);
   assert.match(r.text, /would run: mkdir -m 700 \/Library\/orch-test\/outboxes\/reviewer/);
   assert.match(r.text, /set owner and mode of \/Library\/orch-test\/outboxes\/reviewer: chown 602:602, chmod 755/);
-  assert.match(r.text, /set the access list of \/Library\/orch-test\/outboxes\/worker to user:orchestrate allow directory_inherit,file_inherit,list,readattr,readextattr,readsecurity,search/);
+  assert.match(r.text, /set the access list of \/Library\/orch-test\/outboxes\/worker to user:orchestrate allow delete_child,directory_inherit,file_inherit,list,readattr,readextattr,readsecurity,search/);
   assert.match(r.text, /dry run: \d+ step\(s\), nothing changed/);
   assert.equal(mac.log.length, 0, 'no changing call was made');
   assert.equal(mac.users.size, 1);
@@ -156,7 +163,7 @@ test('apply as root: every check passes, ids are 600-699 and all different, then
 
 test('every folder ends with the table\'s owner, group and mode, and its exact access list (K8, K13, K14)', () => {
   const mac = applied();
-  const ids = { root: { uid: mac.rootUid, gid: 0 }, owner: { uid: uidOf(mac, 'joe'), gid: 20 } };
+  const ids = { root: { uid: mac.rootUid, gid: 0 }, owner: { uid: uidOf(mac, 'sam'), gid: 0 } };   // the person's folders are pinned to wheel (m1)
   for (const u of USERS) ids[u] = { uid: uidOf(mac, u), gid: uidOf(mac, u) };
   for (const row of folderTable(cfg)) {
     const st = mac.lstat(row.path);
@@ -247,13 +254,17 @@ test('check: exit 0 and PASS lines only when all is right; the sudo item is SKIP
   const mac = applied();
   mac.as = 501;
   const r = run(mac, ['check']);
-  assert.equal(r.code, 0, r.text);
+  assert.equal(r.code, 3, `exit 3: nothing failed, but some items could not be seen without root\n${r.text}`);
   assert.match(r.text, /PASS  user review is not an admin/);
   assert.match(r.text, /PASS  \/Library\/orch-test\/outboxes\/reviewer \(review, 755\)/);
-  assert.match(r.text, /SKIP  user review has no sudo rule — needs root/);
-  assert.ok(!/FAIL/.test(r.text));
+  assert.match(r.text, /NEEDS ROOT  user review has no sudo rule — needs root/);
+  assert.match(r.text, /NEEDS ROOT  user review has no sign-in record — needs root to read the password hash/, 'the password hash is hidden from a non-root check (m5)');
+  assert.ok(!/PASS  user review has no sign-in record/.test(r.text) && !/PASS  user review has no sudo rule/.test(r.text), 'never PASS for what could not be seen');
+  assert.ok(!/FAIL/.test(r.text)); assert.match(r.text, /could not be checked without root/);
   mac.as = 0;
-  assert.match(run(mac, ['check']).text, /PASS  user review has no sudo rule/);
+  const rr = run(mac, ['check']);
+  assert.equal(rr.code, 0, rr.text);
+  assert.match(rr.text, /PASS  user review has no sudo rule/); assert.match(rr.text, /PASS  user review has no sign-in record/);
 });
 
 // ---- PLANTS: one fault per clause; each says which check catches it. -------------------------------------------------
@@ -316,7 +327,7 @@ test('PLANT wrong home → caught by "home is"', () => {
 
 // M5
 test('PLANT P3: review has the owner\'s own id → caught: the ids must all differ, and the id must be in range', () => {
-  const mac = applied(); mac.users.get('review').UniqueID = mac.users.get('joe').UniqueID;
+  const mac = applied(); mac.users.get('review').UniqueID = mac.users.get('sam').UniqueID;
   const w = fails(mac).map((f) => f.what);
   assert.ok(w.includes('the three users, the owner and root all have different ids'), w.join(' | '));
   assert.ok(w.includes(`user review's id is in 600-699`));
@@ -450,7 +461,7 @@ test('a made folder does not keep an access list it inherited (c3)', { skip: !is
   // the base's parent gives every new folder under it an inherited entry; the apply must clear it from the folders it makes
   assert.equal(spawnSync('/bin/chmod', ['-h', '+a', 'user:daemon allow list,search,readattr,file_inherit,directory_inherit', mac.at('/Library')]).status, 0);
   const r = run(mac, ['users-folders']);
-  assert.equal(r.code, 1, 'the folders above the base must be free of access lists, so root refuses before it starts');
+  assert.equal(r.code, 2, 'the folders above the base must be free of access lists, so root refuses before it starts');
   assert.match(r.text, /access list/);
 });
 
@@ -471,14 +482,16 @@ test('PLANT the folder above the base writable by others → caught by the chain
 test('PLANT P1: /Library writable by others → the run stops before ANY step: no user, no folder, nothing logged', () => {
   const mac = fakeMac(); chmodSync(mac.at('/Library'), 0o777);
   const r = run(mac, ['users-folders']);
-  assert.equal(r.code, 1, r.text); assert.match(r.text, /folders above \/Library\/orch-test are not safe for root to work in/);
+  // Root's own config sits in /Library, so the config is refused first (exit 2); the plan's own chain check is tested on its own below.
+  assert.equal(r.code, 2, r.text); assert.match(r.text, /folder the config is in is not root's alone/);
   assert.deepEqual(mac.log, [], 'a root step ran'); assert.equal(mac.users.size, 1); assert.equal(existsSync(mac.at(cfg.base)), false);
+  const p = plan(mac, cfg); assert.deepEqual(p.ops, []); assert.match(p.problems.join(), /folders above \/Library\/orch-test are not safe for root to work in/);
 });
 
 test('PLANT P7: /Library is a link → the run stops before ANY step', () => {
   const mac = fakeMac(); rmSync(mac.at('/Library'), { recursive: true }); mkdirSync(mac.at('/elsewhere')); symlinkSync(mac.at('/elsewhere'), mac.at('/Library'));
   const r = run(mac, ['users-folders']);
-  assert.equal(r.code, 1, r.text); assert.match(r.text, /is a link/);
+  assert.equal(r.code, 2, r.text); assert.match(r.text, /is a link/);
   assert.deepEqual(mac.log, []); assert.equal(mac.users.size, 1); assert.deepEqual(existsSync(mac.at('/elsewhere/orch-test')), false);
 });
 
@@ -591,9 +604,9 @@ test('order: every folder is made (parents first) before any owner is set, and a
 });
 
 test('PLANT the owner user missing → refused, nothing changed', () => {
-  const mac = fakeMac(); mac.users.delete('joe');
+  const mac = fakeMac(); mac.users.delete('sam');
   const r = run(mac, ['users-folders']);
-  assert.equal(r.code, 1); assert.match(r.text, /owner's Mac user joe was not found/); assert.equal(mac.log.length, 0);
+  assert.equal(r.code, 1); assert.match(r.text, /owner's Mac user sam was not found/); assert.equal(mac.log.length, 0);
 });
 
 test('a group named like a user, with no user yet: the user is made to match it (its id is kept)', () => {
@@ -648,7 +661,9 @@ test('root refuses a node program that others can change, before it does anythin
   const mac = fakeMac(); mac.nodeProblemText = 'the node program /opt/homebrew/Cellar/node/bin/node: /opt/homebrew/bin is not owned by root';
   const r = run(mac, ['users-folders']);
   assert.equal(r.code, 2, r.text); assert.match(r.text, /root must not run a node program others can change/); assert.match(r.text, /nodejs\.org/); assert.deepEqual(mac.log, []);
-  assert.equal(run(mac, ['users-folders', '--dry-run']).code, 0, 'a dry run needs no root, so no node check');
+  assert.equal(run(mac, ['check']).code, 2, 'a `sudo check` runs code as root too (L100 m3)');
+  mac.as = 501;
+  assert.equal(run(mac, ['users-folders', '--dry-run']).code, 0, 'a dry run without root needs no node check');
 });
 
 test('nodeProblemOf: the program and every folder above it must be root\'s alone', () => {
@@ -679,7 +694,7 @@ test('proofs: the owner\'s user cannot write the record, hooks, settings, launch
 });
 
 test('PLANT a folder the owner can write (hooks is the owner\'s) → the proof FAILs; a broken control makes every proof FAIL', () => {
-  const mac = applied(); mac.owners.set(P('hooks'), { uid: uidOf(mac, 'joe'), gid: 20 });
+  const mac = applied(); mac.owners.set(P('hooks'), { uid: uidOf(mac, 'sam'), gid: 20 });
   const bad = runProofs(mac, cfg).filter((r) => !r.ok); assert.equal(bad.length, 1); assert.match(bad[0].what, /cannot write .*hooks/); assert.match(bad[0].why, /CAN do this/);
   assert.equal(run(mac, ['proofs']).code, 1);
   const mac2 = applied(); mac2.owners.set(P('worker-copies'), { uid: mac2.rootUid, gid: 0 });   // the control: the owner must be able to write its own folder
@@ -693,7 +708,7 @@ test('PLANT the keys folder readable by the owner (mode 755) → the proof FAILs
 
 test('proofs: dry run prints the commands and runs none; without root it is refused', () => {
   const mac = fakeMac({ euid: 501 });
-  const d = run(mac, ['proofs', '--dry-run']); assert.equal(d.code, 0); assert.match(d.text, /would run: sudo -n -u joe \/bin\/test -w \/Library\/orch-test\/hooks   \(must fail\)/);
+  const d = run(mac, ['proofs', '--dry-run']); assert.equal(d.code, 0); assert.match(d.text, /would run: sudo -n -u sam \/bin\/test -w \/Library\/orch-test\/hooks   \(must fail\)/);
   const r = run(mac, ['proofs']); assert.equal(r.code, 2); assert.match(r.text, /must run as root/);
 });
 
@@ -703,7 +718,7 @@ test('usage errors exit 2, and an unknown argument is never echoed (it could be 
   }
   const s = sink(); assert.equal(main(['users-folders', 'sk-ant-SECRETSECRET', '--config', cfgFile()], { io: fakeMac(), out: s.out, err: s.err }), 2);
   assert.ok(!s.lines.join('\n').includes('SECRETSECRET'), 'an unknown argument was printed');
-  const bad = join(mkdtempSync(join(tmpdir(), 'setup-cfg-')), 'c.json'); writeFileSync(bad, '{"base":"/Users/x","owner":"joe"}');
+  const bad = join(mkdtempSync(join(tmpdir(), 'setup-cfg-')), 'c.json'); writeFileSync(bad, '{"base":"/Users/x","owner":"sam"}');
   const s2 = sink(); assert.equal(main(['check', '--config', bad], { io: fakeMac(), out: s2.out, err: s2.err }), 2);
 });
 

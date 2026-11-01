@@ -1,16 +1,20 @@
 #!/usr/bin/env node
-// The Mini's one-time setup commands (R-0b-05 and the install). Every command has a --dry-run (changing commands) or is
-// read only; every changing command is safe to run twice and refuses clearly when it needs root and does not have it.
+// The always-on Mac's one-time setup commands (R-0b-05 and the install). Every command has a --dry-run (changing commands)
+// or is read only; every changing command is safe to run twice and refuses clearly when it needs root and does not have it.
 //
-//   users-folders        --config <f> [--dry-run]    the three Mac users and their folders                 (root)
-//   check                --config <f>                PASS, FAIL or SKIP per item for the above             (read only)
-//   proofs               --config <f> [--dry-run]    the owner's own Mac user cannot write the record, hooks,
-//                                                    settings, launcher... or read the keys                (root, read only)
-//   install              --config <f> [--dry-run]    the link layout, then the updater's first run         (root)
-//   check-install        --config <f> [--main <sha>] the copy, its link, every install folder, access lists (read only)
-//   daemons place|load|unload  --config <f> [--dry-run]   the three background jobs' files; load; unload   (root)
-//   daemons list         --config <f>                loaded or not, per job                                (read only)
-//   daemons check        --config <f>                the job files are exact and the jobs are loaded       (read only)
+//   users-folders        [--dry-run]    the three Mac users and their folders                                  (root)
+//   check                               PASS, FAIL or NEEDS ROOT per item for the above; exit 3 if some need root (read only)
+//   proofs               [--dry-run]    the owner's own Mac user cannot write the record, hooks,
+//                                       settings, launcher... or read the keys                                 (root, read only)
+//   install              [--dry-run]    the link layout, then the updater's first run                          (root)
+//   check-install        [--main <sha>] the copy, its link, every install folder, access lists                 (read only)
+//   daemons place|load|unload  [--dry-run]   the three background jobs' files; load; unload                    (root)
+//   daemons list                        loaded or not, per job                                                 (read only)
+//   daemons check                       the job files are exact and the jobs are loaded                        (read only)
+//
+// The config: as root, ONLY the root-owned file at ROOT_CONFIG_PATH (layout.mjs), opened without following links, owned
+// by root, written by no one else, in folders only root writes (NEW-1). Without sudo, `--config <file>` may name another
+// file (for a --dry-run before the real one is put in place).
 //
 // `--root-prefix <dir>` is for tests only (every folder path is put under it; the Mac's user records are not) and is
 // refused when running as root: under sudo it would move where root writes while every printed path still read
@@ -18,7 +22,7 @@
 
 import { readFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
-import { parseConfig } from './layout.mjs';
+import { ROOT_CONFIG_PATH, parseConfig } from './layout.mjs';
 import { realIo, rootProblem } from './mac.mjs';
 import { guarded } from './guard.mjs';
 import { apply, check, plan } from './users-folders.mjs';
@@ -26,7 +30,7 @@ import { proofCommands, runProofs } from './proofs.mjs';
 import { checkInstall, parseInstallConfig, planInstall, spawnUpdater } from './install.mjs';
 import { checkDaemons, list, planLoad, planPlace, planUnload } from './daemons.mjs';
 
-const USAGE = 'usage: node setup.mjs <users-folders|check|proofs|install|check-install|daemons place|load|unload|list|check> --config <file> [--dry-run] [--main <commit>]';
+const USAGE = 'usage: node setup.mjs <users-folders|check|proofs|install|check-install|daemons place|load|unload|list|check> [--config <file>, without sudo only] [--dry-run] [--main <commit>]';
 const DAEMON_SUBS = ['place', 'load', 'unload', 'list', 'check'];
 const COMMANDS = ['users-folders', 'check', 'proofs', 'install', 'check-install', 'daemons'];
 
@@ -45,7 +49,6 @@ export function parseArgs(argv) {
       if (a === '--config') o.config = v; else if (a === '--main') { if (!/^[0-9a-f]{40}$/.test(v)) throw new Error('--main must be a 40-hex commit'); o.main = v; } else o.prefix = v;
     } else throw new Error(`argument ${i + 1} is not one this command takes (it is not shown, in case it is a secret)`);
   }
-  if (!o.config) throw new Error('--config <file> is required');
   const readOnly = cmd === 'check' || cmd === 'check-install' || (cmd === 'daemons' && (sub === 'list' || sub === 'check'));
   if (readOnly && o.dry) throw new Error('this command never changes anything, so --dry-run does not apply');
   if (o.main && cmd !== 'check-install') throw new Error('--main is only for check-install');
@@ -53,10 +56,11 @@ export function parseArgs(argv) {
 }
 
 function report(res, out) {
-  for (const r of res) out(r.skip ? `SKIP  ${r.what} — ${r.why}` : r.ok ? `PASS  ${r.what}` : `FAIL  ${r.what} — ${r.why}`);
+  for (const r of res) out(r.skip ? `NEEDS ROOT  ${r.what} — ${r.why}` : r.ok ? `PASS  ${r.what}` : `FAIL  ${r.what} — ${r.why}`);
   const bad = res.filter((r) => !r.ok).length; const skipped = res.filter((r) => r.skip).length;
-  out(`${bad ? `${bad} of ${res.length} FAILED` : `all ${res.length - skipped} PASS`}${skipped ? ` (${skipped} skipped: they need root)` : ''}`);
-  return bad ? 1 : 0;
+  // A check that could not look is not a pass: with any NEEDS ROOT line the summary says so and the exit code is not 0.
+  out(`${bad ? `${bad} of ${res.length} FAILED` : skipped ? `${res.length - skipped} PASS, but ${skipped} could not be checked without root (run it again with sudo)` : `all ${res.length} PASS`}`);
+  return bad ? 1 : skipped ? 3 : 0;
 }
 
 /**
@@ -73,12 +77,24 @@ export function planCommand(io, cfg, o, { readSource = (p) => readFileSync(p, 'u
 
 /** Runs one command. `io` and `runUpdater` are ports for tests. → exit code. */
 export function main(argv, { io: given, runUpdater = spawnUpdater, out = (s) => process.stdout.write(`${s}\n`), err = (s) => process.stderr.write(`${s}\n`) } = {}) {
-  let o; let raw;
-  try { o = parseArgs(argv); raw = JSON.parse(readFileSync(o.config, 'utf8')); } catch (e) { err(`${e.message}\n${USAGE}`); return 2; }
-  let cfg;
-  try { cfg = ['users-folders', 'check', 'proofs'].includes(o.cmd) ? parseConfig(raw) : parseInstallConfig(raw); } catch (e) { err(`${e.message}\n${USAGE}`); return 2; }
+  let o; let cfg;
+  try { o = parseArgs(argv); } catch (e) { err(`${e.message}\n${USAGE}`); return 2; }
   const io = given ?? realIo({ prefix: o.prefix });
-  if (o.prefix && io.euid() === 0) { err('refused: --root-prefix is for tests and may not be used as root'); return 2; }
+  const asRoot = io.euid() === 0;
+  if (o.prefix && asRoot) { err('refused: --root-prefix is for tests and may not be used as root'); return 2; }
+  // Root takes orders only from the root-owned config at the fixed place (NEW-1): never from a file named on the command
+  // line, and never from a home folder. And root must not be running a node program others can change, whatever the command
+  // (a `sudo check` runs code as root as well; L100 m3).
+  if (asRoot) {
+    if (o.config) { err(`refused: as root this reads only ${ROOT_CONFIG_PATH}, which must be root's own file; --config is for a run without sudo (see the README)`); return 2; }
+    const p = io.nodeProblem?.();
+    if (p) { err(`refused: root must not run a node program others can change: ${p}. Use the node from nodejs.org in /usr/local/bin/node by its full path.`); return 2; }
+  }
+  try {
+    const text = io.readConfig(o.config ?? ROOT_CONFIG_PATH, { strict: asRoot || !o.config });
+    let raw; try { raw = JSON.parse(text); } catch { throw new Error('the config is not valid JSON'); }   // never the parser's own message: it quotes the file
+    cfg = ['users-folders', 'check', 'proofs'].includes(o.cmd) ? parseConfig(raw) : parseInstallConfig(raw);
+  } catch (e) { err(`${e.message}\n${USAGE}`); return 2; }
 
   if (o.cmd === 'check') return report(check(io, cfg), out);
   if (o.cmd === 'check-install') return report(checkInstall(io, cfg, { main: o.main }), out);

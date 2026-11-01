@@ -15,6 +15,7 @@ import { SCRIPTS, reviewDaemonPlists, updaterPlist } from '../modules/M4-worksho
 import { NODE, RUNNER_CONFIG, STAMP, UPDATER_CONFIG } from '../modules/M4-workshop/launcher/install-check.mjs';
 import { MUST_KEEP } from '../modules/M4-workshop/launcher/review-updater.mjs';
 import { realIo } from './mac.mjs';
+import { ROOT_CONFIG_PATH } from './layout.mjs';
 import { BOOTSTRAP_FILES, LABEL_RE, installPaths, parseInstallConfig, updaterConfigFor } from './install.mjs';
 import { JOBS, checkDaemons, list, plistTexts } from './daemons.mjs';
 import { checkInstall } from './install.mjs';
@@ -64,7 +65,7 @@ async function world({ euid = 0 } = {}) {
   writeFileSync(join(mac.prefix, 'gitbin', 'git'), `#!/bin/sh\nexec '${GIT}' "$@"\n`); chmodSync(join(mac.prefix, 'gitbin', 'git'), 0o755);
   writeFileSync(join(ext, 'node'), '#!/bin/sh\n'); chmodSync(join(ext, 'node'), 0o755);
   const raw = {
-    base: BASE, owner: 'joe', products: ['alpha'], address: 'https://example.invalid/org/repo.git', label: LABEL,
+    base: BASE, owner: 'sam', products: ['alpha'], address: 'https://example.invalid/org/repo.git', label: LABEL,
     runnerConfig: join(ext, 'review.json'), extras: [join(ext, 'wiring'), join(ext, 'claude-bin'), join(ext, 'hooks')],
     gitBin: join(mac.prefix, 'gitbin', 'git'), nodeBin: join(ext, 'node'),
   };
@@ -82,7 +83,8 @@ async function world({ euid = 0 } = {}) {
     updaterRuns.push(r.status);
     return { status: r.status ?? 1, stderr: r.stderr };
   };
-  const run = (args, extra = {}) => { const s = sink(); const code = main([...args, '--config', cfgFile], { io: mac, runUpdater, out: s.out, err: s.err, ...extra }); return { code, text: text(s), s }; };
+  const argvFor = (args) => { if (mac.as === 0) { const f = mac.at(ROOT_CONFIG_PATH); rmSync(f, { force: true }); writeFileSync(f, JSON.stringify(raw)); chmodSync(f, 0o644); return args; } return [...args, '--config', cfgFile]; };
+  const run = (args, extra = {}) => { const s = sink(); const code = main(argvFor(args), { io: mac, runUpdater, out: s.out, err: s.err, ...extra }); return { code, text: text(s), s }; };
   const folders = run(['users-folders']);
   assert.equal(folders.code, 0, folders.text);
   mac.as = euid;
@@ -198,7 +200,7 @@ test('install: refuses a runner config for another place, or one that names thin
 test('install: a cut-off run (the updater fails) leaves no link, and the next run starts clean and finishes', async () => {
   const w = await world();
   const failing = () => ({ status: 1, stderr: 'boom' });
-  const s = sink(); const code = main(['install', '--config', w.cfgFile], { io: w.mac, runUpdater: failing, out: s.out, err: s.err });
+  const s = sink(); const code = main(w.mac.as === 0 ? ['install'] : ['install', '--config', w.cfgFile], { io: w.mac, runUpdater: failing, out: s.out, err: s.err });
   assert.equal(code, 1); assert.match(text(s), /first run failed/);
   assert.equal(failed(checkInstall(w.mac, w.cfg)).length > 0, true, 'a failed install must not read as installed');
   const r = w.run(['install']);
@@ -300,7 +302,7 @@ test('daemons place: three job files, root\'s 0644, exactly what review-daemons.
     assert.ok(plists[job].includes(`${BASE}/install/orchestrate`) || job === 'review-account', job);
     assert.ok(!plists[job].includes(w.mac.prefix), `${job} carries the test prefix`);
   }
-  const owner = reviewDaemonPlists({ label: LABEL, installRoot: `${BASE}/install/orchestrate`, config: `${BASE}/install/orchestrate/${RUNNER_CONFIG}`, reviewRoot: `${BASE}/review`, reviewHome: `${BASE}/home/review`, accountCopy: `${BASE}/account-copy.json`, ownerHome: '/Users/joe', ownerUid: 65001, logDir: `${BASE}/logs` });
+  const owner = reviewDaemonPlists({ label: LABEL, installRoot: `${BASE}/install/orchestrate`, config: `${BASE}/install/orchestrate/${RUNNER_CONFIG}`, reviewRoot: `${BASE}/review`, reviewHome: `${BASE}/home/review`, accountCopy: `${BASE}/account-copy.json`, ownerHome: '/Users/sam', ownerUid: 65001, logDir: `${BASE}/logs` });
   assert.equal(plists['review-runner'], owner.runner);
   assert.equal(plists['review-account'], owner.accountCopy);
   assert.equal(plists['review-updater'], updaterPlist({ label: LABEL, installRoot: `${BASE}/install/orchestrate`, logDir: `${BASE}/logs` }));
@@ -467,9 +469,15 @@ test('PLANT P1: /Library writable by others → install, place, load and unload 
   chmodSync(w.mac.at('/Library'), 0o777);
   const n = w.mac.log.length;
   for (const args of [['install'], ['daemons', 'place'], ['daemons', 'load'], ['daemons', 'unload']]) {
+    // As root the config's own wall stops it first (exit 2); the plan's guard is reached by a dry run without root.
     const r = w.run(args);
-    assert.equal(r.code, 1, `${args.join(' ')}: ${r.text}`);
-    assert.match(r.text, /folders above \/Library\/orch-test are not safe for root to work in/);
+    assert.equal(r.code, 2, `${args.join(' ')}: ${r.text}`);
+    assert.match(r.text, /not root's alone/);
+    w.mac.as = w.mac.rootUid + 1;
+    const d = w.run([...args, '--dry-run']);
+    assert.equal(d.code, 1, `${args.join(' ')}: ${d.text}`);
+    assert.match(d.text, /folders above \/Library\/orch-test are not safe for root to work in/);
+    w.mac.as = 0;
   }
   assert.equal(w.mac.log.length, n, 'a step ran');
 });
@@ -480,7 +488,10 @@ test('PLANT P7: /Library is a link → install runs no step', async () => {
   mkdirSync(other); renameLibrary(lib, other);
   const n = w.mac.log.length;
   const r = w.run(['install']);
-  assert.equal(r.code, 1, r.text); assert.match(r.text, /is a link|not safe for root/);
+  assert.equal(r.code, 2, r.text); assert.match(r.text, /is a link|not safe for root/);
+  w.mac.as = w.mac.rootUid + 1;
+  const d = w.run(['install', '--dry-run']);
+  assert.equal(d.code, 1, d.text); assert.match(d.text, /is a link|not safe for root/);
   assert.equal(w.mac.log.length, n);
 });
 

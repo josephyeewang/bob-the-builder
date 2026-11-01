@@ -6,6 +6,7 @@
 // owner's user can be run as at all, and it CAN write its own worker-copies folder. Only then do the "cannot" proofs count.
 
 import { join } from 'node:path';
+import { REVIEW_ROLES } from '../shared/review-roles.mjs';
 
 const SUDO = '/usr/bin/sudo';
 const TEST = '/bin/test';
@@ -13,7 +14,7 @@ const LS = '/bin/ls';
 const TRUE = '/usr/bin/true';
 
 // The folders the owner's user must not write: the record, and the code and rules the robots run from.
-const NO_WRITE = ['hooks', 'settings', 'launcher', 'lead-main', 'claude-code', 'bob', 'global-rules', 'frontdoor', 'mirror', 'private', 'keys', 'review', 'review-copies'];
+const NO_WRITE = ['hooks', 'settings', 'launcher', 'lead-main', 'claude-code', 'bob', 'global-rules', 'frontdoor', 'mirror', 'private', 'keys', 'review', 'review-copies', 'outboxes', ...REVIEW_ROLES.map((r) => `outboxes/${r}`)];
 
 /** The proofs: [{ what, args, expect: 'ok' | 'fail', control? }]. `args` are what follows `sudo -n -u <owner>`. */
 export function proofList(cfg) {
