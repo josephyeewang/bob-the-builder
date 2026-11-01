@@ -14,7 +14,7 @@ Root takes its orders from **one file at a fixed place, `/Library/orchestrate-se
 opened without following a link, a plain file, owned by root, written by no one else, in folders only root writes.
 Anything else is refused before a single step (a file in your home folder, which your own user can change between your
 read-back and the run, is never read by root; `--config` is refused under `sudo`). You write a copy in your home, look at
-it with `--dry-run`, then put it in place once with `sudo install -o root -g wheel -m 0644` and read it back.
+it with `--dry-run`, then put it in place once with `sudo install -o root -g wheel -m 0644 /dev/stdin /Library/orchestrate-setup.json < ~/orchestrate-setup.json` (`install` follows links, so the file goes in through stdin, never as a path) and read it back.
 
 ```json
 { "base": "/Library/orchestrate", "owner": "<your Mac user>", "products": ["<product>"] }

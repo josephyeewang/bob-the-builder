@@ -21,7 +21,8 @@ export const USER_ID_RANGE = Object.freeze({ low: 600, high: 699 });
 export const NO_SHELL = '/usr/bin/false';
 // Root takes its orders from ONE file at a fixed place, root's own (NEW-1, L100): never from a home folder, where the
 // person's own user could change it between a read-back and the run. The person edits a copy in their home, then a
-// single `sudo install -o root -g wheel -m 0644` puts it here (README). Root reads it with mac.mjs `readConfigFile`.
+// single `sudo install -o root -g wheel -m 0644 /dev/stdin <here> < <copy>` puts it here (README; `install` follows links,
+// so the copy goes in through stdin, never as a path). Root reads it with mac.mjs `readConfigFile`.
 export const ROOT_CONFIG_PATH = '/Library/orchestrate-setup.json';
 // The note root leaves in the base the moment it makes it (NEW-1): a base that exists without it was not made by this setup
 // and is refused, never adopted. It sits in the base so a second base has its own.
