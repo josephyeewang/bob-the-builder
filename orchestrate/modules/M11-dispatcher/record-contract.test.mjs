@@ -7,6 +7,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { dispatcherPass } from './pass.mjs';
 import { actOnDead } from './tick.mjs';
+import { KEYS } from './keys.mjs';
 import { timeLimits, requestMerges, MERGE_REQUEST } from './merges.mjs';
 import { waitOn } from './moves.mjs';
 import { outageStep, OUTAGE_FACT } from './outage.mjs';
@@ -93,12 +94,22 @@ test('L72 contract: dead restart: a provably dead owner\'s claim is broken by th
   endedSession(w, l.sessionId, 'C-1', l.pid);
   // A live process: the Record refuses the break, and the card stays running (L72 (5): breakIfDead on a live pid).
   w.env.clock.t += 31 * MIN;
-  const live = actOnDead({ rec: w.rec, now: w.env.clock.t, restart: [l.sessionId], asks: [], cards: { [l.sessionId]: 'C-1' } });
+  const live = actOnDead({ rec: w.rec, rules: w.rules, now: w.env.clock.t, restart: [l.sessionId], asks: [], cards: { [l.sessionId]: 'C-1' } });
   assert.match(live[0][1], /not restarted: owner not provably dead \(process alive\)/);
   assert.equal(w.rec.read('card', 'C-1').doc.state, 'running');
   // The process is gone, the session ended, no activity past claims.stuck_min: broken.
   w.dead.add(l.pid);
-  const done = actOnDead({ rec: w.rec, now: w.env.clock.t, restart: [l.sessionId], asks: [], cards: { [l.sessionId]: 'C-1' } });
+  // claims.stuck_min is a per-product key (L110 m-2): read for the card's own product. Rules that answer it only for
+  // another product break nothing, and the missing value is handed back to be told.
+  const prod = w.rec.read('card', 'C-1').doc.product;
+  assert.ok(prod);
+  const onlyFor = (who) => ({ get: (k, o) => (k === KEYS.claimsStuckMin && o?.product !== who ? undefined : w.rules.get(k, o)) });
+  const missing = [];
+  const other = actOnDead({ rec: w.rec, rules: onlyFor('another-product'), now: w.env.clock.t, restart: [l.sessionId], asks: [], cards: { [l.sessionId]: 'C-1' }, missing });
+  assert.deepEqual(other, [['C-1', `not restarted: the rules have no ${KEYS.claimsStuckMin} for ${prod}`]]);
+  assert.deepEqual(missing, [KEYS.claimsStuckMin]);
+  assert.equal(w.rec.read('card', 'C-1').doc.state, 'running');
+  const done = actOnDead({ rec: w.rec, rules: onlyFor(prod), now: w.env.clock.t, restart: [l.sessionId], asks: [], cards: { [l.sessionId]: 'C-1' } });
   assert.deepEqual(done, [['C-1', 'ready again']]);
   const c = w.rec.read('card', 'C-1').doc;
   assert.equal(c.state, 'ready');

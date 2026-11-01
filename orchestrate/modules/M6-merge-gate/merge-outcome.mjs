@@ -12,8 +12,11 @@
 //     merged at another head → refused ("merged outside the gate"), told, the card put back.
 //     not merged → refused with `reason`, the card put back.
 //   Put back: merging → verified, or in_review when the Record refuses verified (no passing verdict for its head), with
-//   `reason` added to the card's attempts.merge_refusals (the gate's count; the same reason twice goes to the owner,
-//   which the Dispatcher asks).
+//   `reason` added to the card's attempts.merge_refusals (the gate's count). The gate alerts once per refusal; it does
+//   not ask the owner. The same reason twice in a row (refusedTwice below; a timeout, an interruption, or GitHub's own
+//   405, 409 or 422 from land()) goes to the owner: the Dispatcher asks, once per repeat (attempts.merge_asks), and
+//   requests no new merge for the card until the owner answers, so a refusal that will happen again is never retried
+//   in a loop of alerts (L110 m-1).
 //   The Dispatcher hands over a not-merged reading only once the outcome is known (L85 M-1 a): the PR closed and not
 //   merged, or still open past timeouts.merging_open_max_min after the merging write (`openTooLong`). Any other
 //   not-merged reading is refused here, so an unknown outcome is never recorded as refused.
@@ -33,11 +36,22 @@
 //     Record can't give counts as too long, so the limit only ever fires rather than waits forever); false when the
 //     limit itself is unknown.
 //   prReading(pr) → GitHub's pull request answer in the reading's shape { state, merged, merge_commit_sha, head_sha }.
+//   refusedTwice(cardDoc) → the reason, when the card's last two merge refusals are the same and the owner has not been
+//     asked about the newer one yet (attempts.merge_asks below the list's length); else null.
 
 import { markReverted } from './undo.mjs';
 import { factFrom } from '../M9-record/permissions.mjs';
 
 export const PR_FACT = (n) => `pr-${n}`;
+
+export function refusedTwice(doc) {
+  const reasons = doc?.attempts?.merge_refusals;
+  if (!Array.isArray(reasons) || reasons.length < 2) return null;
+  const asked = doc.attempts.merge_asks;
+  if (Number.isInteger(asked) && asked >= reasons.length) return null;
+  const [a, b] = reasons.slice(-2);
+  return typeof b === 'string' && a === b ? b : null;
+}
 // The refusal for a PR merged at a head the gate did not judge; whoever writes it has told the owner.
 export const MERGED_OUTSIDE = 'merged outside the gate, at a head the gate did not judge';
 

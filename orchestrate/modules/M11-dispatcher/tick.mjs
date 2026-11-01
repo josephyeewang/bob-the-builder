@@ -73,12 +73,20 @@ export function signedInAccount({ rec, rules, now }) {
  * other card waits on Joe. Each card moved gets its own alert (L43(a), L38: no silent move); a card that already moved
  * on is left alone, with no alert. A break the Record refuses is listed with its reason, never forced.
  */
-export function actOnDead({ rec, now, restart, asks, cards = {}, alert = () => {} }) {
+export function actOnDead({ rec, rules, now, restart, asks, cards = {}, alert = () => {}, missing = [] }) {
   const done = [];
   for (const sid of restart) {
     const cardId = cards[sid];
     const cur = cardId ? rec.read('card', cardId) : null;
     if (!cur || !['running', 'claimed'].includes(cur.doc.state)) continue;
+    // No claim is broken without claims.stuck_min (M9 refuses too). It is a per-product key, read for the card's own
+    // product (L110 m-2); the missing value is told with the others.
+    try { need(rules, KEYS.claimsStuckMin, { product: cur.doc.product }); } catch (e) {
+      if (!(e instanceof MissingKey)) throw e;
+      if (!missing.includes(e.key)) missing.push(e.key);
+      done.push([cardId, `not restarted: the rules have no ${e.key} for ${cur.doc.product ?? 'its product'}`]);
+      continue;
+    }
     const broke = rec.breakIfDead({ card: cardId });
     if (broke.ok) {
       done.push([cardId, 'ready again']);
@@ -166,10 +174,7 @@ export async function tick({ rec, rules, now, ports: p }) {
     const board = p.board();
     const o = outageStep({ rec, rules, board, now, healthy: p.healthy(), resume: p.resume?.() ?? false, alert });
     outageOpen = o.outage;
-    // No claim is broken without claims.stuck_min (M9 refuses too); the missing value is told with the others.
-    let stuck = true;
-    try { need(rules, KEYS.claimsStuckMin); } catch (e) { if (!(e instanceof MissingKey)) throw e; missing.push(e.key); stuck = false; }
-    const acted = o.outage ? [] : actOnDead({ rec, now, restart: stuck ? o.restart : [], asks: o.asks, cards: o.cards, alert });
+    const acted = o.outage ? [] : actOnDead({ rec, rules, now, restart: o.restart, asks: o.asks, cards: o.cards, alert, missing });
     // A claim whose session never started lapses (the Record stops that session id first; L72). Not in an outage.
     const lapse = o.outage ? null : rec.lapseClaims(now, { stopSession: p.stopSession });
     if (lapse && !lapse.ok) throw new Error(`claims could not be lapsed: ${lapse.reason}`);
@@ -212,7 +217,7 @@ export async function tick({ rec, rules, now, ports: p }) {
   const startsHeld = outageOpen ? 'outage' : bands ? null : 'the main pass did not finish';
   await run('limits', () => timeLimits({ rec, rules, now, b: bands ?? held, running, gateAlive: p.gateAlive,
     hasReviewer: p.hasReviewer, requestReview: p.requestReview, reviewAlerts: p.reviewAlerts, alert, startsHeld, missing }));
-  await run('merges', () => requestMerges({ rec, rules, now, b: bands ?? held, running, startsHeld, missing }));
+  await run('merges', () => requestMerges({ rec, rules, now, b: bands ?? held, running, startsHeld, missing, alert }));
   // A step that failed did not report what it lacked, so nothing already told is dropped this tick.
   const complete = ['stops', 'undo-starts', 'pass', 'limits', 'merges'].every((s) => res[s]?.ok);
   try { await rulesMissingAlert({ rec, keys: missing, alert, now, complete }); } catch (e) { alert(`the Dispatcher could not record missing rules values: ${e?.message ?? e}`); }

@@ -39,6 +39,8 @@ export const COMPACTION_FACT = (card) => `compactions-${card}`;
 export const HOST_FACT = 'host-lock-seen';
 export const PAUSE_FACT = (product) => `pause-${product}`;
 export const LIMIT_FACT = (account) => `limit-hit-${account}`;
+/** What a limit_hit wait that names no account becomes (L110 m-4): it waits on Joe. */
+export const LIMIT_NO_ACCOUNT = 'limit_hit: the wait names no account, so the limit reset can\'t be read';
 export const UNKNOWN_FACT = 'unknown-usage-alert';
 export const RULES_MISSING_FACT = 'rules-missing-alert';
 // Used only when timeouts.cancel_grace_min itself is missing (audit MAT-2): Cancel must still stop.
@@ -279,7 +281,20 @@ export async function dispatcherPass({ rec, rules, now, account, sessions, probe
       // (`wait.account`, set by whoever parks the card; M9 lets no script put an account on the card itself). Only a
       // reading taken after the card began to wait: an older one is an earlier limit, already reset (L97 M-3). A reading
       // with no reset time (`resets_at` null) or no `observed_at` resumes nothing.
-      const lf = sensorsFact(rec, LIMIT_FACT(doc.wait?.account ?? account))?.doc;
+      // The writer that parks a card on a limit (a follow-up, after the worker-exit wiring) must park it first and write
+      // `limit-hit-<account>` after (L110 m-3): the Record stamps `wait.since` at the park, so a reading written before
+      // it counts as an earlier limit and the card never resumes. (The other way: keep the reading's `observed_at` on
+      // the wait and compare against that.)
+      // A wait that names no account resumes nothing (L110 m-4): the pass's own account is not the one the card hit,
+      // necessarily, so it is never read in its place. The card waits on Joe instead, with one alert.
+      const acct = doc.wait?.account;
+      if (typeof acct !== 'string' || !acct) {
+        if (waitOn(rec, id, { who: 'joe', what: LIMIT_NO_ACCOUNT, now, kind: 'limit_no_account' }).ok) {
+          alert(`card ${id}: it waits on a usage limit but the wait does not say which account's, so it can't resume by itself; it waits on you`);
+        }
+        continue;
+      }
+      const lf = sensorsFact(rec, LIMIT_FACT(acct))?.doc;
       const seen = Date.parse(lf?.observed_at ?? '');
       const resets = Date.parse(lf?.resets_at ?? '');
       if (!(seen > Date.parse(doc.wait?.since ?? '')) || !Number.isFinite(resets) || now < resets) continue;

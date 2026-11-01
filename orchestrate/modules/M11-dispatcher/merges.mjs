@@ -14,12 +14,12 @@
 // A claimed card whose session never started is the Record's to lapse (lapseClaims, claims.unlaunched_min; tick.mjs),
 // not this file's.
 
-import { KEYS, minutes } from './keys.mjs';
+import { KEYS, minutes, MissingKey } from './keys.mjs';
 import { move, waitOn, note, ageMs } from './moves.mjs';
 import { startGate } from './gate.mjs';
 import { rolesFor } from '../M4-workshop/launcher/review-runner.mjs';
 import { relayReviewAlerts } from './review-requests.mjs';
-import { settleMerge, reconcileMerge, prReadingAfter, openTooLong as tooLongOpen, PR_FACT, MERGED_OUTSIDE } from '../M6-merge-gate/merge-outcome.mjs';
+import { settleMerge, reconcileMerge, prReadingAfter, openTooLong as tooLongOpen, PR_FACT, MERGED_OUTSIDE, refusedTwice } from '../M6-merge-gate/merge-outcome.mjs';
 import { textAlerts } from './alerts.mjs';
 import { sensorsFact as fromSensors } from './sensor-facts.mjs';
 
@@ -51,13 +51,33 @@ const sensorsFact = (rec, id) => fromSensors(rec, id, 'pr-');
 export async function timeLimits({ rec, rules, now, b, running = [], gateAlive, hasReviewer, requestReview, reviewAlerts, alert, startsHeld = null, missing = [] }) {
   const done = [];
   const statusErrors = [];
-  const lim = {
-    checking: minutes(rules, KEYS.checkingMaxMin), reporting: minutes(rules, KEYS.reportingMaxMin), inReview: minutes(rules, KEYS.inReviewNoReviewerMin),
-    mergingOpen: minutes(rules, KEYS.mergingOpenMaxMin),
+  // The limits are per-product keys, which the real engine answers only for a named product (L110, the M-1 class):
+  // each entry's are read for its card's product, once per product per pass. A product whose rules lack one gets no
+  // limits this pass: its entries are listed, untouched, and the key is handed back for the tick to tell Joe.
+  const byProduct = new Map();
+  const limOf = (cardId) => {
+    const product = cardId ? rec.read('card', cardId)?.doc?.product ?? null : null;
+    if (!byProduct.has(product)) {
+      const o = { product: product ?? undefined };
+      let v;
+      try {
+        v = { checking: minutes(rules, KEYS.checkingMaxMin, o), reporting: minutes(rules, KEYS.reportingMaxMin, o),
+          inReview: minutes(rules, KEYS.inReviewNoReviewerMin, o), mergingOpen: minutes(rules, KEYS.mergingOpenMaxMin, o) };
+      } catch (e) {
+        if (!(e instanceof MissingKey)) throw e;
+        if (!missing.includes(e.key)) missing.push(e.key);
+        v = { none: `no time limit: the rules have no ${e.key} for ${product ?? 'its product'}` };
+      }
+      byProduct.set(product, v);
+    }
+    return byProduct.get(product);
   };
   for (const { id, doc } of rec.list('card')) {
+    if (doc.state !== 'in_review') continue;
+    const lim = limOf(id);
+    if (lim.none) { done.push([id, lim.none]); continue; }
     // The clock is the card's last write: a review request writes its count, so the next one is a full limit later.
-    if (doc.state !== 'in_review' || ageMs(rec, 'card', id, now, { since: 'write' }) < lim.inReview) continue;
+    if (ageMs(rec, 'card', id, now, { since: 'write' }) < lim.inReview) continue;
     const want = [];
     let unclear = false;
     for (const role of rolesFor(doc)) {
@@ -94,12 +114,18 @@ export async function timeLimits({ rec, rules, now, b, running = [], gateAlive, 
   }
   // A session that has said it is reporting but handed in nothing in time: its card fails.
   for (const { id, doc } of rec.list('session')) {
-    if (doc.state !== 'reporting' || ageMs(rec, 'session', id, now) < lim.reporting) continue;
+    if (doc.state !== 'reporting') continue;
+    const lim = limOf(doc.card);
+    if (lim.none) { done.push([id, lim.none]); continue; }
+    if (ageMs(rec, 'session', id, now) < lim.reporting) continue;
     const card = doc.card ? rec.read('card', doc.card) : null;
     if (card && card.doc.state === 'running' && move(rec, 'card', doc.card, { state: 'failed', failure: 'no_report' }, { kind: 'timeout' }).ok) done.push([doc.card, 'reporting->failed']);
     move(rec, 'session', id, { state: 'ended', reason: 'no_report' }, { kind: 'timeout' });
   }
   for (const { id, doc } of rec.list('merge')) {
+    const timed = doc.state === 'checking' || (doc.state === 'merging' && !gateAlive());
+    const lim = timed ? limOf(doc.card) : {};
+    if (lim.none) { done.push([id, lim.none]); continue; }
     if (doc.state === 'checking' && ageMs(rec, 'merge', id, now) >= lim.checking) {
       done.push(...settled(rec, id, settleMerge({ record: rec, alert: textAlerts(alert), now }, id, { reason: 'timeout' }), { now, alert }));
     } else if (doc.state === 'merging' && !gateAlive()) {
@@ -150,24 +176,30 @@ export async function timeLimits({ rec, rules, now, b, running = [], gateAlive, 
   return done;
 }
 
-// What M6's settleMerge did, for the list. A card put back with the same refusal reason a second time goes to Joe
-// (the reasons are the gate's attempts.merge_refusals).
+// The one way a card whose merge was refused twice in a row for the same reason goes to Joe (L110 m-1), used by both
+// paths that see it: a merge this file settles, and requestMerges, which sees the gate's own refusals (a timeout, an
+// interruption, GitHub's 405, 409 or 422) before it would request the card again. Joe is asked once per repeat:
+// attempts.merge_asks is set to the number of reasons in the same write, and the card waits until he answers.
+function askOnRepeat(rec, id, { now, alert, pr }) {
+  const card = rec.read('card', id);
+  const why = card?.doc ? refusedTwice(card.doc) : null;
+  if (!why) return null;
+  const w = waitOn(rec, id, { who: 'joe', what: `merge refused twice: ${why}`, now, link: pr != null ? `PR ${pr}` : undefined,
+    attempts: { merge_asks: card.doc.attempts.merge_refusals.length } });
+  if (!w.ok) return [id, `not sent to joe: ${w.reason}`];
+  alert(`card ${id}: the merge was refused twice for the same reason (${why})`);
+  return [id, 'waiting on joe'];
+}
+
+// What M6's settleMerge did, for the list. A card put back with the same refusal reason twice in a row goes to Joe.
 function settled(rec, id, r, { now, alert }) {
   if (!r.ok) return [[id, `not settled: ${r.reason}`]];
   if (r.outcome === 'merged') return [[id, 'merged']];
   const out = [[id, `refused:${rec.read('merge', id)?.doc?.reasons?.[0] ?? 'unknown'}`]];
   if (!r.card) return out;
   out.push([r.card.id, `->${r.card.to}`]);
-  const card = rec.read('card', r.card.id);
-  const reasons = card?.doc?.attempts?.merge_refusals ?? [];
-  const last = reasons.at(-1);
-  if (last && reasons.indexOf(last) !== reasons.length - 1) {
-    const pr = rec.read('merge', id)?.doc?.pr;
-    if (waitOn(rec, r.card.id, { who: 'joe', what: `merge refused twice: ${last}`, now, link: pr != null ? `PR ${pr}` : undefined }).ok) {
-      alert(`card ${r.card.id}: the merge was refused twice for the same reason (${last})`);
-      out.push([r.card.id, 'waiting on joe']);
-    }
-  }
+  const asked = askOnRepeat(rec, r.card.id, { now, alert, pr: rec.read('merge', id)?.doc?.pr });
+  if (asked) out.push(asked);
   return out;
 }
 
@@ -201,10 +233,16 @@ function prOf(rec, head) {
  * verdict for the head it has now, counted from the review sessions' own files (M9 verdictFor), and the Merge Gate
  * counts them again. The Record's verdict rows are not proof, so the Dispatcher does not read them.
  */
-export function requestMerges({ rec, rules, now, b, running = [], startsHeld = null, missing = [] }) {
+export function requestMerges({ rec, rules, now, b, running = [], startsHeld = null, missing = [], alert = () => {} }) {
   const done = [];
   for (const { id, rev, doc } of rec.list('card')) {
     if (!READY_TO_MERGE.includes(doc.state)) continue;
+    // The same refusal twice in a row: Joe is asked, and no new request is made (L110 m-1).
+    if (refusedTwice(doc)) {
+      const pr = doc.head ? prOf(rec, doc.head) : null;
+      done.push(askOnRepeat(rec, id, { now, alert, pr: typeof pr === 'number' ? pr : null }));
+      continue;
+    }
     // The card must name its own head (audit 0b-6 r2 MIN-9): no head is no merge.
     if (!doc.head) { done.push([id, 'not ready: the card names no head']); continue; }
     const session = workerSession(rec, id);

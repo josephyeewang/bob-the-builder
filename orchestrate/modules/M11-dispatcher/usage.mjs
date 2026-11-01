@@ -1,7 +1,8 @@
 // Usage bands (R-0b-67; design v4 §5.4, rail A8, G3; review 0b-6 M1–M5, M8, M23, m14, m17; lead L13, L14).
 //
-// Reads the record fact `usage-<account>` that Sensors writes (lane 3, the M5 contract):
-//   { account, h5: { used_pct, resets_at }, week: { used_pct, resets_at }, observed_at, source }
+// Reads the record fact `usage-<account>` that the Sensors (M12) write, through sensorsFact (only a reading Sensors
+// made counts). The fields read are READ_FACTS' (read-facts.mjs, L89):
+//   { account, h5: { used_pct, resets_at }, week: { used_pct, resets_at }, observed_at }
 // and turns it into two separate values (M3): `band` (green | amber | red | unknown), which Joe's own
 // tabs read, and `own_building` (open | amber | full | unknown), which gates only the work the
 // Dispatcher itself starts. Writing red into `band` at the reserve line would stop Joe's tabs too.

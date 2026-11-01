@@ -315,7 +315,8 @@ export async function gatePass(ctx) {
     const reading = prReading(pr);
     const final = reading.merged || reading.state === 'closed';
     let limit = NaN;
-    try { limit = minutes(ctx.rules, KEYS.mergingOpenMaxMin); } catch { limit = NaN; }
+    // A per-product key: the real engine answers it only for a named product (L110 M-1).
+    try { limit = minutes(ctx.rules, KEYS.mergingOpenMaxMin, { product: ctx.product }); } catch { limit = NaN; }
     const tooLong = !final && openTooLong(record, m.id, now, limit);
     if (!final && !tooLong) { step(m, 'outcome_unknown', { reasons: [Number.isFinite(limit) ? 'the pull request is still open' : `the pull request is still open, and the rules have no ${KEYS.mergingOpenMaxMin}`] }); return; }
     const out = settleMerge({ record, alert, now }, m.id, { pr: reading, reason: 'interrupted', openTooLong: tooLong });

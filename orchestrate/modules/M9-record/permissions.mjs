@@ -25,11 +25,15 @@ export const WRITER_FIELDS = Object.freeze(['round']);
 //   reviewer_starts  how many review requests in a row failed to start a reviewer (two → the owner is asked)
 //   review_requests  how many review requests the Dispatcher has made for the card: it goes up on every request, so the
 //                    write always changes something and the card's write time (the next request's clock) moves (L85 m-1)
-//   merge_refusals   the reasons the gate refused this card's merges (the same reason twice → the owner is asked)
+//   merge_refusals   the reasons the gate refused this card's merges (the same reason twice in a row → the owner is
+//                    asked, M6 refusedTwice)
+//   merge_asks       how many of those reasons the owner has been asked about: the Dispatcher sets it to the list's
+//                    length when it asks, so one repeat is asked about once, never on every pass (L110 m-1)
 export const ATTEMPTS = Object.freeze({
   reviewer_starts: Object.freeze({ writer: 'dispatcher', shape: 'count' }),
   review_requests: Object.freeze({ writer: 'dispatcher', shape: 'count' }),
   merge_refusals: Object.freeze({ writer: 'merge_gate', shape: 'reasons' }),
+  merge_asks: Object.freeze({ writer: 'dispatcher', shape: 'count' }),
 });
 
 // Fact ids by family (L74): each role may create a fact only under its own families, and may change only a fact it
