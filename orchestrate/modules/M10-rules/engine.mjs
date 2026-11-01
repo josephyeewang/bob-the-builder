@@ -29,6 +29,10 @@ export const MAC_MIN = Object.freeze(['caps.editing_per_mac', 'caps.scripts_per_
   'usage.bands.*.*', 'usage.no_tier1_prod_above', 'usage.stale_after_min']);
 export const MAC_MAX = Object.freeze(['usage.reserve_pct.*', 'claude_code.required_minimum']);
 export const MAC_MATCH = Object.freeze(['claude_code.pin', 'models.*', 'accounts.current', 'accounts.joe.tz']);
+// Lists read for the whole Mac, combined strictest-wins: only what every product's list names (L96). usage.red_runs is
+// the kinds of session that may still start in the red band; the band is the account's, not one product's, so a read
+// with no product answers it. An item one product leaves out is held for all.
+export const MAC_LIST_ALL = Object.freeze(['usage.red_runs']);
 
 export const LANES = Object.freeze(['lead', 'docs', 'product']);
 export const REVERSED_AUDIT = Object.freeze(['failure', 'success', 'none']);
@@ -122,11 +126,15 @@ export function makeEngine({ products, rulesState, productState, running, rolesD
     const vals = m.all.map((pol) => at(pol, key));
     if (vals.some((v) => v === undefined || v === null)) return undefined;
     if (matches(MAC_MATCH, key)) return vals[0];
+    if (matches(MAC_LIST_ALL, key)) {
+      if (!vals.every((v) => Array.isArray(v) && v.every((x) => typeof x === 'string' && x))) return undefined;
+      return Object.freeze(vals[0].filter((x, i, a) => a.indexOf(x) === i && vals.every((v) => v.includes(x))));
+    }
     if (key === 'claude_code.required_minimum') return vals.reduce((a, b) => (compareVersions(a, b) >= 0 ? a : b));
     if (vals.some((v) => typeof v !== 'number')) return undefined;
     return matches(MAC_MIN, key) ? Math.min(...vals) : Math.max(...vals);
   }
-  const isMacKey = (key) => matches(MAC_MIN, key) || matches(MAC_MAX, key) || matches(MAC_MATCH, key);
+  const isMacKey = (key) => matches(MAC_MIN, key) || matches(MAC_MAX, key) || matches(MAC_MATCH, key) || matches(MAC_LIST_ALL, key);
 
   function roles(pin) {
     if (!rolesByPin.has(pin)) rolesByPin.set(pin, loadRoles(rolesDir, { pin }));

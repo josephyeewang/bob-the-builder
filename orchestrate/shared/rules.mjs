@@ -11,7 +11,9 @@
 //   const rules = makeRules(impl);
 //   const d = rules.may('push_branch', { product, card, files });   // → { decision, tier?, reason, rev }
 //   if (d.decision !== 'allow') refuse(d.reason);
-//   rules.get('caps.editing_per_mac', { product })                  // → a number from the rules, or undefined
+//   rules.get('caps.editing_per_mac', { product })                  // → the value as the rules hold it, or undefined
+//   rules.num('claims.stuck_min', { product })                      // → a whole number, or undefined (L96)
+//   rules.flag('product.onboarded', { product })                    // → true or false, or undefined (L96)
 //   rules.classify(change)                                          // → { tier, risky: [...], reasons, protected } (D7)
 //     change = { product, files: [{ path, previous_path?, status: added|modified|removed|renamed|copied, mode?,
 //                added_lines?, removed_lines? }], truncated?, declared_tier?, labels? }
@@ -19,6 +21,9 @@
 //     dropped (round 2, R2-M10). The GitHub-side checker reads the parent commit's rules through M10's
 //     classifyWithRulesText instead.
 //   Gate only on may(). get() is for display and sizing; an undefined get() means "refuse", never "no limit".
+//   The rules file is text, and its reader converts only some keys, so get() can hand back "30" or "true" (L96). Every
+//   number and every true/false a module reads goes through num() and flag(); get() is for text, maps and lists only.
+//   orchestrate/test/rules-typed-reads.test.mjs fails on a module that checks a get() value as a number or a flag.
 //   rules.rev                                                      // the loaded rules version, for diary lines
 
 export const ALLOW = 'allow';
@@ -44,6 +49,23 @@ export const RISKY_CLASSES = Object.freeze(['production_data', 'schema', 'protec
 // Merge Gate tests membership here; it never parses reason text.
 export const HOLD_REASONS = Object.freeze(['held_tier1_hours', 'rules_not_adopted']);
 
+// The one conversion for a rules number or flag (L96). A number is a whole number: a safe integer the reader already
+// converted, or text that is exactly an optional minus and digits. Anything else ("3x", "1.5", " 3", "", 3.5) is
+// missing, so the caller refuses as it does for a key that isn't there. A flag is exactly true or false, as the
+// reader's text or as a value; "yes", "True", 1 and "" are missing.
+const WHOLE = /^-?\d+$/;
+export function wholeNumber(v) {
+  if (typeof v === 'number') return Number.isSafeInteger(v) ? v + 0 : undefined;
+  if (typeof v !== 'string' || !WHOLE.test(v)) return undefined;
+  const n = Number(v);
+  return Number.isSafeInteger(n) ? n + 0 : undefined;   // + 0 turns -0 into 0
+}
+export function exactFlag(v) {
+  if (v === true || v === 'true') return true;
+  if (v === false || v === 'false') return false;
+  return undefined;
+}
+
 const errText = (e) => { try { return String(e?.message ?? e); } catch { return 'unreadable error'; } };
 
 export function allow(reason = 'allowed') { return { decision: ALLOW, reason }; }
@@ -58,6 +80,7 @@ export function isDecision(d) {
 }
 
 // Wrap an implementation { may(action, subject), get(key, opts), classify(change), rev } so every call fails closed.
+// num() and flag() are built here over the implementation's get(), so a fake and the real engine convert the same way.
 export function makeRules(impl) {
   const rev = () => { try { return impl?.rev ?? null; } catch { return null; } };
   return Object.freeze({
@@ -75,6 +98,12 @@ export function makeRules(impl) {
     },
     get(key, opts = {}) {
       try { return impl.get(key, opts); } catch { return undefined; }
+    },
+    num(key, opts = {}) {
+      try { return wholeNumber(impl.get(key, opts)); } catch { return undefined; }
+    },
+    flag(key, opts = {}) {
+      try { return exactFlag(impl.get(key, opts)); } catch { return undefined; }
     },
     // A change the rules can't classify counts as risky (D7), so a failure here is "unclassifiable", Tier 1.
     // Any risky class or protected path makes it Tier 1, whatever the implementation said (R2-m2).
