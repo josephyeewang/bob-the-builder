@@ -4,6 +4,7 @@
 //
 // start(x) gets from the runner (review-runner.mjs `runnerPass`, filled in by review-runner-main.mjs `realPorts`):
 //   role, card, head, sessionId, outbox, env, earlier   the session, as the runner made it
+//   packageDir                                          <root>/packages/<session>: the runner's folder the package goes in
 //   claudeBin                                           the pinned claude, inside the installed copy (checked)
 //   copy, makeCopy()                                    the review copy's one path, <reviewCopies>/<session> (the same
 //                                                       path the runner removes once the session's ended record is
@@ -15,7 +16,9 @@
 // other settings source, and returns claude's own process id (L66), since it spawns the pinned claude itself.
 // `ok: false` means claude was never spawned (L71 point 2).
 //
-// The prompt and the review package are M5's (R-0b-144): the package is worked out in the review copy once it is made.
+// The prompt and the review package are M5's (R-0b-144): the package is worked out in the review copy once it is made,
+// and written into packageDir, never into the copy (M-1 (c), L83). Every answer once it is written carries its
+// package_sha256, so the runner pins it whether or not claude starts.
 
 import { FLAGS as F } from './settings-names.mjs';
 import { DESIGN_PROFILES } from './role-profiles.mjs';
@@ -29,12 +32,14 @@ export async function start(x) {
   if (!profile) return refuse(`${x?.role} has no role profile`);
   let made; try { made = await x.makeCopy(); } catch (e) { made = refuse(e?.message ?? String(e)); }
   if (!made?.ok) return refuse(`the review copy: ${made?.reason ?? 'not made'}`);
-  const pkg = await (x.packageFor ?? reviewPackage)({ copy: x.copy, head: x.head });
+  const pkg = await (x.packageFor ?? reviewPackage)({ copy: x.copy, head: x.head, dir: x.packageDir });
   if (!pkg?.ok) return refuse(`the review package: ${pkg?.reason ?? 'not made'}`);
+  const sha = { package_sha256: pkg.diffSha256 };
+  const no = (reason) => ({ ...refuse(reason), ...sha });
   let text;
-  try { text = reviewerPrompt({ ...x, pkg }); } catch (e) { return refuse(`the prompt: ${e?.message ?? e}`); }
+  try { text = reviewerPrompt({ ...x, pkg }); } catch (e) { return no(`the prompt: ${e?.message ?? e}`); }
   const s = x.settingsFor(x.copy);
-  if (!s?.ok) return refuse(`the settings: ${s?.reason ?? 'not made'}`);
+  if (!s?.ok) return no(`the settings: ${s?.reason ?? 'not made'}`);
   const args = [F.print, F.outputFormat, F.streamJson, F.verbose, F.settings, s.file, F.sessionId, x.sessionId,
     F.strictMcpConfig, F.mcpConfig, '{"mcpServers":{}}', F.tools, profile.tools.join(','), F.permissionMode, profile.mode];
   if (profile.restricted) args.push(F.restricted);
@@ -42,14 +47,14 @@ export async function start(x) {
   let child;
   try {
     child = x.spawn(x.claudeBin, args, { cwd: x.copy, env: { PATH: '/usr/bin:/bin:/usr/sbin:/sbin', HOME: process.env.HOME, ...x.env }, detached: true, stdio: 'ignore' });
-  } catch (e) { return refuse(`claude could not be spawned (${e?.code ?? e?.message})`); }
+  } catch (e) { return no(`claude could not be spawned (${e?.code ?? e?.message})`); }
   const pid = await new Promise((res) => {
     if (Number.isInteger(child?.pid)) { res(child.pid); return; }
     child?.once?.('spawn', () => res(child.pid));
     child?.once?.('error', () => res(null));
     if (!child?.once) res(null);
   });
-  if (!Number.isInteger(pid)) return refuse('claude could not be spawned');
+  if (!Number.isInteger(pid)) return no('claude could not be spawned');
   child.unref?.();
-  return { ok: true, pid };
+  return { ok: true, pid, ...sha };
 }

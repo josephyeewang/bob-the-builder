@@ -7,6 +7,7 @@ import { FLAGS as F } from './settings-names.mjs';
 import { DESIGN_PROFILES } from './role-profiles.mjs';
 
 const HEAD = 'a'.repeat(40);
+const PKG_SHA = 'f'.repeat(64);
 
 // A fake claude: a child that reports its pid once spawned, or fails to spawn.
 function fakeSpawn({ pid = 4242, fail = false } = {}) {
@@ -32,7 +33,8 @@ function x(over = {}) {
       claudeBin: '/i/bin/claude', copy: '/rc/S-1', spawn: sp.spawn,
       makeCopy: async () => { made.push('/rc/S-1'); return { ok: true }; },
       settingsFor: (dir) => { settings.push(dir); return { ok: true, file: `/r/settings/S-1.json` }; },
-      packageFor: async ({ copy, head }) => ({ ok: true, base: 'b'.repeat(40), head, files: [{ status: 'M', path: 'a.txt' }], diffFile: `${copy}/.git/orchestrate-review/change.diff`, diffBytes: 10 }),
+      packageDir: '/r/packages/S-1',
+      packageFor: async ({ copy, head, dir }) => { made.push(`package ${copy} -> ${dir}`); return { ok: true, base: 'b'.repeat(40), head, files: [{ status: 'M', path: 'a.txt' }], diffFile: `${dir}/change.diff`, diffBytes: 10, diffSha256: PKG_SHA }; },
       ...over,
     },
   };
@@ -45,8 +47,8 @@ test('R-0b-163 (L78): the wiring exports start and nothing else', () => {
 test('R-0b-163 planted: claude is launched with --settings naming the file the runner\'s settingsFor wrote, once, and no other settings source', async () => {
   const w = x();
   const r = await wiring.start(w.x);
-  assert.deepEqual(r, { ok: true, pid: 4242 });
-  assert.deepEqual(w.made, ['/rc/S-1'], 'the review copy is made first');
+  assert.deepEqual(r, { ok: true, pid: 4242, package_sha256: PKG_SHA }, 'the package sha256 goes back for the runner to pin');
+  assert.deepEqual(w.made, ['/rc/S-1', 'package /rc/S-1 -> /r/packages/S-1'], 'the review copy is made first, then the package goes in the runner\'s folder');
   assert.deepEqual(w.settings, ['/rc/S-1'], 'the settings name that same copy');
   assert.equal(w.calls.length, 1);
   const { bin, args, opts, child } = w.calls[0];
@@ -78,7 +80,7 @@ test('R-0b-163: a start that never spawns claude says so (ok false), and no copy
   assert.match((await wiring.start(noSettings.x)).reason, /the settings: template/);
   assert.equal(noSettings.calls.length, 0);
   const failed = fakeSpawn({ fail: true });
-  assert.deepEqual(await wiring.start(x({ spawn: failed.spawn }).x), { ok: false, reason: 'claude could not be spawned' });
+  assert.deepEqual(await wiring.start(x({ spawn: failed.spawn }).x), { ok: false, reason: 'claude could not be spawned', package_sha256: PKG_SHA }, 'once the package is written its sha256 goes back too');
   assert.match((await wiring.start(x({ spawn: () => { throw Object.assign(new Error('x'), { code: 'EACCES' }); } }).x)).reason, /could not be spawned \(EACCES\)/);
 });
 

@@ -9,6 +9,7 @@ import { join } from 'node:path';
 import { runnerPass, readReviewStatus, needsRole, rolesFor, RETRY_MS, INTAKE_WAIT_MS, SWEEP_AFTER_MS, MAX_FAILED_STARTS, STATUS_STALE_MS, MAX_REQUEST_BYTES, MAX_STARTS_PER_PASS, MAX_PENDING, CARD_ID, readRequest, earlierBlock, outboxLeft } from './review-runner.mjs';
 import { PASSES, headReviews, runnerEnded, runnerLaunchFor, runnerLaunches, sessionVerdict, worstVerdict } from '../../M9-record/outbox.mjs';
 import { tempDir } from '../../../shared/test-tmp.mjs';
+import { createHash } from 'node:crypto';
 
 const ME = process.getuid();
 const OTHER = ME + 1;
@@ -20,6 +21,13 @@ const TREE2 = 'd'.repeat(40);
 const T0 = Date.parse('2026-10-31T12:00:00Z');
 const MIN = 60_000;
 const CLAUDE = '/pinned/claude';
+// What the real wiring does before it spawns claude (M5 reviewPackage, M-1 (c)): it writes the review package into the
+// runner's packages/<session> folder and hands back its sha256, which the runner pins.
+function pkg(x, diff = `diff for ${x.sessionId}\n`) {
+  mkdirSync(x.packageDir, { mode: 0o755 });
+  writeFileSync(join(x.packageDir, 'change.diff'), diff, { mode: 0o644, flag: 'wx' });
+  return { package_sha256: createHash('sha256').update(diff).digest('hex') };
+}
 
 function world(over = {}) {
   const base = tempDir('m4-runner-');
@@ -51,7 +59,7 @@ function world(over = {}) {
     setAsideByJoe: () => taps.splice(0),
     sessions: async () => live.slice(),
     stop: async (s) => { stops.push(s); const i = live.findIndex((x) => x.pid === s.pid); if (i >= 0) live.splice(i, 1); },
-    start: async (x) => { starts.push(x); const p = ++pid; live.push({ pid: p, sessionId: x.sessionId }); return { ok: true, pid: p }; },
+    start: async (x) => { starts.push(x); const p = ++pid; live.push({ pid: p, sessionId: x.sessionId }); return { ok: true, pid: p, ...pkg(x) }; },
     accountInUse: () => 'a',
     handedIn: () => ({ ok: false, none: true }),
     verdictTaken: () => ({ ok: true }),
@@ -246,7 +254,7 @@ test('L68 planted: a verdict that can\'t be counted holds the head: no new revie
 
 test('L66 pid contract: a start counts only when its pid is claude\'s, and nothing but claude is ever stopped', async () => {
   // The start returns the launcher's pid (not claude's): the start fails, and nothing is counted as running.
-  const w = await ready({ start: async () => ({ ok: true, pid: 4242 }) });
+  const w = await ready({ start: async (x) => ({ ok: true, pid: 4242, ...pkg(x) }) });
   w.ask();
   const r = await runnerPass(w.ctx);
   refusedFor(r, /the reviewer start gave process 4242, which is not claude; the session is held until the runner marks it ended/);
@@ -356,7 +364,7 @@ test('L68: every session the runner launched is marked ended: when it ends, or b
 
   // A start whose pid isn't claude's leaves its launch record (the session may have started): the sweep marks it ended
   // once its launch is 5 minutes old, on a pass where no live claude of review's is a stray.
-  const v = await ready({ start: async (x) => { v.starts.push(x); v.live.push({ pid: 7000, sessionId: x.sessionId }); return { ok: true, pid: 4242 }; } });
+  const v = await ready({ start: async (x) => { v.starts.push(x); v.live.push({ pid: 7000, sessionId: x.sessionId }); return { ok: true, pid: 4242, ...pkg(x) }; } });
   v.ctx.processName = (p) => (p === 7000 ? `${CLAUDE} --session-id S-1` : null);
   v.ask();
   refusedFor(await runnerPass(v.ctx), /the reviewer start gave process 4242, which is not claude; the session is held until the runner marks it ended/);
@@ -372,7 +380,7 @@ test('L68: every session the runner launched is marked ended: when it ends, or b
   assert.equal((await runnerPass(v.ctx)).alerts.length, 0, 'told once');
 
   // A stray that can't be stopped holds the sweep back; a young launch isn't swept; a running one never is.
-  const u = await ready({ start: async () => ({ ok: true, pid: 4242 }) });
+  const u = await ready({ start: async (x) => ({ ok: true, pid: 4242, ...pkg(x) }) });
   u.ask(); await runnerPass(u.ctx);
   await runnerPass(u.ctx);
   assert.equal(u.ended('S-1').none, true, 'under 5 minutes old');
@@ -486,7 +494,7 @@ test('L69 planted: a session that ends with no verdict holds the head; only Joe\
   const v = await ready({ start: async () => ({ ok: false, reason: 'claude would not start' }) });
   v.ask();
   refusedFor(await runnerPass(v.ctx), /could not be started: claude would not start/);
-  v.ctx.start = async (x) => { v.starts.push(x); const p = 5555; v.live.push({ pid: p, sessionId: x.sessionId }); return { ok: true, pid: p }; };
+  v.ctx.start = async (x) => { v.starts.push(x); const p = 5555; v.live.push({ pid: p, sessionId: x.sessionId }); return { ok: true, pid: p, ...pkg(x) }; };
   v.clock.t += RETRY_MS;
   v.ask();
   assert.equal((await runnerPass(v.ctx)).started.length, 1);
@@ -818,7 +826,7 @@ test('L70 P15 planted: with the runner\'s memory of a start wiped, its launch re
 // session id. Otherwise it ran: a file in the outbox makes it an end; a live claude is followed as the runner's own.
 test('L70 planted: a failed start that left a file in its outbox is an end, never tried again', async () => {
   let tries = 0;
-  const w = await ready({ start: async (x) => { tries += 1; w.starts.push(x); writeFileSync(join(x.outbox, 'verdict.md'), failing(), { mode: 0o644 }); return { ok: false, reason: 'it fell over' }; } });
+  const w = await ready({ start: async (x) => { tries += 1; w.starts.push(x); writeFileSync(join(x.outbox, 'verdict.md'), failing(), { mode: 0o644 }); return { ok: false, reason: 'it fell over', ...pkg(x) }; } });
   w.ask();
   let r = await runnerPass(w.ctx);
   refusedFor(r, /the reviewer start said it failed \(it fell over\), but the session ran \(it left 1 file in its outbox: verdict\.md \(it says fail\)\); it counts as a start/);
@@ -834,7 +842,7 @@ test('L70 planted: a failed start that left a file in its outbox is an end, neve
 });
 
 test('L70 planted: a failed start whose claude is live is followed as the runner\'s own; an unreadable session list holds it', async () => {
-  const w = await ready({ start: async (x) => { w.starts.push(x); w.live.push({ pid: 4242, sessionId: x.sessionId }); return { ok: false, reason: 'the launcher timed out' }; } });
+  const w = await ready({ start: async (x) => { w.starts.push(x); w.live.push({ pid: 4242, sessionId: x.sessionId }); return { ok: false, reason: 'the launcher timed out', ...pkg(x) }; } });
   w.ask();
   let r = await runnerPass(w.ctx);
   refusedFor(r, /the reviewer start said it failed \(the launcher timed out\), but the session ran \(claude 4242 carries its id\); it counts as a start/);
@@ -847,7 +855,7 @@ test('L70 planted: a failed start whose claude is live is followed as the runner
   assert.equal(w.ended('S-1').ended.verdict_sha256, 'none');
   // The session list can't be read just after the start: it may have run, so it is held, not tried again.
   let broken = false;
-  const v = await ready({ start: async (x) => { v.starts.push(x); broken = true; return { ok: false, reason: 'no pid' }; } });
+  const v = await ready({ start: async (x) => { v.starts.push(x); broken = true; return { ok: false, reason: 'no pid', ...pkg(x) }; } });
   const list = v.ctx.sessions;
   v.ctx.sessions = async () => { if (broken) { broken = false; throw new Error('ps failed'); } return list(); };
   v.ask();
@@ -995,7 +1003,7 @@ test('L71 repro (c) planted: an outbox with only .verdict-S-1.md saying fail get
 // read first, then the outbox, so the file is seen: an end, with the fail's sha, and the gate refuses.
 test('L71 repro (b) planted: a fail written during the session list after a failed start is seen; the record stays and the gate refuses', async () => {
   let during = null;
-  const w = await ready({ handedIn: (x) => realHandedIn(w)(x), start: async (x) => { w.starts.push(x); during = x.outbox; return { ok: false, reason: 'it fell over' }; } });
+  const w = await ready({ handedIn: (x) => realHandedIn(w)(x), start: async (x) => { w.starts.push(x); during = x.outbox; return { ok: false, reason: 'it fell over', ...pkg(x) }; } });
   const list = w.ctx.sessions;
   w.ctx.sessions = async () => { if (during) { writeFileSync(join(during, 'verdict-S-1.md'), failing(), { mode: 0o644 }); during = null; } return list(); };
   w.ask();
@@ -1035,7 +1043,7 @@ test('L71 repro (b) planted: a never-ran start keeps its record; a fail that sho
 
 // L71 point 1 on never-ran: a failed start whose outbox fails its checks is no never-ran; it is an end.
 test('L71 planted: a failed start whose outbox others can write is an end, never tried again', async () => {
-  const w = await ready({ start: async (x) => { w.starts.push(x); chmodSync(x.outbox, 0o777); return { ok: false, reason: 'it fell over' }; } });
+  const w = await ready({ start: async (x) => { w.starts.push(x); chmodSync(x.outbox, 0o777); return { ok: false, reason: 'it fell over', ...pkg(x) }; } });
   w.ask();
   refusedFor(await runnerPass(w.ctx), /but the session ran \(its outbox fails its checks \(the reviewer session outbox folder can be written by others than the review user\)\); it counts as a start/);
   assert.equal(w.ended('S-1').ended.verdict_sha256, 'refused');
@@ -1121,4 +1129,70 @@ test('R-0b-163 planted: removeCopy is called only after the ended record exists,
   assert.equal(r.ok, true, r.error);
   assert.equal(v.ended('S-1').ended.how, 'ended');
   assert.ok(r.alerts.some((a) => /The review copy of session S-1 could not be removed \(EBUSY\); it is left in place and needs removing by hand/.test(a.text)), r.alerts.map((a) => a.text).join(' | '));
+});
+
+// ---- L83, audit R-0b-147 M-1 (c): the review package is the runner's, and is checked before a verdict counts ----
+
+const passingNow = () => `${JSON.stringify({ entity: 'verdict', card: 'C-1', expectRev: 0, fields: { head: HEAD, pass: true, checklist: { correct: 'clean', well_built: 'clean', works_for_user: 'clean', holds_up: 'clean' }, notes: [] } })}\n`;
+// One session that hands in a pass; `spoil` does what the session (or the change's tests) did to its package meanwhile.
+async function packageRun(spoil, start) {
+  const w = await ready({ handedIn: (x) => realHandedIn(w)(x), ...(start ? { start: (x) => start(w, x) } : {}) });
+  w.ask();
+  const r1 = await runnerPass(w.ctx);
+  assert.deepEqual(r1.started.map((x) => x.session_id), ['S-1']);
+  writeFileSync(join(w.outboxRoot, 'reviewer', 'S-1', 'verdict-S-1.md'), passingNow(), { mode: 0o644 });
+  spoil(w, join(w.root, 'packages', 'S-1'));
+  w.end('S-1');
+  const r = await runnerPass(w.ctx);
+  return { w, r };
+}
+
+test('L83 M-1 (c): the package sits in the runner\'s packages folder, pinned, and an untouched one lets the pass count', async () => {
+  const { w } = await packageRun(() => {});
+  assert.equal(w.starts[0].packageDir, join(w.root, 'packages', 'S-1'), 'the runner names the folder, outside the copy');
+  assert.equal((lstatSync(join(w.root, 'packages')).mode & 0o7777), 0o755);
+  const pin = readFileSync(join(w.root, 'packages', 'S-1.sha256'), 'utf8').trim();
+  assert.equal(pin, createHash('sha256').update('diff for S-1\n').digest('hex'));
+  assert.match(w.ended('S-1').ended.verdict_sha256, /^[0-9a-f]{64}$/, 'the pass counts');
+  assert.equal(gateSays(w).worst, null);
+});
+
+test('L83 M-1 (c) planted: a test in the branch rewrites the package, and the verdict does not count', async () => {
+  const { w, r } = await packageRun((_w, dir) => writeFileSync(join(dir, 'change.diff'), 'a smaller, kinder diff\n'));
+  assert.equal(w.ended('S-1').ended.verdict_sha256, 'refused');
+  assert.match(r.alerts.find((a) => a.id === 'held-S-1').text, /the review package changed while the session ran/);
+  assert.match(gateSays(w).worst, /the reviewer session S-1's verdict can't be counted, so it counts as a failure/);
+});
+
+test('L83 M-1 (c) planted: a package swapped for a link, removed, or with no pin: the verdict does not count', async () => {
+  const cases = [
+    [(w, dir) => { const o = join(w.base, 'other.diff'); writeFileSync(o, 'diff for S-1\n'); unlinkSync(join(dir, 'change.diff')); symlinkSync(o, join(dir, 'change.diff')); }, /the review package's diff: it is a link/],
+    [(w, dir) => unlinkSync(join(dir, 'change.diff')), /the review package's diff: it is gone/],
+    [(w, dir) => chmodSync(join(dir, 'change.diff'), 0o666), /the review package's diff: it can be written by others/],
+    [(w) => unlinkSync(join(w.root, 'packages', 'S-1.sha256')), /has no pin the runner can read \(it is gone\)/],
+    [(w) => writeFileSync(join(w.root, 'packages', 'S-1.sha256'), `${'0'.repeat(64)}\n`), /the review package changed while the session ran/],
+  ];
+  for (const [spoil, re] of cases) {
+    const { w, r } = await packageRun(spoil);
+    assert.equal(w.ended('S-1').ended.verdict_sha256, 'refused', String(re));
+    assert.match(r.alerts.find((a) => a.id === 'held-S-1').text, re);
+  }
+  // A start that hands back no sha256 has nothing pinned: fail closed.
+  const { w, r } = await packageRun(() => {}, (v, x) => { v.starts.push(x); v.live.push({ pid: 4100, sessionId: x.sessionId }); return { ok: true, pid: 4100 }; });
+  assert.equal(existsSync(join(w.root, 'packages', 'S-1.sha256')), false);
+  assert.equal(w.ended('S-1').ended.verdict_sha256, 'refused');
+  assert.match(r.alerts.find((a) => a.id === 'held-S-1').text, /has no pin the runner can read/);
+});
+
+test('L83 M-1 (c): a session the runner lost track of is swept, and its pinned package still lets its pass count', async () => {
+  const w = await ready({ handedIn: (x) => realHandedIn(w)(x) });
+  w.ask();
+  await runnerPass(w.ctx);
+  writeFileSync(join(w.outboxRoot, 'reviewer', 'S-1', 'verdict-S-1.md'), passingNow(), { mode: 0o644 });
+  editState(w, (s) => { s.running = []; });   // the memory lost it
+  w.end('S-1');
+  w.clock.t += SWEEP_AFTER_MS + MIN;
+  await runnerPass(w.ctx);
+  assert.equal(w.ended('S-1').ended.how, 'swept');
+  assert.match(w.ended('S-1').ended.verdict_sha256, /^[0-9a-f]{64}$/);
 });
