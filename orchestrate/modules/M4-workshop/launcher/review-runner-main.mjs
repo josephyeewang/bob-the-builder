@@ -31,8 +31,11 @@
 // gets `claudeBin`, `node` and `hooksDir` (checked above) to run and to render the settings with, and `earlier`: the
 // card's earlier failing verdicts for this role on other trees, [{ session_id, head, notes }], which the reviewer's
 // prompt must include (L69 point 4), as quoted data from an earlier reviewer and never as instructions: the wiring
-// renders them with `earlierBlock` (review-runner.mjs, L70 point 5). Exit 0 when the pass ran clean, 1 when it refused
-// or could not run.
+// renders them with `earlierBlock` (review-runner.mjs, L70 point 5; since L71 C3 the runner passes the rendered block, a
+// string the wiring puts in the prompt as it is). `ok: false` from start means claude was never spawned (L71 point 2).
+// Joe's taps: only a plain handler for Joe's button, running as Joe, writes `ownerTaps`; the Front Door's own tools get
+// a deny rule on that folder, and the handler removes a tap once the status lists it in `taps_read` (L71 points 5, C1).
+// Exit 0 when the pass ran clean, 1 when it refused or could not run.
 
 import { closeSync, constants, fstatSync, lstatSync, openSync, readFileSync, readdirSync, realpathSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
@@ -51,7 +54,13 @@ const ABS = ['installRoot', 'root', 'outboxRoot', 'reviewHome', 'recordRoot', 'm
 const MAX_CARD_BYTES = 1024 * 1024;
 const CHILD_MS = 10_000;
 
-export function readConfig(file) {
+/**
+ * The config, checked. `lstat` and `top` are ports for a test (as for `installProblem`): the runner's folder and review's
+ * outbox root, and every folder above each up to `top` (/), must be root's or the review user's, written by no one
+ * else, and not links (L71 point 1, the item 20(b) rule). A folder the workers' Mac user could write could have the
+ * role folder renamed away, so a fail would read as silence.
+ */
+export function readConfig(file, { lstat = lstatSync, top = '/' } = {}) {
   const c = JSON.parse(readFileSync(file, 'utf8'));
   for (const k of ABS) if (typeof c?.[k] !== 'string' || !isAbsolute(c[k])) throw new Error(`config: ${k} must be an absolute path`);
   if (c.accountCopy !== undefined && (typeof c.accountCopy !== 'string' || !isAbsolute(c.accountCopy))) throw new Error('config: accountCopy must be an absolute path');
@@ -64,7 +73,28 @@ export function readConfig(file) {
   const r = realPath(c.root);
   const o = realPath(c.outboxRoot);
   if (inside(r, o) || inside(o, r)) throw new Error(`config: root (${c.root}) and outboxRoot (${c.outboxRoot}) must be two separate folders, neither inside the other`);
+  const owners = [0, c.uids.reviewer].filter((u) => Number.isInteger(u) && u >= 0);
+  for (const k of ['root', 'outboxRoot']) {
+    const bad = wallProblem(c[k], owners, { lstat, top });
+    if (bad) throw new Error(`config: ${k}: ${bad}`);
+  }
   return c;
+}
+
+// A folder and every folder above it, up to `top`: plain folders (not links) of one of `owners`, written by no one else.
+function wallProblem(path, owners, { lstat, top }) {
+  const p0 = resolve(path);
+  const rel = relative(top, p0);
+  if (!isAbsolute(top) || rel === '..' || rel.startsWith('../') || isAbsolute(rel)) return `${p0} is not under ${top}`;
+  for (let p = p0; ; p = dirname(p)) {
+    const what = p === p0 ? p : `${p}, above it,`;
+    let st; try { st = lstat(p); } catch { return `${what} is missing`; }
+    if (st.isSymbolicLink()) return `${what} is a link (name the folder by its real path)`;
+    if (!st.isDirectory()) return `${what} is not a folder`;
+    if (!owners.includes(st.uid)) return `${what} is not owned by root or the review user`;
+    if (st.mode & 0o022) return `${what} can be written by others`;
+    if (p === top || p === dirname(p)) return null;
+  }
 }
 
 /** A path's real path: its nearest folder that exists, with links resolved, and the rest of the path as given. */
@@ -207,7 +237,8 @@ export function readInstallStamp(installRoot, { owner = 0 } = {}) {
   try { fd = openSync(join(installRoot, STAMP), constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); } catch { return null; }
   try {
     const st = fstatSync(fd);
-    if (!st.isFile() || st.nlink !== 1 || st.uid !== owner || st.mode & 0o022 || st.size > 64) return null;
+    // No check of a second name (L71 point 4): a hard link can't change root's bytes; owner, mode and size stay.
+    if (!st.isFile() || st.uid !== owner || st.mode & 0o022 || st.size > 64) return null;
     const t = readFileSync(fd, 'utf8').trim();
     return /^[0-9a-f]{40}$/.test(t) ? t : null;
   } catch { return null; } finally { closeSync(fd); }

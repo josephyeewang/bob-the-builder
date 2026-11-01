@@ -260,31 +260,34 @@ test('L66 pid contract: the real port reads a process\'s command, and the verdic
   assert.equal(p.claudeBin, '/pinned/claude');
   assert.match(p.processName(process.pid), /node/);
   for (const pid of [0, -1, 1.5, '12']) assert.equal(p.processName(pid), null);
-  // A session with no outbox folder has handed nothing in, and that is a failed try, never a throw.
+  // A session whose outbox folder is gone can't be counted (L71 point 1): never a silence, never a throw.
   const h = p.handedIn({ role: 'reviewer', sessionId: 'S-1', card: 'C-1', head: 'a'.repeat(40) });
   assert.equal(h.ok, false);
-  assert.equal(h.none, true);
-  assert.match(h.reason, /no verdict was handed in \(no outbox folder\)/);
+  assert.equal(h.none, false);
+  assert.match(h.reason, /its outbox folder is gone/);
 });
+
+// The wall check on root and outboxRoot (L71) stood in for: every folder is a plain folder of root's that no one else writes.
+const OPEN_WALLS = { lstat: () => ({ isSymbolicLink: () => false, isDirectory: () => true, uid: 0, mode: 0o40755 }) };
 
 test('L65: the config names every path as a full path', () => {
   const d = tempDir('m4-cfg-');
   const good = { installRoot: '/i', root: '/r', outboxRoot: '/o', reviewHome: '/h', uids: {}, recordRoot: '/x', recordUid: 5, mirror: '/m', claudeBin: '/c', hooksDir: '/i/hooks', ownerHome: '/w', ownerUid: 5, wiring: '/i/w.mjs' };
   writeFileSync(join(d, 'c.json'), JSON.stringify(good));
-  assert.equal(readConfig(join(d, 'c.json')).mirror, '/m');
+  assert.equal(readConfig(join(d, 'c.json'), OPEN_WALLS).mirror, '/m');
   writeFileSync(join(d, 'c.json'), JSON.stringify({ ...good, mirror: 'm' }));
-  assert.throws(() => readConfig(join(d, 'c.json')), /mirror must be an absolute path/);
+  assert.throws(() => readConfig(join(d, 'c.json'), OPEN_WALLS), /mirror must be an absolute path/);
   const { hooksDir, ...noHooks } = good;
   writeFileSync(join(d, 'c.json'), JSON.stringify(noHooks));
-  assert.throws(() => readConfig(join(d, 'c.json')), /hooksDir must be an absolute path/);
+  assert.throws(() => readConfig(join(d, 'c.json'), OPEN_WALLS), /hooksDir must be an absolute path/);
   writeFileSync(join(d, 'c.json'), JSON.stringify({ ...good, recordUid: '5' }));
-  assert.throws(() => readConfig(join(d, 'c.json')), /recordUid must be a uid/);
+  assert.throws(() => readConfig(join(d, 'c.json'), OPEN_WALLS), /recordUid must be a uid/);
 });
 
 test('L68 planted: the runner\'s folder and review\'s outbox are two walls: one inside the other, or the same, is refused', () => {
   const d = realpathSync(tempDir('m4-cfg-'));
   const good = { installRoot: '/i', root: join(d, 'review'), outboxRoot: join(d, 'outbox'), reviewHome: '/h', uids: {}, recordRoot: '/x', recordUid: 5, mirror: '/m', claudeBin: '/c', hooksDir: '/i/hooks', ownerHome: '/w', ownerUid: 5, wiring: '/i/w.mjs' };
-  const cfg = (over) => { writeFileSync(join(d, 'c.json'), JSON.stringify({ ...good, ...over })); return () => readConfig(join(d, 'c.json')); };
+  const cfg = (over) => { writeFileSync(join(d, 'c.json'), JSON.stringify({ ...good, ...over })); return () => readConfig(join(d, 'c.json'), OPEN_WALLS); };
   assert.equal(cfg({})().root, join(d, 'review'), 'two folders side by side');
   assert.equal(cfg({ outboxRoot: join(d, 'review-outbox') })().outboxRoot, join(d, 'review-outbox'), 'a name that only starts the same is not inside');
   const walls = /root .* and outboxRoot .* must be two separate folders, neither inside the other/;
@@ -392,8 +395,55 @@ test('L70 planted: Joe\'s taps are read only as the owner\'s own files, in the o
   // The config names the folder as an absolute path, or not at all.
   const d = realpathSync(tempDir('m4-cfg-'));
   const good = { installRoot: '/i', root: join(d, 'review'), outboxRoot: join(d, 'outbox'), reviewHome: '/h', uids: {}, recordRoot: '/x', recordUid: 5, mirror: '/m', claudeBin: '/c', hooksDir: '/i/hooks', ownerHome: '/w', ownerUid: 5, wiring: '/i/w.mjs' };
-  const cfg = (over) => { writeFileSync(join(d, 'c.json'), JSON.stringify({ ...good, ...over })); return () => readConfig(join(d, 'c.json')); };
+  const cfg = (over) => { writeFileSync(join(d, 'c.json'), JSON.stringify({ ...good, ...over })); return () => readConfig(join(d, 'c.json'), OPEN_WALLS); };
   assert.equal(cfg({})().ownerTaps, undefined);
   assert.equal(cfg({ ownerTaps: '/t' })().ownerTaps, '/t');
   assert.throws(cfg({ ownerTaps: 'taps' }), /ownerTaps must be an absolute path/);
+});
+
+// L71 point 1: the runner's folder and review's outbox root, and every folder above each up to the top, are root's or
+// review's, written by no one else, and not links. The test's user stands in for review; the top is a throwaway folder.
+test('L71 planted: root and outboxRoot, and every folder above them, are root\'s or review\'s alone', () => {
+  const d = realpathSync(tempDir('m4-cfg-'));
+  chmodSync(d, 0o755);
+  const mid = join(d, 'srv');
+  mkdirSync(join(mid, 'review'), { recursive: true });
+  mkdirSync(join(mid, 'outbox'));
+  for (const p of [mid, join(mid, 'review'), join(mid, 'outbox')]) chmodSync(p, 0o755);
+  const uidsOf = (reviewer) => ({ ...Object.fromEntries(['lead', 'worker', 'front_door', 'learning', 'writer', 'incident', 'scout', 'thinking'].map((r) => [r, ME + 1])), reviewer, auditor: reviewer });
+  const good = { installRoot: '/i', root: join(mid, 'review'), outboxRoot: join(mid, 'outbox'), reviewHome: '/h', uids: uidsOf(ME), recordRoot: '/x', recordUid: 5, mirror: '/m', claudeBin: '/c', hooksDir: '/i/hooks', ownerHome: '/w', ownerUid: 5, wiring: '/i/w.mjs' };
+  const cfg = (over = {}, opts = { top: d }) => { writeFileSync(join(d, 'c.json'), JSON.stringify({ ...good, ...over })); return () => readConfig(join(d, 'c.json'), opts); };
+  assert.equal(cfg()().outboxRoot, join(mid, 'outbox'), 'the control: review\'s folders, under review\'s and root\'s');
+  // The outbox root open to others: a worker could rename reviewer/ away.
+  chmodSync(join(mid, 'outbox'), 0o775);
+  assert.throws(cfg(), /config: outboxRoot: .*\/srv\/outbox can be written by others/);
+  chmodSync(join(mid, 'outbox'), 0o755);
+  // A folder above it open to others: the whole outbox could be swapped.
+  chmodSync(mid, 0o777);
+  assert.throws(cfg(), /config: root: .*\/srv, above it, can be written by others/);
+  chmodSync(mid, 0o755);
+  chmodSync(d, 0o775);
+  assert.throws(cfg(), /config: root: .*, above it, can be written by others/, 'up to the top too');
+  chmodSync(d, 0o755);
+  // Owned by someone who is neither root nor review (here: the review uid named is another user's).
+  assert.throws(cfg({ uids: uidsOf(ME + 1) }), /config: root: .*\/srv\/review is not owned by root or the review user/);
+  // A link, the folder or one above it.
+  symlinkSync(join(mid, 'outbox'), join(d, 'outbox-link'));
+  assert.throws(cfg({ outboxRoot: join(d, 'outbox-link') }), /config: outboxRoot: .*outbox-link is a link \(name the folder by its real path\)/);
+  symlinkSync(mid, join(d, 'srv-link'));
+  assert.throws(cfg({ root: join(d, 'srv-link', 'review') }), /config: root: .*srv-link, above it, is a link/);
+  // Missing, or not under the top.
+  assert.throws(cfg({ outboxRoot: join(mid, 'none') }), /config: outboxRoot: .*\/srv\/none is missing/);
+  assert.throws(cfg({}, { top: join(d, 'elsewhere') }), /is not under/);
+  // The real walk, with no ports: a throwaway folder under the shared temp folder is never root's or review's alone.
+  assert.throws(cfg({}, {}), /config: root: /);
+});
+
+// L71 point 4: a second name for the install stamp can't change root's bytes, so it reads the same.
+test('L71 planted: the install stamp reads the same with a second name', () => {
+  const C = 'e'.repeat(40);
+  const d = tempDir('m4-stamp-');
+  writeFileSync(join(d, STAMP), installStamp(C), { mode: 0o644 });
+  linkSync(join(d, STAMP), join(d, 'second-name'));
+  assert.equal(readInstallStamp(d, { owner: ME }), C);
 });

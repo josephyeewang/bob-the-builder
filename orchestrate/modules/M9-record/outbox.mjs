@@ -208,8 +208,10 @@ export const ASIDE_FOLDER = 'set-aside';
 /** The runner's set-aside records folder (L69): sessions Joe set aside with "review again", beside the launch records. */
 export const asideFolderOf = (launchesRoot) => join(dirname(String(launchesRoot)), ASIDE_FOLDER);
 // What an ended record says of the verdict file (L69 point 2): its sha256 when the session ended, `none` when it left no
-// file, `refused` when the file it left could not be counted.
-export const ENDED_VERDICT = /^(?:[0-9a-f]{64}|none|refused)$/;
+// file, `refused` when the file it left could not be counted, `never_ran` when the start failed and claude never ran
+// (L71 point 2: the launch record is kept, so a file that shows up later still counts).
+export const NEVER_RAN = 'never_ran';
+export const ENDED_VERDICT = /^(?:[0-9a-f]{64}|none|refused|never_ran)$/;
 
 function reviewUidOf(uids, uid) {
   return uid !== undefined ? (Number.isInteger(uid) && uid > 0 ? { ok: true, uid } : { ok: false, reason: 'no review user id' }) : reviewUid(uids);
@@ -266,14 +268,19 @@ export function runnerAside({ root, uids, uid, role, card, head, sessionId, fsta
 /**
  * Every session the runner launched for this card at this head, or at any head with the same tree (L69 point 4), each
  * settled from review's own stores (L68, L69). Nothing is read from the Record. For each session, in this order:
- *   1. a set-aside record from Joe → it has no say (`aside`);
+ *   1. a set-aside record from Joe → it has no say (`aside`), but only while its ended record still says `none` and its
+ *      outbox still holds no verdict (L71 C4); otherwise it can't be counted;
  *   2. its ended record, read FIRST: none → not ended, and it blocks whether or not a file is there;
  *   3. the verdict file, which must be the one the ended record names (its sha256): a file changed or gone since the end,
- *      or one that appeared after a session ended with none, can't be counted; `none` with no file is a silent end.
+ *      or one that appeared after a session ended with none, can't be counted; `none` with no file is a silent end. An
+ *      outbox folder that is gone can't be counted either (L71 point 1), never a silence. `never_ran` (L71 point 2) with
+ *      no file → it has no say (`never_ran`); a verdict file that shows up later counts as what it says.
  * `tree` is the head's tree (the Merge Gate reads it from git). Without it, the trees the launch records at this head name
  * stand in. A launch record that fails its checks refuses only the card it belongs to (its own bytes say which, or else
  * its session's ended record or verdict file); one that can't be tied to any card is skipped and listed in `skipped`.
- * → { ok, sessions: [{ role, session_id, head, tree, aside, ended, silent, verdict | null, problem | null }], skipped }
+ * A launch record that fails its checks is never set aside (L71: "review again" is not offered for one).
+ * → { ok, sessions: [{ role, session_id, head, tree, aside, never_ran, ended, silent, verdict | null, problem | null }],
+ *     skipped }
  *   | { ok: false, reason }
  */
 export function headReviews({ launches, outboxRoot, uids, card, head, tree, fstat } = {}) {
@@ -301,24 +308,31 @@ export function headReviews({ launches, outboxRoot, uids, card, head, tree, fsta
     const c = tiedCard(r);
     if (c === null) { skipped.push({ name: r.name, reason: r.reason }); continue; }
     if (c !== card) continue;
-    if (r.sid && runnerAside({ root: asideRoot, uid, sessionId: r.sid, card, role: r.tie?.role, head: r.tie?.head, fstat }).ok) continue;
     return { ok: false, reason: `the launch record ${r.name} of card ${card} fails its checks, so no review of this card can be counted (${r.reason})` };
   }
   const sessions = [];
   for (const l of rl.launches) {
     const d = l.doc;
     if (d.card !== card || !(d.head === head || (d.tree && trees.includes(d.tree)))) continue;
-    const s = { role: d.role, session_id: d.session_id, head: d.head, tree: d.tree ?? null, aside: false, ended: false, silent: false, verdict: null, problem: null };
+    const s = { role: d.role, session_id: d.session_id, head: d.head, tree: d.tree ?? null, aside: false, never_ran: false, ended: false, silent: false, verdict: null, problem: null };
     sessions.push(s);
     const a = runnerAside({ root: asideRoot, uid, role: d.role, card, head: d.head, sessionId: d.session_id, fstat });
-    if (a.ok) { s.aside = true; continue; }
-    if (!a.none) { s.problem = a.reason; continue; }
+    if (!a.ok && !a.none) { s.problem = a.reason; continue; }
     const e = runnerEnded({ root: endedRoot, uid, role: d.role, card, head: d.head, sessionId: d.session_id, fstat });
+    if (a.ok) {
+      // Joe sets aside only a silent end (L71 C4): checked again here, whatever the runner did.
+      const v = sessionVerdict({ outboxRoot, uids, role: d.role, sessionId: d.session_id, card, head: d.head });
+      if (!e.ok || e.ended.verdict_sha256 !== 'none') s.problem = `it was set aside, but ${e.ok ? 'its ended record names a verdict file' : e.none ? 'it has no ended record' : e.reason}; only a silent end can be set aside`;
+      else if (!v.none) s.problem = `it was set aside, but ${v.ok ? 'a verdict file was left after the session ended with none' : v.reason}`;
+      else s.aside = true;
+      continue;
+    }
     if (!e.ok) { if (!e.none) s.problem = e.reason; continue; }
     s.ended = true;
     const want = e.ended.verdict_sha256;
     const v = sessionVerdict({ outboxRoot, uids, role: d.role, sessionId: d.session_id, card, head: d.head });
-    if (want === 'refused') s.problem = `its verdict could not be counted when it ended${v.ok || v.none ? '' : ` (${v.reason})`}`;
+    if (want === NEVER_RAN) { if (v.none) s.never_ran = true; else if (v.ok) s.verdict = v.verdict; else s.problem = v.reason; }
+    else if (want === 'refused') s.problem = `its verdict could not be counted when it ended${v.ok || v.none ? '' : ` (${v.reason})`}`;
     else if (want === 'none') { if (v.none) s.silent = true; else s.problem = v.ok ? 'a verdict file was left after the session ended with none' : v.reason; }
     else if (!v.ok) s.problem = v.none ? 'its verdict file is gone since the session ended' : v.reason;
     else if (v.verdict.sha256 !== want) s.problem = 'its verdict file changed after the session ended; only the version written by the end counts, and it is gone';
@@ -335,13 +349,13 @@ function readLaunchQuiet(root, uid, sid, fstat) {
 }
 
 /**
- * The worst verdict for one role (L68, L69): Joe's set-aside sessions have no say; of the rest, a verdict that can't be
+ * The worst verdict for one role (L68, L69): Joe's set-aside sessions and starts that never ran (L71) have no say; of the rest, a verdict that can't be
  * counted, a session that has not ended (file or not), a session that ended without a verdict (a crash, a context-limit
  * stop or a kill counts too) and a failing verdict each refuse; with `needPass`, so does having no passing session.
  * null when the role passes.
  */
 export function worstVerdict(sessions, role, passes, { needPass = true } = {}) {
-  const mine = (Array.isArray(sessions) ? sessions : []).filter((s) => s?.role === role && s.aside !== true);
+  const mine = (Array.isArray(sessions) ? sessions : []).filter((s) => s?.role === role && s.aside !== true && s.never_ran !== true);
   for (const s of mine) {
     if (s.problem) return `the ${role} session ${s.session_id}'s verdict can't be counted, so it counts as a failure: ${s.problem}`;
     if (s.ended !== true) return `the ${role} session ${s.session_id} has not ended yet, so what it says is not known`;
@@ -484,8 +498,9 @@ export function sessionVerdict({ outboxRoot, uids, role, sessionId, card, head }
     if (typeof sessionId !== 'string' || !SESSION_ID.test(sessionId)) return no('no session id of letters, digits and dashes');
     const dir = join(outboxRoot, role, sessionId);
     let names;
-    // No folder at all is nothing handed in; any other failure to list it is a refusal.
-    try { names = readdirSync(dir).filter((n) => !n.startsWith('.') && kindOf(n) === 'verdict-'); } catch (e) { return e?.code === 'ENOENT' ? no('no verdict was handed in (no outbox folder)', true) : no('its outbox folder could not be listed'); }
+    // The runner makes the outbox folder before the start, so one that is gone (renamed, or its role folder renamed) is
+    // a refusal, never "nothing handed in" (L71 point 1); so is any other failure to list it.
+    try { names = readdirSync(dir).filter((n) => !n.startsWith('.') && kindOf(n) === 'verdict-'); } catch (e) { return no(e?.code === 'ENOENT' ? 'its outbox folder is gone, so what it handed in can\'t be known' : 'its outbox folder could not be listed'); }
     if (!names.length) return no('no verdict was handed in', true);
     if (names.length > 1) return no('more than one verdict file was left, so none counts');
     const f = readOutboxFile({ outboxRoot, uids, tag: { role, sessionId }, file: join(dir, names[0]) });

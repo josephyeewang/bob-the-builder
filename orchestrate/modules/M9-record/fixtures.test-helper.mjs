@@ -114,8 +114,10 @@ export function runCard(env, id, claim) {
 }
 
 // The review runner's launch record for a session (L65): the only launch a verdict counts from.
-// `tree` (L69), when given, is the head's tree: a session counts at every head with that tree.
+// `tree` (L69), when given, is the head's tree: a session counts at every head with that tree. The runner makes the
+// session's outbox folder before the start, so it is made here too (L71: a folder that is gone is not a silence).
 export function runnerLaunch(env, card, sid, role = 'reviewer', head = HEAD, { tree } = {}) {
+  if (env.outRoot) mkdirSync(join(env.outRoot, role, sid), { recursive: true });
   const p = join(env.launchRoot, `${sid}.json`);
   writeFileSync(p, JSON.stringify({ session_id: sid, role, card, head, ...(tree ? { tree } : {}), launched_at: iso(env.clock.t), request_id: `q-${sid}` }), { mode: 0o644, flag: 'wx' });
   chmodSync(p, 0o644);

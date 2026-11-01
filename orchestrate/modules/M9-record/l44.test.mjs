@@ -3,7 +3,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, fstatSync, linkSync, lstatSync, readFileSync, realpathSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, fstatSync, linkSync, lstatSync, readFileSync, realpathSync, renameSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import { setup, product, readyCard, runCard, outboxFile, launch, runnerLaunch, runnerEndedRecord, runnerAsideRecord, CLEAN_CHECKLIST, HEAD, HEAD2, UID, put, must } from './fixtures.test-helper.mjs';
@@ -478,4 +478,75 @@ test('L70 P11 planted: verified with an auditor that ended silent is refused, as
   runnerLaunch(env, 'C-1', 'A-1', 'auditor', HEAD);
   runnerEndedRecord(env, 'C-1', 'A-1', 'auditor', HEAD, { sha: 'none' });
   refused(verify(env), /the auditor session A-1 ended without handing in a verdict, which counts as a failure/);
+});
+
+// ---- Lead call L71 ----
+
+const reviewsOf = (env) => headReviews({ launches: env.launchRoot, outboxRoot: env.outRoot, uids: env.reviewUids, card: 'C-1', head: HEAD });
+const sessionOf = (env, sid) => reviewsOf(env).sessions.find((s) => s.session_id === sid);
+
+// L71 point 1: the runner made the session's outbox folder, so one that is gone is a refusal, never a silence.
+test('L71 planted: an outbox folder gone after a silent end can\'t be counted, never a silence', () => {
+  const { env } = inReview();
+  runnerLaunch(env, 'C-1', 'R-1');
+  runnerEndedRecord(env, 'C-1', 'R-1', 'reviewer', HEAD, { sha: 'none' });
+  assert.equal(sessionOf(env, 'R-1').silent, true, 'the control: an empty folder is a silent end');
+  renameSync(join(env.outRoot, 'reviewer'), join(env.outRoot, 'x'));
+  const s = sessionOf(env, 'R-1');
+  assert.equal(s.silent, false);
+  assert.match(s.problem, /its outbox folder is gone, so what it handed in can't be known/);
+});
+
+// L71 point 2: an ended record of `never_ran` with no file has no say; a file that shows up later counts as it says.
+test('L71 planted: a start that never ran has no say until a verdict shows up; then it counts', () => {
+  const verify = (env) => put(env.review, 'dispatcher', 'card', 'C-1', { state: 'verified' });
+  const { env, hdr } = inReview();
+  runnerLaunch(env, 'C-1', 'R-0');
+  runnerEndedRecord(env, 'C-1', 'R-0', 'reviewer', HEAD, { sha: 'never_ran' });
+  runnerLaunch(env, 'C-1', 'R-1');
+  must(env.review.applyOutbox({ role: 'reviewer', sessionId: 'R-1', card: 'C-1' }, outboxFile(env, 'reviewer', 'R-1', 'verdict-1.md', hdr({ head: HEAD, pass: true }))), 'the pass');
+  runnerEndedRecord(env, 'C-1', 'R-1');
+  assert.equal(sessionOf(env, 'R-0').never_ran, true);
+  must(verify(env), 'a start that never ran has no say');
+  // A failing file that shows up later counts.
+  const { env: e2, hdr: h2 } = inReview();
+  runnerLaunch(e2, 'C-1', 'R-0');
+  runnerEndedRecord(e2, 'C-1', 'R-0', 'reviewer', HEAD, { sha: 'never_ran' });
+  runnerLaunch(e2, 'C-1', 'R-1');
+  must(e2.review.applyOutbox({ role: 'reviewer', sessionId: 'R-1', card: 'C-1' }, outboxFile(e2, 'reviewer', 'R-1', 'verdict-1.md', h2({ head: HEAD, pass: true }))), 'the pass');
+  runnerEndedRecord(e2, 'C-1', 'R-1');
+  outboxFile(e2, 'reviewer', 'R-0', 'verdict-0.md', h2({ head: HEAD, pass: false }));
+  assert.equal(sessionOf(e2, 'R-0').verdict?.pass, false);
+  refused(verify(e2), /the reviewer session R-0 did not pass/);
+  // Its folder gone: can't be counted.
+  const { env: e3 } = inReview();
+  runnerLaunch(e3, 'C-1', 'R-0');
+  runnerEndedRecord(e3, 'C-1', 'R-0', 'reviewer', HEAD, { sha: 'never_ran' });
+  renameSync(join(e3.outRoot, 'reviewer'), join(e3.outRoot, 'x'));
+  assert.match(sessionOf(e3, 'R-0').problem, /its outbox folder is gone/);
+});
+
+// L71 C4: the gate checks a set-aside again: only a silent end, with its outbox still holding no verdict.
+test('L71 C4 planted: a set-aside session has no say only while its ended record says none and its outbox holds no verdict', () => {
+  const one = ({ sha, file, noEnded } = {}) => {
+    const { env, hdr } = inReview();
+    runnerLaunch(env, 'C-1', 'R-1');
+    if (!noEnded) runnerEndedRecord(env, 'C-1', 'R-1', 'reviewer', HEAD, { sha: sha ?? 'none' });
+    if (file) outboxFile(env, 'reviewer', 'R-1', 'verdict-1.md', hdr({ head: HEAD, pass: false }));
+    runnerAsideRecord(env, 'C-1', 'R-1');
+    return sessionOf(env, 'R-1');
+  };
+  assert.equal(one().aside, true, 'the control: a silent end set aside');
+  assert.match(one({ sha: 'e'.repeat(64) }).problem, /it was set aside, but its ended record names a verdict file; only a silent end can be set aside/);
+  assert.match(one({ sha: 'refused' }).problem, /it was set aside, but its ended record names a verdict file/);
+  assert.match(one({ noEnded: true }).problem, /it was set aside, but it has no ended record/);
+  assert.match(one({ file: true }).problem, /it was set aside, but a verdict file was left after the session ended with none/);
+});
+
+// A launch record that fails its checks is never set aside (L71: no "review again" for one).
+test('L71 planted: a set-aside record does not take away a bad launch record\'s refusal', () => {
+  const { env } = inReview();
+  writeFileSync(join(env.launchRoot, 'R-7.json'), JSON.stringify({ session_id: 'R-7', role: 'reviewer', card: 'C-1', head: 'short' }), { mode: 0o644 });
+  runnerAsideRecord(env, 'C-1', 'R-7');
+  refused(reviewsOf(env), /the launch record R-7\.json of card C-1 fails its checks/);
 });
