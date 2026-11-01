@@ -173,6 +173,8 @@ test('L123 m-1: exact_reverse "false" in the rules still needs a go for an undo 
     verifiedCard(w, 'U-1', { pr: 9, files: { 'src/a.mjs': 'one' }, undo: w.root });
     await gatePass(w.ctx);   // the gate takes the request in, so there is a merge to gather facts for
     if (!skipped) assert.ok(mergeOf(w, 'U-1').doc.reasons?.some((x) => x.startsWith('10:')), `${v}: refused for no go`);
+    // L134 c-2: go-free means the pass gave no refusal 10 at all, not just that gather skipped the go.
+    else assert.ok(!(mergeOf(w, 'U-1').doc.reasons ?? []).some((x) => x.startsWith('10:')), `${v}: no refusal 10: ${JSON.stringify(mergeOf(w, 'U-1').doc.reasons)}`);
     const f = await gatherFacts(w.ctx, mergeOf(w, 'U-1'));
     assert.equal(f.card.doc.kind, 'exact_reverse');
     if (skipped) assert.deepEqual(f.go, { ok: true, reasons: [], skipped: true }, String(v));

@@ -1,15 +1,17 @@
 // A stand-in for the Mac, for the setup tests: a throwaway folder as the root prefix, an in-memory user directory that
 // answers like dscl and dseditgroup, and folder owners kept in a table (a test is not root, so it cannot chown for real).
+// Owners fail closed (L149 m9): a path nobody gave an owner to belongs to no one (uid -1), and a file just written has no owner until
+// the code sets one, so a missing chown shows as a failure instead of passing as "root's by default".
 // A stand-in refuses what the real tool refuses (L-brief): dscl writes need root, a path outside /Users and /Groups is
 // invalid, a write with no value is a bad call, a record that is not there reads as exit 56; chown needs root; mkdir
 // needs the parent and refuses an existing folder (those two are the real mkdir's own refusals, since it is the real one).
 
 import { chmodSync, cpSync, fchmodSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, realpathSync, rmSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import test from 'node:test';
 import { tempDir } from '../shared/test-tmp.mjs';
-import { readConfigFile, secureFile, secureFolder, writeNewFile } from './mac.mjs';
+import { nodeProblemOf, readConfigFile, secureFile, secureFolder, writeNewFile } from './mac.mjs';
 
 // The stand-in runs the Mac's own `ls -le` and `chmod +a` for the access-list items. A machine that is not a Mac (the Linux
 // check on GitHub) has neither, so a test that reaches them is SKIPPED with the reason on show, never passed; the macOS job
@@ -47,6 +49,7 @@ export function fakeMac({ euid: as = 0, users = {}, admins = [] } = {}) {
   };
   const at = (p) => join(prefix, p);
   mkdirSync(at('/Library/LaunchDaemons'), { recursive: true });
+  for (const p of ['/Library', '/Library/LaunchDaemons']) mac.owners.set(p, { uid: mac.rootUid, gid: 0 });
   const dscl = (args) => {
     const [flag, path, ...rest] = args;
     const m = /^\/(Users|Groups)(?:\/([A-Za-z0-9_.-]+))?$/.exec(path ?? '');
@@ -90,7 +93,7 @@ export function fakeMac({ euid: as = 0, users = {}, admins = [] } = {}) {
     if (prog === '/usr/bin/true') return { status: 0, stdout: '', stderr: '' };
     const can = (p, write) => {
       let st; try { st = lstatSync(at(p)); } catch { return false; }
-      const o = mac.owners.get(p) ?? { uid: mac.rootUid, gid: 0 };
+      const o = mac.owners.get(p) ?? { uid: -1, gid: -1 };
       const bits = write ? [0o200, 0o020, 0o002] : [0o400, 0o040, 0o004];
       if (st.mode & (o.uid === uid ? bits[0] : o.gid === gid ? bits[1] : bits[2])) return true;
       // An access list entry for this user (the real `ls -le` shows it) lets a read through; it never lets a write through here
@@ -147,7 +150,7 @@ export function fakeMac({ euid: as = 0, users = {}, admins = [] } = {}) {
     prefix,
     lstat(p) {
       const st = lstatSync(at(p)); const o = mac.owners.get(p);
-      return { isDirectory: () => st.isDirectory(), isFile: () => st.isFile(), isSymbolicLink: () => st.isSymbolicLink(), mode: st.mode, size: st.size, ino: st.ino, dev: st.dev, uid: o ? o.uid : mac.rootUid, gid: o ? o.gid : 0 };
+      return { isDirectory: () => st.isDirectory(), isFile: () => st.isFile(), isSymbolicLink: () => st.isSymbolicLink(), mode: st.mode, size: st.size, ino: st.ino, dev: st.dev, uid: o ? o.uid : -1, gid: o ? o.gid : -1 };
     },
     mkdir(p, mode) { mac.log.push(`mkdir ${p}`); mkdirSync(at(p), { mode }); mac.owners.set(p, { uid: mac.rootUid, gid: 0 }); },
     // The setup's one way to change an owner and mode: the real handle-based change, with chown stood in for (a test is not root).
@@ -160,11 +163,15 @@ export function fakeMac({ euid: as = 0, users = {}, admins = [] } = {}) {
     // A stand-in for GitHub: a test sets mac.github = (url, init) => ({ status, text }). Every call is kept (the token is in init.headers).
     fetch: async (url, init) => { mac.fetchLog.push({ url, method: init?.method ?? 'GET' }); if (!mac.github) throw Object.assign(new Error('offline'), { code: 'ENOTFOUND' }); return mac.github(url, init); },
     readSecret(prompt) { mac.secretPrompts.push(prompt); if (mac.secretInput === null) throw new Error('there is no terminal to type the token into; run this in the Terminal app'); return mac.secretInput; },
+    // The real checks on a node program the config names, for the file's own owner (the test process) and mode, in its own folder.
+    nodeBinProblem: (p) => nodeProblemOf(p, { rootUid: mac.rootUid, top: (() => { try { return dirname(realpathSync(p)); } catch { return '/'; } })() }),
+    // The runner config is a real file outside the prefix. The real reader (links, plain file, size); as root also its owner and mode.
+    readSource: (p) => readConfigFile(p, { strict: mac.as === 0, rootUid: mac.rootUid, top: dirname(p), ownerOf: (st) => st.uid }),
     // The install and the job files. The real calls, on the prefixed place; a write needs the parent folder (like the real one)
     // and makes a NEW file only (like the real one: it never overwrites or follows a link).
     readText: (p) => readFileSync(at(p), 'utf8'),
-    write(p, text, mode) { mac.log.push(`write ${p}`); writeNewFile(at(p), text, mode); mac.owners.set(p, { uid: mac.as === 0 ? mac.rootUid : mac.rootUid + 1, gid: 0 }); },
-    copyFile(src, p, mode) { mac.log.push(`copy ${p}`); writeNewFile(at(p), readFileSync(src), mode); mac.owners.set(p, { uid: mac.as === 0 ? mac.rootUid : mac.rootUid + 1, gid: 0 }); },
+    write(p, text, mode) { mac.log.push(`write ${p}`); writeNewFile(at(p), text, mode); mac.owners.set(p, { uid: -2, gid: -2 }); },   // no owner until the code sets one
+    copyFile(src, p, mode) { mac.log.push(`copy ${p}`); writeNewFile(at(p), readFileSync(src), mode); mac.owners.set(p, { uid: -2, gid: -2 }); },
     copyTree(src, p) { mac.log.push(`copytree ${p}`); cpSync(src, at(p), { recursive: true, dereference: false, errorOnExist: true, force: false }); },
     rm(p) { mac.log.push(`rm ${p}`); rmSync(at(p), { recursive: true, force: true }); for (const k of [...mac.owners.keys()]) if (k === p || k.startsWith(`${p}/`)) mac.owners.delete(k); },
     list: (p) => readdirSync(at(p)),
@@ -183,7 +190,7 @@ export function fakeMac({ euid: as = 0, users = {}, admins = [] } = {}) {
       const m = /^system\/(.+)$/.exec(a ?? '');
       if (!m) return err(64, 'Usage: launchctl print <domain-target>');
       if (!mac.loaded.has(m[1])) return err(113, `Could not find service "${m[1]}" in domain for system`);
-      return { status: 0, stdout: `system/${m[1]} = {\n\tstate = ${mac.loaded.get(m[1]).state}\n\tlast exit code = 0\n}\n`, stderr: '' };
+      return { status: 0, stdout: `system/${m[1]} = {\n\tstate = ${mac.loaded.get(m[1]).state}\n\tlast exit code = ${mac.loaded.get(m[1]).lastExit ?? '(never exited)'}\n}\n`, stderr: '' };
     }
     if (verb === 'bootstrap' || verb === 'bootout') {
       if (mac.as !== 0) return err(1, `${verb === 'bootstrap' ? 'Bootstrap' : 'Boot-out'} failed: 1: Operation not permitted`);

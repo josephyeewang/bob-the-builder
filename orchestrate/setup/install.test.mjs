@@ -14,7 +14,7 @@ import { NODE, RUNNER_CONFIG, STAMP, UPDATER_CONFIG } from '../modules/M4-worksh
 import { MUST_KEEP } from '../modules/M4-workshop/launcher/review-updater.mjs';
 import { realIo } from './mac.mjs';
 import { ROOT_CONFIG_PATH } from './layout.mjs';
-import { BOOTSTRAP_FILES, LABEL_RE, installPaths, parseInstallConfig, updaterConfigFor } from './install.mjs';
+import { BOOTSTRAP_FILES, LABEL_RE, installPaths, parseInstallConfig, spawnUpdater, updaterCommand, updaterConfigFor } from './install.mjs';
 import { JOBS, checkDaemons, list, plistTexts } from './daemons.mjs';
 import { checkInstall, rootMadeEntries } from './install.mjs';
 import { main, parseArgs, planCommand } from './setup.mjs';
@@ -76,11 +76,21 @@ async function world({ euid = 0 } = {}) {
   // local folder (the one option the updater has for tests), `owner`/`top` standing in for root and `/` as its own tests do.
   const runner = join(ext, 'run-updater.mjs');
   writeFileSync(runner, 'import { pathToFileURL } from "node:url";\nconst [script, opts, ...argv] = process.argv.slice(2);\nconst { main } = await import(pathToFileURL(script).href);\nprocess.exitCode = await main(argv, { ...JSON.parse(opts), gitTools: () => null });\n');
-  const updaterRuns = [];
-  const runUpdater = (io, { script, config, seed }) => {
+  const updaterRuns = []; const updaterCalls = [];
+  // The stand-in updater takes the command the setup REALLY builds (updaterCommand: the node, the arguments, the environment), records
+  // it, and refuses what root's updater would be unsafe to start on: anything in the work folder that is not root's (the fake Mac
+  // knows no owner for a path nobody chowned), has a link, or can be written by others (L149 m9: P13, P14, P20).
+  const runUpdater = (io, spec) => {
+    const { config, seed } = spec;
+    const cmd = updaterCommand(io, spec);
+    updaterCalls.push(cmd);
+    const stray = []; const walk = (logical) => { const st = mac.lstat(logical); if (st.isSymbolicLink() || st.uid !== mac.rootUid || (st.mode & 0o022)) stray.push(logical); if (st.isDirectory()) for (const n of readdirSync(mac.at(logical))) walk(join(logical, n)); };
+    walk(installPaths(parseInstallConfig(raw)).work);
+    if (stray.length) { updaterRuns.push(1); return { status: 1, stderr: `the stand-in updater refuses to start: not root's alone: ${stray.slice(0, 3).join(', ')}` }; }
     const c = JSON.parse(readFileSync(io.at(config), 'utf8'));
     writeFileSync(io.at(config), JSON.stringify({ ...c, address: bare }));
-    const r = spawnSync(process.execPath, [runner, io.at(script), JSON.stringify({ uid: ME, owner: ME, top: mac.prefix, localAddress: true, pathDirs: [] }), io.at(config), '--first', io.at(seed)], { encoding: 'utf8' });
+    const [script, ...rest] = cmd.args;
+    const r = spawnSync(process.execPath, [runner, script, JSON.stringify({ uid: ME, owner: ME, top: mac.prefix, localAddress: true, pathDirs: [] }), ...rest], { encoding: 'utf8' });
     updaterRuns.push(r.status);
     return { status: r.status ?? 1, stderr: r.stderr };
   };
@@ -89,7 +99,7 @@ async function world({ euid = 0 } = {}) {
   const folders = run(['users-folders']);
   assert.equal(folders.code, 0, folders.text);
   mac.as = euid;
-  return { mac, ext, raw, cfg, cfgFile, run, runUpdater, updaterRuns, root };
+  return { mac, ext, raw, cfg, cfgFile, run, runUpdater, updaterRuns, updaterCalls, root };
 }
 const installed = async () => { const w = await world(); const r = w.run(['install']); assert.equal(r.code, 0, r.text); return w; };
 const placed = async () => { const w = await installed(); const r = w.run(['daemons', 'place']); assert.equal(r.code, 0, r.text); return w; };
@@ -212,7 +222,7 @@ test('install: refuses a runner config for another place, or one that names thin
   }
   writeFileSync(w.cfg.runnerConfig, 'not json');
   r = w.run(['install']);
-  assert.equal(r.code, 1); assert.match(r.text, /can't be read as JSON/);
+  assert.equal(r.code, 1); assert.match(r.text, /is not valid JSON/);
   assert.equal(w.mac.log.length, before);
 });
 
@@ -639,4 +649,107 @@ test('REAL daemons list and check on this Mac with a throwaway prefix: reads onl
   assert.equal(c.code, 1);
   assert.equal(w.mac.log.length, before);
   assert.equal(existsSync(w.mac.at(`${BASE}/install`)), false);
+});
+
+// ───────────────────────────── L149: the r4 audit's Minors ─────────────────────────────
+
+const NOT_A_SECRET = 'zz-not-a-real-secret-zz';
+const assertNoStep = (w, before, what) => assert.equal(w.mac.log.length, before, `${what}: a step ran`);
+
+test('L149 m1 root reads the runner config through one handle: a link, a file others can write, and a file that is not JSON are refused, and no byte of the file is ever shown', async () => {
+  const w = await world(); const before = w.mac.log.length;
+  const real = join(w.ext, 'review.json'); const hidden = join(w.ext, 'hidden.json');
+  writeFileSync(hidden, `${NOT_A_SECRET} not json`); symlinkSync(hidden, join(w.ext, 'link.json'));
+  w.raw.runnerConfig = join(w.ext, 'link.json');
+  let r = w.run(['install']); assert.equal(r.code, 1, r.text); assert.match(r.text, /is a link, and a link is not followed/); assert.doesNotMatch(r.text, /zz-not/);
+  w.raw.runnerConfig = hidden;
+  r = w.run(['install']); assert.equal(r.code, 1, r.text); assert.match(r.text, /is not valid JSON/); assert.doesNotMatch(r.text, /zz-not/);
+  w.raw.runnerConfig = real; chmodSync(real, 0o666);
+  r = w.run(['install']); assert.equal(r.code, 1, r.text); assert.match(r.text, /can be written by others than root/);
+  assertNoStep(w, before, 'install');
+  chmodSync(real, 0o644); r = w.run(['install']); assert.equal(r.code, 0, r.text);   // and a plain file of the right kind is fine
+});
+
+test('L149 m4 m6 a linked extra, a missing extra and a node root may not run are refused at plan time, before any root step', async () => {
+  const w = await world(); const before = w.mac.log.length; const extras = [...w.raw.extras];
+  symlinkSync(join(w.ext, 'claude-bin'), join(w.ext, 'claude-link'));
+  w.raw.extras = [join(w.ext, 'claude-link'), join(w.ext, 'hooks')];
+  let r = w.run(['install']); assert.equal(r.code, 1, r.text); assert.match(r.text, /the extra .*claude-link: is a link .*Name the real file/);
+  r = w.run(['install', '--dry-run']); assert.equal(r.code, 1, r.text); assert.match(r.text, /is a link/);   // a dry run shows it too
+  w.raw.extras = extras; symlinkSync(join(w.ext, 'claude-bin'), join(w.ext, 'hooks', 'inner'));
+  r = w.run(['install']); assert.equal(r.code, 1, r.text); assert.match(r.text, /inner is a link inside it/);
+  rmSync(join(w.ext, 'hooks', 'inner'));
+  w.raw.extras = [join(w.ext, 'nope')]; r = w.run(['install']); assert.equal(r.code, 1, r.text); assert.match(r.text, /does not exist/);
+  w.raw.extras = extras;
+  chmodSync(join(w.ext, 'node'), 0o666);   // a node program others can write: root would run a copy of it
+  r = w.run(['install']); assert.equal(r.code, 1, r.text); assert.match(r.text, /nodeBin .*can be written by others than root/);
+  assertNoStep(w, before, 'install'); assert.equal(w.updaterRuns.length, 0);
+  chmodSync(join(w.ext, 'node'), 0o755); r = w.run(['install']); assert.equal(r.code, 0, r.text);
+});
+
+test('L149 m3 m2 m7 daemons check FAILS on a leftover job under another label, a loaded job older than its file and a job whose last exit is not 0; load reloads the changed job', async () => {
+  const w = await placed(); assert.equal(w.run(['daemons', 'load']).code, 0);
+  assert.equal(w.run(['daemons', 'check']).code, 0);
+  // (a) a leftover set of jobs under another label
+  const stray = w.mac.at('/Library/LaunchDaemons/com.example.old.review-updater.plist'); writeFileSync(stray, 'x');
+  let r = w.run(['daemons', 'check']); assert.equal(r.code, 1, r.text); assert.match(r.text, /FAIL  no job file in .* under another label .*com\.example\.old\.review-updater\.plist/);
+  rmSync(stray); assert.equal(w.run(['daemons', 'check']).code, 0);
+  // (b) the owner's home folder changes: place rewrites the account job's file, but launchd still runs the old definition
+  w.mac.users.get('sam').NFSHomeDirectory = '/Users/sam2';
+  r = w.run(['daemons', 'place']); assert.equal(r.code, 0, r.text); assert.match(r.text, /write .*review-account\.plist/);
+  r = w.run(['daemons', 'check']); assert.equal(r.code, 1, r.text); assert.match(r.text, new RegExp(`FAIL  ${LABEL}.review-account was loaded from the job file as it is now`)); assert.doesNotMatch(r.text, new RegExp(`FAIL  ${LABEL}.review-updater`));
+  const mark = w.mac.log.length;
+  r = w.run(['daemons', 'load']); assert.equal(r.code, 0, r.text);
+  const steps = w.mac.log.slice(mark).filter((x) => x.startsWith('launchctl'));
+  assert.deepEqual(steps, [`launchctl bootout system/${LABEL}.review-account`, `launchctl bootstrap system ${w.mac.at(`/Library/LaunchDaemons/${LABEL}.review-account.plist`)}`]);   // only that job, out and in
+  assert.equal(w.run(['daemons', 'check']).code, 0);
+  assert.match(w.run(['daemons', 'load']).text, /nothing to do/);
+  // (c) a job that keeps crashing
+  w.mac.loaded.get(`${LABEL}.review-runner`).lastExit = '78';
+  r = w.run(['daemons', 'check']); assert.equal(r.code, 1, r.text); assert.match(r.text, new RegExp(`FAIL  ${LABEL}.review-runner's last run ended well .*last exit code 78`));
+  w.mac.loaded.get(`${LABEL}.review-runner`).lastExit = '0'; assert.equal(w.run(['daemons', 'check']).code, 0);
+  // unload forgets the fingerprints: a job loaded again is recorded again
+  assert.equal(w.run(['daemons', 'unload']).code, 0); assert.deepEqual(JSON.parse(readFileSync(w.mac.at(`${BASE}/install/loaded-jobs.json`), 'utf8')), {});
+});
+
+test('L149 m8 load refuses unless the install check passes (the copy is root\'s alone): nothing is loaded', async () => {
+  const w = await placed();
+  chmodSync(copyOf(w), 0o777);
+  const r = w.run(['daemons', 'load']); assert.equal(r.code, 1, r.text); assert.match(r.text, /the install check fails/); assert.equal(w.mac.loaded.size, 0);
+  chmodSync(copyOf(w), 0o755); assert.equal(w.run(['daemons', 'load']).code, 0);
+});
+
+test('L149 cosmetic 3 an owner record with no home folder is a plain message, not a stack trace', async () => {
+  const w = await installed(); w.mac.users.get('sam').NFSHomeDirectory = '';
+  const r = w.run(['daemons', 'place']); assert.equal(r.code, 1, r.text); assert.match(r.text, /the job files cannot be built from the owner's Mac user sam/); assert.doesNotMatch(r.text, /\n\s+at /);
+});
+
+test('L149 m9 P12 the logs folder the jobs make is not a stranger to `check`', async () => {
+  const w = await placed();
+  assert.ok(rootMadeEntries(w.cfg).includes(installPaths(w.cfg).logDir));
+  const strangers = check(w.mac, w.cfg, { alsoKnown: rootMadeEntries(w.cfg) }).filter((r) => !r.ok && /did not make/.test(r.why ?? ''));
+  assert.deepEqual(strangers, []);
+});
+
+test('L149 m9 P14 P20 the updater is started with --first and the seed, a fixed PATH and nothing else of the environment — and spawnUpdater really does it', async () => {
+  const w = await installed();
+  const call = w.updaterCalls.at(-1); const P = installPaths(w.cfg);
+  assert.equal(call.file, w.mac.at(`${P.seed}/${NODE}`));
+  assert.deepEqual(call.args.slice(1), [w.mac.at(`${P.seed}/${UPDATER_CONFIG}`), '--first', w.mac.at(P.seed)]);
+  assert.deepEqual(Object.keys(call.env), ['PATH']);
+  // the REAL spawnUpdater, with node standing in for the copied node and a script that reports what it was given
+  const dump = join(w.mac.prefix, 'dump.mjs'); writeFileSync(dump, 'process.stderr.write(JSON.stringify({ argv: process.argv.slice(2), env: Object.keys(process.env).sort() }));\n');
+  symlinkSync(process.execPath, join(w.mac.prefix, 'node-stand-in'));
+  const r = spawnUpdater(w.mac, { node: '/node-stand-in', script: '/dump.mjs', config: '/c.json', seed: '/s' });
+  assert.equal(r.status, 0, r.stderr);
+  const seen = JSON.parse(r.stderr);
+  assert.deepEqual(seen.argv, [join(w.mac.prefix, 'c.json'), '--first', join(w.mac.prefix, 's')]);
+  assert.ok(!seen.env.includes('HOME') && !seen.env.some((k) => /TOKEN|SECRET|KEY/i.test(k)), seen.env.join(','));
+  assert.ok(seen.env.includes('PATH'));
+});
+
+test('L149 m9 P13 P21 nothing the install or place makes is left without an owner or with a mode nobody set (the stand-in Mac gives no default owner)', async () => {
+  const w = await placed();
+  for (const job of JOBS) { const st = w.mac.lstat(`/Library/LaunchDaemons/${LABEL}.${job}.plist`); assert.equal(st.uid, w.mac.rootUid, job); assert.equal(st.mode & 0o7777, 0o644, job); }
+  writeFileSync(w.mac.at('/nobody-chowned-this'), 'x'); assert.equal(w.mac.lstat('/nobody-chowned-this').uid, -1);
 });
