@@ -143,8 +143,10 @@ test('R-0b-144: the package is the diff from where the branch left main to the h
 
 test('R-0b-144: the verdict file is the one M9 reads; one the gate could not count is never written', () => {
   const h = 'a'.repeat(40);
-  const t = verdictFileText({ role: 'reviewer', card: 'C-1', head: h, pass: true, checklist: CLEAN, notes: 'fine' });
-  assert.deepEqual(JSON.parse(t.split('\n')[0]).fields, { head: h, pass: true, checklist: CLEAN });
+  const t = verdictFileText({ role: 'reviewer', card: 'C-1', head: h, pass: true, checklist: CLEAN, findings: [{ level: 'minor', says: 'x', on: 'correct' }] });
+  assert.deepEqual(JSON.parse(t.split('\n')[0]).fields, { head: h, pass: true, checklist: CLEAN, notes: [{ level: 'minor', says: 'x', on: 'correct' }] });
+  assert.throws(() => verdictFileText({ role: 'reviewer', card: 'C-1', head: h, pass: true, checklist: CLEAN, findings: [{ level: 'big', says: 'x' }] }), /level is one of/);
+  assert.throws(() => verdictFileText({ role: 'reviewer', card: 'C-1', head: h, pass: true, checklist: CLEAN, findings: [{ level: 'minor', says: 'x', file: '../etc' }] }), /a path inside the change/);
   assert.equal(verdictFileName('S-1'), 'verdict-S-1.md');
   assert.throws(() => verdictFileText({ role: 'reviewer', card: 'C-1', head: 'HEAD', pass: true, checklist: CLEAN }), /names the 40-hex head/);
   assert.throws(() => verdictFileText({ role: 'reviewer', card: 'C-1', head: h, pass: 'yes', checklist: CLEAN }), /pass: true or false/);
@@ -154,7 +156,7 @@ test('R-0b-144: the verdict file is the one M9 reads; one the gate could not cou
 });
 
 test('R-0b-144: a real verdict from a launched reviewer, written as its prompt says, passes refusal 5', async () => {
-  const w = await world(tempDir('m5-real-'), ({ path, example }) => write(path, `${example}\nNo findings; looked again from the user's side.\n`));
+  const w = await world(tempDir('m5-real-'), ({ path, example }) => write(path, `${example}\n`));
   await w.run();
   const [l] = w.s.launched;
   assert.equal(l.path, join(w.outboxRoot, 'reviewer', 'S-1', 'verdict-S-1.md'), 'the prompt names the session\'s own outbox');
