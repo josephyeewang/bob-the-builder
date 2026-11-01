@@ -8,6 +8,7 @@ everything they ask for becomes one small file in its outbox and one short reply
 | `skill/orchestrate/SKILL.md` | R-0b-81, 137 | The one skill: new idea, a piece of work sorted into a Bob mode, pause, away, back, wrap up, rotate. "Not wired yet" for the rest. |
 | `outbox.mjs` | R-0b-81, 83 | The three file shapes (`state-`, `request-`, `idea-`) and intake's check. Never `state: active`; a key in any file refuses it; a product off the list or a reused id is refused (L26). `intakePush` is the confirmation the owner gets. |
 | `sort.mjs` | R-0b-137 | The full loop's reference: the cue words per Bob mode (the skill's table must match), the three-line read-back with Go, Change, Not now, the one question with a recommendation when unsure, and the check that a reply never repeats a pasted key. |
+| (in `outbox.mjs`) | R-0b-136 | `ask-request-<id>.json`, the owner's "find out X": a research ask with its product and one-line brief. M2 `research-ask.mjs` turns it into the ask. |
 | `timezone.mjs` | R-0b-83 | A time zone counts only as a city-based name the system knows; anything ambiguous is null, which holds number work for products on the Merge Gate. |
 | `trip.mjs` | R-0b-83 | The trip brief: go items and risky asks with links, the Mini check (online, logged in, battery backup), the Air. |
 | `transcript.mjs` | R-0b-82, 84 | Reads the Front Door's own conversation log: the owner's turns, question boxes and their answers, "turn finished". |
@@ -73,6 +74,12 @@ R-0b-82's decision and handoff code sit here although the row is tagged M11 (lan
    yet"). The Lead acts on evolve, audit and upgrade as Bob runs on that product; think opens a thinking room on the
    rules' `models.main`. `what` is the owner's words, one line, already checked for keys; pass it on through
    `cleanOutside`. NEW files nothing: the owner opens their own session. Until this is wired, the request sits unread.
+10. Research asks (R-0b-136). Lane 2's intake checks `ask-request-<id>.json` with `checkOutboxFile` and pushes
+   `intakePush` like the other Front Door files, then hands it to the record's `applyOutbox` (kept as a report). Each
+   pass runs M2's `openResearchAsks(ctx)` and pushes each `opened[].push` to the owner's phone. R-0b-135, after it
+   writes the research_copy card, calls M2's `landResearch(ctx, id)`. The owner's desktop session (Bob's method for
+   "run research ask R-12") reads the brief and the file name to leave with M2's `researchBrief(record, id)`, then
+   writes `research-R-12.md` to the proposals folder; how that session reads the record is the Lead's to place.
 
 ## Ledger: two lines per row (review-0b-8 MAT-10)
 
@@ -83,6 +90,7 @@ R-0b-82's decision and handoff code sit here although the row is tagged M11 (lan
 | R-0b-83 | yes: `trip.test.mjs`, `outbox.test.mjs`, `M12-sensors/power-source.test.mjs` | not yet (step 7) |
 | R-0b-84 | yes: `transcript.test.mjs` (the checker) | not yet (step 8) |
 | R-0b-85 | audit rounds logged in the build notes | — |
+| R-0b-136 | yes: `M2-approvals/research-ask.test.mjs` (against a stand-in for R-0b-135) | not yet (needs join item 10 and R-0b-135) |
 | R-0b-137 | yes: `sort.test.mjs` | not yet (needs join item 9) |
 
 A §13 proof row stays unproven until its owner line is filled. R-0b-85's audit of the restart covers lane 2's

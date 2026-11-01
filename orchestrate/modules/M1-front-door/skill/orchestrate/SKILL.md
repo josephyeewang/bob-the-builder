@@ -1,6 +1,6 @@
 ---
 name: orchestrate
-description: The Front Door's one skill. Use when the owner, from their phone, files a new idea, asks for work on a product (a new project, a fix, a check, an update from Bob, a thinking room), pauses a product, goes away ("I'm away until Friday"), says they are back, asks to wrap up, or asks to rotate a key. Writes exactly one small file to the outbox and replies in one short message.
+description: The Front Door's one skill. Use when the owner, from their phone, files a new idea, asks for work on a product (a new project, a fix, a check, an update from Bob, a thinking room), asks to find something out (a research ask), pauses a product, goes away ("I'm away until Friday"), says they are back, asks to wrap up, or asks to rotate a key. Writes exactly one small file to the outbox and replies in one short message.
 ---
 
 # orchestrate — what the Front Door does with what the owner says
@@ -54,6 +54,18 @@ When the owner asks for work on a product, sort it into one of five modes by the
 4. If their words hold a key, leave it out of `what`, out of the read-back and out of every reply, and follow the key
    rule above.
 
+## Research ask ("find out …", "research …", "look into …")
+
+Research is not one of the five modes above; it has its own file. The owner's session on the Mini does the research
+later, so nothing runs now.
+1. Product: the one the research is for, from the product list (ask with a question box if unsure).
+2. Write `ask-request-<id>.json`, one line:
+   `{"ask":"research","product":"X","brief":"<what to find out, their words, one line, at most 300 characters>"}`
+   Leave any key out of the brief (the key rule above).
+3. Reply: "Filed: research ask for X. The Mini confirms in a minute." The Mini then pushes the ask's number (R-12, say)
+   and puts it on the owner's waiting list. To run it, the owner opens a desktop session on the Mini and says
+   "run research ask R-12". The report comes back from that session by itself; never ask the owner to paste it.
+
 ## Pause ("pause X")
 
 Write `state-<id>.json`, one line:
@@ -101,4 +113,4 @@ said it (capitals and digits with at least one `_`, such as `STRIPE_KEY`; add no
 
 ## Not wired yet
 
-Research asks, anything else: reply "That isn't wired yet." Write nothing.
+Anything else: reply "That isn't wired yet." Write nothing.
