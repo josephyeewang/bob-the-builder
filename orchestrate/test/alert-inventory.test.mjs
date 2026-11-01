@@ -13,15 +13,23 @@
 //   tested: <file>.test.mjs > <test name>   that test exists and runs fakeAlert({ answer: false }) and
 //                                           fakeAlert({ throws }); it checks nothing says "told" after a lost alert
 //   ruled: L<n>, <why>                       a lead call says this one is fine (the ruled list grows only by a lead call)
+//   wrapped: <file> <fn>                     the call goes through a listed wrapper whose contract test is proven
+//                                           (L139 item 4): see the wrappers below
 //   open: <lane n|lead>, <#PR|none yet>      still to fix or test; the gate below passes only with none open
 //
 // The other lists, same file: wrappers (a function named like an alert that calls one: "passes" when it hands back the
 // answer), silent (a production alert that answers nothing, so it counts as sent under !== false) and standins (a test
 // alert made from anything but fakeAlert()). They are pinned by file + line hash, as a multiset.
 //
-// Change control (L135 item 4): in a PR that is not the lead's (branch lead-* or claude/lead-*), the list may not rule
-// an entry, add or rule a wrapper, or grow any list's open count. The test compares the list with the one at the
-// merge-base, and always prints what changed.
+// A wrapper may carry a `contract_test` ("<file>.test.mjs > <test name>", L139 item 4): a test that imports the
+// wrapper's file and shows, with fakeAlert({ answer: false }) and fakeAlert({ throws }), that the wrapper never takes
+// a lost alert as sent. It is proven when that test exists, runs both, is not a todo, the wrapper's body still matches
+// its pin, and every wrapper in its `inner` is proven too. Only then may a call the wrapper `covers` be `wrapped:`.
+// A wrapper the scanner cannot see (not named like an alert) is listed with `by_lead: true`.
+//
+// Change control (L135 item 4, L139 item 6): in a PR that is not the lead's (branch lead-* or claude/lead-*), the
+// list may not rule an entry, add or rule a wrapper, or grow any list's open count, and the checker's own files
+// (LEAD_FILES) may not change at all. The test compares with the merge-base, and always prints what changed.
 //
 // What this cannot see (a reviewer still reads for these):
 //   - an alert more than one call away (a via entry covers one step: a same-file function, or one imported by name);
@@ -36,7 +44,7 @@ import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 import {
   inventory, orchestrateFiles, readList, compare, keyOf, short, parseStatus, testedProblem, hintsFor, countList,
-  changeControl, LEAD_BRANCH, LIST,
+  changeControl, LEAD_BRANCH, LIST, contractProblems, fnBody, leadFilesIn, LEAD_FILES,
 } from './alert-inventory.mjs';
 import { wrappers, standIns, losingStandIns, silentDefaults } from './alert-answer-scan.mjs';
 import { fakeAlert } from './fake-alert.test-helper.mjs';
@@ -51,6 +59,7 @@ const PROD = FILES.filter((f) => !f.testCode);
 const TESTS = FILES.filter((f) => f.testCode && f.rel !== HELPER);
 const LISTED = readList(ROOT);
 const squash = (t) => t.replace(/\s+/g, ' ').trim();
+const readSrc = (rel) => { try { return readFileSync(join(ROOT, rel), 'utf8'); } catch { return null; } };
 const CLI = 'run `node orchestrate/test/alert-inventory.mjs` for the pins and a suggested status';
 
 // ---- 1. the pins ----
@@ -102,7 +111,12 @@ test('every alert wrapper is on the list, and one listed as passing hands back t
   const found = new Map();
   for (const f of PROD) for (const w of wrappers(f.src)) found.set(`${f.rel} ${w.fn}`, { ...w, file: f.rel });
   const bad = [];
-  const listed = new Map(LISTED.wrappers.map((e) => [`${e.file} ${e.fn}`, e]));
+  const listed = new Map(LISTED.wrappers.filter((e) => !e.by_lead).map((e) => [`${e.file} ${e.fn}`, e]));
+  for (const e of LISTED.wrappers.filter((x) => x.by_lead)) {
+    const code = readSrc(e.file);
+    if (code === null || fnBody(code, e.fn) === null) bad.push(`stale: ${e.file} ${e.fn} (listed by the lead) is no longer there`);
+    else if (e.status === 'passes') for (const why of contractProblems({ ...e, inner: [] }, LISTED.wrappers, readSrc)) bad.push(`${e.file} ${e.fn} is listed as passing, but its contract is not proven: ${why}`);
+  }
   for (const [k, w] of found) {
     const e = listed.get(k);
     if (!e) bad.push(`new wrapper ${w.file}:${w.line} ${w.fn}: ${w.passes ? 'it hands back the answer; the lead adds it as "passes"' : `it loses the answer (${w.why}): return the inner call's answer, or test it === false / !== false`}`);
@@ -110,6 +124,38 @@ test('every alert wrapper is on the list, and one listed as passing hands back t
     else if (e.status !== 'passes' && w.passes) bad.push(`${w.file}:${w.line} ${w.fn} now hands back the answer: set its status to "passes"`);
   }
   for (const [k, e] of listed) if (!found.has(k) && !e.lands_with) bad.push(`stale: ${k} is no longer a wrapper here; remove it from the list`);
+  assert.deepEqual(bad, []);
+});
+
+test('every wrapper contract is pinned to the wrapper as it is now, and names a test that exists (L139 item 4)', () => {
+  const bad = [];
+  const report = [];
+  for (const w of LISTED.wrappers.filter((x) => x.contract_test || x.covers || x.inner)) {
+    const id = `${w.file} ${w.fn}`;
+    if (!w.contract_test) { bad.push(`${id}: covers or inner without a contract_test`); continue; }
+    const code = readSrc(w.file);
+    const now = code === null ? null : fnBody(code, w.fn);
+    if (!w.body) bad.push(`${id}: a wrapper with a contract_test pins its body ("body": "${now}")`);
+    else if (now !== w.body) bad.push(`${id}: the wrapper changed since its contract was pinned (body ${now}, list ${w.body}); re-check its contract test, then re-pin`);
+    const x = /^(\S+\.test\.mjs) > (.+)$/.exec(w.contract_test);
+    if (!x || readSrc(x[1]) === null || /no test/.test(testedProblem(readSrc(x[1]), x[2]) ?? '')) bad.push(`${id}: contract_test "${w.contract_test}" names no test that exists`);
+    const why = contractProblems(w, LISTED.wrappers, readSrc);
+    report.push(`${id}: ${why.length ? `not proven: ${why.join('; ')}` : 'proven'}`);
+  }
+  console.log(`wrapper contracts (L139):\n  ${report.join('\n  ')}`);
+  assert.deepEqual(bad, []);
+});
+
+test('every "wrapped" entry goes through a listed wrapper that covers it and whose contract is proven (L139 item 4)', () => {
+  const bad = [];
+  for (const e of LISTED.alerts) {
+    const s = parseStatus(e.status);
+    if (s.kind !== 'wrapped') continue;
+    const w = LISTED.wrappers.find((x) => x.file === s.file && x.fn === s.fn);
+    if (!w) { bad.push(`${e.file} ${e.fn} ${e.call}: no wrapper ${s.file} ${s.fn} on the list`); continue; }
+    if (!(w.covers ?? []).some((c) => c.file === e.file && c.call === e.call && (!c.fn || c.fn === e.fn))) bad.push(`${e.file} ${e.fn} ${e.call}: ${s.file} ${s.fn} does not cover this call`);
+    for (const why of contractProblems(w, LISTED.wrappers, readSrc)) bad.push(`${e.file} ${e.fn} ${e.call}: ${why}`);
+  }
   assert.deepEqual(bad, []);
 });
 
@@ -152,17 +198,22 @@ test('the gate: nothing is open before the first cutover (L135)', {
 // ---- 4. change control ----
 
 function git(args) { return execFileSync('git', args, { cwd: ROOT, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim(); }
-test('the list changes only in a lead PR: no new ruling, no new wrapper, no list grows its open count (L135 item 4)', (t) => {
-  let base; let branch;
+test('the list and the checker change only in a lead PR: no new ruling, no new wrapper, no open count grows, no checker file changes (L135 item 4, L139 item 6)', (t) => {
+  let base; let branch; let changed = [];
   try {
     branch = process.env.GITHUB_HEAD_REF || git(['rev-parse', '--abbrev-ref', 'HEAD']);
     const to = process.env.GITHUB_BASE_REF || 'main';
     const ref = [`origin/${to}`, to].find((r) => { try { git(['rev-parse', '--verify', '--quiet', r]); return true; } catch { return false; } });
     if (!ref) return t.skip(`no ${to} branch to compare with`);
     const mb = git(['merge-base', 'HEAD', ref]);
-    try { base = JSON.parse(git(['show', `${mb}:orchestrate/${LIST}`])); } catch { return t.skip(`the list is new since the merge-base ${mb.slice(0, 7)}`); }
+    changed = git(['diff', '--name-only', mb, 'HEAD']).split('\n').filter(Boolean);
+    try { base = JSON.parse(git(['show', `${mb}:orchestrate/${LIST}`])); } catch { base = null; }
   } catch (e) { return t.skip(`no git history here: ${e.message.split('\n')[0]}`); }
   const lead = LEAD_BRANCH.test(branch);
+  const mine = leadFilesIn(changed);
+  if (mine.length) console.log(`the checker's own files changed on ${branch}${lead ? ' (a lead branch)' : ''}: ${mine.join(', ')}`);
+  if (!lead) assert.deepEqual(mine, [], `only a lead PR changes the alert checker's files (L139 item 6): ${LEAD_FILES.join(', ')}`);
+  if (!base) return t.skip('the list is new since the merge-base');
   const { problems, would, summary } = changeControl(base, LISTED, { lead });
   console.log(`alert list against the merge-base (branch ${branch}${lead ? ', a lead branch' : ''}):\n  ${summary.join('\n  ')}${would.length ? `\n  needs the lead:\n  ${would.join('\n  ')}` : ''}`);
   assert.deepEqual(problems, []);
@@ -182,6 +233,29 @@ test('controls: change control stops a lane ruling, adding a wrapper or growing 
   assert.equal(lane({ alerts: [base.alerts[1]] }), 0, 'an entry fixed away');
   assert.equal(changeControl(base, { alerts: [e('ruled: L999, the lead says so')], wrappers: [], silent: [], standins: [] }, { lead: true }).problems.length, 0, 'a lead PR');
   assert.ok(LEAD_BRANCH.test('lead-alert-sweep') && LEAD_BRANCH.test('claude/lead-x') && !LEAD_BRANCH.test('claude/orch-lane1-x') && !LEAD_BRANCH.test('orch-lane2-lead-x'));
+});
+
+test('controls: a wrapper contract is proven only by a real, non-todo test with both fakes, on the pinned body, with proven inner wrappers (L139)', () => {
+  const files = {
+    'm/w.mjs': 'export function tellX(a) { return a(); }\nexport function inner(a) { return a(); }',
+    'test/c.test.mjs': "import { fakeAlert } from './fake-alert.test-helper.mjs';\nimport { tellX } from '../m/w.mjs';\ntest('ok', () => { tellX(fakeAlert({ answer: false })); tellX(fakeAlert({ throws: new Error('x') })); });\ntest('later', { todo: 'not yet' }, () => { tellX(fakeAlert({ answer: false })); tellX(fakeAlert({ throws: 1 })); });\ntest('half', () => { tellX(fakeAlert({ answer: false })); });",
+    'test/d.test.mjs': "import { fakeAlert } from './fake-alert.test-helper.mjs';\ntest('ok', () => { fakeAlert({ answer: false }); fakeAlert({ throws: 1 }); });",
+  };
+  const read = (r) => files[r] ?? null;
+  const body = fnBody(files['m/w.mjs'], 'tellX');
+  const w = (over) => ({ file: 'm/w.mjs', fn: 'tellX', body, contract_test: 'test/c.test.mjs > ok', ...over });
+  const inner = { file: 'm/w.mjs', fn: 'inner', body: fnBody(files['m/w.mjs'], 'inner'), contract_test: 'test/c.test.mjs > later' };
+  const n = (x, list = [x]) => contractProblems(x, list, read).length;
+  assert.equal(n(w()), 0, 'proven');
+  assert.equal(n(w({ contract_test: 'test/c.test.mjs > later' })), 1, 'a todo test proves nothing');
+  assert.equal(n(w({ contract_test: 'test/c.test.mjs > half' })), 1, 'answer: false without a throw');
+  assert.equal(n(w({ contract_test: 'test/d.test.mjs > ok' })), 1, 'a test that does not import the wrapper');
+  assert.equal(n(w({ body: '00000000' })), 1, 'the wrapper changed since it was pinned');
+  assert.equal(n(w({ contract_test: undefined })), 1, 'no contract test');
+  assert.equal(n(w({ inner: ['m/w.mjs inner'] }), [w({ inner: ['m/w.mjs inner'] }), inner]), 1, 'an inner wrapper not proven');
+  assert.deepEqual(leadFilesIn(['orchestrate/test/alert-inventory.json', 'orchestrate/test/alert-answer-scan.mjs', 'orchestrate/modules/M2-approvals/x.mjs', 'docs/test/alert-inventory.json']),
+    ['orchestrate/test/alert-inventory.json', 'orchestrate/test/alert-answer-scan.mjs'], "the checker's own files");
+  assert.deepEqual(parseStatus('wrapped: modules/M13-ledger/heartbeat.mjs set'), { kind: 'wrapped', file: 'modules/M13-ledger/heartbeat.mjs', fn: 'set' });
 });
 
 // ---- 5. controls: the inventory finds every form ----

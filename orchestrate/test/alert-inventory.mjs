@@ -208,16 +208,22 @@ export function folderOwner(rel) {
 // ---- the statuses ----
 
 export const OWNERS = ['lane 1', 'lane 2', 'lane 3', 'lane 4', 'lead'];
-/** Parses one status: { kind: 'tested', file, test } | { kind: 'ruled', call, why } | { kind: 'open', owner, pr } | { kind: 'bad', why }. */
+/**
+ * Parses one status: { kind: 'tested', file, test } | { kind: 'ruled', call, why } | { kind: 'wrapped', file, fn }
+ * | { kind: 'open', owner, pr } | { kind: 'bad', why }. `wrapped: <file> <fn>` (L139 item 4): the call goes through a
+ * listed wrapper whose contract test is proven (contractProblems), and the wrapper's `covers` names this call.
+ */
 export function parseStatus(s) {
   if (typeof s !== 'string') return { kind: 'bad', why: 'status must be a string' };
   let x = /^tested: (\S+\.test\.mjs) > (.+)$/.exec(s);
   if (x) return { kind: 'tested', file: x[1], test: x[2] };
   x = /^ruled: (L\d{1,4}), (.{8,})$/.exec(s);
   if (x) return { kind: 'ruled', call: x[1], why: x[2] };
+  x = /^wrapped: (\S+\.mjs) ([A-Za-z_$][\w$]*)$/.exec(s);
+  if (x) return { kind: 'wrapped', file: x[1], fn: x[2] };
   x = /^open: (lane [1-4]|lead), (#\d+|none yet)$/.exec(s);
   if (x) return OWNERS.includes(x[1]) ? { kind: 'open', owner: x[1], pr: x[2] } : { kind: 'bad', why: 'unknown owner' };
-  return { kind: 'bad', why: 'status must be "tested: <file>.test.mjs > <test name>", "ruled: L<n>, <why>" or "open: <lane n|lead>, <#N|none yet>"' };
+  return { kind: 'bad', why: 'status must be "tested: <file>.test.mjs > <test name>", "ruled: L<n>, <why>", "wrapped: <file> <fn>" or "open: <lane n|lead>, <#N|none yet>"' };
 }
 
 // Does the test named `name` in `src` (a .test.mjs) exist, and run fakeAlert({ answer: false }) and fakeAlert({ throws })?
@@ -239,9 +245,60 @@ export function testedProblem(src, name) {
     const threw = calls.some((c) => /\bthrows\s*:/.test(c));
     if (!/from\s+['"][^'"]*fake-alert\.test-helper\.mjs['"]/.test(src)) return 'the file does not import fakeAlert';
     if (!lost || !threw) return `the test must run fakeAlert({ answer: false }) and fakeAlert({ throws: ... }); it runs ${lost ? 'only answer: false' : threw ? 'only throws' : 'neither'}${raw.includes('fakeAlert') ? '' : ' (no fakeAlert in its body)'}`;
+    // A todo or skipped test proves nothing: its failure does not fail the run.
+    const opts = m.slice(open + 1 + name.length + 2, open + 1 + name.length + 2 + 200).match(/^\s*,\s*\{([^{}]*)\}/);
+    if (opts && /\b(?:todo|skip)\s*:\s*(?!false\b)/.test(src.slice(open + 1 + name.length + 2, open + 1 + name.length + 2 + opts[0].length))) return 'the test is a todo or skipped, so it proves nothing yet';
+    if (/(?:test|it)\s*\.\s*(?:todo|skip)\s*$/.test(m.slice(Math.max(0, x.index - 2), open))) return 'the test is a todo or skipped, so it proves nothing yet';
     return null;
   }
   return 'no test(...) or it(...) by that name';
+}
+
+// ---- wrapper contracts (L139 item 4) ----
+
+/** The body pin of the first function named `fn` in `src` (comments left out), or null when there is none. */
+export function fnBody(src, fn) {
+  const m = mask(src);
+  const b = blocks(m, pairs(m)).find((x) => x.kind === 'fn' && x.name === fn);
+  return b ? short(squash(mask(src.slice(b.open, b.close + 1), { commentsOnly: true }))) : null;
+}
+/** Does `testSrc` (at `testRel`) import `fileRel`? Both relative to orchestrate/. */
+export function importsFile(testSrc, testRel, fileRel) {
+  for (const x of mask(testSrc, { commentsOnly: true }).matchAll(/\bfrom\s*['"](\.{1,2}\/[^'"]+)['"]/g)) {
+    if (normalize(join(dirname(testRel), x[1])).split('\\').join('/') === fileRel) return true;
+  }
+  return false;
+}
+/**
+ * Why a wrapper's contract is not proven, or [] when it is. Proven: the wrapper names a `contract_test`
+ * ("<file>.test.mjs > <name>") that exists, imports the wrapper's file, runs fakeAlert answering false and throwing,
+ * and is not a todo; its body pin matches; and every wrapper it calls on (`inner`) is proven too.
+ * `read(rel)` returns a file's source under orchestrate/, or null.
+ */
+export function contractProblems(w, wrappersList, read, seen = new Set()) {
+  const id = `${w.file} ${w.fn}`;
+  if (seen.has(id)) return [`${id}: its inner wrappers loop`];
+  seen.add(id);
+  if (!w.contract_test) return [`${id} has no contract_test`];
+  const x = /^(\S+\.test\.mjs) > (.+)$/.exec(w.contract_test);
+  if (!x) return [`${id}: contract_test must be "<file>.test.mjs > <test name>"`];
+  const out = [];
+  const src = read(x[1]);
+  if (src === null) out.push(`${id}: ${x[1]} does not exist`);
+  else {
+    if (!importsFile(src, x[1], w.file)) out.push(`${id}: ${x[1]} does not import ${w.file}`);
+    const why = testedProblem(src, x[2]);
+    if (why) out.push(`${id}: ${x[1]} > ${x[2]}: ${why}`);
+  }
+  const code = read(w.file);
+  if (code === null || fnBody(code, w.fn) === null) out.push(`${id}: no function ${w.fn} in ${w.file}`);
+  else if (w.body && fnBody(code, w.fn) !== w.body) out.push(`${id}: the wrapper changed since its contract was pinned (body ${fnBody(code, w.fn)}, list ${w.body})`);
+  for (const inner of w.inner ?? []) {
+    const v = wrappersList.find((y) => `${y.file} ${y.fn}` === inner);
+    if (!v) out.push(`${id}: inner wrapper ${inner} is not on the list`);
+    else out.push(...contractProblems(v, wrappersList, read, new Set(seen)));
+  }
+  return out;
 }
 
 // The key that pins an entry: file, function, call line hash, body hash.
@@ -304,6 +361,13 @@ export function compare(found, listed) {
 // ---- change control (L135 item 4): the list is the lead's ----
 
 export const LEAD_BRANCH = /^(?:claude\/)?lead-/;
+// The checker's own files (L139 item 6): only a lead PR changes them. safe-merge.sh refuses them too; this is the second layer.
+// raise-contract.test.mjs (the wrapper contracts) and fake-alert.test-helper.mjs (what every contract runs) are added
+// here too: a lane that weakens either would weaken every proof that rests on them.
+export const LEAD_FILES = Object.freeze(['test/alert-inventory.json', 'test/alert-inventory.mjs', 'test/alert-inventory.test.mjs', 'test/alert-answer-scan.mjs',
+  'test/alert-answer.test.mjs', 'test/raise-contract.test.mjs', 'test/fake-alert.test-helper.mjs']);
+/** The lead-only files among `changed` (paths relative to the repo root). */
+export const leadFilesIn = (changed) => changed.filter((p) => LEAD_FILES.some((f) => p === `orchestrate/${f}`));
 const kindOf = (status) => (typeof status === 'string' ? status.split(':')[0] : 'bad');
 /** Entries by status kind, and open ones by owner: { alerts: { open, ruled, tested }, open_by_owner: {...}, ... }. */
 export function countList(list) {
