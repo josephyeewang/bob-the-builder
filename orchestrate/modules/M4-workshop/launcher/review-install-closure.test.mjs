@@ -18,6 +18,16 @@
 // a string can't hide code from them, and code can't hide inside what looks like a comment. The reader is itself
 // checked against node: for every module, the files its static imports reach, as the reader finds them, are exactly
 // the files node loaded.
+//
+// What the scans do not see (audit r2 m-a): a path built from pieces ('../../' + '../x'), a dirname(dirname(...))
+// chain, a template that starts `${import.meta.dirname}/../`, a lazy import() of a package name or of an absolute path.
+// None of these shapes is in the code today; each would fail only when its code runs, not at load.
+//
+// Started as launchd starts it (L132 M-2): every program a LaunchDaemon or the Dispatcher's job starts (ENTRY_POINTS)
+// is run by node from the installed copy, named through the copy's link as the plist names it, with no arguments. Each
+// must refuse: a non-zero exit and a message saying why. A program whose start check compares the link path with its
+// own real path, without resolving the link, takes itself for an imported module there, and exits 0 with nothing
+// said, every time it is started; importing it can't show that.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdirSync, readFileSync, writeFileSync, chmodSync, existsSync, realpathSync, statSync, readdirSync, lstatSync, rmSync } from 'node:fs';
@@ -48,6 +58,10 @@ const CONFIG_IMPORTS = Object.freeze([
   ['modules/M4-workshop/launcher/review-runner-main.mjs', 'import(pathToFileURL(c.wiring).href)'],
   ['modules/M4-workshop/launcher/review-runner-main.mjs', 'import(pathToFileURL(c.budget).href)'],
 ]);
+// Every program a job file starts from the installed copy (L132 M-2): the three LaunchDaemons' scripts and the
+// Dispatcher's. A new job file adds its script here.
+const ENTRY_POINTS = Object.freeze([...Object.values(SCRIPTS), 'modules/M11-dispatcher/main.mjs']);
+
 // Modules whose whole body is a test fixture's hook: each reads a hook's input on stdin and exits while it loads. Each
 // child is given such an input; a module on this list must exit while it loads, and any other module must not.
 const EXITS_ON_LOAD = Object.freeze({
@@ -307,6 +321,39 @@ function importOne(probe, target, out, cwd) {
   });
 }
 
+/**
+ * What is wrong with one module's real import (`res`, from importOne): it failed, loaded a file outside `folder`, exited
+ * or not as EXITS_ON_LOAD says, or loaded other files than the reader finds (the reader, checked against node). Adds
+ * the files it loaded, as paths in `folder`, to `used`. A list of findings; empty when all is well.
+ */
+function loadFindings(m, res, { folder, used = new Set() }) {
+  const { r, status, signal, err } = res;
+  if (!r) return [`${m.rel}: the child wrote nothing (status ${status}, ${signal ?? 'no signal'}): ${err}`];
+  const exits = Object.hasOwn(EXITS_ON_LOAD, m.rel);
+  if (r.error) return [`${m.rel} does not load from the copy: ${r.error}`];
+  const fails = [];
+  if (exits && r.loaded) fails.push(`${m.rel} is on EXITS_ON_LOAD but loaded without exiting`);
+  if (!exits && !r.loaded) fails.push(`${m.rel} exited (${r.code}) while it loaded`);
+  const files = r.seen.map((u) => fileURLToPath(u));
+  for (const f of files) {
+    const inFolder = relative(folder, f);
+    if (inFolder.startsWith('..') || isAbsolute(inFolder)) fails.push(`${m.rel} loaded ${f}, outside the installed copy`);
+    else used.add(inFolder.split(sep).join('/'));
+  }
+  const byReader = [...readerClosure(m.file)].sort();
+  const byNode = [...new Set(files)].sort();
+  if (byReader.join('\n') !== byNode.join('\n')) {
+    fails.push(`${m.rel}: the reader and node differ (reader only: ${byReader.filter((f) => !byNode.includes(f)).map((f) => relative(folder, f)).join(', ') || '-'}; node only: ${byNode.filter((f) => !byReader.includes(f)).map((f) => relative(folder, f)).join(', ') || '-'})`);
+  }
+  return fails;
+}
+
+/** Runs `script` by node with no arguments, as a job file starts it: { status, signal, out }. */
+function startBare(script, cwd) {
+  const r = spawnSync(process.execPath, [script], { cwd, input: '', encoding: 'utf8', timeout: 60_000, env: { PATH: '/usr/bin:/bin', HOME: cwd } });
+  return { status: r.status, signal: r.signal, out: `${r.stdout ?? ''}${r.stderr ?? ''}`.trim() };
+}
+
 async function importAll(items, probe, root, width = 8) {
   const res = new Array(items.length);
   let next = 0;
@@ -325,7 +372,13 @@ test('L92 item 4, L106 M-1: every module of the installed copy loads from the co
   assert.match(readInstallStamp(w.installRoot, { owner: ME }), /^[0-9a-f]{40}$/);
 
   const mods = modulesOf(real).map((f) => ({ file: f, rel: relative(real, f).split(sep).join('/') }));
-  for (const s of Object.values(SCRIPTS)) assert.ok(mods.some((m) => m.rel === s), `the plist script ${s} is in the copy`);
+  for (const s of ENTRY_POINTS) assert.ok(mods.some((m) => m.rel === s), `the job script ${s} is in the copy`);
+
+  // L132 M-2: each program, started through the link with no arguments, refuses and says why (a usage line, or
+  // the check it failed); none goes quiet, and none fails while it loads.
+  const started = ENTRY_POINTS.map((s) => ({ s, ...startBare(join(w.installRoot, s), w.root) }));
+  const quiet = started.filter((x) => x.signal || x.status === 0 || x.out === '' || /ERR_[A-Z_]+|^\s+at |node:internal/m.test(x.out));
+  assert.deepEqual(quiet.map((x) => `${x.s}: exit ${x.status ?? x.signal}, said ${JSON.stringify(x.out.slice(0, 300))}`), [], 'every job script, started through the link, refuses and says why');
   for (const f of Object.keys(EXITS_ON_LOAD)) assert.ok(mods.some((m) => m.rel === f), `${f}, on EXITS_ON_LOAD, is in the copy`);
   for (const [f] of CONFIG_IMPORTS) assert.ok(mods.some((m) => m.rel === f), `${f}, on CONFIG_IMPORTS, is in the copy`);
 
@@ -343,25 +396,8 @@ test('L92 item 4, L106 M-1: every module of the installed copy loads from the co
   const reached = new Set();
   const scripts = new Set(Object.values(SCRIPTS));
   items.forEach((m, k) => {
-    const { r, status, signal, err } = res[k];
-    if (!r) { fails.push(`${m.rel}: the child wrote nothing (status ${status}, ${signal ?? 'no signal'}): ${err}`); return; }
-    const exits = Object.hasOwn(EXITS_ON_LOAD, m.rel);
-    if (r.error) { fails.push(`${m.rel} does not load from the copy: ${r.error}`); return; }
-    if (exits && r.loaded) fails.push(`${m.rel} is on EXITS_ON_LOAD but loaded without exiting`);
-    if (!exits && !r.loaded) fails.push(`${m.rel} exited (${r.code}) while it loaded`);
-    const files = r.seen.map((u) => fileURLToPath(u));
-    for (const f of files) {
-      const inFolder = relative(folder, f);
-      if (inFolder.startsWith('..') || isAbsolute(inFolder)) fails.push(`${m.rel} loaded ${f}, outside the installed copy`);
-      else used.add(inFolder.split(sep).join('/'));
-    }
-    // The reader, checked against node: the files the reader's static imports reach are the files node loaded.
-    const byReader = [...readerClosure(m.file)].sort();
-    const byNode = [...new Set(files)].sort();
-    if (byReader.join('\n') !== byNode.join('\n')) {
-      fails.push(`${m.rel}: the reader and node differ (reader only: ${byReader.filter((f) => !byNode.includes(f)).map((f) => relative(folder, f)).join(', ') || '-'}; node only: ${byNode.filter((f) => !byReader.includes(f)).map((f) => relative(folder, f)).join(', ') || '-'})`);
-    }
-    if (scripts.has(m.rel)) for (const f of files) reached.add(f);
+    fails.push(...loadFindings(m, res[k], { folder, used }));
+    if (scripts.has(m.rel) && res[k].r) for (const u of res[k].r.seen) reached.add(fileURLToPath(u));
   });
   assert.deepEqual(fails, [], 'every module loads from the copy, and only from it');
   // Every listed outside file is loaded by a module of the copy, so the list holds no stale entry.
@@ -371,6 +407,26 @@ test('L92 item 4, L106 M-1: every module of the installed copy loads from the co
 });
 
 // ---- The reader and the scans on small modules. -----------------------------------------------------------------
+
+// m-c (audit r2 N25): the reader-against-node check, on a module whose computed import node follows and the reader's
+// static imports do not, and on the same module without it.
+test('L132 m-c: the reader-against-node check reports a module that loads a file the reader does not find', async () => {
+  const root = realpathSync.native(tempDir('m4-closure-rn-'));
+  const folder = join(root, 'v');
+  const dir = join(folder, SOURCE);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, 'b.mjs'), 'export const b = 1;\n');
+  writeFileSync(join(dir, 'c.mjs'), 'export const c = 1;\n');
+  const probe = join(root, 'probe.mjs');
+  writeFileSync(probe, PROBE);
+  const m = { file: join(dir, 'a.mjs'), rel: 'a.mjs' };
+  const run = async (text, k) => {
+    writeFileSync(m.file, text);
+    return loadFindings(m, await importOne(probe, pathToFileURL(m.file).href, join(root, `out-${k}.json`), root), { folder });
+  };
+  assert.deepEqual(await run("import './b.mjs';\nconst n = 'c';\nawait import(`./${n}.mjs`);\n", 1), [`a.mjs: the reader and node differ (reader only: -; node only: ${SOURCE}/c.mjs)`]);
+  assert.deepEqual(await run("import './b.mjs';\n", 2), [], 'the control: the reader finds what node loads');
+});
 
 test('L106 M-1 (d): the reader keeps strings, templates and regular expressions apart from code and comments', () => {
   // The auditor's plant G: a string with "/*" in it and a later one with "*/" no longer hide the import between them.
@@ -400,7 +456,9 @@ test('L106 M-1 (b), (c): the scans find a load the real import cannot see', () =
   // The auditor's plants A and A2: a template and a variable import() of a file outside the copy.
   assert.match(scan('modules/M10-rules/policy.mjs', 'export const f = () => import(`../../../scripts/blueprint/${n}.mjs`);\n').join('|'), /policy\.mjs:1 imports a name made at run time/);
   assert.match(scan('modules/M10-rules/policy.mjs', 'const p = "../../../scripts/blueprint/schema-check.mjs";\nexport const f = () => import(p);\n').join('|'), /policy\.mjs:2 imports a name made at run time \(import\(p\)\)/);
-  // A plain-string import() is node's to follow, and the real import loads what it names once it runs.
+  // A plain-string import() is not refused by this scan. It runs only when called, so the real import above does not
+  // load it either: the path scan reads its string like any other path in the code, so one that leads out of
+  // orchestrate/ is still found. A bare package name or an absolute path in it is not checked (audit r2 m-a).
   assert.deepEqual(scan('modules/M10-rules/policy.mjs', "export const f = () => import('./engine.mjs');\n"), []);
   // The wiring call is allowed in its own file only, and only that exact call.
   const wiring = 'const mod = await import(pathToFileURL(config.wiring).href);\n';

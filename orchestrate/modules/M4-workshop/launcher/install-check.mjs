@@ -46,6 +46,18 @@ export const RUNNER_CONFIG = 'review.json';
 // The commit stamp (L66): the commit the copy was made from, 40 hex and a newline, in this file at the top of the
 // versioned folder (beside SOURCE and the outside files, written after both), root's like the rest. The runner shows it in its status; the Dispatcher tells Joe when it is not main's.
 export const STAMP = 'installed-commit';
+// The runner's config keys that name a module the runner itself imports (L132 M-1): the wiring and the budget module.
+export const RUNNER_MODULES = Object.freeze(['wiring', 'budget']);
+// Each must be one of the copy's own code files from the repository: a .mjs file under one of these folders of the
+// copy. A copy item the install step puts at the top of the copy (`keep`), a folder or the config is refused: the
+// runner imports the module from the copy, and only a file among the copy's own finds the files it imports.
+export const MODULE_HOMES = Object.freeze(['modules', 'shared']);
+/** Null, or why `rel` (a path inside the copy, relative to it) is not one of the copy's own code files. */
+export function copyModuleProblem(rel) {
+  const parts = typeof rel === 'string' ? rel.split('/') : [];
+  if (parts.length >= 2 && MODULE_HOMES.includes(parts[0]) && !parts.some((s) => s === '' || s === '.' || s === '..') && rel.endsWith('.mjs')) return null;
+  return `is not one of the copy's own code files (a .mjs file under its ${MODULE_HOMES.map((h) => `${h}/`).join(' or ')} folder), so it can't find the files it loads`;
+}
 const HEX40 = /^[0-9a-f]{40}$/;
 
 export function installStamp(commit) {
@@ -98,9 +110,9 @@ export function currentCopy(installRoot, { owner = 0, lstat = lstatSync, readlin
  * shape; it clears the old folder itself.
  */
 export function oldInstall(installRoot, v) {
-  return `${installRoot} is an install from before the copy's layout changed (L92 item 4): its link names the folder ${v} itself, not ${v}/${SOURCE}. Nothing was changed, and reviews do not start until it is put right. To put it right, remove the old link, then run the install step again (the updater once as root with --first <seed folder>). The removal, to paste in Terminal: sudo /bin/rm ${shellQuote(installRoot)}`;
+  return `${installRoot} is an install from before the copy's layout changed: its link points at the folder ${v} instead of ${v}/${SOURCE} inside it. Nothing was changed, and reviews do not start until it is put right. To put it right, remove the old link (only the link; the old folder is cleared for you), then run the Mac setup's install step again, the same step that first made this copy, which makes it in the new layout. The removal, to paste in Terminal: sudo /bin/rm ${shellQuote(installRoot)}`;
 }
-const shellQuote = (p) => (/^[A-Za-z0-9_./-]+$/.test(p) ? p : `'${String(p).replace(/'/g, "'\\''")}'`);
+export const shellQuote = (p) => (/^[A-Za-z0-9_./-]+$/.test(p) ? p : `'${String(p).replace(/'/g, "'\\''")}'`);
 
 /**
  * The installed copy as a LaunchDaemon may run it (L106 m-1): the copy's link, not a plain folder (L75 c-7), and a

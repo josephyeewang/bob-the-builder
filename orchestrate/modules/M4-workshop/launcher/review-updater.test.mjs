@@ -14,7 +14,7 @@ import { tempDir } from '../../../shared/test-tmp.mjs';
 import { gitOk, callLog, ROOT_PATH, safeGitEnv } from '../git/safe-git.mjs';
 import { SCRIPTS, UPDATE_EVERY_S, updaterPlist } from './review-daemons.mjs';
 import { STAMP, SOURCE, OUTSIDE_FILES, NODE, UPDATER_CONFIG, RUNNER_CONFIG, installProblem, chainProblem, currentCopy, aclProblem, versionName, mainSeenFile, readMainSeen, readInstallStamp,
-  nextMainSeen, behindSince, copyReady } from './install-check.mjs';
+  nextMainSeen, behindSince, copyReady, oldInstall, shellQuote } from './install-check.mjs';
 import { updateOnce, writeNew, leftovers as updaterLeftovers, parseTree, parseBatch, readUpdaterConfig, main, MAIN, PREVIOUS, CLONE_MADE,
   cloneLocks, gitIsRunning, gitToolsProblem, previousCopy, clearLeftovers } from './review-updater.mjs';
 
@@ -933,19 +933,33 @@ test('L75 m-3: on a Mac, the developer folder /usr/bin/git hands over to, its gi
   assert.equal(gitToolsProblem('/usr/bin/git', { ...opts, run: xs(join(root, 'dev-link')) }), null);
 });
 
-test('L75 m-4: a new copy must hold what the runner\'s config names in it (wiring, claude, the hooks), or the update is refused', async () => {
+test('L75 m-4, L132 M-1: a new copy must hold what the runner\'s config names in it (wiring, budget, claude, the hooks), or the update is refused', async () => {
   const w = await world();
-  writeFileSync(join(w.keepSeed, RUNNER_CONFIG), `${JSON.stringify({ wiring: join(w.installRoot, 'wiring', 'w.mjs'), claudeBin: '/usr/local/bin/claude', hooksDir: join(w.installRoot, 'modules') })}\n`);
-  const r = await updateOnce(w.c, { ...w.o, first: w.keepSeed });
-  assert.match(r.reason, /the new copy was not made \(the new copy has no wiring\/w\.mjs, the runner's wiring: keep must hold wiring\)/);
-  assert.equal(existsSync(w.installRoot), false);
-  assert.deepEqual(leftovers(w), []);
+  // The wiring and the budget module must be the copy's own code files from main, under modules/ or shared/ (L132
+  // M-1): a copy item is refused before the flip, even one `keep` carries, and so is one main does not hold.
   mkdirSync(join(w.keepSeed, 'wiring'));
   writeFileSync(join(w.keepSeed, 'wiring', 'w.mjs'), '');
-  writeFileSync(join(w.keepSeed, RUNNER_CONFIG), `${JSON.stringify({ wiring: join(w.installRoot, 'wiring', 'w.mjs'), claudeBin: join(w.installRoot, 'claude', 'bin') })}\n`);
+  const kept = { ...w.c, keep: [...w.c.keep, 'wiring'] };
+  const wired = join(w.installRoot, SCRIPTS.updater);
+  for (const k of ['wiring', 'budget']) {
+    const kw = join(w.installRoot, 'wiring', 'w.mjs');
+    writeFileSync(join(w.keepSeed, RUNNER_CONFIG), `${JSON.stringify({ wiring: wired, [k]: kw, claudeBin: '/usr/local/bin/claude' })}\n`);
+    const r = await updateOnce(kept, { ...w.o, first: w.keepSeed });
+    assert.match(r.reason, new RegExp(`the new copy was not made \\(the runner's ${k}, ${kw}, is not one of the copy's own code files \\(a \\.mjs file under its modules/ or shared/ folder\\)`), k);
+    assert.equal(existsSync(w.installRoot), false);
+    writeFileSync(join(w.keepSeed, RUNNER_CONFIG), `${JSON.stringify({ wiring: wired, [k]: join(w.installRoot, 'modules', 'gone.mjs'), claudeBin: '/usr/local/bin/claude' })}\n`);
+    assert.match((await updateOnce(kept, { ...w.o, first: w.keepSeed })).reason, new RegExp(`the new copy has no modules/gone\\.mjs, the runner's ${k}: main does not hold it`), k);
+    assert.deepEqual(leftovers(w), []);
+  }
+  writeFileSync(join(w.keepSeed, RUNNER_CONFIG), `${JSON.stringify({ wiring: wired, claudeBin: '/usr/local/bin/claude', hooksDir: join(w.installRoot, 'hooks') })}\n`);
+  const r = await updateOnce(w.c, { ...w.o, first: w.keepSeed });
+  assert.match(r.reason, /the new copy was not made \(the new copy has no hooks, the runner's hooksDir: keep must hold hooks\)/);
+  assert.equal(existsSync(w.installRoot), false);
+  assert.deepEqual(leftovers(w), []);
+  writeFileSync(join(w.keepSeed, RUNNER_CONFIG), `${JSON.stringify({ wiring: wired, claudeBin: join(w.installRoot, 'claude', 'bin') })}\n`);
   const c = { ...w.c, keep: [...w.c.keep, 'wiring'] };
   assert.match((await updateOnce(c, { ...w.o, first: w.keepSeed })).reason, /has no claude\/bin, the runner's claudeBin: keep must hold claude/);
-  writeFileSync(join(w.keepSeed, RUNNER_CONFIG), `${JSON.stringify({ wiring: join(w.installRoot, 'wiring', 'w.mjs'), claudeBin: '/usr/local/bin/claude' })}\n`);
+  writeFileSync(join(w.keepSeed, RUNNER_CONFIG), `${JSON.stringify({ wiring: wired, budget: wired, claudeBin: '/usr/local/bin/claude' })}\n`);
   const ok = await updateOnce(c, { ...w.o, first: w.keepSeed });
   assert.equal(ok.ok, true, ok.reason);
   assert.equal(existsSync(join(w.installRoot, 'wiring', 'w.mjs')), true);
@@ -1007,7 +1021,9 @@ test('L106 m-3, m-2: an install from before L92 item 4 is refused everywhere, no
   const v = oldShape(w);
   const inst = dirname(w.installRoot);
   const before = snapshot(inst);
-  const told = new RegExp(`${esc(w.installRoot)} is an install from before the copy's layout changed \\(L92 item 4\\): its link names the folder ${esc(v)} itself, not ${esc(v)}/${SOURCE}\\. Nothing was changed.*remove the old link, then run the install step again .*--first <seed folder>.*to paste in Terminal: sudo /bin/rm ${esc(w.installRoot)}$`);
+  const told = new RegExp(`^${esc(w.installRoot)} is an install from before the copy's layout changed: its link points at the folder ${esc(v)} instead of ${esc(v)}/${SOURCE} inside it\\. Nothing was changed.*remove the old link \\(only the link; the old folder is cleared for you\\), then run the Mac setup's install step again, the same step that first made this copy.*to paste in Terminal: sudo /bin/rm ${esc(w.installRoot)}$`);
+  // What Joe reads holds no lead-call numbers and no placeholder to fill in (audit r2 m-e).
+  assert.doesNotMatch(oldInstall(w.installRoot, v), /\bL\d+\b|<[a-z ]+>/);
   // The update, the install step, the runner's and the account copy's check, and the install check all say it.
   assert.match((await updateOnce(w.c, w.o)).reason, told);
   assert.match((await updateOnce(w.c, { ...w.o, first: w.keepSeed })).reason, told);
@@ -1027,6 +1043,30 @@ test('L106 m-3, m-2: an install from before L92 item 4 is refused everywhere, no
   assert.equal(existsSync(join(inst, v, STAMP)), false, 'the old folder is cleared');
   assert.deepEqual(leftovers(w), []);
 });
+
+// m-d (audit r2 N5): the removal line, pasted into a shell as it is, removes exactly the link, even when its path holds
+// a space and a quote; a file named by the path's first word is left alone.
+test('L132 m-d: the old-install removal line is safe to paste for a path with a space and a quote', () => {
+  const top = realpathSync.native(tempDir('m4-oldlink-'));
+  const dir = join(top, "it's here", 'inst');
+  mkdirSync(dir, { recursive: true });
+  const link = join(dir, SOURCE);
+  const v = `${SOURCE}.v-${'a'.repeat(40)}`;
+  mkdirSync(join(dir, v));
+  symlinkSync(v, link);
+  writeFileSync(join(top, 'it'), 'not this one\n');
+  const line = oldInstall(link, v).split('to paste in Terminal: ')[1];
+  assert.equal(line, `sudo /bin/rm ${shellQuote(link)}`);
+  assert.notEqual(shellQuote(link), link, 'the path is quoted');
+  // The line without sudo, as the shell reads it.
+  const r = spawnSync('/bin/sh', ['-c', line.replace(/^sudo /, '')], { cwd: top, encoding: 'utf8' });
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(existsSync(link) || lstatExists(link), false, 'the link is gone');
+  assert.equal(existsSync(join(dir, v)), true, 'the folder it named stays');
+  assert.equal(readFileSync(join(top, 'it'), 'utf8'), 'not this one\n');
+  assert.equal(shellQuote('/plain/path-1.x'), '/plain/path-1.x', 'a plain path is left as it is');
+});
+const lstatExists = (p) => { try { lstatSync(p); return true; } catch { return false; } };
 
 test('L106 m-1: a copy the updater did not finish (no stamp, or another commit\'s) is not ready, though its link is good', async () => {
   const w = await world();

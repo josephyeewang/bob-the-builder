@@ -3,7 +3,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, existsSync, fstatSync, linkSync, mkdirSync, readFileSync, realpathSync, symlinkSync, unlinkSync, writeFileSync, lstatSync } from 'node:fs';
+import { chmodSync, existsSync, fstatSync, linkSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, unlinkSync, writeFileSync, lstatSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { templateFile } from './review-settings.mjs';
@@ -53,7 +53,7 @@ test('L66 M2: what a review runs (claude, node, the hooks folder) must be inside
   writeFileSync(join(vFolder, STAMP), installStamp(C), { mode: 0o644 });
   const out = tempDir('m4-progs-out-');
   for (const d of ['bin', 'hooks', 'modules']) mkdirSync(join(base, d), { mode: 0o755 });
-  const files = { self: join(base, 'modules', 'runner.mjs'), config: join(base, 'review.json'), wiring: join(base, 'wiring.mjs'), claude: join(base, 'bin', 'claude'), node: join(base, 'bin', 'node') };
+  const files = { self: join(base, 'modules', 'runner.mjs'), config: join(base, 'review.json'), wiring: join(base, 'modules', 'wiring.mjs'), claude: join(base, 'bin', 'claude'), node: join(base, 'bin', 'node') };
   for (const f of Object.values(files)) writeFileSync(f, '', { mode: 0o644 });
   writeFileSync(join(base, 'hooks', 'plain-files.mjs'), '', { mode: 0o644 });
   // Each review role's settings template (L67), where the updater copies it in with the rest of the folder.
@@ -99,6 +99,42 @@ test('L66 M2: what a review runs (claude, node, the hooks folder) must be inside
   chmodSync(files.claude, 0o644);
   assert.match(check({ claudeBin: join(base, 'bin', 'gone') }), /bin\/gone is missing/);
   assert.match(check({ hooksDir: base }), /is not inside the installed copy/);
+  // L132 M-1: the wiring and the budget module, which the runner imports, must be the copy's own code files, .mjs files
+  // under its modules/ or shared/ folder. A copy item the install step put at the top of the copy, a folder or the
+  // config is refused: the runner would import it and fail on its first import of the copy's own files.
+  const own = /is not one of the copy's own code files \(a \.mjs file under its modules\/ or shared\/ folder\)/;
+  writeFileSync(join(base, 'kept-wiring.mjs'), '', { mode: 0o644 });
+  writeFileSync(join(base, 'modules', 'x.js'), '', { mode: 0o644 });
+  mkdirSync(join(base, 'shared'), { mode: 0o755 });
+  chmodSync(join(base, 'shared'), 0o755);
+  writeFileSync(join(base, 'shared', 'b.mjs'), '', { mode: 0o644 });
+  mkdirSync(join(base, 'modules', 'dir.mjs'), { mode: 0o755 });
+  chmodSync(join(base, 'modules', 'dir.mjs'), 0o755);
+  for (const k of ['wiring', 'budget']) {
+    const at = (p) => check({ [k]: p });
+    const says = (p, re) => assert.match(at(p), new RegExp(`^the runner's ${k}, ${p.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}, ${re.source}`), `${k} = ${p}`);
+    says(join(base, 'kept-wiring.mjs'), own);
+    says(files.config, own);
+    says(join(base, 'modules', 'M4-workshop'), own);
+    says(join(base, 'modules', 'dir.mjs'), /is not a file/);
+    says(join(base, 'modules', 'x.js'), own);
+    // One of the copy's own modules is accepted, under modules/ or shared/, named through the link or by its real path.
+    assert.equal(at(files.self), null, `${k}: a module under modules/`);
+    assert.equal(at(join(base, 'shared', 'b.mjs')), null, `${k}: a module under shared/`);
+    assert.equal(at(byReal(files.self)), null, `${k}: by its real path`);
+  }
+  // m-b (audit r2 N22): the budget module is on the root's-alone check like the wiring. One outside the copy, others can
+  // write, or a link is refused by that check, by name; without the budget on it, these pass.
+  writeFileSync(join(out, 'budget.mjs'), '', { mode: 0o644 });
+  assert.match(check({ budget: join(out, 'budget.mjs') }), new RegExp(`^${join(out, 'budget.mjs')} is not inside the installed copy`));
+  assert.match(check({ budget: join(base, 'modules', 'gone.mjs') }), new RegExp(`^${join(base, 'modules', 'gone.mjs')} is missing`));
+  symlinkSync(files.self, join(base, 'modules', 'link.mjs'));
+  assert.match(check({ budget: join(base, 'modules', 'link.mjs') }), new RegExp(`^${join(base, 'modules', 'link.mjs')} is a link`));
+  unlinkSync(join(base, 'modules', 'link.mjs'));
+  for (const p of [join(base, 'kept-wiring.mjs'), join(base, 'modules', 'x.js'), join(base, 'shared', 'b.mjs')]) unlinkSync(p);
+  rmSync(join(base, 'modules', 'dir.mjs'), { recursive: true });
+  rmSync(join(base, 'shared'), { recursive: true });
+  assert.equal(check(), null);
   // The ports hand what was checked to the wiring's start.
   let got;
   const ports = realPorts({ ...c, uids: { reviewer: ME } }, { start: (x) => { got = x; return { ok: true, pid: 1 }; } }, { node: files.node, owner: ME });

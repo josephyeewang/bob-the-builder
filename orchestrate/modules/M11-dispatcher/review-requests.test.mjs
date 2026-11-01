@@ -8,6 +8,7 @@ import { join } from 'node:path';
 import { tempDir } from '../../shared/test-tmp.mjs';
 import { writeReviewRequest, reviewPorts, statusAlerts, mainSeenHead, STAMP_GRACE_MS } from './review-requests.mjs';
 import { STATUS_STALE_MS } from '../M4-workshop/launcher/review-runner.mjs';
+import { RUNNER_LOG } from '../M4-workshop/launcher/review-daemons.mjs';
 
 const ME = process.getuid();
 const HEAD = 'ab'.repeat(20);
@@ -102,7 +103,12 @@ test('L66: a failed runner pass and an installed copy behind main are told, each
   assert.equal(behind.length, 1);
   assert.match(behind[0].text, /installed copy is at abababa, but main is at ccccccc/);
   assert.equal(statusAlerts({ ...ok, installed_commit: HEAD }, () => 'd'.repeat(40))[0].id, behind[0].id, 'main moving on does not tell it again');
-  assert.match(statusAlerts({ ...ok, installed_commit: null }, () => MAIN)[0].text, /no commit stamp where it is read, installed-commit at the top of the <name>\.v-<commit> folder/);
+  // m-f (audit r2): plain words, and where the runner's log is: the path when the wiring gives it, else the file's name.
+  const none = statusAlerts({ ...ok, installed_commit: null }, () => MAIN)[0].text;
+  assert.match(none, /no commit stamp \(the file that says which commit of main the copy was made from\).*the review runner says what to do in its log, review-runner\.err\.log, in the folder the Mac setup chose for the review jobs' logs\.$/);
+  assert.equal(RUNNER_LOG, 'review-runner.err.log');
+  assert.match(statusAlerts({ ...ok, installed_commit: null }, () => MAIN, T0, { runnerLog: '/logs/review-runner.err.log' })[0].text, /says what to do in its log, \/logs\/review-runner\.err\.log\.$/);
+  assert.doesNotMatch(none, /<|\.v-|installed-commit|L\d+/, 'no placeholders, folder names or lead-call numbers');
   for (const mainHead of [undefined, () => null, () => 'main', () => { throw new Error('no'); }]) assert.deepEqual(statusAlerts({ ...ok, installed_commit: HEAD }, mainHead), []);
   // Through the ports, read from the real status file.
   const dir = tempDir('m11-status-');

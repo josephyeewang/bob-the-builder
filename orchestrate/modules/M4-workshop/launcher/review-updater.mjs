@@ -17,7 +17,7 @@
 //      versioned folder beside the copy (`<installRoot>.v-<commit>/orchestrate`), and the few files outside it that the
 //      code imports (install-check.mjs OUTSIDE_FILES) at their repository paths in the same folder (L92 item 4), straight
 //      from git's objects: no checkout, no work tree; copies in the copy's own items that are not in the repository
-//      (`keep`: its node, its configs, the wiring, the claude program) from the copy in place, then writes the commit
+//      (`keep`: its node, its configs, the claude program; never the wiring, L132 M-1) from the copy in place, then writes the commit
 //      stamp last, at the top of the versioned folder;
 //   5. checks the new folder is root's alone (`installProblem`) and holds what the runner's config names in the copy
 //      (its wiring, the claude program, the hooks), then flips the copy's link to its `orchestrate/` with one rename. The folder it
@@ -46,7 +46,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:pat
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { git, checkMirror, useGitHome, MIRROR_CONFIG_TEMPLATE, ROOT_PATH } from '../git/safe-git.mjs';
-import { SOURCE, OUTSIDE_FILES, STAMP, NODE, UPDATER_CONFIG, RUNNER_CONFIG, installStamp, installProblem, chainProblem, aclProblem, currentCopy, readInstallStamp,
+import { SOURCE, OUTSIDE_FILES, STAMP, NODE, UPDATER_CONFIG, RUNNER_CONFIG, RUNNER_MODULES, copyModuleProblem, installStamp, installProblem, chainProblem, aclProblem, currentCopy, readInstallStamp,
   versionName, versionCommit, mainSeenFile, readMainSeen, nextMainSeen } from './install-check.mjs';
 
 export const MAIN = 'refs/heads/main';
@@ -58,9 +58,10 @@ const NAME = /^(?!\.\.?$)[A-Za-z0-9._-]{1,128}$/;
 const HTTPS = /^https:\/\/[A-Za-z0-9.-]+(:\d+)?\/[^\s]+$/;
 const FILE_MODES = { 100644: 0o644, 100755: 0o755 };
 const GIT_MS = 300_000;
-// The runner's config keys that name something in the copy the repository does not hold (L75 m-4): `keep` must carry
-// each over, or the first update would drop it. Checked in the new copy before the flip.
-export const RUNNER_NAMES = Object.freeze(['wiring', 'claudeBin', 'hooksDir']);
+// The runner's config keys that name something in the copy (L75 m-4), each checked in the new copy before the flip.
+// The claude program and the hooks may be copy items, which `keep` must carry over or the first update would drop them;
+// the wiring and the budget module must be the copy's own code files from main (L132 M-1, install-check RUNNER_MODULES).
+export const RUNNER_NAMES = Object.freeze(['wiring', 'budget', 'claudeBin', 'hooksDir']);
 // The link naming the copy the last update replaced (L75 (a)), `<installRoot>.prev`, root's, beside the copy. Only
 // root writes in that folder, so it is root's doing. It only keeps that folder from being removed; nothing is ever put
 // in place from it.
@@ -523,7 +524,10 @@ function runnerNamesMissing(installRoot, next) {
     if (typeof v !== 'string' || !isAbsolute(v)) continue;
     const rel = relative(installRoot, v);
     if (rel === '' || rel.startsWith('..') || isAbsolute(rel)) continue;
-    if (!there(join(next, rel))) return `the new copy has no ${rel}, the runner's ${k}: keep must hold ${rel.split('/')[0]}`;
+    const mod = RUNNER_MODULES.includes(k);
+    const why = mod ? copyModuleProblem(rel) : null;
+    if (why) return `the runner's ${k}, ${v}, ${why}`;
+    if (!there(join(next, rel))) return `the new copy has no ${rel}, the runner's ${k}: ${mod ? 'main does not hold it' : `keep must hold ${rel.split('/')[0]}`}`;
   }
   return null;
 }

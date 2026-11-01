@@ -5,10 +5,10 @@
 // What runs, and the runner's alerts for Joe, come back in the runner's status file; a status that is missing or
 // older than 3 minutes is an error, never "no reviewer" (L63).
 //
-//   reviewPorts({ requests, status, reviewUid, now, newId, mainHead, installRoot, main })
+//   reviewPorts({ requests, status, reviewUid, now, newId, mainHead, installRoot, main, runnerLog })
 //                                                             → { requestReview, hasReviewer, reviewAlerts }
 //   mainSeenHead({ installRoot, main, owner, top })           → the mainHead port, from root's record of main (L75 m-2)
-//   statusAlerts(status, mainHead, now)                       → the Dispatcher's own alerts from the status (L66)
+//   statusAlerts(status, mainHead, now, { runnerLog })        → the Dispatcher's own alerts from the status (L66)
 //   relayReviewAlerts({ rec, alerts, alert, now })            → tells Joe each runner alert once (a fact per alert)
 //
 // Besides the runner's own alerts, the Dispatcher tells Joe two things it reads in the status (L66), each once:
@@ -31,6 +31,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { readReviewStatus, REQUEST_ID, CARD_ID } from '../M4-workshop/launcher/review-runner.mjs';
 import { behindSince, mainSeenFile, readMainSeen } from '../M4-workshop/launcher/install-check.mjs';
+import { RUNNER_LOG } from '../M4-workshop/launcher/review-daemons.mjs';
 import { REVIEW_ROLES } from '../../shared/review-roles.mjs';
 import { tellThen } from './alerts.mjs';
 
@@ -67,7 +68,7 @@ const sha = (s) => createHash('sha256').update(String(s)).digest('hex').slice(0,
 export const STAMP_GRACE_MS = 30 * 60_000;
 const AHEAD_MS = 5 * 60_000;
 
-export function statusAlerts(s, mainHead, now = Date.now()) {
+export function statusAlerts(s, mainHead, now = Date.now(), { runnerLog } = {}) {
   const out = [];
   if (s?.ok === false) {
     const why = typeof s.error === 'string' && s.error ? s.error.slice(0, 300) : 'no reason given';
@@ -83,10 +84,13 @@ export function statusAlerts(s, mainHead, now = Date.now()) {
     if (at && since !== null && now - since < STAMP_GRACE_MS) return out;
     out.push({ id: `stamp-${at ?? 'none'}`, at: 'once', text: at
       ? `Its installed copy is at ${at.slice(0, 7)}, but main is at ${main.slice(0, 7)}: reviews run the old code until the copy is updated.`
-      : 'Its installed copy has no commit stamp where it is read, installed-commit at the top of the <name>.v-<commit> folder the copy\'s link names (beside orchestrate/, not inside it), so whether reviews run main\'s code can\'t be told. An install from before the copy\'s layout changed has none there; the review runner\'s log says what to do.' });
+      : `Its installed copy has no commit stamp (the file that says which commit of main the copy was made from), so whether reviews run main's code can't be told. A copy installed before the copy's layout changed has none; the review runner says what to do in its log, ${logWhere(runnerLog)}.` });
   }
   return out;
 }
+
+// Where the review runner's log is: the path the wiring passes, or the file's name and the folder it is in.
+const logWhere = (p) => (typeof p === 'string' && p.startsWith('/') ? p : `${RUNNER_LOG}, in the folder the Mac setup chose for the review jobs' logs`);
 
 /**
  * The mainHead port statusAlerts takes (L75 m-2): main's commit (`main()`, the wiring's) and since when the copy has
@@ -102,16 +106,17 @@ export function mainSeenHead({ installRoot, main, owner = 0, top = '/' }) {
 
 /**
  * The ports the time limits use. `status` is the runner's status.json; `reviewUid` the review user's uid. The stamp check
- * uses `mainHead`, or, given `installRoot` and `main`, mainSeenHead's.
+ * uses `mainHead`, or, given `installRoot` and `main`, mainSeenHead's. `runnerLog` is the review runner's log file
+ * (`<logDir>/` M4 review-daemons.mjs RUNNER_LOG), which the no-stamp alert names.
  */
-export function reviewPorts({ requests, status, reviewUid, now = () => Date.now(), newId, mainHead, installRoot, main }) {
+export function reviewPorts({ requests, status, reviewUid, now = () => Date.now(), newId, mainHead, installRoot, main, runnerLog }) {
   if (!mainHead && installRoot && main) mainHead = mainSeenHead({ installRoot, main });
   const read = () => readReviewStatus({ file: status, now: now(), uid: reviewUid });
   return {
     requestReview: ({ card, head, role }) => writeReviewRequest({ dir: requests, card, head, role, ...(newId ? { newId } : {}) }),
     // Throws when the status can't be trusted: an unclear answer is an error, never a no (L63).
     hasReviewer: (card, role, head) => read().running.some((r) => r.card === card && r.role === role && r.head === head),
-    reviewAlerts: () => { const s = read(); return [...s.alerts, ...statusAlerts(s, mainHead, now())]; },
+    reviewAlerts: () => { const s = read(); return [...s.alerts, ...statusAlerts(s, mainHead, now(), { runnerLog })]; },
   };
 }
 
