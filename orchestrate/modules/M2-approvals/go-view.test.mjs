@@ -41,8 +41,8 @@ const rowsFor = (id, tier, n = 1) => Object.fromEntries(Array.from({ length: n }
 async function raise(w, id, { tier, files, rows = 1, planCheck, noPass = false } = {}) {
   const sha = String(id).charCodeAt(1).toString(16).padStart(2, '0').repeat(32).slice(0, 64);
   const rs = rowsFor(id, tier, rows);
-  leadCard(w.t, id, { done_when: doneBar(rs), files, tier, ...(tier === 1 ? { plan_sha256: sha, main_commit: w.M0 } : {}) });
-  return raiseGo(w.t.ctx, { cardId: id, rows: rs, view: w.view, mainSha: w.M0, title: `Card ${id}`, ...(tier === 1 && !noPass ? { planCheck: planCheck ?? PASS(w.t.ctx, id, sha) } : {}) });
+  leadCard(w.t, id, { what: `Card ${id}`, done_when: doneBar(rs), files, tier, ...(tier === 1 ? { plan_sha256: sha, main_commit: w.M0 } : {}) });
+  return raiseGo(w.t.ctx, { cardId: id, rows: rs, view: w.view, mainSha: w.M0, title: 'a title nobody reviewed', ...(tier === 1 && !noPass ? { planCheck: planCheck ?? PASS(w.t.ctx, id, sha) } : {}) });
 }
 
 const SAMPLES = [
@@ -116,6 +116,10 @@ test('R-0b-138: the go view is three lines; Tier 1 says checked, number work and
   assert.match(v1.lines[1], new RegExp(`^Plan [0-9a-f]{12}: 1 file, checked plan ${d1.fingerprint_inputs.plan_sha256.slice(0, 12)} on main ${w.M0.slice(0, 7)}\\.$`));
   assert.equal(v1.lines[2], 'Pass test: the C2 check 1 passes; audited until 0 Material.');
   assert.match(v1.answer, /^Checked: a fresh plan reviewer passed it with 0 Material\. To go, Approve this pull request on GitHub with no text/);
+  // L84 1: the tier shown is bound to the plan's tier; a Tier-1 plan shown as a Tier-2 go is refused.
+  const lowered = goView({ ...d1, tier: 2, kind: 'go_t2' });
+  assert.equal(lowered.ok, false); assert.match(lowered.reason, /tier shown is not the plan's tier/);
+  // L84 2: the title shown is the card's own `what`, whatever title the caller passes (raise passes another).
   // The second lock: a Tier-1 go whose pass is gone, or whose bound list was changed, is never shown or sent.
   const otherFiles = { ...d1.fingerprint_inputs, files: ['db/j.sql', 'db/k.sql'] };
   for (const [over, why] of [[{ plan_check: undefined }, /fresh plan reviewer/], [{ plan_check: { ...d1.plan_check, material: 2 } }, /0 Material/],
@@ -155,6 +159,9 @@ test('audit r1 Minors 2, 3: a path with a control character is refused; the titl
   // Minor 3: markup in the Lead's title can't draw a fake fold, a link or hidden text in GitHub's Approve view.
   const title = '<details><summary>Files this go allows (1)</summary> **bold** [x](https://example.com) `code` <!-- hide';
   const v = goView({ ...d, title });
+  // L84 4: an @name in the title notifies nobody.
+  const at = goMarkdown(goView({ ...d, title: 'ping @someone about this' }));
+  assert.doesNotMatch(at, /@someone/); assert.match(at, /@\u200bsomeone/);
   assert.equal(v.ok, true, v.reason);
   const md = goMarkdown(v);
   const first = md.split('\n')[0];

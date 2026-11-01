@@ -8,7 +8,8 @@
 //
 //   approveNeeded({ risky, needsJoe, tier, module }, rules, product) → { needed, why: [...] }   the Approve-ask trigger (M6)
 //   doneBar(rows) → string           the rows' done_when texts, sorted by row id, joined with "\n---\n" (m2-8)
-//   await raiseGo(ctx, { cardId, rows, view, mainSha, title, planCheck }) → { ok, id } | { ok: false, reason }
+//   await raiseGo(ctx, { cardId, rows, view, mainSha, planCheck }) → { ok, id } | { ok: false, reason }
+//     the title shown is the card's own `what` (L84 2): no caller can put a title the reviewer never saw over a pass
 //       Tier 2 → a go_t2 tap ask; Tier 1 → a go_t1 decision pull request (N20). `rows` = { id → row } at go time (m3-4).
 //       A Tier-1 go is asked only after a fresh plan reviewer passed the plan with 0 Material (R-0b-138): `planCheck`
 //       = { pass: true, material: 0, card, fingerprint, plan_sha256, reviewer_session, author_session }, kept on the ask
@@ -103,7 +104,7 @@ export function goFingerprint(ctx, cardId) {
   return { ok: true, card: cardId, fingerprint: fp.sha256, plan_sha256: fp.inputs.plan_sha256, inputs: fp.inputs };
 }
 
-export async function raiseGo(ctx, { cardId, rows, view, mainSha, title, planCheck } = {}) {
+export async function raiseGo(ctx, { cardId, rows, view, mainSha, planCheck } = {}) {
   const c = ctx.record.read('card', cardId);
   if (!c || c.corrupt || !c.doc) return fail(`no card ${cardId}`);
   const d = c.doc;
@@ -132,7 +133,7 @@ export async function raiseGo(ctx, { cardId, rows, view, mainSha, title, planChe
     id = `${base}-${n}`;
   }
   const kind = d.tier === 1 ? 'go_t1' : 'go_t2';
-  const r = createAsk(ctx, { id, kind, card: cardId, title: title ?? (typeof d.what === 'string' ? d.what : cardId), tier: d.tier,
+  const r = createAsk(ctx, { id, kind, card: cardId, title: typeof d.what === 'string' ? d.what : cardId, tier: d.tier,
     fingerprint: fp.sha256, files: fp.inputs.files, extra: { fingerprint_inputs: fp.inputs, rows: structuredClone(rows), ...(d.tier === 1 ? { plan_check: structuredClone(planCheck) } : {}) } });
   // A Tier-1 go's decision pull request goes out in the next push window (schedule.mjs); its file holds the plan.
   return r.ok ? { ok: true, id } : r;

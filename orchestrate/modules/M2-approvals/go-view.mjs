@@ -56,6 +56,7 @@ export function goView(doc) {
   const tier = doc.tier;
   if (tier !== 1 && tier !== 2) return fail('the go names no tier');
   if (doc.kind !== (tier === 1 ? 'go_t1' : 'go_t2')) return fail('the go\'s kind is not its tier\'s');
+  if (inp.tier !== tier) return fail('the tier shown is not the plan\'s tier');
   if (typeof doc.fingerprint !== 'string' || !SHA256.test(doc.fingerprint)) return fail('a go names its plan fingerprint');
   if (tier === 1) {
     const bad = planCheckProblem(doc.plan_check, { fingerprint: doc.fingerprint, card: doc.card, planSha256: inp.plan_sha256 });
@@ -88,8 +89,9 @@ const span = (f) => { const n = Math.max(0, ...[...String(f).matchAll(/`+/g)].ma
 
 // Markdown and HTML in a line are shown as text, not drawn (Minor 3): every character GitHub could read as markup is
 // escaped, and < > & become entities, so a title can't draw a fake fold or hide text.
+// An `@` gets a zero-width space after it, so `@name` in a title never notifies that GitHub user (L84 4).
 export const mdText = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-  .replace(/[\\`*_{}[\]()#+\-.!|~]/g, (c) => `\\${c}`);
+  .replace(/[\\`*_{}[\]()#+\-.!|~]/g, (c) => `\\${c}`).replace(/@/g, '@\u200b');
 
 export function goMarkdown(v) {
   return [`**${mdText(v.lines[0])}**`, mdText(v.lines[1]), mdText(v.lines[2]), '', v.answer, '', `<details><summary>${v.fold.summary}</summary>`, '',
