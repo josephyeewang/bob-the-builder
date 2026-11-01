@@ -1096,3 +1096,29 @@ test('L71 C3 planted: earlierBlock quotes across every kind of line break', () =
   assert.deepEqual(body, notes.map((n) => `> ${n}`));
   for (const ch of ['\r', ' ', ' ', '\u0085', '\v', '\f']) assert.ok(!b.includes(ch), JSON.stringify(ch));
 });
+
+// R-0b-163 (L77 m9): a session's review copy is removed only once its ended record is written; a running session keeps
+// the files it reads, and a copy that can't be removed is told to Joe, never retried as a fail.
+test('R-0b-163 planted: removeCopy is called only after the ended record exists, never for a running session', async () => {
+  const removed = [];
+  let w;
+  w = await ready({ removeCopy: (sid) => { removed.push([sid, w.ended(sid).none !== true]); } });
+  w.ask(); await runnerPass(w.ctx);
+  await runnerPass(w.ctx);
+  w.clock.t += 10 * SWEEP_AFTER_MS;
+  await runnerPass(w.ctx);
+  assert.deepEqual(removed, [], 'not while it runs, however long');
+  w.end('S-1');
+  await runnerPass(w.ctx);
+  assert.deepEqual(removed, [['S-1', true]], 'once, after its ended record');
+  await runnerPass(w.ctx);
+  assert.equal(removed.length, 1, 'once only');
+  // A copy that can't be removed is an alert; the ended record stands.
+  const v = await ready({ removeCopy: () => { throw Object.assign(new Error('busy'), { code: 'EBUSY' }); } });
+  v.ask(); await runnerPass(v.ctx);
+  v.end('S-1');
+  const r = await runnerPass(v.ctx);
+  assert.equal(r.ok, true, r.error);
+  assert.equal(v.ended('S-1').ended.how, 'ended');
+  assert.ok(r.alerts.some((a) => /The review copy of session S-1 could not be removed \(EBUSY\); it is left in place and needs removing by hand/.test(a.text)), r.alerts.map((a) => a.text).join(' | '));
+});
