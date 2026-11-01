@@ -52,3 +52,18 @@ Lead is running, say so.
 Write `request-rotate-<id>.json`: `{"request":"rotate","product":null,"name":"<NAME>"}`, where `<NAME>` is the key's **name** exactly as the owner
 said it (capitals and digits with at least one `_`, such as `STRIPE_KEY`; add nothing to it). Never the value. Reply:
 "Filed: rotate <NAME>. The Mini confirms in a minute." The steps come after that.
+
+## Parked owner test: OWNER-TEST.md step 7, the trip dry run
+
+
+- **Type:** `I'm away until Friday` and answer the time zone with a city, such as `Europe/Prague`.
+- **You should see:** the reply "Filed: away <the test product>. The Mini confirms in a minute.", a "Confirmed: away …"
+  notification, then within a few minutes a
+  phone notification holding the brief (lead call L22): the test product set to away, what waits on your go and the
+  open risky asks (each with a link), the Mini check (online, logged in, battery backup), and the Air line. Then say
+  `brief`: the Front Door quotes the same brief. If the notification doesn't come, stop here: the cutover waits until
+  the push is proven (L29).
+- If the Air line hasn't passed, on the Air: open Claude Code, type `/configaudit` and press Return. It sends the result
+  to the Mini itself; you never type a count. Say `I'm away until Friday` again: the new brief's Air line passes.
+- Claude checks the test product's record really says away. Then **tap** it back to active. Typing "I'm back" files a
+  request only; that is expected.

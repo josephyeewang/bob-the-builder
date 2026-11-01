@@ -86,6 +86,10 @@ test('L151: pause, away, back, wrap up and rotate file nothing; each reply says 
   // No file shape or file name for these kinds is left in the live skill for the Front Door to write.
   assert.doesNotMatch(SKILL, /\{"request":|"state":"(paused|away)"|`state-<id>|`request-(resume|wrapup|rotate)-/);
   assert.doesNotMatch(SKILL, /Only the owner's tap brings it back|The steps come after that|Resume still needs your tap/);
+  // The owner's own test steps expect the same (none of them waits on a pause, away or rotate that files nothing).
+  const OWNER = readFileSync(new URL('./OWNER-TEST.md', import.meta.url), 'utf8');
+  assert.doesNotMatch(OWNER, /Filed: (away|pause|resume|wrap|rotate)|Confirmed: (away|pause)|\b(pause|rotate) nosuchproduct|question box asking your time zone/);
+  assert.ok(OWNER.includes('"Confirmed: idea <id>, saved for the Lead."'));
   // idea- promises nothing beyond being saved for the Lead.
   assert.ok(SKILL.includes('Reply: **"Filed: idea <id>, saved for the Lead. The Mini confirms in a minute."** Promise nothing more'));
   assert.match(SKILL, /Product names come only from the product list in your context file/);
