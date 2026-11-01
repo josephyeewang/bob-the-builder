@@ -357,7 +357,8 @@ export function scanSources(files) {
         if (all.length !== lit) problems.push(`${file}: ${all.length - lit} ${local}( call(s) without a literal entity; the scan cannot say what they write`);
         // The helper itself handed on as a value can't be followed either.
         for (const m of s.matchAll(new RegExp(`(?<![\\w$.])${local.replace(/\$/g, '\\$')}\\b(?!\\s*\\()`, 'g'))) {
-          const before = s.slice(Math.max(0, m.index - 40), m.index);
+          // From the statement's start, not a fixed 40 characters: a long import list (M2 undo-flag.mjs:43) is still an import (L151).
+          const before = s.slice(Math.max(0, s.lastIndexOf(";", m.index) + 1, s.lastIndexOf("\n\n", m.index)), m.index);
           if (/\bimport\s*\{[^}]*$/.test(before) || /\bas\s+$/.test(before) || /function\s*$/.test(before) || /\b(?:const|let)\s+$/.test(before)) continue;
           problems.push(`${file}:${lineOf(s, m.index)}: ${local} is handed on as a value, so the scan can't see what it writes`);
         }

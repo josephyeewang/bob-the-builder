@@ -342,3 +342,13 @@ test('L129 N9: only M9 may import its store.mjs, in any import form', () => {
   assert.doesNotMatch(problemsOf([{ file: 'modules/M9-record/writer.mjs', src: forms[0] }]), /store\.mjs/);
   assert.doesNotMatch(problemsOf([{ file: 'modules/M2-approvals/x.mjs', src: "import { a } from './ask-store.mjs';" }]), /store\.mjs/);
 });
+
+test('L151: a helper named in a long import list is an import, not handed on as a value; handing it on is still caught', () => {
+  const store = SOURCES.find((f) => f.file === 'modules/M2-approvals/ask-store.mjs');
+  const pad = Array.from({ length: 12 }, (_, i) => `helperNumber${i}`).join(', ');
+  const longImport = `import { ${pad}, writeDoc } from './ask-store.mjs';\n`;
+  assert.ok(longImport.indexOf('writeDoc') > 40, 'the name sits past the old 40-character look-back');
+  const flagged = (src) => problemsOf([store, { file: 'modules/M2-approvals/long.mjs', src }]);
+  assert.doesNotMatch(flagged(longImport), /long\.mjs.*handed on as a value/);
+  assert.match(flagged(`${longImport}export const a = (xs) => xs.forEach(writeDoc);\n`), /long\.mjs:2: writeDoc is handed on as a value/);
+});
