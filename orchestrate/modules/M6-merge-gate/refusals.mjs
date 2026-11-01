@@ -22,10 +22,12 @@
 //   requiredChecks [name], checksIgnored [{ app_id, name }]
 //   compareStatus 'ahead' | 'behind' | 'diverged' | 'identical' | null   main...head (refusal 12)
 //   carried { review, audit, reasons } | null   carry-over from H0 to the PR head (read only when they differ)
-//   verdicts [{ doc, createdBy }], launches [{ doc }] | null   launches: the review runner's records only (L65); null
-//                                            when they could not be read, with launchesProblem saying why. verdicts:
-//                                            what each verdict file says, read again (L66 M1); verdictsRefused [reason]
-//                                            for the rows whose file failed
+//   reviews [{ role, session_id, head, tree, aside, ended, silent, verdict | null, problem | null }] | null   every
+//                                            session the review runner launched for this card at H0 or H0's tree, with
+//                                            its own verdict file (M9 headReviews, L68, L69); null when they could not
+//                                            be read, with reviewsProblem saying why
+//   prReviews (same shape) | null            the same at the PR head and its tree, read only when it is not H0 (L69);
+//                                            null when they could not be read, with prReviewsProblem saying why
 //   tier 1 | 2 | null                        M10's computed tier for the change
 //   exactReverse bool                        the change recomputes as an exact reverse (M10 exact-reverse.mjs)
 //   reversesGateMerge bool                   the reversed commit carries the robot's mark (first-cutover undo)
@@ -37,7 +39,7 @@
 //   files [{ path, status }] | null          the change's files
 //   firstCustomerNewFiles [prefix] | null    effect_paths.first_customer_visible.new_files_under
 
-import { VERDICT_CHECKLIST, CHECKLIST_LEVELS } from '../../shared/record.mjs';
+import { PASSES, worstVerdict } from '../M9-record/outbox.mjs';
 import { HOLD_REASONS } from '../../shared/rules.mjs';
 import { compileList } from '../M10-rules/paths.mjs';
 
@@ -77,26 +79,31 @@ function checksProblem(f) {
   return null;
 }
 
-const checklistClean = (doc) => !!doc?.checklist && typeof doc.checklist === 'object'
-  && VERDICT_CHECKLIST.every((k) => CHECKLIST_LEVELS.includes(doc.checklist[k]) && doc.checklist[k] !== 'material');
+// The role's own pass (a reviewer with a clean four-line checklist, an auditor with 0 Material) is M9's, the one
+// definition the record's move to verified uses too (L69 point 6).
+export { PASSES };
 
-// M9's own rule (writer.mjs verdictFor): a verdict counts only from a session the review runner launched in that role on
-// this card at that head (its own record, which gather reads through M9's check, L65), handed in through its own review
-// outbox (an integer outbox_uid, created as role:session).
-const launched = (f, v, role, head) => Number.isInteger(v.doc?.outbox_uid) && v.createdBy === `${role}:${v.doc?.session_id}`
-  && (Array.isArray(f.launches) ? f.launches : []).some((l) => l.doc?.card === f.card.id && l.doc?.role === role && l.doc?.head === head && l.doc?.session_id === v.doc.session_id);
-
+// The worst verdict (L68, L69): every session the review runner launched for this card at this head, or at any head with
+// the same tree, has its say, so an extra start (or an amend with no code change) can only add a chance to fail. A role
+// passes only when one of its sessions passed, none failed, none ended silent and none is unsettled (M9 worstVerdict).
+// An auditor that ran on a Tier-2 change still has its say: a failing one refuses. When the pull request's head is not
+// H0, every session at that head (or its tree) has its say too, even when the review carries over (L69 point 5).
 export function verdictProblem(f) {
   const head = f.card?.doc?.head;
   if (!SHA.test(head ?? '')) return 'the card has no head';
-  if (!Array.isArray(f.launches)) return `the review runner's launch records could not be read: ${f.launchesProblem ?? 'not gathered'}`;
-  const vs = (Array.isArray(f.verdicts) ? f.verdicts : []).filter((v) => v?.doc?.card === f.card.id && v.doc.head === head);
-  const why = Array.isArray(f.verdictsRefused) && f.verdictsRefused.length ? ` (${f.verdictsRefused.length} verdict row(s) not counted: ${f.verdictsRefused[0]})` : '';
-  if (!vs.some((v) => launched(f, v, 'reviewer', head) && v.doc.pass === true && checklistClean(v.doc))) return `no passing reviewer verdict with a clean four-line checklist for ${head.slice(0, 7)} from a launched reviewer${why}`;
+  if (!Array.isArray(f.reviews)) return `the review runner's records could not be read: ${f.reviewsProblem ?? 'not gathered'}`;
+  const at = ` at ${head.slice(0, 7)}`;
+  const rp = worstVerdict(f.reviews, 'reviewer', PASSES.reviewer);
+  if (rp) return `${rp}${at} (a pass needs a clean four-line checklist)`;
   if (f.tier !== 1 && f.tier !== 2) return 'the change\'s tier is unknown';
-  if (f.tier === 1 && !vs.some((v) => launched(f, v, 'auditor', head) && v.doc.pass === true && v.doc.material === 0)) return `Tier 1: no auditor verdict with 0 Material for ${head.slice(0, 7)} from a launched auditor`;
+  const ap = worstVerdict(f.reviews, 'auditor', PASSES.auditor, { needPass: f.tier === 1 });
+  if (ap) return `${f.tier === 1 ? 'Tier 1: ' : ''}${ap}${at} (a pass needs 0 Material)`;
   const prHead = f.pr?.head?.sha;
   if (prHead !== head) {
+    const there = ` at the pull request's head ${String(prHead).slice(0, 7)}`;
+    if (!Array.isArray(f.prReviews)) return `the review runner's records${there} could not be read: ${f.prReviewsProblem ?? 'not gathered'}`;
+    const pp = worstVerdict(f.prReviews, 'reviewer', PASSES.reviewer, { needPass: false }) ?? worstVerdict(f.prReviews, 'auditor', PASSES.auditor, { needPass: false });
+    if (pp) return `${pp}${there}`;
     if (f.carried?.review !== true) return `the review was for ${head.slice(0, 7)}; it does not carry over to ${String(prHead).slice(0, 7)}`;
     if (f.tier === 1 && f.carried.audit !== true) return `the Tier-1 audit does not carry over to ${String(prHead).slice(0, 7)}`;
   }
@@ -135,6 +142,8 @@ export function judge(f) {
   const notes = [];
   const no = (n, reason) => refusals.push({ n, reason });
   try {
+    // A review launch record no card can be tied to was skipped by M9's check (L69 point 3): logged with the decision.
+    for (const x of Array.isArray(f?.reviewsSkipped) ? f.reviewsSkipped : []) notes.push(`a review launch record that names no card was skipped (${x})`);
     if (!f?.card?.id || !f.card.doc) return { decision: 'refuse', refusals: [{ n: 11, reason: 'no card' }], hold: null, notes };
     const first = f.cutoverStage !== 'second';
     const reverse = f.exactReverse === true;

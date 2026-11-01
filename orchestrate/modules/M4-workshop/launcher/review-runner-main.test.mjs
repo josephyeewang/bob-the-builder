@@ -3,13 +3,15 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, linkSync, mkdirSync, readFileSync, symlinkSync, writeFileSync, lstatSync } from 'node:fs';
+import { chmodSync, fstatSync, linkSync, mkdirSync, readFileSync, realpathSync, symlinkSync, unlinkSync, writeFileSync, lstatSync } from 'node:fs';
 import { join } from 'node:path';
-import { installProblem, programsProblem, readCardFile, adminAnswer, sessionsFrom, realPorts, readConfig, readInstallStamp } from './review-runner-main.mjs';
+import { installProblem, programsProblem, readCardFile, recordVerdictTaken, adminAnswer, sessionsFrom, realPorts, readConfig, readInstallStamp, readJoeTaps } from './review-runner-main.mjs';
+import { readOutboxFile } from '../../M9-record/outbox.mjs';
 import { STAMP, installStamp } from './review-daemons.mjs';
 import { reviewDaemonPlists } from './review-daemons.mjs';
 import { readAccountFile, copyAccountTo, useAccount, ACCOUNT_FILE } from './accounts.mjs';
 import { tempDir } from '../../../shared/test-tmp.mjs';
+import { git, gitOk } from '../git/safe-git.mjs';
 
 const ME = process.getuid();
 
@@ -20,16 +22,17 @@ test('L65: the installed copy must be root\'s alone, with the runner, config and
   for (const p of [base, join(base, 'a'), join(base, 'a', 'b')]) chmodSync(p, 0o755);
   chmodSync(join(base, 'a', 'b', 'x.mjs'), 0o644);
   // This test's user stands in for root.
-  assert.equal(installProblem(base, [join(base, 'a', 'b', 'x.mjs')], { owner: ME }), null);
-  // The real check wants root, which this user is not.
-  assert.match(installProblem(base, [], {}), /is not owned by root/);
-  assert.match(installProblem(base, ['/elsewhere/wiring.mjs'], { owner: ME }), /not inside the installed copy/);
-  assert.match(installProblem(base, [join(base, '..', 'x')], { owner: ME }), /not inside the installed copy/);
+  assert.equal(installProblem(base, [join(base, 'a', 'b', 'x.mjs')], { owner: ME, top: base }), null);
+  // The real owner check wants root, which this user is not. The walk stops at the test's folder, so what is above the
+  // temp folder on this machine (a link, or a folder anyone can write) can't answer first.
+  assert.match(installProblem(base, [], { top: base }), /is not owned by root/);
+  assert.match(installProblem(base, ['/elsewhere/wiring.mjs'], { owner: ME, top: base }), /not inside the installed copy/);
+  assert.match(installProblem(base, [join(base, '..', 'x')], { owner: ME, top: base }), /not inside the installed copy/);
   chmodSync(join(base, 'a', 'b', 'x.mjs'), 0o664);
-  assert.match(installProblem(base, [], { owner: ME }), /x\.mjs can be written by others than root/);
+  assert.match(installProblem(base, [], { owner: ME, top: base }), /x\.mjs can be written by others than root/);
   chmodSync(join(base, 'a', 'b', 'x.mjs'), 0o644);
   symlinkSync('/tmp', join(base, 'a', 'l'));
-  assert.match(installProblem(base, [], { owner: ME }), /a\/l is a link/);
+  assert.match(installProblem(base, [], { owner: ME, top: base }), /a\/l is a link/);
 });
 
 test('L66 M2: what a review runs (claude, node, the hooks folder) must be inside the installed copy and root\'s alone', async () => {
@@ -42,7 +45,7 @@ test('L66 M2: what a review runs (claude, node, the hooks folder) must be inside
   for (const p of [base, join(base, 'bin'), join(base, 'hooks'), join(base, 'modules')]) chmodSync(p, 0o755);
   for (const p of [out]) chmodSync(p, 0o755);
   const c = { installRoot: base, wiring: files.wiring, claudeBin: files.claude, hooksDir: join(base, 'hooks') };
-  const check = (over = {}, node = files.node) => programsProblem({ ...c, ...over }, { self: files.self, config: files.config, node, owner: ME });
+  const check = (over = {}, node = files.node) => programsProblem({ ...c, ...over }, { self: files.self, config: files.config, node, owner: ME, top: base });
   // This test's user stands in for root; with everything inside, nothing is wrong.
   assert.equal(check(), null);
   assert.match(programsProblem(c, { self: files.self, config: files.config, node: files.node }), /is not owned by root/);
@@ -70,6 +73,78 @@ test('L66 M2: what a review runs (claude, node, the hooks folder) must be inside
   assert.deepEqual(got, { role: 'reviewer', claudeBin: files.claude, node: files.node, hooksDir: join(base, 'hooks') });
 });
 
+test('item 20(b) planted: every folder above the installed copy, up to /, must be root\'s, written by no one else, and not a link', () => {
+  const base = tempDir('m4-above-');
+  const inst = join(base, 'p', 'q', 'inst');
+  mkdirSync(inst, { recursive: true });
+  for (const p of [base, join(base, 'p'), join(base, 'p', 'q'), inst]) chmodSync(p, 0o755);
+  const check = (opts = {}, root = inst) => installProblem(root, [], { owner: ME, top: base, ...opts });
+  assert.equal(check(), null);
+  chmodSync(join(base, 'p'), 0o775);
+  assert.match(check(), new RegExp(`${join(base, 'p')}, above the installed copy, can be written by others than root`));
+  chmodSync(join(base, 'p'), 0o757);
+  assert.match(check(), /p, above the installed copy, can be written by others than root/);
+  chmodSync(join(base, 'p'), 0o755);
+  chmodSync(base, 0o777);
+  assert.match(check(), new RegExp(`${base}, above the installed copy, can be written by others than root`), 'up to and with the top');
+  chmodSync(base, 0o755);
+  // Another user's folder above the copy (the stat port stands in for that user).
+  const other = (p) => { const st = lstatSync(p); return p === join(base, 'p', 'q') ? Object.assign(Object.create(Object.getPrototypeOf(st)), st, { uid: ME + 1 }) : st; };
+  assert.match(check({ lstat: other }), /q, above the installed copy, is not owned by root/);
+  // A link above the copy.
+  symlinkSync(join(base, 'p'), join(base, 'lp'));
+  assert.match(check({}, join(base, 'lp', 'q', 'inst')), /lp, above the installed copy, is a link/);
+  // The real check runs to /, which this throwaway folder's parents fail.
+  assert.match(installProblem(inst, [], { owner: ME }), /above the installed copy/);
+  assert.match(check({}, '/elsewhere'), /is not under/);
+});
+
+test('item 20(a): whether the Record took a session\'s verdict is read from its verdict row and the file it names', () => {
+  const rec = tempDir('m4-rectaken-');
+  const outboxRoot = tempDir('m4-rectaken-out-');
+  const uids = { reviewer: ME, auditor: ME };
+  const H = 'a'.repeat(40);
+  mkdirSync(join(rec, 'docs'), { mode: 0o755 });
+  for (const p of [rec, join(rec, 'docs'), outboxRoot]) chmodSync(p, 0o755);
+  const ask = (over = {}) => recordVerdictTaken({ recordRoot: rec, recordUid: ME, outboxRoot, uids, role: 'reviewer', sessionId: 'S-1', card: 'C-1', head: H, ...over });
+  assert.deepEqual(ask(), { ok: false, reason: 'the Record holds no verdicts yet' });
+  mkdirSync(join(rec, 'docs', 'verdict'), { mode: 0o755 });
+  chmodSync(join(rec, 'docs', 'verdict'), 0o755);
+  assert.equal(ask().reason, 'the Record holds no verdict of session S-1');
+  // The session's verdict file, and the row the intake would write for it.
+  for (const p of [join(outboxRoot, 'reviewer'), join(outboxRoot, 'reviewer', 'S-1')]) { mkdirSync(p, { mode: 0o755 }); chmodSync(p, 0o755); }
+  const file = join(outboxRoot, 'reviewer', 'S-1', 'verdict-S-1.md');
+  writeFileSync(file, `${JSON.stringify({ entity: 'verdict', card: 'C-1', expectRev: 2, fields: { head: H, pass: true } })}\n`, { mode: 0o644 });
+  const f = readOutboxFile({ outboxRoot, uids, tag: { role: 'reviewer', sessionId: 'S-1' }, file });
+  assert.equal(f.ok, true, f.reason);
+  const row = (doc, id = 'verdict-S-1-7') => writeFileSync(join(rec, 'docs', 'verdict', `${id}.json`), JSON.stringify({ entity: 'verdict', id, rev: 1, doc }), { mode: 0o644 });
+  const good = { session_id: 'S-1', role: 'reviewer', card: 'C-1', head: H, pass: true, source_key: f.key };
+  row(good);
+  assert.deepEqual(ask(), { ok: true });
+  // Another head, card or role is not this start's verdict.
+  assert.match(ask({ head: 'b'.repeat(40) }).reason, /names reviewer on C-1 at aaaaaaa/);
+  assert.match(ask({ card: 'C-2' }).reason, /names reviewer on C-1/);
+  assert.match(ask({ role: 'auditor' }).reason, /names reviewer on C-1/);
+  // A session whose id starts the same (S-1-2) is another session: its good verdict is not S-1's.
+  unlinkSync(join(rec, 'docs', 'verdict', 'verdict-S-1-7.json'));
+  for (const p of [join(outboxRoot, 'reviewer', 'S-1-2')]) { mkdirSync(p, { mode: 0o755 }); chmodSync(p, 0o755); }
+  const file2 = join(outboxRoot, 'reviewer', 'S-1-2', 'verdict-S-1-2.md');
+  writeFileSync(file2, readFileSync(file), { mode: 0o644 });
+  const f2 = readOutboxFile({ outboxRoot, uids, tag: { role: 'reviewer', sessionId: 'S-1-2' }, file: file2 });
+  row({ ...good, session_id: 'S-1-2', source_key: f2.key }, 'verdict-S-1-2-8');
+  assert.deepEqual(ask({ sessionId: 'S-1-2' }), { ok: true });
+  assert.equal(ask().reason, 'the Record holds no verdict of session S-1');
+  row(good);
+  // A row whose file has changed since (a second file written over the first) does not count.
+  writeFileSync(file, `${JSON.stringify({ entity: 'verdict', card: 'C-1', expectRev: 2, fields: { head: H, pass: false } })}\n`, { mode: 0o644 });
+  assert.match(ask().reason, /is not the one handed in/);
+  // A Record that isn't its owner's alone throws: the runner refuses the request and counts nothing.
+  chmodSync(join(rec, 'docs'), 0o775);
+  assert.throws(() => ask(), /is not the Record owner's alone/);
+  chmodSync(join(rec, 'docs'), 0o755);
+  assert.equal(ask({ sessionId: '../x' }).reason, 'the start names no session');
+});
+
 test('L65: a card is read from the Record read only, as the Record owner\'s plain file', () => {
   const root = tempDir('m4-recread-');
   mkdirSync(join(root, 'docs', 'card'), { recursive: true });
@@ -77,7 +152,7 @@ test('L65: a card is read from the Record read only, as the Record owner\'s plai
   const put = (id, body, mode = 0o644) => { const p = join(root, 'docs', 'card', `${id}.json`); writeFileSync(p, typeof body === 'string' ? body : JSON.stringify(body), { mode }); chmodSync(p, mode); return p; };
   put('C-1', { entity: 'card', id: 'C-1', rev: 3, doc: { state: 'in_review', head: 'a'.repeat(40), tier: 1 } });
   const read = (card, uid = ME) => readCardFile({ recordRoot: root, recordUid: uid, card });
-  assert.deepEqual(read('C-1'), { ok: true, doc: { state: 'in_review', head: 'a'.repeat(40), tier: 1 } });
+  assert.deepEqual(read('C-1'), { ok: true, doc: { state: 'in_review', head: 'a'.repeat(40), tier: 1 }, rev: 3 });
   assert.match(read('C-2').reason, /no such card/);
   assert.match(read('../x').reason, /not a card id/);
   assert.match(read('C-1', ME + 1).reason, /not the Record owner's alone/);
@@ -186,24 +261,45 @@ test('L66 pid contract: the real port reads a process\'s command, and the verdic
   assert.equal(p.claudeBin, '/pinned/claude');
   assert.match(p.processName(process.pid), /node/);
   for (const pid of [0, -1, 1.5, '12']) assert.equal(p.processName(pid), null);
-  // A session with no outbox folder has handed nothing in, and that is a failed try, never a throw.
+  // A session whose outbox folder is gone can't be counted (L71 point 1): never a silence, never a throw.
   const h = p.handedIn({ role: 'reviewer', sessionId: 'S-1', card: 'C-1', head: 'a'.repeat(40) });
   assert.equal(h.ok, false);
-  assert.match(h.reason, /could not be listed/);
+  assert.equal(h.none, false);
+  assert.match(h.reason, /its outbox folder is gone/);
 });
+
+// The wall check on root and outboxRoot (L71) stood in for: every folder is a plain folder of root's that no one else writes.
+const OPEN_WALLS = { lstat: () => ({ isSymbolicLink: () => false, isDirectory: () => true, uid: 0, mode: 0o40755 }) };
 
 test('L65: the config names every path as a full path', () => {
   const d = tempDir('m4-cfg-');
   const good = { installRoot: '/i', root: '/r', outboxRoot: '/o', reviewHome: '/h', uids: {}, recordRoot: '/x', recordUid: 5, mirror: '/m', claudeBin: '/c', hooksDir: '/i/hooks', ownerHome: '/w', ownerUid: 5, wiring: '/i/w.mjs' };
   writeFileSync(join(d, 'c.json'), JSON.stringify(good));
-  assert.equal(readConfig(join(d, 'c.json')).mirror, '/m');
+  assert.equal(readConfig(join(d, 'c.json'), OPEN_WALLS).mirror, '/m');
   writeFileSync(join(d, 'c.json'), JSON.stringify({ ...good, mirror: 'm' }));
-  assert.throws(() => readConfig(join(d, 'c.json')), /mirror must be an absolute path/);
+  assert.throws(() => readConfig(join(d, 'c.json'), OPEN_WALLS), /mirror must be an absolute path/);
   const { hooksDir, ...noHooks } = good;
   writeFileSync(join(d, 'c.json'), JSON.stringify(noHooks));
-  assert.throws(() => readConfig(join(d, 'c.json')), /hooksDir must be an absolute path/);
+  assert.throws(() => readConfig(join(d, 'c.json'), OPEN_WALLS), /hooksDir must be an absolute path/);
   writeFileSync(join(d, 'c.json'), JSON.stringify({ ...good, recordUid: '5' }));
-  assert.throws(() => readConfig(join(d, 'c.json')), /recordUid must be a uid/);
+  assert.throws(() => readConfig(join(d, 'c.json'), OPEN_WALLS), /recordUid must be a uid/);
+});
+
+test('L68 planted: the runner\'s folder and review\'s outbox are two walls: one inside the other, or the same, is refused', () => {
+  const d = realpathSync(tempDir('m4-cfg-'));
+  const good = { installRoot: '/i', root: join(d, 'review'), outboxRoot: join(d, 'outbox'), reviewHome: '/h', uids: {}, recordRoot: '/x', recordUid: 5, mirror: '/m', claudeBin: '/c', hooksDir: '/i/hooks', ownerHome: '/w', ownerUid: 5, wiring: '/i/w.mjs' };
+  const cfg = (over) => { writeFileSync(join(d, 'c.json'), JSON.stringify({ ...good, ...over })); return () => readConfig(join(d, 'c.json'), OPEN_WALLS); };
+  assert.equal(cfg({})().root, join(d, 'review'), 'two folders side by side');
+  assert.equal(cfg({ outboxRoot: join(d, 'review-outbox') })().outboxRoot, join(d, 'review-outbox'), 'a name that only starts the same is not inside');
+  const walls = /root .* and outboxRoot .* must be two separate folders, neither inside the other/;
+  assert.throws(cfg({ outboxRoot: join(d, 'review', 'outbox') }), walls, 'the outbox inside the runner\'s folder');
+  assert.throws(cfg({ root: join(d, 'outbox', 'review') }), walls, 'the runner\'s folder inside the outbox');
+  assert.throws(cfg({ outboxRoot: join(d, 'review') }), walls, 'the same folder');
+  assert.throws(cfg({ outboxRoot: `${join(d, 'review')}/./x/..` }), walls, 'the same folder, spelled another way');
+  // A link that names the outbox's place inside the runner's folder is seen through.
+  mkdirSync(join(d, 'review'));
+  symlinkSync(join(d, 'review'), join(d, 'alias'));
+  assert.throws(cfg({ outboxRoot: join(d, 'alias', 'outbox') }), walls, 'through a link');
 });
 
 test('L65: the two LaunchDaemons run the installed copy and its own node, the runner as review', () => {
@@ -218,4 +314,138 @@ test('L65: the two LaunchDaemons run the installed copy and its own node, the ru
   for (const t of [p.runner, p.accountCopy]) assert.doesNotMatch(t, /homebrew|\/usr\/local/);
   assert.throws(() => reviewDaemonPlists({ label: 'x y' }), /bad job label/);
   assert.throws(() => reviewDaemonPlists({ label: 'x', installRoot: 'I' }), /installRoot must be an absolute path/);
+});
+
+// L69 point 4: the runner keys one start per card, tree and role. The real port reads the head's tree through safe-git
+// (no inherited settings, no prompts, no network), in a throwaway repository.
+test('L69: the real tree port reads a head\'s tree from the mirror; an amend with no code change has the same tree', async () => {
+  const d = tempDir('m4-tree-');
+  const gd = join(d, '.git');
+  const out = async (args, o = {}) => (await git(args, { gitDir: gd, workTree: d, cwd: d, ...o })).stdout.toString('utf8').trim();
+  await gitOk(['init', '-q', d], { gitDir: gd });
+  writeFileSync(join(d, 'a.txt'), 'one\n');
+  await gitOk(['add', 'a.txt'], { gitDir: gd, workTree: d, cwd: d });
+  await gitOk(['-c', 'user.name=t', '-c', 'user.email=t@example.invalid', 'commit', '-q', '-m', 'one'], { gitDir: gd, workTree: d, cwd: d });
+  await gitOk(['branch', 'card/c-1'], { gitDir: gd, workTree: d, cwd: d });
+  const ports = realPorts({ mirror: gd, uids: { reviewer: process.getuid() } }, {});
+  const head = await ports.currentHead('C-1');
+  assert.match(head, /^[0-9a-f]{40}$/);
+  const tree = await ports.treeOf('C-1', head);
+  assert.equal(tree, await out(['rev-parse', `${head}^{tree}`]));
+  // An amend with only a new message: a new head, the same tree.
+  await gitOk(['-c', 'user.name=t', '-c', 'user.email=t@example.invalid', 'commit', '-q', '--amend', '-m', 'one, again'], { gitDir: gd, workTree: d, cwd: d });
+  const amend = await out(['rev-parse', 'HEAD']);
+  assert.notEqual(amend, head);
+  assert.equal(await ports.treeOf('C-1', amend), tree);
+  // A code change: a new tree.
+  writeFileSync(join(d, 'a.txt'), 'two\n');
+  await gitOk(['-c', 'user.name=t', '-c', 'user.email=t@example.invalid', 'commit', '-q', '-am', 'two'], { gitDir: gd, workTree: d, cwd: d });
+  assert.notEqual(await ports.treeOf('C-1', await out(['rev-parse', 'HEAD'])), tree);
+  // A head git does not have, or one that is not 40 hex, is a throw (the runner refuses the request).
+  await assert.rejects(ports.treeOf('C-1', 'e'.repeat(40)), /the head's tree is not in the mirror/);
+  await assert.rejects(ports.treeOf('C-1', 'HEAD'), /the head is not 40 hex/);
+  // Joe's taps: none until the phone link is wired.
+  assert.deepEqual(ports.setAsideByJoe(), []);
+});
+
+// L70 point 3: a "review again" tap is a file of Joe's own Mac user, in a folder of his that no one else writes. Nothing
+// the workers' Mac user writes can be one.
+test('L70 planted: Joe\'s taps are read only as the owner\'s own files, in the owner\'s own folder', () => {
+  const ME = process.getuid();
+  const base = tempDir('m4-taps-');
+  chmodSync(base, 0o755);
+  const dir = join(base, 'taps');
+  mkdirSync(dir, { mode: 0o755 }); chmodSync(dir, 0o755);
+  const tap = (sid, doc = { session_id: sid }, mode = 0o644) => { const p = join(dir, `${sid}.json`); writeFileSync(p, typeof doc === 'string' ? doc : JSON.stringify(doc), { mode }); chmodSync(p, mode); return p; };
+  assert.deepEqual(readJoeTaps({ dir: undefined, ownerUid: ME }), [], 'none configured: none');
+  const p1 = tap('S-1');
+  let got = readJoeTaps({ dir, ownerUid: ME });
+  assert.deepEqual(got.map((t) => t.session_id), ['S-1']);
+  assert.match(got[0].key, /^S-1\.json:[0-9.]+:[0-9a-f]{64}$/);
+  assert.equal(readJoeTaps({ dir, ownerUid: ME })[0].key, got[0].key, 'the same tap has the same key');
+  // The folder: the owner's, a plain folder, written by no one else; the same for the folder above it.
+  assert.throws(() => readJoeTaps({ dir, ownerUid: ME + 1 }), /the taps folder is not owned by the owner/);
+  chmodSync(dir, 0o777);
+  try { assert.throws(() => readJoeTaps({ dir, ownerUid: ME }), /the taps folder can be written by others than the owner/); } finally { chmodSync(dir, 0o755); }
+  chmodSync(dir, 0o775);
+  try { assert.throws(() => readJoeTaps({ dir, ownerUid: ME }), /the taps folder can be written by others than the owner/); } finally { chmodSync(dir, 0o755); }
+  chmodSync(base, 0o777);
+  try { assert.throws(() => readJoeTaps({ dir, ownerUid: ME }), /the folder above the taps folder can be written by others than the owner/); } finally { chmodSync(base, 0o755); }
+  symlinkSync(dir, join(base, 'alias'));
+  assert.throws(() => readJoeTaps({ dir: join(base, 'alias'), ownerUid: ME }), /the taps folder is not a plain folder/);
+  assert.throws(() => readJoeTaps({ dir: join(base, 'missing'), ownerUid: ME }), /the taps folder is missing/);
+  const above = (uid) => (p) => { const st = lstatSync(p); return p === base ? Object.assign(Object.create(Object.getPrototypeOf(st)), st, { uid }) : st; };
+  assert.throws(() => readJoeTaps({ dir, ownerUid: ME, lstat: above(ME + 7) }), /the folder above the taps folder is not owned by the owner/);
+  assert.equal(readJoeTaps({ dir, ownerUid: ME, lstat: above(0) }).length, 1, 'the folder above may be root\'s');
+  // A file of another user (the workers') is ignored; so is one others may write, a link, a misnamed or bad one.
+  const ino = lstatSync(p1).ino;
+  const other = (fd) => { const st = fstatSync(fd); return st.ino === ino ? Object.assign(Object.create(Object.getPrototypeOf(st)), st, { uid: ME + 1 }) : st; };
+  assert.deepEqual(readJoeTaps({ dir, ownerUid: ME, fstat: other }), [], 'a tap file owned by the workers\' user is ignored');
+  chmodSync(p1, 0o666);
+  try { assert.deepEqual(readJoeTaps({ dir, ownerUid: ME }), []); } finally { chmodSync(p1, 0o644); }
+  unlinkSync(p1);
+  writeFileSync(join(base, 'elsewhere.json'), JSON.stringify({ session_id: 'S-2' }), { mode: 0o644 });
+  symlinkSync(join(base, 'elsewhere.json'), join(dir, 'S-2.json'));
+  tap('S-3', { session_id: 'S-4' });
+  tap('S-5', '{');
+  tap('S-6', { session_id: 'S-6', pad: 'x'.repeat(5000) });
+  writeFileSync(join(dir, 'S-7.txt'), JSON.stringify({ session_id: 'S-7' }), { mode: 0o644 });
+  mkdirSync(join(dir, 'S-8.json'));
+  tap('S-9');
+  assert.deepEqual(readJoeTaps({ dir, ownerUid: ME }).map((t) => t.session_id), ['S-9']);
+  // The config names the folder as an absolute path, or not at all.
+  const d = realpathSync(tempDir('m4-cfg-'));
+  const good = { installRoot: '/i', root: join(d, 'review'), outboxRoot: join(d, 'outbox'), reviewHome: '/h', uids: {}, recordRoot: '/x', recordUid: 5, mirror: '/m', claudeBin: '/c', hooksDir: '/i/hooks', ownerHome: '/w', ownerUid: 5, wiring: '/i/w.mjs' };
+  const cfg = (over) => { writeFileSync(join(d, 'c.json'), JSON.stringify({ ...good, ...over })); return () => readConfig(join(d, 'c.json'), OPEN_WALLS); };
+  assert.equal(cfg({})().ownerTaps, undefined);
+  assert.equal(cfg({ ownerTaps: '/t' })().ownerTaps, '/t');
+  assert.throws(cfg({ ownerTaps: 'taps' }), /ownerTaps must be an absolute path/);
+});
+
+// L71 point 1: the runner's folder and review's outbox root, and every folder above each up to the top, are root's or
+// review's, written by no one else, and not links. The test's user stands in for review; the top is a throwaway folder.
+test('L71 planted: root and outboxRoot, and every folder above them, are root\'s or review\'s alone', () => {
+  const d = realpathSync(tempDir('m4-cfg-'));
+  chmodSync(d, 0o755);
+  const mid = join(d, 'srv');
+  mkdirSync(join(mid, 'review'), { recursive: true });
+  mkdirSync(join(mid, 'outbox'));
+  for (const p of [mid, join(mid, 'review'), join(mid, 'outbox')]) chmodSync(p, 0o755);
+  const uidsOf = (reviewer) => ({ ...Object.fromEntries(['lead', 'worker', 'front_door', 'learning', 'writer', 'incident', 'scout', 'thinking'].map((r) => [r, ME + 1])), reviewer, auditor: reviewer });
+  const good = { installRoot: '/i', root: join(mid, 'review'), outboxRoot: join(mid, 'outbox'), reviewHome: '/h', uids: uidsOf(ME), recordRoot: '/x', recordUid: 5, mirror: '/m', claudeBin: '/c', hooksDir: '/i/hooks', ownerHome: '/w', ownerUid: 5, wiring: '/i/w.mjs' };
+  const cfg = (over = {}, opts = { top: d }) => { writeFileSync(join(d, 'c.json'), JSON.stringify({ ...good, ...over })); return () => readConfig(join(d, 'c.json'), opts); };
+  assert.equal(cfg()().outboxRoot, join(mid, 'outbox'), 'the control: review\'s folders, under review\'s and root\'s');
+  // The outbox root open to others: a worker could rename reviewer/ away.
+  chmodSync(join(mid, 'outbox'), 0o775);
+  assert.throws(cfg(), /config: outboxRoot: .*\/srv\/outbox can be written by others/);
+  chmodSync(join(mid, 'outbox'), 0o755);
+  // A folder above it open to others: the whole outbox could be swapped.
+  chmodSync(mid, 0o777);
+  assert.throws(cfg(), /config: root: .*\/srv, above it, can be written by others/);
+  chmodSync(mid, 0o755);
+  chmodSync(d, 0o775);
+  assert.throws(cfg(), /config: root: .*, above it, can be written by others/, 'up to the top too');
+  chmodSync(d, 0o755);
+  // Owned by someone who is neither root nor review (here: the review uid named is another user's).
+  assert.throws(cfg({ uids: uidsOf(ME + 1) }), /config: root: .*\/srv\/review is not owned by root or the review user/);
+  // A link, the folder or one above it.
+  symlinkSync(join(mid, 'outbox'), join(d, 'outbox-link'));
+  assert.throws(cfg({ outboxRoot: join(d, 'outbox-link') }), /config: outboxRoot: .*outbox-link is a link \(name the folder by its real path\)/);
+  symlinkSync(mid, join(d, 'srv-link'));
+  assert.throws(cfg({ root: join(d, 'srv-link', 'review') }), /config: root: .*srv-link, above it, is a link/);
+  // Missing, or not under the top.
+  assert.throws(cfg({ outboxRoot: join(mid, 'none') }), /config: outboxRoot: .*\/srv\/none is missing/);
+  assert.throws(cfg({}, { top: join(d, 'elsewhere') }), /is not under/);
+  // The real walk, with no ports: with the review uid named as another user's, the test's own throwaway folder (checked
+  // first) is neither root's nor review's, so the walk refuses on any machine, whatever the folders above the temp folder.
+  assert.throws(cfg({ uids: uidsOf(ME + 1) }, {}), /config: root: .*\/srv\/review is not owned by root or the review user/);
+});
+
+// L71 point 4: a second name for the install stamp can't change root's bytes, so it reads the same.
+test('L71 planted: the install stamp reads the same with a second name', () => {
+  const C = 'e'.repeat(40);
+  const d = tempDir('m4-stamp-');
+  writeFileSync(join(d, STAMP), installStamp(C), { mode: 0o644 });
+  linkSync(join(d, STAMP), join(d, 'second-name'));
+  assert.equal(readInstallStamp(d, { owner: ME }), C);
 });

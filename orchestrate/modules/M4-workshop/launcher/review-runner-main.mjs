@@ -9,29 +9,43 @@
 // can write them (`installProblem`), so a copy installed wrong, or made writable later, starts nothing. The same goes
 // for what a review session runs (L66 M2): the claude program, the node this runs on and the hooks folder the
 // reviewer's settings point at are inside the installed copy and root's alone (`programsProblem`), or no review starts.
+// Every folder above the installed copy, up to /, must be root's and written by no one else too (item 20(b)): a folder
+// another user could write could have the copy renamed away and another put in its place.
 //
 // The config names every path; nothing here names a machine:
 //   { "installRoot": "/abs", "root": "/abs", "outboxRoot": "/abs", "reviewHome": "/abs",
 //     "uids": { "<role>": <uid>, ... },            every role of the design table (m-1); both review roles name review
-//     "recordRoot": "/abs", "recordUid": <uid>,     the Record, read only (its docs/card/<id>.json)
+//     "recordRoot": "/abs", "recordUid": <uid>,     the Record, read only (its docs/card/ and docs/verdict/)
 //     "mirror": "/abs",                             the git mirror, read only (refs/heads/card/<card>)
 //     "claudeBin": "/abs",                          the pinned claude program (checked on each pin bump, m-8), inside installRoot
 //     "hooksDir": "/abs",                           the hooks folder a reviewer's settings point at, inside installRoot
 //     "accountCopy": "/abs",                        root's copy of the account in use (review-account-copy.plist)
 //     "ownerHome": "/abs", "ownerUid": <uid>,       the fallback: the owner's own account file, read only
+//     "ownerTaps": "/abs",                          optional: Joe's "review again" taps (L70 point 3), a folder of the
+//                                                   owner's that no one else writes, holding <session>.json files of
+//                                                   the owner's; the Front Door, which runs as Joe, writes them
 //     "wiring": "/abs/wiring.mjs" }                 exports `start(x)` (review-runner.mjs `runnerPass`, `ctx.start`)
 // The wiring's start runs the launcher (launch.mjs, checks 1 to 13) for a reviewer or an auditor, with `--session-id`
 // set to the runner's id, and returns { ok, pid }, where pid is claude's own process (L66: never the launcher's; the
 // runner checks the pid's command is the pinned claude before it counts the start, and before it stops anything). It
-// gets `claudeBin`, `node` and `hooksDir` (checked above) to run and to render the settings with. Exit 0 when the pass ran clean, 1 when it refused or could not run.
+// gets `claudeBin`, `node` and `hooksDir` (checked above) to run and to render the settings with, and `earlier`: the
+// card's earlier failing verdicts for this role on other trees, [{ session_id, head, notes }], which the reviewer's
+// prompt must include (L69 point 4), as quoted data from an earlier reviewer and never as instructions: the wiring
+// renders them with `earlierBlock` (review-runner.mjs, L70 point 5; since L71 C3 the runner passes the rendered block, a
+// string the wiring puts in the prompt as it is). `ok: false` from start means claude was never spawned (L71 point 2).
+// Joe's taps: only a plain handler for Joe's button, running as Joe, writes `ownerTaps`; the Front Door's own tools get
+// a deny rule on that folder, and the handler removes a tap once the status lists it in `taps_read` (L71 points 5, C1).
+// Exit 0 when the pass ran clean, 1 when it refused or could not run.
 
 import { closeSync, constants, fstatSync, lstatSync, openSync, readFileSync, readdirSync, realpathSync } from 'node:fs';
-import { isAbsolute, join, relative } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { runnerPass, CARD_ID, isClaudeCommand } from './review-runner.mjs';
 import { STAMP } from './review-daemons.mjs';
-import { sessionVerdict } from '../../M9-record/outbox.mjs';
+import { sessionVerdict, verdictFromFile } from '../../M9-record/outbox.mjs';
+import { SESSION_ID } from '../../../shared/record.mjs';
 import { readAccountFile, ACCOUNT_FILE } from './accounts.mjs';
 import { REVIEW_USER } from './review-user.mjs';
 import { git } from '../git/safe-git.mjs';
@@ -40,20 +54,71 @@ const ABS = ['installRoot', 'root', 'outboxRoot', 'reviewHome', 'recordRoot', 'm
 const MAX_CARD_BYTES = 1024 * 1024;
 const CHILD_MS = 10_000;
 
-export function readConfig(file) {
+/**
+ * The config, checked. `lstat` and `top` are ports for a test (as for `installProblem`): the runner's folder and review's
+ * outbox root, and every folder above each up to `top` (/), must be root's or the review user's, written by no one
+ * else, and not links (L71 point 1, the item 20(b) rule). A folder the workers' Mac user could write could have the
+ * role folder renamed away, so a fail would read as silence.
+ */
+export function readConfig(file, { lstat = lstatSync, top = '/' } = {}) {
   const c = JSON.parse(readFileSync(file, 'utf8'));
   for (const k of ABS) if (typeof c?.[k] !== 'string' || !isAbsolute(c[k])) throw new Error(`config: ${k} must be an absolute path`);
   if (c.accountCopy !== undefined && (typeof c.accountCopy !== 'string' || !isAbsolute(c.accountCopy))) throw new Error('config: accountCopy must be an absolute path');
+  if (c.ownerTaps !== undefined && (typeof c.ownerTaps !== 'string' || !isAbsolute(c.ownerTaps))) throw new Error('config: ownerTaps must be an absolute path');
   for (const k of ['recordUid', 'ownerUid']) if (!Number.isInteger(c[k]) || c[k] < 0) throw new Error(`config: ${k} must be a uid`);
   if (!c.uids || typeof c.uids !== 'object') throw new Error('config: uids must map each role to a uid');
+  // The runner's folder and review's outbox are two walls (L68 (4)): review sessions write the outbox, and only the
+  // runner writes its launch and ended records. One inside the other (or the same folder) would let a session's
+  // folder stand where a runner's record is read. Compared on real paths, so a link can't hide it.
+  const r = realPath(c.root);
+  const o = realPath(c.outboxRoot);
+  if (inside(r, o) || inside(o, r)) throw new Error(`config: root (${c.root}) and outboxRoot (${c.outboxRoot}) must be two separate folders, neither inside the other`);
+  const owners = [0, c.uids.reviewer].filter((u) => Number.isInteger(u) && u >= 0);
+  for (const k of ['root', 'outboxRoot']) {
+    const bad = wallProblem(c[k], owners, { lstat, top });
+    if (bad) throw new Error(`config: ${k}: ${bad}`);
+  }
   return c;
 }
 
+// A folder and every folder above it, up to `top`: plain folders (not links) of one of `owners`, written by no one else.
+function wallProblem(path, owners, { lstat, top }) {
+  const p0 = resolve(path);
+  const rel = relative(top, p0);
+  if (!isAbsolute(top) || rel === '..' || rel.startsWith('../') || isAbsolute(rel)) return `${p0} is not under ${top}`;
+  for (let p = p0; ; p = dirname(p)) {
+    const what = p === p0 ? p : `${p}, above it,`;
+    let st; try { st = lstat(p); } catch { return `${what} is missing`; }
+    if (st.isSymbolicLink()) return `${what} is a link (name the folder by its real path)`;
+    if (!st.isDirectory()) return `${what} is not a folder`;
+    if (!owners.includes(st.uid)) return `${what} is not owned by root or the review user`;
+    if (st.mode & 0o022) return `${what} can be written by others`;
+    if (p === top || p === dirname(p)) return null;
+  }
+}
+
+/** A path's real path: its nearest folder that exists, with links resolved, and the rest of the path as given. */
+function realPath(p) {
+  let head = resolve(p);
+  const rest = [];
+  for (;;) {
+    try { return join(realpathSync(head), ...rest); } catch { /* not there yet */ }
+    const up = dirname(head);
+    if (up === head) return resolve(p);
+    rest.unshift(basename(head));
+    head = up;
+  }
+}
+/** Is `p` the folder `dir` or inside it? */
+const inside = (p, dir) => { const rel = relative(dir, p); return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel)); };
+
 /**
  * The installed copy: every folder and file under `installRoot` owned by `owner` (root) and written by no one else, no
- * links; and each of `files` inside it. `lstat` is a port so a test can stand in for root. Null, or the first problem.
+ * links; each of `files` inside it; and every folder above it, up to `top` (/), root's, written by no one else and not a
+ * link (item 20(b)). `lstat` is a port so a test can stand in for root, and `top` lets a test stop in its own throwaway
+ * folder. Null, or the first problem.
  */
-export function installProblem(installRoot, files, { owner = 0, lstat = lstatSync, list = readdirSync } = {}) {
+export function installProblem(installRoot, files, { owner = 0, lstat = lstatSync, list = readdirSync, top = '/' } = {}) {
   for (const f of files) {
     const rel = typeof f === 'string' && isAbsolute(f) ? relative(installRoot, f) : '..';
     if (rel === '' || rel.startsWith('..') || isAbsolute(rel)) return `${f} is not inside the installed copy ${installRoot}`;
@@ -62,6 +127,16 @@ export function installProblem(installRoot, files, { owner = 0, lstat = lstatSyn
     if (st.isSymbolicLink()) return `${f} is a link`;
     if (st.uid !== owner) return `${f} is not owned by root`;
     if (st.mode & 0o022) return `${f} can be written by others than root`;
+  }
+  const above = (p) => { const r = relative(top, p); return r === '..' || r.startsWith('../') || isAbsolute(r); };
+  if (!isAbsolute(top) || above(installRoot)) return `${installRoot} is not under ${top}`;
+  for (let p = dirname(installRoot); !above(p); p = dirname(p)) {
+    let st; try { st = lstat(p); } catch { return `${p}, above the installed copy, is missing`; }
+    if (st.isSymbolicLink()) return `${p}, above the installed copy, is a link (name the copy by its real path)`;
+    if (!st.isDirectory()) return `${p}, above the installed copy, is not a folder`;
+    if (st.uid !== owner) return `${p}, above the installed copy, is not owned by root`;
+    if (st.mode & 0o022) return `${p}, above the installed copy, can be written by others than root`;
+    if (p === top || p === dirname(p)) break;
   }
   const walk = (p) => {
     let st; try { st = lstat(p); } catch { return `${p} is missing`; }
@@ -83,24 +158,66 @@ export function programsProblem(c, { self, config, node = realpathSync(process.e
   return installProblem(c.installRoot, [self, config, c.wiring, c.claudeBin, node, c.hooksDir], opts);
 }
 
-/** A card from the Record, read only: docs/card/<id>.json, a plain file of the Record's owner that no one else writes. */
-export function readCardFile({ recordRoot, recordUid, card }) {
-  if (typeof card !== 'string' || !CARD_ID.test(card) || card.startsWith('.')) return { ok: false, reason: 'not a card id' };
-  for (const d of [recordRoot, join(recordRoot, 'docs'), join(recordRoot, 'docs', 'card')]) {
-    let st; try { st = lstatSync(d); } catch { return { ok: false, reason: `${d} is missing` }; }
-    if (st.isSymbolicLink() || !st.isDirectory()) return { ok: false, reason: `${d} is not a plain folder` };
-    if (st.uid !== recordUid || st.mode & 0o022) return { ok: false, reason: `${d} is not the Record owner's alone` };
-  }
-  const p = join(recordRoot, 'docs', 'card', `${card}.json`);
+// A folder of the Record: a plain folder of the Record's owner that no one else writes. Null, or the problem.
+function recordFolderProblem(d, recordUid) {
+  let st; try { st = lstatSync(d); } catch { return `${d} is missing`; }
+  if (st.isSymbolicLink() || !st.isDirectory()) return `${d} is not a plain folder`;
+  if (st.uid !== recordUid || st.mode & 0o022) return `${d} is not the Record owner's alone`;
+  return null;
+}
+
+// One document of the Record, read only: a plain file of the Record's owner that no one else writes, never a link.
+function readRecordFile(p, recordUid, entity, id, missing) {
   let fd;
-  try { fd = openSync(p, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); } catch (e) { return { ok: false, reason: e?.code === 'ENOENT' ? 'no such card' : `it can't be read (${e?.code ?? e})` }; }
+  try { fd = openSync(p, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); } catch (e) { return { ok: false, reason: e?.code === 'ENOENT' ? missing : `it can't be read (${e?.code ?? e})` }; }
   try {
     const st = fstatSync(fd);
     if (!st.isFile() || st.nlink !== 1 || st.uid !== recordUid || st.mode & 0o022 || st.size > MAX_CARD_BYTES) return { ok: false, reason: 'its file is not the Record\'s own plain file' };
     const d = JSON.parse(readFileSync(fd, 'utf8'));
-    if (d?.entity !== 'card' || d?.id !== card || !d.doc || typeof d.doc !== 'object') return { ok: false, reason: 'its file is not a card document' };
-    return { ok: true, doc: d.doc };
+    if (d?.entity !== entity || d?.id !== id || !d.doc || typeof d.doc !== 'object') return { ok: false, reason: `its file is not a ${entity} document` };
+    return { ok: true, doc: d.doc, rev: Number.isInteger(d.rev) ? d.rev : null };
   } catch { return { ok: false, reason: 'its file is not JSON' }; } finally { closeSync(fd); }
+}
+
+/** A card from the Record, read only: docs/card/<id>.json, with its revision (`rev`). */
+export function readCardFile({ recordRoot, recordUid, card }) {
+  if (typeof card !== 'string' || !CARD_ID.test(card) || card.startsWith('.')) return { ok: false, reason: 'not a card id' };
+  for (const d of [recordRoot, join(recordRoot, 'docs'), join(recordRoot, 'docs', 'card')]) {
+    const bad = recordFolderProblem(d, recordUid);
+    if (bad) return { ok: false, reason: bad };
+  }
+  return readRecordFile(join(recordRoot, 'docs', 'card', `${card}.json`), recordUid, 'card', card, 'no such card');
+}
+
+/**
+ * Whether the Record took a review session's verdict (item 20(a)): a verdict row of that session (docs/verdict/), for
+ * that role, card and head, whose file in review's outbox still reads true (M9 `verdictFromFile`). → { ok: true } |
+ * { ok: false, reason }. A Record that can't be read throws. The runner only tells Joe what this says, and never starts
+ * a review again on it (L68): a worker can write the Record. The Merge Gate reads the verdict files itself.
+ */
+export function recordVerdictTaken({ recordRoot, recordUid, outboxRoot, uids, role, sessionId, card, head }) {
+  if (typeof sessionId !== 'string' || !SESSION_ID.test(sessionId)) return { ok: false, reason: 'the start names no session' };
+  for (const d of [recordRoot, join(recordRoot, 'docs')]) {
+    const bad = recordFolderProblem(d, recordUid);
+    if (bad) throw new Error(bad);
+  }
+  const dir = join(recordRoot, 'docs', 'verdict');
+  try { lstatSync(dir); } catch (e) { if (e?.code === 'ENOENT') return { ok: false, reason: 'the Record holds no verdicts yet' }; throw e; }
+  const bad = recordFolderProblem(dir, recordUid);
+  if (bad) throw new Error(bad);
+  const names = readdirSync(dir).filter((n) => n.startsWith(`verdict-${sessionId}-`) && n.endsWith('.json'));
+  let why = `the Record holds no verdict of session ${sessionId}`;
+  for (const n of names) {
+    const r = readRecordFile(join(dir, n), recordUid, 'verdict', n.slice(0, -'.json'.length), 'it is gone');
+    if (!r.ok) { why = `its verdict row ${n}: ${r.reason}`; continue; }
+    const d = r.doc;
+    if (d.session_id !== sessionId) continue;
+    if (d.role !== role || d.card !== card || d.head !== head) { why = `its verdict row names ${d.role} on ${d.card} at ${String(d.head).slice(0, 7)}`; continue; }
+    const f = verdictFromFile({ outboxRoot, uids, row: { doc: d } });
+    if (f.ok) return { ok: true };
+    why = f.reason;
+  }
+  return { ok: false, reason: why };
 }
 
 /** `dseditgroup` answers "yes ..." or "no ..."; anything else is not an answer (and the runner counts it as an admin). */
@@ -120,10 +237,48 @@ export function readInstallStamp(installRoot, { owner = 0 } = {}) {
   try { fd = openSync(join(installRoot, STAMP), constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); } catch { return null; }
   try {
     const st = fstatSync(fd);
-    if (!st.isFile() || st.nlink !== 1 || st.uid !== owner || st.mode & 0o022 || st.size > 64) return null;
+    // No check of a second name (L71 point 4): a hard link can't change root's bytes; owner, mode and size stay.
+    if (!st.isFile() || st.uid !== owner || st.mode & 0o022 || st.size > 64) return null;
     const t = readFileSync(fd, 'utf8').trim();
     return /^[0-9a-f]{40}$/.test(t) ? t : null;
   } catch { return null; } finally { closeSync(fd); }
+}
+
+const TAP_NAME = /^([A-Za-z0-9-]{1,128})\.json$/;
+const MAX_TAP_BYTES = 4096;
+/**
+ * Joe's "review again" taps (L70 point 3): files in a folder of the owner's that no one else writes (and whose own
+ * folder no one else writes either, so it can't be swapped), each a plain file of the owner's that no one else writes,
+ * named <session>.json and holding { "session_id": "<session>" }. Nothing the workers' Mac user writes can be one: not
+ * the Dispatcher, the Record or requests/. A file that fails a check is ignored. No folder configured → none. A folder
+ * that fails its check is a throw (the pass says why). Each tap has a key (name, time and bytes), so it is read once.
+ * `lstat` and `fstat` are ports for a test. → [{ session_id, key }]
+ */
+export function readJoeTaps({ dir, ownerUid, lstat = lstatSync, fstat = fstatSync } = {}) {
+  if (dir === undefined) return [];
+  if (typeof dir !== 'string' || !isAbsolute(dir) || !Number.isInteger(ownerUid) || ownerUid < 0) throw new Error('the taps folder or the owner\'s uid is not set');
+  for (const [p, what] of [[dir, 'the taps folder'], [dirname(dir), 'the folder above the taps folder']]) {
+    let st; try { st = lstat(p); } catch (e) { throw new Error(`${what} is missing (${e?.code ?? e})`); }
+    if (st.isSymbolicLink() || !st.isDirectory()) throw new Error(`${what} is not a plain folder`);
+    if (st.uid !== ownerUid && !(p !== dir && st.uid === 0)) throw new Error(`${what} is not owned by the owner`);
+    if (st.mode & 0o022) throw new Error(`${what} can be written by others than the owner`);
+  }
+  const out = [];
+  for (const name of readdirSync(dir).sort()) {
+    const m = TAP_NAME.exec(name);
+    if (!m) continue;
+    let fd;
+    try { fd = openSync(join(dir, name), constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); } catch { continue; }
+    try {
+      const st = fstat(fd);
+      if (!st.isFile() || st.uid !== ownerUid || st.mode & 0o022 || st.size > MAX_TAP_BYTES) continue;
+      const buf = readFileSync(fd);
+      let doc; try { doc = JSON.parse(buf.toString('utf8')); } catch { continue; }
+      if (!doc || typeof doc !== 'object' || doc.session_id !== m[1] || !SESSION_ID.test(m[1])) continue;
+      out.push({ session_id: m[1], key: `${name}:${st.mtimeMs}:${createHash('sha256').update(buf).digest('hex')}` });
+    } catch { continue; } finally { closeSync(fd); }
+  }
+  return out;
 }
 
 /** `ps -o pid=,command=` lines → the processes of `bin`, with their --session-id; this process left out. */
@@ -151,11 +306,21 @@ export function realPorts(c, wiring, { node = realpathSync(process.execPath) } =
     now: () => Date.now(), ownUid: () => process.getuid(),
     isAdmin: () => adminAnswer(run('/usr/sbin/dseditgroup', ['-o', 'checkmember', '-m', REVIEW_USER, 'admin'])),
     readCard: (card) => readCardFile({ recordRoot: c.recordRoot, recordUid: c.recordUid, card }),
+    verdictTaken: ({ role, sessionId, card, head }) => recordVerdictTaken({ recordRoot: c.recordRoot, recordUid: c.recordUid, outboxRoot: c.outboxRoot, uids: c.uids, role, sessionId, card, head }),
     currentHead: async (card) => {
       const r = await git(['rev-parse', '--verify', '-q', `refs/heads/card/${card.toLowerCase()}^{commit}`], { gitDir: c.mirror, purpose: 'review-runner-head', timeoutMs: CHILD_MS });
       if (r.code !== 0) throw new Error(`the card's branch is not in the mirror (${r.code})`);
       return r.stdout.toString('utf8').trim();
     },
+    // The head's tree (L69): one start per card, tree and role. The head is the one currentHead just read.
+    treeOf: async (card, head) => {
+      if (typeof head !== 'string' || !/^[0-9a-f]{40}$/.test(head)) throw new Error('the head is not 40 hex');
+      const r = await git(['rev-parse', '--verify', '-q', `${head}^{tree}`], { gitDir: c.mirror, purpose: 'review-runner-tree', timeoutMs: CHILD_MS });
+      if (r.code !== 0) throw new Error(`the head's tree is not in the mirror (${r.code})`);
+      return r.stdout.toString('utf8').trim();
+    },
+    // Joe's "review again" taps (L70 point 3): only the owner's own files; none until `ownerTaps` is set.
+    setAsideByJoe: () => readJoeTaps({ dir: c.ownerTaps, ownerUid: c.ownerUid }),
     sessions: () => {
       const r = run('/bin/ps', ['-U', String(uid), '-o', 'pid=', '-o', 'command=']);
       if (r.status !== 0 && r.status !== 1) throw new Error(`ps failed (${r.error?.code ?? `exit ${r.status}`})`);

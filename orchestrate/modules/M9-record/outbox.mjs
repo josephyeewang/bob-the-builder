@@ -3,8 +3,10 @@
 // WHY. AI sessions never write the record. They drop files in their own outbox, `<outboxRoot>/<role>/<sessionId>/`,
 // and the Dispatcher hands each file to the Store Writer. The file is written by an AI, so it is read as hostile:
 //   - the role and session come from where the file really is (realpath), never from what it says;
-//   - it is opened without following a link, and must be a plain file with one name, owned by the role's user, ≤ 256 KB,
-//     so a link to a key file can't be copied into the record;
+//   - it is opened without following a link, and must be a plain file owned by the role's user, ≤ 256 KB, so a link to a
+//     key file can't be copied into the record; in a worker's outbox it must have one name, and in review's it may have
+//     more (L70 point 1: any user can make a second name there, and it can't change review's bytes) but no one else may
+//     write it;
 //   - its kind comes from its name, and must be listed for that role in shared OUTBOX_KINDS.
 //
 //   readOutboxFile({ outboxRoot, uids, tag, file }) →
@@ -41,6 +43,32 @@
 //   verdictFields(header) → { ok, card, head, pass, notes, checklist, material } | { ok: false, reason }
 //   verdictFromFile({ outboxRoot, uids, row }) →
 //     { ok, verdict: { role, session_id, card, head, pass, checklist, material, created_by, outbox_uid, source_key } } | { ok: false, reason }
+//
+// THE WORST VERDICT (lead call L68). Taking any passing verdict made every extra start on one head a fresh chance to
+// pass. So what a head's review says is read from review's own stores only, never from the Record: every session the
+// runner launched for that card and head (its launch records), and each one's verdict file in review's outbox. A role
+// passes a head only when at least one of its sessions handed in a pass, none failed, and none is unsettled. A verdict
+// file that can't be counted (a second file, a wrong card or head, a failed check) counts as a failure, so it can't be
+// outrun by a new start either. An extra start can now only add a chance to fail. The Merge Gate (M6) and the record's
+// verify rule both judge this way.
+//
+// SILENCE IS A FAILURE, AND THE END PINS THE FILE (lead call L69). A session that ran and ended with no verdict file (a
+// crash, a context-limit stop or a kill counts too) is a failure: it holds the head, and Joe is told. Only Joe's
+// "review again" sets it aside (`<runner folder>/set-aside/<session>.json`, written by the runner), and then it has no
+// say. When a session ends the runner writes its ended record (`ended/<session>.json`: the launch record's fields,
+// `ended_at`, and `verdict_sha256`, the verdict file's sha256 then, or `none`, or `refused`). The ended record is read
+// first: a session not yet ended blocks, file or not; a file that differs from the one the end saw can't be counted. A
+// failing verdict covers every head with the same tree (the launch record names it), so an amend with no code change
+// can't buy a new roll. A launch record that fails its checks refuses only the card it belongs to.
+//
+//   ENDED_FOLDER, endedFolderOf(launchesRoot), ASIDE_FOLDER, asideFolderOf(launchesRoot)   beside the launch records
+//   runnerEnded({ root, uids | uid, role, card, head, sessionId }) → { ok, ended } | { ok: false, none, reason }
+//   runnerAside({ root, uids | uid, card, role?, head?, sessionId }) → { ok, aside } | { ok: false, none, reason }
+//   headReviews({ launches, outboxRoot, uids, card, head, tree? }) →
+//     { ok, sessions: [{ role, session_id, head, tree, aside, ended, silent, verdict | null, problem | null }], skipped }
+//     | { ok: false, reason }
+//   worstVerdict(sessions, role, passes, { needPass = true }) → null | reason   (passes(verdict) is the role's own pass)
+//   PASSES { reviewer, auditor }, checklistClean(verdict)    each role's own pass, the one definition (L69 point 6)
 
 import { createHash } from 'node:crypto';
 import { closeSync, fstatSync, lstatSync, openSync, readdirSync, readSync, realpathSync, constants } from 'node:fs';
@@ -86,36 +114,53 @@ export function launchesFolderProblem(root, uid) {
   return null;
 }
 
-// One launch record, read as the outbox reads a file: no link, a plain file with one name, review's own and writable by
-// no one else, small, and naming itself (the session id in the file is the one in its name).
+// One launch record, read as the outbox reads a file: no link, a plain file, review's own and writable by no one else,
+// small, and naming itself (the session id in the file is the one in its name). The launch, ended and set-aside records
+// are all read here.
+//
+// A second name is no fault here (L70 point 1): any Mac user can hard-link a file in a folder it can search, and these
+// folders are 0755 so the gate can read them, but a second name can't change the bytes, which stay review's, 0644, in
+// review's folder. Counting it would let a worker turn a failing session's record into a bad one.
+//
+// A record that fails its checks still says what it can (L69 point 3): `sid` from its name, and `tie`, the card (and
+// role, head and tree, when well formed) its bytes name. The tie is read only when the file's standing is good (owner,
+// mode, a plain file; L70 P4): bytes in a file review does not own say nothing. So a bad record refuses only the card it
+// belongs to, not every card.
 function readLaunch(root, uid, name, fstat = fstatSync) {
-  const no = (reason) => ({ ok: false, reason });
   const m = LAUNCH_NAME.exec(name);
+  let tie = null;
+  const no = (reason, none = false) => ({ ok: false, reason, none, sid: m ? m[1] : null, tie });
   if (!m) return no(`${name.slice(0, 80)} is not a launch record name`);
   let fd;
   try { fd = openSync(join(root, name), constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); } catch (e) {
-    return no(e?.code === 'ELOOP' ? 'the launch record is a link' : e?.code === 'ENOENT' ? 'no launch record' : `the launch record can't be opened (${e?.code ?? 'error'})`);
+    return no(e?.code === 'ELOOP' ? 'the launch record is a link' : e?.code === 'ENOENT' ? 'no launch record' : `the launch record can't be opened (${e?.code ?? 'error'})`, e?.code === 'ENOENT');
   }
-  let buf;
+  let buf; let standing = null;
   try {
     const st = fstat(fd);
     if (!st.isFile()) return no('the launch record is not a plain file');
-    if (st.nlink !== 1) return no('the launch record has more than one name (a hard link)');
-    if (st.uid !== uid) return no('the launch record is not owned by the review user');
-    if (st.mode & 0o022) return no('the launch record can be written by others than the review user');
     if (st.size > MAX_LAUNCH_BYTES) return no(`the launch record is over ${MAX_LAUNCH_BYTES} bytes`);
+    standing = st.uid !== uid ? 'the launch record is not owned by the review user'
+      : st.mode & 0o022 ? 'the launch record can be written by others than the review user' : null;
+    if (standing) return no(standing);
     buf = Buffer.alloc(st.size);
     let got = 0;
     while (got < buf.length) { const n = readSync(fd, buf, got, buf.length - got, got); if (!n) break; got += n; }
     buf = buf.subarray(0, got);
   } finally { closeSync(fd); }
-  let doc;
-  try { doc = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(buf)); } catch { return no('the launch record is not JSON'); }
+  let doc = null;
+  try { doc = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(buf)); } catch { doc = null; }
+  if (doc && typeof doc === 'object' && !Array.isArray(doc) && typeof doc.card === 'string' && CARD_ID.test(doc.card)) {
+    tie = { card: doc.card };
+    if (REVIEW_ROLES.includes(doc.role) && HEX40.test(doc.head ?? '') && doc.session_id === m[1]) Object.assign(tie, { role: doc.role, head: doc.head, tree: HEX40.test(doc.tree ?? '') ? doc.tree : null });
+  }
+  if (doc === null) return no('the launch record is not JSON');
   if (!doc || typeof doc !== 'object' || Array.isArray(doc)) return no('the launch record is not a JSON object');
   if (doc.session_id !== m[1]) return no('the launch record names another session than its file name');
   if (!REVIEW_ROLES.includes(doc.role)) return no('the launch record names no review role');
   if (typeof doc.card !== 'string' || !CARD_ID.test(doc.card)) return no('the launch record names no card');
   if (typeof doc.head !== 'string' || !HEX40.test(doc.head)) return no('the launch record names no 40-hex head');
+  if (doc.tree !== undefined && (typeof doc.tree !== 'string' || !HEX40.test(doc.tree))) return no('the launch record names a tree that is not 40 hex');
   return { ok: true, doc, key: createHash('sha256').update(buf).digest('hex') };
 }
 
@@ -138,7 +183,7 @@ export function runnerLaunchFor({ root, uids, uid, role, card, head, sessionId, 
   return { ok: true, launch: d, key: r.key };
 }
 
-/** Every launch record that passes the checks; a bad file is listed under `refused`, a bad folder refuses the lot. */
+/** Every launch record that passes the checks; a bad file is listed under `refused` (with its `sid` and `tie`), a bad folder refuses the lot. */
 export function runnerLaunches({ root, uids, fstat } = {}) {
   const u = reviewUid(uids);
   if (!u.ok) return { ok: false, reason: u.reason };
@@ -151,10 +196,188 @@ export function runnerLaunches({ root, uids, fstat } = {}) {
     // The runner writes `.<name>.tmp` first and renames it into place, so a half-written record is never under its name.
     if (name.startsWith('.')) continue;
     const r = readLaunch(root, u.uid, name, fstat);
-    if (r.ok) launches.push({ doc: r.doc, key: r.key }); else refused.push({ name, reason: r.reason });
+    if (r.ok) launches.push({ doc: r.doc, key: r.key }); else refused.push({ name, reason: r.reason, sid: r.sid, tie: r.tie });
   }
   return { ok: true, launches, refused };
 }
+
+export const ENDED_FOLDER = 'ended';
+/** The runner's ended records folder: beside its launch records, in the runner's own folder (L68). */
+export const endedFolderOf = (launchesRoot) => join(dirname(String(launchesRoot)), ENDED_FOLDER);
+export const ASIDE_FOLDER = 'set-aside';
+/** The runner's set-aside records folder (L69): sessions Joe set aside with "review again", beside the launch records. */
+export const asideFolderOf = (launchesRoot) => join(dirname(String(launchesRoot)), ASIDE_FOLDER);
+// What an ended record says of the verdict file (L69 point 2): its sha256 when the session ended, `none` when it left no
+// file, `refused` when the file it left could not be counted, `never_ran` when the start failed and claude never ran
+// (L71 point 2: the launch record is kept, so a file that shows up later still counts).
+export const NEVER_RAN = 'never_ran';
+export const ENDED_VERDICT = /^(?:[0-9a-f]{64}|none|refused|never_ran)$/;
+
+function reviewUidOf(uids, uid) {
+  return uid !== undefined ? (Number.isInteger(uid) && uid > 0 ? { ok: true, uid } : { ok: false, reason: 'no review user id' }) : reviewUid(uids);
+}
+
+// One record of the runner's, by session, in a folder it makes when it first writes there: no folder or no record is
+// `none`; a record that fails its checks is a refusal with its reason.
+function runnerRecord(what, root, uid, sessionId, fstat) {
+  const no = (reason, none = false) => ({ ok: false, reason, none });
+  try { lstatSync(root); } catch (e) { if (e?.code === 'ENOENT') return no('none', true); }
+  const bad = launchesFolderProblem(root, uid);
+  if (bad) return no(`the ${what} records: ${bad}`);
+  const r = readLaunch(root, uid, `${sessionId}.json`, fstat);
+  if (!r.ok) return r.none ? no('none', true) : { ...no(`the ${what} record of session ${sessionId}: ${r.reason}`), tie: r.tie };
+  return { ok: true, doc: r.doc };
+}
+
+/**
+ * The runner's record that a session it launched has ended (L68), read with every check a launch record gets, and
+ * naming the same session, role, card and head. `none` when there is no such record (the session may still be running).
+ * It says what the verdict file was when the session ended (`verdict_sha256`, L69).
+ */
+export function runnerEnded({ root, uids, uid, role, card, head, sessionId, fstat } = {}) {
+  const no = (reason, none = false) => ({ ok: false, reason, none });
+  if (typeof sessionId !== 'string' || !SESSION_ID.test(sessionId)) return no('no session id of letters, digits and dashes');
+  const u = reviewUidOf(uids, uid);
+  if (!u.ok) return no(u.reason);
+  const r = runnerRecord('ended', root, u.uid, sessionId, fstat);
+  if (!r.ok) return r.none ? no(`the runner has not marked session ${sessionId} ended`, true) : no(r.reason);
+  const d = r.doc;
+  if (d.role !== role || d.card !== card || d.head !== head) return no(`the ended record of session ${sessionId} is for another role, card or head`);
+  if (!Number.isFinite(Date.parse(d.ended_at ?? ''))) return no(`the ended record of session ${sessionId} has no ended_at`);
+  if (typeof d.verdict_sha256 !== 'string' || !ENDED_VERDICT.test(d.verdict_sha256)) return no(`the ended record of session ${sessionId} does not say what verdict file it ended with`);
+  return { ok: true, ended: d };
+}
+
+/**
+ * Joe's "review again" (L69 point 1): the runner's record that Joe set a session aside, so it has no say. Read with
+ * every check a launch record gets, for the same session and card (and role and head, when given).
+ */
+export function runnerAside({ root, uids, uid, role, card, head, sessionId, fstat } = {}) {
+  const no = (reason, none = false) => ({ ok: false, reason, none });
+  if (typeof sessionId !== 'string' || !SESSION_ID.test(sessionId)) return no('no session id of letters, digits and dashes');
+  const u = reviewUidOf(uids, uid);
+  if (!u.ok) return no(u.reason);
+  const r = runnerRecord('set-aside', root, u.uid, sessionId, fstat);
+  if (!r.ok) return r.none ? no(`Joe has not set session ${sessionId} aside`, true) : no(r.reason);
+  const d = r.doc;
+  if (d.card !== card || (role !== undefined && d.role !== role) || (head !== undefined && d.head !== head)) return no(`the set-aside record of session ${sessionId} is for another role, card or head`);
+  if (d.by !== 'joe' || !Number.isFinite(Date.parse(d.set_aside_at ?? ''))) return no(`the set-aside record of session ${sessionId} does not say Joe set it aside, and when`);
+  return { ok: true, aside: d };
+}
+
+/**
+ * Every session the runner launched for this card at this head, or at any head with the same tree (L69 point 4), each
+ * settled from review's own stores (L68, L69). Nothing is read from the Record. For each session, in this order:
+ *   1. a set-aside record from Joe → it has no say (`aside`), but only while its ended record still says `none` and its
+ *      outbox still holds no verdict (L71 C4); otherwise it can't be counted;
+ *   2. its ended record, read FIRST: none → not ended, and it blocks whether or not a file is there;
+ *   3. the verdict file, which must be the one the ended record names (its sha256): a file changed or gone since the end,
+ *      or one that appeared after a session ended with none, can't be counted; `none` with no file is a silent end. An
+ *      outbox folder that is gone can't be counted either (L71 point 1), never a silence. `never_ran` (L71 point 2) with
+ *      no file → it has no say (`never_ran`); a verdict file that shows up later counts as what it says.
+ * `tree` is the head's tree (the Merge Gate reads it from git). Without it, the trees the launch records at this head name
+ * stand in. A launch record that fails its checks refuses only the card it belongs to (its own bytes say which, or else
+ * its session's ended record or verdict file); one that can't be tied to any card is skipped and listed in `skipped`.
+ * A launch record that fails its checks is never set aside (L71: "review again" is not offered for one).
+ * → { ok, sessions: [{ role, session_id, head, tree, aside, never_ran, ended, silent, verdict | null, problem | null }],
+ *     skipped }
+ *   | { ok: false, reason }
+ */
+export function headReviews({ launches, outboxRoot, uids, card, head, tree, fstat } = {}) {
+  const rl = runnerLaunches({ root: launches, uids, fstat });
+  if (!rl.ok) return { ok: false, reason: rl.reason };
+  const uid = uids[REVIEW_ROLES[0]];
+  const endedRoot = endedFolderOf(launches);
+  const asideRoot = asideFolderOf(launches);
+  const trees = HEX40.test(tree ?? '') ? [tree]
+    : [...new Set(rl.launches.filter((l) => l.doc.card === card && l.doc.head === head && l.doc.tree).map((l) => l.doc.tree))];
+  // A bad record: whose card is it? Its own bytes first; then its session's ended record or verdict file.
+  const tiedCard = (r) => {
+    if (r.tie?.card) return r.tie.card;
+    if (!r.sid) return null;
+    const e = readLaunchQuiet(endedRoot, uid, r.sid, fstat);
+    if (e) return e;
+    for (const role of REVIEW_ROLES) {
+      const v = sessionVerdict({ outboxRoot, uids, role, sessionId: r.sid, card: null, head: null });
+      if (v.card) return v.card;
+    }
+    return null;
+  };
+  const skipped = [];
+  for (const r of rl.refused) {
+    const c = tiedCard(r);
+    if (c === null) { skipped.push({ name: r.name, reason: r.reason }); continue; }
+    if (c !== card) continue;
+    return { ok: false, reason: `the launch record ${r.name} of card ${card} fails its checks, so no review of this card can be counted (${r.reason})` };
+  }
+  const sessions = [];
+  for (const l of rl.launches) {
+    const d = l.doc;
+    if (d.card !== card || !(d.head === head || (d.tree && trees.includes(d.tree)))) continue;
+    const s = { role: d.role, session_id: d.session_id, head: d.head, tree: d.tree ?? null, aside: false, never_ran: false, ended: false, silent: false, verdict: null, problem: null };
+    sessions.push(s);
+    const a = runnerAside({ root: asideRoot, uid, role: d.role, card, head: d.head, sessionId: d.session_id, fstat });
+    if (!a.ok && !a.none) { s.problem = a.reason; continue; }
+    const e = runnerEnded({ root: endedRoot, uid, role: d.role, card, head: d.head, sessionId: d.session_id, fstat });
+    if (a.ok) {
+      // Joe sets aside only a silent end (L71 C4): checked again here, whatever the runner did.
+      const v = sessionVerdict({ outboxRoot, uids, role: d.role, sessionId: d.session_id, card, head: d.head });
+      if (!e.ok || e.ended.verdict_sha256 !== 'none') s.problem = `it was set aside, but ${e.ok ? 'its ended record names a verdict file' : e.none ? 'it has no ended record' : e.reason}; only a silent end can be set aside`;
+      else if (!v.none) s.problem = `it was set aside, but ${v.ok ? 'a verdict file was left after the session ended with none' : v.reason}`;
+      else s.aside = true;
+      continue;
+    }
+    if (!e.ok) { if (!e.none) s.problem = e.reason; continue; }
+    s.ended = true;
+    const want = e.ended.verdict_sha256;
+    const v = sessionVerdict({ outboxRoot, uids, role: d.role, sessionId: d.session_id, card, head: d.head });
+    if (want === NEVER_RAN) { if (v.none) s.never_ran = true; else if (v.ok) s.verdict = v.verdict; else s.problem = v.reason; }
+    else if (want === 'refused') s.problem = `its verdict could not be counted when it ended${v.ok || v.none ? '' : ` (${v.reason})`}`;
+    else if (want === 'none') { if (v.none) s.silent = true; else s.problem = v.ok ? 'a verdict file was left after the session ended with none' : v.reason; }
+    else if (!v.ok) s.problem = v.none ? 'its verdict file is gone since the session ended' : v.reason;
+    else if (v.verdict.sha256 !== want) s.problem = 'its verdict file changed after the session ended; only the version written by the end counts, and it is gone';
+    else s.verdict = v.verdict;
+  }
+  return { ok: true, sessions, skipped };
+}
+
+// The card a record of the runner's names, when its standing is good (L70 P4); null when it names none.
+function readLaunchQuiet(root, uid, sid, fstat) {
+  try { lstatSync(root); } catch { return null; }
+  const r = readLaunch(root, uid, `${sid}.json`, fstat);
+  return r.ok ? r.doc.card : r.tie?.card ?? null;
+}
+
+/**
+ * The worst verdict for one role (L68, L69): Joe's set-aside sessions and starts that never ran (L71) have no say; of the rest, a verdict that can't be
+ * counted, a session that has not ended (file or not), a session that ended without a verdict (a crash, a context-limit
+ * stop or a kill counts too) and a failing verdict each refuse; with `needPass`, so does having no passing session.
+ * null when the role passes.
+ */
+export function worstVerdict(sessions, role, passes, { needPass = true } = {}) {
+  const mine = (Array.isArray(sessions) ? sessions : []).filter((s) => s?.role === role && s.aside !== true && s.never_ran !== true);
+  for (const s of mine) {
+    if (s.problem) return `the ${role} session ${s.session_id}'s verdict can't be counted, so it counts as a failure: ${s.problem}`;
+    if (s.ended !== true) return `the ${role} session ${s.session_id} has not ended yet, so what it says is not known`;
+    if (s.silent || !s.verdict) return `the ${role} session ${s.session_id} ended without handing in a verdict, which counts as a failure`;
+    if (!passes(s.verdict)) return `the ${role} session ${s.session_id} did not pass`;
+  }
+  if (needPass && !mine.some((s) => s.verdict && passes(s.verdict))) return `no ${role} session handed in a pass`;
+  return null;
+}
+
+/** Every line of the four-line checklist (L44) at a known level, none of them material. */
+export const checklistClean = (v) => !!v?.checklist && typeof v.checklist === 'object'
+  && VERDICT_CHECKLIST.every((k) => CHECKLIST_LEVELS.includes(v.checklist[k]) && v.checklist[k] !== 'material');
+
+/**
+ * Each role's own pass, the one definition (L69 point 6): a reviewer passes with a clean four-line checklist (L44), an
+ * auditor with 0 Material. The Merge Gate (M6 refusals.mjs) and the record's move to verified both use it.
+ */
+export const PASSES = Object.freeze({
+  reviewer: (v) => v?.pass === true && checklistClean(v),
+  auditor: (v) => v?.pass === true && v.material === 0,
+});
 
 // The longest listed kind the name starts with (so `report-compact-x` is report-compact-, not report-).
 export function kindOf(name) {
@@ -209,8 +432,12 @@ export function readOutboxFile({ outboxRoot, uids = {}, tag, file }) {
   try {
     const st = fstatSync(fd);
     if (!st.isFile()) return no('not a plain file');
-    if (st.nlink !== 1) return no('file has more than one name (a hard link)');
+    // A second name is a fault in a worker's outbox (the worker owns the file, so it could change it through the other
+    // name), but not in review's (L70 point 1): another user's link can't change review's 0644 bytes, and counting it
+    // would let a worker turn a failing verdict into one that can't be counted. Owner, mode, folders and sha still hold.
+    if (st.nlink !== 1 && !REVIEW_ROLES.includes(tag.role)) return no('file has more than one name (a hard link)');
     if (st.uid !== owner) return no(`file is owned by uid ${st.uid}, not the ${tag.role} outbox owner`);
+    if (REVIEW_ROLES.includes(tag.role) && st.mode & 0o022) return no('file can be written by others than the review user');
     if (st.size > MAX_OUTBOX_BYTES) return no(`file is ${st.size} bytes, over ${MAX_OUTBOX_BYTES}`);
     buf = Buffer.alloc(st.size);
     let got = 0;
@@ -258,9 +485,11 @@ export function verdictFields(h) {
 
 /**
  * A review session's own verdict, judged as the intake judges it (L66): the one verdict file in its outbox folder, read
- * with every check, for the card and head it was launched on. The review runner calls this when a session ends, so a
- * verdict the intake would refuse counts as a failed start. → { ok, verdict } | { ok: false, none, reason } (`none` when
- * nothing was handed in)
+ * with every check, for the card and head it was launched on. The review runner calls this when a session ends and
+ * writes the file's sha256 (or none, or refused) into the ended record; a verdict the intake would refuse, or none at
+ * all, holds the head (L69). The Merge Gate calls it again and counts the file only if its sha256 is the one recorded.
+ * → { ok, verdict (with its sha256) } | { ok: false, none, reason, card? } (`none` when nothing was handed in; `card`
+ * when the file names another card than asked, or the question named none)
  */
 export function sessionVerdict({ outboxRoot, uids, role, sessionId, card, head } = {}) {
   const no = (reason, none = false) => ({ ok: false, none, reason });
@@ -269,16 +498,18 @@ export function sessionVerdict({ outboxRoot, uids, role, sessionId, card, head }
     if (typeof sessionId !== 'string' || !SESSION_ID.test(sessionId)) return no('no session id of letters, digits and dashes');
     const dir = join(outboxRoot, role, sessionId);
     let names;
-    try { names = readdirSync(dir).filter((n) => !n.startsWith('.') && kindOf(n) === 'verdict-'); } catch { return no('its outbox folder could not be listed'); }
+    // The runner makes the outbox folder before the start, so one that is gone (renamed, or its role folder renamed) is
+    // a refusal, never "nothing handed in" (L71 point 1); so is any other failure to list it.
+    try { names = readdirSync(dir).filter((n) => !n.startsWith('.') && kindOf(n) === 'verdict-'); } catch (e) { return no(e?.code === 'ENOENT' ? 'its outbox folder is gone, so what it handed in can\'t be known' : 'its outbox folder could not be listed'); }
     if (!names.length) return no('no verdict was handed in', true);
     if (names.length > 1) return no('more than one verdict file was left, so none counts');
     const f = readOutboxFile({ outboxRoot, uids, tag: { role, sessionId }, file: join(dir, names[0]) });
     if (!f.ok) return no(f.reason);
     const v = verdictFields(f.header);
     if (!v.ok) return no(v.reason);
-    if (v.card !== card) return no(`the verdict names card ${v.card}, not ${card}`);
+    if (v.card !== card) return { ...no(`the verdict names card ${v.card}, not ${card}`), card: v.card };
     if (v.head !== head) return no(`the verdict names head ${v.head.slice(0, 7)}, not ${String(head).slice(0, 7)}`);
-    return { ok: true, verdict: v };
+    return { ok: true, verdict: { ...v, role, session_id: sessionId, outbox_uid: f.owner_uid, source_key: f.key, sha256: f.sha256 } };
   } catch (e) { return no(`the verdict could not be read (${e?.code ?? e?.message ?? e})`); }
 }
 

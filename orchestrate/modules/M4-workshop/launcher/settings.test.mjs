@@ -17,7 +17,7 @@ const PATHS = {
   copy: '/w/copy', outbox: '/w/outbox', hooksDir: '/w/hooks', snapshot: '/w/rules.json', node: '/w/node',
   deny: { secrets: ['/w/secrets'], claudeHome: '/h/.claude', ssh: '/h/.ssh', gh: '/h/.config/gh', robotKeys: '/w/keys', record: '/w/record', otherCopies: ['/w/copy2'] },
   bobFolder: '/w/bob', mirror: '/w/mirror.git',
-  reviewWalls: { outboxRoot: '/r/outbox', launches: '/r/launches', status: '/r/status', requests: '/r/requests' },
+  reviewWalls: { outboxRoot: '/r/outbox', runnerRoot: '/r/review' },
 };
 const PRODUCT = { commands: { test: 'npm test', build: 'npm run build' }, hosts: ['registry.example.com'] };
 const render = (role, extra = {}) => renderRoleSettings({ productionFiles: [], role, profile: DESIGN_PROFILES[role], paths: PATHS, product: PRODUCT, rulesHosts: ['registry.example.com'], ...extra });
@@ -265,26 +265,27 @@ test('L66 M3: a reviewer\'s and an auditor\'s shell may write none of the review
     const dw = sb.filesystem.denyWrite;
     // Bash, and every program it starts (the sandbox covers the whole process tree), trying to write a verdict into the
     // outbox, a launch record, the status or a request: each path is on the no-write list.
-    for (const p of ['/r/outbox/reviewer/R-1/verdict-C-1.json', '/r/outbox/auditor/A-1/verdict-C-1.md', '/r/outbox/reviewer', '/r/launches/R-1.json',
-      '/r/status/status.json', '/r/requests/q-1.json', '/r/requests']) assert.ok(covers(dw, p), `${role}: ${p}`);
+    for (const p of ['/r/outbox/reviewer/R-1/verdict-C-1.json', '/r/outbox/auditor/A-1/verdict-C-1.md', '/r/outbox/reviewer', '/r/review/launches/R-1.json',
+      '/r/review/status.json', '/r/review/state.json', '/r/review/requests/q-1.json', '/r/review/requests', '/r/review/rejected/x', '/r/review']) assert.ok(covers(dw, p), `${role}: ${p}`);
     assert.equal(covers(dw, '/w/copy/src/a.mjs'), false, 'the code copy stays writable');
     assert.equal(sb.allowUnsandboxedCommands, false);
     assert.equal(checkSettings(r.settings, { profile: DESIGN_PROFILES[role] }).ok, true);
     // The Write and Edit tools: never the launches, status or request folders; the outbox stays open for the verdict.
     const deny = r.settings.permissions.deny;
-    for (const k of ['launches', 'status', 'requests']) for (const t of ['Write', 'Edit']) assert.ok(deny.includes(`${t}(//r/${k}/**)`), `${role} ${t} ${k}`);
+    for (const t of ['Write', 'Edit']) assert.ok(deny.includes(`${t}(//r/review/**)`), `${role} ${t} the runner's folder`);
     assert.equal(deny.some((d) => /^(Write|Edit)\(\/\/r\/outbox\/\*\*\)$/.test(d)), false, 'the Write tool may write the verdict');
     // Without the folders named, a review role is refused; a path that is not plain is refused.
     const { reviewWalls, ...noWalls } = PATHS;
     assert.match(render(role, { paths: noWalls }).reason, new RegExp(`a ${role}'s settings need the review folder outboxRoot`));
-    assert.match(render(role, { paths: { ...PATHS, reviewWalls: { ...reviewWalls, status: 'r/status' } } }).reason, /review folder status as a plain absolute path/);
-    assert.match(render(role, { paths: { ...PATHS, reviewWalls: { ...reviewWalls, requests: '/r/../requests' } } }).reason, /review folder requests/);
+    assert.match(render(role, { paths: { ...PATHS, reviewWalls: { ...reviewWalls, runnerRoot: 'r/review' } } }).reason, /review folder runnerRoot as a plain absolute path/);
+    assert.match(render(role, { paths: { ...PATHS, reviewWalls: { ...reviewWalls, runnerRoot: '/r/../review' } } }).reason, /review folder runnerRoot/);
+    assert.match(render(role, { paths: { ...PATHS, reviewWalls: { outboxRoot: '/r/outbox' } } }).reason, /review folder runnerRoot/);
   }
   // The other roles don't need them, and get no such entries.
   const { reviewWalls, ...noWalls } = PATHS;
   const wk = render('worker', { paths: noWalls });
   assert.equal(wk.ok, true, wk.reason);
-  assert.equal(covers(wk.settings.sandbox.filesystem.denyWrite, '/r/launches/R-1.json'), false);
+  assert.equal(covers(wk.settings.sandbox.filesystem.denyWrite, '/r/review/launches/R-1.json'), false);
 });
 
 test('round 2 MIN-4: the Bob folder is on the sandbox no-write list, so the shell cannot write it either', () => {

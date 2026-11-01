@@ -15,7 +15,9 @@ import { REVIEW_ROLES } from '../../../shared/review-roles.mjs';
 // The review user's own folders (L66 M3): what a verdict counts from. A reviewer runs the change's tests by design, so
 // code a worker wrote runs as `review`; the shell sandbox, for Bash and everything it starts, may write none of them,
 // and the Write and Edit tools none but the outbox (where the verdict is written, through Write, which the hooks judge).
-export const REVIEW_WALLS = Object.freeze(['outboxRoot', 'launches', 'status', 'requests']);
+// The review runner's whole folder (its requests/, rejected/, launches/, status.json and its own memory, state.json),
+// not only some of its children: a reviewer runs as the same Mac user as the runner (item 20 cosmetics).
+export const REVIEW_WALLS = Object.freeze(['outboxRoot', 'runnerRoot']);
 
 export const HOOK_TIMEOUT = 10;
 export const POLICY_HOOKS = Object.freeze({
@@ -52,7 +54,8 @@ const denyPair = (p) => [`Read(/${abs(p)}/**)`, `Edit(/${abs(p)}/**)`];
 /**
  * paths: { copy, outbox, hooksDir, snapshot, node, deny: { secrets: [], claudeHome, ssh, gh, robotKeys, record, otherCopies: [] },
  *          bobFolder?, extraOutboxes?: [], reviewWalls? }
- * reviewWalls { outboxRoot, launches, status, requests }: needed for a reviewer or auditor (L66 M3), refused without.
+ * reviewWalls { outboxRoot, runnerRoot }: needed for a reviewer or auditor (L66 M3), refused without. runnerRoot is the
+ * review runner's folder (its config's `root`).
  * product: { commands, hosts }         rulesHosts: the rules' allowed hosts; registryHosts: allowed during install only
  * phase: 'session' | 'install'
  * productionFiles: the rules' `production.env_files`. Each must be on the read-deny list, or the launch is refused
