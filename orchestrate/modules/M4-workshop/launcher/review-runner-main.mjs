@@ -68,6 +68,7 @@ import { sessionSettings, templateFile } from './review-settings.mjs';
 import { REVIEW_ROLES } from '../../../shared/review-roles.mjs';
 import { removeProtected, restoreMainCopies } from './worker-copy.mjs';
 import { writeSnapshot } from '../hooks/snapshot.mjs';
+import { finalize, headFileReader } from '../../M5-review-audit/findings.mjs';
 
 const ABS = ['installRoot', 'root', 'outboxRoot', 'reviewHome', 'recordRoot', 'mirror', 'claudeBin', 'hooksDir', 'ownerHome', 'wiring',
   'snapshot', 'bobFolder', 'reviewCopies', 'workerCopies'];
@@ -389,6 +390,7 @@ export function realPorts(c, wiring, { node = realpathSync.native(process.execPa
       const r = readAccountFile({ file: own, uid: c.ownerUid });
       return r.ok ? r.account : null;
     },
+    finalize: ({ role, sessionId, card, head }) => finalize({ outboxRoot: c.outboxRoot, uids: c.uids, role, sessionId, card, head, owner: c.uids[role], readFile: headFileReader({ gitDir: c.mirror, head }) }),
     handedIn: ({ role, sessionId, card, head }) => sessionVerdict({ outboxRoot: c.outboxRoot, uids: c.uids, role, sessionId, card, head }),
   };
 }

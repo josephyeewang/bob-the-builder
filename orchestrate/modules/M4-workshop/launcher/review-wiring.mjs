@@ -23,13 +23,14 @@ import { reviewPackage } from '../../M5-review-audit/review-package.mjs';
 import { reviewerPrompt } from '../../M5-review-audit/reviewer-prompt.mjs';
 
 const refuse = (reason) => ({ ok: false, reason });
+const SEND_BACK_EFFORT = 'xhigh';   // not exported: the wiring exports `start` only (L78)
 
 export async function start(x) {
   const profile = DESIGN_PROFILES[x?.role];
   if (!profile) return refuse(`${x?.role} has no role profile`);
   let made; try { made = await x.makeCopy(); } catch (e) { made = refuse(e?.message ?? String(e)); }
   if (!made?.ok) return refuse(`the review copy: ${made?.reason ?? 'not made'}`);
-  const pkg = await (x.packageFor ?? reviewPackage)({ copy: x.copy, head: x.head });
+  const pkg = await (x.packageFor ?? reviewPackage)({ copy: x.copy, head: x.head, since: x.audited });
   if (!pkg?.ok) return refuse(`the review package: ${pkg?.reason ?? 'not made'}`);
   let text;
   try { text = reviewerPrompt({ ...x, pkg }); } catch (e) { return refuse(`the prompt: ${e?.message ?? e}`); }
@@ -38,6 +39,8 @@ export async function start(x) {
   const args = [F.print, F.outputFormat, F.streamJson, F.verbose, F.settings, s.file, F.sessionId, x.sessionId,
     F.strictMcpConfig, F.mcpConfig, '{"mcpServers":{}}', F.tools, profile.tools.join(','), F.permissionMode, profile.mode];
   if (profile.restricted) args.push(F.restricted);
+  // A send-back (R-0b-145): a round after an earlier failing verdict on this card runs at the highest effort.
+  if (typeof x.earlier === 'string' && x.earlier.trim()) args.push(F.effort, SEND_BACK_EFFORT);
   args.push(text);
   let child;
   try {

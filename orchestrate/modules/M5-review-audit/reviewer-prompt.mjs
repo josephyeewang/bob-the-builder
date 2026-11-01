@@ -24,6 +24,7 @@ export function reviewerPrompt({ role, card, head, sessionId, outbox, pkg, earli
     `Card ${card}, head ${head}. Your working folder holds that commit; main is beside it as refs/heads/main.`,
     `The change runs from ${pkg.base} (where it left main) to the head. It touches ${pkg.files.length} file(s):\n${files}`,
     `The whole diff is in ${pkg.diffFile} (${pkg.diffBytes} bytes). Read it, and read the files around it.`,
+    role === 'auditor' && pkg.reAudit ? `This is a short re-audit of a combined change. An earlier audit passed this card at ${pkg.reAudit.since}; since then the branch was caught up with main, which brought in ${pkg.reAudit.brought.length} changed file(s):\n${pkg.reAudit.brought.map((p) => `  ${p}`).join('\n')}\nAn audit does not carry over a change to numbers merged since. Check above all that this change and those files together still give the right numbers; a Material finding in how they combine counts like any other.` : '',
     `Three rules:\n${REVIEW_RULES.map((r, i) => `${i + 1}. ${r}`).join('\n')}`,
     `Hand in your verdict as one file, ${outbox}/${verdictFileName(sessionId)}, written once. Any other file there named verdict- means none counts.`,
     verdictFormat({ role, card, head }),
