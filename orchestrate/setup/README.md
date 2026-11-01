@@ -124,3 +124,18 @@ tests assert that over the output, the step list, the Mac's call log and every p
 
 Checked on macOS 27.0.1 (these notes expire with an OS upgrade): `dscl . -read` of a missing key prints `No such key` on
 stderr with exit 0; opening a link with `O_NOFOLLOW|O_DIRECTORY` gives `ENOTDIR` (Linux: `ELOOP`).
+
+## Part 4 — the watch-only week's rules copy and hourly job (R-0b-122)
+
+Config: an optional `"watch": { "repo": "<owner/name>", "rulesSha256": "<64 hex>" }` in the root-owned config. Without it,
+everything below is off. The hash is the SHA-256 of the rules draft file (`shasum -a 256 <file>` prints it), written by whoever
+edits the root config, so the owner's own Mac user cannot choose the rules the week is judged by.
+
+| Command | What it does | Root? |
+|---|---|---|
+| `sudo node setup.mjs watch-rules --rules-source <file>` | refuses unless the file hashes to the config's `watch.rulesSha256`; writes it as `<base>/watch/rules-draft.yaml` (root's, 0644, in orchestrate's 0700 folder). `--dry-run` shows the step | yes |
+| `sudo node setup.mjs check-watch-rules` | read only: the copy is there, root's 0644, no access list, and hashes to the config's value. Without sudo: NEEDS ROOT (exit 3), never PASS | no (sudo to look) |
+| `sudo node setup.mjs daemons place` / `load` / `check` | with a `watch` entry there is a fourth job, `<label>.watch-only`: runs as `orchestrate`, from the installed copy, `watch-run.mjs once --rules draft --rules-sha256 <hash>` every hour. `load` refuses until the rules copy is in place | yes |
+
+The runner re-checks the hash on every pass and judges nothing if the file differs. The job's file is built with the
+launcher's one plist builder and label rule (`review-daemons.mjs` exports them), so there is one of each.

@@ -1,7 +1,7 @@
 // Setup part 2b (PR 2): the three background jobs (LaunchDaemons). The plist texts come from review-daemons.mjs (the one
 // place that builds them); this file puts them where launchd looks, and loads, lists and unloads them.
 //
-//   place    write the three plists into /Library/LaunchDaemons, root:wheel 0644 (launchd refuses any other owner or mode)
+//   place    write the three plists (four with the hourly watch-only job, when the config has `watch`) into /Library/LaunchDaemons, root:wheel 0644 (launchd refuses any other owner or mode)
 //   load     launchctl bootstrap system <plist>, for each job not loaded yet; refuses until the install is there
 //   unload   launchctl bootout system/<label>, for each job that is loaded
 //   list     launchctl print system/<label>: loaded or not, state, last exit code (read only)
@@ -15,10 +15,14 @@ import { RUNNER_CONFIG, aclProblem, chainProblem, currentCopy } from '../modules
 import { homeOf } from './layout.mjs';
 import { installPaths } from './install.mjs';
 import { readUser } from './users-folders.mjs';
+import { watchPlist } from './watch-setup.mjs';
+import { watchRulesPath } from './layout.mjs';
 
 export const DAEMON_DIR = '/Library/LaunchDaemons';
 const LAUNCHCTL = '/bin/launchctl';
 export const JOBS = Object.freeze(['review-updater', 'review-account', 'review-runner']);   // load order: the updater first
+// The hourly watch-only job (watch-setup.mjs) is a fourth job only when the config has a `watch` entry.
+export const jobsFor = (cfg) => (cfg.watch ? [...JOBS, 'watch-only'] : [...JOBS]);
 const op = (text, run) => ({ text, run });
 const plistPath = (cfg, job) => join(DAEMON_DIR, `${cfg.label}.${job}.plist`);
 const labelOf = (cfg, job) => `${cfg.label}.${job}`;
@@ -30,7 +34,9 @@ export function plistTexts(io, cfg) {
   if (!owner.exists || !Number.isInteger(owner.uid) || owner.uid <= 0) { problems.push(`the owner's Mac user ${cfg.owner} was not found`); return { plists: {}, problems }; }
   const common = { label: cfg.label, installRoot: P.installRoot, logDir: P.logDir };
   const two = reviewDaemonPlists({ ...common, config: join(P.installRoot, RUNNER_CONFIG), reviewRoot: P.reviewRoot, reviewHome: homeOf(cfg, 'review'), accountCopy: P.accountCopy, ownerHome: owner.home, ownerUid: owner.uid });
-  return { plists: { 'review-runner': two.runner, 'review-account': two.accountCopy, 'review-updater': updaterPlist(common) }, problems };
+  const plists = { 'review-runner': two.runner, 'review-account': two.accountCopy, 'review-updater': updaterPlist(common) };
+  if (cfg.watch) plists['watch-only'] = watchPlist(io, cfg);
+  return { plists, problems };
 }
 
 const launchctl = (io, args) => io.run(LAUNCHCTL, args);
@@ -43,7 +49,7 @@ export function jobState(io, cfg, job) {
   return { loaded: true, state: /^\s*state = (.+)$/m.exec(r.stdout)?.[1]?.trim() ?? 'unknown', lastExit: /^\s*last exit code = (.+)$/m.exec(r.stdout)?.[1]?.trim() ?? 'unknown' };
 }
 
-export function planPlace(io, cfg, jobs = JOBS) {
+export function planPlace(io, cfg, jobs = jobsFor(cfg)) {
   const P = installPaths(cfg); const ops = []; const { plists, problems } = plistTexts(io, cfg);
   if (problems.length) return { ops, problems };
   // The job files go outside the base, into launchd's own folder: it and every folder above it must be root's alone too.
@@ -67,7 +73,11 @@ export function planLoad(io, cfg) {
   const P = installPaths(cfg); const ops = []; const problems = [];
   const cur = currentCopy(io.at(P.installRoot), { owner: io.rootUid });
   if (cur.missing || cur.problem || !cur.link) problems.push('the install is not there yet (run the install first), so a job would start against nothing');
-  for (const job of JOBS) {
+  if (cfg.watch) {
+    let r = null; try { r = io.lstat(watchRulesPath(cfg)); } catch { /* below */ }
+    if (!r) problems.push(`${watchRulesPath(cfg)} is not there (run watch-rules first), so the hourly watch job would have no rules to judge by`);
+  }
+  for (const job of jobsFor(cfg)) {
     try { io.lstat(plistPath(cfg, job)); } catch { problems.push(`${plistPath(cfg, job)} is not there (run daemons place first)`); continue; }
     const s = jobState(io, cfg, job);
     if (s.error) { problems.push(`could not ask launchd about ${labelOf(cfg, job)}: ${s.error}`); continue; }
@@ -80,7 +90,7 @@ export function planLoad(io, cfg) {
 /** Unload the jobs that are loaded; none loaded → nothing to do, no error. Runner first, so nothing starts while the updater goes. */
 export function planUnload(io, cfg) {
   const ops = []; const problems = [];
-  for (const job of [...JOBS].reverse()) {
+  for (const job of [...jobsFor(cfg)].reverse()) {
     const s = jobState(io, cfg, job);
     if (s.error) { problems.push(`could not ask launchd about ${labelOf(cfg, job)}: ${s.error}`); continue; }
     if (!s.loaded) continue;
@@ -111,7 +121,7 @@ export function planReloadAccount(io, cfg) {
 }
 
 export function list(io, cfg) {
-  return JOBS.map((job) => ({ job, label: labelOf(cfg, job), ...jobState(io, cfg, job) }));
+  return jobsFor(cfg).map((job) => ({ job, label: labelOf(cfg, job), ...jobState(io, cfg, job) }));
 }
 
 /** Read only → [{ ok, what, why? }]. */
@@ -119,7 +129,7 @@ export function checkDaemons(io, cfg) {
   const out = []; const item = (ok, what, why) => out.push({ ok, what, ...(ok ? {} : { why }) });
   const { plists, problems } = plistTexts(io, cfg);
   if (problems.length) { item(false, 'the job files can be built', problems[0]); return out; }
-  for (const job of JOBS) {
+  for (const job of jobsFor(cfg)) {
     const f = plistPath(cfg, job); const why = [];
     let st = null; try { st = io.lstat(f); } catch { why.push('missing'); }
     if (st) {

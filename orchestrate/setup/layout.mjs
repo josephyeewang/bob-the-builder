@@ -39,7 +39,7 @@ export const FORBIDDEN_UNDER = Object.freeze(['/Users', '/Applications', '/tmp',
 /** The checked config, or a thrown Error naming the first problem. */
 export function parseConfig(raw) {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('config: expected an object with base, owner and products');
-  const { base, owner, products = [], proposalsParent } = raw;
+  const { base, owner, products = [], proposalsParent, watch } = raw;
   if (typeof base !== 'string' || !BASE.test(base) || base.split('/').some((s) => s === '..' || s === '.') || base.includes('//') || base.length > 200) {
     throw new Error('config: base must be a full path of letters, digits and . _ - / only, with no .. and no spaces');
   }
@@ -55,7 +55,12 @@ export function parseConfig(raw) {
   if (proposalsParent !== undefined && (typeof proposalsParent !== 'string' || !BASE.test(proposalsParent) || proposalsParent.split('/').some((x) => x === '..' || x === '.') || proposalsParent.includes('//') || proposalsParent.endsWith('/') || proposalsParent.split('/').length < 3 || proposalsParent.length > 200)) {
     throw new Error('config: proposalsParent must be a full path of letters, digits and . _ - / only, in a folder of its own, with no .. and no spaces');
   }
-  return { base: b, owner, products: [...products], ...(proposalsParent !== undefined ? { proposalsParent } : {}) };
+  // The watch-only week (R-0b-122): the repository to watch and the hash of the rules draft root put in place (watch-rules).
+  if (watch !== undefined && (!watch || typeof watch !== 'object' || Array.isArray(watch) || Object.keys(watch).some((k) => !['repo', 'rulesSha256'].includes(k))
+    || typeof watch.repo !== 'string' || !/^[A-Za-z0-9_-][A-Za-z0-9_.-]*\/[A-Za-z0-9_-][A-Za-z0-9_.-]*$/.test(watch.repo) || typeof watch.rulesSha256 !== 'string' || !/^[0-9a-f]{64}$/.test(watch.rulesSha256))) {
+    throw new Error('config: watch must be { "repo": "owner/name", "rulesSha256": "<64 hex characters>" }');
+  }
+  return { base: b, owner, products: [...products], ...(proposalsParent !== undefined ? { proposalsParent } : {}), ...(watch !== undefined ? { watch: { repo: watch.repo, rulesSha256: watch.rulesSha256 } } : {}) };
 }
 
 /** Where the proposals folders live (R-0b-128, runbook A7; "a proposal for the owner's OK" until they OK it): one folder per product under this parent. */
@@ -148,3 +153,6 @@ export function folderTable(cfg) {
   // person's own user, whose Mac group would otherwise be taken as it comes (L100 m1). Set on apply, compared in check.
   return rows.map(([path, owner, mode, why, acl = []]) => ({ path, owner, mode, why, acl, ...(owner === 'owner' && (mode & 0o070) ? { group: 'root' } : {}) }));
 }
+
+/** The rules draft the watch-only week judges by (R-0b-122): root's copy, in orchestrate's watch folder; the config holds its hash. */
+export const watchRulesPath = (cfg) => join(cfg.base, 'watch', 'rules-draft.yaml');
