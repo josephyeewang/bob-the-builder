@@ -23,6 +23,9 @@ const ID = /^[A-Za-z0-9][A-Za-z0-9 ._:/#|@+-]{0,127}$/;
 const alert = { key: 'id', title: 'text', body: 'text', status_text: 'text', status: 'id', since: 'time', last: 'time',
   cleared: 'time', count: 'count', issue: 'count' };
 const check = { name: 'text', status: 'id', conclusion: 'id', summary: 'text' };
+// The Dispatcher's readings (R-0b-168): each carries observed_at, taken after the read it reports returned.
+const reading = { value: 'bool', observed_at: 'time' };
+const usageWindow = { used_pct: 'num', resets_at: 'time' };
 
 export const SHAPES = Object.freeze({
   'fact.air-health': { red_count: 'count', checked_at: 'time' },
@@ -34,8 +37,15 @@ export const SHAPES = Object.freeze({
   'fact.outside-no-push': { green: 'bool', reason: 'text', at: 'time' },
   'fact.outside-robot-merges': { product: 'id', label: 'id', at: 'time', run_id: 'id', run_at: 'time', green: 'bool',
     last_green_at: 'time', red_runs: 'count', red_since: 'time', latch_reason: 'text', last_red_at: 'time', reason: 'text' },
+  'fact.limit-hit': { account: 'id', resets_at: 'time', observed_at: 'time', source: 'id' },
+  'fact.minibase-running': reading,
+  'fact.network-up': reading,
+  'fact.frontdoor-reachable': reading,
+  'fact.signed-in-account': { account: 'id', observed_at: 'time' },
+  'fact.usage': { account: 'id', observed_at: 'time', source: 'id', h5: usageWindow, week: usageWindow },
   'fact.power-source': { at: 'time', source: 'text', ups_present: 'bool', on_ups_power: 'bool', internal_battery: 'bool' },
-  'fact.pr': { number: 'count', title: 'text', author: 'text', head_sha: 'id', base: 'text', branch: 'text',
+  'fact.pr': { number: 'count', title: 'text', author: 'text', head_sha: 'id', state: 'id', merged: 'bool', merge_commit_sha: 'id',
+    observed_at: 'time', base: 'text', branch: 'text',
     changed_files: [{ path: 'text', from: 'text', status: 'id', added: 'count', removed: 'count' }],
     diff_summary: { files: 'count', added: 'count', removed: 'count' }, checks_at_head: [check],
     unresolved_threads: [{ author: 'text', body: 'text', path: 'text' }], behind_main: 'count' },
