@@ -54,7 +54,7 @@ function world({ policy = POLICY, mode = 'draft' } = {}) {
     if (path === '/graphql') {
       if (state.graphql) return { status: state.graphql, json: null };
       const nodes = threadsOf.get(body.variables.pr) ?? [];
-      return { status: 200, json: { data: { repository: { pullRequest: { reviewThreads: { totalCount: nodes.length, nodes } } } } } };
+      return { status: 200, json: { data: { repository: { pullRequest: { reviewThreads: { totalCount: state.total ?? nodes.length, nodes } } } } } };
     }
     throw new Error(`unexpected ${method} ${path}`);
   };
@@ -690,7 +690,7 @@ test('PLANT refusal 8: a docs change the owner labelled needs-joe → refusal 8 
   assert.equal(v.judged()[0].verdict, VERDICTS[0]);
 });
 
-test('PLANT the second-cutover branch: where the lane rule says "ask" (nothing hard broken), refusal 8 stands alone → "would ask for the owner\'s Approve"; with any hard refusal added it is "would refuse" (caught by: the hard/soft split in judgeMerged)', async () => {
+test('judgeMerged sorts hard and soft refusals: where the lane rule says "ask" refusal 8 stands alone → "would ask"; with any hard refusal added → "would refuse"', async () => {
   const rs = await draftRulesFor();
   const askEngine = { classify: (c) => rs.engine.classify(c), get: (k, o) => rs.engine.get(k, o), may: () => ({ decision: 'ask', reason: 'a Tier 1 change needs the owner', tier: 1 }) };
   const head = 'b'.repeat(40);
@@ -1020,4 +1020,90 @@ test('R3 m-d a second, different rules version must have landed AFTER the first 
   const l = w.lines().find((x) => x.sha === d2.merge);
   assert.ok(l && l.verdict, JSON.stringify(w.lines().filter((x) => x.sha === d2.merge)));
   assert.ok(w.lines().some((x) => x.sha === d1.merge && x.verdict));
+});
+
+// ───────────────────────────── round 4 (audit r3 of #86)
+
+const dayPasses = async (w) => { await w.pass(PIN_AT); for (const d of ['03', '04', '05', '06', '07', '08', '09']) await w.pass(`2026-11-${d}T12:00:00Z`); };
+
+test('R4 MAT-A (probe R3P1) a direct push at 23:20 on the end day, held back at 23:50 and judged at 00:50, is still in the end day and the week does NOT silently count', async () => {
+  const w = world(); await dayPasses(w);
+  const sha = w.push({ 'docs/z.md': 'z' }, '2026-11-09T23:20:00Z');
+  await w.pass('2026-11-09T23:50:00Z');
+  assert.ok(w.lines().some((l) => l.sha === sha && l.not_judged_reason), 'held back at 23:50');
+  await w.pass('2026-11-10T00:50:00Z');
+  const l = w.judged().find((x) => x.sha === sha);
+  assert.equal(l.seen_at, '2026-11-09T23:50:00Z', 'seen_at is the FIRST pass that saw it, not the judging pass');
+  const s = week(w);
+  assert.equal(s.judged, 1); assert.equal(s.disagreements, 1); assert.equal(s.ok, false);
+});
+
+test('R4 MAT-A edge: a direct push first seen up to 2 hours after the end day ends counts in the end day; later does not', async () => {
+  for (const [at, counts] of [['2026-11-10T01:59:00Z', 1], ['2026-11-10T02:00:00Z', 1], ['2026-11-10T02:01:00Z', 0]]) {
+    const w = world(); await dayPasses(w);
+    w.push({ 'docs/z.md': 'z' }, '2026-11-09T22:00:00Z');
+    await w.pass(at);
+    assert.equal(summary({ dir: w.dir, endDay: '2026-11-09', explanations: NOEX }).judged, counts, at);
+  }
+});
+
+test('R4 m-1 (N26) no explanations file → owner is null and the summary says no file was read', async () => {
+  const w = world(); await w.pass(PIN_AT);
+  const r = readExplanations(join(w.dir, 'none.json'), { ownerUid: UID });
+  assert.equal(r.owner, null); assert.equal(r.ok, true);
+  const out = [];
+  await main(['summary', '--dir', w.dir, '--end-day', '2026-11-09', '--explanations', join(w.dir, 'none.json'), '--owner-uid', String(UID)], { out: (x) => out.push(x), err: () => {} });
+  assert.match(out.join('\n'), /no file was read/);
+  const f = ownFile({ ['a'.repeat(40)]: 'fine' });
+  assert.equal(readExplanations(f, { ownerUid: UID }).owner, UID);
+});
+
+test('R4 m-2 (N20) a pull request with 100 or more review threads is a fact (refusal 7), not a read failure: it is judged, not stuck', async () => {
+  const w = world(); await w.pass(PIN_AT);
+  w.land({ 'docs/a.md': 'two' }); w.state.total = 150;
+  await w.pass('2026-11-03T12:00:00Z');
+  const l = w.judged()[0];
+  assert.ok(l, JSON.stringify(w.lines()));
+  assert.equal(l.verdict, VERDICTS[2]); assert.ok(l.refusals.some((r) => r.n === 7));
+  assert.ok(!w.lines().some((x) => x.not_judged_reason));
+});
+
+test('R4 m-2 (N21) a failed threads read says the HTTP status first and the words "the review threads" once', async () => {
+  const w = world(); await w.pass(PIN_AT);
+  w.land({ 'docs/a.md': 'two' }); w.state.graphql = 502;
+  await w.pass('2026-11-03T12:00:00Z');
+  const nj = w.lines().find((l) => l.not_judged_reason);
+  assert.match(nj.not_judged_reason, /^HTTP 502/);
+  assert.equal((nj.not_judged_reason.match(/the review threads/g) ?? []).length, 1, nj.not_judged_reason);
+});
+
+test('R4 m-2 (N22) a "not judged" line carries the rules it was tried under', async () => {
+  const w = world(); await w.pass(PIN_AT);
+  w.land({ 'docs/a.md': 'two' }); w.state.graphql = 502;
+  await w.pass('2026-11-03T12:00:00Z');
+  const nj = w.lines().find((l) => l.not_judged_reason);
+  assert.equal(nj.rules, H(POLICY));
+});
+
+test('R4 m-2 (N24) a commit that was "not judged" and judged on a retry is not stuck, and the week still counts', async () => {
+  const w = world(); await w.pass(PIN_AT);
+  const b = w.land({ 'docs/b.md': 'b' }, { at: '2026-11-04T09:00:00Z' });
+  w.state.graphql = 502;
+  await w.pass('2026-11-04T12:00:00Z');
+  w.state.graphql = null;
+  for (const d of ['03', '04', '05', '06', '07', '08', '09']) await w.pass(`2026-11-${d}T13:00:00Z`);
+  await w.pass('2026-11-10T00:30:00Z');
+  const s = week(w);
+  assert.deepEqual(s.stuck, []); assert.ok(w.judged().some((l) => l.sha === b.merge));
+  assert.equal(s.ok, true, JSON.stringify(s.reasons));
+});
+
+test('R4 m-5 the summary names the earliest end day that could count: day 7 after a midnight pin, day 8 after a mid-day pin', async () => {
+  const w = world(); await w.pass(PIN_AT);
+  assert.equal(summary({ dir: w.dir, endDay: '2026-11-09', explanations: NOEX }).earliestEndDay, '2026-11-09');
+  const v = world(); await v.pass('2026-11-03T15:00:00Z');
+  assert.equal(summary({ dir: v.dir, endDay: '2026-11-09', explanations: NOEX }).earliestEndDay, '2026-11-10');
+  const out = [];
+  await main(['summary', '--dir', v.dir, '--end-day', '2026-11-09', '--explanations', join(v.dir, 'none.json'), '--owner-uid', String(UID)], { out: (x) => out.push(x), err: () => {} });
+  assert.match(out.join('\n'), /earliest end day that could count: 2026-11-10/);
 });

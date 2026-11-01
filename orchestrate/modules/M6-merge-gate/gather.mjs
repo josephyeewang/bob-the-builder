@@ -8,6 +8,7 @@
 //   await gatherFacts(ctx, merge) → facts            (see refusals.mjs for every field)
 //   recordView(record) → { createdBy(entity, id), seqOf(entity, id), linesAfter(seq) }
 //   threadsQuery → the GraphQL text for refusal 7
+//   threads(gh, owner, repo, pr) → { ok, unresolved } (a failed read throws, message starts with the HTTP status); linesOf(patch) → added/removed lines
 // ctx = { record, rules, product, gh, owner, repo, view, now, alert, approvals?, readRow?, reviewLaunches }
 //   reviewLaunches { root, uids, outbox }: the review runner's launch records folder (its ended records sit beside it,
 //     L68), the role → Mac user id map (L65), and review's outbox root, where each session's verdict file is read
@@ -100,7 +101,7 @@ export const linesOf = (patch) => {
 export async function threads(gh, owner, repo, pr) {
   const r = await gh.post('/graphql', { query: threadsQuery, variables: { owner, repo, pr } });
   const t = r?.json?.data?.repository?.pullRequest?.reviewThreads;
-  if (r?.status !== 200 || r.json?.errors || !t || !Array.isArray(t.nodes)) { const e = new Error(`HTTP ${r?.status}: the review threads could not be read`); e.unreadable = true; throw e; }
+  if (r?.status !== 200 || r.json?.errors || !t || !Array.isArray(t.nodes)) { const e = new Error(r?.status !== 200 ? `HTTP ${r?.status}: the review threads could not be read` : 'GitHub answered 200 but with an error: the review threads could not be read'); e.unreadable = true; throw e; }
   if (t.totalCount !== t.nodes.length || t.totalCount >= MAX_LIST) return { ok: false };
   // A human thread: its first comment's author is a User. A bot's thread (a linter) is not a person waiting on an answer.
   const unresolved = t.nodes.filter((n) => n?.isResolved !== true && n?.comments?.nodes?.[0]?.author?.__typename !== 'Bot').length;

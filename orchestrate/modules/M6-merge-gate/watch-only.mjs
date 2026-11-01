@@ -50,6 +50,7 @@ const HEX64 = /^[0-9a-f]{64}$/;
 const MAX_LIST = 100;
 const MAX_WALK = 1000;
 const FRESH_MS = 3_600_000;
+const EDGE_MS = FRESH_MS + 3_600_000;   // the hold-back for a young direct push, plus one pass interval
 const LOCK_STALE_MS = 20 * 60_000;
 const PRODUCT = 'watch';
 const here = dirname(fileURLToPath(import.meta.url));
@@ -241,7 +242,7 @@ export async function gatherMerged({ gh, owner, repo, policy, sha, now = () => D
     { const j = await get(`${base}/commits/${headSha}/status?per_page=${MAX_LIST}`, 'the statuses');
       if (Array.isArray(j.statuses) && !(Number.isInteger(j.total_count) && j.total_count >= MAX_LIST)) statuses = j.statuses.map((s) => ({ context: s?.context, state: s?.state })); }
     let threads;
-    try { threads = await threadsOf(gh, owner, repo, num); } catch (e) { fail('the review threads', e); }
+    try { threads = await threadsOf(gh, owner, repo, num); } catch (e) { if (e?.unreadable) throw e; fail('the review threads', e); }
     return {
       direct: false, sha, pr: num, mergedAt: pr.merged_at ?? null, mergedBy: pr.merged_by?.login ?? null, prBase: pr.base?.ref ?? null, headSha, checks, statuses, threads, files,
       labels: (pr.labels ?? []).map((l) => l?.name).filter((n) => typeof n === 'string'),
@@ -342,6 +343,9 @@ async function pass({ gh, owner, repo, dir, rules, at, now, maxWalk }) {
     if (!reachedStop) problems.push(`main's history did not lead back to the pin within ${maxWalk} commits`);
   }
   let judged = 0; const skipped = 0;
+  // The time a commit was FIRST seen: the earliest line of any kind for it (a "not judged" line included), else this pass.
+  const firstSeen = new Map();
+  for (const l of lines) if (isCommit(l) && typeof (l.seen_at ?? l.at) === 'string' && !firstSeen.has(l.sha)) firstSeen.set(l.sha, l.seen_at ?? l.at);
   const notJudgedBefore = new Map(lines.filter((l) => isCommit(l) && l.not_judged_reason).map((l) => [l.sha, l.not_judged_reason]));
   for (const sha of chain.reverse()) {
     if (problems.length && !pinOk) break;
@@ -356,7 +360,7 @@ async function pass({ gh, owner, repo, dir, rules, at, now, maxWalk }) {
     const facts = await gatherMerged({ gh, owner, repo, policy: r.policy, sha, now: () => Date.parse(at) });
     if (facts.unreadable) { notJudged(facts.unreadable); continue; }
     const v = judgeMerged(facts, r);
-    log({ sha, at, seen_at: at, merged_at: facts.mergedAt, pr: facts.pr, merged_by: facts.mergedBy, direct: facts.direct, rules: r.id ?? ruleId, ...v });
+    log({ sha, at, seen_at: firstSeen.get(sha) ?? at, merged_at: facts.mergedAt, pr: facts.pr, merged_by: facts.mergedBy, direct: facts.direct, rules: r.id ?? ruleId, ...v });
     judged++;
   }
   return done(head, pin.sha, judged, skipped);
@@ -374,7 +378,7 @@ export function readExplanations(path, { ownerUid }) {
   try {
     let there = true;
     try { lstatSync(path); } catch (e) { if (e?.code === 'ENOENT') there = false; else throw e; }
-    if (!there) return { ok: true, explanations: {}, owner: ownerUid, problem: null };
+    if (!there) return { ok: true, explanations: {}, owner: null, problem: null, missing: true };
     const { buf, st } = readPlain(path, 1_000_000);
     const dst = statSync(dirname(path));
     if (st.uid !== ownerUid) return bad(`the explanations file is owned by user ${st.uid}, not the owner's user ${ownerUid}`);
@@ -395,17 +399,19 @@ export function readExplanations(path, { ownerUid }) {
 export function summary({ dir, endDay, explanations: ex = { ok: true, explanations: {}, owner: null, problem: null } }) {
   const lines = readLog(dir);
   const pin = lines.filter((l) => l.pin === true).at(-1) ?? null;
-  const out = { days: [], missingDays: [], judged: 0, wouldMerge: 0, disagreements: 0, unexplained: [], failedPasses: 0, corrupt: lines.filter((l) => l.corrupt).length, duplicates: [], stuck: [], windowStart: pin?.at ?? null, explanationsOwner: ex.owner, explanationsProblem: ex.problem, reasons: [], ok: false };
+  const out = { days: [], missingDays: [], judged: 0, wouldMerge: 0, disagreements: 0, unexplained: [], failedPasses: 0, corrupt: lines.filter((l) => l.corrupt).length, duplicates: [], stuck: [], windowStart: pin?.at ?? null, earliestEndDay: null, explanationsOwner: ex.owner, explanationsProblem: ex.problem, reasons: [], ok: false };
   if (!/^\d{4}-\d{2}-\d{2}$/.test(endDay ?? '') || new Date(`${endDay}T00:00:00Z`).toISOString().slice(0, 10) !== endDay) { out.reasons.push('the end day is not a real date'); return out; }
   if (!pin) { out.reasons.push('no pass has run yet (no pin)'); return out; }
   const end = Date.parse(`${endDay}T00:00:00Z`);
   // The first counted day is the day AFTER the pin, unless the pin is exactly midnight: the pin day is only part of a day.
   const pinDay = Date.parse(`${day(pin.at)}T00:00:00Z`);
-  for (let t = Date.parse(pin.at) === pinDay ? pinDay : pinDay + 86_400_000; t <= end; t += 86_400_000) out.days.push(new Date(t).toISOString().slice(0, 10));
+  const firstDay = Date.parse(pin.at) === pinDay ? pinDay : pinDay + 86_400_000;
+  for (let t = firstDay; t <= end; t += 86_400_000) out.days.push(new Date(t).toISOString().slice(0, 10));
   const after = lines.filter((l) => !l.corrupt && l.at >= pin.at);
   const cleanPass = (l) => l.pass === true && !(l.problems?.length) && l.pin_sha === pin.sha && l.pin_ok === true && l.rules === pin.rules && SHA.test(l.head ?? '');
   const clean = after.filter(cleanPass);
   const cleanDays = new Set(clean.map((l) => day(l.at)));
+  out.earliestEndDay = new Date(firstDay + 6 * 86_400_000).toISOString().slice(0, 10);
   out.missingDays = out.days.filter((d) => !cleanDays.has(d));
   out.failedPasses = after.filter((l) => l.pass === true && !cleanPass(l)).length;
   const rulesOk = (l) => pin.rules === 'github' || l.rules === pin.rules;
@@ -417,7 +423,10 @@ export function summary({ dir, endDay, explanations: ex = { ok: true, explanatio
   // A direct push counts on the day a pass first saw it (its own date is the committer's to set); every judged line found
   // after the pin counts, an early date clamped to the first day of the window. Only a date past the end day is out.
   const countedDay = (l) => day((l.direct ? l.seen_at : l.merged_at) ?? l.seen_at ?? l.at);
-  const inWindow = judgedLines.filter((l) => countedDay(l) <= endDay);
+  // When it is unclear which week a commit belongs to, it counts IN: a direct push first seen up to the hold-back (1 hour)
+  // plus one pass interval (1 hour) after the end day's midnight is counted in the end day.
+  const lateGrace = (l) => l.direct && Date.parse(l.seen_at ?? l.at) <= end + 86_400_000 + EDGE_MS;
+  const inWindow = judgedLines.filter((l) => countedDay(l) <= endDay || lateGrace(l));
   const dis = inWindow.filter((l) => l.verdict !== VERDICTS[0]);
   out.judged = inWindow.length; out.wouldMerge = inWindow.length - dis.length; out.disagreements = dis.length;
   out.unexplained = (ex.ok ? dis.filter((l) => typeof ex.explanations[l.sha] !== 'string' || !ex.explanations[l.sha].trim()) : dis).map((l) => ({ sha: l.sha, pr: l.pr, verdict: l.verdict, refusals: l.refusals }));

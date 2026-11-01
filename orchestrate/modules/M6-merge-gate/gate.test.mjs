@@ -668,3 +668,31 @@ test('L70 planted: a failing verdict file with a second name still refuses the m
   assert.ok(m.doc.reasons.some((x) => x.startsWith('5:') && /the reviewer session R-C-1 did not pass/.test(x)), m.doc.reasons.join(' | '));
   assert.ok(!m.doc.reasons.some((x) => /can't be counted|more than one name/.test(x)), m.doc.reasons.join(' | '));
 });
+
+// The review threads are read through the one shared threads() in gather.mjs. Whatever goes wrong with that read, the gate
+// refuses with refusal 7 and merges nothing; a clean read still merges. (Added with the watch-only runner, which shares the read.)
+for (const [name, fail] of [
+  ['an HTTP 502', async () => ({ status: 502, json: null })],
+  ['a 200 carrying errors', async () => ({ status: 200, json: { errors: [{ message: 'x' }] } })],
+  ['a thrown error', async () => { throw new Error('boom'); }],
+  ['too many threads to read whole', async () => ({ status: 200, json: { data: { repository: { pullRequest: { reviewThreads: { totalCount: 101, nodes: [] } } } } } })],
+]) {
+  test(`the review threads cannot be read (${name}): refused with 7, nothing merged`, async () => {
+    const w = world();
+    verifiedCard(w);
+    const orig = w.g.gh.post;
+    w.g.gh.post = async (p, b) => (p === '/graphql' ? fail() : orig(p, b));
+    await gatePass(w.ctx);
+    const m = mergeOf(w);
+    assert.equal(m.doc.state, 'refused', JSON.stringify(m.doc));
+    assert.equal(w.g.writes.filter(([k, p]) => k === 'put' && /merge$/.test(p)).length, 0);
+    assert.match(JSON.stringify(m.doc), /7: the review threads could not be read/);
+  });
+}
+
+test('the review threads read cleanly with none open: the same card merges', async () => {
+  const w = world();
+  verifiedCard(w);
+  await gatePass(w.ctx);
+  assert.equal(mergeOf(w).doc.state, 'merged');
+});
