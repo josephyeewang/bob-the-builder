@@ -74,3 +74,31 @@ root folder prefix, an in-memory `dscl`/`dseditgroup`, owners kept in a table) a
 the real tool refuses (a `dscl` write without root, a bad path, a missing record). The last tests run the real read-only
 tools on this Mac (`dscl -read`, `dseditgroup -o checkmember`, `stat`, `ls -led`). Each `PLANT` test breaks one clause and
 names the check that catches it.
+
+## Part 3 — taps, proposals, git trust, the account job reload, the watch-only token
+
+| Command | What it does | Root? |
+|---|---|---|
+| `sudo node setup.mjs users-folders` | now also makes `<base>/owner-taps` (the owner's, 0755, no access list; runner setting `ownerTaps`) | yes |
+| `sudo node setup.mjs proposals --config <file> [--dry-run]` | makes `proposalsParent` (default `/Users/Shared/orchestrate-proposals`: root's, **0711**) and one folder per product (the owner's, **0700**, one access-list entry for `orchestrate`: list/search/read, inherited) | yes |
+| `node setup.mjs check-proposals` | read only: owner, mode, exact access list; with `sudo` also: the owner can write, `orchestrate` reads and cannot write, `review` cannot read | no (sudo for proofs) |
+| `sudo node setup.mjs safe-directory` / `check-safe-directory` | runs `git config --global --add safe.directory <base>/mirror` **as the owner** (root never writes into their home); refuses if they trust `*` | yes |
+| `sudo node setup.mjs daemons reload-account` | if the `review-account` job is loaded: rewrite its file (carries `--install <copy>`), unload, load. Not loaded: nothing to do | yes |
+| `sudo node setup.mjs token` / `check-token` | types the watch-only token hidden into `<base>/keys/watch-only-token` (orchestrate's, 0600); the check reads owner, mode and size only | yes |
+
+Why the proposals parent is 0711 root's and the folders use an access list, not a group: the owner's own group (`staff`) holds
+every ordinary user of the Mac. The parent sits in a folder everyone can write into, so the base wall cannot be used; instead
+root makes it itself, refuses one that already exists and is not root's, and a first step re-checks it. Open for the lead:
+the proposals deny rule (R-0b-128 item 4) and the read-back's "block in rendered settings" wait for that row.
+
+### Where the watch-only token lives (proposal, the lead decides)
+The three users never log in, so none has a login Keychain. Options: (a) **a file in `keys/`** — orchestrate's 0600 file in
+its own 0700 folder; the job reads it directly and passes it to GitHub as a header, never as an argument. (b) a file Keychain
+for orchestrate — needs an unlock password, which would have to sit in another file next to it: same protection, more
+moving parts, and `security add-generic-password -w <value>` would show the token in the process list. (c) the owner's
+Keychain — the owner's AI sessions (workers) could reach it: refused. **Recommended: (a).** Built as (a).
+The token text is never printed, logged, put in a step's text or an error, or given to a program as an argument; the
+tests assert that over the output, the step list, the Mac's call log and every program call.
+
+Checked on macOS 27.0.1 (these notes expire with an OS upgrade): `dscl . -read` of a missing key prints `No such key` on
+stderr with exit 0; opening a link with `O_NOFOLLOW|O_DIRECTORY` gives `ENOTDIR` (Linux: `ELOOP`).

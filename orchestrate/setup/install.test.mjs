@@ -552,6 +552,46 @@ test('a job file written where a link sits replaces the link itself; the link\'s
   assert.equal(statSync(plistFile(w, 'review-runner')).isFile(), true);
 });
 
+// ───────────────────────────── A8: reload the account job only if it is loaded ─────────────────────────────
+
+test('reload-account: the job is not loaded → nothing to do, exit 0, the Mac not touched (a no-op, as the runbook expects on a fresh Mini)', async () => {
+  const w = await placed(); const n = w.mac.log.length;
+  const r = w.run(['daemons', 'reload-account']);
+  assert.equal(r.code, 0, r.text); assert.match(r.text, /nothing to do/); assert.equal(w.mac.log.length, n);
+  const d = w.run(['daemons', 'reload-account', '--dry-run']); assert.equal(d.code, 0); assert.match(d.text, /nothing to do/);
+});
+
+test('reload-account: loaded with an OLD file (no --install) → the file is rewritten to carry --install <the installed copy>, unloaded, loaded; the other jobs untouched', async () => {
+  const w = await placed();
+  assert.equal(w.run(['daemons', 'load']).code, 0);
+  const f = plistFile(w, 'review-account');
+  rmSync(f); writeFileSync(f, readFileSync(plistFile(w, 'review-runner'), 'utf8').replace('review-runner', 'review-account'), { mode: 0o644 });   // some old text
+  const { plists } = plistTexts(w.mac, w.cfg);
+  assert.ok(plists['review-account'].includes(`<string>--install</string><string>${installPaths(w.cfg).installRoot}</string>`));
+  const dry = w.run(['daemons', 'reload-account', '--dry-run']);
+  assert.equal(dry.code, 0, dry.text); assert.match(dry.text, /would run: write .*review-account\.plist/); assert.match(dry.text, /would run: launchctl bootout/); assert.match(dry.text, /would run: launchctl bootstrap/);
+  const n = w.mac.log.length;
+  const r = w.run(['daemons', 'reload-account']); assert.equal(r.code, 0, r.text);
+  assert.equal(readFileSync(f, 'utf8'), plists['review-account']);
+  const steps = w.mac.log.slice(n).filter((l) => /review-account|launchctl/.test(l) && !/^(chown|chmod) /.test(l));
+  assert.deepEqual(steps.map((s) => s.split(' ').slice(0, 2).join(' ')), ['rm /Library/LaunchDaemons/com.example.orch-test.review-account.plist', 'write /Library/LaunchDaemons/com.example.orch-test.review-account.plist', 'launchctl bootout', 'launchctl bootstrap']);
+  assert.ok(!w.mac.log.slice(n).some((l) => /review-runner|review-updater/.test(l)), 'another job was touched');
+  assert.ok(w.mac.loaded.has(`${LABEL}.review-account`) && w.mac.loaded.has(`${LABEL}.review-runner`));
+  assert.deepEqual(failed(checkDaemons(w.mac, w.cfg)), []);
+});
+
+test('PLANT reload-account when /Library is writable by others → no step runs (the guard, as for every root command)', async () => {
+  const w = await placed(); assert.equal(w.run(['daemons', 'load']).code, 0);
+  chmodSync(w.mac.at('/Library'), 0o777); const n = w.mac.log.length;
+  const r = w.run(['daemons', 'reload-account']); assert.equal(r.code, 1); assert.equal(w.mac.log.length, n);
+});
+
+test('reload-account refuses when not root; --dry-run does not need root', async () => {
+  const w = await placed(); w.mac.as = 1234;
+  assert.equal(w.run(['daemons', 'reload-account']).code, 2);
+  assert.equal(w.run(['daemons', 'reload-account', '--dry-run']).code, 0);
+});
+
 // ───────────────────────────── the real read-only tools on this Mac ─────────────────────────────
 
 test('REAL launchctl print: an unknown job is "not loaded" (exit 113), read only', { skip: !isDarwin }, () => {

@@ -43,7 +43,7 @@ export function jobState(io, cfg, job) {
   return { loaded: true, state: /^\s*state = (.+)$/m.exec(r.stdout)?.[1]?.trim() ?? 'unknown', lastExit: /^\s*last exit code = (.+)$/m.exec(r.stdout)?.[1]?.trim() ?? 'unknown' };
 }
 
-export function planPlace(io, cfg) {
+export function planPlace(io, cfg, jobs = JOBS) {
   const P = installPaths(cfg); const ops = []; const { plists, problems } = plistTexts(io, cfg);
   if (problems.length) return { ops, problems };
   // The job files go outside the base, into launchd's own folder: it and every folder above it must be root's alone too.
@@ -52,7 +52,7 @@ export function planPlace(io, cfg) {
   let st = null; try { st = io.lstat(P.logDir); } catch (e) { if (e?.code !== 'ENOENT') return { ops, problems: [`${P.logDir} could not be read (${e?.code ?? e})`] }; }
   if (st === null) ops.push(op(`mkdir ${P.logDir}`, () => io.mkdir(P.logDir, 0o700)), op(`set owner and mode of ${P.logDir}: chown 0:0, chmod 755`, () => io.secure(P.logDir, { uid: io.rootUid, gid: 0, mode: 0o755 })));
   else if (st.isSymbolicLink() || !st.isDirectory()) return { ops, problems: [`${P.logDir} exists but is not a plain folder; nothing was changed`] };
-  for (const job of JOBS) {
+  for (const job of jobs) {
     const f = plistPath(cfg, job);
     let same = false;
     try { const s = io.lstat(f); same = s.isFile() && !s.isSymbolicLink() && s.uid === io.rootUid && (s.mode & 0o7777) === 0o644 && io.readText(f) === plists[job] && aclProblem([io.at(f)]) === null; } catch { /* not there */ }
@@ -87,6 +87,27 @@ export function planUnload(io, cfg) {
     ops.push(op(`launchctl bootout system/${labelOf(cfg, job)}`, () => { const r = launchctl(io, ['bootout', `system/${labelOf(cfg, job)}`]); if (r.status !== 0) throw new Error(`could not unload ${labelOf(cfg, job)} (${failText(r)})`); }));
   }
   return { ops, problems };
+}
+
+/**
+ * Runbook A8: the account job reloaded so its file carries `--install <the installed copy>` (copy-to refuses without it).
+ * A job that is not loaded gives NO steps and no error: there is nothing running on an old file. A loaded one gets its file
+ * rewritten (only if it differs), then unloaded and loaded again. Nothing else is touched.
+ */
+export function planReloadAccount(io, cfg) {
+  const job = 'review-account'; const label = labelOf(cfg, job);
+  const s = jobState(io, cfg, job);
+  if (s.error) return { ops: [], problems: [`could not ask launchd about ${label}: ${s.error}`] };
+  if (!s.loaded) return { ops: [], problems: [] };
+  const { plists, problems } = plistTexts(io, cfg);
+  if (problems.length) return { ops: [], problems };
+  const P = installPaths(cfg);
+  if (!plists[job].includes(`<string>--install</string><string>${P.installRoot}</string>`)) return { ops: [], problems: [`the ${job} file this would write does not carry --install ${P.installRoot}; nothing was changed`] };
+  const place = planPlace(io, cfg, [job]);
+  if (place.problems.length) return place;
+  const out = op(`launchctl bootout system/${label}`, () => { const r = launchctl(io, ['bootout', `system/${label}`]); if (r.status !== 0) throw new Error(`could not unload ${label} (${failText(r)})`); });
+  const inn = op(`launchctl bootstrap system ${io.at(plistPath(cfg, job))}`, () => { const r = launchctl(io, ['bootstrap', 'system', io.at(plistPath(cfg, job))]); if (r.status !== 0) throw new Error(`could not load ${label} (${failText(r)}); run: daemons load`); });
+  return { ops: [...place.ops, out, inn], problems: [] };
 }
 
 export function list(io, cfg) {

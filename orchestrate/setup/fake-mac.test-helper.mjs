@@ -20,7 +20,10 @@ export function fakeMac({ euid: as = 0, users = {}, admins = [] } = {}) {
     owners: new Map(),          // logical path → { uid, gid } set by chown
     log: [],                    // every changing call, in order
     failNextDsclCreate: false,  // a test sets this to make the next dscl -create fail once
-    sudoRules: new Set(),       // users a sudo rule names (`sudo -l -U` then says they may run sudo)
+    gitSafe: new Map(),         // user → their `git config --global` safe.directory values
+    secretInput: null,          // what the stand-in terminal returns for the hidden read (null = there is no terminal)
+    secretPrompts: [],          // every prompt shown
+    sudoRules: new Set(),      // users a sudo rule names (`sudo -l -U` then says they may run sudo)
     nodeProblemText: null,      // a test sets this to make the node program look like one root must not run
     aclPrincipals: { orchestrate: 'daemon' },   // access-list names that exist only on the Mini are stood in for by a real user here
   };
@@ -68,10 +71,23 @@ export function fakeMac({ euid: as = 0, users = {}, admins = [] } = {}) {
       let st; try { st = lstatSync(at(p)); } catch { return false; }
       const o = mac.owners.get(p) ?? { uid: mac.rootUid, gid: 0 };
       const bits = write ? [0o200, 0o020, 0o002] : [0o400, 0o040, 0o004];
-      return Boolean(st.mode & (o.uid === uid ? bits[0] : o.gid === gid ? bits[1] : bits[2]));
+      if (st.mode & (o.uid === uid ? bits[0] : o.gid === gid ? bits[1] : bits[2])) return true;
+      // An access list entry for this user (the real `ls -le` shows it) lets a read through; it never lets a write through here
+      // (the setup only ever grants list/search/read), and the Mini's `orchestrate` is stood in for by a real user of this Mac.
+      if (write) return false;
+      const principal = mac.aclPrincipals[who] ?? who;
+      const shown = real('/bin/ls', ['-led', at(p)]).stdout;
+      return new RegExp(`^\\s+\\d+: user:${principal} allow .*\\blist\\b`, 'm').test(shown);
     };
     if (prog === '/bin/test' && rest[0] === '-w') return { status: can(rest[1], true) ? 0 : 1, stdout: '', stderr: '' };
     if (prog === '/bin/ls') return can(rest[0], false) ? { status: 0, stdout: '', stderr: '' } : { status: 1, stdout: '', stderr: `ls: ${rest[0]}: Permission denied` };
+    if (prog === '/usr/bin/git' && rest[0] === 'config' && rest[1] === '--global') {
+      // git's own answers: a key that is not set exits 1; an add with no value is a usage error (129).
+      const store = mac.gitSafe.get(who) ?? [];
+      if (rest[2] === '--get-all' && rest[3] === 'safe.directory') return store.length ? { status: 0, stdout: `${store.join('\n')}\n`, stderr: '' } : { status: 1, stdout: '', stderr: '' };
+      if (rest[2] === '--add' && rest[3] === 'safe.directory' && rest[4]) { mac.log.push(`git config --global --add safe.directory ${rest[4]} (as ${who})`); mac.gitSafe.set(who, [...store, rest[4]]); return { status: 0, stdout: '', stderr: '' }; }
+      return { status: 129, stdout: '', stderr: 'usage: git config [<options>]' };
+    }
     return { status: 127, stdout: '', stderr: `fake mac: ${prog} is not stood in for` };
   };
   const ports = (p) => ({
@@ -110,13 +126,14 @@ export function fakeMac({ euid: as = 0, users = {}, admins = [] } = {}) {
     prefix,
     lstat(p) {
       const st = lstatSync(at(p)); const o = mac.owners.get(p);
-      return { isDirectory: () => st.isDirectory(), isFile: () => st.isFile(), isSymbolicLink: () => st.isSymbolicLink(), mode: st.mode, ino: st.ino, dev: st.dev, uid: o ? o.uid : mac.rootUid, gid: o ? o.gid : 0 };
+      return { isDirectory: () => st.isDirectory(), isFile: () => st.isFile(), isSymbolicLink: () => st.isSymbolicLink(), mode: st.mode, size: st.size, ino: st.ino, dev: st.dev, uid: o ? o.uid : mac.rootUid, gid: o ? o.gid : 0 };
     },
     mkdir(p, mode) { mac.log.push(`mkdir ${p}`); mkdirSync(at(p), { mode }); mac.owners.set(p, { uid: mac.rootUid, gid: 0 }); },
     // The setup's one way to change an owner and mode: the real handle-based change, with chown stood in for (a test is not root).
     secure(p, want) { secureFolder(at(p), want, ports(p)); },
     secureFile(p, want) { secureFile(at(p), want, ports(p)); },
     nodeProblem: () => mac.nodeProblemText,
+    readSecret(prompt) { mac.secretPrompts.push(prompt); if (mac.secretInput === null) throw new Error('there is no terminal to type the token into; run this in the Terminal app'); return mac.secretInput; },
     // The install and the job files. The real calls, on the prefixed place; a write needs the parent folder (like the real one)
     // and makes a NEW file only (like the real one: it never overwrites or follows a link).
     readText: (p) => readFileSync(at(p), 'utf8'),

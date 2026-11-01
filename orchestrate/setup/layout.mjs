@@ -30,7 +30,7 @@ export const FORBIDDEN_UNDER = Object.freeze(['/Users', '/Applications', '/tmp',
 /** The checked config, or a thrown Error naming the first problem. */
 export function parseConfig(raw) {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('config: expected an object with base, owner and products');
-  const { base, owner, products = [] } = raw;
+  const { base, owner, products = [], proposalsParent } = raw;
   if (typeof base !== 'string' || !BASE.test(base) || base.split('/').some((s) => s === '..' || s === '.') || base.includes('//') || base.length > 200) {
     throw new Error('config: base must be a full path of letters, digits and . _ - / only, with no .. and no spaces');
   }
@@ -43,7 +43,33 @@ export function parseConfig(raw) {
   if (!Array.isArray(products) || products.length > 50 || products.some((p) => typeof p !== 'string' || !PRODUCT.test(p)) || new Set(products).size !== products.length) {
     throw new Error('config: products must be a list of distinct names (lowercase letters, digits, dashes)');
   }
-  return { base: b, owner, products: [...products] };
+  if (proposalsParent !== undefined && (typeof proposalsParent !== 'string' || !BASE.test(proposalsParent) || proposalsParent.split('/').some((x) => x === '..' || x === '.') || proposalsParent.includes('//') || proposalsParent.endsWith('/') || proposalsParent.split('/').length < 3 || proposalsParent.length > 200)) {
+    throw new Error('config: proposalsParent must be a full path of letters, digits and . _ - / only, in a folder of its own, with no .. and no spaces');
+  }
+  return { base: b, owner, products: [...products], ...(proposalsParent !== undefined ? { proposalsParent } : {}) };
+}
+
+/** Where the proposals folders live (R-0b-128, runbook A7; "a proposal for the owner's OK" until they OK it): one folder per product under this parent. */
+export const DEFAULT_PROPOSALS_PARENT = '/Users/Shared/orchestrate-proposals';
+export const proposalsParentOf = (cfg) => cfg.proposalsParent ?? DEFAULT_PROPOSALS_PARENT;
+/** The folder the owner writes review-again taps into (runner setting `ownerTaps`, runbook A6). */
+export const ownerTapsPath = (cfg) => join(cfg.base, 'owner-taps');
+/** The Do-plane git mirror; the owner's git is told to trust exactly this path (R-0b-05 done_when, safe.directory). */
+export const mirrorPath = (cfg) => join(cfg.base, 'mirror');
+
+/**
+ * The proposals folders (R-0b-128, L76 (3)). The parent is root's, 0711 (traverse only): nobody else can rename, remove or
+ * list it, and root makes it, so no user can have planted it. Each product's folder is the owner's, 0700: only the owner
+ * reads and writes; `orchestrate` reads through the ONE access-list entry (list/search/read, inherited) and cannot write;
+ * `review` and everyone else get nothing. A group would not do: the owner's own group (staff) holds every ordinary user of
+ * the Mac, so the access list is what gives exactly one extra reader.
+ */
+export function proposalRows(cfg) {
+  const parent = proposalsParentOf(cfg);
+  return [
+    { path: parent, owner: 'root', mode: 0o711, why: 'the proposals parent: root\'s, traverse only', acl: [] },
+    ...cfg.products.map((prod) => ({ path: join(parent, prod), owner: 'owner', mode: 0o700, why: `${prod}: proposals (only the owner writes; orchestrate reads)`, acl: [ORCHESTRATE_READ_ACL] })),
+  ];
 }
 
 /** Where a user's home folder is (also what its Mac record names). */
@@ -81,7 +107,8 @@ export function folderTable(cfg) {
     [p('launcher'), 'orchestrate', 0o755, 'the launcher'],
     [p('frontdoor'), 'orchestrate', 0o755, 'the Front Door\'s start folder'],
     [p('lead-main'), 'orchestrate', 0o755, 'the Lead\'s read-only copy of main'],
-    [p('mirror'), 'orchestrate', 0o755, 'the Do-plane git mirror'],
+    [mirrorPath(cfg), 'orchestrate', 0o755, 'the Do-plane git mirror'],
+    [ownerTapsPath(cfg), 'owner', 0o755, 'the owner\'s review-again taps (runner setting ownerTaps): the owner writes, others only read, no access list'],
     [p('bob'), 'orchestrate', 0o755, 'Bob method copies'],
     [p('global-rules'), 'orchestrate', 0o755, 'plain-text copy of the global rules'],
     [p('claude-code'), 'orchestrate', 0o755, 'the roles\' pinned Claude Code copies'],

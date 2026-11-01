@@ -186,10 +186,10 @@ function aclOp(io, row) {
 }
 
 /** Folders: { ops, problems }, given the ids from planUsers. New folders first (parents first), then owners and modes deepest first. */
-export function planFolders(io, cfg, ids) {
+export function planFolders(io, cfg, ids, rows = folderTable(cfg)) {
   const problems = []; const made = new Map();
   const makes = []; const fixes = [];
-  for (const row of folderTable(cfg)) {
+  for (const row of rows) {
     const want = ownerIds(io, ids, row.owner);
     if (!want) { problems.push(`${row.path}: no id for ${row.owner}, so its owner can't be set`); continue; }
     let st = null;
@@ -278,7 +278,13 @@ export function check(io, cfg) {
   }
   const above = baseChainProblem(io, cfg);
   item(above === null, `folders above ${cfg.base} are root's alone, no links, no access lists`, above);
-  for (const row of folderTable(cfg)) {
+  folderChecks(io, folderTable(cfg), ids, item);
+  return out;
+}
+
+/** The owner, group, mode and exact access list of each row's folder → item(ok, what, why). Read only. */
+export function folderChecks(io, rows, ids, item) {
+  for (const row of rows) {
     const what = `${row.path} (${row.owner}, ${modeText(row.mode)})`;
     let st; try { st = io.lstat(row.path); } catch { item(false, what, 'missing'); continue; }
     if (st.isSymbolicLink()) { item(false, what, 'is a link'); continue; }
@@ -301,5 +307,4 @@ export function check(io, cfg) {
     }
     item(why.length === 0, what, why.join('; '));
   }
-  return out;
 }

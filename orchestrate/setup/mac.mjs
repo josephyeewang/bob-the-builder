@@ -17,7 +17,7 @@
 // swap a child for a link between the plan and the change. Every change opens the folder itself (O_NOFOLLOW, folder
 // only), checks it is the very folder the plan saw, and changes it through that handle.
 
-import { closeSync, constants, cpSync, fchmodSync, fchownSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, readlinkSync, realpathSync, rmSync, writeSync } from 'node:fs';
+import { closeSync, constants, cpSync, fchmodSync, fchownSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, readlinkSync, realpathSync, rmSync, writeSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
 import { chainProblem } from '../modules/M4-workshop/launcher/install-check.mjs';
@@ -65,6 +65,31 @@ export function writeNewFile(real, data, mode) {
 }
 
 /** Why root should not run the node program that is running now, or null: its file, and every folder above it, must be root's alone (L90 m4). */
+/**
+ * One line typed at the terminal itself (/dev/tty, so a pipe or a log cannot stand in for it) with the echo off. The text is
+ * returned and nothing else ever holds it: it is not printed, and no program is given it. Echo is turned back on whatever
+ * happens. Refuses (nothing read) if there is no terminal or the echo cannot be turned off.
+ */
+export function readSecretFromTty(prompt, { maxBytes = 1024 } = {}) {
+  let fd;
+  try { fd = openSync('/dev/tty', 'r+'); } catch { throw new Error('there is no terminal to type the token into; run this in the Terminal app'); }
+  try {
+    const stty = (arg) => spawnSync('/bin/stty', [arg], { stdio: [fd, 'ignore', 'ignore'] });
+    writeSync(fd, prompt);
+    if (stty('-echo').status !== 0) throw new Error('the terminal\'s echo could not be turned off, so nothing was read');
+    const bytes = []; const one = Buffer.alloc(1);
+    try {
+      for (;;) {
+        if (readSync(fd, one, 0, 1, null) !== 1) break;
+        if (one[0] === 10 || one[0] === 13) break;
+        if (bytes.length >= maxBytes) throw new Error('that is far longer than a token; nothing was saved');
+        bytes.push(one[0]);
+      }
+    } finally { stty('echo'); writeSync(fd, '\n'); }
+    return Buffer.from(bytes).toString('utf8');
+  } finally { closeSync(fd); }
+}
+
 export function nodeProblemOf(execPath, { rootUid = 0, top = '/', lstat = lstatSync, realpath = realpathSync } = {}) {
   let real; try { real = realpath(execPath); } catch { return `could not find the real place of ${execPath}`; }
   const st = (() => { try { return lstat(real); } catch { return null; } })();
@@ -91,6 +116,7 @@ export function realIo({ prefix = '' } = {}) {
     secure: (p, want) => secureFolder(at(p), want),
     secureFile: (p, want) => secureFile(at(p), want),
     nodeProblem: () => nodeProblemOf(process.execPath),
+    readSecret: (prompt) => readSecretFromTty(prompt),
     // For the install and the job files. `src` is a real path outside the prefix (a file of this repository, the node program).
     readText: (p) => readFileSync(at(p), 'utf8'),
     write: (p, text, mode) => writeNewFile(at(p), text, mode),
