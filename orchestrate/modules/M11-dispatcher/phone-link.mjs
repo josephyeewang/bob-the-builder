@@ -115,7 +115,8 @@ export async function phoneLinkStep({ rec, rules, now, send, restartFrontDoor, s
     const r = await startMinibase();
     st.minibase_started_at = iso(now);
     done.push(r?.ok ? 'Mini Base started' : 'Mini Base start failed');
-    if (!r?.ok) alert(`Mini Base is not running and did not start: ${r?.reason ?? 'no answer'}`);
+    // A notice only: the start is tried again after RETRY_MS whatever the answer; a lost one is in the list (L130 m8).
+    if (!r?.ok && alert(`Mini Base is not running and did not start: ${r?.reason ?? 'no answer'}`) === false) done.push('not told: the alert could not be queued');
   }
 
   const fd = reading(rec, FACTS.reachable, now);
@@ -140,7 +141,8 @@ export async function phoneLinkStep({ rec, rules, now, send, restartFrontDoor, s
   if (st.refused_since && now - Date.parse(st.refused_since) >= stuckMs) {
     const r = await restartFrontDoor({ handoff: lastHandoff() });
     note(rec, 'phone-link-note', `the Front Door was unreachable and could not be reconnected for ${Math.round((now - Date.parse(st.refused_since)) / 60_000)} min; restarted under its fixed name`, { now });
-    if (!r?.ok) alert(`the Front Door could not be reconnected or restarted: ${r?.reason ?? 'no answer'}`);
+    // A notice only: a link still down is tried again; a lost one is in the list (L130 m9).
+    if (!r?.ok && alert(`the Front Door could not be reconnected or restarted: ${r?.reason ?? 'no answer'}`) === false) done.push('not told: the alert could not be queued');
     Object.assign(st, { refused_since: null, attempts: 0, failures: 0, last_try_at: iso(now), restarted_at: iso(now) });
     save();
     return [...done, r?.ok ? 'Front Door restarted' : 'Front Door restart failed'];

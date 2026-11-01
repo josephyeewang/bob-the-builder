@@ -13,10 +13,15 @@ const ports = (over = {}) => {
 const at = (min) => iso(T0 + min * MIN);
 const GREEN = { band: 'green', own_building: 'open', prodBlocked: false };
 // The Record's clock reads the pass's time, as the real one does: its writes in the pass are stamped then.
+// Alerts go through the real outbox and are delivered at the end of the pass, as the tick does (L130): `alerts` is
+// what was delivered, and a told mark is written only for those. A test that hands its own `alert` keeps it.
 const pass = async (rec, minutesLater, over, b = GREEN) => {
   const { alerts, p } = ports(over);
-  setClock(rec.base ?? rec, T0 + minutesLater * MIN);
-  return { moves: await timeLimits({ rec, rules: R, now: T0 + minutesLater * MIN, b, ...p }), alerts };
+  const now = T0 + minutesLater * MIN;
+  setClock(rec.base ?? rec, now);
+  if (over?.alert) return { moves: await timeLimits({ rec, rules: R, now, b, ...p }), alerts };
+  const moves = await withAlerts(rec.base ?? rec, now, (t) => { alerts.push(t); return true; }, (alert) => timeLimits({ rec, rules: R, now, b, ...p, alert }));
+  return { moves, alerts };
 };
 
 const HA = 'a'.repeat(40); // the head the gate judged
@@ -397,10 +402,26 @@ test('audit MAT-5: a merge request is held in red without merges, and for Tier-1
   const c = readyRec();
   assert.deepEqual(requestMerges({ alert: noAlert, rec: c, rules: R, now: T0, b: GREEN }), [['C-1', 'merge requested']]);
   const rev = c.read('card', 'C-1').rev;
-  const mr = c.read('merge_request', MERGE_REQUEST('C-1', HA, rev)).doc;
+  const mr = c.read('merge_request', MERGE_REQUEST('C-1', HA, 0)).doc;
   assert.deepEqual([mr.card, mr.pr, mr.session_id, mr.head, mr.rev], ['C-1', 7, 'S-9', HA, rev]);
-  assert.equal(c.meta('merge_request', MERGE_REQUEST('C-1', HA, rev)).createdBy, 'dispatcher');
+  assert.equal(c.meta('merge_request', MERGE_REQUEST('C-1', HA, 0)).createdBy, 'dispatcher');
   assert.deepEqual(requestMerges({ alert: noAlert, rec: c, rules: R, now: T0, b: GREEN }), []);
+});
+
+test('L129: an edit to the card at the same head makes no second request; a refusal the gate records does', () => {
+  const rec = readyRec();
+  assert.deepEqual(requestMerges({ alert: noAlert, rec, rules: R, now: T0, b: GREEN }), [['C-1', 'merge requested']]);
+  assert.ok(rec.read('merge_request', 'mr-C-1-' + HA.slice(0, 12) + '-r0'), 'the id names the head and the refusal count');
+  // An edit that is not a refusal: a new rev, the same head (the Dispatcher's own ask count).
+  const rev0 = rec.read('card', 'C-1').rev;
+  change(rec, 'card', 'C-1', { attempts: { merge_asks: 0 } });
+  assert.ok(rec.read('card', 'C-1').rev > rev0, 'the card has a new rev');
+  assert.deepEqual(requestMerges({ alert: noAlert, rec, rules: R, now: T0 + MIN, b: GREEN }), []);
+  assert.equal(requests(rec).length, 1, 'no second request for an edit');
+  change(rec, 'card', 'C-1', { attempts: { merge_asks: 0, merge_refusals: ['GitHub did not merge the judged head'] } });
+  assert.deepEqual(requestMerges({ alert: noAlert, rec, rules: R, now: T0 + 2 * MIN, b: GREEN }), [['C-1', 'merge requested again']]);
+  assert.ok(rec.read('merge_request', MERGE_REQUEST('C-1', HA, 1)));
+  assert.equal(requests(rec).length, 2);
 });
 
 test('L72: the session is the newest worker launch for the card, and the pull request the one Sensors reading at its head', () => {
@@ -448,9 +469,9 @@ test('audit 0b-6 r2 MAT-4 / MAT-6 / MIN-9: an undo is requested in red, unknown 
   assert.deepEqual(requestMerges({ alert: noAlert, rec, rules: R, now: T0, b: GREEN }), [['C-1', 'merge requested']]);
   change(rec, 'card', 'C-1', { attempts: { merge_refusals: ['stale'] } });
   assert.deepEqual(requestMerges({ alert: noAlert, rec, rules: R, now: T0 + MIN, b: GREEN }), [['C-1', 'merge requested again']]);
-  assert.ok(rec.read('merge_request', MERGE_REQUEST('C-1', HA, rec.read('card', 'C-1').rev)));
+  assert.ok(rec.read('merge_request', MERGE_REQUEST('C-1', HA, 1)));
   assert.equal(requests(rec).length, 2, 'the first request is kept as it was (create-only)');
-  assert.deepEqual(requestMerges({ alert: noAlert, rec, rules: R, now: T0 + 2 * MIN, b: GREEN }), [], 'once per rev');
+  assert.deepEqual(requestMerges({ alert: noAlert, rec, rules: R, now: T0 + 2 * MIN, b: GREEN }), [], 'once per refusal');
   // MIN-9: a card that names no head of its own is not requested.
   const nohead = readyRec({ head: undefined });
   assert.match(requestMerges({ alert: noAlert, rec: nohead, rules: R, now: T0, b: GREEN })[0][1], /names no head/);
@@ -609,4 +630,16 @@ test('L65: the runner\'s alerts are told to Joe once each; the same trouble at a
   assert.deepEqual(await run(failed, 7), ['review runner: Its last pass failed: the review folders: requests is a link.']);
   assert.deepEqual(await run(statusAlerts({ ok: false, error: 'the review folders: requests is a link' }), 8), []);
   assert.deepEqual(await run(statusAlerts({ ok: false, error: 'another cause' }), 9), ['review runner: Its last pass failed: another cause.']);
+});
+
+// Audit r5 N5: limits are read per product and per key; two limits of one product in one pass share no value.
+test('N5: an in_review card read first (15 min) does not lend its limit to a checking merge of the same product (30 min)', async () => {
+  const rec = recWith([['product', 'p1', { state: 'active' }],
+    ['card', 'C-2', { state: 'in_review', head: HA, tier: 2, product: 'p1', changed_at: at(0) }],
+    ['card', 'C-1', { state: 'merging', head: HA, product: 'p1' }],
+    ['merge', 'M-1', { card: 'C-1', pr: 7, state: 'checking', judged_head: HA, changed_at: at(0) }]]);
+  const rules = rulesWith();
+  assert.ok(rules.get(K.inReviewNoReviewerMin, { product: 'p1' }) < 20 && rules.get(K.checkingMaxMin, { product: 'p1' }) > 20, 'the two limits sit either side of 20 min');
+  await pass(rec, 20);
+  assert.equal(rec.read('merge', 'M-1').doc.state, 'checking', '20 min is under checking_max_min (30)');
 });

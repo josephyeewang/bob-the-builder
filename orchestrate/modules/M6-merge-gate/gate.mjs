@@ -26,7 +26,7 @@ import { MARK_CONTEXT, markDescription, markable, NEEDS_JOE_CONTEXT, needsJoeDes
 import { isOpen } from '../../shared/record.mjs';
 import { markReverted } from './undo.mjs';
 import { factFrom } from '../M9-record/permissions.mjs';
-import { settleMerge, openTooLong, prReading, prReadingAfter, MERGED_OUTSIDE } from './merge-outcome.mjs';
+import { settleMerge, openTooLong, prReading, prReadingAfter, MERGED_OUTSIDE, MERGED_OUTSIDE_UNTOLD, alertTaken } from './merge-outcome.mjs';
 import { KEYS, minutes } from '../M11-dispatcher/keys.mjs';
 
 export const ACTOR = 'merge_gate';
@@ -303,8 +303,9 @@ export async function gatePass(ctx) {
         return finish(fresh('merge', m.id), pr.merge_commit_sha);
       }
       if (pr.merged === true) {
-        alert({ type: 'merge_gate_unsure', merge: m.id, note: `pull request #${pr.number} merged at ${short(pr.head?.sha)}, not the judged ${short(m.doc.judged_head)}` });
-        move(m, 'refused', { reasons: [MERGED_OUTSIDE] });
+        // MERGED_OUTSIDE says the owner was told, so it is written only when the alert was taken (L130 M6).
+        const said = alertTaken(alert, { type: 'merge_gate_unsure', merge: m.id, note: `pull request #${pr.number} merged at ${short(pr.head?.sha)}, not the judged ${short(m.doc.judged_head)}` });
+        move(m, 'refused', { reasons: [said ? MERGED_OUTSIDE : MERGED_OUTSIDE_UNTOLD] });
         putBack(m, 'verified');
         return;
       }

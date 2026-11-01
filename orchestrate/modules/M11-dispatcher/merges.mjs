@@ -15,12 +15,13 @@
 // not this file's.
 
 import { KEYS, minutes, MissingKey, missingFor } from './keys.mjs';
-import { move, waitOn, note, ageMs } from './moves.mjs';
+import { move, ageMs } from './moves.mjs';
+import { waitOnJoe } from './joe-waits.mjs';
 import { startGate } from './gate.mjs';
 import { rolesFor } from '../M4-workshop/launcher/review-runner.mjs';
 import { relayReviewAlerts } from './review-requests.mjs';
-import { settleMerge, reconcileMerge, prReadingAfter, openTooLong as tooLongOpen, PR_FACT, MERGED_OUTSIDE, refusedTwice } from '../M6-merge-gate/merge-outcome.mjs';
-import { textAlerts } from './alerts.mjs';
+import { settleMerge, reconcileMerge, prReadingAfter, openTooLong as tooLongOpen, PR_FACT, MERGED_OUTSIDE, MERGED_OUTSIDE_UNTOLD, refusedTwice } from '../M6-merge-gate/merge-outcome.mjs';
+import { textAlerts, tellThen, alertText, heldAlerts } from './alerts.mjs';
 import { sensorsFact as fromSensors } from './sensor-facts.mjs';
 
 // The pull request reading and the open-too-long clock are M6's, shared with the gate's own recover() (L94).
@@ -31,6 +32,9 @@ export const UNREAD_FACT = (mergeId) => `merge-unread-${mergeId}`;
 /** The note that Joe was told a repeat refusal could not be put on him (L116 M-1), once per card per refusal count. */
 export const ASK_REFUSED_FACT = (cardId, refusals) => `merge-ask-refused-${cardId}-${refusals}`;
 const iso = (ms) => new Date(ms).toISOString();
+// A told note's fields (the shape moves.mjs note() writes), as the mark of the alert it records: the one way this file
+// says the owner was told is tellThen, so the note is written only once the alert is delivered (L127; sendAlerts).
+const noted = (text, now) => ({ text, at: iso(now) });
 
 const fresh = (rec, prNumber, mergeId) => prReadingAfter(rec, prNumber, mergeId);
 const LANDED = ['checking', 'merging', 'merged', 'audited_ok', 'audit_flagged'];
@@ -94,7 +98,7 @@ export async function timeLimits({ rec, rules, now, b, running = [], gateAlive, 
     // A count that drives a decision lives in the card's attempts, the Dispatcher's own key (L74).
     const fails = doc.attempts?.reviewer_starts ?? 0;
     if (fails >= 2) {
-      if (waitOn(rec, id, { who: 'joe', what: 'no reviewer could be asked for', now }).ok) { alert(`card ${id}: no reviewer could be asked for twice`); done.push([id, 'in_review->waiting']); }
+      if (waitOnJoe(rec, id, { what: 'no reviewer could be asked for', now, alert, text: `card ${id}: no reviewer could be asked for twice` }).ok) done.push([id, 'in_review->waiting']);
       continue;
     }
     const g = startGate({ rules, rec, card: { id, ...doc }, kind: 'review', product: doc.product, b, running });
@@ -140,8 +144,10 @@ export async function timeLimits({ rec, rules, now, b, running = [], gateAlive, 
         if (lim.none) { done.push([id, `waiting for a fresh PR reading; ${lim.none}`]); continue; }
         const since = (ms) => (Number.isFinite(ms) ? `${Math.round(ms / 60_000)} min` : 'longer than the merging limit');
         if (tooLongOpen(rec, id, now, lim.ms) && !rec.read('fact', UNREAD_FACT(id))) {
-          alert(`merge ${id}: the Merge Gate stopped mid-merge and PR ${doc.pr} has had no fresh reading for ${since(ageMs(rec, 'merge', id, now, { since: 'write' }))}; it stays merging until the Sensors read the PR (check that they are running)`);
-          note(rec, UNREAD_FACT(id), `merge ${id}: no fresh reading of PR ${doc.pr} past the merging limit; the owner was told`, { now });
+          // The note is the alert's mark, written once it is delivered (L127): a queue that refused it is retried next pass.
+          const say = `merge ${id}: the Merge Gate stopped mid-merge and PR ${doc.pr} has had no fresh reading for ${since(ageMs(rec, 'merge', id, now, { since: 'write' }))}; it stays merging until the Sensors read the PR (check that they are running)`;
+          const why = `merge ${id}: no fresh reading of PR ${doc.pr} past the merging limit; the owner was told`;
+          tellThen(alert, say, { fact: UNREAD_FACT(id), fields: noted(why, now), kind: 'note' });
         }
         done.push([id, 'waiting for a fresh PR reading']); continue;
       }
@@ -157,7 +163,8 @@ export async function timeLimits({ rec, rules, now, b, running = [], gateAlive, 
       const openTooLong = !final && tooLongOpen(rec, id, now, openMs);
       if (!final && !openTooLong) { done.push([id, 'merge outcome not known yet: the PR is still open']); continue; }
       const r = settleMerge({ record: rec, alert: textAlerts(alert), now }, id, { pr, reason: 'interrupted', openTooLong });
-      if (openTooLong && r.ok && r.outcome === 'refused') alert(`merge ${id}: the Merge Gate stopped mid-merge and PR ${doc.pr} is still open after ${Math.round(openMs / 60_000)} min; recorded as interrupted, and the card goes back to be merged again`);
+      // A notice only: the card goes back to be merged again whatever the answer; a lost one is in the list (L130 m3).
+      if (openTooLong && r.ok && r.outcome === 'refused' && alert(`merge ${id}: the Merge Gate stopped mid-merge and PR ${doc.pr} is still open after ${Math.round(openMs / 60_000)} min; recorded as interrupted, and the card goes back to be merged again`) === false) done.push([id, 'not told: the alert could not be queued']);
       done.push(...settled(rec, id, r, { now, alert }));
     } else if (doc.state === 'refused' && !(doc.reasons ?? []).includes(MERGED_OUTSIDE) && !rec.read('fact', RECONCILED_FACT(id)) && !landedElsewhere(rec, id, doc)) {
       // A refused merge whose PR GitHub later shows merged, by a reading after the refusal. An interrupted one goes to
@@ -165,17 +172,25 @@ export async function timeLimits({ rec, rules, now, b, running = [], gateAlive, 
       // a reconcile that can't be made, stays refused and the owner is told once (L94 point 3: no refusal wording is
       // silent); the note keeps it from being told again. Skipped when another merge of the same PR is under way or
       // merged: that merge is the PR's record, so this one is neither reconciled nor told (the PR is merged once).
-      const pr = fresh(rec, doc.pr, id);
+      // MERGED_OUTSIDE_UNTOLD was written on a merged answer whose alert was not taken (L130 M6): it needs no newer reading.
+      const untold = (doc.reasons ?? []).includes(MERGED_OUTSIDE_UNTOLD);
+      const pr = untold ? { merged: true } : fresh(rec, doc.pr, id);
       if (pr?.merged === true) {
+        let text = untold
+          ? `merge ${id}: PR ${doc.pr} merged outside the gate, at a head the gate did not judge; check the card and its audit`
+          : `merge ${id} was refused (${(doc.reasons ?? []).join('; ') || 'no reason given'}) but PR ${doc.pr} shows merged; check the card and its audit`;
         if ((doc.reasons ?? []).includes('interrupted')) {
-          const r = reconcileMerge({ record: rec, alert: textAlerts(alert), now }, id, { pr, factId: PR_FACT(doc.pr) });
-          if (r.ok) { done.push([id, 'interrupted, then merged: reconciled']); if (r.card) done.push([r.card, '->merged']); continue; }
-          if (!r.told) alert(`merge ${id} was recorded as interrupted but PR ${doc.pr} shows merged, and it could not be recorded merged (${r.reason}); check the card and its audit`);
-        } else {
-          alert(`merge ${id} was refused (${(doc.reasons ?? []).join('; ') || 'no reason given'}) but PR ${doc.pr} shows merged; check the card and its audit`);
+          // M6's alerts are held until its answer is known (L127): a reconcile made sends them as they are; one not made
+          // sends them as the one told alert, with this file's own line when M6 did not say why itself.
+          const said = [];
+          const r = reconcileMerge({ record: rec, alert: heldAlerts(said), now }, id, { pr, factId: PR_FACT(doc.pr) });
+          if (r.ok) { for (const e of said) textAlerts(alert)(e); done.push([id, 'interrupted, then merged: reconciled']); if (r.card) done.push([r.card, '->merged']); continue; }
+          const own = r.told ? [] : [`merge ${id} was recorded as interrupted but PR ${doc.pr} shows merged, and it could not be recorded merged (${r.reason}); check the card and its audit`];
+          text = [...said.map((e) => alertText(e)), ...own].join('; ');
         }
-        note(rec, RECONCILED_FACT(id), `merge ${id} was recorded as refused but PR ${doc.pr} shows merged; the owner was told`, { now });
-        done.push([id, 'refused but merged: told']);
+        const why = `merge ${id} was recorded as refused but PR ${doc.pr} shows merged; the owner was told`;
+        const said = tellThen(alert, text, { fact: RECONCILED_FACT(id), fields: noted(why, now), kind: 'note' }) !== false;
+        done.push([id, said ? 'refused but merged: told' : 'refused but merged: not told yet, asked again next pass']);
       }
     }
   }
@@ -203,17 +218,16 @@ function askOnRepeat(rec, id, { now, alert, pr }) {
   const why = card?.doc ? refusedTwice(card.doc) : null;
   if (!why) return null;
   const n = card.doc.attempts.merge_refusals.length;
-  const w = waitOn(rec, id, { who: 'joe', what: `merge refused twice: ${why}`, now, link: pr != null ? `PR ${pr}` : undefined,
-    attempts: { merge_asks: n } });
+  const w = waitOnJoe(rec, id, { what: `merge refused twice: ${why}`, now, link: pr != null ? `PR ${pr}` : undefined,
+    attempts: { merge_asks: n }, alert, text: `card ${id}: the merge was refused twice for the same reason (${why})` });
   if (!w.ok) {
     const told = ASK_REFUSED_FACT(id, n);
     if (!rec.read('fact', told)) {
-      alert(`card ${id}: the merge was refused twice for the same reason (${why}), but the card could not be put on you to decide (${w.reason}); it is not merged or asked for again until you look at it`);
-      note(rec, told, `card ${id}: the ask after ${n} refusals was refused (${w.reason}); the owner was told`, { now });
+      const say = `card ${id}: the merge was refused twice for the same reason (${why}), but the card could not be put on you to decide (${w.reason}); it is not merged or asked for again until you look at it`;
+      tellThen(alert, say, { fact: ASK_REFUSED_FACT(id, n), fields: noted(`card ${id}: the ask after ${n} refusals was refused (${w.reason}); the owner was told`, now), kind: 'note' });
     }
     return [id, `not sent to joe: ${w.reason}`];
   }
-  alert(`card ${id}: the merge was refused twice for the same reason (${why})`);
   return [id, 'waiting on joe'];
 }
 
@@ -229,8 +243,10 @@ function settled(rec, id, r, { now, alert }) {
   return out;
 }
 
-// One record per request, never changed (L74: merge_request is create-only): a new rev of the card is a new request.
-export const MERGE_REQUEST = (card, head, rev) => `mr-${card}-${String(head).slice(0, 12)}-${rev}`;
+// One record per request, never changed (L74: merge_request is create-only). The id is the card, its head and how many
+// refusals the gate has recorded (L129): a refusal is a new request, an edit to the card at the same head is not.
+// The gate reads the id only as a key (its own merge names it; gather reads it back by id).
+export const MERGE_REQUEST = (card, head, refusals) => `mr-${card}-${String(head).slice(0, 12)}-r${refusals}`;
 const READY_TO_MERGE = ['verified', 'approved'];
 
 // The worker session that made the card's work: its newest worker launch (the Dispatcher's own launch records).
@@ -269,6 +285,8 @@ export function requestMerges({ rec, rules, now, b, running = [], startsHeld = n
     if (refusedTwice(doc)) {
       const pr = doc.head ? prOf(rec, doc.head) : null;
       const asked = askOnRepeat(rec, id, { now, alert, pr: typeof pr === 'number' ? pr : null });
+      // askOnRepeat re-reads the card, and the gate is another process: a newer, different refusal recorded since
+      // this list was read leaves nothing to ask, and `asked` is null (audit r5 P-F, merges-ask.test.mjs).
       if (asked) done.push(asked);
       continue;
     }
@@ -280,7 +298,7 @@ export function requestMerges({ rec, rules, now, b, running = [], startsHeld = n
       done.push([id, pr?.many ? `not ready: ${pr.many} pull requests show head ${doc.head.slice(0, 7)}` : 'not ready: needs a pull request and its session']);
       continue;
     }
-    const mid = MERGE_REQUEST(id, doc.head, rev);
+    const mid = MERGE_REQUEST(id, doc.head, (doc.attempts?.merge_refusals ?? []).length);
     if (rec.read('merge_request', mid)) continue;
     const again = rec.list('merge_request').some((q) => q.doc?.card === id);
     // An undo is never held by the band (audit 0b-6 r2 MAT-4, L31): it is the way out of a bad change.

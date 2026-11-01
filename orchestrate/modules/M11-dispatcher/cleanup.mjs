@@ -219,8 +219,9 @@ export async function cleanupCopy({ rec, rules, now, card, copiesRoot, sealRoot,
   } finally { rmSync(staging, { recursive: true, force: true }); }
   const d = rules.may('delete_copy', { card, copy, reasons });
   if (d.decision === 'deny') {
-    alert(`card ${card}: its copy could not be proven safe to delete and the rules refuse to ask (${d.reason}); it is kept`);
-    return done('kept', [...reasons, `rules: ${d.reason}`]);
+    // A notice only: the copy is kept either way and the next cleanup asks again; a lost one is in the reasons (L130 m10).
+    const said = alert(`card ${card}: its copy could not be proven safe to delete and the rules refuse to ask (${d.reason}); it is kept`) !== false;
+    return done('kept', [...reasons, `rules: ${d.reason}`, ...(said ? [] : ['not told: the alert could not be queued'])]);
   }
   // Even an "allow" is never a delete here: an unproven copy is only deleted on Joe's answer. The ask is M2's (only
   // approvals writes asks, L74): a yes/no tap, Yes = delete. An ask already closed for this card is asked anew under

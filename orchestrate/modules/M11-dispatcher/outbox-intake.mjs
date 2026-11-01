@@ -17,6 +17,7 @@ import { readdirSync, lstatSync } from 'node:fs';
 import { join } from 'node:path';
 import { readOutboxFile, OUTBOX_NAME } from '../M4-workshop/launcher/outbox.mjs';
 import { DESIGN_PROFILES } from '../M4-workshop/launcher/role-profiles.mjs';
+import { tellThen, isQueued } from './alerts.mjs';
 
 export const READONLY_REQUESTS = Object.freeze({ think: 'reviewer', scout: 'scout', write: 'writer' });
 export const SETTLE_MS = 2000;
@@ -82,11 +83,16 @@ export async function intakePass({ rec, sessions, wait, alert, note, startReadon
       // copy may be handed in under the same name.
       // A `starting` claim (audit 0b-6 r2 MIN-7) is the same for a read-only start: it may have started, so it is never started twice.
       const what = prev.doc.state === 'starting' ? 'its read-only session may or may not have started, and was not started again' : 'it may or may not have reached the record, and was not applied again';
-      put({ ...prev.doc, sha256: prev.doc.sha256, state: 'interrupted', at: new Date(now).toISOString() }, 'outbox_interrupted');
-      alert(`the hand-in of ${name} from ${s.role} ${s.sessionId} was interrupted; ${what}`);
+      // Told until delivered (L130 M7): the text is kept on the fact, and a pass that sees it untold asks again.
+      const said = `the hand-in of ${name} from ${s.role} ${s.sessionId} was interrupted; ${what}`;
+      const w = put({ ...prev.doc, sha256: prev.doc.sha256, state: 'interrupted', at: new Date(now).toISOString(), alert_text: said }, 'outbox_interrupted');
+      if (w.ok) tellThen(alert, said, { fact: appliedId(s.sessionId, name), fields: { told_state: 'interrupted' }, kind: 'outbox_told' });
     }
     if (prev) {
       const was = prev.doc.state;
+      if (['refused', 'interrupted'].includes(was) && prev.doc.alert_text && prev.doc.told_state !== was && !isQueued(rec, key)) {
+        tellThen(alert, prev.doc.alert_text, { fact: appliedId(s.sessionId, name), fields: { told_state: was }, kind: 'outbox_told' });
+      }
       if (prev.doc.sha256 === hash && was !== 'waiting') { r.already = true; continue; }
       // A file that was never used (refused or interrupted) may be handed in again with new content.
       if (prev.doc.sha256 !== hash && !['refused', 'interrupted'].includes(was)) {
@@ -124,9 +130,16 @@ export async function intakePass({ rec, sessions, wait, alert, note, startReadon
     try { applied = rec.applyOutbox({ role: s.role, sessionId: s.sessionId, card: s.card }, path); }
     catch (e) { applied = { ok: false, reason: e.message }; }
     r.applied = applied.ok;
-    if (!applied.ok) { r.refused = applied.reason; alert(`the record refused ${name} from ${s.role} ${s.sessionId}: ${applied.reason}`); }
     // applied_at lets the Lead restart tell a hand-off written after WRAP from an older one (audit 0b-6 r2 MAT-3).
-    put({ state: applied.ok ? 'applied' : 'refused', applied_at: new Date(now).toISOString() }, 'outbox_applied');
+    // A refusal is recorded with its text first, then told until delivered (L130 M8).
+    const said = applied.ok ? null : `the record refused ${name} from ${s.role} ${s.sessionId}: ${applied.reason}`;
+    const done = put({ state: applied.ok ? 'applied' : 'refused', applied_at: new Date(now).toISOString(), ...(said ? { alert_text: said } : {}) }, 'outbox_applied');
+    if (!applied.ok) {
+      r.refused = applied.reason;
+      // A refusal the record would not keep has no fact to re-ask from, so it is told now either way.
+      if (done.ok) tellThen(alert, said, { fact: appliedId(s.sessionId, name), fields: { told_state: 'refused' }, kind: 'outbox_told' });
+      else alert(said);
+    }
   }
   return out;
 }

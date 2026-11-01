@@ -21,6 +21,7 @@ import { readMark } from './mark.mjs';
 import { readNeedsJoe } from './checker-entry.mjs';
 import { gatherFacts } from './gather.mjs';
 import { timeLimits } from '../M11-dispatcher/merges.mjs';
+import { MERGED_OUTSIDE, MERGED_OUTSIDE_UNTOLD } from './merge-outcome.mjs';
 
 const POLICY = 'tiers: {}\n';
 const CLEAN = { correct: 'clean', well_built: 'clean', works_for_user: 'clean', holds_up: 'clean' };
@@ -331,6 +332,37 @@ test('L110 m-6 (G14): a merge stopped in checking, its PR still open, is refused
   assert.equal(cardOf(w).state, 'verified');
   assert.equal(gatePuts(w), 0);
 });
+
+// L130 M5: recover() writes MERGED_OUTSIDE ("the owner was told") only when its alert was taken; an alert that answers
+// false, or throws, leaves MERGED_OUTSIDE_UNTOLD, which the Dispatcher tells (merges.mjs, alert-answer.test S3).
+for (const [name, answer, want] of [['taken', () => true, MERGED_OUTSIDE], ['not queued', () => false, MERGED_OUTSIDE_UNTOLD],
+  ['thrown', () => { throw new Error('queue gone'); }, MERGED_OUTSIDE_UNTOLD]]) {
+  test(`L130: a stopped checking merge GitHub shows merged at another head is refused; the alert ${name} -> ${want === MERGED_OUTSIDE ? 'told' : 'untold'}`, async () => {
+    const w = world(limited());
+    verifiedCard(w);
+    const base = w.ctx.record;
+    w.ctx.record = Object.create(base, { read: { value: (e, id) => {
+      if (e === 'card' && mergeOf(w)?.doc.state === 'checking') throw new Error('the gate process stopped');
+      return base.read(e, id);
+    } } });
+    await gatePass(w.ctx).catch(() => {});
+    w.ctx.record = base;
+    assert.equal(mergeOf(w).doc.state, 'checking');
+    // Merged on GitHub, outside the gate, at a head the gate never judged.
+    const pr = w.g.pulls.get(7);
+    Object.assign(pr, { head: w.g.commit([w.g.main], { 'src/a.mjs': 'three' }, { from: w.g.main }), state: 'closed', merged: true, merge_commit_sha: 'e'.repeat(40) });
+    let asked = 0;
+    w.ctx.alert = (a) => { asked += 1; w.alerts.push(a); return answer(); };
+    tick(w, 1);
+    await gatePass(w.ctx);
+    const m = mergeOf(w);
+    assert.equal(m.doc.state, 'refused');
+    assert.deepEqual(m.doc.reasons, [want]);
+    assert.equal(asked, 1);
+    assert.equal(cardOf(w).state, 'verified');
+    assert.equal(gatePuts(w), 0, 'the gate never merged it');
+  });
+}
 
 for (const status of [405, 409, 422]) {
   test(`L94: GitHub's explicit no (${status}) refuses at once, the card put back with the reason counted`, async () => {

@@ -176,9 +176,9 @@ test('L72 contract: merge request: a verified card with its PR and worker sessio
   const args = { rec: w.rec, rules: w.rules, now: w.env.clock.t, b: GREEN_BANDS, running: [], alert: (t) => assert.fail(`unexpected alert: ${t}`) };
   assert.deepEqual(requestMerges(args), [['C-1', 'merge requested']]);
   const { rev } = w.rec.read('card', 'C-1');
-  const q = w.rec.read('merge_request', MERGE_REQUEST('C-1', HEAD, rev));
+  const q = w.rec.read('merge_request', MERGE_REQUEST('C-1', HEAD, 0));
   assert.deepEqual([q.doc.card, q.doc.pr, q.doc.session_id, q.doc.head, q.doc.rev], ['C-1', 7, l.sessionId, HEAD, rev]);
-  assert.deepEqual(requestMerges(args), [], 'one request per head and rev');
+  assert.deepEqual(requestMerges(args), [], 'one request per head and refusal count');
   // The gate takes it (merge_gate), the check runs past its limit: M6's settleMerge writes the refusal as merge_gate and
   // puts the card back (L74 b3); the Dispatcher writes no merge outcome itself.
   must(w.rec.write({ actor: 'merge_gate', entity: 'merge', id: 'MG-1', expectRev: 0, doc: { state: 'requested', card: 'C-1', pr: 7, head: HEAD, product: PRODUCT } }), 'merge requested');
@@ -372,9 +372,11 @@ test('L116 M-1 contract: an approved card refused twice the same way, whose ask 
   gateRefuses(w, 'MG-2', '409');
   must(put(w.env.review, 'approvals', 'card', 'C-1', { state: 'approved' }), 'approved');
   const alerts = [];
-  const args = () => ({ rec: w.rec, rules: w.rules, now: w.env.clock.t, b: GREEN_BANDS, running: [], alert: (t) => alerts.push(t) });
+  // As the tick runs it: queued, then delivered, and the told note written only then (L130).
+  const run = () => withAlerts(w.rec, w.env.clock.t, (t) => { alerts.push(t); return true; },
+    (alert) => requestMerges({ rec: w.rec, rules: w.rules, now: w.env.clock.t, b: GREEN_BANDS, running: [], alert }));
   // M9 has no approved → waiting yet (lane 1 adds it in #79 r2; this test then asserts waiting on joe instead).
-  const first = requestMerges(args());
+  const first = await run();
   assert.equal(first.length, 1);
   assert.match(first[0][1], /^not sent to joe: .*approved/);
   assert.equal(alerts.length, 1);
@@ -383,12 +385,12 @@ test('L116 M-1 contract: an approved card refused twice the same way, whose ask 
   assert.equal(w.rec.read('card', 'C-1').doc.state, 'approved');
   assert.equal(w.rec.list('merge_request').length, 0, 'not requested again');
   w.env.clock.t += MIN;
-  assert.match(requestMerges(args())[0][1], /^not sent to joe/);
+  assert.match((await run())[0][1], /^not sent to joe/);
   assert.equal(alerts.length, 1, 'not told again');
   // A new refusal is a new count: Joe is told again (the told-once note is per card and refusal count).
   gateRefuses(w, 'MG-3', '409');
   must(put(w.env.review, 'approvals', 'card', 'C-1', { state: 'approved' }), 'approved again');
-  assert.match(requestMerges(args())[0][1], /^not sent to joe/);
+  assert.match((await run())[0][1], /^not sent to joe/);
   assert.equal(alerts.length, 2);
   assert.ok(w.rec.read('fact', ASK_REFUSED_FACT('C-1', 3)));
 });

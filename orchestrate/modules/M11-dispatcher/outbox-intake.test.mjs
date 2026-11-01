@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { writeFileSync, symlinkSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { intakePass, kindsFor } from './outbox-intake.mjs';
-import { change, recWith } from './fixtures.test-helper.mjs';
+import { change, recWith, withAlerts } from './fixtures.test-helper.mjs';
 import { tempDir } from '../../shared/test-tmp.mjs';
 
 const UID = process.getuid();
@@ -169,17 +169,59 @@ test('audit MAT-7: a claim left at applying becomes interrupted with one alert, 
   const sha = createHash('sha256').update('done').digest('hex');
   const rec = recWith([['fact', 'intake-applied-S-1-report-C-1.md', { session: 'S-1', name: 'report-C-1.md', sha256: sha, state: 'applying' }]]);
   const sessions = [{ sessionId: 'S-1', role: 'worker', outbox: ob, uid: UID, card: 'C-1' }];
-  const out = await intakePass({ rec, sessions, ...w.ports });
+  // As the tick runs it: queued, then delivered, and marked told only then (L130 M7).
+  const run = () => withAlerts(rec, Date.now(), (t) => { w.calls.alerts.push(t); return true; }, (alert) => intakePass({ rec, sessions, ...w.ports, alert }));
+  const out = await run();
   assert.equal(out[0].already, true);
   assert.notEqual(out[0].applied, true);
   assert.equal(rec.read('fact', 'intake-applied-S-1-report-C-1.md').doc.state, 'interrupted');
   assert.equal(w.calls.alerts.length, 1);
   assert.match(w.calls.alerts[0], /interrupted/);
   assert.equal(rec.diary().filter((l) => l.kind === 'outbox').length, 0);
-  await intakePass({ rec, sessions, ...w.ports });
+  await run();
   assert.equal(w.calls.alerts.length, 1);
   assert.equal(rec.diary().filter((l) => l.kind === 'outbox').length, 0);
   assert.equal(leadInFlight({ rec, sessionId: 'S-1', outboxNames: ['report-C-1.md'], questionOpen: false }), null);
+});
+
+// L130: an alert the queue did not take (answer false) writes no told_state; the next pass tells it once.
+test('L130: an interrupted claim whose alert was not queued is told on the next pass, once', async () => {
+  const { createHash } = await import('node:crypto');
+  const w = world();
+  const ob = mk(join(w.root, 'worker'));
+  writeFileSync(join(ob, 'report-C-1.md'), 'done');
+  const sha = createHash('sha256').update('done').digest('hex');
+  const rec = recWith([['fact', 'intake-applied-S-1-report-C-1.md', { session: 'S-1', name: 'report-C-1.md', sha256: sha, state: 'applying' }]]);
+  const sessions = [{ sessionId: 'S-1', role: 'worker', outbox: ob, uid: UID, card: 'C-1' }];
+  const run = () => withAlerts(rec, Date.now(), (t) => { w.calls.alerts.push(t); return true; }, (alert) => intakePass({ rec, sessions, ...w.ports, alert }));
+  await intakePass({ rec, sessions, ...w.ports, alert: () => false });
+  const f = () => rec.read('fact', 'intake-applied-S-1-report-C-1.md').doc;
+  assert.equal(f().state, 'interrupted');
+  assert.equal(f().told_state, undefined, 'not marked told');
+  await run();
+  assert.equal(w.calls.alerts.length, 1);
+  assert.match(w.calls.alerts[0], /interrupted/);
+  assert.equal(f().told_state, 'interrupted');
+  await run();
+  assert.equal(w.calls.alerts.length, 1, 'told once');
+});
+
+test('L130: a file the record refused, whose alert was not queued, is told on the next pass, once', async () => {
+  const w = world();
+  const ob = mk(join(w.root, 'worker'));
+  const sessions = [{ sessionId: 'S-1', role: 'worker', outbox: ob, uid: UID, card: 'C-1' }];
+  writeFileSync(join(ob, 'report-C-1.md'), 'done');
+  // The record refusing the hand-in, as it does a transition the role may not make.
+  const rec = Object.create(recWith(), { applyOutbox: { value: () => ({ ok: false, reason: 'not a hand-in this role may make' }) } });
+  const run = () => withAlerts(rec, Date.now(), (t) => { w.calls.alerts.push(t); return true; }, (alert) => intakePass({ rec, sessions, ...w.ports, alert }));
+  assert.equal((await intakePass({ rec, sessions, ...w.ports, alert: () => false }))[0].refused, 'not a hand-in this role may make');
+  const f = () => rec.read('fact', 'intake-applied-S-1-report-C-1.md').doc;
+  assert.equal(f().told_state, undefined, 'not marked told');
+  await run();
+  assert.equal(w.calls.alerts.length, 1, w.calls.alerts.join(' | '));
+  assert.equal(f().told_state, 'refused');
+  await run();
+  assert.equal(w.calls.alerts.length, 1, 'told once');
 });
 
 test("audit MIN-20 (I6): a worker's think file starts no read-only session", async () => {

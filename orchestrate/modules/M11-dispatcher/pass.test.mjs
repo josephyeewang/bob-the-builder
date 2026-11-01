@@ -1,9 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
-import { dispatcherPass as dispatcherPass0, stopPass as stopPass0, undoStarts, stopProcessGroup, STOP_FACT, LIMIT_FACT, LIMIT_NO_ACCOUNT, UNDO_HELD_FACT, PAUSE_FACT, RULES_MISSING_FACT, rulesMissingAlert as rulesMissingAlert0 } from './pass.mjs';
+import { dispatcherPass as dispatcherPass0, stopPass as stopPass0, undoStarts, stopProcessGroup, STOP_FACT, UNSAVED_FACT, LIMIT_FACT, LIMIT_NO_ACCOUNT, UNDO_HELD_FACT, PAUSE_FACT, RULES_MISSING_FACT, rulesMissingAlert as rulesMissingAlert0 } from './pass.mjs';
 import { USAGE_FACT, BAND_FACT } from './usage.mjs';
 import { OUTAGE_FACT } from './outage.mjs';
+import { retellWaits, WAIT_TELL_FACT } from './joe-waits.mjs';
 import { KEYS as K } from './keys.mjs';
 import { change, rulesWith, recWith, seed, usageFact, undoEntries, filesOfCommits, T0, MIN, H, iso, withAlerts } from './fixtures.test-helper.mjs';
 
@@ -447,6 +448,43 @@ test('M7: a stop that fails alerts and leaves the card as it was; a failed save 
   await dispatcherPass({ ...base, now: T0 + 2 * MIN, stopGroup: async () => ({ ok: true, how: 'SIGTERM' }), saveWork: async () => ({ ok: false, reason: 'disk full' }), alert: (x) => alerts.push(x) });
   assert.match(alerts[1], /not saved: disk full/);
   assert.equal(w.rec.read('fact', STOP_FACT(sid)).doc.state, 'done');
+});
+
+// L130 M9: work not saved, whose alert the queue did not take, is told on a later pass, once; the stop stands.
+test('L130: an unsaved stop whose alert was not queued is told on the next pass, once', async () => {
+  const w = world([card('C-1')]);
+  await w.pass(0);
+  const sid = w.sessions[0].id;
+  w.setCard('C-1', { state: 'cancelled' });
+  const base = { rec: w.rec, rules: rulesWith({}, startAnswer(w.rec)), account: ACCT, sessions: [...w.sessions], probe: () => idle, launch: async () => ({ ok: false }),
+    stopGroup: async () => ({ ok: true, how: 'SIGTERM' }), saveWork: async () => ({ ok: false, reason: 'disk full' }) };
+  await dispatcherPass0({ ...base, now: T0 + MIN, alert: () => false });
+  assert.equal(w.rec.read('fact', STOP_FACT(sid)).doc.state, 'done', 'the stop stands');
+  assert.equal(w.rec.read('fact', UNSAVED_FACT(sid))?.doc?.told_at, undefined, 'not marked told');
+  const alerts = [];
+  await dispatcherPass({ ...base, sessions: [], now: T0 + 2 * MIN, alert: (x) => alerts.push(x) });
+  assert.equal(alerts.filter((a) => /not saved: disk full/.test(a)).length, 1, alerts.join(' | '));
+  assert.ok(w.rec.read('fact', UNSAVED_FACT(sid)).doc.told_at);
+  await dispatcherPass({ ...base, sessions: [], now: T0 + 3 * MIN, alert: (x) => alerts.push(x) });
+  assert.equal(alerts.filter((a) => /not saved/.test(a)).length, 1, 'told once');
+});
+
+// L130 M3: a limit wait that names no account is put on Joe even when its alert is not queued; the tick's waits step
+// tells it once.
+test('L130: a no-account limit wait whose alert was not queued waits on Joe, and is told once by the waits step', async () => {
+  const parked = { state: 'waiting', tier: 2, product: 'p1', files: ['src/n.js'], wait: { who: 'usage', what: 'limit_hit', since: iso(T0), next_check: iso(T0) } };
+  const w = world([['card', 'N', parked], ['fact', LIMIT_FACT(ACCT), { resets_at: iso(T0 + 30 * MIN), observed_at: iso(T0 + MIN) }]]);
+  const sessions = [];
+  await dispatcherPass0({ rec: w.rec, rules: rulesWith({}, startAnswer(w.rec)), now: T0 + 31 * MIN, account: ACCT, sessions, probe: () => idle,
+    launch: async () => ({ ok: false }), stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }), filesOf: filesOfCommits, alert: () => false });
+  assert.deepEqual([w.rec.read('card', 'N').doc.wait.who, w.rec.read('card', 'N').doc.wait.what], ['joe', LIMIT_NO_ACCOUNT]);
+  assert.equal(w.rec.read('fact', WAIT_TELL_FACT('N')).doc.told_since, undefined, 'not marked told');
+  const alerts = [];
+  const waits = (min) => withAlerts(w.rec, T0 + min * MIN, (x) => alerts.push(x), (alert) => retellWaits({ rec: w.rec, alert }));
+  await waits(32);
+  await waits(33);
+  assert.equal(alerts.filter((a) => /does not say which account/.test(a)).length, 1, alerts.join(' | '));
+  assert.equal(w.rec.read('fact', WAIT_TELL_FACT('N')).doc.told_since, w.rec.read('card', 'N').doc.wait.since);
 });
 
 test('audit MAT-2: a cancel still stops when the rules lack a value: cancel_grace_min missing uses the 2 min floor', async () => {

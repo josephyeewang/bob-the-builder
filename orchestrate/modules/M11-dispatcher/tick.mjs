@@ -44,11 +44,12 @@ import { timeLimits, requestMerges } from './merges.mjs';
 import { undoStep } from './undo.mjs';
 import { phoneLinkStep } from './phone-link.mjs';
 import { cleanupPass } from './cleanup.mjs';
-import { move, waitOn, note } from './moves.mjs';
+import { move, note } from './moves.mjs';
+import { waitOnJoe, retellWaits } from './joe-waits.mjs';
 import { outbox, tellThen, sendAlerts, dropCause } from './alerts.mjs';
 import { takePassLock } from './pass-lock.mjs';
 
-export const STEPS = Object.freeze(['stops', 'undo', 'undo-starts', 'outage', 'intake', 'leads', 'pass', 'limits', 'merges', 'phone', 'cleanup']);
+export const STEPS = Object.freeze(['stops', 'undo', 'undo-starts', 'outage', 'intake', 'leads', 'pass', 'limits', 'merges', 'waits', 'phone', 'cleanup']);
 export const ACCOUNT_FACT = 'signed-in-account';
 export const LAST_PASS_FACT = 'last-full-pass';
 export const STEP_ERROR_FACT = (step) => `step-error-${step}`;
@@ -91,16 +92,17 @@ export function actOnDead({ rec, rules, now, restart, asks, cards = {}, alert = 
     const broke = rec.breakIfDead({ card: cardId });
     if (broke.ok) {
       done.push([cardId, 'ready again']);
-      alert(`card ${cardId}: its session ${sid} stopped; the card is marked safe to re-run, so it is back in the queue`);
+      // A notice only: the card is back in the queue whatever the answer; a lost one is in the diary (L130 m1).
+      if (alert(`card ${cardId}: its session ${sid} stopped; the card is marked safe to re-run, so it is back in the queue`) === false) done.push([cardId, 'not told: the alert could not be queued']);
     } else done.push([cardId, `not restarted: ${broke.reason}`]);
   }
   for (const cardId of asks) {
     const cur = rec.read('card', cardId);
     if (!cur || !['running', 'claimed'].includes(cur.doc.state)) continue;
-    if (waitOn(rec, cardId, { who: 'joe', what: 'dead_session: its session stopped and the card is not marked safe to re-run', now, link: `card ${cardId}`, kind: 'dead_ask' }).ok) {
-      done.push([cardId, 'waiting on Joe']);
-      alert(`card ${cardId}: its session stopped and the card is not marked safe to re-run, so it waits on you`);
-    }
+    // Told until delivered (L130 M1): waitOnJoe records the tell, and retellWaits asks again while it is not delivered.
+    const w = waitOnJoe(rec, cardId, { what: 'dead_session: its session stopped and the card is not marked safe to re-run', now, link: `card ${cardId}`, kind: 'dead_ask',
+      alert, text: `card ${cardId}: its session stopped and the card is not marked safe to re-run, so it waits on you` });
+    if (w.ok) done.push([cardId, 'waiting on Joe']);
   }
   return done;
 }
@@ -219,6 +221,8 @@ export async function tick({ rec, rules, now, ports: p }) {
   await run('limits', () => timeLimits({ rec, rules, now, b: bands ?? held, running, gateAlive: p.gateAlive,
     hasReviewer: p.hasReviewer, requestReview: p.requestReview, reviewAlerts: p.reviewAlerts, alert, startsHeld, missing }));
   await run('merges', () => requestMerges({ rec, rules, now, b: bands ?? held, running, startsHeld, missing, alert }));
+  // A card put on Joe whose alert was not delivered is told again (L130).
+  await run('waits', () => retellWaits({ rec, alert }));
   // A step that failed did not report what it lacked, so nothing already told is dropped this tick.
   const complete = ['stops', 'undo-starts', 'pass', 'limits', 'merges'].every((s) => res[s]?.ok);
   try { await rulesMissingAlert({ rec, keys: missing, alert, now, complete }); } catch (e) { alert(`the Dispatcher could not record missing rules values: ${e?.message ?? e}`); }

@@ -12,7 +12,8 @@
 // root's; it stays a draft, so the start loop never picks it up) and alerts Joe, once. While the undo card has not
 // failed, the Lead is told instead.
 
-import { note, move } from './moves.mjs';
+import { move } from './moves.mjs';
+import { tellThen } from './alerts.mjs';
 import { holdAlert } from './pass.mjs';
 import { undoneBy } from '../M6-merge-gate/undo.mjs';
 import { factFrom, PLAN_INPUTS } from '../M9-record/permissions.mjs';
@@ -20,6 +21,8 @@ import { factFrom, PLAN_INPUTS } from '../M9-record/permissions.mjs';
 export const UNDO_CARD = (askId) => `undo-${askId}`;
 export const FIX_CARD = (undoId) => `fix-${undoId}`;
 export const REVERSE_FACT = (undoId) => `reverse-${undoId}`;
+/** The note that Joe was told of an undo's fix card (D8), the mark of that alert (L127). */
+export const UNDO_NOTE_FACT = (undoId) => `undo-note-${undoId}`;
 const MERGED = ['merged', 'audited_ok', 'audit_flagged'];
 const SHA = /^[0-9a-f]{40}$/;
 const short = (s) => String(s ?? '').slice(0, 7);
@@ -97,22 +100,26 @@ function fixCards({ rec, now, alert, out }) {
     const fid = REVERSE_FACT(id);
     const f = rec.read('fact', fid);
     if (f?.doc?.state !== 'not_clean' || !factFrom('merge_gate', { id: fid, createdBy: rec.meta?.('fact', fid)?.createdBy ?? null }, 'reverse-')) continue;
-    if (rec.read('card', FIX_CARD(id))) continue;
+    // Told once the fix card exists and its alert was delivered (the note is the alert's mark, L127): a fix card
+    // whose alert the queue refused is told again next pass.
+    const fix = rec.read('card', FIX_CARD(id));
+    if (fix && rec.read('fact', UNDO_NOTE_FACT(id))) continue;
     const why = `the undo (card ${id}) could not be an exact reverse: ${f.doc.reason ?? 'no reason given'}`;
-    if (doc.state !== 'failed') {
+    if (!fix && doc.state !== 'failed') {
       // The Record gives a fix card only to a failed card: until this one fails, the Lead is told, once a day.
       holdAlert({ rec, cause: `undo-not-clean-${id}`, text: `${why}; the Lead plans the fix once the undo card has failed`, alert, now });
       continue;
     }
-    const plan = Object.fromEntries(PLAN_INPUTS.filter((k) => doc[k] !== undefined).map((k) => [k, doc[k]]));
-    const w = rec.write({ actor: 'dispatcher', entity: 'card', id: FIX_CARD(id), expectRev: 0, kind: 'undo_fix_card',
-      // A draft, never `ready` (audit MAT-4): the Lead plans it; the start loop never picks it up.
-      doc: { state: 'draft', kind: 'fix', fix_of: id, product: doc.product ?? null, module: doc.module ?? null, what: why, ...plan } });
-    if (w.ok) {
-      alert(`${why}; a fix card waits for the Lead`);
-      note(rec, `undo-note-${id}`, `undo ${id} not clean; fix card ${FIX_CARD(id)} written`, { now });
+    if (!fix) {
+      const plan = Object.fromEntries(PLAN_INPUTS.filter((k) => doc[k] !== undefined).map((k) => [k, doc[k]]));
+      const w = rec.write({ actor: 'dispatcher', entity: 'card', id: FIX_CARD(id), expectRev: 0, kind: 'undo_fix_card',
+        // A draft, never `ready` (audit MAT-4): the Lead plans it; the start loop never picks it up.
+        doc: { state: 'draft', kind: 'fix', fix_of: id, product: doc.product ?? null, module: doc.module ?? null, what: why, ...plan } });
+      if (!w.ok) { out.push([id, `fix card not recorded: ${w.reason}`]); continue; }
       out.push([id, 'fix card written']);
-    } else out.push([id, `fix card not recorded: ${w.reason}`]);
+    }
+    const noted = { text: `undo ${id} not clean; fix card ${FIX_CARD(id)} written`, at: new Date(now).toISOString() };
+    tellThen(alert, `${why}; a fix card waits for the Lead`, { fact: UNDO_NOTE_FACT(id), fields: noted, kind: 'note' });
   }
 }
 
