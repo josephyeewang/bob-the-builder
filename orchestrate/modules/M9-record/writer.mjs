@@ -21,16 +21,18 @@ import { hostname } from 'node:os';
 import { basename } from 'node:path';
 import { CARD_KINDS, ENTITIES, FINAL_STATES, SESSION_ID, STATES, WAIT_FIELDS, WAIT_WHO, isOpen, makeRecord, missingFields, timeoutFor } from '../../shared/record.mjs';
 import { guardWrite, same } from './guard.mjs';
-import { PLAN_INPUTS, actorName, mayCreateKind } from './permissions.mjs';
+import { PLAN_INPUTS, actorName, factFrom, mayCreateKind } from './permissions.mjs';
 import { readyCheck } from './ready.mjs';
 import { PASSES, headReviews, readOutboxFile, runnerLaunchFor, verdictFields, worstVerdict } from './outbox.mjs';
 import { processDead, realProbe } from './lock.mjs';
 import { openStore } from './store.mjs';
 
 const MIN = 60000;
-// The fewest dead-looking claims that count as an outage (lead call L43): one or two dead claims are broken one by one,
-// so a Mac with two claims can still break its one dead one.
-const OUTAGE_MIN = 3;
+// How long a session claim may wait for its process (claims.unlaunched_min, L72) when the rules don't say.
+const UNLAUNCHED_MIN_DEFAULT = 5;
+// The role whose facts are a tab's heartbeat: not named yet (lead call L74 addendum, a lead to-do before tab claims are
+// used), so a tab claim lapses on the running limit alone.
+const TAB_HEARTBEAT_WRITER = null;
 const HEX40 = /^[0-9a-f]{40}$/;
 const KIND = /^[a-z_]{1,40}$/;
 const no = (reason) => ({ ok: false, reason });
@@ -87,17 +89,33 @@ export function openRecord({ root, product, ownerUid, rules, alert = () => {}, n
     return { ok: true, wait: out };
   }
 
+  // The claim has two steps (L72): ready → claimed names the session before it starts (the Dispatcher makes the id and
+  // the launcher starts claude with it), so no second start can take the card; claimed → running adds the process once
+  // the start reports it. The writer stamps claimed_at. rules_rev is the rules the claim was made under (L74).
+  const CLAIM_FIELDS = Object.freeze({ session: ['kind', 'session_id', 'host', 'claimed_at', 'rules_rev'], tab: ['kind', 'claim_id', 'host', 'claimed_at', 'rules_rev'] });
   function checkClaim(claim, nowMs) {
-    if (!claim || typeof claim !== 'object') return no('a claim needs its owner');
+    if (!claim || typeof claim !== 'object' || Array.isArray(claim)) return no('a claim needs its owner');
     if (claim.kind === 'session') {
-      if (!Number.isInteger(claim.pid) || claim.pid <= 0) return no('a session claim needs the pid');
-      if (typeof claim.pid_start !== 'string' || !claim.pid_start) return no('a session claim needs pid_start');
       if (typeof claim.session_id !== 'string' || !SESSION_ID.test(claim.session_id)) return no('a session claim needs a session_id the session can hand in with (letters, digits, dashes; at most 128)');
+      if (claim.pid !== undefined || claim.pid_start !== undefined) return no('a session claim gets its pid at claimed → running, once the session has started');
     } else if (claim.kind === 'tab') {
       if (typeof claim.claim_id !== 'string' || !claim.claim_id) return no('a tab claim needs claim_id');
     } else return no('claim.kind must be session or tab');
+    const extra = Object.keys(claim).filter((k) => !CLAIM_FIELDS[claim.kind].includes(k));
+    if (extra.length) return no(`a ${claim.kind} claim has no ${extra.join(', ')}`);
     if (typeof claim.host !== 'string' || !claim.host) return no('a claim needs the host');
-    return { ok: true, claim: { ...claim, at: iso(nowMs) } };
+    if (claim.rules_rev !== undefined && !(typeof claim.rules_rev === 'string' && claim.rules_rev) && !Number.isInteger(claim.rules_rev)) return no('claim.rules_rev names the rules it was made under');
+    return { ok: true, claim: { ...claim, claimed_at: iso(nowMs) } };
+  }
+  // claimed → running: a session claim gains pid and pid_start and nothing else; a tab claim is unchanged.
+  function checkStart(before, after) {
+    if (!after || typeof after !== 'object' || Array.isArray(after)) return no('a running card has a claim');
+    if (before.kind !== 'session') return same(before, after) ? { ok: true } : no('a tab claim does not change at claimed → running');
+    if (!Number.isInteger(after.pid) || after.pid <= 0) return no('claimed → running needs the session\'s pid');
+    if (typeof after.pid_start !== 'string' || !after.pid_start) return no('claimed → running needs pid_start');
+    const { pid, pid_start, ...rest } = after;   // eslint-disable-line no-unused-vars
+    if (!same(rest, before)) return no('claimed → running only adds pid and pid_start to the claim');
+    return { ok: true };
   }
 
   // The checks for one document. Returns the document to write, or a refusal.
@@ -120,7 +138,7 @@ export function openRecord({ root, product, ownerUid, rules, alert = () => {}, n
     const nowMs = now();
     if (!cur && testNoRevCheck && w.expectRev !== 0) return no('no such document');
     // Who may set which fields and make which move: the one check the test stand-in makes too (guard.mjs, L72).
-    const g = guardWrite({ entity, id, actor, old: cur?.doc ?? null, doc: w.doc });
+    const g = guardWrite({ entity, id, actor, old: cur?.doc ?? null, doc: w.doc, createdBy: cur?.createdBy ?? null });
     if (!g.ok) return g;
     const doc = g.doc;
 
@@ -185,7 +203,7 @@ export function openRecord({ root, product, ownerUid, rules, alert = () => {}, n
       const ask = typeof src?.ask === 'string' ? tx.lookup('ask', src.ask) : null;
       const fact = typeof src?.fact === 'string' ? tx.lookup('fact', src.fact) : null;
       const askOk = ask && ask.doc.kind === 'undo' && (ask.doc.state === 'answered' || ask.doc.state === 'consumed');
-      const factOk = fact && fact.createdBy === 'sensors' && fact.doc.type === 'undo_issue' && fact.doc.authenticated === true;
+      const factOk = factFrom('sensors', fact, 'undo-issue-') && fact.doc.type === 'undo_issue' && fact.doc.authenticated === true;
       if (!askOk && !factOk) return no('an exact_reverse card needs an answered Undo ask or an authenticated audit issue (source)');
       // One reverse per piece of evidence (0b-2 audit MAT-2): one answered Undo is never the go for many cards.
       const key = askOk ? ['ask', src.ask] : ['fact', src.fact];
@@ -232,12 +250,16 @@ export function openRecord({ root, product, ownerUid, rules, alert = () => {}, n
       if (doc.needs_joe === true && !NEEDS_JOE_SETTERS.includes(name)) return no(`${name} may not set needs_joe`);
       if (doc.needs_joe !== true && name !== 'approvals') return no('only approvals clears needs_joe');
     }
-    // The claim: set only by ready → claimed; otherwise never changed by a write (R2-M6, R3-M4).
+    // The claim: set by ready → claimed, given its process by claimed → running; otherwise never changed by a write
+    // (R2-M6, R3-M4, L72).
     if (to === 'claimed' && from === 'ready') {
       const c = checkClaim(doc.claim, nowMs);
       if (!c.ok) return c;
       doc.claim = c.claim;
-    } else if (changed.includes('claim')) return no('a claim is set only by ready → claimed');
+    } else if (from === 'claimed' && to === 'running') {
+      const c = checkStart(old.claim ?? {}, doc.claim);
+      if (!c.ok) return c;
+    } else if (changed.includes('claim')) return no('a claim is set only by ready → claimed, and given its pid only by claimed → running');
     if ((to === 'claimed' || to === 'running') && !doc.claim) return no(`a ${to} card has a claim`);
     if (!(to === 'claimed' || to === 'running') && doc.claim) return no(`a ${to} card has no claim`);
     // The wait.
@@ -351,7 +373,7 @@ export function openRecord({ root, product, ownerUid, rules, alert = () => {}, n
     }
     if (moving && from === 'merged') {
       const f = typeof w.data?.fact === 'string' ? tx.lookup('fact', w.data.fact) : null;
-      if (!f || f.createdBy !== 'sensors' || f.doc.type !== 'audit_run') return no('an audit result comes from a Sensors audit_run fact (data.fact)');
+      if (!factFrom('sensors', f, 'audit-run-') || f.doc.type !== 'audit_run') return no('an audit result comes from a Sensors audit_run fact (data.fact)');
       if (!doc.merge_commit || f.doc.commit !== doc.merge_commit) return no('the audit_run fact is for another commit');
       const want = f.doc.conclusion === 'success' ? 'audited_ok' : 'audit_flagged';
       if (to !== want) return no(`the audit concluded ${f.doc.conclusion}, so the merge is ${want}`);
@@ -542,23 +564,14 @@ export function openRecord({ root, product, ownerUid, rules, alert = () => {}, n
         const claim = c.doc.claim;
         if (claim?.kind !== 'session') return no('a tab claim is never broken; it lapses');
         if (claim.host !== host) return no(`claim is from host ${claim.host}; never broken from here`);
+        if (!Number.isInteger(claim.pid)) return no('this claim has no process yet; it lapses at claims.unlaunched_min, never broken');
         const stuckMin = get('claims.stuck_min');
         if (!Number.isInteger(stuckMin) || stuckMin < 1) return no('the rules set no claims.stuck_min, so no claim is broken');
         const nowMs = now();
         const mine = deadness(tx, claim, p, nowMs, stuckMin);
         if (!mine.dead) return no(`owner not provably dead (${mine.why})`);
-        // An outage: at least OUTAGE_MIN of this Mac's session claims look dead at once, and they are half or more. Break
-        // none (M-5 item 3). Below that, each dead claim is broken on its own, with an alert (lead call L43).
-        const board = tx.list('card').filter((e) => (e.doc.state === 'claimed' || e.doc.state === 'running') && e.doc.claim?.kind === 'session' && e.doc.claim.host === host);
-        if (board.length >= OUTAGE_MIN) {
-          const dead = board.filter((e) => deadness(tx, e.doc.claim, p, nowMs, stuckMin).dead).length;
-          if (dead >= OUTAGE_MIN && dead * 2 >= board.length) {
-            // One alert per Mac per day, not one per card per pass (L38; 0b-2 audit MIN-1).
-            const key = `alert:claims_outage:${host}:${iso(nowMs).slice(0, 10)}`;
-            if (!tx.seen(key)) { store.alert({ type: 'claims_outage', dead, of: board.length }); tx.markSeen(key, 'alerted'); }
-            return no(`${dead} of ${board.length} claims look dead at once; none is broken (outage)`);
-          }
-        }
+        // Whether many dead claims at once are an outage (and none is broken) is the Dispatcher's one rule (M11
+        // outage.mjs, L72 (ii)); this breaks only the claim it is given, once its own owner is provably dead.
         const r = endClaim(tx, c, 'ready', 'claim_break', { session_id: claim.session_id, pid: claim.pid, why: mine.why });
         return { ok: true, rev: r.rev, seq: r.seq, broke: { session_id: claim.session_id, why: mine.why } };
       });
@@ -569,12 +582,35 @@ export function openRecord({ root, product, ownerUid, rules, alert = () => {}, n
     } catch (e) { return no(`store error: ${String(e?.message ?? e).slice(0, 200)}`); }
   }
 
-  function lapseClaims(nowArg) {
+  // A session claim with no process yet that has not reached running within claims.unlaunched_min lapses (L72), but only
+  // once `stopSession(session_id)` answers true: whatever was started under that id is stopped (or nothing ran), so the
+  // card can't run twice. With no stopSession, or an answer that is not true, the claim stays and the owner is told once
+  // a day. stopSession runs before the lock is taken, and the lapse checks the claim is still that one.
+  function lapseClaims(nowArg, { stopSession } = {}) {
+    const nowMs = Number.isFinite(nowArg) ? nowArg : now();
+    let unlaunchedMin;
+    try { unlaunchedMin = get('claims.unlaunched_min'); } catch (e) { return no(`the rules could not be read (${String(e?.message ?? e).slice(0, 200)})`); }
+    if (unlaunchedMin === undefined || unlaunchedMin === null) unlaunchedMin = UNLAUNCHED_MIN_DEFAULT;
+    if (!Number.isInteger(unlaunchedMin) || unlaunchedMin < 1) return no('claims.unlaunched_min must be a whole number of minutes');
+    const stopped = new Set();
+    const held = [];
+    for (const c of store.list('card')) {
+      const claim = c.doc.claim;
+      if (c.doc.state !== 'claimed' || claim?.kind !== 'session' || Number.isInteger(claim.pid)) continue;
+      if (!(nowMs > Date.parse(claim.claimed_at) + unlaunchedMin * MIN)) continue;
+      let ok = false, why = 'no way to stop a session was given';
+      if (typeof stopSession === 'function') { try { ok = stopSession(claim.session_id) === true; if (!ok) why = 'stopSession did not say it stopped'; } catch (e) { why = String(e?.message ?? e).slice(0, 200); } }
+      if (ok) stopped.add(`${c.id}\u0000${claim.session_id}`);
+      else held.push({ card: c.id, session_id: claim.session_id, why });
+    }
     try {
       return store.transaction((tx) => {
-        const nowMs = Number.isFinite(nowArg) ? nowArg : now();
+        for (const h of held) {
+          // One alert per card per day (L38).
+          const key = `alert:unlaunched_held:${h.card}:${iso(nowMs).slice(0, 10)}`;
+          if (!tx.seen(key)) { store.alert({ type: 'unlaunched_claim_held', ...h }); tx.markSeen(key, 'alerted'); }
+        }
         const t = timeouts();
-        const claimed = timeoutFor(t, 'card', 'claimed');
         const running = timeoutFor(t, 'card', 'running');
         const waitT = timeoutFor(t, 'card', 'waiting');
         const stale = get('proposals.heartbeat_stale_min');
@@ -585,19 +621,25 @@ export function openRecord({ root, product, ownerUid, rules, alert = () => {}, n
           // Check the file before writing over it: a hand-edited card is quarantined and alerted, not silently replaced (round 3 m-C).
           const chk = tx.current('card', e.id);
           if (!chk || chk.tampered) continue;
-          const since = Date.parse(e.stateSince);
           if (claim.kind === 'session') {
-            if (e.doc.state === 'claimed' && claimed?.minutes && nowMs > since + claimed.minutes * MIN) {
-              const r = endClaim(tx, e, 'ready', 'claim_lapse', { after_min: claimed.minutes });
+            if (e.doc.state !== 'claimed') continue;
+            // A claimed session claim has no process yet (its pid comes with claimed → running): it lapses at
+            // claims.unlaunched_min, once its session id was stopped above (the same claim). A running one is never lapsed
+            // here; a dead owner's claim is broken (breakIfDead).
+            if (stopped.has(`${e.id}\u0000${claim.session_id}`)) {
+              const r = endClaim(tx, e, 'ready', 'claim_lapse', { why: 'never launched', after_min: unlaunchedMin, session_id: claim.session_id });
               lapsed.push({ card: e.id, to: 'ready', seq: r.seq });
             }
             continue;
           }
-          // A tab claim: its heartbeat (the latest tab_heartbeat fact, timed by the diary) or the running limit.
-          const beats = tx.list('fact').filter((x) => x.doc.type === 'tab_heartbeat' && x.doc.claim_id === claim.claim_id).map((x) => Date.parse(x.ts));
-          const lastBeat = Math.max(Date.parse(claim.at) || 0, ...beats);
-          const staleHit = Number.isInteger(stale) && stale >= 1 && nowMs - lastBeat > stale * MIN;
-          const limitHit = !!running?.minutes && nowMs - (Date.parse(claim.at) || 0) > running.minutes * MIN;
+          // A tab claim: its heartbeat or the running limit. A heartbeat counts only from its writer's own family
+          // (L74 addendum); none is named yet (TAB_HEARTBEAT_WRITER), so none counts and the running limit decides.
+          const beats = tx.list('fact').filter((x) => factFrom(TAB_HEARTBEAT_WRITER, x) && x.doc.type === 'tab_heartbeat' && x.doc.claim_id === claim.claim_id).map((x) => Date.parse(x.ts));
+          const lastBeat = Math.max(Date.parse(claim.claimed_at) || 0, ...beats);
+          // With no heartbeat writer named, no beat can come, so staleness is not judged at all (it would lapse every tab
+          // claim at the stale limit): the running limit alone decides, as the lead call says.
+          const staleHit = TAB_HEARTBEAT_WRITER !== null && Number.isInteger(stale) && stale >= 1 && nowMs - lastBeat > stale * MIN;
+          const limitHit = !!running?.minutes && nowMs - (Date.parse(claim.claimed_at) || 0) > running.minutes * MIN;
           if (!staleHit && !limitHit) continue;
           const why = staleHit ? 'heartbeat stale' : 'running limit';
           if (e.doc.state === 'claimed') {

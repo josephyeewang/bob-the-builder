@@ -154,16 +154,22 @@ test('exact_reverse needs an answered Undo ask or an authenticated audit issue, 
   seed(env, 'ask', 'A-1', { state: 'answered', kind: 'undo', reask_count: 0 });
   seed(env, 'ask', 'A-2', { state: 'answered', kind: 'question', reask_count: 0 });
   refused(er('U-0', { ask: 'A-2' }), /needs an answered Undo ask/, 'another kind of ask');
-  must(env.record.write({ actor: 'workshop', entity: 'fact', id: 'F-w', expectRev: 0, doc: { type: 'undo_issue', authenticated: true } }));
-  refused(er('U-0', { fact: 'F-w' }), /needs an answered Undo ask/, 'a fact not from Sensors');
-  must(env.record.write({ actor: 'sensors', entity: 'fact', id: 'F-u', expectRev: 0, doc: { type: 'undo_issue', authenticated: false } }));
-  refused(er('U-0', { fact: 'F-u' }), /needs an answered Undo ask/, 'an unauthenticated issue');
-  must(env.record.write({ actor: 'sensors', entity: 'fact', id: 'F-a', expectRev: 0, doc: { type: 'undo_issue', authenticated: true } }));
+  // Look-alikes (L74 addendum): the workshop's own fact of the same type, a Sensors fact outside undo-issue-, and a fact
+  // in Sensors' family not written by Sensors (put straight into the store) are never the evidence.
+  must(env.record.write({ actor: 'workshop', entity: 'fact', id: 'push.F-w', expectRev: 0, doc: { type: 'undo_issue', authenticated: true } }));
+  refused(er('U-0', { fact: 'push.F-w' }), /needs an answered Undo ask/, 'a fact not from Sensors');
+  must(env.record.write({ actor: 'sensors', entity: 'fact', id: 'pr-77', expectRev: 0, doc: { type: 'undo_issue', authenticated: true } }));
+  refused(er('U-0', { fact: 'pr-77' }), /needs an answered Undo ask/, 'a Sensors fact outside undo-issue-');
+  env.store.transaction((tx) => tx.commit([{ entity: 'fact', id: 'undo-issue-planted', doc: { type: 'undo_issue', authenticated: true } }], { actor: 'dispatcher', kind: 'seed' }));
+  refused(er('U-0', { fact: 'undo-issue-planted' }), /needs an answered Undo ask/, 'in the family but not written by Sensors');
+  must(env.record.write({ actor: 'sensors', entity: 'fact', id: 'undo-issue-u', expectRev: 0, doc: { type: 'undo_issue', authenticated: false } }));
+  refused(er('U-0', { fact: 'undo-issue-u' }), /needs an answered Undo ask/, 'an unauthenticated issue');
+  must(env.record.write({ actor: 'sensors', entity: 'fact', id: 'undo-issue-a', expectRev: 0, doc: { type: 'undo_issue', authenticated: true } }));
   must(er('U-1', { ask: 'A-1' }), 'from the ask');
-  must(er('U-2', { fact: 'F-a' }), 'from the fact');
+  must(er('U-2', { fact: 'undo-issue-a' }), 'from the fact, the look-alikes before it blocking nothing');
   // One reverse per piece of evidence (0b-2 audit MAT-2).
   refused(er('U-3', { ask: 'A-1' }), /ask A-1 already has its exact_reverse card/);
-  refused(er('U-3', { fact: 'F-a' }), /fact F-a already has its exact_reverse card/);
+  refused(er('U-3', { fact: 'undo-issue-a' }), /fact undo-issue-a already has its exact_reverse card/);
   // The Lead may not rewrite a go-free card's plan, which would then go to ready with no go (0b-2 audit MAT-1).
   refused(roadmapEdit(env, 'U-2', { files: ['src/anything-else.mjs', 'src/other.mjs'] }), /lead may not change the plan of a exact_reverse card/);
   assert.deepEqual(env.record.read('card', 'U-2').doc.files, plan().files);
@@ -380,15 +386,20 @@ test('one merge at a time, and a verified card that needs the owner never enters
 test('the audit result comes from a Sensors audit_run fact for the merged commit', () => {
   const env = setup({ prefix: 'm9-wr-' });
   seed(env, 'merge', 'M-1', { state: 'merged', card: 'C-1', merge_commit: HEAD });
-  must(env.record.write({ actor: 'sensors', entity: 'fact', id: 'ok-other', expectRev: 0, doc: { type: 'audit_run', commit: HEAD2, conclusion: 'success' } }));
-  must(env.record.write({ actor: 'workshop', entity: 'fact', id: 'ok-forged', expectRev: 0, doc: { type: 'audit_run', commit: HEAD, conclusion: 'success' } }));
-  must(env.record.write({ actor: 'sensors', entity: 'fact', id: 'bad', expectRev: 0, doc: { type: 'audit_run', commit: HEAD, conclusion: 'failure' } }));
+  must(env.record.write({ actor: 'sensors', entity: 'fact', id: 'audit-run-other', expectRev: 0, doc: { type: 'audit_run', commit: HEAD2, conclusion: 'success' } }));
+  // Look-alikes (L74 addendum): the workshop's own, Sensors' outside audit-run-, and one in the family not by Sensors.
+  must(env.record.write({ actor: 'workshop', entity: 'fact', id: 'push.ok-forged', expectRev: 0, doc: { type: 'audit_run', commit: HEAD, conclusion: 'success' } }));
+  must(env.record.write({ actor: 'sensors', entity: 'fact', id: 'pr-ok', expectRev: 0, doc: { type: 'audit_run', commit: HEAD, conclusion: 'success' } }));
+  env.store.transaction((tx) => tx.commit([{ entity: 'fact', id: 'audit-run-planted', doc: { type: 'audit_run', commit: HEAD, conclusion: 'success' } }], { actor: 'merge_gate', kind: 'seed' }));
+  must(env.record.write({ actor: 'sensors', entity: 'fact', id: 'audit-run-bad', expectRev: 0, doc: { type: 'audit_run', commit: HEAD, conclusion: 'failure' } }));
   const audit = (to, fact) => put(env.record, 'merge_gate', 'merge', 'M-1', { state: to }, { data: { fact } });
   refused(audit('audited_ok', undefined), /comes from a Sensors audit_run fact/);
-  refused(audit('audited_ok', 'ok-forged'), /comes from a Sensors audit_run fact/);
-  refused(audit('audited_ok', 'ok-other'), /for another commit/);
-  refused(audit('audited_ok', 'bad'), /concluded failure, so the merge is audit_flagged/);
-  must(audit('audit_flagged', 'bad'));
+  refused(audit('audited_ok', 'push.ok-forged'), /comes from a Sensors audit_run fact/);
+  refused(audit('audited_ok', 'pr-ok'), /comes from a Sensors audit_run fact/);
+  refused(audit('audited_ok', 'audit-run-planted'), /comes from a Sensors audit_run fact/);
+  refused(audit('audited_ok', 'audit-run-other'), /for another commit/);
+  refused(audit('audited_ok', 'audit-run-bad'), /concluded failure, so the merge is audit_flagged/);
+  must(audit('audit_flagged', 'audit-run-bad'));
 });
 
 // ---------------- overdue ----------------

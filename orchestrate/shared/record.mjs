@@ -18,7 +18,8 @@
 //   rec.overdue(now)                             // → [{ entity, id, state, since, limit }] past their time limit
 //   rec.release({ card, session_id })            // the claim's holder gives the card back (claimed → ready)
 //   rec.breakIfDead({ card }, probe?)            // break a claim whose owner is provably dead (G1)
-//   rec.lapseClaims(now)                         // claims past their time limit lapse, each with a diary line
+//   rec.lapseClaims(now, { stopSession }?)       // claims past their time limit lapse, each with a diary line; an
+//                                                   unlaunched one only once stopSession(id) says nothing runs (L72)
 //
 // RULES EVERY IMPLEMENTATION KEEPS. Every write is "only if unchanged since read": expectRev is the rev the caller
 // read (0 to create). A mismatch is refused. Every accepted write appends exactly one diary line; a refused one
@@ -154,7 +155,7 @@ export function makeRecord(impl) {
     overdue(now) { try { return optional('overdue', () => [])(now); } catch (e) { return [{ entity: null, id: null, corrupt: true, reason: `record error: ${errText(e)}` }]; } },
     release(r) { return guard(() => optional('release', () => refused('this record has no claims'))(r)); },
     breakIfDead(r, probe) { return guard(() => optional('breakIfDead', () => refused('this record has no claims'))(r, probe)); },
-    lapseClaims(now) { return guard(() => optional('lapseClaims', () => ({ ok: true, lapsed: [] }))(now)); },
+    lapseClaims(now, opts) { return guard(() => optional('lapseClaims', () => ({ ok: true, lapsed: [] }))(now, opts)); },
   });
 }
 
@@ -168,22 +169,24 @@ export function memoryRecord() {
   const docs = new Map();
   const lines = [];
   const key = (e, id) => `${e}/${id}`;
+  // What a read returns: the document and its rev, as the real Record's read does (createdBy stays inside, as the store's meta).
+  const view = (d) => structuredClone({ entity: d.entity, id: d.id, doc: d.doc, rev: d.rev });
   const log = (actor, kind, entity, id, from, to, data) => {
     const line = { seq: lines.length + 1, ts: new Date().toISOString(), actor, kind, entity, id, from_state: from ?? null, to_state: to ?? null, data: data ?? null };
     lines.push(line);
     return line.seq;
   };
   return makeRecord({
-    read(entity, id) { const d = docs.get(key(entity, id)); return d ? structuredClone(d) : null; },
-    list(entity) { return [...docs.values()].filter((d) => d.entity === entity).map((d) => structuredClone(d)); },
+    read(entity, id) { const d = docs.get(key(entity, id)); return d ? view(d) : null; },
+    list(entity) { return [...docs.values()].filter((d) => d.entity === entity).map(view); },
     diary({ since = 0 } = {}) { return lines.filter((l) => l.seq > since).map((l) => ({ ...l })); },
     write({ actor, entity, id, expectRev, doc, kind = 'write' }) {
       const cur = docs.get(key(entity, id));
       if ((cur?.rev ?? 0) !== expectRev) return refused(`changed since read (rev ${cur?.rev ?? 0}, expected ${expectRev})`);
-      const g = guardWrite({ entity, id, actor, old: cur?.doc ?? null, doc });
+      const g = guardWrite({ entity, id, actor, old: cur?.doc ?? null, doc, createdBy: cur?.createdBy ?? null });
       if (!g.ok) return refused(g.reason);
       const rev = expectRev + 1;
-      docs.set(key(entity, id), { entity, id, doc: g.doc, rev });
+      docs.set(key(entity, id), { entity, id, doc: g.doc, rev, createdBy: cur?.createdBy ?? actor });
       const seq = log(actor, kind, entity, id, cur?.doc?.state, doc?.state);
       return { ok: true, rev, seq };
     },

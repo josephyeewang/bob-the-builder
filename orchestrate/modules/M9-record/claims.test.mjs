@@ -8,7 +8,7 @@ import { readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { pidStart, realProbe, sleepMs } from './lock.mjs';
 import { openRecord } from './writer.mjs';
-import { PRODUCT, UID, iso, must, product, put, readyCard, runCard, claimCard, rulesFor, seed, sessionClaim, setup } from './fixtures.test-helper.mjs';
+import { PRODUCT, UID, claimOnly, iso, must, product, put, readyCard, runCard, claimCard, rulesFor, seed, sessionClaim, setup } from './fixtures.test-helper.mjs';
 
 const MIN = 60000;
 const err = (code) => Object.assign(new Error(code), { code });
@@ -42,7 +42,8 @@ test('claim 1: a claim on a ready card wins, is stamped with the time, and write
   const c = env.record.read('card', 'C-1').doc;
   assert.equal(c.state, 'claimed');
   assert.equal(c.claim.session_id, 'S-1');
-  assert.equal(c.claim.at, iso(env.clock.t), 'the writer stamps the claim time');
+  assert.equal(c.claim.claimed_at, iso(env.clock.t), 'the writer stamps the claim time');
+  assert.equal(c.claim.pid, undefined, 'the process comes at claimed → running (L72)');
   assert.equal(diaryKinds(env).filter((k) => k === 'claim').length, 1);
   assert.deepEqual(env.record.ready(), [], 'a claimed card leaves the ready list');
 });
@@ -85,7 +86,7 @@ test('claim 5: a claim on a card that is not ready is refused', () => {
   const env3 = setup({ prefix: 'm9-claim-' });
   board(env3);
   seed(env3, 'go', 'go-C-1', { product: PRODUCT, card_id: 'C-1', plan_fingerprint: 'f'.repeat(64) });
-  const r3 = put(env3.record, 'dispatcher', 'card', 'C-1', { state: 'claimed', claim: sessionClaim() });
+  const r3 = put(env3.record, 'dispatcher', 'card', 'C-1', { state: 'claimed', claim: claimOnly(sessionClaim()) });
   assert.match(r3.reason, /can't claim: no go from the owner/);
 });
 
@@ -98,7 +99,7 @@ test('claim 6: a claim survives a writer restart', () => {
   const c = again.record.read('card', 'C-1').doc;
   assert.equal(c.state, 'claimed');
   assert.equal(c.claim.session_id, 'S-1');
-  assert.match(again.record.breakIfDead({ card: 'C-1' }).reason, /process alive/);
+  assert.match(again.record.breakIfDead({ card: 'C-1' }).reason, /no process yet; it lapses at claims.unlaunched_min, never broken/);
 });
 
 test('claim 7: only the holder may release a claim', () => {
@@ -117,7 +118,7 @@ test('claim 7: only the holder may release a claim', () => {
   assert.deepEqual(env.record.ready().map((x) => x.id), ['C-1']);
   // A running card is not released this way: it hands in or is broken.
   claimCard(env, 'C-1');
-  must(put(env.record, 'dispatcher', 'card', 'C-1', { state: 'running' }));
+  must(put(env.record, 'dispatcher', 'card', 'C-1', { state: 'running', claim: { ...env.record.read('card', 'C-1').doc.claim, pid: 4242, pid_start: 'x' } }));
   assert.match(env.record.release({ card: 'C-1', session_id: 'S-1' }).reason, /not claimed/);
 });
 
@@ -156,18 +157,68 @@ test('a lapse checks the card file first: a hand-edited card is quarantined and 
   assert.equal(env.record.read('card', 'C-1').doc.state, 'claimed', 'restored from the diary');
 });
 
-test('claim 8: a session claim that never starts lapses at its time limit, with a diary line', () => {
+test('claim 8: a session claim that never starts lapses at claims.unlaunched_min, once its session id is stopped (L72)', () => {
   const env = setup({ prefix: 'm9-claim-' });
   board(env, ['C-1', 'C-2']);
   claimCard(env, 'C-1');
   runCard(env, 'C-2', sessionClaim({ session_id: 'S-2', pid: 5000 }));
   const t0 = env.clock.t;
-  assert.deepEqual(env.record.lapseClaims(t0 + 60 * MIN).lapsed, [], 'not at the limit');
-  const r = env.record.lapseClaims(t0 + 60 * MIN + 1);
+  const asked = [];
+  const stop = (answer) => (sid) => { asked.push(sid); return answer; };
+  // The default is 5 minutes (none set in these rules).
+  assert.deepEqual(env.record.lapseClaims(t0 + 5 * MIN, { stopSession: stop(true) }).lapsed, [], 'not at the limit');
+  assert.deepEqual(asked, [], 'nothing is stopped before the limit');
+  // Past it, but no way to stop the session, or a stop that doesn't say it stopped: the claim stays, told once a day.
+  assert.deepEqual(env.record.lapseClaims(t0 + 5 * MIN + 1).lapsed, []);
+  assert.deepEqual(env.record.lapseClaims(t0 + 5 * MIN + 2, { stopSession: stop(false) }).lapsed, []);
+  assert.deepEqual(env.record.lapseClaims(t0 + 5 * MIN + 3, { stopSession: () => { throw new Error('ps failed'); } }).lapsed, []);
+  assert.equal(env.alerts.filter((a) => a.type === 'unlaunched_claim_held' && a.card === 'C-1').length, 1, 'one alert a day');
+  assert.equal(env.record.read('card', 'C-1').doc.state, 'claimed');
+  // Stopped: it lapses back to ready, with a diary line; only the unlaunched claim's session was asked about.
+  asked.length = 0;
+  const r = env.record.lapseClaims(t0 + 5 * MIN + 4, { stopSession: stop(true) });
   assert.deepEqual(r.lapsed.map((x) => [x.card, x.to]), [['C-1', 'ready']]);
+  assert.deepEqual(asked, ['S-1']);
   assert.equal(env.record.read('card', 'C-1').doc.claim, undefined);
-  assert.equal(diaryKinds(env).at(-1), 'claim_lapse');
+  const line = env.record.diary().at(-1);
+  assert.equal(line.kind, 'claim_lapse');
+  assert.equal(line.data.why, 'never launched');
+  assert.equal(line.data.session_id, 'S-1');
   assert.equal(env.record.read('card', 'C-2').doc.state, 'running', 'a running session claim never lapses; G1 decides');
+  // The rules may set the limit; a bad one refuses.
+  const env2 = setup({ prefix: 'm9-claim-', values: { 'claims.unlaunched_min': 20 } });
+  board(env2);
+  claimCard(env2, 'C-1');
+  assert.deepEqual(env2.record.lapseClaims(env2.clock.t + 6 * MIN, { stopSession: () => true }).lapsed, []);
+  assert.deepEqual(env2.record.lapseClaims(env2.clock.t + 20 * MIN + 1, { stopSession: () => true }).lapsed.map((x) => x.card), ['C-1']);
+  const env3 = setup({ prefix: 'm9-claim-', values: { 'claims.unlaunched_min': 0 } });
+  assert.match(env3.record.lapseClaims(env3.clock.t).reason, /claims.unlaunched_min must be a whole number/);
+});
+
+test('the claim has two steps: claimed names the session, running adds only its process (L72)', () => {
+  const env = setup({ prefix: 'm9-claim-' });
+  board(env, ['C-1', 'C-2']);
+  // A claim carrying a pid is refused: the process comes at claimed → running.
+  assert.match(put(env.record, 'dispatcher', 'card', 'C-1', { state: 'claimed', claim: sessionClaim() }).reason, /gets its pid at claimed → running/);
+  assert.match(put(env.record, 'dispatcher', 'card', 'C-1', { state: 'claimed', claim: { ...claimOnly(sessionClaim()), note: 'x' } }).reason, /a session claim has no note/);
+  assert.match(put(env.record, 'dispatcher', 'card', 'C-1', { state: 'claimed', claim: { ...claimOnly(sessionClaim()), rules_rev: '' } }).reason, /rules_rev names the rules/);
+  must(put(env.record, 'dispatcher', 'card', 'C-1', { state: 'claimed', claim: { ...claimOnly(sessionClaim()), rules_rev: 'r-7' } }), 'claim with rules_rev');
+  const claim = env.record.read('card', 'C-1').doc.claim;
+  assert.equal(claim.rules_rev, 'r-7');
+  // Running needs the pid and pid_start, and changes nothing else in the claim.
+  assert.match(put(env.record, 'dispatcher', 'card', 'C-1', { state: 'running' }).reason, /needs the session's pid/);
+  assert.match(put(env.record, 'dispatcher', 'card', 'C-1', { state: 'running', claim: { ...claim, pid: 9 } }).reason, /needs pid_start/);
+  assert.match(put(env.record, 'dispatcher', 'card', 'C-1', { state: 'running', claim: { ...claim, pid: 9, pid_start: 'x', session_id: 'S-2' } }).reason, /only adds pid and pid_start/);
+  assert.match(put(env.record, 'dispatcher', 'card', 'C-1', { state: 'running', claim: { ...claim, pid: 9, pid_start: 'x', rules_rev: 'r-8' } }).reason, /only adds pid and pid_start/);
+  must(put(env.record, 'dispatcher', 'card', 'C-1', { state: 'running', claim: { ...claim, pid: 9, pid_start: 'x' } }), 'start');
+  assert.equal(env.record.read('card', 'C-1').doc.claim.pid, 9);
+  // Once running, the claim never changes by a write.
+  assert.match(put(env.record, 'dispatcher', 'card', 'C-1', { claim: { ...env.record.read('card', 'C-1').doc.claim, pid: 10 } }).reason, /a claim is set only by ready → claimed/);
+  // A tab claim is the same at running.
+  claimCard(env, 'C-2', { kind: 'tab', claim_id: 'T-1', host: 'mac-a' });
+  const tab = env.record.read('card', 'C-2').doc.claim;
+  assert.match(put(env.record, 'dispatcher', 'card', 'C-2', { state: 'running', claim: { ...tab, pid: 3, pid_start: 'x' } }).reason, /a tab claim does not change/);
+  must(put(env.record, 'dispatcher', 'card', 'C-2', { state: 'running' }), 'tab start');
 });
 
 test('claim 9: a dead owner\'s claim is broken (process gone, session ended, no recent activity)', () => {
@@ -274,7 +325,7 @@ test('G1: no session record, another host, or no stuck_min in the rules: nothing
   assert.match(env.record.breakIfDead({ card: 'C-9' }).reason, /no card C-9/);
 });
 
-test('G1 outage: when 3 or more of this Mac\'s claims look dead and they are half or more, none is broken (L43)', () => {
+test('breakIfDead breaks only the claim it is given, each once its own owner is provably dead; the outage rule is M11\'s (L72)', () => {
   const ids = ['C-1', 'C-2', 'C-3', 'C-4'];
   const make = (deadPids, list = ids) => {
     const env = setup({ prefix: 'm9-g1-', probe: fakeProbe({ dead: deadPids }) });
@@ -282,42 +333,18 @@ test('G1 outage: when 3 or more of this Mac\'s claims look dead and they are hal
     list.forEach((id, i) => { runCard(env, id, sessionClaim({ session_id: `S-${i}`, pid: 100 + i })); session(env, `S-${i}`, { state: 'ended', pid: 100 + i, ago: 600 }); });
     return env;
   };
+  // Three of four dead: M9 no longer counts the board, so each dead one asked about is broken, each alerted once.
   const three = make([100, 101, 102]);
-  const r = three.record.breakIfDead({ card: 'C-1' });
-  assert.match(r.reason, /3 of 4 claims look dead at once; none is broken/);
-  assert.ok(three.alerts.some((a) => a.type === 'claims_outage' && a.dead === 3));
-  assert.ok(ids.every((id) => three.record.read('card', id).doc.state === 'running'));
-  // One alert per Mac per day, however many passes and cards (L38; 0b-2 audit MIN-1); a new day alerts again.
-  for (let pass = 0; pass < 2; pass++) for (const id of ids.slice(0, 3)) three.record.breakIfDead({ card: id });
-  assert.equal(three.alerts.filter((a) => a.type === 'claims_outage').length, 1);
-  three.clock.t += 24 * 60 * 60000;
-  three.record.breakIfDead({ card: 'C-1' });
-  assert.equal(three.alerts.filter((a) => a.type === 'claims_outage').length, 2);
-  // Fewer than 3 dead: each is broken on its own, with one alert per break (L43).
-  const two = make([100, 101]);
-  must(two.record.breakIfDead({ card: 'C-1' }), 'two of four dead: each is broken');
-  must(two.record.breakIfDead({ card: 'C-2' }), 'two of four dead: each is broken');
-  assert.deepEqual(two.alerts.filter((a) => a.type === 'claim_broken').map((a) => a.card), ['C-1', 'C-2']);
-  assert.equal(two.alerts.filter((a) => a.type === 'claims_outage').length, 0);
-  const one = make([100]);
-  must(one.record.breakIfDead({ card: 'C-1' }), 'one of four is broken');
-  // The two-claim Mac with one dead claim (the round 1 gap): broken, and alerted.
-  const pair = make([100], ['C-1', 'C-2']);
-  must(pair.record.breakIfDead({ card: 'C-1' }), 'one of two is broken');
-  assert.equal(pair.record.read('card', 'C-1').doc.state, 'ready');
-  assert.ok(pair.alerts.some((a) => a.type === 'claim_broken' && a.card === 'C-1' && a.session_id === 'S-0'));
-  // Both of two dead is under 3: each broken.
-  const both = make([100, 101], ['C-1', 'C-2']);
-  must(both.record.breakIfDead({ card: 'C-1' }), 'two of two dead is under the outage floor');
-  // 3 of 6 is half: an outage. 3 of 7 is under half: broken.
-  const six = ['C-1', 'C-2', 'C-3', 'C-4', 'C-5', 'C-6'];
-  assert.match(make([100, 101, 102], six).record.breakIfDead({ card: 'C-1' }).reason, /3 of 6 claims look dead at once; none is broken/);
-  must(make([100, 101, 102], [...six, 'C-7']).record.breakIfDead({ card: 'C-1' }), '3 of 7 is under half');
-  // A refused break raises no break alert.
-  assert.ok(!three.alerts.some((a) => a.type === 'claim_broken'));
+  for (const id of ['C-1', 'C-2', 'C-3']) must(three.record.breakIfDead({ card: id }), `${id} is dead`);
+  assert.match(three.record.breakIfDead({ card: 'C-4' }).reason, /process alive/, 'a live pid is never broken');
+  assert.deepEqual(three.alerts.filter((a) => a.type === 'claim_broken').map((a) => a.card), ['C-1', 'C-2', 'C-3']);
+  assert.equal(three.alerts.filter((a) => a.type === 'claims_outage').length, 0, 'no outage alert from M9');
+  assert.equal(three.record.read('card', 'C-4').doc.state, 'running');
+  // Asked again about a broken card: it is ready now, so nothing more happens.
+  assert.match(three.record.breakIfDead({ card: 'C-1' }).reason, /only a claimed or running card's claim is broken/);
 });
 
-test('a tab claim is never broken; it lapses when its heartbeat goes stale or at the running limit', () => {
+test('a tab claim is never broken; with no heartbeat writer named, it lapses at the running limit (L74 addendum)', () => {
   const env = setup({ prefix: 'm9-tab-', probe: fakeProbe({ dead: [4242] }) });
   board(env, ['C-1', 'C-2', 'C-3']);
   const t0 = env.clock.t;
@@ -325,19 +352,20 @@ test('a tab claim is never broken; it lapses when its heartbeat goes stale or at
   runCard(env, 'C-2', { kind: 'tab', claim_id: 'T-2', host: 'mac-a' });
   runCard(env, 'C-3', { kind: 'tab', claim_id: 'T-3', host: 'mac-a' });
   assert.match(env.record.breakIfDead({ card: 'C-2' }).reason, /a tab claim is never broken/);
-  const beat = (id, at) => { env.clock.t = at; must(env.record.write({ actor: 'sensors', entity: 'fact', id: `hb-${id}-${at}`, expectRev: 0, doc: { type: 'tab_heartbeat', claim_id: id } }), 'beat'); };
-  beat('T-1', t0 + 8 * MIN);
-  beat('T-2', t0 + 8 * MIN);
-  for (let m = 8; m <= 56; m += 8) beat('T-3', t0 + m * MIN);
-  assert.deepEqual(env.record.lapseClaims(t0 + 18 * MIN).lapsed, [], 'a beat 10 minutes ago is not stale');
-  const r = env.record.lapseClaims(t0 + 18 * MIN + 1);
-  assert.deepEqual(r.lapsed.map((x) => [x.card, x.to]).sort(), [['C-1', 'ready'], ['C-2', 'waiting']]);
+  // A heartbeat has no family, so no role can write one by that name; one a role writes in its own family, or one put
+  // straight into the store, is a look-alike and keeps no claim alive (it fails closed: the running limit decides).
+  assert.match(env.record.write({ actor: 'sensors', entity: 'fact', id: 'hb-T-1', expectRev: 0, doc: { type: 'tab_heartbeat', claim_id: 'T-1' } }).reason, /in no family/);
+  for (let m = 8; m <= 56; m += 8) {
+    env.clock.t = t0 + m * MIN;
+    must(env.record.write({ actor: 'sensors', entity: 'fact', id: `usage-hb-${m}`, expectRev: 0, doc: { type: 'tab_heartbeat', claim_id: 'T-3' } }), 'look-alike');
+    env.store.transaction((tx) => tx.commit([{ entity: 'fact', id: `hb-${m}`, doc: { type: 'tab_heartbeat', claim_id: 'T-3' } }], { actor: 'sensors', kind: 'seed' }));
+  }
+  assert.deepEqual(env.record.lapseClaims(t0 + 60 * MIN).lapsed, [], 'not at the running limit');
+  const r = env.record.lapseClaims(t0 + 60 * MIN + 1);
+  assert.deepEqual(r.lapsed.map((x) => [x.card, x.to]).sort(), [['C-1', 'ready'], ['C-2', 'waiting'], ['C-3', 'waiting']]);
   const w = env.record.read('card', 'C-2').doc;
   assert.equal(w.claim, undefined);
   assert.equal(w.wait.return_to, 'ready');
   assert.equal(w.wait.resume, 'retry');
-  // C-3 keeps beating but hits the 60-minute running limit.
-  assert.deepEqual(env.record.lapseClaims(t0 + 60 * MIN).lapsed, []);
-  assert.deepEqual(env.record.lapseClaims(t0 + 60 * MIN + 1).lapsed.map((x) => x.card), ['C-3']);
   assert.ok(diaryKinds(env).filter((k) => k === 'claim_lapse').length === 3);
 });

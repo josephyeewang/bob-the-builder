@@ -35,12 +35,19 @@ test('the stand-in refuses a field or a move M9 does not allow that actor, as th
   assert.equal(at({ state: 'ready' }).ok, true);
   assert.equal(at({ state: 'claimed', claim: { kind: 'session', session_id: 'S-1', host: 'h' } }).ok, true);
   assert.match(at({ state: 'ready' }).reason, /made only by a claim break or lapse/);
-  // Who may create an entity at all: the dispatcher writes no facts.
-  assert.match(make('dispatcher', 'fact', 'F-1', { text: 'x' }).reason, /dispatcher may not create fact/);
+  // Facts by family (L74): the dispatcher makes facts only in its own families, so it can't take Sensors' pr- first.
+  assert.match(make('dispatcher', 'fact', 'F-1', { text: 'x' }).reason, /fact F-1 is in no family; dispatcher may not create it/);
+  assert.match(make('dispatcher', 'fact', 'pr-7', { text: 'x' }).reason, /fact pr-7 is in sensors's family, not dispatcher's/);
+  assert.match(make('approvals', 'fact', 'outage', { text: 'x' }).reason, /approvals may not create fact/);
   // The claim a move ends goes with it: leaving claimed by release clears it.
   assert.equal(rec.release({ card: 'C-1', session_id: 'S-1' }).ok, true);
   assert.equal(rec.read('card', 'C-1').doc.claim, undefined);
   assert.equal(rec.diary().length, 4);
+  // Change-own (L74): a fact is changed only by the role that created it.
+  assert.equal(make('dispatcher', 'fact', 'outage', { text: 'x' }).ok, true);
+  const f = rec.read('fact', 'outage');
+  assert.match(rec.write({ actor: 'sensors', entity: 'fact', id: 'outage', expectRev: f.rev, doc: { text: 'y' } }).reason, /sensors may change only a fact it created; outage was created by dispatcher/);
+  assert.equal(rec.write({ actor: 'dispatcher', entity: 'fact', id: 'outage', expectRev: f.rev, doc: { text: 'y' } }).ok, true);
 });
 
 test('AI roles cannot call write; bad arguments are refused, not thrown', () => {
