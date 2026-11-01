@@ -10,7 +10,7 @@
 //   check-install        [--main <sha>] the copy, its link, every install folder, access lists                 (read only)
 //   daemons place|load|unload  [--dry-run]   the three background jobs' files; load; unload                    (root)
 //   daemons list                        loaded or not, per job                                                 (read only)
-//   daemons check                       the job files are exact and the jobs are loaded                        (read only)
+//   daemons check                       the job files are exact, no leftover jobs, each job loaded from the file as it is now, last exit 0  (read only)
 //
 // The config: as root, ONLY the root-owned file at ROOT_CONFIG_PATH (layout.mjs), opened without following links, owned
 // by root, written by no one else, in folders only root writes (NEW-1). Without sudo, `--config <file>` may name another
@@ -20,7 +20,6 @@
 // refused when running as root: under sudo it would move where root writes while every printed path still read
 // /Library/... (L90 minor b). Exit: 0 fine, 1 a check failed or a problem was found, 2 usage or not root.
 
-import { readFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import { ROOT_CONFIG_PATH, parseConfig } from './layout.mjs';
 import { realIo, rootProblem } from './mac.mjs';
@@ -68,7 +67,7 @@ function report(res, out) {
  * every one of them starts with the same wall (L90 M3): the folders above the base must be root's alone, checked now (a
  * problem gives no steps at all) and again as the FIRST step of the run.
  */
-export function planCommand(io, cfg, o, { readSource = (p) => readFileSync(p, 'utf8'), runUpdater = spawnUpdater } = {}) {
+export function planCommand(io, cfg, o, { readSource = (p) => io.readSource(p), runUpdater = spawnUpdater } = {}) {
   if (o.cmd === 'users-folders') return plan(io, cfg);   // carries the wall itself
   const res = o.cmd === 'install' ? planInstall(io, cfg, { readSource, runUpdater })
     : o.sub === 'place' ? planPlace(io, cfg) : o.sub === 'load' ? planLoad(io, cfg) : planUnload(io, cfg);
@@ -122,7 +121,7 @@ export function main(argv, { io: given, runUpdater = spawnUpdater, out = (s) => 
   if (o.dry) { for (const x of planned.ops) out(`would run: ${x.text}`); out(`dry run: ${planned.ops.length} step(s), nothing changed.`); return 0; }
   try { apply(planned.ops, { log: (t) => out(`run: ${t}`) }); } catch (e) { err(`stopped: ${e.message}. Run it again after fixing that; it picks up where it stopped.`); return 1; }
   const after = o.cmd === 'users-folders' ? check(io, cfg, { alsoKnown: rootMadeEntries(cfg) }) : o.cmd === 'install' ? checkInstall(io, cfg)
-    : o.sub === 'place' ? checkDaemons(io, cfg).filter((r) => !/is loaded$/.test(r.what)) : o.sub === 'load' ? checkDaemons(io, cfg).filter((r) => /is loaded$/.test(r.what)) : null;
+    : o.sub === 'place' ? checkDaemons(io, cfg).filter((r) => /exactly the built job file$|under another label/.test(r.what)) : o.sub === 'load' ? checkDaemons(io, cfg).filter((r) => /is loaded$|loaded from the job file as it is now$/.test(r.what)) : null;
   if (!after) { out('done.'); return 0; }
   const bad = after.filter((r) => !r.ok);
   for (const r of bad) err(`FAIL  ${r.what} — ${r.why}`);

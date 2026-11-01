@@ -14,6 +14,14 @@
 //   io.euid()               who this process runs as
 //   io.rootUid              the uid root has (0; a test stands one in)
 //   io.nodeProblem()        null, or why the node running this is not one root may run (L90 minor a)
+//   io.nodeBinProblem(path) the same for a node program the config names (it is copied in and root runs the copy)
+//   io.readSource(path)     a file of this machine outside the prefix that root reads (the runner config): through one handle,
+//                           never through a link, a plain file, not too big; as root also root's own and written by no one else.
+//                           Errors never show a byte of the file.
+//   io.nodeBinProblem(path) the same for a node program the config names (it is copied in and root runs the copy)
+//   io.readSource(path)     a file of this machine outside the prefix that root reads (the runner config): through one handle,
+//                           never through a link, a plain file, not too big; as root also root's own and written by no one else.
+//                           Errors never show a byte of the file.
 //
 // There is no chown or chmod here that takes a path: both follow a link, and a Mac user that owns a parent folder can
 // swap a child for a link between the plan and the change. Every change opens the folder itself (O_NOFOLLOW, folder
@@ -120,6 +128,10 @@ export function realIo({ prefix = '' } = {}) {
     // The fixed config place is a logical path (under the prefix); a path the person named with --config is a real one.
     readConfig: (p, { strict = false } = {}) => readConfigFile(strict ? at(p) : p, { strict, rootUid: 0, top: prefix || '/' }),
     nodeProblem: () => nodeProblemOf(process.execPath),
+    nodeBinProblem: (p) => nodeProblemOf(p),
+    readSource: (p) => readConfigFile(p, { strict: (typeof process.geteuid === 'function' ? process.geteuid() : -1) === 0, rootUid: 0, top: '/' }),
+    nodeBinProblem: (p) => nodeProblemOf(p),
+    readSource: (p) => readConfigFile(p, { strict: (typeof process.geteuid === 'function' ? process.geteuid() : -1) === 0, rootUid: 0, top: '/' }),
     // For the install and the job files. `src` is a real path outside the prefix (a file of this repository, the node program).
     readText: (p) => readFileSync(at(p), 'utf8'),
     write: (p, text, mode) => writeNewFile(at(p), text, mode),
