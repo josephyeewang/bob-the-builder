@@ -47,8 +47,10 @@ function refusedAlerts(ctx, refused) {
     now[f.report] = f.reason;
     if (last[f.report] !== f.reason) ctx.alert?.({ kind: 'ask_request_refused', ...f });
   }
-  mkdirSync(ctx.stateDir, { recursive: true });
-  writeFileSync(file, `${JSON.stringify(now)}\n`);
+  // A state file that can't be saved is alerted, never thrown: the pass must still hand back the asks it opened, so
+  // their "on your waiting list" push goes out (L84 3). The cost is only that a refusal may be alerted again.
+  try { mkdirSync(ctx.stateDir, { recursive: true }); writeFileSync(file, `${JSON.stringify(now)}\n`); }
+  catch (e) { ctx.alert?.({ kind: 'research_refused_state_not_saved', reason: String(e?.code ?? e?.message ?? e) }); }
 }
 
 export function openResearchAsks(ctx) {
