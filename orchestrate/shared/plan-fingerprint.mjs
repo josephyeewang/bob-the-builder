@@ -32,13 +32,28 @@ export function canonicalJson(v) {
 }
 
 // The one rule for a plan's file path, exported so a plan's wave check (M3) compares the same cleaned form (L87 M-1).
-// Returns the cleaned path, or null when it is not one plain path.
+// Returns the cleaned path, or null when it is not one plain path. Refused besides the shape rules: control characters,
+// line and paragraph separators, and every Unicode format character (\p{Cf}: zero-width spaces and joiners U+200B-200F,
+// direction overrides U+202A-202E and isolates U+2066-2069, the byte-order mark U+FEFF, soft hyphen and the rest).
+// Those draw nothing on screen, so a path holding one reads to Joe as a different file from the one it names (L95 Minor 4).
+const UNPRINTED = /[\u0000-\u001f\u007f-\u009f\u2028\u2029\p{Cf}]/u;
 export function cleanPath(p) {
   if (typeof p !== 'string' || !p) return null;
   let q = p.normalize('NFC');
   while (q.startsWith('./')) q = q.slice(2);
-  if (!q || q.endsWith('/') || q.startsWith('/') || /[*?[\]{}]/.test(q) || q.includes('\\') || /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/.test(q) || q.split('/').some((s) => s === '' || s === '.' || s === '..')) return null;
+  if (!q || q.endsWith('/') || q.startsWith('/') || /[*?[\]{}]/.test(q) || q.includes('\\') || UNPRINTED.test(q) || q.split('/').some((s) => s === '' || s === '.' || s === '..')) return null;
   return q;
+}
+
+// The one key two plan paths are compared by (L93 m-1): the cleaned path, fully case-folded, in NFC. The Mac's default
+// disk ignores case, so two cards naming `straße.js` and `STRASSE.js`, or `ς.js` and `σ.js`, touch one file. A plain
+// toLowerCase misses both (ß stays ß; final ς stays ς), so this folds through upper case first (ß → SS → ss, ς → Σ → σ,
+// ﬁ → FI → fi), then NFC again, since a case change can leave text out of NFC. It folds slightly MORE than Unicode's
+// own case folding (dotless ı and i become one), which can only report a collision that isn't there, never miss one.
+// The fingerprint keeps case (cleanPath); this key answers "is it the same file", never what the worker is told.
+export function pathKey(p) {
+  const q = cleanPath(p);
+  return q === null ? null : q.toUpperCase().toLowerCase().normalize('NFC');
 }
 
 export function planFingerprint(plan) {
