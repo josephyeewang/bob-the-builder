@@ -10,36 +10,35 @@
 //                                                       written, L77 m9), and the step that fills it from the mirror
 //   settingsFor(copy)                                   the runner's settings maker (review-settings.mjs sessionSettings)
 //   spawn                                               child_process.spawn (a port, so a test runs no claude)
+//   packageFor (tests only)                             stands in for M5 reviewPackage; the runner never passes it
 // The wiring writes no settings of its own: it launches claude with `--settings <the file settingsFor wrote>` and no
 // other settings source, and returns claude's own process id (L66), since it spawns the pinned claude itself.
 // `ok: false` means claude was never spawned (L71 point 2).
 //
-// The prompt is a placeholder until R-0b-144 lands the reviewer's prompt and review package.
+// The prompt and the review package are M5's (R-0b-144): the package is worked out in the review copy once it is made.
 
 import { FLAGS as F } from './settings-names.mjs';
 import { DESIGN_PROFILES } from './role-profiles.mjs';
+import { reviewPackage } from '../../M5-review-audit/review-package.mjs';
+import { reviewerPrompt } from '../../M5-review-audit/reviewer-prompt.mjs';
 
 const refuse = (reason) => ({ ok: false, reason });
-
-function prompt(x) {
-  return [
-    `You are the ${x.role} for card ${x.card} at commit ${x.head}. The change is in your working folder.`,
-    `Hand in your verdict as one file in ${x.outbox}.`,
-    x.earlier || '',
-  ].filter(Boolean).join('\n\n');
-}
 
 export async function start(x) {
   const profile = DESIGN_PROFILES[x?.role];
   if (!profile) return refuse(`${x?.role} has no role profile`);
   let made; try { made = await x.makeCopy(); } catch (e) { made = refuse(e?.message ?? String(e)); }
   if (!made?.ok) return refuse(`the review copy: ${made?.reason ?? 'not made'}`);
+  const pkg = await (x.packageFor ?? reviewPackage)({ copy: x.copy, head: x.head });
+  if (!pkg?.ok) return refuse(`the review package: ${pkg?.reason ?? 'not made'}`);
+  let text;
+  try { text = reviewerPrompt({ ...x, pkg }); } catch (e) { return refuse(`the prompt: ${e?.message ?? e}`); }
   const s = x.settingsFor(x.copy);
   if (!s?.ok) return refuse(`the settings: ${s?.reason ?? 'not made'}`);
   const args = [F.print, F.outputFormat, F.streamJson, F.verbose, F.settings, s.file, F.sessionId, x.sessionId,
     F.strictMcpConfig, F.mcpConfig, '{"mcpServers":{}}', F.tools, profile.tools.join(','), F.permissionMode, profile.mode];
   if (profile.restricted) args.push(F.restricted);
-  args.push(prompt(x));
+  args.push(text);
   let child;
   try {
     child = x.spawn(x.claudeBin, args, { cwd: x.copy, env: { PATH: '/usr/bin:/bin:/usr/sbin:/sbin', HOME: process.env.HOME, ...x.env }, detached: true, stdio: 'ignore' });

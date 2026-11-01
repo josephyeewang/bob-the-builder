@@ -32,6 +32,7 @@ function x(over = {}) {
       claudeBin: '/i/bin/claude', copy: '/rc/S-1', spawn: sp.spawn,
       makeCopy: async () => { made.push('/rc/S-1'); return { ok: true }; },
       settingsFor: (dir) => { settings.push(dir); return { ok: true, file: `/r/settings/S-1.json` }; },
+      packageFor: async ({ copy, head }) => ({ ok: true, base: 'b'.repeat(40), head, files: [{ status: 'M', path: 'a.txt' }], diffFile: `${copy}/.git/orchestrate-review/change.diff`, diffBytes: 10 }),
       ...over,
     },
   };
