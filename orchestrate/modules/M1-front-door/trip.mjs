@@ -66,7 +66,7 @@ export function briefAnswers(text, ids) {
 // audit round 8 M-1); the failure itself is pushed once per id set (round 7 minor 1).
 export const TRIP_FAILED_TEXT = 'The Mini could not build it. It tries again every few minutes and pushes the brief when it can.';
 // The failure names the ids on its first line like a brief does, so the brief file can hold it and the skill quotes it
-// when the owner says "brief" (0b-8 audit round 9 M-1: in the two-reply fallback a failure was otherwise never seen).
+// when the owner says "brief" (0b-8 audit round 9 M-1: a failure was otherwise never seen there).
 // A bad id is a wiring fault that won't clear by itself, and it can't name the owner's ids, so it has its own first line the
 // skill quotes whatever ids it names (0b-8 confirm round M-1). Both carry the time for the skill's "Made at".
 const failedText = (ids, at) => `Trip brief failed at ${at}; answers state files: ${ids.join(', ')}.\n${TRIP_FAILED_TEXT}`;

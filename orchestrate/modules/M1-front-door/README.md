@@ -49,7 +49,7 @@ R-0b-82's decision and handoff code sit here although the row is tagged M11 (lan
    every time (each one replaced by the newest result of its kind; an old `lastFailedIds` is harmless, since ids are never reused). The pass also writes each result's text (a brief or a failure) to the read-only file the skill quotes
    if the owner asks first, and runs `readPowerSource` with the
    heartbeat. The skill quotes only a brief that names the ids it wrote (0b-8 audit round 3 M-3). If the push isn't
-   ready by the first cutover, trip mode falls back to two replies ("filed", then the brief when the owner says "brief").
+   proven by the first cutover, the cutover waits (L29): there is no fallback without the push.
 5. Lane 2: its launch read-back checker replaces `readback.mjs` at the join; the two agree on EndConversation and on
    settings sources (machine-wide + `--settings` only).
 6. The Air's health result (lead call L23): /configaudit on the Air runs `node M12-sensors/air-health.mjs <red count>

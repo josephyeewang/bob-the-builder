@@ -67,5 +67,16 @@ See LANES.md for who builds this folder, and the build rows (0b-9, R-0b-86..99) 
 - Create the robot (GitHub App), install it, and put its key in the orchestrate key folder (set up with `/apikeys`; the key is never read by a session).
 - Put the robot's numeric bot id in the rules (`product_profile.robot.bot_user_id`).
 - Name the required checks in the rules (`product_profile.required_checks`); with none, every change is refused (1, 2).
-- Allow undo cards without a go (`approvals.plan_go.go_free: [exact_reverse]`); without it every undo is refused (10).
+- Allow undo cards without a go, in the map form (block lines: the rules reader refuses `{…}`). The list form
+  `[exact_reverse]` works for the gate but not for the Dispatcher, which reads `lead_daily_card` from the same map, so
+  the first-cutover fit check refuses it (L86). Without `exact_reverse` every undo is refused (10).
+
+  ```yaml
+  approvals:
+    plan_go:
+      go_free:
+        exact_reverse: true
+        lead_daily_card:
+          - docs/blueprint/daily/**
+  ```
 - Set M2's `approvals.push_windows` and `approvals.decisions_dir`; no Approve stands without them.
