@@ -20,9 +20,8 @@
 // whole enclosing function, comments left out (`body`). A change to the call's line, or anywhere in its function,
 // changes a pin, so a planted mark nine lines later, a guard moved, or a swap inside one function shows up.
 import { createHash } from 'node:crypto';
-import { readdirSync, readFileSync, statSync, rmSync, mkdtempSync, realpathSync } from 'node:fs';
+import { readdirSync, readFileSync, statSync, rmSync, realpathSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
-import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { dirname, join, normalize, relative, sep } from 'node:path';
 import { mask, pairs, blocks, fnAt, namedFnBlockAt, lineOf, ALERT_NAMES, alertSites, wrappers, WRITE_CALL, TOLD_MARK } from './alert-answer-scan.mjs';
@@ -637,9 +636,15 @@ export function contractProblems(w, wrappersList, read, seen = new Set(), runtim
 // ---- the run-time proof (L143 M-2) ----
 
 const escapeRe = (t) => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-/** One run of one test (by exact name): { ran, passed, skipped, log: [{ outcome, frames }] }. */
-export function runOneTest(root, testRel, name, flip = null) {
-  const dir = mkdtempSync(join(tmpdir(), 'fake-alert-'));
+/**
+ * One run of one test (by exact name): { ran, passed, skipped, log: [{ outcome, frames }] }. `tmp` makes the folder
+ * for fakeAlert's log: the calling test file hands in a maker built on the tempDir helper of shared/test-tmp.mjs, so
+ * the folder is removed even if this run dies (tmp-guard.test.mjs: this file is test code and makes no temp folder of
+ * its own, and it is also the CLI, which must not load node:test).
+ */
+export function runOneTest(root, testRel, name, flip = null, tmp = null) {
+  if (typeof tmp !== 'function') throw new Error('runOneTest needs tmp: a folder maker built on the tempDir helper of shared/test-tmp.mjs');
+  const dir = tmp();
   const logFile = join(dir, 'log.jsonl');
   const env = { ...process.env, FAKE_ALERT_LOG: logFile };
   delete env.FAKE_ALERT_FLIP;
@@ -664,9 +669,9 @@ export function runOneTest(root, testRel, name, flip = null) {
  * with fakeAlert's throw turned into true, it fails. `answerUnused` (a lead call) excuses only the false flip: the code
  * acts the same whatever the alert answers (a red fact raised again every pass).
  */
-export function runtimeProblems(root, testRel, name, targets, { answerUnused = null } = {}) {
+export function runtimeProblems(root, testRel, name, targets, { answerUnused = null, tmp = null } = {}) {
   const out = [];
-  const plain = runOneTest(root, testRel, name);
+  const plain = runOneTest(root, testRel, name, null, tmp);
   if (!plain.ran) return [`the test did not run (no test by that exact name in ${testRel})`];
   if (plain.skipped) return ['the test is skipped or a todo when it runs, so it proves nothing'];
   if (!plain.passed) return ['the test fails'];
@@ -682,16 +687,16 @@ export function runtimeProblems(root, testRel, name, targets, { answerUnused = n
     if (!reached('false')) out.push(`${t.file} ${t.fn} never reached a fakeAlert that answered false`);
     if (!reached('threw')) out.push(`${t.file} ${t.fn} never reached a fakeAlert that threw`);
   }
-  if (!answerUnused && runOneTest(root, testRel, name, 'false').passed) out.push('it still passes when the lost alert answers true instead of false, so it never checks the answer');
-  if (runOneTest(root, testRel, name, 'throws').passed) out.push('it still passes when the failing alert answers true instead of throwing, so it never checks the throw');
+  if (!answerUnused && runOneTest(root, testRel, name, 'false', tmp).passed) out.push('it still passes when the lost alert answers true instead of false, so it never checks the answer');
+  if (runOneTest(root, testRel, name, 'throws', tmp).passed) out.push('it still passes when the failing alert answers true instead of throwing, so it never checks the throw');
   return out;
 }
-/** runtimeProblems, run once per test and target set. */
-export function runtimeCache(root) {
+/** runtimeProblems, run once per test and target set; `tmp` as for runOneTest. */
+export function runtimeCache(root, tmp) {
   const seen = new Map();
   return (testRel, name, targets, opts = {}) => {
     const k = JSON.stringify([testRel, name, targets, opts.answerUnused ?? null]);
-    if (!seen.has(k)) seen.set(k, runtimeProblems(root, testRel, name, targets, opts));
+    if (!seen.has(k)) seen.set(k, runtimeProblems(root, testRel, name, targets, { ...opts, tmp }));
     return seen.get(k);
   };
 }

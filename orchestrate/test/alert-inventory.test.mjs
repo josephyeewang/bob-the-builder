@@ -46,8 +46,7 @@
 //   - whether a ruled "retried next pass" stays true: the ruling is re-checked only when its pins change.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, readFileSync, mkdtempSync, mkdirSync, writeFileSync, copyFileSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { existsSync, readFileSync, mkdirSync, writeFileSync, copyFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
@@ -58,6 +57,7 @@ import {
 } from './alert-inventory.mjs';
 import { wrappers, standIns, losingStandIns, silentDefaults } from './alert-answer-scan.mjs';
 import { fakeAlert } from './fake-alert.test-helper.mjs';
+import { tempDir } from '../shared/test-tmp.mjs';
 import { outbox, ALERT_QUEUE_FACT } from '../modules/M11-dispatcher/alerts.mjs';
 import { holdAlert, HOLD_FACT } from '../modules/M11-dispatcher/pass.mjs';
 import { recWith, T0 } from '../modules/M11-dispatcher/fixtures.test-helper.mjs';
@@ -71,7 +71,8 @@ const LISTED = readList(ROOT);
 const squash = (t) => t.replace(/\s+/g, ' ').trim();
 const readSrc = (rel) => { try { return readFileSync(join(ROOT, rel), 'utf8'); } catch { return null; } };
 const CLI = 'run `node orchestrate/test/alert-inventory.mjs` for the pins and a suggested status';
-const RUNTIME = runtimeCache(ROOT);   // each contract or tested test is run three times, once per file and name
+const TMP = () => tempDir('orch-fake-alert-');   // fakeAlert's log for each run-time proof; removed when this file ends
+const RUNTIME = runtimeCache(ROOT, TMP);   // each contract or tested test is run three times, once per file and name
 
 // ---- 1. the pins ----
 
@@ -422,8 +423,8 @@ test('controls: every alert stand-in shape is caught (L143 Minor 5)', () => {
   assert.equal(n('const f = fakeAlert(); const o = { alert: f };'), 0, 'fakeAlert');
 });
 test('controls: the run-time proof fails a test that never reaches the code, ignores the answer, or ignores the throw (L143 M-2)', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'rt-control-'));
-  try {
+  const dir = tempDir('orch-rt-control-');
+  {
     mkdirSync(join(dir, 'test')); mkdirSync(join(dir, 'm'));
     copyFileSync(join(ROOT, HELPER), join(dir, HELPER));
     writeFileSync(join(dir, 'm/c.mjs'), 'export function closeIt(alert, rec) {\n  const sent = alert("x");\n  if (sent !== false) rec.push("told");\n  return sent;\n}\n'
@@ -450,7 +451,7 @@ test('closure', () => {
 });
 `);
     const target = [{ file: 'm/c.mjs', fn: 'closeIt' }];
-    const why = (name, opts) => runtimeProblems(dir, 'm/c.test.mjs', name, target, opts).join(' | ');
+    const why = (name, opts) => runtimeProblems(dir, 'm/c.test.mjs', name, target, { ...opts, tmp: TMP }).join(' | ');
     assert.equal(why('honest'), '', 'an honest test is proven');
     assert.match(why('token'), /never reached a fakeAlert that answered false.*never reached a fakeAlert that threw/, 'a token test (r2 F3) reaches nothing');
     assert.match(why('ignores the answer'), /still passes when the lost alert answers true/, 'a test that never checks the answer');
@@ -459,10 +460,10 @@ test('closure', () => {
     assert.match(why('skipped'), /skipped or a todo/, 't.skip() in the body');
     assert.match(why('no such test'), /did not run/, 'a name that is not a test');
     // The closure a wrapper hands back has no name on the stack; a frame on a line inside the function counts (safeAlert).
-    const closure = (fn) => runtimeProblems(dir, 'm/c.test.mjs', 'closure', [{ file: 'm/c.mjs', fn }]).join(' | ');
+    const closure = (fn) => runtimeProblems(dir, 'm/c.test.mjs', 'closure', [{ file: 'm/c.mjs', fn }], { tmp: TMP }).join(' | ');
     assert.equal(closure('guard'), '', 'the closure guard hands back is reached inside guard');
     assert.match(closure('other'), /never reached a fakeAlert that answered false/, 'but not inside a function it never ran');
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+  }
 });
 
 // ---- 6. fakeAlert keeps the real outbox's contract (L135 item 5) ----
