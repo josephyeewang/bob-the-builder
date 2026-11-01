@@ -125,14 +125,14 @@ test('L104: usage.pace_min_share: 0.5 in the rules text comes out as 0.5', () =>
 
 test('L104 O-1: the checker accepts outage.*, the timeouts minute keys and caps.shakedown, and reads them typed', () => {
   const text = `${FIXTURE.replace(/^caps:\n/m, 'caps:\n  shakedown: false\n')
-    .replace(/^timeouts:\n/m, 'timeouts:\n  cancel_grace_min: 20\n  usage_unknown_max_min: 90\n  merging_open_max_min: 45\n')}\noutage:\n  min_dead: 2\n  share: 0.5\n`;
+    .replace(/^timeouts:\n/m, 'timeouts:\n  cancel_grace_min: 20\n  usage_unknown_max_min: 90\n')}\noutage:\n  min_dead: 2\n  share: 0.5\n`;
   const rules = rulesFromText(text);
   const o = { product: 'app' };
   assert.equal(rules.flag('caps.shakedown', o), false);
   assert.equal(rules.num('caps.shakedown_workers', o), 1, 'the fixture holds 1');
   assert.equal(rules.num('timeouts.cancel_grace_min', o), 20);
   assert.equal(rules.num('timeouts.usage_unknown_max_min', o), 90);
-  assert.equal(rules.num('timeouts.merging_open_max_min', o), 45, "the Merge Gate's limit (lane 2)");
+  assert.equal(rules.num('timeouts.merging_open_max_min', o), 10, "the Merge Gate's limit, in the fixture itself (L148)");
   assert.equal(rules.num('outage.min_dead', o), 2);
   assert.equal(rules.dec('outage.share', o), 0.5);
   // What it still refuses: a shakedown that isn't true or false, a minute key that isn't a whole number, a misspelt
@@ -208,4 +208,12 @@ test('L96 (audit #77 M-3a): usage.red_runs is Mac-wide, so a read with no produc
   assert.equal(rulesFor({ app: withUsage('  red_runs:\n    - kind: undos') }).get('usage.red_runs'), undefined, 'a list of maps, not names');
   // An empty list is a real answer: nothing runs in the red band.
   assert.deepEqual([...rulesFor({ app: withUsage('  red_runs: []') }).get('usage.red_runs')], []);
+});
+
+test("L148: the fixture holds the Merge Gate's open limit, read through the real text path, under merge.merging's own limit", () => {
+  const limit = rulesFromText(FIXTURE).num('timeouts.merging_open_max_min', P);
+  assert.equal(limit, 10, '#68 gate.mjs reads this; without it a real install gets MissingKey and no alert');
+  const p = parsePolicy(FIXTURE);
+  assert.ok(p.ok, p.reason);
+  assert.ok(limit < p.policy.timeouts.merge.merging.minutes, "the gate decides before the record's merging limit does");
 });
