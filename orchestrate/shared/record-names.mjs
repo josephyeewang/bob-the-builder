@@ -40,7 +40,8 @@ export const OUTBOX_KIND_PATTERN = KIND_SHAPE;
 // A session id: capped so an id made from it stays a legal file name (0b-2 audit round 6). record.mjs re-exports it.
 export const SESSION_ID = /^[A-Za-z0-9-]{1,128}$/;
 // The longest listed kind a file name starts with (so `report-compact-x` is report-compact-, not report-), or null;
-// a compaction note (`-compact-` in its name) is only ever a `-compact-` kind (L101). M9's outbox, the test stand-in,
+// a compaction note (`-compact` in its name, in any case: the reserved form, M4 outbox-kind.mjs, L121) is only ever a
+// `-compact-` kind (L101). M9's outbox, the test stand-in,
 // M4's intake read and M11's intake read a file's kind with this one function; the plain-files hook uses the same
 // rule (kindAmong) on the kinds the launcher hands it.
 export const outboxKindOf = (name) => kindAmong(name, Object.keys(OUTBOX_KINDS));

@@ -129,6 +129,9 @@ export function renderRoleSettings({ role, profile, paths, product = {}, rulesHo
   // Only a worker and the writer change files in a code copy; every other role writes its outbox only.
   const copyArg = ['worker', 'writer'].includes(role) ? ` --copy ${paths.copy}` : '';
   // The longer listed kinds this role may not hand in, so the hook reads a name's kind as M9 does (L82 M-1).
+  // Kept on purpose as the general guard (L121 cosmetic): today every such kind is a `-compact-` kind (report-compact-
+  // for the reviewer, scout, writer, thinking role and scripts), which the compaction rule alone already keeps from
+  // matching; this list also covers a longer kind added later that is not a compaction kind.
   const shadow = shadowKindsFor(role, profile.outbox);
   const notKinds = shadow.length ? ` --not-kinds ${shadow.join(',')}` : '';
   const hookCmd = (name, extra = '') =>

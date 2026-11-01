@@ -96,7 +96,7 @@ test('L101: a reviewer\'s verdict-compact- note is refused everywhere; a Lead\'s
   const all = { hook: true, m4: true, m9: true };
   for (const [role, name, want] of [
     ['reviewer', 'verdict-compact-S1.md', none], ['auditor', 'verdict-compact-S1.md', none],
-    ['lead', 'handoff-compact-L1.md', none], ['thinking', 'proposal-compact-T1.md', none],
+    ['lead', 'handoff-compact-L1.md', none], ['thinking', 'report-compact-T1.md', none],
     ['worker', 'report-compact-W1.md', all], ['front_door', 'state-compact-F1.md', all],
   ]) {
     assert.deepEqual(judge(env, role, `N-${role}`, name), want, `${role} handing in ${name}`);
@@ -117,6 +117,22 @@ test('L101: the hook\'s kindIn and the shared outboxKindOf give every role the s
       assert.equal(kindIn(name, outboxKindsFor(role), shadowKindsFor(role)), want, `${role}: ${name}`);
     }
   }
+});
+
+// L121 Minor 4: the reserved form. `-compact` in any case, anywhere, whatever follows, makes a name a compaction note,
+// and only a `-compact-` kind the name starts with exactly can match it. The hook, M4's intake read and M9 agree.
+test('L121: a name holding -compact in any case is a compaction note, never a verdict or any other plain kind', () => {
+  for (const name of ['verdict-compact-S1.md', 'verdict-COMPACT-S1.md', 'verdict-Compact-S1.md', 'verdict-compact.md',
+    'verdict-compactS1.md', 'verdict-S1-compact', 'verdict-S1-Compact.md', 'report-Compact-W1.md', 'report-compact.md',
+    'report-compactness.md', 'state-COMPACT-F1.md', 'handoff-x-compact_1.md']) {
+    assert.equal(outboxKindOf(name), null, name);
+    for (const role of LAUNCHED) assert.equal(kindIn(name, outboxKindsFor(role), shadowKindsFor(role)), null, `${role}: ${name}`);
+  }
+  // The notes the hook really writes keep their kinds, and a plain name that only holds "compa" is untouched.
+  assert.equal(outboxKindOf('report-compact-W1.md'), 'report-compact-');
+  assert.equal(outboxKindOf('state-compact-F1.md'), 'state-compact-');
+  assert.equal(outboxKindOf('verdict-S1.md'), 'verdict-');
+  assert.equal(outboxKindOf('report-compare-1.md'), 'report-');
 });
 
 test('L101: the rendered compaction hooks name a notes folder apart from the outbox for every role without a -compact- kind', () => {
