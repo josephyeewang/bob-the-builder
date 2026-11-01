@@ -58,7 +58,8 @@ rec.lapseClaims(now);
 
 - **Claims are a field on the card** (`claim`), set by `ready → claimed` and cleared when the card leaves claimed and running. `claimed → ready` and `running → ready` are never a plain write: they happen only through `release`, `breakIfDead` or `lapseClaims`.
 - **Outbox kinds** (`OUTBOX_KINDS`) are the file-name prefixes each AI role may send. A worker hands its card in with `handin-` (running → in_review). An `ask-request-` is stored as an inert report; only `approvals` turns it into an ask.
-- **Plan fingerprint**: `plan-fingerprint.mjs` is the one fingerprint a go binds to. M2 Approvals stores it on the go; M9 recomputes it at `draft → ready`.
+- **Plan fingerprint**: `plan-fingerprint.mjs` is the one fingerprint a go binds to. M2 Approvals stores it on the go; M9 recomputes it at `draft → ready`. Its `cleanPath` is the one rule for a plan's file path (L87).
+- **Plan review pass**: `plan-review.mjs` is the one shape of a fresh plan reviewer's pass, which a Tier-1 go needs. `planPass` builds it from M3's read of the reviewer's answer plus ids the reviewer can't write (the card, its fingerprint, and the two sessions from the launch records). M2's `planCheckProblem` checks it (L87).
 
 - **Required fields** (`REQUIRED_FIELDS`) are refused when missing, by the fake too: a card's `state` and `module`; a verdict's `session_id` and `head`; every field of `merge_request` and of `launch` (both written by the Dispatcher only), except that a launch names a `card` and `head` only for a worker, reviewer or auditor (`CARD_ROLES`; one check, `missingFields`).
 - **Final states** (`FINAL_STATES`) need no time limit; every other state has one in the rules. `closed → reverted` is the one move out of a final state.
