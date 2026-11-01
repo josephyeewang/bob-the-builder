@@ -10,6 +10,9 @@
 // The outage ends by itself after 2 passes in a row with the network up, the Mini signed in and
 // usage readable, or on Joe's "resume". Outside an outage, a dead session's card is restarted only
 // when `rerun_safe === true`; any other card becomes an ask (waiting on Joe), never a restart.
+// The Record has no rerun_safe field and no writer for one yet (L72 census, a (b) for the lead): until it does,
+// every dead session's card waits on Joe, the safe side. This file is the one outage rule (L72 (ii)): M9's
+// breakIfDead only breaks the claim it is given.
 
 import { KEYS, need, minutes } from './keys.mjs';
 

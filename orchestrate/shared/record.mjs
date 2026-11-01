@@ -14,9 +14,13 @@
 //   rec.applyOutbox({ role: 'worker', sessionId: 'S-4', card: 'C-12' }, '/path/report-C-12.md')
 //                                                // → { ok: true, … } or { ok: false, reason }
 //   rec.diary({ since: 0 })                      // → diary lines, oldest first
+//   rec.meta('card', 'C-12')                     // → { ts, stateSince, createdBy } (the Record's own clock: its last
+//                                                   write, and when it reached its state; and who made it, which a
+//                                                   gating reader checks with M9's factFrom), or null when absent
 //   rec.ready()                                  // → cards that may start now (M9's ready rule)
 //   rec.overdue(now)                             // → [{ entity, id, state, since, limit }] past their time limit
-//   rec.release({ card, session_id })            // the claim's holder gives the card back (claimed → ready)
+//   rec.release({ card, session_id, reason? })   // the claim's holder gives the card back (claimed → ready); the
+//                                                // reason (say, the launcher's refusal) is kept on the diary line
 //   rec.breakIfDead({ card }, probe?)            // break a claim whose owner is provably dead (G1)
 //   rec.lapseClaims(now, { stopSession }?)       // claims past their time limit lapse, each with a diary line; an
 //                                                   unlaunched one only once stopSession(id) says nothing runs (L72)
@@ -29,10 +33,12 @@
 // diary() is the one call that throws when the store can't be read: its callers walk every line, and an empty answer
 // would read as "nothing happened" (round 10 m2: fail closed by throwing, not by an empty list).
 
-import { CARD_KINDS, OUTBOX_KINDS, OUTBOX_KIND_PATTERN, STATES } from './record-names.mjs';
-export { CARD_KINDS, OUTBOX_KINDS, OUTBOX_KIND_PATTERN, STATES };
+import { createHash } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+import { CARD_KINDS, OUTBOX_KINDS, OUTBOX_KIND_PATTERN, SESSION_ID, STATES, outboxKindOf } from './record-names.mjs';
+export { CARD_KINDS, OUTBOX_KINDS, OUTBOX_KIND_PATTERN, STATES, outboxKindOf };
 // The test stand-in's field and move check is M9's own (L72); guard.mjs needs only record-names.mjs, so no load loop.
-import { guardWrite } from '../modules/M9-record/guard.mjs';
+import { claimCheck, guardWrite } from '../modules/M9-record/guard.mjs';
 
 // Plain-script actors write under their own name; AI roles only through applyOutbox, as `<role>:<sessionId>`.
 // `joe` writes nothing in 0b (the owner acts through `approvals`); it stays a name so old diary lines still parse.
@@ -110,8 +116,10 @@ export function timeoutFor(rules, entity, state) {
 // They sit in the document's `wait` field. A card's wait also says how it resumes and where to (R2-m10, R2-m1).
 export const WAIT_FIELDS = Object.freeze(['who', 'what', 'since', 'next_check']);
 export const WAIT_RETURN_FIELDS = Object.freeze(['resume', 'return_to']);
-export const WAIT_WHO = Object.freeze(['joe', 'usage', 'dependency', 'incident', 'date']);   // `date` also needs a reason
-export const SESSION_ID = /^[A-Za-z0-9-]{1,128}$/;   // capped so an id made from it stays a legal file name (0b-2 audit round 6)
+// A card waiting on the owner says this `who` (L79): readers compare against it, never a string of their own.
+export const OWNER_WAIT_WHO = 'joe';
+export const WAIT_WHO = Object.freeze([OWNER_WAIT_WHO, 'usage', 'dependency', 'incident', 'date']);   // `date` also needs a reason
+export { SESSION_ID };   // one rule, in record-names.mjs (the guard reads it too)
 
 export function isActor(a) {
   if (SCRIPT_ACTORS.includes(a)) return true;
@@ -131,6 +139,15 @@ export function makeRecord(impl) {
     read(entity, id) { if (!ENTITIES.includes(entity)) return null; try { return impl.read(entity, id); } catch (e) { return corrupt(entity, id, e); } },
     list(entity) { if (!ENTITIES.includes(entity)) return []; try { return impl.list(entity); } catch (e) { return [corrupt(entity, null, e)]; } },
     diary(opts = {}) { return impl.diary(opts); },
+    // Times come from the Record, never from a field a script stamps (L72): no script may set changed_at. A caller
+    // that can't read them gets null and treats the age as unknown.
+    meta(entity, id) {
+      if (!ENTITIES.includes(entity)) return null;
+      try {
+        const m = optional('meta', () => null)(entity, id);
+        return m && typeof m.ts === 'string' && typeof m.stateSince === 'string' ? { ts: m.ts, stateSince: m.stateSince, createdBy: typeof m.createdBy === 'string' ? m.createdBy : null } : null;
+      } catch { return null; }
+    },
     write(w) {
       if (!w || !isActor(w.actor)) return refused(`unknown actor "${w?.actor}"`);
       if (!SCRIPT_ACTORS.includes(w.actor)) return refused('AI roles write only through their outbox');
@@ -162,49 +179,104 @@ export function makeRecord(impl) {
 // For other modules' tests: an in-memory record that keeps the rev check, the diary, and M9's own check of who may
 // set which fields and make which move (M9-record/guard.mjs, imported, not copied: L72). A stand-in looser than the
 // real Record let writes pass every test that the real one refuses. What it still does not check is the rest of the
-// Store Writer: the ready rule, a claim's and a wait's shape, verdicts and merges. applyOutbox records the hand-in only.
+// Store Writer: the ready rule, a claim's and a wait's shape, verdicts and merges. applyOutbox makes the document a
+// create kind makes (a handoff, a report, a lesson: as M9's applyParsed does, once per file content, written as
+// `<role>:<session>`), without M9's file checks (owner, links, size); any other kind it records in the diary only.
 // The claim fakes are simple: ready() is every `ready` card with no claim, release() hands a claimed card back when the
-// session holds it, breakIfDead() never breaks (the fake can't tell a dead owner), overdue() and lapseClaims() find none.
-export function memoryRecord() {
+// session holds it, overdue() and lapseClaims() find none. breakIfDead() breaks only what M9's would and only when the
+// test's `dead(claim)` says the owner is dead (the fake can't tell a dead owner itself, so with no `dead` it never
+// breaks): a session claim on a claimed or running card that has a process. The contract test runs the real one.
+// meta() keeps the real Record's times by `now` (a function giving ms; the real clock when not given), so a test sets
+// the clock instead of a changed_at field no script may write.
+// The diary data of a release: who gave the card back and why (a reason is text, capped like any diary text).
+export const releaseData = (by, reason) => ({ by, ...(typeof reason === 'string' && reason ? { reason: reason.slice(0, 500) } : {}) });
+
+export function memoryRecord({ now = () => Date.now(), dead = null } = {}) {
   const docs = new Map();
   const lines = [];
   const key = (e, id) => `${e}/${id}`;
+  const stamp = () => new Date(now()).toISOString();
   // What a read returns: the document and its rev, as the real Record's read does (createdBy stays inside, as the store's meta).
   const view = (d) => structuredClone({ entity: d.entity, id: d.id, doc: d.doc, rev: d.rev });
-  const log = (actor, kind, entity, id, from, to, data) => {
-    const line = { seq: lines.length + 1, ts: new Date().toISOString(), actor, kind, entity, id, from_state: from ?? null, to_state: to ?? null, data: data ?? null };
+  const log = (actor, kind, entity, id, from, to, data, ts = stamp()) => {
+    // `writes` as the real diary line has it, so a reader of who last wrote an entry (M2's ask-store) reads it here too.
+    const line = { seq: lines.length + 1, ts, actor, kind, entity, id, from_state: from ?? null, to_state: to ?? null, data: data ?? null, writes: [{ entity, id }] };
     lines.push(line);
     return line.seq;
   };
+  // The times as the real store keeps them: ts is the last write, stateSince the write that changed the state.
+  const touch = (d, prevState) => { d.ts = stamp(); if (!d.stateSince || (prevState ?? null) !== (d.doc?.state ?? null)) d.stateSince = d.ts; };
   return makeRecord({
     read(entity, id) { const d = docs.get(key(entity, id)); return d ? view(d) : null; },
     list(entity) { return [...docs.values()].filter((d) => d.entity === entity).map(view); },
+    meta(entity, id) { const d = docs.get(key(entity, id)); return d ? { ts: d.ts, stateSince: d.stateSince, createdBy: d.createdBy } : null; },
     diary({ since = 0 } = {}) { return lines.filter((l) => l.seq > since).map((l) => ({ ...l })); },
     write({ actor, entity, id, expectRev, doc, kind = 'write' }) {
       const cur = docs.get(key(entity, id));
       if ((cur?.rev ?? 0) !== expectRev) return refused(`changed since read (rev ${cur?.rev ?? 0}, expected ${expectRev})`);
       const g = guardWrite({ entity, id, actor, old: cur?.doc ?? null, doc, createdBy: cur?.createdBy ?? null });
       if (!g.ok) return refused(g.reason);
+      // The claim's shape and its two steps, by the same check the Store Writer makes (L72).
+      if (entity === 'card') {
+        const c = claimCheck({ old: cur?.doc ?? null, doc: g.doc, from: g.from, to: g.to, changed: g.changed, nowMs: now() });
+        if (!c.ok) return refused(c.reason);
+        if (c.claim) g.doc.claim = c.claim;
+      }
       const rev = expectRev + 1;
-      docs.set(key(entity, id), { entity, id, doc: g.doc, rev, createdBy: cur?.createdBy ?? actor });
-      const seq = log(actor, kind, entity, id, cur?.doc?.state, doc?.state);
+      const d = { entity, id, doc: g.doc, rev, createdBy: cur?.createdBy ?? actor, ts: cur?.ts, stateSince: cur?.stateSince };
+      touch(d, cur ? cur.doc?.state : undefined);
+      docs.set(key(entity, id), d);
+      const seq = log(actor, kind, entity, id, cur?.doc?.state, doc?.state, d.ts);
       return { ok: true, rev, seq };
     },
     applyOutbox(tag, file) {
-      const seq = log(`${tag.role}:${tag.sessionId}`, 'outbox', 'report', String(file).split('/').pop(), null, null, { card: tag.card ?? null });
+      const name = String(file).split('/').pop();
+      const actor = `${tag.role}:${tag.sessionId}`;
+      const spec = OUTBOX_KINDS[outboxKindOf(name)] ?? null;
+      if (spec?.mode === 'create' && spec.entity && spec.roles.includes(tag.role)) {
+        let buf;
+        try { buf = readFileSync(file); } catch (e) { return refused(`can't read ${name} (${e?.code ?? 'error'})`); }
+        const sha256 = createHash('sha256').update(buf).digest('hex');
+        const sourceKey = `${file}\0${sha256}`;
+        if ([...docs.values()].some((d) => d.entity === spec.entity && d.doc?.source_key === sourceKey)) return { ok: true, skipped: true };
+        const kind = outboxKindOf(name);
+        const id = `${kind}${tag.sessionId}-${lines.length + 1}`;
+        const doc = { kind, role: tag.role, session_id: tag.sessionId, card: tag.card ?? null, source: name, source_key: sourceKey, sha256, text: buf.toString('utf8') };
+        const g = guardWrite({ entity: spec.entity, id, actor, old: null, doc, createdBy: null });
+        if (!g.ok) return refused(g.reason);
+        const d = { entity: spec.entity, id, doc: g.doc, rev: 1, createdBy: actor };
+        touch(d);
+        docs.set(key(spec.entity, id), d);
+        return { ok: true, rev: 1, seq: log(actor, 'outbox', spec.entity, id, null, null, { card: tag.card ?? null }, d.ts) };
+      }
+      const seq = log(actor, 'outbox', 'report', name, null, null, { card: tag.card ?? null });
       return { ok: true, seq };
     },
     ready() { return [...docs.values()].filter((d) => d.entity === 'card' && d.doc?.state === 'ready' && !d.doc.claim).map((d) => structuredClone(d)); },
     overdue() { return []; },
-    release({ card, session_id } = {}) {
+    release({ card, session_id, reason } = {}) {
       const cur = docs.get(key('card', card));
       if (!cur || cur.doc?.state !== 'claimed' || cur.doc.claim?.session_id !== session_id) return refused('only the claim\'s holder may release it');
       const { claim, ...rest } = cur.doc;   // eslint-disable-line no-unused-vars
       cur.doc = { ...rest, state: 'ready' };
       cur.rev += 1;
-      return { ok: true, rev: cur.rev, seq: log('dispatcher', 'claim_release', 'card', card, 'claimed', 'ready') };
+      touch(cur, 'claimed');
+      return { ok: true, rev: cur.rev, seq: log('dispatcher', 'claim_release', 'card', card, 'claimed', 'ready', releaseData(session_id, reason)) };
     },
-    breakIfDead() { return refused('the memory record never breaks a claim'); },
+    breakIfDead({ card } = {}) {
+      const cur = docs.get(key('card', card));
+      if (!cur || !['claimed', 'running'].includes(cur.doc?.state)) return refused(`card ${card} is not claimed or running`);
+      const claim = cur.doc.claim;
+      if (claim?.kind !== 'session') return refused('a tab claim is never broken; it lapses');
+      if (!Number.isInteger(claim.pid)) return refused('this claim has no process yet; it lapses, never broken');
+      if (typeof dead !== 'function' || dead(structuredClone(claim)) !== true) return refused('owner not provably dead');
+      const from = cur.doc.state;
+      const { claim: _c, ...rest } = cur.doc;   // eslint-disable-line no-unused-vars
+      cur.doc = { ...rest, state: 'ready' };
+      cur.rev += 1;
+      touch(cur, from);
+      return { ok: true, rev: cur.rev, seq: log('dispatcher', 'claim_break', 'card', card, from, 'ready') };
+    },
     lapseClaims() { return { ok: true, lapsed: [] }; },
   });
 }

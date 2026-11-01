@@ -37,12 +37,14 @@ export const KEYS = Object.freeze({
   cancelGraceMin: 'timeouts.cancel_grace_min',
   parkWaitMin: 'timeouts.park_wait_min',
   deadQuietMin: 'timeouts.dead_quiet_min',
-  claimedNoSessionMin: 'timeouts.claimed_no_session_min',
   checkingMaxMin: 'timeouts.checking_max_min',
   reportingMaxMin: 'timeouts.reporting_max_min',
   inReviewNoReviewerMin: 'timeouts.in_review_no_reviewer_min',
   frontDoorStuckMin: 'timeouts.front_door_stuck_min',
   usageUnknownMaxMin: 'timeouts.usage_unknown_max_min',
+  // claims (L72): the quiet time before a dead owner's claim is broken (M9 breakIfDead reads it; read here so a missing
+  // value is told). A claim whose session never started lapses at M9's claims.unlaunched_min, which has a default.
+  claimsStuckMin: 'claims.stuck_min',
   // outage (review M9)
   outageMinDead: 'outage.min_dead',
   outageShare: 'outage.share',
@@ -57,7 +59,7 @@ export const KEYS = Object.freeze({
 // them through `fakeRules({ values })`.
 export const NEW_KEYS = Object.freeze([
   KEYS.paceMinShare, KEYS.shakedown, KEYS.amberEditingPerProduct, KEYS.amberEditingPerMac,
-  KEYS.cancelGraceMin, KEYS.parkWaitMin, KEYS.deadQuietMin, KEYS.claimedNoSessionMin, KEYS.checkingMaxMin,
+  KEYS.cancelGraceMin, KEYS.parkWaitMin, KEYS.deadQuietMin, KEYS.checkingMaxMin,
   KEYS.reportingMaxMin, KEYS.inReviewNoReviewerMin, KEYS.frontDoorStuckMin, KEYS.usageUnknownMaxMin, KEYS.outageMinDead, KEYS.outageShare,
 ]);
 

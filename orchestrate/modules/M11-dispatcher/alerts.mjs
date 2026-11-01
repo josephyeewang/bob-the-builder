@@ -129,6 +129,13 @@ export function outbox(rec, now) {
  * again queues the same entry, not a second one, and an entry dropped at a cap is counted (L52). Every "told" write in this folder sits in a
  * `tellThen` call: the sweep in alert-sites.test.mjs checks it.
  */
+/**
+ * The outbox `alert` for a module whose alerts are objects (M6 settleMerge: { type, note, reason, merge }), as text.
+ * Only ever wraps the step's own outbox `alert` (the sweep in alert-sites.test.mjs allows `textAlerts(alert)` alone).
+ */
+export const textAlerts = (alert, who = 'merge gate') => (e) => alert(typeof e === 'string' ? e
+  : `${who}: ${e?.note ?? e?.reason ?? e?.type ?? 'no detail'}${e?.merge ? ` (merge ${e.merge})` : ''}`);
+
 export function tellThen(alert, text, mark) {
   return alert(text, { mark });
 }

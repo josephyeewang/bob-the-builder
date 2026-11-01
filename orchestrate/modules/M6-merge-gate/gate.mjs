@@ -25,6 +25,7 @@ import { judge } from './refusals.mjs';
 import { MARK_CONTEXT, markDescription, markable, NEEDS_JOE_CONTEXT, needsJoeDescription } from './mark.mjs';
 import { isOpen } from '../../shared/record.mjs';
 import { markReverted } from './undo.mjs';
+import { factFrom } from '../M9-record/permissions.mjs';
 
 export const ACTOR = 'merge_gate';
 export const NOT_GREEN_LINE = 'outside check not green in 2 h';
@@ -67,6 +68,11 @@ export async function gatePass(ctx) {
     return r.ok;
   };
 
+  // An audit result is proof only from Sensors' own family, made by Sensors (L74 addendum): never a fact found by its
+  // type alone, which any role may write into its own family.
+  const auditRuns = () => record.list('fact').filter((x) => x.doc?.type === 'audit_run'
+    && factFrom('sensors', { id: x.id, createdBy: record.meta?.('fact', x.id)?.createdBy ?? null }, 'audit-run-'));
+
   // 2. Intake.
   const merges = () => record.list('merge').filter((m) => m.doc && !m.corrupt);
   const taken = new Set(merges().map((m) => m.doc.request));
@@ -98,7 +104,7 @@ export async function gatePass(ctx) {
 
   // 3. Audit results (R-0b-93): only a Sensors audit_run fact for the merge commit moves a merged merge.
   for (const m of merges().filter((x) => x.doc.state === 'merged' && SHA.test(x.doc.merge_commit ?? ''))) {
-    const f = record.list('fact').find((x) => x.doc?.type === 'audit_run' && x.doc.commit === m.doc.merge_commit && ['success', 'failure'].includes(x.doc.conclusion));
+    const f = auditRuns().find((x) => x.doc.commit === m.doc.merge_commit && ['success', 'failure'].includes(x.doc.conclusion));
     if (!f) continue;
     const to = f.doc.conclusion === 'success' ? 'audited_ok' : 'audit_flagged';
     const r = record.write({ actor: ACTOR, entity: 'merge', id: m.id, expectRev: m.rev, doc: { ...m.doc, state: to, audited_at: iso() }, data: { fact: f.id } });
@@ -251,7 +257,7 @@ export async function gatePass(ctx) {
     if (r.ok) {
       step(m, 'marked');
       // An audit that already ran on this commit read it with no mark: it needs running again.
-      if (m.doc.state !== 'merged' || record.list('fact').some((x) => x.doc?.type === 'audit_run' && x.doc.commit === sha)) alert({ type: 'merge_marked_after_audit', merge: m.id, commit: sha, ask_owner: 'Re-run the audit on this commit?' });
+      if (m.doc.state !== 'merged' || auditRuns().some((x) => x.doc.commit === sha)) alert({ type: 'merge_marked_after_audit', merge: m.id, commit: sha, ask_owner: 'Re-run the audit on this commit?' });
     } else alert({ type: 'merge_gate_write_refused', merge: m.id, to: 'marked', reason: r.reason });
   }
 

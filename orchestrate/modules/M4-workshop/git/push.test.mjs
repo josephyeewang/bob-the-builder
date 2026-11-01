@@ -111,8 +111,10 @@ async function world({ scanner: scannerOverride, gate = {} } = {}) {
   mkdirSync(privateDir, { mode: 0o700 });
 
   const record = memoryRecord();
-  record.write({ actor: 'dispatcher', entity: 'session', id: 'S-1', expectRev: 0, doc: { product: PRODUCT, card: 'C-1', branch: 'card/c-1', outbox, attempt: 'a1' } });
-  record.write({ actor: 'dispatcher', entity: 'card', id: 'C-1', expectRev: 0, doc: { title: 'Card one', summary: 'does a thing' } });
+  // Seeded as the real Record takes them (L72): a session starts in preparing; a card names its state and module,
+  // and its PR title is the card's `what`.
+  assert.equal(record.write({ actor: 'dispatcher', entity: 'session', id: 'S-1', expectRev: 0, doc: { state: 'preparing', product: PRODUCT, card: 'C-1', branch: 'card/c-1', outbox, attempt: 'a1' } }).ok, true);
+  assert.equal(record.write({ actor: 'dispatcher', entity: 'card', id: 'C-1', expectRev: 0, doc: { state: 'draft', module: 'M-test', what: 'Card one' } }).ok, true);
   const writeFact = (kind, doc) => { const cur = record.read('fact', factId(kind, PRODUCT)); return record.write({ actor: 'sensors', entity: 'fact', id: factId(kind, PRODUCT), expectRev: cur?.rev ?? 0, doc }); };
   const fresh = () => new Date().toISOString();
   writeFact('vercel_skip', { product: PRODUCT, vercel_project: 'prj_1', read_at: fresh(), result: true });
@@ -566,7 +568,7 @@ test('inputs come from the record only; the branch, product and rules are checke
   await refusedAndUntouched(w, /robot key/, { getRobotToken: async () => '' });
   for (const [doc, re] of [[{ product: PRODUCT, card: 'C-1', branch: 'main', outbox: w.outbox, attempt: 'a1' }, /not the card's branch/], [{ product: PRODUCT, card: 'C-1', branch: 'card/c-2', outbox: w.outbox, attempt: 'a1' }, /not the card's branch/], [{ product: PRODUCT, card: '../x', branch: 'card/x', outbox: w.outbox, attempt: 'a1' }, /bad card id/]]) {
     const cur = w.record.read('session', 'S-1');
-    w.record.write({ actor: 'dispatcher', entity: 'session', id: 'S-1', expectRev: cur.rev, doc });
+    assert.equal(w.record.write({ actor: 'dispatcher', entity: 'session', id: 'S-1', expectRev: cur.rev, doc: { state: cur.doc.state, ...doc } }).ok, true);
     const r = await w.push();
     assert.equal(r.ok, false); assert.match(r.reason, re);
   }

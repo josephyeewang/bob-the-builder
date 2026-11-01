@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { phoneLinkStep, FACTS, LINK_FACT, REMOTE_CONTROL } from './phone-link.mjs';
+import { factFamilyOf } from '../M9-record/permissions.mjs';
 import { KEYS as K } from './keys.mjs';
 import { rulesWith, recWith, T0, MIN, iso, withAlerts } from './fixtures.test-helper.mjs';
 
@@ -9,7 +10,7 @@ function world({ outcome = 'sent', restartOk = true, minibaseOk = true, alert = 
   const calls = { sent: [], restarts: 0, minibase: 0, alerts: [] };
   const fact = (id, value, atMin) => {
     const cur = rec.read('fact', id);
-    const r = rec.write({ actor: 'dispatcher', entity: 'fact', id, expectRev: cur?.rev ?? 0, doc: { value, observed_at: iso(T0 + atMin * MIN) } });
+    const r = rec.write({ actor: factFamilyOf(id), entity: 'fact', id, expectRev: cur?.rev ?? 0, doc: { value, observed_at: iso(T0 + atMin * MIN) } });
     if (!r.ok) throw new Error(r.reason);
   };
   const ports = {
@@ -155,7 +156,7 @@ test('audit MAT-10: the Front Door gone is restarted with its last handoff, at m
   const handoffs = [];
   const alerts = [];
   let ok = true;
-  const fact = (id, value, min) => rec.write({ actor: 'dispatcher', entity: 'fact', id, expectRev: rec.read('fact', id)?.rev ?? 0, doc: { value, observed_at: iso(T0 + min * MIN) } });
+  const fact = (id, value, min) => rec.write({ actor: factFamilyOf(id), entity: 'fact', id, expectRev: rec.read('fact', id)?.rev ?? 0, doc: { value, observed_at: iso(T0 + min * MIN) } });
   const step = (min, alive) => {
     for (const id of [FACTS.network, FACTS.reachable, FACTS.minibase]) fact(id, true, min);
     return withAlerts(rec, T0 + min * MIN, (t) => alerts.push(t), (alert) => phoneLinkStep({ rec, rules: rulesWith(), now: T0 + min * MIN, send: async () => ({ outcome: 'sent' }), startMinibase: async () => ({ ok: true }),
@@ -210,7 +211,7 @@ test('r5 MAT-2: a link alert that fails is told at the next try, once', async ()
 // neither tell Joe about an outage that has passed nor mark the next outage as told.
 test('r7 M2: an outage alert queued while the port was down is dropped when the link comes back; the next outage is told', async () => {
   const rec = recWith();
-  const fact = (id, value, atMin) => { const cur = rec.read('fact', id); rec.write({ actor: 'dispatcher', entity: 'fact', id, expectRev: cur?.rev ?? 0, doc: { value, observed_at: iso(T0 + atMin * MIN) } }); };
+  const fact = (id, value, atMin) => { const cur = rec.read('fact', id); rec.write({ actor: factFamilyOf(id), entity: 'fact', id, expectRev: cur?.rev ?? 0, doc: { value, observed_at: iso(T0 + atMin * MIN) } }); };
   const read = (m, fd) => { fact(FACTS.network, true, m); fact(FACTS.reachable, fd, m); fact(FACTS.minibase, true, m); };
   let up = false;
   const got = [];

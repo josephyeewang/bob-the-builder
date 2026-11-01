@@ -37,5 +37,5 @@ export function applyResult(rec, cardId, stdout, { now }) {
     const what = r.outcome === 'budget_stop' ? 'budget_stop' : 'budget_stop: the worker\'s result could not be read';
     return { ...r, moved: waitOn(rec, cardId, { who: 'joe', what, now, kind: 'budget_stop' }).ok };
   }
-  return { ...r, moved: move(rec, 'card', cardId, { state: 'failed', reason: `worker ended: ${r.subtype}` }, { now, kind: 'worker_failed' }).ok };
+  return { ...r, moved: move(rec, 'card', cardId, { state: 'failed', failure: `worker ended: ${r.subtype}` }, { kind: 'worker_failed' }).ok };
 }

@@ -34,8 +34,8 @@ export const ATTEMPTS = Object.freeze({
 // gating reader can tell the writer from the id. A family ending in `-` or `.` is a prefix; any other is one exact id.
 // No two roles' families may overlap (familyOverlaps, tested). A role listed here with no row in WRITERS.fact holds
 // its names but can write none. `store` is the Store Writer's own (an outbox refusal), written inside M9, never by write().
-// Not yet named (lead calls L74): a tab heartbeat has no family, so none counts and a tab claim lapses on the running
-// limit alone; live_check has a row but no family, so it creates nothing.
+// A tab's heartbeat is the Dispatcher's (L77 (5)): `tab-heartbeat-<tab>`, and only one it wrote keeps a tab claim alive
+// (TAB_HEARTBEAT_WRITER, read by M9's lapseClaims). live_check has a row but no family, so it creates nothing.
 export const FACT_FAMILIES = Object.freeze(Object.fromEntries(Object.entries({
   store: ['outbox-refused-'],
   sensors: ['pr-', 'usage-', 'signed-in-account', 'limit-hit-', 'network-up', 'frontdoor-reachable', 'minibase-running',
@@ -47,7 +47,7 @@ export const FACT_FAMILIES = Object.freeze(Object.fromEntries(Object.entries({
   dispatcher: ['unsent-alerts', 'outage', 'rules-missing-alert', 'compactions-', 'stop-', 'host-lock-', 'pause-',
     'undo-held-', 'undo-note-', 'step-error-', 'last-full-pass', 'band-usage', 'unknown-usage-alert', 'lead-restart-',
     'phone-link', 'phone-link-', 'intake-applied-', 'intake-note', 'hold-', 'review-alert-', 'reconciled-', 'cleanup-',
-    'pass-lock-note'],
+    'pass-lock-note', 'tab-heartbeat-'],
   live_check: [],
 }).map(([k, v]) => [k, Object.freeze(v)])));
 
@@ -81,6 +81,10 @@ export function familyOverlaps(table = FACT_FAMILIES) {
  * when one is named, which must be one of `role`'s) AND `role` created it. Never one without the other, and never the
  * fact's `type` alone: any role can write any type into its own family.
  */
+// The one role whose `tab_heartbeat` facts count, in its family `tab-heartbeat-` (L77 (5)).
+export const TAB_HEARTBEAT_WRITER = 'dispatcher';
+export const TAB_HEARTBEAT_FAMILY = 'tab-heartbeat-';
+
 export function factFrom(role, entry, family) {
   if (typeof role !== 'string' || !entry || typeof entry.id !== 'string') return false;
   if (factFamilyOf(entry.id) !== role || actorName(entry.createdBy ?? '') !== role) return false;

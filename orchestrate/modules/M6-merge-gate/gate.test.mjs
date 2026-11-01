@@ -58,8 +58,8 @@ function verifiedCard(w, id = 'C-1', { pr = 7, files = { 'src/a.mjs': 'two' }, u
   const { env, g } = w;
   if (undo) {
     // The Dispatcher's undo card, from an authenticated audit issue (lane 2 makes it; here it is made the same way).
-    must(env.record.write({ actor: 'sensors', entity: 'fact', id: `issue-${id}`, expectRev: 0, doc: { type: 'undo_issue', authenticated: true, commit: undo } }), 'issue');
-    must(env.record.write({ actor: 'dispatcher', entity: 'card', id, expectRev: 0, doc: { state: 'draft', product: PRODUCT, kind: 'exact_reverse', source: { fact: `issue-${id}` }, ...plan({ files: Object.keys(files) }) } }), 'undo card');
+    must(env.record.write({ actor: 'sensors', entity: 'fact', id: `undo-issue-${id}`, expectRev: 0, doc: { type: 'undo_issue', authenticated: true, commit: undo } }), 'issue');
+    must(env.record.write({ actor: 'dispatcher', entity: 'card', id, expectRev: 0, doc: { state: 'draft', product: PRODUCT, kind: 'exact_reverse', source: { fact: `undo-issue-${id}` }, ...plan({ files: Object.keys(files) }) } }), 'undo card');
   } else {
     const doc = leadCard(env, id, { files: Object.keys(files) });
     must(env.record.write({ actor: 'approvals', entity: 'go', id: `go-${id}`, expectRev: 0, doc: { product: PRODUCT, card_id: id, plan_fingerprint: fingerprintFor(id, doc), files: Object.keys(files), tier: 2, rows: {} } }), 'go');
@@ -121,7 +121,7 @@ test('a clean card merges: paired write, squash merge of the judged head, card m
   assert.deepEqual(w.alerts, []);
 
   // The audit result comes only from a Sensors audit_run fact for that commit.
-  must(w.env.record.write({ actor: 'sensors', entity: 'fact', id: 'audit-1', expectRev: 0, doc: { type: 'audit_run', commit: m.doc.merge_commit, conclusion: 'failure' } }), 'fact');
+  must(w.env.record.write({ actor: 'sensors', entity: 'fact', id: 'audit-run-1', expectRev: 0, doc: { type: 'audit_run', commit: m.doc.merge_commit, conclusion: 'failure' } }), 'fact');
   await gatePass(w.ctx);
   assert.equal(mergeOf(w).doc.state, 'audit_flagged');
 });
@@ -131,7 +131,7 @@ test('the undo route: a flagged merge\'s exact reverse goes first, merges with n
   verifiedCard(w);
   await gatePass(w.ctx);
   const flagged = mergeOf(w).doc.merge_commit;
-  must(w.env.record.write({ actor: 'sensors', entity: 'fact', id: 'audit-1', expectRev: 0, doc: { type: 'audit_run', commit: flagged, conclusion: 'failure' } }), 'fact');
+  must(w.env.record.write({ actor: 'sensors', entity: 'fact', id: 'audit-run-1', expectRev: 0, doc: { type: 'audit_run', commit: flagged, conclusion: 'failure' } }), 'fact');
   await gatePass(w.ctx);
   assert.equal(mergeOf(w).doc.state, 'audit_flagged');
   must(put(w.env.record, 'dispatcher', 'card', 'C-1', { state: 'closed' }), 'closed');
@@ -381,7 +381,7 @@ test('a mark that failed until the audit result landed is still posted, with an 
   w.g.answer.status = () => ({ status: 500, json: null });
   await gatePass(w.ctx);
   const m = mergeOf(w);
-  must(w.env.record.write({ actor: 'sensors', entity: 'fact', id: 'run-1', expectRev: 0, doc: { type: 'audit_run', commit: m.doc.merge_commit, conclusion: 'failure' } }), 'fact');
+  must(w.env.record.write({ actor: 'sensors', entity: 'fact', id: 'audit-run-1', expectRev: 0, doc: { type: 'audit_run', commit: m.doc.merge_commit, conclusion: 'failure' } }), 'fact');
   w.g.answer.status = null;
   await gatePass(w.ctx);
   const after = mergeOf(w);

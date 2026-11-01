@@ -52,7 +52,8 @@ export function directSends(files) {
     text.split('\n').forEach((line, i) => {
       const body = line.replace(/\/\/.*$/, '').replace(/(['"`])(?:\\.|(?!\1).)*\1/g, "''");
       const port = /\b(?:p|ports)\.alert\b/.test(body) && !/sendAlerts\([^)]*\b(?:p|ports)\.alert\b/.test(body);
-      const handed = [...body.matchAll(/\balert\s*:\s*([^,})\s]+)/g)].some((m) => m[1] !== 'alert' && !m[1].startsWith('outbox('));
+      // `textAlerts(alert)` (alerts.mjs) only words an object alert for the step's own outbox.
+      const handed = [...body.matchAll(/\balert\s*:\s*([^,})\s]+)/g)].some((m) => m[1] !== 'alert' && !m[1].startsWith('outbox(') && m[1] !== 'textAlerts(alert');
       const outboxMade = /\bconst\s+alert\s*=/.test(body) && !/\bconst\s+alert\s*=\s*outbox\(/.test(body);
       if (port || handed || outboxMade) bad.push(`${f}:${i + 1}: ${line.trim()}`);
     });
@@ -105,8 +106,10 @@ test('L47 sweep, control: a direct send, a port handed to a step, or an alert ma
     'undoStep({ rec, alert });',
     'holdAlert({ rec, alert: outbox(rec, now), now });',
     'const alert = outbox(rec, now);',
+    'settleMerge({ record: rec, alert: textAlerts(send), now });',
+    'settleMerge({ record: rec, alert: textAlerts(alert), now });',
   ].join('\n')], ['alerts.mjs', 'await port(text); p.alert(x);']];
-  assert.deepEqual(directSends(files).map((l) => l.split(':')[1]), ['1', '2', '3', '4', '5']);
+  assert.deepEqual(directSends(files).map((l) => l.split(':')[1]), ['1', '2', '3', '4', '5', '10']);
 });
 
 // Audit 0b-6 r7 M2, as a class: every fact a told mark goes on has a step that drops the cause's queued

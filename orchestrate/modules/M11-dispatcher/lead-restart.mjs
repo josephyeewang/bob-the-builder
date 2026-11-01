@@ -51,7 +51,8 @@ export function leadInFlight({ rec, sessionId, outboxNames, questionOpen }) {
   }
   // `claim` leaves the record's entities in 0b-2; only the ones the record still has are read.
   for (const entity of ['card', 'merge', 'ask', 'go', 'claim', 'report'].filter((e) => ENTITIES.includes(e))) {
-    for (const { id, doc } of rec.list(entity)) if (doc?.waiting?.who === 'lead' && doc.state !== 'closed') return `${entity} ${id} waits on the Lead`;
+    // The Record has no Lead waiter (WAIT_WHO): a card waiting for the Lead's split waits on a dependency, `needs_split`.
+    for (const { id, doc } of rec.list(entity)) if (doc?.state === 'waiting' && doc.wait?.what === 'needs_split') return `${entity} ${id} waits on the Lead`;
   }
   return null;
 }
@@ -113,12 +114,10 @@ export async function leadRestartStep({ rec, rules, now, lead, size, inFlight, s
   // was written before it (audit 0b-6 r3 MIN-3).
   const fresh = used?.state === 'applied' && Date.parse(used.applied_at ?? '') > since;
   if (fresh) {
-    const hcur = rec.read('handoff', `handoff-${sid}`);
-    if (hcur?.doc?.sha256 !== used.sha256) {
-      const h = rec.write({ actor: 'dispatcher', entity: 'handoff', id: `handoff-${sid}`, expectRev: hcur?.rev ?? 0,
-        doc: { session: sid, product: lead.product ?? null, name: HANDOFF_NAME(sid), sha256: used.sha256, at: iso(now) }, kind: 'handoff' });
-      if (!h.ok) return `handoff not recorded: ${h.reason}`;
-    }
+    // The hand-off is the Lead's own record, made from its outbox file by the Record (applyOutbox, kind handoff; L74):
+    // the Dispatcher writes none, it only checks the Record holds this one.
+    const held = rec.list('handoff').some((h) => h.doc?.session_id === sid && h.doc.sha256 === used.sha256 && /^lead(:|$)/.test(rec.meta?.('handoff', h.id)?.createdBy ?? ''));
+    if (!held) return 'handoff not recorded yet';
     // Two Leads never run at once (audit MAT-8): the new one starts only once the old one is stopped.
     let stopped;
     try { stopped = await stopSession(); } catch (e) { stopped = { ok: false, reason: e.message }; }

@@ -15,6 +15,7 @@
 
 import { createHash } from 'node:crypto';
 import { cleanOutside } from '../M12-sensors/escape.mjs';
+import { factFrom } from '../M9-record/permissions.mjs';
 
 export const RETURN_GAP_MIN = 15;
 
@@ -49,7 +50,9 @@ export async function caughtUpOnce({ rec, gh, writer, ownerId, product, lastGood
   const asks = rec.list('ask').map((a) => ({ id: a.id, ...a.doc }));
   const expired = asks.filter((a) => a.state === 'expired' && whileDown(a));
   const waiting = asks.filter((a) => a.state === 'answered' && whileDown(a));
-  const ideasWhileDown = rec.list('fact').filter((f) => f.doc.kind === 'fact.idea-issue' && Date.parse(f.doc.ts) >= Date.parse(downSince)).length;
+  // Only the Ledger's own idea facts count (L74 addendum: the family and who made it, never the kind alone).
+  const ours = (f) => factFrom('ledger', { id: f.id, createdBy: rec.meta?.('fact', f.id)?.createdBy ?? null }, 'idea-issue-');
+  const ideasWhileDown = rec.list('fact').filter((f) => f.doc.kind === 'fact.idea-issue' && ours(f) && Date.parse(f.doc.ts) >= Date.parse(downSince)).length;
 
   const idem = createHash('sha256').update(`caught-up|${product}|${downSince}`).digest('hex').slice(0, 16);
   const pid = `push-request-${idem}`;

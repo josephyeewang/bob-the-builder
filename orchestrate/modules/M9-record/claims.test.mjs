@@ -344,7 +344,31 @@ test('breakIfDead breaks only the claim it is given, each once its own owner is 
   assert.match(three.record.breakIfDead({ card: 'C-1' }).reason, /only a claimed or running card's claim is broken/);
 });
 
-test('a tab claim is never broken; with no heartbeat writer named, it lapses at the running limit (L74 addendum)', () => {
+test('the heartbeat limit may come as text (the policy\'s free-form proposals map); a missing or bad one is told once a day and the running limit decides', () => {
+  // As text, a whole number is read as one.
+  const t = setup({ prefix: 'm9-tabtxt-', values: { 'proposals.heartbeat_stale_min': '30' } });
+  board(t, ['C-1']);
+  const t0 = t.clock.t;
+  claimCard(t, 'C-1', { kind: 'tab', claim_id: 'T-1', host: 'mac-a' });
+  assert.deepEqual(t.record.lapseClaims(t0 + 30 * MIN).lapsed, []);
+  assert.deepEqual(t.record.lapseClaims(t0 + 30 * MIN + 1).lapsed.map((x) => x.card), ['C-1']);
+  assert.equal(t.alerts.filter((a) => a.type === 'heartbeat_stale_unreadable').length, 0);
+  // Missing, or not a positive whole number: no early lapse, one alert a day, and the running limit (60) still decides.
+  for (const bad of [undefined, null, 'x', '0', 0, -5, 2.5, '2.5', ' ', true]) {
+    const env = setup({ prefix: 'm9-tabbad-', values: { 'proposals.heartbeat_stale_min': bad } });
+    board(env, ['C-1']);
+    const s0 = env.clock.t;
+    claimCard(env, 'C-1', { kind: 'tab', claim_id: 'T-1', host: 'mac-a' });
+    assert.deepEqual(env.record.lapseClaims(s0 + 59 * MIN).lapsed, [], String(bad));
+    assert.deepEqual(env.record.lapseClaims(s0 + 59 * MIN + 1).lapsed, [], String(bad));
+    const told = env.alerts.filter((a) => a.type === 'heartbeat_stale_unreadable');
+    assert.equal(told.length, 1, `${String(bad)}: told once a day`);
+    assert.equal(told[0].key, 'proposals.heartbeat_stale_min');
+    assert.deepEqual(env.record.lapseClaims(s0 + 60 * MIN + 1).lapsed.map((x) => x.card), ['C-1'], `${String(bad)}: the running limit`);
+  }
+});
+
+test('a tab claim is never broken; it lapses when the Dispatcher\'s heartbeat goes stale, or at the running limit (L74 addendum, L77 (5))', () => {
   const env = setup({ prefix: 'm9-tab-', probe: fakeProbe({ dead: [4242] }) });
   board(env, ['C-1', 'C-2', 'C-3']);
   const t0 = env.clock.t;
@@ -352,17 +376,36 @@ test('a tab claim is never broken; with no heartbeat writer named, it lapses at 
   runCard(env, 'C-2', { kind: 'tab', claim_id: 'T-2', host: 'mac-a' });
   runCard(env, 'C-3', { kind: 'tab', claim_id: 'T-3', host: 'mac-a' });
   assert.match(env.record.breakIfDead({ card: 'C-2' }).reason, /a tab claim is never broken/);
-  // A heartbeat has no family, so no role can write one by that name; one a role writes in its own family, or one put
-  // straight into the store, is a look-alike and keeps no claim alive (it fails closed: the running limit decides).
-  assert.match(env.record.write({ actor: 'sensors', entity: 'fact', id: 'hb-T-1', expectRev: 0, doc: { type: 'tab_heartbeat', claim_id: 'T-1' } }).reason, /in no family/);
-  for (let m = 8; m <= 56; m += 8) {
-    env.clock.t = t0 + m * MIN;
+  // Only the Dispatcher writes a heartbeat (its family tab-heartbeat-); another role can't write one by that name.
+  assert.match(env.record.write({ actor: 'sensors', entity: 'fact', id: 'tab-heartbeat-T-3', expectRev: 0, doc: { type: 'tab_heartbeat', claim_id: 'T-3' } }).reason, /family/);
+  const beat = (tab, claimId, m) => {
+    const id = `tab-heartbeat-${tab}`;
+    must(env.record.write({ actor: 'dispatcher', entity: 'fact', id, expectRev: env.record.read('fact', id)?.rev ?? 0, doc: { type: 'tab_heartbeat', claim_id: claimId, at: iso(t0 + m * MIN) } }), `beat ${m}`);
+  };
+  // PLANT: look-alikes for T-3 keep no claim alive: one another role writes in its own family, one under the
+  // Dispatcher's name put straight into the store by another writer, one the Ledger writes in its own heartbeat- family,
+  // and one the Dispatcher itself writes under another of its families (only `tab-heartbeat-` counts).
+  const lookalikes = (m) => {
+    must(env.record.write({ actor: 'dispatcher', entity: 'fact', id: `stop-hb-T-3-${m}`, expectRev: 0, doc: { type: 'tab_heartbeat', claim_id: 'T-3' } }), 'look-alike');
     must(env.record.write({ actor: 'sensors', entity: 'fact', id: `usage-hb-${m}`, expectRev: 0, doc: { type: 'tab_heartbeat', claim_id: 'T-3' } }), 'look-alike');
-    env.store.transaction((tx) => tx.commit([{ entity: 'fact', id: `hb-${m}`, doc: { type: 'tab_heartbeat', claim_id: 'T-3' } }], { actor: 'sensors', kind: 'seed' }));
+    must(env.record.write({ actor: 'ledger', entity: 'fact', id: `heartbeat-T-3-${m}`, expectRev: 0, doc: { type: 'tab_heartbeat', claim_id: 'T-3' } }), 'look-alike');
+    env.store.transaction((tx) => tx.commit([{ entity: 'fact', id: `tab-heartbeat-X-${m}`, doc: { type: 'tab_heartbeat', claim_id: 'T-3' } }], { actor: 'sensors', kind: 'seed' }));
+  };
+  env.clock.t = t0 + 8 * MIN;
+  beat('T-2', 'T-2', 8);
+  lookalikes(8);
+  assert.deepEqual(env.record.lapseClaims(t0 + 10 * MIN).lapsed, [], 'not past the stale limit');
+  const stale = env.record.lapseClaims(t0 + 10 * MIN + 1);
+  assert.deepEqual(stale.lapsed.map((x) => [x.card, x.to]).sort(), [['C-1', 'ready'], ['C-3', 'waiting']], 'no beat, or only look-alikes: stale');
+  // The Dispatcher's own beats keep T-2 alive to the running limit, never past it.
+  for (let m = 16; m <= 56; m += 8) {
+    env.clock.t = t0 + m * MIN;
+    beat('T-2', 'T-2', m);
+    assert.deepEqual(env.record.lapseClaims(t0 + (m + 2) * MIN).lapsed, [], `alive at ${m + 2} min`);
   }
   assert.deepEqual(env.record.lapseClaims(t0 + 60 * MIN).lapsed, [], 'not at the running limit');
   const r = env.record.lapseClaims(t0 + 60 * MIN + 1);
-  assert.deepEqual(r.lapsed.map((x) => [x.card, x.to]).sort(), [['C-1', 'ready'], ['C-2', 'waiting'], ['C-3', 'waiting']]);
+  assert.deepEqual(r.lapsed.map((x) => [x.card, x.to]), [['C-2', 'waiting']]);
   const w = env.record.read('card', 'C-2').doc;
   assert.equal(w.claim, undefined);
   assert.equal(w.wait.return_to, 'ready');

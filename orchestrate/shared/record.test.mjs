@@ -1,6 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { makeRecord, memoryRecord, isActor, missingFields, STATES, FINAL_STATES, WAIT_FIELDS, REQUIRED_FIELDS, ENTITIES } from './record.mjs';
+import { tempDir } from './test-tmp.mjs';
 
 test('create, read, update only if unchanged, one diary line per accepted write', () => {
   const rec = memoryRecord();
@@ -11,7 +14,7 @@ test('create, read, update only if unchanged, one diary line per accepted write'
   const stale = rec.write({ actor: 'dispatcher', entity: 'card', id: 'C-1', expectRev: 1, doc: { state: 'claimed', module: 'm' } });
   assert.equal(stale.ok, false);
   assert.match(stale.reason, /changed since read/);
-  assert.equal(rec.write({ actor: 'dispatcher', entity: 'card', id: 'C-1', expectRev: 2, doc: { state: 'claimed', module: 'm' } }).rev, 3);
+  assert.equal(rec.write({ actor: 'dispatcher', entity: 'card', id: 'C-1', expectRev: 2, doc: { state: 'claimed', module: 'm', claim: { kind: 'session', session_id: 'S-1', host: 'h' } } }).rev, 3);
   const d = rec.diary();
   assert.equal(d.length, 3);
   assert.deepEqual([d[2].from_state, d[2].to_state, d[2].actor], ['ready', 'claimed', 'dispatcher']);
@@ -39,6 +42,26 @@ test('the stand-in refuses a field or a move M9 does not allow that actor, as th
   assert.match(make('dispatcher', 'fact', 'F-1', { text: 'x' }).reason, /fact F-1 is in no family; dispatcher may not create it/);
   assert.match(make('dispatcher', 'fact', 'pr-7', { text: 'x' }).reason, /fact pr-7 is in sensors's family, not dispatcher's/);
   assert.match(make('approvals', 'fact', 'outage', { text: 'x' }).reason, /approvals may not create fact/);
+  // The claim's two steps, by M9's own check (guard.mjs claimCheck, L72): ready → claimed names a session and no
+  // process, and is stamped; claimed → running adds pid and pid_start and nothing else; no other write changes it.
+  {
+    const r2 = memoryRecord({ now: () => Date.parse('2026-10-01T00:00:00Z') });
+    assert.equal(r2.write({ actor: 'dispatcher', entity: 'card', id: 'K', expectRev: 0, doc: { state: 'draft', module: 'm' } }).ok, true);
+    const k = (doc, actor = 'dispatcher') => { const c = r2.read('card', 'K'); return r2.write({ actor, entity: 'card', id: 'K', expectRev: c.rev, doc: { ...c.doc, ...doc } }); };
+    assert.equal(k({ state: 'ready' }).ok, true);
+    assert.match(k({ state: 'claimed' }).reason, /a claim needs its owner/);
+    assert.match(k({ state: 'claimed', claim: { kind: 'session', session_id: 'S-9', host: 'h', pid: 7 } }).reason, /gets its pid at claimed → running/);
+    assert.match(k({ state: 'claimed', claim: { kind: 'session', session_id: 'bad id', host: 'h' } }).reason, /session_id/);
+    assert.equal(k({ state: 'claimed', claim: { kind: 'session', session_id: 'S-9', host: 'h' } }).ok, true);
+    assert.equal(r2.read('card', 'K').doc.claim.claimed_at, '2026-10-01T00:00:00.000Z');
+    const claim = r2.read('card', 'K').doc.claim;
+    assert.match(k({ state: 'running' }).reason, /needs the session's pid/);
+    assert.match(k({ state: 'running', claim: { ...claim, pid: undefined, pid_start: undefined } }).reason, /needs the session's pid/);
+    assert.match(k({ state: 'running', claim: { ...claim, pid: 7 } }).reason, /needs pid_start/);
+    assert.match(k({ state: 'running', claim: { ...claim, session_id: 'S-8', pid: 7, pid_start: 'x' } }).reason, /only adds pid and pid_start/);
+    assert.equal(k({ state: 'running', claim: { ...claim, pid: 7, pid_start: 'x' } }).ok, true);
+    assert.match(k({ claim: { ...r2.read('card', 'K').doc.claim, pid: 8 } }).reason, /a claim is set only by ready → claimed/);
+  }
   // The claim a move ends goes with it: leaving claimed by release clears it.
   assert.equal(rec.release({ card: 'C-1', session_id: 'S-1' }).ok, true);
   assert.equal(rec.read('card', 'C-1').doc.claim, undefined);
@@ -64,7 +87,9 @@ test('applyOutbox needs a known role and its session id', () => {
   const rec = memoryRecord();
   assert.equal(rec.applyOutbox({ role: 'merge_gate', sessionId: 'S' }, 'f').ok, false);
   assert.equal(rec.applyOutbox({ role: 'worker' }, 'f').ok, false);
-  assert.equal(rec.applyOutbox({ role: 'worker', sessionId: 'S-4', card: 'C-1' }, '/o/report-C-1.md').ok, true);
+  const dir = tempDir('m9-outbox-');
+  writeFileSync(join(dir, 'report-C-1.md'), 'done');
+  assert.equal(rec.applyOutbox({ role: 'worker', sessionId: 'S-4', card: 'C-1' }, join(dir, 'report-C-1.md')).ok, true);
   assert.equal(rec.diary()[0].actor, 'worker:S-4');
 });
 

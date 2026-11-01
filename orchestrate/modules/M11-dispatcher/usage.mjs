@@ -12,6 +12,7 @@
 // starts and Tier-1 production merge requests (L14).
 
 import { KEYS, need, minutes } from './keys.mjs';
+import { sensorsFact } from './sensor-facts.mjs';
 
 const WEEK_MS = 7 * 24 * 60 * 60_000;
 const H5_MS = 5 * 60 * 60_000;
@@ -86,7 +87,7 @@ export function bands({ rules, reading, now }) {
 /** Reads the fact and works out the bands. */
 export function currentBands({ rec, rules, account, now }) {
   const staleMs = minutes(rules, KEYS.staleAfterMin);
-  const reading = readFact(account ? rec.read('fact', USAGE_FACT(account)) : null, { account, now, staleMs });
+  const reading = readFact(account ? sensorsFact(rec, USAGE_FACT(account)) : null, { account, now, staleMs });
   return bands({ rules, reading, now });
 }
 

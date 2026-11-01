@@ -43,7 +43,9 @@ test('each family names its one owner; a prefix needs something after it', () =>
   assert.equal(factFamilyOf('push.C-1.1'), 'workshop');
   assert.equal(factFamilyOf('blueprint_freshness_alarm'), 'sensors');
   assert.equal(factFamilyOf('blueprint_freshness_alarm-2'), null, 'an exact family is that one id');
-  assert.equal(factFamilyOf('hb-T-1'), null, 'a tab heartbeat has no family yet');
+  assert.equal(factFamilyOf('tab-heartbeat-T-1'), 'dispatcher', 'a tab heartbeat is the Dispatcher\'s (L77 (5))');
+  assert.equal(factFamilyOf('heartbeat-T-1'), 'ledger', 'the Ledger\'s own heartbeat- is another family');
+  assert.equal(factFamilyOf('hb-T-1'), null);
 });
 
 test('PLANT squatting: no role creates a fact in another role\'s family, on the real Record and the stand-in', () => {
@@ -114,4 +116,13 @@ test('attempts: each key only by its own writer, in its shape; no other key (L74
   const m = memoryRecord();
   must(m.write({ actor: 'dispatcher', entity: 'card', id: 'C-1', expectRev: 0, doc: { state: 'draft', module: 'm' } }), 'card');
   assert.match(m.write({ actor: 'dispatcher', entity: 'card', id: 'C-1', expectRev: 1, doc: { state: 'draft', module: 'm', attempts: { merge_refusals: ['x'] } } }).reason, /it is merge_gate's/);
+});
+
+test('PLANT fact-state: on a fact, `state` is a plain field, so a change to it alone is written (real and stand-in)', () => {
+  for (const [what, rec] of both()) {
+    must(write(rec, 'dispatcher', 'intake-applied-S-1-a.md', { session: 'S-1', state: 'starting' }), what);
+    must(write(rec, 'dispatcher', 'intake-applied-S-1-a.md', { session: 'S-1', state: 'waiting' }), `${what}: the state alone changed`);
+    assert.equal(rec.read('fact', 'intake-applied-S-1-a.md').doc.state, 'waiting', what);
+    assert.match(write(rec, 'dispatcher', 'intake-applied-S-1-a.md', { session: 'S-1', state: 'waiting' }).reason, /nothing changed/, what);
+  }
 });

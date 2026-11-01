@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { writeFileSync, symlinkSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { intakePass, kindsFor } from './outbox-intake.mjs';
-import { recWith } from './fixtures.test-helper.mjs';
+import { change, recWith } from './fixtures.test-helper.mjs';
 import { tempDir } from '../../shared/test-tmp.mjs';
 
 const UID = process.getuid();
@@ -204,7 +204,7 @@ test('audit 0b-6 r2 MIN-7: the file is claimed before its read-only session star
   assert.equal(seen, 'starting');
   // Simulate the crash leaving the claim (the catch turned it into "waiting"; put it back as a crash would leave it).
   const cur = rec.read('fact', 'intake-applied-L-1-think-q1.md');
-  rec.write({ actor: 'dispatcher', entity: 'fact', id: 'intake-applied-L-1-think-q1.md', expectRev: cur.rev, doc: { ...cur.doc, state: 'starting' } });
+  assert.equal(cur.doc.state, 'waiting'); change(rec, 'fact', 'intake-applied-L-1-think-q1.md', { state: 'starting' });
   const tries = [];
   await intakePass({ rec, sessions, ...w.ports, startReadonly: (x) => { tries.push(x); return { ok: true }; } });
   assert.deepEqual(tries, [], 'never started twice');

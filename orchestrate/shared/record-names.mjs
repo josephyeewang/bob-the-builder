@@ -33,6 +33,15 @@ export const OUTBOX_KINDS = Object.freeze(Object.fromEntries(Object.entries({
   'prune-': { roles: ['learning'], entity: null, mode: 'create' },
 }).map(([k, v]) => [k, Object.freeze({ ...v, roles: Object.freeze(v.roles) })])));
 export const OUTBOX_KIND_PATTERN = /^[a-z]+(-[a-z]+)*-$/;
+// A session id: capped so an id made from it stays a legal file name (0b-2 audit round 6). record.mjs re-exports it.
+export const SESSION_ID = /^[A-Za-z0-9-]{1,128}$/;
+// The longest listed kind a file name starts with (so `report-compact-x` is report-compact-, not report-), or null.
+// M9's outbox and the test stand-in both read a file's kind with this one function.
+export function outboxKindOf(name) {
+  let best = null;
+  for (const k of Object.keys(OUTBOX_KINDS)) if (name.startsWith(k) && name.length > k.length && (!best || k.length > best.length)) best = k;
+  return best;
+}
 
 // Card kinds (0b-2 R3-M3). Set once, at create, by the creator M9's permissions name. `exact_reverse` is the undo card.
 export const CARD_KINDS = Object.freeze(['ordinary', 'fix', 'exact_reverse', 'lead_daily_card', 'research_copy']);

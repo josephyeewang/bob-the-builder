@@ -23,6 +23,7 @@
 
 import { KEYS, minutes } from './keys.mjs';
 import { note } from './moves.mjs';
+import { sensorsFact } from './sensor-facts.mjs';
 import { tellThen, dropCause } from './alerts.mjs';
 
 export const LINK_FACT = 'phone-link';
@@ -44,7 +45,7 @@ function clearTold(rec, now, fact) {
 }
 
 const reading = (rec, id, now) => {
-  const d = rec.read('fact', id)?.doc;
+  const d = sensorsFact(rec, id)?.doc;
   const v = d?.value;
   const seen = Date.parse(d?.observed_at ?? '');
   const current = Number.isFinite(seen) && now - seen <= READING_MAX_AGE_MS && seen <= now + 60_000;

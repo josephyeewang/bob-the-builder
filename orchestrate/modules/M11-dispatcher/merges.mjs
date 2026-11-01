@@ -1,48 +1,59 @@
 // Open merge attempts and the time limits the Dispatcher enforces each pass (R-0b-57; design v3
-// §2.4; review 0b-6 M11, m15, m16, c1).
+// §2.4; review 0b-6 M11, m15, m16, c1; L72, L74 b3).
 //
-// The Dispatcher never calls GitHub. It reads Sensors' fact `pr-<n>` = { state, merged,
-// merge_commit_sha, head_sha, observed_at } and decides only on a fact observed after the attempt's
-// last change; otherwise it waits a pass. Merge attempts are `merge` entries:
-// { card, pr, state, head_sha, merge_commit_sha, reason, changed_at }.
+// The Dispatcher never calls GitHub, and never writes a merge's outcome: whether a merge happened is the Merge Gate's
+// decision (L74 b3). It keeps the timing: a merge stuck in checking past its limit, or in merging while the gate's
+// process is gone, is handed to M6's settleMerge, which writes as merge_gate. It reads Sensors' fact `pr-<n>` =
+// { merged, merge_commit_sha, head_sha, observed_at } and decides only on a reading observed after the merge's last
+// write (the Record's own time, rec.meta); otherwise it waits a pass. Merges are M6's documents:
+// { card, pr, state, judged_head, merge_commit, reasons, ... }.
+//
+// A claimed card whose session never started is the Record's to lapse (lapseClaims, claims.unlaunched_min; tick.mjs),
+// not this file's.
 
 import { KEYS, minutes } from './keys.mjs';
 import { move, waitOn, note, ageMs } from './moves.mjs';
 import { startGate } from './gate.mjs';
 import { rolesFor } from '../M4-workshop/launcher/review-runner.mjs';
 import { relayReviewAlerts } from './review-requests.mjs';
+import { settleMerge } from '../M6-merge-gate/merge-outcome.mjs';
+import { textAlerts } from './alerts.mjs';
+import { sensorsFact as fromSensors } from './sensor-facts.mjs';
 
 export const PR_FACT = (n) => `pr-${n}`;
-const fresh = (fact, attempt) => {
-  const seen = Date.parse(fact?.doc?.observed_at ?? '');
-  const changed = Date.parse(attempt.changed_at ?? '');
-  return Number.isFinite(seen) && Number.isFinite(changed) && seen > changed ? fact.doc : null;
+export const RECONCILED_FACT = (mergeId) => `reconciled-${mergeId}`;
+const iso = (ms) => new Date(ms).toISOString();
+
+// A Sensors reading is proof only from Sensors' own family, made by Sensors (L74 addendum).
+const sensorsFact = (rec, id) => fromSensors(rec, id, 'pr-');
+const fresh = (rec, prNumber, mergeId) => {
+  const f = prNumber == null ? null : sensorsFact(rec, PR_FACT(prNumber));
+  const seen = Date.parse(f?.doc?.observed_at ?? '');
+  const changed = Date.parse(rec.meta('merge', mergeId)?.ts ?? '');
+  return Number.isFinite(seen) && Number.isFinite(changed) && seen > changed ? f.doc : null;
 };
 
 /**
- * One pass of the time limits. Ports: `hasSession(cardId)` (a live session for the card),
- * `gateAlive()` (the Merge Gate's process), `alert(text)`, and the review runner's (L65, review-requests.mjs):
- * `hasReviewer(cardId, role, head)` (throws when the runner's status can't be trusted), `requestReview({ card, head, role })`
- * -> { ok } | { ok: false, reason } (a request the runner checks; the Dispatcher never starts a review itself), and
- * `reviewAlerts()` (the runner's alerts, told to Joe once). A card in review needs a reviewer, and an auditor too on
- * Tier 1 (m-6). `b` = this pass's bands and `running` = the running sessions: a review request goes
- * through the same start gate as every other start (audit MAT-5), so red holds it unless the rules'
- * red_runs lists reviews. `missing` collects rules values the gate lacked, for the tick to tell Joe. `startsHeld` (a reason) skips review requests this pass, uncounted.
- * When the runner's status can't be read, no review is asked for, and the pass ends with that error once the other
- * limits have run, so the tick tells Joe. Returns the list of moves made, for the diary and the tests.
+ * One pass of the time limits. Ports: `gateAlive()` (the Merge Gate's process), `alert(text)`, and the review
+ * runner's (L65, review-requests.mjs): `hasReviewer(cardId, role, head)` (throws when the runner's status can't be
+ * trusted), `requestReview({ card, head, role })` -> { ok } | { ok: false, reason } (a request the runner checks; the
+ * Dispatcher never starts a review itself), and `reviewAlerts()` (the runner's alerts, told to Joe once). A card in
+ * review needs a reviewer, and an auditor too on Tier 1 (m-6). `b` = this pass's bands and `running` = the running
+ * sessions: a review request goes through the same start gate as every other start (audit MAT-5), so red holds it
+ * unless the rules' red_runs lists reviews. `missing` collects rules values the gate lacked, for the tick to tell Joe.
+ * `startsHeld` (a reason) skips review requests this pass, uncounted. When the runner's status can't be read, no review
+ * is asked for, and the pass ends with that error once the other limits have run, so the tick tells Joe. Returns the
+ * list of moves made, for the diary and the tests.
  */
-export async function timeLimits({ rec, rules, now, b, running = [], hasSession, gateAlive, hasReviewer, requestReview, reviewAlerts, alert, startsHeld = null, missing = [] }) {
+export async function timeLimits({ rec, rules, now, b, running = [], gateAlive, hasReviewer, requestReview, reviewAlerts, alert, startsHeld = null, missing = [] }) {
   const done = [];
   const statusErrors = [];
   const lim = {
-    claimed: minutes(rules, KEYS.claimedNoSessionMin), checking: minutes(rules, KEYS.checkingMaxMin),
-    reporting: minutes(rules, KEYS.reportingMaxMin), inReview: minutes(rules, KEYS.inReviewNoReviewerMin),
+    checking: minutes(rules, KEYS.checkingMaxMin), reporting: minutes(rules, KEYS.reportingMaxMin), inReview: minutes(rules, KEYS.inReviewNoReviewerMin),
   };
   for (const { id, doc } of rec.list('card')) {
-    if (doc.state === 'claimed' && !hasSession(id) && ageMs(doc, now) >= lim.claimed) {
-      if (move(rec, 'card', id, { state: 'ready', claim: null }, { now, kind: 'timeout' }).ok) done.push([id, 'claimed->ready']);
-    }
-    if (doc.state !== 'in_review' || ageMs(doc, now) < lim.inReview) continue;
+    // The clock is the card's last write: a review request writes its count, so the next one is a full limit later.
+    if (doc.state !== 'in_review' || ageMs(rec, 'card', id, now, { since: 'write' }) < lim.inReview) continue;
     const want = [];
     let unclear = false;
     for (const role of rolesFor(doc)) {
@@ -55,7 +66,8 @@ export async function timeLimits({ rec, rules, now, b, running = [], hasSession,
     if (!want.length) continue;
     // An outage, or a pass with no bands, holds the request without counting it as a failure (audit 0b-6 r2 MIN-4, MIN-5).
     if (startsHeld) { done.push([id, `reviewer held: ${startsHeld}`]); continue; }
-    const fails = doc.reviewer_start_failures ?? 0;
+    // A count that drives a decision lives in the card's attempts, the Dispatcher's own key (L74).
+    const fails = doc.attempts?.reviewer_starts ?? 0;
     if (fails >= 2) {
       if (waitOn(rec, id, { who: 'joe', what: 'no reviewer could be asked for', now }).ok) { alert(`card ${id}: no reviewer could be asked for twice`); done.push([id, 'in_review->waiting']); }
       continue;
@@ -71,31 +83,31 @@ export async function timeLimits({ rec, rules, now, b, running = [], hasSession,
       if (r?.ok) said.push(`${role} requested`);
       else { failed = true; said.push(`${role} request failed: ${r?.reason ?? 'no answer'}`); }
     }
-    // The move resets the card's clock, so the next request for it is a full limit later.
-    move(rec, 'card', id, { reviewer_start_failures: failed ? fails + 1 : 0 }, { now, kind: 'review_request' });
+    move(rec, 'card', id, { attempts: { ...(doc.attempts ?? {}), reviewer_starts: failed ? fails + 1 : 0 } }, { kind: 'review_request' });
     done.push([id, said.join(', ')]);
   }
   // A session that has said it is reporting but handed in nothing in time: its card fails.
   for (const { id, doc } of rec.list('session')) {
-    if (doc.state !== 'reporting' || ageMs(doc, now) < lim.reporting) continue;
+    if (doc.state !== 'reporting' || ageMs(rec, 'session', id, now) < lim.reporting) continue;
     const card = doc.card ? rec.read('card', doc.card) : null;
-    if (card && card.doc.state === 'running' && move(rec, 'card', doc.card, { state: 'failed', reason: 'no_report' }, { now, kind: 'timeout' }).ok) done.push([doc.card, 'reporting->failed']);
-    move(rec, 'session', id, { state: 'ended', reason: 'no_report' }, { now, kind: 'timeout' });
+    if (card && card.doc.state === 'running' && move(rec, 'card', doc.card, { state: 'failed', failure: 'no_report' }, { kind: 'timeout' }).ok) done.push([doc.card, 'reporting->failed']);
+    move(rec, 'session', id, { state: 'ended', reason: 'no_report' }, { kind: 'timeout' });
   }
   for (const { id, doc } of rec.list('merge')) {
-    if (doc.state === 'checking' && ageMs(doc, now) >= lim.checking) {
-      done.push(...refuse(rec, id, doc, 'timeout', { now, alert }));
+    if (doc.state === 'checking' && ageMs(rec, 'merge', id, now) >= lim.checking) {
+      done.push(...settled(rec, id, settleMerge({ record: rec, alert: textAlerts(alert), now }, id, { reason: 'timeout' }), { now, alert }));
     } else if (doc.state === 'merging' && !gateAlive()) {
-      const pr = fresh(rec.read('fact', PR_FACT(doc.pr)), doc);
+      const pr = fresh(rec, doc.pr, id);
       if (!pr) { done.push([id, 'waiting for a fresh PR reading']); continue; }
-      if (pr.merged === true) done.push(...merged(rec, id, doc, pr, { now, alert }));
-      else done.push(...refuse(rec, id, doc, 'interrupted', { now, alert }));
-    } else if (doc.state === 'refused' && doc.reason === 'interrupted') {
-      // Reconcile both ways: GitHub wins.
-      const pr = fresh(rec.read('fact', PR_FACT(doc.pr)), doc);
+      done.push(...settled(rec, id, settleMerge({ record: rec, alert: textAlerts(alert), now }, id, { pr, reason: 'interrupted' }), { now, alert }));
+    } else if (doc.state === 'refused' && (doc.reasons ?? []).includes('interrupted') && !rec.read('fact', RECONCILED_FACT(id))) {
+      // A refused merge stays refused (the Record has no move out of it): when GitHub later shows it merged, the owner
+      // is told once, and the note keeps it from being told again.
+      const pr = fresh(rec, doc.pr, id);
       if (pr?.merged === true) {
-        done.push(...merged(rec, id, doc, pr, { now, alert }));
-        note(rec, `reconciled-${id}`, `merge ${id} was recorded as interrupted but PR ${doc.pr} shows merged; recorded as merged`, { now });
+        alert(`merge ${id} was recorded as interrupted but PR ${doc.pr} shows merged; check the card and its audit`);
+        note(rec, RECONCILED_FACT(id), `merge ${id} was recorded as interrupted but PR ${doc.pr} shows merged; the owner was told`, { now });
+        done.push([id, 'refused but merged: told']);
       }
     }
   }
@@ -108,75 +120,80 @@ export async function timeLimits({ rec, rules, now, b, running = [], hasSession,
   return done;
 }
 
-function merged(rec, id, doc, pr, { now, alert }) {
-  const out = [];
-  const w = move(rec, 'merge', id, { state: 'merged', merge_commit_sha: pr.merge_commit_sha ?? null, merged_head_sha: pr.head_sha ?? null }, { now, kind: 'merge_outcome' });
-  if (!w.ok) return out;
-  out.push([id, 'merged']);
-  if (pr.head_sha !== doc.head_sha) alert(`PR ${doc.pr} merged at ${pr.head_sha}, not the checked ${doc.head_sha}; the audit judges it`);
-  if (doc.card && rec.read('card', doc.card)) move(rec, 'card', doc.card, { state: 'merged' }, { now, kind: 'merge_outcome' });
-  return out;
-}
-
-// A refusal sends the card back to `verified` (or `in_review` when its verdict is for another head);
-// the same reason a second time goes to Joe.
-function refuse(rec, id, doc, reason, { now, alert }) {
-  const out = [];
-  if (!move(rec, 'merge', id, { state: 'refused', reason }, { now, kind: 'merge_outcome' }).ok) return out;
-  out.push([id, `refused:${reason}`]);
-  const card = doc.card ? rec.read('card', doc.card) : null;
-  if (!card) return out;
-  const seen = card.doc.merge_refusals ?? [];
-  if (seen.includes(reason)) {
-    if (waitOn(rec, doc.card, { who: 'joe', what: `merge refused twice: ${reason}`, now, link: doc.pr ? `PR ${doc.pr}` : undefined }).ok) {
-      alert(`card ${doc.card}: the merge was refused twice for the same reason (${reason})`);
-      out.push([doc.card, 'waiting on joe']);
+// What M6's settleMerge did, for the list. A card put back with the same refusal reason a second time goes to Joe
+// (the reasons are the gate's attempts.merge_refusals).
+function settled(rec, id, r, { now, alert }) {
+  if (!r.ok) return [[id, `not settled: ${r.reason}`]];
+  if (r.outcome === 'merged') return [[id, 'merged']];
+  const out = [[id, `refused:${rec.read('merge', id)?.doc?.reasons?.[0] ?? 'unknown'}`]];
+  if (!r.card) return out;
+  out.push([r.card.id, `->${r.card.to}`]);
+  const card = rec.read('card', r.card.id);
+  const reasons = card?.doc?.attempts?.merge_refusals ?? [];
+  const last = reasons.at(-1);
+  if (last && reasons.indexOf(last) !== reasons.length - 1) {
+    const pr = rec.read('merge', id)?.doc?.pr;
+    if (waitOn(rec, r.card.id, { who: 'joe', what: `merge refused twice: ${last}`, now, link: pr != null ? `PR ${pr}` : undefined }).ok) {
+      alert(`card ${r.card.id}: the merge was refused twice for the same reason (${last})`);
+      out.push([r.card.id, 'waiting on joe']);
     }
-    return out;
   }
-  const verdict = rec.read('verdict', doc.card)?.doc;
-  const back = verdict && verdict.head === doc.head_sha ? 'verified' : 'in_review';
-  move(rec, 'card', doc.card, { state: back, merge_refusals: [...seen, reason] }, { now, kind: 'merge_refused' });
-  out.push([doc.card, `->${back}`]);
   return out;
 }
 
-export const MERGE_REQUEST = (card, head) => `mr-${card}-${String(head).slice(0, 12)}`;
+// One record per request, never changed (L74: merge_request is create-only): a new rev of the card is a new request.
+export const MERGE_REQUEST = (card, head, rev) => `mr-${card}-${String(head).slice(0, 12)}-${rev}`;
 const READY_TO_MERGE = ['verified', 'approved'];
 
+// The worker session that made the card's work: its newest worker launch (the Dispatcher's own launch records).
+function workerSession(rec, cardId) {
+  const mine = rec.list('launch').filter((l) => l.doc?.role === 'worker' && l.doc.card === cardId && typeof l.doc.session_id === 'string');
+  mine.sort((x, y) => String(y.doc.launched_at ?? '').localeCompare(String(x.doc.launched_at ?? '')));
+  return mine[0]?.doc.session_id ?? null;
+}
+// The card's pull request: the one Sensors reading whose head is the card's head (a card carries no PR number; no
+// script may write one on it).
+function prOf(rec, head) {
+  const hits = rec.list('fact').filter((f) => /^pr-\d+$/.test(f.id) && f.doc?.head_sha === head && sensorsFact(rec, f.id));
+  return hits.length === 1 ? Number(hits[0].id.slice(3)) : hits.length ? { many: hits.length } : null;
+}
+
 /**
- * Merge requests (R-0b-67, R-0b-68; review 0b-6 M23, D12). For each card the review passed (verified,
- * or approved), whose verdict is for the card's current head and who has no request for that head
- * yet (or whose request is for an older rev of the card), the Dispatcher stores a `merge_request` { card, pr, session_id, head, rev, requested_at }: the
- * Merge Gate merges only a change with a stored request matching session, head and rev (refusal 11).
- * The request goes through the start gate as kind 'merge', so red holds it unless red_runs lists
- * merges, and no Tier-1 production change is requested above the usage line or while usage is unknown.
- * An undo card's request goes as 'undo_merge', which no band holds (R-0b-68), even when this pass
- * has no bands (`startsHeld`, a reason): then every other request is held (L31).
- * `session_id` is the worker session that made the head; `rev` is the card's record rev.
+ * Merge requests (R-0b-67, R-0b-68; review 0b-6 M23, D12). For each card the review passed (verified, or approved),
+ * naming its head, with no request for this head and rev yet, the Dispatcher stores a
+ * `merge_request` { card, pr, session_id, head, rev, requested_at }: the Merge Gate merges only a change with a stored
+ * request matching session, head and rev (refusal 11). The request goes through the start gate as kind 'merge', so
+ * red holds it unless red_runs lists merges, and no Tier-1 production change is requested above the usage line or
+ * while usage is unknown. An undo (exact_reverse) card's request goes as 'undo_merge', which no band holds (R-0b-68),
+ * even when this pass has no bands (`startsHeld`, a reason): then every other request is held (L31).
+ * `session_id` is the worker session that made the head (its launch record); `pr` is Sensors' reading for the head.
+ * The review itself is not read here (L72): the Record lets a card into verified or approved only with a passing
+ * verdict for the head it has now, counted from the review sessions' own files (M9 verdictFor), and the Merge Gate
+ * counts them again. The Record's verdict rows are not proof, so the Dispatcher does not read them.
  */
 export function requestMerges({ rec, rules, now, b, running = [], startsHeld = null, missing = [] }) {
   const done = [];
   for (const { id, rev, doc } of rec.list('card')) {
     if (!READY_TO_MERGE.includes(doc.state)) continue;
-    const verdict = rec.read('verdict', id)?.doc;
-    if (!verdict?.head || doc.pr == null || !doc.session) { done.push([id, 'not ready: needs a verdict, a pull request and its session']); continue; }
-    // The card must name its own head, and the verdict must be for it (audit 0b-6 r2 MIN-9): no head is no merge.
+    // The card must name its own head (audit 0b-6 r2 MIN-9): no head is no merge.
     if (!doc.head) { done.push([id, 'not ready: the card names no head']); continue; }
-    if (doc.head !== verdict.head) { done.push([id, 'the verdict is for another head']); continue; }
-    const mid = MERGE_REQUEST(id, verdict.head);
-    // A request for an older rev of the card (M6 refused it and the card came back) is asked again
-    // (audit 0b-6 r2 MAT-6); the Merge Gate refuses a rev that is not the card's current one anyway.
-    const old = rec.read('merge_request', mid);
-    if (old && old.doc.rev === rev) continue;
+    const session = workerSession(rec, id);
+    const pr = prOf(rec, doc.head);
+    if (pr == null || typeof pr !== 'number' || !session) {
+      done.push([id, pr?.many ? `not ready: ${pr.many} pull requests show head ${doc.head.slice(0, 7)}` : 'not ready: needs a pull request and its session']);
+      continue;
+    }
+    const mid = MERGE_REQUEST(id, doc.head, rev);
+    if (rec.read('merge_request', mid)) continue;
+    const again = rec.list('merge_request').some((q) => q.doc?.card === id);
     // An undo is never held by the band (audit 0b-6 r2 MAT-4, L31): it is the way out of a bad change.
     // When this pass has no bands (an outage, or the main pass failed), only undos are requested.
-    if (startsHeld && doc.kind !== 'undo') { done.push([id, `merge request held: ${startsHeld}`]); continue; }
-    const g = startGate({ rules, rec, card: { id, ...doc }, kind: doc.kind === 'undo' ? 'undo_merge' : 'merge', product: doc.product, b, running });
+    if (startsHeld && doc.kind !== 'exact_reverse') { done.push([id, `merge request held: ${startsHeld}`]); continue; }
+    const g = startGate({ rules, rec, card: { id, ...doc }, kind: doc.kind === 'exact_reverse' ? 'undo_merge' : 'merge', product: doc.product, b, running });
     if (!g.ok) { if (g.missing) missing.push(g.missing); done.push([id, `merge request held: ${g.reason}`]); continue; }
-    const w = rec.write({ actor: 'dispatcher', entity: 'merge_request', id: mid, expectRev: old?.rev ?? 0, kind: 'merge_request',
-      doc: { card: id, pr: doc.pr, session_id: doc.session, head: verdict.head, rev, product: doc.product ?? null, requested_at: new Date(now).toISOString() } });
-    done.push([id, w.ok ? (old ? 'merge requested again' : 'merge requested') : `merge request not recorded: ${w.reason}`]);
+    const w = rec.write({ actor: 'dispatcher', entity: 'merge_request', id: mid, expectRev: 0, kind: 'merge_request',
+      doc: { card: id, pr, session_id: session, head: doc.head, rev, product: doc.product ?? null, requested_at: iso(now) } });
+    done.push([id, w.ok ? (again ? 'merge requested again' : 'merge requested') : `merge request not recorded: ${w.reason}`]);
   }
   return done;
 }

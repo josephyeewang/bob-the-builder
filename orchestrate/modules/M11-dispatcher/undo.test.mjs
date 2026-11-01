@@ -1,30 +1,40 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { undoStep as undoStep0, UNDO_CARD, FIX_CARD, REVERSE_FACT } from './undo.mjs';
+import { undoStep as undoStep0, exactReverse, UNDO_CARD, FIX_CARD, REVERSE_FACT } from './undo.mjs';
 import { rulesWith, recWith, T0, iso, withAlerts } from './fixtures.test-helper.mjs';
 import { outbox, ALERT_QUEUE_FACT } from './alerts.mjs';
 
 // Each step runs as the tick runs it: its alerts are queued, then sent once it is done (alerts.mjs, L47).
 const undoStep = (a) => withAlerts(a.rec, a.now, a.alert ?? (() => {}), (alert) => undoStep0({ ...a, alert }));
 
+// The Record's own shapes (L72, L74): the ask names the merged card (approvals' ask, answered by a tap), the card holds
+// the merge commit the gate recorded, and the gate's merge names the card, its PR and the same commit.
 const SHA = 'a'.repeat(40);
 const OTHER = 'b'.repeat(40);
 const COUNT = { count_approval: { decision: 'allow', reason: 'a counted tap' } };
 const R = rulesWith({}, COUNT);
-const ask = (over = {}) => ({ state: 'answered', kind: 'undo', via: 'tap', pr: 7, merge_commit_sha: SHA, answered_at: iso(T0), ...over });
-const merged = (over = {}) => ({ state: 'audited_ok', pr: 7, merge_commit_sha: SHA, product: 'p', card: 'C-1', module: 'M-u', ...over });
+const tapped = (over = {}) => ({ channel: 'tap', choice: 'Undo', approves: true, at: iso(T0), ...over });
+const ask = (over = {}) => ({ state: 'answered', kind: 'undo', card: 'T-1', choices: ['Undo', 'Keep'], answer: tapped(), ...over });
+const target = (over = {}) => ['card', 'T-1', { state: 'merged', module: 'M-u', product: 'p', tier: 2, files: ['src/a.js', 'src/b.js'], merge_commit: SHA, ...over }];
+const merge = (over = {}, id = 'MG-1') => ['merge', id, { state: 'audited_ok', card: 'T-1', pr: 7, merge_commit: SHA, product: 'p', ...over }];
+const undoCard = (over = {}) => ({ state: 'ready', kind: 'exact_reverse', source: { ask: 'A-1' }, module: 'M-u', product: 'p', tier: 2, files: ['src/a.js', 'src/b.js'], what: 'undo PR 7', ...over });
 
-function world(entries, { files = ['src/a.js', 'src/b.js'] } = {}) {
-  const rec = recWith(entries);
+function world(entries, { files = ['src/a.js', 'src/b.js'], rec: wrap } = {}) {
+  const base = recWith(entries);
+  const rec = wrap ? wrap(base) : base;
   const calls = { alerts: [], filesOf: [] };
   const step = (rules = R) => undoStep({ rec, rules, now: T0, filesOf: (s) => { calls.filesOf.push(s); return files; }, alert: (t) => calls.alerts.push(t) });
-  return { rec, calls, step };
+  return { rec, base, calls, step };
 }
+const tapWorld = (askOver, opts) => world([target(), merge(), ['ask', 'A-1', ask(askOver)]], opts);
+// A record that refuses the undo card's create, as the real one may (the ask's evidence already used, a store error).
+const refusesCard = (reason) => (rec) => ({ ...proxy(rec), write: (w) => (w.entity === 'card' && w.expectRev === 0 ? { ok: false, reason } : rec.write(w)) });
+const proxy = (rec) => ({ read: (...a) => rec.read(...a), list: (...a) => rec.list(...a), meta: (...a) => rec.meta(...a), write: (w) => rec.write(w), diary: (...a) => rec.diary(...a) });
 
 // L47: a crash between queueing and sending. The pass that queued the alert ends before its send; the next
 // pass (the same record, a working port) delivers it once, and only then is the cause marked told.
 test('L47: an alert queued by a pass that crashed before sending is delivered once by the next pass', async () => {
-  const w = world([['merge', 'M-1', merged({ module: undefined, card: null })], ['ask', 'A-1', ask()]]);
+  const w = tapWorld({}, { rec: refusesCard('store busy') });
   await undoStep0({ rec: w.rec, rules: R, now: T0, filesOf: () => ['src/a.js'], alert: outbox(w.rec, T0) });
   const q = w.rec.read('fact', ALERT_QUEUE_FACT).doc.entries;
   assert.equal(q.length, 1);
@@ -38,28 +48,26 @@ test('L47: an alert queued by a pass that crashed before sending is delivered on
   assert.ok(w.rec.list('fact').some((f) => f.id !== ALERT_QUEUE_FACT && f.doc?.told_at), 'told once delivered');
 });
 
-test('M21: an answered, counted tap naming a merged PR -> one go-free undo card first in the queue; the ask consumed', async () => {
-  const w = world([['merge', 'M-1', merged()], ['ask', 'A-1', ask()]]);
+test('M21 (L74): an answered, counted Undo tap on a merged card -> one exact_reverse card, ready (go-free); the ask is approvals\' to close', async () => {
+  const w = tapWorld();
   assert.deepEqual((await w.step()), [['A-1', 'undo card written']]);
   const card = w.rec.read('card', UNDO_CARD('A-1')).doc;
-  assert.equal(card.kind, 'undo');
-  assert.equal(card.go_free, true);
-  assert.equal(card.queue, 'front');
-  assert.equal(card.state, 'ready');
+  assert.deepEqual([card.kind, card.state, card.source, card.product, card.module], ['exact_reverse', 'ready', { ask: 'A-1' }, 'p', 'M-u']);
   assert.deepEqual(card.files, ['src/a.js', 'src/b.js']);
-  assert.deepEqual([card.pr, card.merge_commit_sha, card.reverses, card.product], [7, SHA, 'M-1', 'p']);
+  assert.match(card.what, /undo PR 7 \(merge aaaaaaa of card T-1\)/);
+  // The reversed commit comes from the source (M6 undoneBy), never from a field on the card.
+  for (const f of ['pr', 'merge_commit_sha', 'reverses', 'queue', 'go_free']) assert.equal(card[f], undefined, f);
   assert.deepEqual(w.calls.filesOf, [SHA]);
-  const a = w.rec.read('ask', 'A-1').doc;
-  assert.equal(a.state, 'consumed');
-  assert.equal(a.card, UNDO_CARD('A-1'));
-  // asking again is harmless
+  // M11 does not move the ask (answered → consumed is approvals'; M2 has no consume call yet, a (b) for the lead).
+  assert.equal(w.rec.read('ask', 'A-1').doc.state, 'answered');
+  // asking again is harmless: the card is past draft
   assert.deepEqual((await w.step()), []);
-  assert.equal(w.rec.list('card').length, 1);
+  assert.equal(w.rec.list('card').filter((c) => c.doc.kind === 'exact_reverse').length, 1);
 });
 
-test('an undo card the record refuses (no module known) alerts Joe once and leaves the ask answered', async () => {
-  const w = world([['merge', 'M-1', merged({ module: undefined, card: null })], ['ask', 'A-1', ask()]]);
-  assert.match((await w.step())[0][1], /undo card not recorded: card is missing module/);
+test('an undo card the record refuses alerts Joe once and leaves the ask answered', async () => {
+  const w = tapWorld({}, { rec: refusesCard('ask A-1 already has its exact_reverse card') });
+  assert.match((await w.step())[0][1], /undo card not recorded: ask A-1 already has its exact_reverse card/);
   assert.equal(w.calls.alerts.length, 1);
   assert.match(w.calls.alerts[0], /PR 7 could not be queued/);
   await w.step();
@@ -69,11 +77,11 @@ test('an undo card the record refuses (no module known) alerts Joe once and leav
 
 test('M21: every merged state counts; a merge that did not land does not', async () => {
   for (const state of ['merged', 'audited_ok', 'audit_flagged']) {
-    const w = world([['merge', 'M-1', merged({ state })], ['ask', 'A-1', ask()]]);
+    const w = world([target(), merge({ state }), ['ask', 'A-1', ask()]]);
     assert.equal((await w.step())[0][1], 'undo card written', state);
   }
   for (const state of ['requested', 'checking', 'merging', 'refused']) {
-    const w = world([['merge', 'M-1', merged({ state })], ['ask', 'A-1', ask()]]);
+    const w = world([target(), merge({ state }), ['ask', 'A-1', ask()]]);
     assert.equal((await w.step())[0][1], 'no merged attempt matches', state);
     assert.equal(w.rec.read('ask', 'A-1').doc.state, 'answered');
   }
@@ -81,79 +89,118 @@ test('M21: every merged state counts; a merge that did not land does not', async
 
 test('M21: not a tap, not counted, or naming no matching merge -> nothing written', async () => {
   const cases = [
-    [ask({ via: 'typed' }), R, /not a tap/],
-    [ask(), rulesWith(), /not counted/], // no count_approval answer -> denied
-    [ask(), rulesWith({}, { count_approval: { decision: 'ask', tier: 1, reason: 'needs a second look' } }), /not counted/],
-    [ask({ merge_commit_sha: OTHER }), R, /no merged attempt matches/],
-    [ask({ pr: 8 }), R, /no merged attempt matches/],
-    [ask({ pr: undefined }), R, /names no merged PR/],
-    [ask({ merge_commit_sha: 'abc' }), R, /names no merged PR/],
+    [[target(), merge(), ['ask', 'A-1', ask({ answer: tapped({ channel: 'typed' }) })]], R, /not a tap/],
+    [[target(), merge(), ['ask', 'A-1', ask()]], rulesWith(), /not counted/], // no count_approval answer -> denied
+    [[target(), merge(), ['ask', 'A-1', ask()]], rulesWith({}, { count_approval: { decision: 'ask', tier: 1, reason: 'needs a second look' } }), /not counted/],
+    [[target({ merge_commit: OTHER }), merge(), ['ask', 'A-1', ask()]], R, /no merged attempt matches/],
+    [[target(), merge({ card: 'T-2' }), ['ask', 'A-1', ask()]], R, /no merged attempt matches/],
+    [[target(), merge(), ['ask', 'A-1', ask({ card: 'T-9' })]], R, /no merge commit in the record/],
+    [[target({ merge_commit: undefined }), merge(), ['ask', 'A-1', ask()]], R, /no merge commit in the record/],
   ];
-  for (const [a, rules, why] of cases) {
-    const w = world([['merge', 'M-1', merged()], ['ask', 'A-1', a]]);
+  for (const [entries, rules, why] of cases) {
+    const w = world(entries);
     const out = (await w.step(rules));
     assert.match(out[0][1], why);
-    assert.equal(w.rec.list('card').length, 0);
+    assert.equal(w.rec.list('card').filter((c) => c.doc.kind === 'exact_reverse').length, 0);
     assert.equal(w.rec.read('ask', 'A-1').doc.state, 'answered');
   }
 });
 
+test('M21: a tap that chose Keep, or did not approve, undoes nothing and is not held', async () => {
+  for (const answer of [tapped({ choice: 'Keep' }), tapped({ approves: false })]) {
+    const w = tapWorld({ answer });
+    assert.deepEqual((await w.step()), []);
+    assert.equal(w.rec.list('card').filter((c) => c.doc.kind === 'exact_reverse').length, 0);
+    assert.equal(w.calls.alerts.length, 0);
+  }
+});
+
 test('M21: only answered undo asks are read', async () => {
-  const w = world([['merge', 'M-1', merged()], ['ask', 'A-1', ask({ state: 'open' })], ['ask', 'A-2', ask({ kind: 'delete_copy' })]]);
+  const w = world([target(), merge(), ['ask', 'A-1', ask({ state: 'open', answer: undefined })], ['ask', 'A-2', ask({ kind: 'delete_copy' })]]);
   assert.deepEqual((await w.step()), []);
 });
 
 test('M21: count_approval sees the ask', async () => {
   let seen;
-  const w = world([['merge', 'M-1', merged()], ['ask', 'A-1', ask()]]);
+  const w = tapWorld();
   await w.step(rulesWith({}, { count_approval: (s) => { seen = s; return { decision: 'allow', reason: 'ok' }; } }));
   assert.equal(seen.ask.id, 'A-1');
-  assert.equal(seen.ask.via, 'tap');
+  assert.equal(seen.ask.answer.channel, 'tap');
+  assert.equal(seen.ask.card, 'T-1');
 });
 
 test('M21: the reversed commit\'s files cannot be read -> no card, the ask stays answered for the next pass', async () => {
-  const w = world([['merge', 'M-1', merged()], ['ask', 'A-1', ask()]], { files: null });
+  const w = tapWorld({}, { files: null });
   assert.match((await w.step())[0][1], /could not be read/);
   assert.equal(w.rec.read('ask', 'A-1').doc.state, 'answered');
-  assert.equal(w.rec.list('card').length, 0);
+  assert.equal(w.rec.list('card').filter((c) => c.doc.kind === 'exact_reverse').length, 0);
 });
 
-test('M21: a pass stopped after the card and before the ask move finishes without a second card', async () => {
-  const w = world([['merge', 'M-1', merged()], ['ask', 'A-1', ask()], ['card', UNDO_CARD('A-1'), { state: 'ready', kind: 'undo', pr: 7 }]]);
+test('M21: a pass stopped after the card and before its move to ready finishes without a second card', async () => {
+  const w = world([target(), merge(), ['ask', 'A-1', ask()], ['card', UNDO_CARD('A-1'), undoCard({ state: 'draft' })]]);
   assert.deepEqual((await w.step()), [['A-1', 'undo card written']]);
   assert.equal(w.calls.filesOf.length, 0);
-  assert.equal(w.rec.read('ask', 'A-1').doc.state, 'consumed');
+  assert.equal(w.rec.read('card', UNDO_CARD('A-1')).doc.state, 'ready');
+  assert.equal(w.rec.list('card').filter((c) => c.doc.kind === 'exact_reverse').length, 1);
 });
 
-test('D8: M6 says not clean -> a fix card first in the Lead\'s queue and one alert', async () => {
+const failedUndo = (over = {}) => ['card', UNDO_CARD('A-1'), undoCard({ state: 'failed', failure: { reason: 'the reverse is not clean', at: iso(T0) }, ...over })];
+const reverseFact = (doc, id = REVERSE_FACT(UNDO_CARD('A-1'))) => ['fact', id, doc];
+
+test('D8: M6 says not clean on a failed undo card -> a fix card as a draft for the Lead, and one alert', async () => {
   const U = UNDO_CARD('A-1');
-  const w = world([['card', U, { state: 'running', kind: 'undo', pr: 7, product: 'p' }], ['fact', REVERSE_FACT(U), { state: 'not_clean', reason: 'a later change touched src/a.js' }]]);
+  const w = world([target(), merge(), ['ask', 'A-1', ask()], failedUndo(), reverseFact({ state: 'not_clean', reason: 'a later change touched src/a.js' })]);
   assert.deepEqual((await w.step()), [[U, 'fix card written']]);
   const fix = w.rec.read('card', FIX_CARD(U)).doc;
-  // audit MAT-4: the fix card waits on the Lead to plan it; it is never `ready` for a worker
-  assert.deepEqual([fix.kind, fix.for, fix.queue, fix.state, fix.about, fix.module], ['fix', 'lead', 'front', 'waiting', U, 'M-test']);
-  assert.equal(fix.waiting.who, 'lead');
-  for (const f of ['who', 'what', 'since', 'next_check']) assert.ok(fix.waiting[f], f);
+  // audit MAT-4: the fix card waits on the Lead to plan it (a draft); it is never `ready` for a worker
+  assert.deepEqual([fix.kind, fix.fix_of, fix.state, fix.module, fix.product], ['fix', U, 'draft', 'M-u', 'p']);
+  assert.deepEqual(fix.files, ['src/a.js', 'src/b.js'], 'the plan is the root\'s');
   assert.match(fix.what, /a later change touched src\/a\.js/);
   assert.equal(w.calls.alerts.length, 1);
-  assert.match(w.calls.alerts[0], /PR 7/);
+  assert.match(w.calls.alerts[0], /could not be an exact reverse/);
   await w.step();
   assert.equal(w.calls.alerts.length, 1, 'once');
 });
 
-test('D8: a clean reverse, or no word from M6 yet, writes nothing', async () => {
+test('D8: not clean while the undo card has not failed -> no fix card yet; the Lead is told once a day', async () => {
   const U = UNDO_CARD('A-1');
-  const w = world([['card', U, { state: 'running', kind: 'undo', pr: 7 }], ['card', 'C-2', { state: 'running' }], ['fact', REVERSE_FACT('C-2'), { state: 'not_clean' }]]);
-  assert.deepEqual((await w.step()), []);
-  const w2 = world([['card', U, { state: 'running', kind: 'undo', pr: 7 }], ['fact', REVERSE_FACT(U), { state: 'clean' }]]);
-  assert.deepEqual((await w2.step()), []);
-  assert.equal(w2.calls.alerts.length, 0);
+  const rec = recWith([target(), merge(), ['ask', 'A-1', ask()], ['card', U, undoCard()], reverseFact({ state: 'not_clean', reason: 'x' })]);
+  const alerts = [];
+  const step = (at) => undoStep({ rec, rules: R, now: at, filesOf: () => [], alert: (t) => alerts.push(t) });
+  await step(T0);
+  await step(T0 + 60_000);
+  assert.equal(rec.read('card', FIX_CARD(U)), null);
+  assert.equal(alerts.length, 1, alerts.join(' | '));
+  assert.match(alerts[0], /the Lead plans the fix once the undo card has failed/);
+  await step(T0 + 25 * 3_600_000);
+  assert.equal(alerts.length, 2, 'again a day later');
+});
+
+test('D8 / L74 addendum: a clean reverse, no word from M6, or a look-alike not_clean fact not written by the gate writes nothing', async () => {
+  const U = UNDO_CARD('A-1');
+  const base = [target(), merge(), ['ask', 'A-1', ask()], failedUndo()];
+  for (const [label, extra] of [
+    ['no word', []],
+    ['clean', [reverseFact({ state: 'clean' })]],
+    ['another card\'s', [reverseFact({ state: 'not_clean' }, REVERSE_FACT('C-2'))]],
+  ]) {
+    const w = world([...base, ...extra]);
+    assert.deepEqual((await w.step()), [], label);
+    assert.equal(w.calls.alerts.length, 0, label);
+  }
+  // The look-alike: a not_clean fact under the gate's id that another role wrote (a record that says so) is ignored.
+  const w = world([...base, reverseFact({ state: 'not_clean', reason: 'x' })], { rec: (r) => ({ ...proxy(r), meta: (e, id) => (e === 'fact' && id === REVERSE_FACT(U) ? { ...r.meta(e, id), createdBy: 'sensors' } : r.meta(e, id)) }) });
+  assert.deepEqual((await w.step()), [], 'a look-alike is not proof');
+  assert.equal(w.rec.read('card', FIX_CARD(U)), null);
+  // Control: the gate's own fact on the same record does write the fix card.
+  const w2 = world([...base, reverseFact({ state: 'not_clean', reason: 'x' })]);
+  assert.deepEqual((await w2.step()), [[U, 'fix card written']]);
 });
 
 // Audit 0b-6 r4 MAT-4: each tap on its own, and no tap left untold (L38).
 test('r4 MAT-4: a tap whose files read throws holds no other tap, and is told once a day', async () => {
-  const rec = recWith([['merge', 'M-1', merged()], ['merge', 'M-2', merged({ pr: 8, merge_commit_sha: OTHER })],
-    ['ask', 'A-1', ask()], ['ask', 'A-2', ask({ pr: 8, merge_commit_sha: OTHER })]]);
+  const rec = recWith([target(), merge(), target({ merge_commit: OTHER }).map((x, i) => (i === 1 ? 'T-2' : x)), merge({ card: 'T-2', pr: 8, merge_commit: OTHER }, 'MG-2'),
+    ['ask', 'A-1', ask()], ['ask', 'A-2', ask({ card: 'T-2' })]]);
   const alerts = [];
   const step = (at) => undoStep({ rec, rules: R, now: at, alert: (t) => alerts.push(t),
     filesOf: (s) => { if (s === SHA) throw new Error('mirror unreadable'); return ['src/b.js']; } });
@@ -164,20 +211,20 @@ test('r4 MAT-4: a tap whose files read throws holds no other tap, and is told on
   assert.equal(rec.read('ask', 'A-1').doc.state, 'answered');
   await step(T0 + 60_000);
   assert.equal(alerts.length, 1, alerts.join(' | '));
-  assert.match(alerts[0], /your Undo tap \(ask A-1, PR 7\) is not acted on: it could not be read/);
+  assert.match(alerts[0], /your Undo tap \(ask A-1, card T-1\) is not acted on: it could not be read/);
   await step(T0 + 25 * 3_600_000);
   assert.equal(alerts.length, 2, 'again a day later');
 });
 
 test('r4 MAT-4: every tap that is not acted on is told, once per tap and reason, and again a day later', async () => {
   const cases = [
-    [ask({ via: 'typed' }), R, /not a tap/],
-    [ask(), rulesWith(), /not counted/],
-    [ask({ pr: undefined }), R, /names no merged PR/],
-    [ask({ pr: 8 }), R, /no merged attempt matches/],
+    [[target(), merge(), ['ask', 'A-1', ask({ answer: tapped({ channel: 'typed' }) })]], R, /not a tap/],
+    [[target(), merge(), ['ask', 'A-1', ask()]], rulesWith(), /not counted/],
+    [[target(), merge(), ['ask', 'A-1', ask({ card: 'T-9' })]], R, /no merge commit in the record/],
+    [[target(), merge({ card: 'T-2' }), ['ask', 'A-1', ask()]], R, /no merged attempt matches/],
   ];
-  for (const [a, rules, why] of cases) {
-    const rec = recWith([['merge', 'M-1', merged()], ['ask', 'A-1', a]]);
+  for (const [entries, rules, why] of cases) {
+    const rec = recWith(entries);
     const alerts = [];
     const step = (at) => undoStep({ rec, rules, now: at, filesOf: () => ['src/a.js'], alert: (t) => alerts.push(t) });
     await step(T0);
@@ -187,16 +234,17 @@ test('r4 MAT-4: every tap that is not acted on is told, once per tap and reason,
     await step(T0 + 25 * 3_600_000);
     assert.equal(alerts.length, 2, `${why}: again a day later`);
   }
-  // The files read answering nothing is told too; the record refusing the card, once a day.
+  // The files read answering nothing is told too.
   {
-    const w = world([['merge', 'M-1', merged()], ['ask', 'A-1', ask()]], { files: null });
+    const w = tapWorld({}, { files: null });
     await w.step();
     assert.equal(w.calls.alerts.length, 1);
     assert.match(w.calls.alerts[0], /files could not be read/);
   }
   // Two taps held for the same reason are each told: the alert is per tap, not per reason.
   {
-    const rec = recWith([['merge', 'M-1', merged()], ['ask', 'A-1', ask({ via: 'typed' })], ['ask', 'A-2', ask({ via: 'typed' })]]);
+    const typed = { answer: tapped({ channel: 'typed' }) };
+    const rec = recWith([target(), merge(), ['ask', 'A-1', ask(typed)], ['ask', 'A-2', ask(typed)]]);
     const alerts = [];
     await undoStep({ rec, rules: R, now: T0, filesOf: () => ['src/a.js'], alert: (t) => alerts.push(t) });
     assert.equal(alerts.length, 2, alerts.join(' | '));
@@ -206,29 +254,33 @@ test('r4 MAT-4: every tap that is not acted on is told, once per tap and reason,
 });
 
 // Audit 0b-6 r4 MAT-5: each part of the exact-reverse check (L40), planted alone.
-test('r4 MAT-5: exactReverse refuses a card that differs from the merge in any one way', async () => {
-  const { exactReverse } = await import('./undo.mjs');
-  const rec = recWith([['merge', 'M-1', merged({ state: 'merged' })], ['merge', 'M-2', merged({ state: 'refused' })]]);
-  const card = (over = {}) => ({ id: 'U-1', kind: 'undo', reverses: 'M-1', pr: 7, merge_commit_sha: SHA, files: ['src/a.js', 'src/b.js'], ...over });
+test('r4 MAT-5: exactReverse refuses a card that differs from the merge in any one way', () => {
+  const recOf = (entries = []) => recWith([target(), merge({ state: 'merged' }), ['ask', 'A-1', ask()], ...entries]);
+  const rec = recOf();
+  const card = (over = {}) => ({ id: 'U-1', ...undoCard(over) });
   const files = () => ['src/b.js', 'src/a.js'];
   assert.deepEqual(exactReverse({ rec, card: card(), filesOf: files }), { ok: true }, 'control');
   const notMerge = /not the reverse of a merge in the record/;
-  for (const [label, c, f, why] of [
-    ['a merge that did not land', card({ reverses: 'M-2' }), files, notMerge],
-    ['no merge of that id', card({ reverses: 'M-9' }), files, notMerge],
-    ['no merge named', card({ reverses: undefined }), files, notMerge],
-    ['another PR', card({ pr: 8 }), files, notMerge],
-    ['another commit', card({ merge_commit_sha: OTHER }), files, notMerge],
-    ['files unreadable', card(), () => null, /files could not be read/],
-    ['files throw', card(), () => { throw new Error('x'); }, /files could not be read/],
-    ['no files port', card(), undefined, /files could not be read/],
-    ['card has no list', card({ files: undefined }), files, /files could not be read/],
-    ['one file more', card({ files: ['src/a.js', 'src/b.js', 'src/c.js'] }), files, /does not match/],
-    ['one file less', card({ files: ['src/a.js'] }), files, /does not match/],
-    ['as many files, one other', card({ files: ['src/a.js', 'src/c.js'] }), files, /does not match/],
+  const refusedMerge = recWith([target(), merge({ state: 'refused' }), ['ask', 'A-1', ask()]]);
+  const otherCommit = recWith([target({ merge_commit: OTHER }), merge({ state: 'merged' }), ['ask', 'A-1', ask()]]);
+  const otherAsk = recOf([['ask', 'A-2', ask({ kind: 'delete_copy' })]]);
+  for (const [label, r, c, f, why] of [
+    ['a merge that did not land', refusedMerge, card(), files, notMerge],
+    ['the card\'s commit is not the merge\'s', otherCommit, card(), files, notMerge],
+    ['no such ask', rec, card({ source: { ask: 'A-9' } }), files, notMerge],
+    ['an ask that is not an undo', otherAsk, card({ source: { ask: 'A-2' } }), files, notMerge],
+    ['no source', rec, card({ source: undefined }), files, notMerge],
+    ['not an exact_reverse card', rec, card({ kind: 'ordinary' }), files, notMerge],
+    ['files unreadable', rec, card(), () => null, /files could not be read/],
+    ['files throw', rec, card(), () => { throw new Error('x'); }, /files could not be read/],
+    ['no files port', rec, card(), undefined, /files could not be read/],
+    ['card has no list', rec, card({ files: undefined }), files, /files could not be read/],
+    ['one file more', rec, card({ files: ['src/a.js', 'src/b.js', 'src/c.js'] }), files, /does not match/],
+    ['one file less', rec, card({ files: ['src/a.js'] }), files, /does not match/],
+    ['as many files, one other', rec, card({ files: ['src/a.js', 'src/c.js'] }), files, /does not match/],
   ]) {
-    const r = exactReverse({ rec, card: c, filesOf: f });
-    assert.equal(r.ok, false, label);
-    assert.match(r.reason, why, label);
+    const out = exactReverse({ rec: r, card: c, filesOf: f });
+    assert.equal(out.ok, false, label);
+    assert.match(out.reason, why, label);
   }
 });

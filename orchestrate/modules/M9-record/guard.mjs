@@ -12,7 +12,7 @@
 //   writer.mjs: they need the whole record.
 
 import { canonicalJson } from '../../shared/plan-fingerprint.mjs';
-import { STATES } from '../../shared/record-names.mjs';
+import { SESSION_ID, STATES } from '../../shared/record-names.mjs';
 import { CREATE_STATES, INTERNAL_MOVES, moveActors } from './moves.mjs';
 import { ATTEMPTS, WRITERS, actorName, factFamilyOf, fieldsAllowed } from './permissions.mjs';
 
@@ -79,11 +79,60 @@ export function guardWrite({ entity, id, actor, old, doc, createdBy }) {
   if (entity === 'product' && moving && from === 'paused') { delete out.return_to; cleared.push('return_to'); }
 
   const keys = new Set([...Object.keys(old), ...Object.keys(out)]);
-  const changed = [...keys].filter((k) => k !== 'state' && !cleared.includes(k) && !same(old[k], out[k]));
+  // On an entity with no states (a fact), `state` is an ordinary field: a change to it alone is a change.
+  const changed = [...keys].filter((k) => !(stateful && k === 'state') && !cleared.includes(k) && !same(old[k], out[k]));
   const allowed = fieldsAllowed(entity, actor, { state: from });
   if (!allowed) return no(`${name} may not change ${entity}`);
   if (allowed !== '*') { const bad = changed.filter((f) => !allowed.has(f)); if (bad.length) return no(`${name} may not change ${bad.join(', ')} on ${entity}${id === undefined ? '' : ` ${id}`}`); }
   if (entity === 'card' && changed.includes('attempts')) { const p = attemptsProblem(name, old.attempts, out.attempts); if (p) return no(p); }
   if (!moving && !changed.length) return no('nothing changed');
   return { ok: true, doc: out, moving, from, to, changed, cleared };
+}
+
+// ---------- the claim (L72) ----------
+// The claim has two steps: ready → claimed names the session before it starts (the Dispatcher makes the id and the
+// launcher starts claude with it), so no second start can take the card; claimed → running adds the process once the
+// start reports it. The claim is stamped claimed_at here. rules_rev is the rules the claim was made under (L74).
+// Otherwise a write never changes a claim (R2-M6, R3-M4); a claimed or running card has one, any other card none.
+// Both the Store Writer and the stand-in call this, so neither takes a claim the other refuses.
+const CLAIM_FIELDS = Object.freeze({ session: ['kind', 'session_id', 'host', 'claimed_at', 'rules_rev'], tab: ['kind', 'claim_id', 'host', 'claimed_at', 'rules_rev'] });
+function checkClaim(claim, nowMs) {
+  if (!claim || typeof claim !== 'object' || Array.isArray(claim)) return no('a claim needs its owner');
+  if (claim.kind === 'session') {
+    if (typeof claim.session_id !== 'string' || !SESSION_ID.test(claim.session_id)) return no('a session claim needs a session_id the session can hand in with (letters, digits, dashes; at most 128)');
+    if (claim.pid !== undefined || claim.pid_start !== undefined) return no('a session claim gets its pid at claimed → running, once the session has started');
+  } else if (claim.kind === 'tab') {
+    if (typeof claim.claim_id !== 'string' || !claim.claim_id) return no('a tab claim needs claim_id');
+  } else return no('claim.kind must be session or tab');
+  const extra = Object.keys(claim).filter((k) => !CLAIM_FIELDS[claim.kind].includes(k));
+  if (extra.length) return no(`a ${claim.kind} claim has no ${extra.join(', ')}`);
+  if (typeof claim.host !== 'string' || !claim.host) return no('a claim needs the host');
+  if (claim.rules_rev !== undefined && !(typeof claim.rules_rev === 'string' && claim.rules_rev) && !Number.isInteger(claim.rules_rev)) return no('claim.rules_rev names the rules it was made under');
+  return { ok: true, claim: { ...claim, claimed_at: new Date(nowMs).toISOString() } };
+}
+// claimed → running: a session claim gains pid and pid_start and nothing else; a tab claim is unchanged.
+function checkStart(before, after) {
+  if (!after || typeof after !== 'object' || Array.isArray(after)) return no('a running card has a claim');
+  if (before.kind !== 'session') return same(before, after) ? { ok: true } : no('a tab claim does not change at claimed → running');
+  if (!Number.isInteger(after.pid) || after.pid <= 0) return no('claimed → running needs the session\'s pid');
+  if (typeof after.pid_start !== 'string' || !after.pid_start) return no('claimed → running needs pid_start');
+  const { pid, pid_start, ...rest } = after;   // eslint-disable-line no-unused-vars
+  if (!same(rest, before)) return no('claimed → running only adds pid and pid_start to the claim');
+  return { ok: true };
+}
+/** A card write's claim, after guardWrite: { ok: true, claim? } (claim = the stamped claim to store) | { ok: false, reason }. */
+export function claimCheck({ old, doc, from, to, changed, nowMs }) {
+  let claim;
+  if (old && to === 'claimed' && from === 'ready') {
+    const c = checkClaim(doc.claim, nowMs);
+    if (!c.ok) return c;
+    claim = c.claim;
+  } else if (old && from === 'claimed' && to === 'running') {
+    const c = checkStart(old.claim ?? {}, doc.claim);
+    if (!c.ok) return c;
+  } else if (old && changed.includes('claim')) return no('a claim is set only by ready → claimed, and given its pid only by claimed → running');
+  const has = !!(claim ?? doc.claim);
+  if ((to === 'claimed' || to === 'running') && !has) return no(`a ${to} card has a claim`);
+  if (!(to === 'claimed' || to === 'running') && has) return no(`a ${to} card has no claim`);
+  return claim ? { ok: true, claim } : { ok: true };
 }
