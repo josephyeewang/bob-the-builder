@@ -195,6 +195,8 @@ test('planted: every route to writeDoc is caught, from any folder of orchestrate
     'absolute.mjs': `import { writeDoc } from '${store}';\n`,
     'fileurl.mjs': `import { writeDoc } from '${pathToFileURL(store).href}?v=1';\n`,
     'required.mjs': "const { writeDoc } = require('../M2-approvals/ask-store.mjs');\n",
+    'dquote.mjs': 'import { writeDoc } from "../M2-approvals/ask-store.mjs";\n',
+    'dqcall.mjs': 'const s = await import("../M2-approvals/ask-store.mjs");\n',
     'sub/deep.mjs': "import { writeDoc } from '../../M2-approvals/ask-store.mjs';\n",
     'fine.mjs': "import { askStore, consumeAsk } from '../M2-approvals/ask-store.mjs';\nconst x = await import('./other.mjs');\n",
     'other.mjs': "const p = 'x'; const y = await import(p);\n", // names no ask-store: not ours to judge
@@ -203,7 +205,7 @@ test('planted: every route to writeDoc is caught, from any folder of orchestrate
   writeFileSync(join(root, 'shared', 'outside.mjs'), "import { writeDoc } from '../modules/M2-approvals/ask-store.mjs';\n");
   const got = writeDocImporters(root).sort();
   const want = [
-    ...['named', 'renamed', 'star', 'reexport', 'dynamic', 'template', 'computed', 'interp', 'absolute', 'fileurl', 'required', 'sub/deep']
+    ...['named', 'renamed', 'star', 'reexport', 'dynamic', 'template', 'computed', 'interp', 'absolute', 'fileurl', 'required', 'dquote', 'dqcall', 'sub/deep']
       .map((n) => `modules/M11-dispatcher/${n}.mjs`),
     ...Object.keys(m2cases).map((n) => `modules/M2-approvals/${n}`),
     'shared/outside.mjs',

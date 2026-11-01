@@ -248,3 +248,21 @@ test('L95 Minor 3: an undo-by-hand push survives a throwing alert sink and is ha
   await openUndoFlags({ ...u.ctx, alert: () => { throw new Error('down'); } }, { entriesOf: said(WORDS), addedBy: async () => null });
   assert.match((await openUndoFlags(u.ctx, { entriesOf: said(WORDS) })).byHand[0].push, /file list couldn't be read/);
 });
+
+// L95 (stack r3 Minor 1, for the undo pass): a throw on one undo request (here the record, on its first ask write) is
+// refused with the reason and ends nothing: the other request still opens, and the refused one opens on a later pass.
+test('L95 Minor 1: a throw on one undo request refuses only that request', async () => {
+  const t = m2env(); session(t, SID);
+  merged(t, 'C-7', 41); merged(t, 'C-8', 42);
+  const W2 = 'that change was wrong too, undo pull request 42';
+  flag(t); flag(t, { pr: 42, brief: W2, id: '20261103-0915-ub' });
+  const real = t.record.write.bind(t.record);
+  let asks = 0;
+  const write = (w) => { if (w.entity === 'ask' && ++asks === 1) throw new Error('disk full'); return real(w); };
+  const r = await openUndoFlags({ ...t.ctx, record: { ...t.record, write } }, { entriesOf: said(WORDS, W2), addedBy: noFilesAdded });
+  assert.equal(r.opened.length, 1, JSON.stringify(r));
+  assert.equal(r.refused.length, 1);
+  assert.match(r.refused[0].reason, /the pass failed on it: disk full/);
+  const r2 = await openUndoFlags(t.ctx, { entriesOf: said(WORDS, W2), addedBy: noFilesAdded });
+  assert.equal(r2.opened.length, 1, JSON.stringify(r2));
+});
