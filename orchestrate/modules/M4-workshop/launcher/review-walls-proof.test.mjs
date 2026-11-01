@@ -7,11 +7,12 @@
 //       ORCH_SANDBOX_PROOF=1 node --test --test-name-pattern 'sandbox setting' review-walls-proof.test.mjs
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, writeFileSync, readFileSync, rmSync, realpathSync, appendFileSync } from 'node:fs';
+import { mkdirSync, writeFileSync, readFileSync, rmSync, realpathSync, appendFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import { DESIGN_PROFILES } from './role-profiles.mjs';
 import { FLAGS as F } from './settings-names.mjs';
+import { tempDir } from '../../../shared/test-tmp.mjs';
 import {
   wallPlaces, wallAttempts, attemptPrompt, attemptArgs, bashCommand, judgeAttempt, runProof, WALL_TOOLS, BASH_SPELLINGS, MARK,
   SANDBOX_ESCAPE_CHECKED, escapeSettings, escapeArgs, escapeAttempt, judgeEscape,
@@ -204,7 +205,7 @@ const claudeVersion = () => { const r = spawnSync('claude', [F.version], { encod
 test(`L91 (1) live: the sandbox setting allowUnsandboxedCommands:false refuses a call that asks to leave the sandbox, on Claude Code ${SANDBOX_ESCAPE_CHECKED.claude_code}`, { skip: SANDBOX_LIVE ? false : 'set ORCH_SANDBOX_PROOF=1 to run it (it starts two real sessions)', timeout: 15 * 60_000 }, async (t) => {
   const v = claudeVersion();
   assert.equal(v, SANDBOX_ESCAPE_CHECKED.claude_code, `the installed Claude Code is ${v}; the proof was checked on ${SANDBOX_ESCAPE_CHECKED.claude_code}. Run it again on the new version and update SANDBOX_ESCAPE_CHECKED and the note (Principle 9)`);
-  const base = mkdtempSync('/tmp/bob-sandbox-proof-');
+  const base = tempDir('m4-sandbox-proof-');   // the shared helper, so a failed run leaves nothing behind
   try {
     const runs = {};
     for (const [name, allow] of [['control', true], ['walled', false]]) {
