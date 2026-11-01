@@ -9,6 +9,7 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, symlinkSync, utimesSync
 import { createHash } from 'node:crypto';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { spawnSync } from 'node:child_process';
 import { tempDir } from '../../shared/test-tmp.mjs';
 import { blobSha } from '../M10-rules/reader.mjs';
 import { fakeGateGitHub } from './fixtures/fake-gate-github.mjs';
@@ -1224,4 +1225,14 @@ test('R6 cosmetic: a damaged explanations file says it is not valid JSON; an unr
   const f = join(folder, 'explanations.json'); writeFileSync(f, '{ not json'); chmodSync(f, 0o644);
   const r = readExplanations(f, { ownerUid: UID });
   assert.equal(r.ok, false); assert.match(r.problem, /not valid JSON/);
+});
+
+test('R7 started through a link (the way launchd starts the installed copy), watch-run runs: with no arguments it prints the usage and exits 2, not 0 and silent', () => {
+  const here = dirname(fileURLToPath(import.meta.url));
+  const folder = tempDir('m6-watch-link-'); const link = join(folder, 'watch-run.mjs');
+  symlinkSync(join(here, 'watch-run.mjs'), link);
+  for (const entry of [link, join(here, 'watch-run.mjs')]) {
+    const r = spawnSync(process.execPath, [entry], { encoding: 'utf8' });
+    assert.equal(r.status, 2, `${entry}: ${r.stdout}${r.stderr}`); assert.match(r.stderr, /usage: node watch-run\.mjs/);
+  }
 });

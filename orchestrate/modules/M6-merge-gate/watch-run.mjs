@@ -12,9 +12,9 @@
 // the week counts; days are UTC; it counts an explanation only from a file the owner's Mac user owns, in a folder only that
 // user can write. Exit: 0 fine, 1 the week does not count / a pass had a problem, 2 usage.
 
-import { chmodSync, closeSync, constants, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, closeSync, constants, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath } from 'node:url';
 import { draftRules, githubRules, readExplanations, readOnlyClient, summary, tokenFile, watchPass } from './watch-only.mjs';
 
 const OPTS = ['--repo', '--dir', '--token-file', '--rules', '--rules-sha256', '--end-day', '--explanations', '--owner-uid', '--file', '--sha', '--text'];
@@ -95,4 +95,7 @@ export async function main(argv, { out = (s) => process.stdout.write(`${s}\n`), 
   } catch (e) { err(`stopped: ${String(e?.message ?? e).slice(0, 160)}`); return 1; }
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) process.exitCode = await main(process.argv.slice(2));
+// Started as a program? Compare real paths: launchd starts it through the installed link, so argv[1] is the link while
+// import.meta.url is the real file.
+const started = (() => { try { return process.argv[1] ? realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url)) : false; } catch { return false; } })();
+if (started) process.exitCode = await main(process.argv.slice(2));
