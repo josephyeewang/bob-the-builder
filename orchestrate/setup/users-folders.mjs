@@ -265,7 +265,7 @@ export function apply(ops, { log = () => {} } = {}) {
 const SUDO_NOT_ALLOWED = /is not allowed to run sudo/;
 
 /** Read only. → [{ ok, what, why?, skip? }], one per item. A `skip` item is not a FAIL: it needs root to be read. */
-export function check(io, cfg) {
+export function check(io, cfg, { alsoKnown = [] } = {}) {
   const out = [];
   const item = (ok, what, why) => out.push({ ok, what, ...(ok ? {} : { why }) });
   const skip = (what, why) => out.push({ ok: true, skip: true, what, why });
@@ -321,7 +321,7 @@ export function check(io, cfg) {
   item(above === null, `folders above ${cfg.base} are root's alone, no links, no access lists`, above);
   { const b = baseProblem(io, cfg); item(!b.problem && !b.fresh, `${cfg.base} was made by this setup (root's ${BASE_MARKER} note is in it)`, b.problem ?? 'the base does not exist'); }
   const tableRows = folderTable(cfg);
-  folderChecks(io, tableRows, ids, item, { known: new Set([...tableRows.map((r) => r.path), baseMarkerPath(cfg)]) });
+  folderChecks(io, tableRows, ids, item, { known: new Set([...tableRows.map((r) => r.path), baseMarkerPath(cfg), ...alsoKnown]) });
   return out;
 }
 

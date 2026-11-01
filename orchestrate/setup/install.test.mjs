@@ -18,9 +18,9 @@ import { realIo } from './mac.mjs';
 import { ROOT_CONFIG_PATH } from './layout.mjs';
 import { BOOTSTRAP_FILES, LABEL_RE, installPaths, parseInstallConfig, updaterConfigFor } from './install.mjs';
 import { JOBS, checkDaemons, list, plistTexts } from './daemons.mjs';
-import { checkInstall } from './install.mjs';
+import { checkInstall, rootMadeEntries } from './install.mjs';
 import { main, parseArgs, planCommand } from './setup.mjs';
-import { apply } from './users-folders.mjs';
+import { apply, check } from './users-folders.mjs';
 import { fakeMac } from './fake-mac.test-helper.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -180,6 +180,13 @@ test('install: the real updater accepts the layout; every item passes; the work 
   assert.deepEqual(w.updaterRuns, [0], 'a second run ran the updater again');
   const main40 = checkInstall(w.mac, w.cfg, { main: stamp });
   assert.equal(failed(main40).length, 0);
+});
+
+test('check after a correct install does not call the install folders strangers (r3 n4); PLANT without the carry it does', async () => {
+  const w = await installed();
+  const strangers = (rs) => rs.filter((r) => !r.ok && /did not make/.test(r.why ?? ''));
+  assert.equal(strangers(check(w.mac, w.cfg, { alsoKnown: rootMadeEntries(w.cfg) })).length, 0);
+  assert.ok(strangers(check(w.mac, w.cfg)).some((r) => /install/.test(r.why)), 'the plant: no carry → "install" is a stranger');
 });
 
 test('install: refuses a runner config for another place, or one that names things the copy would not carry; nothing is changed', async () => {

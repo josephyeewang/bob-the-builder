@@ -56,6 +56,9 @@ export function installPaths(cfg) {
   };
 }
 
+/** The entries the install and the jobs put directly under the base, so `check` does not call them strangers (r3 n4). */
+export const rootMadeEntries = (cfg) => { const P = installPaths(cfg); return [P.install, P.work, P.logDir, P.accountCopy]; };
+
 const op = (text, run) => ({ text, run });
 // Owner and mode are set through an open handle (never by path, which would follow a link): a folder or a file, root:wheel.
 const rootOwned = (io, p, mode, kind = 'file') => [op(`set owner and mode of ${p}: chown 0:0, chmod ${mode.toString(8)}`, () => { const want = { uid: io.rootUid, gid: 0, mode }; if (kind === 'dir') io.secure(p, want); else io.secureFile(p, want); })];
