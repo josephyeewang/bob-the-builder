@@ -18,7 +18,8 @@
 //   check-safe-directory (read only; sudo to look)
 //   token  [--dry-run]  save the watch-only token (typed hidden, never shown)  (root)
 //   prove-token  --repo <owner/name>  read works, a no-op write is refused 403  (read only on GitHub; sudo to read the file)
-//   watch-rules --rules-source <file> [--dry-run]  put the watch-only week's rules in place (hash must match the config)  (root)
+//   watch-rules [--rules-source <file>] [--dry-run]  put the watch-only week's rules in place: the draft that came with the installed copy, or the named file (hash must match the config)  (root)
+//   watch-rules --print-config-line --repo <owner/name>  prints the config line (repo + fingerprint of the installed draft)  (read only)
 //   check-watch-rules  the rules copy is root's, 0644, and hashes to the config's value  (read only; sudo to look)
 //   check-token  the token file's owner, mode and size (never its text)  (read only; sudo to look)
 //
@@ -39,7 +40,7 @@ import { apply, check, plan } from './users-folders.mjs';
 import { proofCommands, runProofs } from './proofs.mjs';
 import { checkInstall, parseInstallConfig, planInstall, rootMadeEntries, spawnUpdater } from './install.mjs';
 import { checkDaemons, list, planLoad, planPlace, planReloadAccount, planUnload } from './daemons.mjs';
-import { checkWatchRules, planWatchRules } from './watch-setup.mjs';
+import { checkWatchRules, planWatchRules, watchConfigLine } from './watch-setup.mjs';
 import { proveToken, checkProposals, checkSafeDirectory, checkToken, planProposals, planSafeDirectory, planToken } from './extras.mjs';
 
 const USAGE = 'usage: node setup.mjs <users-folders|check|proofs|install|check-install|daemons place|load|unload|list|check|reload-account|proposals|check-proposals|safe-directory|check-safe-directory|token|check-token|watch-rules|check-watch-rules> [--config <file>, without sudo only] [--dry-run] [--main <commit>]';
@@ -53,10 +54,11 @@ export function parseArgs(argv) {
   if (!COMMANDS.includes(cmd)) throw new Error(`first word must be ${COMMANDS.join(', ')}`);
   let rest = argv.slice(1); let sub = null;
   if (cmd === 'daemons') { sub = rest[0]; rest = rest.slice(1); if (!DAEMON_SUBS.includes(sub)) throw new Error(`daemons needs one of ${DAEMON_SUBS.join(', ')}`); }
-  const o = { cmd, sub, config: null, dry: false, prefix: '', main: null, repo: null, rulesSource: null };
+  const o = { cmd, sub, config: null, dry: false, prefix: '', main: null, repo: null, rulesSource: null, printLine: false };
   for (let i = 0; i < rest.length; i++) {
     const a = rest[i];
     if (a === '--dry-run') o.dry = true;
+    else if (a === '--print-config-line') o.printLine = true;
     else if (a === '--config' || a === '--root-prefix' || a === '--main' || a === '--repo' || a === '--rules-source') {
       const v = rest[++i];
       if (typeof v !== 'string' || v.startsWith('--')) throw new Error(`${a} needs a value`);
@@ -65,10 +67,11 @@ export function parseArgs(argv) {
   }
   const readOnly = READ_ONLY.includes(cmd) || (cmd === 'daemons' && (sub === 'list' || sub === 'check'));
   if (readOnly && o.dry) throw new Error('this command never changes anything, so --dry-run does not apply');
-  if (o.repo !== null && cmd !== 'prove-token') throw new Error('--repo is only for prove-token');
+  if (o.repo !== null && cmd !== 'prove-token' && !(cmd === 'watch-rules' && o.printLine)) throw new Error('--repo is only for prove-token and watch-rules --print-config-line');
   if (cmd === 'prove-token' && !o.repo) throw new Error('prove-token needs --repo owner/name');
+  if (o.printLine && cmd !== 'watch-rules') throw new Error('--print-config-line is only for watch-rules');
+  if (o.printLine && (o.dry || o.rulesSource !== null || !o.repo)) throw new Error('--print-config-line reads only and needs --repo owner/name (no --dry-run, no --rules-source)');
   if (o.rulesSource !== null && cmd !== 'watch-rules') throw new Error('--rules-source is only for watch-rules');
-  if (cmd === 'watch-rules' && !o.rulesSource) throw new Error('watch-rules needs --rules-source <the rules file>');
   if (o.main && cmd !== 'check-install') throw new Error('--main is only for check-install');
   return o;
 }
@@ -124,6 +127,7 @@ export function main(argv, { io: given, runUpdater = spawnUpdater, out = (s) => 
   if (o.cmd === 'check-safe-directory') return report(checkSafeDirectory(io, cfg), out);
   if (o.cmd === 'check-token') return report(checkToken(io, cfg), out);
   if (o.cmd === 'check-watch-rules') return report(checkWatchRules(io, cfg), out);
+  if (o.cmd === 'watch-rules' && o.printLine) { const r = watchConfigLine(io, cfg, { repo: o.repo }); if (r.problem) { err(`PROBLEM  ${r.problem}`); return 1; } out(r.line); return 0; }
   if (o.cmd === 'prove-token') return proveToken(io, cfg, { repo: o.repo }).then((res) => report(res, out));
   if (o.cmd === 'daemons' && o.sub === 'check') return report(checkDaemons(io, cfg), out);
   if (o.cmd === 'daemons' && o.sub === 'list') {

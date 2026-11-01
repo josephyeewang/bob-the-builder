@@ -10,7 +10,7 @@ import { join } from 'node:path';
 import { ROOT_CONFIG_PATH, folderTable, parseConfig, watchNotesPath, watchRulesPath } from './layout.mjs';
 import { parseInstallConfig } from './install.mjs';
 import { jobsFor, plistTexts, checkDaemons, planPlace } from './daemons.mjs';
-import { checkWatchRules, planWatchRules, watchPlist, WATCH_RUN } from './watch-setup.mjs';
+import { checkWatchRules, planWatchRules, watchPlist, WATCH_RUN, WATCH_RULES_IN_COPY } from './watch-setup.mjs';
 import { main, parseArgs } from './setup.mjs';
 import { fakeMac, macTest as test } from './fake-mac.test-helper.mjs';
 import { tempDir } from '../shared/test-tmp.mjs';
@@ -86,7 +86,7 @@ test('watch-rules: refusals — no watch entry, not root, missing source, source
   assert.equal(r2.code, 2); assert.match(r2.text, /must run as root/);
   const c = world(); assert.equal(c.run(['watch-rules', '--rules-source', join(c.ext, 'nope.yaml')]).code, 1);
   const d = world(); assert.equal(d.run(['watch-rules', '--rules-source', 'rules.yaml']).code, 1);
-  assert.equal(d.run(['watch-rules']).code, 2);
+  assert.equal(d.run(['watch-rules']).code, 1);   // no file named: the installed copy's draft is looked for, and there is no copy yet
   const e = world(); chmodSync(e.mac.at(`${BASE}/watch`), 0o755);
   const r5 = e.run(['watch-rules', '--rules-source', e.src]); assert.equal(r5.code, 1); assert.match(r5.text, /not orchestrate's own 0700 folder/);
   assert.throws(() => parseArgs(['check-watch-rules', '--dry-run']), /never changes anything/);
@@ -186,4 +186,49 @@ test('R3 MAT-6 the explanations folder is the owner\'s, readable by orchestrate 
     assert.ok(r && (r.mode & 0o005) === 0o005, `${dir} lets others read and walk through`);
     dir = join(dir, '..');
   }
+});
+
+// ---- the rules draft that comes with the installed copy (L146 W1): no file to hand over, and the config line is printed ----
+const COPY = `${BASE}/install/orchestrate`;
+function withCopy(w, { text = RULES, uid = w.mac.rootUid, mode = 0o644 } = {}) {   // the fake's "root" is the test process's own uid
+  w.mac.mkdir(`${BASE}/install`, 0o755); w.mac.secure(`${BASE}/install`, { uid: w.mac.rootUid, gid: 0, mode: 0o755 });
+  w.mac.mkdir(COPY, 0o755); w.mac.secure(COPY, { uid: w.mac.rootUid, gid: 0, mode: 0o755 });
+  if (text !== null) { w.mac.write(`${COPY}/${WATCH_RULES_IN_COPY}`, text, 0o600); w.mac.secureFile(`${COPY}/${WATCH_RULES_IN_COPY}`, { uid, gid: 0, mode }); }
+  return w;
+}
+
+test('watch-rules with no file: takes the draft from the installed copy, checks it against the config, puts it in place', () => {
+  const w = withCopy(world());
+  const dry = w.run(['watch-rules', '--dry-run']); assert.equal(dry.code, 0, dry.text); assert.match(dry.text, /write .*rules-draft\.yaml/);
+  const r = w.run(['watch-rules']); assert.equal(r.code, 0, r.text); assert.match(r.text, /done: all 1 items PASS/);
+  assert.equal(readFileSync(w.mac.at(watchRulesPath(parseConfig(RAW))), 'utf8'), RULES);
+  assert.match(w.run(['watch-rules']).text, /nothing to do/);
+});
+
+test('PLANT watch-rules from the copy: a draft that does not hash to the config → refused, nothing written (hash clause)', () => {
+  const w = withCopy(world(), { text: `${RULES}# changed\n` });
+  const r = w.run(['watch-rules']); assert.equal(r.code, 1); assert.match(r.text, /hashes to .*but the config/);
+});
+
+test('PLANT watch-rules from the copy: no copy / no draft in it / draft not root\'s / draft others can write / draft is a link → each refused, nothing written', () => {
+  const none = world(); assert.match(none.run(['watch-rules']).text, /run install first/);
+  const nodraft = withCopy(world(), { text: null }); assert.match(nodraft.run(['watch-rules']).text, /has no watch-rules\.draft\.yaml/);
+  const notRoot = withCopy(world(), { uid: process.getuid() + 1 }); assert.match(notRoot.run(['watch-rules']).text, /not root's, or others can write it/);
+  const loose = withCopy(world(), { mode: 0o666 }); assert.match(loose.run(['watch-rules']).text, /not root's, or others can write it/);
+  const link = withCopy(world(), { text: null }); symlinkSync(join(link.ext, 'rules.yaml'), link.mac.at(`${COPY}/${WATCH_RULES_IN_COPY}`));
+  assert.match(link.run(['watch-rules']).text, /is not a plain file/);
+  for (const x of [none, nodraft, notRoot, loose, link]) assert.throws(() => statSync(x.mac.at(watchRulesPath(parseConfig(RAW)))), /ENOENT/);
+});
+
+test('watch-rules --print-config-line: prints the repo and the fingerprint of the installed draft; reads only; usable without root', () => {
+  const w = withCopy(world()); w.mac.as = 501;   // the copy is made as root; the printing is not
+  const r = w.run(['watch-rules', '--print-config-line', '--repo', REPO]);
+  assert.equal(r.code, 0, r.text); assert.equal(r.text, `  "watch": { "repo": "${REPO}", "rulesSha256": "${HASH}" },`);
+  const noWatch = { ...RAW }; delete noWatch.watch;   // works before the config has a watch entry (that is what it is for)
+  const v = withCopy(world({ raw: noWatch })); v.mac.as = 501; assert.equal(v.run(['watch-rules', '--print-config-line', '--repo', REPO]).text, r.text);
+  assert.match(world({ as: 501 }).run(['watch-rules', '--print-config-line', '--repo', REPO]).text, /run install first/);
+  assert.match(w.run(['watch-rules', '--print-config-line', '--repo', 'no-slash']).text, /owner\/name/);
+  for (const bad of [['--print-config-line'], ['--print-config-line', '--repo', REPO, '--dry-run'], ['--print-config-line', '--repo', REPO, '--rules-source', '/x']]) assert.throws(() => parseArgs(['watch-rules', ...bad]), /print-config-line/);
+  assert.throws(() => parseArgs(['check', '--print-config-line']), /only for watch-rules/);
+  assert.throws(() => parseArgs(['check', '--repo', REPO]), /--repo is only for/);
 });

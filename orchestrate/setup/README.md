@@ -133,7 +133,8 @@ edits the root config, so the owner's own Mac user cannot choose the rules the w
 
 | Command | What it does | Root? |
 |---|---|---|
-| `sudo node setup.mjs watch-rules --rules-source <file>` | refuses unless the file hashes to the config's `watch.rulesSha256`; writes it as `<base>/watch/rules-draft.yaml` (root's, 0644, in orchestrate's 0700 folder). `--dry-run` shows the step | yes |
+| `node setup.mjs watch-rules --print-config-line --repo <owner/name>` | read only, no root: prints the one config line to add (`"watch": { "repo": …, "rulesSha256": … }`), the fingerprint being that of `watch-rules.draft.yaml` in the installed copy. Works before the config has a `watch` entry | no |
+| `sudo /usr/local/bin/node setup.mjs watch-rules` | takes the draft that came with the installed copy (`<install>/watch-rules.draft.yaml`: root's, a plain file, not writable by others; never a file in a home folder) and refuses unless it hashes to the config's `watch.rulesSha256`; writes it as `<base>/watch/rules-draft.yaml` (root's, 0644, in orchestrate's 0700 folder). `--rules-source <file>` names another file instead (tests, odd cases). `--dry-run` shows the step | yes |
 | `sudo node setup.mjs check-watch-rules` | read only: the copy is there, root's 0644, no access list, and hashes to the config's value. Without sudo: NEEDS ROOT (exit 3), never PASS | no (sudo to look) |
 | `sudo node setup.mjs daemons place` / `load` / `check` | with a `watch` entry there is a fourth job, `<label>.watch-only`: runs as `orchestrate`, from the installed copy, `watch-run.mjs once --rules draft --rules-sha256 <hash>` every hour. `load` refuses until the rules copy is in place | yes |
 
