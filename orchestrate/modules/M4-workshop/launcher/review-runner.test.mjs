@@ -1135,8 +1135,8 @@ test('R-0b-163 planted: removeCopy is called only after the ended record exists,
 
 const passingNow = () => `${JSON.stringify({ entity: 'verdict', card: 'C-1', expectRev: 0, fields: { head: HEAD, pass: true, checklist: { correct: 'clean', well_built: 'clean', works_for_user: 'clean', holds_up: 'clean' }, notes: [] } })}\n`;
 // One session that hands in a pass; `spoil` does what the session (or the change's tests) did to its package meanwhile.
-async function packageRun(spoil, start) {
-  const w = await ready({ handedIn: (x) => realHandedIn(w)(x), ...(start ? { start: (x) => start(w, x) } : {}) });
+async function packageRun(spoil, start, more = {}) {
+  const w = await ready({ handedIn: (x) => realHandedIn(w)(x), ...(start ? { start: (x) => start(w, x) } : {}), ...more });
   w.ask();
   const r1 = await runnerPass(w.ctx);
   assert.deepEqual(r1.started.map((x) => x.session_id), ['S-1']);
@@ -1158,10 +1158,17 @@ test('L83 M-1 (c): the package sits in the runner\'s packages folder, pinned, an
 });
 
 test('L83 M-1 (c) planted: a test in the branch rewrites the package, and the verdict does not count', async () => {
-  const { w, r } = await packageRun((_w, dir) => writeFileSync(join(dir, 'change.diff'), 'a smaller, kinder diff\n'));
+  const finalized = [];
+  const { w, r } = await packageRun((_w, dir) => writeFileSync(join(dir, 'change.diff'), 'a smaller, kinder diff\n'), null,
+    { finalize: async (x) => { finalized.push(x.sessionId); return { ok: true }; } });
   assert.equal(w.ended('S-1').ended.verdict_sha256, 'refused');
   assert.match(r.alerts.find((a) => a.id === 'held-S-1').text, /the review package changed while the session ran/);
   assert.match(gateSays(w).worst, /the reviewer session S-1's verdict can't be counted, so it counts as a failure/);
+  assert.deepEqual(finalized, [], 'its findings are never checked: the verdict counts for nothing (R-0b-145 finalize)');
+  // An untouched package is finalized as usual.
+  const ok = [];
+  await packageRun(() => {}, null, { finalize: async (x) => { ok.push(x.sessionId); return { ok: true }; } });
+  assert.deepEqual(ok, ['S-1']);
 });
 
 test('L83 M-1 (c) planted: a package swapped for a link, removed, or with no pin: the verdict does not count', async () => {

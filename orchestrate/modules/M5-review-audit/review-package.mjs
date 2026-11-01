@@ -12,7 +12,7 @@
 import { createHash } from 'node:crypto';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { isAbsolute, join } from 'node:path';
-import { gitOk } from '../M4-workshop/git/safe-git.mjs';
+import { git, gitOk } from '../M4-workshop/git/safe-git.mjs';
 
 const HEX40 = /^[0-9a-f]{40}$/;
 // C0 controls, DEL, the C1 controls, and the Unicode line and paragraph separators (built from their codes so no
@@ -31,8 +31,8 @@ export function plainNames(list, what = 'the file name') {
 
 export const sha256 = (text) => createHash('sha256').update(text).digest('hex');
 
-/** → { ok, base, head, files: [{ status, path }], diffFile, diffBytes, diffSha256 } | { ok: false, reason } */
-export async function reviewPackage({ copy, head, dir }) {
+/** → { ok, base, head, files: [{ status, path }], diffFile, diffBytes, diffSha256, reAudit } | { ok: false, reason } */
+export async function reviewPackage({ copy, head, dir, since }) {
   if (typeof head !== 'string' || !HEX40.test(head)) return { ok: false, reason: 'the head is not 40 hex' };
   if (typeof dir !== 'string' || !isAbsolute(dir)) return { ok: false, reason: 'no package folder of the runner\'s was given' };
   const opts = (purpose) => ({ gitDir: join(copy, '.git'), workTree: copy, cwd: copy, purpose, timeoutMs: 120_000 });
@@ -46,10 +46,20 @@ export async function reviewPackage({ copy, head, dir }) {
     for (let i = 0; i + 1 < parts.length; i += 2) files.push({ status: parts[i], path: parts[i + 1] });
     plainNames(files.map((f) => f.path));
     const diff = await gitOk(['diff', ...DIFF_FLAGS, base, head], opts('review-package-diff'));
+    // The short re-audit (R-0b-146): `since` is a head of this card an auditor passed. When this head was caught up
+    // with main after it, what main brought in between the two is listed, so the audit checks the combined change.
+    // Those names go into the prompt too, so they are held to the same rule (M-1 (b)).
+    let reAudit = null;
+    if (typeof since === 'string' && HEX40.test(since) && since !== head
+        && (await git(['merge-base', '--is-ancestor', since, head], opts('review-package-since'))).code === 0) {
+      const was = (await gitOk(['merge-base', 'refs/heads/main', since], opts('review-package-since-base'))).trim();
+      const brought = plainNames((await gitOk(['diff', '--name-only', '-z', '--no-renames', was, base], opts('review-package-brought'))).split('\0').filter(Boolean), 'the file main brought in');
+      if (brought.length) reAudit = { since, brought };
+    }
     // A folder of its own, made fresh: one already there is never written into.
     mkdirSync(dir, { mode: 0o755 });
     const diffFile = join(dir, DIFF_NAME);
     writeFileSync(diffFile, diff, { mode: 0o644, flag: 'wx' });
-    return { ok: true, base, head, files, diffFile, diffBytes: Buffer.byteLength(diff), diffSha256: sha256(diff) };
+    return { ok: true, base, head, files, diffFile, diffBytes: Buffer.byteLength(diff), diffSha256: sha256(diff), reAudit };
   } catch (e) { return { ok: false, reason: e?.message ?? String(e) }; }
 }

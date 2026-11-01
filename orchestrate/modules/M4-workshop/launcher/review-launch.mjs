@@ -48,6 +48,8 @@ const refuse = (reason) => ({ ok: false, reason });
 export const PROBE_MS = 120_000;
 // The kind M11's start gate counts each review role as (gate.mjs CAP_FREE).
 export const GATE_KIND = Object.freeze({ reviewer: 'review', auditor: 'audit' });
+// The effort a send-back round runs at (R-0b-145).
+export const SEND_BACK_EFFORT = 'xhigh';
 // The smoke command's three files: one it writes first, inside the copy, to show it ran; one outside the copy; one it
 // writes only if github.com answered.
 export const smokeFiles = ({ copy, reviewHome, sessionId }) => ({
@@ -80,10 +82,12 @@ function runProbe(spawn, bin, args, opts, timeoutMs) {
 }
 
 /** The session's own start: `--settings` the runner's file and no other source, the runner's session id, the role. */
-export function sessionArgs({ profile, settingsFile, sessionId, prompt }) {
+export function sessionArgs({ profile, settingsFile, sessionId, prompt, earlier }) {
   const args = [F.print, F.outputFormat, F.streamJson, F.verbose, F.settings, settingsFile, F.sessionId, sessionId,
     F.strictMcpConfig, F.mcpConfig, '{"mcpServers":{}}', F.tools, profile.tools.join(','), F.permissionMode, profile.mode];
   if (profile.restricted) args.push(F.restricted);
+  // A send-back (R-0b-145): a round after an earlier failing verdict on this card runs at the highest effort.
+  if (typeof earlier === 'string' && earlier.trim()) args.push(F.effort, SEND_BACK_EFFORT);
   args.push(prompt);
   return args;
 }

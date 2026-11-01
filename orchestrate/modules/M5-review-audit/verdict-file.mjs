@@ -60,7 +60,7 @@ export function verdictFormat({ role, card, head }) {
     'The file is JSON on one line, shaped like the example below, with your own values; nothing else may be added to it. The example only shows the shape: its pass, checklist and finding are made up, not a judgment of this change.',
     JSON.stringify(example),
     say,
-    `"notes" lists every finding, worst first, each like ${JSON.stringify(finding)}. level is one of ${FINDING_LEVELS.join(', ')}.${role === 'reviewer' ? ' "on" is the checklist line it is about.' : ''} Name the file, line and an exact quote wherever you can: a finding whose file, line or quote is not in the change is dropped as noise.`,
+    `"notes" lists every finding, worst first, each like ${JSON.stringify(finding)}. level is one of ${FINDING_LEVELS.join(', ')}.${role === 'reviewer' ? ' "on" is the checklist line it is about.' : ''} Name the file, line and an exact quote wherever you can: a finding whose file, line or quote can't be found at the head you review is dropped as noise.`,
     `"head" stays exactly ${head}: a verdict for any other commit is not counted.`,
   ].join('\n');
 }

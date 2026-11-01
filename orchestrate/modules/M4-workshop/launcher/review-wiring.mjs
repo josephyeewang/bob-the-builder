@@ -42,7 +42,7 @@ export async function start(x) {
   if (!profile) return refuse(`${x?.role} has no role profile`);
   let made; try { made = await x.makeCopy(); } catch (e) { made = refuse(e?.message ?? String(e)); }
   if (!made?.ok) return refuse(`the review copy: ${made?.reason ?? 'not made'}`);
-  const pkg = await (x.packageFor ?? reviewPackage)({ copy: x.copy, head: x.head, dir: x.packageDir });
+  const pkg = await (x.packageFor ?? reviewPackage)({ copy: x.copy, head: x.head, dir: x.packageDir, since: x.audited });
   if (!pkg?.ok) return refuse(`the review package: ${pkg?.reason ?? 'not made'}`);
   const sha = { package_sha256: pkg.diffSha256 };
   const no = (reason, more = {}) => ({ ...refuse(reason), ...more, ...sha });
@@ -50,7 +50,7 @@ export async function start(x) {
   try { text = reviewerPrompt({ ...x, pkg }); } catch (e) { return no(`the prompt: ${e?.message ?? e}`); }
   const s = x.settingsFor(x.copy);
   if (!s?.ok) return no(`the settings: ${s?.reason ?? 'not made'}`);
-  const args = sessionArgs({ profile, settingsFile: s.file, sessionId: x.sessionId, prompt: text });
+  const args = sessionArgs({ profile, settingsFile: s.file, sessionId: x.sessionId, prompt: text, earlier: x.earlier });
   const env = sessionEnv(x);
   const li = x.launchInputs ?? {};
   let r;

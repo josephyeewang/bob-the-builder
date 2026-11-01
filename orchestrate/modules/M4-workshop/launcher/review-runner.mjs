@@ -285,6 +285,8 @@ export function packageProblem({ dir, sessionId, uid }) {
  *     counted (verdict.sha256 is the file's); { ok: false, none: true } when it left none; { ok: false, reason } when it
  *     left one that can't be counted (M9 `sessionVerdict`, the same read the Merge Gate makes)
  *   installedCommit() → the installed copy's commit stamp (40 hex), shown in the status
+ *   finalize({ role, sessionId, card, head }) → { ok } | { ok: false, none?, reason }: the finding-checker on the ended
+ *     session's own verdict file (M5 findings.mjs, R-0b-145), before handedIn reads it. Optional
  *   removeCopy(sessionId) → removes the session's review copy (<reviewCopies>/<session>); called only once its ended
  *     record is written (L77 m9). Optional: a runner with none leaves the copies alone
  * Returns { ok, error?, started: [...], refused: [...], stopped: [...], alerts: [...] } (also what status.json shows).
@@ -406,6 +408,13 @@ export async function runnerPass(ctx) {
     // read, so nothing it holds counts.
     const pkgBad = walls.ok ? packageProblem({ dir: P.packages, sessionId: doc.session_id, uid }) : null;
     let h;
+    // Finalize first (R-0b-145): the finding-checker works on this session's own verdict file only, in place, so the
+    // sha256 below is that of the finalized file. One that can't be finalized is left as written, and judged as it is.
+    // Not for a session whose package changed: its verdict counts for nothing, whatever its findings say.
+    if (walls.ok && !pkgBad && ctx.finalize) {
+      let z; try { z = await ctx.finalize({ role: doc.role, sessionId: doc.session_id, card: doc.card, head: doc.head }); } catch (e) { z = { ok: false, reason: e?.message ?? String(e) }; }
+      if (z?.ok !== true && z?.none !== true) alert(`finalize-${doc.session_id}`, `The findings in the ${doc.role} session ${doc.session_id}'s verdict could not be checked (${String(z?.reason ?? 'no reason given').slice(0, 300)}); the verdict is judged as it was written.`);
+    }
     if (!walls.ok) h = { ok: false, reason: `its outbox fails its checks: ${walls.reason}` };
     else if (pkgBad) h = { ok: false, reason: pkgBad };
     else try { h = await ctx.handedIn({ role: doc.role, sessionId: doc.session_id, outbox: reviewOutbox({ outboxRoot: ctx.outboxRoot, role: doc.role, sessionId: doc.session_id }), card: doc.card, head: doc.head }); } catch (e) { h = { ok: false, reason: `its verdict could not be read (${e?.message ?? e})` }; }
@@ -611,14 +620,20 @@ export async function runnerPass(ctx) {
     // their notes, so a new push is checked against what failed before. Joe's set-aside sessions are left out. Only a
     // settled verdict counts, read from the bytes its ended record pins (L70 point 5); a file changed since says nothing.
     // The wiring shows them as quoted data from an earlier reviewer, never as instructions (`earlierBlock`).
+    // An auditor also gets the newest head of this card an earlier auditor passed (`audited`, R-0b-146): on a head
+    // caught up with main since, its package lists what main brought in, so the new audit is a short re-audit of the
+    // combined change (no Tier-1 audit carries over a Tier-1 merge, M10 carry-over.mjs).
     const earlier = [];
+    let audited = null;
     for (const { doc: d } of [...rl.launches].sort((x, y) => String(y.doc.launched_at).localeCompare(String(x.doc.launched_at)))) {
-      if (earlier.length >= MAX_EARLIER) break;
+      if (earlier.length >= MAX_EARLIER && (role !== 'auditor' || audited)) break;
       if (d.card !== card || d.role !== role || d.head === head || d.tree === tree || asideIds.has(d.session_id)) continue;
       const pin = runnerEnded({ root: P.ended, uid, role, card, head: d.head, sessionId: d.session_id });
       if (!pin.ok || !HEX64.test(pin.ended.verdict_sha256)) continue;
       let h; try { h = await ctx.handedIn({ role, sessionId: d.session_id, outbox: reviewOutbox({ outboxRoot: ctx.outboxRoot, role, sessionId: d.session_id }), card, head: d.head }); } catch { continue; }
-      if (h?.ok !== true || h.verdict?.sha256 !== pin.ended.verdict_sha256 || PASSES[role](h.verdict)) continue;
+      if (h?.ok !== true || h.verdict?.sha256 !== pin.ended.verdict_sha256) continue;
+      if (PASSES[role](h.verdict)) { if (role === 'auditor' && !audited) audited = d.head; continue; }
+      if (earlier.length >= MAX_EARLIER) continue;
       const n = h.verdict?.notes;
       earlier.push({ session_id: d.session_id, head: d.head, notes: (typeof n === 'string' ? n : JSON.stringify(n ?? null)).slice(0, MAX_EARLIER_NOTES) });
     }
@@ -626,7 +641,7 @@ export async function runnerPass(ctx) {
       writeLaunch(P.launches, sid, { session_id: sid, role, card, head, tree, request_id: rid, launched_at: iso(now), signin: acct, config_dir: configDir });
     } catch (e) { failStart(`its launch record could not be written (${e?.code ?? e?.message})`); continue; }
     let r;
-    try { r = await ctx.start({ role, card, head, tree, sessionId: sid, outbox, configDir, env: accountEnv(ctx.reviewHome, acct), signin: acct, earlier: earlierBlock(earlier), packageDir: join(P.packages, sid) }); } catch (e) { r = { ok: false, reason: e?.message ?? String(e) }; }
+    try { r = await ctx.start({ role, card, head, tree, sessionId: sid, outbox, configDir, env: accountEnv(ctx.reviewHome, acct), signin: acct, earlier: earlierBlock(earlier), packageDir: join(P.packages, sid), ...(audited ? { audited } : {}) }); } catch (e) { r = { ok: false, reason: e?.message ?? String(e) }; }
     // The package's sha256 is pinned at once, whatever the start says next, so any end of this session checks it.
     if (HEX64.test(r?.package_sha256 ?? '')) {
       try { pinPackage(P.packages, sid, r.package_sha256); } catch (e) { alert(`pin-${sid}`, `The review package of session ${sid} could not be pinned (${e?.code ?? e?.message}); its verdict will not count.`); }
