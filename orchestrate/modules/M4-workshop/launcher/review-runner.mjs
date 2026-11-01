@@ -245,6 +245,9 @@ function writeLaunch(dir, sid, doc) {
  *   installedCommit() → the installed copy's commit stamp (40 hex), shown in the status
  *   finalize({ role, sessionId, card, head }) → { ok } | { ok: false, none?, reason }: the finding-checker on the ended
  *     session's own verdict file (M5 findings.mjs, R-0b-145), before handedIn reads it. Optional
+ *   carried({ card, doc, head }) → carry-over from the card's head (doc.head) to `head`: { review, audit, reasons, head }
+ *     (M6 gather `carriedFrom`, over the mirror). Lets an auditor start at that head for a short re-audit (L80 (A)).
+ *     Optional: a runner with none starts every session at the card's head only
  *   removeCopy(sessionId) → removes the session's review copy (<reviewCopies>/<session>); called only once its ended
  *     record is written (L77 m9). Optional: a runner with none leaves the copies alone
  * Returns { ok, error?, started: [...], refused: [...], stopped: [...], alerts: [...] } (also what status.json shows).
@@ -508,7 +511,18 @@ export async function runnerPass(ctx) {
     let c; try { c = await ctx.readCard(card); } catch (e) { c = { ok: false, reason: e?.message ?? String(e) }; }
     if (!c?.ok) { refuse(`card ${card} is not in the Record${c?.reason ? ` (${c.reason})` : ''}`); continue; }
     if (!needsRole(c.doc, role)) { refuse(`card ${card} does not need a ${role} (it is ${c.doc?.state ?? 'in no state'}${role === 'auditor' ? `, tier ${c.doc?.tier ?? 'none'}` : ''})`); continue; }
-    if (c.doc.head !== head) { refuse(`the request names head ${head.slice(0, 7)}, but the card's head is ${String(c.doc.head ?? 'none').slice(0, 7)}`); continue; }
+    if (c.doc.head !== head) {
+      // The short re-audit (L80 (A)): an auditor, and only an auditor, may start at another head of this card when the
+      // review carried over from the card's head to exactly that head and the audit did not. The Merge Gate works the
+      // carry-over out again for itself; this only keeps a start from being made where it could never count.
+      const not = `the request names head ${head.slice(0, 7)}, but the card's head is ${String(c.doc.head ?? 'none').slice(0, 7)}`;
+      if (role !== 'auditor' || typeof ctx.carried !== 'function') { refuse(not); continue; }
+      let k; try { k = await ctx.carried({ card, doc: c.doc, head }); } catch (e) { k = { reasons: [e?.message ?? String(e)] }; }
+      if (k?.review !== true || k.audit === true || k.head !== head) {
+        refuse(`${not}; an auditor starts there only for a short re-audit, when the review carried over to it and the audit did not (${k?.review !== true ? `the review does not: ${(k?.reasons ?? []).join('; ') || 'no reason given'}` : k.audit === true ? 'the audit carries over, so none is needed' : 'worked out for another head'})`);
+        continue;
+      }
+    }
     let gitHead; try { gitHead = await ctx.currentHead(card, c.doc); } catch (e) { gitHead = null; refuse(`the card's head in git could not be read (${e?.message ?? e})`); continue; }
     if (gitHead !== head) { refuse(`the request names head ${head.slice(0, 7)}, but the card's branch is at ${String(gitHead ?? 'nothing').slice(0, 7)}`); continue; }
     let tree; try { tree = await ctx.treeOf(card, head); } catch (e) { refuse(`the tree of ${head.slice(0, 7)} could not be read (${e?.message ?? e})`); continue; }

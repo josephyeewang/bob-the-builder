@@ -113,6 +113,32 @@ async function defaultReadRow(gh, base, id, head) {
 // One read per fact; each failure becomes that fact's "unknown".
 const attempt = async (fn, fallback = null) => { try { return await fn(); } catch { return fallback; } };
 
+/**
+ * Carry-over from H0 (what was reviewed) to `head`, the one reading the Merge Gate and the review runner both make (L80):
+ * the branch's own commits since H0, both merge-bases with main, and the Tier-1 merges the audit did not see.
+ * `view` is a git view (M10 git-view.mjs, or M5 local-view.mjs over the mirror); `merges` the Record's merge documents.
+ * → carryOver's { review, audit, reasons }, plus `head`: the head it was worked out for. Throws when git can't answer.
+ */
+export async function carriedFrom({ view, merges, mergeId, H0, head, mainSha, catchUps }) {
+  // The branch's own commits after H0: the first-parent chain from the head back to H0. (compare's commit list
+  // would also hold main's commits that a catch-up merged in.) Not reaching H0 → an empty list, no carry-over.
+  const between = [];
+  for (let s = head; s !== H0; s = (await view.commit(s)).parents[0]) {
+    if (!SHA.test(s ?? '') || between.length >= MAX_LIST) { between.length = 0; between.push(head); break; }
+    between.unshift(s);
+  }
+  const B0 = (await view.compare(mainSha, H0)).mergeBase;
+  const B1 = (await view.compare(mainSha, head)).mergeBase;
+  // Tier-1 merges the review and audit did not see: on main now but not on the main H0 was built on (B0). Anchored
+  // on what the audit read, not on when the merge was requested; a merge commit that can't be placed counts.
+  let tier1MergesSince = 0;
+  for (const m of merges) {
+    if (m.id === mergeId || m.doc?.tier !== 1 || !['merged', 'audited_ok', 'audit_flagged'].includes(m.doc?.state)) continue;
+    if (!SHA.test(m.doc.merge_commit ?? '') || !(await view.onHistory(m.doc.merge_commit, B0))) tier1MergesSince += 1;
+  }
+  return { ...(await carryOver({ reviewed: { base: B0, head: H0 }, current: { base: B1, head }, between, catchUps: Array.isArray(catchUps) ? catchUps : [], tier1MergesSince, gh: view })), head };
+}
+
 export async function gatherFacts(ctx, merge) {
   const { record, rules, product, gh, owner, repo, view } = ctx;
   const base = `/repos/${owner}/${repo}`;
@@ -186,25 +212,8 @@ export async function gatherFacts(ctx, merge) {
   const catchUps = Array.isArray(merge.doc.catch_ups) ? merge.doc.catch_ups : [];
   f.carried = null;
   if (head && SHA.test(H0 ?? '') && head !== H0 && mainSha) {
-    f.carried = await attempt(async () => {
-      // The branch's own commits after H0: the first-parent chain from the head back to H0. (compare's commit list
-      // would also hold main's commits that a catch-up merged in.) Not reaching H0 → an empty list, no carry-over.
-      const between = [];
-      for (let s = head; s !== H0; s = (await view.commit(s)).parents[0]) {
-        if (!SHA.test(s ?? '') || between.length >= MAX_LIST) { between.length = 0; between.push(head); break; }
-        between.unshift(s);
-      }
-      const B0 = (await view.compare(mainSha, H0)).mergeBase;
-      const B1 = (await view.compare(mainSha, head)).mergeBase;
-      // Tier-1 merges the review and audit did not see: on main now but not on the main H0 was built on (B0). Anchored
-      // on what the audit read, not on when the merge was requested; a merge commit that can't be placed counts.
-      let tier1MergesSince = 0;
-      for (const m of record.list('merge')) {
-        if (m.id === merge.id || m.doc?.tier !== 1 || !['merged', 'audited_ok', 'audit_flagged'].includes(m.doc?.state)) continue;
-        if (!SHA.test(m.doc.merge_commit ?? '') || !(await view.onHistory(m.doc.merge_commit, B0))) tier1MergesSince += 1;
-      }
-      return carryOver({ reviewed: { base: B0, head: H0 }, current: { base: B1, head }, between, catchUps, tier1MergesSince, gh: view });
-    }, { review: false, audit: false, reasons: ['carry-over could not be read'] });
+    f.carried = await attempt(() => carriedFrom({ view, merges: record.list('merge'), mergeId: merge.id, H0, head, mainSha, catchUps }),
+      { review: false, audit: false, reasons: ['carry-over could not be read'] });
   }
 
   // The review (refusal 5; L44, L65, L66 M1, L68, L69). Read from review's own stores only, through M9's one check:
