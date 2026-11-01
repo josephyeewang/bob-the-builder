@@ -74,8 +74,9 @@ R-0b-82's decision and handoff code sit here although the row is tagged M11 (lan
    yet"). The Lead acts on evolve, audit and upgrade as Bob runs on that product; think opens a thinking room on the
    rules' `models.main`. `what` is the owner's words, one line, already checked for keys; pass it on through
    `cleanOutside`. NEW files nothing: the owner opens their own session. Until this is wired (the record has a `request-`
-   entity since L140, but intake doesn't take mode requests in yet and the skill's step 3 is off), the skill files no mode request and never says "Filed": it tells the owner to start it
-   in their own session (audit kit-lane3 r1 Minor 9). Wiring it also means turning the skill's step 3 back on.
+   entity since L140, but intake doesn't take mode requests in yet and the skill's step 3 is off), the skill files
+   no mode request and never says "Filed": it tells the owner to start it in their own session (audit kit-lane3 r1
+   Minor 9). Wiring it also means turning the skill's step 3 back on.
 10. Research asks (R-0b-136). Lane 2's intake checks `ask-request-<id>.json` with `checkOutboxFile` and pushes
    `intakePush` like the other Front Door files, then hands it to the record's `applyOutbox` (kept as a report). Each
    pass runs M2's `openResearchAsks(ctx)` and pushes each `opened[].push` to the owner's phone. R-0b-135, after it
