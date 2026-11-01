@@ -47,6 +47,8 @@ Cue words count only as whole words ("fix" is not in "prefix").
 1. **Sure (exactly one mode's cues fit):** read it back in exactly three lines, then a question box with exactly
    three options, `Go`, `Change` and `Not now`. Line 1: the mode and the product. Line 2: "What you said: " and their
    words, shortened. Line 3: what happens on Go. Write nothing until they tap Go.
+   **Number work** (an evolve that touches figures someone acts on: prices, revenue, scores, totals, billing,
+   payments, money, migrations, backfills, forecasts, metrics): line 3 is "On Go: That request isn't wired to the Mini yet, so I file nothing. It is number work (Tier 1): once it is wired, your go comes only after a fresh plan reviewer passes the plan, and the change is audited until 0 Material."
 2. **Unsure (no cues fit, more than one mode's do, "build a new …" on its own, or a new-project cue that names one of
    the owner's products):** ask one question box, "Which of these do you mean?", with the modes that fit as options and
    the one you recommend first, marked "(Recommended)". When no cue fits, recommend think. Then go to step 1.
