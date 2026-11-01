@@ -95,10 +95,13 @@ export const linesOf = (patch) => {
   return { added_lines: added, removed_lines: removed };
 };
 
-async function threads(gh, owner, repo, pr) {
+// A read that FAILED throws (err.unreadable = true, the message starts with the HTTP status); the gate's own callers map any
+// throw to { ok: false } through `attempt`, exactly as before. A list too long to read whole is a fact: { ok: false }.
+export async function threads(gh, owner, repo, pr) {
   const r = await gh.post('/graphql', { query: threadsQuery, variables: { owner, repo, pr } });
   const t = r?.json?.data?.repository?.pullRequest?.reviewThreads;
-  if (r?.status !== 200 || r.json?.errors || !t || !Array.isArray(t.nodes) || t.totalCount !== t.nodes.length || t.totalCount >= MAX_LIST) return { ok: false };
+  if (r?.status !== 200 || r.json?.errors || !t || !Array.isArray(t.nodes)) { const e = new Error(`HTTP ${r?.status}: the review threads could not be read`); e.unreadable = true; throw e; }
+  if (t.totalCount !== t.nodes.length || t.totalCount >= MAX_LIST) return { ok: false };
   // A human thread: its first comment's author is a User. A bot's thread (a linter) is not a person waiting on an answer.
   const unresolved = t.nodes.filter((n) => n?.isResolved !== true && n?.comments?.nodes?.[0]?.author?.__typename !== 'Bot').length;
   return { ok: true, unresolved };

@@ -37,7 +37,7 @@ import { parsePolicy } from '../M10-rules/policy.mjs';
 import { MAX_BYTES, RULES_PATH, blobSha, findApprovingPull } from '../M10-rules/reader.mjs';
 import { approveNeeded } from '../M2-approvals/go.mjs';
 import { makeRules } from '../../shared/rules.mjs';
-import { botId, linesOf, threadsQuery } from './gather.mjs';
+import { botId, linesOf, threads as threadsOf, threadsQuery } from './gather.mjs';
 import { judge } from './refusals.mjs';
 
 export const NOT_JUDGED = Object.freeze([2, 3, 5, 10, 11, 12, 13]);
@@ -157,6 +157,9 @@ export function githubRules({ gh, owner, repo }) {
  * The verdict from the facts `gatherMerged` returns, through the gate's real judge(). `rules` is { policy, engine }.
  * What cannot be judged afterwards (NOT_JUDGED) is dropped from the refusals and listed instead.
  */
+/** Only a refusal 8 that says the owner's Approve is NEEDED is a plain \"would ask\"; refusal 14 and an Approve check that could not run are refusals. */
+export const asksApprove = (r) => r?.n === 8 && /needs the owner's Approve|the rules ask for the owner's Approve/.test(r.reason ?? '');
+
 export function judgeMerged(facts, rules) {
   const NJ = [...NOT_JUDGED];
   if (facts.direct) return { verdict: VERDICTS[2], refusals: [{ n: 9, reason: 'a push to main with no pull request: the gate only merges pull requests' }], tier: null, risky: [], not_judged: NJ, assumed: ASSUMED };
@@ -187,8 +190,7 @@ export function judgeMerged(facts, rules) {
   };
   const j = judge(f);
   const refusals = j.refusals.filter((r) => !NJ.includes(r.n));
-  // Only a refusal 8 that says the owner's Approve is NEEDED can be "would ask"; refusal 14 and an Approve check that could not run are refusals.
-  const hard = refusals.filter((r) => !(r.n === 8 && /needs the owner's Approve|the rules ask for the owner's Approve/.test(r.reason ?? '')));
+  const hard = refusals.filter((r) => !asksApprove(r));
   const verdict = hard.length ? VERDICTS[2] : refusals.length ? VERDICTS[1] : j.decision === 'hold' ? VERDICTS[3] : VERDICTS[0];
   return { verdict, refusals, tier, risky, not_judged: NJ, assumed: ASSUMED, ...(j.hold ? { hold: j.hold } : {}) };
 }
@@ -239,11 +241,7 @@ export async function gatherMerged({ gh, owner, repo, policy, sha, now = () => D
     { const j = await get(`${base}/commits/${headSha}/status?per_page=${MAX_LIST}`, 'the statuses');
       if (Array.isArray(j.statuses) && !(Number.isInteger(j.total_count) && j.total_count >= MAX_LIST)) statuses = j.statuses.map((s) => ({ context: s?.context, state: s?.state })); }
     let threads;
-    { let r; try { r = await gh.post('/graphql', { query: threadsQuery, variables: { owner, repo, pr: num } }); } catch (e) { fail('the review threads', e); }
-      if (r?.status !== 200 || r.json?.errors) fail('the review threads', `HTTP ${r?.status}`);
-      const t = r.json?.data?.repository?.pullRequest?.reviewThreads;
-      threads = !t || !Array.isArray(t.nodes) || t.totalCount !== t.nodes.length || t.totalCount >= MAX_LIST ? { ok: false }
-        : { ok: true, unresolved: t.nodes.filter((n) => n?.isResolved !== true && n?.comments?.nodes?.[0]?.author?.__typename !== 'Bot').length }; }
+    try { threads = await threadsOf(gh, owner, repo, num); } catch (e) { fail('the review threads', e); }
     return {
       direct: false, sha, pr: num, mergedAt: pr.merged_at ?? null, mergedBy: pr.merged_by?.login ?? null, prBase: pr.base?.ref ?? null, headSha, checks, statuses, threads, files,
       labels: (pr.labels ?? []).map((l) => l?.name).filter((n) => typeof n === 'string'),

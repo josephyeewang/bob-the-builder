@@ -12,7 +12,7 @@ import { fileURLToPath } from 'node:url';
 import { tempDir } from '../../shared/test-tmp.mjs';
 import { blobSha } from '../M10-rules/reader.mjs';
 import { fakeGateGitHub } from './fixtures/fake-gate-github.mjs';
-import { DRAFT_FILE, NOT_JUDGED, VERDICTS, draftRules, githubRules, judgeMerged, readExplanations, readLog, readOnlyClient, summary, tokenFile, watchPass } from './watch-only.mjs';
+import { DRAFT_FILE, NOT_JUDGED, VERDICTS, asksApprove, draftRules, githubRules, judgeMerged, readExplanations, readLog, readOnlyClient, summary, tokenFile, watchPass } from './watch-only.mjs';
 import { explain, main, parseArgs } from './watch-run.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -945,4 +945,79 @@ test('R3 cosmetic: a failed read\'s reason starts with the HTTP status', async (
   w.hooks.push([/\/check-runs/, 500]);
   await w.pass();
   assert.match(w.lines().find((l) => l.not_judged_reason).not_judged_reason, /^HTTP 500/);
+});
+
+// ───────────────────────────── round 3: m-e / m-d / m-f
+
+test('R3 m-f only a stated Approve need is "would ask"; refusal 14 and "the Approve check could not run" are refusals', () => {
+  assert.equal(asksApprove({ n: 8, reason: 'needs the owner\'s Approve: risky: x' }), true);
+  assert.equal(asksApprove({ n: 8, reason: 'the rules ask for the owner\'s Approve: y' }), true);
+  assert.equal(asksApprove({ n: 8, reason: 'the Approve check could not run' }), false);
+  assert.equal(asksApprove({ n: 14, reason: 'app/x.ts is customer-visible; needs the owner\'s Approve until refusal 14 is built' }), false);
+});
+
+test('R3 X7 a new customer-visible file is "would refuse" with refusal 14 on the line', async () => {
+  const w = world(); await w.pass(PIN_AT);
+  w.land({ 'app/new.ts': 'x' }); await w.pass();
+  const l = w.judged()[0];
+  assert.ok(l.refusals.some((r) => r.n === 14), JSON.stringify(l.refusals));
+  assert.equal(l.verdict, VERDICTS[2]);
+});
+
+test('R3 X4 a merge commit with two parents is judged once, as the merge; the branch commit is never walked', async () => {
+  const w = world(); await w.pass(PIN_AT);
+  const before = w.g.main;
+  const side = w.g.commit([before], { 'src/side.mjs': 's' }, { from: before });
+  const merge = w.g.commit([before, side], { 'docs/m.md': 'm' }, { from: before });
+  w.g.main = merge; w.dates.set(merge, '2026-11-03T10:00:00Z'); w.dates.set(side, '2026-11-03T09:00:00Z');
+  await w.pass();
+  const shas = w.lines().filter((l) => l.sha && !l.pin).map((l) => l.sha);
+  assert.deepEqual(shas, [merge]);
+  assert.ok(!w.asked.some(([, p]) => p.includes(`/commits/${side}`)), 'the second parent is never read');
+});
+
+test('R3 X5 the rules are read at the FIRST parent of a merge, not the second', async () => {
+  const w = world({ mode: 'github' }); await w.pass(PIN_AT);
+  const before = w.g.main;                                           // no rules file here
+  const side = w.g.commit([before], { 'orchestrate/policy.yaml': POLICY }, { from: before });   // rules only on the side
+  const merge = w.g.commit([before, side], { 'docs/m.md': 'm' }, { from: before });
+  w.g.main = merge; w.dates.set(merge, '2026-11-03T10:00:00Z');
+  await w.pass();
+  const nj = w.lines().find((l) => l.sha === merge);
+  assert.ok(nj && /^HTTP 404/.test(nj.not_judged_reason ?? ''), JSON.stringify(nj));
+});
+
+test('R3 X11 when a commit has two listed pull requests, the one whose merge commit it is wins', async () => {
+  const w = world(); await w.pass(PIN_AT);
+  const a = w.land({ 'docs/a.md': 'two' });
+  w.g.openPull({ number: 900, head: a.merge, files: { 'docs/a.md': 'two' } });          // an open pull request whose head is that commit
+  const entries = [...w.g.pulls]; w.g.pulls.clear();
+  for (const [k, v] of entries.sort((x, y) => (y[0] === 900 ? 1 : 0) - (x[0] === 900 ? 1 : 0))) w.g.pulls.set(k, v);
+  assert.equal([...w.g.pulls.keys()][0], 900, 'the wrong one is listed first');
+  await w.pass();
+  const l = w.judged().find((x) => x.sha === a.merge);
+  assert.equal(l.pr, a.number); assert.equal(l.direct, false);
+});
+
+test('R3 X24 rules: "no rules file" (404) and "could not be read" (500) say different things', async () => {
+  const w = world({ mode: 'github' });
+  const rules = w.rulesOf();
+  const none = await rules.at(w.root);
+  assert.match(none.reason, /there is no rules file/);
+  w.hooks.push([/\/contents\//, 500]);
+  const boom = await rules.at(w.root);
+  assert.match(boom.reason, /could not be read/); assert.doesNotMatch(boom.reason, /there is no rules file/);
+});
+
+test('R3 m-d a second, different rules version must have landed AFTER the first (the replay guard `after` is passed)', async () => {
+  const w = world({ mode: 'github' }); await w.pass(PIN_AT);
+  const r1 = w.land({ 'orchestrate/policy.yaml': POLICY });
+  const d1 = w.land({ 'docs/a.md': 'two' });
+  const r2 = w.land({ 'orchestrate/policy.yaml': `${POLICY}\n# v2\n` });
+  const d2 = w.land({ 'docs/b.md': 'three' });
+  await w.pass();
+  assert.ok(w.asked.some(([, p]) => p.includes(`/compare/${r1.merge}...${r2.merge}`)), 'the guard compared the last good commit with the new rules\' merge');
+  const l = w.lines().find((x) => x.sha === d2.merge);
+  assert.ok(l && l.verdict, JSON.stringify(w.lines().filter((x) => x.sha === d2.merge)));
+  assert.ok(w.lines().some((x) => x.sha === d1.merge && x.verdict));
 });
