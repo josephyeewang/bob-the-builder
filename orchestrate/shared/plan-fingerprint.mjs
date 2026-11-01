@@ -31,7 +31,9 @@ export function canonicalJson(v) {
   throw new Error(`cannot fingerprint a ${typeof v}`);
 }
 
-function cleanPath(p) {
+// The one rule for a plan's file path, exported so a plan's wave check (M3) compares the same cleaned form (L87 M-1).
+// Returns the cleaned path, or null when it is not one plain path.
+export function cleanPath(p) {
   if (typeof p !== 'string' || !p) return null;
   let q = p.normalize('NFC');
   while (q.startsWith('./')) q = q.slice(2);
