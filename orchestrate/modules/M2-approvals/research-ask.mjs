@@ -34,6 +34,8 @@ function nextId(record) {
   return `R-${(n.length ? Math.max(...n) : 0) + 1}`;
 }
 
+export const claimedAsk = (text) => { try { return JSON.parse(String(text ?? ''))?.ask; } catch { return undefined; } };
+
 // A refused report is alerted once per report and reason, not every pass (audit kit-lane3 r1 Minor 11). The file
 // holds the reports still refused, so a report that stops being refused (it opened, or left the record) is dropped,
 // and one refused for a new reason is alerted again.
@@ -61,6 +63,8 @@ export function openResearchAsks(ctx) {
   for (const rep of record.list('report')) {
     const d = rep.doc;
     if (!d || d.kind !== 'ask-request-' || done.has(rep.id)) continue;
+    // An undo request is undo-flag.mjs's (R-0b-140), which runs every check itself; this pass only routes on the claim.
+    if (claimedAsk(d.text) === 'undo') continue;
     const no = (reason) => { refused.push({ report: rep.id, reason }); };
     if (d.role !== 'front_door') { no('an ask request comes only from the Front Door'); continue; }
     const r = checkOutboxFile(String(d.source ?? ''), String(d.text ?? ''));

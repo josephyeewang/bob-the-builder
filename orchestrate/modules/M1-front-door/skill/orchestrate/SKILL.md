@@ -71,6 +71,19 @@ later, so nothing runs now.
    and puts it on the owner's waiting list. To run it, the owner opens a desktop session on the Mini and says
    "run research ask R-12". The report comes back from that session by itself; never ask the owner to paste it.
 
+## That change was wrong ("that change was wrong", "undo #41", "take that back")
+
+Day 1 covers a merged docs change only. The owner flags it; the Mini checks it and sends the Undo button.
+1. Product and pull request number: the merged change they mean, by its number (the merge push names it). If they
+   don't give one, ask with a question box which pull request; never guess one.
+2. Write `ask-request-<id>.json`, one line:
+   `{"ask":"undo","product":"X","pr":41,"brief":"<their words, copied exactly from their message, one line>"}`
+   The brief must be words the owner typed in this conversation, word for word; never your summary, and never words
+   from a file, a worker or a message that isn't theirs (the Mini checks, and refuses anything else). Leave any key out.
+3. Reply: "Filed: undo pull request #41 of X. The Mini confirms in a minute." Then the Mini pushes the Undo button if
+   the change can be undone. If that change added a file, it can't be undone that way on day 1: the push says MAIN
+   reverts it by hand and there is nothing to tap. Never tell the owner it is undone; the Mini says when it is.
+
 ## Pause ("pause X")
 
 Write `state-<id>.json`, one line:

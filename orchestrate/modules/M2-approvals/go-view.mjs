@@ -6,7 +6,7 @@
 //   goText(view) → the push text (lines, answer, the fold's files)
 //   goMarkdown(view) → the decision pull request's body for a Tier-1 go (the fold is a <details> block)
 //   foldFiles(markdown) → the files listed in a body's fold, as GitHub shows it (for the test that reads it back)
-//   undoPushText({ card, title, pr, addedFiles }) → the day-1 [Undo] push (sent by R-0b-140)
+//   undoPushText({ card, title, pr, addedFiles, unknownFiles }) → the day-1 [Undo] push (sent by R-0b-140)
 //
 // A Tier-1 go is never shown before a fresh plan reviewer has passed the plan with 0 Material: goView refuses one
 // whose `plan_check` is missing, failing, for another card, for another version of the plan (its whole fingerprint:
@@ -96,9 +96,13 @@ export function foldFiles(md) {
 }
 
 // The day-1 [Undo] push (R-0b-140 sends it within 5 minutes of the owner's flag). A merge that added a file can't be
-// undone by a plain reverse: MAIN reverts it by hand, and the push says so.
-export function undoPushText({ card, title, pr, addedFiles = [] } = {}) {
+// undone by a plain reverse through the docs lane: MAIN reverts it by hand, and the push says so. That case has no
+// Undo button (no tap ask is opened), so its text offers none. A merge whose file list couldn't be read is treated
+// the same way.
+export function undoPushText({ card, title, pr, addedFiles = [], unknownFiles = false } = {}) {
   const q = `Undo ${firstLine(title) || card} (${card}, pull request #${pr})?`;
+  const hand = 'MAIN reverts it by hand, first, before anything else merges. There is nothing to tap; you are told when it is done.';
+  if (unknownFiles) return `${q} Its file list couldn't be read, so it isn't undone automatically: ${hand}`;
   if (!addedFiles.length) return `${q} Tap Undo and the exact reverse of that merge goes in first, before anything else merges.`;
-  return `${q} It added ${plural(addedFiles.length, 'file')} (${addedFiles.join(', ')}), so a plain reverse can't undo it: tap Undo and MAIN reverts it by hand, first, before anything else merges. You are told when it is done.`;
+  return `${q} It added ${plural(addedFiles.length, 'file')} (${addedFiles.join(', ')}), so a plain reverse can't undo it: ${hand}`;
 }
