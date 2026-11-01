@@ -197,5 +197,9 @@ test('R-0b-138: the [Undo] push format', () => {
   assert.equal(undoPushText({ card: 'C-4', title: 'Billing export', pr: 41 }),
     'Undo Billing export (C-4, pull request #41)? Tap Undo and the exact reverse of that merge goes in first, before anything else merges.');
   const added = undoPushText({ card: 'C-4', title: 'Billing export', pr: 41, addedFiles: ['src/new.mjs'] });
-  assert.match(added, /It added 1 file \(src\/new\.mjs\), so a plain reverse can't undo it: tap Undo and MAIN reverts it by hand/);
+  assert.match(added, /It added 1 file \(src\/new\.mjs\), so a plain reverse can't undo it: MAIN reverts it by hand/);
+  // No Undo button is offered for it (R-0b-140 opens no tap ask), so the text offers no tap.
+  assert.doesNotMatch(added, /[Tt]ap Undo/); assert.match(added, /nothing to tap/);
+  const unknown = undoPushText({ card: 'C-4', title: 'Billing export', pr: 41, unknownFiles: true });
+  assert.match(unknown, /file list couldn't be read/); assert.match(unknown, /MAIN reverts it by hand/); assert.doesNotMatch(unknown, /[Tt]ap Undo/);
 });

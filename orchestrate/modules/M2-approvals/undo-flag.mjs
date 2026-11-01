@@ -112,7 +112,7 @@ export async function openUndoFlags(ctx, { entriesOf, addedBy } = {}) {
       if (!w.ok) { no(`the record refused the ask: ${w.reason}`); continue; }
       done.add(rep.id); undone.add(card.id);
       alert({ type: 'undo_by_hand', ask: id, card: card.id, pr: r.doc.pr, commit, files });
-      byHand.push({ id, push: undoPushText({ card: card.id, title, pr: r.doc.pr, addedFiles: files.length ? files : ['files it could not list'] }) });
+      byHand.push({ id, push: undoPushText({ card: card.id, title, pr: r.doc.pr, addedFiles: files, unknownFiles: !Array.isArray(added) }) });
       continue;
     }
     const c = createAsk(ctx, { id, kind: 'undo', card: card.id, title, origin_session: sid, extra: join });
