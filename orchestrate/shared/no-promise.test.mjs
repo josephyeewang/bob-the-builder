@@ -39,7 +39,10 @@ export function pushTexts(k) {
   return [...new Set(DOCS.map((d) => intakePush(`${k}X-1.json`, ok(d))))];
 }
 
-export const promises = (k, skill) => [...skillTexts(k, skill), ...pushTexts(k)].filter((t) => ACTION.test(t));
+// A "Not filed: … isn't available … yet" line denies the action, so it is never a promise (lane 3's L151 wording).
+export const NOT_AVAILABLE = /^Not filed: .+ isn't available from the Front Door yet\./;
+const promising = (t) => !/^Not filed\b/.test(t.replace(/\*/g, '')) && ACTION.test(t);
+export const promises = (k, skill) => [...skillTexts(k, skill), ...pushTexts(k)].filter(promising);
 
 test('L151: no text shown to Joe for a pending kind promises an action', () => {
   const pending = Object.entries(OUTBOX_KINDS).filter(([, s]) => s.pending !== undefined).map(([k]) => k);
@@ -50,15 +53,26 @@ test('L151: no text shown to Joe for a pending kind promises an action', () => {
   assert.ok(pushTexts('idea-').some((t) => /^Confirmed: idea/.test(t)), 'the idea- push is read');
 });
 
-test('L151 M-1: the refused kinds are refused because their shown texts promise an action (a pending plant goes red)', () => {
+test('L151 M-1: a refused kind is refused because its shown text promises an action, or says it is not available', () => {
   for (const k of ['state-', 'request-']) {
     assert.equal(OUTBOX_KINDS[k].entity, null, k);
-    assert.ok(promises(k).length > 0, `${k} would promise an action if it were pending`);
+    const shown = pushTexts(k);
+    assert.ok(shown.length > 0, `${k}: the intake push is read`);
+    // Today's wording promises (so pending would be wrong); lane 3's says "not available" (so nothing is promised).
+    for (const t of shown) assert.ok(promising(t) || NOT_AVAILABLE.test(t), `${k}: "${t}" neither promises nor says it is not available`);
   }
-  assert.ok(promises('state-').some((t) => /pause X/.test(t)), 'the skill pause reply');
-  assert.ok(promises('state-').some((t) => /Confirmed: pause app/.test(t)), 'the intake pause push');
-  assert.ok(promises('request-').some((t) => /resume X/.test(t)), 'the skill resume reply');
+});
+
+test('L151: the scan catches a promise and lets a "not available" line through (plants on the text itself)', () => {
+  const skill = (reply) => `## Pause\n\nWrite \`state-<id>.json\`.\nReply: "${reply}"\n`;
+  assert.deepEqual(promises('idea-', skill('Filed: pause X. The Mini confirms in a minute.')).filter((t) => /pause X/.test(t)), [], 'a state- section is not an idea- text');
+  assert.deepEqual(skillTexts('state-', skill('Filed: pause X. The Mini confirms in a minute.')), ['Filed: pause X. The Mini confirms in a minute.']);
+  assert.ok(promising('Filed: pause X. The Mini confirms in a minute.'));
+  assert.ok(promising('Confirmed: pause app. Only your tap brings it back.'));
+  assert.ok(promising('Request taken: rotate K. The key is NOT rotated yet; the steps follow.'));
+  assert.equal(promising("Not filed: pausing app isn't available from the Front Door yet. Nothing changed."), false);
+  assert.ok(NOT_AVAILABLE.test("Not filed: rotating K isn't available from the Front Door yet. The key is NOT rotated."));
   // A shown line for idea- that promised an action would go red.
-  const planted = readFileSync(SKILL, 'utf8').replace('"Filed: idea <id>. The Mini confirms in a minute."', '"Filed: idea <id>. The Lead starts on it tonight."');
+  const planted = readFileSync(SKILL, 'utf8').replace(/"\*{0,2}Filed: idea <id>[^"]*"/, '"Filed: idea <id>. The Lead starts on it tonight."');
   assert.ok(promises('idea-', planted).length > 0, 'a planted promise in the idea- reply is caught');
 });
