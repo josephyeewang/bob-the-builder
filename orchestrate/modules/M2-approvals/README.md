@@ -10,7 +10,7 @@ See LANES.md for who builds this folder, and the build rows (0b-5, R-0b-48..53) 
 |---|---|
 | `kinds.mjs` | The fixed lines the Front Door shows word for word, the reading of the owner's settings (push windows, zones, lapse times), `dueWindow` (is now a push window?) and `lapseAt` (when this round of an ask runs out). Ask kinds themselves are shared names in `shared/asks.mjs`. |
 | `payload.mjs` | The exact question box for an ask, written on the ask when it is created (plain and "still open" versions). |
-| `ask-store.mjs` | Reads and writes asks and gos through the M9 writer as `approvals`; an ask or go last written by anyone else is not trusted and is alerted. |
+| `ask-store.mjs` | Reads and writes asks and gos through the M9 writer as `approvals`; an ask or go last written by anyone else is not trusted and is alerted. `writeDoc` is for M2's own files; another module closes an ask only through `consumeAsk(ctx, id, note)` (answered → consumed, the note may only add new fields; L85 m-3), and `consume-ask.test.mjs` fails on a module outside M2 that imports `writeDoc`. |
 | `transcript-copy.mjs` | M2's tamper-checked copy of a launched session's conversation log. Taps are read from the copy, never from the live file. |
 | `binding.mjs` | When a tap counts (R-0b-48): the box must match the payload exactly, be asked in a Front Door or thinking session the Dispatcher launched, and be answered by a tap while the ask is still in its round. `createAsk` lives here. |
 | `github-review.mjs` | When a GitHub Approve counts (R-0b-49): the owner's account by numeric id, an Approve on the exact commit (or one it carries over to), given after the ask was raised. |
