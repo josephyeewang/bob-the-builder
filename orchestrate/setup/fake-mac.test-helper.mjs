@@ -4,14 +4,31 @@
 // invalid, a write with no value is a bad call, a record that is not there reads as exit 56; chown needs root; mkdir
 // needs the parent and refuses an existing folder (those two are the real mkdir's own refusals, since it is the real one).
 
-import { chmodSync, cpSync, fchmodSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, realpathSync, rmSync } from 'node:fs';
+import { chmodSync, cpSync, fchmodSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, realpathSync, rmSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import test from 'node:test';
+import { tempDir } from '../shared/test-tmp.mjs';
 import { readConfigFile, secureFile, secureFolder, writeNewFile } from './mac.mjs';
 
+// The stand-in runs the Mac's own `ls -le` and `chmod +a` for the access-list items. A machine that is not a Mac (the Linux
+// check on GitHub) has neither, so a test that reaches them is SKIPPED with the reason on show, never passed; the macOS job
+// (.github/workflows/scripts-ci.yml, guarded by ci-job.test.mjs) runs every one of them. SETUP_FORCE_NOT_MAC=1 makes a Mac
+// behave like that machine, to see which tests skip.
+export const NEEDS_MAC = 'needs macOS tools; run by the macOS job';
+export const notMac = () => process.platform !== 'darwin' || process.env.SETUP_FORCE_NOT_MAC === '1';
+let hitMacTool = false;
+/** `test`, except a test that needed a Mac tool this machine lacks is skipped (said aloud) instead of failing. */
+export function macTest(name, opts, fn) {
+  if (typeof opts === 'function') { fn = opts; opts = {}; }
+  return test(name, opts, async (t) => {
+    hitMacTool = false;
+    try { await fn(t); } catch (e) { if (hitMacTool) { t.skip(NEEDS_MAC); return; } throw e; }
+  });
+}
+
 export function fakeMac({ euid: as = 0, users = {}, admins = [] } = {}) {
-  const prefix = realpathSync(mkdtempSync(join(tmpdir(), 'setup-test-')));   // real: the updater compares real paths
+  const prefix = realpathSync(tempDir('orch-setup-mac-'));   // real: the updater compares real paths
   const mac = {
     as, prefix, rootUid: process.getuid(),
     users: new Map(Object.entries({ sam: { UniqueID: '65001', PrimaryGroupID: '20', UserShell: '/bin/zsh', NFSHomeDirectory: '/Users/sam' }, ...users })),
@@ -26,7 +43,7 @@ export function fakeMac({ euid: as = 0, users = {}, admins = [] } = {}) {
     secretPrompts: [],          // every prompt shown
     sudoRules: new Set(),      // users a sudo rule names (`sudo -l -U` then says they may run sudo)
     nodeProblemText: null,      // a test sets this to make the node program look like one root must not run
-    aclPrincipals: { orchestrate: 'daemon' },   // access-list names that exist only on the Mini are stood in for by a real user here
+    aclPrincipals: { orchestrate: 'daemon' },   // access-list names that exist only on the always-on Mac are stood in for by a real user here
   };
   const at = (p) => join(prefix, p);
   mkdirSync(at('/Library/LaunchDaemons'), { recursive: true });
@@ -60,6 +77,7 @@ export function fakeMac({ euid: as = 0, users = {}, admins = [] } = {}) {
     return { status: 40, stdout: '', stderr: 'Invalid Command' };
   };
   const real = (cmd, args) => {
+    if (notMac()) { hitMacTool = true; throw new Error(`${cmd}: ${NEEDS_MAC}`); }
     const r = spawnSync(cmd, args, { encoding: 'utf8' });
     return { status: r.status ?? 1, stdout: String(r.stdout ?? ''), stderr: String(r.stderr ?? r.error?.message ?? '') };
   };
@@ -114,7 +132,7 @@ export function fakeMac({ euid: as = 0, users = {}, admins = [] } = {}) {
         const who = args[args.indexOf('-U') + 1];
         return mac.sudoRules.has(who) ? { status: 0, stdout: `User ${who} may run the following commands on this-mac:\n    (ALL) ALL\n`, stderr: '' } : { status: 1, stdout: `User ${who} is not allowed to run sudo on this-mac.\n`, stderr: '' };
       }
-      // The real ls and chmod, so their refusals are the real ones. A principal that exists only on the Mini (orchestrate)
+      // The real ls and chmod, so their refusals are the real ones. A principal that exists only on the always-on Mac (orchestrate)
       // is swapped for a real user of this Mac on the way in and back on the way out.
       if (cmd === '/bin/ls') {
         const r = real(cmd, args);

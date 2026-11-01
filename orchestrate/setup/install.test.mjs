@@ -3,11 +3,9 @@
 // the updater's own test-only options) against the install the setup built, so a wrong layout is refused by the real code.
 // PLANT tests break one clause each and name the check that catches it. The last tests run read-only tools on this Mac.
 
-import test from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
-import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { gitOk } from '../modules/M4-workshop/git/safe-git.mjs';
@@ -18,10 +16,11 @@ import { realIo } from './mac.mjs';
 import { ROOT_CONFIG_PATH } from './layout.mjs';
 import { BOOTSTRAP_FILES, LABEL_RE, installPaths, parseInstallConfig, updaterConfigFor } from './install.mjs';
 import { JOBS, checkDaemons, list, plistTexts } from './daemons.mjs';
-import { checkInstall } from './install.mjs';
+import { checkInstall, rootMadeEntries } from './install.mjs';
 import { main, parseArgs, planCommand } from './setup.mjs';
-import { apply } from './users-folders.mjs';
-import { fakeMac } from './fake-mac.test-helper.mjs';
+import { apply, check } from './users-folders.mjs';
+import { fakeMac, macTest as test } from './fake-mac.test-helper.mjs';
+import { tempDir } from '../shared/test-tmp.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ME = process.getuid();
@@ -52,7 +51,7 @@ async function origin(root) {
 /** The throwaway Mac with the users and folders already set up (part 1), and the files the install needs. */
 async function world({ euid = 0 } = {}) {
   const mac = fakeMac({ euid: 0 });
-  const ext = mkdtempSync(join(tmpdir(), 'setup-ext-'));
+  const ext = tempDir('orch-setup-ext-');
   const bare = await origin(ext);
   // The runner's config, as the lead's wiring would hand it over, and the three things it names.
   mkdirSync(join(ext, 'wiring'));
@@ -180,6 +179,13 @@ test('install: the real updater accepts the layout; every item passes; the work 
   assert.deepEqual(w.updaterRuns, [0], 'a second run ran the updater again');
   const main40 = checkInstall(w.mac, w.cfg, { main: stamp });
   assert.equal(failed(main40).length, 0);
+});
+
+test('check after a correct install does not call the install folders strangers (r3 n4); PLANT without the carry it does', async () => {
+  const w = await installed();
+  const strangers = (rs) => rs.filter((r) => !r.ok && /did not make/.test(r.why ?? ''));
+  assert.equal(strangers(check(w.mac, w.cfg, { alsoKnown: rootMadeEntries(w.cfg) })).length, 0);
+  assert.ok(strangers(check(w.mac, w.cfg)).some((r) => /install/.test(r.why)), 'the plant: no carry → "install" is a stranger');
 });
 
 test('install: refuses a runner config for another place, or one that names things the copy would not carry; nothing is changed', async () => {
