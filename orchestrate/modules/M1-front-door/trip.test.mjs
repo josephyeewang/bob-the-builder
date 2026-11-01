@@ -70,9 +70,11 @@ test('R-0b-83 brief: away line, time zone question, go items and risky asks with
   facts.put(AIR_FACT, { kind: 'fact.air-health', red_count: 0, checked_at: ago(30) });
   w('go', 'go-1', { state: 'waiting', wait: { who: 'owner', what: 'go on roadmap row 7', since: ago(100) }, link: 'https://example.invalid/roadmap#row-7' });
   w('go', 'go-2', { state: 'done' });
-  w('ask', 'ask-1', { state: 'pushed', what: `delete the old table (pasted ${FAKE.github})`, link: 'https://example.invalid/pr/9' });
-  w('ask', 'ask-2', { state: 'expired', what: 'old' });
-  w('ask', 'ask-3', { state: 'open', what: 'no link here' });
+  w('ask', 'ask-1', { kind: 'risky_approve', state: 'pushed', what: `delete the old table (pasted ${FAKE.github})`, link: 'https://example.invalid/pr/9' });
+  w('ask', 'ask-2', { kind: 'risky_approve', state: 'expired', what: 'old' });
+  w('ask', 'ask-3', { kind: 'risky_approve', state: 'open', what: 'no link here' });
+  // L80: an open research ask is not a risky-act ask.
+  w('ask', 'R-1', { kind: 'research', state: 'open', title: 'find out the churn rate', wait: { who: 'joe', what: '"run research ask R-1" in a desktop session on the Mini', since: ago(10) } });
   const text = buildTripBrief({ products: [{ name: 'test-product', on_merge_gate: true }, { name: 'second', on_merge_gate: false }], until: '2026-11-07', tz: null, rec, facts, heartbeatProduct: HB, now });
   assert.match(text, /test-product, second set to away until 2026-11-07/);
   assert.match(text, /Which time zone will you be in\?/);
@@ -83,6 +85,7 @@ test('R-0b-83 brief: away line, time zone question, go items and risky asks with
   assert.match(text, /ask-1: .*\(https:\/\/example.invalid\/pr\/9\)/);
   assert.match(text, /ask-3: .*RECORD ERROR: no pull request link/);
   assert.equal(text.includes('ask-2'), false);
+  assert.doesNotMatch(text.split('Open risky-act asks')[1], /R-1:/, 'a research ask is not listed as risky');
   assert.equal(text.includes(FAKE.github), false, 'ask text is masked');
   assert.match(text, /Mini check: green/);
   assert.match(text, /Air health check: passed/);

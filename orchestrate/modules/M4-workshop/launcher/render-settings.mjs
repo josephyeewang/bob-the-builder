@@ -20,6 +20,10 @@ import { REVIEW_ROLES } from '../../../shared/review-roles.mjs';
 export const REVIEW_WALLS = Object.freeze(['outboxRoot', 'runnerRoot']);
 
 export const HOOK_TIMEOUT = 10;
+// What ends every hook command (L75 caveat (c)). Claude Code runs a hook command in a shell and blocks only on exit 2;
+// any other failure lets the call through. So a hook whose node or script is gone (the shell's 127), or that crashes
+// (1, or a signal), exits 2 and blocks. A hook that answers 0 is unchanged; one that blocks with 2 still does.
+export const HOOK_FAILS_CLOSED = ' || exit 2';
 export const POLICY_HOOKS = Object.freeze({
   'plain-files': 'Write|Edit|NotebookEdit',
   'secret-file-block': 'Read|Grep|Glob|Edit|Write|NotebookEdit|Bash',
@@ -113,7 +117,7 @@ export function renderRoleSettings({ role, profile, paths, product = {}, rulesHo
   // Only a worker and the writer change files in a code copy; every other role writes its outbox only.
   const copyArg = ['worker', 'writer'].includes(role) ? ` --copy ${paths.copy}` : '';
   const hookCmd = (name, extra = '') =>
-    `${paths.node} ${join(paths.hooksDir, `${name}.mjs`)} --role ${role} --outbox ${paths.outbox} --snapshot ${paths.snapshot} --kinds ${profile.outbox.join(',')}${copyArg}${extra}`;
+    `${paths.node} ${join(paths.hooksDir, `${name}.mjs`)} --role ${role} --outbox ${paths.outbox} --snapshot ${paths.snapshot} --kinds ${profile.outbox.join(',')}${copyArg}${extra}${HOOK_FAILS_CLOSED}`;
   const hooks = { [E.preToolUse]: [] };
   for (const [name, matcher] of Object.entries(POLICY_HOOKS)) {
     hooks[E.preToolUse].push({ [H.matcher]: matcher, [H.hooks]: [{ [H.type]: 'command', [H.command]: hookCmd(name), [H.timeout]: HOOK_TIMEOUT, [H.onFailure]: 'block' }] });
@@ -178,6 +182,11 @@ export function checkSettings(obj, { machineWide = false, profile = null } = {})
   if (!p || p[S.ask]?.length) return refuse('role settings hold ask rules');
   if ((p[S.allow] ?? []).some((r) => !/^Bash\(.+\)$/.test(r) || BAD_COMMAND.test(r.slice(5, -1)))) return refuse('an allow rule is not one exact command');
   if (profile && p[S.defaultMode] !== profile.mode) return refuse('permission mode differs from the profile');
+  for (const list of Object.values(obj[S.hooks] ?? {})) {
+    for (const m of Array.isArray(list) ? list : []) for (const h of m?.[H.hooks] ?? []) {
+      if (typeof h?.[H.command] !== 'string' || !h[H.command].endsWith(HOOK_FAILS_CLOSED)) return refuse('a hook command does not exit 2 when it fails to run');
+    }
+  }
   if (obj[S.disableClaudeAiConnectors] !== true) return refuse('connectors are not off');
   if (obj[S.crossSessionInbound] !== 'refuse') return refuse('incoming messages are not refused');
   if (obj[S.disableSkillShellExecution] !== true) return refuse('skill shell lines are not off');

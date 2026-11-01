@@ -15,6 +15,7 @@
 // "unknown", never green. Merge hours: stated only for products on the Merge Gate (MAT-8); the Merge Gate, not this
 // file, enforces them. Freeze wording only when the owner says the Mini is going off (minor 9).
 
+import { activeKind } from '../../shared/asks.mjs';
 import { cleanOutside } from '../M12-sensors/escape.mjs';
 import { POWER_FACT } from '../M12-sensors/power-source.mjs';
 import { STATUS_FACT } from '../M13-ledger/heartbeat.mjs';
@@ -127,7 +128,9 @@ export function buildTripBrief({ products, until = null, tz: tzIn = null, stateI
 
   // M13's one waiting list (card, ask, go, merge, claim), only what waits on the owner (round 2 M-3, minor 12); an item with a
   // record error is shown, since it might be theirs. Risky asks have their own section below.
-  const asks = rec.list('ask').filter(({ doc }) => doc && OPEN_ASK.includes(doc.state));
+  // Only the kinds shared/asks.mjs lists as active are risky-act asks; a research ask (kind research) waits on the owner
+  // through its own wait instead (LEAD-CALLS L80).
+  const asks = rec.list('ask').filter(({ doc }) => doc && OPEN_ASK.includes(doc.state) && activeKind(doc.kind));
   const askIds = new Set(asks.map((a) => a.id));
   let goes; let listError = null;
   // A card waits on the owner by M9's own name for it (L79); a go or ask doc says 'owner'.

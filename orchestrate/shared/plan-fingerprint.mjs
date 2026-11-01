@@ -31,11 +31,13 @@ export function canonicalJson(v) {
   throw new Error(`cannot fingerprint a ${typeof v}`);
 }
 
-function cleanPath(p) {
+// The one rule for a plan's file path, exported so a plan's wave check (M3) compares the same cleaned form (L87 M-1).
+// Returns the cleaned path, or null when it is not one plain path.
+export function cleanPath(p) {
   if (typeof p !== 'string' || !p) return null;
   let q = p.normalize('NFC');
   while (q.startsWith('./')) q = q.slice(2);
-  if (!q || q.endsWith('/') || q.startsWith('/') || /[*?[\]{}]/.test(q) || q.includes('\\') || q.split('/').some((s) => s === '' || s === '.' || s === '..')) return null;
+  if (!q || q.endsWith('/') || q.startsWith('/') || /[*?[\]{}]/.test(q) || q.includes('\\') || /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/.test(q) || q.split('/').some((s) => s === '' || s === '.' || s === '..')) return null;
   return q;
 }
 
