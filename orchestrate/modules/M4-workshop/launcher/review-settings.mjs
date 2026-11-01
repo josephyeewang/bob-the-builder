@@ -6,8 +6,10 @@
 // committed in `templates/` (this file's folder) and copied into the installed copy by the updater with the rest of
 // `orchestrate/`. A template holds every rule of renderRoleSettings for that role; where a path belongs it holds a
 // placeholder, `/__orch_<name>__`, of two kinds:
-//   - session: `outbox` (outboxRoot/<role>/<the session id the runner made>, L71) and `copy` (the review copy for the
-//     card and head; a review role's settings name no copy today, so it is checked but fills nothing);
+//   - session: `outbox` (outboxRoot/<role>/<the session id the runner made>, L71), `copy` (the review copy for the
+//     card and head; a review role's settings name no copy today, so it is checked but fills nothing) and `notes`
+//     (<runner folder>/notes/<session id>, where the compaction hook keeps the session's note, apart from the
+//     outbox, so a reviewer's note is never taken in as a verdict, L101; the runner makes it, 0700);
 //   - machine: node, the hooks folder, the rules snapshot, the Bob folder, the read-deny list (one list placeholder:
 //     the config's `deny` paths plus the workers' copies folder), and each review wall (REVIEW_WALLS).
 // Machine values come only from the runner's root-owned config inside installRoot, never from a request.
@@ -33,9 +35,10 @@ import { copyPath, currentCopy } from './install-check.mjs';
 
 export const TEMPLATE_DIR = 'modules/M4-workshop/launcher/templates';
 export const SETTINGS_DIR = 'settings';
+export const NOTES_DIR = 'notes';
 export const templateFile = (installRoot, role) => join(installRoot, TEMPLATE_DIR, `${role}.settings.json`);
 
-export const SESSION_SLOTS = Object.freeze(['outbox', 'copy']);
+export const SESSION_SLOTS = Object.freeze(['outbox', 'copy', 'notes']);
 const wallSlot = (k) => `wall_${k}`;
 export const MACHINE_SLOTS = Object.freeze(['node', 'hooks', 'snapshot', 'bob', 'deny', ...REVIEW_WALLS.map(wallSlot)]);
 const LIST_SLOTS = new Set(['deny']);
@@ -60,7 +63,7 @@ export function renderTemplate(role) {
   return renderRoleSettings({
     role, profile: DESIGN_PROFILES[role], productionFiles: [],
     paths: {
-      copy: t('copy'), outbox: t('outbox'), hooksDir: t('hooks'), snapshot: t('snapshot'), node: t('node'), bobFolder: t('bob'),
+      copy: t('copy'), outbox: t('outbox'), hooksDir: t('hooks'), snapshot: t('snapshot'), node: t('node'), bobFolder: t('bob'), notes: t('notes'),
       deny: { secrets: [t('deny')] },
       reviewWalls: Object.fromEntries(REVIEW_WALLS.map((k) => [k, t(wallSlot(k))])),
     },
@@ -83,7 +86,7 @@ export const SPOTS = Object.freeze([
   ['sandbox.filesystem.denyRead[]', `^${one('deny')}$`],
   ['sandbox.filesystem.denyWrite[]', `^${one('outbox')}/(?:\\*\\*/)?\\.\\*$`],
   ['sandbox.filesystem.denyWrite[]', `^${any([...WALLS_ALL, 'bob'])}(?:/\\*\\*)?$`],
-  [/^hooks\.[A-Za-z]+\[\]\.hooks\[\]\.command$/, `^${one('node')} ${one('hooks')}/[a-z-]+\\.mjs --role (?:reviewer|auditor) --outbox ${one('outbox')} --snapshot ${one('snapshot')} --kinds [a-z][a-z,-]*(?: --not-kinds [a-z][a-z,-]*)?(?: --kind [a-z]+ --event [A-Za-z]+)?${esc(HOOK_FAILS_CLOSED)}$`],
+  [/^hooks\.[A-Za-z]+\[\]\.hooks\[\]\.command$/, `^${one('node')} ${one('hooks')}/[a-z-]+\\.mjs --role (?:reviewer|auditor) --outbox ${one('outbox')} --snapshot ${one('snapshot')} --kinds [a-z][a-z,-]*(?: --not-kinds [a-z][a-z,-]*)?(?: --kind [a-z]+ --event [A-Za-z]+(?: --notes ${one('notes')})?)?${esc(HOOK_FAILS_CLOSED)}$`],
 ].map(([at, re]) => Object.freeze({ at, re: new RegExp(re) })));
 
 function walk(x, path, visit) {
@@ -213,7 +216,7 @@ export function slotValues(c, { role, sessionId, copy, node }, ports = {}) {
   if (!cur.link) return refuse(`${c.installRoot} is a plain folder, not the installed copy's link`);
   const values = {
     outbox: join(c.outboxRoot, role, sessionId), copy, node: copyPath(c.installRoot, cur, node), hooks: copyPath(c.installRoot, cur, c.hooksDir),
-    snapshot: c.snapshot, bob: c.bobFolder,
+    snapshot: c.snapshot, bob: c.bobFolder, notes: join(c.root, NOTES_DIR, sessionId),
     deny: [...c.deny, c.workerCopies],
   };
   for (const k of REVIEW_WALLS) {
@@ -276,10 +279,13 @@ export function sessionSettings(c, { role, sessionId, copy, node }, { owner = 0,
   const ck = checkSettings(settings, { profile: DESIGN_PROFILES[role] });
   if (!ck.ok) return refuse(`the filled settings were refused: ${ck.reason}`);
 
+  // The runner's own folders (0700): the settings files, and the session's compaction-notes folder (L101).
+  for (const d of [join(c.root, SETTINGS_DIR), join(c.root, NOTES_DIR), v.values.notes]) {
+    if (!existsSync(d)) mkdirSync(d, { mode: 0o700 });
+    const st = lstatSync(d);
+    if (st.isSymbolicLink() || !st.isDirectory() || st.uid !== uid || st.mode & 0o077) return refuse(`${d} is not the runner's own folder (0700)`);
+  }
   const dir = join(c.root, SETTINGS_DIR);
-  if (!existsSync(dir)) mkdirSync(dir, { mode: 0o700 });
-  const st = lstatSync(dir);
-  if (st.isSymbolicLink() || !st.isDirectory() || st.uid !== uid || st.mode & 0o077) return refuse(`${dir} is not the runner's own folder (0700)`);
   const file = join(dir, `${sessionId}.json`);
   const text = templateText(settings);
   let fd;

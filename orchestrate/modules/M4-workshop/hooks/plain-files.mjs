@@ -7,6 +7,7 @@
 
 import { basename, dirname, sep } from 'node:path';
 import { isMain, runHook, block, pass, landingPath, inside, realFolder, linkedFile, fold, oddPath } from './lib.mjs';
+import { kindAmong } from './outbox-kind.mjs';
 
 export const OUTBOX_ONLY_ROLES = Object.freeze(['lead', 'front_door', 'thinking', 'learning']);
 
@@ -27,13 +28,11 @@ export function isSetupPath(p) {
 
 export const OUTBOX_NAME = /^[a-z]+-[A-Za-z0-9-]+\.(md|json|txt)$/;
 
-// A name's kind, read as M9 reads it (L82 M-1): the longest listed prefix the name starts with. `kinds` is the role's
-// own list (--kinds), `notKinds` the longer listed kinds it may not hand in (--not-kinds); both come from the one
-// shared table through the launcher. Null when the name is none of the role's own.
+// A name's kind, read with M9's own rule (outbox-kind.mjs `kindAmong`, L82 M-1, L101). `kinds` is the role's own list
+// (--kinds), `notKinds` the longer listed kinds it may not hand in (--not-kinds); both come from the one shared table
+// through the launcher. Null when the name is none of the role's own: so a reviewer's `verdict-compact-x` is no kind.
 export function kindIn(name, kinds, notKinds = []) {
-  let best = null;
-  // A kind is a name prefix, so it ends in a dash; anything else (an old first-word list) matches nothing.
-  for (const k of [...kinds, ...notKinds]) if (typeof k === 'string' && /^[a-z]+(-[a-z]+)*-$/.test(k) && name.startsWith(k) && name.length > k.length && (!best || k.length > best.length)) best = k;
+  const best = kindAmong(name, [...kinds, ...notKinds]);
   return best !== null && kinds.includes(best) ? best : null;
 }
 

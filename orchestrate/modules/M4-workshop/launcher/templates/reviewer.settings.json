@@ -108,7 +108,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/__orch_node__ /__orch_hooks__/compact-note.mjs --role reviewer --outbox /__orch_outbox__ --snapshot /__orch_snapshot__ --kinds report-,verdict- --not-kinds report-compact- --kind verdict --event PreCompact || exit 2",
+            "command": "/__orch_node__ /__orch_hooks__/compact-note.mjs --role reviewer --outbox /__orch_outbox__ --snapshot /__orch_snapshot__ --kinds report-,verdict- --not-kinds report-compact- --kind verdict --event PreCompact --notes /__orch_notes__ || exit 2",
             "timeout": 10,
             "onFailure": "block"
           }
@@ -121,7 +121,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/__orch_node__ /__orch_hooks__/compact-note.mjs --role reviewer --outbox /__orch_outbox__ --snapshot /__orch_snapshot__ --kinds report-,verdict- --not-kinds report-compact- --kind verdict --event PostCompact || exit 2",
+            "command": "/__orch_node__ /__orch_hooks__/compact-note.mjs --role reviewer --outbox /__orch_outbox__ --snapshot /__orch_snapshot__ --kinds report-,verdict- --not-kinds report-compact- --kind verdict --event PostCompact --notes /__orch_notes__ || exit 2",
             "timeout": 10,
             "onFailure": "block"
           }
@@ -134,7 +134,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/__orch_node__ /__orch_hooks__/compact-note.mjs --role reviewer --outbox /__orch_outbox__ --snapshot /__orch_snapshot__ --kinds report-,verdict- --not-kinds report-compact- --kind verdict --event SessionStart || exit 2",
+            "command": "/__orch_node__ /__orch_hooks__/compact-note.mjs --role reviewer --outbox /__orch_outbox__ --snapshot /__orch_snapshot__ --kinds report-,verdict- --not-kinds report-compact- --kind verdict --event SessionStart --notes /__orch_notes__ || exit 2",
             "timeout": 10,
             "onFailure": "block"
           }
