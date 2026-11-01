@@ -14,11 +14,13 @@
 //      and on a Mac the developer folder /usr/bin/git hands over to, with its helpers: `gitToolsProblem`), a PATH only
 //      root can write (ROOT_PATH) and a home folder of root's beside the clone (`gitHome`), never /tmp;
 //   4. when main's commit differs from the stamp, writes the files under `orchestrate/` at that commit into a new
-//      folder beside the copy (`<installRoot>.v-<commit>`), straight from git's objects: no checkout, no work tree;
-//      copies in the copy's own items that are not in the repository (`keep`: its node, its configs, the wiring, the
-//      claude program) from the copy in place, then writes the commit stamp last;
+//      versioned folder beside the copy (`<installRoot>.v-<commit>/orchestrate`), and the few files outside it that the
+//      code imports (install-check.mjs OUTSIDE_FILES) at their repository paths in the same folder (L92 item 4), straight
+//      from git's objects: no checkout, no work tree; copies in the copy's own items that are not in the repository
+//      (`keep`: its node, its configs, the wiring, the claude program) from the copy in place, then writes the commit
+//      stamp last, at the top of the versioned folder;
 //   5. checks the new folder is root's alone (`installProblem`) and holds what the runner's config names in the copy
-//      (its wiring, the claude program, the hooks), then flips the copy's link to it with one rename. The folder it
+//      (its wiring, the claude program, the hooks), then flips the copy's link to its `orchestrate/` with one rename. The folder it
 //      replaced is kept through one more update (`PREVIOUS`, L75 (a)): a review session started on it names its node
 //      and hooks by that folder's real path, and keeps them while it runs; every older one is removed;
 //   6. notes, in root's own record beside the copy, when it first saw main ahead of the copy (install-check.mjs
@@ -44,11 +46,11 @@ import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:pat
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { git, checkMirror, useGitHome, MIRROR_CONFIG_TEMPLATE, ROOT_PATH } from '../git/safe-git.mjs';
-import { STAMP, NODE, UPDATER_CONFIG, RUNNER_CONFIG, installStamp, installProblem, chainProblem, aclProblem, currentCopy, readInstallStamp,
+import { SOURCE, OUTSIDE_FILES, STAMP, NODE, UPDATER_CONFIG, RUNNER_CONFIG, installStamp, installProblem, chainProblem, aclProblem, currentCopy, readInstallStamp,
   versionName, versionCommit, mainSeenFile, readMainSeen, nextMainSeen } from './install-check.mjs';
 
 export const MAIN = 'refs/heads/main';
-export const SOURCE = 'orchestrate';
+export { SOURCE, OUTSIDE_FILES };
 // What `keep` must hold, or the first update would drop it: the copy's node, the updater's config, the runner's config.
 export const MUST_KEEP = Object.freeze({ [dirname(NODE)]: 'the copy\'s own node', [UPDATER_CONFIG]: 'the updater\'s config', [RUNNER_CONFIG]: 'the review runner\'s config' });
 const HEX40 = /^[0-9a-f]{40}$/;
@@ -109,6 +111,34 @@ export function parseTree(buf, { keep = [] } = {}) {
   }
   if (!out.length) return refuse(`main holds no ${SOURCE} folder`);
   return { ok: true, files: out };
+}
+
+/**
+ * `git ls-tree -r -z --full-tree <commit> -- <OUTSIDE_FILES>` output → [{ mode, oid, path }] at repository paths, or a
+ * refusal: each listed file must be on main once, as a plain file, and nothing else may come back (L92 item 4).
+ */
+export function parseOutside(buf, list = OUTSIDE_FILES) {
+  const out = [];
+  for (const rec of buf.toString('utf8').split('\0')) {
+    if (!rec) continue;
+    const m = /^(\d{6}) (\w+) ([0-9a-f]{40})\t(.+)$/s.exec(rec);
+    if (!m) return refuse(`an unreadable tree line: ${JSON.stringify(rec.slice(0, 80))}`);
+    const [, mode, type, oid, path] = m;
+    if (!list.includes(path) || out.some((x) => x.path === path)) return refuse(`git listed ${JSON.stringify(path.slice(0, 200))}, which is not one of the outside files`);
+    if (mode === '120000') return refuse(`${path} is a link`);
+    if (mode === '160000' || type !== 'blob') return refuse(`${path} is a submodule`);
+    if (!FILE_MODES[mode]) return refuse(`${path} has mode ${mode}`);
+    out.push({ mode: FILE_MODES[mode], oid, path });
+  }
+  const missing = list.filter((f) => !out.some((x) => x.path === f));
+  if (missing.length) return refuse(`main has no ${missing.join(', ')}, which the copy's code imports`);
+  return { ok: true, files: out };
+}
+
+// Each outside file sits at a plain repository path beside SOURCE, never in it or at the stamp's name (checked once,
+// when this file loads, so a bad list stops every run).
+for (const f of OUTSIDE_FILES) {
+  if (!plainPath(f) || f.split('/')[0] === SOURCE || f === STAMP) throw new Error(`install-check OUTSIDE_FILES: ${f} is not a plain path outside ${SOURCE}`);
 }
 
 /** `git cat-file --batch` output → Map oid → Buffer, checking each answer is the blob that was asked for. */
@@ -173,11 +203,15 @@ export function leftovers(installRoot, { list = readdirSync } = {}) {
     .sort().map((n) => join(dirname(installRoot), n));
 }
 
-/** The folder `<installRoot>.prev` names (a versioned folder beside the copy), or null. */
+/**
+ * The versioned folder `<installRoot>.prev` names (`<name>.v-<commit>/orchestrate`, as the copy's link does), or null.
+ * The whole versioned folder is what is kept, and what is removed when it goes.
+ */
 export function previousCopy(installRoot) {
   const link = `${installRoot}${PREVIOUS}`;
   let to; try { if (!lstatSync(link).isSymbolicLink()) return null; to = readlinkSync(link); } catch { return null; }
-  return versionCommit(installRoot, to) === null ? null : join(dirname(installRoot), to);
+  const parts = String(to).split('/');
+  return parts.length === 2 && parts[1] === SOURCE && versionCommit(installRoot, parts[0]) !== null ? join(dirname(installRoot), parts[0]) : null;
 }
 
 /**
@@ -332,7 +366,7 @@ export async function updateOnce(c, { first = null, owner = 0, top = '/', write 
   const from = first ?? c.installRoot;
   const fromBad = installProblem(from, [], { owner, top });
   if (fromBad) return refuse(`${first ? 'the seed' : 'the installed copy'} is not root's alone: ${fromBad}`);
-  const recovered = clearLeftovers(c.installRoot, { current: cur.real ?? null });
+  const recovered = clearLeftovers(c.installRoot, { current: cur.folder ?? null });
   step('cleared');
 
   const home = gitHome(c.clone, { owner });
@@ -390,27 +424,48 @@ async function swapIn(c, { commit, cur, from, first, owner, write, step, g, rena
   if (cat.code !== 0) return refuse(`git could not read the files: ${cat.stderr.trim().slice(0, 200)}`);
   const batch = parseBatch(cat.stdout, oids);
   if (!batch.ok) return batch;
+  // The few files outside SOURCE the code imports (L92 item 4), at their repository paths. With none listed, git is not
+  // asked: `ls-tree <commit> --` with no path would list the whole tree.
+  const outside = { files: [] };
+  const obatch = { blobs: new Map() };
+  if (OUTSIDE_FILES.length) {
+    const lo = await git(['ls-tree', '-r', '-z', '--full-tree', commit, '--', ...OUTSIDE_FILES], { ...g, purpose: 'updater-list-outside' });
+    if (lo.code !== 0) return refuse(`main's outside files could not be listed: ${lo.stderr.trim().slice(0, 200)}`);
+    const listed = parseOutside(lo.stdout);
+    if (!listed.ok) return listed;
+    outside.files = listed.files;
+    const ooids = listed.files.map((x) => x.oid);
+    const ocat = await git(['cat-file', '--batch'], { ...g, input: `${ooids.join('\n')}\n`, purpose: 'updater-read-outside' });
+    if (ocat.code !== 0) return refuse(`git could not read the outside files: ${ocat.stderr.trim().slice(0, 200)}`);
+    const read = parseBatch(ocat.stdout, ooids);
+    if (!read.ok) return read;
+    obatch.blobs = read.blobs;
+  }
 
   const name = versionName(c.installRoot, commit);
   const next = join(dirname(c.installRoot), name);
   // The copy in place already has this folder's name but not its stamp: it is not this run's to replace.
-  if (cur.real === next) return refuse(`the copy in place, ${name}, has no good stamp; it is left as it is`);
+  if (cur.folder === next) return refuse(`the copy in place, ${name}, has no good stamp; it is left as it is`);
   try {
     mkdirSync(next, { mode: 0o755 });
     step('folder');
-    for (const x of tree.files) {
-      const file = join(next, x.path);
-      mkdirSync(dirname(file), { recursive: true, mode: 0o755 });
-      write(file, batch.blobs.get(x.oid), x.mode);
+    const copy = join(next, SOURCE);
+    for (const [base, files, blobs] of [[copy, tree.files, batch.blobs], [next, outside.files, obatch.blobs]]) {
+      for (const x of files) {
+        const file = join(base, x.path);
+        mkdirSync(dirname(file), { recursive: true, mode: 0o755 });
+        write(file, blobs.get(x.oid), x.mode);
+      }
     }
+    step('outside files');
     for (const n of c.keep) {
       if (!there(join(from, n))) throw new Error(`the copy's own item ${n} is missing from ${from}`);
-      copyItem(join(from, n), join(next, n));
+      copyItem(join(from, n), join(copy, n));
       step(`kept ${n}`);
     }
-    const missing = runnerNamesMissing(c.installRoot, next);
+    const missing = runnerNamesMissing(c.installRoot, copy);
     if (missing) throw new Error(missing);
-    // Last, so a folder with a stamp is a whole one (L73 point 2).
+    // Last, after both trees and the kept items, so a folder with a stamp is a whole one (L73 point 2, L92 item 4).
     write(join(next, STAMP), Buffer.from(installStamp(commit)), 0o644);
     step('stamped');
     const bad = installProblem(next, [], { owner, top: next });
@@ -431,12 +486,12 @@ async function swapIn(c, { commit, cur, from, first, owner, write, step, g, rena
     return refuse(`the new copy could not be put in place (${e.code ?? e.message}); the old one stays`);
   };
   try {
-    symlinkSync(name, link);
+    symlinkSync(`${name}/${SOURCE}`, link);
   } catch (e) { return undo(e); }
   step('linked');
   if (cur.real) {
     try {
-      symlinkSync(basename(cur.real), prevLink);
+      symlinkSync(`${basename(cur.folder)}/${SOURCE}`, prevLink);
       rename(prevLink, `${c.installRoot}${PREVIOUS}`);
     } catch (e) { return undo(e); }
     step('kept the previous');
