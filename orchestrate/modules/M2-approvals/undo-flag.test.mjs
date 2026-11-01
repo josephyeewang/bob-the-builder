@@ -344,7 +344,9 @@ test('L117 m-7: on an unmarked ask, a wrong kind, a non-open ask and a missing k
   assert.equal(markResearchPushSent(t.ctx, id).ok, false, 'the research wrapper never marks a by-hand ask');
   const none = markPushSent(t.ctx, id);
   assert.equal(none.ok, false); assert.doesNotMatch(none.reason, / {2}/, 'L117 c3: no double space');
-  assert.equal(markSent(t.ctx, id, [BY_HAND_KIND], 'state').ok, false, 'only a sent mark');
+  const field = markSent(t.ctx, id, [BY_HAND_KIND], 'consumed_at');
+  assert.equal(field.ok, false); assert.match(field.reason, /consumed_at is not a sent mark/, 'only a sent mark');
+  assert.equal(askStore(t.record).ask(id).doc.consumed_at, undefined);
   assert.equal(askStore(t.record).ask(id).doc.push_sent_at, undefined);
   // A non-open ask of the right kind, never marked: a decision ask walked to pushed.
   must(createAsk(t.ctx, { id: 'D-1', kind: 'decision', card: 'C-7', title: 'Which', choices: ['A', 'B'], recommended: 'A' }));
