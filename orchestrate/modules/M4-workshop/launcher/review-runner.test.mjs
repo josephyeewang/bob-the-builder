@@ -1170,7 +1170,11 @@ test('L83 M-1 (c) planted: a package swapped for a link, removed, or with no pin
     [(w, dir) => unlinkSync(join(dir, 'change.diff')), /the review package's diff: it is gone/],
     [(w, dir) => chmodSync(join(dir, 'change.diff'), 0o666), /the review package's diff: it can be written by others/],
     [(w) => unlinkSync(join(w.root, 'packages', 'S-1.sha256')), /has no pin the runner can read \(it is gone\)/],
-    [(w) => writeFileSync(join(w.root, 'packages', 'S-1.sha256'), `${'0'.repeat(64)}\n`), /the review package changed while the session ran/],
+    [(w) => writeFileSync(join(w.root, 'packages', 'S-1.sha256'), `${'0'.repeat(64)}\n`), /is not the sha256 the runner kept/],
+    // L91 m-2: the diff and the pin rewritten to agree; the runner's own copy, in its state, still differs.
+    [(w, dir) => { writeFileSync(join(dir, 'change.diff'), 'a smaller, kinder diff\n'); writeFileSync(join(w.root, 'packages', 'S-1.sha256'), `${createHash('sha256').update('a smaller, kinder diff\n').digest('hex')}\n`); }, /is not the sha256 the runner kept/],
+    // L91 m-2: the runner's own copy is gone from its state.
+    [(w) => editState(w, (st) => { delete st.packages['S-1']; }), /the runner kept no sha256/],
   ];
   for (const [spoil, re] of cases) {
     const { w, r } = await packageRun(spoil);
@@ -1181,7 +1185,35 @@ test('L83 M-1 (c) planted: a package swapped for a link, removed, or with no pin
   const { w, r } = await packageRun(() => {}, (v, x) => { v.starts.push(x); v.live.push({ pid: 4100, sessionId: x.sessionId }); return { ok: true, pid: 4100 }; });
   assert.equal(existsSync(join(w.root, 'packages', 'S-1.sha256')), false);
   assert.equal(w.ended('S-1').ended.verdict_sha256, 'refused');
-  assert.match(r.alerts.find((a) => a.id === 'held-S-1').text, /has no pin the runner can read/);
+  assert.match(r.alerts.find((a) => a.id === 'held-S-1').text, /the runner kept no sha256/);
+});
+
+test('L91 m-2 planted: a pin written before the runner\'s (EEXIST) leaves the session unpinned, its verdict refused, as the alert says', async () => {
+  const diff = 'diff for S-1\n';
+  const sha = createHash('sha256').update(diff).digest('hex');
+  // Something else writes the pin first, even with the right sha256: the runner's own pin fails, and that alone refuses.
+  const { w, r } = await packageRun(() => {}, (v, x) => {
+    v.starts.push(x); v.live.push({ pid: 4100, sessionId: x.sessionId });
+    const out = pkg(x, diff);
+    writeFileSync(join(v.root, 'packages', `${x.sessionId}.sha256`), `${sha}\n`, { mode: 0o644 });
+    return { ok: true, pid: 4100, ...out };
+  });
+  const st = JSON.parse(readFileSync(join(w.root, 'state.json'), 'utf8'));
+  assert.equal(st.packages?.['S-1'], undefined, 'the record goes once the session is marked ended');
+  assert.equal(w.ended('S-1').ended.verdict_sha256, 'refused');
+  assert.match(r.alerts.find((a) => a.id === 'held-S-1').text, /could not be pinned when it started/);
+  const told = [...(r.alerts ?? []), ...JSON.parse(readFileSync(join(w.root, 'status.json'), 'utf8')).alerts ?? []].find((a) => a.id === 'pin-S-1');
+  assert.match(told?.text ?? '', /marked it unpinned, so whatever the session hands in is refused/, 'the pin alert says what really happens');
+  assert.match(gateSays(w).worst, /can't be counted, so it counts as a failure/);
+});
+
+test('L91 m-2: while a session runs, the runner keeps its package sha256 and that the pin was written', async () => {
+  const w = await ready({ handedIn: (x) => realHandedIn(w)(x) });
+  w.ask();
+  const r1 = await runnerPass(w.ctx);
+  assert.ok(r1.alerts.every((a) => !a.id.startsWith('pin-')));
+  const st = JSON.parse(readFileSync(join(w.root, 'state.json'), 'utf8'));
+  assert.deepEqual(st.packages['S-1'], { sha256: createHash('sha256').update('diff for S-1\n').digest('hex'), pinned: true });
 });
 
 test('L83 M-1 (c): a session the runner lost track of is swept, and its pinned package still lets its pass count', async () => {

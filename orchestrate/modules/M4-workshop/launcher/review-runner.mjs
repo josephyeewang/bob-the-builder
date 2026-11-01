@@ -197,11 +197,11 @@ export function readRequest(dir, name) {
 
 function readState(path) {
   let text;
-  try { text = readFileSync(path, 'utf8'); } catch (e) { if (e?.code === 'ENOENT') return { ok: true, state: { running: [], attempts: {}, seen: [], alerts: [], told: [] } }; return { ok: false, reason: `the runner's state can't be read (${e?.code ?? e})` }; }
+  try { text = readFileSync(path, 'utf8'); } catch (e) { if (e?.code === 'ENOENT') return { ok: true, state: { running: [], attempts: {}, seen: [], alerts: [], told: [], packages: {} } }; return { ok: false, reason: `the runner's state can't be read (${e?.code ?? e})` }; }
   try {
     const s = JSON.parse(text);
     if (!Array.isArray(s.running) || !s.attempts || typeof s.attempts !== 'object' || !Array.isArray(s.seen)) throw new Error('shape');
-    return { ok: true, state: { alerts: [], told: [], ...s } };
+    return { ok: true, state: { alerts: [], told: [], packages: {}, ...s } };
   } catch { return { ok: false, reason: 'the runner\'s state is not what the runner writes' }; }
 }
 // A new file put in place in one step, so a reader never sees half of it.
@@ -221,11 +221,16 @@ function writeLaunch(dir, sid, doc) {
   return final;
 }
 
-// The review package's pin (audit R-0b-147 M-1 (c), L83). The wiring writes a session's package into
+// The review package's pin (audit R-0b-147 M-1 (c), L83, L91 m-2). The wiring writes a session's package into
 // packages/<session>/ (M5 reviewPackage), a folder of the runner's that the session can read but never write (the
-// runnerRoot wall), and hands back its sha256. The runner pins that sha256 at once, in packages/<session>.sha256,
-// written once and never over, and before the session's verdict counts it reads the package again: a package that is
-// gone, changed, a link, or not the runner's own, or a session with no pin, makes the verdict `refused` (fail closed).
+// runnerRoot wall), and hands back its sha256, worked out from the bytes it wrote. The runner keeps that sha256 in its
+// own state (state.packages[<session>]) and pins it in packages/<session>.sha256, written once and never over. Before the
+// session's verdict counts, the runner reads the package again and requires the diff's sha256, the pin and its own copy
+// to agree. A package that is gone, changed, a link or not the runner's own, a pin that differs, or a session whose
+// pinning failed (state.packages[<session>].pinned false, e.g. EEXIST because something wrote the pin first) makes the
+// verdict `refused` (fail closed). Honest limit (Principle 9): the pin and the state sit behind the same runnerRoot wall
+// as the diff, so they are tripwires against a change made by something else, not a second wall; the wall itself is
+// what the live wall proof (review-walls-proof) shows.
 const PIN_MAX = 128;
 function readOwn(path, uid, max = Infinity) {
   let fd;
@@ -243,12 +248,15 @@ export function pinPackage(dir, sessionId, sha) {
   if (!HEX64.test(sha ?? '')) throw new Error('the package\'s sha256 is not 64 hex');
   writeFileSync(join(dir, `${sessionId}.sha256`), `${sha}\n`, { mode: 0o644, flag: 'wx' });
 }
-/** → null when the package is the one pinned, else why not. */
-export function packageProblem({ dir, sessionId, uid }) {
+/** → null when the package is the one pinned, else why not. `kept`: the runner's own record, state.packages[<session>]. */
+export function packageProblem({ dir, sessionId, uid, kept }) {
+  if (!kept || !HEX64.test(kept.sha256 ?? '')) return 'the runner kept no sha256 for the review package it was given';
+  if (kept.pinned !== true) return 'the review package it was given could not be pinned when it started';
   const pin = readOwn(join(dir, `${sessionId}.sha256`), uid, PIN_MAX);
   if (!pin.ok) return `the review package it was given has no pin the runner can read (${pin.reason})`;
   const want = pin.bytes.toString('utf8').trim();
   if (!HEX64.test(want)) return 'the review package\'s pin is not a sha256';
+  if (want !== kept.sha256) return `the review package's pin (${want.slice(0, 12)}) is not the sha256 the runner kept (${kept.sha256.slice(0, 12)})`;
   const folder = join(dir, sessionId);
   const fb = folderProblem(folder, uid);
   if (fb) return `the review package's folder: ${fb}`;
@@ -307,7 +315,7 @@ export async function runnerPass(ctx) {
 
   const P = { requests: join(ctx.root, FOLDERS.requests), rejected: join(ctx.root, FOLDERS.rejected), launches: join(ctx.root, FOLDERS.launches), ended: join(ctx.root, FOLDERS.ended), aside: join(ctx.root, FOLDERS.aside), packages: join(ctx.root, FOLDERS.packages), status: join(ctx.root, FOLDERS.status), state: join(ctx.root, FOLDERS.state) };
   const st = readState(P.state);
-  const state = st.ok ? st.state : { running: [], attempts: {}, seen: [], alerts: [], told: [] };
+  const state = st.ok ? st.state : { running: [], attempts: {}, seen: [], alerts: [], told: [], packages: {} };
   // `at` is the alert's time; the Dispatcher tells each id and time once, so a trouble that keeps the state from being
   // saved passes the time it began (the file's), not this pass's.
   // `offer` adds what Joe can do about it (L69: { action: 'review-again', session_id }).
@@ -404,7 +412,7 @@ export async function runnerPass(ctx) {
     const walls = checkReviewOutbox({ outboxRoot: ctx.outboxRoot, role: doc.role, sessionId: doc.session_id, uid });
     // And the package it was given must be the one the runner pinned (M-1 (c)): one changed while it ran shaped what it
     // read, so nothing it holds counts.
-    const pkgBad = walls.ok ? packageProblem({ dir: P.packages, sessionId: doc.session_id, uid }) : null;
+    const pkgBad = walls.ok ? packageProblem({ dir: P.packages, sessionId: doc.session_id, uid, kept: state.packages?.[doc.session_id] }) : null;
     let h;
     if (!walls.ok) h = { ok: false, reason: `its outbox fails its checks: ${walls.reason}` };
     else if (pkgBad) h = { ok: false, reason: pkgBad };
@@ -412,6 +420,7 @@ export async function runnerPass(ctx) {
     const sha = h?.ok === true && HEX64.test(h.verdict?.sha256 ?? '') ? h.verdict.sha256 : null;
     const said = sha ?? (h?.ok !== true && h?.none === true ? 'none' : 'refused');
     if (!markEnded(doc, said, how)) return false;
+    if (state.packages) delete state.packages[doc.session_id];
     const done = { ...a, started: true, ended_at: iso(now), session_id: doc.session_id };
     const where = `card ${doc.card} at ${doc.head.slice(0, 7)}`;
     const offer = { action: 'review-again', session_id: doc.session_id };
@@ -628,8 +637,12 @@ export async function runnerPass(ctx) {
     let r;
     try { r = await ctx.start({ role, card, head, tree, sessionId: sid, outbox, configDir, env: accountEnv(ctx.reviewHome, acct), signin: acct, earlier: earlierBlock(earlier), packageDir: join(P.packages, sid) }); } catch (e) { r = { ok: false, reason: e?.message ?? String(e) }; }
     // The package's sha256 is pinned at once, whatever the start says next, so any end of this session checks it.
+    // The runner keeps the sha256 in its state too, and whether the pin was written: a session whose pin failed is
+    // refused at its end whatever the pin file then says (L91 m-2).
     if (HEX64.test(r?.package_sha256 ?? '')) {
-      try { pinPackage(P.packages, sid, r.package_sha256); } catch (e) { alert(`pin-${sid}`, `The review package of session ${sid} could not be pinned (${e?.code ?? e?.message}); its verdict will not count.`); }
+      state.packages ??= {};
+      state.packages[sid] = { sha256: r.package_sha256, pinned: false };
+      try { pinPackage(P.packages, sid, r.package_sha256); state.packages[sid].pinned = true; } catch (e) { alert(`pin-${sid}`, `The review package of session ${sid} could not be pinned (${e?.code ?? e?.message}); the runner has marked it unpinned, so whatever the session hands in is refused and the head is held. A new push gets a new review.`); }
     }
     if (!r?.ok || !Number.isInteger(r.pid)) {
       // Claude never ran: the one case a start is tried again on its own (L69 point 1). Only when it really never ran

@@ -20,7 +20,7 @@ const HEX40 = /^[0-9a-f]{40}$/;
 export const CONTROL = new RegExp(`[\\x00-\\x1f\\x7f-\\x9f${String.fromCharCode(0x2028, 0x2029)}]`);
 export const DIFF_NAME = 'change.diff';
 // The diff git hands over is plain text, never shaped by the tree under review (M-1 (a)).
-export const DIFF_FLAGS = Object.freeze(['--no-color', '--text', '--no-textconv', '--no-ext-diff', '--no-renames']);
+export const DIFF_FLAGS = Object.freeze(['--no-color', '--text', '--no-textconv', '--no-ext-diff', '--no-renames', '--ignore-submodules=none']);
 
 /** Throws on the first name holding a control character; → the list. */
 export function plainNames(list, what = 'the file name') {
@@ -40,7 +40,7 @@ export async function reviewPackage({ copy, head, dir }) {
     if ((await gitOk(['rev-parse', 'HEAD'], opts('review-package-head'))).trim() !== head) return { ok: false, reason: 'the review copy is not at the head' };
     const base = (await gitOk(['merge-base', 'refs/heads/main', head], opts('review-package-base'))).trim();
     if (!HEX40.test(base)) return { ok: false, reason: 'the branch has no common commit with main' };
-    const raw = await gitOk(['diff', '--name-status', '-z', '--no-renames', base, head], opts('review-package-files'));
+    const raw = await gitOk(['diff', '--name-status', '-z', '--no-renames', '--ignore-submodules=none', base, head], opts('review-package-files'));
     const parts = raw.split('\0').filter(Boolean);
     const files = [];
     for (let i = 0; i + 1 < parts.length; i += 2) files.push({ status: parts[i], path: parts[i + 1] });

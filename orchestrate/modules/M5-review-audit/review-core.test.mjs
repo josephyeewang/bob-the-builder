@@ -227,7 +227,7 @@ test('R-0b-144 planted: a verdict from a reviewer the runner never launched is r
 // ---- L83, audit R-0b-147 M-1 (a), (b) and minor 4 ----
 
 // A mirror whose card branch adds `files` (name → text) on top of main's a.txt.
-async function mirrorOf(d, files) {
+async function mirrorOf(d, files, prep) {
   const src = join(d, 'src');
   const gd = join(src, '.git');
   const g = (args) => gitOk(['-c', 'user.name=t', '-c', 'user.email=t@example.invalid', ...args], { gitDir: gd, workTree: src, cwd: src });
@@ -237,7 +237,9 @@ async function mirrorOf(d, files) {
   await g(['add', 'a.txt']); await g(['commit', '-q', '-m', 'main']); await g(['branch', '-M', 'main']);
   await g(['switch', '-q', '-c', 'card/c-1']);
   for (const [name, text] of Object.entries(files)) writeFileSync(join(src, name), text);
-  await g(['add', '-A']); await g(['commit', '-q', '-m', 'card']);
+  await g(['add', '-A']);
+  if (prep) await prep(g);
+  await g(['commit', '-q', '-m', 'card']);
   const head = (await gitOk(['rev-parse', 'HEAD'], { gitDir: gd })).trim();
   const copy = join(d, 'copy');
   assert.equal((await prepareReviewCopy({ mirror: gd, card: 'C-1', head, dest: copy })).ok, true);
@@ -277,6 +279,23 @@ test('L83 M-1 (a) planted: a textconv driver and an external diff driver the bra
   assert.equal(existsSync(ran), false, 'no driver ran');
   // And the diff itself is asked for as plain text with no driver, the second wall should a driver get past safe-git.
   for (const f of ['--text', '--no-textconv', '--no-ext-diff']) assert.ok(DIFF_FLAGS.includes(f), f);
+});
+
+test('L91 m-1 planted: a submodule pointer the branch changes is in the package, whatever the copy\'s config says', async () => {
+  const sub = '1'.repeat(40);
+  const m = await mirrorOf(tempDir('m5-sub-'), { 'b.txt': 'b\n' }, (g) => g(['update-index', '--add', '--cacheinfo', `160000,${sub},vendor/lib`]));
+  const pkg = await m.pkg();
+  assert.equal(pkg.ok, true, pkg.reason);
+  assert.ok(pkg.files.some((f) => f.path === 'vendor/lib' && f.status === 'A'), 'the pointer is in the file list');
+  assert.ok(readFileSync(pkg.diffFile, 'utf8').includes(`+Subproject commit ${sub}`), 'and in the diff');
+  // A copy whose config hides submodules: safe-git refuses it, or the flag still shows the pointer.
+  const e = tempDir('m5-sub-');
+  const n = await mirrorOf(e, { 'b.txt': 'b\n' }, (g) => g(['update-index', '--add', '--cacheinfo', `160000,${sub},vendor/lib`]));
+  appendFileSync(join(n.copy, '.git', 'config'), '[diff]\n\tignoreSubmodules = all\n');
+  const hid = await n.pkg();
+  if (hid.ok) assert.ok(readFileSync(hid.diffFile, 'utf8').includes(`+Subproject commit ${sub}`), 'the flag beats the config');
+  else assert.match(hid.reason, /not on the safe list/);
+  assert.ok(DIFF_FLAGS.includes('--ignore-submodules=none'));
 });
 
 test('L83 M-1 (b) planted: a file name with a line break refuses the package, and the prompt quotes every name as data', async () => {
