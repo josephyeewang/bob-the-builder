@@ -33,7 +33,7 @@ Whether many dead claims at once mean an outage (hold them all) is the Dispatche
 
 Every fact id belongs to one role's family (`FACT_FAMILIES` in `permissions.mjs`, lead call L74). An entry ending in `-` or `.` is a prefix; any other entry is that one id. A role creates a fact only in its own family, and no two roles' families overlap (`familyOverlaps()`, tested). A fact is changed only by the role that created it (the store keeps who wrote a document's first diary line). A reader that takes a fact as proof uses `factFrom(role, entry, family)`: the id must be in that role's family AND written by that role. The fact's `type` alone is never proof, since any role can write any type into its own family. Nothing that gates reads a workshop fact as proof.
 
-A card's `attempts` holds counts kept across moves: `reviewer_starts` (written by the Dispatcher) and `merge_refusals` (a list of reasons, written by the merge gate). Each key has one writer and one shape; no other key is allowed.
+A card's `attempts` holds counts kept across moves: `reviewer_starts` and `review_requests` (both written by the Dispatcher; the second goes up on every review request, so the request always changes the card and its clock moves, L85 m-1) and `merge_refusals` (a list of reasons, written by the merge gate). Each key has one writer and one shape; no other key is allowed.
 
 ## Why our own store, not Claude Code's task list
 

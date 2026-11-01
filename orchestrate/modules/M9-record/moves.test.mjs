@@ -66,11 +66,12 @@ test('the move table names only real states and script or AI actors', () => {
   }
 });
 
-test('final states have no way out except closed → reverted (D8)', () => {
+test('final states have no way out except closed → reverted (D8) and an interrupted merge reconciled (L85 M-1 b)', () => {
   for (const [entity, finals] of Object.entries(FINAL_STATES)) {
     for (const f of finals) {
       const outs = Object.keys(MOVES[entity]?.[f] ?? {});
       if (entity === 'card' && f === 'closed') assert.deepEqual(outs, ['reverted']);
+      else if (entity === 'merge' && f === 'refused') assert.deepEqual(outs, ['merged']);
       else assert.deepEqual(outs, [], `${entity} ${f}`);
     }
   }
@@ -153,6 +154,11 @@ test('every legal move succeeds for each listed actor when its condition holds',
             if (entity === 'session' && from === 'quarantined') { doc.card = `card-of-${id}`; seed(env, 'card', doc.card, baseDoc('card', 'closed', env)); }
             if (entity === 'product' && from === 'paused') doc.return_to = to;
             if (entity === 'merge') doc.merge_commit = HEAD;
+            // refused → merged: an interrupted merge whose Sensors PR reading shows it merged at the judged head (L85 M-1 b)
+            if (entity === 'merge' && from === 'refused') {
+              Object.assign(doc, { reasons: ['interrupted'], pr: 900 + n, judged_head: HEAD });
+              ok(env.record.write({ actor: 'sensors', entity: 'fact', id: `pr-${doc.pr}`, expectRev: 0, doc: { merged: true, merge_commit_sha: HEAD, head_sha: HEAD, observed_at: iso(t) } }), 'pr fact');
+            }
             if (entity === 'merge' && to === 'checking') { doc.card = `card-of-${id}`; seed(env, 'card', doc.card, baseDoc('card', 'approved', env)); }
             seed(env, entity, id, doc);
             const next = { ...doc, state: to };
@@ -163,6 +169,7 @@ test('every legal move succeeds for each listed actor when its condition holds',
             if (entity === 'product' && from === 'paused') delete next.return_to;
             write = { entity, id, expectRev: env.record.read(entity, id).rev, doc: next };
             if (entity === 'merge' && from === 'merged') write.data = { fact: to === 'audited_ok' ? 'audit-run-ok' : 'audit-run-bad' };
+            if (entity === 'merge' && from === 'refused') write.data = { fact: `pr-${doc.pr}` };
             if (entity === 'merge' && to === 'checking') {
               const c = env.record.read('card', doc.card);
               also = [{ entity: 'card', id: doc.card, expectRev: c.rev, doc: { ...c.doc, state: 'merging' } }];

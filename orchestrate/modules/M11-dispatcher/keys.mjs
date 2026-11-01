@@ -38,6 +38,8 @@ export const KEYS = Object.freeze({
   parkWaitMin: 'timeouts.park_wait_min',
   deadQuietMin: 'timeouts.dead_quiet_min',
   checkingMaxMin: 'timeouts.checking_max_min',
+  // how long an interrupted merge's PR may still show open before it is refused-interrupted (L85 M-1 a)
+  mergingOpenMaxMin: 'timeouts.merging_open_max_min',
   reportingMaxMin: 'timeouts.reporting_max_min',
   inReviewNoReviewerMin: 'timeouts.in_review_no_reviewer_min',
   frontDoorStuckMin: 'timeouts.front_door_stuck_min',
@@ -59,7 +61,7 @@ export const KEYS = Object.freeze({
 // them through `fakeRules({ values })`.
 export const NEW_KEYS = Object.freeze([
   KEYS.paceMinShare, KEYS.shakedown, KEYS.amberEditingPerProduct, KEYS.amberEditingPerMac,
-  KEYS.cancelGraceMin, KEYS.parkWaitMin, KEYS.deadQuietMin, KEYS.checkingMaxMin,
+  KEYS.cancelGraceMin, KEYS.parkWaitMin, KEYS.deadQuietMin, KEYS.checkingMaxMin, KEYS.mergingOpenMaxMin,
   KEYS.reportingMaxMin, KEYS.inReviewNoReviewerMin, KEYS.frontDoorStuckMin, KEYS.usageUnknownMaxMin, KEYS.outageMinDead, KEYS.outageShare,
 ]);
 

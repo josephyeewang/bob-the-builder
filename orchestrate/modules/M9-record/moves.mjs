@@ -30,8 +30,10 @@ export const MOVES = Object.freeze({
     running: { in_review: ['worker', 'dispatcher'], failed: D, waiting: D, cancelled: A },
     in_review: { verified: D, failed: D, waiting: D, cancelled: A },
     // → in_review from verified or approved: a new head pushed after verification (workshop, R2-M7).
-    verified: { in_review: W, approved: A, merging: G, waiting: D, cancelled: A },
-    approved: { merging: G, verified: A, in_review: W, cancelled: A },
+    // verified/approved → merged: only the Merge Gate's reconcile of an interrupted merge GitHub shows merged (L85 M-1 b);
+    // the writer asks for this card's merged merge document at the same commit, as for every move into merged.
+    verified: { in_review: W, approved: A, merging: G, merged: G, waiting: D, cancelled: A },
+    approved: { merging: G, merged: G, verified: A, in_review: W, cancelled: A },
     merging: { merged: G, verified: G, in_review: G },
     merged: { closed: D, reverted: G },
     closed: { reverted: G },
@@ -65,6 +67,9 @@ export const MOVES = Object.freeze({
     checking: { merging: G, held: G, refused: G },
     merging: { merged: G, refused: G },
     merged: { audited_ok: G, audit_flagged: G },
+    // The one move out of a final merge state (L85 M-1 b): an interrupted merge GitHub shows merged at the judged head.
+    // The writer asks for the Sensors pr- reading that proves it (data.fact).
+    refused: { merged: G },
   }),
   product: freeze({
     light: { active: A, paused: A },

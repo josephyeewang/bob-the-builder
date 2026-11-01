@@ -2022,8 +2022,10 @@ const MOVES = Object.freeze({
     running: { in_review: ['worker', 'dispatcher'], failed: D, waiting: D, cancelled: A },
     in_review: { verified: D, failed: D, waiting: D, cancelled: A },
     // → in_review from verified or approved: a new head pushed after verification (workshop, R2-M7).
-    verified: { in_review: W, approved: A, merging: G, waiting: D, cancelled: A },
-    approved: { merging: G, verified: A, in_review: W, cancelled: A },
+    // verified/approved → merged: only the Merge Gate's reconcile of an interrupted merge GitHub shows merged (L85 M-1 b);
+    // the writer asks for this card's merged merge document at the same commit, as for every move into merged.
+    verified: { in_review: W, approved: A, merging: G, merged: G, waiting: D, cancelled: A },
+    approved: { merging: G, merged: G, verified: A, in_review: W, cancelled: A },
     merging: { merged: G, verified: G, in_review: G },
     merged: { closed: D, reverted: G },
     closed: { reverted: G },
@@ -2057,6 +2059,9 @@ const MOVES = Object.freeze({
     checking: { merging: G, held: G, refused: G },
     merging: { merged: G, refused: G },
     merged: { audited_ok: G, audit_flagged: G },
+    // The one move out of a final merge state (L85 M-1 b): an interrupted merge GitHub shows merged at the judged head.
+    // The writer asks for the Sensors pr- reading that proves it (data.fact).
+    refused: { merged: G },
   }),
   product: freeze({
     light: { active: A, paused: A },
@@ -2135,9 +2140,12 @@ const WRITER_FIELDS = Object.freeze(['round']);
 // A card's `attempts`: the counts that drive a decision (L74). Each key has one writer, the role that adds to it, and
 // a shape. A count that is only shown or logged is never kept on the card; the diary has it.
 //   reviewer_starts  how many review requests in a row failed to start a reviewer (two → the owner is asked)
+//   review_requests  how many review requests the Dispatcher has made for the card: it goes up on every request, so the
+//                    write always changes something and the card's write time (the next request's clock) moves (L85 m-1)
 //   merge_refusals   the reasons the gate refused this card's merges (the same reason twice → the owner is asked)
 const ATTEMPTS = Object.freeze({
   reviewer_starts: Object.freeze({ writer: 'dispatcher', shape: 'count' }),
+  review_requests: Object.freeze({ writer: 'dispatcher', shape: 'count' }),
   merge_refusals: Object.freeze({ writer: 'merge_gate', shape: 'reasons' }),
 });
 
@@ -2457,6 +2465,7 @@ Object.defineProperties(__bob_e, {
   WAIT_FIELDS: { get: () => WAIT_FIELDS, enumerable: true },
   WAIT_RETURN_FIELDS: { get: () => WAIT_RETURN_FIELDS, enumerable: true },
   OWNER_WAIT_WHO: { get: () => OWNER_WAIT_WHO, enumerable: true },
+  PAUSED_WAIT_WHAT: { get: () => PAUSED_WAIT_WHAT, enumerable: true },
   WAIT_WHO: { get: () => WAIT_WHO, enumerable: true },
   SESSION_ID: { get: () => SESSION_ID, enumerable: true },
   isActor: { get: () => isActor, enumerable: true },
@@ -2537,7 +2546,8 @@ function missingFields(entity, doc) {
 }
 
 // Final states need no time limit (A4); every other state has one or a named reason, in the rules' timeouts.
-// closed → reverted is the one move out of a final state (D8).
+// closed → reverted is a move out of a final state (D8); the other is merge refused → merged, the Merge Gate's
+// reconcile of an interrupted merge GitHub shows merged (L85 M-1 b; M9 moves.mjs and its writer check).
 const FINAL_STATES = Object.freeze({
   card: ['closed', 'failed', 'cancelled', 'closed_no_answer', 'reverted'],
   ask: ['consumed', 'expired', 'withdrawn'],
@@ -2579,6 +2589,9 @@ const WAIT_FIELDS = Object.freeze(['who', 'what', 'since', 'next_check']);
 const WAIT_RETURN_FIELDS = Object.freeze(['resume', 'return_to']);
 // A card waiting on the owner says this `who` (L79): readers compare against it, never a string of their own.
 const OWNER_WAIT_WHO = 'joe';
+// A card parked because its product is paused waits on the owner with this `what`, and resumes by itself when the
+// product is unpaused (M11 pass.mjs). So it is no go the owner owes: the trip brief shows it apart (L85 m-5).
+const PAUSED_WAIT_WHAT = 'paused';
 const WAIT_WHO = Object.freeze([OWNER_WAIT_WHO, 'usage', 'dependency', 'incident', 'date']);   // `date` also needs a reason
 
 function isActor(a) {
