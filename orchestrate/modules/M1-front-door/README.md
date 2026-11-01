@@ -73,9 +73,10 @@ R-0b-82's decision and handoff code sit here although the row is tagged M11 (lan
    `request-think-` like the other requests (same `checkOutboxFile`, same push, "Request taken: … Nothing has started
    yet"). The Lead acts on evolve, audit and upgrade as Bob runs on that product; think opens a thinking room on the
    rules' `models.main`. `what` is the owner's words, one line, already checked for keys; pass it on through
-   `cleanOutside`. NEW files nothing: the owner opens their own session. Until this is wired (the record gives `request-`
-   no entity, shared/record.mjs), the skill files no mode request and never says "Filed": it tells the owner to start it
-   in their own session (audit kit-lane3 r1 Minor 9). Wiring it also means turning the skill's step 3 back on.
+   `cleanOutside`. NEW files nothing: the owner opens their own session. Until this is wired (the record refuses
+   `request-` until items 7, 8 and 9 land (L151), and intake doesn't take mode requests in yet; the skill's step 3 is off), the skill files
+   no mode request and never says "Filed": it tells the owner to start it in their own session (audit kit-lane3 r1
+   Minor 9). Wiring it also means turning the skill's step 3 back on.
 10. Research asks (R-0b-136). Lane 2's intake checks `ask-request-<id>.json` with `checkOutboxFile` and pushes
    `intakePush` like the other Front Door files, then hands it to the record's `applyOutbox` (kept as a report). Each
    pass runs M2's `openResearchAsks(ctx)`, sends each `opened[].push` to the owner's phone, then calls
@@ -98,6 +99,11 @@ R-0b-82's decision and handoff code sit here although the row is tagged M11 (lan
    wiring passes it an adapter, e.g. `(a) => box(JSON.stringify(a))`; its `true` means queued, which is kept. Lane 2's M11
    undo step writes the exact_reverse card from an answered Undo ask (it joins on the ask's `card`, `pr`,
    `merge_commit_sha` and `module`, L81); the test uses a labelled stand-in for it until lane 2's PR is up.
+13. Apply a pause or away request to the product (L151 M-1). Lane 2: for each `state-` file intake takes in and
+   checks, approvals writes the product's state (paused, or away with its `until` and `tz`); only approvals may write
+   a product. "Confirmed: pause X" is pushed only after that write. Until this lands, the record refuses `state-`
+   (`refused` in shared OUTBOX_KINDS), so the owner hears "Not filed", never a pause that pauses nothing; this PR
+   turns `state-` into a record kind.
 
 ## Ledger: two lines per row (review-0b-8 MAT-10)
 

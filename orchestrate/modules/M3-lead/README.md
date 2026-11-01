@@ -12,3 +12,10 @@ the owner wants into cards. It has no shell and no token: it reads, and writes o
 
 Not decided here: which outbox kind carries a plan, and when the Dispatcher builds the Lead's input file. Those are the
 Dispatcher's and M9's.
+
+## Join items (other lanes)
+
+1. The Lead reads the owner's ideas (L151). Lane 2: when the Dispatcher builds the Lead's input file, it feeds the
+   `idea-file` section (`lead-input.mjs`) from the `idea-` reports the record has stored since the last pass, each
+   one's quoted text as it is. Until this lands, a stored `idea-` is kept and nothing reads it; the owner is told only
+   "Filed: idea …", which promises nothing more.

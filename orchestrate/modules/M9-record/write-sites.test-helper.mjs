@@ -97,6 +97,8 @@ export const UNUSED_GRANTS = Object.freeze([
   { grant: 'report script create', reason: 'an AI role: its documents come in through its outbox (M9 writer.mjs applyOutbox), never a write() call' },
   { grant: 'report front_door create', reason: 'an AI role: its documents come in through its outbox (M9 writer.mjs applyOutbox), never a write() call' },
   { grant: 'report incident create', reason: 'an AI role: its documents come in through its outbox (M9 writer.mjs applyOutbox), never a write() call' },
+  { grant: 'report lead create', reason: 'an AI role: its wish- and history- files (both latent, L151) come in through its outbox (M9 writer.mjs applyOutbox, L140), never a write() call' },
+  { grant: 'report learning create', reason: 'an AI role: its check- and prune- files come in through its outbox (M9 writer.mjs applyOutbox, L140), never a write() call; learning is NEVER_STARTED in 0b' },
   { grant: 'lesson learning create', reason: 'an AI role: its documents come in through its outbox (M9 writer.mjs applyOutbox), never a write() call' },
   { grant: 'lesson learning update', reason: 'an AI role: its documents come in through its outbox (M9 writer.mjs applyOutbox), never a write() call; learning is Phase 1, so no learning session starts in 0b' },
   { grant: 'card workshop update', reason: 'no module writes this yet (M4 sets the head on a card after a push); kept as the design\'s row, listed to the lead as a candidate to drop until it is built' },
@@ -308,6 +310,10 @@ export function scanSources(files) {
       const hit = [...s.matchAll(/\b(?:import|export)\b[^;'"`]*?from\s*(['"])([^'"]+)\1|\bimport\s*\(\s*(['"`])([^'"`]+)\3|\bimport\s*(['"])([^'"]+)\5/g)]
         .find((m) => { const spec = m[2] ?? m[4] ?? m[6]; return spec.startsWith('.') && posix.normalize(posix.join(posix.dirname(file), spec)) === STORE; });
       if (hit) problems.push(`${file}:${lineOf(s, hit.index)}: imports M9's store.mjs, which skips the Store Writer's checks; only M9 may`);
+      // openRecord hands out only the Record; openRecordWithStore also gives the raw store and impl, so only M9's own
+      // tests may name it (#91 r3 MIN-1). Any mention counts, a string or a computed property included.
+      const raw = s.search(/openRecordWithStore/);
+      if (raw >= 0) problems.push(`${file}:${lineOf(s, raw)}: names openRecordWithStore, which hands out M9's raw store; outside M9 use openRecord`);
     }
   }
   for (const [k, lines] of notObject) {

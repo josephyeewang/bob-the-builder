@@ -14,7 +14,7 @@ import {
   NOT_OBJECT_SITES, NOT_RECORD_RECEIVERS, OTHER_FORMS, PENDING, UNUSED_GRANTS, VARIABLE_SITES,
   checkSites, grantUse, grants, importsOf, modesOf, moduleSources, productionOnly, scanSources, splitPending, stripComments,
 } from './write-sites.test-helper.mjs';
-import { HEAD, PRODUCT, iso, seed, setup } from './fixtures.test-helper.mjs';
+import { HEAD, PRODUCT, UID, iso, rulesFor, seed, setup } from './fixtures.test-helper.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const SOURCES = moduleSources(ROOT);
@@ -157,7 +157,7 @@ const SNAPSHOT = {
   fact: { sensors: { create: '*', update: '*' }, ledger: { create: '*', update: '*' }, dispatcher: { create: '*', update: '*' }, workshop: { create: '*', update: '*' }, live_check: { create: '*' } },
   product: { approvals: { create: '*', update: '*' } },
   handoff: { lead: { create: '*' }, learning: { create: '*' }, dispatcher: { create: '*', update: '*' } },
-  report: Object.fromEntries(['worker', 'reviewer', 'scout', 'writer', 'thinking', 'script', 'front_door', 'incident'].map((r) => [r, { create: '*' }])),
+  report: Object.fromEntries(['worker', 'reviewer', 'scout', 'writer', 'thinking', 'script', 'front_door', 'incident', 'lead', 'learning'].map((r) => [r, { create: '*' }])),
   lesson: { learning: { create: '*', update: '*' } },
   launch: { dispatcher: { create: '*' } },
   merge_request: { dispatcher: { create: '*' } },
@@ -341,6 +341,20 @@ test('L129 N9: only M9 may import its store.mjs, in any import form', () => {
   for (const src of forms) assert.match(problemsOf([{ file: 'modules/M11-dispatcher/x.mjs', src }]), /imports M9's store\.mjs/, src);
   assert.doesNotMatch(problemsOf([{ file: 'modules/M9-record/writer.mjs', src: forms[0] }]), /store\.mjs/);
   assert.doesNotMatch(problemsOf([{ file: 'modules/M2-approvals/x.mjs', src: "import { a } from './ask-store.mjs';" }]), /store\.mjs/);
+});
+
+// #91 r3 MIN-1 (L137, L140): openRecord no longer hands out the raw store or impl, and only M9 may name the export that does.
+test('L140 MIN-1: openRecord gives only the Record and recover; openRecordWithStore is refused outside M9', async () => {
+  const { openRecord, openRecordWithStore } = await import('./writer.mjs');
+  const env = setup({ prefix: 'm9-min1-' });
+  const opened = openRecord({ root: env.root, product: PRODUCT, ownerUid: UID, rules: rulesFor(), alert: () => {} });
+  assert.deepEqual(Object.keys(opened).sort(), ['record', 'recover']);
+  assert.equal(typeof openRecordWithStore, 'function');
+  const forms = ["import { openRecordWithStore } from '../M9-record/writer.mjs';", "const w = await import('../M9-record/writer.mjs'); w['openRecordWithStore']();",
+    "const { openRecordWithStore: o } = mod;"];
+  for (const src of forms) assert.match(problemsOf([{ file: 'modules/M11-dispatcher/x.mjs', src }]), /names openRecordWithStore/, src);
+  assert.doesNotMatch(problemsOf([{ file: 'modules/M9-record/x.mjs', src: forms[0] }]), /openRecordWithStore/);
+  assert.doesNotMatch(problemsOf([{ file: 'modules/M11-dispatcher/x.mjs', src: "import { openRecord } from '../M9-record/writer.mjs';" }]), /openRecordWithStore/);
 });
 
 test('L151: a helper named in a long import list is an import, not handed on as a value; handing it on is still caught', () => {
