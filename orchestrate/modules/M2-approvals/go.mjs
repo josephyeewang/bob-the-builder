@@ -11,7 +11,10 @@
 //   await raiseGo(ctx, { cardId, rows, view, mainSha, title, planCheck }) → { ok, id } | { ok: false, reason }
 //       Tier 2 → a go_t2 tap ask; Tier 1 → a go_t1 decision pull request (N20). `rows` = { id → row } at go time (m3-4).
 //       A Tier-1 go is asked only after a fresh plan reviewer passed the plan with 0 Material (R-0b-138): `planCheck`
-//       = { pass: true, material: 0, plan_sha256, reviewer_session, author_session }, kept on the ask as plan_check.
+//       = { pass: true, material: 0, card, fingerprint, plan_sha256, reviewer_session, author_session }, kept on the ask
+//       as plan_check; card and fingerprint must be this card's and its whole plan fingerprint now (audit r1 M-2).
+//   goFingerprint(ctx, cardId) → { ok, card, fingerprint, plan_sha256, inputs } | { ok: false, reason }
+//       what a plan reviewer names in its pass: the plan it read, as the go would bind it
 //   recordGo(ctx, askId) → { ok, go } | { ok: false, reason }           an answered "go" → the go record; the ask consumed
 //   await goCheck({ go, card, changed, headRows, tier, view, mainSha }) → { ok, reasons, newGo }   at merge (refusal 10)
 //   await tier1Changed(ctx, { cardId, view, mainTip }) → { ok, changed: [paths] }   did a listed file change on main?
@@ -22,7 +25,7 @@ import { canonicalJson, planFingerprint } from '../../shared/plan-fingerprint.mj
 import { activeKind } from '../../shared/asks.mjs';
 import { askStore, writeDoc } from './ask-store.mjs';
 import { createAsk } from './binding.mjs';
-import { planCheckProblem } from './go-view.mjs';
+import { planCheckProblem, unsafePath } from './go-view.mjs';
 
 // What a change may edit in its own row file without a new go (M2-4): status only. Every other field is the plan.
 export const ROW_STATUS_FIELDS = Object.freeze(['status', 'done', 'receipts', 'progress', 'date', 'done_at']);
@@ -91,6 +94,15 @@ const closedGoAsk = (st, cardId, a) => ['withdrawn', 'expired'].includes(a.doc.s
   || (a.doc.state === 'answered' && a.doc.answer?.approves !== true)
   || (a.doc.state === 'consumed' && st.go(`go-${cardId}`)?.doc.ask !== a.id);
 
+export function goFingerprint(ctx, cardId) {
+  const c = ctx.record.read('card', cardId);
+  if (!c || c.corrupt || !c.doc) return fail(`no card ${cardId}`);
+  if (c.doc.product !== ctx.product) return fail(`card ${cardId} belongs to product ${c.doc.product}`);
+  const fp = fingerprintOf(ctx.product, cardId, c.doc);
+  if (!fp.ok) return fail(`the plan can't be fingerprinted: ${fp.reason}`);
+  return { ok: true, card: cardId, fingerprint: fp.sha256, plan_sha256: fp.inputs.plan_sha256, inputs: fp.inputs };
+}
+
 export async function raiseGo(ctx, { cardId, rows, view, mainSha, title, planCheck } = {}) {
   const c = ctx.record.read('card', cardId);
   if (!c || c.corrupt || !c.doc) return fail(`no card ${cardId}`);
@@ -102,7 +114,8 @@ export async function raiseGo(ctx, { cardId, rows, view, mainSha, title, planChe
   if (bad) return fail(bad);
   const fp = fingerprintOf(ctx.product, cardId, d);
   if (!fp.ok) return fail(`the plan can't be fingerprinted: ${fp.reason}`);
-  if (d.tier === 1) { const no = planCheckProblem(planCheck, fp.inputs.plan_sha256); if (no) return fail(no); }
+  if (fp.inputs.files.some(unsafePath)) return fail('a file path holds a control character');
+  if (d.tier === 1) { const no = planCheckProblem(planCheck, { fingerprint: fp.sha256, card: cardId, planSha256: fp.inputs.plan_sha256 }); if (no) return fail(no); }
   // Tier 1 checks folders at the plan's main commit; Tier 2 at main as it is now.
   const folder = await folderIn(view, d.tier === 1 ? d.main_commit : mainSha, fp.inputs.files);
   if (folder) return fail(folder);

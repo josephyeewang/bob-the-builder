@@ -7,7 +7,7 @@ everything they ask for becomes one small file in its outbox and one short reply
 |---|---|---|
 | `skill/orchestrate/SKILL.md` | R-0b-81, 137 | The one skill: new idea, a piece of work sorted into a Bob mode, pause, away, back, wrap up, rotate. "Not wired yet" for the rest. |
 | `outbox.mjs` | R-0b-81, 83 | The three file shapes (`state-`, `request-`, `idea-`) and intake's check. Never `state: active`; a key in any file refuses it; a product off the list or a reused id is refused (L26). `intakePush` is the confirmation the owner gets. |
-| `sort.mjs` | R-0b-137 | The full loop's reference: the cue words per Bob mode (the skill's table must match), the three-line read-back with Go, Change, Not now, the one question with a recommendation when unsure, and the check that a reply never repeats a pasted key. Number work (Tier 1, R-0b-138) reads back "the Lead is planning it now" and that the go comes after a fresh plan check. |
+| `sort.mjs` | R-0b-137 | The full loop's reference: the cue words per Bob mode (the skill's table must match), the three-line read-back with Go, Change, Not now, the one question with a recommendation when unsure, and the check that a reply never repeats a pasted key. Number work (Tier 1, R-0b-138) reads back that it is number work and the go comes after a fresh plan check; while mode requests are unwired it files nothing. |
 | (in `outbox.mjs`) | R-0b-136 | `ask-request-<id>.json`, the owner's "find out X": a research ask with its product and one-line brief. M2 `research-ask.mjs` turns it into the ask. |
 | `timezone.mjs` | R-0b-83 | A time zone counts only as a city-based name the system knows; anything ambiguous is null, which holds number work for products on the Merge Gate. |
 | `trip.mjs` | R-0b-83 | The trip brief: go items and risky asks with links, the Mini check (online, logged in, battery backup), the Air. |
@@ -82,6 +82,10 @@ R-0b-82's decision and handoff code sit here although the row is tagged M11 (lan
    writes the research_copy card, calls M2's `landResearch(ctx, id)`. The owner's desktop session (Bob's method for
    "run research ask R-12") reads the brief and the file name to leave with M2's `researchBrief(record, id)`, then
    writes `research-R-12.md` to the proposals folder; how that session reads the record is the Lead's to place.
+11. Go views (R-0b-138/139). M2's schedule pass puts the go's text (`goText`) on the push event as `view`; lane 2's
+   push sender shows it on the phone. Until that sender is wired (a port today), a go push carries the view but
+   nothing shows it. A plan reviewer's pass (lane 2's R-0b-162) names `card` and `fingerprint` from M2's
+   `goFingerprint(ctx, cardId)` for the plan it read; a pass without them is refused (audit kit-lane3 r1 M-2).
 
 ## Ledger: two lines per row (review-0b-8 MAT-10)
 

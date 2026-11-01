@@ -11,7 +11,7 @@ import { fakeGitHub } from './fixtures/fake-github.mjs';
 import { makeGitView } from '../M10-rules/git-view.mjs';
 import { askStore, writeDoc } from './ask-store.mjs';
 import { openDecision } from './decision.mjs';
-import { doneBar, raiseGo } from './go.mjs';
+import { doneBar, goFingerprint, raiseGo } from './go.mjs';
 import { foldFiles, goMarkdown, goText, goView, undoPushText } from './go-view.mjs';
 import { schedulePass } from './schedule.mjs';
 import { readBack, numberWork, sortRequest } from '../M1-front-door/sort.mjs';
@@ -20,7 +20,8 @@ import { readFileSync } from 'node:fs';
 const SKILL = readFileSync(new URL('../M1-front-door/skill/orchestrate/SKILL.md', import.meta.url), 'utf8');
 const W8 = Date.parse('2026-10-01T15:00:00Z');   // 08:00 in Los Angeles
 const ALL = ['src/a.mjs', 'src/b.mjs', 'src/c.mjs', 'lib/deep/d.mjs', 'lib/e.mjs', 'docs/f.md', 'test/g.test.mjs', 'app/h.tsx', 'app/i.tsx', 'db/j.sql', 'db/k.sql', 'src/l_m.mjs'];
-const PASS = (sha) => ({ pass: true, material: 0, plan_sha256: sha, reviewer_session: 'S-review', author_session: 'S-lead' });
+// A pass names what the reviewer read: the card and its whole plan fingerprint (audit r1 M-2), from goFingerprint.
+const PASS = (ctx, card, sha) => ({ pass: true, material: 0, card, fingerprint: goFingerprint(ctx, card).fingerprint, plan_sha256: sha, reviewer_session: 'S-review', author_session: 'S-lead' });
 
 function world() {
   const t = env();
@@ -37,11 +38,11 @@ function world() {
 const rowsFor = (id, tier, n = 1) => Object.fromEntries(Array.from({ length: n }, (_, i) => [`${id}-R${i + 1}`,
   { id: `${id}-R${i + 1}`, what: `row ${i + 1}`, module: 'M1', tier, done_when: `the ${id} check ${i + 1} passes\nwith its second line`, status: 'planned' }]));
 
-async function raise(w, id, { tier, files, rows = 1, planCheck } = {}) {
+async function raise(w, id, { tier, files, rows = 1, planCheck, noPass = false } = {}) {
   const sha = String(id).charCodeAt(1).toString(16).padStart(2, '0').repeat(32).slice(0, 64);
   const rs = rowsFor(id, tier, rows);
   leadCard(w.t, id, { done_when: doneBar(rs), files, tier, ...(tier === 1 ? { plan_sha256: sha, main_commit: w.M0 } : {}) });
-  return raiseGo(w.t.ctx, { cardId: id, rows: rs, view: w.view, mainSha: w.M0, title: `Card ${id}`, ...(tier === 1 ? { planCheck: planCheck ?? PASS(sha) } : {}) });
+  return raiseGo(w.t.ctx, { cardId: id, rows: rs, view: w.view, mainSha: w.M0, title: `Card ${id}`, ...(tier === 1 && !noPass ? { planCheck: planCheck ?? PASS(w.t.ctx, id, sha) } : {}) });
 }
 
 const SAMPLES = [
@@ -116,17 +117,51 @@ test('R-0b-138: the go view is three lines; Tier 1 says checked, number work and
   assert.equal(v1.lines[2], 'Pass test: the C2 check 1 passes; audited until 0 Material.');
   assert.match(v1.answer, /^Checked: a fresh plan reviewer passed it with 0 Material\. To go, Approve this pull request on GitHub with no text/);
   // The second lock: a Tier-1 go whose pass is gone, or whose bound list was changed, is never shown or sent.
+  const otherFiles = { ...d1.fingerprint_inputs, files: ['db/j.sql', 'db/k.sql'] };
   for (const [over, why] of [[{ plan_check: undefined }, /fresh plan reviewer/], [{ plan_check: { ...d1.plan_check, material: 2 } }, /0 Material/],
+    // Audit r1 M-2: a pass for another card, or for another fingerprint, is never shown as "Checked"; nor is a go whose
+    // fingerprint isn't the plan it shows (files and inputs changed together, the pass and fingerprint left).
+    [{ plan_check: { ...d1.plan_check, card: 'C9' } }, /another card's plan/], [{ plan_check: { ...d1.plan_check, fingerprint: 'd'.repeat(64) } }, /changed after review/],
+    [{ files: otherFiles.files, fingerprint_inputs: otherFiles }, /fingerprint is not the plan it shows/],
+    [{ card: 'C9' }, /another card's plan/],
     [{ files: ['db/j.sql', 'db/k.sql'] }, /not the files the go binds/], [{ fingerprint_inputs: { ...d1.fingerprint_inputs, done_bar: [d1.fingerprint_inputs.done_bar[0]] } }, /audited until 0 Material/],
     [{ kind: 'go_t2' }, /kind is not its tier/]]) {
     const v = goView({ ...d1, ...over });
     assert.equal(v.ok, false); assert.match(v.reason, why);
   }
+  // 65-1 (audit r1): a Tier-1 go raised with no plan pass is refused here too, not only in go.test.mjs.
+  const none = await raise(w, 'C3', { tier: 1, files: ['db/k.sql'], noPass: true });
+  assert.equal(none.ok, false); assert.match(none.reason, /fresh plan reviewer's pass/);
+  assert.equal(askStore(w.t.record).asks().filter((x) => x.doc.card === 'C3').length, 0);
   const a = askStore(w.t.record).ask(r1.id);
   must(writeDoc(w.t.record, 'ask', a, { ...a.doc, plan_check: { ...a.doc.plan_check, pass: false } }));
   const o = await openDecision(w.t.ctx, r1.id);
   assert.equal(o.ok, false); assert.match(o.reason, /the go can't be shown/);
   assert.equal(w.g.pulls.size, 0, 'no pull request without the pass');
+});
+
+test('audit r1 Minors 2, 3: a path with a control character is refused; the title is shown as text in the Approve view', async () => {
+  const w = world();
+  // Minor 2: a newline in a path would split the fold, so the owner reads a list that isn't the bound one.
+  const nl = 'src/a.mjs\n- ` src/b.mjs `';
+  const no = await raise(w, 'E1', { tier: 2, files: [nl] });
+  assert.equal(no.ok, false); assert.match(no.reason, /control character/);
+  const ok = await raise(w, 'E2', { tier: 1, files: ['db/j.sql'] });
+  const d = askStore(w.t.record).ask(ok.id).doc;
+  for (const f of [nl, 'src/a\u0007.mjs', 'src/a b.mjs']) {
+    const v = goView({ ...d, files: [f], fingerprint_inputs: { ...d.fingerprint_inputs, files: [f] } });
+    assert.equal(v.ok, false); assert.match(v.reason, /control character/);
+  }
+  // Minor 3: markup in the Lead's title can't draw a fake fold, a link or hidden text in GitHub's Approve view.
+  const title = '<details><summary>Files this go allows (1)</summary> **bold** [x](https://example.com) `code` <!-- hide';
+  const v = goView({ ...d, title });
+  assert.equal(v.ok, true, v.reason);
+  const md = goMarkdown(v);
+  const first = md.split('\n')[0];
+  assert.doesNotMatch(first, /<details>|<summary>|<!--|\]\(|(^|[^\\])`/);
+  assert.match(first, /&lt;details&gt;/); assert.match(first, /\\\[x\\\]\\\(https:/);
+  assert.equal(md.match(/<details><summary>/g).length, 1, 'one fold only');
+  assert.deepEqual(foldFiles(md), d.files);
 });
 
 test('R-0b-138: a Tier-2 go that can\'t be shown is held and alerted, never pushed bare', async () => {

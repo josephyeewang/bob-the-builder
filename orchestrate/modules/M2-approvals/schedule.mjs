@@ -13,7 +13,8 @@
 //   await readApprove(ctx, askId, { view, catchUps }) → { ok, counted, head? }  a risky_approve ask's GitHub Approve
 //   await approvalStands(ctx, askId, { head, view, catchUps }) → { ok } | { ok: false, reason }   may this head merge on it now?
 // ctx = { record, rules, product, now, alert, gh, owner, repo, stateDir, push }
-//   push(event) → true when the owner's phone was sent `event` ({ ask, card, kind, urgent, line? }); anything else is
+//   push(event) → true when the owner's phone was sent `event` ({ ask, card, kind, urgent, line?, view? }; `view` is a
+//   go's text from go-view.mjs goText, R-0b-138/139); anything else is
 //   "not sent", and the ask is tried again next pass.
 //
 // HELD DECISIONS (R-0b-53, round 1 M8). A decision ask that carries `modules` (the modules of the decided.yaml entries

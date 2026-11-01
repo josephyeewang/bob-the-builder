@@ -1,6 +1,7 @@
 // decision.test.mjs — R-0b-50: decisions go out as small decision pull requests; Approve = the recommended choice, a
 // letter picks another, another account's review is ignored. Also the Tier-1 go as a decision pull request (L17/N20).
 
+import { planFingerprint } from '../../shared/plan-fingerprint.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { env, OWNER_ID } from './fixtures.test-helper.mjs';
@@ -15,10 +16,11 @@ function world({ kind = 'decision', ...over } = {}) {
   const g = fakeGitHub({ ownerId: OWNER_ID, now: () => t.clock.t });
   g.repo.main = g.repo.commit([], { 'README.md': 'hi' });
   Object.assign(t.ctx, { gh: g.gh, owner: 'sample-org', repo: 'sample-app' });
+  const fp = planFingerprint({ product: t.ctx.product, card_id: 'C-1', tier: 1, files: ['src/a.mjs'], done_when: 'the export matches the ledger', plan_sha256: 'e'.repeat(64), main_commit: 'a'.repeat(40) });
   const fields = kind === 'go_t1'
-    ? { id: 'G-1', kind, card: 'C-1', title: 'Billing export', tier: 1, fingerprint: 'f'.repeat(64), files: ['src/a.mjs'], extra: {
-      fingerprint_inputs: { files: ['src/a.mjs'], done_bar: ['the export matches the ledger', 'audited until 0 Material'], plan_sha256: 'e'.repeat(64), main_commit: 'a'.repeat(40) },
-      plan_check: { pass: true, material: 0, plan_sha256: 'e'.repeat(64), reviewer_session: 'S-review', author_session: 'S-lead' } } }
+    ? { id: 'G-1', kind, card: 'C-1', title: 'Billing export', tier: 1, fingerprint: fp.sha256, files: ['src/a.mjs'], extra: {
+      fingerprint_inputs: fp.inputs,
+      plan_check: { pass: true, material: 0, card: 'C-1', fingerprint: fp.sha256, plan_sha256: 'e'.repeat(64), reviewer_session: 'S-review', author_session: 'S-lead' } } }
     : { id: 'D-1', kind, card: 'C-1', title: 'Which export format', choices: ['CSV', 'JSON', 'Parquet'], recommended: 'CSV' };
   const r = createAsk(t.ctx, { ...fields, ...over });
   assert.equal(r.ok, true, r.reason);
