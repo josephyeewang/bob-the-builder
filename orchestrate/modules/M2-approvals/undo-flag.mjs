@@ -26,10 +26,12 @@
 //     addedBy(mergeCommit) → the paths that merge added or renamed to | null when it can't be told (then: by hand)
 //   One ask per report (restart-safe: the ask keeps `request`), one undo per merged card.
 //   `byHand` is every open undo_by_hand ask whose push is not marked sent, this pass's or an earlier one's: the caller
-//   sends each, then calls markPushSent(ctx, id, [BY_HAND_KIND]) (L95, audit stack r3 Minor 3). A tap undo's push needs no
-//   mark: schedule.mjs pushes every open undo ask itself. A report that throws is refused with the reason and the pass
-//   goes on; an alert sink that throws ends nothing. A refused report is alerted once per report and reason (with
-//   ctx.stateDir; stack r3 Minor 2), as research-ask.mjs does.
+//   sends each, then calls markByHandPushSent(ctx, id); anything not marked is handed back next pass (L95, audit stack r3
+//   Minor 3; L117 M-1). A tap undo's push needs no mark: schedule.mjs pushes every open undo ask itself. MAIN's
+//   `undo_by_hand` alert is sent by the pass on every pass until it goes through, then marked main_alert_sent_at
+//   (L117 m-2). A report that throws is refused with a fixed reason and the message in `error`, and the pass goes on; an
+//   alert sink that throws ends nothing. A refused report is alerted once per report and reason (with ctx.stateDir;
+//   stack r3 Minor 2), as research-ask.mjs does.
 //   The push names the change by the card's `what`, which no writer can change after the card is made (M9
 //   CARD_CREATE_ONLY), never by `brief`, which the Lead may edit (stack r3 Minor 6, the L84 2 class).
 //
@@ -38,15 +40,15 @@
 
 import { checkOutboxFile } from '../M1-front-door/outbox.mjs';
 import { ownerTurns } from '../M1-front-door/transcript.mjs';
-import { askStore, markPushSent, writeDoc } from './ask-store.mjs';
-
-export { markPushSent };
+import { askStore, markPushSent, markSent, writeDoc } from './ask-store.mjs';
 import { createAsk } from './binding.mjs';
 import { claimedAsk, onceAlerts, safeAlert } from './research-ask.mjs';
 import { undoPushText } from './go-view.mjs';
 
 export const UNDO_ID = /^U-[1-9]\d{0,5}$/;
 export const BY_HAND_KIND = 'undo_by_hand';
+// The one way to mark a by-hand push sent: the kind is fixed here, so a caller can't leave it out (L117 M-1).
+export const markByHandPushSent = (ctx, id) => markPushSent(ctx, id, [BY_HAND_KIND]);
 const SHA = /^[0-9a-f]{40}$/;
 const iso = (ms) => new Date(ms).toISOString();
 const norm = (s) => String(s ?? '').replace(/\s+/g, ' ').trim().toLowerCase();
@@ -91,7 +93,7 @@ export async function openUndoFlags(ctx, { entriesOf, addedBy } = {}) {
   for (const rep of record.list('report')) {
     const d = rep.doc;
     if (!d || d.kind !== 'ask-request-' || done.has(rep.id) || claimedAsk(d.text) !== 'undo') continue;
-    const no = (reason) => { refused.push({ report: rep.id, reason }); };
+    const no = (reason, error) => { refused.push({ report: rep.id, reason, ...(error === undefined ? {} : { error }) }); };
     try {
       if (d.role !== 'front_door') { no('an undo comes only from the owner, through the Front Door'); continue; }
       const r = checkOutboxFile(String(d.source ?? ''), String(d.text ?? ''));
@@ -123,7 +125,6 @@ export async function openUndoFlags(ctx, { entriesOf, addedBy } = {}) {
         const w = writeDoc(record, 'ask', { id, rev: 0 }, doc);
         if (!w.ok) { no(`the record refused the ask: ${w.reason}`); continue; }
         done.add(rep.id); undone.add(card.id);
-        alert({ type: 'undo_by_hand', ask: id, card: card.id, pr: r.doc.pr, commit, files });
         continue;
       }
       const c = createAsk(ctx, { id, kind: 'undo', card: card.id, title, origin_session: sid, extra: join });
@@ -131,12 +132,21 @@ export async function openUndoFlags(ctx, { entriesOf, addedBy } = {}) {
       done.add(rep.id); undone.add(card.id);
       opened.push({ id, push: undoPushText({ card: card.id, title, pr: r.doc.pr }) });
     } catch (e) {
-      no(`the pass failed on it: ${String(e?.message ?? e)}`);
+      no('the pass failed on it', String(e?.message ?? e));
     }
   }
   if (st.untrusted.length) alert({ kind: 'untrusted_ask', items: st.untrusted });
   onceAlerts(ctx, refused, { file: 'undo-refused.json', make: (f) => ({ type: 'undo_request_refused', ...f }), alert,
     notSaved: 'undo_refused_state_not_saved' });
+  // MAIN's alert for every open by-hand ask not yet told, rebuilt from the ask; marked only once it went through (L117 m-2).
+  const handAsks = askStore(record).asks().filter((a) => a.doc.kind === BY_HAND_KIND && a.doc.product === product && a.doc.state === 'open');
+  for (const a of handAsks.filter((x) => !x.doc.main_alert_sent_at)) {
+    const files = Array.isArray(a.doc.added_files) ? a.doc.added_files : [];
+    if (alert({ type: 'undo_by_hand', ask: a.id, card: a.doc.card, pr: a.doc.pr, commit: a.doc.merge_commit_sha, files })) {
+      const m = markSent(ctx, a.id, [BY_HAND_KIND], 'main_alert_sent_at');
+      if (!m.ok) alert({ type: 'undo_by_hand_mark_failed', ask: a.id, reason: m.reason });
+    }
+  }
   // Every open by-hand ask whose push is not marked sent, rebuilt from what the ask holds (trusted asks only).
   const byHand = askStore(record).asks()
     .filter((a) => a.doc.kind === BY_HAND_KIND && a.doc.product === product && a.doc.state === 'open' && !a.doc.push_sent_at)

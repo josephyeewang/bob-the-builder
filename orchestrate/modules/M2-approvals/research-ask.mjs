@@ -11,10 +11,11 @@
 //                           a refused report is never opened; it is alerted once per report and reason (kept in
 //                           ctx.stateDir, like schedule.mjs's config alert), or on every pass when there is no stateDir.
 //                           `opened` is every open research ask whose push is not marked sent, this pass's or an earlier
-//                           one's: the caller sends each push, then calls markPushSent(ctx, id). So a push lost to a throw
-//                           (the alert sink, a later write, the caller itself) goes out on the next pass (L95, audit
-//                           stack r3 Minor 1). A report that throws is refused with the reason, and the pass goes on.
-//   markPushSent(ctx, id, kinds) → the record's answer        sets push_sent_at once, on a trusted ask of those kinds
+//                           one's: the caller sends each push, then calls markResearchPushSent(ctx, id). Anything not
+//                           marked is handed back next pass, so a push lost to a throw (the alert sink, a later write,
+//                           the caller itself) goes out then (L95, audit stack r3 Minor 1; L117 M-1). A report that
+//                           throws is refused with a fixed reason and the message in `error`, and the pass goes on.
+//   markResearchPushSent(ctx, id) → the record's answer        sets push_sent_at once, on an open trusted research ask
 //   researchBrief(record, id) → { ok, id, product, brief, file } | { ok: false, reason }  for the desktop session
 //   landResearch(ctx, id) → the record's answer                                         the ask leaves the waiting list
 //
@@ -27,11 +28,11 @@ import { join } from 'node:path';
 import { checkOutboxFile } from '../M1-front-door/outbox.mjs';
 import { askStore, markPushSent, writeDoc } from './ask-store.mjs';
 
-export { markPushSent };
-
 export const RESEARCH_ID = /^R-[1-9]\d{0,5}$/;
 export const runLine = (id) => `run research ask ${id}`;
 export const researchFileName = (id) => `research-${id}.md`;
+// The one way to mark a research push sent: the kind is fixed here, so a caller can't leave it out (L117 M-1).
+export const markResearchPushSent = (ctx, id) => markPushSent(ctx, id, ['research']);
 const DAY_MS = 24 * 3600_000;
 const iso = (ms) => new Date(ms).toISOString();
 
@@ -44,9 +45,13 @@ function nextId(record) {
 export const claimedAsk = (text) => { try { return JSON.parse(String(text ?? ''))?.ask; } catch { return undefined; } };
 
 // An alert sink that throws must not end the pass: what it opened is still handed back (L95, stack r3 Minor 1). The
-// count of alerts that could not be given is handed back too, since nothing else can say so.
+// count of alerts that could not be given is handed back too, since nothing else can say so. It answers whether the
+// alert went through (no sink: it did not), so a caller records an alert as given only then (L117 m-1).
 export function safeAlert(ctx, failed) {
-  return (a) => { try { ctx.alert?.(a); } catch { failed.n += 1; } };
+  return (a) => {
+    if (typeof ctx.alert !== 'function') return false;
+    try { ctx.alert(a); return true; } catch { failed.n += 1; return false; }
+  };
 }
 
 // A refused report is alerted once per report and reason, not every pass (audit kit-lane3 r1 Minor 11; the undo pass
@@ -60,9 +65,10 @@ export function onceAlerts(ctx, refused, { file: name, make, alert, notSaved }) 
   let last = {};
   try { last = existsSync(file) ? JSON.parse(readFileSync(file, 'utf8')) ?? {} : {}; } catch { last = {}; }
   const now = {};
+  // A refusal is kept as alerted only once its alert went through, so one lost to a throwing sink is alerted again next
+  // pass (L117 m-1). The reason is fixed text, so a changing error message doesn't alert every pass (L117 c1).
   for (const f of refused) {
-    now[f.report] = f.reason;
-    if (last[f.report] !== f.reason) alert(make(f));
+    if (last[f.report] === f.reason || alert(make(f))) now[f.report] = f.reason;
   }
   // A state file that can't be saved is alerted, never thrown: the pass must still hand back the asks it opened, so
   // their "on your waiting list" push goes out (L84 3). The cost is only that a refusal may be alerted again.
@@ -85,7 +91,7 @@ export function openResearchAsks(ctx) {
     if (!d || d.kind !== 'ask-request-' || done.has(rep.id)) continue;
     // An undo request is undo-flag.mjs's (R-0b-140), which runs every check itself; this pass only routes on the claim.
     if (claimedAsk(d.text) === 'undo') continue;
-    const no = (reason) => { refused.push({ report: rep.id, reason }); };
+    const no = (reason, error) => { refused.push({ report: rep.id, reason, ...(error === undefined ? {} : { error }) }); };
     try {
       if (d.role !== 'front_door') { no('an ask request comes only from the Front Door'); continue; }
       const r = checkOutboxFile(String(d.source ?? ''), String(d.text ?? ''));
@@ -101,7 +107,7 @@ export function openResearchAsks(ctx) {
       if (!w.ok) { no(`the record refused the ask: ${w.reason}`); continue; }
       done.add(rep.id);
     } catch (e) {
-      no(`the pass failed on it: ${String(e?.message ?? e)}`);
+      no('the pass failed on it', String(e?.message ?? e));
     }
   }
   if (st.untrusted.length) alert({ kind: 'untrusted_ask', items: st.untrusted });
