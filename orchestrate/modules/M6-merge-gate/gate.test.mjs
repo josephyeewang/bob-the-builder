@@ -32,7 +32,8 @@ function world({ values = {}, mergeAnswer } = {}) {
   g.main = root;
   const vals = {
     timeouts: fullTimeouts(),
-    'approvals.plan_go.go_free': ['lead_daily_card', 'exact_reverse'],
+    'approvals.plan_go.go_free.lead_daily_card': ['docs/daily/*.md'],
+    'approvals.plan_go.go_free.exact_reverse': true,
     'product.cutover_stage': 'second',
     'product_profile.required_checks': ['test'],
     'product_profile.robot': { bot_user_id: g.robotId },
@@ -162,6 +163,25 @@ test('an undo card whose change is not the exact reverse is refused (9) and neve
   assert.equal(u.doc.state, 'refused');
   assert.ok(u.doc.reasons.some((x) => x.startsWith('9:')), u.doc.reasons.join(' | '));
   assert.equal(w.env.record.read('card', 'C-1').doc.state, 'closed');
+});
+
+// L123 m-1: the go-free read at gather (gather.mjs, refusal 10) goes by the value as the rules file gives it, text.
+// `exact_reverse: false` there is the text 'false', which is not go-free: the undo card still needs a go.
+test('L123 m-1: exact_reverse "false" in the rules still needs a go for an undo card; "true" skips it', async () => {
+  for (const [v, skipped] of [['false', false], [false, false], ['yes', false], ['true', true], [true, true]]) {
+    const w = world({ values: { 'approvals.plan_go.go_free.exact_reverse': v } });
+    verifiedCard(w, 'U-1', { pr: 9, files: { 'src/a.mjs': 'one' }, undo: w.root });
+    await gatePass(w.ctx);   // the gate takes the request in, so there is a merge to gather facts for
+    if (!skipped) assert.ok(mergeOf(w, 'U-1').doc.reasons?.some((x) => x.startsWith('10:')), `${v}: refused for no go`);
+    const f = await gatherFacts(w.ctx, mergeOf(w, 'U-1'));
+    assert.equal(f.card.doc.kind, 'exact_reverse');
+    if (skipped) assert.deepEqual(f.go, { ok: true, reasons: [], skipped: true }, String(v));
+    else {
+      assert.equal(f.go?.skipped, undefined, String(v));
+      assert.equal(f.go?.ok, false, String(v));
+      assert.ok(f.go.reasons.some((x) => /no go for U-1/.test(x)), `${v}: ${JSON.stringify(f.go)}`);
+    }
+  }
 });
 
 test('the outside check not green in 2 h: nothing happens at all', async () => {
