@@ -227,3 +227,130 @@ test('0b-7 audit round 3 M-C: an error body or renamed list field from Vercel ra
     assert.equal(t.gh.issues.get(1).closed, false);
   }
 });
+
+// ---- L143: what the pass saves after a raise (a deploy seen, a setting's baseline) is saved only when it went out ----
+
+// A plain alert stand-in that can lose the alert (L145): `decide(alert)` gives the raise's answer, or throws.
+function sink(decide = () => true) {
+  const raise = async (a) => { raise.texts.push(a); const r = decide(a); raise.answers.push(r); return r; };
+  raise.texts = []; raise.answers = [];
+  raise.reset = () => { raise.texts.length = 0; raise.answers.length = 0; };
+  return raise;
+}
+const downWhen = (cond) => (a) => { if (cond(a)) throw new Error('github down'); return true; };
+
+// The watcher's record writer runs on its own fixed clock, apart from the alerts' tick (L143).
+function lossSetup(raise) {
+  const rec = memoryRecord();
+  const v = fakeVercel();
+  const writer = makeFactWriter(rec, { now: () => new Date('2026-01-01T00:00:00Z') });
+  const alerts = { raise, clear: async () => 'none' };
+  const pass = () => watchOnce({ vercel: v.reader, rulesEntry: { stage: 'first' }, mainFirstParent: new Set(MAIN), evidence: new Set(), writer, alerts, product: 'product 1' });
+  return { v, pass, writer };
+}
+const subjects = (raise, kind) => raise.texts.filter((a) => a.key.includes(`|${kind}|`)).map((a) => a.key.split('|')[2]);
+
+test('L143: an env change whose raise answered false is raised again next pass; a sent one beside it is not', async () => {
+  let lose = true;
+  const raise = sink((a) => !(lose && a.key.includes('|setting-changed|env:env_1:')));
+  const t = lossSetup(raise);
+  await t.pass();
+  t.v.s.envs[0] = { ...t.v.s.envs[0], updatedAt: 2 };
+  t.v.s.envs.push({ id: 'env_2', key: 'NEW_FLAG', target: ['production'], type: 'plain', updatedAt: 3 });
+  await t.pass();
+  assert.equal(subjects(raise, 'setting-changed').length, 2);
+  assert.deepEqual(raise.answers, [false, true]);
+  raise.reset(); lose = false;
+  await t.pass();
+  assert.deepEqual(subjects(raise, 'setting-changed').map((s) => s.split(':')[1]), ['env_1'], 'only the lost one again');
+  raise.reset();
+  await t.pass();
+  assert.deepEqual(subjects(raise, 'setting-changed'), [], 'sent: not raised a third time');
+});
+
+test('L143: a removed env var and a project setting whose raises answered false are raised again next pass', async () => {
+  let lose = true;
+  const raise = sink(() => !lose);
+  const t = lossSetup(raise);
+  await t.pass();
+  t.v.s.envs = [];
+  t.v.s.project.commandForIgnoringBuildStep = 'exit 1';
+  await t.pass();
+  const first = subjects(raise, 'setting-changed');
+  assert.equal(first.length, 2);
+  raise.reset(); lose = false;
+  await t.pass();
+  assert.deepEqual(subjects(raise, 'setting-changed'), first, 'both raised again, the same keys');
+  raise.reset();
+  await t.pass();
+  assert.deepEqual(subjects(raise, 'setting-changed'), []);
+});
+
+test('L143: an unsupported deploy whose raise answered false is not marked seen, so it is raised again next pass', async () => {
+  let lose = true;
+  const raise = sink((a) => !(lose && a.key.includes('|unsupported-deploy|')));
+  const t = lossSetup(raise);
+  await t.pass();
+  const d = dep(BRANCH);
+  t.v.s.deployments = [d]; t.v.s.live = d.uid;
+  await t.pass();
+  assert.deepEqual(subjects(raise, 'unsupported-deploy'), [d.uid]);
+  assert.ok(!t.writer.get(stateFactId('product 1')).seen.includes(d.uid));
+  raise.reset(); lose = false;
+  await t.pass();
+  assert.deepEqual(subjects(raise, 'unsupported-deploy'), [d.uid], 'raised again');
+  raise.reset();
+  await t.pass();
+  assert.deepEqual(subjects(raise, 'unsupported-deploy'), [], 'sent: judged once');
+});
+
+test('L143: a raise that throws stops the pass and saves no baseline, so the next pass raises the change', async () => {
+  let down = true;
+  const raise = sink(downWhen((a) => down && a.key.includes('|setting-changed|')));
+  const t = lossSetup(raise);
+  await t.pass();
+  const base = t.writer.get(stateFactId('product 1'));
+  t.v.s.envs[0] = { ...t.v.s.envs[0], updatedAt: 2 };
+  await assert.rejects(t.pass(), /github down/);
+  assert.deepEqual(t.writer.get(stateFactId('product 1')), base);
+  raise.reset(); down = false;
+  await t.pass();
+  assert.equal(subjects(raise, 'setting-changed').length, 1);
+});
+
+test('L143: through the real M13 alerts, a GitHub open with no issue number makes the next pass open it', async () => {
+  let t0 = Date.parse('2026-11-03T08:00:00Z');
+  const rec = memoryRecord();
+  const gh = fakeIssues();
+  const open = gh.open;
+  gh.open = async () => undefined;
+  const alerts = makeAlerts({ rec, gh, owner: 'owner', now: () => new Date(t0) });
+  const t = lossSetup(alerts.raise);
+  await t.pass();
+  t.v.s.envs[0] = { ...t.v.s.envs[0], updatedAt: 2 };
+  await t.pass();
+  assert.equal(gh.issues.size, 0);
+  gh.open = open; t0 += 60e3;
+  await t.pass();
+  assert.equal(gh.issues.size, 1, 'opened on the next pass, not suppressed');
+  assert.match(gh.issues.get(1).title, /production setting DATABASE_URL updated/);
+  await t.pass();
+  assert.equal(gh.issues.size, 1, 'and once');
+});
+
+test('L143: an added env var whose raise answered false stays out of the baseline, so it is raised again next pass', async () => {
+  let lose = true;
+  const raise = sink(() => !lose);
+  const t = lossSetup(raise);
+  await t.pass();
+  t.v.s.envs.push({ id: 'env_2', key: 'NEW_FLAG', target: ['production'], type: 'plain', updatedAt: 3 });
+  await t.pass();
+  assert.deepEqual(subjects(raise, 'setting-changed').map((s) => s.split(':')[1]), ['env_2']);
+  assert.equal(t.writer.get(stateFactId('product 1')).env.env_2, undefined, 'not in the baseline');
+  raise.reset(); lose = false;
+  await t.pass();
+  assert.deepEqual(subjects(raise, 'setting-changed').map((s) => s.split(':')[1]), ['env_2'], 'raised again');
+  raise.reset();
+  await t.pass();
+  assert.deepEqual(subjects(raise, 'setting-changed'), []);
+});
