@@ -19,27 +19,15 @@
 
 import { createHash } from 'node:crypto';
 import { TIER1_BAR, canonicalJson, planFingerprint } from '../../shared/plan-fingerprint.mjs';
+import { planCheckProblem } from '../../shared/plan-review.mjs';
 
 const fail = (reason) => ({ ok: false, reason });
 const firstLine = (s) => String(s ?? '').split('\n').map((l) => l.trim()).find(Boolean)?.slice(0, 160) ?? '';
 const plural = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
 const SHA256 = /^[0-9a-f]{64}$/;
 
-// The fresh plan check a Tier-1 go needs: passed, 0 Material, on this card's plan as fingerprinted (the whole
-// fingerprint, not only the plan document: files and done_when can change in draft without it, audit r1 M-2), by a
-// session that didn't write it. `check` = { pass, material, card, fingerprint, plan_sha256, reviewer_session,
-// author_session }; the reviewer takes card and fingerprint from goFingerprint (go.mjs) for the plan it read.
-export function planCheckProblem(check, { fingerprint, card, planSha256 } = {}) {
-  if (!check || typeof check !== 'object') return 'a Tier-1 go needs a fresh plan reviewer\'s pass first';
-  if (check.pass !== true || check.material !== 0) return 'the plan reviewer has not passed the plan with 0 Material';
-  if (typeof card !== 'string' || !card || check.card !== card) return 'the plan reviewer passed another card\'s plan';
-  if (!SHA256.test(String(check.fingerprint ?? '')) || check.fingerprint !== fingerprint
-    || !SHA256.test(String(check.plan_sha256 ?? '')) || check.plan_sha256 !== planSha256) return 'the plan or its file list changed after review';
-  const rev = check.reviewer_session; const by = check.author_session;
-  if (typeof rev !== 'string' || !rev || typeof by !== 'string' || !by) return 'the plan check names its reviewer and the plan\'s author';
-  if (rev === by) return 'the plan was checked by the session that wrote it; a fresh reviewer must check it';
-  return null;
-}
+// The fresh plan check a Tier-1 go needs is the one shared rule (shared/plan-review.mjs, L87); raiseGo (go.mjs)
+// applies it before the ask exists, goView again before the owner sees it.
 
 const sha256 = (s) => createHash('sha256').update(s, 'utf8').digest('hex');
 

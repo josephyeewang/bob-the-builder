@@ -26,7 +26,7 @@ import { canonicalJson, planFingerprint } from '../../shared/plan-fingerprint.mj
 import { activeKind } from '../../shared/asks.mjs';
 import { askStore, writeDoc } from './ask-store.mjs';
 import { createAsk } from './binding.mjs';
-import { planCheckProblem } from './go-view.mjs';
+import { planCheckProblem } from '../../shared/plan-review.mjs';
 
 // What a change may edit in its own row file without a new go (M2-4): status only. Every other field is the plan.
 export const ROW_STATUS_FIELDS = Object.freeze(['status', 'done', 'receipts', 'progress', 'date', 'done_at']);
