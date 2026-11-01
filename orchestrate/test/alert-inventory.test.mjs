@@ -10,8 +10,10 @@
 // an entry gone and a new one, so any edit near an alert gets a fresh look before the list is re-pinned.
 //
 // Each entry has exactly one status:
-//   tested: <file>.test.mjs > <test name>   that test exists and runs fakeAlert({ answer: false }) and
-//                                           fakeAlert({ throws }); it checks nothing says "told" after a lost alert
+//   tested: <file>.test.mjs > <test name>   that test exists, imports the entry's file, and is proven at run time
+//                                           (L143 M-2): run as it is, it passes and the entry's own function reaches a
+//                                           fakeAlert answering false and one throwing; run with fakeAlert's false
+//                                           turned into true, it fails; run with its throw turned into true, it fails
 //   ruled: L<n>, <why>                       a lead call says this one is fine (the ruled list grows only by a lead call)
 //   wrapped: <file> <fn>                     the call goes through a listed wrapper whose contract test is proven
 //                                           (L139 item 4): see the wrappers below
@@ -23,28 +25,36 @@
 //
 // A wrapper may carry a `contract_test` ("<file>.test.mjs > <test name>", L139 item 4): a test that imports the
 // wrapper's file and shows, with fakeAlert({ answer: false }) and fakeAlert({ throws }), that the wrapper never takes
-// a lost alert as sent. It is proven when that test exists, runs both, is not a todo, the wrapper's body still matches
-// its pin, and every wrapper in its `inner` is proven too. Only then may a call the wrapper `covers` be `wrapped:`.
-// A wrapper the scanner cannot see (not named like an alert) is listed with `by_lead: true`.
+// a lost alert as sent. It is proven when that test exists, runs both, is not a todo, passes the same run-time proof
+// as a "tested" entry (L143 M-2, with the wrapper as the function that must be reached), the wrapper's body still
+// matches its pin, and every wrapper in its `inner` is proven too. Only then may a call the wrapper `covers` be
+// `wrapped:`, and only then may a wrapper be "passes" (L143 M-3). `answer_unused` (a lead call) excuses only the run
+// with false turned into true, for a wrapper that acts the same whatever the alert answers. A wrapper the scanner
+// cannot see (not named like an alert) is listed with `by_lead: true`.
 //
-// Change control (L135 item 4, L139 item 6): in a PR that is not the lead's (branch lead-* or claude/lead-*), the
-// list may not rule an entry, add or rule a wrapper, or grow any list's open count, and the checker's own files
-// (LEAD_FILES) may not change at all. The test compares with the merge-base, and always prints what changed.
+// Change control (L135 item 4, L139 item 6, L143 Minor 1): in a PR that is not the lead's (branch lead-* or
+// claude/lead-*), the checker's own files (LEAD_FILES, the list among them) may not change at all, and the list is
+// also compared entry by entry with the merge-base: a lane may only re-pin an open entry. A list
+// missing at the merge-base fails a lane PR (L143 Minor 3). The test always prints what changed.
 //
 // What this cannot see (a reviewer still reads for these):
-//   - an alert more than one call away (a via entry covers one step: a same-file function, or one imported by name);
-//   - an alert port handed on by position (`run(rec, alert)`) and called under another name in another file;
+//   - a method on an object a factory hands back (`store.read(` where `read` holds an alert): only plain calls,
+//     `this.x(`, `ns.x(` of `import * as ns`, and imported or re-exported names are followed;
+//   - a dynamic import, `require`, or a function passed around in a data structure and called from there;
+//   - an alert port handed on inside an object (`step({ rec, send: alert })`) under a name that is not alert-like;
 //   - a stand-in passed by position, or built by a helper the test file imports;
 //   - whether a ruled "retried next pass" stays true: the ruling is re-checked only when its pins change.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, mkdtempSync, mkdirSync, writeFileSync, copyFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 import {
   inventory, orchestrateFiles, readList, compare, keyOf, short, parseStatus, testedProblem, hintsFor, countList,
-  changeControl, LEAD_BRANCH, LIST, contractProblems, fnBody, leadFilesIn, LEAD_FILES,
+  changeControl, LEAD_BRANCH, LIST, contractProblems, fnBody, leadFilesIn, LEAD_FILES, runtimeCache, runtimeProblems,
+  isTestCode, badTestPath, answerFlow,
 } from './alert-inventory.mjs';
 import { wrappers, standIns, losingStandIns, silentDefaults } from './alert-answer-scan.mjs';
 import { fakeAlert } from './fake-alert.test-helper.mjs';
@@ -61,6 +71,7 @@ const LISTED = readList(ROOT);
 const squash = (t) => t.replace(/\s+/g, ' ').trim();
 const readSrc = (rel) => { try { return readFileSync(join(ROOT, rel), 'utf8'); } catch { return null; } };
 const CLI = 'run `node orchestrate/test/alert-inventory.mjs` for the pins and a suggested status';
+const RUNTIME = runtimeCache(ROOT);   // each contract or tested test is run three times, once per file and name
 
 // ---- 1. the pins ----
 
@@ -92,15 +103,23 @@ test('every list entry is well formed: its text matches its hash, and its status
   assert.deepEqual(bad, []);
 });
 
-test('every "tested" entry names a test that exists and runs fakeAlert answering false and throwing (L135)', () => {
+test('every "tested" entry names a test that imports its code and proves at run time that a lost alert is not taken as sent (L135, L143 M-2)', () => {
   const bad = [];
+  const byTest = new Map();
   for (const e of LISTED.alerts) {
     const s = parseStatus(e.status);
     if (s.kind !== 'tested') continue;
     const path = join(ROOT, s.file);
     if (!existsSync(path)) { bad.push(`${e.file} ${e.fn}: ${s.file} does not exist`); continue; }
-    const why = testedProblem(readFileSync(path, 'utf8'), s.test);
-    if (why) bad.push(`${e.file} ${e.fn}: ${s.file} > ${s.test}: ${why}`);
+    const why = testedProblem(readFileSync(path, 'utf8'), s.test, { testRel: s.file, file: e.file, fn: e.fn });
+    if (why) { bad.push(`${e.file} ${e.fn}: ${s.file} > ${s.test}: ${why}`); continue; }
+    const k = JSON.stringify([s.file, s.test]);
+    byTest.set(k, [...(byTest.get(k) ?? []), e]);
+  }
+  for (const [k, es] of byTest) {
+    const [file, name] = JSON.parse(k);
+    const targets = [...new Map(es.map((e) => [`${e.file} ${e.fn}`, { file: e.file, fn: e.fn }])).values()];
+    for (const why of RUNTIME(file, name, targets)) bad.push(`${file} > ${name}: ${why}`);
   }
   assert.deepEqual(bad, []);
 });
@@ -115,12 +134,14 @@ test('every alert wrapper is on the list, and one listed as passing hands back t
   for (const e of LISTED.wrappers.filter((x) => x.by_lead)) {
     const code = readSrc(e.file);
     if (code === null || fnBody(code, e.fn) === null) bad.push(`stale: ${e.file} ${e.fn} (listed by the lead) is no longer there`);
-    else if (e.status === 'passes') for (const why of contractProblems({ ...e, inner: [] }, LISTED.wrappers, readSrc)) bad.push(`${e.file} ${e.fn} is listed as passing, but its contract is not proven: ${why}`);
+    else if (e.status === 'passes') for (const why of contractProblems({ ...e, inner: [] }, LISTED.wrappers, readSrc, new Set(), RUNTIME)) bad.push(`${e.file} ${e.fn} is listed as passing, but its contract is not proven: ${why}`);
   }
   for (const [k, w] of found) {
     const e = listed.get(k);
     if (!e) bad.push(`new wrapper ${w.file}:${w.line} ${w.fn}: ${w.passes ? 'it hands back the answer; the lead adds it as "passes"' : `it loses the answer (${w.why}): return the inner call's answer, or test it === false / !== false`}`);
     else if (e.status === 'passes' && !w.passes) bad.push(`${w.file}:${w.line} ${w.fn} is listed as passing but loses the answer: ${w.why}`);
+    // L143 M-3: "passes" also needs a contract test that passes the run-time proof.
+    else if (e.status === 'passes') for (const why of contractProblems(e, LISTED.wrappers, readSrc, new Set(), RUNTIME)) bad.push(`${w.file}:${w.line} ${w.fn} is listed as passing, but its contract is not proven: ${why}`);
     else if (e.status !== 'passes' && w.passes) bad.push(`${w.file}:${w.line} ${w.fn} now hands back the answer: set its status to "passes"`);
   }
   for (const [k, e] of listed) if (!found.has(k) && !e.lands_with) bad.push(`stale: ${k} is no longer a wrapper here; remove it from the list`);
@@ -139,8 +160,9 @@ test('every wrapper contract is pinned to the wrapper as it is now, and names a 
     else if (now !== w.body) bad.push(`${id}: the wrapper changed since its contract was pinned (body ${now}, list ${w.body}); re-check its contract test, then re-pin`);
     const x = /^(\S+\.test\.mjs) > (.+)$/.exec(w.contract_test);
     if (!x || readSrc(x[1]) === null || /no test/.test(testedProblem(readSrc(x[1]), x[2]) ?? '')) bad.push(`${id}: contract_test "${w.contract_test}" names no test that exists`);
-    const why = contractProblems(w, LISTED.wrappers, readSrc);
+    const why = contractProblems(w, LISTED.wrappers, readSrc, new Set(), RUNTIME);
     report.push(`${id}: ${why.length ? `not proven: ${why.join('; ')}` : 'proven'}`);
+    if (w.answer_unused && !/^L\d{1,4}: .{8,}/.test(w.answer_unused)) bad.push(`${id}: answer_unused is a lead call: "L<n>: <why>"`);
   }
   console.log(`wrapper contracts (L139):\n  ${report.join('\n  ')}`);
   assert.deepEqual(bad, []);
@@ -154,7 +176,7 @@ test('every "wrapped" entry goes through a listed wrapper that covers it and who
     const w = LISTED.wrappers.find((x) => x.file === s.file && x.fn === s.fn);
     if (!w) { bad.push(`${e.file} ${e.fn} ${e.call}: no wrapper ${s.file} ${s.fn} on the list`); continue; }
     if (!(w.covers ?? []).some((c) => c.file === e.file && c.call === e.call && (!c.fn || c.fn === e.fn))) bad.push(`${e.file} ${e.fn} ${e.call}: ${s.file} ${s.fn} does not cover this call`);
-    for (const why of contractProblems(w, LISTED.wrappers, readSrc)) bad.push(`${e.file} ${e.fn} ${e.call}: ${why}`);
+    for (const why of contractProblems(w, LISTED.wrappers, readSrc, new Set(), RUNTIME)) bad.push(`${e.file} ${e.fn} ${e.call}: ${why}`);
   }
   assert.deepEqual(bad, []);
 });
@@ -198,7 +220,7 @@ test('the gate: nothing is open before the first cutover (L135)', {
 // ---- 4. change control ----
 
 function git(args) { return execFileSync('git', args, { cwd: ROOT, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim(); }
-test('the list and the checker change only in a lead PR: no new ruling, no new wrapper, no open count grows, no checker file changes (L135 item 4, L139 item 6)', (t) => {
+test('the list and the checker change only in a lead PR: entry by entry, a lane may only re-pin an open entry, and no checker file changes (L135 item 4, L139 item 6, L143 Minor 1)', (t) => {
   let base; let branch; let changed = [];
   try {
     branch = process.env.GITHUB_HEAD_REF || git(['rev-parse', '--abbrev-ref', 'HEAD']);
@@ -213,7 +235,11 @@ test('the list and the checker change only in a lead PR: no new ruling, no new w
   const mine = leadFilesIn(changed);
   if (mine.length) console.log(`the checker's own files changed on ${branch}${lead ? ' (a lead branch)' : ''}: ${mine.join(', ')}`);
   if (!lead) assert.deepEqual(mine, [], `only a lead PR changes the alert checker's files (L139 item 6): ${LEAD_FILES.join(', ')}`);
-  if (!base) return t.skip('the list is new since the merge-base');
+  if (!base) {
+    // L143 Minor 3: a lane PR with a list the merge-base does not have is a lane writing the list; only the lead may.
+    assert.ok(lead, `orchestrate/${LIST} is not on the merge-base: only a lead PR adds the list`);
+    return t.skip('the list is new since the merge-base (a lead PR)');
+  }
   const { problems, would, summary } = changeControl(base, LISTED, { lead });
   console.log(`alert list against the merge-base (branch ${branch}${lead ? ', a lead branch' : ''}):\n  ${summary.join('\n  ')}${would.length ? `\n  needs the lead:\n  ${would.join('\n  ')}` : ''}`);
   assert.deepEqual(problems, []);
@@ -229,8 +255,22 @@ test('controls: change control stops a lane ruling, adding a wrapper or growing 
   assert.equal(lane({ alerts: base.alerts, wrappers: [{ file: 'f.mjs', fn: 'safeX', status: 'passes' }] }), 1, 'a new wrapper');
   assert.equal(lane({ alerts: base.alerts, standins: [{ file: 't.test.mjs', hash: 'x', text: 'x', status: 'open: lane 1, none yet' }] }), 1, 'a new stand-in');
   assert.equal(lane({ alerts: [e('open: lane 1, none yet', 'ffffffff'), base.alerts[1]] }), 0, 'an open entry re-pinned');
-  assert.equal(lane({ alerts: [e('tested: x.test.mjs > y'), base.alerts[1]] }), 0, 'an open entry now tested');
-  assert.equal(lane({ alerts: [base.alerts[1]] }), 0, 'an entry fixed away');
+  assert.equal(lane({ alerts: [...base.alerts, e('open: lane 1, none yet', 'eeeeeeee')].slice(0, 2) }), 0, 'nothing changed');
+  // L143 Minor 1: entry by entry, not net counts.
+  assert.equal(lane({ alerts: [e('tested: x.test.mjs > y'), base.alerts[1]] }), 1, 'an open entry marked tested (the lead checks the test)');
+  assert.equal(lane({ alerts: [base.alerts[1]] }), 1, 'an entry removed');
+  assert.equal(lane({ alerts: [e('open: lane 2, none yet'), base.alerts[1]] }), 1, 'an owner changed');
+  assert.equal(lane({ alerts: [{ ...e('open: lane 1, none yet'), lands_with: '#9' }, base.alerts[1]] }), 1, 'lands_with added');
+  assert.equal(lane({ alerts: [e('open: lane 1, none yet', 'ffffffff'), base.alerts[1], e('ruled: L1, a new ruled entry', '99999999')] }), 1, 'a new entry that is not open');
+  assert.equal(lane({ alerts: [base.alerts[1], e('open: lane 1, none yet', '11111111'), e('open: lane 1, none yet', '22222222')] }), 1, 'an open entry re-pinned and one added');
+  assert.equal(lane({ alerts: [e('tested: x.test.mjs > y', '33333333'), e('ruled: L135, retried next pass', 'cccccccc'), e('open: lane 1, none yet', '44444444')] }), 1,
+    'net open unchanged, but one entry turned tested');
+  const wb = { ...base, wrappers: [{ file: 'f.mjs', fn: 'safeX', status: 'open: lane 1, none yet', body: 'aaaaaaaa' }] };
+  const laneW = (wrappers) => changeControl(wb, { ...wb, wrappers }, { lead: false }).problems.length;
+  assert.equal(laneW([{ ...wb.wrappers[0], status: 'passes' }]), 1, 'a wrapper status changed');
+  assert.equal(laneW([{ ...wb.wrappers[0], body: 'bbbbbbbb' }]), 1, 'a wrapper re-pinned');
+  assert.equal(laneW([]), 1, 'a wrapper removed');
+  assert.equal(changeControl(base, { ...base, standins: [{ file: 't.test.mjs', hash: 'x', text: 'x', status: 'open: lead, none yet' }] }, { lead: false }).problems.length, 1, 'a new stand-in');
   assert.equal(changeControl(base, { alerts: [e('ruled: L999, the lead says so')], wrappers: [], silent: [], standins: [] }, { lead: true }).problems.length, 0, 'a lead PR');
   assert.ok(LEAD_BRANCH.test('lead-alert-sweep') && LEAD_BRANCH.test('claude/lead-x') && !LEAD_BRANCH.test('claude/orch-lane1-x') && !LEAD_BRANCH.test('orch-lane2-lead-x'));
 });
@@ -252,6 +292,7 @@ test('controls: a wrapper contract is proven only by a real, non-todo test with 
   assert.equal(n(w({ contract_test: 'test/d.test.mjs > ok' })), 1, 'a test that does not import the wrapper');
   assert.equal(n(w({ body: '00000000' })), 1, 'the wrapper changed since it was pinned');
   assert.equal(n(w({ contract_test: undefined })), 1, 'no contract test');
+  assert.equal(n(w({ contract_test: '../outside/c.test.mjs > ok' })), 1, 'a test outside orchestrate/ (L143 Minor 9)');
   assert.equal(n(w({ inner: ['m/w.mjs inner'] }), [w({ inner: ['m/w.mjs inner'] }), inner]), 1, 'an inner wrapper not proven');
   assert.deepEqual(leadFilesIn(['orchestrate/test/alert-inventory.json', 'orchestrate/test/alert-answer-scan.mjs', 'orchestrate/modules/M2-approvals/x.mjs', 'docs/test/alert-inventory.json']),
     ['orchestrate/test/alert-inventory.json', 'orchestrate/test/alert-answer-scan.mjs'], "the checker's own files");
@@ -277,13 +318,47 @@ test('controls: the inventory lists plain, member, optional, aliased, renamed an
 });
 test('controls: the inventory lists a function one step out that holds an alert (via), and skips what is not a call', () => {
   assert.deepEqual(calls('function closeX(ctx) { if (bad) ctx.alert({ t: 1 }); }\nfunction run(ctx) { write(ctx); closeX(ctx); }'), ['closeX alert', 'run closeX via'], 'L133: a same-file carrier');
-  assert.deepEqual(calls('function closeX(ctx) { return ctx.alert({ t: 1 }) !== false; }\nfunction run(ctx) { closeX(ctx); }'), ['closeX alert'], 'a function that decides on the answer itself is not a carrier');
+  // L143 M-1: a function that hands back an answer made from the alert's, in any form, passes it on: its callers are listed.
+  for (const form of ['return ctx.alert({ t: 1 }) !== false;', 'const sent = ctx.alert({ t: 1 }); return sent;', 'return ctx.alert({ t: 1 }) || true;',
+    'return ctx.alert({ t: 1 }) ? "sent" : "lost";', 'const r = ctx.alert({ t: 1 }); const ok = r !== false; return { ok };', 'if (ctx.alert({ t: 1 }) === false) return false; return true;']) {
+    assert.deepEqual(calls(`function closeX(ctx) { ${form} }\nfunction run(ctx) { closeX(ctx); }`), ['closeX alert', 'run closeX via'], `passes the answer on: ${form}`);
+  }
+  // Handled: the answer feeds tellThen, or an if with no write after it, or an if that leaves the function.
+  assert.deepEqual(calls('function closeX(ctx, rec) { if (ctx.alert({ t: 1 }) === false) return; rec.write({}); }\nfunction run(ctx) { closeX(ctx); }'), ['closeX alert'], 'an if that leaves before the write');
+  assert.deepEqual(calls('function closeX(ctx, rec) { const s = ctx.alert({ t: 1 }); if (s) rec.write({}); }\nfunction run(ctx) { closeX(ctx); }'), ['closeX alert'], 'an if around the write');
+  assert.deepEqual(calls('function closeX(ctx, rec) { const s = ctx.alert({ t: 1 }); if (s) log(1); rec.write({}); }\nfunction run(ctx) { closeX(ctx); }'), ['closeX alert', 'run closeX via'], 'a write after the if');
+  // The auditor's r2 shapes (audit-pr93-r2 F1, F2, P05), and depth.
+  const at = (fs) => inventory(fs).map((e) => `${e.file} ${e.fn} ${e.call}${e.via ? ` via ${e.via}` : ''}`);
+  assert.ok(at([{ rel: 'm/s.mjs', src: "async function closeDecisionPr(ctx, id) {\n  const c = await gh(id);\n  if (c?.status !== 200) return ctx.alert({ t: 1 }) !== false;\n  return true;\n}\nexport async function runOut(ctx, rec) {\n  if (write(ctx)) await closeDecisionPr(ctx, 1);\n}\nfunction write(ctx) { return true; }\n" }])
+    .includes('m/s.mjs runOut closeDecisionPr via m/s.mjs closeDecisionPr'), 'F1/F1b: closeDecisionPr returns alert(...) !== false; runOut stays listed');
+  assert.ok(at([{ rel: 'm/close-it.mjs', src: "export async function closeIt(ctx, id) {\n  const sent = await ctx.alert({ type: 'pr_not_closed', ask: id });\n  return sent;\n}\n" },
+    { rel: 'm/expire-it.mjs', src: "import { closeIt } from './close-it.mjs';\nexport async function expireIt(ctx, rec, a) {\n  rec.write({ kind: 'ask' });\n  await closeIt(ctx, a.id);\n}\n" }])
+    .includes('m/expire-it.mjs expireIt closeIt via m/close-it.mjs closeIt'), 'F2: the helper returns the answer through a variable; its caller in another file is listed');
+  assert.ok(at([{ rel: 'm/undo.mjs', src: "export function markReverted({ record, alert }, id) {\n  const w = record.write({ id });\n  if (!w.ok) alert('x');\n  return w;\n}\n" },
+    { rel: 'm/gate.mjs', src: "import { markReverted, markReverted as undoMark } from './undo.mjs';\nexport function settleUndo(record, alert, card) {\n  record.write({ kind: 'card' });\n  undoMark({ record, alert }, card.id);\n}\n" }])
+    .includes('m/gate.mjs settleUndo undoMark via m/undo.mjs markReverted'), 'P05: a renamed import of a function that drops its alert');
+  assert.deepEqual(at([{ rel: 'a.mjs', src: "export const one = (ctx) => ctx.alert('x') || true;\n" }, { rel: 'b.mjs', src: "export { one as two } from './a.mjs';\n" },
+    { rel: 'c.mjs', src: "import * as ns from './b.mjs';\nexport function three(ctx) { const r = ns.two(ctx); return r ? 1 : 0; }\n" },
+    { rel: 'd.mjs', src: "import { three as four } from './c.mjs';\nexport function five(ctx, rec) { four(ctx); rec.write({}); }\n" }]).filter((x) => / via /.test(x)),
+  ['c.mjs three two via b.mjs two', 'd.mjs five four via c.mjs three'], 'any depth: a re-export, a namespace import, a renamed import');
+  assert.deepEqual(calls("function step(rec, send) { send('stuck'); rec.write({}); }\nexport function stall6(rec, alert) { step(rec, alert); }"), ['step send', 'stall6 step via'], 'P20: an alert port handed on by position');
+  assert.deepEqual(calls("export class W {\n  warn(t) { this.alert(t); }\n  step(rec) { rec.write({}); this.warn('x'); }\n}"), ['warn alert', 'step warn via'], 'a this.method that drops its alert');
+  // L143 Minor 4: tell* / notify* / safe* / *Joe / *Owner names are alerts; one that is a function we can see is followed.
+  assert.deepEqual(calls("export function s({ rec, tellJoe }) { tellJoe('x'); rec.write({}); }"), ['s tellJoe'], 'P08: tellJoe');
+  assert.deepEqual(calls("export function s(rec, safeNotify) { safeNotify('x'); rec.write({}); }"), ['s safeNotify'], 'P09: safeNotify');
+  assert.deepEqual(calls("export function s(ctx) { ctx.pingOwner('x'); ctx.notifyAll('y'); }"), ['s notifyAll', 's pingOwner'].sort(), 'pingOwner, notifyAll');
+  assert.deepEqual(calls("const safeName = (p) => p.replace(/x/g, '');\nexport function s(p) { return safeName(p); }"), [], 'a safe* function we can see that holds no alert');
   const two = inventory([
     { rel: 'a/x.mjs', src: 'export function closeX(ctx) { ctx.alert({ t: 1 }); }' },
     { rel: 'b/y.mjs', src: "import { closeX } from '../a/x.mjs';\nexport function run(ctx) { put(ctx); closeX(ctx); }" },
   ]).map((e) => `${e.file} ${e.fn} ${e.call} ${e.via ?? ''}`.trim());
   assert.deepEqual(two, ['a/x.mjs closeX alert', 'b/y.mjs run closeX a/x.mjs closeX'], 'a carrier imported from another file');
   assert.deepEqual(calls('function alert(t) { return t; }\nconst o = { notify(a) { return a; } };'), [], 'definitions');
+  // L143 Minor 6: test code is a file that really imports node:test, not one whose comment says so (P19).
+  assert.equal(isTestCode('m/s.mjs', "// Tested from s.test.mjs (import { test } from 'node:test').\nexport function s(ctx) { ctx.alert('x'); }"), false, 'a comment');
+  assert.equal(isTestCode('m/s.mjs', "const t = \"import { test } from 'node:test'\";"), false, 'a string');
+  assert.equal(isTestCode('shared/t.mjs', "import { test } from 'node:test';"), true, 'a real import');
+  assert.equal(isTestCode('shared/t.mjs', "import 'node:test';"), true, 'a bare import');
   assert.deepEqual(calls('function a() { const t = "alert(x)"; /* alert(y) */ }'), [], 'strings and comments');
   assert.deepEqual(calls('function a(rec, alerts) { const list = alerts; rec.list("x"); }'), [], 'an alias is a plain call only');
 });
@@ -294,6 +369,14 @@ test('controls: a change anywhere in the function changes a pin', () => {
   assert.notDeepEqual(pin('function a(ctx, rec) {\n  ctx.alert({ t: 2 });\n  step();\n}'), was, 'the call line');
   assert.deepEqual(pin('function a(ctx, rec) {\n  // a note\n  ctx.alert({ t: 1 });\n  step();\n}'), was, 'a comment does not');
   assert.deepEqual(pin('\n\nfunction a(ctx, rec) {\n  ctx.alert({ t: 1 });\n  step();\n}'), was, 'a move does not');
+  // The auditor's F1b on the real code: two holders called on one line share a line hash; the call is in the key, so
+  // when one stops holding an alert its entry goes, and the other's entry cannot answer for it.
+  const two = 'function w(ctx) { ctx.alert(1); return false; }\nfunction c(ctx) { return ctx.alert(2) !== false; }\nasync function r(ctx, rec) {\n  if (w(ctx)) await c(ctx);\n  rec.write(1);\n}';
+  const listed = inventory([{ rel: 'm.mjs', src: two }]).filter((e) => e.fn === 'r');
+  assert.deepEqual(listed.map((e) => e.call).sort(), ['c', 'w']);
+  const after = inventory([{ rel: 'm.mjs', src: two.replace('ctx.alert(1); return false;', 'if (ctx.alert(1) === false) events.push(1); return false;') }]).filter((e) => e.fn === 'r');
+  const { fresh, gone } = compare(after, listed);
+  assert.deepEqual([fresh.length, gone.map((e) => e.call)], [0, ['w']], 'the w entry goes; the c entry stays as it was');
 });
 test('controls: a "tested" status must name a test that runs fakeAlert answering false and throwing', () => {
   const imp = "import { fakeAlert } from '../../test/fake-alert.test-helper.mjs';\n";
@@ -301,9 +384,76 @@ test('controls: a "tested" status must name a test that runs fakeAlert answering
   assert.match(testedProblem(`${imp}test('lost', () => { run(fakeAlert({ answer: false })); });`, 'lost'), /only answer: false/);
   assert.match(testedProblem(`${imp}test('lost', () => {});`, 'other'), /no test/);
   assert.match(testedProblem("test('lost', () => { run(fakeAlert({ answer: false })); run(fakeAlert({ throws: 1 })); });", 'lost'), /does not import/);
+  // L143 M-2: a throw that cannot throw, a skip in the body, a test that never imports or names the code.
+  for (const v of ['null', 'false', 'undefined', '0', "''"]) assert.match(testedProblem(`${imp}test('lost', () => { run(fakeAlert({ answer: false })); run(fakeAlert({ throws: ${v} })); });`, 'lost'), /only answer: false/, `throws: ${v}`);
+  assert.match(testedProblem(`${imp}test('lost', (t) => { t.skip(); run(fakeAlert({ answer: false })); run(fakeAlert({ throws: new Error('x') })); });`, 'lost'), /skip\(\) or todo\(\)/);
+  assert.match(testedProblem(`${imp}test('lost', (t) => { t.todo('later'); run(fakeAlert({ answer: false })); run(fakeAlert({ throws: new Error('x') })); });`, 'lost'), /skip\(\) or todo\(\)/);
+  const target = { testRel: 'm/a.test.mjs', file: 'm/a.mjs', fn: 'closeIt' };
+  const honest = `${imp}import { closeIt } from './a.mjs';\ntest('lost', () => { closeIt(fakeAlert({ answer: false })); closeIt(fakeAlert({ throws: new Error('x') })); });`;
+  assert.equal(testedProblem(honest, 'lost', target), null);
+  assert.match(testedProblem(honest.replace("from './a.mjs'", "from './b.mjs'"), 'lost', target), /does not import m\/a\.mjs/);
+  assert.match(parseStatus('tested: ../x/y.test.mjs > lost').why, /inside orchestrate/, 'L143 Minor 9');
+  assert.equal(badTestPath('modules/M2-approvals/x.test.mjs'), null);
   assert.equal(parseStatus('open: lane 5, none yet').kind, 'bad');
   assert.equal(parseStatus('ruled: L135, ok').kind, 'bad', 'a ruling says why');
   assert.deepEqual(parseStatus('tested: modules/M2-approvals/x.test.mjs > a lost alert leaves the ask open'), { kind: 'tested', file: 'modules/M2-approvals/x.test.mjs', test: 'a lost alert leaves the ask open' });
+});
+
+test('controls: a wrapper hands back the answer as it is, and every catch answers false or throws again (L143 M-3)', () => {
+  const ok = (src) => wrappers(src).map((w) => w.passes);
+  assert.deepEqual(ok('function safeA(t) { try { return alert(t); } catch {} }'), [false], 'r2: try { return alert() } catch {}');
+  assert.deepEqual(ok('function safeB(t) { return alert(t) || true; }'), [false], 'r2: || true');
+  assert.deepEqual(ok('function safeC(t) { try { return alert(t); } catch (e) { return "sent"; } }'), [false], 'r2: catch returns "sent"');
+  assert.deepEqual(ok('function safeD(t) { return alert(t) !== false; }'), [false], 'a comparison on a returned call');
+  assert.deepEqual(ok('function safeE(t) { return alert(t) ?? true; }'), [false], '??');
+  assert.deepEqual(ok('function safeF(t) { return alert(t) ? true : false; }'), [false], 'a ternary');
+  assert.deepEqual(ok('const safeG = (t) => alert(t).catch(() => true);'), [false], '.catch(() => true)');
+  assert.deepEqual(ok('function safeH(t) { try { return alert(t); } catch { return false; } }'), [true], 'catch answers false');
+  assert.deepEqual(ok('function safeI(t) { try { return alert(t); } catch (e) { log(e); throw e; } }'), [true], 'catch throws again');
+  assert.deepEqual(ok('async function safeJ(t) { return await alert(t); }'), [true], 'return await');
+  assert.deepEqual(ok('function safeK(t) { if (alert(t) === false) return false; return true; }'), [true], 'tested in an if');
+});
+test('controls: every alert stand-in shape is caught (L143 Minor 5)', () => {
+  const n = (src) => standIns(src).length;
+  assert.equal(n('const ctx1 = { rec: null, alert(t) { return true; } };'), 1, 'P11: a one-line method');
+  assert.equal(n('const ctx2 = { alert: (() => true) };'), 1, 'P12: a parenthesised arrow');
+  assert.equal(n('const ctx3 = { alert: Boolean };'), 1, 'P13: alert: Boolean');
+  assert.equal(n('const ctx = { say: console.log };'), 1, 'say: console.log');
+  assert.equal(n('const f = fakeAlert(); const o = { alert: f };'), 0, 'fakeAlert');
+});
+test('controls: the run-time proof fails a test that never reaches the code, ignores the answer, or ignores the throw (L143 M-2)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'rt-control-'));
+  try {
+    mkdirSync(join(dir, 'test')); mkdirSync(join(dir, 'm'));
+    copyFileSync(join(ROOT, HELPER), join(dir, HELPER));
+    writeFileSync(join(dir, 'm/c.mjs'), 'export function closeIt(alert, rec) {\n  const sent = alert("x");\n  if (sent !== false) rec.push("told");\n  return sent;\n}\n');
+    const imp = "import { test } from 'node:test';\nimport assert from 'node:assert/strict';\nimport { fakeAlert } from '../test/fake-alert.test-helper.mjs';\nimport { closeIt } from './c.mjs';\n";
+    writeFileSync(join(dir, 'm/c.test.mjs'), `${imp}
+test('honest', () => {
+  const rec = []; assert.equal(closeIt(fakeAlert({ answer: false }), rec), false); assert.deepEqual(rec, []);
+  assert.throws(() => closeIt(fakeAlert({ throws: new Error('down') }), []), /down/);
+});
+test('token', () => { const a = fakeAlert({ answer: false }); const b = fakeAlert({ throws: new Error('x') }); assert.ok(a && b && closeIt); });
+test('ignores the answer', () => {
+  closeIt(fakeAlert({ answer: false }), []);
+  assert.throws(() => closeIt(fakeAlert({ throws: new Error('down') }), []), /down/);
+});
+test('ignores the throw', () => {
+  const rec = []; assert.equal(closeIt(fakeAlert({ answer: false }), rec), false);
+  try { closeIt(fakeAlert({ throws: new Error('down') }), []); } catch { /* not looked at */ }
+});
+test('skipped', (t) => { t.skip('later'); });
+`);
+    const target = [{ file: 'm/c.mjs', fn: 'closeIt' }];
+    const why = (name, opts) => runtimeProblems(dir, 'm/c.test.mjs', name, target, opts).join(' | ');
+    assert.equal(why('honest'), '', 'an honest test is proven');
+    assert.match(why('token'), /never reached a fakeAlert that answered false.*never reached a fakeAlert that threw/, 'a token test (r2 F3) reaches nothing');
+    assert.match(why('ignores the answer'), /still passes when the lost alert answers true/, 'a test that never checks the answer');
+    assert.equal(why('ignores the answer', { answerUnused: 'L143: control' }), '', 'answer_unused excuses only that');
+    assert.match(why('ignores the throw'), /still passes when the failing alert answers true/, 'a test that never checks the throw');
+    assert.match(why('skipped'), /skipped or a todo/, 't.skip() in the body');
+    assert.match(why('no such test'), /did not run/, 'a name that is not a test');
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
 // ---- 6. fakeAlert keeps the real outbox's contract (L135 item 5) ----

@@ -442,9 +442,11 @@ function sitesFor(src, m, match, bl, names, carriers, { bare = false, wholeFn = 
 }
 
 // A wrapper: a function named like an alert (ALERT_NAMES, or safeX / textX / tellX) that calls an alert.
-// It must hand back the inner call's answer: each alert call in it is `return <call>` (or a concise arrow's body), or
-// is tested `=== false` / `!== false` (#87's safeAlert: false on false, true otherwise, the same as `!== false`; L135).
-// `return true` is allowed only in a wrapper that tests the answer, and no `catch` in it may return true.
+// It must hand back the inner call's answer: each alert call in it is `return <call>` (or a concise arrow's body) with
+// nothing done to it (L143 M-3: no `||`, `??`, ternary, `&&` or comparison on a returned call), or is tested
+// `=== false` / `!== false` in an `if` that answers false (L135). `return true` is allowed only in a wrapper that tests
+// the answer. Every catch in it answers false or throws again (L143 M-3). Passing here is not enough: a wrapper
+// listed as passing also needs a contract test that passes the run-time check (alert-inventory.test.mjs).
 // Returns every wrapper in one file's source: [{ fn, line, passes, why }].
 export const isWrapperName = (n) => ALERT_NAMES.includes(n) || /^(?:safe|text|tell)[A-Z]/.test(n);
 export function wrappers(src) {
@@ -471,18 +473,31 @@ export function wrappers(src) {
     for (const i of calls) {
       let s = i;
       for (;;) { const p = prevIdx(m, s); if (m[p] !== '.') break; const [w, k] = wordBefore(m, prevIdx(m, m[p - 1] === '?' ? p - 1 : p)); if (!w) break; s = k + 1; }
-      const before = prevIdx(m, s);
+      let before = prevIdx(m, s);
+      if (wordBefore(m, before)[0] === 'await') before = prevIdx(m, wordBefore(m, before)[1] + 1);
       const returned = wordBefore(m, before)[0] === 'return' || (m[before] === '>' && m[before - 1] === '=') || (b.concise && s === nextIdx(m, b.a));
       const close = match.get(m.indexOf('(', i));
-      const tested = close !== undefined && /^\s*[!=]==\s*false\b/.test(m.slice(close + 1, close + 20));
+      const after = close === undefined ? '' : m.slice(close + 1, close + 20);
+      const tested = !returned && /^\s*[!=]==\s*false\b/.test(after);
       if (tested) tests += 1;
       if (!returned && !tested) bad.push(`line ${lineOf(m, i)} does not return the alert's answer`);
+      // L143 M-3: the answer goes back as it is. `return alert(t) || true`, `?? true`, `? a : b`, `&& x` or a
+      // comparison (`!== false`, `=== true`) turns a lost alert, or an undefined one, into something else.
+      if (returned && /^\s*(?:\|\||\?\?|\?(?!\.)|&&|[=!]=|[<>])/.test(after)) bad.push(`line ${lineOf(m, i)} changes the answer it returns (${after.trim().slice(0, 12)})`);
     }
     const body = m.slice(b.a, b.z);
     if (/\breturn\s+true\b/.test(body) && !tests) bad.push('it returns true');
+    // L143 M-3: a catch answers false or throws again; anything else (`catch {}`, `return 'sent'`) hides a throw.
     for (const c of body.matchAll(/\bcatch\b\s*(?:\([^()]*\))?\s*\{/g)) {
       const o = b.a + c.index + c[0].length - 1;
-      if (/\breturn\s+true\b/.test(m.slice(o, match.get(o) ?? o))) bad.push('its catch returns true');
+      const inner = m.slice(o + 1, match.get(o) ?? o);
+      if (/\breturn\s+true\b/.test(inner)) bad.push('its catch returns true');
+      else if (!/\breturn\s+false\b|\bthrow\b/.test(inner)) bad.push('its catch neither answers false nor throws again');
+    }
+    for (const c of body.matchAll(/\.\s*catch\s*\(/g)) {
+      const o = b.a + c.index + c[0].length - 1;
+      const cb = m.slice(o + 1, match.get(o) ?? o);
+      if (!/^\s*(?:async\s*)?(?:\([^()]*\)|[A-Za-z_$][\w$]*)\s*=>\s*(?:false\b|\(\s*false\s*\)|\{[^}]*(?:\breturn\s+false\b|\bthrow\b))/.test(cb)) bad.push('its .catch( ) neither answers false nor throws again');
     }
     out.push({ fn: b.fn, line: lineOf(m, b.at), passes: bad.length === 0, why: bad.join('; ') });
   }
@@ -506,6 +521,10 @@ const STANDIN = [
   new RegExp(String.raw`\b${PORT}\s*[:=]\s*(?:[\w$]+\.)?mock\.fn\s*\(`, 'g'),                                          // alert: mock.fn()
   new RegExp(String.raw`\b${PORT}\s*:\s*(?:noop|sink|ignore)\b`, 'g'),                                                    // alert: noop
   /\bfakeIssues\s*\(/g,                                                                                                 // M13's GitHub stand-in: every raise succeeds
+  // L143 Minor 5:
+  new RegExp(String.raw`[{,]\s*(?:async\s+)?${PORT}\s*\([^()]*\)\s*\{`, 'g'),                                           // { rec, alert(t) { return true; } } on one line
+  new RegExp(String.raw`\b${PORT}\s*:\s*\(+\s*(?:async\s+)?(?:\([^()]*\)|[A-Za-z_$][\w$]*)\s*=>`, 'g'),                 // alert: (() => true)
+  new RegExp(String.raw`\b${PORT}\s*:\s*(?:Boolean|Number|String|Object|console\.\w+|Promise\.resolve)\b`, 'g'),          // alert: Boolean
 ];
 // A stand-in that already answers false or throws (its body after `=>`, or a function's first statement).
 const LOSES = /^\s*(?:false\b|\(\s*false\s*\)|\{\s*(?:throw\b|return\s+false\b))/;
@@ -541,14 +560,16 @@ export function losingStandIns(src) {
 }
 
 // A production alert that answers nothing: under `if (alert(...) !== false)` its undefined counts as sent, so a lost
-// alert passes the allowed form (widened by L135 item 6). The forms:
+// alert passes the allowed form (widened by L135 item 6). One that answers a fixed "sent" (`() => true`, `() => 1`,
+// `Boolean`) is the same, only plainer (L143 rerun: the auditor's P15/P16, after the lane's re-pin). The forms:
 //   alert = () => {}, alert = (t) => {}, alert = () => undefined, alert = noop      a parameter default
+//   alert = () => true, alert = () => 1, alert = Boolean                           a fixed "sent"
 //   { alert: tell = () => {} }                                                     the same, renamed
 //   ctx.alert ?? (() => {}), alert: ctx.alert ?? noop                               a fallback
 //   alert: (t) => log(t), alert: (t) => console.error(t)                            a port that only logs
 //   ctx.alert?.(x), alert?.(x)                                                      an absent alert answers undefined
 const NAME = String.raw`(?:[\w$]*[Aa]lerts?|notify|say|tellOnce|raise)`;
-const NOTHING = String.raw`(?:(?:async\s*)?\([^()]*\)\s*=>\s*(?:\{\s*\}|undefined\b|void\s+0\b|null\b)|noop\b)`;
+const NOTHING = String.raw`(?:(?:async\s*)?\([^()]*\)\s*=>\s*(?:\{\s*\}|undefined\b|void\s+0\b|null\b|true\b|!0\b|1\b)|noop\b|Boolean\b)`;
 const SILENT_FORMS = [
   new RegExp(String.raw`\b${NAME}\s*(?::\s*[A-Za-z_$][\w$]*\s*)?=(?![=>])\s*\(?\s*${NOTHING}`, 'g'),
   new RegExp(String.raw`\b${NAME}\s*\?\?\s*\(?\s*${NOTHING}`, 'g'),

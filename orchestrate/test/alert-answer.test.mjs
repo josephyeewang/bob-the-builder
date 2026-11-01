@@ -92,6 +92,11 @@ test('controls: a stand-in not made by fakeAlert() is seen; fakeAlert() is not',
   }
   assert.equal(d('export function f({ alert }) {}'), 0);
   assert.equal(d('if (alert(x) !== false) y();'), 0);
+  // L143 rerun (the auditor's P15/P16): a default that answers a fixed "sent" is the same; one answering false is not.
+  for (const x of ['const alert = ctx.alert ?? (() => true);', 'export function f({ alert = () => true }) {}', 'run({ alert: ctx.alert ?? Boolean });', 'const alert = ctx.alert ?? ((t) => 1);']) {
+    assert.equal(d(x), 1, `L143: ${x}`);
+  }
+  assert.equal(d('const alert = ctx.alert ?? (() => false);'), 0);
 });
 
 // ---- fakeAlert itself ----

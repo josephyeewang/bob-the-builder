@@ -1,9 +1,12 @@
-// raise-contract.test.mjs — lead call L139 item 4: the contract tests for the M12/M13 `raise` wrappers.
+// raise-contract.test.mjs — lead call L139 item 4: the contract tests for the alert wrappers (M12/M13 `raise`, and
+// since L143 M11's tellThen).
 //
 // A call through a wrapper passes as a class (status `wrapped: <file> <fn>` in alert-inventory.json) only when the
 // wrapper's `contract_test` (this file) shows it never takes a lost alert as sent: the alert answering false, and the
 // alert throwing. alert-inventory.test.mjs checks that the named test exists, imports the wrapper's file, runs
-// fakeAlert({ answer: false }) and fakeAlert({ throws }), and is not a todo.
+// fakeAlert({ answer: false }) and fakeAlert({ throws }), and is not a todo; since L143 it also runs the test three
+// times: as it is (the wrapper must reach a fake that answered false and one that threw), then with fakeAlert's false
+// turned into true, then with its throw turned into true (each must make the test fail).
 //
 // What these show (1 Nov 2026, reported to the lead under L139: a todo here is a found defect, not a missing test):
 //   - heartbeat `set`: a red fact is raised again every pass while it is red, so a lost raise is retried. Passes.
@@ -12,9 +15,11 @@
 //     `open` with no number stores an open alert with no issue, which every later pass reads as closed by the owner.
 //     Todo, failing.
 //   - prod-watcher `raise`: a throw stops the pass before the new baseline is saved. Passes. An answer of false is put
-//     in `out` and the baseline is saved anyway, so a lost setting-change alert is never raised again. It is safe only
-//     while M13 raise never answers false. Todo, failing.
+//     in `out` and the baseline is saved anyway, so a lost setting-change alert is never raised again. The L135 ruling
+//     that it was safe while M13 raise never answers false is withdrawn (L143 M-4): open, lane 3. Todo, failing.
 //   - heartbeat account-changed: the same: the new login is saved after a raise whose answer is not looked at. Todo.
+//   - tellThen (M11): hands back the alert's answer as it is: false when lost, a throw as a throw. Passes (L143).
+// Lane 3 may change only the three todo markers here, when its fix lands (L143).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { memoryRecord } from '../shared/record.mjs';
@@ -23,6 +28,7 @@ import { makeAlerts, fakeIssues } from '../modules/M13-ledger/alerts.mjs';
 import { makeVercelReader } from '../modules/M12-sensors/vercel-reader.mjs';
 import { watchOnce } from '../modules/M12-sensors/prod-watcher.mjs';
 import { heartbeatOnce } from '../modules/M13-ledger/heartbeat.mjs';
+import { tellThen } from '../modules/M11-dispatcher/alerts.mjs';
 import { fakeAlert } from './fake-alert.test-helper.mjs';
 
 const DEFECT = 'L139: a found defect, reported to the lead; this goes green when the code is fixed';
@@ -146,4 +152,15 @@ test('heartbeat account-changed never takes a lost raise as sent: answering fals
   await h.pass();
   await h.pass();
   assert.equal(raisedFor(lost, 'account-changed-account B'), 2, 'answered false: the change is raised again on the next pass');
+});
+
+// ---- tellThen (M11) ----
+
+test("tellThen hands back the alert's answer: false when it is lost, and a throw as a throw (L143 contract)", () => {
+  const mark = { fact: 'hold-c', fields: { text: 't' }, kind: 'hold_alert' };
+  const lost = fakeAlert({ answer: false });
+  assert.equal(tellThen(lost, 't', mark), false, 'answered false: tellThen answers false');
+  assert.deepEqual(lost.calls[0], ['t', { mark }], 'and hands the mark to the alert, which writes it only on delivery');
+  assert.throws(() => tellThen(fakeAlert({ throws: new Error('down') }), 't', mark), /down/, 'threw: tellThen throws');
+  assert.equal(tellThen(fakeAlert(), 't', mark), true, 'sent: true');
 });
