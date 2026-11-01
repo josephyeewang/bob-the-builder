@@ -63,7 +63,7 @@ test('0b-8 audit round 3 M-3: the brief names the state files it answers; one ma
   assert.equal(briefAnswers(newer, ['20261103-0915-kq', '20261103-0915-ks']), false, 'one id missing');
   assert.equal(briefAnswers(mk([]), ['20261103-0915-kq']), false);
   assert.equal(briefAnswers(mk(['../x']), []), false);
-  const skill = readFileSync(new URL('./skill/orchestrate/SKILL.md', import.meta.url), 'utf8');
+  const skill = readFileSync(new URL('./parked-skill-wording.md', import.meta.url), 'utf8'); // L151: parked until trip mode is wired
   assert.doesNotMatch(skill, /current time is past/, 'the skill no longer asks for a time it does not have');
   assert.match(skill, /lists\s+\*\*every\*\* `<id>`/);
 });
@@ -73,6 +73,8 @@ test('0b-8 audit round 3 M-4, lead call L23: the Front Door can\'t file an Air c
   const c = checkOutboxFile('request-airhealth-20261103-0930-ab.json', '{"request":"airhealth","product":null,"name":null,"red_count":0}\n');
   assert.equal(c.ok, false); assert.match(c.reason, /Air's own check/);
   const skill = readFileSync(new URL('./skill/orchestrate/SKILL.md', import.meta.url), 'utf8');
-  assert.doesNotMatch(skill, /request-airhealth/); assert.match(skill, /Never ask the owner for a count/);
+  const parked = readFileSync(new URL('./parked-skill-wording.md', import.meta.url), 'utf8'); // L151
+  for (const t of [skill, parked]) assert.doesNotMatch(t, /request-airhealth/);
+  assert.match(parked, /Never ask the owner for a count/); assert.doesNotMatch(skill, /how many|a count/i);
   assert.doesNotMatch(airCheck({ facts: new Map(), now: () => new Date(T0) }).text, /reply here|how many/);
 });

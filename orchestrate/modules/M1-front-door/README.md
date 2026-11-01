@@ -5,7 +5,8 @@ everything they ask for becomes one small file in its outbox and one short reply
 
 | File | Row | What it does |
 |---|---|---|
-| `skill/orchestrate/SKILL.md` | R-0b-81, 137 | The one skill: new idea, a piece of work sorted into a Bob mode, pause, away, back, wrap up, rotate. "Not wired yet" for the rest. |
+| `skill/orchestrate/SKILL.md` | R-0b-81, 137 | The one skill: new idea, a piece of work sorted into a Bob mode, research ask, undo. Pause, away, back, wrap up and rotate file nothing and say plainly they aren't available yet (lead call L151); their old wording is parked in `parked-skill-wording.md`. "Not wired yet" for the rest. |
+| `parked-skill-wording.md` | R-0b-81, 83 | Not loaded. The skill's checked pause, away, back, wrap up and rotate wording, parked by lead call L151 until each kind's consumer lands; that PR moves it back. |
 | `outbox.mjs` | R-0b-81, 83 | The three file shapes (`state-`, `request-`, `idea-`) and intake's check. Never `state: active`; a key in any file refuses it; a product off the list or a reused id is refused (L26). `intakePush` is the confirmation the owner gets. |
 | `sort.mjs` | R-0b-137 | The full loop's reference: the cue words per Bob mode (the skill's table must match), the three-line read-back with Go, Change, Not now, the one question with a recommendation when unsure, and the check that a reply never repeats a pasted key. Number work (Tier 1, R-0b-138) reads back that it is number work and the go comes after a fresh plan check; while mode requests are unwired it files nothing. |
 | (in `outbox.mjs`) | R-0b-136 | `ask-request-<id>.json`, the owner's "find out X": a research ask with its product and one-line brief. M2 `research-ask.mjs` turns it into the ask. |
@@ -60,15 +61,16 @@ R-0b-82's decision and handoff code sit here although the row is tagged M11 (lan
    carries the check's own time, so a late take-in is never fresh, and an older check never replaces a newer one. The Front Door's outbox check refuses that name. The owner never types a count.
 7. "Filed, then confirmed" (lead call L26). Lane 2: the Front Door's context file carries the product list (exact
    names), and for every Front Door file intake takes in or refuses, it pushes `intakePush(name, result)` to the owner's
-   phone ("Confirmed: …" for pause, away and idea; "Request taken: … nothing has happened yet" for resume, wrap up and
-   rotate; or "Not filed: <reason>. Say it again."), **only after the record write succeeded**; a failed write pushes
+   phone ("Confirmed: …" for an idea; "Request taken: … nothing has happened yet" for a research ask or an undo; "Not
+   filed: … isn't available from the Front Door yet" for a state- or request- file, which nothing acts on yet (lead call
+   L151); or "Not filed: <reason>. Say it again."), **only after the record write succeeded**; a failed write pushes
    "Not filed". Lanes 1 and 2: intake calls `checkOutboxFile(name, text, { products, seenIds })`, both a list or a
    Set, with `seenIds` every id taken in before, kept in the record so it survives a restart. Both are required: a
    result whose `checked` shows either skipped is pushed as "Not filed". Until this is wired, a "Filed" reply has no
    confirmation behind it.
-8. The rotate push says "the steps follow" (lead call L26 wording). Lane 2 (or the Lead's rotate flow): send the owner
-   the rotate steps for that name after the "Request taken" push. Until that is wired, the push promises steps that
-   don't come (0b-8 audit round 9 minor 3).
+8. Rotate (lead call L26 wording, parked by L151). Lane 2 (or the Lead's rotate flow): send the owner the rotate steps
+   for that name. Until that is wired, the skill files no rotate request and the push says the key is NOT rotated; the
+   PR that wires it brings back the parked "the steps follow" wording (0b-8 audit round 9 minor 3).
 9. Mode requests (R-0b-137). Lane 2's intake takes in `request-evolve-`, `request-audit-`, `request-upgrade-` and
    `request-think-` like the other requests (same `checkOutboxFile`, same push, "Request taken: … Nothing has started
    yet"). The Lead acts on evolve, audit and upgrade as Bob runs on that product; think opens a thinking room on the

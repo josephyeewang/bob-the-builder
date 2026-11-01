@@ -11,7 +11,7 @@ test('0b-8 audit round 7 M-1: no time zone and not on the Merge Gate → nothing
   const name = 'state-20261103-0915-kq.json';
   const r = checkOutboxFile(name, '{"product":"testprod","state":"away","until":"2026-11-06","tz":null}', { products: ['testprod'], seenIds: [] });
   const push = intakePush(name, r);
-  assert.match(push, /^Confirmed: away testprod until 2026-11-06, no time zone yet/);
+  assert.equal(push, "Not filed: trip mode for testprod isn't available from the Front Door yet. Nothing changed."); // L151
   assert.doesNotMatch(push, /hold/);
   const rec = memoryRecord();
   const brief = buildTripBrief({ products: [{ name: 'testprod', on_merge_gate: false }], tz: null, rec, facts: { get: () => null }, heartbeatProduct: 'testprod' });
@@ -57,7 +57,7 @@ test('0b-8 confirm round M-1 and minor 1: a wiring-fault failure is quotable; ev
   const bad = nextTripPush({ states: [{ id: 'state-20261103-0915-kq.json', state: 'away' }], build: () => 'x', now: at });
   assert.match(bad.text.split('\n')[0], /^Trip brief failed at 2026-11-03T09:20:00.000Z: wiring fault/);
   assert.doesNotMatch(bad.text, /tries again/, 'a wiring fault does not clear by itself');
-  const skill = readFileSync(new URL('./skill/orchestrate/SKILL.md', import.meta.url), 'utf8');
+  const skill = readFileSync(new URL('./parked-skill-wording.md', import.meta.url), 'utf8'); // L151: parked until trip mode is wired
   assert.match(skill, /first\s+line says "wiring fault"/);
   const f = nextTripPush({ states: [{ id: '20261103-0915-kq', state: 'away' }], build: () => { throw new Error('x'); }, now: at });
   assert.match(f.text, /^Trip brief failed at 2026-11-03T09:20:00.000Z; answers state files: 20261103-0915-kq\./);
