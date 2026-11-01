@@ -28,8 +28,33 @@ folder others can write).
   changed**: the command lists the problem and changes nothing. A folder under the base that is wrong gets its owner,
   mode and access list put right. A link where a folder belongs is refused.
 - It never sets or reads a password.
-- Not in this part: the install and the background jobs (part 2); the ownerTaps and proposals folders, the account job
-  reload and the Keychain token (part 3).
+- Not in this part: the install and the background jobs (part 2, below); the ownerTaps and proposals folders, the
+  account job reload and the Keychain token (part 3).
+
+## Part 2: the install and the background jobs
+
+Extra config keys (the same file): `address` (https address of the repository), `label` (starts the jobs' names),
+`runnerConfig` (full path of the review runner's prepared `review.json`, whose `installRoot` is `<base>/install/orchestrate`),
+`extras` (full paths of the files and folders the runner config names: its wiring, claude program and hooks), and
+optionally `gitBin` (default `/usr/bin/git`) and `nodeBin` (default: the node running the command).
+Every name, path and layout rule comes from the launcher's own modules (`install-check.mjs`, `review-daemons.mjs`,
+`review-updater.mjs`); `install.test.mjs` pins the two copies it cannot import (the label rule, the updater's file set).
+
+| Command | What it does | Root? |
+|---|---|---|
+| `node setup.mjs install --config <file> --dry-run` | prints every step | no |
+| `sudo node setup.mjs install --config <file>` | makes the root-owned `install` folder, a root-owned copy of the updater's three files and of node, the seed (`updater.json`, `review.json`, the extras), then runs the updater's `--first` run, which builds the `.v-<commit>` copy and flips the link; then checks | yes |
+| `node setup.mjs check-install --config <file> [--main <commit>]` | read only: the link is root's; the copy and every folder above it are root's alone; the commit stamp; **no access list on any install folder**; `review.json` names this copy and what it names exists | no |
+| `sudo node setup.mjs daemons place --config <file>` | writes the three job files into `/Library/LaunchDaemons` (root:wheel 0644, exactly what `review-daemons.mjs` builds) | yes |
+| `sudo node setup.mjs daemons load` / `unload` | `launchctl bootstrap` / `bootout` for each job not yet loaded / loaded; load refuses until the install and the job files are there; unload with nothing loaded is not an error | yes |
+| `node setup.mjs daemons list` / `check` | read only: loaded or not; the job files are exact and the jobs loaded | no |
+
+Root never runs code a user can write: the updater runs from a root-owned `install-work/bootstrap` copy with a root-owned
+copy of node. A plain folder where the copy's link belongs is refused, not replaced.
+
+Tests: `node --test orchestrate/setup/install.test.mjs`. They add a `launchctl` stand-in that refuses what the real one
+refuses (no root; a job file with the wrong owner or mode; loading twice; unloading what is not loaded; an unknown job is 113),
+run the real updater in a child process against a local folder standing in for GitHub, and run `launchctl print` for real.
 
 ### Tests
 

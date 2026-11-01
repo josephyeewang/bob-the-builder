@@ -4,11 +4,11 @@
 //
 //   io.at(path)             the real place of a logical path (prefix + path); the prefix is '' on the Mini
 //   io.run(cmd, args)       → { status, stdout, stderr }; a fixed PATH, no shell, a time limit
-//   io.lstat/mkdir/chmod/chown   on the logical path
+//   io.lstat/mkdir/chmod/chown/readText/write/copyFile/copyTree/rm/list/readlink   on the logical path
 //   io.euid()               who this process runs as
 //   io.rootUid              the uid root has (0; a test stands one in)
 
-import { chmodSync, chownSync, lstatSync, mkdirSync } from 'node:fs';
+import { chmodSync, chownSync, copyFileSync, cpSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, rmSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
 
@@ -27,6 +27,16 @@ export function realIo({ prefix = '' } = {}) {
     mkdir: (p, mode) => mkdirSync(at(p), { mode }),
     chmod: (p, mode) => chmodSync(at(p), mode),
     chown: (p, uid, gid) => chownSync(at(p), uid, gid),
+    // For the install and the job files. `src` is a real path outside the prefix (a file of this repository, the node program).
+    readText: (p) => readFileSync(at(p), 'utf8'),
+    write: (p, text, mode) => { writeFileSync(at(p), text, { mode, flag: 'w' }); chmodSync(at(p), mode); },
+    copyFile: (src, p, mode) => { copyFileSync(src, at(p)); chmodSync(at(p), mode); },
+    copyTree: (src, p) => cpSync(src, at(p), { recursive: true, dereference: false, errorOnExist: true, force: false }),
+    rm: (p) => rmSync(at(p), { recursive: true, force: true }),
+    list: (p) => readdirSync(at(p)),
+    readlink: (p) => readlinkSync(at(p)),
+    lstatReal: (abs) => lstatSync(abs),     // a path already real (prefix included), such as one read out of a config
+    listReal: (abs) => readdirSync(abs),
   };
 }
 
