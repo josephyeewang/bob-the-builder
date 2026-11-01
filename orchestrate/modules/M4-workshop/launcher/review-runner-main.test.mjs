@@ -7,7 +7,8 @@ import { chmodSync, existsSync, fstatSync, linkSync, mkdirSync, readFileSync, re
 import { basename, dirname, join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { templateFile } from './review-settings.mjs';
-import { installProblem, programsProblem, readCardFile, recordVerdictTaken, adminAnswer, sessionsFrom, realPorts, readConfig, readInstallStamp, readJoeTaps } from './review-runner-main.mjs';
+import { installProblem, programsProblem, readCardFile, recordVerdictTaken, adminAnswer, sessionsFrom, realPorts, readConfig, readInstallStamp, readJoeTaps, readyProblem, reviewCopyPath, prepareReviewCopy, WIRING_EXPORTS } from './review-runner-main.mjs';
+import { parseSnapshot } from '../hooks/snapshot.mjs';
 import { readOutboxFile } from '../../M9-record/outbox.mjs';
 import { STAMP, installStamp } from './review-daemons.mjs';
 import { reviewDaemonPlists } from './review-daemons.mjs';
@@ -16,6 +17,8 @@ import { tempDir } from '../../../shared/test-tmp.mjs';
 import { git, gitOk } from '../git/safe-git.mjs';
 
 const ME = process.getuid();
+// R-0b-163: the keys readConfig now also requires, with the snapshot inside each config's own root.
+const withR163 = (c) => ({ snapshot: join(c.root, 'rules-snapshot.json'), bobFolder: '/b', deny: ['/d'], reviewCopies: '/rc', workerCopies: '/wc', rules: { production: { env_files: [], programs: [], hosts: [] } }, ...c });
 
 test('L65: the installed copy must be root\'s alone, with the runner, config and wiring inside it', () => {
   const base = tempDir('m4-install-');
@@ -57,7 +60,7 @@ test('L66 M2: what a review runs (claude, node, the hooks folder) must be inside
   for (const r of ['reviewer', 'auditor']) writeFileSync(templateFile(base, r), '{}', { mode: 0o644 });
   for (const p of [base, join(base, 'bin'), join(base, 'hooks'), join(base, 'modules'), join(base, 'modules', 'M4-workshop'), dirname(tdir), tdir]) chmodSync(p, 0o755);
   for (const p of [out]) chmodSync(p, 0o755);
-  const c = { installRoot: base, wiring: files.wiring, claudeBin: files.claude, hooksDir: join(base, 'hooks') };
+  const c = { installRoot: base, wiring: files.wiring, claudeBin: files.claude, hooksDir: join(base, 'hooks'), reviewCopies: '/rc' };
   const check = (over = {}, node = files.node) => programsProblem({ ...c, ...over }, { self: files.self, config: files.config, node, owner: ME, top });
   // This test's user stands in for root; with everything inside, nothing is wrong.
   assert.equal(check(), null);
@@ -97,10 +100,13 @@ test('L66 M2: what a review runs (claude, node, the hooks folder) must be inside
   // The ports hand what was checked to the wiring's start.
   let got;
   const ports = realPorts({ ...c, uids: { reviewer: ME } }, { start: (x) => { got = x; return { ok: true, pid: 1 }; } }, { node: files.node, owner: ME });
-  await ports.start({ role: 'reviewer' });
-  const { settingsFor, ...rest } = got;
+  await ports.start({ role: 'reviewer', sessionId: 'rev-1' });
+  const { settingsFor, copy, spawn: sp, makeCopy, ...rest } = got;
+  assert.equal(typeof makeCopy, 'function', 'the step that fills the review copy from the mirror');
+  assert.equal(typeof sp, 'function');
+  assert.equal(copy, join(c.reviewCopies, 'rev-1'), 'the review copy\'s one path, <reviewCopies>/<session>');
   // The hooks by the copy folder's real path (L75 M-1), as the session's settings name them.
-  assert.deepEqual(rest, { role: 'reviewer', claudeBin: files.claude, node: files.node, hooksDir: join(realBase, 'hooks') });
+  assert.deepEqual(rest, { role: 'reviewer', sessionId: 'rev-1', claudeBin: files.claude, node: files.node, hooksDir: join(realBase, 'hooks') });
   assert.equal(typeof settingsFor, 'function', 'and the settings maker, bound to this session (review-settings.test.mjs)');
 });
 
@@ -341,7 +347,7 @@ const OPEN_WALLS = { lstat: () => ({ isSymbolicLink: () => false, isDirectory: (
 
 test('L65: the config names every path as a full path', () => {
   const d = tempDir('m4-cfg-');
-  const good = { installRoot: '/i', root: '/r', outboxRoot: '/o', reviewHome: '/h', uids: {}, recordRoot: '/x', recordUid: 5, mirror: '/m', claudeBin: '/c', hooksDir: '/i/hooks', ownerHome: '/w', ownerUid: 5, wiring: '/i/w.mjs' };
+  const good = withR163({ installRoot: '/i', root: '/r', outboxRoot: '/o', reviewHome: '/h', uids: {}, recordRoot: '/x', recordUid: 5, mirror: '/m', claudeBin: '/c', hooksDir: '/i/hooks', ownerHome: '/w', ownerUid: 5, wiring: '/i/w.mjs' });
   writeFileSync(join(d, 'c.json'), JSON.stringify(good));
   assert.equal(readConfig(join(d, 'c.json'), OPEN_WALLS).mirror, '/m');
   writeFileSync(join(d, 'c.json'), JSON.stringify({ ...good, mirror: 'm' }));
@@ -355,7 +361,7 @@ test('L65: the config names every path as a full path', () => {
 
 test('L68 planted: the runner\'s folder and review\'s outbox are two walls: one inside the other, or the same, is refused', () => {
   const d = realpathSync(tempDir('m4-cfg-'));
-  const good = { installRoot: '/i', root: join(d, 'review'), outboxRoot: join(d, 'outbox'), reviewHome: '/h', uids: {}, recordRoot: '/x', recordUid: 5, mirror: '/m', claudeBin: '/c', hooksDir: '/i/hooks', ownerHome: '/w', ownerUid: 5, wiring: '/i/w.mjs' };
+  const good = withR163({ installRoot: '/i', root: join(d, 'review'), outboxRoot: join(d, 'outbox'), reviewHome: '/h', uids: {}, recordRoot: '/x', recordUid: 5, mirror: '/m', claudeBin: '/c', hooksDir: '/i/hooks', ownerHome: '/w', ownerUid: 5, wiring: '/i/w.mjs' });
   const cfg = (over) => { writeFileSync(join(d, 'c.json'), JSON.stringify({ ...good, ...over })); return () => readConfig(join(d, 'c.json'), OPEN_WALLS); };
   assert.equal(cfg({})().root, join(d, 'review'), 'two folders side by side');
   assert.equal(cfg({ outboxRoot: join(d, 'review-outbox') })().outboxRoot, join(d, 'review-outbox'), 'a name that only starts the same is not inside');
@@ -392,7 +398,7 @@ test('L73 point 7(a): root and outboxRoot are compared on the disk\'s own real p
   mkdirSync(join(d, 'review', 'outbox'), { recursive: true });
   const upper = join(dirname(d), basename(d).toUpperCase());
   if (!existsSync(upper)) { t.skip('this disk tells case apart'); return; }
-  const good = { installRoot: '/i', root: join(d, 'review'), outboxRoot: join(d, 'outbox'), reviewHome: '/h', uids: {}, recordRoot: '/x', recordUid: 5, mirror: '/m', claudeBin: '/c', hooksDir: '/i/hooks', ownerHome: '/w', ownerUid: 5, wiring: '/i/w.mjs' };
+  const good = withR163({ installRoot: '/i', root: join(d, 'review'), outboxRoot: join(d, 'outbox'), reviewHome: '/h', uids: {}, recordRoot: '/x', recordUid: 5, mirror: '/m', claudeBin: '/c', hooksDir: '/i/hooks', ownerHome: '/w', ownerUid: 5, wiring: '/i/w.mjs' });
   const file = join(d, 'c.json');
   const cfg = (over) => { writeFileSync(file, JSON.stringify({ ...good, ...over })); return () => readConfig(file, OPEN_WALLS); };
   assert.equal(cfg({})().root, join(d, 'review'), 'the control');
@@ -480,7 +486,7 @@ test('L70 planted: Joe\'s taps are read only as the owner\'s own files, in the o
   assert.deepEqual(readJoeTaps({ dir, ownerUid: ME }).map((t) => t.session_id), ['S-9']);
   // The config names the folder as an absolute path, or not at all.
   const d = realpathSync(tempDir('m4-cfg-'));
-  const good = { installRoot: '/i', root: join(d, 'review'), outboxRoot: join(d, 'outbox'), reviewHome: '/h', uids: {}, recordRoot: '/x', recordUid: 5, mirror: '/m', claudeBin: '/c', hooksDir: '/i/hooks', ownerHome: '/w', ownerUid: 5, wiring: '/i/w.mjs' };
+  const good = withR163({ installRoot: '/i', root: join(d, 'review'), outboxRoot: join(d, 'outbox'), reviewHome: '/h', uids: {}, recordRoot: '/x', recordUid: 5, mirror: '/m', claudeBin: '/c', hooksDir: '/i/hooks', ownerHome: '/w', ownerUid: 5, wiring: '/i/w.mjs' });
   const cfg = (over) => { writeFileSync(join(d, 'c.json'), JSON.stringify({ ...good, ...over })); return () => readConfig(join(d, 'c.json'), OPEN_WALLS); };
   assert.equal(cfg({})().ownerTaps, undefined);
   assert.equal(cfg({ ownerTaps: '/t' })().ownerTaps, '/t');
@@ -497,7 +503,7 @@ test('L71 planted: root and outboxRoot, and every folder above them, are root\'s
   mkdirSync(join(mid, 'outbox'));
   for (const p of [mid, join(mid, 'review'), join(mid, 'outbox')]) chmodSync(p, 0o755);
   const uidsOf = (reviewer) => ({ ...Object.fromEntries(['lead', 'worker', 'front_door', 'learning', 'writer', 'incident', 'scout', 'thinking'].map((r) => [r, ME + 1])), reviewer, auditor: reviewer });
-  const good = { installRoot: '/i', root: join(mid, 'review'), outboxRoot: join(mid, 'outbox'), reviewHome: '/h', uids: uidsOf(ME), recordRoot: '/x', recordUid: 5, mirror: '/m', claudeBin: '/c', hooksDir: '/i/hooks', ownerHome: '/w', ownerUid: 5, wiring: '/i/w.mjs' };
+  const good = withR163({ installRoot: '/i', root: join(mid, 'review'), outboxRoot: join(mid, 'outbox'), reviewHome: '/h', uids: uidsOf(ME), recordRoot: '/x', recordUid: 5, mirror: '/m', claudeBin: '/c', hooksDir: '/i/hooks', ownerHome: '/w', ownerUid: 5, wiring: '/i/w.mjs' });
   const cfg = (over = {}, opts = { top: d }) => { writeFileSync(join(d, 'c.json'), JSON.stringify({ ...good, ...over })); return () => readConfig(join(d, 'c.json'), opts); };
   assert.equal(cfg()().outboxRoot, join(mid, 'outbox'), 'the control: review\'s folders, under review\'s and root\'s');
   // The outbox root open to others: a worker could rename reviewer/ away.
@@ -541,4 +547,102 @@ test('L71 planted: the install stamp reads the same with a second name', () => {
   writeFileSync(join(d, STAMP), installStamp(C), { mode: 0o644 });
   linkSync(join(d, STAMP), join(d, 'second-name'));
   assert.equal(readInstallStamp(d, { owner: ME }), C);
+});
+
+// R-0b-163: the keys the wiring, the snapshot and the review copies need, refused at daemon start when missing or not
+// full paths, so a config that would only fail at the first start never gets that far.
+test('R-0b-163 planted: readConfig refuses each of snapshot, bobFolder, deny, reviewCopies and workerCopies, missing or relative', () => {
+  const d = realpathSync(tempDir('m4-cfg163-'));
+  const good = withR163({ installRoot: '/i', root: join(d, 'review'), outboxRoot: join(d, 'outbox'), reviewHome: '/h', uids: {}, recordRoot: '/x', recordUid: 5, mirror: '/m', claudeBin: '/c', hooksDir: '/i/hooks', ownerHome: '/w', ownerUid: 5, wiring: '/i/w.mjs' });
+  const cfg = (c) => { writeFileSync(join(d, 'c.json'), JSON.stringify(c)); return () => readConfig(join(d, 'c.json'), OPEN_WALLS); };
+  assert.equal(cfg(good)().snapshot, join(d, 'review', 'rules-snapshot.json'));
+  for (const k of ['snapshot', 'bobFolder', 'reviewCopies', 'workerCopies']) {
+    const { [k]: _, ...missing } = good;
+    assert.throws(cfg(missing), new RegExp(`${k} must be an absolute path`), `${k} missing`);
+    assert.throws(cfg({ ...good, [k]: 'rel/x' }), new RegExp(`${k} must be an absolute path`), `${k} relative`);
+  }
+  const { deny: _d, ...noDeny } = good;
+  assert.throws(cfg(noDeny), /deny must list absolute paths/, 'deny missing');
+  assert.throws(cfg({ ...good, deny: [] }), /deny must list absolute paths/, 'deny empty');
+  assert.throws(cfg({ ...good, deny: ['/d', 'rel'] }), /deny must list absolute paths/, 'deny relative');
+  // The rules the hooks read: production's three lists, full paths where they are paths.
+  const { rules: _r, ...noRules } = good;
+  assert.throws(cfg(noRules), /rules.production must list env_files, programs and hosts/);
+  assert.throws(cfg({ ...good, rules: { production: { env_files: [], programs: [] } } }), /rules.production must list/);
+  assert.throws(cfg({ ...good, rules: { production: { env_files: ['prod-file'], programs: [], hosts: [] } } }), /env_files and secrets.paths must be absolute/);
+  assert.throws(cfg({ ...good, rules: { ...good.rules, secrets: { paths: ['keys'] } } }), /env_files and secrets.paths must be absolute/);
+  assert.equal(cfg({ ...good, rules: { ...good.rules, secrets: { paths: ['/k'] } } })().rules.secrets.paths[0], '/k');
+  // The snapshot is the runner's own file, inside its folder; anywhere else a session could write it.
+  const outside = /snapshot .* must be a file inside root/;
+  assert.throws(cfg({ ...good, snapshot: join(d, 'outbox', 'rules-snapshot.json') }), outside, 'in the outbox');
+  assert.throws(cfg({ ...good, snapshot: join(d, 'rules-snapshot.json') }), outside, 'beside root');
+  assert.throws(cfg({ ...good, snapshot: join(d, 'review') }), outside, 'root itself');
+  assert.throws(cfg({ ...good, snapshot: `${join(d, 'review')}/../x.json` }), outside, 'out of root, spelled inside');
+  // The review copies and the workers' copies are two folders.
+  const apart = /reviewCopies and workerCopies must be two separate folders/;
+  assert.throws(cfg({ ...good, reviewCopies: '/wc/review' }), apart);
+  assert.throws(cfg({ ...good, workerCopies: '/rc' }), apart);
+});
+
+test('R-0b-163 (L78) planted: the loaded wiring must export exactly start; a second export or a default is refused', () => {
+  assert.deepEqual(WIRING_EXPORTS, ['start']);
+  const writes = [];
+  const c = { snapshot: '/r/rules-snapshot.json', rules: { production: { env_files: [], programs: [], hosts: [] } } };
+  const write = (p, r) => writes.push([p, r]);
+  const start = () => ({ ok: true, pid: 1 });
+  assert.equal(readyProblem(c, { start }, { write }), null);
+  assert.match(readyProblem(c, { start, settingsFor: () => ({}) }, { write }), /the wiring must export only start, not settingsFor, start/);
+  assert.match(readyProblem(c, { start, default: start }, { write }), /the wiring must export only start, not default, start/);
+  assert.match(readyProblem(c, {}, { write }), /the wiring must export only start, not nothing/);
+  assert.match(readyProblem(c, { start: 'start' }, { write }), /the wiring has no start/);
+  assert.equal(writes.length, 1, 'a refused wiring writes no snapshot');
+});
+
+test('R-0b-163 planted: each pass writes the rules snapshot from the runner\'s own config, and the hooks read it fresh', () => {
+  const d = tempDir('m4-snap-');
+  const rules = { production: { env_files: ['/srv/app/prod-settings'], programs: ['vercel'], hosts: ['prod.example.invalid'] }, secrets: { paths: ['/k'] } };
+  const c = { snapshot: join(d, 'rules-snapshot.json'), rules };
+  assert.equal(existsSync(c.snapshot), false);
+  assert.equal(readyProblem(c, { start: () => ({}) }), null);
+  const snap = parseSnapshot(readFileSync(c.snapshot, 'utf8'));
+  assert.equal(snap.ok, true, snap.reason);
+  assert.deepEqual(snap.rules, rules);
+  // A snapshot that can't be written stops the pass: a missing one would leave every hook refusing, unexplained.
+  assert.match(readyProblem({ snapshot: join(d, 'gone', 'x.json'), rules }, { start: () => ({}) }), /the rules snapshot could not be written/);
+});
+
+test('R-0b-163: a review copy\'s one path is <reviewCopies>/<session>; anything not a session id is refused', () => {
+  assert.equal(reviewCopyPath({ reviewCopies: '/rc' }, 'S-1'), '/rc/S-1');
+  for (const bad of ['../x', 'a/b', '', undefined, '.']) assert.throws(() => reviewCopyPath({ reviewCopies: '/rc' }, bad), /not a session id/);
+});
+
+test('R-0b-163: the review copy holds the card\'s head with main beside it; a folder already there, or a head the mirror lacks, is refused', async () => {
+  const d = tempDir('m4-rcopy-');
+  const src = join(d, 'src');
+  const gd = join(src, '.git');
+  const g = (args) => gitOk(['-c', 'user.name=t', '-c', 'user.email=t@example.invalid', ...args], { gitDir: gd, workTree: src, cwd: src });
+  mkdirSync(src);
+  await gitOk(['init', '-q', src], { gitDir: gd });
+  writeFileSync(join(src, 'a.txt'), 'main\n');
+  await g(['add', 'a.txt']); await g(['commit', '-q', '-m', 'main']); await g(['branch', '-M', 'main']);
+  await g(['switch', '-q', '-c', 'card/c-1']);
+  writeFileSync(join(src, 'a.txt'), 'card\n');
+  await g(['commit', '-q', '-am', 'card']);
+  const head = (await gitOk(['rev-parse', 'HEAD'], { gitDir: gd })).trim();
+  const dest = join(d, 'copies', 'S-1');
+  mkdirSync(join(d, 'copies'));
+  const r = await prepareReviewCopy({ mirror: gd, card: 'C-1', head, dest });
+  assert.equal(r.ok, true, r.reason);
+  assert.equal(readFileSync(join(dest, 'a.txt'), 'utf8'), 'card\n');
+  assert.equal(lstatSync(dest).mode & 0o777, 0o700);
+  const dg = { gitDir: join(dest, '.git') };
+  assert.equal((await gitOk(['rev-parse', 'HEAD'], dg)).trim(), head);
+  assert.match((await gitOk(['rev-parse', 'refs/heads/main'], dg)).trim(), /^[0-9a-f]{40}$/, 'main is there for the diff');
+  assert.match((await prepareReviewCopy({ mirror: gd, card: 'C-1', head, dest })).reason, /is there already/, 'never reused');
+  const lost = join(d, 'copies', 'S-2');
+  const r2 = await prepareReviewCopy({ mirror: gd, card: 'C-1', head: 'e'.repeat(40), dest: lost });
+  assert.equal(r2.ok, false);
+  assert.equal(existsSync(lost), false, 'a failed copy leaves nothing behind');
+  assert.match((await prepareReviewCopy({ mirror: gd, card: 'C-1', head: 'HEAD', dest: lost })).reason, /not 40 hex/);
+  assert.match((await prepareReviewCopy({ mirror: gd, card: '../x', head, dest: lost })).reason, /not a card id/);
 });

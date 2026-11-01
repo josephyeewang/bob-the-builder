@@ -22,6 +22,7 @@ export const FLAGS = Object.freeze({
   effort: '--effort',
   version: '--version',
   maxTurns: '--max-turns',
+  sessionId: '--session-id',
 });
 
 export const SETTINGS = Object.freeze({

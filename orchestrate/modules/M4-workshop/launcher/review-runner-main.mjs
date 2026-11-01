@@ -27,8 +27,15 @@
 //     "wiring": "/abs/wiring.mjs",                  exports `start(x)` (review-runner.mjs `runnerPass`, `ctx.start`)
 //     "snapshot": "/abs", "bobFolder": "/abs",      the session settings' fixed paths (L67 addendum 2, review-settings.mjs):
 //     "deny": ["/abs", ...],                        the rules snapshot (inside root), the Bob folder, the read-deny list,
-//     "reviewCopies": "/abs", "workerCopies": "/abs" }  and the review copies' folder, apart from the workers' copies'
-//                                                   folder (which the deny list covers whole); read only at a start
+//     "reviewCopies": "/abs", "workerCopies": "/abs",   and the review copies' folder, apart from the workers' copies'
+//                                                   folder (which the deny list covers whole). All five are checked at
+//                                                   daemon start (R-0b-163), so a typo stops the daemon, not each review
+//     "rules": { "production": { "env_files": [], "programs": [], "hosts": [] }, "secrets": { "paths": [] } } }
+//                                                   the rules the review sessions' hooks read: each run writes them to
+//                                                   `snapshot`, well inside the hooks' 5-minute limit (item 7)
+// The wiring (review-wiring.mjs) exports `start` and nothing else (R-0b-163, L78 n4): a wiring with any other export is
+// refused at daemon start. Each review copy is <reviewCopies>/<session>: the runner names it, the wiring fills it with
+// `makeCopy`, and the runner removes it once that session's ended record is written (L77 m9).
 // The wiring's start runs the launcher (launch.mjs, checks 1 to 13) for a reviewer or an auditor, with `--session-id`
 // set to the runner's id, and returns { ok, pid }, where pid is claude's own process (L66: never the launcher's; the
 // runner checks the pid's command is the pinned claude before it counts the start, and before it stops anything). It
@@ -45,9 +52,9 @@
 // a deny rule on that folder, and the handler removes a tap once the status lists it in `taps_read` (L71 points 5, C1).
 // Exit 0 when the pass ran clean, 1 when it refused or could not run.
 
-import { closeSync, constants, fstatSync, lstatSync, openSync, readFileSync, readdirSync, realpathSync } from 'node:fs';
+import { closeSync, constants, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, rmSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { runnerPass, CARD_ID, isClaudeCommand } from './review-runner.mjs';
@@ -56,11 +63,17 @@ import { sessionVerdict, verdictFromFile } from '../../M9-record/outbox.mjs';
 import { SESSION_ID } from '../../../shared/record.mjs';
 import { readAccountFile, ACCOUNT_FILE } from './accounts.mjs';
 import { REVIEW_USER } from './review-user.mjs';
-import { git } from '../git/safe-git.mjs';
+import { git, gitOk } from '../git/safe-git.mjs';
 import { sessionSettings, templateFile } from './review-settings.mjs';
 import { REVIEW_ROLES } from '../../../shared/review-roles.mjs';
+import { removeProtected, restoreMainCopies } from './worker-copy.mjs';
+import { writeSnapshot } from '../hooks/snapshot.mjs';
 
-const ABS = ['installRoot', 'root', 'outboxRoot', 'reviewHome', 'recordRoot', 'mirror', 'claudeBin', 'hooksDir', 'ownerHome', 'wiring'];
+const ABS = ['installRoot', 'root', 'outboxRoot', 'reviewHome', 'recordRoot', 'mirror', 'claudeBin', 'hooksDir', 'ownerHome', 'wiring',
+  'snapshot', 'bobFolder', 'reviewCopies', 'workerCopies'];
+// The one export a wiring may have (R-0b-163, L78 n4).
+export const WIRING_EXPORTS = Object.freeze(['start']);
+const absList = (v) => Array.isArray(v) && v.every((p) => typeof p === 'string' && isAbsolute(p));
 const MAX_CARD_BYTES = 1024 * 1024;
 const CHILD_MS = 10_000;
 
@@ -75,6 +88,10 @@ export function readConfig(file, { lstat = lstatSync, top = '/', acl = aclProble
   for (const k of ABS) if (typeof c?.[k] !== 'string' || !isAbsolute(c[k])) throw new Error(`config: ${k} must be an absolute path`);
   if (c.accountCopy !== undefined && (typeof c.accountCopy !== 'string' || !isAbsolute(c.accountCopy))) throw new Error('config: accountCopy must be an absolute path');
   if (c.ownerTaps !== undefined && (typeof c.ownerTaps !== 'string' || !isAbsolute(c.ownerTaps))) throw new Error('config: ownerTaps must be an absolute path');
+  if (!absList(c.deny) || c.deny.length === 0) throw new Error('config: deny must list absolute paths');
+  const prod = c.rules?.production;
+  if (!prod || !['env_files', 'programs', 'hosts'].every((k) => Array.isArray(prod[k]) && prod[k].every((v) => typeof v === 'string'))) throw new Error('config: rules.production must list env_files, programs and hosts');
+  if (!absList(prod.env_files) || (c.rules.secrets !== undefined && !absList(c.rules.secrets?.paths))) throw new Error('config: the rules\' env_files and secrets.paths must be absolute paths');
   for (const k of ['recordUid', 'ownerUid']) if (!Number.isInteger(c[k]) || c[k] < 0) throw new Error(`config: ${k} must be a uid`);
   if (!c.uids || typeof c.uids !== 'object') throw new Error('config: uids must map each role to a uid');
   // The runner's folder and review's outbox are two walls (L68 (4)): review sessions write the outbox, and only the
@@ -84,6 +101,12 @@ export function readConfig(file, { lstat = lstatSync, top = '/', acl = aclProble
   const r = realPath(c.root).toLowerCase();
   const o = realPath(c.outboxRoot).toLowerCase();
   if (inside(r, o) || inside(o, r)) throw new Error(`config: root (${c.root}) and outboxRoot (${c.outboxRoot}) must be two separate folders, neither inside the other`);
+  // The rules snapshot is the runner's own file, behind its wall (item 7); the review copies sit apart from the workers'.
+  const snap = realPath(c.snapshot).toLowerCase();
+  if (snap === r || !inside(snap, r)) throw new Error(`config: snapshot (${c.snapshot}) must be a file inside root (${c.root})`);
+  const rc = realPath(c.reviewCopies).toLowerCase();
+  const wc = realPath(c.workerCopies).toLowerCase();
+  if (inside(rc, wc) || inside(wc, rc)) throw new Error('config: reviewCopies and workerCopies must be two separate folders, neither inside the other');
   const owners = [0, c.uids.reviewer].filter((u) => Number.isInteger(u) && u >= 0);
   for (const k of ['root', 'outboxRoot']) {
     const bad = wallProblem(c[k], owners, { lstat, top, acl });
@@ -275,6 +298,40 @@ export function sessionsFrom(text, bin, self = process.pid) {
 
 const run = (bin, args) => spawnSync(bin, args, { encoding: 'utf8', timeout: CHILD_MS, stdio: ['ignore', 'pipe', 'pipe'] });
 
+/** A session's review copy: the one path the wiring fills and the runner removes (L77 m9, L78 c4). */
+export function reviewCopyPath(c, sessionId) {
+  if (typeof sessionId !== 'string' || !SESSION_ID.test(sessionId)) throw new Error('not a session id');
+  return join(c.reviewCopies, sessionId);
+}
+
+/**
+ * The review copy (launch checks 1 and 2 for a review role): a new folder holding the card's branch at `head` from the
+ * mirror, with main beside it for the diff, what the branch brought under a protected name removed and main's own put
+ * back, as for a worker's copy (worker-copy.mjs). A folder already there is refused, never reused. → { ok } | { ok: false, reason }
+ */
+export async function prepareReviewCopy({ mirror, card, head, dest }) {
+  if (typeof card !== 'string' || !CARD_ID.test(card)) return { ok: false, reason: 'not a card id' };
+  if (typeof head !== 'string' || !/^[0-9a-f]{40}$/.test(head)) return { ok: false, reason: 'the head is not 40 hex' };
+  try { lstatSync(dest); return { ok: false, reason: `${dest} is there already` }; } catch { /* good */ }
+  mkdirSync(dest, { mode: 0o700 });
+  const branch = `card/${card.toLowerCase()}`;
+  const opts = (purpose) => ({ gitDir: join(dest, '.git'), workTree: dest, cwd: dest, purpose, timeoutMs: 120_000 });
+  try {
+    // Born on a branch name nothing fetches into: git refuses to fetch into the branch a folder is on, and a plain
+    // init sits on main.
+    await gitOk(['init', '-q', '--initial-branch=review-copy-unborn', dest], opts('review-copy-init'));
+    await gitOk(['fetch', '-q', '--no-tags', '--no-write-fetch-head', '--no-recurse-submodules', mirror, `${head}:refs/heads/${branch}`, 'refs/heads/main:refs/heads/main'], opts('review-copy-fetch'));
+    await gitOk(['checkout', '-q', '-f', branch], opts('review-copy-checkout'));
+    if ((await gitOk(['rev-parse', 'HEAD'], opts('review-copy-head'))).trim() !== head) throw new Error('the checked-out commit is not the head');
+    removeProtected(dest);
+    await restoreMainCopies({ mirror, dest });
+    return { ok: true };
+  } catch (e) {
+    rmSync(dest, { recursive: true, force: true });
+    return { ok: false, reason: e?.message ?? String(e) };
+  }
+}
+
 /** The real ports (the wiring gives `start`). */
 export function realPorts(c, wiring, { node = realpathSync.native(process.execPath), owner = 0 } = {}) {
   const uid = c.uids.reviewer;
@@ -315,9 +372,14 @@ export function realPorts(c, wiring, { node = realpathSync.native(process.execPa
     // start is refused; the next pass starts it.
     start: (x) => {
       const hooksDir = copyPath(c.installRoot, currentCopy(c.installRoot, { owner }), c.hooksDir);
-      return wiring.start({ ...x, claudeBin: c.claudeBin, node, hooksDir,
-        settingsFor: (copy) => sessionSettings({ ...c, hooksDir }, { role: x.role, sessionId: x.sessionId, copy, node }, { owner }) });
+      const copy = reviewCopyPath(c, x.sessionId);
+      return wiring.start({ ...x, claudeBin: c.claudeBin, node, hooksDir, copy, spawn,
+        makeCopy: () => prepareReviewCopy({ mirror: c.mirror, card: x.card, head: x.head, dest: copy }),
+        settingsFor: (dir) => sessionSettings({ ...c, hooksDir }, { role: x.role, sessionId: x.sessionId, copy: dir, node }, { owner }) });
     },
+    // Only once the session's ended record is written (review-runner.mjs `markEnded`, L77 m9). rmSync removes a link,
+    // never what it points at.
+    removeCopy: (sessionId) => rmSync(reviewCopyPath(c, sessionId), { recursive: true, force: true }),
     accountInUse: () => {
       const copy = c.accountCopy ? readAccountFile({ file: c.accountCopy, uid: 0 }) : { ok: false };
       if (copy.ok) return copy.account;
@@ -331,6 +393,20 @@ export function realPorts(c, wiring, { node = realpathSync.native(process.execPa
   };
 }
 
+/**
+ * The last two steps before a pass (L78, L77 (2)): the loaded wiring must export exactly `start` (a second export is a
+ * second door the runner never checks), and the rules snapshot the review sessions' hooks read is written from the
+ * runner's own config; the hooks refuse every call once it is 5 minutes old, so each pass writes it afresh.
+ * `write` is a port for a test. Returns what is wrong, or null.
+ */
+export function readyProblem(c, wiring, { write = writeSnapshot } = {}) {
+  const names = Object.keys(wiring ?? {}).sort();
+  if (names.length !== WIRING_EXPORTS.length || names.some((n, i) => n !== WIRING_EXPORTS[i])) return `the wiring must export only start, not ${names.join(', ') || 'nothing'}`;
+  if (typeof wiring.start !== 'function') return 'the wiring has no start';
+  try { write(c.snapshot, c.rules); } catch (e) { return `the rules snapshot could not be written (${e?.code ?? e?.message})`; }
+  return null;
+}
+
 export async function main(argv, { log = (s) => process.stderr.write(`${s}\n`) } = {}) {
   if (!argv[0]) { log('usage: review-runner-main.mjs <config.json>'); return 1; }
   let c;
@@ -340,7 +416,8 @@ export async function main(argv, { log = (s) => process.stderr.write(`${s}\n`) }
   if (bad) { log(`review runner: refused, the installed copy is not root's alone: ${bad}`); return 1; }
   let wiring;
   try { wiring = await import(pathToFileURL(c.wiring).href); } catch (e) { log(`review runner: the wiring could not be loaded (${e.message})`); return 1; }
-  if (typeof wiring.start !== 'function') { log('review runner: the wiring has no start'); return 1; }
+  const notReady = readyProblem(c, wiring);
+  if (notReady) { log(`review runner: ${notReady}`); return 1; }
   const r = await runnerPass(realPorts(c, wiring));
   for (const s of r.started) log(`started ${s.role} ${s.session_id} for ${s.card} at ${s.head.slice(0, 7)}`);
   for (const x of r.refused) log(`refused ${x.request}: ${x.reason}`);

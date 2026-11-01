@@ -243,6 +243,8 @@ function writeLaunch(dir, sid, doc) {
  *     counted (verdict.sha256 is the file's); { ok: false, none: true } when it left none; { ok: false, reason } when it
  *     left one that can't be counted (M9 `sessionVerdict`, the same read the Merge Gate makes)
  *   installedCommit() → the installed copy's commit stamp (40 hex), shown in the status
+ *   removeCopy(sessionId) → removes the session's review copy (<reviewCopies>/<session>); called only once its ended
+ *     record is written (L77 m9). Optional: a runner with none leaves the copies alone
  * Returns { ok, error?, started: [...], refused: [...], stopped: [...], alerts: [...] } (also what status.json shows).
  */
 export async function runnerPass(ctx) {
@@ -331,16 +333,19 @@ export async function runnerPass(ctx) {
   // The ended record (L68, L69): a session the runner launched has its say at the Merge Gate through its verdict file,
   // and holds the head until it is marked here. The record says what the file was at the end (`verdict_sha256`: its
   // sha256, `none` or `refused`), and only that version counts. Written once, never over; one that can't be written
-  // fails the pass, and the sweep below tries again.
+  // fails the pass, and the sweep below tries again. Only once the record is there is the session's review copy
+  // removed (L77 m9, `removeCopy`): never before, so a session still running keeps the files it reads.
   const markEnded = (doc, said, how) => {
     try {
       writeLaunch(P.ended, doc.session_id, { session_id: doc.session_id, role: doc.role, card: doc.card, head: doc.head, ...(doc.tree ? { tree: doc.tree } : {}), ended_at: iso(now), verdict_sha256: said, how });
-      return true;
     } catch (e) {
-      if (e?.code === 'EEXIST') return true;   // marked already
-      fail(`session ${doc.session_id} could not be marked ended (${e?.code ?? e?.message})`);
-      return false;
+      if (e?.code !== 'EEXIST') {   // EEXIST: marked already
+        fail(`session ${doc.session_id} could not be marked ended (${e?.code ?? e?.message})`);
+        return false;
+      }
     }
+    try { ctx.removeCopy?.(doc.session_id); } catch (e) { alert(`copy-${doc.session_id}`, `The review copy of session ${doc.session_id} could not be removed (${e?.code ?? e?.message}); it is left in place and needs removing by hand.`); }
+    return true;
   };
   const reviewAgain = 'A tap on "review again" sets that session aside so a new one can start; a new push also gets a new review.';
   // A session the runner launched has ended (or was swept): read its verdict, mark it ended, and settle its try. Silence
