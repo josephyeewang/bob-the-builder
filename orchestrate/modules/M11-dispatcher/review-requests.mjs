@@ -13,9 +13,11 @@
 //   - a pass that failed (`ok: false`), once per cause (its error text);
 //   - an installed copy whose commit stamp is not main's (or has no stamp), once per installed commit: reviews then run
 //     old code until the copy is updated. `mainHead(installed)` is the wiring's port: `{ commit, since }`, main's commit
-//     (40 hex) and, in ms, when main first moved past the installed commit (the commit time of the oldest commit in
-//     `installed..main`; main's own commit time when there is no stamp or it is not on main). The updater copies main
-//     every 10 minutes (M4 review-updater.mjs), so a copy behind main is told only once it has stayed behind for
+//     (40 hex) and, in ms, since when the copy has been behind it. `since` comes from root's own record, which the updater
+//     writes after each fetch (M4 install-check.mjs: `behindSince(readMainSeen(mainSeenFile(installRoot)), commit)`):
+//     when the updater first saw main ahead of the copy, by its own clock, or its last fetch when it has not yet seen
+//     this head. Never a commit's date, which the commit's author sets (L73 point 7(b)). The updater copies main every
+//     10 minutes (M4 review-updater.mjs), so a copy behind main is told only once it has stayed behind for
 //     STAMP_GRACE_MS (item 20(c)); no stamp, or no `since` (or one dated ahead), is told at once. A plain commit string
 //     counts as no `since`. Without the port, or when it fails, there is no stamp check.
 //

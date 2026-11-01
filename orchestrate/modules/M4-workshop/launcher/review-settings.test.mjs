@@ -4,8 +4,8 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, copyFileSync, lstatSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
+import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   renderTemplate, templateText, templateFile, spotsProblem, fillTemplate, onlySpotsChanged, realPathProblem, slotValues,
@@ -211,6 +211,24 @@ test('L67: each machine value is a real plain path under its expected root', () 
   assert.match(run(m, { c: { outboxRoot: `${m.c.outboxRoot}/` } }).reason, /is not in its plain form/);
   assert.equal(realPathProblem('/a/./b'), '/a/./b is not in its plain form');
   assert.equal(realPathProblem('/a//b'), '/a//b is not in its plain form');
+});
+
+test('L73 point 7(a), C2: a value in another case than the disk holds, or / itself, is refused', (t) => {
+  assert.equal(realPathProblem('/'), '/ is the whole disk, not a folder a setting may name');
+  const d = realpathSync.native(tempDir('m4-case-'));
+  mkdirSync(join(d, 'sub'));
+  assert.equal(realPathProblem(join(d, 'sub')), null, 'the control');
+  assert.equal(realPathProblem(join(d, 'sub', 'not-made-yet')), null);
+  const upper = join(dirname(d), basename(d).toUpperCase());
+  if (!existsSync(upper)) { t.skip('this disk tells case apart'); return; }
+  assert.match(realPathProblem(upper), /is not in the disk's own case/);
+  assert.match(realPathProblem(join(d, 'SUB')), /is not in the disk's own case/);
+  assert.match(realPathProblem(join(d, 'SUB', 'not-made-yet')), /is not in the disk's own case/);
+  // So two copies' folders can't be set apart by case alone.
+  const m = machine();
+  const wc = m.c.workerCopies;
+  const shout = join(dirname(wc), basename(wc).toUpperCase(), 'review');
+  assert.match(run(m, { c: { reviewCopies: shout }, x: { copy: join(shout, 'card-1') } }).reason, /is not in the disk's own case|must be apart/);
 });
 
 test('L67: a fill that changes anything but the placeholders is refused, and nothing is written', () => {

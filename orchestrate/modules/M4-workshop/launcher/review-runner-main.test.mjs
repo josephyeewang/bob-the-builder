@@ -3,8 +3,9 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, fstatSync, linkSync, mkdirSync, readFileSync, realpathSync, symlinkSync, unlinkSync, writeFileSync, lstatSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { chmodSync, existsSync, fstatSync, linkSync, mkdirSync, readFileSync, realpathSync, symlinkSync, unlinkSync, writeFileSync, lstatSync } from 'node:fs';
+import { basename, dirname, join } from 'node:path';
+import { spawnSync } from 'node:child_process';
 import { templateFile } from './review-settings.mjs';
 import { installProblem, programsProblem, readCardFile, recordVerdictTaken, adminAnswer, sessionsFrom, realPorts, readConfig, readInstallStamp, readJoeTaps } from './review-runner-main.mjs';
 import { readOutboxFile } from '../../M9-record/outbox.mjs';
@@ -105,7 +106,7 @@ test('item 20(b) planted: every folder above the installed copy, up to /, must b
   chmodSync(base, 0o755);
   // Another user's folder above the copy (the stat port stands in for that user).
   const other = (p) => { const st = lstatSync(p); return p === join(base, 'p', 'q') ? Object.assign(Object.create(Object.getPrototypeOf(st)), st, { uid: ME + 1 }) : st; };
-  assert.match(check({ lstat: other }), /q, above the installed copy, is not owned by root/);
+  assert.match(check({ lstat: other }), new RegExp(`q, above the installed copy, is not owned by uid ${ME}`));
   // A link above the copy.
   symlinkSync(join(base, 'p'), join(base, 'lp'));
   assert.match(check({}, join(base, 'lp', 'q', 'inst')), /lp, above the installed copy, is a link/);
@@ -284,7 +285,7 @@ test('L66 pid contract: the real port reads a process\'s command, and the verdic
 });
 
 // The wall check on root and outboxRoot (L71) stood in for: every folder is a plain folder of root's that no one else writes.
-const OPEN_WALLS = { lstat: () => ({ isSymbolicLink: () => false, isDirectory: () => true, uid: 0, mode: 0o40755 }) };
+const OPEN_WALLS = { lstat: () => ({ isSymbolicLink: () => false, isDirectory: () => true, uid: 0, mode: 0o40755 }), acl: () => null };
 
 test('L65: the config names every path as a full path', () => {
   const d = tempDir('m4-cfg-');
@@ -329,6 +330,23 @@ test('L65: the two LaunchDaemons run the installed copy and its own node, the ru
   for (const t of [p.runner, p.accountCopy]) assert.doesNotMatch(t, /homebrew|\/usr\/local/);
   assert.throws(() => reviewDaemonPlists({ label: 'x y' }), /bad job label/);
   assert.throws(() => reviewDaemonPlists({ label: 'x', installRoot: 'I' }), /installRoot must be an absolute path/);
+  // The runner's config is the one the updater's `keep` carries over (L73 point 4), at its fixed name in the copy.
+  assert.throws(() => reviewDaemonPlists({ label: 'x', installRoot: '/I', config: '/I/config.json', reviewRoot: '/R', reviewHome: '/H', accountCopy: '/I/account', ownerHome: '/W', ownerUid: 501, logDir: '/L' }), /config must be \/I\/review\.json/);
+  assert.throws(() => reviewDaemonPlists({ label: 'x', installRoot: '/I', config: '/elsewhere/review.json', reviewRoot: '/R', reviewHome: '/H', accountCopy: '/I/account', ownerHome: '/W', ownerUid: 501, logDir: '/L' }), /config must be \/I\/review\.json/);
+});
+
+test('L73 point 7(a): root and outboxRoot are compared on the disk\'s own real paths, so a change of case can\'t set them apart', (t) => {
+  const d = realpathSync.native(tempDir('m4-case-'));
+  mkdirSync(join(d, 'review', 'outbox'), { recursive: true });
+  const upper = join(dirname(d), basename(d).toUpperCase());
+  if (!existsSync(upper)) { t.skip('this disk tells case apart'); return; }
+  const good = { installRoot: '/i', root: join(d, 'review'), outboxRoot: join(d, 'outbox'), reviewHome: '/h', uids: {}, recordRoot: '/x', recordUid: 5, mirror: '/m', claudeBin: '/c', hooksDir: '/i/hooks', ownerHome: '/w', ownerUid: 5, wiring: '/i/w.mjs' };
+  const file = join(d, 'c.json');
+  const cfg = (over) => { writeFileSync(file, JSON.stringify({ ...good, ...over })); return () => readConfig(file, OPEN_WALLS); };
+  assert.equal(cfg({})().root, join(d, 'review'), 'the control');
+  assert.throws(cfg({ outboxRoot: join(upper, 'review', 'outbox') }), /must be two separate folders/);
+  assert.throws(cfg({ outboxRoot: join(upper, 'REVIEW', 'outbox') }), /must be two separate folders/);
+  assert.throws(cfg({ root: join(upper, 'review', 'outbox', 'r'), outboxRoot: join(d, 'review') }), /must be two separate folders/, 'a part not made yet keeps its case');
 });
 
 // L69 point 4: the runner keys one start per card, tree and role. The real port reads the head's tree through safe-git
@@ -451,6 +469,14 @@ test('L71 planted: root and outboxRoot, and every folder above them, are root\'s
   // Missing, or not under the top.
   assert.throws(cfg({ outboxRoot: join(mid, 'none') }), /config: outboxRoot: .*\/srv\/none is missing/);
   assert.throws(cfg({}, { top: join(d, 'elsewhere') }), /is not under/);
+  // An access list on the outbox root or a folder above it (L73 point 7(c)), which the mode bits don't show.
+  const out = join(mid, 'outbox');
+  assert.throws(cfg({}, { top: d, acl: (ps) => (ps.includes(out) ? `${out} has an access list (ACL)` : null) }), /config: outboxRoot: .*\/srv\/outbox has an access list/);
+  if (process.platform === 'darwin') {
+    assert.equal(spawnSync('/bin/chmod', ['+a', 'everyone allow add_file', mid]).status, 0);
+    try { assert.throws(cfg(), /config: root: .*\/srv has an access list/); } finally { spawnSync('/bin/chmod', ['-N', mid]); }
+    assert.equal(cfg()().outboxRoot, out);
+  }
   // The real walk, with no ports: with the review uid named as another user's, the test's own throwaway folder (checked
   // first) is neither root's nor review's, so the walk refuses on any machine, whatever the folders above the temp folder.
   assert.throws(cfg({ uids: uidsOf(ME + 1) }, {}), /config: root: .*\/srv\/review is not owned by root or the review user/);

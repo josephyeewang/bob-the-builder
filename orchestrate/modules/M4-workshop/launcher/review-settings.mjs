@@ -166,17 +166,22 @@ export function onlySpotsChanged(template, result, values, path = '') {
   return Object.is(template, result) ? null : `${path} differs from the template`;
 }
 
-/** Null, or why a value may not fill a placeholder: not a plain absolute path, `..`, or a link on the way to it. */
-export function realPathProblem(v, { realpath = realpathSync, lstat = lstatSync } = {}) {
+/**
+ * Null, or why a value may not fill a placeholder: not a plain absolute path, `/` itself, `..`, a link on the way to it,
+ * or a case other than the disk's. The real path is realpathSync.native's, which gives the case the disk holds (the
+ * plain one keeps the case it was given, so `/USERS/...` passed; L73 point 7(a)).
+ */
+export function realPathProblem(v, { realpath = realpathSync.native, lstat = lstatSync } = {}) {
   if (typeof v !== 'string' || !isAbsolute(v) || !PLAIN.test(v)) return `${JSON.stringify(v)} is not a plain absolute path`;
+  if (v === '/') return '/ is the whole disk, not a folder a setting may name';
   if (v.split('/').includes('..') || v.split('/').includes('.') || /\/\/|.\/$/.test(v)) return `${v} is not in its plain form`;
   // The deepest part that is there must be its own real path: no link anywhere on the way (a deny of a link misses
-  // what it points at). Parts after it may be missing (a deny of a file not made yet).
+  // what it points at), and the disk's own case. Parts after it may be missing (a deny of a file not made yet).
   let at = v;
   for (;;) {
     let there = true;
     try { lstat(at); } catch { there = false; }
-    if (there) { let r; try { r = realpath(at); } catch { r = null; } return r === at ? null : `${v} runs through a link`; }
+    if (there) { let r; try { r = realpath(at); } catch { r = null; } return r === at ? null : `${v} runs through a link or is not in the disk's own case`; }
     if (at === dirname(at)) return `${v} has no part that is there`;
     at = dirname(at);
   }
@@ -212,10 +217,14 @@ export function slotValues(c, { role, sessionId, copy, node }, ports = {}) {
       if (bad) return refuse(`${k}: ${bad}`);
     }
   }
-  // Each under its expected root.
-  if (inside(c.workerCopies, c.reviewCopies) || inside(c.reviewCopies, c.workerCopies) || c.workerCopies === c.reviewCopies) return refuse('the review copies\' folder and the workers\' copies\' folder must be apart');
+  // Each under its expected root. "Apart" is compared on the real paths (both passed realPathProblem above, so the parts
+  // that are there are their own real paths) and without case, since the disk ignores it: refusing more is safe.
+  const w = c.workerCopies.toLowerCase();
+  const rv = c.reviewCopies.toLowerCase();
+  if (inside(w, rv) || inside(rv, w) || w === rv) return refuse('the review copies\' folder and the workers\' copies\' folder must be apart');
   if (!inside(c.reviewCopies, copy) || !isDir(copy, lstat)) return refuse(`copy: ${copy} is not a folder inside the review copies' folder`);
-  if (inside(c.workerCopies, copy)) return refuse(`copy: ${copy} is inside the workers' copies' folder, which the reviewer may not read`);
+  // A second guard (L73 C1): "apart" and "inside the review copies' folder" above already rule this out.
+  if (inside(w, copy.toLowerCase())) return refuse(`copy: ${copy} is inside the workers' copies' folder, which the reviewer may not read`);
   if (dirname(values.outbox) !== join(c.outboxRoot, role) || !isDir(values.outbox, lstat)) return refuse(`outbox: ${values.outbox} is not the session's folder in its role's outbox`);
   for (const k of ['node', 'hooks']) if (!inside(c.installRoot, values[k])) return refuse(`${k}: ${values[k]} is not inside the installed copy`);
   if (!inside(c.root, values.snapshot)) return refuse(`snapshot: ${values.snapshot} is not inside the runner's folder`);

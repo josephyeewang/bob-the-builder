@@ -1,22 +1,30 @@
-// Item 19: the updater, against real git. A local bare repository stands in for GitHub: its main holds an orchestrate
-// folder, its HEAD points at another branch (`evil`), and it has a tag. The installed copy, the clone and the seed are
-// throwaway folders; `owner` is this test's own uid and `top` the test folder, standing in for root and `/`. Every git
-// call goes through safe-git (no prompts, no askpass, fixed environment), and only to local paths.
+// Item 19 and L73: the updater, against real git. A local bare repository stands in for GitHub (through the test-only
+// `localAddress` option): its main holds an orchestrate folder, its HEAD points at another branch (`evil`), and it has
+// a tag. The installed copy, the clone and the seed are throwaway folders; `owner` is this test's own uid and `top` the
+// test folder, standing in for root and `/`. Every git call goes through safe-git (no prompts, no askpass, fixed
+// environment), and only to local paths.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { writeFileSync, mkdirSync, readFileSync, existsSync, readdirSync, lstatSync, chmodSync, symlinkSync, renameSync, rmSync, statSync, realpathSync } from 'node:fs';
-import { join, dirname, basename } from 'node:path';
+import { writeFileSync, mkdirSync, readFileSync, existsSync, readdirSync, lstatSync, chmodSync, symlinkSync, renameSync, rmSync,
+  statSync, realpathSync, readlinkSync, cpSync } from 'node:fs';
+import { join, dirname, basename, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { spawnSync } from 'node:child_process';
 import { tempDir } from '../../../shared/test-tmp.mjs';
-import { gitOk, callLog } from '../git/safe-git.mjs';
-import { STAMP, SCRIPTS, NODE, UPDATER_CONFIG, UPDATE_EVERY_S, updaterPlist } from './review-daemons.mjs';
-import { updateOnce, writeNew, recoverSwap, parseTree, parseBatch, chainProblem, readUpdaterConfig, main, MAIN } from './review-updater.mjs';
+import { gitOk, callLog, ROOT_PATH, safeGitEnv } from '../git/safe-git.mjs';
+import { SCRIPTS, UPDATE_EVERY_S, updaterPlist } from './review-daemons.mjs';
+import { STAMP, NODE, UPDATER_CONFIG, RUNNER_CONFIG, installProblem, chainProblem, currentCopy, aclProblem, versionName, mainSeenFile, readMainSeen,
+  nextMainSeen, behindSince } from './install-check.mjs';
+import { updateOnce, writeNew, leftovers as updaterLeftovers, parseTree, parseBatch, readUpdaterConfig, main, MAIN } from './review-updater.mjs';
 
 const ME = process.getuid();
 const ID = [['user.name', 'test'], ['user.email', 'test@example.invalid']];
-const KEEP = ['bin', 'config.json', UPDATER_CONFIG];
+const KEEP = ['bin', RUNNER_CONFIG, UPDATER_CONFIG];
+const GIT = spawnSync('/usr/bin/which', ['git'], { encoding: 'utf8' }).stdout.trim();
+const E40 = 'e'.repeat(40);
 
 async function world() {
-  const root = realpathSync(tempDir('m4-updater-'));
+  const root = realpathSync.native(tempDir('m4-updater-'));
   const origin = join(root, 'origin.git');
   await gitOk(['init', '--bare', '-q', origin], { gitDir: origin });
   const seed = join(root, 'seed');
@@ -48,13 +56,24 @@ async function world() {
   mkdirSync(join(keepSeed, 'bin'), { recursive: true });
   writeFileSync(join(keepSeed, NODE), 'a node\n');
   chmodSync(join(keepSeed, NODE), 0o755);
-  writeFileSync(join(keepSeed, 'config.json'), '{"runner":true}\n');
+  writeFileSync(join(keepSeed, RUNNER_CONFIG), '{"runner":true}\n');
   const installRoot = join(root, 'inst', 'orchestrate');
   mkdirSync(dirname(installRoot));
-  const c = { installRoot, clone: join(root, 'clone.git'), address: origin, keep: KEEP, gitBin: 'git' };
+  const c = { installRoot, clone: join(root, 'clone.git'), address: origin, keep: KEEP, gitBin: GIT };
   writeFileSync(join(keepSeed, UPDATER_CONFIG), `${JSON.stringify(c)}\n`);
-  const o = { owner: ME, top: root };
+  const o = { owner: ME, top: root, localAddress: true };
   return { root, origin, seed, sg, put, commit, push, main1, marker, keepSeed, installRoot, c, o };
+}
+
+/** For main(), which checks that git is the owner's alone: a small wrapper the test's user owns, noting the PATH it gets. */
+function ownGit(w) {
+  mkdirSync(join(w.root, 'gitbin'), { recursive: true });
+  const gitBin = join(w.root, 'gitbin', 'git');
+  writeFileSync(gitBin, `#!/bin/sh\necho "$PATH" >> '${join(w.root, 'path-seen')}'\nexec '${GIT}' "$@"\n`);
+  chmodSync(gitBin, 0o755);
+  w.c = { ...w.c, gitBin };
+  writeFileSync(join(w.keepSeed, UPDATER_CONFIG), `${JSON.stringify(w.c)}\n`);
+  return gitBin;
 }
 
 /** Every file under `dir` → its text (folders as "dir"), for before-and-after comparisons. */
@@ -70,8 +89,11 @@ function snapshot(dir) {
   walk(dir);
   return out;
 }
-const leftovers = (w) => readdirSync(dirname(w.installRoot)).filter((n) => n !== basename(w.installRoot));
+const linkOf = (w) => { try { return readlinkSync(w.installRoot); } catch { return null; } };
+/** What is beside the copy other than its link, the folder the link names and root's record of main. */
+const leftovers = (w) => readdirSync(dirname(w.installRoot)).filter((n) => ![basename(w.installRoot), linkOf(w), basename(mainSeenFile(w.installRoot))].includes(n));
 const stampOf = (w) => readFileSync(join(w.installRoot, STAMP), 'utf8').trim();
+const moveMain = async (w, text) => { w.put('orchestrate/a.txt', text); const m = await w.commit(`main: ${text.trim()}`); await w.push(MAIN); return m; };
 
 test('item 19: the install step copies main\'s orchestrate folder, the copy\'s own items and the stamp, and runs nothing from it', async () => {
   const w = await world();
@@ -80,6 +102,8 @@ test('item 19: the install step copies main\'s orchestrate folder, the copy\'s o
   assert.equal(r.changed, true);
   assert.equal(r.commit, w.main1);
   assert.equal(stampOf(w), w.main1);
+  assert.equal(lstatSync(w.installRoot).isSymbolicLink(), true, 'the copy is the link the updater flips');
+  assert.equal(linkOf(w), versionName(w.installRoot, w.main1));
   assert.equal(readFileSync(join(w.installRoot, 'a.txt'), 'utf8'), 'one\n');
   assert.equal(statSync(join(w.installRoot, 'tools/run.sh')).mode & 0o777, 0o755);
   assert.equal(statSync(join(w.installRoot, 'a.txt')).mode & 0o777, 0o644);
@@ -90,6 +114,7 @@ test('item 19: the install step copies main\'s orchestrate folder, the copy\'s o
   assert.equal(existsSync(join(w.installRoot, 'install.sh')), true);
   assert.equal(existsSync(w.marker), false, 'no script from the repository ran');
   assert.deepEqual(leftovers(w), []);
+  assert.equal(installProblem(w.installRoot, [join(w.installRoot, NODE)], { owner: ME, top: w.root }), null);
   // Every git call was the updater's own, against its clone.
   const mine = callLog.filter((x) => x.gitDir === w.c.clone);
   assert.ok(mine.length >= 4);
@@ -111,7 +136,7 @@ test('item 19: at main already, nothing is touched; when main moves, the copy fo
   assert.deepEqual(snapshot(w.installRoot), before);
 
   // The copy's own items as they are now in the copy (not the seed) are the ones carried over.
-  writeFileSync(join(w.installRoot, 'config.json'), '{"runner":"edited in place"}\n');
+  writeFileSync(join(w.installRoot, RUNNER_CONFIG), '{"runner":"edited in place"}\n');
   w.put('orchestrate/a.txt', 'two\n');
   rmSync(join(w.seed, 'orchestrate/gone.txt'));
   w.put('orchestrate/new/b.txt', 'b\n');
@@ -120,10 +145,11 @@ test('item 19: at main already, nothing is touched; when main moves, the copy fo
   const r = await updateOnce(w.c, w.o);
   assert.deepEqual([r.ok, r.changed, r.commit], [true, true, main2], r.reason);
   assert.equal(stampOf(w), main2);
+  assert.equal(linkOf(w), versionName(w.installRoot, main2));
   assert.equal(readFileSync(join(w.installRoot, 'a.txt'), 'utf8'), 'two\n');
   assert.equal(readFileSync(join(w.installRoot, 'new/b.txt'), 'utf8'), 'b\n');
   assert.equal(existsSync(join(w.installRoot, 'gone.txt')), false, 'a file main dropped is gone from the copy');
-  assert.equal(readFileSync(join(w.installRoot, 'config.json'), 'utf8'), '{"runner":"edited in place"}\n');
+  assert.equal(readFileSync(join(w.installRoot, RUNNER_CONFIG), 'utf8'), '{"runner":"edited in place"}\n');
   assert.equal(readFileSync(join(w.installRoot, NODE), 'utf8'), 'a node\n');
   assert.equal(existsSync(join(w.installRoot, 'evil.txt')), false);
   assert.equal(existsSync(w.marker), false);
@@ -147,9 +173,7 @@ test('item 19 planted: a hook in the clone is refused before any fetch, so nothi
   mkdirSync(join(w.c.clone, 'hooks'), { recursive: true });
   writeFileSync(join(w.c.clone, 'hooks', 'reference-transaction'), `#!/bin/sh\ntouch ${w.marker}\n`);
   chmodSync(join(w.c.clone, 'hooks', 'reference-transaction'), 0o755);
-  w.put('orchestrate/a.txt', 'three\n');
-  await w.commit('main moves');
-  await w.push(MAIN);
+  await moveMain(w, 'three\n');
   const before = snapshot(w.installRoot);
   const r = await updateOnce(w.c, w.o);
   assert.equal(r.ok, false);
@@ -163,13 +187,11 @@ test('item 19 planted: a hook in the clone is refused before any fetch, so nothi
   assert.equal(existsSync(w.marker), false);
 });
 
-test('item 19 planted: a run cut off part way leaves the old copy whole and no half copy anywhere', async () => {
+test('item 19 planted: a write that fails part way leaves the old copy whole and no half copy anywhere', async () => {
   const w = await world();
   assert.equal((await updateOnce(w.c, { ...w.o, first: w.keepSeed })).ok, true);
   w.put('orchestrate/0-first.txt', 'sorts first\n');
-  w.put('orchestrate/a.txt', 'four\n');
-  await w.commit('main moves');
-  await w.push(MAIN);
+  await moveMain(w, 'four\n');
   const before = snapshot(w.installRoot);
   let n = 0;
   const write = (file, data, mode) => { if (++n === 3) throw new Error('the disk filled up'); return writeNew(file, data, mode); };
@@ -187,9 +209,7 @@ test('item 19 planted: a run cut off part way leaves the old copy whole and no h
 test('item 19: a new copy with a file others can write is not put in place', async () => {
   const w = await world();
   assert.equal((await updateOnce(w.c, { ...w.o, first: w.keepSeed })).ok, true);
-  w.put('orchestrate/a.txt', 'five\n');
-  await w.commit('main moves');
-  await w.push(MAIN);
+  await moveMain(w, 'five\n');
   const before = snapshot(w.installRoot);
   const write = (file, data, mode) => writeNew(file, data, file.endsWith('/a.txt') ? 0o666 : mode);
   const r = await updateOnce(w.c, { ...w.o, write });
@@ -198,30 +218,174 @@ test('item 19: a new copy with a file others can write is not put in place', asy
   assert.deepEqual(leftovers(w), []);
 });
 
-test('item 19: a run cut off between the two renames is put right on the next run', async () => {
+test('L73 point 1: at every step of an update the path launchd starts from names a whole copy, and a run stopped at any step is put right by the next', async () => {
   const w = await world();
   assert.equal((await updateOnce(w.c, { ...w.o, first: w.keepSeed })).ok, true);
+  const main2 = await moveMain(w, 'six\n');
+  const inst = dirname(w.installRoot);
+  // launchd's view: the node and the updater's script through installRoot, in a copy root's alone with a good stamp.
+  const whole = (where) => {
+    assert.equal(lstatSync(w.installRoot).isSymbolicLink(), true, where);
+    assert.equal(readFileSync(join(w.installRoot, NODE), 'utf8'), 'a node\n', where);
+    assert.equal(existsSync(join(w.installRoot, SCRIPTS.updater)), true, where);
+    assert.ok([w.main1, main2].includes(stampOf(w)), where);
+    assert.equal(installProblem(w.installRoot, [join(w.installRoot, NODE)], { owner: ME, top: w.root }), null, where);
+  };
+  // Each image is the disk as a run killed right there would leave it (no clean-up runs).
+  const images = [];
+  const freeze = (where) => {
+    whole(where);
+    const d = join(w.root, `image-${images.length}`);
+    cpSync(inst, d, { recursive: true, verbatimSymlinks: true });
+    images.push({ where, d });
+  };
+  const write = (file, data, mode) => { writeNew(file, data, mode); freeze(`after writing ${basename(file)}`); };
+  const r = await updateOnce(w.c, { ...w.o, write, step: (name) => freeze(`after ${name}`) });
+  assert.equal(r.ok, true, r.reason);
+  whole('at the end');
+  const names = images.map((x) => x.where);
+  for (const n of ['after cleared', 'after folder', `after writing ${STAMP}`, 'after stamped', 'after linked', 'after flipped', 'after removed the old copy', 'after noted']) {
+    assert.ok(names.includes(n), `no image ${n}`);
+  }
+  for (const { where, d } of images) {
+    rmSync(inst, { recursive: true, force: true });
+    cpSync(d, inst, { recursive: true, verbatimSymlinks: true });
+    whole(`restored ${where}`);
+    const again = await updateOnce(w.c, w.o);
+    assert.equal(again.ok, true, `${where}: ${again.reason}`);
+    assert.equal(stampOf(w), main2, where);
+    assert.equal(readFileSync(join(w.installRoot, 'a.txt'), 'utf8'), 'six\n', where);
+    assert.deepEqual(leftovers(w), [], where);
+  }
+});
+
+test('L73 point 2: the stamp is the last file written into a new copy, after every file of main and every own item', async () => {
+  const w = await world();
+  const order = [];
+  const write = (file, data, mode) => {
+    order.push(file);
+    if (basename(file) === STAMP) {
+      for (const n of [...KEEP, NODE, 'a.txt', 'tools/run.sh']) assert.equal(existsSync(join(dirname(file), n)), true, `${n} is there before the stamp`);
+    }
+    return writeNew(file, data, mode);
+  };
+  const r = await updateOnce(w.c, { ...w.o, first: w.keepSeed, write });
+  assert.equal(r.ok, true, r.reason);
+  const folder = join(dirname(w.installRoot), versionName(w.installRoot, w.main1));
+  const intoCopy = order.filter((f) => f.startsWith(`${folder}/`));
+  assert.ok(intoCopy.length > 3);
+  assert.equal(intoCopy.at(-1), join(folder, STAMP), 'nothing is written into the copy after its stamp');
+});
+
+test('L73 M1 probe A: the clone is never made in a folder others can write, and nothing is written before that check', async () => {
+  const w = await world();
+  const open = join(w.root, 'open');
+  mkdirSync(open);
+  chmodSync(open, 0o777);
+  const c = { ...w.c, clone: join(open, 'clone.git') };
+  const r = await updateOnce(c, { ...w.o, first: w.keepSeed });
+  assert.match(r.reason, /the folder of the clone: .*\/open can be written by others than root/);
+  assert.equal(existsSync(c.clone), false, 'no git init ran');
+  assert.equal(callLog.some((x) => x.gitDir === c.clone), false, 'no git call at all');
+  assert.equal(existsSync(w.installRoot), false);
+  assert.deepEqual(readdirSync(dirname(w.installRoot)), []);
+  // A clone that is a link is refused before git runs in it.
+  chmodSync(open, 0o755);
+  mkdirSync(join(w.root, 'real-clone'));
+  symlinkSync(join(w.root, 'real-clone'), c.clone);
+  assert.match((await updateOnce(c, { ...w.o, first: w.keepSeed })).reason, /the clone: .*clone\.git is a link/);
+  assert.equal(callLog.some((x) => x.gitDir === c.clone), false);
+  assert.deepEqual(readdirSync(join(w.root, 'real-clone')), []);
+});
+
+test('L73 M1 probe B: a folder planted beside the copy is never put in place, and a copy that is not root\'s alone is not copied from', async () => {
+  const w = await world();
+  assert.equal((await updateOnce(w.c, { ...w.o, first: w.keepSeed })).ok, true);
+  const inst = dirname(w.installRoot);
+  const plant = (name) => {
+    const d = join(inst, name);
+    mkdirSync(join(d, 'bin'), { recursive: true });
+    writeFileSync(join(d, NODE), 'EVIL NODE\n');
+    for (const n of [RUNNER_CONFIG, UPDATER_CONFIG]) writeFileSync(join(d, n), '{}\n');
+    writeFileSync(join(d, STAMP), `${E40}\n`);
+    return d;
+  };
+  // The reviewer's probe: the copy moved away, and an old-style folder and a versioned one planted beside it.
+  const away = join(w.root, 'away');
+  renameSync(w.installRoot, away);
+  const oldStyle = plant(`${basename(w.installRoot)}.old-${E40}`);
+  plant(versionName(w.installRoot, E40));
+  await moveMain(w, 'seven\n');
+  const r = await updateOnce(w.c, w.o);
+  assert.match(r.reason, /there is no installed copy; run the install step/);
+  assert.equal(existsSync(w.installRoot), false, 'nothing planted was put in place');
+  const lines = [];
+  const mo = { ...w.o, log: (s) => lines.push(s), uid: ME, self: join(w.installRoot, SCRIPTS.updater) };
+  assert.equal(await main([join(w.keepSeed, UPDATER_CONFIG)], mo), 1);
+  assert.match(lines.pop(), /orchestrate is missing/);
+  assert.equal(lines.some((l) => /the copy is now at|put .* back|put .* in/.test(l)), false, lines.join('\n'));
+  assert.equal(existsSync(w.installRoot), false);
+
+  // With the copy's link back, the planted versioned folder is removed, never used; the old-style one is not the
+  // updater's name and is left alone (and never read).
+  renameSync(away, w.installRoot);
+  const ok = await updateOnce(w.c, w.o);
+  assert.equal(ok.ok, true, ok.reason);
+  assert.ok(ok.recovered.includes(`removed ${versionName(w.installRoot, E40)}`));
+  assert.equal(readFileSync(join(w.installRoot, NODE), 'utf8'), 'a node\n');
+  assert.equal(readFileSync(join(w.installRoot, 'a.txt'), 'utf8'), 'seven\n');
+  rmSync(oldStyle, { recursive: true });
+  assert.deepEqual(leftovers(w), []);
+
+  // A copy whose node others can write is refused before anything is copied from it.
+  chmodSync(join(w.installRoot, NODE), 0o777);
+  await moveMain(w, 'eight\n');
   const before = snapshot(w.installRoot);
-  const fake = 'f'.repeat(40);
-  // Cut off after the first rename: the old copy is aside and a complete new one waits. The old one goes back.
-  renameSync(w.installRoot, `${w.installRoot}.old-${fake}`);
-  mkdirSync(`${w.installRoot}.new-${fake}`);
-  writeFileSync(join(`${w.installRoot}.new-${fake}`, STAMP), `${fake}\n`);
-  assert.deepEqual(recoverSwap(w.installRoot, { owner: ME }), ['put the old copy back', `removed ${basename(w.installRoot)}.new-${fake}`]);
+  assert.match((await updateOnce(w.c, w.o)).reason, /the installed copy is not root's alone: .*bin\/node can be written by others than root/);
   assert.deepEqual(snapshot(w.installRoot), before);
   assert.deepEqual(leftovers(w), []);
-  // No old copy, and a new one without its stamp (cut off while writing): it is not put in, and is removed.
-  const half = `${w.installRoot}.new-${fake}`;
-  renameSync(w.installRoot, half);
-  rmSync(join(half, STAMP));
-  assert.deepEqual(recoverSwap(w.installRoot, { owner: ME }), [`removed ${basename(half)}`]);
-  assert.equal(existsSync(w.installRoot), false);
-  // A complete new one (its stamp names its own commit) is put in.
-  const whole = join(w.root, 'whole');
-  assert.equal((await updateOnce({ ...w.c, installRoot: whole }, { ...w.o, first: w.keepSeed })).ok, true);
-  renameSync(whole, `${w.installRoot}.new-${w.main1}`);
-  assert.deepEqual(recoverSwap(w.installRoot, { owner: ME }), ['put the complete new copy in']);
-  assert.equal(stampOf(w), w.main1);
+  chmodSync(join(w.installRoot, NODE), 0o755);
+
+  // A link that names anything but a versioned folder beside it is refused.
+  const elsewhere = join(w.root, 'elsewhere');
+  cpSync(realpathSync.native(w.installRoot), elsewhere, { recursive: true });
+  const tmp = join(w.root, 'tmp-link');
+  symlinkSync(elsewhere, tmp);
+  renameSync(tmp, w.installRoot);
+  assert.match((await updateOnce(w.c, w.o)).reason, /orchestrate points at .*elsewhere.*, not a copy folder beside it/);
+  assert.match(installProblem(w.installRoot, [], { owner: ME, top: w.root }), /not a copy folder beside it/);
+  // A link of another owner's; a plain folder where the link should be.
+  assert.match(currentCopy(w.installRoot, { owner: ME + 1 }).problem, new RegExp(`the copy's link, is not owned by uid ${ME + 1}`));
+  rmSync(w.installRoot);
+  cpSync(elsewhere, w.installRoot, { recursive: true });
+  assert.match((await updateOnce(w.c, w.o)).reason, /orchestrate is a plain folder, not the copy's link the updater flips/);
+  assert.equal(readFileSync(join(w.installRoot, 'a.txt'), 'utf8'), 'seven\n', 'left as it was');
+});
+
+test('L73 M1 probe C: the install step refuses a folder others can write, and a seed that is not root\'s alone', async () => {
+  const w = await world();
+  ownGit(w);
+  const inst = dirname(w.installRoot);
+  chmodSync(inst, 0o777);
+  const r = await updateOnce(w.c, { ...w.o, first: w.keepSeed });
+  assert.match(r.reason, /the folder of the copy: .*\/inst can be written by others than root/);
+  assert.deepEqual(readdirSync(inst), [], 'nothing was written there');
+  assert.equal(existsSync(w.c.clone), false);
+  const lines = [];
+  const mo = { ...w.o, log: (s) => lines.push(s), uid: ME };
+  assert.equal(await main([join(w.keepSeed, UPDATER_CONFIG), '--first', w.keepSeed], mo), 1);
+  assert.match(lines.pop(), /the folder of the copy: .*can be written by others than root/);
+  assert.deepEqual(readdirSync(inst), []);
+  chmodSync(inst, 0o755);
+  // The seed itself: a node others can write, then the seed's folder.
+  chmodSync(join(w.keepSeed, NODE), 0o777);
+  assert.match((await updateOnce(w.c, { ...w.o, first: w.keepSeed })).reason, /the seed is not root's alone: .*bin\/node can be written by others than root/);
+  chmodSync(join(w.keepSeed, NODE), 0o755);
+  chmodSync(w.keepSeed, 0o777);
+  assert.match((await updateOnce(w.c, { ...w.o, first: w.keepSeed })).reason, /the seed is not root's alone: .*keep-seed can be written by others than root/);
+  assert.equal(await main([join(w.keepSeed, UPDATER_CONFIG), '--first', w.keepSeed], mo), 1);
+  assert.match(lines.pop(), /the config: .*keep-seed can be written by others than root/);
+  assert.deepEqual(readdirSync(inst), []);
 });
 
 test('item 19: a link or a submodule in main\'s folder, or a name that is one of the copy\'s own items, refuses the update', async () => {
@@ -265,24 +429,20 @@ test('item 19: git\'s answers are checked: each object is the blob asked for, wh
 
 test('item 19: a link among the copy\'s own items refuses the update', async () => {
   const w = await world();
-  symlinkSync('/etc/hosts', join(w.keepSeed, 'config.json.real'));
-  rmSync(join(w.keepSeed, 'config.json'));
-  symlinkSync(join(w.keepSeed, 'config.json.real'), join(w.keepSeed, 'config.json'));
+  symlinkSync('/etc/hosts', join(w.keepSeed, 'review.json.real'));
+  rmSync(join(w.keepSeed, RUNNER_CONFIG));
+  symlinkSync(join(w.keepSeed, 'review.json.real'), join(w.keepSeed, RUNNER_CONFIG));
   const r = await updateOnce(w.c, { ...w.o, first: w.keepSeed });
-  assert.match(r.reason, /config\.json is a link/);
+  assert.match(r.reason, /review\.json(\.real)? is a link/);
   assert.equal(existsSync(w.installRoot), false);
   assert.deepEqual(leftovers(w), []);
 });
 
-test('item 19: the daemon\'s run checks it is root, and that its config, itself, its node, git and the clone are root\'s alone', async () => {
+test('item 19, L73 point 6: the daemon\'s run checks it is root, that its config, itself, its node, git and the clone are root\'s alone, and gives git a PATH only root can write', async () => {
   const w = await world();
-  // A git only the owner can change: a small wrapper in the test folder.
-  mkdirSync(join(w.root, 'gitbin'));
-  const gitBin = join(w.root, 'gitbin', 'git');
-  writeFileSync(gitBin, '#!/bin/sh\nexec git "$@"\n');
-  chmodSync(gitBin, 0o755);
-  const c = { ...w.c, gitBin };
-  writeFileSync(join(w.keepSeed, UPDATER_CONFIG), `${JSON.stringify(c)}\n`);
+  // A git only the owner can change: a small wrapper in the test folder, which notes the PATH it was given.
+  const gitBin = ownGit(w);
+  const pathSeen = join(w.root, 'path-seen');
   const lines = [];
   const log = (s) => lines.push(s);
   const o = { ...w.o, log, uid: ME };
@@ -296,6 +456,12 @@ test('item 19: the daemon\'s run checks it is root, and that its config, itself,
   assert.equal(await main([join(w.keepSeed, UPDATER_CONFIG), '--first', w.keepSeed], { ...o, self }), 0, lines.join('\n'));
   assert.match(lines.pop(), /the copy is now at [0-9a-f]{40}/);
   assert.equal(await main([conf], { ...o, self }), 0, lines.join('\n'));
+  const paths = readFileSync(pathSeen, 'utf8').trim().split('\n');
+  assert.ok(paths.length >= 4);
+  assert.deepEqual([...new Set(paths)], [ROOT_PATH], 'every git root ran got root\'s own PATH');
+  assert.doesNotMatch(ROOT_PATH, /homebrew|local/);
+  assert.equal(safeGitEnv({ path: ROOT_PATH }).PATH, ROOT_PATH);
+  assert.match(safeGitEnv().PATH, /homebrew/, 'the workers\' own git calls keep theirs');
 
   chmodSync(conf, 0o666);
   assert.equal(await main([conf], { ...o, self }), 1);
@@ -316,35 +482,158 @@ test('item 19: the daemon\'s run checks it is root, and that its config, itself,
   assert.match(lines.pop(), /the clone: .*clone\.git can be written by others than root/);
   chmodSync(w.c.clone, 0o755);
   assert.equal(await main([conf], { ...o, self }), 0, lines.join('\n'));
+  // A folder on root's PATH that is not root's alone (here: this test's own folder, which is not root's).
+  assert.equal(await main([conf], { ...o, self, pathDirs: [join(w.root, 'gitbin')] }), 1);
+  assert.match(lines.pop(), /updater: PATH: .*gitbin is not owned by root/);
+  // The real run passes no localAddress, so a config naming a local folder is refused.
+  assert.equal(await main([conf], { ...o, self, localAddress: false }), 1);
+  assert.match(lines.pop(), /address must be an https address/);
 });
 
-test('item 19: the config names absolute paths, an address, the copy\'s own items (its node among them) and git', () => {
+test('item 19, L73 points 3 and 4: the config names absolute paths, an https address, the copy\'s own items (its node and both configs among them) and git', async () => {
   const dir = tempDir('m4-updcfg-');
   const f = join(dir, 'u.json');
-  const ok = { installRoot: '/I/o', clone: '/C', address: 'https://github.com/o/r.git', keep: ['bin', 'x.json'], gitBin: '/usr/bin/git' };
-  const t = (c) => { writeFileSync(f, JSON.stringify(c)); return () => readUpdaterConfig(f); };
+  const ok = { installRoot: '/I/o', clone: '/C', address: 'https://github.com/o/r.git', keep: ['bin', UPDATER_CONFIG, RUNNER_CONFIG, 'x.json'], gitBin: '/usr/bin/git' };
+  const t = (c, opts) => { writeFileSync(f, JSON.stringify(c)); return () => readUpdaterConfig(f, opts); };
   assert.equal(t(ok)().address, ok.address);
   assert.throws(t({ ...ok, installRoot: 'I' }), /installRoot must be an absolute path/);
+  assert.throws(t({ ...ok, installRoot: '/' }), /installRoot must be an absolute path/);
   assert.throws(t({ ...ok, clone: '/a/../b' }), /clone must be an absolute path/);
   assert.throws(t({ ...ok, address: 'git@github.com:o/r.git' }), /address must be an https address/);
+  assert.throws(t({ ...ok, address: 'http://github.com/o/r.git' }), /address must be an https address/);
+  assert.throws(t({ ...ok, address: '/srv/origin.git' }), /address must be an https address/, 'a local folder only through the test option');
+  assert.throws(t({ ...ok, address: '/srv/origin.git', localAddress: true }), /address must be an https address/, 'no key in the file turns it on');
+  assert.equal(t({ ...ok, address: '/srv/origin.git' }, { localAddress: true })().address, '/srv/origin.git');
   assert.throws(t({ ...ok, keep: ['bin', '../x'] }), /keep must list plain top-level names/);
   assert.throws(t({ ...ok, keep: ['bin', STAMP] }), /keep must list plain top-level names/);
-  assert.throws(t({ ...ok, keep: ['x.json'] }), /keep must hold bin/);
+  assert.throws(t({ ...ok, keep: [UPDATER_CONFIG, RUNNER_CONFIG] }), /keep must hold bin/);
+  assert.throws(t({ ...ok, keep: ['bin', RUNNER_CONFIG] }), /keep must hold updater\.json \(the updater's config\)/);
+  assert.throws(t({ ...ok, keep: ['bin', UPDATER_CONFIG] }), /keep must hold review\.json \(the review runner's config\)/);
+  // updateOnce itself refuses a local address without the option.
+  const w = await world();
+  assert.match((await updateOnce(w.c, { owner: ME, top: w.root, first: w.keepSeed })).reason, /the address must be an https address/);
+  assert.equal(existsSync(w.installRoot), false);
 });
 
-test('item 19: chainProblem walks every folder up to the top', () => {
+test('L73 point 7(b): the stamp alert\'s "since" is when the updater first saw main ahead of the copy, by its own clock, kept while the copy stays behind', async () => {
+  const w = await world();
+  const file = mainSeenFile(w.installRoot);
+  const seen = () => readMainSeen(file, { owner: ME });
+  const failing = (file2, data, mode) => { if (file2.includes('.v-')) throw new Error('the disk filled up'); return writeNew(file2, data, mode); };
+  assert.equal((await updateOnce(w.c, { ...w.o, first: w.keepSeed, now: () => 1_000 })).ok, true);
+  assert.deepEqual(seen(), { commit: w.main1, since: 1_000, installed: w.main1, checked_at: 1_000 });
+  assert.equal(lstatSync(file).mode & 0o777, 0o644, 'anyone may read it; only root writes it');
+
+  const main2 = await moveMain(w, 'nine\n');
+  assert.equal((await updateOnce(w.c, { ...w.o, write: failing, now: () => 5_000 })).ok, false);
+  assert.deepEqual(seen(), { commit: main2, since: 5_000, installed: w.main1, checked_at: 5_000 }, 'the run\'s clock, not the commit\'s date');
+  assert.equal((await updateOnce(w.c, { ...w.o, write: failing, now: () => 9_000 })).ok, false);
+  assert.deepEqual(seen(), { commit: main2, since: 5_000, installed: w.main1, checked_at: 9_000 }, 'kept while the copy stays behind');
+  const main3 = await moveMain(w, 'ten\n');
+  assert.equal((await updateOnce(w.c, { ...w.o, write: failing, now: () => 12_000 })).ok, false);
+  const s12 = seen();
+  assert.deepEqual(s12, { commit: main3, since: 5_000, installed: w.main1, checked_at: 12_000 }, 'a main that keeps moving does not restart it');
+  assert.equal(behindSince(s12, main3), 5_000);
+  assert.equal(behindSince(s12, 'f'.repeat(40)), 12_000, 'a head the updater has not seen: since its last fetch');
+  assert.equal(behindSince(null, main3), null);
+
+  assert.equal((await updateOnce(w.c, { ...w.o, now: () => 15_000 })).ok, true);
+  assert.deepEqual(seen(), { commit: main3, since: 15_000, installed: main3, checked_at: 15_000 });
+  // Caught up, then behind again: the clock starts when the updater first sees the new head.
+  const main4 = await moveMain(w, 'eleven\n');
+  assert.equal((await updateOnce(w.c, { ...w.o, write: failing, now: () => 20_000 })).ok, false);
+  assert.equal(seen().since, 20_000);
+  assert.equal(seen().commit, main4);
+  // A record dated ahead of the clock is not kept; one others can write is not read.
+  assert.equal(nextMainSeen({ commit: main4, since: 99_000, installed: main3, checked_at: 20_000 }, { commit: main4, installed: main3, now: 21_000 }).since, 21_000);
+  chmodSync(file, 0o666);
+  assert.equal(seen(), null);
+});
+
+test('L73 point 5: root runs only the updater\'s own small module set, which imports nothing but Node\'s own', () => {
+  const here = dirname(fileURLToPath(import.meta.url));
+  const found = new Set();
+  const visit = (file) => {
+    if (found.has(file)) return;
+    found.add(file);
+    const src = readFileSync(file, 'utf8');
+    const specs = [...src.matchAll(/(?:^|\n)\s*(?:import|export)\b[^'"`;]*?\bfrom\s*['"]([^'"]+)['"]/g), ...src.matchAll(/(?:^|\n)\s*import\s*['"]([^'"]+)['"]/g)].map((m) => m[1]);
+    for (const m of src.matchAll(/\bimport\s*\(([^)]*)\)/g)) {
+      const lit = /^\s*['"]([^'"]+)['"]\s*$/.exec(m[1]);
+      assert.ok(lit, `${basename(file)} has a dynamic import of something that is not named: import(${m[1]})`);
+      specs.push(lit[1]);
+    }
+    for (const s of specs) {
+      if (s.startsWith('node:')) continue;
+      assert.ok(s.startsWith('.'), `${basename(file)} imports ${s}`);
+      visit(resolve(dirname(file), s));
+    }
+  };
+  visit(join(here, 'review-updater.mjs'));
+  assert.deepEqual([...found].map((f) => f.slice(dirname(here).length + 1)).sort(), ['git/safe-git.mjs', 'launcher/install-check.mjs', 'launcher/review-updater.mjs']);
+});
+
+test('L73 point 7(c): the access-list reader, on both systems\' ls output, and failing closed', () => {
+  const calls = [];
+  const run = (out, status = 0) => (bin, args) => { calls.push([bin, ...args]); return { status, stdout: out, stderr: status ? 'no' : '' }; };
+  const plain = '-rw-r--r--@ 1 u  g  0 Oct 31 20:45 /a\n';
+  assert.equal(aclProblem(['/a'], { run: run(plain), platform: 'darwin' }), null);
+  assert.deepEqual(calls.pop(), ['/bin/ls', '-led', '--', '/a']);
+  assert.match(aclProblem(['/a'], { run: run(`${plain} 0: group:everyone deny delete\n`), platform: 'darwin' }), /^\/a has an access list \(ACL\)/);
+  assert.match(aclProblem(['/a'], { run: run('-rw-r--r--+ 1 u g 0 Oct 31 20:45 /a\n'), platform: 'linux' }), /^\/a has an access list/);
+  assert.deepEqual(calls.pop(), ['/bin/ls', '-ld', '--', '/a']);
+  assert.match(aclProblem(['/a', '/b'], { run: run('', 1), platform: 'darwin' }), /the access lists \(ACL\) of \/a and others could not be read/);
+  calls.length = 0;
+  assert.equal(aclProblem(Array.from({ length: 450 }, (_, i) => `/p${i}`), { run: run(plain), platform: 'darwin' }), null);
+  assert.equal(calls.length, 3, 'in batches');
+  assert.equal(aclProblem([], { run: () => { throw new Error('not called'); } }), null);
+});
+
+test('L73 point 7(c): an access list on the copy or on a folder root writes in is refused', { skip: process.platform !== 'darwin' && 'chmod +a is macOS\'s' }, async () => {
+  const w = await world();
+  assert.equal((await updateOnce(w.c, { ...w.o, first: w.keepSeed })).ok, true);
+  const chmod = (...a) => assert.equal(spawnSync('/bin/chmod', a).status, 0);
+  const f = join(realpathSync.native(w.installRoot), 'a.txt');
+  chmod('+a', 'everyone deny delete', f);
+  assert.match(installProblem(w.installRoot, [], { owner: ME, top: w.root }), /a\.txt has an access list \(ACL\)/);
+  await moveMain(w, 'twelve\n');
+  assert.match((await updateOnce(w.c, w.o)).reason, /the installed copy is not root's alone: .*a\.txt has an access list/);
+  chmod('-N', f);
+  assert.equal(installProblem(w.installRoot, [], { owner: ME, top: w.root }), null);
+  const inst = dirname(w.installRoot);
+  chmod('+a', 'everyone allow add_file', inst);
+  assert.match(chainProblem(inst, { owner: ME, top: w.root }), /inst has an access list/);
+  assert.match((await updateOnce(w.c, w.o)).reason, /the folder of the copy: .*inst has an access list/);
+  chmod('-N', inst);
+  assert.equal((await updateOnce(w.c, w.o)).ok, true);
+});
+
+test('item 19, L73 C3: chainProblem walks every folder up to the top, names the owner it wants, and the leftovers come in name order', () => {
   const st = (uid, mode, link = false) => ({ uid, mode, isSymbolicLink: () => link });
   const table = { '/a': st(0, 0o40755), '/a/b': st(0, 0o40755), '/a/b/git': st(0, 0o100755), '/': st(0, 0o41777) };
   const lstat = (p) => { if (!table[p]) throw new Error('ENOENT'); return table[p]; };
-  assert.equal(chainProblem('/a/b/git', { lstat }), '/ can be written by others than root');
+  const seen = [];
+  const acl = (ps) => { seen.push(ps); return null; };
+  assert.equal(chainProblem('/a/b/git', { lstat, acl }), '/ can be written by others than root');
   table['/'] = st(0, 0o40755);
-  assert.equal(chainProblem('/a/b/git', { lstat }), null);
+  assert.equal(chainProblem('/a/b/git', { lstat, acl }), null);
+  assert.deepEqual(seen.pop(), ['/a/b/git', '/a/b', '/a', '/'], 'the access lists of the whole chain are read');
   table['/a'] = st(501, 0o40755);
-  assert.equal(chainProblem('/a/b/git', { lstat }), '/a is not owned by root');
-  assert.equal(chainProblem('/a/b/git', { lstat, top: '/a/b' }), null, 'the walk stops at the top');
+  assert.equal(chainProblem('/a/b/git', { lstat, acl }), '/a is not owned by root');
+  assert.equal(chainProblem('/a/b/git', { lstat, acl, owner: 502 }), '/a/b/git is not owned by uid 502');
+  assert.equal(chainProblem('/a/b/git', { lstat, acl, top: '/a/b' }), null, 'the walk stops at the top');
+  assert.equal(chainProblem('/a/b/git', { lstat, acl: () => '/a/b has an access list (ACL)', top: '/a/b' }), '/a/b has an access list (ACL)');
   table['/a/b'] = st(0, 0o120755, true);
-  assert.equal(chainProblem('/a/b/git', { lstat }), '/a/b is a link');
-  assert.equal(chainProblem('/a/b/none', { lstat }), '/a/b/none is missing');
+  assert.equal(chainProblem('/a/b/git', { lstat, acl }), '/a/b is a link');
+  assert.equal(chainProblem('/a/b/none', { lstat, acl }), '/a/b/none is missing');
+
+  const dir = tempDir('m4-leftovers-');
+  const ir = join(dir, 'orchestrate');
+  for (const n of [`orchestrate.v-${'b'.repeat(40)}`, `orchestrate.v-${'a'.repeat(40)}`, `orchestrate.link-${'c'.repeat(40)}`, 'orchestrate.v-short', 'other']) mkdirSync(join(dir, n));
+  const want = [`orchestrate.link-${'c'.repeat(40)}`, `orchestrate.v-${'a'.repeat(40)}`, `orchestrate.v-${'b'.repeat(40)}`];
+  assert.deepEqual(updaterLeftovers(ir).map((p) => basename(p)), want);
+  // Whatever order the disk lists them in.
+  assert.deepEqual(updaterLeftovers(ir, { list: (d) => readdirSync(d).sort().reverse() }).map((p) => basename(p)), want);
 });
 
 test('item 19: the updater\'s LaunchDaemon runs as root every 10 minutes, from the installed copy only', () => {

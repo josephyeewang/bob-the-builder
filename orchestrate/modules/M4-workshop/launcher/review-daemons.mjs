@@ -1,7 +1,8 @@
-// The LaunchDaemon files for the review side (L65). Both are root's and sit in the system folder; both run code
-// only from the installed copy (`installRoot`, a root-owned copy of the orchestrate folder, with its own node at
-// bin/node), never from the repository or a node the workers' Mac user can write: either would let a worker change what
-// runs as `review`, or as root.
+// The LaunchDaemon files for the review side (L65). All are root's and sit in the system folder; all run code only
+// from the installed copy (`installRoot`, a root-owned copy of the orchestrate folder, with its own node at bin/node;
+// install-check.mjs), never from the repository or a node the workers' Mac user can write: either would let a worker
+// change what runs as `review`, or as root. installRoot is the copy's link, which the updater flips in one rename, so
+// the node and scripts each plist names are there at every moment of an update (L73 point 1).
 //
 //   review runner   runs as `review` once a minute, and when a request arrives (WatchPaths on requests/)
 //   account copy    runs as root when the owner switches account (WatchPaths on the owner's account file) and every
@@ -12,6 +13,7 @@
 // Every path is passed in; nothing here names a machine. The install itself is one of Joe's steps (README).
 
 import { join } from 'node:path';
+import { NODE, RUNNER_CONFIG, STAMP, UPDATER_CONFIG, installStamp } from './install-check.mjs';
 import { ACCOUNT_FILE } from './accounts.mjs';
 import { REVIEW_USER } from './review-user.mjs';
 
@@ -24,18 +26,10 @@ export const SCRIPTS = Object.freeze({
   accounts: 'modules/M4-workshop/launcher/accounts.mjs',
   updater: 'modules/M4-workshop/launcher/review-updater.mjs',
 });
-// The updater's own config, one of the copy's own items (review-updater.mjs `keep`).
-export const UPDATER_CONFIG = 'updater.json';
 export const UPDATE_EVERY_S = 600;
-export const NODE = 'bin/node';
-// The commit stamp (L66): the install writes the commit it copied, 40 hex and a newline, into this file at the top of
-// the installed copy, root's like the rest. The runner shows it in its status; the Dispatcher tells Joe when it is not
-// main's. `installStamp(commit)` is the file's text.
-export const STAMP = 'installed-commit';
-export function installStamp(commit) {
-  if (typeof commit !== 'string' || !/^[0-9a-f]{40}$/.test(commit)) throw new Error('the commit stamp must be a 40-hex commit');
-  return `${commit}\n`;
-}
+// The copy's node, its stamp and the two configs' names have one home, install-check.mjs (root's updater reads them
+// there); they are passed on here for the install step and the tests.
+export { NODE, RUNNER_CONFIG, STAMP, UPDATER_CONFIG, installStamp };
 
 function plist(entries) {
   return ['<?xml version="1.0" encoding="UTF-8"?>',
@@ -46,12 +40,14 @@ const arr = (xs) => `<array>${xs.map(str).join('')}</array>`;
 
 /**
  * { label, installRoot, config, reviewRoot, reviewHome, accountCopy, ownerHome, ownerUid, logDir } → { runner, accountCopy }
- * (the two plist texts). `label` is a prefix: the jobs are <label>.review-runner and <label>.review-account.
+ * (the two plist texts). `label` is a prefix: the jobs are <label>.review-runner and <label>.review-account. `config` is
+ * the runner's config, at its fixed name in the copy (RUNNER_CONFIG), so the updater's `keep` carries it over.
  */
 export function reviewDaemonPlists({ label, installRoot, config, reviewRoot, reviewHome, accountCopy, ownerHome, ownerUid, logDir }) {
   if (!LABEL.test(String(label))) throw new Error('bad job label');
   for (const [k, v] of Object.entries({ installRoot, config, reviewRoot, reviewHome, accountCopy, ownerHome, logDir })) if (!ABS.test(String(v))) throw new Error(`${k} must be an absolute path`);
   if (!Number.isInteger(ownerUid) || ownerUid <= 0) throw new Error('ownerUid must be the owner\'s uid');
+  if (config !== join(installRoot, RUNNER_CONFIG)) throw new Error(`config must be ${join(installRoot, RUNNER_CONFIG)}, the runner's config in the copy`);
   const node = join(installRoot, NODE);
   const path = '/usr/bin:/bin:/usr/sbin:/sbin';
   const runner = plist([

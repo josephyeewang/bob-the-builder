@@ -51,7 +51,7 @@ import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { runnerPass, CARD_ID, isClaudeCommand } from './review-runner.mjs';
-import { STAMP } from './review-daemons.mjs';
+import { installProblem, readInstallStamp, aclProblem } from './install-check.mjs';
 import { sessionVerdict, verdictFromFile } from '../../M9-record/outbox.mjs';
 import { SESSION_ID } from '../../../shared/record.mjs';
 import { readAccountFile, ACCOUNT_FILE } from './accounts.mjs';
@@ -70,7 +70,7 @@ const CHILD_MS = 10_000;
  * else, and not links (L71 point 1, the item 20(b) rule). A folder the workers' Mac user could write could have the
  * role folder renamed away, so a fail would read as silence.
  */
-export function readConfig(file, { lstat = lstatSync, top = '/' } = {}) {
+export function readConfig(file, { lstat = lstatSync, top = '/', acl = aclProblem } = {}) {
   const c = JSON.parse(readFileSync(file, 'utf8'));
   for (const k of ABS) if (typeof c?.[k] !== 'string' || !isAbsolute(c[k])) throw new Error(`config: ${k} must be an absolute path`);
   if (c.accountCopy !== undefined && (typeof c.accountCopy !== 'string' || !isAbsolute(c.accountCopy))) throw new Error('config: accountCopy must be an absolute path');
@@ -79,23 +79,26 @@ export function readConfig(file, { lstat = lstatSync, top = '/' } = {}) {
   if (!c.uids || typeof c.uids !== 'object') throw new Error('config: uids must map each role to a uid');
   // The runner's folder and review's outbox are two walls (L68 (4)): review sessions write the outbox, and only the
   // runner writes its launch and ended records. One inside the other (or the same folder) would let a session's
-  // folder stand where a runner's record is read. Compared on real paths, so a link can't hide it.
-  const r = realPath(c.root);
-  const o = realPath(c.outboxRoot);
+  // folder stand where a runner's record is read. Compared on real paths, so a link or a change of case can't hide it
+  // (L73 point 7(a)).
+  const r = realPath(c.root).toLowerCase();
+  const o = realPath(c.outboxRoot).toLowerCase();
   if (inside(r, o) || inside(o, r)) throw new Error(`config: root (${c.root}) and outboxRoot (${c.outboxRoot}) must be two separate folders, neither inside the other`);
   const owners = [0, c.uids.reviewer].filter((u) => Number.isInteger(u) && u >= 0);
   for (const k of ['root', 'outboxRoot']) {
-    const bad = wallProblem(c[k], owners, { lstat, top });
+    const bad = wallProblem(c[k], owners, { lstat, top, acl });
     if (bad) throw new Error(`config: ${k}: ${bad}`);
   }
   return c;
 }
 
-// A folder and every folder above it, up to `top`: plain folders (not links) of one of `owners`, written by no one else.
-function wallProblem(path, owners, { lstat, top }) {
+// A folder and every folder above it, up to `top`: plain folders (not links) of one of `owners`, written by no one else,
+// with no access list (L73 point 7(c)).
+function wallProblem(path, owners, { lstat, top, acl }) {
   const p0 = resolve(path);
   const rel = relative(top, p0);
   if (!isAbsolute(top) || rel === '..' || rel.startsWith('../') || isAbsolute(rel)) return `${p0} is not under ${top}`;
+  const seen = [];
   for (let p = p0; ; p = dirname(p)) {
     const what = p === p0 ? p : `${p}, above it,`;
     let st; try { st = lstat(p); } catch { return `${what} is missing`; }
@@ -103,16 +106,20 @@ function wallProblem(path, owners, { lstat, top }) {
     if (!st.isDirectory()) return `${what} is not a folder`;
     if (!owners.includes(st.uid)) return `${what} is not owned by root or the review user`;
     if (st.mode & 0o022) return `${what} can be written by others`;
-    if (p === top || p === dirname(p)) return null;
+    seen.push(p);
+    if (p === top || p === dirname(p)) return acl(seen);
   }
 }
 
-/** A path's real path: its nearest folder that exists, with links resolved, and the rest of the path as given. */
+/**
+ * A path's real path: its nearest folder that exists, with links resolved and in the case the disk holds it
+ * (realpathSync.native: the plain one keeps the case it was given, L73 point 7(a)), and the rest of the path as given.
+ */
 function realPath(p) {
   let head = resolve(p);
   const rest = [];
   for (;;) {
-    try { return join(realpathSync(head), ...rest); } catch { /* not there yet */ }
+    try { return join(realpathSync.native(head), ...rest); } catch { /* not there yet */ }
     const up = dirname(head);
     if (up === head) return resolve(p);
     rest.unshift(basename(head));
@@ -122,50 +129,16 @@ function realPath(p) {
 /** Is `p` the folder `dir` or inside it? */
 const inside = (p, dir) => { const rel = relative(dir, p); return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel)); };
 
-/**
- * The installed copy: every folder and file under `installRoot` owned by `owner` (root) and written by no one else, no
- * links; each of `files` inside it; and every folder above it, up to `top` (/), root's, written by no one else and not a
- * link (item 20(b)). `lstat` is a port so a test can stand in for root, and `top` lets a test stop in its own throwaway
- * folder. Null, or the first problem.
- */
-export function installProblem(installRoot, files, { owner = 0, lstat = lstatSync, list = readdirSync, top = '/' } = {}) {
-  for (const f of files) {
-    const rel = typeof f === 'string' && isAbsolute(f) ? relative(installRoot, f) : '..';
-    if (rel === '' || rel.startsWith('..') || isAbsolute(rel)) return `${f} is not inside the installed copy ${installRoot}`;
-    // Each named file itself too, so a missing one is named rather than passed over by the walk below.
-    let st; try { st = lstat(f); } catch { return `${f} is missing`; }
-    if (st.isSymbolicLink()) return `${f} is a link`;
-    if (st.uid !== owner) return `${f} is not owned by root`;
-    if (st.mode & 0o022) return `${f} can be written by others than root`;
-  }
-  const above = (p) => { const r = relative(top, p); return r === '..' || r.startsWith('../') || isAbsolute(r); };
-  if (!isAbsolute(top) || above(installRoot)) return `${installRoot} is not under ${top}`;
-  for (let p = dirname(installRoot); !above(p); p = dirname(p)) {
-    let st; try { st = lstat(p); } catch { return `${p}, above the installed copy, is missing`; }
-    if (st.isSymbolicLink()) return `${p}, above the installed copy, is a link (name the copy by its real path)`;
-    if (!st.isDirectory()) return `${p}, above the installed copy, is not a folder`;
-    if (st.uid !== owner) return `${p}, above the installed copy, is not owned by root`;
-    if (st.mode & 0o022) return `${p}, above the installed copy, can be written by others than root`;
-    if (p === top || p === dirname(p)) break;
-  }
-  const walk = (p) => {
-    let st; try { st = lstat(p); } catch { return `${p} is missing`; }
-    if (st.isSymbolicLink()) return `${p} is a link`;
-    if (st.uid !== owner) return `${p} is not owned by root`;
-    if (st.mode & 0o022) return `${p} can be written by others than root`;
-    if (!st.isDirectory()) return null;
-    for (const n of list(p)) { const bad = walk(join(p, n)); if (bad) return bad; }
-    return null;
-  };
-  return walk(installRoot);
-}
+// installProblem, the stamp reader and the access-list check live in install-check.mjs, which root's updater runs
+// too; they are passed on here for the runner's own callers and tests.
+export { installProblem, readInstallStamp };
 
 /**
  * What a review session runs (L66 M2), named one by one: the runner itself, its config, the wiring, the claude
  * program, the node this runs on, the hooks folder and each review role's settings template (L67). Each must be inside
  * the installed copy and root's alone.
  */
-export function programsProblem(c, { self, config, node = realpathSync(process.execPath), ...opts } = {}) {
+export function programsProblem(c, { self, config, node = realpathSync.native(process.execPath), ...opts } = {}) {
   return installProblem(c.installRoot, [self, config, c.wiring, c.claudeBin, node, c.hooksDir, ...REVIEW_ROLES.map((r) => templateFile(c.installRoot, r))], opts);
 }
 
@@ -239,22 +212,6 @@ export function adminAnswer(r) {
   throw new Error(`the admin check gave no answer (${r?.error?.code ?? `exit ${r?.status}`})`);
 }
 
-/**
- * The installed copy's commit stamp (review-daemons.mjs `STAMP`), read as root's plain file: 40 hex, or null when it is
- * missing or not root's alone (the status then shows none, and the Dispatcher tells Joe).
- */
-export function readInstallStamp(installRoot, { owner = 0 } = {}) {
-  let fd;
-  try { fd = openSync(join(installRoot, STAMP), constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); } catch { return null; }
-  try {
-    const st = fstatSync(fd);
-    // No check of a second name (L71 point 4): a hard link can't change root's bytes; owner, mode and size stay.
-    if (!st.isFile() || st.uid !== owner || st.mode & 0o022 || st.size > 64) return null;
-    const t = readFileSync(fd, 'utf8').trim();
-    return /^[0-9a-f]{40}$/.test(t) ? t : null;
-  } catch { return null; } finally { closeSync(fd); }
-}
-
 const TAP_NAME = /^([A-Za-z0-9-]{1,128})\.json$/;
 const MAX_TAP_BYTES = 4096;
 /**
@@ -310,7 +267,7 @@ export function sessionsFrom(text, bin, self = process.pid) {
 const run = (bin, args) => spawnSync(bin, args, { encoding: 'utf8', timeout: CHILD_MS, stdio: ['ignore', 'pipe', 'pipe'] });
 
 /** The real ports (the wiring gives `start`). */
-export function realPorts(c, wiring, { node = realpathSync(process.execPath) } = {}) {
+export function realPorts(c, wiring, { node = realpathSync.native(process.execPath) } = {}) {
   const uid = c.uids.reviewer;
   return {
     root: c.root, outboxRoot: c.outboxRoot, uids: c.uids, reviewHome: c.reviewHome, claudeBin: c.claudeBin,
@@ -363,8 +320,8 @@ export async function main(argv, { log = (s) => process.stderr.write(`${s}\n`) }
   if (!argv[0]) { log('usage: review-runner-main.mjs <config.json>'); return 1; }
   let c;
   try { c = readConfig(argv[0]); } catch (e) { log(`review runner: ${e.message}`); return 1; }
-  const self = realpathSync(fileURLToPath(import.meta.url));
-  const bad = programsProblem(c, { self, config: realpathSync(argv[0]) });
+  const self = realpathSync.native(fileURLToPath(import.meta.url));
+  const bad = programsProblem(c, { self, config: realpathSync.native(argv[0]) });
   if (bad) { log(`review runner: refused, the installed copy is not root's alone: ${bad}`); return 1; }
   let wiring;
   try { wiring = await import(pathToFileURL(c.wiring).href); } catch (e) { log(`review runner: the wiring could not be loaded (${e.message})`); return 1; }
@@ -376,6 +333,6 @@ export async function main(argv, { log = (s) => process.stderr.write(`${s}\n`) }
   return r.ok ? 0 : 1;
 }
 
-const me = (() => { try { return realpathSync(fileURLToPath(import.meta.url)); } catch { return null; } })();
-const invoked = (() => { try { return process.argv[1] ? realpathSync(process.argv[1]) : null; } catch { return null; } })();
+const me = (() => { try { return realpathSync.native(fileURLToPath(import.meta.url)); } catch { return null; } })();
+const invoked = (() => { try { return process.argv[1] ? realpathSync.native(process.argv[1]) : null; } catch { return null; } })();
 if (me && me === invoked) process.exitCode = await main(process.argv.slice(2));

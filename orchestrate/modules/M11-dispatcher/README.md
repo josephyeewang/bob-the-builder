@@ -42,7 +42,7 @@ Every outside effect (launching, stopping, typing into a session, git, alerts) i
 | `leads()` | leads | Per Lead: `{ lead, size, outboxNames, questionOpen, send, stopSession, startLead }` |
 | `sessions()`, `probe`, `launch`, `stopGroup`, `saveWork`, `hostLock`, `pauseLead` | pass | As in `pass.mjs` |
 | `hasSession`, `gateAlive` | limits | As in `merges.mjs` |
-| `hasReviewer`, `requestReview`, `reviewAlerts` | limits | From `reviewPorts({ requests, status, reviewUid, mainHead })` (`review-requests.mjs`, L65, L66): the review runner's `requests/` folder, its `status.json`, the review user's uid, and `mainHead(installed)` → `{ commit, since }` for the stamp check (main's commit, 40 hex, and when main first moved past the installed commit); without `mainHead` there is no stamp check |
+| `hasReviewer`, `requestReview`, `reviewAlerts` | limits | From `reviewPorts({ requests, status, reviewUid, mainHead })` (`review-requests.mjs`, L65, L66): the review runner's `requests/` folder, its `status.json`, the review user's uid, and `mainHead(installed)` → `{ commit, since }` for the stamp check (main's commit, 40 hex, and since when the copy has been behind it, from root's own record that the updater writes: M4 `install-check.mjs` `behindSince`, never a commit's date, L73); without `mainHead` there is no stamp check |
 | `filesOf` | undo | The files a merged PR changed |
 | `sendFrontDoor`, `restartFrontDoor`, `startMinibase`, `frontDoorAlive`, `strayFrontDoor`, `frontDoorHandoff` | phone | As in `phone-link.mjs` |
 | `cleanup: { copiesRoot, sealRoot, mirrorFor, git, saveWork }` | cleanup | As in `cleanup.mjs` |

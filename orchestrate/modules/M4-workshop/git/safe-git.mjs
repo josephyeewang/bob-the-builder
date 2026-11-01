@@ -77,6 +77,9 @@ export const SAFE_CONFIG = Object.freeze([
 ]);
 
 const FIXED_PATH = '/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin';
+// The PATH for git that runs as root (the updater, L73 point 6): only folders only root can write. /opt/homebrew/bin is
+// the admin group's, so a program git looks up there could be swapped by the workers' Mac user.
+export const ROOT_PATH = '/usr/bin:/bin:/usr/sbin:/sbin';
 let privateHome = null;
 const HOME_PREFIX = 'orch-git-home-';
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -117,10 +120,10 @@ const home = () => {
 export const callLog = [];
 
 /** The environment for one git call. `extraConfig` (pairs) is appended after SAFE_CONFIG. */
-export function safeGitEnv({ gitDir, commonDir, workTree, extraConfig = [] } = {}) {
+export function safeGitEnv({ gitDir, commonDir, workTree, extraConfig = [], path = FIXED_PATH } = {}) {
   const cfg = [...SAFE_CONFIG, ...extraConfig];
   const env = {
-    PATH: FIXED_PATH,
+    PATH: path,
     HOME: home(),
     LANG: 'C',
     LC_ALL: 'C',
@@ -387,8 +390,8 @@ function runChild(bin, argv, { cwd, env, input = null, timeoutMs }) {
 }
 
 /** The keys and values in one config file, read by git without following its includes, or { why }. */
-async function readConfigFile(file, { gitBin, timeoutMs }) {
-  const r = await runChild(gitBin, ['config', '--file', file, '--no-includes', '--list', '-z'], { cwd: home(), env: safeGitEnv(), timeoutMs });
+async function readConfigFile(file, { gitBin, timeoutMs, path }) {
+  const r = await runChild(gitBin, ['config', '--file', file, '--no-includes', '--list', '-z'], { cwd: home(), env: safeGitEnv({ path }), timeoutMs });
   if (r.code !== 0) return { why: r.stderr.trim().slice(0, 200) || `exit ${r.code}` };
   const entries = r.stdout.toString('utf8').split('\0').filter((x) => x !== '').map((x) => {
     const nl = x.indexOf('\n');
@@ -404,13 +407,13 @@ const labelOf = (f, { dir, common }) => {
   return f;
 };
 
-async function checkRepo(gitDir, { gitBin = 'git', timeoutMs = 30000, allowObjects } = {}) {
+async function checkRepo(gitDir, { gitBin = 'git', timeoutMs = 30000, allowObjects, path } = {}) {
   let found;
   try { found = repoConfigFiles(gitDir, { allowObjects }); } catch (e) { return { why: `its folders could not be read: ${e.message}` }; }
   if (found.why) return { why: found.why, missing: found.missing };
   const bad = [];
   for (const f of found.files) {
-    const r = await readConfigFile(f, { gitBin, timeoutMs });
+    const r = await readConfigFile(f, { gitBin, timeoutMs, path });
     const where = labelOf(f, found);
     if (r.why) return { why: `its config ${where} could not be read: ${r.why}` };
     for (const [k, v] of r.entries) if (!inertSetting(k, v)) bad.push(`${k} (${where})`);
@@ -502,19 +505,20 @@ export function withNoPrograms(args) {
  * the check read (GIT_DIR and GIT_COMMON_DIR), so it reads no pointer file or commondir itself. `allowObjects` names
  * the objects folders an alternates file may borrow from. A command that reaches another repository must name the
  * place: an absolute path, or `address` (one https address) (L51). Only `git init` runs where nothing is yet, and a
- * call with no command (`--version`) opens no repository, so it is not checked.
+ * call with no command (`--version`) opens no repository, so it is not checked. `path` replaces the PATH git gets
+ * (ROOT_PATH for git run as root).
  */
-export async function git(args, { gitDir, workTree, cwd, input, extraConfig, allowObjects, address, purpose = 'unnamed', timeoutMs = 120000, gitBin = 'git' } = {}) {
+export async function git(args, { gitDir, workTree, cwd, input, extraConfig, allowObjects, address, purpose = 'unnamed', timeoutMs = 120000, gitBin = 'git', path } = {}) {
   if (!gitDir) return { code: -1, stdout: Buffer.alloc(0), stderr: 'safe-git: GIT_DIR is required' };
   const at = commandAt(args);
   let dirs = { gitDir };
   if (at < args.length) {
-    const checked = await checkRepo(gitDir, { gitBin, allowObjects, timeoutMs });
+    const checked = await checkRepo(gitDir, { gitBin, allowObjects, timeoutMs, path });
     const why = checked.missing && args[at] === 'init' ? null : checked.why ?? placeWhy(args, at, address);
     if (why) return { code: -1, stdout: Buffer.alloc(0), stderr: `safe-git: refused: ${why}` };
     if (!checked.why) dirs = { gitDir: checked.dir, commonDir: checked.common };
   }
-  const env = safeGitEnv({ ...dirs, workTree, extraConfig });
+  const env = safeGitEnv({ ...dirs, workTree, extraConfig, ...(path ? { path } : {}) });
   const where = cwd ?? home();
   callLog.push({ purpose, gitDir, cwd: where, workTree: workTree ?? null, args: args.filter((a) => !/^http\..*extraheader/i.test(a)) });
   return runChild(gitBin, ['--no-pager', ...withNoPrograms(args)], { cwd: where, env, input, timeoutMs });
