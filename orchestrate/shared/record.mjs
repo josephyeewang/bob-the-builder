@@ -243,7 +243,12 @@ export function memoryRecord() {
     applyOutbox(tag, file) {
       // Like the real M9, a file whose name has no outbox kind is refused, never logged as handed in (L121).
       const name = String(file).split('/').pop();
-      if (!outboxKind(name)) return refused(`no outbox kind for file name ${name.slice(0, 80)}`);
+      const kind = outboxKind(name);
+      if (!kind) return refused(`no outbox kind for file name ${name.slice(0, 80)}`);
+      // The same role and record-rule checks as M9's readOutboxFile, in its order and with its reasons (L129 M-1).
+      const spec = OUTBOX_KINDS[kind];
+      if (!spec.roles.includes(tag?.role)) return refused(`outbox kind ${kind} is not listed for ${tag?.role}`);
+      if (!spec.entity) return refused(`outbox kind ${kind} has no record rule yet`);
       const seq = log(`${tag.role}:${tag.sessionId}`, 'outbox', 'report', String(file).split('/').pop(), null, null, { card: tag.card ?? null });
       return { ok: true, seq };
     },

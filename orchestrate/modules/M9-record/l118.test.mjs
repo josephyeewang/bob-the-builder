@@ -5,7 +5,7 @@
 // and the real fact-writing modules run on one real Record with no fact id written by two actors.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { PRODUCT, must, plan, product, setup } from './fixtures.test-helper.mjs';
+import { PRODUCT, must, outboxFile, plan, product, setup } from './fixtures.test-helper.mjs';
 import { makeFactWriter } from '../M12-sensors/facts.mjs';
 import { readPowerSource } from '../M12-sensors/power-source.mjs';
 import { makeAlerts, fakeIssues } from '../M13-ledger/alerts.mjs';
@@ -103,4 +103,19 @@ test('the real Sensors and Ledger fact writers run on one real Record: every wri
   assert.deepEqual(shared, [], 'no fact id is written by two actors');
   assert.ok(writes.filter((w) => w.actor === 'ledger').length > 5 && writes.some((w) => w.actor === 'sensors'), `${writes.length} fact writes`);
   assert.ok([...byId.keys()].some((id) => (byId.get(id).has('ledger')) && writes.filter((w) => w.id === id).length > 1), 'some Ledger fact is rewritten');
+});
+
+// #91 r2 audit (L129), probe m68fam carried as a test: a Lead's handoff, handed in through its outbox, is the Lead's
+// own; the Dispatcher, another Lead session, the same session's writer name and Learning may not rewrite it.
+test('L129: a Lead handoff from the outbox is rewritten by no one, the Dispatcher included', () => {
+  const env = setup({ prefix: 'm9-l129-' });
+  const f = outboxFile(env, 'lead', 'X', 'handoff-X.md', 'where I got to');
+  const a = env.record.applyOutbox({ role: 'lead', sessionId: 'X' }, f);
+  assert.equal(a.ok, true, a.reason);
+  const h = env.record.list('handoff')[0];
+  for (const actor of ['dispatcher', 'lead:X', 'lead:Y', 'learning:Z']) {
+    const r = env.record.write({ actor, entity: 'handoff', id: h.id, expectRev: h.rev, doc: { ...h.doc, text: 'forged' } });
+    assert.equal(r.ok, false, actor);
+  }
+  assert.equal(env.record.read('handoff', h.id).doc.text, h.doc.text);
 });

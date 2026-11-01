@@ -85,3 +85,16 @@ test('L121: the stand-in refuses a file name with no outbox kind, as the real M9
   assert.equal(outboxKind('report-C-1.md'), 'report-');
   assert.equal(outboxKind('ask-request-1.md'), 'ask-request-', 'the longest kind wins');
 });
+
+test('L129: the stand-in names a document\'s first writer as its creator, whoever writes it later', () => {
+  const rec = memoryRecord();
+  assert.equal(rec.write({ actor: 'sensors', entity: 'fact', id: 'F-1', expectRev: 0, doc: { type: 'x' } }).ok, true);
+  assert.equal(rec.write({ actor: 'ledger', entity: 'fact', id: 'F-1', expectRev: 1, doc: { type: 'y' } }).ok, true);
+  assert.equal(rec.createdBy('fact', 'F-1'), 'sensors');
+  assert.equal(rec.createdBy('fact', 'F-2'), null);
+});
+
+test('L129: a name with a dot in its id has no outbox kind', () => {
+  assert.equal(outboxKind('report-X.1.md'), null);
+  assert.equal(outboxKind('report-X1.md'), 'report-');
+});

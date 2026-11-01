@@ -102,15 +102,14 @@ export const UNUSED_GRANTS = Object.freeze([
   { grant: 'card workshop update', reason: 'no module writes this yet (M4 sets the head on a card after a push); kept as the design\'s row, listed to the lead as a candidate to drop until it is built' },
   { grant: 'card approvals update', reason: 'no module writes this yet (M2 sets or clears needs_joe, approval_required and cancel_reason); kept as the design\'s row, listed to the lead as a candidate to drop until it is built' },
   { grant: 'session dispatcher create', reason: 'no module writes this yet (M11 records a session it starts); kept as the design\'s row, listed to the lead as a candidate to drop until it is built' },
-  { grant: 'session workshop update', reason: 'no module writes this yet (M4 updates the session it runs); kept as the design\'s row, listed to the lead as a candidate to drop until it is built' },
+  { grant: 'session workshop update', reason: 'no module writes this yet (M4 updates the session it runs), but moves.mjs gives every session move to the Workshop (preparing → running, running → waiting, reporting, stuck, recycling, ended), so dropping it would forbid every session move; kept, and flagged to the lead (L129)' },
   { grant: 'product approvals create', reason: 'no module writes this yet (M2 adds a product); kept as the design\'s row, listed to the lead as a candidate to drop until it is built' },
   { grant: 'product approvals update', reason: 'no module writes this yet (M2 changes a product); kept as the design\'s row, listed to the lead as a candidate to drop until it is built' },
   { grant: 'fact live_check create', reason: 'no module writes this yet (M7 live check has only its README); kept as the design\'s row, listed to the lead as a candidate to drop until it is built' },
-  { grant: 'report ledger create', reason: 'no module writes this yet (M13 files a report); kept as the design\'s row, listed to the lead as a candidate to drop until it is built' },
-  { grant: 'lesson dispatcher create', reason: 'no module writes this yet (M11 files a lesson; learning is Phase 1); kept as the design\'s row, listed to the lead as a candidate to drop until it is built' },
 ]);
 
 const LITERAL = /^'([a-z_]+)'$/;
+const STORE = 'modules/M9-record/store.mjs';
 
 // Source with comment text blanked, keeping line numbers and string contents (or, with { strings: true }, blanking
 // those too, quotes kept, so a word inside a string is never read as code).
@@ -191,8 +190,32 @@ function functionSpans(s) {
 }
 const enclosing = (spans, at) => spans.filter(([, a, b]) => a <= at && at < b).sort((x, y) => y[1] - x[1])[0]?.[0] ?? null;
 
+// A spread after the actor, entity, id or expectRev can replace them, so the scan can't trust the literal it read
+// (#91 r2 audit N1). A spread is fine only before all four.
+const FIXED_KEYS = ['actor', 'entity', 'id', 'expectRev'];
+export function lateSpread(obj) {
+  let seen = false;
+  for (const p of topParts(obj)) {
+    if (p.startsWith('...')) { if (seen) return true; continue; }
+    const k = /^([A-Za-z_$][\w$]*)\s*(?::|$)/.exec(p)?.[1];
+    if (FIXED_KEYS.includes(k)) seen = true;
+  }
+  return false;
+}
+
 // Top-level `key: value` and shorthand properties of an object literal's text.
 export function topProps(obj) {
+  const props = {};
+  for (const p of topParts(obj)) {
+    const m = /^([A-Za-z_$][\w$]*)\s*:\s*([\s\S]*)$/.exec(p);
+    if (m) props[m[1]] = m[2].trim();
+    else if (/^[A-Za-z_$][\w$]*$/.test(p)) props[p] = p;   // shorthand: a variable of that name
+  }
+  return props;
+}
+
+// The top-level parts of an object literal's text, trimmed, empty ones dropped.
+function topParts(obj) {
   const body = obj.slice(1, -1); const parts = []; let depth = 0; let q = null; let start = 0;
   for (let i = 0; i < body.length; i++) {
     const c = body[i];
@@ -203,13 +226,7 @@ export function topProps(obj) {
     else if (c === ',' && depth === 0) { parts.push(body.slice(start, i)); start = i + 1; }
   }
   parts.push(body.slice(start));
-  const props = {};
-  for (const p of parts.map((x) => x.trim()).filter(Boolean)) {
-    const m = /^([A-Za-z_$][\w$]*)\s*:\s*([\s\S]*)$/.exec(p);
-    if (m) props[m[1]] = m[2].trim();
-    else if (/^[A-Za-z_$][\w$]*$/.test(p)) props[p] = p;   // shorthand: a variable of that name
-  }
-  return props;
+  return parts.map((x) => x.trim()).filter(Boolean);
 }
 
 // `0` creates; a read document's own rev (`x.rev`, `x?.rev`) updates; anything else may do either (L118 m4).
@@ -277,6 +294,7 @@ export function scanSources(files) {
       if (!obj) { problems.push(`${file}:${line}: a write whose object never closes`); continue; }
       const props = topProps(obj);
       if (!('actor' in props) && !('entity' in props)) { const k = `${file}|${receiver}`; notObject.set(k, [...(notObject.get(k) ?? []), line]); continue; }
+      if (lateSpread(obj)) { problems.push(`${file}:${line}: a spread after the actor, entity, id or expectRev can replace them; put it first`); continue; }
       const actor = resolve(props.actor); const entity = resolve(props.entity); const modes = modesOf(props.expectRev);
       if (!modes) { problems.push(`${file}:${line}: a Record write with no expectRev`); continue; }
       if (actor && entity) { sites.push({ file, line, fn: enclosing(spans, m.index), actor, entity, modes }); continue; }
@@ -284,6 +302,13 @@ export function scanSources(files) {
     }
     const other = otherForms(s, b);
     if (other.length) forms.set(file, other);
+    // M9's store commits a transaction without the writer's checks, so only M9 may load it (#91 r2 audit N9).
+    // Any import or re-export form, static or dynamic, whose path is that file.
+    if (!file.startsWith('modules/M9-record/')) {
+      const hit = [...s.matchAll(/\b(?:import|export)\b[^;'"`]*?from\s*(['"])([^'"]+)\1|\bimport\s*\(\s*(['"`])([^'"`]+)\3|\bimport\s*(['"])([^'"]+)\5/g)]
+        .find((m) => { const spec = m[2] ?? m[4] ?? m[6]; return spec.startsWith('.') && posix.normalize(posix.join(posix.dirname(file), spec)) === STORE; });
+      if (hit) problems.push(`${file}:${lineOf(s, hit.index)}: imports M9's store.mjs, which skips the Store Writer's checks; only M9 may`);
+    }
   }
   for (const [k, lines] of notObject) {
     const [file, receiver] = k.split('|');

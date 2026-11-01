@@ -157,8 +157,8 @@ const SNAPSHOT = {
   fact: { sensors: { create: '*', update: '*' }, ledger: { create: '*', update: '*' }, dispatcher: { create: '*', update: '*' }, workshop: { create: '*', update: '*' }, live_check: { create: '*' } },
   product: { approvals: { create: '*', update: '*' } },
   handoff: { lead: { create: '*' }, learning: { create: '*' }, dispatcher: { create: '*', update: '*' } },
-  report: Object.fromEntries(['ledger', 'worker', 'reviewer', 'scout', 'writer', 'thinking', 'script', 'front_door', 'incident'].map((r) => [r, { create: '*' }])),
-  lesson: { dispatcher: { create: '*' }, learning: { create: '*', update: '*' } },
+  report: Object.fromEntries(['worker', 'reviewer', 'scout', 'writer', 'thinking', 'script', 'front_door', 'incident'].map((r) => [r, { create: '*' }])),
+  lesson: { learning: { create: '*', update: '*' } },
   launch: { dispatcher: { create: '*' } },
   merge_request: { dispatcher: { create: '*' } },
 };
@@ -324,4 +324,21 @@ test('L118 M2 on the real Record: the dispatcher creates a merge request and may
   const b = env.record.write({ actor: 'dispatcher', entity: 'merge_request', id: 'mr-1', expectRev: cur.rev, doc: { ...cur.doc, n: 2 } });
   assert.equal(b.ok, false);
   assert.match(b.reason, /may not change merge_request/);
+});
+
+// #91 r2 audit N1 and N9 (L129): two write forms the scan used to miss.
+test('L129 N1: a spread after the literal actor, entity, id or expectRev is a problem; a spread first is not', () => {
+  const at = (obj) => problemsOf([{ file: 'modules/M3-lead/t.mjs', src: `const r = ctx.record.write(${obj});\n` }]);
+  for (const obj of ["{ actor: 'lead', entity: 'card', id, expectRev: 0, doc, ...over }", "{ actor: 'lead', ...over, entity: 'card', id, expectRev: 0, doc }",
+    "{ entity: 'card', id, expectRev: 0, doc, ...over, actor: 'lead' }"]) assert.match(at(obj), /a spread after the actor, entity, id or expectRev/, obj);
+  assert.doesNotMatch(at("{ ...over, actor: 'lead', entity: 'card', id, expectRev: 0, doc }"), /spread/);
+  assert.doesNotMatch(at("{ actor: 'lead', entity: 'card', id, expectRev: 0, doc: { ...doc, x: 1 } }"), /spread/, 'a spread inside doc is not top level');
+});
+
+test('L129 N9: only M9 may import its store.mjs, in any import form', () => {
+  const forms = ["import { openStore } from '../M9-record/store.mjs';", "import * as s from '../M9-record/store.mjs';",
+    "export { openStore } from '../M9-record/store.mjs';", "const s = await import('../M9-record/store.mjs');", "import '../M9-record/store.mjs';"];
+  for (const src of forms) assert.match(problemsOf([{ file: 'modules/M11-dispatcher/x.mjs', src }]), /imports M9's store\.mjs/, src);
+  assert.doesNotMatch(problemsOf([{ file: 'modules/M9-record/writer.mjs', src: forms[0] }]), /store\.mjs/);
+  assert.doesNotMatch(problemsOf([{ file: 'modules/M2-approvals/x.mjs', src: "import { a } from './ask-store.mjs';" }]), /store\.mjs/);
 });

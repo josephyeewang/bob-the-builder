@@ -58,7 +58,7 @@ export async function gatePass(ctx) {
   if (!start.open) return { ran: false, reason: NOT_GREEN_LINE, problems: start.problems, did };
 
   // Rewrites a document it just read, so it passes that read's rev: an update, never a create (L118 c3).
-  const write = (entity, cur, fields, extra = {}) => record.write({ actor: ACTOR, entity, id: cur.id, expectRev: cur.rev, doc: { ...(cur.doc ?? {}), ...fields }, ...extra });
+  const write = (entity, cur, fields, extra = {}) => record.write({ ...extra, actor: ACTOR, entity, id: cur.id, expectRev: cur.rev, doc: { ...(cur.doc ?? {}), ...fields } });
   const fresh = (entity, id) => record.read(entity, id);
   // Audit results come from Sensors alone (L118 m9): an audit_run fact any other writer made is not read.
   const auditRuns = () => record.list('fact').filter((x) => x.doc?.type === 'audit_run' && record.createdBy('fact', x.id) === 'sensors');
@@ -96,7 +96,7 @@ export async function gatePass(ctx) {
   // result moves it on, and also after (a late mark means the audit needs running again; the alert says so).
   for (const m of merges().filter((x) => ['merged', 'audited_ok', 'audit_flagged'].includes(x.doc.state) && SHA.test(x.doc.merge_commit ?? ''))) {
     const card = fresh('card', m.doc.card);
-    if (card?.doc?.state === 'merging' || !m.doc.marked_at) await complete(m, m.doc.merge_commit);
+    if (card?.doc?.state === 'merging' || !m.doc.marked_at || m.doc.late_mark_alert === 'owed') await complete(m, m.doc.merge_commit);
   }
 
   // 3. Audit results (R-0b-93): only a Sensors audit_run fact for the merge commit moves a merged merge. An audit_run
@@ -238,7 +238,7 @@ export async function gatePass(ctx) {
       if (!c.ok) alert({ type: 'merge_gate_write_refused', card: card.id, to: 'merged', reason: c.reason });
       else if (card.doc.kind === 'exact_reverse') { const u = markReverted({ record, alert }, card.id); if (u.ok) step(m, 'reverted', { card: u.card }); }
     }
-    if (m.doc.marked_at) return;
+    if (m.doc.marked_at) { tellLateMark(m, sha); return; }
     let posts;
     try {
       posts = [
@@ -251,12 +251,25 @@ export async function gatePass(ctx) {
       try { s = await gh.post(`${base}/statuses/${sha}`, { state: 'success', ...p }); } catch { s = { status: 0 }; }
       if (s?.status !== 201) { alert({ type: 'merge_mark_failed', merge: m.id, commit: sha, context: p.context, status: s?.status }); return; }
     }
-    const r = write('merge', fresh('merge', m.id), { marked_at: iso() });
+    // An audit that already ran on this commit read it with no mark: it needs running again. The alert is owed in the
+    // same write as the mark, and cleared only once the alert is taken (L130 m17), so a lost alert is sent next pass.
+    const late = m.doc.state !== 'merged' || auditRuns().some((x) => x.doc.commit === sha);
+    const r = write('merge', fresh('merge', m.id), { marked_at: iso(), ...(late ? { late_mark_alert: 'owed' } : {}) });
     if (r.ok) {
       step(m, 'marked');
-      // An audit that already ran on this commit read it with no mark: it needs running again.
-      if (m.doc.state !== 'merged' || auditRuns().some((x) => x.doc.commit === sha)) alert({ type: 'merge_marked_after_audit', merge: m.id, commit: sha, ask_owner: 'Re-run the audit on this commit?' });
+      tellLateMark(fresh('merge', m.id), sha);
     } else alert({ type: 'merge_gate_write_refused', merge: m.id, to: 'marked', reason: r.reason });
+  }
+
+  // Sends an owed late-mark alert; only an alert that was taken (not false, no throw) clears the debt.
+  function tellLateMark(m, sha) {
+    if (m?.doc?.late_mark_alert !== 'owed') return;
+    let taken;
+    try { taken = alert({ type: 'merge_marked_after_audit', merge: m.id, commit: sha, ask_owner: 'Re-run the audit on this commit?' }) !== false; } catch { taken = false; }
+    if (taken) {
+      const r = write('merge', m, { late_mark_alert: 'told' });
+      if (!r.ok) alert({ type: 'merge_gate_write_refused', merge: m.id, to: 'late mark told', reason: r.reason });
+    }
   }
 
   // A merge in checking or merging, found at the start of a pass (or a merge GitHub didn't confirm): GitHub says

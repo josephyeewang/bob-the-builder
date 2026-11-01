@@ -71,9 +71,9 @@ export const WRITERS = Object.freeze({
   // The Dispatcher writes the restart handoff for a Lead that stopped, and rewrites it on the next stop (M11
   // lead-restart.mjs, L112). It has no ask row: asks are approvals' alone (L17, L72).
   handoff: Object.freeze({ lead: createOnly(), learning: createOnly(), dispatcher: ANY }),
-  report: Object.freeze({ ledger: createOnly(), ...Object.fromEntries(reportRoles.map((r) => [r, createOnly()])) }),
+  report: Object.freeze({ ...Object.fromEntries(reportRoles.map((r) => [r, createOnly()])) }),
   // learning is Phase 1 (0b-1 MAT-11): listed so its row exists, but no learning session starts in 0b.
-  lesson: Object.freeze({ dispatcher: createOnly(), learning: ANY }),
+  lesson: Object.freeze({ learning: ANY }),
   launch: Object.freeze({ dispatcher: createOnly() }),
   // Create-only (L118 M2): a request asked again gets its own id (lane 2, mr-<card>-<head12>-r<n>), so no one rewrites one
   // the Merge Gate may already be reading.
