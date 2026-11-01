@@ -61,14 +61,21 @@ export const WRITERS = Object.freeze({
   verdict: Object.freeze({ reviewer: createOnly(), auditor: createOnly() }),
   session: Object.freeze({ dispatcher: ANY, workshop: Object.freeze({ update: '*' }) }),
   merge: Object.freeze({ merge_gate: ANY }),
-  fact: Object.freeze({ sensors: createOnly(), live_check: createOnly(), workshop: createOnly() }),
+  // Facts at a fixed id are read and written again with the read rev, so each writer that does so may update (L112):
+  // the Sensors' readings and the Ledger's alerts (M12 facts.mjs), the Dispatcher's alert queue, notes, usage band,
+  // outage and restart facts (M11), and the Workshop's push fact (M4 push.mjs). live_check only ever creates.
+  // The real-code check is test/record-writes.test.mjs: every write site in a module must have its row here.
+  fact: Object.freeze({ sensors: ANY, ledger: ANY, dispatcher: ANY, workshop: ANY, live_check: createOnly() }),
   product: Object.freeze({ approvals: ANY }),
-  handoff: Object.freeze({ lead: createOnly(), learning: createOnly() }),
+  // The Dispatcher writes the restart handoff for a Lead that stopped, and rewrites it on the next stop (M11
+  // lead-restart.mjs, L112). It has no ask row: asks are approvals' alone (L17, L72).
+  handoff: Object.freeze({ lead: createOnly(), learning: createOnly(), dispatcher: ANY }),
   report: Object.freeze({ ledger: createOnly(), ...Object.fromEntries(reportRoles.map((r) => [r, createOnly()])) }),
   // learning is Phase 1 (0b-1 MAT-11): listed so its row exists, but no learning session starts in 0b.
   lesson: Object.freeze({ dispatcher: createOnly(), learning: ANY }),
   launch: Object.freeze({ dispatcher: createOnly() }),
-  merge_request: Object.freeze({ dispatcher: createOnly() }),
+  // A refused request for an older rev is asked again over the same id (M11 merges.mjs, audit 0b-6 r2 MAT-6; L112).
+  merge_request: Object.freeze({ dispatcher: ANY }),
 });
 
 export const actorName = (actor) => String(actor).split(':')[0];
