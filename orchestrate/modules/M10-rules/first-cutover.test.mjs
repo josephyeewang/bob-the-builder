@@ -22,7 +22,7 @@ import { KEYS as M11_KEYS, NEW_KEYS as M11_NEW_KEYS, need } from '../M11-dispatc
 import { startGate } from '../M11-dispatcher/gate.mjs';
 import { bands } from '../M11-dispatcher/usage.mjs';
 import { handoffVet } from '../M11-dispatcher/lead-restart.mjs';
-import { KNOWN, SCOPE_OWNERS, numeric, scopeLabel } from './known-gaps.mjs';
+import { KNOWN, SCOPE_OWNERS, scopeLabel } from './known-gaps.mjs';
 import { DAILY_CARD_RULE, m11Scope } from './first-cutover.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -32,28 +32,23 @@ const ENTRY = { product: 'sample-app', owner: 'sample-org', repo: 'sample-app', 
 
 // Reasons the real readers give today on any rules file, each a known gap in the readers, not in the file, and labeled
 // so in the check's own output (known-gaps.mjs; L96 m-D, L115). They go as these land:
-//   - numbers as text (L96): lane 2's M11 sweep (context.*, caps.per_state). (The heartbeat's went with #79: this check
-//     now calls writer.mjs heartbeatLimit, which reads through num(), L123.)
-//   - M11's Mac-wide reads of per-product keys (L115 M-A, L131): lane 2's L104 sweep passes the product at the four
-//     context.* reads. (usage.red_runs's went with #79, which made it Mac-wide in shared/rules.mjs.)
+//   - M11's Mac-wide reads of per-product keys (L115 M-A, L131, L144): lane 2's L104 sweep passes the product at the
+//     four context.* reads and the six per-product time limits. (usage.red_runs's went with #79, and the Dispatcher-wide
+//     NEW_KEYS with #94, which made them Mac-wide in shared/rules.mjs.)
+//   (Numbers and flags as text went with #94: M11 reads through num/dec/flag, L148.)
 // The test 'the pending reasons are exactly these' then fails, and this list is cut to what is left; at [] the todo
 // test below passes.
 const SCOPE = (k) => `M11: ${k} is read without the product, so the real engine gives none${scopeLabel(k)}`;
-const TEXT = (k) => `M11: ${k} must be a number${KNOWN.text}`;
+// The six per-product time limits M11 reads without the product (merges.mjs, pass.mjs; L144, lane 2's L104 O-1 step 2).
+const PER_PRODUCT_TIMEOUTS = Object.freeze(['timeouts.cancel_grace_min', 'timeouts.park_wait_min', 'timeouts.claimed_no_session_min',
+  'timeouts.checking_max_min', 'timeouts.reporting_max_min', 'timeouts.in_review_no_reviewer_min']);
 const PENDING = Object.freeze([
-  SCOPE('usage.pace_min_share'),
-  `M11: caps.shakedown must be a boolean${KNOWN.text}`,
-  ...M11_NEW_KEYS.filter((k) => /^(timeouts|outage)\./.test(k)).map(SCOPE),
-  SCOPE('context.lead.soft'), TEXT('context.lead.soft'),
-  SCOPE('context.lead.hard'), TEXT('context.lead.hard'),
-  SCOPE('context.handoff_cap.role'), TEXT('context.handoff_cap.role'),
-  SCOPE('context.worker.split_after_compactions'), TEXT('context.worker.split_after_compactions'),
-  `M11: caps.per_state must give a number for active, away, paused, light (editingLimits refuses it)${KNOWN.text}`,
+  ...PER_PRODUCT_TIMEOUTS.map(SCOPE),
+  SCOPE('context.lead.soft'), SCOPE('context.lead.hard'), SCOPE('context.handoff_cap.role'), SCOPE('context.worker.split_after_compactions'),
 ]);
 // The keys the pending reasons are about, by gap.
 const keyOf = (x) => x.match(/^M(?:9|11): (\S+) /)[1];
 const PENDING_SCOPE = PENDING.filter((x) => x.endsWith(KNOWN.scopeContext) || x.endsWith(KNOWN.scopeNew)).map(keyOf);
-const PENDING_TEXT = PENDING.filter((x) => x.endsWith(KNOWN.text)).map(keyOf);
 const fit = (...a) => firstCutoverProblems(...a).filter((x) => !PENDING.includes(x));
 
 // The keys the merge gate (M6), Approvals (M2), the Record (M9) and the Dispatcher (M11) read (L86): go_free in the
@@ -230,21 +225,22 @@ export function m11SourceScopes(files = Object.fromEntries(M11_SOURCES.map((f) =
 // M2's readConfig; M6's botId, its required-checks read (a list of check names, gather.mjs:142) and goFreeKinds for
 // undo cards; M9's readyCheck on an undo card in each product state; M11's real startGate for every session kind, its
 // bands() and handoff check, and need() on every other key it reads (NEW_KEYS too, #77 r5 MAT-1) at the type and the scope its
-// sources use (L115 M-A). The pending gaps are mended first (a Mac-wide read of a pending scope key gets the product's
-// value, a pending number given as text is made a number), so the rest of each reader is still tested.
+// sources use (L115 M-A). The pending scope gaps are mended first (a Mac-wide read of a pending scope key gets the
+// product's value), so the rest of each reader is still tested. The mended rules are made with makeRules, so they
+// answer num/dec/flag as the real rules do (#94, L148), not get alone.
 function readersAccept(text) {
   const real = rulesOf(text);
   if (!real) return false;
   const product = 'sample-app';
   const p = { product };
-  const rules = {
+  const rules = makeRules({
     get: (k, o) => {
-      let v = real.get(k, o);
-      if (v === undefined && !o?.product && PENDING_SCOPE.includes(k)) v = real.get(k, p);
-      return PENDING_TEXT.includes(k) ? numeric(v) : v;
+      const v = real.get(k, o);
+      return v === undefined && !o?.product && PENDING_SCOPE.includes(k) ? real.get(k, p) : v;
     },
+    may: (a, s) => real.may(a, s),
     classify: (c) => real.classify(c),
-  };
+  });
   const checks = rules.get('product_profile.required_checks', p);
   const m2 = readConfig(real, product).ok;
   const m6 = botId(real.get('product_profile.robot', p)) !== null && Array.isArray(checks) && checks.every((c) => typeof c === 'string' && c)
@@ -323,17 +319,19 @@ test('the pending reasons are exactly these, on the fixture as given, and each s
   for (const [name, k] of Object.entries(KNOWN)) assert.match(k, /^ \(known: .+, L\d+; waits on .+\)$/, name);
   // L120 c-2: each label's ruling, and the owner it waits on.
   assert.deepEqual(Object.fromEntries(Object.entries(KNOWN).map(([n, k]) => [n, k.match(/, (L\d+); waits on (.+)\)$/).slice(1)])), {
-    text: ['L96', 'step 2'], scopeContext: ['L115', 'lane 2\'s L104 sweep'], scopeNew: ['L144', 'the lead\'s scope call'],
+    scopeContext: ['L115', 'lane 2\'s L104 sweep'], scopeNew: ['L144', 'lane 2\'s L104 O-1 step 2'],
   });
   // usage.red_runs's gap went with #79 (L131): it is Mac-wide in the rules, and M11 reads it so.
   assert.equal(scopeLabel('usage.red_runs'), '');
   assert.equal(scopeLabel('context.lead.soft'), KNOWN.scopeContext);
   // L125 c-1: owners are named key by key; any other key gets no label, so it can't pass as known.
   assert.equal(scopeLabel('timeouts.cancel_grace_min'), KNOWN.scopeNew);
-  for (const k of ['caps.readonly_per_session', 'timeouts.merging_open_max_min', 'anything.at.all', 'context.other', 'constructor']) assert.equal(scopeLabel(k), '', k);
+  // #94 made the Dispatcher-wide keys Mac-wide, so they are no gap (L131, L148).
+  for (const k of ['caps.readonly_per_session', 'timeouts.merging_open_max_min', 'usage.pace_min_share', 'timeouts.dead_quiet_min',
+    'outage.share', 'anything.at.all', 'context.other', 'constructor']) assert.equal(scopeLabel(k), '', k);
   assert.deepEqual(Object.keys(SCOPE_OWNERS), PENDING_SCOPE, 'the map names exactly the pending scope gaps');
   for (const x of PENDING) assert.match(x, / \(known: /, x);
-  assert.deepEqual(PENDING_SCOPE, ['usage.pace_min_share', ...M11_NEW_KEYS.filter((k) => /^(timeouts|outage)\./.test(k)),
+  assert.deepEqual(PENDING_SCOPE, [...PER_PRODUCT_TIMEOUTS,
     'context.lead.soft', 'context.lead.hard', 'context.handoff_cap.role', 'context.worker.split_after_compactions']);
 });
 
@@ -377,17 +375,15 @@ test('the fit check reads each M11 key at the rules\' own scope, and M11\'s sour
   assert.deepEqual([...m11SourceScopes({ 'x.mjs': "need(rules, KEYS.redRuns, { product: p, type: 'list' })" }).scopes.get('redRuns')], ['product']);
 });
 
-// Since #79 usage.red_runs is read Mac-wide and gives [undo], so no start is refused for it. The starts that read
-// caps.per_state (editing, overnight, undo) are refused for its numbers as text (the KNOWN.text gap, lane 2's M11 sweep);
-// when that sweep lands this test fails, and the todo below can pass.
-test('the real startGate refuses editing, overnight and undo on the fixture today, for caps.per_state, and no start for usage.red_runs (L115 M-A, L131)', () => {
+// Since #79 usage.red_runs is read Mac-wide and gives [undo], so no start is refused for it. Since #94 caps.per_state's
+// numbers are read through num(), so editing, overnight and undo start too (L148): no start is refused on the fixture.
+test('the real startGate refuses no start on the fixture: not editing, overnight or undo for caps.per_state, nor any for usage.red_runs (L131, L148)', () => {
   const rules = rulesOf(FIRST);
   const rec = { read: (e) => (e === 'product' ? { doc: { state: 'active' } } : null), list: () => [] };
   const card = { id: 'C-1', product: 'sample-app', kind: 'editing', tier: 2, files: ['docs/research/note.md'] };
   const b = { band: 'green', own_building: 'open', prodBlocked: false };
   const got = Object.fromEntries(START_KINDS.map((kind) => [kind, startGate({ rules, rec, card, kind, product: 'sample-app', b, running: [], lead: 'S-lead' }).missing ?? null]));
-  const PER_STATE = ['editing', 'overnight', 'undo'];
-  assert.deepEqual(got, Object.fromEntries(START_KINDS.map((kind) => [kind, PER_STATE.includes(kind) ? 'caps.per_state' : null])));
+  assert.deepEqual(got, Object.fromEntries(START_KINDS.map((kind) => [kind, null])));
 });
 
 test.todo('the fixture is fit with no pending reasons (after the L96 step-2 sweeps)', () => {
@@ -549,7 +545,7 @@ test('the heartbeat limit is refused exactly when writer.mjs heartbeatLimit give
   }
 });
 
-test('L120 m-1: a value that is wrong, not a number given as text, gets no known label', () => {
+test('L120 m-1: a value that is wrong gets no known label', () => {
   const noLabel = (text, key) => {
     const got = firstCutoverProblems(text, ENTRY).filter((x) => x.includes(key) && !PENDING.includes(x));
     assert.ok(got.length, `${key} is refused`);
@@ -558,7 +554,4 @@ test('L120 m-1: a value that is wrong, not a number given as text, gets no known
   noLabel(swap(FIRST, 'heartbeat_stale_min: 30', 'heartbeat_stale_min: 0'), 'proposals.heartbeat_stale_min');
   noLabel(swap(FIRST, 'heartbeat_stale_min: 30', 'heartbeat_stale_min: abc'), 'proposals.heartbeat_stale_min');
   noLabel(swap(FIRST, '    light: 1\n', '    light: abc\n'), 'caps.per_state');
-  assert.equal(numeric(' 3'), ' 3', 'a number with a space stays text');
-  assert.equal(numeric('3 '), '3 ');
-  assert.deepEqual(numeric({ light: ' 3', away: '1' }), { light: ' 3', away: 1 });
 });

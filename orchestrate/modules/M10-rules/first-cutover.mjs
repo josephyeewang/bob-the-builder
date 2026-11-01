@@ -14,8 +14,8 @@
 // policyProblems that calls its own readers (M9 runs its real readyCheck; M11's entry below runs its real need() and
 // editingLimits). The fit check takes the union of those lists, says which are missing, and runs each module's check on
 // M10's real engine over this file. What is policy rather than a reader's need (a non-empty required_checks) is a line
-// of its own here, labeled as policy. A reason that is a known gap in the readers, not in the file (numbers as text,
-// M11's scope reads: known-gaps.mjs), says so on its end; the file is still refused for it. Daily-card lists are a rule
+// of its own here, labeled as policy. A reason that is a known gap in the readers, not in the file (M11's scope reads:
+// known-gaps.mjs), says so on its end; the file is still refused for it. Daily-card lists are a rule
 // of their own until M11 reads them with compile (L120).
 
 import { fileURLToPath } from 'node:url';
@@ -30,7 +30,7 @@ import * as M9 from '../M9-record/required-keys.mjs';
 import { KEYS as M11_KEYS, need } from '../M11-dispatcher/keys.mjs';
 import { editingLimits } from '../M11-dispatcher/gate.mjs';
 import { PRODUCT_STATES } from './policy.mjs';
-import { KNOWN, SCOPE_OWNERS, asNumbers, scopeLabel } from './known-gaps.mjs';
+import { SCOPE_OWNERS, scopeLabel } from './known-gaps.mjs';
 
 // M11 has no required-keys file of its own yet (lane 2's folder), so its entry is built here from M11's own exports:
 // every key in KEYS, NEW_KEYS included, each read by M11's need() with its type at the key's own scope, plus the real
@@ -62,13 +62,12 @@ const M11 = Object.freeze({
         out.push(`M11: ${key} is read without the product, so the real engine gives none${scopeLabel(key)}`);
       }
       if (reads(rules, key, m11Scope(key) === 'product' ? withProduct : { type })) continue;
-      out.push(`M11: ${key} must be ${a} ${type}${reads(asNumbers(rules), key, withProduct) ? KNOWN.text : ''}`);
+      out.push(`M11: ${key} must be ${a} ${type}`);
     }
     if (!out.some((x) => x.startsWith(`M11: ${M11_KEYS.perState} `))) {
       const limits = (r, state) => { try { editingLimits({ rules: r, product, productDoc: { state }, amberCaps: false }); return true; } catch { return false; } };
       const bad = PRODUCT_STATES.filter((state) => !limits(rules, state));
-      const text = bad.every((state) => limits(asNumbers(rules), state));
-      if (bad.length) out.push(`M11: ${M11_KEYS.perState} must give a number for ${bad.join(', ')} (editingLimits refuses it)${text ? KNOWN.text : ''}`);
+      if (bad.length) out.push(`M11: ${M11_KEYS.perState} must give a number for ${bad.join(', ')} (editingLimits refuses it)`);
     }
     return out;
   },
