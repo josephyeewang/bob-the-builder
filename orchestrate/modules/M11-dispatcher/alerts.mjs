@@ -1,6 +1,6 @@
 // The one outbox for Joe's alerts (LEAD-CALLS L47; audit 0b-6 r6 MAT-A, MAT-B, MAT-C).
 //
-// Every alert site only drops an entry in a saved queue (the fact `alert-unsent`): `outbox(rec, now)`
+// Every alert site only drops an entry in a saved queue (the fact `unsent-alerts`): `outbox(rec, now)`
 // gives the `alert(text)` every step gets, and it never sends, waits or throws. One sender,
 // `sendAlerts`, delivers the queue at the end of each pass, each send with a short deadline. An entry
 // leaves the queue only after its send went through; a send that fails, answers false or does not
@@ -15,7 +15,7 @@ import { randomUUID } from 'node:crypto';
 const iso = (ms) => new Date(ms).toISOString();
 const putFact = (rec, id, doc, kind) => rec.write({ actor: 'dispatcher', entity: 'fact', id, expectRev: rec.read('fact', id)?.rev ?? 0, doc, kind });
 
-export const ALERT_QUEUE_FACT = 'alert-unsent';
+export const ALERT_QUEUE_FACT = 'unsent-alerts';
 export const ALERT_QUEUE_MAX = 50;
 // The cap on entries not yet tried (a Minor from the review of the first Dispatcher build): while the port is
 // down each round tries one entry, so without it the untried grow without limit. Well above a burst, so one

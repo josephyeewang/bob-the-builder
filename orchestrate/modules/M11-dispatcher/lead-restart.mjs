@@ -43,7 +43,7 @@ export const handoffVet = (rules) => ({ kind, text }) => {
 export function leadInFlight({ rec, sessionId, outboxNames, questionOpen }) {
   if (questionOpen) return 'a question box is open';
   for (const name of outboxNames) {
-    const used = rec.read('fact', `outbox-${sessionId}-${name}`)?.doc?.state;
+    const used = rec.read('fact', `intake-applied-${sessionId}-${name}`)?.doc?.state;
     // A read-only request queued on a refusal (`waiting`, held by the red band or a cap) is not in flight:
     // it could wait until the weekly reset, and the Lead's restart is never held by the budget (audit
     // 0b-6 r3 MAT-4, L31). WRAP tells the Lead that queued requests do not carry over.
@@ -104,7 +104,7 @@ export async function leadRestartStep({ rec, rules, now, lead, size, inFlight, s
   }
 
   // wrap_sent or reasked: wait for the Lead's answer (a turn ended after the ask) or the handoff.
-  const used = rec.read('fact', `outbox-${sid}-${HANDOFF_NAME(sid)}`)?.doc;
+  const used = rec.read('fact', `intake-applied-${sid}-${HANDOFF_NAME(sid)}`)?.doc;
   const answered = size.endedAt != null && size.endedAt > Date.parse(st.sent_at);
   // Only a hand-off applied after WRAP counts (audit 0b-6 r2 MAT-3): an older one under the same name
   // would start the new Lead from an out-of-date note. No time recorded counts as older.

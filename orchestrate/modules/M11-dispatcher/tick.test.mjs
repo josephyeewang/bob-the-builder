@@ -317,7 +317,7 @@ test('audit 0b-6 r2 MAT-2: a Lead\'s read-only request goes through the start ga
     const started = [];
     const w = world([...(signedIn ? [account()] : []), ...entries], { over: { outboxSessions: () => lead(join(root, name)), startReadonly: async (x) => { started.push(x.kind); return { ok: true }; }, ...over } });
     const r = await w.pass();
-    return { started, fact: w.rec.read('fact', 'outbox-L-1-think-q1.md')?.doc, r };
+    return { started, fact: w.rec.read('fact', 'intake-applied-L-1-think-q1.md')?.doc, r };
   };
   const red = await run('red', [['fact', USAGE_FACT(ACCT), usageFact({ week: 90, h5: 20, account: ACCT, now: T0 })]]);
   assert.deepEqual(red.started, []);
@@ -698,7 +698,7 @@ test('r4 MAT-2: an alert that throws, or rejects, skips no step: a cancel that f
     assert.equal(r.steps.outage.ok, false, `${label}: control, the outage step failed and its alert failed too`);
     assert.ok(w.calls.launched.includes('U-1'), label);
     await new Promise((ok) => setImmediate(ok));
-    assert.match(w.rec.read('fact', 'alert-unsent')?.doc?.error ?? '', /no network/, label);
+    assert.match(w.rec.read('fact', 'unsent-alerts')?.doc?.error ?? '', /no network/, label);
   }
 });
 
@@ -715,13 +715,13 @@ test('r5 MAT-2: an alert that fails once is sent on the next pass, for a hold an
     await new Promise((ok) => setImmediate(ok));
     assert.deepEqual(sent, [], `${label}: control, nothing got through while alerts were down`);
     // Both are causes told through tellThen: not queued, and not marked told, so their own step tells again.
-    assert.match(w.rec.read('fact', 'alert-unsent')?.doc?.error ?? '', /no network/, label);
+    assert.match(w.rec.read('fact', 'unsent-alerts')?.doc?.error ?? '', /no network/, label);
     assert.ok(!w.rec.read('fact', 'stop-S-X')?.doc?.told_at && !w.rec.read('fact', 'hold-account')?.doc?.told_at, `${label}: marked told although unsent`);
     down = false;
     await w.pass(1);
     assert.equal(sent.filter((t) => /could not be stopped/.test(t)).length, 1, `${label}: ${sent.join(' | ')}`);
     assert.equal(sent.filter((t) => /signed-in account/.test(t)).length, 1, `${label}: ${sent.join(' | ')}`);
-    assert.deepEqual(w.rec.read('fact', 'alert-unsent')?.doc?.entries, [], `${label}: the queue is empty once sent`);
+    assert.deepEqual(w.rec.read('fact', 'unsent-alerts')?.doc?.entries, [], `${label}: the queue is empty once sent`);
   }
 });
 
@@ -789,8 +789,8 @@ test('L47: a send that hangs delays no safety act and loses no alert', async () 
   assert.ok(order.includes('launch U-1'), order.join(', '));
   assert.ok(order.lastIndexOf('stop') < order.indexOf('alert') && order.indexOf('launch U-1') < order.indexOf('alert'), order.join(', '));
   assert.equal(order.filter((x) => x === 'alert').length, 1, 'a hung send ends the round');
-  assert.deepEqual(r.alerts, { sent: 0, failed: 1, left: w.rec.read('fact', 'alert-unsent').doc.entries.length });
-  assert.match(w.rec.read('fact', 'alert-unsent').doc.error, /did not answer within 50 ms/);
+  assert.deepEqual(r.alerts, { sent: 0, failed: 1, left: w.rec.read('fact', 'unsent-alerts').doc.entries.length });
+  assert.match(w.rec.read('fact', 'unsent-alerts').doc.error, /did not answer within 50 ms/);
   assert.ok(!w.rec.read('fact', 'stop-S-X')?.doc?.told_at, 'marked told although unsent');
   hang = false;
   await w.pass(1, { ports: { alertSendMs: 50 } });
@@ -798,7 +798,7 @@ test('L47: a send that hangs delays no safety act and loses no alert', async () 
   assert.equal(sent.filter((x) => /S-X \(card X-1\) could not be stopped/.test(x)).length, 1, sent.join(' | '));
   assert.equal(sent.filter((x) => /signed-in account/.test(x)).length, 1, sent.join(' | '));
   assert.ok(w.rec.read('fact', 'stop-S-X').doc.told_at);
-  assert.deepEqual(w.rec.read('fact', 'alert-unsent').doc.entries, []);
+  assert.deepEqual(w.rec.read('fact', 'unsent-alerts').doc.entries, []);
 });
 
 // Audit 0b-6 r5 MAT-1: the watchdog starts before the wiring loads, so a wiring that never finishes

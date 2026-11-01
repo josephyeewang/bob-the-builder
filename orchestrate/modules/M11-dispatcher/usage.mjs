@@ -18,7 +18,7 @@ const H5_MS = 5 * 60 * 60_000;
 
 export const BANDS = Object.freeze(['green', 'amber', 'red', 'unknown']);
 export const USAGE_FACT = (account) => `usage-${account}`;
-export const BAND_FACT = 'usage-band';
+export const BAND_FACT = 'band-usage';
 
 const pct = (x) => typeof x === 'number' && Number.isFinite(x) && x >= 0 && x <= 100;
 const time = (s) => (typeof s === 'string' && /^\d{4}-\d\d-\d\dT/.test(s) ? Date.parse(s) : NaN);
@@ -122,7 +122,7 @@ export function mayStart({ b, kind, tier, risky = [], repair = false, redRuns })
   return kind === 'script' || kind === 'overnight' ? { ok: true } : { ok: false, reason: `unknown kind ${kind}` };
 }
 
-/** Writes the `usage-band` fact when the band or own-building value changed; keeps unknown_since. */
+/** Writes the `band-usage` fact when the band or own-building value changed; keeps unknown_since. */
 export function recordBands({ rec, b, now, account }) {
   const cur = rec.read('fact', BAND_FACT);
   const prev = cur?.doc;

@@ -219,7 +219,7 @@ test('r7 M2: an outage alert queued while the port was down is dropped when the 
   let m = 0;
   for (; m <= 16; m += 1) { read(m, false); await step(m); }
   assert.equal(got.length, 0);
-  assert.ok(rec.read('fact', 'alert-unsent').doc.entries.some((e) => e.mark?.fact === LINK_FACT), 'the outage alert is queued');
+  assert.ok(rec.read('fact', 'unsent-alerts').doc.entries.some((e) => e.mark?.fact === LINK_FACT), 'the outage alert is queued');
   m = 17; read(m, true); up = true; await step(m);
   assert.equal(got.length, 0, 'the passed outage is not told');
   for (m = 18; m <= 60; m += 1) { read(m, false); await step(m); }

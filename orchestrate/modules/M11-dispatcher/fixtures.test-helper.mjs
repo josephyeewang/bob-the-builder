@@ -4,7 +4,7 @@
 import { fakeRules } from '../../shared/rules.mjs';
 import { SCRIPT_ACTORS, STATES, memoryRecord } from '../../shared/record.mjs';
 import { CREATE_STATES, INTERNAL_MOVES, MOVES, moveActors } from '../M9-record/moves.mjs';
-import { fieldsAllowed } from '../M9-record/permissions.mjs';
+import { factFamilyOf, fieldsAllowed } from '../M9-record/permissions.mjs';
 import { KEYS as K } from './keys.mjs';
 import { outbox, sendAlerts } from './alerts.mjs';
 
@@ -75,7 +75,8 @@ function seedOne(rec, entity, id, doc) {
   const atMove = new Set(Object.values(MOVE_FIELDS));
   const fields = Object.keys(doc).filter((f) => f !== 'state' && !(entity === 'card' && atMove.has(f)));
   const mayCreate = (a) => { const s = fieldsAllowed(entity, a, { create: true }); return s && (!stateful || CREATE_STATES[entity][path[0]]?.includes(a)) ? s : null; };
-  const makers = SCRIPTS.filter((a) => mayCreate(a));
+  // A fact is made by the role whose family holds its id (L74), the one script that may.
+  const makers = SCRIPTS.filter((a) => mayCreate(a) && (entity !== 'fact' || factFamilyOf(id) === a));
   if (!makers.length) throw new Error(`recWith ${entity} ${id}: no script may make a ${entity}`);
   const maker = makers.find((a) => { const s = mayCreate(a); return s === '*' || fields.every((f) => s.has(f)); }) ?? makers[0];
   const allowed = mayCreate(maker);

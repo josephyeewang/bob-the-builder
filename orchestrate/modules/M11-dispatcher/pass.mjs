@@ -2,7 +2,7 @@
 // review 0b-6 M7, M8, M16, M19, m5, m6, m7).
 //
 // At login and every pass: start what the record says should run, and stop what should not.
-//   1. Usage bands (usage.mjs), written as the `usage-band` fact.
+//   1. Usage bands (usage.mjs), written as the `band-usage` fact.
 //   2. host.lock (m5): "Air is home" never stops orchestrated products; one diary line per change.
 //   3. Compactions (M19), counted per card across all its sessions.
 //   4. What should stop: a cancelled card (the kill switch: hard stop after timeouts.cancel_grace_min),
@@ -35,7 +35,7 @@ export const COMPACTION_FACT = (card) => `compactions-${card}`;
 export const HOST_FACT = 'host-lock-seen';
 export const PAUSE_FACT = (product) => `pause-${product}`;
 export const LIMIT_FACT = (account) => `limit-hit-${account}`;
-export const UNKNOWN_FACT = 'usage-unknown-alert';
+export const UNKNOWN_FACT = 'unknown-usage-alert';
 export const RULES_MISSING_FACT = 'rules-missing-alert';
 // Used only when timeouts.cancel_grace_min itself is missing (audit MAT-2): Cancel must still stop.
 export const CANCEL_GRACE_FLOOR_MS = 2 * 60_000;

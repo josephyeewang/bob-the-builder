@@ -83,7 +83,7 @@ test('M18: anything in flight blocks the WRAP', async () => {
   assert.match(leadInFlight({ rec: recWith(), sessionId: SID, outboxNames: ['wish-1.md'], questionOpen: false }), /wish-1\.md not used yet/);
   assert.match(leadInFlight({ rec: recWith(), sessionId: SID, outboxNames: ['.wish-1.md.partial'], questionOpen: false }), /not used yet/);
   assert.match(leadInFlight({ rec: recWith(), sessionId: SID, outboxNames: [], questionOpen: true }), /question box/);
-  const used = recWith([['fact', `outbox-${SID}-wish-1.md`, { state: 'applied' }], ['card', 'C-1', { state: 'waiting', waiting: { who: 'joe' } }]]);
+  const used = recWith([['fact', `intake-applied-${SID}-wish-1.md`, { state: 'applied' }], ['card', 'C-1', { state: 'waiting', waiting: { who: 'joe' } }]]);
   assert.equal(leadInFlight({ rec: used, sessionId: SID, outboxNames: ['wish-1.md'], questionOpen: false }), null);
 });
 
@@ -190,7 +190,7 @@ test('audit MIN-13: a handoff that was refused or not recorded never stops the o
   const w = world();
   assert.equal(await w.step(ended(260_000), 1), 'WRAP sent');
   // the intake refused the handoff (the record would not take it): re-asked, never stopped
-  const key = `outbox-${SID}-handoff-${SID}.md`;
+  const key = `intake-applied-${SID}-handoff-${SID}.md`;
   w.rec.write({ actor: 'dispatcher', entity: 'fact', id: key, expectRev: 0, doc: { session: SID, name: `handoff-${SID}.md`, sha256: 'x', state: 'refused' } });
   assert.equal(await w.step(ended(265_000, 3), 3), 're-asked');
   assert.match(w.calls.sent[1], /the record refused it/);
@@ -225,7 +225,7 @@ test('audit 0b-6 r2 MAT-3: a handoff applied before the WRAP never restarts the 
   // An old fact with no time recorded counts as older too.
   const v = world();
   assert.equal(await v.step(ended(260_000), 1), 'WRAP sent');
-  v.rec.write({ actor: 'dispatcher', entity: 'fact', id: `outbox-${SID}-${HANDOFF_NAME(SID)}`, expectRev: 0, doc: { state: 'applied', sha256: 'a'.repeat(64) } });
+  v.rec.write({ actor: 'dispatcher', entity: 'fact', id: `intake-applied-${SID}-${HANDOFF_NAME(SID)}`, expectRev: 0, doc: { state: 'applied', sha256: 'a'.repeat(64) } });
   assert.notEqual(await v.step(ended(262_000, 2), 3), 'restarted');
   assert.equal(v.calls.stops, 0);
 });
@@ -233,8 +233,8 @@ test('audit 0b-6 r2 MAT-3: a handoff applied before the WRAP never restarts the 
 // ---- audit 0b-6 round 3 ----
 
 test('audit 0b-6 r3 MAT-4: a read-only request waiting on a refusal is not in flight; one not yet used still is', () => {
-  const rec = recWith([['fact', 'outbox-L-1-think-q1.md', { session: SID, name: 'think-q1.md', state: 'waiting', reason: 'the red band holds it' }],
-    ['fact', 'outbox-L-1-scout-q2.md', { session: SID, name: 'scout-q2.md', state: 'starting' }]]);
+  const rec = recWith([['fact', 'intake-applied-L-1-think-q1.md', { session: SID, name: 'think-q1.md', state: 'waiting', reason: 'the red band holds it' }],
+    ['fact', 'intake-applied-L-1-scout-q2.md', { session: SID, name: 'scout-q2.md', state: 'starting' }]]);
   assert.equal(leadInFlight({ rec, sessionId: SID, outboxNames: ['think-q1.md'], questionOpen: false }), null);
   assert.match(leadInFlight({ rec, sessionId: SID, outboxNames: ['think-q1.md', 'scout-q2.md'], questionOpen: false }), /scout-q2\.md not used yet/);
 });

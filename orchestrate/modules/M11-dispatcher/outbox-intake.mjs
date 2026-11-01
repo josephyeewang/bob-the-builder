@@ -22,7 +22,7 @@ export const READONLY_REQUESTS = Object.freeze({ think: 'reviewer', scout: 'scou
 export const SETTLE_MS = 2000;
 
 const sha256 = (s) => createHash('sha256').update(s).digest('hex');
-const appliedId = (sessionId, name) => `outbox-${sessionId}-${name}`;
+const appliedId = (sessionId, name) => `intake-applied-${sessionId}-${name}`;
 const statOf = (p) => { try { const s = lstatSync(p); return `${s.size}:${s.mtimeMs}`; } catch { return null; } };
 
 /** The kinds a session may hand in: its role's, except a read-only request session hands back report-. */
