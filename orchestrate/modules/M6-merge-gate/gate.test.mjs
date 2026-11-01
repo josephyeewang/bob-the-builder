@@ -12,11 +12,12 @@ import { chmodSync } from 'node:fs';
 import { fakeRules, allow, deny, makeRules } from '../../shared/rules.mjs';
 import { makeEngine } from '../M10-rules/engine.mjs';
 import { parsePolicy } from '../M10-rules/policy.mjs';
+import { rulesFromText } from '../M10-rules/from-text.mjs';
 import { fakeGateGitHub } from './fixtures/fake-gate-github.mjs';
 import { makeGitView } from '../M10-rules/git-view.mjs';
 import { blobSha } from '../M10-rules/reader.mjs';
 import { ROBOT_FACT, NO_PUSH_FACT } from '../M12-sensors/outside-watch.mjs';
-import { gatePass, queueOrder, NOT_GREEN_LINE } from './gate.mjs';
+import { gatePass, queueOrder, NOT_GREEN_LINE, MERGE_LIMIT_TOLD_FACT } from './gate.mjs';
 import { readMark } from './mark.mjs';
 import { readNeedsJoe } from './checker-entry.mjs';
 import { gatherFacts } from './gather.mjs';
@@ -34,7 +35,8 @@ function world({ values = {}, mergeAnswer } = {}) {
   g.main = root;
   const vals = {
     timeouts: fullTimeouts(),
-    'approvals.plan_go.go_free': ['lead_daily_card', 'exact_reverse'],
+    'approvals.plan_go.go_free.lead_daily_card': ['docs/daily/*.md'],
+    'approvals.plan_go.go_free.exact_reverse': true,
     'product.cutover_stage': 'second',
     'product_profile.required_checks': ['test'],
     'product_profile.robot': { bot_user_id: g.robotId },
@@ -166,6 +168,27 @@ test('an undo card whose change is not the exact reverse is refused (9) and neve
   assert.equal(w.env.record.read('card', 'C-1').doc.state, 'closed');
 });
 
+// L123 m-1: the go-free read at gather (gather.mjs, refusal 10) goes by the value as the rules file gives it, text.
+// `exact_reverse: false` there is the text 'false', which is not go-free: the undo card still needs a go.
+test('L123 m-1: exact_reverse "false" in the rules still needs a go for an undo card; "true" skips it', async () => {
+  for (const [v, skipped] of [['false', false], [false, false], ['yes', false], ['true', true], [true, true]]) {
+    const w = world({ values: { 'approvals.plan_go.go_free.exact_reverse': v } });
+    verifiedCard(w, 'U-1', { pr: 9, files: { 'src/a.mjs': 'one' }, undo: w.root });
+    await gatePass(w.ctx);   // the gate takes the request in, so there is a merge to gather facts for
+    if (!skipped) assert.ok(mergeOf(w, 'U-1').doc.reasons?.some((x) => x.startsWith('10:')), `${v}: refused for no go`);
+    // L134 c-2: go-free means the pass gave no refusal 10 at all, not just that gather skipped the go.
+    else assert.ok(!(mergeOf(w, 'U-1').doc.reasons ?? []).some((x) => x.startsWith('10:')), `${v}: no refusal 10: ${JSON.stringify(mergeOf(w, 'U-1').doc.reasons)}`);
+    const f = await gatherFacts(w.ctx, mergeOf(w, 'U-1'));
+    assert.equal(f.card.doc.kind, 'exact_reverse');
+    if (skipped) assert.deepEqual(f.go, { ok: true, reasons: [], skipped: true }, String(v));
+    else {
+      assert.equal(f.go?.skipped, undefined, String(v));
+      assert.equal(f.go?.ok, false, String(v));
+      assert.ok(f.go.reasons.some((x) => /no go for U-1/.test(x)), `${v}: ${JSON.stringify(f.go)}`);
+    }
+  }
+});
+
 test('the outside check not green in 2 h: nothing happens at all', async () => {
   const w = world();
   verifiedCard(w);
@@ -288,11 +311,11 @@ test('L110 M-1: the gate reads merging_open_max_min for its product from the rea
     productState: () => ({ state: 'active' }), running: () => 0, rolesDir: join(here, '../M10-rules/roles'), clock: () => w.env.clock.t }));
   assert.equal(eng.get(KEY), undefined, 'the engine gives no per-product value without a product');
   assert.equal(eng.get(KEY, { product: PRODUCT }), LIMIT_MIN);
-  // The world's rules, with this one key answered by the engine (the rules object is frozen: copied, get replaced).
+  // The world's rules, with this one key answered by the engine, built on makeRules so num() reads the same override
+  // (L148 item 1: a get-only stand-in let the merging limit go unread, and the merge was never refused).
   const base = w.ctx.rules;
-  const d = Object.getOwnPropertyDescriptors(base);
-  d.get = { value: (k, o) => (k === KEY ? eng.get(k, o) : base.get(k, o)), enumerable: true };
-  w.ctx.rules = Object.freeze(Object.defineProperties({}, d));
+  w.ctx.rules = makeRules({ get rev() { return base.rev; }, may: (a, s) => base.may(a, s), classify: (c) => base.classify(c),
+    get: (k, o) => (k === KEY ? eng.get(k, o) : base.get(k, o)) });
   verifiedCard(w);
   loseAnswer(w, { merged: false });
   await gatePass(w.ctx);
@@ -306,6 +329,55 @@ test('L110 M-1: the gate reads merging_open_max_min for its product from the rea
   assert.deepEqual(mergeOf(w).doc.reasons, ['interrupted']);
   assert.equal(cardOf(w).state, 'verified');
 });
+
+// L148 item 5: with no timeouts.merging_open_max_min in the rules, an open merge is never refused as interrupted, so
+// the owner is told once per merge that the limit is missing. The told fact is written only once the alert was taken:
+// a refused alert tells again on the next pass, and once told, no pass tells again.
+// The third case reads the real rules file with its merging limit line taken out (the fixture gains one in #97), the
+// key answered by M10's engine through rulesFromText, as the L110 M-1 test above does with the limit present.
+const FIXTURE_TEXT = readFileSync(join(here, '../M10-rules/fixtures/policy.yaml'), 'utf8');
+for (const [refuseFirst, realFile] of [[false, false], [true, false], [false, true]]) {
+  test(`L148 item 5: a lost merge answer with no merging limit in the rules tells the owner once${refuseFirst ? ', after a refused first alert' : ''}${realFile ? ', the line taken out of the real rules file' : ''}`, async () => {
+    const w = world();
+    if (realFile) {
+      const KEY = 'timeouts.merging_open_max_min';
+      const text = FIXTURE_TEXT.replace(/^  merging_open_max_min: .*\n/m, '');
+      assert.doesNotMatch(text, /merging_open_max_min/, 'the line is out of the file');
+      const real = rulesFromText({ [PRODUCT]: text }, { clock: () => w.env.clock.t });
+      assert.equal(real.get(KEY, { product: PRODUCT }), undefined, 'the real engine has no limit');
+      const base = w.ctx.rules;
+      w.ctx.rules = makeRules({ get rev() { return base.rev; }, may: (a, s) => base.may(a, s), classify: (c) => base.classify(c),
+        get: (k, o) => (k === KEY ? real.get(k, o) : base.get(k, o)) });
+    }
+    assert.equal(w.ctx.rules.num('timeouts.merging_open_max_min', { product: PRODUCT }), undefined, 'the rules lack the limit');
+    let refuse = refuseFirst;
+    const push = w.ctx.alert;
+    w.ctx.alert = (a) => {
+      if (a.type === 'merge_limit_missing' && refuse) { refuse = false; return false; }
+      return push(a);
+    };
+    verifiedCard(w);
+    loseAnswer(w, { merged: false });
+    await gatePass(w.ctx);
+    assert.equal(mergeOf(w).doc.state, 'merging');
+    const missingTold = () => w.alerts.filter((a) => a.type === 'merge_limit_missing');
+    assert.deepEqual(missingTold(), [], 'the merge call pass says it is unsure, nothing more');
+    const id = mergeOf(w).id;
+    for (let i = 0; i < 4; i++) {
+      tick(w, 2);
+      const r = await gatePass(w.ctx);
+      assert.equal(mergeOf(w).doc.state, 'merging', 'never refused with no limit');
+      assert.ok(r.did.some((d) => d.step === 'outcome_unknown'), JSON.stringify(r.did));
+      const told = recOf(w).read('fact', MERGE_LIMIT_TOLD_FACT(id));
+      if (refuseFirst && i === 0) assert.equal(told, null, 'a refused alert writes no told fact');
+      else assert.equal(told?.doc?.merge, id, `pass ${i}: told is recorded`);
+    }
+    assert.equal(missingTold().length, 1, 'told exactly once');
+    assert.equal(missingTold()[0].merge, id);
+    assert.match(missingTold()[0].note, /timeouts\.merging_open_max_min/);
+    assert.equal(gatePuts(w), 1, 'one merge call');
+  });
+}
 
 // G14 (L110 m-6): a pass that stopped after the checking write, before any merge call, left the merge in checking.
 // GitHub was never asked to merge, so a pull request still open is no unknown outcome: refused at once, the card put

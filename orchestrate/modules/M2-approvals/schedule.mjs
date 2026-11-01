@@ -13,7 +13,8 @@
 //   await readApprove(ctx, askId, { view, catchUps }) → { ok, counted, head? }  a risky_approve ask's GitHub Approve
 //   await approvalStands(ctx, askId, { head, view, catchUps }) → { ok } | { ok: false, reason }   may this head merge on it now?
 // ctx = { record, rules, product, now, alert, gh, owner, repo, stateDir, push }
-//   push(event) → true when the owner's phone was sent `event` ({ ask, card, kind, urgent, line? }); anything else is
+//   push(event) → true when the owner's phone was sent `event` ({ ask, card, kind, urgent, line?, view? }; `view` is a
+//   go's text from go-view.mjs goText, R-0b-138/139, or an owner-flagged undo's undoPushText, R-0b-140); anything else is
 //   "not sent", and the ask is tried again next pass.
 //
 // HELD DECISIONS (R-0b-53, round 1 M8). A decision ask that carries `modules` (the modules of the decided.yaml entries
@@ -26,7 +27,8 @@ import { join } from 'node:path';
 import { activeKind } from '../../shared/asks.mjs';
 import { askStore, writeDoc } from './ask-store.mjs';
 import { releaseBoxes, releaseSessions } from './binding.mjs';
-import { openDecision } from './decision.mjs';
+import { CLOSE_DUE, closeDecisionPr, openDecision } from './decision.mjs';
+import { goText, goView, undoPushText } from './go-view.mjs';
 import { countApprove, requestReview } from './github-review.mjs';
 import { MERGE_APPROVE_MS, UNDO_OPEN_QUESTION_LINE, URGENT_REPUSH_MS, dueWindow, lapseAt, readConfig, zoneFor } from './kinds.mjs';
 
@@ -37,14 +39,15 @@ const iso = (ms) => new Date(ms).toISOString();
 const ms = (s) => { const t = Date.parse(s ?? ''); return Number.isFinite(t) ? t : null; };
 const fail = (reason, extra = {}) => ({ ok: false, reason, ...extra });
 
-// The config alert goes out once per distinct problem, not every pass (round 2 m2-6).
+// The config alert goes out once per distinct problem, not every pass (round 2 m2-6). It is kept as sent only when the
+// sink did not answer false (L130: M11's outbox answers false when it could not queue); a throw stops before the write.
 function configAlert(ctx, reason) {
   const file = join(ctx.stateDir, 'config-alert.json');
   if (reason === null) { rmSync(file, { force: true }); return; }
   let last = null;
   try { last = existsSync(file) ? JSON.parse(readFileSync(file, 'utf8')).reason : null; } catch { last = null; }
   if (last === reason) return;
-  ctx.alert({ type: 'approvals_config', reason });
+  if (ctx.alert({ type: 'approvals_config', reason }) === false) return;
   mkdirSync(ctx.stateDir, { recursive: true });
   writeFileSync(file, `${JSON.stringify({ reason })}\n`);
 }
@@ -73,10 +76,12 @@ function write(ctx, cur, doc, events, event) {
   return true;
 }
 
-async function closeDecisionPr(ctx, id, doc) {
-  if (!activeKind(doc.kind)?.decision_pr || !Number.isSafeInteger(doc.pr)) return;
-  const c = await ctx.gh.patch(`/repos/${ctx.owner}/${ctx.repo}/pulls/${doc.pr}`, { state: 'closed' }).catch((e) => ({ status: String(e?.message ?? e) }));
-  if (c?.status !== 200) ctx.alert({ type: 'decision_pr_not_closed', ask: id, pr: doc.pr, reason: String(c?.status) });
+// A decision answered while its close did not go through carries CLOSE_DUE (decision.mjs, L135); the pass tries the
+// close again, and takes the mark off once it closed or Joe was told it did not.
+async function retryClose(ctx, a, events) {
+  if (!(await closeDecisionPr(ctx, a.id, a.doc))) return;
+  const { [CLOSE_DUE]: _due, ...rest } = a.doc;
+  write(ctx, a, rest, events, { type: 'decision_pr_close_retried', ask: a.id, card: a.doc.card });
 }
 
 // An unanswered lapsing ask 12 hours after it was raised this round, or an unused merge approval 24 hours after:
@@ -96,7 +101,8 @@ async function runOut(ctx, a, nowMs, events) {
   } else {
     releaseBoxes(next, 'expired', nowMs, { moveBack: false });
     next.state = 'expired';
-    if (write(ctx, a, next, events, { type: 'expired', ask: a.id, card: doc.card })) await closeDecisionPr(ctx, a.id, doc);
+    // Close first (L133 m-2); expired is written only once the close worked or Joe was told it did not.
+    if (await closeDecisionPr(ctx, a.id, doc)) write(ctx, a, next, events, { type: 'expired', ask: a.id, card: doc.card });
   }
   return true;
 }
@@ -111,7 +117,13 @@ async function push(ctx, a, { urgent, win, anyBound, nowMs }, events) {
   };
   if (k.channel === 'tap') {
     if (typeof ctx.push !== 'function') { ctx.alert({ type: 'approvals_no_push', ask: a.id }); return; }
-    const event = { ask: a.id, card: doc.card, kind: doc.kind, urgent, ...(doc.kind === 'undo' && anyBound ? { line: UNDO_OPEN_QUESTION_LINE } : {}) };
+    // A go push carries the go view (R-0b-138/139): the plan in three lines and the files it allows. One that can't be
+    // shown is held, never sent bare.
+    let view = null;
+    if (k.go) { const v = goView(doc); if (!v.ok) { ctx.alert({ type: 'go_not_shown', ask: a.id, reason: v.reason }); return; } view = goText(v); }
+    // An undo the owner flagged (R-0b-140) carries its pull request, so its push says which change and what Undo does.
+    if (doc.kind === 'undo' && Number.isSafeInteger(doc.pr)) view = undoPushText({ card: doc.card, title: doc.title, pr: doc.pr });
+    const event = { ask: a.id, card: doc.card, kind: doc.kind, urgent, ...(doc.kind === 'undo' && anyBound ? { line: UNDO_OPEN_QUESTION_LINE } : {}), ...(view ? { view } : {}) };
     let sent = false;
     try { sent = (await ctx.push(event)) === true; } catch { sent = false; }
     if (!sent) { ctx.alert({ type: 'push_not_sent', ask: a.id }); return; }
@@ -156,6 +168,8 @@ export async function schedulePass(ctx) {
   if (st.untrusted.length) ctx.alert({ type: 'approvals_untrusted', items: st.untrusted });
   for (const a of st.asks()) {
     if (!activeKind(a.doc.kind)) continue;
+    // A close still due is retried first; the ask's run-out waits for the next pass (one write per ask per pass).
+    if (a.doc[CLOSE_DUE] === true) { await retryClose(ctx, a, events); continue; }
     await runOut(ctx, a, nowMs, events);
   }
   // Re-read: the run-outs above changed states.

@@ -15,6 +15,10 @@ import { waitOn } from './moves.mjs';
 import { outageStep, OUTAGE_FACT } from './outage.mjs';
 import { USAGE_FACT } from './usage.mjs';
 import { recWith, rulesWith, usageFact, withAlerts } from './fixtures.test-helper.mjs';
+import { makeRules } from '../../shared/rules.mjs';
+// Rules with one reading replaced, built on makeRules (L148 item 1): num(), dec() and flag() read through the same
+// override, so a test never answers `get` alone while the code reads numbers through num().
+const overGet = (base, get) => makeRules({ get rev() { return base.rev; }, may: (a, s) => base.may(a, s), get, classify: (c) => base.classify(c) });
 import { setup, product, readyCard, outboxFile, passingVerdict, put, must, HEAD, PRODUCT, iso } from '../M9-record/fixtures.test-helper.mjs';
 
 const MIN = 60_000;
@@ -105,7 +109,7 @@ test('L72 contract: dead restart: a provably dead owner\'s claim is broken by th
   // another product break nothing, and the missing value is handed back to be told.
   const prod = w.rec.read('card', 'C-1').doc.product;
   assert.ok(prod);
-  const onlyFor = (who) => ({ get: (k, o) => (k === KEYS.claimsStuckMin && o?.product !== who ? undefined : w.rules.get(k, o)) });
+  const onlyFor = (who) => overGet(w.rules, (k, o) => (k === KEYS.claimsStuckMin && o?.product !== who ? undefined : w.rules.get(k, o)));
   const missing = [];
   const other = actOnDead({ rec: w.rec, rules: onlyFor('another-product'), now: w.env.clock.t, restart: [l.sessionId], asks: [], cards: { [l.sessionId]: 'C-1' }, missing });
   assert.deepEqual(other, [['C-1', `not restarted: the rules have no ${KEYS.claimsStuckMin} for ${prod}`]]);
@@ -365,7 +369,9 @@ test('L116 m5 contract: two same refusals send the card to Joe once, merge_asks 
   assert.deepEqual([w.rec.read('card', 'C-1').doc.attempts.merge_asks, alerts.length], [3, 2]);
 });
 
-test('L116 M-1 contract: an approved card refused twice the same way, whose ask the Record refuses, is told to Joe once and not lost', async () => {
+// L134: M9 now has approved → waiting (#79), so an approved card refused twice the same way waits on Joe like a
+// verified one, back to approved on his answer, told once per refusal count.
+test('L116 M-1 contract (L134): an approved card refused twice the same way waits on Joe, told once, and a new refusal count tells again', async () => {
   const w = world();
   await verifiedCard(w);
   gateRefuses(w, 'MG-1', '409');
@@ -375,24 +381,22 @@ test('L116 M-1 contract: an approved card refused twice the same way, whose ask 
   // As the tick runs it: queued, then delivered, and the told note written only then (L130).
   const run = () => withAlerts(w.rec, w.env.clock.t, (t) => { alerts.push(t); return true; },
     (alert) => requestMerges({ rec: w.rec, rules: w.rules, now: w.env.clock.t, b: GREEN_BANDS, running: [], alert }));
-  // M9 has no approved → waiting yet (lane 1 adds it in #79 r2; this test then asserts waiting on joe instead).
-  const first = await run();
-  assert.equal(first.length, 1);
-  assert.match(first[0][1], /^not sent to joe: .*approved/);
+  assert.deepEqual(await run(), [['C-1', 'waiting on joe']]);
+  const c = w.rec.read('card', 'C-1').doc;
+  assert.deepEqual([c.state, c.wait.who, c.wait.return_to, c.attempts.merge_asks, c.attempts.merge_refusals], ['waiting', 'joe', 'approved', 2, ['409', '409']]);
   assert.equal(alerts.length, 1);
-  assert.match(alerts[0], /card C-1: the merge was refused twice for the same reason \(409\), but the card could not be put on you to decide/);
-  assert.ok(w.rec.read('fact', ASK_REFUSED_FACT('C-1', 2)), 'told once, remembered');
-  assert.equal(w.rec.read('card', 'C-1').doc.state, 'approved');
+  assert.match(alerts[0], /card C-1: the merge was refused twice for the same reason \(409\)/);
+  assert.equal(w.rec.read('fact', ASK_REFUSED_FACT('C-1', 2)), null, 'the ask was taken: no refused-ask note');
   assert.equal(w.rec.list('merge_request').length, 0, 'not requested again');
   w.env.clock.t += MIN;
-  assert.match((await run())[0][1], /^not sent to joe/);
+  assert.deepEqual(await run(), [], 'a waiting card is not requested');
   assert.equal(alerts.length, 1, 'not told again');
-  // A new refusal is a new count: Joe is told again (the told-once note is per card and refusal count).
+  // Joe's answer puts it back to approved; a third same refusal is a new count: Joe is asked again.
+  must(put(w.env.review, 'dispatcher', 'card', 'C-1', { state: 'approved', wait: undefined }), 'Joe answers');
   gateRefuses(w, 'MG-3', '409');
   must(put(w.env.review, 'approvals', 'card', 'C-1', { state: 'approved' }), 'approved again');
-  assert.match((await run())[0][1], /^not sent to joe/);
-  assert.equal(alerts.length, 2);
-  assert.ok(w.rec.read('fact', ASK_REFUSED_FACT('C-1', 3)));
+  assert.deepEqual(await run(), [['C-1', 'waiting on joe']]);
+  assert.deepEqual([w.rec.read('card', 'C-1').doc.attempts.merge_asks, alerts.length], [3, 2]);
 });
 
 test('L116 m5 contract (L110 m-4): a limit_hit wait naming no account is re-waited on Joe by the pass, on the real Record, told once', async () => {

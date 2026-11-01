@@ -21,7 +21,7 @@
 // Product-state starts are M10's `may('start_session')` answer; this file does not repeat them.
 // Every outside effect is a port, so tests run on fakes.
 
-import { KEYS, need, minutes, MissingKey } from './keys.mjs';
+import { KEYS, need, minutes, MissingKey, missingFor } from './keys.mjs';
 import { currentBands, recordBands } from './usage.mjs';
 import { startGate } from './gate.mjs';
 import { atSafePoint } from './transcript.mjs';
@@ -158,9 +158,27 @@ export async function stopPass({ rec, rules, now, account, sessions, probe, stop
   // the stop loop (audit 0b-6 r3 MAT-1).
   const missing = [];
   const read = readOr(missing);
-  const cancelMs = read(() => minutes(rules, KEYS.cancelGraceMin), CANCEL_GRACE_FLOOR_MS);
-  const parkMs = read(() => minutes(rules, KEYS.parkWaitMin), Infinity);
-  const split = read(() => need(rules, KEYS.splitAfterCompactions), Infinity);
+  // Cancel grace, park wait and the compaction split are per-product keys (L131: each governs one product's session),
+  // which the real rules answer only for a named product. They are read for every product in the Record and every
+  // running session's product, so a product that lacks one starts nothing, as before, and a session is timed by its
+  // own product's value.
+  const limits = new Map();
+  const limitsFor = (product) => {
+    const k = product;
+    if (!limits.has(k)) {
+      const opts = { product };
+      const readFor = (key, f, fallback) => { try { return f(); } catch (e) { missing.push(e instanceof MissingKey ? missingFor(e.key, product) : `the rules (${e?.message ?? e})`); return fallback; } };
+      limits.set(k, {
+        cancelMs: readFor(KEYS.cancelGraceMin, () => minutes(rules, KEYS.cancelGraceMin, opts), CANCEL_GRACE_FLOOR_MS),
+        parkMs: readFor(KEYS.parkWaitMin, () => minutes(rules, KEYS.parkWaitMin, opts), Infinity),
+        split: readFor(KEYS.splitAfterCompactions, () => need(rules, KEYS.splitAfterCompactions, opts), Infinity),
+      });
+    }
+    return limits.get(k);
+  };
+  let products = [];
+  try { products = rec.list('product').map((x) => x.id); } catch { products = []; }
+  for (const product of new Set([...products, ...sessions.map((s) => s.product)].filter(Boolean))) limitsFor(product);
   const b = read(() => currentBands({ rec, rules, account, now }), HELD_BANDS);
   const { unknownSince } = recordBands({ rec, b, now, account });
 
@@ -183,6 +201,10 @@ export async function stopPass({ rec, rules, now, account, sessions, probe, stop
       compactions = Object.values(by).reduce((a, x) => a + x, 0);
     }
     const productDoc = rec.read('product', s.product)?.doc;
+    // A session names its product; else its card does. With neither, nothing is read: no product's value applies, so a
+    // cancel still stops after the floor and nothing parks or splits on a limit.
+    const own = s.product ?? card?.product;
+    const { cancelMs, parkMs, split } = own ? limitsFor(own) : { cancelMs: CANCEL_GRACE_FLOOR_MS, parkMs: Infinity, split: Infinity };
     const why = stopReason({ s, card, productDoc, b, compactions, split });
     const sf = factDoc(rec, STOP_FACT(s.id));
     let pending = sf?.doc?.state === 'pending' ? sf.doc : null;

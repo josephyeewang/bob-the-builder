@@ -4,14 +4,19 @@
 // review-updater.test.mjs: the updater's (review-updater.mjs, this file, safe-git.mjs) and the account copy's
 // (accounts.mjs and this file), and nothing else of the repository (L73 point 5, c-1).
 //
-// The layout (L73 point 1). `installRoot` is a link, root's, in a folder only root can write. It names a folder beside
-// it, `<name>.v-<commit>`, which holds the copy. The updater makes a new versioned folder, then flips the link with one
+// The layout (L73 point 1, L92 item 4). `installRoot` is a link, root's, in a folder only root can write. It names
+// `<name>.v-<commit>/orchestrate`, inside a versioned folder beside it. The versioned folder mirrors the repository: its
+// `orchestrate/` is the copy, and beside it are the few files outside orchestrate/ that the code imports (OUTSIDE_FILES,
+// at their repository paths), so an import such as `../../../scripts/blueprint/yaml-lite.mjs` lands inside the versioned
+// folder (Node loads a module from its real path). The commit stamp is at the top of the versioned folder. The updater makes a new versioned folder, then flips the link with one
 // rename, which the system makes atomic: every path a LaunchDaemon starts from (installRoot/bin/node and the scripts)
 // names a whole copy at every moment of an update, and a run cut off anywhere leaves the link on the old copy or the
 // new one, never on nothing. A plain folder at installRoot is still a copy to these checks; the updater and the review
 // runner refuse one (L75 c-7), since only a link can be flipped whole.
 //
-//   currentCopy(installRoot)            → { real, link, commit } | { missing } | { problem }
+//   currentCopy(installRoot)            → { real, folder, link, commit } | { missing } | { problem, old? }
+//   copyReady(installRoot)              → null, or why the copy is not one a LaunchDaemon may run: the link, and a
+//                                         stamp that is the commit its folder is named for (L106 m-1)
 //   copyPath(installRoot, cur, p)       → `p` named through the link, as the same path in the folder it names
 //   installProblem(installRoot, files)  → null, or why the copy (and the folders above it) is not root's alone
 //   chainProblem(path)                  → null, or why `path` and every folder above it is not root's alone
@@ -23,14 +28,36 @@ import { closeSync, constants, fstatSync, lstatSync, openSync, readFileSync, rea
 import { basename, dirname, isAbsolute, join, relative } from 'node:path';
 import { spawnSync } from 'node:child_process';
 
+// The repository folder the copy is made of, and the folder inside the versioned folder that the link names.
+export const SOURCE = 'orchestrate';
+// The files outside SOURCE that the installed code imports, at their repository paths (L92 item 4, the install
+// closure). The updater installs exactly these beside SOURCE. review-install-closure.test.mjs installs a copy as the
+// updater does, deletes the repository it came from, and imports every non-test module of the copy for real; it fails
+// when any of them loads a file outside the copy, or names one in a way that only runs later (a dynamic import of a
+// name made at run time, a path leading out of SOURCE) that is not listed here (L106 M-1). Copying one into orchestrate/
+// instead would make two sources of it.
+export const OUTSIDE_FILES = Object.freeze(['scripts/blueprint/yaml-lite.mjs']);
+
 export const NODE = 'bin/node';
 // The updater's own config and the review runner's config: two of the copy's own items (review-updater.mjs `keep`),
 // at fixed names so the updater can refuse a `keep` that would drop either (L73 point 4).
 export const UPDATER_CONFIG = 'updater.json';
 export const RUNNER_CONFIG = 'review.json';
-// The commit stamp (L66): the commit the copy was made from, 40 hex and a newline, in this file at the top of the copy,
-// root's like the rest. The runner shows it in its status; the Dispatcher tells Joe when it is not main's.
+// The commit stamp (L66): the commit the copy was made from, 40 hex and a newline, in this file at the top of the
+// versioned folder (beside SOURCE and the outside files, written after both), root's like the rest. The runner shows it in its status; the Dispatcher tells Joe when it is not main's.
 export const STAMP = 'installed-commit';
+// The runner's config keys that name a module the runner itself imports (L132 M-1): the wiring and the budget module.
+export const RUNNER_MODULES = Object.freeze(['wiring', 'budget']);
+// Each must be one of the copy's own code files from the repository: a .mjs file under one of these folders of the
+// copy. A copy item the install step puts at the top of the copy (`keep`), a folder or the config is refused: the
+// runner imports the module from the copy, and only a file among the copy's own finds the files it imports.
+export const MODULE_HOMES = Object.freeze(['modules', 'shared']);
+/** Null, or why `rel` (a path inside the copy, relative to it) is not one of the copy's own code files. */
+export function copyModuleProblem(rel) {
+  const parts = typeof rel === 'string' ? rel.split('/') : [];
+  if (parts.length >= 2 && MODULE_HOMES.includes(parts[0]) && !parts.some((s) => s === '' || s === '.' || s === '..') && rel.endsWith('.mjs')) return null;
+  return `is not one of the copy's own code files (a .mjs file under its ${MODULE_HOMES.map((h) => `${h}/`).join(' or ')} folder), so it can't find the files it loads`;
+}
 const HEX40 = /^[0-9a-f]{40}$/;
 
 export function installStamp(commit) {
@@ -50,22 +77,56 @@ export function versionCommit(installRoot, name) {
 export const ownerName = (owner) => (owner === 0 ? 'root' : `uid ${owner}`);
 
 /**
- * Where the copy is. A plain folder at installRoot is the copy itself. A link must be `owner`'s and name a versioned
- * folder beside it (a plain name, `<name>.v-<commit>`, nothing else), which must be a folder. Nothing there →
- * { missing }. `lstat` and `readlink` are ports for a test.
+ * Where the copy is. A plain folder at installRoot is the copy itself (and its own versioned folder). A link must be
+ * `owner`'s and name exactly `<name>.v-<commit>/orchestrate` (L92 item 4): a versioned folder beside it, then SOURCE,
+ * nothing else (no `..`, no other folder, no deeper path). Both must be real folders, not links, and `owner`'s.
+ * Nothing there → { missing }. `real` is the copy (the folder the link names); `folder` is the versioned folder that
+ * holds it, the outside files and the stamp. `lstat` and `readlink` are ports for a test.
  */
 export function currentCopy(installRoot, { owner = 0, lstat = lstatSync, readlink = readlinkSync } = {}) {
   let st; try { st = lstat(installRoot); } catch { return { missing: true, problem: `${installRoot} is missing` }; }
-  if (st.isDirectory()) return { real: installRoot, link: false, commit: null };
+  if (st.isDirectory()) return { real: installRoot, folder: installRoot, link: false, commit: null };
   if (!st.isSymbolicLink()) return { problem: `${installRoot} is neither a folder nor the copy's link` };
   if (st.uid !== owner) return { problem: `${installRoot}, the copy's link, is not owned by ${ownerName(owner)}` };
   let to; try { to = readlink(installRoot); } catch (e) { return { problem: `${installRoot} can't be read (${e.code ?? e.message})` }; }
-  const commit = versionCommit(installRoot, to);
-  if (commit === null) return { problem: `${installRoot} points at ${JSON.stringify(String(to).slice(0, 200))}, not a copy folder beside it` };
-  const real = join(dirname(installRoot), to);
-  let t; try { t = lstat(real); } catch { return { problem: `${installRoot} points at ${to}, which is missing` }; }
-  if (!t.isDirectory()) return { problem: `${real}, which ${installRoot} points at, is not a folder` };
-  return { real, link: true, commit };
+  const parts = String(to).split('/');
+  if (parts.length === 1 && versionCommit(installRoot, parts[0]) !== null) return { problem: oldInstall(installRoot, parts[0]), old: true };
+  const commit = parts.length === 2 && parts[1] === SOURCE ? versionCommit(installRoot, parts[0]) : null;
+  if (commit === null) return { problem: `${installRoot} points at ${JSON.stringify(String(to).slice(0, 200))}, not ${SOURCE} in a copy folder beside it` };
+  const folder = join(dirname(installRoot), parts[0]);
+  const real = join(folder, SOURCE);
+  for (const [p, what] of [[folder, parts[0]], [real, to]]) {
+    let t; try { t = lstat(p); } catch { return { problem: `${installRoot} points at ${to}, and ${what} is missing` }; }
+    if (t.isSymbolicLink() || !t.isDirectory()) return { problem: `${p}, which ${installRoot} points into, is not a folder` };
+    if (t.uid !== owner) return { problem: `${p}, which ${installRoot} points into, is not owned by ${ownerName(owner)}` };
+  }
+  return { real, folder, link: true, commit };
+}
+
+/**
+ * What Joe is told about an install from before L92 item 4, whose link names the versioned folder `v` itself (L106
+ * m-3). Nothing is changed: the updater, the runner and the account copy refuse it, and the install step refuses
+ * while the link is there. Removing the link (only the link: no slash at the end) lets the install step make the new
+ * shape; it clears the old folder itself.
+ */
+export function oldInstall(installRoot, v) {
+  return `${installRoot} is an install from before the copy's layout changed: its link points at the folder ${v} instead of ${v}/${SOURCE} inside it. Nothing was changed, and reviews do not start until it is put right. To put it right, remove the old link (only the link; the old folder is cleared for you), then run the Mac setup's install step again, the same step that first made this copy, which makes it in the new layout. The removal, to paste in Terminal: sudo /bin/rm ${shellQuote(installRoot)}`;
+}
+export const shellQuote = (p) => (/^[A-Za-z0-9_./-]+$/.test(p) ? p : `'${String(p).replace(/'/g, "'\\''")}'`);
+
+/**
+ * The installed copy as a LaunchDaemon may run it (L106 m-1): the copy's link, not a plain folder (L75 c-7), and a
+ * commit stamp that is the commit its folder is named for. A copy whose stamp is missing or another's was not
+ * finished by the updater (which writes the stamp last), or was made by hand. The updater itself does not ask this:
+ * it must still be able to replace such a copy. Null, or the problem. `lstat` and `readlink` are ports for a test.
+ */
+export function copyReady(installRoot, { owner = 0, lstat = lstatSync, readlink = readlinkSync } = {}) {
+  const cur = currentCopy(installRoot, { owner, lstat, readlink });
+  if (!cur.real) return cur.problem;
+  if (!cur.link) return `${installRoot} is a plain folder, not the installed copy's link (the install step makes the link)`;
+  const stamp = readInstallStamp(installRoot, { owner });
+  if (stamp !== cur.commit) return `the copy's commit stamp (${stamp ?? `none at ${join(cur.folder, STAMP)}`}) is not the commit its folder is named for (${cur.commit})`;
+  return null;
 }
 
 /**
@@ -175,16 +236,19 @@ export function installProblem(installRoot, files, { owner = 0, lstat = lstatSyn
     for (const n of list(p)) { const bad = walk(join(p, n)); if (bad) return bad; }
     return null;
   };
-  return walk(real) ?? acl(seen);
+  // The whole versioned folder: the copy, the outside files it imports and the stamp (L92 item 4).
+  return walk(cur.folder) ?? acl(seen);
 }
 
 /**
  * The installed copy's commit stamp (`STAMP`), read as root's plain file: 40 hex, or null when it is missing or not
- * root's alone (the status then shows none, and the Dispatcher tells Joe). Through the copy's link, if it has one: only
- * the stamp itself may not be a link.
+ * root's alone (the status then shows none, and the Dispatcher tells Joe). It is read at the top of the versioned
+ * folder the copy's link names (currentCopy `folder`), not inside the copy; a link of any other shape → null.
  */
 export function readInstallStamp(installRoot, { owner = 0 } = {}) {
-  const t = readRootFile(join(installRoot, STAMP), { owner, max: 64 });
+  const cur = currentCopy(installRoot, { owner });
+  if (!cur.folder) return null;
+  const t = readRootFile(join(cur.folder, STAMP), { owner, max: 64 });
   return t !== null && HEX40.test(t.trim()) ? t.trim() : null;
 }
 

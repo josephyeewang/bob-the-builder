@@ -17,9 +17,14 @@ const HOST = 'mac-a';
 const idle = { size: { tokens: 1, turnEnded: false, openTools: [], compactions: 0 }, activity: { state: 'active' } };
 const GREEN = { band: 'green', own_building: 'open', pace: 0.5, prodBlocked: false };
 
-function world() {
+// refuseWait: the Record refuses every card write to waiting (as a rev race or a refused move would), so the ask is
+// refused on every pass. M9 lets an approved card wait since #79, so an approved card no longer does this (L134).
+function world({ refuseWait = false } = {}) {
   const E = setup({ prefix: 'm11-mergeask-', probe: { kill() {}, pidStart: () => 'start' }, host: HOST });
-  const rec = E.record;
+  const real = E.record;
+  const waits = (x) => x?.entity === 'card' && x?.doc?.state === 'waiting';
+  const rec = !refuseWait ? real : { ...Object.fromEntries(Object.keys(real).map((k) => [k, typeof real[k] === 'function' ? real[k].bind(real) : real[k]])),
+    write: (x) => (waits(x) || (x?.also ?? []).some(waits) ? { ok: false, reason: 'the wait write is refused in this test' } : real.write(x)) };
   product(E);
   const rules = rulesWith({}, { start_session: () => ({ decision: 'allow', reason: 'ok' }) });
   must(rec.write({ actor: 'sensors', entity: 'fact', id: USAGE_FACT(ACCT), expectRev: 0, doc: usageFact({ week: 30, h5: 20, account: ACCT, now: E.clock.t }) }), 'usage');
@@ -73,16 +78,17 @@ function gateRefuses(w, mgId, reason) {
 const askText = /card C-1: the merge was refused twice for the same reason \(409\), but the card could not be put on you/;
 const toldCount = (w) => w.delivered.filter((t) => askText.test(t)).length;
 
-// P-D: an approved card refused twice (the Record does not let approved wait yet) whose "could not ask" alert the queue
-// did not take: the told note is not written, so a later pass tells Joe, once.
+// P-D: a card refused twice whose ask the Record refuses (here every wait write is refused; L134: an approved card is
+// no longer one, M9 lets it wait), and whose "could not ask" alert the queue did not take: the told note is not
+// written, so a later pass tells Joe, once.
 test('audit r5 P-D: the could-not-ask alert answering false writes no told note; Joe is told once on a later tick', async () => {
-  const w = world();
+  const w = world({ refuseWait: true });
   await verifiedCard(w);
   gateRefuses(w, 'MG-1', '409'); gateRefuses(w, 'MG-2', '409');
   must(put(w.E.review, 'approvals', 'card', 'C-1', { state: 'approved' }), 'approved');
   w.E.clock.t += MIN;
   const r = requestMerges({ rec: w.rec, rules: w.rules, now: w.E.clock.t, b: GREEN, running: [], alert: () => false });
-  assert.match(r[0][1], /^not sent to joe/);
+  assert.match(r[0][1], /^not sent to joe: the wait write is refused in this test/);
   assert.equal(w.rec.read('fact', ASK_REFUSED_FACT('C-1', 2)), null, 'no told note while untold');
   for (let i = 0; i < 5; i++) { w.E.clock.t += MIN; await w.runTick(); }
   assert.equal(toldCount(w), 1, JSON.stringify(w.delivered));

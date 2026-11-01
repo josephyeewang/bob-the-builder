@@ -50,7 +50,7 @@ export const FACT_FAMILIES = Object.freeze(Object.fromEntries(Object.entries({
     'undo-issue-', 'blueprint_freshness_alarm'],
   ledger: ['air-health', 'alert-', 'idea-issue-', 'push-request-', 'heartbeat-', 'signed-out-'],
   workshop: ['push.'],
-  merge_gate: ['reverse-'],
+  merge_gate: ['reverse-', 'merge-limit-told-'],
   dispatcher: ['unsent-alerts', 'outage', 'rules-missing-alert', 'compactions-', 'stop-', 'host-lock-', 'pause-',
     'undo-held-', 'undo-note-', 'wait-tell-', 'step-error-', 'last-full-pass', 'band-usage', 'unknown-usage-alert', 'lead-restart-',
     'phone-link', 'phone-link-', 'intake-applied-', 'intake-note', 'hold-', 'review-alert-', 'reconciled-', 'cleanup-',

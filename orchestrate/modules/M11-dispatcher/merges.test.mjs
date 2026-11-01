@@ -4,8 +4,12 @@ import { timeLimits, requestMerges, MERGE_REQUEST, PR_FACT, RECONCILED_FACT, REC
 import { KEYS as K } from './keys.mjs';
 import { settleMerge, reconcileMerge, openTooLong, prReadingAfter } from '../M6-merge-gate/merge-outcome.mjs';
 import { rulesWith, recWith, change, seed, setClock, undoEntries, T0, MIN, iso, withAlerts } from './fixtures.test-helper.mjs';
+import { makeRules } from '../../shared/rules.mjs';
 
 const R = rulesWith();
+// Rules with one reading replaced, built on makeRules (L148 item 1): num(), dec() and flag() read through the same
+// override, so a test never answers `get` alone while the code reads numbers through num().
+const overGet = (base, get) => makeRules({ get rev() { return base.rev; }, may: (a, s) => base.may(a, s), get, classify: (c) => base.classify(c) });
 const ports = (over = {}) => {
   const alerts = [];
   return { alerts, p: { gateAlive: () => true, hasReviewer: () => true, requestReview: () => ({ ok: true }), alert: (t) => alerts.push(t), ...over } };
@@ -338,7 +342,7 @@ test('every time limit comes from the rules, for the product of the card it time
     }
     // The limits are per-product keys, which M10's engine answers only for a named product: an entry is timed by its
     // card's product's limit, and rules that answer only another product's time nothing (L116 m3: every loop).
-    const onlyFor = (who) => ({ ...R, get: (k, opts) => (LIMITS.includes(k) && opts?.product !== who ? undefined : R.get(k, opts)) });
+    const onlyFor = (who) => overGet(R, (k, opts) => (LIMITS.includes(k) && opts?.product !== who ? undefined : R.get(k, opts)));
     for (const [who, timed, lacks] of [['P-2', false, [`${key} for P-1`]], ['P-1', true, []]]) {
       const rec = recWith(w.rows({ product: 'P-1' }));
       const { missing } = await timeAt60(rec, onlyFor(who));
@@ -352,7 +356,7 @@ test('every time limit comes from the rules, for the product of the card it time
 });
 
 test('L116 m2: a merge GitHub has finished is settled with no limit read; L116 m7: a reporting session with no card is its own note', async () => {
-  const none = { ...R, get: (k, o) => (LIMITS.includes(k) ? undefined : R.get(k, o)) };
+  const none = overGet(R, (k, o) => (LIMITS.includes(k) ? undefined : R.get(k, o)));
   for (const [f, want] of [[{ state: 'closed', merged: true, merge_commit_sha: MC }, 'merged'], [{ state: 'closed', merged: false }, 'refused']]) {
     const rec = recWith([['card', 'C-1', { state: 'merging', head: HA, product: 'P-1' }], merging(), ['fact', PR_FACT(7), { head_sha: HA, observed_at: at(59), ...f }]]);
     const { missing } = await timeAt60(rec, none);

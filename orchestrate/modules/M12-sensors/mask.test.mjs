@@ -74,6 +74,33 @@ test('maskDeep masks every string at any depth, keys included', () => {
 test('planted failure: the scanner itself finds an unmasked key (so a 0 from it means something)', () => {
   assert.ok(findCredentials(`left in: ${FAKE.github}`).length >= 1);
   assert.ok(findCredentials(`left in: ${FAKE.generic}`).length >= 1);
+  // L84 6: an all-upper-case access-key id (a planted fake, built from parts) is found and masked.
+  const keyId = ['AK', 'IA', 'Q7XP3ZL9M2K4T8WB'].join('');
+  assert.ok(findCredentials(`id=${keyId} next`).some((f) => f.kind === 'access-key-id'));
+  assert.doesNotMatch(makeMasker({ env: {} }).maskSecrets(`the id is ${keyId}.`).text, new RegExp(keyId));
+  assert.equal(findCredentials('AKIAWORD is not a key; AKIA1234 is too short').length, 0);
+});
+
+// L95 (audit stack r3 Minor 5, probe P6): planted fakes built at run time, never real keys.
+test('L95 Minor 5: the A3T family, an id glued to a word character, and a prefix-less upper-case key are masked', () => {
+  const { maskSecrets } = makeMasker({ env: {} });
+  const body = 'Q7XP3ZL9M2K4T8WB';
+  const ids = { a3t: ['A3', 'TX', body].join(''), glued: `ID_${['AK', 'IA', body].join('')}`, trailing: `${['AK', 'IA', body].join('')}x` };
+  for (const [name, text] of Object.entries(ids)) {
+    assert.ok(findCredentials(`left in: ${text} next`).some((f) => f.kind === 'access-key-id'), name);
+    assert.doesNotMatch(maskSecrets(`the id is ${text}.`).text, new RegExp(body), name);
+  }
+  // A 32- and a 40-character upper-case-and-digit key with no known prefix.
+  for (const n of [32, 40]) {
+    const key = Array.from({ length: n }, (_, i) => 'Q7XP3ZL9M2K4T8WBRCV5HN6JD1FG0SYA'[(i * 7) % 32]).join('');
+    assert.ok(findCredentials(`key ${key} here`).some((f) => f.kind === 'high-entropy'), `${n}`);
+    assert.doesNotMatch(maskSecrets(`key ${key} here`).text, new RegExp(key.slice(0, 12)), `${n}`);
+  }
+  // Not keys: an upper-case hex SHA, a constant's name, a short run.
+  const sha = 'ABCDEF0123456789'.repeat(2) + '01234567';
+  for (const text of [sha, 'MAX_RETRY_COUNT_FOR_THE_BIG_QUEUE_2', 'AKIA1234']) {
+    assert.equal(maskSecrets(`v ${text} v`).text, `v ${text} v`, text);
+  }
 });
 
 // review-0b-7 M5 and round 2: identifiers stay exact; a typed NAME alone never exempts a value.

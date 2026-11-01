@@ -36,12 +36,21 @@ const no = (reason) => ({ ok: false, reason });
 const iso = (ms) => new Date(ms).toISOString();
 const NEEDS_JOE_SETTERS = ['lead', 'dispatcher', 'merge_gate'];
 
+// How long a tab claim may go without a heartbeat, in minutes, or undefined when the rules set none (L115 m-A): the
+// one reading, so lane 3's fit check calls this instead of copying it.
+export function heartbeatLimit(rules, product) {
+  const n = rules?.num?.('proposals.heartbeat_stale_min', { product });
+  return n !== undefined && n >= 1 ? n : undefined;
+}
+
 export function openRecord({ root, product, ownerUid, rules, alert = () => {}, now = () => Date.now(), host = hostname(),
   probe = realProbe, outbox = {}, profileVersion = null, faultAt, testNoLock = false, testNoRevCheck = false, lockTimeoutMs } = {}) {
   if (typeof product !== 'string' || !/^[A-Za-z0-9._-]+$/.test(product)) throw new Error('the record needs its product name');
   if (!rules || typeof rules.get !== 'function') throw new Error('the record needs the rules (shared/rules.mjs)');
   const store = openStore({ root, ownerUid, alert, now, host, probe, faultAt, testNoLock, lockTimeoutMs });
   const get = (key) => rules.get(key, { product });
+  // Rules numbers through the one conversion (L96 step 2): text or an integer, else missing.
+  const num = (key) => rules.num(key, { product });
   const timeouts = () => ({ timeouts: get('timeouts') });
 
   // A view over the record for the ready rule: inside a transaction it reads the locked index, outside it reads the store.
@@ -82,6 +91,9 @@ export function openRecord({ root, product, ownerUid, rules, alert = () => {}, n
       if (from === 'running' && wait.resume !== 'retry') return no('a running card waits only with resume: retry (its claim ends)');
       if (wait.resume === 'retry' && wait.return_to !== 'ready') return no('resume: retry returns to ready');
       if (wait.resume === 'continue' && wait.return_to !== from) return no(`resume: continue returns to ${from}`);
+      // An approved card waits only to come back to approved (L116, L123 m-3): a retry would send it to ready, past
+      // the owner's Approve and its review.
+      if (from === 'approved' && !(wait.resume === 'continue' && wait.return_to === 'approved')) return no('an approved card waits only with resume: continue, back to approved');
     }
     return { ok: true, wait: out };
   }
@@ -185,8 +197,8 @@ export function openRecord({ root, product, ownerUid, rules, alert = () => {}, n
       if (!ask || ask.doc.kind !== 'research' || !isOpen('ask', ask.doc.state)) return no('a research_copy card needs an open research ask (research_ask)');
       if (tx.list('card').some((c) => c.doc.kind === 'research_copy' && c.doc.research_ask === doc.research_ask)) return no(`ask ${doc.research_ask} already has its research_copy card`);
     }
-    const cap = get('caps.rounds');
-    if (!Number.isInteger(cap) || cap < 1) return no('no round cap in the rules (caps.rounds)');
+    const cap = num('caps.rounds');
+    if (cap === undefined || cap < 1) return no('no round cap in the rules (caps.rounds)');
     if (doc.round > cap) {
       const t = timeoutFor(timeouts(), 'card', 'waiting');
       if (!t) return no('the rules have no card waiting limit');
@@ -233,12 +245,20 @@ export function openRecord({ root, product, ownerUid, rules, alert = () => {}, n
         const r = checkWait(doc.wait, { entity: 'card', state: 'waiting', from: moving ? from : old.wait?.return_to === 'ready' && old.wait?.resume === 'retry' ? 'ready' : old.wait?.return_to, card: true, nowMs });
         if (!r.ok) return r;
         if (!moving && (r.wait.resume !== old.wait?.resume || r.wait.return_to !== old.wait?.return_to)) return no('a re-check keeps the wait\'s resume and return_to');
-        doc.wait = r.wait;
+        // The head the card waits on is the writer's, never the caller's (L123 m-4): set when the wait begins and kept
+        // on a re-check, so the way back can tell whether a new head was pushed while it waited.
+        const { head: _given, ...given } = r.wait;
+        const waitHead = moving ? old.head : old.wait?.head;
+        doc.wait = waitHead === undefined ? given : { ...given, head: waitHead };
       }
     } else if (changed.includes('wait')) return no('only a waiting card has a wait');
     if (moving && from === 'waiting' && to !== 'closed_no_answer' && to !== 'cancelled') {
       if (old.wait?.return_to === null || old.wait?.return_to === undefined) return no('this wait has no way back (round cap): only cancelled or closed_no_answer');
-      if (to !== old.wait.return_to) return no(`a wait returns only to ${old.wait.return_to}`);
+      // A card that waited from approved and got a new head meanwhile goes back through review, never straight back to
+      // approved: the owner's Approve was for the old head (L123 m-4).
+      const headMoved = old.wait.return_to === 'approved' && doc.head !== old.wait.head;
+      if (headMoved && to === 'approved') return no('the head changed while the card waited: it goes back to in_review, not approved');
+      if (!(headMoved && to === 'in_review') && to !== old.wait.return_to) return no(`a wait returns only to ${old.wait.return_to}`);
     }
     // The head: only the push script, and a new head after verification sends the card back to review (R2-M7, R3-m6).
     if (changed.includes('head')) {
@@ -539,8 +559,8 @@ export function openRecord({ root, product, ownerUid, rules, alert = () => {}, n
         if (claim?.kind !== 'session') return no('a tab claim is never broken; it lapses');
         if (claim.host !== host) return no(`claim is from host ${claim.host}; never broken from here`);
         if (!Number.isInteger(claim.pid)) return no('this claim has no process yet; it lapses at claims.unlaunched_min, never broken');
-        const stuckMin = get('claims.stuck_min');
-        if (!Number.isInteger(stuckMin) || stuckMin < 1) return no('the rules set no claims.stuck_min, so no claim is broken');
+        const stuckMin = num('claims.stuck_min');
+        if (stuckMin === undefined || stuckMin < 1) return no('the rules set no claims.stuck_min, so no claim is broken');
         const nowMs = now();
         const mine = deadness(tx, claim, p, nowMs, stuckMin);
         if (!mine.dead) return no(`owner not provably dead (${mine.why})`);
@@ -562,10 +582,14 @@ export function openRecord({ root, product, ownerUid, rules, alert = () => {}, n
   // a day. stopSession runs before the lock is taken, and the lapse checks the claim is still that one.
   function lapseClaims(nowArg, { stopSession } = {}) {
     const nowMs = Number.isFinite(nowArg) ? nowArg : now();
+    // Through the typed reader (L148 item 2): the claims map stays text on a real install ("30"). Missing means the
+    // default; set but not a positive whole number refuses the pass.
     let unlaunchedMin;
-    try { unlaunchedMin = get('claims.unlaunched_min'); } catch (e) { return no(`the rules could not be read (${String(e?.message ?? e).slice(0, 200)})`); }
-    if (unlaunchedMin === undefined || unlaunchedMin === null) unlaunchedMin = UNLAUNCHED_MIN_DEFAULT;
-    if (!Number.isInteger(unlaunchedMin) || unlaunchedMin < 1) return no('claims.unlaunched_min must be a whole number of minutes');
+    try {
+      const raw = get('claims.unlaunched_min');
+      unlaunchedMin = raw === undefined || raw === null ? UNLAUNCHED_MIN_DEFAULT : num('claims.unlaunched_min');
+    } catch (e) { return no(`the rules could not be read (${String(e?.message ?? e).slice(0, 200)})`); }
+    if (unlaunchedMin === undefined || unlaunchedMin < 1) return no('claims.unlaunched_min must be a whole number of minutes');
     const stopped = new Set();
     const held = [];
     for (const c of store.list('card')) {
@@ -587,13 +611,13 @@ export function openRecord({ root, product, ownerUid, rules, alert = () => {}, n
         const t = timeouts();
         const running = timeoutFor(t, 'card', 'running');
         const waitT = timeoutFor(t, 'card', 'waiting');
-        // `proposals` is a free-form map in the policy, so the limit may come as text ("30"): a whole number either way.
-        // Missing or not a positive whole number: staleness is not judged (the claim holds to the running limit, so the
-        // card can't start twice), and the owner is told once a day.
-        const staleRaw = get('proposals.heartbeat_stale_min');
-        const stale = Number.isInteger(staleRaw) ? staleRaw : (typeof staleRaw === 'string' && /^\d{1,6}$/.test(staleRaw.trim()) ? Number(staleRaw.trim()) : null);
-        if (!(stale >= 1) && tx.list('card').some((e) => e.doc.claim?.kind === 'tab' && (e.doc.state === 'claimed' || e.doc.state === 'running'))) {
+        // The one reading of the heartbeat limit (heartbeatLimit, L115 m-A). Missing or not a positive whole number:
+        // staleness is not judged (the claim holds to the running limit, so the card can't start twice), and the owner is
+        // told once a day.
+        const stale = heartbeatLimit(rules, product);
+        if (stale === undefined && tx.list('card').some((e) => e.doc.claim?.kind === 'tab' && (e.doc.state === 'claimed' || e.doc.state === 'running'))) {
           const key = `alert:heartbeat_stale_unreadable:${iso(nowMs).slice(0, 10)}`;
+          const staleRaw = get('proposals.heartbeat_stale_min');
           if (!tx.seen(key)) { store.alert({ type: 'heartbeat_stale_unreadable', key: 'proposals.heartbeat_stale_min', value: staleRaw === undefined ? null : String(staleRaw).slice(0, 40) }); tx.markSeen(key, 'alerted'); }
         }
         const lapsed = [];

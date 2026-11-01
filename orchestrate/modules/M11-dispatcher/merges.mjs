@@ -246,7 +246,7 @@ export async function timeLimits({ rec, rules, now, b, running = [], gateAlive, 
 // refusals (check() finding the card not ready, recover() putting back a merge left in checking) add no reason, so
 // they never count toward a repeat (L116 m7 ruling). The reasons carry over to a new head: after a new head, one
 // refusal that matches the last one before it asks Joe at once (L116 c3; reasons that alternate never ask).
-// When the Record refuses the ask (an approved card, until M9 lets approved wait; a rev race), Joe is told once per
+// When the Record refuses the ask (a rev race, or a move it does not allow), Joe is told once per
 // card and refusal count, so no card stalls without him knowing (L116 M-1).
 function askOnRepeat(rec, id, { now, alert, pr }) {
   const card = rec.read('card', id);

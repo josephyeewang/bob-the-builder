@@ -129,6 +129,8 @@ test('every legal move succeeds for each listed actor when its condition holds',
           if (entity === 'card') {
             const doc = { ...baseDoc('card', from, env), kind: 'lead_daily_card' };
             if (from === 'waiting') doc.wait = waitTo(to === 'closed_no_answer' || to === 'cancelled' ? 'ready' : to);
+            // A seeded wait carries the head it began on, as the writer stamps it (L123 m-4).
+            if (from === 'waiting' && doc.head !== undefined) doc.wait.head = doc.head;
             if (from === 'running' && to === 'in_review') doc.claim = { kind: 'tab', host: 'mac-a', claim_id: 'T-1', claimed_at: iso(t) };
             goFreeCard(id, doc);
             const next = { ...doc, state: to };

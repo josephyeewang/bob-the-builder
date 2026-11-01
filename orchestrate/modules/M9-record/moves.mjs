@@ -33,12 +33,14 @@ export const MOVES = Object.freeze({
     // verified/approved → merged: only the Merge Gate's reconcile of an interrupted merge GitHub shows merged (L85 M-1 b);
     // the writer asks for this card's merged merge document at the same commit, as for every move into merged.
     verified: { in_review: W, approved: A, merging: G, merged: G, waiting: D, cancelled: A },
-    approved: { merging: G, merged: G, verified: A, in_review: W, cancelled: A },
+    // approved → waiting: an approved card whose merge is refused twice is put on the owner, and comes back to approved
+    // (L116; the wait's resume: continue returns to approved).
+    approved: { merging: G, merged: G, verified: A, in_review: W, waiting: D, cancelled: A },
     merging: { merged: G, verified: G, in_review: G },
     merged: { closed: D, reverted: G },
     closed: { reverted: G },
     // A wait returns only to its own return_to (checked by the writer); these are the states a return_to can name.
-    waiting: { ready: D, in_review: D, verified: D, closed_no_answer: D, cancelled: A },
+    waiting: { ready: D, in_review: D, verified: D, approved: D, closed_no_answer: D, cancelled: A },
   }),
   ask: freeze({
     // open → expired: an ask whose box was released lapses a second time without being shown again (0b-5 M5-2).

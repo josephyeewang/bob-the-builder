@@ -6,6 +6,7 @@ import { USAGE_FACT, BAND_FACT } from './usage.mjs';
 import { OUTAGE_FACT } from './outage.mjs';
 import { retellWaits, WAIT_TELL_FACT } from './joe-waits.mjs';
 import { KEYS as K } from './keys.mjs';
+import { makeRules } from '../../shared/rules.mjs';
 import { change, rulesWith, recWith, seed, usageFact, undoEntries, filesOfCommits, T0, MIN, H, iso, withAlerts, setClock } from './fixtures.test-helper.mjs';
 
 // Each step runs as the tick runs it: its alerts are queued, then sent once it is done (alerts.mjs, L47).
@@ -665,11 +666,14 @@ test('audit 0b-6 r3 MAT-1: a host.lock that cannot be read, or rules that cannot
   {
     const { w, sid } = await cancelledWorld();
     const good = rulesWith({}, { start_session: { decision: 'allow', reason: 'ok' } });
-    const broken = { ...good, get: () => { throw new Error('rules file unreadable'); } };
+    // Built on makeRules, as the real rules are (L148 item 1): a reader that throws makes every value missing through
+    // get, num, dec and flag alike, never a get-only stand-in whose num still answers.
+    const broken = makeRules({ get rev() { return good.rev; }, may: (a, s) => good.may(a, s), classify: (c) => good.classify(c),
+      get: () => { throw new Error('rules file unreadable'); } });
     const r = await w.pass(1, { rules: broken });
     assert.deepEqual(w.calls.stops, [sid]);
-    assert.ok(r.notes.some((n) => /nothing but undo cards starts: the rules have no value for the rules \(rules file unreadable\)/.test(n)), r.notes.join(' | '));
-    assert.equal(w.calls.alerts.filter((a) => /rules file unreadable/.test(a)).length, 1);
+    assert.ok(r.notes.some((n) => /nothing but undo cards starts: the rules have no value for .*timeouts\.cancel_grace_min/.test(n)), r.notes.join(' | '));
+    assert.equal(w.calls.alerts.filter((a) => /the rules have no value for .*timeouts\.cancel_grace_min/.test(a)).length, 1);
     assert.equal(w.calls.launched.length, 1, 'nothing new started');
   }
 });
