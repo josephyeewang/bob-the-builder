@@ -11,6 +11,7 @@ import { STAMP, installStamp } from './review-daemons.mjs';
 import { reviewDaemonPlists } from './review-daemons.mjs';
 import { readAccountFile, copyAccountTo, useAccount, ACCOUNT_FILE } from './accounts.mjs';
 import { tempDir } from '../../../shared/test-tmp.mjs';
+import { git, gitOk } from '../git/safe-git.mjs';
 
 const ME = process.getuid();
 
@@ -309,4 +310,36 @@ test('L65: the two LaunchDaemons run the installed copy and its own node, the ru
   for (const t of [p.runner, p.accountCopy]) assert.doesNotMatch(t, /homebrew|\/usr\/local/);
   assert.throws(() => reviewDaemonPlists({ label: 'x y' }), /bad job label/);
   assert.throws(() => reviewDaemonPlists({ label: 'x', installRoot: 'I' }), /installRoot must be an absolute path/);
+});
+
+// L69 point 4: the runner keys one start per card, tree and role. The real port reads the head's tree through safe-git
+// (no inherited settings, no prompts, no network), in a throwaway repository.
+test('L69: the real tree port reads a head\'s tree from the mirror; an amend with no code change has the same tree', async () => {
+  const d = tempDir('m4-tree-');
+  const gd = join(d, '.git');
+  const out = async (args, o = {}) => (await git(args, { gitDir: gd, workTree: d, cwd: d, ...o })).stdout.toString('utf8').trim();
+  await gitOk(['init', '-q', d], { gitDir: gd });
+  writeFileSync(join(d, 'a.txt'), 'one\n');
+  await gitOk(['add', 'a.txt'], { gitDir: gd, workTree: d, cwd: d });
+  await gitOk(['-c', 'user.name=t', '-c', 'user.email=t@example.invalid', 'commit', '-q', '-m', 'one'], { gitDir: gd, workTree: d, cwd: d });
+  await gitOk(['branch', 'card/c-1'], { gitDir: gd, workTree: d, cwd: d });
+  const ports = realPorts({ mirror: gd, uids: { reviewer: process.getuid() } }, {});
+  const head = await ports.currentHead('C-1');
+  assert.match(head, /^[0-9a-f]{40}$/);
+  const tree = await ports.treeOf('C-1', head);
+  assert.equal(tree, await out(['rev-parse', `${head}^{tree}`]));
+  // An amend with only a new message: a new head, the same tree.
+  await gitOk(['-c', 'user.name=t', '-c', 'user.email=t@example.invalid', 'commit', '-q', '--amend', '-m', 'one, again'], { gitDir: gd, workTree: d, cwd: d });
+  const amend = await out(['rev-parse', 'HEAD']);
+  assert.notEqual(amend, head);
+  assert.equal(await ports.treeOf('C-1', amend), tree);
+  // A code change: a new tree.
+  writeFileSync(join(d, 'a.txt'), 'two\n');
+  await gitOk(['-c', 'user.name=t', '-c', 'user.email=t@example.invalid', 'commit', '-q', '-am', 'two'], { gitDir: gd, workTree: d, cwd: d });
+  assert.notEqual(await ports.treeOf('C-1', await out(['rev-parse', 'HEAD'])), tree);
+  // A head git does not have, or one that is not 40 hex, is a throw (the runner refuses the request).
+  await assert.rejects(ports.treeOf('C-1', 'e'.repeat(40)), /the head's tree is not in the mirror/);
+  await assert.rejects(ports.treeOf('C-1', 'HEAD'), /the head is not 40 hex/);
+  // Joe's taps: none until the phone link is wired.
+  assert.deepEqual(ports.setAsideByJoe(), []);
 });

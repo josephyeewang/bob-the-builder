@@ -8,16 +8,20 @@
 //   - the card must be in the Record (read only) and in a state that needs this role (an auditor only on a Tier-1 card);
 //   - `head` must be the card's head in the Record and its current head in git (read only);
 //   - the role must be reviewer or auditor;
-//   - nothing may already be running for that card, head and role;
-//   - per card, head and role there is one start; a start that failed (or a session that ended with no verdict file)
-//     may be tried again after 15 minutes, 3 tries in all, and then Joe is told.
-// Nothing a worker can write starts a review again (lead call L68). A session that handed in a verdict that can't be
-// counted holds its head: the Merge Gate counts it as a failure, so a new review would change nothing, and Joe is told.
-// A verdict the Record has not taken 15 minutes after its session ended is told to Joe, and nothing starts again: the
-// Merge Gate and the Record's move to verified read the verdict files themselves, never the Record's rows.
-// When a session ends, the runner writes its ended record into ended/ (L68): a session with no verdict file holds the
-// head until it is marked ended. Each pass on which every live review session is the runner's own, it also marks
-// ended any launched session it is not running (a start it lost track of), once that launch is 5 minutes old.
+//   - nothing may already be running for that card, tree and role;
+//   - per card, tree and role there is one start (L69: an amend with no code change keeps its tree, so it gets no new
+//     roll). A start where claude never ran may be tried again after 15 minutes, 3 tries in all, and then Joe is told.
+// Nothing a worker can write starts a review again (lead call L68), and a session that ran never starts again on its
+// own (L69). A session that ended with no verdict file (a crash, a context-limit stop or a kill does this too) or with
+// one that can't be counted holds its head: the Merge Gate counts it as a failure, and Joe is told, with a "review
+// again" tap. The tap (`setAsideByJoe`) sets that session aside in set-aside/, so it has no say, and the next request
+// may start a new one. A verdict the Record has not taken 15 minutes after its session ended is told to Joe, and
+// nothing starts again: the Merge Gate and the Record's move to verified read the verdict files themselves.
+// When a session ends, the runner writes its ended record into ended/ (L68), with the verdict file's sha256 at that
+// moment (L69): only that version counts. Each pass on which every live review session is the runner's own, it also
+// marks ended any launched session it is not running (a start it lost track of), once that launch is 5 minutes old,
+// reading its verdict file as at any end. A new reviewer's prompt holds the notes of the card's earlier failing
+// verdicts on other trees (`earlier`, L69). A launch record that fails its checks is told to Joe once.
 // Every request name is read each pass (L66): a name that is not a request's is moved aside into rejected/, so junk
 // can't hold real requests back, and more than 200 waiting is told to Joe. Only starts are capped, 50 a pass, oldest
 // first by when the runner first saw each request.
@@ -39,6 +43,7 @@
 //   rejected/    0700   files in requests/ whose names are not a request's, moved aside unread
 //   launches/    0755   the launch records (M9 reads them)
 //   ended/       0755   the ended records, one per launched session once it has ended (M9 `runnerEnded` reads them)
+//   set-aside/   0755   Joe's "review again": one record per session Joe set aside (M9 `runnerAside` reads them)
 //   status.json  0644   { written_at, ok, error, installed_commit, running, refused, alerts }
 //   state.json   0600   the runner's own memory: running sessions, tries per card, head and role, request ids seen
 
@@ -47,7 +52,7 @@ import { randomUUID } from 'node:crypto';
 import { dirname, join } from 'node:path';
 import { REVIEW_ROLES } from '../../../shared/review-roles.mjs';
 import { SESSION_ID } from '../../../shared/record.mjs';
-import { ENDED_FOLDER, launchesFolderProblem, reviewUid, runnerLaunches, CARD_ID } from '../../M9-record/outbox.mjs';
+import { ASIDE_FOLDER, ENDED_FOLDER, PASSES, launchesFolderProblem, reviewUid, runnerLaunches, CARD_ID } from '../../M9-record/outbox.mjs';
 import { checkReviewOutbox, reviewOutbox, uidsProblem } from './review-user.mjs';
 import { ACCOUNT_NAMES, accountDir, accountEnv } from './accounts.mjs';
 
@@ -67,14 +72,19 @@ export const REQUEST_NAME = /^[A-Za-z0-9-]{1,64}\.json$/;
 export const REQUEST_ID = /^[A-Za-z0-9-]{1,64}$/;
 export { CARD_ID };
 const HEX40 = /^[0-9a-f]{40}$/;
-export const FOLDERS = Object.freeze({ requests: 'requests', rejected: 'rejected', launches: 'launches', ended: ENDED_FOLDER, status: 'status.json', state: 'state.json' });
+const HEX64 = /^[0-9a-f]{64}$/;
+// The earlier failing verdicts' notes a new reviewer gets in its prompt (L69 point 4): the newest few, each cut short.
+export const MAX_EARLIER = 5;
+export const MAX_EARLIER_NOTES = 4000;
+export const FOLDERS = Object.freeze({ requests: 'requests', rejected: 'rejected', launches: 'launches', ended: ENDED_FOLDER, aside: ASIDE_FOLDER, status: 'status.json', state: 'state.json' });
 const REQUEST_KEYS = ['card', 'head', 'request_id', 'role'];
 
 const iso = (t) => new Date(t).toISOString();
 
 /** Is a `ps` command line the pinned claude's? The one reading, for the session list and the check before a stop. */
 export const isClaudeCommand = (cmd, bin) => typeof cmd === 'string' && typeof bin === 'string' && bin.length > 0 && (cmd === bin || cmd.startsWith(`${bin} `));
-const keyOf = (card, head, role) => `${card}:${head}:${role}`;
+// One start per card, tree and role (L69 point 4): an amend with no code change keeps its tree, so it gets no new roll.
+const keyOf = (card, tree, role) => `${card}:${tree}:${role}`;
 
 /** Does a card in this state need a session of this role? A reviewer for every card in review; an auditor too on Tier 1 (m-6). */
 export function needsRole(doc, role) {
@@ -159,25 +169,29 @@ function writeLaunch(dir, sid, doc) {
  *   now(), ownUid(), newId() (default randomUUID)
  *   isAdmin() → true | false; a throw counts as an admin (m-3)
  *   readCard(card) → { ok, doc, rev } (the Record, read only)      currentHead(card, doc) → 40 hex (git, read only)
+ *   treeOf(card, head) → the head's tree, 40 hex (git, read only; L69): one start per card, tree and role
+ *   setAsideByJoe() → [{ session_id }] Joe's "review again" taps since the last pass (L69; a port now, wired to the phone
+ *     link at the cutover). Each sets that session aside (it has no say) and lets a new session start
  *   verdictTaken({ role, sessionId, card, head }) → { ok: true } when the Record holds this session's verdict and its
  *     file still reads true (M9 `verdictFromFile`); { ok: false, reason } when it doesn't; a throw when the Record can't
  *     be read (item 20(a)). Only ever told to Joe: nothing starts again on what it says (L68)
  *   sessions() → [{ pid, sessionId? }] the review sessions alive now     stop({ pid, sessionId })
  *   claudeBin, processName(pid) → the process's command line: nothing is stopped, and no start counts, unless it is
  *     claude's (`isClaudeCommand`)
- *   start({ role, card, head, sessionId, outbox, configDir, env, signin }) → { ok, pid } | { ok: false, reason }; the pid
- *     is claude's own process, never the launcher's (L66)
+ *   start({ role, card, head, tree, sessionId, outbox, configDir, env, signin, earlier }) → { ok, pid } | { ok: false,
+ *     reason }; the pid is claude's own process, never the launcher's (L66). `earlier` is [{ session_id, head, notes }],
+ *     the card's earlier failing verdicts for this role on other trees, newest first (L69): the prompt includes them
  *   accountInUse() → 'a' | 'b' (which sign-in folder of review's to start on)
- *   handedIn({ role, sessionId, outbox, card, head }) → { ok: true } when the ended session left a verdict that can be
- *     counted; { ok: false, none: true } when it left none; { ok: false, reason } when it left one that can't be counted
- *     (M9 `sessionVerdict`, the same read the Merge Gate makes)
+ *   handedIn({ role, sessionId, outbox, card, head }) → { ok: true, verdict } when the session left a verdict that can be
+ *     counted (verdict.sha256 is the file's); { ok: false, none: true } when it left none; { ok: false, reason } when it
+ *     left one that can't be counted (M9 `sessionVerdict`, the same read the Merge Gate makes)
  *   installedCommit() → the installed copy's commit stamp (40 hex), shown in the status
  * Returns { ok, error?, started: [...], refused: [...], stopped: [...], alerts: [...] } (also what status.json shows).
  */
 export async function runnerPass(ctx) {
   const now = ctx.now();
   const newId = ctx.newId ?? randomUUID;
-  const result = { ok: true, error: null, started: [], refused: [], stopped: [], alerts: [] };
+  const result = { ok: true, error: null, started: [], refused: [], stopped: [], alerts: [], setAside: [] };
   let installed = null;
   try { const c = await ctx.installedCommit?.(); installed = typeof c === 'string' && HEX40.test(c) ? c : null; } catch { installed = null; }
   // Who we are and where we write come first: a runner that is not review, or a folder that is not review's, writes nothing.
@@ -190,15 +204,16 @@ export async function runnerPass(ctx) {
   const rootBad = folderProblem(ctx.root, uid);
   if (rootBad) return { ...result, ok: false, error: `the review folder: ${rootBad}`, wrote: false };
 
-  const P = { requests: join(ctx.root, FOLDERS.requests), rejected: join(ctx.root, FOLDERS.rejected), launches: join(ctx.root, FOLDERS.launches), ended: join(ctx.root, FOLDERS.ended), status: join(ctx.root, FOLDERS.status), state: join(ctx.root, FOLDERS.state) };
+  const P = { requests: join(ctx.root, FOLDERS.requests), rejected: join(ctx.root, FOLDERS.rejected), launches: join(ctx.root, FOLDERS.launches), ended: join(ctx.root, FOLDERS.ended), aside: join(ctx.root, FOLDERS.aside), status: join(ctx.root, FOLDERS.status), state: join(ctx.root, FOLDERS.state) };
   const st = readState(P.state);
   const state = st.ok ? st.state : { running: [], attempts: {}, seen: [], alerts: [], told: [] };
   // `at` is the alert's time; the Dispatcher tells each id and time once, so a trouble that keeps the state from being
   // saved passes the time it began (the file's), not this pass's.
-  const alert = (id, text, at = iso(now)) => {
+  // `offer` adds what Joe can do about it (L69: { action: 'review-again', session_id }).
+  const alert = (id, text, at = iso(now), offer = null) => {
     if (state.told.includes(id)) return;
     state.told = [...state.told, id].slice(-KEEP_SEEN);
-    const a = { id, at, text };
+    const a = { id, at, text, ...(offer ?? {}) };
     state.alerts = [...state.alerts, a].slice(-KEEP_LIST);
     result.alerts.push(a);
   };
@@ -232,8 +247,10 @@ export async function runnerPass(ctx) {
     ensureFolder(P.rejected, 0o700);
     ensureFolder(P.launches, 0o755);
     ensureFolder(P.ended, 0o755);
+    ensureFolder(P.aside, 0o755);
   } catch (e) { fail(`the review folders could not be made (${e?.code ?? e?.message})`); return finish(); }
-  const reqBad = folderProblem(P.requests, uid, 0o1733) ?? folderProblem(P.rejected, uid, 0o700) ?? launchesFolderProblem(P.launches, uid) ?? ((b) => b && `the ended records: ${b}`)(launchesFolderProblem(P.ended, uid));
+  const reqBad = folderProblem(P.requests, uid, 0o1733) ?? folderProblem(P.rejected, uid, 0o700) ?? launchesFolderProblem(P.launches, uid)
+    ?? ((b) => b && `the ended records: ${b}`)(launchesFolderProblem(P.ended, uid)) ?? ((b) => b && `the set-aside records: ${b}`)(launchesFolderProblem(P.aside, uid));
   if (reqBad) { fail(`the review folders: ${reqBad}`); return finish(); }
 
   // The sessions alive now. One the runner did not start is stopped, and Joe is told (m-7); one that ended leaves `running`.
@@ -253,12 +270,13 @@ export async function runnerPass(ctx) {
     const what = isClaude ? (stopped ? 'stopped' : 'could not be stopped') : 'not stopped, because the process is no longer claude';
     alert(`stray-${s.pid}-${s.sessionId ?? ''}`, `A review session the review runner did not start was found (process ${s.pid}${s.sessionId ? `, session ${s.sessionId}` : ''}) and ${what}.`);
   }
-  // The ended record (L68): a session the runner launched has its say at the Merge Gate through its verdict file, and a
-  // session with no file holds the head until it is marked here. Written once, never over; one that can't be written
+  // The ended record (L68, L69): a session the runner launched has its say at the Merge Gate through its verdict file,
+  // and holds the head until it is marked here. The record says what the file was at the end (`verdict_sha256`: its
+  // sha256, `none` or `refused`), and only that version counts. Written once, never over; one that can't be written
   // fails the pass, and the sweep below tries again.
-  const markEnded = (doc, handedIn, how) => {
+  const markEnded = (doc, said, how) => {
     try {
-      writeLaunch(P.ended, doc.session_id, { session_id: doc.session_id, role: doc.role, card: doc.card, head: doc.head, ended_at: iso(now), handed_in: handedIn, how });
+      writeLaunch(P.ended, doc.session_id, { session_id: doc.session_id, role: doc.role, card: doc.card, head: doc.head, ...(doc.tree ? { tree: doc.tree } : {}), ended_at: iso(now), verdict_sha256: said, how });
       return true;
     } catch (e) {
       if (e?.code === 'EEXIST') return true;   // marked already
@@ -266,46 +284,89 @@ export async function runnerPass(ctx) {
       return false;
     }
   };
-  const alive = new Set(live.map((s) => s.pid));
-  for (const r of state.running.filter((x) => !alive.has(x.pid))) {
-    const k = keyOf(r.card, r.head, r.role);
+  const reviewAgain = 'A tap on "review again" sets that session aside so a new one can start; a new push also gets a new review.';
+  // A session the runner launched has ended (or was swept): read its verdict, mark it ended, and settle its try. Silence
+  // is a failure (L69 point 1): a session that ran and left no verdict, or one that can't be counted, holds the head, and
+  // Joe is told. Nothing starts again on its own; Joe's "review again" sets the session aside.
+  const endSession = async (doc, how) => {
+    const k = keyOf(doc.card, doc.tree ?? doc.head, doc.role);
     const a = state.attempts[k] ?? { failures: 0 };
     let h;
-    try { h = await ctx.handedIn({ role: r.role, sessionId: r.session_id, outbox: reviewOutbox({ outboxRoot: ctx.outboxRoot, role: r.role, sessionId: r.session_id }), card: r.card, head: r.head }); } catch (e) { h = { ok: false, reason: `its verdict could not be read (${e?.message ?? e})` }; }
-    markEnded(r, h?.ok === true ? true : h?.none === true ? false : null, 'ended');
-    if (h?.ok === true) state.attempts[k] = { ...a, started: true, ended_at: iso(now) };
-    else if (h?.none === true) {
-      // A session that ended with nothing handed in counts as a failed start: Joe is told, and the next request may
-      // start a new review after the wait, 3 tries in all (L66). The ended record gives it no say at the Merge Gate.
-      state.attempts[k] = { ...a, started: false, failures: (a.failures ?? 0) + 1, last_failed_at: iso(now), last_reason: 'ended with no verdict' };
-      alert(`ended-${r.session_id}`, `The ${r.role} for card ${r.card} at ${r.head.slice(0, 7)} ended without handing in a verdict.`);
+    try { h = await ctx.handedIn({ role: doc.role, sessionId: doc.session_id, outbox: reviewOutbox({ outboxRoot: ctx.outboxRoot, role: doc.role, sessionId: doc.session_id }), card: doc.card, head: doc.head }); } catch (e) { h = { ok: false, reason: `its verdict could not be read (${e?.message ?? e})` }; }
+    const sha = h?.ok === true && HEX64.test(h.verdict?.sha256 ?? '') ? h.verdict.sha256 : null;
+    const said = sha ?? (h?.ok !== true && h?.none === true ? 'none' : 'refused');
+    if (!markEnded(doc, said, how)) return false;
+    const done = { ...a, started: true, ended_at: iso(now), session_id: doc.session_id };
+    const where = `card ${doc.card} at ${doc.head.slice(0, 7)}`;
+    const offer = { action: 'review-again', session_id: doc.session_id };
+    if (sha) state.attempts[k] = { ...done, held: false };
+    else if (said === 'none') {
+      state.attempts[k] = { ...done, held: true, last_reason: 'ended with no verdict' };
+      alert(`silent-${doc.session_id}`, `The ${doc.role} session ${doc.session_id} for ${where} ended without handing in a verdict (a crash, a context-limit stop or a kill does this too). That counts as a failure, so this head can't pass, and nothing starts again on its own. ${reviewAgain}`, undefined, offer);
     } else {
-      // A verdict that can't be counted counts as a failure at the Merge Gate (L68), so this head can't pass and a new
-      // review of it would change nothing: nothing starts again, and Joe is told. A new push gets a new review.
-      const why = typeof h?.reason === 'string' && h.reason ? h.reason.slice(0, 300) : 'no reason given';
-      state.attempts[k] = { ...a, started: true, ended_at: iso(now), held: true, last_reason: `its verdict can't be counted: ${why}` };
-      alert(`held-${r.session_id}`, `The ${r.role} for card ${r.card} at ${r.head.slice(0, 7)} handed in a verdict that can't be counted (${why}). It counts as a failure, so this head can't pass; no new ${r.role} starts on it. A new push gets a new review.`);
+      const why = typeof h?.reason === 'string' && h.reason ? h.reason.slice(0, 300) : h?.ok === true ? 'the file\'s sha256 was not given' : 'no reason given';
+      state.attempts[k] = { ...done, held: true, last_reason: `its verdict can't be counted: ${why}` };
+      alert(`held-${doc.session_id}`, `The ${doc.role} session ${doc.session_id} for ${where} handed in a verdict that can't be counted (${why}). It counts as a failure, so this head can't pass; no new ${doc.role} starts on it on its own. ${reviewAgain}`, undefined, offer);
     }
-  }
+    return true;
+  };
+  const alive = new Set(live.map((s) => s.pid));
+  for (const r of state.running.filter((x) => !alive.has(x.pid))) await endSession(r, 'ended');
   state.running = state.running.filter((x) => alive.has(x.pid));
+
+  // The launch records, read once for the sweep, Joe's taps and the requests. One that fails its checks is told to Joe
+  // once: the Merge Gate refuses the card it belongs to, or skips it when it names no card (L69 point 3).
+  const rl = runnerLaunches({ root: P.launches, uids: ctx.uids });
+  if (!rl.ok) fail(`the launch records could not be read: ${rl.reason}`);
+  for (const b of rl.ok ? rl.refused : []) {
+    const whose = b.tie?.card ? `It belongs to card ${b.tie.card}, which can't pass until it is fixed${b.tie.role ? `; a tap on "review again" for session ${b.sid} sets it aside` : ''}.` : 'It names no card, so the Merge Gate skips it.';
+    alert(`bad-record-${b.name}`, `The review runner's launch record ${b.name.slice(0, 80)} fails its checks (${b.reason}). ${whose}`, undefined, b.tie?.role ? { action: 'review-again', session_id: b.sid } : null);
+  }
+  let asideIds = new Set();
+  try { asideIds = new Set(readdirSync(P.aside).filter((n) => !n.startsWith('.')).map((n) => n.replace(/\.json$/, ''))); } catch (e) { fail(`the set-aside records could not be listed (${e?.code ?? e})`); }
 
   // The sweep (L68): a launched session the runner is not running, with no ended record, is one it lost track of (it
   // stopped between the launch record and saving its memory, or the start gave a pid that wasn't claude's). It is marked
-  // ended only on a pass where every live claude session of review's is the runner's own, so none can still hand in a verdict, and
-  // only once its launch is 5 minutes old, so the session list has had time to show it.
-  if (!strayClaude) {
-    const rl = runnerLaunches({ root: P.launches, uids: ctx.uids });
-    if (!rl.ok) fail(`the launch records could not be read for the sweep: ${rl.reason}`);
-    else {
-      const runningIds = new Set(state.running.map((x) => x.session_id));
-      for (const { doc } of rl.launches) {
-        if (runningIds.has(doc.session_id)) continue;
-        const at = Date.parse(doc.launched_at ?? '');
-        if (Number.isFinite(at) && now - at < SWEEP_AFTER_MS) continue;
-        try { lstatSync(join(P.ended, `${doc.session_id}.json`)); continue; } catch { /* not marked */ }
-        if (markEnded(doc, null, 'swept')) alert(`swept-${doc.session_id}`, `The ${doc.role} session ${doc.session_id} for card ${doc.card} at ${doc.head.slice(0, 7)} was not being tracked by the review runner; it is now marked ended.`);
-      }
+  // ended only on a pass where every live claude session of review's is the runner's own, so none can still hand in a
+  // verdict, and only once its launch is 5 minutes old, so the session list has had time to show it. Its verdict file is
+  // read as at any end, so a session that handed in a pass before it was lost still counts.
+  if (!strayClaude && rl.ok) {
+    const runningIds = new Set(state.running.map((x) => x.session_id));
+    for (const { doc } of rl.launches) {
+      if (runningIds.has(doc.session_id)) continue;
+      const at = Date.parse(doc.launched_at ?? '');
+      if (Number.isFinite(at) && now - at < SWEEP_AFTER_MS) continue;
+      try { lstatSync(join(P.ended, `${doc.session_id}.json`)); continue; } catch { /* not marked */ }
+      if (await endSession(doc, 'swept')) alert(`swept-${doc.session_id}`, `The ${doc.role} session ${doc.session_id} for card ${doc.card} at ${doc.head.slice(0, 7)} was not being tracked by the review runner; it is now marked ended.`);
     }
+  }
+
+  // Joe's "review again" (L69 point 1). A tap names a session; the runner checks it is one it holds a head for (it ended
+  // without a verdict that counts) or one whose launch record fails its checks, and not running. It then writes the
+  // set-aside record (the Merge Gate gives that session no say) and clears the hold, so the next request may start a new
+  // session. Taps come only through this port, never from requests/: anyone can write there.
+  let taps = [];
+  try { const t = await ctx.setAsideByJoe?.(); taps = Array.isArray(t) ? t : []; } catch (e) { fail(`Joe's "review again" taps could not be read (${e?.message ?? e})`); }
+  for (const t of taps) {
+    const sid = t?.session_id;
+    const no = (reason) => result.refused.push({ at: iso(now), request: null, card: null, role: null, request_id: null, reason: `Joe's "review again" for session ${String(sid).slice(0, 80)}: ${reason}` });
+    if (typeof sid !== 'string' || !SESSION_ID.test(sid)) { no('that is not a session id'); continue; }
+    if (!rl.ok) { no('the launch records could not be read'); continue; }
+    if (state.running.some((r) => r.session_id === sid)) { no('that session is still running'); continue; }
+    const good = rl.launches.find((l) => l.doc.session_id === sid)?.doc;
+    const bad = good ? null : rl.refused.find((b) => b.sid === sid && b.tie?.role);
+    const doc = good ?? (bad ? { session_id: sid, ...bad.tie } : null);
+    if (!doc) { no('the runner launched no such session, or its record names no role, card and head'); continue; }
+    const k = keyOf(doc.card, doc.tree ?? doc.head, doc.role);
+    const a = state.attempts[k];
+    const held = a?.held === true && a.session_id === sid;
+    if (!held && !bad) { no('only a session that ended without a verdict that counts, or whose launch record fails its checks, can be set aside'); continue; }
+    try {
+      writeLaunch(P.aside, sid, { session_id: sid, role: doc.role, card: doc.card, head: doc.head, ...(doc.tree ? { tree: doc.tree } : {}), set_aside_at: iso(now), by: 'joe' });
+    } catch (e) { if (e?.code !== 'EEXIST') { fail(`session ${sid} could not be set aside (${e?.code ?? e?.message})`); continue; } }
+    asideIds.add(sid);
+    if (held) state.attempts[k] = { failures: a.failures ?? 0, set_aside: [...(a.set_aside ?? []), sid].slice(-KEEP_LIST) };
+    result.setAside.push({ session_id: sid, card: doc.card, role: doc.role });
   }
 
   // Every request name, each pass (L66 starvation). A name that is not a request's is moved aside unread; the rest are
@@ -341,13 +402,20 @@ export async function runnerPass(ctx) {
     if (c.doc.head !== head) { refuse(`the request names head ${head.slice(0, 7)}, but the card's head is ${String(c.doc.head ?? 'none').slice(0, 7)}`); continue; }
     let gitHead; try { gitHead = await ctx.currentHead(card, c.doc); } catch (e) { gitHead = null; refuse(`the card's head in git could not be read (${e?.message ?? e})`); continue; }
     if (gitHead !== head) { refuse(`the request names head ${head.slice(0, 7)}, but the card's branch is at ${String(gitHead ?? 'nothing').slice(0, 7)}`); continue; }
-    const k = keyOf(card, head, role);
-    if (state.running.some((r) => keyOf(r.card, r.head, r.role) === k)) { refuse(`a ${role} is already running for card ${card} at ${head.slice(0, 7)}`); continue; }
+    let tree; try { tree = await ctx.treeOf(card, head); } catch (e) { refuse(`the tree of ${head.slice(0, 7)} could not be read (${e?.message ?? e})`); continue; }
+    if (typeof tree !== 'string' || !HEX40.test(tree)) { refuse(`the tree of ${head.slice(0, 7)} could not be read`); continue; }
+    if (!rl.ok) { refuse(`the launch records could not be read, so no ${role} starts`); continue; }
+    const k = keyOf(card, tree, role);
+    if (state.running.some((r) => keyOf(r.card, r.tree ?? r.head, r.role) === k)) { refuse(`a ${role} is already running for card ${card} at ${head.slice(0, 7)} (or a head with the same tree)`); continue; }
     let a = state.attempts[k] ?? { failures: 0 };
-    if (a.started) {
-      // One start per head, for good (L68): what the Record says is never a reason to start again, since a worker can
-      // write the Record. A verdict the Record has not taken 15 minutes after its session ended is told to Joe once; the
-      // Merge Gate reads the verdict file itself either way. A held head (a verdict that can't be counted) was told already.
+    // The launch records say it too, whatever the runner's memory says: a session on this card's tree (or head) for this
+    // role, not set aside by Joe, is a start already made.
+    const made = rl.launches.some(({ doc: d }) => d.card === card && d.role === role && (d.head === head || d.tree === tree) && !asideIds.has(d.session_id));
+    if (a.started || made) {
+      // One start per tree, for good (L68, L69): what the Record says is never a reason to start again, since a worker
+      // can write the Record, and an amend with no code change keeps its tree. A verdict the Record has not taken 15
+      // minutes after its session ended is told to Joe once; the Merge Gate reads the verdict file itself either way. A
+      // held head (silent, or a verdict that can't be counted) was told already, with the "review again" tap.
       const sid = a.session_id;
       const ended = Date.parse(a.ended_at ?? '');
       if (!a.held && Number.isFinite(ended) && now - ended >= INTAKE_WAIT_MS) {
@@ -358,7 +426,7 @@ export async function runnerPass(ctx) {
           alert(`not-taken-${sid ?? k}`, `The ${role} for card ${card} at ${head.slice(0, 7)} handed in a verdict the Record has not taken (${why}). Nothing starts again: the Merge Gate reads the verdict file itself, and the card waits for Joe.`);
         }
       }
-      refuse(`a ${role} was already started for card ${card} at ${head.slice(0, 7)}; one start per head`);
+      refuse(`a ${role} was already started for card ${card} at ${head.slice(0, 7)} (or a head with the same tree); one start per head and tree`);
       continue;
     }
     if ((a.failures ?? 0) >= MAX_FAILED_STARTS) {
@@ -389,23 +457,42 @@ export async function runnerPass(ctx) {
     const ob = checkReviewOutbox({ outboxRoot: ctx.outboxRoot, role, sessionId: sid, uid });
     if (!ob.ok) { failStart(ob.reason); continue; }
     const configDir = accountDir(ctx.reviewHome, acct);
+    // The card's earlier failing verdicts for this role, on other trees (L69 point 4): the new reviewer's prompt holds
+    // their notes, so a new push is checked against what failed before. Joe's set-aside sessions are left out.
+    const earlier = [];
+    for (const { doc: d } of [...rl.launches].sort((x, y) => String(y.doc.launched_at).localeCompare(String(x.doc.launched_at)))) {
+      if (earlier.length >= MAX_EARLIER) break;
+      if (d.card !== card || d.role !== role || d.head === head || d.tree === tree || asideIds.has(d.session_id)) continue;
+      let h; try { h = await ctx.handedIn({ role, sessionId: d.session_id, outbox: reviewOutbox({ outboxRoot: ctx.outboxRoot, role, sessionId: d.session_id }), card, head: d.head }); } catch { continue; }
+      if (h?.ok !== true || PASSES[role](h.verdict)) continue;
+      const n = h.verdict?.notes;
+      earlier.push({ session_id: d.session_id, head: d.head, notes: (typeof n === 'string' ? n : JSON.stringify(n ?? null)).slice(0, MAX_EARLIER_NOTES) });
+    }
     let recPath;
     try {
-      recPath = writeLaunch(P.launches, sid, { session_id: sid, role, card, head, request_id: rid, launched_at: iso(now), signin: acct, config_dir: configDir });
+      recPath = writeLaunch(P.launches, sid, { session_id: sid, role, card, head, tree, request_id: rid, launched_at: iso(now), signin: acct, config_dir: configDir });
     } catch (e) { failStart(`its launch record could not be written (${e?.code ?? e?.message})`); continue; }
     let r;
-    try { r = await ctx.start({ role, card, head, sessionId: sid, outbox, configDir, env: accountEnv(ctx.reviewHome, acct), signin: acct }); } catch (e) { r = { ok: false, reason: e?.message ?? String(e) }; }
+    try { r = await ctx.start({ role, card, head, tree, sessionId: sid, outbox, configDir, env: accountEnv(ctx.reviewHome, acct), signin: acct, earlier }); } catch (e) { r = { ok: false, reason: e?.message ?? String(e) }; }
     if (!r?.ok || !Number.isInteger(r.pid)) {
+      // Claude never ran: the one case a start is tried again on its own (L69 point 1).
       try { unlinkSync(recPath); } catch { /* gone */ }
       failStart(r?.reason ?? 'the start gave no process id');
       continue;
     }
     // The pid must be claude's own (L66): one that is the launcher's would not match the session list, and the next pass
-    // would stop claude as a stray. The launch record stays, so a session that did start can still hand in a verdict.
+    // would stop claude as a stray. Claude may have run, so this is no failed start (L69): the launch record stays, the
+    // head is held as started, and the sweep marks the session ended once it is 5 minutes old, reading its verdict file
+    // as at any end. Joe is told.
     let cmd = null; try { cmd = await ctx.processName(r.pid); } catch { cmd = null; }
-    if (!isClaudeCommand(cmd, ctx.claudeBin)) { failStart(`the start gave process ${r.pid}, which is not claude`); continue; }
+    if (!isClaudeCommand(cmd, ctx.claudeBin)) {
+      state.attempts[k] = { ...a, started: true, started_at: iso(now), session_id: sid, last_reason: `the start gave process ${r.pid}, which is not claude` };
+      refuse(`the ${role} start gave process ${r.pid}, which is not claude; the session is held until the runner marks it ended`);
+      alert(`untracked-${sid}`, `The ${role} session ${sid} for card ${card} at ${head.slice(0, 7)} was started, but the start gave process ${r.pid}, which is not claude. The runner can't follow it; it is marked ended after ${SWEEP_AFTER_MS / 60_000} minutes, and what it handed in by then counts.`);
+      continue;
+    }
     state.attempts[k] = { ...a, started: true, started_at: iso(now), session_id: sid };
-    state.running.push({ card, head, role, session_id: sid, pid: r.pid, started_at: iso(now) });
+    state.running.push({ card, head, tree, role, session_id: sid, pid: r.pid, started_at: iso(now) });
     result.started.push({ card, head, role, session_id: sid, signin: acct });
   }
   return finish();

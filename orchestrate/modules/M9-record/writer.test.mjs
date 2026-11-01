@@ -3,7 +3,7 @@
 // (R2-M7), the audit result, merge requests, and overdue (R-0b-21).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { HEAD, HEAD2, PRODUCT, iso, leadCard, must, outboxFile, plan, product, put, readyCard, runCard, runnerLaunch, seed, setup } from './fixtures.test-helper.mjs';
+import { HEAD, HEAD2, PRODUCT, iso, leadCard, must, outboxFile, plan, product, put, readyCard, runCard, runnerLaunch, runnerEndedRecord, CLEAN_CHECKLIST, seed, setup } from './fixtures.test-helper.mjs';
 
 const MIN = 60000;
 const wait = (env, over = {}) => ({ who: 'dependency', what: 'the API key', since: iso(env.clock.t), next_check: iso(env.clock.t + 30 * MIN), resume: 'retry', return_to: 'ready', ...over });
@@ -262,7 +262,8 @@ test('verified needs a passing verdict for the current head from a reviewer laun
   must(env.record.applyOutbox({ role: 'worker', sessionId: 'S-1', card: 'C-1' }, outboxFile(env, 'worker', 'S-1', 'handin-v.md', `${JSON.stringify({ entity: 'card', id: 'C-1', from_state: 'running', to_state: 'in_review' })}\n`)));
   const vfile = (sid, name, header) => outboxFile(env, 'reviewer', sid, name, `${JSON.stringify(header)}\n`);
   const apply = (sid, name, header) => env.review.applyOutbox({ role: 'reviewer', sessionId: sid, card: 'C-1' }, vfile(sid, name, header));
-  const hdr = (fields, over = {}) => ({ entity: 'verdict', card: 'C-1', expectRev: env.record.read('card', 'C-1').rev, fields, ...over });
+  // A reviewer's pass carries a clean checklist (M9 PASSES, L69).
+  const hdr = (fields, over = {}) => ({ entity: 'verdict', card: 'C-1', expectRev: env.record.read('card', 'C-1').rev, fields: fields.pass === true ? { checklist: CLEAN_CHECKLIST, ...fields } : fields, ...over });
   // The verdict file's own checks.
   refused(apply('R-1', 'verdict-a.md', hdr({ head: HEAD, pass: true, state: 'verified' })), /may not set state/);
   refused(apply('R-1', 'verdict-b.md', hdr({ head: 'short', pass: true })), /40-hex head/);
@@ -277,6 +278,7 @@ test('verified needs a passing verdict for the current head from a reviewer laun
   refused(put(env.review, 'dispatcher', 'card', 'C-1', { state: 'verified' }), /no reviewer session handed in a pass for head aaaaaaa/);
   runnerLaunch(env, 'C-1', 'R-2');
   must(apply('R-2', 'verdict-g.md', hdr({ head: HEAD, pass: false })), 'a fail');
+  runnerEndedRecord(env, 'C-1', 'R-2');
   refused(put(env.review, 'dispatcher', 'card', 'C-1', { state: 'verified' }), /the reviewer session R-2 did not pass for head aaaaaaa/);
   // A verdict naming a head the session wasn't launched on is refused at intake (L44 planted case). Its file stays in
   // R-2's folder, so R-2 now holds two verdict files: it can't be counted, and that counts as a failure (L68).
@@ -287,6 +289,7 @@ test('verified needs a passing verdict for the current head from a reviewer laun
   // L68: a pass from a new launch on the same head never outruns R-2's fail. The head is fixed with a new push instead.
   runnerLaunch(env, 'C-1', 'R-5');
   must(apply('R-5', 'verdict-i.md', hdr({ head: HEAD, pass: true })), 'a later pass on the same head');
+  runnerEndedRecord(env, 'C-1', 'R-5');
   refused(put(env.review, 'dispatcher', 'card', 'C-1', { state: 'verified' }), /R-2's verdict can't be counted/);
   // R-3 (launched on HEAD2) left a verdict naming another head, so HEAD2 can't pass either: a fresh head, HEAD4.
   const HEAD4 = 'd'.repeat(40);
@@ -297,6 +300,7 @@ test('verified needs a passing verdict for the current head from a reviewer laun
   refused(put(env.review, 'dispatcher', 'card', 'C-1', { state: 'verified' }), /no reviewer session handed in a pass for head ddddddd/);
   runnerLaunch(env, 'C-1', 'R-4', 'reviewer', HEAD4);   // launched on the new head
   must(apply('R-4', 'verdict-j.md', hdr({ head: HEAD4, pass: true }, { expectRev: 1 })), 'the pass for the new head, its expectRev stale');
+  runnerEndedRecord(env, 'C-1', 'R-4', 'reviewer', HEAD4);
   must(put(env.review, 'dispatcher', 'card', 'C-1', { state: 'verified' }), 'verified');
   // A new head after verification sends it back to review.
   const HEAD3 = 'c'.repeat(40);

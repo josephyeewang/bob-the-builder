@@ -8,6 +8,9 @@
 //
 //   const { record, store } = openRecord({ root, product, ownerUid, rules, alert, outbox: { root, uids, launches } })
 //   `outbox.launches` is the review runner's launch records folder (L65): a verdict counts only with a record there.
+//   `outbox.treeOf(card, head)`, when given, is the head's tree (L69): sessions at any head with that tree count too. A
+//   throw or an answer that is not 40 hex refuses the move to verified. Without it, the trees the launch records at the
+//   head name stand in.
 //   record is shared/record.mjs's interface (makeRecord), so callers never see this file.
 //
 // Options only tests pass: `now` (a fake clock), `host`, `probe` (fake process checks), `faultAt` (crash at a step),
@@ -21,7 +24,7 @@ import { canonicalJson } from '../../shared/plan-fingerprint.mjs';
 import { CREATE_STATES, INTERNAL_MOVES, moveActors } from './moves.mjs';
 import { PLAN_INPUTS, actorName, fieldsAllowed, mayCreateKind } from './permissions.mjs';
 import { readyCheck } from './ready.mjs';
-import { headReviews, readOutboxFile, runnerLaunchFor, verdictFields, worstVerdict } from './outbox.mjs';
+import { PASSES, headReviews, readOutboxFile, runnerLaunchFor, verdictFields, worstVerdict } from './outbox.mjs';
 import { processDead, realProbe } from './lock.mjs';
 import { openStore } from './store.mjs';
 
@@ -313,13 +316,21 @@ export function openRecord({ root, product, ownerUid, rules, alert = () => {}, n
   // each session's verdict file in review's outbox (L44, L65, L66 M1), never from the Record's rows. One reviewer must
   // have passed, none failed and none be unsettled. An auditor that failed (or whose verdict can't be counted) holds it
   // back too; one still running does not (the Merge Gate waits for it on a Tier-1 change).
+  // The passes are M9's one definition, the Merge Gate's too (L69 point 6). The head's tree comes from `outbox.treeOf`
+  // when it is set (git, read only; wired at the cutover), so a review at another head with the same tree counts (L69
+  // point 4); without it, the trees the launch records at this head name stand in.
   function verdictFor(tx, cardId, doc) {
     if (typeof doc.head !== 'string' || !HEX40.test(doc.head)) return no('the card has no head to verify');
-    const hr = headReviews({ launches: outbox.launches, outboxRoot: outbox.root, uids: outbox.uids, card: cardId, head: doc.head });
+    let tree;
+    if (typeof outbox.treeOf === 'function') {
+      try { tree = outbox.treeOf(cardId, doc.head); } catch (e) { return no(`the tree of head ${doc.head.slice(0, 7)} could not be read (${e?.message ?? e})`); }
+      if (typeof tree !== 'string' || !HEX40.test(tree)) return no(`the tree of head ${doc.head.slice(0, 7)} could not be read`);
+    }
+    const hr = headReviews({ launches: outbox.launches, outboxRoot: outbox.root, uids: outbox.uids, card: cardId, head: doc.head, tree });
     if (!hr.ok) return no(`the review of head ${doc.head.slice(0, 7)} could not be read: ${hr.reason}`);
-    const auditorsDone = hr.sessions.filter((s) => s.role !== 'auditor' || s.verdict || s.problem);
-    const p = worstVerdict(hr.sessions, 'reviewer', (v) => v.pass === true)
-      ?? worstVerdict(auditorsDone, 'auditor', (v) => v.pass === true && (v.material ?? 0) === 0, { needPass: false });
+    const auditorsDone = hr.sessions.filter((s) => s.role !== 'auditor' || s.ended === true || s.problem);
+    const p = worstVerdict(hr.sessions, 'reviewer', PASSES.reviewer)
+      ?? worstVerdict(auditorsDone, 'auditor', PASSES.auditor, { needPass: false });
     return p ? no(`${p} for head ${doc.head.slice(0, 7)}`) : { ok: true };
   }
 

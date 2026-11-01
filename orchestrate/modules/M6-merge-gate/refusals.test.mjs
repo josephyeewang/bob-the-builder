@@ -10,9 +10,10 @@ const H1 = 'b'.repeat(40);
 const MAIN = 'c'.repeat(40);
 const CLEAN = { correct: 'clean', well_built: 'minor', works_for_user: 'cosmetic', holds_up: 'clean' };
 
-// One session the review runner launched at H0, as M9 headReviews hands it over (L68).
-function session(role, sid, verdict, { ended = null, problem = null } = {}) {
-  return { role, session_id: sid, verdict: verdict ? { card: 'C-1', head: H0, notes: null, checklist: null, material: null, ...verdict } : null, ended, problem };
+// One session the review runner launched at H0, as M9 headReviews hands it over (L68, L69): ended, with its verdict,
+// unless the test says otherwise.
+function session(role, sid, verdict, { ended = true, problem = null, silent = !verdict && ended === true, aside = false, head = H0 } = {}) {
+  return { role, session_id: sid, head, tree: null, aside, ended, silent, verdict: verdict ? { card: 'C-1', head, notes: null, checklist: null, material: null, ...verdict } : null, problem };
 }
 
 function clean(over = {}) {
@@ -43,6 +44,8 @@ function clean(over = {}) {
   };
   return over(f) ?? f;
 }
+// The pull request moved past H0 (a catch-up), and the review carries over.
+const pastH0 = (f) => { f.pr.head.sha = H1; f.checks[0].head_sha = H1; f.carried = { review: true, audit: true, reasons: [] }; f.prReviews = []; };
 const only = (f) => { const r = judge(f); assert.equal(r.decision, 'refuse', JSON.stringify(r)); return r.refusals.map((x) => x.n); };
 
 test('a clean change merges', () => {
@@ -69,9 +72,14 @@ const PLANTED = [
   [5, 'L68: a launched reviewer with no verdict file, not marked ended', (f) => { f.reviews.push(session('reviewer', 'R-2', null, { ended: false })); }],
   [5, 'L68: a launched reviewer whose verdict file can\'t be counted', (f) => { f.reviews.push(session('reviewer', 'R-2', null, { problem: 'more than one verdict file was left, so none counts' })); }],
   [5, 'L68: only a reviewer that ended with no verdict', (f) => { f.reviews = [session('reviewer', 'R-2', null, { ended: true })]; }],
+  [5, 'L69: a passing reviewer whose session has not ended', (f) => { f.reviews[0].ended = false; }],
+  [5, 'L69: a reviewer that ended silent beside a pass', (f) => { f.reviews.push(session('reviewer', 'R-2', null)); }],
+  [5, 'L69: a fail at the pull request\'s head, with a review that carries over', (f) => { pastH0(f); f.prReviews = [session('reviewer', 'R-9', { pass: false, checklist: CLEAN }, { head: H1 })]; }],
+  [5, 'L69: an unsettled session at the pull request\'s head', (f) => { pastH0(f); f.prReviews = [session('reviewer', 'R-9', null, { ended: false, head: H1 })]; }],
+  [5, 'L69: the pull request\'s head could not be read', (f) => { pastH0(f); f.prReviews = null; f.prReviewsProblem = 'the tree of bbbbbbb could not be read'; }],
   [5, 'L68: a Tier-2 change with a failing auditor', (f) => { f.reviews.push(session('auditor', 'A-1', { pass: false, material: 2 })); }],
   [5, 'Tier 1 without an auditor verdict', (f) => { f.tier = 1; f.approve.needed = false; }],
-  [5, 'a head that moved, review not carried', (f) => { f.pr.head.sha = H1; f.checks[0].head_sha = H1; f.carried = { review: false, audit: false, reasons: ['x'] }; }],
+  [5, 'a head that moved, review not carried', (f) => { f.pr.head.sha = H1; f.checks[0].head_sha = H1; f.carried = { review: false, audit: false, reasons: ['x'] }; f.prReviews = []; }],
   [6, 'a check for another commit', (f) => { f.checks.push({ name: 'other', app_id: 2, head_sha: H1, status: 'completed', conclusion: 'success' }); }],
   [7, 'an unresolved thread', (f) => { f.threads.unresolved = 2; }],
   [7, 'threads unreadable', (f) => { f.threads = { ok: false }; }],
@@ -116,17 +124,38 @@ test('L68 planted: try 1 fails and try 2 passes on one head → refused, and say
   assert.match(verdictProblem(f), /the reviewer session R-0 did not pass/);
 });
 
-test('L68: a session that ended with no verdict has no say; one still unsettled blocks', () => {
+// L69 point 1 reverses L68's "no say": a session that ran and ended with no file is a failure, beside any pass. Only
+// Joe's "review again" sets it aside, and then it has no say.
+test('L69 planted: a session that ended with no verdict is a failure; one not ended blocks, file or not; Joe\'s set-aside has no say', () => {
   const f = clean((f) => { f.reviews.push(session('reviewer', 'R-2', null, { ended: true })); });
-  assert.equal(judge(f).decision, 'merge');
-  f.reviews[1].ended = false;
-  assert.match(verdictProblem(f), /R-2 has handed in no verdict and has not ended/);
+  assert.deepEqual(only(f), [5]);
+  assert.match(verdictProblem(f), /the reviewer session R-2 ended without handing in a verdict, which counts as a failure/);
+  f.reviews[1].aside = true;
+  assert.equal(judge(f).decision, 'merge', 'set aside by Joe: no say');
+  f.reviews[1] = session('reviewer', 'R-2', { pass: true, checklist: CLEAN }, { ended: false });
+  assert.match(verdictProblem(f), /R-2 has not ended yet/, 'a passing file of a session not yet ended blocks');
   f.reviews[1].ended = null;
-  assert.match(verdictProblem(f), /R-2 has handed in no verdict and has not ended/);
+  assert.match(verdictProblem(f), /R-2 has not ended yet/);
+  // Set aside, and nothing else: no pass is left.
+  f.reviews = [session('reviewer', 'R-2', null, { aside: true })];
+  assert.match(verdictProblem(f), /no reviewer session handed in a pass/);
+});
+
+// L69 point 5: the pull request's head has its own say, even when the review carries over to it.
+test('L69 planted: a fail at the pull request\'s head with a passing carry-over is refused; a pass there merges', () => {
+  const f = clean((f) => { pastH0(f); f.prReviews = []; });
+  assert.equal(judge(f).decision, 'merge', 'no session at the new head: the carry-over decides');
+  f.prReviews = [session('reviewer', 'R-9', { pass: false, checklist: CLEAN }, { head: H1 })];
+  assert.deepEqual(only(f), [5]);
+  assert.match(verdictProblem(f), /the reviewer session R-9 did not pass at the pull request's head bbbbbbb/);
+  f.prReviews = [session('auditor', 'A-9', { pass: true, material: 1 }, { head: H1 })];
+  assert.match(verdictProblem(f), /the auditor session A-9 did not pass at the pull request's head/, 'a Tier-2 change\'s auditor there has its say too');
+  f.prReviews = [session('reviewer', 'R-9', { pass: true, checklist: CLEAN }, { head: H1 })];
+  assert.equal(judge(f).decision, 'merge');
 });
 
 test('a caught-up head whose review (and Tier-1 audit) carried over merges', () => {
-  const f = clean((f) => { f.pr.head.sha = H1; f.checks[0].head_sha = H1; f.carried = { review: true, audit: true, reasons: [] }; });
+  const f = clean((f) => { f.pr.head.sha = H1; f.checks[0].head_sha = H1; f.carried = { review: true, audit: true, reasons: [] }; f.prReviews = []; });
   assert.equal(judge(f).decision, 'merge');
 });
 

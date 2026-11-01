@@ -25,7 +25,9 @@
 // The wiring's start runs the launcher (launch.mjs, checks 1 to 13) for a reviewer or an auditor, with `--session-id`
 // set to the runner's id, and returns { ok, pid }, where pid is claude's own process (L66: never the launcher's; the
 // runner checks the pid's command is the pinned claude before it counts the start, and before it stops anything). It
-// gets `claudeBin`, `node` and `hooksDir` (checked above) to run and to render the settings with. Exit 0 when the pass ran clean, 1 when it refused or could not run.
+// gets `claudeBin`, `node` and `hooksDir` (checked above) to run and to render the settings with, and `earlier`: the
+// card's earlier failing verdicts for this role on other trees, [{ session_id, head, notes }], which the reviewer's
+// prompt must include (L69 point 4). Exit 0 when the pass ran clean, 1 when it refused or could not run.
 
 import { closeSync, constants, fstatSync, lstatSync, openSync, readFileSync, readdirSync, realpathSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
@@ -235,6 +237,15 @@ export function realPorts(c, wiring, { node = realpathSync(process.execPath) } =
       if (r.code !== 0) throw new Error(`the card's branch is not in the mirror (${r.code})`);
       return r.stdout.toString('utf8').trim();
     },
+    // The head's tree (L69): one start per card, tree and role. The head is the one currentHead just read.
+    treeOf: async (card, head) => {
+      if (typeof head !== 'string' || !/^[0-9a-f]{40}$/.test(head)) throw new Error('the head is not 40 hex');
+      const r = await git(['rev-parse', '--verify', '-q', `${head}^{tree}`], { gitDir: c.mirror, purpose: 'review-runner-tree', timeoutMs: CHILD_MS });
+      if (r.code !== 0) throw new Error(`the head's tree is not in the mirror (${r.code})`);
+      return r.stdout.toString('utf8').trim();
+    },
+    // Joe's "review again" taps (L69): a port now, wired to the phone link at the cutover. None until then.
+    setAsideByJoe: () => [],
     sessions: () => {
       const r = run('/bin/ps', ['-U', String(uid), '-o', 'pid=', '-o', 'command=']);
       if (r.status !== 0 && r.status !== 1) throw new Error(`ps failed (${r.error?.code ?? `exit ${r.status}`})`);

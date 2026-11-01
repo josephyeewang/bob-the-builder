@@ -2,7 +2,7 @@
 // folder, and short-hands for making a card reach a state the honest way (every step through the writer).
 
 import { createHash } from 'node:crypto';
-import { chmodSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, readFileSync, readdirSync, realpathSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { planFingerprint } from '../../shared/plan-fingerprint.mjs';
 import { tempDir } from '../../shared/test-tmp.mjs';
@@ -12,7 +12,7 @@ import { HEAD, PRODUCT, UID, rulesFor } from './rules.test-helper.mjs';
 export { PRODUCT, HEAD, HEAD2, UID, fullTimeouts, rulesFor } from './rules.test-helper.mjs';
 
 // A record in a fresh temp folder. `clock` is a mutable fake clock (ms).
-export function setup({ values, prefix = 'm9-rec-', probe, faultAt, host = 'mac-a', extra = {} } = {}) {
+export function setup({ values, prefix = 'm9-rec-', probe, faultAt, host = 'mac-a', extra = {}, treeOf } = {}) {
   const base = tempDir(prefix);
   const root = join(base, 'store');
   const outRoot = join(base, 'outbox');
@@ -27,16 +27,18 @@ export function setup({ values, prefix = 'm9-rec-', probe, faultAt, host = 'mac-
   const rules = rulesFor(values);
   const uids = Object.fromEntries(['lead', 'worker', 'reviewer', 'auditor', 'incident', 'scout', 'writer', 'front_door', 'thinking', 'learning', 'script'].map((r) => [r, UID]));
   const opened = openRecord({ root, product: PRODUCT, ownerUid: UID, rules, alert: (a) => alerts.push(a), now: () => clock.t, host,
-    probe, faultAt, outbox: { root: outRoot, uids, launches: launchRoot }, ...extra });
+    probe, faultAt, outbox: { root: outRoot, uids, launches: launchRoot, ...(treeOf ? { treeOf } : {}) }, ...extra });
   // The review user (L44): reviewers and auditors write as a Mac user of their own. Tests run as one user, so this second
   // view of the same store calls this test's user the review user and every other role someone else; verdicts go in here.
   const reviewUids = Object.fromEntries(Object.keys(uids).map((r) => [r, r === 'reviewer' || r === 'auditor' ? UID : UID + 1]));
   const review = openRecord({ root, product: PRODUCT, ownerUid: UID, rules, alert: (a) => alerts.push(a), now: () => clock.t, host,
-    probe, outbox: { root: outRoot, uids: reviewUids, launches: launchRoot }, ...extra }).record;
+    probe, outbox: { root: outRoot, uids: reviewUids, launches: launchRoot, ...(treeOf ? { treeOf } : {}) }, ...extra }).record;
   return { ...opened, review, base, root, outRoot, launchRoot, reviewUids, clock, alerts, rules };
 }
 
 export const iso = (ms) => new Date(ms).toISOString();
+// A reviewer's four-line checklist with nothing material (L44): what a pass needs (M9 PASSES, L69).
+export const CLEAN_CHECKLIST = Object.freeze({ correct: 'clean', well_built: 'minor', works_for_user: 'cosmetic', holds_up: 'clean' });
 
 export function plan(over = {}) {
   return { module: 'M1', files: ['src/a.mjs'], done_when: 'tests pass', tier: 2, ...over };
@@ -112,21 +114,30 @@ export function runCard(env, id, claim) {
 }
 
 // The review runner's launch record for a session (L65): the only launch a verdict counts from.
-export function runnerLaunch(env, card, sid, role = 'reviewer', head = HEAD) {
+// `tree` (L69), when given, is the head's tree: a session counts at every head with that tree.
+export function runnerLaunch(env, card, sid, role = 'reviewer', head = HEAD, { tree } = {}) {
   const p = join(env.launchRoot, `${sid}.json`);
-  writeFileSync(p, JSON.stringify({ session_id: sid, role, card, head, launched_at: iso(env.clock.t), request_id: `q-${sid}` }), { mode: 0o644, flag: 'wx' });
+  writeFileSync(p, JSON.stringify({ session_id: sid, role, card, head, ...(tree ? { tree } : {}), launched_at: iso(env.clock.t), request_id: `q-${sid}` }), { mode: 0o644, flag: 'wx' });
   chmodSync(p, 0o644);
   return p;
 }
 
 // The review runner's record that a session ended (L68): the launch record's fields plus ended_at, in `ended/` beside
-// the launch records.
-export function runnerEndedRecord(env, card, sid, role = 'reviewer', head = HEAD) {
+// the launch records, and what the verdict file was then (L69 `verdict_sha256`): by default, the sha256 of the one
+// verdict file in the session's outbox now, or `none`.
+export function verdictShaNow(env, role, sid) {
+  const dir = join(env.outRoot, role, sid);
+  let names = [];
+  try { names = readdirSync(dir).filter((n) => n.startsWith('verdict-')); } catch { names = []; }
+  return names.length === 1 ? createHash('sha256').update(readFileSync(join(dir, names[0]))).digest('hex') : 'none';
+}
+export function runnerEndedRecord(env, card, sid, role = 'reviewer', head = HEAD, { sha, tree } = {}) {
   const dir = join(env.base, 'ended');
   mkdirSync(dir, { mode: 0o755, recursive: true });
   chmodSync(dir, 0o755);
   const p = join(dir, `${sid}.json`);
-  writeFileSync(p, JSON.stringify({ session_id: sid, role, card, head, launched_at: iso(env.clock.t), request_id: `q-${sid}`, ended_at: iso(env.clock.t), handed_in: false }), { mode: 0o644, flag: 'wx' });
+  const said = sha ?? verdictShaNow(env, role, sid);
+  writeFileSync(p, JSON.stringify({ session_id: sid, role, card, head, ...(tree ? { tree } : {}), launched_at: iso(env.clock.t), request_id: `q-${sid}`, ended_at: iso(env.clock.t), verdict_sha256: said, how: 'ended' }), { mode: 0o644, flag: 'wx' });
   chmodSync(p, 0o644);
   return p;
 }
@@ -134,9 +145,19 @@ export function runnerEndedRecord(env, card, sid, role = 'reviewer', head = HEAD
 // A passing verdict as the intake leaves it (L66 M1): the runner's launch record, the verdict file in the review outbox,
 // and the row naming that file. Put straight into the store, so a test can start with a card's review done. A move to
 // verified then goes through `env.review`, the view that knows the review user.
+// Joe's "review again" (L69): the runner's record that a session is set aside, in `set-aside/` beside the launch records.
+export function runnerAsideRecord(env, card, sid, role = 'reviewer', head = HEAD) {
+  const dir = join(env.base, 'set-aside');
+  mkdirSync(dir, { mode: 0o755, recursive: true });
+  chmodSync(dir, 0o755);
+  const p = join(dir, `${sid}.json`);
+  writeFileSync(p, JSON.stringify({ session_id: sid, role, card, head, set_aside_at: iso(env.clock.t), by: 'joe' }), { mode: 0o644, flag: 'wx' });
+  return p;
+}
 export function passingVerdict(env, card, sid, head = HEAD) {
   runnerLaunch(env, card, sid, 'reviewer', head);
-  const p = outboxFile(env, 'reviewer', sid, `verdict-${sid}.md`, `${JSON.stringify({ entity: 'verdict', card, expectRev: 0, fields: { head, pass: true } })}\n`);
+  const p = outboxFile(env, 'reviewer', sid, `verdict-${sid}.md`, `${JSON.stringify({ entity: 'verdict', card, expectRev: 0, fields: { head, pass: true, checklist: CLEAN_CHECKLIST } })}\n`);
+  runnerEndedRecord(env, card, sid, 'reviewer', head);
   const key = `${realpathSync(p)}\0${createHash('sha256').update(readFileSync(p)).digest('hex')}`;
   env.store.transaction((tx) => tx.commit([{ entity: 'verdict', id: `verdict-${sid}`, doc: { session_id: sid, role: 'reviewer', card, head, pass: true, outbox_uid: UID, source_key: key } }], { actor: `reviewer:${sid}`, kind: 'verdict' }));
   return p;

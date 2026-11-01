@@ -15,6 +15,8 @@ const OTHER = ME + 1;
 const UIDS = { lead: OTHER, worker: OTHER, front_door: OTHER, learning: OTHER, writer: OTHER, incident: OTHER, scout: OTHER, thinking: OTHER, reviewer: ME, auditor: ME };
 const HEAD = 'a'.repeat(40);
 const HEAD2 = 'b'.repeat(40);
+const TREE = 'c'.repeat(40);
+const TREE2 = 'd'.repeat(40);
 const T0 = Date.parse('2026-10-31T12:00:00Z');
 const MIN = 60_000;
 const CLAUDE = '/pinned/claude';
@@ -28,6 +30,10 @@ function world(over = {}) {
   const clock = { t: T0 };
   const cards = new Map([['C-1', { state: 'in_review', head: HEAD, tier: 2 }], ['C-9', { state: 'in_review', head: HEAD, tier: 1 }]]);
   const heads = new Map([['C-1', HEAD], ['C-9', HEAD]]);
+  // Each head's tree (L69): HEAD and HEAD2 differ in code unless a test says otherwise.
+  const trees = new Map([[HEAD, TREE], [HEAD2, TREE2]]);
+  // Joe's "review again" taps (L69): the session ids the phone link would hand over, taken once.
+  const taps = [];
   const live = [];
   const starts = [];
   const stops = [];
@@ -41,6 +47,8 @@ function world(over = {}) {
     isAdmin: async () => false,
     readCard: (c) => (cards.has(c) ? { ok: true, doc: cards.get(c) } : { ok: false }),
     currentHead: (c) => heads.get(c),
+    treeOf: async (c, h) => { if (!trees.has(h)) throw new Error('no such commit'); return trees.get(h); },
+    setAsideByJoe: () => taps.splice(0),
     sessions: async () => live.slice(),
     stop: async (s) => { stops.push(s); const i = live.findIndex((x) => x.pid === s.pid); if (i >= 0) live.splice(i, 1); },
     start: async (x) => { starts.push(x); const p = ++pid; live.push({ pid: p, sessionId: x.sessionId }); return { ok: true, pid: p }; },
@@ -62,7 +70,7 @@ function world(over = {}) {
   const end = (sid) => { const i = live.findIndex((x) => x.sessionId === sid); live.splice(i, 1); };
   // The runner's ended record of a session, as the Merge Gate reads it (M9 `runnerEnded`).
   const ended = (sid, { role = 'reviewer', card = 'C-1', head = HEAD } = {}) => runnerEnded({ root: join(root, 'ended'), uids: UIDS, role, card, head, sessionId: sid });
-  return { base, root, outboxRoot, clock, cards, heads, live, starts, stops, ctx, ask, status, end, ended, requests };
+  return { base, root, outboxRoot, clock, cards, heads, trees, taps, live, starts, stops, ctx, ask, status, end, ended, requests };
 }
 // The first pass makes the folders; nothing is asked yet.
 async function ready(over) { const w = world(over); const r = await runnerPass(w.ctx); assert.equal(r.ok, true, r.error); return w; }
@@ -191,9 +199,9 @@ test('L68 planted: a verdict that can\'t be counted holds the head: no new revie
   verdict('S-1', HEAD2);
   w.end('S-1');
   let r = await runnerPass(w.ctx);
-  assert.ok(r.alerts.some((a) => /reviewer for card C-1 at aaaaaaa handed in a verdict that can't be counted \(the verdict names head bbbbbbb, not aaaaaaa\)\. It counts as a failure, so this head can't pass; no new reviewer starts on it/.test(a.text)), r.alerts.map((a) => a.text).join(' | '));
+  assert.ok(r.alerts.some((a) => /reviewer session S-1 for card C-1 at aaaaaaa handed in a verdict that can't be counted \(the verdict names head bbbbbbb, not aaaaaaa\)\. It counts as a failure, so this head can't pass; no new reviewer starts on it on its own\. A tap on "review again" sets that session aside/.test(a.text)), r.alerts.map((a) => a.text).join(' | '));
   assert.equal(w.ended('S-1').ok, true, 'marked ended');
-  assert.equal(w.ended('S-1').ended.handed_in, null);
+  assert.equal(w.ended('S-1').ended.verdict_sha256, 'refused');
   // The Merge Gate's read: the session's verdict can't be counted, so it counts as a failure there.
   const hr = headReviews({ launches: join(w.root, 'launches'), outboxRoot: w.outboxRoot, uids: UIDS, card: 'C-1', head: HEAD });
   assert.deepEqual(hr.sessions.map((x) => [x.session_id, Boolean(x.problem)]), [['S-1', true]]);
@@ -201,7 +209,7 @@ test('L68 planted: a verdict that can\'t be counted holds the head: no new revie
   w.clock.t += RETRY_MS;
   w.ask();
   r = await runnerPass(w.ctx);
-  refusedFor(r, /already started for card C-1 at aaaaaaa; one start per head/);
+  refusedFor(r, /already started for card C-1 at aaaaaaa \(or a head with the same tree\); one start per head and tree/);
   assert.equal(r.alerts.length, 0);
   assert.equal(w.starts.length, 1);
   // A new head is a new review. Two verdict files there can't be counted either, and hold that head too.
@@ -216,7 +224,7 @@ test('L68 planted: a verdict that can\'t be counted holds the head: no new revie
   assert.ok(r.alerts.some((a) => /more than one verdict file was left, so none counts\)\. It counts as a failure/.test(a.text)), r.alerts.map((a) => a.text).join(' | '));
   w.clock.t += RETRY_MS;
   w.ask({ head: HEAD2 });
-  refusedFor(await runnerPass(w.ctx), /already started for card C-1 at bbbbbbb; one start per head/);
+  refusedFor(await runnerPass(w.ctx), /already started for card C-1 at bbbbbbb \(or a head with the same tree\); one start per head and tree/);
   assert.equal(w.starts.length, 2);
   // A verdict that can't even be read holds as well: it is never a failed start.
   const x = await ready({ handedIn: () => { throw new Error('the outbox could not be listed'); } });
@@ -237,7 +245,7 @@ test('L66 pid contract: a start counts only when its pid is claude\'s, and nothi
   const w = await ready({ start: async () => ({ ok: true, pid: 4242 }) });
   w.ask();
   const r = await runnerPass(w.ctx);
-  refusedFor(r, /the start gave process 4242, which is not claude/);
+  refusedFor(r, /the reviewer start gave process 4242, which is not claude; the session is held until the runner marks it ended/);
   assert.deepEqual(w.status().running, []);
   // A stray whose pid is now another program's is left alone, and Joe is told.
   const v = await ready();
@@ -295,11 +303,11 @@ test('L68 planted: the card\'s revision moves between a verdict and its intake: 
   w.end('S-1');
   let r = await runnerPass(w.ctx);
   assert.equal(r.alerts.length, 0, r.alerts.map((a) => a.text).join(' | '));
-  assert.equal(w.ended('S-1').ended.handed_in, true);
+  assert.match(w.ended('S-1').ended.verdict_sha256, /^[0-9a-f]{64}$/, 'the file the session ended with');
   // Within the wait, nothing is told; after it, the Record not having taken it is told once. Nothing starts again.
   w.ask();
   r = await runnerPass(w.ctx);
-  refusedFor(r, /already started for card C-1 at aaaaaaa; one start per head/);
+  refusedFor(r, /already started for card C-1 at aaaaaaa \(or a head with the same tree\); one start per head and tree/);
   assert.equal(r.alerts.length, 0);
   w.clock.t += INTAKE_WAIT_MS;
   w.ask();
@@ -316,7 +324,7 @@ test('L68 planted: the card\'s revision moves between a verdict and its intake: 
   for (let i = 0; i < MAX_FAILED_STARTS + 1; i++) { w.clock.t += INTAKE_WAIT_MS; w.ask(); refusedFor(await runnerPass(w.ctx), /one start per head/); }
   assert.equal(w.starts.length, 1);
   // The control: a Record that took the verdict tells nothing.
-  const x = await ready({ handedIn: () => ({ ok: true, verdict: {} }), verdictTaken: () => ({ ok: true }) });
+  const x = await ready({ handedIn: () => ({ ok: true, verdict: { sha256: 'e'.repeat(64) } }), verdictTaken: () => ({ ok: true }) });
   x.ask(); await runnerPass(x.ctx); x.end('S-1'); await runnerPass(x.ctx);
   x.clock.t += INTAKE_WAIT_MS; x.ask();
   r = await runnerPass(x.ctx);
@@ -325,18 +333,18 @@ test('L68 planted: the card\'s revision moves between a verdict and its intake: 
 });
 
 test('L68: every session the runner launched is marked ended: when it ends, or by the sweep once it is lost track of', async () => {
-  // Ended with no verdict: marked, handed_in false, and its head may be tried again (the record gives it no say).
+  // Ended with no verdict: marked `none`, and its head is held (L69: silence is a failure at the Merge Gate).
   const w = await ready();
   w.ask(); await runnerPass(w.ctx);
   assert.equal(w.ended('S-1').none, true, 'not marked while it runs');
   w.end('S-1');
   await runnerPass(w.ctx);
-  assert.equal(w.ended('S-1').ended.handed_in, false);
+  assert.equal(w.ended('S-1').ended.verdict_sha256, 'none');
   assert.equal(w.ended('S-1').ended.how, 'ended');
   assert.equal(lstatSync(join(w.root, 'ended')).mode & 0o7777, 0o755);
   assert.equal(lstatSync(join(w.root, 'ended', 'S-1.json')).mode & 0o777, 0o644);
   const hr = headReviews({ launches: join(w.root, 'launches'), outboxRoot: w.outboxRoot, uids: UIDS, card: 'C-1', head: HEAD });
-  assert.deepEqual(hr.sessions.map((x) => [x.session_id, x.verdict, x.ended]), [['S-1', null, true]]);
+  assert.deepEqual(hr.sessions.map((x) => [x.session_id, x.verdict, x.ended, x.silent]), [['S-1', null, true, true]]);
   // Never written over, by the sweep or anything else.
   w.clock.t += SWEEP_AFTER_MS;
   await runnerPass(w.ctx);
@@ -347,7 +355,7 @@ test('L68: every session the runner launched is marked ended: when it ends, or b
   const v = await ready({ start: async (x) => { v.starts.push(x); v.live.push({ pid: 7000, sessionId: x.sessionId }); return { ok: true, pid: 4242 }; } });
   v.ctx.processName = (p) => (p === 7000 ? `${CLAUDE} --session-id S-1` : null);
   v.ask();
-  refusedFor(await runnerPass(v.ctx), /the start gave process 4242, which is not claude/);
+  refusedFor(await runnerPass(v.ctx), /the reviewer start gave process 4242, which is not claude; the session is held until the runner marks it ended/);
   assert.equal(v.ended('S-1').none, true);
   v.clock.t += SWEEP_AFTER_MS;
   // The claude it did start is a stray: stopped, and nothing is swept on that pass.
@@ -391,10 +399,10 @@ test('L65: a duplicate is refused: the same request id, or a second start while 
   w.ask();
   refusedFor(await runnerPass(w.ctx), /a reviewer is already running for card C-1/);
   // It ends having handed in a verdict: no second start for the same head.
-  w.ctx.handedIn = () => ({ ok: true });
+  w.ctx.handedIn = () => ({ ok: true, verdict: { sha256: 'e'.repeat(64) } });
   w.end('S-1');
   w.ask();
-  refusedFor(await runnerPass(w.ctx), /already started for card C-1 at aaaaaaa; one start per head/);
+  refusedFor(await runnerPass(w.ctx), /already started for card C-1 at aaaaaaa \(or a head with the same tree\); one start per head and tree/);
   assert.equal(w.starts.length, 1);
   // A new head is a new review.
   w.cards.set('C-1', { state: 'in_review', head: HEAD2, tier: 2 });
@@ -427,19 +435,102 @@ test('L65: too many starts: a failed start waits 15 minutes, 3 tries in all, the
   assert.equal(w.status().alerts.filter((a) => /No reviewer could be started/.test(a.text)).length, 1, 'still once');
 });
 
-test('L65: a session that ends with no verdict counts as a failed try, and Joe is told', async () => {
+// L69 point 1 reverses L65's "a failed try": a session that ran and ended with no verdict is a failure. It holds the head
+// and Joe is told, with a "review again" tap; nothing starts again on its own. The tap sets it aside, and then a new
+// session may start. Only a start where claude never ran is tried again on its own.
+test('L69 planted: a session that ends with no verdict holds the head; only Joe\'s "review again" lets a new one start', async () => {
   const w = await ready();
   w.ask();
   await runnerPass(w.ctx);
   w.end('S-1');
-  const r = await runnerPass(w.ctx);
-  assert.ok(r.alerts.some((a) => /reviewer for card C-1 at aaaaaaa ended without handing in a verdict/.test(a.text)));
+  let r = await runnerPass(w.ctx);
+  const told = r.alerts.find((a) => /reviewer session S-1 for card C-1 at aaaaaaa ended without handing in a verdict \(a crash, a context-limit stop or a kill does this too\)\. That counts as a failure, so this head can't pass, and nothing starts again on its own/.test(a.text));
+  assert.ok(told, r.alerts.map((a) => a.text).join(' | '));
+  assert.equal(told.action, 'review-again');
+  assert.equal(told.session_id, 'S-1');
   assert.deepEqual(w.status().running, []);
+  assert.equal(w.ended('S-1').ended.verdict_sha256, 'none');
+  // No restart, however long it waits.
+  for (const wait of [0, RETRY_MS, 10 * RETRY_MS]) {
+    w.clock.t += wait;
+    w.ask();
+    r = await runnerPass(w.ctx);
+    refusedFor(r, /already started for card C-1 at aaaaaaa \(or a head with the same tree\); one start per head and tree/);
+    assert.equal(r.alerts.length, 0, 'told once');
+  }
+  assert.equal(w.starts.length, 1);
+  // A tap for a session that is not held, or not a session, is refused, and sets nothing aside.
+  w.taps.push({ session_id: 'S-404' }, { session_id: '../x' });
+  r = await runnerPass(w.ctx);
+  refusedFor(r, /review again" for session S-404: the runner launched no such session/);
+  refusedFor(r, /review again" for session \.\.\/x: that is not a session id/);
+  assert.deepEqual(r.setAside, []);
+  // Joe taps "review again": S-1 is set aside (the Merge Gate gives it no say), and the next request starts S-2.
+  w.taps.push({ session_id: 'S-1' });
   w.ask();
-  refusedFor(await runnerPass(w.ctx), /failed less than 15 minutes ago/);
-  w.clock.t += RETRY_MS;
+  r = await runnerPass(w.ctx);
+  assert.deepEqual(r.setAside, [{ session_id: 'S-1', card: 'C-1', role: 'reviewer' }]);
+  assert.deepEqual(r.started.map((x) => x.session_id), ['S-2']);
+  const hr = headReviews({ launches: join(w.root, 'launches'), outboxRoot: w.outboxRoot, uids: UIDS, card: 'C-1', head: HEAD });
+  assert.deepEqual(hr.sessions.map((x) => [x.session_id, x.aside]), [['S-1', true], ['S-2', false]]);
+  // A tap for a running session is refused.
+  w.taps.push({ session_id: 'S-2' });
+  refusedFor(await runnerPass(w.ctx), /review again" for session S-2: that session is still running/);
+  // The control: a start where claude never ran is tried again on its own, after the wait.
+  const v = await ready({ start: async () => ({ ok: false, reason: 'claude would not start' }) });
+  v.ask();
+  refusedFor(await runnerPass(v.ctx), /could not be started: claude would not start/);
+  v.ctx.start = async (x) => { v.starts.push(x); const p = 5555; v.live.push({ pid: p, sessionId: x.sessionId }); return { ok: true, pid: p }; };
+  v.clock.t += RETRY_MS;
+  v.ask();
+  assert.equal((await runnerPass(v.ctx)).started.length, 1);
+});
+
+test('L69 planted: an amend with no code change keeps its tree, so a failed head gets no new roll; a new tree starts with the earlier notes', async () => {
+  const w = await ready({ handedIn: (x) => sessionVerdict({ outboxRoot: w.outboxRoot, uids: UIDS, ...x }) });
   w.ask();
-  assert.equal((await runnerPass(w.ctx)).started.length, 1);
+  await runnerPass(w.ctx);
+  writeFileSync(join(w.outboxRoot, 'reviewer', 'S-1', 'verdict-S-1.md'), `${JSON.stringify({ entity: 'verdict', card: 'C-1', expectRev: 0, fields: { head: HEAD, pass: false, notes: 'the retry loop never stops' } })}\n`, { mode: 0o644 });
+  w.end('S-1');
+  await runnerPass(w.ctx);
+  // An amend: a new head, the same tree. No new reviewer.
+  const AMEND = 'f'.repeat(40);
+  w.trees.set(AMEND, TREE);
+  w.cards.set('C-1', { state: 'in_review', head: AMEND, tier: 2 });
+  w.heads.set('C-1', AMEND);
+  w.ask({ head: AMEND });
+  refusedFor(await runnerPass(w.ctx), /already started for card C-1 at fffffff \(or a head with the same tree\); one start per head and tree/);
+  assert.equal(w.starts.length, 1);
+  // The Merge Gate's read at the amend: S-1's fail is there, by its tree.
+  const hr = headReviews({ launches: join(w.root, 'launches'), outboxRoot: w.outboxRoot, uids: UIDS, card: 'C-1', head: AMEND, tree: TREE });
+  assert.deepEqual(hr.sessions.map((x) => [x.session_id, x.verdict?.pass]), [['S-1', false]]);
+  // A real code change: a new tree. A new reviewer starts, and its prompt holds S-1's notes.
+  w.cards.set('C-1', { state: 'in_review', head: HEAD2, tier: 2 });
+  w.heads.set('C-1', HEAD2);
+  w.ask({ head: HEAD2 });
+  const r = await runnerPass(w.ctx);
+  assert.deepEqual(r.started.map((x) => x.session_id), ['S-2']);
+  const s = w.starts.at(-1);
+  assert.equal(s.tree, TREE2);
+  assert.deepEqual(s.earlier, [{ session_id: 'S-1', head: HEAD, notes: 'the retry loop never stops' }]);
+  assert.equal(runnerLaunchFor({ root: join(w.root, 'launches'), uids: UIDS, role: 'reviewer', card: 'C-1', head: HEAD2, sessionId: 'S-2' }).launch.tree, TREE2);
+  // A tree git can't give refuses the request.
+  w.heads.set('C-1', 'e'.repeat(40));
+  w.cards.set('C-1', { state: 'in_review', head: 'e'.repeat(40), tier: 2 });
+  w.ask({ head: 'e'.repeat(40) });
+  refusedFor(await runnerPass(w.ctx), /the tree of eeeeeee could not be read \(no such commit\)/);
+});
+
+test('L69: a launch record that fails its checks is told to Joe once, with whose card it is', async () => {
+  const w = await ready();
+  writeFileSync(join(w.root, 'launches', 'S-7.json'), JSON.stringify({ session_id: 'S-7', role: 'reviewer', card: 'C-1', head: 'short' }), { mode: 0o644 });
+  writeFileSync(join(w.root, 'launches', 'S-8.json'), '{', { mode: 0o644 });
+  let r = await runnerPass(w.ctx);
+  const a7 = r.alerts.find((a) => a.id === 'bad-record-S-7.json');
+  assert.match(a7.text, /fails its checks \(the launch record names no 40-hex head\)\. It belongs to card C-1, which can't pass until it is fixed/);
+  assert.match(r.alerts.find((a) => a.id === 'bad-record-S-8.json').text, /It names no card, so the Merge Gate skips it/);
+  r = await runnerPass(w.ctx);
+  assert.equal(r.alerts.length, 0, 'told once');
 });
 
 test('L65 m-6: a Tier-1 card gets an auditor as well as a reviewer', async () => {
@@ -576,4 +667,22 @@ test('L65 planted: a status that is missing, stale, or writable by others is an 
   assert.throws(() => readReviewStatus({ file: vf, now: T0, uid: ME, stat }), /folder is not owned by the review user/);
   assert.throws(() => readReviewStatus({ file: join(v.base, 'none', 'status.json'), now: T0, uid: ME }), /folder is missing/);
   assert.equal(readReviewStatus({ file: vf, now: T0, uid: ME }).ok, true);
+});
+
+// L69 point 1: "review again" sets aside only a held session (silent, or a verdict that can't be counted). A session that
+// handed in a verdict that counts can't be set aside, so a tap never wipes a fail from the gate's read.
+test('L69 planted: a tap on a session that handed in a verdict that counts is refused, and sets nothing aside', async () => {
+  const w = await ready({ handedIn: () => ({ ok: true, verdict: { sha256: 'e'.repeat(64) } }), verdictTaken: () => ({ ok: true }) });
+  w.ask();
+  await runnerPass(w.ctx);
+  w.end('S-1');
+  await runnerPass(w.ctx);
+  assert.match(w.ended('S-1').ended.verdict_sha256, /^[0-9a-f]{64}$/);
+  w.taps.push({ session_id: 'S-1' });
+  w.ask();
+  const r = await runnerPass(w.ctx);
+  refusedFor(r, /review again" for session S-1: only a session that ended without a verdict that counts, or whose launch record fails its checks, can be set aside/);
+  assert.deepEqual(r.setAside, []);
+  assert.deepEqual(r.started, []);
+  assert.deepEqual(readdirSync(join(w.root, 'set-aside')), []);
 });

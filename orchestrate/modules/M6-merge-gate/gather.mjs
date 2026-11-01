@@ -207,18 +207,35 @@ export async function gatherFacts(ctx, merge) {
     }, { review: false, audit: false, reasons: ['carry-over could not be read'] });
   }
 
-  // The review (refusal 5; L44, L65, L66 M1, L68). Read from review's own stores only, through M9's one check: every
-  // session the review runner launched for this card at H0 (its launch records), each one's verdict file in review's
-  // outbox, and the runner's ended records. Nothing is read from the Record: its `launch` entries and verdict rows are
-  // written by the Dispatcher, as the workers' Mac user, and stay as history and for display. No folder setting, or a
-  // folder that fails the check, leaves no sessions and refusal 5 names why.
-  let hr;
-  try {
-    hr = ctx.reviewLaunches ? headReviews({ launches: ctx.reviewLaunches.root, outboxRoot: ctx.reviewLaunches.outbox, uids: ctx.reviewLaunches.uids, card: card.id, head: H0 })
-      : { ok: false, reason: 'the gate has no review launches folder set' };
-  } catch (e) { hr = { ok: false, reason: `the review records could not be read (${e?.message ?? e})` }; }
+  // The review (refusal 5; L44, L65, L66 M1, L68, L69). Read from review's own stores only, through M9's one check:
+  // every session the review runner launched for this card at H0, or at any head with H0's tree (its launch records),
+  // each one's verdict file in review's outbox, the runner's ended records and Joe's set-aside records. Nothing is read
+  // from the Record: its `launch` entries and verdict rows are written by the Dispatcher, as the workers' Mac user, and
+  // stay as history and for display. No folder setting, a folder that fails the check, or a tree git can't give leaves no
+  // sessions and refusal 5 names why. When the pull request's head is not H0, the same is read at that head (L69).
+  const reviewsAt = async (sha) => {
+    if (!ctx.reviewLaunches) return { ok: false, reason: 'the gate has no review launches folder set' };
+    let tree;
+    try { tree = (await view.commit(sha)).tree; } catch (e) { return { ok: false, reason: `the tree of ${String(sha).slice(0, 7)} could not be read (${e?.message ?? e})` }; }
+    if (!SHA.test(tree ?? '')) return { ok: false, reason: `the tree of ${String(sha).slice(0, 7)} could not be read` };
+    try {
+      return headReviews({ launches: ctx.reviewLaunches.root, outboxRoot: ctx.reviewLaunches.outbox, uids: ctx.reviewLaunches.uids, card: card.id, head: sha, tree });
+    } catch (e) { return { ok: false, reason: `the review records could not be read (${e?.message ?? e})` }; }
+  };
+  const hr = SHA.test(H0 ?? '') ? await reviewsAt(H0) : { ok: false, reason: 'the card has no head' };
   f.reviews = hr.ok ? hr.sessions : null;
   f.reviewsProblem = hr.ok ? null : hr.reason;
+  f.prReviews = null; f.prReviewsProblem = null;
+  let prSkipped = [];
+  if (SHA.test(head ?? '') && head !== H0) {
+    const pr = await reviewsAt(head);
+    f.prReviews = pr.ok ? pr.sessions : null;
+    f.prReviewsProblem = pr.ok ? null : pr.reason;
+    prSkipped = pr.ok ? pr.skipped ?? [] : [];
+  }
+  // A launch record no card can be tied to is skipped by the check; it is logged here (the review runner tells Joe once).
+  const skipped = [...new Map([...(hr.skipped ?? []), ...prSkipped].map((x) => [x.name, x])).values()];
+  if (skipped.length) f.reviewsSkipped = skipped.map((x) => `${x.name}: ${x.reason}`);
 
   // The owner's Approve (refusals 8, 13, 14): needed per M2, and standing on GitHub now.
   const apx = ctx.approvals ?? { record, rules, product, now: ctx.now, alert: ctx.alert ?? (() => {}), gh, owner, repo };

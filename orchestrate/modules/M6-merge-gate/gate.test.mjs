@@ -7,7 +7,8 @@ import { readFileSync, readdirSync, unlinkSync, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { setup, product, leadCard, runCard, outboxFile, put, must, plan, PRODUCT, fingerprintFor, fullTimeouts, runnerLaunch, runnerEndedRecord, launch } from '../M9-record/fixtures.test-helper.mjs';
+import { setup, product, leadCard, runCard, outboxFile, put, must, plan, PRODUCT, fingerprintFor, fullTimeouts, runnerLaunch, runnerEndedRecord, runnerAsideRecord, launch } from '../M9-record/fixtures.test-helper.mjs';
+import { chmodSync } from 'node:fs';
 import { fakeRules, allow, deny, makeRules } from '../../shared/rules.mjs';
 import { makeEngine } from '../M10-rules/engine.mjs';
 import { parsePolicy } from '../M10-rules/policy.mjs';
@@ -73,6 +74,7 @@ function verifiedCard(w, id = 'C-1', { pr = 7, files = { 'src/a.mjs': 'two' }, u
   runnerLaunch(env, id, sid, 'reviewer', head);
   const hdr = `${JSON.stringify({ entity: 'verdict', card: id, expectRev: env.record.read('card', id).rev, fields: { head, pass: true, checklist: CLEAN, material: 0 } })}\n`;
   must(env.review.applyOutbox({ role: 'reviewer', sessionId: sid, card: id }, outboxFile(env, 'reviewer', sid, `verdict-${id}.md`, hdr)), 'verdict');
+  runnerEndedRecord(env, id, sid, 'reviewer', head);
   must(put(env.review, 'dispatcher', 'card', id, { state: 'verified' }), 'verified');
   if (request) requestMerge(w, id, pr, head);
   return head;
@@ -449,10 +451,25 @@ test('L66 M1 planted: a verdict row that says pass while its outbox file says fa
   w.env.store.transaction((tx) => tx.commit([{ entity: 'verdict', id: v.id, doc: { ...v.doc, source_key: key } }], { actor: v.doc.role + ':' + v.doc.session_id, kind: 'verdict' }));
   assert.equal(w.env.record.read('verdict', v.id).doc.pass, true, 'the row says pass');
   await gatePass(w.ctx);
-  const m = mergeOf(w);
+  let m = mergeOf(w);
+  assert.notEqual(m.doc.state, 'merged');
+  // Changed after the end, the file can't be counted at all (L69 point 2).
+  assert.ok(m.doc.reasons.some((x) => x.startsWith('5:') && /R-C-1's verdict can't be counted, so it counts as a failure: its verdict file changed after the session ended/.test(x)), m.doc.reasons.join(' | '));
+  // As if it had said fail by the end (the ended record names the failing file): the file's fail decides, whatever the
+  // row says.
+  const w1 = world();
+  verifiedCard(w1);
+  const v1 = w1.env.record.list('verdict')[0];
+  const file1 = v1.doc.source_key.slice(0, v1.doc.source_key.lastIndexOf('\0'));
+  writeFileSync(file1, readFileSync(file1, 'utf8').replace('"pass":true', '"pass":false'));
+  unlinkSync(join(w1.env.base, 'ended', 'R-C-1.json'));
+  runnerEndedRecord(w1.env, 'C-1', 'R-C-1', 'reviewer', w1.env.record.read('card', 'C-1').doc.head);
+  w1.env.store.transaction((tx) => tx.commit([{ entity: 'verdict', id: v1.id, doc: { ...v1.doc, source_key: `${file1}\0${createHash('sha256').update(readFileSync(file1)).digest('hex')}` } }], { actor: `reviewer:${v1.doc.session_id}`, kind: 'verdict' }));
+  await gatePass(w1.ctx);
+  m = mergeOf(w1);
   assert.notEqual(m.doc.state, 'merged');
   assert.ok(m.doc.reasons.some((x) => x.startsWith('5:') && /the reviewer session R-C-1 did not pass/.test(x)), m.doc.reasons.join(' | '));
-  // The file gone: refused, and refusal 5 says the session has handed nothing in (the row is never read, L68).
+  // The file gone: refused, and refusal 5 says the file the session ended with is gone (the row is never read, L68).
   const w2 = world();
   verifiedCard(w2);
   const v2 = w2.env.record.list('verdict')[0];
@@ -460,7 +477,7 @@ test('L66 M1 planted: a verdict row that says pass while its outbox file says fa
   await gatePass(w2.ctx);
   const m2 = mergeOf(w2);
   assert.notEqual(m2.doc.state, 'merged');
-  assert.ok(m2.doc.reasons.some((x) => x.startsWith('5:') && /R-C-1 has handed in no verdict and has not ended/.test(x)), m2.doc.reasons.join(' | '));
+  assert.ok(m2.doc.reasons.some((x) => x.startsWith('5:') && /R-C-1's verdict can't be counted, so it counts as a failure: its verdict file is gone since the session ended/.test(x)), m2.doc.reasons.join(' | '));
 });
 
 test('L65: with no review launches folder set, the gate refuses (5) and says why, never reading the Record', async () => {
@@ -482,17 +499,21 @@ test('L65: with no review launches folder set, the gate refuses (5) and says why
 
 // ---- Lead call L68: the worst verdict, read from review's own stores ----
 
-// A second reviewer the runner launched on the same head, with its own verdict file (or none).
-function secondReviewer(w, head, sid, { pass, checklist = CLEAN } = {}) {
+// A second reviewer the runner launched on the same head, with its own verdict file (or none), marked ended by the
+// runner unless `ended: false`.
+function secondReviewer(w, head, sid, { pass, checklist = CLEAN, ended = true } = {}) {
   runnerLaunch(w.env, 'C-1', sid, 'reviewer', head);
-  if (pass === undefined) return null;
-  return outboxFile(w.env, 'reviewer', sid, `verdict-${sid}.md`, `${JSON.stringify({ entity: 'verdict', card: 'C-1', expectRev: 0, fields: { head, pass, checklist } })}\n`);
+  const f = pass === undefined ? null
+    : outboxFile(w.env, 'reviewer', sid, `verdict-${sid}.md`, `${JSON.stringify({ entity: 'verdict', card: 'C-1', expectRev: 0, fields: { head, pass, checklist } })}\n`);
+  if (ended) runnerEndedRecord(w.env, 'C-1', sid, 'reviewer', head);
+  return f;
 }
+const refusal5 = (w, re) => { const m = mergeOf(w); assert.notEqual(m.doc.state, 'merged'); assert.ok(m.doc.reasons.some((x) => x.startsWith('5:') && re.test(x)), m.doc.reasons.join(' | ')); };
 
 test('L68 planted: try 1 fails and try 2 passes on one head → refused (5), never merged', async () => {
   const w = world();
   const head = verifiedCard(w);
-  // Try 1 said fail (its file is in review's outbox); try 2 (R-C-1, taken by the Record) passed.
+  // Try 1 said fail (its file is in review's outbox, and it ended); try 2 (R-C-1, taken by the Record) passed.
   secondReviewer(w, head, 'R-try1', { pass: false });
   await gatePass(w.ctx);
   const m = mergeOf(w);
@@ -512,19 +533,120 @@ test('L68 planted: a failing verdict whose Record row is gone (or never taken) s
   assert.ok(m.doc.reasons.some((x) => x.startsWith('5:') && /R-gone did not pass/.test(x)), m.doc.reasons.join(' | '));
 });
 
-test('L68 planted: a launched reviewer with no verdict file and not marked ended → refused; once the runner marks it ended, it has no say', async () => {
+// L69 point 1 reverses L68 point 2: a session that ran and ended with no file is a failure. Only Joe's "review again"
+// sets it aside, and then it has no say.
+test('L69 planted: a reviewer not ended blocks; one that ended with no verdict is refused (5); Joe\'s set-aside has no say', async () => {
   const w = world();
   const head = verifiedCard(w);
-  secondReviewer(w, head, 'R-quiet');
+  secondReviewer(w, head, 'R-quiet', { ended: false });
   await gatePass(w.ctx);
-  const m = mergeOf(w);
-  assert.notEqual(m.doc.state, 'merged');
-  assert.ok(m.doc.reasons.some((x) => x.startsWith('5:') && /R-quiet has handed in no verdict and has not ended/.test(x)), m.doc.reasons.join(' | '));
-  // The same session marked ended by the runner: the passing one alone decides.
+  refusal5(w, /R-quiet has not ended yet/);
+  // A passing file from a session not yet ended blocks the same way.
+  const w1 = world();
+  const head1 = verifiedCard(w1);
+  secondReviewer(w1, head1, 'R-early', { pass: true, ended: false });
+  await gatePass(w1.ctx);
+  refusal5(w1, /R-early has not ended yet/);
+  // Ended with no file: a failure, beside the pass.
   const w2 = world();
   const head2 = verifiedCard(w2);
   secondReviewer(w2, head2, 'R-quiet');
-  runnerEndedRecord(w2.env, 'C-1', 'R-quiet', 'reviewer', head2);
   await gatePass(w2.ctx);
-  assert.equal(mergeOf(w2).doc.state, 'merged', JSON.stringify(mergeOf(w2).doc.reasons));
+  refusal5(w2, /the reviewer session R-quiet ended without handing in a verdict, which counts as a failure/);
+  // Joe taps "review again": that session is set aside, and the pass alone decides.
+  const w3 = world();
+  const head3 = verifiedCard(w3);
+  secondReviewer(w3, head3, 'R-quiet');
+  runnerAsideRecord(w3.env, 'C-1', 'R-quiet', 'reviewer', head3);
+  await gatePass(w3.ctx);
+  assert.equal(mergeOf(w3).doc.state, 'merged', JSON.stringify(mergeOf(w3).doc.reasons));
+});
+
+// L69 point 7: the gate-level cases P2, P3, P9 and P10.
+test('L69 P2 planted: an ended record that fails its checks refuses (5)', async () => {
+  const w = world();
+  const head = verifiedCard(w);
+  secondReviewer(w, head, 'R-bad', { pass: true, ended: false });
+  writeFileSync(join(w.env.base, 'ended', 'R-bad.json'), '{', { mode: 0o644 });
+  await gatePass(w.ctx);
+  refusal5(w, /R-bad's verdict can't be counted, so it counts as a failure: the ended record of session R-bad: the launch record is not JSON/);
+});
+
+test('L69 P3 planted: an ended record for another head refuses (5)', async () => {
+  const w = world();
+  const head = verifiedCard(w);
+  secondReviewer(w, head, 'R-other', { pass: true, ended: false });
+  runnerEndedRecord(w.env, 'C-1', 'R-other', 'reviewer', 'e'.repeat(40));
+  await gatePass(w.ctx);
+  refusal5(w, /R-other's verdict can't be counted, so it counts as a failure: the ended record of session R-other is for another role, card or head/);
+});
+
+test('L69 P9 planted: a review outbox that exists but can\'t be listed refuses (5)', async () => {
+  const w = world();
+  verifiedCard(w);
+  const dir = join(w.env.outRoot, 'reviewer', 'R-C-1');
+  chmodSync(dir, 0o000);
+  try {
+    await gatePass(w.ctx);
+  } finally { chmodSync(dir, 0o755); }
+  // The listing failure itself is the reason, not the pinned sha catching a file that seems gone (L69 P9).
+  refusal5(w, /R-C-1's verdict can't be counted, so it counts as a failure: its outbox folder could not be listed/);
+  assert.equal(w.g.writes.filter(([k]) => k === 'put').length, 0);
+});
+
+test('L69 P10 planted: one bad launch record refuses only its own card; one tied to no card is skipped and logged', async () => {
+  const w = world();
+  verifiedCard(w);
+  // Another card's record fails its checks: this card still merges.
+  writeFileSync(join(w.env.launchRoot, 'R-x.json'), JSON.stringify({ session_id: 'R-x', card: 'C-2', head: 'e'.repeat(40) }), { mode: 0o644 });
+  // One that names no card and is no session of this card: skipped, and said in the notes.
+  writeFileSync(join(w.env.launchRoot, 'R-y.json'), '{', { mode: 0o644 });
+  await gatePass(w.ctx);
+  assert.equal(mergeOf(w).doc.state, 'merged', JSON.stringify(mergeOf(w).doc.reasons));
+  const f = await gatherFacts(w.ctx, mergeOf(w));
+  assert.deepEqual(f.reviewsSkipped, ['R-y.json: the launch record is not JSON']);
+  // This card's own bad record refuses it.
+  const w2 = world();
+  verifiedCard(w2);
+  writeFileSync(join(w2.env.launchRoot, 'R-z.json'), JSON.stringify({ session_id: 'R-z', card: 'C-1', head: 'e'.repeat(40) }), { mode: 0o644 });
+  await gatePass(w2.ctx);
+  refusal5(w2, /the launch record R-z\.json of card C-1 fails its checks, so no review of this card can be counted \(the launch record names no review role\)/);
+});
+
+// L69 point 5: the pull request's head has its own say, even when the review carries over to it.
+test('L69 planted: a failing reviewer at the caught-up head refuses (5), even with a passing carry-over', async () => {
+  const w = world();
+  verifiedCard(w);
+  w.g.main = w.g.commit([w.g.main], { 'docs/other.md': 'x' }, { from: w.g.main });
+  await gatePass(w.ctx);
+  assert.equal(mergeOf(w).doc.state, 'catching_up');
+  const after = w.g.pulls.get(7).head;
+  secondReviewer(w, after, 'R-after', { pass: false });
+  await gatePass(w.ctx);
+  refusal5(w, /the reviewer session R-after did not pass at the pull request's head/);
+  assert.equal(w.g.writes.filter(([k, path]) => k === 'put' && path.endsWith('/merge')).length, 0, 'never merged');
+});
+
+// L69 point 4 at the gate: the head's tree comes from git (the gate's view), so a fail at an earlier head with the same
+// tree refuses, even though this head's own launch record names no tree.
+test('L69 planted: the gate reads the head\'s tree; a fail at another head with the same tree refuses (5)', async () => {
+  const w = world();
+  const head = verifiedCard(w);
+  const tree = (await w.ctx.view.commit(head)).tree;
+  const A = 'f'.repeat(40);
+  runnerLaunch(w.env, 'C-1', 'R-old', 'reviewer', A, { tree });
+  outboxFile(w.env, 'reviewer', 'R-old', 'verdict-R-old.md', `${JSON.stringify({ entity: 'verdict', card: 'C-1', expectRev: 0, fields: { head: A, pass: false, checklist: CLEAN } })}\n`);
+  runnerEndedRecord(w.env, 'C-1', 'R-old', 'reviewer', A, { tree });
+  await gatePass(w.ctx);
+  refusal5(w, /the reviewer session R-old did not pass/);
+  assert.equal(w.g.writes.filter(([k, p]) => k === 'put' && /\/merge$/.test(p)).length, 0);
+  // The control: the same fail on another tree has no say here.
+  const w2 = world();
+  const h2 = verifiedCard(w2);
+  runnerLaunch(w2.env, 'C-1', 'R-old', 'reviewer', A, { tree: 'd'.repeat(40) });
+  outboxFile(w2.env, 'reviewer', 'R-old', 'verdict-R-old.md', `${JSON.stringify({ entity: 'verdict', card: 'C-1', expectRev: 0, fields: { head: A, pass: false, checklist: CLEAN } })}\n`);
+  runnerEndedRecord(w2.env, 'C-1', 'R-old', 'reviewer', A, { tree: 'd'.repeat(40) });
+  assert.notEqual((await w2.ctx.view.commit(h2)).tree, 'd'.repeat(40));
+  await gatePass(w2.ctx);
+  assert.equal(mergeOf(w2).doc.state, 'merged', mergeOf(w2).doc.reasons?.join(' | '));
 });
