@@ -35,7 +35,7 @@ function cleanPath(p) {
   if (typeof p !== 'string' || !p) return null;
   let q = p.normalize('NFC');
   while (q.startsWith('./')) q = q.slice(2);
-  if (!q || q.endsWith('/') || q.startsWith('/') || /[*?[\]{}]/.test(q) || q.includes('\\') || q.split('/').some((s) => s === '' || s === '.' || s === '..')) return null;
+  if (!q || q.endsWith('/') || q.startsWith('/') || /[*?[\]{}]/.test(q) || q.includes('\\') || /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/.test(q) || q.split('/').some((s) => s === '' || s === '.' || s === '..')) return null;
   return q;
 }
 
