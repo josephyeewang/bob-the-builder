@@ -7,10 +7,12 @@ export const KNOWN = Object.freeze({
   // yaml-lite has no numbers: the real engine hands `n: 30` over as "30" (L96).
   text: ' (known: rules numbers arrive as text, L96; waits on step 2)',
   // M11 reads these keys with no product; on the real engine a product key read that way is undefined (L115 M-A).
-  scope: ' (known: M11 reads this key without the product, L115; waits on #79 for usage.red_runs, lane 2\'s L104 sweep for context.*)',
-  // M11 gate.mjs matches daily-card patterns with its own matcher, not M10 compile (L115 M-B).
-  pattern: ' (known: M11 reads this pattern differently from M10 compile, L115; waits on lane 2\'s sweep onto compile)',
+  // One label per owner (L120 c-2): usage.red_runs is lane 1's (#79 makes it Mac-wide), context.* is lane 2's.
+  scopeRedRuns: ' (known: M11 reads this key without the product, L115; waits on lane 1\'s #79)',
+  scopeContext: ' (known: M11 reads this key without the product, L115; waits on lane 2\'s L104 sweep)',
 });
+/** The scope label for a key M11 reads Mac-wide, naming that key's owner. */
+export const scopeLabel = (key) => (key.startsWith('context.') ? KNOWN.scopeContext : KNOWN.scopeRedRuns);
 
 // A rules value the real engine gave as text that would be a number: "30", "0.5", not "", " 3" or "3x". Lists are left
 // alone; a map's values are converted one level down (caps.per_state).

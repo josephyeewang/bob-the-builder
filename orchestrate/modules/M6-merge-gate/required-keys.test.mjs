@@ -5,6 +5,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { REQUIRED_KEYS, OPTIONAL_KEYS } from './required-keys.mjs';
+import { GO_FREE_KEY } from '../M9-record/required-keys.mjs';
 
 const here = new URL('.', import.meta.url);
 
@@ -15,7 +16,7 @@ const LIT = /(?<![.\w])get\(\s*(['"`])((?:(?!\1)[^\\])*)\1/g;
 export const nonLiteral = (text) => [...code(text).matchAll(/(?<![.\w])get\(/g)].length - [...code(text).matchAll(LIT)].length;
 export function keysRead(text) {
   const keys = new Set([...code(text).matchAll(LIT)].map((m) => m[2]));
-  if (/\bgoFreeKinds\(/.test(text)) keys.add('approvals.plan_go.go_free');
+  if (/\bgoFreeKinds\(/.test(text)) keys.add(GO_FREE_KEY);
   return keys;
 }
 // A key is covered when it is listed, or when it is the map a listed key sits in (product_profile.robot → bot_user_id).

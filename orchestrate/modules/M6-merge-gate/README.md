@@ -79,5 +79,7 @@ See LANES.md for who builds this folder, and the build rows (0b-9, R-0b-86..99) 
         lead_daily_card: []
   ```
 
-  At the first cutover the Lead is not on the product, so `lead_daily_card` is `[]` (L96); `[]` is not go-free.
+  At the first cutover the Lead is not on the product, so `lead_daily_card` is `[]` (L96), and the fit check refuses
+  any other list until the Dispatcher reads it with the rules' own path language (L120). `[]` is not go-free after
+  lane 1's L115 M-C; until then goFreeKinds counts the key.
 - Set M2's `approvals.push_windows` and `approvals.decisions_dir`; no Approve stands without them.
