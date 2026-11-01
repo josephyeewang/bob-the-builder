@@ -100,6 +100,13 @@ test('R-0b-136: what opens nothing', () => {
   openResearchAsks(ctx); openResearchAsks(ctx);
   assert.equal(t.alerts.filter((a) => a.kind === 'ask_request_refused').length, 3);
   assert.equal(t.record.list('ask').length, 0);
+  // L84 3: a state folder that can't be written loses no opened ask (its push still goes out); the failure is alerted.
+  const blocked = join(t.base, 'not-a-folder');
+  writeFileSync(blocked, 'a file, so no folder can be made here');
+  fileAsk(t, 'find out the thing that must still open', '20261103-0915-rz');
+  const r2 = openResearchAsks({ ...t.ctx, stateDir: join(blocked, 'state') });
+  assert.equal(r2.opened.length, 1);
+  assert.ok(t.alerts.some((a) => a.kind === 'research_refused_state_not_saved'));
   // The shapes the Front Door may not write.
   const bad = (doc) => checkOutboxFile('ask-request-20261103-0915-re.json', JSON.stringify(doc)).ok;
   assert.equal(bad({ ask: 'research', product: PRODUCT, brief: 'ok' }), true);
