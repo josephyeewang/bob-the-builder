@@ -6,6 +6,9 @@
 //   io.run(cmd, args)       → { status, stdout, stderr }; a fixed PATH, no shell, a time limit
 //   io.lstat/mkdir          on the logical path
 //   io.secure(path, want)   set a folder's owner and mode WITHOUT following a link (L90 M4): see secureFolder
+//   io.secureFile(path, want)   the same for a file: see secureFile
+//   io.readText/write/copyFile/copyTree/rm/list/readlink   on the logical path (write and copyFile make a NEW file and
+//                           never follow a link or overwrite: see writeNewFile)
 //   io.euid()               who this process runs as
 //   io.rootUid              the uid root has (0; a test stands one in)
 //   io.nodeProblem()        null, or why the node running this is not one root may run (L90 minor a)
@@ -14,7 +17,7 @@
 // swap a child for a link between the plan and the change. Every change opens the folder itself (O_NOFOLLOW, folder
 // only), checks it is the very folder the plan saw, and changes it through that handle.
 
-import { closeSync, constants, fchmodSync, fchownSync, fstatSync, lstatSync, mkdirSync, openSync, realpathSync } from 'node:fs';
+import { closeSync, constants, cpSync, fchmodSync, fchownSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, readlinkSync, realpathSync, rmSync, writeSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
 import { chainProblem } from '../modules/M4-workshop/launcher/install-check.mjs';
@@ -38,6 +41,27 @@ export function secureFolder(real, want, { chown = fchownSync, chmod = fchmodSyn
     chown(fd, want.uid, want.gid ?? st.gid);
     chmod(fd, want.mode);
   } finally { closeSync(fd); }
+}
+
+/** The same for a file: refuses a link, a folder, and (when `ino` is given) a file other than the one the plan saw. */
+export function secureFile(real, want, { chown = fchownSync, chmod = fchmodSync } = {}) {
+  let fd;
+  try { fd = openSync(real, constants.O_RDONLY | constants.O_NOFOLLOW); } catch (e) {
+    throw new Error(e?.code === 'ELOOP' ? `${real} is now a link; nothing was changed` : `${real} could not be opened (${e?.code ?? e})`);
+  }
+  try {
+    const st = fstatSync(fd);
+    if (!st.isFile()) throw new Error(`${real} is not a plain file; nothing was changed`);
+    if (want.ino !== undefined && (st.ino !== want.ino || st.dev !== want.dev)) throw new Error(`${real} is not the file the plan saw (it was replaced); nothing was changed`);
+    chown(fd, want.uid, want.gid ?? st.gid);
+    chmod(fd, want.mode);
+  } finally { closeSync(fd); }
+}
+
+/** Makes a NEW file: refuses to overwrite anything or to follow a link at the name. The caller then sets owner and mode with secureFile. */
+export function writeNewFile(real, data, mode) {
+  const fd = openSync(real, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, mode);
+  try { const b = Buffer.isBuffer(data) ? data : Buffer.from(data, 'utf8'); let off = 0; while (off < b.length) off += writeSync(fd, b, off, b.length - off); } finally { closeSync(fd); }
 }
 
 /** Why root should not run the node program that is running now, or null: its file, and every folder above it, must be root's alone (L90 m4). */
@@ -65,7 +89,18 @@ export function realIo({ prefix = '' } = {}) {
     lstat: (p) => lstatSync(at(p)),
     mkdir: (p, mode) => mkdirSync(at(p), { mode }),
     secure: (p, want) => secureFolder(at(p), want),
+    secureFile: (p, want) => secureFile(at(p), want),
     nodeProblem: () => nodeProblemOf(process.execPath),
+    // For the install and the job files. `src` is a real path outside the prefix (a file of this repository, the node program).
+    readText: (p) => readFileSync(at(p), 'utf8'),
+    write: (p, text, mode) => writeNewFile(at(p), text, mode),
+    copyFile: (src, p, mode) => writeNewFile(at(p), readFileSync(src), mode),
+    copyTree: (src, p) => cpSync(src, at(p), { recursive: true, dereference: false, errorOnExist: true, force: false }),
+    rm: (p) => rmSync(at(p), { recursive: true, force: true }),
+    list: (p) => readdirSync(at(p)),
+    readlink: (p) => readlinkSync(at(p)),
+    lstatReal: (abs) => lstatSync(abs),     // a path already real (prefix included), such as one read out of a config
+    listReal: (abs) => readdirSync(abs),
   };
 }
 
