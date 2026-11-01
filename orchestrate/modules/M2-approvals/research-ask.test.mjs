@@ -11,7 +11,7 @@ import { outboxFile as m9file } from '../M9-record/fixtures.test-helper.mjs';
 import { checkOutboxFile, intakePush, outboxFile } from '../M1-front-door/outbox.mjs';
 import { waitingItems, waitingLines } from '../M13-ledger/waiting.mjs';
 import { askStore } from './ask-store.mjs';
-import { landResearch, openResearchAsks, researchBrief, researchFileName, runLine } from './research-ask.mjs';
+import { landResearch, markResearchPushSent, openResearchAsks, researchBrief, researchFileName, runLine } from './research-ask.mjs';
 
 const SKILL = readFileSync(new URL('../M1-front-door/skill/orchestrate/SKILL.md', import.meta.url), 'utf8');
 const FAKE_KEY = ['sk', '_live_', 'A1b2C3d4E5f6G7h8I9j0K1l2'].join(''); // planted fake, never a real key
@@ -52,9 +52,47 @@ test('R-0b-136: "find out X" puts a research ask with its brief on "waiting on y
   const lines = waitingLines(waitingItems(t.record));
   assert.equal(lines.length, 1);
   assert.match(lines[0], /^ask R-1: waits on joe for "run research ask R-1" in a desktop session on the Mini: find out how the top three rivals price their annual plan, since 2026-/);
-  // Once per report, also after a restart (the ask names its report).
+  // Once per report, also after a restart (the ask names its report). Its push is handed back until it is marked
+  // sent (L95), and never after.
+  assert.deepEqual(openResearchAsks(t.ctx).opened.map((o) => o.id), ['R-1']);
+  must(markResearchPushSent(t.ctx, 'R-1'), 'mark sent');
   assert.deepEqual(openResearchAsks(t.ctx).opened, []);
   assert.equal(t.record.list('ask').length, 1);
+  assert.equal(markResearchPushSent(t.ctx, 'R-1').ok, false, 'marked once');
+});
+
+// L95 (audit stack r3 Minor 1, probes P4a and P4b): a throw in the pass loses no research push. The sink throwing on
+// an alert, or the record throwing on a later write, still hands back every ask opened; and an ask whose push the
+// caller never marked sent is handed back on the next pass.
+test('L95 Minor 1: a research push is never lost to a throwing alert sink or a later store write', () => {
+  // P4a: the alert sink throws on the refused report's alert.
+  const t = m2env();
+  fileAsk(t, 'find out the first thing', '20261103-0915-rg');
+  must(t.record.applyOutbox({ role: 'incident', sessionId: 'I-1' }, m9file(t, 'incident', 'I-1', 'ask-request-20261103-0915-rh.json', '{"ask":"research","product":"sample-app","brief":"find out x"}\n')));
+  const ctx = { ...t.ctx, alert: () => { throw new Error('the sink is down'); } };
+  const r = openResearchAsks(ctx);
+  assert.deepEqual(r.opened.map((o) => o.id), ['R-1']);
+  assert.equal(r.refused.length, 1);
+  assert.ok(r.alerts_failed >= 1, 'the failed alerts are counted');
+  // The caller crashed before sending: the next pass hands R-1 back again.
+  assert.deepEqual(openResearchAsks(t.ctx).opened.map((o) => o.id), ['R-1']);
+
+  // P4b: the record throws on the second ask write. R-1 is still handed back, and the second report is refused with
+  // the reason, so it opens on a later pass.
+  const u = m2env();
+  fileAsk(u, 'find out the first thing', '20261103-0915-ri');
+  fileAsk(u, 'find out the second thing', '20261103-0915-rj');
+  const real = u.record.write.bind(u.record);
+  let asks = 0;
+  const write = (w) => { if (w.entity === 'ask' && ++asks === 2) throw new Error('disk full'); return real(w); };
+  const rec = { ...u.record, write }; // the record is frozen, so a copy of its methods with write swapped
+  const r2 = openResearchAsks({ ...u.ctx, record: rec });
+  assert.deepEqual(r2.opened.map((o) => o.id), ['R-1']);
+  assert.equal(r2.refused.length, 1);
+  assert.equal(r2.refused[0].reason, 'the pass failed on it');
+  assert.match(r2.refused[0].error, /disk full/);
+  const r3 = openResearchAsks(u.ctx);
+  assert.deepEqual(r3.opened.map((o) => o.id).sort(), ['R-1', 'R-2']);
 });
 
 test('R-0b-136: "run research ask R-1" needs nothing pasted, and the report lands in the record (stand-in for R-0b-135)', () => {

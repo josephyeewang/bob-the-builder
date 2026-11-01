@@ -16,6 +16,8 @@
 // fields of a fact (sha, *_sha, id, uid, *_id, ts, *_at, created) are never masked by maskDeep at all: approval binding,
 // the history file and the watchers' dedup all depend on them being exact. RESIDUAL, said plainly: a bare hex secret, or
 // a bare 24-character Vercel classic token, with no name beside it is caught only if its exact value is known (layer 1).
+// An access-key id glued to an upper-case letter or digit (XAKIA…) inside a run shorter than 32 characters is missed too:
+// the id rule needs a clean edge, and the all-upper generic rule needs 32 characters (L95, stack r3 Minor 5).
 // The Vercel prefixed-token shape (`vc?_`) is assumed from public examples, not checked against a live key
 // (29 Oct 2026); Vercel's older 24-character tokens are caught by the name, flag and Bearer rules instead.
 
@@ -57,7 +59,9 @@ const SHAPES = [
   { kind: 'vercel', re: /\bvc[a-z]_[A-Za-z0-9]{20,}/g, group: 0 },
   // Cloud access-key ids are all upper case, so the generic rule (mixed case) misses them (L84 6): the AWS-style
   // prefixes followed by 16 upper-case letters or digits.
-  { kind: 'access-key-id', re: /\b(?:AKIA|ASIA|ABIA|ACCA|AGPA|AIDA|AIPA|ANPA|ANVA|AROA|APKA|ASCA)[A-Z0-9]{16}\b/g, group: 0 },
+  // Cloud access-key ids. Bounded by "not an upper-case letter or digit", not by \b, so an id glued to a word
+  // character (ID_AKIA…, AKIA…x) is still found (L95, audit stack r3 Minor 5); A3T? is the older id family.
+  { kind: 'access-key-id', re: /(?<![A-Z0-9])(?:A3T[A-Z0-9]|AKIA|ASIA|ABIA|ACCA|AGPA|AIDA|AIPA|ANPA|ANVA|AROA|APKA|ASCA)[A-Z0-9]{16}(?![A-Z0-9])/g, group: 0 },
   { kind: 'jwt', re: /\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g, group: 0 },
   { kind: 'private-key', re: /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)/g, group: 0 },
   { kind: 'bearer', re: /\b(?:Bearer|Basic)\s+([A-Za-z0-9._~+/-]{12,}=*)/g, group: 1 },
@@ -77,7 +81,8 @@ function entropy(s) {
   return h;
 }
 
-// A generic high-entropy run: mixed case and a digit (so never a hex SHA), high entropy, and not a path
+// A generic high-entropy run: mixed case and a digit, or all upper case and digits (never a hex SHA), high entropy,
+// and not a path
 // (a run holding '/' together with '-' or '_' mixes two encodings, which no single key format does).
 // Things that look random but are identifiers, not secrets.
 export function isKnownId(t) {
@@ -90,6 +95,9 @@ export function looksHighEntropy(s) {
   const t = s.replace(/=+$/, '');
   if (t.length < 32) return false;
   if (isKnownId(t)) return false;
+  // An all-upper-case key with no known prefix (L95, stack r3 Minor 5): only upper-case letters and digits, both
+  // present, high entropy. Hex is a known id above, and a run with `_` or `-` (a constant's name) is never this.
+  if (/^[A-Z0-9]+$/.test(t)) return /[A-Z]/.test(t) && /[0-9]/.test(t) && entropy(t) >= 4.0;
   if (!/[A-Z]/.test(t) || !/[a-z]/.test(t) || !/[0-9]/.test(t)) return false;
   if (t.includes('/') && /[-_]/.test(t)) return false;
   return entropy(t) >= 4.0;
