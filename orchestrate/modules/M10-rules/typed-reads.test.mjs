@@ -125,13 +125,14 @@ test('L104: usage.pace_min_share: 0.5 in the rules text comes out as 0.5', () =>
 
 test('L104 O-1: the checker accepts outage.*, the timeouts minute keys and caps.shakedown, and reads them typed', () => {
   const text = `${FIXTURE.replace(/^caps:\n/m, 'caps:\n  shakedown: false\n')
-    .replace(/^timeouts:\n/m, 'timeouts:\n  cancel_grace_min: 20\n  usage_unknown_max_min: 90\n')}\noutage:\n  min_dead: 2\n  share: 0.5\n`;
+    .replace(/^timeouts:\n/m, 'timeouts:\n  cancel_grace_min: 20\n  usage_unknown_max_min: 90\n  merging_open_max_min: 45\n')}\noutage:\n  min_dead: 2\n  share: 0.5\n`;
   const rules = rulesFromText(text);
   const o = { product: 'app' };
   assert.equal(rules.flag('caps.shakedown', o), false);
   assert.equal(rules.num('caps.shakedown_workers', o), 1, 'the fixture holds 1');
   assert.equal(rules.num('timeouts.cancel_grace_min', o), 20);
   assert.equal(rules.num('timeouts.usage_unknown_max_min', o), 90);
+  assert.equal(rules.num('timeouts.merging_open_max_min', o), 45, "the Merge Gate's limit (lane 2)");
   assert.equal(rules.num('outage.min_dead', o), 2);
   assert.equal(rules.dec('outage.share', o), 0.5);
   // What it still refuses: a shakedown that isn't true or false, a minute key that isn't a whole number, a misspelt
