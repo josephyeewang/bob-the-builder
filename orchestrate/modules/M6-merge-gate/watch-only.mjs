@@ -384,10 +384,10 @@ export function readExplanations(path, { ownerUid }) {
     if (st.uid !== ownerUid) return bad(`the explanations file is owned by user ${st.uid}, not the owner's user ${ownerUid}`);
     if ((st.mode & 0o022) !== 0) return bad('the explanations file can be written by others');
     if (dst.uid !== ownerUid || (dst.mode & 0o022) !== 0) return bad('the explanations folder is not only the owner\'s');
-    const o = JSON.parse(buf.toString('utf8'));
+    let o; try { o = JSON.parse(buf.toString('utf8')); } catch { return bad('the explanations file is not valid JSON, so it does not count'); }
     if (!o || typeof o !== 'object' || Array.isArray(o)) return bad('the explanations file is not a list of commit: reason');
     return { ok: true, explanations: o, owner: st.uid, problem: null };
-  } catch (e) { return bad(`the explanations file could not be reached, so it does not count (${e?.code === 'EACCES' ? 'no permission to look' : failText(e)})`); }
+  } catch (e) { return bad(`the explanations file could not be reached (${e?.code === 'EACCES' ? 'no permission to look' : failText(e)})`); }
 }
 
 /**
@@ -426,7 +426,8 @@ export function summary({ dir, endDay, explanations: ex = { ok: true, explanatio
   // When it is unclear which week a commit belongs to, it counts IN: a direct push first seen at or before the first CLEAN pass
   // at or after the end day's midnight is counted in the end day (a failed or missed pass cannot push it out), with 2 hours
   // (the hold-back plus one pass interval) kept as a floor.
-  const firstFinal = clean.map((l) => Date.parse(l.at)).filter((t) => t >= end + 86_400_000).sort((x, y) => x - y)[0] ?? -Infinity;
+  // The first in the LOG's order, not the earliest time: a clock stepped back cannot pull the edge earlier.
+  const firstFinal = Date.parse(clean.find((l) => Date.parse(l.at) >= end + 86_400_000)?.at ?? '') || -Infinity;
   const lateGrace = (l) => l.direct && Date.parse(l.seen_at ?? l.at) <= Math.max(end + 86_400_000 + EDGE_MS, firstFinal);
   const inWindow = judgedLines.filter((l) => countedDay(l) <= endDay || lateGrace(l));
   const dis = inWindow.filter((l) => l.verdict !== VERDICTS[0]);

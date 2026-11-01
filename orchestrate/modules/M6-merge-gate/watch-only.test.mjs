@@ -1110,6 +1110,7 @@ test('R4 m-5 the summary names the earliest end day that could count: day 7 afte
   const out = [];
   await main(['summary', '--dir', v.dir, '--end-day', '2026-11-09', '--explanations', join(v.dir, 'none.json'), '--owner-uid', String(UID)], { out: (x) => out.push(x), err: () => {} });
   assert.match(out.join('\n'), /earliest end day that could count: 2026-11-10/);
+  assert.match(out.join('\n'), /since the first pass after the latest rules restart/);
 });
 
 // ───────────────────────────── round 5 (audit r4 of #86: the end-day boundary)
@@ -1153,7 +1154,7 @@ test('R5 MAT-B (R4P7) a day with only an early pass: a push at 01:00 on the end 
   w.push({ 'docs/z.md': 'z' }, '2026-11-09T01:00:00Z');
   await w.pass('2026-11-10T04:00:00Z');
   const s = week(w);
-  assert.ok(!s.ok || s.disagreements === 1, show(s));
+  assert.equal(s.disagreements, 1, show(s)); assert.equal(s.ok, false);
 });
 
 test('R5 m-B the first reason a commit was "not judged" is kept: a second, different reason after the allowance does not move first-seen', async () => {
@@ -1161,7 +1162,7 @@ test('R5 m-B the first reason a commit was "not judged" is kept: a second, diffe
   const sha = w.push({ 'docs/z.md': 'z' }, '2026-11-09T23:20:00Z');
   await w.pass('2026-11-09T23:50:00Z');                       // held back: under an hour old
   w.hooks.push([new RegExp(`${BASE}/commits/${sha}$`), 502]);
-  await w.pass('2026-11-10T00:50:00Z');                       // a different reason, after the allowance
+  await w.pass('2026-11-10T00:50:00Z');                       // a different reason; 00:50 is inside the 2h floor, so first-seen still matters for which pass is the edge
   w.hooks.length = 0;
   await w.pass('2026-11-10T01:50:00Z');
   const l = w.judged().find((x) => x.sha === sha);
@@ -1186,4 +1187,41 @@ test('R5 cosmetics: a bad explanations file prints one "could not be used" line,
   const text = out.join('\n');
   assert.doesNotMatch(text, /user none/); assert.doesNotMatch(text, /does not count[^\n]*does not count/);
   assert.match(text, /explanations: the file could not be used/);
+});
+
+// ───────────────────────────── round 6 (audit r5 of #86: what is a clean pass)
+
+const lastPassLine = (w) => w.lines().filter((l) => l.pass).at(-1);
+
+test('R6 m-C (R5I) the edge is the first clean pass after midnight in LOG order: a clock stepped back cannot pull it earlier', async () => {
+  const w = world(); await dayPasses(w); await w.pass('2026-11-09T23:30:00Z');
+  const p = w.push({ 'docs/z.md': 'z' }, '2026-11-09T23:45:00Z');
+  w.hooks.push([new RegExp(`${BASE}/commits/main$`), 502]); await w.pass('2026-11-10T00:45:00Z'); await w.pass('2026-11-10T01:45:00Z'); w.hooks.length = 0;
+  await w.pass('2026-11-10T03:00:00Z');                 // judges P, seen_at 03:00
+  await w.pass('2026-11-10T00:50:00Z');                 // the clock stepped back; a clean pass, written later
+  const s = week(w);
+  assert.equal(w.judged().find((x) => x.sha === p).seen_at, '2026-11-10T03:00:00Z');
+  assert.equal(s.disagreements, 1, show(s)); assert.equal(s.ok, false);
+});
+
+test('R6 m-D (R5S) a pass with ANY problem is not clean, so it cannot become the edge (head and pin fine, a walk read failed above the push)', async () => {
+  const w = world(); await dayPasses(w); await w.pass('2026-11-09T23:30:00Z');
+  const p = w.push({ 'docs/z.md': 'z' }, '2026-11-09T23:45:00Z');
+  const q = w.push({ 'docs/q.md': 'q' }, '2026-11-09T23:50:00Z');
+  w.hooks.push([new RegExp(`/git/commits/${q}$`), 502]);
+  await w.pass('2026-11-10T00:45:00Z');
+  const bad = lastPassLine(w);
+  w.hooks.length = 0; w.hooks.push([new RegExp(`${BASE}/commits/main$`), 502]); await w.pass('2026-11-10T01:45:00Z');
+  w.hooks.length = 0; await w.pass('2026-11-10T02:45:00Z');
+  const s = week(w); const l = w.judged().find((x) => x.sha === p);
+  assert.ok(bad.problems.length && bad.head && bad.pin_ok, 'the planted pass has a head, the pin and a problem');
+  assert.equal(l.seen_at, '2026-11-10T02:45:00Z');
+  assert.equal(s.disagreements, 2, show(s)); assert.equal(s.ok, false);
+});
+
+test('R6 cosmetic: a damaged explanations file says it is not valid JSON; an unreachable one is not told "so it does not count" twice', async () => {
+  const folder = tempDir('m6-watch-owner-'); chmodSync(folder, 0o755);
+  const f = join(folder, 'explanations.json'); writeFileSync(f, '{ not json'); chmodSync(f, 0o644);
+  const r = readExplanations(f, { ownerUid: UID });
+  assert.equal(r.ok, false); assert.match(r.problem, /not valid JSON/);
 });
