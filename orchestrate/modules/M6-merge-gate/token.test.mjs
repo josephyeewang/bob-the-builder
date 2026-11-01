@@ -35,7 +35,7 @@ function fakeGitHub({ status = 201 } = {}) {
       const okSig = verify('RSA-SHA256', Buffer.from(`${h}.${p}`), publicKey, Buffer.from(s ?? '', 'base64url'));
       const head = JSON.parse(Buffer.from(h, 'base64url'));
       const claims = JSON.parse(Buffer.from(p, 'base64url'));
-      seen.push({ path, okSig, head, claims });
+      seen.push({ path, okSig, head, claims, jwt });
       if (!okSig) return { status: 401, json: { message: 'bad signature' } };
       return status === 201 ? { status, json: { token: TOKEN, expires_at: '2026-10-30T13:00:00Z' } } : { status, json: { message: 'no' } };
     },
@@ -76,7 +76,11 @@ test('mints a token in memory, and no file in the temp folder holds it afterward
   assert.equal(gh.seen[0].okSig, true);
   assert.deepEqual(gh.seen[0].claims, { iat: NOW / 1000 - 60, exp: NOW / 1000 + 540, iss: '12345' });
   assert.equal(anyFileHolds(dir, TOKEN), false, 'the token was written to disk');
-  assert.equal(anyFileHolds(dir, 'eyJ'), false, 'the signed request was written to disk');
+  // The signed request itself, and each of its three parts, in no file. (Not a bare 'eyJ': the key file, made fresh
+  // each run, holds that by chance about 6 runs in 1000.)
+  const { jwt } = gh.seen[0];
+  assert.equal(jwt.split('.').length, 3);
+  for (const part of [jwt, ...jwt.split('.')]) assert.equal(anyFileHolds(dir, part), false, 'the signed request was written to disk');
 });
 
 test('a run as another Mac user, or as root, is refused before the key is read', async () => {

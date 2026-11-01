@@ -43,17 +43,21 @@ export function verdictFileText({ role, card, head, pass, checklist, material, f
   return `${JSON.stringify(header)}\n`;
 }
 
-/** The format as the reviewer's prompt states it: an example line for this card and head, and the rules. */
+/**
+ * The format as the reviewer's prompt states it: an example line for this card and head, and the rules. The example
+ * only shows the shape (audit R-0b-147 minor 4): it fails, with one made-up finding, so a session that copies it as it
+ * is hands in a fail, never a pass it did not judge.
+ */
 export function verdictFormat({ role, card, head }) {
-  const finding = { level: 'minor', says: 'what is wrong, and why it matters', file: 'path/in/the/change', line: 12, quote: 'the exact text on that line', ...(role === 'reviewer' ? { on: 'correct' } : {}) };
+  const finding = { level: 'material', says: 'what is wrong, and why it matters', file: 'path/in/the/change', line: 12, quote: 'the exact text on that line', ...(role === 'reviewer' ? { on: 'correct' } : {}) };
   const example = role === 'reviewer'
-    ? { entity: 'verdict', card, expectRev: 0, fields: { head, pass: true, checklist: Object.fromEntries(VERDICT_CHECKLIST.map((k) => [k, 'clean'])), notes: [] } }
-    : { entity: 'verdict', card, expectRev: 0, fields: { head, pass: true, material: 0, notes: [] } };
+    ? { entity: 'verdict', card, expectRev: 0, fields: { head, pass: false, checklist: Object.fromEntries(VERDICT_CHECKLIST.map((k) => [k, k === 'correct' ? 'material' : 'clean'])), notes: [finding] } }
+    : { entity: 'verdict', card, expectRev: 0, fields: { head, pass: false, material: 1, notes: [finding] } };
   const say = role === 'reviewer'
     ? `"checklist" has exactly the four lines ${VERDICT_CHECKLIST.join(', ')}, each one of ${CHECKLIST_LEVELS.join(', ')}. pass is true only when no line is material.`
     : '"material" is the whole number of Material findings. pass is true only when it is 0.';
   return [
-    'The file is this JSON on one line, with your own values; nothing else may be added to it:',
+    'The file is JSON on one line, shaped like the example below, with your own values; nothing else may be added to it. The example only shows the shape: its pass, checklist and finding are made up, not a judgment of this change.',
     JSON.stringify(example),
     say,
     `"notes" lists every finding, worst first, each like ${JSON.stringify(finding)}. level is one of ${FINDING_LEVELS.join(', ')}.${role === 'reviewer' ? ' "on" is the checklist line it is about.' : ''} Name the file, line and an exact quote wherever you can: a finding whose file, line or quote can't be found at the head you review is dropped as noise.`,
