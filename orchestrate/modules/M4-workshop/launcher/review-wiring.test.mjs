@@ -18,6 +18,7 @@ import { fileURLToPath } from 'node:url';
 const HERE = dirname(fileURLToPath(import.meta.url));
 
 const HEAD = 'a'.repeat(40);
+const PKG_SHA = 'f'.repeat(64);
 const ME = process.getuid();
 const UIDS = Object.fromEntries(Object.keys(DESIGN_PROFILES).map((r) => [r, ['reviewer', 'auditor'].includes(r) ? ME : ME + 1000]));
 
@@ -48,6 +49,8 @@ function x(over = {}, li = undefined) {
       claudeBin: '/i/claude-code/2.1.300/claude', copy: '/rc/S-1-not-there', spawn: sp.spawn,
       makeCopy: async () => { made.push('/rc/S-1'); return { ok: true }; },
       settingsFor: (dir) => { settings.push(dir); return { ok: true, file: '/r/settings/S-1.json', settings: DESIGN_PROFILES[role] ? settingsOf(role) : {} }; },
+      packageDir: '/r/packages/S-1',
+      packageFor: async ({ copy, head, dir }) => { made.push(`package ${copy} -> ${dir}`); return { ok: true, base: 'b'.repeat(40), head, files: [{ status: 'M', path: 'a.txt' }], diffFile: `${dir}/change.diff`, diffBytes: 10, diffSha256: PKG_SHA }; },
       ...(li ? { launchInputs: li } : {}),
       ...over,
     },
@@ -65,7 +68,8 @@ test('L83 M-3 planted: start runs launch(): with no launch inputs it is refused 
     assert.equal(r.ok, false, role);
     assert.match(r.reason, /runs only as the review user/);
     assert.deepEqual(r.launch_log, []);
-    assert.deepEqual(w.made, ['/rc/S-1'], 'the copy is made first');
+    assert.equal(r.package_sha256, PKG_SHA, 'once the package is written its sha256 goes back for the runner to pin, even on a refusal');
+    assert.deepEqual(w.made, ['/rc/S-1', 'package /rc/S-1-not-there -> /r/packages/S-1'], 'the copy is made first, then the package goes in the runner\'s folder');
     assert.deepEqual(w.settings, ['/rc/S-1-not-there'], 'the settings name that same copy');
     assert.equal(w.calls.length, 0, 'claude is never spawned');
   }
@@ -129,6 +133,10 @@ test('R-0b-163: no profile, no copy or no settings means no launch', async () =>
   const throws = x({ makeCopy: async () => { throw new Error('disk'); } });
   assert.match((await wiring.start(throws.x)).reason, /the review copy: disk/);
   const noSettings = x({ settingsFor: () => ({ ok: false, reason: 'template' }) });
-  assert.match((await wiring.start(noSettings.x)).reason, /the settings: template/);
-  for (const w of [noCopy, throws, noSettings]) assert.equal(w.calls.length, 0);
+  const ns = await wiring.start(noSettings.x);
+  assert.match(ns.reason, /the settings: template/);
+  assert.equal(ns.package_sha256, PKG_SHA);
+  const noPkg = x({ packageFor: async () => ({ ok: false, reason: 'no diff' }) });
+  assert.deepEqual(await wiring.start(noPkg.x), { ok: false, reason: 'the review package: no diff' });
+  for (const w of [noCopy, throws, noSettings, noPkg]) assert.equal(w.calls.length, 0);
 });

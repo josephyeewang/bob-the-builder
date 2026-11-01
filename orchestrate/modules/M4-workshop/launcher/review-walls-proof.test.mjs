@@ -36,7 +36,7 @@ function callFor(a, id = 't1') {
 test('L83 M-2, L91 m-5 planted: the proof attacks every place L83 and L91 name', () => {
   const places = wallPlaces(C, { sessionId: 'S-1', other: 'S-2' });
   const where = places.map((p) => p.file ?? p.dir);
-  for (const p of ['/r/runner/launches', '/r/runner/requests', '/r/runner/rejected', '/r/runner/ended', '/r/runner/set-aside', '/r/runner/settings',
+  for (const p of ['/r/runner/launches', '/r/runner/requests', '/r/runner/rejected', '/r/runner/packages', '/r/runner/packages/S-1/change.diff', '/r/runner/packages/S-1.sha256', '/r/runner/ended', '/r/runner/set-aside', '/r/runner/settings',
     '/r/runner/status.json', '/r/runner/state.json', '/r/runner/settings/S-1.json', '/r/runner/rules.json',
     '/r/outbox/reviewer/S-1', '/r/outbox/reviewer/S-2', '/r/outbox/auditor/S-2']) assert.ok(where.includes(p), `the proof attacks ${p}`);
 });
@@ -133,7 +133,7 @@ const refuseAll = (a, files) => {
   return lines(init(), callFor(a), result('t1', 'Permission denied', true), end([{ tool_use_id: 't1' }]));
 };
 function world() {
-  const files = new Map([['/r/runner/status.json', B('{"s":1}')], ['/r/runner/state.json', B('{}')], ['/r/runner/settings/S-1.json', B('{}')], ['/r/runner/rules.json', B('[]')]]);
+  const files = new Map([['/r/runner/packages/S-1/change.diff', B('diff\n')], ['/r/runner/packages/S-1.sha256', B('0\n')], ['/r/runner/status.json', B('{"s":1}')], ['/r/runner/state.json', B('{}')], ['/r/runner/settings/S-1.json', B('{}')], ['/r/runner/rules.json', B('[]')]]);
   return { attempts: wallAttempts(wallPlaces(C, { sessionId: 'S-1', other: 'S-2' })), control: { tool: 'Write', target: '/r/outbox/reviewer/S-1/verdict.json' }, files };
 }
 
@@ -258,6 +258,7 @@ test('L66 live wall proof: a real review session, as the review user, is refused
   const { sessionSettings } = await import('./review-settings.mjs');
   const { reviewOutbox } = await import('./review-user.mjs');
   const { writeSnapshot } = await import('../hooks/snapshot.mjs');
+  const { FOLDERS } = await import('./review-runner.mjs');
   const c = readConfig(CONFIG);
   const sessionId = `wall-proof-${Date.now()}`;
   const other = `${sessionId}-other`;
@@ -267,6 +268,7 @@ test('L66 live wall proof: a real review session, as the review user, is refused
   for (const d of made) mkdirSync(d, { recursive: true, mode: 0o700 });
   const logFile = join(c.reviewHome, `wall-proof-${sessionId}.jsonl`);
   let settingsFile = null;
+  let pinFile = null;
   try {
     writeSnapshot(c.snapshot, c.rules); // as each runner pass does, so the hooks are not refusing a stale snapshot
     const node = realpathSync.native(process.execPath);
@@ -274,6 +276,13 @@ test('L66 live wall proof: a real review session, as the review user, is refused
     const s = sessionSettings({ ...c, hooksDir }, { role: 'reviewer', sessionId, copy, node }, { owner: 0 });
     assert.equal(s.ok, true, s.reason);
     settingsFile = s.file;
+    // Its own review package and pin, as the runner and the wiring leave them (L91 m-5), so the walls are tried on real files.
+    const pkgDir = join(c.root, FOLDERS.packages, sessionId);
+    mkdirSync(pkgDir, { recursive: true, mode: 0o755 });
+    made.push(pkgDir);
+    writeFileSync(join(pkgDir, 'change.diff'), 'diff for the wall proof\n', { mode: 0o644 });
+    pinFile = join(c.root, FOLDERS.packages, `${sessionId}.sha256`);
+    writeFileSync(pinFile, `${'0'.repeat(64)}\n`, { mode: 0o644 });
     const profile = DESIGN_PROFILES.reviewer;
     const env = { PATH: '/usr/bin:/bin:/usr/sbin:/sbin', HOME: c.reviewHome };
     const r = await runProof({
@@ -293,6 +302,7 @@ test('L66 live wall proof: a real review session, as the review user, is refused
     assert.equal(r.ok, true, `${r.why ?? 'every attempt must be refused'}; ${JSON.stringify(r.through)}; the log is ${logFile}`);
   } finally {
     if (settingsFile) rmSync(settingsFile, { force: true });
+    if (pinFile) rmSync(pinFile, { force: true });
     for (const d of made) rmSync(d, { recursive: true, force: true });
   }
 });

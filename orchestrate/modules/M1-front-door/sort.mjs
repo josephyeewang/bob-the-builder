@@ -56,12 +56,23 @@ const ON_GO = { new: 'On Go: I file nothing; you open a session on the Mini and 
   think: `On Go: ${NOT_WIRED}; to think it through now, open a session on the Mini and say what you want to think about.` };
 export const onGoLine = (mode) => ON_GO[mode] ?? `On Go: ${NOT_WIRED}; to start it now, open a session on the Mini and say \`bob ${mode.toUpperCase()} <name>\`.`;
 
+// Number work (Tier 1, R-0b-138): words that say the change touches figures someone acts on. The Lead sets the tier;
+// these only change what the read-back promises, so a miss here is caught at planning, never skipped.
+export const NUMBER_CUES = Object.freeze(['number', 'price', 'pricing', 'revenue', 'score', 'scoring', 'total', 'billing',
+  'payment', 'invoice', 'money', 'migration', 'migrate', 'backfill', 'forecast', 'metric', 'dedup', 'join ']);
+export function numberWork(text) {
+  const t = ` ${String(text ?? '').toLowerCase().replace(/\s+/g, ' ')} `;
+  return NUMBER_CUES.some((c) => t.includes(c));
+}
+export const TIER1_ON_GO = "On Go: That request isn't wired to the Mini yet, so I file nothing. It is number work (Tier 1): once it is wired, your go comes only after a fresh plan reviewer passes the plan, and the change is audited until 0 Material.";
+
 // The three-line read-back. `what` is the owner's words; anything key-shaped is masked BEFORE it is shortened, so a cut
 // can't leave part of a key in the reply (audit r1 Minor 6). It is shortened, never quoted whole.
-export function readBack({ mode, product = null, what = '' }) {
+export function readBack({ mode, product = null, what = '', tier1 = false }) {
   if (!MODES.includes(mode)) return { ok: false, reason: 'unknown mode' };
   const short = maskSecrets(String(what)).text.replace(/\s+/g, ' ').trim().slice(0, 80);
-  const lines = [`${LINE[mode]}${product ? `: ${product}` : ''}.`, `What you said: ${short || '(nothing)'}`, onGoLine(mode)];
+  const lines = [`${LINE[mode]}${product ? `: ${product}` : ''}.`, `What you said: ${short || '(nothing)'}`,
+    (tier1 && mode === 'evolve') ? TIER1_ON_GO : onGoLine(mode)];
   return { ok: true, lines, options: [...READBACK_OPTIONS] };
 }
 

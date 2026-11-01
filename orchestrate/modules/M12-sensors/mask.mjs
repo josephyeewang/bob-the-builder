@@ -55,6 +55,9 @@ const SHAPES = [
   { kind: 'supabase', re: /\bsbp_[A-Za-z0-9]{20,}/g, group: 0 },
   { kind: 'supabase', re: /\bsb_secret_[A-Za-z0-9_-]{12,}/g, group: 0 },
   { kind: 'vercel', re: /\bvc[a-z]_[A-Za-z0-9]{20,}/g, group: 0 },
+  // Cloud access-key ids are all upper case, so the generic rule (mixed case) misses them (L84 6): the AWS-style
+  // prefixes followed by 16 upper-case letters or digits.
+  { kind: 'access-key-id', re: /\b(?:AKIA|ASIA|ABIA|ACCA|AGPA|AIDA|AIPA|ANPA|ANVA|AROA|APKA|ASCA)[A-Z0-9]{16}\b/g, group: 0 },
   { kind: 'jwt', re: /\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g, group: 0 },
   { kind: 'private-key', re: /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)/g, group: 0 },
   { kind: 'bearer', re: /\b(?:Bearer|Basic)\s+([A-Za-z0-9._~+/-]{12,}=*)/g, group: 1 },

@@ -13,7 +13,8 @@
 //   await readApprove(ctx, askId, { view, catchUps }) → { ok, counted, head? }  a risky_approve ask's GitHub Approve
 //   await approvalStands(ctx, askId, { head, view, catchUps }) → { ok } | { ok: false, reason }   may this head merge on it now?
 // ctx = { record, rules, product, now, alert, gh, owner, repo, stateDir, push }
-//   push(event) → true when the owner's phone was sent `event` ({ ask, card, kind, urgent, line? }); anything else is
+//   push(event) → true when the owner's phone was sent `event` ({ ask, card, kind, urgent, line?, view? }; `view` is a
+//   go's text from go-view.mjs goText, R-0b-138/139, or an owner-flagged undo's undoPushText, R-0b-140); anything else is
 //   "not sent", and the ask is tried again next pass.
 //
 // HELD DECISIONS (R-0b-53, round 1 M8). A decision ask that carries `modules` (the modules of the decided.yaml entries
@@ -27,6 +28,7 @@ import { activeKind } from '../../shared/asks.mjs';
 import { askStore, writeDoc } from './ask-store.mjs';
 import { releaseBoxes, releaseSessions } from './binding.mjs';
 import { openDecision } from './decision.mjs';
+import { goText, goView, undoPushText } from './go-view.mjs';
 import { countApprove, requestReview } from './github-review.mjs';
 import { MERGE_APPROVE_MS, UNDO_OPEN_QUESTION_LINE, URGENT_REPUSH_MS, dueWindow, lapseAt, readConfig, zoneFor } from './kinds.mjs';
 
@@ -111,7 +113,13 @@ async function push(ctx, a, { urgent, win, anyBound, nowMs }, events) {
   };
   if (k.channel === 'tap') {
     if (typeof ctx.push !== 'function') { ctx.alert({ type: 'approvals_no_push', ask: a.id }); return; }
-    const event = { ask: a.id, card: doc.card, kind: doc.kind, urgent, ...(doc.kind === 'undo' && anyBound ? { line: UNDO_OPEN_QUESTION_LINE } : {}) };
+    // A go push carries the go view (R-0b-138/139): the plan in three lines and the files it allows. One that can't be
+    // shown is held, never sent bare.
+    let view = null;
+    if (k.go) { const v = goView(doc); if (!v.ok) { ctx.alert({ type: 'go_not_shown', ask: a.id, reason: v.reason }); return; } view = goText(v); }
+    // An undo the owner flagged (R-0b-140) carries its pull request, so its push says which change and what Undo does.
+    if (doc.kind === 'undo' && Number.isSafeInteger(doc.pr)) view = undoPushText({ card: doc.card, title: doc.title, pr: doc.pr });
+    const event = { ask: a.id, card: doc.card, kind: doc.kind, urgent, ...(doc.kind === 'undo' && anyBound ? { line: UNDO_OPEN_QUESTION_LINE } : {}), ...(view ? { view } : {}) };
     let sent = false;
     try { sent = (await ctx.push(event)) === true; } catch { sent = false; }
     if (!sent) { ctx.alert({ type: 'push_not_sent', ask: a.id }); return; }
