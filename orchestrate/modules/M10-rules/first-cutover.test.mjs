@@ -290,6 +290,9 @@ const VARIANTS = [
 test('the pending reasons are exactly these, on the fixture as given, and each says it is known (L96 m-D, L115)', () => {
   assert.deepEqual(firstCutoverProblems(FIRST, ENTRY), [...PENDING]);
   for (const x of PENDING) assert.ok(Object.values(KNOWN).some((k) => x.endsWith(k)), x);
+  // Each label is real text a reader sees, naming its ruling (an empty label would match every reason).
+  for (const [name, k] of Object.entries(KNOWN)) assert.match(k, /^ \(known: .+, L\d+; waits on .+\)$/, name);
+  for (const x of PENDING) assert.match(x, / \(known: /, x);
   assert.deepEqual(PENDING_SCOPE, ['usage.red_runs', 'context.lead.soft', 'context.lead.hard', 'context.handoff_cap.role', 'context.worker.split_after_compactions']);
 });
 
