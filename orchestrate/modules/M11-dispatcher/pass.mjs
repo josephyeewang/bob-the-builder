@@ -166,12 +166,11 @@ export async function stopPass({ rec, rules, now, account, sessions, probe, stop
   const limitsFor = (product) => {
     const k = product;
     if (!limits.has(k)) {
-      const opts = { product };
       const readFor = (key, f, fallback) => { try { return f(); } catch (e) { missing.push(e instanceof MissingKey ? missingFor(e.key, product) : `the rules (${e?.message ?? e})`); return fallback; } };
       limits.set(k, {
-        cancelMs: readFor(KEYS.cancelGraceMin, () => minutes(rules, KEYS.cancelGraceMin, opts), CANCEL_GRACE_FLOOR_MS),
-        parkMs: readFor(KEYS.parkWaitMin, () => minutes(rules, KEYS.parkWaitMin, opts), Infinity),
-        split: readFor(KEYS.splitAfterCompactions, () => need(rules, KEYS.splitAfterCompactions, opts), Infinity),
+        cancelMs: readFor(KEYS.cancelGraceMin, () => minutes(rules, KEYS.cancelGraceMin, { product }), CANCEL_GRACE_FLOOR_MS),
+        parkMs: readFor(KEYS.parkWaitMin, () => minutes(rules, KEYS.parkWaitMin, { product }), Infinity),
+        split: readFor(KEYS.splitAfterCompactions, () => need(rules, KEYS.splitAfterCompactions, { product }), Infinity),
       });
     }
     return limits.get(k);

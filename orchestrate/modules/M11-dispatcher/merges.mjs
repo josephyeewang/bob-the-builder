@@ -91,13 +91,20 @@ export async function timeLimits({ rec, rules, now, b, running = [], gateAlive, 
   // each is read for its card's product, where it is used, once per product per pass (L116 m2). A key the product's
   // rules lack skips only the step that needs it: that entry is listed, untouched, and the key goes back, with the
   // product, for the tick to tell Joe. Settling a merge GitHub has already finished needs no limit at all.
+  // Each read is written out, key by key, so M10's scope check reads its scope (L131; a key passed by name it can't).
+  const LIMITS = {
+    inReviewNoReviewerMin: (product) => minutes(rules, KEYS.inReviewNoReviewerMin, { product }),
+    reportingMaxMin: (product) => minutes(rules, KEYS.reportingMaxMin, { product }),
+    checkingMaxMin: (product) => minutes(rules, KEYS.checkingMaxMin, { product }),
+    mergingOpenMaxMin: (product) => minutes(rules, KEYS.mergingOpenMaxMin, { product }),
+  };
   const read = new Map();
   const limOf = (cardId, name) => {
     const product = cardId ? rec.read('card', cardId)?.doc?.product ?? null : null;
     const k = `${product}\0${name}`;
     if (!read.has(k)) {
       let v;
-      try { v = { ms: minutes(rules, KEYS[name], { product: product ?? undefined }) }; } catch (e) {
+      try { v = { ms: LIMITS[name](product ?? undefined) }; } catch (e) {
         if (!(e instanceof MissingKey)) throw e;
         const what = missingFor(e.key, product);
         if (!missing.includes(what)) missing.push(what);
