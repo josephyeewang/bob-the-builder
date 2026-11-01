@@ -1,7 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { decide } from '../M4-workshop/hooks/plain-files.mjs';
+import { makeSnapshot } from '../M4-workshop/hooks/snapshot.mjs';
+import { intakePass, kindsFor } from '../M11-dispatcher/outbox-intake.mjs';
 import { env as m2env, must, PRODUCT } from './fixtures.test-helper.mjs';
 import { outboxFile as m9file } from '../M9-record/fixtures.test-helper.mjs';
 import { checkOutboxFile, intakePush, outboxFile } from '../M1-front-door/outbox.mjs';
@@ -90,6 +94,11 @@ test('R-0b-136: what opens nothing', () => {
   assert.equal(r.refused.length, 3);
   assert.deepEqual(r.refused.map((f) => f.reason).sort(), ['an ask request comes only from the Front Door', 'that product is not this record\'s', 'the file holds an escape (\\u); write plain text'].sort());
   assert.equal(t.alerts.filter((a) => a.kind === 'ask_request_refused').length, 3);
+  // With a state folder, a refused report is alerted once, not on every pass (audit r1 Minor 11).
+  const ctx = { ...t.ctx, stateDir: join(t.base, 'state') };
+  t.alerts.length = 0;
+  openResearchAsks(ctx); openResearchAsks(ctx);
+  assert.equal(t.alerts.filter((a) => a.kind === 'ask_request_refused').length, 3);
   assert.equal(t.record.list('ask').length, 0);
   // The shapes the Front Door may not write.
   const bad = (doc) => checkOutboxFile('ask-request-20261103-0915-re.json', JSON.stringify(doc)).ok;
@@ -112,3 +121,29 @@ test('R-0b-136: the skill writes the research ask in the shape intake takes', ()
   assert.match(SKILL, /never ask the owner to paste it/);
   assert.doesNotMatch(SKILL, /Research asks, anything else/);
 });
+
+// Audit kit-lane3 r1 M-1: the real path, not applyOutbox directly. The Front Door's Write passes M4's plain-files hook
+// (the role's kinds from its real profile), the Dispatcher's intake reads it with M4's readOutboxFile and hands it to the
+// record, and the ask opens. It FAILS until lane 2's M4 fix lets the Front Door hand in `ask-request-` files; then
+// drop the todo.
+test('audit r1 M-1: a research ask handed in on the real path (hook, intake) reaches "waiting on you"',
+  { todo: 'fails until lane 2 lets the Front Door hand in ask-request- files (M4 role-profiles, audit M-1) and intake may record its hand-in fact in the real record (M11 outbox-intake vs M9 permissions)' }, async () => {
+    const t = m2env();
+    const sid = 'F-1';
+    const outbox = join(t.outRoot, 'front_door', sid);
+    mkdirSync(outbox, { recursive: true });
+    const snapshot = join(t.base, 'rules.json');
+    writeFileSync(snapshot, makeSnapshot({ production: { env_files: [], programs: [], hosts: [] }, secrets: { paths: [] } }));
+    const f = outboxFile('ask-request', '20261103-0915-rp', { ask: 'research', product: PRODUCT, brief: 'find out what the rivals charge' });
+    const kinds = kindsFor({ role: 'front_door' });
+    const hook = decide({ tool_name: 'Write', tool_input: { file_path: join(outbox, f.name), content: f.text } }, { role: 'front_door', outbox, snapshot, kinds });
+    assert.equal(hook.block, false, `the Write hook blocked the Front Door's file: ${hook.reason}`);
+    writeFileSync(join(outbox, f.name), f.text);
+    const alerts = [];
+    const out = await intakePass({ rec: t.record, sessions: [{ sessionId: sid, role: 'front_door', outbox, uid: process.getuid(), card: null, product: PRODUCT }],
+      wait: async () => {}, alert: (a) => alerts.push(a), note: () => {}, startReadonly: async () => ({ ok: false }), replyToLead: () => {} });
+    assert.equal(out[0]?.refused, undefined, `intake refused it: ${out[0]?.refused}`);
+    const r = openResearchAsks(t.ctx);
+    assert.equal(r.opened.length, 1, JSON.stringify(r.refused));
+    assert.ok(waitingLines(waitingItems(t.record)).some((l) => l.includes('find out what the rivals charge')));
+  });

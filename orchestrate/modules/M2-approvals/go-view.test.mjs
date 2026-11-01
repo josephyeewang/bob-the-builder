@@ -141,17 +141,20 @@ test('R-0b-138: a Tier-2 go that can\'t be shown is held and alerted, never push
   assert.ok(alerts.some((x) => x.type === 'go_not_shown' && x.ask === r.id));
 });
 
-test('R-0b-138: a number-work read-back says the Lead is planning it now; the skill says the same', () => {
+test('R-0b-138: a number-work read-back names the Tier 1 path, files nothing while unwired; the skill says the same', () => {
   const words = 'fix the revenue total on the billing page';
   assert.equal(sortRequest(words).mode, 'evolve');
   assert.equal(numberWork(words), true);
   assert.equal(numberWork('fix the typo on the about page'), false);
   const rb = readBack({ mode: 'evolve', product: 'sample-app', what: words, tier1: true });
   assert.equal(rb.lines.length, 3);
-  assert.match(rb.lines[2], /the Lead is planning it now/);
+  // Mode requests are not wired (audit r1 Minor 9), so the Tier 1 line claims no filing either.
+  assert.match(rb.lines[2], /isn't wired to the Mini yet, so I file nothing/);
+  assert.doesNotMatch(rb.lines[2], /I file it|Filed|planning it now/);
+  assert.match(rb.lines[2], /number work \(Tier 1\)/);
   assert.match(rb.lines[2], /fresh plan reviewer passes the plan/);
   assert.match(rb.lines[2], /audited until 0 Material/);
-  assert.doesNotMatch(readBack({ mode: 'evolve', product: 'sample-app', what: 'fix the typo' }).lines[2], /planning it now/);
+  assert.doesNotMatch(readBack({ mode: 'evolve', product: 'sample-app', what: 'fix the typo' }).lines[2], /Tier 1/);
   assert.ok(SKILL.includes(rb.lines[2].replace(/\s+/g, ' ')) || SKILL.replace(/\s+/g, ' ').includes(rb.lines[2]), 'the skill gives the same line');
 });
 

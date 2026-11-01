@@ -73,7 +73,9 @@ R-0b-82's decision and handoff code sit here although the row is tagged M11 (lan
    `request-think-` like the other requests (same `checkOutboxFile`, same push, "Request taken: … Nothing has started
    yet"). The Lead acts on evolve, audit and upgrade as Bob runs on that product; think opens a thinking room on the
    rules' `models.main`. `what` is the owner's words, one line, already checked for keys; pass it on through
-   `cleanOutside`. NEW files nothing: the owner opens their own session. Until this is wired, the request sits unread.
+   `cleanOutside`. NEW files nothing: the owner opens their own session. Until this is wired (the record gives `request-`
+   no entity, shared/record.mjs), the skill files no mode request and never says "Filed": it tells the owner to start it
+   in their own session (audit kit-lane3 r1 Minor 9). Wiring it also means turning the skill's step 3 back on.
 10. Research asks (R-0b-136). Lane 2's intake checks `ask-request-<id>.json` with `checkOutboxFile` and pushes
    `intakePush` like the other Front Door files, then hands it to the record's `applyOutbox` (kept as a report). Each
    pass runs M2's `openResearchAsks(ctx)` and pushes each `opened[].push` to the owner's phone. R-0b-135, after it
@@ -90,7 +92,7 @@ R-0b-82's decision and handoff code sit here although the row is tagged M11 (lan
 | R-0b-83 | yes: `trip.test.mjs`, `outbox.test.mjs`, `M12-sensors/power-source.test.mjs` | not yet (step 7) |
 | R-0b-84 | yes: `transcript.test.mjs` (the checker) | not yet (step 8) |
 | R-0b-85 | audit rounds logged in the build notes | — |
-| R-0b-136 | yes: `M2-approvals/research-ask.test.mjs` (against a stand-in for R-0b-135) | not yet (needs join item 10 and R-0b-135) |
+| R-0b-136 | partly: `M2-approvals/research-ask.test.mjs`. Not done: clause 2 (the report lands) passes only against a stand-in for R-0b-135, and the real-path test (hook, intake, record) is a todo that fails until lane 2's M4 and M9 fixes land (audit kit-lane3 r1 M-1, Minor 10) | not yet (needs join item 10 and R-0b-135) |
 | R-0b-137 | yes: `sort.test.mjs` | not yet (needs join item 9) |
 
 A §13 proof row stays unproven until its owner line is filled. R-0b-85's audit of the restart covers lane 2's
