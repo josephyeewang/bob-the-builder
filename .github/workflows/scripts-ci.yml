@@ -8,8 +8,9 @@ name: scripts-ci
 on:
   push:
     branches: [main]
+  # Every pull request, whatever its base: a PR stacked on another branch gets checks from its first push, not only once
+  # it is retargeted to main (retargeting starts no run). The lead's merge refuses a PR with no checks (LEAD-CALLS L113).
   pull_request:
-    branches: [main]
 
 jobs:
   shellcheck:
