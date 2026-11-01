@@ -180,6 +180,149 @@ test('a decision Approve given after its lapse counts nothing', async () => {
   assert.equal(w.g.pulls.get(pr).state, 'closed', 'an expired decision\'s pull request is closed');
 });
 
+// L133 m-2: written `expired` first, a close that failed plus a lost alert left the decision pull request open,
+// nothing retried it, and Joe was never told. Now the close comes first and `expired` waits for a close that worked
+// or an alert that went through; until then each pass tries both again.
+test('L133 m-2: an expiring decision whose close fails and whose alert is refused stays un-expired, and both are retried', async () => {
+  const w = world();
+  must(createAsk(w.t.ctx, { id: 'D-1', kind: 'decision', card: 'C-1', title: 'Which format', choices: ['CSV', 'JSON'], recommended: 'CSV' }));
+  await w.at(W8);
+  const pr = ask(w, 'D-1').pr;
+  assert.ok(pr);
+  await w.at(W8 + 13 * HOUR);
+  await w.at(W8 + 24 * HOUR);
+  assert.equal(ask(w, 'D-1').state, 'pushed');
+  const realGh = w.t.ctx.gh;
+  const close = { fail: true, tries: 0 };
+  w.t.ctx.gh = { ...realGh, patch: async (path, body) => {
+    if (path.endsWith(`/pulls/${pr}`) && body?.state === 'closed') { close.tries += 1; if (close.fail) return { status: 502 }; }
+    return realGh.patch(path, body);
+  } };
+  const notClosed = () => w.t.alerts.filter((a) => a.type === 'decision_pr_not_closed');
+  // The close fails and the sink refuses the alert (as M11's outbox does when it can't queue).
+  w.t.sink.answer = false;
+  await w.at(W8 + 36 * HOUR);
+  assert.equal(close.tries, 1);
+  assert.equal(ask(w, 'D-1').state, 'pushed', 'not expired: nothing would retry the close');
+  assert.equal(w.g.pulls.get(pr).state, 'open');
+  assert.equal(notClosed().length, 0);
+  // The close still fails, but the alert goes through: Joe is told, and the ask expires.
+  w.t.sink.answer = true;
+  await w.at(W8 + 37 * HOUR);
+  assert.equal(close.tries, 2, 'the close was tried again');
+  assert.equal(notClosed().length, 1);
+  assert.equal(notClosed()[0].pr, pr);
+  assert.equal(ask(w, 'D-1').state, 'expired');
+  await w.at(W8 + 38 * HOUR);
+  assert.equal(close.tries, 2, 'an expired ask is not closed again');
+  assert.equal(notClosed().length, 1, 'and Joe is told once');
+});
+
+test('L133 m-2: a sink that throws counts as not told, and a close that works on the retry expires the ask with no alert', async () => {
+  const w = world();
+  must(createAsk(w.t.ctx, { id: 'D-1', kind: 'decision', card: 'C-1', title: 'Which format', choices: ['CSV', 'JSON'], recommended: 'CSV' }));
+  await w.at(W8);
+  const pr = ask(w, 'D-1').pr;
+  await w.at(W8 + 13 * HOUR);
+  await w.at(W8 + 24 * HOUR);
+  const realGh = w.t.ctx.gh;
+  const close = { fail: true };
+  w.t.ctx.gh = { ...realGh, patch: async (path, body) => (close.fail && path.endsWith(`/pulls/${pr}`) ? Promise.reject(new Error('network down')) : realGh.patch(path, body)) };
+  const realAlert = w.t.ctx.alert;
+  w.t.ctx.alert = () => { throw new Error('sink broke'); };
+  await w.at(W8 + 36 * HOUR);
+  assert.equal(ask(w, 'D-1').state, 'pushed');
+  w.t.ctx.alert = realAlert;
+  close.fail = false;
+  await w.at(W8 + 37 * HOUR);
+  assert.equal(ask(w, 'D-1').state, 'expired');
+  assert.equal(w.g.pulls.get(pr).state, 'closed');
+  assert.equal(w.t.alerts.filter((a) => a.type === 'decision_pr_not_closed').length, 0);
+});
+
+// L135: the same shape after an answer (decision.mjs readDecision). The answer is written with CLOSE_DUE; the mark comes
+// off once the close worked or Joe was told, and until then each schedule pass retries the close and the alert.
+async function answeredWithFailingClose(w, { sink }) {
+  must(createAsk(w.t.ctx, { id: 'D-1', kind: 'decision', card: 'C-1', title: 'Which format', choices: ['CSV', 'JSON'], recommended: 'CSV' }));
+  await w.at(W8);
+  const pr = ask(w, 'D-1').pr;
+  assert.ok(pr);
+  const realGh = w.t.ctx.gh;
+  const close = { fail: true, tries: 0 };
+  w.t.ctx.gh = { ...realGh, patch: async (path, body) => {
+    if (path.endsWith(`/pulls/${pr}`) && body?.state === 'closed') { close.tries += 1; if (close.fail) return { status: 502 }; }
+    return realGh.patch(path, body);
+  } };
+  const realAlert = w.t.ctx.alert;
+  if (sink === 'throws') w.t.ctx.alert = (a) => { if (a?.type === 'decision_pr_not_closed') throw new Error('sink broke'); return realAlert(a); };
+  else w.t.sink.answer = false;
+  w.g.review(pr, { state: 'APPROVED', commit_id: w.g.pulls.get(pr).head, submitted_at: w.t.clock.t + MIN });
+  w.t.clock.t += 2 * MIN;
+  const r = await readDecision(w.t.ctx, 'D-1');
+  assert.deepEqual([r.ok, r.counted, r.choice], [true, true, 'CSV'], r.reason);
+  const restore = () => { w.t.ctx.alert = realAlert; w.t.sink.answer = true; };
+  return { pr, close, restore };
+}
+const notClosed = (w) => w.t.alerts.filter((a) => a.type === 'decision_pr_not_closed');
+
+for (const sink of ['false', 'throws']) {
+  test(`L135: an answered decision whose close fails and whose alert ${sink === 'false' ? 'answers false' : 'throws'} keeps pr_close_due, and the pass retries until closed`, async () => {
+    const w = world();
+    const { pr, close, restore } = await answeredWithFailingClose(w, { sink });
+    assert.equal(ask(w, 'D-1').state, 'answered', 'the answer is kept and counted');
+    assert.equal(ask(w, 'D-1').pr_close_due, true, 'a close still due is on the record');
+    assert.equal(w.g.pulls.get(pr).state, 'open');
+    assert.equal(notClosed(w).length, 0, 'Joe not told');
+    // A pass with the close still failing and the alert still lost: tried again, the mark stays.
+    let r = await w.at(w.t.clock.t + HOUR);
+    assert.equal(close.tries, 2);
+    assert.equal(ask(w, 'D-1').pr_close_due, true);
+    // The close works: the mark comes off, with no alert, and no later pass closes it again.
+    close.fail = false; restore();
+    r = await w.at(w.t.clock.t + HOUR);
+    assert.equal(close.tries, 3);
+    assert.equal(w.g.pulls.get(pr).state, 'closed');
+    assert.equal(ask(w, 'D-1').pr_close_due, undefined);
+    assert.equal(ask(w, 'D-1').state, 'answered');
+    assert.ok(r.events.some((e) => e.type === 'decision_pr_close_retried' && e.ask === 'D-1'));
+    assert.equal(notClosed(w).length, 0);
+    await w.at(w.t.clock.t + HOUR);
+    assert.equal(close.tries, 3, 'not closed again');
+  });
+}
+
+test('L135: when the close still fails but the alert goes through, Joe is told once and the mark comes off', async () => {
+  const w = world();
+  const { pr, close, restore } = await answeredWithFailingClose(w, { sink: 'false' });
+  restore();
+  await w.at(w.t.clock.t + HOUR);
+  assert.equal(close.tries, 2);
+  assert.equal(notClosed(w).length, 1);
+  assert.equal(notClosed(w)[0].pr, pr);
+  assert.equal(ask(w, 'D-1').pr_close_due, undefined);
+  await w.at(w.t.clock.t + HOUR);
+  assert.equal(close.tries, 2, 'not retried once Joe was told');
+  assert.equal(notClosed(w).length, 1);
+});
+
+test('L135: a close that works first time leaves no mark, and a mark whose clearing write was refused is cleared by the pass', async () => {
+  const w = world();
+  must(createAsk(w.t.ctx, { id: 'D-1', kind: 'decision', card: 'C-1', title: 'Which format', choices: ['CSV', 'JSON'], recommended: 'CSV' }));
+  await w.at(W8);
+  const pr = ask(w, 'D-1').pr;
+  w.g.review(pr, { state: 'APPROVED', commit_id: w.g.pulls.get(pr).head, submitted_at: w.t.clock.t + MIN });
+  w.t.clock.t += 2 * MIN;
+  assert.equal((await readDecision(w.t.ctx, 'D-1')).counted, true);
+  assert.equal(w.g.pulls.get(pr).state, 'closed');
+  assert.equal(ask(w, 'D-1').pr_close_due, undefined);
+  // A crash between the answer and the close (or a refused clearing write) leaves the mark: the pass clears it.
+  const a = askStore(w.t.record).ask('D-1');
+  must(writeDoc(w.t.record, 'ask', a, { ...a.doc, pr_close_due: true }));
+  const r = await w.at(w.t.clock.t + HOUR);
+  assert.equal(ask(w, 'D-1').pr_close_due, undefined);
+  assert.ok(r.events.some((e) => e.type === 'decision_pr_close_retried'));
+});
+
 test('a held decision is not raised while a card on its module is open; closing it raises the ask in the next window', async () => {
   const w = world();
   leadCard(w.t, 'K-1', { module: 'M3' });

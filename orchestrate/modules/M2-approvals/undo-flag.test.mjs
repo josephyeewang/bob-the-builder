@@ -409,20 +409,53 @@ test('L124 M-1: a sink that answers false is not a delivery: counted, nothing ma
   assert.ok(handAsk(t).doc.main_alert_sent_at);
 });
 
-test('L124 M-1: through M11\'s real outbox() over a refused queue write, nothing is marked, and the next working pass alerts', async () => {
-  const { outbox } = await import('../M11-dispatcher/alerts.mjs');
-  const box = outbox({ read: () => null, write: () => ({ ok: false, reason: 'busy' }) }, 0);
-  assert.equal(box('x'), false, 'the real outbox answers false; it does not throw');
+// L133 c1: the real M9 record, refusing only the alert-queue write with the store's own kind of reason (probe PQ).
+// On main today the real record refuses every queue write anyway (the dispatcher may not create that fact; #68 fixes
+// it), so the working passes go through the real outbox only once it can queue, and through the fixture sink until then.
+test('L124 M-1: through M11\'s real outbox() over the real record with the queue write refused, nothing is marked, and the next working pass alerts', async () => {
+  const { outbox, ALERT_QUEUE_FACT } = await import('../M11-dispatcher/alerts.mjs');
   const t = withState(m2env()); merged(t); flag(t); badResearch(t);
+  const busy = { on: true, n: 0 };
+  const isQueue = (w) => w?.entity === 'fact' && w?.id === ALERT_QUEUE_FACT;
+  const rec = { ...t.record, write: (w) => (busy.on && isQueue(w) ? (busy.n += 1, { ok: false, reason: 'the store is busy: the lock was not free after 10000 ms' }) : t.record.write(w)) };
+  const box = outbox(rec, 0);
   // The README's text adapter (item 12): outbox takes text.
-  const refusing = { ...t.ctx, alert: (a) => box(JSON.stringify(a)) };
-  const r1 = openResearchAsks(refusing);
-  const u1 = await openUndoFlags(refusing, { entriesOf: said(WORDS), addedBy: ADDED });
+  const sink = { ...t.ctx, alert: (a) => box(JSON.stringify(a)) };
+  const r1 = openResearchAsks(sink);
+  const u1 = await openUndoFlags(sink, { entriesOf: said(WORDS), addedBy: ADDED });
+  assert.ok(busy.n >= 2, 'the alerts reached the real outbox and its queue write');
   assert.ok(r1.alerts_failed >= 1 && u1.alerts_failed >= 1);
   assert.equal(handAsk(t).doc.main_alert_sent_at, undefined);
-  for (let i = 0; i < 2; i += 1) { openResearchAsks(t.ctx); await openUndoFlags(t.ctx, { entriesOf: said(WORDS), addedBy: ADDED }); }
-  assert.equal(t.alerts.filter((a) => a.kind === 'ask_request_refused').length, 1);
-  assert.equal(mainAlerts(t).length, 1);
+  busy.on = false;
+  const canQueue = outbox(t.record, 0)(JSON.stringify({ type: 'probe' })) === true;
+  const working = canQueue ? sink : t.ctx;
+  const r2 = openResearchAsks(working);
+  const u2 = await openUndoFlags(working, { entriesOf: said(WORDS), addedBy: ADDED });
+  if (!canQueue) {
+    assert.equal(r2.alerts_failed ?? 0, 0); assert.equal(u2.alerts_failed ?? 0, 0);
+    assert.equal(t.alerts.filter((a) => a.kind === 'ask_request_refused').length, 1);
+    assert.equal(mainAlerts(t).length, 1);
+  } else {
+    const q = (t.record.read('fact', ALERT_QUEUE_FACT)?.doc?.entries ?? []).map((e) => JSON.parse(e.text));
+    assert.equal(q.filter((a) => a.kind === 'ask_request_refused').length, 1);
+    assert.equal(q.filter((a) => a.type === 'undo_by_hand').length, 1);
+  }
+  assert.ok(handAsk(t).doc.main_alert_sent_at);
+});
+
+// L133 c3: L130 defines delivered as "not false", so a sink answering undefined (no answer at all) counts as delivered.
+test('L133 c3: a sink that answers undefined is a delivery: nothing counted, marked once, and not alerted again', async () => {
+  const t = withState(m2env()); merged(t); flag(t); badResearch(t);
+  const got = [];
+  const quiet = { ...t.ctx, alert: (a) => { got.push(a); return undefined; } };
+  for (let i = 0; i < 2; i += 1) {
+    const r = openResearchAsks(quiet);
+    const u = await openUndoFlags(quiet, { entriesOf: said(WORDS), addedBy: ADDED });
+    assert.equal(r.alerts_failed, undefined); assert.equal(u.alerts_failed, undefined);
+  }
+  assert.equal(got.filter((a) => a.kind === 'ask_request_refused').length, 1);
+  assert.equal(got.filter((a) => a.type === 'undo_by_hand').length, 1);
+  assert.ok(handAsk(t).doc.main_alert_sent_at);
 });
 
 test('L124 m-2: a record write that throws in MAIN\'s alert loop is counted and the pass still hands back byHand', async () => {

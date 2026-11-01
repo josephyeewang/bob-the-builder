@@ -141,6 +141,8 @@ export async function openUndoFlags(ctx, { entriesOf, addedBy } = {}) {
   // MAIN's alert for every open by-hand ask not yet told, rebuilt from the ask; marked only once it went through (L117 m-2).
   const handAsks = askStore(record).asks().filter((a) => a.doc.kind === BY_HAND_KIND && a.doc.product === product && a.doc.state === 'open');
   // A write that throws here is counted in alerts_failed and the pass goes on (L124 m-2); the ask is alerted again next pass.
+  // On purpose (L133 c2): a mark that throws after MAIN's alert went out is counted there too, though the alert was
+  // delivered. MAIN then gets it again next pass, so a repeat is the cost, never a lost alert.
   for (const a of handAsks.filter((x) => !x.doc.main_alert_sent_at)) {
     const files = Array.isArray(a.doc.added_files) ? a.doc.added_files : [];
     try {

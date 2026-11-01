@@ -121,6 +121,56 @@ test('L124 m-1: writeDoc refuses a caller whose file is outside M2, or code with
   assert.equal(doc(t).state, 'consumed');
 });
 
+// L133 m-1: the fence's four safety lines, each pinned (plants B19, B22, B23, B24 survived before). A copied tree holds
+// its own ask-store.mjs (it imports only node:), so its M2 folder is the copy's.
+test('L133 m-1: the fence refuses a sibling folder that only starts with M2\'s name, follows the disk\'s letter case, and leaves the stack settings as it found them', async () => {
+  const t = world('answered');
+  const tree = join(t.base, 'fence-tree');
+  const m2 = join(tree, 'M2-approvals');
+  const sib = join(tree, 'M2-approvals copy');
+  mkdirSync(m2, { recursive: true }); mkdirSync(sib, { recursive: true });
+  writeFileSync(join(m2, 'ask-store.mjs'), readFileSync(new URL('./ask-store.mjs', import.meta.url)));
+  const CALL = 'export const call = (fn, ...a) => fn(...a);\n';
+  writeFileSync(join(m2, 'helper.mjs'), CALL);
+  writeFileSync(join(sib, 'caller.mjs'), CALL);
+  const copy = await import(pathToFileURL(join(m2, 'ask-store.mjs')).href);
+  const a = askStore(t.record).ask('D-1');
+  const next = { ...a.doc, state: 'consumed', consumed_at: 'x' };
+  // (a) `M2-approvals copy/` starts with the M2 folder's name but is another folder: refused (the separator, :89).
+  const fromSib = (await import(pathToFileURL(join(sib, 'caller.mjs')).href)).call(copy.writeDoc, t.record, 'ask', a, next);
+  assert.equal(fromSib.ok, false);
+  assert.match(fromSib.reason, /it was called from .*M2-approvals copy[\\/]caller\.mjs$/);
+  assert.equal(askStore(t.record).ask('D-1').doc.state, 'answered');
+  // (b) A helper in the copy's own M2 folder may write; on a Mac, also when imported through another letter case
+  // (realpathSync.native, :36: plain realpathSync keeps the case it was given, and the helper's writes were refused).
+  const upper = join(tree, 'M2-Approvals', 'helper.mjs');
+  const caseless = process.platform === 'darwin' && (() => { try { return realpathSync.native(upper) === realpathSync.native(join(m2, 'helper.mjs')); } catch { return false; } })();
+  const helper = await import(pathToFileURL(caseless ? upper : join(m2, 'helper.mjs')).href);
+  const w = helper.call(copy.writeDoc, t.record, 'ask', a, next);
+  assert.equal(w.ok, true, `an M2 helper writes${caseless ? ' (imported through M2-Approvals/)' : ''}: ${w.reason ?? ''}`);
+  assert.equal(askStore(t.record).ask('D-1').doc.state, 'consumed');
+  if (process.platform === 'darwin') assert.ok(caseless, 'this Mac\'s temp folder ignores letter case, so (b) ran through M2-Approvals/');
+  // (c) A process whose stack limit is 0 still writes (:45), and its limit is 0 again afterwards.
+  const t2 = world('answered');
+  const limit = Error.stackTraceLimit;
+  let c;
+  try { Error.stackTraceLimit = 0; c = consumeAsk(t2.ctx, 'D-1'); assert.equal(Error.stackTraceLimit, 0); } finally { Error.stackTraceLimit = limit; }
+  assert.equal(c.ok, true, c.reason);
+  // (d) The caller's own prepareStackTrace is back after writeDoc (:49), and errors' stacks are text again.
+  const t3 = world('answered');
+  const mine = (err, frames) => `mine:${frames.length}`;
+  const prep = Error.prepareStackTrace;
+  try {
+    Error.prepareStackTrace = mine;
+    assert.equal(consumeAsk(t3.ctx, 'D-1').ok, true);
+    assert.equal(Error.prepareStackTrace, mine);
+  } finally { Error.prepareStackTrace = prep; }
+  const t4 = world('answered');
+  assert.equal(consumeAsk(t4.ctx, 'D-1').ok, true);
+  assert.equal(Error.prepareStackTrace, prep);
+  assert.equal(typeof new Error().stack, 'string');
+});
+
 // ---- no module outside M2 imports writeDoc ----
 
 // The fence is writeDoc's own caller check (L124 m-1, tested below); this scan is an early warning only, so it is not

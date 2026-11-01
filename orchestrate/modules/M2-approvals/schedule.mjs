@@ -27,7 +27,7 @@ import { join } from 'node:path';
 import { activeKind } from '../../shared/asks.mjs';
 import { askStore, writeDoc } from './ask-store.mjs';
 import { releaseBoxes, releaseSessions } from './binding.mjs';
-import { openDecision } from './decision.mjs';
+import { CLOSE_DUE, closeDecisionPr, openDecision } from './decision.mjs';
 import { goText, goView, undoPushText } from './go-view.mjs';
 import { countApprove, requestReview } from './github-review.mjs';
 import { MERGE_APPROVE_MS, UNDO_OPEN_QUESTION_LINE, URGENT_REPUSH_MS, dueWindow, lapseAt, readConfig, zoneFor } from './kinds.mjs';
@@ -76,10 +76,12 @@ function write(ctx, cur, doc, events, event) {
   return true;
 }
 
-async function closeDecisionPr(ctx, id, doc) {
-  if (!activeKind(doc.kind)?.decision_pr || !Number.isSafeInteger(doc.pr)) return;
-  const c = await ctx.gh.patch(`/repos/${ctx.owner}/${ctx.repo}/pulls/${doc.pr}`, { state: 'closed' }).catch((e) => ({ status: String(e?.message ?? e) }));
-  if (c?.status !== 200) ctx.alert({ type: 'decision_pr_not_closed', ask: id, pr: doc.pr, reason: String(c?.status) });
+// A decision answered while its close did not go through carries CLOSE_DUE (decision.mjs, L135); the pass tries the
+// close again, and takes the mark off once it closed or Joe was told it did not.
+async function retryClose(ctx, a, events) {
+  if (!(await closeDecisionPr(ctx, a.id, a.doc))) return;
+  const { [CLOSE_DUE]: _due, ...rest } = a.doc;
+  write(ctx, a, rest, events, { type: 'decision_pr_close_retried', ask: a.id, card: a.doc.card });
 }
 
 // An unanswered lapsing ask 12 hours after it was raised this round, or an unused merge approval 24 hours after:
@@ -99,7 +101,8 @@ async function runOut(ctx, a, nowMs, events) {
   } else {
     releaseBoxes(next, 'expired', nowMs, { moveBack: false });
     next.state = 'expired';
-    if (write(ctx, a, next, events, { type: 'expired', ask: a.id, card: doc.card })) await closeDecisionPr(ctx, a.id, doc);
+    // Close first (L133 m-2); expired is written only once the close worked or Joe was told it did not.
+    if (await closeDecisionPr(ctx, a.id, doc)) write(ctx, a, next, events, { type: 'expired', ask: a.id, card: doc.card });
   }
   return true;
 }
@@ -165,6 +168,8 @@ export async function schedulePass(ctx) {
   if (st.untrusted.length) ctx.alert({ type: 'approvals_untrusted', items: st.untrusted });
   for (const a of st.asks()) {
     if (!activeKind(a.doc.kind)) continue;
+    // A close still due is retried first; the ask's run-out waits for the next pass (one write per ask per pass).
+    if (a.doc[CLOSE_DUE] === true) { await retryClose(ctx, a, events); continue; }
     await runOut(ctx, a, nowMs, events);
   }
   // Re-read: the run-outs above changed states.

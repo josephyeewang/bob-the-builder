@@ -9,7 +9,7 @@
 //   st.ask(id) / st.go(id) → { id, rev, doc } | null
 //   st.gos() → [{ id, rev, doc }]
 //   st.untrusted → [`ask/<id>`, …]          for the caller's alert
-//   writeDoc(record, entity, cur, doc) → the record's answer (cur = null to create)   M2's own modules only (L85 m-3)
+//   writeDoc(record, entity, cur, doc) → the record's answer (to create, cur = { id, rev: 0 })   M2's own modules only (L85 m-3)
 //   consumeAsk(ctx, id, note = {}) → the record's answer | { ok: false, reason }        for modules outside M2
 //   markPushSent(ctx, id, kinds) → the record's answer | { ok: false, reason }        once a pass's push has gone out
 //   markSent(ctx, id, kinds, field) → the same, for a SENT_FIELDS mark (MAIN's by-hand alert uses main_alert_sent_at)
