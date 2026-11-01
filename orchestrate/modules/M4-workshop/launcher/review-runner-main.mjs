@@ -72,7 +72,9 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { runnerPass, CARD_ID, isClaudeCommand } from './review-runner.mjs';
 import { installProblem, readInstallStamp, aclProblem, currentCopy, copyPath } from './install-check.mjs';
 import { sessionVerdict, verdictFromFile } from '../../M9-record/outbox.mjs';
-import { SESSION_ID } from '../../../shared/record.mjs';
+import { SESSION_ID, isOpen } from '../../../shared/record.mjs';
+import { carriedFrom } from '../../M6-merge-gate/gather.mjs';
+import { localGitView } from '../../M5-review-audit/local-view.mjs';
 import { readAccountFile, ACCOUNT_FILE } from './accounts.mjs';
 import { REVIEW_USER } from './review-user.mjs';
 import { git, gitOk } from '../git/safe-git.mjs';
@@ -260,6 +262,36 @@ export function readCardFile({ recordRoot, recordUid, card }) {
   return readRecordFile(join(recordRoot, 'docs', 'card', `${card}.json`), recordUid, 'card', card, 'no such card');
 }
 
+/** Every merge document of the Record, read only (docs/merge/). A Record that can't be read throws. */
+export function readMergeFiles({ recordRoot, recordUid }) {
+  for (const d of [recordRoot, join(recordRoot, 'docs')]) {
+    const bad = recordFolderProblem(d, recordUid);
+    if (bad) throw new Error(bad);
+  }
+  const dir = join(recordRoot, 'docs', 'merge');
+  try { lstatSync(dir); } catch (e) { if (e?.code === 'ENOENT') return []; throw e; }
+  const bad = recordFolderProblem(dir, recordUid);
+  if (bad) throw new Error(bad);
+  return readdirSync(dir).filter((n) => n.endsWith('.json') && !n.startsWith('.')).map((n) => {
+    const id = n.slice(0, -'.json'.length);
+    const r = readRecordFile(join(dir, n), recordUid, 'merge', id, 'it is gone');
+    if (!r.ok) throw new Error(`merge ${id}: ${r.reason}`);
+    return { id, doc: r.doc };
+  });
+}
+
+/**
+ * Carry-over from the card's head to `head` over the mirror (L80 (A)), with M6's one reading (`carriedFrom`). The card's
+ * one open merge request gives the recorded catch-ups; none, or more than one, throws (no carry-over).
+ */
+export async function mirrorCarried({ mirror, recordRoot, recordUid, card, doc, head }) {
+  const merges = readMergeFiles({ recordRoot, recordUid });
+  const mine = merges.filter((m) => m.doc?.card === card && isOpen('merge', m.doc?.state));
+  if (mine.length !== 1) throw new Error(`card ${card} has ${mine.length} open merge requests, not one`);
+  const mainSha = (await gitOk(['rev-parse', '--verify', '-q', 'refs/heads/main^{commit}'], { gitDir: mirror, purpose: 'review-runner-main', timeoutMs: CHILD_MS })).trim();
+  return carriedFrom({ view: localGitView({ gitDir: mirror }), merges, mergeId: mine[0].id, H0: doc.head, head, mainSha, catchUps: mine[0].doc.catch_ups });
+}
+
 /**
  * Whether the Record took a review session's verdict (item 20(a)): a verdict row of that session (docs/verdict/), for
  * that role, card and head, whose file in review's outbox still reads true (M9 `verdictFromFile`). → { ok: true } |
@@ -413,6 +445,7 @@ export function realPorts(c, wiring, { node = realpathSync.native(process.execPa
       if (r.code !== 0) throw new Error(`the card's branch is not in the mirror (${r.code})`);
       return r.stdout.toString('utf8').trim();
     },
+    carried: ({ card, doc, head }) => mirrorCarried({ mirror: c.mirror, recordRoot: c.recordRoot, recordUid: c.recordUid, card, doc, head }),
     // The head's tree (L69): one start per card, tree and role. The head is the one currentHead just read.
     treeOf: async (card, head) => {
       if (typeof head !== 'string' || !/^[0-9a-f]{40}$/.test(head)) throw new Error('the head is not 40 hex');

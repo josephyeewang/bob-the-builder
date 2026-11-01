@@ -21,7 +21,8 @@
 //   statuses [{ context, state }] | null     commit statuses on the PR head (refusal 1)
 //   requiredChecks [name], checksIgnored [{ app_id, name }]
 //   compareStatus 'ahead' | 'behind' | 'diverged' | 'identical' | null   main...head (refusal 12)
-//   carried { review, audit, reasons } | null   carry-over from H0 to the PR head (read only when they differ)
+//   carried { review, audit, reasons, head } | null   carry-over from H0 to the PR head (read only when they differ;
+//                                            gather `carriedFrom`); `head` is the head it was worked out for (L80)
 //   reviews [{ role, session_id, head, tree, aside, ended, silent, verdict | null, problem | null }] | null   every
 //                                            session the review runner launched for this card at H0 or H0's tree, with
 //                                            its own verdict file (M9 headReviews, L68, L69); null when they could not
@@ -105,7 +106,14 @@ export function verdictProblem(f) {
     const pp = worstVerdict(f.prReviews, 'reviewer', PASSES.reviewer, { needPass: false }) ?? worstVerdict(f.prReviews, 'auditor', PASSES.auditor, { needPass: false });
     if (pp) return `${pp}${there}`;
     if (f.carried?.review !== true) return `the review was for ${head.slice(0, 7)}; it does not carry over to ${String(prHead).slice(0, 7)}`;
-    if (f.tier === 1 && f.carried.audit !== true) return `the Tier-1 audit does not carry over to ${String(prHead).slice(0, 7)}`;
+    // The short re-audit (L80 (A), R-0b-146): when the review carried over to exactly this head and only the audit did
+    // not, a passing auditor at the pull request's head counts in its place. Every auditor there still has its say.
+    if (f.tier === 1 && f.carried.audit !== true) {
+      const no = `the Tier-1 audit does not carry over to ${String(prHead).slice(0, 7)}`;
+      if (f.carried.head !== prHead) return no;
+      const re = worstVerdict(f.prReviews, 'auditor', PASSES.auditor, { needPass: true });
+      if (re) return `${no}, and no short re-audit passed there (${re})`;
+    }
   }
   return null;
 }

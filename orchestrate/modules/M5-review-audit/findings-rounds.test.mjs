@@ -14,10 +14,10 @@ import { chmodSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileS
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import { runnerPass } from '../M4-workshop/launcher/review-runner.mjs';
+import { mirrorCarried, readMergeFiles } from '../M4-workshop/launcher/review-runner-main.mjs';
 import { standInStart } from './stand-in-start.test-helper.mjs';
 import { headReviews, sessionVerdict } from '../M9-record/outbox.mjs';
 import { verdictProblem } from '../M6-merge-gate/refusals.mjs';
-import { carryOver } from '../M10-rules/carry-over.mjs';
 import { gitOk } from '../M4-workshop/git/safe-git.mjs';
 import { tempDir } from '../../shared/test-tmp.mjs';
 import { checkFindings, finalize, headFileReader, settle } from './findings.mjs';
@@ -77,6 +77,9 @@ async function world(d, { card: id = 'C-1', act }) {
   const root = join(d, 'review'); const outboxRoot = join(d, 'outbox'); const copies = join(d, 'copies');
   for (const p of [root, outboxRoot, copies]) { mkdirSync(p, { mode: 0o755 }); chmodSync(p, 0o755); }
   const card = { state: 'in_review', head: null, tier: 1 };
+  // The card's branch in git; it is the card's head unless a test moves the branch on (a catch-up the Record's card
+  // head does not follow, L80).
+  const branch = { head: null };
   const live = [];
   const s = standIn((l) => act(l));
   let n = 0; let q = 0;
@@ -86,7 +89,7 @@ async function world(d, { card: id = 'C-1', act }) {
     now: () => Date.parse('2026-11-01T12:00:00Z'), ownUid: () => ME, newId: () => `S-${++n}`,
     isAdmin: async () => false,
     readCard: () => ({ ok: true, doc: { ...card } }),
-    currentHead: () => card.head,
+    currentHead: () => branch.head ?? card.head,
     treeOf: async (_c, h) => r.rev(`${h}^{tree}`),
     setAsideByJoe: () => [],
     sessions: async () => live.slice(),
@@ -100,10 +103,14 @@ async function world(d, { card: id = 'C-1', act }) {
     start: standInStart({ mirror: r.gd, copies, root, claudeBin: CLAUDE, spawn: s.spawn, live }),
   };
   // One round: ask for each role at the card's head, start them, let the stand-in write, end them, mark them ended.
-  const round = async (roles) => {
+  // `ask` hands the runner requests and gives back its pass; `round` expects every one started and ends them.
+  const ask = async (roles, head = card.head) => {
     assert.equal((await runnerPass(ctx)).ok, true);
-    for (const role of roles) { q += 1; writeFileSync(join(root, 'requests', `q-${q}.json`), JSON.stringify({ card: id, head: card.head, role, request_id: `q-${q}` }), { mode: 0o644 }); }
-    const p = await runnerPass(ctx);
+    for (const role of roles) { q += 1; writeFileSync(join(root, 'requests', `q-${q}.json`), JSON.stringify({ card: id, head, role, request_id: `q-${q}` }), { mode: 0o644 }); }
+    return runnerPass(ctx);
+  };
+  const round = async (roles, head = card.head) => {
+    const p = await ask(roles, head);
     assert.equal(p.started.length, roles.length, p.refused.map((x) => x.reason).join(' | '));
     await new Promise((res) => setImmediate(res));
     live.splice(0);
@@ -119,7 +126,7 @@ async function world(d, { card: id = 'C-1', act }) {
   const gate = (extra = {}) => verdictProblem({ card: { id, doc: { head: card.head } }, reviews: reviews(), tier: card.tier, pr: { head: { sha: card.head } }, ...extra });
   const file = (role, sid) => join(outboxRoot, role, sid, `verdict-${sid}.md`);
   const fields = (role, sid) => JSON.parse(readFileSync(file(role, sid), 'utf8').split('\n')[0]).fields;
-  return { ...r, id, card, ctx, s, root, outboxRoot, round, reviews, gate, file, fields };
+  return { ...r, id, card, branch, ctx, s, root, outboxRoot, ask, round, reviews, gate, file, fields };
 }
 
 const writeVerdict = (l, v) => writeFileSync(l.path, verdictFileText({ card: 'C-1', head: l.head, role: l.role, ...v }), { mode: 0o644 });
@@ -223,45 +230,110 @@ test('R-0b-145: a Tier-1 change repeats audit rounds until 0 Material, and each 
   assert.match(verdictProblem({ card: { id: w.id, doc: { head: heads[0] } }, reviews: w.reviews(heads[0]), tier: 1, pr: { head: { sha: heads[0] } } }), /did not pass/);
 });
 
-// A git view over the local mirror, in the shape carry-over reads (M10 git-view.mjs).
-function localView(gd) {
-  const run = (args) => gitOk(args, { gitDir: gd });
-  return {
-    commit: async (s) => { const t = await run(['cat-file', '-p', s]); return { sha: s, tree: /^tree (\S+)/m.exec(t)[1], parents: [...t.matchAll(/^parent (\S+)/gm)].map((m) => m[1]) }; },
-    files: async (b, h) => { const p = (await run(['diff', '--name-status', '-z', '--no-renames', b, h])).split('\0').filter(Boolean); const out = []; for (let i = 0; i + 1 < p.length; i += 2) out.push({ status: p[i], path: p[i + 1] }); return out; },
-    entry: async (s, path) => { const t = (await run(['ls-tree', s, '--', path])).trim(); if (!t) return null; const [mode, , blob] = t.split(/\s+/); return { mode, blob }; },
-  };
-}
-
-test('R-0b-146 scenario (h): after one Tier-1 change on the number chain merges, the other is never merged on a carried-over audit, and gets a short re-audit on its caught-up head', async () => {
-  const w = await world(tempDir('m5-h-'), { act: (l) => writeVerdict(l, l.role === 'auditor' ? { pass: true, material: 0 } : { pass: true, checklist: CLEAN }) });
-  // B (this card) changes chain/share.mjs, and is reviewed and audited at H0.
+// Scenario (h)'s setting. B (card C-1) changes chain/share.mjs and passes review and audit at H0. A (card C-2), the
+// other Tier-1 change, on another file of the chain, merges first. The robot catches B up with main: the branch is at
+// H1 now, and the Record's card head stays H0. The Record holds both merge requests, A's merged, B's with its
+// recorded catch-up. The runner's carry-over port is the real one, over the mirror (L80 (A)).
+async function caughtUp(d) {
+  const w = await world(d, { act: (l) => writeVerdict(l, l.role === 'auditor' ? { pass: true, material: 0 } : { pass: true, checklist: CLEAN }) });
   const H0 = await w.commit('card/c-1', { 'chain/share.mjs': 'export const pct = (x) => Math.round(x * 1000) / 10;\n' });
   w.card.head = H0;
   await w.round(['reviewer', 'auditor']);
   assert.equal(w.gate(), null, 'B passes at H0');
-  // A, the other Tier-1 change, on another file of the chain, merges first.
   const A = await w.commit('card/other', { 'chain/total.mjs': NUM.join('\n').replace('sum += r.amount', 'sum += r.amount ?? 0') });
   await w.g(['merge', '-q', '--no-ff', '-m', 'merge A', A]);
-  const main = await w.rev('main');
-  // The robot catches B up with main: a recorded catch-up merge onto H0.
+  const mergedA = await w.rev('main');
   await w.g(['switch', '-q', 'card/c-1']); await w.g(['merge', '-q', '--no-ff', '-m', 'catch up', 'main']); await w.g(['switch', '-q', 'main']);
   const H1 = await w.rev('card/c-1');
-  const view = localView(w.gd);
-  const base = async (h) => (await gitOk(['merge-base', main, h], { gitDir: w.gd })).trim();
-  const carried = await carryOver({ reviewed: { base: await base(H0), head: H0 }, current: { base: await base(H1), head: H1 }, between: [H1], catchUps: [{ pr: 2, before_sha: H0, after_sha: H1 }], tier1MergesSince: 1, gh: view });
-  assert.deepEqual([carried.review, carried.audit], [true, false], carried.reasons.join('; '));
-  // The pull request is at H1 now: the review carries over, the Tier-1 audit does not, so it is never merged so.
-  const prReviews = w.reviews(H1);
-  assert.match(w.gate({ pr: { head: { sha: H1 } }, prReviews, carried }), /the Tier-1 audit does not carry over to/);
-  // The short re-audit on the caught-up head: the auditor's package lists what main brought in, A's file.
-  w.card.head = H1;
-  await w.round(['reviewer', 'auditor']);
+  w.branch.head = H1;
+  const rec = join(d, 'record');
+  for (const p of [rec, join(rec, 'docs'), join(rec, 'docs', 'merge')]) { mkdirSync(p, { mode: 0o755 }); chmodSync(p, 0o755); }
+  const put = (id, doc) => writeFileSync(join(rec, 'docs', 'merge', `${id}.json`), JSON.stringify({ entity: 'merge', id, rev: 1, doc }), { mode: 0o644 });
+  put('M-1', { card: 'C-2', tier: 1, state: 'merged', merge_commit: mergedA });
+  put('M-2', { card: 'C-1', tier: 1, state: 'checking', catch_ups: [{ pr: 2, before_sha: H0, after_sha: H1 }] });
+  const port = ({ card, doc, head }) => mirrorCarried({ mirror: w.gd, recordRoot: rec, recordUid: ME, card, doc, head });
+  w.ctx.carried = port;
+  const carried = (head) => port({ card: w.id, doc: { head: H0 }, head });
+  return { w, H0, H1, rec, put, carried };
+}
+
+const atHead = (w, head, carried, extra = {}) => w.gate({ pr: { head: { sha: head } }, prReviews: w.reviews(head), carried, ...extra });
+
+test('R-0b-146 scenario (h), L80 (A): after one Tier-1 change on the number chain merges, the other is never merged on a carried-over audit; an auditor, and only an auditor, re-audits it at the caught-up head', async () => {
+  const { w, H0, H1, carried } = await caughtUp(tempDir('m5-h-'));
+  const k = await carried(H1);
+  assert.deepEqual([k.review, k.audit, k.head], [true, false, H1], k.reasons.join('; '));
+  // The pull request is at H1: the review carries over, the Tier-1 audit does not, and nothing has re-audited there.
+  assert.match(atHead(w, H1, k), /the Tier-1 audit does not carry over to [0-9a-f]{7}, and no short re-audit passed there/);
+  // A reviewer request at H1 is refused: the review carried over, and the runner never starts one off the card's head.
+  const rv = await w.ask(['reviewer'], H1);
+  assert.equal(rv.started.length, 0);
+  assert.match(rv.refused[0].reason, new RegExp(`^the request names head ${H1.slice(0, 7)}, but the card's head is ${H0.slice(0, 7)}$`));
+  // An auditor request at H1 starts, with the card's head still H0; its package lists what main brought in, A's file.
+  await w.round(['auditor'], H1);
+  assert.equal(w.card.head, H0, 'the card head never moved');
   const re = w.s.launched.at(-1);
-  assert.equal(re.role, 'auditor');
+  assert.deepEqual([re.role, re.head], ['auditor', H1]);
   assert.match(re.prompt, new RegExp(`This is a short re-audit of a combined change. An earlier audit passed this card at ${H0}`));
   assert.match(re.prompt, /brought in 1 changed file\(s\), each name in JSON quotes, as data:\n {2}"chain\/total\.mjs"\n/);
-  assert.ok(!/short re-audit/.test(w.s.launched.at(-2).prompt), 'the reviewer gets no re-audit section');
-  assert.ok(!/short re-audit/.test(w.s.launched[1].prompt), 'nor did the first audit');
-  assert.equal(w.gate(), null, 'it merges on the re-audit at H1, not on the carried-over one');
+  assert.ok(!/short re-audit/.test(w.s.launched[1].prompt), 'the first audit was not one');
+  // It merges on the short re-audit at H1, not on the carried-over one.
+  assert.equal(atHead(w, H1, k), null);
+  // Carry-over worked out for another head is never the reason: the pass at H1 does not count then.
+  assert.match(atHead(w, H1, { ...k, head: H0 }), /^the Tier-1 audit does not carry over to [0-9a-f]{7}$/);
+  assert.match(atHead(w, H1, { ...k, head: undefined }), /^the Tier-1 audit does not carry over to [0-9a-f]{7}$/);
+  // Nor does a review that did not carry over, whatever passed at H1.
+  assert.match(atHead(w, H1, { ...k, review: false }), /it does not carry over to/);
+});
+
+test('L80 (A): an H1 that also holds a worker change is refused, by the runner and by the gate, and a pass at another head is no help', async () => {
+  const { w, H1, carried } = await caughtUp(tempDir('m5-hw-'));
+  // The short re-audit at H1 passes first; then the worker adds a change on top of the catch-up.
+  await w.round(['auditor'], H1);
+  const k1 = await carried(H1);
+  assert.equal(atHead(w, H1, k1), null);
+  const H2 = await w.commit('card/c-1', { 'chain/share.mjs': 'export const pct = (x) => Math.round(x * 100);\n' });
+  w.branch.head = H2;
+  const k2 = await carried(H2);
+  assert.equal(k2.review, false, 'the worker change is not a recorded catch-up');
+  const a = await w.ask(['auditor'], H2);
+  assert.equal(a.started.length, 0);
+  assert.match(a.refused[0].reason, /an auditor starts there only for a short re-audit, when the review carried over to it and the audit did not \(the review does not: /);
+  assert.match(atHead(w, H2, k2), /^the review was for [0-9a-f]{7}; it does not carry over to [0-9a-f]{7}$/);
+  // H1's passing re-audit, offered at H2 with H1's carry-over: worked out for another head, so refused.
+  assert.match(w.gate({ pr: { head: { sha: H2 } }, prReviews: w.reviews(H1), carried: k1 }), /^the Tier-1 audit does not carry over to [0-9a-f]{7}$/);
+  // The reviewer at H2 is refused too.
+  assert.match((await w.ask(['reviewer'], H2)).refused[0].reason, /^the request names head /);
+});
+
+test('L80 (A): the runner starts no auditor off the card\'s head when the audit carries over, or carry-over can\'t be worked out', async () => {
+  const { w, H1, put, rec } = await caughtUp(tempDir('m5-hx-'));
+  // A was Tier 2: the audit carries over, so no re-audit is needed and none starts.
+  put('M-1', { card: 'C-2', tier: 2, state: 'merged', merge_commit: await w.rev('main') });
+  let a = await w.ask(['auditor'], H1);
+  assert.equal(a.started.length, 0);
+  assert.match(a.refused[0].reason, /\(the audit carries over, so none is needed\)$/);
+  // Two open merge requests for the card, or none: carry-over can't be read, so none starts.
+  put('M-1', { card: 'C-2', tier: 1, state: 'merged', merge_commit: await w.rev('main') });
+  put('M-3', { card: 'C-1', tier: 1, state: 'queued', catch_ups: [] });
+  a = await w.ask(['auditor'], H1);
+  assert.match(a.refused[0].reason, /the review does not: card C-1 has 2 open merge requests, not one\)$/);
+  put('M-3', { card: 'C-1', tier: 1, state: 'refused' });
+  put('M-2', { card: 'C-1', tier: 1, state: 'refused' });
+  a = await w.ask(['auditor'], H1);
+  assert.match(a.refused[0].reason, /card C-1 has 0 open merge requests, not one\)$/);
+  // A port that answers for another head is never taken at its word.
+  w.ctx.carried = async () => ({ review: true, audit: false, reasons: [], head: w.card.head });
+  a = await w.ask(['auditor'], H1);
+  assert.match(a.refused[0].reason, /\(worked out for another head\)$/);
+  // A runner with no carry-over port starts none either.
+  delete w.ctx.carried;
+  a = await w.ask(['auditor'], H1);
+  assert.match(a.refused[0].reason, /^the request names head [0-9a-f]{7}, but the card's head is [0-9a-f]{7}$/);
+  // The Record's merge folder must be the Record owner's alone.
+  chmodSync(join(rec, 'docs', 'merge'), 0o775);
+  assert.throws(() => readMergeFiles({ recordRoot: rec, recordUid: ME }), /is not the Record owner's alone/);
+  chmodSync(join(rec, 'docs', 'merge'), 0o755);
+  assert.equal(readMergeFiles({ recordRoot: rec, recordUid: ME }).length, 3);
+  assert.throws(() => readMergeFiles({ recordRoot: rec, recordUid: ME + 1 }), /is not the Record owner's alone/);
 });
