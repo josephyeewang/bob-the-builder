@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
-import { dispatcherPass as dispatcherPass0, stopPass as stopPass0, undoStarts, stopProcessGroup, STOP_FACT, LIMIT_FACT, UNDO_HELD_FACT, PAUSE_FACT, RULES_MISSING_FACT, rulesMissingAlert as rulesMissingAlert0 } from './pass.mjs';
+import { dispatcherPass as dispatcherPass0, stopPass as stopPass0, undoStarts, stopProcessGroup, STOP_FACT, LIMIT_FACT, LIMIT_NO_ACCOUNT, UNDO_HELD_FACT, PAUSE_FACT, RULES_MISSING_FACT, rulesMissingAlert as rulesMissingAlert0 } from './pass.mjs';
 import { USAGE_FACT, BAND_FACT } from './usage.mjs';
 import { OUTAGE_FACT } from './outage.mjs';
 import { KEYS as K } from './keys.mjs';
@@ -207,8 +207,8 @@ test('R-0b-67 / R-0b-68: in red, review / audit / merge sessions keep running an
 });
 
 test('M8: limit_hit -> after the reset Tier 2 goes back to ready, Tier 1 waits on Joe', async () => {
-  // A card waits on the usage limit (WAIT_WHO usage); a wait that names no account waits on the pass's own.
-  const wait = (tier) => ({ state: 'waiting', tier, wait: { who: 'usage', what: 'limit_hit', since: iso(T0), next_check: iso(T0) } });
+  // A card waits on the usage limit (WAIT_WHO usage) of the account its wait names.
+  const wait = (tier) => ({ state: 'waiting', tier, wait: { who: 'usage', what: 'limit_hit', since: iso(T0), next_check: iso(T0), account: ACCT } });
   const w = world([['card', 'T2', { ...wait(2), product: 'p1', files: ['src/t2.js'] }], ['card', 'T1', { ...wait(1), product: 'p1' }], ['fact', LIMIT_FACT(ACCT), { resets_at: iso(T0 + 30 * MIN), observed_at: iso(T0 + MIN) }]]);
   await w.pass(10);
   assert.equal(w.rec.read('card', 'T2').doc.state, 'waiting');
@@ -224,7 +224,7 @@ test('L97: a card parked on account b\'s limit reads b\'s reading, not the pass\
   // The wait names the account (M9 keeps a wait's extra fields; it lets no script put an account on the card).
   const wait = (files, acct) => ({ state: 'waiting', tier: 2, product: 'p1', files, wait: { who: 'usage', what: 'limit_hit', since: iso(T0), next_check: iso(T0), ...(acct ? { account: acct } : {}) } });
   const w = world([
-    ['card', 'A', wait(['src/a.js'])], ['card', 'B', wait(['src/b.js'], 'acct-b')],
+    ['card', 'A', wait(['src/a.js'], ACCT)], ['card', 'B', wait(['src/b.js'], 'acct-b')],
     ['fact', LIMIT_FACT(ACCT), { resets_at: iso(T0 + 30 * MIN), observed_at: iso(T0 + MIN) }],
     ['fact', LIMIT_FACT('acct-b'), { resets_at: iso(T0 + 90 * MIN), observed_at: iso(T0 + MIN) }],
   ]);
@@ -240,7 +240,7 @@ test('L97 M-3: a limit reading from before the card began to wait, or with no re
   // has no reset time (resets_at null, as the writer leaves it when the reset is unknown).
   const wait = (since, files, acct) => ({ state: 'waiting', tier: 2, product: 'p1', files, wait: { who: 'usage', what: 'limit_hit', since: iso(T0 + since * MIN), next_check: iso(T0 + since * MIN), ...(acct ? { account: acct } : {}) } });
   const w = world([
-    ['card', 'C', { ...wait(20, ['src/c.js']), changed_at: iso(T0 + 20 * MIN) }],
+    ['card', 'C', { ...wait(20, ['src/c.js'], ACCT), changed_at: iso(T0 + 20 * MIN) }],
     ['card', 'D', wait(0, ['src/d.js'], 'acct-d')],
     ['fact', LIMIT_FACT(ACCT), { resets_at: iso(T0 + 10 * MIN), observed_at: iso(T0 + MIN) }],
     ['fact', LIMIT_FACT('acct-d'), { resets_at: null, observed_at: iso(T0 + MIN) }],
@@ -254,6 +254,22 @@ test('L97 M-3: a limit reading from before the card began to wait, or with no re
   w.rec.write({ actor: 'sensors', entity: 'fact', id: LIMIT_FACT(ACCT), expectRev: cur.rev, doc: { resets_at: iso(T0 + 50 * MIN), observed_at: iso(T0 + 25 * MIN) } });
   const r2 = await w.pass(61);
   assert.deepEqual(r2.resumed, ['C']);
+});
+
+test('L110 m-4: a limit_hit wait that names no account resumes nothing, never on the pass\'s account; it waits on Joe, one alert', async () => {
+  // The pass's account has a reading that has reset: a card whose wait names no account must not be resumed by it.
+  const parked = { state: 'waiting', tier: 2, product: 'p1', files: ['src/n.js'], wait: { who: 'usage', what: 'limit_hit', since: iso(T0), next_check: iso(T0) } };
+  const w = world([['card', 'N', parked], ['fact', LIMIT_FACT(ACCT), { resets_at: iso(T0 + 30 * MIN), observed_at: iso(T0 + MIN) }]]);
+  const r = await w.pass(31);
+  assert.deepEqual(r.resumed, []);
+  const n = w.rec.read('card', 'N').doc;
+  assert.deepEqual([n.state, n.wait.who, n.wait.what], ['waiting', 'joe', LIMIT_NO_ACCOUNT]);
+  const told = () => w.calls.alerts.filter((a) => /does not say which account/.test(a));
+  assert.equal(told().length, 1);
+  await w.pass(32);
+  await w.pass(33);
+  assert.equal(told().length, 1, 'told once');
+  assert.equal(w.rec.read('card', 'N').doc.state, 'waiting');
 });
 
 test('M8: usage unknown for over a day -> parked work waits on Joe, one alert', async () => {

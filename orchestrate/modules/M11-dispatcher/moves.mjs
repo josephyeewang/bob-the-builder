@@ -21,7 +21,7 @@ export function move(rec, entity, id, patch, { kind = 'move' } = {}) {
  * starts it again from ready (the only way out of running, whose claim ends), 'continue' returns it to the state it
  * waited from. Defaults: retry from running or ready, continue otherwise; a card already waiting keeps its own.
  */
-export function waitOn(rec, id, { who, what, now, nextCheckMs = 60_000, link, resume, kind = 'wait' }) {
+export function waitOn(rec, id, { who, what, now, nextCheckMs = 60_000, link, resume, kind = 'wait', attempts }) {
   const cur = rec.read('card', id);
   if (!cur) return { ok: false, reason: `card ${id} is not in the record` };
   if (cur.corrupt) return { ok: false, reason: `card ${id} can't be read: ${cur.reason}` };
@@ -34,7 +34,9 @@ export function waitOn(rec, id, { who, what, now, nextCheckMs = 60_000, link, re
   const wait = { who, what, since: iso(now), next_check: iso(now + nextCheckMs), resume: how, return_to: back, ...(link ? { link } : {}) };
   for (const f of WAIT_FIELDS) if (!wait[f]) return { ok: false, reason: `a wait needs ${f}` };
   if (!WAIT_WHO.includes(who)) return { ok: false, reason: `wait.who must be one of ${WAIT_WHO.join(', ')}` };
-  return rec.write({ actor: 'dispatcher', entity: 'card', id, expectRev: cur.rev, doc: { ...cur.doc, state: 'waiting', wait }, kind });
+  // `attempts`: the Dispatcher's own counts to set in the same write (merge_asks, L110 m-1).
+  const doc = { ...cur.doc, state: 'waiting', wait, ...(attempts ? { attempts: { ...(cur.doc.attempts ?? {}), ...attempts } } : {}) };
+  return rec.write({ actor: 'dispatcher', entity: 'card', id, expectRev: cur.rev, doc, kind });
 }
 
 /** Writes a note the diary keeps (one accepted write is one diary line). */

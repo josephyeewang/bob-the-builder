@@ -273,6 +273,65 @@ test('L94: a lost merge answer and the PR stays open: merging under the limit; p
   assert.equal(gatePuts(w), 1);
 });
 
+// The merge time limit read from M10's real engine (L110 M-1): a per-product key, which the engine answers only when the
+// product is named. The fixture policy is parsed for real; its schema does not list timeouts.merging_open_max_min yet
+// (M10's to add), so the value is set on the parsed policy, as an adopted file would give it.
+test('L110 M-1: the gate reads merging_open_max_min for its product from the real engine, so a merge past the limit is refused', async () => {
+  const KEY = 'timeouts.merging_open_max_min';
+  const w = world();
+  const parsed = parsePolicy(readFileSync(join(here, '../M10-rules/fixtures/policy.yaml'), 'utf8'));
+  assert.ok(parsed.ok, parsed.reason);
+  const pol = structuredClone(parsed.policy);
+  pol.timeouts = { ...pol.timeouts, merging_open_max_min: LIMIT_MIN };
+  const eng = makeRules(makeEngine({ products: [PRODUCT], rulesState: () => ({ status: 'ok', policy: pol, commit: 'c'.repeat(40), blob: 'b'.repeat(40) }),
+    productState: () => ({ state: 'active' }), running: () => 0, rolesDir: join(here, '../M10-rules/roles'), clock: () => w.env.clock.t }));
+  assert.equal(eng.get(KEY), undefined, 'the engine gives no per-product value without a product');
+  assert.equal(eng.get(KEY, { product: PRODUCT }), LIMIT_MIN);
+  // The world's rules, with this one key answered by the engine (the rules object is frozen: copied, get replaced).
+  const base = w.ctx.rules;
+  const d = Object.getOwnPropertyDescriptors(base);
+  d.get = { value: (k, o) => (k === KEY ? eng.get(k, o) : base.get(k, o)), enumerable: true };
+  w.ctx.rules = Object.freeze(Object.defineProperties({}, d));
+  verifiedCard(w);
+  loseAnswer(w, { merged: false });
+  await gatePass(w.ctx);
+  assert.equal(mergeOf(w).doc.state, 'merging');
+  tick(w, LIMIT_MIN - 1);
+  await gatePass(w.ctx);
+  assert.equal(mergeOf(w).doc.state, 'merging', 'under the limit');
+  tick(w, 1);
+  await gatePass(w.ctx);
+  assert.equal(mergeOf(w).doc.state, 'refused', 'past the limit the engine gave for this product');
+  assert.deepEqual(mergeOf(w).doc.reasons, ['interrupted']);
+  assert.equal(cardOf(w).state, 'verified');
+});
+
+// G14 (L110 m-6): a pass that stopped after the checking write, before any merge call, left the merge in checking.
+// GitHub was never asked to merge, so a pull request still open is no unknown outcome: refused at once, the card put
+// back, with no wait for the merging limit and no merge call.
+test('L110 m-6 (G14): a merge stopped in checking, its PR still open, is refused at once on the next pass', async () => {
+  const w = world(limited());
+  verifiedCard(w);
+  // The process stops right after the checking write: its next read of the Record never returns.
+  const base = w.ctx.record;
+  w.ctx.record = Object.create(base, { read: { value: (e, id) => {
+    if (e === 'card' && mergeOf(w)?.doc.state === 'checking') throw new Error('the gate process stopped');
+    return base.read(e, id);
+  } } });
+  await gatePass(w.ctx).catch(() => {});
+  w.ctx.record = base;
+  assert.equal(mergeOf(w).doc.state, 'checking', 'the stopped pass left the merge in checking');
+  assert.equal(cardOf(w).state, 'merging');
+  assert.equal(gatePuts(w), 0, 'GitHub was never asked to merge');
+  tick(w, 1);
+  await gatePass(w.ctx);
+  const m = mergeOf(w);
+  assert.equal(m.doc.state, 'refused', 'refused at once, well under the merging limit');
+  assert.deepEqual(m.doc.reasons, ['GitHub did not merge the judged head']);
+  assert.equal(cardOf(w).state, 'verified');
+  assert.equal(gatePuts(w), 0);
+});
+
 for (const status of [405, 409, 422]) {
   test(`L94: GitHub's explicit no (${status}) refuses at once, the card put back with the reason counted`, async () => {
     const w = world(limited());

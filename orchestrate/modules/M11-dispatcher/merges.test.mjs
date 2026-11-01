@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { timeLimits, requestMerges, MERGE_REQUEST, PR_FACT, RECONCILED_FACT } from './merges.mjs';
 import { KEYS as K } from './keys.mjs';
-import { settleMerge, reconcileMerge } from '../M6-merge-gate/merge-outcome.mjs';
+import { settleMerge, reconcileMerge, openTooLong, prReadingAfter } from '../M6-merge-gate/merge-outcome.mjs';
 import { rulesWith, recWith, change, seed, setClock, undoEntries, T0, MIN, iso, withAlerts } from './fixtures.test-helper.mjs';
 
 const R = rulesWith();
@@ -290,13 +290,30 @@ test('L85 m-1: a reviewer that never shows up is asked for once per time limit, 
   assert.deepEqual(rec.read('card', 'C-1').doc.attempts, { reviewer_starts: 0, review_requests: 3 });
 });
 
-test('every time limit comes from the rules', async () => {
-  for (const key of [K.checkingMaxMin, K.reportingMaxMin, K.inReviewNoReviewerMin, K.mergingOpenMaxMin]) {
-    await assert.rejects(() => timeLimits({ rec: recWith(), rules: rulesWith({ [key]: undefined }), now: T0, b: GREEN, ...ports().p }), new RegExp(key.replace(/\./g, '\\.')));
+test('every time limit comes from the rules, for the product of the card it times (L110, the M-1 class)', async () => {
+  const LIMITS = [K.checkingMaxMin, K.reportingMaxMin, K.inReviewNoReviewerMin, K.mergingOpenMaxMin];
+  // A limit the rules lack: nothing it would time is touched, and the key goes back for the tick to tell Joe once.
+  for (const key of LIMITS) {
+    const rec = recWith([cardMerging, checking()]);
+    const missing = [];
+    const moves = await timeLimits({ rec, rules: rulesWith({ [key]: undefined }), now: T0 + 60 * MIN, b: GREEN, ...ports().p, missing });
+    assert.deepEqual(missing, [key], key);
+    assert.equal(rec.read('merge', 'M-1').doc.state, 'checking', `${key}: no limit, so nothing is timed out`);
+    assert.deepEqual(moves, [['M-1', `no time limit: the rules have no ${key} for its product`]]);
   }
   const rec = recWith([cardMerging, checking()]);
   await timeLimits({ rec, rules: rulesWith({ [K.checkingMaxMin]: 2 }), now: T0 + 2 * MIN, b: GREEN, ...ports().p });
   assert.equal(rec.read('merge', 'M-1').doc.state, 'refused');
+  // The limits are per-product keys, which M10's engine answers only for a named product: a merge is timed by its
+  // card's product's limit, and rules that answer only another product's time nothing.
+  const onlyFor = (who) => ({ get: (k, o) => (LIMITS.includes(k) && o?.product !== who ? undefined : R.get(k, o)) });
+  for (const [who, want, lacks] of [['P-2', 'checking', [K.checkingMaxMin]], ['P-1', 'refused', []]]) {
+    const r = recWith([['card', 'C-1', { ...cardMerging[2], product: 'P-1' }], checking()]);
+    const missing = [];
+    await timeLimits({ rec: r, rules: onlyFor(who), now: T0 + 60 * MIN, b: GREEN, ...ports().p, missing });
+    assert.equal(r.read('merge', 'M-1').doc.state, want, `rules for ${who}`);
+    assert.deepEqual(missing, lacks, `rules for ${who}`);
+  }
 });
 
 test('audit MAT-5: a reviewer start goes through the start gate: red holds it unless red_runs lists reviews', async () => {
@@ -390,6 +407,70 @@ test('audit 0b-6 r2 MAT-4 / MAT-6 / MIN-9: an undo is requested in red, unknown 
   const nohead = readyRec({ head: undefined });
   assert.match(requestMerges({ rec: nohead, rules: R, now: T0, b: GREEN })[0][1], /names no head/);
   assert.deepEqual(requests(nohead), []);
+});
+
+test('L110 m-1: the gate refusing the same merge twice in a row (here GitHub\'s 405) goes to Joe once, never requested again in a loop', () => {
+  const NO = 'GitHub refused the merge (405: Base branch was modified)';
+  const rec = readyRec();
+  const alerts = [];
+  const go = (min) => requestMerges({ rec, rules: R, now: T0 + min * MIN, b: GREEN, alert: (t) => alerts.push(t) });
+  assert.deepEqual(go(0), [['C-1', 'merge requested']]);
+  // The gate refuses it (land(): settleMerge puts the card back to verified with the reason): it is asked again once.
+  change(rec, 'card', 'C-1', { attempts: { merge_refusals: [NO] } });
+  assert.deepEqual(go(1), [['C-1', 'merge requested again']]);
+  // Refused again for the same reason: Joe is asked, and no third request is written.
+  change(rec, 'card', 'C-1', { attempts: { merge_refusals: [NO, NO] } });
+  assert.deepEqual(go(2), [['C-1', 'waiting on joe']]);
+  const c = rec.read('card', 'C-1').doc;
+  assert.equal(c.state, 'waiting');
+  assert.equal(c.wait.who, 'joe');
+  assert.equal(c.wait.what, `merge refused twice: ${NO}`);
+  assert.equal(c.wait.link, 'PR 7');
+  assert.equal(c.attempts.merge_asks, 2);
+  assert.equal(requests(rec).length, 2);
+  assert.equal(alerts.length, 1);
+  assert.match(alerts[0], /refused twice for the same reason \(GitHub refused the merge \(405/);
+  // Later passes while he decides: nothing more, no new alert.
+  assert.deepEqual(go(3), []);
+  assert.equal(alerts.length, 1);
+  // He answers (the card back to verified): it is requested again, and not sent straight back to him.
+  change(rec, 'card', 'C-1', { state: 'verified', wait: undefined });
+  assert.deepEqual(go(4), [['C-1', 'merge requested again']]);
+  assert.equal(alerts.length, 1);
+  // A third refusal for the same reason is a new repeat: asked once more.
+  change(rec, 'card', 'C-1', { attempts: { ...rec.read('card', 'C-1').doc.attempts, merge_refusals: [NO, NO, NO] } });
+  assert.deepEqual(go(5), [['C-1', 'waiting on joe']]);
+  assert.equal(rec.read('card', 'C-1').doc.attempts.merge_asks, 3);
+  assert.equal(alerts.length, 2);
+  // Not in a row (a, b, a): requested again, no ask.
+  const mixed = readyRec();
+  change(mixed, 'card', 'C-1', { attempts: { merge_refusals: [NO, 'timeout', NO] } });
+  assert.deepEqual(requestMerges({ rec: mixed, rules: R, now: T0, b: GREEN }), [['C-1', 'merge requested']]);
+});
+
+// The shared decision functions both the gate and this file use (L94), each case alone (L110 m-6).
+test('L110 m-6 (G11): an age the Record can\'t give counts as too long; an unknown limit never fires', () => {
+  const LIMIT = 30 * MIN;
+  const young = { meta: () => ({ ts: iso(T0) }) };
+  assert.equal(openTooLong(young, 'M-1', T0 + LIMIT - 1, LIMIT), false);
+  assert.equal(openTooLong(young, 'M-1', T0 + LIMIT, LIMIT), true);
+  for (const [name, rec] of [['no entry', { meta: () => null }], ['an unreadable time', { meta: () => ({ ts: 'not a time' }) }], ['no meta at all', {}]]) {
+    assert.equal(openTooLong(rec, 'M-1', T0, LIMIT), true, name);
+  }
+  assert.equal(openTooLong({ meta: () => null }, 'M-1', T0, NaN), false, 'no limit: it waits, never fires');
+});
+
+test('L110 m-6 (G13): a pull request reading counts only when Sensors made it, and after the merge\'s last write', () => {
+  const reading = { state: 'open', merged: false, head_sha: HA, observed_at: at(5) };
+  const recBy = (createdBy, mergeTs = at(0)) => ({
+    read: (e, id) => (e === 'fact' && id === PR_FACT(7) ? { id, rev: 1, doc: reading } : null),
+    meta: (e) => (e === 'fact' ? { createdBy } : { ts: mergeTs }),
+  });
+  assert.deepEqual(prReadingAfter(recBy('sensors'), 7, 'M-1'), reading);
+  assert.equal(prReadingAfter(recBy('dispatcher'), 7, 'M-1'), null, 'another role\'s pr- reading is not Sensors\'');
+  assert.equal(prReadingAfter(recBy(null), 7, 'M-1'), null, 'a maker the Record can\'t name is not Sensors');
+  assert.equal(prReadingAfter(recBy('sensors', at(6)), 7, 'M-1'), null, 'a reading from before the merge\'s last write');
+  assert.equal(prReadingAfter(recBy('sensors'), null, 'M-1'), null, 'no pull request number');
 });
 
 test('audit 0b-6 r3 MAT-3: a rules value the gate lacks is handed back to the tick, by the time limits and by the merge requests', async () => {

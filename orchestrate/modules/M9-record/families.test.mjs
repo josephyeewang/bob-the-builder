@@ -97,7 +97,8 @@ test('attempts: each key only by its own writer, in its shape; no other key (L74
   product(env);
   readyCard(env, 'C-1');
   const at = (actor, attempts) => put(env.record, actor, 'card', 'C-1', { attempts });
-  assert.deepEqual(Object.keys(ATTEMPTS).sort(), ['merge_refusals', 'review_requests', 'reviewer_starts']);
+  assert.deepEqual(Object.keys(ATTEMPTS).sort(), ['merge_asks', 'merge_refusals', 'review_requests', 'reviewer_starts']);
+  assert.match(at('merge_gate', { merge_asks: 1 }).reason, /merge_gate may not change attempts.merge_asks \(it is dispatcher's\)/);
   must(at('dispatcher', { reviewer_starts: 1 }), 'the dispatcher adds its own count');
   assert.match(at('dispatcher', { reviewer_starts: 1, merge_refusals: ['checks failed'] }).reason, /dispatcher may not change attempts.merge_refusals \(it is merge_gate's\)/);
   assert.match(at('merge_gate', { reviewer_starts: 2 }).reason, /merge_gate may not change attempts.reviewer_starts/);
