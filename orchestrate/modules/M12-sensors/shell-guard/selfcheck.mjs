@@ -34,7 +34,15 @@ function runOne(i, name, mode, sh, newFolder) {
     const cwd = c.cwd ?? (mode === 'relative' ? dir : other);
     // Sealed from the user's shell set-up (round 10 audit 4 minor 4): no rc files, HOME inside the folder, a plain PATH.
     const env = { PATH: `${dirname(process.execPath)}:/usr/bin:/bin`, HOME: root, LANG: 'C' }; // node's folder: node -e cases
-    const r = spawnSync(sh, [...(sh.endsWith('zsh') ? ['-f'] : []), '-c', cmd], { cwd, env, encoding: 'utf8', timeout: 10000 });
+    // A run that times out can't say whether it touched the file, so it is never counted as "touched nothing": it is
+    // run again with more time, and if it still can't finish, the check stops with that case named (L95: under the load
+    // of two suites at once, a 10 s limit cut `node -e` runs short and they were reported as dead).
+    let r;
+    for (const timeout of [10_000, 60_000, 120_000]) {
+      r = spawnSync(sh, [...(sh.endsWith('zsh') ? ['-f'] : []), '-c', cmd], { cwd, env, encoding: 'utf8', timeout });
+      if (r.error?.code !== 'ETIMEDOUT') break;
+    }
+    if (r.error?.code === 'ETIMEDOUT') throw new Error(`could not tell, ${sh} timed out three times on: ${c.command}`);
     const seen = (r.stdout ?? '') + readOut(`${root}/y`);
     let changed = true;
     try { changed = lstatSync(file).isSymbolicLink() || readFileSync(file, 'utf8') !== CONTENT; } catch { /* gone: changed */ }
@@ -49,6 +57,14 @@ function runOne(i, name, mode, sh, newFolder) {
 // newFolder: makes a new empty folder for one run (tests pass tempDir from shared/test-tmp.mjs); each is removed after.
 export function touchCheck(name, { mode = 'relative', shells = ['/bin/bash'], newFolder } = {}) {
   if (typeof newFolder !== 'function') throw new Error('touchCheck needs newFolder: a function that makes a new empty folder');
-  // The cases reported are those for a stand-in folder of the same shape (same templates and forms, in the same order).
-  return refuseCases(name, mode, '/sg-self-root').map((c, i) => ({ ...c, touchedBy: shells.filter((sh) => runOne(i, name, mode, sh, newFolder)) }));
+  // The cases reported are those for a stand-in folder of the same shape (same templates and forms, in the same order):
+  // a new folder of its own for each call, never a fixed path, so two suites can run at once (L95). It is only named in
+  // the cases, never written to, and is removed after.
+  const stand = realpathSync(newFolder());
+  try {
+    return refuseCases(name, mode, stand).map((c, i) => ({ ...c, touchedBy: shells.filter((sh) => runOne(i, name, mode, sh, newFolder)) }));
+  } finally {
+    rmSync(stand, { recursive: true, force: true });
+    if (existsSync(stand)) throw new Error(`could not remove ${stand}`);
+  }
 }

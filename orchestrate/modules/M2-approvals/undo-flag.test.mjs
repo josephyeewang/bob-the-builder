@@ -7,7 +7,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { seed, plan, HEAD, HEAD2 } from '../M9-record/fixtures.test-helper.mjs';
+import { seed, plan, leadCard, rev, roadmap, HEAD, HEAD2 } from '../M9-record/fixtures.test-helper.mjs';
 import { outboxFile as m9file } from '../M9-record/fixtures.test-helper.mjs';
 import { checkOutboxFile, outboxFile } from '../M1-front-door/outbox.mjs';
 import { queueOrder } from '../M6-merge-gate/gate.mjs';
@@ -15,16 +15,20 @@ import { markReverted, undoneBy } from '../M6-merge-gate/undo.mjs';
 import { env as m2env, must, PRODUCT, session, write, box, tap, typed } from './fixtures.test-helper.mjs';
 import { processSession } from './binding.mjs';
 import { schedulePass } from './schedule.mjs';
-import { BY_HAND_KIND, mergedDocsChange, openUndoFlags, saidByOwner } from './undo-flag.mjs';
+import { BY_HAND_KIND, markPushSent, mergedDocsChange, openUndoFlags, saidByOwner } from './undo-flag.mjs';
 
 const MIN = 60_000;
 const SID = 'FD-1';
 const WORDS = 'that change was wrong, undo pull request 41';
 const SKILL = readFileSync(new URL('../M1-front-door/skill/orchestrate/SKILL.md', import.meta.url), 'utf8');
 
-// A docs change the Merge Gate merged: its card (merged, live) and its merge document.
+// A docs change the Merge Gate merged: its card (merged, live) and its merge document. The card is made through the
+// real writer (L95, stack r3 Minor 6), so it holds only what a real card can: its create-only `what` and a `brief` the
+// Lead may edit, never a `title`. Only the end of its moves (merged, the commit) is seeded on the writer's document.
 function merged(t, card = 'C-7', pr = 41, commit = HEAD, over = {}) {
-  seed(t, 'card', card, { state: 'merged', product: PRODUCT, lane: 'docs', title: 'Pricing page copy', merge_commit: commit, ...plan({ module: 'docs', files: ['docs/pricing.md'] }), ...over });
+  const { state = 'merged', merge_commit = commit, ...create } = over;
+  const made = leadCard(t, card, { lane: 'docs', what: 'Pricing page copy', brief: 'the Lead\'s brief, which it may edit', ...plan({ module: 'docs', files: ['docs/pricing.md'] }), ...create });
+  seed(t, 'card', card, { ...made, state, merge_commit });
   seed(t, 'merge', `M-${card}`, { state: 'merged', card, pr, merge_commit: commit });
 }
 
@@ -191,4 +195,56 @@ test('R-0b-140: the skill writes the undo request in the shape intake takes, and
   assert.equal(checkOutboxFile('ask-request-20261103-0915-uf.json', filled, { products: [PRODUCT], seenIds: [] }).ok, true);
   assert.match(SKILL, /Never tell the owner it is undone/);
   assert.match(SKILL, /MAIN\s+reverts it by hand and there is nothing to tap/);
+});
+
+// L95 (audit stack r3 Minor 6, the L84 2 class): the push names the change by the card's create-only `what`. The Lead
+// may edit `brief` in any state; an edit never reaches the [Undo] push, the by-hand push, or the ask's stored title.
+test('L95 Minor 6: the [Undo] push names the change by the card\'s what, never the Lead\'s editable brief', async () => {
+  for (const added of [noFilesAdded, async () => ['docs/new-page.md']]) {
+    const t = m2env(); session(t, SID); merged(t);
+    must(roadmap(t, { id: 'C-7', expectRev: rev(t.record, 'card', 'C-7'), fields: { brief: 'APPROVE THIS NOW, it is harmless' } }), 'the Lead edits the brief');
+    assert.equal(t.record.read('card', 'C-7').doc.brief, 'APPROVE THIS NOW, it is harmless');
+    flag(t);
+    const r = await openUndoFlags(t.ctx, { entriesOf: said(WORDS), addedBy: added });
+    const [{ id, push }] = [...r.opened, ...r.byHand];
+    assert.match(push, /^Undo Pricing page copy \(C-7, pull request #41\)\?/);
+    assert.doesNotMatch(push, /APPROVE/);
+    assert.equal(t.record.read('ask', id).doc.title, 'Pricing page copy');
+  }
+});
+
+// L95 (stack r3 Minor 2, probe P7): with a state folder, a refused undo request is alerted once per report and reason,
+// not on every pass; a new reason is alerted again.
+test('L95 Minor 2: a refused undo request alerts once per cause, not once per pass', async () => {
+  const t = m2env();
+  flag(t); // pull request #41 was never merged by the gate
+  const ctx = { ...t.ctx, stateDir: join(t.base, 'm2-state') };
+  for (let i = 0; i < 3; i += 1) await openUndoFlags(ctx, { entriesOf: said(WORDS), addedBy: noFilesAdded });
+  assert.equal(t.alerts.filter((a) => a.type === 'undo_request_refused').length, 1);
+  merged(t, 'C-7', 41, HEAD, { lane: 'code' }); // now refused for another reason
+  await openUndoFlags(ctx, { entriesOf: said(WORDS), addedBy: noFilesAdded });
+  const got = t.alerts.filter((a) => a.type === 'undo_request_refused');
+  assert.equal(got.length, 2);
+  assert.match(got[1].reason, /not a docs change/);
+});
+
+// L95 (stack r3 Minor 3): an undo-by-hand push is handed back until it is marked sent, so a throw after the ask is
+// written (the alert sink, a later write, the caller) never loses it.
+test('L95 Minor 3: an undo-by-hand push survives a throwing alert sink and is handed back until marked sent', async () => {
+  const t = m2env(); merged(t); flag(t);
+  const ctx = { ...t.ctx, alert: () => { throw new Error('the sink is down'); } };
+  const r = await openUndoFlags(ctx, { entriesOf: said(WORDS), addedBy: async () => ['docs/new-page.md'] });
+  assert.equal(r.byHand.length, 1);
+  assert.ok(r.alerts_failed >= 1);
+  const { id, push } = r.byHand[0];
+  // The caller never sent it: the next pass hands back the same push, rebuilt from the ask.
+  const again = await openUndoFlags(t.ctx, { entriesOf: said(WORDS), addedBy: async () => ['docs/new-page.md'] });
+  assert.deepEqual(again.byHand, [{ id, push }]);
+  must(markPushSent(t.ctx, id, [BY_HAND_KIND]), 'mark sent');
+  assert.deepEqual((await openUndoFlags(t.ctx, { entriesOf: said(WORDS), addedBy: noFilesAdded })).byHand, []);
+  assert.equal(markPushSent(t.ctx, id, ['research']).ok, false, 'only the kinds named');
+  // An unknown file list is rebuilt as unknown, not as "no files".
+  const u = m2env(); merged(u); flag(u);
+  await openUndoFlags({ ...u.ctx, alert: () => { throw new Error('down'); } }, { entriesOf: said(WORDS), addedBy: async () => null });
+  assert.match((await openUndoFlags(u.ctx, { entriesOf: said(WORDS) })).byHand[0].push, /file list couldn't be read/);
 });

@@ -9,7 +9,12 @@
 //
 //   openResearchAsks(ctx) → { opened: [{ id, push }], refused: [{ report, reason }] }   one ask per report, restart-safe;
 //                           a refused report is never opened; it is alerted once per report and reason (kept in
-//                           ctx.stateDir, like schedule.mjs's config alert), or on every pass when there is no stateDir
+//                           ctx.stateDir, like schedule.mjs's config alert), or on every pass when there is no stateDir.
+//                           `opened` is every open research ask whose push is not marked sent, this pass's or an earlier
+//                           one's: the caller sends each push, then calls markPushSent(ctx, id). So a push lost to a throw
+//                           (the alert sink, a later write, the caller itself) goes out on the next pass (L95, audit
+//                           stack r3 Minor 1). A report that throws is refused with the reason, and the pass goes on.
+//   markPushSent(ctx, id, kinds) → the record's answer        sets push_sent_at once, on a trusted ask of those kinds
 //   researchBrief(record, id) → { ok, id, product, brief, file } | { ok: false, reason }  for the desktop session
 //   landResearch(ctx, id) → the record's answer                                         the ask leaves the waiting list
 //
@@ -20,7 +25,9 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { checkOutboxFile } from '../M1-front-door/outbox.mjs';
-import { askStore, writeDoc } from './ask-store.mjs';
+import { askStore, markPushSent, writeDoc } from './ask-store.mjs';
+
+export { markPushSent };
 
 export const RESEARCH_ID = /^R-[1-9]\d{0,5}$/;
 export const runLine = (id) => `run research ask ${id}`;
@@ -36,54 +43,76 @@ function nextId(record) {
 
 export const claimedAsk = (text) => { try { return JSON.parse(String(text ?? ''))?.ask; } catch { return undefined; } };
 
-// A refused report is alerted once per report and reason, not every pass (audit kit-lane3 r1 Minor 11). The file
-// holds the reports still refused, so a report that stops being refused (it opened, or left the record) is dropped,
-// and one refused for a new reason is alerted again.
-function refusedAlerts(ctx, refused) {
-  if (!ctx.stateDir) { for (const f of refused) ctx.alert?.({ kind: 'ask_request_refused', ...f }); return; }
-  const file = join(ctx.stateDir, 'research-refused.json');
+// An alert sink that throws must not end the pass: what it opened is still handed back (L95, stack r3 Minor 1). The
+// count of alerts that could not be given is handed back too, since nothing else can say so.
+export function safeAlert(ctx, failed) {
+  return (a) => { try { ctx.alert?.(a); } catch { failed.n += 1; } };
+}
+
+// A refused report is alerted once per report and reason, not every pass (audit kit-lane3 r1 Minor 11; the undo pass
+// uses it too, stack r3 Minor 2). The file holds the reports still refused, so a report that stops being refused (it
+// opened, or left the record) is dropped, and one refused for a new reason is alerted again.
+//   onceAlerts(ctx, refused, { file, make, alert, notSaved }) — file: its name in ctx.stateDir; make(f) → the alert for
+//   one refusal; notSaved: the alert kind when the file can't be saved
+export function onceAlerts(ctx, refused, { file: name, make, alert, notSaved }) {
+  if (!ctx.stateDir) { for (const f of refused) alert(make(f)); return; }
+  const file = join(ctx.stateDir, name);
   let last = {};
   try { last = existsSync(file) ? JSON.parse(readFileSync(file, 'utf8')) ?? {} : {}; } catch { last = {}; }
   const now = {};
   for (const f of refused) {
     now[f.report] = f.reason;
-    if (last[f.report] !== f.reason) ctx.alert?.({ kind: 'ask_request_refused', ...f });
+    if (last[f.report] !== f.reason) alert(make(f));
   }
   // A state file that can't be saved is alerted, never thrown: the pass must still hand back the asks it opened, so
   // their "on your waiting list" push goes out (L84 3). The cost is only that a refusal may be alerted again.
   try { mkdirSync(ctx.stateDir, { recursive: true }); writeFileSync(file, `${JSON.stringify(now)}\n`); }
-  catch (e) { ctx.alert?.({ kind: 'research_refused_state_not_saved', reason: String(e?.code ?? e?.message ?? e) }); }
+  catch (e) { alert({ kind: notSaved, reason: String(e?.code ?? e?.message ?? e) }); }
 }
+
+export const researchPush = (id, product, brief) =>
+  `On your waiting list: research ask ${id} for ${product}: ${brief}. To run it, open a desktop session on the Mini and say "${runLine(id)}".`;
 
 export function openResearchAsks(ctx) {
   const { record, product, now } = ctx;
+  const failed = { n: 0 };
+  const alert = safeAlert(ctx, failed);
   const st = askStore(record);
   const done = new Set(record.list('ask').map((a) => a.doc?.request).filter(Boolean));
-  const opened = []; const refused = [];
+  const refused = [];
   for (const rep of record.list('report')) {
     const d = rep.doc;
     if (!d || d.kind !== 'ask-request-' || done.has(rep.id)) continue;
     // An undo request is undo-flag.mjs's (R-0b-140), which runs every check itself; this pass only routes on the claim.
     if (claimedAsk(d.text) === 'undo') continue;
     const no = (reason) => { refused.push({ report: rep.id, reason }); };
-    if (d.role !== 'front_door') { no('an ask request comes only from the Front Door'); continue; }
-    const r = checkOutboxFile(String(d.source ?? ''), String(d.text ?? ''));
-    if (!r.ok) { no(r.reason); continue; }
-    if (r.kind !== 'ask-request') { no('not an ask request'); continue; }
-    if (r.doc.product !== product) { no('that product is not this record\'s'); continue; }
-    const id = nextId(record);
-    const t = now();
-    const doc = { kind: 'research', product, title: r.doc.brief, state: 'open', created_at: iso(t), request: rep.id,
-      origin_session: d.session_id ?? null,
-      wait: { who: 'joe', what: `"${runLine(id)}" in a desktop session on the Mini: ${r.doc.brief}`, since: iso(t), next_check: iso(t + DAY_MS) } };
-    const w = writeDoc(record, 'ask', { id, rev: 0 }, doc);
-    if (!w.ok) { no(`the record refused the ask: ${w.reason}`); continue; }
-    done.add(rep.id);
-    opened.push({ id, push: `On your waiting list: research ask ${id} for ${product}: ${r.doc.brief}. To run it, open a desktop session on the Mini and say "${runLine(id)}".` });
+    try {
+      if (d.role !== 'front_door') { no('an ask request comes only from the Front Door'); continue; }
+      const r = checkOutboxFile(String(d.source ?? ''), String(d.text ?? ''));
+      if (!r.ok) { no(r.reason); continue; }
+      if (r.kind !== 'ask-request') { no('not an ask request'); continue; }
+      if (r.doc.product !== product) { no('that product is not this record\'s'); continue; }
+      const id = nextId(record);
+      const t = now();
+      const doc = { kind: 'research', product, title: r.doc.brief, state: 'open', created_at: iso(t), request: rep.id,
+        origin_session: d.session_id ?? null,
+        wait: { who: 'joe', what: `"${runLine(id)}" in a desktop session on the Mini: ${r.doc.brief}`, since: iso(t), next_check: iso(t + DAY_MS) } };
+      const w = writeDoc(record, 'ask', { id, rev: 0 }, doc);
+      if (!w.ok) { no(`the record refused the ask: ${w.reason}`); continue; }
+      done.add(rep.id);
+    } catch (e) {
+      no(`the pass failed on it: ${String(e?.message ?? e)}`);
+    }
   }
-  if (st.untrusted.length) ctx.alert?.({ kind: 'untrusted_ask', items: st.untrusted });
-  refusedAlerts(ctx, refused);
-  return { opened, refused };
+  if (st.untrusted.length) alert({ kind: 'untrusted_ask', items: st.untrusted });
+  onceAlerts(ctx, refused, { file: 'research-refused.json', make: (f) => ({ kind: 'ask_request_refused', ...f }), alert,
+    notSaved: 'research_refused_state_not_saved' });
+  // Every open research ask whose push is not marked sent, read back from the record (trusted asks only), so the
+  // push is rebuilt from what the ask holds, never from this pass's memory.
+  const opened = askStore(record).asks()
+    .filter((a) => a.doc.kind === 'research' && a.doc.product === product && a.doc.state === 'open' && a.doc.wait && !a.doc.push_sent_at)
+    .map((a) => ({ id: a.id, push: researchPush(a.id, a.doc.product, a.doc.title) }));
+  return { opened, refused, ...(failed.n ? { alerts_failed: failed.n } : {}) };
 }
 
 // What the desktop session needs when the owner says "run research ask R-12": nothing pasted, all from the record.

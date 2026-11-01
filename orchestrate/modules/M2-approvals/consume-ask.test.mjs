@@ -5,12 +5,12 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, relative, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { env, must } from './fixtures.test-helper.mjs';
-import { askStore, consumeAsk, writeDoc } from './ask-store.mjs';
+import { NOTE_KEYS, askStore, consumeAsk, writeDoc } from './ask-store.mjs';
 import { createAsk } from './binding.mjs';
 
-const MODULES = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+const ORCH = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
 
 function world(state = 'answered') {
   const t = env();
@@ -68,9 +68,48 @@ test('the note may only add new fields: never the state, the answer, consumed_at
   for (const note of [null, [], 'x', new Map()]) assert.equal(consumeAsk(world().ctx, 'D-1', note).ok, false, String(note));
 });
 
+// L95 (audit stack r3 Minor 7, probes P8a and P8b): only the cleanup's two keys, with plain values. A `wait` would put
+// the consumed ask back on the owner's waiting list; a `request` naming a report would stop it ever opening.
+test('L95 Minor 7: the note is allow-listed to kept_at_card_change and not_deleted, with plain values', () => {
+  for (const note of [{ wait: { who: 'joe', what: 'x', since: 'y' } }, { request: 'report-1' }, { pr: 7 }, { card_override: 'C-2' },
+    { next_check: 'x' }, { kept_at_card_change: { a: 1 } }, { not_deleted: ['x'] }, { not_deleted: 'x'.repeat(501) },
+    { kept_at_card_change: Number.NaN }, { [Symbol('s')]: 1 }]) {
+    const t = world();
+    const r = consumeAsk(t.ctx, 'D-1', note);
+    assert.equal(r.ok, false, String(Object.keys(note)));
+    assert.equal(doc(t).state, 'answered');
+    assert.equal(Object.hasOwn(doc(t), 'wait'), false);
+  }
+  assert.deepEqual([...NOTE_KEYS], ['kept_at_card_change', 'not_deleted']);
+  const t = world();
+  must(consumeAsk(t.ctx, 'D-1', { kept_at_card_change: 4, not_deleted: 'the copy is not the Dispatcher\'s own' }));
+  assert.equal(doc(t).not_deleted, 'the copy is not the Dispatcher\'s own');
+  must(consumeAsk(world().ctx, 'D-1', { not_deleted: null }));
+});
+
+// L95 (stack r3 Minor 10, plant m-3-4): an ask whose latest diary line another actor wrote is not M2's, so it is refused.
+test('L95 Minor 10: consumeAsk refuses an ask whose last diary line another actor wrote', () => {
+  const t = world();
+  const cur = t.record.read('ask', 'D-1');
+  t.store.transaction((tx) => tx.commit([{ entity: 'ask', id: 'D-1', doc: { ...cur.doc } }], { actor: 'dispatcher', kind: 'seed' }));
+  assert.equal(t.record.read('ask', 'D-1').doc.state, 'answered', 'the raw record still says answered');
+  const r = consumeAsk(t.ctx, 'D-1');
+  assert.equal(r.ok, false);
+  assert.match(r.reason, /no trusted ask D-1/);
+  assert.equal(t.record.read('ask', 'D-1').doc.state, 'answered');
+});
+
 // ---- no module outside M2 imports writeDoc ----
 
-const IMPORT = /\b(?:import|export)\s*([^;]*?)\s*from\s*['"]([^'"]+)['"]|\bimport\s*\(\s*['"]([^'"]+)['"]\s*\)/g;
+// Static `import … from` / `export … from`, with any quote (a backtick is matched too, so a check never depends on it).
+const STATIC = /\b(?:import|export)\s*([^;]*?)\s*from\s*(['"`])([^'"`]+)\2/g;
+// A dynamic import or require whose argument is one plain string (no `${`), and every dynamic import or require.
+const CALL_LIT = /\b(?:import|require)\s*\(\s*(['"`])([^'"`$]+)\1\s*\)/g;
+const CALL_ANY = /\b(?:import|require)\s*\(/g;
+// In an M2 file: an export that hands writeDoc itself on (`export { writeDoc }`, `export { writeDoc as w }`,
+// `export default writeDoc`, `export const w = writeDoc`). A function that only calls it exports nothing of it.
+const EXPORTS_WRITEDOC = /\bexport\s*\{[^}]*\bwriteDoc\b[^}]*\}|\bexport\s+default\s+writeDoc\s*(?:[;\n]|$)|\bexport\s+(?:const|let|var)\s+[\w$]+\s*=\s*writeDoc\s*(?:[;\n]|$)/;
+const STAR_FROM = /\bexport\s*\*\s*(?:as\s+[\w$]+\s*)?from\s*(['"`])([^'"`]+)\1/g;
 
 function filesUnder(dir) {
   const out = [];
@@ -78,50 +117,96 @@ function filesUnder(dir) {
     if (e.name === 'node_modules' || e.name.startsWith('.')) continue;
     const p = join(dir, e.name);
     if (e.isDirectory()) out.push(...filesUnder(p));
-    else if (/\.m?js$/.test(e.name)) out.push(p);
+    else if (/\.[cm]?js$/.test(e.name)) out.push(p);
   }
   return out;
 }
 
-// Every file outside M2-approvals that reaches writeDoc: a named import or re-export of it, a namespace import or
-// `export *` of ask-store, or a dynamic import of ask-store (which can reach it).
-export function writeDocImporters(modulesRoot) {
-  const store = resolve(modulesRoot, 'M2-approvals', 'ask-store.mjs');
-  const m2 = resolve(modulesRoot, 'M2-approvals');
+// Where a specifier points: a relative path, an absolute path, or a file:// URL (a query or hash is dropped). A bare
+// package name points at no file of ours.
+function target(file, spec) {
+  const s = spec.replace(/[?#].*$/, '');
+  if (s.startsWith('file:')) { try { return fileURLToPath(s); } catch { return null; } }
+  if (s.startsWith('/')) return resolve(s);
+  if (s.startsWith('.')) return resolve(dirname(file), s);
+  return null;
+}
+
+// Every file under `orchestrate/` (L95, audit stack r3 Minor 8: not only modules/) that reaches writeDoc:
+//   outside M2: a named import or re-export of it, a namespace import or `export *` of ask-store, a dynamic import or
+//     require of ask-store, or, in a file that names ask-store, any dynamic import or require that isn't one plain
+//     string (a computed or template specifier could be ask-store);
+//   inside M2 (its own tests aside): a file that re-exports writeDoc or does `export *` from ask-store, since an
+//     outside module could then reach it through that file.
+export function writeDocImporters(orchRoot) {
+  const m2 = resolve(orchRoot, 'modules', 'M2-approvals');
+  const store = join(m2, 'ask-store.mjs');
   const found = [];
-  for (const f of filesUnder(modulesRoot)) {
-    if (f.startsWith(`${m2}/`)) continue;
+  for (const f of filesUnder(orchRoot)) {
+    if (f === store) continue;
     const text = readFileSync(f, 'utf8');
-    for (const m of text.matchAll(IMPORT)) {
-      const spec = m[2] ?? m[3];
-      if (!spec.startsWith('.') || resolve(dirname(f), spec) !== store) continue;
-      if (m[3] || /\bwriteDoc\b|\*/.test(m[1])) found.push(relative(modulesRoot, f));
+    const rel = relative(orchRoot, f);
+    if (f.startsWith(`${m2}/`)) {
+      if (/\.test\.mjs$/.test(f)) continue;
+      const star = [...text.matchAll(STAR_FROM)].some((m) => target(f, m[2]) === store);
+      if (star || EXPORTS_WRITEDOC.test(text)) found.push(rel);
+      continue;
     }
+    const hit = [...text.matchAll(STATIC)].some((m) => target(f, m[3]) === store && /\bwriteDoc\b|\*/.test(m[1]))
+      || [...text.matchAll(CALL_LIT)].some((m) => target(f, m[2]) === store)
+      || (text.includes('ask-store') && [...text.matchAll(CALL_ANY)].length > [...text.matchAll(CALL_LIT)].length);
+    if (hit) found.push(rel);
   }
   return [...new Set(found)];
 }
 
-test('no module outside M2 imports writeDoc (M6 may still read through askStore)', () => {
-  assert.deepEqual(writeDocImporters(MODULES), []);
+test('no module in orchestrate/ outside M2 reaches writeDoc, and no M2 file re-exports it (M6 may still read through askStore)', () => {
+  assert.deepEqual(writeDocImporters(ORCH), []);
 });
 
-test('planted: a module outside M2 that imports writeDoc is caught, in every way it could', () => {
+test('planted: every route to writeDoc is caught, from any folder of orchestrate/', () => {
   const t = env();
-  const root = join(t.base, 'modules');
-  mkdirSync(join(root, 'M2-approvals'), { recursive: true });
-  mkdirSync(join(root, 'M11-dispatcher', 'sub'), { recursive: true });
-  writeFileSync(join(root, 'M2-approvals', 'ask-store.mjs'), 'export const writeDoc = 1;\n');
-  writeFileSync(join(root, 'M2-approvals', 'go.mjs'), "import { writeDoc } from './ask-store.mjs';\n");
+  const root = join(t.base, 'orchestrate');
+  const m2 = join(root, 'modules', 'M2-approvals');
+  const store = join(m2, 'ask-store.mjs');
+  mkdirSync(m2, { recursive: true });
+  mkdirSync(join(root, 'modules', 'M11-dispatcher', 'sub'), { recursive: true });
+  mkdirSync(join(root, 'shared'), { recursive: true });
+  writeFileSync(store, 'export const writeDoc = 1;\nexport const askStore = 2;\n');
+  writeFileSync(join(m2, 'go.mjs'), "import { writeDoc } from './ask-store.mjs';\nexport const go = () => writeDoc;\n");
+  writeFileSync(join(m2, 'go.test.mjs'), "export { writeDoc } from './ask-store.mjs';\n"); // M2's own tests may
+  const m2cases = {
+    'relay.mjs': "export { writeDoc } from './ask-store.mjs';\n",
+    'relay2.mjs': "import { writeDoc } from './ask-store.mjs';\nexport { writeDoc as w };\n",
+    'starry.mjs': "export * from './ask-store.mjs';\n",
+    'dflt.mjs': "import { writeDoc } from './ask-store.mjs';\nexport default writeDoc;\n",
+    'alias.mjs': "import { writeDoc } from './ask-store.mjs';\nexport const w = writeDoc;\n",
+  };
+  for (const [name, text] of Object.entries(m2cases)) writeFileSync(join(m2, name), text);
   const cases = {
     'named.mjs': "import { askStore, writeDoc } from '../M2-approvals/ask-store.mjs';\n",
     'renamed.mjs': "import {\n  writeDoc as w,\n} from '../M2-approvals/ask-store.mjs';\n",
     'star.mjs': "import * as store from '../M2-approvals/ask-store.mjs';\n",
     'reexport.mjs': "export { writeDoc } from '../M2-approvals/ask-store.mjs';\n",
     'dynamic.mjs': "const s = await import('../M2-approvals/ask-store.mjs');\n",
+    'template.mjs': "const s = await import(`../M2-approvals/ask-store.mjs`);\n",
+    'computed.mjs': "const d = '../M2-approvals/'; const s = await import(d + 'ask-store.mjs');\n",
+    'interp.mjs': "const n = 'ask-store'; const s = await import(`../M2-approvals/${n}.mjs`);\n",
+    'absolute.mjs': `import { writeDoc } from '${store}';\n`,
+    'fileurl.mjs': `import { writeDoc } from '${pathToFileURL(store).href}?v=1';\n`,
+    'required.mjs': "const { writeDoc } = require('../M2-approvals/ask-store.mjs');\n",
     'sub/deep.mjs': "import { writeDoc } from '../../M2-approvals/ask-store.mjs';\n",
-    'fine.mjs': "import { askStore, consumeAsk } from '../M2-approvals/ask-store.mjs';\n",
+    'fine.mjs': "import { askStore, consumeAsk } from '../M2-approvals/ask-store.mjs';\nconst x = await import('./other.mjs');\n",
+    'other.mjs': "const p = 'x'; const y = await import(p);\n", // names no ask-store: not ours to judge
   };
-  for (const [name, text] of Object.entries(cases)) writeFileSync(join(root, 'M11-dispatcher', name), text);
+  for (const [name, text] of Object.entries(cases)) writeFileSync(join(root, 'modules', 'M11-dispatcher', name), text);
+  writeFileSync(join(root, 'shared', 'outside.mjs'), "import { writeDoc } from '../modules/M2-approvals/ask-store.mjs';\n");
   const got = writeDocImporters(root).sort();
-  assert.deepEqual(got, ['named', 'renamed', 'star', 'reexport', 'dynamic', 'sub/deep'].map((n) => `M11-dispatcher/${n}.mjs`).sort());
+  const want = [
+    ...['named', 'renamed', 'star', 'reexport', 'dynamic', 'template', 'computed', 'interp', 'absolute', 'fileurl', 'required', 'sub/deep']
+      .map((n) => `modules/M11-dispatcher/${n}.mjs`),
+    ...Object.keys(m2cases).map((n) => `modules/M2-approvals/${n}`),
+    'shared/outside.mjs',
+  ].sort();
+  assert.deepEqual(got, want);
 });
