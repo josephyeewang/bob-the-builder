@@ -1,6 +1,6 @@
 // Setup part 4: the watch-only week's two Mac-side pieces (R-0b-122, lane 4 round 2).
 //
-//   watch-rules --rules-source <file>   root puts the rules draft in place: the file must hash to the config's `watch.rulesSha256`
+//   watch-rules --rules-source <full path>   root puts the rules draft in place: the file must hash to the config's `watch.rulesSha256`
 //                                       (written by root in the config, so the owner's user cannot pick other rules); the copy
 //                                       is root's 0644 in orchestrate's watch folder. The runner re-checks the hash every pass.
 //   check-watch-rules                   the copy is there, root's 0644, no access list, and hashes to the config's value
@@ -13,7 +13,7 @@
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import { ABS, LABEL, arr, plist, str } from '../modules/M4-workshop/launcher/review-daemons.mjs';
-import { NODE, aclProblem, currentCopy } from '../modules/M4-workshop/launcher/install-check.mjs';
+import { NODE, aclProblem } from '../modules/M4-workshop/launcher/install-check.mjs';
 import { homeOf, watchRulesPath } from './layout.mjs';
 import { installPaths } from './install.mjs';
 import { readUser } from './users-folders.mjs';
@@ -21,8 +21,6 @@ import { tokenPath } from './extras.mjs';
 
 export const WATCH_RUN = 'modules/M6-merge-gate/watch-run.mjs';
 export const WATCH_EVERY_S = 3600;
-/** Where the rules draft sits in the installed copy (the repository's orchestrate/ folder). The lead commits it; the setup never makes it. */
-export const WATCH_RULES_IN_COPY = 'watch-rules.draft.yaml';
 export const REPO_RE = /^[A-Za-z0-9_-][A-Za-z0-9_.-]*\/[A-Za-z0-9_-][A-Za-z0-9_.-]*$/;
 const op = (text, run) => ({ text, run });
 const sha = (text) => createHash('sha256').update(Buffer.from(text, 'utf8')).digest('hex');
@@ -48,44 +46,26 @@ export function watchPlist(io, cfg) {
   ]);
 }
 
-/**
- * The rules draft that came with the installed copy, read from the copy itself (root's, written by no one else), never from a
- * home folder the owner can change. Reads only. → { text } or { problem }.
- */
-export function copyRules(io, cfg) {
-  const P = installPaths(cfg);
-  const cur = currentCopy(io.at(P.installRoot), { owner: io.rootUid });
-  if (cur.missing || cur.problem) return { problem: `the installed copy is not usable yet (${cur.problem ?? 'missing'}); run install first` };
-  const pre = io.at('/').replace(/\/$/, '');
-  const logical = pre && cur.real.startsWith(pre) ? cur.real.slice(pre.length) : cur.real;
-  const file = join(logical, WATCH_RULES_IN_COPY);
-  let st; try { st = io.lstat(file); } catch { return { problem: `the installed copy has no ${WATCH_RULES_IN_COPY} (the rules draft has to be committed to main and installed first)` }; }
-  if (st.isSymbolicLink() || !st.isFile()) return { problem: `${file} is not a plain file` };
-  if (st.uid !== io.rootUid || (st.mode & 0o022) !== 0) return { problem: `${file} is not root's, or others can write it` };
-  const text = io.readText(file);
-  if (typeof text !== 'string' || text.length === 0 || text.length > 200_000) return { problem: `${file} is empty or too large` };
+/** A rules file named on the command line: a full path, a plain non-empty file that can be read. → { text } or { problem }. Fails closed. */
+function readRules(source, readSource) {
+  if (typeof source !== 'string' || !source.startsWith('/')) return { problem: '--rules-source must be the full path of the rules file' };
+  let text; try { text = readSource(source); } catch (e) { return { problem: `the rules file could not be read (${e?.code ?? 'error'})` }; }
+  if (typeof text !== 'string' || text.length === 0 || text.length > 200_000) return { problem: 'the rules file is empty or too large' };
   return { text };
 }
 
-/** The one line to add to the root config: the repository and the fingerprint of the rules draft in the installed copy. Reads only. */
-export function watchConfigLine(io, cfg, { repo }) {
+/** The one line to add to the root config: the repository and the fingerprint of the rules file named. Reads only. */
+export function watchConfigLine(cfg, { repo, source, readSource }) {
   if (typeof repo !== 'string' || !REPO_RE.test(repo)) return { problem: '--repo must be owner/name' };
-  const c = copyRules(io, cfg); if (c.problem) return c;
-  return { line: `  "watch": { "repo": ${JSON.stringify(repo)}, "rulesSha256": "${sha(c.text)}" },` };
+  const r = readRules(source, readSource); if (r.problem) return r;
+  return { line: `  "watch": { "repo": ${JSON.stringify(repo)}, "rulesSha256": "${sha(r.text)}" },` };
 }
 
 /** Root puts the rules draft in place. → { ops, problems }. `readSource(path)` reads a file outside the prefix (a port for tests). */
 export function planWatchRules(io, cfg, { source, readSource }) {
   if (!cfg.watch) return { ops: [], problems: ['the config has no "watch" entry (repo and rulesSha256); add it first'] };
-  let text;
-  if (source === null || source === undefined) {   // no file named: the draft that came with the installed copy
-    const c = copyRules(io, cfg); if (c.problem) return { ops: [], problems: [c.problem] };
-    text = c.text;
-  } else {
-    if (typeof source !== 'string' || !source.startsWith('/')) return { ops: [], problems: ['--rules-source must be the full path of the rules file'] };
-    try { text = readSource(source); } catch (e) { return { ops: [], problems: [`the rules file could not be read (${e?.code ?? 'error'})`] }; }
-  }
-  if (typeof text !== 'string' || text.length === 0 || text.length > 200_000) return { ops: [], problems: ['the rules file is empty or too large'] };
+  const r = readRules(source, readSource); if (r.problem) return { ops: [], problems: [r.problem] };
+  const text = r.text;
   const got = sha(text);
   if (got !== cfg.watch.rulesSha256) return { ops: [], problems: [`the rules file hashes to ${short(got)}…, but the config (which only root can change) says ${short(cfg.watch.rulesSha256)}…; nothing was changed`] };
   const dir = join(cfg.base, 'watch'); const dest = watchRulesPath(cfg);
