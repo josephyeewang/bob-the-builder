@@ -2,7 +2,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { TIER1_BAR, canonicalJson, planFingerprint } from './plan-fingerprint.mjs';
+import { TIER1_BAR, canonicalJson, planFingerprint, cleanPath, pathKey } from './plan-fingerprint.mjs';
 
 const T2 = { product: 'sample-app', card_id: 'C-1', tier: 2, files: ['src/a.mjs'], done_when: 'tests pass' };
 const T1 = { ...T2, tier: 1, plan_sha256: 'a'.repeat(64), main_commit: 'b'.repeat(40) };
@@ -63,4 +63,45 @@ test('canonicalJson sorts keys at every level and refuses what JSON can\'t say',
   assert.throws(() => canonicalJson(NaN), /finite/);
   assert.throws(() => canonicalJson(undefined), /cannot fingerprint/);
   assert.throws(() => canonicalJson(() => 1), /cannot fingerprint/);
+});
+
+// Every code point in each named range, one by one, at the start, the middle and the end of a path (L95 Minor 4).
+const FORMAT_RANGES = [
+  ['zero-width spaces, joiners and marks', 0x200b, 0x200f],
+  ['direction embeddings and overrides', 0x202a, 0x202e],
+  ['direction isolates', 0x2066, 0x2069],
+  ['byte-order mark', 0xfeff, 0xfeff],
+];
+for (const [name, lo, hi] of FORMAT_RANGES) {
+  test(`L95 Minor 4: a path holding a Unicode format character is refused: ${name}`, () => {
+    for (let c = lo; c <= hi; c++) {
+      const ch = String.fromCodePoint(c);
+      for (const p of [`${ch}src/a.mjs`, `src/a${ch}b.mjs`, `src/a.mjs${ch}`]) {
+        assert.equal(cleanPath(p), null, `U+${c.toString(16).toUpperCase()} in ${JSON.stringify(p)}`);
+        assert.equal(pathKey(p), null);
+        assert.match(fp({ files: [p] }).reason ?? '', /is not one plain path/);
+      }
+    }
+  });
+}
+
+test('L95 Minor 4: the rest of \\p{Cf} is refused too, and plain non-ASCII names still pass', () => {
+  for (const c of [0x00ad, 0x061c, 0x180e, 0x2060, 0xfff9, 0xe0001]) assert.equal(cleanPath(`a${String.fromCodePoint(c)}b.mjs`), null, c.toString(16));
+  // The reported case: an override makes "a" + U+202E + "b.mjs" read as a different name.
+  assert.equal(cleanPath('a\u202eb.mjs'), null);
+  for (const p of ['src/café.mjs', 'docs/日本.md', 'src/straße.js', 'src/a-b_c.mjs']) assert.equal(cleanPath(p), p);
+});
+
+test('L93 m-1: pathKey is the cleaned path fully case-folded, in NFC, so one file has one key', () => {
+  for (const [a, b] of [['straße.js', 'STRASSE.js'], ['ς.js', 'σ.js'], ['ς.js', 'Σ.js'], ['src/A.js', './src/a.js'],
+    ['ﬁle.js', 'FILE.js'], ['src/café.js', 'SRC/CAFÉ.js'], ['src/café.js', 'src/cafe\u0301.js'], ['K.js', '\u212a.js']]) {
+    assert.ok(pathKey(a) !== null, a);
+    assert.equal(pathKey(a), pathKey(b), `${a} / ${b}`);
+  }
+  // NFC after the fold: the key is always in NFC.
+  for (const p of ['src/ǅ.js', 'src/İ.js', 'src/ΐ.js']) assert.equal(pathKey(p), pathKey(p).normalize('NFC'), p);
+  assert.notEqual(pathKey('src/a.js'), pathKey('src/b.js'));
+  for (const bad of ['', '/abs', 'src/*', 'a\u200bb.js', 7]) assert.equal(pathKey(bad), null, String(bad));
+  // The fingerprint itself keeps case: pathKey is only for "is it the same file".
+  assert.notEqual(fp({ files: ['straße.js'] }).sha256, fp({ files: ['STRASSE.js'] }).sha256);
 });
