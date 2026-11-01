@@ -138,7 +138,9 @@ test('L131: across products a Dispatcher-wide key is the smallest value (dead_qu
 // gave a NaN limit, so "open past the limit" was never true and an interrupted merge was never refused (4 M6 gate
 // tests red after the #68 merge-forward). Here the limit comes from the real rules text and is a number.
 test("L134 M-1: a merge open past timeouts.merging_open_max_min is past its limit when the rules come in as text", () => {
-  const withOpen = (v) => FIXTURE.replace(/^timeouts:\n/m, `timeouts:\n  merging_open_max_min: ${v}\n`);
+  // The fixture holds the key since L148; each case replaces its value.
+  const withOpen = (v) => FIXTURE.replace(/^  merging_open_max_min: 10$/m, `  merging_open_max_min: ${v}`);
+  assert.notEqual(withOpen("45"), FIXTURE, "the fixture holds timeouts.merging_open_max_min");
   const rules = rulesFromText(withOpen("45"));
   const limit = minutes(rules, "timeouts.merging_open_max_min", o);
   assert.equal(limit, 45 * 60_000);
