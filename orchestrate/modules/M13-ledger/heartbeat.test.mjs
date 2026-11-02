@@ -495,3 +495,75 @@ for (const how of ['false', 'throw']) {
     assert.equal(issuesFor(h, /red: front-door/).length, 1, 'opened on the next pass');
   });
 }
+
+// ---- P11 (L166): a notice went out, its account save was refused, and the Mini switched back before the retry ----
+
+const toldLogin = (h) => h.writer.get('heartbeat-product-1')?.login_told;
+
+test('P11: A→B told but its save refused, then back to A within 10 min: the switch back is told, once', async () => {
+  let refuse = false;
+  const raise = sink();
+  const h = lossSetup(raise, (id) => refuse && /^heartbeat-account-/.test(id));
+  await h.pass();
+  h.world.login = 'account B'; refuse = true; h.tick(); await h.pass();
+  assert.equal(savedLogin(h), 'account A', 'the save was refused');
+  assert.equal(toldLogin(h), 'account B', 'the owner was told B');
+  refuse = false; h.world.login = 'account A'; h.tick(); await h.pass();
+  assert.deepEqual(changed(raise), ['account B', 'account A'], 'the switch back is its own notice');
+  assert.match(raise.texts.at(-1).body, /signed in as account A \(was account B\)/);
+  h.tick(); await h.pass(); h.tick(); await h.pass();
+  assert.deepEqual(changed(raise), ['account B', 'account A'], 'and only once');
+  assert.deepEqual([savedLogin(h), toldLogin(h)], ['account A', 'account A']);
+});
+
+test('P11: the switch-back notice is lost (raise answers false): the next pass tells it again under the same key', async () => {
+  let refuse = false; let lose = false;
+  const raise = sink((a) => (lose && /account-changed-/.test(a.key) ? false : 'opened'));
+  const h = lossSetup(raise, (id) => refuse && /^heartbeat-account-/.test(id));
+  await h.pass();
+  h.world.login = 'account B'; refuse = true; h.tick(); await h.pass();
+  refuse = false; lose = true; h.world.login = 'account A'; h.tick(); await h.pass();
+  assert.equal(toldLogin(h), 'account B', 'a lost notice leaves what the owner heard');
+  lose = false; h.tick(); await h.pass();
+  const keys = raise.texts.filter((a) => /account-changed-/.test(a.key)).map((a) => a.key);
+  assert.equal(keys.length, 3);
+  assert.equal(keys[1], keys[2], 'the resend is the same notice');
+  assert.equal(toldLogin(h), 'account A');
+  h.tick(); await h.pass();
+  assert.equal(raise.texts.filter((a) => /account-changed-/.test(a.key)).length, 3);
+});
+
+test('P11: a planned A→B whose push went out but whose save was refused, then back to A: one alert (A was not planned)', async () => {
+  let refuse = false;
+  const raise = sink();
+  const h = lossSetup(raise, (id) => refuse && /^heartbeat-account-/.test(id));
+  h.plan({ to: 'account B', at: '2026-11-03' });
+  await h.pass();
+  h.world.login = 'account B'; refuse = true; h.tick(); await h.pass();
+  refuse = false; h.world.login = 'account A'; h.tick(); await h.pass();
+  assert.deepEqual(changed(raise), ['account A']);
+  assert.match(raise.texts.at(-1).body, /\(was account B\)/);
+});
+
+test('P11: a B the owner never heard of (its raise answered false), then back to A: nothing to tell', async () => {
+  const raise = sink((a) => (/account-changed-/.test(a.key) ? false : 'opened'));
+  const h = lossSetup(raise);
+  await h.pass();
+  h.world.login = 'account B'; h.tick(); await h.pass();
+  assert.equal(toldLogin(h), 'account A');
+  h.world.login = 'account A'; h.tick(); await h.pass(); h.tick(); await h.pass();
+  assert.deepEqual(changed(raise), ['account B'], 'only the lost B, no A');
+});
+
+test('P11: A→B told, save refused, signed out, then A: the owner still hears it is A again, through the real alerts', async () => {
+  const { STATUS_FACT } = await import('./heartbeat.mjs');
+  const h = setup({ wrap: (w) => ({ get: (id) => w.get(id), put: (id, doc) => (/^heartbeat-account-/.test(id) && doc.login === 'account B' ? { ok: false } : w.put(id, doc)) }) });
+  await h.pass();
+  h.world.account = { signedIn: true, login: 'account B' }; h.tick(10); await h.pass();
+  h.world.account = { signedIn: false }; h.tick(10); await h.pass();
+  assert.equal(h.writer.get(STATUS_FACT('product 1')).login_told, 'account B', 'kept while signed out');
+  h.world.account = { signedIn: true, login: 'account A' }; h.tick(10); await h.pass();
+  const changes = alertIssues(h.gh).filter((i) => /account changed/.test(i.title));
+  assert.equal(changes.length, 2, changes.map((i) => i.body).join(' / '));
+  assert.match(changes[1].body, /signed in as account A \(was account B\)/);
+});
