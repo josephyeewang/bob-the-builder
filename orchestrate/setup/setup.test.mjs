@@ -482,7 +482,7 @@ test('PLANT P1: /Library writable by others → the run stops before ANY step: n
   const mac = fakeMac(); chmodSync(mac.at('/Library'), 0o777);
   const r = run(mac, ['users-folders']);
   // Root's own config sits in /Library, so the config is refused first (exit 2); the plan's own chain check is tested on its own below.
-  assert.equal(r.code, 2, r.text); assert.match(r.text, /folder the config is in is not root's alone/);
+  assert.equal(r.code, 2, r.text); assert.match(r.text, /folder root's setup config is in is not root's alone/);
   assert.deepEqual(mac.log, [], 'a root step ran'); assert.equal(mac.users.size, 1); assert.equal(existsSync(mac.at(cfg.base)), false);
   const p = plan(mac, cfg); assert.deepEqual(p.ops, []); assert.match(p.problems.join(), /folders above \/Library\/orch-test are not safe for root to work in/);
 });

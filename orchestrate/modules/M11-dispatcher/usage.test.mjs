@@ -147,7 +147,7 @@ test('a missing threshold key refuses rather than guesses', () => {
   assert.throws(() => bands({ rules: rulesWith({ [K.redH5]: 'eighty' }), reading: { ok: false }, now: T0 }), MissingKey);
 });
 
-test('the usage-band fact keeps both values and the unknown start time', () => {
+test('the band-usage fact keeps both values and the unknown start time', () => {
   const rec = recWith();
   const g = pace(0.5);
   assert.equal(recordBands({ rec, b: g, now: T0, account: 'acct-a' }).ok, true);

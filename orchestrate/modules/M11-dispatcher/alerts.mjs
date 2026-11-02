@@ -1,6 +1,6 @@
 // The one outbox for Joe's alerts (LEAD-CALLS L47; audit 0b-6 r6 MAT-A, MAT-B, MAT-C).
 //
-// Every alert site only drops an entry in a saved queue (the fact `alert-unsent`): `outbox(rec, now)`
+// Every alert site only drops an entry in a saved queue (the fact `unsent-alerts`): `outbox(rec, now)`
 // gives the `alert(text)` every step gets, and it never sends, waits or throws. One sender,
 // `sendAlerts`, delivers the queue at the end of each pass, each send with a short deadline. An entry
 // leaves the queue only after its send went through; a send that fails, answers false or does not
@@ -15,7 +15,7 @@ import { randomUUID } from 'node:crypto';
 const iso = (ms) => new Date(ms).toISOString();
 const putFact = (rec, id, doc, kind) => rec.write({ actor: 'dispatcher', entity: 'fact', id, expectRev: rec.read('fact', id)?.rev ?? 0, doc, kind });
 
-export const ALERT_QUEUE_FACT = 'alert-unsent';
+export const ALERT_QUEUE_FACT = 'unsent-alerts';
 export const ALERT_QUEUE_MAX = 50;
 // The cap on entries not yet tried (a Minor from the review of the first Dispatcher build): while the port is
 // down each round tries one entry, so without it the untried grow without limit. Well above a burst, so one
@@ -86,7 +86,8 @@ const withDrops = (rec, d, entries, dropped) => ({ ...d, entries, dropped: (d.dr
  * is delivered. A second alert for the same cause, or with the same text, replaces the queued one in place.
  * Of the entries that waited through a failed send, the queue keeps ALERT_QUEUE_MAX, and of those not yet tried
  * ALERT_UNTRIED_MAX (capQueue says which go); every one dropped is counted in the next text sent.
- * Returns the entry's id, or null when the record refused it.
+ * Returns the entry's id, or null when the record refused it or the cap dropped this very entry (L130 m18: the
+ * drop is still counted, but the caller is not told it was queued).
  */
 export function queueAlert(rec, text, { now, mark = null } = {}) {
   const d = rec.read('fact', ALERT_QUEUE_FACT)?.doc ?? {};
@@ -97,7 +98,8 @@ export function queueAlert(rec, text, { now, mark = null } = {}) {
   const i = all.findIndex((e) => (key ? e.key === key : !e.key && e.text === entry.text));
   if (i >= 0) all[i] = entry; else all.push(entry);
   const { entries, dropped } = capQueue(rec, all);
-  return putFact(rec, ALERT_QUEUE_FACT, { ...withDrops(rec, d, entries, dropped), next }, 'alert_queued').ok === true ? entry.id : null;
+  const kept = putFact(rec, ALERT_QUEUE_FACT, { ...withDrops(rec, d, entries, dropped), next }, 'alert_queued').ok === true;
+  return kept && !dropped.some((e) => e.id === entry.id) ? entry.id : null;
 }
 
 /**
@@ -116,6 +118,11 @@ export function dropCause(rec, fact) {
   } catch { return false; }
 }
 
+/** Whether an alert whose mark names `fact` waits in the queue (a re-ask that would only replace it can be skipped). */
+export function isQueued(rec, fact) {
+  try { return entriesOf(rec.read('fact', ALERT_QUEUE_FACT)?.doc).some((e) => e.mark?.fact === fact); } catch { return false; }
+}
+
 /** The `alert(text, { mark })` every step gets: it queues and returns whether it did; it never sends, waits or throws. */
 export function outbox(rec, now) {
   const alert = (text, { mark = null } = {}) => { try { return queueAlert(rec, text, { now, mark }) !== null; } catch { return false; } };
@@ -129,6 +136,21 @@ export function outbox(rec, now) {
  * again queues the same entry, not a second one, and an entry dropped at a cap is counted (L52). Every "told" write in this folder sits in a
  * `tellThen` call: the sweep in alert-sites.test.mjs checks it.
  */
+/**
+ * The outbox `alert` for a module whose alerts are objects (M6 settleMerge: { type, note, reason, merge }), as text.
+ * Only ever wraps the step's own outbox `alert` (the sweep in alert-sites.test.mjs allows `textAlerts(alert)` alone).
+ */
+export const textAlerts = (alert, who = 'merge gate') => (e) => alert(alertText(e, who));
+/**
+ * The `alert` for an M6 call whose alerts the step sends itself once it has M6's answer (L127): each is kept in `into`
+ * and nothing is queued, so the step can send them as they are, or as the one alert a told note is the mark of. It
+ * never sends: the sweep in alert-sites.test.mjs allows `heldAlerts(` beside `textAlerts(alert)`.
+ */
+export const heldAlerts = (into) => (e) => { into.push(e); return true; };
+/** An alert object (or text) as the text the outbox sends: textAlerts' words, for a step that sends it itself. */
+export const alertText = (e, who = 'merge gate') => (typeof e === 'string' ? e
+  : `${who}: ${e?.note ?? e?.reason ?? e?.type ?? 'no detail'}${e?.merge ? ` (merge ${e.merge})` : ''}`);
+
 export function tellThen(alert, text, mark) {
   return alert(text, { mark });
 }

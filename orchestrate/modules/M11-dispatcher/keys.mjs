@@ -37,12 +37,16 @@ export const KEYS = Object.freeze({
   cancelGraceMin: 'timeouts.cancel_grace_min',
   parkWaitMin: 'timeouts.park_wait_min',
   deadQuietMin: 'timeouts.dead_quiet_min',
-  claimedNoSessionMin: 'timeouts.claimed_no_session_min',
   checkingMaxMin: 'timeouts.checking_max_min',
+  // how long an interrupted merge's PR may still show open before it is refused-interrupted (L85 M-1 a)
+  mergingOpenMaxMin: 'timeouts.merging_open_max_min',
   reportingMaxMin: 'timeouts.reporting_max_min',
   inReviewNoReviewerMin: 'timeouts.in_review_no_reviewer_min',
   frontDoorStuckMin: 'timeouts.front_door_stuck_min',
   usageUnknownMaxMin: 'timeouts.usage_unknown_max_min',
+  // claims (L72): the quiet time before a dead owner's claim is broken (M9 breakIfDead reads it; read here so a missing
+  // value is told). A claim whose session never started lapses at M9's claims.unlaunched_min, which has a default.
+  claimsStuckMin: 'claims.stuck_min',
   // outage (review M9)
   outageMinDead: 'outage.min_dead',
   outageShare: 'outage.share',
@@ -57,7 +61,7 @@ export const KEYS = Object.freeze({
 // them through `fakeRules({ values })`.
 export const NEW_KEYS = Object.freeze([
   KEYS.paceMinShare, KEYS.shakedown, KEYS.amberEditingPerProduct, KEYS.amberEditingPerMac,
-  KEYS.cancelGraceMin, KEYS.parkWaitMin, KEYS.deadQuietMin, KEYS.claimedNoSessionMin, KEYS.checkingMaxMin,
+  KEYS.cancelGraceMin, KEYS.parkWaitMin, KEYS.deadQuietMin, KEYS.checkingMaxMin, KEYS.mergingOpenMaxMin,
   KEYS.reportingMaxMin, KEYS.inReviewNoReviewerMin, KEYS.frontDoorStuckMin, KEYS.usageUnknownMaxMin, KEYS.outageMinDead, KEYS.outageShare,
 ]);
 
@@ -66,7 +70,7 @@ export const NEW_KEYS = Object.freeze([
 const DEFAULTS = Object.freeze({ [KEYS.paceMinShare]: 0.143, [KEYS.shakedown]: true });
 
 export class MissingKey extends Error {
-  constructor(key) { super(`the rules have no value for ${key}`); this.key = key; }
+  constructor(key, why) { super(why ? `the rules' ${key} ${why}` : `the rules have no value for ${key}`); this.key = key; }
 }
 
 // The keys whose value may have a fraction: shares, paces and percentages. They are read with dec(); every other
@@ -76,6 +80,11 @@ export const DECIMAL_KEYS = Object.freeze([
   KEYS.redPace, KEYS.redWeek, KEYS.redH5, KEYS.amberPace, KEYS.amberWeek, KEYS.amberH5, KEYS.ownBuildingShare,
   KEYS.reservePct, KEYS.noTier1ProdAbove, KEYS.paceMinShare, KEYS.outageShare,
 ]);
+
+// The keys that are a wait before something is given up on: 0 would give up at once (stuck_min 0 passes the fit check
+// but the Record refuses every break; a merging limit of 0 calls every open merge interrupted), so they must be at
+// least 1, and anything less reads as missing (L164 m1).
+export const AT_LEAST_ONE = Object.freeze([KEYS.claimsStuckMin, KEYS.mergingOpenMaxMin]);
 
 /**
  * A value from the rules, typed, or throws MissingKey (L123). Numbers go through rules.num() or rules.dec() and the
@@ -92,8 +101,11 @@ export function need(rules, key, { product, type = 'number' } = {}) {
   else if (type === 'list') v = Array.isArray(raw) && raw.every((x) => typeof x === 'string') ? raw : undefined;
   else if (type === 'object') v = raw !== null && typeof raw === 'object' && !Array.isArray(raw) ? raw : undefined;
   if (v === undefined) throw new MissingKey(key);
+  if (AT_LEAST_ONE.includes(key) && !(v >= 1)) throw new MissingKey(key, `is ${v}; it must be at least 1`);
   return v;
 }
 
 /** Minutes from the rules (a whole number), as milliseconds. */
 export const minutes = (rules, key, opts) => need(rules, key, opts) * 60_000;
+/** How a missing per-product value is listed for Joe: the key, and the product it is missing for (L116 c1). */
+export const missingFor = (key, product) => (product ? `${key} for ${product}` : key);

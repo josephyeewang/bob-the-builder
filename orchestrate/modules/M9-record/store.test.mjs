@@ -19,7 +19,7 @@ test('folders are 755 and files 644 whatever the umask (M-7 a)', () => {
     const env = setup({ prefix: 'm9-store-' });
     seed(env, 'card', 'C-1', card());
     for (const d of ['', 'docs', 'tmp', 'quarantine', 'docs/card']) assert.equal(mode(join(env.root, d)), 0o755, d || 'root');
-    for (const f of ['diary.jsonl', 'refusals.jsonl', 'outbox-seen.jsonl', 'docs/card/C-1.json']) assert.equal(mode(join(env.root, f)), 0o644, f);
+    for (const f of ['diary.jsonl', 'refusals.jsonl', 'outbox-seen.jsonl', 'unsent-alerts.jsonl', 'docs/card/C-1.json']) assert.equal(mode(join(env.root, f)), 0o644, f);
     // Every level the store makes is 755, not only the last (0b-2 audit MIN-6).
     openStore({ root: join(env.base, 'a', 'b', 'store'), ownerUid: UID });
     for (const d of ['a', 'a/b', 'a/b/store']) assert.equal(mode(join(env.base, d)), 0o755, d);
@@ -296,8 +296,8 @@ const reopen = (env, alerts = []) => openRecord({ root: env.root, product: PRODU
 test('a link, FIFO or wrong kind of thing in place of any store name stops the store with an alert naming it, touching nothing outside (round 9 M1-M4, m1-m3)', { timeout: 60000 }, () => {
   const cases = [
     ['docs', 'link-dir'], ['tmp', 'link-dir'], ['quarantine', 'link-dir'],
-    ['diary.jsonl', 'link-file'], ['refusals.jsonl', 'link-file'], ['outbox-seen.jsonl', 'link-file'],
-    ['diary.jsonl', 'fifo'], ['outbox-seen.jsonl', 'fifo'], ['refusals.jsonl', 'fifo'], ['lock', 'fifo'],
+    ['diary.jsonl', 'link-file'], ['refusals.jsonl', 'link-file'], ['outbox-seen.jsonl', 'link-file'], ['unsent-alerts.jsonl', 'link-file'],
+    ['diary.jsonl', 'fifo'], ['outbox-seen.jsonl', 'fifo'], ['refusals.jsonl', 'fifo'], ['unsent-alerts.jsonl', 'fifo'], ['lock', 'fifo'],
     ['diary.jsonl', 'folder'], ['lock', 'folder'], ['tmp', 'file'],
   ];
   for (const [name, how] of cases) {
@@ -367,7 +367,7 @@ test('a read never goes through a linked diary, even one identical to the real o
 
 // ---- 0b-2 audit round 10 ----
 test('a store file with a second name (a hard link) stops the store; the other file is not changed (round 10 M1)', () => {
-  for (const name of ['diary.jsonl', 'refusals.jsonl', 'outbox-seen.jsonl']) {
+  for (const name of ['diary.jsonl', 'refusals.jsonl', 'outbox-seen.jsonl', 'unsent-alerts.jsonl']) {
     const env = setup({ prefix: 'm9-store-' });
     seed(env, 'card', 'C-0', card());
     const out = outsideDir(env, `hl-${name.replace('.', '_')}`);

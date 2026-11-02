@@ -4,9 +4,9 @@
 // KEYS.x, the rules reached directly or through a path ending in rules (#68 reads the merge time limit in gate.mjs as
 // minutes(ctx.rules, KEYS.x, #77 r6 MAT-1). A need( or minutes( call it can't name (also `need (`, `need?.(`, `x.need(`,
 // `need.call(`) fails as unreadable; comments are not read (L165 m2); the helper's header says what a text reader
-// can't see (an aliased import, the reader passed as a value, a comma call). It runs over every M6 source file but the generated checker bundle, whose code is each source module's own,
-// tested where it lives. Every rules key read must be listed, every listed key must be read, and a read whose key
-// can't be named fails.
+// can't see (an aliased import, the reader passed as a value, a comma call). It runs over every M6 source file but
+// the generated checker bundle, whose code is each source module's own, tested where it lives. Every rules key read
+// must be listed, every listed key must be read, and a read whose key can't be named fails.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, readdirSync } from 'node:fs';
@@ -98,4 +98,15 @@ test('the reader catches a new read in any M6 file, in every form, and a key it 
   assert.equal(listed(['effect_paths'], 'effect_paths.new_field'), false);
   assert.equal(listed(['timeouts'], 'timeouts.merging_open_max_min'), false, '#77 r6 m-2: timeouts is not the go-free map');
   assert.equal(listed([GO_FREE_KEY], `${GO_FREE_KEY}.exact_reverse`), true);
+});
+
+// L164 m1: the merging limit, when set, is read as the gate reads it (M11 need): whole minutes, at least 1.
+test('L164 m1: timeouts.merging_open_max_min, when set, must be whole minutes, at least 1; missing is fine', async () => {
+  const { policyProblems } = await import('./required-keys.mjs');
+  const { fakeRules } = await import('../../shared/rules.mjs');
+  const P = 'sample-app';
+  const key = 'timeouts.merging_open_max_min';
+  const line = `M6: ${key}, when set, must be a whole number of minutes, at least 1`;
+  for (const bad of [0, '0', 'soon', -2, 1.5]) assert.ok(policyProblems(fakeRules({ values: { [key]: bad } }), P).includes(line), `${bad}`);
+  for (const good of [1, 15, '15', undefined]) assert.ok(!policyProblems(fakeRules({ values: good === undefined ? {} : { [key]: good } }), P).includes(line), `${good}`);
 });

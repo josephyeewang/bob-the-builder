@@ -55,7 +55,7 @@ test('PLANT NEW-1 group-writable config → refused, zero steps (caught by: the 
 test('PLANT NEW-1 config in a folder others can write → refused (caught by: the folder chain check)', () => {
   const mac = fakeMac(); putConfig(mac); chmodSync(mac.at('/Library'), 0o777);
   const r = go(mac, ['users-folders']);
-  assert.equal(r.code, 2, r.text); assert.match(r.text, /folder the config is in is not root's alone/); noRootStep(mac);
+  assert.equal(r.code, 2, r.text); assert.match(r.text, /folder root's setup config is in is not root's alone/); noRootStep(mac);
 });
 
 test('PLANT NEW-1 no config at the fixed place → refused with a plain reason; a config in a home folder is never read as root', () => {
@@ -227,6 +227,20 @@ test('m7: the real io is wired to the real checks (secure goes through secureFol
   const st = (uid, mode) => ({ uid, mode, isSymbolicLink: () => false });
   const lstat = (p) => (p === '/usr/local/bin/node' ? st(0, 0o100775) : st(0, 0o40755));
   assert.match(nodeProblemOf('/usr/local/bin/node', { lstat, realpath: (p) => p }), /written by others/);
+});
+
+test('n2: the real io reads the fixed config strictly and its mkdir refuses a folder that already exists (plants C10, B16)', { skip: process.getuid?.() === 0 }, () => {
+  const dir = tempDir('orch-setup-io2-');
+  const io = realIo({ prefix: dir });
+  writeFileSync(join(dir, 'cfg.json'), '{"base":"/x"}', { mode: 0o644 });
+  // strict (the fixed place): a file this user owns is NOT root's → refused. A non-strict read (--config, no sudo) takes it.
+  // A realIo that read strict paths non-strictly (C10) would accept it, and this fails.
+  assert.throws(() => io.readConfig('/cfg.json', { strict: true }), /root|owner|owned/i);
+  assert.match(String(io.readConfig(join(dir, 'cfg.json'), { strict: false })), /"base":"\/x"/);
+  // mkdir is not recursive and not quiet about an existing folder (B16): a base someone else made must stop the run.
+  io.mkdir('/fresh', 0o755);
+  assert.throws(() => io.mkdir('/fresh', 0o755), /EEXIST|exists/);
+  assert.throws(() => io.mkdir('/no/parent', 0o755), /ENOENT|no such/i);
 });
 
 test('m8 and the table: the orchestrate entry on a worker outbox folder can list, read and clear (delete_child), nothing more; the proofs cover the outbox folders', () => {
