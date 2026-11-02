@@ -77,6 +77,11 @@ export function writeNewFile(real, data, mode, own = null, { chown = fchownSync,
   try {
     if (own) { chown(fd, own.uid, own.gid); chmod(fd, own.mode); }
     const b = Buffer.isBuffer(data) ? data : Buffer.from(data, 'utf8'); let off = 0; while (off < b.length) off += writeSync(fd, b, off, b.length - off);
+  } catch (e) {
+    // This call made the file (exclusive create), so a step that fails after it removes the name: no empty or half-written file is
+    // left behind (L203 m-A). Only the name goes; whatever else may sit there now is never written or followed.
+    try { unlinkSync(real); } catch { /* the first error is the one to report */ }
+    throw e;
   } finally { closeSync(fd); }
 }
 

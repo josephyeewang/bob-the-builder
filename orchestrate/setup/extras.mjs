@@ -155,8 +155,15 @@ export function planToken(io, cfg) {
     // works (L194). A leftover side name from a cut-off run is only a name: plain unlink, never a folder's contents, never through a link.
     const tmp = `${f}.new`;
     io.unlink(tmp);
-    try { io.writeOwned(tmp, `${t}\n`, { uid: orch.uid, gid: orch.gid, mode: 0o600 }); } finally { t = ''; }   // owner and mode set on the open handle, before the first byte; exclusive create
-    try { io.rename(tmp, f); } catch (e) { io.unlink(tmp); throw new Error(`the new token could not take the old one's place (${e?.code ?? 'error'}); the old token file is unchanged`); }
+    const drop = () => { try { io.unlink(tmp); } catch { /* the first error is the one to report (L203 c3) */ } };
+    // Owner and mode set on the open handle, before the first byte; exclusive create. A write that fails after the side file was
+    // made (disk full, chown refused) removes it, so no part of the token is left at the side name (L203 m-A).
+    try { io.writeOwned(tmp, `${t}\n`, { uid: orch.uid, gid: orch.gid, mode: 0o600 }); } catch (e) { drop(); throw e; } finally { t = ''; }
+    try { io.rename(tmp, f); } catch (e) {
+      drop();
+      let folder = false; try { const s = io.lstat(f); folder = s.isDirectory() && !s.isSymbolicLink(); } catch { /* not there */ }
+      throw new Error(folder ? `${f} is now a folder, so the new token was not saved (${e?.code ?? 'error'})` : `the new token could not take the old one's place (${e?.code ?? 'error'}); the old token file is unchanged`);
+    }
   })], problems: [] };
 }
 

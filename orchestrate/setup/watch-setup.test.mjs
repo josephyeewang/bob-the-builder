@@ -13,6 +13,7 @@ import { jobsFor, plistTexts, checkDaemons, planPlace, planLoad, planUnload } fr
 import { readConfigFile, realIo } from './mac.mjs';
 import { checkWatchRules, planWatchRules, watchConfigLine, watchPlist, WATCH_RUN } from './watch-setup.mjs';
 import { main, parseArgs } from './setup.mjs';
+import { parseArgs as watchRunArgs } from '../modules/M6-merge-gate/watch-run.mjs';
 import { fakeMac, macTest as test } from './fake-mac.test-helper.mjs';
 import { tempDir } from '../shared/test-tmp.mjs';
 
@@ -382,12 +383,14 @@ test('L181 m-C: check-watch-rules reads one handle: a name swapped to a link or 
 // ───────────────────────────── L194 ─────────────────────────────
 
 test('L194 m3 PLANT one owner/name check: print-config-line prints a line for exactly the names the config loader takes', () => {
-  const names = ['example-org/example-repo', 'a/b', '.x/y', 'x/.y', 'o/' + 'n'.repeat(100), 'o/' + 'n'.repeat(101), 'o'.repeat(101) + '/n', 'x/..', './y', 'no-slash', 'a/b/c', 'a /b', '', 'a/'];
+  const names = ['example-org/example-repo', 'a/b', 'acme/.github', '.x/y', 'x/.y', 'o/' + 'n'.repeat(100), 'o/' + 'n'.repeat(101), 'o'.repeat(101) + '/n', 'x/..', './y', 'no-slash', 'a/b/c', 'a /b', '', 'a/'];
   for (const repo of names) {
     let loads = true; try { parseConfig({ ...RAW, watch: { repo } }); } catch { loads = false; }
     const r = watchConfigLine({}, { repo, source: '/x', readSource: () => RULES });
     assert.equal(Boolean(r.line), loads, `${JSON.stringify(repo)}: print-config-line ${r.line ? 'prints a line' : 'refuses'}, the config loader ${loads ? 'takes' : 'refuses'} it`);
     if (r.line) assert.deepEqual(parseConfig({ ...RAW, ...JSON.parse(`{${r.line.trim().replace(/,$/, '')}}`) }).watch, { repo, rulesSha256: HASH });
+    let runs = true; try { watchRunArgs(['once', '--repo', repo, '--dir', '/d', '--token-file', '/t', '--rules', 'draft', '--rules-sha256', HASH]); } catch (e) { runs = false; if (!/--repo must be owner\/name|--repo is required/.test(e.message)) throw e; }
+    assert.equal(runs, loads, `${JSON.stringify(repo)}: the hourly job (watch-run) ${runs ? 'takes' : 'refuses'} it, the config loader ${loads ? 'takes' : 'refuses'} it (L203 m-B)`);
   }
 });
 

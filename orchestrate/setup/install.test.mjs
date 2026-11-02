@@ -940,3 +940,20 @@ test('L194 m1 reload-account run again with nothing to change has no steps: the 
   assert.ok(w.mac.log.slice(m).some((l) => /^launchctl bootstrap/.test(l)), 'a changed file was not reloaded');
   assert.equal(readFileSync(f, 'utf8'), good);
 });
+
+// ───────────────────────────── L203: the #112 audit's probes, kept as tests ─────────────────────────────
+test('L203 the job was loaded from an OLDER file and `daemons place` has since rewritten it (no reload): reload-account must still reload', async () => {
+  const w = await placed(); const f = plistFile(w, 'review-account'); const good = readFileSync(f, 'utf8');
+  rmSync(f); writeFileSync(f, good.replace('</dict>', '<key>Nice</key><integer>1</integer></dict>'), { mode: 0o644 });
+  assert.equal(w.run(['daemons', 'load']).code, 0);          // loaded (and recorded) from the older text
+  assert.equal(w.run(['daemons', 'place']).code, 0);         // file back to the built text; launchd still runs the older one
+  assert.equal(readFileSync(f, 'utf8'), good);
+  const n = w.mac.log.length; const r = w.run(['daemons', 'reload-account']); assert.equal(r.code, 0, r.text);
+  assert.ok(w.mac.log.slice(n).some((l) => /^launchctl bootstrap/.test(l)), 'reload-account skipped a job loaded from an older file');
+});
+test('L203 reload-account refuses on a missing install (the not-there branch of the shared check)', async () => {
+  const w = await placed(); assert.equal(w.run(['daemons', 'load']).code, 0);
+  rmSync(w.mac.at(`${BASE}/install/orchestrate`)); const n = w.mac.log.length;
+  const r = w.run(['daemons', 'reload-account']); assert.equal(r.code, 1, r.text); assert.match(r.text, /install is not there yet/);
+  assert.ok(!w.mac.log.slice(n).some((l) => /^launchctl (bootout|bootstrap)/.test(l)));
+});
