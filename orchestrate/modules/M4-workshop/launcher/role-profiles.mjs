@@ -24,6 +24,14 @@ export const outboxKindsFor = (role) => Object.keys(OUTBOX_KINDS).filter((k) => 
 export const shadowKindsFor = (role, own = outboxKindsFor(role)) =>
   Object.keys(OUTBOX_KINDS).filter((k) => !own.includes(k) && own.some((o) => k.startsWith(o)));
 
+// Kinds the table lists for a role that its design still may not hand in, because nothing yet does what their text
+// promises (LEAD-CALLS L151 M-1, L167 c-4). The Front Door's `state-` (pause/away) and `request-` (resume, wrap-up,
+// rotate, mode requests) are refused by the Record too; leaving them out here refuses them at the plain-files hook and
+// at intake as well. A kind comes back here in the PR that lands its consumer. The Front Door is left with idea-,
+// ask-request- (work, research and undo asks) and its compaction note, state-compact-.
+export const NOT_YET = Object.freeze({ front_door: Object.freeze(['state-', 'request-']) });
+const designKinds = (role) => outboxKindsFor(role).filter((k) => !(NOT_YET[role] ?? []).includes(k));
+
 const p = (o) => Object.freeze({ ...o, tools: Object.freeze(o.tools), outbox: Object.freeze(o.outbox) });
 
 // Compaction windows come from the rules' context key; these are the design values (R-0b-42).
@@ -44,7 +52,7 @@ export const DESIGN_PROFILES = Object.freeze({
   writer: p({ tools: ['Read', 'Glob', 'Grep', 'Edit', 'Write'], mode: 'dontAsk', restricted: true,
     outbox: outboxKindsFor('writer'), compactWindow: 300000, setupFileRefusals: false, bobFolder: false, compactKind: 'report' }),
   front_door: p({ tools: ['Read', 'Glob', 'Grep', 'Write', 'AskUserQuestion', 'PushNotification', 'Skill'], mode: 'acceptEdits',
-    restricted: true, outbox: outboxKindsFor('front_door'), compactWindow: 250000, setupFileRefusals: true, bobFolder: false,
+    restricted: true, outbox: designKinds('front_door'), compactWindow: 250000, setupFileRefusals: true, bobFolder: false,
     skills: ['orchestrate'], compactKind: 'state' }),
   thinking: p({ tools: ['Read', 'Glob', 'Grep', 'Write', 'AskUserQuestion', 'PushNotification'], mode: 'acceptEdits',
     restricted: true, outbox: outboxKindsFor('thinking'), compactWindow: 400000, setupFileRefusals: true, bobFolder: false, compactKind: 'report' }),
