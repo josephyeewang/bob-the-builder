@@ -52,13 +52,16 @@ function overlaps(a, b) {
   return null;
 }
 
-// Undo workers are worker-profile sessions too (M14, audit MIN-7): they count toward the editing caps.
+// Undo workers are worker-profile sessions too (M14, audit MIN-7): a running one counts toward the editing caps
+// for every other editing start. An exact-reverse undo's own start is not held by those caps (L199): see startGate.
 // Overnight runs edit files too (audit 0b-6 r2, L27): they count toward the caps, never around them.
 const isEditing = (s) => s.kind === 'editing' || s.kind === 'undo' || s.kind === 'overnight';
 // Every session that writes files takes part in the files-don't-overlap check (audit MIN-16).
 // Sessions that finish work or answer the owner; they write no product files, so the caps do not apply.
 const CAP_FREE = Object.freeze(['review', 'audit', 'merge', 'undo_merge', 'lead', 'front_door']);
 const writesFiles = (s) => isEditing(s) || s.kind === 'script';
+// An exact-reverse undo's own limit, in place of the editing caps (L199): one at a time per product.
+export const UNDOS_PER_PRODUCT = 1;
 
 /**
  * The card's tier and risky classes, failing closed (audit MAT-3, MIN-15): the risky set is the card's
@@ -122,12 +125,18 @@ export function startGate({ rules, rec, card, kind, product, b, running, lead, e
     if (!isEditing({ kind })) return refuse(`unknown session kind ${kind}: start nothing`);
     const productDoc = rec.read('product', product)?.doc;
     if (!productDoc) return refuse(`no product record for ${product}`);
-    // A cap is budget, not safety (LEAD-CALLS L40): an exact reverse whose cap value is missing skips that
-    // cap and names it, so Joe is still told. The files-don't-overlap check below is safety and still runs.
+    // An undo that is an exact reverse is a safety act, never held by the editing caps (L199, L31): the first
+    // cutover's rules set caps.editing_per_product to 0. Its own limit is one undo running per product. A running
+    // undo still counts toward the caps for every other editing start (isEditing). A missing cap value is still
+    // named for it (L40), so Joe is told. The files-don't-overlap check below is safety and still runs.
+    const exactUndo = kind === 'undo' && exactReverse === true;
     let lim = null;
     let capMissing = null;
-    try { lim = editingLimits({ rules, product, productDoc, amberCaps: band.amberCaps }); } catch (e) { if (!(kind === 'undo' && exactReverse && e.key)) throw e; capMissing = e.key; }
-    if (lim) {
+    try { lim = editingLimits({ rules, product, productDoc, amberCaps: band.amberCaps }); } catch (e) { if (!(exactUndo && e.key)) throw e; capMissing = e.key; }
+    if (exactUndo) {
+      const undos = mine.filter((s) => s.kind === 'undo').length;
+      if (undos >= UNDOS_PER_PRODUCT) return refuse(`the product already runs ${undos} undo(s) (one at a time)`);
+    } else if (lim) {
       const onProduct = mine.filter(isEditing);
       if (onProduct.length >= lim.product) return refuse(`the product already runs ${onProduct.length} editing worker(s) (cap ${lim.product})`);
       const onMac = running.filter(isEditing).length;
@@ -162,7 +171,10 @@ export function disjoint({ rules, card, product, others, rec }) {
   return { ok: true };
 }
 
-/** M4's launch check 12, as a port: the same answer the pass got. */
+/**
+ * M4's launch check 12, as a port: the same answer the pass got. M4 launches only reviewers and auditors
+ * (review-launch.mjs GATE_KIND), so no undo comes this way and `exactReverse` is never needed here.
+ */
 export function check12({ rules, rec, bandsNow, runningNow }) {
   return (ctx) => startGate({ rules, rec, card: ctx.card, kind: ctx.kind, product: ctx.product, b: bandsNow(), running: runningNow(), lead: ctx.lead });
 }
