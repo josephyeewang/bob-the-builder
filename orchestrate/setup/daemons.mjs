@@ -8,7 +8,7 @@
 //   unload   launchctl bootout system/<label>, for each job that is loaded
 //   list     launchctl print system/<label>: loaded or not, state, last exit code (read only)
 //   check    read only: the files are exactly what review-daemons.mjs builds, root's 0644, no access list; no job file left under
-//            another label; each job is loaded, from the file as it is now, and its last run ended with exit 0
+//            another label; each job is loaded, from the file as it is now, its last run ended with exit 0, and no run has been going over 30 minutes
 //
 // Paths inside the plists are the real ones (no test prefix); the plist files themselves sit under io.at().
 
@@ -156,11 +156,13 @@ export function list(io, cfg) {
 /** Read only → [{ ok, what, why? }]. */
 const NEVER = '(never exited)';
 export const FIRST_RUN_LIMIT_S = 30 * 60;
-/** Seconds the process has been running (`ps -o etime=`: [[dd-]hh:]mm:ss), or null if it cannot be read. */
+const UNREADABLE = 'unreadable';
+/** Seconds the process has been running (`ps -o etime=`: [[dd-]hh:]mm:ss); null if there is no such process any more (ps failed or printed nothing: it ended between the two reads); UNREADABLE if ps answered with something this cannot parse (L180 m5b). */
 function runningSeconds(io, pid) {
   const r = io.run('/bin/ps', ['-o', 'etime=', '-p', String(pid)]);
-  const m = r.status === 0 ? /^\s*(?:(?:(\d+)-)?(\d+):)?(\d+):(\d+)\s*$/.exec(r.stdout) : null;
-  return m ? ((Number(m[1] ?? 0) * 24 + Number(m[2] ?? 0)) * 60 + Number(m[3])) * 60 + Number(m[4]) : null;
+  if (r.status !== 0 || r.stdout.trim() === '') return null;
+  const m = /^\s*(?:(?:(\d+)-)?(\d+):)?(\d+):(\d+)\s*$/.exec(r.stdout);
+  return m ? ((Number(m[1] ?? 0) * 24 + Number(m[2] ?? 0)) * 60 + Number(m[3])) * 60 + Number(m[4]) : UNREADABLE;
 }
 export function checkDaemons(io, cfg) {
   const out = []; const item = (ok, what, why, skip = false) => { if (!skip) out.push({ ok, what, ...(ok ? {} : { why }) }); };
@@ -193,13 +195,13 @@ export function checkDaemons(io, cfg) {
     if (s.pid && s.lastExit !== NEVER) {
       // A later run that hangs leaves the job running, and launchd starts no new run while one is going: the last exit would stay green.
       const age = runningSeconds(io, s.pid);
-      item(age === null || age <= FIRST_RUN_LIMIT_S, `${label}'s current run is not stuck (at most ${FIRST_RUN_LIMIT_S / 60} minutes)`, `this run has been going for ${Math.round(age / 60)} minutes and has not ended; look in ${installPaths(cfg).logDir}`);
+      item(age === null || (age !== UNREADABLE && age <= FIRST_RUN_LIMIT_S), `${label}'s current run is not stuck (at most ${FIRST_RUN_LIMIT_S / 60} minutes)`, age === UNREADABLE ? `ps answered with something that could not be read, so how long this run has been going is not known; look in ${installPaths(cfg).logDir}` : `this run has been going for ${Math.round(age / 60)} minutes and has not ended; look in ${installPaths(cfg).logDir}`);
     }
     if (s.lastExit === NEVER) {
       // It has not finished a run yet. Every job starts at load and then runs on a timer, so this is fine only while its first run is young.
       const age = s.pid ? runningSeconds(io, s.pid) : null;
-      item(age !== null && age <= FIRST_RUN_LIMIT_S, `${label} is on its first run, and not for long (at most ${FIRST_RUN_LIMIT_S / 60} minutes)`,
-        age === null ? `it is loaded but has no running process and has never finished a run; look in ${installPaths(cfg).logDir}` : `its first run has been going for ${Math.round(age / 60)} minutes and has not ended; look in ${installPaths(cfg).logDir}`);
+      item(age !== null && age !== UNREADABLE && age <= FIRST_RUN_LIMIT_S, `${label} is on its first run, and not for long (at most ${FIRST_RUN_LIMIT_S / 60} minutes)`,
+        age === null ? `it is loaded but has no running process and has never finished a run; look in ${installPaths(cfg).logDir}` : age === UNREADABLE ? `ps answered with something that could not be read, so how long the first run has been going is not known; look in ${installPaths(cfg).logDir}` : `its first run has been going for ${Math.round(age / 60)} minutes and has not ended; look in ${installPaths(cfg).logDir}`);
     }
   }
   return out;

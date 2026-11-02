@@ -180,7 +180,7 @@ export function checkToken(io, cfg) {
 const API = 'https://api.github.com';
 
 /**
- * Proves the token is watch-only against the repository the CONFIG names (watch.repo), as the orchestrate user would use it.
+ * Proves the token cannot write pull requests (and can read) against the repository the CONFIG names (watch.repo), as the orchestrate user would use it.
  *  - The repo is never typed on the command line (L150 m4).
  *  - Needs root: the token file is read AS orchestrate (sudo -H -u orchestrate cat), so "orchestrate's background job can read
  *    it" is part of the proof. Before that the file is looked at WITHOUT following links: a plain file, orchestrate's, 0600.

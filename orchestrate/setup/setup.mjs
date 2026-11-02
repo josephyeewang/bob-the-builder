@@ -10,8 +10,8 @@
 //   check-install        [--main <sha>] the copy, its link, every install folder, access lists                 (read only)
 //   daemons place|load|unload  [--dry-run]   the three background jobs' files; load; unload                    (root)
 //   daemons list                        loaded or not, per job                                                 (read only)
-//   daemons check                       the job files are exact, no leftover jobs, each job loaded from the file as it is now, last exit 0  (read only)
-//   daemons reload-account [--dry-run]  reload the account job only if it is loaded  (root)
+//   daemons check                       the job files are exact, no leftover jobs, each job loaded from the file as it is now, last exit 0, no run going over 30 minutes  (read only)
+//   daemons reload-account [--dry-run]  reload the account job; exits 1 ("Run: daemons load") when it is not loaded  (root)
 //   proposals  [--dry-run]  the proposals folders: parent root's, one per product  (root)
 //   check-proposals  owner, mode, access list; with sudo, who can read or write (read only)
 //   safe-directory  [--dry-run]  the owner's git trusts exactly the mirror folder  (root, runs git as the owner)
@@ -43,7 +43,7 @@ const TOKEN_PAGE_NOTE = [
   'What this proved: the token cannot write pull requests. It did not prove the token cannot change code, or that it reaches only one repository.',
   "Now check that by eye, on GitHub's token page (github.com → your picture → Settings → Developer settings → Personal access tokens → Fine-grained tokens → this token):",
   '  - Repository access: only the one repository named in the config;',
-  '  - Permissions: Contents = Read-only and Pull requests = Read-only, and nothing else.',
+  '  - Permissions: Metadata = Read-only (GitHub always adds it), Contents = Read-only (GitHub may call it "code"), Pull requests = Read-only, and nothing else.',
 ];
 const USAGE = 'usage: node setup.mjs <users-folders|check|proofs|install|check-install|daemons place|load|unload|list|check|reload-account|proposals|check-proposals|safe-directory|check-safe-directory|token|check-token|prove-token> [--config <file>, without sudo only] [--dry-run] [--main <commit>]';
 const DAEMON_SUBS = ['place', 'load', 'unload', 'list', 'check', 'reload-account'];
@@ -147,11 +147,11 @@ export function main(argv, { io: given, runUpdater = spawnUpdater, out = (s) => 
     for (const x of planned.ops) out(`would run: ${x.text}`);
     // A dry run is not root, but it can read the runner config with root's rules: warn only when root would refuse it, and say why (L169 m4).
     if (o.cmd === 'install' && cfg.runnerConfig && planned.ops.length) {
-      try { io.readSourceStrict(cfg.runnerConfig); } catch (e) { out(`WARNING  root will refuse ${cfg.runnerConfig}: ${e.message}. To put it right: sudo install -o root -g wheel -m 0644 /dev/stdin ${cfg.runnerConfig} < <your copy of review.json, kept in a folder only you can open>`); }
+      try { io.readSourceStrict(cfg.runnerConfig); } catch (e) { out(`WARNING  root will refuse ${cfg.runnerConfig}: ${e.message}. To put it right: keep your copy of review.json in a folder only you can open, then sudo install -o root -g wheel -m 0644 /dev/stdin <a path in a folder only root can write, e.g. under /Library> < <that copy>, and set runnerConfig in your settings to that path`); }
     }
     out(`dry run: ${planned.ops.length} step(s), nothing changed.`); return 0; }
   // A message that already says what to run next ("run: daemons load") is the one instruction; the generic "run it again" is only for the rest.
-  try { apply(planned.ops, { log: (t) => out(`run: ${t}`) }); } catch (e) { err(/run: daemons load/.test(e.message) ? `stopped: ${e.message}.` : `stopped: ${e.message}. Run it again after fixing that; it picks up where it stopped.`); return 1; }
+  try { apply(planned.ops, { log: (t) => out(`run: ${t}`) }); } catch (e) { err(/run: daemons load/i.test(e.message) ? `stopped: ${e.message}.` : `stopped: ${e.message}. Run it again after fixing that; it picks up where it stopped.`); return 1; }
   const after = o.cmd === 'users-folders' ? check(io, cfg, { alsoKnown: rootMadeEntries(cfg) }) : o.cmd === 'install' ? checkInstall(io, cfg)
     : o.cmd === 'proposals' ? checkProposals(io, cfg) : o.cmd === 'safe-directory' ? checkSafeDirectory(io, cfg) : o.cmd === 'token' ? checkToken(io, cfg)
     : o.sub === 'place' ? checkDaemons(io, cfg).filter((r) => /exactly the built job file$|under another label/.test(r.what)) : o.sub === 'load' ? checkDaemons(io, cfg).filter((r) => /is loaded$|loaded from the job file as it is now$/.test(r.what))
