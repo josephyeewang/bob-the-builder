@@ -24,32 +24,40 @@ export const outboxKindsFor = (role) => Object.keys(OUTBOX_KINDS).filter((k) => 
 export const shadowKindsFor = (role, own = outboxKindsFor(role)) =>
   Object.keys(OUTBOX_KINDS).filter((k) => !own.includes(k) && own.some((o) => k.startsWith(o)));
 
+// Kinds the table lists for a role that its design still may not hand in, because nothing yet does what their text
+// promises (LEAD-CALLS L151 M-1, L167 c-4). The Front Door's `state-` (pause/away) and `request-` (resume, wrap-up,
+// rotate, mode requests) are refused by the Record too; leaving them out here refuses them at the plain-files hook and
+// at intake as well. A kind comes back here in the PR that lands its consumer. The Front Door is left with idea-,
+// ask-request- (work, research and undo asks) and its compaction note, state-compact-.
+export const NOT_YET = Object.freeze({ front_door: Object.freeze(['state-', 'request-']) });
+const designKinds = (role) => outboxKindsFor(role).filter((k) => !(NOT_YET[role] ?? []).includes(k));
+
 const p = (o) => Object.freeze({ ...o, tools: Object.freeze(o.tools), outbox: Object.freeze(o.outbox) });
 
 // Compaction windows come from the rules' context key; these are the design values (R-0b-42).
 export const DESIGN_PROFILES = Object.freeze({
   lead: p({ tools: ['Read', 'Glob', 'Grep', 'Write', 'AskUserQuestion'], mode: 'acceptEdits', restricted: true,
-    outbox: outboxKindsFor('lead'), compactWindow: 400000,
+    outbox: designKinds('lead'), compactWindow: 400000,
     setupFileRefusals: true, bobFolder: true, compactKind: 'handoff' }),
   worker: p({ tools: ['Read', 'Glob', 'Grep', 'Edit', 'Write', 'Bash'], mode: 'dontAsk', restricted: true,
-    outbox: outboxKindsFor('worker'), compactWindow: 300000, setupFileRefusals: false, bobFolder: true, compactKind: 'report' }),
+    outbox: designKinds('worker'), compactWindow: 300000, setupFileRefusals: false, bobFolder: true, compactKind: 'report' }),
   reviewer: p({ tools: ['Read', 'Glob', 'Grep', 'Bash', 'Write'], mode: 'dontAsk', restricted: true,
-    outbox: outboxKindsFor('reviewer'), compactWindow: 300000, setupFileRefusals: false, bobFolder: true, compactKind: 'verdict' }),
+    outbox: designKinds('reviewer'), compactWindow: 300000, setupFileRefusals: false, bobFolder: true, compactKind: 'verdict' }),
   auditor: p({ tools: ['Read', 'Glob', 'Grep', 'Bash', 'Write'], mode: 'dontAsk', restricted: true,
-    outbox: outboxKindsFor('auditor'), compactWindow: 300000, setupFileRefusals: false, bobFolder: true, compactKind: 'verdict' }),
+    outbox: designKinds('auditor'), compactWindow: 300000, setupFileRefusals: false, bobFolder: true, compactKind: 'verdict' }),
   incident: p({ tools: ['Read', 'Glob', 'Grep'], mode: 'dontAsk', restricted: true,
-    outbox: outboxKindsFor('incident'), compactWindow: 300000, setupFileRefusals: false, bobFolder: false, compactKind: 'ask' }),
+    outbox: designKinds('incident'), compactWindow: 300000, setupFileRefusals: false, bobFolder: false, compactKind: 'ask' }),
   scout: p({ tools: ['Read', 'Glob', 'Grep'], mode: 'dontAsk', restricted: true,
-    outbox: outboxKindsFor('scout'), compactWindow: 300000, setupFileRefusals: false, bobFolder: false, compactKind: 'report' }),
+    outbox: designKinds('scout'), compactWindow: 300000, setupFileRefusals: false, bobFolder: false, compactKind: 'report' }),
   writer: p({ tools: ['Read', 'Glob', 'Grep', 'Edit', 'Write'], mode: 'dontAsk', restricted: true,
-    outbox: outboxKindsFor('writer'), compactWindow: 300000, setupFileRefusals: false, bobFolder: false, compactKind: 'report' }),
+    outbox: designKinds('writer'), compactWindow: 300000, setupFileRefusals: false, bobFolder: false, compactKind: 'report' }),
   front_door: p({ tools: ['Read', 'Glob', 'Grep', 'Write', 'AskUserQuestion', 'PushNotification', 'Skill'], mode: 'acceptEdits',
-    restricted: true, outbox: outboxKindsFor('front_door'), compactWindow: 250000, setupFileRefusals: true, bobFolder: false,
+    restricted: true, outbox: designKinds('front_door'), compactWindow: 250000, setupFileRefusals: true, bobFolder: false,
     skills: ['orchestrate'], compactKind: 'state' }),
   thinking: p({ tools: ['Read', 'Glob', 'Grep', 'Write', 'AskUserQuestion', 'PushNotification'], mode: 'acceptEdits',
-    restricted: true, outbox: outboxKindsFor('thinking'), compactWindow: 400000, setupFileRefusals: true, bobFolder: false, compactKind: 'report' }),
+    restricted: true, outbox: designKinds('thinking'), compactWindow: 400000, setupFileRefusals: true, bobFolder: false, compactKind: 'report' }),
   learning: p({ tools: ['Read', 'Glob', 'Grep', 'Write'], mode: 'acceptEdits', restricted: true,
-    outbox: outboxKindsFor('learning'), compactWindow: 400000, setupFileRefusals: true, bobFolder: true, compactKind: 'handoff' }),
+    outbox: designKinds('learning'), compactWindow: 400000, setupFileRefusals: true, bobFolder: true, compactKind: 'handoff' }),
 });
 
 export const hasShell = (profile) => profile.tools.includes('Bash');

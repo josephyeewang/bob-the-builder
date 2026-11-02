@@ -11,7 +11,7 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { AI_ROLES, OUTBOX_KINDS, outboxKindOf } from '../../../shared/record.mjs';
-import { DESIGN_PROFILES, outboxKindsFor, shadowKindsFor } from './role-profiles.mjs';
+import { DESIGN_PROFILES, NOT_YET, outboxKindsFor, shadowKindsFor, checkProfile } from './role-profiles.mjs';
 import { renderRoleSettings, POLICY_HOOKS, HOOK_FAILS_CLOSED } from './render-settings.mjs';
 import { SETTINGS as S, HOOK_FIELDS as H, HOOK_EVENTS as E } from './settings-names.mjs';
 import { readOutboxFile } from './outbox.mjs';
@@ -22,6 +22,9 @@ import { setup, UID } from '../../M9-record/fixtures.test-helper.mjs';
 // The roles M4 launches. `script` is an outbox role too (a plain script's reports), but M4 starts no session for it, so
 // it has no profile and no hook; M9 alone judges its files.
 const LAUNCHED = AI_ROLES.filter((r) => r !== 'script');
+// A kind the table lists for a role that its design leaves out until something does what the kind's text promises
+// (L151 M-1, L167 c-4: the Front Door's state- and request-).
+const notYet = (role, kind) => (NOT_YET[role] ?? []).includes(kind);
 const HOOK = join(dirname(fileURLToPath(import.meta.url)), '..', 'hooks', 'plain-files.mjs');
 const REVIEW_WALLS = { outboxRoot: '/r/outbox', runnerRoot: '/r/review' };
 
@@ -60,9 +63,16 @@ test('L82 M-1: for every role, M4\'s kinds are exactly the shared table\'s, and 
   assert.deepEqual(Object.keys(DESIGN_PROFILES).sort(), [...LAUNCHED].sort(), 'one profile per role M4 launches');
   const listed = [...new Set(Object.values(OUTBOX_KINDS).flatMap((k) => k.roles))];
   for (const r of listed) assert.ok(AI_ROLES.includes(r), `${r} in the table is a known role`);
+  // L189 m3: the checks below read NOT_YET, so a kind wrongly added to it would pass them. Pin it exactly, and hold every
+  // other role to the full table with no hold-back in between. A kind is added here only in the PR that lands its reason.
+  assert.deepEqual(JSON.parse(JSON.stringify(NOT_YET)), { front_door: ['state-', 'request-'] }, 'the kinds held back are exactly these');
+  for (const role of LAUNCHED.filter((r) => r !== 'front_door')) {
+    assert.deepEqual([...DESIGN_PROFILES[role].outbox].sort(), outboxKindsFor(role).sort(), `${role}: every kind the table lists, none held back`);
+  }
   for (const role of LAUNCHED) {
     const table = Object.keys(OUTBOX_KINDS).filter((k) => OUTBOX_KINDS[k].roles.includes(role));
-    assert.deepEqual([...DESIGN_PROFILES[role].outbox].sort(), table.sort(), `${role}: M4's kinds = M9's list`);
+    assert.deepEqual([...DESIGN_PROFILES[role].outbox].sort(), table.filter((k) => !notYet(role, k)).sort(), `${role}: M4's kinds = M9's list, less the kinds not yet handed in`);
+    for (const k of NOT_YET[role] ?? []) assert.ok(table.includes(k), `${role}: ${k}, held back, is one the table lists for it`);
     assert.deepEqual(outboxKindsFor(role).sort(), table.sort(), role);
     for (const k of DESIGN_PROFILES[role].outbox) assert.match(k, /^[a-z]+(-[a-z]+)*-$/, `${role}: ${k} is a name prefix`);
     for (const s of shadowKindsFor(role)) assert.ok(!table.includes(s) && table.some((o) => s.startsWith(o)), `${role}: ${s} is a longer kind it may not hand in`);
@@ -78,15 +88,42 @@ test('L82 M-1: every role × every listed kind and look-alike: the hook, M4\'s i
   const swept = [];
   for (const role of LAUNCHED) {
     for (const name of names) {
-      const want = OUTBOX_KINDS[outboxKindOf(name)]?.roles.includes(role) ?? false;
+      // M9 lists a held-back kind for the role (its own refusal of state-/request- is a later check, tested below).
+      const listed = OUTBOX_KINDS[outboxKindOf(name)]?.roles.includes(role) ?? false;
+      const want = listed && !notYet(role, outboxKindOf(name));
       const got = judge(env, role, `K-${++n}`, name);
-      assert.deepEqual(got, { hook: want, m4: want, m9: want }, `${role} handing in ${name}`);
+      assert.deepEqual(got, { hook: want, m4: want, m9: listed }, `${role} handing in ${name}`);
       if (want) swept.push(`${role}:${outboxKindOf(name)}`);
     }
   }
   // Every (role, kind) pair in the table was reached as an allowed hand-in.
-  const pairs = Object.entries(OUTBOX_KINDS).flatMap(([k, v]) => v.roles.filter((r) => r !== 'script').map((r) => `${r}:${k}`));
+  const pairs = Object.entries(OUTBOX_KINDS).flatMap(([k, v]) => v.roles.filter((r) => r !== 'script' && !notYet(r, k)).map((r) => `${r}:${k}`));
   for (const p of pairs) assert.ok(swept.includes(p), `${p} was swept`);
+});
+
+// L167 c-4: the Front Door hands in only idea-, ask-request- (work, research and undo asks) and its compaction note.
+// A pause/away (state-) or resume/wrap-up/rotate (request-) file is refused at the profile, before the Record sees it:
+// the plain-files hook as the launcher renders it, M4's intake read and a published profile that lists either kind.
+test('L167 c-4: a Front Door state- or request- file is refused at the profile, not only at the Record', () => {
+  assert.deepEqual([...DESIGN_PROFILES.front_door.outbox].sort(), ['ask-request-', 'idea-', 'state-compact-']);
+  const env = setup({ prefix: 'm4-kinds-' });
+  for (const name of ['state-20261103-0915-aa.json', 'request-resume-20261103-0915-ad.json', 'request-think-1.json']) {
+    const got = judge(env, 'front_door', `F-${name.split('-')[0]}-${name.length}`, name);
+    assert.equal(got.hook, false, `the hook refuses ${name}`);
+    assert.equal(got.m4, false, `M4's intake read refuses ${name}`);
+  }
+  // The kinds it keeps still pass all three.
+  for (const name of ['idea-1.md', 'ask-request-20261103-0915-ab.json', 'state-compact-F2.md']) {
+    assert.deepEqual(judge(env, 'front_door', `F-ok-${name.length}`, name), { hook: true, m4: true, m9: true }, name);
+  }
+  // A published profile may not hand them back: each is outside the design.
+  const design = DESIGN_PROFILES.front_door;
+  for (const k of ['state-', 'request-']) {
+    const r = checkProfile('front_door', { ...design, outbox: [...design.outbox, k] });
+    assert.equal(r.ok, false, k);
+    assert.match(r.reason, new RegExp(`outbox kinds outside the design: ${k}`));
+  }
+  assert.equal(checkProfile('front_door', design).ok, true, 'the design itself passes');
 });
 
 // L101: a compaction note (`-compact-` in its name) is only ever a `-compact-` kind, at the hook, M4's read and M9.
