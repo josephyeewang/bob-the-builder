@@ -8,6 +8,7 @@
 //   await gatherFacts(ctx, merge) → facts            (see refusals.mjs for every field)
 //   recordView(record) → { createdBy(entity, id), seqOf(entity, id), linesAfter(seq) }
 //   threadsQuery → the GraphQL text for refusal 7
+//   threads(gh, owner, repo, pr) → { ok, unresolved } (a failed read throws, message starts with the HTTP status; a 200 carrying errors says "GitHub answered 200 but with an error: the review threads could not be read"); linesOf(patch) → added/removed lines
 // ctx = { record, rules, product, gh, owner, repo, view, now, alert, approvals?, readRow?, reviewLaunches }
 //   reviewLaunches { root, uids, outbox }: the review runner's launch records folder (its ended records sit beside it,
 //     L68), the role → Mac user id map (L65), and review's outbox root, where each session's verdict file is read
@@ -85,7 +86,7 @@ async function mainGreen(gh, base, sha, required, ignoredList) {
   return runs.every(good) && sts.every((s) => s.state === 'success');
 }
 
-const linesOf = (patch) => {
+export const linesOf = (patch) => {
   if (typeof patch !== 'string') return {};
   const added = []; const removed = [];
   for (const l of patch.split('\n')) {
@@ -95,10 +96,13 @@ const linesOf = (patch) => {
   return { added_lines: added, removed_lines: removed };
 };
 
-async function threads(gh, owner, repo, pr) {
+// A read that FAILED throws (err.unreadable = true, the message starts with the HTTP status); the gate's own callers map any
+// throw to { ok: false } through `attempt`, exactly as before. A list too long to read whole is a fact: { ok: false }.
+export async function threads(gh, owner, repo, pr) {
   const r = await gh.post('/graphql', { query: threadsQuery, variables: { owner, repo, pr } });
   const t = r?.json?.data?.repository?.pullRequest?.reviewThreads;
-  if (r?.status !== 200 || r.json?.errors || !t || !Array.isArray(t.nodes) || t.totalCount !== t.nodes.length || t.totalCount >= MAX_LIST) return { ok: false };
+  if (r?.status !== 200 || r.json?.errors || !t || !Array.isArray(t.nodes)) { const e = new Error(r?.status !== 200 ? `HTTP ${r?.status}: the review threads could not be read` : 'GitHub answered 200 but with an error: the review threads could not be read'); e.unreadable = true; throw e; }
+  if (t.totalCount !== t.nodes.length || t.totalCount >= MAX_LIST) return { ok: false };
   // A human thread: its first comment's author is a User. A bot's thread (a linter) is not a person waiting on an answer.
   const unresolved = t.nodes.filter((n) => n?.isResolved !== true && n?.comments?.nodes?.[0]?.author?.__typename !== 'Bot').length;
   return { ok: true, unresolved };
