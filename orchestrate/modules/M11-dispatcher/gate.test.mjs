@@ -47,9 +47,9 @@ test('M14: the product limit is the smallest of its caps', () => {
   assert.equal(go({ b: AMBER, running: [worker(0, 'p2', 'w3'), worker(1, 'p2', 'w4')] }).ok, true);
   // own-building amber gives amber caps with a green band
   assert.equal(go({ b: { ...GREEN, own_building: 'amber' }, running: [worker(0), worker(1)] }).ok, false);
-  // a per-state cap missing for the product's state refuses
-  const odd = setup({ products: [product('p1', 'mystery')] });
-  assert.equal(go({ rec: odd }).ok, false);
+  // a per-state cap missing for the product's state refuses (the Record holds only the four product states, so the
+  // rules leave one out)
+  assert.equal(go({ rules: rulesWith({ [K.perState]: { light: 1, away: 3, paused: 0 } }) }).ok, false);
   // no product record refuses
   assert.equal(go({ product: 'p9', card: { id: 'x', product: 'p9', tier: 2, files: ['a.js'] } }).ok, false);
 });
@@ -100,7 +100,18 @@ test('M13: a path outside the repo refuses', () => {
   assert.equal(normPath('./a/./b/../c.js'), 'a/c.js');
 });
 
-test('row 61: two cards each touching only their own row file start together; a shared row id overlaps', () => {
+test('row 61: a card names the row files it touches; named rows overlap on the shared row only', () => {
+  assert.equal(go({ card: { id: 'b', tier: 2, rows: ['R-2'], files: ['docs/blueprint/rows/R-2.yaml'] } }).ok, true);
+  assert.match(go({ card: { id: 'b', tier: 2, rows: ['R-2'], files: ['docs/blueprint/rows/R-3.yaml'] } }).reason, /without naming it/);
+  const set = (rows) => fileSet({ rows, files: [] }, { dailyPatterns: [] }).files;
+  const meet = (x, y) => [...x].some((f) => y.has(f));
+  assert.equal(meet(set(['R-1']), set(['R-1'])), true);
+  assert.equal(meet(set(['R-1']), set(['R-2'])), false);
+});
+
+// (b) for the lead (L72): M9's card has no `rows` field, so no card in the Record can name a row, and the gate refuses
+// every card that touches a row file. Kept as a todo until M9 has the field (or the gate stops reading it).
+test('row 61 through the Record: two cards each touching only their own row file start together; a shared row id overlaps', { todo: 'M9 card has no rows field (b)' }, () => {
   const rec = setup({ cards: [card('a', ['docs/blueprint/rows/R-1.yaml'], { rows: ['R-1'] })] });
   const run = [{ id: 'S-a', product: 'p1', kind: 'editing', card: 'a' }];
   assert.equal(go({ rec, running: run, card: { id: 'b', tier: 2, rows: ['R-2'], files: ['docs/blueprint/rows/R-2.yaml'] } }).ok, true);
