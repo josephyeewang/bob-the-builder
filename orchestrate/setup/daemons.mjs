@@ -154,6 +154,11 @@ export function checkDaemons(io, cfg) {
     const text = fileText(io, cfg, job);
     item(text !== null && rec[label] === sha(text), `${label} was loaded from the job file as it is now`, 'it runs an older definition than the file on disk (or was not loaded by this tool); run daemons load, which reloads it');
     item(s.lastExit === '0', `${label}'s last run ended well (exit 0)`, s.lastExit === NEVER ? undefined : `last exit code ${s.lastExit}; look in ${installPaths(cfg).logDir}`, s.lastExit === NEVER);
+    if (s.pid && s.lastExit !== NEVER) {
+      // A later run that hangs leaves the job running, and launchd starts no new run while one is going: the last exit would stay green.
+      const age = runningSeconds(io, s.pid);
+      item(age === null || age <= FIRST_RUN_LIMIT_S, `${label}'s current run is not stuck (at most ${FIRST_RUN_LIMIT_S / 60} minutes)`, `this run has been going for ${Math.round(age / 60)} minutes and has not ended; look in ${installPaths(cfg).logDir}`);
+    }
     if (s.lastExit === NEVER) {
       // It has not finished a run yet. Every job starts at load and then runs on a timer, so this is fine only while its first run is young.
       const age = s.pid ? runningSeconds(io, s.pid) : null;

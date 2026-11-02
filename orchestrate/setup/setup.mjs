@@ -120,8 +120,10 @@ export function main(argv, { io: given, runUpdater = spawnUpdater, out = (s) => 
   if (!planned.ops.length) out(planned.installed ? 'nothing to do: already installed.' : 'nothing to do: already as needed.');
   if (o.dry) {
     for (const x of planned.ops) out(`would run: ${x.text}`);
-    // A dry run is not root, so it cannot judge the runner config by root's rules: say what root will require (L160 m5).
-    if (o.cmd === 'install' && cfg.runnerConfig && planned.ops.length) out(`WARNING  root will refuse ${cfg.runnerConfig} unless it is root's own file that nobody else can write, with every folder above it root's too. A dry run as you cannot check that. To put it right: sudo install -o root -g wheel -m 0644 /dev/stdin ${cfg.runnerConfig} < <your copy of review.json>`);
+    // A dry run is not root, but it can read the runner config with root's rules: warn only when root would refuse it, and say why (L169 m4).
+    if (o.cmd === 'install' && cfg.runnerConfig && planned.ops.length) {
+      try { io.readSourceStrict(cfg.runnerConfig); } catch (e) { out(`WARNING  root will refuse ${cfg.runnerConfig}: ${e.message}. To put it right: sudo install -o root -g wheel -m 0644 /dev/stdin ${cfg.runnerConfig} < <your copy of review.json, kept in a folder only you can open>`); }
+    }
     out(`dry run: ${planned.ops.length} step(s), nothing changed.`); return 0; }
   try { apply(planned.ops, { log: (t) => out(`run: ${t}`) }); } catch (e) { err(`stopped: ${e.message}. Run it again after fixing that; it picks up where it stopped.`); return 1; }
   const after = o.cmd === 'users-folders' ? check(io, cfg, { alsoKnown: rootMadeEntries(cfg) }) : o.cmd === 'install' ? checkInstall(io, cfg)
