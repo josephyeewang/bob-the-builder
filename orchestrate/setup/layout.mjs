@@ -39,7 +39,7 @@ export const FORBIDDEN_UNDER = Object.freeze(['/Users', '/Applications', '/tmp',
 /** The checked config, or a thrown Error naming the first problem. */
 export function parseConfig(raw) {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('config: expected an object with base, owner and products');
-  const { base, owner, products = [] } = raw;
+  const { base, owner, products = [], proposalsParent, watch } = raw;
   if (typeof base !== 'string' || !BASE.test(base) || base.split('/').some((s) => s === '..' || s === '.') || base.includes('//') || base.length > 200) {
     throw new Error('config: base must be a full path of letters, digits and . _ - / only, with no .. and no spaces');
   }
@@ -52,7 +52,38 @@ export function parseConfig(raw) {
   if (!Array.isArray(products) || products.length > 50 || products.some((p) => typeof p !== 'string' || !PRODUCT.test(p)) || new Set(products).size !== products.length) {
     throw new Error('config: products must be a list of distinct names (lowercase letters, digits, dashes)');
   }
-  return { base: b, owner, products: [...products] };
+  if (proposalsParent !== undefined && (typeof proposalsParent !== 'string' || !BASE.test(proposalsParent) || proposalsParent.split('/').some((x) => x === '..' || x === '.') || proposalsParent.includes('//') || proposalsParent.endsWith('/') || proposalsParent.split('/').length < 3 || proposalsParent.length > 200)) {
+    throw new Error('config: proposalsParent must be a full path of letters, digits and . _ - / only, in a folder of its own, with no .. and no spaces');
+  }
+  // The repository the watch-only token is proven against (prove-token reads it from here, never from the command line): owner/name.
+  if (watch !== undefined) {
+    const r = watch && typeof watch === 'object' && !Array.isArray(watch) ? watch.repo : undefined;
+    if (typeof r !== 'string' || !/^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/.test(r) || r.split('/').some((x) => x === '.' || x === '..')) throw new Error('config: watch.repo must look like owner/name');
+  }
+  return { base: b, owner, products: [...products], ...(proposalsParent !== undefined ? { proposalsParent } : {}), ...(watch !== undefined ? { watch: { repo: watch.repo } } : {}) };
+}
+
+/** Where the proposals folders live (R-0b-128, runbook A7; "a proposal for the owner's OK" until they OK it): one folder per product under this parent. */
+export const DEFAULT_PROPOSALS_PARENT = '/Users/Shared/orchestrate-proposals';
+export const proposalsParentOf = (cfg) => cfg.proposalsParent ?? DEFAULT_PROPOSALS_PARENT;
+/** The folder the owner writes review-again taps into (runner setting `ownerTaps`, runbook A6). */
+export const ownerTapsPath = (cfg) => join(cfg.base, 'owner-taps');
+/** The Do-plane git mirror; the owner's git is told to trust exactly this path (R-0b-05 done_when, safe.directory). */
+export const mirrorPath = (cfg) => join(cfg.base, 'mirror');
+
+/**
+ * The proposals folders (R-0b-128, L76 (3)). The parent is root's, 0711 (traverse only): nobody else can rename, remove or
+ * list it, and root makes it, so no user can have planted it. Each product's folder is the owner's, 0700: only the owner
+ * reads and writes; `orchestrate` reads through the ONE access-list entry (list/search/read, inherited) and cannot write;
+ * `review` and everyone else get nothing. A group would not do: the owner's own group (staff) holds every ordinary user of
+ * the Mac, so the access list is what gives exactly one extra reader.
+ */
+export function proposalRows(cfg) {
+  const parent = proposalsParentOf(cfg);
+  return [
+    { path: parent, owner: 'root', mode: 0o711, why: 'the proposals parent: root\'s, traverse only', acl: [] },
+    ...cfg.products.map((prod) => ({ path: join(parent, prod), owner: 'owner', mode: 0o700, why: `${prod}: proposals (only the owner writes; orchestrate reads)`, acl: [PROPOSALS_READ_ACL] })),
+  ];
 }
 
 /** Where a user's home folder is (also what its Mac record names). */
@@ -68,6 +99,9 @@ export const WORKER_ROLES = Object.freeze(AI_ROLES.filter((r) => !REVIEW_ROLES.i
  */
 // `delete_child` (L100 m8): the record's intake may clear a hand-in once it is taken in; the worker seals its own file 0440.
 export const ORCHESTRATE_READ_ACL = Object.freeze({ who: 'user:orchestrate', perms: Object.freeze(['list', 'search', 'readattr', 'readextattr', 'readsecurity', 'delete_child', 'file_inherit', 'directory_inherit']) });
+// The proposals folders are read only for orchestrate: no delete_child (that is for the outbox folders, which it clears).
+export const PROPOSALS_READ_ACL = Object.freeze({ who: 'user:orchestrate', perms: Object.freeze(['list', 'search', 'readattr', 'readextattr', 'readsecurity', 'file_inherit', 'directory_inherit']) });
+
 
 /** An access-list entry as `ls -le` prints it, with its permissions sorted: "user:orchestrate allow directory_inherit,file_inherit,list,...". */
 export const aclText = (e) => `${e.who} allow ${[...e.perms].sort().join(',')}`;
@@ -91,7 +125,8 @@ export function folderTable(cfg) {
     [p('launcher'), 'orchestrate', 0o755, 'the launcher'],
     [p('frontdoor'), 'orchestrate', 0o755, 'the Front Door\'s start folder'],
     [p('lead-main'), 'orchestrate', 0o755, 'the Lead\'s read-only copy of main'],
-    [p('mirror'), 'orchestrate', 0o755, 'the Do-plane git mirror'],
+    [mirrorPath(cfg), 'orchestrate', 0o755, 'the Do-plane git mirror'],
+    [ownerTapsPath(cfg), 'owner', 0o755, 'the owner\'s review-again taps (runner setting ownerTaps): the owner writes, others only read, no access list'],
     [p('bob'), 'orchestrate', 0o755, 'Bob method copies'],
     [p('global-rules'), 'orchestrate', 0o755, 'plain-text copy of the global rules'],
     [p('claude-code'), 'orchestrate', 0o755, 'the roles\' pinned Claude Code copies'],
