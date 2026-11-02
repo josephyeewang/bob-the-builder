@@ -194,9 +194,10 @@ test('L151 M-1: the refused kinds are refused by the real Record and the stand-i
   assert.equal(env.record.list('report').length, 0);
 });
 
-test('L151: a join item must name the kind; state-compact- in item 1 is not state-', () => {
+test('L151: a join item must name the kind (an item that does not name state- is refused); state-compact- is not state-', () => {
   const st = OUTBOX_KINDS['state-'];
-  assert.match(whoReadsProblems('state-', { ...st, refused: 'M1 join item 1, lane 2' }).join(), /none of them names `state-`/);
+  // M1 item 1 names `state-` itself since #106/#99 (it holds state- back), so item 2, which names neither, is the case.
+  assert.match(whoReadsProblems('state-', { ...st, refused: 'M1 join item 2, lane 2' }).join(), /none of them names `state-`/);
   assert.match(whoReadsProblems('state-', { ...st, refused: 'M1 join item 3, lane 2' }).join(), /none of them names `state-`/);
   assert.deepEqual(whoReadsProblems('state-', { ...st, refused: 'M1 join item 4, lane 2' }), [], 'item 4 names state- (the trip brief)');
   assert.match(whoReadsProblems('idea-', { ...OUTBOX_KINDS['idea-'], pending: 'M1 join item 5, lane 2' }).join(), /none of them names `idea-`/);

@@ -112,12 +112,16 @@ R-0b-82's decision and handoff code sit here although the row is tagged M11 (lan
    wiring passes it an adapter, e.g. `(a) => box(JSON.stringify(a))`; its `true` means queued, which is kept. Lane 2's M11
    undo step writes the exact_reverse card from an answered Undo ask (it joins on the ask's `card`, `pr`,
    `merge_commit_sha` and `module`, L81); the test uses a labelled stand-in for it until lane 2's PR is up.
-13. Apply a pause or away request to the product (L151 M-1). Lane 2: for each `state-` file intake takes in and
-   checks, approvals writes the product's state (paused, or away with its `until` and `tz`); only approvals may write
-   a product. "Confirmed: pause X" is pushed only after that write. Until this lands, the record refuses `state-`
-   (`refused` in shared OUTBOX_KINDS), so the owner hears "Not filed", never a pause that pauses nothing; this PR
-   turns `state-` into a record kind. Join item 4 (the trip brief, `nextTripPush`/`buildTripBrief`) waits on this: it
-   reads only stored `state-` files, so it must not be wired before this lands.
+13. Apply a pause or away request to the product (L151 M-1). Lane 1 (M2 approvals), on lane 2's intake: for each
+   `state-` file intake takes in and checks, approvals writes the product's state (paused, or away with its `until`
+   and `tz`); only approvals may write a product. "Confirmed: pause X" is pushed only after that write. Until this
+   lands, the skill writes no `state-` file and replies that pause and away aren't wired yet (L151, L167), and the
+   record refuses `state-` (`refused` in shared OUTBOX_KINDS), so a file written anyway gets "Not filed", never a
+   pause that pauses nothing. This PR turns `state-` into a record kind and brings the pause/away wording back from
+   `parked-skill-wording.md`. Join item 4 (the trip brief, `nextTripPush`/`buildTripBrief`) waits on this: it reads
+   only stored `state-` files, so it must not be wired before this lands. Item 4's trip push waits on the PR that
+   lands the trip consumer, which proves R-0b-83 on the phone before merging (L167 M-2), not on the first cutover:
+   while `state-` is refused there is no trip mode and nothing to push.
 
 ## Ledger: two lines per row (review-0b-8 MAT-10)
 
