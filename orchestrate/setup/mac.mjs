@@ -25,7 +25,7 @@
 // swap a child for a link between the plan and the change. Every change opens the folder itself (O_NOFOLLOW, folder
 // only), checks it is the very folder the plan saw, and changes it through that handle.
 
-import { unlinkSync, closeSync, constants, cpSync, fchmodSync, fchownSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, readlinkSync, realpathSync, rmSync, writeSync } from 'node:fs';
+import { renameSync, unlinkSync, closeSync, constants, cpSync, fchmodSync, fchownSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, readlinkSync, realpathSync, rmSync, writeSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { dirname, join } from 'node:path';
 import { chainProblem } from '../modules/M4-workshop/launcher/install-check.mjs';
@@ -77,6 +77,11 @@ export function writeNewFile(real, data, mode, own = null, { chown = fchownSync,
   try {
     if (own) { chown(fd, own.uid, own.gid); chmod(fd, own.mode); }
     const b = Buffer.isBuffer(data) ? data : Buffer.from(data, 'utf8'); let off = 0; while (off < b.length) off += writeSync(fd, b, off, b.length - off);
+  } catch (e) {
+    // This call made the file (exclusive create), so a step that fails after it removes the name: no empty or half-written file is
+    // left behind (L203 m-A). Only the name goes; whatever else may sit there now is never written or followed.
+    try { unlinkSync(real); } catch { /* the first error is the one to report */ }
+    throw e;
   } finally { closeSync(fd); }
 }
 
@@ -182,6 +187,7 @@ export function realIo({ prefix = '' } = {}) {
     write: (p, text, mode) => writeNewFile(at(p), text, mode),
     writeOwned: (p, text, own) => writeNewFile(at(p), text, own.mode, own),
     unlink: (p) => { try { unlinkName(at(p)); } catch (e) { if (e?.code !== 'ENOENT') throw e; } },
+    rename: (from, to) => renameSync(at(from), at(to)),   // one name over another in the same folder: a link at `to` is replaced, never followed; a folder there refuses
     copyFile: (src, p, mode) => writeNewFile(at(p), readFileSync(src), mode),
     copyTree: (src, p) => cpSync(src, at(p), { recursive: true, dereference: false, errorOnExist: true, force: false }),
     rm: (p) => rmSync(at(p), { recursive: true, force: true }),

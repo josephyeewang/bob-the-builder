@@ -452,11 +452,12 @@ test('L150 m1 a hard link already at the token name is only removed as a name: t
   assert.deepEqual(failing(checkToken(w.mac, w.cfg)), []);
 });
 
-test('L150 m1 the token file is made in one call that carries the owner and mode (unlink, write, chown, chmod — nothing reopens the name)', () => {
+test('L150 m1 L194 the token file is made in one call that carries the owner and mode, at a side name, then renamed over the old one (unlink side name, write, chown, chmod, rename — nothing reopens the name)', () => {
   const w = world(); w.mac.secretInput = SECRET; const mark = w.mac.log.length;
   assert.equal(w.run(['token']).code, 0);
   const steps = w.mac.log.slice(mark).filter((x) => x.includes('watch-only-token'));
-  assert.deepEqual(steps.map((x) => x.split(' ')[0]), ['unlink', 'write', 'chown', 'chmod']);
+  assert.deepEqual(steps.map((x) => x.split(' ')[0]), ['unlink', 'write', 'chown', 'chmod', 'rename']);
+  assert.ok(steps.slice(0, 4).every((x) => x.includes('watch-only-token.new')), steps.join('\n')); assert.ok(!existsSync(w.mac.at(`${tokenPath(cfg)}.new`)));
   assert.ok(!(w.mac.reopened ?? []).includes(tokenPath(cfg)), 'the token name was opened a second time to set its owner');
 });
 
@@ -559,7 +560,10 @@ test('L173 n2 PLANT a hard link to a victim swapped in at the token name right A
   assert.equal(readFileSync(victim, 'utf8'), 'keep\n'); assert.equal(statSync(victim).mode & 0o777, 0o644);
   assert.deepEqual(w.mac.owners.get('/victim2.txt'), { uid: 4242, gid: 4242 });
   assert.ok(swappedAt > 0, 'the swap happened');
-  assert.deepEqual(w.mac.log.slice(swappedAt).filter((x) => x.includes('watch-only-token')), [], 'nothing touched the token name after the swap');
+  // After the write only the rename runs (L194): it moves a NAME, so the victim's owner, mode and text stay as they were (above), and
+  // nothing chowns, chmods or writes through the name. What landed is the victim, not a token of orchestrate's: check-token says so.
+  assert.deepEqual(w.mac.log.slice(swappedAt).filter((x) => x.includes('watch-only-token')).map((x) => x.split(' ')[0]), ['rename'], 'something other than the rename touched the token name after the swap');
+  assert.equal(failing(checkToken(w.mac, w.cfg)).length, 1, 'check-token passed a victim at the token name');   // the stand-in keeps owners by name, so the reason here is its mode and size
   assert.doesNotMatch(r.text, new RegExp(SECRET));
 });
 
@@ -580,4 +584,90 @@ test('L173 n4 REAL realIo.unlink: removes one name (a file, a link without touch
   mkdirSync(join(d, 'dir')); writeFileSync(join(d, 'dir', 'inside'), 'precious');
   assert.throws(() => io.unlink('/dir'), /EISDIR|EPERM|EACCES/);
   assert.equal(readFileSync(join(d, 'dir', 'inside'), 'utf8'), 'precious');
+});
+
+// ───────────────────────────── L194: a failed token write keeps the token that works ─────────────────────────────
+
+test('L194 PLANT the write of a new token fails → the old token file is unchanged (it is never removed first); check-token still passes', () => {
+  const w = world(); w.mac.secretInput = SECRET; assert.equal(w.run(['token']).code, 0);
+  const f = w.mac.at(tokenPath(cfg));
+  w.mac.writeOwned = () => { throw Object.assign(new Error('no space left on device'), { code: 'ENOSPC' }); };
+  w.mac.secretInput = `${SECRET.slice(0, -4)}ZZZZ`;
+  const r = w.run(['token']); assert.equal(r.code, 1, r.text);
+  assert.equal(readFileSync(f, 'utf8'), `${SECRET}\n`); assert.deepEqual(failing(checkToken(w.mac, w.cfg)), []);
+  assert.doesNotMatch(r.text, new RegExp(SECRET.slice(0, 20)));
+});
+
+test('L194 PLANT the new token cannot be renamed over the old one → the old one is unchanged, the side name is removed, and the message says so', () => {
+  const w = world(); w.mac.secretInput = SECRET; assert.equal(w.run(['token']).code, 0);
+  const f = w.mac.at(tokenPath(cfg));
+  w.mac.rename = () => { throw Object.assign(new Error('nope'), { code: 'EIO' }); };
+  w.mac.secretInput = `${SECRET.slice(0, -4)}ZZZZ`;
+  const r = w.run(['token']); assert.equal(r.code, 1, r.text); assert.match(r.text, /old token file is unchanged/);
+  assert.equal(readFileSync(f, 'utf8'), `${SECRET}\n`); assert.ok(!existsSync(`${f}.new`), 'the new token was left at the side name');
+});
+
+test('L194 a side name left by a cut-off run is replaced as a name (a link there: its target untouched), and the token still lands', () => {
+  const w = world(); w.mac.secretInput = SECRET;
+  const victim = w.mac.at('/victim.txt'); writeFileSync(victim, 'keep\n', { mode: 0o644 });
+  symlinkSync(victim, w.mac.at(`${tokenPath(cfg)}.new`));
+  assert.equal(w.run(['token']).code, 0);
+  assert.equal(readFileSync(victim, 'utf8'), 'keep\n'); assert.equal(readFileSync(w.mac.at(tokenPath(cfg)), 'utf8'), `${SECRET}\n`);
+  assert.deepEqual(failing(checkToken(w.mac, w.cfg)), []);
+});
+
+// ───────────────────────────── L203: the #112 audit's probes, kept as tests ─────────────────────────────
+test('L203 m-A the side file is created and THEN the write fails (disk full mid-write / chown refused) → the side name is removed', () => {
+  const w = world(); w.mac.secretInput = SECRET; assert.equal(w.run(['token']).code, 0);
+  const f = w.mac.at(tokenPath(cfg)); const orig = w.mac.writeOwned.bind(w.mac);
+  w.mac.writeOwned = (p, text, own) => { orig(p, text.slice(0, 20), own); throw Object.assign(new Error('no space left on device'), { code: 'ENOSPC' }); };
+  w.mac.secretInput = `${SECRET.slice(0, -4)}ZZZZ`;
+  const r = w.run(['token']); assert.equal(r.code, 1, r.text);
+  assert.equal(readFileSync(f, 'utf8'), `${SECRET}\n`);
+  assert.ok(!existsSync(`${f}.new`), `the side file was left behind holding: ${existsSync(`${f}.new`) ? JSON.stringify(readFileSync(`${f}.new`, 'utf8')) : ''}`);
+});
+test('L203 m-A real writeNewFile: a refused chown on the open handle removes the file it made (nothing left at the name)', () => {
+  const d = tempDir('orch-probe-wnf-'); const p = join(d, 'watch-only-token.new');
+  assert.throws(() => writeNewFile(p, 'secret\n', 0o600, { uid: 1, gid: 1, mode: 0o600 }, { chown: () => { throw Object.assign(new Error('EPERM'), { code: 'EPERM' }); } }));
+  assert.ok(!existsSync(p), 'writeNewFile left an empty file at the side name after the chown failed');
+});
+test('L203 a hard link to a victim planted at the side name BEFORE the run: only the name is removed, the victim is untouched, the token lands', () => {
+  const w = world(); w.mac.secretInput = SECRET;
+  const victim = w.mac.at('/victim3.txt'); writeFileSync(victim, 'keep\n', { mode: 0o644 }); linkSync(victim, w.mac.at(`${tokenPath(cfg)}.new`));
+  assert.equal(w.run(['token']).code, 0);
+  assert.equal(readFileSync(victim, 'utf8'), 'keep\n'); assert.equal(statSync(victim).nlink, 1);
+  assert.equal(readFileSync(w.mac.at(tokenPath(cfg)), 'utf8'), `${SECRET}\n`);
+});
+test('L203 a symlink planted at the side name between the unlink and the write → the write refuses (exclusive, no-follow), the target is untouched, the old token stays', () => {
+  const w = world(); w.mac.secretInput = SECRET; assert.equal(w.run(['token']).code, 0);
+  const victim = w.mac.at('/victim4.txt'); writeFileSync(victim, 'keep\n', { mode: 0o644 });
+  const unlink = w.mac.unlink.bind(w.mac);
+  w.mac.unlink = (p) => { unlink(p); if (p.endsWith('.new')) symlinkSync(victim, w.mac.at(p)); };
+  w.mac.secretInput = `${SECRET.slice(0, -4)}ZZZZ`;
+  const r = w.run(['token']); assert.equal(r.code, 1, r.text);
+  assert.equal(readFileSync(victim, 'utf8'), 'keep\n'); assert.equal(readFileSync(w.mac.at(tokenPath(cfg)), 'utf8'), `${SECRET}\n`);
+});
+
+test('L203 c3 a folder put at the token name before the rename → the message says so (never "unchanged"); the side file is removed', () => {
+  const w = world(); w.mac.secretInput = SECRET; assert.equal(w.run(['token']).code, 0);
+  const f = w.mac.at(tokenPath(cfg)); const rename = w.mac.rename.bind(w.mac);
+  w.mac.rename = (a, b) => { rmSync(w.mac.at(b)); mkdirSync(w.mac.at(b)); rename(a, b); };
+  w.mac.secretInput = `${SECRET.slice(0, -4)}ZZZZ`;
+  const r = w.run(['token']); assert.equal(r.code, 1, r.text);
+  assert.match(r.text, /is now a folder, so the new token was not saved/); assert.doesNotMatch(r.text, /unchanged/);
+  assert.ok(!existsSync(`${f}.new`));
+});
+
+test('L203 c3 the clean-up of the side file fails too → the first error is the one reported', () => {
+  const w = world(); w.mac.secretInput = SECRET; assert.equal(w.run(['token']).code, 0);
+  const unlink = w.mac.unlink.bind(w.mac); let armed = false;
+  w.mac.unlink = (p) => { if (armed) throw Object.assign(new Error('clean-up refused'), { code: 'EPERM' }); unlink(p); };
+  w.mac.rename = () => { armed = true; throw Object.assign(new Error('nope'), { code: 'EIO' }); };
+  w.mac.secretInput = `${SECRET.slice(0, -4)}ZZZZ`;
+  const r = w.run(['token']); assert.equal(r.code, 1, r.text);
+  assert.match(r.text, /could not take the old one's place \(EIO\); the old token file is unchanged/); assert.doesNotMatch(r.text, /clean-up refused/);
+});
+
+test('L203 c4 PIN writeNewFile opens with O_NOFOLLOW as well as O_EXCL (O_EXCL already refuses a link, so only this pin notices the flag going)', () => {
+  assert.match(writeNewFile.toString(), /O_CREAT \| constants\.O_EXCL \| constants\.O_NOFOLLOW/);
 });

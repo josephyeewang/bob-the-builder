@@ -6,7 +6,7 @@
 // invalid, a write with no value is a bad call, a record that is not there reads as exit 56; chown needs root; mkdir
 // needs the parent and refuses an existing folder (those two are the real mkdir's own refusals, since it is the real one).
 
-import { unlinkSync, chmodSync, cpSync, fchmodSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, realpathSync, rmSync } from 'node:fs';
+import { renameSync, unlinkSync, chmodSync, cpSync, fchmodSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, realpathSync, rmSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { dirname, join } from 'node:path';
 import test from 'node:test';
@@ -185,6 +185,7 @@ export function fakeMac({ euid: as = 0, users = {}, admins = [] } = {}) {
     readText: (p) => readFileSync(at(p), 'utf8'),
     writeOwned(p, text, own) { mac.log.push(`write ${p}`); writeNewFile(at(p), text, own.mode, own, ports(p)); },
     unlink(p) { mac.log.push(`unlink ${p}`); try { unlinkSync(at(p)); } catch (e) { if (e?.code !== 'ENOENT') throw e; } mac.owners.delete(p); },
+    rename(from, to) { mac.log.push(`rename ${from} ${to}`); renameSync(at(from), at(to)); const o = mac.owners.get(from); mac.owners.delete(from); if (o) mac.owners.set(to, o); else mac.owners.delete(to); },   // the real call
     write(p, text, mode) { mac.log.push(`write ${p}`); writeNewFile(at(p), text, mode); mac.owners.set(p, { uid: -2, gid: -2 }); },   // no owner until the code sets one
     copyFile(src, p, mode) { mac.log.push(`copy ${p}`); writeNewFile(at(p), readFileSync(src), mode); mac.owners.set(p, { uid: -2, gid: -2 }); },
     copyTree(src, p) { mac.log.push(`copytree ${p}`); cpSync(src, at(p), { recursive: true, dereference: false, errorOnExist: true, force: false }); },
