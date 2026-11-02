@@ -35,9 +35,10 @@
 //     exact_reverse   USED: made by the Dispatcher from Joe's Undo tap (M11 undo.mjs), go-free.
 //     ordinary        USED as the docs change the gate merged (made by Joe's tab or the Lead; its making is not
 //                     this path, so it is seeded).
-//     research_copy   designed for the first cutover, but nothing makes one yet and the fixture does not make it
-//                     go-free (todo below, R-0b-135, L204-c). Until it is built, nothing on day one makes a docs change
-//                     for the gate to merge or an Undo to reverse; the ordinary card here is seeded (day-one audit M-2).
+//     research_copy   go-free in the fixture, as the fit check demands (L204-c); M11's start gate lets one per
+//                     product start at editing cap 0. Nothing makes one yet (R-0b-135's intake of research-R-<n>.md),
+//                     so nothing on day one makes a docs change for the gate to merge or an Undo to reverse; the
+//                     ordinary card here is seeded (day-one audit M-2).
 //     fix, lead_daily_card  NOT USED: the Lead plans a fix card and makes the daily card; the Lead is not on the
 //                     product.
 //   Product state: active (the fixture's product_state_rules.active.start is within_caps). paused is "no starts" by
@@ -132,8 +133,8 @@ test('the kinds list at the top is what the fixture and the modules say', () => 
   assert.equal(rules.num('caps.editing_per_product', { product: P }), 0);
   // script: off.
   assert.equal(rules.get('roles_enabled.script', { product: P }), 'none');
-  // Undo cards are go-free; nothing else is (research_copy is not, and the Lead's daily card has no files).
-  assert.deepEqual(goFreeKinds(rules, P), ['exact_reverse']);
+  // Undo cards and the research lane's copy cards are go-free (L204-c); the Lead's daily card has no files.
+  assert.deepEqual(goFreeKinds(rules, P), ['exact_reverse', 'research_copy']);
   assert.deepEqual(rules.get('approvals.plan_go.go_free.lead_daily_card', { product: P }), []);
   assert.ok(CARD_CREATORS.dispatcher.includes('exact_reverse'));
   assert.ok(CARD_KINDS.includes('research_copy') && CARD_KINDS.includes('exact_reverse'));
@@ -269,9 +270,24 @@ test('with no product document today, the gaps are exactly the known ones (pause
   assert.match(start.reason, /no product record/);
 });
 
-test('a research_copy card is ready on day one with no go', { todo: 'R-0b-135, L204-c (lane 2, M11): nothing makes a research_copy card yet, and the first-cutover rules do not set go_free.research_copy' }, () => {
+test('a research_copy card is ready on day one with no go', () => {
   const { rules } = dayOne();
   assert.ok(goFreeKinds(rules, P).includes('research_copy'));
+});
+
+// L204-c: the research lane's copy card starts at the fixture's editing cap 0, one per product (M11's start gate).
+const COPY = Object.freeze({ id: 'RC-1', kind: 'research_copy', product: P, tier: 2, files: ['docs/research/R-1.md'] });
+test('M11\'s start gate starts a research_copy card on day one, at editing cap 0', () => {
+  const w = dayOne();
+  const a = startGate({ rules: w.rules, rec: w.rec, card: COPY, kind: 'editing', product: P, b: green(w.rules), running: [] });
+  assert.equal(a.ok, true, a.reason);
+  assert.equal(a.missing, undefined);
+});
+
+test('M10\'s start question: a worker for a research_copy card may start on day one', { todo: 'L204-c M10 half (lane 3, after #118): the start question refuses a research_copy start at editing cap 0' }, () => {
+  const { rules } = dayOne();
+  const may = rules.may('start_session', { product: P, card: COPY, role: 'worker', tier: 2, editing: true });
+  assert.equal(may.decision, 'allow', may.reason);
 });
 
 // ---- M6's checks step: the real gatherFacts over fake GitHub, then judge ----

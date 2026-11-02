@@ -31,6 +31,7 @@ import { KEYS as M11_KEYS, need } from '../M11-dispatcher/keys.mjs';
 import { editingLimits } from '../M11-dispatcher/gate.mjs';
 import { PRODUCT_STATES } from './policy.mjs';
 import { SCOPE_OWNERS, scopeLabel } from './known-gaps.mjs';
+import { goFreeKinds } from '../M9-record/ready.mjs';
 
 // M11 has no required-keys file of its own yet (lane 2's folder), so its entry is built here from M11's own exports:
 // every key in KEYS, NEW_KEYS included, each read by M11's need() with its type at the key's own scope, plus the real
@@ -108,7 +109,16 @@ export function firstCutoverProblems(text, entry, existing = []) {
   // Policy (L96 m-1): with no required check the gate would check nothing, so the first cutover names at least one.
   const checks = p.product_profile?.required_checks;
   if (Array.isArray(checks) && !checks.length) out.push('product_profile.required_checks must name at least one check (policy)');
-  out.push(...moduleProblems(p, typeof entry?.product === 'string' && entry.product ? entry.product : 'product'));
+  const product = typeof entry?.product === 'string' && entry.product ? entry.product : 'product';
+  const mods = moduleProblems(p, product);
+  out.push(...mods);
+  // The research lane's copy card is the first cutover's whole point (L204-c, R-0b-135): it must reach ready with no
+  // go, as the Record reads it. A reason a module already gives about the whole go_free map, or about this key, is not
+  // said twice.
+  const said = (x) => x.includes(`${GO_FREE_MAP} `) || x.includes(`${GO_FREE_COPY} `);
+  if (!mods.some(said) && !goFreeKinds(engineRules(p, product), product).includes('research_copy')) {
+    out.push(`${GO_FREE_COPY} must be true at the first cutover (the research lane's copy card, L204-c)`);
+  }
   if (entry !== undefined) {
     let e;
     try { e = checkProducts([...existing, entry]).at(-1); } catch (err) { out.push(`the products.json entry is malformed: ${err.message}`); }
@@ -117,9 +127,12 @@ export function firstCutoverProblems(text, entry, existing = []) {
   return out;
 }
 
-// Every key a module needs, read through M10's real engine as that module reads it.
-export function moduleProblems(policy, product) {
-  const rules = makeRules(makeEngine({
+const GO_FREE_MAP = 'approvals.plan_go.go_free';
+export const GO_FREE_COPY = `${GO_FREE_MAP}.research_copy`;
+
+// M10's real engine over one parsed policy, for one active product with nothing running.
+function engineRules(policy, product) {
+  return makeRules(makeEngine({
     products: [product],
     rulesState: () => ({ status: 'ok', policy, commit: '0'.repeat(40), blob: '0'.repeat(40) }),
     productState: () => ({ state: 'active' }),
@@ -127,6 +140,11 @@ export function moduleProblems(policy, product) {
     rolesDir: ROLES_DIR,
     clock: () => Date.now(),
   }));
+}
+
+// Every key a module needs, read through M10's real engine as that module reads it.
+export function moduleProblems(policy, product) {
+  const rules = engineRules(policy, product);
   const out = [];
   const missing = new Set(MODULE_KEYS.filter((k) => { const v = rules.get(k, { product }); return v === undefined || v === null; }));
   for (const k of missing) {

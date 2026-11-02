@@ -50,6 +50,7 @@ approvals:
   plan_go:
     go_free:
       exact_reverse: true
+      research_copy: true
       lead_daily_card: []
   push_windows: ['08:00', '17:00']
   decisions_dir: docs/decisions
