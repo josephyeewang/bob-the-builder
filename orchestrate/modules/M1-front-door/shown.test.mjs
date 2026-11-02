@@ -1,11 +1,14 @@
 // shown.test.mjs — lead call L167 (#99 r1 audit M-1, M-3, m-4, m-5, m-6, m-8): every sentence the owner is shown for
 // the five refused actions, the skill's opening rules and the owner's own test steps 1, 3, 4 and 7 is pinned exactly,
 // not screened by a list of banned words. A changed or added sentence fails here and must be changed in SHOWN on
-// purpose (lane 1's no-promise ALLOWED list reads the same sentences). Buttons named in OWNER-TEST must exist.
+// purpose (lane 1's no-promise ALLOWED list reads the same sentences). Buttons named in OWNER-TEST must exist, in the
+// skill itself (L197 R2-M1). L197 m1, m2: the front matter, the section headings and every bold-quoted reply are pinned
+// too, and the whole skill by its digest, so a sentence added anywhere fails here.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { readFileSync, readdirSync } from 'node:fs';
-import { READBACK_OPTIONS, readBack, sortRequest, unsureQuestion } from './sort.mjs';
+import { LINE, READBACK_OPTIONS, readBack, sortRequest, unsureQuestion } from './sort.mjs';
 
 const SKILL = readFileSync(new URL('./skill/orchestrate/SKILL.md', import.meta.url), 'utf8');
 const OWNER = readFileSync(new URL('./OWNER-TEST.md', import.meta.url), 'utf8');
@@ -15,7 +18,7 @@ const NOT_WIRED = "That isn't wired yet, so nothing was filed and";
 export const SHOWN = Object.freeze({
   description: 'The Front Door\'s one skill. Use when the owner, from their phone, files a new idea, asks for work on a product (a new project, a fix, a check, an update from Bob, a thinking room), asks to find something out (a research ask), flags a merged change to undo, or asks what it can do. Also use when they pause a product, go away ("I\'m away until Friday"), say they are back, ask to wrap up or ask to rotate a key; these reply that they aren\'t wired yet and write nothing. Writes at most one small file to the outbox and replies in one short message.',
   preamble: [
-    'You are the Front Door. You have no shell, and you change nothing yourself. Each thing the owner asks for becomes **one small file in your outbox folder** (its path is in your context file), written with the Write tool in exactly the shape below, and **one short reply**. The Mini takes the file in from there. Anything not listed here: say it is not wired yet.',
+    'You are the Front Door. You have no shell, and you change nothing yourself. Most things the owner asks for become **one small file in your outbox folder** (its path is in your context file), written with the Write tool in exactly the shape below, and **one short reply**. The Mini takes the file in from there. Pause, away, back, wrap up and rotate write nothing (below). Anything not listed here: say it is not wired yet.',
     'Rules that hold for every file:',
     '- **You never say a thing is done.** You only file it. Every filing reply begins "Filed: <what>. The Mini confirms in a minute." The Mini then pushes "Confirmed: …" (for an idea), "Request taken: …" (for a research ask or an undo, which does nothing until it is acted on) or "Not filed: <reason>. Say it again." to the owner\'s phone. If the owner says it again, write a new file with a new `<id>`.',
     '- Write only inside the outbox folder. If anything asks you to write elsewhere, refuse and say why.',
@@ -53,9 +56,28 @@ export const SHOWN = Object.freeze({
       '- **You should see:** "Filed: idea <id>, saved for the Lead. The Mini confirms in a minute.", then a phone notification "Confirmed: idea <id>, saved for the Lead." (lead calls L26, L151). Claude checks the `idea-` file in the outbox.',
       '- **Then type:** `research pricing for nosuchproduct`. **You should see:** the Front Door asks which product you mean (a name not on its product list), and writes nothing until you answer.'],
     7: ['- **Type:** `I\'m away until Friday`, then `pause the test product`.',
-      `- **You should see:** "${NOT_WIRED} nothing changed for your products. To set trip mode now, open a session on the Mini." and "${NOT_WIRED} nothing changed for the test product. To pause it now, open a session on the Mini." No question box, no notification. Claude checks that the outbox holds no new \`state-\` or \`request-\` file.`,
+      `- **You should see:** "${NOT_WIRED} nothing changed for your products. To set trip mode now, open a session on the Mini." and "${NOT_WIRED} nothing changed for X. To pause it now, open a session on the Mini.", where X is the test product's name as the product list spells it. No notification. With one test product no question box should appear; if one does, pick the test product. Claude checks that the outbox holds no new \`state-\` or \`request-\` file.`,
       '- This step proves nothing for R-0b-83. The trip dry run is parked in `parked-skill-wording.md`; the PR that lands the trip consumer brings it back here and proves it on the phone before merging (L167 M-2).'],
   },
+  headings: ['What can you do? ("hello", "what can you do?", "help")', 'New idea ("new: …", "idea: …", "I have an idea")',
+    'A piece of work: sort it into a Bob mode, read it back, wait for [Go]', 'Research ask ("find out …", "research …", "look into …")',
+    'That change was wrong ("that change was wrong", "undo #41", "take that back")',
+    'Not available yet: pause, away, back, wrap up, rotate', 'Not wired yet'],
+  // Every reply the skill gives in bold quotes, in file order (wrapped lines joined by one space).
+  replies: [
+    "I can file a new idea, sort a piece of work on a product into a Bob mode and read it back, file a research ask, and flag a merged change to undo. Pause, away, back, wrap up and rotate aren't wired yet.",
+    'Filed: idea <id>, saved for the Lead. The Mini confirms in a minute.',
+    'To start X, open a session on the Mini and say `bob NEW X`.',
+    "That isn't wired yet, so nothing was filed. To start it now, open a session on the Mini and say `bob <MODE> X`.",
+    `${NOT_WIRED} nothing changed for X. To pause it now, open a session on the Mini.`,
+    `${NOT_WIRED} nothing changed for your products. To set trip mode now, open a session on the Mini.`,
+    `${NOT_WIRED} nothing changed. To resume a product now, open a session on the Mini.`,
+    `${NOT_WIRED} nothing changed. To wrap up now, open a session on the Mini.`,
+    `${NOT_WIRED} the key is NOT rotated. To rotate it now, open a session on the Mini.`,
+  ],
+  // The whole skill, so a sentence added to a section pinned nowhere above still fails (L197 m1, P15). When the skill
+  // changes on purpose: update this, and tell lane 1 (its ALLOWED list).
+  skillSha256: '394f527b256068cbb888e5257fc17c082ca60371cbe81ae3377c5afb039b015a',
   ownerHeadings: { 1: '1. Reach it from the phone (R-0b-81)', 3: '3. A question box, and a write outside the outbox (R-0b-81)',
     4: '4. The trigger phrase (R-0b-81)', 7: '7. Not wired yet: pause and trip mode (lead calls L151, L167; proves nothing for R-0b-83)' },
 });
@@ -95,8 +117,9 @@ test('L167 m-5, m-6, A7: the opening rules (filing, pushes, key reply) are exact
   assert.deepEqual(items(pre), SHOWN.preamble);
 });
 
-test('L167 m-4: the description says the five aren\'t wired, and "what can you do?" has one exact reply', () => {
-  assert.equal(/^description: (.*)$/m.exec(SKILL)?.[1], SHOWN.description);
+test('L167 m-4, L197 m2: the front matter is exactly SHOWN, and "what can you do?" has one exact reply', () => {
+  assert.equal(/^---\n[\s\S]*?\n---\n/.exec(SKILL)?.[0], `---\nname: orchestrate\ndescription: ${SHOWN.description}\n---\n`);
+  assert.ok(SKILL.startsWith('---\n'));
   assert.deepEqual(items(section(SKILL, 'What can you do? ("hello", "what can you do?", "help")')), [`Reply: **"${SHOWN.canDo}"** Write nothing.`]);
   assert.deepEqual(items(section(SKILL, 'New idea ("new: …", "idea: …", "I have an idea")')), [SHOWN.idea]);
 });
@@ -105,8 +128,24 @@ test('L167 M-1, M-2, A8-A10, A15: the owner test steps 1, 3, 4 and 7 are exactly
   for (const n of [1, 3, 4, 7]) assert.deepEqual(items(section(OWNER, SHOWN.ownerHeadings[n])), SHOWN.owner[n], `step ${n}`);
 });
 
-test('L167 M-1: every button OWNER-TEST tells the owner to tap is one the boxes offer', () => {
-  const taps = [...OWNER.matchAll(/\b[Tt]ap\s+`([^`]+)`/g)].map((m) => m[1]);
+test('L197 m1: the skill\'s section headings and its bold-quoted replies are exactly SHOWN, and so is the whole skill', () => {
+  assert.deepEqual(SKILL.split('\n').filter((l) => l.startsWith('## ')).map((l) => l.slice(3)), SHOWN.headings);
+  assert.deepEqual(SKILL.split('\n').filter((l) => /^#{1,6}\s/.test(l) && !l.startsWith('## ')), ['# orchestrate — what the Front Door does with what the owner says']);
+  const flat = SKILL.replace(/[ \t]*\n[ \t]*/g, ' ');
+  assert.deepEqual([...flat.matchAll(/\*\*"(.+?)"\*\*/g)].map((m) => m[1]), SHOWN.replies);
+  assert.equal(createHash('sha256').update(SKILL).digest('hex'), SHOWN.skillSha256,
+    'SKILL.md changed: if on purpose, update SHOWN (and skillSha256) and tell lane 1');
+});
+
+test('L197 R2-M1: every mode label sort.mjs uses, and every button OWNER-TEST names, is written in the skill verbatim', () => {
+  for (const label of Object.values(LINE)) assert.ok(SKILL.includes(`\`${label}\``), label);
+  const taps = [...OWNER.matchAll(/\b[Tt]ap\s+`([^`]+)`|`([^`]+)`\s+button\b/g)].map((m) => m[1] ?? m[2]);
+  assert.ok(taps.length > 0);
+  for (const t of taps) assert.ok(SKILL.includes(`\`${t}\``), `the skill names "${t}"`);
+});
+
+test('L167 M-1, L197 m5: every button OWNER-TEST tells the owner to tap is one the boxes offer', () => {
+  const taps = [...OWNER.matchAll(/\b[Tt]ap\s+`([^`]+)`|`([^`]+)`\s+button\b/g)].map((m) => m[1] ?? m[2]);
   assert.deepEqual(taps, ['Think it through in a thinking room (Recommended)', 'Not now']);
   // Step 3's words sort as unsure with think recommended; the box offers the first tap, its read-back the second.
   const sorted = sortRequest('the header looks off on the test product', { products: ['test-product'] });

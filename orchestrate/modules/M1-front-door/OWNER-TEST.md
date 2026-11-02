@@ -58,9 +58,10 @@ Claude records each result as the second ledger line for its row (README). Use t
 
 - **Type:** `I'm away until Friday`, then `pause the test product`.
 - **You should see:** "That isn't wired yet, so nothing was filed and nothing changed for your products. To set trip
-  mode now, open a session on the Mini." and "That isn't wired yet, so nothing was filed and nothing changed for the
-  test product. To pause it now, open a session on the Mini." No question box, no notification. Claude checks that
-  the outbox holds no new `state-` or `request-` file.
+  mode now, open a session on the Mini." and "That isn't wired yet, so nothing was filed and nothing changed for X. To
+  pause it now, open a session on the Mini.", where X is the test product's name as the product list spells it. No
+  notification. With one test product no question box should appear; if one does, pick the test product. Claude
+  checks that the outbox holds no new `state-` or `request-` file.
 - This step proves nothing for R-0b-83. The trip dry run is parked in `parked-skill-wording.md`; the PR that lands
   the trip consumer brings it back here and proves it on the phone before merging (L167 M-2).
 

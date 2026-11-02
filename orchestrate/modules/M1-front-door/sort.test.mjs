@@ -66,7 +66,7 @@ test('R-0b-137: the skill\'s cue table and buttons match sort.mjs', () => {
     for (const c of CUES[mode]) assert.ok(row.toLowerCase().includes(c.trim().replace("lets think", "let's think")), `${mode}: ${c}`);
   }
   for (const o of READBACK_OPTIONS) assert.ok(SKILL.includes(`\`${o}\``), o);
-  assert.ok(SKILL.includes('"(Recommended)"'));
+  assert.ok(SKILL.includes('" (Recommended)" after its'));
   assert.ok(SKILL.includes('Cue words count only as whole words'));
   assert.ok(SKILL.includes('"build a new …" on its own') && SKILL.includes('When no cue fits, recommend think'));
   // Minor 9: the mode requests are under "not wired yet", and the skill never says "Filed" for them.

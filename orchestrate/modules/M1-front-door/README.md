@@ -1,7 +1,8 @@
 # M1 Front Door
 
 Lane 3 builds this folder (LANES.md). The Front Door is the one session the owner reaches from their phone. It has no shell:
-everything they ask for becomes one small file in its outbox and one short reply. Milestone 0b-8 is its minimum.
+most things they ask for become one small file in its outbox and one short reply; pause, away, back, wrap up and rotate
+write nothing yet. Milestone 0b-8 is its minimum.
 
 | File | Row | What it does |
 |---|---|---|
@@ -52,9 +53,11 @@ R-0b-82's decision and handoff code sit here although the row is tagged M11 (lan
    phone over the Front Door's push path and its `ids` stored as `lastPushedIds` (lead call L22); a result with
    `failed: true` (the brief couldn't be built) is pushed too, but its `ids` go to `lastFailedIds`, never
    `lastPushedIds`, so the next passes keep trying and push the real brief once it builds; pass both lists back in
-   every time (each one replaced by the newest result of its kind; an old `lastFailedIds` is harmless, since ids are never reused). The pass also writes each result's text (a brief or a failure) to the read-only file the skill quotes
-   if the owner asks first, and runs `readPowerSource` with the
-   heartbeat. The skill quotes only a brief that names the ids it wrote (0b-8 audit round 3 M-3). The first cutover
+   every time (each one replaced by the newest result of its kind; an old `lastFailedIds` is harmless, since ids are never reused). The pass also runs `readPowerSource` with the
+   heartbeat. The live skill quotes no trip brief now: that quoting (the read-only brief file, and the rule that the
+   skill quotes only a brief naming the ids it wrote, 0b-8 audit round 3 M-3) is parked with the trip wording in
+   `parked-skill-wording.md` (lead calls L151, L167); `trip.mjs` still builds the brief, and the PR that lands the trip
+   consumer brings the quoting back. The first cutover
    does not wait on this push while trip mode is refused (lead call L167 M-2): L29's gate moves to the PR that lands
    the trip consumer, which proves R-0b-83 on the phone before merging. There is no trip mode without the push.
 5. Lane 2: its launch read-back checker replaces `readback.mjs` at the join; the two agree on EndConversation and on
