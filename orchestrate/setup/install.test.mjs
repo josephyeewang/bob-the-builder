@@ -4,7 +4,7 @@
 // PLANT tests break one clause each and name the check that catches it. The last tests run read-only tools on this Mac.
 
 import assert from 'node:assert/strict';
-import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, fchmodSync, renameSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { dirname, join, resolve } from 'node:path';
@@ -13,7 +13,7 @@ import { gitOk } from '../modules/M4-workshop/git/safe-git.mjs';
 import { SCRIPTS, reviewDaemonPlists, updaterPlist } from '../modules/M4-workshop/launcher/review-daemons.mjs';
 import { NODE, RUNNER_CONFIG, STAMP, UPDATER_CONFIG } from '../modules/M4-workshop/launcher/install-check.mjs';
 import { MUST_KEEP } from '../modules/M4-workshop/launcher/review-updater.mjs';
-import { realIo } from './mac.mjs';
+import { realIo, writeNewFile } from './mac.mjs';
 import { ROOT_CONFIG_PATH } from './layout.mjs';
 import { BOOTSTRAP_FILES, LABEL_RE, installPaths, parseInstallConfig, spawnUpdater, updaterCommand, updaterConfigFor } from './install.mjs';
 import { JOBS, checkDaemons, list, plistTexts } from './daemons.mjs';
@@ -596,11 +596,11 @@ test('a job file written where a link sits replaces the link itself; the link\'s
 
 // ───────────────────────────── A8: reload the account job only if it is loaded ─────────────────────────────
 
-test('reload-account: the job is not loaded → nothing to do, exit 0, the Mac not touched (a no-op, as the runbook expects on a fresh Mini)', async () => {
+test('L173 n5 reload-account: the job is not loaded → says plainly "the account job … is not loaded … Run: daemons load", exit 1, never "nothing to do" or "done", the Mac not touched', async () => {
   const w = await placed(); const n = w.mac.log.length;
   const r = w.run(['daemons', 'reload-account']);
-  assert.equal(r.code, 0, r.text); assert.match(r.text, /nothing to do/); assert.equal(w.mac.log.length, n);
-  const d = w.run(['daemons', 'reload-account', '--dry-run']); assert.equal(d.code, 0); assert.match(d.text, /nothing to do/);
+  assert.equal(r.code, 1, r.text); assert.match(r.text, /the account job \(.*review-account\) is not loaded.*Run: daemons load/); assert.doesNotMatch(r.text, /nothing to do|done/); assert.equal(w.mac.log.length, n);
+  const d = w.run(['daemons', 'reload-account', '--dry-run']); assert.equal(d.code, 1); assert.match(d.text, /is not loaded/);
 });
 
 test('reload-account: loaded with an OLD file (no --install) → the file is rewritten to carry --install <the installed copy>, unloaded, loaded; the other jobs untouched', async () => {
@@ -629,7 +629,7 @@ test('PLANT reload-account when /Library is writable by others → no step runs 
 });
 
 test('reload-account refuses when not root; --dry-run does not need root', async () => {
-  const w = await placed(); w.mac.as = 1234;
+  const w = await placed(); assert.equal(w.run(['daemons', 'load']).code, 0); w.mac.as = 1234;   // loaded, so a dry run has a reload to show
   assert.equal(w.run(['daemons', 'reload-account']).code, 2);
   assert.equal(w.run(['daemons', 'reload-account', '--dry-run']).code, 0);
 });
@@ -717,6 +717,19 @@ test('L149 m3 m2 m7 daemons check FAILS on a leftover job under another label, a
   rj.ageS = 2 * 86400; assert.equal(w.run(['daemons', 'check']).code, 1, 'days (dd-hh:mm:ss) counts');
   const pid = rj.pid; delete rj.pid; r = w.run(['daemons', 'check']); assert.equal(r.code, 1, r.text); assert.match(r.text, /no running process and has never finished a run/);
   rj.pid = pid; rj.ageS = 5; rj.lastExit = '0'; assert.equal(w.run(['daemons', 'check']).code, 0);
+  // L169 m1: a LATER run that hangs (pid present, last exit 0) fails too, because launchd starts no new run while one is going
+  rj.ageS = 3 * 3600; r = w.run(['daemons', 'check']); assert.equal(r.code, 1, r.text); assert.match(r.text, new RegExp(`FAIL  ${LABEL}.review-runner's current run is not stuck.*has been going for 180 minutes`));
+  rj.ageS = 29 * 60; assert.equal(w.run(['daemons', 'check']).code, 0, 'a young later run passes');
+  rj.ageS = 31 * 60; assert.equal(w.run(['daemons', 'check']).code, 1, 'L180 m5a: 31 minutes is over the 30-minute limit (a 60-minute limit would pass this)');
+  rj.ageS = 30 * 60; assert.equal(w.run(['daemons', 'check']).code, 0, 'exactly 30 minutes still passes'); rj.ageS = 29 * 60;
+  // L169 a4: a pid that ps does not know (prints nothing): never-exited fails with "no running process"; a job that has exited before just passes
+  rj.ageS = 5; const known = rj.pid; rj.pid = 7777; const realPs = w.mac.ps; w.mac.ps = (a) => (Number(a[3]) === rj.pid ? { status: 0, stdout: '', stderr: '' } : realPs(a)); rj.lastExit = '0'; const q = w.run(['daemons', 'check']); assert.equal(q.code, 0, q.text);
+  delete rj.lastExit; r = w.run(['daemons', 'check']); assert.equal(r.code, 1, r.text); assert.match(r.text, /no running process and has never finished a run/);
+  // L180 m5b: ps answers (exit 0) with something unreadable: unlike printing nothing, that FAILs, for a later run and a first run
+  w.mac.ps = (a) => (Number(a[3]) === rj.pid ? { status: 0, stdout: 'garbled output\n', stderr: '' } : realPs(a));
+  rj.lastExit = '0'; r = w.run(['daemons', 'check']); assert.equal(r.code, 1, r.text); assert.match(r.text, /could not be read/);
+  delete rj.lastExit; r = w.run(['daemons', 'check']); assert.equal(r.code, 1, r.text); assert.match(r.text, /could not be read/); assert.doesNotMatch(r.text, /NaN/);
+  w.mac.ps = realPs; rj.pid = known; rj.lastExit = '0'; assert.equal(w.run(['daemons', 'check']).code, 0);
   // unload forgets the fingerprints: a job loaded again is recorded again
   assert.equal(w.run(['daemons', 'unload']).code, 0); assert.deepEqual(JSON.parse(readFileSync(w.mac.at(`${BASE}/install/loaded-jobs.json`), 'utf8')), {});
 });
@@ -769,7 +782,7 @@ test('L150 m2 reload-account: a load that fails leaves the job unloaded; the sto
   const w = await placed(); assert.equal(w.run(['daemons', 'load']).code, 0);
   const f = plistFile(w, 'review-account'); rmSync(f); writeFileSync(f, 'old text', { mode: 0o644 });
   w.mac.failBootstrap = new Set([`${LABEL}.review-account`]);
-  let r = w.run(['daemons', 'reload-account']); assert.equal(r.code, 1, r.text); assert.match(r.text, /could not load .*run: daemons load/);
+  let r = w.run(['daemons', 'reload-account']); assert.equal(r.code, 1, r.text); assert.match(r.text, /could not load .*run: daemons load/); assert.doesNotMatch(r.text, /Run it again after fixing that/, 'one instruction, not two (L173 n5)');
   assert.ok(!w.mac.loaded.has(`${LABEL}.review-account`));
   r = w.run(['daemons', 'reload-account']); assert.equal(r.code, 1, r.text); assert.match(r.text, /is NOT loaded now/); assert.match(r.text, /Run: daemons load/); assert.doesNotMatch(r.text, /nothing to do|done\./);
   w.mac.failBootstrap = null;
@@ -786,10 +799,11 @@ test('L150 m2 a load that says yes but leaves nothing loaded is a failure: load 
   w.mac.users.get('sam').NFSHomeDirectory = '/Users/sam2'; w.run(['daemons', 'place']);
   w.mac.bootstrapLies = new Set([`${LABEL}.review-account`]);
   r = w.run(['daemons', 'reload-account']); assert.equal(r.code, 1, r.text); assert.match(r.text, /is NOT loaded after the load/);
+  assert.match(r.text, /run: daemons load/i); assert.doesNotMatch(r.text, /run it again/i, 'L180 m1: one instruction, not two');
 });
 
-test('L150 m2 reload-account on a fresh Mini (never loaded, nothing recorded) is still a plain no-op', async () => {
-  const w = await placed(); const r = w.run(['daemons', 'reload-account']); assert.equal(r.code, 0, r.text); assert.match(r.text, /nothing to do/);
+test('L173 n5 reload-account on a fresh Mini (never loaded, nothing recorded) says the account job is not loaded and to run daemons load', async () => {
+  const w = await placed(); const r = w.run(['daemons', 'reload-account']); assert.equal(r.code, 1, r.text); assert.match(r.text, /is not loaded.*Run: daemons load/); assert.doesNotMatch(r.text, /nothing to do/);
 });
 
 test('L160 m6 a nodeBin that is a link (even to a root-safe node) is refused at plan time: the copy would be made from the name, not the checked file', async () => {
@@ -809,13 +823,33 @@ test('L160 m4 the runner config is read ONCE: the copy root installs is the text
   assert.equal(readFileSync(w.mac.at(`${BASE}/install/orchestrate/review.json`), 'utf8'), checked);
 });
 
-test('L160 m5 the install dry run WARNS that root takes the runner config only if it is root\'s own, unwritable by others, in root-only folders; a real run and a no-op dry run do not', async () => {
+test('L169 m4 the install dry run runs root\'s own read of the runner config and WARNS only when root would refuse it, with the exact reason; a real run and a no-op dry run do not', async () => {
   const w = await world();
+  const ok = w.run(['install', '--dry-run']); assert.equal(ok.code, 0, ok.text); assert.doesNotMatch(ok.text, /WARNING/, 'a file root would take: no warning');
+  const asWas = w.mac.as; w.mac.as = 501; w.mac.sourceOwner = w.mac.rootUid + 1;   // a dry run as an ordinary user; the file is someone else's, as far as root's read can tell
   const r = w.run(['install', '--dry-run']); assert.equal(r.code, 0, r.text);
-  assert.match(r.text, /WARNING  root will refuse .*review\.json unless it is root's own file.*sudo install -o root -g wheel -m 0644 \/dev\/stdin/);
+  assert.match(r.text, /WARNING  root will refuse .*review\.json: .*not owned by root/);
+  assert.match(r.text, /folder only you can open.*sudo install -o root -g wheel -m 0644 \/dev\/stdin .*set runnerConfig in your settings/);
+  assert.doesNotMatch(r.text, /can't check that/);
+  w.mac.sourceOwner = null; w.mac.as = asWas;
   const real = w.run(['install']); assert.equal(real.code, 0, real.text); assert.doesNotMatch(real.text, /WARNING/);
   const again = w.run(['install', '--dry-run']); assert.doesNotMatch(again.text, /WARNING/);   // nothing left to do: nothing to warn about
 });
+
+test('L169 a8 the copy root installs is the text that was checked even if the source file changes right after the read (no second read of the path)', async () => {
+  const w = await world(); const orig = w.mac.readSource; const checked = readFileSync(w.raw.runnerConfig, 'utf8');
+  w.mac.readSource = (p) => { const t = orig(p); writeFileSync(p, `{"swapped":true}\n`); return t; };
+  const r = w.run(['install']); assert.equal(r.code, 0, r.text);
+  assert.equal(readFileSync(w.mac.at(`${BASE}/install/orchestrate/review.json`), 'utf8'), checked);
+});
+
+test('L169 a11/a14 the REAL io refuses a node program named by a link or with a trailing slash (it must be its own real place)', () => {
+  const d = realpathSync(tempDir('orch-a11-')); const io = realIo();
+  const lnk = join(d, 'node'); symlinkSync(process.execPath, lnk);
+  assert.match(io.nodeBinProblem(lnk), /not the program's own real place/);
+  assert.match(io.nodeBinProblem(`${process.execPath}/`) ?? '', /not the program's own real place|could not find/);
+});
+
 
 test('L160 c3 the REAL readers name which config they refuse: the runner config (readSource) and the setup config (readConfig)', () => {
   const d = realpathSync(tempDir('orch-c3-')); const io = realIo();
@@ -860,4 +894,20 @@ test('R6 m-6 a watch-only job file left under an old label is flagged by a full 
   assert.equal(w.run(['daemons', 'place']).code, 0);
   writeFileSync(w.mac.at('/Library/LaunchDaemons/com.example.oldlabel.watch-only.plist'), 'x');
   const r = w.run(['daemons', 'check']); assert.equal(r.code, 1, r.text); assert.match(r.text, /oldlabel\.watch-only\.plist/);
+});
+
+test('L180 m4 the REAL realIo.readSourceStrict: a root-owned file with no links is read, a file you own is refused, a path through a link is refused, and no message shows the file\'s bytes', { skip: !isDarwin || process.getuid?.() === 0 }, () => {
+  const io = realIo(); const dir = tempDir('orch-strict-'); const mine = join(dir, 'review.json'); writeFileSync(mine, 'zz-secret-marker-text', { mode: 0o644 });
+  assert.equal(typeof io.readSourceStrict('/private/etc/protocols'), 'string');                        // root's, 0644, every folder above root's, no link
+  assert.throws(() => io.readSourceStrict(mine), (e) => /not owned by root/.test(e.message) && !/zz-secret/.test(e.message));
+  assert.throws(() => io.readSourceStrict('/etc/protocols'), (e) => /link/.test(e.message) && !/zz-secret/.test(e.message));   // /etc is a link to /private/etc
+});
+
+test('L180 m5c writeNewFile with `own` never touches the name again after the handle is closed: a file swapped in at the name keeps its mode', () => {
+  const dir = tempDir('orch-wnf-'); const f = join(dir, 'secret');
+  let swapped = false;
+  const chmod = (fd, mode) => { fchmodSync(fd, mode); if (!swapped) { swapped = true; renameSync(f, `${f}.moved`); writeFileSync(f, 'decoy\n', { mode: 0o600 }); } };
+  writeNewFile(f, 'token\n', 0o600, { uid: process.getuid(), gid: process.getgid(), mode: 0o640 }, { chmod });
+  assert.equal(statSync(`${f}.moved`).mode & 0o7777, 0o640, 'the handle got the mode');
+  assert.equal(statSync(f).mode & 0o7777, 0o600, 'the file swapped in at the name was touched by name'); assert.equal(readFileSync(f, 'utf8'), 'decoy\n');
 });

@@ -16,6 +16,7 @@ See LANES.md for who builds this folder, and the build rows (0b-2, R-0b-20..28) 
 | `ready.mjs` | The one ready rule, used by both the move into `ready` and the ready list. |
 | `outbox.mjs` | Reads an AI session's outbox file as hostile: no links, the role's owner, 256 KB at most, a kind its role may send; one name in a worker's outbox (a second name in review's own stores is no fault, L70: it can't change review's bytes, while review's files may not be writable by others). A review session's outbox folder that is gone is a refusal, never a silence (L71). |
 | `*.test.mjs` | The tests. `*.test-helper.mjs` are shared set-up, not tests. |
+| `write-sites.test.mjs` | L112: reads every non-test module for its Record writes and checks each against `permissions.mjs`, so a row the real code needs cannot be missing while module tests pass on a record that allows everything. Writes another lane is fixing are printed on a named pending list, never skipped. |
 
 ## Claims
 

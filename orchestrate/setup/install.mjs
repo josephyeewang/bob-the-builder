@@ -103,7 +103,7 @@ export function planInstall(io, cfg, { readSource, runUpdater }) {
     return { ops, problems, installed: !why };
   }
   let rc; let rcText = null;
-  try { rcText = readSource(cfg.runnerConfig); } catch (e) { problems.push(`the runner config ${cfg.runnerConfig} can't be read: ${e.message}`); }   // the reader's messages never quote the file
+  try { rcText = readSource(cfg.runnerConfig); } catch (e) { problems.push(`${e.message} (${cfg.runnerConfig})`); }   // the reader's messages never quote the file
   if (rcText !== null) { try { rc = JSON.parse(rcText); } catch { problems.push(`the runner config ${cfg.runnerConfig} is not valid JSON`); } }   // never the parser's message: it quotes the file
   if (rc && (typeof rc !== 'object' || rc.installRoot !== io.at(P.installRoot))) problems.push(`the runner config's installRoot must be ${io.at(P.installRoot)}`);
   const names = rc ? RUNNER_NAMES.filter((n) => typeof rc[n] === 'string') : [];

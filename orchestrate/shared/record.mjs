@@ -35,8 +35,10 @@
 
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
-import { CARD_KINDS, OUTBOX_KINDS, OUTBOX_KIND_PATTERN, SESSION_ID, STATES, outboxKindOf } from './record-names.mjs';
-export { CARD_KINDS, OUTBOX_KINDS, OUTBOX_KIND_PATTERN, STATES, outboxKindOf };
+import { CARD_KINDS, OUTBOX_KINDS, OUTBOX_KIND_PATTERN, OUTBOX_NAME, SESSION_ID, STATES, outboxKindOf } from './record-names.mjs';
+export { CARD_KINDS, OUTBOX_KINDS, OUTBOX_KIND_PATTERN, OUTBOX_NAME, STATES, outboxKindOf };
+// A second name for outboxKindOf (the same function, not a copy), kept because record.test and older callers import it.
+export const outboxKind = outboxKindOf;
 // The test stand-in's field and move check is M9's own (L72); guard.mjs needs only record-names.mjs, so no load loop.
 import { claimCheck, guardWrite } from '../modules/M9-record/guard.mjs';
 
@@ -234,16 +236,22 @@ export function memoryRecord({ now = () => Date.now(), dead = null } = {}) {
       return { ok: true, rev, seq };
     },
     applyOutbox(tag, file) {
+      // Like the real M9, a file whose name has no outbox kind is refused, never logged as handed in (L121).
       const name = String(file).split('/').pop();
+      const kind = outboxKindOf(name);
+      if (!kind) return refused(`no outbox kind for file name ${name.slice(0, 80)}`);
+      // The same role and record-rule checks as M9's readOutboxFile, in its order and with its reasons (L129 M-1);
+      // they come before the create path, so a kind refused by M9 is never stored here.
+      const spec = OUTBOX_KINDS[kind];
+      if (!spec.roles.includes(tag?.role)) return refused(`outbox kind ${kind} is not listed for ${tag?.role}`);
+      if (!spec.entity) return refused(`outbox kind ${kind} has no record rule yet`);
       const actor = `${tag.role}:${tag.sessionId}`;
-      const spec = OUTBOX_KINDS[outboxKindOf(name)] ?? null;
-      if (spec?.mode === 'create' && spec.entity && spec.roles.includes(tag.role)) {
+      if (spec.mode === 'create') {
         let buf;
         try { buf = readFileSync(file); } catch (e) { return refused(`can't read ${name} (${e?.code ?? 'error'})`); }
         const sha256 = createHash('sha256').update(buf).digest('hex');
         const sourceKey = `${file}\0${sha256}`;
         if ([...docs.values()].some((d) => d.entity === spec.entity && d.doc?.source_key === sourceKey)) return { ok: true, skipped: true };
-        const kind = outboxKindOf(name);
         const id = `${kind}${tag.sessionId}-${lines.length + 1}`;
         const doc = { kind, role: tag.role, session_id: tag.sessionId, card: tag.card ?? null, source: name, source_key: sourceKey, sha256, text: buf.toString('utf8') };
         const g = guardWrite({ entity: spec.entity, id, actor, old: null, doc, createdBy: null });

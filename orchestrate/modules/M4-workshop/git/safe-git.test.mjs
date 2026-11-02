@@ -1,7 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { writeFileSync, mkdirSync, readdirSync, readFileSync, statSync, symlinkSync, utimesSync, existsSync, chmodSync, cpSync, rmSync, realpathSync, appendFileSync, linkSync } from 'node:fs';
+import { cp, writeFile, chmod } from 'node:fs/promises';
 import { join, dirname, relative } from 'node:path';
+import { availableParallelism } from 'node:os';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { spawn, spawnSync } from 'node:child_process';
 import { createServer } from 'node:net';
@@ -151,15 +153,52 @@ async function listener() {
   return { url: `http://127.0.0.1:${server.address().port}`, hits: () => hits, reset: () => { hits = 0; }, close: () => new Promise((ok) => server.close(ok)) };
 }
 
-/** git run with safe-git's environment and flags but without its config check: the second layer alone. */
+// The two sweeps run their cases side by side, at most this many at a time (#35): one after another they took 50 to
+// 100 s each on a loaded machine, close to their 120 s limit, and a cancelled sweep's git kept making folders after
+// its cleanup ran (L161). Each case has its own folder, so nothing one case does is seen by another. A case copies
+// and writes its files without blocking (fs/promises): on a loaded machine the copies alone took 40 s of the L49
+// sweep's main thread, one after another.
+const POOL = Math.min(8, availableParallelism());
+
+/** Runs `fn` on every item, at most `n` at once; `fn` also gets the number of the slot it runs in (0 to n-1). */
+async function inPool(items, n, fn) {
+  let next = 0;
+  const slot = async (k) => { while (next < items.length) { const i = next++; await fn(items[i], k, i); } };
+  await Promise.all(Array.from({ length: Math.min(n, items.length) }, (_, k) => slot(k)));
+}
+
+/**
+ * One sweep case's own world: a copy of the trapped repository, its own markers folder, a listener and a bare peer
+ * to push to (pushes from cases side by side into one peer would race for its refs). `cw` stands in for the world
+ * in everyCommand: the bundles and clean repositories it makes go in the case's folder.
+ */
+async function sweepCase(w, name) {
+  const dir = join(w.root, 'cases', name.replace(/[^a-z0-9]+/gi, '-'));
+  const markers = join(dir, 'markers');
+  mkdirSync(markers, { recursive: true });
+  const d = join(dir, 'repo');
+  await cp(w.d, d, { recursive: true });
+  const peer = join(dir, 'peer.git');
+  await gitOk(['init', '--bare', '-q', peer], { gitDir: peer });
+  return { dir, markers, d, peer, net: await listener(), cw: { ...w, root: dir, peer } };
+}
+
+/**
+ * git run with safe-git's environment and flags but without its config check: the second layer alone. A git still
+ * running after 30 s is stopped with everything it started (its own process group) and comes back `hung`: a program
+ * git started that keeps git's output open (a planted `cat`) would otherwise keep the case waiting until the sweep's
+ * limit cancels it (#35).
+ */
 function rawGit(args, { gitDir, workTree, input } = {}) {
   return new Promise((done) => {
-    const child = spawn('git', ['--no-pager', ...withNoPrograms(args)], { cwd: tmp(), env: safeGitEnv({ gitDir, workTree }), stdio: ['pipe', 'pipe', 'pipe'], timeout: 60_000 });
+    const child = spawn('git', ['--no-pager', ...withNoPrograms(args)], { cwd: tmp(), env: safeGitEnv({ gitDir, workTree }), stdio: ['pipe', 'pipe', 'pipe'], detached: true });
     let err = '';
     let out = '';
+    let hung = false;
+    const timer = setTimeout(() => { hung = true; try { process.kill(-child.pid, 'SIGKILL'); } catch {} }, 30_000);
     child.stdout.on('data', (d) => { out += d; });
     child.stderr.on('data', (d) => { err += d; });
-    child.on('close', (code) => done({ code, stdout: out, stderr: err }));
+    child.on('close', (code) => { clearTimeout(timer); done({ code, stdout: out, stderr: err, hung }); });
     child.stdin.on('error', () => {});
     child.stdin.end(input ?? '');
   });
@@ -234,106 +273,133 @@ async function everyCommand(w, d, run) {
 
 test('L36/L49 sweep: every planted key is refused before git runs; the pins alone still start no program and reach no network', { timeout: 120_000 }, async () => {
   const w = await trapWorld();
-  const net = await listener();
-  const markers = join(w.root, 'markers');
-  mkdirSync(markers);
-  const prog = (name) => {
-    const p = join(w.root, 'traps', name);
-    mkdirSync(dirname(p), { recursive: true });
-    writeFileSync(p, `#!/bin/sh\ntouch ${JSON.stringify(join(markers, name))}\ncat\n`);
-    chmodSync(p, 0o755);
-    return p;
+  // A case's traps: programs and hooks that leave a marker in the case's own folder when they run.
+  const trapsFor = async (t) => {
+    const traps = join(t.dir, 'traps');
+    const prog = (name) => {
+      const p = join(traps, name);
+      mkdirSync(dirname(p), { recursive: true });
+      writeFileSync(p, `#!/bin/sh\ntouch ${JSON.stringify(join(t.markers, name))}\ncat\n`);
+      chmodSync(p, 0o755);
+      return p;
+    };
+    const hooks = join(traps, 'hooks');
+    mkdirSync(hooks, { recursive: true });
+    await Promise.all(['pre-commit', 'commit-msg', 'post-commit', 'post-checkout', 'post-merge', 'pre-push', 'reference-transaction', 'post-index-change', 'pre-auto-gc'].map(async (h) => {
+      await writeFile(join(hooks, h), `#!/bin/sh\ntouch ${JSON.stringify(join(t.markers, `hook-${h}`))}\n`);
+      await chmod(join(hooks, h), 0o755);
+    }));
+    const attrs = join(traps, 'attributes');
+    await writeFile(attrs, '* filter=y diff=y merge=y\n');
+    return { traps, prog, hooks, attrs };
   };
-  const hooks = join(w.root, 'traps', 'hooks');
-  mkdirSync(hooks, { recursive: true });
-  for (const h of ['pre-commit', 'commit-msg', 'post-commit', 'post-checkout', 'post-merge', 'pre-push', 'reference-transaction', 'post-index-change', 'pre-auto-gc']) {
-    writeFileSync(join(hooks, h), `#!/bin/sh\ntouch ${JSON.stringify(join(markers, `hook-${h}`))}\n`);
-    chmodSync(join(hooks, h), 0o755);
-  }
-  const attrs = join(w.root, 'traps', 'attributes');
-  writeFileSync(attrs, '* filter=y diff=y merge=y\n');
   const sign = (k) => ['[log]', '\tshowSignature = true', '[merge]', '\tverifySignatures = true', '[pull]', '\tverifySignatures = true',
     '[commit]', '\tgpgSign = true', '[tag]', '\tgpgSign = true', '\tforceSignAnnotated = true', '[push]', '\tgpgSign = if-asked', k];
   // Pinned: the repository sets them, SAFE_CONFIG wins.
   const pinned = {
-    'core.fsmonitor': () => ['[core]', `\tfsmonitor = ${prog('core.fsmonitor')}`],
-    'core.hooksPath': () => ['[core]', `\thooksPath = ${hooks}`],
-    'core.pager': () => ['[core]', `\tpager = ${prog('core.pager')}`, '[pager]', `\tlog = ${prog('pager.log')}`],
-    'core.editor': () => ['[core]', `\teditor = ${prog('core.editor')}`, '[sequence]', `\teditor = ${prog('sequence.editor')}`],
-    'core.sshCommand': () => ['[core]', `\tsshCommand = ${prog('core.sshCommand')}`],
-    'core.askPass': () => ['[core]', `\taskPass = ${prog('core.askPass')}`],
-    'core.attributesFile': () => ['[core]', `\tattributesFile = ${attrs}`],
-    'diff.external': () => ['[diff]', `\texternal = ${prog('diff.external')}`],
-    'interactive.diffFilter': () => ['[interactive]', `\tdiffFilter = ${prog('interactive.diffFilter')}`],
-    'credential.helper': () => ['[credential]', `\thelper = !${prog('credential.helper')}`],
-    'gpg.program': () => sign(`[gpg]\n\tprogram = ${prog('gpg.program')}`),
-    'gpg.openpgp.program': () => sign(`[gpg "openpgp"]\n\tprogram = ${prog('gpg.openpgp.program')}`),
-    'gpg.x509.program': () => sign(`[gpg]\n\tformat = x509\n[gpg "x509"]\n\tprogram = ${prog('gpg.x509.program')}`),
-    'gpg.ssh.program': () => sign(`[gpg]\n\tformat = ssh\n[gpg "ssh"]\n\tprogram = ${prog('gpg.ssh.program')}\n\tdefaultKeyCommand = ${prog('gpg.ssh.defaultKeyCommand')}\n\tallowedSignersFile = ${attrs}`),
-    'submodule.recurse': () => ['[submodule]', '\trecurse = true', '[fetch]', '\trecurseSubmodules = true', '[push]', '\trecurseSubmodules = on-demand'],
-    'transfer.bundleURI': () => ['[transfer]', '\tbundleURI = true', '[fetch]', `\tbundleURI = file://${prog('bundle-uri')}`],
-    'http.proxy': () => ['[http]', `\tproxy = ${net.url}`, '[remote "origin"]', '\turl = https://example.invalid/r.git'],
-    'fetch.bundleURI': () => ['[fetch]', `\tbundleURI = ${net.url}/b.bundle`],
-    'protocol.ext.allow': () => ['[protocol "ext"]', '\tallow = always', '[remote "origin"]', `\turl = ext::${prog('ext-protocol')}`],
+    'core.fsmonitor': ({ prog, hooks, attrs, traps }, t) => ['[core]', `\tfsmonitor = ${prog('core.fsmonitor')}`],
+    'core.hooksPath': ({ prog, hooks, attrs, traps }, t) => ['[core]', `\thooksPath = ${hooks}`],
+    'core.pager': ({ prog, hooks, attrs, traps }, t) => ['[core]', `\tpager = ${prog('core.pager')}`, '[pager]', `\tlog = ${prog('pager.log')}`],
+    'core.editor': ({ prog, hooks, attrs, traps }, t) => ['[core]', `\teditor = ${prog('core.editor')}`, '[sequence]', `\teditor = ${prog('sequence.editor')}`],
+    'core.sshCommand': ({ prog, hooks, attrs, traps }, t) => ['[core]', `\tsshCommand = ${prog('core.sshCommand')}`],
+    'core.askPass': ({ prog, hooks, attrs, traps }, t) => ['[core]', `\taskPass = ${prog('core.askPass')}`],
+    'core.attributesFile': ({ prog, hooks, attrs, traps }, t) => ['[core]', `\tattributesFile = ${attrs}`, '[filter "y"]', `\tclean = ${prog('attributes.clean')}`,
+      `\tsmudge = ${prog('attributes.smudge')}`, '\trequired = true', '[diff "y"]', `\ttextconv = ${prog('attributes.textconv')}`, '[merge "y"]', `\tdriver = ${prog('attributes.merge')}`],
+    'diff.external': ({ prog, hooks, attrs, traps }, t) => ['[diff]', `\texternal = ${prog('diff.external')}`],
+    'interactive.diffFilter': ({ prog, hooks, attrs, traps }, t) => ['[interactive]', `\tdiffFilter = ${prog('interactive.diffFilter')}`],
+    'credential.helper': ({ prog, hooks, attrs, traps }, t) => ['[credential]', `\thelper = !${prog('credential.helper')}`],
+    'gpg.program': ({ prog, hooks, attrs, traps }, t) => sign(`[gpg]\n\tprogram = ${prog('gpg.program')}`),
+    'gpg.openpgp.program': ({ prog, hooks, attrs, traps }, t) => sign(`[gpg "openpgp"]\n\tprogram = ${prog('gpg.openpgp.program')}`),
+    'gpg.x509.program': ({ prog, hooks, attrs, traps }, t) => sign(`[gpg]\n\tformat = x509\n[gpg "x509"]\n\tprogram = ${prog('gpg.x509.program')}`),
+    'gpg.ssh.program': ({ prog, hooks, attrs, traps }, t) => sign(`[gpg]\n\tformat = ssh\n[gpg "ssh"]\n\tprogram = ${prog('gpg.ssh.program')}\n\tdefaultKeyCommand = ${prog('gpg.ssh.defaultKeyCommand')}\n\tallowedSignersFile = ${attrs}`),
+    'submodule.recurse': ({ prog, hooks, attrs, traps }, t) => ['[submodule]', '\trecurse = true', '[fetch]', '\trecurseSubmodules = true', '[push]', '\trecurseSubmodules = on-demand'],
+    'transfer.bundleURI': ({ prog, hooks, attrs, traps }, t) => ['[transfer]', '\tbundleURI = true', '[fetch]', `\tbundleURI = file://${prog('bundle-uri')}`],
+    'http.proxy': ({ prog, hooks, attrs, traps }, t) => ['[http]', `\tproxy = ${t.net.url}`, '[remote "origin"]', '\turl = https://example.invalid/r.git'],
+    'fetch.bundleURI': ({ prog, hooks, attrs, traps }, t) => ['[fetch]', `\tbundleURI = ${t.net.url}/b.bundle`],
+    'protocol.ext.allow': ({ prog, hooks, attrs, traps }, t) => ['[protocol "ext"]', '\tallow = always', '[remote "origin"]', `\turl = ext::${prog('ext-protocol')}`],
   };
   // Per-name: refused before git runs in the repository.
   const named = {
-    'filter.x': () => ['[filter "x"]', `\tclean = ${prog('filter.clean')}`, `\tsmudge = ${prog('filter.smudge')}`, `\tprocess = ${prog('filter.process')}`, '\trequired = true'],
-    'diff.x': () => ['[diff "x"]', `\ttextconv = ${prog('diff.textconv')}`, `\tcommand = ${prog('diff.command')}`],
-    'merge.x.driver': () => ['[merge "x"]', `\tdriver = ${prog('merge.driver')}`],
-    'trailer.x': () => ['[trailer "x"]', `\tcommand = ${prog('trailer.command')}`, `\tcmd = ${prog('trailer.cmd')}`],
-    'remote.uploadpack': () => ['[remote "origin"]', `\turl = ${'$'}{SRC}`, `\tuploadpack = ${prog('remote.uploadpack')}`, `\treceivepack = ${prog('remote.receivepack')}`],
-    'remote.vcs': () => ['[remote "origin"]', '\tvcs = trap', `\turl = ${'$'}{SRC}`],
-    'url.insteadOf': () => [`[url "ext::${prog('url.insteadof')}"]`, `\tinsteadOf = ${'$'}{SRC}`, `\tpushInsteadOf = ${'$'}{PEER}`],
-    'credential.url.helper': () => ['[credential "https://example.invalid"]', `\thelper = !${prog('credential.url.helper')}`],
-    'submodule.update': () => ['[submodule "s"]', `\tupdate = !${prog('submodule.update')}`],
-    'http.url.proxy': () => ['[http "https://example.invalid"]', `\tproxy = ${net.url}`],
-    'hook.x': () => ['[hook "x"]', `\tcommand = ${prog('hook.x')}`, '\tevent = reference-transaction', '\tevent = pre-commit', '\tevent = post-checkout'],
-    'HOOK.y (upper case)': () => ['[HOOK "y"]', `\tCOMMAND = ${prog('hook.y')}`, '\tEVENT = reference-transaction'],
-    'bundle list': () => ['[bundle]', '\tversion = 1', '\tmode = all', '[bundle "b"]', `\turi = ${net.url}/c.bundle`],
-    'promisor': () => ['[extensions]', '\tpartialClone = origin', '[remote "origin"]', `\turl = ${'$'}{SRC}`, '\tpromisor = true'],
-    'core.alternateRefsCommand': () => ['[core]', `\talternateRefsCommand = ${prog('core.alternateRefsCommand')}`],
-    'core.gitProxy': () => ['[core]', `\tgitProxy = ${prog('core.gitProxy')}`],
-    'include of a named key': () => { const inc = join(w.root, 'traps', 'inc.cfg'); writeFileSync(inc, `[filter "x"]\n\tclean = ${prog('include.clean')}\n`); return ['[include]', `\tpath = ${inc}`]; },
+    'filter.x': ({ prog, hooks, attrs, traps }, t) => ['[filter "x"]', `\tclean = ${prog('filter.clean')}`, `\tsmudge = ${prog('filter.smudge')}`, `\tprocess = ${prog('filter.process')}`, '\trequired = true'],
+    'diff.x': ({ prog, hooks, attrs, traps }, t) => ['[diff "x"]', `\ttextconv = ${prog('diff.textconv')}`, `\tcommand = ${prog('diff.command')}`],
+    'merge.x.driver': ({ prog, hooks, attrs, traps }, t) => ['[merge "x"]', `\tdriver = ${prog('merge.driver')}`],
+    'trailer.x': ({ prog, hooks, attrs, traps }, t) => ['[trailer "x"]', `\tcommand = ${prog('trailer.command')}`, `\tcmd = ${prog('trailer.cmd')}`],
+    'remote.uploadpack': ({ prog, hooks, attrs, traps }, t) => ['[remote "origin"]', `\turl = ${'$'}{SRC}`, `\tuploadpack = ${prog('remote.uploadpack')}`, `\treceivepack = ${prog('remote.receivepack')}`],
+    'remote.vcs': ({ prog, hooks, attrs, traps }, t) => ['[remote "origin"]', '\tvcs = trap', `\turl = ${'$'}{SRC}`],
+    'url.insteadOf': ({ prog, hooks, attrs, traps }, t) => [`[url "ext::${prog('url.insteadof')}"]`, `\tinsteadOf = ${'$'}{SRC}`, `\tpushInsteadOf = ${'$'}{PEER}`],
+    'credential.url.helper': ({ prog, hooks, attrs, traps }, t) => ['[credential "https://example.invalid"]', `\thelper = !${prog('credential.url.helper')}`],
+    'submodule.update': ({ prog, hooks, attrs, traps }, t) => ['[submodule "s"]', `\tupdate = !${prog('submodule.update')}`],
+    'http.url.proxy': ({ prog, hooks, attrs, traps }, t) => ['[http "https://example.invalid"]', `\tproxy = ${t.net.url}`],
+    'hook.x': ({ prog, hooks, attrs, traps }, t) => ['[hook "x"]', `\tcommand = ${prog('hook.x')}`, '\tevent = reference-transaction', '\tevent = pre-commit', '\tevent = post-checkout'],
+    'HOOK.y (upper case)': ({ prog, hooks, attrs, traps }, t) => ['[HOOK "y"]', `\tCOMMAND = ${prog('hook.y')}`, '\tEVENT = reference-transaction'],
+    'bundle list': ({ prog, hooks, attrs, traps }, t) => ['[bundle]', '\tversion = 1', '\tmode = all', '[bundle "b"]', `\turi = ${t.net.url}/c.bundle`],
+    'promisor': ({ prog, hooks, attrs, traps }, t) => ['[extensions]', '\tpartialClone = origin', '[remote "origin"]', `\turl = ${'$'}{SRC}`, '\tpromisor = true'],
+    'core.alternateRefsCommand': ({ prog, hooks, attrs, traps }, t) => ['[core]', `\talternateRefsCommand = ${prog('core.alternateRefsCommand')}`],
+    'core.gitProxy': ({ prog, hooks, attrs, traps }, t) => ['[core]', `\tgitProxy = ${prog('core.gitProxy')}`],
+    'include of a named key': ({ prog, hooks, attrs, traps }, t) => { const inc = join(traps, 'inc.cfg'); writeFileSync(inc, `[filter "x"]\n\tclean = ${prog('include.clean')}\n`); return ['[include]', `\tpath = ${inc}`]; },
   };
-  const fill = (lines) => lines.join('\n').replaceAll('${SRC}', w.src).replaceAll('${PEER}', w.peer);
-  const copyFor = (name) => {
-    const d = join(w.root, 'cases', name.replace(/[^a-z0-9]+/gi, '-'));
-    cpSync(w.d, d, { recursive: true });
-    writeFileSync(join(d, '.gitattributes'), '* filter=x diff=x merge=x\n');
-    return d;
-  };
+  const fill = (lines, t) => lines.join('\n').replaceAll('${SRC}', w.src).replaceAll('${PEER}', t.peer);
   const failures = [];
-  const fired = (name) => {
-    const f = readdirSync(markers);
+  const fired = (t, name) => {
+    const f = readdirSync(t.markers);
     if (f.length) failures.push(`${name}: ${f.join(', ')}`);
-    for (const x of f) rmSync(join(markers, x));
-    if (net.hits()) failures.push(`${name}: reached the network ${net.hits()} times`);
-    net.reset();
+    for (const x of f) rmSync(join(t.markers, x));
+    if (t.net.hits()) failures.push(`${name}: reached the network ${t.net.hits()} times`);
+    t.net.reset();
   };
   const refusedAll = (name, res) => {
     // Every command in the trapped repository is refused; the fetch from it into a clean one does not read its config.
     const ran = res.filter(([c, r]) => c !== 'fetch from it' && !(r.code === -1 && /safe-git: refused: .*not on the safe list/.test(r.stderr)));
     if (ran.length) failures.push(`${name}: not refused: ${ran.map(([c]) => c).join('; ')}`);
   };
-  for (const [name, lines] of Object.entries(pinned)) {
-    const d = copyFor(name);
-    const clean = readFileSync(join(d, '.git', 'config'), 'utf8');
-    writeFileSync(join(d, '.git', 'config'), `${clean}${fill(lines())}\n`);
-    refusedAll(name, await everyCommand(w, d, (args, opts) => git(args, opts)));
-    fired(name);
+  // Every key a pinned case is named for, and every signature key it plants, is one SAFE_CONFIG pins. Checked by
+  // name because some pins back each other up (gpg.program and gpg.openpgp.program are one setting in git, and
+  // log.showSignature only matters while a signing program can run): one of them dropped changes nothing git does,
+  // so no run of git would show it.
+  const pinnedKeys = new Set(SAFE_CONFIG.map(([k]) => k.toLowerCase()));
+  const keysIn = (lines) => {
+    let head = '';
+    return lines.join('\n').split('\n').flatMap((l) => {
+      const sec = /^\[([^\s\]"]+)(?: "([^"]*)")?\]$/.exec(l);
+      if (sec) { head = sec[2] === undefined ? sec[1] : `${sec[1]}.${sec[2]}`; return []; }
+      const kv = /^\t([A-Za-z0-9-]+) = /.exec(l);
+      return kv ? [`${head}.${kv[1]}`] : [];
+    });
+  };
+  const sigKeys = keysIn(sign('[gpg]\n\tprogram = x'));
+  assert.ok(sigKeys.length >= 8, `read only ${sigKeys.length} signature keys`);
+  // diff.external is the one stopped by a flag (--no-ext-diff on every diff command, withNoPrograms), not a pin.
+  const unpinned = [...Object.keys(pinned), ...sigKeys].filter((k) => k !== 'diff.external' && !pinnedKeys.has(k.toLowerCase()));
+  assert.deepEqual(unpinned, [], 'planted as pinned, but SAFE_CONFIG does not pin it');
+  const cases = [...Object.entries(pinned).map(([name, lines]) => [name, lines, true]), ...Object.entries(named).map(([name, lines]) => [name, lines, false])];
+  const done = [];
+  await inPool(cases, POOL, async ([name, lines, pin]) => {
+    const t = await sweepCase(w, name);
+    done.push([name, t]);
+    // The global attributes file only counts where the tree's own .gitattributes says nothing.
+    if (name !== 'core.attributesFile') await writeFile(join(t.d, '.gitattributes'), '* filter=x diff=x merge=x\n');
+    const clean = readFileSync(join(t.d, '.git', 'config'), 'utf8');
+    await writeFile(join(t.d, '.git', 'config'), `${clean}${fill(lines(await trapsFor(t), t), t)}\n`);
+    refusedAll(name, await everyCommand(t.cw, t.d, (args, opts) => git(args, opts)));
+    fired(t, name);
+    if (!pin) return;
     // The second layer alone: the same commands with the config check skipped.
-    await everyCommand(w, d, rawGit);
-    fired(`${name} (pins alone)`);
-  }
-  for (const [name, lines] of Object.entries(named)) {
-    const d = copyFor(name);
-    writeFileSync(join(d, '.git', 'config'), `${readFileSync(join(d, '.git', 'config'), 'utf8')}${fill(lines())}\n`);
-    refusedAll(name, await everyCommand(w, d, (args, opts) => git(args, opts)));
-    fired(name);
-  }
-  await net.close();
-  assert.deepEqual(failures, []);
+    // After a git that hung, the case has failed: its later commands are skipped, since several of them hanging 30 s
+    // each would hold the sweep past its limit.
+    let hung = '';
+    await everyCommand(t.cw, t.d, async (args, opts) => {
+      if (hung) return { code: null, stdout: '', stderr: 'skipped' };
+      const r = await rawGit(args, opts);
+      if (r.hung) hung = args.join(' ');
+      return r;
+    });
+    if (hung) failures.push(`${name} (pins alone): git hung and was stopped after 30 s: ${hung}; the later commands were skipped`);
+    fired(t, `${name} (pins alone)`);
+  });
+  // A program that ran after its case was looked at is caught here.
+  for (const [name, t] of done) { fired(t, `${name} (after the sweep)`); await t.net.close(); }
+  assert.equal(done.length, cases.length);
+  assert.deepEqual(failures.sort(), []);
 });
 
 test('L36 sweep, control: the planted programs run when git is used the careless way', { timeout: 120_000 }, async () => {
@@ -434,10 +500,16 @@ test('L49 sweep: every key git lists is refused and named unless it is on the sa
   };
   const failures = [];
   const let_through = [];
-  for (const key of listed) {
-    const { name, text } = section(key, prog);
-    writeFileSync(join(w.gd, 'config'), clean + text);
-    const why = await repoConfigWhy(w.gd);
+  // Each slot plants its keys, one at a time, in its own copy of the repository.
+  const slots = await Promise.all(Array.from({ length: POOL }, async (_, k) => { const d = join(w.root, 'keys', String(k)); await cp(w.d, d, { recursive: true }); return join(d, '.git'); }));
+  const whys = [];
+  await inPool(listed, POOL, async (key, k, i) => {
+    await writeFile(join(slots[k], 'config'), clean + section(key, prog).text);
+    whys[i] = await repoConfigWhy(slots[k]);
+  });
+  for (const [i, key] of listed.entries()) {
+    const { name } = section(key, prog);
+    const why = whys[i];
     const listedAs = name.split('.').map((x, i, a) => (i === 0 || i === a.length - 1 ? x.toLowerCase() : x)).join('.');
     if (inertSetting(listedAs, prog)) {
       if (why) failures.push(`${key}: on the list but refused: ${why}`);
@@ -445,28 +517,44 @@ test('L49 sweep: every key git lists is refused and named unless it is on the sa
     } else if (!why) failures.push(`${key}: let through`);
     else if (!why.includes(listedAs) && !/could not be read/.test(why)) failures.push(`${key}: refused without naming it: ${why}`);
   }
-  writeFileSync(join(w.gd, 'config'), clean);
+  assert.equal(whys.length, listed.length);
   assert.deepEqual(failures, []);
-  // What the list lets through is the safe list itself, nothing more.
-  assert.deepEqual(let_through.filter((k) => !INERT_KEYS.has(k.toLowerCase()) && !/^(?:remote\.<name>\.(?:url|pushurl|fetch|gh-resolved)|branch\.<name>\.(?:merge|rebase|vscode-merge-base))$/.test(k)), []);
-  // Each of those, planted with the program or with a network address, starts nothing and reaches nothing.
-  const net = await listener();
-  for (const key of let_through) {
-    for (const value of [prog, `${net.url}/x.git`]) {
-      const { text } = section(key, value);
-      const d = join(w.root, 'cases', `${key.replace(/[^a-z0-9]+/gi, '-')}-${value === prog ? 'prog' : 'net'}`);
-      cpSync(w.d, d, { recursive: true });
-      writeFileSync(join(d, '.git', 'config'), clean + text);
-      if (await repoConfigWhy(join(d, '.git'))) continue; // a value the list refuses (an http address)
-      await everyCommand(w, d, (args, opts) => git(args, opts));
-      const f = readdirSync(markers);
-      if (f.length || net.hits()) failures.push(`${key} = ${value}: ran ${f.length}, network ${net.hits()}`);
-      for (const x of f) rmSync(join(markers, x));
-      net.reset();
-    }
+  // What the list lets through is these keys, nothing more. A fixed list, not INERT_KEYS itself: a key added to the
+  // safe list (say core.pager, harmless only while it stays pinned) passed a check made against the list (#35), so
+  // adding one now means changing this test too.
+  const SAFE_LIST = new Set(['core.repositoryformatversion', 'core.bare', 'core.filemode', 'core.logallrefupdates', 'core.ignorecase',
+    'core.precomposeunicode', 'core.symlinks', 'extensions.objectformat', 'extensions.worktreeconfig', 'user.name', 'user.email',
+    'core.autocrlf', 'core.untrackedcache', 'extensions.relativeworktrees',
+    'remote.<name>.url', 'remote.<name>.pushurl', 'remote.<name>.fetch', 'remote.<name>.gh-resolved',
+    'branch.<name>.merge', 'branch.<name>.rebase', 'branch.<name>.vscode-merge-base']);
+  assert.deepEqual(let_through.filter((k) => !SAFE_LIST.has(k.toLowerCase())), [], 'let through, but not on the fixed list');
+  assert.deepEqual([...INERT_KEYS].filter((k) => !SAFE_LIST.has(k)), [], 'on INERT_KEYS, but not on the fixed list');
+  // Each of those, planted with the program or with a network address, starts nothing and reaches nothing. Each case
+  // has its own program, markers and listener, so the cases run side by side.
+  const cases = let_through.flatMap((key) => [[key, 'prog'], [key, 'net']]);
+  const done = [];
+  let ran = 0;
+  await inPool(cases, POOL, async ([key, kind]) => {
+    const t = await sweepCase(w, `${key}-${kind}`);
+    done.push([key, kind, t]);
+    const trap = join(t.dir, 'trap');
+    await writeFile(trap, `#!/bin/sh\ntouch ${JSON.stringify(join(t.markers, 'ran'))}\ncat\n`);
+    await chmod(trap, 0o755);
+    const value = kind === 'prog' ? trap : `${t.net.url}/x.git`;
+    await writeFile(join(t.d, '.git', 'config'), clean + section(key, value).text);
+    if (await repoConfigWhy(join(t.d, '.git'))) return; // a value the list refuses (an http address)
+    ran += 1;
+    await everyCommand(t.cw, t.d, (args, opts) => git(args, opts));
+  });
+  // Looked at once every case is done, so a program that ran late is caught too.
+  for (const [key, kind, t] of done) {
+    const f = readdirSync(t.markers);
+    if (f.length || t.net.hits()) failures.push(`${key} = ${kind === 'prog' ? 'a program' : 'a network address'}: ran ${f.length}, network ${t.net.hits()}`);
+    await t.net.close();
   }
-  await net.close();
-  assert.deepEqual(failures, []);
+  assert.equal(done.length, cases.length);
+  assert.ok(ran >= let_through.length, `only ${ran} of the cases ran their commands`);
+  assert.deepEqual(failures.sort(), []);
 });
 
 test('L49: a planted program behind a pointer file, a commondir, a worktree or a submodule config is refused, naming the file', async () => {
