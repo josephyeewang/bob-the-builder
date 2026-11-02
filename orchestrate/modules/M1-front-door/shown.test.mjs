@@ -77,7 +77,9 @@ export const SHOWN = Object.freeze({
   ],
   // The whole skill, so a sentence added to a section pinned nowhere above still fails (L197 m1, P15). When the skill
   // changes on purpose: update this, and tell lane 1 (its ALLOWED list).
-  skillSha256: '394f527b256068cbb888e5257fc17c082ca60371cbe81ae3377c5afb039b015a',
+  skillSha256: 'e2cd4da78b3f3d77b576c8f575acb43eb1701fd129180c632cce69fb7b659863',
+  // Step 2 of the work section, wrapped lines joined by one space (L202 N1): the rule that each option is its label.
+  step2: '2. **Unsure (no cues fit, more than one mode\'s do, "build a new …" on its own, or a new-project cue that names one of the owner\'s products):** ask one question box, "Which of these do you mean?", with the modes that fit as options, each written exactly as its label in the table, and the one you recommend first with " (Recommended)" after its label. When no cue fits, recommend think: the first option is then `Think it through in a thinking room (Recommended)`. Then go to step 1.',
   ownerHeadings: { 1: '1. Reach it from the phone (R-0b-81)', 3: '3. A question box, and a write outside the outbox (R-0b-81)',
     4: '4. The trigger phrase (R-0b-81)', 7: '7. Not wired yet: pause and trip mode (lead calls L151, L167; proves nothing for R-0b-83)' },
 });
@@ -97,6 +99,8 @@ const section = (doc, heading) => {
   assert.equal(parts.length, 2, `one "## ${heading}" section`);
   return parts[1].split('\n## ')[0];
 };
+// The buttons OWNER-TEST tells the owner to use: "tap `X`", "press `X`", "`X` button" or "`X` buttons" (L197 m5, L202 C1).
+const ownerTaps = () => [...OWNER.matchAll(/\b(?:[Tt]ap|[Pp]ress)\s+`([^`]+)`|`([^`]+)`\s+buttons?\b/g)].map((m) => m[1] ?? m[2]);
 const skillBody = SKILL.replace(/^---\n[\s\S]*?\n---\n/, '').trimStart();
 
 test('L167 M-3: the five refused actions\' replies, the wrap-up tail and the section\'s instructions are exactly SHOWN', () => {
@@ -139,13 +143,24 @@ test('L197 m1: the skill\'s section headings and its bold-quoted replies are exa
 
 test('L197 R2-M1: every mode label sort.mjs uses, and every button OWNER-TEST names, is written in the skill verbatim', () => {
   for (const label of Object.values(LINE)) assert.ok(SKILL.includes(`\`${label}\``), label);
-  const taps = [...OWNER.matchAll(/\b[Tt]ap\s+`([^`]+)`|`([^`]+)`\s+button\b/g)].map((m) => m[1] ?? m[2]);
+  // L202 N1: each label sits in its own mode's row, and step 2 says to write it exactly, word for word.
+  for (const [mode, label] of Object.entries(LINE)) {
+    assert.equal(SKILL.split('\n').filter((l) => l.startsWith(`| ${mode} |`)).length, 1, mode);
+    assert.ok(SKILL.includes(`\n| ${mode} | \`${label}\` |`), `the ${mode} row carries "${label}"`);
+  }
+  const flatLines = SKILL.split('\n').map((l) => l.trim()).join(' ');
+  const step2 = /2\. \*\*Unsure .*? Then go to step 1\./.exec(flatLines)?.[0];
+  assert.equal(step2, SHOWN.step2);
+  // L202 C2: line 1 as the skill describes it is line 1 as readBack writes it.
+  assert.ok(SKILL.includes('Line 1: the mode\'s label, then ": ", the product and a full stop.'));
+  assert.equal(readBack({ mode: 'think', product: 'test-product', what: 'x' }).lines[0], `${LINE.think}: test-product.`);
+  const taps = ownerTaps();
   assert.ok(taps.length > 0);
   for (const t of taps) assert.ok(SKILL.includes(`\`${t}\``), `the skill names "${t}"`);
 });
 
-test('L167 M-1, L197 m5: every button OWNER-TEST tells the owner to tap is one the boxes offer', () => {
-  const taps = [...OWNER.matchAll(/\b[Tt]ap\s+`([^`]+)`|`([^`]+)`\s+button\b/g)].map((m) => m[1] ?? m[2]);
+test('L167 M-1, L197 m5, L202 C1: every button OWNER-TEST tells the owner to tap is one the boxes offer', () => {
+  const taps = ownerTaps();
   assert.deepEqual(taps, ['Think it through in a thinking room (Recommended)', 'Not now']);
   // Step 3's words sort as unsure with think recommended; the box offers the first tap, its read-back the second.
   const sorted = sortRequest('the header looks off on the test product', { products: ['test-product'] });
