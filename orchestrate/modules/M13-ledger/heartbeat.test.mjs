@@ -5,12 +5,13 @@ import { makeFactWriter } from '../M12-sensors/facts.mjs';
 import { makeAlerts, fakeIssues } from './alerts.mjs';
 import { heartbeatOnce, DISPATCHER_LATE_MIN } from './heartbeat.mjs';
 
-function setup() {
+// `wrap` lets a test change what the pass reads from the record (#98 r2 P6: a saved record with no time).
+function setup({ wrap = (w) => w } = {}) {
   let t = Date.parse('2026-11-03T12:00:00Z');
   const now = () => new Date(t);
   const rec = memoryRecord();
   const gh = fakeIssues();
-  const writer = makeFactWriter(rec, { actor: 'ledger', now });
+  const writer = wrap(makeFactWriter(rec, { actor: 'ledger', now }));
   const alerts = makeAlerts({ rec, gh, owner: 'owner', now });
   const world = { lastPass: () => new Date(t - 60e3).toISOString(), rules: true, fd: true, account: { signedIn: true, login: 'account A' }, usage: null, dispatcherRunning: true };
   const probes = {
@@ -343,6 +344,28 @@ test('L158 m3: a count lost to a rewrite (an older build, a hand edit) never reu
   }
 });
 
+test('#98 r2 Minor 1 (P6): a record with no time, or not a time, and its count lost, twice: the second A→B is still told', async () => {
+  for (const ts of [undefined, 'not a time', '[REDACTED:wrong-shape]']) {
+    // The pass reads the account record without its time (or with a wrong one), as an older build or a hand edit leaves it.
+    const wrap = (w) => ({ put: w.put, get: (id) => {
+      const d = w.get(id);
+      if (!d || !id.startsWith('heartbeat-account-')) return d;
+      const { ts: _drop, ...rest } = d;
+      return ts === undefined ? rest : { ...rest, ts };
+    } });
+    const h = setup({ wrap });
+    await h.pass();
+    for (let round = 1; round <= 2; round++) {
+      h.world.account = { signedIn: true, login: 'account B' }; h.tick(10); await h.pass();
+      assert.equal(acctIssues(h.gh).length, round, `ts ${ts}, round ${round}: a new issue, not the closed one answering "suppressed"`);
+      h.gh.ownerCloses(acctIssues(h.gh).at(-1)[0]);
+      // The count is lost too, and the login is back to A.
+      h.writer.put('heartbeat-account-product-1', { kind: 'fact.heartbeat-account', product: 'product 1', login: 'account A' });
+      h.world.account = { signedIn: true, login: 'account A' };
+    }
+  }
+});
+
 test('L158 m3: the same on the planned path: a lost count with the plan still standing pushes the next A→B again', async () => {
   const h = setup();
   h.plan({ to: 'account B', at: '2026-11-03T11:00:00Z' });
@@ -367,6 +390,24 @@ test('L158 m3: an alert that went out but whose account save was refused is retr
   assert.equal(keys.length, 2);
   assert.equal(keys[0], keys[1], 'the retry finds the same alert (a silent repeat), not a second notice');
   assert.equal(savedLogin(h), 'account B');
+});
+
+test('#98 r2 Minor 2 (P15): a planned switch whose push went out but whose account save was refused: the retry saves B, and a later B→A alerts', async () => {
+  let refuse = false;
+  const raise = sink();
+  const h = lossSetup(raise, (id) => refuse && /^heartbeat-account-/.test(id));
+  h.plan({ to: 'account B', at: '2026-11-03' });
+  await h.pass();
+  h.world.login = 'account B'; refuse = true; h.tick(); await h.pass();
+  const pushes = () => h.base.list('fact').filter((f) => f.doc.kind === 'fact.push-request').length;
+  assert.equal(pushes(), 1, 'the push request was written');
+  assert.equal(savedLogin(h), 'account A', 'the save was refused');
+  refuse = false; h.tick(); await h.pass();
+  assert.equal(pushes(), 1, 'the retry finds the same push request, so one switch is one push');
+  assert.equal(savedLogin(h), 'account B', 'an existing push request counts as told, so the retry saves B');
+  h.world.login = 'account A'; h.tick(); await h.pass();
+  assert.deepEqual(changed(raise), ['account A'], 'B→A was not planned: one alert');
+  assert.equal(savedLogin(h), 'account A');
 });
 
 test('L158 m2: a saved pinned issue that is not an issue number reopens without asking GitHub about it', async () => {

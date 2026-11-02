@@ -78,10 +78,13 @@ export async function heartbeatOnce({ product, writer, gh, alerts, owner, probes
   // once the owner closed it, or a silent body edit) or the first one's push request (never written again), so the
   // owner was never told. It also carries the saved record's time (L158 m3): a count lost to a rewrite without it (an
   // older build, a hand edit) would reuse a closed alert's number, but that rewrite gives a new time. Retries of one
-  // switch keep both, because the record is rewritten only with the new login.
+  // switch keep both, because the record is rewritten only with the new login. A record with no time, or one that is
+  // not a time, takes this pass's time instead of a fixed word (#98 r2 Minor 1, P6): a retry may then be a duplicate
+  // notice, never a silent one.
   const switches = Number.isSafeInteger(lastRec?.switches) && lastRec.switches >= 0 ? lastRec.switches : 0;
   const nextSwitches = switches + 1;
-  const seq = `${nextSwitches}-${typeof lastRec?.ts === 'string' ? lastRec.ts : 'none'}`;
+  const savedTs = typeof lastRec?.ts === 'string' && Number.isFinite(Date.parse(lastRec.ts)) ? lastRec.ts : t.toISOString();
+  const seq = `${nextSwitches}-${savedTs}`;
   let switched = false;
   // The new login is saved only once its change alert or push request went out: a raise that answered false (or a
   // refused push-request write) keeps the old login, so the next pass tells it again (L143). A throw stops the pass
