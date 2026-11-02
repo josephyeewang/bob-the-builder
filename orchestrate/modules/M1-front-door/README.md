@@ -1,11 +1,13 @@
 # M1 Front Door
 
 Lane 3 builds this folder (LANES.md). The Front Door is the one session the owner reaches from their phone. It has no shell:
-everything they ask for becomes one small file in its outbox and one short reply. Milestone 0b-8 is its minimum.
+most things they ask for become one small file in its outbox and one short reply; pause, away, back, wrap up and rotate
+write nothing yet. Milestone 0b-8 is its minimum.
 
 | File | Row | What it does |
 |---|---|---|
-| `skill/orchestrate/SKILL.md` | R-0b-81, 137 | The one skill: new idea, a piece of work sorted into a Bob mode, pause, away, back, wrap up, rotate. "Not wired yet" for the rest. |
+| `skill/orchestrate/SKILL.md` | R-0b-81, 137 | The one skill: new idea, a piece of work sorted into a Bob mode, research ask, undo. Pause, away, back, wrap up and rotate file nothing and reply "That isn't wired yet" (lead calls L151, L167); their old wording is parked in `parked-skill-wording.md`. "What can you do?" has one fixed reply. "Not wired yet" for the rest. |
+| `parked-skill-wording.md` | R-0b-81, 83 | Not loaded. The skill's checked pause, away, back, wrap up and rotate wording, parked by lead call L151 until each kind's consumer lands; that PR moves it back. |
 | `outbox.mjs` | R-0b-81, 83 | The three file shapes (`state-`, `request-`, `idea-`) and intake's check. Never `state: active`; a key in any file refuses it; a product off the list or a reused id is refused (L26). `intakePush` is the confirmation the owner gets. |
 | `sort.mjs` | R-0b-137 | The full loop's reference: the cue words per Bob mode (the skill's table must match), the three-line read-back with Go, Change, Not now, the one question with a recommendation when unsure, and the check that a reply never repeats a pasted key. Number work (Tier 1, R-0b-138) reads back that it is number work and the go comes after a fresh plan check; while mode requests are unwired it files nothing. |
 | (in `outbox.mjs`) | R-0b-136 | `ask-request-<id>.json`, the owner's "find out X": a research ask with its product and one-line brief. M2 `research-ask.mjs` turns it into the ask. |
@@ -36,21 +38,28 @@ R-0b-82's decision and handoff code sit here although the row is tagged M11 (lan
 ## Join items (other lanes)
 
 1. Lane 1: the Store Writer refuses `state: active` from the front_door role; the Merge Gate reads `tz` (null while
-   away = hold Tier 1; [Undo] never held). The role profile lists two more outbox kinds (`state-compact-`,
-   `ask-request-`) than this milestone writes; they are other rows'.
+   away = hold Tier 1; [Undo] never held). The role profile lets the Front Door write `idea-`, `ask-request-` and
+   `state-compact-` (another row's) only: it holds back `state-` and `request-` (#106) until the PR that lands each
+   kind's consumer.
 2. Lanes 1 and 2: the three outbox shapes in `outbox.mjs` are the contract for intake (R-0b-56); intake calls
    `checkOutboxFile` after lane 2's name and owner check, and passes idea text on through `cleanOutside`.
 3. Lane 2: stop and start the Front Door under its fixed name when `shouldRestartFrontDoor` says so, and deliver
    `makeFrontDoorHandoff`'s text (first prompt, or a read-only file outside the outbox).
 4. Lane 2: each Ledger pass calls `nextTripPush({ states, lastPushedIds, lastFailedIds, build })` (`states`: `{ id, state }` of the
-   newest checked `state-` file per product, of which only `away` ones count; `build` = `buildTripBrief` with those ids). A result is sent to the owner's
+   newest **stored** `state-` file per product, of which only `away` ones count; `build` = `buildTripBrief` with those ids).
+   **This waits on the pause/away apply join item** (lane 1's: approvals writes the product's state from each
+   `state-` file and the record stores it). Until then the record refuses `state-`, so a pass fed intake-checked files
+   would tell the owner "Trip mode: X set to away…" for a file that was refused (#95 r2 m4). A result is sent to the owner's
    phone over the Front Door's push path and its `ids` stored as `lastPushedIds` (lead call L22); a result with
    `failed: true` (the brief couldn't be built) is pushed too, but its `ids` go to `lastFailedIds`, never
    `lastPushedIds`, so the next passes keep trying and push the real brief once it builds; pass both lists back in
-   every time (each one replaced by the newest result of its kind; an old `lastFailedIds` is harmless, since ids are never reused). The pass also writes each result's text (a brief or a failure) to the read-only file the skill quotes
-   if the owner asks first, and runs `readPowerSource` with the
-   heartbeat. The skill quotes only a brief that names the ids it wrote (0b-8 audit round 3 M-3). If the push isn't
-   proven by the first cutover, the cutover waits (L29): there is no fallback without the push.
+   every time (each one replaced by the newest result of its kind; an old `lastFailedIds` is harmless, since ids are never reused). The pass also runs `readPowerSource` with the
+   heartbeat. The live skill quotes no trip brief now: that quoting (the read-only brief file, and the rule that the
+   skill quotes only a brief naming the ids it wrote, 0b-8 audit round 3 M-3) is parked with the trip wording in
+   `parked-skill-wording.md` (lead calls L151, L167); `trip.mjs` still builds the brief, and the PR that lands the trip
+   consumer brings the quoting back. The first cutover
+   does not wait on this push while trip mode is refused (lead call L167 M-2): L29's gate moves to the PR that lands
+   the trip consumer, which proves R-0b-83 on the phone before merging. There is no trip mode without the push.
 5. Lane 2: its launch read-back checker replaces `readback.mjs` at the join; the two agree on EndConversation and on
    settings sources (machine-wide + `--settings` only).
 6. The Air's health result (lead call L23): /configaudit on the Air runs `node M12-sensors/air-health.mjs <red count>
@@ -60,18 +69,22 @@ R-0b-82's decision and handoff code sit here although the row is tagged M11 (lan
    carries the check's own time, so a late take-in is never fresh, and an older check never replaces a newer one. The Front Door's outbox check refuses that name. The owner never types a count.
 7. "Filed, then confirmed" (lead call L26). Lane 2: the Front Door's context file carries the product list (exact
    names), and for every Front Door file intake takes in or refuses, it pushes `intakePush(name, result)` to the owner's
-   phone ("Confirmed: …" for pause, away and idea; "Request taken: … nothing has happened yet" for resume, wrap up and
-   rotate; or "Not filed: <reason>. Say it again."), **only after the record write succeeded**; a failed write pushes
-   "Not filed". Lanes 1 and 2: intake calls `checkOutboxFile(name, text, { products, seenIds })`, both a list or a
+   phone ("Confirmed: …" for an idea; "Request taken: … nothing has happened yet" for a research ask or an undo; or "Not
+   filed: <reason>. Say it again."), **only after the record write succeeded**; a failed write pushes "Not filed".
+   A `state-` or `request-` file is the exception (lead calls L151, L167 m-1): nothing acts on either yet, the record
+   always refuses them and the profile holds them back (#106), so if one reaches intake, intake pushes
+   `intakePush(name, check)` whatever the record answers ("Not filed: … isn't available from the Front Door yet"),
+   never the failed-write "Say it again". Lanes 1 and 2: intake calls `checkOutboxFile(name, text, { products, seenIds })`, both a list or a
    Set, with `seenIds` every id taken in before, kept in the record so it survives a restart. Both are required: a
    result whose `checked` shows either skipped is pushed as "Not filed". Until this is wired, a "Filed" reply has no
    confirmation behind it.
-8. The rotate push says "the steps follow" (lead call L26 wording). Lane 2 (or the Lead's rotate flow): send the owner
-   the rotate steps for that name after the "Request taken" push. Until that is wired, the push promises steps that
-   don't come (0b-8 audit round 9 minor 3).
+8. Rotate (lead call L26 wording, parked by L151). Lane 2 (or the Lead's rotate flow): send the owner the rotate steps
+   for that name. Until that is wired, the skill files no rotate request and the push says the key is NOT rotated; the
+   PR that wires it brings back the parked "the steps follow" wording (0b-8 audit round 9 minor 3).
 9. Mode requests (R-0b-137). Lane 2's intake takes in `request-evolve-`, `request-audit-`, `request-upgrade-` and
-   `request-think-` like the other requests (same `checkOutboxFile`, same push, "Request taken: … Nothing has started
-   yet"). The Lead acts on evolve, audit and upgrade as Bob runs on that product; think opens a thinking room on the
+   `request-think-` like the other requests (same `checkOutboxFile`). Until then their push is "Not filed: the <mode>
+   request isn't available from the Front Door yet. Nothing changed." (L151); the PR that wires them brings back
+   "Request taken". The Lead acts on evolve, audit and upgrade as Bob runs on that product; think opens a thinking room on the
    rules' `models.main`. `what` is the owner's words, one line, already checked for keys; pass it on through
    `cleanOutside`. NEW files nothing: the owner opens their own session. Until this is wired (the record refuses
    `request-` until items 7, 8 and 9 land (L151), and intake doesn't take mode requests in yet; the skill's step 3 is off), the skill files
@@ -110,9 +123,9 @@ R-0b-82's decision and handoff code sit here although the row is tagged M11 (lan
 
 | Row | Built, fake tests pass (Claude) | Proven on phone/Mini (owner + Claude, date, result) |
 |---|---|---|
-| R-0b-81 | yes: `outbox.test.mjs`, `skill.test.mjs` | not yet (OWNER-TEST steps 1–5) |
+| R-0b-81 | yes: `outbox.test.mjs`, `skill.test.mjs`, `shown.test.mjs` (every owner-shown sentence pinned, L167) | not yet (OWNER-TEST steps 1–5) |
 | R-0b-82 | yes: `restart.test.mjs`, `transcript.test.mjs` | not yet (step 6; needs lane 2's stop/start) |
-| R-0b-83 | yes: `trip.test.mjs`, `outbox.test.mjs`, `M12-sensors/power-source.test.mjs` | not yet (step 7) |
+| R-0b-83 | yes: `trip.test.mjs`, `outbox.test.mjs`, `M12-sensors/power-source.test.mjs` | not yet (trip dry run parked by L151; the PR that lands the trip consumer proves it before merging, L167 M-2; step 7 proves nothing for this row) |
 | R-0b-84 | yes: `transcript.test.mjs` (the checker) | not yet (step 8) |
 | R-0b-85 | audit rounds logged in the build notes | — |
 | R-0b-136 | partly: `M2-approvals/research-ask.test.mjs`. Not done: clause 2 (the report lands) passes only against a stand-in for R-0b-135, and the real-path test (hook, intake, record) is a todo that fails until lane 2's M4 and M9 fixes land (audit kit-lane3 r1 M-1, Minor 10) | not yet (needs join item 10 and R-0b-135) |
