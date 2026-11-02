@@ -48,7 +48,7 @@ const TOKEN_PAGE_NOTE = [
   'What this proved: the token cannot write pull requests. It did not prove the token cannot change code, or that it reaches only one repository.',
   "Now check that by eye, on GitHub's token page (github.com → your picture → Settings → Developer settings → Personal access tokens → Fine-grained tokens → this token):",
   '  - Repository access: only the one repository named in the config;',
-  '  - Permissions: Metadata = Read-only (GitHub always adds it), Contents = Read-only (GitHub may call it "code"), Pull requests = Read-only, and nothing else.',
+  '  - Permissions: Metadata = Read-only (GitHub adds it by itself; fine if absent), Contents = Read-only (GitHub may call it "code"), Pull requests = Read-only, and nothing else.',
 ];
 const USAGE = 'usage: node setup.mjs <users-folders|check|proofs|install|check-install|daemons place|load|unload|list|check [--only <job>]|daemons reload-account|prove-token|proposals|check-proposals|safe-directory|check-safe-directory|token|check-token|watch-rules|check-watch-rules> [--config <file>, without sudo only] [--dry-run] [--main <commit>]';
 const DAEMON_SUBS = ['place', 'load', 'unload', 'list', 'check', 'reload-account'];
@@ -167,7 +167,8 @@ export function main(argv, { io: given, runUpdater = spawnUpdater, out = (s) => 
     }
     out(`dry run: ${planned.ops.length} step(s), nothing changed.`); return 0; }
   // A message that already says what to run next ("run: daemons load") is the one instruction; the generic "run it again" is only for the rest.
-  try { apply(planned.ops, { log: (t) => out(`run: ${t}`) }); } catch (e) { err(/run: daemons load/i.test(e.message) ? `stopped: ${e.message}.` : `stopped: ${e.message}. Run it again after fixing that; it picks up where it stopped.`); return 1; }
+  try { apply(planned.ops, { log: (t) => out(`run: ${t}`) }); } catch (e) { const why = String(e.message).replace(/\.+$/, '');   // a message that ends in its own period gets one, not two
+    err(/run: daemons load/i.test(e.message) ? `stopped: ${why}.` : `stopped: ${why}. Run it again after fixing that; it picks up where it stopped.`); return 1; }
   const after = o.cmd === 'users-folders' ? check(io, cfg, { alsoKnown: rootMadeEntries(cfg) }) : o.cmd === 'install' ? checkInstall(io, cfg)
     : o.cmd === 'proposals' ? checkProposals(io, cfg) : o.cmd === 'safe-directory' ? checkSafeDirectory(io, cfg) : o.cmd === 'token' ? checkToken(io, cfg) : o.cmd === 'watch-rules' ? checkWatchRules(io, cfg)
     : o.sub === 'place' ? checkDaemons(io, cfg, o.jobs).filter((r) => /exactly the built job file$|under another label/.test(r.what)) : o.sub === 'load' ? checkDaemons(io, cfg, o.jobs).filter((r) => /is loaded$|loaded from the job file as it is now$/.test(r.what))
