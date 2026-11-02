@@ -323,6 +323,27 @@ test('L44 planted: a verdict file in a worker\'s outbox is refused at intake and
   assert.deepEqual(kindsFor({ role: 'reviewer' }), ['report-', 'verdict-']);
 });
 
+// L189 m2 (L167 c-4): the Front Door's state- (pause/away) and request- (resume, wrap-up, rotate, mode) files are refused
+// at the Dispatcher's own read, before the Record sees them, through kindsFor as intake uses it. The kinds it keeps reach
+// the Record (control). A kindsFor that handed the Front Door the full table would let both through to applyOutbox.
+test('L189 m2: a Front Door state- or request- file is refused at intake\'s read and never reaches the record', async () => {
+  const w = world();
+  const ob = mk(join(w.root, 'front_door'));
+  const held = ['state-20261103-0915-aa.json', 'request-resume-20261103-0915-ad.json', 'request-think-1.json'];
+  const kept = ['idea-1.md', 'ask-request-20261103-0915-ab.json'];
+  for (const n of [...held, ...kept]) writeFileSync(join(ob, n), '{}\n');
+  const real = recWith();
+  const applied = [];
+  const rec = Object.create(real, { applyOutbox: { value: (meta, file) => { applied.push(file.split('/').pop()); return real.applyOutbox(meta, file); } } });
+  const out = await intakePass({ rec, sessions: [{ sessionId: 'F-1', role: 'front_door', outbox: ob, uid: UID }], ...w.ports });
+  for (const n of held) {
+    assert.match(out.find((r) => r.name === n).refused, /is not a kind this role may hand in/, `${n} is refused at the read`);
+    assert.ok(!applied.includes(n), `${n} never reaches the record`);
+  }
+  for (const n of kept) assert.ok(applied.includes(n), `${n}, a kind the Front Door keeps, reaches the record`);
+  assert.deepEqual(kindsFor({ role: 'front_door' }).filter((k) => k === 'state-' || k === 'request-'), []);
+});
+
 // L138 m1, m3, m8: the real outbox, with the Record's clock ahead of the tick's. `queueOk()` false is an outbox that
 // refuses the entry (a full queue, say), so nothing is queued and only the recorded fact can ask again.
 const tickRun = (base, rec, w, sessions, port, min, queueOk = () => true) => {

@@ -63,6 +63,12 @@ test('L82 M-1: for every role, M4\'s kinds are exactly the shared table\'s, and 
   assert.deepEqual(Object.keys(DESIGN_PROFILES).sort(), [...LAUNCHED].sort(), 'one profile per role M4 launches');
   const listed = [...new Set(Object.values(OUTBOX_KINDS).flatMap((k) => k.roles))];
   for (const r of listed) assert.ok(AI_ROLES.includes(r), `${r} in the table is a known role`);
+  // L189 m3: the checks below read NOT_YET, so a kind wrongly added to it would pass them. Pin it exactly, and hold every
+  // other role to the full table with no hold-back in between. A kind is added here only in the PR that lands its reason.
+  assert.deepEqual(JSON.parse(JSON.stringify(NOT_YET)), { front_door: ['state-', 'request-'] }, 'the kinds held back are exactly these');
+  for (const role of LAUNCHED.filter((r) => r !== 'front_door')) {
+    assert.deepEqual([...DESIGN_PROFILES[role].outbox].sort(), outboxKindsFor(role).sort(), `${role}: every kind the table lists, none held back`);
+  }
   for (const role of LAUNCHED) {
     const table = Object.keys(OUTBOX_KINDS).filter((k) => OUTBOX_KINDS[k].roles.includes(role));
     assert.deepEqual([...DESIGN_PROFILES[role].outbox].sort(), table.filter((k) => !notYet(role, k)).sort(), `${role}: M4's kinds = M9's list, less the kinds not yet handed in`);
