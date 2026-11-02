@@ -66,7 +66,7 @@ test('R-0b-137: the skill\'s cue table and buttons match sort.mjs', () => {
     for (const c of CUES[mode]) assert.ok(row.toLowerCase().includes(c.trim().replace("lets think", "let's think")), `${mode}: ${c}`);
   }
   for (const o of READBACK_OPTIONS) assert.ok(SKILL.includes(`\`${o}\``), o);
-  assert.ok(SKILL.includes('"(Recommended)"'));
+  assert.ok(SKILL.includes('" (Recommended)" after its'));
   assert.ok(SKILL.includes('Cue words count only as whole words'));
   assert.ok(SKILL.includes('"build a new …" on its own') && SKILL.includes('When no cue fits, recommend think'));
   // Minor 9: the mode requests are under "not wired yet", and the skill never says "Filed" for them.
@@ -82,7 +82,7 @@ test('R-0b-137: each mode request the skill writes passes intake, and only mode 
     assert.equal(f.ok, true, request);
     const r = checkOutboxFile(f.name, f.text, { products: ['test-product'], seenIds: [] });
     assert.equal(r.ok, true, r.reason); assert.equal(r.doc.what, 'fix the chart');
-    assert.match(intakePush(f.name, r), /^Request taken: .*Nothing has started yet/);
+    assert.equal(intakePush(f.name, r), `Not filed: the ${request} request isn't available from the Front Door yet. Nothing changed.`); // L151
   }
   const filled = '{"request":"audit","product":"test-product","name":null,"what":"is the total right"}';
   assert.equal(checkOutboxFile('request-audit-20261103-0915-ab.json', filled).ok, true);
@@ -99,7 +99,7 @@ test('R-0b-137: each mode request the skill writes passes intake, and only mode 
 test('R-0b-137 / B11 planted: a secret typed in chat is not repeated, and rotate files the name only', () => {
   const said = `fix the login, the key is ${FAKE_KEY}`;
   assert.equal(repeatsSecret(said, `Change: test-product.\nWhat you said: fix the login, the key is ${FAKE_KEY}`), true);
-  assert.equal(repeatsSecret(said, 'That looks like a key. I did not keep it. Rotate it, and tell me only its name.'), false);
+  assert.equal(repeatsSecret(said, 'That looks like a key. I did not keep it. Treat it as exposed: rotate it now in a session on the Mini; that can\'t be done from here.'), false);
   assert.equal(repeatsSecret('hello', `here: ${FAKE_KEY}`), true, 'a key-shaped reply is refused on its own');
   // L84 6: the read-back repeats none of an all-upper-case access-key id (a planted fake).
   const keyId = ['AK', 'IA', 'Q7XP3ZL9M2K4T8WB'].join('');
@@ -121,5 +121,5 @@ test('R-0b-137 / B11 planted: a secret typed in chat is not repeated, and rotate
   assert.equal(checkOutboxFile(f.name, f.text).ok, false, 'a what holding the key refuses the whole file');
   const rot = outboxFile('request', '20261103-0915-ro', { request: 'rotate', name: 'GITHUB_TOKEN' });
   assert.equal(rot.ok, true); assert.ok(!rot.text.includes(FAKE_KEY));
-  assert.match(intakePush(rot.name, checkOutboxFile(rot.name, rot.text, { products: [], seenIds: [] })), /rotate GITHUB_TOKEN/);
+  assert.equal(intakePush(rot.name, checkOutboxFile(rot.name, rot.text, { products: [], seenIds: [] })), "Not filed: rotating GITHUB_TOKEN isn't available from the Front Door yet. The key is NOT rotated."); // L151
 });
