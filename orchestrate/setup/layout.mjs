@@ -55,12 +55,15 @@ export function parseConfig(raw) {
   if (proposalsParent !== undefined && (typeof proposalsParent !== 'string' || !BASE.test(proposalsParent) || proposalsParent.split('/').some((x) => x === '..' || x === '.') || proposalsParent.includes('//') || proposalsParent.endsWith('/') || proposalsParent.split('/').length < 3 || proposalsParent.length > 200)) {
     throw new Error('config: proposalsParent must be a full path of letters, digits and . _ - / only, in a folder of its own, with no .. and no spaces');
   }
-  // The repository the watch-only token is proven against (prove-token reads it from here, never from the command line): owner/name.
+  // The watch-only week: `repo` is the repository the token is proven against (prove-token reads it from here, never from the command
+  // line) and the one watch-rules prints; `rulesSha256` is the hash of the rules file root put in place (watch-rules), absent until then.
   if (watch !== undefined) {
-    const r = watch && typeof watch === 'object' && !Array.isArray(watch) ? watch.repo : undefined;
+    const ok = watch && typeof watch === 'object' && !Array.isArray(watch) && Object.keys(watch).every((k) => ['repo', 'rulesSha256'].includes(k));
+    const r = ok ? watch.repo : undefined;
     if (typeof r !== 'string' || !/^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/.test(r) || r.split('/').some((x) => x === '.' || x === '..')) throw new Error('config: watch.repo must look like owner/name');
+    if (watch.rulesSha256 !== undefined && (typeof watch.rulesSha256 !== 'string' || !/^[0-9a-f]{64}$/.test(watch.rulesSha256))) throw new Error('config: watch.rulesSha256 must be 64 hex characters');
   }
-  return { base: b, owner, products: [...products], ...(proposalsParent !== undefined ? { proposalsParent } : {}), ...(watch !== undefined ? { watch: { repo: watch.repo } } : {}) };
+  return { base: b, owner, products: [...products], ...(proposalsParent !== undefined ? { proposalsParent } : {}), ...(watch !== undefined ? { watch: { repo: watch.repo, ...(watch.rulesSha256 !== undefined ? { rulesSha256: watch.rulesSha256 } : {}) } } : {}) };
 }
 
 /** Where the proposals folders live (R-0b-128, runbook A7; "a proposal for the owner's OK" until they OK it): one folder per product under this parent. */
@@ -120,6 +123,8 @@ export function folderTable(cfg) {
     ...USERS.map((u) => [homeOf(cfg, u), u, 0o700, `${u}'s home`]),
     [p('keys'), 'orchestrate', 0o700, 'robot keys: nothing else reads them'],
     [p('private'), 'orchestrate', 0o700, 'private data: attempt logs, raw facts before masking'],
+    [p('watch'), 'orchestrate', 0o700, 'the watch-only week: the log of what the Merge Gate would have done, and the rules draft'],
+    [watchNotesPath(cfg), 'owner', 0o755, 'the watch-only week\'s written explanations: the owner writes, orchestrate and the summary only read'],
     [p('hooks'), 'orchestrate', 0o755, 'hook copies and the rules snapshot: read and run by others, written by orchestrate'],
     [p('settings'), 'orchestrate', 0o755, 'role settings files'],
     [p('launcher'), 'orchestrate', 0o755, 'the launcher'],
@@ -152,3 +157,7 @@ export function folderTable(cfg) {
   // person's own user, whose Mac group would otherwise be taken as it comes (L100 m1). Set on apply, compared in check.
   return rows.map(([path, owner, mode, why, acl = []]) => ({ path, owner, mode, why, acl, ...(owner === 'owner' && (mode & 0o070) ? { group: 'root' } : {}) }));
 }
+
+/** The rules draft the watch-only week judges by (R-0b-122): root's copy, in orchestrate's watch folder; the config holds its hash. */
+export const watchRulesPath = (cfg) => join(cfg.base, 'watch', 'rules-draft.yaml');
+export const watchNotesPath = (cfg) => join(cfg.base, 'watch-notes');

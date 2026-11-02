@@ -15,6 +15,7 @@
 //   io.rootUid              the uid root has (0; a test stands one in)
 //   io.nodeProblem()        null, or why the node running this is not one root may run (L90 minor a)
 //   io.nodeBinProblem(path) the same for a node program the config names (it is copied in and root runs the copy)
+//   io.readRules(path)      the watch-only rules file: the same single-handle, no-link, plain-file read, but its owner is not judged
 //   io.readSource(path)     a file of this machine outside the prefix that root reads (the runner config): through one handle,
 //                           never through a link, a plain file, not too big; as root also root's own and written by no one else.
 //                           Errors never show a byte of the file.
@@ -87,13 +88,13 @@ export function unlinkName(real) { unlinkSync(real); }
  * it root's alone. Errors name the problem and never show a byte of the file (it may hold anything). `ownerOf` and `chain`
  * are ports for a test, which is not root.
  */
-export function readConfigFile(real, { strict = false, rootUid = 0, top = '/', ownerOf = (st) => st.uid, chain = chainProblem, what = 'the config' } = {}) {
+export function readConfigFile(real, { strict = false, rootUid = 0, top = '/', ownerOf = (st) => st.uid, chain = chainProblem, what = 'the config', fstat = fstatSync } = {}) {
   let fd;
-  try { fd = openSync(real, constants.O_RDONLY | constants.O_NOFOLLOW); } catch (e) {
-    throw new Error(e?.code === 'ELOOP' ? `${what} is a link, and a link is not followed` : e?.code === 'ENOENT' ? `${what} file was not found` : `${what} could not be opened (${e?.code ?? 'error'})`);
+  try { fd = openSync(real, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); } catch (e) {   // O_NONBLOCK: a named pipe must not hold the open forever (R6 m-1)
+    throw new Error(e?.code === 'ELOOP' ? `${what} is a link, and a link is not followed` : e?.code === 'ENOENT' ? (/ file$/.test(what) ? `${what} was not found` : `${what} file was not found`) : `${what} could not be opened (${e?.code ?? 'error'})`);
   }
   try {
-    const st = fstatSync(fd);
+    const st = fstat(fd);
     if (!st.isFile()) throw new Error(`${what} is not a plain file`);
     if (st.size > 65536) throw new Error(`${what} is far bigger than a config can be`);
     if (strict) {
@@ -102,7 +103,10 @@ export function readConfigFile(real, { strict = false, rootUid = 0, top = '/', o
       const above = chain(dirname(real), { owner: rootUid, top });
       if (above) throw new Error(`the folder ${what} is in is not root's alone (${above})`);
     }
-    return readFileSync(fd, 'utf8');
+    // Read through this handle with a limit of its own: a file that grew after the size check above is refused, not read to the end (R6 m-2).
+    const buf = Buffer.alloc(65537); let n = 0;
+    for (;;) { const k = readSync(fd, buf, n, buf.length - n, null); if (k === 0) break; n += k; if (n === buf.length) throw new Error(`${what} is far bigger than a config can be`); }
+    return buf.toString('utf8', 0, n);
   } finally { closeSync(fd); }
 }
 
@@ -166,6 +170,9 @@ export function realIo({ prefix = '' } = {}) {
     // Plain fetch for the one place the setup talks to GitHub (prove-token). → { status, text }; a time limit; redirects are not followed.
     fetch: async (url, init) => { const r = await fetch(url, { ...init, redirect: 'manual', signal: AbortSignal.timeout(20_000) }); return { status: r.status, text: await r.text(), rateRemaining: r.headers.get('x-ratelimit-remaining') }; },
     nodeBinProblem: (p) => nodeProblemOf(p, { exact: true }),
+    // The watch-only rules file root copies in (a file of the owner's choosing, so its owner is not judged): still one handle, never a link,
+    // a plain file, a size limit, and no message shows a byte of it.
+    readRules: (p) => readConfigFile(p, { strict: false, what: 'the rules file' }),
     readSource: (p) => readConfigFile(p, { strict: (typeof process.geteuid === 'function' ? process.geteuid() : -1) === 0, rootUid: 0, top: '/', what: 'the runner config' }),
     // For the install and the job files. `src` is a real path outside the prefix (a file of this repository, the node program).
     readText: (p) => readFileSync(at(p), 'utf8'),

@@ -176,6 +176,7 @@ export function fakeMac({ euid: as = 0, users = {}, admins = [] } = {}) {
     // The real checks on a node program the config names, for the file's own owner (the test process) and mode, in its own folder.
     nodeBinProblem: (p) => nodeProblemOf(p, { exact: true, rootUid: mac.rootUid, top: (() => { try { return dirname(realpathSync(p)); } catch { return '/'; } })() }),
     // The runner config is a real file outside the prefix. The real reader (links, plain file, size); as root also its owner and mode.
+    readRules: (p) => readConfigFile(p, { strict: false, what: 'the rules file' }),
     readSource: (p) => readConfigFile(p, { strict: mac.as === 0, rootUid: mac.rootUid, top: dirname(p), ownerOf: (st) => st.uid, what: 'the runner config' }),
     // The install and the job files. The real calls, on the prefixed place; a write needs the parent folder (like the real one)
     // and makes a NEW file only (like the real one: it never overwrites or follows a link).

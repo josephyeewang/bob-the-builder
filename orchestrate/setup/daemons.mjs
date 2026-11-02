@@ -1,7 +1,7 @@
 // Setup part 2b (PR 2): the three background jobs (LaunchDaemons). The plist texts come from review-daemons.mjs (the one
 // place that builds them); this file puts them where launchd looks, and loads, lists and unloads them.
 //
-//   place    write the three plists into /Library/LaunchDaemons, root:wheel 0644 (launchd refuses any other owner or mode)
+//   place    write the three plists (four with the hourly watch-only job, when the config has `watch`) into /Library/LaunchDaemons, root:wheel 0644 (launchd refuses any other owner or mode)
 //   load     launchctl bootstrap system <plist>, for each job not loaded yet; a job loaded from an OLDER file is reloaded (bootout, then
 //            bootstrap); refuses unless the install check passes. It records the fingerprint of each file it loaded
 //            (<base>/install/loaded-jobs.json, root's) so `check` can tell a loaded job from a file that has since changed
@@ -19,10 +19,22 @@ import { RUNNER_CONFIG, aclProblem, chainProblem, currentCopy } from '../modules
 import { homeOf } from './layout.mjs';
 import { checkInstall, installPaths } from './install.mjs';
 import { readUser } from './users-folders.mjs';
+import { watchPlist, WATCH_NO_HASH } from './watch-setup.mjs';
+import { watchRulesPath } from './layout.mjs';
 
 export const DAEMON_DIR = '/Library/LaunchDaemons';
 const LAUNCHCTL = '/bin/launchctl';
 export const JOBS = Object.freeze(['review-updater', 'review-account', 'review-runner']);   // load order: the updater first
+// The hourly watch-only job (watch-setup.mjs) is a fourth job only when the config's `watch` entry has the rules fingerprint (R6 M-1):
+// a repo-only entry (all prove-token needs) leaves the three review jobs exactly as before.
+export const jobsFor = (cfg) => (cfg.watch?.rulesSha256 ? [...JOBS, 'watch-only'] : [...JOBS]);
+/** `--only <job>`: that one job, or a clear refusal naming the jobs there are (the watch job exists only when the config's `watch` entry has the rules fingerprint). */
+export function onlyJobs(cfg, name) {
+  const all = jobsFor(cfg);
+  if (name === 'watch-only' && cfg.watch && !cfg.watch.rulesSha256) throw new Error(WATCH_NO_HASH);
+  if (!all.includes(name)) throw new Error(`--only names no job of this config: ${JSON.stringify(String(name).slice(0, 60))}; the jobs are ${all.join(', ')}`);
+  return [name];
+}
 const op = (text, run) => ({ text, run });
 const plistPath = (cfg, job) => join(DAEMON_DIR, `${cfg.label}.${job}.plist`);
 const labelOf = (cfg, job) => `${cfg.label}.${job}`;
@@ -46,7 +58,9 @@ export function plistTexts(io, cfg) {
   const common = { label: cfg.label, installRoot: P.installRoot, logDir: P.logDir };
   try {
     const two = reviewDaemonPlists({ ...common, config: join(P.installRoot, RUNNER_CONFIG), reviewRoot: P.reviewRoot, reviewHome: homeOf(cfg, 'review'), accountCopy: P.accountCopy, ownerHome: owner.home, ownerUid: owner.uid });
-    return { plists: { 'review-runner': two.runner, 'review-account': two.accountCopy, 'review-updater': updaterPlist(common) }, problems };
+    const plists = { 'review-runner': two.runner, 'review-account': two.accountCopy, 'review-updater': updaterPlist(common) };
+    if (cfg.watch?.rulesSha256) plists['watch-only'] = watchPlist(io, cfg);
+    return { plists, problems };
   } catch (e) { return { plists: {}, problems: [`the job files cannot be built from the owner's Mac user ${cfg.owner} (${e.message}); is its home folder set?`] }; }
 }
 
@@ -60,7 +74,7 @@ export function jobState(io, cfg, job) {
   return { loaded: true, pid: Number(/^\s*pid = (\d+)$/m.exec(r.stdout)?.[1]) || null, state: /^\s*state = (.+)$/m.exec(r.stdout)?.[1]?.trim() ?? 'unknown', lastExit: /^\s*last exit code = (.+)$/m.exec(r.stdout)?.[1]?.trim() ?? 'unknown' };
 }
 
-export function planPlace(io, cfg, jobs = JOBS) {
+export function planPlace(io, cfg, jobs = jobsFor(cfg)) {
   const P = installPaths(cfg); const ops = []; const { plists, problems } = plistTexts(io, cfg);
   if (problems.length) return { ops, problems };
   // The job files go outside the base, into launchd's own folder: it and every folder above it must be root's alone too.
@@ -81,7 +95,7 @@ export function planPlace(io, cfg, jobs = JOBS) {
   return { ops, problems };
 }
 
-export function planLoad(io, cfg) {
+export function planLoad(io, cfg, jobs = jobsFor(cfg)) {
   const P = installPaths(cfg); const ops = []; const problems = [];
   const cur = currentCopy(io.at(P.installRoot), { owner: io.rootUid });
   if (cur.missing || cur.problem || !cur.link) problems.push('the install is not there yet (run the install first), so a job would start against nothing');
@@ -90,8 +104,12 @@ export function planLoad(io, cfg) {
     const bad = checkInstall(io, cfg).filter((r) => !r.ok);
     if (bad.length) problems.push(`the install check fails (${bad[0].what}: ${bad[0].why})${bad.length > 1 ? `, and ${bad.length - 1} more` : ''}; fix that first (node setup.mjs check-install shows all of it)`);
   }
+  if (jobs.includes('watch-only')) {
+    let r = null; try { r = io.lstat(watchRulesPath(cfg)); } catch { /* below */ }
+    if (!r) problems.push(`${watchRulesPath(cfg)} is not there (run watch-rules first), so the hourly watch job would have no rules to judge by`);
+  }
   const rec = readRecord(io, cfg);
-  for (const job of JOBS) {
+  for (const job of jobs) {
     const text = fileText(io, cfg, job);
     if (text === null) { problems.push(`${plistPath(cfg, job)} is not there (run daemons place first)`); continue; }
     const s = jobState(io, cfg, job); const label = labelOf(cfg, job); const h = sha(text);
@@ -107,9 +125,9 @@ export function planLoad(io, cfg) {
 }
 
 /** Unload the jobs that are loaded; none loaded → nothing to do, no error. Runner first, so nothing starts while the updater goes. */
-export function planUnload(io, cfg) {
+export function planUnload(io, cfg, jobs = jobsFor(cfg)) {
   const ops = []; const problems = [];
-  for (const job of [...JOBS].reverse()) {
+  for (const job of [...jobs].reverse()) {
     const s = jobState(io, cfg, job);
     if (s.error) { problems.push(`could not ask launchd about ${labelOf(cfg, job)}: ${s.error}`); continue; }
     if (!s.loaded) continue;
@@ -148,8 +166,8 @@ export function planReloadAccount(io, cfg) {
   return { ops: [...place.ops, out, inn, rec, readBackOp(io, cfg, job)], problems: [] };
 }
 
-export function list(io, cfg) {
-  return JOBS.map((job) => ({ job, label: labelOf(cfg, job), ...jobState(io, cfg, job) }));
+export function list(io, cfg, jobs = jobsFor(cfg)) {
+  return jobs.map((job) => ({ job, label: labelOf(cfg, job), ...jobState(io, cfg, job) }));
 }
 
 /** Read only → [{ ok, what, why? }]. */
@@ -161,16 +179,18 @@ function runningSeconds(io, pid) {
   const m = r.status === 0 ? /^\s*(?:(?:(\d+)-)?(\d+):)?(\d+):(\d+)\s*$/.exec(r.stdout) : null;
   return m ? ((Number(m[1] ?? 0) * 24 + Number(m[2] ?? 0)) * 60 + Number(m[3])) * 60 + Number(m[4]) : null;
 }
-export function checkDaemons(io, cfg) {
+export function checkDaemons(io, cfg, jobs = jobsFor(cfg)) {
   const out = []; const item = (ok, what, why, skip = false) => { if (!skip) out.push({ ok, what, ...(ok ? {} : { why }) }); };
   const { plists, problems } = plistTexts(io, cfg);
   if (problems.length) { item(false, 'the job files can be built', problems[0]); return out; }
   // A job file under another label is a second copy of a job that launchd may be running too (a changed label leaves the old one behind).
+  // It is about the whole set, so a check narrowed with --only leaves it out.
   let names = []; try { names = io.list(DAEMON_DIR); } catch { /* the folder itself is checked by place */ }
-  const stray = names.filter((n) => { const m = /^(.+)\.(review-updater|review-account|review-runner)\.plist$/.exec(n); return m && m[1] !== cfg.label; });
-  item(stray.length === 0, `no job file in ${DAEMON_DIR} under another label than ${cfg.label}`, `${stray.join(', ')}: a leftover set of jobs (take them out with daemons unload under the old label, then delete the files)`);
+  const subset = jobs.length < jobsFor(cfg).length;
+  const stray = subset ? [] : names.filter((n) => { const m = /^(.+)\.(review-updater|review-account|review-runner|watch-only)\.plist$/.exec(n); return m && m[1] !== cfg.label; });
+  item(stray.length === 0, `no job file in ${DAEMON_DIR} under another label than ${cfg.label}`, `${stray.join(', ')}: a leftover set of jobs (take them out with daemons unload under the old label, then delete the files)`, subset);
   const rec = readRecord(io, cfg);
-  for (const job of JOBS) {
+  for (const job of jobs) {
     const f = plistPath(cfg, job); const why = [];
     let st = null; try { st = io.lstat(f); } catch { why.push('missing'); }
     if (st) {
