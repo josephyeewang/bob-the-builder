@@ -20,6 +20,8 @@ import { cleanOutside } from '../M12-sensors/escape.mjs';
 import { POWER_FACT } from '../M12-sensors/power-source.mjs';
 import { STATUS_FACT } from '../M13-ledger/heartbeat.mjs';
 import { waitingItems } from '../M13-ledger/waiting.mjs';
+import { OWNER_WAIT_WHO, PAUSED_WAIT_WHAT } from '../../shared/record.mjs';
+import { WRITERS, fieldsAllowed } from '../M9-record/permissions.mjs';
 import { checkTimeZone } from './timezone.mjs';
 
 export const FRESH_MIN = 60;
@@ -132,17 +134,30 @@ export function buildTripBrief({ products, until = null, tz: tzIn = null, stateI
   const asks = rec.list('ask').filter(({ doc }) => doc && OPEN_ASK.includes(doc.state) && activeKind(doc.kind));
   const askIds = new Set(asks.map((a) => a.id));
   let goes; let listError = null;
-  try { goes = waitingItems(rec).filter((i) => (i.record_error || String(i.who ?? '').toLowerCase() === 'owner') && !(i.entity === 'ask' && askIds.has(i.id))); } catch { goes = []; listError = 'RECORD ERROR: the waiting list could not be read'; }
-  const link = (doc, what) => (doc?.link ? doc.link : `RECORD ERROR: no ${what} link in the record`);
+  // A card waits on the owner by M9's own name for it (L79); a go or ask doc says 'owner'.
+  const onOwner = (i) => String(i.who ?? '').toLowerCase() === (i.entity === 'card' ? OWNER_WAIT_WHO : 'owner');
+  // A card parked for a paused product resumes by itself on unpause: shown apart, not as a go owed (L85 m-5).
+  const parked = (i) => !i.record_error && i.entity === 'card' && i.what === PAUSED_WAIT_WHAT;
+  let paused = [];
+  try {
+    const mine = waitingItems(rec).filter((i) => (i.record_error || onOwner(i)) && !(i.entity === 'ask' && askIds.has(i.id)));
+    goes = mine.filter((i) => !parked(i));
+    paused = mine.filter(parked);
+  } catch { goes = []; listError = 'RECORD ERROR: the waiting list could not be read'; }
+  // A kind whose M9 schema lets no writer set a `link` (a card) is named, not linked (L79); a kind that may carry one
+  // but lacks it is a record error.
+  const mayLink = (entity) => Object.keys(WRITERS[entity] ?? {}).some((actor) => [true, false].some((create) => { const f = fieldsAllowed(entity, actor, { create }); return f === '*' || Boolean(f?.has?.('link')); }));
+  const link = (doc, what, entity, id) => (doc?.link ? doc.link : !mayLink(entity) ? `${entity} ${id}` : `RECORD ERROR: no ${what} link in the record`);
   out.push('', `Waiting on your go (${listError ? 'unknown' : goes.length}):`);
   if (listError) out.push(`- ${listError}`);
   for (const i of goes) {
     const doc = rec.read(i.entity, i.id)?.doc;
-    out.push(`- ${i.entity} ${i.id}: ${i.record_error ?? cleanOutside(String(i.what ?? ''), 'record-ask')} (${link(doc, i.entity === 'go' ? 'roadmap row' : 'record')})`);
+    out.push(`- ${i.entity} ${i.id}: ${i.record_error ?? cleanOutside(String(i.what ?? ''), 'record-ask')} (${link(doc, i.entity === 'go' ? 'roadmap row' : 'record', i.entity, i.id)})`);
   }
   if (!goes.length && !listError) out.push('- none');
+  if (paused.length) out.push('', `Parked while their product is paused; they resume when you unpause (${paused.length}):`, ...paused.map((i) => `- card ${i.id}`));
   out.push('', `Open risky-act asks (${asks.length}); they still expire after ${askExpiryH} h while you are away:`);
-  for (const { id, doc } of asks) out.push(`- ${id}: ${cleanOutside(String(doc.what ?? doc.wait?.what ?? ''), 'record-ask')} (${link(doc, 'pull request')})`);
+  for (const { id, doc } of asks) out.push(`- ${id}: ${cleanOutside(String(doc.what ?? doc.wait?.what ?? ''), 'record-ask')} (${link(doc, 'pull request', 'ask', id)})`);
   if (!asks.length) out.push('- none');
 
   out.push('');
