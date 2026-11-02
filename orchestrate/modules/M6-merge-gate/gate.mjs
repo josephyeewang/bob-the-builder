@@ -291,7 +291,7 @@ export async function gatePass(ctx) {
   function waitLimit(m) {
     const limit = mergingLimit(m);
     if (limit === undefined || Number.isFinite(limit)) return limit;
-    tellLimitMissing(m, `merge ${m.id} is waiting to be judged (${(m.doc.waiting_on ?? []).join('; ')}), and the rules have no ${KEYS.mergingOpenMaxMin}, so the gate uses its own default of ${DEFAULT_WAIT_LIMIT_MIN} min: a wait is told after ${DEFAULT_WAIT_LIMIT_MIN} min and refused after ${WAIT_CAP_TIMES * DEFAULT_WAIT_LIMIT_MIN} min, and an open merge after the merge call is never recorded as interrupted. Add the limit to the rules file`);
+    tellLimitMissing(m, 'waiting', `merge ${m.id} is waiting to be judged (${(m.doc.waiting_on ?? []).join('; ')}), and the rules have no ${KEYS.mergingOpenMaxMin}, so the gate uses its own default of ${DEFAULT_WAIT_LIMIT_MIN} min: a wait is told after ${DEFAULT_WAIT_LIMIT_MIN} min and refused after ${WAIT_CAP_TIMES * DEFAULT_WAIT_LIMIT_MIN} min, and an open merge after the merge call is never recorded as interrupted. Add the limit to the rules file`);
     return DEFAULT_WAIT_LIMIT_MIN * 60_000;
   }
 
@@ -461,7 +461,7 @@ export async function gatePass(ctx) {
     if (limit === undefined) return;
     const tooLong = !final && openTooLong(record, m.id, now, limit);
     if (!final && !tooLong) {
-      if (!Number.isFinite(limit)) tellLimitMissing(m);
+      if (!Number.isFinite(limit)) tellLimitMissing(m, 'open');
       step(m, 'outcome_unknown', { reasons: [Number.isFinite(limit) ? 'the pull request is still open' : `the pull request is still open, and the rules have no ${KEYS.mergingOpenMaxMin}`] });
       return;
     }
@@ -482,14 +482,18 @@ export async function gatePass(ctx) {
   // answer, and a waiting hold is timed by DEFAULT_WAIT_LIMIT_MIN (L184), so the owner is told once per merge that the
   // rules lack the limit (L148 item 5). The told fact is written
   // only once the alert was taken (as MERGED_OUTSIDE, L130 M6); a refused alert, or a refused fact write, tells again
-  // next pass.
-  function tellLimitMissing(m, note = `pull request #${m.doc.pr} is still open after the merge call, and the rules have no ${KEYS.mergingOpenMaxMin}, so it is never recorded as interrupted; it waits for GitHub's final answer. Add the limit to the rules file`) {
+  // next pass. Each of the two notes is told once per merge (L188): `told` lists which ('waiting' while it waits to be
+  // judged, 'open' when its pull request is open after the merge call), so being told one doesn't skip the other. A
+  // fact with no `told` is from before the waiting note, so it stands for 'open'.
+  function tellLimitMissing(m, when, note = `pull request #${m.doc.pr} is still open after the merge call, and the rules have no ${KEYS.mergingOpenMaxMin}, so it is never recorded as interrupted; it waits for GitHub's final answer. Add the limit to the rules file`) {
     const id = MERGE_LIMIT_TOLD_FACT(m.id);
     const f = record.read('fact', id);
-    if (f?.doc && !f.corrupt && factFrom(ACTOR, { id, createdBy: record.meta?.('fact', id)?.createdBy ?? null }, MERGE_LIMIT_TOLD_FAMILY)) return;
+    const ours = f?.doc && !f.corrupt && factFrom(ACTOR, { id, createdBy: record.meta?.('fact', id)?.createdBy ?? null }, MERGE_LIMIT_TOLD_FAMILY);
+    const told = ours ? (Array.isArray(f.doc.told) ? f.doc.told : ['open']) : [];
+    if (told.includes(when)) return;
     const said = alertTaken(alert, { type: 'merge_limit_missing', merge: m.id, card: m.doc.card, pr: m.doc.pr, note });
     if (!said) return;
-    const r = record.write({ actor: ACTOR, entity: 'fact', id, expectRev: f?.rev ?? 0, doc: { type: 'merge_limit_told', merge: m.id, key: KEYS.mergingOpenMaxMin, told_at: iso() } });
+    const r = record.write({ actor: ACTOR, entity: 'fact', id, expectRev: f?.rev ?? 0, doc: { type: 'merge_limit_told', merge: m.id, key: KEYS.mergingOpenMaxMin, told: [...told, when], told_at: iso() } });
     if (!r.ok) alert({ type: 'merge_gate_write_refused', merge: m.id, to: 'told', reason: r.reason });
   }
 

@@ -1397,6 +1397,45 @@ test('L164 + L184: a waiting merge with no merging limit in the rules is told on
   assert.equal(told(w, 'merge_limit_missing').length, 1, 'told once');
 });
 
+// L188 Minor: the two missing-limit notes are each told once per merge. A merge told while it waited is told again
+// when its pull request is open after the merge call, and neither note twice.
+test('L188: a merge told of the missing limit while waiting is told again when open after the merge call, each once', async () => {
+  const w = world();
+  verifiedCard(w);
+  w.g.pulls.get(7).mergeable_state = 'unknown';
+  await gatePass(w.ctx);
+  waitingHeld(mergeOf(w), /^3: /);
+  const id = mergeOf(w).id;
+  assert.equal(told(w, 'merge_limit_missing').length, 1);
+  assert.match(told(w, 'merge_limit_missing')[0].note, /waiting to be judged/);
+  assert.deepEqual(recOf(w).read('fact', MERGE_LIMIT_TOLD_FACT(id))?.doc?.told, ['waiting']);
+  w.g.pulls.get(7).mergeable_state = 'clean';
+  loseAnswer(w, { merged: false });
+  for (let i = 0; i < 4; i++) { tick(w, 2); await gatePass(w.ctx); }
+  const notes = told(w, 'merge_limit_missing').map((a) => a.note);
+  assert.equal(notes.length, 2, JSON.stringify(notes));
+  assert.match(notes[1], /still open after the merge call/);
+  assert.deepEqual(recOf(w).read('fact', MERGE_LIMIT_TOLD_FACT(id))?.doc?.told, ['waiting', 'open']);
+});
+
+test('L188 control: a told fact from before the waiting note stands for the open note only', async () => {
+  const w = world();
+  verifiedCard(w);
+  w.g.pulls.get(7).mergeable_state = 'unknown';
+  await gatePass(w.ctx);
+  // Rewrite the fact the old way (no told list), as a merge told only the open note before L188 would have it.
+  const fid = MERGE_LIMIT_TOLD_FACT(mergeOf(w).id);
+  must(recOf(w).write({ actor: 'merge_gate', entity: 'fact', id: fid, expectRev: recOf(w).read('fact', fid).rev, doc: { type: 'merge_limit_told', merge: mergeOf(w).id } }), 'old form');
+  tick(w, 2);
+  await gatePass(w.ctx);
+  assert.equal(told(w, 'merge_limit_missing').length, 2, 'the waiting note is told: an old fact is the open note\'s');
+  assert.deepEqual(recOf(w).read('fact', fid)?.doc?.told, ['open', 'waiting']);
+  w.g.pulls.get(7).mergeable_state = 'clean';
+  loseAnswer(w, { merged: false });
+  for (let i = 0; i < 4; i++) { tick(w, 2); await gatePass(w.ctx); }
+  assert.equal(told(w, 'merge_limit_missing').length, 2, 'the open note is not told again');
+});
+
 // L168 (1): the three refusal sites that tell the owner, each with a lost first alert.
 const redCheck = (w, head) => w.g.checks.set(head, [{ name: 'test', app: { id: 1 }, head_sha: head, status: 'completed', conclusion: 'failure' }]);
 const LONG_ID = 'C-' + 'x'.repeat(86);

@@ -456,6 +456,34 @@ test('L177 c3: rawGit ends at its stop time though a program that left git\'s pr
   }
 });
 
+// L188: the same for safe-git's own runner (runChild): at its stop time it closes git's three pipes, though a program
+// git started has left git's process group and still holds them. A stand-in git (a script given as gitBin) starts that
+// program, and `--version` runs with no repository check, so the one call is runChild's.
+test('L188: safe-git\'s runner ends at its stop time and closes every pipe, though a program that left git\'s group keeps them', { timeout: 30_000 }, async () => {
+  const d = tmp();
+  const pidFile = join(d, 'pid');
+  const fake = join(d, 'git');
+  writeFileSync(fake, `#!/bin/sh\nperl -MPOSIX -e 'if (fork) { exit } POSIX::setsid(); open(my $f, ">", $ARGV[0]); print $f $$; close $f; sleep 20' '${pidFile}'\nsleep 20\n`);
+  chmodSync(fake, 0o755);
+  const pipeHandles = () => process._getActiveHandles().filter((h) => h?._handle?.constructor?.name === 'Pipe');
+  const before = new Set(pipeHandles());
+  const opened = () => pipeHandles().filter((h) => !before.has(h));
+  const t0 = Date.now();
+  try {
+    const r = await git(['--version'], { gitDir: '/dev/null', gitBin: fake, timeoutMs: 1_500, purpose: 'L188 test' });
+    const took = Date.now() - t0;
+    for (let i = 0; i < 20 && !existsSync(pidFile); i++) await new Promise((res) => setTimeout(res, 50));
+    assert.ok(existsSync(pidFile), 'control: the program left the group and is still running');
+    assert.equal(r.code, -1, JSON.stringify(r));
+    assert.match(r.stderr, /did not end within 1500 ms and was stopped/);
+    assert.ok(took < 6_000, `git() took ${took} ms`);
+    for (let i = 0; i < 20 && opened().length; i++) await new Promise((res) => setTimeout(res, 50));
+    assert.equal(opened().length, 0, `every pipe to git is closed, though the program still holds the other end: ${process.getActiveResourcesInfo().join(',')}`);
+  } finally {
+    try { process.kill(Number(readFileSync(pidFile, 'utf8')), 'SIGKILL'); } catch {}
+  }
+});
+
 test('L36 sweep, control: the planted programs run when git is used the careless way', { timeout: 120_000 }, async () => {
   const w = await trapWorld();
   const markers = join(w.root, 'markers');
