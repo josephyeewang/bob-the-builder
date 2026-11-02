@@ -753,3 +753,32 @@ test('L149 m9 P13 P21 nothing the install or place makes is left without an owne
   for (const job of JOBS) { const st = w.mac.lstat(`/Library/LaunchDaemons/${LABEL}.${job}.plist`); assert.equal(st.uid, w.mac.rootUid, job); assert.equal(st.mode & 0o7777, 0o644, job); }
   writeFileSync(w.mac.at('/nobody-chowned-this'), 'x'); assert.equal(w.mac.lstat('/nobody-chowned-this').uid, -1);
 });
+
+// ───────────────────────────── L150 m2: reload-account never ends in a false "done" ─────────────────────────────
+
+test('L150 m2 reload-account: a load that fails leaves the job unloaded; the stop says "run: daemons load"; running reload-account again says the job is NOT loaded (never "nothing to do"); daemons load puts it right', async () => {
+  const w = await placed(); assert.equal(w.run(['daemons', 'load']).code, 0);
+  const f = plistFile(w, 'review-account'); rmSync(f); writeFileSync(f, 'old text', { mode: 0o644 });
+  w.mac.failBootstrap = new Set([`${LABEL}.review-account`]);
+  let r = w.run(['daemons', 'reload-account']); assert.equal(r.code, 1, r.text); assert.match(r.text, /could not load .*run: daemons load/);
+  assert.ok(!w.mac.loaded.has(`${LABEL}.review-account`));
+  r = w.run(['daemons', 'reload-account']); assert.equal(r.code, 1, r.text); assert.match(r.text, /is NOT loaded now/); assert.match(r.text, /Run: daemons load/); assert.doesNotMatch(r.text, /nothing to do|done\./);
+  w.mac.failBootstrap = null;
+  r = w.run(['daemons', 'load']); assert.equal(r.code, 0, r.text); assert.ok(w.mac.loaded.has(`${LABEL}.review-account`));
+  assert.deepEqual(failed(checkDaemons(w.mac, w.cfg)), []);
+});
+
+test('L150 m2 a load that says yes but leaves nothing loaded is a failure: load and reload-account both read back', async () => {
+  const w = await placed();
+  w.mac.bootstrapLies = new Set([`${LABEL}.review-account`]);
+  let r = w.run(['daemons', 'load']); assert.equal(r.code, 1, r.text); assert.match(r.text, /is NOT loaded after the load/);
+  w.mac.bootstrapLies = null; assert.equal(w.run(['daemons', 'load']).code, 0);
+  rmSync(plistFile(w, 'review-account')); w.run(['daemons', 'place']);
+  w.mac.users.get('sam').NFSHomeDirectory = '/Users/sam2'; w.run(['daemons', 'place']);
+  w.mac.bootstrapLies = new Set([`${LABEL}.review-account`]);
+  r = w.run(['daemons', 'reload-account']); assert.equal(r.code, 1, r.text); assert.match(r.text, /is NOT loaded after the load/);
+});
+
+test('L150 m2 reload-account on a fresh Mini (never loaded, nothing recorded) is still a plain no-op', async () => {
+  const w = await placed(); const r = w.run(['daemons', 'reload-account']); assert.equal(r.code, 0, r.text); assert.match(r.text, /nothing to do/);
+});

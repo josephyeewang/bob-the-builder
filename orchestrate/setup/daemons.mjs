@@ -31,6 +31,11 @@ const recordPath = (cfg) => join(installPaths(cfg).install, 'loaded-jobs.json');
 /** What `load` recorded: job label → fingerprint of the job file it loaded. Anything unreadable is an empty record (every job then counts as not known to match). */
 function readRecord(io, cfg) { try { const r = JSON.parse(io.readText(recordPath(cfg))); return r && typeof r === 'object' && !Array.isArray(r) ? r : {}; } catch { return {}; } }
 function changeRecord(io, cfg, fn) { const rec = readRecord(io, cfg); fn(rec); const f = recordPath(cfg); io.rm(f); io.write(f, `${JSON.stringify(rec, null, 1)}\n`, 0o600); io.secureFile(f, { uid: io.rootUid, gid: 0, mode: 0o644 }); }
+/** A step that asks launchd AFTER a load whether the job is really there: a bootstrap that said yes but left nothing is a failure, not "done" (L150 m2). */
+const readBackOp = (io, cfg, job) => op(`read back: ${labelOf(cfg, job)} is loaded`, () => {
+  const s = jobState(io, cfg, job);
+  if (s.error || !s.loaded) throw new Error(`${labelOf(cfg, job)} is NOT loaded after the load${s.error ? ` (${s.error})` : ''}. Nothing is running it. Run: daemons load`);
+});
 const fileText = (io, cfg, job) => { try { return io.readText(plistPath(cfg, job)); } catch { return null; } };
 
 /** The three plist texts, from the layout and the owner's record. → { plists: {job: text}, problems } */
@@ -95,7 +100,8 @@ export function planLoad(io, cfg) {
     // Loaded from an older file (or not by this tool): launchd keeps running what it first read, so take it out and load the file as it is now.
     if (s.loaded) ops.push(op(`launchctl bootout system/${label}   (it was loaded from a different job file than the one on disk)`, () => { const r = launchctl(io, ['bootout', `system/${label}`]); if (r.status !== 0) throw new Error(`could not unload ${label} (${failText(r)})`); }));
     ops.push(op(`launchctl bootstrap system ${io.at(plistPath(cfg, job))}`, () => { const r = launchctl(io, ['bootstrap', 'system', io.at(plistPath(cfg, job))]); if (r.status !== 0) throw new Error(`could not load ${label} (${failText(r)})`); }),
-      op(`record the fingerprint of ${label}'s job file in ${recordPath(cfg)}`, () => changeRecord(io, cfg, (x) => { x[label] = h; })));
+      op(`record the fingerprint of ${label}'s job file in ${recordPath(cfg)}`, () => changeRecord(io, cfg, (x) => { x[label] = h; })),
+      readBackOp(io, cfg, job));
   }
   return { ops, problems };
 }
@@ -122,7 +128,13 @@ export function planReloadAccount(io, cfg) {
   const job = 'review-account'; const label = labelOf(cfg, job);
   const s = jobState(io, cfg, job);
   if (s.error) return { ops: [], problems: [`could not ask launchd about ${label}: ${s.error}`] };
-  if (!s.loaded) return { ops: [], problems: [] };
+  if (!s.loaded) {
+    // Not loaded AND this tool once loaded it (the fingerprint is still recorded): an earlier reload stopped between the unload and
+    // the load, so the job is NOT running. Saying "nothing to do" there would be a false "done" (L150 m2).
+    const rec0 = readRecord(io, cfg);
+    if (rec0 && rec0[label] !== undefined) return { ops: [], problems: [`${label} is NOT loaded now, though it was loaded before (an earlier reload probably stopped half way). Nothing is running it. Run: daemons load`] };
+    return { ops: [], problems: [] };
+  }
   const { plists, problems } = plistTexts(io, cfg);
   if (problems.length) return { ops: [], problems };
   const P = installPaths(cfg);
@@ -131,7 +143,9 @@ export function planReloadAccount(io, cfg) {
   if (place.problems.length) return place;
   const out = op(`launchctl bootout system/${label}`, () => { const r = launchctl(io, ['bootout', `system/${label}`]); if (r.status !== 0) throw new Error(`could not unload ${label} (${failText(r)})`); });
   const inn = op(`launchctl bootstrap system ${io.at(plistPath(cfg, job))}`, () => { const r = launchctl(io, ['bootstrap', 'system', io.at(plistPath(cfg, job))]); if (r.status !== 0) throw new Error(`could not load ${label} (${failText(r)}); run: daemons load`); });
-  return { ops: [...place.ops, out, inn], problems: [] };
+  const text = plists[job]; const h = sha(text);
+  const rec = op(`record the fingerprint of ${label}'s job file in ${recordPath(cfg)}`, () => changeRecord(io, cfg, (x) => { x[label] = h; }));
+  return { ops: [...place.ops, out, inn, rec, readBackOp(io, cfg, job)], problems: [] };
 }
 
 export function list(io, cfg) {

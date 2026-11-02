@@ -3,13 +3,13 @@
 // each and name the check that catches it. The last tests run read-only tools on this Mac.
 
 import assert from 'node:assert/strict';
-import { chmodSync, mkdirSync, readFileSync, statSync, symlinkSync, writeFileSync, rmSync } from 'node:fs';
+import { chmodSync, linkSync, mkdirSync, readFileSync, statSync, symlinkSync, writeFileSync, rmSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
 import { DEFAULT_PROPOSALS_PARENT, ROOT_CONFIG_PATH, folderTable, mirrorPath, ownerTapsPath, parseConfig, proposalRows } from './layout.mjs';
-import { readSecretFromTty, realIo } from './mac.mjs';
+import { readSecretFromTty, realIo, writeNewFile } from './mac.mjs';
 import { aclEntries, apply, check } from './users-folders.mjs';
-import { checkProposals, checkSafeDirectory, checkToken, planProposals, planSafeDirectory, planToken, tokenPath, tokenProblem } from './extras.mjs';
+import { proposalsProblem, checkProposals, checkSafeDirectory, checkToken, planProposals, planSafeDirectory, planToken, tokenPath, tokenProblem } from './extras.mjs';
 import { main, parseArgs, planCommand } from './setup.mjs';
 import { fakeMac, macTest as test } from './fake-mac.test-helper.mjs';
 import { tempDir } from '../shared/test-tmp.mjs';
@@ -31,7 +31,7 @@ function withConfig(mac, file, raw, args) {
 /** The throwaway Mac with part 1 done, and the shared folder the proposals parent goes in. Every call the Mac saw is kept. */
 function world({ raw = RAW } = {}) {
   const mac = fakeMac({ euid: 0 });
-  mkdirSync(mac.at('/Users/Shared'), { recursive: true });
+  mkdirSync(mac.at('/Users/Shared'), { recursive: true }); chmodSync(mac.at('/Users/Shared'), 0o1777); mac.owners.set('/Users/Shared', { uid: mac.rootUid, gid: 0 });   // as on a real Mac: root's, sticky
   const calls = []; const realRun = mac.run;
   mac.run = (cmd, args) => { calls.push([cmd, ...args]); return realRun(cmd, args); };
   const file = cfgFile(raw);
@@ -135,7 +135,7 @@ test('PLANT the parent swapped for a link between the plan and the run → the f
   const w = world(); assert.equal(w.run(['proposals']).code, 0);
   chmodSync(w.mac.at(`${PARENT}/alpha`), 0o755);   // so the plan has something to do
   const p = planCommand(w.mac, w.cfg, { cmd: 'proposals' });
-  assert.deepEqual(p.problems, []); assert.match(p.ops[0].text, /check that .* is a plain folder/);
+  assert.deepEqual(p.problems, []); assert.match(p.ops[0].text, /every folder above/); assert.match(p.ops[1].text, /check that .* is a plain folder/);
   const victim = w.mac.at('/victim'); mkdirSync(victim, { mode: 0o700 });
   rmSync(w.mac.at(PARENT), { recursive: true }); symlinkSync(victim, w.mac.at(PARENT));
   const n = w.mac.log.length;
@@ -191,8 +191,8 @@ test('safe-directory: the owner\'s git is told the mirror path, run AS the owner
 
 test('PLANT safe.directory = * → refused with a plain sentence, nothing changed; the check FAILs', () => {
   const w = world(); w.mac.gitSafe.set('sam', ['*']);
-  const r = w.run(['safe-directory']); assert.equal(r.code, 1); assert.match(r.text, /trusts every folder/); assert.deepEqual(w.mac.gitSafe.get('sam'), ['*']);
-  assert.match(failing(checkSafeDirectory(w.mac, w.cfg)).map((x) => x.why).join(), /every folder/);
+  const r = w.run(['safe-directory']); assert.equal(r.code, 1); assert.match(r.text, /trusts more than the mirror/); assert.deepEqual(w.mac.gitSafe.get('sam'), ['*']);
+  assert.match(failing(checkSafeDirectory(w.mac, w.cfg)).map((x) => x.why).join(), /more than the mirror/);
 });
 
 test('PLANT the mirror path missing → check-safe-directory FAILs; dry run prints the exact command and changes nothing', () => {
@@ -317,27 +317,95 @@ test('REAL: git config --global --get-all of an unset key exits 1 (what planSafe
 
 // ───────────────────────────────────────────── prove-token (L99 (3))
 
-/** A stand-in for GitHub that refuses what GitHub refuses: no/wrong bearer → 401; the write answers what `write` says. */
-function github(w, { write = 403, prs = [{ number: 7, title: 'A title' }] } = {}) {
+const RAWW = { ...RAW, watch: { repo: 'org/repo' } };
+const GH_NO_WRITE = '{"message":"Resource not accessible by personal access token"}';
+/** A stand-in for GitHub that refuses what GitHub refuses: no/wrong bearer → 401; the repo is private; the write answers what `write` says. */
+function github(w, { write = 403, writeText = GH_NO_WRITE, writeRemaining, prs = [{ number: 7, title: 'A title' }], repo = { private: true, archived: false } } = {}) {
   w.mac.github = (url, init) => {
     if (init.headers.Authorization !== `Bearer ${SECRET}`) return { status: 401, text: '{"message":"Bad credentials"}' };
     const u = new URL(url);
     if (u.host !== 'api.github.com') return { status: 404, text: '' };
+    if ((init.method ?? 'GET') === 'GET' && u.pathname === '/repos/org/repo') return { status: 200, text: JSON.stringify(repo) };
     if ((init.method ?? 'GET') === 'GET' && /^\/repos\/org\/repo\/pulls$/.test(u.pathname)) return { status: 200, text: JSON.stringify(prs) };
-    if (init.method === 'PATCH' && /^\/repos\/org\/repo\/pulls\/7$/.test(u.pathname)) { w.patched = JSON.parse(init.body); return { status: write, text: '{"message":"Resource not accessible by personal access token"}' }; }
+    if (init.method === 'PATCH' && /^\/repos\/org\/repo\/pulls\/7$/.test(u.pathname)) { w.patched = JSON.parse(init.body); return { status: write, text: writeText, rateRemaining: writeRemaining }; }
     return { status: 404, text: '' };
   };
 }
-const withToken = () => { const w = world(); w.mac.secretInput = SECRET; assert.equal(w.run(['token']).code, 0); return w; };
-const prove = async (w) => { const lines = []; const code = await main(withConfig(w.mac, w.file, RAW, ['prove-token', '--repo', 'org/repo']), { io: w.mac, out: (s) => lines.push(s), err: (s) => lines.push(`ERR ${s}`) }); return { code, text: lines.join('\n') }; };
+const withToken = (raw = RAWW) => { const w = world({ raw }); w.raw = raw; w.mac.secretInput = SECRET; assert.equal(w.run(['token']).code, 0); return w; };
+const prove = async (w, raw = w.raw ?? RAWW) => { const lines = []; const code = await main(withConfig(w.mac, w.file, raw, ['prove-token']), { io: w.mac, out: (s) => lines.push(s), err: (s) => lines.push(`ERR ${s}`) }); return { code, text: lines.join('\n') }; };
+const gets = (w) => w.mac.fetchLog.map((x) => x.method);
 
-test('prove-token: the read works and the no-op write (the title set to itself) comes back 403 → PASS; only status numbers are printed', async () => {
+test('prove-token: private repo from the config, the read works, the no-op write is refused as "this token may not" → PASS; only fixed sentences and numbers are printed', async () => {
   const w = withToken(); github(w);
   const r = await prove(w);
-  assert.equal(r.code, 0, r.text); assert.match(r.text, /PASS .*open pull requests works/); assert.match(r.text, /PASS .*pull request #7's title set to itself\) is refused with 403/);
+  assert.equal(r.code, 0, r.text); assert.match(r.text, /PASS .*is a private repository/); assert.match(r.text, /PASS .*open pull requests works/); assert.match(r.text, /PASS .*pull request #7's title set to itself\) is refused because this token may not write/);
   assert.deepEqual(w.patched, { title: 'A title' });
-  assert.deepEqual(w.mac.fetchLog.map((x) => x.method), ['GET', 'PATCH']);
+  assert.deepEqual(gets(w), ['GET', 'GET', 'PATCH']);
   assert.ok(!r.text.includes(SECRET) && !r.text.includes('Resource not accessible'));
+});
+
+test('L150 m4 the token is read AS orchestrate (sudo -n -H -u orchestrate /bin/cat <file>), never by root through the name; the token is in no argument', async () => {
+  const w = withToken(); github(w); const mark = w.calls.length;
+  assert.equal((await prove(w)).code, 0);
+  const cats = w.calls.slice(mark).filter((c) => c.includes('/bin/cat'));
+  assert.deepEqual(cats, [['/usr/bin/sudo', '-n', '-H', '-u', 'orchestrate', '/bin/cat', tokenPath(cfg)]]);
+  assert.ok(!w.calls.flat().some((x) => String(x).includes(SECRET)));
+});
+
+test('L150 m4 P7 the stand-in refuses `sudo -u` without -H, as the real one keeps the caller\'s home; every setup call passes -H', async () => {
+  const w = world();
+  assert.equal(w.mac.run('/usr/bin/sudo', ['-n', '-u', 'orchestrate', '/usr/bin/true']).status, 1);
+  assert.equal(w.mac.run('/usr/bin/sudo', ['-n', '-H', '-u', 'orchestrate', '/usr/bin/true']).status, 0);
+  assert.equal(w.run(['proposals']).code, 0); assert.equal(w.run(['check-proposals']).code, 0);   // these ride on asUser: they would fail without -H
+});
+
+test('L150 m4 the repo is the config\'s: --repo is gone, a config without watch.repo FAILs plainly, a bad one is refused when the config is read', async () => {
+  assert.throws(() => parseArgs(['prove-token', '--repo', 'org/repo']), /not one this command takes/);
+  let w = withToken(RAW); github(w); let r = await prove(w, RAW); assert.equal(r.code, 1); assert.match(r.text, /"watch": \{ "repo"/); assert.equal(w.mac.fetchLog.length, 0);
+  for (const bad of ['../x', 'a', 'a/b/c', '', 5, 'a/..']) assert.throws(() => parseConfig({ ...RAW, watch: { repo: bad } }), /watch.repo must look like owner\/name/, String(bad));
+  assert.throws(() => parseConfig({ ...RAW, watch: 'org/repo' }), /watch.repo/);
+});
+
+test('L150 m4 PLANT a public repository → FAIL (reading it proves nothing), no pull-request call, no write', async () => {
+  const w = withToken(); github(w, { repo: { private: false, archived: false } });
+  const r = await prove(w); assert.equal(r.code, 1, r.text); assert.match(r.text, /FAIL .*is a private repository.*public/); assert.deepEqual(gets(w), ['GET']);
+});
+
+test('L150 m4 PLANT an archived repository → FAIL (an archived repo refuses every write), no write tried', async () => {
+  const w = withToken(); github(w, { repo: { private: true, archived: true } });
+  const r = await prove(w); assert.equal(r.code, 1, r.text); assert.match(r.text, /FAIL .*is not archived/); assert.deepEqual(gets(w), ['GET']);
+});
+
+test('L150 c6 PLANT a rate-limit 403 or any other 403 is not proof → FAIL; only GitHub\'s "this token may not" answer passes', async () => {
+  let w = withToken(); github(w, { writeText: '{"message":"API rate limit exceeded"}', writeRemaining: '0' });
+  let r = await prove(w); assert.equal(r.code, 1, r.text); assert.match(r.text, /rate limit, which says nothing about the token/);
+  w = withToken(); github(w, { writeText: '{"message":"API rate limit exceeded"}' });   // no header: still not the "may not" answer
+  r = await prove(w); assert.equal(r.code, 1, r.text); assert.match(r.text, /not with its "this token may not write" answer/);
+  w = withToken(); github(w, { writeText: '{"message":"Repository was archived so is read-only."}' });
+  r = await prove(w); assert.equal(r.code, 1, r.text); assert.match(r.text, /not with its "this token may not write" answer/);
+  w = withToken(); github(w, { write: 429, writeText: '{}' }); r = await prove(w); assert.equal(r.code, 1, r.text); assert.match(r.text, /rate limit/);
+  assert.ok(!r.text.includes('Repository was archived'));
+});
+
+test('L150 m4 PLANT a token file that is a link, someone else\'s, or loose (0644) → FAIL before anything is read or sent', async () => {
+  const f = (w) => w.mac.at(tokenPath(cfg));
+  let w = withToken(); github(w); chmodSync(f(w), 0o644);
+  let r = await prove(w); assert.equal(r.code, 1, r.text); assert.match(r.text, /mode is 644, not 600/);
+  w = withToken(); github(w); w.mac.owners.set(tokenPath(cfg), { uid: 4242, gid: 4242 });
+  r = await prove(w); assert.equal(r.code, 1, r.text); assert.match(r.text, /not orchestrate's/);
+  w = withToken(); github(w); const real = f(w); const hidden = w.mac.at('/hidden-token'); writeFileSync(hidden, `${SECRET}\n`, { mode: 0o600 }); rmSync(real); symlinkSync(hidden, real);
+  r = await prove(w); assert.equal(r.code, 1, r.text); assert.match(r.text, /it is a link/);
+  for (const x of [w]) { assert.equal(x.mac.fetchLog.length, 0); assert.ok(!x.calls.flat().includes('/bin/cat')); }
+});
+
+test('L150 m4 prove-token needs root (the read is done as orchestrate) → without it, FAIL "run with sudo", nothing read or sent', async () => {
+  const w = withToken(); github(w); w.mac.as = 1234;
+  const r = await prove(w); assert.equal(r.code, 1, r.text); assert.match(r.text, /run with sudo/); assert.equal(w.mac.fetchLog.length, 0); assert.ok(!w.calls.flat().includes('/bin/cat'));
+});
+
+test('PLANT a token GitHub does not accept (the first look answers 401) → FAIL, nothing else is tried', async () => {
+  const w = withToken(); github(w); w.mac.github = () => ({ status: 401, text: '' });
+  const r = await prove(w); assert.equal(r.code, 1); assert.match(r.text, /answered 401/); assert.deepEqual(gets(w), ['GET']);
 });
 
 test('PLANT a token that CAN write (the no-op write answers 200) → FAIL that says to revoke it, exit 1', async () => {
@@ -349,21 +417,120 @@ test('PLANT any other answer to the write (404, 422, 500) is not proof → FAIL'
   for (const write of [404, 422, 500]) { const w = withToken(); github(w, { write }); const r = await prove(w); assert.equal(r.code, 1, String(write)); assert.match(r.text, new RegExp(`answered ${write}, not 403`)); }
 });
 
-test('PLANT a token GitHub does not accept (read answers 401) → FAIL on the read, no write is tried', async () => {
-  const w = withToken(); github(w); w.mac.github = () => ({ status: 401, text: '' });
-  const r = await prove(w); assert.equal(r.code, 1); assert.match(r.text, /answered 401/); assert.deepEqual(w.mac.fetchLog.map((x) => x.method), ['GET']);
-});
-
-test('prove-token: no open pull request, no network, no token file, a bad repo name → each FAILs plainly; no write without a pull request', async () => {
-  let w = withToken(); github(w, { prs: [] }); let r = await prove(w); assert.equal(r.code, 1); assert.match(r.text, /none was found/); assert.deepEqual(w.mac.fetchLog.map((x) => x.method), ['GET']);
+test('prove-token: no open pull request (the advice names the config\'s repo), no network, no token file → each FAILs plainly; no write without a pull request', async () => {
+  let w = withToken(); github(w, { prs: [] }); let r = await prove(w); assert.equal(r.code, 1); assert.match(r.text, /org\/repo has none open\. Open one there/); assert.deepEqual(gets(w), ['GET', 'GET']);
   w = withToken(); w.mac.github = null; r = await prove(w); assert.equal(r.code, 1); assert.match(r.text, /no answer \(ENOTFOUND\)/);
-  w = world(); github(w); r = await prove(w); assert.equal(r.code, 1); assert.match(r.text, /could not be read/); assert.equal(w.mac.fetchLog.length, 0);
-  assert.throws(() => parseArgs(['prove-token', '--config', 'x']), /needs --repo/);
-  assert.throws(() => parseArgs(['check', '--config', 'x', '--repo', 'a/b']), /only for prove-token/);
-  w = withToken(); github(w); const lines = []; assert.equal(await main(withConfig(w.mac, w.file, RAW, ['prove-token', '--repo', '../x']), { io: w.mac, out: (s) => lines.push(s), err: (s) => lines.push(s) }), 1); assert.equal(w.mac.fetchLog.length, 0);
+  w = world({ raw: RAWW }); w.raw = RAWW; github(w); r = await prove(w); assert.equal(r.code, 1); assert.match(r.text, /is not there/); assert.equal(w.mac.fetchLog.length, 0);
 });
 
 test('PLANT a token file holding something that is not a token → FAIL before any call is made', async () => {
   const w = withToken(); github(w); writeFileSync(w.mac.at(tokenPath(cfg)), 'not a token at all, just words that are long enough\n');
   const r = await prove(w); assert.equal(r.code, 1); assert.match(r.text, /does not look like one/); assert.equal(w.mac.fetchLog.length, 0);
+});
+
+// ───────────────────────────── L150 m1: a hard link at the token name can never get the victim chowned ─────────────────────────────
+
+test('L150 m1 PLANT a hard link to a victim swapped in at the token name right after the old file is removed → the write refuses (exclusive create), the victim keeps its owner, mode and text', () => {
+  const w = world(); w.mac.secretInput = SECRET;
+  const victim = w.mac.at('/victim.txt'); writeFileSync(victim, 'keep\n', { mode: 0o644 }); w.mac.owners.set('/victim.txt', { uid: 4242, gid: 4242 });
+  const unlink = w.mac.unlink.bind(w.mac);
+  w.mac.unlink = (p) => { unlink(p); linkSync(victim, w.mac.at(p)); };   // the attacker wins the race
+  const r = w.run(['token']); assert.equal(r.code, 1, r.text);
+  assert.equal(readFileSync(victim, 'utf8'), 'keep\n'); assert.equal(statSync(victim).mode & 0o777, 0o644);
+  assert.deepEqual(w.mac.owners.get('/victim.txt'), { uid: 4242, gid: 4242 });
+  assert.ok(!w.mac.log.some((x) => /^chown .* \/victim/.test(x)));
+  assert.doesNotMatch(r.text, new RegExp(SECRET));
+});
+
+test('L150 m1 a hard link already at the token name is only removed as a name: the victim is untouched and the new token is a new file, orchestrate\'s 0600', () => {
+  const w = world(); w.mac.secretInput = SECRET;
+  const victim = w.mac.at('/victim.txt'); writeFileSync(victim, 'keep\n', { mode: 0o644 }); linkSync(victim, w.mac.at(tokenPath(cfg)));
+  const r = w.run(['token']); assert.equal(r.code, 0, r.text);
+  assert.equal(readFileSync(victim, 'utf8'), 'keep\n'); assert.equal(statSync(victim).mode & 0o777, 0o644);
+  assert.notEqual(statSync(victim).ino, statSync(w.mac.at(tokenPath(cfg))).ino);
+  assert.deepEqual(failing(checkToken(w.mac, w.cfg)), []);
+});
+
+test('L150 m1 the token file is made in one call that carries the owner and mode (unlink, write, chown, chmod — nothing reopens the name)', () => {
+  const w = world(); w.mac.secretInput = SECRET; const mark = w.mac.log.length;
+  assert.equal(w.run(['token']).code, 0);
+  const steps = w.mac.log.slice(mark).filter((x) => x.includes('watch-only-token'));
+  assert.deepEqual(steps.map((x) => x.split(' ')[0]), ['unlink', 'write', 'chown', 'chmod']);
+  assert.ok(!(w.mac.reopened ?? []).includes(tokenPath(cfg)), 'the token name was opened a second time to set its owner');
+});
+
+// ───────────────────────────── L150 m3: proposals runs inside the wall ─────────────────────────────
+
+test('L150 m3 proposals: the base wall is the first step, and a folder above the proposals parent that others can write gives no steps', () => {
+  const w = world();
+  const p = planCommand(w.mac, w.cfg, { cmd: 'proposals' });
+  assert.match(p.ops[0].text, /every folder above/);
+  chmodSync(w.mac.at('/Library'), 0o777); chmodSync(w.mac.at('/Users/Shared'), 0o777);
+  const q = planCommand(w.mac, w.cfg, { cmd: 'proposals' }); assert.deepEqual(q.ops, []); assert.match(q.problems.join(' '), /not safe for root to work in/);
+  assert.match(proposalsProblem(w.mac, w.cfg), /is not sticky/); chmodSync(w.mac.at('/Users/Shared'), 0o1777); chmodSync(w.mac.at('/Users'), 0o777);
+  assert.match(proposalsProblem(w.mac, w.cfg), /the folders above .* are not safe for root to work in/);   // the proposals' own check, apart from the base wall
+});
+
+test('L150 m3 PLANT a proposals parent others can write (0777, not sticky) → refused; sticky (1777) is accepted', () => {
+  const w = world(); assert.equal(w.run(['proposals']).code, 0);
+  chmodSync(w.mac.at(PARENT), 0o777);
+  const r = w.run(['proposals']); assert.equal(r.code, 1, r.text); assert.match(r.text, /can be written by others than root .* not sticky/);
+  chmodSync(w.mac.at(PARENT), 0o1777);
+  assert.deepEqual(planProposals(w.mac, w.cfg).problems, []);
+});
+
+// ───────────────────────────── L150 m6 / m5: safe.directory in every scope, the wall on every root command, exclusive create ─────────────────────────────
+
+test('L150 m6 PLANT a wildcard in any form ("/x/*", "/*", "*") in ANY scope (global, system, an include) → refused, nothing added, the check FAILs', () => {
+  const m = mirrorPath(cfg);
+  for (const bad of ['*', '/*', `${m.replace(/\/mirror$/, '')}/*`, '/Library/*']) {
+    let w = world(); w.mac.gitSafe.set('sam', [bad]);   // the global file
+    let r = w.run(['safe-directory']); assert.equal(r.code, 1, bad); assert.match(r.text, /trusts more than the mirror/); assert.deepEqual(w.mac.gitSafe.get('sam'), [bad]);
+    assert.match(failing(checkSafeDirectory(w.mac, w.cfg)).map((x) => x.why).join(), /more than the mirror/);
+    w = world(); w.mac.gitSafeOther = [bad];   // only the system file or an include holds it
+    r = w.run(['safe-directory']); assert.equal(r.code, 1, `other scope: ${bad}`); assert.match(r.text, /whichever git settings file/); assert.equal(w.mac.gitSafe.get('sam'), undefined);
+    w.mac.gitSafe.set('sam', [m]);   // the mirror is there too, but the wildcard still fails the check
+    assert.equal(failing(checkSafeDirectory(w.mac, w.cfg)).length, 1);
+  }
+});
+
+test('L150 m5 P20 a "*" sitting NEXT TO the mirror path still FAILs check-safe-directory (the mirror alone passes)', () => {
+  const w = world(); const m = mirrorPath(cfg); w.mac.gitSafe.set('sam', [m]);
+  assert.deepEqual(failing(checkSafeDirectory(w.mac, w.cfg)), []);
+  w.mac.gitSafe.set('sam', [m, '*']); assert.equal(failing(checkSafeDirectory(w.mac, w.cfg)).length, 1);
+  w.mac.gitSafe.set('sam', ['*', m]); assert.equal(failing(checkSafeDirectory(w.mac, w.cfg)).length, 1);
+});
+
+test('L150 m5 P13 P14 reload-account and token both run behind the folder-chain wall: a folder above the base others can write gives no steps and nothing is read', () => {
+  for (const cmd of ['token', 'daemons']) {
+    const w = world(); w.mac.secretInput = SECRET; chmodSync(w.mac.at('/Library'), 0o777);
+    const o = cmd === 'token' ? { cmd: 'token' } : { cmd: 'daemons', sub: 'reload-account' };
+    const p = planCommand(w.mac, w.cfg, o); assert.deepEqual(p.ops, [], cmd); assert.match(p.problems.join(' '), /not safe for root to work in/, cmd);
+    assert.equal(w.mac.secretPrompts.length, 0);
+  }
+  const w = world(); w.mac.secretInput = SECRET;
+  assert.match(planCommand(w.mac, w.cfg, { cmd: 'token' }).ops[0].text, /every folder above/);   // and the guard is the FIRST step
+});
+
+test('L150 m5 P22 a new file is made exclusively and never through a link: writeNewFile refuses a name that exists, and a link, whatever it points at', () => {
+  const d = tempDir('orch-extras-wnf-'); const f = join(d, 'a'); const victim = join(d, 'victim');
+  writeFileSync(victim, 'keep\n');
+  writeNewFile(f, 'x', 0o600); assert.throws(() => writeNewFile(f, 'y', 0o600), /EEXIST/);
+  symlinkSync(victim, join(d, 'link')); assert.throws(() => writeNewFile(join(d, 'link'), 'y', 0o600), /EEXIST|ELOOP/);
+  symlinkSync(join(d, 'nowhere'), join(d, 'dangling')); assert.throws(() => writeNewFile(join(d, 'dangling'), 'y', 0o600), /EEXIST|ELOOP/);
+  linkSync(victim, join(d, 'hard')); assert.throws(() => writeNewFile(join(d, 'hard'), 'y', 0o600), /EEXIST/);
+  assert.equal(readFileSync(victim, 'utf8'), 'keep\n');
+  // with an owner: set on the open handle, before the first byte is written
+  const order = []; const g = join(d, 'g');
+  writeNewFile(g, 'secret', 0o600, { uid: 7, gid: 8, mode: 0o600 }, { chown: (fd, u, gi) => order.push(`chown ${u}:${gi} size=${statSync(g).size}`), chmod: (fd, m) => order.push(`chmod ${m.toString(8)} size=${statSync(g).size}`) });
+  assert.deepEqual(order, ['chown 7:8 size=0', 'chmod 600 size=0']);
+});
+
+test('REAL: git config --includes --get-all of an unset key exits 1, and reads a value that sits in an included file (what the all-scopes read relies on)', { skip: !isDarwin }, () => {
+  const home = tempDir('orch-extras-home2-'); const env = { PATH: '/usr/bin:/bin', HOME: home, GIT_CONFIG_NOSYSTEM: '1' };
+  const none = spawnSync('/usr/bin/git', ['config', '--includes', '--get-all', 'safe.directory'], { encoding: 'utf8', env, cwd: home }); assert.equal(none.status, 1, none.stderr);
+  writeFileSync(join(home, 'extra.cfg'), '[safe]\n\tdirectory = /y/*\n');
+  assert.equal(spawnSync('/usr/bin/git', ['config', '--global', '--add', 'include.path', join(home, 'extra.cfg')], { encoding: 'utf8', env }).status, 0);
+  const got = spawnSync('/usr/bin/git', ['config', '--includes', '--get-all', 'safe.directory'], { encoding: 'utf8', env, cwd: home }); assert.equal(got.stdout, '/y/*\n');
+  const globalOnly = spawnSync('/usr/bin/git', ['config', '--global', '--get-all', 'safe.directory'], { encoding: 'utf8', env, cwd: home }); assert.equal(globalOnly.status, 1);   // --global alone never saw it
 });

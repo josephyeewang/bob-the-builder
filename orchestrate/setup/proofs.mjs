@@ -32,7 +32,7 @@ export function proofList(cfg) {
 export function runProofs(io, cfg) {
   const out = []; let controlsHold = true;
   for (const pr of proofList(cfg)) {
-    const r = io.run(SUDO, ['-n', '-u', cfg.owner, ...pr.args]);
+    const r = io.run(SUDO, ['-n', '-H', '-u', cfg.owner, ...pr.args]);
     const gotOk = r.status === 0;
     if (pr.control) {
       const ok = gotOk; if (!ok) controlsHold = false;

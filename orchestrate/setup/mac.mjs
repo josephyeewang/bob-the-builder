@@ -23,7 +23,7 @@
 // swap a child for a link between the plan and the change. Every change opens the folder itself (O_NOFOLLOW, folder
 // only), checks it is the very folder the plan saw, and changes it through that handle.
 
-import { closeSync, constants, cpSync, fchmodSync, fchownSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, readlinkSync, realpathSync, rmSync, writeSync } from 'node:fs';
+import { unlinkSync, closeSync, constants, cpSync, fchmodSync, fchownSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, readlinkSync, realpathSync, rmSync, writeSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { dirname, join } from 'node:path';
 import { chainProblem } from '../modules/M4-workshop/launcher/install-check.mjs';
@@ -64,11 +64,22 @@ export function secureFile(real, want, { chown = fchownSync, chmod = fchmodSync 
   } finally { closeSync(fd); }
 }
 
-/** Makes a NEW file: refuses to overwrite anything or to follow a link at the name. The caller then sets owner and mode with secureFile. */
-export function writeNewFile(real, data, mode) {
+/**
+ * Makes a NEW file: refuses to overwrite anything or to follow a link at the name. The caller then sets owner and mode with
+ * secureFile — or, for a secret, passes `own` ({uid, gid, mode}): the owner and mode are then set on THE SAME open handle
+ * BEFORE the first byte is written, so the secret never sits in a file of the wrong owner, and the name is never opened
+ * a second time (a hard link swapped in at the name after the write cannot be chowned). L150 m1.
+ */
+export function writeNewFile(real, data, mode, own = null, { chown = fchownSync, chmod = fchmodSync } = {}) {
   const fd = openSync(real, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, mode);
-  try { const b = Buffer.isBuffer(data) ? data : Buffer.from(data, 'utf8'); let off = 0; while (off < b.length) off += writeSync(fd, b, off, b.length - off); } finally { closeSync(fd); }
+  try {
+    if (own) { chown(fd, own.uid, own.gid); chmod(fd, own.mode); }
+    const b = Buffer.isBuffer(data) ? data : Buffer.from(data, 'utf8'); let off = 0; while (off < b.length) off += writeSync(fd, b, off, b.length - off);
+  } finally { closeSync(fd); }
 }
+
+/** Removes ONE name that is not a folder (a plain unlink: it never goes down into a folder and never follows a link). */
+export function unlinkName(real) { unlinkSync(real); }
 
 /**
  * The text of a config file, read through ONE open handle and never through a link (NEW-1, L100 m4). Always: a plain file,
@@ -151,12 +162,14 @@ export function realIo({ prefix = '' } = {}) {
     nodeProblem: () => nodeProblemOf(process.execPath),
     readSecret: (prompt) => readSecretFromTty(prompt),
     // Plain fetch for the one place the setup talks to GitHub (prove-token). → { status, text }; a time limit; redirects are not followed.
-    fetch: async (url, init) => { const r = await fetch(url, { ...init, redirect: 'manual', signal: AbortSignal.timeout(20_000) }); return { status: r.status, text: await r.text() }; },
+    fetch: async (url, init) => { const r = await fetch(url, { ...init, redirect: 'manual', signal: AbortSignal.timeout(20_000) }); return { status: r.status, text: await r.text(), rateRemaining: r.headers.get('x-ratelimit-remaining') }; },
     nodeBinProblem: (p) => nodeProblemOf(p),
     readSource: (p) => readConfigFile(p, { strict: (typeof process.geteuid === 'function' ? process.geteuid() : -1) === 0, rootUid: 0, top: '/' }),
     // For the install and the job files. `src` is a real path outside the prefix (a file of this repository, the node program).
     readText: (p) => readFileSync(at(p), 'utf8'),
     write: (p, text, mode) => writeNewFile(at(p), text, mode),
+    writeOwned: (p, text, own) => writeNewFile(at(p), text, own.mode, own),
+    unlink: (p) => { try { unlinkName(at(p)); } catch (e) { if (e?.code !== 'ENOENT') throw e; } },
     copyFile: (src, p, mode) => writeNewFile(at(p), readFileSync(src), mode),
     copyTree: (src, p) => cpSync(src, at(p), { recursive: true, dereference: false, errorOnExist: true, force: false }),
     rm: (p) => rmSync(at(p), { recursive: true, force: true }),

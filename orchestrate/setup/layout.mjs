@@ -39,7 +39,7 @@ export const FORBIDDEN_UNDER = Object.freeze(['/Users', '/Applications', '/tmp',
 /** The checked config, or a thrown Error naming the first problem. */
 export function parseConfig(raw) {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('config: expected an object with base, owner and products');
-  const { base, owner, products = [], proposalsParent } = raw;
+  const { base, owner, products = [], proposalsParent, watch } = raw;
   if (typeof base !== 'string' || !BASE.test(base) || base.split('/').some((s) => s === '..' || s === '.') || base.includes('//') || base.length > 200) {
     throw new Error('config: base must be a full path of letters, digits and . _ - / only, with no .. and no spaces');
   }
@@ -55,7 +55,12 @@ export function parseConfig(raw) {
   if (proposalsParent !== undefined && (typeof proposalsParent !== 'string' || !BASE.test(proposalsParent) || proposalsParent.split('/').some((x) => x === '..' || x === '.') || proposalsParent.includes('//') || proposalsParent.endsWith('/') || proposalsParent.split('/').length < 3 || proposalsParent.length > 200)) {
     throw new Error('config: proposalsParent must be a full path of letters, digits and . _ - / only, in a folder of its own, with no .. and no spaces');
   }
-  return { base: b, owner, products: [...products], ...(proposalsParent !== undefined ? { proposalsParent } : {}) };
+  // The repository the watch-only token is proven against (prove-token reads it from here, never from the command line): owner/name.
+  if (watch !== undefined) {
+    const r = watch && typeof watch === 'object' && !Array.isArray(watch) ? watch.repo : undefined;
+    if (typeof r !== 'string' || !/^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/.test(r) || r.split('/').some((x) => x === '.' || x === '..')) throw new Error('config: watch.repo must look like owner/name');
+  }
+  return { base: b, owner, products: [...products], ...(proposalsParent !== undefined ? { proposalsParent } : {}), ...(watch !== undefined ? { watch: { repo: watch.repo } } : {}) };
 }
 
 /** Where the proposals folders live (R-0b-128, runbook A7; "a proposal for the owner's OK" until they OK it): one folder per product under this parent. */
