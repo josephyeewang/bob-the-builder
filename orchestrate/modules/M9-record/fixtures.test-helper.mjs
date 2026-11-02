@@ -5,6 +5,7 @@ import { createHash } from 'node:crypto';
 import { chmodSync, mkdirSync, readFileSync, readdirSync, realpathSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { planFingerprint } from '../../shared/plan-fingerprint.mjs';
+import { outboxKindOf } from '../../shared/record-names.mjs';
 import { tempDir } from '../../shared/test-tmp.mjs';
 import { openRecord } from './writer.mjs';
 import { HEAD, PRODUCT, UID, rulesFor } from './rules.test-helper.mjs';
@@ -100,17 +101,26 @@ export function readyCard(env, id, over = {}) {
   must(put(env.record, 'dispatcher', 'card', id, { state: 'ready' }), `${id} ready`);
 }
 
+// A session's claim with its process. The claim has two steps (L72): claimCard writes it without pid and pid_start
+// (ready → claimed), and runCard adds them (claimed → running).
 export function sessionClaim(over = {}) {
   return { kind: 'session', host: 'mac-a', pid: 4242, pid_start: 'Thu Oct  1 11:00:00 2026', session_id: 'S-1', ...over };
 }
-
-export function claimCard(env, id, claim = sessionClaim()) {
-  must(put(env.record, 'dispatcher', 'card', id, { state: 'claimed', claim }), `claim ${id}`);
+export function claimOnly(claim) {
+  if (claim?.kind !== 'session') return claim;
+  const { pid, pid_start, ...rest } = claim;   // eslint-disable-line no-unused-vars
+  return rest;
 }
 
-export function runCard(env, id, claim) {
+export function claimCard(env, id, claim = sessionClaim()) {
+  must(put(env.record, 'dispatcher', 'card', id, { state: 'claimed', claim: claimOnly(claim) }), `claim ${id}`);
+}
+
+export function runCard(env, id, claim = sessionClaim()) {
   claimCard(env, id, claim);
-  must(put(env.record, 'dispatcher', 'card', id, { state: 'running' }), `run ${id}`);
+  const now = env.record.read('card', id).doc.claim;
+  const started = claim.kind === 'session' ? { ...now, pid: claim.pid, pid_start: claim.pid_start } : now;
+  must(put(env.record, 'dispatcher', 'card', id, { state: 'running', claim: started }), `run ${id}`);
 }
 
 // The review runner's launch record for a session (L65): the only launch a verdict counts from.
@@ -130,7 +140,8 @@ export function runnerLaunch(env, card, sid, role = 'reviewer', head = HEAD, { t
 export function verdictShaNow(env, role, sid) {
   const dir = join(env.outRoot, role, sid);
   let names = [];
-  try { names = readdirSync(dir).filter((n) => n.startsWith('verdict-')); } catch { names = []; }
+  // The one kind rule (L101): a verdict-compact- note is no verdict.
+  try { names = readdirSync(dir).filter((n) => outboxKindOf(n) === 'verdict-'); } catch { names = []; }
   return names.length === 1 ? createHash('sha256').update(readFileSync(join(dir, names[0]))).digest('hex') : 'none';
 }
 export function runnerEndedRecord(env, card, sid, role = 'reviewer', head = HEAD, { sha, tree } = {}) {

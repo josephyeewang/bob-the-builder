@@ -15,10 +15,13 @@
 // "unknown", never green. Merge hours: stated only for products on the Merge Gate (MAT-8); the Merge Gate, not this
 // file, enforces them. Freeze wording only when the owner says the Mini is going off (minor 9).
 
+import { activeKind } from '../../shared/asks.mjs';
 import { cleanOutside } from '../M12-sensors/escape.mjs';
 import { POWER_FACT } from '../M12-sensors/power-source.mjs';
 import { STATUS_FACT } from '../M13-ledger/heartbeat.mjs';
 import { waitingItems } from '../M13-ledger/waiting.mjs';
+import { OWNER_WAIT_WHO, PAUSED_WAIT_WHAT } from '../../shared/record.mjs';
+import { WRITERS, fieldsAllowed } from '../M9-record/permissions.mjs';
 import { checkTimeZone } from './timezone.mjs';
 
 export const FRESH_MIN = 60;
@@ -58,15 +61,16 @@ export function briefAnswers(text, ids) {
 }
 
 // Lead call L22: the brief goes to the owner's phone as a push, once per new set of away files. states: [{ id, state }], the
-// newest checked state file per product; only "away" ones count, so a plain pause never pushes a trip brief (0b-8
-// audit round 5 M-1). lastPushedIds: the ids of the last brief pushed; lastFailedIds: the ids of the last failure
+// newest STORED state file per product (not merely intake-checked: until the pause/away apply lands the record refuses
+// state-, and a brief for a refused file would tell the owner a trip mode that isn't set, #95 r2 m4); only "away" ones
+// count, so a plain pause never pushes a trip brief (0b-8 audit round 5 M-1). lastPushedIds: the ids of the last brief pushed; lastFailedIds: the ids of the last failure
 // pushed; build(ids) → the brief text. Returns { text, ids } to push, or null (nothing new). A brief that can't be
 // built, or doesn't name every id, returns { text, ids, failed: true }: the Ledger pushes it and stores its ids as
 // lastFailedIds, NOT lastPushedIds, so it keeps trying every pass and pushes the real brief once it builds (0b-8
 // audit round 8 M-1); the failure itself is pushed once per id set (round 7 minor 1).
 export const TRIP_FAILED_TEXT = 'The Mini could not build it. It tries again every few minutes and pushes the brief when it can.';
 // The failure names the ids on its first line like a brief does, so the brief file can hold it and the skill quotes it
-// when the owner says "brief" (0b-8 audit round 9 M-1: in the two-reply fallback a failure was otherwise never seen).
+// when the owner says "brief" (0b-8 audit round 9 M-1: a failure was otherwise never seen there).
 // A bad id is a wiring fault that won't clear by itself, and it can't name the owner's ids, so it has its own first line the
 // skill quotes whatever ids it names (0b-8 confirm round M-1). Both carry the time for the skill's "Made at".
 const failedText = (ids, at) => `Trip brief failed at ${at}; answers state files: ${ids.join(', ')}.\n${TRIP_FAILED_TEXT}`;
@@ -125,20 +129,37 @@ export function buildTripBrief({ products, until = null, tz: tzIn = null, stateI
 
   // M13's one waiting list (card, ask, go, merge, claim), only what waits on the owner (round 2 M-3, minor 12); an item with a
   // record error is shown, since it might be theirs. Risky asks have their own section below.
-  const asks = rec.list('ask').filter(({ doc }) => doc && OPEN_ASK.includes(doc.state));
+  // Only the kinds shared/asks.mjs lists as active are risky-act asks; a research ask (kind research) waits on the owner
+  // through its own wait instead (LEAD-CALLS L80).
+  const asks = rec.list('ask').filter(({ doc }) => doc && OPEN_ASK.includes(doc.state) && activeKind(doc.kind));
   const askIds = new Set(asks.map((a) => a.id));
   let goes; let listError = null;
-  try { goes = waitingItems(rec).filter((i) => (i.record_error || String(i.who ?? '').toLowerCase() === 'owner') && !(i.entity === 'ask' && askIds.has(i.id))); } catch { goes = []; listError = 'RECORD ERROR: the waiting list could not be read'; }
-  const link = (doc, what) => (doc?.link ? doc.link : `RECORD ERROR: no ${what} link in the record`);
+  // A card waits on the owner by M9's own name for it (L79), and so does a research ask (L84 m-3); a go or other ask says
+  // 'owner'.
+  const onOwner = (i) => { const who = String(i.who ?? '').toLowerCase(); return who === (i.entity === 'card' ? OWNER_WAIT_WHO : 'owner') || (i.entity === 'ask' && who === OWNER_WAIT_WHO); };
+  // A card parked for a paused product resumes by itself on unpause: shown apart, not as a go owed (L85 m-5).
+  const parked = (i) => !i.record_error && i.entity === 'card' && i.what === PAUSED_WAIT_WHAT;
+  let paused = [];
+  try {
+    const mine = waitingItems(rec).filter((i) => (i.record_error || onOwner(i)) && !(i.entity === 'ask' && askIds.has(i.id)));
+    goes = mine.filter((i) => !parked(i));
+    paused = mine.filter(parked);
+  } catch { goes = []; listError = 'RECORD ERROR: the waiting list could not be read'; }
+  // A kind whose M9 schema lets no writer set a `link` (a card) is named, not linked (L79); a kind that may carry one
+  // but lacks it is a record error.
+  const mayLink = (entity) => Object.keys(WRITERS[entity] ?? {}).some((actor) => [true, false].some((create) => { const f = fieldsAllowed(entity, actor, { create }); return f === '*' || Boolean(f?.has?.('link')); }));
+  // A research ask has nothing to link to (its line says what to run), so it is named too.
+  const link = (doc, what, entity, id) => (doc?.link ? doc.link : !mayLink(entity) || (entity === 'ask' && !activeKind(doc?.kind)) ? `${entity} ${id}` : `RECORD ERROR: no ${what} link in the record`);
   out.push('', `Waiting on your go (${listError ? 'unknown' : goes.length}):`);
   if (listError) out.push(`- ${listError}`);
   for (const i of goes) {
     const doc = rec.read(i.entity, i.id)?.doc;
-    out.push(`- ${i.entity} ${i.id}: ${i.record_error ?? cleanOutside(String(i.what ?? ''), 'record-ask')} (${link(doc, i.entity === 'go' ? 'roadmap row' : 'record')})`);
+    out.push(`- ${i.entity} ${i.id}: ${i.record_error ?? cleanOutside(String(i.what ?? ''), 'record-ask')} (${link(doc, i.entity === 'go' ? 'roadmap row' : 'record', i.entity, i.id)})`);
   }
   if (!goes.length && !listError) out.push('- none');
+  if (paused.length) out.push('', `Parked while their product is paused; they resume when you unpause (${paused.length}):`, ...paused.map((i) => `- card ${i.id}`));
   out.push('', `Open risky-act asks (${asks.length}); they still expire after ${askExpiryH} h while you are away:`);
-  for (const { id, doc } of asks) out.push(`- ${id}: ${cleanOutside(String(doc.what ?? doc.wait?.what ?? ''), 'record-ask')} (${link(doc, 'pull request')})`);
+  for (const { id, doc } of asks) out.push(`- ${id}: ${cleanOutside(String(doc.what ?? doc.wait?.what ?? ''), 'record-ask')} (${link(doc, 'pull request', 'ask', id)})`);
   if (!asks.length) out.push('- none');
 
   out.push('');

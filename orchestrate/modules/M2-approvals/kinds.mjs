@@ -45,8 +45,8 @@ export function validZone(tz) {
 // → { ok: true, githubId, homeTz, windows: ['08:00', …], decisionsDir, urgent: [kinds] } | { ok: false, reason }
 export function readConfig(rules, product) {
   const get = (k) => rules?.get?.(k, { product });
-  const githubId = get('accounts.joe.github_id');
-  if (!Number.isSafeInteger(githubId) || githubId <= 0) return { ok: false, reason: 'accounts.joe.github_id is missing or not a number' };
+  const githubId = rules?.num?.('accounts.joe.github_id', { product });   // the one number rule (L96 step 2)
+  if (githubId === undefined || githubId <= 0) return { ok: false, reason: 'accounts.joe.github_id is missing or not a number' };
   const homeTz = get('accounts.joe.tz');
   if (!validZone(homeTz)) return { ok: false, reason: 'accounts.joe.tz is missing or not a time zone' };
   const windows = get('approvals.push_windows');

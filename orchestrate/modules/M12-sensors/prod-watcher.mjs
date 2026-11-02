@@ -60,7 +60,13 @@ export async function watchOnce({ vercel, rulesEntry, mainFirstParent, evidence,
   const id = stateFactId(product);
   const prev = writer.get(id);
   const out = [];
-  const raise = async (kind, subject, title, body) => { out.push({ kind, subject, result: await alerts.raise({ key: `${product}|${kind}|${subject}`, title: `${product}: ${title}`, body }) }); };
+  // Answers whether the alert went out: false when M13 lost it (L143). What the pass saves after a raise (a deploy
+  // seen, a setting's baseline) is saved only when it went out, so a lost alert is raised again next pass.
+  const raise = async (kind, subject, title, body) => {
+    const result = await alerts.raise({ key: `${product}|${kind}|${subject}`, title: `${product}: ${title}`, body });
+    out.push({ kind, subject, result });
+    return result !== false;
+  };
   const readKey = `${product}|watcher-cannot-read|vercel`;
   let deps; let live; let env; let settings;
   try {
@@ -83,16 +89,17 @@ export async function watchOnce({ vercel, rulesEntry, mainFirstParent, evidence,
 
   const ready = deps.filter((d) => d.state === 'READY' && d.target === 'production');
   const seen = new Set(prev?.seen ?? []);
+  const lostDeploys = new Set();
   if (prev) {
     for (const d of ready) {
       if (seen.has(d.uid)) continue;
       const v = judge(d);
-      if (!v.ok) await raise('unsupported-deploy', d.uid, 'production deploy that is not a supported main commit', `Deployment ${d.uid} went live in production: ${v.why}.${d.sha ? ` Commit ${d.sha}.` : ''}`);
+      if (!v.ok && !(await raise('unsupported-deploy', d.uid, 'production deploy that is not a supported main commit', `Deployment ${d.uid} went live in production: ${v.why}.${d.sha ? ` Commit ${d.sha}.` : ''}`))) lostDeploys.add(d.uid);
     }
   }
   // Only a deploy in a final state is remembered: one first seen while still building is judged when it turns READY
   // (0b-7 audit M-1).
-  for (const d of deps) if (FINAL.includes(d.state)) seen.add(d.uid);
+  for (const d of deps) if (FINAL.includes(d.state) && !lostDeploys.has(d.uid)) seen.add(d.uid);
 
   const newest = ready.filter((d) => judge(d).ok).sort((a, b) => b.created - a.created)[0] ?? null;
   const oldKey = `${product}|old-version-live|production`;
@@ -104,20 +111,23 @@ export async function watchOnce({ vercel, rulesEntry, mainFirstParent, evidence,
 
   const ep = envPrint(env);
   const sp = settingsPrint(settings);
+  // The baseline saved: the new prints, except a change whose alert was lost keeps its old print (or stays absent).
+  const keepEnv = { ...ep }; const keepSp = { ...sp };
+  const keepOld = (to, k, old) => { if (old === undefined) delete to[k]; else to[k] = old; };
   if (prev) {
     for (const eid of new Set([...Object.keys(prev.env ?? {}), ...Object.keys(ep)])) {
       const a = prev.env?.[eid]; const b = ep[eid];
       if (a?.print === b?.print) continue;
       const what = !a ? 'added' : !b ? 'removed' : 'updated';
-      await raise('setting-changed', `env:${eid}:${b?.print ?? 'gone'}`, `production setting ${(b ?? a).key} ${what}`, `Production environment variable ${(b ?? a).key} was ${what}. (Its value is never read.)`);
+      if (!(await raise('setting-changed', `env:${eid}:${b?.print ?? 'gone'}`, `production setting ${(b ?? a).key} ${what}`, `Production environment variable ${(b ?? a).key} was ${what}. (Its value is never read.)`))) keepOld(keepEnv, eid, a);
     }
     for (const k of new Set([...Object.keys(prev.settings ?? {}), ...Object.keys(sp)])) {
       if (prev.settings?.[k] === sp[k]) continue;
-      await raise('setting-changed', `project:${k}:${sp[k] ?? 'gone'}`, `project setting ${k} changed`, `The project setting ${k} changed in Vercel. If nobody meant to, check it on the dashboard.`);
+      if (!(await raise('setting-changed', `project:${k}:${sp[k] ?? 'gone'}`, `project setting ${k} changed`, `The project setting ${k} changed in Vercel. If nobody meant to, check it on the dashboard.`))) keepOld(keepSp, k, prev.settings?.[k]);
     }
   }
 
   writer.put(id, { kind: 'fact.prod-watch', product, stage, live: live?.uid ?? null, newest_supported: newest?.uid ?? null,
-    env: ep, settings: sp, seen: [...seen].slice(-SEEN_KEEP), baseline: !prev });
+    env: keepEnv, settings: keepSp, seen: [...seen].slice(-SEEN_KEEP), baseline: !prev });
   return out;
 }

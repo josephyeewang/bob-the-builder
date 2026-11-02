@@ -9,7 +9,7 @@ import { fakeGitHub } from './fixtures/fake-github.mjs';
 import { makeGitView } from '../M10-rules/git-view.mjs';
 import { writeDoc, askStore } from './ask-store.mjs';
 import { openDecision, readDecision } from './decision.mjs';
-import { approveNeeded, doneBar, goCheck, raiseGo, recordGo, recordRecheck, rowFile, tier1Changed } from './go.mjs';
+import { approveNeeded, doneBar, goCheck, goFingerprint, raiseGo, recordGo, recordRecheck, rowFile, tier1Changed } from './go.mjs';
 
 const MIN = 60_000;
 const row = (id, over = {}) => ({ id, what: `row ${id}`, module: 'M1', tier: 2, done_when: `tests pass for ${id}`, status: 'planned', ...over });
@@ -171,8 +171,35 @@ test('Tier 1: the go is a decision pull request; a listed file changed on main i
   const w = world();
   const plan = { tier: 1, plan_sha256: 'e'.repeat(64), main_commit: w.M0, files: ['src/a.mjs'] };
   const rows = card(w, 'T', plan, { 'R-1': row('R-1', { tier: 1 }) });
-  const r = await raiseGo(w.t.ctx, { cardId: 'T', rows, view: w.view, mainSha: w.M0 });
+  const fpT = goFingerprint(w.t.ctx, 'T');
+  assert.equal(fpT.ok, true, fpT.reason);
+  const pass = { pass: true, material: 0, card: 'T', fingerprint: fpT.fingerprint, plan_sha256: 'e'.repeat(64), reviewer_session: 'S-review', author_session: 'S-lead' };
+  // R-0b-138: no go is asked before a fresh plan reviewer passed this plan with 0 Material.
+  for (const [bad, why] of [[undefined, /fresh plan reviewer's pass/], [{ ...pass, material: 1 }, /0 Material/], [{ ...pass, pass: false }, /0 Material/],
+    [{ ...pass, plan_sha256: 'd'.repeat(64) }, /changed after review/], [{ ...pass, fingerprint: 'd'.repeat(64) }, /changed after review/],
+    [{ ...pass, fingerprint: undefined }, /changed after review/], [{ ...pass, card: 'U' }, /another card's plan/], [{ ...pass, card: undefined }, /another card's plan/], [{ ...pass, reviewer_session: 'S-lead' }, /session that wrote it/], [{ ...pass, reviewer_session: '' }, /names its reviewer/]]) {
+    const no = await raiseGo(w.t.ctx, { cardId: 'T', rows, view: w.view, mainSha: w.M0, planCheck: bad });
+    assert.equal(no.ok, false); assert.match(no.reason, why);
+  }
+  assert.equal(askStore(w.t.record).asks().length, 0, 'nothing asked without the pass');
+  // Audit r1 M-2: plan_sha256 alone is not the plan. A file list or done_when changed in draft after the pass, or a
+  // pass given for another card with the same plan document, is refused.
+  for (const [change, label] of [[{ files: ['src/a.mjs', 'src/b.mjs'] }, 'files'], [{ done_when: 'a weaker test' }, 'done_when']]) {
+    const c = w.t.record.read('card', 'T');
+    must(roadmap(w.t, { id: 'T', expectRev: c.rev, fields: change }), label);   // the Lead's draft edit, as the record allows
+    const rs = change.done_when ? { 'R-1': { ...rows['R-1'], done_when: change.done_when } } : rows;
+    const no = await raiseGo(w.t.ctx, { cardId: 'T', rows: rs, view: w.view, mainSha: w.M0, planCheck: pass });
+    assert.equal(no.ok, false, `${label} changed after the pass`); assert.match(no.reason, /changed after review/, label);
+    const back = w.t.record.read('card', 'T');
+    must(roadmap(w.t, { id: 'T', expectRev: back.rev, fields: { files: c.doc.files, done_when: c.doc.done_when } }), 'restore');
+  }
+  const rowsU = card(w, 'U', plan, { 'R-1': row('R-1', { tier: 1 }) });
+  const otherCard = await raiseGo(w.t.ctx, { cardId: 'U', rows: rowsU, view: w.view, mainSha: w.M0, planCheck: pass });
+  assert.equal(otherCard.ok, false); assert.match(otherCard.reason, /another card's plan/);
+  assert.equal(askStore(w.t.record).asks().length, 0, 'nothing asked on a pass for another plan');
+  const r = await raiseGo(w.t.ctx, { cardId: 'T', rows, view: w.view, mainSha: w.M0, planCheck: pass });
   assert.equal(r.ok, true, r.reason);
+  assert.deepEqual(askStore(w.t.record).ask(r.id).doc.plan_check, pass);
   assert.equal(askStore(w.t.record).ask(r.id).doc.kind, 'go_t1');
   const { pr } = await openDecision(w.t.ctx, r.id);
   const file = JSON.parse(w.g.repo.files(w.g.pulls.get(pr).head).get('decisions/go-T.json').text);

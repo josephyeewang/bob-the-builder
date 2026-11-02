@@ -8,20 +8,26 @@ import { caughtUpOnce } from './caught-up.mjs';
 const OWNER = 1001;
 const H = 3600e3;
 
-function setup() {
+function setup({ meta } = {}) {
   let t = Date.parse('2026-11-03T08:00:00Z');
   const now = () => new Date(t);
   // The in-memory record stamps the diary with the real clock; this wrapper stamps it with the test's clock instead.
   const rec0 = memoryRecord(); const stamps = [];
   const rec = { ...rec0,
     write(w) { const r = rec0.write(w); if (r.ok) stamps[r.seq] = t; return r; },
-    diary(o) { return rec0.diary(o).map((l) => ({ ...l, ts: stamps[l.seq] ? new Date(stamps[l.seq]).toISOString() : l.ts })); } };
+    diary(o) { return rec0.diary(o).map((l) => ({ ...l, ts: stamps[l.seq] ? new Date(stamps[l.seq]).toISOString() : l.ts })); },
+    ...(meta ? { meta: meta(rec0) } : {}) };
   const writer = makeFactWriter(rec, { actor: 'ledger', now });
   const issues = [];
   const gh = { listIdeaIssues: async () => issues };
   let lastGood = now().toISOString();
   const pass = async () => { const r = await caughtUpOnce({ rec, gh, writer, ownerId: OWNER, product: 'product 1', lastGoodPass: lastGood, now }); lastGood = now().toISOString(); return r; };
-  const ask = (id, doc) => rec.write({ actor: 'approvals', entity: 'ask', id, expectRev: rec.read('ask', id)?.rev ?? 0, doc });
+  // An ask is born open and moves as M9 allows (L72): open -> pushed -> answered, or open -> expired.
+  const PATH = { open: [], pushed: ['pushed'], answered: ['pushed', 'answered'], expired: ['expired'] };
+  const ask = (id, { state, ...doc }) => {
+    assert.equal(rec.write({ actor: 'approvals', entity: 'ask', id, expectRev: 0, doc: { ...doc, state: 'open' } }).ok, true);
+    for (const to of PATH[state]) { const cur = rec.read('ask', id); const r = rec.write({ actor: 'approvals', entity: 'ask', id, expectRev: cur.rev, doc: { ...cur.doc, state: to } }); assert.equal(r.ok, true, r.reason); }
+  };
   return { rec, issues, pass, ask, tick: (ms) => { t += ms; }, pushes: () => rec.list('fact').filter((f) => f.doc.kind === 'fact.push-request') };
 }
 
@@ -100,4 +106,16 @@ test('the owner match is numeric: "1001" from config works; a missing owner ID r
   const gh = { listIdeaIssues: async () => [{ number: 1, title: 't', body: 'b', user: { id: 1001 } }, { number: 2, title: 't', body: 'b' }] };
   assert.deepEqual((await intakeIdeas({ gh, writer, ownerId: '1001' })).filed, [1]);
   await assert.rejects(intakeIdeas({ gh, writer, ownerId: undefined }), /numeric GitHub user ID/);
+});
+
+test('L74 addendum: an idea fact the Ledger did not make is not counted; the Ledger\'s own is', async () => {
+  for (const [who, n] of [['sensors', 0], ['ledger', 1]]) {
+    // A record that says another role made idea-issue-7 (a look-alike under the Ledger's id) is not proof of an idea.
+    const s = setup({ meta: (r) => (e, id) => (e === 'fact' && id === 'idea-issue-7' ? { ...r.meta(e, id), createdBy: who } : r.meta(e, id)) });
+    await s.pass();
+    s.tick(40 * 60e3);
+    s.issues.push({ number: 7, title: 'Idea: dark mode', body: 'from the phone', user: { id: OWNER, login: 'owner' } });
+    await s.pass();
+    assert.match(s.pushes()[0].doc.text, new RegExp(`Ideas filed from GitHub: ${n}\\.`), who);
+  }
 });

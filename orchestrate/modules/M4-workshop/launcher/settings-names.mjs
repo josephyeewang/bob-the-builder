@@ -22,6 +22,7 @@ export const FLAGS = Object.freeze({
   effort: '--effort',
   version: '--version',
   maxTurns: '--max-turns',
+  sessionId: '--session-id',
 });
 
 export const SETTINGS = Object.freeze({
@@ -116,8 +117,15 @@ export const MIN_CLAUDE_CODE = '2.1.295';
 // One entry per name the launcher writes: how it was proven (`readback:<start-message field>` or
 // `break-it:<test>`) and the Claude Code version it was proven on. An entry counts only for that
 // exact version, so a pin change makes every name unconfirmed until live proof L2 runs again.
-// Empty today: no name has been proven live yet, so every launch refuses (fail closed).
-export const CONFIRMED = Object.freeze({});
+// Three names are proven, by the sandbox setting's break-it test (review-walls-proof.test.mjs, L91 (1)): with
+// `sandbox.enabled` and `allowUnsandboxedCommands: false` a call asking to leave the sandbox was refused, and with
+// `true` (the control) the same call wrote. Every other name is still unproven, so every launch still refuses.
+const SANDBOX_BREAK_IT = Object.freeze({ by: 'break-it:review-walls-proof.test.mjs "the sandbox setting"', version: '2.1.316' });
+export const CONFIRMED = Object.freeze({
+  [SETTINGS.sandbox]: SANDBOX_BREAK_IT,
+  [SETTINGS.sandboxEnabled]: SANDBOX_BREAK_IT,
+  [SETTINGS.allowUnsandboxedCommands]: SANDBOX_BREAK_IT,
+});
 
 // Keys whose children are data (plugin ids, variable names and values), not setting names.
 const DATA_KEYS = new Set([SETTINGS.enabledPlugins]);
