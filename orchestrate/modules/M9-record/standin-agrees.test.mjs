@@ -11,13 +11,13 @@ import assert from 'node:assert/strict';
 import { setup, outboxFile } from './fixtures.test-helper.mjs';
 import { memoryRecord, OUTBOX_KINDS, AI_ROLES } from '../../shared/record.mjs';
 
-const NAME_REASONS = /^(no outbox kind for file name|outbox kind \S+ is not listed for|outbox kind \S+ has no record rule yet)/;
+const NAME_REASONS = /^(no outbox kind for file name|outbox kind \S+ is not listed for|outbox kind \S+ has no record rule yet|not_a_record$)/;
 const EXTRA = ['notakind-X1.md', 'report-.md', 'REPORT-X1.md', 'report-X.1.md', 'report-X1.MD', 'report-X1.md.txt',
   'report_X1.md', 'report-X1', 'report-é.md', 'verdict-compact-S1.md'];
 
 test('L129 M-1: the stand-in and the real applyOutbox agree on every name and role reason, case for case', () => {
   const env = setup({ prefix: 'm9-standin-' });
-  const fake = memoryRecord();
+  const fake = memoryRecord({ outboxRoot: env.outRoot });   // the same folder, so where a file is checks alike (L151 m7)
   let n = 0;
   let cases = 0;
   let nameRefusals = 0;
