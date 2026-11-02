@@ -1714,6 +1714,35 @@ test('L186 control: a thread read that fails for one pull request holds only tha
   assert.equal(mergeOf(w, 'C-2').doc.state, 'merged', 'a failed read for one pull request is not an outage that stops the queue');
 });
 
+// L187 c1: a check or status list too long to read is a fact about that one change (refusal 1, final), not GitHub
+// down, so the queue doesn't stop for a pass behind it: the change after it is judged in the same pass.
+for (const which of ['checks', 'statuses']) {
+  test(`L187 c1: 100 ${which} on one change refuses it, and the change behind it merges in the same pass`, async () => {
+    const w = world(limited());
+    const head = verifiedCard(w);
+    tick(w, 1);
+    verifiedCard(w, 'C-2', { pr: 8, files: { 'src/b.mjs': 'b' } });
+    if (which === 'checks') w.g.checks.set(head, Array.from({ length: 100 }, (_, i) => ({ name: i ? `c${i}` : 'test', app: { id: 1 }, head_sha: head, status: 'completed', conclusion: 'success' })));
+    else w.g.statuses.set(head, Array.from({ length: 100 }, (_, i) => ({ context: `s${i}`, state: 'success' })));
+    await gatePass(w.ctx);
+    assert.equal(mergeOf(w, 'C-1').doc.state, 'refused', JSON.stringify(mergeOf(w, 'C-1').doc));
+    assert.ok(mergeOf(w, 'C-1').doc.reasons.some((x) => new RegExp(`^1: the commit has 100 ${which === 'checks' ? 'check runs' : 'statuses'}`).test(x)), mergeOf(w, 'C-1').doc.reasons.join(' | '));
+    assert.equal(mergeOf(w, 'C-2').doc.state, 'merged', 'a list too long to read is not an outage that stops the queue');
+  });
+}
+
+test('L187 c1 control: a check-run read that fails still stops the queue for the pass', async () => {
+  const w = world(limited());
+  verifiedCard(w);
+  tick(w, 1);
+  verifiedCard(w, 'C-2', { pr: 8, files: { 'src/b.mjs': 'b' } });
+  const get = w.g.gh.get;
+  w.g.gh.get = async (path) => (/\/check-runs/.test(path) ? { status: 502, json: null } : get(path));
+  await gatePass(w.ctx);
+  waitingHeld(mergeOf(w, 'C-1'), /^1: the checks could not be read/);
+  assert.notEqual(mergeOf(w, 'C-2')?.doc.state, 'merged', 'GitHub down for check runs stops the queue for the pass');
+});
+
 test('L184 control: a wait that clears before the cap still merges', async () => {
   const w = world(limited());
   verifiedCard(w);

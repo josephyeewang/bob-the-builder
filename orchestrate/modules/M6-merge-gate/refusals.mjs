@@ -50,6 +50,7 @@
 //   files [{ path, status }] | null          the change's files
 //   filesProblem 'too_many' | 'no_entry' | 'unread' | null   why there is no file list (L182); filesMissing the file
 //   checksTooLong text | undefined           a check or status list longer than the gate reads (L182)
+//   tooLongLists ['checks' | 'statuses']     which of the two it was (gate.mjs reads the other as unread; L187 c1)
 //   firstCustomerNewFiles [prefix] | null    effect_paths.first_customer_visible.new_files_under
 
 import { PASSES, worstVerdict } from '../M9-record/outbox.mjs';

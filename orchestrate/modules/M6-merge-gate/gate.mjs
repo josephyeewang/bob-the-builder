@@ -185,7 +185,9 @@ export async function gatePass(ctx) {
     }
     const facts = await gatherFacts(ctx, m);
     // GitHub unreadable: hold this one and stop, rather than hold the whole queue in one pass.
-    const outage = !!facts.card && (!facts.pr || !SHA.test(facts.main?.sha ?? '') || facts.checks === null || facts.statuses === null || facts.compareStatus === null);
+    // A check or status list too long to read is a fact (refusal 1, final), not GitHub down (L187 c1).
+    const unread = (k) => facts[k] === null && !(facts.tooLongLists ?? []).includes(k);
+    const outage = !!facts.card && (!facts.pr || !SHA.test(facts.main?.sha ?? '') || unread('checks') || unread('statuses') || facts.compareStatus === null);
     // Behind main: catch up first (R-0b-89), never judge a head that can't land as judged.
     if ((facts.compareStatus === 'behind' || facts.compareStatus === 'diverged') && facts.pr?.state === 'open' && SHA.test(facts.pr?.head?.sha ?? '')) {
       if ((m.doc.catch_ups ?? []).length >= (ctx.maxCatchUps ?? MAX_CATCH_UPS)) { move(m, 'returned_to_builder', { reasons: [`caught up ${MAX_CATCH_UPS} times and still behind main`] }); return STEPPED_ASIDE; }

@@ -63,20 +63,20 @@ const tooLong = (message) => Object.assign(new Error(message), { tooLong: true }
 
 async function json(gh, path) {
   const r = await gh.get(path);
-  if (r?.status !== 200 || r.json === undefined || r.json === null) throw new Error(`${path} answered ${r?.status}`);
+  if (r?.status !== 200 || r.json === undefined || r.json === null) throw Object.assign(new Error(`${path} answered ${r?.status}`), { status: r?.status });
   return r.json;
 }
 
 const checkRun = (c) => ({ name: c?.name, app_id: c?.app?.id, head_sha: c?.head_sha, status: c?.status, conclusion: c?.conclusion });
 
-async function checksAt(gh, base, sha) {
+export async function checksAt(gh, base, sha) {
   const j = await json(gh, `${base}/commits/${sha}/check-runs?per_page=${MAX_LIST}`);
   if (Array.isArray(j.check_runs) && Number.isInteger(j.total_count) && j.total_count >= MAX_LIST) throw tooLong(`${j.total_count} check runs; the gate reads at most ${MAX_LIST - 1}`);
   if (!Array.isArray(j.check_runs) || !Number.isInteger(j.total_count) || j.total_count !== j.check_runs.length) throw new Error('the check runs are cut off or unreadable');
   return j.check_runs.map(checkRun);
 }
 
-async function statusesAt(gh, base, sha) {
+export async function statusesAt(gh, base, sha) {
   const j = await json(gh, `${base}/commits/${sha}/status?per_page=${MAX_LIST}`);
   if (Array.isArray(j.statuses) && Number.isInteger(j.total_count) && j.total_count >= MAX_LIST) throw tooLong(`${j.total_count} statuses; the gate reads at most ${MAX_LIST - 1}`);
   if (!Array.isArray(j.statuses)) throw new Error('the statuses are cut off or unreadable');
@@ -158,9 +158,10 @@ export async function gatherFacts(ctx, merge) {
   f.checksIgnored = Array.isArray(ignoredRaw) ? ignoredRaw.map((x) => ({ app_id: botId({ bot_user_id: x?.app_id }), name: x?.name })) : [];
   f.main = { sha: mainSha, green: mainSha && f.requiredChecks ? await attempt(() => mainGreen(gh, base, mainSha, f.requiredChecks, f.checksIgnored)) : null };
   // A check or status list longer than the gate reads (L182): checksTooLong says so, and refusal 1 is final.
-  const longList = (e) => { if (e?.tooLong) f.checksTooLong = String(e.message); };
-  f.checks = head ? await attempt(() => checksAt(gh, base, head), null, longList) : null;
-  f.statuses = head ? await attempt(() => statusesAt(gh, base, head), null, longList) : null;
+  // tooLongLists names which list it was, so the gate doesn't read that empty list as GitHub down (L187 c1).
+  const longList = (which) => (e) => { if (e?.tooLong) { f.checksTooLong = String(e.message); f.tooLongLists = [...(f.tooLongLists ?? []), which]; } };
+  f.checks = head ? await attempt(() => checksAt(gh, base, head), null, longList('checks')) : null;
+  f.statuses = head ? await attempt(() => statusesAt(gh, base, head), null, longList('statuses')) : null;
 
   // The change: main...head.
   const cmp = head && mainSha ? await attempt(() => json(gh, `${base}/compare/${mainSha}...${head}`)) : null;
