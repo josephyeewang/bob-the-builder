@@ -2499,3 +2499,78 @@ test('L205 lane 1 note 1: M2\'s unreadable Approve is classed by its cause: 404/
     assert.equal(failedRead(v.cause), failed, `${status}: ${v.cause?.message}`);
   }
 });
+
+// The Approve, through the gate (L205 r2 plants Q8, Q10): an answered Approve ask whose reviews read fails holds the
+// merge on 8, with no clock, and merges once the read returns; a reviews read GitHub answers with a 404 is an answer,
+// so the wait counts toward the cap.
+const OWNER_ID = 4242;
+function approveAsk(w, { head, pr = 7, id = 'R-1', card = 'C-1' }) {
+  const rec = recOf(w);
+  const base = { kind: 'risky_approve', card, title: 'Change the schema', tier: 2, risky: ['schema'], pr, raised_at: nowIso(w), reask_count: 0 };
+  must(rec.write({ actor: 'approvals', entity: 'ask', id, expectRev: 0, doc: { ...base, state: 'open' } }), 'ask open');
+  must(put(rec, 'approvals', 'ask', id, { state: 'pushed' }), 'ask pushed');
+  must(put(rec, 'approvals', 'ask', id, { state: 'answered', answer: { approves: true, head } }), 'ask answered');
+}
+function approveWorld(reviews) {
+  const w = world(limited());
+  const r = w.ctx.rules;
+  w.ctx.rules = Object.create(r, { classify: { value: (x) => ({ ...r.classify(x), risky: ['schema'] }) } });
+  const head = verifiedCard(w);
+  approveAsk(w, { head });
+  const values = { ...w.values, 'accounts.joe.github_id': OWNER_ID, 'accounts.joe.tz': 'UTC', 'approvals.push_windows': ['08:00'], 'approvals.decisions_dir': 'docs/decisions' };
+  const approved = { status: 200, json: [{ id: 1, user: { id: OWNER_ID, type: 'User' }, state: 'APPROVED', commit_id: head, submitted_at: nowIso(w, 1) }] };
+  const gh = { ...w.g.gh, get: async (p) => (/\/pulls\/\d+\/reviews/.test(p) ? reviews(approved) : w.g.gh.get(p)) };
+  w.ctx.approvals = { record: recOf(w), rules: fakeRules({ values }), product: PRODUCT, now: w.ctx.now, alert: () => {}, gh, owner: 'sample-org', repo: 'sample-app' };
+  return w;
+}
+test('L205: an Approve whose reviews read fails holds the merge on 8 with no clock; read, the Approve stands and it merges', async () => {
+  let down = true;
+  const w = approveWorld((ok) => (down ? { status: 502, json: null } : ok));
+  await gatePass(w.ctx);
+  waitingHeld(mergeOf(w), /^8: the Approve could not be read from GitHub: GitHub answered 502/);
+  assert.equal(mergeOf(w).doc.stuck_since, null, 'a failed read does not start the cap\'s clock');
+  assert.deepEqual(told(w, 'merge_refused'), []);
+  down = false;
+  tick(w, 2);
+  await gatePass(w.ctx);
+  assert.equal(mergeOf(w).doc.state, 'merged', JSON.stringify(mergeOf(w).doc));
+});
+test('L205 Minor 1: an Approve whose reviews read GitHub answers with a 404 waits on 8, and the wait counts toward the cap', async () => {
+  const w = approveWorld(() => ({ status: 404, json: null }));
+  await cappedAfter(w, /^8: the Approve could not be read from GitHub: GitHub answered 404/);
+});
+
+// The robot's mark on an undo at the first cutover (plant Q17): a failed statuses read leaves "does it reverse a gate
+// merge?" unknown, so the undo waits on 9; the next pass reads the mark and merges it.
+test('L205: at the first cutover, a failed read of the reversed commit\'s mark holds the undo on 9; the next pass merges it', async () => {
+  const w = world({ values: { 'product.cutover_stage': 'first' } });
+  verifiedCard(w);
+  await gatePass(w.ctx);
+  const flagged = mergeOf(w).doc.merge_commit;
+  must(recOf(w).write({ actor: 'sensors', entity: 'fact', id: 'audit-run-1', expectRev: 0, doc: { type: 'audit_run', commit: flagged, conclusion: 'failure' } }), 'fact');
+  await gatePass(w.ctx);
+  must(put(recOf(w), 'dispatcher', 'card', 'C-1', { state: 'closed' }), 'closed');
+  tick(w, 1);
+  verifiedCard(w, 'U-1', { pr: 9, files: { 'src/a.mjs': 'one' }, undo: flagged });
+  w.ctx.rules = fakeRules({ values: w.values, answers: { merge: allow('in lane') } });
+  let left = 1;
+  wrapGet(w, (p, r) => (left > 0 && p.includes(`/commits/${flagged}/statuses`) ? (left -= 1, { status: 502, json: null }) : r));
+  await gatePass(w.ctx);
+  assert.equal(left, 0, 'the mark read was the one that failed');
+  const u = mergeOf(w, 'U-1');
+  assert.equal(u.doc.state, 'held', JSON.stringify(u.doc));
+  assert.ok((u.doc.waiting_on ?? []).some((x) => /^9: /.test(x)), (u.doc.waiting_on ?? []).join(' | '));
+  assert.equal(u.doc.stuck_since, null);
+  tick(w, 1);
+  await gatePass(w.ctx);
+  assert.equal(mergeOf(w, 'U-1').doc.state, 'merged', JSON.stringify(mergeOf(w, 'U-1').doc));
+});
+
+// The review threads (plant Q25): a GraphQL answer of 404 is GitHub's answer, so the wait on 7 counts toward the cap.
+test('L205 Minor 1: a review-thread read GitHub answers with a 404 waits on 7, and the wait counts toward the cap', async () => {
+  const w = world(limited());
+  verifiedCard(w);
+  const post = w.g.gh.post;
+  w.g.gh.post = async (path, body) => (path === '/graphql' ? { status: 404, json: null } : post(path, body));
+  await cappedAfter(w, /^7: the review threads could not be read/);
+});
