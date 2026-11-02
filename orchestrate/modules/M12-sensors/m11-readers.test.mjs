@@ -108,9 +108,15 @@ export function writersOf(family, sources = Object.fromEntries(CODE.map((f) => [
 export function kindWriters(family, sources = Object.fromEntries(CODE.map((f) => [f, stripComments(readFileSync(join(HERE, f), 'utf8'))]))) {
   // The kind as a quoted string anywhere in the code (the readings spell theirs in VALUE_KINDS); fact-shapes.mjs only
   // declares the shapes, it writes nothing.
+  // Any quote style (lane 3 review Minor 1): '…', "…" or `…`.
   const kind = `fact.${family.replace(/-$/, '')}`;
-  return Object.entries(sources).filter(([file]) => file !== 'fact-shapes.mjs').flatMap(([file, text]) => [...text.matchAll(new RegExp(`'${kind.replace(/\./g, '\\.')}'`, 'g'))].map(() => file));
+  return Object.entries(sources).filter(([file]) => file !== 'fact-shapes.mjs').flatMap(([file, text]) => [...text.matchAll(new RegExp(`(['"\`])${kind.replace(/\./g, '\\.')}\\1`, 'g'))].map(() => file));
 }
+// writersOf sees only `.put(` (lane 3 review Minor 2). A put reached another way (writer['put'](…), a destructured
+// `{ put } = writer`, or `const p = writer.put`) would get past it, so M12's code may not use those forms at all.
+const PUT_ALIAS = /\[\s*['"`]put['"`]\s*\]|\{[^{}]*\bput\b[^{}]*\}\s*=[^=>]|=\s*[\w.]+\.put\b(?!\s*\()/;
+export const putAliases = (sources = Object.fromEntries(CODE.map((f) => [f, stripComments(readFileSync(join(HERE, f), 'utf8'))]))) =>
+  Object.entries(sources).filter(([, text]) => PUT_ALIAS.test(text)).map(([file]) => file);
 
 test('L97 m-5: each fact M11 reads has exactly one writer in M12, under one kind', () => {
   for (const { family } of READ_FACTS) {
@@ -125,6 +131,16 @@ test('L97 m-5: each fact M11 reads has exactly one writer in M12, under one kind
   assert.equal(kindWriters('signed-in-account', p4).length, 2);
   const p4b = { ...src, 'plant.mjs': "export const w = (writer) => writer.put('network-up', { kind: 'fact.power-source', at: 'x' });" };
   assert.equal(writersOf('network-up', p4b).length, 2);
+  // The kind in double quotes or a template literal (lane 3 Minor 1).
+  for (const q of ['"', '`']) {
+    const p = { ...src, 'plant.mjs': `export const k = ${q}fact.signed-in-account${q};` };
+    assert.equal(kindWriters('signed-in-account', p).length, 2, `kind in ${q} quotes`);
+  }
+  // No put reached past the scan (lane 3 Minor 2): none in M12 today, and each form is caught.
+  assert.deepEqual(putAliases(), [], 'M12 reaches put a way writersOf cannot see');
+  for (const plant of ["writer['put'](ACCOUNT_FACT, {});", 'const { put } = writer;', 'const { get, put: p } = writer;', 'const p = writer.put;']) {
+    assert.deepEqual(putAliases({ ...src, 'plant.mjs': plant }), ['plant.mjs'], plant);
+  }
 });
 
 // ---- the real writers into the real record ----
@@ -285,6 +301,20 @@ test('L97 M-3: a new hit with no reset time replaces yesterday\'s, and the card 
   assert.deepEqual([f.resets_at, f.observed_at], [null, iso(T0 + 24 * 60 * MIN + MIN)]);
   await w.pass(24 * 60 + 10);
   assert.equal(w.rec.read('card', 'T2').doc.state, 'waiting', 'no reset time: never resumed on yesterday\'s');
+});
+
+test('L97 M-3 (lane 3 review): a hit with no reset time keeps today\'s reset time from the same window, and the card resumes after it', async () => {
+  const w = limitWorld(0);
+  // 10:01 a worker on a learns the reset (12:00); 10:05 a second worker on a hits it with no readable time.
+  await writeLimitHit(makeFactWriter(w.rec), { account: ACCT, resets_at: iso(T0 + 120 * MIN), source: 'worker-exit' }, { now: clockAt(T0 + MIN) });
+  const r = await writeLimitHit(makeFactWriter(w.rec), { account: ACCT, resets_at: null, source: 'worker-exit-2' }, { now: clockAt(T0 + 5 * MIN) });
+  assert.equal(r.ok, true, r.reason);
+  const f = w.rec.read('fact', LIMIT_FACT(ACCT)).doc;
+  assert.deepEqual([f.resets_at, f.observed_at, f.source], [iso(T0 + 120 * MIN), iso(T0 + 5 * MIN), 'worker-exit-2']);
+  await w.pass(60);
+  assert.equal(w.rec.read('card', 'T2').doc.state, 'waiting');
+  await w.pass(121);
+  assert.equal(w.rec.read('card', 'T2').doc.state, 'ready', 'resumed after the kept reset time');
 });
 
 test('R-0b-168: the writers refuse what M11 must not decide on', async () => {

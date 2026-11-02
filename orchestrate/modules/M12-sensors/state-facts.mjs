@@ -55,13 +55,20 @@ export async function writeReading(writer, which, probe, { now = () => new Date(
 }
 
 // exit: the worker's exit result, { account, resets_at, source }. A hit is always written, even with no readable reset
-// time (L97 M-3): then resets_at is null, which replaces an older hit's time. M11 resumes a card only on a hit observed
-// after the card began to wait, with a reset time that has passed, so a null keeps it waiting (never resumes early on
-// yesterday's reset). Only a hit that names no known account is refused: there is no fact id to write it under.
+// time (L97 M-3). M11 resumes a card only on a hit observed after the card began to wait, with a reset time that has
+// passed. With no readable time, the stored hit's reset time is kept if it is still ahead (the same limit window: a
+// second worker hitting it must not throw away the time the first one learned, or the card would wait for good; lane 3
+// review of r2); otherwise resets_at is null, so yesterday's past reset never resumes a card early.
+// Only a hit that names no known account is refused: there is no fact id to write it under.
 export async function writeLimitHit(writer, exit, { now = () => new Date() } = {}) {
   const observed_at = stamp(now);
   if (!accountOk(exit?.account)) return { ok: false, reason: 'the limit hit names no known account' };
-  return writer.put(LIMIT_FACT(exit.account), { kind: 'fact.limit-hit', account: exit.account, resets_at: timeOrNull(exit.resets_at), observed_at, source: exit.source ?? null });
+  let resets_at = timeOrNull(exit.resets_at);
+  if (resets_at === null) {
+    const kept = timeOrNull(writer.get?.(LIMIT_FACT(exit.account))?.resets_at);
+    if (kept && Date.parse(kept) > Date.parse(observed_at)) resets_at = kept;
+  }
+  return writer.put(LIMIT_FACT(exit.account), { kind: 'fact.limit-hit', account: exit.account, resets_at, observed_at, source: exit.source ?? null });
 }
 
 // The writer for each family M11 reads, by its M9 family name (M11 READ_FACTS' `family`): the function itself, called
