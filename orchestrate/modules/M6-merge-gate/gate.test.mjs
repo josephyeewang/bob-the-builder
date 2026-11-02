@@ -1091,6 +1091,9 @@ test('L138 MAT-2: refusal 8 sets needs_joe; once Joe approves the card at the sa
   assert.equal(w.env.record.list('merge_request').length, 2);
 });
 
+// The refusal here is about the change (a red check), so not asking again is right. A temporary refusal (checks or
+// threads unreadable, mergeable unknown, main red) currently stalls the same way and is never retried. Known gap,
+// fixed under LEAD-CALLS L164 before the first cutover; no test pins that stall.
 test('L138 MAT-2: a merge the gate refused while the card did not change is not asked for again on every pass', async () => {
   const w = world();
   const head = verifiedCard(w, 'C-1', { request: false });

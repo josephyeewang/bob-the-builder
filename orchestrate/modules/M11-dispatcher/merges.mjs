@@ -365,9 +365,11 @@ export function requestMerges({ rec, rules, now, b, running = [], startsHeld = n
     const ended = endedMerges(rec, id, doc.head);
     const mid = MERGE_REQUEST(id, doc.head, ended.n);
     if (rec.read('merge_request', mid)) continue;
-    // A merge the gate ended while the card did not change (refused on what it judged, say a red check) is not asked
-    // for again on every pass: each would be refused, and told to Joe, the same way. Any put-back changes the card (it went
-    // through merging), and so do refusal 8's needs_joe and Joe's Approve, so each of those is asked for again.
+    // A merge the gate ended while the card did not change is not asked for again on every pass. Any put-back changes
+    // the card (it went through merging), and so do refusal 8's needs_joe and Joe's Approve, so each of those is asked
+    // for again. For a refusal about the change itself (say a red check) that is right: it is final until the card
+    // changes. A temporary refusal (checks or threads unreadable, mergeable unknown, main red) currently stalls the same
+    // way and is never retried. Known gap, fixed under LEAD-CALLS L164 before the first cutover.
     if (ended.rev !== null && rev <= ended.rev) { done.push([id, 'not requested again: the gate ended its merge and the card has not changed since']); continue; }
     const again = rec.list('merge_request').some((q) => q.doc?.card === id);
     // An undo is never held by the band (audit 0b-6 r2 MAT-4, L31): it is the way out of a bad change.
