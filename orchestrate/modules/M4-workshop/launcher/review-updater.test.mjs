@@ -947,6 +947,19 @@ test('L75 m-4, L132 M-1: a new copy must hold what the runner\'s config names in
     const r = await updateOnce(kept, { ...w.o, first: w.keepSeed });
     assert.match(r.reason, new RegExp(`the new copy was not made \\(the runner's ${k}, ${kw}, is not one of the copy's own code files \\(a \\.mjs file under its modules/ or shared/ folder\\)`), k);
     assert.equal(existsSync(w.installRoot), false);
+    // L136 m5: a file at the top of the copy (where the install step once put the wiring) is not one of its own code
+    // files either; L136 m2: nor is a test file, test helper or fixture, though main holds it.
+    for (const [rel, re] of [
+      ['review-wiring.mjs', /is not one of the copy's own code files \(a \.mjs file under its modules\/ or shared\/ folder\)/],
+      ['modules/M4-workshop/launcher/review-updater.test.mjs', /is one of the copy's test files, test helpers or test fixtures/],
+      ['modules/M12-sensors/shell-guard/fixtures/naive-hook.mjs', /is one of the copy's test files, test helpers or test fixtures/],
+    ]) {
+      const p = join(w.installRoot, rel);
+      writeFileSync(join(w.keepSeed, RUNNER_CONFIG), `${JSON.stringify({ wiring: wired, [k]: p, claudeBin: '/usr/local/bin/claude' })}\n`);
+      const t = await updateOnce(kept, { ...w.o, first: w.keepSeed });
+      assert.match(t.reason, new RegExp(`the new copy was not made \\(the runner's ${k}, ${p.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}, ${re.source}`), `${k} = ${rel}`);
+      assert.equal(existsSync(w.installRoot), false);
+    }
     writeFileSync(join(w.keepSeed, RUNNER_CONFIG), `${JSON.stringify({ wiring: wired, [k]: join(w.installRoot, 'modules', 'gone.mjs'), claudeBin: '/usr/local/bin/claude' })}\n`);
     assert.match((await updateOnce(kept, { ...w.o, first: w.keepSeed })).reason, new RegExp(`the new copy has no modules/gone\\.mjs, the runner's ${k}: main does not hold it`), k);
     assert.deepEqual(leftovers(w), []);
