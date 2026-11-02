@@ -199,6 +199,7 @@ export const ALLOWED = Object.freeze({
   'modules/M4-workshop/launcher/review-runner-main.mjs': 2,
   'modules/M4-workshop/launcher/review-updater.test.mjs': 1,
   'modules/M6-merge-gate/build-checker.test.mjs': 1,
+  'modules/M9-record/write-sites.test.mjs': 1, // a plant's own test text, the 'dynamic, built name' case (L151)
 });
 
 function filesUnder(dir) {

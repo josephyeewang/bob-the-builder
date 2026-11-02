@@ -62,6 +62,10 @@ export function guardWrite({ entity, id, actor, old, doc, createdBy }) {
 
   // ---------- update ----------
   if (row?.own && actorName(createdBy ?? '') !== name) return no(`${name} may change only a ${entity} it created; ${id ?? 'this one'} was created by ${createdBy ?? 'an unknown writer'}`);
+  // Only the writer that created a fact or handoff may update it (L118 M1): the same actor, session included. The
+  // readers that trust a fact's writer (an exact_reverse card's undo_issue, an audit result's audit_run) read
+  // createdBy, which is the first writer only, so a second writer rewriting the contents would forge them.
+  if ((entity === 'fact' || entity === 'handoff') && createdBy !== String(actor)) return no(`only ${createdBy ?? 'its creator'} may change ${entity} ${id}`);
   const from = old.state;
   const to = out.state;
   const moving = stateful && from !== to;

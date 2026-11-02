@@ -23,6 +23,7 @@ import { readNeedsJoe } from './checker-entry.mjs';
 import { gatherFacts } from './gather.mjs';
 import { timeLimits, requestMerges } from '../M11-dispatcher/merges.mjs';
 import { MERGED_OUTSIDE, MERGED_OUTSIDE_UNTOLD } from './merge-outcome.mjs';
+import { fakeAlert } from '../../test/fake-alert.test-helper.mjs';
 
 const POLICY = 'tiers: {}\n';
 const CLEAN = { correct: 'clean', well_built: 'clean', works_for_user: 'clean', holds_up: 'clean' };
@@ -128,6 +129,7 @@ test('a clean card merges: paired write, squash merge of the judged head, card m
   must(w.env.record.write({ actor: 'sensors', entity: 'fact', id: 'audit-run-1', expectRev: 0, doc: { type: 'audit_run', commit: m.doc.merge_commit, conclusion: 'failure' } }), 'fact');
   await gatePass(w.ctx);
   assert.equal(mergeOf(w).doc.state, 'audit_flagged');
+  assert.deepEqual(w.alerts, []);
 });
 
 test('the undo route: a flagged merge\'s exact reverse goes first, merges with no Approve, and the undone card is reverted', async () => {
@@ -846,6 +848,57 @@ test('a mark that failed until the audit result landed is still posted, with an 
   assert.ok(w.alerts.some((a) => a.type === 'merge_marked_after_audit'));
 });
 
+// #91 r2 audit (L129, plant D15): the late-mark check reads Sensors audit runs only. An audit_run another writer made
+// for the commit is not an audit, so a mark posted late on a still-merged merge asks for no re-run.
+test('L129: a Ledger audit_run for the commit does not make a late mark ask for a re-run', async () => {
+  const w = world();
+  verifiedCard(w);
+  w.g.answer.status = () => ({ status: 500, json: null });
+  await gatePass(w.ctx);
+  const m = mergeOf(w);
+  must(w.env.record.write({ actor: 'ledger', entity: 'fact', id: 'alert-audit-0', expectRev: 0, doc: { type: 'audit_run', commit: m.doc.merge_commit, conclusion: 'failure' } }), 'ledger fact');
+  w.g.answer.status = null;
+  await gatePass(w.ctx);
+  const after = mergeOf(w);
+  assert.equal(after.doc.state, 'merged');
+  assert.ok(after.doc.marked_at);
+  assert.equal(after.doc.late_mark_alert, undefined);
+  assert.ok(!w.alerts.some((a) => a.type === 'merge_marked_after_audit'), JSON.stringify(w.alerts));
+});
+
+// L130 m17: the late-mark alert's answer counts. A refused (false) or thrown alert leaves it owed and it is sent again
+// on the next pass; once taken it is marked told and never sent again.
+test('L130 m17: a late-mark alert that is refused or throws is sent again next pass, then never again', async () => {
+  for (const fail of ['false', 'throw']) {
+    const w = world();
+    let refuse = true;
+    const sent = [];
+    w.ctx.alert = (a) => {
+      if (a.type === 'merge_marked_after_audit' && refuse) { if (fail === 'throw') throw new Error('queue busy'); return false; }
+      sent.push(a);
+      return true;
+    };
+    verifiedCard(w);
+    w.g.answer.status = () => ({ status: 500, json: null });
+    await gatePass(w.ctx);
+    const m = mergeOf(w);
+    must(w.env.record.write({ actor: 'sensors', entity: 'fact', id: 'audit-run-1', expectRev: 0, doc: { type: 'audit_run', commit: m.doc.merge_commit, conclusion: 'failure' } }), 'fact');
+    w.g.answer.status = null;
+    await gatePass(w.ctx);
+    let after = mergeOf(w);
+    assert.ok(after.doc.marked_at, fail);
+    assert.equal(after.doc.late_mark_alert, 'owed', fail);
+    assert.ok(!sent.some((a) => a.type === 'merge_marked_after_audit'), fail);
+    refuse = false;
+    await gatePass(w.ctx);
+    after = mergeOf(w);
+    assert.equal(after.doc.late_mark_alert, 'told', fail);
+    assert.equal(sent.filter((a) => a.type === 'merge_marked_after_audit').length, 1, fail);
+    await gatePass(w.ctx);
+    assert.equal(sent.filter((a) => a.type === 'merge_marked_after_audit').length, 1, `${fail}: sent once only`);
+  }
+});
+
 // Audit round 3, Material: on M10's real engine a clean docs change with a Tier-2 go merges as Tier 2 (the card's
 // declared tier reaches the classification), and the needs-joe status says so.
 test('real rules: a clean docs change with a Tier-2 go merges, recorded and marked as Tier 2', async () => {
@@ -1230,3 +1283,57 @@ test('L138 MAT-2: a merge the gate refused while the card did not change is not 
   tick(w, 1);
   assert.deepEqual(dispatcherAsks(w, 'C-1', { head }), [['C-1', 'merge requested again']]);
 });
+
+// L174 m2 (the r5 audit's local test, kept): tellLimitMissing writes its told fact only after a delivered alert. A sink
+// that answers false then true, one that throws then answers true, a told-fact write refused once, and a sink that
+// answers false forever: one attempt per pass until the fact is written, then none; never written while it is lost.
+for (const mode of ['false-then-true', 'throw-then-true', 'write-refused-once', 'false-forever']) {
+  test(`L174 m2: tellLimitMissing is told again each pass until delivered and recorded (${mode})`, async () => {
+    const w = world();
+    const sent = []; const delivered = [];
+    let k = -1;
+    const mine = (a) => a?.type === 'merge_limit_missing';
+    const alert = fakeAlert({
+      // throws is asked first on every call, so it numbers the merge_limit_missing calls.
+      throws: (a) => { if (!mine(a)) return false; k += 1; sent.push(k); return mode === 'throw-then-true' && k === 0 && 'outbox down'; },
+      answer: (a) => { if (!mine(a)) return true; if (mode === 'false-forever' || (mode === 'false-then-true' && k === 0)) return false; delivered.push(k); return true; },
+    });
+    w.ctx.alert = alert;
+    let refusedWrites = 0;
+    if (mode === 'write-refused-once') {
+      const rec = w.ctx.record; const orig = rec.write.bind(rec);
+      w.ctx.record = { ...rec, write: (x) => { if (x.entity === 'fact' && String(x.id).startsWith('merge-limit-told-') && refusedWrites === 0) { refusedWrites += 1; return { ok: false, reason: 'refused (L174 test)' }; } return orig(x); } };
+    }
+    verifiedCard(w);
+    loseAnswer(w, { merged: false });
+    await gatePass(w.ctx);
+    const id = mergeOf(w).id;
+    const toldAt = [];
+    for (let i = 0; i < 5; i++) {
+      tick(w, 2);
+      await gatePass(w.ctx);
+      toldAt.push(recOf(w).read('fact', MERGE_LIMIT_TOLD_FACT(id)) ? 1 : 0);
+    }
+    const writeRefused = alert.texts.filter((a) => a?.type === 'merge_gate_write_refused' && a.to === 'told').length;
+    if (mode === 'false-forever') {
+      assert.equal(delivered.length, 0);
+      assert.deepEqual(toldAt, [0, 0, 0, 0, 0], 'never recorded while lost');
+      assert.equal(sent.length, 5, 'tried every pass');
+      return;
+    }
+    assert.ok(delivered.length >= 1, 'delivered at least once');
+    const firstTold = toldAt.indexOf(1);
+    assert.ok(firstTold >= 0, 'the told fact is written once an alert is delivered');
+    assert.equal(sent.length, firstTold + 1, 'one attempt per pass until the fact is written, then none');
+    assert.equal(toldAt[0], 0, 'not recorded on the first pass');
+    assert.ok(toldAt.slice(firstTold).every((x) => x === 1), 'stays recorded');
+    if (mode === 'write-refused-once') {
+      assert.equal(refusedWrites, 1);
+      assert.equal(writeRefused, 1, 'the refused write is told');
+      assert.equal(delivered.length, 2, 'told again after the refused write, then recorded');
+    } else {
+      assert.equal(delivered.length, 1, 'delivered exactly once');
+      assert.equal(writeRefused, 0);
+    }
+  });
+}
