@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { memoryRecord } from '../../shared/record.mjs';
+import { recWith, seed } from '../M11-dispatcher/fixtures.test-helper.mjs';
+import { factFamilyOf } from '../M9-record/permissions.mjs';
 import { makeFactWriter } from '../M12-sensors/facts.mjs';
 import { POWER_FACT } from '../M12-sensors/power-source.mjs';
 import { STATUS_FACT } from '../M13-ledger/heartbeat.mjs';
@@ -13,9 +14,13 @@ const ago = (min) => new Date(NOW - min * 60e3).toISOString();
 const HB = 'mini';
 
 function world() {
-  const rec = memoryRecord();
-  const facts = makeFactWriter(rec, { actor: 'ledger', now });
-  const w = (entity, id, doc) => assert.equal(rec.write({ actor: 'dispatcher', entity, id, expectRev: rec.read(entity, id)?.rev ?? 0, doc }).ok, true);
+  const rec = recWith([]);
+  // Each fact is written by the role whose family holds it (L74): the power reading is the Sensors', the rest the
+  // Ledger's. Each record entry is seeded the way M9 takes it, by the script that may make it (L72).
+  const ledger = makeFactWriter(rec, { actor: 'ledger', now });
+  const sensors = makeFactWriter(rec, { actor: 'sensors', now });
+  const facts = { ...ledger, put: (id, doc, kind) => (factFamilyOf(id) === 'sensors' ? sensors : ledger).put(id, doc, kind) };
+  const w = (entity, id, doc) => seed(rec, entity, id, doc);
   return { rec, facts, w };
 }
 const green = (facts) => {

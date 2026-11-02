@@ -14,7 +14,9 @@
 //                     email address: the probe maps it. Signed out → a `signed-out` fact and one alert; nothing here
 //                     restarts anything (the Dispatcher owns that loop and reads the fact). A change to the account
 //                     named by a planned switch → one push request "switch the phone app to account <B> too"
-//                     (idempotent: the same switch never pushes twice); an unplanned change → an alert.
+//                     (idempotent: the same switch never pushes twice); an unplanned change → an alert of its own.
+//                     Both are keyed by a switch count, so a second switch to the same account is a fresh notice
+//                     (L152, L158).
 //   usage             from the usage fact (R-0b-66) when there is one, else "unknown". Crossing 50/75/90/95 % of a
 //                     window → one alert per window, its body naming the highest threshold (a higher one comments
 //                     once; the next window clears it).
@@ -24,6 +26,7 @@ import { createHash } from 'node:crypto';
 
 export const DISPATCHER_LATE_MIN = 15;
 export const USAGE_STEPS = Object.freeze([50, 75, 90, 95]);
+const ISSUE = (n) => Number.isSafeInteger(n) && n > 0;
 const ISSUE_FACT = (product) => `heartbeat-issue-${product.replace(/[^A-Za-z0-9_-]/g, '-')}`;
 // The status fact the Front Door's trip check reads (review-0b-8 MAT-9): green only while `at` is under an hour old.
 export const STATUS_FACT = (product) => `heartbeat-${product.replace(/[^A-Za-z0-9_-]/g, '-')}`;
@@ -68,23 +71,39 @@ export async function heartbeatOnce({ product, writer, gh, alerts, owner, probes
     'The Mini is signed out of Claude. Sessions cannot start; the Dispatcher will not restart in a loop. Sign the Mini back in.');
 
   const lastId = `heartbeat-account-${product.replace(/[^A-Za-z0-9_-]/g, '-')}`;
-  const last = writer.get(lastId)?.login ?? null;
-  // The new login is saved only once its change alert went out: a raise that answered false keeps the old login, so
-  // the next pass raises the change again (L143). A throw stops the pass before the save, the same way.
+  const lastRec = writer.get(lastId);
+  const last = lastRec?.login ?? null;
+  // Every switch, planned or not, is counted, and its alert or push request carries its number (L152 MAT-1, L158
+  // MAT-A): keyed by the logins alone, a second switch to the same account found the first one's alert ('suppressed'
+  // once the owner closed it, or a silent body edit) or the first one's push request (never written again), so the
+  // owner was never told. It also carries the saved record's time (L158 m3): a count lost to a rewrite without it (an
+  // older build, a hand edit) would reuse a closed alert's number, but that rewrite gives a new time. Retries of one
+  // switch keep both, because the record is rewritten only with the new login. A record with no time, or one that is
+  // not a time, takes this pass's time instead of a fixed word (#98 r2 Minor 1, P6): a retry may then be a duplicate
+  // notice, never a silent one.
+  const switches = Number.isSafeInteger(lastRec?.switches) && lastRec.switches >= 0 ? lastRec.switches : 0;
+  const nextSwitches = switches + 1;
+  const savedTs = typeof lastRec?.ts === 'string' && Number.isFinite(Date.parse(lastRec.ts)) ? lastRec.ts : t.toISOString();
+  const seq = `${nextSwitches}-${savedTs}`;
+  let switched = false;
+  // The new login is saved only once its change alert or push request went out: a raise that answered false (or a
+  // refused push-request write) keeps the old login, so the next pass tells it again (L143). A throw stops the pass
+  // before the save, the same way.
   let told = true;
   if (signedIn && last && last !== acct.login) {
+    switched = true;
     if (plannedSwitch?.to === acct.login) {
-      const idem = createHash('sha256').update(`switch|${last}|${acct.login}|${plannedSwitch.at ?? ''}`).digest('hex').slice(0, 16);
+      const idem = createHash('sha256').update(`switch|${seq}|${last}|${acct.login}|${plannedSwitch.at ?? ''}`).digest('hex').slice(0, 16);
       const pid = `push-request-${idem}`;
       // A refused write of the push request is a lost notice too: the old login stays.
       if (!writer.get(pid)) told = writer.put(pid, { kind: 'fact.push-request', idempotency_key: idem, state: 'requested', product,
         text: `The Mini switched to ${acct.login}: switch the phone app to ${acct.login} too.` })?.ok === true;
     } else {
-      told = await alerts.raise({ key: key(`account-changed-${acct.login}`), title: `${product}: the Mini's Claude account changed`,
+      told = await alerts.raise({ key: key(`account-changed-${seq}-${acct.login}`), title: `${product}: the Mini's Claude account changed`,
         body: `The Mini is now signed in as ${acct.login} (was ${last}) and no switch was planned.` }) !== false;
     }
   }
-  if (signedIn && told) writer.put(lastId, { kind: 'fact.heartbeat-account', product, login: acct.login });
+  if (signedIn && told) writer.put(lastId, { kind: 'fact.heartbeat-account', product, login: acct.login, switches: switched ? nextSwitches : switches });
 
   const u = await probe(probes.usage);
   const usage = u.ok ? u.v : null;
@@ -104,7 +123,11 @@ export async function heartbeatOnce({ product, writer, gh, alerts, owner, probes
   const body = `Orchestrate heartbeat. ${red.length ? `RED: ${red.join(', ')}` : 'All green.'}\nmini_alive_at: ${t.toISOString()}\n\n${lines.join('\n')}\n`;
   const issueId = ISSUE_FACT(product);
   const known = writer.get(issueId)?.issue;
-  if (known && !(await gh.isClosed(known))) await gh.edit(known, body);
-  else writer.put(issueId, { kind: 'fact.heartbeat-issue', product, issue: await gh.open({ title: 'Orchestrate heartbeat (pinned)', body, assignee: owner, labels: ['orchestrate-heartbeat'] }) });
+  if (ISSUE(known) && !(await gh.isClosed(known))) await gh.edit(known, body);
+  else {
+    // An open with no issue number is not saved, so the next pass opens it again (L152 m3).
+    const issue = await gh.open({ title: 'Orchestrate heartbeat (pinned)', body, assignee: owner, labels: ['orchestrate-heartbeat'] });
+    if (ISSUE(issue)) writer.put(issueId, { kind: 'fact.heartbeat-issue', product, issue });
+  }
   return { red, body };
 }

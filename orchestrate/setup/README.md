@@ -59,8 +59,34 @@ A config that does not parse is reported as "not valid JSON": the file's own tex
   program checks itself, and refuses under `sudo` for every command (`check` included). `--root-prefix` is for tests and
   is refused when running as root.
 - It never sets or reads a password. An unknown argument is never printed back (it could be a secret).
-- Not in this part: the install and the background jobs (part 2); the ownerTaps and proposals folders, the account job
+- Not in this part: the install and the background jobs (part 2, below); the ownerTaps and proposals folders, the account job
   reload and the watch-only token file (part 3).
+
+## Part 2: the install and the background jobs
+
+Extra config keys (the same file): `address` (https address of the repository), `label` (starts the jobs' names),
+`runnerConfig` (full path of the review runner's prepared `review.json`, whose `installRoot` is `<base>/install/orchestrate`),
+`extras` (full paths of the files and folders the runner config names: its claude program and hooks; the wiring and the budget module are the copy's own code, never extras. With the base `/Library/orchestrate` the runner config names the wiring exactly `"wiring": "/Library/orchestrate/install/orchestrate/modules/M4-workshop/launcher/review-wiring.mjs"`; for the budget module use the path of its file under the same `modules/` folder), and
+optionally `gitBin` (default `/usr/bin/git`) and `nodeBin` (default and advised: leave it out, so it is the node running the command; a node root may not run, such as a Homebrew one, is refused before any step; a `nodeBin` that is a link, not the program's own real file, is refused too, because the copy is made from the name). Each extra is named by its real file, not by a shortcut: a link, a missing file or a link inside a folder is refused at plan time, with no step run. Root reads the runner config through one handle, never through a link, and only if it is root's own and written by no one else; an error never shows a byte of it.
+When root runs `install` for real, the `runnerConfig` file must be root's own, written by no one else, with every folder above it root's too (root takes no orders from a file others could change). A `--dry-run` as you cannot judge that, so it prints a WARNING saying so. To put the file in place: `sudo install -o root -g wheel -m 0644 /dev/stdin /Library/<name>.json < ~/review.json` (use the real path from `runnerConfig`). The file is read once; the copy root installs is the text that was checked.
+Every name, path and layout rule comes from the launcher's own modules (`install-check.mjs`, `review-daemons.mjs`,
+`review-updater.mjs`); `install.test.mjs` pins the two copies it cannot import (the label rule, the updater's file set).
+
+| Command | What it does | Root? |
+|---|---|---|
+| `/usr/local/bin/node setup.mjs install --config <file> --dry-run` | prints every step (and every refusal, before any step) | no |
+| `sudo /usr/local/bin/node setup.mjs install` | makes the root-owned `install` folder, a root-owned copy of the updater's three files and of node, the seed (`updater.json`, `review.json`, the extras), then runs the updater's `--first` run, which builds the `.v-<commit>` copy and flips the link; then checks | yes |
+| `/usr/local/bin/node setup.mjs check-install --config <file> [--main <commit>]` | read only: the link is root's; the copy and every folder above it are root's alone; the commit stamp; **no access list on any install folder**; `review.json` names this copy and what it names exists | no |
+| `sudo /usr/local/bin/node setup.mjs daemons place` | writes the three job files into `/Library/LaunchDaemons` (root:wheel 0644, exactly what `review-daemons.mjs` builds) | yes |
+| `sudo /usr/local/bin/node setup.mjs daemons load` / `unload` | `launchctl bootstrap` / `bootout` for each job not yet loaded / loaded; load refuses unless the install check passes and the job files are there; a job loaded from an older file is taken out and loaded again (`load` records each file's fingerprint in `<base>/install/loaded-jobs.json`, root's); unload with nothing loaded is not an error | yes |
+| `/usr/local/bin/node setup.mjs daemons list` / `check` | read only: `list` shows loaded or not, state and last exit. `check` FAILs on: a job file wrong or missing; a leftover job file under another label; a job not loaded; a job loaded from an older file than the one on disk; a job whose last run did not end with exit 0. It cannot see a job loaded under an old label whose file is gone: `daemons unload` under the old label first. Changing the label, `review.json` or the owner's home folder needs `daemons unload`, the change, `place`, `load` | no |
+
+Root never runs code a user can write: the updater runs from a root-owned `install-work/bootstrap` copy with a root-owned
+copy of node. A plain folder where the copy's link belongs is refused, not replaced.
+
+Tests: `node --test orchestrate/setup/install.test.mjs`. They add a `launchctl` stand-in that refuses what the real one
+refuses (no root; a job file with the wrong owner or mode; loading twice; unloading what is not loaded; an unknown job is 113),
+run the real updater in a child process against a local folder standing in for GitHub, and run `launchctl print` for real.
 
 ### Tests
 

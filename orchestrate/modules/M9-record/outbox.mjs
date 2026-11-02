@@ -73,7 +73,7 @@
 import { createHash } from 'node:crypto';
 import { closeSync, fstatSync, lstatSync, openSync, readdirSync, readSync, realpathSync, constants } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
-import { CHECKLIST_LEVELS, OUTBOX_KINDS, SESSION_ID, VERDICT_CHECKLIST } from '../../shared/record.mjs';
+import { CHECKLIST_LEVELS, OUTBOX_KINDS, SESSION_ID, VERDICT_CHECKLIST, outboxKindOf } from '../../shared/record.mjs';
 import { REVIEW_ROLES } from '../../shared/review-roles.mjs';
 
 export { REVIEW_ROLES };
@@ -379,12 +379,8 @@ export const PASSES = Object.freeze({
   auditor: (v) => v?.pass === true && v.material === 0,
 });
 
-// The longest listed kind the name starts with (so `report-compact-x` is report-compact-, not report-).
-export function kindOf(name) {
-  let best = null;
-  for (const k of Object.keys(OUTBOX_KINDS)) if (name.startsWith(k) && name.length > k.length && (!best || k.length > best.length)) best = k;
-  return best;
-}
+// The longest listed kind the name starts with: one function, in record-names.mjs (the test stand-in reads it too).
+export const kindOf = outboxKindOf;
 
 export function readOutboxFile({ outboxRoot, uids = {}, tag, file }) {
   const given = typeof file === 'string' ? file : '';

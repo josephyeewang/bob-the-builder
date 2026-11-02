@@ -8,7 +8,7 @@ import { cleanupCopy, cleanupPass, ASK_ID, hashCopy, mirrorTree, ownCopy, STALE_
 import { createSaveWork } from '../M4-workshop/git/save-work.mjs';
 import { git as safeGit, callLog } from '../M4-workshop/git/safe-git.mjs';
 import { PR_FACT } from './merges.mjs';
-import { rulesWith, recWith, T0, MIN, iso } from './fixtures.test-helper.mjs';
+import { rulesWith, recWith, change, setClock, T0, MIN, iso } from './fixtures.test-helper.mjs';
 import { tempDir } from '../../shared/test-tmp.mjs';
 
 // Test set-up only: plain git with no user or machine config, in a throwaway folder. It never asks for a
@@ -44,12 +44,18 @@ function world() {
 
 const ASK = { decision: 'ask', tier: 2, reason: 'an unproven copy needs Joe' };
 const R = rulesWith({}, { delete_copy: ASK });
+// Joe's answers as M2 records them (channel, choice, approves).
+const YES = { channel: 'tap', choice: 'Yes', approves: true };
+const KEEP = { channel: 'tap', choice: 'No', approves: false };
 const locked = createSaveWork({ runLocked: (fn) => fn() }); // stands in for the lock-down runner
 
-function recFor(w, { attempt = {}, pr = {}, card = {} } = {}) {
+// The copy the record names for C-1 is on its worker launch (the card has no copy field, L72).
+const launchFor = (copy, id = 'L-1', at = T0 - 60 * MIN) => ['launch', id, { session_id: `S-${id}`, role: 'worker', card: 'C-1', head: 'a'.repeat(40), rev: 1, copy, launched_at: iso(at) }];
+function recFor(w, { attempt = {}, pr = {}, card = {}, copy = w.copy } = {}) {
   return recWith([
-    ['card', 'C-1', { state: 'merged', copy: w.copy, ...card }],
-    ...(attempt ? [['merge', 'M-1', { card: 'C-1', pr: 7, state: 'audited_ok', head_sha: w.H, merge_commit_sha: w.M, changed_at: iso(T0 - 10 * MIN), ...attempt }]] : []),
+    ['card', 'C-1', { state: 'merged', ...card }],
+    ...(copy ? [launchFor(copy)] : []),
+    ...(attempt ? [['merge', 'M-1', { card: 'C-1', pr: 7, state: 'audited_ok', judged_head: w.H, merge_commit: w.M, changed_at: iso(T0 - 10 * MIN), ...attempt }]] : []),
     ...(pr ? [['fact', PR_FACT(7), { state: 'closed', merged: true, merge_commit_sha: w.M, head_sha: w.H, observed_at: iso(T0 - 5 * MIN), ...pr }]] : []),
   ]);
 }
@@ -79,10 +85,20 @@ async function clean(w, rec, over = {}) {
   return { ...r, alerts, calls };
 }
 
+// Joe answers as M2 records it: the ask is shown first (open -> pushed), then answered (M9's ask moves).
+function answerAsk(rec, answer) {
+  for (const doc of [{ state: 'pushed' }, { state: 'answered', answer }]) {
+    const cur = rec.read('ask', ASK_ID('C-1'));
+    const r = rec.write({ actor: 'approvals', entity: 'ask', id: ASK_ID('C-1'), expectRev: cur.rev, doc: { ...cur.doc, ...doc } });
+    assert.equal(r.ok, true, `the ask ${doc.state}: ${r.reason}`);
+  }
+}
 const theAsk = (rec) => rec.read('ask', ASK_ID('C-1'))?.doc ?? null;
 function assertSealed(rec) {
   const a = theAsk(rec);
-  assert.equal(a.kind, 'delete_copy');
+  // M2's yes/no tap, for deleting the copy (L74: only approvals writes asks).
+  assert.equal(a.kind, 'tap_yes_no');
+  assert.equal(a.purpose, 'delete_copy');
   assert.equal(a.state, 'open');
   assert.equal(a.tier, 2);
   assert.ok(existsSync(a.sealed.path));
@@ -118,7 +134,7 @@ test('M12 case 2 / m15: PR open or the merge not yet audited -> kept, no bundle 
 
 test('M12 case 3: PR closed unmerged -> sealed and asked; nothing deleted', async () => {
   const w = world();
-  const rec = recFor(w, { attempt: { state: 'refused', reason: 'interrupted', merge_commit_sha: null }, pr: { state: 'closed', merged: false, merge_commit_sha: null }, card: { state: 'closed' } });
+  const rec = recFor(w, { attempt: { state: 'refused', reason: 'interrupted', merge_commit: null }, pr: { state: 'closed', merged: false, merge_commit_sha: null }, card: { state: 'closed' } });
   const r = await clean(w, rec);
   assert.equal(r.result, 'asked');
   assert.ok(existsSync(w.copy));
@@ -212,7 +228,7 @@ test('M12 case 8: the record says merged but the PR fact or the mirror says not 
   w3.run(['update-ref', 'refs/heads/main', w3.B], w3.mirror);
   assert.match((await clean(w3, recFor(w3))).reasons.join(), /not on the mirror's main/);
   const w4 = world();
-  assert.match((await clean(w4, recFor(w4, { attempt: { merge_commit_sha: null } }))).reasons.join(), /names no merge commit/);
+  assert.match((await clean(w4, recFor(w4, { attempt: { merge_commit: null } }))).reasons.join(), /names no merge commit/);
 });
 
 test("M12 (e): a folder that is not this card's copy is never bundled, sealed or deleted", async () => {
@@ -225,7 +241,7 @@ test("M12 (e): a folder that is not this card's copy is never bundled, sealed or
   assert.equal(r.calls.length, 0);
   assert.ok(existsSync(elsewhere));
   const w2 = world();
-  const r2 = await clean(w2, recFor(w2, { card: { copy: join(w2.dir, 'other') } }));
+  const r2 = await clean(w2, recFor(w2, { copy: join(w2.dir, 'other') }));
   assert.equal(r2.result, 'refused');
   assert.match(r2.reasons.join(), /another copy/);
   assert.ok(existsSync(w2.copy));
@@ -242,7 +258,7 @@ test("the ask: one per copy; Joe's answer is acted on once; a refusal to ask kee
   assert.equal(again.result, 'kept');
   assert.equal(again.calls.length, 0, 'no second bundle while the ask is open');
   const cur = rec.read('ask', ASK_ID('C-1'));
-  assert.equal(rec.write({ actor: 'approvals', entity: 'ask', id: ASK_ID('C-1'), expectRev: cur.rev, doc: { ...cur.doc, state: 'answered', answer: 'delete' } }).ok, true, 'the answer is recorded');
+  answerAsk(rec, YES);
   // audit: a "delete" is acted on only when the rules count it as Joe's approval
   assert.equal((await clean(w, rec, { rules: rulesWith({}, { count_approval: { decision: 'deny', reason: 'not counted' } }) })).result, 'refused');
   assert.ok(existsSync(w.copy));
@@ -255,7 +271,7 @@ test("the ask: one per copy; Joe's answer is acted on once; a refusal to ask kee
   const rec2 = recFor(w2);
   await clean(w2, rec2);
   const c2 = rec2.read('ask', ASK_ID('C-1'));
-  assert.equal(rec2.write({ actor: 'approvals', entity: 'ask', id: ASK_ID('C-1'), expectRev: c2.rev, doc: { ...c2.doc, state: 'answered', answer: 'keep' } }).ok, true, 'the answer is recorded');
+  answerAsk(rec2, KEEP);
   assert.equal((await clean(w2, rec2)).result, 'kept');
   assert.ok(existsSync(w2.copy));
   const later = await clean(w2, rec2);
@@ -335,20 +351,19 @@ test('audit 0b-6 r2 MAT-5 / MAT-8 (C2): any answer but delete keeps the copy wit
   for (const answer of ['no', 'not yet', '']) {
     const w = world();
     writeFileSync(join(w.copy, 'a.txt'), 'changed\n');
-    const rec = recFor(w, { card: { changed_at: iso(T0 - 20 * MIN) } });
+    const rec = recFor(w);
     await clean(w, rec);
-    const a = rec.read('ask', ASK_ID('C-1'));
-    assert.equal(rec.write({ actor: 'approvals', entity: 'ask', id: ASK_ID('C-1'), expectRev: a.rev, doc: { ...a.doc, state: 'answered', answer } }).ok, true, 'the answer is recorded');
+    answerAsk(rec, answer);
     assert.equal((await clean(w, rec)).result, 'kept', answer);
     const later = await clean(w, rec);
     assert.deepEqual([later.result, later.calls.length], ['kept', 0], `${JSON.stringify(answer)}: not bundled or asked again`);
     assert.equal(theAsk(rec).state, 'consumed');
-    // the card moves: the copy is looked at, and asked about, again
-    const c = rec.read('card', 'C-1');
-    rec.write({ actor: 'dispatcher', entity: 'card', id: 'C-1', expectRev: c.rev, doc: { ...c.doc, changed_at: iso(T0 - MIN) } });
+    // the card changes (the Record stamps it later by its own clock): the copy is looked at, and asked about, again
+    setClock(rec, T0 + MIN);
+    change(rec, 'card', 'C-1', { needs_joe: true });
     const moved = await clean(w, rec);
     assert.ok(moved.calls.length > 0, `${JSON.stringify(answer)}: bundled again after the card moved`);
-    assert.equal(theAsk(rec).state, 'open');
+    assert.equal(rec.read('ask', `${ASK_ID('C-1')}-2`)?.doc.state, 'open', 'asked anew under the next id');
     assert.ok(existsSync(w.copy));
   }
 });
@@ -387,9 +402,9 @@ test("audit 0b-6 r3 MIN-5 (J7): Joe's delete is refused when the record now name
   const rec = recFor(w);
   await clean(w, rec);
   const cur = rec.read('ask', ASK_ID('C-1'));
-  assert.equal(rec.write({ actor: 'approvals', entity: 'ask', id: ASK_ID('C-1'), expectRev: cur.rev, doc: { ...cur.doc, state: 'answered', answer: 'delete' } }).ok, true, 'the answer is recorded');
-  const c = rec.read('card', 'C-1');
-  rec.write({ actor: 'dispatcher', entity: 'card', id: 'C-1', expectRev: c.rev, doc: { ...c.doc, copy: join(w.dir, 'another') } });
+  answerAsk(rec, YES);
+  const [, lid, ldoc] = launchFor(join(w.dir, 'another'), 'L-2', T0 - MIN);
+  assert.equal(rec.write({ actor: 'dispatcher', entity: 'launch', id: lid, expectRev: 0, doc: ldoc }).ok, true, 'a newer launch names another copy');
   const r = await clean(w, rec, { rules: COUNTED });
   assert.equal(r.result, 'refused');
   assert.match(r.reasons.join(' '), /record names another copy/);

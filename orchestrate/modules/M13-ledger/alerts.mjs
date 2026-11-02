@@ -96,7 +96,13 @@ export function fakeIssues() {
     async edit(i, body) { issues.get(i).body = body; calls.push(['edit', i]); },
     async comment(i, text) { issues.get(i).comments.push(text); calls.push(['comment', i]); },
     async close(i, text) { const x = issues.get(i); x.closed = true; x.comments.push(text); calls.push(['close', i]); },
-    async isClosed(i) { return issues.get(i)?.closed ?? true; },
+    // Strict, as GitHub would be (#98 r1 m2, Principle 10): asking about an issue that was never opened, or about
+    // something that is not an issue number, is a caller's bug, so it throws rather than answering "closed".
+    async isClosed(i) {
+      if (!Number.isSafeInteger(i) || i <= 0) throw new Error(`fakeIssues.isClosed: not an issue number: ${JSON.stringify(i)}`);
+      if (!issues.has(i)) throw new Error(`fakeIssues.isClosed: no issue ${i}`);
+      return issues.get(i).closed;
+    },
     ownerCloses(i) { issues.get(i).closed = true; },
   };
 }
