@@ -6,8 +6,12 @@
 //   a module's own helper named in `helpers` (writer.mjs's get( and num(), called bare, and
 //   need(rules, KEYS.x / minutes(rules, KEYS.x, the Dispatcher's readers, with KEYS.x looked up in `keyMaps` (M11's KEYS).
 //   The rules may be reached through a path ending in `rules` (ctx.rules, this.rules?.): #68 reads
-//   timeouts.merging_open_max_min in M6 gate.mjs as minutes(ctx.rules, KEYS.x (#77 r6 MAT-1). Any other need( or
-//   minutes( call (another first argument, or a key that is not KEYS.<a name in the map>) is counted in nonLiteral.
+//   timeouts.merging_open_max_min in M6 gate.mjs as minutes(ctx.rules, KEYS.x (#77 r6 MAT-1). A need( or minutes(
+//   call, also written `need (`, `need?.(` or as a method `x.need(`, whose first argument is not the rules or whose
+//   key is not <a map in keyMaps>.<a name in it> is counted in nonLiteral (L156 m-1). What this text reader can't see:
+//   the readers imported under another name (`import { need as n }`), or passed as a value and called later
+//   (`const f = need; f(rules, KEYS.x)`). Neither is written in Orchestrate today; a review of such a change must
+//   add the name here.
 // The key is a literal in any quote kind, or a name bound in the same file by `const NAME = <literal>;`. A template key's
 // ${…} is expanded: ${state} over the product states, ${kind} over the go-free kinds (goFreeOn's
 // `${GO_FREE_KEY}.${kind}`, L123), and a const name to its value. Anything else is counted in nonLiteral, so a key the
@@ -59,7 +63,7 @@ export function rulesReads(text, { helpers = [], keyMaps = {} } = {}) {
   }
   // The Dispatcher's readers: need(rules, KEYS.x …) and minutes(rules, KEYS.x …), the rules as above. A call with any
   // other first argument can't be named, so it counts as unreadable rather than being skipped (#77 r6 MAT-1).
-  for (const m of src.matchAll(/(?<![\w$.])(?:need|minutes)\(\s*/g)) {
+  for (const m of src.matchAll(/(?<![\w$])(?:need|minutes)\s*(?:\?\.)?\(\s*/g)) {
     const arg = new RegExp(String.raw`^${RULES}\s*,\s*`).exec(src.slice(m.index + m[0].length));
     if (!arg) { nonLiteral += 1; continue; }
     const ref = new RegExp(String.raw`^(${NAME})\.(${NAME})\s*[,)]`).exec(src.slice(m.index + m[0].length + arg[0].length));
