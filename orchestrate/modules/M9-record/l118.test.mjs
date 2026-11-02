@@ -17,22 +17,22 @@ const rewrite = (env, actor, entity, id, fields) => {
   const cur = env.record.read(entity, id);
   return env.record.write({ actor, entity, id, expectRev: cur.rev, doc: { ...cur.doc, ...fields } });
 };
-const refusedAsNotCreator = (r, where) => { assert.equal(r.ok, false, where); assert.match(r.reason, /only sensors may change fact|only lead:L-1 may change handoff/, where); };
+const refusedAsNotCreator = (r, where) => { assert.equal(r.ok, false, where); assert.match(r.reason, /only sensors may change fact|was created by sensors|only lead:L-1 may change handoff/, where); };
 
 for (const forger of FORGERS) {
   test(`forgery: ${forger} turns a Sensors undo_issue authenticated, and no exact_reverse card follows`, () => {
     const env = setup({ prefix: 'm9-l118-' }); product(env);
-    must(env.record.write({ actor: 'sensors', entity: 'fact', id: 'F-u', expectRev: 0, doc: { type: 'undo_issue', authenticated: false } }));
-    refusedAsNotCreator(rewrite(env, forger, 'fact', 'F-u', { authenticated: true }), forger);
-    assert.equal(env.record.read('fact', 'F-u').doc.authenticated, false);
-    const c = env.record.write({ actor: 'dispatcher', entity: 'card', id: 'U-1', expectRev: 0, doc: { state: 'draft', product: PRODUCT, kind: 'exact_reverse', source: { fact: 'F-u' }, ...plan() } });
+    must(env.record.write({ actor: 'sensors', entity: 'fact', id: 'undo-issue-1', expectRev: 0, doc: { type: 'undo_issue', authenticated: false } }));
+    refusedAsNotCreator(rewrite(env, forger, 'fact', 'undo-issue-1', { authenticated: true }), forger);
+    assert.equal(env.record.read('fact', 'undo-issue-1').doc.authenticated, false);
+    const c = env.record.write({ actor: 'dispatcher', entity: 'card', id: 'U-1', expectRev: 0, doc: { state: 'draft', product: PRODUCT, kind: 'exact_reverse', source: { fact: 'undo-issue-1' }, ...plan() } });
     assert.equal(c.ok, false, 'an unauthenticated undo_issue makes no exact_reverse card');
   });
   test(`forgery: ${forger} turns a Sensors audit_run failure into success`, () => {
     const env = setup({ prefix: 'm9-l118-' });
-    must(env.record.write({ actor: 'sensors', entity: 'fact', id: 'audit-1', expectRev: 0, doc: { type: 'audit_run', commit: 'a'.repeat(40), conclusion: 'failure' } }));
-    refusedAsNotCreator(rewrite(env, forger, 'fact', 'audit-1', { conclusion: 'success' }), forger);
-    assert.equal(env.record.read('fact', 'audit-1').doc.conclusion, 'failure');
+    must(env.record.write({ actor: 'sensors', entity: 'fact', id: 'audit-run-1', expectRev: 0, doc: { type: 'audit_run', commit: 'a'.repeat(40), conclusion: 'failure' } }));
+    refusedAsNotCreator(rewrite(env, forger, 'fact', 'audit-run-1', { conclusion: 'success' }), forger);
+    assert.equal(env.record.read('fact', 'audit-run-1').doc.conclusion, 'failure');
   });
   test(`forgery: ${forger} turns a Sensors start-gate vercel fact true`, () => {
     const env = setup({ prefix: 'm9-l118-' });
@@ -52,12 +52,15 @@ test('forgery: the dispatcher rewrites a handoff the Lead wrote', () => {
 
 test('the creator still updates its own fact and handoff', () => {
   const env = setup({ prefix: 'm9-l118-' });
+  // Each in one of its own families (FACT_FAMILIES, #68).
+  const OWN = { sensors: 'pr-1', dispatcher: 'outage', workshop: 'push.x', ledger: 'alert-1' };
   for (const actor of ['sensors', ...FORGERS]) {
-    must(env.record.write({ actor, entity: 'fact', id: `own-${actor}`, expectRev: 0, doc: { n: 1 } }), `${actor} create`);
-    must(rewrite(env, actor, 'fact', `own-${actor}`, { n: 2 }), `${actor} update`);
+    must(env.record.write({ actor, entity: 'fact', id: OWN[actor], expectRev: 0, doc: { n: 1 } }), `${actor} create`);
+    must(rewrite(env, actor, 'fact', OWN[actor], { n: 2 }), `${actor} update`);
   }
-  must(env.record.write({ actor: 'dispatcher', entity: 'handoff', id: 'handoff-L-9', expectRev: 0, doc: { session: 'L-9', text: 'a' } }));
-  must(rewrite(env, 'dispatcher', 'handoff', 'handoff-L-9', { text: 'b' }), 'the dispatcher rewrites its own restart handoff');
+  // A handoff is create-only for the Lead and learning, and the Dispatcher has no handoff row (L129), so no handoff
+  // is ever updated.
+  assert.equal(env.record.write({ actor: 'dispatcher', entity: 'handoff', id: 'handoff-L-9', expectRev: 0, doc: { session: 'L-9', text: 'a' } }).ok, false);
 });
 
 test('the real Sensors and Ledger fact writers run on one real Record: every write lands, and no fact id has two writers', async () => {

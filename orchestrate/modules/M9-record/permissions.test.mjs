@@ -3,7 +3,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { ENTITIES, REQUIRED_FIELDS, SCRIPT_ACTORS } from '../../shared/record.mjs';
-import { CARD_CREATORS, WRITERS, fieldsAllowed, mayCreateKind } from './permissions.mjs';
+import { CARD_CREATORS, FACT_FAMILIES, WRITERS, fieldsAllowed, mayCreateKind } from './permissions.mjs';
 import { HEAD, PRODUCT, iso, seed, setup } from './fixtures.test-helper.mjs';
 
 const ACTORS = SCRIPT_ACTORS.filter((a) => a !== 'joe');
@@ -27,10 +27,15 @@ test('create: only the listed script actors may create each entity', () => {
   for (const entity of ENTITIES) {
     if (entity === 'card' || entity === 'merge_request') continue;   // card kinds and merge requests: their own tests
     for (const actor of ACTORS) {
-      const id = entity === 'product' ? PRODUCT : `${entity}-${n++}`;
+      // A fact goes in the actor's own family (L74); an actor with none can create no fact (families.test.mjs).
+      const fam = entity === 'fact' ? FACT_FAMILIES[actor]?.[0] : undefined;
+      const id = entity === 'product' ? PRODUCT : entity === 'fact' && fam ? (/[-.]$/.test(fam) ? `${fam}${n++}` : fam) : `${entity}-${n++}`;
       const r = env.record.write({ actor, entity, id, expectRev: 0, doc: minimal(entity, env) });
       const listed = fieldsAllowed(entity, actor, { create: true }) !== null;
-      if (listed) {
+      if (listed && entity === 'fact' && !fam) {
+        assert.equal(r.ok, false, `${actor} has no fact family`);
+        assert.match(r.reason, /in no family/, `${entity} as ${actor}`);
+      } else if (listed) {
         if (!r.ok) assert.doesNotMatch(r.reason, /may not create/, `${entity} as ${actor}: ${r.reason}`);
         if (r.ok && entity === 'product') seed(env, 'product', PRODUCT, { state: 'active' });
       } else {

@@ -2,9 +2,11 @@
 // reader is M10's rules-reads.test-helper.mjs, the one M2's and M9's tests share (L123), so it sees every read form:
 // get/num/dec/flag, plain or ?., a gather-style get( helper, and the Dispatcher's need(rules, KEYS.x / minutes(rules,
 // KEYS.x, the rules reached directly or through a path ending in rules (#68 reads the merge time limit in gate.mjs as
-// minutes(ctx.rules, KEYS.x, #77 r6 MAT-1); any other need( or minutes( call fails as unreadable). It runs over every M6 source file but the generated
-// checker bundle, whose code is each source module's own, tested where it lives. Every rules key read must be listed,
-// every listed key must be read, and a read whose key can't be named fails.
+// minutes(ctx.rules, KEYS.x, #77 r6 MAT-1). A need( or minutes( call it can't name (also `need?.(`, `x.need(`) fails as
+// unreadable; the helper's header says what a text reader can't see (an aliased import, the reader passed as a
+// value). It runs over every M6 source file but the generated checker bundle, whose code is each source module's own,
+// tested where it lives. Every rules key read must be listed, every listed key must be read, and a read whose key
+// can't be named fails.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, readdirSync } from 'node:fs';
@@ -64,12 +66,17 @@ test('the reader catches a new read in any M6 file, in every form, and a key it 
   assert.ok(k68, 'an M11 key the gate does not list');
   // #68's real call reaches the rules through ctx (gate.mjs: minutes(ctx.rules, KEYS.mergingOpenMaxMin, …), #77 r6 MAT-1).
   for (const call of [`minutes(rules, KEYS.${k68[0]}, { product })`, `need(rules, KEYS.${k68[0]})`,
-    `minutes(ctx.rules, KEYS.${k68[0]}, { product: ctx.product })`, `need(this.rules, KEYS.${k68[0]})`, `minutes(ctx?.rules, KEYS.${k68[0]})`]) {
+    `minutes(ctx.rules, KEYS.${k68[0]}, { product: ctx.product })`, `need(this.rules, KEYS.${k68[0]})`, `minutes(ctx?.rules, KEYS.${k68[0]})`,
+    // L156 m-1: a space before the bracket, an optional call, a method call.
+    `need (rules, KEYS.${k68[0]})`, `minutes?.(rules, KEYS.${k68[0]})`, `d.need(rules, KEYS.${k68[0]})`]) {
     assert.deepEqual(unlisted(plant('gate.mjs', `const t = ${call};`).keys), [k68[1]], call);
   }
   for (const [file, line] of [['gather.mjs', 'const x = get(KEY);'], ['gate.mjs', 'const t = minutes(rules, KEYS.noSuchKey);'],
     ['gate.mjs', 'const t = need(rules, key);'], ['gate.mjs', 'const t = minutes(ctx.config, KEYS.cancelGraceMin);'],
-    ['gate.mjs', 'const t = need(r, KEYS.cancelGraceMin);'], ['gate.mjs', 'const t = minutes(ctx.rules, KEYS.noSuchKey);'], ['undo.mjs', 'const x = rules.num(`caps.${what}`, { product });']]) {
+    ['gate.mjs', 'const t = need(r, KEYS.cancelGraceMin);'], ['gate.mjs', 'const t = minutes(ctx.rules, KEYS.noSuchKey);'],
+    // L156 m-1 and c-a: the same unnamed reads in the other spellings, and a key map the reader is not given.
+    ['gate.mjs', 'const t = need (rules, key);'], ['gate.mjs', 'const t = need?.(rules, key);'], ['gate.mjs', 'const t = d.minutes(r, KEYS.cancelGraceMin);'],
+    ['gate.mjs', 'const t = need(rules, OTHER.cancelGraceMin);'], ['undo.mjs', 'const x = rules.num(`caps.${what}`, { product });']]) {
     assert.equal(plant(file, line).nonLiteral, 1, `${file}: ${line}`);
   }
   // m-1: a key inside a listed map that is not the go-free map is not covered by that map.

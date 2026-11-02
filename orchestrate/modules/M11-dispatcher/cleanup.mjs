@@ -2,17 +2,18 @@
 //
 // The Merge Gate always squash-merges, so "the branch head is on main" proves nothing. A copy is
 // deleted only when all five hold:
-//   (a) the record's merge attempt has an audit result (audited_ok or audit_flagged, m15), names a
-//       merge_commit_sha, and the PR fact agrees;
+//   (a) the record's merge attempt (M6's merge document) has an audit result (audited_ok or audit_flagged,
+//       m15), names a merge_commit, and Sensors' PR fact agrees;
 //   (b) that commit is on the mirror's main;
 //   (c) a fresh "save unsaved work" bundle, written inside the lock-down just now, has its head
-//       equal to the attempt's head_sha (no extra commit), and the copy's files match that head's
+//       equal to the attempt's judged_head (no extra commit), and the copy's files match that head's
 //       tree (no uncommitted edit);
 //   (d) the bundle carries only refs/heads/<card branch>;
 //   (e) the folder is this card's copy.
 // Not proven -> the bundle is sealed (moved to an orchestrate-owned folder, read-only, sha256 in the
-// record) and rules.may('delete_copy') gives an ask, recorded as an `ask` entry with kind
-// delete_copy. Still in flight (PR open, merge not yet audited) -> the copy is kept, untouched.
+// record) and rules.may('delete_copy') gives an ask, made by M2 (createAsk: only approvals writes asks, L74) as a
+// yes/no tap with purpose delete_copy (Yes = delete). Still in flight (PR open, merge not yet audited) -> the copy is
+// kept, untouched.
 //
 // Delete is a plain folder delete. No git command here has its working folder inside a copy: the
 // mirror is read with GIT_DIR set to the mirror, and the copy's files are hashed in Node. The one
@@ -26,6 +27,9 @@ import { readBundleHeader } from '../M4-workshop/git/push.mjs';
 import { isProtectedName } from '../M4-workshop/launcher/worker-copy.mjs';
 import { PR_FACT } from './merges.mjs';
 import { note } from './moves.mjs';
+import { createAsk } from '../M2-approvals/binding.mjs';
+import { consumeAsk } from '../M2-approvals/ask-store.mjs';
+import { sensorsFact } from './sensor-facts.mjs';
 
 export const ASK_ID = (card) => `delete-copy-${card}`;
 export const CLEANUP_FACT = (card) => `cleanup-${card}`;
@@ -38,12 +42,36 @@ const iso = (ms) => new Date(ms).toISOString();
 const st = (p) => { try { return lstatSync(p); } catch { return null; } };
 const inside = (root, p) => !!p && (resolve(p) === resolve(root) || resolve(p).startsWith(resolve(root) + sep));
 
-/** The card's newest merge attempt (by changed_at), or null. */
+/** The card's newest merge attempt (by the gate's requested_at, then the Record's own time), or null. */
 export function latestAttempt(rec, card) {
   const mine = rec.list('merge').filter((m) => m.doc.card === card);
-  mine.sort((x, y) => (Date.parse(y.doc.changed_at ?? '') || 0) - (Date.parse(x.doc.changed_at ?? '') || 0));
+  const at = (m) => Date.parse(m.doc.requested_at ?? '') || Date.parse(rec.meta?.('merge', m.id)?.ts ?? '') || 0;
+  mine.sort((x, y) => at(y) - at(x));
   return mine[0] ?? null;
 }
+
+// Sensors' reading of a pull request: proof only from Sensors' own family, made by Sensors (L74 addendum).
+function prFact(rec, n) {
+  if (n == null) return null;
+  return sensorsFact(rec, PR_FACT(n), 'pr-')?.doc ?? null;
+}
+// The card's newest delete-copy ask: a yes/no ask M2 made for this purpose (its id delete-copy-<card>[-n]).
+function copyAsks(rec, card) {
+  return rec.list('ask').filter((a) => (a.id === ASK_ID(card) || a.id.startsWith(`${ASK_ID(card)}-`)) && a.doc?.purpose === 'delete_copy' && a.doc.card === card
+    && (rec.meta?.('ask', a.id)?.createdBy ?? 'approvals') === 'approvals');
+}
+export function copyAsk(rec, card) {
+  const n = (a) => (a.id === ASK_ID(card) ? 1 : Number(a.id.slice(ASK_ID(card).length + 1)) || 0);
+  return copyAsks(rec, card).sort((x, y) => n(y) - n(x))[0] ?? null;
+}
+function copyAskId(rec, card) {
+  let i = 1;
+  const taken = (id) => !!rec.read('ask', id);
+  while (taken(i === 1 ? ASK_ID(card) : `${ASK_ID(card)}-${i}`)) i++;
+  return i === 1 ? ASK_ID(card) : `${ASK_ID(card)}-${i}`;
+}
+// When the card last changed, by the Record's clock: a kept copy is asked about again only after that.
+const cardChange = (rec, card) => rec.meta?.('card', card)?.ts ?? null;
 
 /**
  * What to do with a card's copy before any bundle is made: 'keep' (still in flight), 'check'
@@ -51,7 +79,7 @@ export function latestAttempt(rec, card) {
  */
 export function stage(rec, card) {
   const a = latestAttempt(rec, card);
-  const pr = a?.doc?.pr != null ? rec.read('fact', PR_FACT(a.doc.pr))?.doc : null;
+  const pr = prFact(rec, a?.doc?.pr);
   if (a && AUDITED.includes(a.doc.state)) return 'check';
   if (a && IN_FLIGHT.includes(a.doc.state)) return 'keep';
   if (pr && pr.merged !== true && pr.state === 'closed') return 'ask';
@@ -112,18 +140,22 @@ export async function cleanupCopy({ rec, rules, now, card, copiesRoot, sealRoot,
   if (!CARD.test(String(card))) return done('refused', ['bad card id']);
   const copy = join(copiesRoot, card);
   const cardDoc = rec.read('card', card)?.doc;
-  const ask = rec.read('ask', ASK_ID(card));
+  // The copy the record names for the card is on its newest worker launch (`copy`, from the launch port): the card
+  // itself has no copy field (L72 census), so no script could write one there.
+  const named = cardDoc ? { ...cardDoc, copy: namedCopy(rec, card) } : null;
+  const ask = copyAsk(rec, card);
 
-  // An ask already answered: act on Joe's answer, once.
+  // An ask already answered: act on Joe's answer, once. The ask is approvals' (M2): it is closed through M2's own
+  // writer (L74), never written as the Dispatcher. Yes is delete.
   if (ask && ask.doc.state === 'answered') {
-    const del = ask.doc.answer === 'delete';
-    const consume = (extra = {}) => rec.write({ actor: 'dispatcher', entity: 'ask', id: ASK_ID(card), expectRev: ask.rev,
-      doc: { ...ask.doc, state: 'consumed', consumed_at: iso(now), kept_at_card_change: cardDoc?.changed_at ?? null, ...extra }, kind: 'ask_consumed' });
+    const del = ask.doc.answer?.choice === 'Yes' && ask.doc.answer?.approves === true;
+    // Through M2's consumeAsk (lane 3 m-3, #72): no module outside M2 writes an ask itself.
+    const consume = (extra = {}) => consumeAsk({ record: rec, now: () => now }, ask.id, { kept_at_card_change: cardChange(rec, card), ...extra });
     if (!del) { consume(); return done('kept', ['Joe said keep']); }
     // A delete needs an answer M2 counted, as the undo tap does (audit MIN-5).
     const counted = rules.may('count_approval', { ask: { id: ASK_ID(card), ...ask.doc } });
     if (counted.decision !== 'allow') return done('refused', [`the delete answer was not counted: ${counted.reason}`]);
-    const own = ownCopy(copy, copiesRoot, card, cardDoc);
+    const own = ownCopy(copy, copiesRoot, card, named);
     consume(own.ok ? {} : { not_deleted: own.reason });
     if (!own.ok) return done('refused', [`Joe said delete, but ${own.reason}`]); // audit MIN-6
     rmSync(copy, { recursive: true, force: true });
@@ -132,7 +164,7 @@ export async function cleanupCopy({ rec, rules, now, card, copiesRoot, sealRoot,
   if (ask && ['open', 'pushed'].includes(ask.doc.state)) return { result: 'kept', reasons: ['waiting on the delete-copy ask'] };
   // Any answer but delete keeps it (audit 0b-6 r2 MAT-5, as the README says): the copy is left alone until
   // the card moves again (audit MAT-9), never re-asked each pass.
-  if (ask && ask.doc.state === 'consumed' && ask.doc.answer !== 'delete' && ask.doc.kept_at_card_change === (cardDoc?.changed_at ?? null)) {
+  if (ask && ask.doc.state === 'consumed' && ask.doc.answer?.choice !== 'Yes' && ask.doc.kept_at_card_change === cardChange(rec, card)) {
     return { result: 'kept', reasons: ['Joe said keep'] };
   }
 
@@ -140,7 +172,7 @@ export async function cleanupCopy({ rec, rules, now, card, copiesRoot, sealRoot,
   if (what === 'keep') return { result: 'kept', reasons: ['the card is still in flight'] };
 
   // (e) first: never bundle or seal a folder that is not this card's copy.
-  const own = ownCopy(copy, copiesRoot, card, cardDoc);
+  const own = ownCopy(copy, copiesRoot, card, named);
   if (!own.ok) return done('refused', [own.reason]);
 
   const branch = `card/${card.toLowerCase()}`;
@@ -164,16 +196,16 @@ export async function cleanupCopy({ rec, rules, now, card, copiesRoot, sealRoot,
   if (what === 'ask') reasons.push('the card ended without a merge');
   else {
     const a = latestAttempt(rec, card).doc;
-    const pr = rec.read('fact', PR_FACT(a.pr))?.doc;
-    // (a)
-    if (!SHA.test(String(a.merge_commit_sha))) reasons.push('the merge attempt names no merge commit');
-    else if (pr?.merged !== true || pr.merge_commit_sha !== a.merge_commit_sha) reasons.push('the PR fact does not agree the merge happened');
+    const pr = prFact(rec, a.pr);
+    // (a) The gate's merge document: merge_commit and the judged head (M6's names).
+    if (!SHA.test(String(a.merge_commit))) reasons.push('the merge attempt names no merge commit');
+    else if (pr?.merged !== true || pr.merge_commit_sha !== a.merge_commit) reasons.push('the PR fact does not agree the merge happened');
     // (b)
-    else if ((await git(['merge-base', '--is-ancestor', a.merge_commit_sha, 'refs/heads/main'], { gitDir: mirror, purpose: 'cleanup-on-main' })).code !== 0) reasons.push("the merge commit is not on the mirror's main");
+    else if ((await git(['merge-base', '--is-ancestor', a.merge_commit, 'refs/heads/main'], { gitDir: mirror, purpose: 'cleanup-on-main' })).code !== 0) reasons.push("the merge commit is not on the mirror's main");
     // (c)
-    if (head && head !== a.head_sha) reasons.push(`the copy has commits after the merged head (${head.slice(0, 12)})`);
+    if (head && head !== a.judged_head) reasons.push(`the copy has commits after the merged head (${head.slice(0, 12)})`);
     else if (head) {
-      const tree = await mirrorTree(git, mirror, a.head_sha);
+      const tree = await mirrorTree(git, mirror, a.judged_head);
       if (!tree) reasons.push('the merged head is not in the mirror');
       else if (!sameFiles(hashCopy(copy), tree)) reasons.push('the copy has edits that were never committed');
     }
@@ -187,26 +219,38 @@ export async function cleanupCopy({ rec, rules, now, card, copiesRoot, sealRoot,
   } finally { rmSync(staging, { recursive: true, force: true }); }
   const d = rules.may('delete_copy', { card, copy, reasons });
   if (d.decision === 'deny') {
-    alert(`card ${card}: its copy could not be proven safe to delete and the rules refuse to ask (${d.reason}); it is kept`);
-    return done('kept', [...reasons, `rules: ${d.reason}`]);
+    // A notice only: the copy is kept either way and the next cleanup asks again; a lost one is in the reasons (L130 m10).
+    const said = alert(`card ${card}: its copy could not be proven safe to delete and the rules refuse to ask (${d.reason}); it is kept`) !== false;
+    return done('kept', [...reasons, `rules: ${d.reason}`, ...(said ? [] : ['not told: the alert could not be queued'])]);
   }
-  // Even an "allow" is never a delete here: an unproven copy is only deleted on Joe's answer.
-  const w = rec.write({ actor: 'dispatcher', entity: 'ask', id: ASK_ID(card), expectRev: ask?.rev ?? 0, kind: 'ask',
-    doc: { state: 'open', kind: 'delete_copy', card, copy, reasons, sealed, tier: d.tier ?? 2, rules_rev: d.rev ?? null, asked_at: iso(now) } });
+  // Even an "allow" is never a delete here: an unproven copy is only deleted on Joe's answer. The ask is M2's (only
+  // approvals writes asks, L74): a yes/no tap, Yes = delete. An ask already closed for this card is asked anew under
+  // the card's next change, under the next free id (delete-copy-<card>, then -2, -3 ...).
+  const w = createAsk({ record: rec, product: cardDoc?.product ?? null, now: () => now }, {
+    id: copyAskId(rec, card), kind: 'tap_yes_no', card,
+    title: `Delete the work copy of card ${card}? It could not be proven safe: ${reasons.join('; ')}`, tier: d.tier ?? 2,
+    extra: { purpose: 'delete_copy', copy, reasons, sealed, rules_rev: d.rev ?? null } });
   if (!w.ok) return done('refused', [...reasons, `the ask was not recorded: ${w.reason}`]);
   return done('asked', reasons);
 }
 
-/** (e) The folder is copiesRoot/<card>, a real folder, and the one the record names for the card. */
-export function ownCopy(copy, copiesRoot, card, cardDoc) {
+// The copy folder the newest worker launch for the card names, or null when no launch names one.
+function namedCopy(rec, card) {
+  const mine = rec.list('launch').filter((l) => l.doc?.card === card && l.doc.role === 'worker')
+    .sort((a, b) => String(b.doc.launched_at ?? '').localeCompare(String(a.doc.launched_at ?? '')));
+  return mine[0]?.doc?.copy ?? null;
+}
+
+/** (e) The folder is copiesRoot/<card>, a real folder, and the one the record names for the card (`named.copy`). */
+export function ownCopy(copy, copiesRoot, card, named) {
   const s = st(copy);
   if (!s) return { ok: false, reason: 'no copy folder' };
   if (s.isSymbolicLink() || !s.isDirectory()) return { ok: false, reason: 'the copy is not a real folder' };
   let real;
   try { real = realpathSync(copy); } catch { return { ok: false, reason: 'the copy folder is unreadable' }; }
   if (real !== join(realpathSync(copiesRoot), card)) return { ok: false, reason: 'the copy folder is not this card\'s' };
-  if (!cardDoc) return { ok: false, reason: 'the card is not in the record' };
-  if (cardDoc.copy != null && resolve(cardDoc.copy) !== resolve(copy)) return { ok: false, reason: 'the record names another copy for this card' };
+  if (!named) return { ok: false, reason: 'the card is not in the record' };
+  if (named.copy != null && resolve(named.copy) !== resolve(copy)) return { ok: false, reason: 'the record names another copy for this card' };
   return { ok: true };
 }
 

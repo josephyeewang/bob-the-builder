@@ -1,9 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { writeFileSync, symlinkSync, mkdirSync } from 'node:fs';
+import { writeFileSync, symlinkSync, mkdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { intakePass, kindsFor } from './outbox-intake.mjs';
-import { recWith } from './fixtures.test-helper.mjs';
+import { change, recWith, withAlerts, setClock, T0 } from './fixtures.test-helper.mjs';
+import { setup as setupRecord } from '../M9-record/fixtures.test-helper.mjs';
 import { tempDir } from '../../shared/test-tmp.mjs';
 
 const UID = process.getuid();
@@ -146,7 +147,7 @@ test('audit MAT-6: a read-only request the start refuses waits, the Lead is told
   const tries = [];
   const startReadonly = (x) => { tries.push(x); return allow ? { ok: true } : { ok: false, reason: 'cap 4' }; };
   for (let i = 0; i < 2; i += 1) await intakePass({ rec, sessions, ...w.ports, startReadonly });
-  const fact = rec.read('fact', 'outbox-L-1-think-q9.md').doc;
+  const fact = rec.read('fact', 'intake-applied-L-1-think-q9.md').doc;
   assert.equal(fact.state, 'waiting');
   assert.equal(fact.tries, 2);
   assert.equal(w.calls.replies.length, 1);
@@ -154,7 +155,7 @@ test('audit MAT-6: a read-only request the start refuses waits, the Lead is told
   assert.equal(tries.length, 2);
   allow = true;
   await intakePass({ rec, sessions, ...w.ports, startReadonly });
-  assert.equal(rec.read('fact', 'outbox-L-1-think-q9.md').doc.state, 'applied');
+  assert.equal(rec.read('fact', 'intake-applied-L-1-think-q9.md').doc.state, 'applied');
   await intakePass({ rec, sessions, ...w.ports, startReadonly });
   assert.equal(tries.length, 3); // started once, never again
   assert.equal(w.calls.replies.length, 1);
@@ -167,19 +168,61 @@ test('audit MAT-7: a claim left at applying becomes interrupted with one alert, 
   const ob = mk(join(w.root, 'worker'));
   writeFileSync(join(ob, 'report-C-1.md'), 'done');
   const sha = createHash('sha256').update('done').digest('hex');
-  const rec = recWith([['fact', 'outbox-S-1-report-C-1.md', { session: 'S-1', name: 'report-C-1.md', sha256: sha, state: 'applying' }]]);
+  const rec = recWith([['fact', 'intake-applied-S-1-report-C-1.md', { session: 'S-1', name: 'report-C-1.md', sha256: sha, state: 'applying' }]]);
   const sessions = [{ sessionId: 'S-1', role: 'worker', outbox: ob, uid: UID, card: 'C-1' }];
-  const out = await intakePass({ rec, sessions, ...w.ports });
+  // As the tick runs it: queued, then delivered, and marked told only then (L130 M7).
+  const run = () => withAlerts(rec, Date.now(), (t) => { w.calls.alerts.push(t); return true; }, (alert) => intakePass({ rec, sessions, ...w.ports, alert }));
+  const out = await run();
   assert.equal(out[0].already, true);
   assert.notEqual(out[0].applied, true);
-  assert.equal(rec.read('fact', 'outbox-S-1-report-C-1.md').doc.state, 'interrupted');
+  assert.equal(rec.read('fact', 'intake-applied-S-1-report-C-1.md').doc.state, 'interrupted');
   assert.equal(w.calls.alerts.length, 1);
   assert.match(w.calls.alerts[0], /interrupted/);
   assert.equal(rec.diary().filter((l) => l.kind === 'outbox').length, 0);
-  await intakePass({ rec, sessions, ...w.ports });
+  await run();
   assert.equal(w.calls.alerts.length, 1);
   assert.equal(rec.diary().filter((l) => l.kind === 'outbox').length, 0);
   assert.equal(leadInFlight({ rec, sessionId: 'S-1', outboxNames: ['report-C-1.md'], questionOpen: false }), null);
+});
+
+// L130: an alert the queue did not take (answer false) writes no told_state; the next pass tells it once.
+test('L130: an interrupted claim whose alert was not queued is told on the next pass, once', async () => {
+  const { createHash } = await import('node:crypto');
+  const w = world();
+  const ob = mk(join(w.root, 'worker'));
+  writeFileSync(join(ob, 'report-C-1.md'), 'done');
+  const sha = createHash('sha256').update('done').digest('hex');
+  const rec = recWith([['fact', 'intake-applied-S-1-report-C-1.md', { session: 'S-1', name: 'report-C-1.md', sha256: sha, state: 'applying' }]]);
+  const sessions = [{ sessionId: 'S-1', role: 'worker', outbox: ob, uid: UID, card: 'C-1' }];
+  const run = () => withAlerts(rec, Date.now(), (t) => { w.calls.alerts.push(t); return true; }, (alert) => intakePass({ rec, sessions, ...w.ports, alert }));
+  await intakePass({ rec, sessions, ...w.ports, alert: () => false });
+  const f = () => rec.read('fact', 'intake-applied-S-1-report-C-1.md').doc;
+  assert.equal(f().state, 'interrupted');
+  assert.equal(f().told_state, undefined, 'not marked told');
+  await run();
+  assert.equal(w.calls.alerts.length, 1);
+  assert.match(w.calls.alerts[0], /interrupted/);
+  assert.equal(f().told_state, 'interrupted');
+  await run();
+  assert.equal(w.calls.alerts.length, 1, 'told once');
+});
+
+test('L130: a file the record refused, whose alert was not queued, is told on the next pass, once', async () => {
+  const w = world();
+  const ob = mk(join(w.root, 'worker'));
+  const sessions = [{ sessionId: 'S-1', role: 'worker', outbox: ob, uid: UID, card: 'C-1' }];
+  writeFileSync(join(ob, 'report-C-1.md'), 'done');
+  // The record refusing the hand-in, as it does a transition the role may not make.
+  const rec = Object.create(recWith(), { applyOutbox: { value: () => ({ ok: false, reason: 'not a hand-in this role may make' }) } });
+  const run = () => withAlerts(rec, Date.now(), (t) => { w.calls.alerts.push(t); return true; }, (alert) => intakePass({ rec, sessions, ...w.ports, alert }));
+  assert.equal((await intakePass({ rec, sessions, ...w.ports, alert: () => false }))[0].refused, 'not a hand-in this role may make');
+  const f = () => rec.read('fact', 'intake-applied-S-1-report-C-1.md').doc;
+  assert.equal(f().told_state, undefined, 'not marked told');
+  await run();
+  assert.equal(w.calls.alerts.length, 1, w.calls.alerts.join(' | '));
+  assert.equal(f().told_state, 'refused');
+  await run();
+  assert.equal(w.calls.alerts.length, 1, 'told once');
 });
 
 test("audit MIN-20 (I6): a worker's think file starts no read-only session", async () => {
@@ -199,16 +242,16 @@ test('audit 0b-6 r2 MIN-7: the file is claimed before its read-only session star
   const sessions = [{ sessionId: 'L-1', role: 'lead', outbox: ob, uid: UID, product: 'p1' }];
   let seen = null;
   // The start sees the claim already in the record; then the pass "dies" before it answers.
-  const dies = () => { seen = rec.read('fact', 'outbox-L-1-think-q1.md')?.doc?.state; throw Object.assign(new Error('pass died'), { die: true }); };
+  const dies = () => { seen = rec.read('fact', 'intake-applied-L-1-think-q1.md')?.doc?.state; throw Object.assign(new Error('pass died'), { die: true }); };
   await intakePass({ rec, sessions, ...w.ports, startReadonly: dies });
   assert.equal(seen, 'starting');
   // Simulate the crash leaving the claim (the catch turned it into "waiting"; put it back as a crash would leave it).
-  const cur = rec.read('fact', 'outbox-L-1-think-q1.md');
-  rec.write({ actor: 'dispatcher', entity: 'fact', id: 'outbox-L-1-think-q1.md', expectRev: cur.rev, doc: { ...cur.doc, state: 'starting' } });
+  const cur = rec.read('fact', 'intake-applied-L-1-think-q1.md');
+  assert.equal(cur.doc.state, 'waiting'); change(rec, 'fact', 'intake-applied-L-1-think-q1.md', { state: 'starting' });
   const tries = [];
   await intakePass({ rec, sessions, ...w.ports, startReadonly: (x) => { tries.push(x); return { ok: true }; } });
   assert.deepEqual(tries, [], 'never started twice');
-  assert.equal(rec.read('fact', 'outbox-L-1-think-q1.md').doc.state, 'interrupted');
+  assert.equal(rec.read('fact', 'intake-applied-L-1-think-q1.md').doc.state, 'interrupted');
   assert.match(w.calls.alerts.at(-1), /read-only session may or may not have started/);
 });
 
@@ -253,14 +296,14 @@ test('audit 0b-6 r3 MIN-5 (J11): after an interrupted hand-in, a new copy under 
   const ob = mk(join(w.root, 'worker'));
   writeFileSync(join(ob, 'report-C-1.md'), 'done');
   const sha = createHash('sha256').update('done').digest('hex');
-  const rec = recWith([['card', 'C-1', { state: 'running' }], ['fact', 'outbox-S-1-report-C-1.md', { session: 'S-1', name: 'report-C-1.md', sha256: sha, state: 'applying' }]]);
+  const rec = recWith([['card', 'C-1', { state: 'running' }], ['fact', 'intake-applied-S-1-report-C-1.md', { session: 'S-1', name: 'report-C-1.md', sha256: sha, state: 'applying' }]]);
   const sessions = [{ sessionId: 'S-1', role: 'worker', outbox: ob, uid: UID, card: 'C-1' }];
   await intakePass({ rec, sessions, ...w.ports });
-  assert.equal(rec.read('fact', 'outbox-S-1-report-C-1.md').doc.state, 'interrupted');
+  assert.equal(rec.read('fact', 'intake-applied-S-1-report-C-1.md').doc.state, 'interrupted');
   writeFileSync(join(ob, 'report-C-1.md'), 'done, again');
   const out = await intakePass({ rec, sessions, ...w.ports });
   assert.equal(out[0].applied, true, JSON.stringify(out));
-  assert.equal(rec.read('fact', 'outbox-S-1-report-C-1.md').doc.state, 'applied');
+  assert.equal(rec.read('fact', 'intake-applied-S-1-report-C-1.md').doc.state, 'applied');
 });
 
 test('L44 planted: a verdict file in a worker\'s outbox is refused at intake and never reaches the record', async () => {
@@ -278,4 +321,96 @@ test('L44 planted: a verdict file in a worker\'s outbox is refused at intake and
   assert.equal(w.calls.alerts.length, 1);
   assert.deepEqual(kindsFor({ role: 'worker' }).includes('verdict'), false);
   assert.deepEqual(kindsFor({ role: 'reviewer' }), ['verdict']);
+});
+
+// L138 m1, m3, m8: the real outbox, with the Record's clock ahead of the tick's. `queueOk()` false is an outbox that
+// refuses the entry (a full queue, say), so nothing is queued and only the recorded fact can ask again.
+const tickRun = (base, rec, w, sessions, port, min, queueOk = () => true) => {
+  const now = T0 + min * 60_000;
+  setClock(base, now + 1500);
+  return withAlerts(base, now, port, (real) => {
+    const alert = Object.assign((t, o) => (queueOk() ? real(t, o) : false), { queues: true });
+    return intakePass({ rec, sessions, ...w.ports, alert, now });
+  });
+};
+const refusingRec = (base, reason) => Object.create(base, { applyOutbox: { value: () => ({ ok: false, reason }) } });
+
+test('L138 m3: a refused hand-in whose file is gone before the tell went out is still told, exactly once', async () => {
+  const w = world();
+  const ob = mk(join(w.root, 'worker'));
+  const sessions = [{ sessionId: 'S-1', role: 'worker', outbox: ob, uid: UID, card: 'C-1' }];
+  writeFileSync(join(ob, 'report-C-1.md'), 'done');
+  const base = recWith();
+  const rec = refusingRec(base, 'not a hand-in this role may make');
+  const got = [];
+  const port = (t) => { got.push(typeof t === 'string' ? t : t.text); return true; };
+  let queueOk = false;
+  await tickRun(base, rec, w, sessions, port, 1, () => queueOk);
+  assert.deepEqual(got, [], 'the outbox took nothing');
+  const f = () => base.read('fact', 'intake-applied-S-1-report-C-1.md').doc;
+  assert.equal(f().state, 'refused');
+  assert.equal(f().told_state, undefined, 'a lost tell marks nothing');
+  // The file is cleaned away before the next pass.
+  rmSync(join(ob, 'report-C-1.md'));
+  queueOk = true;
+  await tickRun(base, rec, w, sessions, port, 2);
+  assert.deepEqual(got, ['the record refused report-C-1.md from worker S-1: not a hand-in this role may make'], 'told from the recorded fact');
+  assert.equal(f().told_state, 'refused');
+  for (const min of [3, 4, 5]) await tickRun(base, rec, w, sessions, port, min);
+  assert.equal(got.length, 1, 'told exactly once once delivered (P20)');
+});
+
+test('L138 m8 (P20): a refused hand-in delivered at once is told exactly once over later passes, file listed or not', async () => {
+  const w = world();
+  const ob = mk(join(w.root, 'worker'));
+  const sessions = [{ sessionId: 'S-1', role: 'worker', outbox: ob, uid: UID, card: 'C-1' }];
+  writeFileSync(join(ob, 'report-C-1.md'), 'done');
+  const base = recWith();
+  const rec = refusingRec(base, 'refused here');
+  const got = [];
+  const port = (t) => { got.push(typeof t === 'string' ? t : t.text); return true; };
+  for (const min of [1, 2, 3]) await tickRun(base, rec, w, sessions, port, min);
+  rmSync(join(ob, 'report-C-1.md'));
+  for (const min of [4, 5]) await tickRun(base, rec, w, sessions, port, min);
+  assert.deepEqual(got, ['the record refused report-C-1.md from worker S-1: refused here']);
+});
+
+// L140: think-, scout- and write- only start a read-only session; the Record has no rule for them.
+test('L140: a real think- start is marked applied, with no applyOutbox call and no alert (real Record)', async () => {
+  const E = setupRecord({ prefix: 'm11-intake-l140-' });
+  const w = world();
+  const ob = mk(join(w.root, 'lead'));
+  writeFileSync(join(ob, 'think-q1.md'), 'Is option A safe?');
+  let applies = 0;
+  const real = E.record;
+  const rec = Object.create(real, { applyOutbox: { value: (...a) => { applies += 1; return real.applyOutbox(...a); } } });
+  const sessions = [{ sessionId: 'L-1', role: 'lead', outbox: ob, uid: UID, product: 'p1' }];
+  const got = [];
+  const run = () => withAlerts(real, E.clock.t, (t) => { got.push(typeof t === 'string' ? t : t.text); return true; }, (alert) => intakePass({ rec, sessions, ...w.ports, alert, now: E.clock.t }));
+  const [r] = await run();
+  assert.equal(r.started, true, JSON.stringify(r));
+  assert.equal(w.calls.readonly.length, 1);
+  assert.equal(applies, 0, 'nothing for the Record to take');
+  assert.deepEqual(got, [], 'no alert');
+  assert.equal(real.read('fact', 'intake-applied-L-1-think-q1.md').doc.state, 'applied');
+  E.clock.t += 60_000;
+  await run();
+  assert.equal(w.calls.readonly.length, 1, 'not started twice');
+  assert.deepEqual(got, []);
+});
+
+test('L140: an apply answering not_a_record is handled, with no alert', async () => {
+  const w = world();
+  const ob = mk(join(w.root, 'worker'));
+  writeFileSync(join(ob, 'report-C-1.md'), 'done');
+  const base = recWith();
+  const rec = Object.create(base, { applyOutbox: { value: () => ({ ok: false, outcome: 'not_a_record', not_a_record: true, reason: 'no record rule' }) } });
+  const sessions = [{ sessionId: 'S-1', role: 'worker', outbox: ob, uid: UID, card: 'C-1' }];
+  const got = [];
+  const port = (t) => { got.push(typeof t === 'string' ? t : t.text); return true; };
+  const [r] = await tickRun(base, rec, w, sessions, port, 1);
+  assert.equal(r.applied, true);
+  assert.equal(base.read('fact', 'intake-applied-S-1-report-C-1.md').doc.state, 'applied');
+  await tickRun(base, rec, w, sessions, port, 2);
+  assert.deepEqual(got, []);
 });

@@ -8,7 +8,8 @@ import { outboxFile, checkOutboxFile } from './outbox.mjs';
 import { checkPhoneReadback, extractReadback } from './readback.mjs';
 import { buildTripBrief, miniCheck } from './trip.mjs';
 import { typed, said, asks, result, T0, iso } from './fixtures.mjs';
-import { memoryRecord } from '../../shared/record.mjs';
+import { recWith, seed } from '../M11-dispatcher/fixtures.test-helper.mjs';
+import { factFamilyOf } from '../M9-record/permissions.mjs';
 import { makeFactWriter } from '../M12-sensors/facts.mjs';
 import { POWER_FACT } from '../M12-sensors/power-source.mjs';
 import { STATUS_FACT } from '../M13-ledger/heartbeat.mjs';
@@ -52,25 +53,38 @@ function tripWorld() {
   const NOW = Date.parse('2026-11-03T12:00:00Z');
   const now = () => new Date(NOW);
   const ago = (min) => new Date(NOW - min * 60e3).toISOString();
-  const rec = memoryRecord();
-  const facts = makeFactWriter(rec, { actor: 'ledger', now });
-  const w = (entity, id, doc) => assert.equal(rec.write({ actor: 'dispatcher', entity, id, expectRev: rec.read(entity, id)?.rev ?? 0, doc }).ok, true);
+  const rec = recWith([]);
+  // Each fact is written by the role whose family holds it (L74): the power reading is the Sensors', the rest the
+  // Ledger's. Each record entry is seeded the way M9 takes it, by the script that may make it (L72).
+  const ledger = makeFactWriter(rec, { actor: 'ledger', now });
+  const sensors = makeFactWriter(rec, { actor: 'sensors', now });
+  const facts = { ...ledger, put: (id, doc, kind) => (factFamilyOf(id) === 'sensors' ? sensors : ledger).put(id, doc, kind) };
+  const w = (entity, id, doc) => seed(rec, entity, id, doc);
   return { rec, facts, w, now, ago };
 }
 const brief = (x, extra = {}) => buildTripBrief({ products: [{ name: 'test-product', on_merge_gate: true }], until: '2026-11-07', tz: 'Europe/Prague', rec: x.rec, facts: x.facts, heartbeatProduct: 'mini', now: x.now, ...extra });
 
 test('0b-8 audit round 2 M-3: the brief lists what waits on the owner from the one waiting list (a held card too), not what waits on others; a record error shows', () => {
   const x = tripWorld();
-  x.w('card', 'card-4', { module: 'M1', state: 'waiting', wait: { who: 'owner', what: 'pick the launch date', since: x.ago(50) }, link: 'https://example.invalid/card/4' });
+  // A card waits on the owner as M9 says (who 'joe', L79), and has no `link` field: it is named, not linked. A card
+  // waiting on usage is not the owner's.
+  x.w('card', 'card-4', { module: 'M1', state: 'waiting', wait: { who: 'joe', what: 'pick the launch date', since: x.ago(50) } });
+  x.w('card', 'card-7', { module: 'M1', state: 'waiting', wait: { who: 'usage', what: 'the weekly limit', since: x.ago(40) } });
+  // L85 m-5: a card parked for a paused product (M11's park) is no go owed; it resumes on unpause.
+  x.w('card', 'card-9', { module: 'M1', state: 'waiting', wait: { who: 'joe', what: 'paused', since: x.ago(30) } });
   x.w('go', 'go-5', { state: 'waiting', wait: { who: 'dispatcher', what: 'build finishing', since: x.ago(10) } });
   // The record refuses a waiting doc without who/since at write time, so a bad row (an older doc) is planted on read.
   const bad = { id: 'merge-6', rev: 1, doc: { state: 'waiting', wait: { what: 'unclear' } } };
   const rec = { ...x.rec, list: (e) => (e === 'merge' ? [bad] : x.rec.list(e)), read: (e, id) => (e === 'merge' ? bad : x.rec.read(e, id)) };
   const t = brief({ ...x, rec });
   assert.match(t, /Waiting on your go \(2\):/);
-  assert.match(t, /- card card-4: .*pick the launch date.*\(https:\/\/example.invalid\/card\/4\)/);
+  assert.match(t, /- card card-4: .*pick the launch date.*\(card card-4\)/);
+  assert.equal(t.includes('card-4: pick the launch date (RECORD ERROR'), false, 'a card is never a missing-link error');
+  assert.equal(t.includes('the weekly limit'), false, 'a usage wait is not the owner\'s');
   assert.match(t, /record error: merge merge-6 is waiting with no who, since/);
   assert.equal(t.includes('build finishing'), false);
+  assert.equal(/- card card-9: /.test(t), false, 'a paused park is not waiting on your go');
+  assert.match(t, /Parked while their product is paused; they resume when you unpause \(1\):\n- card card-9\n/);
 });
 
 test('0b-8 audit round 2 M-5, minors 8, 9: the brief is stamped with when it was made and good until; a future heartbeat is unknown; a bad zone holds number work', () => {
@@ -130,4 +144,16 @@ test('0b-8 audit round 2 minors 1, 7: newest turn with no time → no restart; c
   const split = `${k.slice(0, 6)}\u0007${k.slice(6)}`;
   const h = makeFrontDoorHandoff({ entries: [typed(0, `use ${split} please`), said(1, 'ok')], openAsks: [], rereadList: [], now: at(30) });
   assert.equal(h.includes(k.slice(6)), false);
+});
+
+test('L79: a go or ask whose M9 schema may carry a link but lacks one still shows RECORD ERROR; a card is named', () => {
+  const x = tripWorld();
+  x.w('go', 'go-8', { state: 'waiting', wait: { who: 'owner', what: 'go on row 8', since: x.ago(20) } });
+  // A risky-act ask (an active kind, shared/asks.mjs; #62 lists only those) that should carry a pull request link.
+  x.w('ask', 'ask-9', { state: 'open', kind: 'risky_approve', what: 'drop the old table' });
+  x.w('card', 'card-10', { module: 'M1', state: 'waiting', wait: { who: 'joe', what: 'pick a name', since: x.ago(30) } });
+  const t = brief(x);
+  assert.match(t, /- go go-8: .*go on row 8.*\(RECORD ERROR: no roadmap row link in the record\)/);
+  assert.match(t, /- ask-9: .*drop the old table.*\(RECORD ERROR: no pull request link in the record\)/);
+  assert.match(t, /- card card-10: .*pick a name.*\(card card-10\)/);
 });

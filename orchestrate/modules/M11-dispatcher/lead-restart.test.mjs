@@ -21,7 +21,7 @@ function world() {
   let outcome = 'sent';
   const rec = recWith();
   const step = (size, min, over = {}) => withAlerts(rec, T0 + min * MIN, over.alert ?? ((t) => calls.alerts.push(t)), (alert) => leadRestartStep({
-    rec, rules: over.rules ?? R, now: T0 + min * MIN, lead: { sessionId: SID, product: 'p' }, size, alert,
+    rec, rules: over.rules ?? R, now: T0 + min * MIN, lead: { sessionId: SID, product: 'p' }, size, alert: over.answer ?? alert,
     inFlight: over.inFlight ?? null,
     send: async (t) => { calls.sent.push(t); return { outcome }; },
     stopSession: async () => { calls.stops += 1; return over.stopFails ? { ok: false, reason: 'still running' } : { ok: true }; },
@@ -56,7 +56,9 @@ test('M18: 260k at a finished turn with nothing in flight -> WRAP; the handoff a
   assert.equal(await w.step(ended(265_000, 3), 3), 'restarted');
   assert.equal(w.calls.stops, 1);
   assert.deepEqual(w.calls.starts, [{ handoff: 'handoff-L-1' }]);
-  assert.equal(w.rec.read('handoff', 'handoff-L-1').doc.session, SID);
+  // The handoff is the Lead's own record, made from its file by applyOutbox (L74): one entry, written as the Lead.
+  const handoffs = w.rec.list('handoff');
+  assert.deepEqual(handoffs.map((h) => [h.doc.session_id, w.rec.meta('handoff', h.id).createdBy]), [[SID, `lead:${SID}`]]);
   assert.equal(phase(w.rec), 'done');
   assert.equal(await w.step(ended(265_000, 4), 4), 'done');
   assert.equal(w.calls.sent.length, 1);
@@ -78,12 +80,14 @@ test('M18: anything in flight blocks the WRAP', async () => {
   assert.equal(await w.step(ended(260_000), 1, { inFlight: 'a question box is open' }), 'waiting: a question box is open');
   assert.equal(w.calls.sent.length, 0);
   // what leadInFlight finds
-  const rec = recWith([['merge', 'M-1', { state: 'requested', waiting: { who: 'lead', what: 'go', since: iso(T0), next_check: iso(T0) } }]]);
-  assert.match(leadInFlight({ rec, sessionId: SID, outboxNames: [], questionOpen: false }), /merge M-1 waits on the Lead/);
+  // The Record has no Lead waiter: a card waiting on the Lead's split waits on a dependency, needs_split.
+  const split = { who: 'dependency', what: 'needs_split', since: iso(T0), next_check: iso(T0), resume: 'continue', return_to: 'ready' };
+  const rec = recWith([['card', 'C-1', { state: 'waiting', wait: split }]]);
+  assert.match(leadInFlight({ rec, sessionId: SID, outboxNames: [], questionOpen: false }), /card C-1 waits on the Lead/);
   assert.match(leadInFlight({ rec: recWith(), sessionId: SID, outboxNames: ['wish-1.md'], questionOpen: false }), /wish-1\.md not used yet/);
   assert.match(leadInFlight({ rec: recWith(), sessionId: SID, outboxNames: ['.wish-1.md.partial'], questionOpen: false }), /not used yet/);
   assert.match(leadInFlight({ rec: recWith(), sessionId: SID, outboxNames: [], questionOpen: true }), /question box/);
-  const used = recWith([['fact', `outbox-${SID}-wish-1.md`, { state: 'applied' }], ['card', 'C-1', { state: 'waiting', waiting: { who: 'joe' } }]]);
+  const used = recWith([['fact', `intake-applied-${SID}-wish-1.md`, { state: 'applied' }], ['card', 'C-1', { state: 'waiting', wait: { ...split, who: 'joe', what: 'approve' } }]]);
   assert.equal(leadInFlight({ rec: used, sessionId: SID, outboxNames: ['wish-1.md'], questionOpen: false }), null);
 });
 
@@ -142,6 +146,36 @@ test('M18: the new Lead failing to start alerts', async () => {
   assert.equal(phase(w.rec), 'done');
 });
 
+// L130: `answer` stands in for the outbox's own answer; false (not queued) writes no told field, so the next pass tells.
+test('L130: a start failure whose alert was not queued is told on the next pass, once', async () => {
+  const w = world();
+  await w.step(ended(260_000), 1);
+  w.handIn(1000);
+  await w.intake();
+  assert.equal(await w.step(ended(261_000, 2), 2, { startFails: true, answer: () => false }), 'stopped; new Lead failed to start');
+  assert.equal(w.calls.alerts.length, 0);
+  assert.equal(w.rec.read('fact', RESTART_FACT(SID)).doc.start_failed_told, undefined, 'not marked told');
+  await w.step(midTurn(261_000), 3, { startFails: true });
+  assert.equal(w.calls.alerts.length, 1);
+  assert.equal(w.rec.read('fact', RESTART_FACT(SID)).doc.start_failed_told, true);
+  await w.step(midTurn(261_000), 4, { startFails: true });
+  assert.equal(w.calls.alerts.length, 1, 'told once');
+});
+
+test('L130: a give-up whose alert was not queued is told on the next pass, once', async () => {
+  const w = world();
+  await w.step(ended(260_000, 0), 1);
+  await w.step(ended(261_000, 2), 3);
+  assert.equal(await w.step(ended(262_000, 5), 5, { answer: () => false }), 'gave up; the old Lead keeps running');
+  assert.equal(w.calls.alerts.length, 0);
+  assert.equal(w.rec.read('fact', RESTART_FACT(SID)).doc.gave_up_told, undefined);
+  await w.step(ended(262_000, 5), 6);
+  assert.equal(w.calls.alerts.length, 1);
+  assert.match(w.calls.alerts[0], /gave up|handoff/i);
+  await w.step(ended(262_000, 5), 7);
+  assert.equal(w.calls.alerts.length, 1, 'told once');
+});
+
 test('M18 / m9: 410k mid-turn sends no WRAP; above hard + 50k alerts once', async () => {
   const w = world();
   assert.equal(await w.step(midTurn(410_000), 1), 'mid-turn');
@@ -190,24 +224,29 @@ test('audit MIN-13: a handoff that was refused or not recorded never stops the o
   const w = world();
   assert.equal(await w.step(ended(260_000), 1), 'WRAP sent');
   // the intake refused the handoff (the record would not take it): re-asked, never stopped
-  const key = `outbox-${SID}-handoff-${SID}.md`;
+  const key = `intake-applied-${SID}-handoff-${SID}.md`;
   w.rec.write({ actor: 'dispatcher', entity: 'fact', id: key, expectRev: 0, doc: { session: SID, name: `handoff-${SID}.md`, sha256: 'x', state: 'refused' } });
   assert.equal(await w.step(ended(265_000, 3), 3), 're-asked');
   assert.match(w.calls.sent[1], /the record refused it/);
   assert.equal(w.calls.stops, 0);
   assert.equal(w.calls.starts.length, 0);
-  // applied, but the handoff entry cannot be written: not stopped
+  // Applied, but the Record holds no handoff the Lead wrote (L74: the Lead's own entry, made by applyOutbox): not
+  // stopped. Neither when the entry is missing, nor when one names this session but another role wrote it (look-alike).
   const w2 = world();
   assert.equal(await w2.step(ended(260_000), 1), 'WRAP sent');
   w2.handIn(1_000);
   await w2.intake();
-  const realWrite = w2.rec.write.bind(w2.rec);
-  const rec = { read: (...a) => w2.rec.read(...a), list: (...a) => w2.rec.list(...a), write: (a) => (a.entity === 'handoff' ? { ok: false, reason: 'stale rev' } : realWrite(a)) };
-  const r = await leadRestartStep({ rec, rules: R, now: T0 + 3 * MIN, lead: { sessionId: SID }, size: ended(265_000, 3), inFlight: null,
+  const base = { read: (...a) => w2.rec.read(...a), list: (...a) => w2.rec.list(...a), meta: (...a) => w2.rec.meta(...a), write: (a) => w2.rec.write(a) };
+  const missing = { ...base, list: (e) => (e === 'handoff' ? [] : w2.rec.list(e)) };
+  const lookalike = { ...base, meta: (e, id) => (e === 'handoff' ? { ...w2.rec.meta(e, id), createdBy: `learning:${SID}` } : w2.rec.meta(e, id)) };
+  const run = (rec) => leadRestartStep({ rec, rules: R, now: T0 + 3 * MIN, lead: { sessionId: SID }, size: ended(265_000, 3), inFlight: null,
     send: async () => ({ outcome: 'sent' }), stopSession: async () => { w2.calls.stops += 1; return { ok: true }; }, startLead: async () => { w2.calls.starts.push(1); return { ok: true }; }, alert: () => {} });
-  assert.equal(r, 'handoff not recorded: stale rev');
+  assert.equal(await run(missing), 'handoff not recorded yet');
+  assert.equal(await run(lookalike), 'handoff not recorded yet', 'a handoff another role wrote is not the Lead\'s');
   assert.equal(w2.calls.stops, 0);
   assert.equal(w2.calls.starts.length, 0);
+  // Control: the same pass on the record as it is restarts the Lead.
+  assert.equal(await run(base), 'restarted');
 });
 
 test('audit 0b-6 r2 MAT-3: a handoff applied before the WRAP never restarts the Lead; one applied after it does', async () => {
@@ -225,7 +264,7 @@ test('audit 0b-6 r2 MAT-3: a handoff applied before the WRAP never restarts the 
   // An old fact with no time recorded counts as older too.
   const v = world();
   assert.equal(await v.step(ended(260_000), 1), 'WRAP sent');
-  v.rec.write({ actor: 'dispatcher', entity: 'fact', id: `outbox-${SID}-${HANDOFF_NAME(SID)}`, expectRev: 0, doc: { state: 'applied', sha256: 'a'.repeat(64) } });
+  v.rec.write({ actor: 'dispatcher', entity: 'fact', id: `intake-applied-${SID}-${HANDOFF_NAME(SID)}`, expectRev: 0, doc: { state: 'applied', sha256: 'a'.repeat(64) } });
   assert.notEqual(await v.step(ended(262_000, 2), 3), 'restarted');
   assert.equal(v.calls.stops, 0);
 });
@@ -233,8 +272,8 @@ test('audit 0b-6 r2 MAT-3: a handoff applied before the WRAP never restarts the 
 // ---- audit 0b-6 round 3 ----
 
 test('audit 0b-6 r3 MAT-4: a read-only request waiting on a refusal is not in flight; one not yet used still is', () => {
-  const rec = recWith([['fact', 'outbox-L-1-think-q1.md', { session: SID, name: 'think-q1.md', state: 'waiting', reason: 'the red band holds it' }],
-    ['fact', 'outbox-L-1-scout-q2.md', { session: SID, name: 'scout-q2.md', state: 'starting' }]]);
+  const rec = recWith([['fact', 'intake-applied-L-1-think-q1.md', { session: SID, name: 'think-q1.md', state: 'waiting', reason: 'the red band holds it' }],
+    ['fact', 'intake-applied-L-1-scout-q2.md', { session: SID, name: 'scout-q2.md', state: 'starting' }]]);
   assert.equal(leadInFlight({ rec, sessionId: SID, outboxNames: ['think-q1.md'], questionOpen: false }), null);
   assert.match(leadInFlight({ rec, sessionId: SID, outboxNames: ['think-q1.md', 'scout-q2.md'], questionOpen: false }), /scout-q2\.md not used yet/);
 });

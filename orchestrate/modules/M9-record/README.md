@@ -20,7 +20,21 @@ See LANES.md for who builds this folder, and the build rows (0b-2, R-0b-20..28) 
 
 ## Claims
 
-A claim is a field on its card: set by `ready → claimed`, cleared when the card leaves claimed and running. A session's claim ends by a release from its holder, a lapse (claimed for longer than the card's `claimed` time limit), or a dead-owner break. A break needs all three of: the process gone, its session ended or gone, and no activity for `claims.stuck_min` minutes. If three or more of this Mac's claims look dead at once and they are half or more, none is broken (an outage) and the owner gets one alert a day. Below that, each dead claim is broken on its own and each break is alerted (lead call L43). A claim from another Mac is never broken from this one. A tab's claim is never broken; it lapses when its heartbeat is older than `proposals.heartbeat_stale_min` or at the running limit.
+A claim is a field on its card: set by `ready → claimed`, cleared when the card leaves claimed and running. It has two steps (lead call L72). `ready → claimed` names the session before it starts (`kind`, `session_id`, `host`, and `rules_rev`, the rules it was made under); the writer stamps `claimed_at`. `claimed → running` adds the process (`pid`, `pid_start`) and nothing else. A tab's claim carries `claim_id` in place of the session and does not change at running.
+
+A session's claim ends three ways:
+
+- **A release** by its holder.
+- **A lapse.** A claim that has no process yet and is older than `claims.unlaunched_min` (5 minutes when the rules don't say) goes back to ready. It lapses only once the caller's `stopSession(session_id)` says whatever started under that id is stopped, so the card can't run twice. With no `stopSession`, or one that does not answer true, the claim stays and the owner gets one alert a day.
+- **A dead-owner break.** `breakIfDead` breaks only the claim it is given, and only when all three hold: the process is gone (pid and start time), its session ended or is gone, and there has been no activity for `claims.stuck_min` minutes. A claim with no process yet is never broken (it lapses instead). A claim from another Mac is never broken from this one.
+
+Whether many dead claims at once mean an outage (hold them all) is the Dispatcher's rule, in M11, not this store's (L72). A tab's claim is never broken. Nothing writes its heartbeat yet, so the running limit alone ends it.
+
+## Facts: families and who may change them
+
+Every fact id belongs to one role's family (`FACT_FAMILIES` in `permissions.mjs`, lead call L74). An entry ending in `-` or `.` is a prefix; any other entry is that one id. A role creates a fact only in its own family, and no two roles' families overlap (`familyOverlaps()`, tested). A fact is changed only by the role that created it (the store keeps who wrote a document's first diary line). A reader that takes a fact as proof uses `factFrom(role, entry, family)`: the id must be in that role's family AND written by that role. The fact's `type` alone is never proof, since any role can write any type into its own family. Nothing that gates reads a workshop fact as proof.
+
+A card's `attempts` holds counts kept across moves: `reviewer_starts` and `review_requests` (both written by the Dispatcher; the second goes up on every review request, so the request always changes the card and its clock moves, L85 m-1) `merge_refusals` (a list of reasons, written by the merge gate) and `merge_asks` (written by the Dispatcher: how many of those reasons Joe has been asked about, so the same refusal twice in a row is asked about once, L110 m-1). Each key has one writer and one shape; no other key is allowed.
 
 ## Why our own store, not Claude Code's task list
 
@@ -37,8 +51,8 @@ Claude Code has a native task list. We checked whether it could hold the claims:
 
 - **A crash between applying an outbox file and marking it seen.** On restart the file is applied again: a hand-in is refused (and logged as a refusal it isn't), a verdict is stored twice. Both are harmless to the card's state; one write for both would close it.
 - **`merged → reverted` has no evidence check yet.** The reversing merge is the Merge Gate's to name (0b-9).
-- ~~**Two claims, one dead.**~~ Closed by lead call L43: an outage needs at least three dead-looking claims, so a two-claim Mac breaks its one dead claim.
-- **The outage raises an alert, not an ask.** Only `approvals` writes asks; the alert goes out on the owner's push path once a day (L38).
+- ~~**Two claims, one dead.**~~ Closed by lead call L43. Since L72 the outage rule is the Dispatcher's (M11).
+- ~~**The outage raises an alert, not an ask.**~~ Moved to M11 with the outage rule (L72).
 
 ## Known gaps (audit round 2, logged, not fixed here)
 
@@ -91,8 +105,8 @@ Round 11 fixed: the round-10 one-name rule wrongly caught the lock, which is mad
 
 ## Known gaps (lead call L43, logged, not fixed here)
 
-- **A kill between a claim break and its alert** leaves the break in the diary (a `claim_break` line) with no alert sent; the card is already back to ready, so nothing retries it. Same window as any crash; the outage alert has a seen mark, the per-break alert doesn't.
-- **A Mac with one or two claims breaks them all after a reboot**, since that is under the outage floor of three. That is what L43 asks for.
+- **A kill between a claim break and its alert** leaves the break in the diary (a `claim_break` line) with no alert sent; the card is already back to ready, so nothing retries it. Same window as any crash; the per-break alert has no seen mark.
+- **A Mac with one or two claims breaks them all after a reboot**, since that is under the outage floor of three. That is what L43 asks for; the floor is M11's since L72.
 
 ## Running the tests
 

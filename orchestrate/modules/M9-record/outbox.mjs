@@ -74,7 +74,7 @@
 import { createHash } from 'node:crypto';
 import { closeSync, fstatSync, lstatSync, openSync, readdirSync, readSync, constants } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
-import { CHECKLIST_LEVELS, OUTBOX_KINDS, SESSION_ID, VERDICT_CHECKLIST, notARecord, outboxKind, outboxPlace } from '../../shared/record.mjs';
+import { CHECKLIST_LEVELS, OUTBOX_KINDS, SESSION_ID, VERDICT_CHECKLIST, notARecord, outboxKindOf, outboxPlace } from '../../shared/record.mjs';
 import { REVIEW_ROLES } from '../../shared/review-roles.mjs';
 
 export { REVIEW_ROLES };
@@ -380,9 +380,10 @@ export const PASSES = Object.freeze({
   auditor: (v) => v?.pass === true && v.material === 0,
 });
 
-// The longest listed kind a name starts with, for a name that passes the one outbox name rule (shared OUTBOX_NAME,
-// L121): readOutboxFile, sessionVerdict and verdictFromFile all take kinds through here.
-export const kindOf = outboxKind;
+// The longest listed kind a name starts with, for a name that passes the one outbox name rule (OUTBOX_NAME, L121):
+// one function, in record-names.mjs, that the test stand-in reads too. readOutboxFile, sessionVerdict and
+// verdictFromFile all take kinds through here.
+export const kindOf = outboxKindOf;
 
 export function readOutboxFile({ outboxRoot, uids = {}, tag, file }) {
   const given = typeof file === 'string' ? file : '';

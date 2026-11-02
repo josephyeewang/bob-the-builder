@@ -2,7 +2,9 @@
 // Dispatcher file holds them. A test that wants a different number overrides one key.
 
 import { fakeRules } from '../../shared/rules.mjs';
-import { memoryRecord } from '../../shared/record.mjs';
+import { SCRIPT_ACTORS, STATES, memoryRecord } from '../../shared/record.mjs';
+import { CREATE_STATES, INTERNAL_MOVES, MOVES, moveActors } from '../M9-record/moves.mjs';
+import { factFamilyOf, fieldsAllowed } from '../M9-record/permissions.mjs';
 import { KEYS as K } from './keys.mjs';
 import { outbox, sendAlerts } from './alerts.mjs';
 
@@ -14,16 +16,17 @@ export const VALUES = Object.freeze({
   [K.editingPerProduct]: 3, [K.editingPerMac]: 5, [K.perState]: { light: 1, active: 3, away: 3, paused: 0 },
   [K.shakedown]: false, [K.shakedownWorkers]: 1, [K.scriptsPerProduct]: 1, [K.scriptsPerMac]: 2, [K.readonlyPerSession]: 4,
   [K.leadDailyCard]: ['docs/blueprint/blueprint.yaml', 'docs/blueprint/cards/**', 'docs/blueprint/BLUEPRINT.md'],
-  [K.cancelGraceMin]: 2, [K.parkWaitMin]: 15, [K.deadQuietMin]: 5, [K.claimedNoSessionMin]: 10, [K.checkingMaxMin]: 30,
+  [K.cancelGraceMin]: 2, [K.parkWaitMin]: 15, [K.deadQuietMin]: 5, [K.claimsStuckMin]: 5, [K.checkingMaxMin]: 30, [K.mergingOpenMaxMin]: 15,
   [K.reportingMaxMin]: 10, [K.inReviewNoReviewerMin]: 15, [K.frontDoorStuckMin]: 10, [K.usageUnknownMaxMin]: 1440,
   [K.outageMinDead]: 3, [K.outageShare]: 0.5,
   [K.leadSoft]: 250_000, [K.leadHard]: 400_000, [K.handoffCapRole]: 8_000, [K.splitAfterCompactions]: 2,
 });
 
-export const rulesWith = (over = {}, answers = {}) => {
+// `classify` answers rules.classify (a card's tier and risky classes come from its files, never from a card field).
+export const rulesWith = (over = {}, answers = {}, { classify } = {}) => {
   const values = { ...VALUES, ...over };
   for (const [k, v] of Object.entries(over)) if (v === undefined) delete values[k];
-  return fakeRules({ values, answers });
+  return fakeRules({ values, answers, classify });
 };
 
 export const T0 = Date.parse('2026-10-29T12:00:00Z');
@@ -41,26 +44,139 @@ export function usageFact({ week, h5, gone = 0.5, account = 'acct-a', observedAg
   };
 }
 
-export function recWith(entries = []) {
-  const rec = memoryRecord();
-  for (const [entity, id, doc] of entries) {
-    // The record requires a card's module; a fixture card that names none gets a test module.
-    const d = entity === 'card' && doc && !('module' in doc) ? { module: 'M-test', ...doc } : doc;
-    const r = rec.write({ actor: 'dispatcher', entity, id, expectRev: 0, doc: d });
-    if (!r.ok) throw new Error(r.reason);
+// A record holding `entries` ([entity, id, doc]), each reached the way the real Record allows (L72): made in a state
+// its maker may make it in, by a script M9 lets make it, then moved one legal step at a time, each step by a script
+// M9 lets make it. A field only some other script may set is set by that script; one no script may set is refused, so
+// a test can't start from a document the real Record would never hold. The claim goes in on the move into claimed,
+// the wait on the move into waiting, the failure on the move into failed.
+// A seed's `changed_at` is not a field (no script may write one): it is when the Record saw the entry's writes, so its
+// state age (meta stateSince) is what the test means. The Record's clock is T0 otherwise; `setClock(rec, ms)` moves it.
+// A verdict comes only from a review session's own file (M9 applyOutbox), so none can be seeded here.
+const MOVE_FIELDS = Object.freeze({ claimed: 'claim', waiting: 'wait', failed: 'failure' });
+// `joe` writes nothing (the owner acts through approvals), so he never seeds a step.
+const SCRIPTS = SCRIPT_ACTORS.filter((a) => a !== 'joe');
+const scripts = (actors) => (actors ?? []).filter((a) => SCRIPTS.includes(a));
+function pathTo(entity, target) {
+  const starts = Object.entries(CREATE_STATES[entity] ?? {}).filter(([, a]) => scripts(a).length).map(([s]) => s);
+  const seen = new Map(starts.map((s) => [s, [s]]));
+  const queue = [...starts];
+  while (queue.length) {
+    const s = queue.shift();
+    if (s === target) return seen.get(s);
+    for (const to of Object.keys(MOVES[entity]?.[s] ?? {})) {
+      if (seen.has(to) || INTERNAL_MOVES[entity]?.[s]?.includes(to) || !scripts(moveActors(entity, s, to)).length) continue;
+      seen.set(to, [...seen.get(s), to]);
+      queue.push(to);
+    }
   }
+  return null;
+}
+function seedOne(rec, entity, id, doc) {
+  const must = (r, what) => { if (!r.ok) throw new Error(`recWith ${entity} ${id}: ${what}: ${r.reason}`); return r; };
+  const stateful = Object.hasOwn(STATES, entity);
+  const path = stateful ? pathTo(entity, doc.state) : [undefined];
+  if (!path) throw new Error(`recWith ${entity} ${id}: no script reaches ${doc.state}`);
+  const atMove = new Set(Object.values(MOVE_FIELDS));
+  // On an entity with no states (a fact), `state` is an ordinary field.
+  // A field given as undefined is not set (a test leaves it out that way).
+  const fields = Object.keys(doc).filter((f) => doc[f] !== undefined && !(stateful && f === 'state') && !(entity === 'card' && atMove.has(f)));
+  const mayCreate = (a) => { const s = fieldsAllowed(entity, a, { create: true }); return s && (!stateful || CREATE_STATES[entity][path[0]]?.includes(a)) ? s : null; };
+  // A fact is made by the role whose family holds its id (L74), the one script that may.
+  const makers = SCRIPTS.filter((a) => mayCreate(a) && (entity !== 'fact' || factFamilyOf(id) === a));
+  if (!makers.length) throw new Error(`recWith ${entity} ${id}: no script may make a ${entity}`);
+  const maker = makers.find((a) => { const s = mayCreate(a); return s === '*' || fields.every((f) => s.has(f)); }) ?? makers[0];
+  const allowed = mayCreate(maker);
+  const first = Object.fromEntries(fields.filter((f) => allowed === '*' || allowed.has(f)).map((f) => [f, doc[f]]));
+  must(rec.write({ actor: maker, entity, id, expectRev: 0, doc: stateful ? { ...first, state: path[0] } : first }), `made by ${maker}`);
+  // The rest, each by a script that may set it.
+  for (const f of fields.filter((x) => !(x in first))) {
+    const cur = rec.read(entity, id);
+    const by = SCRIPTS.find((a) => { const s = fieldsAllowed(entity, a, { state: cur.doc.state }); return s === '*' || s?.has(f); });
+    if (!by) throw new Error(`recWith ${entity} ${id}: no script may set ${f} on a ${entity}`);
+    must(rec.write({ actor: by, entity, id, expectRev: cur.rev, doc: { ...cur.doc, [f]: doc[f] } }), `${f} set by ${by}`);
+  }
+  for (const to of path.slice(1)) {
+    const cur = rec.read(entity, id);
+    const by = scripts(moveActors(entity, cur.doc.state, to))[0];
+    const extra = entity === 'card' && MOVE_FIELDS[to] && doc[MOVE_FIELDS[to]] !== undefined ? { [MOVE_FIELDS[to]]: doc[MOVE_FIELDS[to]] } : {};
+    // The claim's two steps (L72): a seed that names none gets a session claim, its process added at claimed → running.
+    if (entity === 'card' && to === 'claimed') {
+      const { pid: _p, pid_start: _s, claimed_at: _c, ...named } = doc.claim ?? { kind: 'session', session_id: `seed-${String(id).replace(/[^A-Za-z0-9-]/g, '-')}`, host: 'test-host' };
+      extra.claim = named;
+    }
+    if (entity === 'card' && to === 'running' && cur.doc.claim?.kind === 'session') {
+      extra.claim = { ...cur.doc.claim, pid: doc.claim?.pid ?? 99_999, pid_start: doc.claim?.pid_start ?? 'seeded' };
+    }
+    must(rec.write({ actor: by, entity, id, expectRev: cur.rev, doc: { ...cur.doc, ...extra, state: to } }), `${cur.doc.state} → ${to} by ${by}`);
+  }
+}
+/**
+ * Test-only: a change to an entry made by the script M9 lets make it (a move by the one that owns that move, a field
+ * by one that may set it), as the outside world would make it. Throws when no script may, so a test can't stage a
+ * change the real Record would refuse.
+ */
+export function change(rec, entity, id, patch) {
+  const cur = rec.read(entity, id);
+  if (!cur) throw new Error(`change ${entity} ${id}: not in the record`);
+  const doc = { ...cur.doc, ...patch };
+  for (const [k, v] of Object.entries(patch)) if (v === undefined) delete doc[k];
+  // On an entity with no states (a fact), `state` is an ordinary field.
+  const stateful = Object.hasOwn(STATES, entity);
+  const moving = stateful && 'state' in patch && patch.state !== cur.doc.state;
+  const fields = Object.keys(patch).filter((f) => !(stateful && f === 'state'));
+  const may = (a) => { const s = fieldsAllowed(entity, a, { state: cur.doc.state }); return fields.every((f) => s === '*' || s?.has(f)); };
+  const by = moving ? scripts(moveActors(entity, cur.doc.state, patch.state)).filter(may) : SCRIPTS.filter(may);
+  for (const actor of by) {
+    const r = rec.write({ actor, entity, id, expectRev: cur.rev, doc });
+    if (r.ok) return r;
+  }
+  throw new Error(`change ${entity} ${id}: no script may make this change (${JSON.stringify(patch)})`);
+}
+
+const clocks = new WeakMap();
+/** Moves the Record's clock of a recWith record (ms): its later writes are stamped then. */
+export const setClock = (rec, ms) => { clocks.get(rec).t = ms; };
+export function recWith(entries = [], { now = T0, dead = null } = {}) {
+  const clock = { t: now };
+  const rec = memoryRecord({ now: () => clock.t, dead });
+  clocks.set(rec, clock);
+  for (const [entity, id, doc] of entries) seed(rec, entity, id, doc);
   return rec;
 }
 
-// An undo card as the undo step writes it (LEAD-CALLS L40): it reverses a merge in the record, with the
-// reversed commit's file list. `filesOfCommits` answers for every commit these fixtures made.
+/**
+ * Test-only: adds one entry to a recWith record, mid-test, the way recWith seeds it (M9's own path, each step by the
+ * script that may make it). A changed_at sets the clock for that seed only (kept as a field on a fact).
+ */
+export function seed(rec, entity, id, doc) {
+  const clock = clocks.get(rec);
+  const was = clock.t;
+  // The record requires a card's module; a fixture card that names none gets a test module.
+  const { changed_at: at, ...d0 } = doc ?? {};
+  const d = entity === 'card' && !('module' in d0) ? { module: 'M-test', ...d0 } : d0;
+  // A changed_at is kept on a fact (its own field, any fact may hold one); elsewhere it only sets the clock.
+  const keep = entity === 'fact' && at !== undefined;
+  if (!keep && at !== undefined) clock.t = Date.parse(at);
+  try { seedOne(rec, entity, id, keep ? { ...d, changed_at: at } : d); } finally { clock.t = was; }
+}
+
+// An undo card as the undo step writes it (LEAD-CALLS L40, L74): M9's exact_reverse, whose source is Joe's answered Undo
+// ask on a merged card (T-<id>, with the merge commit the gate recorded and the gate's merge MG-<id>), with the reversed
+// commit's file list. The undo card is the last entry. `filesOfCommits` answers for every commit these fixtures made.
 const commitFiles = new Map();
 export const undoSha = (id) => Buffer.from(String(id)).toString('hex').padEnd(40, '0').slice(0, 40);
+export const UNDO_TARGET = (id) => `T-${id}`;
+export const UNDO_ASK = (id) => `A-${id}`;
 export function undoEntries(id, over = {}, { product = 'p1', files = [`src/${id}.js`], pr = 7 } = {}) {
   const sha = undoSha(id);
   commitFiles.set(sha, files);
-  return [['merge', `MG-${id}`, { state: 'merged', pr, merge_commit_sha: sha, product }],
-    ['card', id, { state: 'ready', kind: 'undo', queue: 'front', go_free: true, module: 'M-test', product, tier: 2, files, pr, merge_commit_sha: sha, reverses: `MG-${id}`, changed_at: iso(T0 - 600_000), ...over }]];
+  const target = UNDO_TARGET(id);
+  return [
+    ['card', target, { state: 'merged', module: 'M-test', product, tier: 2, files, merge_commit: sha }],
+    ['merge', `MG-${id}`, { state: 'merged', card: target, pr, merge_commit: sha, product }],
+    ['ask', UNDO_ASK(id), { state: 'answered', kind: 'undo', card: target, choices: ['Undo', 'Keep'], answer: { channel: 'tap', choice: 'Undo', approves: true, at: iso(T0 - 700_000) } }],
+    ['card', id, { state: 'ready', kind: 'exact_reverse', source: { ask: UNDO_ASK(id) }, module: 'M-test', product, tier: 2, files, what: `undo PR ${pr}`, changed_at: iso(T0 - 600_000), ...over }],
+  ];
 }
 export const filesOfCommits = (sha) => { if (!commitFiles.has(sha)) throw new Error(`no such commit ${sha}`); return commitFiles.get(sha); };
 
