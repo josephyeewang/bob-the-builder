@@ -14,7 +14,7 @@ import { tempDir } from '../../../shared/test-tmp.mjs';
 const tmp = () => tempDir('orch-set-');
 
 const PATHS = {
-  copy: '/w/copy', outbox: '/w/outbox', hooksDir: '/w/hooks', snapshot: '/w/rules.json', node: '/w/node',
+  copy: '/w/copy', outbox: '/w/outbox', hooksDir: '/w/hooks', snapshot: '/w/rules.json', node: '/w/node', notes: '/w/notes',
   deny: { secrets: ['/w/secrets'], claudeHome: '/h/.claude', ssh: '/h/.ssh', gh: '/h/.config/gh', robotKeys: '/w/keys', record: '/w/record', otherCopies: ['/w/copy2'] },
   bobFolder: '/w/bob', mirror: '/w/mirror.git',
   reviewWalls: { outboxRoot: '/r/outbox', runnerRoot: '/r/review' },
@@ -41,7 +41,7 @@ test('a published profile can never widen a role', () => {
   const w = DESIGN_PROFILES.worker;
   assert.match(checkProfile('worker', { ...w, tools: [...w.tools, 'Agent'] }).reason, /never-list/);
   assert.match(checkProfile('lead', { ...DESIGN_PROFILES.lead, tools: [...DESIGN_PROFILES.lead.tools, 'Bash'] }).reason, /outside the design/);
-  assert.match(checkProfile('worker', { ...w, outbox: ['report', 'roadmap'] }).reason, /outbox kinds/);
+  assert.match(checkProfile('worker', { ...w, outbox: ['report-', 'roadmap-'] }).reason, /outbox kinds/);
   assert.match(checkProfile('worker', { ...w, mode: 'bypassPermissions' }).reason, /mode/);
   assert.match(checkProfile('worker', { ...w, restricted: false }).reason, /not restricted/);
   assert.match(checkProfile('worker', { ...w, compactWindow: 0 }).reason, /compaction/);

@@ -9,8 +9,10 @@
 import { writeFileSync, readFileSync, renameSync } from 'node:fs';
 import { join, dirname, basename } from 'node:path';
 import { SETTINGS as S, HOOK_FIELDS as H, HOOK_EVENTS as E, ENV, REFUSED_SETTINGS } from './settings-names.mjs';
-import { hasShell, DESIGN_PROFILES } from './role-profiles.mjs';
+import { hasShell, DESIGN_PROFILES, shadowKindsFor } from './role-profiles.mjs';
 import { REVIEW_ROLES } from '../../../shared/review-roles.mjs';
+import { noteInOutbox } from '../hooks/compact-note.mjs';
+import { inside } from '../hooks/lib.mjs';
 
 // The review user's own folders (L66 M3): what a verdict counts from. A reviewer runs the change's tests by design, so
 // code a worker wrote runs as `review`; the shell sandbox, for Bash and everything it starts, may write none of them,
@@ -57,7 +59,9 @@ const denyPair = (p) => [`Read(/${abs(p)}/**)`, `Edit(/${abs(p)}/**)`];
 
 /**
  * paths: { copy, outbox, hooksDir, snapshot, node, deny: { secrets: [], claudeHome, ssh, gh, robotKeys, record, otherCopies: [] },
- *          bobFolder?, extraOutboxes?: [], reviewWalls? }
+ *          bobFolder?, extraOutboxes?: [], reviewWalls?, notes? }
+ * notes: the session's own compaction-notes folder, apart from the outbox (L101). Needed by every role whose kinds hold no
+ * `<compactKind>-compact-` kind (all but the worker and the Front Door), refused without: their note never goes in the outbox.
  * reviewWalls { outboxRoot, runnerRoot }: needed for a reviewer or auditor (L66 M3), refused without. runnerRoot is the
  * review runner's folder (its config's `root`).
  * product: { commands, hosts }         rulesHosts: the rules' allowed hosts; registryHosts: allowed during install only
@@ -111,19 +115,33 @@ export function renderRoleSettings({ role, profile, paths, product = {}, rulesHo
   }
 
   // Hook arguments are words, so no path may hold a space or a shell character.
-  for (const p of [paths.node, paths.hooksDir, paths.outbox, paths.snapshot, paths.copy]) {
+  for (const p of [paths.node, paths.hooksDir, paths.outbox, paths.snapshot, paths.copy, paths.notes]) {
     if (p !== undefined && (typeof p !== 'string' || !p.startsWith('/') || /[^A-Za-z0-9._/-]/.test(p))) return refuse(`path "${p}" is not a plain absolute path`);
+  }
+  // Where the compaction note goes (L101): the outbox only for a role with a -compact- kind; any other role names its
+  // notes folder, apart from the outbox, neither inside the other.
+  let notesArg = '';
+  if (!noteInOutbox(profile.compactKind, profile.outbox)) {
+    if (paths.notes === undefined) return refuse(`a ${role}'s compaction note is kept outside the outbox, and no notes folder was given`);
+    if (inside(paths.notes, paths.outbox) || inside(paths.outbox, paths.notes)) return refuse('the notes folder must be apart from the outbox');
+    notesArg = ` --notes ${paths.notes}`;
   }
   // Only a worker and the writer change files in a code copy; every other role writes its outbox only.
   const copyArg = ['worker', 'writer'].includes(role) ? ` --copy ${paths.copy}` : '';
+  // The longer listed kinds this role may not hand in, so the hook reads a name's kind as M9 does (L82 M-1).
+  // Kept on purpose as the general guard (L121 cosmetic): today every such kind is a `-compact-` kind (report-compact-
+  // for the reviewer, scout, writer, thinking role and scripts), which the compaction rule alone already keeps from
+  // matching; this list also covers a longer kind added later that is not a compaction kind.
+  const shadow = shadowKindsFor(role, profile.outbox);
+  const notKinds = shadow.length ? ` --not-kinds ${shadow.join(',')}` : '';
   const hookCmd = (name, extra = '') =>
-    `${paths.node} ${join(paths.hooksDir, `${name}.mjs`)} --role ${role} --outbox ${paths.outbox} --snapshot ${paths.snapshot} --kinds ${profile.outbox.join(',')}${copyArg}${extra}${HOOK_FAILS_CLOSED}`;
+    `${paths.node} ${join(paths.hooksDir, `${name}.mjs`)} --role ${role} --outbox ${paths.outbox} --snapshot ${paths.snapshot} --kinds ${profile.outbox.join(',')}${notKinds}${copyArg}${extra}${HOOK_FAILS_CLOSED}`;
   const hooks = { [E.preToolUse]: [] };
   for (const [name, matcher] of Object.entries(POLICY_HOOKS)) {
     hooks[E.preToolUse].push({ [H.matcher]: matcher, [H.hooks]: [{ [H.type]: 'command', [H.command]: hookCmd(name), [H.timeout]: HOOK_TIMEOUT, [H.onFailure]: 'block' }] });
   }
   for (const [event, matcher] of COMPACT_HOOKS) {
-    (hooks[event] ??= []).push({ [H.matcher]: matcher, [H.hooks]: [{ [H.type]: 'command', [H.command]: hookCmd('compact-note', ` --kind ${profile.compactKind} --event ${event}`), [H.timeout]: HOOK_TIMEOUT, [H.onFailure]: 'block' }] });
+    (hooks[event] ??= []).push({ [H.matcher]: matcher, [H.hooks]: [{ [H.type]: 'command', [H.command]: hookCmd('compact-note', ` --kind ${profile.compactKind} --event ${event}${notesArg}`), [H.timeout]: HOOK_TIMEOUT, [H.onFailure]: 'block' }] });
   }
 
   const settings = {

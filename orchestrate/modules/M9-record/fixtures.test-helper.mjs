@@ -5,6 +5,7 @@ import { createHash } from 'node:crypto';
 import { chmodSync, mkdirSync, readFileSync, readdirSync, realpathSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { planFingerprint } from '../../shared/plan-fingerprint.mjs';
+import { outboxKindOf } from '../../shared/record-names.mjs';
 import { tempDir } from '../../shared/test-tmp.mjs';
 import { openRecord } from './writer.mjs';
 import { HEAD, PRODUCT, UID, rulesFor } from './rules.test-helper.mjs';
@@ -139,7 +140,8 @@ export function runnerLaunch(env, card, sid, role = 'reviewer', head = HEAD, { t
 export function verdictShaNow(env, role, sid) {
   const dir = join(env.outRoot, role, sid);
   let names = [];
-  try { names = readdirSync(dir).filter((n) => n.startsWith('verdict-')); } catch { names = []; }
+  // The one kind rule (L101): a verdict-compact- note is no verdict.
+  try { names = readdirSync(dir).filter((n) => outboxKindOf(n) === 'verdict-'); } catch { names = []; }
   return names.length === 1 ? createHash('sha256').update(readFileSync(join(dir, names[0]))).digest('hex') : 'none';
 }
 export function runnerEndedRecord(env, card, sid, role = 'reviewer', head = HEAD, { sha, tree } = {}) {

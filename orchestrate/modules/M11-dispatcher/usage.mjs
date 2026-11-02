@@ -25,7 +25,7 @@ export const BAND_FACT = 'band-usage';
 const pct = (x) => typeof x === 'number' && Number.isFinite(x) && x >= 0 && x <= 100;
 const time = (s) => (typeof s === 'string' && /^\d{4}-\d\d-\d\dT/.test(s) ? Date.parse(s) : NaN);
 
-/** Checks the fact's shape and age. Returns { ok, week, h5, weekResets, reason }. */
+/** Checks the fact's shape and age. Returns { ok, week, h5, weekResets, observedAt, reason }. */
 export function readFact(fact, { account, now, staleMs }) {
   if (!account) return { ok: false, reason: 'no signed-in account is known' };
   const d = fact?.doc;
@@ -42,7 +42,7 @@ export function readFact(fact, { account, now, staleMs }) {
     if (r <= now) return { ok: false, reason: `the ${name} window has reset since the reading` };
     if (r - now > span) return { ok: false, reason: `the ${name} reset time is further away than the window` };
   }
-  return { ok: true, week: d.week.used_pct, h5: d.h5.used_pct, weekResets: time(d.week.resets_at) };
+  return { ok: true, week: d.week.used_pct, h5: d.h5.used_pct, weekResets: time(d.week.resets_at), observedAt: d.observed_at };
 }
 
 /**
@@ -57,7 +57,7 @@ export function bands({ rules, reading, now }) {
     prodAbove: need(rules, KEYS.noTier1ProdAbove), paceMin: need(rules, KEYS.paceMinShare),
   };
   if (!reading.ok) {
-    return { band: 'unknown', own_building: 'unknown', pace: null, prodBlocked: true, reason: reading.reason };
+    return { band: 'unknown', own_building: 'unknown', pace: null, prodBlocked: true, read_at: null, reason: reading.reason };
   }
   const { week, h5, weekResets } = reading;
   // Share of the week gone, from the weekly reset time (M1). Pace counts only once the floor is
@@ -82,7 +82,7 @@ export function bands({ rules, reading, now }) {
   // Own building never moves `band` (M3: Joe's tabs read band). The review's M2 also lists it as an
   // amber trigger, but its own plant (week 50 → green) needs it kept apart; see README.
   if (own !== 'open') why.push(`own building ${own}`);
-  return { band, own_building: own, pace, week, h5, prodBlocked: week > t.prodAbove || h5 > t.prodAbove, reason: why.join(', ') || 'within every line' };
+  return { band, own_building: own, pace, week, h5, prodBlocked: week > t.prodAbove || h5 > t.prodAbove, read_at: reading.observedAt ?? null, reason: why.join(', ') || 'within every line' };
 }
 
 /** Reads the fact and works out the bands. */
