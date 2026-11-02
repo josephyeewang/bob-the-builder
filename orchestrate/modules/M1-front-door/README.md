@@ -44,7 +44,10 @@ R-0b-82's decision and handoff code sit here although the row is tagged M11 (lan
 3. Lane 2: stop and start the Front Door under its fixed name when `shouldRestartFrontDoor` says so, and deliver
    `makeFrontDoorHandoff`'s text (first prompt, or a read-only file outside the outbox).
 4. Lane 2: each Ledger pass calls `nextTripPush({ states, lastPushedIds, lastFailedIds, build })` (`states`: `{ id, state }` of the
-   newest checked `state-` file per product, of which only `away` ones count; `build` = `buildTripBrief` with those ids). A result is sent to the owner's
+   newest **stored** `state-` file per product, of which only `away` ones count; `build` = `buildTripBrief` with those ids).
+   **This waits on the pause/away apply join item** (#95's item 13: approvals writes the product's state from each
+   `state-` file and the record stores it). Until then the record refuses `state-`, so a pass fed intake-checked files
+   would tell the owner "Trip mode: X set to away…" for a file that was refused (#95 r2 m4). A result is sent to the owner's
    phone over the Front Door's push path and its `ids` stored as `lastPushedIds` (lead call L22); a result with
    `failed: true` (the brief couldn't be built) is pushed too, but its `ids` go to `lastFailedIds`, never
    `lastPushedIds`, so the next passes keep trying and push the real brief once it builds; pass both lists back in
