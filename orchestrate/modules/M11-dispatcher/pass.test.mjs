@@ -7,6 +7,7 @@ import { OUTAGE_FACT } from './outage.mjs';
 import { retellWaits, WAIT_TELL_FACT } from './joe-waits.mjs';
 import { KEYS as K } from './keys.mjs';
 import { makeRules } from '../../shared/rules.mjs';
+import { fakeAlert } from '../../test/fake-alert.test-helper.mjs';
 import { change, rulesWith, realEngine, recWith, seed, usageFact, undoEntries, filesOfCommits, T0, MIN, H, iso, withAlerts, setClock } from './fixtures.test-helper.mjs';
 
 // Each step runs as the tick runs it: its alerts are queued, then sent once it is done (alerts.mjs, L47).
@@ -855,6 +856,26 @@ test('r4 MAT-5: during an outage the undo starts start nothing', async () => {
   const r2 = await undoStarts({ rec, rules: rulesWith({}, { start_session: { decision: 'allow', reason: 'ok' } }), now: T0, bands: { band: 'green', own_building: 'open', prodBlocked: false },
     running: [], launch: async (x) => { launched.push(x.card.id); return { ok: true, sessionId: x.sessionId, pid: 4242, pidStart: 's4242', head: 'h'.repeat(40) }; }, filesOf: filesOfCommits, alert: () => {} });
   assert.deepEqual(r2.started, ['U-1']);
+});
+
+// L199 (1): the first cutover's caps.editing_per_product is 0. The real undo start still starts Joe's Undo, one per
+// product at a time: a second undo card on the product waits (Joe is told why), and starts once the first has ended.
+test('L199: at editing cap 0 the undo start starts one undo per product; the second waits its turn', async () => {
+  const rec = recWith([['product', 'p1', { state: 'active' }], ...undoEntries('U-1'), ...undoEntries('U-2')]);
+  const rules = rulesWith({ [K.editingPerProduct]: 0 }, { start_session: { decision: 'allow', reason: 'ok' } });
+  const launched = [];
+  const ask = (running) => undoStarts({ rec, rules, now: T0, bands: { band: 'green', own_building: 'open', prodBlocked: false }, running,
+    launch: async (x) => { launched.push([x.card.id, x.kind]); return { ok: true, sessionId: x.sessionId, pid: 4242, pidStart: 's4242', head: 'h'.repeat(40) }; },
+    filesOf: filesOfCommits, alert: fakeAlert() });
+  const r = await ask([]);
+  assert.deepEqual(r.started, ['U-1']);
+  assert.deepEqual(launched, [['U-1', 'undo']]);
+  assert.deepEqual(r.missing, []);
+  assert.deepEqual(r.refused, [['U-2', 'the product already runs 1 undo(s) (one at a time)']]);
+  assert.equal(rec.read('card', 'U-2').doc.state, 'ready');
+  // The first undo over (no longer running), the second starts.
+  const r2 = await ask([]);
+  assert.deepEqual(r2.started, ['U-2']);
 });
 
 test('r4 Minor: usage unread for over a day is told again each day it lasts', async () => {

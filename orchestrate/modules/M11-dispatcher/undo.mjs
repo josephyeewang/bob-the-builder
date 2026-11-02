@@ -25,6 +25,17 @@ export const REVERSE_FACT = (undoId) => `reverse-${undoId}`;
 /** The note that Joe was told of an undo's fix card (D8), the mark of that alert (L127). */
 export const UNDO_NOTE_FACT = (undoId) => `undo-note-${undoId}`;
 const MERGED = ['merged', 'audited_ok', 'audit_flagged'];
+/** The undo card is Tier 2: the docs lane takes an exact reverse only when its card declares Tier 2 (M6 README, L199). */
+export const UNDO_TIER = 2;
+/**
+ * The one shape of an undo card, written in draft. Tests build their undo cards with it too, so a card a test
+ * starts from is the card this file writes (Principle 10, L199).
+ */
+export function undoCardDoc({ askId, files, target, pr, commit }) {
+  return { state: 'draft', kind: 'exact_reverse', tier: UNDO_TIER, source: { ask: askId }, files, product: target.doc.product ?? null,
+    module: target.doc.module ?? null, what: `undo PR ${pr ?? '?'} (merge ${short(commit)} of card ${target.id})` };
+}
+
 const SHA = /^[0-9a-f]{40}$/;
 const short = (s) => String(s ?? '').slice(0, 7);
 
@@ -76,8 +87,7 @@ async function tap({ rec, rules, now, filesOf, alert, out, held, id, doc }) {
     const files = filesOf(commit);
     if (!Array.isArray(files)) return await held('files', 'the reversed commit\'s files could not be read');
     const w = rec.write({ actor: 'dispatcher', entity: 'card', id: cardId, expectRev: 0, kind: 'undo_card',
-      doc: { state: 'draft', kind: 'exact_reverse', source: { ask: id }, files, product: target.doc.product ?? null, module: target.doc.module ?? null,
-        what: `undo PR ${m.doc.pr ?? '?'} (merge ${short(commit)} of card ${target.id})` } });
+      doc: undoCardDoc({ askId: id, files, target, pr: m.doc.pr, commit }) });
     if (!w.ok) {
       // Joe tapped Undo: a card that cannot be written (say, its module is unknown) is told to him, once a day.
       out.push([id, `undo card not recorded: ${w.reason}`]);
