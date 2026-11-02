@@ -167,10 +167,15 @@ export function makeEngine({ products, rulesState, productState, running, rolesD
     // safety acts are never held, and pausing is often the moment Joe wants to undo (L31, L199, L210). This is the rule
     // push_branch and merge already keep: an exact reverse passes the paused floor and the file's state rule (here
     // `start: none`, as merge passes `undo_only`). Its own limit instead: at most one undo running per product. A
-    // running undo still counts toward the caps for every other editing start (the running port counts it). M11
-    // gate.mjs keeps the same rule. The card's kind is only the claim; the Dispatcher checks it is an exact reverse
-    // before the start (L40).
-    const undo = editing && s.card?.kind === 'exact_reverse';
+    // running undo still counts toward the caps for every other editing start (the running port counts it). This
+    // matches M11's gate after #117 (lane 2, L199). The card's kind is only the claim; the Dispatcher checks it is an
+    // exact reverse before the start (L40). Only a worker runs an undo: no other role starts under this exception (L220).
+    // An undo starts only where its merge could land: the state's tier1_merge must be a rule merge knows, so a typo
+    // there refuses the undo's start as the docs-lane merge refuses it (L220 M1).
+    const undo = editing && role === 'worker' && s.card?.kind === 'exact_reverse';
+    if (undo && !['rules', 'tier1_hours_only', 'undo_only'].includes(at(pol, `product_state_rules.${state}.tier1_merge`))) {
+      return deny(`product_state_rules.${state}.tier1_merge is not a known rule`);
+    }
     if (!undo && (!floor.start || fileRule === 'none')) return deny(`product is ${state}: no starts`);
     if (undo && count({ product, undo: true }) >= 1) return deny(`an undo is already running for ${product} (one at a time)`);
 
@@ -186,8 +191,9 @@ export function makeEngine({ products, rulesState, productState, running, rolesD
       if (count({}) >= macCap) return deny(`editing cap reached on this Mac (${macCap})`);
     }
 
-    // Tier 1 needs a fresh usage reading (A8).
-    if (tier === 1) {
+    // Tier 1 needs a fresh usage reading (A8). Not an undo: M11 already exempts undos from the usage bands, and a
+    // missing or stale reading must not hold a safety act (L31, L220).
+    if (tier === 1 && !undo) {
       const staleMin = macValue('usage.stale_after_min');
       const readAt = Date.parse(s.usage?.read_at ?? '');
       const now = clock();
