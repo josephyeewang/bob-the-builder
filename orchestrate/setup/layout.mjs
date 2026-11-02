@@ -37,6 +37,9 @@ const BASE = /^\/[A-Za-z0-9._/-]+$/;
 export const FORBIDDEN_UNDER = Object.freeze(['/Users', '/Applications', '/tmp', '/private/tmp', '/var/tmp', '/private/var/tmp', '/Volumes', '/opt', '/usr/local']);
 
 /** The checked config, or a thrown Error naming the first problem. */
+/** The one owner/name check (L194 m3): the config loader and watch-rules --print-config-line both use it, so a line printed is one the loader takes. */
+export const isRepoName = (r) => typeof r === 'string' && /^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/.test(r) && !r.split('/').some((x) => x === '.' || x === '..');
+
 export function parseConfig(raw) {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('config: expected an object with base, owner and products');
   const { base, owner, products = [], proposalsParent, watch } = raw;
@@ -60,7 +63,7 @@ export function parseConfig(raw) {
   if (watch !== undefined) {
     const ok = watch && typeof watch === 'object' && !Array.isArray(watch) && Object.keys(watch).every((k) => ['repo', 'rulesSha256'].includes(k));
     const r = ok ? watch.repo : undefined;
-    if (typeof r !== 'string' || !/^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/.test(r) || r.split('/').some((x) => x === '.' || x === '..')) throw new Error('config: watch.repo must look like owner/name');
+    if (!isRepoName(r)) throw new Error('config: watch.repo must look like owner/name');
     if (watch.rulesSha256 !== undefined && (typeof watch.rulesSha256 !== 'string' || !/^[0-9a-f]{64}$/.test(watch.rulesSha256))) throw new Error('config: watch.rulesSha256 must be 64 hex characters');
   }
   return { base: b, owner, products: [...products], ...(proposalsParent !== undefined ? { proposalsParent } : {}), ...(watch !== undefined ? { watch: { repo: watch.repo, ...(watch.rulesSha256 !== undefined ? { rulesSha256: watch.rulesSha256 } : {}) } } : {}) };

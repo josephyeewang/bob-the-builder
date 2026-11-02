@@ -151,9 +151,12 @@ export function planToken(io, cfg) {
     const bad = tokenProblem(t); if (bad) { t = ''; throw new Error(bad); }
     let st = null; try { st = io.lstat(f); } catch { /* not there */ }
     if (st && st.isDirectory() && !st.isSymbolicLink()) { t = ''; throw new Error(`${f} is now a folder; nothing was saved`); }
-    io.unlink(f);   // one name, plain unlink: never a folder's contents, never through a link
-    io.writeOwned(f, `${t}\n`, { uid: orch.uid, gid: orch.gid, mode: 0o600 });   // owner and mode set on the open handle, before the first byte
-    t = '';
+    // The new token goes to a side name first and is then renamed over the old one, so a write that fails keeps the token that
+    // works (L194). A leftover side name from a cut-off run is only a name: plain unlink, never a folder's contents, never through a link.
+    const tmp = `${f}.new`;
+    io.unlink(tmp);
+    try { io.writeOwned(tmp, `${t}\n`, { uid: orch.uid, gid: orch.gid, mode: 0o600 }); } finally { t = ''; }   // owner and mode set on the open handle, before the first byte; exclusive create
+    try { io.rename(tmp, f); } catch (e) { io.unlink(tmp); throw new Error(`the new token could not take the old one's place (${e?.code ?? 'error'}); the old token file is unchanged`); }
   })], problems: [] };
 }
 

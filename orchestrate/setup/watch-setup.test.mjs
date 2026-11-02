@@ -11,7 +11,7 @@ import { ROOT_CONFIG_PATH, folderTable, parseConfig, watchNotesPath, watchRulesP
 import { parseInstallConfig } from './install.mjs';
 import { jobsFor, plistTexts, checkDaemons, planPlace, planLoad, planUnload } from './daemons.mjs';
 import { readConfigFile, realIo } from './mac.mjs';
-import { checkWatchRules, planWatchRules, watchPlist, WATCH_RUN } from './watch-setup.mjs';
+import { checkWatchRules, planWatchRules, watchConfigLine, watchPlist, WATCH_RUN } from './watch-setup.mjs';
 import { main, parseArgs } from './setup.mjs';
 import { fakeMac, macTest as test } from './fake-mac.test-helper.mjs';
 import { tempDir } from '../shared/test-tmp.mjs';
@@ -367,4 +367,25 @@ test('L181 m-C: check-watch-rules reads one handle: a name swapped to a link or 
     const res = checkWatchRules(w.mac, cfg);
     assert.equal(res[0].ok, false, `${kind}: ${JSON.stringify(res)}`);
   }
+});
+
+// ───────────────────────────── L194 ─────────────────────────────
+
+test('L194 m3 PLANT one owner/name check: print-config-line prints a line for exactly the names the config loader takes', () => {
+  const names = ['example-org/example-repo', 'a/b', '.x/y', 'x/.y', 'o/' + 'n'.repeat(100), 'o/' + 'n'.repeat(101), 'o'.repeat(101) + '/n', 'x/..', './y', 'no-slash', 'a/b/c', 'a /b', '', 'a/'];
+  for (const repo of names) {
+    let loads = true; try { parseConfig({ ...RAW, watch: { repo } }); } catch { loads = false; }
+    const r = watchConfigLine({}, { repo, source: '/x', readSource: () => RULES });
+    assert.equal(Boolean(r.line), loads, `${JSON.stringify(repo)}: print-config-line ${r.line ? 'prints a line' : 'refuses'}, the config loader ${loads ? 'takes' : 'refuses'} it`);
+    if (r.line) assert.deepEqual(parseConfig({ ...RAW, ...JSON.parse(`{${r.line.trim().replace(/,$/, '')}}`) }).watch, { repo, rulesSha256: HASH });
+  }
+});
+
+test('L194 PLANT the rules copy must be root:wheel: a copy in another group FAILS the check, and watch-rules puts it right (not "nothing to do")', () => {
+  const w = world(); assert.equal(w.run(['watch-rules', '--rules-source', w.src]).code, 0);
+  const p = watchRulesPath(w.cfg); w.mac.owners.set(p, { uid: w.mac.rootUid, gid: 20 });
+  assert.match(failing(checkWatchRules(w.mac, w.cfg))[0].why, /group is gid 20, not wheel/);
+  const r = w.run(['watch-rules', '--rules-source', w.src]); assert.equal(r.code, 0, r.text); assert.doesNotMatch(r.text, /nothing to do/);
+  assert.deepEqual(w.mac.owners.get(p), { uid: w.mac.rootUid, gid: 0 });
+  assert.deepEqual(failing(checkWatchRules(w.mac, w.cfg)), []);
 });

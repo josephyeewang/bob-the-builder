@@ -911,3 +911,31 @@ test('L180 m5c writeNewFile with `own` never touches the name again after the ha
   assert.equal(statSync(`${f}.moved`).mode & 0o7777, 0o640, 'the handle got the mode');
   assert.equal(statSync(f).mode & 0o7777, 0o600, 'the file swapped in at the name was touched by name'); assert.equal(readFileSync(f, 'utf8'), 'decoy\n');
 });
+
+// ───────────────────────────── L194: reload-account runs load's install check, and does nothing when there is nothing to do ─────────────────────────────
+
+test('L194 M1 PLANT reload-account refuses unless the install check passes, as load does: a copy others can write is never reloaded', async () => {
+  const w = await placed(); assert.equal(w.run(['daemons', 'load']).code, 0);
+  chmodSync(copyOf(w), 0o777); const n = w.mac.log.length;
+  const r = w.run(['daemons', 'reload-account']);
+  assert.equal(r.code, 1, r.text); assert.match(r.text, /the install check fails/);
+  assert.ok(!w.mac.log.slice(n).some((l) => /^launchctl (bootout|bootstrap)/.test(l)), 'a job was unloaded or loaded against a copy others can write');
+  const d = w.run(['daemons', 'reload-account', '--dry-run']); assert.equal(d.code, 1, d.text); assert.match(d.text, /the install check fails/);
+  chmodSync(copyOf(w), 0o755); assert.equal(w.run(['daemons', 'reload-account']).code, 0);
+});
+
+test('L194 m1 reload-account run again with nothing to change has no steps: the job (and any pass it is running) is left alone', async () => {
+  const w = await placed(); assert.equal(w.run(['daemons', 'load']).code, 0);
+  assert.equal(w.run(['daemons', 'reload-account']).code, 0);
+  const n = w.mac.log.length;
+  const r = w.run(['daemons', 'reload-account']); assert.equal(r.code, 0, r.text);
+  assert.deepEqual(w.mac.log.slice(n).filter((l) => /^launchctl (bootout|bootstrap)/.test(l)), []);
+  assert.ok(w.mac.loaded.has(`${LABEL}.review-account`)); assert.deepEqual(failed(checkDaemons(w.mac, w.cfg)), []);
+  // a job file changed on disk since the load is still reloaded
+  const f = plistFile(w, 'review-account'); const good = readFileSync(f, 'utf8');
+  rmSync(f); writeFileSync(f, good.replace('</dict>', '<key>Nice</key><integer>1</integer></dict>'), { mode: 0o644 });
+  const m = w.mac.log.length;
+  assert.equal(w.run(['daemons', 'reload-account']).code, 0);
+  assert.ok(w.mac.log.slice(m).some((l) => /^launchctl bootstrap/.test(l)), 'a changed file was not reloaded');
+  assert.equal(readFileSync(f, 'utf8'), good);
+});

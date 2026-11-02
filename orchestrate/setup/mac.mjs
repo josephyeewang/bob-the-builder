@@ -25,7 +25,7 @@
 // swap a child for a link between the plan and the change. Every change opens the folder itself (O_NOFOLLOW, folder
 // only), checks it is the very folder the plan saw, and changes it through that handle.
 
-import { unlinkSync, closeSync, constants, cpSync, fchmodSync, fchownSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, readlinkSync, realpathSync, rmSync, writeSync } from 'node:fs';
+import { renameSync, unlinkSync, closeSync, constants, cpSync, fchmodSync, fchownSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, readlinkSync, realpathSync, rmSync, writeSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { dirname, join } from 'node:path';
 import { chainProblem } from '../modules/M4-workshop/launcher/install-check.mjs';
@@ -182,6 +182,7 @@ export function realIo({ prefix = '' } = {}) {
     write: (p, text, mode) => writeNewFile(at(p), text, mode),
     writeOwned: (p, text, own) => writeNewFile(at(p), text, own.mode, own),
     unlink: (p) => { try { unlinkName(at(p)); } catch (e) { if (e?.code !== 'ENOENT') throw e; } },
+    rename: (from, to) => renameSync(at(from), at(to)),   // one name over another in the same folder: a link at `to` is replaced, never followed; a folder there refuses
     copyFile: (src, p, mode) => writeNewFile(at(p), readFileSync(src), mode),
     copyTree: (src, p) => cpSync(src, at(p), { recursive: true, dereference: false, errorOnExist: true, force: false }),
     rm: (p) => rmSync(at(p), { recursive: true, force: true }),
