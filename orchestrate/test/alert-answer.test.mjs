@@ -97,6 +97,18 @@ test('controls: a stand-in not made by fakeAlert() is seen; fakeAlert() is not',
     assert.equal(d(x), 1, `L143: ${x}`);
   }
   assert.equal(d('const alert = ctx.alert ?? (() => false);'), 0);
+  // L155 m1 (the auditor's N09-N11): decided by calling the default once in a sandbox, not by its spelling.
+  for (const x of ['const alert = ctx.alert || (() => true);', 'const alert = ctx.alert || (() => {});', "const alert = ctx.alert ?? (() => 'sent');",
+    'const alert = ctx.alert ?? function () { return true; };', 'const alert = ctx.alert ?? (() => !0);', 'const alert = ctx.alert ?? (async () => true);',
+    'const quiet = () => 1;\nrun({ alert: ctx.alert ?? quiet });', 'function quiet() { return [] }\nrun({ alert: quiet });', 'run({ alert: console.log });',
+    'export function f({ notifyOwner = () => true }) {}', 'run({ alert: (t) => { log(t); return "queued"; } });']) {
+    assert.equal(d(x), 1, `L155 m1: ${x}`);
+  }
+  for (const x of ['const alert = ctx.alert ?? (() => { throw new Error("no alert port"); });', 'const alert = ctx.alert ?? (async () => false);',
+    'run({ alert: (t) => outbox.send(t) });', 'run({ alert: tellIt });', 'const alerts = { raise };', 'run({ alert: ctx.alert ?? ((t) => queue.push(t) && false) });']) {
+    assert.equal(d(x), 0, `L155 m1, not silent: ${x}`);
+  }
+  assert.match(silentDefaults("const alert = ctx.alert ?? (() => 'sent');")[0].why, /answers 'sent'/, 'it says what the default answered');
 });
 
 // ---- fakeAlert itself ----
