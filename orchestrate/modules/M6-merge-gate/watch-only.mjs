@@ -37,7 +37,7 @@ import { parsePolicy } from '../M10-rules/policy.mjs';
 import { MAX_BYTES, RULES_PATH, blobSha, findApprovingPull } from '../M10-rules/reader.mjs';
 import { approveNeeded } from '../M2-approvals/go.mjs';
 import { makeRules } from '../../shared/rules.mjs';
-import { botId, checksAt, linesOf, statusesAt, threads as threadsOf, threadsQuery } from './gather.mjs';
+import { botId, checksAt, failedRead, linesOf, statusesAt, threads as threadsOf, threadsQuery } from './gather.mjs';
 import { judge } from './refusals.mjs';
 
 export const NOT_JUDGED = Object.freeze([2, 3, 5, 10, 11, 12, 13]);
@@ -186,7 +186,7 @@ export function judgeMerged(facts, rules) {
     main: { green: true }, request: null, go: { ok: true, skipped: true }, compareStatus: 'ahead', rulesAdopted: true, exactReverse: false, reviews: [], movesSinceRequest: [],
     checks: facts.checks, statuses: facts.statuses, requiredChecks: Array.isArray(required) ? required : null,
     checksIgnored: Array.isArray(ignoredRaw) ? ignoredRaw.map((x) => ({ app_id: botId({ bot_user_id: x?.app_id }), name: x?.name })) : [],
-    filesProblem: facts.filesProblem ?? (files ? null : 'unread'), filesMissing: facts.filesMissing, checksTooLong: facts.checksTooLong,
+    filesProblem: facts.filesProblem ?? (files ? null : 'unread'), filesMissing: facts.filesMissing, checksTooLong: facts.checksTooLong, checksCutOff: facts.checksCutOff, judgedOnMain: true,
     threads: facts.threads, files, firstCustomerNewFiles: Array.isArray(fcv) ? fcv : null, tier, lane,
     approve: { needed: need.needed, why: need.why, stands: false, reason: null },
   };
@@ -241,14 +241,23 @@ export async function gatherMerged({ gh, owner, repo, policy, sha, now = () => D
       } catch (e) { fail('the files', e); }
     }
     let checksTooLong;
-    const list = async (read, what) => { try { return await read(gh, base, headSha); } catch (e) { if (e?.tooLong) { checksTooLong = String(e.message); return null; } return fail(what, 'status' in Object(e) ? `HTTP ${e.status}` : e); } };
+    let checksCutOff;
+    // A list GitHub answered but cut off (its count doesn't match it) is not a failed read (L190 minor a): the gate waits
+    // on it and refuses it at the cap (refusal 1), so for a commit already on main that is the gate's verdict.
+    const list = async (read, what) => {
+      try { return await read(gh, base, headSha); } catch (e) {
+        if (e?.tooLong) { checksTooLong = String(e.message); return null; }
+        if (!failedRead(e)) { checksCutOff = failText(e); return null; }
+        return fail(what, Number.isInteger(e?.status) ? `HTTP ${e.status}` : e);
+      }
+    };
     const checks = await list(checksAt, 'the check runs');
     const statuses = await list(statusesAt, 'the statuses');
     let threads;
     try { threads = await threadsOf(gh, owner, repo, num); } catch (e) { if (e?.unreadable) throw e; fail('the review threads', e); }
     return {
       direct: false, sha, pr: num, mergedAt: pr.merged_at ?? null, mergedBy: pr.merged_by?.login ?? null, prBase: pr.base?.ref ?? null, headSha, checks, statuses, threads, files,
-      filesProblem: files ? null : tooMany ? 'too_many' : noEntry ? 'no_entry' : 'unread', ...(noEntry ? { filesMissing: noEntry } : {}), ...(checksTooLong ? { checksTooLong } : {}),
+      filesProblem: files ? null : tooMany ? 'too_many' : noEntry ? 'no_entry' : 'unread', ...(noEntry ? { filesMissing: noEntry } : {}), ...(checksTooLong ? { checksTooLong } : {}), ...(checksCutOff ? { checksCutOff } : {}),
       labels: (pr.labels ?? []).map((l) => l?.name).filter((n) => typeof n === 'string'),
     };
   } catch (e) { if (e?.unreadable) return { unreadable: e.message }; throw e; }

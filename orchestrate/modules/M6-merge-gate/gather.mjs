@@ -61,9 +61,23 @@ export function recordView(record) {
 // not a failed read, so it is never waited out: the refusal it leads to is final and tells the owner to split.
 const tooLong = (message) => Object.assign(new Error(message), { tooLong: true });
 
+// A read that FAILED, as against one that GitHub answered but that came back incomplete (L186, L190 M3/M4). A failed
+// read says nothing about the change, so for the wait cap it is a pass with GitHub unreadable; an incomplete answer
+// (a count that doesn't match its list) counts toward the cap. Failed: the client threw, GitHub answered other than
+// 200, or the answer had no body or not the shape asked for. Read from the error the reader threw: gather's own
+// readers mark it (`unreadable`); M10's git view says "GitHub answered <status> for <path>"; an HTTP code in the
+// message, or a fetch that timed out or never connected, is one too. CHECKED AGAINST M10 git-view.mjs as of L190: its
+// failed read is that one message, and its truncated tree ("file list ... is cut off") and odd answers are not, so a
+// failed tree read is now a pass with GitHub unreadable and a truncated one counts toward the cap (this retires L186's
+// tree to-do). Void if git-view's wording changes; git-view marking its failed reads (err.status) would end the coupling.
+export const failedRead = (e) => e?.unreadable === true || Number.isInteger(e?.status)
+  || ['AbortError', 'TimeoutError'].includes(e?.name) || /^(HTTP \d+|GitHub answered |fetch failed)/.test(String(e?.message ?? ''));
+const failed = (message) => Object.assign(new Error(message), { unreadable: true });
+
 async function json(gh, path) {
-  const r = await gh.get(path);
-  if (r?.status !== 200 || r.json === undefined || r.json === null) throw Object.assign(new Error(`${path} answered ${r?.status}`), { status: r?.status });
+  let r;
+  try { r = await gh.get(path); } catch (e) { throw failed(`${path} could not be read: ${String(e?.message ?? e).slice(0, 200)}`); }
+  if (r?.status !== 200 || r.json === undefined || r.json === null) throw Object.assign(new Error(`${path} answered ${r?.status}`), { status: r?.status, unreadable: true });
   return r.json;
 }
 
@@ -72,14 +86,16 @@ const checkRun = (c) => ({ name: c?.name, app_id: c?.app?.id, head_sha: c?.head_
 export async function checksAt(gh, base, sha) {
   const j = await json(gh, `${base}/commits/${sha}/check-runs?per_page=${MAX_LIST}`);
   if (Array.isArray(j.check_runs) && Number.isInteger(j.total_count) && j.total_count >= MAX_LIST) throw tooLong(`${j.total_count} check runs; the gate reads at most ${MAX_LIST - 1}`);
-  if (!Array.isArray(j.check_runs) || !Number.isInteger(j.total_count) || j.total_count !== j.check_runs.length) throw new Error('the check runs are cut off or unreadable');
+  if (!Array.isArray(j.check_runs) || !Number.isInteger(j.total_count)) throw failed('the check runs answer is not a list with a count');
+  // Answered, but the count doesn't match the list: incomplete, not failed (L190 M3).
+  if (j.total_count !== j.check_runs.length) throw new Error(`the check runs are cut off (${j.check_runs.length} listed of ${j.total_count})`);
   return j.check_runs.map(checkRun);
 }
 
 export async function statusesAt(gh, base, sha) {
   const j = await json(gh, `${base}/commits/${sha}/status?per_page=${MAX_LIST}`);
   if (Array.isArray(j.statuses) && Number.isInteger(j.total_count) && j.total_count >= MAX_LIST) throw tooLong(`${j.total_count} statuses; the gate reads at most ${MAX_LIST - 1}`);
-  if (!Array.isArray(j.statuses)) throw new Error('the statuses are cut off or unreadable');
+  if (!Array.isArray(j.statuses)) throw failed('the statuses answer is not a list');
   return j.statuses.map((s) => ({ context: s?.context, state: s?.state }));
 }
 
@@ -103,15 +119,17 @@ export const linesOf = (patch) => {
   return { added_lines: added, removed_lines: removed };
 };
 
-// A read that FAILED throws (err.unreadable = true, the message starts with the HTTP status); the gate's own callers map any
-// throw to { ok: false } through `attempt`, exactly as before. A list of 100+ threads is a fact, refused for good (L182):
-// { ok: false, tooLong }. A count that doesn't match the list is { ok: false }, a wait.
+// A read that FAILED throws (err.unreadable = true, the message starts with the HTTP status); gather turns that into
+// { ok: false, unreadable: true }. A list of 100+ threads is a fact, refused for good (L182): { ok: false, tooLong }.
+// A count that doesn't match the list was answered but is incomplete (L190 M3): { ok: false, incomplete }, a wait that
+// counts toward the cap.
 export async function threads(gh, owner, repo, pr) {
-  const r = await gh.post('/graphql', { query: threadsQuery, variables: { owner, repo, pr } });
+  let r;
+  try { r = await gh.post('/graphql', { query: threadsQuery, variables: { owner, repo, pr } }); } catch (e) { throw failed(`the review threads could not be read: ${String(e?.message ?? e).slice(0, 200)}`); }
   const t = r?.json?.data?.repository?.pullRequest?.reviewThreads;
-  if (r?.status !== 200 || r.json?.errors || !t || !Array.isArray(t.nodes)) { const e = new Error(r?.status !== 200 ? `HTTP ${r?.status}: the review threads could not be read` : 'GitHub answered 200 but with an error: the review threads could not be read'); e.unreadable = true; throw e; }
+  if (r?.status !== 200 || r.json?.errors || !t || !Array.isArray(t.nodes)) { const e = new Error(r?.status !== 200 ? `${Number.isInteger(r?.status) ? `HTTP ${r.status}` : 'no answer'}: the review threads could not be read` : 'GitHub answered 200 but with an error: the review threads could not be read'); e.unreadable = true; throw e; }
   if (Number.isInteger(t.totalCount) && t.totalCount >= MAX_LIST) return { ok: false, tooLong: `${t.totalCount} review threads; the gate reads at most ${MAX_LIST - 1}` };
-  if (t.totalCount !== t.nodes.length) return { ok: false };
+  if (t.totalCount !== t.nodes.length) return { ok: false, incomplete: `GitHub counts ${t.totalCount} review threads but lists ${t.nodes.length}` };
   // A human thread: its first comment's author is a User. A bot's thread (a linter) is not a person waiting on an answer.
   const unresolved = t.nodes.filter((n) => n?.isResolved !== true && n?.comments?.nodes?.[0]?.author?.__typename !== 'Bot').length;
   return { ok: true, unresolved };
@@ -135,6 +153,9 @@ export async function gatherFacts(ctx, merge) {
   const card = cardEntry && !cardEntry.corrupt ? { id: cardEntry.id, rev: cardEntry.rev, doc: cardEntry.doc } : null;
   const f = { cutoverStage: get('product.cutover_stage') === 'second' ? 'second' : 'first', card };
   if (!card) return f;
+  // The reads that FAILED this pass (failedRead), by name: the gate's `passUnreadable` reads them (L190 M2-M4).
+  f.unreadReads = [];
+  const markFailed = (which, also = () => {}) => (e) => { if (failedRead(e)) f.unreadReads.push(which); also(e); };
   const H0 = card.doc.head;
   const kind = card.doc.kind ?? 'ordinary';
 
@@ -156,10 +177,13 @@ export async function gatherFacts(ctx, merge) {
   // The rules file gives every value as text: an app id is turned into a number here, once, as botId does.
   const ignoredRaw = get('product_profile.checks_ignored');
   f.checksIgnored = Array.isArray(ignoredRaw) ? ignoredRaw.map((x) => ({ app_id: botId({ bot_user_id: x?.app_id }), name: x?.name })) : [];
-  f.main = { sha: mainSha, green: mainSha && f.requiredChecks ? await attempt(() => mainGreen(gh, base, mainSha, f.requiredChecks, f.checksIgnored)) : null };
+  f.main = { sha: mainSha, green: mainSha && f.requiredChecks ? await attempt(() => mainGreen(gh, base, mainSha, f.requiredChecks, f.checksIgnored), null, markFailed('main checks')) : null };
   // A check or status list longer than the gate reads (L182): checksTooLong says so, and refusal 1 is final.
   // tooLongLists names which list it was, so the gate doesn't read that empty list as GitHub down (L187 c1).
-  const longList = (which) => (e) => { if (e?.tooLong) { f.checksTooLong = String(e.message); f.tooLongLists = [...(f.tooLongLists ?? []), which]; } };
+  // A list GitHub answered but cut off (L190 M3/M4) is checksCutOff: a wait with GitHub readable, so it counts toward the cap.
+  const longList = (which) => markFailed(which, (e) => {
+    if (e?.tooLong) { f.checksTooLong = String(e.message); f.tooLongLists = [...(f.tooLongLists ?? []), which]; } else if (!failedRead(e)) f.checksCutOff = String(e?.message ?? e).slice(0, 200);
+  });
   f.checks = head ? await attempt(() => checksAt(gh, base, head), null, longList('checks')) : null;
   f.statuses = head ? await attempt(() => statusesAt(gh, base, head), null, longList('statuses')) : null;
 
@@ -176,7 +200,7 @@ export async function gatherFacts(ctx, merge) {
     const e = await view.entry(x.status === 'removed' ? mb : head, x.filename);
     if (!e) { noEntry ??= x.filename; throw new Error(`${x.filename}: no tree entry`); }
     return { path: x.filename, ...(x.previous_filename ? { previous_path: x.previous_filename } : {}), status: x.status === 'changed' ? 'modified' : x.status, mode: e.mode, ...linesOf(x.patch) };
-  }))) : null;
+  })), null, markFailed('files')) : null;
   // Why there is no file list (L182). 'too_many': compare was read, but GitHub lists at most COMPARE_FILE_LIMIT files,
   // so the list is cut off; 'no_entry': a listed file is not in its commit's file list (both commits are fixed, so a
   // later pass reads the same). Either is a fact about the change, and refusals 8, 9, 10 and 14 are final. 'unread':
@@ -240,7 +264,7 @@ export async function gatherFacts(ctx, merge) {
   const reviewsAt = async (sha) => {
     if (!ctx.reviewLaunches) return { ok: false, reason: 'the gate has no review launches folder set' };
     let tree;
-    try { tree = (await view.commit(sha)).tree; } catch (e) { return { ok: false, reason: `the tree of ${String(sha).slice(0, 7)} could not be read (${e?.message ?? e})` }; }
+    try { tree = (await view.commit(sha)).tree; } catch (e) { return { ok: false, unreadable: failedRead(e), reason: `the tree of ${String(sha).slice(0, 7)} could not be read (${e?.message ?? e})` }; }
     if (!SHA.test(tree ?? '')) return { ok: false, reason: `the tree of ${String(sha).slice(0, 7)} could not be read` };
     try {
       return headReviews({ launches: ctx.reviewLaunches.root, outboxRoot: ctx.reviewLaunches.outbox, uids: ctx.reviewLaunches.uids, card: card.id, head: sha, tree });
@@ -249,12 +273,14 @@ export async function gatherFacts(ctx, merge) {
   const hr = SHA.test(H0 ?? '') ? await reviewsAt(H0) : { ok: false, reason: 'the card has no head' };
   f.reviews = hr.ok ? hr.sessions : null;
   f.reviewsProblem = hr.ok ? null : hr.reason;
+  if (hr.unreadable === true) f.unreadReads.push('reviewed head');
   f.prReviews = null; f.prReviewsProblem = null;
   let prSkipped = [];
   if (SHA.test(head ?? '') && head !== H0) {
     const pr = await reviewsAt(head);
     f.prReviews = pr.ok ? pr.sessions : null;
     f.prReviewsProblem = pr.ok ? null : pr.reason;
+    if (pr.unreadable === true) f.unreadReads.push('pull request head');
     prSkipped = pr.ok ? pr.skipped ?? [] : [];
   }
   // A launch record no card can be tied to is skipped by the check; it is logged here (the review runner tells Joe once).
@@ -265,7 +291,7 @@ export async function gatherFacts(ctx, merge) {
   const apx = ctx.approvals ?? { record, rules, product, now: ctx.now, alert: ctx.alert ?? (() => {}), gh, owner, repo };
   const need = approveNeeded({ risky, needsJoe: card.doc.needs_joe === true || card.doc.approval_required === true, tier: f.tier, module: card.doc.module }, rules, product);
   const ask = askStore(record).asks().filter((a) => a.doc.card === card.id && activeKind(a.doc.kind)?.merge_approve && a.doc.state === 'answered').sort((a, b) => String(b.doc.raised_at).localeCompare(String(a.doc.raised_at)))[0];
-  const stand = ask && head ? await attempt(() => approvalStands(apx, ask.id, { head, view, catchUps }), { ok: false, reason: 'the Approve check failed' }) : { ok: false, reason: 'no answered Approve for this card' };
+  const stand = ask && head ? await attempt(() => approvalStands(apx, ask.id, { head, view, catchUps }), { ok: false, reason: 'the Approve check failed' }, markFailed('approve')) : { ok: false, reason: 'no answered Approve for this card' };
   f.approve = { needed: need.needed, why: need.why, stands: stand.ok === true, reason: stand.ok ? null : stand.reason };
 
   // The go (refusal 10).
@@ -282,15 +308,16 @@ export async function gatherFacts(ctx, merge) {
     const headRows = {};
     for (const id of [...ids].sort()) headRows[id] = await readRow(id, head);
     return goCheck({ go: go.doc, card: { id: card.id, root: rootId, doc: card.doc }, changed: f.files, headRows, tier: f.tier, view, mainSha });
-  }) : null;
+  }, null, markFailed('go')) : null;
 
-  f.threads = Number.isInteger(merge.doc.pr) ? await attempt(() => threads(gh, owner, repo, merge.doc.pr), { ok: false }) : { ok: false };
+  f.threads = Number.isInteger(merge.doc.pr) ? await attempt(() => threads(gh, owner, repo, merge.doc.pr), null) : { ok: false };
+  if (f.threads === null) { f.threads = { ok: false, unreadable: true }; f.unreadReads.push('threads'); }
 
   // The rules this gate runs on are the ones adopted at main (hold, never refuse).
   f.rulesAdopted = mainSha ? await attempt(async () => {
     const adopted = get('rules.adopted');
     const at = await json(gh, `${base}/contents/${RULES_PATH}?ref=${mainSha}`);
     return typeof adopted?.blob === 'string' && adopted.blob === at.sha;
-  }) : null;
+  }, null, markFailed('rules at main')) : null;
   return f;
 }

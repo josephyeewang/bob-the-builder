@@ -45,11 +45,16 @@
 //   lane { decision, reason, tier }          rules.may('merge', subject): M10 picks docs lane or deep by cutover
 //   approve { needed, why, stands, reason }  M2 approveNeeded + approvalStands (refusals 8, 13, 14)
 //   go { ok, reasons, skipped } | null       M2 goCheck, or skipped for a go-free kind (refusal 10)
-//   threads { ok, unresolved } | null        unresolved human review threads, GraphQL (refusal 7)
+//   threads { ok, unresolved } | { ok: false, tooLong | incomplete | unreadable }   review threads, GraphQL (refusal 7)
+//   unreadReads [name]                       the reads that FAILED this pass (gather failedRead); the gate reads them (L190)
 //   rulesAdopted bool | null                 the adopted rules blob equals policy.yaml at main (else a hold)
 //   files [{ path, status }] | null          the change's files
 //   filesProblem 'too_many' | 'no_entry' | 'unread' | null   why there is no file list (L182); filesMissing the file
 //   checksTooLong text | undefined           a check or status list longer than the gate reads (L182)
+//   checksCutOff text | undefined            the head's check runs: GitHub answered, but its count doesn't match its list
+//                                            (L190): a wait, counted toward the cap; final when judgedOnMain
+//   judgedOnMain true | undefined            watch-only: the commit is already on main, so a wait is judged as the
+//                                            gate's verdict at the cap (L190 minor a)
 //   tooLongLists ['checks' | 'statuses']     which of the two it was (gate.mjs reads the other as unread; L187 c1)
 //   firstCustomerNewFiles [prefix] | null    effect_paths.first_customer_visible.new_files_under
 
@@ -90,6 +95,9 @@ const ignored = (c, list) => (Array.isArray(list) ? list : []).some((x) => Numbe
 // (a check that has not run or not finished, a pending status) is not known yet.
 function checksProblem(f) {
   if (typeof f.checksTooLong === 'string') return final(`the commit has ${f.checksTooLong}; run fewer checks on this commit`);
+  // Answered but cut off: the gate waits (counted toward its cap); for a commit already on main, watch-only gives the
+  // gate's verdict at the cap, which is final (L190 minor a).
+  if (typeof f.checksCutOff === 'string') return (f.judgedOnMain === true ? final : notYet)(`${f.checksCutOff}; GitHub's count doesn't match its list`);
   if (!Array.isArray(f.checks) || !Array.isArray(f.statuses)) return notYet('the checks could not be read');
   if (!Array.isArray(f.requiredChecks)) return notYet('the rules name no required checks');
   const runs = f.checks.filter((c) => !ignored(c, f.checksIgnored));
@@ -144,7 +152,9 @@ function verdictCheck(f) {
   const at = ` at ${head.slice(0, 7)}`;
   const rp = roleProblem(f.reviews, 'reviewer', PASSES.reviewer, true);
   if (rp) return reworded(rp, (r) => `${r}${at} (a pass needs a clean four-line checklist)`);
-  // M10 gives the tier from the files: with them read, no tier is a fact a later pass reads the same (L187).
+  // M10 gives the tier from the files: with them read, no tier is a fact a later pass reads the same (L187). A guard: the
+  // production classify (makeRules) always answers tier 1 or 2 and reads any doubt as tier 1, so it can't reach the
+  // final branch today; a classifier that could answer neither is refused here rather than judged (L190 cosmetic).
   if (f.tier !== 1 && f.tier !== 2) return Array.isArray(f.files) ? final('the rules give no tier for the change\'s files') : notYet('the change\'s tier is unknown');
   const ap = roleProblem(f.reviews, 'auditor', PASSES.auditor, f.tier === 1);
   if (ap) return reworded(ap, (r) => `${f.tier === 1 ? 'Tier 1: ' : ''}${r}${at} (a pass needs 0 Material)`);
@@ -231,7 +241,10 @@ export function judge(f) {
     // 5. The review (and the Tier-1 audit).
     if (!reverse) add(5, verdictCheck(f));
     // 7. Human review threads (fail closed).
-    if (f.threads?.ok !== true) (typeof f.threads?.tooLong === 'string' ? no(7, `the pull request has ${f.threads.tooLong}; open a new pull request; resolved threads still count toward GitHub's total`) : wait(7, 'the review threads could not be read'));
+    if (f.threads?.ok !== true) {
+      if (typeof f.threads?.tooLong === 'string') no(7, `the pull request has ${f.threads.tooLong}; open a new pull request; resolved threads still count toward GitHub's total`);
+      else wait(7, typeof f.threads?.incomplete === 'string' ? `the review threads came back incomplete (${f.threads.incomplete})` : 'the review threads could not be read');
+    }
     else if (!(f.threads.unresolved === 0)) no(7, `${f.threads.unresolved} review thread(s) unresolved`);
     // 9 and the holds. M10's merge answer; a hold keeps the place in the queue.
     const lane = f.lane;

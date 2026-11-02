@@ -2082,3 +2082,297 @@ test('L182 class (r2 probe): 100 statuses on the head is refused for good (refus
   await gatePass(w.ctx);
   refusedFor(w, /^1: the commit has 100 statuses/);
 });
+
+// ───────────────────────────── L190: #108 r1. The auditor's probes (A1-A8, C1) as written, plus B1 as ruled.
+
+// A1 (M1): a wait that cleared (main red, then fixed) is followed by a catch-up and a fresh CI wait on the new head.
+// The new wait must be timed from its own start, not inherit the old stuck_since.
+test('L190 probe A1: after main red clears and the merge catches up, a fresh CI wait is not refused on the old clock', async () => {
+  const w = world(limited());
+  verifiedCard(w);
+  w.g.checks.set(w.g.main, redRun(w.g.main));
+  await gatePass(w.ctx);
+  waitingHeld(mergeOf(w), /^2: main is red/);
+  const t0 = mergeOf(w).doc.stuck_since;
+  assert.ok(t0);
+  tick(w, WAIT_CAP_TIMES * LIMIT_MIN - 5);
+  await gatePass(w.ctx);
+  waitingHeld(mergeOf(w), /^2: main is red/);
+  // main is fixed by a new commit: green, and the pull request is now behind it.
+  w.g.main = w.g.commit([w.g.main], { 'docs/fix.md': 'x' }, { from: w.g.main });
+  tick(w, 1);
+  await gatePass(w.ctx);
+  assert.equal(mergeOf(w).doc.state, 'catching_up', JSON.stringify(mergeOf(w).doc));
+  // CI on the caught-up head has not run yet.
+  w.g.checks.set(w.g.pulls.get(7).head, []);
+  tick(w, 5);
+  await gatePass(w.ctx);
+  const m = mergeOf(w);
+  assert.notEqual(m.doc.state, 'refused', `refused for good ${Math.round((w.env.clock.t - Date.parse(t0)) / 60000)} min after an old wait began, 5 min into a new one: ${JSON.stringify(m.doc.reasons)}`);
+  // Lane 2's addition: the new wait has its own clock and its own notice.
+  waitingHeld(m, /^1: /);
+  assert.equal(Date.parse(m.doc.stuck_since), w.env.clock.t, 'the new wait starts its own clock');
+  assert.equal(m.doc.wait_told_at ?? null, null, 'and has told nothing yet');
+});
+
+// A2 (M2): under the lock (check()), a GraphQL blip makes judge hold; that pass is unreadable, so it can't refuse.
+test('L190 probe A2: a GraphQL blip under the lock past the cap does not refuse for good', async () => {
+  const w = world(limited());
+  verifiedCard(w);
+  w.g.pulls.get(7).mergeable_state = 'unknown';
+  await gatePass(w.ctx);
+  waitingHeld(mergeOf(w), /^3: /);
+  tick(w, WAIT_CAP_TIMES * LIMIT_MIN - 1);
+  await gatePass(w.ctx);
+  waitingHeld(mergeOf(w), /^3: /);
+  // The wait clears; in this pass the second thread read (the one under the lock) fails.
+  w.g.pulls.get(7).mergeable_state = 'clean';
+  const post = w.g.gh.post;
+  let n = 0;
+  w.g.gh.post = async (path, body) => (path === '/graphql' && ++n >= 2 ? { status: 502, json: null } : post(path, body));
+  tick(w, 2);
+  await gatePass(w.ctx);
+  assert.notEqual(mergeOf(w).doc.state, 'refused', `refused for good on a GraphQL blip: ${JSON.stringify(mergeOf(w).doc.reasons)}`);
+});
+
+// A3 (M2): the same blip under the lock with no earlier wait must not start the cap's clock.
+test('L190 probe A3: a GraphQL blip under the lock does not start the cap clock', async () => {
+  const w = world(limited());
+  verifiedCard(w);
+  const post = w.g.gh.post;
+  let n = 0;
+  w.g.gh.post = async (path, body) => (path === '/graphql' && ++n >= 2 ? { status: 502, json: null } : post(path, body));
+  await gatePass(w.ctx);
+  waitingHeld(mergeOf(w), /^7: the review threads could not be read/);
+  assert.equal(mergeOf(w).doc.stuck_since ?? null, null, `stuck_since started on an outage: ${mergeOf(w).doc.stuck_since}`);
+});
+
+// A4 (M3): a thread read that SUCCEEDS but comes back incomplete counts toward the cap (L186).
+test('L190 probe A4: a thread list whose count never matches is refused after the cap, not waited on forever', async () => {
+  const w = world(limited());
+  verifiedCard(w);
+  const post = w.g.gh.post;
+  w.g.gh.post = async (path, body) => {
+    const r = await post(path, body);
+    if (path !== '/graphql') return r;
+    const t = r.json.data.repository.pullRequest.reviewThreads;
+    return { ...r, json: { data: { repository: { pullRequest: { reviewThreads: { ...t, totalCount: t.nodes.length + 1 } } } } } };
+  };
+  await gatePass(w.ctx);
+  waitingHeld(mergeOf(w), /^7: /);
+  tick(w, WAIT_CAP_TIMES * LIMIT_MIN + 1);
+  await gatePass(w.ctx);
+  tick(w, 5);
+  await gatePass(w.ctx);
+  assert.equal(mergeOf(w).doc.state, 'refused', `waits forever: stuck_since=${mergeOf(w).doc.stuck_since}`);
+  // Lane 2's addition: the reason says the list came back incomplete, not that it could not be read.
+  assert.ok(mergeOf(w).doc.reasons.some((x) => /^7: the review threads came back incomplete \(GitHub counts \d+ review threads but lists \d+\)/.test(x)), mergeOf(w).doc.reasons.join(' | '));
+});
+
+// A5 (M4): a FAILED read of main's check runs (5xx), with everything else readable, is an outage pass.
+test('L190 probe A5: main\'s check-run read failing (5xx) past the cap never refuses', async () => {
+  const w = world(limited());
+  verifiedCard(w);
+  const main = w.g.main;
+  wrapGet(w, (p, r) => (p.includes(`/commits/${main}/check-runs`) ? { status: 502, json: null } : r));
+  for (const step of [0, WAIT_CAP_TIMES * LIMIT_MIN, 5]) {
+    tick(w, step);
+    await gatePass(w.ctx);
+  }
+  assert.notEqual(mergeOf(w).doc.state, 'refused', `refused for good on a failed read: ${JSON.stringify(mergeOf(w).doc.reasons)}`);
+});
+
+// A6: outage flapping never resets the clock; refused once 3x passes with GitHub readable.
+test('L190 probe A6: flapping outage passes do not reset the clock; refused once 3x passes with GitHub readable', async () => {
+  const w = world(limited());
+  verifiedCard(w);
+  w.g.pulls.get(7).mergeable_state = 'unknown';
+  await gatePass(w.ctx);
+  const t0 = mergeOf(w).doc.stuck_since;
+  for (let i = 0; i < 6; i++) {
+    w.g.down = i % 2 === 0;
+    tick(w, 7);
+    await gatePass(w.ctx);
+    if (mergeOf(w).doc.state === 'refused') break;
+    assert.equal(mergeOf(w).doc.stuck_since, t0, `pass ${i}`);
+  }
+  w.g.down = false;
+  tick(w, 5);
+  await gatePass(w.ctx);
+  assert.equal(mergeOf(w).doc.state, 'refused');
+  assert.equal(told(w, 'merge_refused').length, 1);
+  assert.equal(told(w, 'merge_waiting_long').length, 1);
+});
+
+// A7: the default-limit note and the long-wait note are each told once over many passes.
+test('L190 probe A7: with no limit in the rules, the default note and the long wait are each told once over many passes', async () => {
+  const w = world();
+  verifiedCard(w);
+  w.g.pulls.get(7).mergeable_state = 'unknown';
+  for (let i = 0; i < 15; i++) { await gatePass(w.ctx); tick(w, 7); }
+  assert.equal(told(w, 'merge_limit_missing').length, 1);
+  assert.equal(told(w, 'merge_waiting_long').length, 1);
+  assert.equal(mergeOf(w).doc.state, 'refused');
+  assert.equal(told(w, 'merge_refused').length, 1);
+});
+
+// A8: 99 check runs on the head are read and judged (not refused for length).
+test('L190 probe A8: 99 check runs is judged, not refused as too long', async () => {
+  const w = world(limited());
+  const head = verifiedCard(w);
+  w.g.checks.set(head, Array.from({ length: 99 }, (_, i) => ({ name: i ? `c${i}` : 'test', app: { id: 1 }, head_sha: head, status: 'completed', conclusion: 'success' })));
+  await gatePass(w.ctx);
+  assert.equal(mergeOf(w).doc.state, 'merged', JSON.stringify(mergeOf(w).doc));
+});
+
+// C1 (M4): the reviewed head's commit read failing (view.commit) is a failed read: an outage pass.
+test('L190 probe C1: the reviewed head\'s commit read failing past the cap never refuses', async () => {
+  const w = world(limited());
+  const h0 = verifiedCard(w);
+  const view = w.ctx.view;
+  w.ctx.view = Object.create(view, { commit: { value: (s) => (s === h0 ? Promise.reject(new Error('HTTP 502')) : view.commit(s)) } });
+  for (const step of [0, WAIT_CAP_TIMES * LIMIT_MIN, 5]) { tick(w, step); await gatePass(w.ctx); }
+  assert.notEqual(mergeOf(w).doc.state, 'refused', `refused for good on a failed read: ${JSON.stringify(mergeOf(w).doc.reasons)}`);
+});
+
+// C1 controls (M4): the same read in git-view's own failed-read wording is an outage pass too; a tree GitHub answered
+// but cut off counts toward the cap (git-view "file list ... is cut off"; L190, retiring L186's tree to-do).
+test('L190 C1 controls: git-view\'s failed read is an outage pass; its cut-off tree counts toward the cap', async () => {
+  for (const [message, refused] of [['GitHub answered 502 for /repos/o/r/git/commits/x', false], ['file list of 1234567 is cut off or unknown', true]]) {
+    const w = world(limited());
+    const h0 = verifiedCard(w);
+    const view = w.ctx.view;
+    w.ctx.view = Object.create(view, { commit: { value: (s) => (s === h0 ? Promise.reject(new Error(message)) : view.commit(s)) } });
+    for (const step of [0, WAIT_CAP_TIMES * LIMIT_MIN, 5]) { tick(w, step); await gatePass(w.ctx); }
+    assert.equal(mergeOf(w).doc.state === 'refused', refused, `${message}: ${JSON.stringify(mergeOf(w).doc)}`);
+  }
+});
+
+// M4: a head check list GitHub answered but cut off counts toward the cap, with a reason that says so; a failed one
+// (502) is an outage pass that holds and never refuses.
+test('L190 M4: a cut-off head check list is a wait capped like any other; a failed head check read never refuses', async () => {
+  const w = world(limited());
+  const head = verifiedCard(w);
+  wrapGet(w, (p, r) => (p.includes(`/commits/${head}/check-runs`) && r?.status === 200 ? { ...r, json: { ...r.json, total_count: r.json.check_runs.length + 1 } } : r));
+  await cappedAfter(w, /^1: the check runs are cut off \(\d+ listed of \d+\); GitHub's count doesn't match its list/);
+
+  const w2 = world(limited());
+  const head2 = verifiedCard(w2);
+  wrapGet(w2, (p, r) => (p.includes(`/commits/${head2}/check-runs`) ? { status: 502, json: null } : r));
+  for (const step of [0, WAIT_CAP_TIMES * LIMIT_MIN, 5]) { tick(w2, step); await gatePass(w2.ctx); }
+  assert.equal(mergeOf(w2).doc.state, 'held', JSON.stringify(mergeOf(w2).doc));
+  assert.equal(mergeOf(w2).doc.stuck_since ?? null, null, 'an outage never starts the clock');
+});
+
+// B1, as ruled in L190: a catch-up GitHub accepts (202) but whose head never moves is capped from the request: told
+// once past the limit, refused for good at WAIT_CAP_TIMES times it with CATCH_UP_STUCK. Outage passes don't count.
+const stuckCatchUp = (w) => {
+  w.g.main = w.g.commit([w.g.main], { 'docs/other.md': 'x' }, { from: w.g.main });
+  w.g.answer.update = () => ({ status: 202, json: { message: 'Updating pull request branch.' } });
+};
+test('L190 B1 (auditor probe): a catch-up GitHub accepts but never makes is capped or told', async () => {
+  const w = world(limited());
+  verifiedCard(w);
+  stuckCatchUp(w);
+  for (let i = 0; i < 10; i++) { await gatePass(w.ctx); tick(w, 10); }
+  const m = mergeOf(w);
+  const toldAny = w.alerts.filter((a) => a.merge === m.id);
+  assert.ok(m.doc.state !== 'catching_up' || toldAny.length > 0, `100 min in catching_up, state=${m.doc.state}, alerts=${JSON.stringify(w.alerts)}`);
+});
+test('L190 B1: a stuck catch-up is told once past the limit and refused for good at the cap, timed from the request', async () => {
+  const w = world(limited());
+  verifiedCard(w);
+  stuckCatchUp(w);
+  await gatePass(w.ctx);
+  const asked = mergeOf(w);
+  assert.equal(asked.doc.state, 'catching_up');
+  assert.equal(Date.parse(asked.doc.stuck_since), w.env.clock.t, 'the clock starts at the request');
+  tick(w, LIMIT_MIN - 1);
+  await gatePass(w.ctx);
+  assert.deepEqual(told(w, 'merge_waiting_long'), [], 'under the limit: nothing told');
+  tick(w, 1);
+  await gatePass(w.ctx);
+  assert.equal(told(w, 'merge_waiting_long').length, 1, 'past the limit: told once');
+  tick(w, WAIT_CAP_TIMES * LIMIT_MIN - LIMIT_MIN - 1);
+  await gatePass(w.ctx);
+  assert.equal(mergeOf(w).doc.state, 'catching_up', 'one minute under the cap: still waiting');
+  assert.equal(told(w, 'merge_waiting_long').length, 1, 'told once');
+  tick(w, 1);
+  await gatePass(w.ctx);
+  const m = mergeOf(w);
+  assert.equal(m.doc.state, 'refused', JSON.stringify(m.doc));
+  assert.deepEqual(m.doc.reasons, ['GitHub accepted the branch update but the head never moved']);
+  assert.equal(m.doc.tell_owner, true);
+  assert.equal(m.doc.tell_note, waitCapNote(LIMIT_MIN * 60_000));
+  assert.equal(told(w, 'merge_refused').length, 1);
+  tick(w, 5);
+  await gatePass(w.ctx);
+  assert.equal(told(w, 'merge_refused').length, 1, 'told once');
+  assert.equal(gatePuts(w), 0, 'never merged');
+});
+test('L190 B1 blip control: a head that moves late (past the limit, under the cap) is caught up and merged, never refused', async () => {
+  const w = world(limited());
+  verifiedCard(w);
+  stuckCatchUp(w);
+  await gatePass(w.ctx);
+  tick(w, WAIT_CAP_TIMES * LIMIT_MIN - 1);
+  await gatePass(w.ctx);
+  assert.equal(mergeOf(w).doc.state, 'catching_up');
+  // GitHub makes the commit at last.
+  const pr = w.g.pulls.get(7);
+  pr.head = w.g.commit([pr.head, w.g.main], pr.files, { from: w.g.main });
+  tick(w, 1);
+  await gatePass(w.ctx);
+  const m = mergeOf(w);
+  assert.equal(m.doc.state, 'merged', JSON.stringify(m.doc));
+  assert.equal(m.doc.catch_ups.length, 1);
+  assert.deepEqual(told(w, 'merge_refused'), []);
+  assert.equal(m.doc.stuck_since ?? null, null, 'the catch-up\'s clock is cleared when the head moves');
+});
+test('L190 B1 outage control: the pull request unreadable while catching up, past the cap, never refuses', async () => {
+  const w = world(limited());
+  verifiedCard(w);
+  stuckCatchUp(w);
+  await gatePass(w.ctx);
+  const t0 = mergeOf(w).doc.stuck_since;
+  w.g.down = true;
+  for (const step of [LIMIT_MIN, WAIT_CAP_TIMES * LIMIT_MIN, 5]) { tick(w, step); await gatePass(w.ctx); }
+  assert.equal(mergeOf(w).doc.state, 'catching_up', JSON.stringify(mergeOf(w).doc));
+  assert.deepEqual(told(w, 'merge_refused'), []);
+  assert.equal(mergeOf(w).doc.stuck_since, t0, 'an outage neither refuses nor resets the clock');
+});
+
+// M1, lane 2's additions: each way out of a wait clears all of its fields, not only the one a probe reads.
+test('L190 M1: a stuck catch-up after a long wait that was told gets its own notice', async () => {
+  const w = world(limited());
+  verifiedCard(w);
+  w.g.checks.set(w.g.main, redRun(w.g.main));
+  await gatePass(w.ctx);
+  tick(w, LIMIT_MIN);
+  await gatePass(w.ctx);
+  waitingHeld(mergeOf(w), /^2: main is red/);
+  assert.equal(told(w, 'merge_waiting_long').length, 1, 'the first wait is told');
+  stuckCatchUp(w);
+  tick(w, 1);
+  await gatePass(w.ctx);
+  assert.equal(mergeOf(w).doc.state, 'catching_up');
+  assert.equal(mergeOf(w).doc.wait_told_at ?? null, null, 'the catch-up starts with nothing told');
+  tick(w, LIMIT_MIN);
+  await gatePass(w.ctx);
+  assert.equal(told(w, 'merge_waiting_long').length, 2, 'the stuck catch-up is told on its own');
+});
+test('L190 M1: a merge that waited and then merged keeps no wait fields', async () => {
+  const w = world(limited());
+  verifiedCard(w);
+  w.g.pulls.get(7).mergeable_state = 'unknown';
+  await gatePass(w.ctx);
+  tick(w, LIMIT_MIN);
+  await gatePass(w.ctx);
+  assert.equal(told(w, 'merge_waiting_long').length, 1);
+  w.g.pulls.get(7).mergeable_state = 'clean';
+  tick(w, 1);
+  await gatePass(w.ctx);
+  const m = mergeOf(w);
+  assert.equal(m.doc.state, 'merged', JSON.stringify(m.doc));
+  for (const k of ['waiting_on', 'waiting_since', 'wait_told_at', 'stuck_since']) assert.equal(m.doc[k] ?? null, null, `${k} is cleared`);
+});

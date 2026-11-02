@@ -991,14 +991,31 @@ test('L187 c2: a listed file missing from its commit\'s file list is a "would re
   assert.match(all, /docs\/ghost\.md is not in its commit's file list/);
 });
 
-test('L187 c2 control: a cut-off check list (GitHub counts more than it lists) is "not judged", never judged as complete', async () => {
+// L190 minor a: a cut-off list is an answer, not a failed read. The gate waits on it and refuses it at the cap, so for a
+// commit already on main the verdict is the gate's at the cap: refusal 1, final. A failed check read stays "not judged".
+test('L187 c2 / L190 minor a: a cut-off check list (GitHub counts more than it lists) is judged as the gate\'s final refusal 1, never as complete', async () => {
   const w = world(); await w.pass(PIN_AT);
   w.land({ 'docs/a.md': 'two' });
   const get = w.g.gh.get;
   w.g.gh.get = async (path) => { const r = await get(path); return /\/check-runs/.test(path) && r?.status === 200 ? { ...r, json: { ...r.json, total_count: r.json.check_runs.length + 1 } } : r; };
   await w.pass();
+  assert.ok(!w.lines().some((l) => l.not_judged_reason), JSON.stringify(w.lines()));
+  const r1 = (w.judged()[0]?.refusals ?? []).find((x) => x.n === 1);
+  assert.match(r1?.reason ?? '', /the check runs are cut off \(\d+ listed of \d+\); GitHub's count doesn't match its list/, JSON.stringify(w.judged()));
+  assert.notEqual(r1.temporary, true, 'final, as the gate is at the cap');
+  assert.equal(w.judged()[0].verdict, 'would refuse');
+});
+
+test('L190 minor a control: a FAILED check read (HTTP 502) is still "not judged", with the status and no "HTTP undefined"', async () => {
+  const w = world(); await w.pass(PIN_AT);
+  w.land({ 'docs/a.md': 'two' });
+  const get = w.g.gh.get;
+  w.g.gh.get = async (path) => (/\/check-runs/.test(path) ? { status: 502, json: null } : get(path));
+  await w.pass();
   assert.equal(w.judged().length, 0, JSON.stringify(w.judged()));
-  assert.match(w.lines().find((l) => l.not_judged_reason)?.not_judged_reason ?? '', /cut off.*the check runs/);
+  const why = w.lines().find((l) => l.not_judged_reason)?.not_judged_reason ?? '';
+  assert.match(why, /HTTP 502.*the check runs/);
+  assert.doesNotMatch(why, /undefined/);
 });
 
 // ───────────────────────────── round 3: m-e / m-d / m-f

@@ -58,6 +58,27 @@ export const FINAL_NOTE = 'refused for a reason about the change itself; it won\
 export const WAIT_CAP_TIMES = 3;
 export const DEFAULT_WAIT_LIMIT_MIN = 30;
 export const waitCapNote = (limitMs) => `waited ${Math.round((WAIT_CAP_TIMES * limitMs) / 60_000)} min or more to be judged and was never judged, with GitHub readable; refused for good so the owner can act on what it waited on. It won't be retried until the card changes`;
+// A catch-up GitHub accepted (202) whose head never moves (L190 B1): capped as a wait is, timed from the request.
+export const CATCH_UP_STUCK = 'GitHub accepted the branch update but the head never moved';
+// The fields a wait keeps (L164, L184). Cleared when the merge leaves the wait for a catch-up or the merge call (L190 M1):
+// a new wait after that gets its own clock and its own notice.
+const WAIT_CLEARED = Object.freeze({ waiting_on: null, waiting_since: null, wait_told_at: null, stuck_since: null });
+
+/**
+ * One answer to "was GitHub unreadable this pass", for serve and for check under the lock (L190 M2).
+ * outage: the pull request, main or the head's checks or statuses could not be read: hold this one and stop the queue.
+ * unreadable: that, or another read that FAILED (gather's unreadReads: main's checks, the reviewed tree, the go check,
+ * the Approve check, the threads, the rules at main), or a failed carry-over or compare read (L186, L187). A pass with
+ * GitHub unreadable neither starts the wait cap's clock nor refuses at the cap. A read that was answered but came back
+ * incomplete (a count that doesn't match its list) is not unreadable, so it counts toward the cap (L190 M3, M4).
+ */
+export function passUnreadable(facts) {
+  const failed = (k) => (facts?.unreadReads ?? []).includes(k);
+  const outage = !!facts?.card && (!facts.pr || !SHA.test(facts.main?.sha ?? '') || failed('checks') || failed('statuses'));
+  const unreadable = !!facts?.card && (outage || (facts.unreadReads ?? []).length > 0 || facts.threads?.unreadable === true
+    || facts.carried?.unread === true || facts.compareStatus === null);
+  return { outage, unreadable };
+}
 export const GITHUB_NO_NOTE ='GitHub refused the merge; the card goes back and is asked for again, and the same refusal twice goes to the owner';
 
 // The order the queue is served in: undo first, the lead's daily card when the blueprint's freshness alarm is on,
@@ -174,6 +195,10 @@ export async function gatePass(ctx) {
     // An interrupted merge of this PR may still land on GitHub (L102): no merge or catch-up call goes out for it again
     // until Sensors has read the PR after that refusal and seen it not merged. A reading that shows merged is the
     // Dispatcher's reconcile to record, never a second merge.
+    // TO-DO (L190 minor c, owner lane 3, Sensors): this wait has no cap of its own (L184 says every wait). It ends only
+    // when Sensors reads the pull request after the interrupted merge, so the cap belongs with that reading: Sensors
+    // should tell the owner when the reading is overdue. Not done here because it is not a few lines: the merge stays
+    // queued with no wait clock, and refusing it while the earlier merge may still land would be wrong.
     const cut = merges().find((x) => x.id !== m.id && x.doc.pr === m.doc.pr && x.doc.state === 'refused' && (x.doc.reasons ?? []).includes('interrupted')
       && ((r) => !r || r.merged === true)(prReadingAfter(record, x.doc.pr, x.id)));
     if (cut) { step(m, 'waiting', { reasons: [`merge ${cut.id} of this pull request was interrupted; waiting for a reading of the pull request after it`] }); return STEPPED_ASIDE; }
@@ -184,12 +209,11 @@ export async function gatePass(ctx) {
       return now?.doc?.state === 'queued' ? serve(now) : STEPPED_ASIDE;
     }
     const facts = await gatherFacts(ctx, m);
-    // GitHub unreadable: hold this one and stop, rather than hold the whole queue in one pass.
-    // A check or status list too long to read is a fact (refusal 1, final), not GitHub down (L187 c1). A compare that
-    // fails while the pull request, main and the checks read is this change's, not GitHub down: it holds this one and
-    // the queue goes on (L187), as a failed thread read does.
-    const unread = (k) => facts[k] === null && !(facts.tooLongLists ?? []).includes(k);
-    const outage = !!facts.card && (!facts.pr || !SHA.test(facts.main?.sha ?? '') || unread('checks') || unread('statuses'));
+    // GitHub unreadable: hold this one and stop, rather than hold the whole queue in one pass. A check or status list
+    // too long to read is a fact (refusal 1, final), not GitHub down (L187 c1); one cut off is a wait that counts toward
+    // the cap (L190 M3). A compare that fails while the pull request, main and the checks read is this change's, not
+    // GitHub down: it holds this one and the queue goes on (L187), as a failed thread read does.
+    const { outage, unreadable } = passUnreadable(facts);
     // Behind main: catch up first (R-0b-89), never judge a head that can't land as judged.
     if ((facts.compareStatus === 'behind' || facts.compareStatus === 'diverged') && facts.pr?.state === 'open' && SHA.test(facts.pr?.head?.sha ?? '')) {
       if ((m.doc.catch_ups ?? []).length >= (ctx.maxCatchUps ?? MAX_CATCH_UPS)) { move(m, 'returned_to_builder', { reasons: [`caught up ${MAX_CATCH_UPS} times and still behind main`] }); return STEPPED_ASIDE; }
@@ -197,15 +221,14 @@ export async function gatePass(ctx) {
     }
     const v = judge(facts);
     if (v.decision === 'refuse') { refuse(m, facts, v); return outage ? undefined : STEPPED_ASIDE; }
-    // For the wait cap (L184, L186), a failed thread, carry-over or compare read is a pass with GitHub unreadable too; only
-    // a read that succeeds and comes back incomplete counts toward the cap. It doesn't stop the queue as an outage does.
-    const unreadable = outage || (facts.threads?.ok !== true && typeof facts.threads?.tooLong !== 'string') || facts.carried?.unread === true || facts.compareStatus === null;
     if (v.decision === 'hold') { hold(m, v, unreadable); return outage ? undefined : STEPPED_ASIDE; }
     return take(m, facts);
   }
 
   async function catchUp(m, head) {
-    if (!move(m, 'catching_up', { catch_up_from: head })) return;
+    // Leaving a wait clears its clock (L190 M1); the catch-up's own wait starts now (B1), with nothing told yet.
+    const at = iso();
+    if (!move(m, 'catching_up', { catch_up_from: head, ...WAIT_CLEARED, waiting_on: [CATCH_UP_STUCK], waiting_since: at, stuck_since: at })) return;
     let r;
     try { r = await gh.put(`${base}/pulls/${m.doc.pr}/update-branch`, { expected_head_sha: head }); } catch (e) { r = { status: 0 }; }
     if (r?.status === 202) return step(m, 'catch_up_asked');
@@ -214,13 +237,35 @@ export async function gatePass(ctx) {
     return STEPPED_ASIDE;
   }
 
+  // L190 B1: a catch-up GitHub accepted but whose head never moves is a wait like any other (L184): told once past the
+  // wait limit, refused for good at WAIT_CAP_TIMES times it, timed from the request. A pass where the pull request can't
+  // be read is an outage pass: it neither refuses nor stops the clock.
   async function finishCatchUp(m) {
-    let pr;
-    try { pr = (await gh.get(`${base}/pulls/${m.doc.pr}`)).json; } catch { pr = null; }
-    const after = pr?.head?.sha;
-    if (!SHA.test(after ?? '') || after === m.doc.catch_up_from) return;   // GitHub hasn't made the commit yet
+    let r;
+    try { r = await gh.get(`${base}/pulls/${m.doc.pr}`); } catch { r = null; }
+    const after = r?.status === 200 ? r.json?.head?.sha : undefined;
+    if (!SHA.test(after ?? '')) return;   // the pull request could not be read: an outage pass
+    if (after === m.doc.catch_up_from) return catchUpWaits(m);   // GitHub hasn't made the commit yet
     const catchUps = [...(m.doc.catch_ups ?? []), { pr: m.doc.pr, before_sha: m.doc.catch_up_from, after_sha: after }];
-    move(m, 'queued', { catch_ups: catchUps, catch_up_from: null });
+    move(m, 'queued', { catch_ups: catchUps, catch_up_from: null, ...WAIT_CLEARED });
+  }
+
+  function catchUpWaits(m) {
+    const cur = fresh('merge', m.id) ?? m;
+    // A catch-up asked for before its clock was kept starts it now.
+    if (!Number.isFinite(Date.parse(cur.doc.stuck_since ?? ''))) {
+      const at = iso();
+      const w = write('merge', cur, { waiting_on: [CATCH_UP_STUCK], waiting_since: at, wait_told_at: null, stuck_since: at });
+      if (!w.ok) alert({ type: 'merge_gate_write_refused', merge: m.id, to: 'catch_up_clock', reason: w.reason });
+      return;
+    }
+    const limit = waitLimit(cur, [CATCH_UP_STUCK]);
+    if (limit === undefined) return;
+    if (now() - Date.parse(cur.doc.stuck_since) >= WAIT_CAP_TIMES * limit) {
+      if (move(cur, 'refused', { reasons: [CATCH_UP_STUCK], catch_up_from: null, tell_owner: true, tell_note: waitCapNote(limit) })) tellRefused(fresh('merge', m.id));
+      return;
+    }
+    waitedLong(cur, limit);
   }
 
   function refuse(m, facts, v) {
@@ -245,15 +290,13 @@ export async function gatePass(ctx) {
   // The cap (L184): a wait the gate can't end by itself (a tree too big to read, main red, GitHub never working out
   // mergeable, a check that never runs, a review that never ends...) is refused for good after WAIT_CAP_TIMES × the wait
   // limit, told once, with what it waited on as the reasons. Its clock (stuck_since) starts at the first waiting pass
-  // with GitHub readable: a pass with GitHub unreadable (the outage line in serve, or a failed thread, carry-over or
-  // compare read, L186, L187) neither starts it, nor refuses, nor stops it, so an outage alone never refuses a change for good
-  // (L164), and an outage in the middle of a long wait doesn't start it again. Only a read that succeeds and comes back
-  // incomplete counts toward the cap.
-  // TO-DO (L186, an accepted risk): a file-tree read that fails can't yet be told from a truncated one (M10
-  // git-view.mjs throws the same for both, and gather leaves filesProblem 'unread'), so a failed tree read counts toward
-  // the cap. The refusal is safe (no merge), told, and names its reason. Telling them apart needs git-view to mark a
-  // truncated answer (as gather's tooLong marks a long list) and github-checker to pass that through.
-  function hold(m, v, outage = false) {
+  // with GitHub readable: a pass with GitHub unreadable (passUnreadable: any read that FAILED, L186, L187, L190) neither
+  // starts it, nor refuses, nor stops it, so an outage alone never refuses a change for good (L164), and an outage in the
+  // middle of a long wait doesn't start it again. Only a read that succeeds and comes back incomplete counts toward the cap.
+  // `unreadable` has no default: every caller says (L190 M2, a caller missed when this function's inputs changed).
+  function hold(m, v, unreadable) {
+    if (typeof unreadable !== 'boolean') throw new Error('hold() needs to be told whether GitHub was readable this pass (L190 M2)');
+    const outage = unreadable;
     const cur = fresh('merge', m.id) ?? m;
     const waiting = v.hold === WAITING_HOLD;
     const waitingOn = v.refusals.map((x) => `${x.n}: ${x.reason}`);
@@ -323,10 +366,10 @@ export async function gatePass(ctx) {
     const head = facts.pr?.head?.sha;
     if (v.decision !== 'merge' || head !== m.doc.judged_head) {
       const reasons = v.decision === 'merge' ? ['the head moved while the merge was being checked'] : v.refusals.map((x) => `${x.n}: ${x.reason}`);
-      if (v.decision === 'hold') hold(m, v); else move(m, 'refused', { reasons });
+      if (v.decision === 'hold') hold(m, v, passUnreadable(facts).unreadable); else move(m, 'refused', { reasons });
       return putBack(m, 'verified');
     }
-    if (!move(m, 'merging', { judged_main: facts.main.sha })) return;
+    if (!move(m, 'merging', { judged_main: facts.main.sha, ...WAIT_CLEARED })) return;
     return land(fresh('merge', m.id));
   }
 
