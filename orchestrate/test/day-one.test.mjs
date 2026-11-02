@@ -373,19 +373,20 @@ test('L97: every Record document production reads has a production writer', { to
 
 // ---- L151 (P24): no text shown to Joe promises an action for a pending kind ----
 
-// The shared scan lives in orchestrate/shared/no-promise.test.mjs (lane 1, #95). Where it exists it is imported, which
-// runs its own tests here too, and asked about every pending kind; it is never copied.
+// The shared scan lives in orchestrate/shared/no-promise.test.mjs (lane 1, #95). Where it exists it is imported at the top
+// level, so its own tests run here too as tests of their own (inside a test they would be cancelled when it ends), and
+// asked about every pending kind; it is never copied. A literal path: M2's consume-ask scan refuses a computed import()
+// outside its list (day-one audit M-1).
 const NO_PROMISE = join(ORCH, 'shared/no-promise.test.mjs');
-test('L151 (P24): no text shown to Joe promises an action for an outbox kind whose reader is pending', async () => {
+const promiseScan = existsSync(NO_PROMISE) ? await import('../shared/no-promise.test.mjs') : null;
+test('L151 (P24): no text shown to Joe promises an action for an outbox kind whose reader is pending', () => {
   const pending = Object.entries(OUTBOX_KINDS).filter(([, s]) => s.pending !== undefined).map(([k]) => k);
-  if (!existsSync(NO_PROMISE)) {
+  if (!promiseScan) {
     assert.deepEqual(pending, [], `kinds ${pending.join(', ')} are pending, but the shared promise scan (shared/no-promise.test.mjs) is not here to read their shown texts`);
     return;
   }
-  // A literal path: M2's consume-ask scan refuses a computed import() outside its list (day-one audit M-1).
-  const scan = await import('../shared/no-promise.test.mjs');
-  assert.equal(typeof scan.promises, 'function', 'the shared scan exports promises(kind)');
-  for (const k of pending) assert.deepEqual(scan.promises(k), [], `${k}: a shown text promises an action`);
+  assert.equal(typeof promiseScan.unapproved, 'function', 'the shared scan exports unapproved(kind)');
+  for (const k of pending) assert.deepEqual(promiseScan.unapproved(k), [], `${k}: a shown text is not an approved sentence`);
 });
 
 // ---- L137: every L137 to-do is gone before the first cutover ----
@@ -403,7 +404,7 @@ function testFiles(dir, out = []) {
 // matches it.
 const CALL = ['L', '137'].join('');
 const TODO_NAMING = new RegExp(`\\btodo\\b\\s*[:(][^\\n]*\\b${CALL}\\b`);
-test('L137: no test file in orchestrate/ still carries a to-do naming it', { todo: '#95 (lane 1) removes the last of these' }, () => {
+test('L137: no test file in orchestrate/ still carries a to-do naming it', () => {
   const left = [];
   for (const p of testFiles(ORCH)) {
     readFileSync(p, 'utf8').split('\n').forEach((line, i) => { if (TODO_NAMING.test(line)) left.push(`${relative(ORCH, p).split(sep).join('/')}:${i + 1}`); });
