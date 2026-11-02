@@ -34,9 +34,10 @@
 // would read as "nothing happened" (round 10 m2: fail closed by throwing, not by an empty list).
 
 import { createHash } from 'node:crypto';
-import { readFileSync } from 'node:fs';
-import { CARD_KINDS, OUTBOX_KINDS, OUTBOX_KIND_PATTERN, OUTBOX_NAME, SESSION_ID, STATES, outboxKindOf } from './record-names.mjs';
-export { CARD_KINDS, OUTBOX_KINDS, OUTBOX_KIND_PATTERN, OUTBOX_NAME, STATES, outboxKindOf };
+import { lstatSync, readFileSync, realpathSync } from 'node:fs';
+import { basename, dirname, join } from 'node:path';
+import { CARD_KINDS, NOT_A_RECORD, OUTBOX_KINDS, OUTBOX_KIND_PATTERN, OUTBOX_NAME, SESSION_ID, STATES, isNotARecord, notARecord, outboxKindOf } from './record-names.mjs';
+export { CARD_KINDS, NOT_A_RECORD, OUTBOX_KINDS, OUTBOX_KIND_PATTERN, OUTBOX_NAME, STATES, isNotARecord, notARecord, outboxKindOf };
 // A second name for outboxKindOf (the same function, not a copy), kept because record.test and older callers import it.
 export const outboxKind = outboxKindOf;
 // The test stand-in's field and move check is M9's own (L72); guard.mjs needs only record-names.mjs, so no load loop.
@@ -127,6 +128,37 @@ export const PAUSED_WAIT_WHAT = 'paused';
 export const WAIT_WHO = Object.freeze([OWNER_WAIT_WHO, 'usage', 'dependency', 'incident', 'date']);   // `date` also needs a reason
 export { SESSION_ID };   // one rule, in record-names.mjs (the guard reads it too)
 
+// Where an outbox file is, checked before anything is read from its name (M9 readOutboxFile, and the stand-in below:
+// the one definition, L151 m7). → { ok: true, real } | { ok: false, reason }
+export function outboxPlace({ outboxRoot, tag, file }) {
+  const no = (reason) => ({ ok: false, reason });
+  const given = typeof file === 'string' ? file : '';
+  if (!given) return no('no file');
+  if (!tag || typeof tag.role !== 'string' || typeof tag.sessionId !== 'string' || !SESSION_ID.test(tag.sessionId)) return no('bad outbox tag');
+  if (typeof outboxRoot !== 'string' || !outboxRoot) return no('no outbox root configured');
+  let real; let folder;
+  try { real = realpathSync(given); } catch { return no('file not found'); }
+  // The role and session folders themselves may not be links: a session folder linked to another's would hand that
+  // session's files in under this tag (0b-2 audit MIN-5).
+  try {
+    for (const p of [join(outboxRoot, tag.role), join(outboxRoot, tag.role, tag.sessionId)]) if (lstatSync(p).isSymbolicLink()) return no(`outbox folder ${basename(p)} is a link`);
+    folder = realpathSync(join(outboxRoot, tag.role, tag.sessionId));
+  } catch { return no(`no outbox folder for ${tag.role} ${tag.sessionId}`); }
+  if (dirname(real) !== folder) return no(`file is not directly inside the ${tag.role} outbox of session ${tag.sessionId}`);
+  // The name given must be the file itself, not a link to it: realpath follows links, O_NOFOLLOW checks the last part.
+  if (basename(given) !== basename(real)) return no('file is a link');
+  return { ok: true, real };
+}
+
+// The stand-in's check when it has no outbox root: the file exists and the name given is the file, not a link.
+function fileOnly(file) {
+  const given = typeof file === 'string' ? file : '';
+  if (!given) return { ok: false, reason: 'no file' };
+  let real;
+  try { real = realpathSync(given); } catch { return { ok: false, reason: 'file not found' }; }
+  return basename(given) === basename(real) ? { ok: true, real } : { ok: false, reason: 'file is a link' };
+}
+
 export function isActor(a) {
   if (SCRIPT_ACTORS.includes(a)) return true;
   const m = /^([a-z_]+):(.+)$/s.exec(String(a));
@@ -197,7 +229,7 @@ export function makeRecord(impl) {
 // The diary data of a release: who gave the card back and why (a reason is text, capped like any diary text).
 export const releaseData = (by, reason) => ({ by, ...(typeof reason === 'string' && reason ? { reason: reason.slice(0, 500) } : {}) });
 
-export function memoryRecord({ now = () => Date.now(), dead = null } = {}) {
+export function memoryRecord({ outboxRoot, now = () => Date.now(), dead = null } = {}) {
   const docs = new Map();
   const lines = [];
   const key = (e, id) => `${e}/${id}`;
@@ -236,7 +268,12 @@ export function memoryRecord({ now = () => Date.now(), dead = null } = {}) {
       return { ok: true, rev, seq };
     },
     applyOutbox(tag, file) {
-      // Like the real M9, a file whose name has no outbox kind is refused, never logged as handed in (L121).
+      // Like the real M9: first where the file is (missing, a link, the wrong folder; L151 m7), then its name. Given no
+      // root, the stand-in still refuses a missing file or a link, but cannot check the folder: M11's fixture keeps a
+      // session's files in <tmp>/<role>/ with no session folder (lane 2's to move to the real layout; then root is required).
+      const place = outboxRoot === undefined ? fileOnly(file) : outboxPlace({ outboxRoot, tag, file });
+      if (!place.ok) return refused(place.reason);
+      // A file whose name has no outbox kind is refused, never logged as handed in (L121).
       const name = String(file).split('/').pop();
       const kind = outboxKindOf(name);
       if (!kind) return refused(`no outbox kind for file name ${name.slice(0, 80)}`);
@@ -244,6 +281,7 @@ export function memoryRecord({ now = () => Date.now(), dead = null } = {}) {
       // they come before the create path, so a kind refused by M9 is never stored here.
       const spec = OUTBOX_KINDS[kind];
       if (!spec.roles.includes(tag?.role)) return refused(`outbox kind ${kind} is not listed for ${tag?.role}`);
+      if (spec.record === 'none') return notARecord(kind);
       if (!spec.entity) return refused(`outbox kind ${kind} has no record rule yet`);
       const actor = `${tag.role}:${tag.sessionId}`;
       if (spec.mode === 'create') {
