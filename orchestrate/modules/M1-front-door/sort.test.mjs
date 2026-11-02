@@ -82,7 +82,7 @@ test('R-0b-137: each mode request the skill writes passes intake, and only mode 
     assert.equal(f.ok, true, request);
     const r = checkOutboxFile(f.name, f.text, { products: ['test-product'], seenIds: [] });
     assert.equal(r.ok, true, r.reason); assert.equal(r.doc.what, 'fix the chart');
-    assert.match(intakePush(f.name, r), /^Request taken: .*Nothing has started yet/);
+    assert.equal(intakePush(f.name, r), `Not filed: the ${request} request isn't available from the Front Door yet. Nothing changed.`); // L151
   }
   const filled = '{"request":"audit","product":"test-product","name":null,"what":"is the total right"}';
   assert.equal(checkOutboxFile('request-audit-20261103-0915-ab.json', filled).ok, true);
@@ -121,5 +121,5 @@ test('R-0b-137 / B11 planted: a secret typed in chat is not repeated, and rotate
   assert.equal(checkOutboxFile(f.name, f.text).ok, false, 'a what holding the key refuses the whole file');
   const rot = outboxFile('request', '20261103-0915-ro', { request: 'rotate', name: 'GITHUB_TOKEN' });
   assert.equal(rot.ok, true); assert.ok(!rot.text.includes(FAKE_KEY));
-  assert.match(intakePush(rot.name, checkOutboxFile(rot.name, rot.text, { products: [], seenIds: [] })), /rotate GITHUB_TOKEN/);
+  assert.equal(intakePush(rot.name, checkOutboxFile(rot.name, rot.text, { products: [], seenIds: [] })), "Not filed: rotating GITHUB_TOKEN isn't available from the Front Door yet. The key is NOT rotated."); // L151
 });

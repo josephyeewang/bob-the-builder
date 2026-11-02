@@ -126,26 +126,30 @@ export function checkOutboxFile(name, text, { products = null, seenIds = null } 
 
 // The push intake sends the owner for every Front Door file, taken in or refused (L26): the Front Door only ever says
 // "Filed"; this is the confirmation. Lane 2 sends it over the Front Door's push path, and only after the record write
-// succeeded (a failed write pushes "Not filed"). "Confirmed" only where taking the file in is the act itself (pause,
-// away, idea). A request does nothing yet, so its push says so (0b-8 audit round 6 M-1). A result whose product or
-// id check was skipped is never confirmed (round 6 minor 1).
+// succeeded (a failed write pushes "Not filed"). "Confirmed" only for an idea, where saving it for the Lead is all that
+// happens. A research ask or an undo does nothing until it is acted on, so its push says so (0b-8 audit round 6 M-1).
+// A state- or request- file (pause, away, resume, wrap up, rotate, a mode request) is never filed: nothing acts on one
+// yet, so the record refuses it and the push says plainly that it isn't available and nothing changed (lead call L151;
+// the skill writes none). A result whose product or id check was skipped is never confirmed (round 6 minor 1).
 export function intakePush(name, result) {
   const no = (why) => `Not filed: ${maskSecrets(String(why)).text}. Say it again.`;
   if (!result?.ok) return no(result?.reason ?? 'unknown reason');
   if (result.checked?.products !== true || result.checked?.seenIds !== true) return no('the Mini could not check the product list and the file ids');
   const d = result.doc ?? {};
-  if (result.kind === 'idea') return `Confirmed: idea ${result.id ?? ''}.`.replace(' .', '.');
-  if (result.kind === 'state') {
-    if (d.state !== 'away') return `Confirmed: pause ${d.product}. Only your tap brings it back.`;
-    const tz = d.tz ? `time zone ${d.tz}` : `no time zone yet; the trip brief says what that means for each product${result.note ? ' (that time zone was not accepted; name a city, such as Europe/Prague)' : ''}`;
-    return `Confirmed: away ${d.product}${d.until ? ` until ${String(d.until).slice(0, 10)}` : ''}, ${tz}.`;
-  }
+  if (result.kind === 'idea') return `Confirmed: idea ${result.id ?? ''}, saved for the Lead.`.replace(' ,', ',');
   if (result.kind === 'ask-request' && d.ask === 'undo') return `Request taken: undo pull request #${d.pr} of ${d.product}. Nothing is undone yet; the Undo button comes next if that change can be undone.`;
   if (result.kind === 'ask-request') return `Request taken: research ask for ${d.product}. Nothing has started yet; it goes on your waiting list with its number.`;
-  if (d.request === 'rotate') return `Request taken: rotate ${d.name}. The key is NOT rotated yet; the steps follow.`;
-  if (MODE_REQUESTS.includes(d.request)) return `Request taken: ${d.request}${d.product ? ` ${d.product}` : ''}. Nothing has started yet${d.request === 'think' ? '; the Mini opens the thinking room' : '; the Lead picks it up when it runs'}.`;
-  if (d.request === 'wrapup') return 'Request taken: wrap up. Nothing has wrapped up yet; the Lead does it when it runs.';
-  return `Request taken: resume ${d.product ?? 'all products'}. Nothing resumes until you tap it.`;
+  return notAvailable(result.kind, d);
+}
+
+// L151: what a state- or request- push says. Never "Confirmed" and never "Request taken": nothing was filed.
+const notYet = (what, after = 'Nothing changed.') => `Not filed: ${what} isn't available from the Front Door yet. ${after}`;
+function notAvailable(kind, d) {
+  if (kind === 'state') return notYet(d.state === 'away' ? `trip mode for ${d.product}` : `pausing ${d.product}`);
+  if (d.request === 'rotate') return notYet(`rotating ${d.name}`, 'The key is NOT rotated.');
+  if (d.request === 'wrapup') return notYet('wrapping up');
+  if (d.request === 'resume') return notYet(`resuming ${d.product ?? 'all products'}`);
+  return notYet(`the ${d.request} request`);
 }
 
 function checkOne(name, text) {

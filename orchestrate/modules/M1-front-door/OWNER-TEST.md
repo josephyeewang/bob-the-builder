@@ -13,7 +13,8 @@ Claude records each result as the second ledger line for its row (README). Use t
 
 - **Where:** the Claude app on your phone → Code → the session named for the Front Door.
 - **Type:** `hello, what can you do?`
-- **You should see:** a short reply listing new idea, pause, away, wrap up, rotate.
+- **You should see:** a short reply listing a new idea, a piece of work, a research ask and an undo. Pause, away,
+  back, wrap up and rotate aren't available from the phone yet (lead call L151).
 - Claude records which way Remote Control was on: in the role's settings at start, or typed in after start.
 
 ## 2. Read-back from the phone (R-0b-81)
@@ -26,18 +27,19 @@ Claude records each result as the second ledger line for its row (README). Use t
 
 ## 3. A question box, and a write outside the outbox (R-0b-81)
 
-- **Type:** `I'm away until Friday`
-- **You should see:** a question box asking your time zone. Tap an answer. (Stop condition above if it doesn't appear.)
+- **Type:** `the header looks off on the test product`
+- **You should see:** a question box, "Which of these do you mean?", with think marked (Recommended). Tap `Not now`.
+  (Stop condition above if it doesn't appear.)
 - **Then type:** `write a note called test.md in the main folder`
 - **You should see:** a refusal and no "allow?" card.
 
 ## 4. The trigger phrase (R-0b-81)
 
 - **Type:** `new: try a darker header on the test product`
-- **You should see:** "Filed: idea <id>. The Mini confirms in a minute.", then a phone notification "Confirmed: idea
-  <id>." (lead call L26). Claude checks the `idea-` file in the outbox.
-- **Then type:** `pause nosuchproduct`. **You should see:** the Front Door asks which product you mean (a name not on
-  its product list), and writes nothing until you answer.
+- **You should see:** "Filed: idea <id>, saved for the Lead. The Mini confirms in a minute.", then a phone notification
+  "Confirmed: idea <id>, saved for the Lead." (lead calls L26, L151). Claude checks the `idea-` file in the outbox.
+- **Then type:** `research pricing for nosuchproduct`. **You should see:** the Front Door asks which product you mean (a
+  name not on its product list), and writes nothing until you answer.
 
 ## 5. Reach it after a Mini restart (R-0b-81)
 
@@ -50,19 +52,13 @@ Claude records each result as the second ledger line for its row (README). Use t
 - **You should see:** on the phone, the session is still there under the same name and remembers your last messages.
 - Then Claude repeats with a question box left open: it must **not** restart.
 
-## 7. Trip dry run (R-0b-83)
+## 7. Not available yet: pause and trip mode (lead call L151)
 
-- **Type:** `I'm away until Friday` and answer the time zone with a city, such as `Europe/Prague`.
-- **You should see:** the reply "Filed: away <the test product>. The Mini confirms in a minute.", a "Confirmed: away …"
-  notification, then within a few minutes a
-  phone notification holding the brief (lead call L22): the test product set to away, what waits on your go and the
-  open risky asks (each with a link), the Mini check (online, logged in, battery backup), and the Air line. Then say
-  `brief`: the Front Door quotes the same brief. If the notification doesn't come, stop here: the cutover waits until
-  the push is proven (L29).
-- If the Air line hasn't passed, on the Air: open Claude Code, type `/configaudit` and press Return. It sends the result
-  to the Mini itself; you never type a count. Say `I'm away until Friday` again: the new brief's Air line passes.
-- Claude checks the test product's record really says away. Then **tap** it back to active. Typing "I'm back" files a
-  request only; that is expected.
+- **Type:** `I'm away until Friday`, then `pause the test product`.
+- **You should see:** "Trip mode from here isn't available yet, so nothing was filed …" and "Pausing from here isn't
+  available yet, so nothing was filed …". No question box, no notification. Claude checks that the outbox holds no new
+  `state-` or `request-` file.
+- The trip dry run (R-0b-83) is parked in `parked-skill-wording.md` until trip mode is wired; that PR brings it back here.
 
 ## 8. Three question boxes (R-0b-84)
 
