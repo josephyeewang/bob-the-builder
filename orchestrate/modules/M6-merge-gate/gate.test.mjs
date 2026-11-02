@@ -17,7 +17,7 @@ import { fakeGateGitHub } from './fixtures/fake-gate-github.mjs';
 import { makeGitView } from '../M10-rules/git-view.mjs';
 import { blobSha } from '../M10-rules/reader.mjs';
 import { ROBOT_FACT, NO_PUSH_FACT } from '../M12-sensors/outside-watch.mjs';
-import { gatePass, queueOrder, NOT_GREEN_LINE, MERGE_LIMIT_TOLD_FACT } from './gate.mjs';
+import { gatePass, queueOrder, NOT_GREEN_LINE, MERGE_LIMIT_TOLD_FACT, FINAL_NOTE, GITHUB_NO_NOTE } from './gate.mjs';
 import { readMark } from './mark.mjs';
 import { readNeedsJoe } from './checker-entry.mjs';
 import { gatherFacts } from './gather.mjs';
@@ -936,21 +936,28 @@ test('L66 M1 planted: a verdict row that says pass while its outbox file says fa
   assert.ok(m2.doc.reasons.some((x) => x.startsWith('5:') && /R-C-1's verdict can't be counted, so it counts as a failure: its verdict file is gone since the session ended/.test(x)), m2.doc.reasons.join(' | '));
 });
 
-test('L65: with no review launches folder set, the gate refuses (5) and says why, never reading the Record', async () => {
+// Not known yet (L164): held as waiting, with the reason in waiting_on, and no merge call.
+function waits5(w, re) {
+  const m = mergeOf(w);
+  assert.equal(m.doc.state, 'held', JSON.stringify(m.doc));
+  assert.equal(m.doc.hold, 'waiting');
+  assert.ok((m.doc.waiting_on ?? []).some((x) => x.startsWith('5:') && re.test(x)), (m.doc.waiting_on ?? []).join(' | '));
+  assert.equal(w.g.writes.filter(([k]) => k === 'put').length, 0);
+}
+
+// The review records could not be read: not known yet, so held and judged again each pass (L164), never merged.
+test('L65: with no review launches folder set, the gate holds (5) and says why, never reading the Record', async () => {
   const w = world();
   verifiedCard(w);
   delete w.ctx.reviewLaunches;
   await gatePass(w.ctx);
-  const m = mergeOf(w);
-  assert.notEqual(m.doc.state, 'merged');
-  assert.ok(m.doc.reasons.some((x) => x.startsWith('5:') && /records could not be read: the gate has no review launches folder set/.test(x)), m.doc.reasons.join(' | '));
-  // A folder that fails M9's check refuses the same way.
+  waits5(w, /records could not be read: the gate has no review launches folder set/);
+  // A folder that fails M9's check holds the same way.
   const w2 = world();
   verifiedCard(w2);
   w2.ctx.reviewLaunches = { root: w2.env.launchRoot, uids: { ...w2.env.reviewUids, worker: w2.env.reviewUids.reviewer } };
   await gatePass(w2.ctx);
-  const m2 = mergeOf(w2);
-  assert.ok(m2.doc.reasons.some((x) => x.startsWith('5:') && /shared with worker/.test(x)), m2.doc.reasons.join(' | '));
+  waits5(w2, /shared with worker/);
 });
 
 // ---- Lead call L68: the worst verdict, read from review's own stores ----
@@ -991,18 +998,18 @@ test('L68 planted: a failing verdict whose Record row is gone (or never taken) s
 
 // L69 point 1 reverses L68 point 2: a session that ran and ended with no file is a failure. Only Joe's "review again"
 // sets it aside, and then it has no say.
-test('L69 planted: a reviewer not ended blocks; one that ended with no verdict is refused (5); Joe\'s set-aside has no say', async () => {
+test('L69 planted: a reviewer not ended blocks (held, L164); one that ended with no verdict is refused (5); Joe\'s set-aside has no say', async () => {
   const w = world();
   const head = verifiedCard(w);
   secondReviewer(w, head, 'R-quiet', { ended: false });
   await gatePass(w.ctx);
-  refusal5(w, /R-quiet has not ended yet/);
+  waits5(w, /R-quiet has not ended yet/);
   // A passing file from a session not yet ended blocks the same way.
   const w1 = world();
   const head1 = verifiedCard(w1);
   secondReviewer(w1, head1, 'R-early', { pass: true, ended: false });
   await gatePass(w1.ctx);
-  refusal5(w1, /R-early has not ended yet/);
+  waits5(w1, /R-early has not ended yet/);
   // Ended with no file: a failure, beside the pass.
   const w2 = world();
   const head2 = verifiedCard(w2);
@@ -1061,12 +1068,12 @@ test('L69 P10 planted: one bad launch record refuses only its own card; one tied
   assert.equal(mergeOf(w).doc.state, 'merged', JSON.stringify(mergeOf(w).doc.reasons));
   const f = await gatherFacts(w.ctx, mergeOf(w));
   assert.deepEqual(f.reviewsSkipped, ['R-y.json: the launch record is not JSON']);
-  // This card's own bad record refuses it.
+  // This card's own bad record holds it: its reviews can't be read, so it is not known yet (L164), and never merged.
   const w2 = world();
   verifiedCard(w2);
   writeFileSync(join(w2.env.launchRoot, 'R-z.json'), JSON.stringify({ session_id: 'R-z', card: 'C-1', head: 'e'.repeat(40) }), { mode: 0o644 });
   await gatePass(w2.ctx);
-  refusal5(w2, /the launch record R-z\.json of card C-1 fails its checks, so no review of this card can be counted \(the launch record names no review role\)/);
+  waits5(w2, /the launch record R-z\.json of card C-1 fails its checks, so no review of this card can be counted \(the launch record names no review role\)/);
 });
 
 // L69 point 5: the pull request's head has its own say, even when the review carries over to it.
@@ -1207,9 +1214,9 @@ test('L138 MAT-2: refusal 8 sets needs_joe; once Joe approves the card at the sa
   assert.equal(w.env.record.list('merge_request').length, 2);
 });
 
-// The refusal here is about the change (a red check), so not asking again is right. A temporary refusal (checks or
-// threads unreadable, mergeable unknown, main red) currently stalls the same way and is never retried. Known gap,
-// fixed under LEAD-CALLS L164 before the first cutover; no test pins that stall.
+// The refusal here is about the change (a red check), so not asking again is right. What is only not known yet (checks
+// or threads unreadable, mergeable unknown, main red) is held instead and judged again each pass (L164, the tests at
+// the end of this file).
 test('L138 MAT-2: a merge the gate refused while the card did not change is not asked for again on every pass', async () => {
   const w = world();
   const head = verifiedCard(w, 'C-1', { request: false });
@@ -1229,4 +1236,210 @@ test('L138 MAT-2: a merge the gate refused while the card did not change is not 
   must(put(w.env.record, 'dispatcher', 'card', 'C-1', { attempts: { merge_asks: 0 } }), 'a change');
   tick(w, 1);
   assert.deepEqual(dispatcherAsks(w, 'C-1', { head }), [['C-1', 'merge requested again']]);
+});
+
+// ---- L164: what is only not known yet is held, never refused for good; the owner hears of a long wait once ----------
+// L168, L170: a refusal the owner must hear of is told until its alert is taken (an answer of false, or a throw, is not).
+
+// The owner's alert queue does not take the first `n` alerts of one type: it answers false, or throws. Every try is kept.
+function flakyAlert(w, type, mode, n = 1) {
+  const push = w.ctx.alert;
+  const tries = [];
+  w.ctx.alert = (a) => {
+    if (a.type === type) {
+      tries.push(a);
+      if (n > 0) { n--; if (mode === 'throw') throw new Error('queue gone'); return false; }
+    }
+    return push(a);
+  };
+  return tries;
+}
+const told = (w, type) => w.alerts.filter((a) => a.type === type);
+const waitingHeld = (m, re) => {
+  assert.equal(m.doc.state, 'held', JSON.stringify(m.doc));
+  assert.equal(m.doc.hold, 'waiting');
+  assert.ok((m.doc.waiting_on ?? []).some((x) => re.test(x)), (m.doc.waiting_on ?? []).join(' | '));
+};
+
+test('L164 PROBE-D: GitHub down for a pass holds the merge (never refuses it) and stops the queue; GitHub back, it merges', async () => {
+  const w = world(limited());
+  verifiedCard(w);
+  tick(w, 1);
+  verifiedCard(w, 'C-2', { pr: 8, files: { 'src/b.mjs': 'b' } });
+  w.g.down = true;
+  await gatePass(w.ctx);
+  waitingHeld(mergeOf(w), /^3: /);
+  assert.equal(mergeOf(w, 'C-2').doc.state, 'queued', 'an outage stops the queue: the next merge is not judged against it');
+  assert.equal(cardOf(w).state, 'verified');
+  assert.equal(gatePuts(w), 0);
+  assert.deepEqual(told(w, 'merge_refused'), []);
+  w.g.down = false;
+  tick(w, 1);
+  await gatePass(w.ctx);
+  assert.equal(mergeOf(w).doc.state, 'merged', 'judged again once GitHub answers');
+  assert.equal(cardOf(w).state, 'merged');
+  assert.deepEqual(told(w, 'merge_refused'), []);
+  assert.deepEqual(told(w, 'merge_waiting_long'), []);
+});
+
+for (const mode of ['taken', 'false', 'throw']) {
+  test(`L164: a merge GitHub can't yet call mergeable waits, judged again each pass; past the limit the owner is told once (alert ${mode})`, async () => {
+    const w = world(limited());
+    verifiedCard(w);
+    w.g.pulls.get(7).mergeable_state = 'unknown';
+    const tries = flakyAlert(w, 'merge_waiting_long', mode, mode === 'taken' ? 0 : 1);
+    await gatePass(w.ctx);
+    const since = mergeOf(w).doc.waiting_since;
+    waitingHeld(mergeOf(w), /^3: .*mergeable/);
+    assert.equal(since, nowIso(w));
+    for (let i = 0; i < 3; i++) {
+      tick(w, 4);
+      await gatePass(w.ctx);
+      waitingHeld(mergeOf(w), /^3: .*mergeable/);
+      assert.equal(mergeOf(w).doc.waiting_since, since, 'the wait keeps the time it began');
+    }
+    assert.equal(tries.length, 0, 'under the limit: nothing told');
+    tick(w, 4);
+    await gatePass(w.ctx);
+    assert.equal(tries.length, 1);
+    assert.equal(!!mergeOf(w).doc.wait_told_at, mode === 'taken', 'wait_told_at only once the alert was taken');
+    tick(w, 1);
+    await gatePass(w.ctx);
+    assert.equal(tries.length, mode === 'taken' ? 1 : 2, 'a lost alert is sent again on the next pass');
+    assert.ok(mergeOf(w).doc.wait_told_at);
+    tick(w, 1);
+    await gatePass(w.ctx);
+    assert.equal(told(w, 'merge_waiting_long').length, 1, 'told once');
+    assert.match(told(w, 'merge_waiting_long')[0].note, /judged again on every pass/);
+    assert.equal(gatePuts(w), 0);
+    w.g.pulls.get(7).mergeable_state = 'clean';
+    tick(w, 1);
+    await gatePass(w.ctx);
+    assert.equal(mergeOf(w).doc.state, 'merged');
+  });
+}
+
+test('L164: a waiting merge with no merging limit in the rules tells the owner once that the limit is missing', async () => {
+  const w = world();
+  verifiedCard(w);
+  w.g.pulls.get(7).mergeable_state = 'unknown';
+  for (let i = 0; i < 4; i++) {
+    await gatePass(w.ctx);
+    waitingHeld(mergeOf(w), /^3: /);
+    tick(w, 30);
+  }
+  assert.equal(told(w, 'merge_limit_missing').length, 1);
+  assert.match(told(w, 'merge_limit_missing')[0].note, /waiting to be judged .*timeouts\.merging_open_max_min/);
+  assert.equal(recOf(w).read('fact', MERGE_LIMIT_TOLD_FACT(mergeOf(w).id))?.doc?.merge, mergeOf(w).id);
+  assert.deepEqual(told(w, 'merge_waiting_long'), []);
+});
+
+// L168 (1): the three refusal sites that tell the owner, each with a lost first alert.
+const redCheck = (w, head) => w.g.checks.set(head, [{ name: 'test', app: { id: 1 }, head_sha: head, status: 'completed', conclusion: 'failure' }]);
+const LONG_ID = 'C-' + 'x'.repeat(86);
+for (const [site, make, note] of [
+  ['a red check', (w) => redCheck(w, verifiedCard(w)), FINAL_NOTE],
+  ['a card id too long for the mark', (w) => verifiedCard(w, LONG_ID), FINAL_NOTE],
+  ['GitHub refusing the merge (405)', (w) => { verifiedCard(w); w.g.answer.merge = () => ({ status: 405, json: { message: 'Base branch was modified' } }); }, GITHUB_NO_NOTE],
+]) {
+  for (const mode of ['false', 'throw']) {
+    test(`L168: ${site}: a lost merge_refused alert (${mode}) is sent again until taken, then never again`, async () => {
+      const w = world();
+      const tries = flakyAlert(w, 'merge_refused', mode, 1);
+      make(w);
+      const only = () => { const ms = recOf(w).list('merge'); assert.equal(ms.length, 1); return ms[0]; };
+      await gatePass(w.ctx);
+      assert.equal(only().doc.state, 'refused');
+      assert.equal(only().doc.tell_owner, true);
+      assert.equal(only().doc.told_at, undefined, 'not told: no mark');
+      assert.equal(tries.length, 1);
+      tick(w, 1);
+      await gatePass(w.ctx);
+      assert.equal(tries.length, 2, 'sent again on the next pass');
+      assert.ok(only().doc.told_at, 'told: marked');
+      for (let i = 0; i < 2; i++) { tick(w, 1); await gatePass(w.ctx); }
+      assert.equal(tries.length, 2, 'never again once told');
+      assert.equal(told(w, 'merge_refused').length, 1);
+      assert.equal(told(w, 'merge_refused')[0].note, note);
+      assert.deepEqual(told(w, 'merge_refused')[0].reasons, only().doc.reasons);
+    });
+  }
+}
+
+test('L168: a refusal told at once is marked in the same pass and never sent again', async () => {
+  const w = world();
+  redCheck(w, verifiedCard(w));
+  await gatePass(w.ctx);
+  assert.ok(mergeOf(w).doc.told_at);
+  tick(w, 1);
+  await gatePass(w.ctx);
+  assert.equal(told(w, 'merge_refused').length, 1);
+});
+
+// L164 m2: only a missing key reads as "the rules have no limit"; rules that fail to answer say the gate is unsure.
+test('L164 m2: rules that fail to answer the merging limit during recovery say the gate is unsure, never that the limit is missing', async () => {
+  const KEY = 'timeouts.merging_open_max_min';
+  const w = world(limited());
+  verifiedCard(w);
+  loseAnswer(w, { merged: false });
+  await gatePass(w.ctx);
+  assert.equal(mergeOf(w).doc.state, 'merging');
+  const base = w.ctx.rules;
+  const broken = (k) => { if (k === KEY) throw new Error('the rules engine stopped'); };
+  w.ctx.rules = Object.create(base, {
+    get: { value: (k, o) => { broken(k); return base.get(k, o); } },
+    num: { value: (k, o) => { broken(k); return base.num(k, o); } },
+  });
+  tick(w, LIMIT_MIN + 1);
+  await gatePass(w.ctx);
+  assert.equal(mergeOf(w).doc.state, 'merging', 'not refused on a limit the rules could not give');
+  assert.ok(told(w, 'merge_gate_unsure').some((a) => /could not answer timeouts\.merging_open_max_min: the rules engine stopped/.test(a.note)), JSON.stringify(w.alerts));
+  assert.deepEqual(told(w, 'merge_limit_missing'), []);
+  assert.equal(recOf(w).read('fact', MERGE_LIMIT_TOLD_FACT(mergeOf(w).id)), null);
+  w.ctx.rules = base;
+  tick(w, 1);
+  await gatePass(w.ctx);
+  assert.equal(mergeOf(w).doc.state, 'refused');
+  assert.deepEqual(mergeOf(w).doc.reasons, ['interrupted']);
+});
+
+// L164 m3: the missing-limit alert that throws is sent again; a told fact the gate did not make does not count.
+test('L164 m3: a merge_limit_missing alert that throws writes no told fact and is sent again on the next pass', async () => {
+  const w = world();
+  const tries = flakyAlert(w, 'merge_limit_missing', 'throw', 1);
+  verifiedCard(w);
+  loseAnswer(w, { merged: false });
+  await gatePass(w.ctx);
+  const id = mergeOf(w).id;
+  tick(w, 2);
+  await gatePass(w.ctx);
+  assert.equal(tries.length, 1);
+  assert.equal(recOf(w).read('fact', MERGE_LIMIT_TOLD_FACT(id)), null, 'a thrown alert writes no told fact');
+  for (let i = 0; i < 3; i++) { tick(w, 2); await gatePass(w.ctx); }
+  assert.equal(tries.length, 2);
+  assert.equal(told(w, 'merge_limit_missing').length, 1);
+  assert.equal(recOf(w).read('fact', MERGE_LIMIT_TOLD_FACT(id))?.doc?.merge, id);
+});
+
+test('L164 m3: a told fact the gate did not make is not counted: the owner is still told the limit is missing', async () => {
+  const w = world();
+  verifiedCard(w);
+  loseAnswer(w, { merged: false });
+  await gatePass(w.ctx);
+  const id = mergeOf(w).id;
+  const fid = MERGE_LIMIT_TOLD_FACT(id);
+  // The fact is there, but the Record says another role made it (factFrom reads who created it).
+  must(recOf(w).write({ actor: 'merge_gate', entity: 'fact', id: fid, expectRev: 0, doc: { type: 'merge_limit_told', merge: id } }), 'planted');
+  const plantRev = recOf(w).read('fact', fid).rev;
+  const base = w.ctx.record;
+  w.ctx.record = Object.create(base, { meta: { value: (e, x) => {
+    const m = base.meta(e, x);
+    return e === 'fact' && x === fid && base.read('fact', fid)?.rev === plantRev ? { ...m, createdBy: 'sensors' } : m;
+  } } });
+  tick(w, 2);
+  await gatePass(w.ctx);
+  assert.equal(told(w, 'merge_limit_missing').length, 1, 'told despite the foreign fact');
+  tick(w, 2);
+  await gatePass(w.ctx);
+  assert.equal(told(w, 'merge_limit_missing').length, 1, 'the gate\'s own told fact then counts');
 });

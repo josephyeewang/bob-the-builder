@@ -1023,3 +1023,30 @@ test('L116 m4: a card the gate refused twice the same way is told to Joe through
   assert.equal(told.length, 1, w.calls.alerts.join(' | '));
   assert.equal(requested(w.rec, 'C-1'), null, 'not requested while it waits on Joe');
 });
+
+// L172 m3, in the tick: the outage step queues its alert in the Record's outbox (tick.mjs `outbox`); the send to the
+// owner is the alert port, here throwing on the first try. The pass that opens the outage still holds every start, and
+// the outage is told once, on a later pass. (outage.test.mjs has the throw from outageStep's own alert.)
+test('L172 m3: an outage opened in a pass whose outage alert send throws still holds starts that pass, and is told once later', async () => {
+  const gone = (id, c) => ({ id, card: c, alive: false, ended: true, lastWriteAt: T0 - 10 * MIN });
+  const board = [gone('S-1', 'C-1'), gone('S-2', 'C-2'), gone('S-3', 'C-3')];
+  let throwOnce = true;
+  const told = [];
+  const w = world([account(), usage(), card('C-1', { state: 'running' }), card('C-2', { state: 'running' }), card('C-3', { state: 'running' }),
+    card('R-1', { state: 'in_review', changed_at: iso(T0 - 60 * MIN) }), ...mergeReady('V-1', 7)],
+  { over: { board: () => board, healthy: () => false, alert: (t) => {
+    const text = typeof t === 'string' ? t : t.text;
+    if (/stopped at once/.test(text)) { if (throwOnce) { throwOnce = false; throw new Error('queue gone'); } told.push(text); }
+    return true;
+  } } });
+  const r = await w.pass();
+  assert.equal(w.rec.read('fact', OUTAGE_FACT).doc.state, 'open');
+  assert.equal(w.rec.read('fact', OUTAGE_FACT).doc.told_id, undefined);
+  assert.deepEqual(w.calls.reviewers, [], 'no reviewer starts in the pass the outage opened');
+  assert.deepEqual(w.calls.launched, []);
+  assert.equal(requested(w.rec, 'V-1'), null, 'no merge is requested');
+  assert.match(String(r.steps.leads.result), /outage/);
+  for (let i = 1; i <= 3; i += 1) await w.pass(i);
+  assert.equal(told.length, 1, 'told once, on a later pass');
+  assert.equal(w.rec.read('fact', OUTAGE_FACT).doc.told_id, w.rec.read('fact', OUTAGE_FACT).doc.id);
+});

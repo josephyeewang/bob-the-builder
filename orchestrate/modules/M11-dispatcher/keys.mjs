@@ -70,7 +70,7 @@ export const NEW_KEYS = Object.freeze([
 const DEFAULTS = Object.freeze({ [KEYS.paceMinShare]: 0.143, [KEYS.shakedown]: true });
 
 export class MissingKey extends Error {
-  constructor(key) { super(`the rules have no value for ${key}`); this.key = key; }
+  constructor(key, why) { super(why ? `the rules' ${key} ${why}` : `the rules have no value for ${key}`); this.key = key; }
 }
 
 // The keys whose value may have a fraction: shares, paces and percentages. They are read with dec(); every other
@@ -80,6 +80,11 @@ export const DECIMAL_KEYS = Object.freeze([
   KEYS.redPace, KEYS.redWeek, KEYS.redH5, KEYS.amberPace, KEYS.amberWeek, KEYS.amberH5, KEYS.ownBuildingShare,
   KEYS.reservePct, KEYS.noTier1ProdAbove, KEYS.paceMinShare, KEYS.outageShare,
 ]);
+
+// The keys that are a wait before something is given up on: 0 would give up at once (stuck_min 0 passes the fit check
+// but the Record refuses every break; a merging limit of 0 calls every open merge interrupted), so they must be at
+// least 1, and anything less reads as missing (L164 m1).
+export const AT_LEAST_ONE = Object.freeze([KEYS.claimsStuckMin, KEYS.mergingOpenMaxMin]);
 
 /**
  * A value from the rules, typed, or throws MissingKey (L123). Numbers go through rules.num() or rules.dec() and the
@@ -96,6 +101,7 @@ export function need(rules, key, { product, type = 'number' } = {}) {
   else if (type === 'list') v = Array.isArray(raw) && raw.every((x) => typeof x === 'string') ? raw : undefined;
   else if (type === 'object') v = raw !== null && typeof raw === 'object' && !Array.isArray(raw) ? raw : undefined;
   if (v === undefined) throw new MissingKey(key);
+  if (AT_LEAST_ONE.includes(key) && !(v >= 1)) throw new MissingKey(key, `is ${v}; it must be at least 1`);
   return v;
 }
 

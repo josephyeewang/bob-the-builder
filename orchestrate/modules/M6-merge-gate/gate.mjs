@@ -11,6 +11,9 @@
 //   5. Held merges go back in the queue to be judged again; they keep their place (queue_since).
 //   6. The next queued merge (queueOrder): behind main → catch up (PUT update-branch; a conflict returns it to the
 //      builder); otherwise judge (refusals.mjs over gather.mjs). refuse → refused, with every reason; hold → held;
+//      a change that can't be judged yet (GitHub unreadable, a check or review still running, main red) is held as
+//      waiting and judged again on the next pass, never refused for good (L164); a wait past
+//      timeouts.merging_open_max_min is told to the owner once;
 //      merge → the paired write (merge → checking, card → merging), judged again under the lock, then merging, the
 //      merge on GitHub (PUT /pulls/n/merge with the judged head, squash: never a ref write), merged, the card merged,
 //      the robot's mark on the merge commit, and a check that the merge commit's first parent is the judged main.
@@ -18,16 +21,21 @@
 //   await gatePass(ctx) → { ran, reason?, problems?, did: [{ merge, step, ... }] }
 // ctx = gather.mjs's ctx, plus readFact? (id → doc; default the record's fact) and maxCatchUps? (default 3).
 // The gate writes only as merge_gate. It never moves a card it didn't put in merging, except merged.
+//
+// TOLD UNTIL DELIVERED (L168, L170; the site G pattern of L135). A refusal the owner must hear of is written with
+// tell_owner: true and its note; told_at is added only once the merge_refused alert was taken (an answer of false, or a
+// throw, is not taken), and each pass sends again for every refused merge that has tell_owner and no told_at. A long
+// wait is the same with wait_told_at.
 
 import { robotMergesGreen } from '../M12-sensors/outside-watch.mjs';
 import { gatherFacts, botId } from './gather.mjs';
-import { judge } from './refusals.mjs';
+import { judge, WAITING_HOLD } from './refusals.mjs';
 import { MARK_CONTEXT, markDescription, markable, NEEDS_JOE_CONTEXT, needsJoeDescription } from './mark.mjs';
 import { isOpen } from '../../shared/record.mjs';
 import { markReverted } from './undo.mjs';
 import { factFrom } from '../M9-record/permissions.mjs';
 import { settleMerge, openTooLong, prReading, prReadingAfter, MERGED_OUTSIDE, MERGED_OUTSIDE_UNTOLD, alertTaken } from './merge-outcome.mjs';
-import { KEYS, minutes } from '../M11-dispatcher/keys.mjs';
+import { KEYS, minutes, MissingKey } from '../M11-dispatcher/keys.mjs';
 
 export const ACTOR = 'merge_gate';
 export const NOT_GREEN_LINE = 'outside check not green in 2 h';
@@ -40,6 +48,9 @@ const SHA = /^[0-9a-f]{40}$/;
 export const MERGE_NO = Object.freeze([405, 409, 422]);
 const DONE = ['merged', 'audited_ok', 'audit_flagged'];
 const short = (s) => String(s ?? '').slice(0, 7);
+// What a refusal's alert tells the owner happens next.
+export const FINAL_NOTE = 'refused for a reason about the change itself; it won\'t be retried until the card changes';
+export const GITHUB_NO_NOTE = 'GitHub refused the merge; the card goes back and is asked for again, and the same refusal twice goes to the owner';
 
 // The order the queue is served in: undo first, the lead's daily card when the blueprint's freshness alarm is on,
 // then Tier 1, then Tier 2; ties go to whoever has waited longest (queue_since, kept through holds and catch-ups).
@@ -120,6 +131,9 @@ export async function gatePass(ctx) {
     if (r.ok) step(m, to); else alert({ type: 'merge_gate_write_refused', merge: m.id, to, reason: r.reason });
   }
 
+  // 3b. A refusal whose alert was lost is told again (L168).
+  for (const m of merges().filter((x) => x.doc.state === 'refused' && x.doc.tell_owner === true && !x.doc.told_at)) tellRefused(m);
+
   // 4. One at a time: finish a merge a stopped pass left behind.
   const busy = merges().find((m) => m.doc.state === 'checking' || m.doc.state === 'merging');
   if (busy) { await recover(busy); return { ran: true, did }; }
@@ -141,8 +155,7 @@ export async function gatePass(ctx) {
   async function serve(m) {
     if (!markable(m.doc.card)) {
       const reasons = ['the card id is too long for the robot\'s mark (80 characters at most)'];
-      move(m, 'refused', { reasons });
-      alert({ type: 'merge_refused', merge: m.id, card: m.doc.card, reasons });
+      if (move(m, 'refused', { reasons, tell_owner: true, tell_note: FINAL_NOTE })) tellRefused(fresh('merge', m.id));
       return STEPPED_ASIDE;
     }
     // This PR is already merged under another merge (an interrupted one, reconciled): nothing is left to merge.
@@ -161,7 +174,7 @@ export async function gatePass(ctx) {
       return now?.doc?.state === 'queued' ? serve(now) : STEPPED_ASIDE;
     }
     const facts = await gatherFacts(ctx, m);
-    // GitHub unreadable: refuse this one and stop, rather than refuse the whole queue in one pass.
+    // GitHub unreadable: hold this one and stop, rather than hold the whole queue in one pass.
     const outage = !!facts.card && (!facts.pr || !SHA.test(facts.main?.sha ?? '') || facts.checks === null || facts.statuses === null || facts.compareStatus === null);
     // Behind main: catch up first (R-0b-89), never judge a head that can't land as judged.
     if ((facts.compareStatus === 'behind' || facts.compareStatus === 'diverged') && facts.pr?.state === 'open' && SHA.test(facts.pr?.head?.sha ?? '')) {
@@ -170,7 +183,7 @@ export async function gatePass(ctx) {
     }
     const v = judge(facts);
     if (v.decision === 'refuse') { refuse(m, facts, v); return outage ? undefined : STEPPED_ASIDE; }
-    if (v.decision === 'hold') { move(m, 'held', { hold: v.hold }); return STEPPED_ASIDE; }
+    if (v.decision === 'hold') { hold(m, v); return outage ? undefined : STEPPED_ASIDE; }
     return take(m, facts);
   }
 
@@ -198,8 +211,53 @@ export async function gatePass(ctx) {
     // The owner's Approve is missing: say so on the card, so M2 asks for it (refusal 8).
     const card = fresh('card', m.doc.card);
     if (v.refusals.some((x) => x.n === 8) && facts.approve?.needed && card && card.doc.needs_joe !== true) write('card', card, { needs_joe: true });
-    move(m, 'refused', { reasons });
-    alert({ type: 'merge_refused', merge: m.id, card: m.doc.card, reasons });
+    if (move(m, 'refused', { reasons, tell_owner: true, tell_note: FINAL_NOTE })) tellRefused(fresh('merge', m.id));
+  }
+
+  // Told once delivered: told_at is the mark, and 3b sends again until it is down.
+  function tellRefused(m) {
+    if (!m?.doc || m.doc.state !== 'refused' || m.doc.told_at) return;
+    const taken = alertTaken(alert, { type: 'merge_refused', merge: m.id, card: m.doc.card, reasons: m.doc.reasons ?? [], note: m.doc.tell_note ?? FINAL_NOTE });
+    if (!taken) return;
+    const r = write('merge', m, { told_at: iso() });
+    if (!r.ok) alert({ type: 'merge_gate_write_refused', merge: m.id, to: 'told', reason: r.reason });
+  }
+
+  // A hold. A waiting one (L164) keeps the time it began waiting (waiting_since) and what it waits on, so the owner hears
+  // of a wait past timeouts.merging_open_max_min, once (wait_told_at); any other hold starts that clock again.
+  function hold(m, v) {
+    const cur = fresh('merge', m.id) ?? m;
+    const waiting = v.hold === WAITING_HOLD;
+    const fields = waiting
+      ? { hold: v.hold, waiting_on: v.refusals.map((x) => `${x.n}: ${x.reason}`), waiting_since: cur.doc.waiting_since ?? iso(), wait_told_at: cur.doc.wait_told_at ?? null }
+      : { hold: v.hold, waiting_on: null, waiting_since: null, wait_told_at: null };
+    if (!move(cur, 'held', fields) || !waiting) return;
+    waitedLong(fresh('merge', m.id));
+  }
+
+  function waitedLong(m) {
+    if (!m?.doc || m.doc.wait_told_at) return;
+    const limit = mergingLimit(m);
+    if (limit === undefined) return;
+    if (!Number.isFinite(limit)) { tellLimitMissing(m, `merge ${m.id} is waiting to be judged (${(m.doc.waiting_on ?? []).join('; ')}), and the rules have no ${KEYS.mergingOpenMaxMin}, so a long wait is never told. Add the limit to the rules file`); return; }
+    const since = Date.parse(m.doc.waiting_since ?? '');
+    if (Number.isFinite(since) && now() - since < limit) return;
+    const taken = alertTaken(alert, { type: 'merge_waiting_long', merge: m.id, card: m.doc.card, pr: m.doc.pr, waiting_since: m.doc.waiting_since ?? null, waiting_on: m.doc.waiting_on ?? [],
+      note: `merge ${m.id} has waited to be judged for ${Math.round(limit / 60_000)} min or more: ${(m.doc.waiting_on ?? []).join('; ')}. It is judged again on every pass` });
+    if (!taken) return;
+    const r = write('merge', m, { wait_told_at: iso() });
+    if (!r.ok) alert({ type: 'merge_gate_write_refused', merge: m.id, to: 'wait_told', reason: r.reason });
+  }
+
+  // timeouts.merging_open_max_min in ms; NaN when the rules lack it (MissingKey); undefined when the rules could not
+  // answer at all, told as merge_gate_unsure, so a broken rules engine is never reported as a missing key (L164 m2).
+  function mergingLimit(m) {
+    // A per-product key: the real engine answers it only for a named product (L110 M-1).
+    try { return minutes(ctx.rules, KEYS.mergingOpenMaxMin, { product: ctx.product }); } catch (e) {
+      if (e instanceof MissingKey) return NaN;
+      alert({ type: 'merge_gate_unsure', merge: m.id, note: `the rules could not answer ${KEYS.mergingOpenMaxMin}: ${String(e?.message ?? e).slice(0, 200)}; trying again next pass` });
+      return undefined;
+    }
   }
 
   async function take(m, facts) {
@@ -220,7 +278,7 @@ export async function gatePass(ctx) {
     const head = facts.pr?.head?.sha;
     if (v.decision !== 'merge' || head !== m.doc.judged_head) {
       const reasons = v.decision === 'merge' ? ['the head moved while the merge was being checked'] : v.refusals.map((x) => `${x.n}: ${x.reason}`);
-      if (v.decision === 'hold') move(m, 'held', { hold: v.hold }); else move(m, 'refused', { reasons });
+      if (v.decision === 'hold') hold(m, v); else move(m, 'refused', { reasons });
       return putBack(m, 'verified');
     }
     if (!move(m, 'merging', { judged_main: facts.main.sha })) return;
@@ -234,8 +292,8 @@ export async function gatePass(ctx) {
     if (r?.status === 200 && r.json?.merged === true && SHA.test(sha ?? '')) return finish(m, sha);
     if (MERGE_NO.includes(r?.status)) {
       const why = `GitHub refused the merge (${r.status}${r.json?.message ? `: ${String(r.json.message).slice(0, 200)}` : ''})`;
-      const out = settleMerge({ record, alert, now }, m.id, { reason: why });
-      if (out.ok) { step(m, 'refused', { reasons: [why] }); alert({ type: 'merge_refused', merge: m.id, card: m.doc.card, reasons: [why] }); }
+      const out = settleMerge({ record, alert, now }, m.id, { reason: why, fields: { tell_owner: true, tell_note: GITHUB_NO_NOTE } });
+      if (out.ok) { step(m, 'refused', { reasons: [why] }); tellRefused(fresh('merge', m.id)); }
       return;
     }
     // No answer, a 5xx, or a 200 that doesn't say merged: GitHub may still be finishing the merge (L94). The merge stays
@@ -340,9 +398,8 @@ export async function gatePass(ctx) {
     }
     const reading = prReading(pr);
     const final = reading.merged || reading.state === 'closed';
-    let limit = NaN;
-    // A per-product key: the real engine answers it only for a named product (L110 M-1).
-    try { limit = minutes(ctx.rules, KEYS.mergingOpenMaxMin, { product: ctx.product }); } catch { limit = NaN; }
+    const limit = mergingLimit(m);
+    if (limit === undefined) return;
     const tooLong = !final && openTooLong(record, m.id, now, limit);
     if (!final && !tooLong) {
       if (!Number.isFinite(limit)) tellLimitMissing(m);
@@ -363,15 +420,15 @@ export async function gatePass(ctx) {
   }
 
   // With no timeouts.merging_open_max_min, an open merge is never refused as interrupted: it waits for GitHub's final
-  // answer, so the owner is told once per merge that the rules lack the limit (L148 item 5). The told fact is written
+  // answer, and a waiting hold is never told as long (L164), so the owner is told once per merge that the rules lack
+  // the limit (L148 item 5). The told fact is written
   // only once the alert was taken (as MERGED_OUTSIDE, L130 M6); a refused alert, or a refused fact write, tells again
   // next pass.
-  function tellLimitMissing(m) {
+  function tellLimitMissing(m, note = `pull request #${m.doc.pr} is still open after the merge call, and the rules have no ${KEYS.mergingOpenMaxMin}, so it is never recorded as interrupted; it waits for GitHub's final answer. Add the limit to the rules file`) {
     const id = MERGE_LIMIT_TOLD_FACT(m.id);
     const f = record.read('fact', id);
     if (f?.doc && !f.corrupt && factFrom(ACTOR, { id, createdBy: record.meta?.('fact', id)?.createdBy ?? null }, MERGE_LIMIT_TOLD_FAMILY)) return;
-    const said = alertTaken(alert, { type: 'merge_limit_missing', merge: m.id, card: m.doc.card, pr: m.doc.pr,
-      note: `pull request #${m.doc.pr} is still open after the merge call, and the rules have no ${KEYS.mergingOpenMaxMin}, so it is never recorded as interrupted; it waits for GitHub's final answer. Add the limit to the rules file` });
+    const said = alertTaken(alert, { type: 'merge_limit_missing', merge: m.id, card: m.doc.card, pr: m.doc.pr, note });
     if (!said) return;
     const r = record.write({ actor: ACTOR, entity: 'fact', id, expectRev: f?.rev ?? 0, doc: { type: 'merge_limit_told', merge: m.id, key: KEYS.mergingOpenMaxMin, told_at: iso() } });
     if (!r.ok) alert({ type: 'merge_gate_write_refused', merge: m.id, to: 'told', reason: r.reason });

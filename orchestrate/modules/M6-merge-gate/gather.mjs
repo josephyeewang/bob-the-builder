@@ -204,7 +204,7 @@ export async function gatherFacts(ctx, merge) {
         if (!SHA.test(m.doc.merge_commit ?? '') || !(await view.onHistory(m.doc.merge_commit, B0))) tier1MergesSince += 1;
       }
       return carryOver({ reviewed: { base: B0, head: H0 }, current: { base: B1, head }, between, catchUps, tier1MergesSince, gh: view });
-    }, { review: false, audit: false, reasons: ['carry-over could not be read'] });
+    }, { review: false, audit: false, unread: true, reasons: ['carry-over could not be read'] });
   }
 
   // The review (refusal 5; L44, L65, L66 M1, L68, L69). Read from review's own stores only, through M9's one check:

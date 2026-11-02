@@ -80,5 +80,13 @@ export function policyProblems(rules, product) {
   for (const [reason, states] of byReason) out.push(`M9: no card is ever ready in a ${states.join(' or ')} product: ${reason}`);
   // The tab heartbeat limit, read by writer.mjs's own heartbeatLimit (L115 m-A, L123): a whole number of minutes, at least 1.
   if (heartbeatLimit(rules, product) === undefined) out.push('M9: proposals.heartbeat_stale_min must be a whole number of minutes, at least 1');
+  // The optional keys, when set, are read as writer.mjs reads them: a whole number of minutes, at least 1. Missing is
+  // fine (each says what happens above); set to 0 or to text, the Record would refuse every break, or every lapse pass
+  // would fail (L164 m1).
+  for (const key of OPTIONAL_KEYS) {
+    if (absent(key)) continue;
+    let n; try { n = rules.num(key, { product }); } catch { n = undefined; }
+    if (!Number.isInteger(n) || n < 1) out.push(`M9: ${key}, when set, must be a whole number of minutes, at least 1`);
+  }
   return [...new Set(out)];
 }
