@@ -54,7 +54,7 @@ export function watchPlist(io, cfg) {
 function readRules(source, readSource) {
   if (typeof source !== 'string' || !source.startsWith('/')) return { problem: '--rules-source must be the full path of the rules file' };
   let text; try { text = readSource(source); } catch (e) { return { problem: `the rules file could not be read: ${e?.message ?? 'error'}` }; }
-  if (typeof text !== 'string' || text.length === 0) return { problem: 'the rules file is empty' };   // the size limit is the reader's (readConfigFile: 64 KB), 
+  if (typeof text !== 'string' || text.length === 0) return { problem: 'the rules file is empty' };   // the size limit is the reader's (readConfigFile: 64 KB), stated once there
   return { text };
 }
 
