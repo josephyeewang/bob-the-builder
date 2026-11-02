@@ -70,7 +70,10 @@ function parseArgs(argv) {
 
 const read = (p) => { try { return readFileSync(p, "utf8"); } catch { return null; } };
 
-/** Every file in the repo as a root-relative path (skips .git and node_modules), for bare names and short paths. */
+/**
+ * Every file in the repo as a root-relative path, for bare names and short paths. Skips .git, node_modules and
+ * .claude (worktrees and local data live there: a copy of a file in a worktree must not make a broken pointer pass).
+ */
 function allFiles(root) {
   const files = [];
   const walk = (dir, rel, depth) => {
@@ -78,7 +81,7 @@ function allFiles(root) {
     let entries = [];
     try { entries = readdirSync(dir, { withFileTypes: true }); } catch { return; }
     for (const e of entries) {
-      if (e.name === ".git" || e.name === "node_modules") continue;
+      if (e.name === ".git" || e.name === "node_modules" || e.name === ".claude") continue;
       const r = rel ? `${rel}/${e.name}` : e.name;
       if (e.isDirectory()) walk(join(dir, e.name), r, depth + 1);
       else files.push(r);
