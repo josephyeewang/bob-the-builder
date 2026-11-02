@@ -1653,15 +1653,64 @@ for (const [name, make, re] of HOLDS) {
   });
 }
 
-test('L184: the carry-over can\'t be read: waits, then refused for good after the cap', async () => {
+// L186: a failed thread read or carry-over read is a pass with GitHub unreadable: past the cap it still waits, and it
+// merges (or is judged on what it reads) once the reads return.
+test('L186 control: a carry-over read that fails past the cap never refuses', async () => {
   const w = world(limited());
   const h0 = verifiedCard(w);
   // The pull request's head moved on from the reviewed head, and the carry-over's compare of main with H0 fails.
   const h1 = w.g.commit([h0], { 'src/a.mjs': 'three' }, { from: h0 });
   w.g.pulls.get(7).head = h1;
   const view = w.ctx.view;
-  w.ctx.view = Object.create(view, { compare: { value: (b, h) => (h === h0 ? Promise.reject(new Error('compare gone')) : view.compare(b, h)) } });
-  await cappedAfter(w, /^5: whether the review carries over .* could not be read/);
+  let down = true;
+  w.ctx.view = Object.create(view, { compare: { value: (b, h) => (down && h === h0 ? Promise.reject(new Error('compare gone')) : view.compare(b, h)) } });
+  const re = /^5: whether the review carries over .* could not be read/;
+  for (const step of [0, WAIT_CAP_TIMES * LIMIT_MIN, 5]) {
+    tick(w, step);
+    await gatePass(w.ctx);
+    waitingHeld(mergeOf(w), re);
+  }
+  assert.equal(mergeOf(w).doc.stuck_since, null);
+  assert.deepEqual(told(w, 'merge_refused'), []);
+  down = false;
+  tick(w, 1);
+  await gatePass(w.ctx);
+  // Read once the compare answers, and judged on it: here the review does not carry over (a final refusal, not the cap).
+  assert.equal(mergeOf(w).doc.state, 'refused', JSON.stringify(mergeOf(w).doc));
+  assert.deepEqual(mergeOf(w).doc.reasons, ['5: the review was for ' + h0.slice(0, 7) + '; it does not carry over to ' + h1.slice(0, 7)]);
+  assert.equal(mergeOf(w).doc.tell_note, FINAL_NOTE);
+});
+
+test('L186 control: a GraphQL-only outage longer than the cap never refuses, and the merge goes through once reads return', async () => {
+  const w = world(limited());
+  verifiedCard(w);
+  const post = w.g.gh.post;
+  let down = true;
+  w.g.gh.post = async (path, body) => (down && path === '/graphql' ? { status: 502, json: null } : post(path, body));
+  for (const step of [0, LIMIT_MIN, WAIT_CAP_TIMES * LIMIT_MIN, 5]) {
+    tick(w, step);
+    await gatePass(w.ctx);
+    waitingHeld(mergeOf(w), /^7: the review threads could not be read/);
+  }
+  assert.equal(mergeOf(w).doc.stuck_since, null, 'a failed thread read does not start the cap\'s clock');
+  assert.deepEqual(told(w, 'merge_refused'), []);
+  down = false;
+  tick(w, 1);
+  await gatePass(w.ctx);
+  assert.equal(mergeOf(w).doc.state, 'merged');
+  assert.deepEqual(told(w, 'merge_refused'), []);
+});
+
+test('L186 control: a thread read that fails for one pull request holds only that one; the change behind it merges in the same pass', async () => {
+  const w = world(limited());
+  verifiedCard(w);
+  tick(w, 1);
+  verifiedCard(w, 'C-2', { pr: 8, files: { 'src/b.mjs': 'b' } });
+  const post = w.g.gh.post;
+  w.g.gh.post = async (path, body) => (path === '/graphql' && body?.variables?.pr === 7 ? { status: 502, json: null } : post(path, body));
+  await gatePass(w.ctx);
+  waitingHeld(mergeOf(w, 'C-1'), /^7: the review threads could not be read/);
+  assert.equal(mergeOf(w, 'C-2').doc.state, 'merged', 'a failed read for one pull request is not an outage that stops the queue');
 });
 
 test('L184 control: a wait that clears before the cap still merges', async () => {

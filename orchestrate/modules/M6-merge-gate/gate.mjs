@@ -193,7 +193,10 @@ export async function gatePass(ctx) {
     }
     const v = judge(facts);
     if (v.decision === 'refuse') { refuse(m, facts, v); return outage ? undefined : STEPPED_ASIDE; }
-    if (v.decision === 'hold') { hold(m, v, outage); return outage ? undefined : STEPPED_ASIDE; }
+    // For the wait cap (L184, L186), a failed thread read or carry-over read is a pass with GitHub unreadable too; only a
+    // read that succeeds and comes back incomplete counts toward the cap. It doesn't stop the queue as an outage does.
+    const unreadable = outage || (facts.threads?.ok !== true && typeof facts.threads?.tooLong !== 'string') || facts.carried?.unread === true;
+    if (v.decision === 'hold') { hold(m, v, unreadable); return outage ? undefined : STEPPED_ASIDE; }
     return take(m, facts);
   }
 
@@ -238,9 +241,14 @@ export async function gatePass(ctx) {
   // The cap (L184): a wait the gate can't end by itself (a tree too big to read, main red, GitHub never working out
   // mergeable, a check that never runs, a review that never ends...) is refused for good after WAIT_CAP_TIMES × the wait
   // limit, told once, with what it waited on as the reasons. Its clock (stuck_since) starts at the first waiting pass
-  // with GitHub readable: a pass with GitHub unreadable (the outage line in serve) neither starts it, nor refuses, nor
-  // stops it, so an outage alone never refuses a change for good (L164), and an outage in the middle of a long wait
-  // doesn't start it again.
+  // with GitHub readable: a pass with GitHub unreadable (the outage line in serve, or a failed thread or carry-over
+  // read, L186) neither starts it, nor refuses, nor stops it, so an outage alone never refuses a change for good
+  // (L164), and an outage in the middle of a long wait doesn't start it again. Only a read that succeeds and comes back
+  // incomplete counts toward the cap.
+  // TO-DO (L186, an accepted risk): a file-tree read that fails can't yet be told from a truncated one (M10
+  // git-view.mjs throws the same for both, and gather leaves filesProblem 'unread'), so a failed tree read counts toward
+  // the cap. The refusal is safe (no merge), told, and names its reason. Telling them apart needs git-view to mark a
+  // truncated answer (as gather's tooLong marks a long list) and github-checker to pass that through.
   function hold(m, v, outage = false) {
     const cur = fresh('merge', m.id) ?? m;
     const waiting = v.hold === WAITING_HOLD;
