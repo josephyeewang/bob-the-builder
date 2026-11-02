@@ -24,7 +24,7 @@ const UIDS = Object.fromEntries(Object.keys(DESIGN_PROFILES).map((r) => [r, ['re
 
 function settingsOf(role) {
   const r = renderRoleSettings({ productionFiles: [], role, profile: DESIGN_PROFILES[role], product: { commands: { test: 'npm test' } },
-    paths: { copy: '/rc/S-1', outbox: '/o/reviewer/S-1', hooksDir: '/i/hooks', snapshot: '/r/rules.json', node: '/i/node', bobFolder: '/b',
+    paths: { copy: '/rc/S-1', outbox: '/o/reviewer/S-1', hooksDir: '/i/hooks', snapshot: '/r/rules.json', node: '/i/node', bobFolder: '/b', notes: '/r/notes/S-1',
       deny: { secrets: ['/k'] }, reviewWalls: { outboxRoot: '/o', runnerRoot: '/r' } } });
   assert.equal(r.ok, true, r.reason);
   return r.settings;
@@ -95,9 +95,9 @@ function machine() {
   const base = realpathSync(tempDir('m4-wiring-'));
   const d = (...p) => { const q = join(base, ...p); mkdirSync(q, { recursive: true }); return q; };
   const V = `install.v-${'c'.repeat(40)}`;
-  d(V);
+  d(V, 'orchestrate');
   const installRoot = join(base, 'install');
-  symlinkSync(V, installRoot); // root's link to the versioned copy (L75 M-1)
+  symlinkSync(`${V}/orchestrate`, installRoot); // root's link to the copy in the versioned folder (L75 M-1, L92 item 4)
   mkdirSync(dirname(templateFile(installRoot, 'reviewer')), { recursive: true });
   for (const r of REVIEW_ROLES) { copyFileSync(join(HERE, 'templates', `${r}.settings.json`), templateFile(installRoot, r)); chmodSync(templateFile(installRoot, r), 0o644); }
   const node = join(d('install', 'bin'), 'node'); writeFileSync(node, '');

@@ -1,17 +1,22 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { memoryRecord } from '../../shared/record.mjs';
+import { recWith } from '../M11-dispatcher/fixtures.test-helper.mjs';
 import { waitingItems, waitingLines } from './waiting.mjs';
 
+// Seeded the way the Record takes them, each step by the script that may make it (L72): a card waits on one of
+// M9's WAIT_WHO; an ask is approvals'. The two broken waits (no who; no wait at all) are ones M9 refuses to write, so
+// they stand for a record file that holds them anyway (a hand edit, a bad restore): they sit beside the real record.
 function seed() {
-  const rec = memoryRecord();
-  const w = (entity, id, doc) => assert.equal(rec.write({ actor: 'dispatcher', entity, id, expectRev: 0, doc }).ok, true);
-  w('card', 'C-1', { module: 'M4', state: 'waiting', wait: { who: 'owner', what: 'go on the plan', since: '2026-11-03T08:00:00Z', next_check: '2026-11-03T17:00:00Z' } });
-  w('ask', 'A-2', { module: 'M4', state: 'pushed', wait: { who: 'owner', what: 'Approve PR 12', since: '2026-11-02T17:00:00Z' } });
-  w('card', 'C-3', { module: 'M4', state: 'running' });
-  w('card', 'C-4', { module: 'M4', state: 'waiting', wait: { what: 'the Mini', since: '2026-11-03T09:00:00Z' } });
-  w('card', 'C-5', { module: 'M4', state: 'waiting' });
-  return rec;
+  const rec = recWith([
+    ['card', 'C-1', { module: 'M4', state: 'waiting', wait: { who: 'joe', what: 'go on the plan', since: '2026-11-03T08:00:00Z', next_check: '2026-11-03T17:00:00Z' } }],
+    ['ask', 'A-2', { module: 'M4', state: 'pushed', wait: { who: 'owner', what: 'Approve PR 12', since: '2026-11-02T17:00:00Z' } }],
+    ['card', 'C-3', { module: 'M4', state: 'running' }],
+  ]);
+  const broken = [
+    { id: 'C-4', rev: 1, doc: { module: 'M4', state: 'waiting', wait: { what: 'the Mini', since: '2026-11-03T09:00:00Z' } } },
+    { id: 'C-5', rev: 1, doc: { module: 'M4', state: 'waiting' } },
+  ];
+  return { ...rec, list: (e) => [...rec.list(e), ...(e === 'card' ? broken : [])] };
 }
 
 test('every waiting item is listed with who / what / since from the record, oldest first', () => {

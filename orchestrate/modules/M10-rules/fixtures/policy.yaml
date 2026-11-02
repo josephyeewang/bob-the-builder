@@ -152,6 +152,10 @@ failure_classes:
   sent_back: joe
 
 timeouts:
+  # The Merge Gate's limit (M6 gate.mjs recover, L94/L148): a pull request still open this long after the merge's last
+  # write is refused 'interrupted' with one alert. Under merge.merging's 15 below, so the gate decides before the
+  # record's own limit does.
+  merging_open_max_min: 10
   card:
     draft:
       no_limit_reason: waits for the Lead's read-back and Joe's go

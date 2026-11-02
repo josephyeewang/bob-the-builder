@@ -139,8 +139,11 @@ export function makeReader({ gh, stateDir, products, verifyApproved, alert, now 
   const say = (product, reason, blob, detail) => {
     const key = `${product}\0${reason}\0${blob ?? ''}`;
     if (sent.has(key)) return;
-    sent.add(key);
-    try { alert({ product, reason, blob: blob ?? null, detail: detail ?? null, at: new Date(now()).toISOString() }); } catch { /* an alert sink failing must not change the answer */ }
+    // Marked sent only once the alert is delivered (L168 M-3): an answer of false, or a throw, leaves it unmarked, so
+    // the next read tells again. A failing sink still never changes the reader's answer.
+    let answer;
+    try { answer = alert({ product, reason, blob: blob ?? null, detail: detail ?? null, at: new Date(now()).toISOString() }); } catch { answer = false; }
+    if (answer !== false) sent.add(key);
   };
 
   const goodFile = (product) => join(stateDir, `${product}.last-good.json`);

@@ -612,6 +612,14 @@ The companion `audit-log.md` records *deferred* items (Defer verdicts that may s
 - **Revisit trigger:**
   - Bob makes its first release tag: rewrite `SECURITY.md`'s supply-chain advice.
   - Or: the next fresh audit finds another claim Bob's files do not back. Then the gap is in how claims get checked, not in one file.
+### D-035: A test stand-in refuses what the real part refuses, and every hand-off gets one test with no stand-ins (Engineering Principle 10)
+
+- **Date:** 2026-11-01
+- **Status:** Accepted (the owner approved the rule on 2026-11-01)
+- **Context:** While Bob ORCHESTRATE was being built in parallel lanes, fresh-context checks found the same kind of bug more than eight times in two days. A test stand-in accepted inputs the real part refuses, or could only answer success, so the tests passed on code the real part would refuse or that would fail silently live. One class sweep found 12 serious places where a lost alert was counted as delivered. No test saw them, because none of the roughly 70 alert stand-ins could answer "not delivered".
+- **Decision:** Engineering Principle 10. A stand-in must refuse everything the real part refuses and must be able to give every answer the real part gives, failures included. Every pair of parts that pass data gets at least one test with both real parts and no stand-in between them. A stand-in found looser than the real part is fixed at the stand-in, and every stand-in of that part is checked.
+- **Consequences:** Stand-ins get a little more work, because they must model refusals and failures, not just success. Shared stand-in helpers (one per port, able to answer failure) are the cheap way to meet it. A test that only ever sees success no longer counts as covering a hand-off. Audits can now name this principle when they find a permissive stand-in.
+
 ---
 
 ## Anti-pattern reminder

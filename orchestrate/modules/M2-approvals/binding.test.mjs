@@ -243,6 +243,30 @@ test('a rewritten log is tampered: the box is released, the later tap never coun
   assert.equal(t.alerts.filter((a) => a.type === 'transcript_tampered').length, 1);
 });
 
+test('L135 B: a tamper alert that is lost (false, or a throw) is told again next pass, then once delivered never again', () => {
+  for (const lost of [false, 'throws']) {
+    const t = env(); session(t, 'FD-1');
+    const doc = make(t);
+    const b = box(doc.payload, t.clock.t + MIN);
+    write(t, 'FD-1', b.entry);
+    t.clock.t += 2 * MIN; run(t, 'FD-1');
+    writeFileSync(t.log('FD-1'), readFileSync(t.log('FD-1'), 'utf8').replace('Ship', 'Shop'));
+    t.sink.answer = lost;
+    const pass = () => { try { return run(t, 'FD-1'); } catch (e) { assert.equal(lost, 'throws', String(e)); return { events: [] }; } };
+    for (let i = 0; i < 2; i++) {
+      const r = pass();
+      assert.ok(!r.events.some((e) => e.type === 'tampered'), `${lost}: no "tampered" event while the alert is lost`);
+      assert.equal(t.ctx.copies.sync('FD-1', t.log('FD-1')).untold, true, `${lost}: still untold`);
+    }
+    assert.equal(state(t).boxes[0].reason, 'tampered', `${lost}: the box is released all the same`);
+    t.sink.answer = true;
+    assert.ok(pass().events.some((e) => e.type === 'tampered'), `${lost}: told once delivered`);
+    pass(); pass();
+    assert.equal(t.alerts.filter((a) => a.type === 'transcript_tampered').length, 1, `${lost}: one delivered alert, not one per pass`);
+    assert.equal(t.ctx.copies.sync('FD-1', t.log('FD-1')).untold, false);
+  }
+});
+
 test('a newer Front Door replaces the old one: its box is released (m2-5)', () => {
   const t = env(); session(t, 'FD-1');
   const doc = make(t);

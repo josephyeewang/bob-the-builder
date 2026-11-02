@@ -9,12 +9,12 @@ import { mkdirSync, realpathSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tempDir } from '../../shared/test-tmp.mjs';
 import { ACCOUNTS, ACCOUNT_FILE, setupSecondFolder, useAccount } from '../M4-workshop/launcher/accounts.mjs';
-import { PER_FOLDER_PORTS, accountLaunch, accountPorts, acrossAccounts, inAnyAccount, stopInAccount } from './account-ports.mjs';
+import { PER_FOLDER_PORTS, accountLaunch, accountPorts, acrossAccounts, stopInAccount } from './account-ports.mjs';
+import { setup as m9Setup, product as m9Product, readyCard, claimCard, sessionClaim } from '../M9-record/fixtures.test-helper.mjs';
 import { dispatcherPass as dispatcherPass0 } from './pass.mjs';
-import { timeLimits } from './merges.mjs';
 import { phoneLinkStep, FACTS } from './phone-link.mjs';
 import { USAGE_FACT } from './usage.mjs';
-import { rulesWith, recWith, usageFact, T0, MIN, iso, withAlerts } from './fixtures.test-helper.mjs';
+import { change, rulesWith, recWith, usageFact, T0, MIN, iso, withAlerts } from './fixtures.test-helper.mjs';
 
 const dispatcherPass = (a) => withAlerts(a.rec, a.now, a.alert ?? (() => {}), (alert) => dispatcherPass0({ ...a, alert }));
 
@@ -40,7 +40,7 @@ function folders(h, A, B) {
     const s = st[ctx.signin];
     const did = (what, extra = {}) => { log.push([what, ctx.signin, ...Object.values(extra)]); };
     return {
-      launch: async (x) => { did('launch', { card: x.card.id }); const id = `S-${++n}`; s.sessions.push({ id, card: x.card.id, product: x.product, kind: x.kind }); return { ok: true, sessionId: id, pgid: 100 + n, head: 'h'.repeat(40) }; },
+      launch: async (x) => { did('launch', { card: x.card.id }); n += 1; const id = x.sessionId ?? `S-${n}`; s.sessions.push({ id, card: x.card.id, product: x.product, kind: x.kind }); return { ok: true, sessionId: id, pid: 2000 + n, pidStart: `s${n}`, pgid: 100 + n, head: 'h'.repeat(40) }; },
       startReadonly: async (x) => { did('startReadonly', { lead: x.lead }); return { ok: true }; },
       startMinibase: async () => { did('startMinibase'); return { ok: true }; },
       sessions: () => s.sessions.map((x) => ({ ...x })),
@@ -51,7 +51,8 @@ function folders(h, A, B) {
         stopSession: async (own) => { did('stopSession', { lead: l, own: own?.signin }); s.leads = s.leads.filter((x) => x !== l); return { ok: true }; },
         startLead: async (x, c) => { did('startLead', { lead: l, in: c?.signin }); st[c.signin].leads.push(`${l}+`); return { ok: true }; },
       })),
-      hasSession: (card) => s.sessions.some((x) => x.card === card),
+      // Stopped here, or never ran here: true. The fake stops it in its own folder.
+      stopSession: (sid) => { s.sessions = s.sessions.filter((x) => x.id !== sid); return true; },
       stopGroup: async (x) => { did('stopGroup', { id: x.id }); const i = s.sessions.findIndex((y) => y.id === x.id); if (i < 0) return { ok: false, how: 'not here' }; s.sessions.splice(i, 1); return { ok: true, how: 'SIGTERM' }; },
       frontDoorAlive: () => s.frontDoor,
       restartFrontDoor: async (x) => { did('restartFrontDoor', { handoff: x?.handoff ?? null }); s.frontDoor = true; return { ok: true }; },
@@ -59,6 +60,17 @@ function folders(h, A, B) {
     };
   };
   return { log, st, inFolder, ports: accountPorts({ home: h, inFolder }) };
+}
+
+
+// A real Record (M9, in a temp folder) holding card C-1 claimed by session S-1 with no process yet, and a time past
+// claims.unlaunched_min, for the lapse tests.
+async function realRecordWithUnlaunchedClaim() {
+  const env = m9Setup({ prefix: 'm11-lapse-', values: { 'claims.unlaunched_min': 5 } });
+  m9Product(env);
+  readyCard(env, 'C-1');
+  claimCard(env, 'C-1', sessionClaim({ session_id: 'S-1' }));
+  return { rec: env.record, alerts: env.alerts, later: env.clock.t + 10 * 60_000, close: () => {} };
 }
 
 test('R-1-89 / L61: every per-folder port named in the contract is wrapped', () => {
@@ -142,52 +154,50 @@ test('R-1-89 / L61: the lists cover both folders after a switch; a session in bo
   assert.deepEqual(acrossAccounts({ home: one.h, listIn: () => [{ id: 'S-9' }] })(), [{ id: 'S-9', signin: 'a', config_dir: one.A }]);
 });
 
-test('R-1-89 / L61: the check ports say yes for a session in either folder, whichever is in use', async () => {
+test('L72 / L63: stopSession says yes only when every folder has stopped the session, whichever account is in use', async () => {
   const { h, A, B } = home();
   const f = folders(h, A, B);
   await f.ports.launch({ card: { id: 'C-1' }, kind: 'build', product: 'p1' });
   for (const name of ['b', 'a']) {
     assert.equal(useAccount({ home: h, name }).ok, true);
-    assert.equal(f.ports.hasSession('C-1'), true, `after use ${name}`);
-    assert.equal(f.ports.hasSession('C-9'), false);
+    // S-1 runs on account a: it is stopped there, and b never ran it, so both say true.
+    assert.equal(f.ports.stopSession('S-1'), true, `after use ${name}`);
+    assert.equal(f.ports.stopSession('S-9'), true, 'never ran anywhere: nothing to stop');
   }
-  // L63: an unclear answer in one folder and no in the other is an error naming the folder and the answer, never a no.
-  // A yes in either folder still wins. A failing or late check names its folder.
-  for (const [odd, shown] of [[null, 'null'], [undefined, 'undefined'], ['no', '"no"'], [0, '0']]) {
-    for (const [first, second] of [['a', 'b'], ['b', 'a']]) {
-      const check = inAnyAccount({ home: h, checkIn: (ctx) => (ctx.signin === first ? odd : false), what: 'hasSession' });
-      assert.throws(() => check('C-1'), new RegExp(`^Error: account ${first} \\(~/\\.claude${first === 'b' ? '-b' : ''}\\): hasSession gave no clear answer \\(${shown}\\); not read as "not there"$`), `${shown} in ${first}, false in ${second}`);
+  assert.deepEqual(f.st.a.sessions, [], 'the session was stopped in its own folder');
+  // L63: an unclear answer (or a no, an error, a promise) from either folder is a no, never "not there", even with a yes
+  // from the other folder: the Record keeps the claim.
+  for (const odd of [null, undefined, false, 'yes', 0, Promise.resolve(true)]) {
+    for (const first of ['a', 'b']) {
+      const p = accountPorts({ home: h, inFolder: (ctx) => ({ ...f.inFolder(ctx), stopSession: () => (ctx.signin === first ? odd : true) }) });
+      assert.equal(p.stopSession('S-1'), false, `${String(odd)} in ${first}`);
     }
   }
-  assert.equal(inAnyAccount({ home: h, checkIn: (ctx) => (ctx.signin === 'a' ? null : true) })('C-1'), true);
-  assert.equal(inAnyAccount({ home: h, checkIn: (ctx) => (ctx.signin === 'b' ? undefined : true) })('C-1'), true);
-  assert.equal(inAnyAccount({ home: h, checkIn: () => false })('C-1'), false);
-  assert.throws(() => inAnyAccount({ home: h, checkIn: (ctx) => { if (ctx.signin === 'b') throw new Error('x'); return false; }, what: 'hasSession' })('C-1'), /^Error: account b \(~\/\.claude-b\): hasSession could not be checked \(x\)$/);
-  assert.throws(() => inAnyAccount({ home: h, checkIn: async () => true })('C-1'), /must answer at once/);
+  const throws = accountPorts({ home: h, inFolder: (ctx) => ({ ...f.inFolder(ctx), stopSession: () => { if (ctx.signin === 'b') throw new Error('x'); return true; } }) });
+  assert.equal(throws.stopSession('S-1'), false);
 });
 
 // Reviewers and auditors are no longer started on these accounts: the review runner starts them as `review`, on
 // review's own two folders (L65 m-5; M4 review-runner.test.mjs), so the account switch reaches them there.
 
-test('L63 (the reviewer\'s repro): after a switch, an unclear answer from the old account moves no card', async () => {
+test('L63 / L72 (the reviewer\'s repro, now on the lapse): after a switch, an unclear answer from the old account lapses no claim', async () => {
   for (const odd of [null, undefined]) {
     const { h, A, B } = home();
     const f = folders(h, A, B);
-    // Account a can't say (null, or no answer at all); account b, now in use, says no.
-    const ports = accountPorts({ home: h, inFolder: (ctx) => ({ ...f.inFolder(ctx), ...(ctx.signin === 'a' ? { hasSession: () => odd } : {}) }) });
+    const ports = accountPorts({ home: h, inFolder: (ctx) => ({ ...f.inFolder(ctx), ...(ctx.signin === 'a' ? { stopSession: () => odd } : {}) }) });
     assert.equal(useAccount({ home: h, name: 'b' }).ok, true);
-    const old = iso(T0 - 600 * MIN);
-    for (const [state, port] of [['claimed', 'hasSession']]) {
-      const rec = recWith([['card', 'C-1', { state, module: 'M-test', product: 'p1', tier: 2, files: ['src/a.js'], claim: state === 'claimed' ? { session: 'S-1' } : undefined, changed_at: old }]]);
-      f.log.length = 0;
-      const alerts = [];
-      await assert.rejects(timeLimits({ rec, rules: rulesWith(), now: T0, b: { band: 'green' }, running: [], hasSession: ports.hasSession, gateAlive: () => true,
-        hasReviewer: () => true, requestReview: () => ({ ok: true }), alert: (t) => alerts.push(t) }),
-        new RegExp(`^Error: account a \\(~/\\.claude\\): ${port} gave no clear answer \\(${String(odd)}\\)`), `${String(odd)}, ${state}`);
-      const card = rec.read('card', 'C-1');
-      assert.deepEqual([card.doc.state, card.rev], [state, 1], `${String(odd)}: the ${state} card stays`);
-      assert.deepEqual(f.log, [], `${String(odd)}: nothing started`);
-    }
+    // The Record's own lapse (M9 lapseClaims), against a real record: a claim with no process past claims.unlaunched_min.
+    const r = await realRecordWithUnlaunchedClaim();
+    try {
+      const out = r.rec.lapseClaims(r.later, { stopSession: ports.stopSession });
+      assert.equal(out.ok, true, out.reason);
+      assert.deepEqual(out.lapsed, [], `${String(odd)}: nothing lapsed`);
+      assert.equal(r.rec.read('card', 'C-1').doc.state, 'claimed', `${String(odd)}: the claimed card stays`);
+      assert.ok(r.alerts.some((a) => a.type === 'unlaunched_claim_held'), `${String(odd)}: the owner is told`);
+      // Both folders yes: it lapses.
+      const yes = r.rec.lapseClaims(r.later, { stopSession: f.ports.stopSession });
+      assert.deepEqual(yes.lapsed.map((x) => [x.card, x.to]), [['C-1', 'ready']]);
+    } finally { r.close(); }
   }
 });
 
@@ -225,7 +235,7 @@ test('R-1-89 / L61: the Front Door follows the account in use: after a switch it
   assert.equal(f.ports.frontDoorAlive(), false, 'running on the old account only counts as not running');
   // The phone step, as the tick runs it, restarts it with its handoff.
   const rec = recWith();
-  for (const id of [FACTS.network, FACTS.reachable, FACTS.minibase]) rec.write({ actor: 'dispatcher', entity: 'fact', id, expectRev: 0, doc: { value: true, observed_at: iso(T0) } });
+  for (const id of [FACTS.network, FACTS.reachable, FACTS.minibase]) rec.write({ actor: 'sensors', entity: 'fact', id, expectRev: 0, doc: { value: true, observed_at: iso(T0) } });
   const alerts = [];
   f.log.length = 0;
   const done = await withAlerts(rec, T0, (t) => alerts.push(t), (alert) => phoneLinkStep({ rec, rules: rulesWith(), now: T0, send: async () => ({ outcome: 'sent' }),
@@ -260,7 +270,7 @@ test('R-1-89 / L61: the Front Door follows the account in use: after a switch it
 // The phone step as the tick runs it, with the wrapped Front Door ports, every link fact fresh at `now`.
 function phoneAt(f, now, over = {}) {
   const { rec } = f;
-  for (const id of [FACTS.network, FACTS.reachable, FACTS.minibase]) rec.write({ actor: 'dispatcher', entity: 'fact', id, expectRev: rec.read('fact', id)?.rev ?? 0, doc: { value: true, observed_at: iso(now) } });
+  for (const id of [FACTS.network, FACTS.reachable, FACTS.minibase]) rec.write({ actor: 'sensors', entity: 'fact', id, expectRev: rec.read('fact', id)?.rev ?? 0, doc: { value: true, observed_at: iso(now) } });
   const p = { ...f.ports, ...over };
   return withAlerts(rec, now, (t) => f.alerts.push(t), (alert) => phoneLinkStep({ rec, rules: rulesWith(), now, send: async () => ({ outcome: 'sent' }),
     restartFrontDoor: p.restartFrontDoor, startMinibase: p.startMinibase, frontDoorAlive: p.frontDoorAlive, strayFrontDoor: p.strayFrontDoor, lastHandoff: () => 'handoff-fd', alert }));
@@ -346,34 +356,36 @@ function world() {
   const ACCT = 'acct-a';
   const rec = recWith([['product', 'p1', { state: 'active' }],
     ...['C-1', 'C-2'].map((id) => ['card', id, { state: 'ready', module: 'M-test', product: 'p1', tier: 2, files: [`src/${id}.js`], changed_at: iso(T0 - 10 * MIN) }])]);
-  rec.write({ actor: 'dispatcher', entity: 'fact', id: USAGE_FACT(ACCT), expectRev: 0, doc: usageFact({ week: 30, h5: 20, account: ACCT, now: T0 }) });
+  rec.write({ actor: 'sensors', entity: 'fact', id: USAGE_FACT(ACCT), expectRev: 0, doc: usageFact({ week: 30, h5: 20, account: ACCT, now: T0 }) });
   const rules = rulesWith({}, { start_session: () => ({ decision: 'allow', reason: 'ok' }) });
   const idle = { size: { tokens: 1, turnEnded: false, openTools: [], compactions: 0 }, activity: { state: 'active' } };
   const pass = (min, only) => dispatcherPass({ rec, rules, now: T0 + min * MIN, account: ACCT, sessions: f.ports.sessions(), probe: () => idle,
     launch: async (x) => (only && x.card.id !== only ? { ok: false, reason: 'not this pass' } : f.ports.launch(x)),
     stopGroup: f.ports.stopGroup, saveWork: async () => ({ ok: true }), alert: () => {} });
-  const setCard = (id, patch) => { const c = rec.read('card', id); rec.write({ actor: 'dispatcher', entity: 'card', id, expectRev: c.rev, doc: { ...c.doc, ...patch } }); };
+  const setCard = (id, patch) => change(rec, 'card', id, patch);
   return { h, A, B, rec, f, pass, setCard };
 }
 
 test('R-1-89: every launch record names its folder; a switch leaves the running session alone, and stops still reach it', async () => {
   const w = world();
   await w.pass(0, 'C-1');
-  const l1 = w.rec.read('launch', 'S-1').doc;
+  // The session id is the claim's (L72), chosen before the launch: the launch record is found by its card.
+  const launchOf = (card) => w.rec.list('launch').find((l) => l.doc.card === card)?.doc;
+  const l1 = launchOf('C-1');
   assert.deepEqual([l1.signin, l1.config_dir, l1.card], ['a', w.A, 'C-1']);
   // Switch while S-1 runs: the next session starts on b; S-1 is not stopped, moved or re-recorded.
   assert.equal(useAccount({ home: w.h, name: 'b' }).ok, true);
   await w.pass(1);
-  const l2 = w.rec.read('launch', 'S-2').doc;
+  const l2 = launchOf('C-2');
   assert.deepEqual([l2.signin, l2.config_dir, l2.card], ['b', w.B, 'C-2']);
   assert.deepEqual(w.f.log.map(([what, folder, card]) => [what, folder, card]), [['launch', 'a', 'C-1'], ['launch', 'b', 'C-2']], 'a switch stops nothing');
-  assert.deepEqual(w.f.st.a.sessions.map((s) => s.id), ['S-1'], 'S-1 still runs in the first folder');
-  assert.deepEqual(w.rec.read('launch', 'S-1').doc, l1, 'its launch record is unchanged');
+  assert.deepEqual(w.f.st.a.sessions.map((s) => s.id), [l1.session_id], 'S-1 still runs in the first folder');
+  assert.deepEqual(launchOf('C-1'), l1, 'its launch record is unchanged');
   assert.equal(w.rec.read('card', 'C-1').doc.state, 'running');
   // The old account's session is still stoppable: a cancel stops it through the first folder.
   w.setCard('C-1', { state: 'cancelled' });
   await w.pass(2);
-  assert.deepEqual(w.f.log.at(-1), ['stopGroup', 'a', 'S-1']);
+  assert.deepEqual(w.f.log.at(-1), ['stopGroup', 'a', l1.session_id]);
   assert.deepEqual(w.f.st.a.sessions, []);
-  assert.deepEqual(w.f.st.b.sessions.map((s) => s.id), ['S-2']);
+  assert.deepEqual(w.f.st.b.sessions.map((s) => s.id), [l2.session_id]);
 });

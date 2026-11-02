@@ -131,7 +131,11 @@ test('R-0b-138: the go view is three lines; Tier 1 says checked, number work and
     [{ files: otherFiles.files, fingerprint_inputs: otherFiles }, /fingerprint is not the plan it shows/],
     [{ card: 'C9' }, /another card's plan/],
     [{ files: ['db/j.sql', 'db/k.sql'] }, /not the files the go binds/], [{ fingerprint_inputs: { ...d1.fingerprint_inputs, done_bar: [d1.fingerprint_inputs.done_bar[0]] } }, /audited until 0 Material/],
-    [{ kind: 'go_t2' }, /kind is not its tier/]]) {
+    [{ kind: 'go_t2' }, /kind is not its tier/],
+    // L95 (audit stack r3 Minor 9, plant L84-5c): inputs that rebuild to the same fingerprint but are not written the
+    // one canonical way (an extra key; a `./` file the rebuild cleans up) are refused by the second lock alone.
+    [{ fingerprint_inputs: { ...d1.fingerprint_inputs, extra: 'x' } }, /not written the one way its fingerprint was taken from/],
+    [{ files: ['./db/j.sql'], fingerprint_inputs: { ...d1.fingerprint_inputs, files: ['./db/j.sql'] } }, /not written the one way its fingerprint was taken from/]]) {
     const v = goView({ ...d1, ...over });
     assert.equal(v.ok, false); assert.match(v.reason, why);
   }

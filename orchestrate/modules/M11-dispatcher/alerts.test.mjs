@@ -11,12 +11,12 @@ const mark = (fact) => ({ fact, fields: { told_at: 'now' }, kind: 'k' });
 test('L47: a send answered false, or thrown, is not delivered: the entry stays, untold, at the back', async () => {
   for (const [label, port] of [['false', () => false], ['throws', () => { throw new Error('no network'); }], ['rejects', async () => { throw new Error('no network'); }]]) {
     const rec = recWith([]);
-    queueAlert(rec, 'one', { now: T0, mark: mark('f-1') });
-    queueAlert(rec, 'two', { now: T0, mark: mark('f-2') });
+    queueAlert(rec, 'one', { now: T0, mark: mark('stop-f-1') });
+    queueAlert(rec, 'two', { now: T0, mark: mark('stop-f-2') });
     const r = await sendAlerts(rec, port, T0, { sendMs: 50 });
     assert.deepEqual(r, { sent: 0, failed: 1, left: 2 }, label);
     assert.deepEqual(queue(rec).map((e) => [e.text, e.tries ?? 0]), [['two', 0], ['one', 1]], label);
-    assert.equal(rec.read('fact', 'f-1'), null, `${label}: marked told although unsent`);
+    assert.equal(rec.read('fact', 'stop-f-1'), null, `${label}: marked told although unsent`);
   }
 });
 
@@ -46,13 +46,13 @@ test('L47: the sender stops at its budget once one send is done, and the rest wa
 
 test('L47: a crash between marking and removing sends the entry again (twice, never lost)', async () => {
   const real = recWith([]);
-  queueAlert(real, 'stop failed', { now: T0, mark: mark('f-1') });
+  queueAlert(real, 'stop failed', { now: T0, mark: mark('stop-f-1') });
   // The record refuses the queue write that removes the delivered entry, as a crash right after the mark would.
   let crash = true;
   const rec = { read: (...a) => real.read(...a), write: (w) => (crash && w.kind === 'alert_sent' ? { ok: false, reason: 'crashed' } : real.write(w)) };
   const got = [];
   await sendAlerts(rec, (t) => got.push(t), T0, { sendMs: 50 });
-  assert.equal(rec.read('fact', 'f-1').doc.told_at, 'now');
+  assert.equal(rec.read('fact', 'stop-f-1').doc.told_at, 'now');
   assert.equal(queue(rec).length, 1);
   crash = false;
   await sendAlerts(rec, (t) => got.push(t), T0, { sendMs: 50 });
@@ -66,7 +66,7 @@ test('L47: the outbox queues and answers at once; it never calls a port, waits o
   const rec = { read: (...a) => real.read(...a), write: (w) => { if (gone) throw new Error('record gone'); return real.write(w); } };
   const alert = outbox(rec, T0);
   assert.equal(alert.queues, true);
-  assert.equal(alert('hello', { mark: mark('f-1') }), true);
+  assert.equal(alert('hello', { mark: mark('stop-f-1') }), true);
   assert.equal(queue(rec).length, 1);
   gone = true;
   assert.equal(alert('again'), false);
@@ -75,20 +75,20 @@ test('L47: the outbox queues and answers at once; it never calls a port, waits o
 // Audit 0b-6 r7 M2: a copy that was out when its cause cleared marks nothing when it settles, delivered or not.
 test('r7 M2: a copy settled after its cause cleared writes no mark and leaves no entry', async () => {
   const rec = recWith();
-  queueAlert(rec, 'stop failed', { now: T0, mark: mark('f-1') });
+  queueAlert(rec, 'stop failed', { now: T0, mark: mark('stop-f-1') });
   const [out] = queue(rec);
-  dropCause(rec, 'f-1');
+  dropCause(rec, 'stop-f-1');
   assert.equal(queue(rec).length, 0);
   settleAlert(rec, out, true, T0);
-  assert.equal(rec.read('fact', 'f-1')?.doc?.told_at, undefined, 'no mark on a cleared cause');
+  assert.equal(rec.read('fact', 'stop-f-1')?.doc?.told_at, undefined, 'no mark on a cleared cause');
   settleAlert(rec, out, false, T0);
   assert.equal(queue(rec).length, 0, 'a failed copy of a cleared cause is not queued again');
   // Through the sender: a send out when the cause clears marks nothing at settle.
-  queueAlert(rec, 'stop failed', { now: T0, mark: mark('f-2') });
+  queueAlert(rec, 'stop failed', { now: T0, mark: mark('stop-f-2') });
   const r = await sendAlerts(rec, () => true, T0, { sendMs: 200, later: true });
-  dropCause(rec, 'f-2');
+  dropCause(rec, 'stop-f-2');
   r.settle();
-  assert.equal(rec.read('fact', 'f-2')?.doc?.told_at, undefined);
+  assert.equal(rec.read('fact', 'stop-f-2')?.doc?.told_at, undefined);
   assert.equal(queue(rec).length, 0);
 });
 

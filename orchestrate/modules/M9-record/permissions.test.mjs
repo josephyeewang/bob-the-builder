@@ -3,7 +3,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { ENTITIES, REQUIRED_FIELDS, SCRIPT_ACTORS } from '../../shared/record.mjs';
-import { CARD_CREATORS, WRITERS, fieldsAllowed, mayCreateKind } from './permissions.mjs';
+import { CARD_CREATORS, FACT_FAMILIES, WRITERS, fieldsAllowed, mayCreateKind } from './permissions.mjs';
 import { HEAD, PRODUCT, iso, seed, setup } from './fixtures.test-helper.mjs';
 
 const ACTORS = SCRIPT_ACTORS.filter((a) => a !== 'joe');
@@ -27,10 +27,15 @@ test('create: only the listed script actors may create each entity', () => {
   for (const entity of ENTITIES) {
     if (entity === 'card' || entity === 'merge_request') continue;   // card kinds and merge requests: their own tests
     for (const actor of ACTORS) {
-      const id = entity === 'product' ? PRODUCT : `${entity}-${n++}`;
+      // A fact goes in the actor's own family (L74); an actor with none can create no fact (families.test.mjs).
+      const fam = entity === 'fact' ? FACT_FAMILIES[actor]?.[0] : undefined;
+      const id = entity === 'product' ? PRODUCT : entity === 'fact' && fam ? (/[-.]$/.test(fam) ? `${fam}${n++}` : fam) : `${entity}-${n++}`;
       const r = env.record.write({ actor, entity, id, expectRev: 0, doc: minimal(entity, env) });
       const listed = fieldsAllowed(entity, actor, { create: true }) !== null;
-      if (listed) {
+      if (listed && entity === 'fact' && !fam) {
+        assert.equal(r.ok, false, `${actor} has no fact family`);
+        assert.match(r.reason, /in no family/, `${entity} as ${actor}`);
+      } else if (listed) {
         if (!r.ok) assert.doesNotMatch(r.reason, /may not create/, `${entity} as ${actor}: ${r.reason}`);
         if (r.ok && entity === 'product') seed(env, 'product', PRODUCT, { state: 'active' });
       } else {
@@ -67,13 +72,17 @@ test('update: every listed field passes the field check for its actor and is ref
         // approvals only clears needs_joe (the setters are tested on the other side of the same field).
         const clearing = entity === 'card' && field === 'needs_joe' && actor === 'approvals';
         if (clearing) doc.needs_joe = true;
-        seed(env, entity, id, doc);
+        // Only a fact's or handoff's creator may update it (L118 M1), so those are seeded as the actor that updates.
+        const owned = entity === 'fact' || entity === 'handoff';
+        if (owned) env.store.transaction((tx) => tx.commit([{ entity, id, doc }], { actor, kind: 'seed' }));
+        else seed(env, entity, id, doc);
         const cur = env.record.read(entity, id);
         const r = env.record.write({ actor, entity, id, expectRev: cur.rev, doc: { ...cur.doc, [field]: clearing ? false : value(field) } });
         const allowed = fieldsAllowed(entity, actor, { state: cur.doc.state });
         const listed = allowed === '*' || (allowed instanceof Set && allowed.has(field));
         const where = `${entity}.${field} as ${actor}: ${r.reason}`;
-        if (listed) { if (!r.ok) assert.doesNotMatch(r.reason, FIELD_GATE, where); }
+        if (listed && owned) assert.ok(r.ok, where);   // the creator's own update goes through
+        else if (listed) { if (!r.ok) assert.doesNotMatch(r.reason, FIELD_GATE, where); }
         else { assert.equal(r.ok, false, where); assert.match(r.reason, FIELD_GATE, where); }
         checked++;
       }
