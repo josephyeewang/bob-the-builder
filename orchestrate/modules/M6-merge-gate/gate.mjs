@@ -93,7 +93,7 @@ export async function gatePass(ctx) {
   // result moves it on, and also after (a late mark means the audit needs running again; the alert says so).
   for (const m of merges().filter((x) => ['merged', 'audited_ok', 'audit_flagged'].includes(x.doc.state) && SHA.test(x.doc.merge_commit ?? ''))) {
     const card = fresh('card', m.doc.card);
-    if (card?.doc?.state === 'merging' || !m.doc.marked_at) await complete(m, m.doc.merge_commit);
+    if (card?.doc?.state === 'merging' || !m.doc.marked_at || revertUnsettled(m, card)) await complete(m, m.doc.merge_commit);
   }
 
   // 3. Audit results (R-0b-93): only a Sensors audit_run fact for the merge commit moves a merged merge.
@@ -224,6 +224,19 @@ export async function gatePass(ctx) {
     } catch { alert({ type: 'merge_parent_moved', merge: m.id, commit: sha, judged_main: m.doc.judged_main, parent: null }); }
   }
 
+  // An undo card that merged marks the card it undid reverted. That is tried again on later passes until it holds or the
+  // owner was told why it can't (the "undo_not_marked" alert delivered); revert_settled_at on the merge records either.
+  // Without it, a lost alert after the card went merged would never be asked again (L135 site G).
+  function revertUnsettled(m, card) { return card?.doc?.kind === 'exact_reverse' && card.doc.state === 'merged' && !m.doc.revert_settled_at; }
+  function settleRevert(m, cardId) {
+    const u = markReverted({ record, alert }, cardId);
+    if (u.ok) step(m, 'reverted', { card: u.card });
+    if (u.ok || u.told) {
+      const r = write('merge', fresh('merge', m.id), { revert_settled_at: iso() });
+      if (!r.ok) alert({ type: 'merge_gate_write_refused', merge: m.id, to: 'revert_settled', reason: r.reason });
+    }
+  }
+
   // After a merge is recorded: the card goes merged (and an undo marks what it undid), and the two statuses go on the
   // merge commit: the robot's mark (R-0b-94) and the needs-joe answer the GitHub-side checker reads. Each part is redone
   // on later passes until it holds (posting a status twice is harmless); marked_at records that both were posted.
@@ -232,8 +245,8 @@ export async function gatePass(ctx) {
     if (card?.doc?.state === 'merging') {
       const c = write('card', card, { state: 'merged', merge_commit: sha });
       if (!c.ok) alert({ type: 'merge_gate_write_refused', card: card.id, to: 'merged', reason: c.reason });
-      else if (card.doc.kind === 'exact_reverse') { const u = markReverted({ record, alert }, card.id); if (u.ok) step(m, 'reverted', { card: u.card }); }
-    }
+      else if (card.doc.kind === 'exact_reverse') settleRevert(m, card.id);
+    } else if (revertUnsettled(m, card)) settleRevert(m, card.id);
     if (m.doc.marked_at) return;
     let posts;
     try {

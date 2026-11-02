@@ -151,6 +151,69 @@ test('the undo route: a flagged merge\'s exact reverse goes first, merges with n
   assert.equal(w.g.repo.files(w.g.main).get('src/a.mjs').text, 'one');
 });
 
+// L135 site G: the undo card merged, but marking the undone card reverted failed, and the alert saying so was lost
+// (false, or a throw). The gate tries again each pass until the mark holds or the alert is delivered, then stops.
+async function undoWithBlockedMark(lost) {
+  const w = world();
+  verifiedCard(w);
+  await gatePass(w.ctx);
+  const flagged = mergeOf(w).doc.merge_commit;
+  must(w.env.record.write({ actor: 'sensors', entity: 'fact', id: 'audit-1', expectRev: 0, doc: { type: 'audit_run', commit: flagged, conclusion: 'failure' } }), 'fact');
+  await gatePass(w.ctx);
+  must(put(w.env.record, 'dispatcher', 'card', 'C-1', { state: 'closed' }), 'closed');
+  w.env.clock.t += 60_000;
+  verifiedCard(w, 'U-1', { pr: 9, files: { 'src/a.mjs': 'one' }, undo: flagged });
+  w.ctx.rules = fakeRules({ values: w.values, answers: { merge: allow('in lane') } });
+  const real = w.ctx.record;
+  const lose = { mark: true, alert: lost };
+  // The record is frozen: a wrapper with every method bound, and write refusing only the reverted mark.
+  const wrap = {};
+  for (const k of Object.keys(real)) wrap[k] = typeof real[k] === 'function' ? real[k].bind(real) : real[k];
+  wrap.write = (req) => (lose.mark && req.entity === 'card' && req.id === 'C-1' && req.doc?.state === 'reverted' ? { ok: false, reason: 'planted refusal' } : real.write(req));
+  w.ctx.record = wrap;
+  w.ctx.alert = (a) => {
+    w.alerts.push(a);
+    if (a.type !== 'undo_not_marked' || lose.alert === 'ok') return true;
+    if (lose.alert === 'throws') throw new Error('the alert could not be sent');
+    return false;
+  };
+  const tries = () => w.alerts.filter((a) => a.type === 'undo_not_marked').length;
+  const settled = () => mergeOf(w, 'U-1').doc.revert_settled_at;
+  return { w, lose, tries, settled };
+}
+
+test('L135 G: a lost undo_not_marked alert is retried each pass; the mark landing later settles it once', async () => {
+  for (const lost of [false, 'throws']) {
+    const { w, lose, tries, settled } = await undoWithBlockedMark(lost);
+    await gatePass(w.ctx);
+    assert.equal(mergeOf(w, 'U-1').doc.state, 'merged', `${lost}: the undo merged`);
+    assert.equal(w.env.record.read('card', 'C-1').doc.state, 'closed', `${lost}: the mark was refused`);
+    assert.equal(tries(), 1);
+    assert.equal(settled(), undefined, `${lost}: not settled while the alert is lost`);
+    await gatePass(w.ctx);
+    assert.equal(tries(), 2, `${lost}: tried again next pass`);
+    lose.mark = false;
+    const r = await gatePass(w.ctx);
+    assert.equal(w.env.record.read('card', 'C-1').doc.state, 'reverted', `${lost}: marked once the write holds`);
+    assert.ok(r.did.some((d) => d.step === 'reverted' && d.card === 'C-1'));
+    assert.ok(settled(), `${lost}: settled`);
+    await gatePass(w.ctx);
+    assert.equal(tries(), 2, `${lost}: no more tries once settled`);
+  }
+});
+
+test('L135 G: a delivered undo_not_marked alert settles the merge; the gate does not keep asking', async () => {
+  const { w, lose, tries, settled } = await undoWithBlockedMark(false);
+  lose.alert = 'ok';
+  await gatePass(w.ctx);
+  assert.equal(w.env.record.read('card', 'C-1').doc.state, 'closed');
+  assert.equal(tries(), 1);
+  assert.ok(settled(), 'told the owner, so settled');
+  await gatePass(w.ctx);
+  await gatePass(w.ctx);
+  assert.equal(tries(), 1, 'told once');
+});
+
 test('an undo card whose change is not the exact reverse is refused (9) and never merged', async () => {
   const w = world();
   verifiedCard(w);

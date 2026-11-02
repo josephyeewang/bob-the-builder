@@ -121,7 +121,8 @@ export function processSession(ctx, { sessionId, sourcePath }) {
       const w = writeDoc(ctx.record, 'ask', a, doc);
       if (!w.ok) ctx.alert({ type: 'approvals_write_refused', ask: a.id, reason: w.reason });
     }
-    if (synced.first) { ctx.alert({ type: 'transcript_tampered', session: sessionId }); events.push({ type: 'tampered', session: sessionId }); }
+    // Marked told only once delivered: a lost alert (false, or a throw) is sent again next pass (L135 site B).
+    if (synced.untold && ctx.alert({ type: 'transcript_tampered', session: sessionId }) !== false) { ctx.copies.told(sessionId); events.push({ type: 'tampered', session: sessionId }); }
     return { ok: true, events };
   }
   const sess = boxSession(ctx.record, sessionId);

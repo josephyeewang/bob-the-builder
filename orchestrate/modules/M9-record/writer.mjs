@@ -536,8 +536,9 @@ export function openRecord({ root, product, ownerUid, rules, alert = () => {}, n
           const reason = `store error: ${String(storeErr?.message ?? storeErr).slice(0, 200)}; the file will be tried again`;
           const once = `store_error:${f.key}`;
           if (tx.seen(once)) return no(reason);
-          tx.markSeen(once, 'alerted');
-          return refuse({ ...ev, outbox: true }, reason);
+          // Marked only once the refusal's alert is delivered: a lost one is told again on the next try (L130).
+          if (store.refuse({ ...ev, outbox: true, reason }) !== false) tx.markSeen(once, 'alerted');
+          return no(reason);
         }
         if (r.ok) { tx.markSeen(f.key, 'applied'); return r; }
         tx.markSeen(f.key, 'refused');
@@ -601,17 +602,19 @@ export function openRecord({ root, product, ownerUid, rules, alert = () => {}, n
           if (dead >= OUTAGE_MIN && dead * 2 >= board.length) {
             // One alert per Mac per day, not one per card per pass (L38; 0b-2 audit MIN-1).
             const key = `alert:claims_outage:${host}:${iso(nowMs).slice(0, 10)}`;
-            if (!tx.seen(key)) { store.alert({ type: 'claims_outage', dead, of: board.length }); tx.markSeen(key, 'alerted'); }
+            // Marked only once delivered: a lost alert is sent again next pass, while the outage lasts (L130 m15).
+            if (!tx.seen(key) && store.alert({ type: 'claims_outage', dead, of: board.length }) !== false) tx.markSeen(key, 'alerted');
             return no(`${dead} of ${board.length} claims look dead at once; none is broken (outage)`);
           }
         }
         const r = endClaim(tx, c, 'ready', 'claim_break', { session_id: claim.session_id, pid: claim.pid, why: mine.why });
         return { ok: true, rev: r.rev, seq: r.seq, broke: { session_id: claim.session_id, why: mine.why } };
       });
-      // Each break is told to the owner, once the write is down (L43).
+      // Each break is told to the owner, once the write is down (L43). The break is never redone, so nothing would ask
+      // again: an alert that isn't delivered is kept and sent again at the next transaction (L135 site C).
       if (!out.ok) return out;
-      store.alert({ type: 'claim_broken', card, session_id: out.broke.session_id, why: out.broke.why });
-      return { ok: true, rev: out.rev, seq: out.seq };
+      const told = store.alertOrKeep({ type: 'claim_broken', card, session_id: out.broke.session_id, why: out.broke.why });
+      return { ok: true, rev: out.rev, seq: out.seq, told };
     } catch (e) { return no(`store error: ${String(e?.message ?? e).slice(0, 200)}`); }
   }
 

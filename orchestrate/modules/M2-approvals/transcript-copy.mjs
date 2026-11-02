@@ -4,15 +4,17 @@
 // WHY. The owner's tap is read from the session's JSONL log, which any session of the owner's can write. Each pass copies
 // the log's new, complete lines into a copy only orchestrate writes, keeping the byte offset and a hash of the prefix
 // already copied. An answer counts only from the copy, and only while that prefix is unchanged: a rewritten or shortened
-// log refuses every pending answer from that session for good and alerts once. This catches edits; it does not stop a
+// log refuses every pending answer from that session for good and alerts, each pass until the alert is delivered (L135).
+// This catches edits; it does not stop a
 // forged line appended at the end (the accepted Tier-2 residual, round 1 M2(b); Tier-1 gos go through GitHub instead).
 //
 //   const copies = makeTranscriptCopies({ root });        root: a folder only orchestrate writes (made 0700)
-//   copies.sync(sessionId, sourcePath) → { ok: true, tampered: false, added } | { ok: true, tampered: true, first }
+//   copies.sync(sessionId, sourcePath) → { ok: true, tampered: false, added } | { ok: true, tampered: true, untold }
 //                                      | { ok: false, reason }    (a missing source is { ok: true, added: 0 })
 //   copies.pending(sessionId) → [{ entry, end }]  lines copied but not yet processed, in order (malformed lines skipped)
 //   copies.done(sessionId, end)                   mark processed up to byte `end` (process lines in order, M5-3)
 //   copies.tampered(sessionId) → bool
+//   copies.told(sessionId)                        the tamper alert was delivered: `untold` is false from now on (L135 B)
 //
 // Only newline-terminated lines are copied, so a line still being written is never read half-way.
 
@@ -47,7 +49,7 @@ export function makeTranscriptCopies({ root } = {}) {
       try {
         check(sid);
         const s = readState(sid);
-        if (s.tampered) return { ok: true, tampered: true, first: false };
+        if (s.tampered) return { ok: true, tampered: true, untold: s.untold === true };
         if (!existsSync(sourcePath)) return { ok: true, tampered: false, added: 0 };
         const fd = openSync(sourcePath, 'r');
         let buf;
@@ -63,8 +65,8 @@ export function makeTranscriptCopies({ root } = {}) {
           }
         } finally { closeSync(fd); }
         if (!buf || buf.length < s.offset || hash(buf.subarray(0, s.offset)) !== s.prefix_sha256) {
-          writeState(sid, { ...s, tampered: true, tampered_at: new Date().toISOString() });
-          return { ok: true, tampered: true, first: true };
+          writeState(sid, { ...s, tampered: true, untold: true, tampered_at: new Date().toISOString() });
+          return { ok: true, tampered: true, untold: true };
         }
         const lastNl = buf.lastIndexOf(0x0a);
         const end = lastNl + 1;
@@ -104,6 +106,7 @@ export function makeTranscriptCopies({ root } = {}) {
       writeState(sid, { ...s, processed: end });
     },
     tampered(sid) { check(sid); return readState(sid).tampered === true; },
+    told(sid) { check(sid); const s = readState(sid); if (s.untold === true) writeState(sid, { ...s, untold: false, told_at: new Date().toISOString() }); },
   });
 }
 
