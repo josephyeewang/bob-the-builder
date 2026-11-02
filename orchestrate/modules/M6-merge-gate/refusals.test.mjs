@@ -307,3 +307,17 @@ test('L65: review records that could not be read refuse 5 with the reason', () =
   const f = clean((x) => { x.reviews = null; x.reviewsProblem = 'the review launches folder is missing'; });
   assert.match(verdictProblem(f), /records could not be read: the review launches folder is missing/);
 });
+
+test('L182 class (r2 probe): an undo whose check list is too long is refused (6), final; one whose checks are unread waits', () => {
+  const a = judge(clean((f) => { reverse(f); f.checks = null; f.checksTooLong = '100 check runs; the gate reads at most 99'; }));
+  assert.equal(a.decision, 'refuse', JSON.stringify(a));
+  assert.ok(a.refusals.some((x) => x.n === 6 && !x.temporary), JSON.stringify(a));
+  const b = judge(clean((f) => { reverse(f); f.checks = null; }));
+  assert.equal(b.decision, 'hold', JSON.stringify(b));
+});
+test('L182 class (r2 probe): too_many with main red still refuses (a final refusal is not hidden by a wait)', () => {
+  const a = judge(clean((f) => { f.files = null; f.filesProblem = 'too_many'; f.lane = null; f.tier = null; f.go = null; f.main.green = false; }));
+  assert.equal(a.decision, 'refuse', JSON.stringify(a));
+  const b = judge(clean((f) => { f.files = null; f.filesProblem = 'unread'; f.lane = null; f.tier = null; f.go = null; }));
+  assert.equal(b.decision, 'hold', JSON.stringify(b));
+});

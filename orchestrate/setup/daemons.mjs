@@ -1,14 +1,14 @@
 // Setup part 2b (PR 2): the three background jobs (LaunchDaemons). The plist texts come from review-daemons.mjs (the one
 // place that builds them); this file puts them where launchd looks, and loads, lists and unloads them.
 //
-//   place    write the three plists into /Library/LaunchDaemons, root:wheel 0644 (launchd refuses any other owner or mode)
+//   place    write the three plists (four with the hourly watch-only job, when the config's `watch` entry has `rulesSha256`) into /Library/LaunchDaemons, root:wheel 0644 (launchd refuses any other owner or mode)
 //   load     launchctl bootstrap system <plist>, for each job not loaded yet; a job loaded from an OLDER file is reloaded (bootout, then
 //            bootstrap); refuses unless the install check passes. It records the fingerprint of each file it loaded
 //            (<base>/install/loaded-jobs.json, root's) so `check` can tell a loaded job from a file that has since changed
 //   unload   launchctl bootout system/<label>, for each job that is loaded
 //   list     launchctl print system/<label>: loaded or not, state, last exit code (read only)
 //   check    read only: the files are exactly what review-daemons.mjs builds, root's 0644, no access list; no job file left under
-//            another label; each job is loaded, from the file as it is now, and its last run ended with exit 0
+//            another label; each job is loaded, from the file as it is now, its last run ended with exit 0, and no run has been going over 30 minutes
 //
 // Paths inside the plists are the real ones (no test prefix); the plist files themselves sit under io.at().
 
@@ -19,10 +19,22 @@ import { RUNNER_CONFIG, aclProblem, chainProblem, currentCopy } from '../modules
 import { homeOf } from './layout.mjs';
 import { checkInstall, installPaths } from './install.mjs';
 import { readUser } from './users-folders.mjs';
+import { watchPlist, WATCH_NO_HASH } from './watch-setup.mjs';
+import { watchRulesPath } from './layout.mjs';
 
 export const DAEMON_DIR = '/Library/LaunchDaemons';
 const LAUNCHCTL = '/bin/launchctl';
 export const JOBS = Object.freeze(['review-updater', 'review-account', 'review-runner']);   // load order: the updater first
+// The hourly watch-only job (watch-setup.mjs) is a fourth job only when the config's `watch` entry has the rules fingerprint (R6 M-1):
+// a repo-only entry (all prove-token needs) leaves the three review jobs exactly as before.
+export const jobsFor = (cfg) => (cfg.watch?.rulesSha256 ? [...JOBS, 'watch-only'] : [...JOBS]);
+/** `--only <job>`: that one job, or a clear refusal naming the jobs there are (the watch job exists only when the config's `watch` entry has the rules fingerprint). */
+export function onlyJobs(cfg, name) {
+  const all = jobsFor(cfg);
+  if (name === 'watch-only' && cfg.watch && !cfg.watch.rulesSha256) throw new Error(WATCH_NO_HASH);
+  if (!all.includes(name)) throw new Error(`--only names no job of this config: ${JSON.stringify(String(name).slice(0, 60))}; the jobs are ${all.join(', ')}`);
+  return [name];
+}
 const op = (text, run) => ({ text, run });
 const plistPath = (cfg, job) => join(DAEMON_DIR, `${cfg.label}.${job}.plist`);
 const labelOf = (cfg, job) => `${cfg.label}.${job}`;
@@ -46,7 +58,9 @@ export function plistTexts(io, cfg) {
   const common = { label: cfg.label, installRoot: P.installRoot, logDir: P.logDir };
   try {
     const two = reviewDaemonPlists({ ...common, config: join(P.installRoot, RUNNER_CONFIG), reviewRoot: P.reviewRoot, reviewHome: homeOf(cfg, 'review'), accountCopy: P.accountCopy, ownerHome: owner.home, ownerUid: owner.uid });
-    return { plists: { 'review-runner': two.runner, 'review-account': two.accountCopy, 'review-updater': updaterPlist(common) }, problems };
+    const plists = { 'review-runner': two.runner, 'review-account': two.accountCopy, 'review-updater': updaterPlist(common) };
+    if (cfg.watch?.rulesSha256) plists['watch-only'] = watchPlist(io, cfg);
+    return { plists, problems };
   } catch (e) { return { plists: {}, problems: [`the job files cannot be built from the owner's Mac user ${cfg.owner} (${e.message}); is its home folder set?`] }; }
 }
 
@@ -60,7 +74,7 @@ export function jobState(io, cfg, job) {
   return { loaded: true, pid: Number(/^\s*pid = (\d+)$/m.exec(r.stdout)?.[1]) || null, state: /^\s*state = (.+)$/m.exec(r.stdout)?.[1]?.trim() ?? 'unknown', lastExit: /^\s*last exit code = (.+)$/m.exec(r.stdout)?.[1]?.trim() ?? 'unknown' };
 }
 
-export function planPlace(io, cfg, jobs = JOBS) {
+export function planPlace(io, cfg, jobs = jobsFor(cfg)) {
   const P = installPaths(cfg); const ops = []; const { plists, problems } = plistTexts(io, cfg);
   if (problems.length) return { ops, problems };
   // The job files go outside the base, into launchd's own folder: it and every folder above it must be root's alone too.
@@ -81,7 +95,7 @@ export function planPlace(io, cfg, jobs = JOBS) {
   return { ops, problems };
 }
 
-export function planLoad(io, cfg) {
+export function planLoad(io, cfg, jobs = jobsFor(cfg)) {
   const P = installPaths(cfg); const ops = []; const problems = [];
   const cur = currentCopy(io.at(P.installRoot), { owner: io.rootUid });
   if (cur.missing || cur.problem || !cur.link) problems.push('the install is not there yet (run the install first), so a job would start against nothing');
@@ -90,8 +104,12 @@ export function planLoad(io, cfg) {
     const bad = checkInstall(io, cfg).filter((r) => !r.ok);
     if (bad.length) problems.push(`the install check fails (${bad[0].what}: ${bad[0].why})${bad.length > 1 ? `, and ${bad.length - 1} more` : ''}; fix that first (node setup.mjs check-install shows all of it)`);
   }
+  if (jobs.includes('watch-only')) {
+    let r = null; try { r = io.lstat(watchRulesPath(cfg)); } catch { /* below */ }
+    if (!r) problems.push(`${watchRulesPath(cfg)} is not there (run watch-rules first), so the hourly watch job would have no rules to judge by`);
+  }
   const rec = readRecord(io, cfg);
-  for (const job of JOBS) {
+  for (const job of jobs) {
     const text = fileText(io, cfg, job);
     if (text === null) { problems.push(`${plistPath(cfg, job)} is not there (run daemons place first)`); continue; }
     const s = jobState(io, cfg, job); const label = labelOf(cfg, job); const h = sha(text);
@@ -107,9 +125,9 @@ export function planLoad(io, cfg) {
 }
 
 /** Unload the jobs that are loaded; none loaded → nothing to do, no error. Runner first, so nothing starts while the updater goes. */
-export function planUnload(io, cfg) {
+export function planUnload(io, cfg, jobs = [...JOBS, 'watch-only']) {
   const ops = []; const problems = [];
-  for (const job of [...JOBS].reverse()) {
+  for (const job of [...jobs].reverse()) {
     const s = jobState(io, cfg, job);
     if (s.error) { problems.push(`could not ask launchd about ${labelOf(cfg, job)}: ${s.error}`); continue; }
     if (!s.loaded) continue;
@@ -121,8 +139,9 @@ export function planUnload(io, cfg) {
 
 /**
  * Runbook A8: the account job reloaded so its file carries `--install <the installed copy>` (copy-to refuses without it).
- * A job that is not loaded gives NO steps and no error: there is nothing running on an old file. A loaded one gets its file
- * rewritten (only if it differs), then unloaded and loaded again. Nothing else is touched.
+ * A job that is not loaded gives NO steps and a problem (exit 1): either nothing has loaded it yet, or an earlier reload stopped
+ * half way; either way the instruction is "run: daemons load". A loaded one gets its file rewritten (only if it differs), then
+ * unloaded and loaded again. Nothing else is touched.
  */
 export function planReloadAccount(io, cfg) {
   const job = 'review-account'; const label = labelOf(cfg, job);
@@ -133,7 +152,7 @@ export function planReloadAccount(io, cfg) {
     // the load, so the job is NOT running. Saying "nothing to do" there would be a false "done" (L150 m2).
     const rec0 = readRecord(io, cfg);
     if (rec0 && rec0[label] !== undefined) return { ops: [], problems: [`${label} is NOT loaded now, though it was loaded before (an earlier reload probably stopped half way). Nothing is running it. Run: daemons load`] };
-    return { ops: [], problems: [] };
+    return { ops: [], problems: [`the account job (${label}) is not loaded, so there is nothing to reload. Run: daemons load`] };
   }
   const { plists, problems } = plistTexts(io, cfg);
   if (problems.length) return { ops: [], problems };
@@ -148,29 +167,38 @@ export function planReloadAccount(io, cfg) {
   return { ops: [...place.ops, out, inn, rec, readBackOp(io, cfg, job)], problems: [] };
 }
 
-export function list(io, cfg) {
-  return JOBS.map((job) => ({ job, label: labelOf(cfg, job), ...jobState(io, cfg, job) }));
+export function list(io, cfg, jobs = null) {
+  if (jobs === null) jobs = jobsFor(cfg).includes('watch-only') || !jobState(io, cfg, 'watch-only').loaded ? jobsFor(cfg) : [...JOBS, 'watch-only'];
+  return jobs.map((job) => ({ job, label: labelOf(cfg, job), ...jobState(io, cfg, job) }));
 }
 
 /** Read only → [{ ok, what, why? }]. */
 const NEVER = '(never exited)';
 export const FIRST_RUN_LIMIT_S = 30 * 60;
-/** Seconds the process has been running (`ps -o etime=`: [[dd-]hh:]mm:ss), or null if it cannot be read. */
+const UNREADABLE = 'unreadable';
+/** Seconds the process has been running (`ps -o etime=`: [[dd-]hh:]mm:ss); null if there is no such process any more (ps failed or printed nothing: it ended between the two reads); UNREADABLE if ps answered with something this cannot parse (L180 m5b). */
 function runningSeconds(io, pid) {
   const r = io.run('/bin/ps', ['-o', 'etime=', '-p', String(pid)]);
-  const m = r.status === 0 ? /^\s*(?:(?:(\d+)-)?(\d+):)?(\d+):(\d+)\s*$/.exec(r.stdout) : null;
-  return m ? ((Number(m[1] ?? 0) * 24 + Number(m[2] ?? 0)) * 60 + Number(m[3])) * 60 + Number(m[4]) : null;
+  if (r.status !== 0 || r.stdout.trim() === '') return null;
+  const m = /^\s*(?:(?:(\d+)-)?(\d+):)?(\d+):(\d+)\s*$/.exec(r.stdout);
+  return m ? ((Number(m[1] ?? 0) * 24 + Number(m[2] ?? 0)) * 60 + Number(m[3])) * 60 + Number(m[4]) : UNREADABLE;
 }
-export function checkDaemons(io, cfg) {
+export function checkDaemons(io, cfg, jobs = jobsFor(cfg)) {
   const out = []; const item = (ok, what, why, skip = false) => { if (!skip) out.push({ ok, what, ...(ok ? {} : { why }) }); };
   const { plists, problems } = plistTexts(io, cfg);
   if (problems.length) { item(false, 'the job files can be built', problems[0]); return out; }
   // A job file under another label is a second copy of a job that launchd may be running too (a changed label leaves the old one behind).
+  // It is about the whole set, so a check narrowed with --only leaves it out.
   let names = []; try { names = io.list(DAEMON_DIR); } catch { /* the folder itself is checked by place */ }
-  const stray = names.filter((n) => { const m = /^(.+)\.(review-updater|review-account|review-runner)\.plist$/.exec(n); return m && m[1] !== cfg.label; });
-  item(stray.length === 0, `no job file in ${DAEMON_DIR} under another label than ${cfg.label}`, `${stray.join(', ')}: a leftover set of jobs (take them out with daemons unload under the old label, then delete the files)`);
+  const subset = jobs.length < jobsFor(cfg).length;
+  const stray = subset ? [] : names.filter((n) => { const m = /^(.+)\.(review-updater|review-account|review-runner|watch-only)\.plist$/.exec(n); return m && m[1] !== cfg.label; });
+  item(stray.length === 0, `no job file in ${DAEMON_DIR} under another label than ${cfg.label}`, `${stray.join(', ')}: a leftover set of jobs (take them out with daemons unload under the old label, then delete the files)`, subset);
+  if (!subset && !jobsFor(cfg).includes('watch-only')) {
+    const s = jobState(io, cfg, 'watch-only'); let placed = false; try { io.lstat(plistPath(cfg, 'watch-only')); placed = true; } catch { /* none */ }
+    item(!s.loaded && !placed, `no ${labelOf(cfg, 'watch-only')} job is placed or loaded (the config names no rules fingerprint)`, `${s.loaded ? 'it is loaded' : 'its file is there'}: take it out with daemons unload, then delete ${plistPath(cfg, 'watch-only')}`, !s.loaded && !placed);   // listed only when there is one
+  }
   const rec = readRecord(io, cfg);
-  for (const job of JOBS) {
+  for (const job of jobs) {
     const f = plistPath(cfg, job); const why = [];
     let st = null; try { st = io.lstat(f); } catch { why.push('missing'); }
     if (st) {
@@ -189,11 +217,16 @@ export function checkDaemons(io, cfg) {
     const text = fileText(io, cfg, job);
     item(text !== null && rec[label] === sha(text), `${label} was loaded from the job file as it is now`, 'it runs an older definition than the file on disk (or was not loaded by this tool); run daemons load, which reloads it');
     item(s.lastExit === '0', `${label}'s last run ended well (exit 0)`, s.lastExit === NEVER ? undefined : `last exit code ${s.lastExit}; look in ${installPaths(cfg).logDir}`, s.lastExit === NEVER);
+    if (s.pid && s.lastExit !== NEVER) {
+      // A later run that hangs leaves the job running, and launchd starts no new run while one is going: the last exit would stay green.
+      const age = runningSeconds(io, s.pid);
+      item(age === null || (age !== UNREADABLE && age <= FIRST_RUN_LIMIT_S), `${label}'s current run is not stuck (at most ${FIRST_RUN_LIMIT_S / 60} minutes)`, age === UNREADABLE ? `ps answered with something that could not be read, so how long this run has been going is not known; look in ${installPaths(cfg).logDir}` : `this run has been going for ${Math.round(age / 60)} minutes and has not ended; look in ${installPaths(cfg).logDir}`);
+    }
     if (s.lastExit === NEVER) {
       // It has not finished a run yet. Every job starts at load and then runs on a timer, so this is fine only while its first run is young.
       const age = s.pid ? runningSeconds(io, s.pid) : null;
-      item(age !== null && age <= FIRST_RUN_LIMIT_S, `${label} is on its first run, and not for long (at most ${FIRST_RUN_LIMIT_S / 60} minutes)`,
-        age === null ? `it is loaded but has no running process and has never finished a run; look in ${installPaths(cfg).logDir}` : `its first run has been going for ${Math.round(age / 60)} minutes and has not ended; look in ${installPaths(cfg).logDir}`);
+      item(age !== null && age !== UNREADABLE && age <= FIRST_RUN_LIMIT_S, `${label} is on its first run, and not for long (at most ${FIRST_RUN_LIMIT_S / 60} minutes)`,
+        age === null ? `it is loaded but has no running process and has never finished a run; look in ${installPaths(cfg).logDir}` : age === UNREADABLE ? `ps answered with something that could not be read, so how long the first run has been going is not known; look in ${installPaths(cfg).logDir}` : `its first run has been going for ${Math.round(age / 60)} minutes and has not ended; look in ${installPaths(cfg).logDir}`);
     }
   }
   return out;

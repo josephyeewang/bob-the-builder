@@ -434,9 +434,13 @@ test('L177 c3: rawGit ends at its stop time though a program that left git\'s pr
   const d = tmp();
   const pidFile = join(d, 'pid');
   const orphan = `!perl -MPOSIX -e 'if (fork) { sleep 20; exit } POSIX::setsid(); open(my $f, ">", $ARGV[0]); print $f $$; close $f; sleep 20'`;
-  // The pipes node holds open (L182 m1): the stop must close git's three, not only end the call.
-  const pipes = () => process.getActiveResourcesInfo().filter((x) => x === 'PipeWrap').length;
-  const before = pipes();
+  // The pipes node holds open (L182 m1): the stop must close git's three, not only end the call. Counted by identity
+  // (L187 m1): a child an earlier test left running closes its own pipes during this test, so a plain count can match
+  // by chance with this call's pipes still open. Only pipes that weren't open before the call are this call's. (node's
+  // handle list is undocumented; if it goes, this throws and the test fails loudly.)
+  const pipeHandles = () => process._getActiveHandles().filter((h) => h?._handle?.constructor?.name === 'Pipe');
+  const before = new Set(pipeHandles());
+  const opened = () => pipeHandles().filter((h) => !before.has(h));
   const t0 = Date.now();
   try {
     const r = await rawGit(['-c', `alias.linger=${orphan}`, 'linger', pidFile], { gitDir: join(d, 'none.git'), stopMs: 1_500 });
@@ -445,8 +449,8 @@ test('L177 c3: rawGit ends at its stop time though a program that left git\'s pr
     assert.equal(r.hung, true, JSON.stringify(r));
     assert.ok(took < 6_000, `rawGit took ${took} ms`);
     // Closed pipes leave node's list within a few turns of the loop; one left open stays until the program ends (20 s).
-    for (let i = 0; i < 20 && pipes() !== before; i++) await new Promise((res) => setTimeout(res, 50));
-    assert.equal(pipes(), before, `every pipe to git is closed, though the program still holds the other end: ${process.getActiveResourcesInfo().join(',')}`);
+    for (let i = 0; i < 20 && opened().length; i++) await new Promise((res) => setTimeout(res, 50));
+    assert.equal(opened().length, 0, `every pipe to git is closed, though the program still holds the other end: ${process.getActiveResourcesInfo().join(',')}`);
   } finally {
     try { process.kill(Number(readFileSync(pidFile, 'utf8')), 'SIGKILL'); } catch {}
   }

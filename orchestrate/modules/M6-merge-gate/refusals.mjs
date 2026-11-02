@@ -88,7 +88,7 @@ const ignored = (c, list) => (Array.isArray(list) ? list : []).some((x) => Numbe
 // Red comes first: a red check or status is about the change, whatever else is still running. What is left after that
 // (a check that has not run or not finished, a pending status) is not known yet.
 function checksProblem(f) {
-  if (typeof f.checksTooLong === 'string') return final(`the commit has ${f.checksTooLong}; ${SPLIT_LINE} or run fewer checks`);
+  if (typeof f.checksTooLong === 'string') return final(`the commit has ${f.checksTooLong}; run fewer checks on this commit`);
   if (!Array.isArray(f.checks) || !Array.isArray(f.statuses)) return notYet('the checks could not be read');
   if (!Array.isArray(f.requiredChecks)) return notYet('the rules name no required checks');
   const runs = f.checks.filter((c) => !ignored(c, f.checksIgnored));
@@ -229,7 +229,7 @@ export function judge(f) {
     // 5. The review (and the Tier-1 audit).
     if (!reverse) add(5, verdictCheck(f));
     // 7. Human review threads (fail closed).
-    if (f.threads?.ok !== true) (typeof f.threads?.tooLong === 'string' ? no(7, `the pull request has ${f.threads.tooLong}; resolve and close some, or ${SPLIT_LINE}`) : wait(7, 'the review threads could not be read'));
+    if (f.threads?.ok !== true) (typeof f.threads?.tooLong === 'string' ? no(7, `the pull request has ${f.threads.tooLong}; open a new pull request; resolved threads still count toward GitHub's total`) : wait(7, 'the review threads could not be read'));
     else if (!(f.threads.unresolved === 0)) no(7, `${f.threads.unresolved} review thread(s) unresolved`);
     // 9 and the holds. M10's merge answer; a hold keeps the place in the queue.
     const lane = f.lane;
