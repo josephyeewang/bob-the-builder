@@ -169,6 +169,7 @@ export function fakeMac({ euid: as = 0, users = {}, admins = [] } = {}) {
     // The real reader (links, plain file, owner, mode, folders above); `configOwner` stands in for the file's owner (a test is not root).
     readConfig: (p, { strict = false } = {}) => readConfigFile(strict ? at(p) : p, { strict, rootUid: mac.rootUid, top: prefix, ownerOf: (st) => mac.configOwner ?? st.uid, what: strict ? "root's setup config" : 'the setup config' }),
     configOwner: null,
+    sourceOwner: null,   // stands in for the runner config's owner (a test is not root)
     nodeProblem: () => mac.nodeProblemText,
     // A stand-in for GitHub: a test sets mac.github = (url, init) => ({ status, text }). Every call is kept (the token is in init.headers).
     fetch: async (url, init) => { mac.fetchLog.push({ url, method: init?.method ?? 'GET' }); if (!mac.github) throw Object.assign(new Error('offline'), { code: 'ENOTFOUND' }); return mac.github(url, init); },
@@ -176,7 +177,8 @@ export function fakeMac({ euid: as = 0, users = {}, admins = [] } = {}) {
     // The real checks on a node program the config names, for the file's own owner (the test process) and mode, in its own folder.
     nodeBinProblem: (p) => nodeProblemOf(p, { exact: true, rootUid: mac.rootUid, top: (() => { try { return dirname(realpathSync(p)); } catch { return '/'; } })() }),
     // The runner config is a real file outside the prefix. The real reader (links, plain file, size); as root also its owner and mode.
-    readSource: (p) => readConfigFile(p, { strict: mac.as === 0, rootUid: mac.rootUid, top: dirname(p), ownerOf: (st) => st.uid, what: 'the runner config' }),
+    readSourceStrict: (p) => readConfigFile(p, { strict: true, rootUid: mac.rootUid, top: dirname(p), ownerOf: (st) => mac.sourceOwner ?? st.uid, what: 'the runner config' }),
+    readSource: (p) => readConfigFile(p, { strict: mac.as === 0, rootUid: mac.rootUid, top: dirname(p), ownerOf: (st) => mac.sourceOwner ?? st.uid, what: 'the runner config' }),
     // The install and the job files. The real calls, on the prefixed place; a write needs the parent folder (like the real one)
     // and makes a NEW file only (like the real one: it never overwrites or follows a link).
     readText: (p) => readFileSync(at(p), 'utf8'),
@@ -240,7 +242,7 @@ export function fakeMac({ euid: as = 0, users = {}, admins = [] } = {}) {
     if (!j) return { status: 1, stdout: '', stderr: '' };
     const s = j.ageS ?? 0; const dd = Math.floor(s / 86400); const r = s % 86400; const hh = Math.floor(r / 3600); const mm = Math.floor((r % 3600) / 60); const ss = r % 60;
     const p2 = (n) => String(n).padStart(2, '0');
-    return { status: 0, stdout: `  ${dd ? `${dd}-${p2(hh)}:` : hh ? `${p2(hh)}:` : ''}${p2(mm)}:${p2(ss)}\n`, stderr: '' };
+    return { status: 0, stdout: `${dd ? `${dd}-${p2(hh)}:` : hh ? `${p2(hh)}:` : ''}${p2(mm)}:${p2(ss)}\n`, stderr: '' };
   };
   mac.run = (cmd, args) => (cmd === '/bin/launchctl' ? mac.launchctl(args) : cmd === '/bin/ps' ? mac.ps(args) : baseRun(cmd, args));
   return mac;

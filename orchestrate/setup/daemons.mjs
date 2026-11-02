@@ -121,8 +121,9 @@ export function planUnload(io, cfg) {
 
 /**
  * Runbook A8: the account job reloaded so its file carries `--install <the installed copy>` (copy-to refuses without it).
- * A job that is not loaded gives NO steps and no error: there is nothing running on an old file. A loaded one gets its file
- * rewritten (only if it differs), then unloaded and loaded again. Nothing else is touched.
+ * A job that is not loaded gives NO steps and a problem (exit 1): either nothing has loaded it yet, or an earlier reload stopped
+ * half way; either way the instruction is "run: daemons load". A loaded one gets its file rewritten (only if it differs), then
+ * unloaded and loaded again. Nothing else is touched.
  */
 export function planReloadAccount(io, cfg) {
   const job = 'review-account'; const label = labelOf(cfg, job);
@@ -133,7 +134,7 @@ export function planReloadAccount(io, cfg) {
     // the load, so the job is NOT running. Saying "nothing to do" there would be a false "done" (L150 m2).
     const rec0 = readRecord(io, cfg);
     if (rec0 && rec0[label] !== undefined) return { ops: [], problems: [`${label} is NOT loaded now, though it was loaded before (an earlier reload probably stopped half way). Nothing is running it. Run: daemons load`] };
-    return { ops: [], problems: [] };
+    return { ops: [], problems: [`the account job (${label}) is not loaded, so there is nothing to reload. Run: daemons load`] };
   }
   const { plists, problems } = plistTexts(io, cfg);
   if (problems.length) return { ops: [], problems };
@@ -189,6 +190,11 @@ export function checkDaemons(io, cfg) {
     const text = fileText(io, cfg, job);
     item(text !== null && rec[label] === sha(text), `${label} was loaded from the job file as it is now`, 'it runs an older definition than the file on disk (or was not loaded by this tool); run daemons load, which reloads it');
     item(s.lastExit === '0', `${label}'s last run ended well (exit 0)`, s.lastExit === NEVER ? undefined : `last exit code ${s.lastExit}; look in ${installPaths(cfg).logDir}`, s.lastExit === NEVER);
+    if (s.pid && s.lastExit !== NEVER) {
+      // A later run that hangs leaves the job running, and launchd starts no new run while one is going: the last exit would stay green.
+      const age = runningSeconds(io, s.pid);
+      item(age === null || age <= FIRST_RUN_LIMIT_S, `${label}'s current run is not stuck (at most ${FIRST_RUN_LIMIT_S / 60} minutes)`, `this run has been going for ${Math.round(age / 60)} minutes and has not ended; look in ${installPaths(cfg).logDir}`);
+    }
     if (s.lastExit === NEVER) {
       // It has not finished a run yet. Every job starts at load and then runs on a timer, so this is fine only while its first run is young.
       const age = s.pid ? runningSeconds(io, s.pid) : null;

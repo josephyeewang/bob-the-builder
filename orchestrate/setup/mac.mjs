@@ -15,6 +15,7 @@
 //   io.rootUid              the uid root has (0; a test stands one in)
 //   io.nodeProblem()        null, or why the node running this is not one root may run (L90 minor a)
 //   io.nodeBinProblem(path) the same for a node program the config names (it is copied in and root runs the copy)
+//   io.readSourceStrict(path)  io.readSource's read with root's rules whoever runs it (a dry run's way to say what root would refuse)
 //   io.readSource(path)     a file of this machine outside the prefix that root reads (the runner config): through one handle,
 //                           never through a link, a plain file, not too big; as root also root's own and written by no one else.
 //                           Errors never show a byte of the file.
@@ -166,6 +167,8 @@ export function realIo({ prefix = '' } = {}) {
     // Plain fetch for the one place the setup talks to GitHub (prove-token). → { status, text }; a time limit; redirects are not followed.
     fetch: async (url, init) => { const r = await fetch(url, { ...init, redirect: 'manual', signal: AbortSignal.timeout(20_000) }); return { status: r.status, text: await r.text(), rateRemaining: r.headers.get('x-ratelimit-remaining') }; },
     nodeBinProblem: (p) => nodeProblemOf(p, { exact: true }),
+    // The same read as root's, whoever runs it: a dry run uses it to say exactly what root would refuse.
+    readSourceStrict: (p) => readConfigFile(p, { strict: true, rootUid: 0, top: '/', what: 'the runner config' }),
     readSource: (p) => readConfigFile(p, { strict: (typeof process.geteuid === 'function' ? process.geteuid() : -1) === 0, rootUid: 0, top: '/', what: 'the runner config' }),
     // For the install and the job files. `src` is a real path outside the prefix (a file of this repository, the node program).
     readText: (p) => readFileSync(at(p), 'utf8'),
