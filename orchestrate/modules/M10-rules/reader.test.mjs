@@ -255,3 +255,23 @@ test('an alert sink that throws does not change the answer', async () => {
   await reader.refresh();
   assert.equal(reader.state('sample-app').status, 'deny_all');
 });
+
+test('L168 M-3: an alert that answers false or throws is not marked sent, so the next read tells again', async () => {
+  for (const mode of ['false', 'throws']) {
+    const stateDir = tempDir('m10-reader-');
+    const gh = fakeGitHub(); gh.commit(1, fixture);
+    const calls = [];
+    let lose = true;
+    const alert = (a) => { calls.push(a.reason); if (!lose) return true; if (mode === 'throws') throw new Error('x'); return false; };
+    const reader = makeReader({ gh, stateDir, products: [PRODUCT], verifyApproved: () => false, alert });
+    await reader.refresh();
+    await reader.refresh();
+    assert.equal(reader.state('sample-app').status, 'deny_all', `${mode}: the answer is the same`);
+    assert.equal(calls.length, 2, `${mode}: lost, so told again on the next read`);
+    lose = false;
+    await reader.refresh();
+    await reader.refresh();
+    await reader.refresh();
+    assert.equal(calls.length, 3, `${mode}: told once delivered, then not again`);
+  }
+});

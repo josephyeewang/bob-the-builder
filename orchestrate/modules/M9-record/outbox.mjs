@@ -379,7 +379,9 @@ export const PASSES = Object.freeze({
   auditor: (v) => v?.pass === true && v.material === 0,
 });
 
-// The longest listed kind the name starts with: one function, in record-names.mjs (the test stand-in reads it too).
+// The longest listed kind a name starts with, for a name that passes the one outbox name rule (OUTBOX_NAME, L121):
+// one function, in record-names.mjs, that the test stand-in reads too. readOutboxFile, sessionVerdict and
+// verdictFromFile all take kinds through here.
 export const kindOf = outboxKindOf;
 
 export function readOutboxFile({ outboxRoot, uids = {}, tag, file }) {

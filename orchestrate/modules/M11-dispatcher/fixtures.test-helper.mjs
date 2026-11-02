@@ -1,7 +1,13 @@
 // Test-only: the design's numbers (v4 §14.1.6 and the review's new keys), passed to fakeRules so no
 // Dispatcher file holds them. A test that wants a different number overrides one key.
 
-import { fakeRules } from '../../shared/rules.mjs';
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { fakeRules, makeRules } from '../../shared/rules.mjs';
+import { CHANNEL_TIER } from '../../shared/approval.mjs';
+import { makeEngine } from '../M10-rules/engine.mjs';
+import { parsePolicy } from '../M10-rules/policy.mjs';
 import { SCRIPT_ACTORS, STATES, memoryRecord } from '../../shared/record.mjs';
 import { CREATE_STATES, INTERNAL_MOVES, MOVES, moveActors } from '../M9-record/moves.mjs';
 import { factFamilyOf, fieldsAllowed } from '../M9-record/permissions.mjs';
@@ -22,11 +28,43 @@ export const VALUES = Object.freeze({
   [K.leadSoft]: 250_000, [K.leadHard]: 400_000, [K.handoffCapRole]: 8_000, [K.splitAfterCompactions]: 2,
 });
 
+// M10's real engine on its sample policy (L81). count_approval goes through it unless a test answers it itself.
+const here = dirname(fileURLToPath(import.meta.url));
+export const PRODUCTS = Object.freeze(['p', 'p1', 'p2', 'p3', 'p9']);
+let engine;
+export function realEngine() {
+  if (engine) return engine;
+  const policy = parsePolicy(readFileSync(join(here, '../M10-rules/fixtures/policy.yaml'), 'utf8'));
+  if (!policy.ok) throw new Error(`M10 sample policy: ${policy.reason}`);
+  engine = makeRules(makeEngine({ products: [...PRODUCTS], rulesState: () => ({ status: 'ok', policy: policy.policy, commit: 'c'.repeat(40), blob: 'b'.repeat(40) }),
+    productState: () => ({ state: 'active' }), running: () => 0, rolesDir: join(here, '../M10-rules/roles'), clock: () => T0 }));
+  return engine;
+}
+
+// What M10 reads for each action M11 asks (engine.mjs ANSWERS; shared/README.md). A test's own answer is reached only
+// through these, so a fake can't hide a question the real engine would refuse to read (L81 sweep: start_session was
+// asked with the card alone, and count_approval as { ask: {...} }, and the fakes said yes to both).
+const isTier = (t) => t === 1 || t === 2;
+export const M10_READS = Object.freeze({
+  start_session: (s) => (typeof s.product !== 'string' || typeof s.role !== 'string' || !isTier(s.tier) || typeof s.editing !== 'boolean'
+    ? 'start_session needs product, role, tier (1 or 2) and editing'
+    : s.tier === 1 && !Number.isFinite(Date.parse(s.usage?.read_at ?? '')) ? 'Tier 1 start needs a usage reading' : null),
+  count_approval: (s) => (typeof s.product !== 'string' || typeof s.ask_kind !== 'string' || !Object.hasOwn(CHANNEL_TIER, s.channel ?? '') || !Array.isArray(s.risky)
+    ? 'count_approval needs product, ask_kind, channel and risky' : null),
+  delete_copy: () => null,
+});
+const readsChecked = (answers) => Object.fromEntries(Object.entries(answers).map(([action, a]) => [action, (s) => {
+  const bad = M10_READS[action]?.(s ?? {});
+  if (bad) return { decision: 'deny', reason: `fake rules: M10 would refuse this subject (${bad})` };
+  return typeof a === 'function' ? a(s) : a;
+}]));
+
 // `classify` answers rules.classify (a card's tier and risky classes come from its files, never from a card field).
 export const rulesWith = (over = {}, answers = {}, { classify } = {}) => {
   const values = { ...VALUES, ...over };
   for (const [k, v] of Object.entries(over)) if (v === undefined) delete values[k];
-  return fakeRules({ values, answers, classify });
+  const all = { count_approval: (s) => realEngine().may('count_approval', s), ...answers };
+  return fakeRules({ values, answers: readsChecked(all), classify });
 };
 
 export const T0 = Date.parse('2026-10-29T12:00:00Z');
@@ -174,7 +212,7 @@ export function undoEntries(id, over = {}, { product = 'p1', files = [`src/${id}
   return [
     ['card', target, { state: 'merged', module: 'M-test', product, tier: 2, files, merge_commit: sha }],
     ['merge', `MG-${id}`, { state: 'merged', card: target, pr, merge_commit: sha, product }],
-    ['ask', UNDO_ASK(id), { state: 'answered', kind: 'undo', card: target, choices: ['Undo', 'Keep'], answer: { channel: 'tap', choice: 'Undo', approves: true, at: iso(T0 - 700_000) } }],
+    ['ask', UNDO_ASK(id), { state: 'answered', kind: 'undo', product, card: target, tier: 2, risky: [], choices: ['Undo', 'Keep'], answer: { channel: 'tap', choice: 'Undo', approves: true, at: iso(T0 - 700_000) } }],
     ['card', id, { state: 'ready', kind: 'exact_reverse', source: { ask: UNDO_ASK(id) }, module: 'M-test', product, tier: 2, files, what: `undo PR ${pr}`, changed_at: iso(T0 - 600_000), ...over }],
   ];
 }

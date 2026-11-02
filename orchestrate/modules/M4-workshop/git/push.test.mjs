@@ -16,11 +16,25 @@ import { crc32 } from './binary-files.mjs';
 import { chunk, makePng, ihdr } from './png-fixture.mjs';
 import { startGate, factId } from './start-gate.mjs';
 import { memoryRecord } from '../../../shared/record.mjs';
-import { fakeRules, allow, deny } from '../../../shared/rules.mjs';
+import { fakeRules, makeRules, allow, deny } from '../../../shared/rules.mjs';
+import { makeEngine } from '../../M10-rules/engine.mjs';
+import { parsePolicy } from '../../M10-rules/policy.mjs';
+import { fileURLToPath } from 'node:url';
 
 const tmp = (p = 'orch-push-') => tempDir(p);
 const WF = '.github/workflows/outside-check.yml';
 const PRODUCT = 'p1';
+const here = dirname(fileURLToPath(import.meta.url));
+let engine;
+const pushAsked = [];
+function realEngine() {
+  if (engine) return engine;
+  const policy = parsePolicy(readFileSync(join(here, '../../M10-rules/fixtures/policy.yaml'), 'utf8'));
+  assert.ok(policy.ok, policy.reason);
+  engine = makeRules(makeEngine({ products: [PRODUCT], rulesState: () => ({ status: 'ok', policy: policy.policy, commit: 'c'.repeat(40), blob: 'b'.repeat(40) }),
+    productState: () => ({ state: 'active' }), running: () => 0, rolesDir: join(here, '../../M10-rules/roles'), clock: () => Date.now() }));
+  return engine;
+}
 const REPO = 'owner/test-repo';
 
 // A GitHub-token-shaped string made at run time, so no secret-shaped text is ever committed.
@@ -114,7 +128,7 @@ async function world({ scanner: scannerOverride, gate = {} } = {}) {
   // Seeded as the real Record takes them (L72): a session starts in preparing; a card names its state and module,
   // and its PR title is the card's `what`.
   assert.equal(record.write({ actor: 'dispatcher', entity: 'session', id: 'S-1', expectRev: 0, doc: { state: 'preparing', product: PRODUCT, card: 'C-1', branch: 'card/c-1', outbox, attempt: 'a1' } }).ok, true);
-  assert.equal(record.write({ actor: 'dispatcher', entity: 'card', id: 'C-1', expectRev: 0, doc: { state: 'draft', module: 'M-test', what: 'Card one' } }).ok, true);
+  assert.equal(record.write({ actor: 'dispatcher', entity: 'card', id: 'C-1', expectRev: 0, doc: { state: 'draft', module: 'M-test', product: PRODUCT, lane: 'product', what: 'Card one' } }).ok, true);
   const writeFact = (kind, doc) => { const cur = record.read('fact', factId(kind, PRODUCT)); return record.write({ actor: 'sensors', entity: 'fact', id: factId(kind, PRODUCT), expectRev: cur?.rev ?? 0, doc }); };
   const fresh = () => new Date().toISOString();
   writeFact('vercel_skip', { product: PRODUCT, vercel_project: 'prj_1', read_at: fresh(), result: true });
@@ -123,7 +137,8 @@ async function world({ scanner: scannerOverride, gate = {} } = {}) {
   const fake = makeFakeScanner((mkdirSync(join(root, 'scan')), join(root, 'scan')));
   const issues = []; const prs = [];
   const values = { 'product.repo': REPO, 'product.mirror': mirror, 'product.onboarded': true, 'product.default_branch': 'main', 'product.vercel_project': 'prj_1', 'outside_check.workflow': WF };
-  const answers = { push_branch: allow('fine') };
+  // push_branch is M10's real engine on its sample policy (L81 sweep): the push is asked what the engine reads.
+  const answers = { push_branch: (s) => { pushAsked.push(s); return realEngine().may('push_branch', s); } };
   const run = { workflow_path: WF, event: 'schedule', head_branch: 'main', run_at: fresh(), steps: [{ product: PRODUCT, conclusion: 'success' }] };
   const ports = {
     record,
@@ -143,6 +158,31 @@ async function world({ scanner: scannerOverride, gate = {} } = {}) {
   const push = (over = {}) => createPushScript({ ...ports, ...over })('S-1');
   return { root, gh, mirror, clone, cg, outbox, record, values, answers, run, fake, issues, prs, commit, bundle, ghRefs, push, ports, writeFact };
 }
+
+// L81 sweep: the push asks M10's push_branch what it reads, and the real engine answers it.
+test('L81: push_branch is asked the card as { id, rows, doc: { lane } } and each file as { path, status }; the old subject is refused', async () => {
+  const w = await world();
+  await w.commit('work', (c) => { writeFileSync(join(c, 'app.txt'), 'changed\n'); writeFileSync(join(c, 'new.txt'), 'new\n'); });
+  await w.bundle();
+  pushAsked.length = 0;
+  const r = await w.push();
+  assert.equal(r.ok, true, r.reason);
+  assert.equal(pushAsked.length, 1);
+  const s = pushAsked[0];
+  assert.deepEqual(s.card, { id: 'C-1', kind: undefined, rows: [], doc: { lane: 'product' } });
+  assert.deepEqual(s.files.map((f) => [f.path, f.status]).sort(), [['app.txt', 'modified'], ['new.txt', 'added']]);
+  // The subject the push used to send (the card's id, bare names): the real engine refuses it.
+  assert.equal(realEngine().may('push_branch', { product: PRODUCT, card: 'C-1', files: ['app.txt'] }).decision, 'deny');
+  // A card with no lane is refused by the real engine, not let through (the Record keeps a card's lane as created,
+  // so the push reads it through a record that drops it).
+  const w2 = await world();
+  const t = w2.record;
+  const noLane = Object.fromEntries(Object.keys(t).map((k) => [k, typeof t[k] === 'function' ? t[k].bind(t) : t[k]]));
+  noLane.read = (e, id) => { const r = t.read(e, id); return e === 'card' && r ? { ...r, doc: { ...r.doc, lane: undefined } } : r; };
+  await w2.commit('work', (c) => writeFileSync(join(c, 'app.txt'), 'changed\n'));
+  await w2.bundle();
+  await refusedAndUntouched(w2, /card has no lane/, { record: noLane });
+});
 
 async function refusedAndUntouched(w, re, over) {
   const before = await w.ghRefs();

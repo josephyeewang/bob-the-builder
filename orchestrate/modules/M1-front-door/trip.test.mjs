@@ -80,7 +80,9 @@ test('R-0b-83 brief: away line, time zone question, go items and risky asks with
   assert.match(text, /Which time zone will you be in\?/);
   assert.match(text, /test-product: number work holds until you answer; \[Undo\] still runs/);
   assert.match(text, /second still merges the way you run it today; the hours rule starts at the second cutover/);
-  assert.match(text, /Waiting on your go \(1\):\n- go go-1: .*go on roadmap row 7.*\(https:\/\/example.invalid\/roadmap#row-7\)/);
+  // L84 minor 3: the research ask waits on the owner (who 'joe'), so it is listed with the goes, by its id.
+  assert.match(text, /Waiting on your go \(2\):\n- go go-1: .*go on roadmap row 7.*\(https:\/\/example.invalid\/roadmap#row-7\)/);
+  assert.match(text.split('Open risky-act asks')[0], /- ask R-1: .*run research ask R-1.*\(ask R-1\)/);
   assert.match(text, /Open risky-act asks \(2\); they still expire after 12 h/);
   assert.match(text, /ask-1: .*\(https:\/\/example.invalid\/pr\/9\)/);
   assert.match(text, /ask-3: .*RECORD ERROR: no pull request link/);

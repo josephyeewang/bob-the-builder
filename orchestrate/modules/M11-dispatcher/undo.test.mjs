@@ -11,10 +11,11 @@ const undoStep = (a) => withAlerts(a.rec, a.now, a.alert ?? (() => {}), (alert) 
 // the merge commit the gate recorded, and the gate's merge names the card, its PR and the same commit.
 const SHA = 'a'.repeat(40);
 const OTHER = 'b'.repeat(40);
-const COUNT = { count_approval: { decision: 'allow', reason: 'a counted tap' } };
-const R = rulesWith({}, COUNT);
+// count_approval is M10's real engine (fixtures.test-helper.mjs, L81): the ask is the one M2 writes, with its product,
+// tier and risky classes, and the tap counts only where M10 says a tap is enough.
+const R = rulesWith();
 const tapped = (over = {}) => ({ channel: 'tap', choice: 'Undo', approves: true, at: iso(T0), ...over });
-const ask = (over = {}) => ({ state: 'answered', kind: 'undo', card: 'T-1', choices: ['Undo', 'Keep'], answer: tapped(), ...over });
+const ask = (over = {}) => ({ state: 'answered', kind: 'undo', product: 'p', card: 'T-1', tier: 2, risky: [], choices: ['Undo', 'Keep'], answer: tapped(), ...over });
 const target = (over = {}) => ['card', 'T-1', { state: 'merged', module: 'M-u', product: 'p', tier: 2, files: ['src/a.js', 'src/b.js'], merge_commit: SHA, ...over }];
 const merge = (over = {}, id = 'MG-1') => ['merge', id, { state: 'audited_ok', card: 'T-1', pr: 7, merge_commit: SHA, product: 'p', ...over }];
 const undoCard = (over = {}) => ({ state: 'ready', kind: 'exact_reverse', source: { ask: 'A-1' }, module: 'M-u', product: 'p', tier: 2, files: ['src/a.js', 'src/b.js'], what: 'undo PR 7', ...over });
@@ -90,7 +91,9 @@ test('M21: every merged state counts; a merge that did not land does not', async
 test('M21: not a tap, not counted, or naming no matching merge -> nothing written', async () => {
   const cases = [
     [[target(), merge(), ['ask', 'A-1', ask({ answer: tapped({ channel: 'typed' }) })]], R, /not a tap/],
-    [[target(), merge(), ['ask', 'A-1', ask()]], rulesWith(), /not counted/], // no count_approval answer -> denied
+    // A risky class needs Joe's GitHub Approve: the real engine does not count a tap for it.
+    [[target(), merge(), ['ask', 'A-1', ask({ risky: ['schema'] })]], R, /not counted: this answer needs the owner's own Approve on GitHub/],
+    [[target(), merge(), ['ask', 'A-1', ask()]], rulesWith({}, { count_approval: { decision: 'deny', reason: 'no' } }), /not counted/],
     [[target(), merge(), ['ask', 'A-1', ask()]], rulesWith({}, { count_approval: { decision: 'ask', tier: 1, reason: 'needs a second look' } }), /not counted/],
     [[target({ merge_commit: OTHER }), merge(), ['ask', 'A-1', ask()]], R, /no merged attempt matches/],
     [[target(), merge({ card: 'T-2' }), ['ask', 'A-1', ask()]], R, /no merged attempt matches/],
@@ -120,13 +123,20 @@ test('M21: only answered undo asks are read', async () => {
   assert.deepEqual((await w.step()), []);
 });
 
-test('M21: count_approval sees the ask', async () => {
+test('M21 (L81): count_approval is asked what M10 reads, and only "ask" at the tap\'s tier counts', async () => {
   let seen;
   const w = tapWorld();
-  await w.step(rulesWith({}, { count_approval: (s) => { seen = s; return { decision: 'allow', reason: 'ok' }; } }));
-  assert.equal(seen.ask.id, 'A-1');
-  assert.equal(seen.ask.answer.channel, 'tap');
-  assert.equal(seen.ask.card, 'T-1');
+  await w.step(rulesWith({}, { count_approval: (s) => { seen = s; return { decision: 'ask', tier: 2, reason: 'a tap' }; } }));
+  assert.deepEqual(seen, { product: 'p', card: 'T-1', ask_kind: 'undo', channel: 'tap', tier: 2, risky: [] });
+  assert.equal(w.rec.list('card').filter((c) => c.doc.kind === 'exact_reverse').length, 1);
+  // An "allow" is not M10's answer for an approval, and a GitHub-tier answer does not count a tap.
+  for (const verdict of [{ decision: 'allow', reason: 'ok' }, { decision: 'ask', tier: 1, reason: 'github' }]) {
+    const w2 = tapWorld();
+    assert.match((await w2.step(rulesWith({}, { count_approval: verdict })))[0][1], /not counted/);
+    assert.equal(w2.rec.list('card').filter((c) => c.doc.kind === 'exact_reverse').length, 0);
+  }
+  // The old shape, { ask: {...} }, is refused by the real engine (L81 plant).
+  assert.equal(R.may('count_approval', { ask: { id: 'A-1', ...ask() } }).decision, 'deny');
 });
 
 test('M21: the reversed commit\'s files cannot be read -> no card, the ask stays answered for the next pass', async () => {
@@ -234,7 +244,7 @@ test('r4 MAT-4: a tap whose files read throws holds no other tap, and is told on
 test('r4 MAT-4: every tap that is not acted on is told, once per tap and reason, and again a day later', async () => {
   const cases = [
     [[target(), merge(), ['ask', 'A-1', ask({ answer: tapped({ channel: 'typed' }) })]], R, /not a tap/],
-    [[target(), merge(), ['ask', 'A-1', ask()]], rulesWith(), /not counted/],
+    [[target(), merge(), ['ask', 'A-1', ask({ risky: ['schema'] })]], R, /not counted/],
     [[target(), merge(), ['ask', 'A-1', ask({ card: 'T-9' })]], R, /no merge commit in the record/],
     [[target(), merge({ card: 'T-2' }), ['ask', 'A-1', ask()]], R, /no merged attempt matches/],
   ];

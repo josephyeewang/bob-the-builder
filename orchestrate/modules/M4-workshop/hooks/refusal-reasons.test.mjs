@@ -3,6 +3,7 @@
 // later line would still refuse for another reason.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { outboxKindsFor } from '../launcher/role-profiles.mjs';
 import { mkdirSync, writeFileSync, symlinkSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { Readable } from 'node:stream';
@@ -24,7 +25,7 @@ function world(rules = { production: { env_files: ['/nowhere/settings.production
   writeFileSync(snapshot, makeSnapshot(rules));
   return { root, outbox, copy, snapshot };
 }
-const args = (w, role = 'worker', extra = {}) => ({ role, outbox: w.outbox, snapshot: w.snapshot, kinds: role === 'lead' ? ['wish', 'ask', 'handoff'] : ['report'], copy: role === 'worker' ? w.copy : undefined, ...extra });
+const args = (w, role = 'worker', extra = {}) => ({ role, outbox: w.outbox, snapshot: w.snapshot, kinds: outboxKindsFor(role), copy: role === 'worker' ? w.copy : undefined, ...extra });
 const bash = (command, cwd = '/') => ({ tool_name: 'Bash', tool_input: { command }, cwd });
 const write = (file_path) => ({ tool_name: 'Write', tool_input: { file_path, content: 'x' } });
 

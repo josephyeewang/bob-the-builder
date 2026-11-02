@@ -7,7 +7,7 @@ import { OUTAGE_FACT } from './outage.mjs';
 import { retellWaits, WAIT_TELL_FACT } from './joe-waits.mjs';
 import { KEYS as K } from './keys.mjs';
 import { makeRules } from '../../shared/rules.mjs';
-import { change, rulesWith, recWith, seed, usageFact, undoEntries, filesOfCommits, T0, MIN, H, iso, withAlerts, setClock } from './fixtures.test-helper.mjs';
+import { change, rulesWith, realEngine, recWith, seed, usageFact, undoEntries, filesOfCommits, T0, MIN, H, iso, withAlerts, setClock } from './fixtures.test-helper.mjs';
 
 // Each step runs as the tick runs it: its alerts are queued, then sent once it is done (alerts.mjs, L47).
 const dispatcherPass = (a) => withAlerts(a.rec, a.now, a.alert ?? (() => {}), (alert) => dispatcherPass0({ ...a, alert }));
@@ -295,7 +295,9 @@ test('M8 / R-0b-67: unknown usage -> no Tier-1 start; Tier 2 still starts', asyn
   const w = world([card('C-1', { tier: 1 }), card('C-2')], { usage: null });
   const r = await w.pass();
   assert.deepEqual(r.started, ['C-2']);
-  assert.match(r.refused[0][1], /unknown/);
+  // M10 refuses a Tier-1 start with no usage reading before the band check is reached (L81: start_session is asked
+  // what M10 reads, and an unknown band carries no reading time).
+  assert.match(r.refused[0][1], /Tier 1 start needs a usage reading/);
 });
 
 test('R-0b-67: in amber Tier 1 goes first, and Tier 2 queues behind a Tier-1 card the caps hold', async () => {
@@ -1017,6 +1019,32 @@ test('r8 MAT-1: a held undo that starts before its alert is sent leaves no stale
   w.setCard('U-1', { state: 'ready' });
   await at(3, deny);
   assert.equal(told(), 1, sent.join(' | '));
+});
+
+// L81 sweep: start_session is asked what M10 reads. The real engine answers here, on its sample policy: a Tier-1 card
+// with a fresh usage reading and a Tier-2 card both start; the old question (the card alone) and a stale reading do not.
+test('L81: the real M10 engine starts a Tier-1 card on a fresh reading and a Tier-2 card; the old subject is refused', async () => {
+  let seen = [];
+  const real = (s) => { seen.push(s); return realEngine().may('start_session', s); };
+  const w = world([card('C-1', { tier: 1 }), card('C-2')]);
+  const r = await w.pass(0, { rules: rulesWith({}, { start_session: real }) });
+  assert.deepEqual(r.started.sort(), ['C-1', 'C-2'], JSON.stringify(r.refused));
+  const one = seen.find((s) => s.card.id === 'C-1');
+  assert.equal(one.role, 'worker');
+  assert.equal(one.tier, 1);
+  assert.equal(one.editing, true);
+  assert.equal(one.product, 'p1');
+  assert.equal(one.usage.read_at, iso(T0 - MIN));
+  assert.equal(seen.find((s) => s.card.id === 'C-2').tier, 2);
+  // The subject the pass used to send: the real engine refuses it.
+  assert.equal(realEngine().may('start_session', { card: { id: 'C-3' }, product: 'p1' }).decision, 'deny');
+  // A reading older than usage.stale_after_min holds Tier 1; Tier 2 needs none.
+  seen = [];
+  const w2 = world([card('C-1', { tier: 1 }), card('C-2')]);
+  w2.setUsage(GREEN, T0 - 6 * H);
+  const r2 = await w2.pass(0, { rules: rulesWith({}, { start_session: real }) });
+  assert.deepEqual(r2.started, ['C-2']);
+  assert.match(r2.refused.find(([id]) => id === 'C-1')[1], /usage reading/);
 });
 
 // L138 m4 and m1: the real outbox, the Record's clock ahead of the tick's. The first pass that puts the card on Joe

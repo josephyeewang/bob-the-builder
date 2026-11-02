@@ -506,8 +506,9 @@ export function openRecord({ root, product, ownerUid, rules, alert = () => {}, n
           const reason = `store error: ${String(storeErr?.message ?? storeErr).slice(0, 200)}; the file will be tried again`;
           const once = `store_error:${f.key}`;
           if (tx.seen(once)) return no(reason);
-          tx.markSeen(once, 'alerted');
-          return refuse({ ...ev, outbox: true }, reason);
+          // Marked only once the refusal's alert is delivered: a lost one is told again on the next try (L130).
+          if (store.refuse({ ...ev, outbox: true, reason }) !== false) tx.markSeen(once, 'alerted');
+          return no(reason);
         }
         if (r.ok) { tx.markSeen(f.key, 'applied'); return r; }
         tx.markSeen(f.key, 'refused');
@@ -569,10 +570,11 @@ export function openRecord({ root, product, ownerUid, rules, alert = () => {}, n
         const r = endClaim(tx, c, 'ready', 'claim_break', { session_id: claim.session_id, pid: claim.pid, why: mine.why });
         return { ok: true, rev: r.rev, seq: r.seq, broke: { session_id: claim.session_id, why: mine.why } };
       });
-      // Each break is told to the owner, once the write is down (L43).
+      // Each break is told to the owner, once the write is down (L43). The break is never redone, so nothing would ask
+      // again: an alert that isn't delivered is kept and sent again at the next transaction (L135 site C).
       if (!out.ok) return out;
-      store.alert({ type: 'claim_broken', card, session_id: out.broke.session_id, why: out.broke.why });
-      return { ok: true, rev: out.rev, seq: out.seq };
+      const told = store.alertOrKeep({ type: 'claim_broken', card, session_id: out.broke.session_id, why: out.broke.why });
+      return { ok: true, rev: out.rev, seq: out.seq, told };
     } catch (e) { return no(`store error: ${String(e?.message ?? e).slice(0, 200)}`); }
   }
 
@@ -606,7 +608,7 @@ export function openRecord({ root, product, ownerUid, rules, alert = () => {}, n
         for (const h of held) {
           // One alert per card per day (L38).
           const key = `alert:unlaunched_held:${h.card}:${iso(nowMs).slice(0, 10)}`;
-          if (!tx.seen(key)) { store.alert({ type: 'unlaunched_claim_held', ...h }); tx.markSeen(key, 'alerted'); }
+          if (!tx.seen(key) && store.alert({ type: 'unlaunched_claim_held', ...h }) !== false) tx.markSeen(key, 'alerted');   // marked only once delivered (L130 m15, L168 M-1)
         }
         const t = timeouts();
         const running = timeoutFor(t, 'card', 'running');
@@ -618,7 +620,7 @@ export function openRecord({ root, product, ownerUid, rules, alert = () => {}, n
         if (stale === undefined && tx.list('card').some((e) => e.doc.claim?.kind === 'tab' && (e.doc.state === 'claimed' || e.doc.state === 'running'))) {
           const key = `alert:heartbeat_stale_unreadable:${iso(nowMs).slice(0, 10)}`;
           const staleRaw = get('proposals.heartbeat_stale_min');
-          if (!tx.seen(key)) { store.alert({ type: 'heartbeat_stale_unreadable', key: 'proposals.heartbeat_stale_min', value: staleRaw === undefined ? null : String(staleRaw).slice(0, 40) }); tx.markSeen(key, 'alerted'); }
+          if (!tx.seen(key) && store.alert({ type: 'heartbeat_stale_unreadable', key: 'proposals.heartbeat_stale_min', value: staleRaw === undefined ? null : String(staleRaw).slice(0, 40) }) !== false) tx.markSeen(key, 'alerted');   // L168 M-1
         }
         const lapsed = [];
         for (const e of tx.list('card')) {

@@ -14,6 +14,7 @@
 
 import { botId } from './gather.mjs';
 import { goFreeOn, GO_FREE_KEY } from '../M9-record/ready.mjs';
+import { KEYS, need } from '../M11-dispatcher/keys.mjs';
 
 export const REQUIRED_KEYS = Object.freeze([
   'product_profile.required_checks',      // with none, every change is refused (refusals 1, 2)
@@ -26,8 +27,9 @@ export const OPTIONAL_KEYS = Object.freeze([
   'product_profile.checks_ignored',       // missing ignores none
   'effect_paths',                         // first_customer_visible.new_files_under; missing makes that fact unknown
   'rules.adopted',                        // the engine's own answer, not a key in the file
-  'timeouts.merging_open_max_min',        // missing: an open merge is never refused as interrupted, and the owner is
-                                          // told once per merge that the limit is missing (gate.mjs, L148 item 5)
+  KEYS.mergingOpenMaxMin,                 // missing: an open merge is never refused as interrupted, and the owner is
+                                          // told once per merge that the limit is missing (gate.mjs, L148 item 5);
+                                          // set, it must be a whole number of minutes, at least 1 (L164 m1)
 ]);
 
 export function policyProblems(rules, product) {
@@ -38,5 +40,8 @@ export function policyProblems(rules, product) {
   if (!Array.isArray(checks) || !checks.every((c) => typeof c === 'string' && c)) out.push('M6: product_profile.required_checks must be a list of check names');
   if (botId(get('product_profile.robot')) === null) out.push('M6: product_profile.robot.bot_user_id must be the robot\'s numeric id');
   if (!goFreeOn(rules, product, 'exact_reverse')) out.push(`M6: ${GO_FREE_KEY}.exact_reverse must be true at the first cutover`);
+  // Read as gate.mjs reads it (M11's need): 0 would call every open merge interrupted at once.
+  const limit = get('timeouts.merging_open_max_min');
+  if (limit !== undefined && limit !== null) { try { need(rules, KEYS.mergingOpenMaxMin, { product }); } catch { out.push(`M6: ${KEYS.mergingOpenMaxMin}, when set, must be a whole number of minutes, at least 1`); } }
   return out;
 }

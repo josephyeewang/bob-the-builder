@@ -459,10 +459,16 @@ test('a value parsePolicy accepts but the Dispatcher refuses is refused, naming 
     ['    split_after_compactions: 2\n', '    split_after_compactions: "2x"\n', 'context.worker.split_after_compactions'],
     ['      editing_per_product: 1\n', '      editing_per_product: 1.5\n', 'usage.bands.amber.editing_per_product'],
     ['      editing_per_mac: 2\n', '      editing_per_mac: 1.5\n', 'usage.bands.amber.editing_per_mac'],
-    ['    light: 1\n', '    light: 1.5\n', 'caps.per_state'],
-    ['    light: 1\n', '    light: abc\n', 'caps.per_state'],
     ['  per_state:\n    active: 1\n    away: 1\n    paused: 0\n    light: 1\n', '  per_state: 1\n', 'caps.per_state'],
   ];
+  // L156 m-2: every product state's cap, not only light's, so a check that skips a state is caught.
+  const block = /\n  per_state:\n((?:    \S+: .*\n)+)/.exec(FIRST)[1];
+  for (const state of PRODUCT_STATES) {
+    const line = block.split('\n').find((l) => l.startsWith(`    ${state}: `));
+    assert.ok(line, `the fixture caps ${state}`);
+    // The whole block is swapped, so the same line elsewhere in the fixture is never the one changed.
+    for (const bad of ['1.5', 'abc']) cases.push([`  per_state:\n${block}`, `  per_state:\n${block.replace(`${line}\n`, `    ${state}: ${bad}\n`)}`, 'caps.per_state']);
+  }
   for (const [from, to, key] of cases) {
     const text = swap(FIRST, from, to);
     assert.ok(rulesOf(text), `parsePolicy accepts ${to.trim()}`);

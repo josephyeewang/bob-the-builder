@@ -53,7 +53,8 @@ const locked = createSaveWork({ runLocked: (fn) => fn() }); // stands in for the
 const launchFor = (copy, id = 'L-1', at = T0 - 60 * MIN) => ['launch', id, { session_id: `S-${id}`, role: 'worker', card: 'C-1', head: 'a'.repeat(40), rev: 1, copy, launched_at: iso(at) }];
 function recFor(w, { attempt = {}, pr = {}, card = {}, copy = w.copy } = {}) {
   return recWith([
-    ['card', 'C-1', { state: 'merged', ...card }],
+    // A card names its product, as every real card does: the delete ask M2 makes carries it to count_approval (L81).
+    ['card', 'C-1', { state: 'merged', product: 'p1', ...card }],
     ...(copy ? [launchFor(copy)] : []),
     ...(attempt ? [['merge', 'M-1', { card: 'C-1', pr: 7, state: 'audited_ok', judged_head: w.H, merge_commit: w.M, changed_at: iso(T0 - 10 * MIN), ...attempt }]] : []),
     ...(pr ? [['fact', PR_FACT(7), { state: 'closed', merged: true, merge_commit_sha: w.M, head_sha: w.H, observed_at: iso(T0 - 5 * MIN), ...pr }]] : []),
@@ -247,7 +248,8 @@ test("M12 (e): a folder that is not this card's copy is never bundled, sealed or
   assert.ok(existsSync(w2.copy));
 });
 
-const COUNTED = rulesWith({}, { count_approval: { decision: 'allow', reason: 'counted' } });
+// The delete answer is counted by M10's real engine (fixtures.test-helper.mjs, L81).
+const COUNTED = rulesWith();
 
 test("the ask: one per copy; Joe's answer is acted on once; a refusal to ask keeps the copy with an alert", async () => {
   const w = world();
