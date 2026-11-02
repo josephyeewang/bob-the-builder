@@ -4,6 +4,7 @@
 
 import * as __bob_node_crypto from 'node:crypto';
 import * as __bob_node_fs from 'node:fs';
+import * as __bob_node_path from 'node:path';
 import * as __bob_node_url from 'node:url';
 
 const __bob_mods = new Map();
@@ -2452,6 +2453,9 @@ let KIND_SHAPE, kindAmong;
 __bob_i('orchestrate/modules/M4-workshop/hooks/outbox-kind.mjs', (m) => { KIND_SHAPE = m.KIND_SHAPE; kindAmong = m.kindAmong; });
 Object.defineProperties(__bob_e, {
   OUTBOX_KINDS: { get: () => OUTBOX_KINDS, enumerable: true },
+  NOT_A_RECORD: { get: () => NOT_A_RECORD, enumerable: true },
+  notARecord: { get: () => notARecord, enumerable: true },
+  isNotARecord: { get: () => isNotARecord, enumerable: true },
   OUTBOX_KIND_PATTERN: { get: () => OUTBOX_KIND_PATTERN, enumerable: true },
   SESSION_ID: { get: () => SESSION_ID, enumerable: true },
   OUTBOX_NAME: { get: () => OUTBOX_NAME, enumerable: true },
@@ -2472,30 +2476,60 @@ Object.defineProperties(__bob_e, {
 // Outbox file kinds (design v4 §14.1.2 "Outbox names", lead call L2, 0b-2 round 2 R2-M9, round 3 R3-M2): the file name
 // starts with the kind. M10's role-profile loader refuses a kind not listed here or not listed for that role.
 //   kind → { roles, entity, mode }: `create` makes a new document with no header; `move` needs the
-//   { entity, id, expectRev } header. `entity: null` means the Store Writer has no rule for the kind yet, so
-//   applyOutbox refuses it (fails closed) until the 0b-2 build gives it one.
+//   { entity, id, expectRev } header.
+// Every kind is one of three things (L137, L140, L151):
+//   - a record kind, with an entity. A kind stored as a report is inert: nothing acts on it unless a reader picks it up,
+//     so each one says who reads it. `reader: '<file>:<fn>[, <file>:<fn>]'` names a live reader. `pending: '<module> join
+//     item(s) <n>, lane <n>'` names the join item in that module's README that wires one. `latent: '<why>'` says why
+//     nothing writes it today. `kept: '<why>'` (only the three kinds written before L140) says storing it is the point.
+//     M9's outbox-kinds.test fails on a report kind with none of them (no kind is a black hole). A `pending` kind's
+//     join item must name the kind, and no text shown to Joe for it may promise an action nothing performs (L151).
+//   - not a record: `record: 'none'` with `handledBy`, the module that takes the file in itself. applyOutbox answers
+//     NOT_A_RECORD for it (see notARecord below), which is neither stored nor refused.
+//   - refused, `entity: null`, with `refused: '<module> join item(s) <n>, lane <n>'`, the join item that lands its
+//     consumer: the text Joe is shown for it promises an action (pause, resume…) that nothing performs yet, so the
+//     Record refuses it and Joe hears "Not filed" rather than a promise. It flips to a record kind only in the PR that
+//     lands that consumer (L151 M-1). A kind with none of the three is refused too, but the test fails on one.
+const NONE = (roles) => ({ roles, entity: null, mode: 'create', record: 'none', handledBy: 'M11-dispatcher/outbox-intake.mjs' });
 const OUTBOX_KINDS = Object.freeze(Object.fromEntries(Object.entries({
-  'report-': { roles: ['worker', 'reviewer', 'scout', 'writer', 'thinking', 'script'], entity: 'report', mode: 'create' },
-  'report-compact-': { roles: ['worker'], entity: 'report', mode: 'create' },
-  'state-compact-': { roles: ['front_door'], entity: 'report', mode: 'create' },
+  'report-': { roles: ['worker', 'reviewer', 'scout', 'writer', 'thinking', 'script'], entity: 'report', mode: 'create',
+    kept: 'a session\'s own account of its work, kept with the card for the history and for audits; nothing acts on it' },
+  'report-compact-': { roles: ['worker'], entity: 'report', mode: 'create',
+    kept: 'the worker\'s note at a compaction, kept for the history; nothing acts on it' },
+  'state-compact-': { roles: ['front_door'], entity: 'report', mode: 'create',
+    kept: 'the Front Door\'s note at a compaction, kept for the history; nothing acts on it' },
   'handoff-': { roles: ['lead', 'learning'], entity: 'handoff', mode: 'create' },
   'handin-': { roles: ['worker'], entity: 'card', mode: 'move' },   // the worker's running → in_review (0b-2 R3-M4)
   'lesson-': { roles: ['learning'], entity: 'lesson', mode: 'create' },
   'verdict-': { roles: ['reviewer', 'auditor'], entity: 'verdict', mode: 'move' },
   // Stored as an inert request document; only approvals turns it into an ask (0b-2 R3-M2), so it is never an `ask` here.
-  'ask-request-': { roles: ['front_door', 'incident'], entity: 'report', mode: 'create' },
-  'wish-': { roles: ['lead'], entity: null, mode: 'create' },
-  'think-': { roles: ['lead'], entity: null, mode: 'create' },
-  'scout-': { roles: ['lead'], entity: null, mode: 'create' },
-  'write-': { roles: ['lead'], entity: null, mode: 'create' },
+  'ask-request-': { roles: ['front_door', 'incident'], entity: 'report', mode: 'create',
+    reader: 'M2-approvals/research-ask.mjs:openResearchAsks, M2-approvals/undo-flag.mjs:openUndoFlags' },
+  'wish-': { roles: ['lead'], entity: 'report', mode: 'create', latent: 'no Lead prompt writes one yet; only the role lists (M10 lead profile, M4 DESIGN_PROFILES) name it' },
+  // A request for a read-only session: M11's intake starts it and records the hand-in itself (L140).
+  'think-': NONE(['lead']),
+  'scout-': NONE(['lead']),
+  'write-': NONE(['lead']),
   'roadmap-': { roles: ['lead'], entity: 'card', mode: 'move' },
-  'history-': { roles: ['lead'], entity: null, mode: 'create' },
-  'request-': { roles: ['front_door'], entity: null, mode: 'create' },
-  'state-': { roles: ['front_door'], entity: null, mode: 'create' },
-  'idea-': { roles: ['front_door', 'thinking'], entity: null, mode: 'create' },
-  'check-': { roles: ['learning'], entity: null, mode: 'create' },
-  'prune-': { roles: ['learning'], entity: null, mode: 'create' },
+  'history-': { roles: ['lead'], entity: 'report', mode: 'create', latent: 'no Lead prompt writes one yet, and M12 history.mjs answer() has no caller' },
+  // Refused until their consumers land (L151 M-1). The skill says "Filed: resume X / wrap up / rotate K" and "Filed:
+  // pause X / away X": stored, nothing would resume, rotate or pause anything, so the Record refuses them and Joe hears
+  // "Not filed". request- waits on the push (item 7), the rotate steps (8) and the mode requests (9); state- on
+  // approvals writing the product's state (item 13). Never a product write by an AI.
+  'request-': { roles: ['front_door'], entity: null, mode: 'create', refused: 'M1 join items 7, 8 and 9, lane 2' },
+  'state-': { roles: ['front_door'], entity: null, mode: 'create', refused: 'M1 join item 13, lane 2' },
+  // Stored is the whole act ("Filed: idea X"); the Lead reads it once its input file's idea-file section is fed.
+  'idea-': { roles: ['front_door', 'thinking'], entity: 'report', mode: 'create', pending: 'M3 join item 1, lane 2' },
+  'check-': { roles: ['learning'], entity: 'report', mode: 'create', latent: 'its only role, learning, is NEVER_STARTED (M10 roles.mjs)' },
+  'prune-': { roles: ['learning'], entity: 'report', mode: 'create', latent: 'its only role, learning, is NEVER_STARTED (M10 roles.mjs)' },
 }).map(([k, v]) => [k, Object.freeze({ ...v, roles: Object.freeze(v.roles) })])));
+// applyOutbox's answer for a `record: 'none'` kind: not stored, not refused, no diary line, no refusal, no alert.
+// The file is handledBy's; a caller tests for it with isNotARecord, never by matching the reason text.
+const NOT_A_RECORD = 'not_a_record';
+function notARecord(kind) {
+  return { ok: false, notARecord: true, reason: NOT_A_RECORD, kind, handledBy: OUTBOX_KINDS[kind]?.handledBy ?? null };
+}
+const isNotARecord = (r) => r?.ok === false && r?.notARecord === true && r?.reason === NOT_A_RECORD;
 const OUTBOX_KIND_PATTERN = KIND_SHAPE;
 // A session id: capped so an id made from it stays a legal file name (0b-2 audit round 6). record.mjs re-exports it.
 const SESSION_ID = /^[A-Za-z0-9-]{1,128}$/;
@@ -2529,16 +2563,20 @@ const STATES = Object.freeze({
 // ---- orchestrate/shared/record.mjs ----
 __bob_def('orchestrate/shared/record.mjs', ['orchestrate/shared/record-names.mjs', 'orchestrate/modules/M9-record/guard.mjs'], function (__bob_e, __bob_i) {
 const { createHash } = __bob_node_crypto;
-const { readFileSync } = __bob_node_fs;
-let CARD_KINDS, OUTBOX_KINDS, OUTBOX_KIND_PATTERN, OUTBOX_NAME, SESSION_ID, STATES, outboxKindOf, claimCheck, guardWrite;
-__bob_i('orchestrate/shared/record-names.mjs', (m) => { CARD_KINDS = m.CARD_KINDS; OUTBOX_KINDS = m.OUTBOX_KINDS; OUTBOX_KIND_PATTERN = m.OUTBOX_KIND_PATTERN; OUTBOX_NAME = m.OUTBOX_NAME; SESSION_ID = m.SESSION_ID; STATES = m.STATES; outboxKindOf = m.outboxKindOf; });
+const { lstatSync, readFileSync, realpathSync } = __bob_node_fs;
+const { basename, dirname, join } = __bob_node_path;
+let CARD_KINDS, NOT_A_RECORD, OUTBOX_KINDS, OUTBOX_KIND_PATTERN, OUTBOX_NAME, SESSION_ID, STATES, isNotARecord, notARecord, outboxKindOf, claimCheck, guardWrite;
+__bob_i('orchestrate/shared/record-names.mjs', (m) => { CARD_KINDS = m.CARD_KINDS; NOT_A_RECORD = m.NOT_A_RECORD; OUTBOX_KINDS = m.OUTBOX_KINDS; OUTBOX_KIND_PATTERN = m.OUTBOX_KIND_PATTERN; OUTBOX_NAME = m.OUTBOX_NAME; SESSION_ID = m.SESSION_ID; STATES = m.STATES; isNotARecord = m.isNotARecord; notARecord = m.notARecord; outboxKindOf = m.outboxKindOf; });
 __bob_i('orchestrate/modules/M9-record/guard.mjs', (m) => { claimCheck = m.claimCheck; guardWrite = m.guardWrite; });
 Object.defineProperties(__bob_e, {
   CARD_KINDS: { get: () => CARD_KINDS, enumerable: true },
+  NOT_A_RECORD: { get: () => NOT_A_RECORD, enumerable: true },
   OUTBOX_KINDS: { get: () => OUTBOX_KINDS, enumerable: true },
   OUTBOX_KIND_PATTERN: { get: () => OUTBOX_KIND_PATTERN, enumerable: true },
   OUTBOX_NAME: { get: () => OUTBOX_NAME, enumerable: true },
   STATES: { get: () => STATES, enumerable: true },
+  isNotARecord: { get: () => isNotARecord, enumerable: true },
+  notARecord: { get: () => notARecord, enumerable: true },
   outboxKindOf: { get: () => outboxKindOf, enumerable: true },
   outboxKind: { get: () => outboxKind, enumerable: true },
   SCRIPT_ACTORS: { get: () => SCRIPT_ACTORS, enumerable: true },
@@ -2559,6 +2597,7 @@ Object.defineProperties(__bob_e, {
   PAUSED_WAIT_WHAT: { get: () => PAUSED_WAIT_WHAT, enumerable: true },
   WAIT_WHO: { get: () => WAIT_WHO, enumerable: true },
   SESSION_ID: { get: () => SESSION_ID, enumerable: true },
+  outboxPlace: { get: () => outboxPlace, enumerable: true },
   isActor: { get: () => isActor, enumerable: true },
   makeRecord: { get: () => makeRecord, enumerable: true },
   releaseData: { get: () => releaseData, enumerable: true },
@@ -2687,6 +2726,37 @@ const OWNER_WAIT_WHO = 'joe';
 const PAUSED_WAIT_WHAT = 'paused';
 const WAIT_WHO = Object.freeze([OWNER_WAIT_WHO, 'usage', 'dependency', 'incident', 'date']);   // `date` also needs a reason
 
+// Where an outbox file is, checked before anything is read from its name (M9 readOutboxFile, and the stand-in below:
+// the one definition, L151 m7). → { ok: true, real } | { ok: false, reason }
+function outboxPlace({ outboxRoot, tag, file }) {
+  const no = (reason) => ({ ok: false, reason });
+  const given = typeof file === 'string' ? file : '';
+  if (!given) return no('no file');
+  if (!tag || typeof tag.role !== 'string' || typeof tag.sessionId !== 'string' || !SESSION_ID.test(tag.sessionId)) return no('bad outbox tag');
+  if (typeof outboxRoot !== 'string' || !outboxRoot) return no('no outbox root configured');
+  let real; let folder;
+  try { real = realpathSync(given); } catch { return no('file not found'); }
+  // The role and session folders themselves may not be links: a session folder linked to another's would hand that
+  // session's files in under this tag (0b-2 audit MIN-5).
+  try {
+    for (const p of [join(outboxRoot, tag.role), join(outboxRoot, tag.role, tag.sessionId)]) if (lstatSync(p).isSymbolicLink()) return no(`outbox folder ${basename(p)} is a link`);
+    folder = realpathSync(join(outboxRoot, tag.role, tag.sessionId));
+  } catch { return no(`no outbox folder for ${tag.role} ${tag.sessionId}`); }
+  if (dirname(real) !== folder) return no(`file is not directly inside the ${tag.role} outbox of session ${tag.sessionId}`);
+  // The name given must be the file itself, not a link to it: realpath follows links, O_NOFOLLOW checks the last part.
+  if (basename(given) !== basename(real)) return no('file is a link');
+  return { ok: true, real };
+}
+
+// The stand-in's check when it has no outbox root: the file exists and the name given is the file, not a link.
+function fileOnly(file) {
+  const given = typeof file === 'string' ? file : '';
+  if (!given) return { ok: false, reason: 'no file' };
+  let real;
+  try { real = realpathSync(given); } catch { return { ok: false, reason: 'file not found' }; }
+  return basename(given) === basename(real) ? { ok: true, real } : { ok: false, reason: 'file is a link' };
+}
+
 function isActor(a) {
   if (SCRIPT_ACTORS.includes(a)) return true;
   const m = /^([a-z_]+):(.+)$/s.exec(String(a));
@@ -2757,7 +2827,7 @@ function makeRecord(impl) {
 // The diary data of a release: who gave the card back and why (a reason is text, capped like any diary text).
 const releaseData = (by, reason) => ({ by, ...(typeof reason === 'string' && reason ? { reason: reason.slice(0, 500) } : {}) });
 
-function memoryRecord({ now = () => Date.now(), dead = null } = {}) {
+function memoryRecord({ outboxRoot, now = () => Date.now(), dead = null } = {}) {
   const docs = new Map();
   const lines = [];
   const key = (e, id) => `${e}/${id}`;
@@ -2796,7 +2866,12 @@ function memoryRecord({ now = () => Date.now(), dead = null } = {}) {
       return { ok: true, rev, seq };
     },
     applyOutbox(tag, file) {
-      // Like the real M9, a file whose name has no outbox kind is refused, never logged as handed in (L121).
+      // Like the real M9: first where the file is (missing, a link, the wrong folder; L151 m7), then its name. Given no
+      // root, the stand-in still refuses a missing file or a link, but cannot check the folder: M11's fixture keeps a
+      // session's files in <tmp>/<role>/ with no session folder (lane 2's to move to the real layout; then root is required).
+      const place = outboxRoot === undefined ? fileOnly(file) : outboxPlace({ outboxRoot, tag, file });
+      if (!place.ok) return refused(place.reason);
+      // A file whose name has no outbox kind is refused, never logged as handed in (L121).
       const name = String(file).split('/').pop();
       const kind = outboxKindOf(name);
       if (!kind) return refused(`no outbox kind for file name ${name.slice(0, 80)}`);
@@ -2804,6 +2879,7 @@ function memoryRecord({ now = () => Date.now(), dead = null } = {}) {
       // they come before the create path, so a kind refused by M9 is never stored here.
       const spec = OUTBOX_KINDS[kind];
       if (!spec.roles.includes(tag?.role)) return refused(`outbox kind ${kind} is not listed for ${tag?.role}`);
+      if (spec.record === 'none') return notARecord(kind);
       if (!spec.entity) return refused(`outbox kind ${kind} has no record rule yet`);
       const actor = `${tag.role}:${tag.sessionId}`;
       if (spec.mode === 'create') {

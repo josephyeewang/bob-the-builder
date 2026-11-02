@@ -14,14 +14,13 @@ import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import { ABS, LABEL, arr, plist, str } from '../modules/M4-workshop/launcher/review-daemons.mjs';
 import { NODE, aclProblem } from '../modules/M4-workshop/launcher/install-check.mjs';
-import { homeOf, watchRulesPath } from './layout.mjs';
+import { homeOf, isRepoName, watchRulesPath } from './layout.mjs';
 import { installPaths } from './install.mjs';
 import { readUser } from './users-folders.mjs';
 import { tokenPath } from './extras.mjs';
 
 export const WATCH_RUN = 'modules/M6-merge-gate/watch-run.mjs';
 export const WATCH_EVERY_S = 3600;
-export const REPO_RE = /^[A-Za-z0-9_-][A-Za-z0-9_.-]*\/[A-Za-z0-9_-][A-Za-z0-9_.-]*$/;
 const op = (text, run) => ({ text, run });
 const sha = (text) => createHash('sha256').update(Buffer.from(text, 'utf8')).digest('hex');
 const short = (h) => h.slice(0, 12);
@@ -58,9 +57,10 @@ function readRules(source, readSource) {
   return { text };
 }
 
-/** The one line to add to the root config: the repository and the fingerprint of the rules file named. Reads only. */
+/** The one line to add to the root config: the repository and the fingerprint of the rules file named. Reads only. It ends in a
+ *  comma, ready to go above another key; as the LAST key, drop that comma (the runbook's step strips it with sed). */
 export function watchConfigLine(cfg, { repo, source, readSource }) {
-  if (typeof repo !== 'string' || !REPO_RE.test(repo)) return { problem: '--repo must be owner/name' };
+  if (!isRepoName(repo)) return { problem: '--repo must be owner/name' };
   const r = readRules(source, readSource); if (r.problem) return r;
   return { line: `  "watch": { "repo": ${JSON.stringify(repo)}, "rulesSha256": "${sha(r.text)}" },` };
 }
@@ -79,14 +79,14 @@ export function planWatchRules(io, cfg, { source, readSource }) {
   let d; try { d = io.lstat(dir); } catch { return { ops: [], problems: [`${dir} is not there (run users-folders first)`] }; }
   if (d.isSymbolicLink() || !d.isDirectory() || d.uid !== orch.uid || (d.mode & 0o7777) !== 0o700) return { ops: [], problems: [`${dir} is not orchestrate's own 0700 folder (run users-folders first)`] };
   let same = false;
-  try { const s = io.lstat(dest); same = s.isFile() && !s.isSymbolicLink() && s.uid === io.rootUid && (s.mode & 0o7777) === 0o644 && sha(io.readRules(io.at(dest))) === got && aclProblem([io.at(dest)]) === null; } catch { /* not there */ }
+  try { const s = io.lstat(dest); same = s.isFile() && !s.isSymbolicLink() && s.uid === io.rootUid && s.gid === 0 && (s.mode & 0o7777) === 0o644 && sha(io.readRules(io.at(dest))) === got && aclProblem([io.at(dest)]) === null; } catch { /* not there */ }
   if (same) return { ops: [], problems: [] };
   return { ops: [op(`write ${dest}   (root:wheel 0644, hash ${short(got)}…)`, () => { io.unlink(dest); io.writeOwned(dest, text, { uid: io.rootUid, gid: 0, mode: 0o644 }); })], problems: [] };
 }
 
 /** Read only → [{ ok, what, why? }]; needs root to look (the folder is orchestrate's 0700). */
 export function checkWatchRules(io, cfg) {
-  const f = watchRulesPath(cfg); const what = `${f} is root's 0644 copy of the rules, and hashes to the config's value`;
+  const f = watchRulesPath(cfg); const what = `${f} is root:wheel's 0644 copy of the rules, and hashes to the config's value`;
   if (!cfg.watch) return [{ ok: true, what: 'the watch-only week is not set up (no "watch" entry in the config)' }];
   if (!cfg.watch.rulesSha256) return [{ ok: false, what, why: WATCH_NO_HASH }];
   if (io.euid() !== 0) return [{ ok: true, skip: true, what, why: 'the folder is orchestrate-only; needs root to look; run with sudo' }];
@@ -95,6 +95,7 @@ export function checkWatchRules(io, cfg) {
   if (st.isSymbolicLink() || !st.isFile()) why.push('is not a plain file');
   else {
     if (st.uid !== io.rootUid) why.push(`owner is uid ${st.uid}, not root`);
+    if (st.gid !== 0) why.push(`group is gid ${st.gid}, not wheel (0)`);
     if ((st.mode & 0o7777) !== 0o644) why.push(`mode is ${(st.mode & 0o7777).toString(8)}, want 644`);
     const acl = aclProblem([io.at(f)]); if (acl) why.push(acl);
     let h = null; try { h = sha(io.readRules(io.at(f))); } catch (e) { why.push(`could not be read (${e.message})`); }
