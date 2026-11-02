@@ -162,13 +162,16 @@ export function makeEngine({ products, rulesState, productState, running, rolesD
     const floor = STATE_FLOOR[state];
     const fileRule = at(pol, `product_state_rules.${state}.start`);
     if (!['within_caps', 'editing_cap_1', 'none'].includes(fileRule)) return deny(`product_state_rules.${state}.start is not a known rule`);
-    if (!floor.start || fileRule === 'none') return deny(`product is ${state}: no starts`);
 
-    // An undo (an exact-reverse card) is never refused by the editing caps, a cap of 0 included: safety acts are never
-    // held (L31, L199). Its own limit instead: at most one undo running per product. A running undo still counts
-    // toward the caps for every other editing start (the running port counts it). M11 gate.mjs keeps the same rule.
-    // The card's kind is only the claim; the Dispatcher checks it is an exact reverse before the start (L40).
+    // An undo (an exact-reverse card) is never refused by the product's state or the editing caps, a cap of 0 included:
+    // safety acts are never held, and pausing is often the moment Joe wants to undo (L31, L199, L210). This is the rule
+    // push_branch and merge already keep: an exact reverse passes the paused floor and the file's state rule (here
+    // `start: none`, as merge passes `undo_only`). Its own limit instead: at most one undo running per product. A
+    // running undo still counts toward the caps for every other editing start (the running port counts it). M11
+    // gate.mjs keeps the same rule. The card's kind is only the claim; the Dispatcher checks it is an exact reverse
+    // before the start (L40).
     const undo = editing && s.card?.kind === 'exact_reverse';
+    if (!undo && (!floor.start || fileRule === 'none')) return deny(`product is ${state}: no starts`);
     if (undo && count({ product, undo: true }) >= 1) return deny(`an undo is already running for ${product} (one at a time)`);
 
     // Caps (MAT-5, MAT-10). Editing starts only; an undo is not capped (above).

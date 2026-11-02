@@ -7,7 +7,7 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { makeRules, HOLD_REASONS } from '../../shared/rules.mjs';
 import { makeEngine } from './engine.mjs';
-import { parsePolicy } from './policy.mjs';
+import { parsePolicy, PRODUCT_STATES } from './policy.mjs';
 import { MAX_FILES } from './classify.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -143,6 +143,60 @@ test('start_session: an undo is never refused by the editing caps; one undo per 
   assert.equal(start(busy, { ...undo, editing: false, role: 'auditor' }).decision, 'allow', 'the one-undo limit holds undo workers only');
   const broken = world({ policies: { app: zeroCap }, run: { undo: { app: Number.NaN } } });
   assert.equal(start(broken, undo).decision, 'deny', 'an unknown undo count is a deny');
+});
+
+test('start_session while paused: an exact-reverse undo starts, nothing else does; still one undo at a time (L210)', () => {
+  const undo = { card: { id: 'C-undo', kind: 'exact_reverse' } };
+  const w = world({ states: { app: { state: 'paused' } } });
+  assert.equal(start(w, undo).decision, 'allow', 'paused + an exact_reverse card → allowed');
+  assert.match(start(w).reason, /product is paused: no starts/, 'paused + a normal editing worker → refused');
+  assert.match(start(w, { card: { id: 'C-2', kind: 'research_copy' } }).reason, /paused/, 'only the exact-reverse kind passes');
+  assert.match(start(w, { ...undo, editing: false, role: 'auditor' }).reason, /paused/, 'a read-only start naming the undo card is not the undo');
+  w.run.undo = { app: 1 }; w.run.app = 1; w.run.mac = 1;
+  assert.match(start(w, undo).reason, /an undo is already running for app/, 'paused + a second undo while one runs → refused');
+  // A missing or unknown state reads as paused, so the undo starts there too, as push and merge let it through.
+  const none = world({ states: { app: null } });
+  assert.equal(start(none, undo).decision, 'allow');
+  // The file's state rule: `none` holds every start but the undo; a rule it doesn't know still refuses the undo.
+  const noStarts = world({ policies: { app: pol(set('', 'start: within_caps', 'start: none')) } });
+  assert.equal(start(noStarts, undo).decision, 'allow');
+  assert.match(start(noStarts).reason, /no starts/);
+  const unknown = world({ states: { app: { state: 'paused' } }, policies: { app: pol(set('', 'start: none', 'start: sometimes')) } });
+  assert.match(start(unknown, undo).reason, /not a known rule/);
+  // Every other state keeps its answer: the undo in active, away and light starts as before.
+  for (const state of ['active', 'away', 'light']) assert.equal(start(world({ states: { app: { state } } }), undo).decision, 'allow', state);
+});
+
+// L217: the start's state answer is not a copy of push and merge's; it is read from them. For every state the
+// rules file knows (plus a missing and an unknown one) and every state rule, push_branch and the docs-lane merge
+// are asked first, and the start must say what they say: an undo starts wherever both let an exact reverse through,
+// and a normal edit starts only where both let a normal change through (`start: none` pairs with `undo_only`).
+// If push or merge change, this test changes with them; a start that widens on its own goes red.
+test('start_session takes its state answer from push_branch and merge, in every state and state rule (L210, L217)', () => {
+  const PAIRS = [['within_caps', 'rules'], ['within_caps', 'tier1_hours_only'], ['editing_cap_1', 'rules'], ['none', 'undo_only']];
+  const base = pol();
+  const undoCard = { id: 'C-undo', rows: ['R-1'], doc: { lane: 'docs' }, kind: 'exact_reverse' };
+  const normalCard = { id: 'C-1', rows: ['R-1'], doc: { lane: 'docs' } };
+  const reverseOf = { kind: 'exact_reverse', reverses: R, exact_reverse_ok: true, reversed_audit: 'success' };
+  let checked = 0;
+  for (const state of [...PRODUCT_STATES, null, 'unknown-state']) {
+    // A missing or unknown state reads as paused, so its rules are paused's.
+    const ruleState = PRODUCT_STATES.includes(state) ? state : 'paused';
+    for (const [startRule, mergeRule] of PAIRS) {
+      const policy = { ...base, product_state_rules: { ...base.product_state_rules, [ruleState]: { start: startRule, tier1_merge: mergeRule } } };
+      const w = world({ policies: { app: policy }, states: { app: state === null ? null : { state } }, deep: false });
+      const ok = (d) => d.decision === 'allow';
+      const docsMerge = (extra = {}) => ok(w.rules.may('merge', { product: 'app', card: { id: 'C-1' }, files: [file('docs/research/a.md')], declared_tier: 2, labels: [], ...extra }));
+      // Out of the docs lane, so only the exact-reverse exception can let the push through.
+      const pushUndo = ok(w.rules.may('push_branch', { product: 'app', card: undoCard, reverses_files: ['app/a.ts'], files: [file('app/a.ts')] }));
+      const pushNormal = ok(w.rules.may('push_branch', { product: 'app', card: normalCard, files: [file('docs/research/a.md')] }));
+      const where = `${state} start:${startRule} tier1_merge:${mergeRule}`;
+      assert.equal(ok(start(w, { card: { id: 'C-undo', kind: 'exact_reverse' } })), pushUndo && docsMerge(reverseOf), `undo, ${where}`);
+      assert.equal(ok(start(w)), pushNormal && docsMerge(), `normal edit, ${where}`);
+      checked++;
+    }
+  }
+  assert.equal(checked, (PRODUCT_STATES.length + 2) * PAIRS.length);
 });
 
 test('start_session: Tier 1 needs a fresh usage reading (A8)', () => {
