@@ -353,6 +353,14 @@ expect "no as-of date with --require-asof -> FAIL" 1 "carries no \"Status as of"
 expect "coherence-check.sh runs it on the root file (class 8)" 1 "\[8\] Root instruction file" -- \
   bash -c "printf -- '- Gone: docs/gone.md\n' >> '$D/AGENTS.md'; bash '$HERE/coherence-check.sh' '$D/docs'"
 expect "Bob's own root files pass" 0 "doc-pointers-check: OK" -- node "$DP" --root "$HERE/.."
+expect "coherence-check.sh names the failing section on the RESULT line" 1 "hard problems found in: \[8\] root-file pointers \\(exit 1\\)" -- \
+  bash "$HERE/coherence-check.sh" "$D/docs"
+CR="$TMP/crash"; mkdir -p "$CR/docs"; printf '# Notes\n' > "$CR/docs/a.md"; cp "$HERE/coherence-check.sh" "$CR/"; printf 'process.exit(3);\n' > "$CR/doc-pointers-check.mjs"
+expect "coherence-check.sh: a crash in doc-pointers-check is named, never a bare ✗" 1 "exited 3 without a FAIL line" -- \
+  bash "$CR/coherence-check.sh" "$CR/docs"
+DC="$TMP/dotclaude"; mkdir -p "$DC/.claude/worktrees/x/deep"; printf 'x\n' > "$DC/.claude/worktrees/x/deep/only.md"
+printf '# Project\n- Notes: `deep/only.md`\n' > "$DC/AGENTS.md"
+expect "a pointer found only in a .claude/ worktree copy -> FAIL (L164 m5)" 1 "deep/only.md" -- node "$DP" --root "$DC"
 HL="$TMP/headlog"; mkdir -p "$HL"
 printf '# Decision Log\n\n### D-001: a\n\n### D-002: b\n\n### D-002: c\n' > "$HL/decision-log.md"
 expect "coherence-check.sh: a duplicate ### D-NNN heading -> FAIL" 1 "DUPLICATE IDs: D-002" -- bash "$HERE/coherence-check.sh" "$HL"

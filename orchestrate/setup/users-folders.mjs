@@ -321,8 +321,13 @@ export function check(io, cfg, { alsoKnown = [] } = {}) {
   item(above === null, `folders above ${cfg.base} are root's alone, no links, no access lists`, above);
   { const b = baseProblem(io, cfg); item(!b.problem && !b.fresh, `${cfg.base} was made by this setup (root's ${BASE_MARKER} note is in it)`, b.problem ?? 'the base does not exist'); }
   const tableRows = folderTable(cfg);
-  const known = new Set([...tableRows.map((r) => r.path), baseMarkerPath(cfg), ...alsoKnown]);
-  for (const row of tableRows) {
+  folderChecks(io, tableRows, ids, item, { known: new Set([...tableRows.map((r) => r.path), baseMarkerPath(cfg), ...alsoKnown]) });
+  return out;
+}
+
+/** The owner, group, mode and exact access list of each row's folder → item(ok, what, why). Read only. `known`: the paths a root-owned folder may hold. */
+export function folderChecks(io, rows, ids, item, { known = new Set(rows.map((r) => r.path)) } = {}) {
+  for (const row of rows) {
     const what = `${row.path} (${row.owner}, ${modeText(row.mode)})`;
     let st; try { st = io.lstat(row.path); } catch { item(false, what, 'missing'); continue; }
     if (st.isSymbolicLink()) { item(false, what, 'is a link'); continue; }
@@ -353,5 +358,4 @@ export function check(io, cfg, { alsoKnown = [] } = {}) {
     }
     item(why.length === 0, what, why.join('; '));
   }
-  return out;
 }

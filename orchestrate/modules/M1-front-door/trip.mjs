@@ -133,8 +133,9 @@ export function buildTripBrief({ products, until = null, tz: tzIn = null, stateI
   const asks = rec.list('ask').filter(({ doc }) => doc && OPEN_ASK.includes(doc.state) && activeKind(doc.kind));
   const askIds = new Set(asks.map((a) => a.id));
   let goes; let listError = null;
-  // A card waits on the owner by M9's own name for it (L79); a go or ask doc says 'owner'.
-  const onOwner = (i) => String(i.who ?? '').toLowerCase() === (i.entity === 'card' ? OWNER_WAIT_WHO : 'owner');
+  // A card waits on the owner by M9's own name for it (L79), and so does a research ask (L84 m-3); a go or other ask says
+  // 'owner'.
+  const onOwner = (i) => { const who = String(i.who ?? '').toLowerCase(); return who === (i.entity === 'card' ? OWNER_WAIT_WHO : 'owner') || (i.entity === 'ask' && who === OWNER_WAIT_WHO); };
   // A card parked for a paused product resumes by itself on unpause: shown apart, not as a go owed (L85 m-5).
   const parked = (i) => !i.record_error && i.entity === 'card' && i.what === PAUSED_WAIT_WHAT;
   let paused = [];
@@ -146,7 +147,8 @@ export function buildTripBrief({ products, until = null, tz: tzIn = null, stateI
   // A kind whose M9 schema lets no writer set a `link` (a card) is named, not linked (L79); a kind that may carry one
   // but lacks it is a record error.
   const mayLink = (entity) => Object.keys(WRITERS[entity] ?? {}).some((actor) => [true, false].some((create) => { const f = fieldsAllowed(entity, actor, { create }); return f === '*' || Boolean(f?.has?.('link')); }));
-  const link = (doc, what, entity, id) => (doc?.link ? doc.link : !mayLink(entity) ? `${entity} ${id}` : `RECORD ERROR: no ${what} link in the record`);
+  // A research ask has nothing to link to (its line says what to run), so it is named too.
+  const link = (doc, what, entity, id) => (doc?.link ? doc.link : !mayLink(entity) || (entity === 'ask' && !activeKind(doc?.kind)) ? `${entity} ${id}` : `RECORD ERROR: no ${what} link in the record`);
   out.push('', `Waiting on your go (${listError ? 'unknown' : goes.length}):`);
   if (listError) out.push(`- ${listError}`);
   for (const i of goes) {

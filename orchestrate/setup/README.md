@@ -29,7 +29,7 @@ A config that does not parse is reported as "not valid JSON": the file's own tex
 |---|---|---|
 | `node setup.mjs users-folders --config <file> --dry-run` | prints every step it would take; changes nothing (`--config` names your editable copy; there is no `--config` under `sudo`) | no |
 | `sudo /usr/local/bin/node setup.mjs users-folders` | makes the three users (ids 600-699, all different; hidden, shell `/usr/bin/false`, password `*`, own group with no members, never admin), then the folders (owner, group, exact mode, exact access list), then runs `check` | yes |
-| `node setup.mjs check --config <file>` | read only: `PASS`, `FAIL` or `NEEDS ROOT` per item; exit 1 on any FAIL, exit 3 if all that could be seen passed but some items need root. Before setup it lists 41 FAILs of 45 items for one product (about 5 more for each extra product), which is expected | no |
+| `node setup.mjs check --config <file>` | read only: `PASS`, `FAIL` or `NEEDS ROOT` per item; exit 1 on any FAIL, exit 3 if all that could be seen passed but some items need root. Before setup it lists 42 FAILs of 46 items for one product (about 5 more for each extra product), which is expected | no |
 | `sudo /usr/local/bin/node setup.mjs check` | the same with nothing hidden: the sudo-rule and password-hash items can be read | yes |
 | `sudo /usr/local/bin/node setup.mjs proofs` | runs, as the owner's user, the "cannot" proofs: the record, hooks, settings, launcher, lead-main and claude-code copies, the outbox folders cannot be written and the robot keys cannot be read (two controls first) | yes |
 
@@ -95,3 +95,32 @@ root folder prefix, an in-memory `dscl`/`dseditgroup`, owners kept in a table) a
 the real tool refuses (a `dscl` write without root, a bad path, a missing record, the password hash for anyone but root).
 The last tests run the real read-only tools on this Mac (`dscl -read`, `dseditgroup -o checkmember`, `stat`, `ls -led`).
 Each `PLANT` test breaks one clause and names the check that catches it.
+
+## Part 3 — taps, proposals, git trust, the account job reload, the watch-only token
+
+| Command | What it does | Root? |
+|---|---|---|
+| `sudo /usr/local/bin/node setup.mjs users-folders` | now also makes `<base>/owner-taps` (the owner's, 0755, no access list; runner setting `ownerTaps`) | yes |
+| `sudo /usr/local/bin/node setup.mjs proposals` | makes `proposalsParent` (default `/Users/Shared/orchestrate-proposals`: root's, **0711**) and one folder per product (the owner's, **0700**, one access-list entry for `orchestrate`: list/search/read, inherited). Runs behind the same folder-chain wall as every root command; the folder the parent sits in must be root's and either written by no one else or sticky (as the Mac's own `/Users/Shared` is), and the parent itself root's and not writable by others unless sticky. A file moved in from elsewhere may not be readable by `orchestrate` (it keeps its old owner and mode): copy it in instead. | yes |
+| `/usr/local/bin/node setup.mjs check-proposals` | read only: owner, mode, exact access list; with `sudo` also: the owner can write, `orchestrate` reads and cannot write, `review` cannot read | no (sudo for proofs) |
+| `sudo /usr/local/bin/node setup.mjs safe-directory` / `check-safe-directory` | runs `git config --global --add safe.directory <base>/mirror` **as the owner** (root never writes into their home). It reads what their git trusts from every settings file it reads (system, global, anything they include), and refuses if any entry has a `*` in it (`*`, `/path/*`): remove the line yourself where it lives. The check FAILs on a `*` even next to the mirror | yes |
+| `sudo /usr/local/bin/node setup.mjs daemons reload-account` | if the `review-account` job is loaded: rewrite its file (carries `--install <copy>`), unload, load, record, and read back that it is loaded. Never loaded: nothing to do. If an earlier reload stopped after the unload (not loaded, but this tool had loaded it): it says plainly that nothing is running the job and to run `daemons load`, never "done" | yes |
+| `sudo /usr/local/bin/node setup.mjs prove-token` | proves the token is watch-only against the repository the config names (`"watch": { "repo": "owner/name" }`; never typed on the command line). The token file is looked at first without following links (orchestrate's own plain 0600 file), then read **as orchestrate** (`sudo -H -u orchestrate cat`). Then: the repository is private and not archived; listing open pull requests works; a no-op change to an open one is refused with GitHub's "this token may not" answer (a rate limit or any other 403 is not proof). Output has only fixed sentences and numbers, never the token | yes (reads the file as orchestrate) |
+| `sudo /usr/local/bin/node setup.mjs token` / `check-token` | types the watch-only token hidden into `<base>/keys/watch-only-token` (orchestrate's, 0600); the check reads owner, mode and size only. The old file name is removed with a plain unlink, then the new file is made exclusively and its owner and mode are set on the same open handle before the token is written (a link or hard link put in the name cannot redirect it) | yes |
+
+Why the proposals parent is 0711 root's and the folders use an access list, not a group: the owner's own group (`staff`) holds
+every ordinary user of the Mac. The parent sits in a folder everyone can write into, so the base wall cannot be used; instead
+root makes it itself, refuses one that already exists and is not root's, and a first step re-checks it. Open for the lead:
+the proposals deny rule (R-0b-128 item 4) and the read-back's "block in rendered settings" wait for that row.
+
+### Where the watch-only token lives (proposal, the lead decides)
+The three users never log in, so none has a login Keychain. (Lead-approved: a file.) Options: (a) **a file in `keys/`** — orchestrate's 0600 file in
+its own 0700 folder; the job reads it directly and passes it to GitHub as a header, never as an argument. (b) a file Keychain
+for orchestrate — needs an unlock password, which would have to sit in another file next to it: same protection, more
+moving parts, and `security add-generic-password -w <value>` would show the token in the process list. (c) the owner's
+Keychain — the owner's AI sessions (workers) could reach it: refused. **Recommended: (a).** Built as (a).
+The token text is never printed, logged, put in a step's text or an error, or given to a program as an argument; the
+tests assert that over the output, the step list, the Mac's call log and every program call.
+
+Checked on macOS 27.0.1 (these notes expire with an OS upgrade): `dscl . -read` of a missing key prints `No such key` on
+stderr with exit 0; opening a link with `O_NOFOLLOW|O_DIRECTORY` gives `ENOTDIR` (Linux: `ELOOP`).

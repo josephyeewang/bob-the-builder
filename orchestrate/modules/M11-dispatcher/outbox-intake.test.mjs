@@ -111,7 +111,7 @@ test("R-0b-58: the thinking session's report- is applied; it may hand in nothing
   writeFileSync(join(ob, 'verdict-q1.md'), 'approve');
   const rec = recWith();
   const s = { sessionId: 'T-1', role: 'reviewer', outbox: ob, uid: UID, request: 'think', card: undefined };
-  assert.deepEqual(kindsFor(s), ['report']);
+  assert.deepEqual(kindsFor(s), ['report-']);
   const out = await intakePass({ rec, sessions: [s], ...w.ports });
   assert.equal(out.find((r) => r.name === 'report-q1.md').applied, true);
   assert.ok(out.find((r) => r.name === 'verdict-q1.md').refused);
@@ -319,8 +319,8 @@ test('L44 planted: a verdict file in a worker\'s outbox is refused at intake and
   assert.equal(applies, 0);
   assert.equal(rec.list('verdict').length, 0);
   assert.equal(w.calls.alerts.length, 1);
-  assert.deepEqual(kindsFor({ role: 'worker' }).includes('verdict'), false);
-  assert.deepEqual(kindsFor({ role: 'reviewer' }), ['verdict']);
+  assert.deepEqual(kindsFor({ role: 'worker' }).includes('verdict-'), false);
+  assert.deepEqual(kindsFor({ role: 'reviewer' }), ['report-', 'verdict-']);
 });
 
 // L138 m1, m3, m8: the real outbox, with the Record's clock ahead of the tick's. `queueOk()` false is an outbox that

@@ -8,6 +8,7 @@
 //
 // Layout under `root` (a required argument; the real path is the owner's launcher setting):
 //   docs/<entity>/<id>.json   diary.jsonl   lock   break.lock   tmp/   quarantine/   refusals.jsonl   outbox-seen.jsonl
+//   unsent-alerts.jsonl (alerts not yet delivered, sent again at each transaction)
 // Folders are 755 and files 644, set with chmod whatever the umask.
 //
 // Write path (tx.commit): lock → temp file + fsync → nonce re-check → diary line + fsync (commit point) → rename →
@@ -93,12 +94,16 @@ export function openStore({ root, ownerUid, alert = () => {}, now = () => Date.n
   }
 
   const P = { docs: join(root, 'docs'), tmp: join(root, 'tmp'), quarantine: join(root, 'quarantine'), diary: join(root, 'diary.jsonl'),
-    refusals: join(root, 'refusals.jsonl'), seen: join(root, 'outbox-seen.jsonl') };
+    refusals: join(root, 'refusals.jsonl'), seen: join(root, 'outbox-seen.jsonl'), unsent: join(root, 'unsent-alerts.jsonl') };
   // The store's own names must be what they should be before anything touches them: a link, a FIFO or the wrong kind of
   // thing in their place stops the store with an alert naming it, and nothing is read, written, moved or deleted through it
   // (0b-2 audit round 9 M1-M4; one check for the whole store folder, after rounds 6-8 patched it one name at a time).
   const told = new Set();
-  const tellOnce = (event, key = event.reason) => { const k = `${event.type}:${key}`; if (told.has(k)) return; told.add(k); try { alert({ at: new Date(now()).toISOString(), ...event }); } catch { /* never stops the store */ } };
+  // An alert's answer is passed back (L130): false, or a throw, means it was not delivered. A throw never stops the store.
+  const stamp = (event) => ({ at: new Date(now()).toISOString(), ...event });
+  const send = (event) => { try { return alert(event) !== false; } catch { return false; } };
+  // Told once per process, and only once delivered: a lost one is sent again the next time it comes up (L135).
+  const tellOnce = (event, key = event.reason) => { const k = `${event.type}:${key}`; if (told.has(k)) return true; if (!send(stamp(event))) return false; told.add(k); return true; };
   const stopFor = (type, reason, key = reason) => { tellOnce({ type, reason }, key); return Object.assign(new Error(`${reason}; writes stop until the owner fixes it`), { store: true }); };
   function layoutProblem() {
     const kind = (p) => {
@@ -109,7 +114,7 @@ export function openStore({ root, ownerUid, alert = () => {}, now = () => Date.n
     const r = kind(root);
     if (r !== 'folder' && r !== 'none') return `the store folder ${root} is ${r}`;
     for (const d of ['docs', 'tmp', 'quarantine']) { const k = kind(join(root, d)); if (k !== 'folder' && k !== 'none') return `the store's ${d}/ is ${k}, not a folder`; }
-    for (const f of ['diary.jsonl', 'refusals.jsonl', 'outbox-seen.jsonl']) { const k = kind(join(root, f)); if (k !== 'file' && k !== 'none') return `the store's ${f} is ${k}, not a plain file`; }
+    for (const f of ['diary.jsonl', 'refusals.jsonl', 'outbox-seen.jsonl', 'unsent-alerts.jsonl']) { const k = kind(join(root, f)); if (k !== 'file' && k !== 'none') return `the store's ${f} is ${k}, not a plain file`; }
     // The lock files are made by a hard link from a temp name (lock.mjs createWhole), so a second name is normal for a moment
     // and stays if the maker was killed; they are never written in place, so only a link or the wrong kind is refused (round 11 M1, M2).
     for (const f of ['lock', 'break.lock']) { const k = kind(join(root, f)); if (k !== 'file' && k !== 'none' && !/hard link/.test(k)) return `the store's ${f} is ${k}, not a plain file`; }
@@ -117,10 +122,38 @@ export function openStore({ root, ownerUid, alert = () => {}, now = () => Date.n
   }
   { const bad = layoutProblem(); if (bad) throw stopFor('store_layout', bad); }
   for (const d of [root, P.docs, P.tmp, P.quarantine]) mkdir755(d);
-  for (const f of [P.diary, P.refusals, P.seen]) { if (!existsSync(f)) writeFileSync(f, '', { mode: 0o644, flag: 'a' }); chmodSync(f, 0o644); }
+  for (const f of [P.diary, P.refusals, P.seen, P.unsent]) { if (!existsSync(f)) writeFileSync(f, '', { mode: 0o644, flag: 'a' }); chmodSync(f, 0o644); }
 
   const lock = makeLock({ dir: root, host, timeoutMs: lockTimeoutMs, probe, disabled: testNoLock });
-  const say = (event) => { try { alert({ at: new Date(now()).toISOString(), ...event }); } catch { /* the sink never stops a write */ } };
+  const say = (event) => send(stamp(event));
+  // An alert about a step that is done and never redone (a file moved to quarantine, a torn line cut, a claim broken):
+  // nothing would ask again, so one that isn't delivered is kept in unsent-alerts.jsonl and sent again at the start of
+  // every later transaction until it is (L135 sites C, D, E; the L133 shape). The file is only ever appended to, one line
+  // when an alert is kept and one when it is delivered, so a keep from outside the lock never races a resend. If even the
+  // append fails, this process holds the alert in memory and resends it the same way.
+  const unsentHere = [];
+  const keep = (e) => {
+    const x = { id: randomBytes(8).toString('hex'), outcome: 'unsent', event: e };
+    try { appendPlain(P.unsent, `${JSON.stringify(x)}\n`); } catch { unsentHere.push(x); }
+  };
+  const sayOrKeep = (event) => { const e = stamp(event); if (send(e)) return true; keep(e); return false; };
+  function resend() {
+    let text = '';
+    try { text = readPlain(P.unsent); } catch { /* the layout check names a bad file; the ones held here are still tried */ }
+    const done = new Set();
+    const waiting = [];
+    for (const l of text.split('\n')) {
+      let x; try { x = JSON.parse(l); } catch { continue; }
+      if (x?.outcome === 'sent' && typeof x.id === 'string') done.add(x.id);
+      else if (x?.outcome === 'unsent' && typeof x.id === 'string' && x.event && typeof x.event === 'object') waiting.push(x);
+    }
+    for (const x of waiting) {
+      if (done.has(x.id) || !send({ ...x.event, resent: true })) continue;
+      done.add(x.id);
+      try { appendPlain(P.unsent, `${JSON.stringify({ id: x.id, outcome: 'sent', at: new Date(now()).toISOString() })}\n`); } catch { /* sent twice, never lost */ }
+    }
+    for (let i = unsentHere.length - 1; i >= 0; i--) if (send({ ...unsentHere[i].event, resent: true })) unsentHere.splice(i, 1);
+  }
   // Every path from an id goes through here, so an id like ../../x can never name a file outside the store (round 5 m-2).
   const docPath = (entity, id) => {
     if (!safeName(entity) || !safeName(id)) throw new Error(`bad entity or id: ${String(id).slice(0, 80)}`);
@@ -206,7 +239,7 @@ export function openStore({ root, ownerUid, alert = () => {}, now = () => Date.n
     const q = join(P.quarantine, `${tidy(entity)}-${tidy(id)}-${sha256(`${entity}/${id}`).slice(0, 12)}-${now()}-${randomBytes(6).toString('hex')}.json`);
     let moved = null;
     if (path) { try { renameSync(path, q); moved = q; } catch (e) { if (e?.code !== 'ENOENT') throw e; } }
-    say({ type: 'tamper', entity, id, reason: why, quarantined: moved });
+    sayOrKeep({ type: 'tamper', entity, id, reason: why, quarantined: moved });
     return moved;
   }
   // docs/<entity> must be a real folder: a link there would send reads, renames and restores outside the store (round 8 M2).
@@ -273,7 +306,7 @@ export function openStore({ root, ownerUid, alert = () => {}, now = () => Date.n
       const fd = plainFd(P.diary, constants.O_RDWR);
       try { ftruncateSync(fd, keep); fsyncSync(fd); } finally { closeSync(fd); }
       report.cut = all.length - keep;
-      say({ type: 'diary_torn_line_cut', bytes: report.cut });
+      sayOrKeep({ type: 'diary_torn_line_cut', bytes: report.cut });
     }
     // 2. Read it all again; seq gaps and broken chains mark the store damaged.
     reset();
@@ -336,6 +369,7 @@ export function openStore({ root, ownerUid, alert = () => {}, now = () => Date.n
     const release = () => { if (!released) { released = true; lock.release(nonce); } };
     try {
       fault('locked');
+      resend();
       if (!recovered || broke) { lastRecovery = recoverOrStop(); recovered = true; } else {
         refresh();
         // Bytes after the last whole line, seen under the lock, are a torn line another writer left when it died; cut it
@@ -459,8 +493,9 @@ export function openStore({ root, ownerUid, alert = () => {}, now = () => Date.n
     refuse(event) {
       const line = { at: new Date(now()).toISOString(), ...event };
       try { appendPlain(P.refusals, `${JSON.stringify(line)}\n`); } catch { /* the alert still fires */ }
-      say({ type: 'refused', ...event });
+      return say({ type: 'refused', ...event });
     },
     alert: say,
+    alertOrKeep: sayOrKeep,
   });
 }

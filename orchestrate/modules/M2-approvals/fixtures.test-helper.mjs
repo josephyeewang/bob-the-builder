@@ -35,9 +35,10 @@ export function env({ values = {}, answers = {} } = {}) {
   const rules = fakeRules({ values: { timeouts: fullTimeouts(), ...CONFIG, ...values }, answers: { count_approval: countApproval, ...answers } });
   const alerts = [];
   const copies = makeTranscriptCopies({ root: join(e.base, 'copies') });
-  // The sink answers like M11's outbox (L124 M-1): true once queued; set sink.answer = false and it refuses, queuing nothing.
+  // The sink answers like M11's outbox (L124 M-1): true once queued; set sink.answer = false and it refuses, queuing nothing;
+  // 'throws' and it throws (L130: a throw counts as false).
   const sink = { answer: true };
-  const alert = (a) => { if (sink.answer === false) return false; alerts.push(a); return true; };
+  const alert = (a) => { if (sink.answer === 'throws') throw new Error('the alert could not be sent'); if (sink.answer === false) return false; alerts.push(a); return true; };
   const ctx = { record: e.record, rules, product: PRODUCT, copies, now: () => e.clock.t, alert };
   return { ...e, ctx, alerts, sink, log: (sid) => join(e.base, `${sid}.jsonl`) };
 }
