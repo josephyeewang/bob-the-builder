@@ -37,8 +37,10 @@ import { spawn, spawnSync } from 'node:child_process';
 import { builtinModules } from 'node:module';
 import { tempDir } from '../../../shared/test-tmp.mjs';
 import { gitOk } from '../git/safe-git.mjs';
-import { SCRIPTS } from './review-daemons.mjs';
-import { NODE, UPDATER_CONFIG, RUNNER_CONFIG, STAMP, SOURCE, OUTSIDE_FILES, currentCopy, readInstallStamp } from './install-check.mjs';
+import { SCRIPTS, reviewDaemonPlists, updaterPlist } from './review-daemons.mjs';
+import { NODE, UPDATER_CONFIG, RUNNER_CONFIG, STAMP, SOURCE, OUTSIDE_FILES, TEST_FOLDERS, currentCopy, readInstallStamp } from './install-check.mjs';
+import { loginJobPlist } from '../../M11-dispatcher/login-job.mjs';
+import { watchPlist } from '../../../setup/watch-setup.mjs';
 import { updateOnce, MAIN } from './review-updater.mjs';
 
 const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', '..');
@@ -58,9 +60,36 @@ const CONFIG_IMPORTS = Object.freeze([
   ['modules/M4-workshop/launcher/review-runner-main.mjs', 'import(pathToFileURL(c.wiring).href)'],
   ['modules/M4-workshop/launcher/review-runner-main.mjs', 'import(pathToFileURL(c.budget).href)'],
 ]);
-// Every program a job file starts from the installed copy (L132 M-2): the three LaunchDaemons' scripts, the
-// Dispatcher's and the watch-only week's. A new job file adds its script here.
-const ENTRY_POINTS = Object.freeze([...Object.values(SCRIPTS), 'modules/M11-dispatcher/main.mjs', 'modules/M6-merge-gate/watch-run.mjs']);
+// Every program a job file starts from the installed copy (L132 M-2), taken from the job files themselves (L136 m1):
+// each module of the copy that builds a launchd job file is called here with a sample config, and the script each job
+// starts is read from the file's start command (ProgramArguments). A new builder must be added to JOB_BUILDERS: the
+// tripwire test below fails while any module of the copy that writes a start command is missing from it.
+const SAMPLE_BASE = '/sample';
+const SAMPLE_ROOT = join(SAMPLE_BASE, 'install', SOURCE);   // where setup/install.mjs installPaths puts the copy's link
+const LABEL = 'org.example.orch';
+// The Dispatcher's job file takes its script from its caller, and no setup step calls it yet (the first cutover
+// does): until one does, the script it is given is named here.
+const DISPATCHER_MAIN = 'modules/M11-dispatcher/main.mjs';
+const JOB_BUILDERS = Object.freeze({
+  'modules/M4-workshop/launcher/review-daemons.mjs': () => [
+    ...Object.values(reviewDaemonPlists({ label: LABEL, installRoot: SAMPLE_ROOT, config: join(SAMPLE_ROOT, RUNNER_CONFIG), reviewRoot: join(SAMPLE_BASE, 'review'),
+      reviewHome: join(SAMPLE_BASE, 'home', 'review'), accountCopy: join(SAMPLE_BASE, 'account-copy.json'), ownerHome: join(SAMPLE_BASE, 'owner-home'), ownerUid: 1000, logDir: join(SAMPLE_BASE, 'logs') })),
+    updaterPlist({ label: LABEL, installRoot: SAMPLE_ROOT, logDir: join(SAMPLE_BASE, 'logs') }),
+  ],
+  'setup/watch-setup.mjs': () => [watchPlist(null, { base: SAMPLE_BASE, label: LABEL, watch: { repo: 'owner/repo', rulesSha256: '0'.repeat(64) } })],
+  'modules/M11-dispatcher/login-job.mjs': () => [loginJobPlist({ label: LABEL, node: join(SAMPLE_ROOT, NODE), script: join(SAMPLE_ROOT, DISPATCHER_MAIN),
+    config: join(SAMPLE_BASE, 'dispatcher.json'), path: '/usr/bin:/bin', logDir: join(SAMPLE_BASE, 'logs'), workDir: SAMPLE_BASE })],
+});
+/** The one script of the copy a job file starts: the .mjs file under the copy's link in its start command. */
+function startedScript(text) {
+  const args = /<key>ProgramArguments<\/key>\s*<array>([\s\S]*?)<\/array>/.exec(text)?.[1];
+  assert.ok(args, `a job file with no start command: ${text.slice(0, 200)}`);
+  const strings = [...args.matchAll(/<string>([^<]*)<\/string>/g)].map((m) => m[1]);
+  const scripts = strings.filter((s) => s.startsWith(`${SAMPLE_ROOT}/`) && s.endsWith('.mjs')).map((s) => s.slice(SAMPLE_ROOT.length + 1));
+  assert.equal(scripts.length, 1, `each job starts exactly one script of the copy: ${strings.join(' ')}`);
+  return scripts[0];
+}
+const ENTRY_POINTS = Object.freeze([...new Set(Object.values(JOB_BUILDERS).flatMap((b) => b().map(startedScript)))].sort());
 
 // Modules whose whole body is a test fixture's hook: each reads a hook's input on stdin and exits while it loads. Each
 // child is given such an input; a module on this list must exit while it loads, and any other module must not.
@@ -410,6 +439,21 @@ test('L92 item 4, L106 M-1: every module of the installed copy loads from the co
 
 // m-c (audit r2 N25): the reader-against-node check, on a module whose computed import node follows and the reader's
 // static imports do not, and on the same module without it.
+test('L136 m1: the programs to start come from every job-file builder of the copy, and a new builder must be listed', () => {
+  // Every launchd job file of today, read from its builder: the three LaunchDaemons, the watch-only week, the Dispatcher.
+  assert.deepEqual(ENTRY_POINTS, [...new Set([...Object.values(SCRIPTS), DISPATCHER_MAIN, 'modules/M6-merge-gate/watch-run.mjs'])].sort());
+  // The tripwire: a module of the copy (test code aside) that writes a launchd start command is a job-file builder, and
+  // each one must be on JOB_BUILDERS, so the script its jobs start is started through the link above. A listed
+  // builder that no longer writes one is stale.
+  const isTestCode = (r) => /\.test(-helper)?\.mjs$/.test(r) || r.split('/').slice(0, -1).some((d) => TEST_FOLDERS.includes(d));
+  const writers = tracked([SOURCE]).filter((f) => f.endsWith('.mjs')).map((f) => f.slice(SOURCE.length + 1))
+    .filter((r) => !isTestCode(r) && /ProgramArguments/.test(readFileSync(join(REPO, SOURCE, r), 'utf8')));
+  assert.deepEqual(writers.sort(), Object.keys(JOB_BUILDERS).sort(), 'every module that builds a job file is on JOB_BUILDERS, and only those');
+  // Each builder's jobs each start one script of the copy, read from the job file's start command.
+  for (const [f, build] of Object.entries(JOB_BUILDERS)) assert.ok(build().length >= 1, `${f} builds a job file`);
+  assert.equal(startedScript(`<key>ProgramArguments</key><array><string>${join(SAMPLE_ROOT, NODE)}</string><string>${join(SAMPLE_ROOT, 'modules', 'x.mjs')}</string><string>${SAMPLE_ROOT}</string></array>`), 'modules/x.mjs');
+});
+
 test('L132 m-c: the reader-against-node check reports a module that loads a file the reader does not find', async () => {
   const root = realpathSync.native(tempDir('m4-closure-rn-'));
   const folder = join(root, 'v');

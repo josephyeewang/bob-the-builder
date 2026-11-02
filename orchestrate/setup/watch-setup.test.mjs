@@ -292,6 +292,16 @@ test('R6 class check: every reader of watch.* in setup code is either the repo (
   assert.equal(failing(checkWatchRules(world().mac, cfg)).length, 1);
 });
 
+test('r7 c-C class check: the setup code reads cfg.watch in exactly these places (a new reader must be gated on the fingerprint, then added here)', () => {
+  const at = {};
+  const here = new URL('.', import.meta.url);
+  for (const f of readdirSync(here).filter((x) => x.endsWith('.mjs') && !x.includes('.test'))) {   // every setup file, so a new one is covered too
+    const n = (readFileSync(new URL(`./${f}`, here), 'utf8').match(/cfg\.watch\b/g) ?? []).length;   // each read, not each line
+    if (n) at[f] = n;
+  }
+  assert.deepEqual(at, { 'daemons.mjs': 4, 'extras.mjs': 1, 'watch-setup.mjs': 11 });
+});
+
 test('R6 m-1 a named pipe given as the rules file is refused at once, not waited on', { skip: process.platform === 'win32' }, () => {
   const dir = tempDir('orch-fifo-'); const fifo = join(dir, 'rules.fifo');
   assert.equal(spawnSync('/usr/bin/mkfifo', [fifo]).status, 0);
@@ -331,7 +341,7 @@ test('R6 c-1 the fingerprint is of the UTF-8 text: the README says so', () => {
 
 // ---- L181 (r7 follow-ups): m-A hourly job the config stopped naming; m-B a folder at the copy's name; m-C swapped name between lstat and read
 import { list } from './daemons.mjs';
-import { mkdirSync } from 'node:fs';
+import { mkdirSync, readdirSync } from 'node:fs';
 
 test('L181 m-A: the config loses its fingerprint (or its watch entry) while the hourly job is loaded: unload, list and check still see it', () => {
   const w = world({});
