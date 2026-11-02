@@ -52,11 +52,22 @@ export const RUNNER_MODULES = Object.freeze(['wiring', 'budget']);
 // copy. A copy item the install step puts at the top of the copy (`keep`), a folder or the config is refused: the
 // runner imports the module from the copy, and only a file among the copy's own finds the files it imports.
 export const MODULE_HOMES = Object.freeze(['modules', 'shared']);
+// A test file, a test helper, or anything in a test or fixtures folder is in the copy too, but it is never a program
+// the runner may load: a test imports the test runner, and a fixture may exit as soon as it loads, so a config naming
+// one by mistake would leave the runner quiet with nothing useful said (L136 m2).
+const TEST_NAME = /\.test(-helper)?\.mjs$/;
+export const TEST_FOLDERS = Object.freeze(['fixtures', 'test']);
 /** Null, or why `rel` (a path inside the copy, relative to it) is not one of the copy's own code files. */
 export function copyModuleProblem(rel) {
   const parts = typeof rel === 'string' ? rel.split('/') : [];
-  if (parts.length >= 2 && MODULE_HOMES.includes(parts[0]) && !parts.some((s) => s === '' || s === '.' || s === '..') && rel.endsWith('.mjs')) return null;
-  return `is not one of the copy's own code files (a .mjs file under its ${MODULE_HOMES.map((h) => `${h}/`).join(' or ')} folder), so it can't find the files it loads`;
+  // The empty, `.` and `..` parts never reach here from the runner, whose path.relative drops them; the guard is for
+  // other callers, such as the install step and the updater, which pass the config's text as it is (L136 c1).
+  const own = parts.length >= 2 && MODULE_HOMES.includes(parts[0]) && !parts.some((s) => s === '' || s === '.' || s === '..') && rel.endsWith('.mjs');
+  if (!own) return `is not one of the copy's own code files (a .mjs file under its ${MODULE_HOMES.map((h) => `${h}/`).join(' or ')} folder), so it can't find the files it loads`;
+  if (TEST_NAME.test(rel) || parts.slice(0, -1).some((s) => TEST_FOLDERS.includes(s))) {
+    return `is one of the copy's test files, test helpers or test fixtures (a name ending .test.mjs or .test-helper.mjs, or a file in a ${TEST_FOLDERS.map((f) => `${f}/`).join(' or ')} folder), not a program the runner may load`;
+  }
+  return null;
 }
 const HEX40 = /^[0-9a-f]{40}$/;
 
