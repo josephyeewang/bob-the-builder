@@ -929,6 +929,7 @@ test('L194 m1 reload-account run again with nothing to change has no steps: the 
   assert.equal(w.run(['daemons', 'reload-account']).code, 0);
   const n = w.mac.log.length;
   const r = w.run(['daemons', 'reload-account']); assert.equal(r.code, 0, r.text);
+  assert.match(r.text, /nothing to do: already as needed\.\ndone: all 2 items PASS\./, 'a no-op still ends with its closing check (L198), never a bare "done."');
   assert.deepEqual(w.mac.log.slice(n).filter((l) => /^launchctl (bootout|bootstrap)/.test(l)), []);
   assert.ok(w.mac.loaded.has(`${LABEL}.review-account`)); assert.deepEqual(failed(checkDaemons(w.mac, w.cfg)), []);
   // a job file changed on disk since the load is still reloaded
