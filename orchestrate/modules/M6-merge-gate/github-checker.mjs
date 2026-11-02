@@ -2515,9 +2515,9 @@ const OUTBOX_KINDS = Object.freeze(Object.fromEntries(Object.entries({
   // Refused until their consumers land (L151 M-1). The skill says "Filed: resume X / wrap up / rotate K" and "Filed:
   // pause X / away X": stored, nothing would resume, rotate or pause anything, so the Record refuses them and Joe hears
   // "Not filed". request- waits on the push (item 7), the rotate steps (8) and the mode requests (9); state- on
-  // approvals writing the product's state (item 13). Never a product write by an AI.
+  // approvals writing the product's state (item 13, lane 1's M2 approvals: lead call L213). Never a product write by an AI.
   'request-': { roles: ['front_door'], entity: null, mode: 'create', refused: 'M1 join items 7, 8 and 9, lane 2' },
-  'state-': { roles: ['front_door'], entity: null, mode: 'create', refused: 'M1 join item 13, lane 2' },
+  'state-': { roles: ['front_door'], entity: null, mode: 'create', refused: 'M1 join item 13, lane 1' },
   // Stored is the whole act ("Filed: idea X"); the Lead reads it once its input file's idea-file section is fed.
   'idea-': { roles: ['front_door', 'thinking'], entity: 'report', mode: 'create', pending: 'M3 join item 1, lane 2' },
   'check-': { roles: ['learning'], entity: 'report', mode: 'create', latent: 'its only role, learning, is NEVER_STARTED (M10 roles.mjs)' },

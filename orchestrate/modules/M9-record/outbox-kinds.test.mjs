@@ -21,7 +21,7 @@ import { NEVER_STARTED, ROLE_FILES } from '../M10-rules/roles.mjs';
 import { DESIGN_PROFILES } from '../M4-workshop/launcher/role-profiles.mjs';
 import { WRITERS, fieldsAllowed } from './permissions.mjs';
 import { outboxFile, setup } from './fixtures.test-helper.mjs';
-import { namesKind } from '../../shared/kinds.test-helper.mjs';
+import { SOURCE_EXT, kindMentions, namesKind, sourceFiles } from '../../shared/kinds.test-helper.mjs';
 
 const MODULES = join(dirname(fileURLToPath(import.meta.url)), '..');
 const ROLES_DIR = join(MODULES, 'M10-rules/roles');
@@ -70,6 +70,15 @@ export function readsStored(text, k) {
   const gap = '(?:(?!\\.\\s)[\\s\\S])*';
   return new RegExp(`\\breads?\\b${gap}(?:${tick}${gap}\\bstored\\b|\\bstored\\b${gap}${tick})`).test(String(text));
 }
+// L212 Minor 3 (the #95 r3 plant B3): the wording check above is a guess, so it is not what decides who the reader is.
+// Each kind's reader is this fixed table, read by a person when a row is added: a pending tag must name its kind's row.
+// Re-pointing idea- at another item that merely says it "reads" files that are "stored" (M1 item 2, intake) goes red.
+export const CONSUMERS = Object.freeze({
+  'idea-': 'M3 join item 1', // the Lead reads the stored idea- reports (lead-input.mjs's idea-file section)
+  'state-': 'M1 join item 13', // M2 approvals writes the product's state from each stored state- file (L151, L213)
+});
+const consumerProblem = (k, module, nums) => (nums.some((n) => CONSUMERS[k] === `${module} join item ${n}`) ? []
+  : [`${k}: pending names ${module} join item ${nums.join(', ')}, but ${CONSUMERS[k] ? `its reader is ${CONSUMERS[k]}` : 'it has no row in CONSUMERS'} (L212)`]);
 export function joinItemProblems(k, field, v) {
   const m = /^(M\d+) join items? (\d+(?:(?:, | and )\d+)*), lanes? \d+(?: and \d+)?$/.exec(v);
   if (!m) return [`${k}: ${field} "${v}" is not "<module> join item <n>, lane <n>"`];
@@ -82,26 +91,16 @@ export function joinItemProblems(k, field, v) {
   if (missing.length) return [`${k}: ${field} names ${module} join item ${missing.join(', ')}, which ${folder}/README.md does not list under "## Join items"`];
   if (!nums.some((n) => items.get(n).includes(`\`${k}\``))) return [`${k}: ${field} names ${module} join item ${nums.join(', ')}, and none of them names \`${k}\``];
   if (field === 'pending' && !nums.some((n) => readsStored(items.get(n), k))) return [`${k}: ${field} names ${module} join item ${nums.join(', ')}, and none of them says it reads the stored \`${k}\` files`];
+  if (field === 'pending') return consumerProblem(k, module, nums);
   return [];
 }
 
 // The latent claims a kind may make, each checked against the code (L151 m3). Any other latent text is a problem.
-export const SOURCE_EXT = /\.(mjs|js|cjs|md|json|txt|yaml|yml|toml)$/;
-export function sourceFiles(dir, out = []) {
-  for (const e of readdirSync(dir, { withFileTypes: true })) {
-    const p = join(dir, e.name);
-    if (e.isDirectory()) { if (e.name !== 'node_modules' && e.name !== 'fixtures') sourceFiles(p, out); } else if (SOURCE_EXT.test(e.name) && !/\.test(-helper)?\.mjs$/.test(e.name)) out.push(p);
-  }
-  return out;
-}
-// Where a kind may be named without writing it: the kind lists, their READMEs, and M6's bundle of shared/.
-const LISTS = ['shared/record-names.mjs', 'shared/record.mjs', 'shared/README.md', 'modules/M10-rules/roles/lead.json', 'modules/M4-workshop/launcher/role-profiles.mjs', 'modules/M6-merge-gate/github-checker.mjs'];
+// The file walk (SOURCE_EXT, sourceFiles, kindMentions) moved to shared/kinds.test-helper.mjs (L212), so the no-promise
+// test walks the same files; exported again here under the same names.
+export { SOURCE_EXT, sourceFiles, kindMentions };
 const ORCH = join(MODULES, '..');
 const BOB = join(ORCH, '..');
-// Every file outside the lists that names the kind: a prompt, a skill or code that would write it.
-export function kindMentions(k, files = [...sourceFiles(ORCH), ...sourceFiles(join(BOB, 'skill')), ...sourceFiles(join(BOB, 'skills'))]) {
-  return files.filter((p) => !LISTS.some((l) => p === join(ORCH, l)) && namesKind(readFileSync(p, 'utf8').replace(/`/g, ' '), k)).map((p) => p.slice(BOB.length + 1));
-}
 // Any file other than history.mjs that names makeHistory as a whole word outside a code comment (an import, a dynamic
 // import, a re-export, a prompt or config that names it). A comment that mentions it calls nothing.
 const uncommented = (p, t) => (/\.(mjs|js|cjs)$/.test(p) ? t.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '') : t);
@@ -202,7 +201,7 @@ test('L151: a join item must name the kind (an item that does not name state- is
   assert.deepEqual(whoReadsProblems('state-', { ...st, refused: 'M1 join item 4, lane 2' }), [], 'item 4 names state- (the trip brief)');
   assert.match(whoReadsProblems('idea-', { ...OUTBOX_KINDS['idea-'], pending: 'M1 join item 5, lane 2' }).join(), /none of them names `idea-`/);
   assert.match(whoReadsProblems('state-', { ...st, entity: 'report' }).join(), /refused kind has entity null/);
-  assert.match(whoReadsProblems('state-', { ...st, pending: 'M1 join item 13, lane 2' }).join(), /names no reader/);
+  assert.match(whoReadsProblems('state-', { ...st, pending: 'M1 join item 13, lane 1' }).join(), /names no reader/);
   assert.equal(namesKind('the `state-compact-` kind', 'state-'), false);
   assert.equal(namesKind('the newest `state-` file', 'state-'), true);
   assert.equal(namesKind('ask-request-<id>.json', 'request-'), false, 'ask-request- is its own kind');
@@ -313,13 +312,21 @@ test('L162 m2: a join item names a kind only by its exact backticked prefix; a p
   const st = { ...OUTBOX_KINDS['state-'], refused: undefined, entity: 'report' };
   // Item 4 names `state-` but does not read stored ones: not enough to be the pending item that wires a reader.
   assert.match(whoReadsProblems('state-', { ...st, pending: 'M1 join item 4, lane 2' }).join(), /none of them says it reads the stored `state-` files/);
-  assert.deepEqual(whoReadsProblems('state-', { ...st, pending: 'M1 join item 13, lane 2' }), [], 'item 13 reads only stored `state-` files');
+  assert.deepEqual(whoReadsProblems('state-', { ...st, pending: 'M1 join item 13, lane 1' }), [], 'item 13 reads only stored `state-` files');
   assert.equal(readsStored('it reads the `idea-` reports the record has stored since the last pass (`lead-input.mjs`)', 'idea-'), true);
   assert.equal(readsStored('it reads only stored `state-` files', 'state-'), true);
   assert.equal(readsStored('the idea- reports it reads are stored', 'idea-'), false, 'N1: not backticked');
   assert.equal(readsStored('it reads the `idea-` list. The record has stored them', 'idea-'), false, 'N2: two sentences');
   assert.equal(readsStored('it writes `idea-` files the record has stored', 'idea-'), false, 'no read');
   assert.equal(readsStored('it reads the `idea-file` section the record has stored', 'idea-'), false, '`idea-file` is not `idea-`');
+  // L212 Minor 3 (B3): the reader is the CONSUMERS row, not the wording. An item that says the right words but is not
+  // the kind's row is refused; a kind with no row is refused.
+  const ideaSpec = OUTBOX_KINDS['idea-'];
+  assert.deepEqual(whoReadsProblems('idea-', ideaSpec), [], 'idea- names its CONSUMERS row (M3 item 1)');
+  assert.match(consumerProblem('idea-', 'M1', ['2']).join(), /its reader is M3 join item 1/);
+  assert.match(consumerProblem('report-', 'M3', ['1']).join(), /has no row in CONSUMERS/);
+  assert.deepEqual(consumerProblem('idea-', 'M3', ['1']), []);
+  assert.deepEqual(Object.keys(CONSUMERS).sort(), ['idea-', 'state-'], 'a new reader row is read by a person when added');
 });
 
 test('L162 m3: makeHistory counts as a caller in any source form, and yaml/yml/toml files are scanned', () => {
