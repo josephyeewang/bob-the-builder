@@ -17,7 +17,8 @@
 // "not known yet" is marked temporary: GitHub or the record could not be read, a check or a review session has not
 // finished, GitHub has not worked out yet whether the PR is mergeable, or main is red (main's state, not the change's).
 // A change with temporary refusals and no final one is held (WAITING_HOLD), so the gate judges it again on its next
-// pass instead of refusing it for good.
+// pass instead of refusing it for good. A wait that outlasts the gate's cap with GitHub readable is the gate's to end
+// (gate.mjs, L184), not this file's.
 //
 // THE FACTS (gather.mjs fills them; a missing one refuses whatever reads it):
 //   cutoverStage 'first' | 'second'          product.cutover_stage, missing = first

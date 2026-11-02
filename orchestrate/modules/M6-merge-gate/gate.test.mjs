@@ -17,7 +17,7 @@ import { fakeGateGitHub } from './fixtures/fake-gate-github.mjs';
 import { makeGitView } from '../M10-rules/git-view.mjs';
 import { blobSha } from '../M10-rules/reader.mjs';
 import { ROBOT_FACT, NO_PUSH_FACT } from '../M12-sensors/outside-watch.mjs';
-import { gatePass, queueOrder, NOT_GREEN_LINE, MERGE_LIMIT_TOLD_FACT, FINAL_NOTE, GITHUB_NO_NOTE } from './gate.mjs';
+import { gatePass, queueOrder, NOT_GREEN_LINE, MERGE_LIMIT_TOLD_FACT, FINAL_NOTE, GITHUB_NO_NOTE, WAIT_CAP_TIMES, DEFAULT_WAIT_LIMIT_MIN, waitCapNote } from './gate.mjs';
 import { readMark } from './mark.mjs';
 import { readNeedsJoe } from './checker-entry.mjs';
 import { gatherFacts } from './gather.mjs';
@@ -1371,19 +1371,29 @@ for (const mode of ['taken', 'false', 'throw']) {
   });
 }
 
-test('L164: a waiting merge with no merging limit in the rules tells the owner once that the limit is missing', async () => {
+// L184: until the rules carry the limit, a wait reads the gate's default (told once that it does), told past it and
+// refused past 3 times it.
+test('L164 + L184: a waiting merge with no merging limit in the rules is told once that the default is in use, then timed by it', async () => {
   const w = world();
   verifiedCard(w);
   w.g.pulls.get(7).mergeable_state = 'unknown';
-  for (let i = 0; i < 4; i++) {
+  const D = DEFAULT_WAIT_LIMIT_MIN;
+  // Passes at 0, D - 1, D and 3D - 1 minutes: held each time, told it waits from D on.
+  for (const [step, longTold] of [[0, 0], [D - 1, 0], [1, 1], [WAIT_CAP_TIMES * D - 1 - D, 1]]) {
+    tick(w, step);
     await gatePass(w.ctx);
     waitingHeld(mergeOf(w), /^3: /);
-    tick(w, 30);
+    assert.equal(told(w, 'merge_waiting_long').length, longTold);
   }
   assert.equal(told(w, 'merge_limit_missing').length, 1);
-  assert.match(told(w, 'merge_limit_missing')[0].note, /waiting to be judged .*timeouts\.merging_open_max_min/);
+  assert.match(told(w, 'merge_limit_missing')[0].note, new RegExp(`waiting to be judged .*timeouts\\.merging_open_max_min.*default of ${D} min`));
   assert.equal(recOf(w).read('fact', MERGE_LIMIT_TOLD_FACT(mergeOf(w).id))?.doc?.merge, mergeOf(w).id);
-  assert.deepEqual(told(w, 'merge_waiting_long'), []);
+  tick(w, 1);
+  await gatePass(w.ctx);
+  assert.equal(mergeOf(w).doc.state, 'refused', JSON.stringify(mergeOf(w).doc));
+  assert.equal(mergeOf(w).doc.tell_note, waitCapNote(D * 60_000));
+  assert.equal(told(w, 'merge_refused').length, 1);
+  assert.equal(told(w, 'merge_limit_missing').length, 1, 'told once');
 });
 
 // L168 (1): the three refusal sites that tell the owner, each with a lost first alert.
@@ -1590,4 +1600,141 @@ test('L182 class control: a review-thread read that fails still waits', async ()
   await gatePass(w.ctx);
   waitingHeld(mergeOf(w), /^7: the review threads could not be read/);
   assert.deepEqual(told(w, 'merge_refused'), []);
+});
+
+// L184: one cap on every wait the gate can't end by itself. Each listed hold waits (told once past the limit), and is
+// refused for good past WAIT_CAP_TIMES times the limit, told once, with what it waited on as the reasons.
+function wrapGet(w, change) {
+  const get = w.g.gh.get;
+  w.g.gh.get = async (path) => change(path, await get(path));
+}
+async function cappedAfter(w, re) {
+  await gatePass(w.ctx);
+  waitingHeld(mergeOf(w), re);
+  tick(w, WAIT_CAP_TIMES * LIMIT_MIN - 1);
+  await gatePass(w.ctx);
+  waitingHeld(mergeOf(w), re);
+  assert.equal(told(w, 'merge_waiting_long').length, 1, 'past the limit: told once that it waits');
+  assert.deepEqual(told(w, 'merge_refused'), [], 'under the cap: not refused');
+  tick(w, 1);
+  await gatePass(w.ctx);
+  const m = mergeOf(w);
+  assert.equal(m.doc.state, 'refused', JSON.stringify(m.doc));
+  assert.equal(m.doc.tell_owner, true);
+  assert.equal(m.doc.tell_note, waitCapNote(LIMIT_MIN * 60_000));
+  assert.ok(m.doc.reasons.some((x) => re.test(x)), m.doc.reasons.join(' | '));
+  assert.equal(told(w, 'merge_refused').length, 1);
+  assert.deepEqual(told(w, 'merge_refused')[0].reasons, m.doc.reasons);
+  assert.equal(gatePuts(w), 0);
+  tick(w, 5);
+  await gatePass(w.ctx);
+  assert.equal(mergeOf(w).doc.state, 'refused', 'it stays refused');
+  assert.equal(told(w, 'merge_refused').length, 1, 'told once');
+}
+const redRun = (sha) => [{ name: 'test', app: { id: 1 }, head_sha: sha, status: 'completed', conclusion: 'failure' }];
+const HOLDS = [
+  ['the head\'s file tree comes back truncated', (w) => wrapGet(w, (p, r) => (/\/git\/trees\//.test(p) && r?.status === 200 ? { ...r, json: { ...r.json, truncated: true } } : r)), /^9: the rules gave no merge answer/],
+  ['main is red', (w) => w.g.checks.set(w.g.main, redRun(w.g.main)), /^2: main is red/],
+  ['main has 100 check runs', (w) => w.g.checks.set(w.g.main, Array.from({ length: 100 }, (_, i) => ({ name: i ? `c${i}` : 'test', app: { id: 1 }, head_sha: w.g.main, status: 'completed', conclusion: 'success' }))), /^2: main's checks could not be read/],
+  ['the rules name no required checks', (w) => { w.values['product_profile.required_checks'] = null; }, /^1: the rules name no required checks/],
+  ['the rules give no merge answer', (w) => { w.ctx.rules = Object.create(w.ctx.rules, { may: { value: () => { throw new Error('the engine stopped'); } } }); }, /^9: the rules gave no merge answer/],
+  ['the go check fails', (w) => { const base = w.ctx.record; w.ctx.record = Object.create(base, { read: { value: (e, id) => { if (e === 'go') throw new Error('go store gone'); return base.read(e, id); } } }); }, /^10: the go could not be checked/],
+  ['GitHub never works out mergeable', (w) => { w.g.pulls.get(7).mergeable_state = 'unknown'; }, /^3: GitHub has not worked out/],
+  ['a required check never runs', (w, head) => w.g.checks.set(head, []), /^1: required check test has not run/],
+  ['a review session never ends', (w, head) => runnerLaunch(w.env, 'C-1', 'R-C-1-again', 'reviewer', head), /^5: /],
+  ['the rules have no first-customer paths', (w) => { w.values.effect_paths = {}; }, /^14: the change's files or the first-customer paths could not be read/],
+];
+for (const [name, make, re] of HOLDS) {
+  test(`L184: ${name}: waits, told once past the limit, refused for good after ${WAIT_CAP_TIMES} times it`, async () => {
+    const w = world(limited());
+    const head = verifiedCard(w);
+    make(w, head);
+    await cappedAfter(w, re);
+  });
+}
+
+test('L184: the carry-over can\'t be read: waits, then refused for good after the cap', async () => {
+  const w = world(limited());
+  const h0 = verifiedCard(w);
+  // The pull request's head moved on from the reviewed head, and the carry-over's compare of main with H0 fails.
+  const h1 = w.g.commit([h0], { 'src/a.mjs': 'three' }, { from: h0 });
+  w.g.pulls.get(7).head = h1;
+  const view = w.ctx.view;
+  w.ctx.view = Object.create(view, { compare: { value: (b, h) => (h === h0 ? Promise.reject(new Error('compare gone')) : view.compare(b, h)) } });
+  await cappedAfter(w, /^5: whether the review carries over .* could not be read/);
+});
+
+test('L184 control: a wait that clears before the cap still merges', async () => {
+  const w = world(limited());
+  verifiedCard(w);
+  w.g.pulls.get(7).mergeable_state = 'unknown';
+  await gatePass(w.ctx);
+  waitingHeld(mergeOf(w), /^3: /);
+  tick(w, WAIT_CAP_TIMES * LIMIT_MIN - 1);
+  await gatePass(w.ctx);
+  waitingHeld(mergeOf(w), /^3: /);
+  w.g.pulls.get(7).mergeable_state = 'clean';
+  tick(w, 1);
+  await gatePass(w.ctx);
+  assert.equal(mergeOf(w).doc.state, 'merged');
+  assert.deepEqual(told(w, 'merge_refused'), []);
+});
+
+test('L184 control: GitHub down past the cap never refuses; the cap\'s clock starts at the first pass with GitHub readable', async () => {
+  const w = world(limited());
+  verifiedCard(w);
+  w.g.down = true;
+  for (let i = 0; i < 4; i++) {
+    await gatePass(w.ctx);
+    waitingHeld(mergeOf(w), /^3: the pull request could not be read/);
+    tick(w, LIMIT_MIN);
+  }
+  assert.equal(mergeOf(w).doc.stuck_since, null, 'an outage pass does not start the cap\'s clock');
+  assert.deepEqual(told(w, 'merge_refused'), []);
+  // GitHub back, but the PR's mergeable state still unknown: a new wait, timed from now, not from the outage.
+  w.g.down = false;
+  w.g.pulls.get(7).mergeable_state = 'unknown';
+  await gatePass(w.ctx);
+  waitingHeld(mergeOf(w), /^3: GitHub has not worked out/);
+  assert.equal(mergeOf(w).doc.stuck_since, nowIso(w));
+  w.g.down = true;
+  tick(w, WAIT_CAP_TIMES * LIMIT_MIN);
+  await gatePass(w.ctx);
+  waitingHeld(mergeOf(w), /^3: the pull request could not be read/);
+  assert.deepEqual(told(w, 'merge_refused'), [], 'past the cap, but GitHub unreadable: still never refused');
+  w.g.down = false;
+  tick(w, 1);
+  await gatePass(w.ctx);
+  assert.equal(mergeOf(w).doc.state, 'refused', 'an outage in the middle doesn\'t start the clock again');
+  assert.equal(told(w, 'merge_refused').length, 1);
+});
+
+test('L184 control: a hold of another kind in between starts the cap\'s clock again', async () => {
+  const w = world(limited());
+  verifiedCard(w);
+  const pr = w.g.pulls.get(7);
+  pr.mergeable_state = 'unknown';
+  await gatePass(w.ctx);
+  tick(w, WAIT_CAP_TIMES * LIMIT_MIN - 1);
+  await gatePass(w.ctx);
+  waitingHeld(mergeOf(w), /^3: /);
+  // One pass held for the rules not being adopted (not a wait): the wait is over.
+  const adopted = w.values['rules.adopted'];
+  pr.mergeable_state = 'clean';
+  w.values['rules.adopted'] = { blob: 'f'.repeat(40) };
+  tick(w, 1);
+  await gatePass(w.ctx);
+  assert.equal(mergeOf(w).doc.state, 'held');
+  assert.equal(mergeOf(w).doc.hold, 'rules_not_adopted');
+  assert.equal(mergeOf(w).doc.stuck_since, null);
+  // Waiting again: a new wait, timed from now.
+  w.values['rules.adopted'] = adopted;
+  pr.mergeable_state = 'unknown';
+  tick(w, 1);
+  await gatePass(w.ctx);
+  waitingHeld(mergeOf(w), /^3: /);
+  assert.deepEqual(told(w, 'merge_refused'), []);
+  tick(w, WAIT_CAP_TIMES * LIMIT_MIN);
+  await gatePass(w.ctx);
+  assert.equal(mergeOf(w).doc.state, 'refused');
 });

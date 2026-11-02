@@ -12,8 +12,9 @@
 //   6. The next queued merge (queueOrder): behind main → catch up (PUT update-branch; a conflict returns it to the
 //      builder); otherwise judge (refusals.mjs over gather.mjs). refuse → refused, with every reason; hold → held;
 //      a change that can't be judged yet (GitHub unreadable, a check or review still running, main red) is held as
-//      waiting and judged again on the next pass, never refused for good (L164); a wait past
-//      timeouts.merging_open_max_min is told to the owner once;
+//      waiting and judged again on the next pass (L164); a wait past timeouts.merging_open_max_min is told to the
+//      owner once, and one still waiting with GitHub readable after 3 times that is refused for good and told (L184);
+//      a pass with GitHub unreadable never refuses;
 //      merge → the paired write (merge → checking, card → merging), judged again under the lock, then merging, the
 //      merge on GitHub (PUT /pulls/n/merge with the judged head, squash: never a ref write), merged, the card merged,
 //      the robot's mark on the merge commit, and a check that the merge commit's first parent is the judged main.
@@ -51,7 +52,13 @@ const DONE = ['merged', 'audited_ok', 'audit_flagged'];
 const short = (s) => String(s ?? '').slice(0, 7);
 // What a refusal's alert tells the owner happens next.
 export const FINAL_NOTE = 'refused for a reason about the change itself; it won\'t be retried until the card changes';
-export const GITHUB_NO_NOTE = 'GitHub refused the merge; the card goes back and is asked for again, and the same refusal twice goes to the owner';
+// The cap on a wait (L184): refused for good after WAIT_CAP_TIMES × the wait limit. The wait limit is
+// timeouts.merging_open_max_min; until the rules carry that key, waiting reads DEFAULT_WAIT_LIMIT_MIN (the open-merge
+// timer in recover has no default: with no key it still waits for GitHub's final answer).
+export const WAIT_CAP_TIMES = 3;
+export const DEFAULT_WAIT_LIMIT_MIN = 30;
+export const waitCapNote = (limitMs) => `waited ${Math.round((WAIT_CAP_TIMES * limitMs) / 60_000)} min or more to be judged and was never judged, with GitHub readable; refused for good so the owner can act on what it waited on. It won't be retried until the card changes`;
+export const GITHUB_NO_NOTE ='GitHub refused the merge; the card goes back and is asked for again, and the same refusal twice goes to the owner';
 
 // The order the queue is served in: undo first, the lead's daily card when the blueprint's freshness alarm is on,
 // then Tier 1, then Tier 2; ties go to whoever has waited longest (queue_since, kept through holds and catch-ups).
@@ -186,7 +193,7 @@ export async function gatePass(ctx) {
     }
     const v = judge(facts);
     if (v.decision === 'refuse') { refuse(m, facts, v); return outage ? undefined : STEPPED_ASIDE; }
-    if (v.decision === 'hold') { hold(m, v); return outage ? undefined : STEPPED_ASIDE; }
+    if (v.decision === 'hold') { hold(m, v, outage); return outage ? undefined : STEPPED_ASIDE; }
     return take(m, facts);
   }
 
@@ -227,22 +234,37 @@ export async function gatePass(ctx) {
   }
 
   // A hold. A waiting one (L164) keeps the time it began waiting (waiting_since) and what it waits on, so the owner hears
-  // of a wait past timeouts.merging_open_max_min, once (wait_told_at); any other hold starts that clock again.
-  function hold(m, v) {
+  // of a wait past the wait limit, once (wait_told_at); any other hold starts that clock again.
+  // The cap (L184): a wait the gate can't end by itself (a tree too big to read, main red, GitHub never working out
+  // mergeable, a check that never runs, a review that never ends...) is refused for good after WAIT_CAP_TIMES × the wait
+  // limit, told once, with what it waited on as the reasons. Its clock (stuck_since) starts at the first waiting pass
+  // with GitHub readable: a pass with GitHub unreadable (the outage line in serve) neither starts it, nor refuses, nor
+  // stops it, so an outage alone never refuses a change for good (L164), and an outage in the middle of a long wait
+  // doesn't start it again.
+  function hold(m, v, outage = false) {
     const cur = fresh('merge', m.id) ?? m;
     const waiting = v.hold === WAITING_HOLD;
+    const waitingOn = v.refusals.map((x) => `${x.n}: ${x.reason}`);
     const fields = waiting
-      ? { hold: v.hold, waiting_on: v.refusals.map((x) => `${x.n}: ${x.reason}`), waiting_since: cur.doc.waiting_since ?? iso(), wait_told_at: cur.doc.wait_told_at ?? null }
-      : { hold: v.hold, waiting_on: null, waiting_since: null, wait_told_at: null };
+      ? { hold: v.hold, waiting_on: waitingOn, waiting_since: cur.doc.waiting_since ?? iso(), wait_told_at: cur.doc.wait_told_at ?? null, stuck_since: cur.doc.stuck_since ?? (outage ? null : iso()) }
+      : { hold: v.hold, waiting_on: null, waiting_since: null, wait_told_at: null, stuck_since: null };
+    if (waiting && !outage) {
+      const limit = waitLimit(cur);
+      const stuck = Date.parse(fields.stuck_since ?? '');
+      if (limit !== undefined && Number.isFinite(stuck) && now() - stuck >= WAIT_CAP_TIMES * limit) {
+        const reasons = waitingOn;
+        if (move(cur, 'refused', { ...fields, hold: null, reasons, tell_owner: true, tell_note: waitCapNote(limit) })) tellRefused(fresh('merge', m.id));
+        return;
+      }
+    }
     if (!move(cur, 'held', fields) || !waiting) return;
     waitedLong(fresh('merge', m.id));
   }
 
   function waitedLong(m) {
     if (!m?.doc || m.doc.wait_told_at) return;
-    const limit = mergingLimit(m);
+    const limit = waitLimit(m);
     if (limit === undefined) return;
-    if (!Number.isFinite(limit)) { tellLimitMissing(m, `merge ${m.id} is waiting to be judged (${(m.doc.waiting_on ?? []).join('; ')}), and the rules have no ${KEYS.mergingOpenMaxMin}, so a long wait is never told. Add the limit to the rules file`); return; }
     const since = Date.parse(m.doc.waiting_since ?? '');
     if (Number.isFinite(since) && now() - since < limit) return;
     const taken = alertTaken(alert, { type: 'merge_waiting_long', merge: m.id, card: m.doc.card, pr: m.doc.pr, waiting_since: m.doc.waiting_since ?? null, waiting_on: m.doc.waiting_on ?? [],
@@ -250,6 +272,15 @@ export async function gatePass(ctx) {
     if (!taken) return;
     const r = write('merge', m, { wait_told_at: iso() });
     if (!r.ok) alert({ type: 'merge_gate_write_refused', merge: m.id, to: 'wait_told', reason: r.reason });
+  }
+
+  // The wait limit in ms: timeouts.merging_open_max_min, or DEFAULT_WAIT_LIMIT_MIN while the rules lack it (L184; the
+  // owner is told once per merge that the default is in use); undefined when the rules could not answer.
+  function waitLimit(m) {
+    const limit = mergingLimit(m);
+    if (limit === undefined || Number.isFinite(limit)) return limit;
+    tellLimitMissing(m, `merge ${m.id} is waiting to be judged (${(m.doc.waiting_on ?? []).join('; ')}), and the rules have no ${KEYS.mergingOpenMaxMin}, so the gate uses its own default of ${DEFAULT_WAIT_LIMIT_MIN} min: a wait is told after ${DEFAULT_WAIT_LIMIT_MIN} min and refused after ${WAIT_CAP_TIMES * DEFAULT_WAIT_LIMIT_MIN} min, and an open merge after the merge call is never recorded as interrupted. Add the limit to the rules file`);
+    return DEFAULT_WAIT_LIMIT_MIN * 60_000;
   }
 
   // timeouts.merging_open_max_min in ms; NaN when the rules lack it (MissingKey); undefined when the rules could not
@@ -436,8 +467,8 @@ export async function gatePass(ctx) {
   }
 
   // With no timeouts.merging_open_max_min, an open merge is never refused as interrupted: it waits for GitHub's final
-  // answer, and a waiting hold is never told as long (L164), so the owner is told once per merge that the rules lack
-  // the limit (L148 item 5). The told fact is written
+  // answer, and a waiting hold is timed by DEFAULT_WAIT_LIMIT_MIN (L184), so the owner is told once per merge that the
+  // rules lack the limit (L148 item 5). The told fact is written
   // only once the alert was taken (as MERGED_OUTSIDE, L130 M6); a refused alert, or a refused fact write, tells again
   // next pass.
   function tellLimitMissing(m, note = `pull request #${m.doc.pr} is still open after the merge call, and the rules have no ${KEYS.mergingOpenMaxMin}, so it is never recorded as interrupted; it waits for GitHub's final answer. Add the limit to the rules file`) {
