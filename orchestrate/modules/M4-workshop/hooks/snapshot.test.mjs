@@ -46,13 +46,13 @@ test('each hook that reads the snapshot passes that reason on, even for ls', () 
   writeSnapshot(p, RULES, new Date(Date.now() - 400_000));
   const input = { tool_name: 'Bash', tool_input: { command: 'ls' }, cwd: d };
   for (const [name, hook] of [['production-write-guard', prodGuard], ['secret-file-block', secret]]) {
-    const r = hook.decide(input, { role: 'worker', outbox: join(d, 'outbox'), snapshot: p, kinds: ['report'] });
+    const r = hook.decide(input, { role: 'worker', outbox: join(d, 'outbox'), snapshot: p, kinds: ['report-'] });
     assert.equal(r.block, true, name);
     assert.match(r.reason, /^rules snapshot is stale \(\d+ s old, the limit is 300 s\), so every call is refused until it is rewritten; .*keepSnapshotFresh\)$/, name);
   }
   // And the same command passes once the snapshot is rewritten.
   writeSnapshot(p, RULES);
-  for (const hook of [prodGuard, secret]) assert.equal(hook.decide(input, { role: 'worker', outbox: join(d, 'outbox'), snapshot: p, kinds: ['report'] }).block, false);
+  for (const hook of [prodGuard, secret]) assert.equal(hook.decide(input, { role: 'worker', outbox: join(d, 'outbox'), snapshot: p, kinds: ['report-'] }).block, false);
 });
 
 test('keepSnapshotFresh writes now, rewrites on every tick, and stops when told', () => {

@@ -324,9 +324,9 @@ test('a store error writing a refused hand-in\'s fact leaves the file unseen, tr
 
 test('L121: a name that only looks like an outbox name (U+2011 for the hyphen) has no kind at M9, as at the hook and M4', () => {
   const env = setup({ prefix: 'm9-out-' });
-  const odd = 'verdict-compact\u2011S1.md';
+  const odd = 'verdict-x\u2011S1.md';
   assert.equal(kindOf(odd), null);
-  assert.equal(kindOf('verdict-compact-S1.md'), 'verdict-');
+  assert.equal(kindOf('verdict-x-S1.md'), 'verdict-');
   assert.equal(kindOf('verdict-.md'), null, 'a kind with nothing after it is not a name');
   const r = env.record.applyOutbox({ role: 'reviewer', sessionId: 'R-1' }, outboxFile(env, 'reviewer', 'R-1', odd, 'x'));
   assert.equal(r.ok, false);

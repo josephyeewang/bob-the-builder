@@ -39,10 +39,10 @@ test('m8: the handoff estimate is ceil(bytes / 4); 31,000 bytes is accepted and 
   assert.equal(estimateTokens('abcde'), 2);
   assert.equal(estimateTokens('é'), 1); // 2 utf-8 bytes
   const vet = handoffVet(R);
-  assert.equal(vet({ kind: 'handoff', text: 'x'.repeat(31_000) }), null);
-  assert.match(vet({ kind: 'handoff', text: 'x'.repeat(33_000) }), /8250 tokens, over the 8000 cap/);
-  assert.equal(vet({ kind: 'handoff', text: 'x'.repeat(32_000) }), null); // exactly the cap
-  assert.equal(vet({ kind: 'wish', text: 'x'.repeat(99_000) }), null);
+  assert.equal(vet({ kind: 'handoff-', text: 'x'.repeat(31_000) }), null);
+  assert.match(vet({ kind: 'handoff-', text: 'x'.repeat(33_000) }), /8250 tokens, over the 8000 cap/);
+  assert.equal(vet({ kind: 'handoff-', text: 'x'.repeat(32_000) }), null); // exactly the cap
+  assert.equal(vet({ kind: 'wish-', text: 'x'.repeat(99_000) }), null);
 });
 
 test('M18: 260k at a finished turn with nothing in flight -> WRAP; the handoff applied -> restarted on it', async () => {
@@ -192,7 +192,7 @@ test('the lines come from the rules', async () => {
   const w = world();
   assert.equal(await w.step(ended(160_000), 1, { rules: rulesWith({ [K.leadSoft]: 150_000 }) }), 'WRAP sent');
   await assert.rejects(() => world().step(ended(1), 1, { rules: rulesWith({ [K.leadSoft]: undefined }) }), /context\.lead\.soft/);
-  assert.throws(() => handoffVet(rulesWith({ [K.handoffCapRole]: undefined }))({ kind: 'handoff', text: '' }), /handoff_cap/);
+  assert.throws(() => handoffVet(rulesWith({ [K.handoffCapRole]: undefined }))({ kind: 'handoff-', text: '' }), /handoff_cap/);
   assert.equal(readdirSync(w.outbox).length, 0);
 });
 

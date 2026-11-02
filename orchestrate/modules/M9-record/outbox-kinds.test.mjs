@@ -26,8 +26,8 @@ function writable() {
     for (const k of p.outbox_kinds ?? []) pairs.push([role, k, 'profile']);
   }
   for (const [k, spec] of Object.entries(OUTBOX_KINDS)) for (const role of spec.roles) pairs.push([role, k, 'OUTBOX_KINDS']);
-  // M4's design table, which M11 intake's kindsFor() reads: its kinds have no trailing dash ('ask' is the file kind ask-).
-  for (const [role, p] of Object.entries(DESIGN_PROFILES)) for (const k of p.outbox) pairs.push([role, `${k}-`, 'M4 DESIGN_PROFILES']);
+  // M4's design table, which M11 intake's kindsFor() reads: since main 27878ca it holds full kinds, trailing dash included.
+  for (const [role, p] of Object.entries(DESIGN_PROFILES)) for (const k of p.outbox) pairs.push([role, k, 'M4 DESIGN_PROFILES']);
   return pairs;
 }
 
