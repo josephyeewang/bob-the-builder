@@ -58,9 +58,9 @@ const CONFIG_IMPORTS = Object.freeze([
   ['modules/M4-workshop/launcher/review-runner-main.mjs', 'import(pathToFileURL(c.wiring).href)'],
   ['modules/M4-workshop/launcher/review-runner-main.mjs', 'import(pathToFileURL(c.budget).href)'],
 ]);
-// Every program a job file starts from the installed copy (L132 M-2): the three LaunchDaemons' scripts and the
-// Dispatcher's. A new job file adds its script here.
-const ENTRY_POINTS = Object.freeze([...Object.values(SCRIPTS), 'modules/M11-dispatcher/main.mjs']);
+// Every program a job file starts from the installed copy (L132 M-2): the three LaunchDaemons' scripts, the
+// Dispatcher's and the watch-only week's. A new job file adds its script here.
+const ENTRY_POINTS = Object.freeze([...Object.values(SCRIPTS), 'modules/M11-dispatcher/main.mjs', 'modules/M6-merge-gate/watch-run.mjs']);
 
 // Modules whose whole body is a test fixture's hook: each reads a hook's input on stdin and exits while it loads. Each
 // child is given such an input; a module on this list must exit while it loads, and any other module must not.

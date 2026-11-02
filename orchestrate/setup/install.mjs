@@ -16,7 +16,7 @@ import { dirname, join, posix } from 'node:path';
 import { realpathSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { SCRIPTS } from '../modules/M4-workshop/launcher/review-daemons.mjs';
+import { LABEL, SCRIPTS } from '../modules/M4-workshop/launcher/review-daemons.mjs';
 import { NODE, RUNNER_CONFIG, RUNNER_MODULES, STAMP, UPDATER_CONFIG, aclProblem, copyModuleProblem, currentCopy, installProblem, readInstallStamp } from '../modules/M4-workshop/launcher/install-check.mjs';
 import { MUST_KEEP, RUNNER_NAMES } from '../modules/M4-workshop/launcher/review-updater.mjs';
 import { parseConfig } from './layout.mjs';
@@ -26,8 +26,8 @@ export const ORCH_ROOT = join(HERE, '..');   // this repository's orchestrate/ f
 // The updater's module set, relative to orchestrate/ (review-updater.mjs imports the other two by these relative paths).
 const UPDATER_DIR = posix.dirname(SCRIPTS.updater);
 export const BOOTSTRAP_FILES = Object.freeze([SCRIPTS.updater, posix.join(UPDATER_DIR, 'install-check.mjs'), posix.join(UPDATER_DIR, '../git/safe-git.mjs')].map((p) => posix.normalize(p)));
-// The jobs' label rule, as review-daemons.mjs has it (that file does not export it; a test pins the two together).
-export const LABEL_RE = /^[A-Za-z0-9][A-Za-z0-9.-]{0,127}$/;
+// The jobs' label rule is review-daemons.mjs's own (it exports it), so there is one.
+export const LABEL_RE = LABEL;
 const HTTPS = /^https:\/\/[A-Za-z0-9.-]+(:\d+)?\/[^\s]+$/;
 const PLAIN_ABS = (p) => typeof p === 'string' && p.startsWith('/') && posix.normalize(p) === p && !p.includes('\0') && !p.includes('\n') && p !== '/';
 const KEEP_NAME = /^(?!\.\.?$)[A-Za-z0-9._-]{1,128}$/;
@@ -103,7 +103,7 @@ export function planInstall(io, cfg, { readSource, runUpdater }) {
     return { ops, problems, installed: !why };
   }
   let rc; let rcText = null;
-  try { rcText = readSource(cfg.runnerConfig); } catch (e) { problems.push(`the runner config ${cfg.runnerConfig} can't be read: ${e.message}`); }   // the reader's messages never quote the file
+  try { rcText = readSource(cfg.runnerConfig); } catch (e) { problems.push(`${e.message} (${cfg.runnerConfig})`); }   // the reader's messages never quote the file
   if (rcText !== null) { try { rc = JSON.parse(rcText); } catch { problems.push(`the runner config ${cfg.runnerConfig} is not valid JSON`); } }   // never the parser's message: it quotes the file
   if (rc && (typeof rc !== 'object' || rc.installRoot !== io.at(P.installRoot))) problems.push(`the runner config's installRoot must be ${io.at(P.installRoot)}`);
   const names = rc ? RUNNER_NAMES.filter((n) => typeof rc[n] === 'string') : [];

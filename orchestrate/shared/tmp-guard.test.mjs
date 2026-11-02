@@ -79,8 +79,25 @@ test('a whole run of every orchestrate suite leaves no lane\'s temp folder behin
   const tmp = tempDir('orch-guardrun-');
   const files = ALL.filter((f) => f.endsWith('.test.mjs') && f !== SELF);
   assert.ok(files.length >= 10, 'found the test files');
-  const run = spawnSync(process.execPath, ['--test', ...files], { encoding: 'utf8', env: cleanEnv({ TMPDIR: tmp, TMP: tmp, TEMP: tmp }), maxBuffer: 64 * 1024 * 1024 });
-  assert.equal(run.status, 0, run.stdout.slice(-2000) + run.stderr.slice(-2000));
+  const run = spawnSync(process.execPath, ['--test', '--test-reporter=tap', ...files], { encoding: 'utf8', env: cleanEnv({ TMPDIR: tmp, TMP: tmp, TEMP: tmp }), maxBuffer: 64 * 1024 * 1024 });
+  // L170 item 4: say which inner tests failed (each "not ok" line that is not a todo, with its error's first lines),
+  // not the run's last 2000 characters, which are mostly the summary.
+  const failed = () => {
+    const lines = run.stdout.split('\n');
+    const out = [];
+    lines.forEach((l, i) => {
+      if (!/^\s*not ok \d+/.test(l) || /# TODO\b/.test(l)) return;
+      const end = lines.findIndex((x, k) => k > i && /^\s*\.\.\.\s*$/.test(x));
+      const block = lines.slice(i + 1, end < 0 ? i + 30 : end);
+      const loc = block.find((x) => /^\s*location:/.test(x));
+      const e = block.findIndex((x) => /^\s*error:/.test(x));
+      const pad = e < 0 ? 0 : block[e].search(/\S/);
+      const err = e < 0 ? [] : [block[e], ...block.slice(e + 1).filter((x, k, a) => x.trim() && a.slice(0, k + 1).every((y) => !y.trim() || y.search(/\S/) > pad)).slice(0, 3)];
+      out.push([l.trim(), ...[loc, ...err].filter(Boolean).map((x) => `    ${x.trim()}`)].join('\n'));
+    });
+    return `${out.length} inner test(s) failed:\n${out.join('\n') || '(no "not ok" line; stderr follows)'}\n${run.stderr.slice(-800)}`;
+  };
+  assert.equal(run.status, 0, run.status === 0 ? '' : failed());
   const tolerated = Object.values(NOT_SWITCHED_YET);
   const left = readdirSync(tmp).filter((n) => OURS.test(n) && !tolerated.some((p) => n.startsWith(p)));
   assert.deepEqual(left, []);
