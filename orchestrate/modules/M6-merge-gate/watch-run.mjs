@@ -15,6 +15,7 @@
 import { chmodSync, closeSync, constants, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { isRepoName } from '../../setup/layout.mjs';
 import { draftRules, githubRules, readExplanations, readOnlyClient, summary, tokenFile, watchPass } from './watch-only.mjs';
 
 const OPTS = ['--repo', '--dir', '--token-file', '--rules', '--rules-sha256', '--end-day', '--explanations', '--owner-uid', '--file', '--sha', '--text'];
@@ -34,7 +35,7 @@ export function parseArgs(argv) {
   }
   for (const k of NEED[cmd]) if (!o[k]) throw new Error(`--${k.replace(/[A-Z]/g, (c) => `-${c.toLowerCase()}`)} is required`);
   if (cmd === 'once') {
-    if (!/^[A-Za-z0-9_-][A-Za-z0-9_.-]*\/[A-Za-z0-9_-][A-Za-z0-9_.-]*$/.test(o.repo)) throw new Error('--repo must be owner/name');
+    if (!isRepoName(o.repo)) throw new Error('--repo must be owner/name');   // the one owner/name check, shared with the setup's config and print-config-line (L203 m-B)
     if (!['draft', 'github'].includes(o.rules)) throw new Error('--rules must be draft or github');
     if (o.rules === 'draft' && !/^[0-9a-f]{64}$/.test(o.rulesSha256 ?? '')) throw new Error('--rules draft needs --rules-sha256 (64 hex characters)');
     if (o.rules === 'github' && o.rulesSha256) throw new Error('--rules-sha256 is only for --rules draft');

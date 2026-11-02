@@ -61,8 +61,9 @@ export function briefAnswers(text, ids) {
 }
 
 // Lead call L22: the brief goes to the owner's phone as a push, once per new set of away files. states: [{ id, state }], the
-// newest checked state file per product; only "away" ones count, so a plain pause never pushes a trip brief (0b-8
-// audit round 5 M-1). lastPushedIds: the ids of the last brief pushed; lastFailedIds: the ids of the last failure
+// newest STORED state file per product (not merely intake-checked: until the pause/away apply lands the record refuses
+// state-, and a brief for a refused file would tell the owner a trip mode that isn't set, #95 r2 m4); only "away" ones
+// count, so a plain pause never pushes a trip brief (0b-8 audit round 5 M-1). lastPushedIds: the ids of the last brief pushed; lastFailedIds: the ids of the last failure
 // pushed; build(ids) → the brief text. Returns { text, ids } to push, or null (nothing new). A brief that can't be
 // built, or doesn't name every id, returns { text, ids, failed: true }: the Ledger pushes it and stores its ids as
 // lastFailedIds, NOT lastPushedIds, so it keeps trying every pass and pushes the real brief once it builds (0b-8

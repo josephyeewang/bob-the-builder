@@ -49,8 +49,10 @@ export function sortRequest(text, { products = [] } = {}) {
   return { sure: false, mode: null, recommend: all[0] ?? NO_CUE_RECOMMEND, hits: all };
 }
 
-const LINE = { new: 'Start a new project', evolve: 'Change an existing product', audit: 'Check (audit) a product',
-  upgrade: 'Bring a product up to date with Bob', think: 'Think it through in a thinking room' };
+// Each mode's label: the read-back's line 1 and the unsure box's options. The skill's table names each one verbatim
+// (L197 R2-M1), since the phone runs the skill, not this file.
+export const LINE = Object.freeze({ new: 'Start a new project', evolve: 'Change an existing product', audit: 'Check (audit) a product',
+  upgrade: 'Bring a product up to date with Bob', think: 'Think it through in a thinking room' });
 const NOT_WIRED = 'That request isn\'t wired to the Mini yet, so I file nothing';
 const ON_GO = { new: 'On Go: I file nothing; you open a session on the Mini and say `bob NEW <name>`.',
   think: `On Go: ${NOT_WIRED}; to think it through now, open a session on the Mini and say what you want to think about.` };
