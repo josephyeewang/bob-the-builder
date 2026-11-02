@@ -95,15 +95,18 @@ export function planPlace(io, cfg, jobs = jobsFor(cfg)) {
   return { ops, problems };
 }
 
-export function planLoad(io, cfg, jobs = jobsFor(cfg)) {
-  const P = installPaths(cfg); const ops = []; const problems = [];
+/** Null, or why no job may be (re)loaded now: a job must not start against a copy that is not whole and root's alone (L149 m8; the same check as check-install). Used by load AND reload-account (L194 M1). */
+function installProblem(io, cfg) {
+  const P = installPaths(cfg);
   const cur = currentCopy(io.at(P.installRoot), { owner: io.rootUid });
-  if (cur.missing || cur.problem || !cur.link) problems.push('the install is not there yet (run the install first), so a job would start against nothing');
-  else {
-    // A job must not start against a copy that is not whole and root's alone (L149 m8): the same check as check-install.
-    const bad = checkInstall(io, cfg).filter((r) => !r.ok);
-    if (bad.length) problems.push(`the install check fails (${bad[0].what}: ${bad[0].why})${bad.length > 1 ? `, and ${bad.length - 1} more` : ''}; fix that first (node setup.mjs check-install shows all of it)`);
-  }
+  if (cur.missing || cur.problem || !cur.link) return 'the install is not there yet (run the install first), so a job would start against nothing';
+  const bad = checkInstall(io, cfg).filter((r) => !r.ok);
+  return bad.length ? `the install check fails (${bad[0].what}: ${bad[0].why})${bad.length > 1 ? `, and ${bad.length - 1} more` : ''}; fix that first (node setup.mjs check-install shows all of it)` : null;
+}
+
+export function planLoad(io, cfg, jobs = jobsFor(cfg)) {
+  const ops = []; const problems = [];
+  const bad = installProblem(io, cfg); if (bad) problems.push(bad);
   if (jobs.includes('watch-only')) {
     let r = null; try { r = io.lstat(watchRulesPath(cfg)); } catch { /* below */ }
     if (!r) problems.push(`${watchRulesPath(cfg)} is not there (run watch-rules first), so the hourly watch job would have no rules to judge by`);
@@ -141,7 +144,9 @@ export function planUnload(io, cfg, jobs = [...JOBS, 'watch-only']) {
  * Runbook A8: the account job reloaded so its file carries `--install <the installed copy>` (copy-to refuses without it).
  * A job that is not loaded gives NO steps and a problem (exit 1): either nothing has loaded it yet, or an earlier reload stopped
  * half way; either way the instruction is "run: daemons load". A loaded one gets its file rewritten (only if it differs), then
- * unloaded and loaded again. Nothing else is touched.
+ * unloaded and loaded again. Nothing else is touched. Like load, it refuses unless the install check passes (L194 M1).
+ * Run again with nothing to change (the file is as built AND the job was loaded from it), it does nothing: unloading would only
+ * stop a pass that may be running, and the job would come back exactly as it was (L194 m1).
  */
 export function planReloadAccount(io, cfg) {
   const job = 'review-account'; const label = labelOf(cfg, job);
@@ -154,6 +159,7 @@ export function planReloadAccount(io, cfg) {
     if (rec0 && rec0[label] !== undefined) return { ops: [], problems: [`${label} is NOT loaded now, though it was loaded before (an earlier reload probably stopped half way). Nothing is running it. Run: daemons load`] };
     return { ops: [], problems: [`the account job (${label}) is not loaded, so there is nothing to reload. Run: daemons load`] };
   }
+  const bad = installProblem(io, cfg); if (bad) return { ops: [], problems: [bad] };
   const { plists, problems } = plistTexts(io, cfg);
   if (problems.length) return { ops: [], problems };
   const P = installPaths(cfg);
@@ -163,6 +169,7 @@ export function planReloadAccount(io, cfg) {
   const out = op(`launchctl bootout system/${label}`, () => { const r = launchctl(io, ['bootout', `system/${label}`]); if (r.status !== 0) throw new Error(`could not unload ${label} (${failText(r)})`); });
   const inn = op(`launchctl bootstrap system ${io.at(plistPath(cfg, job))}`, () => { const r = launchctl(io, ['bootstrap', 'system', io.at(plistPath(cfg, job))]); if (r.status !== 0) throw new Error(`could not load ${label} (${failText(r)}); run: daemons load`); });
   const text = plists[job]; const h = sha(text);
+  if (place.ops.length === 0 && (readRecord(io, cfg) ?? {})[label] === h) return { ops: [], problems: [] };   // already loaded from this very file (m1)
   const rec = op(`record the fingerprint of ${label}'s job file in ${recordPath(cfg)}`, () => changeRecord(io, cfg, (x) => { x[label] = h; }));
   return { ops: [...place.ops, out, inn, rec, readBackOp(io, cfg, job)], problems: [] };
 }
