@@ -25,11 +25,13 @@ import { watchRulesPath } from './layout.mjs';
 export const DAEMON_DIR = '/Library/LaunchDaemons';
 const LAUNCHCTL = '/bin/launchctl';
 export const JOBS = Object.freeze(['review-updater', 'review-account', 'review-runner']);   // load order: the updater first
-// The hourly watch-only job (watch-setup.mjs) is a fourth job only when the config has a `watch` entry.
-export const jobsFor = (cfg) => (cfg.watch ? [...JOBS, 'watch-only'] : [...JOBS]);
-/** `--only <job>`: that one job, or a clear refusal naming the jobs there are (the watch job exists only when the config has a `watch` entry). */
+// The hourly watch-only job (watch-setup.mjs) is a fourth job only when the config's `watch` entry has the rules fingerprint (R6 M-1):
+// a repo-only entry (all prove-token needs) leaves the three review jobs exactly as before.
+export const jobsFor = (cfg) => (cfg.watch?.rulesSha256 ? [...JOBS, 'watch-only'] : [...JOBS]);
+/** `--only <job>`: that one job, or a clear refusal naming the jobs there are (the watch job exists only when the config's `watch` entry has the rules fingerprint). */
 export function onlyJobs(cfg, name) {
   const all = jobsFor(cfg);
+  if (name === 'watch-only' && cfg.watch && !cfg.watch.rulesSha256) throw new Error(WATCH_NO_HASH);
   if (!all.includes(name)) throw new Error(`--only names no job of this config: ${JSON.stringify(String(name).slice(0, 60))}; the jobs are ${all.join(', ')}`);
   return [name];
 }
@@ -57,9 +59,9 @@ export function plistTexts(io, cfg) {
   try {
     const two = reviewDaemonPlists({ ...common, config: join(P.installRoot, RUNNER_CONFIG), reviewRoot: P.reviewRoot, reviewHome: homeOf(cfg, 'review'), accountCopy: P.accountCopy, ownerHome: owner.home, ownerUid: owner.uid });
     const plists = { 'review-runner': two.runner, 'review-account': two.accountCopy, 'review-updater': updaterPlist(common) };
-    if (cfg.watch) plists['watch-only'] = watchPlist(io, cfg);
+    if (cfg.watch?.rulesSha256) plists['watch-only'] = watchPlist(io, cfg);
     return { plists, problems };
-  } catch (e) { return { plists: {}, problems: [e.message === WATCH_NO_HASH ? e.message : `the job files cannot be built from the owner's Mac user ${cfg.owner} (${e.message}); is its home folder set?`] }; }
+  } catch (e) { return { plists: {}, problems: [`the job files cannot be built from the owner's Mac user ${cfg.owner} (${e.message}); is its home folder set?`] }; }
 }
 
 const launchctl = (io, args) => io.run(LAUNCHCTL, args);
@@ -102,7 +104,7 @@ export function planLoad(io, cfg, jobs = jobsFor(cfg)) {
     const bad = checkInstall(io, cfg).filter((r) => !r.ok);
     if (bad.length) problems.push(`the install check fails (${bad[0].what}: ${bad[0].why})${bad.length > 1 ? `, and ${bad.length - 1} more` : ''}; fix that first (node setup.mjs check-install shows all of it)`);
   }
-  if (cfg.watch && jobs.includes('watch-only')) {
+  if (jobs.includes('watch-only')) {
     let r = null; try { r = io.lstat(watchRulesPath(cfg)); } catch { /* below */ }
     if (!r) problems.push(`${watchRulesPath(cfg)} is not there (run watch-rules first), so the hourly watch job would have no rules to judge by`);
   }
@@ -185,7 +187,7 @@ export function checkDaemons(io, cfg, jobs = jobsFor(cfg)) {
   // It is about the whole set, so a check narrowed with --only leaves it out.
   let names = []; try { names = io.list(DAEMON_DIR); } catch { /* the folder itself is checked by place */ }
   const subset = jobs.length < jobsFor(cfg).length;
-  const stray = subset ? [] : names.filter((n) => { const m = /^(.+)\.(review-updater|review-account|review-runner)\.plist$/.exec(n); return m && m[1] !== cfg.label; });
+  const stray = subset ? [] : names.filter((n) => { const m = /^(.+)\.(review-updater|review-account|review-runner|watch-only)\.plist$/.exec(n); return m && m[1] !== cfg.label; });
   item(stray.length === 0, `no job file in ${DAEMON_DIR} under another label than ${cfg.label}`, `${stray.join(', ')}: a leftover set of jobs (take them out with daemons unload under the old label, then delete the files)`, subset);
   const rec = readRecord(io, cfg);
   for (const job of jobs) {

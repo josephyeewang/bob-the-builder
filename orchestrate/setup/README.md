@@ -129,8 +129,11 @@ stderr with exit 0; opening a link with `O_NOFOLLOW|O_DIRECTORY` gives `ENOTDIR`
 ## Part 4 — the watch-only week's rules copy and hourly job (R-0b-122)
 
 Config: an optional `"watch": { "repo": "<owner/name>", "rulesSha256": "<64 hex>" }` in the root-owned config. Without it,
-everything below is off. The hash is the SHA-256 of the rules draft file (`shasum -a 256 <file>` prints it), written by whoever
+everything below is off. With only the `repo` (all `prove-token` needs) the three review jobs are exactly as before, no hourly
+job is built, and `watch-rules`, `check-watch-rules` and `daemons ... --only watch-only` say "no rulesSha256 yet" and what to do.
+The hash is the SHA-256 of the rules draft file (`shasum -a 256 <file>` prints it), written by whoever
 edits the root config, so the owner's own Mac user cannot choose the rules the week is judged by.
+The fingerprint is of the UTF-8 text of the file, so it is the same as `shasum`'s for any valid UTF-8 file (which a rules file is).
 
 | Command | What it does | Root? |
 |---|---|---|

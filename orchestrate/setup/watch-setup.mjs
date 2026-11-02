@@ -81,7 +81,7 @@ export function planWatchRules(io, cfg, { source, readSource }) {
   let same = false;
   try { const s = io.lstat(dest); same = s.isFile() && !s.isSymbolicLink() && s.uid === io.rootUid && (s.mode & 0o7777) === 0o644 && sha(io.readText(dest)) === got && aclProblem([io.at(dest)]) === null; } catch { /* not there */ }
   if (same) return { ops: [], problems: [] };
-  return { ops: [op(`write ${dest}   (root:wheel 0644, hash ${short(got)}…)`, () => { io.rm(dest); io.write(dest, text, 0o600); io.secureFile(dest, { uid: io.rootUid, gid: 0, mode: 0o644 }); })], problems: [] };
+  return { ops: [op(`write ${dest}   (root:wheel 0644, hash ${short(got)}…)`, () => { io.rm(dest); io.writeOwned(dest, text, { uid: io.rootUid, gid: 0, mode: 0o644 }); })], problems: [] };
 }
 
 /** Read only → [{ ok, what, why? }]; needs root to look (the folder is orchestrate's 0700). */

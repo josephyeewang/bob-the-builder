@@ -4,12 +4,13 @@
 
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { chmodSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, fstatSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
 import { ROOT_CONFIG_PATH, folderTable, parseConfig, watchNotesPath, watchRulesPath } from './layout.mjs';
 import { parseInstallConfig } from './install.mjs';
 import { jobsFor, plistTexts, checkDaemons, planPlace, planLoad, planUnload } from './daemons.mjs';
+import { readConfigFile, realIo } from './mac.mjs';
 import { checkWatchRules, planWatchRules, watchPlist, WATCH_RUN } from './watch-setup.mjs';
 import { main, parseArgs } from './setup.mjs';
 import { fakeMac, macTest as test } from './fake-mac.test-helper.mjs';
@@ -252,7 +253,7 @@ test('L160 watch-rules reads the rules file safely, as root would: a link, a fol
   const hidden = join(w.ext, 'hidden.yaml'); writeFileSync(hidden, `${SECRET_LINE}\n`);
   const link = join(w.ext, 'link.yaml'); symlinkSync(hidden, link);
   const big = join(w.ext, 'big.yaml'); writeFileSync(big, `${SECRET_LINE}${'x'.repeat(70000)}`);
-  for (const [src, why] of [[link, /rules file is a link/], [w.ext, /rules file is not a plain file/], [big, /rules file is far bigger/], [join(w.ext, 'none.yaml'), /rules file file was not found/]]) {
+  for (const [src, why] of [[link, /rules file is a link/], [w.ext, /rules file is not a plain file/], [big, /rules file is far bigger/], [join(w.ext, 'none.yaml'), /rules file was not found/]]) {
     const r = w.run(['watch-rules', '--rules-source', src]); assert.equal(r.code, 1, `${src}: ${r.text}`);
     assert.match(r.text, why); assert.doesNotMatch(r.text, /zz-secret/);
     const p = w.run(['watch-rules', '--print-config-line', '--repo', REPO, '--rules-source', src]); assert.equal(p.code, 1, r.text); assert.doesNotMatch(p.text, /zz-secret/);
@@ -260,13 +261,70 @@ test('L160 watch-rules reads the rules file safely, as root would: a link, a fol
   assert.equal(w.run(['watch-rules', '--rules-source', w.src]).code, 0);   // the owner of the file is not judged: a plain file of anyone's is fine
 });
 
-test('L173 the config may name the repository before the rules exist (prove-token needs only that): every reader of watch.rulesSha256 then says so plainly, and none puts "undefined" anywhere', () => {
-  const w = world({ raw: { ...RAW, watch: { repo: REPO } } });
-  const place = w.run(['daemons', 'place']); assert.equal(place.code, 1, place.text); assert.match(place.text, /no rulesSha256 yet/); assert.doesNotMatch(place.text, /undefined|home folder/);
-  assert.equal(statSync(w.mac.at('/Library/LaunchDaemons')).isDirectory(), true);
-  assert.deepEqual(jobsFor(w.cfg).filter((j) => { try { statSync(w.mac.at(`/Library/LaunchDaemons/${RAW.label}.${j}.plist`)); return true; } catch { return false; } }), [], 'no job file was written');
-  const wr = w.run(['watch-rules', '--rules-source', w.src]); assert.equal(wr.code, 1, wr.text); assert.match(wr.text, /no rulesSha256 yet/); assert.doesNotMatch(wr.text, /undefined/);
+test('R6 M-1 / L173 the config may name only the repository (prove-token needs just that): the three review jobs are exactly as before, the watch job is not built, and every watch command says so plainly', () => {
+  const rawNo = { ...RAW }; delete rawNo.watch;
+  const w = world({ raw: { ...RAW, watch: { repo: REPO } } }); const base = world({ raw: rawNo });
+  assert.deepEqual(jobsFor(w.cfg), ['review-updater', 'review-account', 'review-runner']);                                   // R6A
+  const t = plistTexts(w.mac, w.cfg); assert.equal(t.plists['watch-only'], undefined); assert.deepEqual(t.problems, []);
+  const place = w.run(['daemons', 'place']); assert.equal(place.code, 0, place.text);                                       // R6B
+  assert.doesNotMatch(place.text, /watch-only|undefined/);
+  const placed = (job) => { try { statSync(w.mac.at(`/Library/LaunchDaemons/${RAW.label}.${job}.plist`)); return true; } catch { return false; } };
+  assert.deepEqual(['review-updater', 'review-account', 'review-runner', 'watch-only'].filter(placed), ['review-updater', 'review-account', 'review-runner']);
+  assert.equal(planLoad(w.mac, w.cfg).problems.some((x) => /watch|rules/.test(x)), false);                                   // R6C: review jobs are not held up by the watch rules
+  assert.equal(checkDaemons(w.mac, w.cfg).length, checkDaemons(base.mac, base.cfg).length);                                 // R6D: the check has exactly the items it had before #86
+  assert.equal(checkDaemons(w.mac, w.cfg).some((r) => /watch/.test(r.what)), false);
+  const wr = w.run(['watch-rules', '--rules-source', w.src]); assert.equal(wr.code, 1, wr.text); assert.match(wr.text, /no rulesSha256 yet/);   // R6E: refused, not thrown
+  assert.doesNotMatch(wr.text, /undefined|TypeError|THREW/);
+  const dr = w.run(['watch-rules', '--rules-source', w.src, '--dry-run']); assert.equal(dr.code, 1, dr.text); assert.match(dr.text, /no rulesSha256 yet/);
   const ck = w.run(['check-watch-rules']); assert.equal(ck.code, 1, ck.text); assert.match(ck.text, /FAIL .*no rulesSha256 yet/); assert.doesNotMatch(ck.text, /undefined/);
-  const dc = w.run(['daemons', 'check']); assert.equal(dc.code, 1, dc.text); assert.match(dc.text, /no rulesSha256 yet/);
+  // --only watch-only says the same, instead of "no such job"
+  for (const sub of ['place', 'load', 'unload', 'list', 'check']) { const x = w.run(['daemons', sub, '--only', 'watch-only']); assert.equal(x.code, 2, `${sub}: ${x.text}`); assert.match(x.text, /no rulesSha256 yet/); }
   assert.equal(w.run(['watch-rules', '--print-config-line', '--repo', REPO, '--rules-source', w.src]).code, 0, 'the line that fixes it can still be printed');
+  // and the job builder itself refuses (a caller that skips jobsFor)
+  assert.throws(() => watchPlist(w.mac, w.cfg), /no rulesSha256 yet/);
+});
+
+test('R6 class check: every reader of watch.* in setup code is either the repo (always there) or gated on the fingerprint', () => {
+  // The config shape is the only door: `watch.repo` is required wherever `watch` exists, `rulesSha256` optional. This pins the optional one.
+  const cfg = parseInstallConfig({ ...RAW, watch: { repo: REPO } });
+  assert.equal(cfg.watch.rulesSha256, undefined); assert.equal(cfg.watch.repo, REPO);
+  assert.deepEqual(planWatchRules(world().mac, cfg, { source: '/x', readSource: () => 'x' }).problems.length, 1);
+  assert.equal(failing(checkWatchRules(world().mac, cfg)).length, 1);
+});
+
+test('R6 m-1 a named pipe given as the rules file is refused at once, not waited on', { skip: process.platform === 'win32' }, () => {
+  const dir = tempDir('orch-fifo-'); const fifo = join(dir, 'rules.fifo');
+  assert.equal(spawnSync('/usr/bin/mkfifo', [fifo]).status, 0);
+  const macUrl = new URL('./mac.mjs', import.meta.url).href;
+  const r = spawnSync(process.execPath, ['--input-type=module', '-e', `import { readConfigFile } from ${JSON.stringify(macUrl)}; try { readConfigFile(${JSON.stringify(fifo)}, { what: 'the rules file' }); console.log('READ'); } catch (e) { console.log(e.message); }`], { encoding: 'utf8', timeout: 5000 });
+  assert.equal(r.error, undefined, 'the read did not hang'); assert.match(r.stdout, /rules file is not a plain file/);
+});
+
+test('R6 m-2 a file that grew after the size check is refused by the bytes actually read, not read to its end', () => {
+  const dir = tempDir('orch-grow-'); const f = join(dir, 'rules.yaml'); writeFileSync(f, 'x'.repeat(200000));
+  const lying = (fd) => ({ ...fstatSync(fd), isFile: () => true, size: 100 });   // what the size check saw, before the file grew
+  assert.throws(() => readConfigFile(f, { what: 'the rules file', fstat: lying }), /rules file is far bigger/);
+  writeFileSync(f, 'ok\n'); assert.equal(readConfigFile(f, { what: 'the rules file', fstat: lying }), 'ok\n');
+});
+
+test('R6 m-3 the rules copy is written through writeOwned: owner and mode are set on the open handle, and the name is not reopened afterwards', () => {
+  const w = world(); const dest = watchRulesPath(w.cfg);
+  const r = w.run(['watch-rules', '--rules-source', w.src]); assert.equal(r.code, 0, r.text);
+  assert.ok(w.mac.log.includes(`write ${dest}`), 'written');
+  assert.ok(!(w.mac.reopened ?? []).includes(dest), 'the name was reopened to chown it (a swapped-in hard link would be chowned)');
+  assert.equal(failing(checkWatchRules(w.mac, w.cfg)).length, 0);
+});
+
+test('R6 m-5 the real Mac\'s readRules is the safe single-handle read: a link and a folder are refused, a plain file of anyone\'s is read', () => {
+  const dir = tempDir('orch-realrules-'); const f = join(dir, 'r.yaml'); writeFileSync(f, 'a: 1\n'); symlinkSync(f, join(dir, 'l.yaml'));
+  const io = realIo();
+  assert.equal(io.readRules(f), 'a: 1\n');
+  assert.throws(() => io.readRules(join(dir, 'l.yaml')), /rules file is a link/);
+  assert.throws(() => io.readRules(dir), /rules file is not a plain file/);
+  assert.throws(() => io.readRules(join(dir, 'none')), /rules file was not found/);
+  writeFileSync(join(dir, 'big'), 'x'.repeat(70000)); assert.throws(() => io.readRules(join(dir, 'big')), /far bigger/);
+});
+
+test('R6 c-1 the fingerprint is of the UTF-8 text: the README says so', () => {
+  assert.match(readFileSync(new URL('./README.md', import.meta.url), 'utf8'), /fingerprint is of the UTF-8 text/);
 });

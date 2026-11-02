@@ -6,6 +6,7 @@
 import assert from 'node:assert/strict';
 import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { gitOk } from '../modules/M4-workshop/git/safe-git.mjs';
@@ -53,7 +54,7 @@ async function origin(root) {
 }
 
 /** The throwaway Mac with the users and folders already set up (part 1), and the files the install needs. */
-async function world({ euid = 0 } = {}) {
+async function world({ euid = 0, rules = null } = {}) {
   const mac = fakeMac({ euid: 0 });
   const ext = realpathSync(tempDir('orch-setup-ext-'));
   const bare = await origin(ext);
@@ -70,6 +71,9 @@ async function world({ euid = 0 } = {}) {
     runnerConfig: join(ext, 'review.json'), extras: [join(ext, 'claude-bin'), join(ext, 'hooks')],
     gitBin: join(mac.prefix, 'gitbin', 'git'), nodeBin: join(ext, 'node'),
   };
+  // `rules` (a text): the config also names the watch-only week, with the fingerprint of that text, and the file is at ext/rules.yaml.
+  const rulesSrc = join(ext, 'rules.yaml');
+  if (rules !== null) { writeFileSync(rulesSrc, rules); raw.watch = { repo: 'example-org/example-repo', rulesSha256: createHash('sha256').update(rules).digest('hex') }; }
   const cfgFile = join(ext, 'install.json'); writeFileSync(cfgFile, JSON.stringify(raw));
   const cfg = parseInstallConfig(raw);
   // The updater's first run, for real, in a child: the setup's own seed and bootstrap copy, GitHub's address swapped for the
@@ -99,7 +103,7 @@ async function world({ euid = 0 } = {}) {
   const folders = run(['users-folders']);
   assert.equal(folders.code, 0, folders.text);
   mac.as = euid;
-  return { mac, ext, raw, cfg, cfgFile, run, runUpdater, updaterRuns, updaterCalls, root };
+  return { mac, ext, raw, cfg, cfgFile, run, runUpdater, updaterRuns, updaterCalls, root, rulesSrc };
 }
 const installed = async () => { const w = await world(); const r = w.run(['install']); assert.equal(r.code, 0, r.text); return w; };
 const placed = async () => { const w = await installed(); const r = w.run(['daemons', 'place']); assert.equal(r.code, 0, r.text); return w; };
@@ -820,4 +824,40 @@ test('L160 c3 the REAL readers name which config they refuse: the runner config 
   assert.throws(() => io.readSource(join(d, 'none.json')), /^Error: the runner config file was not found/);
   assert.throws(() => io.readConfig(join(d, 'link.json')), /^Error: the setup config is a link/);
   assert.throws(() => io.readConfig(join(d, 'none.json')), /^Error: the setup config file was not found/);
+});
+
+test('R6 m-4 daemons place|load|unload|check --only watch-only through the command: exactly that job, read back, recorded, and check keeps the loaded-record and first-run items', async () => {
+  const w = await world({ rules: 'version: 1\n' }); const wl = `${LABEL}.watch-only`;
+  assert.equal(w.run(['install']).code, 0);
+  assert.equal(w.run(['watch-rules', '--rules-source', w.rulesSrc]).code, 0);
+  assert.equal(w.run(['daemons', 'place', '--only', 'watch-only']).code, 0);
+  const dry = w.run(['daemons', 'load', '--only', 'watch-only', '--dry-run']); assert.equal(dry.code, 0, dry.text);
+  assert.ok(dry.text.includes(`read back: ${wl} is loaded`), dry.text); assert.equal(w.mac.loaded.size, 0);
+  const ld = w.run(['daemons', 'load', '--only', 'watch-only']); assert.equal(ld.code, 0, ld.text);
+  assert.deepEqual([...w.mac.loaded.keys()], [wl], 'exactly that one job was loaded');
+  const rec = () => JSON.parse(readFileSync(w.mac.at(installPaths(w.cfg).install + '/loaded-jobs.json'), 'utf8'));
+  assert.deepEqual(Object.keys(rec()), [wl], 'the loaded record names that one job');
+  assert.equal(w.run(['daemons', 'check', '--only', 'watch-only']).code, 0);
+  // the loaded record is part of the check under --only
+  writeFileSync(w.mac.at(installPaths(w.cfg).install + '/loaded-jobs.json'), '{}\n');
+  let r = w.run(['daemons', 'check', '--only', 'watch-only']); assert.equal(r.code, 1, r.text); assert.match(r.text, /was loaded from the job file as it is now/);
+  assert.equal(w.run(['daemons', 'load', '--only', 'watch-only']).code, 0);
+  assert.equal(w.run(['daemons', 'check', '--only', 'watch-only']).code, 0);
+  // a first run that never ends is part of the check under --only
+  const j = w.mac.loaded.get(wl); delete j.lastExit; j.ageS = 3 * 3600;
+  r = w.run(['daemons', 'check', '--only', 'watch-only']); assert.equal(r.code, 1, r.text); assert.match(r.text, /on its first run, and not for long/);
+  j.lastExit = '0'; j.ageS = 5;
+  // unload --only takes out that job and forgets only it
+  w.mac.loaded.set(`${LABEL}.review-runner`, { ...j });   // another job is loaded: unload --only must leave it alone
+  const un = w.run(['daemons', 'unload', '--only', 'watch-only']); assert.equal(un.code, 0, un.text);
+  assert.deepEqual([...w.mac.loaded.keys()], [`${LABEL}.review-runner`]); assert.deepEqual(Object.keys(rec()), []);
+});
+
+test('R6 m-6 a watch-only job file left under an old label is flagged by a full check', async () => {
+  const w = await world({ rules: 'version: 1\n' });
+  assert.equal(w.run(['install']).code, 0);
+  assert.equal(w.run(['watch-rules', '--rules-source', w.rulesSrc]).code, 0);
+  assert.equal(w.run(['daemons', 'place']).code, 0);
+  writeFileSync(w.mac.at('/Library/LaunchDaemons/com.example.oldlabel.watch-only.plist'), 'x');
+  const r = w.run(['daemons', 'check']); assert.equal(r.code, 1, r.text); assert.match(r.text, /oldlabel\.watch-only\.plist/);
 });
