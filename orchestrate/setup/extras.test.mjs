@@ -360,7 +360,7 @@ test('L150 m4 P7 the stand-in refuses `sudo -u` without -H, as the real one keep
 });
 
 test('L150 m4 the repo is the config\'s: --repo is gone, a config without watch.repo FAILs plainly, a bad one is refused when the config is read', async () => {
-  assert.throws(() => parseArgs(['prove-token', '--repo', 'org/repo']), /not one this command takes/);
+  assert.throws(() => parseArgs(['prove-token', '--repo', 'org/repo']), /--repo is only for watch-rules --print-config-line/);
   let w = withToken(RAW); github(w); let r = await prove(w, RAW); assert.equal(r.code, 1); assert.match(r.text, /"watch": \{ "repo"/); assert.equal(w.mac.fetchLog.length, 0);
   for (const bad of ['../x', 'a', 'a/b/c', '', 5, 'a/..']) assert.throws(() => parseConfig({ ...RAW, watch: { repo: bad } }), /watch.repo must look like owner\/name/, String(bad));
   assert.throws(() => parseConfig({ ...RAW, watch: 'org/repo' }), /watch.repo/);

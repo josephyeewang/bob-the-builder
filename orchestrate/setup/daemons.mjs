@@ -182,9 +182,11 @@ export function checkDaemons(io, cfg, jobs = jobsFor(cfg)) {
   const { plists, problems } = plistTexts(io, cfg);
   if (problems.length) { item(false, 'the job files can be built', problems[0]); return out; }
   // A job file under another label is a second copy of a job that launchd may be running too (a changed label leaves the old one behind).
+  // It is about the whole set, so a check narrowed with --only leaves it out.
   let names = []; try { names = io.list(DAEMON_DIR); } catch { /* the folder itself is checked by place */ }
-  const stray = names.filter((n) => { const m = /^(.+)\.(review-updater|review-account|review-runner)\.plist$/.exec(n); return m && m[1] !== cfg.label; });
-  item(stray.length === 0, `no job file in ${DAEMON_DIR} under another label than ${cfg.label}`, `${stray.join(', ')}: a leftover set of jobs (take them out with daemons unload under the old label, then delete the files)`);
+  const subset = jobs.length < jobsFor(cfg).length;
+  const stray = subset ? [] : names.filter((n) => { const m = /^(.+)\.(review-updater|review-account|review-runner)\.plist$/.exec(n); return m && m[1] !== cfg.label; });
+  item(stray.length === 0, `no job file in ${DAEMON_DIR} under another label than ${cfg.label}`, `${stray.join(', ')}: a leftover set of jobs (take them out with daemons unload under the old label, then delete the files)`, subset);
   const rec = readRecord(io, cfg);
   for (const job of jobs) {
     const f = plistPath(cfg, job); const why = [];

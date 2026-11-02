@@ -93,7 +93,7 @@ function report(res, out) {
 export function planCommand(io, cfg, o, { readSource = (p) => io.readSource(p), runUpdater = spawnUpdater } = {}) {
   if (o.cmd === 'users-folders') return plan(io, cfg);   // carries the wall itself
   if (o.cmd === 'proposals') return guarded(io, cfg, planProposals(io, cfg));   // the base wall first (L150 m3), then its own wall for the parent (extras.mjs)
-  if (o.cmd === 'watch-rules') return guarded(io, cfg, planWatchRules(io, cfg, { source: o.rulesSource, readSource }));
+  if (o.cmd === 'watch-rules') return guarded(io, cfg, planWatchRules(io, cfg, { source: o.rulesSource, readSource: (p) => io.readRules(p) }));
   if (o.cmd === 'safe-directory') return planSafeDirectory(io, cfg);   // root writes nothing: git runs as the owner
   const res = o.cmd === 'install' ? planInstall(io, cfg, { readSource, runUpdater })
     : o.cmd === 'token' ? planToken(io, cfg)
@@ -129,7 +129,7 @@ export function main(argv, { io: given, runUpdater = spawnUpdater, out = (s) => 
   if (o.cmd === 'check-safe-directory') return report(checkSafeDirectory(io, cfg), out);
   if (o.cmd === 'check-token') return report(checkToken(io, cfg), out);
   if (o.cmd === 'check-watch-rules') return report(checkWatchRules(io, cfg), out);
-  if (o.cmd === 'watch-rules' && o.printLine) { const r = watchConfigLine(cfg, { repo: o.repo, source: o.rulesSource, readSource: (p) => readFileSync(p, 'utf8') }); if (r.problem) { err(`PROBLEM  ${r.problem}`); return 1; } out(r.line); return 0; }
+  if (o.cmd === 'watch-rules' && o.printLine) { const r = watchConfigLine(cfg, { repo: o.repo, source: o.rulesSource, readSource: (p) => io.readRules(p) }); if (r.problem) { err(`PROBLEM  ${r.problem}`); return 1; } out(r.line); return 0; }
   if (o.cmd === 'prove-token') return proveToken(io, cfg).then((res) => report(res, out));
   if (o.cmd === 'daemons' && o.sub === 'check') return report(checkDaemons(io, cfg, o.jobs), out);
   if (o.cmd === 'daemons' && o.sub === 'list') {

@@ -49,7 +49,7 @@ export function watchPlist(io, cfg) {
 /** A rules file named on the command line: a full path, a plain non-empty file that can be read. → { text } or { problem }. Fails closed. */
 function readRules(source, readSource) {
   if (typeof source !== 'string' || !source.startsWith('/')) return { problem: '--rules-source must be the full path of the rules file' };
-  let text; try { text = readSource(source); } catch (e) { return { problem: `the rules file could not be read (${e?.code ?? 'error'})` }; }
+  let text; try { text = readSource(source); } catch (e) { return { problem: `the rules file could not be read: ${e?.message ?? 'error'}` }; }
   if (typeof text !== 'string' || text.length === 0 || text.length > 200_000) return { problem: 'the rules file is empty or too large' };
   return { text };
 }

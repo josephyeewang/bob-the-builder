@@ -44,7 +44,8 @@ const failing = (res) => res.filter((r) => !r.ok);
 test('config: watch must be { repo, rulesSha256 }; anything else is refused; absent is fine', () => {
   assert.equal(parseConfig({ base: BASE, owner: 'sam', products: [] }).watch, undefined);
   assert.deepEqual(parseConfig(RAW).watch, { repo: REPO, rulesSha256: HASH });
-  for (const bad of [{}, { repo: REPO }, { rulesSha256: HASH }, { repo: REPO, rulesSha256: HASH.toUpperCase() }, { repo: REPO, rulesSha256: HASH.slice(1) }, { repo: 'no-slash', rulesSha256: HASH }, { repo: '../x/y', rulesSha256: HASH }, { repo: REPO, rulesSha256: HASH, extra: 1 }, [], 'x', null]) {
+  assert.deepEqual(parseConfig({ ...RAW, watch: { repo: REPO } }).watch, { repo: REPO });   // L150 m4: the repo alone is a valid watch (prove-token needs it before the rules are in place)
+  for (const bad of [{}, { rulesSha256: HASH }, { repo: REPO, rulesSha256: HASH.toUpperCase() }, { repo: REPO, rulesSha256: HASH.slice(1) }, { repo: 'no-slash', rulesSha256: HASH }, { repo: '../x/y', rulesSha256: HASH }, { repo: REPO, rulesSha256: HASH, extra: 1 }, [], 'x', null]) {
     assert.throws(() => parseConfig({ ...RAW, watch: bad }), /watch/, JSON.stringify(bad));
   }
 });
@@ -241,7 +242,20 @@ test('daemons load / list / check --only <job>: only that job is considered (the
   assert.doesNotMatch(ps(['watch-only']), /review-runner|review-updater|review-account/);   // its own problem here is only that no install exists
   assert.match(ps(undefined), /review-runner\.plist is not there/);                          // all jobs, as before
   const rep = checkDaemons(w.mac, w.cfg, ['watch-only']); assert.deepEqual(rep.map((r) => /watch-only/.test(r.what)), rep.map(() => true));
-  assert.equal(checkDaemons(w.mac, w.cfg).length, 8);
+  assert.equal(checkDaemons(w.mac, w.cfg).length, 9);
   const l = w.run(['daemons', 'list', '--only', 'watch-only']); assert.equal(l.code, 0, l.text); assert.equal(l.text.trim().split('\n').length, 1);
   assert.equal(planUnload(w.mac, w.cfg, ['watch-only']).problems.length, 0);
+});
+
+test('L160 watch-rules reads the rules file safely, as root would: a link, a folder or an oversize file is refused, and no message shows a byte of the file', () => {
+  const w = world(); const SECRET_LINE = 'zz-secret-rule-text';
+  const hidden = join(w.ext, 'hidden.yaml'); writeFileSync(hidden, `${SECRET_LINE}\n`);
+  const link = join(w.ext, 'link.yaml'); symlinkSync(hidden, link);
+  const big = join(w.ext, 'big.yaml'); writeFileSync(big, `${SECRET_LINE}${'x'.repeat(70000)}`);
+  for (const [src, why] of [[link, /rules file is a link/], [w.ext, /rules file is not a plain file/], [big, /rules file is far bigger/], [join(w.ext, 'none.yaml'), /rules file file was not found/]]) {
+    const r = w.run(['watch-rules', '--rules-source', src]); assert.equal(r.code, 1, `${src}: ${r.text}`);
+    assert.match(r.text, why); assert.doesNotMatch(r.text, /zz-secret/);
+    const p = w.run(['watch-rules', '--print-config-line', '--repo', REPO, '--rules-source', src]); assert.equal(p.code, 1, r.text); assert.doesNotMatch(p.text, /zz-secret/);
+  }
+  assert.equal(w.run(['watch-rules', '--rules-source', w.src]).code, 0);   // the owner of the file is not judged: a plain file of anyone's is fine
 });
