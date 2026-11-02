@@ -185,9 +185,11 @@ export async function gatePass(ctx) {
     }
     const facts = await gatherFacts(ctx, m);
     // GitHub unreadable: hold this one and stop, rather than hold the whole queue in one pass.
-    // A check or status list too long to read is a fact (refusal 1, final), not GitHub down (L187 c1).
+    // A check or status list too long to read is a fact (refusal 1, final), not GitHub down (L187 c1). A compare that
+    // fails while the pull request, main and the checks read is this change's, not GitHub down: it holds this one and
+    // the queue goes on (L187), as a failed thread read does.
     const unread = (k) => facts[k] === null && !(facts.tooLongLists ?? []).includes(k);
-    const outage = !!facts.card && (!facts.pr || !SHA.test(facts.main?.sha ?? '') || unread('checks') || unread('statuses') || facts.compareStatus === null);
+    const outage = !!facts.card && (!facts.pr || !SHA.test(facts.main?.sha ?? '') || unread('checks') || unread('statuses'));
     // Behind main: catch up first (R-0b-89), never judge a head that can't land as judged.
     if ((facts.compareStatus === 'behind' || facts.compareStatus === 'diverged') && facts.pr?.state === 'open' && SHA.test(facts.pr?.head?.sha ?? '')) {
       if ((m.doc.catch_ups ?? []).length >= (ctx.maxCatchUps ?? MAX_CATCH_UPS)) { move(m, 'returned_to_builder', { reasons: [`caught up ${MAX_CATCH_UPS} times and still behind main`] }); return STEPPED_ASIDE; }
@@ -195,9 +197,9 @@ export async function gatePass(ctx) {
     }
     const v = judge(facts);
     if (v.decision === 'refuse') { refuse(m, facts, v); return outage ? undefined : STEPPED_ASIDE; }
-    // For the wait cap (L184, L186), a failed thread read or carry-over read is a pass with GitHub unreadable too; only a
-    // read that succeeds and comes back incomplete counts toward the cap. It doesn't stop the queue as an outage does.
-    const unreadable = outage || (facts.threads?.ok !== true && typeof facts.threads?.tooLong !== 'string') || facts.carried?.unread === true;
+    // For the wait cap (L184, L186), a failed thread, carry-over or compare read is a pass with GitHub unreadable too; only
+    // a read that succeeds and comes back incomplete counts toward the cap. It doesn't stop the queue as an outage does.
+    const unreadable = outage || (facts.threads?.ok !== true && typeof facts.threads?.tooLong !== 'string') || facts.carried?.unread === true || facts.compareStatus === null;
     if (v.decision === 'hold') { hold(m, v, unreadable); return outage ? undefined : STEPPED_ASIDE; }
     return take(m, facts);
   }
@@ -243,8 +245,8 @@ export async function gatePass(ctx) {
   // The cap (L184): a wait the gate can't end by itself (a tree too big to read, main red, GitHub never working out
   // mergeable, a check that never runs, a review that never ends...) is refused for good after WAIT_CAP_TIMES × the wait
   // limit, told once, with what it waited on as the reasons. Its clock (stuck_since) starts at the first waiting pass
-  // with GitHub readable: a pass with GitHub unreadable (the outage line in serve, or a failed thread or carry-over
-  // read, L186) neither starts it, nor refuses, nor stops it, so an outage alone never refuses a change for good
+  // with GitHub readable: a pass with GitHub unreadable (the outage line in serve, or a failed thread, carry-over or
+  // compare read, L186, L187) neither starts it, nor refuses, nor stops it, so an outage alone never refuses a change for good
   // (L164), and an outage in the middle of a long wait doesn't start it again. Only a read that succeeds and comes back
   // incomplete counts toward the cap.
   // TO-DO (L186, an accepted risk): a file-tree read that fails can't yet be told from a truncated one (M10

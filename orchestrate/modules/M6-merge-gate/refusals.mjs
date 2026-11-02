@@ -144,7 +144,8 @@ function verdictCheck(f) {
   const at = ` at ${head.slice(0, 7)}`;
   const rp = roleProblem(f.reviews, 'reviewer', PASSES.reviewer, true);
   if (rp) return reworded(rp, (r) => `${r}${at} (a pass needs a clean four-line checklist)`);
-  if (f.tier !== 1 && f.tier !== 2) return notYet('the change\'s tier is unknown');
+  // M10 gives the tier from the files: with them read, no tier is a fact a later pass reads the same (L187).
+  if (f.tier !== 1 && f.tier !== 2) return Array.isArray(f.files) ? final('the rules give no tier for the change\'s files') : notYet('the change\'s tier is unknown');
   const ap = roleProblem(f.reviews, 'auditor', PASSES.auditor, f.tier === 1);
   if (ap) return reworded(ap, (r) => `${f.tier === 1 ? 'Tier 1: ' : ''}${r}${at} (a pass needs 0 Material)`);
   const prHead = f.pr?.head?.sha;

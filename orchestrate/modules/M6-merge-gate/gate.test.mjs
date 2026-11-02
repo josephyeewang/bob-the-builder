@@ -1644,6 +1644,8 @@ const HOLDS = [
   ['a required check never runs', (w, head) => w.g.checks.set(head, []), /^1: required check test has not run/],
   ['a review session never ends', (w, head) => runnerLaunch(w.env, 'C-1', 'R-C-1-again', 'reviewer', head), /^5: /],
   ['the rules have no first-customer paths', (w) => { w.values.effect_paths = {}; }, /^14: the change's files or the first-customer paths could not be read/],
+  // L187: the review runner's records unreadable, and a tier M10 can't give for files the gate did read.
+  ['the review runner\'s records can\'t be read', (w) => { w.ctx.reviewLaunches = Object.create(w.ctx.reviewLaunches, { root: { get() { throw new Error('launch folder unreadable'); } } }); }, /^5: the review runner's records could not be read: the review records could not be read/],
 ];
 for (const [name, make, re] of HOLDS) {
   test(`L184: ${name}: waits, told once past the limit, refused for good after ${WAIT_CAP_TIMES} times it`, async () => {
@@ -1741,6 +1743,47 @@ test('L187 c1 control: a check-run read that fails still stops the queue for the
   await gatePass(w.ctx);
   waitingHeld(mergeOf(w, 'C-1'), /^1: the checks could not be read/);
   assert.notEqual(mergeOf(w, 'C-2')?.doc.state, 'merged', 'GitHub down for check runs stops the queue for the pass');
+});
+
+// L187: M10 gives the tier from the files, so with them read, no tier is final (refusal 5), not a wait.
+test('L187: no tier for files the gate read is refused for good (refusal 5), told', async () => {
+  const w = world(limited());
+  verifiedCard(w);
+  const r = w.ctx.rules;
+  w.ctx.rules = Object.create(r, { classify: { value: (x) => ({ ...r.classify(x), tier: null }) } });
+  await gatePass(w.ctx);
+  refusedFor(w, /^5: the rules give no tier for the change's files$/);
+});
+
+// L187: a compare that fails for one pull request is that change's, not GitHub down: it holds that one (not counted
+// toward the cap, as a failed thread read), and the change behind it is judged in the same pass.
+test('L187: a compare that fails for one pull request holds only that one; the change behind it merges in the same pass', async () => {
+  const w = world(limited());
+  const h1 = verifiedCard(w);
+  tick(w, 1);
+  verifiedCard(w, 'C-2', { pr: 8, files: { 'src/b.mjs': 'b' } });
+  wrapGet(w, (p, r) => (new RegExp(`/compare/[0-9a-f]{40}\\.\\.\\.${h1}$`).test(p) ? { status: 404, json: null } : r));
+  await gatePass(w.ctx);
+  waitingHeld(mergeOf(w, 'C-1'), /^12: the branch could not be compared with main/);
+  assert.equal(mergeOf(w, 'C-2').doc.state, 'merged', 'a compare that fails for one pull request does not stop the queue');
+});
+
+test('L187 control: a compare that fails past the cap never refuses, and merges once it reads', async () => {
+  const w = world(limited());
+  verifiedCard(w);
+  let down = true;
+  wrapGet(w, (p, r) => (down && /\/compare\//.test(p) ? { status: 502, json: null } : r));
+  for (const step of [0, LIMIT_MIN, WAIT_CAP_TIMES * LIMIT_MIN, 5]) {
+    tick(w, step);
+    await gatePass(w.ctx);
+    waitingHeld(mergeOf(w), /^12: the branch could not be compared with main/);
+  }
+  assert.equal(mergeOf(w).doc.stuck_since, null, 'a failed compare does not start the cap\'s clock');
+  assert.deepEqual(told(w, 'merge_refused'), []);
+  down = false;
+  tick(w, 1);
+  await gatePass(w.ctx);
+  assert.equal(mergeOf(w).doc.state, 'merged');
 });
 
 test('L184 control: a wait that clears before the cap still merges', async () => {

@@ -122,7 +122,6 @@ const NOT_YET = [
   [1, 'the checks unreadable (statuses null)', (f) => { f.statuses = null; }],
   [3, 'mergeable not worked out yet (null)', (f) => { f.pr.mergeable = null; }],
   [3, 'mergeable_state unknown', (f) => { f.pr.mergeable_state = 'unknown'; }],
-  [5, 'tier unknown', (f) => { f.tier = null; }],
   [5, 'the review records unreadable', (f) => { f.reviews = null; f.reviewsProblem = 'the gate has no review launches folder set'; }],
   [5, 'the carry-over could not be read', (f) => { pastH0(f); f.carried = { review: false, audit: false, unread: true, reasons: ['carry-over could not be read'] }; }],
   [5, 'the carry-over was not gathered', (f) => { pastH0(f); f.carried = null; }],
@@ -133,6 +132,14 @@ const NOT_YET = [
 for (const [n, name, plant] of NOT_YET) {
   test(`L164 not yet, so held: ${name}`, () => assert.deepEqual(waitsOn(clean(plant)), [n]));
 }
+
+// L187: M10 gives the tier from the files, so no tier for files that were read is final; with them unread, it waits.
+test('L187: no tier with the files read refuses on 5 for good; with them unread, 5 waits', () => {
+  const r = judge(clean((f) => { f.tier = null; }));
+  assert.equal(r.decision, 'refuse');
+  assert.deepEqual(r.refusals, [{ n: 5, reason: 'the rules give no tier for the change\'s files' }]);
+  assert.ok(waitsOn(clean((f) => { f.tier = null; f.files = null; })).includes(5));
+});
 
 // PROBE-D (L164): with the change's files unread, M10 calls the change unclassifiable, so "needs the Approve" is not
 // known yet; read, the same answer refuses.
