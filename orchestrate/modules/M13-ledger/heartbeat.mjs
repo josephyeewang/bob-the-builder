@@ -85,22 +85,30 @@ export async function heartbeatOnce({ product, writer, gh, alerts, owner, probes
   const nextSwitches = switches + 1;
   const savedTs = typeof lastRec?.ts === 'string' && Number.isFinite(Date.parse(lastRec.ts)) ? lastRec.ts : t.toISOString();
   const seq = `${nextSwitches}-${savedTs}`;
+  // What the owner was last told the Mini's login is (P11, L166): the status fact's `login_told` moves only once a
+  // notice went out, and keeps its value while signed out. When the saved login equals today's but `login_told` doesn't,
+  // a notice went out and its save was refused, then the Mini switched back before the retry: that switch back is a
+  // switch too, told against what the owner last heard. While the logins differ the saved one stays the reference, so
+  // an L143/L158 retry keeps its key. A lost P11 notice leaves `login_told` where it was, so the next pass tells it
+  // again (keep and resend, L170).
+  const toldBefore = writer.get(STATUS_FACT(product))?.login_told ?? null;
+  const prev = signedIn && last === acct.login && toldBefore ? toldBefore : last;
   let switched = false;
   // The new login is saved only once its change alert or push request went out: a raise that answered false (or a
   // refused push-request write) keeps the old login, so the next pass tells it again (L143). A throw stops the pass
   // before the save, the same way.
   let told = true;
-  if (signedIn && last && last !== acct.login) {
+  if (signedIn && prev && prev !== acct.login) {
     switched = true;
     if (plannedSwitch?.to === acct.login) {
-      const idem = createHash('sha256').update(`switch|${seq}|${last}|${acct.login}|${plannedSwitch.at ?? ''}`).digest('hex').slice(0, 16);
+      const idem = createHash('sha256').update(`switch|${seq}|${prev}|${acct.login}|${plannedSwitch.at ?? ''}`).digest('hex').slice(0, 16);
       const pid = `push-request-${idem}`;
       // A refused write of the push request is a lost notice too: the old login stays.
       if (!writer.get(pid)) told = writer.put(pid, { kind: 'fact.push-request', idempotency_key: idem, state: 'requested', product,
         text: `The Mini switched to ${acct.login}: switch the phone app to ${acct.login} too.` })?.ok === true;
     } else {
       told = await alerts.raise({ key: key(`account-changed-${seq}-${acct.login}`), title: `${product}: the Mini's Claude account changed`,
-        body: `The Mini is now signed in as ${acct.login} (was ${last}) and no switch was planned.` }) !== false;
+        body: `The Mini is now signed in as ${acct.login} (was ${prev}) and no switch was planned.` }) !== false;
     }
   }
   if (signedIn && told) writer.put(lastId, { kind: 'fact.heartbeat-account', product, login: acct.login, switches: switched ? nextSwitches : switches });
@@ -118,7 +126,8 @@ export async function heartbeatOnce({ product, writer, gh, alerts, owner, probes
   }
 
   writer.put(STATUS_FACT(product), { kind: 'fact.heartbeat-status', product, at: t.toISOString(),
-    front_door_reachable: f.ok && f.v === true, signed_in: signedIn, login: signedIn ? acct.login : null, red });
+    front_door_reachable: f.ok && f.v === true, signed_in: signedIn, login: signedIn ? acct.login : null,
+    login_told: signedIn && told ? acct.login : (toldBefore ?? last), red });
 
   const body = `Orchestrate heartbeat. ${red.length ? `RED: ${red.join(', ')}` : 'All green.'}\nmini_alive_at: ${t.toISOString()}\n\n${lines.join('\n')}\n`;
   const issueId = ISSUE_FACT(product);
