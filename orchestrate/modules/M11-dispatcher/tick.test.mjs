@@ -1050,3 +1050,37 @@ test('L172 m3: an outage opened in a pass whose outage alert send throws still h
   assert.equal(told.length, 1, 'told once, on a later pass');
   assert.equal(w.rec.read('fact', OUTAGE_FACT).doc.told_id, w.rec.read('fact', OUTAGE_FACT).doc.id);
 });
+
+// L172 follow-up (the lead's ruling on #105): the outage step writes the open outage, then throws. The tick reads the
+// outage again once the step has run, so in that same pass every outage-aware hold waits: a Lead's read-only request
+// is held with an outage reason (and tried again later), the Lead step waits, no reviewer, start or merge request.
+test('L172 follow-up: an outage step that throws right after writing the open outage still holds everything outage-aware in that pass', async () => {
+  const gone = (id, c) => ({ id, card: c, alive: false, ended: true, lastWriteAt: T0 - 10 * MIN });
+  const board = [gone('S-1', 'C-1'), gone('S-2', 'C-2'), gone('S-3', 'C-3')];
+  const dir = join(tempDir('m11-outage-throw-'), 'lead');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, 'think-q1.md'), 'Is A safe?');
+  const started = [];
+  const w = world([account(), usage(), card('C-1', { state: 'running' }), card('C-2', { state: 'running' }), card('C-3', { state: 'running' }),
+    card('R-1', { state: 'in_review', changed_at: iso(T0 - 60 * MIN) }), ...mergeReady('V-1', 7)],
+  { over: { board: () => board, healthy: () => false,
+    outboxSessions: () => [{ sessionId: 'L-1', role: 'lead', outbox: dir, uid: process.getuid(), product: 'p1' }],
+    startReadonly: async (x) => { started.push(x.kind); return { ok: true }; } } });
+  // The test Record is frozen: the pass gets a copy of it whose write throws once, after the outage is written.
+  let armed = true;
+  const rec = { ...w.rec, write: (x) => {
+    const r = w.rec.write(x);
+    if (armed && x.entity === 'fact' && x.id === OUTAGE_FACT && x.kind === 'outage_start') { armed = false; throw new Error('the disk went away'); }
+    return r;
+  } };
+  const r = await tick({ rec, rules: rulesWith({}, allow), now: T0, ports: w.ports });
+  assert.equal(armed, false, 'control: the throw came right after the outage was written');
+  assert.equal(r.steps.outage.ok, false, 'the outage step failed');
+  assert.equal(w.rec.read('fact', OUTAGE_FACT).doc.state, 'open');
+  assert.deepEqual(started, [], 'the Lead\'s read-only request does not start');
+  assert.match(String(w.rec.read('fact', 'intake-applied-L-1-think-q1.md')?.doc?.reason), /outage/, 'it waits on the outage');
+  assert.match(String(r.steps.leads.result), /outage/, 'the Lead step waits');
+  assert.deepEqual(w.calls.reviewers, [], 'no reviewer is asked for');
+  assert.deepEqual(w.calls.launched, [], 'nothing starts');
+  assert.equal(requested(w.rec, 'V-1'), null, 'no merge is requested');
+});
