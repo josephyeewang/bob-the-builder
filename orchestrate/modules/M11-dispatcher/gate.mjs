@@ -62,6 +62,11 @@ const CAP_FREE = Object.freeze(['review', 'audit', 'merge', 'undo_merge', 'lead'
 const writesFiles = (s) => isEditing(s) || s.kind === 'script';
 // An exact-reverse undo's own limit, in place of the editing caps (L199): one at a time per product.
 export const UNDOS_PER_PRODUCT = 1;
+// The research lane's copy card (L204-c, R-0b-135): its own limit, in place of the editing caps, and the one folder it
+// may touch. It starts as an editing session; its card's kind is what marks it.
+export const COPIES_PER_PRODUCT = 1;
+export const RESEARCH_DIR = 'docs/research/';
+const isCopy = (card) => card?.kind === 'research_copy';
 
 /**
  * The card's tier and risky classes, failing closed (audit MAT-3, MIN-15): the risky set is the card's
@@ -130,12 +135,30 @@ export function startGate({ rules, rec, card, kind, product, b, running, lead, e
     // undo still counts toward the caps for every other editing start (isEditing). A missing cap value is still
     // named for it (L40), so Joe is told. The files-don't-overlap check below is safety and still runs.
     const exactUndo = kind === 'undo' && exactReverse === true;
+    // The research lane's copy card is never held by the editing caps either (L204-c, the L199 pattern): the first
+    // cutover's whole point is the research and docs lane, at caps.editing_per_product 0. It may touch only
+    // docs/research/ (R-0b-135), and one runs at a time per product. A running copy still counts toward the caps for
+    // every other editing start (it is an editing session). A missing cap value is named for it, as for an undo.
+    const copy = kind === 'editing' && isCopy(card);
+    if (copy) {
+      const files = card.files ?? [];
+      const outside = files.find((f) => !normPath(f)?.startsWith(RESEARCH_DIR));
+      if (!files.length || outside !== undefined) return refuse(`a research copy card may touch only ${RESEARCH_DIR} (${outside ?? 'it names no file'})`);
+    }
     let lim = null;
     let capMissing = null;
-    try { lim = editingLimits({ rules, product, productDoc, amberCaps: band.amberCaps }); } catch (e) { if (!(exactUndo && e.key)) throw e; capMissing = e.key; }
+    try { lim = editingLimits({ rules, product, productDoc, amberCaps: band.amberCaps }); } catch (e) { if (!((exactUndo || copy) && e.key)) throw e; capMissing = e.key; }
     if (exactUndo) {
       const undos = mine.filter((s) => s.kind === 'undo').length;
       if (undos >= UNDOS_PER_PRODUCT) return refuse(`the product already runs ${undos} undo(s) (one at a time)`);
+    } else if (copy) {
+      // A running copy is an editing session whose card is a research_copy. An editing session whose card the record
+      // can't give makes the count unknown, and an unknown count holds the start, never lets it through.
+      const cards = mine.filter((s) => s.kind === 'editing').map((s) => [s, s.card ? rec.read('card', s.card)?.doc : null]);
+      const unknown = cards.find(([, doc]) => !doc);
+      if (unknown) return refuse(`a running worker's card (${unknown[0].card ?? '?'}) is not in the record, so the research copies running can't be counted`);
+      const copies = cards.filter(([, doc]) => isCopy(doc)).length;
+      if (copies >= COPIES_PER_PRODUCT) return refuse(`the product already runs ${copies} research copy session(s) (one at a time)`);
     } else if (lim) {
       const onProduct = mine.filter(isEditing);
       if (onProduct.length >= lim.product) return refuse(`the product already runs ${onProduct.length} editing worker(s) (cap ${lim.product})`);

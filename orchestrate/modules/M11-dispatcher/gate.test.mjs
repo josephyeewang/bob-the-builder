@@ -305,3 +305,92 @@ test('L199: a running undo counts toward the caps for every other editing start'
   assert.match(go({ running: mac }).reason ?? '', /Mac already runs 5/);
   assert.equal(go({ running: mac.slice(0, 4) }).ok, true, 'control: four on the Mac');
 });
+
+// L204-c (R-0b-135): the research lane's copy card starts at the first cutover's caps.editing_per_product 0 (the L199
+// pattern). It may touch only docs/research/; one runs at a time per product; a running one counts toward the caps for
+// every other editing start; an editing session whose card the record can't give makes the count unknown, which holds.
+const copyCard = (id = 'RC-1', files = ['docs/research/R-1.md']) => ({ id, product: 'p1', tier: 2, kind: 'research_copy', files });
+const copyRec = (extra = []) => setup({ cards: [card('c0', ['docs/research/R-0.md'], { kind: 'research_copy' }), card('c9', ['docs/research/R-9.md'], { kind: 'research_copy', product: 'p2' }), ...extra] });
+
+test('L204-c: at caps.editing_per_product 0 a research copy starts; an ordinary editing card is still held at cap 0', () => {
+  const rules = rulesWith({ [K.editingPerProduct]: 0 });
+  const r = go({ rules, card: copyCard() });
+  assert.equal(r.ok, true, r.reason);
+  assert.equal(r.missing, undefined);
+  const held = go({ rules, card: { ...copyCard(), kind: 'ordinary' } });
+  assert.equal(held.ok, false);
+  assert.match(held.reason, /cap 0/);
+  // Only an editing start is a copy: the same card asked as an overnight run is held by the cap.
+  assert.match(go({ rules, card: copyCard(), kind: 'overnight' }).reason ?? '', /cap 0/);
+});
+
+test('L204-c: the product, Mac and shakedown caps never hold a research copy', () => {
+  const full = [worker(0, 'p2', 'w3'), worker(1, 'p2', 'w4'), worker(2, 'p2', 'w5'), worker(3, 'p2', 'w6'), worker(4, 'p2', 'w7')];
+  const cases = [['product cap', rulesWith(), [worker(0), worker(1), worker(2)]], ['Mac cap', rulesWith(), full], ['shakedown', rulesWith({ [K.shakedown]: true }), [worker(0)]]];
+  for (const [what, rules, running] of cases) {
+    const r = go({ rules, card: copyCard(), running });
+    assert.equal(r.ok, true, `${what}: ${r.reason}`);
+    const held = go({ rules, card: { ...copyCard(), kind: 'ordinary' }, running });
+    assert.equal(held.ok, false, `${what} control`);
+    assert.match(held.reason, /cap \d/, `${what} control`);
+  }
+});
+
+test('L204-c: one research copy at a time per product; another product\'s copy, ordinary workers or an undo do not hold it', () => {
+  const rules = rulesWith({ [K.editingPerProduct]: 0 });
+  const rec = copyRec([card('u0', ['src/other.js'], { kind: 'exact_reverse' })]);
+  const second = go({ rules, rec, card: copyCard(), running: [worker(0, 'p1', 'c0')] });
+  assert.equal(second.ok, false);
+  assert.match(second.reason, /already runs 1 research copy session\(s\) \(one at a time\)/);
+  assert.equal(go({ rules, rec, card: copyCard(), running: [worker(0, 'p2', 'c9')] }).ok, true, 'a copy on another product');
+  assert.equal(go({ rec, card: copyCard(), running: [worker(0), worker(1), worker(2)] }).ok, true, 'three ordinary workers (the cap)');
+  assert.equal(go({ rules, rec, card: copyCard(), running: [undoSession(0)] }).ok, true, 'an undo running');
+});
+
+test('L204-c: a running editing session whose card the record can\'t give holds a research copy (the count is unknown)', () => {
+  const rules = rulesWith({ [K.editingPerProduct]: 0 });
+  for (const s of [worker(0, 'p1', 'gone'), { id: 'S-x', product: 'p1', kind: 'editing' }]) {
+    const r = go({ rules, rec: copyRec(), card: copyCard(), running: [s] });
+    assert.equal(r.ok, false, JSON.stringify(s));
+    assert.match(r.reason, /is not in the record, so the research copies running can't be counted/);
+  }
+  assert.equal(go({ rules, rec: copyRec(), card: copyCard(), running: [worker(0, 'p1', 'w1')] }).ok, true, 'control: a known ordinary card');
+});
+
+test('L204-c: a research copy card may touch only docs/research/', () => {
+  const rules = rulesWith({ [K.editingPerProduct]: 0 });
+  for (const files of [['docs/research/R-1.md', 'src/app.js'], ['docs/research-x/R-1.md'], ['docs/research/../src/app.js'], ['docs/R-1.md'], ['/docs/research/R-1.md'], []]) {
+    const r = go({ rules, card: copyCard('RC-1', files) });
+    assert.equal(r.ok, false, files.join());
+    assert.match(r.reason, /a research copy card may touch only docs\/research\//, files.join());
+  }
+  const none = go({ rules, card: { id: 'RC-1', product: 'p1', tier: 2, kind: 'research_copy' } });
+  assert.match(none.reason ?? '', /names no file/);
+  assert.equal(go({ rules, card: copyCard('RC-1', ['docs/research/R-1.md', 'docs/research/sub/R-1-data.md']) }).ok, true);
+});
+
+test('L204-c: a running research copy counts toward the caps for every other editing start', () => {
+  const rec = copyRec();
+  const one = rulesWith({ [K.editingPerProduct]: 1 });
+  const r = go({ rules: one, rec, running: [worker(0, 'p1', 'c0')] });
+  assert.equal(r.ok, false);
+  assert.match(r.reason, /runs 1 editing worker\(s\) \(cap 1\)/);
+  assert.equal(go({ rules: one, rec, running: [] }).ok, true, 'control');
+});
+
+test('L204-c: a missing cap value does not hold a research copy, and is still named', () => {
+  const rules = rulesWith({ [K.editingPerProduct]: undefined });
+  const r = go({ rules, card: copyCard() });
+  assert.equal(r.ok, true, r.reason);
+  assert.equal(r.missing, K.editingPerProduct);
+  const held = go({ rules, card: { ...copyCard(), kind: 'ordinary' } });
+  assert.equal(held.ok, false);
+  assert.equal(held.missing, K.editingPerProduct);
+});
+
+test('L204-c: a research copy still shares no file with a running card', () => {
+  const rec = copyRec([card('w-r', ['docs/research/R-1.md'])]);
+  const r = go({ rec, card: copyCard(), running: [worker(0, 'p1', 'w-r')] });
+  assert.equal(r.ok, false);
+  assert.match(r.reason, /shares docs\/research\/r-1\.md with running card w-r/);
+});
