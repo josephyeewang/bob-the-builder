@@ -2,9 +2,9 @@
 // reader is M10's rules-reads.test-helper.mjs, the one M2's and M9's tests share (L123), so it sees every read form:
 // get/num/dec/flag, plain or ?., a gather-style get( helper, and the Dispatcher's need(rules, KEYS.x / minutes(rules,
 // KEYS.x, the rules reached directly or through a path ending in rules (#68 reads the merge time limit in gate.mjs as
-// minutes(ctx.rules, KEYS.x, #77 r6 MAT-1). A need( or minutes( call it can't name (also `need?.(`, `x.need(`) fails as
-// unreadable; the helper's header says what a text reader can't see (an aliased import, the reader passed as a
-// value). It runs over every M6 source file but the generated checker bundle, whose code is each source module's own,
+// minutes(ctx.rules, KEYS.x, #77 r6 MAT-1). A need( or minutes( call it can't name (also `need (`, `need?.(`, `x.need(`,
+// `need.call(`) fails as unreadable; comments are not read (L165 m2); the helper's header says what a text reader
+// can't see (an aliased import, the reader passed as a value, a comma call). It runs over every M6 source file but the generated checker bundle, whose code is each source module's own,
 // tested where it lives. Every rules key read must be listed, every listed key must be read, and a read whose key
 // can't be named fails.
 import { test } from 'node:test';
@@ -76,8 +76,23 @@ test('the reader catches a new read in any M6 file, in every form, and a key it 
     ['gate.mjs', 'const t = need(r, KEYS.cancelGraceMin);'], ['gate.mjs', 'const t = minutes(ctx.rules, KEYS.noSuchKey);'],
     // L156 m-1 and c-a: the same unnamed reads in the other spellings, and a key map the reader is not given.
     ['gate.mjs', 'const t = need (rules, key);'], ['gate.mjs', 'const t = need?.(rules, key);'], ['gate.mjs', 'const t = d.minutes(r, KEYS.cancelGraceMin);'],
-    ['gate.mjs', 'const t = need(rules, OTHER.cancelGraceMin);'], ['undo.mjs', 'const x = rules.num(`caps.${what}`, { product });']]) {
+    ['gate.mjs', 'const t = need(rules, OTHER.cancelGraceMin);'], ['undo.mjs', 'const x = rules.num(`caps.${what}`, { product });'],
+    // L165 m1: through .call/.apply the first argument is never the rules, so the read can't be named.
+    ['gate.mjs', 'const t = need.call(null, rules, KEYS.cancelGraceMin);'], ['gate.mjs', 'const t = minutes.apply(null, [rules, KEYS.cancelGraceMin]);'],
+    ['gate.mjs', 'const t = need?.call(null, rules, KEYS.cancelGraceMin);']]) {
     assert.equal(plant(file, line).nonLiteral, 1, `${file}: ${line}`);
+  }
+  // L165 m2: a read written in a comment is not a read, and a string that looks like a comment hides no read after it.
+  const base = plant('gate.mjs', '');
+  for (const line of [`/* rules.get('${NEW}') */`, `/**\n * rules.num('${NEW}') or need(rules, key)\n */`,
+    `const a = 1; // rules.get('${NEW}') and need(rules, key)`, `const b = 2;   // minutes (see rules.dec())`]) {
+    const got = plant('gate.mjs', line);
+    assert.deepEqual(unlisted(got.keys), [], line);
+    assert.equal(got.nonLiteral, base.nonLiteral, line);
+  }
+  for (const line of [`const g = 'docs/**/*.md'; const x = rules.get('${NEW}');`, `const s = 'a // b'; const x = rules.get('${NEW}');`,
+    `const u = "http://x"; const x = rules.get('${NEW}');`, `const w = 'src/*'; const x = rules.get('${NEW}'); const y = '*/';`, 'const v = `a // ${b}`; const x = rules.get(\'' + NEW + '\');']) {
+    assert.deepEqual(unlisted(plant('gate.mjs', line).keys), [NEW], line);
   }
   // m-1: a key inside a listed map that is not the go-free map is not covered by that map.
   assert.equal(listed(['effect_paths'], 'effect_paths.new_field'), false);

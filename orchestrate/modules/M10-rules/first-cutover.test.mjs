@@ -464,14 +464,16 @@ test('a value parsePolicy accepts but the Dispatcher refuses is refused, naming 
     const line = block.split('\n').find((l) => l.startsWith(`    ${state}: `));
     assert.ok(line, `the fixture caps ${state}`);
     // The whole block is swapped, so the same line elsewhere in the fixture is never the one changed.
-    for (const bad of ['1.5', 'abc']) cases.push([`  per_state:\n${block}`, `  per_state:\n${block.replace(`${line}\n`, `    ${state}: ${bad}\n`)}`, 'caps.per_state']);
+    for (const bad of ['1.5', 'abc']) cases.push([`  per_state:\n${block}`, `  per_state:\n${block.replace(`${line}\n`, `    ${state}: ${bad}\n`)}`, 'caps.per_state', state]);
   }
-  for (const [from, to, key] of cases) {
+  for (const [from, to, key, state] of cases) {
     const text = swap(FIRST, from, to);
     assert.ok(rulesOf(text), `parsePolicy accepts ${to.trim()}`);
     assert.equal(readersAccept(text), false, `the readers refuse ${to.trim()}`);
     const got = fit(text, ENTRY);
     assert.ok(got.length === 1 && got[0].startsWith(`M11: ${key} must `), `${to.trim()}: ${got.join(' | ')}`);
+    // L165 c1: the reason names the state that is wrong, not some other one (#100 r1 plant O10).
+    if (state) assert.ok(got[0].includes(`for ${state} (`), `${state}: ${got[0]}`);
   }
 });
 

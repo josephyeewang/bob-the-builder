@@ -7,11 +7,15 @@
 //   need(rules, KEYS.x / minutes(rules, KEYS.x, the Dispatcher's readers, with KEYS.x looked up in `keyMaps` (M11's KEYS).
 //   The rules may be reached through a path ending in `rules` (ctx.rules, this.rules?.): #68 reads
 //   timeouts.merging_open_max_min in M6 gate.mjs as minutes(ctx.rules, KEYS.x (#77 r6 MAT-1). A need( or minutes(
-//   call, also written `need (`, `need?.(` or as a method `x.need(`, whose first argument is not the rules or whose
-//   key is not <a map in keyMaps>.<a name in it> is counted in nonLiteral (L156 m-1). What this text reader can't see:
-//   the readers imported under another name (`import { need as n }`), or passed as a value and called later
-//   (`const f = need; f(rules, KEYS.x)`). Neither is written in Orchestrate today; a review of such a change must
-//   add the name here.
+//   call, also written `need (`, `need?.(`, as a method `x.need(`, or through `.call(`/`.apply(` (whose first argument
+//   is never the rules), whose first argument is not the rules or whose key is not <a map in keyMaps>.<a name in it>
+//   is counted in nonLiteral (L156 m-1, L165 m1). What this text reader can't see: the readers imported under another
+//   name (`import { need as n }`), passed as a value and called later (`const f = need; f(rules, KEYS.x)`), or called
+//   through a comma or other wrapper (`(0, need)(rules, KEYS.x)`). None is written in Orchestrate today; a review of
+//   such a change must add the name here.
+// Comments are not code (L165 m2): `/* … */` blocks that start a line, whole `//` lines, and a trailing ` // `
+//   comment when the code before it closes every quote it opens. Words inside strings are still read, so a string
+//   holding "minutes (" is a known false alarm: it fails the test loudly, never hides a read.
 // The key is a literal in any quote kind, or a name bound in the same file by `const NAME = <literal>;`. A template key's
 // ${…} is expanded: ${state} over the product states, ${kind} over the go-free kinds (goFreeOn's
 // `${GO_FREE_KEY}.${kind}`, L123), and a const name to its value. Anything else is counted in nonLiteral, so a key the
@@ -27,8 +31,21 @@ import { GO_FREE, GO_FREE_KEY } from '../M9-record/ready.mjs';
 // A quoted literal whose quote is capture group n (its body is group n + 1).
 const Q = (n = 1) => `(['"\`])((?:(?!\\${n})[^\\\\])*)\\${n}`;
 const NAME = String.raw`[A-Za-z_$][\w$]*`;
-// Comment lines are not code.
-export const code = (text) => text.split('\n').filter((l) => !/^\s*\/\//.test(l)).join('\n');
+// Comments are not code (header). A block or trailing comment is cut only where it can't be inside a string: a block
+// that starts a line (after spaces), and a ` // ` whose code before it has an even count of each quote kind. A string
+// such as 'docs/**/*.md' or 'a // b' is left alone, so a read after it on the same line is still seen.
+const evenQuotes = (s) => [...`'"\``].every((q) => s.split(q).length % 2 === 1);
+export const code = (text) => text
+  .replace(/^[ \t]*\/\*[\s\S]*?\*\//gm, (c) => c.replace(/[^\n]/g, ' '))
+  .split('\n')
+  .filter((l) => !/^\s*\/\//.test(l))
+  .map((l) => {
+    for (let i = l.search(/\s\/\/\s/); i !== -1; i = l.slice(i + 1).search(/\s\/\/\s/) === -1 ? -1 : i + 1 + l.slice(i + 1).search(/\s\/\/\s/)) {
+      if (evenQuotes(l.slice(0, i))) return l.slice(0, i);
+    }
+    return l;
+  })
+  .join('\n');
 const VARS = Object.freeze({ state: PRODUCT_STATES, kind: Object.keys(GO_FREE) });
 const MAX_DEPTH = 4;
 // The rules object, reached directly or through a path ending in `rules` (ctx.rules, this.rules, a?.rules), #77 r6 MAT-1.
@@ -63,7 +80,7 @@ export function rulesReads(text, { helpers = [], keyMaps = {} } = {}) {
   }
   // The Dispatcher's readers: need(rules, KEYS.x …) and minutes(rules, KEYS.x …), the rules as above. A call with any
   // other first argument can't be named, so it counts as unreadable rather than being skipped (#77 r6 MAT-1).
-  for (const m of src.matchAll(/(?<![\w$])(?:need|minutes)\s*(?:\?\.)?\(\s*/g)) {
+  for (const m of src.matchAll(/(?<![\w$])(?:need|minutes)\s*(?:(?:\?\.|\.)(?:call|apply)\s*)?(?:\?\.)?\(\s*/g)) {
     const arg = new RegExp(String.raw`^${RULES}\s*,\s*`).exec(src.slice(m.index + m[0].length));
     if (!arg) { nonLiteral += 1; continue; }
     const ref = new RegExp(String.raw`^(${NAME})\.(${NAME})\s*[,)]`).exec(src.slice(m.index + m[0].length + arg[0].length));
