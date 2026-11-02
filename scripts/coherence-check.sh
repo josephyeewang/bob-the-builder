@@ -22,6 +22,7 @@
 set -uo pipefail
 DOCS_DIR="${1:-./docs}"
 FAIL=0
+FAIL_WHY=""   # which section(s) failed, named on the RESULT line
 
 if [ ! -d "$DOCS_DIR" ]; then
   echo "coherence-check: '$DOCS_DIR' is not a directory" >&2
@@ -74,7 +75,7 @@ else
       printf '%s\n' "${IDS[@]}" | grep -qx "$pad" || MISSING+=" $pad"
     done
     echo "  range: D-$LO … D-$HI   (${#IDS[@]} unique entries)"
-    if [ -n "$MISSING" ]; then echo "  ✗ MISSING:$MISSING"; FAIL=1; else echo "  ✓ contiguous, no gaps"; fi
+    if [ -n "$MISSING" ]; then echo "  ✗ MISSING:$MISSING"; FAIL=1; FAIL_WHY="$FAIL_WHY [1] ID gap"; else echo "  ✓ contiguous, no gaps"; fi
     # $DUPES is newline-separated (from `uniq -d`); the word-split below is
     # DELIBERATE so the IDs print on one line after the label, matching the MISSING
     # line above. Quoting would change the output, so the intent is declared rather
@@ -82,7 +83,7 @@ else
     # every run since at least 2026-09-07 — 8 consecutive red runs — which is
     # Rule 33's own point: a permanently red job is a job nobody reads.
     # shellcheck disable=SC2086
-    if [ -n "$DUPES" ]; then echo "  ✗ DUPLICATE IDs:" $DUPES; FAIL=1; else echo "  ✓ no duplicate IDs"; fi
+    if [ -n "$DUPES" ]; then echo "  ✗ DUPLICATE IDs:" $DUPES; FAIL=1; FAIL_WHY="$FAIL_WHY [1] duplicate ID"; else echo "  ✓ no duplicate IDs"; fi
   fi
 fi
 
@@ -231,18 +232,23 @@ else
     PTR_ARGS+=(--status "$(cd "$(dirname "$STATUS_FILE")" && pwd)/$(basename "$STATUS_FILE")" --log "$(cd "$(dirname "$LOG_FILE")" && pwd)/$(basename "$LOG_FILE")")
     [ -f "$DOCS_DIR/PROJECT-STATE.md" ] && PTR_ARGS+=(--also "$(cd "$DOCS_DIR" && pwd)/PROJECT-STATE.md")
   fi
-  if PTR_OUT="$(node "$SWEEP_DIR/doc-pointers-check.mjs" "${PTR_ARGS[@]}" 2>&1)"; then
-    printf '%s\n' "$PTR_OUT" | sed 's/^/  /'
-  else
-    printf '%s\n' "$PTR_OUT" | sed 's/^/  /'
-    FAIL=1
+  PTR_RC=0
+  PTR_OUT="$(node "$SWEEP_DIR/doc-pointers-check.mjs" "${PTR_ARGS[@]}" 2>&1)" || PTR_RC=$?
+  printf '%s\n' "$PTR_OUT" | sed 's/^/  /'
+  if [ "$PTR_RC" -ne 0 ]; then
+    FAIL=1; FAIL_WHY="$FAIL_WHY [8] root-file pointers (exit $PTR_RC)"
+    # A non-zero exit with no FAIL line is a crash or a kill, not a broken pointer: say so, so it is never a bare ✗.
+    case "$PTR_OUT" in
+      *"doc-pointers-check: FAIL ("*) ;;
+      *) echo "  ✗ doc-pointers-check exited $PTR_RC without a FAIL line (a crash, a kill or an unreadable folder, not a broken pointer); its output is above" ;;
+    esac
   fi
 fi
 
 echo
 echo "════════════════════════════════════════════════════════════════"
 if [ "$FAIL" -ne 0 ]; then
-  echo " RESULT: ✗ hard problems found (contiguity, retired-term residue, or a broken root-file pointer / stale status)."
+  echo " RESULT: ✗ hard problems found in:${FAIL_WHY:- (no section named: a bug in this script)}"
 else
   echo " RESULT: ✓ no mechanical drift. Review ⚠ items + judge §/D targets + reconcile contracts semantically."
 fi

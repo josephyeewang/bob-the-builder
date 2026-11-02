@@ -12,14 +12,17 @@ import { chmodSync } from 'node:fs';
 import { fakeRules, allow, deny, makeRules } from '../../shared/rules.mjs';
 import { makeEngine } from '../M10-rules/engine.mjs';
 import { parsePolicy } from '../M10-rules/policy.mjs';
+import { rulesFromText } from '../M10-rules/from-text.mjs';
 import { fakeGateGitHub } from './fixtures/fake-gate-github.mjs';
 import { makeGitView } from '../M10-rules/git-view.mjs';
 import { blobSha } from '../M10-rules/reader.mjs';
 import { ROBOT_FACT, NO_PUSH_FACT } from '../M12-sensors/outside-watch.mjs';
-import { gatePass, queueOrder, NOT_GREEN_LINE } from './gate.mjs';
+import { gatePass, queueOrder, NOT_GREEN_LINE, MERGE_LIMIT_TOLD_FACT } from './gate.mjs';
 import { readMark } from './mark.mjs';
 import { readNeedsJoe } from './checker-entry.mjs';
 import { gatherFacts } from './gather.mjs';
+import { timeLimits, requestMerges } from '../M11-dispatcher/merges.mjs';
+import { MERGED_OUTSIDE, MERGED_OUTSIDE_UNTOLD } from './merge-outcome.mjs';
 
 const POLICY = 'tiers: {}\n';
 const CLEAN = { correct: 'clean', well_built: 'clean', works_for_user: 'clean', holds_up: 'clean' };
@@ -59,8 +62,8 @@ function verifiedCard(w, id = 'C-1', { pr = 7, files = { 'src/a.mjs': 'two' }, u
   const { env, g } = w;
   if (undo) {
     // The Dispatcher's undo card, from an authenticated audit issue (lane 2 makes it; here it is made the same way).
-    must(env.record.write({ actor: 'sensors', entity: 'fact', id: `issue-${id}`, expectRev: 0, doc: { type: 'undo_issue', authenticated: true, commit: undo } }), 'issue');
-    must(env.record.write({ actor: 'dispatcher', entity: 'card', id, expectRev: 0, doc: { state: 'draft', product: PRODUCT, kind: 'exact_reverse', source: { fact: `issue-${id}` }, ...plan({ files: Object.keys(files) }) } }), 'undo card');
+    must(env.record.write({ actor: 'sensors', entity: 'fact', id: `undo-issue-${id}`, expectRev: 0, doc: { type: 'undo_issue', authenticated: true, commit: undo } }), 'issue');
+    must(env.record.write({ actor: 'dispatcher', entity: 'card', id, expectRev: 0, doc: { state: 'draft', product: PRODUCT, kind: 'exact_reverse', source: { fact: `undo-issue-${id}` }, ...plan({ files: Object.keys(files) }) } }), 'undo card');
   } else {
     const doc = leadCard(env, id, { files: Object.keys(files) });
     must(env.record.write({ actor: 'approvals', entity: 'go', id: `go-${id}`, expectRev: 0, doc: { product: PRODUCT, card_id: id, plan_fingerprint: fingerprintFor(id, doc), files: Object.keys(files), tier: 2, rows: {} } }), 'go');
@@ -122,7 +125,7 @@ test('a clean card merges: paired write, squash merge of the judged head, card m
   assert.deepEqual(w.alerts, []);
 
   // The audit result comes only from a Sensors audit_run fact for that commit.
-  must(w.env.record.write({ actor: 'sensors', entity: 'fact', id: 'audit-1', expectRev: 0, doc: { type: 'audit_run', commit: m.doc.merge_commit, conclusion: 'failure' } }), 'fact');
+  must(w.env.record.write({ actor: 'sensors', entity: 'fact', id: 'audit-run-1', expectRev: 0, doc: { type: 'audit_run', commit: m.doc.merge_commit, conclusion: 'failure' } }), 'fact');
   await gatePass(w.ctx);
   assert.equal(mergeOf(w).doc.state, 'audit_flagged');
 });
@@ -132,7 +135,7 @@ test('the undo route: a flagged merge\'s exact reverse goes first, merges with n
   verifiedCard(w);
   await gatePass(w.ctx);
   const flagged = mergeOf(w).doc.merge_commit;
-  must(w.env.record.write({ actor: 'sensors', entity: 'fact', id: 'audit-1', expectRev: 0, doc: { type: 'audit_run', commit: flagged, conclusion: 'failure' } }), 'fact');
+  must(w.env.record.write({ actor: 'sensors', entity: 'fact', id: 'audit-run-1', expectRev: 0, doc: { type: 'audit_run', commit: flagged, conclusion: 'failure' } }), 'fact');
   await gatePass(w.ctx);
   assert.equal(mergeOf(w).doc.state, 'audit_flagged');
   must(put(w.env.record, 'dispatcher', 'card', 'C-1', { state: 'closed' }), 'closed');
@@ -223,27 +226,342 @@ test('GitHub refuses the merge: refused, card back to verified, nothing marked',
   assert.equal([...w.g.statuses.values()].flat().length, 0);
 });
 
-test('a pass stopped after GitHub merged: the next pass finishes the merge from what GitHub says', async () => {
-  const w = world();
-  verifiedCard(w);
-  // GitHub merges, but its answer is lost.
-  w.g.answer.merge = (pr, body) => { w.g.answer.merge = null; return null; };
+// L94: the gate's own recovery decides through M6 settleMerge, the Dispatcher's function, with the same clock. Only
+// GitHub's explicit "no" (405, 409, 422) refuses at once; any other answer leaves the merge merging until GitHub shows
+// what happened. Every test here runs on the real Record.
+const LIMIT_MIN = 15;
+const limited = () => ({ values: { 'timeouts.merging_open_max_min': LIMIT_MIN } });
+const gatePuts = (w) => w.g.writes.filter(([k, p]) => k === 'put' && p.endsWith('/merge')).length;
+// GitHub takes the merge call but the answer never comes back (`merged` says whether GitHub did the merge).
+function loseAnswer(w, { merged }) {
   const realPut = w.g.gh.put;
-  w.g.gh.put = async (p, b) => { const r = await realPut(p, b); if (p.endsWith('/merge')) throw new Error('connection reset'); return r; };
+  w.g.gh.put = async (p, b) => {
+    if (!p.endsWith('/merge')) return realPut(p, b);
+    if (merged) await realPut(p, b); else w.g.writes.push(['put', p, b]);
+    throw new Error('connection reset');
+  };
+  return realPut;
+}
+const recOf = (w) => w.env.record;
+const cardOf = (w, id = 'C-1') => recOf(w).read('card', id).doc;
+const tick = (w, min) => { w.env.clock.t += min * 60_000; };
+const nowIso = (w, offsetMin = 0) => new Date(w.env.clock.t + offsetMin * 60_000).toISOString();
+
+test('L94: a lost merge answer, then GitHub shows it merged: merging and one alert, then merged on the next pass, with the marks, the audit and an Undo to follow', async () => {
+  const w = world(limited());
+  verifiedCard(w);
+  loseAnswer(w, { merged: true });
   await gatePass(w.ctx);
-  assert.equal(mergeOf(w).doc.state, 'merged');
-  assert.equal(w.env.record.read('card', 'C-1').doc.state, 'merged');
+  assert.equal(mergeOf(w).doc.state, 'merging');
+  assert.equal(cardOf(w).state, 'merging');
+  assert.deepEqual(w.alerts.map((a) => a.type), ['merge_gate_unsure']);
+  tick(w, 1);
+  const r = await gatePass(w.ctx);
+  const m = mergeOf(w);
+  assert.equal(m.doc.state, 'merged', JSON.stringify(r.did));
+  assert.match(m.doc.merge_commit, /^[0-9a-f]{40}$/);
+  assert.equal(m.doc.merge_commit, w.g.main);
+  assert.ok(m.doc.marked_at, 'the robot\'s mark and the needs-joe status are posted');
+  // Undo works from the card's merge_commit (M11 undo.mjs), so the card must carry it.
+  assert.equal(cardOf(w).state, 'merged');
+  assert.equal(cardOf(w).merge_commit, m.doc.merge_commit);
+  assert.equal(gatePuts(w), 1, 'one merge call');
+  assert.deepEqual(w.alerts.map((a) => a.type), ['merge_gate_unsure']);
+  must(recOf(w).write({ actor: 'sensors', entity: 'fact', id: 'audit-run-1', expectRev: 0, doc: { type: 'audit_run', commit: m.doc.merge_commit, conclusion: 'failure' } }), 'fact');
+  await gatePass(w.ctx);
+  assert.equal(mergeOf(w).doc.state, 'audit_flagged');
 });
 
-test('a merge left in merging by a stopped pass, not merged on GitHub: refused, card back to verified', async () => {
-  const w = world();
+test('L94: a lost merge answer and the PR stays open: merging under the limit; past it, refused (interrupted) with one alert and the card put back', async () => {
+  const w = world(limited());
   verifiedCard(w);
-  w.g.gh.put = async () => { throw new Error('stopped'); };
-  w.g.down = false;
-  // First pass: GitHub can't be reached for the merge; it reads the pull request, sees it open, and refuses.
+  loseAnswer(w, { merged: false });
   await gatePass(w.ctx);
-  assert.equal(mergeOf(w).doc.state, 'refused');
-  assert.equal(w.env.record.read('card', 'C-1').doc.state, 'verified');
+  assert.equal(mergeOf(w).doc.state, 'merging');
+  tick(w, 5);
+  await gatePass(w.ctx);
+  assert.equal(mergeOf(w).doc.state, 'merging', 'open under the limit: the outcome is not known yet');
+  assert.equal(cardOf(w).state, 'merging');
+  assert.deepEqual(w.alerts.map((a) => a.type), ['merge_gate_unsure']);
+  tick(w, LIMIT_MIN - 5);
+  await gatePass(w.ctx);
+  const m = mergeOf(w);
+  assert.equal(m.doc.state, 'refused');
+  assert.deepEqual(m.doc.reasons, ['interrupted']);
+  assert.equal(cardOf(w).state, 'verified');
+  assert.deepEqual(cardOf(w).attempts?.merge_refusals, ['interrupted']);
+  assert.deepEqual(w.alerts.map((a) => a.type), ['merge_gate_unsure', 'merge_interrupted']);
+  tick(w, 1);
+  await gatePass(w.ctx);
+  assert.deepEqual(w.alerts.map((a) => a.type), ['merge_gate_unsure', 'merge_interrupted'], 'told once');
+  assert.equal(gatePuts(w), 1);
+});
+
+// The merge time limit read from M10's real engine (L110 M-1): a per-product key, which the engine answers only when the
+// product is named. The fixture policy is parsed for real; its schema does not list timeouts.merging_open_max_min yet
+// (M10's to add), so the value is set on the parsed policy, as an adopted file would give it.
+test('L110 M-1: the gate reads merging_open_max_min for its product from the real engine, so a merge past the limit is refused', async () => {
+  const KEY = 'timeouts.merging_open_max_min';
+  const w = world();
+  const parsed = parsePolicy(readFileSync(join(here, '../M10-rules/fixtures/policy.yaml'), 'utf8'));
+  assert.ok(parsed.ok, parsed.reason);
+  const pol = structuredClone(parsed.policy);
+  pol.timeouts = { ...pol.timeouts, merging_open_max_min: LIMIT_MIN };
+  const eng = makeRules(makeEngine({ products: [PRODUCT], rulesState: () => ({ status: 'ok', policy: pol, commit: 'c'.repeat(40), blob: 'b'.repeat(40) }),
+    productState: () => ({ state: 'active' }), running: () => 0, rolesDir: join(here, '../M10-rules/roles'), clock: () => w.env.clock.t }));
+  assert.equal(eng.get(KEY), undefined, 'the engine gives no per-product value without a product');
+  assert.equal(eng.get(KEY, { product: PRODUCT }), LIMIT_MIN);
+  // The world's rules, with this one key answered by the engine, built on makeRules so num() reads the same override
+  // (L148 item 1: a get-only stand-in let the merging limit go unread, and the merge was never refused).
+  const base = w.ctx.rules;
+  w.ctx.rules = makeRules({ get rev() { return base.rev; }, may: (a, s) => base.may(a, s), classify: (c) => base.classify(c),
+    get: (k, o) => (k === KEY ? eng.get(k, o) : base.get(k, o)) });
+  verifiedCard(w);
+  loseAnswer(w, { merged: false });
+  await gatePass(w.ctx);
+  assert.equal(mergeOf(w).doc.state, 'merging');
+  tick(w, LIMIT_MIN - 1);
+  await gatePass(w.ctx);
+  assert.equal(mergeOf(w).doc.state, 'merging', 'under the limit');
+  tick(w, 1);
+  await gatePass(w.ctx);
+  assert.equal(mergeOf(w).doc.state, 'refused', 'past the limit the engine gave for this product');
+  assert.deepEqual(mergeOf(w).doc.reasons, ['interrupted']);
+  assert.equal(cardOf(w).state, 'verified');
+});
+
+// L148 item 5: with no timeouts.merging_open_max_min in the rules, an open merge is never refused as interrupted, so
+// the owner is told once per merge that the limit is missing. The told fact is written only once the alert was taken:
+// a refused alert tells again on the next pass, and once told, no pass tells again.
+// The third case reads the real rules file with its merging limit line taken out (the fixture gains one in #97), the
+// key answered by M10's engine through rulesFromText, as the L110 M-1 test above does with the limit present.
+const FIXTURE_TEXT = readFileSync(join(here, '../M10-rules/fixtures/policy.yaml'), 'utf8');
+for (const [refuseFirst, realFile] of [[false, false], [true, false], [false, true]]) {
+  test(`L148 item 5: a lost merge answer with no merging limit in the rules tells the owner once${refuseFirst ? ', after a refused first alert' : ''}${realFile ? ', the line taken out of the real rules file' : ''}`, async () => {
+    const w = world();
+    if (realFile) {
+      const KEY = 'timeouts.merging_open_max_min';
+      const text = FIXTURE_TEXT.replace(/^  merging_open_max_min: .*\n/m, '');
+      assert.doesNotMatch(text, /merging_open_max_min/, 'the line is out of the file');
+      const real = rulesFromText({ [PRODUCT]: text }, { clock: () => w.env.clock.t });
+      assert.equal(real.get(KEY, { product: PRODUCT }), undefined, 'the real engine has no limit');
+      const base = w.ctx.rules;
+      w.ctx.rules = makeRules({ get rev() { return base.rev; }, may: (a, s) => base.may(a, s), classify: (c) => base.classify(c),
+        get: (k, o) => (k === KEY ? real.get(k, o) : base.get(k, o)) });
+    }
+    assert.equal(w.ctx.rules.num('timeouts.merging_open_max_min', { product: PRODUCT }), undefined, 'the rules lack the limit');
+    let refuse = refuseFirst;
+    const push = w.ctx.alert;
+    w.ctx.alert = (a) => {
+      if (a.type === 'merge_limit_missing' && refuse) { refuse = false; return false; }
+      return push(a);
+    };
+    verifiedCard(w);
+    loseAnswer(w, { merged: false });
+    await gatePass(w.ctx);
+    assert.equal(mergeOf(w).doc.state, 'merging');
+    const missingTold = () => w.alerts.filter((a) => a.type === 'merge_limit_missing');
+    assert.deepEqual(missingTold(), [], 'the merge call pass says it is unsure, nothing more');
+    const id = mergeOf(w).id;
+    for (let i = 0; i < 4; i++) {
+      tick(w, 2);
+      const r = await gatePass(w.ctx);
+      assert.equal(mergeOf(w).doc.state, 'merging', 'never refused with no limit');
+      assert.ok(r.did.some((d) => d.step === 'outcome_unknown'), JSON.stringify(r.did));
+      const told = recOf(w).read('fact', MERGE_LIMIT_TOLD_FACT(id));
+      if (refuseFirst && i === 0) assert.equal(told, null, 'a refused alert writes no told fact');
+      else assert.equal(told?.doc?.merge, id, `pass ${i}: told is recorded`);
+    }
+    assert.equal(missingTold().length, 1, 'told exactly once');
+    assert.equal(missingTold()[0].merge, id);
+    assert.match(missingTold()[0].note, /timeouts\.merging_open_max_min/);
+    assert.equal(gatePuts(w), 1, 'one merge call');
+  });
+}
+
+// G14 (L110 m-6): a pass that stopped after the checking write, before any merge call, left the merge in checking.
+// GitHub was never asked to merge, so a pull request still open is no unknown outcome: refused at once, the card put
+// back, with no wait for the merging limit and no merge call.
+test('L110 m-6 (G14): a merge stopped in checking, its PR still open, is refused at once on the next pass', async () => {
+  const w = world(limited());
+  verifiedCard(w);
+  // The process stops right after the checking write: its next read of the Record never returns.
+  const base = w.ctx.record;
+  w.ctx.record = Object.create(base, { read: { value: (e, id) => {
+    if (e === 'card' && mergeOf(w)?.doc.state === 'checking') throw new Error('the gate process stopped');
+    return base.read(e, id);
+  } } });
+  await gatePass(w.ctx).catch(() => {});
+  w.ctx.record = base;
+  assert.equal(mergeOf(w).doc.state, 'checking', 'the stopped pass left the merge in checking');
+  assert.equal(cardOf(w).state, 'merging');
+  assert.equal(gatePuts(w), 0, 'GitHub was never asked to merge');
+  tick(w, 1);
+  await gatePass(w.ctx);
+  const m = mergeOf(w);
+  assert.equal(m.doc.state, 'refused', 'refused at once, well under the merging limit');
+  assert.deepEqual(m.doc.reasons, ['GitHub did not merge the judged head']);
+  assert.equal(cardOf(w).state, 'verified');
+  assert.equal(gatePuts(w), 0);
+});
+
+// L130 M5: recover() writes MERGED_OUTSIDE ("the owner was told") only when its alert was taken; an alert that answers
+// false, or throws, leaves MERGED_OUTSIDE_UNTOLD, which the Dispatcher tells (merges.mjs, alert-answer.test S3).
+for (const [name, answer, want] of [['taken', () => true, MERGED_OUTSIDE], ['not queued', () => false, MERGED_OUTSIDE_UNTOLD],
+  ['thrown', () => { throw new Error('queue gone'); }, MERGED_OUTSIDE_UNTOLD]]) {
+  test(`L130: a stopped checking merge GitHub shows merged at another head is refused; the alert ${name} -> ${want === MERGED_OUTSIDE ? 'told' : 'untold'}`, async () => {
+    const w = world(limited());
+    verifiedCard(w);
+    const base = w.ctx.record;
+    w.ctx.record = Object.create(base, { read: { value: (e, id) => {
+      if (e === 'card' && mergeOf(w)?.doc.state === 'checking') throw new Error('the gate process stopped');
+      return base.read(e, id);
+    } } });
+    await gatePass(w.ctx).catch(() => {});
+    w.ctx.record = base;
+    assert.equal(mergeOf(w).doc.state, 'checking');
+    // Merged on GitHub, outside the gate, at a head the gate never judged.
+    const pr = w.g.pulls.get(7);
+    Object.assign(pr, { head: w.g.commit([w.g.main], { 'src/a.mjs': 'three' }, { from: w.g.main }), state: 'closed', merged: true, merge_commit_sha: 'e'.repeat(40) });
+    let asked = 0;
+    w.ctx.alert = (a) => { asked += 1; w.alerts.push(a); return answer(); };
+    tick(w, 1);
+    await gatePass(w.ctx);
+    const m = mergeOf(w);
+    assert.equal(m.doc.state, 'refused');
+    assert.deepEqual(m.doc.reasons, [want]);
+    assert.equal(asked, 1);
+    assert.equal(cardOf(w).state, 'verified');
+    assert.equal(gatePuts(w), 0, 'the gate never merged it');
+  });
+}
+
+for (const status of [405, 409, 422]) {
+  test(`L94: GitHub's explicit no (${status}) refuses at once, the card put back with the reason counted`, async () => {
+    const w = world(limited());
+    verifiedCard(w);
+    w.g.answer.merge = () => ({ status, json: { message: 'no' } });
+    await gatePass(w.ctx);
+    const m = mergeOf(w);
+    assert.equal(m.doc.state, 'refused');
+    assert.deepEqual(m.doc.reasons, [`GitHub refused the merge (${status}: no)`]);
+    assert.equal(cardOf(w).state, 'verified');
+    assert.deepEqual(cardOf(w).attempts?.merge_refusals, [`GitHub refused the merge (${status}: no)`]);
+    assert.deepEqual(w.alerts.map((a) => a.type), ['merge_refused']);
+  });
+}
+
+for (const [name, answer] of [['a 5xx', () => ({ status: 502, json: { message: 'bad gateway' } })], ['a 200 that does not say merged', () => ({ status: 200, json: { merged: false } })]]) {
+  test(`L94: ${name} from the merge call is not a refusal: the merge stays merging`, async () => {
+    const w = world(limited());
+    verifiedCard(w);
+    w.g.answer.merge = answer;
+    await gatePass(w.ctx);
+    assert.equal(mergeOf(w).doc.state, 'merging');
+    assert.equal(cardOf(w).state, 'merging');
+    assert.deepEqual(w.alerts.map((a) => a.type), ['merge_gate_unsure']);
+  });
+}
+
+for (const merged of [true, false]) {
+  test(`L94: the gate restarts in the middle of a merge (GitHub ${merged ? 'merged' : 'did not merge'}): the same outcome as a lost answer`, async () => {
+    const w = world(limited());
+    verifiedCard(w);
+    const realPut = w.g.gh.put;
+    // The first process stops inside the merge call: its pass never returns.
+    w.g.gh.put = async (p, b) => {
+      if (!p.endsWith('/merge')) return realPut(p, b);
+      if (merged) await realPut(p, b); else w.g.writes.push(['put', p, b]);
+      return new Promise(() => {});
+    };
+    gatePass(w.ctx);
+    for (let i = 0; i < 200 && gatePuts(w) === 0; i++) await new Promise((r) => setImmediate(r));
+    assert.equal(gatePuts(w), 1);
+    assert.equal(mergeOf(w).doc.state, 'merging');
+    // A new process, the same Record.
+    w.g.gh.put = realPut;
+    tick(w, 1);
+    await gatePass({ ...w.ctx });
+    if (merged) {
+      assert.equal(mergeOf(w).doc.state, 'merged');
+      assert.equal(cardOf(w).state, 'merged');
+    } else {
+      assert.equal(mergeOf(w).doc.state, 'merging');
+      tick(w, LIMIT_MIN);
+      await gatePass({ ...w.ctx });
+      assert.deepEqual(mergeOf(w).doc.reasons, ['interrupted']);
+      assert.equal(cardOf(w).state, 'verified');
+    }
+    assert.equal(gatePuts(w), 1, 'never a second merge call');
+  });
+}
+
+// The first merge refused as interrupted, and the Dispatcher's next request for the card (it was put back).
+async function interruptedThenAskedAgain(w, head) {
+  const realPut = loseAnswer(w, { merged: false });
+  await gatePass(w.ctx);
+  tick(w, LIMIT_MIN);
+  await gatePass(w.ctx);
+  const first = mergeOf(w);
+  assert.deepEqual(first.doc.reasons, ['interrupted']);
+  w.g.gh.put = realPut;
+  must(recOf(w).write({ actor: 'dispatcher', entity: 'merge_request', id: 'mr-C-1-again', expectRev: 0, doc: { card: 'C-1', pr: 7, session_id: 'S-1', head, rev: recOf(w).read('card', 'C-1').rev, requested_at: nowIso(w) } }), 'again');
+  return { first, realPut };
+}
+function sensorsReads(w, doc) {
+  const cur = recOf(w).read('fact', 'pr-7');
+  must(recOf(w).write({ actor: 'sensors', entity: 'fact', id: 'pr-7', expectRev: cur?.rev ?? 0, doc }), 'pr reading');
+}
+
+test('L102: after an interrupted refusal, a later GitHub merge of that PR is reconciled exactly once, and no second merge call goes out while the reading is older than the refusal', async () => {
+  const w = world(limited());
+  const head = verifiedCard(w);
+  const { first, realPut } = await interruptedThenAskedAgain(w, head);
+  // A reading from before the refusal does not count.
+  sensorsReads(w, { state: 'open', merged: false, merge_commit_sha: null, head_sha: head, observed_at: nowIso(w, -60) });
+  tick(w, 1);
+  let r = await gatePass(w.ctx);
+  const again = recOf(w).list('merge').find((m) => m.doc.request === 'mr-C-1-again');
+  assert.equal(again.doc.state, 'queued');
+  assert.ok(r.did.some((d) => d.merge === again.id && d.step === 'waiting'), JSON.stringify(r.did));
+  assert.equal(gatePuts(w), 1, 'no second merge call while the reading is older than the refusal');
+  // GitHub finishes the first merge late; Sensors reads it.
+  await realPut('/repos/sample-org/sample-app/pulls/7/merge', { sha: head, merge_method: 'squash' });
+  const sha = w.g.pulls.get(7).merge_commit_sha;
+  tick(w, 1);
+  sensorsReads(w, { state: 'closed', merged: true, merge_commit_sha: sha, head_sha: head, observed_at: nowIso(w) });
+  r = await gatePass(w.ctx);
+  assert.ok(r.did.some((d) => d.merge === again.id && d.step === 'waiting'), 'a reading that shows merged is the reconcile\'s, never a second merge');
+  const limits = fakeRules({ values: { 'timeouts.checking_max_min': 10, 'timeouts.reporting_max_min': 10, 'timeouts.in_review_no_reviewer_min': 10, 'timeouts.merging_open_max_min': LIMIT_MIN } });
+  const said = [];
+  const run = () => timeLimits({ rec: recOf(w), rules: limits, now: w.env.clock.t, b: {}, gateAlive: () => true, alert: (t) => said.push(t) });
+  const d1 = await run();
+  assert.ok(d1.some(([id, what]) => id === first.id && what === 'interrupted, then merged: reconciled'), JSON.stringify(d1));
+  const m1 = recOf(w).read('merge', first.id).doc;
+  assert.equal(m1.state, 'merged');
+  assert.equal(m1.merge_commit, sha);
+  assert.ok(m1.reconciled_at, 'a reconciled merge says so (c-2)');
+  assert.equal(cardOf(w).state, 'merged');
+  tick(w, 1);
+  const d2 = await run();
+  assert.ok(!d2.some(([id]) => id === first.id), 'reconciled once');
+  await gatePass(w.ctx);
+  assert.equal(recOf(w).read('merge', again.id).doc.state, 'refused');
+  assert.match(recOf(w).read('merge', again.id).doc.reasons[0], /already merged/);
+  assert.equal(gatePuts(w), 2, 'the gate sent one merge call; the other is GitHub finishing on its own');
+  assert.deepEqual(said, []);
+});
+
+test('L102: an interrupted refusal, then a reading after it that shows the PR open: the gate merges it again', async () => {
+  const w = world(limited());
+  const head = verifiedCard(w);
+  await interruptedThenAskedAgain(w, head);
+  tick(w, 1);
+  sensorsReads(w, { state: 'open', merged: false, merge_commit_sha: null, head_sha: head, observed_at: nowIso(w) });
+  await gatePass(w.ctx);
+  const again = recOf(w).list('merge').find((m) => m.doc.request === 'mr-C-1-again');
+  assert.equal(again.doc.state, 'merged');
+  assert.equal(cardOf(w).state, 'merged');
 });
 
 test('behind main: catch up with the expected head; a conflict returns it to the builder', async () => {
@@ -403,7 +721,7 @@ test('a mark that failed until the audit result landed is still posted, with an 
   w.g.answer.status = () => ({ status: 500, json: null });
   await gatePass(w.ctx);
   const m = mergeOf(w);
-  must(w.env.record.write({ actor: 'sensors', entity: 'fact', id: 'run-1', expectRev: 0, doc: { type: 'audit_run', commit: m.doc.merge_commit, conclusion: 'failure' } }), 'fact');
+  must(w.env.record.write({ actor: 'sensors', entity: 'fact', id: 'audit-run-1', expectRev: 0, doc: { type: 'audit_run', commit: m.doc.merge_commit, conclusion: 'failure' } }), 'fact');
   w.g.answer.status = null;
   await gatePass(w.ctx);
   const after = mergeOf(w);
@@ -689,4 +1007,110 @@ test('L70 planted: a failing verdict file with a second name still refuses the m
   assert.notEqual(m.doc.state, 'merged');
   assert.ok(m.doc.reasons.some((x) => x.startsWith('5:') && /the reviewer session R-C-1 did not pass/.test(x)), m.doc.reasons.join(' | '));
   assert.ok(!m.doc.reasons.some((x) => /can't be counted|more than one name/.test(x)), m.doc.reasons.join(' | '));
+});
+
+// L138 MAT-2: every way the gate puts a card back ends its merge, so the Dispatcher's next pass asks for the merge again
+// (M11 requestMerges, its real id rule, over this real Record); a merge ended while the card did not change is not
+// asked for on every pass.
+const M11_RULES = fakeRules({ values: { 'usage.red_runs': [] } });
+const GREEN_BAND = { band: 'green', own_building: 'open', prodBlocked: false };
+function dispatcherAsks(w, id = 'C-1', { pr = 7, head } = {}) {
+  const { env } = w;
+  if (!env.record.read('launch', 'launch-S-1')) launch(env, id, 'S-1', 'worker');
+  const f = env.record.read('fact', `pr-${pr}`);
+  const reading = { type: 'pr', head_sha: head, state: 'open', merged: false, observed_at: new Date(env.clock.t).toISOString() };
+  must(env.record.write({ actor: 'sensors', entity: 'fact', id: `pr-${pr}`, expectRev: f?.rev ?? 0, doc: reading }), 'pr reading');
+  return requestMerges({ rec: env.record, rules: M11_RULES, now: env.clock.t, b: GREEN_BAND, alert: (t) => assert.fail(`unexpected alert: ${t}`) });
+}
+const mergesOf = (w, id = 'C-1') => w.env.record.list('merge').filter((m) => m.doc.card === id).sort((a, b) => (a.id < b.id ? -1 : 1));
+
+test('L138 MAT-2: check() refuses at the lock and puts the card back; the next Dispatcher pass asks again, and that merge lands', async () => {
+  const w = world();
+  const head = verifiedCard(w, 'C-1', { request: false });
+  assert.deepEqual(dispatcherAsks(w, 'C-1', { head }), [['C-1', 'merge requested']]);
+  // The check turns red between the queue's judgement and the one under the lock.
+  const base = w.ctx.record;
+  w.ctx.record = Object.create(base, { write: { value: (x) => {
+    const r = base.write(x);
+    if (r.ok && x.entity === 'merge' && x.doc?.state === 'checking') w.g.checks.set(head, [{ name: 'test', app: { id: 1 }, head_sha: head, status: 'completed', conclusion: 'failure' }]);
+    return r;
+  } } });
+  await gatePass(w.ctx);
+  w.ctx.record = base;
+  assert.deepEqual(mergesOf(w).map((m) => m.doc.state), ['refused']);
+  assert.equal(cardOf(w).state, 'verified', 'put back by check()');
+  assert.equal((cardOf(w).attempts?.merge_refusals ?? []).length, 0, 'not a refusal the repeat ask counts (L116 m7)');
+  w.g.checks.delete(head);
+  tick(w, 1);
+  assert.deepEqual(dispatcherAsks(w, 'C-1', { head }), [['C-1', 'merge requested again']]);
+  assert.equal(w.env.record.list('merge_request').length, 2);
+  await gatePass(w.ctx);
+  assert.deepEqual(mergesOf(w).map((m) => m.doc.state), ['refused', 'merged']);
+  assert.equal(cardOf(w).state, 'merged');
+});
+
+test('L138 MAT-2: recover() refuses a merge stopped in checking and puts the card back; the next Dispatcher pass asks again', async () => {
+  const w = world(limited());
+  const head = verifiedCard(w, 'C-1', { request: false });
+  assert.deepEqual(dispatcherAsks(w, 'C-1', { head }), [['C-1', 'merge requested']]);
+  const base = w.ctx.record;
+  w.ctx.record = Object.create(base, { read: { value: (e, id) => {
+    if (e === 'card' && mergeOf(w)?.doc.state === 'checking') throw new Error('the gate process stopped');
+    return base.read(e, id);
+  } } });
+  await gatePass(w.ctx).catch(() => {});
+  w.ctx.record = base;
+  tick(w, 1);
+  await gatePass(w.ctx);
+  assert.deepEqual(mergesOf(w).map((m) => [m.doc.state, m.doc.reasons]), [['refused', ['GitHub did not merge the judged head']]]);
+  assert.equal(cardOf(w).state, 'verified', 'put back by recover()');
+  tick(w, 1);
+  assert.deepEqual(dispatcherAsks(w, 'C-1', { head }), [['C-1', 'merge requested again']]);
+  await gatePass(w.ctx);
+  assert.equal(cardOf(w).state, 'merged');
+});
+
+test('L138 MAT-2: refusal 8 sets needs_joe; once Joe approves the card at the same head, the next Dispatcher pass asks again', async () => {
+  const w = world({ values: { 'product.cutover_stage': 'second' } });
+  realRules(w, { deep: true });
+  const head = verifiedCard(w, 'C-1', { files: PLANTED['a risky act with no Approve'].files, request: false });
+  assert.deepEqual(dispatcherAsks(w, 'C-1', { head }), [['C-1', 'merge requested']]);
+  await gatePass(w.ctx);
+  const first = mergesOf(w);
+  assert.deepEqual(first.map((m) => m.doc.state), ['refused']);
+  assert.ok(first[0].doc.reasons.some((x) => x.startsWith('8:')), first[0].doc.reasons.join(' | '));
+  assert.equal(cardOf(w).needs_joe, true);
+  // While it waits on his Approve the Record takes no request for it (M9), and says so each pass.
+  tick(w, 1);
+  assert.deepEqual(dispatcherAsks(w, 'C-1', { head }), [['C-1', 'merge request not recorded: card C-1 is verified and needs the owner; no merge request yet']]);
+  assert.equal(w.env.record.list('merge_request').length, 1);
+  // Joe approves (the same head): asked again.
+  must(put(w.env.review, 'approvals', 'card', 'C-1', { state: 'approved' }), 'approved');
+  tick(w, 1);
+  assert.deepEqual(dispatcherAsks(w, 'C-1', { head }), [['C-1', 'merge requested again']]);
+  assert.equal(w.env.record.list('merge_request').length, 2);
+});
+
+// The refusal here is about the change (a red check), so not asking again is right. A temporary refusal (checks or
+// threads unreadable, mergeable unknown, main red) currently stalls the same way and is never retried. Known gap,
+// fixed under LEAD-CALLS L164 before the first cutover; no test pins that stall.
+test('L138 MAT-2: a merge the gate refused while the card did not change is not asked for again on every pass', async () => {
+  const w = world();
+  const head = verifiedCard(w, 'C-1', { request: false });
+  w.g.checks.set(head, [{ name: 'test', app: { id: 1 }, head_sha: head, status: 'completed', conclusion: 'failure' }]);
+  assert.deepEqual(dispatcherAsks(w, 'C-1', { head }), [['C-1', 'merge requested']]);
+  await gatePass(w.ctx);
+  assert.deepEqual(mergesOf(w).map((m) => m.doc.state), ['refused']);
+  assert.equal(cardOf(w).state, 'verified', 'refused in the queue: the card never left verified');
+  for (let i = 0; i < 3; i++) {
+    tick(w, 1);
+    assert.deepEqual(dispatcherAsks(w, 'C-1', { head }), [['C-1', 'not requested again: the gate ended its merge and the card has not changed since']]);
+    await gatePass(w.ctx);
+  }
+  assert.equal(w.env.record.list('merge_request').length, 1);
+  assert.equal(w.env.record.list('merge').length, 1, 'no refusal (and no alert) per pass');
+  // The card changes (an edit at the same head): asked again.
+  must(put(w.env.record, 'dispatcher', 'card', 'C-1', { attempts: { merge_asks: 0 } }), 'a change');
+  tick(w, 1);
+  assert.deepEqual(dispatcherAsks(w, 'C-1', { head }), [['C-1', 'merge requested again']]);
 });

@@ -130,8 +130,8 @@ export function relayReviewAlerts({ rec, alerts, alert, now }) {
     if (!a || typeof a.id !== 'string' || typeof a.text !== 'string') continue;
     const fact = REVIEW_ALERT_FACT(a);
     if (rec.read('fact', fact)?.doc?.told_at) continue;
-    tellThen(alert, `review runner: ${a.text.slice(0, 500)}`, { fact: REVIEW_ALERT_FACT(a), fields: { told_at: new Date(now).toISOString() }, kind: 'review_alert' });
-    n += 1;
+    // Only an alert the queue took is counted (L130 c1).
+    if (tellThen(alert, `review runner: ${a.text.slice(0, 500)}`, { fact: REVIEW_ALERT_FACT(a), fields: { told_at: new Date(now).toISOString() }, kind: 'review_alert' }) !== false) n += 1;
   }
   return n;
 }

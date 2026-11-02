@@ -33,18 +33,16 @@ const ENTRY = { product: 'sample-app', owner: 'sample-org', repo: 'sample-app', 
 // Reasons the real readers give today on any rules file, each a known gap in the readers, not in the file, and labeled
 // so in the check's own output (known-gaps.mjs; L96 m-D, L115). They go as these land:
 //   - M11's Mac-wide reads of per-product keys (L115 M-A, L131, L144): lane 2's L104 sweep passes the product at the
-//     four context.* reads and the six per-product time limits. (usage.red_runs's went with #79, and the Dispatcher-wide
+//     three context.* reads left (the time limits and context.worker.split_after_compactions went with #68). (usage.red_runs's went with #79, and the Dispatcher-wide
 //     NEW_KEYS with #94, which made them Mac-wide in shared/rules.mjs.)
 //   (Numbers and flags as text went with #94: M11 reads through num/dec/flag, L148.)
 // The test 'the pending reasons are exactly these' then fails, and this list is cut to what is left; at [] the todo
 // test below passes.
 const SCOPE = (k) => `M11: ${k} is read without the product, so the real engine gives none${scopeLabel(k)}`;
-// The six per-product time limits M11 reads without the product (merges.mjs, pass.mjs; L144, lane 2's L104 O-1 step 2).
-const PER_PRODUCT_TIMEOUTS = Object.freeze(['timeouts.cancel_grace_min', 'timeouts.park_wait_min', 'timeouts.claimed_no_session_min',
-  'timeouts.checking_max_min', 'timeouts.reporting_max_min', 'timeouts.in_review_no_reviewer_min']);
+// (The six per-product time limits M11 read without the product went with #68: merges.mjs and pass.mjs read each for
+// its product, and timeouts.claimed_no_session_min is no longer read; L144, lane 2's L104 O-1 step 2.)
 const PENDING = Object.freeze([
-  ...PER_PRODUCT_TIMEOUTS.map(SCOPE),
-  SCOPE('context.lead.soft'), SCOPE('context.lead.hard'), SCOPE('context.handoff_cap.role'), SCOPE('context.worker.split_after_compactions'),
+  SCOPE('context.lead.soft'), SCOPE('context.lead.hard'), SCOPE('context.handoff_cap.role'),
 ]);
 // The keys the pending reasons are about, by gap.
 const keyOf = (x) => x.match(/^M(?:9|11): (\S+) /)[1];
@@ -78,10 +76,12 @@ context:
     role: 3
   worker:
     split_after_compactions: 2
+claims:
+  stuck_min: 30
 `;
 
 // The Dispatcher's single minute limits (M11 keys.mjs), each a whole number under timeouts.
-const TIMEOUT_MINUTES = ['cancel_grace_min: 10', 'park_wait_min: 60', 'dead_quiet_min: 20', 'claimed_no_session_min: 15',
+const TIMEOUT_MINUTES = ['cancel_grace_min: 10', 'park_wait_min: 60', 'dead_quiet_min: 20',
   'checking_max_min: 60', 'reporting_max_min: 30', 'in_review_no_reviewer_min: 60', 'front_door_stuck_min: 30',
   'usage_unknown_max_min: 30'].map((l) => `  ${l}\n`).join('');
 
@@ -123,7 +123,10 @@ test('the sample as it stands is refused, for each first-cutover reason', () => 
     'caps.per_state is missing (M11 reads it)',
     'caps.shakedown is missing (M11 reads it)',
     'approvals.plan_go.go_free.lead_daily_card is missing (M11 reads it)',
-    ...M11_NEW_KEYS.filter((k) => /^(timeouts|outage)\./.test(k)).map((k) => `${k} is missing (M11 reads it)`),
+    // timeouts.merging_open_max_min is the fixture's own line (#97); claims.stuck_min is M11's since #68 (tick.mjs).
+    ...M11_NEW_KEYS.filter((k) => /^timeouts\./.test(k) && !SAMPLE.includes(`  ${k.split('.')[1]}:`)).map((k) => `${k} is missing (M11 reads it)`),
+    'claims.stuck_min is missing (M11 reads it)',
+    ...M11_NEW_KEYS.filter((k) => /^outage\./.test(k)).map((k) => `${k} is missing (M11 reads it)`),
     'context.lead.soft is missing (M11 reads it)',
     'context.lead.hard is missing (M11 reads it)',
     'context.handoff_cap.role is missing (M11 reads it)',
@@ -322,20 +325,20 @@ test('the pending reasons are exactly these, on the fixture as given, and each s
   for (const [name, k] of Object.entries(KNOWN)) assert.match(k, /^ \(known: .+, L\d+; waits on .+\)$/, name);
   // L120 c-2: each label's ruling, and the owner it waits on.
   assert.deepEqual(Object.fromEntries(Object.entries(KNOWN).map(([n, k]) => [n, k.match(/, (L\d+); waits on (.+)\)$/).slice(1)])), {
-    scopeContext: ['L115', 'lane 2\'s L104 sweep'], scopeNew: ['L144', 'lane 2\'s L104 O-1 step 2'],
+    scopeContext: ['L115', 'lane 2\'s L104 sweep'],
   });
   // usage.red_runs's gap went with #79 (L131): it is Mac-wide in the rules, and M11 reads it so.
   assert.equal(scopeLabel('usage.red_runs'), '');
   assert.equal(scopeLabel('context.lead.soft'), KNOWN.scopeContext);
   // L125 c-1: owners are named key by key; any other key gets no label, so it can't pass as known.
-  assert.equal(scopeLabel('timeouts.cancel_grace_min'), KNOWN.scopeNew);
+  // #68: the time limits are read for their product, so they are no gap (L144).
+  for (const k of ['timeouts.cancel_grace_min', 'timeouts.checking_max_min', 'context.worker.split_after_compactions']) assert.equal(scopeLabel(k), '', k);
   // #94 made the Dispatcher-wide keys Mac-wide, so they are no gap (L131, L148).
   for (const k of ['caps.readonly_per_session', 'timeouts.merging_open_max_min', 'usage.pace_min_share', 'timeouts.dead_quiet_min',
     'outage.share', 'anything.at.all', 'context.other', 'constructor']) assert.equal(scopeLabel(k), '', k);
   assert.deepEqual(Object.keys(SCOPE_OWNERS), PENDING_SCOPE, 'the map names exactly the pending scope gaps');
   for (const x of PENDING) assert.match(x, / \(known: /, x);
-  assert.deepEqual(PENDING_SCOPE, [...PER_PRODUCT_TIMEOUTS,
-    'context.lead.soft', 'context.lead.hard', 'context.handoff_cap.role', 'context.worker.split_after_compactions']);
+  assert.deepEqual(PENDING_SCOPE, ['context.lead.soft', 'context.lead.hard', 'context.handoff_cap.role']);
 });
 
 // L131: the fit check reads each key at the rules' own scope (shared/rules.mjs isMacKey), and M11's sources must read it
@@ -456,10 +459,16 @@ test('a value parsePolicy accepts but the Dispatcher refuses is refused, naming 
     ['    split_after_compactions: 2\n', '    split_after_compactions: "2x"\n', 'context.worker.split_after_compactions'],
     ['      editing_per_product: 1\n', '      editing_per_product: 1.5\n', 'usage.bands.amber.editing_per_product'],
     ['      editing_per_mac: 2\n', '      editing_per_mac: 1.5\n', 'usage.bands.amber.editing_per_mac'],
-    ['    light: 1\n', '    light: 1.5\n', 'caps.per_state'],
-    ['    light: 1\n', '    light: abc\n', 'caps.per_state'],
     ['  per_state:\n    active: 1\n    away: 1\n    paused: 0\n    light: 1\n', '  per_state: 1\n', 'caps.per_state'],
   ];
+  // L156 m-2: every product state's cap, not only light's, so a check that skips a state is caught.
+  const block = /\n  per_state:\n((?:    \S+: .*\n)+)/.exec(FIRST)[1];
+  for (const state of PRODUCT_STATES) {
+    const line = block.split('\n').find((l) => l.startsWith(`    ${state}: `));
+    assert.ok(line, `the fixture caps ${state}`);
+    // The whole block is swapped, so the same line elsewhere in the fixture is never the one changed.
+    for (const bad of ['1.5', 'abc']) cases.push([`  per_state:\n${block}`, `  per_state:\n${block.replace(`${line}\n`, `    ${state}: ${bad}\n`)}`, 'caps.per_state']);
+  }
   for (const [from, to, key] of cases) {
     const text = swap(FIRST, from, to);
     assert.ok(rulesOf(text), `parsePolicy accepts ${to.trim()}`);

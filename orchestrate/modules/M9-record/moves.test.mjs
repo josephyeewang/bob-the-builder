@@ -15,7 +15,9 @@ function baseDoc(entity, state, env) {
   const wait = { who: 'dependency', what: 'x', since: iso(t), next_check: iso(t + 60000), resume: 'retry', return_to: 'ready' };
   switch (entity) {
     case 'card': return { state, product: PRODUCT, module: 'M1', kind: 'ordinary', round: 1, files: ['a.mjs'], done_when: 'x', tier: 2, head: HEAD,
-      ...(state === 'claimed' || state === 'running' ? { claim: { kind: 'session', host: 'mac-a', pid: 1, pid_start: 'x', session_id: 'S-1', at: iso(t) } } : {}),
+      // The claim has two steps (L72): claimed names the session; running adds its process.
+      ...(state === 'claimed' ? { claim: { kind: 'session', host: 'mac-a', session_id: 'S-1', claimed_at: iso(t) } } : {}),
+      ...(state === 'running' ? { claim: { kind: 'session', host: 'mac-a', pid: 1, pid_start: 'x', session_id: 'S-1', claimed_at: iso(t) } } : {}),
       ...(state === 'waiting' ? { wait } : {}) };
     case 'ask': return { state, kind: 'question', reask_count: 0 };
     case 'session': return { state, role: 'worker', ...(state.startsWith('waiting_') ? { wait: { who: 'usage', what: 'x', since: iso(t), next_check: iso(t + 60000) } } : {}) };
@@ -64,11 +66,12 @@ test('the move table names only real states and script or AI actors', () => {
   }
 });
 
-test('final states have no way out except closed → reverted (D8)', () => {
+test('final states have no way out except closed → reverted (D8) and an interrupted merge reconciled (L85 M-1 b)', () => {
   for (const [entity, finals] of Object.entries(FINAL_STATES)) {
     for (const f of finals) {
       const outs = Object.keys(MOVES[entity]?.[f] ?? {});
       if (entity === 'card' && f === 'closed') assert.deepEqual(outs, ['reverted']);
+      else if (entity === 'merge' && f === 'refused') assert.deepEqual(outs, ['merged']);
       else assert.deepEqual(outs, [], `${entity} ${f}`);
     }
   }
@@ -108,8 +111,8 @@ test('every legal move succeeds for each listed actor when its condition holds',
   const t = env.clock.t;
   const ok = (r, where) => assert.ok(r.ok, `${where}: ${r.reason}`);
   seed(env, 'product', PRODUCT, { state: 'active' });
-  ok(env.record.write({ actor: 'sensors', entity: 'fact', id: 'audit-ok', expectRev: 0, doc: { type: 'audit_run', commit: HEAD, run_id: 1, conclusion: 'success' } }), 'fact');
-  ok(env.record.write({ actor: 'sensors', entity: 'fact', id: 'audit-bad', expectRev: 0, doc: { type: 'audit_run', commit: HEAD, run_id: 2, conclusion: 'failure' } }), 'fact');
+  ok(env.record.write({ actor: 'sensors', entity: 'fact', id: 'audit-run-ok', expectRev: 0, doc: { type: 'audit_run', commit: HEAD, run_id: 1, conclusion: 'success' } }), 'fact');
+  ok(env.record.write({ actor: 'sensors', entity: 'fact', id: 'audit-run-bad', expectRev: 0, doc: { type: 'audit_run', commit: HEAD, run_id: 2, conclusion: 'failure' } }), 'fact');
   // A go-free kind made by its allowed creator, so moves into ready and claimed pass without a go.
   const goFreeCard = (id, doc) => env.store.transaction((tx) => tx.commit([{ entity: 'card', id, doc }], { actor: 'lead:L-1', kind: 'seed' }));
   const waitTo = (back) => ({ who: 'dependency', what: 'x', since: iso(t), next_check: iso(t + 60000), resume: back === 'ready' ? 'retry' : 'continue', return_to: back });
@@ -128,11 +131,12 @@ test('every legal move succeeds for each listed actor when its condition holds',
             if (from === 'waiting') doc.wait = waitTo(to === 'closed_no_answer' || to === 'cancelled' ? 'ready' : to);
             // A seeded wait carries the head it began on, as the writer stamps it (L123 m-4).
             if (from === 'waiting' && doc.head !== undefined) doc.wait.head = doc.head;
-            if (from === 'running' && to === 'in_review') doc.claim = { kind: 'tab', host: 'mac-a', claim_id: 'T-1', at: iso(t) };
+            if (from === 'running' && to === 'in_review') doc.claim = { kind: 'tab', host: 'mac-a', claim_id: 'T-1', claimed_at: iso(t) };
             goFreeCard(id, doc);
             const next = { ...doc, state: to };
             if (to === 'waiting') next.wait = waitTo(from === 'running' ? 'ready' : from);
-            if (from === 'ready' && to === 'claimed') next.claim = { kind: 'session', host: 'mac-a', pid: 7, pid_start: 'x', session_id: 'S-9' };
+            if (from === 'ready' && to === 'claimed') next.claim = { kind: 'session', host: 'mac-a', session_id: 'S-9' };
+            if (from === 'claimed' && to === 'running') next.claim = { ...doc.claim, pid: 7, pid_start: 'x' };
             if (actor === 'workshop') next.head = 'c'.repeat(40);
             if (to === 'verified' || to === 'approved') {   // every way in needs a pass for the head (round 3 MAT-A)
               passingVerdict(env, id, `R-${id}`);
@@ -152,6 +156,11 @@ test('every legal move succeeds for each listed actor when its condition holds',
             if (entity === 'session' && from === 'quarantined') { doc.card = `card-of-${id}`; seed(env, 'card', doc.card, baseDoc('card', 'closed', env)); }
             if (entity === 'product' && from === 'paused') doc.return_to = to;
             if (entity === 'merge') doc.merge_commit = HEAD;
+            // refused → merged: an interrupted merge whose Sensors PR reading shows it merged at the judged head (L85 M-1 b)
+            if (entity === 'merge' && from === 'refused') {
+              Object.assign(doc, { reasons: ['interrupted'], pr: 900 + n, judged_head: HEAD });
+              ok(env.record.write({ actor: 'sensors', entity: 'fact', id: `pr-${doc.pr}`, expectRev: 0, doc: { merged: true, merge_commit_sha: HEAD, head_sha: HEAD, observed_at: iso(t) } }), 'pr fact');
+            }
             if (entity === 'merge' && to === 'checking') { doc.card = `card-of-${id}`; seed(env, 'card', doc.card, baseDoc('card', 'approved', env)); }
             seed(env, entity, id, doc);
             const next = { ...doc, state: to };
@@ -161,7 +170,8 @@ test('every legal move succeeds for each listed actor when its condition holds',
             if (entity === 'product' && to === 'paused') next.return_to = from;
             if (entity === 'product' && from === 'paused') delete next.return_to;
             write = { entity, id, expectRev: env.record.read(entity, id).rev, doc: next };
-            if (entity === 'merge' && from === 'merged') write.data = { fact: to === 'audited_ok' ? 'audit-ok' : 'audit-bad' };
+            if (entity === 'merge' && from === 'merged') write.data = { fact: to === 'audited_ok' ? 'audit-run-ok' : 'audit-run-bad' };
+            if (entity === 'merge' && from === 'refused') write.data = { fact: `pr-${doc.pr}` };
             if (entity === 'merge' && to === 'checking') {
               const c = env.record.read('card', doc.card);
               also = [{ entity: 'card', id: doc.card, expectRev: c.rev, doc: { ...c.doc, state: 'merging' } }];

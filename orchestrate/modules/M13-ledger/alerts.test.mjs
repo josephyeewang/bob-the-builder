@@ -142,3 +142,14 @@ test('L143: every GitHub call that throws makes raise or clear throw and saves n
     assert.deepEqual(l.alerts.state('k'), before, `${m}: nothing saved`);
   }
 });
+
+test('L152 m2: an open alert saved without an issue (before L143) clears without calling GitHub', async () => {
+  const calls = [];
+  const no = (name) => async (...a) => { calls.push(name); throw new Error(`${name} called`); };
+  const l = lossSetup({ open: no('open'), edit: no('edit'), comment: no('comment'), close: no('close'), isClosed: no('isClosed') });
+  const id = `alert-${createHash('sha256').update('k').digest('hex').slice(0, 16)}`;
+  l.writer.put(id, { kind: 'fact.alert', key: 'k', title: 't', body: 'b', status_text: 'b', status: 'open', since: 'x', last: 'x', count: 1 });
+  assert.equal(await l.alerts.clear({ key: 'k' }), 'cleared');
+  assert.deepEqual(calls, []);
+  assert.equal(l.alerts.state('k').status, 'cleared');
+});
