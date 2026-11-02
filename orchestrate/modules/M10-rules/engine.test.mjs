@@ -31,7 +31,8 @@ function world({ policies = { app: pol() }, states = {}, run = {}, now = AT_10, 
     products,
     rulesState: (p) => w.reader[p],
     productState: (p) => w.states[p] ?? null,
-    running: ({ product }) => (product ? (w.run[product] ?? 0) : w.run.mac),
+    // run.undo[product]: undo workers running for that product (L199); they are in run[product] and run.mac too.
+    running: ({ product, undo }) => (undo ? (w.run.undo?.[product] ?? 0) : product ? (w.run[product] ?? 0) : w.run.mac),
     rolesDir: join(here, 'roles'),
     clock: () => w.now,
     deepMerge: deep,
@@ -116,6 +117,32 @@ test('start_session: caps per product and per Mac, and 0 (MAT-5)', () => {
   const broken = world();
   broken.run.app = Number.NaN;
   assert.equal(start(broken).decision, 'deny', 'an unknown running count is a deny');
+});
+
+test('start_session: an undo is never refused by the editing caps; one undo per product (L31, L199)', () => {
+  const zeroCap = pol(set('', 'editing_per_product: 3', 'editing_per_product: 0'));
+  const undo = { card: { id: 'C-undo', kind: 'exact_reverse' } };
+  const w = world({ policies: { app: zeroCap } });
+  assert.equal(start(w, undo).decision, 'allow', 'cap 0 + undo → allowed');
+  assert.match(start(w).reason, /is 0/, 'cap 0 + an ordinary editing worker → refused');
+  assert.match(start(w, { card: { id: 'C-2', kind: 'docs' } }).reason, /is 0/, 'only the exact-reverse kind is spared');
+  w.run.undo = { app: 1 }; w.run.app = 1; w.run.mac = 1;
+  assert.match(start(w, undo).reason, /an undo is already running for app/, 'a second undo on one product → refused');
+  w.run.undo = { other: 1 };
+  assert.equal(start(w, undo).decision, 'allow', 'an undo on another product does not hold this one');
+  // Full caps on the product and the Mac hold an editing worker, never an undo.
+  const full = world({ run: { app: 3, mac: 5 } });
+  assert.equal(start(full, undo).decision, 'allow');
+  assert.match(start(full).reason, /cap reached/);
+  // A running undo still counts toward the caps for other editing starts (the port counts it in run.app).
+  const one = world({ policies: { app: pol(set('', 'editing_per_product: 3', 'editing_per_product: 1')) }, run: { app: 1, mac: 1, undo: { app: 1 } } });
+  assert.match(start(one).reason, /editing cap reached for app \(1\)/);
+  // A read-only start that names an exact-reverse card is not an undo worker; an unknown undo count is a deny.
+  assert.equal(start(full, { ...undo, editing: false }).decision, 'allow');
+  const busy = world({ run: { app: 1, mac: 1, undo: { app: 1 } } });
+  assert.equal(start(busy, { ...undo, editing: false, role: 'auditor' }).decision, 'allow', 'the one-undo limit holds undo workers only');
+  const broken = world({ policies: { app: zeroCap }, run: { undo: { app: Number.NaN } } });
+  assert.equal(start(broken, undo).decision, 'deny', 'an unknown undo count is a deny');
 });
 
 test('start_session: Tier 1 needs a fresh usage reading (A8)', () => {

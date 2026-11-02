@@ -10,7 +10,9 @@
 //     products      ['<product>', …] from products.json (the strictest-wins scope, MAT-10)
 //     rulesState(p) → the reader's state(p): { status: ok|last_good|deny_all, policy, commit, blob }
 //     productState(p) → the product record's doc ({ state, away?: { tz } }) or null
-//     running({ product }) / running({}) → editing sessions running for that product / on the whole Mac
+//     running({ product }) / running({}) → editing sessions running for that product / on the whole Mac, undo
+//                   workers included (they still count toward the caps for other starts, L199)
+//     running({ product, undo: true }) → undo workers (exact-reverse cards) running for that product (L199)
 //     rolesDir      the role-profile folder (roles/), loaded against each claude_code.pin
 //     clock()       → ms since epoch; the only clock used (subject.now is ignored, R3-m9)
 //     deepMerge     false (the first cutover): a merge passes only the docs-lane path check (lane-check.mjs, L34).
@@ -162,8 +164,15 @@ export function makeEngine({ products, rulesState, productState, running, rolesD
     if (!['within_caps', 'editing_cap_1', 'none'].includes(fileRule)) return deny(`product_state_rules.${state}.start is not a known rule`);
     if (!floor.start || fileRule === 'none') return deny(`product is ${state}: no starts`);
 
-    // Caps (MAT-5, MAT-10). Editing starts only.
-    if (editing) {
+    // An undo (an exact-reverse card) is never refused by the editing caps, a cap of 0 included: safety acts are never
+    // held (L31, L199). Its own limit instead: at most one undo running per product. A running undo still counts
+    // toward the caps for every other editing start (the running port counts it). M11 gate.mjs keeps the same rule.
+    // The card's kind is only the claim; the Dispatcher checks it is an exact reverse before the start (L40).
+    const undo = editing && s.card?.kind === 'exact_reverse';
+    if (undo && count({ product, undo: true }) >= 1) return deny(`an undo is already running for ${product} (one at a time)`);
+
+    // Caps (MAT-5, MAT-10). Editing starts only; an undo is not capped (above).
+    if (editing && !undo) {
       let cap = pol.caps.editing_per_product;
       if (!Number.isSafeInteger(cap)) return deny('caps.editing_per_product missing');
       if (floor.editingCap1 || fileRule === 'editing_cap_1') cap = Math.min(cap, 1);
