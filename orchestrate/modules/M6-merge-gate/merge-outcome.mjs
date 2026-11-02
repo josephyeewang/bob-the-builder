@@ -10,7 +10,8 @@
 //     merged at the judged head → merged (checking goes through merging first), the card merging → merged with its
 //       merge_commit, and an undo card marks what it undid; the gate's next pass posts the marks.
 //     merged at another head → refused ("merged outside the gate"), told, the card put back.
-//     not merged → refused with `reason`, the card put back.
+//     not merged → refused with `reason`, the card put back. `fields` are written with that refusal (the gate's
+//       tell_owner mark, L168), never with a merged outcome.
 //   Put back: merging → verified, or in_review when the Record refuses verified (no passing verdict for its head), with
 //   `reason` added to the card's attempts.merge_refusals (the gate's count). The gate alerts once per refusal; it does
 //   not ask the owner. The same reason twice in a row (refusedTwice below; a timeout, an interruption, or GitHub's own
@@ -85,7 +86,7 @@ const ACTOR = 'merge_gate';
 const SHA = /^[0-9a-f]{40}$/;
 const short = (s) => String(s ?? '').slice(0, 7);
 
-export function settleMerge({ record, alert = () => {}, now }, id, { pr = null, reason, openTooLong = false } = {}) {
+export function settleMerge({ record, alert = () => {}, now }, id, { pr = null, reason, openTooLong = false, fields = {} } = {}) {
   const iso = () => new Date(typeof now === 'function' ? now() : now).toISOString();
   const m = record.read('merge', id);
   if (!m?.doc || m.corrupt) return { ok: false, reason: `merge ${id} can't be read` };
@@ -109,7 +110,7 @@ export function settleMerge({ record, alert = () => {}, now }, id, { pr = null, 
     why = alertTaken(alert, { type: 'merge_gate_unsure', merge: id, note: `pull request #${m.doc.pr} merged at ${short(pr.head_sha)}, not the judged ${short(m.doc.judged_head)}` }) ? MERGED_OUTSIDE : MERGED_OUTSIDE_UNTOLD;
   }
   if (typeof why !== 'string' || !why) return { ok: false, reason: 'a refusal needs its reason' };
-  if (!told(write('merge', m, { state: 'refused', reasons: [why] }), 'refused')) return { ok: false, reason: 'the refusal was refused' };
+  if (!told(write('merge', m, { ...fields, state: 'refused', reasons: [why] }), 'refused')) return { ok: false, reason: 'the refusal was refused' };
   return { ok: true, outcome: 'refused', card: putBack(record, m.doc.card, why, told) };
 }
 

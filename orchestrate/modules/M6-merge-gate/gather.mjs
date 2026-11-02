@@ -25,6 +25,7 @@
 import { carryOver } from '../M10-rules/carry-over.mjs';
 import { checkExactReverse } from '../M10-rules/exact-reverse.mjs';
 import { RULES_PATH } from '../M10-rules/reader.mjs';
+import { COMPARE_FILE_LIMIT } from '../M10-rules/git-view.mjs';
 import { approveNeeded, goCheck, ROW_FILE } from '../M2-approvals/go.mjs';
 import { approvalStands } from '../M2-approvals/schedule.mjs';
 import { askStore } from '../M2-approvals/ask-store.mjs';
@@ -56,6 +57,10 @@ export function recordView(record) {
   };
 }
 
+// A list GitHub answered in full health but that is longer than the gate reads (L182). It is a fact about the change,
+// not a failed read, so it is never waited out: the refusal it leads to is final and tells the owner to split.
+const tooLong = (message) => Object.assign(new Error(message), { tooLong: true });
+
 async function json(gh, path) {
   const r = await gh.get(path);
   if (r?.status !== 200 || r.json === undefined || r.json === null) throw new Error(`${path} answered ${r?.status}`);
@@ -66,13 +71,15 @@ const checkRun = (c) => ({ name: c?.name, app_id: c?.app?.id, head_sha: c?.head_
 
 async function checksAt(gh, base, sha) {
   const j = await json(gh, `${base}/commits/${sha}/check-runs?per_page=${MAX_LIST}`);
-  if (!Array.isArray(j.check_runs) || !Number.isInteger(j.total_count) || j.total_count >= MAX_LIST || j.total_count !== j.check_runs.length) throw new Error('the check runs are cut off or unreadable');
+  if (Array.isArray(j.check_runs) && Number.isInteger(j.total_count) && j.total_count >= MAX_LIST) throw tooLong(`${j.total_count} check runs; the gate reads at most ${MAX_LIST - 1}`);
+  if (!Array.isArray(j.check_runs) || !Number.isInteger(j.total_count) || j.total_count !== j.check_runs.length) throw new Error('the check runs are cut off or unreadable');
   return j.check_runs.map(checkRun);
 }
 
 async function statusesAt(gh, base, sha) {
   const j = await json(gh, `${base}/commits/${sha}/status?per_page=${MAX_LIST}`);
-  if (!Array.isArray(j.statuses) || (Number.isInteger(j.total_count) && j.total_count >= MAX_LIST)) throw new Error('the statuses are cut off or unreadable');
+  if (Array.isArray(j.statuses) && Number.isInteger(j.total_count) && j.total_count >= MAX_LIST) throw tooLong(`${j.total_count} statuses; the gate reads at most ${MAX_LIST - 1}`);
+  if (!Array.isArray(j.statuses)) throw new Error('the statuses are cut off or unreadable');
   return j.statuses.map((s) => ({ context: s?.context, state: s?.state }));
 }
 
@@ -97,12 +104,14 @@ export const linesOf = (patch) => {
 };
 
 // A read that FAILED throws (err.unreadable = true, the message starts with the HTTP status); the gate's own callers map any
-// throw to { ok: false } through `attempt`, exactly as before. A list too long to read whole is a fact: { ok: false }.
+// throw to { ok: false } through `attempt`, exactly as before. A list of 100+ threads is a fact, refused for good (L182):
+// { ok: false, tooLong }. A count that doesn't match the list is { ok: false }, a wait.
 export async function threads(gh, owner, repo, pr) {
   const r = await gh.post('/graphql', { query: threadsQuery, variables: { owner, repo, pr } });
   const t = r?.json?.data?.repository?.pullRequest?.reviewThreads;
   if (r?.status !== 200 || r.json?.errors || !t || !Array.isArray(t.nodes)) { const e = new Error(r?.status !== 200 ? `HTTP ${r?.status}: the review threads could not be read` : 'GitHub answered 200 but with an error: the review threads could not be read'); e.unreadable = true; throw e; }
-  if (t.totalCount !== t.nodes.length || t.totalCount >= MAX_LIST) return { ok: false };
+  if (Number.isInteger(t.totalCount) && t.totalCount >= MAX_LIST) return { ok: false, tooLong: `${t.totalCount} review threads; the gate reads at most ${MAX_LIST - 1}` };
+  if (t.totalCount !== t.nodes.length) return { ok: false };
   // A human thread: its first comment's author is a User. A bot's thread (a linter) is not a person waiting on an answer.
   const unresolved = t.nodes.filter((n) => n?.isResolved !== true && n?.comments?.nodes?.[0]?.author?.__typename !== 'Bot').length;
   return { ok: true, unresolved };
@@ -114,8 +123,8 @@ async function defaultReadRow(gh, base, id, head) {
   try { return parseYaml(Buffer.from(r.json.content, 'base64').toString('utf8'), `${id}.yaml`); } catch { return null; }
 }
 
-// One read per fact; each failure becomes that fact's "unknown".
-const attempt = async (fn, fallback = null) => { try { return await fn(); } catch { return fallback; } };
+// One read per fact; each failure becomes that fact's "unknown". `onError` sees the error (a too-long list, L182).
+const attempt = async (fn, fallback = null, onError = () => {}) => { try { return await fn(); } catch (e) { onError(e); return fallback; } };
 
 export async function gatherFacts(ctx, merge) {
   const { record, rules, product, gh, owner, repo, view } = ctx;
@@ -148,21 +157,31 @@ export async function gatherFacts(ctx, merge) {
   const ignoredRaw = get('product_profile.checks_ignored');
   f.checksIgnored = Array.isArray(ignoredRaw) ? ignoredRaw.map((x) => ({ app_id: botId({ bot_user_id: x?.app_id }), name: x?.name })) : [];
   f.main = { sha: mainSha, green: mainSha && f.requiredChecks ? await attempt(() => mainGreen(gh, base, mainSha, f.requiredChecks, f.checksIgnored)) : null };
-  f.checks = head ? await attempt(() => checksAt(gh, base, head)) : null;
-  f.statuses = head ? await attempt(() => statusesAt(gh, base, head)) : null;
+  // A check or status list longer than the gate reads (L182): checksTooLong says so, and refusal 1 is final.
+  const longList = (e) => { if (e?.tooLong) f.checksTooLong = String(e.message); };
+  f.checks = head ? await attempt(() => checksAt(gh, base, head), null, longList) : null;
+  f.statuses = head ? await attempt(() => statusesAt(gh, base, head), null, longList) : null;
 
   // The change: main...head.
   const cmp = head && mainSha ? await attempt(() => json(gh, `${base}/compare/${mainSha}...${head}`)) : null;
   f.compareStatus = typeof cmp?.status === 'string' ? cmp.status : null;
-  const rawFiles = Array.isArray(cmp?.files) && cmp.files.length < 300 ? cmp.files : null;
+  const cmpFiles = Array.isArray(cmp?.files) ? cmp.files : null;
+  const rawFiles = cmpFiles && cmpFiles.length < COMPARE_FILE_LIMIT ? cmpFiles : null;
   // Each file's mode from the tree (compare gives none): a link, submodule or runnable file is refused by mode alone,
   // so a list whose modes can't all be read is no list (R-0b-98's planted link). A removed file has its old mode.
   const mb = SHA.test(cmp?.merge_base_commit?.sha ?? '') ? cmp.merge_base_commit.sha : null;
+  let noEntry = null;
   f.files = rawFiles && mb ? await attempt(() => Promise.all(rawFiles.map(async (x) => {
     const e = await view.entry(x.status === 'removed' ? mb : head, x.filename);
-    if (!e) throw new Error(`${x.filename}: no tree entry`);
+    if (!e) { noEntry ??= x.filename; throw new Error(`${x.filename}: no tree entry`); }
     return { path: x.filename, ...(x.previous_filename ? { previous_path: x.previous_filename } : {}), status: x.status === 'changed' ? 'modified' : x.status, mode: e.mode, ...linesOf(x.patch) };
   }))) : null;
+  // Why there is no file list (L182). 'too_many': compare was read, but GitHub lists at most COMPARE_FILE_LIMIT files,
+  // so the list is cut off; 'no_entry': a listed file is not in its commit's file list (both commits are fixed, so a
+  // later pass reads the same). Either is a fact about the change, and refusals 8, 9, 10 and 14 are final. 'unread':
+  // a read failed (GitHub down, an odd answer), which a later pass may read: those refusals wait.
+  f.filesProblem = f.files ? null : cmpFiles && cmpFiles.length >= COMPARE_FILE_LIMIT ? 'too_many' : noEntry ? 'no_entry' : 'unread';
+  if (f.filesProblem === 'no_entry') f.filesMissing = noEntry;
   const fcv = get('effect_paths')?.first_customer_visible?.new_files_under;
   f.firstCustomerNewFiles = Array.isArray(fcv) ? fcv : null;
 
@@ -208,7 +227,7 @@ export async function gatherFacts(ctx, merge) {
         if (!SHA.test(m.doc.merge_commit ?? '') || !(await view.onHistory(m.doc.merge_commit, B0))) tier1MergesSince += 1;
       }
       return carryOver({ reviewed: { base: B0, head: H0 }, current: { base: B1, head }, between, catchUps, tier1MergesSince, gh: view });
-    }, { review: false, audit: false, reasons: ['carry-over could not be read'] });
+    }, { review: false, audit: false, unread: true, reasons: ['carry-over could not be read'] });
   }
 
   // The review (refusal 5; L44, L65, L66 M1, L68, L69). Read from review's own stores only, through M9's one check:
