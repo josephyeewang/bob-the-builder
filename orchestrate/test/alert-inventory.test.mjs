@@ -28,6 +28,11 @@
 // is handed back as that throw. What the scanner reads in a wrapper is advice only: it is printed, never a pass. A
 // wrapper the scanner cannot see (not named like an alert) is listed with `by_lead: true`.
 //
+// depends_on (L174 m1): a ruling whose reason relies on another function ("gatePass 3a runs complete again") lists it,
+// [{ file, fn, hash }] with hash = fnBody (the same body pin a ruled wrapper carries). A ruled entry fails once any of
+// those bodies changes, so the ruling cannot go false while none of its own pins moves; the lead sets it open or rules
+// it again. A lead change that gives a ruled entry new depends_on hashes under the same ruling text fails too.
+//
 // Change control (L135 item 4, L139 item 6, L143 Minor 1): in a PR that is not the lead's (branch lead-* or
 // claude/lead-*), the checker's own files (LEAD_FILES, the list among them) may not change at all, and the list is
 // also compared entry by entry with the merge-base: a lane may only re-pin an open alerts entry. A list
@@ -42,7 +47,8 @@
 //   - a dynamic import, `require`, or a function passed around in a data structure and called from there;
 //   - an alert port handed on inside an object (`step({ rec, send: alert })`) under a name that is not alert-like;
 //   - a stand-in passed by position, or built by a helper the test file imports;
-//   - whether a ruled "retried next pass" stays true: the ruling is re-checked only when its pins change;
+//   - whether a ruled "retried next pass" stays true: the ruling is re-checked only when its pins, or a function its
+//     depends_on names, change; a function it relies on and does not name is not watched;
 //   - whether a lead call says what the ruling claims: only that the call exists is checked.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -53,7 +59,7 @@ import { readFileSync } from 'node:fs';
 import {
   inventory, orchestrateFiles, readList, compare, keyOf, short, parseStatus, hintsFor, countList, changeControl,
   LEAD_BRANCH, LIST, fnBody, leadFilesIn, LEAD_FILES, isTestCode, isTestPath, answerFlow, branchName,
-  readLeadCalls, leadCallsIn, leadCallProblem, citedCalls, LEAD_CALL_NUMBERS,
+  readLeadCalls, leadCallsIn, leadCallProblem, citedCalls, LEAD_CALL_NUMBERS, dependsOnProblems,
 } from './alert-inventory.mjs';
 import { wrappers, standIns, losingStandIns, silentDefaults } from './alert-answer-scan.mjs';
 import { fakeAlert } from './fake-alert.test-helper.mjs';
@@ -128,6 +134,18 @@ test('every alert wrapper is on the list, and a ruled one is pinned to its body 
   }
   for (const [k, e] of listed) if (!found.has(k) && !e.lands_with) bad.push(`stale: ${k} is no longer a wrapper here; remove it from the list`);
   if (advice.length) console.log(`the wrapper scanner's advice (L155: advice only):\n  ${advice.join('\n  ')}`);
+  assert.deepEqual(bad, []);
+});
+
+// L174 m1: a ruling's reason may rely on another function; depends_on pins those, and a ruled entry fails once one changes.
+test('every ruled entry is still true of the functions its depends_on names, and every depends_on is well formed (L174 m1)', () => {
+  const bad = [];
+  let n = 0;
+  for (const k of ['alerts', 'wrappers', 'silent', 'standins']) for (const e of LISTED[k]) {
+    if (Object.hasOwn(e, 'depends_on')) n += 1;
+    for (const p of dependsOnProblems(e, readSrc)) bad.push(`${k}: ${e.file} ${e.fn ?? ''} ${e.call ?? ''}${e.via ? ` via ${e.via}` : ''}: ${p}`);
+  }
+  console.log(`depends_on: ${n} entries carry one`);
   assert.deepEqual(bad, []);
 });
 
@@ -275,7 +293,13 @@ test('controls: a cited lead call must be an entry in LEAD-CALLS.md and on the l
   assert.equal(leadCallProblem('L999', { calls: null, allowed }), null, 'CI (no file): the list alone');
   assert.match(leadCallProblem('L57', { calls: null, allowed: [170] }), /not on LEAD_CALL_NUMBERS/, 'CI: a number the lead has not listed');
   assert.match(leadCallProblem('L57', { calls, allowed: [170] }), /not on LEAD_CALL_NUMBERS/, 'here too, so a list that passes here passes in CI');
-  for (const ref of ['because', 'L', 'L12345', '170', 'l170']) assert.match(leadCallProblem(ref, { calls: null, allowed }), /not a lead call number/, `format: ${ref}`);
+  for (const ref of ['because', 'L', 'L12345', '170', 'l170', 'L0', 'L0170', 'L00']) assert.match(leadCallProblem(ref, { calls: null, allowed }), /not a lead call number/, `format: ${ref}`);
+  // L174 c1: no L0 and no leading zero, anywhere a call number is read.
+  assert.equal(leadCallProblem('L0170', { calls: null, allowed: [170] }) === null, false, 'L0170 is not L170');
+  assert.deepEqual([...leadCallsIn('| L0 | x |\n| L0170 | x |\n## L0170 x\n- 2026-11-01 · **L0170 x**\n| L170 | x |\n')], [170], 'L0 and L0170 are not entries');
+  for (const st of ['ruled: L0, the refused file stays', 'ruled: L0170, the refused file stays', 'open: lane 3, L0 follow-up', 'open: lane 3, L0152 follow-up']) assert.equal(parseStatus(st).kind, 'bad', st);
+  assert.deepEqual(citedCalls({ status: 'open: lane 1, none yet', rethrows: 'L0139: a throw stops the pass first' }).map((x) => x.ref), ['L0139'], 'cited as it is, and refused');
+  assert.match(leadCallProblem('L0139', { calls: null, allowed: [139] }), /not a lead call number/);
   // What an entry cites.
   assert.deepEqual(citedCalls({ status: 'ruled: L135, retried next pass' }), [{ ref: 'L135', where: 'its ruling' }]);
   assert.deepEqual(citedCalls({ status: 'open: lane 3, L152 follow-up' }), [{ ref: 'L152', where: 'its follow-up' }]);
@@ -367,6 +391,44 @@ test('controls: a change anywhere in the function changes a pin', () => {
   const { fresh, gone } = compare(after, listed);
   assert.deepEqual([fresh.length, gone.map((e) => e.call)], [0, ['w']], 'the w entry goes; the c entry stays as it was');
 });
+test('controls: depends_on pins the functions a ruling relies on; a change to one fails a ruled entry, never an open one (L174 m1)', () => {
+  const A = 'export function gatePass(ctx) {\n  for (const m of ms) if (!m.marked) complete(m);\n}\n';
+  const B = 'export function gatePass(ctx) {\n  for (const m of ms) if (!m.marked && false) complete(m);\n}\n';
+  const files = { now: A };
+  const src = (rel) => (rel === 'a.mjs' ? files.now : null);
+  const dep = [{ file: 'a.mjs', fn: 'gatePass', hash: fnBody(A, 'gatePass') }];
+  const ruled = { file: 'b.mjs', fn: 'finish', call: 'complete', status: 'ruled: L174, gatePass runs complete again until marked', depends_on: dep };
+  assert.deepEqual(dependsOnProblems(ruled, src), [], 'the function is as it was');
+  assert.deepEqual(dependsOnProblems({ status: ruled.status }, src), [], 'depends_on is optional');
+  // A comment-only change is not a change (the same body pin as a wrapper's).
+  files.now = A.replace('{\n', '{\n  // a note\n');
+  assert.deepEqual(dependsOnProblems(ruled, src), [], 'a comment is not a change');
+  files.now = B;
+  assert.match(dependsOnProblems(ruled, src).join(), /a\.mjs gatePass, which changed since the ruling/, 'the retry it relies on was planted out');
+  assert.deepEqual(dependsOnProblems({ ...ruled, status: 'open: lane 1, none yet' }, src), [], 'an open entry carries one for the ruling to come');
+  files.now = 'export function other() {}\n';
+  assert.match(dependsOnProblems(ruled, src).join(), /no longer there/, 'the function is gone');
+  assert.match(dependsOnProblems({ ...ruled, depends_on: [{ ...dep[0], file: 'gone.mjs' }] }, src).join(), /no longer there/, 'the file is gone');
+  // Its form, ruled or open.
+  for (const bad of [[], {}, 'gatePass', [{ file: 'a.mjs', fn: 'gatePass' }], [{ file: 'a.mjs', fn: 'gatePass', hash: 'XYZ' }], [{ ...dep[0], line: 3 }], [null], [['a.mjs', 'gatePass', dep[0].hash]]]) {
+    for (const status of [ruled.status, 'open: lane 1, none yet']) assert.equal(dependsOnProblems({ status, depends_on: bad }, src).length > 0, true, `${JSON.stringify(bad)} (${status})`);
+  }
+  // Change control: new depends_on hashes under the same ruling text fail on a lead branch too; a lane may not touch it.
+  const e = { file: 'b.mjs', fn: 'finish', call: 'complete', hash: 'aaaaaaaa', body: 'bbbbbbbb', text: 't', status: ruled.status, depends_on: dep };
+  const base = { alerts: [e], wrappers: [], silent: [], standins: [] };
+  const moved = { ...base, alerts: [{ ...e, depends_on: [{ ...dep[0], hash: fnBody(B, 'gatePass') }] }] };
+  assert.match(changeControl(base, moved, { lead: true }).problems.join(), /its depends_on changed/, 'the lead: open it or rule it again');
+  assert.match(changeControl(base, moved, { lead: false }).problems.join(), /depends_on changed; only a lead PR/, 'a lane');
+  const reruled = { ...base, alerts: [{ ...moved.alerts[0], status: 'ruled: L174, gatePass still runs complete again until marked' }] };
+  assert.deepEqual(changeControl(base, reruled, { lead: true }).problems, [], 'a new ruling on the code as it is');
+  const opened = { ...base, alerts: [{ ...moved.alerts[0], status: 'open: lane 1, none yet' }] };
+  assert.deepEqual(changeControl(base, opened, { lead: true }).problems, [], 'or set open');
+  const { depends_on: _, ...bare } = e;
+  const added = { ...base, alerts: [e] };
+  assert.deepEqual(changeControl({ ...base, alerts: [bare] }, added, { lead: true }).problems, [], 'the lead adds a depends_on to a ruling it keeps');
+  assert.match(changeControl({ ...base, alerts: [bare] }, added, { lead: false }).problems.join(), /depends_on changed; only a lead PR/, 'a lane may not');
+});
+
 test('controls: a status is ruled or open; tested and wrapped no longer pass (L170)', () => {
   assert.deepEqual(parseStatus('ruled: L170, the refused file stays and is seen again'), { kind: 'ruled', call: 'L170', why: 'the refused file stays and is seen again' });
   assert.deepEqual(parseStatus('open: lane 2, #68'), { kind: 'open', owner: 'lane 2', pr: '#68' });

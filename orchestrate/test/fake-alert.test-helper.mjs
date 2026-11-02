@@ -51,6 +51,5 @@ export function fakeAlert({ answer = true, throws = null, rejects = null, never 
   alert.texts = texts;
   alert.answers = answers;
   alert.reset = () => { calls.length = 0; texts.length = 0; answers.length = 0; };
-  alert.fake = true;
   return alert;
 }

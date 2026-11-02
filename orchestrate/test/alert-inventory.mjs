@@ -535,10 +535,10 @@ export const OWNERS = ['lane 1', 'lane 2', 'lane 3', 'lane 4', 'lead'];
  */
 export function parseStatus(s) {
   if (typeof s !== 'string') return { kind: 'bad', why: 'status must be a string' };
-  let x = /^ruled: (L\d{1,4}), (.{8,})$/.exec(s);
+  let x = /^ruled: (L[1-9]\d{0,3}), (.{8,})$/.exec(s);
   if (x) return { kind: 'ruled', call: x[1], why: x[2] };
   // L155: `open: lane 3, L152 follow-up` names the lead call whose follow-up PR is to close it (L153 item 2).
-  x = /^open: (lane [1-4]|lead), (#\d+|none yet|L\d{1,4} follow-up)$/.exec(s);
+  x = /^open: (lane [1-4]|lead), (#\d+|none yet|L[1-9]\d{0,3} follow-up)$/.exec(s);
   if (x) return OWNERS.includes(x[1]) ? { kind: 'open', owner: x[1], pr: x[2] } : { kind: 'bad', why: 'unknown owner' };
   if (/^(?:tested|wrapped):/.test(s)) return { kind: 'bad', why: 'L170: "tested" and "wrapped" no longer pass an entry; rule it (a lead call) or set it open' };
   return { kind: 'bad', why: 'status must be "ruled: L<n>, <why>" or "open: <lane n|lead>, <#N|none yet|L<n> follow-up>"' };
@@ -552,7 +552,7 @@ export function parseStatus(s) {
 export const LEAD_CALLS_FILE = join(homedir(), 'Dropbox', '99.0 Claude Sync', 'audit-results', 'orchestrate-buildspec', 'LEAD-CALLS.md');
 // The lead calls the list may cite. Only the lead adds a number, after writing the call in LEAD-CALLS.md (this file is
 // in LEAD_FILES, so a lane PR cannot change it). Where LEAD-CALLS.md is readable, every number here must be an entry.
-export const LEAD_CALL_NUMBERS = Object.freeze([135, 139, 143, 152, 170]);
+export const LEAD_CALL_NUMBERS = Object.freeze([135, 139, 143, 152, 164, 170, 174]);
 /**
  * The call numbers LEAD-CALLS.md holds as entries: a table row "| L9 |", a heading "## L57" / "### L134 ·", or a
  * dated log line, at the start of a line, that starts with the call in bold ("- 2026-11-01 · **L170 ..."); an indented sub-bullet is not one. A number only mentioned inside
@@ -560,7 +560,7 @@ export const LEAD_CALL_NUMBERS = Object.freeze([135, 139, 143, 152, 170]);
  */
 export function leadCallsIn(text) {
   const out = new Set();
-  for (const x of String(text).matchAll(/^(?:\| L(\d{1,4}) \||#{2,4} L(\d{1,4})\b|- (?:[^*\n]*· )?\*\*L(\d{1,4})\b)/gm)) out.add(Number(x[1] ?? x[2] ?? x[3]));
+  for (const x of String(text).matchAll(/^(?:\| L([1-9]\d{0,3}) \||#{2,4} L([1-9]\d{0,3})\b|- (?:[^*\n]*· )?\*\*L([1-9]\d{0,3})\b)/gm)) out.add(Number(x[1] ?? x[2] ?? x[3]));
   return out;
 }
 /** LEAD-CALLS.md's entries, or null when the file is not here (CI). `path` defaults to ORCH_LEAD_CALLS, then the Dropbox copy. */
@@ -574,7 +574,7 @@ export function readLeadCalls(path = process.env.ORCH_LEAD_CALLS || LEAD_CALLS_F
  * (LEAD_CALL_NUMBERS), and, when `calls` (LEAD-CALLS.md's entries) is not null, be an entry there.
  */
 export function leadCallProblem(ref, { calls = null, allowed = LEAD_CALL_NUMBERS } = {}) {
-  const x = /^L(\d{1,4})$/.exec(String(ref));
+  const x = /^L([1-9]\d{0,3})$/.exec(String(ref));
   if (!x) return `"${ref}" is not a lead call number (L<n>)`;
   const n = Number(x[1]);
   if (calls && !calls.has(n)) return `${ref} is not an entry in LEAD-CALLS.md`;
@@ -586,9 +586,9 @@ export function citedCalls(e) {
   const out = [];
   const s = parseStatus(e.status);
   if (s.kind === 'ruled') out.push({ ref: s.call, where: 'its ruling' });
-  if (s.kind === 'open' && /^L\d/.test(s.pr)) out.push({ ref: s.pr.split(' ')[0], where: 'its follow-up' });
+  if (s.kind === 'open' && /^L[1-9]/.test(s.pr)) out.push({ ref: s.pr.split(' ')[0], where: 'its follow-up' });
   if (e.rethrows !== undefined) {
-    const r = /^(L\d{1,4}): .{8,}/.exec(String(e.rethrows));
+    const r = /^(L[1-9]\d{0,3}): .{8,}/.exec(String(e.rethrows));
     out.push({ ref: r ? r[1] : String(e.rethrows).split(':')[0], where: 'its rethrows note ("L<n>: <why>")' });
   }
   return out;
@@ -601,6 +601,38 @@ export function fnBody(src, fn) {
   const m = mask(src);
   const b = blocks(m, pairs(m)).find((x) => x.kind === 'fn' && x.name === fn);
   return b ? short(squash(mask(src.slice(b.open, b.close + 1), { commentsOnly: true }))) : null;
+}
+
+// ---- depends_on (L174 m1) ----
+
+/**
+ * What is wrong with an entry's `depends_on`, as a list (empty when nothing is). A ruling's reason can rely on code
+ * outside the entry's own pins ("gatePass 3a runs complete again", "readOutboxFile leaves the file"): depends_on
+ * names those functions, [{ file, fn, hash }] with hash = fnBody(the file as it is, fn). It is optional; when there it
+ * is a non-empty list of exactly those three fields. On a ruled entry each function must still be there with that
+ * body, else the ruling may have gone false with no pin of its own changing: the entry is set open or ruled again.
+ * An open entry may carry one for the ruling to come; only its form is checked. `readSrc(rel)` answers a file's text
+ * (rel is under orchestrate/), or null.
+ */
+export function dependsOnProblems(e, readSrc) {
+  if (!Object.hasOwn(e, 'depends_on')) return [];
+  const d = e.depends_on;
+  if (!Array.isArray(d) || d.length === 0) return ['depends_on must be a non-empty list of { file, fn, hash }'];
+  const out = [];
+  const ruled = parseStatus(e.status).kind === 'ruled';
+  for (const x of d) {
+    const keys = x && typeof x === 'object' && !Array.isArray(x) ? Object.keys(x).sort().join(',') : '';
+    if (keys !== 'file,fn,hash' || typeof x.file !== 'string' || typeof x.fn !== 'string' || !/^[0-9a-f]{8}$/.test(String(x.hash))) {
+      out.push(`depends_on item ${JSON.stringify(x)} must be exactly { file, fn, hash } (hash: 8 hex, fnBody of the function)`);
+      continue;
+    }
+    if (!ruled) continue;
+    const src = readSrc(x.file);
+    const now = src === null ? null : fnBody(src, x.fn);
+    if (now === null) out.push(`its ruling relies on ${x.file} ${x.fn}, which is no longer there; set it open, or rule it again`);
+    else if (now !== x.hash) out.push(`its ruling relies on ${x.file} ${x.fn}, which changed since the ruling (body ${now}, list ${x.hash}); set it open, or rule it again on the code as it is`);
+  }
+  return out;
 }
 // The key that pins an entry: file, function, the call and what it goes through (via), call line hash, body hash.
 // The call and via are in the key (L143 rerun, the auditor's F1b): two calls on one line, say `if (write(..)) await
@@ -757,6 +789,10 @@ export function changeControl(base, head, { lead }) {
       if (i >= 0) {
         const g = pool.splice(i, 1)[0];
         const what = Object.keys({ ...g, ...e }).filter((f) => !PIN_FIELDS.has(f) && stable({ v: g[f] ?? null }) !== stable({ v: e[f] ?? null }));
+        // L174 m1, as L155 m4: a ruling relies on its depends_on functions as they were; new hashes under the same
+        // ruling text would keep a ruling made on other code, so the lead too sets it open or writes a new ruling.
+        // Adding a depends_on to a ruling kept as it is is the lead's (it pins the code the ruling stands on now).
+        if (kindOf(e.status) === 'ruled' && g.status === e.status && Object.hasOwn(g, 'depends_on') && what.includes('depends_on')) always.push(`${label(k, e)}: still "${e.status}", but its depends_on changed; set it open, or rule it again with a new ruling (L174 m1)`);
         problems.push(`${label(k, e)}: ${what.includes('status') ? `status "${g.status}" became "${e.status}"` : `${what.join(', ')} changed`}; only a lead PR changes an entry (L143 Minor 1)`);
         continue;
       }
@@ -810,4 +846,11 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === normalize(process.argv
   }
   const back = new Set(moved.map(([, g]) => g));
   for (const g of gone) if (!back.has(g)) console.log(`GONE  ${g.file} ${g.fn} ${g.call}${g.via ? ` (via ${g.via})` : ''} (${g.status})\n    ${g.text}\n`);
+  // L174 m1: a ruling whose depends_on functions changed.
+  const list = readList(root);
+  const src = (rel) => { try { return readFileSync(join(root, rel), 'utf8'); } catch { return null; } };
+  for (const k of ['alerts', 'wrappers', 'silent', 'standins']) for (const e of list[k]) for (const p of dependsOnProblems(e, src)) {
+    console.log(`DEPENDS_ON  ${k}: ${e.file} ${e.fn ?? ''} ${e.call ?? ''}: ${p}`);
+    if (Array.isArray(e.depends_on)) console.log(`    now: ${JSON.stringify(e.depends_on.map((x) => ({ ...x, hash: fnBody(src(x.file) ?? '', x.fn) })))}`);
+  }
 }
