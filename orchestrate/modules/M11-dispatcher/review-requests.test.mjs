@@ -117,6 +117,19 @@ test('L66: a failed runner pass and an installed copy behind main are told, each
   assert.deepEqual(got.map((a) => a.id.replace(/-[0-9a-f]{24}$/, '-#')), ['x', 'runner-failed-#', `stamp-${HEAD}`]);
 });
 
+test('L136 m4: reviewPorts hands runnerLog to the no-stamp alert, so Joe is told where the log really is', () => {
+  const MAIN = 'c'.repeat(40);
+  const dir = tempDir('m11-runnerlog-');
+  const file = status(dir, { written_at: new Date(T0).toISOString(), ok: true, error: null, installed_commit: null, running: [], alerts: [] });
+  const log = join('/', 'logs', RUNNER_LOG);
+  const text = (over) => reviewPorts({ requests: dir, status: file, reviewUid: ME, now: () => T0, mainHead: () => MAIN, ...over }).reviewAlerts().map((a) => a.text);
+  const [given] = text({ runnerLog: log });
+  assert.match(given, /no commit stamp/);
+  assert.ok(given.endsWith(`says what to do in its log, ${log}.`), given);
+  // Control: without it, the alert falls back to the file's name and says which folder to look in.
+  assert.match(text({})[0], /says what to do in its log, review-runner\.err\.log, in the folder the Mac setup chose for the review jobs' logs\.$/);
+});
+
 test('item 20(c) planted: a copy behind main is told only once it has stayed behind for the grace period', () => {
   const MAIN = 'c'.repeat(40);
   const ok = { ok: true, error: null, installed_commit: HEAD, alerts: [], running: [] };
