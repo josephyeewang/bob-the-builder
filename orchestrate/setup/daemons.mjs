@@ -8,7 +8,7 @@
 //   unload   launchctl bootout system/<label>, for each job that is loaded
 //   list     launchctl print system/<label>: loaded or not, state, last exit code (read only)
 //   check    read only: the files are exactly what review-daemons.mjs builds, root's 0644, no access list; no job file left under
-//            another label; each job is loaded, from the file as it is now, and its last run ended with exit 0
+//            another label; each job is loaded, from the file as it is now, its last run ended with exit 0, and no run has been going over 30 minutes
 //
 // Paths inside the plists are the real ones (no test prefix); the plist files themselves sit under io.at().
 
@@ -121,8 +121,9 @@ export function planUnload(io, cfg) {
 
 /**
  * Runbook A8: the account job reloaded so its file carries `--install <the installed copy>` (copy-to refuses without it).
- * A job that is not loaded gives NO steps and no error: there is nothing running on an old file. A loaded one gets its file
- * rewritten (only if it differs), then unloaded and loaded again. Nothing else is touched.
+ * A job that is not loaded gives NO steps and a problem (exit 1): either nothing has loaded it yet, or an earlier reload stopped
+ * half way; either way the instruction is "run: daemons load". A loaded one gets its file rewritten (only if it differs), then
+ * unloaded and loaded again. Nothing else is touched.
  */
 export function planReloadAccount(io, cfg) {
   const job = 'review-account'; const label = labelOf(cfg, job);
@@ -133,7 +134,7 @@ export function planReloadAccount(io, cfg) {
     // the load, so the job is NOT running. Saying "nothing to do" there would be a false "done" (L150 m2).
     const rec0 = readRecord(io, cfg);
     if (rec0 && rec0[label] !== undefined) return { ops: [], problems: [`${label} is NOT loaded now, though it was loaded before (an earlier reload probably stopped half way). Nothing is running it. Run: daemons load`] };
-    return { ops: [], problems: [] };
+    return { ops: [], problems: [`the account job (${label}) is not loaded, so there is nothing to reload. Run: daemons load`] };
   }
   const { plists, problems } = plistTexts(io, cfg);
   if (problems.length) return { ops: [], problems };
@@ -155,11 +156,13 @@ export function list(io, cfg) {
 /** Read only → [{ ok, what, why? }]. */
 const NEVER = '(never exited)';
 export const FIRST_RUN_LIMIT_S = 30 * 60;
-/** Seconds the process has been running (`ps -o etime=`: [[dd-]hh:]mm:ss), or null if it cannot be read. */
+const UNREADABLE = 'unreadable';
+/** Seconds the process has been running (`ps -o etime=`: [[dd-]hh:]mm:ss); null if there is no such process any more (ps failed or printed nothing: it ended between the two reads); UNREADABLE if ps answered with something this cannot parse (L180 m5b). */
 function runningSeconds(io, pid) {
   const r = io.run('/bin/ps', ['-o', 'etime=', '-p', String(pid)]);
-  const m = r.status === 0 ? /^\s*(?:(?:(\d+)-)?(\d+):)?(\d+):(\d+)\s*$/.exec(r.stdout) : null;
-  return m ? ((Number(m[1] ?? 0) * 24 + Number(m[2] ?? 0)) * 60 + Number(m[3])) * 60 + Number(m[4]) : null;
+  if (r.status !== 0 || r.stdout.trim() === '') return null;
+  const m = /^\s*(?:(?:(\d+)-)?(\d+):)?(\d+):(\d+)\s*$/.exec(r.stdout);
+  return m ? ((Number(m[1] ?? 0) * 24 + Number(m[2] ?? 0)) * 60 + Number(m[3])) * 60 + Number(m[4]) : UNREADABLE;
 }
 export function checkDaemons(io, cfg) {
   const out = []; const item = (ok, what, why, skip = false) => { if (!skip) out.push({ ok, what, ...(ok ? {} : { why }) }); };
@@ -189,11 +192,16 @@ export function checkDaemons(io, cfg) {
     const text = fileText(io, cfg, job);
     item(text !== null && rec[label] === sha(text), `${label} was loaded from the job file as it is now`, 'it runs an older definition than the file on disk (or was not loaded by this tool); run daemons load, which reloads it');
     item(s.lastExit === '0', `${label}'s last run ended well (exit 0)`, s.lastExit === NEVER ? undefined : `last exit code ${s.lastExit}; look in ${installPaths(cfg).logDir}`, s.lastExit === NEVER);
+    if (s.pid && s.lastExit !== NEVER) {
+      // A later run that hangs leaves the job running, and launchd starts no new run while one is going: the last exit would stay green.
+      const age = runningSeconds(io, s.pid);
+      item(age === null || (age !== UNREADABLE && age <= FIRST_RUN_LIMIT_S), `${label}'s current run is not stuck (at most ${FIRST_RUN_LIMIT_S / 60} minutes)`, age === UNREADABLE ? `ps answered with something that could not be read, so how long this run has been going is not known; look in ${installPaths(cfg).logDir}` : `this run has been going for ${Math.round(age / 60)} minutes and has not ended; look in ${installPaths(cfg).logDir}`);
+    }
     if (s.lastExit === NEVER) {
       // It has not finished a run yet. Every job starts at load and then runs on a timer, so this is fine only while its first run is young.
       const age = s.pid ? runningSeconds(io, s.pid) : null;
-      item(age !== null && age <= FIRST_RUN_LIMIT_S, `${label} is on its first run, and not for long (at most ${FIRST_RUN_LIMIT_S / 60} minutes)`,
-        age === null ? `it is loaded but has no running process and has never finished a run; look in ${installPaths(cfg).logDir}` : `its first run has been going for ${Math.round(age / 60)} minutes and has not ended; look in ${installPaths(cfg).logDir}`);
+      item(age !== null && age !== UNREADABLE && age <= FIRST_RUN_LIMIT_S, `${label} is on its first run, and not for long (at most ${FIRST_RUN_LIMIT_S / 60} minutes)`,
+        age === null ? `it is loaded but has no running process and has never finished a run; look in ${installPaths(cfg).logDir}` : age === UNREADABLE ? `ps answered with something that could not be read, so how long the first run has been going is not known; look in ${installPaths(cfg).logDir}` : `its first run has been going for ${Math.round(age / 60)} minutes and has not ended; look in ${installPaths(cfg).logDir}`);
     }
   }
   return out;

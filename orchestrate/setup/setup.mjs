@@ -10,14 +10,14 @@
 //   check-install        [--main <sha>] the copy, its link, every install folder, access lists                 (read only)
 //   daemons place|load|unload  [--dry-run]   the three background jobs' files; load; unload                    (root)
 //   daemons list                        loaded or not, per job                                                 (read only)
-//   daemons check                       the job files are exact, no leftover jobs, each job loaded from the file as it is now, last exit 0  (read only)
-//   daemons reload-account [--dry-run]  reload the account job only if it is loaded  (root)
+//   daemons check                       the job files are exact, no leftover jobs, each job loaded from the file as it is now, last exit 0, no run going over 30 minutes  (read only)
+//   daemons reload-account [--dry-run]  reload the account job; exits 1 ("Run: daemons load") when it is not loaded  (root)
 //   proposals  [--dry-run]  the proposals folders: parent root's, one per product  (root)
 //   check-proposals  owner, mode, access list; with sudo, who can read or write (read only)
 //   safe-directory  [--dry-run]  the owner's git trusts exactly the mirror folder  (root, runs git as the owner)
 //   check-safe-directory (read only; sudo to look)
 //   token  [--dry-run]  save the watch-only token (typed hidden, never shown)  (root)
-//   prove-token  the repository is the config's watch.repo (private, not archived); read works, a no-op write is refused as "this token may not"  (sudo: the token is read as orchestrate)
+//   prove-token  the repository is the config's watch.repo (private, not archived); read works, a no-op pull-request write is refused as "this token may not"; then a note to check the token page by eye  (sudo: the token is read as orchestrate)
 //   check-token  the token file's owner, mode and size (never its text)  (read only; sudo to look)
 //
 // The config: as root, ONLY the root-owned file at ROOT_CONFIG_PATH (layout.mjs), opened without following links, owned
@@ -38,6 +38,13 @@ import { checkInstall, parseInstallConfig, planInstall, rootMadeEntries, spawnUp
 import { checkDaemons, list, planLoad, planPlace, planReloadAccount, planUnload } from './daemons.mjs';
 import { proveToken, checkProposals, checkSafeDirectory, checkToken, planProposals, planSafeDirectory, planToken } from './extras.mjs';
 
+// What prove-token did NOT prove, said after a PASS (L173 n1): only that the token cannot write pull requests.
+const TOKEN_PAGE_NOTE = [
+  'What this proved: the token cannot write pull requests. It did not prove the token cannot change code, or that it reaches only one repository.',
+  "Now check that by eye, on GitHub's token page (github.com → your picture → Settings → Developer settings → Personal access tokens → Fine-grained tokens → this token):",
+  '  - Repository access: only the one repository named in the config;',
+  '  - Permissions: Metadata = Read-only (GitHub always adds it), Contents = Read-only (GitHub may call it "code"), Pull requests = Read-only, and nothing else.',
+];
 const USAGE = 'usage: node setup.mjs <users-folders|check|proofs|install|check-install|daemons place|load|unload|list|check|reload-account|proposals|check-proposals|safe-directory|check-safe-directory|token|check-token|prove-token> [--config <file>, without sudo only] [--dry-run] [--main <commit>]';
 const DAEMON_SUBS = ['place', 'load', 'unload', 'list', 'check', 'reload-account'];
 const COMMANDS = ['users-folders', 'check', 'proofs', 'install', 'check-install', 'daemons', 'proposals', 'check-proposals', 'safe-directory', 'check-safe-directory', 'token', 'check-token', 'prove-token'];
@@ -114,7 +121,7 @@ export function main(argv, { io: given, runUpdater = spawnUpdater, out = (s) => 
   if (o.cmd === 'check-proposals') return report(checkProposals(io, cfg), out);
   if (o.cmd === 'check-safe-directory') return report(checkSafeDirectory(io, cfg), out);
   if (o.cmd === 'check-token') return report(checkToken(io, cfg), out);
-  if (o.cmd === 'prove-token') return proveToken(io, cfg).then((res) => report(res, out));
+  if (o.cmd === 'prove-token') return proveToken(io, cfg).then((res) => { const code = report(res, out); if (code === 0) for (const l of TOKEN_PAGE_NOTE) out(l); return code; });
   if (o.cmd === 'daemons' && o.sub === 'check') return report(checkDaemons(io, cfg), out);
   if (o.cmd === 'daemons' && o.sub === 'list') {
     for (const j of list(io, cfg)) out(j.loaded ? `${j.label}: loaded, ${j.state}, last exit ${j.lastExit}` : `${j.label}: not loaded${j.error ? ` (${j.error})` : ''}`);
@@ -138,10 +145,13 @@ export function main(argv, { io: given, runUpdater = spawnUpdater, out = (s) => 
   if (!planned.ops.length) out(planned.installed ? 'nothing to do: already installed.' : 'nothing to do: already as needed.');
   if (o.dry) {
     for (const x of planned.ops) out(`would run: ${x.text}`);
-    // A dry run is not root, so it cannot judge the runner config by root's rules: say what root will require (L160 m5).
-    if (o.cmd === 'install' && cfg.runnerConfig && planned.ops.length) out(`WARNING  root will refuse ${cfg.runnerConfig} unless it is root's own file that nobody else can write, with every folder above it root's too. A dry run as you cannot check that. To put it right: sudo install -o root -g wheel -m 0644 /dev/stdin ${cfg.runnerConfig} < <your copy of review.json>`);
+    // A dry run is not root, but it can read the runner config with root's rules: warn only when root would refuse it, and say why (L169 m4).
+    if (o.cmd === 'install' && cfg.runnerConfig && planned.ops.length) {
+      try { io.readSourceStrict(cfg.runnerConfig); } catch (e) { out(`WARNING  root will refuse ${cfg.runnerConfig}: ${e.message}. To put it right: keep your copy of review.json in a folder only you can open, then sudo install -o root -g wheel -m 0644 /dev/stdin <a path in a folder only root can write, e.g. under /Library> < <that copy>, and set runnerConfig in your settings to that path`); }
+    }
     out(`dry run: ${planned.ops.length} step(s), nothing changed.`); return 0; }
-  try { apply(planned.ops, { log: (t) => out(`run: ${t}`) }); } catch (e) { err(`stopped: ${e.message}. Run it again after fixing that; it picks up where it stopped.`); return 1; }
+  // A message that already says what to run next ("run: daemons load") is the one instruction; the generic "run it again" is only for the rest.
+  try { apply(planned.ops, { log: (t) => out(`run: ${t}`) }); } catch (e) { err(/run: daemons load/i.test(e.message) ? `stopped: ${e.message}.` : `stopped: ${e.message}. Run it again after fixing that; it picks up where it stopped.`); return 1; }
   const after = o.cmd === 'users-folders' ? check(io, cfg, { alsoKnown: rootMadeEntries(cfg) }) : o.cmd === 'install' ? checkInstall(io, cfg)
     : o.cmd === 'proposals' ? checkProposals(io, cfg) : o.cmd === 'safe-directory' ? checkSafeDirectory(io, cfg) : o.cmd === 'token' ? checkToken(io, cfg)
     : o.sub === 'place' ? checkDaemons(io, cfg).filter((r) => /exactly the built job file$|under another label/.test(r.what)) : o.sub === 'load' ? checkDaemons(io, cfg).filter((r) => /is loaded$|loaded from the job file as it is now$/.test(r.what))
