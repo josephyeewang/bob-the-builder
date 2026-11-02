@@ -1,7 +1,7 @@
 // Setup part 2b (PR 2): the three background jobs (LaunchDaemons). The plist texts come from review-daemons.mjs (the one
 // place that builds them); this file puts them where launchd looks, and loads, lists and unloads them.
 //
-//   place    write the three plists (four with the hourly watch-only job, when the config has `watch`) into /Library/LaunchDaemons, root:wheel 0644 (launchd refuses any other owner or mode)
+//   place    write the three plists (four with the hourly watch-only job, when the config's `watch` entry has `rulesSha256`) into /Library/LaunchDaemons, root:wheel 0644 (launchd refuses any other owner or mode)
 //   load     launchctl bootstrap system <plist>, for each job not loaded yet; a job loaded from an OLDER file is reloaded (bootout, then
 //            bootstrap); refuses unless the install check passes. It records the fingerprint of each file it loaded
 //            (<base>/install/loaded-jobs.json, root's) so `check` can tell a loaded job from a file that has since changed
@@ -125,7 +125,7 @@ export function planLoad(io, cfg, jobs = jobsFor(cfg)) {
 }
 
 /** Unload the jobs that are loaded; none loaded → nothing to do, no error. Runner first, so nothing starts while the updater goes. */
-export function planUnload(io, cfg, jobs = jobsFor(cfg)) {
+export function planUnload(io, cfg, jobs = [...JOBS, 'watch-only']) {
   const ops = []; const problems = [];
   for (const job of [...jobs].reverse()) {
     const s = jobState(io, cfg, job);
@@ -166,7 +166,8 @@ export function planReloadAccount(io, cfg) {
   return { ops: [...place.ops, out, inn, rec, readBackOp(io, cfg, job)], problems: [] };
 }
 
-export function list(io, cfg, jobs = jobsFor(cfg)) {
+export function list(io, cfg, jobs = null) {
+  if (jobs === null) jobs = jobsFor(cfg).includes('watch-only') || !jobState(io, cfg, 'watch-only').loaded ? jobsFor(cfg) : [...JOBS, 'watch-only'];
   return jobs.map((job) => ({ job, label: labelOf(cfg, job), ...jobState(io, cfg, job) }));
 }
 
@@ -189,6 +190,10 @@ export function checkDaemons(io, cfg, jobs = jobsFor(cfg)) {
   const subset = jobs.length < jobsFor(cfg).length;
   const stray = subset ? [] : names.filter((n) => { const m = /^(.+)\.(review-updater|review-account|review-runner|watch-only)\.plist$/.exec(n); return m && m[1] !== cfg.label; });
   item(stray.length === 0, `no job file in ${DAEMON_DIR} under another label than ${cfg.label}`, `${stray.join(', ')}: a leftover set of jobs (take them out with daemons unload under the old label, then delete the files)`, subset);
+  if (!subset && !jobsFor(cfg).includes('watch-only')) {
+    const s = jobState(io, cfg, 'watch-only'); let placed = false; try { io.lstat(plistPath(cfg, 'watch-only')); placed = true; } catch { /* none */ }
+    item(!s.loaded && !placed, `no ${labelOf(cfg, 'watch-only')} job is placed or loaded (the config names no rules fingerprint)`, `${s.loaded ? 'it is loaded' : 'its file is there'}: take it out with daemons unload, then delete ${plistPath(cfg, 'watch-only')}`, !s.loaded && !placed);   // listed only when there is one
+  }
   const rec = readRecord(io, cfg);
   for (const job of jobs) {
     const f = plistPath(cfg, job); const why = [];

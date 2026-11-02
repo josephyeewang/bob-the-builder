@@ -54,7 +54,7 @@ export function watchPlist(io, cfg) {
 function readRules(source, readSource) {
   if (typeof source !== 'string' || !source.startsWith('/')) return { problem: '--rules-source must be the full path of the rules file' };
   let text; try { text = readSource(source); } catch (e) { return { problem: `the rules file could not be read: ${e?.message ?? 'error'}` }; }
-  if (typeof text !== 'string' || text.length === 0 || text.length > 200_000) return { problem: 'the rules file is empty or too large' };
+  if (typeof text !== 'string' || text.length === 0) return { problem: 'the rules file is empty' };   // the size limit is the reader's (readConfigFile: 64 KB), 
   return { text };
 }
 
@@ -79,9 +79,9 @@ export function planWatchRules(io, cfg, { source, readSource }) {
   let d; try { d = io.lstat(dir); } catch { return { ops: [], problems: [`${dir} is not there (run users-folders first)`] }; }
   if (d.isSymbolicLink() || !d.isDirectory() || d.uid !== orch.uid || (d.mode & 0o7777) !== 0o700) return { ops: [], problems: [`${dir} is not orchestrate's own 0700 folder (run users-folders first)`] };
   let same = false;
-  try { const s = io.lstat(dest); same = s.isFile() && !s.isSymbolicLink() && s.uid === io.rootUid && (s.mode & 0o7777) === 0o644 && sha(io.readText(dest)) === got && aclProblem([io.at(dest)]) === null; } catch { /* not there */ }
+  try { const s = io.lstat(dest); same = s.isFile() && !s.isSymbolicLink() && s.uid === io.rootUid && (s.mode & 0o7777) === 0o644 && sha(io.readRules(io.at(dest))) === got && aclProblem([io.at(dest)]) === null; } catch { /* not there */ }
   if (same) return { ops: [], problems: [] };
-  return { ops: [op(`write ${dest}   (root:wheel 0644, hash ${short(got)}…)`, () => { io.rm(dest); io.writeOwned(dest, text, { uid: io.rootUid, gid: 0, mode: 0o644 }); })], problems: [] };
+  return { ops: [op(`write ${dest}   (root:wheel 0644, hash ${short(got)}…)`, () => { io.unlink(dest); io.writeOwned(dest, text, { uid: io.rootUid, gid: 0, mode: 0o644 }); })], problems: [] };
 }
 
 /** Read only → [{ ok, what, why? }]; needs root to look (the folder is orchestrate's 0700). */
@@ -97,7 +97,7 @@ export function checkWatchRules(io, cfg) {
     if (st.uid !== io.rootUid) why.push(`owner is uid ${st.uid}, not root`);
     if ((st.mode & 0o7777) !== 0o644) why.push(`mode is ${(st.mode & 0o7777).toString(8)}, want 644`);
     const acl = aclProblem([io.at(f)]); if (acl) why.push(acl);
-    let h = null; try { h = sha(io.readText(f)); } catch { why.push('could not be read'); }
+    let h = null; try { h = sha(io.readRules(io.at(f))); } catch (e) { why.push(`could not be read (${e.message})`); }
     if (h !== null && h !== cfg.watch.rulesSha256) why.push(`hashes to ${short(h)}…, the config says ${short(cfg.watch.rulesSha256)}…`);
   }
   return [{ ok: why.length === 0, what, ...(why.length ? { why: why.join('; ') } : {}) }];

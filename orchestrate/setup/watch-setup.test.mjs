@@ -208,7 +208,7 @@ test('PLANT watch-rules: the rules file is REQUIRED and must be a full path — 
   const rel = w.run(['watch-rules', '--rules-source', 'rules.yaml']); assert.equal(rel.code, 1, rel.text); assert.match(rel.text, /must be the full path/);
   const gone = w.run(['watch-rules', '--rules-source', join(w.ext, 'nope.yaml')]); assert.equal(gone.code, 1, gone.text); assert.match(gone.text, /could not be read/);
   writeFileSync(join(w.ext, 'empty.yaml'), '');
-  assert.match(w.run(['watch-rules', '--rules-source', join(w.ext, 'empty.yaml')]).text, /empty or too large/);
+  assert.match(w.run(['watch-rules', '--rules-source', join(w.ext, 'empty.yaml')]).text, /rules file is empty/);
   assert.throws(() => statSync(w.mac.at(watchRulesPath(parseConfig(RAW)))), /ENOENT/);
   // the same refusals for the printing command: nothing is printed
   for (const src of ['rules.yaml', join(w.ext, 'nope.yaml'), join(w.ext, 'empty.yaml')]) {
@@ -327,4 +327,44 @@ test('R6 m-5 the real Mac\'s readRules is the safe single-handle read: a link an
 
 test('R6 c-1 the fingerprint is of the UTF-8 text: the README says so', () => {
   assert.match(readFileSync(new URL('./README.md', import.meta.url), 'utf8'), /fingerprint is of the UTF-8 text/);
+});
+
+// ---- L181 (r7 follow-ups): m-A hourly job the config stopped naming; m-B a folder at the copy's name; m-C swapped name between lstat and read
+import { list } from './daemons.mjs';
+import { mkdirSync } from 'node:fs';
+
+test('L181 m-A: the config loses its fingerprint (or its watch entry) while the hourly job is loaded: unload, list and check still see it', () => {
+  const w = world({});
+  assert.equal(w.run(['watch-rules', '--rules-source', w.src]).code, 0);
+  assert.equal(w.run(['daemons', 'place']).code, 0);
+  const wl = `${RAW.label}.watch-only`;
+  w.mac.loaded.set(wl, { state: 'running', pid: 4100, ageS: 5, lastExit: '0' });
+  for (const raw of [{ ...RAW, watch: { repo: REPO } }, (() => { const r = { ...RAW }; delete r.watch; return r; })()]) {
+    const cfg = parseInstallConfig(raw);
+    assert.ok(planUnload(w.mac, cfg).ops.some((o) => o.text.includes(wl)), 'unload plans a bootout of the hourly job');
+    assert.ok(list(w.mac, cfg).some((j) => j.label === wl), 'list shows the still-loaded hourly job');
+    assert.ok(checkDaemons(w.mac, cfg).some((r) => /watch-only/.test(r.what + (r.why ?? '')) && !r.ok), 'check FAILs on a watch-only job the config no longer names');
+  }
+});
+
+test('L181 m-B: a folder at the rules copy\'s name stops the step; nothing inside it is deleted', () => {
+  const w = world({});
+  const cfg = parseInstallConfig(RAW); const dest = w.mac.at(watchRulesPath(cfg));
+  rmSync(dest, { force: true }); mkdirSync(dest); writeFileSync(join(dest, 'keep.txt'), 'x');
+  const r = w.run(['watch-rules', '--rules-source', w.src]);
+  assert.notEqual(r.code, 0, r.text);
+  assert.equal(readFileSync(join(dest, 'keep.txt'), 'utf8'), 'x');
+});
+
+test('L181 m-C: check-watch-rules reads one handle: a name swapped to a link or a FIFO between lstat and read is not a PASS (and does not hang)', () => {
+  for (const kind of ['link', 'fifo']) {
+    const w = world({});
+    assert.equal(w.run(['watch-rules', '--rules-source', w.src]).code, 0);
+    const cfg = parseInstallConfig(RAW); const dest = watchRulesPath(cfg);
+    const other = join(tempDir('orch-l181-other-'), 'other.txt'); writeFileSync(other, RULES);
+    const lstat = w.mac.lstat.bind(w.mac); let swapped = false;
+    w.mac.lstat = (p) => { const st = lstat(p); if (p === dest && !swapped) { swapped = true; rmSync(w.mac.at(dest)); spawnSync(kind === 'link' ? '/bin/ln' : '/usr/bin/mkfifo', kind === 'link' ? ['-s', other, w.mac.at(dest)] : [w.mac.at(dest)]); } return st; };
+    const res = checkWatchRules(w.mac, cfg);
+    assert.equal(res[0].ok, false, `${kind}: ${JSON.stringify(res)}`);
+  }
 });
