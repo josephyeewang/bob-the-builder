@@ -86,7 +86,8 @@ const withDrops = (rec, d, entries, dropped) => ({ ...d, entries, dropped: (d.dr
  * is delivered. A second alert for the same cause, or with the same text, replaces the queued one in place.
  * Of the entries that waited through a failed send, the queue keeps ALERT_QUEUE_MAX, and of those not yet tried
  * ALERT_UNTRIED_MAX (capQueue says which go); every one dropped is counted in the next text sent.
- * Returns the entry's id, or null when the record refused it.
+ * Returns the entry's id, or null when the record refused it or the cap dropped this very entry (L130 m18: the
+ * drop is still counted, but the caller is not told it was queued).
  */
 export function queueAlert(rec, text, { now, mark = null } = {}) {
   const d = rec.read('fact', ALERT_QUEUE_FACT)?.doc ?? {};
@@ -97,7 +98,8 @@ export function queueAlert(rec, text, { now, mark = null } = {}) {
   const i = all.findIndex((e) => (key ? e.key === key : !e.key && e.text === entry.text));
   if (i >= 0) all[i] = entry; else all.push(entry);
   const { entries, dropped } = capQueue(rec, all);
-  return putFact(rec, ALERT_QUEUE_FACT, { ...withDrops(rec, d, entries, dropped), next }, 'alert_queued').ok === true ? entry.id : null;
+  const kept = putFact(rec, ALERT_QUEUE_FACT, { ...withDrops(rec, d, entries, dropped), next }, 'alert_queued').ok === true;
+  return kept && !dropped.some((e) => e.id === entry.id) ? entry.id : null;
 }
 
 /**
@@ -114,6 +116,11 @@ export function dropCause(rec, fact) {
     if (left.length === entriesOf(d).length && causes.length === causesOf(d).length) return true;
     return putFact(rec, ALERT_QUEUE_FACT, { ...d, entries: left, dropped_causes: causes }, 'alert_cause_cleared').ok === true;
   } catch { return false; }
+}
+
+/** Whether an alert whose mark names `fact` waits in the queue (a re-ask that would only replace it can be skipped). */
+export function isQueued(rec, fact) {
+  try { return entriesOf(rec.read('fact', ALERT_QUEUE_FACT)?.doc).some((e) => e.mark?.fact === fact); } catch { return false; }
 }
 
 /** The `alert(text, { mark })` every step gets: it queues and returns whether it did; it never sends, waits or throws. */
@@ -133,7 +140,15 @@ export function outbox(rec, now) {
  * The outbox `alert` for a module whose alerts are objects (M6 settleMerge: { type, note, reason, merge }), as text.
  * Only ever wraps the step's own outbox `alert` (the sweep in alert-sites.test.mjs allows `textAlerts(alert)` alone).
  */
-export const textAlerts = (alert, who = 'merge gate') => (e) => alert(typeof e === 'string' ? e
+export const textAlerts = (alert, who = 'merge gate') => (e) => alert(alertText(e, who));
+/**
+ * The `alert` for an M6 call whose alerts the step sends itself once it has M6's answer (L127): each is kept in `into`
+ * and nothing is queued, so the step can send them as they are, or as the one alert a told note is the mark of. It
+ * never sends: the sweep in alert-sites.test.mjs allows `heldAlerts(` beside `textAlerts(alert)`.
+ */
+export const heldAlerts = (into) => (e) => { into.push(e); return true; };
+/** An alert object (or text) as the text the outbox sends: textAlerts' words, for a step that sends it itself. */
+export const alertText = (e, who = 'merge gate') => (typeof e === 'string' ? e
   : `${who}: ${e?.note ?? e?.reason ?? e?.type ?? 'no detail'}${e?.merge ? ` (merge ${e.merge})` : ''}`);
 
 export function tellThen(alert, text, mark) {

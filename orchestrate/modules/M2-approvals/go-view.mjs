@@ -56,7 +56,7 @@ export function goView(doc) {
   }
   if (inp.card_id !== doc.card) return fail('the go\'s plan is another card\'s');
   let canon; try { canon = canonicalJson(inp); } catch { canon = null; }
-  if (canon === null || sha256(canon) !== doc.fingerprint) return fail('the go\'s fingerprint is not the plan it shows');
+  if (canon === null || sha256(canon) !== doc.fingerprint) return fail('the go\'s plan is not written the one way its fingerprint was taken from');
   const test = firstLine(inp.done_bar[0]);
   if (!test) return fail('the plan has no pass test');
   const rows = String(inp.done_bar[0]).split('\n---\n').length;

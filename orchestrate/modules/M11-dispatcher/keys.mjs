@@ -73,17 +73,33 @@ export class MissingKey extends Error {
   constructor(key) { super(`the rules have no value for ${key}`); this.key = key; }
 }
 
-/** A number (or the given type) from the rules, or throws MissingKey. */
+// The keys whose value may have a fraction: shares, paces and percentages. They are read with dec(); every other
+// number (a cap, a count, minutes, a token size) is a whole number, read with num() (L123). The rules file is text, so
+// `1.0` there is the text "1.0": a decimal, never a whole number.
+export const DECIMAL_KEYS = Object.freeze([
+  KEYS.redPace, KEYS.redWeek, KEYS.redH5, KEYS.amberPace, KEYS.amberWeek, KEYS.amberH5, KEYS.ownBuildingShare,
+  KEYS.reservePct, KEYS.noTier1ProdAbove, KEYS.paceMinShare, KEYS.outageShare,
+]);
+
+/**
+ * A value from the rules, typed, or throws MissingKey (L123). Numbers go through rules.num() or rules.dec() and the
+ * flag through rules.flag(), so the text the rules file gives ("30", "0.5", "false") reads as the value it names, and
+ * anything else is missing. A default applies only when the rules have no value at all, never over a bad one.
+ */
 export function need(rules, key, { product, type = 'number' } = {}) {
-  let v = rules.get(key, product ? { product } : {});
-  if (v === undefined && Object.hasOwn(DEFAULTS, key)) v = DEFAULTS[key];
-  const ok = type === 'number' ? typeof v === 'number' && Number.isFinite(v) && v >= 0
-    : type === 'boolean' ? typeof v === 'boolean'
-      : type === 'list' ? Array.isArray(v) && v.every((x) => typeof x === 'string')
-        : type === 'object' ? v !== null && typeof v === 'object' && !Array.isArray(v) : false;
-  if (!ok) throw new MissingKey(key);
+  const opts = product ? { product } : {};
+  const raw = rules.get(key, opts);
+  if (raw === undefined && Object.hasOwn(DEFAULTS, key)) return DEFAULTS[key];
+  let v;
+  if (type === 'number') v = DECIMAL_KEYS.includes(key) ? rules.dec(key, opts) : rules.num(key, opts);
+  else if (type === 'boolean') v = rules.flag(key, opts);
+  else if (type === 'list') v = Array.isArray(raw) && raw.every((x) => typeof x === 'string') ? raw : undefined;
+  else if (type === 'object') v = raw !== null && typeof raw === 'object' && !Array.isArray(raw) ? raw : undefined;
+  if (v === undefined) throw new MissingKey(key);
   return v;
 }
 
-/** Minutes from the rules, as milliseconds. */
+/** Minutes from the rules (a whole number), as milliseconds. */
 export const minutes = (rules, key, opts) => need(rules, key, opts) * 60_000;
+/** How a missing per-product value is listed for Joe: the key, and the product it is missing for (L116 c1). */
+export const missingFor = (key, product) => (product ? `${key} for ${product}` : key);

@@ -1,11 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
-import { dispatcherPass as dispatcherPass0, stopPass as stopPass0, undoStarts, stopProcessGroup, STOP_FACT, LIMIT_FACT, LIMIT_NO_ACCOUNT, UNDO_HELD_FACT, PAUSE_FACT, RULES_MISSING_FACT, rulesMissingAlert as rulesMissingAlert0 } from './pass.mjs';
+import { dispatcherPass as dispatcherPass0, stopPass as stopPass0, undoStarts, stopProcessGroup, STOP_FACT, UNSAVED_FACT, LIMIT_FACT, LIMIT_NO_ACCOUNT, UNDO_HELD_FACT, PAUSE_FACT, RULES_MISSING_FACT, rulesMissingAlert as rulesMissingAlert0 } from './pass.mjs';
 import { USAGE_FACT, BAND_FACT } from './usage.mjs';
 import { OUTAGE_FACT } from './outage.mjs';
+import { retellWaits, WAIT_TELL_FACT } from './joe-waits.mjs';
 import { KEYS as K } from './keys.mjs';
-import { change, rulesWith, realEngine, recWith, seed, usageFact, undoEntries, filesOfCommits, T0, MIN, H, iso, withAlerts } from './fixtures.test-helper.mjs';
+import { makeRules } from '../../shared/rules.mjs';
+import { change, rulesWith, realEngine, recWith, seed, usageFact, undoEntries, filesOfCommits, T0, MIN, H, iso, withAlerts, setClock } from './fixtures.test-helper.mjs';
 
 // Each step runs as the tick runs it: its alerts are queued, then sent once it is done (alerts.mjs, L47).
 const dispatcherPass = (a) => withAlerts(a.rec, a.now, a.alert ?? (() => {}), (alert) => dispatcherPass0({ ...a, alert }));
@@ -272,7 +274,7 @@ test('L110 m-4: a limit_hit wait that names no account resumes nothing, never on
   assert.equal(w.rec.read('card', 'N').doc.state, 'waiting');
 });
 
-test('M8: usage unknown for over a day -> parked work waits on Joe, one alert', async () => {
+test('M8: usage unknown for over a day -> parked work waits on Joe; the stretch and the card are each told once', async () => {
   const parked = { state: 'waiting', product: 'p1', wait: { who: 'dispatcher', what: 'usage_band', since: iso(T0), next_check: iso(T0) } };
   const w = world([['card', 'C-1', { ...parked, tier: 1 }]], { usage: null });
   await w.pass(0);
@@ -283,7 +285,10 @@ test('M8: usage unknown for over a day -> parked work waits on Joe, one alert', 
   await w.pass(24 * 60 + 1);
   assert.equal(w.rec.read('card', 'C-1').doc.wait.who, 'joe');
   await w.pass(24 * 60 + 2);
-  assert.equal(w.calls.alerts.length, 1);
+  // L138 m4: the card's wait on Joe is told through waitOnJoe, besides the stretch's own alert.
+  assert.deepEqual(w.calls.alerts.map((t) => (typeof t === 'string' ? t : t.text)).sort(), [
+    "card C-1: usage has been unreadable for over a day, so it can't resume by itself; it waits on you",
+    'usage has been unreadable for over a day; parked work waits on you']);
 });
 
 test('M8 / R-0b-67: unknown usage -> no Tier-1 start; Tier 2 still starts', async () => {
@@ -449,6 +454,43 @@ test('M7: a stop that fails alerts and leaves the card as it was; a failed save 
   await dispatcherPass({ ...base, now: T0 + 2 * MIN, stopGroup: async () => ({ ok: true, how: 'SIGTERM' }), saveWork: async () => ({ ok: false, reason: 'disk full' }), alert: (x) => alerts.push(x) });
   assert.match(alerts[1], /not saved: disk full/);
   assert.equal(w.rec.read('fact', STOP_FACT(sid)).doc.state, 'done');
+});
+
+// L130 M9: work not saved, whose alert the queue did not take, is told on a later pass, once; the stop stands.
+test('L130: an unsaved stop whose alert was not queued is told on the next pass, once', async () => {
+  const w = world([card('C-1')]);
+  await w.pass(0);
+  const sid = w.sessions[0].id;
+  w.setCard('C-1', { state: 'cancelled' });
+  const base = { rec: w.rec, rules: rulesWith({}, startAnswer(w.rec)), account: ACCT, sessions: [...w.sessions], probe: () => idle, launch: async () => ({ ok: false }),
+    stopGroup: async () => ({ ok: true, how: 'SIGTERM' }), saveWork: async () => ({ ok: false, reason: 'disk full' }) };
+  await dispatcherPass0({ ...base, now: T0 + MIN, alert: () => false });
+  assert.equal(w.rec.read('fact', STOP_FACT(sid)).doc.state, 'done', 'the stop stands');
+  assert.equal(w.rec.read('fact', UNSAVED_FACT(sid))?.doc?.told_at, undefined, 'not marked told');
+  const alerts = [];
+  await dispatcherPass({ ...base, sessions: [], now: T0 + 2 * MIN, alert: (x) => alerts.push(x) });
+  assert.equal(alerts.filter((a) => /not saved: disk full/.test(a)).length, 1, alerts.join(' | '));
+  assert.ok(w.rec.read('fact', UNSAVED_FACT(sid)).doc.told_at);
+  await dispatcherPass({ ...base, sessions: [], now: T0 + 3 * MIN, alert: (x) => alerts.push(x) });
+  assert.equal(alerts.filter((a) => /not saved/.test(a)).length, 1, 'told once');
+});
+
+// L130 M3: a limit wait that names no account is put on Joe even when its alert is not queued; the tick's waits step
+// tells it once.
+test('L130: a no-account limit wait whose alert was not queued waits on Joe, and is told once by the waits step', async () => {
+  const parked = { state: 'waiting', tier: 2, product: 'p1', files: ['src/n.js'], wait: { who: 'usage', what: 'limit_hit', since: iso(T0), next_check: iso(T0) } };
+  const w = world([['card', 'N', parked], ['fact', LIMIT_FACT(ACCT), { resets_at: iso(T0 + 30 * MIN), observed_at: iso(T0 + MIN) }]]);
+  const sessions = [];
+  await dispatcherPass0({ rec: w.rec, rules: rulesWith({}, startAnswer(w.rec)), now: T0 + 31 * MIN, account: ACCT, sessions, probe: () => idle,
+    launch: async () => ({ ok: false }), stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }), filesOf: filesOfCommits, alert: () => false });
+  assert.deepEqual([w.rec.read('card', 'N').doc.wait.who, w.rec.read('card', 'N').doc.wait.what], ['joe', LIMIT_NO_ACCOUNT]);
+  assert.equal(w.rec.read('fact', WAIT_TELL_FACT('N')).doc.told_since, undefined, 'not marked told');
+  const alerts = [];
+  const waits = (min) => withAlerts(w.rec, T0 + min * MIN, (x) => alerts.push(x), (alert) => retellWaits({ rec: w.rec, alert }));
+  await waits(32);
+  await waits(33);
+  assert.equal(alerts.filter((a) => /does not say which account/.test(a)).length, 1, alerts.join(' | '));
+  assert.equal(w.rec.read('fact', WAIT_TELL_FACT('N')).doc.told_since, w.rec.read('card', 'N').doc.wait.since);
 });
 
 test('audit MAT-2: a cancel still stops when the rules lack a value: cancel_grace_min missing uses the 2 min floor', async () => {
@@ -626,11 +668,14 @@ test('audit 0b-6 r3 MAT-1: a host.lock that cannot be read, or rules that cannot
   {
     const { w, sid } = await cancelledWorld();
     const good = rulesWith({}, { start_session: { decision: 'allow', reason: 'ok' } });
-    const broken = { ...good, get: () => { throw new Error('rules file unreadable'); } };
+    // Built on makeRules, as the real rules are (L148 item 1): a reader that throws makes every value missing through
+    // get, num, dec and flag alike, never a get-only stand-in whose num still answers.
+    const broken = makeRules({ get rev() { return good.rev; }, may: (a, s) => good.may(a, s), classify: (c) => good.classify(c),
+      get: () => { throw new Error('rules file unreadable'); } });
     const r = await w.pass(1, { rules: broken });
     assert.deepEqual(w.calls.stops, [sid]);
-    assert.ok(r.notes.some((n) => /nothing but undo cards starts: the rules have no value for the rules \(rules file unreadable\)/.test(n)), r.notes.join(' | '));
-    assert.equal(w.calls.alerts.filter((a) => /rules file unreadable/.test(a)).length, 1);
+    assert.ok(r.notes.some((n) => /nothing but undo cards starts: the rules have no value for .*timeouts\.cancel_grace_min/.test(n)), r.notes.join(' | '));
+    assert.equal(w.calls.alerts.filter((a) => /the rules have no value for .*timeouts\.cancel_grace_min/.test(a)).length, 1);
     assert.equal(w.calls.launched.length, 1, 'nothing new started');
   }
 });
@@ -860,7 +905,8 @@ test('r5 MAT-2: usage unknown and a failed Lead hand-off, with the first alert f
     down = false;
     await at(24 * 60 + 2);
     await at(24 * 60 + 3);
-    assert.equal(sent.filter((t) => /usage has been unreadable/.test(t)).length, 1, sent.join(' | '));
+    assert.equal(sent.filter((t) => /^usage has been unreadable/.test(t)).length, 1, sent.join(' | '));
+    assert.equal(sent.filter((t) => /^card C-1: usage has been unreadable/.test(t)).length, 1, sent.join(' | '));
     assert.equal(sent.filter((t) => /could not be asked to hand off/.test(t)).length, 1, sent.join(' | '));
   }
 });
@@ -999,4 +1045,37 @@ test('L81: the real M10 engine starts a Tier-1 card on a fresh reading and a Tie
   const r2 = await w2.pass(0, { rules: rulesWith({}, { start_session: real }) });
   assert.deepEqual(r2.started, ['C-2']);
   assert.match(r2.refused.find(([id]) => id === 'C-1')[1], /usage reading/);
+});
+
+// L138 m4 and m1: the real outbox, the Record's clock ahead of the tick's. The first pass that puts the card on Joe
+// for unread usage has its card tell refused by the outbox; usage is readable again by the next pass, so the stretch
+// alert asks nothing more, and the card is told from its recorded tell (retellWaits, as the tick runs it), exactly once.
+test('L138 m4: a card put on Joe for unread usage is told after usage is back, exactly once, when its first tell was not taken', async () => {
+  const parked = { state: 'waiting', product: 'p1', wait: { who: 'dispatcher', what: 'usage_band', since: iso(T0), next_check: iso(T0) } };
+  const w = world([['card', 'C-1', { ...parked, tier: 1 }]], { usage: null });
+  const sent = [];
+  let refuseCardTell = true;
+  const tick = async (min) => {
+    const now = T0 + min * MIN;
+    setClock(w.rec, now + 1500);
+    await withAlerts(w.rec, now, (t) => { sent.push(typeof t === 'string' ? t : t.text); return true; }, async (real) => {
+      const alert = Object.assign((t, o) => (refuseCardTell && /^card C-1/.test(t) ? false : real(t, o)), { queues: true });
+      await dispatcherPass0({ rec: w.rec, rules: rulesWith(), now, account: ACCT, sessions: [], probe: () => idle, launch: async () => ({ ok: false }),
+        stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }), filesOf: filesOfCommits, alert });
+      retellWaits({ rec: w.rec, alert });
+    });
+  };
+  await tick(0);
+  await tick(24 * 60 + 1);
+  assert.equal(w.rec.read('card', 'C-1').doc.wait.who, 'joe');
+  assert.deepEqual(sent, ['usage has been unreadable for over a day; parked work waits on you'], 'the card tell was not taken');
+  assert.equal(w.rec.read('fact', WAIT_TELL_FACT('C-1')).doc.told_since, undefined);
+  refuseCardTell = false;
+  w.setUsage(GREEN, T0 + (24 * 60 + 2) * MIN);
+  await tick(24 * 60 + 2);
+  const cardTells = () => sent.filter((t) => /^card C-1: usage has been unreadable/.test(t)).length;
+  assert.equal(cardTells(), 1, sent.join(' | '));
+  assert.equal(w.rec.read('fact', WAIT_TELL_FACT('C-1')).doc.told_since, w.rec.read('card', 'C-1').doc.wait.since);
+  for (const min of [3, 4, 5]) await tick(24 * 60 + min);
+  assert.equal(cardTells(), 1, 'told exactly once (P20)');
 });

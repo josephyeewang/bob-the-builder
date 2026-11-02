@@ -54,6 +54,13 @@ export function refusedTwice(doc) {
 }
 // The refusal for a PR merged at a head the gate did not judge; whoever writes it has told the owner.
 export const MERGED_OUTSIDE = 'merged outside the gate, at a head the gate did not judge';
+// The same refusal when the alert was not taken (L130 M6): it is not MERGED_OUTSIDE, so the Dispatcher's
+// refused-but-merged step tells the owner after a fresh reading.
+export const MERGED_OUTSIDE_UNTOLD = `${MERGED_OUTSIDE}; the owner was not told yet`;
+/** Whether an alert was taken: anything but false; a throw counts as false (L130). */
+export function alertTaken(alert, e) {
+  try { return alert(e) !== false; } catch { return false; }
+}
 
 export function prReadingAfter(record, prNumber, mergeId) {
   if (prNumber == null) return null;
@@ -99,8 +106,7 @@ export function settleMerge({ record, alert = () => {}, now }, id, { pr = null, 
   }
   let why = reason;
   if (pr?.merged === true) {
-    why = MERGED_OUTSIDE;
-    alert({ type: 'merge_gate_unsure', merge: id, note: `pull request #${m.doc.pr} merged at ${short(pr.head_sha)}, not the judged ${short(m.doc.judged_head)}` });
+    why = alertTaken(alert, { type: 'merge_gate_unsure', merge: id, note: `pull request #${m.doc.pr} merged at ${short(pr.head_sha)}, not the judged ${short(m.doc.judged_head)}` }) ? MERGED_OUTSIDE : MERGED_OUTSIDE_UNTOLD;
   }
   if (typeof why !== 'string' || !why) return { ok: false, reason: 'a refusal needs its reason' };
   if (!told(write('merge', m, { state: 'refused', reasons: [why] }), 'refused')) return { ok: false, reason: 'the refusal was refused' };
@@ -114,8 +120,9 @@ export function reconcileMerge({ record, alert = () => {}, now }, id, { pr, fact
   if (m.doc.state !== 'refused' || !(m.doc.reasons ?? []).includes('interrupted')) return { ok: false, reason: `merge ${id} is not an interrupted merge` };
   if (pr?.merged !== true) return { ok: false, reason: `PR ${m.doc.pr} does not show merged` };
   if (!SHA.test(pr.merge_commit_sha ?? '') || pr.head_sha !== m.doc.judged_head) {
-    alert({ type: 'merge_gate_unsure', merge: id, note: `pull request #${m.doc.pr} merged at ${short(pr.head_sha)}, not the judged ${short(m.doc.judged_head)}, or with no merge commit; merge ${id} stays refused` });
-    return { ok: false, told: true, reason: `merged at ${short(pr.head_sha)}, not the judged ${short(m.doc.judged_head)}, or with no merge commit` };
+    // told is the alert's own answer (L130 M4): the caller tells the owner itself when it was not taken.
+    const told = alertTaken(alert, { type: 'merge_gate_unsure', merge: id, note: `pull request #${m.doc.pr} merged at ${short(pr.head_sha)}, not the judged ${short(m.doc.judged_head)}, or with no merge commit; merge ${id} stays refused` });
+    return { ok: false, told, reason: `merged at ${short(pr.head_sha)}, not the judged ${short(m.doc.judged_head)}, or with no merge commit` };
   }
   const w = record.write({ actor: ACTOR, entity: 'merge', id, expectRev: m.rev, doc: { ...m.doc, state: 'merged', merge_commit: pr.merge_commit_sha, merged_at: iso(), reconciled_at: iso() }, kind: 'merge_outcome', data: { fact: factId } });
   if (!w.ok) { alert({ type: 'merge_gate_write_refused', merge: id, to: 'merged', reason: w.reason }); return { ok: false, reason: `the reconcile was refused: ${w.reason}` }; }

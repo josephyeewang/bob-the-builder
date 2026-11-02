@@ -145,12 +145,17 @@ test('missing owner settings: no pull request is opened, nothing counts', async 
 });
 
 test('no owner GitHub id, or a bad one, in the settings: no decision pull request is opened', async () => {
-  for (const bad of [undefined, 0, '4242', -1]) {
+  // L96 step 2: the id reads through num(), so the text '4242' (what the settings reader hands back) is a good id;
+  // '0', a sign, a decimal or a word is not.
+  for (const bad of [undefined, 0, '0', -1, '-1', '42.5', '0420', 'joe', true]) {
     const { t, id } = world();
     t.ctx.rules = env({ values: { 'accounts.joe.github_id': bad } }).ctx.rules;
     assert.equal((await openDecision(t.ctx, id)).ok, false, String(bad));
     assert.match(readConfig(t.ctx.rules, t.ctx.product).reason ?? '', /github_id/, String(bad));
   }
+  const { t } = world();
+  t.ctx.rules = env({ values: { 'accounts.joe.github_id': '4242' } }).ctx.rules;
+  assert.doesNotMatch(readConfig(t.ctx.rules, t.ctx.product).reason ?? '', /github_id/, 'the text 4242 is a good id');
 });
 
 test('another account asks for changes after the owner\'s Approve: nothing is recorded, nothing is declined, the PR stays open', async () => {

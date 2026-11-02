@@ -66,7 +66,7 @@ test('MAT-1: one tick runs every step once, in the fixed order, and records the 
   const w = world([account(), usage()]);
   const r = await w.pass();
   assert.deepEqual(Object.keys(r.steps), STEPS);
-  assert.deepEqual(STEPS, ['stops', 'undo', 'undo-starts', 'outage', 'intake', 'leads', 'pass', 'limits', 'merges', 'phone', 'cleanup']);
+  assert.deepEqual(STEPS, ['stops', 'undo', 'undo-starts', 'outage', 'intake', 'leads', 'pass', 'limits', 'merges', 'waits', 'phone', 'cleanup']);
   for (const s of STEPS) assert.equal(r.steps[s].ok, true, `${s}: ${r.steps[s].error}`);
   const last = w.rec.read('fact', LAST_PASS_FACT).doc;
   assert.equal(last.at, iso(T0));
@@ -1008,4 +1008,18 @@ test('r8 MAT-2: a refused text or one timeout ahead of a burst drops nothing whi
     if (how === 'refused') assert.deepEqual(d.entries.map((e) => e.text), ['bad']);
     else assert.ok(got.includes('bad'));
   }
+});
+
+test('L116 m4: a card the gate refused twice the same way is told to Joe through the tick\'s own alert', async () => {
+  const w = world([account(), usage(), ...mergeReady('C-1', 7)]);
+  // The gate's two refusals, as merge_gate writes them (attempts.merge_refusals is the gate's).
+  const cur = w.rec.read('card', 'C-1');
+  const set = w.rec.write({ actor: 'merge_gate', entity: 'card', id: 'C-1', expectRev: cur.rev, doc: { ...cur.doc, attempts: { merge_refusals: ['405', '405'] } } });
+  assert.equal(set.ok, true, set.reason);
+  const r = await w.pass();
+  assert.equal(r.steps.merges.ok, true, r.steps.merges.error);
+  assert.equal(w.rec.read('card', 'C-1').doc.state, 'waiting');
+  const told = w.calls.alerts.filter((a) => /card C-1: the merge was refused twice for the same reason \(405\)/.test(a));
+  assert.equal(told.length, 1, w.calls.alerts.join(' | '));
+  assert.equal(requested(w.rec, 'C-1'), null, 'not requested while it waits on Joe');
 });

@@ -6,7 +6,7 @@ import { spawn } from 'node:child_process';
 import { outageStep, isDead, OUTAGE_FACT, OUTAGE_MIN_DEAD, OUTAGE_MIN_SHARE } from './outage.mjs';
 import { takePassLock, pidDead } from './pass-lock.mjs';
 import { KEYS as K } from './keys.mjs';
-import { rulesWith, recWith, T0, MIN } from './fixtures.test-helper.mjs';
+import { rulesWith, recWith, T0, MIN, withAlerts } from './fixtures.test-helper.mjs';
 import { tempDir } from '../../shared/test-tmp.mjs';
 
 const R = rulesWith();
@@ -26,11 +26,13 @@ test('G1: dead needs the process gone, the session ended and 5 quiet minutes', (
   assert.equal(isDead({ ...gone('a'), lastWriteAt: undefined }, { now: T0, quietMs: q }), false);
 });
 
-test('M9: a board of 4 with 3 killed in one pass restarts nothing and alerts once', () => {
+test('M9: a board of 4 with 3 killed in one pass restarts nothing and alerts once', async () => {
   const rec = recWith(cards());
   const alerts = [];
+  // As the tick runs it: queued, then delivered, and the outage marked told only then (L130).
+  const step = (a) => withAlerts(rec, a.now, (t) => { alerts.push(t); return true; }, (alert) => outageStep({ ...a, alert }));
   const board = [gone('S1', 'C-1'), gone('S2', 'C-2'), gone('S3', 'C-3'), live('S4', 'C-4')];
-  const r = outageStep({ rec, rules: R, board, now: T0, healthy: false, alert: (a) => alerts.push(a) });
+  const r = await step({ rec, rules: R, board, now: T0, healthy: false });
   assert.equal(r.outage, true);
   assert.deepEqual(r.restart, []);
   assert.equal(alerts.length, 1);
@@ -38,11 +40,26 @@ test('M9: a board of 4 with 3 killed in one pass restarts nothing and alerts onc
   assert.match(alerts[0], /3 of 4 running sessions stopped at once/);
   // the next passes during the outage: still nothing restarts, no second alert
   const later = [gone('S4', 'C-4')];
-  const r2 = outageStep({ rec, rules: R, board: later, now: T0 + MIN, healthy: false, alert: (a) => alerts.push(a) });
+  const r2 = await step({ rec, rules: R, board: later, now: T0 + MIN, healthy: false });
   assert.equal(r2.outage, true);
   assert.deepEqual(r2.restart, []);
   assert.equal(alerts.length, 1);
   assert.deepEqual(rec.read('fact', OUTAGE_FACT).doc.dead.map((d) => d.id), ['S1', 'S2', 'S3', 'S4']);
+});
+
+test('L130: an outage whose alert was not queued is told, in its own words, on the next pass, once', async () => {
+  const rec = recWith(cards());
+  const alerts = [];
+  const step = (a) => withAlerts(rec, a.now, (t) => { alerts.push(t); return true; }, (alert) => outageStep({ ...a, alert }));
+  const board = [gone('S1', 'C-1'), gone('S2', 'C-2'), gone('S3', 'C-3'), live('S4', 'C-4')];
+  assert.equal(outageStep({ rec, rules: R, board, now: T0, healthy: false, alert: () => false }).outage, true);
+  assert.equal(rec.read('fact', OUTAGE_FACT).doc.told_id, undefined, 'not marked told');
+  assert.equal((await step({ rec, rules: R, board: [], now: T0 + MIN, healthy: false })).outage, true);
+  assert.equal(alerts.length, 1);
+  assert.match(alerts[0], /3 of 4 running sessions stopped at once/);
+  assert.equal(rec.read('fact', OUTAGE_FACT).doc.told_id, rec.read('fact', OUTAGE_FACT).doc.id);
+  await step({ rec, rules: R, board: [], now: T0 + 2 * MIN, healthy: false });
+  assert.equal(alerts.length, 1, 'told once');
 });
 
 test('M9: a board of 4 with 1 killed decides that one on its own (an ask: no card is marked safe)', () => {

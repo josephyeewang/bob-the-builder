@@ -21,7 +21,7 @@ function world() {
   let outcome = 'sent';
   const rec = recWith();
   const step = (size, min, over = {}) => withAlerts(rec, T0 + min * MIN, over.alert ?? ((t) => calls.alerts.push(t)), (alert) => leadRestartStep({
-    rec, rules: over.rules ?? R, now: T0 + min * MIN, lead: { sessionId: SID, product: 'p' }, size, alert,
+    rec, rules: over.rules ?? R, now: T0 + min * MIN, lead: { sessionId: SID, product: 'p' }, size, alert: over.answer ?? alert,
     inFlight: over.inFlight ?? null,
     send: async (t) => { calls.sent.push(t); return { outcome }; },
     stopSession: async () => { calls.stops += 1; return over.stopFails ? { ok: false, reason: 'still running' } : { ok: true }; },
@@ -144,6 +144,36 @@ test('M18: the new Lead failing to start alerts', async () => {
   assert.equal(w.calls.stops, 1);
   assert.equal(w.calls.starts.length, 3);
   assert.equal(phase(w.rec), 'done');
+});
+
+// L130: `answer` stands in for the outbox's own answer; false (not queued) writes no told field, so the next pass tells.
+test('L130: a start failure whose alert was not queued is told on the next pass, once', async () => {
+  const w = world();
+  await w.step(ended(260_000), 1);
+  w.handIn(1000);
+  await w.intake();
+  assert.equal(await w.step(ended(261_000, 2), 2, { startFails: true, answer: () => false }), 'stopped; new Lead failed to start');
+  assert.equal(w.calls.alerts.length, 0);
+  assert.equal(w.rec.read('fact', RESTART_FACT(SID)).doc.start_failed_told, undefined, 'not marked told');
+  await w.step(midTurn(261_000), 3, { startFails: true });
+  assert.equal(w.calls.alerts.length, 1);
+  assert.equal(w.rec.read('fact', RESTART_FACT(SID)).doc.start_failed_told, true);
+  await w.step(midTurn(261_000), 4, { startFails: true });
+  assert.equal(w.calls.alerts.length, 1, 'told once');
+});
+
+test('L130: a give-up whose alert was not queued is told on the next pass, once', async () => {
+  const w = world();
+  await w.step(ended(260_000, 0), 1);
+  await w.step(ended(261_000, 2), 3);
+  assert.equal(await w.step(ended(262_000, 5), 5, { answer: () => false }), 'gave up; the old Lead keeps running');
+  assert.equal(w.calls.alerts.length, 0);
+  assert.equal(w.rec.read('fact', RESTART_FACT(SID)).doc.gave_up_told, undefined);
+  await w.step(ended(262_000, 5), 6);
+  assert.equal(w.calls.alerts.length, 1);
+  assert.match(w.calls.alerts[0], /gave up|handoff/i);
+  await w.step(ended(262_000, 5), 7);
+  assert.equal(w.calls.alerts.length, 1, 'told once');
 });
 
 test('M18 / m9: 410k mid-turn sends no WRAP; above hard + 50k alerts once', async () => {

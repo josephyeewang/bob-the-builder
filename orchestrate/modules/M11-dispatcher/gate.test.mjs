@@ -192,7 +192,8 @@ test('audit MAT-3: a card with no tier counts as Tier 1; the stricter of the car
   const UNKNOWN = { band: 'unknown', own_building: 'unknown', prodBlocked: true };
   const OVER90 = { band: 'green', own_building: 'open', prodBlocked: true };
   const base = rulesWith();
-  const says = (tier, risky = []) => ({ may: (a, s) => base.may(a, s), get: (k, o) => base.get(k, o), classify: () => ({ tier, risky, reasons: {} }) });
+  // The same rules, with only classify answering differently; the typed readers (num/dec/flag, L123) come along.
+  const says = (tier, risky = []) => ({ ...base, classify: () => ({ tier, risky, reasons: {} }) });
   const c = (extra) => ({ id: 'new', product: 'p1', files: ['src/new.js'], ...extra });
   // unknown usage: no tier -> Tier 1 -> held; an explicit Tier 2 the rules agree with starts
   assert.equal(go({ b: UNKNOWN, card: c({}) }).ok, false);

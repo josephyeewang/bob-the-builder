@@ -104,6 +104,24 @@ export async function openDecision(ctx, id) {
   }
 }
 
+// Closes a decision's pull request. True when there is none to close, it closed, or the `decision_pr_not_closed`
+// alert went through (the sink neither threw nor answered false). False otherwise, and the caller keeps something to
+// retry from: schedule.mjs runOut leaves the ask un-expired (L133 m-2), and readDecision leaves CLOSE_DUE on the
+// answered ask (L135). Before, both ignored the alert's answer, so a lost alert left the pull request open with
+// nothing to retry it, and Joe never told.
+export async function closeDecisionPr(ctx, id, doc) {
+  if (!activeKind(doc.kind)?.decision_pr || !Number.isSafeInteger(doc.pr)) return true;
+  // A client that throws before it returns a promise (a bug, a missing method) is a failed close too, never a stopped
+  // pass: retryClose runs this every pass, so a throw here would stop every push (L142 m4).
+  let c;
+  try { c = await ctx.gh.patch(`/repos/${ctx.owner}/${ctx.repo}/pulls/${doc.pr}`, { state: 'closed' }); } catch (e) { c = { status: String(e?.message ?? e) }; }
+  if (c?.status === 200) return true;
+  try { return ctx.alert({ type: 'decision_pr_not_closed', ask: id, pr: doc.pr, reason: String(c?.status) }) !== false; } catch { return false; }
+}
+// The mark on an answered decision whose close is still due. It is written with the answer, before the close, so a
+// crash between the two leaves it too; schedule.mjs schedulePass retries the close and takes it off (L135).
+export const CLOSE_DUE = 'pr_close_due';
+
 export async function readDecision(ctx, id) {
   const cfg = readConfig(ctx.rules, ctx.product);
   if (!cfg.ok) return fail(cfg.reason);
@@ -131,13 +149,15 @@ export async function readDecision(ctx, id) {
   // The one approval check, on the answer as it will be recorded (L81).
   const counted = answerCounts(ctx.rules, { ...doc, answer }, { product: ctx.product });
   if (!counted.ok) { ctx.alert({ type: 'approval_not_counted', ask: id, reason: counted.reason }); return { ok: true, counted: false }; }
-  const next = { ...doc, state: 'answered', answer };
+  const next = { ...doc, state: 'answered', answer, [CLOSE_DUE]: true };
   const w = writeDoc(ctx.record, 'ask', a, next);
   if (!w.ok) return fail(`the record refused the answer: ${w.reason}`);
   // After any recorded choice the robot closes the decision pull request unmerged (round 1 M9; audit round 1 m-1).
-  {
-    const c = await ctx.gh.patch(`/repos/${ctx.owner}/${ctx.repo}/pulls/${doc.pr}`, { state: 'closed' }).catch((e) => ({ status: String(e?.message ?? e) }));
-    if (c?.status !== 200) ctx.alert({ type: 'decision_pr_not_closed', ask: id, pr: doc.pr, reason: String(c?.status) });
+  // The mark comes off once the close worked or Joe was told; otherwise, or if this write is refused, it stays and the
+  // schedule pass retries (L135).
+  if (await closeDecisionPr(ctx, id, next)) {
+    const { [CLOSE_DUE]: _due, ...closed } = next;
+    writeDoc(ctx.record, 'ask', { id, rev: w.rev }, closed);
   }
   return { ok: true, counted: true, choice };
 }

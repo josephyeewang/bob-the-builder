@@ -95,9 +95,9 @@ function machine() {
   const base = realpathSync(tempDir('m4-wiring-'));
   const d = (...p) => { const q = join(base, ...p); mkdirSync(q, { recursive: true }); return q; };
   const V = `install.v-${'c'.repeat(40)}`;
-  d(V);
+  d(V, 'orchestrate');
   const installRoot = join(base, 'install');
-  symlinkSync(V, installRoot); // root's link to the versioned copy (L75 M-1)
+  symlinkSync(`${V}/orchestrate`, installRoot); // root's link to the copy in the versioned folder (L75 M-1, L92 item 4)
   mkdirSync(dirname(templateFile(installRoot, 'reviewer')), { recursive: true });
   for (const r of REVIEW_ROLES) { copyFileSync(join(HERE, 'templates', `${r}.settings.json`), templateFile(installRoot, r)); chmodSync(templateFile(installRoot, r), 0o644); }
   const node = join(d('install', 'bin'), 'node'); writeFileSync(node, '');

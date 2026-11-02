@@ -26,7 +26,7 @@ import { MARK_CONTEXT, markDescription, markable, NEEDS_JOE_CONTEXT, needsJoeDes
 import { isOpen } from '../../shared/record.mjs';
 import { markReverted } from './undo.mjs';
 import { factFrom } from '../M9-record/permissions.mjs';
-import { settleMerge, openTooLong, prReading, prReadingAfter, MERGED_OUTSIDE } from './merge-outcome.mjs';
+import { settleMerge, openTooLong, prReading, prReadingAfter, MERGED_OUTSIDE, MERGED_OUTSIDE_UNTOLD, alertTaken } from './merge-outcome.mjs';
 import { KEYS, minutes } from '../M11-dispatcher/keys.mjs';
 
 export const ACTOR = 'merge_gate';
@@ -303,8 +303,9 @@ export async function gatePass(ctx) {
         return finish(fresh('merge', m.id), pr.merge_commit_sha);
       }
       if (pr.merged === true) {
-        alert({ type: 'merge_gate_unsure', merge: m.id, note: `pull request #${pr.number} merged at ${short(pr.head?.sha)}, not the judged ${short(m.doc.judged_head)}` });
-        move(m, 'refused', { reasons: [MERGED_OUTSIDE] });
+        // MERGED_OUTSIDE says the owner was told, so it is written only when the alert was taken (L130 M6).
+        const said = alertTaken(alert, { type: 'merge_gate_unsure', merge: m.id, note: `pull request #${pr.number} merged at ${short(pr.head?.sha)}, not the judged ${short(m.doc.judged_head)}` });
+        move(m, 'refused', { reasons: [said ? MERGED_OUTSIDE : MERGED_OUTSIDE_UNTOLD] });
         putBack(m, 'verified');
         return;
       }
@@ -318,7 +319,11 @@ export async function gatePass(ctx) {
     // A per-product key: the real engine answers it only for a named product (L110 M-1).
     try { limit = minutes(ctx.rules, KEYS.mergingOpenMaxMin, { product: ctx.product }); } catch { limit = NaN; }
     const tooLong = !final && openTooLong(record, m.id, now, limit);
-    if (!final && !tooLong) { step(m, 'outcome_unknown', { reasons: [Number.isFinite(limit) ? 'the pull request is still open' : `the pull request is still open, and the rules have no ${KEYS.mergingOpenMaxMin}`] }); return; }
+    if (!final && !tooLong) {
+      if (!Number.isFinite(limit)) tellLimitMissing(m);
+      step(m, 'outcome_unknown', { reasons: [Number.isFinite(limit) ? 'the pull request is still open' : `the pull request is still open, and the rules have no ${KEYS.mergingOpenMaxMin}`] });
+      return;
+    }
     const out = settleMerge({ record, alert, now }, m.id, { pr: reading, reason: 'interrupted', openTooLong: tooLong });
     if (!out.ok) { alert({ type: 'merge_gate_unsure', merge: m.id, note: `the merge could not be settled: ${out.reason}` }); return; }
     if (out.outcome === 'merged') {
@@ -332,6 +337,21 @@ export async function gatePass(ctx) {
     if (tooLong) alert({ type: 'merge_interrupted', merge: m.id, card: m.doc.card, pr: m.doc.pr, note: `pull request #${m.doc.pr} is still open ${Math.round(limit / 60_000)} min after the merge call, with no merge; recorded as interrupted, the card goes back to be merged again, and a later merge of this pull request is recorded when Sensors sees it` });
   }
 
+  // With no timeouts.merging_open_max_min, an open merge is never refused as interrupted: it waits for GitHub's final
+  // answer, so the owner is told once per merge that the rules lack the limit (L148 item 5). The told fact is written
+  // only once the alert was taken (as MERGED_OUTSIDE, L130 M6); a refused alert, or a refused fact write, tells again
+  // next pass.
+  function tellLimitMissing(m) {
+    const id = MERGE_LIMIT_TOLD_FACT(m.id);
+    const f = record.read('fact', id);
+    if (f?.doc && !f.corrupt && factFrom(ACTOR, { id, createdBy: record.meta?.('fact', id)?.createdBy ?? null }, MERGE_LIMIT_TOLD_FAMILY)) return;
+    const said = alertTaken(alert, { type: 'merge_limit_missing', merge: m.id, card: m.doc.card, pr: m.doc.pr,
+      note: `pull request #${m.doc.pr} is still open after the merge call, and the rules have no ${KEYS.mergingOpenMaxMin}, so it is never recorded as interrupted; it waits for GitHub's final answer. Add the limit to the rules file` });
+    if (!said) return;
+    const r = record.write({ actor: ACTOR, entity: 'fact', id, expectRev: f?.rev ?? 0, doc: { type: 'merge_limit_told', merge: m.id, key: KEYS.mergingOpenMaxMin, told_at: iso() } });
+    if (!r.ok) alert({ type: 'merge_gate_write_refused', merge: m.id, to: 'told', reason: r.reason });
+  }
+
   function putBack(m, to) {
     const card = fresh('card', m.doc.card);
     if (card?.doc?.state !== 'merging') return;
@@ -341,3 +361,7 @@ export async function gatePass(ctx) {
 }
 
 export { botId };
+
+// The fact that says the owner was told a merge waits with no merging limit in the rules (L148 item 5).
+export const MERGE_LIMIT_TOLD_FAMILY = 'merge-limit-told-';
+export const MERGE_LIMIT_TOLD_FACT = (mergeId) => `${MERGE_LIMIT_TOLD_FAMILY}${mergeId}`;

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { undoStep as undoStep0, exactReverse, UNDO_CARD, FIX_CARD, REVERSE_FACT } from './undo.mjs';
+import { undoStep as undoStep0, exactReverse, UNDO_CARD, FIX_CARD, REVERSE_FACT, UNDO_NOTE_FACT } from './undo.mjs';
 import { rulesWith, recWith, T0, iso, withAlerts } from './fixtures.test-helper.mjs';
 import { outbox, ALERT_QUEUE_FACT } from './alerts.mjs';
 
@@ -170,6 +170,21 @@ test('D8: M6 says not clean on a failed undo card -> a fix card as a draft for t
   assert.match(w.calls.alerts[0], /could not be an exact reverse/);
   await w.step();
   assert.equal(w.calls.alerts.length, 1, 'once');
+});
+
+test('L130: a fix card whose alert was not queued is told on the next pass, once, and only then noted', async () => {
+  const U = UNDO_CARD('A-1');
+  const w = world([target(), merge(), ['ask', 'A-1', ask()], failedUndo(), reverseFact({ state: 'not_clean', reason: 'a later change touched src/a.js' })]);
+  assert.deepEqual(await undoStep0({ rec: w.rec, rules: R, now: T0, filesOf: () => ['src/a.js', 'src/b.js'], alert: () => false }), [[U, 'fix card written']]);
+  assert.ok(w.rec.read('card', FIX_CARD(U)));
+  assert.equal(w.rec.read('fact', UNDO_NOTE_FACT(U)), null, 'no note while untold');
+  await w.step();
+  assert.equal(w.calls.alerts.length, 1);
+  assert.match(w.calls.alerts[0], /could not be an exact reverse/);
+  assert.ok(w.rec.read('fact', UNDO_NOTE_FACT(U)), 'noted once delivered');
+  await w.step();
+  assert.equal(w.calls.alerts.length, 1, 'once');
+  assert.equal(w.rec.list('card').filter((c) => c.id === FIX_CARD(U)).length, 1, 'one fix card');
 });
 
 test('D8: not clean while the undo card has not failed -> no fix card yet; the Lead is told once a day', async () => {
