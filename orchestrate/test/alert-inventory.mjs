@@ -1,7 +1,7 @@
 // alert-inventory.mjs — the alert inventory behind alert-inventory.test.mjs (lead call L135).
 //
 // L135: a scan that judges "is this answer ignored?" cannot be the gate, so every alert-like call in production code
-// goes on ONE list, alert-inventory.json, and each entry carries a status a person gave it (tested, ruled or open).
+// goes on ONE list, alert-inventory.json, and each entry carries a status a person gave it (ruled or open; L170).
 // This file finds the calls. It aims to miss none, and over-listing is cheap: an extra entry costs one ruling.
 //
 // An alert-like call is a call to:
@@ -20,8 +20,8 @@
 // whole enclosing function, comments left out (`body`). A change to the call's line, or anywhere in its function,
 // changes a pin, so a planted mark nine lines later, a guard moved, or a swap inside one function shows up.
 import { createHash } from 'node:crypto';
-import { readdirSync, readFileSync, statSync, rmSync, realpathSync } from 'node:fs';
-import { spawnSync } from 'node:child_process';
+import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { dirname, join, normalize, relative, sep } from 'node:path';
 import { mask, pairs, blocks, fnAt, namedFnBlockAt, lineOf, ALERT_NAMES, alertSites, wrappers, WRITE_CALL, TOLD_MARK } from './alert-answer-scan.mjs';
@@ -528,99 +528,73 @@ export function folderOwner(rel) {
 
 export const OWNERS = ['lane 1', 'lane 2', 'lane 3', 'lane 4', 'lead'];
 /**
- * Parses one status: { kind: 'tested', file, test } | { kind: 'ruled', call, why } | { kind: 'wrapped', file, fn }
- * | { kind: 'open', owner, pr } | { kind: 'bad', why }. `wrapped: <file> <fn>` (L139 item 4): the call goes through a
- * listed wrapper whose contract test is proven (contractProblems), and the wrapper's `covers` names this call.
+ * Parses one status: { kind: 'ruled', call, why } | { kind: 'open', owner, pr } | { kind: 'bad', why }.
+ * L170: "tested" (a run-time proof) and "wrapped" (a wrapper proven by assertWrapperContract) are gone. The r4 audit
+ * beat both machines eight ways, so neither can pass an entry; an entry is ruled by the lead on the code as it is,
+ * or open until the single-door alert API closes it.
  */
-// A test path is relative to orchestrate/ and stays inside it (L143 Minor 9: no `../`, no absolute path).
-export const badTestPath = (rel) => (/^\/|(?:^|\/)\.\.?(?:\/|$)|\\/.test(rel) ? `the test path must stay inside orchestrate/ (no ../ or absolute path): ${rel}` : null);
 export function parseStatus(s) {
   if (typeof s !== 'string') return { kind: 'bad', why: 'status must be a string' };
-  let x = /^tested: (\S+\.test\.mjs) > (.+)$/.exec(s);
-  if (x) return badTestPath(x[1]) ? { kind: 'bad', why: badTestPath(x[1]) } : { kind: 'tested', file: x[1], test: x[2] };
-  x = /^ruled: (L\d{1,4}), (.{8,})$/.exec(s);
+  let x = /^ruled: (L\d{1,4}), (.{8,})$/.exec(s);
   if (x) return { kind: 'ruled', call: x[1], why: x[2] };
-  x = /^wrapped: (\S+\.mjs) ([A-Za-z_$][\w$]*)$/.exec(s);
-  if (x) return { kind: 'wrapped', file: x[1], fn: x[2] };
   // L155: `open: lane 3, L152 follow-up` names the lead call whose follow-up PR is to close it (L153 item 2).
   x = /^open: (lane [1-4]|lead), (#\d+|none yet|L\d{1,4} follow-up)$/.exec(s);
   if (x) return OWNERS.includes(x[1]) ? { kind: 'open', owner: x[1], pr: x[2] } : { kind: 'bad', why: 'unknown owner' };
-  return { kind: 'bad', why: 'status must be "tested: <file>.test.mjs > <test name>", "ruled: L<n>, <why>", "wrapped: <file> <fn>" or "open: <lane n|lead>, <#N|none yet|L<n> follow-up>"' };
+  if (/^(?:tested|wrapped):/.test(s)) return { kind: 'bad', why: 'L170: "tested" and "wrapped" no longer pass an entry; rule it (a lead call) or set it open' };
+  return { kind: 'bad', why: 'status must be "ruled: L<n>, <why>" or "open: <lane n|lead>, <#N|none yet|L<n> follow-up>"' };
 }
 
-// L155 item 3: a proof test may not name the proof's own settings (FAKE_ALERT_LOG, FAKE_ALERT_FLIP); it could only be
-// reading or faking them. Comments are left out, so a note about them is fine.
-export const namesProofSettings = (src) => /FAKE_ALERT_/.test(mask(src, { commentsOnly: true }));
+// ---- lead calls (L170 item 3) ----
+
+// Where the lead's calls are written. A ruling, a rethrows note or an open follow-up names one by number ("L143"), and
+// the number must be a real call: an entry in LEAD-CALLS.md when that file is here (the lead's machine), and always on
+// LEAD_CALL_NUMBERS below, the lead-owned list this file carries so CI (which has no Dropbox) checks the same thing.
+export const LEAD_CALLS_FILE = join(homedir(), 'Dropbox', '99.0 Claude Sync', 'audit-results', 'orchestrate-buildspec', 'LEAD-CALLS.md');
+// The lead calls the list may cite. Only the lead adds a number, after writing the call in LEAD-CALLS.md (this file is
+// in LEAD_FILES, so a lane PR cannot change it). Where LEAD-CALLS.md is readable, every number here must be an entry.
+export const LEAD_CALL_NUMBERS = Object.freeze([135, 139, 143, 152, 170]);
 /**
- * The test named `name` in `src`: { open, close, body (masked), raw } or null. `why` says when it is a todo or skipped,
- * or calls skip() / todo() in its body: such a test proves nothing, since its failure does not fail the run.
+ * The call numbers LEAD-CALLS.md holds as entries: a table row "| L9 |", a heading "## L57" / "### L134 ·", or a
+ * dated log line, at the start of a line, that starts with the call in bold ("- 2026-11-01 · **L170 ..."); an indented sub-bullet is not one. A number only mentioned inside
+ * another call's text is not an entry.
  */
-export function findTest(src, name) {
-  const m = mask(src);
-  const match = pairs(m);
-  const quoted = [`'${name}'`, `"${name}"`, `\`${name}\``];
-  for (const x of m.matchAll(/(?<![\w$.])(?:test|it)\s*\(/g)) {
-    const open = m.indexOf('(', x.index);
-    const close = match.get(open);
-    if (close === undefined) continue;
-    const head = src.slice(open + 1, open + 1 + name.length + 4).trimStart();
-    if (!quoted.some((q) => head.startsWith(q))) continue;
-    const body = m.slice(open, close + 1);
-    let why = null;
-    if (/\.\s*(?:skip|todo)\s*\(/.test(body)) why = 'the test calls skip() or todo() in its body, so it proves nothing';
-    const opts = m.slice(open + 1 + name.length + 2, open + 1 + name.length + 2 + 200).match(/^\s*,\s*\{([^{}]*)\}/);
-    if (opts && /\b(?:todo|skip)\s*:\s*(?!false\b)/.test(src.slice(open + 1 + name.length + 2, open + 1 + name.length + 2 + opts[0].length))) why = 'the test is a todo or skipped, so it proves nothing yet';
-    if (/(?:test|it)\s*\.\s*(?:todo|skip)\s*$/.test(m.slice(Math.max(0, x.index - 2), open))) why = 'the test is a todo or skipped, so it proves nothing yet';
-    return { open, close, body, raw: src.slice(open, close + 1), match, why };
-  }
-  return null;
+export function leadCallsIn(text) {
+  const out = new Set();
+  for (const x of String(text).matchAll(/^(?:\| L(\d{1,4}) \||#{2,4} L(\d{1,4})\b|- (?:[^*\n]*· )?\*\*L(\d{1,4})\b)/gm)) out.add(Number(x[1] ?? x[2] ?? x[3]));
+  return out;
 }
-/** Does `src` (at `testRel`) import `name` from `helperRel` (both relative to orchestrate/)? */
-export function importsNameFrom(src, testRel, name, helperRel) {
-  for (const x of mask(src, { commentsOnly: true }).matchAll(/\bimport\s*\{([^{}]*)\}\s*from\s*['"](\.{1,2}\/[^'"]+)['"]/g)) {
-    if (normalize(join(dirname(testRel), x[2])).split('\\').join('/') !== helperRel) continue;
-    if (x[1].split(',').map((t) => t.trim()).includes(name)) return true;
-  }
-  return false;
+/** LEAD-CALLS.md's entries, or null when the file is not here (CI). `path` defaults to ORCH_LEAD_CALLS, then the Dropbox copy. */
+export function readLeadCalls(path = process.env.ORCH_LEAD_CALLS || LEAD_CALLS_FILE) {
+  let text;
+  try { text = readFileSync(path, 'utf8'); } catch { return null; }
+  return leadCallsIn(text);
 }
-export const HELPER_REL = 'test/fake-alert.test-helper.mjs';
 /**
- * The static half of a wrapper's contract (L155 item 1): why the contract test cannot prove the wrapper, or null. It
- * must exist, not be a todo or skipped, import the wrapper's file and assertWrapperContract from the shared helper, call
- * assertWrapperContract in its body, and not name the proof's settings. The run-time proof then sees the helper finish.
+ * Why `ref` ("L143") is not a lead call the list may cite, or null. It must look like L<n>, be on `allowed`
+ * (LEAD_CALL_NUMBERS), and, when `calls` (LEAD-CALLS.md's entries) is not null, be an entry there.
  */
-export function contractTestProblem(src, name, { testRel, file }) {
-  const t = findTest(src, name);
-  if (!t) return 'no test(...) or it(...) by that name';
-  if (t.why) return t.why;
-  if (!importsFile(src, testRel, file)) return `the test file does not import ${file}`;
-  if (!importsNameFrom(src, testRel, 'assertWrapperContract', HELPER_REL)) return `the test file does not import assertWrapperContract from ${HELPER_REL} (L155: a wrapper passes only through that helper)`;
-  if (!/(?<![\w$.])assertWrapperContract\s*\(/.test(t.body)) return 'the test does not call assertWrapperContract (L155: a wrapper passes only through that helper)';
-  if (namesProofSettings(src)) return 'the test file names FAKE_ALERT_ (the proof\'s own settings), so it cannot be a proof (L155)';
+export function leadCallProblem(ref, { calls = null, allowed = LEAD_CALL_NUMBERS } = {}) {
+  const x = /^L(\d{1,4})$/.exec(String(ref));
+  if (!x) return `"${ref}" is not a lead call number (L<n>)`;
+  const n = Number(x[1]);
+  if (calls && !calls.has(n)) return `${ref} is not an entry in LEAD-CALLS.md`;
+  if (!allowed.includes(n)) return `${ref} is not on LEAD_CALL_NUMBERS (test/alert-inventory.mjs), the lead-owned list CI checks`;
   return null;
 }
-
-// Does the test named `name` in `src` (a .test.mjs) exist, and run fakeAlert({ answer: false }) and fakeAlert({ throws })?
-// Returns null when it does, or why not. L143 M-2: `throws:` must be something that throws (not null, false, undefined,
-// 0 or ''), the body may not call t.skip() / t.todo(), and with `target` ({ testRel, file }) the test file imports
-// the entry's module. This is the static half; runtimeProblems is the proof (it sees the entry's function reached).
-export function testedProblem(src, name, target = null) {
-  const t = findTest(src, name);
-  if (!t) return 'no test(...) or it(...) by that name';
-  const { open, body, raw, match } = t;
-  const calls = [...body.matchAll(/\bfakeAlert\s*\(/g)].map((y) => { const o = open + y.index + y[0].length - 1; return src.slice(o, (match.get(o) ?? o) + 1); });
-  const lost = calls.some((c) => /\banswer\s*:\s*false\b/.test(c));
-  const threw = calls.some((c) => /\bthrows\s*:\s*(?!(?:null|false|undefined|0|''|""|``|void\s+0)\s*[,})])\S/.test(c));
-  if (!/from\s+['"][^'"]*fake-alert\.test-helper\.mjs['"]/.test(src)) return 'the file does not import fakeAlert';
-  if (target && !importsFile(src, target.testRel, target.file)) return `the test file does not import ${target.file}`;
-  if (t.why && /body/.test(t.why)) return t.why;
-  if (!lost || !threw) return `the test must run fakeAlert({ answer: false }) and fakeAlert({ throws: <an Error> }); it runs ${lost ? 'only answer: false' : threw ? 'only throws' : 'neither'}${raw.includes('fakeAlert') ? '' : ' (no fakeAlert in its body)'}`;
-  if (t.why) return t.why;
-  if (namesProofSettings(src)) return 'the test file names FAKE_ALERT_ (the proof\'s own settings), so it cannot be a proof (L155)';
-  return null;
+/** The lead calls an entry cites: its ruling, its open follow-up, and (a wrapper) its rethrows note. [{ ref, where }]. */
+export function citedCalls(e) {
+  const out = [];
+  const s = parseStatus(e.status);
+  if (s.kind === 'ruled') out.push({ ref: s.call, where: 'its ruling' });
+  if (s.kind === 'open' && /^L\d/.test(s.pr)) out.push({ ref: s.pr.split(' ')[0], where: 'its follow-up' });
+  if (e.rethrows !== undefined) {
+    const r = /^(L\d{1,4}): .{8,}/.exec(String(e.rethrows));
+    out.push({ ref: r ? r[1] : String(e.rethrows).split(':')[0], where: 'its rethrows note ("L<n>: <why>")' });
+  }
+  return out;
 }
 
-// ---- wrapper contracts (L139 item 4) ----
+// ---- wrappers ----
 
 /** The body pin of the first function named `fn` in `src` (comments left out), or null when there is none. */
 export function fnBody(src, fn) {
@@ -628,206 +602,10 @@ export function fnBody(src, fn) {
   const b = blocks(m, pairs(m)).find((x) => x.kind === 'fn' && x.name === fn);
   return b ? short(squash(mask(src.slice(b.open, b.close + 1), { commentsOnly: true }))) : null;
 }
-/** The first and last line of the first function named `fn` in `src`, or null when there is none. */
-export function fnLines(src, fn) {
-  const m = mask(src);
-  const b = blocks(m, pairs(m)).find((x) => x.kind === 'fn' && x.name === fn);
-  return b ? [lineOf(m, b.open), lineOf(m, b.close)] : null;
-}
-/** Does `testSrc` (at `testRel`) import `fileRel`? Both relative to orchestrate/. */
-export function importsFile(testSrc, testRel, fileRel) {
-  for (const x of mask(testSrc, { commentsOnly: true }).matchAll(/\bfrom\s*['"](\.{1,2}\/[^'"]+)['"]/g)) {
-    if (normalize(join(dirname(testRel), x[1])).split('\\').join('/') === fileRel) return true;
-  }
-  return false;
-}
-/**
- * Why a wrapper's contract is not proven, or [] when it is (L155 item 1). Proven: the wrapper names a `contract_test`
- * ("<file>.test.mjs > <name>") that passes contractTestProblem (it calls assertWrapperContract, imported from the
- * shared helper) and the run-time proof (the helper finishes, the wrapper's own lines hand the fakes their calls, and
- * each flip fails it by an assertion); a contract run with `rethrows` needs the list's `rethrows` lead call; its body
- * pin matches; and every wrapper it calls on (`inner`) is proven too. `read(rel)` returns a file's source under
- * orchestrate/, or null.
- */
-export function contractProblems(w, wrappersList, read, seen = new Set(), runtime = null) {
-  const id = `${w.file} ${w.fn}`;
-  if (seen.has(id)) return [`${id}: its inner wrappers loop`];
-  seen.add(id);
-  if (!w.contract_test) return [`${id} has no contract_test`];
-  const x = /^(\S+\.test\.mjs) > (.+)$/.exec(w.contract_test);
-  if (!x) return [`${id}: contract_test must be "<file>.test.mjs > <test name>"`];
-  if (badTestPath(x[1])) return [`${id}: ${badTestPath(x[1])}`];
-  const out = [];
-  const src = read(x[1]);
-  if (src === null) out.push(`${id}: ${x[1]} does not exist`);
-  else {
-    const why = contractTestProblem(src, x[2], { testRel: x[1], file: w.file });
-    if (why) out.push(`${id}: ${x[1]} > ${x[2]}: ${why}`);
-    else if (runtime) for (const r of runtime(x[1], x[2], [{ file: w.file, fn: w.fn }], { contract: { rethrows: w.rethrows ?? null } })) out.push(`${id}: ${x[1]} > ${x[2]}: ${r}`);
-  }
-  if (w.rethrows && !/^L\d{1,4}: .{8,}/.test(w.rethrows)) out.push(`${id}: rethrows is a lead call: "L<n>: <why>"`);
-  if (w.answer_unused) out.push(`${id}: answer_unused no longer makes a wrapper pass (L155: only assertWrapperContract does)`);
-  const code = read(w.file);
-  if (code === null || fnBody(code, w.fn) === null) out.push(`${id}: no function ${w.fn} in ${w.file}`);
-  else if (w.body && fnBody(code, w.fn) !== w.body) out.push(`${id}: the wrapper changed since its contract was pinned (body ${fnBody(code, w.fn)}, list ${w.body})`);
-  for (const inner of w.inner ?? []) {
-    const v = wrappersList.find((y) => `${y.file} ${y.fn}` === inner);
-    if (!v) out.push(`${id}: inner wrapper ${inner} is not on the list`);
-    else out.push(...contractProblems(v, wrappersList, read, new Set(seen), runtime));
-  }
-  return out;
-}
-
-// ---- the run-time proof (L143 M-2) ----
-
-const escapeRe = (t) => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-/**
- * One run of one test (by exact name): { ran, passed, skipped, log: [{ outcome, frames }] }. `tmp` makes the folder
- * for fakeAlert's log: the calling test file hands in a maker built on the tempDir helper of shared/test-tmp.mjs, so
- * the folder is removed even if this run dies (tmp-guard.test.mjs: this file is test code and makes no temp folder of
- * its own, and it is also the CLI, which must not load node:test).
- */
-export function runOneTest(root, testRel, name, flip = null, tmp = null) {
-  if (typeof tmp !== 'function') throw new Error('runOneTest needs tmp: a folder maker built on the tempDir helper of shared/test-tmp.mjs');
-  const dir = tmp();
-  const logFile = join(dir, 'log.jsonl');
-  const env = { ...process.env, FAKE_ALERT_LOG: logFile };
-  delete env.FAKE_ALERT_FLIP;
-  if (flip) env.FAKE_ALERT_FLIP = flip;
-  delete env.NODE_TEST_CONTEXT;   // a child run of its own, not a subtest of this one
-  const r = spawnSync(process.execPath, ['--test', '--test-reporter=tap', `--test-name-pattern=^${escapeRe(name)}$`, testRel],
-    { cwd: root, env, encoding: 'utf8', timeout: 120000 });
-  const out = `${r.stdout ?? ''}${r.stderr ?? ''}`;
-  let log = [];
-  try { log = readFileSync(logFile, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)); } catch { log = []; }
-  rmSync(dir, { recursive: true, force: true });
-  const lines = [...out.matchAll(/^\s*(not ok|ok) \d+ - (.*?)(?:\s+#\s*(SKIP|TODO)\b.*)?$/gm)].filter((x) => x[2].trim() === name);
-  const ran = lines.length > 0;
-  const skipped = lines.some((x) => x[3]);
-  const passed = ran && !skipped && lines.every((x) => x[1] === 'ok') && r.status === 0;
-  // L155 item 3: did it fail by an assertion? The TAP block under its "not ok" line names the error's code.
-  const asserted = lines.some((x) => {
-    if (x[1] !== 'not ok') return false;
-    const rest = out.slice(x.index + x[0].length);
-    const next = rest.search(/^\s*(?:not ok|ok) \d+ - /m);
-    return /^\s*code: 'ERR_ASSERTION'$/m.test(next < 0 ? rest : rest.slice(0, next));
-  });
-  return { ran, passed, skipped, asserted, log };
-}
-// A path under orchestrate/ that is test code by its path alone (L155 m2): see isTestPath below.
-const testFrame = (root, file) => {
-  const rel = relative(root, file).split(sep).join('/');
-  return !rel.startsWith('..') && !rel.startsWith('/') && isTestPath(rel);
-};
-/**
- * Why the test `testRel > name` does not prove `targets` under orchestrate/, or [] when it does (L143 M-2, L155).
- *
- * A target is an entry, { file, fn, lines }: `lines` are the entry's own call lines now (more than one when the list
- * holds identical entries). Or it is a wrapper, { file, fn } with `contract` set: then its lines are the wrapper's own.
- *
- * Reached (L155 item 2): a fakeAlert call whose stack, read from the fake outward, meets a frame in the target's file
- * on one of its lines before it meets any test code. So the fake was handed its call by the code under test, at that
- * line: not by another line of the same function, and not by test code standing between (a test that calls a fake
- * itself, or through an adapter of its own, reaches nothing).
- *
- * Proven: run as it is, the test passes (not skipped, not a todo); every target is reached by a fake that answered
- * false and by one that threw (or rejected); no fake is called straight from test code; with fakeAlert's false turned
- * into true, the test fails by an assertion; with its throw turned into true, it fails by an assertion (L155 item 3).
- * For a wrapper (`contract`), the reaching calls must come from inside assertWrapperContract, by all four of its
- * fakes (false, a throw, a rejection, one that goes out), and the run must log the helper finishing; one that ran with
- * `rethrows` needs `contract.rethrows` (the list's lead call).
- */
-export function runtimeProblems(root, testRel, name, targets, { tmp = null, contract = null } = {}) {
-  const out = [];
-  const plain = runOneTest(root, testRel, name, null, tmp);
-  if (!plain.ran) return [`the test did not run (no test by that exact name in ${testRel})`];
-  if (plain.skipped) return ['the test is skipped or a todo when it runs, so it proves nothing'];
-  if (!plain.passed) return ['the test fails'];
-  let realRoot = root;
-  try { realRoot = realpathSync(root); } catch { /* keep it */ }
-  let helperAbs = join(root, HELPER_REL);
-  try { helperAbs = realpathSync(helperAbs); } catch { /* keep it */ }
-  const calls = plain.log.filter((l) => l.outcome);
-  // The frames from the fake outward, past the helper's own (fakeAlert, assertWrapperContract's run).
-  const outward = (l) => { const i = l.frames.findIndex((f) => f.file !== helperAbs); return i < 0 ? [] : l.frames.slice(i); };
-  const isTest = (f) => f.file === helperAbs || testFrame(realRoot, f.file);
-  const direct = calls.map((l) => outward(l)[0]).filter((f) => f && isTest(f));
-  if (direct.length) out.push(`the test calls a fakeAlert itself (${relative(realRoot, direct[0].file)}:${direct[0].line}); in a proof only the code under test calls it (L155)`);
-  for (const t of targets) {
-    let abs = join(root, t.file);
-    try { abs = realpathSync(abs); } catch { /* a stack frame names the real path; keep this one */ }
-    let lines = t.lines ?? null;
-    if (!lines) {
-      let span = null;
-      try { span = fnLines(readFileSync(join(root, t.file), 'utf8'), t.fn); } catch { span = null; }
-      if (!span) { out.push(`${t.file} ${t.fn}: no such function to reach`); continue; }
-      lines = []; for (let n = span[0]; n <= span[1]; n += 1) lines.push(n);
-    }
-    const on = new Set(lines);
-    const reaches = (l) => {
-      for (const f of outward(l)) {
-        if (f.file === abs && on.has(f.line)) return true;
-        if (isTest(f)) return false;
-      }
-      return false;
-    };
-    const by = (outcomes) => calls.some((l) => outcomes.includes(l.outcome) && (!contract || l.inContract) && reaches(l));
-    const where = t.lines ? `${t.file}:${t.lines.join(',')} ${t.fn}` : `${t.file} ${t.fn}`;
-    const inside = contract ? ' inside assertWrapperContract' : '';
-    if (!by(['false'])) out.push(`${where} never handed${inside} a fakeAlert that answered false its call`);
-    if (contract) {
-      if (!by(['threw'])) out.push(`${where} never handed${inside} a fakeAlert that threw its call`);
-      if (!by(['rejected'])) out.push(`${where} never handed${inside} a fakeAlert that rejected its call`);
-      if (!by(['other'])) out.push(`${where} never handed${inside} a fakeAlert that went out its call`);
-    } else if (!by(['threw', 'rejected'])) out.push(`${where} never handed a fakeAlert that threw its call`);
-  }
-  if (contract) {
-    const done = plain.log.filter((l) => typeof l.contract === 'string');
-    if (!done.some((l) => l.ok)) out.push('assertWrapperContract did not finish in the run');
-    if (done.some((l) => !l.ok)) out.push('an assertWrapperContract run failed and the test went on (it caught the failure)');
-    if (done.some((l) => l.rethrows) && !contract.rethrows) out.push('assertWrapperContract ran with rethrows, but the list has no rethrows lead call for this wrapper');
-  }
-  for (const [flip, what] of [['false', 'the lost alert answers true instead of false'], ['throws', 'the failing alert answers true instead of throwing']]) {
-    const r = runOneTest(root, testRel, name, flip, tmp);
-    if (r.passed) out.push(`it still passes when ${what}, so it never checks ${flip === 'false' ? 'the answer' : 'the throw'}`);
-    else if (!r.asserted) out.push(`when ${what}, it fails, but not by an assertion (an error, a skip, or no run): the flip must fail an assert (L155)`);
-  }
-  return out;
-}
-/** runtimeProblems, run once per test and target set; `tmp` as for runOneTest. */
-export function runtimeCache(root, tmp) {
-  const seen = new Map();
-  return (testRel, name, targets, opts = {}) => {
-    const k = JSON.stringify([testRel, name, targets, opts.contract ?? null]);
-    if (!seen.has(k)) seen.set(k, runtimeProblems(root, testRel, name, targets, { ...opts, tmp }));
-    return seen.get(k);
-  };
-}
-
 // The key that pins an entry: file, function, the call and what it goes through (via), call line hash, body hash.
 // The call and via are in the key (L143 rerun, the auditor's F1b): two calls on one line, say `if (write(..)) await
 // closeDecisionPr(..)`, share a line hash, and without them one could stand in for the other when the list is matched.
 export const keyOf = (e) => `${e.file} | ${e.fn} | ${e.call} | ${e.via ?? ''} | ${e.hash} | ${e.body}`;
-
-/**
- * The run-time targets for `entries` (one test's "tested" entries), given `found`, the inventory of the code now (L155
- * item 2). One target per entry key, never per function: its lines are only the lines that key is found on (more than
- * one only when the list holds identical entries). So a test that reaches one alert line of a function proves that
- * line's entry and no other. An entry not in the code as pinned has no line: it is in `missing`.
- */
-export function entryTargets(entries, found) {
-  const at = new Map();
-  for (const f of found) at.set(keyOf(f), [...(at.get(keyOf(f)) ?? []), f.line]);
-  const targets = new Map();
-  const missing = [];
-  for (const e of entries) {
-    const k = keyOf(e);
-    const lines = at.get(k) ?? [];
-    if (!lines.length) { missing.push(e); continue; }
-    if (!targets.has(k)) targets.set(k, { file: e.file, fn: e.fn, lines: [...new Set(lines)].sort((a, b) => a - b) });
-  }
-  return { targets: [...targets.values()], missing };
-}
 
 // ---- the files ----
 
@@ -902,14 +680,14 @@ export function compare(found, listed) {
 export const LEAD_BRANCH = /^(?:claude\/)?lead-/;
 // The checker's own files (L139 item 6): only a lead PR changes them. safe-merge.sh refuses them too (LEAD_OK, above);
 // that is the guard, this is the early warning.
-// raise-contract.test.mjs (the wrapper contracts) and fake-alert.test-helper.mjs (what every contract runs) are added
-// here too: a lane that weakens either would weaken every proof that rests on them.
+// raise-contract.test.mjs (what the wrappers' callers rely on) and fake-alert.test-helper.mjs (the one test stand-in)
+// are the lead's too (L170: neither proves an entry any more, but a lane that weakens the stand-in weakens every test).
 export const LEAD_FILES = Object.freeze(['test/alert-inventory.json', 'test/alert-inventory.mjs', 'test/alert-inventory.test.mjs', 'test/alert-answer-scan.mjs',
   'test/alert-answer.test.mjs', 'test/raise-contract.test.mjs', 'test/fake-alert.test-helper.mjs']);
 /** The lead-only files among `changed` (paths relative to the repo root). */
 export const leadFilesIn = (changed) => changed.filter((p) => LEAD_FILES.some((f) => p === `orchestrate/${f}`));
 const kindOf = (status) => (typeof status === 'string' ? status.split(':')[0] : 'bad');
-/** Entries by status kind, and open ones by owner: { alerts: { open, ruled, tested }, open_by_owner: {...}, ... }. */
+/** Entries by status kind, and open ones by owner: { alerts: { open, ruled }, open_by_owner: {...}, ... }. */
 export function countList(list) {
   const out = {};
   for (const k of ['alerts', 'wrappers', 'silent', 'standins']) {
@@ -928,9 +706,9 @@ export function countList(list) {
 /**
  * What a change to the list does, base -> head, entry by entry (L143 Minor 1), and what a PR that is not the lead's may
  * not do. Each list is compared as a multiset of whole entries. A lane PR may only re-pin an open entry: the same
- * entry with only its pins (hash, body, text) changed, status and every other field kept (a ruled, tested or wrapped
- * entry was judged on the code as it was, so only the lead re-pins it). Everything else needs the lead: an entry added
- * or removed, a status changed (open to tested included: the lead checks the test), a field changed (lands_with,
+ * entry with only its pins (hash, body, text) changed, status and every other field kept (a ruled entry was judged on
+ * the code as it was, so only the lead re-pins it). Everything else needs the lead: an entry added or removed, a
+ * status changed, a field changed (lands_with,
  * note, via, covers ...), or any wrapper added, removed or changed. Returns { problems, would, summary }.
  */
 const PIN_FIELDS = new Set(['hash', 'body', 'text']);
@@ -983,7 +761,7 @@ export function changeControl(base, head, { lead }) {
         continue;
       }
       if (k === 'wrappers') problems.push(`${label(k, e)}: a wrapper was added; only a lead PR adds a wrapper (L135)`);
-      else problems.push(`${label(k, e)}: a new "${kindOf(e.status)}" entry; only a lead PR adds one (a new alert call needs a test that runs fakeAlert({ answer: false }) and fakeAlert({ throws }), or a lead call)`);
+      else problems.push(`${label(k, e)}: a new "${kindOf(e.status)}" entry; only a lead PR adds one (a new alert call is listed open by the lead, or ruled by a lead call; L170)`);
     }
     for (const g of pool) problems.push(`${label(k, g)} (${g.status}) was removed; only a lead PR takes an entry off the list (L143 Minor 1)`);
   }
@@ -994,6 +772,10 @@ export function changeControl(base, head, { lead }) {
  * The branch this checkout is (L155 m6): GITHUB_HEAD_REF in a pull request's CI, else git's branch name. A detached
  * checkout (an audit's worktree) has no branch name, so it reads ORCH_BRANCH; with that unset it throws "set
  * ORCH_BRANCH", never guessing "a lane". `env` and `git` are handed in so the test controls can try each case.
+ *
+ * This is NOT the guard (L170). GITHUB_HEAD_REF is the PR author's own branch name, so any lane can name a branch
+ * lead-x and pass change control. The real guard is safe-merge.sh's LEAD_OK: it refuses to merge any PR that touches
+ * a LEAD_FILES file unless the lead sets LEAD_OK=<that PR's number>. This check only catches an honest mistake early.
  */
 export function branchName(env, git) {
   if (env.GITHUB_HEAD_REF) return env.GITHUB_HEAD_REF;

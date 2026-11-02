@@ -1,31 +1,20 @@
-// raise-contract.test.mjs — the contract tests for the alert wrappers (lead calls L139 item 4, L143, L155 item 1).
+// raise-contract.test.mjs — what the alert wrappers' callers rely on (lead calls L139 item 4, L143, L170).
 //
-// Since L155 one contract holds every wrapper: assertWrapperContract(wrapper, setup) from fake-alert.test-helper.mjs.
-// It runs the wrapper four times, each in a fresh world built by `setup`: the alert answering false, throwing, and
-// rejecting after a delay (the wrapper must answer === false), and the alert going out (it must not answer false). A
-// wrapper whose contract is to hand a throw back as a throw (a lead call: the list's `rethrows`) is run with
-// `rethrows: true`, and must then throw that very error. A wrapper is "passes" in alert-inventory.json only when its
-// contract_test calls the helper, and alert-inventory.test.mjs runs that test three times: as it is (the helper must
-// finish, and the wrapper's own lines must hand each fake its call), then with fakeAlert's false turned into true, then
-// with its throw turned into true (each must fail it by an assertion). In those runs reading a fake's .calls, .texts
-// or .answers throws, so a contract test asserts only on what the wrapper did.
+// These are behaviour tests, not proofs. Until L170 the contracts at the top of this file ran through
+// assertWrapperContract and a run-time proof, and a wrapper passing them was "passes" in alert-inventory.json. The r4
+// audit beat that machinery eight ways, so L170 removed it: each wrapper is now ruled by the lead on its code
+// (alert-inventory.json says where), or open. The tests below check the behaviour each ruling describes, and fail if
+// the code stops doing it; they do not make any entry pass.
 //
-// The tests below the contracts are the behaviour each wrapper's callers rely on. They are not proofs (nothing in the
-// list names them), so they may read a fake's record.
-//
-// Where each wrapper stands (1 Nov 2026):
-//   - tellThen (M11): hands back the alert's answer as it is: false when lost, a throw as a throw. Passes (rethrows).
+// Where each wrapper stands (L170, 1 Nov 2026):
+//   - tellThen (M11): return alert(text, { mark }): the alert's own answer, and a throw passes. Ruled.
 //   - M13 `raise` (alerts.mjs): a GitHub call that answers false (or `open` with no issue number) makes raise answer
-//     false; one that throws makes raise throw. On open and on comment. Passes (rethrows).
-//   - prod-watcher `raise`: a closure inside watchOnce, so its answer is seen by what the pass keeps: a setting change
-//     whose raise answered false keeps its old baseline and is raised again next pass; a throw stops the pass. Passes
-//     (rethrows).
-//   - heartbeat `set`: answers nothing (it raises a red fact again every pass, whatever raise answered), so it cannot
-//     keep the contract by construction. Its contract is a todo; its callers are open until a lost-raise test runs
-//     at each one (L153).
-//   - safeAlert (M2): answers false when the alert answers false or throws, but takes an alert that answers a promise
-//     as sent, so one that rejects later is counted as given (L155: found by the helper's delayed rejection). Its
-//     contract is a todo; open for lane 1.
+//     false; one that throws makes raise throw; nothing is saved before the call succeeds. Ruled.
+//   - prod-watcher `raise`: answers result !== false; a setting change whose raise answered false keeps its old
+//     baseline and is raised again next pass; a throw stops the pass. Ruled (the r4 hand-check).
+//   - heartbeat `set`: answers nothing; it raises a red fact again every pass, whatever raise answered. Open (lane 3).
+//   - safeAlert (M2): answers false when the alert answers false or throws, but takes a promise as sent, so one that
+//     rejects later counts as given. Open (lane 1).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { memoryRecord } from '../shared/record.mjs';
@@ -36,7 +25,7 @@ import { watchOnce } from '../modules/M12-sensors/prod-watcher.mjs';
 import { heartbeatOnce } from '../modules/M13-ledger/heartbeat.mjs';
 import { tellThen } from '../modules/M11-dispatcher/alerts.mjs';
 import { safeAlert } from '../modules/M2-approvals/research-ask.mjs';
-import { fakeAlert, assertWrapperContract } from './fake-alert.test-helper.mjs';
+import { fakeAlert } from './fake-alert.test-helper.mjs';
 
 // ---- the worlds ----
 
@@ -72,67 +61,12 @@ function heart(raise) {
     usage: async () => null,
   };
   const alerts = { raise, clear: async () => 'none' };
-  const pass = () => heartbeatOnce({ product: 'p', writer, gh: fakeIssues(), alerts, owner: 'o', probes, now });
+  const gh = fakeIssues();   // one GitHub for every pass: since #98 the pinned issue is read back (isClosed) on the next pass
+  const pass = () => heartbeatOnce({ product: 'p', writer, gh, alerts, owner: 'o', probes, now });
   return { world, alerts, pass, tick: () => { t += 10 * 60e3; } };
 }
 
-// ---- the contracts (L155: each one is assertWrapperContract) ----
-
-test('tellThen keeps the wrapper contract: false when the alert is lost, a throw handed back as that throw (L155 contract)', async () => {
-  const mark = { fact: 'hold-c', fields: { text: 't' }, kind: 'hold_alert' };
-  await assertWrapperContract(tellThen, (alert) => tellThen(alert, 't', mark), { rethrows: true });
-});
-
-test('M13 raise keeps the wrapper contract, on open and on comment: false when GitHub loses the call, a throw as that throw (L155 contract)', async () => {
-  // Open: a GitHub open that answers no issue number (false) makes raise answer false; one that answers 7 opens it.
-  await assertWrapperContract(makeAlerts, (alert) => m13({ open: alert }).a.raise({ key: 'k', title: 't', body: 'b' }), { rethrows: true, sent: 7 });
-  // Comment: an alert already open whose status changed; the change notice is the comment.
-  await assertWrapperContract(makeAlerts, async (alert) => {
-    const w = m13();
-    await w.a.raise({ key: 'k', title: 't', body: 'b', status: 's1' });
-    w.gh.comment = alert;
-    return w.a.raise({ key: 'k', title: 't', body: 'b', status: 's2' });
-  }, { rethrows: true });
-});
-
-test('prod-watcher raise keeps the wrapper contract: a setting change whose raise is lost is raised again next pass, a throw stops the pass (L155 contract)', async () => {
-  // raise lives inside watchOnce, so its answer is read from what the pass keeps: the next pass (with a raise that goes
-  // out) raises the setting change again exactly when this pass took the raise as lost. The fake is put straight into
-  // the alerts object the pass reads, so production code hands it its call.
-  await assertWrapperContract(watchOnce, async (alert) => {
-    const w = watcher(fakeAlert());
-    await w.pass();
-    w.change();
-    w.alerts.raise = alert;
-    await w.pass();
-    let again = 0;
-    w.alerts.raise = fakeAlert({ answer: (a) => { if (isSettingChange(a)) again += 1; return 'opened'; } });
-    await w.pass();
-    return again === 0;
-  }, { rethrows: true });
-});
-
-test('heartbeat set keeps the wrapper contract (L155 contract)', { todo: 'set answers nothing: it raises a red fact every pass whatever raise answered, so it cannot answer false (L155; its callers are open, L153)' }, async () => {
-  await assertWrapperContract('heartbeat set', async (alert) => {
-    const h = heart(fakeAlert());
-    await h.pass();
-    h.world.fd = false;
-    h.alerts.raise = alert;
-    h.tick();
-    await h.pass();
-    let again = 0;
-    h.alerts.raise = fakeAlert({ answer: (a) => { if (a.key.endsWith('|heartbeat|front-door')) again += 1; return 'opened'; } });
-    h.tick();
-    await h.pass();
-    return again === 0;
-  });
-});
-
-test('safeAlert keeps the wrapper contract (L155 contract)', { todo: 'safeAlert takes an alert that answers a promise as sent, so one that rejects later counts as given (L155; lane 1)' }, async () => {
-  await assertWrapperContract(safeAlert, (alert) => safeAlert({ alert }, { n: 0 })({ type: 't' }));
-});
-
-// ---- what the callers rely on (behaviour, not proofs) ----
+// ---- what the callers rely on ----
 
 test('M13 raise: a GitHub call that throws makes raise throw and saves nothing that stops the next try (L139)', async () => {
   const down = m13({ open: fakeAlert({ throws: new Error('github down') }) });
@@ -193,6 +127,8 @@ test('heartbeat set: a red fact is raised again next pass after false or a throw
   await d.pass().catch(() => {});
   assert.equal(raisedFor(down, 'front-door'), 2, 'threw: raised again on the next pass');
 });
+// Since #98 (L152) the key carries the switch number: `account-changed-<n>-<saved time>-<login>`.
+const switchRaises = (raise, login) => raise.calls.filter(([x]) => new RegExp(`\\|heartbeat\\|account-changed-\\d+-.+-${login}$`).test(x.key)).length;
 test('heartbeat account-changed: the new login is saved only when the raise was not lost (L139)', async () => {
   const down = fakeAlert({ throws: (a) => a.key.includes('account-changed') && 'github down' });
   const d = heart(down);
@@ -200,14 +136,14 @@ test('heartbeat account-changed: the new login is saved only when the raise was 
   d.world.login = 'account B';
   await assert.rejects(d.pass(), /github down/);
   await d.pass().catch(() => {});
-  assert.equal(raisedFor(down, 'account-changed-account B'), 2, 'threw: the new login was not saved, so it is raised again');
+  assert.equal(switchRaises(down, 'account B'), 2, 'threw: the new login was not saved, so it is raised again');
   const lost = fakeAlert({ answer: false });
   const h = heart(lost);
   await h.pass();
   h.world.login = 'account B';
   await h.pass();
   await h.pass();
-  assert.equal(raisedFor(lost, 'account-changed-account B'), 2, 'answered false: the change is raised again on the next pass');
+  assert.equal(switchRaises(lost, 'account B'), 2, 'answered false: the change is raised again on the next pass');
 });
 
 test('tellThen hands the mark to the alert, which writes it only on delivery (L143)', () => {
@@ -215,6 +151,9 @@ test('tellThen hands the mark to the alert, which writes it only on delivery (L1
   const lost = fakeAlert({ answer: false });
   assert.equal(tellThen(lost, 't', mark), false);
   assert.deepEqual(lost.calls[0], ['t', { mark }]);
+  const boom = new Error('down');
+  assert.throws(() => tellThen(fakeAlert({ throws: boom }), 't', mark), (e) => e === boom, 'a throw passes out as that same throw');
+  assert.equal(tellThen(fakeAlert({ answer: 7 }), 't', mark), 7, 'any other answer is handed back as it is');
 });
 
 test('safeAlert answers false when the alert is lost, whether it answers false or throws, and counts both (L143)', () => {

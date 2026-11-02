@@ -18,7 +18,7 @@
 // M11's alert-sites.test.mjs stays (L135): its L47 direct-send rule and r7 drop-cause rule are not this class.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { alertSites, wrappers, standIns, losingStandIns, silentDefaults } from './alert-answer-scan.mjs';
+import { alertSites, wrappers, standIns, losingStandIns, silentDefaults, probeSilent, isPlainRefusal } from './alert-answer-scan.mjs';
 import { fakeAlert } from './fake-alert.test-helper.mjs';
 
 // ---- controls: each planted form is caught, the allowed forms are not ----
@@ -104,11 +104,59 @@ test('controls: a stand-in not made by fakeAlert() is seen; fakeAlert() is not',
     'export function f({ notifyOwner = () => true }) {}', 'run({ alert: (t) => { log(t); return "queued"; } });']) {
     assert.equal(d(x), 1, `L155 m1: ${x}`);
   }
-  for (const x of ['const alert = ctx.alert ?? (() => { throw new Error("no alert port"); });', 'const alert = ctx.alert ?? (async () => false);',
-    'run({ alert: (t) => outbox.send(t) });', 'run({ alert: tellIt });', 'const alerts = { raise };', 'run({ alert: ctx.alert ?? ((t) => queue.push(t) && false) });']) {
+  for (const x of ['const alert = ctx.alert ?? (() => { throw new Error("no alert port"); });',
+    'run({ alert: (t) => outbox.send(t) });', 'run({ alert: tellIt });', 'const alerts = { raise };', 'this.notify = notify;']) {
     assert.equal(d(x), 0, `L155 m1, not silent: ${x}`);
   }
+  // L170: these two were "not silent" under L155. An async default answers a promise, which a caller's !== false takes
+  // as sent; and one that pushes the alert to a queue keeps it where no one reads, whatever it answers.
+  for (const x of ['const alert = ctx.alert ?? (async () => false);', 'run({ alert: ctx.alert ?? ((t) => queue.push(t) && false) });']) {
+    assert.equal(d(x), 1, `L170, now silent: ${x}`);
+  }
   assert.match(silentDefaults("const alert = ctx.alert ?? (() => 'sent');")[0].why, /answers 'sent'/, 'it says what the default answered');
+});
+
+// L170 item 3: the r4 audit's S0-S6, defaults that answered false to the one call ('an alert', {}) the probe made.
+const R4_SILENT = [
+  ['S0', 'export function f({ rec, alert = () => true }) { alert({ type: "x" }); }', '() => true'],
+  ['S1', "export function f({ rec, alert = (e) => (typeof e === 'string' ? false : true) }) { alert({ type: 'x' }); }", "(e) => (typeof e === 'string' ? false : true)"],
+  ['S2', 'export function f({ rec, alert = ((n) => () => n++ > 0)(0) }) { alert({ type: "x" }); }', '((n) => () => n++ > 0)(0)'],
+  ['S3', "const pending = [];\nexport function f(ctx) { const alert = ctx.alert ?? ((t) => pending.push(t)); alert({ type: 'x' }); }", '((t) => pending.push(t))'],
+  ['S4', 'export function f({ rec, alert = () => ({ then() {} }) }) { if (alert({ type: "x" }) !== false) rec.push("told"); }', '() => ({ then() {} })'],
+  ['S5', 'export function f({ rec, alert = () => new Promise(() => {}) }) { alert({ type: "x" }); }', '() => new Promise(() => {})'],
+  ['S6', 'export function f({ rec, alert = (t, o) => Object.keys(o ?? { a: 1 }).length > 0 }) { alert({ type: "x" }); }', '(t, o) => Object.keys(o ?? { a: 1 }).length > 0'],
+];
+test('controls: a default is silent unless it is a plain arrow that answers false or throws; the probe sees shapes, counts, thenables and pushes (L170 item 3)', () => {
+  const d = (src) => silentDefaults(src).length;
+  for (const [id, src, expr] of R4_SILENT) {
+    assert.equal(silentDefaults(src).length, 1, `${id}: ${expr}`);
+    assert.ok(probeSilent(expr), `${id}: the probe alone catches it too, so a port in an object (wiring, not a default) is caught the same`);
+    assert.equal(isPlainRefusal(expr), false, `${id}: and it is not a plain refusal`);
+  }
+  assert.match(silentDefaults(R4_SILENT[1][1])[0].why, /an alert object/, 'S1: says which shape');
+  assert.match(silentDefaults(R4_SILENT[2][1])[0].why, /call 2 of 3/, 'S2: says which call');
+  assert.match(silentDefaults(R4_SILENT[3][1])[0].why, /pending\.push/, 'S3: says what it touched');
+  assert.match(silentDefaults(R4_SILENT[4][1])[0].why, /never settles/, 'S4');
+  assert.match(silentDefaults(R4_SILENT[5][1])[0].why, /never settles/, 'S5');
+  // The probe on its own (a port written in an object is judged by it alone).
+  for (const x of ['run({ alert: (t) => { seen.last = t; return false; } });', 'run({ alert: (t) => { last = t; return false; } });',
+    'run({ alert: async () => true });', 'run({ alert: () => Promise.resolve("sent") });', 'run({ alert: (t) => (t ? false : true) });']) {
+    assert.equal(d(x), 1, `L170 probe: ${x}`);
+  }
+  for (const x of ['run({ alert: async () => false });', 'run({ alert: () => Promise.reject(new Error("down")) });', 'run({ alert: (t) => outbox.send(t) });']) {
+    assert.equal(d(x), 0, `L170 probe, not silent in an object: ${x}`);
+  }
+  // The form rule: only a plain refusal passes as a default, a name included.
+  for (const x of ['export function f({ alert = () => false }) {}', 'export function f({ alert = (t, o) => false }) {}', 'export function f({ alert = t => (false) }) {}',
+    'export function f({ alert = (t) => { return false; } }) {}', "export function f({ alert = () => { throw new Error('no alert port'); } }) {}",
+    'const alert = ctx.alert ?? (() => { throw new TypeError(); });', 'const alert = ctx.alert || ((() => false));']) {
+    assert.equal(d(x), 0, `L170, a plain refusal: ${x}`);
+  }
+  for (const x of ['export function f({ alert = defaultAlert }) {}', 'const alert = ctx.alert ?? makeAlert(rec);', 'export function f({ alert = (t, x = q.push(t)) => false }) {}',
+    "export function f({ alert = () => { throw new Error(`no ${q.push(1)}`); } }) {}", 'export function f({ alert = function () { return false; } }) {}',
+    'export function f({ alert = async () => { throw new Error("x"); } }) {}', 'const alert = ctx.alert ?? ((t) => { log(t); return false; });']) {
+    assert.equal(d(x), 1, `L170, not a plain refusal: ${x}`);
+  }
 });
 
 // ---- fakeAlert itself ----

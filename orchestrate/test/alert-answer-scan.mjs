@@ -444,10 +444,10 @@ function sitesFor(src, m, match, bl, names, carriers, { bare = false, wholeFn = 
 }
 
 // A wrapper: a function named like an alert (ALERT_NAMES, or safeX / textX / tellX / notifyX) that calls an alert.
-// Since L155 this verdict is ADVICE only, a hint for the lead: a wrapper is "passes" only when its contract test runs
-// assertWrapperContract (fake-alert.test-helper.mjs) and the run-time proof sees it hold, because a text rule can
-// always be beaten by a spelling it does not know (the auditor's r3 N04-N08: a conditional rethrow, a comma, `.then`,
-// `finally`, `false || true`). The hint: each alert call in it is `return <call>` (or a concise arrow's body) with
+// Since L155 this verdict is ADVICE only, a hint for the lead, because a text rule can always be beaten by a spelling
+// it does not know (the auditor's r3 N04-N08: a conditional rethrow, a comma, `.then`, `finally`, `false || true`).
+// Since L170 a wrapper is ruled by the lead on its code (its body pinned) or open; nothing proves one. The hint: each
+// alert call in it is `return <call>` (or a concise arrow's body) with
 // nothing done to it but `!== false` (L143 M-3: no `||`, `??`, ternary, `&&` or other comparison on a returned call),
 // or is held in a local `const` that is returned the same way and never assigned again (L153 item 1), or is tested
 // `=== false` / `!== false` in an `if` that answers false (L135). `return true` is allowed only in a wrapper that tests
@@ -602,6 +602,21 @@ export function losingStandIns(src) {
 // name. Also listed, by its form: `alert?.(x)`, where an absent alert answers undefined.
 // A port is one alert function, so the names are singular: `alerts: { raise }` is an object, and its `raise` is found.
 // A name made here (`const say = (e) => ...`) is a definition, not a default: the wrappers list holds those.
+//
+// L170 item 3 (the r4 audit's S0-S6 got past one call with ('an alert', {})): the probe now
+//   - calls each port with several shapes of argument (a string and options, an alert object and options, a string
+//     alone, nothing at all), CALLS times each, in a fresh sandbox per shape, so an answer that turns on the argument's
+//     type, on the options, or on how many calls came before is seen;
+//   - waits out a promise or any thenable it answers until the sandbox has nothing left to run (the sandbox has no
+//     timers, so nothing settles after that): one still pending is silent, and so is one that settles to anything but
+//     false or a rejection;
+//   - records every push, write or assignment to something outside the port (`pending.push(t)`, `seen.last = t`,
+//     `last = t`): a port that does that is silent whatever it answers, since it keeps the alert somewhere no one reads.
+// And a DEFAULT (`alert = <x>`, `ctx.alert ?? <x>`, `ctx.alert || <x>`), the value used when no real alert is handed
+// in, must be a plain arrow that answers false or throws: `() => false`, `(t) => { return false; }` or
+// `() => { throw new Error('no alert port'); }`, with plain names for parameters and not async. Anything else there,
+// a name included, is silent by its form, whatever the probe saw. A port written in an object (`alert: <x>`) or set
+// on one (`this.notify = notify`) is wiring, not a default, so the probe alone judges it.
 const NAME = String.raw`(?:[\w$]*[Aa]lert|notify[\w$]*|say|tellOnce|raise)`;
 const DEFAULT_AT = [
   new RegExp(String.raw`(?<!\b(?:const|let|var)\s+)(?<![\w$])${NAME}\s*(?::\s*[A-Za-z_$][\w$]*\s*)?=(?![=>])`, 'g'),
@@ -612,29 +627,109 @@ const ABSENT = /(?<![\w$])(?:alert|notify|say)\s*\?\.\s*\(/g;
 const FN_LITERAL = /^\(*\s*(?:async\s+)?(?:function\b|\([^()]*\)\s*=>|[A-Za-z_$][\w$]*\s*=>)/;
 const BUILTIN = new Set(['Boolean', 'Number', 'String', 'Object', 'Array', 'Promise', 'Error', 'TypeError', 'RangeError', 'JSON', 'Math', 'Date',
   'Symbol', 'undefined', 'NaN', 'Infinity', 'Reflect', 'Set', 'Map', 'parseInt', 'parseFloat', 'isNaN']);
-const UNKNOWN = new Proxy(function unknown() {}, {
-  get: (t, k) => (k === 'then' ? undefined : k === Symbol.toPrimitive ? () => NaN : UNKNOWN),
-  apply: () => UNKNOWN,
-  construct: () => UNKNOWN,
-});
+// What the sandbox hands back for a name it does not have: a stand-in that answers "unknown" to everything, remembers
+// the path it was reached by (`pending.push`), and logs any push, write or assignment made through it (L170).
+const MUTATORS = new Set(['push', 'unshift', 'splice', 'fill', 'copyWithin', 'sort', 'reverse', 'set', 'add', 'append', 'appendFile',
+  'appendFileSync', 'write', 'writeFile', 'writeFileSync', 'enqueue', 'put', 'assign', 'defineProperty']);
+const UNKNOWNS = new WeakSet();
+function unknownAt(path, log) {
+  const p = new Proxy(function unknown() {}, {
+    get: (t, k) => (k === 'then' ? undefined : k === Symbol.toPrimitive ? () => NaN : typeof k !== 'string' ? undefined : unknownAt(`${path}.${k}`, log)),
+    set: (t, k) => { log.push(`${path}.${String(k)} = …`); return true; },
+    defineProperty: (t, k) => { log.push(`${path}.${String(k)} = …`); return true; },
+    deleteProperty: (t, k) => { log.push(`delete ${path}.${String(k)}`); return true; },
+    apply: (t, self, args) => { if (MUTATORS.has(path.split('.').pop())) log.push(`${path}(…)`); return unknownAt(`${path}()`, log); },
+    construct: () => unknownAt(`new ${path}`, log),
+  });
+  UNKNOWNS.add(p);
+  return p;
+}
 const QUIET = Object.freeze({
   log: () => undefined,
   console: Object.freeze({ log: () => undefined, info: () => undefined, warn: () => undefined, error: () => undefined, debug: () => undefined }),
   process: Object.freeze({ stdout: Object.freeze({ write: () => true }), stderr: Object.freeze({ write: () => true }) }),
 });
-/** Calls the port written as `expr` once in a sandbox: { kind: 'value', v } | 'threw' | 'pending' | 'not a function' | 'unprobed'. */
+// The argument shapes (L170: a string, an object, none) and how many times each is called.
+export const SHAPES = Object.freeze([
+  ['a string and options', () => ['an alert', {}]],
+  ['an alert object and options', () => [{ type: 'alert', text: 'an alert', mark: 'm' }, { mark: 'm' }]],
+  ['a string alone', () => ['an alert']],
+  ['nothing', () => []],
+]);
+export const CALLS = 3;
+/**
+ * Calls the port written as `expr` CALLS times with each of SHAPES, in a fresh sandbox per shape (L170).
+ * { kind: 'not a function' } | { kind: 'unprobed', why } | { kind: 'ran', calls: [{ shape, n, kind, v? }], touched: [...] },
+ * where a call's kind is 'value', 'threw', 'pending' (a thenable not settled once the sandbox has nothing left to run),
+ * or 'resolved' / 'rejected' (a thenable that settled). `touched` is every push, write or assignment made outside.
+ */
 export function probePort(expr) {
-  const scope = new Proxy({}, {
-    has: (t, k) => typeof k === 'string' && !k.startsWith('__') && !BUILTIN.has(k),
-    get: (t, k) => (typeof k !== 'string' ? undefined : Object.hasOwn(QUIET, k) ? QUIET[k] : UNKNOWN),
-    set: () => true,
-  });
-  const ctx = vm.createContext({ __scope: scope }, { microtaskMode: 'afterEvaluate' });
-  const code = `var __r = null;\nwith (__scope) { try { const __f = (\n${expr}\n); if (typeof __f !== 'function') __r = { kind: 'not a function' }; else { const __v = __f('an alert', {});
-  if (__v && typeof __v.then === 'function') { __r = { kind: 'pending' }; __v.then((v) => { __r = { kind: 'value', v }; }, () => { __r = { kind: 'threw' }; }); } else __r = { kind: 'value', v: __v }; } }
-  catch (__e) { __r = { kind: 'threw' }; } }`;
-  try { vm.runInContext(code, ctx, { timeout: 200 }); } catch (e) { return { kind: 'unprobed', why: String(e?.message ?? e).split('\n')[0] }; }
-  return vm.runInContext('__r', ctx) ?? { kind: 'unprobed', why: 'no answer' };
+  const calls = [];
+  const touched = [];
+  for (const [shape, args] of SHAPES) {
+    const log = [];
+    const scope = new Proxy({}, {
+      has: (t, k) => typeof k === 'string' && !k.startsWith('__') && !BUILTIN.has(k),
+      get: (t, k) => (typeof k !== 'string' ? undefined : Object.hasOwn(QUIET, k) ? QUIET[k] : unknownAt(k, log)),
+      set: (t, k) => { log.push(`${String(k)} = …`); return true; },
+    });
+    const ctx = vm.createContext({ __scope: scope, __args: args(), __n: CALLS }, { microtaskMode: 'afterEvaluate' });
+    const code = `var __r = [];\nwith (__scope) { try { const __f = (\n${expr}\n); if (typeof __f !== 'function') __r = 'not a function'; else for (let __i = 0; __i < __n; __i += 1) {
+  const __c = { n: __i };
+  __r.push(__c);
+  try { const __v = __f(...__args);
+    let __then = null; try { __then = (__v !== null && (typeof __v === 'object' || typeof __v === 'function')) ? __v.then : null; } catch (__e) { __then = null; }
+    if (typeof __then === 'function') { __c.kind = 'pending'; __then.call(__v, (v) => { __c.kind = 'resolved'; __c.v = v; }, () => { __c.kind = 'rejected'; }); }
+    else { __c.kind = 'value'; __c.v = __v; } }
+  catch (__e) { if (__c.kind !== 'pending') __c.kind = 'threw'; } } }
+  catch (__e) { __r = 'threw at load'; } }`;
+    try { vm.runInContext(code, ctx, { timeout: 200 }); } catch (e) { return { kind: 'unprobed', why: String(e?.message ?? e).split('\n')[0] }; }
+    const r = vm.runInContext('__r', ctx);
+    if (r === 'not a function') return { kind: 'not a function' };
+    if (!Array.isArray(r)) return { kind: 'unprobed', why: String(r ?? 'no answer') };
+    for (const c of r) calls.push({ shape, n: c.n, kind: c.kind ?? 'unprobed', v: c.v });
+    touched.push(...log);
+  }
+  return { kind: 'ran', calls, touched: [...new Set(touched)] };
+}
+const show = (v) => (typeof v === 'string' ? `'${v}'` : typeof v === 'function' ? 'a function' : v && typeof v === 'object' ? 'an object' : String(v));
+/** Why the probe says this port is silent, or null (fine, or its answer depends on something the sandbox does not have). */
+export function probeSilent(expr) {
+  const r = probePort(expr);
+  if (r.kind === 'not a function') return null;
+  if (r.kind === 'unprobed') return FN_LITERAL.test(expr) ? `it could not be run to see what it answers (${r.why})` : null;
+  if (r.touched.length) return `it keeps the alert outside itself (${r.touched.slice(0, 2).join(', ')}), so what it answers says nothing about the alert being seen`;
+  for (const c of r.calls) {
+    const at = `called with ${c.shape} (call ${c.n + 1} of ${CALLS})`;
+    if (c.kind === 'threw' || c.kind === 'rejected') continue;
+    if (c.kind === 'pending') return `${at}, it answers a promise that never settles`;
+    if (UNKNOWNS.has(c.v)) continue;
+    if (c.v !== false) return `${at}, it answers ${c.kind === 'resolved' ? `a promise of ${show(c.v)}` : show(c.v)}, not false or a throw`;
+  }
+  return null;
+}
+// A plain refusal (L170): a non-async arrow with plain-name parameters whose body is `false`, `{ return false; }` or
+// `{ throw new <Name>Error(<a plain string, or nothing>); }`, in as many brackets as you like.
+const P_NAME = String.raw`[A-Za-z_$][\w$]*`;
+const P_PARAMS = String.raw`(?:\(\s*(?:${P_NAME}\s*(?:,\s*${P_NAME}\s*)*)?\)|${P_NAME})`;
+const P_THROW = String.raw`throw\s+new\s+(?:[A-Z][\w$]*)?Error\s*\(\s*(?:'[^'\\\n]*'|"[^"\\\n]*"|\`[^\`\\$]*\`)?\s*\)\s*;?`;
+const PLAIN_REFUSAL = new RegExp(String.raw`^${P_PARAMS}\s*=>\s*(?:false|\(\s*false\s*\)|\{\s*(?:return\s+false\s*;?|${P_THROW})\s*\})$`);
+export function isPlainRefusal(expr) {
+  let e = String(expr).trim();
+  for (;;) {
+    if (e[0] !== '(') break;
+    let depth = 0; let q = null; let close = -1;
+    for (let i = 0; i < e.length; i += 1) {
+      const c = e[i];
+      if (q) { if (c === '\\') i += 1; else if (c === q) q = null; continue; }
+      if (c === "'" || c === '"' || c === '`') q = c;
+      else if (c === '(') depth += 1;
+      else if (c === ')') { depth -= 1; if (depth === 0) { close = i; break; } }
+    }
+    if (close !== e.length - 1) break;
+    e = e.slice(1, -1).trim();
+  }
+  return PLAIN_REFUSAL.test(e);
 }
 // The expression from `at` to the first `,` `;` `)` `}` `]` outside brackets (src: the real text; m: its mask).
 function exprAt(src, m, at) {
@@ -656,26 +751,29 @@ export function silentDefaults(src) {
   const defs = new Map();
   for (const x of m.matchAll(/\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*/g)) { const e = exprAt(src, m, x.index + x[0].length); if (FN_LITERAL.test(e)) defs.set(x[1], e); }
   for (const x of m.matchAll(/\bfunction\s+([A-Za-z_$][\w$]*)\s*\(/g)) { const o = x.index + x[0].length - 1; const close = pairs(m).get(o); const b = close === undefined ? -1 : m.indexOf('{', close); const e = b < 0 ? null : pairs(m).get(b); if (e !== undefined && e !== null) defs.set(x[1], `function ${src.slice(o, e + 1)}`); }
-  const judge = (expr) => {
+  const judge = (expr, isDefault) => {
     let e = expr;
+    const plain = isPlainRefusal(expr);
     if (!FN_LITERAL.test(e)) {
       const id = /^([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)$/.exec(e)?.[1];
-      if (!id) return null;
-      if (defs.has(id)) e = defs.get(id);
-      else if (/^(?:noop|sink|ignore)$/.test(id)) return `${id} answers nothing (by its name)`;
-      else if (!BUILTIN.has(id.split('.')[0]) && !Object.hasOwn(QUIET, id.split('.')[0])) return null;
+      if (id && defs.has(id)) e = defs.get(id);
+      else if (id && /^(?:noop|sink|ignore)$/.test(id)) return `${id} answers nothing (by its name)`;
+      else if (!id || (!BUILTIN.has(id.split('.')[0]) && !Object.hasOwn(QUIET, id.split('.')[0]))) {
+        return isDefault ? `a default must be a plain arrow that answers false or throws (L170); this one is ${id ? `the name ${id}` : 'an expression'}, whose answer cannot be seen here` : null;
+      }
     }
-    const r = probePort(e);
-    if (r.kind === 'threw' || (r.kind === 'value' && r.v === false)) return null;
-    if (r.kind === 'value' && r.v === UNKNOWN) return null;
-    if (r.kind === 'pending' || r.kind === 'not a function') return null;
-    if (r.kind === 'unprobed') return FN_LITERAL.test(e) ? `it could not be run to see what it answers (${r.why})` : null;
-    return `called once with an alert, it answers ${typeof r.v === 'string' ? `'${r.v}'` : String(r.v)}, not false or a throw`;
+    const why = probeSilent(e);
+    if (why) return why;
+    if (isDefault && !plain) return `a default must be a plain arrow that answers false or throws (L170); this one is not: ${expr.replace(/\s+/g, ' ').slice(0, 60)}`;
+    return null;
   };
-  for (const re of DEFAULT_AT) {
+  for (const [i, re] of DEFAULT_AT.entries()) {
     re.lastIndex = 0;
     for (const x of m.matchAll(re)) {
-      const why = judge(exprAt(src, m, x.index + x[0].length));
+      // A member assignment (`this.notify = notify`) is wiring, like an object port; a parameter default, a bare
+      // assignment and a fallback (`ctx.alert ?? x`) are defaults.
+      const member = i === 0 && /\.\s*$/.test(m.slice(Math.max(0, x.index - 40), x.index));
+      const why = judge(exprAt(src, m, x.index + x[0].length), i < 2 && !member);
       const line = lineOf(m, x.index);
       if (why && !at.has(line)) at.set(line, why);
     }
