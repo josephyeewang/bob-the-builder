@@ -55,7 +55,11 @@ test('L112, L118 m4, c3: an update is checked where the call passes a read rev, 
   const at = (file, line) => scan.sites.find((s) => s.file === file && s.line === line);
   assert.deepEqual(at('modules/M11-dispatcher/alerts.mjs', 16).modes, ['create', 'update'], 'rec.read(...)?.rev ?? 0');
   assert.deepEqual(at('modules/M11-dispatcher/phone-link.mjs', 44).modes, ['update'], 'c.rev');
-  assert.deepEqual(at('modules/M6-merge-gate/gate.mjs', 96).modes, ['create'], '0');
+  // The gate's create, found by its text, so an edit above it does not move the check.
+  const gateSrc = SOURCES.find((f) => f.file === 'modules/M6-merge-gate/gate.mjs').src.split('\n');
+  const createLine = gateSrc.findIndex((l) => l.includes("entity: 'merge', id, expectRev: 0, doc: { state: 'requested'")) + 1;
+  assert.ok(createLine > 0, 'the gate\'s create write is found');
+  assert.deepEqual(at('modules/M6-merge-gate/gate.mjs', createLine).modes, ['create'], '0');
   // c3: gate.mjs's write() helper passes cur.rev, so it is an update, and the table says so.
   const gateHelper = scan.sites.filter((s) => s.file === 'modules/M6-merge-gate/gate.mjs' && s.via === 'write()');
   assert.ok(gateHelper.length >= 5, `${gateHelper.length} write() calls in gate.mjs`);
