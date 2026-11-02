@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { makeRecord, memoryRecord, isActor, missingFields, STATES, FINAL_STATES, WAIT_FIELDS, REQUIRED_FIELDS, ENTITIES } from './record.mjs';
+import { makeRecord, memoryRecord, outboxKind, isActor, missingFields, STATES, FINAL_STATES, WAIT_FIELDS, REQUIRED_FIELDS, ENTITIES } from './record.mjs';
 import { tempDir } from './test-tmp.mjs';
 
 test('create, read, update only if unchanged, one diary line per accepted write', () => {
@@ -131,4 +131,31 @@ test('a launch names a card and head only for a worker, reviewer or auditor', ()
   assert.deepEqual(missingFields('launch', { ...base, role: 'worker' }), ['card', 'head']);
   assert.deepEqual(missingFields('launch', { ...base }), ['role', 'card', 'head'], 'no role: fail closed');
   assert.deepEqual(missingFields('merge_request', {}), REQUIRED_FIELDS.merge_request);
+});
+
+test('L121: the stand-in refuses a file name with no outbox kind, as the real M9 does', () => {
+  const rec = memoryRecord();
+  for (const name of ['/o/notakind-C-1.md', '/o/verdict-compact\u2011S1.md', '/o/report-.md']) {
+    const r = rec.applyOutbox({ role: 'worker', sessionId: 'S-4' }, name);
+    assert.equal(r.ok, false, name);
+    assert.match(r.reason, /no outbox kind/, name);
+  }
+  assert.equal(rec.diary().length, 0);
+  assert.equal(outboxKind('report-C-1.md'), 'report-');
+  assert.equal(outboxKind('ask-request-1.md'), 'ask-request-', 'the longest kind wins');
+});
+
+test('L129: the stand-in names a document\'s first writer as its creator (meta), and only it may change a fact', () => {
+  const rec = memoryRecord();
+  assert.equal(rec.write({ actor: 'sensors', entity: 'fact', id: 'audit-run-1', expectRev: 0, doc: { type: 'x' } }).ok, true);
+  // L118 M1: another writer may not rewrite it, so createdBy stays the writer of the contents too.
+  assert.match(rec.write({ actor: 'ledger', entity: 'fact', id: 'audit-run-1', expectRev: 1, doc: { type: 'y' } }).reason, /may change/);
+  assert.equal(rec.write({ actor: 'sensors', entity: 'fact', id: 'audit-run-1', expectRev: 1, doc: { type: 'y' } }).ok, true);
+  assert.equal(rec.meta('fact', 'audit-run-1').createdBy, 'sensors');
+  assert.equal(rec.meta('fact', 'audit-run-2'), null);
+});
+
+test('L129: a name with a dot in its id has no outbox kind', () => {
+  assert.equal(outboxKind('report-X.1.md'), null);
+  assert.equal(outboxKind('report-X1.md'), 'report-');
 });

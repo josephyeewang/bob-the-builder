@@ -39,12 +39,16 @@ export const OUTBOX_KINDS = Object.freeze(Object.fromEntries(Object.entries({
 export const OUTBOX_KIND_PATTERN = KIND_SHAPE;
 // A session id: capped so an id made from it stays a legal file name (0b-2 audit round 6). record.mjs re-exports it.
 export const SESSION_ID = /^[A-Za-z0-9-]{1,128}$/;
-// The longest listed kind a file name starts with (so `report-compact-x` is report-compact-, not report-), or null;
-// a compaction note (`-compact` in its name, in any case: the reserved form, M4 outbox-kind.mjs, L121) is only ever a
-// `-compact-` kind (L101). M9's outbox, the test stand-in,
-// M4's intake read and M11's intake read a file's kind with this one function; the plain-files hook uses the same
-// rule (kindAmong) on the kinds the launcher hands it.
-export const outboxKindOf = (name) => kindAmong(name, Object.keys(OUTBOX_KINDS));
+// The one outbox file name rule: `<kind>-<id>.(md|json|txt)`, ASCII letters, digits and dashes only. The write hook
+// and the M4 intake check names with the same pattern (they keep their own copies for now, L121), and M9 applies it
+// before it takes a kind from a name, so a name the hook refuses (a U+2011 dash, a dot in the id) has no kind anywhere.
+export const OUTBOX_NAME = /^([a-z]+)-[A-Za-z0-9-]+\.(md|json|txt)$/;
+// The longest listed kind a good file name starts with (so `report-compact-x.md` is report-compact-, not report-), or
+// null; a compaction note (`-compact` in its name, in any case: the reserved form, M4 outbox-kind.mjs, L121) is only
+// ever a `-compact-` kind (L101). A name that fails OUTBOX_NAME has no kind. M9's outbox, the test stand-in, M4's
+// intake read and M11's intake read a file's kind with this one function; the plain-files hook uses the same rule
+// (kindAmong) on the kinds the launcher hands it.
+export const outboxKindOf = (name) => (typeof name === 'string' && OUTBOX_NAME.test(name) ? kindAmong(name, Object.keys(OUTBOX_KINDS)) : null);
 
 // Card kinds (0b-2 R3-M3). Set once, at create, by the creator M9's permissions name. `exact_reverse` is the undo card.
 export const CARD_KINDS = Object.freeze(['ordinary', 'fix', 'exact_reverse', 'lead_daily_card', 'research_copy']);

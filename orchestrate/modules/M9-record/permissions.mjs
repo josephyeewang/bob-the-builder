@@ -143,15 +143,19 @@ export const WRITERS = Object.freeze({
   verdict: Object.freeze({ reviewer: createOnly(), auditor: createOnly() }),
   session: Object.freeze({ dispatcher: ANY, workshop: Object.freeze({ update: '*' }) }),
   merge: Object.freeze({ merge_gate: ANY }),
+  // The real-code check is modules/M9-record/write-sites.test.mjs: every write site in a module must have its row here,
+  // and every row here is used by a write site or says why not (L112).
   // Each under its own families (FACT_FAMILIES), changing only facts it created (L74). The workshop is worker-side:
   // nothing that gates takes a workshop fact as proof (factFrom names the one role a proof must come from).
   fact: Object.freeze({ sensors: OWN_FACTS, ledger: OWN_FACTS, workshop: OWN_FACTS, dispatcher: OWN_FACTS, merge_gate: OWN_FACTS, live_check: OWN_FACTS }),
   product: Object.freeze({ approvals: ANY }),
   handoff: Object.freeze({ lead: createOnly(), learning: createOnly() }),
-  report: Object.freeze({ ledger: createOnly(), ...Object.fromEntries(reportRoles.map((r) => [r, createOnly()])) }),
+  report: Object.freeze({ ...Object.fromEntries(reportRoles.map((r) => [r, createOnly()])) }),
   // learning is Phase 1 (0b-1 MAT-11): listed so its row exists, but no learning session starts in 0b.
-  lesson: Object.freeze({ dispatcher: createOnly(), learning: ANY }),
+  lesson: Object.freeze({ learning: ANY }),
   launch: Object.freeze({ dispatcher: createOnly() }),
+  // Create-only (L118 M2): a request asked again gets its own id (lane 2, mr-<card>-<head12>-r<n>), so no one rewrites one
+  // the Merge Gate may already be reading.
   merge_request: Object.freeze({ dispatcher: createOnly() }),
 });
 
