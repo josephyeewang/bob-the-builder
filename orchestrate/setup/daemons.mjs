@@ -57,7 +57,7 @@ const failText = (r) => (r.stderr.trim() || r.stdout.trim()).slice(0, 200);
 export function jobState(io, cfg, job) {
   const r = launchctl(io, ['print', `system/${labelOf(cfg, job)}`]);
   if (r.status !== 0) return { loaded: false, error: r.status === 113 ? null : failText(r) };
-  return { loaded: true, state: /^\s*state = (.+)$/m.exec(r.stdout)?.[1]?.trim() ?? 'unknown', lastExit: /^\s*last exit code = (.+)$/m.exec(r.stdout)?.[1]?.trim() ?? 'unknown' };
+  return { loaded: true, pid: Number(/^\s*pid = (\d+)$/m.exec(r.stdout)?.[1]) || null, state: /^\s*state = (.+)$/m.exec(r.stdout)?.[1]?.trim() ?? 'unknown', lastExit: /^\s*last exit code = (.+)$/m.exec(r.stdout)?.[1]?.trim() ?? 'unknown' };
 }
 
 export function planPlace(io, cfg, jobs = JOBS) {
@@ -153,8 +153,16 @@ export function list(io, cfg) {
 }
 
 /** Read only → [{ ok, what, why? }]. */
+const NEVER = '(never exited)';
+export const FIRST_RUN_LIMIT_S = 30 * 60;
+/** Seconds the process has been running (`ps -o etime=`: [[dd-]hh:]mm:ss), or null if it cannot be read. */
+function runningSeconds(io, pid) {
+  const r = io.run('/bin/ps', ['-o', 'etime=', '-p', String(pid)]);
+  const m = r.status === 0 ? /^\s*(?:(?:(\d+)-)?(\d+):)?(\d+):(\d+)\s*$/.exec(r.stdout) : null;
+  return m ? ((Number(m[1] ?? 0) * 24 + Number(m[2] ?? 0)) * 60 + Number(m[3])) * 60 + Number(m[4]) : null;
+}
 export function checkDaemons(io, cfg) {
-  const out = []; const item = (ok, what, why) => out.push({ ok, what, ...(ok ? {} : { why }) });
+  const out = []; const item = (ok, what, why, skip = false) => { if (!skip) out.push({ ok, what, ...(ok ? {} : { why }) }); };
   const { plists, problems } = plistTexts(io, cfg);
   if (problems.length) { item(false, 'the job files can be built', problems[0]); return out; }
   // A job file under another label is a second copy of a job that launchd may be running too (a changed label leaves the old one behind).
@@ -180,7 +188,13 @@ export function checkDaemons(io, cfg) {
     if (!s.loaded) continue;
     const text = fileText(io, cfg, job);
     item(text !== null && rec[label] === sha(text), `${label} was loaded from the job file as it is now`, 'it runs an older definition than the file on disk (or was not loaded by this tool); run daemons load, which reloads it');
-    item(/^(0|\(never exited\))$/.test(s.lastExit), `${label}'s last run ended well (exit 0, or it has not run yet)`, `last exit code ${s.lastExit}; look in ${installPaths(cfg).logDir}`);
+    item(s.lastExit === '0', `${label}'s last run ended well (exit 0)`, s.lastExit === NEVER ? undefined : `last exit code ${s.lastExit}; look in ${installPaths(cfg).logDir}`, s.lastExit === NEVER);
+    if (s.lastExit === NEVER) {
+      // It has not finished a run yet. Every job starts at load and then runs on a timer, so this is fine only while its first run is young.
+      const age = s.pid ? runningSeconds(io, s.pid) : null;
+      item(age !== null && age <= FIRST_RUN_LIMIT_S, `${label} is on its first run, and not for long (at most ${FIRST_RUN_LIMIT_S / 60} minutes)`,
+        age === null ? `it is loaded but has no running process and has never finished a run; look in ${installPaths(cfg).logDir}` : `its first run has been going for ${Math.round(age / 60)} minutes and has not ended; look in ${installPaths(cfg).logDir}`);
+    }
   }
   return out;
 }

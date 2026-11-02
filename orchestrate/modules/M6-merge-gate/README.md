@@ -26,6 +26,7 @@ See LANES.md for who builds this folder, and the build rows (0b-9, R-0b-86..99) 
 ## The rules in one place
 
 - **One merge at a time.** A merge moves `requested → queued → (catching_up) → checking → merging → merged`, and after the audit `audited_ok` or `audit_flagged`. Only one merge is ever in `checking` or `merging`.
+- **A merge the gate could not finish** (`merge-outcome.mjs`, L74 b3, L85 M-1). The Dispatcher keeps the timing and calls `settleMerge`; only the gate writes the outcome. An interrupted merge is settled only on GitHub's final answer: merged, or closed and not merged. A PR still open is waited on until `timeouts.merging_open_max_min` after the merging write, then refused as interrupted and Joe is told. If GitHub later shows that merge merged at the judged head with a merge commit, `reconcileMerge` records it merged and its card merged (`refused → merged`, the one move out of a refused merge; the Record checks the Sensors `pr-` reading again), so the post-merge audit and Undo work as for any merge. Merged at another head: it stays refused and Joe is told once.
 - **The judged head is the merged head.** The merge call names the head that was judged; if the branch moved, GitHub refuses and the merge is refused.
 - **First cutover:** the docs lane only (M10 decides by path, including file modes, so a link file is out). An undo merges at first cutover only if it reverses a merge the gate itself made. The daily card does not merge through the gate yet.
 - **An undo** (an exact-reverse card) goes first in the queue and needs no review, request or Approve, but only when M10 recomputes the change as the exact reverse of the commit its source names. Anything else is refused (9).
@@ -67,5 +68,19 @@ See LANES.md for who builds this folder, and the build rows (0b-9, R-0b-86..99) 
 - Create the robot (GitHub App), install it, and put its key in the orchestrate key folder (set up with `/apikeys`; the key is never read by a session).
 - Put the robot's numeric bot id in the rules (`product_profile.robot.bot_user_id`).
 - Name the required checks in the rules (`product_profile.required_checks`); with none, every change is refused (1, 2).
-- Allow undo cards without a go (`approvals.plan_go.go_free: [exact_reverse]`); without it every undo is refused (10).
+- Allow undo cards without a go, in the map form (block lines: the rules reader refuses `{…}`). The list form
+  `[exact_reverse]` gives no go-free kinds at all (#79), so the gate refuses every undo and the first-cutover fit check
+  refuses the file. Without `exact_reverse: true` every undo is refused (10).
+
+  ```yaml
+  approvals:
+    plan_go:
+      go_free:
+        exact_reverse: true
+        lead_daily_card: []
+  ```
+
+  At the first cutover the Lead is not on the product, so `lead_daily_card` is `[]` (L96), and the fit check refuses
+  any other list until the Dispatcher reads it with the rules' own path language (L120). `[]` is not go-free (L115 M-C):
+  goFreeKinds counts `lead_daily_card` only when it names at least one path.
 - Set M2's `approvals.push_windows` and `approvals.decisions_dir`; no Approve stands without them.

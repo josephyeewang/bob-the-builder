@@ -55,7 +55,7 @@ test('PLANT NEW-1 group-writable config → refused, zero steps (caught by: the 
 test('PLANT NEW-1 config in a folder others can write → refused (caught by: the folder chain check)', () => {
   const mac = fakeMac(); putConfig(mac); chmodSync(mac.at('/Library'), 0o777);
   const r = go(mac, ['users-folders']);
-  assert.equal(r.code, 2, r.text); assert.match(r.text, /folder the config is in is not root's alone/); noRootStep(mac);
+  assert.equal(r.code, 2, r.text); assert.match(r.text, /folder root's setup config is in is not root's alone/); noRootStep(mac);
 });
 
 test('PLANT NEW-1 no config at the fixed place → refused with a plain reason; a config in a home folder is never read as root', () => {

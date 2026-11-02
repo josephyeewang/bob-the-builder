@@ -4,7 +4,7 @@
 // PLANT tests break one clause each and name the check that catches it. The last tests run read-only tools on this Mac.
 
 import assert from 'node:assert/strict';
-import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -55,7 +55,7 @@ async function origin(root) {
 /** The throwaway Mac with the users and folders already set up (part 1), and the files the install needs. */
 async function world({ euid = 0 } = {}) {
   const mac = fakeMac({ euid: 0 });
-  const ext = tempDir('orch-setup-ext-');
+  const ext = realpathSync(tempDir('orch-setup-ext-'));
   const bare = await origin(ext);
   // The runner's config, as the lead's wiring would hand it over, and the three things it names.
   writeFileSync(join(ext, 'claude-bin'), '#!/bin/sh\n'); chmodSync(join(ext, 'claude-bin'), 0o755);
@@ -661,7 +661,7 @@ test('L149 m1 root reads the runner config through one handle: a link, a file ot
   const real = join(w.ext, 'review.json'); const hidden = join(w.ext, 'hidden.json');
   writeFileSync(hidden, `${NOT_A_SECRET} not json`); symlinkSync(hidden, join(w.ext, 'link.json'));
   w.raw.runnerConfig = join(w.ext, 'link.json');
-  let r = w.run(['install']); assert.equal(r.code, 1, r.text); assert.match(r.text, /is a link, and a link is not followed/); assert.doesNotMatch(r.text, /zz-not/);
+  let r = w.run(['install']); assert.equal(r.code, 1, r.text); assert.match(r.text, /the runner config is a link, and a link is not followed/); assert.doesNotMatch(r.text, /zz-not/);
   w.raw.runnerConfig = hidden;
   r = w.run(['install']); assert.equal(r.code, 1, r.text); assert.match(r.text, /is not valid JSON/); assert.doesNotMatch(r.text, /zz-not/);
   w.raw.runnerConfig = real; chmodSync(real, 0o666);
@@ -708,6 +708,13 @@ test('L149 m3 m2 m7 daemons check FAILS on a leftover job under another label, a
   w.mac.loaded.get(`${LABEL}.review-runner`).lastExit = '78';
   r = w.run(['daemons', 'check']); assert.equal(r.code, 1, r.text); assert.match(r.text, new RegExp(`FAIL  ${LABEL}.review-runner's last run ended well .*last exit code 78`));
   w.mac.loaded.get(`${LABEL}.review-runner`).lastExit = '0'; assert.equal(w.run(['daemons', 'check']).code, 0);
+  // (d) L160 m1: "never exited" passes only while the first run is young; a job stuck on its first run, or loaded with no process, FAILs
+  const rj = w.mac.loaded.get(`${LABEL}.review-runner`); delete rj.lastExit;
+  rj.ageS = 29 * 60; assert.equal(w.run(['daemons', 'check']).code, 0, 'young first run passes');
+  rj.ageS = 3 * 3600 + 5 * 60; r = w.run(['daemons', 'check']); assert.equal(r.code, 1, r.text); assert.match(r.text, new RegExp(`FAIL  ${LABEL}.review-runner is on its first run.*has been going for 185 minutes`));
+  rj.ageS = 2 * 86400; assert.equal(w.run(['daemons', 'check']).code, 1, 'days (dd-hh:mm:ss) counts');
+  const pid = rj.pid; delete rj.pid; r = w.run(['daemons', 'check']); assert.equal(r.code, 1, r.text); assert.match(r.text, /no running process and has never finished a run/);
+  rj.pid = pid; rj.ageS = 5; rj.lastExit = '0'; assert.equal(w.run(['daemons', 'check']).code, 0);
   // unload forgets the fingerprints: a job loaded again is recorded again
   assert.equal(w.run(['daemons', 'unload']).code, 0); assert.deepEqual(JSON.parse(readFileSync(w.mac.at(`${BASE}/install/loaded-jobs.json`), 'utf8')), {});
 });
@@ -781,4 +788,38 @@ test('L150 m2 a load that says yes but leaves nothing loaded is a failure: load 
 
 test('L150 m2 reload-account on a fresh Mini (never loaded, nothing recorded) is still a plain no-op', async () => {
   const w = await placed(); const r = w.run(['daemons', 'reload-account']); assert.equal(r.code, 0, r.text); assert.match(r.text, /nothing to do/);
+});
+
+test('L160 m6 a nodeBin that is a link (even to a root-safe node) is refused at plan time: the copy would be made from the name, not the checked file', async () => {
+  const w = await world(); const before = w.mac.log.length;
+  const link = join(w.ext, 'node-link'); symlinkSync(join(w.ext, 'node'), link); w.raw.nodeBin = link;
+  const r = w.run(['install']); assert.equal(r.code, 1, r.text); assert.match(r.text, /nodeBin .*is not the program's own real place.*name .* itself/);
+  assertNoStep(w, before, 'install'); assert.equal(w.updaterRuns.length, 0);
+  w.raw.nodeBin = join(w.ext, 'node'); assert.equal(w.run(['install']).code, 0);   // the real file itself is fine
+});
+
+test('L160 m4 the runner config is read ONCE: the copy root installs is the text that was checked, never a second read of the path', async () => {
+  const w = await world(); const orig = w.mac.readSource; const reads = [];
+  w.mac.readSource = (p) => { reads.push(p); return orig(p); };
+  const checked = readFileSync(w.raw.runnerConfig, 'utf8');
+  const r = w.run(['install']); assert.equal(r.code, 0, r.text);
+  assert.deepEqual(reads, [w.raw.runnerConfig]);
+  assert.equal(readFileSync(w.mac.at(`${BASE}/install/orchestrate/review.json`), 'utf8'), checked);
+});
+
+test('L160 m5 the install dry run WARNS that root takes the runner config only if it is root\'s own, unwritable by others, in root-only folders; a real run and a no-op dry run do not', async () => {
+  const w = await world();
+  const r = w.run(['install', '--dry-run']); assert.equal(r.code, 0, r.text);
+  assert.match(r.text, /WARNING  root will refuse .*review\.json unless it is root's own file.*sudo install -o root -g wheel -m 0644 \/dev\/stdin/);
+  const real = w.run(['install']); assert.equal(real.code, 0, real.text); assert.doesNotMatch(real.text, /WARNING/);
+  const again = w.run(['install', '--dry-run']); assert.doesNotMatch(again.text, /WARNING/);   // nothing left to do: nothing to warn about
+});
+
+test('L160 c3 the REAL readers name which config they refuse: the runner config (readSource) and the setup config (readConfig)', () => {
+  const d = realpathSync(tempDir('orch-c3-')); const io = realIo();
+  writeFileSync(join(d, 'real.json'), '{}'); symlinkSync(join(d, 'real.json'), join(d, 'link.json'));
+  assert.throws(() => io.readSource(join(d, 'link.json')), /^Error: the runner config is a link/);
+  assert.throws(() => io.readSource(join(d, 'none.json')), /^Error: the runner config file was not found/);
+  assert.throws(() => io.readConfig(join(d, 'link.json')), /^Error: the setup config is a link/);
+  assert.throws(() => io.readConfig(join(d, 'none.json')), /^Error: the setup config file was not found/);
 });

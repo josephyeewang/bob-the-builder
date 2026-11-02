@@ -8,7 +8,9 @@
 //                  exact reverse of a merge in the record (L40).
 //   1. outage    — first, so a pass during an outage starts nothing and restarts nothing (R-0b-56).
 //                  Outside an outage its answer is acted on here: a dead session's card that is safe to
-//                  re-run goes back to `ready` (the starts below pick it up); any other waits on Joe.
+//                  re-run has its claim broken by the Record (breakIfDead: back to `ready`, the starts below
+//                  pick it up); any other waits on Joe. Then the Record lapses claims whose session never
+//                  started (lapseClaims, claims.unlaunched_min), once that session id is stopped (L72).
 //   2. intake    — outbox files, so the record is current before anything is decided on it (R-0b-56, 58).
 //   3. leads     — the Lead restart from its handoff (R-0b-63), after the intake applied the handoff.
 //   4. pass      — resumes and starts (R-0b-55, 59, 64, 67), on the stops step's bands and sessions.
@@ -30,7 +32,8 @@
 // The signed-in account comes from the record fact `signed-in-account` { account, observed_at }
 // (Sensors, lane 3). Missing, or older than usage.stale_after_min, means nothing new starts.
 
-import { KEYS, minutes } from './keys.mjs';
+import { KEYS, minutes, need, MissingKey, missingFor } from './keys.mjs';
+import { sensorsFact } from './sensor-facts.mjs';
 import { outageStep, OUTAGE_FACT } from './outage.mjs';
 import { intakePass } from './outbox-intake.mjs';
 import { leadRestartStep, leadInFlight, handoffVet } from './lead-restart.mjs';
@@ -41,11 +44,12 @@ import { timeLimits, requestMerges } from './merges.mjs';
 import { undoStep } from './undo.mjs';
 import { phoneLinkStep } from './phone-link.mjs';
 import { cleanupPass } from './cleanup.mjs';
-import { move, waitOn, note } from './moves.mjs';
+import { move, note } from './moves.mjs';
+import { waitOnJoe, retellWaits } from './joe-waits.mjs';
 import { outbox, tellThen, sendAlerts, dropCause } from './alerts.mjs';
 import { takePassLock } from './pass-lock.mjs';
 
-export const STEPS = Object.freeze(['stops', 'undo', 'undo-starts', 'outage', 'intake', 'leads', 'pass', 'limits', 'merges', 'phone', 'cleanup']);
+export const STEPS = Object.freeze(['stops', 'undo', 'undo-starts', 'outage', 'intake', 'leads', 'pass', 'limits', 'merges', 'waits', 'phone', 'cleanup']);
 export const ACCOUNT_FACT = 'signed-in-account';
 export const LAST_PASS_FACT = 'last-full-pass';
 export const STEP_ERROR_FACT = (step) => `step-error-${step}`;
@@ -55,7 +59,7 @@ const putFact = (rec, id, doc, kind) => rec.write({ actor: 'dispatcher', entity:
 
 /** The signed-in account, or a reason nothing may start (audit MIN-9). */
 export function signedInAccount({ rec, rules, now }) {
-  const d = rec.read('fact', ACCOUNT_FACT)?.doc;
+  const d = sensorsFact(rec, ACCOUNT_FACT)?.doc;
   if (!d?.account || typeof d.account !== 'string') return { account: null, reason: 'the signed-in account is not known' };
   let staleMs;
   try { staleMs = minutes(rules, KEYS.staleAfterMin); } catch { return { account: null, reason: `the rules have no value for ${KEYS.staleAfterMin}`, missing: KEYS.staleAfterMin }; }
@@ -65,27 +69,40 @@ export function signedInAccount({ rec, rules, now }) {
 }
 
 /**
- * Acts on the outage step's answer (M10): safe cards go back to ready; any other card waits on Joe. Each card
- * moved gets its own alert (L43(a), L38: no silent move); a card that already moved on is left alone, with no alert.
+ * Acts on the outage step's answer (M10): a safe card's claim is broken by the Record, which itself checks the owner is
+ * provably dead (breakIfDead: pid and pid_start, the session, no recent activity; L72), and goes back to ready; any
+ * other card waits on Joe. Each card moved gets its own alert (L43(a), L38: no silent move); a card that already moved
+ * on is left alone, with no alert. A break the Record refuses is listed with its reason, never forced.
  */
-export function actOnDead({ rec, now, restart, asks, cards = {}, alert = () => {} }) {
+export function actOnDead({ rec, rules, now, restart, asks, cards = {}, alert = () => {}, missing = [] }) {
   const done = [];
   for (const sid of restart) {
     const cardId = cards[sid];
     const cur = cardId ? rec.read('card', cardId) : null;
     if (!cur || !['running', 'claimed'].includes(cur.doc.state)) continue;
-    if (move(rec, 'card', cardId, { state: 'ready', session: null, restarted_from: sid }, { now, kind: 'dead_restart' }).ok) {
-      done.push([cardId, 'ready again']);
-      alert(`card ${cardId}: its session ${sid} stopped; the card is marked safe to re-run, so it is back in the queue`);
+    // No claim is broken without claims.stuck_min (M9 refuses too). It is a per-product key, read for the card's own
+    // product (L110 m-2); the missing value is told with the others.
+    try { need(rules, KEYS.claimsStuckMin, { product: cur.doc.product }); } catch (e) {
+      if (!(e instanceof MissingKey)) throw e;
+      const what = missingFor(e.key, cur.doc.product);
+      if (!missing.includes(what)) missing.push(what);
+      done.push([cardId, `not restarted: the rules have no ${e.key} for ${cur.doc.product ?? 'its product'}`]);
+      continue;
     }
+    const broke = rec.breakIfDead({ card: cardId });
+    if (broke.ok) {
+      done.push([cardId, 'ready again']);
+      // A notice only: the card is back in the queue whatever the answer; a lost one is in the diary (L130 m1).
+      if (alert(`card ${cardId}: its session ${sid} stopped; the card is marked safe to re-run, so it is back in the queue`) === false) done.push([cardId, 'not told: the alert could not be queued']);
+    } else done.push([cardId, `not restarted: ${broke.reason}`]);
   }
   for (const cardId of asks) {
     const cur = rec.read('card', cardId);
     if (!cur || !['running', 'claimed'].includes(cur.doc.state)) continue;
-    if (waitOn(rec, cardId, { who: 'joe', what: 'dead_session: its session stopped and the card is not marked safe to re-run', now, link: `card ${cardId}`, kind: 'dead_ask' }).ok) {
-      done.push([cardId, 'waiting on Joe']);
-      alert(`card ${cardId}: its session stopped and the card is not marked safe to re-run, so it waits on you`);
-    }
+    // Told until delivered (L130 M1): waitOnJoe records the tell, and retellWaits asks again while it is not delivered.
+    const w = waitOnJoe(rec, cardId, { what: 'dead_session: its session stopped and the card is not marked safe to re-run', now, link: `card ${cardId}`, kind: 'dead_ask',
+      alert, text: `card ${cardId}: its session stopped and the card is not marked safe to re-run, so it waits on you` });
+    if (w.ok) done.push([cardId, 'waiting on Joe']);
   }
   return done;
 }
@@ -160,7 +177,11 @@ export async function tick({ rec, rules, now, ports: p }) {
     const board = p.board();
     const o = outageStep({ rec, rules, board, now, healthy: p.healthy(), resume: p.resume?.() ?? false, alert });
     outageOpen = o.outage;
-    return { ...o, acted: o.outage ? [] : actOnDead({ rec, now, restart: o.restart, asks: o.asks, cards: o.cards, alert }) };
+    const acted = o.outage ? [] : actOnDead({ rec, rules, now, restart: o.restart, asks: o.asks, cards: o.cards, alert, missing });
+    // A claim whose session never started lapses (the Record stops that session id first; L72). Not in an outage.
+    const lapse = o.outage ? null : rec.lapseClaims(now, { stopSession: p.stopSession });
+    if (lapse && !lapse.ok) throw new Error(`claims could not be lapsed: ${lapse.reason}`);
+    return { ...o, acted, lapsed: lapse?.lapsed ?? [] };
   });
   // A Lead's read-only helper goes through the one start gate (audit 0b-6 r2 MAT-2): the red band, the
   // read-only cap per Lead and an outage hold it here, whatever the wiring port does.
@@ -197,9 +218,11 @@ export async function tick({ rec, rules, now, ports: p }) {
   // The time limits themselves still run.
   const held = { band: 'unknown', own_building: 'unknown', pace: null, prodBlocked: true, reason: 'the main pass did not finish' };
   const startsHeld = outageOpen ? 'outage' : bands ? null : 'the main pass did not finish';
-  await run('limits', () => timeLimits({ rec, rules, now, b: bands ?? held, running, hasSession: p.hasSession, gateAlive: p.gateAlive,
+  await run('limits', () => timeLimits({ rec, rules, now, b: bands ?? held, running, gateAlive: p.gateAlive,
     hasReviewer: p.hasReviewer, requestReview: p.requestReview, reviewAlerts: p.reviewAlerts, alert, startsHeld, missing }));
-  await run('merges', () => requestMerges({ rec, rules, now, b: bands ?? held, running, startsHeld, missing }));
+  await run('merges', () => requestMerges({ rec, rules, now, b: bands ?? held, running, startsHeld, missing, alert }));
+  // A card put on Joe whose alert was not delivered is told again (L130).
+  await run('waits', () => retellWaits({ rec, alert }));
   // A step that failed did not report what it lacked, so nothing already told is dropped this tick.
   const complete = ['stops', 'undo-starts', 'pass', 'limits', 'merges'].every((s) => res[s]?.ok);
   try { await rulesMissingAlert({ rec, keys: missing, alert, now, complete }); } catch (e) { alert(`the Dispatcher could not record missing rules values: ${e?.message ?? e}`); }
