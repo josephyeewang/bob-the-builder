@@ -20,7 +20,7 @@ async function race({ testNoLock = false, testNoRevCheck = false } = {}) {
   const go = join(env.base, 'go');
   const kids = Array.from({ length: RACERS }, (_, i) => {
     const w = { actor: 'dispatcher', entity: 'card', id: 'C-1', expectRev: cur.rev,
-      doc: { ...cur.doc, state: 'claimed', claim: { kind: 'session', host: 'mac-a', pid: 1000 + i, pid_start: 'x', session_id: `S-${i}` } } };
+      doc: { ...cur.doc, state: 'claimed', claim: { kind: 'session', host: 'mac-a', session_id: `S-${i}` } } };
     const c = spawn(process.execPath, [CHILD, JSON.stringify({ op: 'race', root: env.root, go, w, testNoLock, testNoRevCheck, now: env.clock.t })], { stdio: ['ignore', 'pipe', 'pipe'] });
     let out = '';
     c.stdout.on('data', (d) => { out += d; });

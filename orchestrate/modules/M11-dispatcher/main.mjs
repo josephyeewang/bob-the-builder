@@ -79,7 +79,8 @@ export async function main(argv, { now = Date.now(), log = (s) => process.stderr
     log(`dispatcher: the pass did not finish within ${limit} ms; exiting so the next start can run`);
     // Joe is told too (L38), once a day: a stuck pass holds everything after the step it is stuck in.
     // Queued, then sent with one send's time: a pass that is late every time never reaches its own sender.
-    try { holdAlert({ rec: wired.rec, cause: 'run-late', text: `a Dispatcher pass did not finish within ${limit} ms and was stopped; the next pass starts in a minute`, alert: outbox(wired.rec, now), now }); await sendAlerts(wired.rec, wired.ports.alert, now, { budgetMs: ALERT_SEND_MS }); }
+    // A refused alert is logged (L130 m12): the late pass is otherwise silent.
+    try { if (holdAlert({ rec: wired.rec, cause: 'run-late', text: `a Dispatcher pass did not finish within ${limit} ms and was stopped; the next pass starts in a minute`, alert: outbox(wired.rec, now), now }) === false) log('dispatcher: the late-pass alert could not be queued'); await sendAlerts(wired.rec, wired.ports.alert, now, { budgetMs: ALERT_SEND_MS }); }
     catch (e) { log(`dispatcher: the late pass could not be told: ${e?.message ?? e}`); }
     return 2;
   }

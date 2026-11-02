@@ -26,6 +26,8 @@ export const OPTIONAL_KEYS = Object.freeze([
   'product_profile.checks_ignored',       // missing ignores none
   'effect_paths',                         // first_customer_visible.new_files_under; missing makes that fact unknown
   'rules.adopted',                        // the engine's own answer, not a key in the file
+  'timeouts.merging_open_max_min',        // missing: an open merge is never refused as interrupted, and the owner is
+                                          // told once per merge that the limit is missing (gate.mjs, L148 item 5)
 ]);
 
 export function policyProblems(rules, product) {
