@@ -241,7 +241,7 @@ export function createPushScript(deps) {
       if (p.code !== 0) no('GitHub refused the push');
       const card_doc = record.read('card', card)?.doc ?? {};
       let pr;
-      try { pr = await pullRequests.upsert({ repo, branch, base, title: String(card_doc.title ?? card), body: String(card_doc.summary ?? ''), token }); } catch { pr = null; }
+      try { pr = await pullRequests.upsert({ repo, branch, base, title: String(card_doc.what ?? card), body: String(card_doc.summary ?? ''), token }); } catch { pr = null; }
       await gitOk(['update-ref', `refs/heads/${branch}`, tip], { gitDir: mirror, purpose: 'push-mirror-branch' });
       return { ok: true, product, card, branch, tip, commits: shas.length, pr: pr ?? null, binaries: scan.binaries };
     } finally {

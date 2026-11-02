@@ -1,7 +1,8 @@
 // Usage bands (R-0b-67; design v4 §5.4, rail A8, G3; review 0b-6 M1–M5, M8, M23, m14, m17; lead L13, L14).
 //
-// Reads the record fact `usage-<account>` that Sensors writes (lane 3, the M5 contract):
-//   { account, h5: { used_pct, resets_at }, week: { used_pct, resets_at }, observed_at, source }
+// Reads the record fact `usage-<account>` that the Sensors (M12) write, through sensorsFact (only a reading Sensors
+// made counts). The fields read are READ_FACTS' (read-facts.mjs, L89):
+//   { account, h5: { used_pct, resets_at }, week: { used_pct, resets_at }, observed_at }
 // and turns it into two separate values (M3): `band` (green | amber | red | unknown), which Joe's own
 // tabs read, and `own_building` (open | amber | full | unknown), which gates only the work the
 // Dispatcher itself starts. Writing red into `band` at the reserve line would stop Joe's tabs too.
@@ -12,13 +13,14 @@
 // starts and Tier-1 production merge requests (L14).
 
 import { KEYS, need, minutes } from './keys.mjs';
+import { sensorsFact } from './sensor-facts.mjs';
 
 const WEEK_MS = 7 * 24 * 60 * 60_000;
 const H5_MS = 5 * 60 * 60_000;
 
 export const BANDS = Object.freeze(['green', 'amber', 'red', 'unknown']);
 export const USAGE_FACT = (account) => `usage-${account}`;
-export const BAND_FACT = 'usage-band';
+export const BAND_FACT = 'band-usage';
 
 const pct = (x) => typeof x === 'number' && Number.isFinite(x) && x >= 0 && x <= 100;
 const time = (s) => (typeof s === 'string' && /^\d{4}-\d\d-\d\dT/.test(s) ? Date.parse(s) : NaN);
@@ -86,7 +88,7 @@ export function bands({ rules, reading, now }) {
 /** Reads the fact and works out the bands. */
 export function currentBands({ rec, rules, account, now }) {
   const staleMs = minutes(rules, KEYS.staleAfterMin);
-  const reading = readFact(account ? rec.read('fact', USAGE_FACT(account)) : null, { account, now, staleMs });
+  const reading = readFact(account ? sensorsFact(rec, USAGE_FACT(account)) : null, { account, now, staleMs });
   return bands({ rules, reading, now });
 }
 
@@ -122,7 +124,7 @@ export function mayStart({ b, kind, tier, risky = [], repair = false, redRuns })
   return kind === 'script' || kind === 'overnight' ? { ok: true } : { ok: false, reason: `unknown kind ${kind}` };
 }
 
-/** Writes the `usage-band` fact when the band or own-building value changed; keeps unknown_since. */
+/** Writes the `band-usage` fact when the band or own-building value changed; keeps unknown_since. */
 export function recordBands({ rec, b, now, account }) {
   const cur = rec.read('fact', BAND_FACT);
   const prev = cur?.doc;
