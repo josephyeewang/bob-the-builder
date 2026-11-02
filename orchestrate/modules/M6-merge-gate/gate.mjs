@@ -456,7 +456,9 @@ export async function gatePass(ctx) {
     }
     const reading = prReading(pr);
     const final = reading.merged || reading.state === 'closed';
-    const limit = mergingLimit(m);
+    // A pull request GitHub shows merged or closed is settled whatever the rules say: the limit is asked only while it is
+    // open, so rules that can't answer never keep a final merge, and the gate behind it, waiting (L188 m6).
+    const limit = final ? null : mergingLimit(m);
     if (limit === undefined) return;
     const tooLong = !final && openTooLong(record, m.id, now, limit);
     if (!final && !tooLong) {

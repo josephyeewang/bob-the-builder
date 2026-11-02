@@ -1494,6 +1494,75 @@ for (const [site, make, note] of [
   }
 }
 
+// L188 m1: pass 3b re-tells a lost refusal even while another merge sits stuck in merging (3b runs before the busy return).
+test('L188 m1: a lost merge_refused alert is told again next pass while another merge is stuck in merging', async () => {
+  const w = world();
+  const tries = flakyAlert(w, 'merge_refused', 'false', 1);
+  redCheck(w, verifiedCard(w));
+  tick(w, 1);
+  verifiedCard(w, 'C-2', { pr: 8, files: { 'src/b.mjs': 'b' } });
+  loseAnswer(w, { merged: false });
+  await gatePass(w.ctx);
+  if (mergeOf(w, 'C-2').doc.state !== 'merging') { tick(w, 1); await gatePass(w.ctx); }
+  assert.equal(mergeOf(w).doc.state, 'refused');
+  assert.equal(mergeOf(w).doc.told_at, undefined, 'the alert was lost: not marked');
+  assert.equal(mergeOf(w, 'C-2').doc.state, 'merging', 'C-2 is stuck: no limit in the rules, its pull request open');
+  const before = tries.length;
+  tick(w, 1);
+  await gatePass(w.ctx);
+  assert.equal(mergeOf(w, 'C-2').doc.state, 'merging', 'still stuck');
+  assert.equal(tries.length, before + 1, 'told again in the pass the busy merge returns from');
+  assert.ok(mergeOf(w).doc.told_at, 'marked told');
+  assert.equal(told(w, 'merge_refused').length, 1);
+});
+
+// L188 m4: a told_at write that is refused alerts merge_gate_write_refused, and the refusal is told again next pass.
+test('L188 m4: a refused told_at write in tellRefused is alerted, and the refusal is told again on the next pass', async () => {
+  const w = world();
+  const rec = w.ctx.record; const orig = rec.write.bind(rec);
+  let refused = 0;
+  w.ctx.record = { ...rec, write: (x) => { if (x.entity === 'merge' && x.doc?.told_at && refused === 0) { refused += 1; return { ok: false, reason: 'refused (L188 m4 test)' }; } return orig(x); } };
+  redCheck(w, verifiedCard(w));
+  await gatePass(w.ctx);
+  assert.equal(refused, 1);
+  assert.equal(mergeOf(w).doc.state, 'refused');
+  assert.equal(mergeOf(w).doc.told_at, undefined);
+  assert.equal(told(w, 'merge_gate_write_refused').filter((a) => a.to === 'told' && a.merge === mergeOf(w).id).length, 1, JSON.stringify(w.alerts));
+  assert.equal(told(w, 'merge_refused').length, 1);
+  tick(w, 1);
+  await gatePass(w.ctx);
+  assert.equal(told(w, 'merge_refused').length, 2, 'told again: the mark was not written');
+  assert.ok(mergeOf(w).doc.told_at, 'marked this time');
+  tick(w, 1);
+  await gatePass(w.ctx);
+  assert.equal(told(w, 'merge_refused').length, 2, 'never again once marked');
+});
+
+// L188 m6: a merge GitHub shows merged or closed is settled even while the rules can't answer the merging limit.
+for (const [how, merged] of [['merged', true], ['closed', false]]) {
+  test(`L188 m6: a pull request ${how} after a lost merge answer settles while the rules can't answer the limit`, async () => {
+    const KEY = 'timeouts.merging_open_max_min';
+    const w = world(limited());
+    verifiedCard(w);
+    loseAnswer(w, { merged });
+    await gatePass(w.ctx);
+    assert.equal(mergeOf(w).doc.state, 'merging');
+    if (!merged) w.g.pulls.get(7).state = 'closed';
+    const base = w.ctx.rules;
+    const broken = (k) => { if (k === KEY) throw new Error('the rules engine stopped'); };
+    w.ctx.rules = Object.create(base, {
+      get: { value: (k, o) => { broken(k); return base.get(k, o); } },
+      num: { value: (k, o) => { broken(k); return base.num(k, o); } },
+    });
+    const unsure = () => told(w, 'merge_gate_unsure').filter((a) => /could not answer/.test(a.note)).length;
+    tick(w, 1);
+    await gatePass(w.ctx);
+    assert.equal(mergeOf(w).doc.state, merged ? 'merged' : 'refused', JSON.stringify(mergeOf(w).doc));
+    assert.equal(unsure(), 0, 'the limit was not asked: the pull request is final');
+    if (merged) assert.equal(cardOf(w).state, 'merged');
+  });
+}
+
 test('L168: a refusal told at once is marked in the same pass and never sent again', async () => {
   const w = world();
   redCheck(w, verifiedCard(w));
