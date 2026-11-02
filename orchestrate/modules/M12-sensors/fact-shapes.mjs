@@ -23,7 +23,7 @@ const ID = /^[A-Za-z0-9][A-Za-z0-9 ._:/#|@+-]{0,127}$/;
 const alert = { key: 'id', title: 'text', body: 'text', status_text: 'text', status: 'id', since: 'time', last: 'time',
   cleared: 'time', count: 'count', issue: 'count' };
 const check = { name: 'text', status: 'id', conclusion: 'id', summary: 'text' };
-// The Dispatcher's readings (R-0b-168): each carries observed_at, taken after the read it reports returned.
+// The Dispatcher's readings (R-0b-168): each carries observed_at, taken just before the read it reports began (L97 M-2).
 const reading = { value: 'bool', observed_at: 'time' };
 const usageWindow = { used_pct: 'num', resets_at: 'time' };
 
