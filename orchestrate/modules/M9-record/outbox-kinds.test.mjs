@@ -61,8 +61,16 @@ function joinItems(module) {
   return items;
 }
 
-// "<module> join item(s) <n>, lane <n>" → its problems: the items exist and at least one names the kind (L151).
-function joinItemProblems(k, field, v) {
+// "<module> join item(s) <n>, lane <n>" → its problems: the items exist and at least one names the kind (L151) by its
+// exact backticked prefix (L162 m2: `state-compact-` or a bare "state" is not `state-`). A pending kind's item must also
+// say, in one sentence, that it reads the stored files of that kind: that is what wires a reader.
+// One sentence: "read(s)", then `<kind>`, then "stored", with no ". " between them (a dot inside `lead-input.mjs` is fine).
+export function readsStored(text, k) {
+  const tick = `\`${k.replace(/-/g, '\\-')}\``;
+  const gap = '(?:(?!\\.\\s)[\\s\\S])*';
+  return new RegExp(`\\breads?\\b${gap}(?:${tick}${gap}\\bstored\\b|\\bstored\\b${gap}${tick})`).test(String(text));
+}
+export function joinItemProblems(k, field, v) {
   const m = /^(M\d+) join items? (\d+(?:(?:, | and )\d+)*), lanes? \d+(?: and \d+)?$/.exec(v);
   if (!m) return [`${k}: ${field} "${v}" is not "<module> join item <n>, lane <n>"`];
   const module = m[1];
@@ -72,13 +80,14 @@ function joinItemProblems(k, field, v) {
   const nums = m[2].split(/, | and /);
   const missing = nums.filter((n) => !items?.has(n));
   if (missing.length) return [`${k}: ${field} names ${module} join item ${missing.join(', ')}, which ${folder}/README.md does not list under "## Join items"`];
-  if (!nums.some((n) => namesKind(items.get(n), k))) return [`${k}: ${field} names ${module} join item ${nums.join(', ')}, and none of them names ${k}`];
+  if (!nums.some((n) => items.get(n).includes(`\`${k}\``))) return [`${k}: ${field} names ${module} join item ${nums.join(', ')}, and none of them names \`${k}\``];
+  if (field === 'pending' && !nums.some((n) => readsStored(items.get(n), k))) return [`${k}: ${field} names ${module} join item ${nums.join(', ')}, and none of them says it reads the stored \`${k}\` files`];
   return [];
 }
 
 // The latent claims a kind may make, each checked against the code (L151 m3). Any other latent text is a problem.
-const SOURCE_EXT = /\.(mjs|js|cjs|md|json|txt)$/;
-function sourceFiles(dir, out = []) {
+export const SOURCE_EXT = /\.(mjs|js|cjs|md|json|txt|yaml|yml|toml)$/;
+export function sourceFiles(dir, out = []) {
   for (const e of readdirSync(dir, { withFileTypes: true })) {
     const p = join(dir, e.name);
     if (e.isDirectory()) { if (e.name !== 'node_modules' && e.name !== 'fixtures') sourceFiles(p, out); } else if (SOURCE_EXT.test(e.name) && !/\.test(-helper)?\.mjs$/.test(e.name)) out.push(p);
@@ -93,13 +102,25 @@ const BOB = join(ORCH, '..');
 export function kindMentions(k, files = [...sourceFiles(ORCH), ...sourceFiles(join(BOB, 'skill')), ...sourceFiles(join(BOB, 'skills'))]) {
   return files.filter((p) => !LISTS.some((l) => p === join(ORCH, l)) && namesKind(readFileSync(p, 'utf8').replace(/`/g, ' '), k)).map((p) => p.slice(BOB.length + 1));
 }
+// Any file other than history.mjs that names makeHistory as a whole word outside a code comment (an import, a dynamic
+// import, a re-export, a prompt or config that names it). A comment that mentions it calls nothing.
+const uncommented = (p, t) => (/\.(mjs|js|cjs)$/.test(p) ? t.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '') : t);
+export function makeHistoryCallers(files = sourceFiles(ORCH)) {
+  return files.filter((p) => !p.endsWith('M12-sensors/history.mjs') && /\bmakeHistory\b/.test(uncommented(p, readFileSync(p, 'utf8')))).map((p) => p.slice(BOB.length + 1));
+}
+const NEVER = 'its only role, learning, is NEVER_STARTED (M10 roles.mjs)';
+const neverStarted = (k, spec) => spec.roles.every((r) => NEVER_STARTED.includes(r)) ? [] : [`${k}: latent says NEVER_STARTED, but not every role is`];
+const noPrompt = (k) => kindMentions(k).map((p) => `${k}: latent says no prompt writes one, but ${p} names it`);
+// Keyed by kind (L162 m3): each latent kind may make only its own claim, so a claim cannot move to a kind it is not
+// checked for.
 export const LATENT_CLAIMS = Object.freeze({
-  'its only role, learning, is NEVER_STARTED (M10 roles.mjs)': (k, spec) => spec.roles.every((r) => NEVER_STARTED.includes(r)) ? [] : [`${k}: latent says NEVER_STARTED, but not every role is`],
-  'no Lead prompt writes one yet; only the role lists (M10 lead profile, M4 DESIGN_PROFILES) name it': (k) => kindMentions(k).map((p) => `${k}: latent says no prompt writes one, but ${p} names it`),
-  'no Lead prompt writes one yet, and M12 history.mjs answer() has no caller': (k) => [
-    ...kindMentions(k).map((p) => `${k}: latent says no prompt writes one, but ${p} names it`),
-    ...sourceFiles(ORCH).filter((p) => !p.endsWith('M12-sensors/history.mjs') && /import[^;]*\bmakeHistory\b[^;]*from ['"][^'"]*history\.mjs['"]/.test(readFileSync(p, 'utf8'))).map((p) => `${k}: latent says history.mjs answer() has no caller, but ${p.slice(BOB.length + 1)} imports makeHistory`),
-  ],
+  'wish-': { text: 'no Lead prompt writes one yet; only the role lists (M10 lead profile, M4 DESIGN_PROFILES) name it', check: noPrompt },
+  'history-': {
+    text: 'no Lead prompt writes one yet, and M12 history.mjs answer() has no caller',
+    check: (k) => [...noPrompt(k), ...makeHistoryCallers().map((p) => `${k}: latent says history.mjs answer() has no caller, but ${p} names makeHistory`)],
+  },
+  'check-': { text: NEVER, check: neverStarted },
+  'prune-': { text: NEVER, check: neverStarted },
 });
 
 // One kind's problems under condition 1; the test below also calls it with altered specs.
@@ -127,7 +148,7 @@ function whoReadsProblems(k, spec) {
     return out;
   }
   if (field === 'pending') return joinItemProblems(k, 'pending', v);
-  if (field === 'latent') return LATENT_CLAIMS[v] ? LATENT_CLAIMS[v](k, spec) : [`${k}: latent "${v}" is not one of the checked claims (LATENT_CLAIMS)`];
+  if (field === 'latent') return LATENT_CLAIMS[k]?.text === v ? LATENT_CLAIMS[k].check(k, spec) : [`${k}: latent "${v}" is not the checked claim for ${k} (LATENT_CLAIMS)`];
   return [];
 }
 
@@ -178,10 +199,10 @@ test('L151 M-1: the refused kinds are refused by the real Record and the stand-i
 
 test('L151: a join item must name the kind; state-compact- in item 1 is not state-', () => {
   const st = OUTBOX_KINDS['state-'];
-  assert.match(whoReadsProblems('state-', { ...st, refused: 'M1 join item 1, lane 2' }).join(), /none of them names state-/);
-  assert.match(whoReadsProblems('state-', { ...st, refused: 'M1 join item 3, lane 2' }).join(), /none of them names state-/);
+  assert.match(whoReadsProblems('state-', { ...st, refused: 'M1 join item 1, lane 2' }).join(), /none of them names `state-`/);
+  assert.match(whoReadsProblems('state-', { ...st, refused: 'M1 join item 3, lane 2' }).join(), /none of them names `state-`/);
   assert.deepEqual(whoReadsProblems('state-', { ...st, refused: 'M1 join item 4, lane 2' }), [], 'item 4 names state- (the trip brief)');
-  assert.match(whoReadsProblems('idea-', { ...OUTBOX_KINDS['idea-'], pending: 'M1 join item 5, lane 2' }).join(), /none of them names idea-/);
+  assert.match(whoReadsProblems('idea-', { ...OUTBOX_KINDS['idea-'], pending: 'M1 join item 5, lane 2' }).join(), /none of them names `idea-`/);
   assert.match(whoReadsProblems('state-', { ...st, entity: 'report' }).join(), /refused kind has entity null/);
   assert.match(whoReadsProblems('state-', { ...st, pending: 'M1 join item 13, lane 2' }).join(), /names no reader/);
   assert.equal(namesKind('the `state-compact-` kind', 'state-'), false);
@@ -190,11 +211,11 @@ test('L151: a join item must name the kind; state-compact- in item 1 is not stat
 });
 
 test('L151 m3: a latent reason is a checked claim; each goes red when it stops being true', () => {
-  assert.match(whoReadsProblems('history-', { ...OUTBOX_KINDS['history-'], latent: 'x' }).join(), /not one of the checked claims/);
+  assert.match(whoReadsProblems('history-', { ...OUTBOX_KINDS['history-'], latent: 'x' }).join(), /not the checked claim for history-/);
   // A prompt that starts writing wish- (or history-) turns the claim false.
   const prompt = join(MODULES, 'M3-lead/prompts-plant.md');
   const files = [prompt];
-  const claim = LATENT_CLAIMS[OUTBOX_KINDS['wish-'].latent];
+  const claim = LATENT_CLAIMS['wish-'].check;
   assert.deepEqual(kindMentions('wish-', []), []);
   writeFileSync(prompt, 'When the owner wishes for X, write `wish-<id>.md` to your outbox.\n');
   try {
@@ -215,7 +236,10 @@ test('L140 condition 1: the check refuses a black hole, a second kept kind, a mi
   assert.match(whoReadsProblems('request-', { ...bare, pending: 'soon' }).join(), /is not "<module> join item/);
   assert.match(whoReadsProblems('request-', { ...bare, reader: 'M2-approvals/research-ask.mjs:noSuchFn' }).join(), /does not export noSuchFn/);
   assert.match(whoReadsProblems('request-', { ...bare, latent: 'x', pending: 'M1 join item 9, lane 2' }).join(), /pending and latent/);
-  assert.match(whoReadsProblems('wish-', { ...OUTBOX_KINDS['wish-'], latent: 'its only role, learning, is NEVER_STARTED (M10 roles.mjs)' }).join(), /not every role is/);
+  // A claim is keyed by its kind (L162 m3): wish- may not borrow check-'s claim, and check- fails its own when a role
+  // that is started is added.
+  assert.match(whoReadsProblems('wish-', { ...OUTBOX_KINDS['wish-'], latent: 'its only role, learning, is NEVER_STARTED (M10 roles.mjs)' }).join(), /not the checked claim for wish-/);
+  assert.match(whoReadsProblems('check-', { ...OUTBOX_KINDS['check-'], roles: ['learning', 'lead'] }).join(), /not every role is/);
   assert.match(whoReadsProblems('think-', { ...OUTBOX_KINDS['think-'], handledBy: 'M11-dispatcher/nope.mjs' }).join(), /no handledBy file/);
 });
 
@@ -285,4 +309,52 @@ test('L140 condition 2: report create reaches exactly these roles, and they gain
   for (const [role, list] of Object.entries(CREATES)) assert.deepEqual(creates(role), list, role);
   // Create only: none of them may change a report once it is written.
   for (const role of Object.keys(CREATES)) assert.equal(fieldsAllowed('report', `${role}:X-1`, { create: false }), null, role);
+});
+
+test('L162 m2: a join item names a kind only by its exact backticked prefix; a pending one says it reads the stored files', () => {
+  const st = { ...OUTBOX_KINDS['state-'], refused: undefined, entity: 'report' };
+  // Item 4 names `state-` but does not read stored ones: not enough to be the pending item that wires a reader.
+  assert.match(whoReadsProblems('state-', { ...st, pending: 'M1 join item 4, lane 2' }).join(), /none of them says it reads the stored `state-` files/);
+  assert.deepEqual(whoReadsProblems('state-', { ...st, pending: 'M1 join item 13, lane 2' }), [], 'item 13 reads only stored `state-` files');
+  assert.equal(readsStored('it reads the `idea-` reports the record has stored since the last pass (`lead-input.mjs`)', 'idea-'), true);
+  assert.equal(readsStored('it reads only stored `state-` files', 'state-'), true);
+  assert.equal(readsStored('the idea- reports it reads are stored', 'idea-'), false, 'N1: not backticked');
+  assert.equal(readsStored('it reads the `idea-` list. The record has stored them', 'idea-'), false, 'N2: two sentences');
+  assert.equal(readsStored('it writes `idea-` files the record has stored', 'idea-'), false, 'no read');
+  assert.equal(readsStored('it reads the `idea-file` section the record has stored', 'idea-'), false, '`idea-file` is not `idea-`');
+});
+
+test('L162 m3: makeHistory counts as a caller in any source form, and yaml/yml/toml files are scanned', () => {
+  for (const ext of ['yaml', 'yml', 'toml']) assert.ok(SOURCE_EXT.test(`x.${ext}`), ext);
+  const dir = join(MODULES, 'M3-lead');
+  const plants = {
+    'n13-plant.mjs': "const { makeHistory } = await import('../M12-sensors/history.mjs');\n",
+    'n14-plant.mjs': "export { makeHistory } from '../M12-sensors/history.mjs';\n",
+    'n15-plant.yaml': 'steps:\n  - call: makeHistory\n',
+    'n16-plant.toml': 'call = "makeHistory"\n',
+  };
+  const files = Object.keys(plants).map((f) => join(dir, f));
+  try {
+    for (const [f, t] of Object.entries(plants)) writeFileSync(join(dir, f), t);
+    assert.deepEqual(makeHistoryCallers(sourceFiles(dir).filter((p) => files.includes(p))).sort(), files.map((p) => p.slice(BOB.length + 1)).sort());
+    writeFileSync(join(dir, 'n13-plant.mjs'), '// makeHistory is the M12 writer\n/* makeHistory */\n');
+    assert.equal(makeHistoryCallers([join(dir, 'n13-plant.mjs')]).length, 0, 'a comment calls nothing');
+  } finally { for (const p of files) rmSync(p, { force: true }); }
+  assert.deepEqual(makeHistoryCallers(), [], 'today nothing calls it');
+});
+
+test('L162: each kind\'s roles are pinned', () => {
+  assert.deepEqual(Object.fromEntries(Object.entries(OUTBOX_KINDS).map(([k, s]) => [k, s.roles])), {
+    'report-': ['worker', 'reviewer', 'scout', 'writer', 'thinking', 'script'], 'report-compact-': ['worker'], 'state-compact-': ['front_door'],
+    'handoff-': ['lead', 'learning'], 'handin-': ['worker'], 'lesson-': ['learning'], 'verdict-': ['reviewer', 'auditor'],
+    'ask-request-': ['front_door', 'incident'], 'wish-': ['lead'], 'think-': ['lead'], 'scout-': ['lead'], 'write-': ['lead'],
+    'roadmap-': ['lead'], 'history-': ['lead'], 'request-': ['front_door'], 'state-': ['front_door'], 'idea-': ['front_door', 'thinking'],
+    'check-': ['learning'], 'prune-': ['learning'],
+  });
+});
+
+test('L162: isNotARecord needs ok === false, not just a missing ok', () => {
+  assert.equal(isNotARecord({ notARecord: true, reason: NOT_A_RECORD, handledBy: 'M11-dispatcher/outbox-intake.mjs' }), false);
+  assert.equal(isNotARecord({ ok: undefined, notARecord: true, reason: NOT_A_RECORD }), false);
+  assert.equal(isNotARecord(notARecord('think-')), true);
 });

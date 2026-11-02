@@ -15,7 +15,8 @@ Dispatcher's and M9's.
 
 ## Join items (other lanes)
 
-1. The Lead reads the owner's ideas (L151). Lane 2: when the Dispatcher builds the Lead's input file, it feeds the
-   `idea-file` section (`lead-input.mjs`) from the `idea-` reports the record has stored since the last pass, each
-   one's quoted text as it is. Until this lands, a stored `idea-` is kept and nothing reads it; the owner is told only
-   "Filed: idea …", which promises nothing more.
+1. The Lead reads the owner's ideas (L151). Lane 2: when the Dispatcher builds the Lead's input file, it reads the
+   `idea-` reports the record has stored since the last pass and feeds the `idea-file` section (`lead-input.mjs`) from
+   them, each one's quoted text as it is. Until this lands, a stored `idea-` is kept and nothing reads it; the owner is
+   told only "Filed: idea <id>. The Mini confirms in a minute." and then "Confirmed: idea <id>.", which promise nothing
+   more.

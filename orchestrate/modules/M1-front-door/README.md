@@ -103,7 +103,8 @@ R-0b-82's decision and handoff code sit here although the row is tagged M11 (lan
    checks, approvals writes the product's state (paused, or away with its `until` and `tz`); only approvals may write
    a product. "Confirmed: pause X" is pushed only after that write. Until this lands, the record refuses `state-`
    (`refused` in shared OUTBOX_KINDS), so the owner hears "Not filed", never a pause that pauses nothing; this PR
-   turns `state-` into a record kind.
+   turns `state-` into a record kind. Join item 4 (the trip brief, `nextTripPush`/`buildTripBrief`) waits on this: it
+   reads only stored `state-` files, so it must not be wired before this lands.
 
 ## Ledger: two lines per row (review-0b-8 MAT-10)
 

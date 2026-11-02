@@ -14,3 +14,26 @@ export function namesKind(text, k) {
   }
   return false;
 }
+
+// L162 M-1: the units of a markdown text a reader can see, for the allowed-sentence check. Each quoted string is one
+// unit; the text around the quotes (each quote replaced by «») is split into sentences. Blocks are list items, table
+// rows, headings and paragraphs; bold marks are dropped and whitespace is folded. A unit with no letter is skipped.
+export function shownUnits(text) {
+  const out = [];
+  for (const block of String(text).split(/\n(?=[ \t]*(?:[-|#]|\d+\. )|[ \t]*\n)/)) {
+    const b = block.replace(/\*\*/g, '').replace(/\s+/g, ' ').trim().replace(/^(?:- |\d+\. |#+ )/, '');
+    const quotes = [];
+    const rest = b.replace(/"([^"]*)"/g, (_, q) => { quotes.push(q.trim()); return '«»'; });
+    out.push(...quotes);
+    out.push(...rest.split(/(?<=[.!?])\s+(?=[A-Z«(`])/).map((s) => s.trim()));
+  }
+  return [...new Set(out.filter((u) => /[A-Za-z]/.test(u)))];
+}
+
+// The markdown sections (`## ` heading to the next, heading included) whose body names the kind; [0] is the preamble.
+// A skill's front matter counts by its description only (name: is not read by anyone).
+export function sectionsNaming(md, k) {
+  const text = String(md).replace(/^---\n([\s\S]*?)\n---\n/, (_, fm) => `${(/^description: (.*)$/m.exec(fm) ?? [, ''])[1]}\n\n`);
+  const [preamble, ...rest] = text.split(/^(?=## )/m);
+  return { preamble, sections: rest.filter((s) => namesKind(s.split('\n').slice(1).join('\n').replace(/`/g, ' '), k)) };
+}
