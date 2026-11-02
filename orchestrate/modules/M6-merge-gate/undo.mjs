@@ -13,7 +13,7 @@
 // an answered Undo ask names the card (its merge_commit is the commit); an authenticated audit issue names the commit
 // (`commit`) or the card (`card`). The same answer feeds the judge (gather.mjs) and the reverted mark below.
 //   undoneBy(record, card) → { commit, card } | null     card = the undo card's { id, doc }
-//   markReverted({ record, alert }, undoCardId) → { ok, card?, reason? }
+//   markReverted({ record, alert }, undoCardId) → { ok, card? } | { ok: false, reason, told }
 //     after an undo card merges, the card it undid is marked reverted (merged or closed → reverted, merge_gate)
 
 import { factFrom } from '../M9-record/permissions.mjs';
@@ -36,7 +36,8 @@ export function undoneBy(record, card) {
 }
 
 export function markReverted({ record, alert = () => {} }, undoCardId) {
-  const no = (reason) => { alert({ type: 'undo_not_marked', card: undoCardId, reason }); return { ok: false, reason }; };
+  // told: the alert was delivered (not false, no throw). The gate retries until it was, or the mark holds (L135 site G).
+  const no = (reason) => { let told; try { told = alert({ type: 'undo_not_marked', card: undoCardId, reason }) !== false; } catch { told = false; } return { ok: false, reason, told }; };
   const u = record.read('card', undoCardId);
   if (!u?.doc || u.doc.kind !== 'exact_reverse' || u.doc.state !== 'merged') return no('not a merged undo card');
   const d = undoneBy(record, u);

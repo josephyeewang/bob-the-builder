@@ -3,7 +3,11 @@
 //
 // WHY A FILE OF ITS OWN (L72). The test stand-in in record.mjs (memoryRecord) checks writes with M9's own tables
 // (permissions.mjs, moves.mjs), and those tables are built from these names when they load. If the names stayed in
-// record.mjs, record.mjs would need M9 and M9 would need record.mjs before either had loaded. This file needs nothing.
+// record.mjs, record.mjs would need M9 and M9 would need record.mjs before either had loaded. This file needs nothing
+// but the outbox-kind rule, which lives in M4's hook folder (that folder is copied alone, see outbox-kind.mjs) and
+// needs nothing itself.
+
+import { KIND_SHAPE, kindAmong } from '../modules/M4-workshop/hooks/outbox-kind.mjs';
 
 // Outbox file kinds (design v4 §14.1.2 "Outbox names", lead call L2, 0b-2 round 2 R2-M9, round 3 R3-M2): the file name
 // starts with the kind. M10's role-profile loader refuses a kind not listed here or not listed for that role.
@@ -32,16 +36,15 @@ export const OUTBOX_KINDS = Object.freeze(Object.fromEntries(Object.entries({
   'check-': { roles: ['learning'], entity: null, mode: 'create' },
   'prune-': { roles: ['learning'], entity: null, mode: 'create' },
 }).map(([k, v]) => [k, Object.freeze({ ...v, roles: Object.freeze(v.roles) })])));
-export const OUTBOX_KIND_PATTERN = /^[a-z]+(-[a-z]+)*-$/;
+export const OUTBOX_KIND_PATTERN = KIND_SHAPE;
 // A session id: capped so an id made from it stays a legal file name (0b-2 audit round 6). record.mjs re-exports it.
 export const SESSION_ID = /^[A-Za-z0-9-]{1,128}$/;
-// The longest listed kind a file name starts with (so `report-compact-x` is report-compact-, not report-), or null.
-// M9's outbox and the test stand-in both read a file's kind with this one function.
-export function outboxKindOf(name) {
-  let best = null;
-  for (const k of Object.keys(OUTBOX_KINDS)) if (name.startsWith(k) && name.length > k.length && (!best || k.length > best.length)) best = k;
-  return best;
-}
+// The longest listed kind a file name starts with (so `report-compact-x` is report-compact-, not report-), or null;
+// a compaction note (`-compact` in its name, in any case: the reserved form, M4 outbox-kind.mjs, L121) is only ever a
+// `-compact-` kind (L101). M9's outbox, the test stand-in,
+// M4's intake read and M11's intake read a file's kind with this one function; the plain-files hook uses the same
+// rule (kindAmong) on the kinds the launcher hands it.
+export const outboxKindOf = (name) => kindAmong(name, Object.keys(OUTBOX_KINDS));
 
 // Card kinds (0b-2 R3-M3). Set once, at create, by the creator M9's permissions name. `exact_reverse` is the undo card.
 export const CARD_KINDS = Object.freeze(['ordinary', 'fix', 'exact_reverse', 'lead_daily_card', 'research_copy']);
