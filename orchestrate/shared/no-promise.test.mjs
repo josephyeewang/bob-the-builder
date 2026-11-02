@@ -21,6 +21,7 @@ import { OUTBOX_KINDS } from './record.mjs';
 import { sectionsNaming, shownUnits } from './kinds.test-helper.mjs';
 import { intakePush } from '../modules/M1-front-door/outbox.mjs';
 import { ONBOARD_SHOWN } from '../modules/M2-approvals/onboard.mjs';
+import { STATE_ANSWERS } from '../modules/M2-approvals/state-request.mjs';
 
 const ORCH = join(dirname(fileURLToPath(import.meta.url)), '..');
 const SKILL = join(ORCH, 'modules/M1-front-door/skill/orchestrate/SKILL.md');
@@ -182,4 +183,24 @@ test('L221: every sentence M2 onboarding can show Joe is an approved one, and th
   assert.deepEqual(shown.filter((u) => !ONBOARD_SHOWN_APPROVED.includes(u)), [], 'a sentence not on the list');
   assert.deepEqual(ONBOARD_SHOWN_APPROVED.filter((u) => !shown.includes(u)), [], 'an approved sentence no longer shown');
   for (const u of shown) assert.doesNotMatch(u, /\b(will|until|tonight|tomorrow|next pass|again|retr(y|ies|ied)|soon)\b/i, u);
+});
+
+// L219 d: what M2's state-request pass (M1 join item 13) answers the owner. state- is still refused, so it has no
+// APPROVED list above and its skill text stays unwired; these are the pass's own answers, read for promises when
+// added (L219): "Confirmed" only after the product write, nothing says when or how a pause or trip mode ends, and
+// "Say it again" only where nothing will retry. The list is exact both ways, so a new or changed answer goes red.
+export const STATE_APPLY_SHOWN = Object.freeze([
+  'Confirmed: <product> is paused.',
+  'Confirmed: trip mode for <product>.',
+  'Not applied: a newer request for <product> came in.',
+  'Not applied: <product> is paused, and trip mode can\'t be set while it is paused.',
+  'Not applied: <product> is in light mode, and trip mode can\'t be set from light mode.',
+  'Not applied: <product> has no record on the Mini yet.',
+  'Not applied: that request could not be read. Say it again.',
+]);
+test('L219 d: every answer the state-request pass can give the owner is an approved sentence, and the list is exact', () => {
+  const shown = Object.values(STATE_ANSWERS).map((f) => f('<product>'));
+  assert.deepEqual(shown.filter((u) => !STATE_APPLY_SHOWN.includes(u)), [], 'an answer not on the list');
+  assert.deepEqual(STATE_APPLY_SHOWN.filter((u) => !shown.includes(u)), [], 'an approved answer no longer given');
+  for (const u of shown) assert.doesNotMatch(u, /\b(will|until|tonight|tomorrow|next pass|resumes?|back on)\b/i, u);
 });
