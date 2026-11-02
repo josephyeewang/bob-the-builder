@@ -1495,3 +1495,99 @@ test('L164 m3: a told fact the gate did not make is not counted: the owner is st
   await gatePass(w.ctx);
   assert.equal(told(w, 'merge_limit_missing').length, 1, 'the gate\'s own told fact then counts');
 });
+
+// L182 M-1: a list GitHub answers in full health but that is too long to judge is a fact about the change, so the
+// refusals that need it are final (and told), never a wait that no later pass ends. A read that fails still waits.
+const COMPARE_PATH = /\/compare\/[0-9a-f]{40}\.\.\.[0-9a-f]{40}$/;
+function compareAnswer(w, change) {
+  const get = w.g.gh.get;
+  w.g.gh.get = async (path) => {
+    const r = await get(path);
+    return COMPARE_PATH.test(path) ? change(r) : r;
+  };
+}
+const padTo = (n) => (r) => (r?.status === 200 ? { ...r, json: { ...r.json, files: [...r.json.files, ...Array.from({ length: n - r.json.files.length }, (_, i) => ({ filename: `src/more-${i}.mjs`, status: 'added', patch: '+x' }))] } } : r);
+const refusedFor = (w, re) => {
+  const m = mergeOf(w);
+  assert.equal(m.doc.state, 'refused', JSON.stringify(m.doc));
+  assert.equal(m.doc.tell_owner, true);
+  assert.ok(m.doc.reasons.some((x) => re.test(x)), m.doc.reasons.join(' | '));
+  assert.equal(told(w, 'merge_refused').length, 1, 'the owner is told');
+  assert.equal(gatePuts(w), 0);
+  assert.deepEqual(told(w, 'merge_waiting_long'), []);
+};
+
+test('L182 M-1: a change of 300 files, GitHub otherwise fine, is refused for good and the owner told to split it', async () => {
+  const w = world(limited());
+  verifiedCard(w);
+  compareAnswer(w, padTo(300));
+  await gatePass(w.ctx);
+  refusedFor(w, /^(8|9|10|14): the change has 300 or more files.*split the change/);
+  for (const n of ['9', '10', '14']) assert.ok(mergeOf(w).doc.reasons.some((x) => x.startsWith(`${n}: the change has 300 or more files`)), `${n} final: ${mergeOf(w).doc.reasons.join(' | ')}`);
+  tick(w, 3 * LIMIT_MIN);
+  await gatePass(w.ctx);
+  assert.equal(mergeOf(w).doc.state, 'refused', 'it stays refused');
+  assert.equal(told(w, 'merge_refused').length, 1, 'told once');
+});
+
+// Real files in the commit, so every one has its tree entry: 299 is a list GitHub gives whole and merges; 300 is not.
+const manyFiles = (n) => Object.fromEntries(Array.from({ length: n }, (_, i) => [`src/f${i}.mjs`, `v${i}`]));
+for (const [n, want] of [[299, 'merged'], [300, 'refused']]) {
+  test(`L182 M-1: a change of ${n} real files is ${want}`, async () => {
+    const w = world(limited());
+    verifiedCard(w, 'C-1', { files: manyFiles(n) });
+    await gatePass(w.ctx);
+    const doc = mergeOf(w).doc;
+    assert.equal(doc.state, want, JSON.stringify({ reasons: doc.reasons, waiting_on: doc.waiting_on }));
+    if (want === 'refused') assert.ok(doc.reasons.some((x) => /^(8|9|10|14): the change has 300 or more files/.test(x)), doc.reasons.join(' | '));
+  });
+}
+
+test('L182 M-1 control: the compare call failing holds the merge to be judged again, never refused', async () => {
+  const w = world(limited());
+  verifiedCard(w);
+  let down = true;
+  compareAnswer(w, (r) => (down ? { status: 502, json: null } : r));
+  await gatePass(w.ctx);
+  waitingHeld(mergeOf(w), /^12: /);
+  assert.ok(!mergeOf(w).doc.waiting_on.some((x) => /300 or more|split/.test(x)), mergeOf(w).doc.waiting_on.join(' | '));
+  assert.deepEqual(told(w, 'merge_refused'), []);
+  down = false;
+  tick(w, 1);
+  await gatePass(w.ctx);
+  assert.equal(mergeOf(w).doc.state, 'merged', 'judged again once compare answers');
+});
+
+test('L182 class: a listed file missing from its commit\'s file list is refused for good, not waited on', async () => {
+  const w = world(limited());
+  verifiedCard(w);
+  compareAnswer(w, (r) => (r?.status === 200 ? { ...r, json: { ...r.json, files: [...r.json.files, { filename: 'src/ghost.mjs', status: 'modified', patch: '+x' }] } } : r));
+  await gatePass(w.ctx);
+  refusedFor(w, /src\/ghost\.mjs is not in its commit's file list/);
+});
+
+test('L182 class: 100 check runs on the head is refused for good (refusal 1), not waited on', async () => {
+  const w = world(limited());
+  const head = verifiedCard(w);
+  w.g.checks.set(head, Array.from({ length: 100 }, (_, i) => ({ name: i ? `c${i}` : 'test', app: { id: 1 }, head_sha: head, status: 'completed', conclusion: 'success' })));
+  await gatePass(w.ctx);
+  refusedFor(w, /^1: the commit has 100 check runs.*split the change/);
+});
+
+test('L182 class: 100 review threads is refused for good (refusal 7), not waited on', async () => {
+  const w = world(limited());
+  verifiedCard(w);
+  w.g.threads = Array.from({ length: 100 }, () => ({ isResolved: true, comments: { nodes: [{ author: { __typename: 'User' } }] } }));
+  await gatePass(w.ctx);
+  refusedFor(w, /^7: the pull request has 100 review threads/);
+});
+
+test('L182 class control: a review-thread read that fails still waits', async () => {
+  const w = world(limited());
+  verifiedCard(w);
+  const post = w.g.gh.post;
+  w.g.gh.post = async (path, body) => (path === '/graphql' ? { status: 502, json: null } : post(path, body));
+  await gatePass(w.ctx);
+  waitingHeld(mergeOf(w), /^7: the review threads could not be read/);
+  assert.deepEqual(told(w, 'merge_refused'), []);
+});

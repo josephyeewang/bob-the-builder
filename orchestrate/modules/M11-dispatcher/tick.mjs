@@ -172,7 +172,8 @@ export async function tick({ rec, rules, now, ports: p }) {
   first.settle();
   // A failing outage step falls back on the record (audit 0b-6 r3 MIN-1): an open outage still holds. Read again
   // once the step has run (L172 follow-up): a step that opened the outage and then threw never set outageOpen, and
-  // the read before it saw no outage. An unreadable fact holds too.
+  // the read before it saw no outage. The shared Record's read never throws: a fact it can't read comes back as
+  // { corrupt: true } with no doc, which is not an open outage (L182 m2). The catch is only for a Record that throws.
   const outageInRecord = () => { try { return rec.read('fact', OUTAGE_FACT)?.doc?.state === 'open'; } catch { return true; } };
   let outageOpen = outageInRecord();
   await run('outage', async () => {

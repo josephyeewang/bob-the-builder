@@ -25,7 +25,8 @@
 // TOLD UNTIL DELIVERED (L168, L170; the site G pattern of L135). A refusal the owner must hear of is written with
 // tell_owner: true and its note; told_at is added only once the merge_refused alert was taken (an answer of false, or a
 // throw, is not taken), and each pass sends again for every refused merge that has tell_owner and no told_at. A long
-// wait is the same with wait_told_at.
+// wait is the same with wait_told_at. ctx.alert must answer true when it has kept the alert (queued it, or stored a
+// copy to send later): a sink that keeps a copy and answers false gets one more kept copy on every pass (L182 m3).
 
 import { robotMergesGreen } from '../M12-sensors/outside-watch.mjs';
 import { gatherFacts, botId } from './gather.mjs';

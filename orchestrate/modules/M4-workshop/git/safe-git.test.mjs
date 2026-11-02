@@ -434,6 +434,9 @@ test('L177 c3: rawGit ends at its stop time though a program that left git\'s pr
   const d = tmp();
   const pidFile = join(d, 'pid');
   const orphan = `!perl -MPOSIX -e 'if (fork) { sleep 20; exit } POSIX::setsid(); open(my $f, ">", $ARGV[0]); print $f $$; close $f; sleep 20'`;
+  // The pipes node holds open (L182 m1): the stop must close git's three, not only end the call.
+  const pipes = () => process.getActiveResourcesInfo().filter((x) => x === 'PipeWrap').length;
+  const before = pipes();
   const t0 = Date.now();
   try {
     const r = await rawGit(['-c', `alias.linger=${orphan}`, 'linger', pidFile], { gitDir: join(d, 'none.git'), stopMs: 1_500 });
@@ -441,6 +444,9 @@ test('L177 c3: rawGit ends at its stop time though a program that left git\'s pr
     assert.ok(existsSync(pidFile), 'control: the program left the group and is still running');
     assert.equal(r.hung, true, JSON.stringify(r));
     assert.ok(took < 6_000, `rawGit took ${took} ms`);
+    // Closed pipes leave node's list within a few turns of the loop; one left open stays until the program ends (20 s).
+    for (let i = 0; i < 20 && pipes() !== before; i++) await new Promise((res) => setTimeout(res, 50));
+    assert.equal(pipes(), before, `every pipe to git is closed, though the program still holds the other end: ${process.getActiveResourcesInfo().join(',')}`);
   } finally {
     try { process.kill(Number(readFileSync(pidFile, 'utf8')), 'SIGKILL'); } catch {}
   }
