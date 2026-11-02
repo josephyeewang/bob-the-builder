@@ -11,7 +11,7 @@
 //   actorName is a script actor, or an AI role (the part before ':' in `role:session`).
 //   fieldsAllowed(entity, actor, { create, state }) → Set of fields, or '*' (any), or null (may not write at all)
 
-import { OUTBOX_KINDS, CARD_KINDS } from '../../shared/record.mjs';
+import { OUTBOX_KINDS, CARD_KINDS } from '../../shared/record-names.mjs';
 
 // Fields a card is created with; never changed after create (R3-m5). Plan inputs are separate below.
 export const CARD_CREATE_ONLY = Object.freeze(['product', 'module', 'lane', 'kind', 'depends_on', 'what', 'fix_of', 'source', 'research_ask']);
@@ -19,6 +19,85 @@ export const CARD_CREATE_ONLY = Object.freeze(['product', 'module', 'lane', 'kin
 export const PLAN_INPUTS = Object.freeze(['files', 'done_when', 'tier', 'plan_sha256', 'main_commit']);
 // Fields only the Store Writer itself sets or clears (round from fix_of, claim cleared on hand-in, wait on return).
 export const WRITER_FIELDS = Object.freeze(['round']);
+
+// A card's `attempts`: the counts that drive a decision (L74). Each key has one writer, the role that adds to it, and
+// a shape. A count that is only shown or logged is never kept on the card; the diary has it.
+//   reviewer_starts  how many review requests in a row failed to start a reviewer (two → the owner is asked)
+//   review_requests  how many review requests the Dispatcher has made for the card: it goes up on every request, so the
+//                    write always changes something and the card's write time (the next request's clock) moves (L85 m-1)
+//   merge_refusals   the reasons the gate refused this card's merges (the same reason twice in a row → the owner is
+//                    asked, M6 refusedTwice)
+//   merge_asks       how many of those reasons the owner has been asked about: the Dispatcher sets it to the list's
+//                    length when it asks, so one repeat is asked about once, never on every pass (L110 m-1)
+export const ATTEMPTS = Object.freeze({
+  reviewer_starts: Object.freeze({ writer: 'dispatcher', shape: 'count' }),
+  review_requests: Object.freeze({ writer: 'dispatcher', shape: 'count' }),
+  merge_refusals: Object.freeze({ writer: 'merge_gate', shape: 'reasons' }),
+  merge_asks: Object.freeze({ writer: 'dispatcher', shape: 'count' }),
+});
+
+// Fact ids by family (L74): each role may create a fact only under its own families, and may change only a fact it
+// created. So no role can take another's id first (the Dispatcher can't make `pr-7` before the Sensors do), and a
+// gating reader can tell the writer from the id. A family ending in `-` or `.` is a prefix; any other is one exact id.
+// No two roles' families may overlap (familyOverlaps, tested). A role listed here with no row in WRITERS.fact holds
+// its names but can write none. `store` is the Store Writer's own (an outbox refusal), written inside M9, never by write().
+// A tab's heartbeat is the Dispatcher's (L77 (5)): `tab-heartbeat-<tab>`, and only one it wrote keeps a tab claim alive
+// (TAB_HEARTBEAT_WRITER, read by M9's lapseClaims). live_check has a row but no family, so it creates nothing.
+export const FACT_FAMILIES = Object.freeze(Object.fromEntries(Object.entries({
+  store: ['outbox-refused-'],
+  sensors: ['pr-', 'usage-', 'signed-in-account', 'limit-hit-', 'network-up', 'frontdoor-reachable', 'minibase-running',
+    'power-source', 'outside-no-push', 'outside-robot-merges-', 'start_gate.', 'prod-watch-', 'audit-run-',
+    'undo-issue-', 'blueprint_freshness_alarm'],
+  ledger: ['air-health', 'alert-', 'idea-issue-', 'push-request-', 'heartbeat-', 'signed-out-'],
+  workshop: ['push.'],
+  merge_gate: ['reverse-', 'merge-limit-told-'],
+  dispatcher: ['unsent-alerts', 'outage', 'rules-missing-alert', 'compactions-', 'stop-', 'host-lock-', 'pause-',
+    'undo-held-', 'undo-note-', 'wait-tell-', 'step-error-', 'last-full-pass', 'band-usage', 'unknown-usage-alert', 'lead-restart-',
+    'phone-link', 'phone-link-', 'intake-applied-', 'intake-note', 'hold-', 'review-alert-', 'reconciled-', 'cleanup-',
+    'pass-lock-note', 'tab-heartbeat-', 'merge-unread-', 'merge-ask-refused-', 'merge-reconcile-tell-'],
+  live_check: [],
+}).map(([k, v]) => [k, Object.freeze(v)])));
+
+const isPrefix = (f) => f.endsWith('-') || f.endsWith('.');
+const covers = (f, id) => (isPrefix(f) ? id.startsWith(f) && id.length > f.length : id === f);
+
+/** The role whose family holds this fact id, or null. */
+export function factFamilyOf(id) {
+  if (typeof id !== 'string') return null;
+  for (const [role, fams] of Object.entries(FACT_FAMILIES)) if (fams.some((f) => covers(f, id))) return role;
+  return null;
+}
+
+/** Pairs of families of different roles where one id could fall in both. [] when the table is sound. */
+export function familyOverlaps(table = FACT_FAMILIES) {
+  const out = [];
+  const all = Object.entries(table).flatMap(([role, fams]) => fams.map((f) => [role, f]));
+  for (let i = 0; i < all.length; i++) {
+    for (let j = i + 1; j < all.length; j++) {
+      const [ra, a] = all[i]; const [rb, b] = all[j];
+      if (ra === rb) continue;
+      const clash = a === b || (isPrefix(a) && b.startsWith(a)) || (isPrefix(b) && a.startsWith(b));
+      if (clash) out.push([`${ra}:${a}`, `${rb}:${b}`]);
+    }
+  }
+  return out;
+}
+
+/**
+ * A gating reader's one test of a fact taken as proof (L74 addendum): its id is in `role`'s family (and in `family`,
+ * when one is named, which must be one of `role`'s) AND `role` created it. Never one without the other, and never the
+ * fact's `type` alone: any role can write any type into its own family.
+ */
+// The one role whose `tab_heartbeat` facts count, in its family `tab-heartbeat-` (L77 (5)).
+export const TAB_HEARTBEAT_WRITER = 'dispatcher';
+export const TAB_HEARTBEAT_FAMILY = 'tab-heartbeat-';
+
+export function factFrom(role, entry, family) {
+  if (typeof role !== 'string' || !entry || typeof entry.id !== 'string') return false;
+  if (factFamilyOf(entry.id) !== role || actorName(entry.createdBy ?? '') !== role) return false;
+  if (family === undefined) return true;
+  return (FACT_FAMILIES[role] ?? []).includes(family) && covers(family, entry.id);
+}
 
 // Which card kinds each creator may make (R3-M3). The writer also checks a creator's evidence (an answered Undo ask,
 // an open research ask) and, at draft → ready, that the card's first diary line was written by an allowed creator.
@@ -30,6 +109,8 @@ export const CARD_CREATORS = Object.freeze({
 const f = (...a) => Object.freeze(a.flat());
 const createOnly = (fields = '*') => Object.freeze({ create: fields });
 const ANY = Object.freeze({ create: '*', update: '*' });
+// Create under its own families, and change only what it created (L74); the guard checks both.
+const OWN_FACTS = Object.freeze({ create: '*', update: '*', own: true });
 
 // AI roles that hand in a report, from the one outbox list (R2-M9), so the two tables can't drift.
 const reportRoles = [...new Set(Object.values(OUTBOX_KINDS).filter((k) => k.entity === 'report').flatMap((k) => k.roles))];
@@ -46,13 +127,14 @@ export const WRITERS = Object.freeze({
       create: f('state', CARD_CREATE_ONLY, PLAN_INPUTS, 'brief', 'desired', 'merge_requested', 'needs_joe', 'round'),
       // claim only on a claim move, wait only into waiting, failure only into failed, summary/report_ref only on a
       // tab's hand-in: the writer checks each against the move.
-      update: f('claim', 'wait', 'failure', 'summary', 'report_ref', 'needs_joe'),
+      // attempts: only its own keys (ATTEMPTS), checked by the guard.
+      update: f('claim', 'wait', 'failure', 'summary', 'report_ref', 'needs_joe', 'attempts'),
       kinds: CARD_CREATORS.dispatcher,
     }),
     worker: Object.freeze({ update: f('summary', 'report_ref') }),
     workshop: Object.freeze({ update: f('head') }),
     approvals: Object.freeze({ update: f('needs_joe', 'approval_required', 'cancel_reason') }),
-    merge_gate: Object.freeze({ update: f('needs_joe', 'merge_commit') }),
+    merge_gate: Object.freeze({ update: f('needs_joe', 'merge_commit', 'attempts') }),
   }),
   // approvals is the only writer of asks and gos (L17, R3-M2); its own module checks ask kinds.
   ask: Object.freeze({ approvals: ANY }),
@@ -61,16 +143,13 @@ export const WRITERS = Object.freeze({
   verdict: Object.freeze({ reviewer: createOnly(), auditor: createOnly() }),
   session: Object.freeze({ dispatcher: ANY, workshop: Object.freeze({ update: '*' }) }),
   merge: Object.freeze({ merge_gate: ANY }),
-  // Facts at a fixed id are read and written again with the read rev, so each writer that does so may update (L112):
-  // the Sensors' readings and the Ledger's alerts (M12 facts.mjs), the Dispatcher's alert queue, notes, usage band,
-  // outage and restart facts (M11), and the Workshop's push fact (M4 push.mjs). live_check only ever creates.
   // The real-code check is modules/M9-record/write-sites.test.mjs: every write site in a module must have its row here,
-  // and every row here is used by a write site or says why not. Only a fact's creator may change it (L118 M1, writer.mjs).
-  fact: Object.freeze({ sensors: ANY, ledger: ANY, dispatcher: ANY, workshop: ANY, live_check: createOnly() }),
+  // and every row here is used by a write site or says why not (L112).
+  // Each under its own families (FACT_FAMILIES), changing only facts it created (L74). The workshop is worker-side:
+  // nothing that gates takes a workshop fact as proof (factFrom names the one role a proof must come from).
+  fact: Object.freeze({ sensors: OWN_FACTS, ledger: OWN_FACTS, workshop: OWN_FACTS, dispatcher: OWN_FACTS, merge_gate: OWN_FACTS, live_check: OWN_FACTS }),
   product: Object.freeze({ approvals: ANY }),
-  // The Dispatcher writes the restart handoff for a Lead that stopped, and rewrites it on the next stop (M11
-  // lead-restart.mjs, L112). It has no ask row: asks are approvals' alone (L17, L72).
-  handoff: Object.freeze({ lead: createOnly(), learning: createOnly(), dispatcher: ANY }),
+  handoff: Object.freeze({ lead: createOnly(), learning: createOnly() }),
   report: Object.freeze({ ...Object.fromEntries(reportRoles.map((r) => [r, createOnly()])) }),
   // learning is Phase 1 (0b-1 MAT-11): listed so its row exists, but no learning session starts in 0b.
   lesson: Object.freeze({ learning: ANY }),
