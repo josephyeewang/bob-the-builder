@@ -70,9 +70,55 @@ const tooLong = (message) => Object.assign(new Error(message), { tooLong: true }
 // failed read is that one message, and its truncated tree ("file list ... is cut off") and odd answers are not, so a
 // failed tree read is now a pass with GitHub unreadable and a truncated one counts toward the cap (this retires L186's
 // tree to-do). Void if git-view's wording changes; git-view marking its failed reads (err.status) would end the coupling.
-export const failedRead = (e) => e?.unreadable === true || Number.isInteger(e?.status)
-  || ['AbortError', 'TimeoutError'].includes(e?.name) || /^(HTTP \d+|GitHub answered |fetch failed)/.test(String(e?.message ?? ''));
+//
+// The HTTP status decides first (#108 r2 Minor 1): a 4xx other than 401, 403 and 429 is GitHub's answer about this
+// request (a commit that isn't there, a request it won't take), which the next pass reads the same, so it is NOT a
+// failed read and its wait counts toward the cap. A 5xx, 401, 403, 429, or an odd answer (a 2xx or 3xx with no body)
+// is a failed read.
+export const ANSWERED_4XX = (s) => s >= 400 && s < 500 && ![401, 403, 429].includes(s);
+const statusOf = (e) => {
+  if (Number.isInteger(e?.status)) return e.status;
+  const m = /^(?:HTTP |GitHub answered )(\d{3})\b/.exec(String(e?.message ?? ''));
+  return m ? Number(m[1]) : null;
+};
+export const failedRead = (e) => {
+  if (['AbortError', 'TimeoutError'].includes(e?.name)) return true;
+  const s = statusOf(e);
+  if (s !== null) return !ANSWERED_4XX(s);
+  return e?.unreadable === true || /^(HTTP |GitHub answered |fetch failed)/.test(String(e?.message ?? ''));
+};
 const failed = (message) => Object.assign(new Error(message), { unreadable: true });
+
+// M10's carry-over and exact-reverse checks, M2's go and Approve checks and the robot's mark turn a read that threw (or
+// that GitHub didn't answer with 200) into a "no" with a reason: fail closed. That "no" says nothing about the change,
+// so a check is run on watched reads, and when one of them failed the check's answer is unknown, never a fact: the
+// refusal it feeds waits, and the failure is classed by failedRead (#108 r2, LEAD-CALLS L205). `seen.error` is the
+// first read that went wrong.
+const VIEW_READS = ['commit', 'compare', 'files', 'entry', 'isDir', 'onHistory'];
+function watchReads({ view, gh } = {}) {
+  const seen = { error: null };
+  // A read that threw with no HTTP status got no answer at all (a dropped connection, a fake's plain Error): failed.
+  const note = (e) => {
+    const c = statusOf(e) === null && !failedRead(e) ? Object.assign(new Error(String(e?.message ?? e)), { unreadable: true, cause: e }) : e;
+    seen.error ??= c;
+    return c;
+  };
+  const v = view ? Object.freeze(Object.fromEntries(VIEW_READS.filter((k) => typeof view[k] === 'function')
+    .map((k) => [k, async (...a) => { try { return await view[k](...a); } catch (e) { throw note(e); } }]))) : view;
+  const g = gh ? { ...gh, get: async (path) => {
+    let r;
+    try { r = await gh.get(path); } catch (e) { throw note(e); }
+    if (r?.status !== 200) note(Object.assign(new Error(`GitHub answered ${r?.status} for ${path}`), { status: r?.status }));
+    return r;
+  } } : gh;
+  return { view: v, gh: g, seen };
+}
+// A check's "no" that came from a failed read is thrown, for attempt() and markFailed to class.
+const throwIfUnread = (r, seen) => {
+  if (seen?.error) throw seen.error;
+  if (r?.unreadable === true) throw (r.cause && typeof r.cause === 'object' ? r.cause : failed(String(r.reason ?? r.reasons?.join('; ') ?? 'GitHub could not be read')));
+  return r;
+};
 
 async function json(gh, path) {
   let r;
@@ -135,10 +181,13 @@ export async function threads(gh, owner, repo, pr) {
   return { ok: true, unresolved };
 }
 
+// A row file at the change's head. 404: the row isn't there (null, a reason for the go check). Any other status but
+// 200 is a read that went wrong, thrown for the go check's attempt to class (L205), never read as "no row".
 async function defaultReadRow(gh, base, id, head) {
-  const r = await gh.get(`${base}/contents/${encodeURIComponent(`docs/blueprint/rows/${id}.yaml`).replace(/%2F/g, '/')}?ref=${head}`);
-  if (r?.status !== 200 || r.json?.encoding !== 'base64') return null;
-  try { return parseYaml(Buffer.from(r.json.content, 'base64').toString('utf8'), `${id}.yaml`); } catch { return null; }
+  let j;
+  try { j = await json(gh, `${base}/contents/${encodeURIComponent(`docs/blueprint/rows/${id}.yaml`).replace(/%2F/g, '/')}?ref=${head}`); } catch (e) { if (e?.status === 404) return null; throw e; }
+  if (j?.encoding !== 'base64') return null;
+  try { return parseYaml(Buffer.from(j.content, 'base64').toString('utf8'), `${id}.yaml`); } catch { return null; }
 }
 
 // One read per fact; each failure becomes that fact's "unknown". `onError` sees the error (a too-long list, L182).
@@ -188,7 +237,7 @@ export async function gatherFacts(ctx, merge) {
   f.statuses = head ? await attempt(() => statusesAt(gh, base, head), null, longList('statuses')) : null;
 
   // The change: main...head.
-  const cmp = head && mainSha ? await attempt(() => json(gh, `${base}/compare/${mainSha}...${head}`)) : null;
+  const cmp = head && mainSha ? await attempt(() => json(gh, `${base}/compare/${mainSha}...${head}`), null, markFailed('compare', (e) => { if (!failedRead(e)) f.compareAnswered = true; })) : null;
   f.compareStatus = typeof cmp?.status === 'string' ? cmp.status : null;
   const cmpFiles = Array.isArray(cmp?.files) ? cmp.files : null;
   const rawFiles = cmpFiles && cmpFiles.length < COMPARE_FILE_LIMIT ? cmpFiles : null;
@@ -221,9 +270,12 @@ export async function gatherFacts(ctx, merge) {
   f.reversesGateMerge = false;
   let reversedAudit = 'none';
   if (kind === 'exact_reverse' && reverses && SHA.test(f.pr?.merge_commit_sha ?? '')) {
-    f.exactReverse = (await attempt(() => checkExactReverse({ view, reverses, merged: f.pr.merge_commit_sha }), { ok: false })).ok === true;
+    // Each on watched reads: a read that failed leaves the answer unknown (exactReverseUnread, reversesGateMergeUnread),
+    // so the judge waits instead of refusing the undo for good (L205).
+    const unread = (key, which) => markFailed(which, () => { f[key] = true; });
+    f.exactReverse = (await attempt(async () => { const w = watchReads({ view }); return throwIfUnread(await checkExactReverse({ view: w.view, reverses, merged: f.pr.merge_commit_sha }), w.seen); }, { ok: false }, unread('exactReverseUnread', 'exact reverse'))).ok === true;
     const robotBotId = botId(get('product_profile.robot'));
-    f.reversesGateMerge = (await readMark({ gh, owner, repo, sha: reverses, robotBotId })).ok === true;
+    f.reversesGateMerge = (await attempt(async () => { const w = watchReads({ gh }); return throwIfUnread(await readMark({ gh: w.gh, owner, repo, sha: reverses, robotBotId }), w.seen); }, { ok: false }, unread('reversesGateMergeUnread', 'robot mark'))).ok === true;
     const m = record.list('merge').find((x) => x.doc?.merge_commit === reverses);
     reversedAudit = m?.doc?.state === 'audit_flagged' ? 'failure' : m?.doc?.state === 'audited_ok' ? 'success' : 'none';
   }
@@ -235,24 +287,28 @@ export async function gatherFacts(ctx, merge) {
   f.carried = null;
   if (head && SHA.test(H0 ?? '') && head !== H0 && mainSha) {
     f.carried = await attempt(async () => {
+      // Every read here is watched: carryOver turns a failed read into "does not carry over" (L205), and a read of
+      // the history below that fails is a failed read, not an answer.
+      const w = watchReads({ view });
+      const view_ = w.view;
       // The branch's own commits after H0: the first-parent chain from the head back to H0. (compare's commit list
       // would also hold main's commits that a catch-up merged in.) Not reaching H0 → an empty list, no carry-over.
       const between = [];
-      for (let s = head; s !== H0; s = (await view.commit(s)).parents[0]) {
+      for (let s = head; s !== H0; s = (await view_.commit(s)).parents[0]) {
         if (!SHA.test(s ?? '') || between.length >= MAX_LIST) { between.length = 0; between.push(head); break; }
         between.unshift(s);
       }
-      const B0 = (await view.compare(mainSha, H0)).mergeBase;
-      const B1 = (await view.compare(mainSha, head)).mergeBase;
+      const B0 = (await view_.compare(mainSha, H0)).mergeBase;
+      const B1 = (await view_.compare(mainSha, head)).mergeBase;
       // Tier-1 merges the review and audit did not see: on main now but not on the main H0 was built on (B0). Anchored
       // on what the audit read, not on when the merge was requested; a merge commit that can't be placed counts.
       let tier1MergesSince = 0;
       for (const m of record.list('merge')) {
         if (m.id === merge.id || m.doc?.tier !== 1 || !['merged', 'audited_ok', 'audit_flagged'].includes(m.doc?.state)) continue;
-        if (!SHA.test(m.doc.merge_commit ?? '') || !(await view.onHistory(m.doc.merge_commit, B0))) tier1MergesSince += 1;
+        if (!SHA.test(m.doc.merge_commit ?? '') || !(await view_.onHistory(m.doc.merge_commit, B0))) tier1MergesSince += 1;
       }
-      return carryOver({ reviewed: { base: B0, head: H0 }, current: { base: B1, head }, between, catchUps, tier1MergesSince, gh: view });
-    }, { review: false, audit: false, unread: true, reasons: ['carry-over could not be read'] });
+      return throwIfUnread(await carryOver({ reviewed: { base: B0, head: H0 }, current: { base: B1, head }, between, catchUps, tier1MergesSince, gh: w.view }), w.seen);
+    }, { review: false, audit: false, unread: true, reasons: ['carry-over could not be read'] }, markFailed('carry-over'));
   }
 
   // The review (refusal 5; L44, L65, L66 M1, L68, L69). Read from review's own stores only, through M9's one check:
@@ -291,8 +347,15 @@ export async function gatherFacts(ctx, merge) {
   const apx = ctx.approvals ?? { record, rules, product, now: ctx.now, alert: ctx.alert ?? (() => {}), gh, owner, repo };
   const need = approveNeeded({ risky, needsJoe: card.doc.needs_joe === true || card.doc.approval_required === true, tier: f.tier, module: card.doc.module }, rules, product);
   const ask = askStore(record).asks().filter((a) => a.doc.card === card.id && activeKind(a.doc.kind)?.merge_approve && a.doc.state === 'answered').sort((a, b) => String(b.doc.raised_at).localeCompare(String(a.doc.raised_at)))[0];
-  const stand = ask && head ? await attempt(() => approvalStands(apx, ask.id, { head, view, catchUps }), { ok: false, reason: 'the Approve check failed' }, markFailed('approve')) : { ok: false, reason: 'no answered Approve for this card' };
-  f.approve = { needed: need.needed, why: need.why, stands: stand.ok === true, reason: stand.ok ? null : stand.reason };
+  // A check that could not read GitHub (M2's `unreadable`, or a watched read that failed inside M10's carry-over) or
+  // that threw leaves the Approve unknown (`unread`): refusals 8, 13 and 14 wait on it (L205).
+  let apUnread = null;
+  const stand = ask && head ? await attempt(async () => {
+    const w = watchReads({ view });
+    return throwIfUnread(await approvalStands(apx, ask.id, { head, view: w.view, catchUps }), w.seen);
+  }, null, markFailed('approve', (e) => { apUnread = `the Approve could not be read from GitHub: ${String(e?.message ?? e).slice(0, 200)}`; })) : { ok: false, reason: 'no answered Approve for this card' };
+  f.approve = stand ? { needed: need.needed, why: need.why, stands: stand.ok === true, reason: stand.ok ? null : stand.reason }
+    : { needed: need.needed, why: need.why, stands: false, unread: true, reason: apUnread };
 
   // The go (refusal 10).
   if (goFreeKinds(rules, product).includes(kind)) f.go = { ok: true, reasons: [], skipped: true };
@@ -307,11 +370,16 @@ export async function gatherFacts(ctx, merge) {
     const readRow = ctx.readRow ?? ((id, h) => defaultReadRow(gh, base, id, h));
     const headRows = {};
     for (const id of [...ids].sort()) headRows[id] = await readRow(id, head);
-    return goCheck({ go: go.doc, card: { id: card.id, root: rootId, doc: card.doc }, changed: f.files, headRows, tier: f.tier, view, mainSha });
+    // M2 marks a check that could not read GitHub `unreadable` (L205): thrown here, so the go is unknown (f.go null,
+    // refusal 10 waits) and markFailed classes the read.
+    const w = watchReads({ view });
+    return throwIfUnread(await goCheck({ go: go.doc, card: { id: card.id, root: rootId, doc: card.doc }, changed: f.files, headRows, tier: f.tier, view: w.view, mainSha }), w.seen);
   }, null, markFailed('go')) : null;
 
-  f.threads = Number.isInteger(merge.doc.pr) ? await attempt(() => threads(gh, owner, repo, merge.doc.pr), null) : { ok: false };
-  if (f.threads === null) { f.threads = { ok: false, unreadable: true }; f.unreadReads.push('threads'); }
+  // A threads read that failed is unreadable; one GitHub answered with a 4xx (Minor 1) waits and counts toward the cap.
+  let threadsErr = null;
+  f.threads = Number.isInteger(merge.doc.pr) ? await attempt(() => threads(gh, owner, repo, merge.doc.pr), null, markFailed('threads', (e) => { threadsErr = e; })) : { ok: false };
+  if (f.threads === null) f.threads = { ok: false, unreadable: failedRead(threadsErr) };
 
   // The rules this gate runs on are the ones adopted at main (hold, never refuse).
   f.rulesAdopted = mainSha ? await attempt(async () => {

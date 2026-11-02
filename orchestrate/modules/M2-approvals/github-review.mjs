@@ -19,6 +19,10 @@
 //     'none', review?, head, line? } | { ok: false, reason }
 //   await countApprove({ gh, view, owner, repo, pr, githubId, raisedAt, catchUps }) → { ok, head, review, carried }
 //     | { ok: false, reason, line? }            the count for a merge: the exact head it is for is returned (M4)
+// ownerVerdict and countApprove add `unreadable: true, cause: <the error>` when a read of GitHub threw, so the
+// check could not finish (L205). The caller classes `cause`: M6 gather's failedRead holds on a failed read (5xx,
+// 401, 403, 429, no answer) and counts a 4xx GitHub answered (a gone pull request) toward its wait cap. Any other
+// "no" is GitHub's answer about the Approve.
 // `gh` is a GitHub client ({ get, post, … } → { status, json }); `view` is M10's git view of the same repository.
 
 import { carryOver } from '../M10-rules/carry-over.mjs';
@@ -101,7 +105,8 @@ export async function ownerVerdict({ gh, owner, repo, pr, githubId, raisedAt }) 
     if (decisive.state === 'CHANGES_REQUESTED') return { ok: true, verdict: 'changes_requested', review, head };
     return { ok: true, verdict: 'none', review, head };
   } catch (e) {
-    return fail(`could not read the reviews: ${String(e?.message ?? e).slice(0, 200)}`);
+    // A read that threw is not the owner's answer (#108 r2, LEAD-CALLS L205): `unreadable`, with the error as `cause`.
+    return fail(`could not read the reviews: ${String(e?.message ?? e).slice(0, 200)}`, { unreadable: true, cause: e });
   }
 }
 
@@ -137,6 +142,6 @@ export async function countApprove({ gh, view, owner, repo, pr, githubId, raised
     if (!r.review) return fail(`the Approve was on an older commit and does not carry over: ${r.reasons.join('; ')}`);
     return { ok: true, head: H1, review: v.review, carried: true };
   } catch (e) {
-    return fail(`could not check the Approve carries over: ${String(e?.message ?? e).slice(0, 200)}`);
+    return fail(`could not check the Approve carries over: ${String(e?.message ?? e).slice(0, 200)}`, { unreadable: true, cause: e });
   }
 }

@@ -2376,3 +2376,126 @@ test('L190 M1: a merge that waited and then merged keeps no wait fields', async 
   assert.equal(m.doc.state, 'merged', JSON.stringify(m.doc));
   for (const k of ['waiting_on', 'waiting_since', 'wait_told_at', 'stuck_since']) assert.equal(m.doc[k] ?? null, null, `${k} is cleared`);
 });
+
+// ---- L205 (#108 r2): a check whose GitHub read failed is not GitHub's "no" ----------------------------------------
+// M2's go and Approve checks, M10's exact-reverse and carry-over checks and the robot's mark turned a failed read into a
+// "no" with a reason, so one 502 refused a merge for good. The read is now classed: a failed read holds the merge and
+// does not count toward the cap; a 4xx other than 401, 403 and 429 is GitHub's answer, so its wait counts (Minor 1).
+const failOnce = (w, method, match, err) => {
+  const view = w.ctx.view;
+  const state = { left: 1 };
+  w.ctx.view = Object.create(view, { [method]: { value: (...a) => (state.left > 0 && match(...a) ? (state.left -= 1, Promise.reject(err())) : view[method](...a)) } });
+  return state;
+};
+const ghErr = (status) => () => new Error(`GitHub answered ${status} for /repos/sample-org/sample-app/git/trees/t?recursive=1`);
+
+test('L205: a single 502 on the go check\'s folder read leaves the merge held, not refused; the next pass merges', async () => {
+  const w = world(limited());
+  verifiedCard(w);
+  const s = failOnce(w, 'isDir', () => true, ghErr(502));
+  await gatePass(w.ctx);
+  waitingHeld(mergeOf(w), /^10: the go could not be checked/);
+  assert.equal(s.left, 0, 'the folder read was the one that failed');
+  assert.equal(mergeOf(w).doc.stuck_since, null, 'a failed read does not start the cap\'s clock');
+  assert.deepEqual(told(w, 'merge_refused'), []);
+  tick(w, 1);
+  await gatePass(w.ctx);
+  assert.equal(mergeOf(w).doc.state, 'merged', JSON.stringify(mergeOf(w).doc));
+});
+
+test('L205: a go check whose folder read keeps failing past the cap never refuses; it merges once the read returns', async () => {
+  const w = world(limited());
+  verifiedCard(w);
+  const s = failOnce(w, 'isDir', () => true, ghErr(502));
+  for (const step of [0, LIMIT_MIN, WAIT_CAP_TIMES * LIMIT_MIN, 5]) {
+    s.left = 1;
+    tick(w, step);
+    await gatePass(w.ctx);
+    waitingHeld(mergeOf(w), /^10: the go could not be checked/);
+  }
+  assert.equal(mergeOf(w).doc.stuck_since, null);
+  assert.deepEqual(told(w, 'merge_refused'), []);
+  tick(w, 1);
+  await gatePass(w.ctx);
+  assert.equal(mergeOf(w).doc.state, 'merged');
+});
+
+// Minor 1: GitHub answered (a 404 here); the check could not finish, so 10 waits, and that wait counts toward the cap.
+test('L205 Minor 1: a 404 on the go check\'s folder read is an answer: the wait counts toward the cap', async () => {
+  const w = world(limited());
+  verifiedCard(w);
+  const view = w.ctx.view;
+  w.ctx.view = Object.create(view, { isDir: { value: () => Promise.reject(ghErr(404)()) } });
+  await cappedAfter(w, /^10: the go could not be checked/);
+});
+
+// defaultReadRow: a row file read that fails (not 200, not 404) is unknown, so 10 waits; read, it is judged.
+test('L205: a row file read that fails holds the merge on 10; read, the change is judged on the row', async () => {
+  const w = world(limited());
+  verifiedCard(w, 'C-1', { files: { 'src/a.mjs': 'two', 'docs/blueprint/rows/R-1.yaml': 'id: R-1\n' } });
+  let down = true;
+  wrapGet(w, (p, r) => (down && p.includes('/contents/docs/blueprint/rows/R-1.yaml') ? { status: 502, json: null } : r));
+  await gatePass(w.ctx);
+  waitingHeld(mergeOf(w), /^10: the go could not be checked/);
+  assert.equal(mergeOf(w).doc.stuck_since, null);
+  down = false;
+  tick(w, 1);
+  await gatePass(w.ctx);
+  assert.equal(mergeOf(w).doc.state, 'refused');
+  assert.ok(mergeOf(w).doc.reasons.some((x) => /^10: docs\/blueprint\/rows\/R-1\.yaml is a row the go doesn't name/.test(x)), mergeOf(w).doc.reasons.join(' | '));
+});
+
+// The undo route with one read under the exact-reverse check failing: held on 9, never refused; next pass it merges.
+test('L205: a failed read in the exact-reverse check holds the undo on 9; the next pass merges it', async () => {
+  const w = world();
+  verifiedCard(w);
+  await gatePass(w.ctx);
+  const flagged = mergeOf(w).doc.merge_commit;
+  must(w.env.record.write({ actor: 'sensors', entity: 'fact', id: 'audit-run-1', expectRev: 0, doc: { type: 'audit_run', commit: flagged, conclusion: 'failure' } }), 'fact');
+  await gatePass(w.ctx);
+  must(put(w.env.record, 'dispatcher', 'card', 'C-1', { state: 'closed' }), 'closed');
+  w.env.clock.t += 60_000;
+  verifiedCard(w, 'U-1', { pr: 9, files: { 'src/a.mjs': 'one' }, undo: flagged });
+  w.ctx.rules = fakeRules({ values: w.values, answers: { merge: allow('in lane') } });
+  const s = failOnce(w, 'onHistory', (sha) => sha === flagged, ghErr(502));
+  await gatePass(w.ctx);
+  assert.equal(s.left, 0);
+  const u = mergeOf(w, 'U-1');
+  assert.equal(u.doc.state, 'held', JSON.stringify(u.doc));
+  assert.ok((u.doc.waiting_on ?? []).some((x) => /^9: whether the undo is an exact reverse could not be read/.test(x)), (u.doc.waiting_on ?? []).join(' | '));
+  tick(w, 1);
+  await gatePass(w.ctx);
+  assert.equal(mergeOf(w, 'U-1').doc.state, 'merged', JSON.stringify(mergeOf(w, 'U-1').doc));
+});
+
+// L205 Minor 2, a tripwire: the real git view's error for a GitHub answer is what failedRead classes. If git-view's
+// message or shape changes, this fails here rather than every failed read quietly counting toward the cap.
+test('L205 Minor 2: the real makeGitView\'s errors are classed by failedRead: 5xx, 401, 403, 429 failed; 404, 422 answered', async () => {
+  const { failedRead } = await import('./gather.mjs');
+  for (const [status, failed] of [[502, true], [500, true], [401, true], [403, true], [429, true], [404, false], [422, false]]) {
+    const view = makeGitView({ gh: { get: async () => ({ status, json: null }) }, owner: 'sample-org', repo: 'sample-app' });
+    for (const read of [() => view.isDir('a'.repeat(40), 'src'), () => view.commit('a'.repeat(40)), () => view.compare('a'.repeat(40), 'b'.repeat(40))]) {
+      const e = await read().then(() => null, (x) => x);
+      assert.ok(e, `${status}: the read threw`);
+      assert.equal(failedRead(e), failed, `${status}: ${e?.message}`);
+    }
+  }
+  const dropped = makeGitView({ gh: { get: async () => { throw new TypeError('fetch failed'); } }, owner: 'sample-org', repo: 'sample-app' });
+  assert.equal(failedRead(await dropped.commit('a'.repeat(40)).then(() => null, (x) => x)), true, 'no answer at all');
+});
+
+// Lane 1's review of the L205 M2 diff, note 1: M2 marks any read that threw `unreadable`, with the error as `cause`;
+// the Merge Gate classes the cause. This drives M2's real countApprove with GitHub answering each status on the pull
+// request read: a 404, 410 or 422 is GitHub's answer (the wait counts toward the cap, so a gone pull request is refused
+// at the cap, never held forever); a 5xx, 401, 403 or 429 is a failed read (held, no clock).
+test('L205 lane 1 note 1: M2\'s unreadable Approve is classed by its cause: 404/410/422 answered, 5xx/401/403/429 failed', async () => {
+  const { failedRead } = await import('./gather.mjs');
+  const { countApprove } = await import('../M2-approvals/github-review.mjs');
+  for (const [status, failed] of [[404, false], [410, false], [422, false], [500, true], [502, true], [401, true], [403, true], [429, true]]) {
+    const gh = { get: async () => ({ status, json: null }) };
+    const v = await countApprove({ gh, view: null, owner: 'sample-org', repo: 'sample-app', pr: 12, githubId: 1, raisedAt: '2026-11-01T00:00:00Z' });
+    assert.deepEqual([v.ok, v.unreadable], [false, true], `${status}: ${JSON.stringify(v)}`);
+    assert.match(String(v.cause?.message), new RegExp(`^GitHub answered ${status} for /repos/sample-org/sample-app/pulls/12`));
+    assert.equal(failedRead(v.cause), failed, `${status}: ${v.cause?.message}`);
+  }
+});

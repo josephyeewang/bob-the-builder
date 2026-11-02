@@ -188,3 +188,26 @@ test('another account\'s "Request changes" in the same second as the owner\'s Ap
   w.g.review(7, { user: 777, state: 'CHANGES_REQUESTED', commit_id: w.H0, submitted_at: T0 + MIN });
   assert.equal((await w.count(raised)).ok, false);
 });
+
+// L205 (#108 r2): a GitHub read that fails is not the owner's answer. ownerVerdict and countApprove say `unreadable`,
+// with the error as `cause`, whether the failure is in the reviews read or in the carry-over's reads; GitHub's own
+// "no" (here, a carry-over that does not hold) is not unreadable.
+test('L205: a failed review read or carry-over read is unreadable, with its error; an answered "no" is not', async () => {
+  const w = world(); const raised = await w.raise();
+  w.g.review(7, { state: 'APPROVED', commit_id: w.H0, submitted_at: T0 + MIN });
+  const get = w.g.gh.get;
+  w.g.gh.get = async (p) => (/\/reviews/.test(p) ? { status: 502, json: null } : get(p));
+  const v = await w.count(raised);
+  assert.deepEqual([v.ok, v.unreadable], [false, true], JSON.stringify(v));
+  assert.match(String(v.cause?.message), /^GitHub answered 502 for /);
+  w.g.gh.get = get;
+  w.moveHead(w.H1);
+  const catchUps = [{ pr: 7, before_sha: w.H0, after_sha: w.H1 }];
+  const boom = new Error('GitHub answered 503 for /repos/sample-org/sample-app/compare/x...y');
+  const down = Object.create(w.view, { compare: { value: async () => { throw boom; } } });
+  const c = await countApprove({ gh: w.g.gh, view: down, owner: 'sample-org', repo: 'sample-app', pr: 7, githubId: OWNER, raisedAt: raised, catchUps });
+  assert.deepEqual([c.ok, c.unreadable, c.cause], [false, true, boom], JSON.stringify(c));
+  assert.equal((await w.count(raised, catchUps)).ok, true, 'read: it carries over');
+  const no = await w.count(raised, []);
+  assert.deepEqual([no.ok, no.unreadable], [false, undefined], 'not a recorded catch-up: GitHub\'s answer, a "no"');
+});

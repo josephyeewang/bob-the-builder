@@ -328,3 +328,21 @@ test('L182 class (r2 probe): too_many with main red still refuses (a final refus
   const b = judge(clean((f) => { f.files = null; f.filesProblem = 'unread'; f.lane = null; f.tier = null; f.go = null; }));
   assert.equal(b.decision, 'hold', JSON.stringify(b));
 });
+
+// L205 (#108 r2): a check whose GitHub read failed is not GitHub's "no". Each refusal it feeds waits, and the same fact
+// read (not unread) still refuses, so the wait is only for the unknown.
+const unreadAp = (over = {}) => ({ needed: true, why: ['risky: schema'], stands: false, unread: true, reason: 'the Approve could not be read from GitHub: GitHub answered 502', ...over });
+const L205 = [
+  [[8], 'the Approve unread, needed', (f) => { f.approve = unreadAp(); }, (f) => { f.approve = { ...unreadAp(), unread: undefined }; }],
+  [[8], 'the Approve unread, the rules ask', (f) => { f.lane = { decision: 'ask', tier: 1, reason: 'risky' }; f.approve = unreadAp({ needed: false }); }, (f) => { f.lane = { decision: 'ask', tier: 1, reason: 'risky' }; f.approve = { needed: false, why: [], stands: false }; }],
+  [[13], 'the Approve unread, a fix card', (f) => { f.card.doc.kind = 'fix'; f.approve = unreadAp({ needed: false }); }, (f) => { f.card.doc.kind = 'fix'; }],
+  [[14], 'the Approve unread, a new customer-visible file', (f) => { f.files.push({ path: 'app/pages/new.tsx', status: 'added' }); f.approve = unreadAp({ needed: false }); }, (f) => { f.files.push({ path: 'app/pages/new.tsx', status: 'added' }); }],
+  [[9], 'an undo whose exact-reverse read failed', (f) => { reverse(f); f.exactReverse = false; f.exactReverseUnread = true; }, (f) => { reverse(f); f.exactReverse = false; }],
+  [[9], 'a first-cutover undo whose robot-mark read failed', (f) => { reverse(f); f.cutoverStage = 'first'; f.reversesGateMerge = false; f.reversesGateMergeUnread = true; }, (f) => { reverse(f); f.cutoverStage = 'first'; f.reversesGateMerge = false; }],
+];
+for (const [ns, name, unread, answered] of L205) {
+  test(`L205: ${name} waits; read and answered, it refuses`, () => {
+    assert.deepEqual(waitsOn(clean(unread)), ns);
+    assert.ok(only(clean(answered)).includes(ns[0]));
+  });
+}

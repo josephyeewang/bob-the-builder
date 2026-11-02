@@ -42,9 +42,12 @@
 //   tier 1 | 2 | null                        M10's computed tier for the change
 //   exactReverse bool                        the change recomputes as an exact reverse (M10 exact-reverse.mjs)
 //   reversesGateMerge bool                   the reversed commit carries the robot's mark (first-cutover undo)
+//   exactReverseUnread, reversesGateMergeUnread true | undefined   a read under either check failed: unknown (L205)
 //   lane { decision, reason, tier }          rules.may('merge', subject): M10 picks docs lane or deep by cutover
-//   approve { needed, why, stands, reason }  M2 approveNeeded + approvalStands (refusals 8, 13, 14)
-//   go { ok, reasons, skipped } | null       M2 goCheck, or skipped for a go-free kind (refusal 10)
+//   approve { needed, why, stands, reason, unread? }  M2 approveNeeded + approvalStands (refusals 8, 13, 14); unread:
+//                                            the Approve could not be read from GitHub, so it is not known (L205)
+//   go { ok, reasons, skipped } | null       M2 goCheck, or skipped for a go-free kind (refusal 10); null when it could
+//                                            not be read (M2's `unreadable`, L205)
 //   threads { ok, unresolved } | { ok: false, tooLong | incomplete | unreadable }   review threads, GraphQL (refusal 7)
 //   unreadReads [name]                       the reads that FAILED this pass (gather failedRead); the gate reads them (L190)
 //   rulesAdopted bool | null                 the adopted rules blob equals policy.yaml at main (else a hold)
@@ -218,6 +221,11 @@ export function judge(f) {
     const reverse = f.exactReverse === true;
     const kind = f.card.doc.kind ?? 'ordinary';
     if (kind === 'lead_daily_card') return { decision: 'refuse', refusals: [{ n: 9, reason: DAILY_CARD_LINE }], hold: null, notes };
+    // An undo whose own facts could not be read is judged on nothing else: as not a reverse, every other refusal would
+    // apply to it and some are final. It waits for a pass that reads them (L205).
+    if (kind === 'exact_reverse' && (f.exactReverseUnread === true || (first && reverse && f.reversesGateMergeUnread === true))) {
+      return { decision: 'hold', refusals: [{ n: 9, reason: f.exactReverseUnread === true ? 'whether the undo is an exact reverse could not be read' : 'whether the undo reverses a merge the gate made could not be read', temporary: true }], hold: WAITING_HOLD, notes };
+    }
     if (kind === 'exact_reverse' && !reverse) no(9, 'an undo card whose change is not an exact reverse');
     else if (first && kind === 'exact_reverse' && f.reversesGateMerge !== true) no(9, 'first cutover: an undo merges only when it reverses a merge the gate made');
 
@@ -259,18 +267,22 @@ export function judge(f) {
     // M10's own ask for a reverse still needs it (R2-M3).
     const ap = f.approve;
     const stands = ap?.stands === true;
+    // An Approve that could not be read from GitHub (ap.unread, L205) is not known to be missing: 8, 13 and 14 wait.
+    const apUnread = ap?.unread === true;
+    const approveWait = (n) => wait(n, ap.reason ?? 'the owner\'s Approve could not be read from GitHub');
     if (!stands) {
-      if (lane?.decision === 'ask') no(8, `the rules ask for the owner's Approve: ${lane.reason}`);
+      if (apUnread && (lane?.decision === 'ask' || (!reverse && ap?.needed !== false))) approveWait(8);
+      else if (lane?.decision === 'ask') no(8, `the rules ask for the owner's Approve: ${lane.reason}`);
       // With the change's files unread, M10 calls every change unclassifiable, so "needs the Approve" is not known yet
       // (PROBE-D, L164): it waits for a pass that reads them.
       else if (!reverse && ap?.needed === true && !Array.isArray(f.files)) waitFiles(8, 'the change\'s files could not be read, so whether it needs the owner\'s Approve is not known yet');
       else if (!reverse && ap?.needed === true) no(8, `needs the owner's Approve: ${(ap.why ?? []).join('; ')}${ap.reason ? ` (${ap.reason})` : ''}`);
       else if (!reverse && ap?.needed !== false) wait(8, 'the Approve check could not run');
     }
-    if (kind === 'fix') { if (stands) notes.push(NOT_BUILT_LINE); else no(13, 'a fix card needs the owner\'s Approve until refusal 13 is built'); }
+    if (kind === 'fix') { if (stands) notes.push(NOT_BUILT_LINE); else if (apUnread) approveWait(13); else no(13, 'a fix card needs the owner\'s Approve until refusal 13 is built'); }
     const cf = customerFiles(f);
     if (cf === null) (Array.isArray(f.files) ? wait : waitFiles)(14, 'the change\'s files or the first-customer paths could not be read');
-    else if (cf.length) { if (stands) { if (!notes.includes(NOT_BUILT_LINE)) notes.push(NOT_BUILT_LINE); } else no(14, `${cf[0].path} is customer-visible; needs the owner's Approve until refusal 14 is built`); }
+    else if (cf.length) { if (stands) { if (!notes.includes(NOT_BUILT_LINE)) notes.push(NOT_BUILT_LINE); } else if (apUnread) approveWait(14); else no(14, `${cf[0].path} is customer-visible; needs the owner's Approve until refusal 14 is built`); }
     // 10. The go.
     if (!f.go) (Array.isArray(f.files) ? wait : waitFiles)(10, 'the go could not be checked');
     else if (f.go.ok !== true && f.go.skipped !== true) no(10, (Array.isArray(f.go.reasons) && f.go.reasons.length ? f.go.reasons : ['go mismatch']).join('; '));

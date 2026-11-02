@@ -68,15 +68,18 @@ const WAIT_CLEARED = Object.freeze({ waiting_on: null, waiting_since: null, wait
  * One answer to "was GitHub unreadable this pass", for serve and for check under the lock (L190 M2).
  * outage: the pull request, main or the head's checks or statuses could not be read: hold this one and stop the queue.
  * unreadable: that, or another read that FAILED (gather's unreadReads: main's checks, the reviewed tree, the go check,
- * the Approve check, the threads, the rules at main), or a failed carry-over or compare read (L186, L187). A pass with
+ * the Approve check, the undo's checks, the carry-over, the compare, the threads, the rules at main; L186, L187, L205),
+ * or a compare with no answer. Failed is gather's failedRead: a 4xx other than 401/403/429 was answered. A pass with
  * GitHub unreadable neither starts the wait cap's clock nor refuses at the cap. A read that was answered but came back
  * incomplete (a count that doesn't match its list) is not unreadable, so it counts toward the cap (L190 M3, M4).
  */
 export function passUnreadable(facts) {
   const failed = (k) => (facts?.unreadReads ?? []).includes(k);
   const outage = !!facts?.card && (!facts.pr || !SHA.test(facts.main?.sha ?? '') || failed('checks') || failed('statuses'));
+  // A carry-over or compare read that failed is in unreadReads (L205); one GitHub answered with a 4xx other than 401,
+  // 403 and 429 is not (#108 r2 Minor 1), so that wait counts toward the cap.
   const unreadable = !!facts?.card && (outage || (facts.unreadReads ?? []).length > 0 || facts.threads?.unreadable === true
-    || facts.carried?.unread === true || facts.compareStatus === null);
+    || (facts.compareStatus === null && facts.compareAnswered !== true));
   return { outage, unreadable };
 }
 export const GITHUB_NO_NOTE ='GitHub refused the merge; the card goes back and is asked for again, and the same refusal twice goes to the owner';
