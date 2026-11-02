@@ -330,7 +330,7 @@ export async function wire() {
   assert.match(bare.stderr, /usage: main\.mjs <config\.json>/);
 });
 
-test('audit 0b-6 r2 MAT-2: a Lead\'s read-only request goes through the start gate in the tick: red, the cap of 4, an outage and no signed-in account hold it; green starts it', { todo: 'L137: think has no record rule in OUTBOX_KINDS yet, so the real Record refuses it; the expectation stays until the per-kind fix' }, async () => {
+test('audit 0b-6 r2 MAT-2: a Lead\'s read-only request goes through the start gate in the tick: red, the cap of 4, an outage and no signed-in account hold it; green starts it', async () => {
   const lead = (dir) => { mkdirSync(dir, { recursive: true }); writeFileSync(join(dir, 'think-q1.md'), 'Is A safe?'); return [{ sessionId: 'L-1', role: 'lead', outbox: dir, uid: process.getuid(), product: 'p1' }]; };
   const root = tempDir('m11-ro-');
   const run = async (name, entries, over = {}, signedIn = true) => {
@@ -1022,4 +1022,31 @@ test('L116 m4: a card the gate refused twice the same way is told to Joe through
   const told = w.calls.alerts.filter((a) => /card C-1: the merge was refused twice for the same reason \(405\)/.test(a));
   assert.equal(told.length, 1, w.calls.alerts.join(' | '));
   assert.equal(requested(w.rec, 'C-1'), null, 'not requested while it waits on Joe');
+});
+
+// L172 m3, in the tick: the outage step queues its alert in the Record's outbox (tick.mjs `outbox`); the send to the
+// owner is the alert port, here throwing on the first try. The pass that opens the outage still holds every start, and
+// the outage is told once, on a later pass. (outage.test.mjs has the throw from outageStep's own alert.)
+test('L172 m3: an outage opened in a pass whose outage alert send throws still holds starts that pass, and is told once later', async () => {
+  const gone = (id, c) => ({ id, card: c, alive: false, ended: true, lastWriteAt: T0 - 10 * MIN });
+  const board = [gone('S-1', 'C-1'), gone('S-2', 'C-2'), gone('S-3', 'C-3')];
+  let throwOnce = true;
+  const told = [];
+  const w = world([account(), usage(), card('C-1', { state: 'running' }), card('C-2', { state: 'running' }), card('C-3', { state: 'running' }),
+    card('R-1', { state: 'in_review', changed_at: iso(T0 - 60 * MIN) }), ...mergeReady('V-1', 7)],
+  { over: { board: () => board, healthy: () => false, alert: (t) => {
+    const text = typeof t === 'string' ? t : t.text;
+    if (/stopped at once/.test(text)) { if (throwOnce) { throwOnce = false; throw new Error('queue gone'); } told.push(text); }
+    return true;
+  } } });
+  const r = await w.pass();
+  assert.equal(w.rec.read('fact', OUTAGE_FACT).doc.state, 'open');
+  assert.equal(w.rec.read('fact', OUTAGE_FACT).doc.told_id, undefined);
+  assert.deepEqual(w.calls.reviewers, [], 'no reviewer starts in the pass the outage opened');
+  assert.deepEqual(w.calls.launched, []);
+  assert.equal(requested(w.rec, 'V-1'), null, 'no merge is requested');
+  assert.match(String(r.steps.leads.result), /outage/);
+  for (let i = 1; i <= 3; i += 1) await w.pass(i);
+  assert.equal(told.length, 1, 'told once, on a later pass');
+  assert.equal(w.rec.read('fact', OUTAGE_FACT).doc.told_id, w.rec.read('fact', OUTAGE_FACT).doc.id);
 });

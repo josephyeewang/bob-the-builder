@@ -1,10 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { writeFileSync, symlinkSync, mkdirSync, rmSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
 import { intakePass, kindsFor } from './outbox-intake.mjs';
 import { change, recWith, withAlerts, setClock, T0 } from './fixtures.test-helper.mjs';
-import { setup as setupRecord } from '../M9-record/fixtures.test-helper.mjs';
+import { setup as setupRecord, outboxFile } from '../M9-record/fixtures.test-helper.mjs';
 import { tempDir } from '../../shared/test-tmp.mjs';
 
 const UID = process.getuid();
@@ -137,7 +137,7 @@ test('an unreadable outbox is skipped, not fatal', async () => {
   assert.equal(out[0].skipped, 'outbox unreadable');
 });
 
-test('audit MAT-6: a read-only request the start refuses waits, the Lead is told once, and it is tried again', { todo: 'L137: think has no record rule in OUTBOX_KINDS yet, so the real Record refuses it; the expectation stays until the per-kind fix' }, async () => {
+test('audit MAT-6: a read-only request the start refuses waits, the Lead is told once, and it is tried again', async () => {
   const w = world();
   const ob = mk(join(w.root, 'lead'));
   writeFileSync(join(ob, 'think-q9.md'), 'Is B safe?');
@@ -414,3 +414,27 @@ test('L140: an apply answering not_a_record is handled, with no alert', async ()
   await tickRun(base, rec, w, sessions, port, 2);
   assert.deepEqual(got, []);
 });
+
+// L168 (2): writer.mjs marks a refused outbox file seen before its own alert, whose answer it does not read. The owner
+// still hears of it once: the Dispatcher's intake tells every refusal the Record answers, until its own tell is taken.
+// Real Record; its own alert lost (false, or a throw, which the store's send turns into false).
+for (const [path, place] of [['a hand-in for a card the Record does not have', 'own'], ['a file in another session\'s folder', 'other']]) {
+  for (const [how, lost] of [['false', () => false], ['throws', () => { throw new Error('queue gone'); }]]) {
+    test(`L168 (2): ${path}, the Record's own alert lost (${how}): the intake tells the owner exactly once`, async () => {
+      let recordAlerts = 0;
+      const E = setupRecord({ prefix: 'm11-intake-l168-', extra: { alert: (a) => { recordAlerts += 1; return lost(a); } } });
+      const name = 'handin-C-9.md';
+      const file = outboxFile(E, 'worker', place === 'own' ? 'S-1' : 'S-2', name, `${JSON.stringify({ entity: 'card', id: 'C-9', from_state: 'running', to_state: 'in_review' })}\n`);
+      const sessions = [{ sessionId: 'S-1', role: 'worker', outbox: dirname(file), uid: UID, card: 'C-9' }];
+      const w = world();
+      const got = [];
+      const run = () => withAlerts(E.record, E.clock.t, (t) => { got.push(typeof t === 'string' ? t : t.text); return true; }, (alert) => intakePass({ rec: E.record, sessions, ...w.ports, alert, now: E.clock.t }));
+      const [r] = await run();
+      assert.ok(r.refused, JSON.stringify(r));
+      assert.ok(recordAlerts >= 1, 'the Record tried its own alert');
+      for (let i = 0; i < 3; i++) { E.clock.t += 60_000; await run(); }
+      assert.equal(got.length, 1, got.join(' | '));
+      assert.match(got[0], new RegExp(`refused ${name.replace('.', '\\.')} from worker S-1`));
+    });
+  }
+}

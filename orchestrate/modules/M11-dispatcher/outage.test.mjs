@@ -47,12 +47,16 @@ test('M9: a board of 4 with 3 killed in one pass restarts nothing and alerts onc
   assert.deepEqual(rec.read('fact', OUTAGE_FACT).doc.dead.map((d) => d.id), ['S1', 'S2', 'S3', 'S4']);
 });
 
-test('L130: an outage whose alert was not queued is told, in its own words, on the next pass, once', async () => {
+// L172 m3: an alert that throws is not taken either, the same as one that answers false.
+for (const [how, lost] of [['was not queued', () => false], ['threw', () => { throw new Error('queue gone'); }]]) test(`L130: an outage whose alert ${how} is told, in its own words, on the next pass, once`, async () => {
   const rec = recWith(cards());
   const alerts = [];
   const step = (a) => withAlerts(rec, a.now, (t) => { alerts.push(t); return true; }, (alert) => outageStep({ ...a, alert }));
   const board = [gone('S1', 'C-1'), gone('S2', 'C-2'), gone('S3', 'C-3'), live('S4', 'C-4')];
-  assert.equal(outageStep({ rec, rules: R, board, now: T0, healthy: false, alert: () => false }).outage, true);
+  // A throw leaves outageStep (the tick's run() catches it); the outage is written first either way.
+  if (how === 'threw') assert.throws(() => outageStep({ rec, rules: R, board, now: T0, healthy: false, alert: lost }), /queue gone/);
+  else assert.equal(outageStep({ rec, rules: R, board, now: T0, healthy: false, alert: lost }).outage, true);
+  assert.equal(rec.read('fact', OUTAGE_FACT).doc.state, 'open');
   assert.equal(rec.read('fact', OUTAGE_FACT).doc.told_id, undefined, 'not marked told');
   assert.equal((await step({ rec, rules: R, board: [], now: T0 + MIN, healthy: false })).outage, true);
   assert.equal(alerts.length, 1);

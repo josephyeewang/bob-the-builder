@@ -187,18 +187,25 @@ async function sweepCase(w, name) {
  * git run with safe-git's environment and flags but without its config check: the second layer alone. A git still
  * running after 30 s is stopped with everything it started (its own process group) and comes back `hung`: a program
  * git started that keeps git's output open (a planted `cat`) would otherwise keep the case waiting until the sweep's
- * limit cancels it (#35).
+ * limit cancels it (#35). Like runChild in safe-git.mjs, the stop also closes git's three pipes and ends the call at
+ * once (L177 c3): a program that left git's process group and keeps a pipe open would otherwise keep node waiting.
  */
-function rawGit(args, { gitDir, workTree, input } = {}) {
-  return new Promise((done) => {
+function rawGit(args, { gitDir, workTree, input, stopMs = 30_000 } = {}) {
+  return new Promise((resolve) => {
     const child = spawn('git', ['--no-pager', ...withNoPrograms(args)], { cwd: tmp(), env: safeGitEnv({ gitDir, workTree }), stdio: ['pipe', 'pipe', 'pipe'], detached: true });
     let err = '';
     let out = '';
-    let hung = false;
-    const timer = setTimeout(() => { hung = true; try { process.kill(-child.pid, 'SIGKILL'); } catch {} }, 30_000);
+    let ended = false;
+    let timer = null;
+    const done = (r) => { if (ended) return; ended = true; clearTimeout(timer); resolve(r); };
+    timer = setTimeout(() => {
+      try { process.kill(-child.pid, 'SIGKILL'); } catch {}
+      for (const s of [child.stdin, child.stdout, child.stderr]) s.destroy();
+      done({ code: null, stdout: out, stderr: err, hung: true });
+    }, stopMs);
     child.stdout.on('data', (d) => { out += d; });
     child.stderr.on('data', (d) => { err += d; });
-    child.on('close', (code) => { clearTimeout(timer); done({ code, stdout: out, stderr: err, hung }); });
+    child.on('close', (code) => done({ code, stdout: out, stderr: err, hung: false }));
     child.stdin.on('error', () => {});
     child.stdin.end(input ?? '');
   });
@@ -245,7 +252,11 @@ async function everyCommand(w, d, run) {
   const cmds = [
     [['status', '--porcelain'], o], [['status'], o], [['add', '-A'], o], [['add', 'a.txt'], o],
     [['--literal-pathspecs', 'log', '-n4', '--name-only', '--format=%H %s', 'main'], o], [['log', '-n4', '-p', 'main'], o],
-    [['log', '-1', '--format=%an <%ae>%n%cn <%ce>%n%B', 'main'], o], [['show', 'main'], o], [['diff', 'HEAD~1'], o], [['diff', '--cached'], o],
+    [['log', '-1', '--format=%an <%ae>%n%cn <%ce>%n%B', 'main'], o], [['show', 'main'], o],
+    // %G? checks each commit's signature whatever log.showSignature says, so with both gpg pins dropped the
+    // repository's signing program runs (L177 c5).
+    [['log', '-n4', '--format=%H %G?', 'main'], o],
+    [['diff', 'HEAD~1'], o], [['diff', '--cached'], o],
     [['diff-tree', '-p', '-r', '--text', '--no-commit-id', 'main'], o], [['diff-tree', '-r', '-z', '--raw', 'main'], o],
     [['cat-file', 'commit', 'main'], o], [['cat-file', 'blob', 'main:a.txt'], o], [['ls-tree', '-r', '-z', '--full-tree', 'main'], o],
     [['ls-files', '-s'], o], [['rev-parse', '--verify', 'main^{commit}'], o], [['rev-list', '--parents', 'main'], o],
@@ -366,10 +377,24 @@ test('L36/L49 sweep: every planted key is refused before git runs; the pins alon
       return kv ? [`${head}.${kv[1]}`] : [];
     });
   };
+  // This name check is the only thing that catches most single pins dropped (L177 m1: 12 of 18 went red only here),
+  // because the pins back each other up. Never relax it on the belief that the runs of git below cover it.
   const sigKeys = keysIn(sign('[gpg]\n\tprogram = x'));
   assert.ok(sigKeys.length >= 8, `read only ${sigKeys.length} signature keys`);
-  // diff.external is the one stopped by a flag (--no-ext-diff on every diff command, withNoPrograms), not a pin.
-  const unpinned = [...Object.keys(pinned), ...sigKeys].filter((k) => k !== 'diff.external' && !pinnedKeys.has(k.toLowerCase()));
+  // Every key every pinned case plants, not just the one it is named for (L177 m2): sequence.editor,
+  // gpg.ssh.defaultKeyCommand and the recurseSubmodules keys ride along in other cases. The case's lines are read
+  // with stand-in traps, so nothing is written. Not pins, by design:
+  // - diff.external is stopped by a flag (--no-ext-diff on every diff command, withNoPrograms);
+  // - remote.origin.url and gpg.format only say where or how, and run nothing themselves;
+  // - pager.log is a per-command pager, which --no-pager overrides;
+  // - the filter "y", diff "y" and merge "y" drivers are named, and only reachable through the attributes file;
+  // - gpg.ssh.allowedSignersFile names a file that is read, not run.
+  const NOT_PINS = ['diff.external', 'remote.origin.url', 'gpg.format', 'pager.log', 'gpg.ssh.allowedsignersfile'];
+  const notPin = (k) => NOT_PINS.includes(k.toLowerCase()) || /^(filter|diff|merge)\.y\./i.test(k);
+  const stand = { prog: (n) => `/stand-in/${n}`, hooks: '/stand-in/hooks', attrs: '/stand-in/attributes', traps: '/stand-in' };
+  const planted = Object.entries(pinned).flatMap(([name, lines]) => [name, ...keysIn(lines(stand, { net: { url: 'http://127.0.0.1:1' } }))]);
+  assert.ok(planted.some((k) => k === 'sequence.editor') && planted.some((k) => k === 'push.recurseSubmodules'), 'the pinned cases\' own lines are read');
+  const unpinned = [...new Set([...planted, ...sigKeys])].filter((k) => !notPin(k) && !pinnedKeys.has(k.toLowerCase()));
   assert.deepEqual(unpinned, [], 'planted as pinned, but SAFE_CONFIG does not pin it');
   const cases = [...Object.entries(pinned).map(([name, lines]) => [name, lines, true]), ...Object.entries(named).map(([name, lines]) => [name, lines, false])];
   const done = [];
@@ -400,6 +425,25 @@ test('L36/L49 sweep: every planted key is refused before git runs; the pins alon
   for (const [name, t] of done) { fired(t, `${name} (after the sweep)`); await t.net.close(); }
   assert.equal(done.length, cases.length);
   assert.deepEqual(failures.sort(), []);
+});
+
+// L177 c3: the sweep's own git runner ends at its stop time even when a program git started has left git's process
+// group and keeps git's output open (the audit's case lingered 611 s). The program writes its number down, so the
+// test stops it afterwards.
+test('L177 c3: rawGit ends at its stop time though a program that left git\'s process group keeps the output open', { timeout: 30_000 }, async () => {
+  const d = tmp();
+  const pidFile = join(d, 'pid');
+  const orphan = `!perl -MPOSIX -e 'if (fork) { sleep 20; exit } POSIX::setsid(); open(my $f, ">", $ARGV[0]); print $f $$; close $f; sleep 20'`;
+  const t0 = Date.now();
+  try {
+    const r = await rawGit(['-c', `alias.linger=${orphan}`, 'linger', pidFile], { gitDir: join(d, 'none.git'), stopMs: 1_500 });
+    const took = Date.now() - t0;
+    assert.ok(existsSync(pidFile), 'control: the program left the group and is still running');
+    assert.equal(r.hung, true, JSON.stringify(r));
+    assert.ok(took < 6_000, `rawGit took ${took} ms`);
+  } finally {
+    try { process.kill(Number(readFileSync(pidFile, 'utf8')), 'SIGKILL'); } catch {}
+  }
 });
 
 test('L36 sweep, control: the planted programs run when git is used the careless way', { timeout: 120_000 }, async () => {

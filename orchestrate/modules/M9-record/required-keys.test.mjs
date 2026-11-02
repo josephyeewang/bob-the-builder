@@ -62,3 +62,15 @@ test('the drift reader catches a new read in readyCheck in every form, and a key
   assert.deepEqual(unlisted(recordReads(ready, writer.replace("get('timeouts')", "get('timeouts2')")).keys), ['timeouts2']);
   assert.deepEqual(unlisted(recordReads(ready, writer.replace("rules?.num?.('proposals.heartbeat_stale_min'", "rules?.num?.('proposals.heartbeat_x'")).keys), ['proposals.heartbeat_x']);
 });
+
+// L164 m1: the optional claim waits, when set, are whole minutes, at least 1 (missing is fine; each says what happens).
+test('L164 m1: claims.stuck_min and claims.unlaunched_min, when set, must be whole minutes, at least 1', async () => {
+  const { policyProblems } = await import('./required-keys.mjs');
+  const { fakeRules } = await import('../../shared/rules.mjs');
+  const P = 'sample-app';
+  for (const key of OPTIONAL_KEYS) {
+    const line = `M9: ${key}, when set, must be a whole number of minutes, at least 1`;
+    for (const bad of [0, 'soon', -2, 1.5]) assert.ok(policyProblems(fakeRules({ values: { [key]: bad } }), P).includes(line), `${key}: ${bad}`);
+    for (const good of [1, 30, '30', undefined]) assert.ok(!policyProblems(fakeRules({ values: good === undefined ? {} : { [key]: good } }), P).includes(line), `${key}: ${good}`);
+  }
+});

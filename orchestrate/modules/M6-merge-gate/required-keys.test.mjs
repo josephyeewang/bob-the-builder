@@ -84,3 +84,14 @@ test('the reader catches a new read in any M6 file, in every form, and a key it 
   assert.equal(listed(['timeouts'], 'timeouts.merging_open_max_min'), false, '#77 r6 m-2: timeouts is not the go-free map');
   assert.equal(listed([GO_FREE_KEY], `${GO_FREE_KEY}.exact_reverse`), true);
 });
+
+// L164 m1: the merging limit, when set, is read as the gate reads it (M11 need): whole minutes, at least 1.
+test('L164 m1: timeouts.merging_open_max_min, when set, must be whole minutes, at least 1; missing is fine', async () => {
+  const { policyProblems } = await import('./required-keys.mjs');
+  const { fakeRules } = await import('../../shared/rules.mjs');
+  const P = 'sample-app';
+  const key = 'timeouts.merging_open_max_min';
+  const line = `M6: ${key}, when set, must be a whole number of minutes, at least 1`;
+  for (const bad of [0, '0', 'soon', -2, 1.5]) assert.ok(policyProblems(fakeRules({ values: { [key]: bad } }), P).includes(line), `${bad}`);
+  for (const good of [1, 15, '15', undefined]) assert.ok(!policyProblems(fakeRules({ values: good === undefined ? {} : { [key]: good } }), P).includes(line), `${good}`);
+});
