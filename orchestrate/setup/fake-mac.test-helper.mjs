@@ -140,13 +140,13 @@ export function fakeMac({ euid: as = 0, users = {}, admins = [] } = {}) {
     secure(p, want) { secureFolder(at(p), want, ports(p)); },
     secureFile(p, want) { secureFile(at(p), want, ports(p)); },
     // The real reader (links, plain file, owner, mode, folders above); `configOwner` stands in for the file's owner (a test is not root).
-    readConfig: (p, { strict = false } = {}) => readConfigFile(strict ? at(p) : p, { strict, rootUid: mac.rootUid, top: prefix, ownerOf: (st) => mac.configOwner ?? st.uid }),
+    readConfig: (p, { strict = false } = {}) => readConfigFile(strict ? at(p) : p, { strict, rootUid: mac.rootUid, top: prefix, ownerOf: (st) => mac.configOwner ?? st.uid, what: strict ? "root's setup config" : 'the setup config' }),
     configOwner: null,
     nodeProblem: () => mac.nodeProblemText,
     // The real checks on a node program the config names, for the file's own owner (the test process) and mode, in its own folder.
-    nodeBinProblem: (p) => nodeProblemOf(p, { rootUid: mac.rootUid, top: (() => { try { return dirname(realpathSync(p)); } catch { return '/'; } })() }),
+    nodeBinProblem: (p) => nodeProblemOf(p, { exact: true, rootUid: mac.rootUid, top: (() => { try { return dirname(realpathSync(p)); } catch { return '/'; } })() }),
     // The runner config is a real file outside the prefix. The real reader (links, plain file, size); as root also its owner and mode.
-    readSource: (p) => readConfigFile(p, { strict: mac.as === 0, rootUid: mac.rootUid, top: dirname(p), ownerOf: (st) => st.uid }),
+    readSource: (p) => readConfigFile(p, { strict: mac.as === 0, rootUid: mac.rootUid, top: dirname(p), ownerOf: (st) => st.uid, what: 'the runner config' }),
     // The install and the job files. The real calls, on the prefixed place; a write needs the parent folder (like the real one)
     // and makes a NEW file only (like the real one: it never overwrites or follows a link).
     readText: (p) => readFileSync(at(p), 'utf8'),
@@ -170,7 +170,7 @@ export function fakeMac({ euid: as = 0, users = {}, admins = [] } = {}) {
       const m = /^system\/(.+)$/.exec(a ?? '');
       if (!m) return err(64, 'Usage: launchctl print <domain-target>');
       if (!mac.loaded.has(m[1])) return err(113, `Could not find service "${m[1]}" in domain for system`);
-      return { status: 0, stdout: `system/${m[1]} = {\n\tstate = ${mac.loaded.get(m[1]).state}\n\tlast exit code = ${mac.loaded.get(m[1]).lastExit ?? '(never exited)'}\n}\n`, stderr: '' };
+      return { status: 0, stdout: `system/${m[1]} = {\n\tstate = ${mac.loaded.get(m[1]).state}\n\tlast exit code = ${mac.loaded.get(m[1]).lastExit ?? '(never exited)'}\n${mac.loaded.get(m[1]).pid ? `\tpid = ${mac.loaded.get(m[1]).pid}\n` : ''}}\n`, stderr: '' };
     }
     if (verb === 'bootstrap' || verb === 'bootout') {
       if (mac.as !== 0) return err(1, `${verb === 'bootstrap' ? 'Bootstrap' : 'Boot-out'} failed: 1: Operation not permitted`);
@@ -185,7 +185,8 @@ export function fakeMac({ euid: as = 0, users = {}, admins = [] } = {}) {
       const label = /<key>Label<\/key>\s*<string>([^<]+)<\/string>/.exec(text)?.[1];
       if (!label) return err(5, 'Bootstrap failed: 5: Input/output error');
       if (mac.loaded.has(label)) return err(5, 'Bootstrap failed: 5: Input/output error');
-      mac.loaded.set(label, { state: 'waiting' }); return { status: 0, stdout: '', stderr: '' };
+      mac.loaded.set(label, { state: 'running', pid: 4000 + mac.loaded.size, ageS: 5 });   // RunAtLoad: launchd starts it at once
+      return { status: 0, stdout: '', stderr: '' };
     }
     if (verb === 'bootout') {
       const m = /^system\/(.+)$/.exec(a ?? '');
@@ -196,6 +197,16 @@ export function fakeMac({ euid: as = 0, users = {}, admins = [] } = {}) {
     return err(64, 'Usage: launchctl <subcommand>');
   };
   const baseRun = mac.run;
-  mac.run = (cmd, args) => (cmd === '/bin/launchctl' ? mac.launchctl(args) : baseRun(cmd, args));
+  // ps: only `ps -o etime= -p <pid>`, the time a launched job's process has been running ([[dd-]hh:]mm:ss); an unknown pid exits 1 with nothing
+  mac.ps = (args) => {
+    const pid = args[0] === '-o' && args[1] === 'etime=' && args[2] === '-p' ? Number(args[3]) : NaN;
+    if (!Number.isInteger(pid)) return { status: 64, stdout: '', stderr: 'usage: ps -o etime= -p <pid>' };
+    const j = [...mac.loaded.values()].find((x) => x.pid === pid);
+    if (!j) return { status: 1, stdout: '', stderr: '' };
+    const s = j.ageS ?? 0; const dd = Math.floor(s / 86400); const r = s % 86400; const hh = Math.floor(r / 3600); const mm = Math.floor((r % 3600) / 60); const ss = r % 60;
+    const p2 = (n) => String(n).padStart(2, '0');
+    return { status: 0, stdout: `  ${dd ? `${dd}-${p2(hh)}:` : hh ? `${p2(hh)}:` : ''}${p2(mm)}:${p2(ss)}\n`, stderr: '' };
+  };
+  mac.run = (cmd, args) => (cmd === '/bin/launchctl' ? mac.launchctl(args) : cmd === '/bin/ps' ? mac.ps(args) : baseRun(cmd, args));
   return mac;
 }

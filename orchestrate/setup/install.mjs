@@ -129,7 +129,7 @@ export function planInstall(io, cfg, { readSource, runUpdater }) {
   ops.push(...dir(join(P.seed, 'bin'), 0o755), op(`copy node ${cfg.nodeBin} → ${join(P.seed, NODE)}`, () => io.copyFile(cfg.nodeBin, join(P.seed, NODE), 0o755)), ...rootOwned(io, join(P.seed, NODE), 0o755));
   const uc = updaterConfigFor(io, cfg);
   ops.push(op(`write ${join(P.seed, UPDATER_CONFIG)}`, () => io.write(join(P.seed, UPDATER_CONFIG), `${JSON.stringify(uc, null, 1)}\n`, 0o644)), ...rootOwned(io, join(P.seed, UPDATER_CONFIG), 0o644));
-  ops.push(op(`copy ${cfg.runnerConfig} → ${join(P.seed, RUNNER_CONFIG)}`, () => io.write(join(P.seed, RUNNER_CONFIG), readSource(cfg.runnerConfig), 0o644)), ...rootOwned(io, join(P.seed, RUNNER_CONFIG), 0o644));
+  ops.push(op(`copy ${cfg.runnerConfig} → ${join(P.seed, RUNNER_CONFIG)}`, () => io.write(join(P.seed, RUNNER_CONFIG), rcText, 0o644)), ...rootOwned(io, join(P.seed, RUNNER_CONFIG), 0o644));
   for (const e of cfg.extras) { const to = join(P.seed, posix.basename(e)); ops.push(op(`copy ${e} → ${to}`, () => { io.copyTree(e, to); ownTree(io, to); })); }
   ops.push(op(`run the updater's first run as root: ${join(P.seed, NODE)} ${join(P.bootstrap, SCRIPTS.updater)} ${join(P.seed, UPDATER_CONFIG)} --first ${P.seed}`, () => {
     const r = runUpdater(io, { node: join(P.seed, NODE), script: join(P.bootstrap, SCRIPTS.updater), config: join(P.seed, UPDATER_CONFIG), seed: P.seed });
