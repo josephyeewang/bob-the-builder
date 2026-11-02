@@ -560,7 +560,10 @@ test('L173 n2 PLANT a hard link to a victim swapped in at the token name right A
   assert.equal(readFileSync(victim, 'utf8'), 'keep\n'); assert.equal(statSync(victim).mode & 0o777, 0o644);
   assert.deepEqual(w.mac.owners.get('/victim2.txt'), { uid: 4242, gid: 4242 });
   assert.ok(swappedAt > 0, 'the swap happened');
-  assert.deepEqual(w.mac.log.slice(swappedAt).filter((x) => x.includes('watch-only-token')), [], 'nothing touched the token name after the swap');
+  // After the write only the rename runs (L194): it moves a NAME, so the victim's owner, mode and text stay as they were (above), and
+  // nothing chowns, chmods or writes through the name. What landed is the victim, not a token of orchestrate's: check-token says so.
+  assert.deepEqual(w.mac.log.slice(swappedAt).filter((x) => x.includes('watch-only-token')).map((x) => x.split(' ')[0]), ['rename'], 'something other than the rename touched the token name after the swap');
+  assert.equal(failing(checkToken(w.mac, w.cfg)).length, 1, 'check-token passed a victim at the token name');   // the stand-in keeps owners by name, so the reason here is its mode and size
   assert.doesNotMatch(r.text, new RegExp(SECRET));
 });
 
