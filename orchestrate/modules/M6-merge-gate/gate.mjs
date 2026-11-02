@@ -260,8 +260,9 @@ export async function gatePass(ctx) {
     const fields = waiting
       ? { hold: v.hold, waiting_on: waitingOn, waiting_since: cur.doc.waiting_since ?? iso(), wait_told_at: cur.doc.wait_told_at ?? null, stuck_since: cur.doc.stuck_since ?? (outage ? null : iso()) }
       : { hold: v.hold, waiting_on: null, waiting_since: null, wait_told_at: null, stuck_since: null };
+    // The limit is asked once per hold (L188 follow-up): rules that can't answer are told once a pass, not twice.
+    const limit = waiting ? waitLimit(cur, waitingOn) : undefined;
     if (waiting && !outage) {
-      const limit = waitLimit(cur);
       const stuck = Date.parse(fields.stuck_since ?? '');
       if (limit !== undefined && Number.isFinite(stuck) && now() - stuck >= WAIT_CAP_TIMES * limit) {
         const reasons = waitingOn;
@@ -270,13 +271,11 @@ export async function gatePass(ctx) {
       }
     }
     if (!move(cur, 'held', fields) || !waiting) return;
-    waitedLong(fresh('merge', m.id));
+    waitedLong(fresh('merge', m.id), limit);
   }
 
-  function waitedLong(m) {
-    if (!m?.doc || m.doc.wait_told_at) return;
-    const limit = waitLimit(m);
-    if (limit === undefined) return;
+  function waitedLong(m, limit) {
+    if (!m?.doc || m.doc.wait_told_at || limit === undefined) return;
     const since = Date.parse(m.doc.waiting_since ?? '');
     if (Number.isFinite(since) && now() - since < limit) return;
     const taken = alertTaken(alert, { type: 'merge_waiting_long', merge: m.id, card: m.doc.card, pr: m.doc.pr, waiting_since: m.doc.waiting_since ?? null, waiting_on: m.doc.waiting_on ?? [],
@@ -288,10 +287,10 @@ export async function gatePass(ctx) {
 
   // The wait limit in ms: timeouts.merging_open_max_min, or DEFAULT_WAIT_LIMIT_MIN while the rules lack it (L184; the
   // owner is told once per merge that the default is in use); undefined when the rules could not answer.
-  function waitLimit(m) {
+  function waitLimit(m, waitingOn) {
     const limit = mergingLimit(m);
     if (limit === undefined || Number.isFinite(limit)) return limit;
-    tellLimitMissing(m, 'waiting', `merge ${m.id} is waiting to be judged (${(m.doc.waiting_on ?? []).join('; ')}), and the rules have no ${KEYS.mergingOpenMaxMin}, so the gate uses its own default of ${DEFAULT_WAIT_LIMIT_MIN} min: a wait is told after ${DEFAULT_WAIT_LIMIT_MIN} min and refused after ${WAIT_CAP_TIMES * DEFAULT_WAIT_LIMIT_MIN} min, and an open merge after the merge call is never recorded as interrupted. Add the limit to the rules file`);
+    tellLimitMissing(m, 'waiting', `merge ${m.id} is waiting to be judged (${waitingOn.join('; ')}), and the rules have no ${KEYS.mergingOpenMaxMin}, so the gate uses its own default of ${DEFAULT_WAIT_LIMIT_MIN} min: a wait is told after ${DEFAULT_WAIT_LIMIT_MIN} min and refused after ${WAIT_CAP_TIMES * DEFAULT_WAIT_LIMIT_MIN} min, and an open merge after the merge call is never recorded as interrupted. Add the limit to the rules file`);
     return DEFAULT_WAIT_LIMIT_MIN * 60_000;
   }
 

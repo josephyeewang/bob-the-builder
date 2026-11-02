@@ -1298,13 +1298,12 @@ test('L138 MAT-2: a merge the gate refused while the card did not change is not 
 function flakyAlert(w, type, mode, n = 1) {
   const push = w.ctx.alert;
   const tries = [];
-  w.ctx.alert = (a) => {
-    if (a.type === type) {
-      tries.push(a);
-      if (n > 0) { n--; if (mode === 'throw') throw new Error('queue gone'); return false; }
-    }
-    return push(a);
-  };
+  // fakeAlert asks `throws` first on every call, so the tries are kept there; a lost one answers false or throws.
+  const lose = (a) => a.type === type && n > 0 && (n -= 1, true);
+  w.ctx.alert = fakeAlert({
+    throws: (a) => { if (a.type === type) tries.push(a); return mode === 'throw' && lose(a) && 'queue gone'; },
+    answer: (a) => (mode !== 'throw' && lose(a) ? false : push(a)),
+  });
   return tries;
 }
 const told = (w, type) => w.alerts.filter((a) => a.type === type);
@@ -1416,6 +1415,33 @@ test('L188: a merge told of the missing limit while waiting is told again when o
   assert.equal(notes.length, 2, JSON.stringify(notes));
   assert.match(notes[1], /still open after the merge call/);
   assert.deepEqual(recOf(w).read('fact', MERGE_LIMIT_TOLD_FACT(id))?.doc?.told, ['waiting', 'open']);
+});
+
+test('L188 follow-up: rules that cannot answer the wait limit while a merge waits are told once a pass, and never refuse it or tell the long wait', async () => {
+  const KEY = 'timeouts.merging_open_max_min';
+  const w = world(limited());
+  verifiedCard(w);
+  w.g.pulls.get(7).mergeable_state = 'unknown';
+  const base = w.ctx.rules;
+  const broken = (k) => { if (k === KEY) throw new Error('the rules engine stopped'); };
+  w.ctx.rules = Object.create(base, {
+    get: { value: (k, o) => { broken(k); return base.get(k, o); } },
+    num: { value: (k, o) => { broken(k); return base.num(k, o); } },
+  });
+  for (let pass = 1; pass <= 3; pass++) {
+    await gatePass(w.ctx);
+    waitingHeld(mergeOf(w), /^3: /);
+    assert.equal(told(w, 'merge_gate_unsure').filter((a) => /could not answer timeouts\.merging_open_max_min/.test(a.note)).length, pass, `one a pass: ${JSON.stringify(w.alerts)}`);
+    tick(w, 1);
+  }
+  assert.deepEqual(told(w, 'merge_refused'), []);
+  assert.deepEqual(told(w, 'merge_waiting_long'), []);
+  assert.deepEqual(told(w, 'merge_limit_missing'), []);
+  w.ctx.rules = base;
+  tick(w, LIMIT_MIN);
+  await gatePass(w.ctx);
+  waitingHeld(mergeOf(w), /^3: /);
+  assert.equal(told(w, 'merge_waiting_long').length, 1, 'told of the long wait once the rules answer');
 });
 
 test('L188 control: a told fact from before the waiting note stands for the open note only', async () => {
@@ -1692,6 +1718,32 @@ for (const [name, make, re] of HOLDS) {
     const head = verifiedCard(w);
     make(w, head);
     await cappedAfter(w, re);
+  });
+}
+
+// L188: the cap's refusal is told as any refusal is (tellRefused, gatePass 3b): a lost alert is sent again next pass.
+for (const mode of ['false', 'throw']) {
+  test(`L188: a cap refusal whose merge_refused alert is lost (${mode}) is told again next pass, then never again`, async () => {
+    const w = world(limited());
+    verifiedCard(w);
+    w.g.pulls.get(7).mergeable_state = 'unknown';
+    const tries = flakyAlert(w, 'merge_refused', mode, 1);
+    await gatePass(w.ctx);
+    tick(w, WAIT_CAP_TIMES * LIMIT_MIN);
+    await gatePass(w.ctx);
+    assert.equal(mergeOf(w).doc.state, 'refused');
+    assert.equal(mergeOf(w).doc.tell_note, waitCapNote(LIMIT_MIN * 60_000));
+    assert.equal(tries.length, 1, 'tried once');
+    assert.equal(mergeOf(w).doc.told_at, undefined, 'not marked told: the alert was lost');
+    tick(w, 1);
+    await gatePass(w.ctx);
+    assert.equal(tries.length, 2, 'sent again');
+    assert.ok(mergeOf(w).doc.told_at, 'marked told once taken');
+    assert.equal(told(w, 'merge_refused').length, 1);
+    assert.equal(told(w, 'merge_refused')[0].note, waitCapNote(LIMIT_MIN * 60_000));
+    tick(w, 1);
+    await gatePass(w.ctx);
+    assert.equal(tries.length, 2, 'not sent a third time');
   });
 }
 

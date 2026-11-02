@@ -6,6 +6,7 @@ import { intakePass, kindsFor } from './outbox-intake.mjs';
 import { change, recWith, withAlerts, setClock, T0 } from './fixtures.test-helper.mjs';
 import { setup as setupRecord, outboxFile } from '../M9-record/fixtures.test-helper.mjs';
 import { tempDir } from '../../shared/test-tmp.mjs';
+import { fakeAlert } from '../../test/fake-alert.test-helper.mjs';
 
 const UID = process.getuid();
 function world() {
@@ -419,10 +420,10 @@ test('L140: an apply answering not_a_record is handled, with no alert', async ()
 // still hears of it once: the Dispatcher's intake tells every refusal the Record answers, until its own tell is taken.
 // Real Record; its own alert lost (false, or a throw, which the store's send turns into false).
 for (const [path, place] of [['a hand-in for a card the Record does not have', 'own'], ['a file in another session\'s folder', 'other']]) {
-  for (const [how, lost] of [['false', () => false], ['throws', () => { throw new Error('queue gone'); }]]) {
+  for (const [how, lost] of [['false', { answer: false }], ['throws', { throws: 'queue gone' }]]) {
     test(`L168 (2): ${path}, the Record's own alert lost (${how}): the intake tells the owner exactly once`, async () => {
-      let recordAlerts = 0;
-      const E = setupRecord({ prefix: 'm11-intake-l168-', extra: { alert: (a) => { recordAlerts += 1; return lost(a); } } });
+      const recordAlert = fakeAlert(lost);
+      const E = setupRecord({ prefix: 'm11-intake-l168-', extra: { alert: recordAlert } });
       const name = 'handin-C-9.md';
       const file = outboxFile(E, 'worker', place === 'own' ? 'S-1' : 'S-2', name, `${JSON.stringify({ entity: 'card', id: 'C-9', from_state: 'running', to_state: 'in_review' })}\n`);
       const sessions = [{ sessionId: 'S-1', role: 'worker', outbox: dirname(file), uid: UID, card: 'C-9' }];
@@ -431,7 +432,7 @@ for (const [path, place] of [['a hand-in for a card the Record does not have', '
       const run = () => withAlerts(E.record, E.clock.t, (t) => { got.push(typeof t === 'string' ? t : t.text); return true; }, (alert) => intakePass({ rec: E.record, sessions, ...w.ports, alert, now: E.clock.t }));
       const [r] = await run();
       assert.ok(r.refused, JSON.stringify(r));
-      assert.ok(recordAlerts >= 1, 'the Record tried its own alert');
+      assert.ok(recordAlert.calls.length >= 1, 'the Record tried its own alert');
       for (let i = 0; i < 3; i++) { E.clock.t += 60_000; await run(); }
       assert.equal(got.length, 1, got.join(' | '));
       assert.match(got[0], new RegExp(`refused ${name.replace('.', '\\.')} from worker S-1`));
