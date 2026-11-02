@@ -2,11 +2,12 @@
 // and the watch-only token's file (R-0b-161). The ownerTaps folder (A6) is a row of the folder table (layout.mjs), made and
 // checked by users-folders / check; the account job reload (A8) is daemons.mjs.
 //
-// The proposals parent sits OUTSIDE the base, in a folder every user can write into (a sticky one), so the base wall
-// (guard.mjs) cannot be used there. What keeps root safe instead: root makes the parent itself (mkdir never follows a link
-// and refuses what exists), an existing parent must already be a real folder root owns (a user's planted one is refused,
-// never taken over), and the owner and mode are set through the open folder (secureFolder). The first step of the run
-// checks the same things again.
+// The proposals parent sits OUTSIDE the base, in a folder every user can write into (a sticky one). The base wall
+// (guard.mjs) is still the first step of the run (setup.mjs `guarded`), and on top of it: the folder the parent sits in must be
+// root's and either unwritable by others or sticky, every folder above that root's alone, root makes the parent itself (mkdir
+// never follows a link and refuses what exists), an existing parent must already be a real folder root owns (a user's planted
+// one is refused, never taken over), and the owner and mode are set through the open folder (secureFolder). The first step of
+// the run checks the same things again.
 //
 // The token: its home is a file in the `keys` folder (0700, orchestrate's) — see README "Where the watch-only token lives".
 // It is typed into the terminal with the echo off, held in memory for the one write, and is never printed, logged, put in
@@ -174,10 +175,8 @@ export function checkToken(io, cfg) {
   return [{ ok: why.length === 0, what, ...(why.length ? { why: why.join('; ') } : {}) }];
 }
 
-// ───────────────────────────────────────────── prove the token is watch-only (R-0b-161, L99 (3))
+// ───────────────────────────────────────────── prove the token cannot write pull requests (R-0b-161, L99 (3), L173 n1)
 
-const REPO = /^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/;
-export const repoProblem = (r) => (typeof r === 'string' && REPO.test(r) && !r.split('/').some((s) => s === '.' || s === '..') ? null : '--repo must look like owner/name');
 const API = 'https://api.github.com';
 
 /**
@@ -189,6 +188,8 @@ const API = 'https://api.github.com';
  *    refuses every write, so neither says anything about this token. (2) a read lists an open pull request. (3) a write that
  *    changes nothing (that pull request's title set to itself) must come back 403 and the answer must be GitHub's "this token
  *    may not" one, not a rate limit or anything else that also says 403.
+ * What a PASS proves is only that this token cannot WRITE PULL REQUESTS. It does not prove the token cannot write code (Contents), or
+ * that it covers only one repository: the closing note in setup.mjs tells the person to look at GitHub's token page by eye.
  * Only status numbers and fixed sentences are ever printed: never the token, never what GitHub sent back. → [{ ok, what, why? }]
  */
 export async function proveToken(io, cfg) {

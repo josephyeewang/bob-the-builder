@@ -121,8 +121,9 @@ export function planUnload(io, cfg) {
 
 /**
  * Runbook A8: the account job reloaded so its file carries `--install <the installed copy>` (copy-to refuses without it).
- * A job that is not loaded gives NO steps and no error: there is nothing running on an old file. A loaded one gets its file
- * rewritten (only if it differs), then unloaded and loaded again. Nothing else is touched.
+ * A job that is not loaded gives NO steps and a problem (exit 1): either nothing has loaded it yet, or an earlier reload stopped
+ * half way; either way the instruction is "run: daemons load". A loaded one gets its file rewritten (only if it differs), then
+ * unloaded and loaded again. Nothing else is touched.
  */
 export function planReloadAccount(io, cfg) {
   const job = 'review-account'; const label = labelOf(cfg, job);
@@ -133,7 +134,7 @@ export function planReloadAccount(io, cfg) {
     // the load, so the job is NOT running. Saying "nothing to do" there would be a false "done" (L150 m2).
     const rec0 = readRecord(io, cfg);
     if (rec0 && rec0[label] !== undefined) return { ops: [], problems: [`${label} is NOT loaded now, though it was loaded before (an earlier reload probably stopped half way). Nothing is running it. Run: daemons load`] };
-    return { ops: [], problems: [] };
+    return { ops: [], problems: [`the account job (${label}) is not loaded, so there is nothing to reload. Run: daemons load`] };
   }
   const { plists, problems } = plistTexts(io, cfg);
   if (problems.length) return { ops: [], problems };

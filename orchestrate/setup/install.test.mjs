@@ -594,11 +594,11 @@ test('a job file written where a link sits replaces the link itself; the link\'s
 
 // ───────────────────────────── A8: reload the account job only if it is loaded ─────────────────────────────
 
-test('reload-account: the job is not loaded → nothing to do, exit 0, the Mac not touched (a no-op, as the runbook expects on a fresh Mini)', async () => {
+test('L173 n5 reload-account: the job is not loaded → says plainly "the account job … is not loaded … Run: daemons load", exit 1, never "nothing to do" or "done", the Mac not touched', async () => {
   const w = await placed(); const n = w.mac.log.length;
   const r = w.run(['daemons', 'reload-account']);
-  assert.equal(r.code, 0, r.text); assert.match(r.text, /nothing to do/); assert.equal(w.mac.log.length, n);
-  const d = w.run(['daemons', 'reload-account', '--dry-run']); assert.equal(d.code, 0); assert.match(d.text, /nothing to do/);
+  assert.equal(r.code, 1, r.text); assert.match(r.text, /the account job \(.*review-account\) is not loaded.*Run: daemons load/); assert.doesNotMatch(r.text, /nothing to do|done/); assert.equal(w.mac.log.length, n);
+  const d = w.run(['daemons', 'reload-account', '--dry-run']); assert.equal(d.code, 1); assert.match(d.text, /is not loaded/);
 });
 
 test('reload-account: loaded with an OLD file (no --install) → the file is rewritten to carry --install <the installed copy>, unloaded, loaded; the other jobs untouched', async () => {
@@ -627,7 +627,7 @@ test('PLANT reload-account when /Library is writable by others → no step runs 
 });
 
 test('reload-account refuses when not root; --dry-run does not need root', async () => {
-  const w = await placed(); w.mac.as = 1234;
+  const w = await placed(); assert.equal(w.run(['daemons', 'load']).code, 0); w.mac.as = 1234;   // loaded, so a dry run has a reload to show
   assert.equal(w.run(['daemons', 'reload-account']).code, 2);
   assert.equal(w.run(['daemons', 'reload-account', '--dry-run']).code, 0);
 });
@@ -774,7 +774,7 @@ test('L150 m2 reload-account: a load that fails leaves the job unloaded; the sto
   const w = await placed(); assert.equal(w.run(['daemons', 'load']).code, 0);
   const f = plistFile(w, 'review-account'); rmSync(f); writeFileSync(f, 'old text', { mode: 0o644 });
   w.mac.failBootstrap = new Set([`${LABEL}.review-account`]);
-  let r = w.run(['daemons', 'reload-account']); assert.equal(r.code, 1, r.text); assert.match(r.text, /could not load .*run: daemons load/);
+  let r = w.run(['daemons', 'reload-account']); assert.equal(r.code, 1, r.text); assert.match(r.text, /could not load .*run: daemons load/); assert.doesNotMatch(r.text, /Run it again after fixing that/, 'one instruction, not two (L173 n5)');
   assert.ok(!w.mac.loaded.has(`${LABEL}.review-account`));
   r = w.run(['daemons', 'reload-account']); assert.equal(r.code, 1, r.text); assert.match(r.text, /is NOT loaded now/); assert.match(r.text, /Run: daemons load/); assert.doesNotMatch(r.text, /nothing to do|done\./);
   w.mac.failBootstrap = null;
@@ -793,8 +793,8 @@ test('L150 m2 a load that says yes but leaves nothing loaded is a failure: load 
   r = w.run(['daemons', 'reload-account']); assert.equal(r.code, 1, r.text); assert.match(r.text, /is NOT loaded after the load/);
 });
 
-test('L150 m2 reload-account on a fresh Mini (never loaded, nothing recorded) is still a plain no-op', async () => {
-  const w = await placed(); const r = w.run(['daemons', 'reload-account']); assert.equal(r.code, 0, r.text); assert.match(r.text, /nothing to do/);
+test('L173 n5 reload-account on a fresh Mini (never loaded, nothing recorded) says the account job is not loaded and to run daemons load', async () => {
+  const w = await placed(); const r = w.run(['daemons', 'reload-account']); assert.equal(r.code, 1, r.text); assert.match(r.text, /is not loaded.*Run: daemons load/); assert.doesNotMatch(r.text, /nothing to do/);
 });
 
 test('L160 m6 a nodeBin that is a link (even to a root-safe node) is refused at plan time: the copy would be made from the name, not the checked file', async () => {

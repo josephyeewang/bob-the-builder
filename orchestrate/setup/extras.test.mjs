@@ -3,10 +3,10 @@
 // each and name the check that catches it. The last tests run read-only tools on this Mac.
 
 import assert from 'node:assert/strict';
-import { chmodSync, linkSync, mkdirSync, readFileSync, statSync, symlinkSync, writeFileSync, rmSync } from 'node:fs';
+import { chmodSync, existsSync, linkSync, mkdirSync, readFileSync, statSync, symlinkSync, writeFileSync, rmSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
-import { join } from 'node:path';
-import { DEFAULT_PROPOSALS_PARENT, ROOT_CONFIG_PATH, folderTable, mirrorPath, ownerTapsPath, parseConfig, proposalRows } from './layout.mjs';
+import { dirname, join } from 'node:path';
+import { DEFAULT_PROPOSALS_PARENT, ROOT_CONFIG_PATH, folderTable, mirrorPath, ownerTapsPath, parseConfig, proposalRows, proposalsParentOf } from './layout.mjs';
 import { readSecretFromTty, realIo, writeNewFile } from './mac.mjs';
 import { aclEntries, apply, check } from './users-folders.mjs';
 import { proposalsProblem, checkProposals, checkSafeDirectory, checkToken, planProposals, planSafeDirectory, planToken, tokenPath, tokenProblem } from './extras.mjs';
@@ -533,4 +533,50 @@ test('REAL: git config --includes --get-all of an unset key exits 1, and reads a
   assert.equal(spawnSync('/usr/bin/git', ['config', '--global', '--add', 'include.path', join(home, 'extra.cfg')], { encoding: 'utf8', env }).status, 0);
   const got = spawnSync('/usr/bin/git', ['config', '--includes', '--get-all', 'safe.directory'], { encoding: 'utf8', env, cwd: home }); assert.equal(got.stdout, '/y/*\n');
   const globalOnly = spawnSync('/usr/bin/git', ['config', '--global', '--get-all', 'safe.directory'], { encoding: 'utf8', env, cwd: home }); assert.equal(globalOnly.status, 1);   // --global alone never saw it
+});
+
+// ───────────────────────────── L173 ─────────────────────────────
+
+test('L173 n1 prove-token says what it proved (pull requests only) and tells Joe to check the token page by eye; a FAIL prints no such note; nothing says "proves watch-only"', async () => {
+  const w = withToken(); github(w);
+  const r = await prove(w); assert.equal(r.code, 0, r.text);
+  assert.match(r.text, /What this proved: the token cannot write pull requests\. It did not prove the token cannot change code/);
+  assert.match(r.text, /Fine-grained tokens/); assert.match(r.text, /Contents = Read-only and Pull requests = Read-only, and nothing else/); assert.match(r.text, /only the one repository/);
+  const bad = withToken(); github(bad, { write: 200 }); const f = await prove(bad);
+  assert.equal(f.code, 1); assert.doesNotMatch(f.text, /What this proved/);
+  const readme = readFileSync(new URL('./README.md', import.meta.url), 'utf8');
+  assert.doesNotMatch(readme, /proves the token is watch-only/); assert.match(readme, /does not prove the token cannot change code/);
+});
+
+test('L173 n2 PLANT a hard link to a victim swapped in at the token name right AFTER the token is written → the victim keeps its owner, mode and text (nothing reopens the name)', () => {
+  const w = world(); w.mac.secretInput = SECRET;
+  const victim = w.mac.at('/victim2.txt'); writeFileSync(victim, 'keep\n', { mode: 0o644 }); w.mac.owners.set('/victim2.txt', { uid: 4242, gid: 4242 });
+  const orig = w.mac.writeOwned.bind(w.mac);
+  let swappedAt = -1;
+  w.mac.writeOwned = (p, text, own) => { orig(p, text, own); rmSync(w.mac.at(p)); linkSync(victim, w.mac.at(p)); swappedAt = w.mac.log.length; };   // the attacker wins the race after the write
+  const r = w.run(['token']); assert.ok(r.code === 0 || r.code === 1, r.text);
+  assert.equal(readFileSync(victim, 'utf8'), 'keep\n'); assert.equal(statSync(victim).mode & 0o777, 0o644);
+  assert.deepEqual(w.mac.owners.get('/victim2.txt'), { uid: 4242, gid: 4242 });
+  assert.ok(swappedAt > 0, 'the swap happened');
+  assert.deepEqual(w.mac.log.slice(swappedAt).filter((x) => x.includes('watch-only-token')), [], 'nothing touched the token name after the swap');
+  assert.doesNotMatch(r.text, new RegExp(SECRET));
+});
+
+test('L173 n3 PLANT the folder the proposals parent sits in belongs to someone else (mode 0755) → no steps, "is not root\'s"', () => {
+  const w = world(); const up = dirname(proposalsParentOf(w.cfg));
+  chmodSync(w.mac.at(up), 0o755); w.mac.owners.set(up, { uid: 4242, gid: 4242 });
+  assert.match(proposalsProblem(w.mac, w.cfg), /is not root's, so someone else could swap what is inside it/);
+  const p = planCommand(w.mac, w.cfg, { cmd: 'proposals' }); assert.deepEqual(p.ops, []); assert.match(p.problems.join(' '), /is not root's/);
+});
+
+test('L173 n4 REAL realIo.unlink: removes one name (a file, a link without touching its target, one of two hard links), is quiet when the name is gone, and REFUSES a folder without touching what is in it', () => {
+  const d = tempDir('orch-unlink-'); const io = realIo({ prefix: d });
+  writeFileSync(join(d, 'f'), 'x'); io.unlink('/f'); assert.ok(!existsSync(join(d, 'f')));
+  writeFileSync(join(d, 'target'), 'keep'); symlinkSync(join(d, 'target'), join(d, 'ln')); io.unlink('/ln');
+  assert.ok(!existsSync(join(d, 'ln'))); assert.equal(readFileSync(join(d, 'target'), 'utf8'), 'keep');
+  linkSync(join(d, 'target'), join(d, 'hard')); io.unlink('/hard'); assert.equal(readFileSync(join(d, 'target'), 'utf8'), 'keep');
+  io.unlink('/nothing-here');
+  mkdirSync(join(d, 'dir')); writeFileSync(join(d, 'dir', 'inside'), 'precious');
+  assert.throws(() => io.unlink('/dir'), /EISDIR|EPERM|EACCES/);
+  assert.equal(readFileSync(join(d, 'dir', 'inside'), 'utf8'), 'precious');
 });
