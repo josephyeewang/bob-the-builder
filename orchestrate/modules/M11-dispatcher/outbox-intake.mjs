@@ -28,6 +28,7 @@ export const SETTLE_MS = 2000;
 // (the real one answers "no record rule yet"). Once its read-only session starts, the hand-in is done: it is marked
 // applied here, with no applyOutbox call and no alert. Lane 1's table marks such kinds `record: 'none'`; until then a
 // read-only request kind with no entity is the same thing.
+/** `kind` is the request word (think, scout, write), as `word` is in intakePass; since L82 M-1 a file's kind is its prefix. */
 export const startsOnly = (kind) => {
   const spec = OUTBOX_KINDS[`${kind}-`];
   return Boolean(spec) && (spec.record === 'none' || (!spec.entity && Object.hasOwn(READONLY_REQUESTS, kind)));
@@ -137,7 +138,7 @@ export async function intakePass({ rec, sessions, wait, alert, note, startReadon
         continue;
       }
       // L140: the session started, and that was the hand-in's whole job.
-      if (startsOnly(file.kind)) {
+      if (startsOnly(word)) {
         put({ state: 'applied', started: true, applied_at: new Date(now).toISOString() }, 'outbox_applied');
         r.applied = true;
         r.started = true;
