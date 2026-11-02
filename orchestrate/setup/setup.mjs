@@ -11,6 +11,14 @@
 //   daemons place|load|unload  [--dry-run]   the three background jobs' files; load; unload                    (root)
 //   daemons list                        loaded or not, per job                                                 (read only)
 //   daemons check                       the job files are exact, no leftover jobs, each job loaded from the file as it is now, last exit 0  (read only)
+//   daemons reload-account [--dry-run]  reload the account job only if it is loaded  (root)
+//   proposals  [--dry-run]  the proposals folders: parent root's, one per product  (root)
+//   check-proposals  owner, mode, access list; with sudo, who can read or write (read only)
+//   safe-directory  [--dry-run]  the owner's git trusts exactly the mirror folder  (root, runs git as the owner)
+//   check-safe-directory (read only; sudo to look)
+//   token  [--dry-run]  save the watch-only token (typed hidden, never shown)  (root)
+//   prove-token  the repository is the config's watch.repo (private, not archived); read works, a no-op write is refused as "this token may not"  (sudo: the token is read as orchestrate)
+//   check-token  the token file's owner, mode and size (never its text)  (read only; sudo to look)
 //
 // The config: as root, ONLY the root-owned file at ROOT_CONFIG_PATH (layout.mjs), opened without following links, owned
 // by root, written by no one else, in folders only root writes (NEW-1). Without sudo, `--config <file>` may name another
@@ -27,11 +35,14 @@ import { guarded } from './guard.mjs';
 import { apply, check, plan } from './users-folders.mjs';
 import { proofCommands, runProofs } from './proofs.mjs';
 import { checkInstall, parseInstallConfig, planInstall, rootMadeEntries, spawnUpdater } from './install.mjs';
-import { checkDaemons, list, planLoad, planPlace, planUnload } from './daemons.mjs';
+import { checkDaemons, list, planLoad, planPlace, planReloadAccount, planUnload } from './daemons.mjs';
+import { proveToken, checkProposals, checkSafeDirectory, checkToken, planProposals, planSafeDirectory, planToken } from './extras.mjs';
 
-const USAGE = 'usage: node setup.mjs <users-folders|check|proofs|install|check-install|daemons place|load|unload|list|check> [--config <file>, without sudo only] [--dry-run] [--main <commit>]';
-const DAEMON_SUBS = ['place', 'load', 'unload', 'list', 'check'];
-const COMMANDS = ['users-folders', 'check', 'proofs', 'install', 'check-install', 'daemons'];
+const USAGE = 'usage: node setup.mjs <users-folders|check|proofs|install|check-install|daemons place|load|unload|list|check|reload-account|proposals|check-proposals|safe-directory|check-safe-directory|token|check-token|prove-token> [--config <file>, without sudo only] [--dry-run] [--main <commit>]';
+const DAEMON_SUBS = ['place', 'load', 'unload', 'list', 'check', 'reload-account'];
+const COMMANDS = ['users-folders', 'check', 'proofs', 'install', 'check-install', 'daemons', 'proposals', 'check-proposals', 'safe-directory', 'check-safe-directory', 'token', 'check-token', 'prove-token'];
+const READ_ONLY = ['check', 'check-install', 'check-proposals', 'check-safe-directory', 'check-token', 'prove-token'];
+const PLAIN_CONFIG = ['users-folders', 'check', 'proofs', 'proposals', 'check-proposals', 'safe-directory', 'check-safe-directory', 'token', 'check-token', 'prove-token'];
 
 export function parseArgs(argv) {
   const cmd = argv[0];
@@ -48,7 +59,7 @@ export function parseArgs(argv) {
       if (a === '--config') o.config = v; else if (a === '--main') { if (!/^[0-9a-f]{40}$/.test(v)) throw new Error('--main must be a 40-hex commit'); o.main = v; } else o.prefix = v;
     } else throw new Error(`argument ${i + 1} is not one this command takes (it is not shown, in case it is a secret)`);
   }
-  const readOnly = cmd === 'check' || cmd === 'check-install' || (cmd === 'daemons' && (sub === 'list' || sub === 'check'));
+  const readOnly = READ_ONLY.includes(cmd) || (cmd === 'daemons' && (sub === 'list' || sub === 'check'));
   if (readOnly && o.dry) throw new Error('this command never changes anything, so --dry-run does not apply');
   if (o.main && cmd !== 'check-install') throw new Error('--main is only for check-install');
   return o;
@@ -69,8 +80,11 @@ function report(res, out) {
  */
 export function planCommand(io, cfg, o, { readSource = (p) => io.readSource(p), runUpdater = spawnUpdater } = {}) {
   if (o.cmd === 'users-folders') return plan(io, cfg);   // carries the wall itself
+  if (o.cmd === 'proposals') return guarded(io, cfg, planProposals(io, cfg));   // the base wall first (L150 m3), then its own wall for the parent (extras.mjs)
+  if (o.cmd === 'safe-directory') return planSafeDirectory(io, cfg);   // root writes nothing: git runs as the owner
   const res = o.cmd === 'install' ? planInstall(io, cfg, { readSource, runUpdater })
-    : o.sub === 'place' ? planPlace(io, cfg) : o.sub === 'load' ? planLoad(io, cfg) : planUnload(io, cfg);
+    : o.cmd === 'token' ? planToken(io, cfg)
+    : o.sub === 'place' ? planPlace(io, cfg) : o.sub === 'load' ? planLoad(io, cfg) : o.sub === 'reload-account' ? planReloadAccount(io, cfg) : planUnload(io, cfg);
   return guarded(io, cfg, res);
 }
 
@@ -92,11 +106,15 @@ export function main(argv, { io: given, runUpdater = spawnUpdater, out = (s) => 
   try {
     const text = io.readConfig(o.config ?? ROOT_CONFIG_PATH, { strict: asRoot || !o.config });
     let raw; try { raw = JSON.parse(text); } catch { throw new Error('the config is not valid JSON'); }   // never the parser's own message: it quotes the file
-    cfg = ['users-folders', 'check', 'proofs'].includes(o.cmd) ? parseConfig(raw) : parseInstallConfig(raw);
+    cfg = PLAIN_CONFIG.includes(o.cmd) ? parseConfig(raw) : parseInstallConfig(raw);
   } catch (e) { err(`${e.message}\n${USAGE}`); return 2; }
 
   if (o.cmd === 'check') return report(check(io, cfg, { alsoKnown: rootMadeEntries(cfg) }), out);
   if (o.cmd === 'check-install') return report(checkInstall(io, cfg, { main: o.main }), out);
+  if (o.cmd === 'check-proposals') return report(checkProposals(io, cfg), out);
+  if (o.cmd === 'check-safe-directory') return report(checkSafeDirectory(io, cfg), out);
+  if (o.cmd === 'check-token') return report(checkToken(io, cfg), out);
+  if (o.cmd === 'prove-token') return proveToken(io, cfg).then((res) => report(res, out));
   if (o.cmd === 'daemons' && o.sub === 'check') return report(checkDaemons(io, cfg), out);
   if (o.cmd === 'daemons' && o.sub === 'list') {
     for (const j of list(io, cfg)) out(j.loaded ? `${j.label}: loaded, ${j.state}, last exit ${j.lastExit}` : `${j.label}: not loaded${j.error ? ` (${j.error})` : ''}`);
@@ -127,7 +145,9 @@ export function main(argv, { io: given, runUpdater = spawnUpdater, out = (s) => 
     out(`dry run: ${planned.ops.length} step(s), nothing changed.`); return 0; }
   try { apply(planned.ops, { log: (t) => out(`run: ${t}`) }); } catch (e) { err(`stopped: ${e.message}. Run it again after fixing that; it picks up where it stopped.`); return 1; }
   const after = o.cmd === 'users-folders' ? check(io, cfg, { alsoKnown: rootMadeEntries(cfg) }) : o.cmd === 'install' ? checkInstall(io, cfg)
-    : o.sub === 'place' ? checkDaemons(io, cfg).filter((r) => /exactly the built job file$|under another label/.test(r.what)) : o.sub === 'load' ? checkDaemons(io, cfg).filter((r) => /is loaded$|loaded from the job file as it is now$/.test(r.what)) : null;
+    : o.cmd === 'proposals' ? checkProposals(io, cfg) : o.cmd === 'safe-directory' ? checkSafeDirectory(io, cfg) : o.cmd === 'token' ? checkToken(io, cfg)
+    : o.sub === 'place' ? checkDaemons(io, cfg).filter((r) => /exactly the built job file$|under another label/.test(r.what)) : o.sub === 'load' ? checkDaemons(io, cfg).filter((r) => /is loaded$|loaded from the job file as it is now$/.test(r.what))
+    : o.sub === 'reload-account' && planned.ops.length ? checkDaemons(io, cfg).filter((r) => /review-account (is loaded|was loaded from the job file as it is now)$/.test(r.what)) : null;
   if (!after) { out('done.'); return 0; }
   const bad = after.filter((r) => !r.ok);
   for (const r of bad) err(`FAIL  ${r.what} — ${r.why}`);
@@ -135,4 +155,4 @@ export function main(argv, { io: given, runUpdater = spawnUpdater, out = (s) => 
   return bad.length ? 1 : 0;
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) process.exitCode = main(process.argv.slice(2));
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) Promise.resolve(main(process.argv.slice(2))).then((c) => { process.exitCode = c; });

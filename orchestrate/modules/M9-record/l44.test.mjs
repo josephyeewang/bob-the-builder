@@ -7,7 +7,7 @@ import { chmodSync, fstatSync, linkSync, lstatSync, readFileSync, realpathSync, 
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import { setup, product, readyCard, runCard, outboxFile, launch, runnerLaunch, runnerEndedRecord, runnerAsideRecord, CLEAN_CHECKLIST, HEAD, HEAD2, UID, put, must } from './fixtures.test-helper.mjs';
-import { headReviews, reviewUserProblem, runnerLaunchFor, runnerLaunches, verdictFromFile } from './outbox.mjs';
+import { headReviews, reviewUserProblem, runnerLaunchFor, runnerLaunches, sessionVerdict, verdictFromFile } from './outbox.mjs';
 
 const refused = (r, re) => { assert.equal(r.ok, false, 'expected a refusal'); assert.match(r.reason, re); };
 
@@ -320,6 +320,34 @@ test('L69 planted: only the verdict file the session ended with counts; one writ
     refused(verify(env), /reviewer session R-1 has not ended yet/);
     runnerEndedRecord(env, 'C-1', 'R-1');
     must(verify(env), 'verified');
+  }
+});
+
+// L121 Minor 1 (#83 r1 P17/P18): a reviewer's compaction note sits beside its verdict in the outbox. Whatever the note
+// says, and however its name is written (the reserved form, any case, L121 Minor 4), it is no verdict: the intake
+// refuses it, and the session still has exactly one verdict, so the head is not refused for "more than one".
+test('L121 planted: a compaction note beside a verdict is never a second verdict; the session counts exactly one', () => {
+  for (const note of ['verdict-compact-S1.md', 'verdict-COMPACT-S1.md', 'verdict-Compact.md', 'verdict-compactS1.md', 'verdict-S1-compact']) {
+    const { env, hdr } = inReview();
+    runnerLaunch(env, 'C-1', 'R-1');
+    const f = outboxFile(env, 'reviewer', 'R-1', 'verdict-S1.md', hdr({ head: HEAD, pass: true }));
+    must(env.review.applyOutbox({ role: 'reviewer', sessionId: 'R-1', card: 'C-1' }, f), 'the pass');
+    // The note says fail, in a verdict's own header: the worst it could do if it were read as one.
+    const n = outboxFile(env, 'reviewer', 'R-1', note, hdr({ head: HEAD, pass: false }));
+    const taken = env.review.applyOutbox({ role: 'reviewer', sessionId: 'R-1', card: 'C-1' }, n);
+    assert.equal(taken.ok, false, `${note}: the intake takes no compaction note as a verdict`);
+    runnerEndedRecord(env, 'C-1', 'R-1');
+    const sha = createHash('sha256').update(readFileSync(f)).digest('hex');
+    const one = sessionVerdict({ outboxRoot: env.outRoot, uids: env.reviewUids, role: 'reviewer', sessionId: 'R-1', card: 'C-1', head: HEAD });
+    assert.equal(one.ok, true, `${note}: ${one.reason}`);
+    assert.equal(one.verdict.sha256, sha, `${note}: the one verdict is verdict-S1.md`);
+    const hr = headReviews({ launches: env.launchRoot, outboxRoot: env.outRoot, uids: env.reviewUids, card: 'C-1', head: HEAD });
+    assert.equal(hr.ok, true, hr.reason);
+    assert.deepEqual(hr.sessions.map((s) => [s.session_id, s.verdict?.pass ?? null, s.problem]), [['R-1', true, null]], `${note}: one session, one passing verdict`);
+    const row = env.review.list('verdict').filter((r) => r.doc.session_id === 'R-1');
+    assert.equal(row.length, 1, `${note}: one verdict row`);
+    assert.equal(verdictFromFile({ outboxRoot: env.outRoot, uids: env.reviewUids, row: row[0] }).ok, true, `${note}: the row's file still reads as the one verdict`);
+    must(put(env.review, 'dispatcher', 'card', 'C-1', { state: 'verified' }), `${note}: verified`);
   }
 });
 

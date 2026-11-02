@@ -6,7 +6,7 @@
 // invalid, a write with no value is a bad call, a record that is not there reads as exit 56; chown needs root; mkdir
 // needs the parent and refuses an existing folder (those two are the real mkdir's own refusals, since it is the real one).
 
-import { chmodSync, cpSync, fchmodSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, realpathSync, rmSync } from 'node:fs';
+import { unlinkSync, chmodSync, cpSync, fchmodSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, realpathSync, rmSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { dirname, join } from 'node:path';
 import test from 'node:test';
@@ -39,7 +39,12 @@ export function fakeMac({ euid: as = 0, users = {}, admins = [] } = {}) {
     owners: new Map(),          // logical path → { uid, gid } set by chown
     log: [],                    // every changing call, in order
     failNextDsclCreate: false,  // a test sets this to make the next dscl -create fail once
-    sudoRules: new Set(),       // users a sudo rule names (`sudo -l -U` then says they may run sudo)
+    fetchLog: [], github: null,
+    gitSafeOther: [],          // safe.directory values from the system file or an include: seen by a read of ALL scopes, never by --global
+    gitSafe: new Map(),        // user → their `git config --global` safe.directory values
+    secretInput: null,          // what the stand-in terminal returns for the hidden read (null = there is no terminal)
+    secretPrompts: [],          // every prompt shown
+    sudoRules: new Set(),      // users a sudo rule names (`sudo -l -U` then says they may run sudo)
     nodeProblemText: null,      // a test sets this to make the node program look like one root must not run
     aclPrincipals: { orchestrate: 'daemon' },   // access-list names that exist only on the always-on Mac are stood in for by a real user here
   };
@@ -91,10 +96,29 @@ export function fakeMac({ euid: as = 0, users = {}, admins = [] } = {}) {
       let st; try { st = lstatSync(at(p)); } catch { return false; }
       const o = mac.owners.get(p) ?? { uid: -1, gid: -1 };
       const bits = write ? [0o200, 0o020, 0o002] : [0o400, 0o040, 0o004];
-      return Boolean(st.mode & (o.uid === uid ? bits[0] : o.gid === gid ? bits[1] : bits[2]));
+      if (st.mode & (o.uid === uid ? bits[0] : o.gid === gid ? bits[1] : bits[2])) return true;
+      // An access list entry for this user (the real `ls -le` shows it) lets a read through; it never lets a write through here
+      // (the setup only ever grants list/search/read), and the Mini's `orchestrate` is stood in for by a real user of this Mac.
+      if (write) return false;
+      const principal = mac.aclPrincipals[who] ?? who;
+      const shown = real('/bin/ls', ['-led', at(p)]).stdout;
+      return new RegExp(`^\\s+\\d+: user:${principal} allow .*\\blist\\b`, 'm').test(shown);
     };
     if (prog === '/bin/test' && rest[0] === '-w') return { status: can(rest[1], true) ? 0 : 1, stdout: '', stderr: '' };
+    if (prog === '/bin/cat') return can(rest[0], false) ? { status: 0, stdout: readFileSync(at(rest[0]), 'utf8'), stderr: '' } : { status: 1, stdout: '', stderr: `cat: ${rest[0]}: Permission denied` };
     if (prog === '/bin/ls') return can(rest[0], false) ? { status: 0, stdout: '', stderr: '' } : { status: 1, stdout: '', stderr: `ls: ${rest[0]}: Permission denied` };
+    if (prog === '/usr/bin/git' && rest[0] === 'config' && rest[1] === '--includes' && rest[2] === '--get-all' && rest[3] === 'safe.directory') {
+      // every scope (system, global, included files), as the real git reads them: nothing else is set here
+      const all = [...mac.gitSafeOther, ...(mac.gitSafe.get(who) ?? [])];
+      return all.length ? { status: 0, stdout: `${all.join('\n')}\n`, stderr: '' } : { status: 1, stdout: '', stderr: '' };
+    }
+    if (prog === '/usr/bin/git' && rest[0] === 'config' && rest[1] === '--global') {
+      // git's own answers: a key that is not set exits 1; an add with no value is a usage error (129).
+      const store = mac.gitSafe.get(who) ?? [];
+      if (rest[2] === '--get-all' && rest[3] === 'safe.directory') return store.length ? { status: 0, stdout: `${store.join('\n')}\n`, stderr: '' } : { status: 1, stdout: '', stderr: '' };
+      if (rest[2] === '--add' && rest[3] === 'safe.directory' && rest[4]) { mac.log.push(`git config --global --add safe.directory ${rest[4]} (as ${who})`); mac.gitSafe.set(who, [...store, rest[4]]); return { status: 0, stdout: '', stderr: '' }; }
+      return { status: 129, stdout: '', stderr: 'usage: git config [<options>]' };
+    }
     return { status: 127, stdout: '', stderr: `fake mac: ${prog} is not stood in for` };
   };
   const ports = (p) => ({
@@ -114,7 +138,10 @@ export function fakeMac({ euid: as = 0, users = {}, admins = [] } = {}) {
       }
       if (cmd === '/usr/bin/sudo') {
         if (mac.as !== 0) return { status: 1, stdout: '', stderr: 'sudo: a password is required' };
-        if (args.includes('-u')) return asUser(args[args.indexOf('-u') + 1], args.slice(args.indexOf('-u') + 2));
+        if (args.includes('-u')) {
+          if (!args.includes('-H')) return { status: 1, stdout: '', stderr: 'fake mac: sudo -u without -H keeps the caller\'s HOME; every call here must say -H (L150 P7)' };
+          return asUser(args[args.indexOf('-u') + 1], args.slice(args.indexOf('-u') + 2));
+        }
         const who = args[args.indexOf('-U') + 1];
         return mac.sudoRules.has(who) ? { status: 0, stdout: `User ${who} may run the following commands on this-mac:\n    (ALL) ALL\n`, stderr: '' } : { status: 1, stdout: `User ${who} is not allowed to run sudo on this-mac.\n`, stderr: '' };
       }
@@ -133,17 +160,20 @@ export function fakeMac({ euid: as = 0, users = {}, admins = [] } = {}) {
     prefix,
     lstat(p) {
       const st = lstatSync(at(p)); const o = mac.owners.get(p);
-      return { isDirectory: () => st.isDirectory(), isFile: () => st.isFile(), isSymbolicLink: () => st.isSymbolicLink(), mode: st.mode, ino: st.ino, dev: st.dev, uid: o ? o.uid : -1, gid: o ? o.gid : -1 };
+      return { isDirectory: () => st.isDirectory(), isFile: () => st.isFile(), isSymbolicLink: () => st.isSymbolicLink(), mode: st.mode, size: st.size, ino: st.ino, dev: st.dev, uid: o ? o.uid : -1, gid: o ? o.gid : -1 };
     },
     mkdir(p, mode) { mac.log.push(`mkdir ${p}`); mkdirSync(at(p), { mode }); mac.owners.set(p, { uid: mac.rootUid, gid: 0 }); },
     // The setup's one way to change an owner and mode: the real handle-based change, with chown stood in for (a test is not root).
     secure(p, want) { secureFolder(at(p), want, ports(p)); },
-    secureFile(p, want) { secureFile(at(p), want, ports(p)); },
+    secureFile(p, want) { (mac.reopened ??= []).push(p); secureFile(at(p), want, ports(p)); },   // reopens the name: a test can see it
     // The real reader (links, plain file, owner, mode, folders above); `configOwner` stands in for the file's owner (a test is not root).
     readConfig: (p, { strict = false } = {}) => readConfigFile(strict ? at(p) : p, { strict, rootUid: mac.rootUid, top: prefix, ownerOf: (st) => mac.configOwner ?? st.uid, what: strict ? "root's setup config" : 'the setup config' }),
     configOwner: null,
     sourceOwner: null,   // stands in for the runner config's owner (a test is not root)
     nodeProblem: () => mac.nodeProblemText,
+    // A stand-in for GitHub: a test sets mac.github = (url, init) => ({ status, text }). Every call is kept (the token is in init.headers).
+    fetch: async (url, init) => { mac.fetchLog.push({ url, method: init?.method ?? 'GET' }); if (!mac.github) throw Object.assign(new Error('offline'), { code: 'ENOTFOUND' }); return mac.github(url, init); },
+    readSecret(prompt) { mac.secretPrompts.push(prompt); if (mac.secretInput === null) throw new Error('there is no terminal to type the token into; run this in the Terminal app'); return mac.secretInput; },
     // The real checks on a node program the config names, for the file's own owner (the test process) and mode, in its own folder.
     nodeBinProblem: (p) => nodeProblemOf(p, { exact: true, rootUid: mac.rootUid, top: (() => { try { return dirname(realpathSync(p)); } catch { return '/'; } })() }),
     // The runner config is a real file outside the prefix. The real reader (links, plain file, size); as root also its owner and mode.
@@ -152,6 +182,8 @@ export function fakeMac({ euid: as = 0, users = {}, admins = [] } = {}) {
     // The install and the job files. The real calls, on the prefixed place; a write needs the parent folder (like the real one)
     // and makes a NEW file only (like the real one: it never overwrites or follows a link).
     readText: (p) => readFileSync(at(p), 'utf8'),
+    writeOwned(p, text, own) { mac.log.push(`write ${p}`); writeNewFile(at(p), text, own.mode, own, ports(p)); },
+    unlink(p) { mac.log.push(`unlink ${p}`); try { unlinkSync(at(p)); } catch (e) { if (e?.code !== 'ENOENT') throw e; } mac.owners.delete(p); },
     write(p, text, mode) { mac.log.push(`write ${p}`); writeNewFile(at(p), text, mode); mac.owners.set(p, { uid: -2, gid: -2 }); },   // no owner until the code sets one
     copyFile(src, p, mode) { mac.log.push(`copy ${p}`); writeNewFile(at(p), readFileSync(src), mode); mac.owners.set(p, { uid: -2, gid: -2 }); },
     copyTree(src, p) { mac.log.push(`copytree ${p}`); cpSync(src, at(p), { recursive: true, dereference: false, errorOnExist: true, force: false }); },
@@ -187,6 +219,9 @@ export function fakeMac({ euid: as = 0, users = {}, admins = [] } = {}) {
       const label = /<key>Label<\/key>\s*<string>([^<]+)<\/string>/.exec(text)?.[1];
       if (!label) return err(5, 'Bootstrap failed: 5: Input/output error');
       if (mac.loaded.has(label)) return err(5, 'Bootstrap failed: 5: Input/output error');
+      if (mac.failBootstrap?.has(label)) return err(5, 'Bootstrap failed: 5: Input/output error');   // a test makes the load fail
+      if (mac.bootstrapLies?.has(label)) return { status: 0, stdout: '', stderr: '' };   // ... or say yes and leave nothing loaded
+
       mac.loaded.set(label, { state: 'running', pid: 4000 + mac.loaded.size, ageS: 5 });   // RunAtLoad: launchd starts it at once
       return { status: 0, stdout: '', stderr: '' };
     }

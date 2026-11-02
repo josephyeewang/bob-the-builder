@@ -592,6 +592,46 @@ test('a job file written where a link sits replaces the link itself; the link\'s
   assert.equal(statSync(plistFile(w, 'review-runner')).isFile(), true);
 });
 
+// ───────────────────────────── A8: reload the account job only if it is loaded ─────────────────────────────
+
+test('reload-account: the job is not loaded → nothing to do, exit 0, the Mac not touched (a no-op, as the runbook expects on a fresh Mini)', async () => {
+  const w = await placed(); const n = w.mac.log.length;
+  const r = w.run(['daemons', 'reload-account']);
+  assert.equal(r.code, 0, r.text); assert.match(r.text, /nothing to do/); assert.equal(w.mac.log.length, n);
+  const d = w.run(['daemons', 'reload-account', '--dry-run']); assert.equal(d.code, 0); assert.match(d.text, /nothing to do/);
+});
+
+test('reload-account: loaded with an OLD file (no --install) → the file is rewritten to carry --install <the installed copy>, unloaded, loaded; the other jobs untouched', async () => {
+  const w = await placed();
+  assert.equal(w.run(['daemons', 'load']).code, 0);
+  const f = plistFile(w, 'review-account');
+  rmSync(f); writeFileSync(f, readFileSync(plistFile(w, 'review-runner'), 'utf8').replace('review-runner', 'review-account'), { mode: 0o644 });   // some old text
+  const { plists } = plistTexts(w.mac, w.cfg);
+  assert.ok(plists['review-account'].includes(`<string>--install</string><string>${installPaths(w.cfg).installRoot}</string>`));
+  const dry = w.run(['daemons', 'reload-account', '--dry-run']);
+  assert.equal(dry.code, 0, dry.text); assert.match(dry.text, /would run: write .*review-account\.plist/); assert.match(dry.text, /would run: launchctl bootout/); assert.match(dry.text, /would run: launchctl bootstrap/);
+  const n = w.mac.log.length;
+  const r = w.run(['daemons', 'reload-account']); assert.equal(r.code, 0, r.text);
+  assert.equal(readFileSync(f, 'utf8'), plists['review-account']);
+  const steps = w.mac.log.slice(n).filter((l) => /review-account|launchctl/.test(l) && !/^(chown|chmod) /.test(l));
+  assert.deepEqual(steps.map((s) => s.split(' ').slice(0, 2).join(' ')), ['rm /Library/LaunchDaemons/com.example.orch-test.review-account.plist', 'write /Library/LaunchDaemons/com.example.orch-test.review-account.plist', 'launchctl bootout', 'launchctl bootstrap']);
+  assert.ok(!w.mac.log.slice(n).some((l) => /review-runner|review-updater/.test(l)), 'another job was touched');
+  assert.ok(w.mac.loaded.has(`${LABEL}.review-account`) && w.mac.loaded.has(`${LABEL}.review-runner`));
+  assert.deepEqual(failed(checkDaemons(w.mac, w.cfg)), []);
+});
+
+test('PLANT reload-account when /Library is writable by others → no step runs (the guard, as for every root command)', async () => {
+  const w = await placed(); assert.equal(w.run(['daemons', 'load']).code, 0);
+  chmodSync(w.mac.at('/Library'), 0o777); const n = w.mac.log.length;
+  const r = w.run(['daemons', 'reload-account']); assert.equal(r.code, 2); assert.equal(w.mac.log.length, n);
+});
+
+test('reload-account refuses when not root; --dry-run does not need root', async () => {
+  const w = await placed(); w.mac.as = 1234;
+  assert.equal(w.run(['daemons', 'reload-account']).code, 2);
+  assert.equal(w.run(['daemons', 'reload-account', '--dry-run']).code, 0);
+});
+
 // ───────────────────────────── the real read-only tools on this Mac ─────────────────────────────
 
 test('REAL launchctl print: an unknown job is "not loaded" (exit 113), read only', { skip: !isDarwin }, () => {
@@ -726,6 +766,35 @@ test('L149 m9 P13 P21 nothing the install or place makes is left without an owne
   const w = await placed();
   for (const job of JOBS) { const st = w.mac.lstat(`/Library/LaunchDaemons/${LABEL}.${job}.plist`); assert.equal(st.uid, w.mac.rootUid, job); assert.equal(st.mode & 0o7777, 0o644, job); }
   writeFileSync(w.mac.at('/nobody-chowned-this'), 'x'); assert.equal(w.mac.lstat('/nobody-chowned-this').uid, -1);
+});
+
+// ───────────────────────────── L150 m2: reload-account never ends in a false "done" ─────────────────────────────
+
+test('L150 m2 reload-account: a load that fails leaves the job unloaded; the stop says "run: daemons load"; running reload-account again says the job is NOT loaded (never "nothing to do"); daemons load puts it right', async () => {
+  const w = await placed(); assert.equal(w.run(['daemons', 'load']).code, 0);
+  const f = plistFile(w, 'review-account'); rmSync(f); writeFileSync(f, 'old text', { mode: 0o644 });
+  w.mac.failBootstrap = new Set([`${LABEL}.review-account`]);
+  let r = w.run(['daemons', 'reload-account']); assert.equal(r.code, 1, r.text); assert.match(r.text, /could not load .*run: daemons load/);
+  assert.ok(!w.mac.loaded.has(`${LABEL}.review-account`));
+  r = w.run(['daemons', 'reload-account']); assert.equal(r.code, 1, r.text); assert.match(r.text, /is NOT loaded now/); assert.match(r.text, /Run: daemons load/); assert.doesNotMatch(r.text, /nothing to do|done\./);
+  w.mac.failBootstrap = null;
+  r = w.run(['daemons', 'load']); assert.equal(r.code, 0, r.text); assert.ok(w.mac.loaded.has(`${LABEL}.review-account`));
+  assert.deepEqual(failed(checkDaemons(w.mac, w.cfg)), []);
+});
+
+test('L150 m2 a load that says yes but leaves nothing loaded is a failure: load and reload-account both read back', async () => {
+  const w = await placed();
+  w.mac.bootstrapLies = new Set([`${LABEL}.review-account`]);
+  let r = w.run(['daemons', 'load']); assert.equal(r.code, 1, r.text); assert.match(r.text, /is NOT loaded after the load/);
+  w.mac.bootstrapLies = null; assert.equal(w.run(['daemons', 'load']).code, 0);
+  rmSync(plistFile(w, 'review-account')); w.run(['daemons', 'place']);
+  w.mac.users.get('sam').NFSHomeDirectory = '/Users/sam2'; w.run(['daemons', 'place']);
+  w.mac.bootstrapLies = new Set([`${LABEL}.review-account`]);
+  r = w.run(['daemons', 'reload-account']); assert.equal(r.code, 1, r.text); assert.match(r.text, /is NOT loaded after the load/);
+});
+
+test('L150 m2 reload-account on a fresh Mini (never loaded, nothing recorded) is still a plain no-op', async () => {
+  const w = await placed(); const r = w.run(['daemons', 'reload-account']); assert.equal(r.code, 0, r.text); assert.match(r.text, /nothing to do/);
 });
 
 test('L160 m6 a nodeBin that is a link (even to a root-safe node) is refused at plan time: the copy would be made from the name, not the checked file', async () => {

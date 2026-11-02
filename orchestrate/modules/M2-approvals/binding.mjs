@@ -34,6 +34,7 @@
 import { ownerTurns, QUESTION_TOOL } from '../M1-front-door/transcript.mjs';
 import { canonicalJson } from '../../shared/plan-fingerprint.mjs';
 import { activeKind } from '../../shared/asks.mjs';
+import { answerCounts } from '../../shared/approval.mjs';
 import { askStore, writeDoc } from './ask-store.mjs';
 import { askIdOf, payloadSha, renderPayload } from './payload.mjs';
 import { lapseAt, readConfig } from './kinds.mjs';
@@ -121,7 +122,8 @@ export function processSession(ctx, { sessionId, sourcePath }) {
       const w = writeDoc(ctx.record, 'ask', a, doc);
       if (!w.ok) ctx.alert({ type: 'approvals_write_refused', ask: a.id, reason: w.reason });
     }
-    if (synced.first) { ctx.alert({ type: 'transcript_tampered', session: sessionId }); events.push({ type: 'tampered', session: sessionId }); }
+    // Marked told only once delivered: a lost alert (false, or a throw) is sent again next pass (L135 site B).
+    if (synced.untold && ctx.alert({ type: 'transcript_tampered', session: sessionId }) !== false) { ctx.copies.told(sessionId); events.push({ type: 'tampered', session: sessionId }); }
     return { ok: true, events };
   }
   const sess = boxSession(ctx.record, sessionId);
@@ -227,14 +229,16 @@ function answer(ctx, sid, e, b, events) {
   const keys = answers && typeof answers === 'object' && !Array.isArray(answers) ? Object.keys(answers) : [];
   const choice = same && keys.length === 1 && keys[0] === q && typeof answers[q] === 'string' ? answers[q] : null;
   if (choice === null || !(doc.choices ?? []).includes(choice)) return release(ctx, a, 'typed', sid, events);
-  const verdict = ctx.rules.may('count_approval', { product: ctx.product, card: doc.card, ask_kind: doc.kind, channel: 'tap', tier: doc.tier ?? null, risky: doc.risky ?? [] });
-  if (verdict.decision !== 'ask' || verdict.tier !== 2) {
-    ctx.alert({ type: 'approval_not_counted', ask: a.id, reason: verdict.reason });
+  // The answer as it will be recorded; the one approval check reads its channel from it (L81).
+  const answer = { channel: 'tap', choice, approves: choice === doc.choices[0], session_id: sid, tool_use_id: b.tool_use_id, at: iso(at) };
+  const counted = answerCounts(ctx.rules, { ...doc, answer }, { product: ctx.product });
+  if (!counted.ok) {
+    ctx.alert({ type: 'approval_not_counted', ask: a.id, reason: counted.reason });
     return release(ctx, a, 'declined', sid, events);
   }
   Object.assign(box, { status: 'answered', closed_at: iso(ctx.now()) });
   doc.state = 'answered';
-  doc.answer = { channel: 'tap', choice, approves: choice === doc.choices[0], session_id: sid, tool_use_id: b.tool_use_id, at: iso(at) };
+  doc.answer = answer;
   const w = writeDoc(ctx.record, 'ask', a, doc);
   if (!w.ok) { ctx.alert({ type: 'approvals_write_refused', ask: a.id, reason: w.reason }); return; }
   events.push({ type: 'answered', ask: a.id, card: doc.card, choice, session: sid });
