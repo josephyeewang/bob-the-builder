@@ -1,19 +1,19 @@
-// alert-answers.test.mjs — L130 m15 and L135 sites C, D and E: an alert that isn't delivered (it answers false, or it
+// alert-answers.test.mjs — L130 m15, L135 sites C, D and E, and L168 M-1: an alert that isn't delivered (it answers false, or it
 // throws) never leaves a "told" mark or a done step that nothing asks about again. Each site runs with a sink that
 // loses the alert, then with one that delivers it.
 //
 // Two forms (L130, L133):
-//   - a told mark written only when the alert answered something other than false (m15 claims_outage, the outbox
-//     store_error mark, the store's told-once set): a lost alert is simply sent again the next time;
+//   - a told mark written only when the alert answered something other than false (lapseClaims' once-a-day marks, the
+//     outbox store_error mark, the store's told-once set): a lost alert is simply sent again the next time;
 //   - a step done once and never redone (a file moved to quarantine, a torn diary line cut, a claim broken): the alert is
 //     kept in unsent-alerts.jsonl and sent again at the start of every later transaction until it is delivered.
 // The stand-in sink below answers false or throws; it moves to #93's fakeAlert once that lands.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { appendFileSync, mkdirSync, readFileSync, renameSync, unlinkSync } from 'node:fs';
+import { appendFileSync, chmodSync, mkdirSync, readFileSync, renameSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { openRecord } from './writer.mjs';
-import { PRODUCT, UID, iso, must, outboxFile, product, readyCard, runCard, seed, sessionClaim, setup } from './fixtures.test-helper.mjs';
+import { PRODUCT, UID, claimCard, iso, must, outboxFile, product, readyCard, runCard, seed, sessionClaim, setup } from './fixtures.test-helper.mjs';
 
 const LOST = ['false', 'throws'];
 const MIN = 60000;
@@ -118,20 +118,47 @@ test('L135 C: a claim_broken alert that is lost after the break is kept and sent
   assert.deepEqual(waiting(env), []);
 });
 
-test('L130 m15: the once-a-day claims_outage mark is written only after the alert is delivered', () => {
+// L168 M-1: lapseClaims' two once-a-day alerts (#68's copies of the m15 form). A lost one leaves no mark, so the
+// next pass tells again; once delivered, it is not told again that day. (The claims_outage mark moved to M11
+// outage.mjs, whose outage.test.mjs covers a lost outage alert through tellThen.)
+test('L168 M-1: unlaunched_claim_held is marked only once delivered', () => {
   for (const mode of LOST) {
     const s = sink();
-    const env = claimsBoard(s, [100, 101, 102], ['C-1', 'C-2', 'C-3', 'C-4']);
+    const env = open(s);
+    product(env);
+    for (const id of ['C-1', 'C-2']) readyCard(env, id);
+    claimCard(env, 'C-1');
+    const t0 = env.clock.t;
     s.mode = mode;
-    assert.match(env.record.breakIfDead({ card: 'C-1' }).reason, /none is broken \(outage\)/);
-    env.record.breakIfDead({ card: 'C-2' });
-    assert.equal(s.of('claims_outage').length, 2, `${mode}: not marked, so the next pass tells again`);
+    env.record.lapseClaims(t0 + 5 * MIN + 1);
+    env.record.lapseClaims(t0 + 5 * MIN + 2);
+    assert.equal(s.of('unlaunched_claim_held').length, 2, `${mode}: not marked, so the next pass tells again`);
     s.mode = 'ok';
-    env.record.breakIfDead({ card: 'C-3' });
-    assert.equal(s.of('claims_outage').length, 3, `${mode}: delivered`);
-    env.record.breakIfDead({ card: 'C-1' });
-    env.record.breakIfDead({ card: 'C-2' });
-    assert.equal(s.of('claims_outage').length, 3, `${mode}: once delivered, once a day`);
+    env.record.lapseClaims(t0 + 5 * MIN + 3);
+    env.record.lapseClaims(t0 + 5 * MIN + 4);
+    env.record.lapseClaims(t0 + 5 * MIN + 5);
+    assert.equal(s.of('unlaunched_claim_held').length, 3, `${mode}: delivered once, then not again that day`);
+    assert.equal(env.record.read('card', 'C-1').doc.state, 'claimed', `${mode}: the claim is held all the same`);
+  }
+});
+
+test('L168 M-1: heartbeat_stale_unreadable is marked only once delivered', () => {
+  for (const mode of LOST) {
+    const s = sink();
+    const env = open(s, { values: { 'proposals.heartbeat_stale_min': 'x' } });
+    product(env);
+    readyCard(env, 'C-1');
+    claimCard(env, 'C-1', { kind: 'tab', claim_id: 'T-1', host: 'mac-a' });
+    const t0 = env.clock.t;
+    s.mode = mode;
+    env.record.lapseClaims(t0 + 10 * MIN);
+    env.record.lapseClaims(t0 + 11 * MIN);
+    assert.equal(s.of('heartbeat_stale_unreadable').length, 2, `${mode}: not marked, so the next pass tells again`);
+    s.mode = 'ok';
+    env.record.lapseClaims(t0 + 12 * MIN);
+    env.record.lapseClaims(t0 + 13 * MIN);
+    env.record.lapseClaims(t0 + 14 * MIN);
+    assert.equal(s.of('heartbeat_stale_unreadable').length, 3, `${mode}: delivered once, then not again that day`);
   }
 });
 
@@ -184,4 +211,30 @@ test('L135: a kept alert survives a restart: a new writer on the same store send
   other.store.transaction(() => null);
   assert.equal(s2.of('diary_torn_line_cut').length, 1, 'the new process sends the kept alert');
   assert.deepEqual(waiting(env), []);
+});
+
+test('L168 Minor: when even the append to unsent-alerts.jsonl fails, the alert is held in memory and resent in the same process', () => {
+  for (const mode of LOST) {
+    const s = sink();
+    const env = open(s);
+    seed(env, 'card', 'C-1', card());
+    const file = join(env.root, 'unsent-alerts.jsonl');
+    chmodSync(file, 0o444);
+    try {
+      appendFileSync(join(env.root, 'diary.jsonl'), '{"seq":2,"half a li');
+      s.mode = mode;
+      pass(env);
+      assert.equal(s.of('diary_torn_line_cut').length, 1, `${mode}: tried`);
+      assert.deepEqual(waiting(env), [], `${mode}: the append failed, so nothing is in the file`);
+      pass(env);
+      assert.equal(s.of('diary_torn_line_cut').length, 2, `${mode}: held here, so tried again`);
+      s.mode = 'ok';
+      pass(env);
+      assert.equal(s.of('diary_torn_line_cut').length, 3, `${mode}: delivered`);
+      assert.equal(s.of('diary_torn_line_cut')[2].resent, true);
+      pass(env);
+      pass(env);
+      assert.equal(s.of('diary_torn_line_cut').length, 3, `${mode}: sent once, not every pass`);
+    } finally { chmodSync(file, 0o644); }
+  }
 });

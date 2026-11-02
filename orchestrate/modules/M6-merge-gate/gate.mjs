@@ -106,6 +106,9 @@ export async function gatePass(ctx) {
   for (const m of merges().filter((x) => ['merged', 'audited_ok', 'audit_flagged'].includes(x.doc.state) && SHA.test(x.doc.merge_commit ?? ''))) {
     const card = fresh('card', m.doc.card);
     if (card?.doc?.state === 'merging' || !m.doc.marked_at || revertUnsettled(m, card)) await complete(m, m.doc.merge_commit);
+    // A parent check whose alert was lost is done again (L168 M-4).
+    const latest = fresh('merge', m.id);
+    if (latest && !latest.doc.parent_checked_at) await parentCheck(latest, latest.doc.merge_commit);
   }
 
   // 3. Audit results (R-0b-93): only a Sensors audit_run fact for the merge commit moves a merged merge.
@@ -248,11 +251,20 @@ export async function gatePass(ctx) {
   }
 
   // The merge must sit right on the main that was judged; if main moved in between, say so (the merge stands).
+  // parent_checked_at on the merge records that the parent matched or the owner was told; an alert that answers false
+  // or throws leaves it unmarked, and the next pass checks again until it is delivered (L168 M-4, the site G pattern).
   async function parentCheck(m, sha) {
+    let done;
     try {
       const k = await ctx.view.commit(sha);
-      if (k?.parents?.[0] !== m.doc.judged_main) alert({ type: 'merge_parent_moved', merge: m.id, commit: sha, judged_main: m.doc.judged_main, parent: k?.parents?.[0] ?? null, ask_owner: 'Undo?' });
-    } catch { alert({ type: 'merge_parent_moved', merge: m.id, commit: sha, judged_main: m.doc.judged_main, parent: null }); }
+      done = k?.parents?.[0] === m.doc.judged_main
+        || alertTaken(alert, { type: 'merge_parent_moved', merge: m.id, commit: sha, judged_main: m.doc.judged_main, parent: k?.parents?.[0] ?? null, ask_owner: 'Undo?' });
+    } catch { done = alertTaken(alert, { type: 'merge_parent_moved', merge: m.id, commit: sha, judged_main: m.doc.judged_main, parent: null }); }
+    if (!done) return;
+    const cur = fresh('merge', m.id);
+    if (!cur || cur.doc?.parent_checked_at) return;
+    const r = write('merge', cur, { parent_checked_at: iso() });
+    if (!r.ok) alert({ type: 'merge_gate_write_refused', merge: m.id, to: 'parent_checked', reason: r.reason });
   }
 
   // An undo card that merged marks the card it undid reverted. That is tried again on later passes until it holds or the

@@ -161,7 +161,7 @@ async function undoWithBlockedMark(lost) {
   verifiedCard(w);
   await gatePass(w.ctx);
   const flagged = mergeOf(w).doc.merge_commit;
-  must(w.env.record.write({ actor: 'sensors', entity: 'fact', id: 'audit-1', expectRev: 0, doc: { type: 'audit_run', commit: flagged, conclusion: 'failure' } }), 'fact');
+  must(w.env.record.write({ actor: 'sensors', entity: 'fact', id: 'audit-run-1', expectRev: 0, doc: { type: 'audit_run', commit: flagged, conclusion: 'failure' } }), 'fact');
   await gatePass(w.ctx);
   must(put(w.env.record, 'dispatcher', 'card', 'C-1', { state: 'closed' }), 'closed');
   w.env.clock.t += 60_000;
@@ -215,6 +215,59 @@ test('L135 G: a delivered undo_not_marked alert settles the merge; the gate does
   await gatePass(w.ctx);
   await gatePass(w.ctx);
   assert.equal(tries(), 1, 'told once');
+});
+
+// L168 M-4: the "main moved under the merge" alert carries the Undo? ask. The view says the merge commit's parent is
+// not the judged main (only for that commit). A lost or throwing one leaves the parent check
+// unmarked, so each later pass checks and tells again until it is delivered; then parent_checked_at stops it.
+function movedParent(w, mode) {
+  const real = w.ctx.view;
+  const moved = 'f'.repeat(40);
+  // The view is frozen: a wrapper with every method bound, and commit() changed only for the merge commit.
+  const view = {};
+  for (const k of Object.keys(real)) view[k] = typeof real[k] === 'function' ? real[k].bind(real) : real[k];
+  view.commit = async (sha) => { const k = await real.commit(sha); return sha === mergeOf(w)?.doc?.merge_commit ? { ...k, parents: [moved] } : k; };
+  w.ctx.view = view;
+  const lose = { mode };
+  const tries = [];
+  w.ctx.alert = (a) => {
+    w.alerts.push(a);
+    if (a.type !== 'merge_parent_moved') return true;
+    tries.push(a);
+    if (lose.mode === 'throws') throw new Error('the alert could not be sent');
+    return lose.mode !== 'false';
+  };
+  return { lose, tries };
+}
+
+test('L168 M-4: a lost merge_parent_moved alert is told again each pass until delivered, then not again', async () => {
+  for (const mode of ['false', 'throws']) {
+    const w = world();
+    verifiedCard(w);
+    const { lose, tries } = movedParent(w, mode);
+    await gatePass(w.ctx);
+    assert.equal(mergeOf(w).doc.state, 'merged', `${mode}: the merge stands`);
+    assert.equal(tries.length, 1, `${mode}: told`);
+    assert.equal(tries[0].ask_owner, 'Undo?');
+    assert.equal(mergeOf(w).doc.parent_checked_at, undefined, `${mode}: not marked while the alert is lost`);
+    await gatePass(w.ctx);
+    assert.equal(tries.length, 2, `${mode}: told again on the next pass`);
+    lose.mode = 'ok';
+    await gatePass(w.ctx);
+    assert.equal(tries.length, 3, `${mode}: delivered`);
+    assert.ok(mergeOf(w).doc.parent_checked_at, `${mode}: marked once delivered`);
+    await gatePass(w.ctx);
+    await gatePass(w.ctx);
+    assert.equal(tries.length, 3, `${mode}: not told again`);
+  }
+});
+
+test('L168 M-4: a parent that matches is marked checked at once, with no alert', async () => {
+  const w = world();
+  verifiedCard(w);
+  await gatePass(w.ctx);
+  assert.ok(mergeOf(w).doc.parent_checked_at);
+  assert.equal(w.alerts.filter((a) => a.type === 'merge_parent_moved').length, 0);
 });
 
 test('an undo card whose change is not the exact reverse is refused (9) and never merged', async () => {

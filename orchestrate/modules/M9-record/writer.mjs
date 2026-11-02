@@ -608,7 +608,7 @@ export function openRecord({ root, product, ownerUid, rules, alert = () => {}, n
         for (const h of held) {
           // One alert per card per day (L38).
           const key = `alert:unlaunched_held:${h.card}:${iso(nowMs).slice(0, 10)}`;
-          if (!tx.seen(key)) { store.alert({ type: 'unlaunched_claim_held', ...h }); tx.markSeen(key, 'alerted'); }
+          if (!tx.seen(key) && store.alert({ type: 'unlaunched_claim_held', ...h }) !== false) tx.markSeen(key, 'alerted');   // marked only once delivered (L130 m15, L168 M-1)
         }
         const t = timeouts();
         const running = timeoutFor(t, 'card', 'running');
@@ -620,7 +620,7 @@ export function openRecord({ root, product, ownerUid, rules, alert = () => {}, n
         if (stale === undefined && tx.list('card').some((e) => e.doc.claim?.kind === 'tab' && (e.doc.state === 'claimed' || e.doc.state === 'running'))) {
           const key = `alert:heartbeat_stale_unreadable:${iso(nowMs).slice(0, 10)}`;
           const staleRaw = get('proposals.heartbeat_stale_min');
-          if (!tx.seen(key)) { store.alert({ type: 'heartbeat_stale_unreadable', key: 'proposals.heartbeat_stale_min', value: staleRaw === undefined ? null : String(staleRaw).slice(0, 40) }); tx.markSeen(key, 'alerted'); }
+          if (!tx.seen(key) && store.alert({ type: 'heartbeat_stale_unreadable', key: 'proposals.heartbeat_stale_min', value: staleRaw === undefined ? null : String(staleRaw).slice(0, 40) }) !== false) tx.markSeen(key, 'alerted');   // L168 M-1
         }
         const lapsed = [];
         for (const e of tx.list('card')) {
