@@ -1572,7 +1572,7 @@ test('L182 class: 100 check runs on the head is refused for good (refusal 1), no
   const head = verifiedCard(w);
   w.g.checks.set(head, Array.from({ length: 100 }, (_, i) => ({ name: i ? `c${i}` : 'test', app: { id: 1 }, head_sha: head, status: 'completed', conclusion: 'success' })));
   await gatePass(w.ctx);
-  refusedFor(w, /^1: the commit has 100 check runs.*split the change/);
+  refusedFor(w, /^1: the commit has 100 check runs; the gate reads at most 99; run fewer checks on this commit$/);
 });
 
 test('L182 class: 100 review threads is refused for good (refusal 7), not waited on', async () => {
@@ -1580,7 +1580,7 @@ test('L182 class: 100 review threads is refused for good (refusal 7), not waited
   verifiedCard(w);
   w.g.threads = Array.from({ length: 100 }, () => ({ isResolved: true, comments: { nodes: [{ author: { __typename: 'User' } }] } }));
   await gatePass(w.ctx);
-  refusedFor(w, /^7: the pull request has 100 review threads/);
+  refusedFor(w, /^7: the pull request has 100 review threads; the gate reads at most 99; open a new pull request; resolved threads still count toward GitHub's total$/);
 });
 
 test('L182 class control: a review-thread read that fails still waits', async () => {
@@ -1646,3 +1646,11 @@ for (const mode of ['false-then-true', 'throw-then-true', 'write-refused-once', 
     }
   });
 }
+
+test('L182 class (r2 probe): 100 statuses on the head is refused for good (refusal 1), told', async () => {
+  const w = world(limited());
+  const head = verifiedCard(w);
+  w.g.statuses.set(head, Array.from({ length: 100 }, (_, i) => ({ context: `s${i}`, state: 'success' })));
+  await gatePass(w.ctx);
+  refusedFor(w, /^1: the commit has 100 statuses/);
+});
