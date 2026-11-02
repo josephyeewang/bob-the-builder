@@ -765,7 +765,7 @@ test('L130 m17: a late-mark alert that is refused or throws is sent again next p
     w.g.answer.status = () => ({ status: 500, json: null });
     await gatePass(w.ctx);
     const m = mergeOf(w);
-    must(w.env.record.write({ actor: 'sensors', entity: 'fact', id: 'run-1', expectRev: 0, doc: { type: 'audit_run', commit: m.doc.merge_commit, conclusion: 'failure' } }), 'fact');
+    must(w.env.record.write({ actor: 'sensors', entity: 'fact', id: 'audit-run-1', expectRev: 0, doc: { type: 'audit_run', commit: m.doc.merge_commit, conclusion: 'failure' } }), 'fact');
     w.g.answer.status = null;
     await gatePass(w.ctx);
     let after = mergeOf(w);

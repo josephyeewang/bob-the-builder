@@ -9,7 +9,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { REQUIRED_FIELDS } from '../../shared/record.mjs';
 import { tempDir } from '../../shared/test-tmp.mjs';
-import { WRITERS, fieldsAllowed } from './permissions.mjs';
+import { FACT_FAMILIES, WRITERS, fieldsAllowed } from './permissions.mjs';
 import {
   NOT_OBJECT_SITES, NOT_RECORD_RECEIVERS, OTHER_FORMS, PENDING, UNUSED_GRANTS, VARIABLE_SITES,
   checkSites, grantUse, grants, importsOf, modesOf, moduleSources, productionOnly, scanSources, splitPending, stripComments,
@@ -34,11 +34,15 @@ test('L112: every Record write in a module is one the permissions table allows (
 
 test('L112: the scan sees the writes the lead counted, so an empty answer is not a blind scan', () => {
   const n = (actor, entity) => scan.sites.filter((s) => s.actor === actor && s.entity === entity).length;
-  assert.equal(n('dispatcher', 'fact'), 10, 'alerts, pass, tick, moves, outage, outbox-intake, phone-link ×2, lead-restart, usage');
-  assert.equal(n('dispatcher', 'handoff'), 1);
-  assert.equal(n('dispatcher', 'ask'), 3, 'cleanup ×2, undo ×1');
+  assert.equal(n('dispatcher', 'fact'), 13, 'alerts, joe-waits ×2, lead-restart, merges, moves, outage, outbox-intake, pass, phone-link ×2, tick, usage');
+  // #68: the restart handoff is the Lead's own (its outbox); the Dispatcher saves a lead-restart- fact instead, and
+  // asks are approvals' alone (lane 2's consumeAsk).
+  assert.equal(n('dispatcher', 'handoff'), 0);
+  assert.equal(n('dispatcher', 'ask'), 0);
   assert.equal(n('workshop', 'fact'), 1);
-  assert.ok(n('dispatcher', 'card') >= 15, 'move() through moves.mjs is followed to its callers');
+  // 12 on main 5a4fdba (8 of them through move()); lane 2 moved the cancel and merge card writes elsewhere.
+  assert.ok(n('dispatcher', 'card') >= 12, 'move() through moves.mjs is followed to its callers');
+  assert.ok(scan.sites.filter((s) => s.via === 'move()' && s.entity === 'card').length >= 8, 'each move(rec, \'card\', …) call is a site');
   assert.ok(n('approvals', 'ask') >= 15, 'writeDoc() is followed to its callers');
   assert.ok(scan.sites.length >= 60, `${scan.sites.length} sites`);
   const files = new Set(scan.sites.map((s) => s.file));
@@ -50,8 +54,8 @@ test('L112: the scan sees the writes the lead counted, so an empty answer is not
 test('L112, L118 m4, c3: an update is checked where the call passes a read rev, a create where it may be new', () => {
   const at = (file, line) => scan.sites.find((s) => s.file === file && s.line === line);
   assert.deepEqual(at('modules/M11-dispatcher/alerts.mjs', 16).modes, ['create', 'update'], 'rec.read(...)?.rev ?? 0');
-  assert.deepEqual(at('modules/M11-dispatcher/phone-link.mjs', 43).modes, ['update'], 'c.rev');
-  assert.deepEqual(at('modules/M6-merge-gate/gate.mjs', 86).modes, ['create'], '0');
+  assert.deepEqual(at('modules/M11-dispatcher/phone-link.mjs', 44).modes, ['update'], 'c.rev');
+  assert.deepEqual(at('modules/M6-merge-gate/gate.mjs', 96).modes, ['create'], '0');
   // c3: gate.mjs's write() helper passes cur.rev, so it is an update, and the table says so.
   const gateHelper = scan.sites.filter((s) => s.file === 'modules/M6-merge-gate/gate.mjs' && s.via === 'write()');
   assert.ok(gateHelper.length >= 5, `${gateHelper.length} write() calls in gate.mjs`);
@@ -64,9 +68,9 @@ test('L112, L118 m4, c3: an update is checked where the call passes a read rev, 
   for (const e of ['cur.rev ?? 0', 'rev', 'a.b.rev', 'cur.rev + 1', 'n', 'cur.revs']) assert.deepEqual(modesOf(e), ['create', 'update'], e);
   // The rows the code needs, said once more as plain facts.
   for (const a of ['sensors', 'ledger', 'dispatcher', 'workshop']) for (const create of [true, false]) assert.notEqual(fieldsAllowed('fact', a, { create }), null, `${a} fact ${create ? 'create' : 'update'}`);
-  for (const create of [true, false]) assert.notEqual(fieldsAllowed('handoff', 'dispatcher', { create }), null);
+  for (const create of [true, false]) assert.equal(fieldsAllowed('handoff', 'dispatcher', { create }), null, 'no handoff row for the dispatcher (L129)');
   assert.equal(WRITERS.ask.dispatcher, undefined, 'no ask row for the dispatcher (L112 ruling 1)');
-  assert.equal(fieldsAllowed('fact', 'live_check', { create: false }), null, 'live_check only creates');
+  assert.deepEqual(FACT_FAMILIES.live_check, [], 'live_check has a row but no family, so it writes no fact (#68)');
   // L118 M2: a merge request is create-only again.
   assert.notEqual(fieldsAllowed('merge_request', 'dispatcher', { create: true }), null);
   assert.equal(fieldsAllowed('merge_request', 'dispatcher', { create: false }), null);
@@ -119,7 +123,8 @@ test('L118 m6: a pending entry holds only the refusals in its own function', () 
   const site = (fn) => ({ site: { file: 'modules/M11-dispatcher/cleanup.mjs', line: 9, fn, actor: 'dispatcher', entity: 'ask', modes: ['create'] }, mode: 'create', why: 'x' });
   const r = splitPending([site('somethingNew')]);
   assert.equal(r.open.length, 1, 'a new refusal in another function of a pending file is open, not held');
-  const r2 = splitPending([site('consume')], [PENDING[0]]);
+  const entry = { name: 'pending x', file: 'modules/M11-dispatcher/cleanup.mjs', fn: 'consume', actor: 'dispatcher', entity: 'ask', count: 1, reason: 'x'.repeat(30) };
+  const r2 = splitPending([site('consume')], [entry]);
   assert.deepEqual([r2.open.length, r2.held.length, r2.stale.length], [0, 1, 0]);
   // The real list: each entry's count matches refusals in its own function.
   const real = splitPending(checkSites(scan.sites));
@@ -143,26 +148,27 @@ test('comments are blanked without eating code after a regex or a string that lo
 const SNAPSHOT = {
   card: {
     lead: { create: ['state', 'product', 'module', 'lane', 'kind', 'depends_on', 'what', 'files', 'done_when', 'tier', 'plan_sha256', 'main_commit', 'brief', 'desired', 'merge_requested', 'needs_joe'], update: ['brief', 'desired', 'merge_requested', 'needs_joe'], updateInDraft: ['files', 'done_when', 'tier', 'plan_sha256', 'main_commit'], kinds: ['ordinary', 'lead_daily_card'] },
-    dispatcher: { create: ['state', 'product', 'module', 'lane', 'kind', 'depends_on', 'what', 'fix_of', 'source', 'research_ask', 'files', 'done_when', 'tier', 'plan_sha256', 'main_commit', 'brief', 'desired', 'merge_requested', 'needs_joe', 'round'], update: ['claim', 'wait', 'failure', 'summary', 'report_ref', 'needs_joe'], kinds: ['fix', 'exact_reverse', 'research_copy'] },
+    dispatcher: { create: ['state', 'product', 'module', 'lane', 'kind', 'depends_on', 'what', 'fix_of', 'source', 'research_ask', 'files', 'done_when', 'tier', 'plan_sha256', 'main_commit', 'brief', 'desired', 'merge_requested', 'needs_joe', 'round'], update: ['claim', 'wait', 'failure', 'summary', 'report_ref', 'needs_joe', 'attempts'], kinds: ['fix', 'exact_reverse', 'research_copy'] },
     worker: { update: ['summary', 'report_ref'] },
     workshop: { update: ['head'] },
     approvals: { update: ['needs_joe', 'approval_required', 'cancel_reason'] },
-    merge_gate: { update: ['needs_joe', 'merge_commit'] },
+    merge_gate: { update: ['needs_joe', 'merge_commit', 'attempts'] },
   },
   ask: { approvals: { create: '*', update: '*' } },
   go: { approvals: { create: '*', update: '*' } },
   verdict: { reviewer: { create: '*' }, auditor: { create: '*' } },
   session: { dispatcher: { create: '*', update: '*' }, workshop: { update: '*' } },
   merge: { merge_gate: { create: '*', update: '*' } },
-  fact: { sensors: { create: '*', update: '*' }, ledger: { create: '*', update: '*' }, dispatcher: { create: '*', update: '*' }, workshop: { create: '*', update: '*' }, live_check: { create: '*' } },
+  // #68: each fact writer changes only facts it created, under its own families (FACT_FAMILIES).
+  fact: Object.fromEntries(['sensors', 'ledger', 'workshop', 'dispatcher', 'merge_gate', 'live_check'].map((r) => [r, { create: '*', update: '*', own: true }])),
   product: { approvals: { create: '*', update: '*' } },
-  handoff: { lead: { create: '*' }, learning: { create: '*' }, dispatcher: { create: '*', update: '*' } },
+  handoff: { lead: { create: '*' }, learning: { create: '*' } },
   report: Object.fromEntries(['worker', 'reviewer', 'scout', 'writer', 'thinking', 'script', 'front_door', 'incident'].map((r) => [r, { create: '*' }])),
   lesson: { learning: { create: '*', update: '*' } },
   launch: { dispatcher: { create: '*' } },
   merge_request: { dispatcher: { create: '*' } },
 };
-const plain = (writers) => Object.fromEntries(Object.entries(writers).map(([e, rows]) => [e, Object.fromEntries(Object.entries(rows).map(([a, row]) => [a, Object.fromEntries(Object.entries(row).map(([k, v]) => [k, v === '*' ? '*' : [...v]]))]))]));
+const plain = (writers) => Object.fromEntries(Object.entries(writers).map(([e, rows]) => [e, Object.fromEntries(Object.entries(rows).map(([a, row]) => [a, Object.fromEntries(Object.entries(row).map(([k, v]) => [k, v === '*' || typeof v === 'boolean' ? v : [...v]]))]))]));
 
 test('L118 m1: every grant in the table is used by a write site or listed in UNUSED_GRANTS with why; the rows are pinned', () => {
   assert.deepEqual(grantUse(scan.sites), { unused: [], staleUnused: [] });
@@ -286,11 +292,11 @@ function minimal(entity, t) {
   return Object.fromEntries((REQUIRED_FIELDS[entity] ?? []).map((f) => [f, f.endsWith('_at') ? iso(t) : 'x']));
 }
 
-test('L112 on the real Record: each fact writer creates and then rewrites the same fact; the dispatcher writes a handoff twice, and no ask', () => {
+test('L112 on the real Record: each fact writer creates and then rewrites a fact in its own family; no handoff or ask from the dispatcher', () => {
   const env = setup({ prefix: 'm9-sites-' });
   const t = env.clock.t;
-  for (const actor of ['sensors', 'ledger', 'dispatcher', 'workshop']) {
-    const id = `fact-${actor}`;
+  const OWN = { sensors: 'pr-1', ledger: 'alert-1', dispatcher: 'outage', workshop: 'push.x', merge_gate: 'reverse-1' };
+  for (const [actor, id] of Object.entries(OWN)) {
     const a = env.record.write({ actor, entity: 'fact', id, expectRev: 0, doc: { ...minimal('fact', t), n: 1 } });
     assert.equal(a.ok, true, `${actor} creates: ${a.reason}`);
     const cur = env.record.read('fact', id);
@@ -298,18 +304,13 @@ test('L112 on the real Record: each fact writer creates and then rewrites the sa
     assert.equal(b.ok, true, `${actor} rewrites: ${b.reason}`);
     assert.equal(env.record.read('fact', id).doc.n, 2);
   }
-  // live_check only creates.
-  assert.equal(env.record.write({ actor: 'live_check', entity: 'fact', id: 'fact-lc', expectRev: 0, doc: minimal('fact', t) }).ok, true);
-  const lc = env.record.read('fact', 'fact-lc');
-  const lcw = env.record.write({ actor: 'live_check', entity: 'fact', id: 'fact-lc', expectRev: lc.rev, doc: { ...lc.doc, n: 2 } });
-  assert.equal(lcw.ok, false); assert.match(lcw.reason, /may not change fact/);
-  // The restart handoff (M11 lead-restart.mjs:118 shape), written, then written again on the next stop.
-  const hdoc = (sha) => ({ ...minimal('handoff', t), session: 'L-1', product: null, name: 'handoff-L-1.md', sha256: sha, at: iso(t) });
-  const h1 = env.record.write({ actor: 'dispatcher', entity: 'handoff', id: 'handoff-L-1', expectRev: 0, doc: hdoc('a'.repeat(64)), kind: 'handoff' });
-  assert.equal(h1.ok, true, h1.reason);
-  const h = env.record.read('handoff', 'handoff-L-1');
-  const h2 = env.record.write({ actor: 'dispatcher', entity: 'handoff', id: 'handoff-L-1', expectRev: h.rev, doc: hdoc('b'.repeat(64)), kind: 'handoff' });
-  assert.equal(h2.ok, true, h2.reason);
+  // live_check has a row but no family, so it creates nothing (#68).
+  const lc = env.record.write({ actor: 'live_check', entity: 'fact', id: 'fact-lc', expectRev: 0, doc: minimal('fact', t) });
+  assert.equal(lc.ok, false); assert.match(lc.reason, /in no family/);
+  // The Dispatcher has no handoff row (L129): the restart handoff is the Lead's, through its outbox.
+  const hdoc = { ...minimal('handoff', t), session: 'L-1', product: null, name: 'handoff-L-1.md', sha256: 'a'.repeat(64), at: iso(t) };
+  const h = env.record.write({ actor: 'dispatcher', entity: 'handoff', id: 'handoff-L-1', expectRev: 0, doc: hdoc, kind: 'handoff' });
+  assert.equal(h.ok, false); assert.match(h.reason, /dispatcher may not create handoff/);
   const ask = env.record.write({ actor: 'dispatcher', entity: 'ask', id: 'ask-1', expectRev: 0, doc: { ...minimal('ask', t), state: 'open' } });
   assert.equal(ask.ok, false); assert.match(ask.reason, /dispatcher may not create ask/);
 });

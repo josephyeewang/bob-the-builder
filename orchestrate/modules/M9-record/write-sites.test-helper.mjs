@@ -53,6 +53,8 @@ export const VARIABLE_SITES = Object.freeze([
       { helper: 'makeAlerts', module: 'modules/M13-ledger/alerts.mjs', fallback: 'ledger' }] },
   { file: 'modules/M6-merge-gate/gate.mjs', count: 1, reason: "gate.mjs's own write(entity, cur, …) helper rewrites a document it just read",
     calls: { helper: 'write', local: 'modules/M6-merge-gate/gate.mjs', entityArg: 0, actor: 'merge_gate', modes: ['update'] } },
+  { file: 'modules/M6-merge-gate/merge-outcome.mjs', count: 1, reason: "settleMerge's own write(entity, cur, …) helper rewrites a merge or card it just read (#68)",
+    calls: { helper: 'write', local: 'modules/M6-merge-gate/merge-outcome.mjs', entityArg: 0, actor: 'merge_gate', modes: ['update'] } },
   { file: 'modules/M2-approvals/ask-store.mjs', count: 1, reason: 'writeDoc(record, entity, cur, doc), M2\'s one writer of asks and gos (cur = null creates)',
     calls: { helper: 'writeDoc', module: 'modules/M2-approvals/ask-store.mjs', entityArg: 1, actor: 'approvals', modes: ['create', 'update'] } },
   { file: 'modules/M11-dispatcher/moves.mjs', count: 1, reason: 'move(rec, entity, id, patch) re-reads the document and writes it as the dispatcher',
@@ -62,21 +64,8 @@ export const VARIABLE_SITES = Object.freeze([
 // Writes the real Record refuses today and another lane is changing, pinned by file and enclosing function (L118 m6).
 // The test prints each one (never a silent skip), and fails once one of them is gone or allowed, so the entry is taken
 // off with the fix.
+// Empty since main 5a4fdba: lane 2 fixed the last seven (L112-3, L114-1, L114-2, L118-2).
 export const PENDING = Object.freeze([
-  { name: 'pending L112-3', file: 'modules/M11-dispatcher/cleanup.mjs', fn: 'consume', actor: 'dispatcher', entity: 'ask', count: 1,
-    reason: 'lane 2 closes the cleanup ask through approvals (consumeAsk)' },
-  { name: 'pending L112-3', file: 'modules/M11-dispatcher/cleanup.mjs', fn: 'cleanupCopy', actor: 'dispatcher', entity: 'ask', count: 1,
-    reason: 'lane 2 has approvals create the cleanup ask' },
-  { name: 'pending L112-3', file: 'modules/M11-dispatcher/undo.mjs', fn: 'tap', actor: 'dispatcher', entity: 'ask', count: 1,
-    reason: 'lane 2 closes this ask through consumeAsk' },
-  { name: 'pending L114-1', file: 'modules/M11-dispatcher/merges.mjs', fn: 'merged', actor: 'dispatcher', entity: 'merge', count: 1,
-    reason: 'lane 2 routes the move to merged through M6 land(); M9 gives merge moves and writes to merge_gate alone' },
-  { name: 'pending L114-1', file: 'modules/M11-dispatcher/merges.mjs', fn: 'refuse', actor: 'dispatcher', entity: 'merge', count: 1,
-    reason: 'lane 2 routes the move to refused through M6 recover(); M9 gives merge moves and writes to merge_gate alone' },
-  { name: 'pending L114-2', file: 'modules/M11-dispatcher/pass.mjs', fn: 'starts', actor: 'dispatcher', entity: 'launch', count: 1,
-    reason: 'a session id launches once and the Merge Gate trusts the launch (refusal 5): lane 2 writes expectRev: 0' },
-  { name: 'pending L118-2', file: 'modules/M11-dispatcher/merges.mjs', fn: 'requestMerges', actor: 'dispatcher', entity: 'merge_request', count: 1,
-    reason: 'merge_request is create-only (L118 M2): lane 2 gives each re-request its own id mr-<card>-<head12>-r<n>, so this is a create' },
 ]);
 
 // Grants in permissions.mjs that no scanned write uses, each with why it is still there (L118 m1). AI roles never call
@@ -106,6 +95,7 @@ export const UNUSED_GRANTS = Object.freeze([
   { grant: 'product approvals create', reason: 'no module writes this yet (M2 adds a product); kept as the design\'s row, listed to the lead as a candidate to drop until it is built' },
   { grant: 'product approvals update', reason: 'no module writes this yet (M2 changes a product); kept as the design\'s row, listed to the lead as a candidate to drop until it is built' },
   { grant: 'fact live_check create', reason: 'no module writes this yet (M7 live check has only its README); kept as the design\'s row, listed to the lead as a candidate to drop until it is built' },
+  { grant: 'fact live_check update', reason: 'no module writes this yet (M7 live check has only its README); #68 gave live_check OWN_FACTS but no family, so it can create nothing and so update nothing' },
 ]);
 
 const LITERAL = /^'([a-z_]+)'$/;
