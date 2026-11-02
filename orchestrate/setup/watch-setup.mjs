@@ -26,8 +26,12 @@ const op = (text, run) => ({ text, run });
 const sha = (text) => createHash('sha256').update(Buffer.from(text, 'utf8')).digest('hex');
 const short = (h) => h.slice(0, 12);
 
-/** The hourly job's plist text. `cfg` must carry `watch` and the install keys (label). */
+/** Said wherever the config's watch entry has the repository but not yet the rules fingerprint (prove-token needs only the repository). */
+export const WATCH_NO_HASH = "the config's watch entry has no rulesSha256 yet: run watch-rules --print-config-line --repo <owner/name> --rules-source <file>, and add the line it prints";
+
+/** The hourly job's plist text. `cfg` must carry `watch` (repo AND rulesSha256) and the install keys (label). */
 export function watchPlist(io, cfg) {
+  if (!/^[0-9a-f]{64}$/.test(String(cfg.watch?.rulesSha256))) throw new Error(WATCH_NO_HASH);
   const P = installPaths(cfg);
   if (!LABEL.test(String(cfg.label))) throw new Error('bad job label');
   for (const [k, v] of Object.entries({ installRoot: P.installRoot, logDir: P.logDir })) if (!ABS.test(String(v))) throw new Error(`${k} must be an absolute path`);
@@ -64,6 +68,7 @@ export function watchConfigLine(cfg, { repo, source, readSource }) {
 /** Root puts the rules draft in place. → { ops, problems }. `readSource(path)` reads a file outside the prefix (a port for tests). */
 export function planWatchRules(io, cfg, { source, readSource }) {
   if (!cfg.watch) return { ops: [], problems: ['the config has no "watch" entry (repo and rulesSha256); add it first'] };
+  if (!cfg.watch.rulesSha256) return { ops: [], problems: [WATCH_NO_HASH] };
   const r = readRules(source, readSource); if (r.problem) return { ops: [], problems: [r.problem] };
   const text = r.text;
   const got = sha(text);
@@ -83,6 +88,7 @@ export function planWatchRules(io, cfg, { source, readSource }) {
 export function checkWatchRules(io, cfg) {
   const f = watchRulesPath(cfg); const what = `${f} is root's 0644 copy of the rules, and hashes to the config's value`;
   if (!cfg.watch) return [{ ok: true, what: 'the watch-only week is not set up (no "watch" entry in the config)' }];
+  if (!cfg.watch.rulesSha256) return [{ ok: false, what, why: WATCH_NO_HASH }];
   if (io.euid() !== 0) return [{ ok: true, skip: true, what, why: 'the folder is orchestrate-only; needs root to look; run with sudo' }];
   let st; try { st = io.lstat(f); } catch { return [{ ok: false, what, why: 'missing (run watch-rules --rules-source <file>)' }]; }
   const why = [];

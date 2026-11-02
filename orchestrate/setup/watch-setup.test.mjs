@@ -259,3 +259,14 @@ test('L160 watch-rules reads the rules file safely, as root would: a link, a fol
   }
   assert.equal(w.run(['watch-rules', '--rules-source', w.src]).code, 0);   // the owner of the file is not judged: a plain file of anyone's is fine
 });
+
+test('L173 the config may name the repository before the rules exist (prove-token needs only that): every reader of watch.rulesSha256 then says so plainly, and none puts "undefined" anywhere', () => {
+  const w = world({ raw: { ...RAW, watch: { repo: REPO } } });
+  const place = w.run(['daemons', 'place']); assert.equal(place.code, 1, place.text); assert.match(place.text, /no rulesSha256 yet/); assert.doesNotMatch(place.text, /undefined|home folder/);
+  assert.equal(statSync(w.mac.at('/Library/LaunchDaemons')).isDirectory(), true);
+  assert.deepEqual(jobsFor(w.cfg).filter((j) => { try { statSync(w.mac.at(`/Library/LaunchDaemons/${RAW.label}.${j}.plist`)); return true; } catch { return false; } }), [], 'no job file was written');
+  const wr = w.run(['watch-rules', '--rules-source', w.src]); assert.equal(wr.code, 1, wr.text); assert.match(wr.text, /no rulesSha256 yet/); assert.doesNotMatch(wr.text, /undefined/);
+  const ck = w.run(['check-watch-rules']); assert.equal(ck.code, 1, ck.text); assert.match(ck.text, /FAIL .*no rulesSha256 yet/); assert.doesNotMatch(ck.text, /undefined/);
+  const dc = w.run(['daemons', 'check']); assert.equal(dc.code, 1, dc.text); assert.match(dc.text, /no rulesSha256 yet/);
+  assert.equal(w.run(['watch-rules', '--print-config-line', '--repo', REPO, '--rules-source', w.src]).code, 0, 'the line that fixes it can still be printed');
+});

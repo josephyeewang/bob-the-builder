@@ -19,7 +19,7 @@ import { RUNNER_CONFIG, aclProblem, chainProblem, currentCopy } from '../modules
 import { homeOf } from './layout.mjs';
 import { checkInstall, installPaths } from './install.mjs';
 import { readUser } from './users-folders.mjs';
-import { watchPlist } from './watch-setup.mjs';
+import { watchPlist, WATCH_NO_HASH } from './watch-setup.mjs';
 import { watchRulesPath } from './layout.mjs';
 
 export const DAEMON_DIR = '/Library/LaunchDaemons';
@@ -59,7 +59,7 @@ export function plistTexts(io, cfg) {
     const plists = { 'review-runner': two.runner, 'review-account': two.accountCopy, 'review-updater': updaterPlist(common) };
     if (cfg.watch) plists['watch-only'] = watchPlist(io, cfg);
     return { plists, problems };
-  } catch (e) { return { plists: {}, problems: [`the job files cannot be built from the owner's Mac user ${cfg.owner} (${e.message}); is its home folder set?`] }; }
+  } catch (e) { return { plists: {}, problems: [e.message === WATCH_NO_HASH ? e.message : `the job files cannot be built from the owner's Mac user ${cfg.owner} (${e.message}); is its home folder set?`] }; }
 }
 
 const launchctl = (io, args) => io.run(LAUNCHCTL, args);
