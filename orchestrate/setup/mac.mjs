@@ -14,12 +14,16 @@
 //   io.euid()               who this process runs as
 //   io.rootUid              the uid root has (0; a test stands one in)
 //   io.nodeProblem()        null, or why the node running this is not one root may run (L90 minor a)
+//   io.nodeBinProblem(path) the same for a node program the config names (it is copied in and root runs the copy)
+//   io.readSource(path)     a file of this machine outside the prefix that root reads (the runner config): through one handle,
+//                           never through a link, a plain file, not too big; as root also root's own and written by no one else.
+//                           Errors never show a byte of the file.
 //
 // There is no chown or chmod here that takes a path: both follow a link, and a Mac user that owns a parent folder can
 // swap a child for a link between the plan and the change. Every change opens the folder itself (O_NOFOLLOW, folder
 // only), checks it is the very folder the plan saw, and changes it through that handle.
 
-import { closeSync, constants, cpSync, fchmodSync, fchownSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, readlinkSync, realpathSync, rmSync, writeSync } from 'node:fs';
+import { unlinkSync, closeSync, constants, cpSync, fchmodSync, fchownSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, readlinkSync, realpathSync, rmSync, writeSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { dirname, join } from 'node:path';
 import { chainProblem } from '../modules/M4-workshop/launcher/install-check.mjs';
@@ -60,11 +64,22 @@ export function secureFile(real, want, { chown = fchownSync, chmod = fchmodSync 
   } finally { closeSync(fd); }
 }
 
-/** Makes a NEW file: refuses to overwrite anything or to follow a link at the name. The caller then sets owner and mode with secureFile. */
-export function writeNewFile(real, data, mode) {
+/**
+ * Makes a NEW file: refuses to overwrite anything or to follow a link at the name. The caller then sets owner and mode with
+ * secureFile — or, for a secret, passes `own` ({uid, gid, mode}): the owner and mode are then set on THE SAME open handle
+ * BEFORE the first byte is written, so the secret never sits in a file of the wrong owner, and the name is never opened
+ * a second time (a hard link swapped in at the name after the write cannot be chowned). L150 m1.
+ */
+export function writeNewFile(real, data, mode, own = null, { chown = fchownSync, chmod = fchmodSync } = {}) {
   const fd = openSync(real, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, mode);
-  try { const b = Buffer.isBuffer(data) ? data : Buffer.from(data, 'utf8'); let off = 0; while (off < b.length) off += writeSync(fd, b, off, b.length - off); } finally { closeSync(fd); }
+  try {
+    if (own) { chown(fd, own.uid, own.gid); chmod(fd, own.mode); }
+    const b = Buffer.isBuffer(data) ? data : Buffer.from(data, 'utf8'); let off = 0; while (off < b.length) off += writeSync(fd, b, off, b.length - off);
+  } finally { closeSync(fd); }
 }
+
+/** Removes ONE name that is not a folder (a plain unlink: it never goes down into a folder and never follows a link). */
+export function unlinkName(real) { unlinkSync(real); }
 
 /**
  * The text of a config file, read through ONE open handle and never through a link (NEW-1, L100 m4). Always: a plain file,
@@ -72,26 +87,25 @@ export function writeNewFile(real, data, mode) {
  * it root's alone. Errors name the problem and never show a byte of the file (it may hold anything). `ownerOf` and `chain`
  * are ports for a test, which is not root.
  */
-export function readConfigFile(real, { strict = false, rootUid = 0, top = '/', ownerOf = (st) => st.uid, chain = chainProblem } = {}) {
+export function readConfigFile(real, { strict = false, rootUid = 0, top = '/', ownerOf = (st) => st.uid, chain = chainProblem, what = 'the config' } = {}) {
   let fd;
   try { fd = openSync(real, constants.O_RDONLY | constants.O_NOFOLLOW); } catch (e) {
-    throw new Error(e?.code === 'ELOOP' ? 'the config is a link, and a link is not followed' : e?.code === 'ENOENT' ? 'the config file was not found' : `the config could not be opened (${e?.code ?? 'error'})`);
+    throw new Error(e?.code === 'ELOOP' ? `${what} is a link, and a link is not followed` : e?.code === 'ENOENT' ? `${what} file was not found` : `${what} could not be opened (${e?.code ?? 'error'})`);
   }
   try {
     const st = fstatSync(fd);
-    if (!st.isFile()) throw new Error('the config is not a plain file');
-    if (st.size > 65536) throw new Error('the config is far bigger than a config can be');
+    if (!st.isFile()) throw new Error(`${what} is not a plain file`);
+    if (st.size > 65536) throw new Error(`${what} is far bigger than a config can be`);
     if (strict) {
-      if (ownerOf(st) !== rootUid) throw new Error('the config is not owned by root, so root will not take orders from it');
-      if (st.mode & 0o022) throw new Error('the config can be written by others than root, so root will not take orders from it');
+      if (ownerOf(st) !== rootUid) throw new Error(`${what} is not owned by root, so root will not take orders from it`);
+      if (st.mode & 0o022) throw new Error(`${what} can be written by others than root, so root will not take orders from it`);
       const above = chain(dirname(real), { owner: rootUid, top });
-      if (above) throw new Error(`the folder the config is in is not root's alone (${above})`);
+      if (above) throw new Error(`the folder ${what} is in is not root's alone (${above})`);
     }
     return readFileSync(fd, 'utf8');
   } finally { closeSync(fd); }
 }
 
-/** Why root should not run the node program that is running now, or null: its file, and every folder above it, must be root's alone (L90 m4). */
 /**
  * One line typed at the terminal itself (/dev/tty, so a pipe or a log cannot stand in for it) with the echo off. The text is
  * returned and nothing else ever holds it: it is not printed, and no program is given it. Echo is turned back on whatever
@@ -117,8 +131,11 @@ export function readSecretFromTty(prompt, { maxBytes = 1024 } = {}) {
   } finally { closeSync(fd); }
 }
 
-export function nodeProblemOf(execPath, { rootUid = 0, top = '/', lstat = lstatSync, realpath = realpathSync } = {}) {
+/** Why root should not run the node program that is running now, or null: its file, and every folder above it, must be root's alone (L90 m4). */
+export function nodeProblemOf(execPath, { rootUid = 0, top = '/', lstat = lstatSync, realpath = realpathSync, exact = false } = {}) {
   let real; try { real = realpath(execPath); } catch { return `could not find the real place of ${execPath}`; }
+  // `exact`: a program the config NAMES is copied from that name, so the name must be the checked file itself, not a link someone can re-point (L160 m6)
+  if (exact && real !== execPath) return `${execPath} is not the program's own real place (it leads to ${real}); name ${real} itself`;
   const st = (() => { try { return lstat(real); } catch { return null; } })();
   if (!st) return `${real} is missing`;
   if (st.uid !== rootUid) return `the node program ${real} is not root's`;
@@ -143,14 +160,18 @@ export function realIo({ prefix = '' } = {}) {
     secure: (p, want) => secureFolder(at(p), want),
     secureFile: (p, want) => secureFile(at(p), want),
     // The fixed config place is a logical path (under the prefix); a path the person named with --config is a real one.
-    readConfig: (p, { strict = false } = {}) => readConfigFile(strict ? at(p) : p, { strict, rootUid: 0, top: prefix || '/' }),
+    readConfig: (p, { strict = false } = {}) => readConfigFile(strict ? at(p) : p, { strict, rootUid: 0, top: prefix || '/', what: strict ? "root's setup config" : 'the setup config' }),
     nodeProblem: () => nodeProblemOf(process.execPath),
     readSecret: (prompt) => readSecretFromTty(prompt),
     // Plain fetch for the one place the setup talks to GitHub (prove-token). → { status, text }; a time limit; redirects are not followed.
-    fetch: async (url, init) => { const r = await fetch(url, { ...init, redirect: 'manual', signal: AbortSignal.timeout(20_000) }); return { status: r.status, text: await r.text() }; },
+    fetch: async (url, init) => { const r = await fetch(url, { ...init, redirect: 'manual', signal: AbortSignal.timeout(20_000) }); return { status: r.status, text: await r.text(), rateRemaining: r.headers.get('x-ratelimit-remaining') }; },
+    nodeBinProblem: (p) => nodeProblemOf(p, { exact: true }),
+    readSource: (p) => readConfigFile(p, { strict: (typeof process.geteuid === 'function' ? process.geteuid() : -1) === 0, rootUid: 0, top: '/', what: 'the runner config' }),
     // For the install and the job files. `src` is a real path outside the prefix (a file of this repository, the node program).
     readText: (p) => readFileSync(at(p), 'utf8'),
     write: (p, text, mode) => writeNewFile(at(p), text, mode),
+    writeOwned: (p, text, own) => writeNewFile(at(p), text, own.mode, own),
+    unlink: (p) => { try { unlinkName(at(p)); } catch (e) { if (e?.code !== 'ENOENT') throw e; } },
     copyFile: (src, p, mode) => writeNewFile(at(p), readFileSync(src), mode),
     copyTree: (src, p) => cpSync(src, at(p), { recursive: true, dereference: false, errorOnExist: true, force: false }),
     rm: (p) => rmSync(at(p), { recursive: true, force: true }),

@@ -37,12 +37,16 @@ export const KEYS = Object.freeze({
   cancelGraceMin: 'timeouts.cancel_grace_min',
   parkWaitMin: 'timeouts.park_wait_min',
   deadQuietMin: 'timeouts.dead_quiet_min',
-  claimedNoSessionMin: 'timeouts.claimed_no_session_min',
   checkingMaxMin: 'timeouts.checking_max_min',
+  // how long an interrupted merge's PR may still show open before it is refused-interrupted (L85 M-1 a)
+  mergingOpenMaxMin: 'timeouts.merging_open_max_min',
   reportingMaxMin: 'timeouts.reporting_max_min',
   inReviewNoReviewerMin: 'timeouts.in_review_no_reviewer_min',
   frontDoorStuckMin: 'timeouts.front_door_stuck_min',
   usageUnknownMaxMin: 'timeouts.usage_unknown_max_min',
+  // claims (L72): the quiet time before a dead owner's claim is broken (M9 breakIfDead reads it; read here so a missing
+  // value is told). A claim whose session never started lapses at M9's claims.unlaunched_min, which has a default.
+  claimsStuckMin: 'claims.stuck_min',
   // outage (review M9)
   outageMinDead: 'outage.min_dead',
   outageShare: 'outage.share',
@@ -57,7 +61,7 @@ export const KEYS = Object.freeze({
 // them through `fakeRules({ values })`.
 export const NEW_KEYS = Object.freeze([
   KEYS.paceMinShare, KEYS.shakedown, KEYS.amberEditingPerProduct, KEYS.amberEditingPerMac,
-  KEYS.cancelGraceMin, KEYS.parkWaitMin, KEYS.deadQuietMin, KEYS.claimedNoSessionMin, KEYS.checkingMaxMin,
+  KEYS.cancelGraceMin, KEYS.parkWaitMin, KEYS.deadQuietMin, KEYS.checkingMaxMin, KEYS.mergingOpenMaxMin,
   KEYS.reportingMaxMin, KEYS.inReviewNoReviewerMin, KEYS.frontDoorStuckMin, KEYS.usageUnknownMaxMin, KEYS.outageMinDead, KEYS.outageShare,
 ]);
 
@@ -69,17 +73,33 @@ export class MissingKey extends Error {
   constructor(key) { super(`the rules have no value for ${key}`); this.key = key; }
 }
 
-/** A number (or the given type) from the rules, or throws MissingKey. */
+// The keys whose value may have a fraction: shares, paces and percentages. They are read with dec(); every other
+// number (a cap, a count, minutes, a token size) is a whole number, read with num() (L123). The rules file is text, so
+// `1.0` there is the text "1.0": a decimal, never a whole number.
+export const DECIMAL_KEYS = Object.freeze([
+  KEYS.redPace, KEYS.redWeek, KEYS.redH5, KEYS.amberPace, KEYS.amberWeek, KEYS.amberH5, KEYS.ownBuildingShare,
+  KEYS.reservePct, KEYS.noTier1ProdAbove, KEYS.paceMinShare, KEYS.outageShare,
+]);
+
+/**
+ * A value from the rules, typed, or throws MissingKey (L123). Numbers go through rules.num() or rules.dec() and the
+ * flag through rules.flag(), so the text the rules file gives ("30", "0.5", "false") reads as the value it names, and
+ * anything else is missing. A default applies only when the rules have no value at all, never over a bad one.
+ */
 export function need(rules, key, { product, type = 'number' } = {}) {
-  let v = rules.get(key, product ? { product } : {});
-  if (v === undefined && Object.hasOwn(DEFAULTS, key)) v = DEFAULTS[key];
-  const ok = type === 'number' ? typeof v === 'number' && Number.isFinite(v) && v >= 0
-    : type === 'boolean' ? typeof v === 'boolean'
-      : type === 'list' ? Array.isArray(v) && v.every((x) => typeof x === 'string')
-        : type === 'object' ? v !== null && typeof v === 'object' && !Array.isArray(v) : false;
-  if (!ok) throw new MissingKey(key);
+  const opts = product ? { product } : {};
+  const raw = rules.get(key, opts);
+  if (raw === undefined && Object.hasOwn(DEFAULTS, key)) return DEFAULTS[key];
+  let v;
+  if (type === 'number') v = DECIMAL_KEYS.includes(key) ? rules.dec(key, opts) : rules.num(key, opts);
+  else if (type === 'boolean') v = rules.flag(key, opts);
+  else if (type === 'list') v = Array.isArray(raw) && raw.every((x) => typeof x === 'string') ? raw : undefined;
+  else if (type === 'object') v = raw !== null && typeof raw === 'object' && !Array.isArray(raw) ? raw : undefined;
+  if (v === undefined) throw new MissingKey(key);
   return v;
 }
 
-/** Minutes from the rules, as milliseconds. */
+/** Minutes from the rules (a whole number), as milliseconds. */
 export const minutes = (rules, key, opts) => need(rules, key, opts) * 60_000;
+/** How a missing per-product value is listed for Joe: the key, and the product it is missing for (L116 c1). */
+export const missingFor = (key, product) => (product ? `${key} for ${product}` : key);

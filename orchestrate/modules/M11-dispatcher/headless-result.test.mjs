@@ -31,8 +31,8 @@ test('m10: a budget stop or unreadable result -> the card waits on Joe with budg
     assert.equal(applyResult(rec, 'C-1', out, { now: T0 }).moved, true);
     const c = rec.read('card', 'C-1').doc;
     assert.equal(c.state, 'waiting');
-    assert.equal(c.waiting.who, 'joe');
-    assert.match(c.waiting.what, /^budget_stop/);
+    assert.equal(c.wait.who, 'joe');
+    assert.match(c.wait.what, /^budget_stop/);
     assert.equal(rec.list('card').length, 1);
   }
 });

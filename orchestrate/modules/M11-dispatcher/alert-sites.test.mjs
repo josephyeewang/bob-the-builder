@@ -52,7 +52,9 @@ export function directSends(files) {
     text.split('\n').forEach((line, i) => {
       const body = line.replace(/\/\/.*$/, '').replace(/(['"`])(?:\\.|(?!\1).)*\1/g, "''");
       const port = /\b(?:p|ports)\.alert\b/.test(body) && !/sendAlerts\([^)]*\b(?:p|ports)\.alert\b/.test(body);
-      const handed = [...body.matchAll(/\balert\s*:\s*([^,})\s]+)/g)].some((m) => m[1] !== 'alert' && !m[1].startsWith('outbox('));
+      // `textAlerts(alert)` (alerts.mjs) only words an object alert for the step's own outbox.
+      // `heldAlerts(into)` only keeps an M6 call's alerts for the step to send itself (L127); it never sends.
+      const handed = [...body.matchAll(/\balert\s*:\s*([^,})\s]+)/g)].some((m) => m[1] !== 'alert' && !m[1].startsWith('outbox(') && m[1] !== 'textAlerts(alert' && !m[1].startsWith('heldAlerts('));
       const outboxMade = /\bconst\s+alert\s*=/.test(body) && !/\bconst\s+alert\s*=\s*outbox\(/.test(body);
       if (port || handed || outboxMade) bad.push(`${f}:${i + 1}: ${line.trim()}`);
     });
@@ -105,8 +107,12 @@ test('L47 sweep, control: a direct send, a port handed to a step, or an alert ma
     'undoStep({ rec, alert });',
     'holdAlert({ rec, alert: outbox(rec, now), now });',
     'const alert = outbox(rec, now);',
+    'settleMerge({ record: rec, alert: textAlerts(send), now });',
+    'settleMerge({ record: rec, alert: textAlerts(alert), now });',
+    'reconcileMerge({ record: rec, alert: heldAlerts(said), now });',
+    'reconcileMerge({ record: rec, alert: held, now });',
   ].join('\n')], ['alerts.mjs', 'await port(text); p.alert(x);']];
-  assert.deepEqual(directSends(files).map((l) => l.split(':')[1]), ['1', '2', '3', '4', '5']);
+  assert.deepEqual(directSends(files).map((l) => l.split(':')[1]), ['1', '2', '3', '4', '5', '10', '13']);
 });
 
 // Audit 0b-6 r7 M2, as a class: every fact a told mark goes on has a step that drops the cause's queued
@@ -118,6 +124,17 @@ export const LATE_MARK_OK = Object.freeze({
   factId: 'told keys count only while still in the last recorded set, so a key that left is told again',
   RESTART_FACT: 'once per Lead session, and a session id is never reused',
   REVIEW_ALERT_FACT: 'one fact per review runner alert (its id and time), so a late mark is on an alert that has been told',
+  // L127: told notes, written as the mark of the alert they record.
+  UNREAD_FACT: 'one per merge id, and a merge is one request, never reused: a late note is on a merge whose owner was told',
+  RECONCILE_TELL_FACT: 'one per merge id, on a merge GitHub shows merged, which stays so: a late copy is still true',
+  RECONCILED_FACT: 'a refused merge whose PR shows merged stays so (a merged PR does not unmerge): a late note still holds',
+  ASK_REFUSED_FACT: 'one per card and refusal count; a later refusal is a new count, told again',
+  UNDO_NOTE_FACT: 'one per undo card, whose fix card is never written twice: a late note is on a fix card the Lead was told of',
+  // L130: marks that carry what they told, so a later one of the same kind is told again.
+  OUTAGE_FACT: 'the mark carries the outage it told (told_id); a new outage has a new id and is told again',
+  WAIT_TELL_FACT: 'the mark carries the wait it told (told_since); a new wait has a new since and is told again',
+  appliedId: 'the mark carries the state it told (told_state); a new hand-in under the name rewrites the fact without it',
+  UNSAVED_FACT: 'one per stopped session, and a session id is never reused',
 });
 
 // The fact names each told mark goes on: `fact: NAME` inside a tellThen call (a call `NAME(...)` or a bare name).
@@ -148,4 +165,62 @@ test('r7 M2 sweep, control: a mark with no drop and no reason is caught; a dropp
     '// dropCause(rec, QUIET_FACT);',
   ].join('\n')]];
   assert.deepEqual(undroppedCauses(files), ['NEW_FACT', 'QUIET_FACT']);
+});
+
+// L127 (audit #68 r5 MAT-1), widened by L130 as a class: a told mark, a wait on Joe or a told note is written only
+// after the alert answered something other than false. The allowed forms are tellThen, and
+// `if (alert(...) !== false) { follow-up }`. Any other `alert(` call followed, in the same block, by a note, a told
+// write or a wait (`note(`, `putFact(`, `waitOn(`, a told field) is refused: that write would stand whatever the
+// queue answered.
+const NOTE_WRITE = new RegExp(String.raw`\bnote\(|\bputFact\(|\bwaitOn\(|${WRITE.source}|${BRACKET.source}`);
+export function notesAfterBareAlerts(files) {
+  const bad = [];
+  for (const [f, text] of files) {
+    if (f === 'alerts.mjs') continue;
+    // Block-comment lines (` * ...`, `/** ...`) are prose, not calls.
+    const lines = text.split('\n').map((l) => (/^\s*(\*|\/\*)/.test(l) ? '' : withoutTellThen(l.replace(/\/\/.*$/, '')).replace(/(['"`])(?:\\.|(?!\1).)*\1/g, "''")));
+    const all = lines.join('\n');
+    for (const m of all.matchAll(/(?<![\w$.])alert\(/g)) {
+      // `alert(...) !== false` gates what follows on the answer: the allowed form. `=== false` is a notice that
+      // records its own loss; what follows does not depend on it.
+      let p = 0, k = m.index + 'alert'.length;
+      for (; k < all.length; k += 1) { if (all[k] === '(') p += 1; else if (all[k] === ')' && (p -= 1) === 0) break; }
+      if (/^\s*[!=]==?\s*false\b/.test(all.slice(k + 1))) continue;
+      // The rest of the block the call is in: up to the brace that closes it.
+      let depth = 0, j = m.index;
+      for (; j < all.length; j += 1) { if (all[j] === '{') depth += 1; else if (all[j] === '}' && (depth -= 1) < 0) break; }
+      const n = all.slice(0, m.index).split('\n').length;
+      if (NOTE_WRITE.test(all.slice(m.index, j))) bad.push(`${f}:${n}: ${text.split('\n')[n - 1].trim()}`);
+    }
+  }
+  return bad;
+}
+
+test('L127 sweep: no told note or told field is written after an alert outside tellThen', () => {
+  assert.deepEqual(notesAfterBareAlerts(code()), []);
+});
+
+test('L127 sweep, control: a note, a putFact or a told write after a bare alert is caught; a tellThen, a note in another block, and an alert with no write after it are not', () => {
+  const files = [['x.mjs', [
+    'if (bad) {',
+    "  alert(`a ${b}`);",
+    "  note(rec, F(id), 'told', { now });",
+    '}',
+    "await alert('b'); putFact(rec, F, { x: 1 }, 'k');",
+    'function h() {',
+    "  if (x) alert('c');",
+    '  st.told = true;',
+    '}',
+    "tellThen(alert, `d ${e(f)}`, { fact: F(id), fields: { text: 't', at: 1 }, kind: 'note' });",
+    "note(rec, G, 'after a tellThen', { now });",
+    "if (y) { alert('e'); }",
+    "function g() { alert('f'); return 1; }",
+    "p.alert('a port'); x.note(1);",
+    '// alert(1); note(2);',
+    "if (alert(`g ${h}`) !== false) { note(rec, F, 'told', { now }); }",
+    "{ alert('i'); waitOn(rec, id, { who: 'joe' }); }",
+    "{ if (alert('j') === false) out.push(1); note(rec, F, 'not about j', { now }); }",
+    ' * alert(text) then note(x)',
+  ].join('\n')]];
+  assert.deepEqual(notesAfterBareAlerts(files).map((l) => l.split(':')[1]), ['2', '5', '7', '17']);
 });

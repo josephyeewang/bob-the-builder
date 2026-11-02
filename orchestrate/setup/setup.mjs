@@ -11,14 +11,14 @@
 //   daemons place|load|unload  [--dry-run]   the three background jobs' files; load; unload                    (root)
 //   daemons list                        loaded or not, per job                                                 (read only)
 //   daemons place|load|unload|list|check --only <job>   that one job only (e.g. watch-only); an unknown name is refused
-//   daemons check                       the job files are exact and the jobs are loaded                        (read only)
+//   daemons check                       the job files are exact, no leftover jobs, each job loaded from the file as it is now, last exit 0  (read only)
 //   daemons reload-account [--dry-run]  reload the account job only if it is loaded  (root)
 //   proposals  [--dry-run]  the proposals folders: parent root's, one per product  (root)
 //   check-proposals  owner, mode, access list; with sudo, who can read or write (read only)
 //   safe-directory  [--dry-run]  the owner's git trusts exactly the mirror folder  (root, runs git as the owner)
 //   check-safe-directory (read only; sudo to look)
 //   token  [--dry-run]  save the watch-only token (typed hidden, never shown)  (root)
-//   prove-token  --repo <owner/name>  read works, a no-op write is refused 403  (read only on GitHub; sudo to read the file)
+//   prove-token  the repository is the config's watch.repo (private, not archived); read works, a no-op write is refused as "this token may not"  (sudo: the token is read as orchestrate)
 //   watch-rules --rules-source <full path> [--dry-run]  put the watch-only week's rules in place (the file's hash must match the config)  (root)
 //   watch-rules --print-config-line --repo <owner/name> --rules-source <full path>  prints the config line (repo + fingerprint of that file)  (read only)
 //   check-watch-rules  the rules copy is root's, 0644, and hashes to the config's value  (read only; sudo to look)
@@ -32,7 +32,6 @@
 // refused when running as root: under sudo it would move where root writes while every printed path still read
 // /Library/... (L90 minor b). Exit: 0 fine, 1 a check failed or a problem was found, 2 usage or not root.
 
-import { readFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import { ROOT_CONFIG_PATH, parseConfig } from './layout.mjs';
 import { realIo, rootProblem } from './mac.mjs';
@@ -44,7 +43,7 @@ import { checkDaemons, list, onlyJobs, planLoad, planPlace, planReloadAccount, p
 import { checkWatchRules, planWatchRules, watchConfigLine } from './watch-setup.mjs';
 import { proveToken, checkProposals, checkSafeDirectory, checkToken, planProposals, planSafeDirectory, planToken } from './extras.mjs';
 
-const USAGE = 'usage: node setup.mjs <users-folders|check|proofs|install|check-install|daemons place|load|unload|list|check [--only <job>]|daemons reload-account|proposals|check-proposals|safe-directory|check-safe-directory|token|check-token|watch-rules|check-watch-rules> [--config <file>, without sudo only] [--dry-run] [--main <commit>]';
+const USAGE = 'usage: node setup.mjs <users-folders|check|proofs|install|check-install|daemons place|load|unload|list|check [--only <job>]|daemons reload-account|prove-token|proposals|check-proposals|safe-directory|check-safe-directory|token|check-token|watch-rules|check-watch-rules> [--config <file>, without sudo only] [--dry-run] [--main <commit>]';
 const DAEMON_SUBS = ['place', 'load', 'unload', 'list', 'check', 'reload-account'];
 const COMMANDS = ['users-folders', 'check', 'proofs', 'install', 'check-install', 'daemons', 'proposals', 'check-proposals', 'safe-directory', 'check-safe-directory', 'token', 'check-token', 'prove-token', 'watch-rules', 'check-watch-rules'];
 const READ_ONLY = ['check', 'check-install', 'check-proposals', 'check-safe-directory', 'check-token', 'prove-token', 'check-watch-rules'];
@@ -68,8 +67,7 @@ export function parseArgs(argv) {
   }
   const readOnly = READ_ONLY.includes(cmd) || (cmd === 'daemons' && (sub === 'list' || sub === 'check'));
   if (readOnly && o.dry) throw new Error('this command never changes anything, so --dry-run does not apply');
-  if (o.repo !== null && cmd !== 'prove-token' && !(cmd === 'watch-rules' && o.printLine)) throw new Error('--repo is only for prove-token and watch-rules --print-config-line');
-  if (cmd === 'prove-token' && !o.repo) throw new Error('prove-token needs --repo owner/name');
+  if (o.repo !== null && !(cmd === 'watch-rules' && o.printLine)) throw new Error('--repo is only for watch-rules --print-config-line (prove-token takes the repository from the config)');
   if (o.printLine && cmd !== 'watch-rules') throw new Error('--print-config-line is only for watch-rules');
   if (o.printLine && (o.dry || !o.repo)) throw new Error('--print-config-line reads only and needs --repo owner/name and --rules-source <full path> (no --dry-run)');
   if (o.rulesSource !== null && cmd !== 'watch-rules') throw new Error('--rules-source is only for watch-rules');
@@ -92,9 +90,9 @@ function report(res, out) {
  * every one of them starts with the same wall (L90 M3): the folders above the base must be root's alone, checked now (a
  * problem gives no steps at all) and again as the FIRST step of the run.
  */
-export function planCommand(io, cfg, o, { readSource = (p) => readFileSync(p, 'utf8'), runUpdater = spawnUpdater } = {}) {
+export function planCommand(io, cfg, o, { readSource = (p) => io.readSource(p), runUpdater = spawnUpdater } = {}) {
   if (o.cmd === 'users-folders') return plan(io, cfg);   // carries the wall itself
-  if (o.cmd === 'proposals') return planProposals(io, cfg);   // outside the base: carries its own wall (extras.mjs)
+  if (o.cmd === 'proposals') return guarded(io, cfg, planProposals(io, cfg));   // the base wall first (L150 m3), then its own wall for the parent (extras.mjs)
   if (o.cmd === 'watch-rules') return guarded(io, cfg, planWatchRules(io, cfg, { source: o.rulesSource, readSource }));
   if (o.cmd === 'safe-directory') return planSafeDirectory(io, cfg);   // root writes nothing: git runs as the owner
   const res = o.cmd === 'install' ? planInstall(io, cfg, { readSource, runUpdater })
@@ -132,7 +130,7 @@ export function main(argv, { io: given, runUpdater = spawnUpdater, out = (s) => 
   if (o.cmd === 'check-token') return report(checkToken(io, cfg), out);
   if (o.cmd === 'check-watch-rules') return report(checkWatchRules(io, cfg), out);
   if (o.cmd === 'watch-rules' && o.printLine) { const r = watchConfigLine(cfg, { repo: o.repo, source: o.rulesSource, readSource: (p) => readFileSync(p, 'utf8') }); if (r.problem) { err(`PROBLEM  ${r.problem}`); return 1; } out(r.line); return 0; }
-  if (o.cmd === 'prove-token') return proveToken(io, cfg, { repo: o.repo }).then((res) => report(res, out));
+  if (o.cmd === 'prove-token') return proveToken(io, cfg).then((res) => report(res, out));
   if (o.cmd === 'daemons' && o.sub === 'check') return report(checkDaemons(io, cfg, o.jobs), out);
   if (o.cmd === 'daemons' && o.sub === 'list') {
     for (const j of list(io, cfg, o.jobs)) out(j.loaded ? `${j.label}: loaded, ${j.state}, last exit ${j.lastExit}` : `${j.label}: not loaded${j.error ? ` (${j.error})` : ''}`);
@@ -154,11 +152,16 @@ export function main(argv, { io: given, runUpdater = spawnUpdater, out = (s) => 
   for (const p of planned.problems) err(`PROBLEM  ${p}`);
   if (planned.problems.length) { err('nothing was changed.'); return 1; }
   if (!planned.ops.length) out(planned.installed ? 'nothing to do: already installed.' : 'nothing to do: already as needed.');
-  if (o.dry) { for (const x of planned.ops) out(`would run: ${x.text}`); out(`dry run: ${planned.ops.length} step(s), nothing changed.`); return 0; }
+  if (o.dry) {
+    for (const x of planned.ops) out(`would run: ${x.text}`);
+    // A dry run is not root, so it cannot judge the runner config by root's rules: say what root will require (L160 m5).
+    if (o.cmd === 'install' && cfg.runnerConfig && planned.ops.length) out(`WARNING  root will refuse ${cfg.runnerConfig} unless it is root's own file that nobody else can write, with every folder above it root's too. A dry run as you cannot check that. To put it right: sudo install -o root -g wheel -m 0644 /dev/stdin ${cfg.runnerConfig} < <your copy of review.json>`);
+    out(`dry run: ${planned.ops.length} step(s), nothing changed.`); return 0; }
   try { apply(planned.ops, { log: (t) => out(`run: ${t}`) }); } catch (e) { err(`stopped: ${e.message}. Run it again after fixing that; it picks up where it stopped.`); return 1; }
   const after = o.cmd === 'users-folders' ? check(io, cfg, { alsoKnown: rootMadeEntries(cfg) }) : o.cmd === 'install' ? checkInstall(io, cfg)
     : o.cmd === 'proposals' ? checkProposals(io, cfg) : o.cmd === 'safe-directory' ? checkSafeDirectory(io, cfg) : o.cmd === 'token' ? checkToken(io, cfg) : o.cmd === 'watch-rules' ? checkWatchRules(io, cfg)
-    : o.sub === 'place' ? checkDaemons(io, cfg, o.jobs).filter((r) => !/is loaded$/.test(r.what)) : o.sub === 'load' ? checkDaemons(io, cfg, o.jobs).filter((r) => /is loaded$/.test(r.what)) : null;
+    : o.sub === 'place' ? checkDaemons(io, cfg, o.jobs).filter((r) => /exactly the built job file$|under another label/.test(r.what)) : o.sub === 'load' ? checkDaemons(io, cfg, o.jobs).filter((r) => /is loaded$|loaded from the job file as it is now$/.test(r.what))
+    : o.sub === 'reload-account' && planned.ops.length ? checkDaemons(io, cfg).filter((r) => /review-account (is loaded|was loaded from the job file as it is now)$/.test(r.what)) : null;
   if (!after) { out('done.'); return 0; }
   const bad = after.filter((r) => !r.ok);
   for (const r of bad) err(`FAIL  ${r.what} — ${r.why}`);

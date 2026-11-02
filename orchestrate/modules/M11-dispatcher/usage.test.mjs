@@ -147,7 +147,7 @@ test('a missing threshold key refuses rather than guesses', () => {
   assert.throws(() => bands({ rules: rulesWith({ [K.redH5]: 'eighty' }), reading: { ok: false }, now: T0 }), MissingKey);
 });
 
-test('the usage-band fact keeps both values and the unknown start time', () => {
+test('the band-usage fact keeps both values and the unknown start time', () => {
   const rec = recWith();
   const g = pace(0.5);
   assert.equal(recordBands({ rec, b: g, now: T0, account: 'acct-a' }).ok, true);
@@ -188,6 +188,8 @@ test('audit MIN-20 (U22): under unknown usage a Tier-1 review or audit is held; 
 
 test('audit MIN-20 (K3): a negative, infinite or non-number rules value is missing, never used', async () => {
   const { need } = await import('./keys.mjs');
-  for (const v of [-1, Infinity, NaN, '5', null]) assert.throws(() => need(rulesWith({ [K.redWeek]: v }), K.redWeek), MissingKey, String(v));
+  // The rules file is text (L123): "5" is the value 5; text that is not a plain decimal is missing.
+  for (const v of [-1, Infinity, NaN, '5x', ' 5', '1e3', '-5', '', null]) assert.throws(() => need(rulesWith({ [K.redWeek]: v }), K.redWeek), MissingKey, String(v));
   assert.equal(need(rulesWith({ [K.redWeek]: 0 }), K.redWeek), 0);
+  assert.equal(need(rulesWith({ [K.redWeek]: '5' }), K.redWeek), 5);
 });

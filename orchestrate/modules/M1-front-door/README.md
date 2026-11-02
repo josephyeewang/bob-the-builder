@@ -50,7 +50,7 @@ R-0b-82's decision and handoff code sit here although the row is tagged M11 (lan
    every time (each one replaced by the newest result of its kind; an old `lastFailedIds` is harmless, since ids are never reused). The pass also writes each result's text (a brief or a failure) to the read-only file the skill quotes
    if the owner asks first, and runs `readPowerSource` with the
    heartbeat. The skill quotes only a brief that names the ids it wrote (0b-8 audit round 3 M-3). If the push isn't
-   ready by the first cutover, trip mode falls back to two replies ("filed", then the brief when the owner says "brief").
+   proven by the first cutover, the cutover waits (L29): there is no fallback without the push.
 5. Lane 2: its launch read-back checker replaces `readback.mjs` at the join; the two agree on EndConversation and on
    settings sources (machine-wide + `--settings` only).
 6. The Air's health result (lead call L23): /configaudit on the Air runs `node M12-sensors/air-health.mjs <red count>
@@ -78,7 +78,8 @@ R-0b-82's decision and handoff code sit here although the row is tagged M11 (lan
    in their own session (audit kit-lane3 r1 Minor 9). Wiring it also means turning the skill's step 3 back on.
 10. Research asks (R-0b-136). Lane 2's intake checks `ask-request-<id>.json` with `checkOutboxFile` and pushes
    `intakePush` like the other Front Door files, then hands it to the record's `applyOutbox` (kept as a report). Each
-   pass runs M2's `openResearchAsks(ctx)` and pushes each `opened[].push` to the owner's phone. R-0b-135, after it
+   pass runs M2's `openResearchAsks(ctx)`, sends each `opened[].push` to the owner's phone, then calls
+   `markResearchPushSent(ctx, id)` for it; anything not marked is handed back next pass. R-0b-135, after it
    writes the research_copy card, calls M2's `landResearch(ctx, id)`. The owner's desktop session (Bob's method for
    "run research ask R-12") reads the brief and the file name to leave with M2's `researchBrief(record, id)`, then
    writes `research-R-12.md` to the proposals folder; how that session reads the record is the Lead's to place.
@@ -90,7 +91,11 @@ R-0b-82's decision and handoff code sit here although the row is tagged M11 (lan
    words). Intake hands it in like a research ask (join item 10). Each pass runs M2's `openUndoFlags(ctx, { entriesOf,
    addedBy })`: `entriesOf(sessionId)` reads M2's copy of that Front Door conversation, `addedBy(mergeCommit)` lists the
    files that merge added (lane 2: git, read-only). An `opened[]` ask is pushed by M2's schedule pass (urgent, with the
-   undo text as `view`); push each `byHand[].push` to the owner once and send MAIN the `undo_by_hand` alert. Lane 2's M11
+   undo text as `view`). Send each `byHand[].push` to the owner, then call `markByHandPushSent(ctx, id)` for it;
+   anything not marked is handed back next pass. MAIN's `undo_by_hand` alert is the pass's own: it goes out through
+   `ctx.alert` on every pass until it goes through: the sink neither threw nor answered `false` (L124 M-1). A sink
+   that throws or answers false is counted in the pass's `alerts_failed`. M11's `outbox(rec, now)` takes text, so the
+   wiring passes it an adapter, e.g. `(a) => box(JSON.stringify(a))`; its `true` means queued, which is kept. Lane 2's M11
    undo step writes the exact_reverse card from an answered Undo ask (it joins on the ask's `card`, `pr`,
    `merge_commit_sha` and `module`, L81); the test uses a labelled stand-in for it until lane 2's PR is up.
 

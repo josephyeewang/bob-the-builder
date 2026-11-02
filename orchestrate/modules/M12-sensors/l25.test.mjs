@@ -14,9 +14,10 @@ const plain = 'hunter2hunter2';
 const T = '2026-11-03T12:00:00.000Z';
 function put(doc) {
   const rec = memoryRecord();
-  const r = makeFactWriter(rec, { masker: makeMasker({ env: {} }), now: () => new Date(T) }).put('f', doc);
-  assert.equal(r.ok, true);
-  return rec.read('fact', 'f').doc;
+  // Under an id in the Sensors' own family (L74), as every Sensors fact is.
+  const r = makeFactWriter(rec, { masker: makeMasker({ env: {} }), now: () => new Date(T) }).put('pr-f', doc);
+  assert.equal(r.ok, true, r.reason);
+  return rec.read('fact', 'pr-f').doc;
 }
 const status = { kind: 'fact.heartbeat-status', product: 'test-product', at: T, front_door_reachable: true, signed_in: true, login: 'account A', red: ['front-door'] };
 

@@ -60,6 +60,16 @@ export function installPaths(cfg) {
 export const rootMadeEntries = (cfg) => { const P = installPaths(cfg); return [P.install, P.work, P.logDir, P.accountCopy]; };
 
 const op = (text, run) => ({ text, run });
+/** Why `p` (a real path outside the prefix) cannot be carried into the copy, or null: it must exist, be a plain file or folder, and hold no link anywhere inside (the copy is root's alone and carries no links). */
+function linkProblem(io, p, depth = 0) {
+  let st; try { st = io.lstatReal(p); } catch (e) { return e?.code === 'ENOENT' ? 'does not exist' : `could not be read (${e?.code ?? 'error'})`; }
+  if (st.isSymbolicLink()) return depth === 0 ? 'is a link (a shortcut). Name the real file it points to; the install does not carry links in' : `${p} is a link inside it; the install does not carry links in`;
+  if (st.isDirectory()) {
+    if (depth > 8) return 'is nested too deeply';
+    for (const n of io.listReal(p)) { const why = linkProblem(io, join(p, n), depth + 1); if (why) return why; }
+  } else if (!st.isFile()) return 'is neither a plain file nor a folder';
+  return null;
+}
 // Owner and mode are set through an open handle (never by path, which would follow a link): a folder or a file, root:wheel.
 const rootOwned = (io, p, mode, kind = 'file') => [op(`set owner and mode of ${p}: chown 0:0, chmod ${mode.toString(8)}`, () => { const want = { uid: io.rootUid, gid: 0, mode }; if (kind === 'dir') io.secure(p, want); else io.secureFile(p, want); })];
 
@@ -92,8 +102,9 @@ export function planInstall(io, cfg, { readSource, runUpdater }) {
     if (why) problems.push(`${P.installRoot}: ${why}. Nothing was changed`);
     return { ops, problems, installed: !why };
   }
-  let rc;
-  try { rc = JSON.parse(readSource(cfg.runnerConfig)); } catch (e) { problems.push(`the runner config ${cfg.runnerConfig} can't be read as JSON (${e.code ?? e.message})`); }
+  let rc; let rcText = null;
+  try { rcText = readSource(cfg.runnerConfig); } catch (e) { problems.push(`the runner config ${cfg.runnerConfig} can't be read: ${e.message}`); }   // the reader's messages never quote the file
+  if (rcText !== null) { try { rc = JSON.parse(rcText); } catch { problems.push(`the runner config ${cfg.runnerConfig} is not valid JSON`); } }   // never the parser's message: it quotes the file
   if (rc && (typeof rc !== 'object' || rc.installRoot !== io.at(P.installRoot))) problems.push(`the runner config's installRoot must be ${io.at(P.installRoot)}`);
   const names = rc ? RUNNER_NAMES.filter((n) => typeof rc[n] === 'string') : [];
   const inCopy = io.at(P.installRoot);
@@ -104,6 +115,10 @@ export function planInstall(io, cfg, { readSource, runUpdater }) {
       if (why) problems.push(`the runner config's ${n} (${rc[n]}) ${why}; name it ${inCopy}/modules/... (the first update would refuse it)`);
     } else if (!cfg.extras.some((e) => rc[n] === `${inCopy}/${posix.basename(e)}` || rc[n].startsWith(`${inCopy}/${posix.basename(e)}/`))) problems.push(`the runner config's ${n} (${rc[n]}) is not inside any of the extras the copy carries, so the first update would refuse it`);
   }
+  // Everything root would copy in is checked NOW, before any root step (L149 m4, m6): a linked program or a node root may not run
+  // used to fail only after the install had made its folders and run the updater.
+  const nodeWhy = io.nodeBinProblem(cfg.nodeBin); if (nodeWhy) problems.push(`nodeBin ${cfg.nodeBin}: ${nodeWhy}. Leave nodeBin out of the config to use the node running this command`);
+  for (const e of cfg.extras) { const why = linkProblem(io, e); if (why) problems.push(`the extra ${e}: ${why}`); }
   if (problems.length) return { ops, problems, installed: false };
 
   const dir = (p, mode, text) => [op(text ?? `mkdir ${p}`, () => { try { io.mkdir(p, 0o700); } catch (e) { if (e.code !== 'EEXIST') throw e; } }), ...rootOwned(io, p, mode, 'dir')];
@@ -114,7 +129,7 @@ export function planInstall(io, cfg, { readSource, runUpdater }) {
   ops.push(...dir(join(P.seed, 'bin'), 0o755), op(`copy node ${cfg.nodeBin} → ${join(P.seed, NODE)}`, () => io.copyFile(cfg.nodeBin, join(P.seed, NODE), 0o755)), ...rootOwned(io, join(P.seed, NODE), 0o755));
   const uc = updaterConfigFor(io, cfg);
   ops.push(op(`write ${join(P.seed, UPDATER_CONFIG)}`, () => io.write(join(P.seed, UPDATER_CONFIG), `${JSON.stringify(uc, null, 1)}\n`, 0o644)), ...rootOwned(io, join(P.seed, UPDATER_CONFIG), 0o644));
-  ops.push(op(`copy ${cfg.runnerConfig} → ${join(P.seed, RUNNER_CONFIG)}`, () => io.write(join(P.seed, RUNNER_CONFIG), readSource(cfg.runnerConfig), 0o644)), ...rootOwned(io, join(P.seed, RUNNER_CONFIG), 0o644));
+  ops.push(op(`copy ${cfg.runnerConfig} → ${join(P.seed, RUNNER_CONFIG)}`, () => io.write(join(P.seed, RUNNER_CONFIG), rcText, 0o644)), ...rootOwned(io, join(P.seed, RUNNER_CONFIG), 0o644));
   for (const e of cfg.extras) { const to = join(P.seed, posix.basename(e)); ops.push(op(`copy ${e} → ${to}`, () => { io.copyTree(e, to); ownTree(io, to); })); }
   ops.push(op(`run the updater's first run as root: ${join(P.seed, NODE)} ${join(P.bootstrap, SCRIPTS.updater)} ${join(P.seed, UPDATER_CONFIG)} --first ${P.seed}`, () => {
     const r = runUpdater(io, { node: join(P.seed, NODE), script: join(P.bootstrap, SCRIPTS.updater), config: join(P.seed, UPDATER_CONFIG), seed: P.seed });
@@ -124,8 +139,12 @@ export function planInstall(io, cfg, { readSource, runUpdater }) {
 }
 
 /** The real first run: a child process, no shell, the paths as arguments. */
-export function spawnUpdater(io, { node, script, config, seed }) {
-  const r = spawnSync(io.at(node), [io.at(script), io.at(config), '--first', io.at(seed)], { encoding: 'utf8', env: { PATH: '/usr/bin:/bin:/usr/sbin:/sbin' }, timeout: 600_000 });
+export function updaterCommand(io, { node, script, config, seed }) {
+  return { file: io.at(node), args: [io.at(script), io.at(config), '--first', io.at(seed)], env: { PATH: '/usr/bin:/bin:/usr/sbin:/sbin' } };
+}
+export function spawnUpdater(io, spec) {
+  const c = updaterCommand(io, spec);
+  const r = spawnSync(c.file, c.args, { encoding: 'utf8', env: c.env, timeout: 600_000 });
   return { status: r.status ?? 1, stderr: String(r.stderr ?? r.error?.message ?? '') };
 }
 

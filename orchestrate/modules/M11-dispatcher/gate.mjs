@@ -8,6 +8,7 @@
 
 import { posix } from 'node:path';
 import { KEYS, need } from './keys.mjs';
+import { wholeNumber } from '../../shared/rules.mjs';
 import { mayStart } from './usage.mjs';
 
 const refuse = (reason) => ({ ok: false, reason });
@@ -74,9 +75,11 @@ export function riskOf(rules, card) {
 /** The editing caps for a product (M14). */
 export function editingLimits({ rules, product, productDoc, amberCaps }) {
   const state = productDoc?.state;
+  // per_state is a map, so its values come as the rules file's text; each is read by the shared whole-number rule (L123).
   const perState = need(rules, KEYS.perState, { product, type: 'object' });
-  if (!Object.hasOwn(perState, state) || typeof perState[state] !== 'number') throw Object.assign(new Error(`no per-state cap for ${state}`), { key: KEYS.perState });
-  const forProduct = [need(rules, KEYS.editingPerProduct, { product }), perState[state]];
+  const stateCap = Object.hasOwn(perState, state) ? wholeNumber(perState[state]) : undefined;
+  if (stateCap === undefined) throw Object.assign(new Error(`no per-state cap for ${state}`), { key: KEYS.perState });
+  const forProduct = [need(rules, KEYS.editingPerProduct, { product }), stateCap];
   const forMac = [need(rules, KEYS.editingPerMac)];
   if (amberCaps) {
     forProduct.push(need(rules, KEYS.amberEditingPerProduct, { product }));
