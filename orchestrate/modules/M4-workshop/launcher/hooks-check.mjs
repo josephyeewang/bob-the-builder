@@ -15,6 +15,8 @@ import { POLICY_HOOKS, HOOK_TIMEOUT, HOOK_FAILS_CLOSED } from './render-settings
 import { SETTINGS as S, HOOK_FIELDS as H, HOOK_EVENTS as E, MIN_CLAUDE_CODE, FLAGS } from './settings-names.mjs';
 import { sha256 } from './role-profiles.mjs';
 import { readSnapshot } from '../hooks/snapshot.mjs';
+import { noteInOutbox } from '../hooks/compact-note.mjs';
+import { inside } from '../hooks/lib.mjs';
 
 export const HOOKS_SOURCE = join(dirname(fileURLToPath(import.meta.url)), '..', 'hooks');
 const refuse = (reason) => ({ ok: false, reason });
@@ -51,7 +53,7 @@ export function checkVersion({ claudeBin, root, pin, run = (bin, a) => execFileS
 // One harmless and one harmful canned call per hook. The harmful one must be blocked (exit 2).
 export function probes({ copy, outbox, kind }) {
   return {
-    'plain-files': [{ tool_name: 'Write', tool_input: { file_path: `${outbox}${sep}${kind}-probe-1.md` } }, { tool_name: 'Write', tool_input: { file_path: `${copy ?? outbox}${sep}.git${sep}config` } }],
+    'plain-files': [{ tool_name: 'Write', tool_input: { file_path: `${outbox}${sep}${kind}probe-1.md` } }, { tool_name: 'Write', tool_input: { file_path: `${copy ?? outbox}${sep}.git${sep}config` } }],
     'secret-file-block': [{ tool_name: 'Bash', tool_input: { command: 'true' } }, { tool_name: 'Read', tool_input: { file_path: `${outbox}${sep}.env` } }],
     'production-write-guard': [{ tool_name: 'Bash', tool_input: { command: 'true' } }, null],
     'merge-guard': [{ tool_name: 'Bash', tool_input: { command: 'true' } }, { tool_name: 'Bash', tool_input: { command: 'git push origin HEAD:main' } }],
@@ -127,6 +129,14 @@ export function checkHooks({ settings, hooksDir, source = HOOKS_SOURCE, kinds, c
       if (!words) return refuse(`a ${event} hook does not exit 2 when it fails to run`);
       const script = words[1];
       if (script !== join(hooksDir, 'compact-note.mjs')) return refuse(`a ${event} hook runs a script outside the hook folder`);
+      // L101: the note goes in the outbox only when the hook's own kinds hold `<kind>-compact-`; any other role's hook
+      // names a notes folder apart from the outbox, so its note can never be taken in as one of its kinds.
+      const arg = (k) => { const i = words.indexOf(`--${k}`); return i > 1 ? words[i + 1] : undefined; };
+      if (!noteInOutbox(arg('kind'), (arg('kinds') ?? '').split(','))) {
+        const notes = arg('notes'); const ob = arg('outbox');
+        if (!notes) return refuse(`a ${event} hook names no notes folder, so this role's compaction note would go in its outbox`);
+        if (!ob || inside(notes, ob) || inside(ob, notes)) return refuse(`a ${event} hook's notes folder is not apart from the outbox`);
+      }
       try { accessSync(script, C.R_OK | C.X_OK); } catch { return refuse(`the ${event} hook is not readable and runnable`); }
     }
   }

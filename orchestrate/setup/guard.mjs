@@ -11,6 +11,16 @@ export function baseChainProblem(io, cfg) {
   return chainProblem(io.at(dirname(cfg.base)), { owner: io.rootUid, top: io.prefix || '/' });
 }
 
+/**
+ * The wall around a whole plan: a problem above the base gives NO steps (nothing is changed); otherwise the guard goes
+ * first, so a folder changed between the plan and the run stops the run before it begins. A plan with no steps stays empty.
+ */
+export function guarded(io, cfg, res) {
+  const p = baseChainProblem(io, cfg);
+  if (p) return { ...res, ops: [], installed: false, problems: [`the folders above ${cfg.base} are not safe for root to work in (${p}). Nothing was changed.`] };
+  return res.ops.length ? { ...res, ops: [guardOp(io, cfg), ...res.ops] } : res;
+}
+
 /** The first step of every root run: the same check, again, right before anything changes. */
 export function guardOp(io, cfg) {
   return {

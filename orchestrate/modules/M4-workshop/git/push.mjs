@@ -27,6 +27,8 @@ import { startGate } from './start-gate.mjs';
 
 export const BUNDLE_CAP = 200 * 1024 * 1024;
 export const BRANCH = /^card\/[a-z0-9][a-z0-9-]{0,63}$/;
+// git's change letters (diff-tree --raw --no-renames) as M10 names them; a type change (T) is a modified file.
+const CHANGE_STATUS = Object.freeze({ A: 'added', M: 'modified', D: 'removed', T: 'modified' });
 const CARD = /^[A-Za-z0-9][A-Za-z0-9-]{0,63}$/;
 const ATTEMPT = /^[A-Za-z0-9][A-Za-z0-9-]{0,63}$/;
 const REPO = /^[A-Za-z0-9][A-Za-z0-9-]{0,38}\/[A-Za-z0-9._-]{1,100}$/;
@@ -229,9 +231,16 @@ export function createPushScript(deps) {
       const scan = await scanSecrets({ setup: scanner, mirror, shas, blobs: [...blobs.values()], messages: await messages(mirror, shas, names), privateDir: work, allowedBinaries: allowList(rules.get('product.allowed_binaries', { product })) });
       if (!scan.ok) no(scan.reason);
 
-      // 6. The rules, then the start gate.
-      const files = [...new Set(net.map((e) => e.path))];
-      const d = rules.may('push_branch', { product, card, files });
+      // 6. The rules, then the start gate. M10's push_branch reads the card as { id, kind, rows, doc: { lane } } and each
+      // file as { path, status } (shared/README.md). Asked with the card's id and bare names, the real engine refused
+      // every push (L81 sweep). A change letter M10 has no word for stays unknown, so the push is refused.
+      const cardDoc = record.read('card', card)?.doc ?? {};
+      const files = net.map((e) => ({ path: e.path, status: CHANGE_STATUS[e.status] ?? `unknown (${e.status})` }));
+      const subject = { product, card: { id: card, kind: cardDoc.kind, rows: Array.isArray(cardDoc.rows) ? cardDoc.rows : [], doc: { lane: cardDoc.lane } }, files };
+      // An exact reverse names the reversed commit's files (the card's own list, which M11 took from that commit); M10 lets
+      // such a push through only when every changed file is in it, and the merge still checks the reverse on GitHub.
+      if (cardDoc.kind === 'exact_reverse' && Array.isArray(cardDoc.files)) subject.reverses_files = cardDoc.files;
+      const d = rules.may('push_branch', subject);
       if (d.decision !== 'allow') no(`the rules do not allow this push: ${d.reason}`);
       const gate = await startGate({ product, mirror, record, readRun, workflowPath: rules.get('outside_check.workflow', { product }), workflowRule, vercelProject: rules.get('product.vercel_project', { product }), cache: gateCache, issues, now: now() });
       if (!gate.ok) no(`the start gate is shut: ${gate.reason}`);
@@ -239,7 +248,7 @@ export function createPushScript(deps) {
       // 7. The push: exactly this commit, exactly this branch, never forced.
       const p = await git(['push', '--porcelain', '--atomic', '--no-verify', url, `${tip}:refs/heads/${branch}`], { gitDir: mirror, purpose: 'push', ...auth });
       if (p.code !== 0) no('GitHub refused the push');
-      const card_doc = record.read('card', card)?.doc ?? {};
+      const card_doc = cardDoc;
       let pr;
       try { pr = await pullRequests.upsert({ repo, branch, base, title: String(card_doc.what ?? card), body: String(card_doc.summary ?? ''), token }); } catch { pr = null; }
       await gitOk(['update-ref', `refs/heads/${branch}`, tip], { gitDir: mirror, purpose: 'push-mirror-branch' });

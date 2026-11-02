@@ -38,8 +38,8 @@ function writable() {
     for (const k of p.outbox_kinds ?? []) pairs.push([role, k, 'profile']);
   }
   for (const [k, spec] of Object.entries(OUTBOX_KINDS)) for (const role of spec.roles) pairs.push([role, k, 'OUTBOX_KINDS']);
-  // M4's design table, which M11 intake's kindsFor() reads: its kinds have no trailing dash ('ask' is the file kind ask-).
-  for (const [role, p] of Object.entries(DESIGN_PROFILES)) for (const k of p.outbox) pairs.push([role, `${k}-`, 'M4 DESIGN_PROFILES']);
+  // M4's design table, which M11 intake's kindsFor() reads: since main 27878ca it holds full kinds, trailing dash included.
+  for (const [role, p] of Object.entries(DESIGN_PROFILES)) for (const k of p.outbox) pairs.push([role, k, 'M4 DESIGN_PROFILES']);
   return pairs;
 }
 
@@ -95,7 +95,7 @@ export function sourceFiles(dir, out = []) {
   return out;
 }
 // Where a kind may be named without writing it: the kind lists, their READMEs, and M6's bundle of shared/.
-const LISTS = ['shared/record.mjs', 'shared/README.md', 'modules/M10-rules/roles/lead.json', 'modules/M4-workshop/launcher/role-profiles.mjs', 'modules/M6-merge-gate/github-checker.mjs'];
+const LISTS = ['shared/record-names.mjs', 'shared/record.mjs', 'shared/README.md', 'modules/M10-rules/roles/lead.json', 'modules/M4-workshop/launcher/role-profiles.mjs', 'modules/M6-merge-gate/github-checker.mjs'];
 const ORCH = join(MODULES, '..');
 const BOB = join(ORCH, '..');
 // Every file outside the lists that names the kind: a prompt, a skill or code that would write it.
@@ -166,11 +166,8 @@ test('L137 MAT-1: every kind a role may write has a record rule or record: \'non
     // The kind exists, but M9 still refuses it for a role not on its own list (L151 m4).
     else if (!spec.roles.includes(role)) gaps.add(`${role}: ${k} (not listed for ${role} in OUTBOX_KINDS; from ${from})`);
   }
-  // L140: ask- needs nothing added. These two come only from M4 DESIGN_PROFILES, which still lists ask- for the lead
-  // and incident; #83 derives DESIGN_PROFILES from OUTBOX_KINDS and removes them. The list is pinned exactly, so the
-  // test goes red the day #83 lands (delete this exception then) and on any new gap.
-  const UNTIL_83 = ['incident: ask- (not in OUTBOX_KINDS; from M4 DESIGN_PROFILES)', 'lead: ask- (not in OUTBOX_KINDS; from M4 DESIGN_PROFILES)'];
-  assert.deepEqual([...gaps].sort(), UNTIL_83, `kinds a role may write that the Record refuses:\n${[...gaps].sort().join('\n')}`);
+  // #83 derives M4 DESIGN_PROFILES from OUTBOX_KINDS, so its old ask- exception is gone: no gap at all.
+  assert.deepEqual([...gaps].sort(), [], `kinds a role may write that the Record refuses:\n${[...gaps].sort().join('\n')}`);
 });
 
 test('L140 condition 1: every inert report kind names its reader, its join item, why it is latent, or (three old kinds) why it is kept', () => {

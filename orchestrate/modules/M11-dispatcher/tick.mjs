@@ -170,9 +170,12 @@ export async function tick({ rec, rules, now, ports: p }) {
   // The early send finishes, and is marked, before any other step, so it never races a later step's writes.
   const first = await early;
   first.settle();
-  let outageOpen = false;
-  // A failing outage step falls back on the record (audit 0b-6 r3 MIN-1): an open outage still holds.
-  try { outageOpen = rec.read('fact', OUTAGE_FACT)?.doc?.state === 'open'; } catch { outageOpen = true; }
+  // A failing outage step falls back on the record (audit 0b-6 r3 MIN-1): an open outage still holds. Read again
+  // once the step has run (L172 follow-up): a step that opened the outage and then threw never set outageOpen, and
+  // the read before it saw no outage. The shared Record's read never throws: a fact it can't read comes back as
+  // { corrupt: true } with no doc, which is not an open outage (L182 m2). The catch is only for a Record that throws.
+  const outageInRecord = () => { try { return rec.read('fact', OUTAGE_FACT)?.doc?.state === 'open'; } catch { return true; } };
+  let outageOpen = outageInRecord();
   await run('outage', async () => {
     const board = p.board();
     const o = outageStep({ rec, rules, board, now, healthy: p.healthy(), resume: p.resume?.() ?? false, alert });
@@ -183,6 +186,7 @@ export async function tick({ rec, rules, now, ports: p }) {
     if (lapse && !lapse.ok) throw new Error(`claims could not be lapsed: ${lapse.reason}`);
     return { ...o, acted, lapsed: lapse?.lapsed ?? [] };
   });
+  if (!outageOpen) outageOpen = outageInRecord();
   // A Lead's read-only helper goes through the one start gate (audit 0b-6 r2 MAT-2): the red band, the
   // read-only cap per Lead and an outage hold it here, whatever the wiring port does.
   const startReadonly = async (x) => {

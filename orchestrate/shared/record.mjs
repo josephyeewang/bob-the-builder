@@ -38,7 +38,7 @@ import { lstatSync, readFileSync, realpathSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { CARD_KINDS, NOT_A_RECORD, OUTBOX_KINDS, OUTBOX_KIND_PATTERN, OUTBOX_NAME, SESSION_ID, STATES, isNotARecord, notARecord, outboxKindOf } from './record-names.mjs';
 export { CARD_KINDS, NOT_A_RECORD, OUTBOX_KINDS, OUTBOX_KIND_PATTERN, OUTBOX_NAME, STATES, isNotARecord, notARecord, outboxKindOf };
-// The name #91's callers use (L121); one function, in record-names.mjs.
+// A second name for outboxKindOf (the same function, not a copy), kept because record.test and older callers import it.
 export const outboxKind = outboxKindOf;
 // The test stand-in's field and move check is M9's own (L72); guard.mjs needs only record-names.mjs, so no load loop.
 import { claimCheck, guardWrite } from '../modules/M9-record/guard.mjs';

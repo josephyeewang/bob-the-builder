@@ -29,7 +29,7 @@ export const estimateTokens = (text) => Math.ceil(Buffer.byteLength(String(text)
 
 /** The intake's vet for handoff files: refuses one over the cap, so the session can write it again. */
 export const handoffVet = (rules) => ({ kind, text }) => {
-  if (kind !== 'handoff') return null;
+  if (kind !== 'handoff-') return null;
   const cap = need(rules, KEYS.handoffCapRole);
   const est = estimateTokens(text);
   return est > cap ? `the handoff is about ${est} tokens, over the ${cap} cap` : null;

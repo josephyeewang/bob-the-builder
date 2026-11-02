@@ -5,12 +5,13 @@ import { makeFactWriter } from '../M12-sensors/facts.mjs';
 import { makeAlerts, fakeIssues } from './alerts.mjs';
 import { heartbeatOnce, DISPATCHER_LATE_MIN } from './heartbeat.mjs';
 
-function setup() {
+// `wrap` lets a test change what the pass reads from the record (#98 r2 P6: a saved record with no time).
+function setup({ wrap = (w) => w } = {}) {
   let t = Date.parse('2026-11-03T12:00:00Z');
   const now = () => new Date(t);
   const rec = memoryRecord();
   const gh = fakeIssues();
-  const writer = makeFactWriter(rec, { actor: 'ledger', now });
+  const writer = wrap(makeFactWriter(rec, { actor: 'ledger', now }));
   const alerts = makeAlerts({ rec, gh, owner: 'owner', now });
   const world = { lastPass: () => new Date(t - 60e3).toISOString(), rules: true, fd: true, account: { signedIn: true, login: 'account A' }, usage: null, dispatcherRunning: true };
   const probes = {
@@ -153,14 +154,15 @@ test('review-0b-8 MAT-9: each pass writes the status fact the trip check reads (
 
 // ---- L143: the new login is saved only once its change alert went out ----
 
-// A plain alert stand-in that can lose the alert (L145): `decide(alert)` gives the raise's answer, or throws.
-function sink(decide = () => true) {
+// A plain alert stand-in that can lose the alert (L145): `decide(alert)` gives the raise's answer, or throws. It answers
+// what the real raise answers ('opened' … or false), never `true` (L152 m1, Principle 10).
+function sink(decide = () => 'opened') {
   const raise = async (a) => { raise.texts.push(a); const r = decide(a); raise.answers.push(r); return r; };
   raise.texts = []; raise.answers = [];
   raise.reset = () => { raise.texts.length = 0; raise.answers.length = 0; };
   return raise;
 }
-const downWhen = (cond) => (a) => { if (cond(a)) throw new Error('github down'); return true; };
+const downWhen = (cond) => (a) => { if (cond(a)) throw new Error('github down'); return 'opened'; };
 
 // The record writer runs on its own fixed clock, apart from the heartbeat's tick (L143). `refuse` makes the record
 // refuse writes to fact ids it matches.
@@ -179,8 +181,12 @@ function lossSetup(raise, refuse = () => false) {
     usage: async () => null,
   };
   let planned = null;
-  const alerts = { raise, clear: async () => 'none' };
-  const pass = () => heartbeatOnce({ product: 'product 1', writer, gh: fakeIssues(), alerts, owner: 'owner', probes, plannedSwitch: planned, now });
+  // The real clear can answer false (L143); nothing the pass saves may hang on it (L152 m1).
+  const alerts = { raise, clear: async () => false };
+  // One GitHub for the whole test: a fresh one per pass forgot the pinned issue the last pass opened (the strict
+  // isClosed found it, #98 r1 m2).
+  const gh = fakeIssues();
+  const pass = () => heartbeatOnce({ product: 'product 1', writer, gh, alerts, owner: 'owner', probes, plannedSwitch: planned, now });
   return { base, writer, world, pass, tick: () => { t += 10 * 60e3; }, plan: (p) => { planned = p; } };
 }
 const changed = (raise) => raise.texts.filter((a) => /\|heartbeat\|account-changed-/.test(a.key)).map((a) => a.key.split('-').pop());
@@ -188,7 +194,7 @@ const savedLogin = (h) => h.writer.get('heartbeat-account-product-1')?.login;
 
 test('L143: an account change whose raise answered false keeps the old login, so the next pass raises it again', async () => {
   let lose = true;
-  const raise = sink(() => !lose);
+  const raise = sink(() => (lose ? false : 'opened'));
   const h = lossSetup(raise);
   await h.pass();
   h.world.login = 'account B';
@@ -233,3 +239,259 @@ test('L143: a planned switch whose push request the record refused keeps the old
   assert.equal(savedLogin(h), 'account B');
   assert.deepEqual(changed(raise), [], 'a planned switch raises nothing');
 });
+
+// ---- L152: through the real alerts, every unplanned switch is its own notice ----
+
+const acctIssues = (gh) => [...gh.issues.entries()].filter(([, i]) => /account changed/.test(i.title));
+const notices = (gh) => gh.calls.filter(([c]) => c === 'open' || c === 'comment').length; // what notifies the owner
+
+test('L152 MAT-1: A→B, the owner closes it, B→A, A→B again: the second A→B is a fresh notice, through the real alerts', async () => {
+  const h = setup();
+  await h.pass();
+  h.world.account = { signedIn: true, login: 'account B' }; h.tick(10); await h.pass();
+  assert.equal(acctIssues(h.gh).length, 1);
+  assert.equal(h.writer.get('heartbeat-account-product-1').login, 'account B', "the real raise answers 'opened', which is told");
+  h.gh.ownerCloses(acctIssues(h.gh)[0][0]);
+  h.world.account = { signedIn: true, login: 'account A' }; h.tick(10); await h.pass();
+  assert.equal(acctIssues(h.gh).length, 2);
+  const before = notices(h.gh);
+  h.world.account = { signedIn: true, login: 'account B' }; h.tick(10); await h.pass();
+  assert.equal(notices(h.gh) - before, 1, 'the owner is told again');
+  assert.equal(acctIssues(h.gh).length, 3, 'a new issue, not the one the owner closed');
+  assert.match(acctIssues(h.gh)[2][1].body, /now signed in as account B \(was account A\)/);
+  assert.equal(h.writer.get('heartbeat-account-product-1').login, 'account B');
+  assert.equal(h.writer.get('heartbeat-account-product-1').switches, 3);
+  h.tick(10); await h.pass();
+  assert.equal(notices(h.gh) - before, 1, 'no switch, no notice');
+});
+
+test('L152 MAT-1: the same with the first notice left open: the second A→B opens its own issue, not a silent edit', async () => {
+  const h = setup();
+  await h.pass();
+  h.world.account = { signedIn: true, login: 'account B' }; h.tick(10); await h.pass();
+  h.world.account = { signedIn: true, login: 'account A' }; h.tick(10); await h.pass();
+  const before = notices(h.gh);
+  h.world.account = { signedIn: true, login: 'account B' }; h.tick(10); await h.pass();
+  assert.equal(notices(h.gh) - before, 1);
+  assert.equal(acctIssues(h.gh).length, 3);
+  assert.equal(acctIssues(h.gh)[0][1].closed, false, 'the first notice is left as it was');
+});
+
+test('L152 MAT-1: a lost raise is retried under the same switch number, so one switch is one notice', async () => {
+  const h = setup();
+  await h.pass();
+  const open = h.gh.open;
+  h.gh.open = async (x) => (/account changed/.test(x.title) ? undefined : open(x));
+  h.world.account = { signedIn: true, login: 'account B' }; h.tick(10); await h.pass();
+  assert.equal(h.writer.get('heartbeat-account-product-1').login, 'account A');
+  h.gh.open = open; h.tick(10); await h.pass();
+  h.tick(10); await h.pass();
+  assert.equal(acctIssues(h.gh).length, 1);
+  assert.deepEqual([h.writer.get('heartbeat-account-product-1').login, h.writer.get('heartbeat-account-product-1').switches], ['account B', 1]);
+});
+
+test('L152 MAT-1: a saved login from before the count (no switches field) counts from 0', async () => {
+  const h = setup();
+  h.writer.put('heartbeat-account-product-1', { kind: 'fact.heartbeat-account', product: 'product 1', login: 'account A' });
+  h.world.account = { signedIn: true, login: 'account B' }; await h.pass();
+  assert.equal(acctIssues(h.gh).length, 1);
+  assert.equal(h.writer.get('heartbeat-account-product-1').switches, 1);
+});
+
+const pushReqs = (h) => h.rec.list('fact').filter((f) => f.doc.kind === 'fact.push-request');
+const acctRec = (h) => h.writer.get('heartbeat-account-product-1');
+
+test('L158 MAT-A: a plan to B that stays in config: A→B pushes, B→A alerts, A→B again pushes again, through the real alerts', async () => {
+  const h = setup();
+  h.plan({ to: 'account B', at: '2026-11-03T11:00:00Z' });
+  await h.pass();
+  h.world.account = { signedIn: true, login: 'account B' }; h.tick(10); await h.pass();
+  assert.equal(pushReqs(h).length, 1);
+  h.world.account = { signedIn: true, login: 'account A' }; h.tick(10); await h.pass();
+  assert.equal(acctIssues(h.gh).length, 1, 'B→A was not planned: an alert');
+  h.world.account = { signedIn: true, login: 'account B' }; h.tick(10); await h.pass();
+  assert.equal(pushReqs(h).length, 2, 'the second A→B is its own push request, not the first one found again');
+  assert.deepEqual([acctRec(h).login, acctRec(h).switches], ['account B', 3], 'every switch, planned or not, is counted');
+  for (let i = 0; i < 3; i++) { h.tick(10); await h.pass(); }
+  assert.equal(pushReqs(h).length, 2, 'no switch, no push');
+  assert.equal(acctRec(h).switches, 3);
+});
+
+test('L158 m1: A → signed out → B is one notice and one counted switch, through the real alerts', async () => {
+  const h = setup();
+  await h.pass();
+  h.world.account = { signedIn: false }; h.tick(10); await h.pass();
+  assert.equal(acctRec(h).login, 'account A', 'a signed-out pass leaves the saved login alone');
+  const before = acctIssues(h.gh).length;
+  h.world.account = { signedIn: true, login: 'account B' }; h.tick(10); await h.pass();
+  assert.equal(acctIssues(h.gh).length - before, 1);
+  assert.match(acctIssues(h.gh).at(-1)[1].body, /now signed in as account B \(was account A\)/);
+  assert.deepEqual([acctRec(h).login, acctRec(h).switches], ['account B', 1]);
+});
+
+test('L158 m3: a count lost to a rewrite (an older build, a hand edit) never reuses a closed alert: the next A→B is told', async () => {
+  for (const lost of [{}, { switches: 0 }, { switches: 'x' }]) {
+    const h = setup();
+    await h.pass();
+    h.world.account = { signedIn: true, login: 'account B' }; h.tick(10); await h.pass();
+    h.gh.ownerCloses(acctIssues(h.gh)[0][0]);
+    h.writer.put('heartbeat-account-product-1', { kind: 'fact.heartbeat-account', product: 'product 1', login: 'account A', ...lost });
+    const before = notices(h.gh);
+    h.tick(10); await h.pass();
+    assert.equal(notices(h.gh) - before, 1, `rewritten with ${JSON.stringify(lost)}: the owner is told`);
+    assert.equal(acctIssues(h.gh).length, 2, 'a new issue, not the closed one answering "suppressed"');
+    assert.equal(acctRec(h).login, 'account B');
+  }
+});
+
+test('#98 r2 Minor 1 (P6): a record with no time, or not a time, and its count lost, twice: the second A→B is still told', async () => {
+  for (const ts of [undefined, 'not a time', '[REDACTED:wrong-shape]']) {
+    // The pass reads the account record without its time (or with a wrong one), as an older build or a hand edit leaves it.
+    const wrap = (w) => ({ put: w.put, get: (id) => {
+      const d = w.get(id);
+      if (!d || !id.startsWith('heartbeat-account-')) return d;
+      const { ts: _drop, ...rest } = d;
+      return ts === undefined ? rest : { ...rest, ts };
+    } });
+    const h = setup({ wrap });
+    await h.pass();
+    for (let round = 1; round <= 2; round++) {
+      h.world.account = { signedIn: true, login: 'account B' }; h.tick(10); await h.pass();
+      assert.equal(acctIssues(h.gh).length, round, `ts ${ts}, round ${round}: a new issue, not the closed one answering "suppressed"`);
+      h.gh.ownerCloses(acctIssues(h.gh).at(-1)[0]);
+      // The count is lost too, and the login is back to A.
+      h.writer.put('heartbeat-account-product-1', { kind: 'fact.heartbeat-account', product: 'product 1', login: 'account A' });
+      h.world.account = { signedIn: true, login: 'account A' };
+    }
+  }
+});
+
+test('L158 m3: the same on the planned path: a lost count with the plan still standing pushes the next A→B again', async () => {
+  const h = setup();
+  h.plan({ to: 'account B', at: '2026-11-03T11:00:00Z' });
+  await h.pass();
+  h.world.account = { signedIn: true, login: 'account B' }; h.tick(10); await h.pass();
+  assert.equal(pushReqs(h).length, 1);
+  h.writer.put('heartbeat-account-product-1', { kind: 'fact.heartbeat-account', product: 'product 1', login: 'account A' });
+  h.tick(10); await h.pass();
+  assert.equal(pushReqs(h).length, 2, 'not the first switch\'s push request found again');
+  assert.equal(acctRec(h).login, 'account B');
+});
+
+test('L158 m3: an alert that went out but whose account save was refused is retried under the same key, so one switch is one notice', async () => {
+  let refuse = false;
+  const raise = sink();
+  const h = lossSetup(raise, (id) => refuse && /^heartbeat-account-/.test(id));
+  await h.pass();
+  h.world.login = 'account B'; refuse = true; h.tick(); await h.pass();
+  assert.equal(savedLogin(h), 'account A', 'the save was refused');
+  refuse = false; h.tick(); await h.pass();
+  const keys = raise.texts.filter((a) => /\|heartbeat\|account-changed-/.test(a.key)).map((a) => a.key);
+  assert.equal(keys.length, 2);
+  assert.equal(keys[0], keys[1], 'the retry finds the same alert (a silent repeat), not a second notice');
+  assert.equal(savedLogin(h), 'account B');
+});
+
+test('#98 r2 Minor 2 (P15): a planned switch whose push went out but whose account save was refused: the retry saves B, and a later B→A alerts', async () => {
+  let refuse = false;
+  const raise = sink();
+  const h = lossSetup(raise, (id) => refuse && /^heartbeat-account-/.test(id));
+  h.plan({ to: 'account B', at: '2026-11-03' });
+  await h.pass();
+  h.world.login = 'account B'; refuse = true; h.tick(); await h.pass();
+  const pushes = () => h.base.list('fact').filter((f) => f.doc.kind === 'fact.push-request').length;
+  assert.equal(pushes(), 1, 'the push request was written');
+  assert.equal(savedLogin(h), 'account A', 'the save was refused');
+  refuse = false; h.tick(); await h.pass();
+  assert.equal(pushes(), 1, 'the retry finds the same push request, so one switch is one push');
+  assert.equal(savedLogin(h), 'account B', 'an existing push request counts as told, so the retry saves B');
+  h.world.login = 'account A'; h.tick(); await h.pass();
+  assert.deepEqual(changed(raise), ['account A'], 'B→A was not planned: one alert');
+  assert.equal(savedLogin(h), 'account A');
+});
+
+test('L158 m2: a saved pinned issue that is not an issue number reopens without asking GitHub about it', async () => {
+  for (const bad of ['[REDACTED:wrong-shape]', '7', 0, -1, 1.5, null]) {
+    const h = setup();
+    h.writer.put('heartbeat-issue-product-1', { kind: 'fact.heartbeat-issue', product: 'product 1', issue: bad });
+    const asked = [];
+    const isClosed = h.gh.isClosed;
+    h.gh.isClosed = async (i) => { asked.push(i); if (typeof i !== 'number') throw new Error(`asked GitHub about ${JSON.stringify(i)}`); return isClosed(i); };
+    await h.pass();
+    assert.deepEqual(asked, [], `issue ${JSON.stringify(bad)}: never asked`);
+    assert.equal(h.gh.calls.filter(([c]) => c === 'open').length, 1, 'opened a fresh pinned issue');
+    assert.equal(h.writer.get('heartbeat-issue-product-1').issue, 1);
+  }
+});
+
+test('L158 m2: the stand-in GitHub refuses questions about issues it never opened', async () => {
+  const gh = fakeIssues();
+  await assert.rejects(gh.isClosed(1), /no issue 1/);
+  await assert.rejects(gh.isClosed('[REDACTED:wrong-shape]'), /not an issue number/);
+  const i = await gh.open({ title: 't', body: 'b' });
+  assert.equal(await gh.isClosed(i), false);
+});
+
+test('L152 m3: a pinned-issue open with no issue number is not saved, and the next pass opens it again', async () => {
+  for (const lost of [undefined, false, null, 0, '7']) {
+    const h = setup();
+    const open = h.gh.open;
+    h.gh.open = async (x) => (/pinned/.test(x.title) ? lost : open(x));
+    await h.pass();
+    assert.equal(h.writer.get('heartbeat-issue-product-1'), null, `open answered ${JSON.stringify(lost)}`);
+    h.gh.open = open; h.tick(10); await h.pass();
+    assert.equal(h.writer.get('heartbeat-issue-product-1').issue, 1);
+    h.tick(10); await h.pass();
+    assert.equal(h.gh.calls.filter(([c]) => c === 'open').length, 1, 'then edited, not opened again');
+  }
+});
+
+// ---- L153: the usage and red-fact raises, lost (false, then a throw), are tried again on the next pass ----
+// Through the real alerts: GitHub's open answers no issue number (raise answers false) or throws.
+
+function lossyGh(h, match, how) {
+  const st = { on: true };
+  const open = h.gh.open; const comment = h.gh.comment;
+  const lose = async () => { if (how === 'throw') throw new Error('github down'); return how === 'false' ? false : undefined; };
+  h.gh.open = async (x) => (st.on && match.test(x.title) ? lose() : open(x));
+  h.gh.comment = async (i, text) => (st.on && match.test(h.gh.issues.get(i).title) ? lose() : comment(i, text));
+  return st;
+}
+const issuesFor = (h, re) => [...h.gh.issues.values()].filter((i) => re.test(i.title));
+
+for (const how of ['false', 'throw']) {
+  test(`L153: a usage raise whose open ${how === 'throw' ? 'threw' : 'was lost'} is raised on the next pass`, async () => {
+    const h = setup();
+    await h.pass();
+    const st = lossyGh(h, /usage past/, how);
+    h.world.usage = { window: 'weekly', pct: 60 }; h.tick(10);
+    if (how === 'throw') await assert.rejects(h.pass(), /github down/); else await h.pass();
+    assert.equal(issuesFor(h, /usage past/).length, 0);
+    st.on = false; h.tick(10); await h.pass();
+    assert.equal(issuesFor(h, /usage past/).length, 1, 'opened on the next pass');
+  });
+
+  test(`L153: a higher usage step whose comment ${how === 'throw' ? 'threw' : 'was lost'} is commented on the next pass`, async () => {
+    const h = setup();
+    h.world.usage = { window: 'weekly', pct: 60 }; await h.pass();
+    const st = lossyGh(h, /usage past/, how === 'throw' ? 'throw' : 'false');
+    h.world.usage = { window: 'weekly', pct: 80 }; h.tick(10);
+    if (how === 'throw') await assert.rejects(h.pass(), /github down/); else await h.pass();
+    assert.equal(issuesFor(h, /usage past/)[0].comments.length, 0);
+    st.on = false; h.tick(10); await h.pass();
+    assert.equal(issuesFor(h, /usage past/)[0].comments.length, 1, 'the 75 % step told on the next pass');
+    h.tick(10); await h.pass();
+    assert.equal(issuesFor(h, /usage past/)[0].comments.length, 1, 'and only once');
+  });
+
+  test(`L153: a red front-door raise whose open ${how === 'throw' ? 'threw' : 'was lost'} is raised on the next pass`, async () => {
+    const h = setup();
+    await h.pass();
+    const st = lossyGh(h, /red: front-door/, how);
+    h.world.fd = false; h.tick(10);
+    if (how === 'throw') await assert.rejects(h.pass(), /github down/); else await h.pass();
+    assert.equal(issuesFor(h, /red: front-door/).length, 0);
+    st.on = false; h.tick(10); await h.pass();
+    assert.equal(issuesFor(h, /red: front-door/).length, 1, 'opened on the next pass');
+  });
+}

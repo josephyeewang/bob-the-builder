@@ -17,6 +17,7 @@
 //   ctx = { record, rules, product, gh, owner, repo, now, alert }
 
 import { activeKind } from '../../shared/asks.mjs';
+import { answerCounts } from '../../shared/approval.mjs';
 import { askStore, writeDoc } from './ask-store.mjs';
 import { ownerVerdict, requestReview } from './github-review.mjs';
 import { goMarkdown, goView } from './go-view.mjs';
@@ -143,10 +144,12 @@ export async function readDecision(ctx, id) {
       approves = true;
     }
   }
-  const verdict = ctx.rules.may('count_approval', { product: ctx.product, card: doc.card, ask_kind: doc.kind, channel: 'github_review', tier: doc.tier ?? null, risky: doc.risky ?? [] });
-  if (verdict.decision !== 'ask' || verdict.tier !== 1) { ctx.alert({ type: 'approval_not_counted', ask: id, reason: verdict.reason }); return { ok: true, counted: false }; }
   const binding = { kind: 'github_review', pr: doc.pr, review_id: v.review.id, commit_id: v.review.commit_id, submitted_at: v.review.submitted_at };
-  const next = { ...doc, state: 'answered', answer: { channel: 'github_review', choice, approves, declined: v.verdict === 'changes_requested', binding, at: iso(ctx.now()) }, [CLOSE_DUE]: true };
+  const answer = { channel: 'github_review', choice, approves, declined: v.verdict === 'changes_requested', binding, at: iso(ctx.now()) };
+  // The one approval check, on the answer as it will be recorded (L81).
+  const counted = answerCounts(ctx.rules, { ...doc, answer }, { product: ctx.product });
+  if (!counted.ok) { ctx.alert({ type: 'approval_not_counted', ask: id, reason: counted.reason }); return { ok: true, counted: false }; }
+  const next = { ...doc, state: 'answered', answer, [CLOSE_DUE]: true };
   const w = writeDoc(ctx.record, 'ask', a, next);
   if (!w.ok) return fail(`the record refused the answer: ${w.reason}`);
   // After any recorded choice the robot closes the decision pull request unmerged (round 1 M9; audit round 1 m-1).
