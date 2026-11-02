@@ -99,7 +99,7 @@ test('R-0b-137: each mode request the skill writes passes intake, and only mode 
 test('R-0b-137 / B11 planted: a secret typed in chat is not repeated, and rotate files the name only', () => {
   const said = `fix the login, the key is ${FAKE_KEY}`;
   assert.equal(repeatsSecret(said, `Change: test-product.\nWhat you said: fix the login, the key is ${FAKE_KEY}`), true);
-  assert.equal(repeatsSecret(said, 'That looks like a key. I did not keep it. Rotate it, and tell me only its name.'), false);
+  assert.equal(repeatsSecret(said, 'That looks like a key. I did not keep it. Treat it as exposed: rotate it now in a session on the Mini; that can\'t be done from here.'), false);
   assert.equal(repeatsSecret('hello', `here: ${FAKE_KEY}`), true, 'a key-shaped reply is refused on its own');
   // L84 6: the read-back repeats none of an all-upper-case access-key id (a planted fake).
   const keyId = ['AK', 'IA', 'Q7XP3ZL9M2K4T8WB'].join('');

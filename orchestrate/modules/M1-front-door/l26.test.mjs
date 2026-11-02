@@ -72,27 +72,10 @@ test('L26: the skill never says a thing is done; every filing reply is "Filed: â
   assert.doesNotMatch(SKILL, /is paused\.|I filed the request|Filed as idea/);
 });
 
-test('L151: pause, away, back, wrap up and rotate file nothing; each reply says plainly it is not available, and promises nothing', () => {
-  const sec = SKILL.split('## Not available yet: pause, away, back, wrap up, rotate')[1]?.split('\n## ')[0] ?? '';
-  const rows = [...sec.matchAll(/^\| "([^|]+?)" \| \*\*"([^"]+)"\*\*/gm)].map((m) => [m[1], m[2]]);
-  assert.deepEqual(rows.map(([said]) => said.split('"')[0]), ['pause X', "I'm away until Friday", "I'm back", 'wrap up', 'rotate X']);
-  for (const [, reply] of rows) {
-    assert.match(reply, /isn't available yet, so nothing was filed/, reply);
-    assert.doesNotMatch(reply, /Filed|confirms|later|soon|tap|brief|will /, reply);
-  }
-  assert.match(rows[4][1], /the key is NOT rotated/);
-  assert.match(sec, /write nothing and never say\s+"Filed"/);
-  assert.match(sec, /never write a `state-`\s+or `request-` file/);
-  // No file shape or file name for these kinds is left in the live skill for the Front Door to write.
-  assert.doesNotMatch(SKILL, /\{"request":|"state":"(paused|away)"|`state-<id>|`request-(resume|wrapup|rotate)-/);
+test('L151: the five refused actions file nothing (their exact words are pinned in shown.test.mjs, L167 M-3)', () => {
   assert.doesNotMatch(SKILL, /Only the owner's tap brings it back|The steps come after that|Resume still needs your tap/);
-  // The owner's own test steps expect the same (none of them waits on a pause, away or rotate that files nothing).
   const OWNER = readFileSync(new URL('./OWNER-TEST.md', import.meta.url), 'utf8');
   assert.doesNotMatch(OWNER, /Filed: (away|pause|resume|wrap|rotate)|Confirmed: (away|pause)|\b(pause|rotate) nosuchproduct|question box asking your time zone/);
-  assert.ok(OWNER.includes('"Confirmed: idea <id>, saved for the Lead."'));
-  // idea- promises nothing beyond being saved for the Lead.
-  assert.ok(SKILL.includes('Reply: **"Filed: idea <id>, saved for the Lead. The Mini confirms in a minute."** Promise nothing more'));
   assert.match(SKILL, /Product names come only from the product list in your context file/);
   assert.match(SKILL, /ask them which with a question box before writing anything/);
-  assert.doesNotMatch(SKILL, /\d{8}-\d{4}-[a-z]{2}/, 'no real-looking example id for the phone to copy');
 });

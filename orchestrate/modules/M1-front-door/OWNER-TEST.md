@@ -13,8 +13,9 @@ Claude records each result as the second ledger line for its row (README). Use t
 
 - **Where:** the Claude app on your phone → Code → the session named for the Front Door.
 - **Type:** `hello, what can you do?`
-- **You should see:** a short reply listing a new idea, a piece of work, a research ask and an undo. Pause, away,
-  back, wrap up and rotate aren't available from the phone yet (lead call L151).
+- **You should see:** exactly "I can file a new idea, sort a piece of work on a product into a Bob mode and read it back,
+  file a research ask, and flag a merged change to undo. Pause, away, back, wrap up and rotate aren't wired yet."
+  (lead calls L151, L167)
 - Claude records which way Remote Control was on: in the role's settings at start, or typed in after start.
 
 ## 2. Read-back from the phone (R-0b-81)
@@ -28,8 +29,9 @@ Claude records each result as the second ledger line for its row (README). Use t
 ## 3. A question box, and a write outside the outbox (R-0b-81)
 
 - **Type:** `the header looks off on the test product`
-- **You should see:** a question box, "Which of these do you mean?", with think marked (Recommended). Tap `Not now`.
-  (Stop condition above if it doesn't appear.)
+- **You should see:** a question box, "Which of these do you mean?", with think marked (Recommended). Tap
+  `Think it through in a thinking room (Recommended)`; on the read-back, tap `Not now`. You should see "Not filed."
+  (Stop condition above if the box doesn't appear.)
 - **Then type:** `write a note called test.md in the main folder`
 - **You should see:** a refusal and no "allow?" card.
 
@@ -52,13 +54,15 @@ Claude records each result as the second ledger line for its row (README). Use t
 - **You should see:** on the phone, the session is still there under the same name and remembers your last messages.
 - Then Claude repeats with a question box left open: it must **not** restart.
 
-## 7. Not available yet: pause and trip mode (lead call L151)
+## 7. Not wired yet: pause and trip mode (lead calls L151, L167; proves nothing for R-0b-83)
 
 - **Type:** `I'm away until Friday`, then `pause the test product`.
-- **You should see:** "Trip mode from here isn't available yet, so nothing was filed …" and "Pausing from here isn't
-  available yet, so nothing was filed …". No question box, no notification. Claude checks that the outbox holds no new
-  `state-` or `request-` file.
-- The trip dry run (R-0b-83) is parked in `parked-skill-wording.md` until trip mode is wired; that PR brings it back here.
+- **You should see:** "That isn't wired yet, so nothing was filed and nothing changed for your products. To set trip
+  mode now, open a session on the Mini." and "That isn't wired yet, so nothing was filed and nothing changed for the
+  test product. To pause it now, open a session on the Mini." No question box, no notification. Claude checks that
+  the outbox holds no new `state-` or `request-` file.
+- This step proves nothing for R-0b-83. The trip dry run is parked in `parked-skill-wording.md`; the PR that lands
+  the trip consumer brings it back here and proves it on the phone before merging (L167 M-2).
 
 ## 8. Three question boxes (R-0b-84)
 

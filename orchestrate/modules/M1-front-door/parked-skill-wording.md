@@ -55,7 +55,6 @@ said it (capitals and digits with at least one `_`, such as `STRIPE_KEY`; add no
 
 ## Parked owner test: OWNER-TEST.md step 7, the trip dry run
 
-
 - **Type:** `I'm away until Friday` and answer the time zone with a city, such as `Europe/Prague`.
 - **You should see:** the reply "Filed: away <the test product>. The Mini confirms in a minute.", a "Confirmed: away …"
   notification, then within a few minutes a
