@@ -29,13 +29,15 @@
 //                 lane takes only declared Tier 2 (M10 lane-check.mjs).
 //     readonly, lead  NOT USED: the Lead is not on the product at the first cutover (go_free.lead_daily_card is [],
 //                 L96 m-1).
-//     front_door  NOT USED on this path: no production code asks startGate for it.
+//     front_door  NOT ASKED: no production code asks startGate for it, though Joe's Undo tap itself comes from a
+//                 Front Door session (M2 undo-flag.mjs), which this test seeds as already answered.
 //   Card kinds (shared/record-names.mjs CARD_KINDS, M9 permissions.mjs CARD_CREATORS):
 //     exact_reverse   USED: made by the Dispatcher from Joe's Undo tap (M11 undo.mjs), go-free.
 //     ordinary        USED as the docs change the gate merged (made by Joe's tab or the Lead; its making is not
 //                     this path, so it is seeded).
 //     research_copy   designed for the first cutover, but nothing makes one yet and the fixture does not make it
-//                     go-free (todo below, R-0b-135).
+//                     go-free (todo below, R-0b-135, L204-c). Until it is built, nothing on day one makes a docs change
+//                     for the gate to merge or an Undo to reverse; the ordinary card here is seeded (day-one audit M-2).
 //     fix, lead_daily_card  NOT USED: the Lead plans a fix card and makes the daily card; the Lead is not on the
 //                     product.
 //   Product state: active (the fixture's product_state_rules.active.start is within_caps). paused is "no starts" by
@@ -45,7 +47,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { join, dirname, relative, sep } from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import { fileURLToPath } from 'node:url';
 import { FIRST, ENTRY, PENDING, swap } from '../modules/M10-rules/first-cutover.test-helper.mjs';
 import { parsePolicy } from '../modules/M10-rules/policy.mjs';
 import { rulesFromText } from '../modules/M10-rules/from-text.mjs';
@@ -56,7 +58,7 @@ import { CARD_CREATORS } from '../modules/M9-record/permissions.mjs';
 import { setup, seed, product as writeProduct, PRODUCT } from '../modules/M9-record/fixtures.test-helper.mjs';
 import { moduleSources, scanSources, stripComments } from '../modules/M9-record/write-sites.test-helper.mjs';
 import { WRITERS } from '../modules/M9-record/permissions.mjs';
-import { startGate } from '../modules/M11-dispatcher/gate.mjs';
+import { startGate, riskOf } from '../modules/M11-dispatcher/gate.mjs';
 import { bands, readFact } from '../modules/M11-dispatcher/usage.mjs';
 import { undoStep, UNDO_CARD } from '../modules/M11-dispatcher/undo.mjs';
 import { undoStarts } from '../modules/M11-dispatcher/pass.mjs';
@@ -84,8 +86,10 @@ function dayOne({ text = FIRST, withProduct = true } = {}) {
   const rules = rulesFromText({ [P]: text }, { productState: (p) => env?.record.read('product', p)?.doc ?? null, clock: () => env?.clock.t ?? T0 });
   env = setup({ prefix: 'orch-day-one-', extra: { rules } });
   env.clock.t = T0;
-  // The product document: the Record grants it to approvals, but no production code writes it yet (L129; see the
-  // writers tests below). With withProduct it is written through the real Record, as approvals would.
+  // The product document: the Record grants it to approvals, but no production code writes it yet (L129, L204-b; see
+  // the writers tests below). With withProduct it is written through the real Record, as approvals would.
+  // productState is wired here by the test: no production code builds the engine yet, and rulesFromText's own default
+  // reads every product as active, so "paused with no document" is this wiring's answer, not yet the Mac's.
   if (withProduct) writeProduct(env, 'active');
   return { env, rules, rec: env.record, alerts: outbox(env.record, T0) };
 }
@@ -188,17 +192,23 @@ test('M11\'s start gate: no kind is held for a rules value the fixture lacks, an
   assert.ok(['review', 'merge'].some((k) => answers[k].ok === true), 'only undos start (undo-only)');
 });
 
+// The known day-one gaps (L199, L204), each a to-do that the PR fixing it switches off.
+const UNDO_CAP_TODO = { todo: 'L199-A (lane 2, M11 gate.mjs): an exact-reverse undo is never refused by the editing caps' };
 for (const kind of USED) {
-  test(`M11's start gate allows a start of kind ${kind} on day one`, async () => {
+  test(`M11's start gate allows a start of kind ${kind} on day one`, kind === 'undo' ? UNDO_CAP_TODO : {}, async () => {
     const a = (await gateAnswers())[kind];
     assert.equal(a.ok, true, `the start gate refuses ${kind}: ${a.reason}`);
   });
 }
 
-test('M10\'s start question: a worker for an undo card may start on day one', () => {
-  const { rules } = dayOne();
-  // pass.mjs asks start_session with editing: true for an undo card too (its worker edits files).
-  const r = rules.may('start_session', { product: P, role: 'worker', tier: 2, editing: true });
+test('M10\'s start question: a worker for an undo card may start on day one', { todo: 'L199-B (lane 1, M10): an exact-reverse undo start is never refused by the editing caps' }, async () => {
+  const w = dayOne();
+  const id = undoTapped(w);
+  await undoStep({ rec: w.rec, rules: w.rules, now: T0, filesOf: filesOfCommits, alert: w.alerts });
+  // pass.mjs asks start_session with editing: true for an undo card too (its worker edits files), and the tier
+  // M11's riskOf gives the card the real undo step made (day-one audit Minor 1: never a handed-in tier).
+  const tier = riskOf(w.rules, cardOf(w.rec, id)).tier;
+  const r = w.rules.may('start_session', { product: P, role: 'worker', tier, editing: true });
   assert.equal(r.decision, 'allow', `the engine refuses the undo worker: ${r.reason}`);
 });
 
@@ -215,7 +225,7 @@ test('Joe\'s Undo on day one: the real undo step makes a ready card, and the Rec
   assert.ok(w.rec.ready().some((c) => c.id === id), 'the Record lists the undo card as ready');
 });
 
-test('Joe\'s Undo on day one: M11\'s real undo start starts the undo card', async () => {
+test('Joe\'s Undo on day one: M11\'s real undo start starts the undo card', { todo: 'L199-A and L199-B (lanes 2 and 1): M11\'s gate and M10\'s start question both refuse an undo at editing cap 0' }, async () => {
   const w = dayOne();
   const id = undoTapped(w);
   await undoStep({ rec: w.rec, rules: w.rules, now: T0, filesOf: filesOfCommits, alert: w.alerts });
@@ -229,7 +239,10 @@ test('Joe\'s Undo on day one: M11\'s real undo start starts the undo card', asyn
   assert.equal(w.rec.read('card', id).doc.state, 'running');
 });
 
-test('the undo card the real undo step makes can pass the first-cutover docs lane (declared Tier 2)', async () => {
+// The merge question below is built by hand (exact_reverse_ok, reversed_audit and the missing reverses_files are
+// gather.mjs's to work out from GitHub). When L199-D switches this to-do off, ask it through checksStep's real
+// gatherFacts and assert on f.lane instead (day-one audit Minor 2).
+test('the undo card the real undo step makes can pass the first-cutover docs lane (declared Tier 2)', { todo: 'L199-D (lane 2, M11 undo.mjs): the undo card is written with no tier, and the docs lane takes only declared Tier 2' }, async () => {
   const w = dayOne();
   const id = undoTapped(w);
   await undoStep({ rec: w.rec, rules: w.rules, now: T0, filesOf: filesOfCommits, alert: w.alerts });
@@ -240,7 +253,7 @@ test('the undo card the real undo step makes can pass the first-cutover docs lan
   assert.equal(r.decision, 'allow', `the docs lane refuses the undo: ${r.reason}`);
 });
 
-test('with only production writers, the product reads active and the docs lane is not undo-only', { todo: 'L129: no production code writes the product document yet (M2 approvals has the grant); with none, the engine reads the product as paused, so only an exact reverse may merge and nothing starts' }, () => {
+test('with only production writers, the product reads active and the docs lane is not undo-only', { todo: 'L129, L204-b (lane 1, M2): no production code writes the product document yet; with none, the product reads as paused, so no worker starts and only an exact reverse may merge' }, () => {
   const { rules } = dayOne({ withProduct: false });
   const merge = rules.may('merge', { product: P, card: { id: 'C-2', kind: 'ordinary', tier: 2 }, truncated: false, labels: [], declared_tier: 2, kind: 'ordinary', files: docsChange() });
   assert.equal(merge.decision, 'allow', merge.reason);
@@ -256,7 +269,7 @@ test('with no product document today, the gaps are exactly the known ones (pause
   assert.match(start.reason, /no product record/);
 });
 
-test('a research_copy card is ready on day one with no go', { todo: 'R-0b-135: nothing makes a research_copy card yet (M11), and the first-cutover rules do not set go_free.research_copy' }, () => {
+test('a research_copy card is ready on day one with no go', { todo: 'R-0b-135, L204-c (lane 2, M11): nothing makes a research_copy card yet, and the first-cutover rules do not set go_free.research_copy' }, () => {
   const { rules } = dayOne();
   assert.ok(goFreeKinds(rules, P).includes('research_copy'));
 });
@@ -323,9 +336,27 @@ function readsAndWriters() {
 // The documents production reads that nothing in production makes, today. Each is a known gap; the test below fails
 // when one is made (take it off) or a new one appears.
 const KNOWN_UNWRITTEN = Object.freeze({
-  product: 'L129: read by M11 gate.mjs and pass.mjs and M2 schedule.mjs; M2 approvals has the grant, no code writes it',
-  session: 'L129: read by M4 push.mjs, M2 binding.mjs and M11 merges.mjs; M11 has the create grant, no code makes one',
+  product: 'L129: read by M11 gate.mjs and pass.mjs and M2 schedule.mjs; M2 approvals has the grant, no code writes it, so no worker starts (L204-b)',
+  session: 'L129: read by M4 push.mjs, M2 binding.mjs and M11 merges.mjs; M11 has the create grant, no code makes one, so no worker branch can be pushed (L204-a)',
 });
+
+test('a worker the real pass starts has the session record M4\'s push script reads', { todo: 'L204-a (lane 2, M11 + M4): the Dispatcher writes only a launch record; push.mjs reads the session record and stops at "no launch record for this session"' }, async () => {
+  const w = dayOne();
+  const id = undoTapped(w);
+  await undoStep({ rec: w.rec, rules: w.rules, now: T0, filesOf: filesOfCommits, alert: w.alerts });
+  let sid = null;
+  await undoStarts({ rec: w.rec, rules: w.rules, now: T0, bands: green(w.rules), running: [], filesOf: filesOfCommits, alert: w.alerts, host: 'mac-a',
+    launch: async (x) => { sid = x.sessionId; return { ok: true, sessionId: x.sessionId, pid: 1001, pidStart: 'start', pgid: 101, head: undoSha(UNDO_ID) }; } });
+  assert.ok(sid, `the undo card ${id} was not started`);
+  // The fields M4 push.mjs attempt() reads from the session record; switching this on, add a push through the real
+  // createPushScript (L204-a's proof).
+  const s = w.rec.read('session', sid)?.doc;
+  assert.ok(s, 'no session record');
+  for (const k of ['product', 'card', 'branch', 'outbox', 'attempt']) assert.ok(s[k], `the session record has no ${k}`);
+});
+
+// Not run here, logged (day-one audit Minor 4): M2's undo-flag, schedule and binding. The answered Undo ask is seeded;
+// M2's own suite guards them.
 
 test('L97, L129: every Record document production reads, today, has a production writer but for the known gaps', () => {
   const { reads, makers } = readsAndWriters();
@@ -351,7 +382,8 @@ test('L151 (P24): no text shown to Joe promises an action for an outbox kind who
     assert.deepEqual(pending, [], `kinds ${pending.join(', ')} are pending, but the shared promise scan (shared/no-promise.test.mjs) is not here to read their shown texts`);
     return;
   }
-  const scan = await import(pathToFileURL(NO_PROMISE).href);
+  // A literal path: M2's consume-ask scan refuses a computed import() outside its list (day-one audit M-1).
+  const scan = await import('../shared/no-promise.test.mjs');
   assert.equal(typeof scan.promises, 'function', 'the shared scan exports promises(kind)');
   for (const k of pending) assert.deepEqual(scan.promises(k), [], `${k}: a shown text promises an action`);
 });
@@ -371,7 +403,7 @@ function testFiles(dir, out = []) {
 // matches it.
 const CALL = ['L', '137'].join('');
 const TODO_NAMING = new RegExp(`\\btodo\\b\\s*[:(][^\\n]*\\b${CALL}\\b`);
-test('L137: no test file in orchestrate/ still carries a to-do naming it', () => {
+test('L137: no test file in orchestrate/ still carries a to-do naming it', { todo: '#95 (lane 1) removes the last of these' }, () => {
   const left = [];
   for (const p of testFiles(ORCH)) {
     readFileSync(p, 'utf8').split('\n').forEach((line, i) => { if (TODO_NAMING.test(line)) left.push(`${relative(ORCH, p).split(sep).join('/')}:${i + 1}`); });
