@@ -1,17 +1,54 @@
 // R-0b-169 probes. Each is tested against stand-ins for the outside world AND against the real thing where it is safe:
-// a real local TCP port, a real local web server, and the real read-only `launchctl print` on a Mac.
+// a real local TCP port, a real local web server, the real read-only `launchctl print` on a Mac, and a live read-only
+// GitHub read that holds the recorded pull request answers to what GitHub returns.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import net from 'node:net';
 import http from 'node:http';
-import { mkdirSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { execFileSync } from 'node:child_process';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { tempDir } from '../../../shared/test-tmp.mjs';
 import { networkProbe, tcpConnect } from './network.mjs';
 import { reachableProbe } from './reachable.mjs';
 import { launchdProbe, stateOf, runLaunchctl } from './launchd.mjs';
 import { signedInProbe } from './signed-in.mjs';
+import { prReader, prsToRead } from './github-pr.mjs';
+import { makeFetchGh } from '../../M6-merge-gate/build-skip.mjs';
+
+const HERE = dirname(fileURLToPath(import.meta.url));
+const REC = JSON.parse(readFileSync(join(HERE, '..', 'fixtures', 'github-pr-recorded.json'), 'utf8'));
+
+// ---- GitHub: one live read-only check that the recorded answers (fixtures/github-pr-recorded.json) are GitHub's ----
+// Reads this repository's own public pull requests with M6's client and no token (GETs only; the review-threads query
+// needs a token, so the loop test uses a hand-made answer for it). The owner and repo come from this checkout's git
+// remote at test time, so no name is written here. Skipped when offline, rate-limited, or the remote is not GitHub.
+test('LIVE GitHub (read-only, no token): the recorded pull request answers match what GitHub returns now', async (t) => {
+  let url = '';
+  try { url = execFileSync('git', ['remote', 'get-url', 'origin'], { cwd: HERE, encoding: 'utf8', timeout: 5000 }).trim(); } catch { /* no remote */ }
+  const m = /github\.com[:/]([A-Za-z0-9._-]+)\/([A-Za-z0-9._-]+?)(?:\.git)?$/.exec(url);
+  if (!m) return t.skip('this checkout has no GitHub remote');
+  const [, owner, repo] = m;
+  const gh = makeFetchGh({});
+  let first;
+  try { first = await gh.get(`/repos/${owner}/${repo}/pulls/${REC.merged}`); } catch (e) { return t.skip(`GitHub not reachable (${e.message})`); }
+  if (first.status === 403 || first.status === 429) return t.skip('GitHub rate limit for unauthenticated reads');
+  if (first.status === 404) return t.skip('the repository is not public');
+  const reader = prReader({ gh, owner, repo });
+  const pr = await reader.pr(REC.merged);
+  const rec = REC.answers[`/pulls/${REC.merged}`];
+  assert.deepEqual([pr.state, pr.merged, pr.merge_commit_sha, pr.head_sha, pr.base_ref], [rec.state, true, rec.merge_commit_sha, rec.head.sha, rec.base.ref]);
+  const files = await reader.files(REC.merged);
+  assert.ok(files.length > 0 && files.every((f) => typeof f.filename === 'string' && typeof f.additions === 'number'));
+  const checks = await reader.checks(pr.head_sha);
+  assert.ok(checks.every((c) => typeof c.name === 'string' && typeof c.status === 'string'));
+  assert.ok(Number.isInteger(await reader.behindBy(REC.merged)));
+  const list = await prsToRead({ gh, owner, repo, rec: { list: () => [] } });
+  assert.equal(list.problem, null, 'the open list reads as a list (it may be empty)');
+  assert.ok(list.numbers.every((n) => Number.isInteger(n) && n > 0));
+});
 
 const onMac = process.platform === 'darwin' && process.env.SETUP_FORCE_NOT_MAC !== '1';
 const macOnly = onMac ? {} : { skip: 'needs macOS tools (launchctl); run on a Mac' };
