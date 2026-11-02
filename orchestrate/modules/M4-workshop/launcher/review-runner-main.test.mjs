@@ -110,10 +110,23 @@ test('L66 M2: what a review runs (claude, node, the hooks folder) must be inside
   writeFileSync(join(base, 'shared', 'b.mjs'), '', { mode: 0o644 });
   mkdirSync(join(base, 'modules', 'dir.mjs'), { mode: 0o755 });
   chmodSync(join(base, 'modules', 'dir.mjs'), 0o755);
+  // L136 m2: a test file, a test helper or anything in a fixtures/ or test/ folder is in the copy, but never a program
+  // the runner may load (a fixture can exit as soon as it loads). One case per kind; `contest.mjs` and a folder named
+  // `tests` are not test files.
+  const testy = /is one of the copy's test files, test helpers or test fixtures \(a name ending \.test\.mjs or \.test-helper\.mjs, or a file in a fixtures\/ or test\/ folder\), not a program the runner may load/;
+  const T = (...p) => join(base, 'modules', ...p);
+  for (const d of [T('M12'), T('M12', 'fixtures'), T('M4'), T('M4', 'test'), T('tests')]) { mkdirSync(d, { mode: 0o755 }); chmodSync(d, 0o755); }
+  const testFiles = [T('wiring.test.mjs'), T('fake.test-helper.mjs'), T('M12', 'fixtures', 'naive-hook.mjs'), T('M4', 'test', 'stub.mjs')];
+  const notTestFiles = [T('contest.mjs'), T('tests', 'wiring.mjs')];
+  for (const f of [...testFiles, ...notTestFiles]) writeFileSync(f, '', { mode: 0o644 });
   for (const k of ['wiring', 'budget']) {
     const at = (p) => check({ [k]: p });
     const says = (p, re) => assert.match(at(p), new RegExp(`^the runner's ${k}, ${p.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}, ${re.source}`), `${k} = ${p}`);
     says(join(base, 'kept-wiring.mjs'), own);
+    // L136 m3: the same keep item named by its real path, inside the versioned folder, is refused too.
+    says(byReal(join(base, 'kept-wiring.mjs')), own);
+    for (const f of testFiles) { says(f, testy); says(byReal(f), testy); }
+    for (const f of notTestFiles) assert.equal(at(f), null, `${k}: ${f} is not a test file`);
     says(files.config, own);
     says(join(base, 'modules', 'M4-workshop'), own);
     says(join(base, 'modules', 'dir.mjs'), /is not a file/);
@@ -132,6 +145,8 @@ test('L66 M2: what a review runs (claude, node, the hooks folder) must be inside
   assert.match(check({ budget: join(base, 'modules', 'link.mjs') }), new RegExp(`^${join(base, 'modules', 'link.mjs')} is a link`));
   unlinkSync(join(base, 'modules', 'link.mjs'));
   for (const p of [join(base, 'kept-wiring.mjs'), join(base, 'modules', 'x.js'), join(base, 'shared', 'b.mjs')]) unlinkSync(p);
+  for (const d of [T('M12'), T('M4'), T('tests')]) rmSync(d, { recursive: true });
+  for (const f of [T('wiring.test.mjs'), T('fake.test-helper.mjs'), T('contest.mjs')]) unlinkSync(f);
   rmSync(join(base, 'modules', 'dir.mjs'), { recursive: true });
   rmSync(join(base, 'shared'), { recursive: true });
   assert.equal(check(), null);
