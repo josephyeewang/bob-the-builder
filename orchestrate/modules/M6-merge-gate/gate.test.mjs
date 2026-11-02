@@ -129,6 +129,7 @@ test('a clean card merges: paired write, squash merge of the judged head, card m
   must(w.env.record.write({ actor: 'sensors', entity: 'fact', id: 'audit-run-1', expectRev: 0, doc: { type: 'audit_run', commit: m.doc.merge_commit, conclusion: 'failure' } }), 'fact');
   await gatePass(w.ctx);
   assert.equal(mergeOf(w).doc.state, 'audit_flagged');
+  assert.deepEqual(w.alerts, []);
 });
 
 test('the undo route: a flagged merge\'s exact reverse goes first, merges with no Approve, and the undone card is reverted', async () => {
@@ -845,6 +846,57 @@ test('a mark that failed until the audit result landed is still posted, with an 
   assert.equal(after.doc.state, 'audit_flagged');
   assert.ok(after.doc.marked_at);
   assert.ok(w.alerts.some((a) => a.type === 'merge_marked_after_audit'));
+});
+
+// #91 r2 audit (L129, plant D15): the late-mark check reads Sensors audit runs only. An audit_run another writer made
+// for the commit is not an audit, so a mark posted late on a still-merged merge asks for no re-run.
+test('L129: a Ledger audit_run for the commit does not make a late mark ask for a re-run', async () => {
+  const w = world();
+  verifiedCard(w);
+  w.g.answer.status = () => ({ status: 500, json: null });
+  await gatePass(w.ctx);
+  const m = mergeOf(w);
+  must(w.env.record.write({ actor: 'ledger', entity: 'fact', id: 'alert-audit-0', expectRev: 0, doc: { type: 'audit_run', commit: m.doc.merge_commit, conclusion: 'failure' } }), 'ledger fact');
+  w.g.answer.status = null;
+  await gatePass(w.ctx);
+  const after = mergeOf(w);
+  assert.equal(after.doc.state, 'merged');
+  assert.ok(after.doc.marked_at);
+  assert.equal(after.doc.late_mark_alert, undefined);
+  assert.ok(!w.alerts.some((a) => a.type === 'merge_marked_after_audit'), JSON.stringify(w.alerts));
+});
+
+// L130 m17: the late-mark alert's answer counts. A refused (false) or thrown alert leaves it owed and it is sent again
+// on the next pass; once taken it is marked told and never sent again.
+test('L130 m17: a late-mark alert that is refused or throws is sent again next pass, then never again', async () => {
+  for (const fail of ['false', 'throw']) {
+    const w = world();
+    let refuse = true;
+    const sent = [];
+    w.ctx.alert = (a) => {
+      if (a.type === 'merge_marked_after_audit' && refuse) { if (fail === 'throw') throw new Error('queue busy'); return false; }
+      sent.push(a);
+      return true;
+    };
+    verifiedCard(w);
+    w.g.answer.status = () => ({ status: 500, json: null });
+    await gatePass(w.ctx);
+    const m = mergeOf(w);
+    must(w.env.record.write({ actor: 'sensors', entity: 'fact', id: 'audit-run-1', expectRev: 0, doc: { type: 'audit_run', commit: m.doc.merge_commit, conclusion: 'failure' } }), 'fact');
+    w.g.answer.status = null;
+    await gatePass(w.ctx);
+    let after = mergeOf(w);
+    assert.ok(after.doc.marked_at, fail);
+    assert.equal(after.doc.late_mark_alert, 'owed', fail);
+    assert.ok(!sent.some((a) => a.type === 'merge_marked_after_audit'), fail);
+    refuse = false;
+    await gatePass(w.ctx);
+    after = mergeOf(w);
+    assert.equal(after.doc.late_mark_alert, 'told', fail);
+    assert.equal(sent.filter((a) => a.type === 'merge_marked_after_audit').length, 1, fail);
+    await gatePass(w.ctx);
+    assert.equal(sent.filter((a) => a.type === 'merge_marked_after_audit').length, 1, `${fail}: sent once only`);
+  }
 });
 
 // Audit round 3, Material: on M10's real engine a clean docs change with a Tier-2 go merges as Tier 2 (the card's

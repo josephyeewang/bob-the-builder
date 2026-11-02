@@ -1967,6 +1967,10 @@ function guardWrite({ entity, id, actor, old, doc, createdBy }) {
 
   // ---------- update ----------
   if (row?.own && actorName(createdBy ?? '') !== name) return no(`${name} may change only a ${entity} it created; ${id ?? 'this one'} was created by ${createdBy ?? 'an unknown writer'}`);
+  // Only the writer that created a fact or handoff may update it (L118 M1): the same actor, session included. The
+  // readers that trust a fact's writer (an exact_reverse card's undo_issue, an audit result's audit_run) read
+  // createdBy, which is the first writer only, so a second writer rewriting the contents would forge them.
+  if ((entity === 'fact' || entity === 'handoff') && createdBy !== String(actor)) return no(`only ${createdBy ?? 'its creator'} may change ${entity} ${id}`);
   const from = old.state;
   const to = out.state;
   const moving = stateful && from !== to;
@@ -2325,15 +2329,19 @@ const WRITERS = Object.freeze({
   verdict: Object.freeze({ reviewer: createOnly(), auditor: createOnly() }),
   session: Object.freeze({ dispatcher: ANY, workshop: Object.freeze({ update: '*' }) }),
   merge: Object.freeze({ merge_gate: ANY }),
+  // The real-code check is modules/M9-record/write-sites.test.mjs: every write site in a module must have its row here,
+  // and every row here is used by a write site or says why not (L112).
   // Each under its own families (FACT_FAMILIES), changing only facts it created (L74). The workshop is worker-side:
   // nothing that gates takes a workshop fact as proof (factFrom names the one role a proof must come from).
   fact: Object.freeze({ sensors: OWN_FACTS, ledger: OWN_FACTS, workshop: OWN_FACTS, dispatcher: OWN_FACTS, merge_gate: OWN_FACTS, live_check: OWN_FACTS }),
   product: Object.freeze({ approvals: ANY }),
   handoff: Object.freeze({ lead: createOnly(), learning: createOnly() }),
-  report: Object.freeze({ ledger: createOnly(), ...Object.fromEntries(reportRoles.map((r) => [r, createOnly()])) }),
+  report: Object.freeze({ ...Object.fromEntries(reportRoles.map((r) => [r, createOnly()])) }),
   // learning is Phase 1 (0b-1 MAT-11): listed so its row exists, but no learning session starts in 0b.
-  lesson: Object.freeze({ dispatcher: createOnly(), learning: ANY }),
+  lesson: Object.freeze({ learning: ANY }),
   launch: Object.freeze({ dispatcher: createOnly() }),
+  // Create-only (L118 M2): a request asked again gets its own id (lane 2, mr-<card>-<head12>-r<n>), so no one rewrites one
+  // the Merge Gate may already be reading.
   merge_request: Object.freeze({ dispatcher: createOnly() }),
 });
 
@@ -2446,6 +2454,7 @@ Object.defineProperties(__bob_e, {
   OUTBOX_KINDS: { get: () => OUTBOX_KINDS, enumerable: true },
   OUTBOX_KIND_PATTERN: { get: () => OUTBOX_KIND_PATTERN, enumerable: true },
   SESSION_ID: { get: () => SESSION_ID, enumerable: true },
+  OUTBOX_NAME: { get: () => OUTBOX_NAME, enumerable: true },
   outboxKindOf: { get: () => outboxKindOf, enumerable: true },
   CARD_KINDS: { get: () => CARD_KINDS, enumerable: true },
   STATES: { get: () => STATES, enumerable: true },
@@ -2490,12 +2499,16 @@ const OUTBOX_KINDS = Object.freeze(Object.fromEntries(Object.entries({
 const OUTBOX_KIND_PATTERN = KIND_SHAPE;
 // A session id: capped so an id made from it stays a legal file name (0b-2 audit round 6). record.mjs re-exports it.
 const SESSION_ID = /^[A-Za-z0-9-]{1,128}$/;
-// The longest listed kind a file name starts with (so `report-compact-x` is report-compact-, not report-), or null;
-// a compaction note (`-compact` in its name, in any case: the reserved form, M4 outbox-kind.mjs, L121) is only ever a
-// `-compact-` kind (L101). M9's outbox, the test stand-in,
-// M4's intake read and M11's intake read a file's kind with this one function; the plain-files hook uses the same
-// rule (kindAmong) on the kinds the launcher hands it.
-const outboxKindOf = (name) => kindAmong(name, Object.keys(OUTBOX_KINDS));
+// The one outbox file name rule: `<kind>-<id>.(md|json|txt)`, ASCII letters, digits and dashes only. The write hook
+// and the M4 intake check names with the same pattern (they keep their own copies for now, L121), and M9 applies it
+// before it takes a kind from a name, so a name the hook refuses (a U+2011 dash, a dot in the id) has no kind anywhere.
+const OUTBOX_NAME = /^([a-z]+)-[A-Za-z0-9-]+\.(md|json|txt)$/;
+// The longest listed kind a good file name starts with (so `report-compact-x.md` is report-compact-, not report-), or
+// null; a compaction note (`-compact` in its name, in any case: the reserved form, M4 outbox-kind.mjs, L121) is only
+// ever a `-compact-` kind (L101). A name that fails OUTBOX_NAME has no kind. M9's outbox, the test stand-in, M4's
+// intake read and M11's intake read a file's kind with this one function; the plain-files hook uses the same rule
+// (kindAmong) on the kinds the launcher hands it.
+const outboxKindOf = (name) => (typeof name === 'string' && OUTBOX_NAME.test(name) ? kindAmong(name, Object.keys(OUTBOX_KINDS)) : null);
 
 // Card kinds (0b-2 R3-M3). Set once, at create, by the creator M9's permissions name. `exact_reverse` is the undo card.
 const CARD_KINDS = Object.freeze(['ordinary', 'fix', 'exact_reverse', 'lead_daily_card', 'research_copy']);
@@ -2517,15 +2530,17 @@ const STATES = Object.freeze({
 __bob_def('orchestrate/shared/record.mjs', ['orchestrate/shared/record-names.mjs', 'orchestrate/modules/M9-record/guard.mjs'], function (__bob_e, __bob_i) {
 const { createHash } = __bob_node_crypto;
 const { readFileSync } = __bob_node_fs;
-let CARD_KINDS, OUTBOX_KINDS, OUTBOX_KIND_PATTERN, SESSION_ID, STATES, outboxKindOf, claimCheck, guardWrite;
-__bob_i('orchestrate/shared/record-names.mjs', (m) => { CARD_KINDS = m.CARD_KINDS; OUTBOX_KINDS = m.OUTBOX_KINDS; OUTBOX_KIND_PATTERN = m.OUTBOX_KIND_PATTERN; SESSION_ID = m.SESSION_ID; STATES = m.STATES; outboxKindOf = m.outboxKindOf; });
+let CARD_KINDS, OUTBOX_KINDS, OUTBOX_KIND_PATTERN, OUTBOX_NAME, SESSION_ID, STATES, outboxKindOf, claimCheck, guardWrite;
+__bob_i('orchestrate/shared/record-names.mjs', (m) => { CARD_KINDS = m.CARD_KINDS; OUTBOX_KINDS = m.OUTBOX_KINDS; OUTBOX_KIND_PATTERN = m.OUTBOX_KIND_PATTERN; OUTBOX_NAME = m.OUTBOX_NAME; SESSION_ID = m.SESSION_ID; STATES = m.STATES; outboxKindOf = m.outboxKindOf; });
 __bob_i('orchestrate/modules/M9-record/guard.mjs', (m) => { claimCheck = m.claimCheck; guardWrite = m.guardWrite; });
 Object.defineProperties(__bob_e, {
   CARD_KINDS: { get: () => CARD_KINDS, enumerable: true },
   OUTBOX_KINDS: { get: () => OUTBOX_KINDS, enumerable: true },
   OUTBOX_KIND_PATTERN: { get: () => OUTBOX_KIND_PATTERN, enumerable: true },
+  OUTBOX_NAME: { get: () => OUTBOX_NAME, enumerable: true },
   STATES: { get: () => STATES, enumerable: true },
   outboxKindOf: { get: () => outboxKindOf, enumerable: true },
+  outboxKind: { get: () => outboxKind, enumerable: true },
   SCRIPT_ACTORS: { get: () => SCRIPT_ACTORS, enumerable: true },
   AI_ROLES: { get: () => AI_ROLES, enumerable: true },
   ENTITIES: { get: () => ENTITIES, enumerable: true },
@@ -2584,6 +2599,8 @@ Object.defineProperties(__bob_e, {
 // diary() is the one call that throws when the store can't be read: its callers walk every line, and an empty answer
 // would read as "nothing happened" (round 10 m2: fail closed by throwing, not by an empty list).
 
+// A second name for outboxKindOf (the same function, not a copy), kept because record.test and older callers import it.
+const outboxKind = outboxKindOf;
 // The test stand-in's field and move check is M9's own (L72); guard.mjs needs only record-names.mjs, so no load loop.
 
 // Plain-script actors write under their own name; AI roles only through applyOutbox, as `<role>:<sessionId>`.
@@ -2779,16 +2796,22 @@ function memoryRecord({ now = () => Date.now(), dead = null } = {}) {
       return { ok: true, rev, seq };
     },
     applyOutbox(tag, file) {
+      // Like the real M9, a file whose name has no outbox kind is refused, never logged as handed in (L121).
       const name = String(file).split('/').pop();
+      const kind = outboxKindOf(name);
+      if (!kind) return refused(`no outbox kind for file name ${name.slice(0, 80)}`);
+      // The same role and record-rule checks as M9's readOutboxFile, in its order and with its reasons (L129 M-1);
+      // they come before the create path, so a kind refused by M9 is never stored here.
+      const spec = OUTBOX_KINDS[kind];
+      if (!spec.roles.includes(tag?.role)) return refused(`outbox kind ${kind} is not listed for ${tag?.role}`);
+      if (!spec.entity) return refused(`outbox kind ${kind} has no record rule yet`);
       const actor = `${tag.role}:${tag.sessionId}`;
-      const spec = OUTBOX_KINDS[outboxKindOf(name)] ?? null;
-      if (spec?.mode === 'create' && spec.entity && spec.roles.includes(tag.role)) {
+      if (spec.mode === 'create') {
         let buf;
         try { buf = readFileSync(file); } catch (e) { return refused(`can't read ${name} (${e?.code ?? 'error'})`); }
         const sha256 = createHash('sha256').update(buf).digest('hex');
         const sourceKey = `${file}\0${sha256}`;
         if ([...docs.values()].some((d) => d.entity === spec.entity && d.doc?.source_key === sourceKey)) return { ok: true, skipped: true };
-        const kind = outboxKindOf(name);
         const id = `${kind}${tag.sessionId}-${lines.length + 1}`;
         const doc = { kind, role: tag.role, session_id: tag.sessionId, card: tag.card ?? null, source: name, source_key: sourceKey, sha256, text: buf.toString('utf8') };
         const g = guardWrite({ entity: spec.entity, id, actor, old: null, doc, createdBy: null });
