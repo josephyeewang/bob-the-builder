@@ -1,10 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { fileURLToPath } from 'node:url';
-import { existsSync, mkdirSync, realpathSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync } from 'node:fs';
+import { spawn } from 'node:child_process';
 import { basename, dirname, resolve } from 'node:path';
 import { corpus, cases, pathForms, askHook, runCorpus, hostDead, hostLive, caselessAt, folderRead } from './runner.mjs';
-import { touchCheck } from './selfcheck.mjs';
 import { tempDir } from '../../../shared/test-tmp.mjs';
 
 const fx = (f) => fileURLToPath(new URL(`./fixtures/${f}`, import.meta.url));
@@ -121,24 +121,82 @@ test('round 10: the ansi-c form reaches the command intact (a string replacement
 // does not hang on one name's letters (round 10 audit 2 M-2). ~7,000 shell runs, about 70 s.
 // corpus.dead is for a Mac; on a machine without zsh, or whose sh is dash (Linux CI), runner.mjs's hostDead drops the
 // pairs that touch nothing there, and they are left out of both sides here (round 10 audit 3 M-4).
-test('round 10: every refuse case touches the file, and corpus.dead is exactly the pairs that do not, on two names', () => {
+//
+// The touch check runs as one child process per name, mode and shell (fixtures/touch-child.mjs), all at once, each with
+// a hard deadline (L299). Run here it blocked this process's event loop for ~10 minutes on a Mac (one spawnSync per
+// case), so no test timeout could fire and a killed run left its folders. A child that overruns is killed, its folder
+// removed, and the test fails naming it.
+// A backstop against a real hang, not a speed budget: alone a child takes 1-2 minutes on a Mac, all eight together
+// 5-10 minutes on a loaded one.
+const TOUCH_DEADLINE_MS = 20 * 60 * 1000;
+function touchPiece(name, mode, shell, deadlineMs = TOUCH_DEADLINE_MS) {
+  const home = realpathSync(tempDir('sg-touch-'));
+  const out = `${home}/cases.json`;
+  const kid = spawn(node, [fx('touch-child.mjs'), name, mode, shell, out], { env: { ...process.env, TMPDIR: home }, stdio: ['ignore', 'ignore', 'pipe'], detached: true });
+  let err = ''; kid.stderr.on('data', (d) => { err += d; });
+  return new Promise((done, fail) => {
+    const timer = setTimeout(() => {
+      try { process.kill(-kid.pid, 'SIGKILL'); } catch { /* already gone */ }
+      rmSync(home, { recursive: true, force: true });
+      fail(new Error(`touch check ${mode} / ${shell} did not finish in ${deadlineMs / 1000} s: killed, its folder removed`));
+    }, deadlineMs);
+    kid.on('exit', (code, signal) => {
+      clearTimeout(timer);
+      try {
+        if (code !== 0) throw new Error(`touch check ${mode} / ${shell} failed (${signal ?? `exit ${code}`}): ${err.slice(-2000)}`);
+        done(JSON.parse(readFileSync(out, 'utf8')));
+      } catch (e) { fail(e); } finally { rmSync(home, { recursive: true, force: true }); }
+    });
+  });
+}
+
+/**
+ * touchCheck(name, { mode, shells }) for every name and mode, one child per shell, all at once. Every child settles
+ * before anything is judged, so none outlives the test or writes into a folder being removed. → per name and mode, one
+ * list: the same cases (a shell's commands name its own stand-in folder, so a case is matched by group, form and
+ * template, in order), touchedBy joined across shells.
+ */
+async function touchAll(names, modes, shells) {
+  const jobs = names.flatMap((name) => modes.flatMap((mode) => shells.map((sh) => ({ name, mode, sh }))));
+  const settled = await Promise.allSettled(jobs.map((j) => touchPiece(j.name, j.mode, j.sh)));
+  const failed = settled.filter((s) => s.status === 'rejected');
+  if (failed.length) throw new Error(failed.map((s) => s.reason?.message ?? s.reason).join('\n'));
+  const key = (c) => `${c.group}/${c.form}/${c.tpl}`;
+  return names.map((name) => modes.map((mode) => {
+    const per = jobs.flatMap((j, i) => (j.name === name && j.mode === mode ? [settled[i].value] : []));
+    const [first] = per;
+    for (const p of per) assert.deepEqual(p.map(key), first.map(key), `${name} ${mode}: each shell sees the same cases`);
+    return first.map((c, i) => ({ ...c, touchedBy: per.flatMap((p) => p[i].touchedBy) }));
+  }).flat());
+}
+
+test('round 10: every refuse case touches the file, and corpus.dead is exactly the pairs that do not, on two names', { timeout: TOUCH_DEADLINE_MS + 60_000 }, async () => {
   const shells = ['/bin/bash', '/bin/zsh'].filter((s) => existsSync(s));
   const listed = Object.entries(corpus.dead).flatMap(([tpl, forms]) => forms.filter((form) => !hostDead(tpl, form) && !hostLive(tpl, form)).map((form) => `${form} / ${tpl}`)).sort();
   assert.ok(listed.length > 0);
-  const saved = corpus.dead; corpus.dead = {};
-  try {
-    for (const name of [T, 'secret.prod']) {
-      const groups = new Map();
-      for (const c of ['relative', 'absolute'].flatMap((mode) => touchCheck(name, { mode, shells, newFolder: () => tempDir('sg-self-') }))) {
-        const k = `${c.form} / ${c.tpl}`; groups.set(k, [...(groups.get(k) ?? []), c]);
-      }
-      const silent = (c) => !c.touchedBy.length;
-      const dead = [...groups].filter(([, cs]) => cs.every(silent)).map(([k]) => k).sort();
-      const bad = [...groups].filter(([, cs]) => !cs.every(silent)).flatMap(([, cs]) => cs.filter(silent));
-      assert.deepEqual(bad.map((c) => `[${c.group}/${c.form}] ${c.command}`), [], `${name}: cases that touch nothing`);
-      assert.deepEqual(dead, listed, `${name}: the dead list`);
+  // Each child empties corpus.dead before it builds its cases, as this test did in-process (touch-child.mjs).
+  const names = [T, 'secret.prod'];
+  const all = await touchAll(names, ['relative', 'absolute'], shells);
+  names.forEach((name, n) => {
+    const groups = new Map();
+    for (const c of all[n]) {
+      const k = `${c.form} / ${c.tpl}`; groups.set(k, [...(groups.get(k) ?? []), c]);
     }
-  } finally { corpus.dead = saved; }
+    const silent = (c) => !c.touchedBy.length;
+    const dead = [...groups].filter(([, cs]) => cs.every(silent)).map(([k]) => k).sort();
+    const bad = [...groups].filter(([, cs]) => !cs.every(silent)).flatMap(([, cs]) => cs.filter(silent));
+    assert.deepEqual(bad.map((c) => `[${c.group}/${c.form}] ${c.command}`), [], `${name}: cases that touch nothing`);
+    assert.deepEqual(dead, listed, `${name}: the dead list`);
+  });
+});
+
+test('L299: a touch check piece that overruns its deadline is killed, its folder removed, and fails naming itself', async () => {
+  // The temp root: where test-tmp.mjs makes every folder (the parent of one of its own).
+  const root = dirname(tmp());
+  const mine = () => new Set(readdirSync(root).filter((n) => n.startsWith('sg-touch-')));
+  const before = mine();
+  await assert.rejects(touchPiece(T, 'relative', '/bin/bash', 300), /touch check relative \/ \/bin\/bash did not finish in 0\.3 s: killed, its folder removed/);
+  assert.deepEqual([...mine()].filter((n) => !before.has(n)), []);
 });
 
 test('round 10 audit 2 M-3: a crude "refuse anything odd" guard fails: plain commands, and the ? and [o] forms', () => {
