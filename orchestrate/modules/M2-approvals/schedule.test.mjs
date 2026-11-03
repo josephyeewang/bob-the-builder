@@ -521,3 +521,25 @@ test('a "Request changes" after the approval was counted withdraws it before the
     assert.equal((await approvalStands(w.t.ctx, 'R-1', { head: w.H, view: w.view })).ok, false, user ? 'another account' : 'the owner');
   }
 });
+
+// L205 (#108 r2): a GitHub read that fails while checking whether an Approve stands is not GitHub's "no": the answer
+// says `unreadable`, with the error as `cause`, and the Merge Gate waits on it. GitHub's own "no" is not unreadable.
+test('L205: an Approve whose GitHub read fails is unreadable, not withdrawn; once read it stands again', async () => {
+  const w = riskyWorld();
+  await w.at(W8);
+  w.g.review(7, { state: 'APPROVED', commit_id: w.H, submitted_at: W8 + HOUR });
+  w.t.clock.t = W8 + HOUR;
+  assert.equal((await readApprove(w.t.ctx, 'R-1', { view: w.view })).counted, true);
+  const get = w.g.gh.get;
+  let down = true;
+  w.g.gh.get = async (p) => (down && /\/reviews/.test(p) ? { status: 502, json: null } : get(p));
+  const r = await approvalStands(w.t.ctx, 'R-1', { head: w.H, view: w.view });
+  assert.deepEqual([r.ok, r.unreadable], [false, true], JSON.stringify(r));
+  assert.match(String(r.cause?.message), /^GitHub answered 502 for /);
+  down = false;
+  assert.equal((await approvalStands(w.t.ctx, 'R-1', { head: w.H, view: w.view })).ok, true);
+  w.g.review(7, { state: 'CHANGES_REQUESTED', commit_id: w.H, submitted_at: W8 + 2 * HOUR });
+  const no = await approvalStands(w.t.ctx, 'R-1', { head: w.H, view: w.view });
+  assert.deepEqual([no.ok, no.unreadable], [false, undefined], 'GitHub\'s answer: changes asked for');
+});
+
