@@ -57,9 +57,12 @@ function confirm(rec, card, c) {
   if (!f?.doc?.since) return null;
   const stored = waitOf(f.doc, c);
   if (!stored || f.doc.wait_since === stored) return stored;
-  const put = rec.write({ actor: 'dispatcher', entity: 'fact', id: WAIT_TELL_FACT(card), expectRev: f.rev, doc: { ...f.doc, wait_since: stored }, kind: 'wait_tell' });
+  const put = rewriteTell(rec, card, f.rev, { ...f.doc, wait_since: stored });
   return put.ok ? stored : null;
 }
+
+// Every write of a card's tell after waitOnJoe's first one, at the rev the caller read (one write site, L112).
+const rewriteTell = (rec, card, expectRev, doc) => rec.write({ actor: 'dispatcher', entity: 'fact', id: WAIT_TELL_FACT(card), expectRev, doc, kind: 'wait_tell' });
 
 /** The text for a joe wait written with no tell: the card, what it waits on, why, and what Joe can do (L316). */
 export function untoldWaitText(card, wait) {
@@ -79,8 +82,7 @@ function adoptUntold(rec) {
     if (doc?.state !== 'waiting' || w?.who !== OWNER_WAIT_WHO || w.what === PAUSED_WAIT_WHAT || !w.since) continue;
     const f = rec.read('fact', WAIT_TELL_FACT(id));
     if (f?.doc?.since && waitOf(f.doc, doc)) continue;
-    rec.write({ actor: 'dispatcher', entity: 'fact', id: WAIT_TELL_FACT(id), expectRev: f?.rev ?? 0,
-      doc: { since: w.since, wait_since: w.since, text: untoldWaitText(id, w) }, kind: 'wait_tell' });
+    rewriteTell(rec, id, f?.rev ?? 0, { since: w.since, wait_since: w.since, text: untoldWaitText(id, w) });
   }
 }
 
@@ -110,7 +112,7 @@ export function retellWaits({ rec, alert, now }) {
       clear: () => {
         dropCause(rec, fact);
         const d = rec.read('fact', fact);
-        if (d?.doc?.told_at != null) rec.write({ actor: 'dispatcher', entity: 'fact', id: fact, expectRev: d.rev, doc: { ...d.doc, told_at: null }, kind: 'wait_tell' });
+        if (d?.doc?.told_at != null) rewriteTell(rec, card, d.rev, { ...d.doc, told_at: null });
       },
     });
   }
