@@ -55,6 +55,7 @@ approvals:
   decisions_dir: docs/decisions
 proposals:
   heartbeat_stale_min: 30
+  outbox: /srv/sample-app/proposals
 outage:
   min_dead: 2
   share: 0.5

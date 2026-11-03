@@ -30,7 +30,7 @@ const REVIEW_WALLS = { outboxRoot: '/r/outbox', runnerRoot: '/r/review' };
 
 // The plain-files hook's arguments exactly as the launcher renders them for this role and outbox.
 function hookArgv(role, outbox) {
-  const r = renderRoleSettings({ productionFiles: [], role, profile: DESIGN_PROFILES[role], product: { commands: { test: 'npm test' } },
+  const r = renderRoleSettings({ productionFiles: [], proposalOutboxes: [], role, profile: DESIGN_PROFILES[role], product: { commands: { test: 'npm test' } },
     paths: { copy: '/w/copy', outbox, hooksDir: '/w/hooks', snapshot: '/w/rules.json', node: '/w/node', notes: '/w/notes', deny: { secrets: ['/w/secrets'] }, reviewWalls: REVIEW_WALLS } });
   assert.equal(r.ok, true, r.reason);
   const entry = r.settings[S.hooks][E.preToolUse].find((e) => e[H.matcher] === POLICY_HOOKS['plain-files']);
@@ -175,7 +175,7 @@ test('L121: a name holding -compact in any case is a compaction note, never a ve
 test('L101: the rendered compaction hooks name a notes folder apart from the outbox for every role without a -compact- kind', () => {
   for (const role of LAUNCHED) {
     const outbox = `/w/outbox/${role}`;
-    const r = renderRoleSettings({ productionFiles: [], role, profile: DESIGN_PROFILES[role], product: { commands: { test: 'npm test' } },
+    const r = renderRoleSettings({ productionFiles: [], proposalOutboxes: [], role, profile: DESIGN_PROFILES[role], product: { commands: { test: 'npm test' } },
       paths: { copy: '/w/copy', outbox, hooksDir: '/w/hooks', snapshot: '/w/rules.json', node: '/w/node', notes: `/w/notes/${role}`, deny: { secrets: ['/w/secrets'] }, reviewWalls: REVIEW_WALLS } });
     assert.equal(r.ok, true, r.reason);
     const inOutbox = DESIGN_PROFILES[role].outbox.includes(`${DESIGN_PROFILES[role].compactKind}-compact-`);
@@ -191,10 +191,10 @@ test('L101: the rendered compaction hooks name a notes folder apart from the out
       assert.equal(seen, 1, `${role}: one ${ev} compaction hook`);
     }
     if (!inOutbox) {
-      const bare = renderRoleSettings({ productionFiles: [], role, profile: DESIGN_PROFILES[role], product: { commands: { test: 'npm test' } },
+      const bare = renderRoleSettings({ productionFiles: [], proposalOutboxes: [], role, profile: DESIGN_PROFILES[role], product: { commands: { test: 'npm test' } },
         paths: { copy: '/w/copy', outbox, hooksDir: '/w/hooks', snapshot: '/w/rules.json', node: '/w/node', deny: { secrets: ['/w/secrets'] }, reviewWalls: REVIEW_WALLS } });
       assert.equal(bare.ok, false, `${role}: no notes folder is refused`);
-      const inside = renderRoleSettings({ productionFiles: [], role, profile: DESIGN_PROFILES[role], product: { commands: { test: 'npm test' } },
+      const inside = renderRoleSettings({ productionFiles: [], proposalOutboxes: [], role, profile: DESIGN_PROFILES[role], product: { commands: { test: 'npm test' } },
         paths: { copy: '/w/copy', outbox, hooksDir: '/w/hooks', snapshot: '/w/rules.json', node: '/w/node', notes: `${outbox}/notes`, deny: { secrets: ['/w/secrets'] }, reviewWalls: REVIEW_WALLS } });
       assert.equal(inside.ok, false, `${role}: a notes folder inside the outbox is refused`);
     }
@@ -206,7 +206,7 @@ test('L82 M-1: a published profile that lists fewer kinds is refused at the hook
   const outbox = join(env.outRoot, 'worker', 'N-1');
   mkdirSync(outbox, { recursive: true });
   const profile = { ...DESIGN_PROFILES.worker, outbox: ['report-'] };
-  const r = renderRoleSettings({ productionFiles: [], role: 'worker', profile, product: { commands: { test: 'npm test' } },
+  const r = renderRoleSettings({ productionFiles: [], proposalOutboxes: [], role: 'worker', profile, product: { commands: { test: 'npm test' } },
     paths: { copy: '/w/copy', outbox, hooksDir: '/w/hooks', snapshot: '/w/rules.json', node: '/w/node', notes: '/w/notes', deny: { secrets: ['/w/secrets'] }, reviewWalls: REVIEW_WALLS } });
   assert.equal(r.ok, true, r.reason);
   const cmd = r.settings[S.hooks][E.preToolUse].find((e) => e[H.matcher] === POLICY_HOOKS['plain-files'])[H.hooks][0][H.command];
