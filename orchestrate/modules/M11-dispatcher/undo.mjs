@@ -25,6 +25,17 @@ export const REVERSE_FACT = (undoId) => `reverse-${undoId}`;
 /** The note that Joe was told of an undo's fix card (D8), the mark of that alert (L127). */
 export const UNDO_NOTE_FACT = (undoId) => `undo-note-${undoId}`;
 const MERGED = ['merged', 'audited_ok', 'audit_flagged'];
+/** The undo card is Tier 2: the docs lane takes an exact reverse only when its card declares Tier 2 (M6 README, L199). */
+export const UNDO_TIER = 2;
+/**
+ * The one shape of an undo card, written in draft. Tests build their undo cards with it too, so a card a test
+ * starts from is the card this file writes (Principle 10, L199).
+ */
+export function undoCardDoc({ askId, files, target, pr, commit }) {
+  return { state: 'draft', kind: 'exact_reverse', tier: UNDO_TIER, source: { ask: askId }, files, product: target.doc.product ?? null,
+    module: target.doc.module ?? null, what: `undo PR ${pr ?? '?'} (merge ${short(commit)} of card ${target.id})` };
+}
+
 const SHA = /^[0-9a-f]{40}$/;
 const short = (s) => String(s ?? '').slice(0, 7);
 
@@ -76,8 +87,7 @@ async function tap({ rec, rules, now, filesOf, alert, out, held, id, doc }) {
     const files = filesOf(commit);
     if (!Array.isArray(files)) return await held('files', 'the reversed commit\'s files could not be read');
     const w = rec.write({ actor: 'dispatcher', entity: 'card', id: cardId, expectRev: 0, kind: 'undo_card',
-      doc: { state: 'draft', kind: 'exact_reverse', source: { ask: id }, files, product: target.doc.product ?? null, module: target.doc.module ?? null,
-        what: `undo PR ${m.doc.pr ?? '?'} (merge ${short(commit)} of card ${target.id})` } });
+      doc: undoCardDoc({ askId: id, files, target, pr: m.doc.pr, commit }) });
     if (!w.ok) {
       // Joe tapped Undo: a card that cannot be written (say, its module is unknown) is told to him, once a day.
       out.push([id, `undo card not recorded: ${w.reason}`]);
@@ -113,11 +123,19 @@ function fixCards({ rec, now, alert, out }) {
       continue;
     }
     if (!fix) {
-      const plan = Object.fromEntries(PLAN_INPUTS.filter((k) => doc[k] !== undefined).map((k) => [k, doc[k]]));
+      // The undo card's tier is not copied (#117 audit m1, L228): Tier 2 is for an exact reverse, and a fix card is a
+      // hand-made change. M9 lets a fix card's tier be absent (the rest of its plan is its root's and never changes),
+      // and no tier counts as Tier 1, so the fix can only be stricter than its root.
+      const plan = Object.fromEntries(PLAN_INPUTS.filter((k) => k !== 'tier' && doc[k] !== undefined).map((k) => [k, doc[k]]));
       const w = rec.write({ actor: 'dispatcher', entity: 'card', id: FIX_CARD(id), expectRev: 0, kind: 'undo_fix_card',
         // A draft, never `ready` (audit MAT-4): the Lead plans it; the start loop never picks it up.
         doc: { state: 'draft', kind: 'fix', fix_of: id, product: doc.product ?? null, module: doc.module ?? null, what: why, ...plan } });
-      if (!w.ok) { out.push([id, `fix card not recorded: ${w.reason}`]); continue; }
+      if (!w.ok) {
+        // Told, once a day while it lasts (L228): a refused fix card left silent fails again on every pass.
+        out.push([id, `fix card not recorded: ${w.reason}`]);
+        holdAlert({ rec, cause: `undo-fix-card-${id}`, text: `${why}; its fix card could not be recorded (${w.reason}), so the Lead must make one by hand`, alert, now });
+        continue;
+      }
       out.push([id, 'fix card written']);
     }
     const noted = { text: `undo ${id} not clean; fix card ${FIX_CARD(id)} written`, at: new Date(now).toISOString() };

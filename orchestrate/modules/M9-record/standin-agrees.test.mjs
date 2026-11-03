@@ -8,7 +8,8 @@
 // one takes) fails too.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { setup, outboxFile } from './fixtures.test-helper.mjs';
+import { setup, outboxFile, product, readyCard, seed, plan, PRODUCT } from './fixtures.test-helper.mjs';
+import { recWith } from '../M11-dispatcher/fixtures.test-helper.mjs';
 import { memoryRecord, OUTBOX_KINDS, AI_ROLES } from '../../shared/record.mjs';
 
 const NAME_REASONS = /^(no outbox kind for file name|outbox kind \S+ is not listed for|outbox kind \S+ has no record rule yet|not_a_record$)/;
@@ -44,4 +45,27 @@ test('L129 M-1: the stand-in and the real applyOutbox agree on every name and ro
   // The loop must really have covered the cases the audit found (589 name/role refusals the old stand-in accepted).
   assert.ok(cases >= AI_ROLES.length * (Object.keys(OUTBOX_KINDS).length * 3 + EXTRA.length), `${cases} cases`);
   assert.ok(nameRefusals >= 589, `only ${nameRefusals} name/role refusals were exercised`);
+});
+
+// L228: M11's tests write fix cards to the stand-in, so it must refuse what the Store Writer refuses (Principle 10).
+test('L228: the stand-in and the Store Writer agree on a new fix card\'s plan, the tier rule included', () => {
+  const base = plan();
+  const noTier = { ...base };
+  delete noTier.tier;
+  const cases = [['no tier', noTier], ['the root\'s tier', base], ['tier 1', { ...base, tier: 1 }], ['tier null', { ...base, tier: null }],
+    ['other files', { ...base, files: ['src/other.mjs'] }], ['other done_when', { ...base, done_when: 'easier' }], ['no tier, other files', { ...noTier, files: ['src/other.mjs'] }]];
+  const seen = new Set();
+  for (const [what, p] of cases) {
+    const env = setup({ prefix: 'm9-sa-' });
+    product(env);
+    readyCard(env, 'C-1');
+    seed(env, 'card', 'C-1', { ...env.record.read('card', 'C-1').doc, state: 'failed' });
+    const mem = recWith([['card', 'C-1', { state: 'failed', product: PRODUCT, kind: 'ordinary', ...base, failure: { reason: 'x', at: '2026-10-01T12:00:00.000Z' } }]]);
+    const doc = { state: 'draft', product: PRODUCT, kind: 'fix', fix_of: 'C-1', ...p };
+    const real = env.record.write({ actor: 'dispatcher', entity: 'card', id: 'F-1', expectRev: 0, doc: structuredClone(doc) });
+    const fake = mem.write({ actor: 'dispatcher', entity: 'card', id: 'F-1', expectRev: 0, doc: structuredClone(doc) });
+    assert.deepEqual([fake.ok, fake.reason], [real.ok, real.reason], what);
+    seen.add(real.ok);
+  }
+  assert.deepEqual([...seen].sort(), [false, true], 'both written and refused cases');
 });
