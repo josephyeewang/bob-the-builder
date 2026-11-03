@@ -573,3 +573,13 @@ test('L335 m-2: a settle that cannot write the queue answers why, and the send l
   await sendAlerts(broken, () => true, T0, { sendMs: 50 });
   assert.match(rec.read('fact', `step-error-alert-settle-${e.id}`)?.doc?.text ?? '', /could not be written.*may be sent again/);
 });
+
+test('L354 item 5 (Q3b): a mark write that gives up is answered and leaves a diary line', async () => {
+  const rec = recWith([['fact', 'stop-q', { told_at: null }]]);
+  queueAlert(rec, 'marked', { now: T0, mark: mark('stop-q') });
+  const [e] = queue(rec);
+  const broken = { ...rec, write: (w) => (w.id === 'stop-q' ? { ok: false, reason: 'refused' } : rec.write(w)) };
+  await sendAlerts(broken, () => true, T0, { sendMs: 50 });
+  assert.deepEqual(queue(rec), [], 'the queue settled');
+  assert.match(rec.read('fact', `step-error-alert-settle-${e.id}`)?.doc?.text ?? '', /could not be written/);
+});

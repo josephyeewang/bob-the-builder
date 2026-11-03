@@ -77,6 +77,7 @@ For a fact M12 writes, the shape is the fields this folder reads, the same list 
 | `reverse-<undo card>` | M6 (lane 1, 0b-9) | `{ state: clean / not_clean, reason }` |
 | `intake-applied-<session>-<file>` | this folder | `{ state: applying / applied / refused / interrupted / waiting, sha256, ... }` |
 | `step-error-<step>`, `last-full-pass` | this folder | the tick's memory |
+| `step-error-alert-settle-<id>` | this folder | a diary line: alert `<id>` was sent or not, but its settle could not write the queue or its mark, so it may be sent again (L335 m-2) |
 | `rules-missing-alert`, `undo-held-<card>`, `hold-<cause>` | this folder | the rules values already told to Joe; the reason an undo card last waited; when each hold was last told (L38) |
 
 Record entries this folder writes besides cards and facts: `launch` (one per start: `{ session_id, role, kind, card, head, rev, product, signin, config_dir, copy, launched_at }`; `signin` (a or b) and `config_dir` are the sign-in folder the session started in, `copy` the worker's copy folder, null when the launch port does not say, R-1-89) and `merge_request` (`mr-<card>-<first 12 of head>-<rev>`: `{ card, pr, session_id, head, rev, product, requested_at }`; create-only, one record per request, so a new rev of the card is a new request, L74).

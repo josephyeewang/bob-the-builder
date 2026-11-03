@@ -249,3 +249,25 @@ test('L335 m-1: the link coming back clears told even when a told mark landed af
   assert.ok(fired);
   assert.equal(w.rec.read('fact', LINK_FACT).doc.told, false, 'the mark survived the clear');
 });
+
+test('L354 item 5 (Q4): a save that changes other fields keeps a told mark written after the step read the link', async () => {
+  const w = world();
+  w.read(0, { fd: true });
+  await w.step(0);
+  w.read(1, { fd: 'unknown' });
+  let fired = false;
+  const view = { ...w.rec, read: (e, id) => {
+    const r = w.rec.read(e, id);
+    if (!fired && e === 'fact' && id === FACTS.reachable) {
+      fired = true;
+      const cur = w.rec.read('fact', LINK_FACT);
+      assert.equal(w.rec.write({ actor: 'dispatcher', entity: 'fact', id: LINK_FACT, expectRev: cur.rev, doc: { ...cur.doc, told: true } }).ok, true);
+    }
+    return r;
+  } };
+  await phoneLinkStep({ rec: view, rules: rulesWith(), now: T0 + MIN, send: async () => ({ outcome: 'sent' }), restartFrontDoor: async () => ({ ok: true }), startMinibase: async () => ({ ok: true }), alert: fakeAlert() });
+  assert.ok(fired);
+  const doc = w.rec.read('fact', LINK_FACT).doc;
+  assert.equal(doc.told, true, 'the save wrote its pre-read copy over the mark');
+  assert.equal(doc.changed_at, iso(T0 + MIN), 'the save itself landed');
+});
