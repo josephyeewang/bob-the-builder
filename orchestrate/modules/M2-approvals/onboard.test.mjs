@@ -4,7 +4,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { env, PRODUCT, must } from './fixtures.test-helper.mjs';
 import { schedulePass } from './schedule.mjs';
@@ -250,5 +250,46 @@ test('on M10\'s real engine, rules kept from the last good file with the key mak
       rolesDir: new URL('../M10-rules/roles', import.meta.url).pathname, clock: () => t.clock.t }));
     assert.equal(onboard({ ...t.ctx, rules }), null);
     assert.equal(t.record.read('product', PRODUCT), null);
+  }
+});
+
+// L295 MAT-1(b): the "tell Joe" mark is saved before the product is written. A folder it can't be saved in stops the
+// create, so no product is ever on with no mark to tell it; the pass throws and the Dispatcher's step alert says so.
+test('L295 MAT-1: a due mark that cannot be saved stops the create: the pass throws and no record is made', async () => {
+  const t = world();
+  mkdirSync(dirname(t.ctx.stateDir), { recursive: true });
+  writeFileSync(t.ctx.stateDir, 'a file where the folder should be');
+  await assert.rejects(() => schedulePass(t.ctx));
+  assert.equal(t.record.read('product', PRODUCT), null, 'not turned on');
+  assert.equal(onboards(t).length, 0);
+  assert.equal(told(t, 'product_on').length, 0);
+});
+
+test('L295 MAT-1: the due mark is on disk before the record is written, and the notice goes out after', async () => {
+  const t = world();
+  const rec = t.record;
+  let markAtWrite = null;
+  t.ctx.record = { ...rec, write: (w) => {
+    if (w.entity === 'product') markAtWrite = JSON.parse(readFileSync(join(t.ctx.stateDir, 'onboard-notices.json'), 'utf8')).due;
+    return rec.write(w);
+  } };
+  await schedulePass(t.ctx);
+  assert.ok(markAtWrite && Number.isSafeInteger(markAtWrite.after), JSON.stringify(markAtWrite));
+  assert.equal(told(t, 'product_on').length, 1);
+  assert.equal(JSON.parse(readFileSync(join(t.ctx.stateDir, 'onboard-notices.json'), 'utf8')).due, false, 'cleared once told');
+});
+
+// L295 Minor 3: a mark left in an old folder never re-tells a product that has long been on.
+test('L295 Minor 3: an old due mark for a product long on is cleared without telling Joe again', async () => {
+  for (const stale of [true, { after: 0, at: Date.parse('2020-01-01T00:00:00Z') }, { after: 10_000, at: 0 }]) {
+    const t = world();
+    await schedulePass(t.ctx);
+    assert.equal(told(t, 'product_on').length, 1);
+    writeFileSync(join(t.ctx.stateDir, 'onboard-notices.json'), JSON.stringify({ seen: [], due: stale }));
+    await schedulePass(t.ctx);
+    await schedulePass(t.ctx);
+    assert.equal(told(t, 'product_on').length, 1, `not told again: ${JSON.stringify(stale)}`);
+    // An old-format mark (true) is not read as a mark at all; one in today's form is cleared.
+    if (stale !== true) assert.equal(JSON.parse(readFileSync(join(t.ctx.stateDir, 'onboard-notices.json'), 'utf8')).due, false);
   }
 });

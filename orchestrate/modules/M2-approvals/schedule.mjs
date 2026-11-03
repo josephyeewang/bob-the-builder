@@ -56,6 +56,40 @@ function configAlert(ctx, reason) {
   writeFileSync(file, `${JSON.stringify({ reason })}\n`);
 }
 
+// A push that can't go out (no phone channel, GitHub refused, the go can't be shown...) is told once per ask and cause,
+// not every pass (L295 Minor 1): an urgent undo is re-tried every pass and a window ask four or five times, and each
+// would otherwise reach Joe as a message. The cause is the alert's type and reason with its numbers out. Kept as told
+// only once the sink took it (answered true); an ask's marks go once it is pushed or stops waiting (any state but open
+// or pushed), so a later failure is told again. Kept in ctx.stateDir (ask-alerts.json); with none, told every pass.
+// A file that can't be saved throws: the step fails and the tick tells that once per day (tick.mjs).
+const ASK_ALERTS = 'ask-alerts.json';
+const causeOf = (e) => `${e.type}:${String(e.reason ?? '').replace(/\d+/g, 'N')}`;
+function askOnce(ctx) {
+  const file = ctx.stateDir ? join(ctx.stateDir, ASK_ALERTS) : null;
+  let marks = {};
+  try { marks = file && existsSync(file) ? JSON.parse(readFileSync(file, 'utf8')) ?? {} : {}; } catch { marks = {}; }
+  if (typeof marks !== 'object' || Array.isArray(marks)) marks = {};
+  const before = JSON.stringify(marks);
+  return {
+    alert(ask, e) {
+      const key = causeOf(e);
+      const told = Array.isArray(marks[ask]) ? marks[ask] : [];
+      if (file && told.includes(key)) return;
+      let ok = false;
+      try { ok = ctx.alert(e) === true; } catch { ok = false; }
+      if (ok && file) marks[ask] = [...told, key].slice(-MAX_WINDOW_MARKS);
+    },
+    pushed(ask) { delete marks[ask]; },
+    save(waiting) {
+      if (!file) return;
+      for (const id of Object.keys(marks)) if (!waiting.has(id)) delete marks[id];
+      if (JSON.stringify(marks) === before) return;
+      mkdirSync(ctx.stateDir, { recursive: true });
+      writeFileSync(file, `${JSON.stringify(marks)}\n`);
+    },
+  };
+}
+
 export function heldBy(record, doc) {
   if (doc.kind !== 'decision' || !Object.hasOwn(doc, 'modules')) return null;
   const mods = doc.modules;
@@ -111,7 +145,7 @@ async function runOut(ctx, a, nowMs, events) {
   return true;
 }
 
-async function push(ctx, a, { urgent, win, anyBound, nowMs }, events) {
+async function push(ctx, a, { urgent, win, anyBound, nowMs, once }, events) {
   const doc = a.doc;
   const k = activeKind(doc.kind);
   const first = !raisedThisRound(doc);
@@ -120,42 +154,42 @@ async function push(ctx, a, { urgent, win, anyBound, nowMs }, events) {
     if (win && !urgent) d.window_pushes = [...(d.window_pushes ?? []), win.key].slice(-MAX_WINDOW_MARKS);
   };
   if (k.channel === 'tap') {
-    if (typeof ctx.push !== 'function') { ctx.alert({ type: 'approvals_no_push', ask: a.id }); return; }
+    if (typeof ctx.push !== 'function') { once.alert(a.id, { type: 'approvals_no_push', ask: a.id }); return; }
     // A go push carries the go view (R-0b-138/139): the plan in three lines and the files it allows. One that can't be
     // shown is held, never sent bare.
     let view = null;
-    if (k.go) { const v = goView(doc); if (!v.ok) { ctx.alert({ type: 'go_not_shown', ask: a.id, reason: v.reason }); return; } view = goText(v); }
+    if (k.go) { const v = goView(doc); if (!v.ok) { once.alert(a.id, { type: 'go_not_shown', ask: a.id, reason: v.reason }); return; } view = goText(v); }
     // An undo the owner flagged (R-0b-140) carries its pull request, so its push says which change and what Undo does.
     if (doc.kind === 'undo' && Number.isSafeInteger(doc.pr)) view = undoPushText({ card: doc.card, title: doc.title, pr: doc.pr });
     const event = { ask: a.id, card: doc.card, kind: doc.kind, urgent, ...(doc.kind === 'undo' && anyBound ? { line: UNDO_OPEN_QUESTION_LINE } : {}), ...(view ? { view } : {}) };
     let sent = false;
     try { sent = (await ctx.push(event)) === true; } catch { sent = false; }
-    if (!sent) { ctx.alert({ type: 'push_not_sent', ask: a.id }); return; }
+    if (!sent) { once.alert(a.id, { type: 'push_not_sent', ask: a.id }); return; }
     const next = structuredClone(doc);
     // A re-push never restarts the 12-hour clock: raised_at is set only by the first push or box of a round.
     if (first) Object.assign(next, { state: 'pushed', raised_at: iso(nowMs), raised_reask: next.reask_count, first_pushed_at: next.first_pushed_at ?? iso(nowMs) });
     mark(next);
-    write(ctx, a, next, events, { type: first ? 'pushed' : 'repushed', ...event });
+    if (write(ctx, a, next, events, { type: first ? 'pushed' : 'repushed', ...event })) once.pushed(a.id);
     return;
   }
   // GitHub kinds: the first round of a decision opens its pull request; a re-ask (or a risky change) requests the
   // owner's review again, and GitHub's time for that request is the new raised_at.
   if (k.decision_pr && !Number.isSafeInteger(doc.pr)) {
     const o = await openDecision(ctx, a.id);
-    if (!o.ok) { ctx.alert({ type: 'decision_pr_not_opened', ask: a.id, reason: o.reason }); return; }
+    if (!o.ok) { once.alert(a.id, { type: 'decision_pr_not_opened', ask: a.id, reason: o.reason }); return; }
     const cur = askStore(ctx.record).ask(a.id);
     const next = structuredClone(cur.doc); mark(next);
-    write(ctx, cur, next, events, { type: 'pushed', ask: a.id, card: doc.card, kind: doc.kind, pr: o.pr });
+    if (write(ctx, cur, next, events, { type: 'pushed', ask: a.id, card: doc.card, kind: doc.kind, pr: o.pr })) once.pushed(a.id);
     return;
   }
-  if (!Number.isSafeInteger(doc.pr)) { ctx.alert({ type: 'approvals_no_pull_request', ask: a.id }); return; }
+  if (!Number.isSafeInteger(doc.pr)) { once.alert(a.id, { type: 'approvals_no_pull_request', ask: a.id }); return; }
   const cfg = readConfig(ctx.rules, ctx.product);
   const r = await requestReview({ gh: ctx.gh, owner: ctx.owner, repo: ctx.repo, pr: doc.pr, githubId: cfg.githubId });
-  if (!r.ok) { ctx.alert({ type: 'review_not_requested', ask: a.id, reason: r.reason }); return; }
+  if (!r.ok) { once.alert(a.id, { type: 'review_not_requested', ask: a.id, reason: r.reason }); return; }
   const next = structuredClone(doc);
   Object.assign(next, { state: 'pushed', raised_at: r.raised_at, raised_reask: next.reask_count, first_pushed_at: next.first_pushed_at ?? iso(nowMs) });
   mark(next);
-  write(ctx, a, next, events, { type: 'pushed', ask: a.id, card: doc.card, kind: doc.kind, pr: doc.pr });
+  if (write(ctx, a, next, events, { type: 'pushed', ask: a.id, card: doc.card, kind: doc.kind, pr: doc.pr })) once.pushed(a.id);
 }
 
 export async function schedulePass(ctx) {
@@ -185,6 +219,7 @@ export async function schedulePass(ctx) {
   // Re-read: the run-outs above changed states.
   const asks = askStore(ctx.record).asks().filter((a) => activeKind(a.doc.kind));
   const anyBound = asks.some((a) => liveBox(a.doc));
+  const once = askOnce(ctx);
   for (const a of asks) {
     const doc = a.doc;
     if (doc.state !== 'open' && doc.state !== 'pushed') continue;
@@ -195,8 +230,10 @@ export async function schedulePass(ctx) {
     let due;
     if (urgent) due = !raisedThisRound(doc) || nowMs - (ms(doc.last_push_at) ?? 0) >= URGENT_REPUSH_MS;
     else due = win !== null && !raisedThisRound(doc) && (ms(doc.lapsed_at ?? doc.created_at) ?? Infinity) <= win.start;
-    if (due) await push(ctx, a, { urgent, win, anyBound, nowMs }, events);
+    if (due) await push(ctx, a, { urgent, win, anyBound, nowMs, once }, events);
   }
+  // Marks are kept only for asks still waiting to be pushed; re-read, since a push moved some on.
+  once.save(new Set(askStore(ctx.record).asks().filter((a) => a.doc.state === 'open' || a.doc.state === 'pushed').map((a) => a.id)));
   return { ok: true, events };
 }
 
