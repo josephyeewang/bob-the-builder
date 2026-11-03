@@ -55,8 +55,8 @@ export async function writeReading(writer, which, probe, { now = () => new Date(
 }
 
 // exit: the worker's exit result, { account, resets_at, source }. A hit is always written, even with no readable reset
-// time (L97 M-3). M11 resumes a card only on a hit observed after the card began to wait, with a reset time that has
-// passed. A reset time already more than PAST_SLACK_MS before the hit is unreadable too (#78 r2 m-3: "resets 1am" read
+// time (L97 M-3). M11 resumes a card only on a hit observed after the card's run began (the wait's run_started, which
+// M9 sets from the claim; MAT-1), with a reset time that has passed; a hit with no reset time puts the card on Joe. A reset time already more than PAST_SLACK_MS before the hit is unreadable too (#78 r2 m-3: "resets 1am" read
 // at 11pm as today's 1am would resume the card a minute later, hit again, and loop every pass).
 // With no readable time, the stored hit's reset time is kept if it is still ahead. ASSUMPTION, not checked (#78 r2
 // c-2): a reset still ahead belongs to the same limit window as this hit; the fact stores no window to check it by. It

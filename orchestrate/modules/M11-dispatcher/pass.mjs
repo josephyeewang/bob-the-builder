@@ -44,6 +44,10 @@ export const PAUSE_FACT = (product) => `pause-${product}`;
 export const LIMIT_FACT = (account) => `limit-hit-${account}`;
 /** What a limit_hit wait that names no account becomes (L110 m-4): it waits on Joe. */
 export const LIMIT_NO_ACCOUNT = 'limit_hit: the wait names no account, so the limit reset can\'t be read';
+/** The other limit_hit waits that can't resume by themselves and wait on Joe (MAT-1, audit #78 r2). */
+export const LIMIT_NO_RUN = 'limit_hit: the wait has no time its run began, so no hit can be matched to it';
+export const LIMIT_NO_RESET = 'limit_hit: the hit has no readable reset time';
+export const LIMIT_NO_HIT = 'limit_hit: no limit hit was recorded for the run in time';
 export const UNKNOWN_FACT = 'unknown-usage-alert';
 export const RULES_MISSING_FACT = 'rules-missing-alert';
 // Used only when timeouts.cancel_grace_min itself is missing (audit MAT-2): Cancel must still stop.
@@ -322,14 +326,14 @@ export async function dispatcherPass({ rec, rules, now, account, sessions, probe
     } else if (what === 'limit_hit') {
       // The limit of the account the card waits on (L97: parked on a's limit, it reads a's fact, not the pass's). The wait names it
       // (`wait.account`, set by whoever parks the card; M9 lets no script put an account on the card itself). Only a
-      // reading taken after the card began to wait: an older one is an earlier limit, already reset (L97 M-3). A reading
-      // with no reset time (`resets_at` null) or no `observed_at` resumes nothing.
-      // The writer that parks a card on a limit (a follow-up, after the worker-exit wiring) must park it first and write
-      // `limit-hit-<account>` after (L110 m-3): the Record stamps `wait.since` at the park, so a reading written before
-      // it counts as an earlier limit and the card never resumes. (The other way: keep the reading's `observed_at` on
-      // the wait and compare against that.)
-      // A wait that names no account resumes nothing (L110 m-4): the pass's own account is not the one the card hit,
-      // necessarily, so it is never read in its place. The card waits on Joe instead, with one alert.
+      // hit observed after the card's run began counts (MAT-1, audit #78 r2): an older one is an earlier limit, already
+      // reset (L97 M-3). The Record sets `wait.run_started` from the claim when a claimed or running card is parked
+      // (M9 guard.mjs), so the order the park and the hit are written in does not matter.
+      // Every limit wait that can't resume by itself waits on Joe, told until delivered (L130), never silently:
+      //   - a wait that names no account (L110 m-4: the pass's own account is not necessarily the one the card hit);
+      //   - a wait with no run_started (it was not parked from a run, or its claim had no readable time);
+      //   - a hit after the run began with no reset time (the worker could not read it, or it was already past);
+      //   - no hit after the run began, timeouts.usage_unknown_max_min after the card began to wait.
       const acct = doc.wait?.account;
       if (typeof acct !== 'string' || !acct) {
         // Told until delivered (L130 M12): the card is waiting on Joe from here on, so this branch never sees it again.
@@ -337,10 +341,28 @@ export async function dispatcherPass({ rec, rules, now, account, sessions, probe
           text: `card ${id}: it waits on a usage limit but the wait does not say which account's, so it can't resume by itself; it waits on you` });
         continue;
       }
+      const runStarted = Date.parse(doc.wait?.run_started ?? '');
+      if (!Number.isFinite(runStarted)) {
+        waitOnJoe(rec, id, { what: LIMIT_NO_RUN, now, kind: 'limit_no_run', alert,
+          text: `card ${id}: it waits on account ${acct}'s usage limit but the record has no time its run began, so no limit hit can be matched to it; it waits on you` });
+        continue;
+      }
       const lf = sensorsFact(rec, LIMIT_FACT(acct))?.doc;
       const seen = Date.parse(lf?.observed_at ?? '');
+      if (!(seen > runStarted)) {
+        if (now - Date.parse(doc.wait?.since ?? '') > unknownMaxMs) {
+          waitOnJoe(rec, id, { what: LIMIT_NO_HIT, now, kind: 'limit_no_hit', alert,
+            text: `card ${id}: it has waited on account ${acct}'s usage limit with no limit hit recorded for its run, so it can't resume by itself; it waits on you` });
+        }
+        continue;
+      }
       const resets = Date.parse(lf?.resets_at ?? '');
-      if (!(seen > Date.parse(doc.wait?.since ?? '')) || !Number.isFinite(resets) || now < resets) continue;
+      if (!Number.isFinite(resets)) {
+        waitOnJoe(rec, id, { what: LIMIT_NO_RESET, now, kind: 'limit_no_reset', alert,
+          text: `card ${id}: account ${acct} hit its usage limit but the reset time could not be read, so it can't resume by itself; it waits on you` });
+        continue;
+      }
+      if (now < resets) continue;
       if (doc.tier === 2) { if (move(rec, 'card', id, { state: 'ready' }, { kind: 'resume_limit_hit' }).ok) out.resumed.push(id); }
       // No card waits on Joe silently (L130): this one is told, until delivered.
       else waitOnJoe(rec, id, { what: 'limit_hit: the limit reset; Tier-1 work does not resume by itself', now, kind: 'limit_reset', alert,
