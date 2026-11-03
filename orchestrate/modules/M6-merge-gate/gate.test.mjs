@@ -2670,7 +2670,7 @@ test('L231: a hold under the lock whose move is refused ends refused, and Joe is
 });
 
 
-// L315 (class audit, told once ever while still waiting): a wait Joe was told of is told again every 24 h while it lasts,
+// L315 (class audit, told once ever while still waiting): a wait the owner was told of is told again every 24 h while it lasts,
 // and its marks are cleared when it ends. Ticks of hours keep the outside check green, as the real watcher would.
 const DAY_MIN = 24 * 60;
 function stayGreen(w) {
@@ -2778,4 +2778,125 @@ test('L315 minor: with no limit in the rules, the open-after-the-merge-call note
   await later(w, 1);
   await later(w, DAY_MIN + 60);
   assert.equal(open().length, 2, 'never told again once it settled');
+});
+
+// #154 audit Minor 2 (L290 M-1): each gathered file's blob is the one compare named for it, git's own id for its bytes;
+// a file compare gives no sha for has no blob, so refusal 10 waits on it instead of matching anything.
+test('gather: each file\'s blob is compare\'s sha for it, git\'s id of its bytes; no sha, no blob', async () => {
+  const files = { 'src/a.mjs': 'two', 'docs/b.md': 'line\r\nnext\r\n' };
+  const w = world();
+  verifiedCard(w, 'C-1', { files });
+  await gatePass(w.ctx);
+  const m = mergeOf(w);
+  const f = await gatherFacts(w.ctx, m);
+  assert.ok(Array.isArray(f.files) && f.files.length === 2, JSON.stringify(f.filesProblem));
+  for (const x of f.files) assert.equal(x.blob, blobSha(Buffer.from(files[x.path])), x.path);
+  // The same ids the compare answer gave, file by file.
+  const real = w.g.gh.get.bind(w.g.gh);
+  let seen = null;
+  w.g.gh.get = async (path) => { const r = await real(path); if (/\/compare\//.test(path)) seen = r.json.files; return r; };
+  const again = await gatherFacts(w.ctx, m);
+  assert.ok(seen, 'compare was read');
+  assert.deepEqual(again.files.map((x) => [x.path, x.blob]).sort(), seen.map((x) => [x.filename, x.sha]).sort());
+  // Compare names no sha: the file has no blob at all.
+  w.g.gh.get = async (path) => { const r = await real(path); return /\/compare\//.test(path) && r.status === 200 ? { ...r, json: { ...r.json, files: r.json.files.map(({ sha, ...x }) => x) } } : r; };
+  const none = await gatherFacts(w.ctx, m);
+  assert.equal(none.files.length, 2);
+  for (const x of none.files) assert.equal('blob' in x, false, x.path);
+});
+
+// L329 (the pastTime sweep): every stored time the gate reads goes through shared pastTime. A time that can't be read,
+// or one stamped 1 h ahead, counts as old enough: the gate acts or tells on that pass, never waits it out.
+const BAD_TIMES = (w) => [['unreadable', 'not a time'], ['1 h ahead', nowIso(w, 60)]];
+function plantMerge(w, fields) {
+  const m = mergeOf(w);
+  must(recOf(w).write({ actor: 'merge_gate', entity: 'merge', id: m.id, expectRev: m.rev, doc: { ...m.doc, ...fields } }), 'planted');
+}
+
+for (const name of ['unreadable', '1 h ahead']) {
+  test(`L329 gate.mjs hold cap: a stuck_since that is ${name} fires the cap on the first pass, not a restarted clock`, async () => {
+    const w = world(limited());
+    verifiedCard(w);
+    w.g.checks.set(w.g.main, redRun(w.g.main));
+    await gatePass(w.ctx);
+    waitingHeld(mergeOf(w), /^2: main is red/);
+    plantMerge(w, { stuck_since: Object.fromEntries(BAD_TIMES(w))[name] });
+    tick(w, 1);
+    await gatePass(w.ctx);
+    const m = mergeOf(w);
+    assert.equal(m.doc.state, 'refused', JSON.stringify(m.doc));
+    assert.equal(m.doc.tell_note, waitCapNote(LIMIT_MIN * 60_000));
+    assert.equal(told(w, 'merge_refused').length, 1);
+  });
+
+  test(`L329 gate.mjs catch-up cap: a stuck_since that is ${name} fires the cap on the first pass`, async () => {
+    const w = world(limited());
+    verifiedCard(w);
+    stuckCatchUp(w);
+    await gatePass(w.ctx);
+    assert.equal(mergeOf(w).doc.state, 'catching_up');
+    plantMerge(w, { stuck_since: Object.fromEntries(BAD_TIMES(w))[name] });
+    tick(w, 1);
+    await gatePass(w.ctx);
+    const m = mergeOf(w);
+    assert.equal(m.doc.state, 'refused', JSON.stringify(m.doc));
+    assert.deepEqual(m.doc.reasons, ['GitHub accepted the branch update but the head never moved']);
+    assert.equal(told(w, 'merge_refused').length, 1);
+  });
+
+  test(`L329 gate.mjs waitedLong: a waiting_since that is ${name} is told on that pass`, async () => {
+    const w = world(limited());
+    verifiedCard(w);
+    w.g.checks.set(w.g.main, redRun(w.g.main));
+    await gatePass(w.ctx);
+    assert.deepEqual(told(w, 'merge_waiting_long'), [], 'a fresh wait is under the limit');
+    plantMerge(w, { waiting_since: Object.fromEntries(BAD_TIMES(w))[name] });
+    tick(w, 1);
+    await gatePass(w.ctx);
+    assert.equal(told(w, 'merge_waiting_long').length, 1, 'told now, not waited out');
+    assert.equal(mergeOf(w).doc.state, 'held', 'only the wait\'s own clock was bad: the cap clock is fine');
+  });
+}
+
+test('L329 gate.mjs hold cap: where the cap can\'t be judged (the rules can\'t answer the limit), a bad stuck_since is restamped, then judged from it', async () => {
+  const w = world(limited());
+  verifiedCard(w);
+  w.g.checks.set(w.g.main, redRun(w.g.main));
+  await gatePass(w.ctx);
+  plantMerge(w, { stuck_since: 'not a time' });
+  const base = w.ctx.rules;
+  const broken = (k) => { if (k === 'timeouts.merging_open_max_min') throw new Error('the rules engine stopped'); };
+  w.ctx.rules = Object.create(base, {
+    get: { value: (k, o) => { broken(k); return base.get(k, o); } },
+    num: { value: (k, o) => { broken(k); return base.num(k, o); } },
+  });
+  tick(w, 1);
+  await gatePass(w.ctx);
+  const restamped = mergeOf(w);
+  assert.equal(restamped.doc.state, 'held');
+  assert.equal(Date.parse(restamped.doc.stuck_since), w.env.clock.t, 'restamped to now');
+  w.ctx.rules = base;
+  tick(w, WAIT_CAP_TIMES * LIMIT_MIN - 1);
+  await gatePass(w.ctx);
+  assert.equal(mergeOf(w).doc.state, 'held', 'judged from the restamp: under the cap');
+  tick(w, 1);
+  await gatePass(w.ctx);
+  assert.equal(mergeOf(w).doc.state, 'refused');
+});
+
+test('L329 merge-outcome.mjs: openTooLong counts a last write that is unreadable or 1 h ahead as old enough; prReadingAfter never takes a reading stamped ahead as fresh', async () => {
+  const { openTooLong, prReadingAfter } = await import('./merge-outcome.mjs');
+  const T0 = Date.parse('2026-11-03T08:00:00.000Z');
+  const LIMIT = 30 * 60_000;
+  const iso = (min) => new Date(T0 + min * 60_000).toISOString();
+  assert.equal(openTooLong({ meta: () => ({ ts: iso(-1) }) }, 'M-1', T0, LIMIT), false, 'a fresh write is not too long');
+  assert.equal(openTooLong({ meta: () => ({ ts: 'not a time' }) }, 'M-1', T0, LIMIT), true, 'unreadable');
+  assert.equal(openTooLong({ meta: () => ({ ts: iso(60) }) }, 'M-1', T0, LIMIT), true, '1 h ahead');
+  const recOfReading = (observed) => ({
+    read: (e, id) => (e === 'fact' ? { id, rev: 1, doc: { state: 'open', merged: false, observed_at: observed } } : null),
+    meta: (e) => (e === 'fact' ? { createdBy: 'sensors' } : { ts: iso(-1) }),
+  });
+  assert.ok(prReadingAfter(recOfReading(iso(0)), 7, 'M-1', T0), 'a reading after the write, not ahead of now, counts');
+  assert.equal(prReadingAfter(recOfReading(iso(60)), 7, 'M-1', T0), null, 'a reading stamped 1 h ahead is not fresh');
+  assert.equal(prReadingAfter(recOfReading('not a time'), 7, 'M-1', T0), null, 'an unreadable reading is not fresh');
 });

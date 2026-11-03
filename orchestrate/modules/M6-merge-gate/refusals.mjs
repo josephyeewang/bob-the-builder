@@ -51,7 +51,7 @@
 //   threads { ok, unresolved } | { ok: false, tooLong | incomplete | unreadable }   review threads, GraphQL (refusal 7)
 //   unreadReads [name]                       the reads that FAILED this pass (gather failedRead); the gate reads them (L190)
 //   rulesAdopted bool | null                 the adopted rules blob equals policy.yaml at main (else a hold)
-//   files [{ path, status }] | null          the change's files
+//   files [{ path, status, mode, blob? }] | null   the change's files; blob is GitHub's blob id at the head (compare's sha)
 //   filesProblem 'too_many' | 'no_entry' | 'unread' | null   why there is no file list (L182); filesMissing the file
 //   checksTooLong text | undefined           a check or status list longer than the gate reads (L182)
 //   checksCutOff text | undefined            the head's check runs: GitHub answered, but its count doesn't match its list
@@ -64,6 +64,7 @@
 import { PASSES, worstVerdict } from '../M9-record/outbox.mjs';
 import { HOLD_REASONS } from '../../shared/rules.mjs';
 import { compileList } from '../M10-rules/paths.mjs';
+import { researchPath } from '../M2-approvals/research-ask.mjs';
 
 export const REFUSALS = Object.freeze({
   1: 'required checks red', 2: 'main red', 3: 'draft, out of date or not mergeable', 4: 'stacked', 5: 'no reviewer verdict',
@@ -197,6 +198,26 @@ function requestProblem(f) {
 
 // The list is read as M10 reads it: patterns (M10 paths.mjs), so `app/`, `app/**` and `app/pages/*.tsx` mean what
 // they mean to the classification. A pattern M10 can't read makes this unknown, which refuses.
+// Refusal 10 for a research_copy card (R-0b-135; L284 c, L286). It merges with no go, so the change may touch only the
+// card's one path, the one its ask names, as one plain file whose blob is the owner's report byte for byte (the blob id
+// the intake worked out from the bytes it hashed). Called only with the change's files read.
+const BLOB = /^[0-9a-f]{40}$/;
+export function researchCopyProblem(f) {
+  const d = f.card.doc;
+  const allowed = typeof d.research_ask === 'string' ? researchPath(d.research_ask) : null;
+  if (!allowed || !Array.isArray(d.files) || d.files.length !== 1 || d.files[0] !== allowed) return final(`a research_copy card's one file must be its ask's ${allowed ?? 'docs/research/research-R-<n>.md'}`);
+  const want = d.source?.blob;
+  if (!BLOB.test(String(want ?? ''))) return final('the research_copy card has no blob id for the report');
+  const touched = f.files.flatMap((x) => [x?.path, x?.previous_path].filter((p) => p !== undefined));
+  if (f.files.length !== 1 || touched.length !== 1 || touched[0] !== allowed) return final(`a research copy may change only ${allowed}; this change touches ${touched.length ? touched.slice(0, 5).join(', ') : 'no file'}`);
+  const x = f.files[0];
+  if (x.status !== 'added' && x.status !== 'modified') return final(`a research copy adds or updates ${allowed}; this change has it ${x.status}`);
+  if (x.mode !== '100644') return final(`${allowed} must be a plain file (mode 100644), not ${x.mode}`);
+  if (!BLOB.test(String(x.blob ?? ''))) return notYet(`GitHub gave no blob id for ${allowed}, so its bytes can't be checked yet`);
+  if (x.blob !== want) return final(`${allowed} is not the owner's report byte for byte (blob ${x.blob.slice(0, 12)}, the card's ${want.slice(0, 12)})`);
+  return null;
+}
+
 function customerFiles(f) {
   if (!Array.isArray(f.files) || !Array.isArray(f.firstCustomerNewFiles)) return null;
   let match;
@@ -286,6 +307,7 @@ export function judge(f) {
     // 10. The go.
     if (!f.go) (Array.isArray(f.files) ? wait : waitFiles)(10, 'the go could not be checked');
     else if (f.go.ok !== true && f.go.skipped !== true) no(10, (Array.isArray(f.go.reasons) && f.go.reasons.length ? f.go.reasons : ['go mismatch']).join('; '));
+    if (kind === 'research_copy') { if (Array.isArray(f.files)) add(10, researchCopyProblem(f)); else waitFiles(10, 'the change\'s files could not be read, so the research copy can\'t be checked'); }
     // 11. The request.
     if (!reverse) add(11, requestProblem(f));
     // 12. Behind main.

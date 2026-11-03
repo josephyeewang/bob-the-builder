@@ -39,6 +39,7 @@ import { markReverted } from './undo.mjs';
 import { factFrom } from '../M9-record/permissions.mjs';
 import { settleMerge, openTooLong, prReading, prReadingAfter, MERGED_OUTSIDE, MERGED_OUTSIDE_UNTOLD, alertTaken } from './merge-outcome.mjs';
 import { KEYS, minutes, MissingKey } from '../M11-dispatcher/keys.mjs';
+import { stillWaiting, pastTime, STILL_WAITING_MS } from '../../shared/still-waiting.mjs';
 
 export const ACTOR = 'merge_gate';
 export const NOT_GREEN_LINE = 'outside check not green in 2 h';
@@ -65,15 +66,9 @@ export const CATCH_UP_STUCK = 'GitHub accepted the branch update but the head ne
 // a new wait after that gets its own clock and its own notice.
 // `wait_reading` names the interrupted merge a queued one waits on a reading after (L315 S-M6b).
 const WAIT_CLEARED = Object.freeze({ waiting_on: null, waiting_since: null, wait_told_at: null, stuck_since: null, wait_reading: null });
-// A wait Joe was told of is told again this often while it lasts (L315: never told once ever while still waiting).
-export const WAIT_RETELL_MS = 24 * 60 * 60_000;
-// Due to be told: never told, a mark that can't be read, one more than a minute in the future (a clock that jumped
-// back; L317), or one WAIT_RETELL_MS old. The same rule as lane 5's shared still-waiting primitive, which replaces this
-// once it lands.
-export function tellDue(toldAt, nowMs, repeatMs = WAIT_RETELL_MS) {
-  const t = Date.parse(toldAt ?? '');
-  return !Number.isFinite(t) || t > nowMs + 60_000 || nowMs - t >= repeatMs;
-}
+// A wait the owner was told of is told again this often while it lasts (L315: never told once ever while still waiting), by
+// the shared stillWaiting rule.
+export const WAIT_RETELL_MS = STILL_WAITING_MS;
 export const GITHUB_UNREADABLE_NOTE = 'GitHub can\'t be read';
 
 /**
@@ -217,7 +212,7 @@ export async function gatePass(ctx) {
     // then every WAIT_RETELL_MS while it lasts, and cleared when the reading lands. It is never refused at the cap: the
     // earlier merge may still land, and refusing this one then would be wrong. It stays queued.
     const cut = merges().find((x) => x.id !== m.id && x.doc.pr === m.doc.pr && x.doc.state === 'refused' && (x.doc.reasons ?? []).includes('interrupted')
-      && ((r) => !r || r.merged === true)(prReadingAfter(record, x.doc.pr, x.id)));
+      && ((r) => !r || r.merged === true)(prReadingAfter(record, x.doc.pr, x.id, now())));
     if (cut) {
       const why = `merge ${cut.id} of this pull request was interrupted; waiting for a reading of the pull request after it`;
       let cur = fresh('merge', m.id) ?? m;
@@ -286,8 +281,8 @@ export async function gatePass(ctx) {
 
   function catchUpWaits(m) {
     const cur = fresh('merge', m.id) ?? m;
-    // A catch-up asked for before its clock was kept starts it now.
-    if (!Number.isFinite(Date.parse(cur.doc.stuck_since ?? ''))) {
+    // A catch-up asked for before its clock was kept (no stuck_since at all) starts it now.
+    if (cur.doc.stuck_since == null) {
       const at = iso();
       const w = write('merge', cur, { waiting_on: [CATCH_UP_STUCK], waiting_since: at, wait_told_at: null, stuck_since: at });
       if (!w.ok) alert({ type: 'merge_gate_write_refused', merge: m.id, to: 'catch_up_clock', reason: w.reason });
@@ -295,7 +290,9 @@ export async function gatePass(ctx) {
     }
     const limit = waitLimit(cur, [CATCH_UP_STUCK]);
     if (limit === undefined) return;
-    if (now() - Date.parse(cur.doc.stuck_since) >= WAIT_CAP_TIMES * limit) {
+    // Through pastTime (L329): a stuck_since that can't be read, or is in the future, is old enough: the cap fires now.
+    const stuck = pastTime(cur.doc.stuck_since, now());
+    if (stuck === null || now() - stuck >= WAIT_CAP_TIMES * limit) {
       if (move(cur, 'refused', { reasons: [CATCH_UP_STUCK], catch_up_from: null, tell_owner: true, tell_note: waitCapNote(limit) })) tellRefused(fresh('merge', m.id));
       return;
     }
@@ -341,8 +338,12 @@ export async function gatePass(ctx) {
     // The limit is asked once per hold (L188 follow-up): rules that can't answer are told once a pass, not twice.
     const limit = waiting ? waitLimit(cur, waitingOn) : undefined;
     if (waiting && !outage) {
-      const stuck = Date.parse(fields.stuck_since ?? '');
-      if (limit !== undefined && Number.isFinite(stuck) && now() - stuck >= WAIT_CAP_TIMES * limit) {
+      // Through pastTime (L329): a stuck_since that can't be read, or is in the future, is old enough, so the cap fires
+      // on this pass; restarting the clock would hold the merge another WAIT_CAP_TIMES × the limit without a word. Only
+      // where the cap can't be judged (no limit) is a bad clock restamped, so it can be judged once the rules answer.
+      const stuck = pastTime(fields.stuck_since, now());
+      if (limit === undefined && stuck === null) fields.stuck_since = iso();
+      if (limit !== undefined && (stuck === null || now() - stuck >= WAIT_CAP_TIMES * limit)) {
         const reasons = waitingOn;
         if (!move(cur, 'refused', { ...fields, hold: null, reasons, tell_owner: true, tell_note: waitCapNote(limit) })) return false;
         tellRefused(fresh('merge', m.id));
@@ -355,19 +356,27 @@ export async function gatePass(ctx) {
   }
 
   // Told after the wait limit, then again every WAIT_RETELL_MS while it still waits, outage passes included (L315
-  // S-M6a: an outage never starts the cap, so without this Joe heard of it once, ever). Cleared with WAIT_CLEARED.
+  // S-M6a: an outage never starts the cap, so without this the owner heard of it once, ever). Cleared with WAIT_CLEARED.
+  // Through the shared stillWaiting (L315): told once the wait is `limit` old (a start time that can't be read, or in the
+  // future, is told now), then every WAIT_RETELL_MS. Its clear does nothing here: the wait's end writes WAIT_CLEARED.
   function waitedLong(m, limit, { outage = false } = {}) {
-    if (!m?.doc || limit === undefined || !tellDue(m.doc.wait_told_at, now())) return;
-    const since = Date.parse(m.doc.waiting_since ?? '');
-    if (Number.isFinite(since) && now() - since < limit) return;
-    const again = Number.isFinite(Date.parse(m.doc.wait_told_at ?? ''));
-    const hours = Number.isFinite(since) ? Math.floor((now() - since) / 3_600_000) : null;
-    const how = again && hours !== null ? `for ${hours} h` : `for ${Math.round(limit / 60_000)} min or more`;
+    if (!m?.doc || limit === undefined) return;
+    const t = now();
+    stillWaiting({ now: t, waiting: true, after: { since: m.doc.waiting_since ?? '', limit },
+      read: () => ({ told_at: m.doc.wait_told_at ?? null }), clear: () => {}, tell: ({ told_at }) => tellWaitedLong(m, limit, outage, t, told_at) });
+  }
+
+  function tellWaitedLong(m, limit, outage, t, toldAt) {
+    const since = pastTime(m.doc.waiting_since, t);
+    const again = pastTime(m.doc.wait_told_at, t) !== null;
+    const how = again && since !== null ? `for ${Math.floor((t - since) / 3_600_000)} h` : `for ${Math.round(limit / 60_000)} min or more`;
     const taken = alertTaken(alert, { type: 'merge_waiting_long', merge: m.id, card: m.doc.card, pr: m.doc.pr, waiting_since: m.doc.waiting_since ?? null, waiting_on: m.doc.waiting_on ?? [], outage,
       note: `merge ${m.id} has waited to be judged ${how}${outage ? `, and ${GITHUB_UNREADABLE_NOTE} right now` : ''}: ${(m.doc.waiting_on ?? []).join('; ')}. It is judged again on every pass, and you are told again every 24 h while it waits` });
-    if (!taken) return;
-    const r = write('merge', m, { wait_told_at: iso() });
+    // The mark is written only once the alert was taken (stillWaiting's tell rule).
+    if (!taken) return false;
+    const r = write('merge', m, { wait_told_at: toldAt });
     if (!r.ok) alert({ type: 'merge_gate_write_refused', merge: m.id, to: 'wait_told', reason: r.reason });
+    return true;
   }
 
   // The wait limit in ms: timeouts.merging_open_max_min, or DEFAULT_WAIT_LIMIT_MIN while the rules lack it (L184; the
@@ -607,14 +616,19 @@ export async function gatePass(ctx) {
     // lack the limit (it waits for GitHub's final answer), so it is told again every WAIT_RETELL_MS while still open
     // (L315 minor). `told_by` keeps each note's last time; a fact without it dates the open note by told_at.
     const toldBy = ours && f.doc.told_by && typeof f.doc.told_by === 'object' ? f.doc.told_by : {};
-    const last = toldBy[when] ?? (told.includes(when) ? f.doc.told_at ?? null : null);
-    if (told.includes(when) && (when !== 'open' || !tellDue(last, now()))) return;
     const again = told.includes(when);
-    const said = alertTaken(alert, { type: 'merge_limit_missing', merge: m.id, card: m.doc.card, pr: m.doc.pr, again, note: again ? `still: ${note}. You are told again every 24 h while it stays open` : note });
-    if (!said) return;
-    const at = iso();
-    const r = record.write({ actor: ACTOR, entity: 'fact', id, expectRev: f?.rev ?? 0, doc: { type: 'merge_limit_told', merge: m.id, key: KEYS.mergingOpenMaxMin, told: again ? told : [...told, when], told_at: at, told_by: { ...toldBy, [when]: at } } });
-    if (!r.ok) alert({ type: 'merge_gate_write_refused', merge: m.id, to: 'told', reason: r.reason });
+    if (again && when !== 'open') return;
+    const send = (at) => {
+      const said = alertTaken(alert, { type: 'merge_limit_missing', merge: m.id, card: m.doc.card, pr: m.doc.pr, again, note: again ? `still: ${note}. You are told again every 24 h while it stays open` : note });
+      if (!said) return false;
+      const r = record.write({ actor: ACTOR, entity: 'fact', id, expectRev: f?.rev ?? 0, doc: { type: 'merge_limit_told', merge: m.id, key: KEYS.mergingOpenMaxMin, told: again ? told : [...told, when], told_at: at, told_by: { ...toldBy, [when]: at } } });
+      if (!r.ok) alert({ type: 'merge_gate_write_refused', merge: m.id, to: 'told', reason: r.reason });
+      return true;
+    };
+    if (when !== 'open') { send(iso()); return; }
+    // The open note through the shared stillWaiting: its mark is this note's last time (a fact without told_by dates it
+    // by told_at). Its clear does nothing: the note stops when the merge settles, which ends the calls.
+    stillWaiting({ now: now(), waiting: true, read: () => (again ? { told_at: toldBy.open ?? f.doc.told_at ?? null } : null), clear: () => {}, tell: ({ told_at }) => send(told_at) });
   }
 
   function putBack(m, to) {
