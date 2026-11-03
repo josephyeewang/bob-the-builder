@@ -230,7 +230,7 @@ export async function stopPass({ rec, rules, now, account, sessions, probe, stop
     // point for ever. It is restarted from now instead (not counted as late, which would stop at once with no safe
     // point over a bad field): the stop is forced one limit from now at most.
     if (pastTime(pending.since, now) === null) {
-      pending = { ...pending, since: iso(now) };
+      pending = { ...pending, since: iso(now), restarted: true };
       putFact(rec, STOP_FACT(s.id), pending, 'stop_wanted');
     }
     const limit = pending.reason === 'cancel' ? cancelMs : parkMs;
@@ -254,7 +254,9 @@ export async function stopPass({ rec, rules, now, account, sessions, probe, stop
   const saves = await Promise.all(done.map(({ s }) => guarded(() => saveWork(s), saveDeadlineMs)));
   for (const [i, { s, pending, late, stopped }] of done.entries()) {
     const saved = saves[i];
-    if (late) note(rec, `stop-note-${s.id}`, `session ${s.id} stopped without a safe point after ${Math.round((now - Date.parse(pending.since)) / 60_000)} min (${pending.reason})`, { now });
+    // After a restart (its start time could not be read) the wait was longer than this count: the note says so (L339).
+    const counted = `${Math.round((now - Date.parse(pending.since)) / 60_000)} min${pending.restarted ? ' counted from a restart (its start time could not be read, so it waited longer)' : ''}`;
+    if (late) note(rec, `stop-note-${s.id}`, `session ${s.id} stopped without a safe point after ${counted} (${pending.reason})`, { now });
     moveAfterStop(rec, s.card, pending.reason, now);
     putFact(rec, STOP_FACT(s.id), { ...pending, state: 'done', stopped_at: iso(now), how: stopped.how, hard: late, saved: !!saved?.ok, ...(saved?.ok ? {} : { save_reason: saved?.reason ?? 'no answer' }) }, 'stop_done');
     dropCause(rec, STOP_FACT(s.id));
@@ -406,7 +408,8 @@ export async function dispatcherPass({ rec, rules, now, account, sessions, probe
   }
   // Once per stretch of unread usage, and again each day it lasts (L38).
   const uf = factDoc(rec, UNKNOWN_FACT)?.doc;
-  if (unknownLong && (!uf?.since?.startsWith?.(unknownSince) || dueToTell(uf, now, HOLD_REPEAT_MS))) {
+  // Compared as text (L339 m2): a start stored as a number is still this stretch's, so told daily, not every pass.
+  if (unknownLong && (!String(uf?.since ?? '').startsWith(String(unknownSince)) || dueToTell(uf, now, HOLD_REPEAT_MS))) {
     tellThen(alert, 'usage has been unreadable for over a day; parked work waits on you', { fact: UNKNOWN_FACT, fields: { since: unknownSince, told_at: iso(now) }, kind: 'usage_unknown_alert' });
   }
 
