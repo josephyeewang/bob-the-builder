@@ -1183,11 +1183,11 @@ test('L324: a failed stop whose told time is ahead or unreadable is told again o
     await f.pass(0);
     const sid = f.sessions[0].id;
     f.setCard('C-3', { state: 'cancelled' });
-    const alerts = [];
+    const alert = fakeAlert();
     const base = { rec: f.rec, rules: rulesWith({}, startAnswer(f.rec)), account: ACCT, sessions: [...f.sessions], probe: () => idle, launch: async () => ({ ok: false }),
-      stopGroup: async () => ({ ok: false, reason: 'permission' }), saveWork: async () => ({ ok: true }), alert: (x) => alerts.push(x) };
+      stopGroup: async () => ({ ok: false, reason: 'permission' }), saveWork: async () => ({ ok: true }), alert };
     await dispatcherPass({ ...base, now: T0 + MIN });
-    const told = () => alerts.filter((x) => /could not be stopped/.test(x)).length;
+    const told = () => alert.texts.filter((x) => /could not be stopped/.test(x)).length;
     assert.equal(told(), 1, label);
     change(f.rec, 'fact', STOP_FACT(sid), { told_at: bad });
     await dispatcherPass({ ...base, now: T0 + 2 * MIN });
@@ -1212,9 +1212,10 @@ test('L324: a failed Lead hand-off, its told time ahead or unreadable, is told a
   for (const [label, bad] of BAD_TOLD(T0 + MIN)) {
     const w = world();
     w.setProduct('p1', 'paused');
-    const alerts = () => w.calls.alerts.filter((a) => /could not be asked to hand off/.test(a));
+    const alert = fakeAlert();
+    const alerts = () => alert.texts.filter((a) => /could not be asked to hand off/.test(a));
     const at = (min) => dispatcherPass({ rec: w.rec, rules: rulesWith(), now: T0 + min * MIN, account: ACCT, sessions: [], probe: () => idle, launch: async () => ({ ok: false }),
-      stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }), pauseLead: () => { throw new Error('send failed'); }, alert: (t) => w.calls.alerts.push(t), filesOf: filesOfCommits });
+      stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }), pauseLead: () => { throw new Error('send failed'); }, alert, filesOf: filesOfCommits });
     await at(0);
     assert.equal(alerts().length, 1, label);
     change(w.rec, 'fact', PAUSE_FACT('p1'), { told_at: bad });
@@ -1241,8 +1242,9 @@ test('L324: a held undo, its told time ahead or unreadable, is told again on the
 test('L324: missing rule values, their told time ahead or unreadable, are told again on the next pass', async () => {
   for (const [label, bad] of BAD_TOLD(T0 + MIN)) {
     const rec = recWith();
-    const alerts = [];
-    const tell = (now) => rulesMissingAlert({ rec, keys: ['a'], alert: (t) => alerts.push(t), now, complete: true });
+    const alert = fakeAlert();
+    const alerts = alert.texts;
+    const tell = (now) => rulesMissingAlert({ rec, keys: ['a'], alert, now, complete: true });
     await tell(T0);
     assert.equal(alerts.length, 1, label);
     change(rec, 'fact', RULES_MISSING_FACT, { told_at: bad });
