@@ -44,6 +44,7 @@ Every outside effect (launching, stopping, typing into a session, git, alerts) i
 | `board()`, `healthy()`, `resume()` | outage | The running sessions with their liveness; whether network, sign-in and usage are fine; whether Joe said resume |
 | `outboxSessions()`, `wait(ms)`, `startReadonly(x)`, `replyToLead(x)`, `intakeFs` | intake | The sessions and their outbox folders; the settle wait; a Lead's read-only start; a note back to the Lead; optional file-reading overrides for tests |
 | `leads()` | leads | Per Lead: `{ lead, size, outboxNames, questionOpen, send, stopSession, startLead }` |
+| `approvals()`, `approvalsProductMs` | approvals | Per product: `{ product, gh, owner, repo, stateDir, push, copies }`, what M2's `schedulePass` reaches outside (L221). The tick adds the record, the rules, the clock and an alert that turns M2's object alerts into one line from known fields. Required: a missing port fails the step. Each product has its own deadline (default `APPROVALS_PRODUCT_MS`, 30 s) and try |
 | `sessions()`, `probe`, `launch`, `stopGroup`, `saveWork`, `hostLock`, `pauseLead` | pass | As in `pass.mjs` |
 | `gateAlive` | limits | As in `merges.mjs` |
 | `stopSession(sessionId)` | limits | For M9's `lapseClaims`: a claim whose session never started lapses at `claims.unlaunched_min` only once this answers true (whatever was started under that id is stopped). From `accountPorts` (`account-ports.mjs`) |
