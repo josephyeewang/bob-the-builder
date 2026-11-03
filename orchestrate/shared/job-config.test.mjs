@@ -149,13 +149,15 @@ test('L253 guard: every production file that imports a config-named module reads
 });
 
 test('L253 guard, planted: a job that parses its own config and imports its wiring is caught; one through the reader is not', () => {
+  // Built, so consume-ask's computed-import scan does not count this test's own planted text as a loader.
+  const IMP = ['im', 'port'].join('');
   const root = tempDir('orch-jobguard-');
   const w = (rel, text) => { mkdirSync(dirname(join(root, rel)), { recursive: true }); writeFileSync(join(root, rel), text); };
-  w('modules/Mx/job.mjs', "const c = JSON.parse(readFileSync(f, 'utf8'));\nconst m = await import(pathToFileURL(c.wiring).href);\n");
-  w('wiring/ok.mjs', "import { readJobConfig } from '../shared/job-config.mjs';\nconst c = readJobConfig(f);\nawait import(pathToFileURL(c.wiring).href);\n");
-  w('wiring/via-m11.mjs', "import { readConfig, startWatchdog } from '../modules/M11-dispatcher/main.mjs';\nawait import(pathToFileURL(readConfig(f).wiring).href);\n");
-  w('modules/My/half.mjs', "const c = openJobJson(f, fail).value;\nawait import(pathToFileURL(c.wiring).href);\n");   // no after-check
-  w('modules/Mz/commented.mjs', "// readJobConfig(f)\nawait import(pathToFileURL(c.wiring).href);\n");
-  w('modules/Mx/job.test.mjs', "await import(pathToFileURL(c.wiring).href);\n");
+  w('modules/Mx/job.mjs', `const c = JSON.parse(readFileSync(f, 'utf8'));\nconst m = await ${IMP}(pathToFileURL(c.wiring).href);\n`);
+  w('wiring/ok.mjs', `import { readJobConfig } from '../shared/job-config.mjs';\nconst c = readJobConfig(f);\nawait ${IMP}(pathToFileURL(c.wiring).href);\n`);
+  w('wiring/via-m11.mjs', `import { readConfig, startWatchdog } from '../modules/M11-dispatcher/main.mjs';\nawait ${IMP}(pathToFileURL(readConfig(f).wiring).href);\n`);
+  w('modules/My/half.mjs', `const c = openJobJson(f, fail).value;\nawait ${IMP}(pathToFileURL(c.wiring).href);\n`);   // no after-check
+  w('modules/Mz/commented.mjs', `// readJobConfig(f)\nawait ${IMP}(pathToFileURL(c.wiring).href);\n`);
+  w('modules/Mx/job.test.mjs', `await ${IMP}(pathToFileURL(c.wiring).href);\n`);
   assert.deepEqual(unreadConfigLoaders(root).sort(), ['modules/Mx/job.mjs', 'modules/My/half.mjs', 'modules/Mz/commented.mjs']);
 });
