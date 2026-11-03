@@ -29,8 +29,8 @@ export const PLAN_FORMAT = 'Plan file. Hand in the plan as one JSON file, plan.j
   + '"wait" only on a card that waits; "reason" is needed only when who is date): '
   + `${JSON.stringify(PLAN_EXAMPLE)}. `
   + 'An id is letters, digits and dashes (at most 64). A wave is a whole number from 1. depends_on lists the ids of cards '
-  + 'in earlier waves. since and next_check are ISO times. Each file is one plain path from the product\'s top folder: no '
-  + '"..", no folder, no pattern.';
+  + 'in earlier waves. since and next_check are ISO times. Each file is one plain path from the product\'s top folder, in plain ASCII '
+  + '(letters a-z or A-Z, digits and plain punctuation; no accents, no ":", no leading "~"): no "..", no folder, no pattern.';
 
 // The handoff's one shape (handoff.mjs HEADS, in order). The placeholders themselves read as a handoff.
 export const HANDOFF_TEMPLATE = [
