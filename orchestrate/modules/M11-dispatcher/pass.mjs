@@ -408,8 +408,11 @@ export async function dispatcherPass({ rec, rules, now, account, sessions, probe
   }
   // Once per stretch of unread usage, and again each day it lasts (L38).
   const uf = factDoc(rec, UNKNOWN_FACT)?.doc;
-  // Compared as text (L339 m2): a start stored as a number is still this stretch's, so told daily, not every pass.
-  if (unknownLong && (!String(uf?.since ?? '').startsWith(String(unknownSince)) || dueToTell(uf, now, HOLD_REPEAT_MS))) {
+  // Compared as text, exactly (L339 m2, L350): a start stored as a number is still this stretch's, so told daily, not
+  // every pass; and a short or corrupt start ('2') is no prefix match for an old stretch's mark, so a new stretch is
+  // told at once. The mark's since is written from this same value, so equal is the whole test; an empty one never matches.
+  const sameStretch = uf?.since != null && String(uf.since) !== '' && String(uf.since) === String(unknownSince);
+  if (unknownLong && (!sameStretch || dueToTell(uf, now, HOLD_REPEAT_MS))) {
     tellThen(alert, 'usage has been unreadable for over a day; parked work waits on you', { fact: UNKNOWN_FACT, fields: { since: unknownSince, told_at: iso(now) }, kind: 'usage_unknown_alert' });
   }
 

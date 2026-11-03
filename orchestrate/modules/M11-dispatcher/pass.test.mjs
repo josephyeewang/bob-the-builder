@@ -1325,6 +1325,21 @@ test('L324: an unknown-usage start that is ahead or unreadable counts as over a 
   }
 });
 
+test('L350: a new unknown-usage stretch whose start is short or corrupt is told at once, not read as the old stretch', async () => {
+  for (const bad of ['2', '2026', T0 + 1]) {
+    const w = world([], { usage: null });
+    const told = () => w.calls.alerts.filter((a) => /usage has been unreadable for over a day/.test(a)).length;
+    await w.pass(0);
+    await w.pass(25 * 60);
+    assert.equal(told(), 1, `${bad}: the first stretch told`);
+    change(w.rec, 'fact', BAND_FACT, { unknown_since: bad });
+    await w.pass(25 * 60 + 1);
+    assert.equal(told(), 2, `${bad}: a new stretch, told at once`);
+    await w.pass(25 * 60 + 2);
+    assert.equal(told(), 2, `${bad}: then quiet`);
+  }
+});
+
 test('L339 m2: an unknown-usage start stored as a number is told once, then daily, not every pass', async () => {
   const w = world([], { usage: null });
   const told = () => w.calls.alerts.filter((a) => /usage has been unreadable for over a day/.test(a)).length;
