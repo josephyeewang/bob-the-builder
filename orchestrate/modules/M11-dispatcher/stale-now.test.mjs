@@ -12,7 +12,7 @@ import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { stopPass, STOP_FACT } from './pass.mjs';
-import { REFUSED_FACT, tellRefused, watchWrites } from './refused-writes.mjs';
+import { REFUSED_FACT, REFUSED_KEEP_MAX, tellRefused, watchWrites } from './refused-writes.mjs';
 import { timeLimits } from './merges.mjs';
 import { waitOn } from './moves.mjs';
 import { USAGE_FACT } from './usage.mjs';
@@ -454,7 +454,7 @@ test('L352 MAT-2: a kept list that is not a list, or holds an entry that can\'t 
     w.rec.write({ actor: 'dispatcher', entity: 'fact', id: REFUSED_FACT('park'), expectRev: 0, doc: { items, told_at: iso(T0) } });
     const did = w.tell(w.rec, T0 + 25 * H);
     assert.equal(did, 'told', JSON.stringify(items));
-    assert.match(w.alert.texts.at(-1), /and 1 more; the kept list could not be read; told again/, JSON.stringify(items));
+    assert.match(w.alert.texts.at(-1), /the kept list could not be read; 1 more refused write was not listed/, JSON.stringify(items));
     assert.equal(w.fact().doc.more, 1, 'counted, so it is not cleared later');
     assert.equal(w.tell(w.rec, T0 + 26 * H), 'quiet');
     assert.equal(w.tell(w.rec, T0 + 50 * H), 'told');
@@ -467,17 +467,22 @@ test('L352 MAT-2: a kept list that is not a list, or holds an entry that can\'t 
   assert.equal(w.fact().doc.more, 1);
 });
 
-test('L352 m1: refusals past the kept cap are counted, said as "and N more", and keep the cause from clearing', () => {
-  const ids = Array.from({ length: 22 }, (_, i) => `C-${i + 1}`);
+test('L352 m1, L361: refusals past the kept cap are counted, keep the cause from clearing, and the alert says who resets it', () => {
+  assert.equal(REFUSED_KEEP_MAX, 200);
+  const ids = Array.from({ length: REFUSED_KEEP_MAX + 2 }, (_, i) => `C-${i + 1}`);
   const w = keptWorld(ids);
   assert.equal(w.tell(w.rec, T0, new Map([['park', ids.map((id) => w.item(id))]])), 'told');
-  assert.match(w.alert.texts.at(-1), /C-22 \(r\); and 2 more; told again/);
-  assert.doesNotMatch(w.alert.texts.at(-1), /C-1 \(/);
-  assert.deepEqual([w.fact().doc.items.length, w.fact().doc.more], [20, 2]);
-  // The 20 kept ones move on; the 2 dropped can't be re-checked, so the cause stays.
+  const first = w.alert.texts.at(-1);
+  assert.deepEqual([w.fact().doc.items.length, w.fact().doc.more], [REFUSED_KEEP_MAX, 2]);
+  // One alert lists the newest 20 and counts the other kept ones, not every one (L361).
+  assert.match(first, /C-202 \(r\); and 180 more still refused; 2 more refused writes were not listed, so once the listed ones are fixed the lead resets this reminder \(fact /);
+  assert.ok(first.includes(REFUSED_FACT('park')), 'names the fact to reset');
+  assert.doesNotMatch(first, /C-182 \(/);
+  assert.match(first, /C-183 \(/);
+  // The kept ones move on; the 2 dropped can't be re-checked, so the cause stays.
   for (const id of ids.slice(2)) park(w.rec, id, T0 + 25 * H);
   assert.equal(w.tell(w.rec, T0 + 25 * H), 'told');
-  assert.match(w.alert.texts.at(-1), /could not be parked: and 2 more; told again/);
+  assert.match(w.alert.texts.at(-1), /could not be parked: 2 more refused writes were not listed/);
   assert.ok(w.fact().doc.told_at);
 });
 

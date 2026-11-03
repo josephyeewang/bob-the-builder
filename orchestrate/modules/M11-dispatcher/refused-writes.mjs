@@ -15,16 +15,18 @@
 // none is. A pass whose steps did not all finish, with nothing kept and nothing new, leaves the cause as it is: no
 // answer is not "ended". A throw in one cause never skips the others; they are thrown on together at the end.
 // Nothing that can't be read clears a cause (L352): a target read that throws, now or when refused, is still refused;
-// a kept list or entry that can't be read, and refused writes past the cap, are counted in `more`, said as "and N
-// more", and keep the cause told.
+// a kept list or entry that can't be read, and refused writes past the cap, are counted in `more`, named in the alert
+// with the fact a lead resets, and keep the cause told. Nothing in the product resets it yet (L361: loud, not silent).
 import { stillWaiting } from '../../shared/still-waiting.mjs';
 import { dropCause, tellThen } from './alerts.mjs';
 import { HOLD_FACT } from './pass.mjs';
 
 // A refused write is a hold (L38): its fact is in the Dispatcher's `hold-` family (pass.mjs HOLD_FACT; M9 permissions).
 export const REFUSED_FACT = (cause) => HOLD_FACT(`write-refused-${cause}`);
-// The most refused writes one cause keeps; the newest are kept.
-export const REFUSED_KEEP_MAX = 20;
+// The most refused writes one cause keeps (the newest), and how many of those one alert lists (L361: the list is
+// re-checked in full; the alert stays short enough to read).
+export const REFUSED_KEEP_MAX = 200;
+export const REFUSED_LIST_MAX = 20;
 
 // Each cause: what Joe reads, the tick steps that make its writes, and the write kinds it covers.
 export const REFUSED_CAUSES = Object.freeze({
@@ -83,11 +85,17 @@ export function watchWrites(inner) {
 
 const iso = (ms) => new Date(ms).toISOString();
 const whatOf = (cause, items) => { const w = REFUSED_CAUSES[cause].what; return typeof w === 'function' ? w(items) : w; };
-// What Joe reads: the kept ones, how many more could not be kept, and whether the kept list could be read.
+// What Joe reads: the newest kept ones, how many other kept ones there are, whether the kept list could be read, and
+// how many could not be kept, with what ends that (L361: `more` can't be re-checked, so the reminder has to say so).
 const textOf = (cause, items, more, unreadable) => {
-  const list = items.map((x) => `${x.id} (${x.reason})`).join('; ');
-  const extra = [more > 0 ? `and ${more} more` : null, unreadable ? 'the kept list could not be read' : null].filter(Boolean).join('; ');
-  return `the Dispatcher: ${whatOf(cause, items)}: ${[list, extra].filter(Boolean).join('; ')}; told again each day while it stays so`;
+  const shown = items.slice(-REFUSED_LIST_MAX);
+  const hidden = items.length - shown.length;
+  return `the Dispatcher: ${whatOf(cause, items)}: ${[
+    shown.map((x) => `${x.id} (${x.reason})`).join('; ') || null,
+    hidden > 0 ? `and ${hidden} more still refused` : null,
+    unreadable ? 'the kept list could not be read' : null,
+    more > 0 ? `${more} more refused ${more === 1 ? 'write was' : 'writes were'} not listed, so once the listed ones are fixed the lead resets this reminder (fact ${REFUSED_FACT(cause)})` : null,
+  ].filter(Boolean).join('; ')}; told again each day while it stays so`;
 };
 const isItem = (x) => x && typeof x === 'object' && typeof x.entity === 'string' && typeof x.id === 'string' && typeof x.from === 'string';
 
