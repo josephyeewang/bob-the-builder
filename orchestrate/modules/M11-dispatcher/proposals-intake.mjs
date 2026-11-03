@@ -23,7 +23,10 @@
 // tell was lost (the queue write refused, or the cap dropped it) is told again at the start of each pass, until its
 // told mark is written (L260 MAT-1): outbox-intake's retell no longer finds these facts, whose ids are hashes (L233 M-4).
 // A folder problem or a kind with nothing to take it in is likewise told until delivered (L260 MAT-2), and two products
-// whose rules name the same folder are both refused, so no file is taken in twice (L260 MAT-3). A file name goes into
+// whose rules name the same folder are both refused, so no file is taken in twice (L260 MAT-3). A folder is, for good,
+// the first product's that takes files in from it: a product whose rules name it later is refused and told until its
+// rules give it a new folder, so files the first used are never taken in again (L268 MAT-B). An interruption whose
+// tell was lost is carried by every later write of the file's fact, so a claim or refusal never hides it (L268 MAT-A). A file name goes into
 // an alert or the diary only cleaned (`shown`): printable ASCII, quoted, at most 80 characters.
 //
 // Day 1 (`product.cutover_stage` first; L76 (5)):
@@ -82,6 +85,8 @@ export const intakeFactId = (product, name) => `intake-applied-proposals-file-${
 export const folderFactId = (product) => `intake-applied-proposals-folder-${idHash(product)}`;
 /** The fact that says files of `kind` sit in a product's folder with nothing to take them in yet. */
 export const waitingFactId = (product, kind) => `intake-applied-proposals-waiting-${idHash(product, kind)}`;
+/** The fact that says which product first took files in from a folder, by its device and file number (L268 MAT-B). */
+export const ownerFactId = (dev, ino) => `intake-applied-proposals-owner-${idHash(dev, ino)}`;
 /** The fact a tell is marked on when the record refused the file's own fact (told once, not every pass). */
 export const toldFactId = (product, name) => `intake-applied-proposals-told-${idHash(product, name)}`;
 // The row that will take each handed-on kind in (L233 M-2: until then, told once per product and kind).
@@ -178,14 +183,29 @@ export async function proposalsPass({ rec, rules, products, ownerUid, wait, aler
   const byFolder = new Map();
   for (const f of folders) {
     if (f.why) continue;
-    let st; try { st = lookDir(f.dir); } catch { continue; }
-    if (!Number.isInteger(st?.ino) || st.ino <= 0) continue;
+    let st; try { st = lookDir(f.dir); } catch { st = null; }
+    // A folder that can't be told apart from another is not read: no owner could be checked for it (L268 MAT-B).
+    if (!Number.isInteger(st?.ino) || st.ino <= 0 || !Number.isInteger(st?.dev)) { f.why = 'the proposals folder could not be identified'; continue; }
+    f.at = { dev: st.dev, ino: st.ino };
     const k = `${st.dev}:${st.ino}`;
     byFolder.set(k, [...(byFolder.get(k) ?? []), f]);
   }
   for (const group of byFolder.values()) {
     if (group.length < 2) continue;
     for (const f of group) f.why = `the proposals folder is also ${group.filter((g) => g !== f).map((g) => g.product).join(', ')}'s, so its files would be taken in once per product`;
+  }
+  // The folder's first product owns it for good (L268 MAT-B): the used memory is per product, so another product that
+  // named it later would take every file the first one used in again. Recorded before any file is read; a write the
+  // record refuses keeps the folder unread this pass.
+  for (const f of folders) {
+    if (f.why) continue;
+    const id = ownerFactId(f.at.dev, f.at.ino);
+    const o = rec.read('fact', id);
+    const first = o?.doc?.product;
+    if (first === f.product) continue;
+    if (first != null) { f.why = `the proposals folder was ${first}'s first, so the files ${first} took in from it would be taken in again; give ${f.product} a new folder`; continue; }
+    const w = rec.write({ actor: 'dispatcher', entity: 'fact', id, expectRev: o?.rev ?? 0, doc: { product: f.product, dev: f.at.dev, ino: f.at.ino, at: new Date(now).toISOString() }, kind: 'proposal_folder_owner' });
+    if (!w.ok) f.why = `the proposals folder's first product could not be recorded (${w.reason})`;
   }
   for (const { product, dir, why: cause } of folders) {
     let why = cause;
@@ -210,7 +230,8 @@ export async function proposalsPass({ rec, rules, products, ownerUid, wait, aler
     // claim of new bytes after an interruption, never erases them, so those bytes are never handed on again.
     const put = (doc, kind) => {
       const used = usedOf(prev?.doc);
-      const w = rec.write({ actor: 'dispatcher', entity: 'fact', id, expectRev: prev?.rev ?? 0, doc: { session: sourceOf(product), product, name, ...doc, ...(used.length ? { used } : {}) }, kind });
+      // An interruption not yet told goes with every write too, so a claim or refusal never hides it (L268 MAT-A).
+      const w = rec.write({ actor: 'dispatcher', entity: 'fact', id, expectRev: prev?.rev ?? 0, doc: { session: sourceOf(product), product, name, ...untoldOf(prev?.doc), ...doc, ...(used.length ? { used } : {}) }, kind });
       if (w.ok) prev = rec.read('fact', id);
       return w;
     };
@@ -234,10 +255,10 @@ export async function proposalsPass({ rec, rules, products, ownerUid, wait, aler
       const said = `${shown(name)} in ${product}'s proposals folder was refused: ${reason}`;
       note(`proposals ${product}: ${shown(name)} refused: ${reason}`);
       const at = new Date(now).toISOString();
-      // Its own text and key, apart from an interruption's alert_text, so each is told again until delivered (L260 MAT-1).
+      // Its own text and key, apart from an interruption's, so each is told again until delivered (L260 MAT-1).
       const w = put(keep ? { ...prev.doc, refused_why: reason, refused_at: at, refused_key: told, refused_text: said } : { sha256: hash, state: 'refused', why: reason, at, refused_key: told, refused_text: said }, 'proposal_refused');
       if (w.ok) tellThen(alert, said, { fact: intakeFactId(product, name), fields: { told_key: told }, kind: 'proposal_told' });
-      else tellUnrecorded(said, `refused ${hash} ${reason}`);
+      else tellUnrecorded(said, `refused ${told}`);
     };
     const parsed = proposalName(name);
     if (!parsed) { refuse(name.startsWith('verdict-') ? 'a verdict comes only from a review session\'s own outbox' : 'it is not a proposals file name'); continue; }
@@ -249,9 +270,14 @@ export async function proposalsPass({ rec, rules, products, ownerUid, wait, aler
       // A pass that stopped between its claim and the hand-over (outbox-intake's MAT-7): whether the file was used is
       // not known, so it is never used twice. Told once. A heartbeat is a poll, so it is simply taken again.
       const said = `the intake of ${name} from ${product}'s proposals folder was interrupted; it may or may not have been used, and was not used again`;
-      const w = put({ ...prev.doc, state: 'interrupted', at: new Date(now).toISOString(), alert_text: said }, 'proposal_interrupted');
+      // Keyed on the interrupted bytes; one still untold from before is told in the same alert (L268 MAT-A). A claim
+      // never carries a told mark, so the key need only differ from the mark this fact holds now.
+      const old = untoldOf(prev.doc);
+      const key = String(prev.doc.sha256);
+      const text = old.interrupted_text ? `${old.interrupted_text}; ${said}` : said;
+      const w = put({ ...prev.doc, state: 'interrupted', at: new Date(now).toISOString(), interrupted_text: text, interrupted_key: key }, 'proposal_interrupted');
       if (!w.ok) { r.refused = `could not record the interruption: ${w.reason}`; tellUnrecorded(said, `interrupted ${prev.doc.sha256}`); continue; }
-      tellThen(alert, said, { fact: intakeFactId(product, name), fields: { told_state: 'interrupted' }, kind: 'proposal_told' });
+      tellThen(alert, text, { fact: intakeFactId(product, name), fields: { told_interrupted: key }, kind: 'proposal_told' });
     }
     // Bytes this name used, or may have, before: never again, whatever the fact says now (L254). A heartbeat is a poll.
     if (parsed.kind !== 'heartbeat' && usedOf(prev?.doc).includes(hash)) { r.already = true; continue; }
@@ -346,6 +372,13 @@ function usedOf(d) {
   return list.slice(-USED_MAX);
 }
 
+// An interruption whose told mark is not written: its text and key, or nothing (L268 MAT-A). Every write of the fact
+// carries it until the mark lands, whatever the state becomes.
+function untoldOf(d) {
+  if (typeof d?.interrupted_key !== 'string' || typeof d.interrupted_text !== 'string' || d.told_interrupted === d.interrupted_key) return {};
+  return { interrupted_text: d.interrupted_text, interrupted_key: d.interrupted_key };
+}
+
 // A cause (a folder problem, or a kind with nothing to take it in) is told when it starts or changes, and its end is
 // recorded; never every pass.
 // A tell that was lost (the queue write refused, or the cap dropped it) is asked again each pass until its told mark,
@@ -374,7 +407,8 @@ function retellFiles(rec, alert, products) {
     const d = f.doc;
     if (!f.id.startsWith(FILE_PREFIX) || !d || !products.includes(d.product) || f.id !== intakeFactId(d.product, d.name)) continue;
     if (isQueued(rec, f.id)) continue;
-    if (d.state === 'interrupted' && d.alert_text && d.told_state !== 'interrupted') tellThen(alert, d.alert_text, { fact: intakeFactId(d.product, d.name), fields: { told_state: 'interrupted' }, kind: 'proposal_told' });
+    const u = untoldOf(d);
+    if (u.interrupted_key) tellThen(alert, u.interrupted_text, { fact: intakeFactId(d.product, d.name), fields: { told_interrupted: u.interrupted_key }, kind: 'proposal_told' });
     if (d.refused_key && d.refused_text && d.told_key !== d.refused_key) tellThen(alert, d.refused_text, { fact: intakeFactId(d.product, d.name), fields: { told_key: d.refused_key }, kind: 'proposal_told' });
   }
 }
