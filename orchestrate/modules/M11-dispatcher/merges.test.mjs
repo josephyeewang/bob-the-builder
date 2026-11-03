@@ -701,6 +701,20 @@ for (const lost of ['send refused', 'queue refused']) {
   });
 }
 
+test('L332 m5: a merge refused twice is put on the owner at the time after the reviewer checks, not the step\'s start', async () => {
+  const rec = recWith([cardMerging, checking('M-1', 0), checking('M-2', 10), ['card', 'C-5', { state: 'in_review', head: HB, changed_at: at(0) }]]);
+  await pass(rec, 31, { hasReviewer: () => true });
+  change(rec, 'card', 'C-1', { state: 'merging' }); // the gate takes it again
+  // Each reviewer check takes 80 s on the Record's clock, before the merges are settled.
+  let t = T0 + 71 * MIN;
+  setClock(rec, t);
+  const alerts = [];
+  await withAlerts(rec, t, (x) => { alerts.push(x); return true; }, (alert) => timeLimits({ rec, rules: R, now: T0 + 71 * MIN, clock: () => t, b: GREEN, alert,
+    gateAlive: () => true, requestReview: () => ({ ok: true }), hasReviewer: async () => { t += 80_000; setClock(rec, t); return true; } }));
+  const c = rec.read('card', 'C-1').doc;
+  assert.deepEqual([c.state, c.wait?.who, c.wait?.since], ['waiting', 'joe', iso(t)], alerts.join(' | '));
+});
+
 // L329: ageMs reads the Record's times by shared pastTime. One that can't be read, or is more than 60 s ahead, is an
 // unknown age (Infinity), so each limit that uses it fires rather than waiting for a time that has not come.
 test('L329: a limit whose entry\'s time is unreadable or an hour ahead still times it out (checking, reporting, no reviewer)', async () => {
