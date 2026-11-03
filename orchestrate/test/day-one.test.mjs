@@ -71,11 +71,11 @@ import { judge } from '../modules/M6-merge-gate/refusals.mjs';
 import { fakeGateGitHub } from '../modules/M6-merge-gate/fixtures/fake-gate-github.mjs';
 import { OUTBOX_KINDS, CARD_KINDS } from '../shared/record-names.mjs';
 import { fakeAlert } from './fake-alert.test-helper.mjs';
-import { tempDir } from '../shared/test-tmp.mjs';
 import { fakeRules } from '../shared/rules.mjs';
 import { openRecord } from '../modules/M9-record/writer.mjs';
 import { ALERT_QUEUE_FACT } from '../modules/M11-dispatcher/alerts.mjs';
 import { blobOf } from '../wiring/fake-github.test-helper.mjs';
+import { installedLayout } from '../shared/job-config.test-helper.mjs';
 
 const ORCH = join(dirname(fileURLToPath(import.meta.url)), '..');
 const P = PRODUCT;
@@ -268,7 +268,9 @@ test('the undo card the real undo step makes can pass the first-cutover docs lan
 // document but that boot: the approvals step reads the rules' onboarding.state and M2 onboard.mjs writes it as approvals.
 const ROOT_ORCH = ORCH;
 function macBoot() {
-  const dir = tempDir('orch-day-one-boot-');
+  // An installed copy of this checkout (L253): main.mjs takes only a config and wiring inside the copy it runs from.
+  const L = installedLayout('orch-day-one-boot-', { source: true });
+  const dir = L.base;
   const f = (n) => join(dir, n);
   writeFileSync(f('products.json'), JSON.stringify([ENTRY]));
   const rulesStateDir = f('rules-state');
@@ -277,12 +279,12 @@ function macBoot() {
   const token = f('token');
   writeFileSync(token, 'x'.repeat(40), { mode: 0o600 });
   chmodSync(token, 0o600);
-  const config = { wiring: join(ROOT_ORCH, 'wiring/dispatcher-wiring.mjs'), lockFile: f('dispatcher.lock'), product: ENTRY.product,
+  const config = { installRoot: L.installRoot, wiring: L.path('wiring/dispatcher-wiring.mjs'), lockFile: f('dispatcher.lock'), product: ENTRY.product,
     recordRoot: f('record'), ownerUid: process.getuid(), productsFile: f('products.json'), rulesStateDir, tokenFile: token,
     approvalsStateDir: f('approvals-state') };
-  writeFileSync(f('config.json'), JSON.stringify(config));
+  const configFile = L.write('dispatcher.json', config);
   writeFileSync(f('fake-github.json'), JSON.stringify({ owner: ENTRY.owner, repo: ENTRY.repo, commit: 'a'.repeat(40), text: FIRST, logFile: f('github.log') }));
-  const r = spawnSync(process.execPath, ['--import', join(ROOT_ORCH, 'wiring/fake-github.test-helper.mjs'), join(ROOT_ORCH, 'modules/M11-dispatcher/main.mjs'), f('config.json')], {
+  const r = spawnSync(process.execPath, ['--import', join(ROOT_ORCH, 'wiring/fake-github.test-helper.mjs'), L.path('modules/M11-dispatcher/main.mjs'), configFile], {
     env: { PATH: process.env.PATH, HOME: process.env.HOME, ORCH_FAKE_GITHUB: f('fake-github.json') }, encoding: 'utf8', timeout: 60_000 });
   const rec = openRecord({ root: config.recordRoot, product: ENTRY.product, ownerUid: process.getuid(), rules: fakeRules() }).record;
   return { code: r.status, err: r.stderr, rec };
@@ -295,7 +297,7 @@ test('with only production writers, the product reads active and the docs lane i
   // The product document exists, and only the boot wrote it: approvals, kind onboard, once.
   assert.equal(rec.read('product', p)?.doc?.state, 'active', 'the boot turned the product on');
   assert.deepEqual(rec.diary({ since: 0 }).filter((l) => l.entity === 'product' && l.id === p).map((l) => [l.actor, l.kind]), [['approvals', 'onboard']]);
-  assert.ok((rec.read('fact', ALERT_QUEUE_FACT)?.doc?.entries ?? []).some((e) => e.text.includes(`${p} is now on`)), 'Joe is told the product is on');
+  assert.equal((rec.read('fact', ALERT_QUEUE_FACT)?.doc?.entries ?? []).filter((e) => e.text.includes(`${p} is now on`)).length, 1, 'Joe is told the product is on, once');
   // The engine reads that document as the product's state: the docs lane merges an ordinary docs change, not undo-only.
   const rules = rulesFromText({ [p]: FIRST }, { productState: (q) => rec.read('product', q)?.doc ?? null, clock: () => T0 });
   const merge = rules.may('merge', { product: p, card: { id: 'C-2', kind: 'ordinary', tier: 2 }, truncated: false, labels: [], declared_tier: 2, kind: 'ordinary', files: docsChange() });
@@ -315,7 +317,17 @@ test('with no product document today, the gaps are exactly the known ones (pause
   assert.match(start.reason, /no product record/);
 });
 
-test('a research_copy card is ready on day one with no go', { todo: 'R-0b-135, L204-c (lane 2, M11): nothing makes a research_copy card yet, and the first-cutover rules do not set go_free.research_copy' }, () => {
+// L303 (#154 audit Minors 4 and 5): two silences the research path leaves for its wiring. Today nothing calls the
+// handler or researchPass, so neither can happen; lane 4's R-0b-162 wiring PR must close both before it lands.
+test('a research report whose card can\'t go ready or land is told to Joe, every time', { todo: 'L303, R-0b-162 (lane 4): the wiring must tell Joe on every settle() failure (not ready, not landed) from researchHandler and researchPass, or a paused product leaves a draft card and a closed ask in silence' }, () => {
+  assert.fail('R-0b-162 wires researchHandler and researchPass; until then nothing reports their settle() results');
+});
+
+test('a research report sent again after an interrupted intake is told, never stuck in silence', { todo: 'L303, R-0b-162 (lane 4): a re-sent report refused with "already has its research_copy card" after an interrupted intake must reach Joe, with what to do' }, () => {
+  assert.fail('R-0b-162 wires the research path; until then a re-send cannot happen');
+});
+
+test('a research_copy card is ready on day one with no go', { todo: 'R-0b-135, L204-c, L286: M11 research-intake.mjs makes the card; the first-cutover rules do not set go_free.research_copy yet (it waits for step 15b)' }, () => {
   const { rules } = dayOne();
   assert.ok(goFreeKinds(rules, P).includes('research_copy'));
 });

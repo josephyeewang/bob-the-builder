@@ -574,6 +574,13 @@ test('audit MAT-4: a fix card the undo step writes is never started as a worker;
   assert.equal(w.rec.read('card', FIX_CARD(U)).doc.state, 'draft');
 });
 
+test('R-0b-135: a ready research_copy card is never started as a worker (lane 2\'s copier makes its commit, L286); other ready work still starts', async () => {
+  const w = world([card('R-C', { kind: 'research_copy', research_ask: 'R-1', files: ['docs/research/research-R-1.md'] }), card('C-1')]);
+  const r = await w.pass(1);
+  assert.deepEqual(r.started, ['C-1']);
+  assert.equal(w.rec.read('card', 'R-C').doc.state, 'ready');
+});
+
 test('audit MIN-20 (P13): parked work does not resume while the Dispatcher\'s own share of the week is full', async () => {
   const wait = { who: 'dispatcher', what: 'usage_band', since: iso(T0 - MIN), next_check: iso(T0) };
   const w = world([card('C-1', { state: 'waiting', wait: wait })], { usage: { week: 50, h5: 10 } });

@@ -73,9 +73,10 @@ import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { runnerPass, CARD_ID, isClaudeCommand } from './review-runner.mjs';
-import { installProblem, readInstallStamp, aclProblem, currentCopy, copyPath, copyReady, copyModuleProblem, RUNNER_MODULES } from './install-check.mjs';
+import { installProblem, readInstallStamp, aclProblem, currentCopy, copyPath, copyReady, RUNNER_MODULES } from './install-check.mjs';
 import { sessionVerdict, verdictFromFile } from '../../M9-record/outbox.mjs';
 import { SESSION_ID } from '../../../shared/record.mjs';
+import { codeFileProblem, openJobJson, readByDescriptor, readChangedProblem } from '../../../shared/job-config.mjs';
 import { readAccountFile, ACCOUNT_FILE } from './accounts.mjs';
 import { REVIEW_USER } from './review-user.mjs';
 import { git, gitOk } from '../git/safe-git.mjs';
@@ -101,7 +102,9 @@ const CHILD_MS = 10_000;
  * role folder renamed away, so a fail would read as silence.
  */
 export function readConfig(file, { lstat = lstatSync, top = '/', acl = aclProblem } = {}) {
-  const c = JSON.parse(readFileSync(file, 'utf8'));
+  // Read by descriptor through the shared job-config reader (L253): never a link, a plain file no one else writes.
+  // Its owner and place (root's, inside the copy) are programsProblem's, and main checks the name still names it.
+  const c = openJobJson(file, (why) => { throw new Error(`config: ${file} ${why}`); }).value;
   for (const k of ABS) if (typeof c?.[k] !== 'string' || !isAbsolute(c[k])) throw new Error(`config: ${k} must be an absolute path`);
   for (const k of OPTIONAL_ABS) if (c[k] !== undefined && (typeof c[k] !== 'string' || !isAbsolute(c[k]))) throw new Error(`config: ${k} must be an absolute path`);
   if (!absList(c.deny) || c.deny.length === 0) throw new Error('config: deny must list absolute paths');
@@ -203,22 +206,10 @@ export function programsProblem(c, { self, config, node = realpathSync.native(pr
   // already refused one outside the copy, missing, a link or not root's alone; this says where inside it may be.
   for (const k of RUNNER_MODULES) {
     if (typeof c[k] !== 'string') continue;
-    const why = runnerModuleProblem(c.installRoot, c[k], opts);
+    const why = codeFileProblem(c.installRoot, c[k], opts);
     if (why) return `the runner's ${k}, ${c[k]}, ${why}`;
   }
   return copyReady(c.installRoot, { owner: opts.owner ?? 0, ...(opts.lstat ? { lstat: opts.lstat } : {}), ...(opts.readlink ? { readlink: opts.readlink } : {}) });
-}
-
-// Null, or why `p`, inside the copy (installProblem checked that), is not one of its own code files (L132 M-1).
-function runnerModuleProblem(installRoot, p, { owner = 0, lstat = lstatSync, readlink } = {}) {
-  const cur = currentCopy(installRoot, { owner, lstat, ...(readlink ? { readlink } : {}) });
-  if (!cur.real) return null;
-  const rel = [installRoot, cur.real].map((b) => relative(b, p)).find((r) => r !== '' && !r.startsWith('..') && !isAbsolute(r));
-  if (!rel) return null;
-  const why = copyModuleProblem(rel);
-  if (why) return why;
-  let st; try { st = lstat(join(cur.real, rel)); } catch { return 'is missing'; }
-  return st.isFile() ? null : 'is not a file';
 }
 
 // A folder of the Record: a plain folder of the Record's owner that no one else writes. Null, or the problem.
@@ -491,13 +482,17 @@ export function readyProblem(c, wiring, { write = writeSnapshot } = {}) {
 
 // `ports` stand in for the walls in a test (the config reader, the root-owned check and the pass); production leaves them out.
 export async function main(argv, { log = (s) => process.stderr.write(`${s}\n`), ports = {} } = {}) {
-  const { readConfigFn = readConfig, programs = programsProblem, pass = runnerPass, write } = ports;
+  const { readConfigFn = readConfig, programs = programsProblem, pass = runnerPass, write, lstat } = ports;
   if (!argv[0]) { log('usage: review-runner-main.mjs <config.json>'); return 1; }
   let c;
   try { c = readConfigFn(argv[0]); } catch (e) { log(`review runner: ${e.message}`); return 1; }
   const self = realpathSync.native(fileURLToPath(import.meta.url));
   const bad = programs(c, { self, config: realpathSync.native(argv[0]) });
   if (bad) { log(`review runner: refused, the installed copy is not one it may run (root's alone, its link, its stamp): ${bad}`); return 1; }
+  // The file programsProblem checked by name is the one read (L253). Always for the real reader; a test's reader is
+  // checked too when it read by descriptor (audit #144 m3), and one answering a plain object has no read to compare.
+  const swapped = readConfigFn === readConfig || readByDescriptor(c) ? readChangedProblem(argv[0], c, lstat ? { lstat } : {}) : null;
+  if (swapped) { log(`review runner: config ${argv[0]} ${swapped}`); return 1; }
   let wiring;
   try { wiring = await import(pathToFileURL(c.wiring).href); } catch (e) { log(`review runner: the wiring could not be loaded (${e.message})`); return 1; }
   const notReady = readyProblem(c, wiring, write ? { write } : {});

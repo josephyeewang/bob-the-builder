@@ -17,15 +17,16 @@
 // Usage has no real source yet (R-0b-66, milestone 0b-6): with no `readUsage` port the pass writes the unknown reading
 // every time, which is the honest state and what the heartbeat's "usage: unknown" already says.
 //
-// RUN AS A SCRIPT: `node loop.mjs <config.json>` with { "wiring": "/abs/path/wiring.mjs" }, the same shape as M11's
-// main.mjs. The wiring exports `async function wire(config)` returning
+// RUN AS A SCRIPT: `node loop.mjs <config.json>` with { "installRoot": "/abs", "wiring": "/abs/path/wiring.mjs" }, the
+// same shape as M11's main.mjs, read through the one checked reader (shared/job-config.mjs, L253): the config, the
+// wiring and this script must be files of the installed copy at installRoot, root's or the job's own user's alone. The wiring exports `async function wire(config)` returning
 //   { rec, ports: { whoIsSignedIn, readUsage?, probes: { network, reachable, minibase }, github?: { gh, owner, repo } } }
 // (`rec` the real record; the probes from ./probes/, built from the wiring's own config, so no machine, product or
 // account name lives here; `github` the robot's client M6 uses). Exit 0 when the pass ran, 1 when the config or wiring
 // could not be loaded, 2 when the pass ran past RUN_DEADLINE_MS (the script then ends outright so the next start runs).
 
-import { readFileSync, realpathSync } from 'node:fs';
-import { isAbsolute } from 'node:path';
+import { realpathSync } from 'node:fs';
+import { readJobConfig } from '../../shared/job-config.mjs';
 import { pathToFileURL, fileURLToPath } from 'node:url';
 import { makeFactWriter } from './facts.mjs';
 import { WRITERS } from './state-facts.mjs';
@@ -135,17 +136,20 @@ export async function sensorsPass({ rec, ports, now = () => new Date(), deadline
   return { wrote, problems };
 }
 
-export function readConfig(file) {
-  const c = JSON.parse(readFileSync(file, 'utf8'));
-  if (typeof c?.wiring !== 'string' || !isAbsolute(c.wiring)) throw new Error('config: wiring must be an absolute path');
-  return c;
+/** The job's config, through the checked reader (L253); `opts.self` is this script, checked as a code file of the copy. */
+export function readConfig(file, opts = {}) {
+  return readJobConfig(file, { code: ['wiring'], ...opts });
 }
 
-export async function main(argv, { now = () => new Date(), log = (s) => process.stderr.write(`${s}\n`), runDeadlineMs = RUN_DEADLINE_MS } = {}) {
+const realOf = (p) => { try { return realpathSync(p); } catch { return null; } };
+const SELF = realOf(fileURLToPath(import.meta.url));
+
+// `self`: this script's real path, checked as one of the installed copy's code files (audit #144 m4).
+export async function main(argv, { now = () => new Date(), log = (s) => process.stderr.write(`${s}\n`), runDeadlineMs = RUN_DEADLINE_MS, self = SELF } = {}) {
   let wired;
   try {
     if (!argv[0]) throw new Error('usage: loop.mjs <config.json>');
-    const config = readConfig(argv[0]);
+    const config = readConfig(argv[0], { self });
     const mod = await import(pathToFileURL(config.wiring).href);
     if (typeof mod.wire !== 'function') throw new Error('the wiring module has no wire()');
     wired = await mod.wire(config);
@@ -160,9 +164,7 @@ export async function main(argv, { now = () => new Date(), log = (s) => process.
   return 0;
 }
 
-const realOf = (p) => { try { return realpathSync(p); } catch { return null; } };
-const self = realOf(fileURLToPath(import.meta.url));
-if (self && process.argv[1] && self === realOf(process.argv[1])) {
+if (SELF && process.argv[1] && SELF === realOf(process.argv[1])) {
   const code = await main(process.argv.slice(2));
   process.exitCode = code;
   setTimeout(() => process.exit(code), 1000).unref();

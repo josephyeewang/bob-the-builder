@@ -22,7 +22,8 @@
 // rules reader's alerts take the same honest answer or go into that queue (below).
 //
 // The config (one JSON file, main.mjs's argument). Every path is absolute; nothing here names a machine or a product.
-//   wiring, lockFile, runDeadlineMs   main.mjs's own (see main.mjs)
+//   installRoot, wiring, lockFile, runDeadlineMs   main.mjs's own (see main.mjs); the config, the wiring and main.mjs
+//                  must be files of the installed copy at installRoot (shared/job-config.mjs, L253)
 //   product        the product this Dispatcher runs (one Record per product, M9)
 //   recordRoot     the product's Record folder (M9 store)
 //   ownerUid       the Mac user that owns the Record (M9 store checks it)
@@ -39,8 +40,9 @@
 // first time its rules file says onboarding.state: active (M2 onboard.mjs), which is all the first cutover needs from it.
 // Its GitHub writes (a decision's pull request, a review request) and the transcript copies need a GitHub identity that
 // can write and the session copies, neither wired yet: `gh` and `copies` refuse. M2 answers each such refusal with an
-// alert for that ask, once per ask and cause (schedule.mjs askAlert, kept in the product's subfolder; L295 Minor 1), and
-// the step stays ok. No `push`: no phone channel exists, so M2 says so per ask (approvals_no_push), once.
+// alert for that ask, once per ask and cause and again each day while the ask waits (schedule.mjs askOnce, kept in the
+// product's subfolder; L309 MAT-2), and the step stays ok. No `push`: no phone channel exists, so M2 says so per ask
+// (approvals_no_push), on the same terms.
 
 import { accessSync, constants, lstatSync, mkdirSync } from 'node:fs';
 import { isAbsolute, join } from 'node:path';
@@ -52,7 +54,7 @@ import { makeRules } from '../shared/rules.mjs';
 import { readOnlyClient, tokenFile } from '../modules/M6-merge-gate/watch-only.mjs';
 import { queueAlert } from '../modules/M11-dispatcher/alerts.mjs';
 
-export const CONFIG_KEYS = Object.freeze(['wiring', 'lockFile', 'runDeadlineMs', 'product', 'recordRoot', 'ownerUid', 'productsFile', 'rulesStateDir', 'tokenFile', 'approvalsStateDir']);
+export const CONFIG_KEYS = Object.freeze(['installRoot', 'wiring', 'lockFile', 'runDeadlineMs', 'product', 'recordRoot', 'ownerUid', 'productsFile', 'rulesStateDir', 'tokenFile', 'approvalsStateDir']);
 const PATHS = Object.freeze(['recordRoot', 'productsFile', 'rulesStateDir', 'tokenFile', 'approvalsStateDir']);
 
 // The ports PRs C and D wire (M11 README, "The tick's ports"). Each throws when called: never a stand-in answer.

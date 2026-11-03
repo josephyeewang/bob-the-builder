@@ -11,7 +11,7 @@ import { spawnSync } from 'node:child_process';
 import { chmodSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { tempDir } from '../shared/test-tmp.mjs';
+import { installedLayout } from '../shared/job-config.test-helper.mjs';
 import { fakeRules } from '../shared/rules.mjs';
 import { openRecord } from '../modules/M9-record/writer.mjs';
 import { FIRST, ENTRY } from '../modules/M10-rules/first-cutover.test-helper.mjs';
@@ -25,8 +25,6 @@ import { notWiredText } from './dispatcher-wiring.mjs';
 import { fakeGitHubFetch, blobOf } from './fake-github.test-helper.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
-const WIRING = join(here, 'robot-wiring.mjs');
-const MAIN = join(here, 'robot-main.mjs');
 const FAKE = join(here, 'fake-github.test-helper.mjs');
 const COMMIT = 'a'.repeat(40);
 const P = ENTRY.product;
@@ -34,7 +32,9 @@ const OWNER_ID = ENTRY.joe_github_id;
 const MIN = 60e3;
 
 function world({ extra = {}, issues = [], keyMode = 0o700 } = {}) {
-  const dir = tempDir('orch-robot-');
+  // An installed copy of this checkout (L253): the job reads its config through shared/job-config.mjs.
+  const L = installedLayout('orch-robot-', { source: true });
+  const dir = L.base;
   const f = (n) => join(dir, n);
   writeFileSync(f('products.json'), JSON.stringify([ENTRY]));
   const rulesStateDir = f('rules-state');
@@ -44,16 +44,17 @@ function world({ extra = {}, issues = [], keyMode = 0o700 } = {}) {
   mkdirSync(keyDir); chmodSync(keyDir, keyMode);
   const token = f('token');
   writeFileSync(token, 'x'.repeat(40), { mode: 0o600 }); chmodSync(token, 0o600);
-  const config = { wiring: WIRING, lockFile: f('robot.lock'), product: P, recordRoot: f('record'), ownerUid: process.getuid(),
+  const config = { installRoot: L.installRoot, wiring: L.path('wiring/robot-wiring.mjs'), lockFile: f('robot.lock'), product: P, recordRoot: f('record'), ownerUid: process.getuid(),
     productsFile: f('products.json'), rulesStateDir, tokenFile: token, keyDir, ...extra };
-  writeFileSync(f('config.json'), JSON.stringify(config));
+  const configFile = L.write('robot.json', config);
+  const main = L.path('wiring/robot-main.mjs');
   const fake = { owner: ENTRY.owner, repo: ENTRY.repo, commit: COMMIT, text: FIRST, issues, logFile: f('github.log') };
   writeFileSync(f('fake-github.json'), JSON.stringify(fake));
-  return { dir, f, config, fake };
+  return { dir, f, config, configFile, main, fake };
 }
 
 function boot(w) {
-  const r = spawnSync(process.execPath, ['--import', FAKE, MAIN, w.f('config.json')], {
+  const r = spawnSync(process.execPath, ['--import', FAKE, w.main, w.configFile], {
     env: { PATH: process.env.PATH, HOME: process.env.HOME, ORCH_FAKE_GITHUB: w.f('fake-github.json') }, encoding: 'utf8', timeout: 60_000 });
   return { code: r.status, err: r.stderr };
 }
@@ -187,10 +188,21 @@ test('R-0b-162 B (L242): with the Dispatcher never run, the late alert is queued
   // A stand-in for lane 3's deliverAlertsPass: it takes what is in the Record's queue when it runs.
   const deliver = ({ rec }) => { got.push(...queued(rec)); return { sent: got.length }; };
   const logs = [];
-  const code = await main([w.f('config.json')], { log: (l) => logs.push(l), wireOpts: { deliver, fetchFn: fakeGitHubFetch(w.fake) } });
+  const code = await main([w.configFile], { self: w.main, log: (l) => logs.push(l), wireOpts: { deliver, fetchFn: fakeGitHubFetch(w.fake) } });
   assert.equal(code, 0, logs.join('\n'));
   assert.ok(got.includes('the Dispatcher has no full pass on record: nothing is started or merged until it runs'), got.join(' | '));
   // Every pass before it had run: their failures were queued first, so delivery saw them too.
   for (const p of ['gate', 'watch']) assert.ok(got.some((t) => t.startsWith(`the robot job's ${p} pass failed`)), p);
   assert.equal(ROBOT_PASSES.at(-1), 'deliver');
+});
+
+test('audit #144 r2 n1: a config that names no installRoot is refused by main, which says installRoot', async () => {
+  const L = installedLayout('orch-robot-noroot-', { files: { 'wiring/w.mjs': 'export async function wire() { return {}; }\n' } });
+  const self = L.write('wiring/robot-main.mjs', 'export {};\n');
+  // Everything else as a working config has it: only the reader can refuse this one (a job that read its own file
+  // first and returned it when it named no installRoot would go on to the wiring instead).
+  const config = L.write('job.json', { wiring: L.path('wiring/w.mjs') });
+  const lines = [];
+  assert.equal(await main([config], { self, log: (s) => lines.push(s) }), 1);
+  assert.match(lines.join('\n'), /installRoot must be a full path/);
 });

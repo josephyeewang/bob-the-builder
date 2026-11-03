@@ -25,9 +25,12 @@
 // A folder problem or a kind with nothing to take it in is likewise told until delivered (L260 MAT-2), and two products
 // whose rules name the same folder are both refused, so no file is taken in twice (L260 MAT-3). A folder is, for good,
 // the first product's that takes files in from it: a product whose rules name it later is refused and told until its
-// rules give it a new folder, so files the first used are never taken in again (L268 MAT-B). An interruption whose
-// tell was lost is carried by every later write of the file's fact, so a claim or refusal never hides it (L268 MAT-A). A file name goes into
-// an alert or the diary only cleaned (`shown`): printable ASCII, quoted, at most 80 characters.
+// rules give it a new folder, so files the first used are never taken in again (L268 MAT-B). Bytes are one product's for
+// good too: by sha256, whatever happened to the folders, bytes another product handed in are refused (L279; the per-name
+// used list covers only the same name in the same product, so a product's own bytes under a new name go in again,
+// L254). Heartbeats are not checked: a poll's bytes come again by design. An interruption whose
+// tell was lost is carried by every later write of the file's fact, so a claim or refusal never hides it (L268 MAT-A).
+// A file name goes into an alert or the diary only fenced (`shownName`: one line, stripped, masked; R-0b-126, probe P7).
 //
 // Day 1 (`product.cutover_stage` first; L76 (5)):
 //   - research-, claim- and heartbeat- files go to their handlers (R-0b-135, R-0b-130, R-0b-131);
@@ -47,7 +50,10 @@ import { join } from 'node:path';
 import { KEYS, need } from './keys.mjs';
 import { tellThen, dropCause, isQueued } from './alerts.mjs';
 import { sha256 } from './outbox-intake.mjs';
+// Git's blob id for a file's bytes, the id refusal 10 compares at merge (M6 gather `blob`; L290 M-1).
+import { blobSha } from '../M10-rules/reader.mjs';
 import { BUNDLE_CAP } from '../M4-workshop/git/push.mjs';
+import { cleanOutside, SOURCES } from '../M12-sensors/escape.mjs';
 
 export const FIRST_CUTOVER = 'First cutover: MAIN merges code by hand.';
 export const IDEAS_OFF = 'idea filing is off until #95-b lands (L212, L215)';
@@ -66,6 +72,24 @@ export const NAMES = Object.freeze({
   claim: new RegExp(`^claim-${ID}\\.md$`),
   heartbeat: new RegExp(`^heartbeat-${ID}\\.md$`),
 });
+// What each kind's text is, as outside text (R-0b-126). Every kind in NAMES names its source here, so none falls to
+// 'unknown'; a bundle is git's bytes, handed on only as a path and never read as text, so it is BYTES. The text a
+// handler or review gets is only ever cleanOutside's fenced copy (stripped, masked, escaped); the sha256 is of the
+// raw bytes. A kind with no source here is refused (fenceFor throws), and proposals-intake.test.mjs fails.
+export const BYTES = 'bytes';
+export const SOURCE_OF = Object.freeze({
+  proposal: 'proposal-file', bundle: BYTES, research: 'research-file', idea: 'idea-file', claim: 'proposal-file', heartbeat: 'proposal-file',
+});
+/** A file name as alert text shows it: one line, stripped, masked and fenced (R-0b-126, probe P7). */
+export const shownName = (name) => cleanOutside(name, 'proposal-name');
+/** The fenced copy of a file's text, with its kind's own source; throws for a kind with none, or one that is bytes. */
+export function fenceFor(kind, text) {
+  const source = Object.hasOwn(SOURCE_OF, kind) ? SOURCE_OF[kind] : null;
+  // `source === BYTES` is also refused by the SOURCES check today ('bytes' is not an outside-text source). It stays so
+  // the rule "a bundle is never read as text" does not rest on M12's list never gaining that word.
+  if (!source || source === BYTES || !SOURCES.includes(source)) throw new Error(`no outside-text source for a ${kind} file`);
+  return { source, fenced: cleanOutside(text, source) };
+}
 const PLAIN_DIR = /^\/[A-Za-z0-9._/-]+$/;
 
 /** The kind and id a name stands for, or null. */
@@ -107,12 +131,14 @@ export function folderProblem(dir, ownerUid, look = lstatSync) {
 }
 
 /**
- * Reads one file through a handle opened without following a link. → { ok, sha256, size, text? } | { ok: false, reason }.
- * A bundle is hashed in pieces and never held as text; every other kind is text, at most TEXT_CAP bytes.
+ * Reads one file through a handle opened without following a link. → { ok, sha256, size, text?, blob? } | { ok: false, reason }.
+ * A bundle is hashed in pieces and never held as text; every other kind is text, at most TEXT_CAP bytes, and also gets
+ * `blob`, git's blob id of the same bytes (L290 M-1): sha256, blob and text all come from the one read of one handle.
  * `fs` is the four calls it makes, so a test can make a file look owned by another user.
  */
 export function readProposalFile(dir, name, { ownerUid, kind, fs = { openSync, fstatSync, readSync, closeSync } }) {
   const cap = kind === 'bundle' ? BUNDLE_CAP : TEXT_CAP;
+  // Its reasons never carry the name: the caller names the file, fenced (R-0b-126, probe P7; L260 m-g).
   let fd;
   try { fd = fs.openSync(join(dir, name), C.O_RDONLY | C.O_NOFOLLOW | (C.O_NONBLOCK ?? 0)); } catch { return { ok: false, reason: 'it could not be opened without following a link' }; }
   try {
@@ -133,14 +159,10 @@ export function readProposalFile(dir, name, { ownerUid, kind, fs = { openSync, f
       h.update(buf.subarray(0, n));
       keep?.push(Buffer.from(buf.subarray(0, n)));
     }
-    return { ok: true, sha256: h.digest('hex'), size: total, ...(keep ? { text: Buffer.concat(keep).toString('utf8') } : {}) };
+    if (!keep) return { ok: true, sha256: h.digest('hex'), size: total };
+    const bytes = Buffer.concat(keep);
+    return { ok: true, sha256: h.digest('hex'), size: total, text: bytes.toString('utf8'), blob: blobSha(bytes) };
   } finally { fs.closeSync(fd); }
-}
-
-/** A file name as it may appear in an alert or the diary: printable ASCII only, quoted, at most 80 characters (r1 P7). */
-export function shown(name) {
-  const s = String(name).replace(/[^\x20-\x7e]/g, '?');
-  return JSON.stringify(s.length > 80 ? `${s.slice(0, 77)}...` : s);
 }
 
 const statOf = (p) => { try { const s = lstatSync(p); return `${s.size}:${s.mtimeMs}:${s.ino}`; } catch { return null; } };
@@ -155,8 +177,13 @@ export function stageOf(rules, product) {
  * One pass over every product's proposals folder.
  * `products`: the product ids. `ownerUid`: Joe's uid from the Dispatcher's config. `wait(ms)`: a sleep.
  * `alert(text, { mark })`: the queueing alert. `note(text)`: a diary line.
- * `handlers`: { research, claim, heartbeat }, each ({ rec, product, kind, id, name, text, sha256 }) → { ok, reason? }.
- * `docsCheck({ product, card, bundle })` → null | reason, and `toReview({ rec, product, card, proposal, bundle })` → { ok, reason? }:
+ * `handlers`: { research, claim, heartbeat }, each ({ rec, product, kind, id, name, source, fenced, sha256, blob, size, now }) → { ok, reason? } (`now`: the pass's clock):
+ *   `fenced` is the file's text as cleanOutside's fenced copy (R-0b-126); a handler never sees the raw text or bytes.
+ *   `sha256`, `blob` (git's blob id) and `size` are of the raw bytes, from the same read (L290 M-1): a handler that
+ *   needs the file itself (the research copy) records them on its card, and M6 refusal 10 compares the blob at merge.
+ *   Open (lane 2, L286 follow-up): the copier, push.mjs, is not built; it will read the file again through M9's safe
+ *   side-file open and copy it only when its sha256 still matches the card's.
+ * `docsCheck({ product, card, bundle })` → null | reason, and `toReview({ rec, product, card, proposal, bundle })` → { ok, reason? } (`proposal` fenced too):
  *   `bundle` is { path, sha256 }: the bytes this pass checked and recorded (L233 M-5), so part 2 checks the bytes it merges.
  *   part 2's; not passed in, every proposal is refused.
  * Returns what happened to each file.
@@ -232,6 +259,8 @@ export async function proposalsPass({ rec, rules, products, ownerUid, wait, aler
     const r = { product, name };
     out.push(r);
     rows.set(`${product}/${name}`, r);
+    // The name as alert and note text may carry it: fenced, so a planted line in a name is never read as an instruction.
+    const shown = shownName(name);
     if (first === null || look(join(dir, name)) !== first) { r.waiting = 'still being written'; continue; }
     const id = intakeFactId(product, name);
     let prev = rec.read('fact', id);
@@ -247,7 +276,7 @@ export async function proposalsPass({ rec, rules, products, ownerUid, wait, aler
     // The record refused this file's own fact: the tell is marked on its told fact instead, so it is told once per
     // cause, not every pass (L233 M-3, m4).
     const tellUnrecorded = (said, key) => {
-      note(`proposals ${product}: ${shown(name)}: ${said}`);
+      note(`proposals ${product}: ${shown}: ${said}`);
       if (rec.read('fact', toldFactId(product, name))?.doc?.told === key || isQueued(rec, toldFactId(product, name))) return undefined;
       return tellThen(alert, said, { fact: toldFactId(product, name), fields: { told: key }, kind: 'proposal_told' });
     };
@@ -261,8 +290,8 @@ export async function proposalsPass({ rec, rules, products, ownerUid, wait, aler
       const told = `${reason}\n${hash ?? first}`;
       const keep = hash === null && prev?.doc?.sha256 != null && prev.doc.state !== 'refused';
       if ((keep || prev?.doc?.state === 'refused') && prev.doc.refused_key === told) return;
-      const said = `${shown(name)} in ${product}'s proposals folder was refused: ${reason}`;
-      note(`proposals ${product}: ${shown(name)} refused: ${reason}`);
+      const said = `${shown} in ${product}'s proposals folder was refused: ${reason}`;
+      note(`proposals ${product}: ${shown} refused: ${reason}`);
       const at = new Date(now).toISOString();
       // Its own text and key, apart from an interruption's, so each is told again until delivered (L260 MAT-1).
       const w = put(keep ? { ...prev.doc, refused_why: reason, refused_at: at, refused_key: told, refused_text: said } : { sha256: hash, state: 'refused', why: reason, at, refused_key: told, refused_text: said }, 'proposal_refused');
@@ -278,7 +307,7 @@ export async function proposalsPass({ rec, rules, products, ownerUid, wait, aler
     if (prev?.doc?.state === 'applying' && parsed.kind !== 'heartbeat') {
       // A pass that stopped between its claim and the hand-over (outbox-intake's MAT-7): whether the file was used is
       // not known, so it is never used twice. Told once. A heartbeat is a poll, so it is simply taken again.
-      const said = `the intake of ${name} from ${product}'s proposals folder was interrupted (version ${String(prev.doc.sha256).slice(0, 12)}); it may or may not have been used, and was not used again`;
+      const said = `the intake of ${shown} from ${product}'s proposals folder was interrupted (version ${String(prev.doc.sha256).slice(0, 12)}); it may or may not have been used, and was not used again`;
       // Keyed on the interrupted bytes; one still untold from before is told in the same alert (L268 MAT-A). A claim
       // never carries a told mark, so the key need only differ from the mark this fact holds now.
       const old = untoldOf(prev.doc);
@@ -299,7 +328,7 @@ export async function proposalsPass({ rec, rules, products, ownerUid, wait, aler
         r.refused = 'the same name with new content';
         // Told once for these bytes: the mark lands when the alert is sent, and one still waiting is not queued again.
         if (prev.doc.told_new !== hash && !isQueued(rec, intakeFactId(product, name))) {
-          const said = `${name} in ${product}'s proposals folder was written again with different content; the second copy was not used`;
+          const said = `${shown} in ${product}'s proposals folder was written again with different content; the second copy was not used`;
           tellThen(alert, said, { fact: intakeFactId(product, name), fields: { told_new: hash }, kind: 'proposal_told' });
         }
         continue;
@@ -307,6 +336,30 @@ export async function proposalsPass({ rec, rules, products, ownerUid, wait, aler
     }
     let use;
     let useBundle = null;
+    // Which product handed these bytes in (L279). `record` writes this product's mark for bytes nobody has; without it the
+    // check only reads, so a proposal's duplicate is refused as one before the first-cutover docs check (r6 m-1).
+    const bytesSeen = (hashes, record) => {
+      for (const h of hashes) {
+        let o;
+        try { o = rec.read('fact', bytesFactId(h)); } catch (e) { return { broke: `the check that no other product handed these bytes in could not be read (${String(e?.message ?? e).slice(0, 200)})` }; }
+        if (o && (o.corrupt || typeof o.doc?.product !== 'string' || !o.doc.product)) return { broke: `the check that no other product handed these bytes in could not be read (${o.corrupt ? String(o.reason).slice(0, 200) : 'no product named'})` };
+        if (o && o.doc.product !== product) return { other: o.doc };
+        if (o || !record) continue;
+        const w = rec.write({ actor: 'dispatcher', entity: 'fact', id: bytesFactId(h), expectRev: 0, doc: { product, name, sha256: h, at: new Date(now).toISOString() }, kind: 'proposal_bytes' });
+        if (!w.ok) return { broke: `which product handed these bytes in could not be recorded (${w.reason})` };
+      }
+      return {};
+    };
+    // Refused or told; true when the file must not be used this pass.
+    const bytesStop = ({ other, broke }) => {
+      if (other) {
+        const as = typeof other.name === 'string' ? ` (as ${shownName(other.name)})` : '';
+        refuse(`these bytes were already handed in by ${other.product}${as} on ${String(other.at ?? '').slice(0, 10) || 'an unknown date'}`, hash);
+        return true;
+      }
+      if (broke) { r.refused = broke; tellUnrecorded(`${shown} in ${product}'s proposals folder was not used: ${broke}`, `bytes ${hash}`); return true; }
+      return false;
+    };
     if (parsed.kind === 'idea') { refuse(IDEAS_OFF, hash); continue; }
     if (parsed.kind === 'bundle') {
       const pair = `proposal-${parsed.id}.md`;
@@ -319,7 +372,7 @@ export async function proposalsPass({ rec, rules, products, ownerUid, wait, aler
       // Recorded, so new bytes under its name are refused and told like any other kind's (L233 M-5).
       if (!(prev?.doc?.state === 'held' && prev.doc.sha256 === hash)) {
         const w = put({ sha256: hash, state: 'held', at: new Date(now).toISOString() }, 'proposal_bundle');
-        if (!w.ok) { r.refused = `could not record the bundle: ${w.reason}`; tellUnrecorded(`${name} in ${product}'s proposals folder could not be recorded (${w.reason}); its proposal waits`, `bundle ${hash}`); continue; }
+        if (!w.ok) { r.refused = `could not record the bundle: ${w.reason}`; tellUnrecorded(`${shown} in ${product}'s proposals folder could not be recorded (${w.reason}); its proposal waits`, `bundle ${hash}`); continue; }
       }
       r.held = `taken in with ${pair}`;
       continue;
@@ -337,6 +390,7 @@ export async function proposalsPass({ rec, rules, products, ownerUid, wait, aler
         if (!bundleRow?.held || b?.state !== 'held') { r.waiting = `waiting for ${pair} to be taken in`; continue; }
         bundle = { path: join(dir, pair), sha256: b.sha256 };
       }
+      if (bytesStop(bytesSeen([hash, ...(bundle ? [bundle.sha256] : [])], false))) continue;
       if (stageOf(rules, product) !== 'second') {
         if (typeof docsCheck !== 'function') { refuse(`${FIRST_CUTOVER} (A docs proposal is taken in once the docs check on the push script's changed files is wired: R-0b-128 part 2.)`, hash); continue; }
         if (!bundle) { refuse(`no ${pair} carries this proposal's change`, hash); continue; }
@@ -346,35 +400,20 @@ export async function proposalsPass({ rec, rules, products, ownerUid, wait, aler
       }
       if (typeof toReview !== 'function') { refuse('a proposal\'s route to review is not built yet (R-0b-128 part 2)', hash); continue; }
       useBundle = bundle?.sha256 ?? null;
-      use = () => toReview({ rec, product, card, proposal: file.text, bundle });
+      use = () => toReview({ rec, product, card, proposal: fenceFor('proposal', file.text).fenced, bundle });
     } else {
       const h = handlers[parsed.kind];
       if (typeof h !== 'function') { r.waiting = `no ${parsed.kind} handler yet`; waiting.get(product)?.add(parsed.kind); continue; }
-      use = () => h({ rec, product, kind: parsed.kind, id: parsed.id, name, text: file.text, sha256: hash });
+      use = () => h({ rec, product, kind: parsed.kind, id: parsed.id, name, ...fenceFor(parsed.kind, file.text), sha256: hash, blob: file.blob, size: file.size, now });
     }
     // Bytes any other product already handed in never reach this one's handlers, whatever happened to the folders
     // (L279: three misses telling folders apart, MAT-B, C, D). Checked across all products by sha256, the bundle's too
     // when one goes with a proposal, and recorded before the claim. A check that can't be read or written keeps the file
     // unused this pass and is told once (fail closed). A heartbeat is a poll: the same bytes come again by design.
-    if (parsed.kind !== 'heartbeat') {
-      const hashes = [hash, ...(useBundle ? [useBundle] : [])];
-      let other = null;
-      let broke = null;
-      for (const h of hashes) {
-        let o;
-        try { o = rec.read('fact', bytesFactId(h)); } catch (e) { broke = `the check that no other product handed these bytes in could not be read (${String(e?.message ?? e).slice(0, 200)})`; break; }
-        if (o && (o.corrupt || typeof o.doc?.product !== 'string')) { broke = `the check that no other product handed these bytes in could not be read (${o.corrupt ? String(o.reason).slice(0, 200) : 'no product named'})`; break; }
-        if (o && o.doc.product !== product) { other = o.doc; break; }
-        if (o) continue;
-        const w = rec.write({ actor: 'dispatcher', entity: 'fact', id: bytesFactId(h), expectRev: 0, doc: { product, name, sha256: h, at: new Date(now).toISOString() }, kind: 'proposal_bytes' });
-        if (!w.ok) { broke = `which product handed these bytes in could not be recorded (${w.reason})`; break; }
-      }
-      if (other) { refuse(`these bytes were already handed in by ${other.product} on ${String(other.at ?? '').slice(0, 10) || 'an unknown date'}`, hash); continue; }
-      if (broke) { r.refused = broke; tellUnrecorded(`${name} in ${product}'s proposals folder was not used: ${broke}`, `bytes ${hash}`); continue; }
-    }
+    if (parsed.kind !== 'heartbeat' && bytesStop(bytesSeen([hash, ...(useBundle ? [useBundle] : [])], true))) continue;
     // Claim first, so a crash after the hand-over cannot use the file twice.
     const claim = put({ sha256: hash, state: 'applying', at: new Date(now).toISOString() }, 'proposal_claim');
-    if (!claim.ok) { r.refused = `could not record the intake: ${claim.reason}`; tellUnrecorded(`the intake of ${name} from ${product}'s proposals folder could not be recorded (${claim.reason}); it was not used`, `claim ${hash}`); continue; }
+    if (!claim.ok) { r.refused = `could not record the intake: ${claim.reason}`; tellUnrecorded(`the intake of ${shown} from ${product}'s proposals folder could not be recorded (${claim.reason}); it was not used`, `claim ${hash}`); continue; }
     let done;
     try { done = await use(); } catch (e) { done = { ok: false, reason: e.message }; }
     if (done?.ok) {

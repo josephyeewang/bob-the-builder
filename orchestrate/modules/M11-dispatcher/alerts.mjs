@@ -206,11 +206,12 @@ export function settleAlert(rec, sent, ok, now, why = 'it was not delivered') {
 }
 
 // Why one send failed, or null when it was delivered: it threw, answered false, or did not answer within `ms`.
-async function sendOne(port, text, ms) {
+// The port also gets the entry (L237), so a channel can key its issue on the entry's mark; `port(text)` ports ignore it.
+async function sendOne(port, text, ms, entry) {
   let timer;
   try {
     const late = new Promise((ok) => { timer = setTimeout(() => ok(LATE), ms); });
-    const r = await Promise.race([Promise.resolve().then(() => port(text)), late]);
+    const r = await Promise.race([Promise.resolve().then(() => port(text, entry)), late]);
     return r === LATE ? `it did not answer within ${ms} ms` : r === false ? 'the sender said no' : null;
   } catch (e) { return String(e?.message ?? e); } finally { clearTimeout(timer); }
 }
@@ -244,7 +245,7 @@ export async function sendAlerts(rec, port, now, { sendMs = ALERT_SEND_MS, budge
       // copy, in this round or one alongside it, carries only what none still out carries.
       const sent = { ...e, carried: carryFor(rec, d, e) };
       inFlight.add(sent);
-      const why = await sendOne(port, textToSend(e, carriedCount(sent.carried)), sendMs);
+      const why = await sendOne(port, textToSend(e, carriedCount(sent.carried)), sendMs, sent);
       const ok = why === null;
       done.push([sent, ok, why]);
       if (!later) settle();
