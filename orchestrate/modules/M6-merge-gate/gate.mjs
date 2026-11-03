@@ -603,10 +603,17 @@ export async function gatePass(ctx) {
     const f = record.read('fact', id);
     const ours = f?.doc && !f.corrupt && factFrom(ACTOR, { id, createdBy: record.meta?.('fact', id)?.createdBy ?? null }, MERGE_LIMIT_TOLD_FAMILY);
     const told = ours ? (Array.isArray(f.doc.told) ? f.doc.told : ['open']) : [];
-    if (told.includes(when)) return;
-    const said = alertTaken(alert, { type: 'merge_limit_missing', merge: m.id, card: m.doc.card, pr: m.doc.pr, note });
+    // The waiting note is told once: that wait is refused at the cap, so it ends. The open note has no end while the rules
+    // lack the limit (it waits for GitHub's final answer), so it is told again every WAIT_RETELL_MS while still open
+    // (L315 minor). `told_by` keeps each note's last time; a fact without it dates the open note by told_at.
+    const toldBy = ours && f.doc.told_by && typeof f.doc.told_by === 'object' ? f.doc.told_by : {};
+    const last = toldBy[when] ?? (told.includes(when) ? f.doc.told_at ?? null : null);
+    if (told.includes(when) && (when !== 'open' || !tellDue(last, now()))) return;
+    const again = told.includes(when);
+    const said = alertTaken(alert, { type: 'merge_limit_missing', merge: m.id, card: m.doc.card, pr: m.doc.pr, again, note: again ? `still: ${note}. You are told again every 24 h while it stays open` : note });
     if (!said) return;
-    const r = record.write({ actor: ACTOR, entity: 'fact', id, expectRev: f?.rev ?? 0, doc: { type: 'merge_limit_told', merge: m.id, key: KEYS.mergingOpenMaxMin, told: [...told, when], told_at: iso() } });
+    const at = iso();
+    const r = record.write({ actor: ACTOR, entity: 'fact', id, expectRev: f?.rev ?? 0, doc: { type: 'merge_limit_told', merge: m.id, key: KEYS.mergingOpenMaxMin, told: again ? told : [...told, when], told_at: at, told_by: { ...toldBy, [when]: at } } });
     if (!r.ok) alert({ type: 'merge_gate_write_refused', merge: m.id, to: 'told', reason: r.reason });
   }
 

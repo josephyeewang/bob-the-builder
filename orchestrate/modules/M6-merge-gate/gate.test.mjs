@@ -2757,3 +2757,25 @@ test('L315 S-M6b: the interrupted alert is sent again each pass until it is take
   assert.equal(told(w, 'merge_interrupted').length, 1, 'once taken, not again');
   assert.equal(tries.length, 3);
 });
+
+test('L315 minor: with no limit in the rules, the open-after-the-merge-call note is told again every 24 h while it stays open, and not once it settles', async () => {
+  const w = world();
+  verifiedCard(w);
+  loseAnswer(w, { merged: false });
+  const open = () => told(w, 'merge_limit_missing').filter((a) => /still open after the merge call/.test(a.note));
+  await gatePass(w.ctx);
+  await later(w, 1);
+  assert.equal(open().length, 1, 'told once it is open');
+  await later(w, 120);
+  assert.equal(open().length, 1, 'quiet at +2 h');
+  await later(w, DAY_MIN + 60 - 120);
+  assert.equal(open().length, 2, 'told again at +25 h');
+  assert.equal(open()[1].again, true);
+  assert.match(open()[1].note, /^still: .*told again every 24 h/);
+  await later(w, 60);
+  assert.equal(open().length, 2, 'quiet again after the re-tell');
+  w.g.pulls.get(7).state = 'closed';
+  await later(w, 1);
+  await later(w, DAY_MIN + 60);
+  assert.equal(open().length, 2, 'never told again once it settled');
+});
