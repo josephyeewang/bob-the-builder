@@ -8,7 +8,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, mkdirSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { installedLayout } from '../shared/job-config.test-helper.mjs';
@@ -18,9 +18,10 @@ import { FIRST, ENTRY } from '../modules/M10-rules/first-cutover.test-helper.mjs
 import { ALERT_QUEUE_FACT } from '../modules/M11-dispatcher/alerts.mjs';
 import { HOLD_FACT } from '../modules/M11-dispatcher/pass.mjs';
 import { LAST_PASS_FACT } from '../modules/M11-dispatcher/tick.mjs';
-import { wire, checkUser, lastReturn, dispatcherLate, NOT_WIRED_PASSES, ROBOT_PASSES } from './robot-wiring.mjs';
+import { wire, checkUser, lastReturn, dispatcherLate, lockHolder, LIVE_PASS_MAX_MS, NOT_WIRED_PASSES, ROBOT_PASSES } from './robot-wiring.mjs';
+import { pidDead } from '../modules/M11-dispatcher/pass-lock.mjs';
 import { DISPATCHER_LATE_MIN } from '../modules/M13-ledger/heartbeat.mjs';
-import { runPasses, CAUSE, main } from './robot-main.mjs';
+import { runPasses, CAUSE, main, NOT_QUEUED } from './robot-main.mjs';
 import { notWiredText } from './dispatcher-wiring.mjs';
 import { fakeGitHubFetch, blobOf } from './fake-github.test-helper.mjs';
 
@@ -45,7 +46,7 @@ function world({ extra = {}, issues = [], keyMode = 0o700 } = {}) {
   const token = f('token');
   writeFileSync(token, 'x'.repeat(40), { mode: 0o600 }); chmodSync(token, 0o600);
   const config = { installRoot: L.installRoot, wiring: L.path('wiring/robot-wiring.mjs'), lockFile: f('robot.lock'), product: P, recordRoot: f('record'), ownerUid: process.getuid(),
-    productsFile: f('products.json'), rulesStateDir, tokenFile: token, keyDir, ...extra };
+    productsFile: f('products.json'), rulesStateDir, tokenFile: token, keyDir, dispatcherLockFile: f('dispatcher.lock'), ...extra };
   const configFile = L.write('robot.json', config);
   const main = L.path('wiring/robot-main.mjs');
   const fake = { owner: ENTRY.owner, repo: ENTRY.repo, commit: COMMIT, text: FIRST, issues, logFile: f('github.log') };
@@ -169,11 +170,11 @@ test('R-0b-162 B (L239): the heartbeat tells Joe when the Dispatcher\'s last ful
   // The same stop is not told again on the next run.
   boot(w);
   assert.equal(late(queued(readRecord(w))).length, 1);
-  // On time: nothing new. A new stop later: told again.
+  // On time: nothing new, and the ended stop's alert leaves the queue unsent (L265, audit #137 M5). A new stop later: told again.
   lastPass(1); boot(w);
-  assert.equal(late(queued(readRecord(w))).length, 1);
+  assert.equal(late(queued(readRecord(w))).length, 0);
   lastPass(DISPATCHER_LATE_MIN + 1); boot(w);
-  assert.equal(late(queued(readRecord(w))).length, 2);
+  assert.equal(late(queued(readRecord(w))).length, 1);
   // The edges, without a process: 15 minutes is on time, 16 is late, a pass from the future is told.
   const rec = readRecord(w);
   const at = Date.parse(rec.read('fact', LAST_PASS_FACT).doc.at);
@@ -194,4 +195,139 @@ test('R-0b-162 B (L242): with the Dispatcher never run, the late alert is queued
   // Every pass before it had run: their failures were queued first, so delivery saw them too.
   for (const p of ['gate', 'watch']) assert.ok(got.some((t) => t.startsWith(`the robot job's ${p} pass failed`)), p);
   assert.equal(ROBOT_PASSES.at(-1), 'deliver');
+});
+
+// ---- the #137 follow-up (L265; audit-pr137 M1-M7, M9) ----
+
+const lockOf = (w) => w.config.lockFile;
+const deadPid = () => { let p = 999_999; while (!pidDead(p)) p -= 1; return p; };
+
+test('L265 M2 (P7, P5, P6a/b): a live holder runs nothing; a dead holder\'s lock is broken and told; a late round is told, exits 2 and keeps its lock', async () => {
+  const w = world();
+  const run = async (opts = {}, cfg = w.configFile) => { const logs = []; let delivered = 0;
+    const deliver = opts.deliver ?? (() => { delivered += 1; return { sent: 0 }; });
+    const code = await main([cfg], { log: (l) => logs.push(l), wireOpts: { deliver, fetchFn: fakeGitHubFetch(w.fake) }, ...opts.main });
+    return { code, logs, delivered }; };
+  // P7: a live holder (this test's own pid): exit 0, a log line, no pass runs, the lock is left as it was.
+  writeFileSync(lockOf(w), JSON.stringify({ pid: process.pid, taken_at: 'T-live' }));
+  let r = await run();
+  assert.equal(r.code, 0);
+  assert.ok(r.logs.some((l) => /robot: another pass runs \(pid \d+\)/.test(l)), r.logs.join('\n'));
+  assert.equal(r.delivered, 0, 'no pass ran under another round\'s lock');
+  assert.match(readFileSync(lockOf(w), 'utf8'), /T-live/);
+  // P5: a dead holder: its lock is broken, the stopped round is told, and this round runs.
+  writeFileSync(lockOf(w), JSON.stringify({ pid: deadPid(), taken_at: 'T-dead' }));
+  r = await run();
+  assert.equal(r.code, 0, r.logs.join('\n'));
+  assert.equal(r.delivered, 1);
+  assert.ok(queued(readRecord(w)).some((t) => /the last robot job round \(taken T-dead\) was stopped before it finished/.test(t)));
+  assert.equal(existsSync(lockOf(w)), false, 'a round that finished releases its lock');
+  // P6a/b: a round past its deadline: told, exit 2, and the lock stays (M7: the pass may still run).
+  const slow = world({ extra: { runDeadlineMs: 300 } });
+  const logs = [];
+  const code = await main([slow.configFile], { log: (l) => logs.push(l), wireOpts: { deliver: () => new Promise(() => {}), fetchFn: fakeGitHubFetch(slow.fake) } });
+  assert.equal(code, 2, logs.join('\n'));
+  assert.ok(logs.some((l) => /the round did not finish within 300 ms/.test(l)));
+  assert.ok(queued(readRecord(slow)).includes('a robot job round did not finish within 300 ms and was stopped; the next round starts in a minute'));
+  assert.equal(existsSync(slow.config.lockFile), true, 'the late round keeps its lock');
+});
+
+test('L265 M1, P16: an alert the queue refuses, or a queue that throws, is logged and kept with the failure; the later passes still run', async () => {
+  const w = world();
+  const { rec } = await wire(w.config, { fetchFn: fakeGitHubFetch(w.fake), log: () => {} });
+  const ran = [];
+  const passes = Object.fromEntries(ROBOT_PASSES.map((p) => [p, () => { ran.push(p); if (p === 'gate') throw new Error('boom'); return {}; }]));
+  // P16: holdAlert throws.
+  let r = await runPasses({ rec, passes, now: () => Date.now(), hold: () => { throw new Error('the queue is damaged'); } });
+  assert.deepEqual(ran, [...ROBOT_PASSES], 'every pass ran');
+  assert.deepEqual([r.gate.ok, r.gate.tell], [false, 'the queue is damaged']);
+  // M1: holdAlert answers false (the queue refused it).
+  r = await runPasses({ rec, passes, now: () => Date.now(), hold: () => false });
+  assert.equal(r.gate.tell, NOT_QUEUED);
+  // Already told today (null) is not a refusal.
+  r = await runPasses({ rec, passes, now: () => Date.now(), hold: () => null });
+  assert.equal(r.gate.tell, undefined);
+  // In main: the failed pass's line says it could not be told, and a stopped round whose alert is refused says so.
+  writeFileSync(lockOf(w), JSON.stringify({ pid: deadPid(), taken_at: 'T0' }));
+  const logs = [];
+  const code = await main([w.configFile], { log: (l) => logs.push(l), hold: () => false, wireOpts: { fetchFn: fakeGitHubFetch(w.fake) } });
+  assert.equal(code, 0);
+  assert.ok(logs.includes(`robot: the stopped round ${NOT_QUEUED}`), logs.join('\n'));
+  assert.ok(logs.some((l) => /robot: gate failed: not wired yet.*\(and could not be told: could not be queued\)/.test(l)), logs.join('\n'));
+  // The heartbeat's own late alert (robot-wiring.mjs): refused → logged, and kept with the heartbeat's failure.
+  const hw = await wire(w.config, { fetchFn: fakeGitHubFetch(w.fake), log: (l) => logs.push(l), hold: () => false });
+  const hr = await runPasses({ rec: hw.rec, passes: hw.passes, now: () => Date.now(), hold: () => null });
+  assert.equal(hr.heartbeat.tell, 'the Dispatcher-late alert could not be queued');
+  assert.ok(logs.includes('robot: the Dispatcher-late alert could not be queued'));
+});
+
+test('L265 M7, M9: a pass past its own limit keeps the lock; any `refused` fails the pass; failed items are logged', async () => {
+  const w = world();
+  const logs = [];
+  const code = await main([w.configFile], { log: (l) => logs.push(l), passDeadlineMs: 50, wireOpts: { deliver: () => new Promise(() => {}), fetchFn: fakeGitHubFetch(w.fake) } });
+  assert.equal(code, 0, logs.join('\n'));
+  assert.ok(logs.some((l) => /robot: deliver failed: it did not finish within 50 ms/.test(l)));
+  assert.ok(logs.includes('robot: a pass ran past its time limit and may still be running; the lock stays until this process exits'));
+  assert.equal(existsSync(lockOf(w)), true);
+  rmSync(lockOf(w));
+  const { rec } = await wire(w.config, { fetchFn: fakeGitHubFetch(w.fake), log: () => {} });
+  const base = Object.fromEntries(ROBOT_PASSES.map((p) => [p, () => ({})]));
+  for (const refused of [true, { why: 'x' }, 'no token']) {
+    const r = await runPasses({ rec, passes: { ...base, deliver: () => ({ refused }) }, now: () => Date.now() });
+    assert.equal(r.deliver.ok, false, JSON.stringify(refused));
+  }
+  const l2 = [];
+  assert.equal(await main([w.configFile], { log: (l) => l2.push(l), wireOpts: { deliver: () => ({ sent: 2, failed: 3 }), fetchFn: fakeGitHubFetch(w.fake) } }), 0);
+  assert.ok(l2.includes('robot: deliver ran, and 3 of its items failed'), l2.join('\n'));
+});
+
+test('L265 M3: the key folder check refuses group bits, a file, and an access list', () => {
+  const w = world();
+  const user = { uid: process.getuid(), ownerUid: process.getuid() };
+  chmodSync(w.config.keyDir, 0o750);
+  assert.throws(() => checkUser({ ...user, keyDir: w.config.keyDir }), /can be read by others \(mode 750\)/);
+  chmodSync(w.config.keyDir, 0o700);
+  assert.doesNotThrow(() => checkUser({ ...user, keyDir: w.config.keyDir }));
+  const file = w.f('keyfile'); writeFileSync(file, '', { mode: 0o600 });
+  assert.throws(() => checkUser({ ...user, keyDir: file }), /is not a plain folder/);
+  assert.throws(() => checkUser({ ...user, keyDir: w.config.keyDir, acl: (ps) => `${ps[0]} has an access list (ACL)` }), /the robot key folder: .* has an access list/);
+});
+
+test('L265 M5, M6: a running Dispatcher pass is not late (a 20-minute live pass), a stuck one is; late alerts leave the queue once it is on time', async () => {
+  const w = world();
+  let t = Date.parse('2026-11-03T10:00:00Z');
+  const { rec, passes } = await wire(w.config, { fetchFn: fakeGitHubFetch(w.fake), now: () => t, log: () => {} });
+  const pass = (atMs) => { const r = rec.write({ actor: 'dispatcher', entity: 'fact', id: LAST_PASS_FACT, expectRev: rec.read('fact', LAST_PASS_FACT)?.rev ?? 0,
+    doc: { at: new Date(atMs).toISOString(), steps: {} }, kind: 'full_pass' }); assert.ok(r.ok, JSON.stringify(r)); };
+  pass(t);
+  const now = t + 21 * MIN;
+  const live = (minAgo) => ({ live: true, takenAt: now - minAgo * MIN });
+  assert.equal(dispatcherLate(rec, { nowMs: now, holder: live(20) }), null, 'a live 20-minute pass is not late');
+  assert.ok(dispatcherLate(rec, { nowMs: now, holder: null }), 'no holder: late');
+  assert.ok(dispatcherLate(rec, { nowMs: now, holder: { live: false, takenAt: now - 20 * MIN } }), 'a dead holder: late');
+  assert.match(dispatcherLate(rec, { nowMs: now + 30 * MIN, holder: live(LIVE_PASS_MAX_MS / MIN + 1 + 30) }).text, /held its lock for \d+ minutes, longer than any pass may run/);
+  assert.match(dispatcherLate(rec, { nowMs: now, holder: { live: true, takenAt: null } }).text, /an unknown time/);
+  // The lock file, read as the wiring reads it.
+  writeFileSync(w.f('dispatcher.lock'), JSON.stringify({ pid: process.pid, taken_at: new Date(now - 20 * MIN).toISOString() }));
+  assert.deepEqual(lockHolder(w.f('dispatcher.lock')), { live: true, takenAt: now - 20 * MIN });
+  writeFileSync(w.f('dispatcher.lock'), JSON.stringify({ pid: deadPid(), taken_at: 'x' }));
+  assert.deepEqual(lockHolder(w.f('dispatcher.lock')), { live: false, takenAt: null });
+  writeFileSync(w.f('dispatcher.lock'), 'not json');
+  assert.equal(lockHolder(w.f('dispatcher.lock')), null);
+  rmSync(w.f('dispatcher.lock'));
+  // M5: late (no holder) → queued; the Dispatcher passes again → the late alert leaves the queue unsent.
+  t = now;
+  const lateQ = () => queued(rec).filter((x) => /^the Dispatcher's last full pass was/.test(x));
+  await passes.heartbeat().catch(() => {});
+  assert.equal(lateQ().length, 1);
+  pass(t);
+  await passes.heartbeat().catch(() => {});
+  assert.equal(lateQ().length, 0, 'the ended stop is no longer queued');
+  // Caught-up's gap counts from a pass's END: a 20-minute pass followed at once by the next is not a return; a real stop is.
+  t += MIN; const start = t;
+  t += 20 * MIN; pass(start);                  // started 20 min ago, written (ended) now
+  t += MIN; pass(t);
+  assert.notEqual(lastReturn(rec, { nowMs: t })?.back, t, 'a slow pass is not an outage (the return found, if any, is the earlier real stop)');
+  t += 20 * MIN; pass(t);
+  assert.equal(lastReturn(rec, { nowMs: t })?.back, t);
 });

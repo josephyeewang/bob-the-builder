@@ -25,21 +25,31 @@
 //               refuses, and the alerts stay queued.
 // A pass that refuses fails, and robot-main.mjs tells Joe ("the robot job's <pass> pass failed: not wired yet: …").
 //
-// The config: the Dispatcher's keys (dispatcher-wiring.mjs) and one more.
-//   keyDir         the robot key folder (setup: orchestrate's, 0700). The job starts only when this process's user owns it.
+// The config: the Dispatcher's keys (dispatcher-wiring.mjs) and two more.
+//   keyDir              the robot key folder (setup: orchestrate's, 0700, no access list). The job starts only when this
+//                       process's user owns it.
+//   dispatcherLockFile  the Dispatcher's pass lock (its config's lockFile). A Dispatcher whose pass is still running is
+//                       not late (audit #137 M6): see dispatcherLate().
 
-import { lstatSync } from 'node:fs';
-import { CONFIG_KEYS as DISPATCHER_KEYS, checkConfig, recordAndRules, refusing } from './dispatcher-wiring.mjs';
+import { lstatSync, readFileSync } from 'node:fs';
+import { CONFIG_KEYS as DISPATCHER_KEYS, checkConfig, recordAndRules, refusing, notWiredText } from './dispatcher-wiring.mjs';
 import { caughtUpOnce, RETURN_GAP_MIN } from '../modules/M13-ledger/caught-up.mjs';
 import { makeFactWriter } from '../modules/M12-sensors/facts.mjs';
 import { LAST_PASS_FACT } from '../modules/M11-dispatcher/tick.mjs';
-import { holdAlert } from '../modules/M11-dispatcher/pass.mjs';
-import { outbox } from '../modules/M11-dispatcher/alerts.mjs';
+import { holdAlert, HOLD_FACT } from '../modules/M11-dispatcher/pass.mjs';
+import { outbox, dropCause, ALERT_QUEUE_FACT } from '../modules/M11-dispatcher/alerts.mjs';
+import { pidDead } from '../modules/M11-dispatcher/pass-lock.mjs';
+import { RUN_DEADLINE_MS as DISPATCHER_RUN_MS, WATCHDOG_MARGIN_MS } from '../modules/M11-dispatcher/main.mjs';
+import { aclProblem } from '../modules/M4-workshop/launcher/install-check.mjs';
 import { DISPATCHER_LATE_MIN } from '../modules/M13-ledger/heartbeat.mjs';
-import { notWiredText } from './dispatcher-wiring.mjs';
 
-export const CONFIG_KEYS = Object.freeze([...DISPATCHER_KEYS, 'keyDir']);
-const PATHS = Object.freeze(['recordRoot', 'productsFile', 'rulesStateDir', 'tokenFile', 'keyDir']);
+export const CONFIG_KEYS = Object.freeze([...DISPATCHER_KEYS, 'keyDir', 'dispatcherLockFile']);
+const PATHS = Object.freeze(['recordRoot', 'productsFile', 'rulesStateDir', 'tokenFile', 'keyDir', 'dispatcherLockFile']);
+// The longest a live Dispatcher pass may hold its lock: M11's run deadline, its watchdog's margin, and a minute (audit
+// #137 M6). Past this, a live holder is stuck, and the Dispatcher counts as late. M11's default deadline: the Dispatcher's
+// config may set a shorter one, never a longer one the robot job would need to know.
+export const LIVE_PASS_MAX_MS = DISPATCHER_RUN_MS + WATCHDOG_MARGIN_MS + 60_000;
+export const LATE_CAUSE = (since) => `robot-dispatcher-late-${since ?? 'never'}`;
 export const ROBOT_PASSES = Object.freeze(['gate', 'heartbeat', 'caught-up', 'watch', 'deliver']);
 // What each pass that is not wired yet is waiting for: the port named in its refusal.
 export const NOT_WIRED_PASSES = Object.freeze({ gate: 'robot.github (R-0b-02)', heartbeat: 'robot.issues (L235)', watch: 'robot.vercel',
@@ -47,19 +57,25 @@ export const NOT_WIRED_PASSES = Object.freeze({ gate: 'robot.github (R-0b-02)', 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const MAX_IDEAS = 100;
 
-/** Refuses unless this process runs as the Record's owner AND owns the robot key folder, private to it. */
-export function checkUser({ uid, ownerUid, keyDir, lstat = lstatSync }) {
+/** Refuses unless this process runs as the Record's owner AND owns the robot key folder, private to it, no access list. */
+export function checkUser({ uid, ownerUid, keyDir, lstat = lstatSync, acl = aclProblem }) {
   if (uid !== ownerUid) throw new Error(`the robot job runs only as the Record's owner (uid ${ownerUid}), not uid ${uid}`);
   let st;
   try { st = lstat(keyDir); } catch (e) { throw new Error(`the robot key folder ${keyDir} can't be read (${e?.code ?? e})`); }
   if (st.isSymbolicLink() || !st.isDirectory()) throw new Error(`the robot key folder ${keyDir} is not a plain folder`);
   if (st.uid !== uid) throw new Error(`the robot key folder ${keyDir} belongs to uid ${st.uid}, not to this job's uid ${uid}`);
   if (st.mode & 0o077) throw new Error(`the robot key folder ${keyDir} can be read by others (mode ${(st.mode & 0o777).toString(8)}); it must be 700`);
+  // An inherited "everyone may read" access list would pass the mode check and give every key file put inside it to any
+  // user (audit #137 M3). Setup refuses one too; this is the second wall.
+  const a = acl([keyDir]);
+  if (a) throw new Error(`the robot key folder: ${a}`);
 }
 
 /**
- * The Dispatcher's most recent return, from the Record's diary: the newest two of its passes (`last-full-pass` writes)
- * more than RETURN_GAP_MIN apart, the later one within the last day. → { downSince, back } (ISO, ms) | null.
+ * The Dispatcher's most recent return, from the Record's diary: two of its passes (`last-full-pass` writes) in a row where
+ * more than RETURN_GAP_MIN passed between the first one ENDING (its diary line's time) and the next one starting (its
+ * `at`), the later one within the last day. → { downSince, back } (ISO, ms) | null. Measured from the end, as
+ * dispatcherLate() counts a running pass as not late (audit #137 M6): a slow pass is not an outage.
  * WHY. caught-up.mjs was written to run inside the Dispatcher's own pass, where "now is more than 15 minutes after the
  * last good pass" means "the Mini has just come back". In this job that same test would be true for every minute the
  * Dispatcher is still DOWN, and the one push for the return (keyed by downSince) would go out mid-outage, saying
@@ -67,30 +83,71 @@ export function checkUser({ uid, ownerUid, keyDir, lstat = lstatSync }) {
  * came back. A return more than a day old is not looked for (the job's first run must not report old history).
  */
 export function lastReturn(rec, { nowMs, gapMin = RETURN_GAP_MIN, withinMs = DAY_MS }) {
-  const at = [];
+  const at = []; const end = [];
   for (const l of rec.diary({ since: 0 })) {
     if (l.actor !== 'dispatcher') continue;
-    for (const w of l.writes ?? []) if (w.entity === 'fact' && w.id === LAST_PASS_FACT) { const t = Date.parse(w.doc?.at); if (Number.isFinite(t)) at.push(t); }
+    for (const w of l.writes ?? []) {
+      if (w.entity !== 'fact' || w.id !== LAST_PASS_FACT) continue;
+      const t = Date.parse(w.doc?.at);
+      if (!Number.isFinite(t)) continue;
+      const e = Date.parse(l.ts);
+      at.push(t); end.push(Number.isFinite(e) && e >= t ? e : t);
+    }
   }
   for (let i = at.length - 1; i > 0; i--) {
     if (nowMs - at[i] > withinMs) break;
-    if (at[i] - at[i - 1] > gapMin * 60e3) return { downSince: new Date(at[i - 1]).toISOString(), back: at[i] };
+    if (at[i] - end[i - 1] > gapMin * 60e3) return { downSince: new Date(at[i - 1]).toISOString(), back: at[i] };
   }
   return null;
 }
 
 /**
- * Is the Dispatcher late? Its last full pass (the `last-full-pass` fact) older than M13's DISPATCHER_LATE_MIN, missing,
- * or more than 10 minutes in the future (heartbeat.mjs's own rule). → null when on time, else { since (ms | null), text }.
+ * Who holds the Dispatcher's pass lock: { live, takenAt (ms | null) }, or null when no one does (or it can't be read:
+ * that is not a running pass). `live` is true unless the pid surely does not exist (pass-lock.mjs pidDead).
+ */
+export function lockHolder(file, { read = (f) => readFileSync(f, 'utf8'), dead = pidDead } = {}) {
+  let held; try { held = JSON.parse(read(file)); } catch { return null; }
+  const pid = held?.pid;
+  const t = Date.parse(held?.taken_at ?? '');
+  return { live: Number.isInteger(pid) && pid > 0 && !dead(pid), takenAt: Number.isFinite(t) ? t : null };
+}
+
+/**
+ * Is the Dispatcher late? (audit #137 M6, the lead's ruling) Late = no full pass (the `last-full-pass` fact, stamped at a
+ * pass's START) within M13's DISPATCHER_LATE_MIN, AND its pass lock not held by a live process; a live holder longer than
+ * LIVE_PASS_MAX_MS is stuck, and counts as late too. Also late: no full pass on record (unless the first one is running),
+ * or one more than 10 minutes in the future (heartbeat.mjs's own rule). → null when on time, else { since (ms | null), text }.
  * `since` keys the alert: each stop of the Dispatcher is told once (and again each day it lasts).
  */
-export function dispatcherLate(rec, { nowMs, lateMin = DISPATCHER_LATE_MIN }) {
+export function dispatcherLate(rec, { nowMs, lateMin = DISPATCHER_LATE_MIN, holder = null }) {
+  const held = holder?.live ? (holder.takenAt === null ? Infinity : nowMs - holder.takenAt) : null;
+  const running = held !== null && held <= LIVE_PASS_MAX_MS;
+  const stuck = held !== null && !running
+    ? ` (a Dispatcher pass has held its lock for ${Number.isFinite(held) ? `${Math.round(held / 60e3)} minutes` : 'an unknown time'}, longer than any pass may run)` : '';
   const at = Date.parse(rec.read('fact', LAST_PASS_FACT)?.doc?.at ?? '');
-  if (!Number.isFinite(at)) return { since: null, text: 'the Dispatcher has no full pass on record: nothing is started or merged until it runs' };
+  if (!Number.isFinite(at)) return running ? null : { since: null, text: `the Dispatcher has no full pass on record: nothing is started or merged until it runs${stuck}` };
   const min = Math.round((nowMs - at) / 60e3);
   if (min < -10) return { since: at, text: `the Dispatcher's last full pass is dated ${-min} minutes in the future: check the Mini's clock` };
-  if (min <= lateMin) return null;
-  return { since: at, text: `the Dispatcher's last full pass was ${min} minutes ago (late after ${lateMin}): nothing new is started or merged until it runs again` };
+  if (min <= lateMin || running) return null;
+  return { since: at, text: `the Dispatcher's last full pass was ${min} minutes ago (late after ${lateMin}): nothing new is started or merged until it runs again${stuck}` };
+}
+
+/**
+ * The Dispatcher is on time: every late alert still queued leaves unsent (L130, audit 0b-6 r7 M2; audit #137 M5), so Joe
+ * is not told of stops that have ended. → whether every drop was written.
+ */
+export function dropLateAlerts(rec) {
+  const prefix = HOLD_FACT(LATE_CAUSE(''));
+  // A hold fact is written only once its alert is delivered (pass.mjs holdAlert), so the causes are read from the queue
+  // itself: its waiting entries and its listed drops.
+  const facts = new Set();
+  let d = null; try { d = rec.read('fact', ALERT_QUEUE_FACT)?.doc; } catch { return false; }
+  for (const m of [...(d?.entries ?? []).map((e) => e?.mark?.fact), ...(d?.dropped_causes ?? []).map((c) => c?.fact)]) {
+    if (typeof m === 'string' && m.startsWith(prefix)) facts.add(m);
+  }
+  let ok = true;
+  for (const f of facts) ok = dropCause(rec, f) && ok;
+  return ok;
 }
 
 /** The open `idea` issues (caught-up.mjs's listIdeaIssues), one read. A list that could be cut off is refused, not used. */
@@ -102,7 +159,7 @@ export async function ideaIssues(gh, { owner, repo }) {
 }
 
 export async function wire(config, { log = (s) => process.stderr.write(`${s}\n`), fetchFn = globalThis.fetch, now = () => Date.now(),
-  uid = process.getuid?.(), deliver = null } = {}) {
+  uid = process.getuid?.(), deliver = null, hold = holdAlert } = {}) {
   const c = checkConfig(config, { keys: CONFIG_KEYS, paths: PATHS });
   checkUser({ uid, ownerUid: c.ownerUid, keyDir: c.keyDir });
   const { rec, gh, entry } = await recordAndRules(c, { who: 'robot', log, fetchFn, now });
@@ -111,12 +168,17 @@ export async function wire(config, { log = (s) => process.stderr.write(`${s}\n`)
   const passes = Object.fromEntries(Object.entries(NOT_WIRED_PASSES).map(([p, port]) => [p, refusing(port)]));
   if (deliver) passes.deliver = () => deliver({ rec, now });
   passes.heartbeat = async () => {
-    const late = dispatcherLate(rec, { nowMs: now() });
+    const late = dispatcherLate(rec, { nowMs: now(), holder: lockHolder(c.dispatcherLockFile) });
+    let tell = null;
     if (late) {
       log(`robot: alert: ${late.text}`);
-      holdAlert({ rec, cause: `robot-dispatcher-late-${late.since ?? 'never'}`, text: late.text, alert: outbox(rec, now()), now: now() });
-    }
-    throw new Error(notWiredText(NOT_WIRED_PASSES.heartbeat));
+      // A refused alert is logged and kept with the pass's failure (audit #137 M1; L130 m12).
+      if (hold({ rec, cause: LATE_CAUSE(late.since), text: late.text, alert: outbox(rec, now()), now: now() }) === false) {
+        tell = 'the Dispatcher-late alert could not be queued';
+        log(`robot: ${tell}`);
+      }
+    } else if (!dropLateAlerts(rec)) log('robot: the Dispatcher is on time, but its old late alerts could not be cleared from the queue');
+    throw Object.assign(new Error(notWiredText(NOT_WIRED_PASSES.heartbeat)), tell ? { tell } : {});
   };
   passes['caught-up'] = async () => {
     const ret = lastReturn(rec, { nowMs: now() });
