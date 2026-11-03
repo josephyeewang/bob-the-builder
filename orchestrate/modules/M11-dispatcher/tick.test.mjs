@@ -1121,14 +1121,14 @@ test('L172 m3: an outage opened in a pass whose outage alert send throws still h
   const gone = (id, c) => ({ id, card: c, alive: false, ended: true, lastWriteAt: T0 - 10 * MIN });
   const board = [gone('S-1', 'C-1'), gone('S-2', 'C-2'), gone('S-3', 'C-3')];
   let throwOnce = true;
-  const told = [];
+  const textOf = (t) => (typeof t === 'string' ? t : t.text);
+  const stopped = (t) => /stopped at once/.test(textOf(t));
+  const lostPort = fakeAlert({ throws: (t) => stopped(t) && throwOnce && ((throwOnce = false), 'queue gone') });
   const w = world([account(), usage(), card('C-1', { state: 'running' }), card('C-2', { state: 'running' }), card('C-3', { state: 'running' }),
     card('R-1', { state: 'in_review', changed_at: iso(T0 - 60 * MIN) }), ...mergeReady('V-1', 7)],
-  { over: { board: () => board, healthy: () => false, alert: (t) => {
-    const text = typeof t === 'string' ? t : t.text;
-    if (/stopped at once/.test(text)) { if (throwOnce) { throwOnce = false; throw new Error('queue gone'); } told.push(text); }
-    return true;
-  } } });
+  { over: { board: () => board, healthy: () => false, alert: lostPort } });
+  // Told: each outage alert the port took (not the one that threw).
+  const told = { get length() { return lostPort.texts.filter((t, i) => stopped(t) && lostPort.answers[i] !== 'threw').length; } };
   const r = await w.pass();
   assert.equal(w.rec.read('fact', OUTAGE_FACT).doc.state, 'open');
   assert.equal(w.rec.read('fact', OUTAGE_FACT).doc.told_id, undefined);

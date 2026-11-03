@@ -17,7 +17,8 @@
 // "not known yet" is marked temporary: GitHub or the record could not be read, a check or a review session has not
 // finished, GitHub has not worked out yet whether the PR is mergeable, or main is red (main's state, not the change's).
 // A change with temporary refusals and no final one is held (WAITING_HOLD), so the gate judges it again on its next
-// pass instead of refusing it for good.
+// pass instead of refusing it for good. A wait that outlasts the gate's cap with GitHub readable is the gate's to end
+// (gate.mjs, L184), not this file's.
 //
 // THE FACTS (gather.mjs fills them; a missing one refuses whatever reads it):
 //   cutoverStage 'first' | 'second'          product.cutover_stage, missing = first
@@ -41,14 +42,23 @@
 //   tier 1 | 2 | null                        M10's computed tier for the change
 //   exactReverse bool                        the change recomputes as an exact reverse (M10 exact-reverse.mjs)
 //   reversesGateMerge bool                   the reversed commit carries the robot's mark (first-cutover undo)
+//   exactReverseUnread, reversesGateMergeUnread true | undefined   a read under either check failed: unknown (L205)
 //   lane { decision, reason, tier }          rules.may('merge', subject): M10 picks docs lane or deep by cutover
-//   approve { needed, why, stands, reason }  M2 approveNeeded + approvalStands (refusals 8, 13, 14)
-//   go { ok, reasons, skipped } | null       M2 goCheck, or skipped for a go-free kind (refusal 10)
-//   threads { ok, unresolved } | null        unresolved human review threads, GraphQL (refusal 7)
+//   approve { needed, why, stands, reason, unread? }  M2 approveNeeded + approvalStands (refusals 8, 13, 14); unread:
+//                                            the Approve could not be read from GitHub, so it is not known (L205)
+//   go { ok, reasons, skipped } | null       M2 goCheck, or skipped for a go-free kind (refusal 10); null when it could
+//                                            not be read (M2's `unreadable`, L205)
+//   threads { ok, unresolved } | { ok: false, tooLong | incomplete | unreadable }   review threads, GraphQL (refusal 7)
+//   unreadReads [name]                       the reads that FAILED this pass (gather failedRead); the gate reads them (L190)
 //   rulesAdopted bool | null                 the adopted rules blob equals policy.yaml at main (else a hold)
 //   files [{ path, status }] | null          the change's files
 //   filesProblem 'too_many' | 'no_entry' | 'unread' | null   why there is no file list (L182); filesMissing the file
 //   checksTooLong text | undefined           a check or status list longer than the gate reads (L182)
+//   checksCutOff text | undefined            the head's check runs: GitHub answered, but its count doesn't match its list
+//                                            (L190): a wait, counted toward the cap; final when judgedOnMain
+//   judgedOnMain true | undefined            watch-only: the commit is already on main, so a wait is judged as the
+//                                            gate's verdict at the cap (L190 minor a)
+//   tooLongLists ['checks' | 'statuses']     which of the two it was (gate.mjs reads the other as unread; L187 c1)
 //   firstCustomerNewFiles [prefix] | null    effect_paths.first_customer_visible.new_files_under
 
 import { PASSES, worstVerdict } from '../M9-record/outbox.mjs';
@@ -88,6 +98,9 @@ const ignored = (c, list) => (Array.isArray(list) ? list : []).some((x) => Numbe
 // (a check that has not run or not finished, a pending status) is not known yet.
 function checksProblem(f) {
   if (typeof f.checksTooLong === 'string') return final(`the commit has ${f.checksTooLong}; run fewer checks on this commit`);
+  // Answered but cut off: the gate waits (counted toward its cap); for a commit already on main, watch-only gives the
+  // gate's verdict at the cap, which is final (L190 minor a).
+  if (typeof f.checksCutOff === 'string') return (f.judgedOnMain === true ? final : notYet)(`${f.checksCutOff}; GitHub's count doesn't match its list`);
   if (!Array.isArray(f.checks) || !Array.isArray(f.statuses)) return notYet('the checks could not be read');
   if (!Array.isArray(f.requiredChecks)) return notYet('the rules name no required checks');
   const runs = f.checks.filter((c) => !ignored(c, f.checksIgnored));
@@ -142,7 +155,10 @@ function verdictCheck(f) {
   const at = ` at ${head.slice(0, 7)}`;
   const rp = roleProblem(f.reviews, 'reviewer', PASSES.reviewer, true);
   if (rp) return reworded(rp, (r) => `${r}${at} (a pass needs a clean four-line checklist)`);
-  if (f.tier !== 1 && f.tier !== 2) return notYet('the change\'s tier is unknown');
+  // M10 gives the tier from the files: with them read, no tier is a fact a later pass reads the same (L187). A guard: the
+  // production classify (makeRules) always answers tier 1 or 2 and reads any doubt as tier 1, so it can't reach the
+  // final branch today; a classifier that could answer neither is refused here rather than judged (L190 cosmetic).
+  if (f.tier !== 1 && f.tier !== 2) return Array.isArray(f.files) ? final('the rules give no tier for the change\'s files') : notYet('the change\'s tier is unknown');
   const ap = roleProblem(f.reviews, 'auditor', PASSES.auditor, f.tier === 1);
   if (ap) return reworded(ap, (r) => `${f.tier === 1 ? 'Tier 1: ' : ''}${r}${at} (a pass needs 0 Material)`);
   const prHead = f.pr?.head?.sha;
@@ -205,6 +221,11 @@ export function judge(f) {
     const reverse = f.exactReverse === true;
     const kind = f.card.doc.kind ?? 'ordinary';
     if (kind === 'lead_daily_card') return { decision: 'refuse', refusals: [{ n: 9, reason: DAILY_CARD_LINE }], hold: null, notes };
+    // An undo whose own facts could not be read is judged on nothing else: as not a reverse, every other refusal would
+    // apply to it and some are final. It waits for a pass that reads them (L205).
+    if (kind === 'exact_reverse' && (f.exactReverseUnread === true || (first && reverse && f.reversesGateMergeUnread === true))) {
+      return { decision: 'hold', refusals: [{ n: 9, reason: f.exactReverseUnread === true ? 'whether the undo is an exact reverse could not be read' : 'whether the undo reverses a merge the gate made could not be read', temporary: true }], hold: WAITING_HOLD, notes };
+    }
     if (kind === 'exact_reverse' && !reverse) no(9, 'an undo card whose change is not an exact reverse');
     else if (first && kind === 'exact_reverse' && f.reversesGateMerge !== true) no(9, 'first cutover: an undo merges only when it reverses a merge the gate made');
 
@@ -228,7 +249,10 @@ export function judge(f) {
     // 5. The review (and the Tier-1 audit).
     if (!reverse) add(5, verdictCheck(f));
     // 7. Human review threads (fail closed).
-    if (f.threads?.ok !== true) (typeof f.threads?.tooLong === 'string' ? no(7, `the pull request has ${f.threads.tooLong}; open a new pull request; resolved threads still count toward GitHub's total`) : wait(7, 'the review threads could not be read'));
+    if (f.threads?.ok !== true) {
+      if (typeof f.threads?.tooLong === 'string') no(7, `the pull request has ${f.threads.tooLong}; open a new pull request; resolved threads still count toward GitHub's total`);
+      else wait(7, typeof f.threads?.incomplete === 'string' ? `the review threads came back incomplete (${f.threads.incomplete})` : 'the review threads could not be read');
+    }
     else if (!(f.threads.unresolved === 0)) no(7, `${f.threads.unresolved} review thread(s) unresolved`);
     // 9 and the holds. M10's merge answer; a hold keeps the place in the queue.
     const lane = f.lane;
@@ -243,18 +267,22 @@ export function judge(f) {
     // M10's own ask for a reverse still needs it (R2-M3).
     const ap = f.approve;
     const stands = ap?.stands === true;
+    // An Approve that could not be read from GitHub (ap.unread, L205) is not known to be missing: 8, 13 and 14 wait.
+    const apUnread = ap?.unread === true;
+    const approveWait = (n) => wait(n, ap.reason ?? 'the owner\'s Approve could not be read from GitHub');
     if (!stands) {
-      if (lane?.decision === 'ask') no(8, `the rules ask for the owner's Approve: ${lane.reason}`);
+      if (apUnread && (lane?.decision === 'ask' || (!reverse && ap?.needed !== false))) approveWait(8);
+      else if (lane?.decision === 'ask') no(8, `the rules ask for the owner's Approve: ${lane.reason}`);
       // With the change's files unread, M10 calls every change unclassifiable, so "needs the Approve" is not known yet
       // (PROBE-D, L164): it waits for a pass that reads them.
       else if (!reverse && ap?.needed === true && !Array.isArray(f.files)) waitFiles(8, 'the change\'s files could not be read, so whether it needs the owner\'s Approve is not known yet');
       else if (!reverse && ap?.needed === true) no(8, `needs the owner's Approve: ${(ap.why ?? []).join('; ')}${ap.reason ? ` (${ap.reason})` : ''}`);
       else if (!reverse && ap?.needed !== false) wait(8, 'the Approve check could not run');
     }
-    if (kind === 'fix') { if (stands) notes.push(NOT_BUILT_LINE); else no(13, 'a fix card needs the owner\'s Approve until refusal 13 is built'); }
+    if (kind === 'fix') { if (stands) notes.push(NOT_BUILT_LINE); else if (apUnread) approveWait(13); else no(13, 'a fix card needs the owner\'s Approve until refusal 13 is built'); }
     const cf = customerFiles(f);
     if (cf === null) (Array.isArray(f.files) ? wait : waitFiles)(14, 'the change\'s files or the first-customer paths could not be read');
-    else if (cf.length) { if (stands) { if (!notes.includes(NOT_BUILT_LINE)) notes.push(NOT_BUILT_LINE); } else no(14, `${cf[0].path} is customer-visible; needs the owner's Approve until refusal 14 is built`); }
+    else if (cf.length) { if (stands) { if (!notes.includes(NOT_BUILT_LINE)) notes.push(NOT_BUILT_LINE); } else if (apUnread) approveWait(14); else no(14, `${cf[0].path} is customer-visible; needs the owner's Approve until refusal 14 is built`); }
     // 10. The go.
     if (!f.go) (Array.isArray(f.files) ? wait : waitFiles)(10, 'the go could not be checked');
     else if (f.go.ok !== true && f.go.skipped !== true) no(10, (Array.isArray(f.go.reasons) && f.go.reasons.length ? f.go.reasons : ['go mismatch']).join('; '));

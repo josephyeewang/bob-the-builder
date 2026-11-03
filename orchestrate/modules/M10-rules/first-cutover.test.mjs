@@ -65,6 +65,7 @@ test('the sample as it stands is refused, for each first-cutover reason', () => 
     'context.lead.hard is missing (M11 reads it)',
     'context.handoff_cap.role is missing (M11 reads it)',
     'context.worker.split_after_compactions is missing (M11 reads it)',
+    'proposals.outbox is missing (M11 reads it)',
   ]);
 });
 
@@ -210,7 +211,7 @@ function readersAccept(text) {
   }));
   return m2 && m6 && m9 && gate && others && m11;
 }
-const M11_TYPE = { perState: 'object', shakedown: 'boolean', leadDailyCard: 'list', redRuns: 'list' };
+const M11_TYPE = { perState: 'object', shakedown: 'boolean', leadDailyCard: 'list', redRuns: 'list', proposalsOutbox: 'text' };
 const START_KINDS = ['editing', 'undo', 'overnight', 'script', 'readonly', 'review', 'audit', 'merge', 'undo_merge', 'lead', 'front_door'];
 
 const GO_FREE_BLOCK = '    go_free:\n      exact_reverse: true\n      lead_daily_card: []\n';

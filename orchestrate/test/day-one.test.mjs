@@ -60,7 +60,7 @@ import { moduleSources, scanSources, stripComments } from '../modules/M9-record/
 import { WRITERS } from '../modules/M9-record/permissions.mjs';
 import { startGate, riskOf } from '../modules/M11-dispatcher/gate.mjs';
 import { bands, readFact } from '../modules/M11-dispatcher/usage.mjs';
-import { undoStep, UNDO_CARD } from '../modules/M11-dispatcher/undo.mjs';
+import { undoStep, UNDO_CARD, exactReverse } from '../modules/M11-dispatcher/undo.mjs';
 import { undoStarts } from '../modules/M11-dispatcher/pass.mjs';
 import { outbox } from '../modules/M11-dispatcher/alerts.mjs';
 import { usageFact, undoEntries, undoSha, filesOfCommits, UNDO_ASK, T0 } from '../modules/M11-dispatcher/fixtures.test-helper.mjs';
@@ -175,10 +175,13 @@ async function gateAnswers() {
   assert.ok(undo, 'the undo step made the undo card');
   const docs = { id: 'C-2', kind: 'ordinary', product: P, tier: 2, files: [DOC] };
   const b = green(w.rules);
+  // pass.mjs asks undo.mjs's exactReverse before the gate; so does this (#117 audit c3).
+  const exact = exactReverse({ rec: w.rec, card: undo, filesOf: filesOfCommits });
+  assert.equal(exact.ok, true, `the undo card is not an exact reverse: ${exact.reason}`);
   const answers = {};
   for (const kind of START_KINDS) {
     const card = kind === 'undo' || kind === 'undo_merge' ? undo : kind === 'readonly' ? null : docs;
-    answers[kind] = startGate({ rules: w.rules, rec: w.rec, card, kind, product: P, b, running: [], lead: kind === 'readonly' ? 'L-1' : undefined, exactReverse: kind === 'undo' });
+    answers[kind] = startGate({ rules: w.rules, rec: w.rec, card, kind, product: P, b, running: [], lead: kind === 'readonly' ? 'L-1' : undefined, exactReverse: kind === 'undo' && exact.ok });
   }
   return answers;
 }
@@ -193,9 +196,8 @@ test('M11\'s start gate: no kind is held for a rules value the fixture lacks, an
 });
 
 // The known day-one gaps (L199, L204), each a to-do that the PR fixing it switches off.
-const UNDO_CAP_TODO = { todo: 'L199-A (lane 2, M11 gate.mjs): an exact-reverse undo is never refused by the editing caps' };
 for (const kind of USED) {
-  test(`M11's start gate allows a start of kind ${kind} on day one`, kind === 'undo' ? UNDO_CAP_TODO : {}, async () => {
+  test(`M11's start gate allows a start of kind ${kind} on day one`, async () => {
     const a = (await gateAnswers())[kind];
     assert.equal(a.ok, true, `the start gate refuses ${kind}: ${a.reason}`);
   });
@@ -225,7 +227,7 @@ test('Joe\'s Undo on day one: the real undo step makes a ready card, and the Rec
   assert.ok(w.rec.ready().some((c) => c.id === id), 'the Record lists the undo card as ready');
 });
 
-test('Joe\'s Undo on day one: M11\'s real undo start starts the undo card', { todo: 'L199-A and L199-B (lanes 2 and 1): M11\'s gate and M10\'s start question both refuse an undo at editing cap 0' }, async () => {
+test('Joe\'s Undo on day one: M11\'s real undo start starts the undo card', { todo: 'L199-B (lane 1): M10\'s start question refuses an undo at editing cap 0 (M11\'s side, L199-A, is done on #117)' }, async () => {
   const w = dayOne();
   const id = undoTapped(w);
   await undoStep({ rec: w.rec, rules: w.rules, now: T0, filesOf: filesOfCommits, alert: w.alerts });
@@ -240,9 +242,9 @@ test('Joe\'s Undo on day one: M11\'s real undo start starts the undo card', { to
 });
 
 // The merge question below is built by hand (exact_reverse_ok, reversed_audit and the missing reverses_files are
-// gather.mjs's to work out from GitHub). When L199-D switches this to-do off, ask it through checksStep's real
-// gatherFacts and assert on f.lane instead (day-one audit Minor 2).
-test('the undo card the real undo step makes can pass the first-cutover docs lane (declared Tier 2)', { todo: 'L199-D (lane 2, M11 undo.mjs): the undo card is written with no tier, and the docs lane takes only declared Tier 2' }, async () => {
+// gather.mjs's to work out from GitHub). The same card through M6's real gatherFacts, asserting on f.lane, is
+// modules/M11-dispatcher/undo-lane.test.mjs (L199-D; day-one audit Minor 2).
+test('the undo card the real undo step makes can pass the first-cutover docs lane (declared Tier 2)', async () => {
   const w = dayOne();
   const id = undoTapped(w);
   await undoStep({ rec: w.rec, rules: w.rules, now: T0, filesOf: filesOfCommits, alert: w.alerts });

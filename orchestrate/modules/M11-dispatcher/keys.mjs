@@ -55,6 +55,8 @@ export const KEYS = Object.freeze({
   leadHard: 'context.lead.hard',
   handoffCapRole: 'context.handoff_cap.role',
   splitAfterCompactions: 'context.worker.split_after_compactions',
+  // the proposals folder (R-0b-128; L76 (3)): one per product, Joe-only write
+  proposalsOutbox: 'proposals.outbox',
 });
 
 // Keys §14.1.6 does not have yet. Lane 1 adds them to the rules schema; until then a test passes
@@ -63,6 +65,7 @@ export const NEW_KEYS = Object.freeze([
   KEYS.paceMinShare, KEYS.shakedown, KEYS.amberEditingPerProduct, KEYS.amberEditingPerMac,
   KEYS.cancelGraceMin, KEYS.parkWaitMin, KEYS.deadQuietMin, KEYS.checkingMaxMin, KEYS.mergingOpenMaxMin,
   KEYS.reportingMaxMin, KEYS.inReviewNoReviewerMin, KEYS.frontDoorStuckMin, KEYS.usageUnknownMaxMin, KEYS.outageMinDead, KEYS.outageShare,
+  KEYS.proposalsOutbox,
 ]);
 
 // The only defaults: the lead's L13 pace floor (one day of seven), and shakedown on until the
@@ -70,7 +73,8 @@ export const NEW_KEYS = Object.freeze([
 const DEFAULTS = Object.freeze({ [KEYS.paceMinShare]: 0.143, [KEYS.shakedown]: true });
 
 export class MissingKey extends Error {
-  constructor(key, why) { super(why ? `the rules' ${key} ${why}` : `the rules have no value for ${key}`); this.key = key; }
+  // `unreadable`: the key has a value, but not one of its type (L228): a rule nobody can read, never "no value".
+  constructor(key, why, { unreadable = false } = {}) { super(why ? `the rules' ${key} ${why}` : `the rules have no value for ${key}`); this.key = key; if (unreadable) this.unreadable = true; }
 }
 
 // The keys whose value may have a fraction: shares, paces and percentages. They are read with dec(); every other
@@ -98,10 +102,11 @@ export function need(rules, key, { product, type = 'number' } = {}) {
   let v;
   if (type === 'number') v = DECIMAL_KEYS.includes(key) ? rules.dec(key, opts) : rules.num(key, opts);
   else if (type === 'boolean') v = rules.flag(key, opts);
+  else if (type === 'text') v = typeof raw === 'string' && raw.trim() ? raw : undefined;
   else if (type === 'list') v = Array.isArray(raw) && raw.every((x) => typeof x === 'string') ? raw : undefined;
   else if (type === 'object') v = raw !== null && typeof raw === 'object' && !Array.isArray(raw) ? raw : undefined;
-  if (v === undefined) throw new MissingKey(key);
-  if (AT_LEAST_ONE.includes(key) && !(v >= 1)) throw new MissingKey(key, `is ${v}; it must be at least 1`);
+  if (v === undefined) throw raw === undefined ? new MissingKey(key) : new MissingKey(key, 'is unreadable', { unreadable: true });
+  if (AT_LEAST_ONE.includes(key) && !(v >= 1)) throw new MissingKey(key, `is ${v}; it must be at least 1`, { unreadable: true });
   return v;
 }
 
