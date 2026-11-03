@@ -28,8 +28,9 @@
 //     `refused` alert still goes out from the store each time; this one says which product was not turned on.
 // Kept in ctx.stateDir (onboard-notices.json). With no stateDir nothing is kept, so each is told every pass.
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { toldRecently } from './told.mjs';
 
 export const ONBOARD_KEY = 'onboarding.state';
 const NOTICES = 'onboard-notices.json';
@@ -56,37 +57,57 @@ export function onboard(ctx) {
   if (on === undefined) return null;
   if (on !== 'active') return { type: 'onboard_near_miss', product: ctx.product, value: on };
   // Due first (L295 MAT-1): saveNotices throws when the folder can't be written, and nothing is turned on.
-  if (ctx.stateDir) { const n = readNotices(ctx); n.due = { after: lastSeq(ctx.record), at: ctx.now?.() ?? Date.now() }; saveNotices(ctx, n); }
+  if (ctx.stateDir) { const n = readNotices(ctx); n.due = lastLine(ctx.record); saveNotices(ctx, n); }
   const w = ctx.record.write({ actor: 'approvals', entity: 'product', id: ctx.product, expectRev: 0, doc: { state: 'active' }, kind: 'onboard' });
   return w.ok ? { type: 'onboarded', product: ctx.product } : { type: 'onboard_refused', product: ctx.product, reason: w.reason };
 }
 
-// The diary's last line number, and whether this product's onboard line came after `after` (L295 Minor 3). A record
-// with no diary (a test's stand-in) reads 0 and "after".
-const lastSeq = (record) => (typeof record?.diary === 'function' ? (record.diary({ since: 0 }).at(-1)?.seq ?? 0) : 0);
+// The mark names the diary's last line when it was made: its number and its time, both the Record's own (L309 MAT-1:
+// no clock is compared, so a slow pass or a Mac asleep mid-pass can't drop it). It is this Record's mark when that line
+// is still there with that time; then the notice goes out once this product's onboard line comes after it. A mark whose
+// line is not there, or has another time, is from another Record and is cleared unsent (L295 Minor 3). A record with
+// no diary (a test's stand-in) reads line 0, and "after".
+const lastLine = (record) => {
+  if (typeof record?.diary !== 'function') return { after: 0, ts: null };
+  const l = record.diary({ since: 0 }).at(-1);
+  return { after: l?.seq ?? 0, ts: l ? String(l.ts ?? '') : null };
+};
 const isOnboard = (p) => (l) => l.actor === 'approvals' && l.kind === 'onboard'
   && ((l.entity === 'product' && l.id === p) || (l.writes ?? []).some((w) => w.entity === 'product' && w.id === p));
-// The onboard line must also be within DUE_MS of the mark: a mark from another Record whose numbers happen to be lower
-// is not this product's create.
-const DUE_MS = 10 * 60_000;
-const near = (at) => (l) => at === undefined || Math.abs((Date.parse(l.ts ?? '') || -Infinity) - at) <= DUE_MS;
-const onboardedAfter = (record, p, { after, at }) => typeof record?.diary !== 'function'
-  || record.diary({ since: after }).some((l) => isOnboard(p)(l) && near(at)(l));
-const DUE = (v) => (v && typeof v === 'object' && Number.isSafeInteger(v.after) && v.after >= 0 && Number.isFinite(v.at) ? { after: v.after, at: v.at } : false);
+const thisRecords = (record, { after, ts }) => {
+  if (typeof record?.diary !== 'function') return true;
+  if (after === 0) return ts === null;
+  const l = record.diary({ since: after - 1 })[0];
+  return l?.seq === after && String(l.ts ?? '') === ts;
+};
+const onboardedAfter = (record, p, due) => typeof record?.diary !== 'function'
+  || (thisRecords(record, due) && record.diary({ since: due.after }).some(isOnboard(p)));
+const DUE = (v) => (v && typeof v === 'object' && Number.isSafeInteger(v.after) && v.after >= 0
+  && (v.after === 0 ? v.ts === null : typeof v.ts === 'string') ? { after: v.after, ts: v.ts } : false);
+// What readNotices answers for a file that is there but can't be read or parsed (L309 Minor 3): "tell". The product
+// may have been made on a pass whose mark is now unreadable, so a product made by approvals is told once more rather
+// than never; the file is then rewritten whole.
+const UNSURE = Object.freeze({ after: 0, ts: null, unsure: true });
+// The near-miss mark (L315): the value shown and when it was told (told.mjs says how long that counts).
+const NEAR = (v) => (v && typeof v === 'object' && typeof v.value === 'string' && Number.isFinite(v.at) ? { value: v.value, at: v.at } : null);
 
 function readNotices(ctx) {
-  if (!ctx.stateDir) return { seen: [], due: false };
+  if (!ctx.stateDir) return { seen: [], due: false, near: null };
   try {
     const f = join(ctx.stateDir, NOTICES);
     const v = existsSync(f) ? JSON.parse(readFileSync(f, 'utf8')) : null;
-    return { seen: Array.isArray(v?.seen) ? v.seen.filter((x) => typeof x === 'string') : [], due: DUE(v?.due) };
-  } catch { return { seen: [], due: false }; }
+    return { seen: Array.isArray(v?.seen) ? v.seen.filter((x) => typeof x === 'string') : [], due: DUE(v?.due), near: NEAR(v?.near) };
+  } catch { return { seen: [], due: UNSURE, near: null }; }
 }
 
 function saveNotices(ctx, n) {
   if (!ctx.stateDir) return;
   mkdirSync(ctx.stateDir, { recursive: true });
-  writeFileSync(join(ctx.stateDir, NOTICES), `${JSON.stringify({ seen: n.seen.slice(-MAX_SEEN), due: n.due })}\n`);
+  // Replaced whole (written beside, then renamed over), so a file that could not be read is replaced by one that can.
+  const f = join(ctx.stateDir, NOTICES);
+  const due = n.due && { after: n.due.after, ts: n.due.ts };
+  writeFileSync(`${f}.new`, `${JSON.stringify({ seen: n.seen.slice(-MAX_SEEN), due, near: n.near ?? null })}\n`, { mode: 0o600 });
+  renameSync(`${f}.new`, f);
 }
 
 const sent = (ctx, alert) => { try { return ctx.alert(alert) === true; } catch { return false; } };
@@ -95,21 +116,31 @@ export function onboardNotices(ctx, made) {
   const p = ctx.product;
   const n = readNotices(ctx);
   // With no stateDir nothing is kept: the notice goes out on the pass that made the record.
-  if (!ctx.stateDir && made?.type === 'onboarded') n.due = { after: 0, at: undefined };
+  if (!ctx.stateDir && made?.type === 'onboarded') n.due = { after: 0, ts: null };
   if (n.due) {
     const rec = ctx.record.read('product', p);
     // No record yet: the write was refused or never ran; the mark waits for the next create (which marks it again).
     if (rec && !rec.corrupt) {
-      if (!onboardedAfter(ctx.record, p, n.due)) { n.due = false; saveNotices(ctx, n); }   // a stale mark: on long before it
+      const unsure = n.due.unsure && (typeof ctx.record?.diary !== 'function' || ctx.record.diary({ since: 0 }).some(isOnboard(p)));
+      if (!unsure && !onboardedAfter(ctx.record, p, n.due)) { n.due = false; saveNotices(ctx, n); }   // another Record's mark
       else if (sent(ctx, { type: 'product_on', product: p, text: ONBOARD_SHOWN.on(p) })) { n.due = false; saveNotices(ctx, n); }
     }
   }
+  // A near miss (a value like Active) is told, then again each day while that value stands (L315: the product never
+  // turns on, so a once-ever message is a silent hold). The mark is the value and when it was told; it goes once the
+  // product is on or the value changes, so a new value is told at once.
+  if (made?.type === 'onboard_near_miss') {
+    const value = shownValue(made.value);
+    const now = ctx.now?.() ?? Date.now();
+    const at = n.near?.value === value ? n.near.at : null;
+    if (ctx.stateDir && toldRecently(at, now)) return;
+    if (sent(ctx, { type: 'onboard_near_miss', product: p, text: ONBOARD_SHOWN.nearMiss(p, made.value) })) { n.near = { value, at: now }; saveNotices(ctx, n); }
+    return;
+  }
+  if (n.near) { n.near = null; saveNotices(ctx, n); }
   let key = null;
   let notice = null;
-  if (made?.type === 'onboard_near_miss') {
-    key = `value:${shownValue(made.value)}`;
-    notice = { type: 'onboard_near_miss', product: p, text: ONBOARD_SHOWN.nearMiss(p, made.value) };
-  } else if (made?.type === 'onboard_refused') {
+  if (made?.type === 'onboard_refused') {
     const reason = String(made.reason ?? 'no reason given');
     key = `refused:${reason.replace(/\d+/g, 'N')}`;
     notice = { type: 'onboard_refused', product: p, text: ONBOARD_SHOWN.refused(p, reason) };

@@ -130,6 +130,10 @@ test('R-0b-162 A: a config the wiring does not know stops the start, told on std
     [{ recordRoot: 'relative/record' }, /config: recordRoot must be an absolute path/],
     [{ rulesStateDir: 'rules-state' }, /config: rulesStateDir must be an absolute path/],
     [{ product: 'another-app' }, /config: .*products\.json does not list the product another-app/],
+    // L309 Minor 1: the product names a folder, so . and .. (and any name not starting with a letter or digit) are refused.
+    [{ product: '..' }, /config: product must be a product name/],
+    [{ product: '.' }, /config: product must be a product name/],
+    [{ product: '.sample-app' }, /config: product must be a product name/],
   ];
   for (const [extra, why] of cases) {
     const r = boot(world({ extra }));

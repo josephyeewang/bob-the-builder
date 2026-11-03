@@ -45,7 +45,7 @@
 import { accessSync, constants, lstatSync, mkdirSync } from 'node:fs';
 import { isAbsolute, join } from 'node:path';
 import { openRecord } from '../modules/M9-record/writer.mjs';
-import { makeReader, readProducts } from '../modules/M10-rules/reader.mjs';
+import { makeReader, readProducts, PRODUCT_NAME } from '../modules/M10-rules/reader.mjs';
 import { makeEngine } from '../modules/M10-rules/engine.mjs';
 import { ROLES_DIR } from '../modules/M10-rules/roles.mjs';
 import { makeRules } from '../shared/rules.mjs';
@@ -54,7 +54,6 @@ import { queueAlert } from '../modules/M11-dispatcher/alerts.mjs';
 
 export const CONFIG_KEYS = Object.freeze(['wiring', 'lockFile', 'runDeadlineMs', 'product', 'recordRoot', 'ownerUid', 'productsFile', 'rulesStateDir', 'tokenFile', 'approvalsStateDir']);
 const PATHS = Object.freeze(['recordRoot', 'productsFile', 'rulesStateDir', 'tokenFile', 'approvalsStateDir']);
-const NAME = /^[A-Za-z0-9._-]+$/;
 
 // The ports PRs C and D wire (M11 README, "The tick's ports"). Each throws when called: never a stand-in answer.
 export const NOT_WIRED = Object.freeze(['board', 'healthy', 'resume', 'outboxSessions', 'wait', 'startReadonly', 'replyToLead', 'leads',
@@ -71,7 +70,7 @@ export function checkConfig(c, { keys = CONFIG_KEYS, paths = PATHS } = {}) {
   // A misspelt key would be ignored and its default used instead, so an unknown key stops the start.
   const extra = Object.keys(c).filter((k) => !keys.includes(k));
   if (extra.length) throw new Error(`config: unknown key ${extra.join(', ')}`);
-  if (typeof c.product !== 'string' || !NAME.test(c.product)) throw new Error('config: product must be a product name (letters, digits, . _ -)');
+  if (typeof c.product !== 'string' || !PRODUCT_NAME.test(c.product)) throw new Error('config: product must be a product name (a letter or digit, then letters, digits, . _ -)');
   for (const k of paths) if (typeof c[k] !== 'string' || !isAbsolute(c[k])) throw new Error(`config: ${k} must be an absolute path`);
   if (!Number.isSafeInteger(c.ownerUid) || c.ownerUid < 0) throw new Error('config: ownerUid must be a Mac user id');
   return c;

@@ -24,8 +24,9 @@
 // every module; a decision whose modules are unknown (empty, or not plain names) is held. Open = any state except
 // merged, closed, cancelled, closed_no_answer and reverted; never the decision's own card.
 
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { toldRecently } from './told.mjs';
 import { activeKind } from '../../shared/asks.mjs';
 import { answerCounts } from '../../shared/approval.mjs';
 import { askStore, writeDoc } from './ask-store.mjs';
@@ -43,41 +44,51 @@ const iso = (ms) => new Date(ms).toISOString();
 const ms = (s) => { const t = Date.parse(s ?? ''); return Number.isFinite(t) ? t : null; };
 const fail = (reason, extra = {}) => ({ ok: false, reason, ...extra });
 
-// The config alert goes out once per distinct problem, not every pass (round 2 m2-6). It is kept as sent only when the
-// sink did not answer false (L130: M11's outbox answers false when it could not queue); a throw stops before the write.
+// The config alert goes out once per distinct problem, not every pass (round 2 m2-6), then again each day while that
+// problem stands (L315: no ask is raised while the config is bad, so a once-ever message is a silent hold). The mark
+// is the problem and when it was told, kept only when the sink did not answer false (L130); a throw stops before the
+// write. It goes once the config reads fine. A file that can't be read counts as nothing told.
 function configAlert(ctx, reason) {
   const file = join(ctx.stateDir, 'config-alert.json');
   if (reason === null) { rmSync(file, { force: true }); return; }
+  const now = ctx.now?.() ?? Date.now();
   let last = null;
-  try { last = existsSync(file) ? JSON.parse(readFileSync(file, 'utf8')).reason : null; } catch { last = null; }
-  if (last === reason) return;
+  try { last = existsSync(file) ? JSON.parse(readFileSync(file, 'utf8')) : null; } catch { last = null; }
+  if (last?.reason === reason && toldRecently(last.at, now)) return;
   if (ctx.alert({ type: 'approvals_config', reason }) === false) return;
   mkdirSync(ctx.stateDir, { recursive: true });
-  writeFileSync(file, `${JSON.stringify({ reason })}\n`);
+  writeFileSync(`${file}.new`, `${JSON.stringify({ reason, at: now })}\n`, { mode: 0o600 });
+  renameSync(`${file}.new`, file);
 }
 
 // A push that can't go out (no phone channel, GitHub refused, the go can't be shown...) is told once per ask and cause,
-// not every pass (L295 Minor 1): an urgent undo is re-tried every pass and a window ask four or five times, and each
-// would otherwise reach Joe as a message. The cause is the alert's type and reason with its numbers out. Kept as told
-// only once the sink took it (answered true); an ask's marks go once it is pushed or stops waiting (any state but open
-// or pushed), so a later failure is told again. Kept in ctx.stateDir (ask-alerts.json); with none, told every pass.
-// A file that can't be saved throws: the step fails and the tick tells that once per day (tick.mjs).
+// then again each day while the ask still waits (L295 Minor 1, re-ruled L309 MAT-2: the holdAlert pattern, M11
+// pass.mjs). An urgent undo is re-tried every pass and a window ask four or five times, and each would otherwise reach
+// Joe as a message; an ask never pushed has no time limit, so a once-ever message would be a silent hold. The cause is
+// the alert's type and reason with its numbers out; its mark is when it was told, kept only once the sink took it
+// (answered true). An ask's marks go once it is pushed or stops waiting, so a later failure is told at once. Kept in
+// ctx.stateDir (ask-alerts.json): a file that can't be read or parsed counts as nothing told, so it tells; with no
+// stateDir, told every pass. A file that can't be saved throws: the step fails and the tick tells that once per day.
+// How long a told time counts: told.mjs (L315, temporary until lane 5's stillWaiting).
 const ASK_ALERTS = 'ask-alerts.json';
 const causeOf = (e) => `${e.type}:${String(e.reason ?? '').replace(/\d+/g, 'N')}`;
 function askOnce(ctx) {
   const file = ctx.stateDir ? join(ctx.stateDir, ASK_ALERTS) : null;
   let marks = {};
   try { marks = file && existsSync(file) ? JSON.parse(readFileSync(file, 'utf8')) ?? {} : {}; } catch { marks = {}; }
-  if (typeof marks !== 'object' || Array.isArray(marks)) marks = {};
+  if (!marks || typeof marks !== 'object' || Array.isArray(marks)) marks = {};
+  const now = ctx.now?.() ?? Date.now();
   const before = JSON.stringify(marks);
   return {
     alert(ask, e) {
       const key = causeOf(e);
-      const told = Array.isArray(marks[ask]) ? marks[ask] : [];
-      if (file && told.includes(key)) return;
-      let ok = false;
-      try { ok = ctx.alert(e) === true; } catch { ok = false; }
-      if (ok && file) marks[ask] = [...told, key].slice(-MAX_WINDOW_MARKS);
+      const told = marks[ask] && typeof marks[ask] === 'object' && !Array.isArray(marks[ask]) ? marks[ask] : {};
+      const at = told[key];
+      if (file && toldRecently(at, now)) return;   // quiet: nothing was sent, so there is no answer
+      // Kept as told only when the sink took it (answered true); a refusal or a throw answers false and marks nothing.
+      try { if (ctx.alert(e) !== true) return false; } catch { return false; }
+      if (file) marks[ask] = Object.fromEntries([...Object.entries(told).filter(([k]) => k !== key), [key, now]].slice(-MAX_WINDOW_MARKS));
+      return true;
     },
     pushed(ask) { delete marks[ask]; },
     save(waiting) {
@@ -85,7 +96,9 @@ function askOnce(ctx) {
       for (const id of Object.keys(marks)) if (!waiting.has(id)) delete marks[id];
       if (JSON.stringify(marks) === before) return;
       mkdirSync(ctx.stateDir, { recursive: true });
-      writeFileSync(file, `${JSON.stringify(marks)}\n`);
+      // Replaced whole, so a file that could not be read is replaced by one that can (L309 Minor 2).
+      writeFileSync(`${file}.new`, `${JSON.stringify(marks)}\n`, { mode: 0o600 });
+      renameSync(`${file}.new`, file);
     },
   };
 }

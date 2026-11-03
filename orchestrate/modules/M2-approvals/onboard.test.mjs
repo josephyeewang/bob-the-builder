@@ -4,10 +4,11 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { env, PRODUCT, must } from './fixtures.test-helper.mjs';
 import { schedulePass } from './schedule.mjs';
+import { createAsk } from './binding.mjs';
 import { onboard, onboardNotices, ONBOARD_KEY, ONBOARD_SHOWN } from './onboard.mjs';
 import { makeRules } from '../../shared/rules.mjs';
 import { fakeAlert } from '../../test/fake-alert.test-helper.mjs';
@@ -281,15 +282,107 @@ test('L295 MAT-1: the due mark is on disk before the record is written, and the 
 
 // L295 Minor 3: a mark left in an old folder never re-tells a product that has long been on.
 test('L295 Minor 3: an old due mark for a product long on is cleared without telling Joe again', async () => {
-  for (const stale of [true, { after: 0, at: Date.parse('2020-01-01T00:00:00Z') }, { after: 10_000, at: 0 }]) {
+  // Older shapes are not marks at all; a mark of today's shape whose diary line is not there, or has another time, is
+  // another Record's (L309: it is matched by the Record's own line, never by a clock).
+  // 'just-before' is a mark naming the line right before this product's onboard line, but with another time: the case
+  // only the Record's own time tells apart.
+  for (let stale of [true, { after: 0, at: Date.parse('2020-01-01T00:00:00Z') }, 'just-before', { after: 10_000, ts: '2026-01-01T00:00:00.000Z' }]) {
     const t = world();
+    must(createAsk(t.ctx, { id: 'Q-1', kind: 'tap_yes_no', card: 'C-1', title: 'A line before the create' }));
     await schedulePass(t.ctx);
+    if (stale === 'just-before') { const s = onboards(t)[0].seq; assert.ok(s >= 2); stale = { after: s - 1, ts: '2020-01-01T00:00:00.000Z' }; }
     assert.equal(told(t, 'product_on').length, 1);
     writeFileSync(join(t.ctx.stateDir, 'onboard-notices.json'), JSON.stringify({ seen: [], due: stale }));
     await schedulePass(t.ctx);
     await schedulePass(t.ctx);
     assert.equal(told(t, 'product_on').length, 1, `not told again: ${JSON.stringify(stale)}`);
     // An old-format mark (true) is not read as a mark at all; one in today's form is cleared.
-    if (stale !== true) assert.equal(JSON.parse(readFileSync(join(t.ctx.stateDir, 'onboard-notices.json'), 'utf8')).due, false);
+    if (typeof stale.ts === 'string') assert.equal(JSON.parse(readFileSync(join(t.ctx.stateDir, 'onboard-notices.json'), 'utf8')).due, false);
   }
+});
+
+// L309 MAT-1: the mark is the Record's own (a diary line's number and time), so a pass whose clock is far from the
+// Record's (a slow rules fetch, the Mac asleep mid-pass) still tells "is now on", once. Before, a gap over 10 minutes
+// between the tick's start and the Record's time turned the product on and dropped the mark unsent.
+test('L309 MAT-1: a tick clock 11 minutes or 2 hours away from the Record\'s still tells "is now on", once', async () => {
+  for (const gap of [11 * 60_000, 2 * 60 * 60_000, -2 * 60 * 60_000]) {
+    const t = world();
+    t.ctx.now = () => t.clock.t - gap;
+    await schedulePass(t.ctx);
+    assert.equal(t.record.read('product', PRODUCT).doc.state, 'active');
+    assert.equal(told(t, 'product_on').length, 1, `told once with a gap of ${gap / 60_000} min`);
+    await schedulePass(t.ctx);
+    assert.equal(told(t, 'product_on').length, 1, 'not again');
+  }
+});
+
+// L309 MAT-1, the crash between the record and the notice: the sink refused, the clocks are hours apart, and the next
+// pass still tells once.
+test('L309 MAT-1: a notice the sink refused goes out on a later pass, however far apart the clocks', async () => {
+  const t = world();
+  t.ctx.now = () => t.clock.t - 3 * 60 * 60_000;
+  t.sink.answer = false;
+  await schedulePass(t.ctx);
+  assert.equal(told(t, 'product_on').length, 0);
+  t.sink.answer = true;
+  await schedulePass(t.ctx);
+  await schedulePass(t.ctx);
+  assert.equal(told(t, 'product_on').length, 1);
+});
+
+// L309 Minor 3: a notices file that can't be read or parsed counts as "tell" for a product approvals turned on; it is
+// replaced whole by a readable one, so it is told once, not every pass.
+test('L309 Minor 3: an unreadable or corrupt notices file tells "is now on" rather than never', async () => {
+  for (const how of ['corrupt', 'unreadable']) {
+    const t = world();
+    t.sink.answer = false;
+    await schedulePass(t.ctx);
+    assert.equal(told(t, 'product_on').length, 0, 'made, not yet told');
+    const f = join(t.ctx.stateDir, 'onboard-notices.json');
+    if (how === 'corrupt') writeFileSync(f, '{ not json');
+    else chmodSync(f, 0o200);
+    t.sink.answer = true;
+    await schedulePass(t.ctx);
+    await schedulePass(t.ctx);
+    assert.equal(told(t, 'product_on').length, 1, how);
+    assert.equal(JSON.parse(readFileSync(f, 'utf8')).due, false, `${how}: replaced by a readable file`);
+  }
+  // A product approvals never made is not told on an unreadable file.
+  const t = world();
+  must(t.record.write({ actor: 'approvals', entity: 'product', id: PRODUCT, expectRev: 0, doc: { state: 'paused' } }), 'product');
+  mkdirSync(t.ctx.stateDir, { recursive: true });
+  writeFileSync(join(t.ctx.stateDir, 'onboard-notices.json'), '{ not json');
+  await schedulePass(t.ctx);
+  assert.equal(told(t, 'product_on').length, 0);
+});
+
+// L315: a near-miss value never turns the product on, so it is told again each day while it stands; the mark goes once
+// the product is on or the value changes. L317: a told time more than a minute ahead counts as not told.
+test('L315: a near-miss value is told again each day while it stands, and its mark goes once the product is on', async () => {
+  const H = 3600000;
+  const t = world({ [ONBOARD_KEY]: 'Active' });
+  const nm = () => told(t, 'onboard_near_miss').length;
+  await schedulePass(t.ctx);
+  assert.equal(nm(), 1);
+  t.clock.t += 2 * H;
+  await schedulePass(t.ctx);
+  assert.equal(nm(), 1, '+2 h: quiet');
+  t.clock.t += 23 * H;
+  await schedulePass(t.ctx);
+  assert.equal(nm(), 2, '+25 h: told again');
+  await schedulePass(t.ctx);
+  assert.equal(nm(), 2);
+  // L317: a told time 30 days ahead (a clock set back) is not "told": Joe is told now, and the mark is set to now.
+  const f = join(t.ctx.stateDir, 'onboard-notices.json');
+  const n = JSON.parse(readFileSync(f, 'utf8'));
+  writeFileSync(f, JSON.stringify({ ...n, near: { ...n.near, at: t.clock.t + 30 * 24 * H } }));
+  await schedulePass(t.ctx);
+  assert.equal(nm(), 3, 'a told time 30 days ahead: told now');
+  await schedulePass(t.ctx);
+  assert.equal(nm(), 3);
+  // Fixed to active: the product turns on and the near-miss mark goes.
+  t.ctx.rules = rulesOf(t, ON);
+  await schedulePass(t.ctx);
+  assert.equal(t.record.read('product', PRODUCT).doc.state, 'active');
+  assert.equal(JSON.parse(readFileSync(f, 'utf8')).near, null);
 });
