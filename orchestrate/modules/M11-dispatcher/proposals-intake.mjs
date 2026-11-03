@@ -50,6 +50,8 @@ import { join } from 'node:path';
 import { KEYS, need } from './keys.mjs';
 import { tellThen, dropCause, isQueued } from './alerts.mjs';
 import { sha256 } from './outbox-intake.mjs';
+// Git's blob id for a file's bytes, the id refusal 10 compares at merge (M6 gather `blob`; L290 M-1).
+import { blobSha } from '../M10-rules/reader.mjs';
 import { BUNDLE_CAP } from '../M4-workshop/git/push.mjs';
 import { cleanOutside, SOURCES } from '../M12-sensors/escape.mjs';
 
@@ -78,11 +80,13 @@ export const BYTES = 'bytes';
 export const SOURCE_OF = Object.freeze({
   proposal: 'proposal-file', bundle: BYTES, research: 'research-file', idea: 'idea-file', claim: 'proposal-file', heartbeat: 'proposal-file',
 });
-/** The fenced copy of a file's text, with its kind's own source; throws for a kind with none, or one that is bytes. */
 /** A file name as alert text shows it: one line, stripped, masked and fenced (R-0b-126, probe P7). */
 export const shownName = (name) => cleanOutside(name, 'proposal-name');
+/** The fenced copy of a file's text, with its kind's own source; throws for a kind with none, or one that is bytes. */
 export function fenceFor(kind, text) {
   const source = Object.hasOwn(SOURCE_OF, kind) ? SOURCE_OF[kind] : null;
+  // `source === BYTES` is also refused by the SOURCES check today ('bytes' is not an outside-text source). It stays so
+  // the rule "a bundle is never read as text" does not rest on M12's list never gaining that word.
   if (!source || source === BYTES || !SOURCES.includes(source)) throw new Error(`no outside-text source for a ${kind} file`);
   return { source, fenced: cleanOutside(text, source) };
 }
@@ -127,8 +131,9 @@ export function folderProblem(dir, ownerUid, look = lstatSync) {
 }
 
 /**
- * Reads one file through a handle opened without following a link. → { ok, sha256, size, text? } | { ok: false, reason }.
- * A bundle is hashed in pieces and never held as text; every other kind is text, at most TEXT_CAP bytes.
+ * Reads one file through a handle opened without following a link. → { ok, sha256, size, text?, blob? } | { ok: false, reason }.
+ * A bundle is hashed in pieces and never held as text; every other kind is text, at most TEXT_CAP bytes, and also gets
+ * `blob`, git's blob id of the same bytes (L290 M-1): sha256, blob and text all come from the one read of one handle.
  * `fs` is the four calls it makes, so a test can make a file look owned by another user.
  */
 export function readProposalFile(dir, name, { ownerUid, kind, fs = { openSync, fstatSync, readSync, closeSync } }) {
@@ -154,7 +159,9 @@ export function readProposalFile(dir, name, { ownerUid, kind, fs = { openSync, f
       h.update(buf.subarray(0, n));
       keep?.push(Buffer.from(buf.subarray(0, n)));
     }
-    return { ok: true, sha256: h.digest('hex'), size: total, ...(keep ? { text: Buffer.concat(keep).toString('utf8') } : {}) };
+    if (!keep) return { ok: true, sha256: h.digest('hex'), size: total };
+    const bytes = Buffer.concat(keep);
+    return { ok: true, sha256: h.digest('hex'), size: total, text: bytes.toString('utf8'), blob: blobSha(bytes) };
   } finally { fs.closeSync(fd); }
 }
 
@@ -170,8 +177,11 @@ export function stageOf(rules, product) {
  * One pass over every product's proposals folder.
  * `products`: the product ids. `ownerUid`: Joe's uid from the Dispatcher's config. `wait(ms)`: a sleep.
  * `alert(text, { mark })`: the queueing alert. `note(text)`: a diary line.
- * `handlers`: { research, claim, heartbeat }, each ({ rec, product, kind, id, name, source, fenced, sha256 }) → { ok, reason? }:
- *   `fenced` is the file's text as cleanOutside's fenced copy (R-0b-126); a handler never sees the raw text.
+ * `handlers`: { research, claim, heartbeat }, each ({ rec, product, kind, id, name, source, fenced, sha256, blob, size }) → { ok, reason? }:
+ *   `fenced` is the file's text as cleanOutside's fenced copy (R-0b-126); a handler never sees the raw text or bytes.
+ *   `sha256`, `blob` (git's blob id) and `size` are of the raw bytes, from the same read (L290 M-1): a handler that
+ *   needs the file itself (the research copy) records them, and lane 2's copier (push.mjs, L286) reads the file again
+ *   through M9's safe side-file open and copies it only when its sha256 still matches; refusal 10 checks the blob.
  * `docsCheck({ product, card, bundle })` → null | reason, and `toReview({ rec, product, card, proposal, bundle })` → { ok, reason? } (`proposal` fenced too):
  *   `bundle` is { path, sha256 }: the bytes this pass checked and recorded (L233 M-5), so part 2 checks the bytes it merges.
  *   part 2's; not passed in, every proposal is refused.
@@ -393,7 +403,7 @@ export async function proposalsPass({ rec, rules, products, ownerUid, wait, aler
     } else {
       const h = handlers[parsed.kind];
       if (typeof h !== 'function') { r.waiting = `no ${parsed.kind} handler yet`; waiting.get(product)?.add(parsed.kind); continue; }
-      use = () => h({ rec, product, kind: parsed.kind, id: parsed.id, name, ...fenceFor(parsed.kind, file.text), sha256: hash });
+      use = () => h({ rec, product, kind: parsed.kind, id: parsed.id, name, ...fenceFor(parsed.kind, file.text), sha256: hash, blob: file.blob, size: file.size });
     }
     // Bytes any other product already handed in never reach this one's handlers, whatever happened to the folders
     // (L279: three misses telling folders apart, MAT-B, C, D). Checked across all products by sha256, the bundle's too

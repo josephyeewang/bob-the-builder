@@ -36,10 +36,11 @@ export const OUTSIDE_FORM = '<outside-text source="SOURCE">ESCAPED TEXT</outside
 const ANSI = /\u001B(?:\[[0-?]*[ -\/]*[@-~]|\][^\u0007\u001B]*(?:\u0007|\u001B\\)|[@-Z\\-_])/g;
 const CONTROL = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F\u0080-\u009F\u200B-\u200F\u202A-\u202E\u2066-\u2069\uFEFF]/g;
 
-// Colour codes and invisible characters out, line ends as \n. Runs BEFORE masking: a colour code or zero-width
+// Colour codes and invisible characters out, line ends as \n: CR LF, a lone CR, and U+2028/U+2029 (line and paragraph
+// separators, which show as a new line; R-0b-126 r2, L290 Minor 1). Runs BEFORE masking: a colour code or zero-width
 // character inside a key breaks its shape, and stripping after masking would join a clear key back together
 // (0b-7 audit round 2, M-1).
-export const stripControls = (text) => String(text ?? '').replace(/\r\n?/g, '\n').replace(ANSI, '').replace(CONTROL, '');
+export const stripControls = (text) => String(text ?? '').replace(/\r\n?|[\u2028\u2029]/g, '\n').replace(ANSI, '').replace(CONTROL, '');
 
 export function escapeOutside(text, source, { cap = SINGLE_LINE.includes(source) ? CAP : Infinity } = {}) {
   const src = SOURCES.includes(source) ? source : 'unknown';
