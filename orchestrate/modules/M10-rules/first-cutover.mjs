@@ -90,6 +90,8 @@ export function firstCutoverProblems(text, entry, existing = []) {
   const out = [];
   // A missing stage reads as first, but the onboarding entry says it, so the second cutover is one visible edit.
   if (parseYaml(text, 'policy.yaml').product?.cutover_stage !== 'first') out.push('product.cutover_stage must say first');
+  // The one "on" switch (L204-b, L209): Approvals makes the product's record from it (M2 onboard.mjs), so the entry says it.
+  if (p.onboarding?.state !== 'active') out.push('onboarding.state must say active');
   if (p.caps.editing_per_product !== 0) out.push('caps.editing_per_product must be 0');
   const lanes = Object.keys(p.lanes);
   if (lanes.length !== FIRST_LANES.length || !FIRST_LANES.every((l) => lanes.includes(l))) out.push('lanes must be docs and research only');

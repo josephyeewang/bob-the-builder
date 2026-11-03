@@ -13,6 +13,8 @@
 //                  started (lapseClaims, claims.unlaunched_min), once that session id is stopped (L72).
 //   2. intake    — outbox files, so the record is current before anything is decided on it (R-0b-56, 58).
 //   3. leads     — the Lead restart from its handoff (R-0b-63), after the intake applied the handoff.
+//      approvals — M2's schedule pass per product (L221 MAT-1): run-outs, pushes, and a product record made when its
+//                  rules file turns it on, before the pass so that product can start this tick. Outage or not.
 //   4. pass      — resumes and starts (R-0b-55, 59, 64, 67), on the stops step's bands and sessions.
 //   5. limits    — time limits and reviewer starts, through the start gate (R-0b-57, 67).
 //   6. merges    — merge requests for reviewed changes, through the start gate (R-0b-67, 68).
@@ -48,8 +50,65 @@ import { move, note } from './moves.mjs';
 import { waitOnJoe, retellWaits } from './joe-waits.mjs';
 import { outbox, tellThen, sendAlerts, dropCause } from './alerts.mjs';
 import { takePassLock } from './pass-lock.mjs';
+import { schedulePass } from '../M2-approvals/schedule.mjs';
 
-export const STEPS = Object.freeze(['stops', 'undo', 'undo-starts', 'outage', 'intake', 'leads', 'pass', 'limits', 'merges', 'waits', 'phone', 'cleanup']);
+export const STEPS = Object.freeze(['stops', 'undo', 'undo-starts', 'outage', 'intake', 'leads', 'approvals', 'pass', 'limits', 'merges', 'waits', 'phone', 'cleanup']);
+// One product's Approvals pass gets this long (or the port `approvalsProductMs`); a hung one counts as failed and the
+// next product still runs (L221, lane 2's ask 2). The step's own deadline still bounds them all.
+export const APPROVALS_PRODUCT_MS = 30_000;
+
+// M2's alerts are objects ({ type, ... }); the tick's outbox takes one line of text. The line is built from known
+// fields only, so nothing else an alert carries (a GitHub answer, a token) reaches Joe's phone; a type this list does
+// not know still becomes a line, never dropped (L221, lane 2's ask 5). Outbox's false ("not queued") is passed back,
+// so M2's `=== false` checks (configAlert, the onboard notices) keep working.
+const ALERT_FIELDS = [['ask', 'ask'], ['card', 'card'], ['session', 'session'], ['kind', 'kind'], ['pr', 'PR']];
+const plain = (v, n = 200) => String(v).replace(/[\r\n\t]+/g, ' ').slice(0, n);
+/** The outbox `alert` handed to one product's approvals pass: its alerts, as text, into the step's own outbox. */
+export function approvalsAlerts(alert, product) { return (a) => alert(approvalsAlertText(product, a)); }
+export function approvalsAlertText(product, a) {
+  if (typeof a === 'string') return `Approvals, ${plain(product, 80)}: ${plain(a, 400)}`;
+  if (typeof a?.text === 'string') return plain(a.text, 400);
+  const type = typeof a?.type === 'string' && /^[a-z_]{1,60}$/.test(a.type) ? a.type.replace(/_/g, ' ') : 'an alert of an unknown type';
+  const parts = ALERT_FIELDS.filter(([k]) => ['string', 'number'].includes(typeof a?.[k])).map(([k, label]) => `${label} ${plain(a[k], 80)}`);
+  if (Array.isArray(a?.items)) parts.push(`${a.items.length} item${a.items.length === 1 ? '' : 's'}`);
+  const reason = typeof a?.reason === 'string' ? `: ${plain(a.reason)}` : '';
+  return `Approvals, ${plain(product, 80)}: ${type}${parts.length ? ` (${parts.join(', ')})` : ''}${reason}`;
+}
+
+/**
+ * The approvals step: M2's schedule pass (schedule.mjs) for each product the port `approvals()` lists, one at a time,
+ * each with its own deadline and its own try (L221 MAT-1). A product whose pass throws or runs late is failed, the
+ * others still run, and the step then fails with one stable line naming the failed products, sorted, each with a short
+ * cause (numbers out), so the tick's step-error alert tells it once per distinct set. A pass that answers `ok: false`
+ * (a bad approvals config) is not failed here: M2 has told Joe itself (approvals_config), once.
+ *   approvals() → [{ product, gh, owner, repo, stateDir, push, copies }]   per product, everything M2 reaches outside
+ */
+export async function approvalsStep({ rec, rules, now, alert, approvals, productMs = APPROVALS_PRODUCT_MS, pass = schedulePass }) {
+  if (typeof approvals !== 'function') throw new Error('the approvals port is missing');
+  const list = await approvals();
+  if (!Array.isArray(list)) throw new Error('the approvals port did not answer a list');
+  const results = [];
+  const failed = [];
+  for (const x of list) {
+    const product = typeof x?.product === 'string' && x.product ? x.product : null;
+    if (!product) { failed.push(['(a product with no name)', 'no product named']); continue; }
+    let timer;
+    try {
+      const late = new Promise((_, no) => { timer = setTimeout(() => no(new Error(`it did not finish within ${productMs} ms`)), productMs); });
+      const ctx = { ...x, record: rec, rules, product, now: () => now, alert: approvalsAlerts(alert, product) };
+      const r = await Promise.race([Promise.resolve().then(() => pass(ctx)), late]);
+      results.push({ product, ok: r?.ok === true, ...(r?.ok === true ? {} : { reason: r?.reason }), events: Array.isArray(r?.events) ? r.events.length : 0 });
+    } catch (e) {
+      failed.push([product, plain(e?.message ?? e, 120).replace(/\d+/g, 'N')]);
+      results.push({ product, ok: false, failed: true });
+    } finally { clearTimeout(timer); }
+  }
+  if (failed.length) {
+    const named = failed.sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)).map(([pr, why]) => `${pr} (${why})`);
+    throw new Error(`the Approvals pass failed for ${named.join(', ')}`);
+  }
+  return results;
+}
 export const ACCOUNT_FACT = 'signed-in-account';
 export const LAST_PASS_FACT = 'last-full-pass';
 export const STEP_ERROR_FACT = (step) => `step-error-${step}`;
@@ -209,6 +268,13 @@ export async function tick({ rec, rules, now, ports: p }) {
     }
     return out;
   });
+  // Approvals (M2's schedule pass), per product (L221 MAT-1). Before the main pass, so a product its rules file just
+  // turned on has its record when the pass reads it and can start this tick. Not before the undo steps: an undo tap is
+  // recorded by M2's binding from the Front Door's session (processSession), not here; this pass only lapses, expires,
+  // pushes, retries a close and onboards, and the undo steps neither need it nor are needed by it. Runs during an
+  // outage too: it starts no session, and asks still lapse and go out on time. Not in `complete` below: M2 tells its
+  // own config problems (approvals_config) and reports no missing rules value to the tick.
+  await run('approvals', () => approvalsStep({ rec, rules, now, alert, approvals: p.approvals, ...(p.approvalsProductMs !== undefined && { productMs: p.approvalsProductMs }) }));
   await run('pass', async () => {
     const r = await dispatcherPass({ rec, rules, now, account: acct.account, sessions: p.sessions(), probe: p.probe, launch: p.launch, stopGroup: p.stopGroup,
       saveWork: p.saveWork, hostLock: p.hostLock, pauseLead: p.pauseLead, filesOf: p.filesOf, alert, startsOff: acct.reason, tellMissing: false, stops, ...portDeadlines });
