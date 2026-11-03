@@ -12,7 +12,7 @@
 // hands a research_copy card to a worker (pass.mjs starts).
 //
 //   researchHandler({ rules }) → the proposals intake's `research` handler:
-//     ({ rec, product, id, name, sha256, blob, size, now }) → { ok: true, card } | { ok: false, reason }   (`fenced` unused; `now` is the pass's clock, required; a 0-byte report is refused)
+//     ({ rec, product, id, name, sha256, blob, size, now }) → { ok: true, card } | { ok: false, reason }   (`fenced` is read only to see that it is not blank; `now` is the pass's clock, required; an empty or blank report is refused)
 //   researchPass({ rec, now })  (now required) → [[card, what]]   each pass: a research_copy card left in draft is moved to ready, and
 //                                                  an ask whose card exists leaves the waiting list (restart-safe)
 //   researchCardDoc({ askId, product, name, sha256, blob, size }) → the one card shape (tests build theirs with it)
@@ -38,6 +38,16 @@ export const RESEARCH_OFF = `research copies are off: the rules don't set ${GO_F
 
 const HEX64 = /^[0-9a-f]{64}$/;
 const HEX40 = /^[0-9a-f]{40}$/;
+// The empty file's sha256 and git blob id: a report with either is empty whatever size it claims (#154 r2 cosmetic 1).
+export const EMPTY_SHA256 = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
+export const EMPTY_BLOB = 'e69de29bb2d1d6434b8b29ae775ad8c2e48c5391';
+// The intake's fenced copy is the text inside one outside-text wrapper (M12 escape.mjs), escaped so it holds no closing tag.
+const FENCED = /^<outside-text source="[^"<>]*">([\s\S]*)<\/outside-text>$/;
+/** True when a fenced copy holds nothing but blank space; null when it is not a fenced copy at all. */
+export function fencedBlank(fenced) {
+  const m = FENCED.exec(typeof fenced === 'string' ? fenced : '');
+  return m ? m[1].trim() === '' : null;
+}
 
 /** The one shape of a research_copy card, written in draft. */
 export function researchCardDoc({ askId, product, name, sha256, blob, size }) {
@@ -46,15 +56,18 @@ export function researchCardDoc({ askId, product, name, sha256, blob, size }) {
 }
 
 export function researchHandler({ rules }) {
-  return function research({ rec, product, id, name, sha256, blob, size, now }) {
+  return function research({ rec, product, id, name, fenced, sha256, blob, size, now }) {
     // The pass's own clock, handed on by the intake, never this machine's at call time (#154 audit, cosmetic).
     if (!Number.isFinite(now)) return { ok: false, reason: 'the intake did not hand on its clock, so the report was not used' };
     if (!goFreeOn(rules, product, 'research_copy')) return { ok: false, reason: RESEARCH_OFF };
     if (!RESEARCH_ID.test(String(id)) || name !== researchFileName(id)) return { ok: false, reason: 'a research report is named research-R-<number>.md, after its ask' };
     // The proof the copy is checked against: the intake's, from the raw bytes it read (L290 M-1).
     if (!HEX64.test(String(sha256)) || !HEX40.test(String(blob)) || !Number.isSafeInteger(size) || size < 0) return { ok: false, reason: 'the intake did not hand on the report\'s sha256, blob id and size, so its copy could not be checked' };
-    // An empty file is not a report: refused, so the ask stays open and Joe is told (#154 audit Minor 6).
-    if (size === 0) return { ok: false, reason: `the research report for ${id} is empty (0 bytes), so there is nothing to copy; the ask stays open` };
+    // An empty file is not a report, and nor is one of only blank space: refused, so the ask stays open and Joe is told
+    // (#154 audit Minor 6; r2 Minor 1 and cosmetic 1). The blank check reads the fenced copy, never the raw text.
+    const blank = fencedBlank(fenced);
+    if (blank === null) return { ok: false, reason: 'the intake did not hand on the report\'s fenced text, so it could not be checked' };
+    if (size === 0 || sha256 === EMPTY_SHA256 || blob === EMPTY_BLOB || blank) return { ok: false, reason: `the research report for ${id} is empty or only blank space, so there is nothing to copy; the ask stays open` };
     const brief = researchBrief(rec, id);
     if (!brief.ok) return { ok: false, reason: brief.reason };
     if (brief.product !== product) return { ok: false, reason: `research ask ${id} is for product ${brief.product}, not this one` };

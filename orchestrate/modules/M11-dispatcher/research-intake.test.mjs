@@ -8,7 +8,7 @@ import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { chmodSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { researchHandler, researchPass, researchCardDoc, researchPath, RESEARCH_CARD, RESEARCH_OFF } from './research-intake.mjs';
+import { researchHandler, researchPass, researchCardDoc, researchPath, RESEARCH_CARD, RESEARCH_OFF, EMPTY_SHA256, EMPTY_BLOB } from './research-intake.mjs';
 import { proposalsPass } from './proposals-intake.mjs';
 import { NEVER_STARTED } from './pass.mjs';
 import { outbox, sendAlerts } from './alerts.mjs';
@@ -96,7 +96,17 @@ test('refused: no open ask by that number, an odd name, another product, no proo
     assert.match(w.hand('R-1', REPORT, over).reason, /did not hand on the report's sha256, blob id and size/, JSON.stringify(over));
   }
   // An empty report is no report (#154 audit Minor 6), and a handler with no clock from the pass uses none of its own.
-  assert.match(w.hand('R-1', '').reason, /^the research report for R-1 is empty \(0 bytes\), so there is nothing to copy; the ask stays open$/);
+  const EMPTY = /^the research report for R-1 is empty or only blank space, so there is nothing to copy; the ask stays open$/;
+  for (const text of ['', '\n', ' \t\n', '\r\n\r\n', '\u200b\n']) assert.match(w.hand('R-1', text).reason, EMPTY, JSON.stringify(text));
+  // The empty file's own sha256 or blob id is empty whatever else is claimed (#154 r2 cosmetic 1).
+  assert.match(w.hand('R-1', REPORT, { sha256: EMPTY_SHA256 }).reason, EMPTY);
+  assert.match(w.hand('R-1', REPORT, { blob: EMPTY_BLOB }).reason, EMPTY);
+  assert.equal(EMPTY_SHA256, sha(''));
+  assert.equal(EMPTY_BLOB, blobSha(Buffer.from('')));
+  // No fenced copy, or something else in its place, is refused, never taken as not blank.
+  for (const fenced of [undefined, REPORT, '<outside-text source="x">a</outside-text> trailing']) {
+    assert.match(w.hand('R-1', REPORT, { fenced }).reason, /did not hand on the report's fenced text/, String(fenced));
+  }
   assert.match(w.hand('R-1', REPORT, { now: undefined }).reason, /did not hand on its clock/);
   assert.throws(() => researchPass({ rec: w.rec }), /needs the pass's clock/);
   assert.equal(researchBrief(w.rec, 'R-1').ok, true, 'the ask is still open');
@@ -129,7 +139,7 @@ test('restart-safe: a card written before a crash is landed by the same bytes or
 });
 
 test('through the real proposals intake: taken in once, and a refusal is told to the owner once', async () => {
-  const w = world({ asks: 2 });
+  const w = world({ asks: 4 });
   const dir = join(w.t.base, 'proposals'); mkdirSync(dir); chmodSync(dir, 0o750);
   // The real queue: each alert is queued in the Record, then sent to a fake port, which writes its told mark (as the tick).
   const port = fakeAlert();
@@ -143,14 +153,19 @@ test('through the real proposals intake: taken in once, and a refusal is told to
   writeFileSync(join(dir, 'research-R-1.md'), REPORT);
   writeFileSync(join(dir, 'research-R-7.md'), 'no such ask');
   writeFileSync(join(dir, 'research-R-2.md'), '');
+  writeFileSync(join(dir, 'research-R-3.md'), '\n');
+  writeFileSync(join(dir, 'research-R-4.md'), ' \t\n');
   await pass();
   await pass();
   assert.equal(w.rec.read('card', RESEARCH_CARD('R-1')).doc.source.sha256, sha(REPORT));
   assert.equal(w.rec.list('card').length, 1);
   assert.equal(alerts.filter((a) => /research-R-7\.md/.test(a) && /there is no research ask R-7/.test(a)).length, 1, 'told once');
-  // An empty report is refused and told once; its ask stays open (#154 audit Minor 6).
-  assert.equal(alerts.filter((a) => /research-R-2\.md/.test(a) && /is empty \(0 bytes\)/.test(a)).length, 1, 'the empty report is told once');
-  assert.equal(researchBrief(w.rec, 'R-2').ok, true);
+  // An empty report, and one of only blank space, is refused and told once; its ask stays open (#154 audit Minor 6, r2 Minor 1).
+  for (const id of ['R-2', 'R-3', 'R-4']) {
+    assert.equal(alerts.filter((a) => a.includes(`research-${id}.md`) && /is empty or only blank space/.test(a)).length, 1, `${id} is told once`);
+    assert.equal(researchBrief(w.rec, id).ok, true, `${id} is still open`);
+    assert.equal(w.rec.read('card', RESEARCH_CARD(id)), null, `${id} got a card`);
+  }
   // The pass's clock, handed on by the intake, not this machine's (#154 audit cosmetic).
   assert.equal(w.rec.read('ask', 'R-1').doc.landed.at, new Date(now).toISOString());
 });
@@ -248,7 +263,7 @@ test('refusal 10 end to end: the real handler, gather and judge refuse a copy wh
   must(env.record.applyOutbox({ role: 'front_door', sessionId: 'F-1' }, m9file(env, 'front_door', 'F-1', f.name, f.text)), 'ask');
   openResearchAsks({ record: env.record, rules, product: PRODUCT, now: () => env.clock.t, alert: fakeAlert() });
   must(researchHandler({ rules })({ rec: env.record, product: PRODUCT, kind: 'research', id: 'R-1', name: 'research-R-1.md',
-    sha256: sha(REPORT), blob: blobSha(Buffer.from(REPORT)), size: Buffer.byteLength(REPORT), now: env.clock.t }), 'handed in');
+    source: 'research-file', fenced: cleanOutside(REPORT, 'research-file'), sha256: sha(REPORT), blob: blobSha(Buffer.from(REPORT)), size: Buffer.byteLength(REPORT), now: env.clock.t }), 'handed in');
   const ctx = { record: env.record, rules, product: PRODUCT, gh: g.gh, owner: 'sample-org', repo: 'sample-app',
     view: makeGitView({ gh: g.gh, owner: 'sample-org', repo: 'sample-app' }), now: () => env.clock.t, alert: fakeAlert(), readFact: () => null };
   let n = 10;
