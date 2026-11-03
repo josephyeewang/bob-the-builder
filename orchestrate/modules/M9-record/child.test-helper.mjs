@@ -6,12 +6,12 @@
 //   { op: 'recover', root, lockTimeoutMs? }       recover() and report what it changed
 //   { op: 'race', root, go, w, testNoLock?, testNoRevCheck? }   wait for the `go` file, then write
 import { existsSync } from 'node:fs';
-import { openRecord } from './writer.mjs';
+import { openRecordWithStore } from './writer.mjs';
 import { rulesFor, PRODUCT, UID } from './rules.test-helper.mjs';
 import { sleepMs } from './lock.mjs';
 
 const a = JSON.parse(process.argv[2]);
-const opened = openRecord({ root: a.root, product: PRODUCT, ownerUid: UID, rules: rulesFor(), host: 'mac-a', now: () => a.now ?? Date.now(),
+const opened = openRecordWithStore({ root: a.root, product: PRODUCT, ownerUid: UID, rules: rulesFor(), host: 'mac-a', now: () => a.now ?? Date.now(),
   faultAt: a.faultAt, outbox: a.outbox, testNoLock: a.testNoLock, testNoRevCheck: a.testNoRevCheck, lockTimeoutMs: a.lockTimeoutMs ?? 20000 });
 let out;
 try {

@@ -138,6 +138,7 @@ test('an unreadable outbox is skipped, not fatal', async () => {
   assert.equal(out[0].skipped, 'outbox unreadable');
 });
 
+// L137, switched on in #95: think- is record: 'none' (handledBy outbox-intake.mjs), so the real Record answers not_a_record.
 test('audit MAT-6: a read-only request the start refuses waits, the Lead is told once, and it is tried again', async () => {
   const w = world();
   const ob = mk(join(w.root, 'lead'));
