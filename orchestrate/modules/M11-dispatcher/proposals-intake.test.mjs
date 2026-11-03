@@ -607,6 +607,100 @@ test('plant L260 m-g: the refusal names the file, fenced as R-0b-126 fences a na
   assert.ok(w.calls.notes.every((n) => !n.includes('\n')));
 });
 
+const sha = (s) => createHash('sha256').update(s).digest('hex');
+const claimed = (w, name, bytes) => seed(w.rec, 'fact', intakeFactId('a', name), { session: 'proposals-a', product: 'a', name, sha256: sha(bytes), state: 'applying' });
+const refusing = (w, kind) => { const rec = Object.create(w.rec); Object.defineProperty(rec, 'write', { value: (x) => (x.kind === kind ? { ok: false, reason: 'no' } : w.rec.write(x)) }); return rec; };
+
+test('plant L268 MAT-A: an interruption whose tell is lost is still told when the same pass claims or refuses the file\'s new bytes', async () => {
+  // New bytes after the interruption are claimed and used in the same pass (probe N1).
+  const w = world();
+  claimed(w, 'research-r1.md', 'old');
+  put(w, 'research-r1.md', 'new');
+  await w.pass({ alert: lost() });
+  assert.equal(fact(w, 'research-r1.md').state, 'applied');
+  assert.equal(w.calls.handed.length, 1, 'the new bytes are used once');
+  await w.pass(); await w.pass(); await w.pass();
+  assert.equal(count(w, /research-r1\.md<\/outside-text> from a's proposals folder was interrupted/), 1);
+  assert.equal(w.calls.alerts.length, 1);
+  // New bytes refused in the same pass (probe N1b): the interruption and the refusal, each told once.
+  const v = world();
+  claimed(v, 'idea-i1.md', 'old');
+  put(v, 'idea-i1.md', 'new', 'a');
+  await v.pass({ alert: lost() });
+  await v.pass(); await v.pass(); await v.pass();
+  assert.equal(count(v, /idea-i1\.md<\/outside-text> from a's proposals folder was interrupted/), 1);
+  assert.equal(count(v, /idea-i1\.md<\/outside-text> in a's proposals folder was refused: idea filing is off/), 1);
+  assert.equal(v.calls.alerts.length, 2);
+});
+
+test('plant L268 MAT-A: an untold interruption and a later one under the same name are told together, once', async () => {
+  const w = world();
+  seed(w.rec, 'fact', intakeFactId('a', 'research-r1.md'), { session: 'proposals-a', product: 'a', name: 'research-r1.md', sha256: sha('two'), state: 'applying', interrupted_text: 'the first interruption', interrupted_key: sha('one') });
+  put(w, 'research-r1.md', 'two');
+  await w.pass(); await w.pass();
+  assert.equal(count(w, /^the first interruption; the intake of <outside-text source="proposal-name">research-r1\.md<\/outside-text> from a's proposals folder was interrupted/), 1);
+  assert.equal(w.calls.alerts.length, 1);
+  assert.equal(w.calls.handed.length, 0, 'neither interrupted copy is used');
+});
+
+test('plant L268 MAT-B: a folder is its first product\'s; a product whose rules name it later is refused and told, and nothing is used twice', async () => {
+  // a uses a file; the rules then move a elsewhere and point b at a's old folder (probe N3).
+  const w = world({ products: ['a', 'b'] });
+  const a2 = join(w.root, 'a2'); mkdirSync(a2); chmodSync(a2, 0o750);
+  put(w, 'research-r1.md', 'x');
+  await w.pass();
+  assert.equal(w.calls.handed.length, 1);
+  const moved = rulesFor({ a: a2, b: w.dirs.a });
+  const out = await w.pass({ rules: moved });
+  await w.pass({ rules: moved });
+  assert.equal(w.calls.handed.length, 1, 'not taken in again under b');
+  assert.match(out.find((r) => r.product === 'b').skipped, /was a's first/);
+  assert.equal(count(w, /^b's proposals folder is not taken in: the proposals folder was a's first/), 1);
+  // Shared (both refused), b leaves (a uses), b comes back and a leaves (probe N3b): used once.
+  const v = world({ products: ['a', 'b'] });
+  const b2 = join(v.root, 'b2'); mkdirSync(b2); chmodSync(b2, 0o750);
+  const va2 = join(v.root, 'a2'); mkdirSync(va2); chmodSync(va2, 0o750);
+  put(v, 'research-r1.md', 'x');
+  for (const r of [{ a: v.dirs.a, b: v.dirs.a }, { a: v.dirs.a, b: b2 }, { a: v.dirs.a, b: v.dirs.a }, { a: va2, b: v.dirs.a }]) await v.pass({ rules: rulesFor(r) });
+  assert.equal(v.calls.handed.length, 1);
+  // The first product not recorded: the folder is not read this pass.
+  const u = world();
+  put(u, 'research-r1.md', 'x');
+  const res = await u.pass({ rec: refusing(u, 'proposal_folder_owner') });
+  assert.match(res[0].skipped, /first product could not be recorded/);
+  assert.equal(u.calls.handed.length, 0);
+});
+
+test('plant L268 m-2: with the file\'s own fact refused, two different bad files under one name are each told', async () => {
+  const w = world();
+  const rec = refusing(w, 'proposal_refused');
+  put(w, 'notes.md', 'x');
+  await w.pass({ rec });
+  put(w, 'notes.md', 'yyyy');
+  await w.pass({ rec }); await w.pass({ rec });
+  assert.equal(count(w, /notes\.md<\/outside-text> in a's proposals folder was refused/), 2);
+});
+
+test('plant L268 m-3: a used file\'s second refusal is told even after a first was', async () => {
+  const w = world();
+  put(w, 'research-r1.md', 'A');
+  await w.pass();
+  put(w, 'research-r1.md', 'x'.repeat(TEXT_CAP + 1));
+  await w.pass();
+  put(w, 'research-r1.md', 'x'.repeat(TEXT_CAP + 7));
+  await w.pass({ alert: lost() });
+  await w.pass(); await w.pass();
+  assert.equal(count(w, /larger than/), 2);
+});
+
+test('plant L268 m-3: the same folder by another spelling (./ and a trailing slash) is still one folder', async () => {
+  const w = world({ products: ['a', 'b'] });
+  put(w, 'research-r1.md', 'x');
+  await w.pass({ rules: rulesFor({ a: w.dirs.a, b: w.dirs.a.replace(/\/a$/, '/./a/') }) });
+  assert.equal(w.calls.handed.length, 0);
+  assert.equal(count(w, /also/), 2);
+});
+
 // ---- the read-deny wall (render-settings.mjs, L78 n5) ----
 
 const PATHS = (proposals) => ({
