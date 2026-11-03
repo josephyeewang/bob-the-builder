@@ -2,27 +2,28 @@
 // Dispatcher is reached through a linked folder, and the test runs exactly the command line,
 // environment and working folder the job file names: nothing is passed by hand.
 import { test } from 'node:test';
-import { fileURLToPath } from 'node:url';
 import assert from 'node:assert/strict';
 import { mkdirSync, writeFileSync, readFileSync, symlinkSync, existsSync } from 'node:fs';
-import { tempDir } from '../../shared/test-tmp.mjs';
+import { installedLayout } from '../../shared/job-config.test-helper.mjs';
 import { join, dirname } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { loginJobPlist } from './login-job.mjs';
 
-const HERE = fileURLToPath(new URL('.', import.meta.url));
 const unesc = (s) => s.replace(/&quot;/g, '"').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
 const strings = (xml) => [...xml.matchAll(/<string>([^<]*)<\/string>/g)].map((m) => unesc(m[1]));
 const after = (xml, key) => xml.split(`<key>${key}</key>`)[1];
 
 test('L31: one pass runs from the login job file as installed, through a linked folder, and writes its diary line', () => {
-  const root = tempDir('m11-installed-');
-  const install = join(root, 'install');
+  // The wiring, config and the Dispatcher itself sit in an installed copy (L253: the job reads its config through
+  // shared/job-config.mjs, and its own script must be one of the copy's code files, audit #144 m4).
+  const L = installedLayout('m11-installed-', { dirs: ['wiring'], source: true });
+  const root = L.base;
+  const install = join(root, 'jobs');
   mkdirSync(install);
-  symlinkSync(HERE, join(install, 'dispatcher'));
+  symlinkSync(join(L.copy, 'modules/M11-dispatcher'), join(install, 'dispatcher'));
   const logDir = join(root, 'logs'); mkdirSync(logDir);
   const diary = join(root, 'diary.json');
-  const wiring = join(root, 'wiring.mjs');
+  const wiring = L.path('wiring/wiring.mjs');
   writeFileSync(wiring, `import { writeFileSync } from 'node:fs';
 import { recWith, rulesWith } from ${JSON.stringify(join(install, 'dispatcher', 'fixtures.test-helper.mjs'))};
 const rec = recWith();
@@ -36,8 +37,7 @@ export async function wire() {
     cleanup: { copiesRoot: ${JSON.stringify(root)}, sealRoot: ${JSON.stringify(root)}, mirrorFor: () => null } } };
 }
 `);
-  const config = join(root, 'config.json');
-  writeFileSync(config, JSON.stringify({ wiring, lockFile: join(root, 'pass.lock') }));
+  const config = L.write('config.json', { installRoot: L.installRoot, wiring, lockFile: join(root, 'pass.lock') });
   const xml = loginJobPlist({ label: 'org.example.dispatcher', node: process.execPath, script: join(install, 'dispatcher', 'main.mjs'), config,
     path: `${dirname(process.execPath)}:/usr/bin:/bin`, logDir, workDir: root });
   // Read the job back the way launchd does: its arguments, its one variable, its folder.
