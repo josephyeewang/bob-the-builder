@@ -47,6 +47,10 @@ export const LIMIT_NO_ACCOUNT = 'limit_hit: the wait names no account, so the li
 /** The other limit_hit waits that can't resume by themselves and wait on Joe (MAT-1, audit #78 r2). */
 export const LIMIT_NO_RUN = 'limit_hit: the wait has no time its run began, so no hit can be matched to it';
 export const LIMIT_NO_RESET = 'limit_hit: the hit has no readable reset time';
+/** The latest a limit can reset after its hit (audit #125 r1 MAT-A). The weekly window is the longest real one, so a
+ *  reset more than a week (and an hour's slack) after the hit is a misread, read as no reset time: the card waits on Joe
+ *  and he is told, never held in silence until a date that will not come. */
+export const LIMIT_RESET_MAX_MS = 7 * 24 * 60 * 60 * 1000 + 60 * 60 * 1000;
 export const LIMIT_NO_HIT = 'limit_hit: no limit hit was recorded for the run in time';
 export const UNKNOWN_FACT = 'unknown-usage-alert';
 export const RULES_MISSING_FACT = 'rules-missing-alert';
@@ -328,11 +332,13 @@ export async function dispatcherPass({ rec, rules, now, account, sessions, probe
       // (`wait.account`, set by whoever parks the card; M9 lets no script put an account on the card itself). Only a
       // hit observed after the card's run began counts (MAT-1, audit #78 r2): an older one is an earlier limit, already
       // reset (L97 M-3). The Record sets `wait.run_started` from the claim when a claimed or running card is parked
-      // (M9 guard.mjs), so the order the park and the hit are written in does not matter.
+      // (M9 guard.mjs), so a hit written before the park still counts. Order is not wholly free: an older hit from the
+      // same run can resume a card parked later on a newer one, which is churn (it parks again), not a wrong start.
       // Every limit wait that can't resume by itself waits on Joe, told until delivered (L130), never silently:
       //   - a wait that names no account (L110 m-4: the pass's own account is not necessarily the one the card hit);
       //   - a wait with no run_started (it was not parked from a run, or its claim had no readable time);
-      //   - a hit after the run began with no reset time (the worker could not read it, or it was already past);
+      //   - a hit after the run began with no reset time (the worker could not read it, or it was already past), or a
+      //     reset more than LIMIT_RESET_MAX_MS after the hit;
       //   - no hit after the run began, timeouts.usage_unknown_max_min after the card began to wait.
       const acct = doc.wait?.account;
       if (typeof acct !== 'string' || !acct) {
@@ -357,9 +363,10 @@ export async function dispatcherPass({ rec, rules, now, account, sessions, probe
         continue;
       }
       const resets = Date.parse(lf?.resets_at ?? '');
-      if (!Number.isFinite(resets)) {
+      if (!Number.isFinite(resets) || resets > seen + LIMIT_RESET_MAX_MS) {
+        const why = Number.isFinite(resets) ? `the reset time it gave (${lf.resets_at}) is more than a week after the hit` : 'the reset time could not be read';
         waitOnJoe(rec, id, { what: LIMIT_NO_RESET, now, kind: 'limit_no_reset', alert,
-          text: `card ${id}: account ${acct} hit its usage limit but the reset time could not be read, so it can't resume by itself; it waits on you` });
+          text: `card ${id}: account ${acct} hit its usage limit but ${why}, so it can't resume by itself; it waits on you` });
         continue;
       }
       if (now < resets) continue;

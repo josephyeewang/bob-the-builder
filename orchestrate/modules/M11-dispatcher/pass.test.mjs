@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
-import { dispatcherPass as dispatcherPass0, stopPass as stopPass0, undoStarts, stopProcessGroup, STOP_FACT, UNSAVED_FACT, LIMIT_FACT, LIMIT_NO_ACCOUNT, LIMIT_NO_RESET, UNDO_HELD_FACT, PAUSE_FACT, RULES_MISSING_FACT, rulesMissingAlert as rulesMissingAlert0 } from './pass.mjs';
+import { dispatcherPass as dispatcherPass0, stopPass as stopPass0, undoStarts, stopProcessGroup, STOP_FACT, UNSAVED_FACT, LIMIT_FACT, LIMIT_NO_ACCOUNT, LIMIT_NO_RESET, LIMIT_RESET_MAX_MS, UNDO_HELD_FACT, PAUSE_FACT, RULES_MISSING_FACT, rulesMissingAlert as rulesMissingAlert0 } from './pass.mjs';
 import { USAGE_FACT, BAND_FACT } from './usage.mjs';
 import { OUTAGE_FACT } from './outage.mjs';
 import { retellWaits, WAIT_TELL_FACT } from './joe-waits.mjs';
@@ -258,6 +258,22 @@ test('L97 M-3, MAT-1: a hit from before the run began resumes nothing; a hit wit
   w.rec.write({ actor: 'sensors', entity: 'fact', id: LIMIT_FACT(ACCT), expectRev: cur.rev, doc: { resets_at: iso(T0 + 50 * MIN), observed_at: iso(T0 + 25 * MIN) } });
   const r2 = await w.pass(61);
   assert.deepEqual(r2.resumed, ['C']);
+});
+
+test('audit #125 r1 MAT-A: a reset more than a week after the hit is read as no reset time: the card waits on Joe, told', async () => {
+  const DAY = 24 * 60 * MIN;
+  const w = world([
+    // E: a misread 300 days ahead. F: exactly a week and an hour after its hit (the longest real window, with slack).
+    ['fact', LIMIT_FACT('acct-e'), { resets_at: iso(T0 + MIN + 300 * DAY), observed_at: iso(T0 + MIN) }],
+    ['fact', LIMIT_FACT('acct-f'), { resets_at: iso(T0 + MIN + LIMIT_RESET_MAX_MS), observed_at: iso(T0 + MIN) }],
+  ]);
+  parkOnLimit(w.rec, 'E', { ranAt: T0, account: 'acct-e' });
+  parkOnLimit(w.rec, 'F', { ranAt: T0, account: 'acct-f' });
+  await w.pass(60);
+  const e = w.rec.read('card', 'E').doc;
+  assert.deepEqual([e.state, e.wait.who, e.wait.what], ['waiting', 'joe', LIMIT_NO_RESET]);
+  assert.equal(w.calls.alerts.filter((x) => /card E: account acct-e hit its usage limit but the reset time it gave \(.*\) is more than a week after the hit/.test(x)).length, 1);
+  assert.deepEqual([w.rec.read('card', 'F').doc.wait.who], ['usage'], 'a reset at the edge still waits on usage');
 });
 
 test('L110 m-4: a limit_hit wait that names no account resumes nothing, never on the pass\'s account; it waits on Joe, one alert', async () => {
