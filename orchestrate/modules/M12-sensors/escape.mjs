@@ -13,7 +13,9 @@
 // - `&` → `&amp;`, `<` → `&lt;`, `>` → `&gt;`, `"` inside the text stays as is (it can't end the fence).
 // - Line ends become `\n`. Removed: terminal colour/escape sequences (whole), other C0/C1 control characters, bidi
 //   overrides U+202A–202E and U+2066–2069, zero-width U+200B–200F and U+FEFF.
-// - Only ONE-LINE sources (SINGLE_LINE: subjects, titles, names) are cut, at 300 characters, and the cut is said:
+// - A ONE-LINE source (SINGLE_LINE: subjects, titles, names) stays on one line: a line end in it is shown as the two
+//   characters `\n`, never a real one, so a planted second line can't pass for a line of our own (R-0b-126, probe P7).
+// - Only ONE-LINE sources are cut, at 300 characters, and the cut is said:
 //   `…[cut 1234 characters]`. Multi-line sources (research, lesson and idea files, issue bodies, review threads, check
 //   output, log lines) are kept whole (review-0b-7 M8): a cut research report would reach the Lead silently short.
 // - Escape ONCE, at the write. Consumers never re-escape; cleaning already-cleaned text escapes it again by design,
@@ -25,8 +27,8 @@ import { makeMasker } from './mask.mjs';
 
 export const SOURCES = Object.freeze(['commit-subject', 'commit-author', 'research-file', 'idea-issue', 'lesson-file',
   'idea-file', 'check-output', 'check-name', 'log-line', 'pr-title', 'pr-file', 'review-thread', 'issue-body', 'issue-title',
-  'deploy-meta', 'front-door-turn', 'record-ask']);
-export const SINGLE_LINE = Object.freeze(['commit-subject', 'commit-author', 'pr-title', 'issue-title', 'check-name', 'deploy-meta']);
+  'deploy-meta', 'front-door-turn', 'record-ask', 'proposal-file', 'proposal-name']);
+export const SINGLE_LINE = Object.freeze(['commit-subject', 'commit-author', 'pr-title', 'issue-title', 'check-name', 'deploy-meta', 'proposal-name']);
 export const CAP = 300;
 // The exact fenced form, for the cutover kit's Lead wording (R-0b-141…143) and the R-0b-148 checks.
 export const OUTSIDE_FORM = '<outside-text source="SOURCE">ESCAPED TEXT</outside-text>';
@@ -34,14 +36,16 @@ export const OUTSIDE_FORM = '<outside-text source="SOURCE">ESCAPED TEXT</outside
 const ANSI = /\u001B(?:\[[0-?]*[ -\/]*[@-~]|\][^\u0007\u001B]*(?:\u0007|\u001B\\)|[@-Z\\-_])/g;
 const CONTROL = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F\u0080-\u009F\u200B-\u200F\u202A-\u202E\u2066-\u2069\uFEFF]/g;
 
-// Colour codes and invisible characters out, line ends as \n. Runs BEFORE masking: a colour code or zero-width
+// Colour codes and invisible characters out, line ends as \n: CR LF, a lone CR, and U+2028/U+2029 (line and paragraph
+// separators, which show as a new line; R-0b-126 r2, L290 Minor 1). Runs BEFORE masking: a colour code or zero-width
 // character inside a key breaks its shape, and stripping after masking would join a clear key back together
 // (0b-7 audit round 2, M-1).
-export const stripControls = (text) => String(text ?? '').replace(/\r\n?/g, '\n').replace(ANSI, '').replace(CONTROL, '');
+export const stripControls = (text) => String(text ?? '').replace(/\r\n?|[\u2028\u2029]/g, '\n').replace(ANSI, '').replace(CONTROL, '');
 
 export function escapeOutside(text, source, { cap = SINGLE_LINE.includes(source) ? CAP : Infinity } = {}) {
   const src = SOURCES.includes(source) ? source : 'unknown';
   let s = stripControls(text);
+  if (SINGLE_LINE.includes(src)) s = s.replace(/\n/g, '\\n');
   let tail = '';
   if (s.length > cap) { tail = `…[cut ${s.length - cap} characters]`; s = s.slice(0, cap); }
   s = s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
