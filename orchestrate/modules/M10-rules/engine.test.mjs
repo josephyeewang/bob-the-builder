@@ -7,7 +7,7 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { makeRules, HOLD_REASONS } from '../../shared/rules.mjs';
 import { makeEngine } from './engine.mjs';
-import { parsePolicy, PRODUCT_STATES } from './policy.mjs';
+import { parsePolicy, PRODUCT_STATES, START_RULES, TIER1_MERGE_RULES } from './policy.mjs';
 import { MAX_FILES } from './classify.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -128,6 +128,7 @@ test('start_session: an undo is never refused by the editing caps; one undo per 
   assert.equal(start(w, undo).decision, 'allow', 'cap 0 + undo → allowed');
   assert.match(start(w).reason, /is 0/, 'cap 0 + an ordinary editing worker → refused');
   assert.match(start(w, { card: { id: 'C-2', kind: 'docs' } }).reason, /is 0/, 'only the exact-reverse kind is spared');
+  assert.match(start(w, { card: { id: 'C-2', kind: 'docs', exact_reverse: true } }).reason, /is 0/, 'the kind, not some other field (plant D)');
   w.run.undo = { app: 1 }; w.run.app = 1; w.run.mac = 1;
   assert.match(start(w, undo).reason, /an undo is already running for app/, 'a second undo on one product → refused');
   w.run.undo = { other: 1 };
@@ -178,6 +179,8 @@ test('start_session: a Tier 1 undo is not held for a missing or stale usage read
   assert.match(start(w, { tier: 1, usage: stale }).reason, /stale/);
   assert.match(start(w, { ...undo, tier: 1, role: 'writer' }).reason, /usage reading/, 'not a worker: held');
   assert.match(start(w, { ...undo, tier: 1, editing: false, role: 'auditor' }).reason, /usage reading/, 'read-only: held');
+  // A worker that doesn't edit is not an undo either, whatever its card says (L226, the auditor's plant F).
+  assert.match(start(w, { ...undo, tier: 1, editing: false }).reason, /usage reading/, 'a read-only worker: held');
 });
 
 test('start_session while paused: an exact-reverse undo starts, nothing else does; still one undo at a time (L210)', () => {
@@ -215,12 +218,13 @@ test('start_session while paused: an exact-reverse undo starts, nothing else doe
 // typo in either is in the grid (`start: none` + `tier1_merge: rules` included). The start's own rule may only
 // tighten: an unknown start rule refuses everything and `start: none` holds every start but the undo. The grid
 // must hold undo answers that are DENY for merge's reason alone, so a start that widens past merge goes red.
+// L226: the known values are policy.mjs's own lists, the ones start and both merges check, plus one unknown each, so
+// a value added to one list and not the other can't hide from the grid.
 test('start_session takes its state answer from push_branch and merge, in every state and state rule (L210, L217, L220)', () => {
   const base = pol();
-  const STARTS = [...new Set([...Object.values(base.product_state_rules).map((r) => r.start), 'none', 'sometimes'])];
-  const MERGES = [...new Set([...Object.values(base.product_state_rules).map((r) => r.tier1_merge), 'undo-only'])];
+  const STARTS = [...START_RULES, 'sometimes'];
+  const MERGES = [...TIER1_MERGE_RULES, 'undo-only'];
   const PAIRS = STARTS.flatMap((a) => MERGES.map((b) => [a, b]));
-  const KNOWN_START = ['within_caps', 'editing_cap_1', 'none'];
   let undoDeniedByMerge = 0;
   let undoAllowed = 0;
   const undoCard = { id: 'C-undo', rows: ['R-1'], doc: { lane: 'docs' }, kind: 'exact_reverse' };
@@ -239,14 +243,14 @@ test('start_session takes its state answer from push_branch and merge, in every 
       const pushUndo = ok(w.rules.may('push_branch', { product: 'app', card: undoCard, reverses_files: ['app/a.ts'], files: [file('app/a.ts')] }));
       const pushNormal = ok(w.rules.may('push_branch', { product: 'app', card: normalCard, files: [file('docs/research/a.md')] }));
       const where = `${state} start:${startRule} tier1_merge:${mergeRule}`;
-      const knownStart = KNOWN_START.includes(startRule);
+      const knownStart = START_RULES.includes(startRule);
       const undoOk = ok(start(w, { card: { id: 'C-undo', kind: 'exact_reverse' } }));
       const undoMay = pushUndo && docsMerge(reverseOf);
       assert.equal(undoOk, knownStart && undoMay, `undo, ${where}`);
       // A normal edit's start reads only the start rule. Where the two rules disagree (an unknown tier1_merge, or
       // `undo_only` beside a start rule other than `none`), it still starts though its merge would be refused: a
       // file that pairs them so is refused by parsePolicy once both keys are checked there (the lead's to-do, L220).
-      const paired = ['rules', 'tier1_hours_only', 'undo_only'].includes(mergeRule) && (startRule === 'none') === (mergeRule === 'undo_only');
+      const paired = TIER1_MERGE_RULES.includes(mergeRule) && (startRule === 'none') === (mergeRule === 'undo_only');
       assert.equal(ok(start(w)), knownStart && startRule !== 'none' && pushNormal && (!paired || docsMerge()), `normal edit, ${where}`);
       if (knownStart && !undoMay) undoDeniedByMerge++;
       if (undoOk) undoAllowed++;
@@ -257,6 +261,19 @@ test('start_session takes its state answer from push_branch and merge, in every 
   assert.ok(PAIRS.some(([a, b]) => a === 'none' && b === 'rules'), 'start: none + tier1_merge: rules is in the grid');
   assert.ok(undoDeniedByMerge > 0, 'some undo answers are DENY for merge\'s reason alone');
   assert.ok(undoAllowed > 0, 'and some are allow');
+});
+
+// L226 (the auditor's plant K): the grid can only try values it knows. So the engine must check each state rule
+// against policy.mjs's list itself, never a copy: a value typed into one check only (start's, say) would let an undo
+// start where both merges refuse it, and no grid value would show it.
+test('engine.mjs checks every state rule it reads against policy.mjs\'s one list, and types no copy (L226)', () => {
+  const src = readFileSync(join(here, 'engine.mjs'), 'utf8');
+  const n = (re) => (src.match(re) ?? []).length;
+  assert.equal(n(/product_state_rules\.\$\{state\}\.start`\)/g), 1, 'start reads the start rule once');
+  assert.equal(n(/!START_RULES\.includes\(/g), 1, 'and checks it against START_RULES');
+  assert.equal(n(/product_state_rules\.\$\{state\}\.tier1_merge`\)/g), 3, 'start and both merges read tier1_merge');
+  assert.equal(n(/!TIER1_MERGE_RULES\.includes\(/g), 3, 'and each checks it against TIER1_MERGE_RULES');
+  assert.equal(n(/\[\s*(?:\.\.\.\w+\s*,\s*)?'(?:within_caps|editing_cap_1|none|rules|tier1_hours_only|undo_only)'/g), 0, 'no list of state-rule values is typed in engine.mjs');
 });
 
 test('start_session: Tier 1 needs a fresh usage reading (A8)', () => {
@@ -297,6 +314,8 @@ test('must-match values: a pin, model, account or home-zone mismatch stops every
 test('one product with no usable rules stops every start on the Mac (MAT-10)', () => {
   const w = world({ policies: { app: pol(), other: null } });
   assert.match(start(w).reason, /rules unusable for other/);
+  // The undo exception is not past this check: an undo is refused too (L226, the auditor's plant P).
+  assert.match(start(w, { card: { id: 'C-undo', kind: 'exact_reverse' } }).reason, /rules unusable for other/, 'an undo is refused too');
   assert.equal(w.rules.get('caps.editing_per_mac'), undefined);
   assert.equal(w.rules.get('caps.rounds', { product: 'app' }), 3, 'a per-product value of a healthy product still reads');
 });
