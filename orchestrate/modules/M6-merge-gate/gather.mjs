@@ -250,7 +250,7 @@ export async function gatherFacts(ctx, merge) {
   f.files = rawFiles && mb ? await attempt(() => Promise.all(rawFiles.map(async (x) => {
     const e = await view.entry(x.status === 'removed' ? mb : head, x.filename);
     if (!e) { noEntry ??= x.filename; throw new Error(`${x.filename}: no tree entry`); }
-    return { path: x.filename, ...(x.previous_filename ? { previous_path: x.previous_filename } : {}), status: x.status === 'changed' ? 'modified' : x.status, mode: e.mode, ...linesOf(x.patch) };
+    return { path: x.filename, ...(x.previous_filename ? { previous_path: x.previous_filename } : {}), status: x.status === 'changed' ? 'modified' : x.status, mode: e.mode, ...(typeof x.sha === 'string' ? { blob: x.sha } : {}), ...linesOf(x.patch) };
   })), null, markFailed('files')) : null;
   // Why there is no file list (L182). 'too_many': compare was read, but GitHub lists at most COMPARE_FILE_LIMIT files,
   // so the list is cut off; 'no_entry': a listed file is not in its commit's file list (both commits are fixed, so a
