@@ -7,28 +7,35 @@
 // round (L235 c).
 //
 //   deliverAlertsPass({ rec, now, recordRoot, product, products, repos, owner, token, fetchFn?, issuesFor?, ... })
-//     → { sent, failed, left, refused?, locked? }               never throws
+//     → { sent, failed, left, refused?, locked? }               never throws; any alert not delivered → `refused`
 //   deliverWith(bound) → ({ rec, now }) => deliverAlertsPass({ ...bound, rec, now })   (the robot job binds it at start-up)
 //   githubIssues({ repo, owner, token, fetchFn?, timeoutMs? }) → the M13 alerts.mjs client, plus findOpen(marker)
 //
 // Config (the robot job's private Mac config, never the rules file; L237): `owner` is Joe's GitHub login, the assignee;
-// `repos` maps each product to its "owner/name" repository; `products` is the products list in order. An alert goes to
-// its Record's product's repo, and one with no product (the store's own) to the first product's. Bob's own repository is
+// `repos` maps each product to its "owner/name" repository; `products` is the products list; `product` is the product
+// whose Record this is (required: there is one Record per product, so no default). Every issue of a round goes to that
+// product's repository: the Record's queue, the store's own alerts and the "Record is locked" issue, each naming the
+// product (L288 MAT-3). A Record whose product document names another product is refused. Bob's own repository is
 // refused: Bob is public, and alerts carry a product's private state.
 // `token` is () → Promise<{ ok, token } | { ok: false, reason }>, built by the robot job from M6 token.mjs
 // mintInstallationToken (L237), asked once per pass. The App needs "Issues: read and write" on each product repo.
 //
-// Each queue entry is one issue key (M13 alerts.mjs: one issue per key, a repeat edits it): a marked entry keys on its
-// mark (product, mark.kind, mark.fact); an unmarked one on a hash of its full text. An issue Joe closed does not silence
-// its key: an alert is news, so the next one opens a new issue (L237). Nothing here closes an alert's issue by itself;
-// wiring `clear` to causes that clear is a follow-up row.
+// Each queue entry is one issue key (M13 alerts.mjs: one issue per key): a marked entry keys on its mark (product,
+// mark.kind, mark.fact); an unmarked one on a hash of its full text. Every new queue entry notifies (L288 MAT-1): the
+// entry's own id is the alert's status, so a new entry on a key whose issue is open adds a comment ("New alert: …"),
+// which GitHub notifies on; a body edit alone notifies nobody. Only a retry of the same entry (its mark was lost) is a
+// silent edit. An issue Joe closed, deleted or moved away does not silence its key: the next alert opens a new issue
+// (L237; GitHub's "not found" or "gone" reads as closed). A body over BODY_MAX characters is cut, and says so, since
+// GitHub refuses a body over 65,536 every time (L288 MAT-2). Nothing here closes an alert's issue by itself; wiring
+// `clear` to causes that clear is a follow-up row.
 //
 // The Record's lock (L242, L244, L245). The pass reads M9's lock and never takes it: only the store breaks a dead
 // holder's lock, because only the store recovers after a break (store.mjs `broke`), so a break from here would leave a
 // process that already opened its store not rolling forward a write the dead holder committed (lane 1's review). A
 // dead holder's lock is left for the store's next write. A live holder, waited on for a few seconds, makes the pass
 // give up with nothing lost. When that
-// holder has kept the lock longer than the heartbeat's red limit (or can't be read), the pass tells Joe straight through
+// holder has kept the lock longer than the heartbeat's red limit (or can't be read, or its start time is in the future),
+// the pass tells Joe straight through
 // GitHub, since the Record can't be written: one issue, found again by a hidden marker, edited while it lasts and closed
 // once the lock is free. No state file.
 
@@ -40,7 +47,10 @@ import { holderDead, readHolder, sleepMs } from '../M9-record/lock.mjs';
 import { markSent, readUnsent } from '../M9-record/unsent.mjs';
 
 export const RECORD_LOCKED_MIN = DISPATCHER_LATE_MIN;
-export const RECORD_LOCKED_MARKER = '<!-- orch:record_locked -->';
+/** The record_locked issue's marker for one product (two products may share a repository). */
+export const lockedMarker = (product) => `<!-- orch:record_locked ${product} -->`;
+/** GitHub refuses an issue body over 65,536 characters; an alert is cut well under it, leaving room for the footer. */
+export const BODY_MAX = 60_000;
 export const LOCK_WAIT_MS = 5_000;
 const MIN = 60_000;
 const REPO = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})\/[A-Za-z0-9._-]{1,100}$/;
@@ -65,7 +75,17 @@ export function channelProblem({ product, products, repos, owner } = {}) {
   if (!Array.isArray(products) || !products.length || !products.every((p) => typeof p === 'string' && p)) return 'no products list';
   if (!repos || typeof repos !== 'object') return 'no repository for any product (repos)';
   for (const r of Object.values(repos)) { const bad = repoProblem(r); if (bad) return bad; }
-  for (const p of new Set([product ?? products[0], products[0]])) if (!own(repos, p)) return `no repository for the product ${p}`;
+  if (typeof product !== 'string' || !product) return 'no product for this Record (product)';
+  if (!products.includes(product)) return `the product ${product} is not in the products list`;
+  if (!own(repos, product)) return `no repository for the product ${product}`;
+  return null;
+}
+
+/** Why `rec` is not `product`'s Record, or null: its product document, when there is one, must be this product's. */
+export function recordProductProblem(rec, product) {
+  const docs = rec.list('product');
+  const other = docs.find((d) => d.id !== product);
+  if (other) return `this Record holds product ${String(other.id).slice(0, 100)}'s state, not ${product}'s`;
   return null;
 }
 
@@ -119,8 +139,11 @@ export function githubIssues({ repo, owner, token, fetchFn = globalThis.fetch, t
       if (!(await comment(n, text))) return false;
       return (await call('PATCH', `/issues/${num(n)}`, { state: 'closed' })).status === 200;
     },
+    // An issue that is gone (deleted: 410; not found: 404) reads as closed, so the next alert opens a new one rather
+    // than failing on it every round (L288 MAT-2 a).
     async isClosed(n) {
       const r = await call('GET', `/issues/${num(n)}`);
+      if (r.status === 404 || r.status === 410) return true;
       if (r.status !== 200 || !r.json) throw new Error(`GitHub answered ${r.status} for issue ${n}`);
       return r.json.state === 'closed';
     },
@@ -141,21 +164,31 @@ export function entryKey(product, text, entry) {
 
 const titleOf = (text) => { const l = String(text).split('\n')[0].trim(); return (l.length > 120 ? `${l.slice(0, 119)}…` : l) || 'Alert'; };
 
-// Raise one alert; an issue Joe closed opens a new one (L237). True only when GitHub took the write.
-async function raiseNews(alerts, key, text, title = titleOf(text)) {
-  let r = await alerts.raise({ key, title, body: String(text) });
+/** An alert's text cut to BODY_MAX characters, saying so when it was cut. */
+export function cutBody(text) {
+  const s = String(text);
+  if (s.length <= BODY_MAX) return s;
+  return `${s.slice(0, BODY_MAX)}\n\n[cut: this alert was ${s.length} characters; the first ${BODY_MAX} are shown]`;
+}
+
+// Raise one queue entry; `entryId` is its status, so a new entry on an open issue comments (notifies) and a retry of the
+// same entry only edits (L288 MAT-1). An issue Joe closed opens a new one (L237). True only when GitHub took the write.
+async function raiseNews(alerts, key, text, entryId) {
+  const body = cutBody(text);
+  const one = { key, title: titleOf(body), body, status: `queue entry ${entryId}`, note: `New alert: ${titleOf(body)}` };
+  let r = await alerts.raise(one);
   if (r === 'suppressed') {
     if (await alerts.clear({ key }) === false) return false;
-    r = await alerts.raise({ key, title, body: String(text) });
+    r = await alerts.raise(one);
   }
   return TOLD.has(r);
 }
 
 // The store's own alert as issue text (masked by makeAlerts before it is posted).
-export function storeText(event) {
+export function storeText(event, product) {
   const e = event && typeof event === 'object' ? event : {};
   const lines = Object.entries(e).filter(([k]) => k !== 'type').map(([k, v]) => `${k}: ${String(typeof v === 'string' ? v : JSON.stringify(v)).slice(0, 300)}`);
-  return [`The Record's store: ${String(e.type ?? 'alert').slice(0, 100)}`, ...lines].join('\n');
+  return [`${product}'s Record store: ${String(e.type ?? 'alert').slice(0, 100)}`, ...lines].join('\n');
 }
 
 // Read M9's lock, waiting at most `ms` for a live holder to let go. Free: no lock, or a dead holder's (M9's own test),
@@ -168,27 +201,32 @@ function lockCheck({ recordRoot, ms, probe, host, nowMs }) {
     if (h === null || holderDead(h, { host, probe })) return { free: true };
     if (!h.unreadable && Date.now() < deadline) { sleepMs(25); continue; }
     const at = Date.parse(h?.at ?? '');
-    const ageMin = Number.isFinite(at) ? Math.max(0, Math.floor((nowMs - at) / MIN)) : null;
+    // A start time in the future can't say how long the lock is held: unknown, so it is told at once (L288).
+    const future = Number.isFinite(at) && at > nowMs;
+    const ageMin = Number.isFinite(at) && !future ? Math.floor((nowMs - at) / MIN) : null;
     const pid = Number.isInteger(h?.pid) ? h.pid : '?';
-    return { free: false, pid, ageMin, reason: `the Record is locked by pid ${pid}${ageMin === null ? '' : ` for ${ageMin} min`}; alerts are queued and not delivered` };
+    return { free: false, pid, ageMin, future, reason: `the Record is locked by pid ${pid}${ageMin === null ? '' : ` for ${ageMin} min`}; alerts are queued and not delivered` };
   }
 }
 
 // The one record_locked issue (L244, L245): told straight through GitHub, found again by its marker.
-async function tellLocked(gh, owner, st, ms) {
+async function tellLocked(gh, owner, product, st, ms) {
   if (st.ageMin !== null && st.ageMin <= RECORD_LOCKED_MIN) return 'waiting';
-  const text = st.ageMin === null
-    ? 'the Record is locked and who holds it can\'t be read; alerts are queued and not delivered'
-    : `the Record has been locked for ${st.ageMin} min by pid ${st.pid}; alerts are queued and not delivered`;
-  const body = `${text}\n\n${RECORD_LOCKED_MARKER}`;
-  const found = await within(ms, () => gh.findOpen(RECORD_LOCKED_MARKER));
+  const text = st.future
+    ? `${product}'s Record is locked by pid ${st.pid}, whose start time is in the future, so how long it has been held can't be told; alerts are queued and not delivered`
+    : st.ageMin === null
+      ? `${product}'s Record is locked and who holds it can't be read; alerts are queued and not delivered`
+      : `${product}'s Record has been locked for ${st.ageMin} min by pid ${st.pid}; alerts are queued and not delivered`;
+  const marker = lockedMarker(product);
+  const body = `${text}\n\n${marker}`;
+  const found = await within(ms, () => gh.findOpen(marker));
   if (found === false) return 'list refused';
   if (ISSUE(found)) return (await within(ms, () => gh.edit(found, body))) ? 'edited' : 'edit refused';
-  return ISSUE(await within(ms, () => gh.open({ title: 'The Record is locked: alerts are not being delivered', body, assignee: owner }))) ? 'opened' : 'open refused';
+  return ISSUE(await within(ms, () => gh.open({ title: `${product}'s Record is locked: alerts are not being delivered`, body, assignee: owner }))) ? 'opened' : 'open refused';
 }
 
-async function clearLocked(gh, ms) {
-  const found = await within(ms, () => gh.findOpen(RECORD_LOCKED_MARKER));
+async function clearLocked(gh, product, ms) {
+  const found = await within(ms, () => gh.findOpen(lockedMarker(product)));
   if (!ISSUE(found)) return;
   await within(ms, () => gh.close(found, 'Cleared: the Record is no longer locked, and the queued alerts are being delivered.'));
 }
@@ -205,8 +243,7 @@ export async function deliverAlertsPass({ rec, now = Date.now, recordRoot, produ
     const bad = channelProblem({ product, products, repos, owner });
     if (bad) return { ...out, refused: `alert channel not set up: ${bad}` };
     if (typeof recordRoot !== 'string' || !recordRoot) return { ...out, refused: 'alert channel not set up: no Record folder (recordRoot)' };
-    const first = products[0];
-    const target = product ?? first;
+    const target = product;
     const tok = typeof token === 'function' ? once(token) : null;
     if (!issuesFor) {
       if (!tok) return { ...out, refused: 'alert channel not set up: no token' };
@@ -223,35 +260,42 @@ export async function deliverAlertsPass({ rec, now = Date.now, recordRoot, produ
     const lock = lockCheck({ recordRoot, ms: lockWaitMs, probe, host, nowMs: nowMs() });
     if (!lock.free) {
       let told;
-      try { told = await tellLocked(ghFor(first), owner, lock, sendMs); } catch (e) { told = `not told: ${msg(e)}`; }
+      try { told = await tellLocked(ghFor(target), owner, target, lock, sendMs); } catch (e) { told = `not told: ${msg(e)}`; }
       return { ...out, refused: lock.reason, locked: told };
     }
-    try { await clearLocked(ghFor(first), sendMs); } catch { /* closed on a later round */ }
+    const wrong = recordProductProblem(rec, target);
+    if (wrong) return { ...out, refused: `alert channel not set up: ${wrong}` };
+    try { await clearLocked(ghFor(target), target, sendMs); } catch { /* closed on a later round */ }
 
     const start = clock();
     const when = () => new Date(nowMs());
     const alerts = makeAlerts({ rec, gh: ghFor(target), owner, now: when });
-    const port = (text, entry) => raiseNews(alerts, entryKey(target, text, entry), text);
+    const port = (text, entry) => raiseNews(alerts, entryKey(target, text, entry), text, entry?.id ?? 'unknown');
     const r = await sendAlerts(rec, port, nowMs(), { sendMs, budgetMs, clock });
     out.sent += r.sent; out.failed += r.failed; out.left = r.left;
-    if (out.failed) return out;
+    // A failed Record send does not skip the store's alerts (L288 MAT-2 c): they are a separate queue.
 
-    // The store's own unsent alerts (L239, L240), to the first product's repo.
+    // The store's own unsent alerts (L239, L240), to this product's repo, naming the product (L288 MAT-3).
     let waiting;
     try { waiting = readUnsent(recordRoot); } catch (e) {
       if (e?.code === 'ENOENT') waiting = [];
       else return { ...out, refused: `the store's unsent alerts could not be read: ${msg(e)}` };
     }
-    const storeAlerts = repos[target] === repos[first] && target === first ? alerts : makeAlerts({ rec, gh: ghFor(first), owner, now: when });
+    let storeLeft = waiting.length;
     for (const x of waiting) {
       if (clock() - start + sendMs > budgetMs && out.sent + out.failed > 0) break;
       let ok = false;
-      try { ok = await within(sendMs, () => raiseNews(storeAlerts, alertKey(first, 'store', x.id), storeText(x.event))); } catch { ok = false; }
-      if (!ok) { out.failed += 1; break; }
+      try { ok = await within(sendMs, () => raiseNews(alerts, alertKey(target, 'store', x.id), storeText(x.event, target), x.id)); } catch { ok = false; }
+      // One store alert GitHub refuses does not hold back the ones after it; it is tried again next round.
+      if (!ok) { out.failed += 1; continue; }
       out.sent += 1;
+      storeLeft -= 1;
       // A mark that fails: the next round raises it again on the same key, so the same issue is edited, not a second opened.
       try { markSent(recordRoot, x.id, when().toISOString()); } catch { /* raised again next round */ }
     }
+    out.storeLeft = storeLeft;
+    // Any alert this round should have delivered and did not: the robot job counts the pass as failed (L288 MAT-2 d).
+    if (out.failed) out.refused = `${out.failed} alert(s) could not be delivered this round and stay queued for the next`;
   } catch (e) {
     out.refused = `the alert round failed: ${msg(e)}`;
   }

@@ -2,7 +2,7 @@
 // robot job, with the Dispatcher dead or alive. Every GitHub call here is a fake; no network.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, readFileSync, readdirSync, writeFileSync, appendFileSync, mkdirSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, writeFileSync, appendFileSync, mkdirSync, rmSync, symlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { memoryRecord } from '../../shared/record.mjs';
 import { tempDir } from '../../shared/test-tmp.mjs';
@@ -10,7 +10,7 @@ import { fakeAlert } from '../../test/fake-alert.test-helper.mjs';
 import { ALERT_QUEUE_FACT, outbox } from '../M11-dispatcher/alerts.mjs';
 import { readUnsent } from '../M9-record/unsent.mjs';
 import { setup, seed, PRODUCT } from '../M9-record/fixtures.test-helper.mjs';
-import { RECORD_LOCKED_MARKER, channelProblem, deliverAlertsPass, deliverWith, entryKey, githubIssues, repoProblem } from './alert-channel.mjs';
+import { BODY_MAX, channelProblem, cutBody, deliverAlertsPass, deliverWith, entryKey, githubIssues, lockedMarker, recordProductProblem, repoProblem } from './alert-channel.mjs';
 
 const T0 = Date.parse('2026-11-03T08:00:00Z');
 const MIN = 60_000;
@@ -133,8 +133,9 @@ test('L244/L245: a live holder: up to the red limit nothing is opened; past it o
   r = await w.run({ host: 'mac-a', probe: ALIVE });
   assert.equal(r.locked, 'opened');
   assert.equal(w.gh.issues.size, 1);
-  assert.match(w.gh.issues.get(1).body, /locked for 16 min by pid 4242; alerts are queued and not delivered/);
-  assert.ok(w.gh.issues.get(1).body.includes(RECORD_LOCKED_MARKER));
+  assert.match(w.gh.issues.get(1).body, /^p1's Record has been locked for 16 min by pid 4242; alerts are queued and not delivered/);
+  assert.match(w.gh.issues.get(1).title, /^p1's Record is locked/);
+  assert.ok(w.gh.issues.get(1).body.includes(lockedMarker('p1')));
   for (let i = 0; i < 3; i++) { w.tick(1); assert.equal((await w.run({ host: 'mac-a', probe: ALIVE })).locked, 'edited'); }
   assert.equal(w.gh.issues.size, 1, 'three more rounds edit the one issue');
   assert.match(w.gh.issues.get(1).body, /locked for 19 min/);
@@ -182,6 +183,7 @@ test('a GitHub client that throws on every call never makes the round throw', as
   outbox(w.rec, T0)('x');
   const r = await w.run({ probe: ALIVE });
   assert.equal(r.failed, 1);
+  assert.match(r.refused, /^1 alert\(s\) could not be delivered this round and stay queued/);
   assert.equal(queued(w.rec).length, 1);
   writeLock(w.root, holder(T0 - 30 * MIN));
   const l = await w.run({ host: 'mac-a', probe: ALIVE });
@@ -198,11 +200,14 @@ test('Bob\'s own repository, a bad repo name, no owner or no repo for the produc
   assert.match(repoProblem('someone/Bob-The-Builder'), /Bob's own/);
   for (const bad of ['nope', 'a/b/c', '-x/y', 'x/.git', 42, '']) assert.match(repoProblem(bad), /not an owner\/name repository/, String(bad));
   assert.equal(repoProblem('acme/product-1'), null);
-  const ok = { products: ['p1'], repos: { p1: 'acme/r' }, owner: 'o' };
+  const ok = { product: 'p1', products: ['p1'], repos: { p1: 'acme/r' }, owner: 'o' };
   assert.equal(channelProblem(ok), null);
+  // L288 MAT-3: the Record's product is required, with no default, and must be in the list.
+  assert.match(channelProblem({ ...ok, product: undefined }), /no product for this Record/);
+  assert.match(channelProblem({ ...ok, product: 'p9', repos: { p1: 'acme/r', p9: 'acme/s' } }), /the product p9 is not in the products list/);
   assert.match(channelProblem({ ...ok, owner: '' }), /owner/);
   assert.match(channelProblem({ ...ok, repos: { p1: 'me/bob-the-builder' } }), /Bob's own/);
-  assert.match(channelProblem({ ...ok, product: 'p2' }), /no repository for the product p2/);
+  assert.match(channelProblem({ ...ok, products: ['p1', 'p2'], product: 'p2' }), /no repository for the product p2/);
   assert.match(channelProblem({ ...ok, repos: Object.create({ p1: 'acme/r' }) }), /no repository for the product p1/);
   const w = world();
   const r = await w.run({ repos: { p1: 'me/bob-the-builder' } });
@@ -211,7 +216,7 @@ test('Bob\'s own repository, a bad repo name, no owner or no repo for the produc
   assert.throws(() => githubIssues({ repo: 'me/bob-the-builder', token: async () => ({ ok: true, token: 't' }) }), /Bob's own/);
 });
 
-test('L237: with no token (the App not set up) the round says so and calls nothing; an alert without a product goes to the first product\'s repo', async () => {
+test('L237, L288 MAT-3: with no token (the App not set up) the round says so and calls nothing; the store\'s own alert goes to this Record\'s product\'s repo, naming it', async () => {
   const w = world({ products: ['p1', 'p2'], product: 'p2' });
   const fetched = [];
   const fetchFn = async (url) => { fetched.push(url); return { status: 201, json: async () => ({ number: 1 }) }; };
@@ -223,7 +228,7 @@ test('L237: with no token (the App not set up) the round says so and calls nothi
   r = await deliverAlertsPass({ ...nb, rec: w.rec });
   assert.equal(r.refused, 'alert channel not set up: no token');
   assert.deepEqual(fetched, []);
-  // The store's own alert (no product) goes to the first product's repo; the Record's queue to its own product's.
+  // One Record per product: the store's own alert goes to this product's repo, like the Record's queue (L288 MAT-3).
   appendFileSync(join(w.root, 'unsent-alerts.jsonl'), `${JSON.stringify({ id: 'u1', outcome: 'unsent', event: { type: 'tamper', entity: 'card' } })}\n`);
   outbox(w.rec, T0)('p2 thing');
   const tokens = [];
@@ -231,7 +236,7 @@ test('L237: with no token (the App not set up) the round says so and calls nothi
   assert.equal(r.sent, 2);
   assert.equal(tokens.length, 1, 'the token is minted once per round');
   const posts = fetched.filter((u) => u.endsWith('/issues'));
-  assert.deepEqual(posts, ['https://api.github.com/repos/acme/product-2/issues', 'https://api.github.com/repos/acme/product-1/issues']);
+  assert.deepEqual(posts, ['https://api.github.com/repos/acme/product-2/issues', 'https://api.github.com/repos/acme/product-2/issues']);
 });
 
 test('githubIssues: fixed host, the contract alerts.mjs reads, and findOpen skips pull requests and other issues', async () => {
@@ -251,13 +256,16 @@ test('githubIssues: fixed host, the contract alerts.mjs reads, and findOpen skip
   answers.push([201, {}], [200, {}]); assert.equal(await gh.close(7, 'bye'), true);
   answers.push([500, null]); assert.equal(await gh.close(7, 'bye'), false, 'no close after a refused comment');
   answers.push([200, { state: 'closed' }]); assert.equal(await gh.isClosed(7), true);
-  answers.push([404, null]); await assert.rejects(gh.isClosed(7), /404/);
+  // L288 MAT-2 a: deleted (410) or not found (404) reads as closed, so the next alert opens a new issue; others throw.
+  answers.push([404, null]); assert.equal(await gh.isClosed(7), true);
+  answers.push([410, null]); assert.equal(await gh.isClosed(7), true);
+  answers.push([500, null]); await assert.rejects(gh.isClosed(7), /500/);
   await assert.rejects(gh.edit(0, 'x'), /not an issue number/);
-  answers.push([200, [{ number: 3, body: `x ${RECORD_LOCKED_MARKER}`, pull_request: {} }, { number: 4, body: 'other' }, { number: 5, body: `y ${RECORD_LOCKED_MARKER}` }]]);
-  assert.equal(await gh.findOpen(RECORD_LOCKED_MARKER), 5);
+  answers.push([200, [{ number: 3, body: `x ${lockedMarker('p1')}`, pull_request: {} }, { number: 4, body: 'other' }, { number: 5, body: `y ${lockedMarker('p1')}` }]]);
+  assert.equal(await gh.findOpen(lockedMarker('p1')), 5);
   assert.match(seen.at(-1)[1], /\/issues\?state=open&per_page=100&assignee=o$/);
-  answers.push([200, []]); assert.equal(await gh.findOpen(RECORD_LOCKED_MARKER), null);
-  answers.push([401, null]); assert.equal(await gh.findOpen(RECORD_LOCKED_MARKER), false);
+  answers.push([200, []]); assert.equal(await gh.findOpen(lockedMarker('p1')), null);
+  answers.push([401, null]); assert.equal(await gh.findOpen(lockedMarker('p1')), false);
   const none = githubIssues({ repo: 'acme/r', token: async () => ({ ok: false, reason: 'no key' }), fetchFn });
   await assert.rejects(none.open({ title: 't', body: 'b' }), /alert channel not set up: no key/);
 });
@@ -270,7 +278,7 @@ test('L239/L240: the store\'s unsent alerts are raised and marked sent; a torn l
   assert.deepEqual(readUnsent(w.root).map((x) => x.id), ['u1']);
   const r = await w.run({ probe: ALIVE });
   assert.equal(r.sent, 1);
-  assert.match(w.gh.issues.get(1).body, /The Record's store: tamper\nentity: card\nid: C-1/);
+  assert.match(w.gh.issues.get(1).body, /^p1's Record store: tamper\nentity: card\nid: C-1/);
   assert.deepEqual(readUnsent(w.root), []);
   assert.equal((await w.run({ probe: ALIVE })).sent, 0, 'marked: not raised again');
   // A mark that can't be written (the file replaced by a folder after the read): raised again, editing the same issue.
@@ -282,6 +290,7 @@ test('L239/L240: the store\'s unsent alerts are raised and marked sent; a torn l
   writeFileSync(join(v.root, 'unsent-alerts.jsonl'), `${JSON.stringify({ id: 'u9', outcome: 'unsent', event: { type: 'tamper' } })}\n`);
   assert.equal((await v.run({ probe: ALIVE })).sent, 1);
   assert.equal(v.gh.issues.size, 1);
+  assert.deepEqual(v.gh.issues.get(1).comments, [], 'a retry of the same entry is a silent edit, not a second notice');
 });
 
 test('L240: a real store\'s lost alert is delivered by the channel, and the store\'s own resend then stays quiet', async () => {
@@ -295,7 +304,7 @@ test('L240: a real store\'s lost alert is delivered by the channel, and the stor
   env.record.write({ actor: 'approvals', entity: 'card', id: 'C-1', expectRev: 2, doc: { state: 'cancelled', product: PRODUCT, module: 'M2', kind: 'ordinary', round: 1, cancel_reason: 'x' } });
   assert.deepEqual(readUnsent(env.root).map((x) => x.event.type), ['tamper']);
   const gh = fakeGitHub();
-  const r = await deliverAlertsPass({ rec: memoryRecord(), now: () => T0, recordRoot: env.root, products: [PRODUCT], repos: { [PRODUCT]: 'acme/product-1' }, owner: 'owner-login', issuesFor: () => gh, lockWaitMs: 30 });
+  const r = await deliverAlertsPass({ rec: memoryRecord(), now: () => T0, recordRoot: env.root, product: PRODUCT, products: [PRODUCT], repos: { [PRODUCT]: 'acme/product-1' }, owner: 'owner-login', issuesFor: () => gh, lockWaitMs: 30 });
   assert.equal(r.sent, 1);
   assert.deepEqual(readUnsent(env.root), []);
   const before = alert.calls.length;
@@ -322,4 +331,182 @@ test('deliverWith binds once and passes the round\'s rec and now', async () => {
   writeLock(w.root, holder(T0 - 5 * MIN));
   const l = await deliver({ rec: w.rec, now: () => T0 });
   assert.equal(l.locked, 'waiting');
+});
+
+// ---- L288: the fresh audit's findings ----
+
+const notifying = (gh, from = 0) => gh.calls.slice(from).filter(([k]) => k === 'open' || k === 'comment');
+const storeLine = (id, type = 'tamper') => `${JSON.stringify({ id, outcome: 'unsent', event: { type } })}\n`;
+
+test('L288 MAT-1: a cause told, cleared and come back notifies exactly once; a body edit alone is never the only news', async () => {
+  const w = world();
+  const a = outbox(w.rec, T0);
+  a('the phone link is down', { mark: { fact: 'stop-phone', fields: { n: 1 } } });
+  await w.run({ probe: ALIVE });
+  assert.equal(notifying(w.gh).length, 1, 'first told: one issue opened');
+  // Three days later the same cause, with the same text, is queued again.
+  w.tick(3 * 24 * 60);
+  const before = w.gh.calls.length;
+  outbox(w.rec, w.now())('the phone link is down', { mark: { fact: 'stop-phone', fields: { n: 2 } } });
+  const r = await w.run({ probe: ALIVE });
+  assert.equal(r.sent, 1);
+  assert.deepEqual(notifying(w.gh, before), [['comment', 1]], 'exactly one notifying action: a comment on the open issue');
+  assert.match(w.gh.issues.get(1).comments[0], /^New alert: the phone link is down/);
+  // The same for the store's own alerts: a new entry on the same key... (store keys are per entry, so each opens one)
+  // and a cause whose issue Joe closed opens a new issue: also one notifying action.
+  w.gh.ownerCloses(1);
+  const b2 = w.gh.calls.length;
+  outbox(w.rec, w.now())('the phone link is down', { mark: { fact: 'stop-phone', fields: { n: 3 } } });
+  await w.run({ probe: ALIVE });
+  assert.deepEqual(notifying(w.gh, b2), [['open', 2]]);
+});
+
+test('L288 MAT-2 a: an issue Joe deleted reads as closed through the real client: the next alert opens a new issue', async () => {
+  const w = world();
+  const live = new Map();
+  let n = 0;
+  const posted = [];
+  const fetchFn = async (url, init) => {
+    const m = /\/issues(?:\/(\d+))?(\/comments)?(\?.*)?$/.exec(url);
+    const id = m[1] && Number(m[1]);
+    const body = init.body ? JSON.parse(init.body) : null;
+    let status = 404; let json = null;
+    if (init.method === 'POST' && !id) { n += 1; live.set(n, { state: 'open' }); posted.push(['open', n]); status = 201; json = { number: n }; }
+    else if (init.method === 'GET' && !id) { status = 200; json = []; }
+    else if (live.has(id)) {
+      if (init.method === 'GET') { status = 200; json = live.get(id); }
+      else if (init.method === 'PATCH') { if (body.state) live.get(id).state = body.state; status = 200; json = {}; }
+      else if (m[2]) { posted.push(['comment', id]); status = 201; json = {}; }
+    }
+    return { status, json: async () => json };
+  };
+  const run = () => deliverAlertsPass({ ...w.bound, issuesFor: undefined, fetchFn, token: async () => ({ ok: true, token: 'fake' }), rec: w.rec, now: w.now, probe: ALIVE });
+  outbox(w.rec, T0)('cause', { mark: { fact: 'stop-x', fields: { n: 1 } } });
+  assert.equal((await run()).sent, 1);
+  live.delete(1); // Joe deletes issue 1: GitHub now answers 404 for it
+  outbox(w.rec, T0)('cause', { mark: { fact: 'stop-x', fields: { n: 2 } } });
+  for (let i = 0; i < 2; i += 1) {
+    const r = await run();
+    assert.equal(r.refused, undefined, JSON.stringify(r));
+  }
+  assert.deepEqual(posted, [['open', 1], ['open', 2]]);
+  assert.deepEqual(queued(w.rec), []);
+});
+
+test('L288 MAT-2 b: an alert over GitHub\'s body limit is cut, says so, and is delivered', async () => {
+  const w = world();
+  const big = `huge alert\n${'x'.repeat(70_000)}`;
+  outbox(w.rec, T0)(big);
+  w.gh.open = ((open) => async (o) => (o.body.length > 65_536 ? false : open(o)))(w.gh.open);
+  const r = await w.run({ probe: ALIVE });
+  assert.equal(r.sent, 1, JSON.stringify(r));
+  const body = w.gh.issues.get(1).body;
+  assert.ok(body.length <= 65_536);
+  assert.match(body, /\[cut: this alert was \d+ characters; the first 60000 are shown\]/);
+  assert.equal(cutBody('short'), 'short');
+  assert.equal(cutBody('y'.repeat(BODY_MAX)), 'y'.repeat(BODY_MAX));
+});
+
+test('L288 MAT-2 c, d: a Record alert GitHub refuses holds back neither the store\'s alerts nor the report: the round says refused', async () => {
+  const w = world();
+  const open = w.gh.open;
+  w.gh.open = async (o) => (/refused one/.test(o.title) ? false : open(o));
+  outbox(w.rec, T0)('the refused one');
+  appendFileSync(join(w.root, 'unsent-alerts.jsonl'), storeLine('u1', 'quarantine'));
+  const r = await w.run({ probe: ALIVE });
+  assert.equal(r.failed, 1);
+  assert.equal(r.sent, 1, 'the store alert still went out');
+  assert.match(w.gh.issues.get(1).body, /^p1's Record store: quarantine/);
+  assert.deepEqual(readUnsent(w.root), []);
+  assert.equal(queued(w.rec).length, 1, 'the refused one stays queued');
+  assert.match(r.refused, /^1 alert\(s\) could not be delivered/);
+});
+
+test('L288 plants: a store send that answers false leaves the alert unmarked and the round refused; one refused store alert does not hold back the next', async () => {
+  for (const lose of [async () => false, async () => { throw new Error('github down'); }]) {
+    const w = world();
+    const open = w.gh.open;
+    w.gh.open = async (o) => (/s1kind/.test(o.title) ? lose() : open(o));
+    appendFileSync(join(w.root, 'unsent-alerts.jsonl'), storeLine('s1', 's1kind') + storeLine('s2', 'other'));
+    const r = await w.run({ probe: ALIVE });
+    assert.deepEqual([r.sent, r.failed], [1, 1]);
+    assert.match(r.refused, /could not be delivered/);
+    assert.deepEqual(readUnsent(w.root).map((x) => x.id), ['s1'], 'not marked sent before it was sent');
+    assert.equal(r.storeLeft, 1);
+    w.gh.open = open;
+    const r2 = await w.run({ probe: ALIVE });
+    assert.deepEqual([r2.sent, r2.failed, r2.refused], [1, 0, undefined]);
+    assert.deepEqual(readUnsent(w.root), []);
+  }
+});
+
+test('L288 plants: the store mark is written only after GitHub took the issue', async () => {
+  const w = world();
+  appendFileSync(join(w.root, 'unsent-alerts.jsonl'), storeLine('m1'));
+  const open = w.gh.open;
+  let unsentAtOpen = null;
+  w.gh.open = async (o) => { unsentAtOpen = readUnsent(w.root).map((x) => x.id); return open(o); };
+  await w.run({ probe: ALIVE });
+  assert.deepEqual(unsentAtOpen, ['m1'], 'still unmarked while the issue was being opened');
+  assert.deepEqual(readUnsent(w.root), []);
+});
+
+test('L288 plants: a store backlog bigger than one round goes out over later rounds, oldest first, none dropped', async () => {
+  const w = world();
+  appendFileSync(join(w.root, 'unsent-alerts.jsonl'), ['b1', 'b2', 'b3', 'b4', 'b5'].map((id) => storeLine(id, `kind-${id}`)).join(''));
+  // Each issue write takes a second of the round's clock; a round's budget fits two.
+  const clock = () => w.gh.calls.length * 1000;
+  const rounds = [];
+  for (let i = 0; i < 4 && readUnsent(w.root).length; i += 1) {
+    const r = await w.run({ probe: ALIVE, clock, sendMs: 1000, budgetMs: 2500 });
+    rounds.push([r.sent, r.storeLeft]);
+  }
+  assert.deepEqual(rounds, [[2, 3], [2, 1], [1, 0]]);
+  assert.deepEqual([...w.gh.issues.values()].map((x) => x.title), ['p1\'s Record store: kind-b1', 'p1\'s Record store: kind-b2', 'p1\'s Record store: kind-b3', 'p1\'s Record store: kind-b4', 'p1\'s Record store: kind-b5']);
+});
+
+test('L288 plants: an unsent file that can\'t be read is refused, never read as empty (the channel and M9)', async () => {
+  for (const make of [(f) => { rmSync(f); mkdirSync(f); }, (f) => { rmSync(f); writeFileSync(`${f}.real`, storeLine('z1')); symlinkSync(`${f}.real`, f); }]) {
+    const w = world();
+    const f = join(w.root, 'unsent-alerts.jsonl');
+    make(f);
+    assert.throws(() => readUnsent(w.root));
+    const r = await w.run({ probe: ALIVE });
+    assert.match(r.refused, /^the store's unsent alerts could not be read/);
+    assert.equal(w.gh.issues.size, 0);
+  }
+});
+
+test('L288 MAT-3: the store\'s alerts and the "Record is locked" issue go to this product\'s repo and name it; a Record of another product is refused', async () => {
+  const w = world({ products: ['p1', 'p2'], product: 'p2' });
+  const seen = [];
+  w.bound.issuesFor = (repo) => { seen.push(repo); return w.gh; };
+  appendFileSync(join(w.root, 'unsent-alerts.jsonl'), storeLine('u1', 'store_fault'));
+  assert.equal((await w.run({ probe: ALIVE })).sent, 1);
+  assert.match(w.gh.issues.get(1).title, /^p2's Record store: store_fault/);
+  writeLock(w.root, holder(T0 - 30 * MIN));
+  const l = await w.run({ host: 'mac-a', probe: ALIVE });
+  assert.equal(l.locked, 'opened');
+  assert.match(w.gh.issues.get(2).title, /^p2's Record is locked/);
+  assert.ok(w.gh.issues.get(2).body.includes(lockedMarker('p2')));
+  assert.deepEqual([...new Set(seen)], ['acme/product-2'], 'only p2\'s repository is ever used');
+  // A Record whose product document is another product's: refused before any alert is sent.
+  const v = world({ products: ['p1', 'p2'], product: 'p2' });
+  v.rec.write({ actor: 'approvals', entity: 'product', id: 'p1', expectRev: 0, doc: { state: 'active' } });
+  outbox(v.rec, T0)('x');
+  const r = await v.run({ probe: ALIVE });
+  assert.match(r.refused, /this Record holds product p1's state, not p2's/);
+  assert.equal(v.gh.calls.length, 0);
+  assert.equal(recordProductProblem(v.rec, 'p1'), null);
+  // No product: refused, not defaulted to the first.
+  const u = world({ products: ['p1', 'p2'] });
+  assert.match((await u.run({ probe: ALIVE, product: undefined })).refused, /no product for this Record/);
+});
+
+test('L288: a lock holder whose start time is in the future is told at once, never "waiting"', async () => {
+  const w = world();
+  writeLock(w.root, holder(T0 + 3 * 60 * MIN));
+  const r = await w.run({ host: 'mac-a', probe: ALIVE });
+  assert.equal(r.locked, 'opened');
+  assert.match(w.gh.issues.get(1).body, /start time is in the future, so how long it has been held can't be told/);
 });
