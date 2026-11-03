@@ -404,3 +404,59 @@ for (const [name, c] of Object.entries(CONDITIONS)) {
     });
   }
 }
+
+// L376: which HTTP code or shape problem it is goes in the body, not in the cause. Otherwise a flapping upstream opens a
+// new issue on every close. A different deploy live, in old-version-live, is a new event and does open one.
+const failWith = (t, status) => Object.defineProperty(t.v.s, 'deployments', { configurable: true, get() { throw Object.assign(new Error('x'), { status }); } });
+const readsAgain = (t, good) => Object.defineProperty(t.v.s, 'deployments', { configurable: true, writable: true, value: good });
+
+test('L376: 502, closed by the owner, then 503: no new issue; a clean read, then 502 again: one new issue', async () => {
+  const t = setup();
+  await t.pass();
+  const good = t.v.s.deployments;
+  failWith(t, 502); await t.pass();
+  assert.equal(t.gh.issues.size, 1);
+  t.gh.ownerCloses(1);
+  failWith(t, 503); await t.pass(); await t.pass();
+  assert.equal(t.gh.issues.size, 1, 'the same problem, and the owner answered it');
+  readsAgain(t, good); await t.pass();
+  failWith(t, 502); await t.pass();
+  assert.equal(t.gh.issues.size, 2, 'it came back after reading fine');
+  assert.equal(t.gh.issues.get(2).closed, false);
+});
+
+test('L376: a shape problem after a closed HTTP error is the same cause: no new issue', async () => {
+  const t = setup();
+  await t.pass();
+  const good = t.v.s.deployments;
+  failWith(t, 502); await t.pass();
+  t.gh.ownerCloses(1);
+  readsAgain(t, [dep(MAIN[0], 'git', 'NEW_STATE')]);
+  assert.deepEqual(await t.pass(), [{ kind: 'watcher-cannot-read', subject: 'vercel', result: 'suppressed' }]);
+  assert.equal(t.gh.issues.size, 1);
+});
+
+test('L376: on an open issue, 502 then 503 updates the body and sends no comment', async () => {
+  const t = setup();
+  await t.pass();
+  failWith(t, 502); await t.pass();
+  failWith(t, 503); await t.pass();
+  const issue = t.gh.issues.get(1);
+  assert.match(issue.body, /HTTP 503/);
+  assert.equal(issue.comments.length, 0);
+});
+
+test('L376: after a close, a different old deploy live opens a new issue, and the same one stays quiet', async () => {
+  const t = setup();
+  const a = dep(MAIN[0]); const b = dep(MAIN[1]); const c = dep(MAIN[2]);
+  t.v.s.deployments = [a, b, c]; t.v.s.live = c.uid;
+  await t.pass();
+  t.v.s.live = a.uid; await t.pass();
+  const opened = t.gh.issues.size;
+  assert.equal(opened, 1);
+  t.gh.ownerCloses(1);
+  await t.pass();
+  assert.equal(t.gh.issues.size, 1);
+  t.v.s.live = b.uid; await t.pass();
+  assert.equal(t.gh.issues.size, 2);
+});

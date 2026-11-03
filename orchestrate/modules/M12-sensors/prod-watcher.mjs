@@ -62,8 +62,10 @@ export async function watchOnce({ vercel, rulesEntry, mainFirstParent, evidence,
   const out = [];
   // Answers whether the alert went out: false when M13 lost it (L143). What the pass saves after a raise (a deploy
   // seen, a setting's baseline) is saved only when it went out, so a lost alert is raised again next pass.
-  const raise = async (kind, subject, title, body) => {
-    const result = await alerts.raise({ key: `${product}|${kind}|${subject}`, title: `${product}: ${title}`, body });
+  // With no status the body is the cause, which suits a body that's fixed for its key. One that isn't passes a status
+  // (L376), or a figure in it would read as a new cause and open a new issue after each close.
+  const raise = async (kind, subject, title, body, status) => {
+    const result = await alerts.raise({ key: `${product}|${kind}|${subject}`, title: `${product}: ${title}`, body, ...(status ? { status } : {}) });
     out.push({ kind, subject, result });
     return result !== false;
   };
@@ -72,12 +74,12 @@ export async function watchOnce({ vercel, rulesEntry, mainFirstParent, evidence,
   try {
     [deps, live, env, settings] = await Promise.all([vercel.deployments(), vercel.live(), vercel.envMeta(), vercel.settings()]);
   } catch (e) {
-    await raise('watcher-cannot-read', 'vercel', 'the production watcher cannot read Vercel', `The production watcher could not read Vercel${Number.isInteger(e?.status) ? ` (HTTP ${e.status})` : ''}. Production is not being watched until it can.`);
+    await raise('watcher-cannot-read', 'vercel', 'the production watcher cannot read Vercel', `The production watcher could not read Vercel${Number.isInteger(e?.status) ? ` (HTTP ${e.status})` : ''}. Production is not being watched until it can.`, 'cannot-read');
     return out;
   }
   const bad = shapeProblems({ deps, live, settings });
   if (bad.length) {
-    await raise('watcher-cannot-read', 'vercel', 'the production watcher cannot read Vercel', `Vercel answered in a shape the production watcher does not know (${bad.join('; ')}). Production is not being watched until it can.`);
+    await raise('watcher-cannot-read', 'vercel', 'the production watcher cannot read Vercel', `Vercel answered in a shape the production watcher does not know (${bad.join('; ')}). Production is not being watched until it can.`, 'cannot-read');
     return out;
   }
   await alerts.clear({ key: readKey, note: 'The production watcher can read Vercel again.' });
