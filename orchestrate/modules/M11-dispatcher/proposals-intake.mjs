@@ -177,8 +177,11 @@ export async function proposalsPass({ rec, rules, products, ownerUid, wait, aler
     if (first === null || look(join(dir, name)) !== first) { r.waiting = 'still being written'; continue; }
     const id = intakeFactId(product, name);
     let prev = rec.read('fact', id);
+    // Every put carries the bytes this name has ever used, or may have (L254): a later write of the fact, a refusal, a
+    // claim of new bytes after an interruption, never erases them, so those bytes are never handed on again.
     const put = (doc, kind) => {
-      const w = rec.write({ actor: 'dispatcher', entity: 'fact', id, expectRev: prev?.rev ?? 0, doc: { session: sourceOf(product), product, name, ...doc }, kind });
+      const used = usedOf(prev?.doc);
+      const w = rec.write({ actor: 'dispatcher', entity: 'fact', id, expectRev: prev?.rev ?? 0, doc: { session: sourceOf(product), product, name, ...doc, ...(used.length ? { used } : {}) }, kind });
       if (w.ok) prev = rec.read('fact', id);
       return w;
     };
@@ -190,12 +193,17 @@ export async function proposalsPass({ rec, rules, products, ownerUid, wait, aler
       return tellThen(alert, said, { fact: toldFactId(product, name), fields: { told: key }, kind: 'proposal_told' });
     };
     // A refusal is recorded once per reason and bytes, and told once (not every pass while the file sits there).
+    // A refusal with no bytes to name (a bad name, too big, a link, another owner) never erases a recorded state (L254):
+    // it is added beside it, so a used file's "already used" still holds when its bytes come back.
     const refuse = (reason, hash = null) => {
       r.refused = reason;
       if (prev?.doc?.state === 'refused' && prev.doc.why === reason && prev.doc.sha256 === hash) return;
+      const keep = hash === null && prev?.doc?.sha256 != null && prev.doc.state !== 'refused';
+      if (keep && prev.doc.refused_why === reason) return;
       const said = `a file in ${product}'s proposals folder was refused: ${reason}`;
       note(`proposals ${product}: ${name} refused: ${reason}`);
-      const w = put({ sha256: hash, state: 'refused', why: reason, at: new Date(now).toISOString(), alert_text: said }, 'proposal_refused');
+      const at = new Date(now).toISOString();
+      const w = put(keep ? { ...prev.doc, refused_why: reason, refused_at: at, alert_text: said } : { sha256: hash, state: 'refused', why: reason, at, alert_text: said }, 'proposal_refused');
       if (w.ok) tellThen(alert, said, { fact: intakeFactId(product, name), fields: { told_state: 'refused' }, kind: 'proposal_told' });
       else tellUnrecorded(said, `refused ${hash} ${reason}`);
     };
@@ -213,6 +221,8 @@ export async function proposalsPass({ rec, rules, products, ownerUid, wait, aler
       if (!w.ok) { r.refused = `could not record the interruption: ${w.reason}`; tellUnrecorded(said, `interrupted ${prev.doc.sha256}`); continue; }
       tellThen(alert, said, { fact: intakeFactId(product, name), fields: { told_state: 'interrupted' }, kind: 'proposal_told' });
     }
+    // Bytes this name used, or may have, before: never again, whatever the fact says now (L254). A heartbeat is a poll.
+    if (parsed.kind !== 'heartbeat' && usedOf(prev?.doc).includes(hash)) { r.already = true; continue; }
     if (prev && prev.doc?.sha256 != null) {
       const was = prev.doc.state;
       if (prev.doc.sha256 === hash && ['applied', 'interrupted'].includes(was)) { r.already = true; continue; }
@@ -292,6 +302,16 @@ export async function proposalsPass({ rec, rules, products, ownerUid, wait, aler
     }
   }
   return out;
+}
+
+// The bytes a fact says were used, or may have been (applied, interrupted), with those it carried. A claim still out
+// (applying) is not listed: the pass turns it into interrupted before anything reads this.
+const USED_STATES = ['applied', 'interrupted'];
+const USED_MAX = 50;
+function usedOf(d) {
+  const list = Array.isArray(d?.used) ? d.used.filter((x) => typeof x === 'string') : [];
+  if (d && USED_STATES.includes(d.state) && typeof d.sha256 === 'string' && !list.includes(d.sha256)) list.push(d.sha256);
+  return list.slice(-USED_MAX);
 }
 
 // A cause (a folder problem, or a kind with nothing to take it in) is told when it starts or changes, and its end is
