@@ -40,8 +40,10 @@ export const PENDING = Object.freeze([
 export const fit = (...a) => firstCutoverProblems(...a).filter((x) => !PENDING.includes(x));
 
 // The keys the merge gate (M6), Approvals (M2), the Record (M9) and the Dispatcher (M11) read (L86): go_free in the
-// map form, the only one both of its readers can use.
+// map form, the only one both of its readers can use. And the "on" switch Approvals makes the product's record from (L209).
 export const MODULE_PART = `
+onboarding:
+  state: active
 product_profile:
   required_checks: [build, test]
   robot:
@@ -55,6 +57,7 @@ approvals:
   decisions_dir: docs/decisions
 proposals:
   heartbeat_stale_min: 30
+  outbox: /srv/sample-app/proposals
 outage:
   min_dead: 2
   share: 0.5

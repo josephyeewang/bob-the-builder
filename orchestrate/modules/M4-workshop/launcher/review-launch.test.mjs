@@ -78,7 +78,7 @@ function world({ role = 'reviewer', smoke = 'sandboxed', init = initFor(role) } 
   const rules = { production: { env_files: [join(root, 'prod.cfg')], programs: ['fakehost'], hosts: ['db.prod.example.net'] }, secrets: { paths: [keys] } };
   writeSnapshot(snapshot, rules); // the runner's pass writes it before any start (readyProblem)
   const profile = DESIGN_PROFILES[role];
-  const r = renderRoleSettings({ productionFiles: [], role, profile, product: { commands: { test: 'npm test' } },
+  const r = renderRoleSettings({ productionFiles: [], proposalOutboxes: [], role, profile, product: { commands: { test: 'npm test' } },
     paths: { copy, outbox, hooksDir, snapshot, node: process.execPath, bobFolder, notes, mirror: join(root, 'mirror.git'),
       deny: { secrets: [keys], claudeHome: join(reviewHome, '.claude'), otherCopies: [join(root, 'copy2')] },
       reviewWalls: { outboxRoot: join(root, 'ro'), runnerRoot: join(root, 'rr') } } });

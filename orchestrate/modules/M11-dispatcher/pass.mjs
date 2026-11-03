@@ -339,6 +339,9 @@ export async function dispatcherPass({ rec, rules, now, account, sessions, probe
       //   - a wait with no run_started (it was not parked from a run, or its claim had no readable time);
       //   - a hit after the run began with no reset time (the worker could not read it, or it was already past), or a
       //     reset more than LIMIT_RESET_MAX_MS after the hit;
+      //   - a card that has waited on a limit longer than LIMIT_RESET_MAX_MS since wait.since, whatever the reading says
+      //     (audit #125 r2 m-2, m-3): a reset that moves forward with each new hit, or a hit dated in the future, would
+      //     otherwise hold it quietly with no end;
       //   - no hit after the run began, timeouts.usage_unknown_max_min after the card began to wait.
       const acct = doc.wait?.account;
       if (typeof acct !== 'string' || !acct) {
@@ -363,13 +366,22 @@ export async function dispatcherPass({ rec, rules, now, account, sessions, probe
         continue;
       }
       const resets = Date.parse(lf?.resets_at ?? '');
+      // Measured from the hit, never from now, on purpose (audit #125 r2 c-2): when the Mini was off past the reset, the
+      // first pass after still judges the reset against the hit's own time.
       if (!Number.isFinite(resets) || resets > seen + LIMIT_RESET_MAX_MS) {
         const why = Number.isFinite(resets) ? `the reset time it gave (${lf.resets_at}) is more than a week after the hit` : 'the reset time could not be read';
         waitOnJoe(rec, id, { what: LIMIT_NO_RESET, now, kind: 'limit_no_reset', alert,
           text: `card ${id}: account ${acct} hit its usage limit but ${why}, so it can't resume by itself; it waits on you` });
         continue;
       }
-      if (now < resets) continue;
+      if (now < resets) {
+        const since = Date.parse(doc.wait?.since ?? '');
+        if (Number.isFinite(since) && now - since > LIMIT_RESET_MAX_MS) {
+          waitOnJoe(rec, id, { what: LIMIT_NO_RESET, now, kind: 'limit_no_reset', alert,
+            text: `card ${id}: it has waited on account ${acct}'s usage limit since ${doc.wait.since}, longer than any real limit window, and the reset it gives (${lf.resets_at}) is still ahead, so it can't resume by itself; it waits on you` });
+        }
+        continue;
+      }
       if (doc.tier === 2) { if (move(rec, 'card', id, { state: 'ready' }, { kind: 'resume_limit_hit' }).ok) out.resumed.push(id); }
       // No card waits on Joe silently (L130): this one is told, until delivered.
       else waitOnJoe(rec, id, { what: 'limit_hit: the limit reset; Tier-1 work does not resume by itself', now, kind: 'limit_reset', alert,

@@ -34,7 +34,7 @@ test('L112: every Record write in a module is one the permissions table allows (
 
 test('L112: the scan sees the writes the lead counted, so an empty answer is not a blind scan', () => {
   const n = (actor, entity) => scan.sites.filter((s) => s.actor === actor && s.entity === entity).length;
-  assert.equal(n('dispatcher', 'fact'), 13, 'alerts, joe-waits ×2, lead-restart, merges, moves, outage, outbox-intake, pass, phone-link ×2, tick, usage');
+  assert.equal(n('dispatcher', 'fact'), 17, 'alerts, joe-waits ×2, lead-restart, merges, moves, outage, outbox-intake, pass, phone-link ×2, proposals-intake ×4, tick, usage');
   // #68: the restart handoff is the Lead's own (its outbox); the Dispatcher saves a lead-restart- fact instead, and
   // asks are approvals' alone (lane 2's consumeAsk).
   assert.equal(n('dispatcher', 'handoff'), 0);

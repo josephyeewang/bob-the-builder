@@ -10,6 +10,7 @@
 // lapse counts nothing (decision.mjs, readApprove below).
 //
 //   await schedulePass(ctx) → { ok, events } | { ok: false, reason, events }    one pass; the dispatcher runs it often
+//     first makes the product's record when its rules file says `onboarding.state: active` and it has none (onboard.mjs)
 //   await readApprove(ctx, askId, { view, catchUps }) → { ok, counted, head? }  a risky_approve ask's GitHub Approve
 //   await approvalStands(ctx, askId, { head, view, catchUps }) → { ok } | { ok: false, reason }   may this head merge on it now?
 //     + unreadable: true, cause when a GitHub read threw (L205); the Merge Gate classes `cause`
@@ -31,6 +32,7 @@ import { askStore, writeDoc } from './ask-store.mjs';
 import { releaseBoxes, releaseSessions } from './binding.mjs';
 import { CLOSE_DUE, closeDecisionPr, openDecision } from './decision.mjs';
 import { goText, goView, undoPushText } from './go-view.mjs';
+import { onboard, onboardNotices } from './onboard.mjs';
 import { countApprove, requestReview } from './github-review.mjs';
 import { MERGE_APPROVE_MS, UNDO_OPEN_QUESTION_LINE, URGENT_REPUSH_MS, dueWindow, lapseAt, readConfig, zoneFor } from './kinds.mjs';
 
@@ -161,6 +163,12 @@ export async function schedulePass(ctx) {
   const cfg = readConfig(ctx.rules, ctx.product);
   if (!cfg.ok) { configAlert(ctx, cfg.reason); return fail(cfg.reason, { events }); }
   configAlert(ctx, null);
+  // A product whose rules file says it is on gets its record, once (L204-b, L209), after the config read (L221 m-3,
+  // ratified): a product whose owner can't be asked is not started. Before the product read below, so the record the
+  // rest of the pass reads is the one just made (pinned: onboarded is events[0]). Joe is told once (onboard.mjs).
+  const made = onboard(ctx);
+  if (made) events.push(made);
+  onboardNotices(ctx, made);
   const nowMs = ctx.now();
   const p = ctx.record.read('product', ctx.product);
   const win = dueWindow(nowMs, zoneFor(cfg, p && !p.corrupt ? p.doc : null), cfg.windows);
