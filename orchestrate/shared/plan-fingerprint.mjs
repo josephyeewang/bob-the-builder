@@ -31,29 +31,47 @@ export function canonicalJson(v) {
   throw new Error(`cannot fingerprint a ${typeof v}`);
 }
 
-// The one rule for a plan's file path, exported so a plan's wave check (M3) compares the same cleaned form (L87 M-1).
-// Returns the cleaned path, or null when it is not one plain path. Refused besides the shape rules: control characters,
-// line and paragraph separators, and every Unicode format character (\p{Cf}: zero-width spaces and joiners U+200B-200F,
-// direction overrides U+202A-202E and isolates U+2066-2069, the byte-order mark U+FEFF, soft hyphen and the rest).
-// Those draw nothing on screen, so a path holding one reads to Joe as a different file from the one it names (L95 Minor 4).
+// A path's shape, before any plan rule: one relative POSIX path with no empty, "." or ".." name, no folder pattern
+// (*, ?, [, {), no backslash, no control character or line separator, no Unicode format character (\p{Cf}), and
+// well formed (no lone surrogate: the disk writes each as U+FFFD, so three spellings are one file; L105 M-2). NFC.
+// Returns the path in NFC with any leading "./" taken off, or null.
 const UNPRINTED = /[\u0000-\u001f\u007f-\u009f\u2028\u2029\p{Cf}]/u;
-export function cleanPath(p) {
-  if (typeof p !== 'string' || !p) return null;
+function shapeClean(p) {
+  if (typeof p !== 'string' || !p || !p.isWellFormed()) return null;
   let q = p.normalize('NFC');
   while (q.startsWith('./')) q = q.slice(2);
   if (!q || q.endsWith('/') || q.startsWith('/') || /[*?[\]{}]/.test(q) || q.includes('\\') || UNPRINTED.test(q) || q.split('/').some((s) => s === '' || s === '.' || s === '..')) return null;
   return q;
 }
 
-// The one key two plan paths are compared by (L93 m-1): the cleaned path, fully case-folded, in NFC. The Mac's default
-// disk ignores case, so two cards naming `straße.js` and `STRASSE.js`, or `ς.js` and `σ.js`, touch one file. A plain
-// toLowerCase misses both (ß stays ß; final ς stays ς), so this folds through upper case first (ß → SS → ss, ς → Σ → σ,
-// ﬁ → FI → fi), then NFC again, since a case change can leave text out of NFC. It folds slightly MORE than Unicode's
-// own case folding (dotless ı and i become one), which can only report a collision that isn't there, never miss one.
-// The fingerprint keeps case (cleanPath); this key answers "is it the same file", never what the worker is told.
+// The one rule for a plan's file path, exported so a plan's wave check (M3) compares the same cleaned form (L87 M-1).
+// Returns the cleaned path, or null when it is not one plain path. Besides the shape rules, a plan path is plain
+// printable ASCII only (L105): the same rule M10's pathProblem applies to a change's files, so a plan can't name a file
+// M10 would send to Joe. That closes, by its root, every character that draws nothing or looks like another one
+// (format characters, fillers, variation selectors, non-ASCII spaces, combining marks, fullwidth slashes; L95 Minor 4).
+const PLAIN = /^[\x20-\x7e]+$/;
+export function cleanPath(p) {
+  const q = shapeClean(p);
+  return q !== null && PLAIN.test(q) ? q : null;
+}
+
+// The one case fold for "is it the same file" (L93 m-1, L105 M-1): lower, upper, lower, then NFC. The Mac's default disk
+// ignores case and Unicode normalization. A plain toLowerCase misses ß/SS and final ς/σ; upper-then-lower misses the
+// capital sharp S (ẞ → ß, but ß → SS). Measured against the Mac's own disk on 16,627 names (audit-pr84 r1): 0 groups
+// the disk treats as one file get two keys. One false collision is known (dotless ı and i), the safe direction: it can
+// only call two files one. Null for a string that is not well formed. Every module compares paths by this or by
+// pathKey, never by a fold of its own (the guard test in plan-fingerprint.test.mjs).
+export function foldKey(s) {
+  if (typeof s !== 'string' || !s.isWellFormed()) return null;
+  return s.toLowerCase().toUpperCase().toLowerCase().normalize('NFC');
+}
+
+// The one key two paths are compared by: the path's shape cleaned (not the ASCII plan rule, since M3 and M11 also
+// compare paths that are not plan paths), then foldKey. The fingerprint keeps case (cleanPath); this key answers "is
+// it the same file", never what the worker is told.
 export function pathKey(p) {
-  const q = cleanPath(p);
-  return q === null ? null : q.toUpperCase().toLowerCase().normalize('NFC');
+  const q = shapeClean(p);
+  return q === null ? null : foldKey(q);
 }
 
 export function planFingerprint(plan) {

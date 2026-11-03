@@ -10,22 +10,26 @@ import { posix } from 'node:path';
 import { KEYS, need } from './keys.mjs';
 import { wholeNumber } from '../../shared/rules.mjs';
 import { mayStart } from './usage.mjs';
+import { foldKey } from '../../shared/plan-fingerprint.mjs';
 
 const refuse = (reason) => ({ ok: false, reason });
 const ROW_FILE = /^docs\/blueprint\/rows\/([^/]+)\.yaml$/;
 
-/** A repo path, normalised and case-folded (macOS names ignore case). Null for a path outside the repo. */
+/** A repo path, normalised and folded by the one shared fold (shared/plan-fingerprint.mjs foldKey; L105 M-3), as the
+ * Mac's disk compares names. Null for a path outside the repo or one that is not well formed. */
 export function normPath(p) {
   if (typeof p !== 'string' || !p.trim() || p.includes('\0')) return null;
   if (p.startsWith('/') || p.startsWith('~') || /^[A-Za-z]:/.test(p)) return null;
   const n = posix.normalize(p.replace(/\\/g, '/'));
   if (n === '..' || n.startsWith('../') || n === '.' || n.endsWith('/')) return null;
-  return n.toLowerCase();
+  return foldKey(n);
 }
 
-/** `**` matches any depth, `*` one name. Patterns are case-folded like paths. */
+/** `**` matches any depth, `*` one name. Patterns are folded like paths (foldKey); one that can't be folded matches
+ * everything, so it counts as an overlap, never as none. */
 export function matches(pattern, path) {
-  const p = String(pattern).toLowerCase();
+  const p = foldKey(String(pattern));
+  if (p === null) return true;
   const re = new RegExp(`^${p.split('**').map((part) => part.split('*').map((s) => s.replace(/[.+?^${}()|[\]\\]/g, '\\$&')).join('[^/]*')).join('.*')}$`);
   return re.test(path);
 }
@@ -33,7 +37,7 @@ export function matches(pattern, path) {
 /** A card's own file set, or a refusal. The daily card also carries its patterns. */
 export function fileSet(card, { dailyPatterns }) {
   const out = new Set();
-  const named = new Set((card.rows ?? []).map((r) => String(r).toLowerCase()));
+  const named = new Set((card.rows ?? []).map((r) => foldKey(String(r))));
   for (const f of card.files ?? []) {
     const n = normPath(f);
     if (!n) return refuse(`the card names a path outside the repo (${f})`);
