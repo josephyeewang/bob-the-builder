@@ -261,7 +261,7 @@ test('L329: a stray check time unreadable or ahead: checked now', async () => {
   }
 });
 
-test('L329: Mini Base down, its last start time unreadable or ahead: started now', async () => {
+test('L329: the host's remote link down, its last start time unreadable or ahead: started now', async () => {
   for (const [label, bad] of BAD_AT(1)) {
     const w = world();
     w.read(1, { mb: false });

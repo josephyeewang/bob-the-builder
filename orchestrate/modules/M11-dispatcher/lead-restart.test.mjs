@@ -323,7 +323,7 @@ test('L329: an ask time unreadable or an hour ahead ends the wait: re-asked, not
   }
 });
 
-test('L329: a Lead that never answers the WRAP is re-asked after a day, then given up on and Joe told', async () => {
+test('L329: a Lead that never answers the WRAP is re-asked after a day, then given up on and the owner told', async () => {
   const w = world();
   const DAY = 24 * 60;
   assert.equal(await w.step(ended(260_000, 0), 1), 'WRAP sent');
