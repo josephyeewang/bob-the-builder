@@ -17,7 +17,7 @@ import { fakeGateGitHub } from './fixtures/fake-gate-github.mjs';
 import { makeGitView } from '../M10-rules/git-view.mjs';
 import { blobSha } from '../M10-rules/reader.mjs';
 import { ROBOT_FACT, NO_PUSH_FACT } from '../M12-sensors/outside-watch.mjs';
-import { gatePass, queueOrder, NOT_GREEN_LINE, MERGE_LIMIT_TOLD_FACT, FINAL_NOTE, GITHUB_NO_NOTE, WAIT_CAP_TIMES, DEFAULT_WAIT_LIMIT_MIN, waitCapNote } from './gate.mjs';
+import { gatePass, queueOrder, NOT_GREEN_LINE, MERGE_LIMIT_TOLD_FACT, FINAL_NOTE, GITHUB_NO_NOTE, CHECK_CUT_NOTE, WAIT_CAP_TIMES, DEFAULT_WAIT_LIMIT_MIN, waitCapNote } from './gate.mjs';
 import { readMark } from './mark.mjs';
 import { readNeedsJoe } from './checker-entry.mjs';
 import { gatherFacts } from './gather.mjs';
@@ -2522,7 +2522,7 @@ function approveWorld(reviews) {
   const values = { ...w.values, 'accounts.joe.github_id': OWNER_ID, 'accounts.joe.tz': 'UTC', 'approvals.push_windows': ['08:00'], 'approvals.decisions_dir': 'docs/decisions' };
   const approved = { status: 200, json: [{ id: 1, user: { id: OWNER_ID, type: 'User' }, state: 'APPROVED', commit_id: head, submitted_at: nowIso(w, 1) }] };
   const gh = { ...w.g.gh, get: async (p) => (/\/pulls\/\d+\/reviews/.test(p) ? reviews(approved) : w.g.gh.get(p)) };
-  w.ctx.approvals = { record: recOf(w), rules: fakeRules({ values }), product: PRODUCT, now: w.ctx.now, alert: () => {}, gh, owner: 'sample-org', repo: 'sample-app' };
+  w.ctx.approvals = { record: recOf(w), rules: fakeRules({ values }), product: PRODUCT, now: w.ctx.now, alert: fakeAlert(), gh, owner: 'sample-org', repo: 'sample-app' };
   return w;
 }
 test('L205: an Approve whose reviews read fails holds the merge on 8 with no clock; read, the Approve stands and it merges', async () => {
@@ -2624,5 +2624,48 @@ test('#108 r3 R3-c: an undo whose exact-reverse compare lists 300 files: the wai
   for (const step of [LIMIT_MIN, WAIT_CAP_TIMES * LIMIT_MIN]) { tick(w, step); await gatePass(w.ctx); }
   assert.equal(mergeOf(w, 'U-1').doc.state, 'refused', JSON.stringify(mergeOf(w, 'U-1').doc));
   assert.equal(told(w, 'merge_refused').filter((a) => a.card === 'U-1' || JSON.stringify(a).includes('U-1')).length, 1);
+});
+
+// L231 (#108 r3): under the lock, a hold whose move is refused, with the write-refused alert lost too, was left in
+// checking; the next pass refused it as "GitHub did not merge the judged head" with nothing told. Both ways out:
+// the hold's write alone refused (ended refused now, with what the check found), and every write out of checking
+// refused that pass (recover() ends it next pass). Either way Joe is told once, when the alert gets through.
+test('L231: a hold under the lock whose move is refused ends refused, and Joe is told once the alert gets through', async () => {
+  for (const all of [false, true]) {
+    const w = world(limited());
+    verifiedCard(w);
+    // The second thread read (the one under the lock) fails, so the check under the lock holds (L190 probe A3).
+    const post = w.g.gh.post;
+    let n = 0;
+    w.g.gh.post = async (path, body) => (path === '/graphql' && ++n >= 2 ? { status: 502, json: null } : post(path, body));
+    const rec = w.ctx.record; const orig = rec.write.bind(rec);
+    let pass = 0; let refusedWrites = 0;
+    w.ctx.record = { ...rec, write: (x) => {
+      const from = x.entity === 'merge' ? rec.read('merge', x.id)?.doc?.state : null;
+      if (pass === 0 && from === 'checking' && (x.doc?.state === 'held' || (all && x.doc?.state !== 'checking'))) { refusedWrites += 1; return { ok: false, reason: 'refused (L231 test)' }; }
+      return orig(x);
+    } };
+    flakyAlert(w, 'merge_gate_write_refused', 'false', 99);
+    flakyAlert(w, 'merge_refused', 'false', 1);
+    await gatePass(w.ctx);
+    assert.ok(refusedWrites >= 1, 'a write out of checking was refused');
+    assert.equal(mergeOf(w).doc.state, all ? 'checking' : 'refused', `all=${all}`);
+    assert.equal(cardOf(w).state, 'verified', 'the card is put back');
+    assert.deepEqual(told(w, 'merge_gate_write_refused'), [], 'the write-refused alerts were lost');
+    for (pass = 1; pass < 4 && !mergeOf(w).doc.told_at; pass++) { tick(w, 1); await gatePass(w.ctx); }
+    const m = mergeOf(w);
+    assert.ok(m.doc.told_at, `all=${all}: told in the end: ${JSON.stringify(m.doc)}`);
+    assert.equal(told(w, 'merge_refused').length, 1, `all=${all}: told once`);
+    if (all) assert.deepEqual([m.doc.reasons, m.doc.tell_note], [['GitHub did not merge the judged head'], CHECK_CUT_NOTE]);
+    else {
+      assert.ok(m.doc.reasons.some((r) => /^7: the review threads could not be read/.test(r)), m.doc.reasons.join(' | '));
+      assert.equal(m.doc.tell_note, CHECK_CUT_NOTE);
+      assert.equal(m.doc.stuck_since, null, 'the wait clock is cleared');
+    }
+    tick(w, 1);
+    await gatePass(w.ctx);
+    assert.equal(told(w, 'merge_refused').length, 1, 'not told again');
+    assert.equal(gatePuts(w), 0, 'nothing was merged');
+  }
 });
 
