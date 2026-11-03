@@ -145,6 +145,10 @@ test('R-0b-162 B: every pass is named, and a pass that throws does not stop the 
   // A pass that never answers is cut off at its deadline and told.
   const stuck = await runPasses({ rec, passes: { ...passes, watch: () => new Promise(() => {}) }, now: () => Date.now(), passDeadlineMs: 50 });
   assert.match(stuck.watch.error, /did not finish within 50 ms/);
+  // A pass that answers { refused } failed, and is told.
+  const ref = await runPasses({ rec, passes: { ...passes, gate: () => 'ok', deliver: () => ({ sent: 0, refused: 'alert channel not set up: no token' }) }, now: () => Date.now() });
+  assert.deepEqual([ref.deliver.ok, ref.deliver.error], [false, 'alert channel not set up: no token']);
+  assert.ok(queued(rec).includes('the robot job\'s deliver pass failed: alert channel not set up: no token; the other passes still ran'));
 });
 
 test('R-0b-162 B (L239): the heartbeat tells Joe when the Dispatcher\'s last full pass is too old, once per stop', () => {

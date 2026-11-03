@@ -32,7 +32,11 @@ export async function runPasses({ rec, passes, now, passDeadlineMs = PASS_DEADLI
     try {
       if (typeof passes[name] !== 'function') throw new Error(`the wiring has no ${name} pass`);
       const late = new Promise((_, no) => { timer = setTimeout(() => no(new Error(`it did not finish within ${passDeadlineMs} ms`)), passDeadlineMs); });
-      res[name] = { ok: true, result: await Promise.race([Promise.resolve().then(passes[name]), late]) };
+      const result = await Promise.race([Promise.resolve().then(passes[name]), late]);
+      // A pass may refuse by answering { refused: <why> } instead of throwing (lane 3's deliverAlertsPass, L242): that is
+      // a failed pass, told like a throw, never counted as done.
+      if (typeof result?.refused === 'string' && result.refused) throw new Error(result.refused);
+      res[name] = { ok: true, result };
     } catch (e) {
       const error = String(e?.message ?? e);
       res[name] = { ok: false, error };
