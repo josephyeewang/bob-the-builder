@@ -2669,3 +2669,91 @@ test('L231: a hold under the lock whose move is refused ends refused, and Joe is
   }
 });
 
+
+// L315 (class audit, told once ever while still waiting): a wait Joe was told of is told again every 24 h while it lasts,
+// and its marks are cleared when it ends. Ticks of hours keep the outside check green, as the real watcher would.
+const DAY_MIN = 24 * 60;
+function stayGreen(w) {
+  const at = new Date(w.env.clock.t).toISOString();
+  w.facts.set(ROBOT_FACT(PRODUCT), { product: PRODUCT, green: true, red_since: null, last_green_at: at });
+  w.facts.set(NO_PUSH_FACT, { green: true, at });
+}
+const later = async (w, min) => { tick(w, min); stayGreen(w); return gatePass(w.ctx); };
+
+test('L315 S-M6a: a wait while GitHub can\'t be read is told at the limit, quiet at +2 h, told again at +25 h naming it, and cleared when reads return', async () => {
+  const w = world(limited());
+  verifiedCard(w);
+  const post = w.g.gh.post;
+  let down = true;
+  w.g.gh.post = async (path, body) => (down && path === '/graphql' ? { status: 502, json: null } : post(path, body));
+  await later(w, 0);
+  assert.equal(told(w, 'merge_waiting_long').length, 0, 'not yet at the limit');
+  await later(w, LIMIT_MIN);
+  assert.equal(told(w, 'merge_waiting_long').length, 1, 'told at the limit');
+  await later(w, 120);
+  assert.equal(told(w, 'merge_waiting_long').length, 1, 'quiet at +2 h');
+  await later(w, DAY_MIN + 60 - 120);
+  assert.equal(told(w, 'merge_waiting_long').length, 2, 'told again at +25 h');
+  assert.match(told(w, 'merge_waiting_long')[1].note, /GitHub can't be read/);
+  await later(w, 60);
+  assert.equal(told(w, 'merge_waiting_long').length, 2, 'quiet again after the re-tell');
+  assert.equal(mergeOf(w).doc.stuck_since, null, 'an outage never starts the cap');
+  assert.deepEqual(told(w, 'merge_refused'), [], 'an outage never refuses');
+  down = false;
+  await later(w, 1);
+  const m = mergeOf(w);
+  assert.equal(m.doc.state, 'merged');
+  for (const f of ['waiting_on', 'waiting_since', 'wait_told_at', 'stuck_since']) assert.equal(m.doc[f] ?? null, null, f);
+  await later(w, DAY_MIN + 60);
+  assert.equal(told(w, 'merge_waiting_long').length, 2, 'never told again once it ended');
+});
+
+test('L315 S-M6b: the wait on an interrupted pull request\'s reading has a clock: told after the limit, then daily, never refused, cleared when the reading lands', async () => {
+  const w = world(limited());
+  const head = verifiedCard(w);
+  await interruptedThenAskedAgain(w, head);
+  const again = () => recOf(w).list('merge').find((m) => m.doc.request === 'mr-C-1-again');
+  const waits = () => told(w, 'merge_waiting_long').filter((a) => a.merge === again()?.id);
+  await later(w, 1);
+  assert.equal(again().doc.state, 'queued');
+  assert.ok(Number.isFinite(Date.parse(again().doc.waiting_since)), 'the wait has a start time');
+  assert.equal(waits().length, 0, 'quiet before the limit');
+  await later(w, LIMIT_MIN);
+  assert.equal(waits().length, 1, 'told after the limit');
+  assert.match(waits()[0].note, /interrupted/);
+  await later(w, 120);
+  assert.equal(waits().length, 1, 'quiet at +2 h');
+  await later(w, DAY_MIN + 60 - 120);
+  assert.equal(waits().length, 2, 'told again at +25 h');
+  await later(w, WAIT_CAP_TIMES * LIMIT_MIN);
+  assert.equal(again().doc.state, 'queued', 'never refused: the earlier merge may still land');
+  assert.equal(gatePuts(w), 1, 'no second merge call');
+  sensorsReads(w, { state: 'open', merged: false, merge_commit_sha: null, head_sha: head, observed_at: nowIso(w, 1) });
+  await later(w, 1);
+  const m = again();
+  assert.equal(m.doc.state, 'merged');
+  for (const f of ['waiting_on', 'waiting_since', 'wait_told_at', 'stuck_since']) assert.equal(m.doc[f] ?? null, null, f);
+  await later(w, DAY_MIN + 60);
+  assert.equal(waits().length, 2, 'never told again once it ended');
+});
+
+test('L315 S-M6b: the interrupted alert is sent again each pass until it is taken, then not again', async () => {
+  const w = world(limited());
+  verifiedCard(w);
+  const tries = flakyAlert(w, 'merge_interrupted', 'false', 2);
+  loseAnswer(w, { merged: false });
+  await gatePass(w.ctx);
+  tick(w, LIMIT_MIN);
+  await gatePass(w.ctx);
+  assert.deepEqual(mergeOf(w).doc.reasons, ['interrupted']);
+  assert.equal(tries.length, 1);
+  assert.equal(told(w, 'merge_interrupted').length, 0, 'the first was lost');
+  await later(w, 1);
+  assert.equal(told(w, 'merge_interrupted').length, 0, 'the second was lost');
+  await later(w, 1);
+  assert.equal(told(w, 'merge_interrupted').length, 1, 'sent again until taken');
+  await later(w, 1);
+  await later(w, DAY_MIN);
+  assert.equal(told(w, 'merge_interrupted').length, 1, 'once taken, not again');
+  assert.equal(tries.length, 3);
+});

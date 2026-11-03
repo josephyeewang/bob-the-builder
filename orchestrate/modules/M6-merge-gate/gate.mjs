@@ -26,7 +26,8 @@
 // TOLD UNTIL DELIVERED (L168, L170; the site G pattern of L135). A refusal the owner must hear of is written with
 // tell_owner: true and its note; told_at is added only once the merge_refused alert was taken (an answer of false, or a
 // throw, is not taken), and each pass sends again for every refused merge that has tell_owner and no told_at. A long
-// wait is the same with wait_told_at. ctx.alert must answer true when it has kept the alert (queued it, or stored a
+// wait is the same with wait_told_at, told again every 24 h while it lasts (L315), and an interrupted merge's notice
+// with interrupted_told_at. ctx.alert must answer true when it has kept the alert (queued it, or stored a
 // copy to send later): a sink that keeps a copy and answers false gets one more kept copy on every pass (L182 m3).
 
 import { robotMergesGreen } from '../M12-sensors/outside-watch.mjs';
@@ -62,7 +63,18 @@ export const waitCapNote = (limitMs) => `waited ${Math.round((WAIT_CAP_TIMES * l
 export const CATCH_UP_STUCK = 'GitHub accepted the branch update but the head never moved';
 // The fields a wait keeps (L164, L184). Cleared when the merge leaves the wait for a catch-up or the merge call (L190 M1):
 // a new wait after that gets its own clock and its own notice.
-const WAIT_CLEARED = Object.freeze({ waiting_on: null, waiting_since: null, wait_told_at: null, stuck_since: null });
+// `wait_reading` names the interrupted merge a queued one waits on a reading after (L315 S-M6b).
+const WAIT_CLEARED = Object.freeze({ waiting_on: null, waiting_since: null, wait_told_at: null, stuck_since: null, wait_reading: null });
+// A wait Joe was told of is told again this often while it lasts (L315: never told once ever while still waiting).
+export const WAIT_RETELL_MS = 24 * 60 * 60_000;
+// Due to be told: never told, a mark that can't be read, one more than a minute in the future (a clock that jumped
+// back; L317), or one WAIT_RETELL_MS old. The same rule as lane 5's shared still-waiting primitive, which replaces this
+// once it lands.
+export function tellDue(toldAt, nowMs, repeatMs = WAIT_RETELL_MS) {
+  const t = Date.parse(toldAt ?? '');
+  return !Number.isFinite(t) || t > nowMs + 60_000 || nowMs - t >= repeatMs;
+}
+export const GITHUB_UNREADABLE_NOTE = 'GitHub can\'t be read';
 
 /**
  * One answer to "was GitHub unreadable this pass", for serve and for check under the lock (L190 M2).
@@ -169,6 +181,7 @@ export async function gatePass(ctx) {
 
   // 3b. A refusal whose alert was lost is told again (L168).
   for (const m of merges().filter((x) => x.doc.state === 'refused' && x.doc.tell_owner === true && !x.doc.told_at)) tellRefused(m);
+  for (const m of merges().filter((x) => x.doc.state === 'refused' && typeof x.doc.interrupted_note === 'string' && !x.doc.interrupted_told_at)) tellInterrupted(m);
 
   // 4. One at a time: finish a merge a stopped pass left behind.
   const busy = merges().find((m) => m.doc.state === 'checking' || m.doc.state === 'merging');
@@ -200,13 +213,29 @@ export async function gatePass(ctx) {
     // An interrupted merge of this PR may still land on GitHub (L102): no merge or catch-up call goes out for it again
     // until Sensors has read the PR after that refusal and seen it not merged. A reading that shows merged is the
     // Dispatcher's reconcile to record, never a second merge.
-    // TO-DO (L190 minor c, owner lane 3, Sensors): this wait has no cap of its own (L184 says every wait). It ends only
-    // when Sensors reads the pull request after the interrupted merge, so the cap belongs with that reading: Sensors
-    // should tell the owner when the reading is overdue. Not done here because it is not a few lines: the merge stays
-    // queued with no wait clock, and refusing it while the earlier merge may still land would be wrong.
+    // This wait has a clock and a told mark like any other (L315 S-M6b, closing L190 minor c): told after the wait limit,
+    // then every WAIT_RETELL_MS while it lasts, and cleared when the reading lands. It is never refused at the cap: the
+    // earlier merge may still land, and refusing this one then would be wrong. It stays queued.
     const cut = merges().find((x) => x.id !== m.id && x.doc.pr === m.doc.pr && x.doc.state === 'refused' && (x.doc.reasons ?? []).includes('interrupted')
       && ((r) => !r || r.merged === true)(prReadingAfter(record, x.doc.pr, x.id)));
-    if (cut) { step(m, 'waiting', { reasons: [`merge ${cut.id} of this pull request was interrupted; waiting for a reading of the pull request after it`] }); return STEPPED_ASIDE; }
+    if (cut) {
+      const why = `merge ${cut.id} of this pull request was interrupted; waiting for a reading of the pull request after it`;
+      let cur = fresh('merge', m.id) ?? m;
+      if (cur.doc.wait_reading !== cut.id) {
+        const w = write('merge', cur, { ...WAIT_CLEARED, waiting_on: [why], waiting_since: iso(), wait_reading: cut.id });
+        if (!w.ok) alert({ type: 'merge_gate_write_refused', merge: m.id, to: 'wait_reading', reason: w.reason });
+        cur = fresh('merge', m.id) ?? cur;
+      }
+      step(m, 'waiting', { reasons: [why] });
+      waitedLong(cur, waitLimit(cur, [why]));
+      return STEPPED_ASIDE;
+    }
+    // The reading landed: that wait is over, and a later wait gets its own clock and notice.
+    if (m.doc.wait_reading) {
+      const w = write('merge', fresh('merge', m.id) ?? m, { ...WAIT_CLEARED });
+      if (!w.ok) alert({ type: 'merge_gate_write_refused', merge: m.id, to: 'wait_reading_cleared', reason: w.reason });
+      m = fresh('merge', m.id) ?? m;
+    }
     if (m.doc.state === 'catching_up') {
       await finishCatchUp(m);
       // Caught up: served now, before younger changes can put it behind main again.
@@ -321,16 +350,21 @@ export async function gatePass(ctx) {
       }
     }
     if (!move(cur, 'held', fields)) return false;
-    if (waiting) waitedLong(fresh('merge', m.id), limit);
+    if (waiting) waitedLong(fresh('merge', m.id), limit, { outage });
     return true;
   }
 
-  function waitedLong(m, limit) {
-    if (!m?.doc || m.doc.wait_told_at || limit === undefined) return;
+  // Told after the wait limit, then again every WAIT_RETELL_MS while it still waits, outage passes included (L315
+  // S-M6a: an outage never starts the cap, so without this Joe heard of it once, ever). Cleared with WAIT_CLEARED.
+  function waitedLong(m, limit, { outage = false } = {}) {
+    if (!m?.doc || limit === undefined || !tellDue(m.doc.wait_told_at, now())) return;
     const since = Date.parse(m.doc.waiting_since ?? '');
     if (Number.isFinite(since) && now() - since < limit) return;
-    const taken = alertTaken(alert, { type: 'merge_waiting_long', merge: m.id, card: m.doc.card, pr: m.doc.pr, waiting_since: m.doc.waiting_since ?? null, waiting_on: m.doc.waiting_on ?? [],
-      note: `merge ${m.id} has waited to be judged for ${Math.round(limit / 60_000)} min or more: ${(m.doc.waiting_on ?? []).join('; ')}. It is judged again on every pass` });
+    const again = Number.isFinite(Date.parse(m.doc.wait_told_at ?? ''));
+    const hours = Number.isFinite(since) ? Math.floor((now() - since) / 3_600_000) : null;
+    const how = again && hours !== null ? `for ${hours} h` : `for ${Math.round(limit / 60_000)} min or more`;
+    const taken = alertTaken(alert, { type: 'merge_waiting_long', merge: m.id, card: m.doc.card, pr: m.doc.pr, waiting_since: m.doc.waiting_since ?? null, waiting_on: m.doc.waiting_on ?? [], outage,
+      note: `merge ${m.id} has waited to be judged ${how}${outage ? `, and ${GITHUB_UNREADABLE_NOTE} right now` : ''}: ${(m.doc.waiting_on ?? []).join('; ')}. It is judged again on every pass, and you are told again every 24 h while it waits` });
     if (!taken) return;
     const r = write('merge', m, { wait_told_at: iso() });
     if (!r.ok) alert({ type: 'merge_gate_write_refused', merge: m.id, to: 'wait_told', reason: r.reason });
@@ -542,7 +576,19 @@ export async function gatePass(ctx) {
       return;
     }
     step(m, 'refused', { reasons: fresh('merge', m.id)?.doc?.reasons ?? [] });
-    if (tooLong) alert({ type: 'merge_interrupted', merge: m.id, card: m.doc.card, pr: m.doc.pr, note: `pull request #${m.doc.pr} is still open ${Math.round(limit / 60_000)} min after the merge call, with no merge; recorded as interrupted, the card goes back to be merged again, and a later merge of this pull request is recorded when Sensors sees it` });
+    if (!tooLong) return;
+    // Told until delivered (L315 S-M6b): the note is kept on the merge, and 3b sends it again until it is taken.
+    const cur = fresh('merge', m.id);
+    const w = cur && write('merge', cur, { interrupted_note: `pull request #${m.doc.pr} is still open ${Math.round(limit / 60_000)} min after the merge call, with no merge; recorded as interrupted, the card goes back to be merged again, and a later merge of this pull request is recorded when Sensors sees it`, interrupted_told_at: null });
+    if (!w?.ok) { alert({ type: 'merge_gate_write_refused', merge: m.id, to: 'interrupted_note', reason: w?.reason ?? 'the merge could not be read' }); return; }
+    tellInterrupted(fresh('merge', m.id));
+  }
+
+  function tellInterrupted(m) {
+    if (!m?.doc || m.doc.state !== 'refused' || typeof m.doc.interrupted_note !== 'string' || m.doc.interrupted_told_at) return;
+    if (!alertTaken(alert, { type: 'merge_interrupted', merge: m.id, card: m.doc.card, pr: m.doc.pr, note: m.doc.interrupted_note })) return;
+    const r = write('merge', m, { interrupted_told_at: iso() });
+    if (!r.ok) alert({ type: 'merge_gate_write_refused', merge: m.id, to: 'interrupted_told', reason: r.reason });
   }
 
   // With no timeouts.merging_open_max_min, an open merge is never refused as interrupted: it waits for GitHub's final
