@@ -7,7 +7,7 @@
 // bundle_files }. kind is editing | undo | script | readonly | review | audit | merge | undo_merge | lead | front_door.
 
 import { posix } from 'node:path';
-import { KEYS, need } from './keys.mjs';
+import { KEYS, MissingKey, need } from './keys.mjs';
 import { wholeNumber } from '../../shared/rules.mjs';
 import { mayStart } from './usage.mjs';
 import { STATES } from '../../shared/record-names.mjs';
@@ -88,7 +88,7 @@ export function editingLimits({ rules, product, productDoc, amberCaps }) {
   const has = Object.hasOwn(perState, state);
   const stateCap = has ? wholeNumber(perState[state]) : undefined;
   // `unreadable`: the state's value is there but is not a whole number, a rule nobody can read (L210 point 3).
-  if (stateCap === undefined) throw Object.assign(new Error(`no per-state cap for ${state}`), { key: KEYS.perState, ...(has ? { unreadable: true } : {}) });
+  if (stateCap === undefined) throw has ? new MissingKey(KEYS.perState, `value for ${state} is unreadable`, { unreadable: true }) : new MissingKey(KEYS.perState, `has no value for ${state}`);
   const forProduct = [need(rules, KEYS.editingPerProduct, { product }), stateCap];
   const forMac = [need(rules, KEYS.editingPerMac)];
   if (amberCaps) {
@@ -132,14 +132,15 @@ export function startGate({ rules, rec, card, kind, product, b, running, lead, e
     if (!isEditing({ kind })) return refuse(`unknown session kind ${kind}: start nothing`);
     const productDoc = rec.read('product', product)?.doc;
     if (!productDoc) return refuse(`no product record for ${product}`);
-    // The shared undo rule (L31, L199, L210; M10 says the same): an undo (an exact-reverse card) is never refused
+    // The shared undo rule (L31, L199, L210): an undo (an exact-reverse card) is never refused
     // by the product's state or the editing caps, a cap of 0 included. Its own limit: at most one undo running per
     // product. A running undo still counts toward the caps for every other editing start (isEditing). A paused
     // product starts its undo, the same way push and merge already let an exact reverse through; every other
     // editing start on a paused product is refused. A product with no state, or a state the Record doesn't know, is
-    // read as paused. A missing cap value is still named for the undo (L40), so Joe is told; a per-state value that
-    // is there but not a whole number is a rule nobody can read, and refuses the undo too. The files-don't-overlap
-    // check below is safety and still runs.
+    // read as paused. A missing cap value is still named for the undo (L40), so Joe is told; a cap value that is
+    // there but unreadable, whichever cap it is, is a rule nobody can read, and refuses the undo too (L228). The
+    // files-don't-overlap check below is safety and still runs. This gate does not read M10's product-state rules
+    // (an unknown merge or start rule): production asks M10 first (pass.mjs starts()), and M10 refuses those.
     const exactUndo = kind === 'undo' && exactReverse === true && card?.kind === 'exact_reverse';
     const paused = !PRODUCT_STATES.includes(productDoc.state) || productDoc.state === 'paused';
     let lim = null;
@@ -172,7 +173,7 @@ export function startGate({ rules, rec, card, kind, product, b, running, lead, e
   } catch (e) {
     // `missing` names the key, so the caller can tell Joe once (audit 0b-6 r3 MAT-3); a refusal alone was silent.
     const missing = e.key ?? `the rules (${e.message})`;
-    return { ...refuse(`the rules have no value for ${missing}: start nothing`), missing };
+    return { ...refuse(e.unreadable === true ? `the rules' value for ${missing} is unreadable: start nothing` : `the rules have no value for ${missing}: start nothing`), missing };
   }
 }
 
