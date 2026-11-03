@@ -63,8 +63,16 @@ bar-sha256: UNSET
   |----------|--------------|----------------------------------------|--------|------------------|
 - *N/A — no fix items this phase* (say so explicitly if skipping).
 
+### [C] Capability Scoreboard (Phase Gate 16) — *required once the project keeps a Capability Traceability Matrix*
+- `live N · e2e N · unwired N · partial N · none N — done N of TOTAL` (copied from the matrix's Works column)
+- [Each capability whose Works value changed this phase: old → new, and its evidence]
+
+### [C] Wiring and Simplicity (Phase Gates 17–18) — *required once the project keeps a Capability Traceability Matrix*
+- Wiring check (`wired.test.mjs`): PASS / FAIL, and the UNWIRED names with their rows — or "Gate 17: no units of work" / "no wiring check for <language>"
+- Simplicity review: each part this phase changed, what was done two ways, what can be deleted, and each finding's Rule 30 bucket
+
 ### [A] Hot Path Results
-- [For each project-wide hot path defined in Build Manifest:]
+- [For each project-wide hot path defined in Build Manifest, driven from the product's real entry point:]
   - [Hot path name]: [input → expected → actual → PASS/FAIL]
 - **Hot path failure is a stop condition.** Do NOT proceed if any hot path fails.
 
