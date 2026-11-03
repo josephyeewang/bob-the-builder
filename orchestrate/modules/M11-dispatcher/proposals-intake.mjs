@@ -177,11 +177,12 @@ export function stageOf(rules, product) {
  * One pass over every product's proposals folder.
  * `products`: the product ids. `ownerUid`: Joe's uid from the Dispatcher's config. `wait(ms)`: a sleep.
  * `alert(text, { mark })`: the queueing alert. `note(text)`: a diary line.
- * `handlers`: { research, claim, heartbeat }, each ({ rec, product, kind, id, name, source, fenced, sha256, blob, size }) → { ok, reason? }:
+ * `handlers`: { research, claim, heartbeat }, each ({ rec, product, kind, id, name, source, fenced, sha256, blob, size, now }) → { ok, reason? } (`now`: the pass's clock):
  *   `fenced` is the file's text as cleanOutside's fenced copy (R-0b-126); a handler never sees the raw text or bytes.
  *   `sha256`, `blob` (git's blob id) and `size` are of the raw bytes, from the same read (L290 M-1): a handler that
- *   needs the file itself (the research copy) records them, and lane 2's copier (push.mjs, L286) reads the file again
- *   through M9's safe side-file open and copies it only when its sha256 still matches; refusal 10 checks the blob.
+ *   needs the file itself (the research copy) records them on its card, and M6 refusal 10 compares the blob at merge.
+ *   Open (lane 2, L286 follow-up): the copier, push.mjs, is not built; it will read the file again through M9's safe
+ *   side-file open and copy it only when its sha256 still matches the card's.
  * `docsCheck({ product, card, bundle })` → null | reason, and `toReview({ rec, product, card, proposal, bundle })` → { ok, reason? } (`proposal` fenced too):
  *   `bundle` is { path, sha256 }: the bytes this pass checked and recorded (L233 M-5), so part 2 checks the bytes it merges.
  *   part 2's; not passed in, every proposal is refused.
@@ -403,7 +404,7 @@ export async function proposalsPass({ rec, rules, products, ownerUid, wait, aler
     } else {
       const h = handlers[parsed.kind];
       if (typeof h !== 'function') { r.waiting = `no ${parsed.kind} handler yet`; waiting.get(product)?.add(parsed.kind); continue; }
-      use = () => h({ rec, product, kind: parsed.kind, id: parsed.id, name, ...fenceFor(parsed.kind, file.text), sha256: hash, blob: file.blob, size: file.size });
+      use = () => h({ rec, product, kind: parsed.kind, id: parsed.id, name, ...fenceFor(parsed.kind, file.text), sha256: hash, blob: file.blob, size: file.size, now });
     }
     // Bytes any other product already handed in never reach this one's handlers, whatever happened to the folders
     // (L279: three misses telling folders apart, MAT-B, C, D). Checked across all products by sha256, the bundle's too
