@@ -1,11 +1,12 @@
-// job-config.mjs — the one checked reader for a job's config (LEAD-CALLS L253), for the three jobs that import code
-// their config names: the Dispatcher (M11 main.mjs), the robot job (wiring/robot-main.mjs) and the review runner
-// (review-runner-main.mjs, which shares openJobJson and readChangedProblem and checks its programs itself).
+// job-config.mjs — the one checked reader for a job's config (LEAD-CALLS L253), for the four jobs that import code
+// their config names: the Dispatcher (M11 main.mjs), the robot job (wiring/robot-main.mjs), the Sensors loop (M12
+// loop.mjs) and the review runner (review-runner-main.mjs, which shares openJobJson and readChangedProblem and checks
+// its programs itself).
 //
 // WHY. Each of those programs imports the code file its config names (`wiring`, the runner's `budget`). A config, or a
 // named file, that anyone but root or the job's own user could write would run that writer's code as the job, which
-// holds the Record and, for the robot job, the write tokens. Before L253 two of the three read their config with a bare
-// JSON.parse; only the review runner checked. Now all three check here, and the job's own script (`self`) is checked
+// holds the Record and, for the robot job, the write tokens. Before L253 three of the four read their config with a bare
+// JSON.parse; only the review runner checked. Now all four check here, and the job's own script (`self`) is checked
 // the same way (audit #144 m4), so there is no unchecked path to fall back to.
 //
 // WHAT. readJobConfig(file, { code }) answers the parsed config, or throws one line naming the file and the reason:

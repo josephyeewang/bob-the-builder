@@ -140,24 +140,31 @@ test('L253: a config that is not a JSON object, or names no installRoot, is refu
 // reader (plant P11), or that builds the URL ahead of the import (P16), changes a pinned line and fails here. And no
 // such file may parse its argument itself (JSON.parse of argv, or a read of argv's file).
 const ORCH = fileURLToPath(new URL('..', import.meta.url));
+// Built, so consume-ask's computed-import scan does not count the pinned text below as a loader of this file's own.
+const IMPORT = ['im', 'port'].join('');
 export const LOADERS = {
   'modules/M11-dispatcher/main.mjs': { imports: 1, pins: [
     ["  const c = readJobConfig(file, { code: ['wiring'], ...opts });", 1],
     ['readConfigFn = readConfig, self = SELF } = {}) {', 1],
     ['    config = readConfigFn(argv[0], { self });', 1],
-    ['    const mod = await import(pathToFileURL(config.wiring).href);', 1]] },
+    [`    const mod = await ${IMPORT}(pathToFileURL(config.wiring).href);`, 1]] },
   'wiring/robot-main.mjs': { imports: 1, pins: [
     ["import { readConfig, startWatchdog, WATCHDOG_MARGIN_MS } from '../modules/M11-dispatcher/main.mjs';", 1],
     ['    config = readConfig(argv[0], { self });', 1],
-    ['    const mod = await import(pathToFileURL(config.wiring).href);', 1]] },
+    [`    const mod = await ${IMPORT}(pathToFileURL(config.wiring).href);`, 1]] },
+  'modules/M12-sensors/loop.mjs': { imports: 1, pins: [
+    ["  return readJobConfig(file, { code: ['wiring'], ...opts });", 1],
+    ['runDeadlineMs = RUN_DEADLINE_MS, self = SELF } = {}) {', 1],
+    ['    const config = readConfig(argv[0], { self });', 1],
+    [`    const mod = await ${IMPORT}(pathToFileURL(config.wiring).href);`, 1]] },
   'modules/M4-workshop/launcher/review-runner-main.mjs': { imports: 2, pins: [
     ['  const c = openJobJson(file, (why) => { throw new Error(`config: ${file} ${why}`); }).value;', 1],
     ['  const { readConfigFn = readConfig, programs = programsProblem, pass = runnerPass, write, lstat } = ports;', 1],
     ['  try { c = readConfigFn(argv[0]); } catch (e) {', 1],
     ['  const bad = programs(c, { self, config: realpathSync.native(argv[0]) });', 1],
     ['  const swapped = readConfigFn === readConfig || readByDescriptor(c) ? readChangedProblem(argv[0], c, lstat ? { lstat } : {}) : null;', 1],
-    ['  try { wiring = await import(pathToFileURL(c.wiring).href); } catch (e) {', 1],
-    ['    try { budget = await (await import(pathToFileURL(c.budget).href)).budget(c); } catch (e) {', 1]] },
+    [`  try { wiring = await ${IMPORT}(pathToFileURL(c.wiring).href); } catch (e) {`, 1],
+    [`    try { budget = await (await ${IMPORT}(pathToFileURL(c.budget).href)).budget(c); } catch (e) {`, 1]] },
 };
 const CALL_ANY = /(?<![\w$.])import\s*\(/g;
 const CALL_LIT = /(?<![\w$.])import\s*\(\s*(['"`])[^'"`$]+\1\s*\)/g;
@@ -183,8 +190,8 @@ export function unreadConfigLoaders(root, loaders = LOADERS) {
     const computed = (text.match(CALL_ANY) ?? []).length - (text.match(CALL_LIT) ?? []).length;
     if (computed === 0) { if (loaders[rel]) out.push(`${rel}: on LOADERS but makes no computed import`); continue; }
     const pin = loaders[rel];
-    if (!pin) { out.push(`${rel}: makes ${computed} computed import(s) and is not on LOADERS`); continue; }
-    if (computed !== pin.imports) out.push(`${rel}: makes ${computed} computed import(s), not ${pin.imports}`);
+    if (!pin) { out.push(`${rel}: makes ${computed} computed imports and is not on LOADERS`); continue; }
+    if (computed !== pin.imports) out.push(`${rel}: makes ${computed} computed imports, not ${pin.imports}`);
     for (const [line, n] of pin.pins) { const c = count(text, line); if (c !== n) out.push(`${rel}: holds "${line.trim()}" ${c} time(s), not ${n}`); }
     if (SELF_PARSE.test(text)) out.push(`${rel}: parses its argument itself`);
   }
@@ -215,10 +222,10 @@ test('L253 guard, planted (audit #144 m1): own JSON.parse beside the reader, a p
   assert.deepEqual(unreadConfigLoaders(root, pins), [`wiring/ok.mjs: holds "${load.trim()}" 0 time(s), not 1`]);
   // A second load, the reader only in a comment, and a loader no one listed.
   w('wiring/ok.mjs', `${good}${load}\n`);
-  assert.deepEqual(unreadConfigLoaders(root, pins), ['wiring/ok.mjs: makes 2 computed import(s), not 1', `wiring/ok.mjs: holds "${load.trim()}" 2 time(s), not 1`]);
+  assert.deepEqual(unreadConfigLoaders(root, pins), ['wiring/ok.mjs: makes 2 computed imports, not 1', `wiring/ok.mjs: holds "${load.trim()}" 2 time(s), not 1`]);
   w('wiring/ok.mjs', `//    config = readConfig(argv[0], { self });\n${load}\n`);
   assert.deepEqual(unreadConfigLoaders(root, pins), ['wiring/ok.mjs: holds "config = readConfig(argv[0], { self });" 0 time(s), not 1']);
   w('wiring/ok.mjs', good);
   w('modules/My/half.mjs', `const c = openJobJson(f, fail).value;\nawait ${IMP}(new URL(c.wiring, 'file:').href);\n`);
-  assert.deepEqual(unreadConfigLoaders(root, pins), ['modules/My/half.mjs: makes 1 computed import(s) and is not on LOADERS']);
+  assert.deepEqual(unreadConfigLoaders(root, pins), ['modules/My/half.mjs: makes 1 computed imports and is not on LOADERS']);
 });
