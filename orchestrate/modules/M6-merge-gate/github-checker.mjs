@@ -740,6 +740,8 @@ Object.defineProperties(__bob_e, {
   CUTOVER_STAGES: { get: () => CUTOVER_STAGES, enumerable: true },
   PRODUCT_STATES: { get: () => PRODUCT_STATES, enumerable: true },
   FAILURE_ACTIONS: { get: () => FAILURE_ACTIONS, enumerable: true },
+  START_RULES: { get: () => START_RULES, enumerable: true },
+  TIER1_MERGE_RULES: { get: () => TIER1_MERGE_RULES, enumerable: true },
   compareVersions: { get: () => compareVersions, enumerable: true },
   parsePolicy: { get: () => parsePolicy, enumerable: true },
   EFFECT_FIELDS: { get: () => EFFECT_FIELDS, enumerable: true },
@@ -799,6 +801,10 @@ const REQUIRED_KEYS = Object.freeze(TOP_KEYS.filter((k) => KEYS[k].required));
 const CUTOVER_STAGES = Object.freeze(['first', 'second']);
 const PRODUCT_STATES = Object.freeze(['active', 'away', 'paused', 'light']);
 const FAILURE_ACTIONS = Object.freeze(['retry', 'quarantine', 'joe']);
+// The values a product state's rule may take (L226): `start` for start_session, `tier1_merge` for both merges.
+// Each list is defined here once; the engine and its tests read it, so a value can't be known to one and not the other.
+const START_RULES = Object.freeze(['within_caps', 'editing_cap_1', 'none']);
+const TIER1_MERGE_RULES = Object.freeze(['rules', 'tier1_hours_only', 'undo_only']);
 const BANNED_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
 const INT = WHOLE_TEXT;     // the one definition, shared with rules.num() and rules.dec() (L104)
 const DEC = DECIMAL_TEXT;
