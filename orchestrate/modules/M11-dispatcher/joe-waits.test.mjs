@@ -201,3 +201,28 @@ test('L315: a copy still queued is not queued again a day later, and is dropped 
   retellWaits({ rec: w.E.record, alert: outbox(w.E.record, w.E.clock.t), now: w.E.clock.t });
   assert.equal(isQueued(w.E.record, fact), false, 'the wait ended: the unsent copy leaves the queue');
 });
+
+// L329 (joe-waits:41): the window match reads both times; a tell whose since can't be read, or lies an hour ahead,
+// matches no wait. The fallback (adoptUntold) writes it afresh for the card's own wait, so the card is told at the next
+// pass and daily after, never silent.
+test('L329: a tell whose since is unreadable or an hour ahead is told at the next pass, then daily', async () => {
+  for (const [label, bad] of [['unreadable', () => 'garbage'], ['an hour ahead', (t) => new Date(t + 60 * MIN).toISOString()]]) {
+    const w = world();
+    const r = await withAlerts(w.E.record, w.E.clock.t, w.port, (alert) => waitOnJoe(w.E.record, 'C-1', { text: 'told at once', alert, now: w.E.clock.t, ...ask }));
+    assert.equal(r.ok, true);
+    assert.equal(w.got.length, 1);
+    const f = w.E.record.read('fact', WAIT_TELL_FACT('C-1'));
+    const put = w.E.record.write({ actor: 'dispatcher', entity: 'fact', id: WAIT_TELL_FACT('C-1'), expectRev: f.rev, doc: { since: bad(w.E.clock.t), text: f.doc.text }, kind: 'wait_tell' });
+    assert.equal(put.ok, true, put.reason);
+    w.E.clock.t += MIN;
+    await w.pass();
+    assert.equal(w.got.length, 2, `${label}: told at the next pass`);
+    assert.equal(w.tell().told_since, w.card().wait.since, `${label}: marked for the card's own wait`);
+    w.E.clock.t += MIN;
+    await w.pass();
+    assert.equal(w.got.length, 2, `${label}: then quiet`);
+    w.E.clock.t += 24 * 60 * MIN;
+    await w.pass();
+    assert.equal(w.got.length, 3, `${label}: told again a day on`);
+  }
+});

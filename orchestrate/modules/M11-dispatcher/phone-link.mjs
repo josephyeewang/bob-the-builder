@@ -25,6 +25,7 @@ import { KEYS, minutes } from './keys.mjs';
 import { note } from './moves.mjs';
 import { sensorsFact } from './sensor-facts.mjs';
 import { tellThen, dropCause } from './alerts.mjs';
+import { pastTime } from '../../shared/still-waiting.mjs';
 
 export const LINK_FACT = 'phone-link';
 // Once-per-cause marks (L63): a failed Front Door restart, and a Front Door left on another account that won't stop.
@@ -61,6 +62,9 @@ const reading = (rec, id, now) => {
  */
 export async function phoneLinkStep({ rec, rules, now, send, restartFrontDoor, startMinibase, frontDoorAlive = () => null, strayFrontDoor = null, lastHandoff = () => null, alert }) {
   const stuckMs = minutes(rules, KEYS.frontDoorStuckMin);
+  // Whether a stored time is within `ms` of now. One that can't be read, or lies ahead (a clock that went back, a bad
+  // write), is not recent (L329, shared pastTime): the step acts, never holds for ever as "done recently".
+  const recent = (at, ms) => { const t = pastTime(at, now); return t !== null && now - t < ms; };
   const cur = rec.read('fact', LINK_FACT);
   const st = { false_streak: 0, attempts: 0, failures: 0, ...(cur?.doc ?? {}) };
   const done = [];
@@ -79,7 +83,7 @@ export async function phoneLinkStep({ rec, rules, now, send, restartFrontDoor, s
   const alive = frontDoorAlive();
   if (alive === true) { clearTold(rec, now, FD_RESTART_FACT); dropCause(rec, FD_RESTART_FACT); }
   if (alive === false) {
-    if (now - Date.parse(st.fd_restarted_at ?? '') < RETRY_MS) done.push('Front Door missing; restarted recently, waiting');
+    if (recent(st.fd_restarted_at, RETRY_MS)) done.push('Front Door missing; restarted recently, waiting');
     else {
       let r;
       try { r = await restartFrontDoor({ handoff: lastHandoff() }); } catch (e) { r = { ok: false, reason: e.message }; }
@@ -95,7 +99,7 @@ export async function phoneLinkStep({ rec, rules, now, send, restartFrontDoor, s
 
   // Two accounts (L63 m2): while it runs on the account in use, one left running on another account is stopped, checked
   // at most once every 5 minutes. A stop that fails, or an account that can't be told about, is told once per cause.
-  if (alive === true && strayFrontDoor && !(now - Date.parse(st.stray_checked_at ?? '') < RETRY_MS)) {
+  if (alive === true && strayFrontDoor && !recent(st.stray_checked_at, RETRY_MS)) {
     let r;
     try { r = await strayFrontDoor(); } catch (e) { r = { ok: false, stopped: [], reason: e.message }; }
     st.stray_checked_at = iso(now);
@@ -111,7 +115,7 @@ export async function phoneLinkStep({ rec, rules, now, send, restartFrontDoor, s
   }
 
   const mb = reading(rec, FACTS.minibase, now);
-  if (mb.value === false && !(now - Date.parse(st.minibase_started_at ?? '') < RETRY_MS)) {
+  if (mb.value === false && !recent(st.minibase_started_at, RETRY_MS)) {
     const r = await startMinibase();
     st.minibase_started_at = iso(now);
     done.push(r?.ok ? 'Mini Base started' : 'Mini Base start failed');
@@ -138,9 +142,12 @@ export async function phoneLinkStep({ rec, rules, now, send, restartFrontDoor, s
   if (st.false_streak < FALSE_READINGS) { save(); return [...done, 'link down once; waiting for a second reading']; }
 
   // L15: the Front Door refused and unreachable for too long -> restart it.
-  if (st.refused_since && now - Date.parse(st.refused_since) >= stuckMs) {
+  // A refused-since that can't be read or lies ahead counts as long enough (L329): restarted, not refused for ever.
+  const refusedAt = st.refused_since ? pastTime(st.refused_since, now) : undefined;
+  if (st.refused_since && (refusedAt === null || now - refusedAt >= stuckMs)) {
     const r = await restartFrontDoor({ handoff: lastHandoff() });
-    note(rec, 'phone-link-note', `the Front Door was unreachable and could not be reconnected for ${Math.round((now - Date.parse(st.refused_since)) / 60_000)} min; restarted under its fixed name`, { now });
+    const howLong = refusedAt === null ? 'since a time that can\'t be read' : `for ${Math.round((now - refusedAt) / 60_000)} min`;
+    note(rec, 'phone-link-note', `the Front Door was unreachable and could not be reconnected ${howLong}; restarted under its fixed name`, { now });
     // A notice only: a link still down is tried again; a lost one is in the list (L130 m9).
     if (!r?.ok && alert(`the Front Door could not be reconnected or restarted: ${r?.reason ?? 'no answer'}`) === false) done.push('not told: the alert could not be queued');
     Object.assign(st, { refused_since: null, attempts: 0, failures: 0, last_try_at: iso(now), restarted_at: iso(now) });
@@ -148,7 +155,7 @@ export async function phoneLinkStep({ rec, rules, now, send, restartFrontDoor, s
     return [...done, r?.ok ? 'Front Door restarted' : 'Front Door restart failed'];
   }
 
-  if (st.last_try_at && now - Date.parse(st.last_try_at) < RETRY_MS) { save(); return [...done, 'waiting to try again']; }
+  if (st.last_try_at && recent(st.last_try_at, RETRY_MS)) { save(); return [...done, 'waiting to try again']; }
   if (st.attempts > 0) st.failures += 1; // the last try did not bring the link back
   // Told only once sent (audit 0b-6 r5 MAT-2).
   if (st.failures >= ALERT_AFTER_FAILURES && !st.told) {

@@ -1059,3 +1059,14 @@ test('L290 c2 (P04, P05): a bytes record with no product reads as broken; anothe
   assert.equal(one(o2, 'research-r1.md').refused, `these bytes were already handed in by b (as ${shownName(theirs)}) on 2026-11-01`);
   for (const t of v.calls.alerts) assert.ok(!t.includes('\n'));
 });
+
+// L329: a lone bundle whose file time can't be read, or lies an hour ahead, is refused and told now, not "waiting for
+// its pair" for ever.
+test('L329: a lone bundle with an unreadable or future file time is refused, not left waiting', async () => {
+  for (const [label, mtime] of [['unreadable', 'NaN'], ['an hour ahead', String(Date.now() + 60 * 60_000)]]) {
+    const w = world();
+    put(w, 'bundle-C-2.bundle', 'bytes');
+    const out = await w.pass({ look: (p) => (/bundle-C-2/.test(p) ? `5:${mtime}:77` : null) });
+    assert.equal(one(out, 'bundle-C-2.bundle').refused, 'no proposal-C-2.md names this bundle\'s card', label);
+  }
+});

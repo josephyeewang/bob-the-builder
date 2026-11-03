@@ -17,6 +17,7 @@
 import { KEYS, need } from './keys.mjs';
 import { tellThen } from './alerts.mjs';
 import { ENTITIES } from '../../shared/record.mjs';
+import { pastTime, STILL_WAITING_MS } from '../../shared/still-waiting.mjs';
 
 export const RESTART_FACT = (sid) => `lead-restart-${sid}`;
 export const HANDOFF_NAME = (sid) => `handoff-${sid}.md`;
@@ -112,7 +113,12 @@ export async function leadRestartStep({ rec, rules, now, lead, size, inFlight, s
 
   // wrap_sent or reasked: wait for the Lead's answer (a turn ended after the ask) or the handoff.
   const used = rec.read('fact', `intake-applied-${sid}-${HANDOFF_NAME(sid)}`)?.doc;
-  const answered = size.endedAt != null && size.endedAt > Date.parse(st.sent_at);
+  // The ask's time through the shared pastTime (L329): one that can't be read or lies ahead counts as long ago, so the
+  // wait ends. And the wait has a cap (STILL_WAITING_MS, the code default; no rules key while the rules file is frozen):
+  // a Lead that never answers counts as not answering, and goes down the same re-ask, then gave-up-and-told path.
+  const sentAt = pastTime(st.sent_at, now);
+  const timedOut = sentAt === null || now - sentAt >= STILL_WAITING_MS;
+  const answered = timedOut || (size.endedAt != null && size.endedAt > sentAt);
   // Only a hand-off applied after WRAP counts (audit 0b-6 r2 MAT-3): an older one under the same name
   // would start the new Lead from an out-of-date note. No time recorded counts as older.
   const since = Date.parse(st.wrap_at ?? st.sent_at);
@@ -143,7 +149,8 @@ export async function leadRestartStep({ rec, rules, now, lead, size, inFlight, s
     return 'restarted';
   }
   if (!answered) return 'waiting for the handoff';
-  const why = used?.state === 'refused' ? 'the record refused it' : used?.state === 'interrupted' ? 'its hand-in was interrupted'
+  const why = timedOut && !(size.endedAt != null && sentAt !== null && size.endedAt > sentAt) && !used ? 'no answer within a day of the ask'
+    : used?.state === 'refused' ? 'the record refused it' : used?.state === 'interrupted' ? 'its hand-in was interrupted'
     : used?.state === 'applied' ? 'a handoff under that name was already used before the WRAP' : 'it is missing or over the cap';
   if ((st.reasks ?? 0) < 1) {
     const r = await send(`Your handoff was not used (${why}). Write ${HANDOFF_NAME(sid)} again, under ${cap} tokens (about ${cap * 4} bytes), then reply DONE.`);

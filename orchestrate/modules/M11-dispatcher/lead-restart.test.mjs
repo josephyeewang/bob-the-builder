@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { leadRestartStep, leadInFlight, handoffVet, estimateTokens, RESTART_FACT, HANDOFF_NAME } from './lead-restart.mjs';
 import { intakePass } from './outbox-intake.mjs';
 import { KEYS as K } from './keys.mjs';
-import { rulesWith, recWith, T0, MIN, iso, withAlerts } from './fixtures.test-helper.mjs';
+import { rulesWith, recWith, change, T0, MIN, iso, withAlerts } from './fixtures.test-helper.mjs';
 import { tempDir } from '../../shared/test-tmp.mjs';
 
 const R = rulesWith(); // soft 250k, hard 400k, handoff cap 8,000 tokens
@@ -309,4 +309,29 @@ test('r5 MAT-2: a hard-line alert that fails is told on the next pass, once', as
     await w.step(midTurn(462_000), 3, { alert });
     assert.equal(sent.filter((t) => /compaction did not happen/.test(t)).length, 1, sent.join(' | '));
   }
+});
+
+// L329: the ask's time is read through the shared pastTime; one that can't be read, or lies an hour ahead, counts as
+// long ago (the wait ends), and the wait for the handoff has a 24 h cap.
+test('L329: an ask time unreadable or an hour ahead ends the wait: re-asked, not "waiting for the handoff" for ever', async () => {
+  for (const [label, bad] of [['unreadable', 'garbage'], ['an hour ahead', iso(T0 + 62 * MIN)]]) {
+    const w = world();
+    assert.equal(await w.step(ended(260_000, 0), 1), 'WRAP sent');
+    change(w.rec, 'fact', RESTART_FACT(SID), { sent_at: bad });
+    // No turn time either, so only the ask's own time can end the wait.
+    assert.equal(await w.step({ ...ended(260_000, 0), endedAt: null }, 2), 're-asked', label);
+  }
+});
+
+test('L329: a Lead that never answers the WRAP is re-asked after a day, then given up on and Joe told', async () => {
+  const w = world();
+  const DAY = 24 * 60;
+  assert.equal(await w.step(ended(260_000, 0), 1), 'WRAP sent');
+  assert.equal(await w.step(ended(260_000, 0), 1 + DAY - 1), 'waiting for the handoff');
+  assert.equal(await w.step(ended(260_000, 0), 1 + DAY), 're-asked');
+  assert.match(w.calls.sent.at(-1), /not used \(no answer within a day of the ask\)/);
+  assert.equal(await w.step(ended(260_000, 0), 1 + 2 * DAY - 1), 'waiting for the handoff');
+  assert.equal(await w.step(ended(260_000, 0), 1 + 2 * DAY), 'gave up; the old Lead keeps running');
+  assert.equal(w.calls.alerts.filter((a) => /did not hand in a usable handoff after a second ask \(no answer within a day of the ask\)/.test(a)).length, 1, w.calls.alerts.join(' | '));
+  assert.equal(w.calls.stops, 0, 'never stopped without a handoff');
 });
