@@ -19,8 +19,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
 import { runTick, ACCOUNT_FACT } from '../modules/M11-dispatcher/tick.mjs';
-import { USAGE_FACT } from '../modules/M11-dispatcher/usage.mjs';
+import { USAGE_FACT, BAND_FACT } from '../modules/M11-dispatcher/usage.mjs';
 import { KEYS as K } from '../modules/M11-dispatcher/keys.mjs';
+import { TOLD_BANDS } from '../modules/M11-dispatcher/pass.mjs';
 import { rulesWith, recWith, change, usageFact, setClock, VALUES, T0, MIN, H, D, iso } from '../modules/M11-dispatcher/fixtures.test-helper.mjs';
 import { tempDir } from '../shared/test-tmp.mjs';
 import { fakeAlert } from './fake-alert.test-helper.mjs';
@@ -130,6 +131,21 @@ test('fold: fifteen cards held in a red band give one band alert, then after a d
 // L299 point 1: a band reason is held from card-by-card telling only while a band-level alert really fires for it.
 // Each reason the start path can give, through the real tick: either the band alert is queued and no card is told,
 // or the card is told on first sight.
+// L305: the start pass folds a band hold only under a band tick's band alert tells, and both read TOLD_BANDS. Driven
+// from the list itself: every band the usage reader can give, with a reading that gives it. A band added to the list
+// (or to the reader) with no reading here fails, and each band's alert fires exactly when the list says it does.
+const READINGS = { green: GREEN, amber: { week: 30, h5: 75 }, red: { week: 90, h5: 20 }, unknown: null };
+test('L305: every band in TOLD_BANDS makes the band alert fire, and no other band does', async () => {
+  for (const band of TOLD_BANDS) assert.ok(Object.hasOwn(READINGS, band), `no reading here gives the band ${band}`);
+  for (const [band, usage] of Object.entries(READINGS)) {
+    const m = mac([card('X')], { usage });
+    const res = await m.at(0);
+    assert.equal(res.steps.stops.result?.bands?.band ?? m.rec.read('fact', BAND_FACT)?.doc?.band, band, `the reading for ${band}`);
+    const fired = count(m.told, new RegExp(`^the usage band is ${band}`));
+    assert.equal(fired, TOLD_BANDS.includes(band) ? 1 : 0, `${band}: ${m.told.join(' | ')}`);
+  }
+});
+
 const PROD = () => ({ tier: 1, risky: ['production_data'], reasons: { production_data: ['src/X.js'] } });
 const BAND_CASES = [
   { name: 'red band', usage: { week: 90, h5: 20 }, card: {}, reason: /^the red band: nothing new starts$/, band: /^the usage band is red/ },

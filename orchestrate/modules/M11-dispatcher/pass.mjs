@@ -463,13 +463,13 @@ const capRefusal = (r) => /cap|already runs|shares |runs alone/.test(r);
 export const UNDO_HELD_FACT = (card) => `undo-held-${card}`;
 // A non-undo start held for a reason that clears by itself (L293, L299) is not told card by card on first sight:
 //   - queueing: another card holds the slot or the files, or Tier-1 work goes first in amber; a slot frees when a run ends;
-//   - the usage band, but only while the band itself is told (TOLD_BANDS, the band alert in tick.mjs);
+//   - the usage band, but only while the band itself is told (TOLD_BANDS, which tick.mjs's band alert reads too; L305);
 //   - a product Joe paused.
 // Once the oldest such card on a product has been in ready a day, Joe gets ONE alert per product and cause listing the
 // held cards (and, for queueing, the cards holding the slot), then daily; a paused product weekly. Every other reason,
 // a band reason with no band alert, and a daily pattern that can't be folded, is told on first sight, once per card and
 // cause, then daily (L38: no silent hold).
-export const TOLD_BANDS = ['red', 'unknown'];
+export const TOLD_BANDS = Object.freeze(['red', 'unknown']);
 export const PAUSED_REPEAT_MS = 7 * HOLD_REPEAT_MS;
 const QUEUES = [
   ['product-cap', /^the product already runs \d+ (editing worker\(s\) \(cap \d+\)|script\(s\))$/],
