@@ -5,6 +5,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { env, OWNER_ID, session, write, box, PRODUCT, must } from './fixtures.test-helper.mjs';
 import { leadCard, put } from '../M9-record/fixtures.test-helper.mjs';
@@ -543,3 +544,35 @@ test('L205: an Approve whose GitHub read fails is unreadable, not withdrawn; onc
   assert.deepEqual([no.ok, no.unreadable], [false, undefined], 'GitHub\'s answer: changes asked for');
 });
 
+// L295 Minor 1: a push that can't go out is told once per ask and cause, not every pass. An urgent undo is tried every
+// pass; with no phone channel it was told every minute. A push that goes through clears the ask's marks, so a later
+// failure is told again; an alert the sink did not take is not marked, and is told next pass.
+test('L295 Minor 1: a refused push is told once per ask and cause; a push that goes through clears the marks', async () => {
+  const w = world();
+  delete w.t.ctx.push;
+  must(createAsk(w.t.ctx, { id: 'U-1', kind: 'undo', card: 'C-1', title: 'Undo' }));
+  const noPush = (id) => w.t.alerts.filter((a) => a.type === 'approvals_no_push' && a.ask === id).length;
+  w.t.sink.answer = false;
+  await w.at(W8);
+  assert.equal(noPush('U-1'), 0, 'the sink refused: not marked');
+  w.t.sink.answer = true;
+  for (let i = 1; i <= 5; i++) await w.at(W8 + i * MIN);
+  assert.equal(noPush('U-1'), 1, 'told once over five passes');
+  must(createAsk(w.t.ctx, { id: 'U-2', kind: 'undo', card: 'C-2', title: 'Undo two' }));
+  await w.at(W8 + 6 * MIN);
+  await w.at(W8 + 7 * MIN);
+  assert.deepEqual([noPush('U-1'), noPush('U-2')], [1, 1], 'once per ask');
+  // The channel comes: both go out, and their marks go.
+  let up = true;
+  w.t.ctx.push = () => up;
+  await w.at(W8 + 8 * MIN);
+  assert.equal(ask(w, 'U-1').state, 'pushed');
+  assert.deepEqual(JSON.parse(readFileSync(join(w.t.ctx.stateDir, 'ask-alerts.json'), 'utf8')), {});
+  // A later failure of the re-push is a new cause, told once.
+  up = false;
+  const notSent = () => w.t.alerts.filter((a) => a.type === 'push_not_sent' && a.ask === 'U-1').length;
+  await w.at(W8 + 8 * MIN + 2 * HOUR);
+  await w.at(W8 + 8 * MIN + 2 * HOUR + MIN);
+  await w.at(W8 + 8 * MIN + 4 * HOUR);
+  assert.equal(notSent(), 1);
+});

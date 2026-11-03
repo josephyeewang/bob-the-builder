@@ -29,15 +29,21 @@
 //   productsFile   M10's products.json: [{ product, owner, repo, joe_github_id }]; it must list `product`
 //   rulesStateDir  M10 reader's folder: the last good rules, and approved-rules.json (the stopgap approval list)
 //   tokenFile      a GitHub token that can read the product's repository: this user's own file, mode 600
-//   approvalsStateDir  M2 Approvals' own folder: what it has told Joe once (onboard-notices.json, config-alert.json)
+//   approvalsStateDir  M2 Approvals' own folder: what it has told Joe once. Each product gets its own subfolder in it
+//                  (<approvalsStateDir>/<product>), so two products never share a told-once mark (L295 MAT-2). At boot
+//                  the folder and the product's subfolder are made if missing (the parent must exist) and the start is
+//                  refused unless each is a plain folder of this user's, private (no group or other access) and
+//                  writable (L295 MAT-1): a folder M2 can't write would turn a product on with Joe never told.
 //
 // THE APPROVALS PORT (L270). Approvals' schedule pass runs for this product each tick: it turns the product on the
 // first time its rules file says onboarding.state: active (M2 onboard.mjs), which is all the first cutover needs from it.
 // Its GitHub writes (a decision's pull request, a review request) and the transcript copies need a GitHub identity that
-// can write and the session copies, neither wired yet: `gh` and `copies` refuse, so an ask that needs them fails the
-// approvals step, told once. No `push`: no phone channel exists, so M2 says so per ask (approvals_no_push).
+// can write and the session copies, neither wired yet: `gh` and `copies` refuse. M2 answers each such refusal with an
+// alert for that ask, once per ask and cause (schedule.mjs askAlert, kept in the product's subfolder; L295 Minor 1), and
+// the step stays ok. No `push`: no phone channel exists, so M2 says so per ask (approvals_no_push), once.
 
-import { isAbsolute } from 'node:path';
+import { accessSync, constants, lstatSync, mkdirSync } from 'node:fs';
+import { isAbsolute, join } from 'node:path';
 import { openRecord } from '../modules/M9-record/writer.mjs';
 import { makeReader, readProducts } from '../modules/M10-rules/reader.mjs';
 import { makeEngine } from '../modules/M10-rules/engine.mjs';
@@ -71,11 +77,37 @@ export function checkConfig(c, { keys = CONFIG_KEYS, paths = PATHS } = {}) {
   return c;
 }
 
+/**
+ * Refuses unless `path` is a plain folder (not a link) owned by `uid` with no group or other access, and, with
+ * `writable`, one this process can write. With `create`, a missing folder is made first (mode 700, its parent must
+ * exist); a make that fails refuses. The one check for a private folder: robot-wiring.mjs checkUser uses it for the
+ * robot key folder, wire() below for the approvals state folder (L295 MAT-1). → path
+ */
+export function privateFolder({ path, uid, what, create = false, writable = false, lstat = lstatSync }) {
+  let st;
+  try { st = lstat(path); } catch (e) {
+    if (!(create && e?.code === 'ENOENT')) throw new Error(`${what} ${path} can't be read (${e?.code ?? e})`);
+    try { mkdirSync(path, { mode: 0o700 }); st = lstat(path); } catch (m) { throw new Error(`${what} ${path} is missing and could not be made (${m?.code ?? m})`); }
+  }
+  if (st.isSymbolicLink() || !st.isDirectory()) throw new Error(`${what} ${path} is not a plain folder`);
+  if (st.uid !== uid) throw new Error(`${what} ${path} belongs to uid ${st.uid}, not to this job's uid ${uid}`);
+  if (st.mode & 0o077) throw new Error(`${what} ${path} can be read by others (mode ${(st.mode & 0o777).toString(8)}); it must be 700`);
+  if (writable) { try { accessSync(path, constants.W_OK | constants.X_OK); } catch (e) { throw new Error(`${what} ${path} can't be written (${e?.code ?? e})`); } }
+  return path;
+}
+
+/** The product's own approvals folder, <approvalsStateDir>/<product>, checked (and made) with its parent at boot. */
+export function approvalsDir(c, { uid = process.getuid() } = {}) {
+  const what = 'the approvals state folder (approvalsStateDir)';
+  privateFolder({ path: c.approvalsStateDir, uid, what, create: true, writable: true });
+  return privateFolder({ path: join(c.approvalsStateDir, c.product), uid, what: "the product's approvals state folder", create: true, writable: true });
+}
+
 export const APPROVALS_NOT_WIRED = Object.freeze({ gh: ['get', 'post', 'put', 'patch'], copies: ['sync', 'told', 'pending', 'done'] });
-/** One product's approvals context (tick.mjs approvalsStep): the real state folder; GitHub writes and copies refuse. */
-export function approvalsFor(c, entry) {
+/** One product's approvals context (tick.mjs approvalsStep): its own checked state folder; GitHub writes and copies refuse. */
+export function approvalsFor(c, entry, stateDir) {
   const refuse = (group) => Object.freeze(Object.fromEntries(APPROVALS_NOT_WIRED[group].map((k) => [k, refusing(`approvals.${group}`)])));
-  return { product: c.product, owner: entry.owner, repo: entry.repo, stateDir: c.approvalsStateDir, gh: refuse('gh'), copies: refuse('copies') };
+  return { product: c.product, owner: entry.owner, repo: entry.repo, stateDir, gh: refuse('gh'), copies: refuse('copies') };
 }
 
 /** The alert port until a channel to Joe exists: logged, and answered "not delivered", so it stays queued. */
@@ -125,10 +157,12 @@ export async function recordAndRules(c, { who, log, fetchFn, now }) {
 export async function wire(config, { limitedSync, log = (s) => process.stderr.write(`${s}\n`), fetchFn = globalThis.fetch, now = () => Date.now() } = {}) {
   void limitedSync;   // the synchronous ports (PRs C, D) run their commands through it
   const c = checkConfig(config);
+  // Before the Record opens: a state folder M2 can't use stops the start, so no product is turned on untold (L295 MAT-1).
+  const stateDir = approvalsDir(c);
   const { rec, rules, entry } = await recordAndRules(c, { who: 'dispatcher', log, fetchFn, now });
   const ports = { alert: logOnlyAlert(log) };
   for (const k of NOT_WIRED) ports[k] = refusing(k);
-  ports.approvals = () => [approvalsFor(c, entry)];
+  ports.approvals = () => [approvalsFor(c, entry, stateDir)];
   // cleanupPass reads a missing copies folder as "nothing to clean" (cleanup.mjs), which would pass in silence. So the
   // folder itself refuses: the tick spreads this object into the step, and the read throws inside the step.
   ports.cleanup = Object.defineProperty(Object.fromEntries(NOT_WIRED_CLEANUP.map((k) => [k, refusing(`cleanup.${k}`)])), 'copiesRoot',
