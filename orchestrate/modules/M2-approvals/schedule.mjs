@@ -84,11 +84,11 @@ function askOnce(ctx) {
       const key = causeOf(e);
       const told = marks[ask] && typeof marks[ask] === 'object' && !Array.isArray(marks[ask]) ? marks[ask] : {};
       const at = told[key];
-      if (file && toldRecently(at, now)) return true;
-      let ok = false;
-      try { ok = ctx.alert(e) === true; } catch { ok = false; }
-      if (ok && file) marks[ask] = Object.fromEntries([...Object.entries(told).filter(([k]) => k !== key), [key, now]].slice(-MAX_WINDOW_MARKS));
-      return ok;
+      if (file && toldRecently(at, now)) return;   // quiet: nothing was sent, so there is no answer
+      // Kept as told only when the sink took it (answered true); a refusal or a throw answers false and marks nothing.
+      try { if (ctx.alert(e) !== true) return false; } catch { return false; }
+      if (file) marks[ask] = Object.fromEntries([...Object.entries(told).filter(([k]) => k !== key), [key, now]].slice(-MAX_WINDOW_MARKS));
+      return true;
     },
     pushed(ask) { delete marks[ask]; },
     save(waiting) {
