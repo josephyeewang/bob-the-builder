@@ -1,7 +1,7 @@
 // stale-now.test.mjs — a pass's `now` read once goes stale (L321, L323). The Store Writer refuses a wait whose since
 // is more than 60 s off its own clock, and a tick runs its steps one after another, each up to STEP_DEADLINE_MS, with
 // a stop step's saves taking up to SAVE_DEADLINE_MS. So the tick reads its clock before each step, stopPass and
-// timeLimits read it again after their slow calls, and a write of a watched kind that is still refused is told to Joe
+// timeLimits read it again after their slow calls, and a write of a watched kind that is still refused is told to the owner
 // (refused-writes.mjs), once a day while it lasts. All on the real Store Writer.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -12,7 +12,7 @@ import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { stopPass, STOP_FACT } from './pass.mjs';
-import { REFUSED_FACT, REFUSED_KEEP_MAX, tellRefused, watchWrites } from './refused-writes.mjs';
+import { REFUSED_FACT, REFUSED_KEEP_MAX, REFUSED_LIST_MAX, REFUSED_OVER_MAX, tellRefused, watchWrites } from './refused-writes.mjs';
 import { timeLimits } from './merges.mjs';
 import { waitOn } from './moves.mjs';
 import { USAGE_FACT } from './usage.mjs';
@@ -29,7 +29,7 @@ const idle = { size: { tokens: 1, turnEnded: false, openTools: [], compactions: 
 const allow = { start_session: { decision: 'allow', reason: 'ok' } };
 
 // A real Record with two running cards: C-1's session S-1 is alive (its product is paused, so the stops step parks it),
-// C-2's session S-2 is gone (the outage step puts it on Joe).
+// C-2's session S-2 is gone (the outage step puts it on the owner).
 // Options (audit #166's probes): `pause` the product, the `cards` made running, the `live` sessions and the dead `board`.
 function world({ pause = true, cards = ['C-1', 'C-2'], live = [{ id: 'S-1', product: PRODUCT, kind: 'editing', card: 'C-1', pgid: 50 }], board } = {}) {
   const E = setup({ prefix: 'm11-stale-', probe: { kill() {}, pidStart: () => 'start' } });
@@ -75,7 +75,7 @@ function world({ pause = true, cards = ['C-1', 'C-2'], live = [{ id: 'S-1', prod
 }
 
 for (const lag of [61_000, 80_000, 125_000]) {
-  test(`L321: a tick whose clock moves ${lag / 1000} s at every read still parks the stopped card and puts the dead one on Joe`, async () => {
+  test(`L321: a tick whose clock moves ${lag / 1000} s at every read still parks the stopped card and puts the dead one on the owner`, async () => {
     const { E, alerts, ports, card } = world();
     // Every read of the clock is `lag` later: each step, and stopPass after its saves, starts that long after the last.
     const clock = () => (E.clock.t += lag);
@@ -84,7 +84,7 @@ for (const lag of [61_000, 80_000, 125_000]) {
     assert.equal(r.steps.outage.ok, true, r.steps.outage.error);
     assert.deepEqual([card('C-1').state, card('C-1').wait?.what], ['waiting', 'paused'], 'the stopped card is parked');
     assert.equal(E.record.read('fact', STOP_FACT('S-1')).doc.moved, true);
-    assert.deepEqual([card('C-2').state, card('C-2').wait?.who], ['waiting', 'joe'], 'the dead card is on Joe');
+    assert.deepEqual([card('C-2').state, card('C-2').wait?.who], ['waiting', 'joe'], 'the dead card is on the owner');
     assert.match(alerts.join(' | '), /card C-2: its session stopped/);
     assert.deepEqual(r.refused.filter(([, did]) => did !== 'idle'), [], 'no write refused');
   });
@@ -148,7 +148,7 @@ test('L323: a refused park is told at once, quiet at +2 h, told again at +25 h, 
   assert.equal(E.record.read('fact', REFUSED_FACT('park')).doc.told_at, null);
 });
 
-test('L323: a dead session\'s card the Record will not put on Joe is told, not dropped', async () => {
+test('L323: a dead session\'s card the Record will not put on the owner is told, not dropped', async () => {
   const { E, alerts, ports, card } = world();
   // No clock, and reading the sessions takes 80 s: the outage step's ask is written at the tick's start time.
   const r = await tick({ rec: E.record, rules: rulesWith({}, allow), now: E.clock.t,
@@ -158,7 +158,7 @@ test('L323: a dead session\'s card the Record will not put on Joe is told, not d
   assert.match(alerts.join(' | '), /a card could not be put on you: C-2 \(wait\.since must be now/);
 });
 
-test('L321: timeLimits puts a card on Joe after reviewer checks that took 80 s, on the real writer', async () => {
+test('L321: timeLimits puts a card on the owner after reviewer checks that took 80 s, on the real writer', async () => {
   for (const withClock of [true, false]) {
     const { E, card } = world();
     const doc = { ...E.record.read('card', 'C-1').doc, state: 'in_review', head: 'a'.repeat(40), attempts: { reviewer_starts: 2 } };
@@ -297,7 +297,7 @@ test('L332 MAT-1 (Probe A): a dead ask refused at an outage\'s end stays told wh
   E.clock.t += 25 * H;
   const r2 = await pass();
   assert.deepEqual([r2.refused.find(([c]) => c === 'joe_wait'), told().length, card('C-2').state], [['joe_wait', 'told'], 1, 'running'], 'told again a day on');
-  // The card is put on Joe (any move will do): the cause clears.
+  // The card is put on the owner (any move will do): the cause clears.
   assert.equal(waitOn(E.record, 'C-2', { who: 'joe', what: 'dead session', now: E.clock.t, kind: 'wait' }).ok, true);
   const r3 = await pass();
   assert.deepEqual(r3.refused.find(([c]) => c === 'joe_wait'), ['joe_wait', 'cleared']);
@@ -341,7 +341,7 @@ test('L332 MAT-2 (Probe D): a parked card whose resume the Record refuses is tol
   assert.match(alerts.join(' | '), /a parked card could not be put back in the queue: C-1 \(not ready: dependency D-1 is failed/);
   E.clock.t += 10 * MIN;
   assert.deepEqual((await pass()).refused.find(([c]) => c === 'resume'), ['resume', 'quiet']);
-  // The card moves on (now waiting on Joe, not on usage): the cause clears (L352 m3).
+  // The card moves on (now waiting on the owner, not on usage): the cause clears (L352 m3).
   E.clock.t += 10 * MIN;
   assert.equal(waitOn(E.record, 'C-1', { who: 'joe', what: 'moved by the test', now: E.clock.t, kind: 'test_move' }).ok, true);
   assert.deepEqual((await pass()).refused.find(([c]) => c === 'resume'), ['resume', 'cleared']);
@@ -359,7 +359,7 @@ test('L332 MAT-2: a time limit\'s end the Record refuses is noted under its own 
   // Told, then cleared once both writes are taken (L352 m3).
   const alert = fakeAlert();
   assert.deepEqual(tellRefused({ ...w, rec, alert, now: T0 + 11 * MIN, ran: () => true }).find(([c]) => c === 'timeout'), ['timeout', 'told']);
-  assert.match(alert.texts[0], /a session past its time limit could not be ended, or its card failed: C-1 \(refused for the test\); S-1/);
+  assert.match(alert.texts[0], /a session past its time limit could not be ended, or its card could not be failed: C-1 \(refused for the test\); S-1/);
   for (const [, o] of alert.calls.splice(0)) rec.write({ actor: 'dispatcher', entity: 'fact', id: o.mark.fact, expectRev: rec.read('fact', o.mark.fact).rev, doc: { ...rec.read('fact', o.mark.fact).doc, ...o.mark.fields } });
   const w2 = watchWrites(rec);
   setClock(rec, T0 + 12 * MIN);
@@ -454,7 +454,7 @@ test('L352 MAT-2: a kept list that is not a list, or holds an entry that can\'t 
     w.rec.write({ actor: 'dispatcher', entity: 'fact', id: REFUSED_FACT('park'), expectRev: 0, doc: { items, told_at: iso(T0) } });
     const did = w.tell(w.rec, T0 + 25 * H);
     assert.equal(did, 'told', JSON.stringify(items));
-    assert.match(w.alert.texts.at(-1), /the kept list could not be read; 1 more refused write was not listed/, JSON.stringify(items));
+    assert.match(w.alert.texts.at(-1), /the kept list could not be read; at least 1 more refused write was not listed/, JSON.stringify(items));
     assert.equal(w.fact().doc.more, 1, 'counted, so it is not cleared later');
     assert.equal(w.tell(w.rec, T0 + 26 * H), 'quiet');
     assert.equal(w.tell(w.rec, T0 + 50 * H), 'told');
@@ -467,23 +467,74 @@ test('L352 MAT-2: a kept list that is not a list, or holds an entry that can\'t 
   assert.equal(w.fact().doc.more, 1);
 });
 
-test('L352 m1, L361: refusals past the kept cap are counted, keep the cause from clearing, and the alert says who resets it', () => {
-  assert.equal(REFUSED_KEEP_MAX, 200);
+test('L352 m1, L361, L366 m-A: refusals past the kept cap stay by id, one alert lists 20, and they clear when they move', () => {
+  assert.deepEqual([REFUSED_KEEP_MAX, REFUSED_LIST_MAX], [200, 20]);
   const ids = Array.from({ length: REFUSED_KEEP_MAX + 2 }, (_, i) => `C-${i + 1}`);
   const w = keptWorld(ids);
   assert.equal(w.tell(w.rec, T0, new Map([['park', ids.map((id) => w.item(id))]])), 'told');
   const first = w.alert.texts.at(-1);
-  assert.deepEqual([w.fact().doc.items.length, w.fact().doc.more], [REFUSED_KEEP_MAX, 2]);
-  // One alert lists the newest 20 and counts the other kept ones, not every one (L361).
-  assert.match(first, /C-202 \(r\); and 180 more still refused; 2 more refused writes were not listed, so once the listed ones are fixed the lead resets this reminder \(fact /);
-  assert.ok(first.includes(REFUSED_FACT('park')), 'names the fact to reset');
-  assert.doesNotMatch(first, /C-182 \(/);
+  assert.deepEqual([w.fact().doc.items.length, w.fact().doc.over.map((x) => x.id), w.fact().doc.more], [REFUSED_KEEP_MAX, ['C-1', 'C-2'], 0]);
+  assert.match(first, /C-202 \(r\); and 182 more still refused; told again/);
+  assert.doesNotMatch(first, /C-182 \(|resets this reminder/);
   assert.match(first, /C-183 \(/);
-  // The kept ones move on; the 2 dropped can't be re-checked, so the cause stays.
+  for (const id of ids) park(w.rec, id, T0 + H);
+  assert.equal(w.tell(w.rec, T0 + H), 'cleared');
+  assert.deepEqual([w.fact().doc.items, w.fact().doc.over, w.fact().doc.more], [[], [], 0]);
+});
+
+test('L366 m-A: the same refusals past the cap, repeated each pass, keep a steady count, and an entry past it shows no reason', () => {
+  const ids = Array.from({ length: REFUSED_KEEP_MAX + 2 }, (_, i) => `C-${i + 1}`);
+  const w = keptWorld(ids);
+  for (let pass = 0; pass < 5; pass += 1) w.tell(w.rec, T0 + pass * MIN, new Map([['park', ids.map((id) => w.item(id))]]));
+  assert.deepEqual([w.fact().doc.items.length, w.fact().doc.over.length, w.fact().doc.more], [REFUSED_KEEP_MAX, 2, 0]);
+  // The kept ones move, so the two kept by id alone come into the alert's list.
   for (const id of ids.slice(2)) park(w.rec, id, T0 + 25 * H);
   assert.equal(w.tell(w.rec, T0 + 25 * H), 'told');
-  assert.match(w.alert.texts.at(-1), /could not be parked: 2 more refused writes were not listed/);
+  assert.match(w.alert.texts.at(-1), /could not be parked: C-1; C-2; told again/);
+});
+
+test('L366 m-A: a write refused twice in a pass counts once', () => {
+  const ids = Array.from({ length: REFUSED_KEEP_MAX + 2 }, (_, i) => `C-${i + 1}`);
+  const w = keptWorld(ids);
+  w.tell(w.rec, T0, new Map([['park', [...ids, ...ids].map((id) => w.item(id))]]));
+  assert.deepEqual([w.fact().doc.items.length, w.fact().doc.over.length, w.fact().doc.more], [REFUSED_KEEP_MAX, 2, 0]);
+  const small = keptWorld(['C-1', 'C-2']);
+  small.tell(small.rec, T0, new Map([['park', ['C-1', 'C-2', 'C-1'].map((id) => small.item(id))]]));
+  assert.deepEqual(small.fact().doc.items.map((x) => x.id).sort(), ['C-1', 'C-2']);
+});
+
+test('L366 m-A: refusals past both lists are a steady "at least", name who resets it, and keep the cause when the rest move', () => {
+  const ids = Array.from({ length: REFUSED_KEEP_MAX + REFUSED_OVER_MAX + 3 }, (_, i) => `C-${i + 1}`);
+  const w = keptWorld(ids);
+  for (let pass = 0; pass < 3; pass += 1) w.tell(w.rec, T0 + pass * MIN, new Map([['park', ids.map((id) => w.item(id))]]));
+  assert.deepEqual([w.fact().doc.items.length, w.fact().doc.over.length, w.fact().doc.more], [REFUSED_KEEP_MAX, REFUSED_OVER_MAX, 3]);
+  const first = w.alert.texts.at(-1);
+  assert.match(first, /at least 3 more refused writes were not listed, so once the listed ones are fixed the lead resets this reminder \(fact /);
+  assert.ok(first.includes(REFUSED_FACT('park')), 'names the fact to reset');
+  for (const id of ids) park(w.rec, id, T0 + 25 * H);
+  assert.equal(w.tell(w.rec, T0 + 25 * H), 'told');
+  assert.match(w.alert.texts.at(-1), /could not be parked: at least 3 more refused writes were not listed/);
   assert.ok(w.fact().doc.told_at);
+});
+
+test('L366 m-B: "the kept list could not be read" stays on the fact through a quiet pass, for the next alert', () => {
+  for (const doc of [{ items: 'x' }, { items: [], over: 'x' }, { items: [], over: [{ id: 1 }] }]) {
+    const w = keptWorld();
+    w.rec.write({ actor: 'dispatcher', entity: 'fact', id: REFUSED_FACT('park'), expectRev: 0, doc: { ...doc, told_at: iso(T0) } });
+    assert.equal(w.tell(w.rec, T0 + H), 'quiet');
+    assert.deepEqual([w.fact().doc.unreadable, w.fact().doc.more], [true, 1], JSON.stringify(doc));
+    assert.equal(w.tell(w.rec, T0 + 2 * H), 'quiet');
+    assert.equal(w.fact().doc.more, 1, 'read clean now, so not counted again');
+    assert.equal(w.tell(w.rec, T0 + 25 * H), 'told');
+    assert.match(w.alert.texts.at(-1), /the kept list could not be read; at least 1 more refused write was not listed/);
+  }
+});
+
+test('L366 m-C: a cause holding only a count is told on time through passes whose steps did not finish', () => {
+  const w = keptWorld();
+  w.rec.write({ actor: 'dispatcher', entity: 'fact', id: REFUSED_FACT('park'), expectRev: 0, doc: { items: [], more: 1, told_at: iso(T0) } });
+  const out = tellRefused({ rec: w.rec, alert: w.alert, now: T0 + 25 * H, refused: new Map(), ran: () => false });
+  assert.equal(out.find(([c]) => c === 'park')[1], 'told');
 });
 
 test('L352 m2: a kept list the Record will not write throws for its cause, so the tick is told', () => {

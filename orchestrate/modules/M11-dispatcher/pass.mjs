@@ -268,7 +268,7 @@ export async function stopPass({ rec, rules, now, clock = () => now, account, se
     const saved = saves[i];
     if (late) note(rec, `stop-note-${s.id}`, `session ${s.id} stopped without a safe point after ${Math.round((after - Date.parse(pending.since)) / 60_000)} min (${pending.reason})`, { now: after });
     // The move's answer is kept on the stop (L323): a park the Record refuses is tried again each pass (reparkStopped)
-    // and told to Joe while it lasts (refused-writes.mjs), never dropped.
+    // and told to the owner while it lasts (refused-writes.mjs), never dropped.
     const moved = moveAfterStop(rec, s.card, pending.reason, after);
     putFact(rec, STOP_FACT(s.id), { ...pending, state: 'done', stopped_at: iso(after), how: stopped.how, hard: late, saved: !!saved?.ok, ...(saved?.ok ? {} : { save_reason: saved?.reason ?? 'no answer' }), ...movedFields(moved) }, 'stop_done');
     dropCause(rec, STOP_FACT(s.id));

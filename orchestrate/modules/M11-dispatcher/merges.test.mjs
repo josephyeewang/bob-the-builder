@@ -701,7 +701,7 @@ for (const lost of ['send refused', 'queue refused']) {
   });
 }
 
-test('L332 m5: a merge refused twice is put on Joe at the time after the reviewer checks, not the step\'s start', async () => {
+test('L332 m5: a merge refused twice is put on the owner at the time after the reviewer checks, not the step\'s start', async () => {
   const rec = recWith([cardMerging, checking('M-1', 0), checking('M-2', 10), ['card', 'C-5', { state: 'in_review', head: HB, changed_at: at(0) }]]);
   await pass(rec, 31, { hasReviewer: () => true });
   change(rec, 'card', 'C-1', { state: 'merging' }); // the gate takes it again
