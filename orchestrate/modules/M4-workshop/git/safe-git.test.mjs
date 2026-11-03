@@ -427,10 +427,14 @@ test('L36/L49 sweep: every planted key is refused before git runs; the pins alon
   assert.deepEqual(failures.sort(), []);
 });
 
+// The two stop-time tests below need perl to start a program that leaves git's process group (L190 minor b). On a Mac
+// without it they skip and say why, rather than fail on something that isn't the runner.
+const NO_PERL = spawnSync('perl', ['-e', '1']).status === 0 ? false : 'perl is not installed: the stand-in program that leaves git\'s group needs it';
+
 // L177 c3: the sweep's own git runner ends at its stop time even when a program git started has left git's process
 // group and keeps git's output open (the audit's case lingered 611 s). The program writes its number down, so the
 // test stops it afterwards.
-test('L177 c3: rawGit ends at its stop time though a program that left git\'s process group keeps the output open', { timeout: 30_000 }, async () => {
+test('L177 c3: rawGit ends at its stop time though a program that left git\'s process group keeps the output open', { timeout: 30_000, skip: NO_PERL }, async () => {
   const d = tmp();
   const pidFile = join(d, 'pid');
   const orphan = `!perl -MPOSIX -e 'if (fork) { sleep 20; exit } POSIX::setsid(); open(my $f, ">", $ARGV[0]); print $f $$; close $f; sleep 20'`;
@@ -449,6 +453,36 @@ test('L177 c3: rawGit ends at its stop time though a program that left git\'s pr
     assert.equal(r.hung, true, JSON.stringify(r));
     assert.ok(took < 6_000, `rawGit took ${took} ms`);
     // Closed pipes leave node's list within a few turns of the loop; one left open stays until the program ends (20 s).
+    for (let i = 0; i < 20 && opened().length; i++) await new Promise((res) => setTimeout(res, 50));
+    assert.equal(opened().length, 0, `every pipe to git is closed, though the program still holds the other end: ${process.getActiveResourcesInfo().join(',')}`);
+  } finally {
+    try { process.kill(Number(readFileSync(pidFile, 'utf8')), 'SIGKILL'); } catch {}
+  }
+});
+
+// L188: the same for safe-git's own runner (runChild): at its stop time it closes git's three pipes, though a program
+// git started has left git's process group and still holds them. A stand-in git (a script given as gitBin) starts that
+// program, and `--version` runs with no repository check, so the one call is runChild's.
+test('L188: safe-git\'s runner ends at its stop time and closes every pipe, though a program that left git\'s group keeps them', { timeout: 30_000, skip: NO_PERL }, async () => {
+  const d = tmp();
+  const pidFile = join(d, 'pid');
+  const fake = join(d, 'git');
+  writeFileSync(fake, `#!/bin/sh\nperl -MPOSIX -e 'if (fork) { exit } POSIX::setsid(); open(my $f, ">", $ARGV[0]); print $f $$; close $f; sleep 20' '${pidFile}'\nsleep 20\n`);
+  chmodSync(fake, 0o755);
+  // process._getActiveHandles is undocumented in node (kept by L190 minor b: nothing documented lists the pipes). If a
+  // node upgrade drops it, this throws and the test fails loudly rather than passing.
+  const pipeHandles = () => process._getActiveHandles().filter((h) => h?._handle?.constructor?.name === 'Pipe');
+  const before = new Set(pipeHandles());
+  const opened = () => pipeHandles().filter((h) => !before.has(h));
+  const t0 = Date.now();
+  try {
+    const r = await git(['--version'], { gitDir: '/dev/null', gitBin: fake, timeoutMs: 1_500, purpose: 'L188 test' });
+    const took = Date.now() - t0;
+    for (let i = 0; i < 20 && !existsSync(pidFile); i++) await new Promise((res) => setTimeout(res, 50));
+    assert.ok(existsSync(pidFile), 'control: the program left the group and is still running');
+    assert.equal(r.code, -1, JSON.stringify(r));
+    assert.match(r.stderr, /did not end within 1500 ms and was stopped/);
+    assert.ok(took < 6_000, `git() took ${took} ms`);
     for (let i = 0; i < 20 && opened().length; i++) await new Promise((res) => setTimeout(res, 50));
     assert.equal(opened().length, 0, `every pipe to git is closed, though the program still holds the other end: ${process.getActiveResourcesInfo().join(',')}`);
   } finally {
