@@ -277,6 +277,33 @@ test('audit #125 r1 MAT-A: a reset more than a week after the hit is read as no 
   assert.deepEqual([w.rec.read('card', 'F').doc.wait.who], ['usage'], 'a reset at the edge still waits on usage');
 });
 
+test('audit #125 r2 m-1, c-2: the far reset is judged against the hit, not now: a reset an hour past the bound waits on Joe though the pass runs 2 h after the hit', async () => {
+  assert.equal(LIMIT_RESET_MAX_MS, 7 * 24 * H + H, 'the bound is a week and an hour (the longest real window, with slack)');
+  // Judged from now (2 h after the hit), this reset would be inside the bound and the card would wait on usage.
+  const w = world([['fact', LIMIT_FACT('acct-g'), { resets_at: iso(T0 + MIN + LIMIT_RESET_MAX_MS + H), observed_at: iso(T0 + MIN) }]]);
+  parkOnLimit(w.rec, 'G', { ranAt: T0, account: 'acct-g' });
+  await w.pass(2 * 60 + 1);
+  const g = w.rec.read('card', 'G').doc;
+  assert.deepEqual([g.state, g.wait.who, g.wait.what], ['waiting', 'joe', LIMIT_NO_RESET]);
+  assert.equal(w.calls.alerts.filter((x) => /card G: account acct-g hit its usage limit but the reset time it gave .* is more than a week after the hit/.test(x)).length, 1);
+});
+
+test('audit #125 r2 m-2, m-3: a card that has waited on a limit longer than the bound waits on Joe, told once, though each new hit moves the reset ahead', async () => {
+  const DAY = 24 * H;
+  // A hit dated 3 days after the park, its reset a week later: each reading is in bounds, yet the card never resumes.
+  const w = world([['fact', LIMIT_FACT('acct-h'), { resets_at: iso(T0 + 10 * DAY), observed_at: iso(T0 + 3 * DAY) }]]);
+  parkOnLimit(w.rec, 'H', { ranAt: T0, account: 'acct-h' });
+  await w.pass(LIMIT_RESET_MAX_MS / MIN);
+  assert.deepEqual([w.rec.read('card', 'H').doc.wait.who], ['usage'], 'exactly the bound is not over it');
+  await w.pass(LIMIT_RESET_MAX_MS / MIN + 1);
+  const h = w.rec.read('card', 'H').doc;
+  assert.deepEqual([h.state, h.wait.who, h.wait.what], ['waiting', 'joe', LIMIT_NO_RESET]);
+  const told = () => w.calls.alerts.filter((x) => /card H: it has waited on account acct-h's usage limit since .*, longer than any real limit window/.test(x));
+  assert.equal(told().length, 1);
+  await w.pass(LIMIT_RESET_MAX_MS / MIN + 2);
+  assert.equal(told().length, 1, 'told once');
+});
+
 test('L110 m-4: a limit_hit wait that names no account resumes nothing, never on the pass\'s account; it waits on Joe, one alert', async () => {
   // The pass's account has a reading that has reset: a card whose wait names no account must not be resumed by it.
   const parked = { state: 'waiting', tier: 2, product: 'p1', files: ['src/n.js'], wait: { who: 'usage', what: 'limit_hit', since: iso(T0), next_check: iso(T0) } };
