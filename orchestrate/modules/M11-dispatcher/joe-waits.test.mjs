@@ -1,6 +1,7 @@
 // joe-waits.test.mjs — L130: a card put on Joe is told until a copy is delivered, and only a delivered copy marks it.
 // Real Record (M9 setup, real permissions), the real outbox and sendAlerts (through withAlerts).
 import { test } from 'node:test';
+import { fakeAlert } from '../../test/fake-alert.test-helper.mjs';
 import assert from 'node:assert/strict';
 import { waitOnJoe, retellWaits, WAIT_TELL_FACT } from './joe-waits.mjs';
 import { withAlerts } from './fixtures.test-helper.mjs';
@@ -131,13 +132,13 @@ test('audit #153 m1: a card put on Joe again for the same what is told the new t
   for (const s of sides) {
     let t = s.start;
     const at = (ms) => { t = ms; s.set(ms); };
-    const got = [];
-    const port = (x) => { got.push(typeof x === 'string' ? x : x.text); return true; };
-    const say = (text) => withAlerts(s.rec, t, port, (alert) => waitOnJoe(s.rec, 'C-1', { text, alert, now: t, ...ask }));
-    assert.equal((await say('first tell')).ok, true, s.name);
+    const port = fakeAlert();
+    const got = port.texts;
+    const putOnJoe = (text) => withAlerts(s.rec, t, port, (alert) => waitOnJoe(s.rec, 'C-1', { text, alert, now: t, ...ask }));
+    assert.equal((await putOnJoe('first tell')).ok, true, s.name);
     const first = s.rec.read('card', 'C-1').doc.wait.since;
     at(t + 2 * 60 * MIN);
-    const r = await say('second tell');
+    const r = await putOnJoe('second tell');
     assert.equal(r.ok, true, `${s.name}: ${r.reason}`);
     assert.equal(s.rec.read('card', 'C-1').doc.wait.since, first, `${s.name}: the wait keeps its since`);
     assert.deepEqual(got, ['first tell', 'second tell'], `${s.name}: the second tell is sent`);

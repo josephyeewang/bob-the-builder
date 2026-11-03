@@ -1244,3 +1244,22 @@ test('audit #153 MAT-1: the stand-in does not keep a stored since in the future 
   recheck(iso(T0));
   assert.equal(w.rec.read('card', 'F').doc.wait.since, iso(T0 + MIN), 'one 60 s ahead of the clock is kept');
 });
+
+// L329's two plants for these sites: a since an hour ahead of the pass that should fire the cap (the unreadable one is
+// the L285 test above), and a run_started an hour ahead (an unreadable one can't be stored: the Record drops it).
+test('audit #153 MAT-1, L329: a since an hour ahead of the pass still lets each cap fire, and a run_started an hour ahead waits on Joe', async () => {
+  const DAY = 24 * H;
+  const w = world([['fact', LIMIT_FACT('acct-s'), { resets_at: iso(T0 + 10 * DAY), observed_at: iso(T0 + 3 * DAY) }]]);
+  parkOnLimit(w.rec, 'S', { ranAt: T0, account: 'acct-s' });
+  parkOnLimit(w.rec, 'U', { ranAt: T0, account: 'acct-u' });
+  garbleSince(w.rec, 'U', iso(T0 + (24 * 60 + 1) * MIN + H));
+  garbleSince(w.rec, 'S', iso(T0 + LIMIT_RESET_MAX_MS + MIN + H));
+  await w.pass(24 * 60 + 1);
+  assert.deepEqual([w.rec.read('card', 'U').doc.wait.who, w.rec.read('card', 'U').doc.wait.what], ['joe', LIMIT_NO_HIT]);
+  await w.pass(LIMIT_RESET_MAX_MS / MIN + 1);
+  assert.deepEqual([w.rec.read('card', 'S').doc.wait.who, w.rec.read('card', 'S').doc.wait.what], ['joe', LIMIT_NO_RESET]);
+  const r = world();
+  parkOnLimit(r.rec, 'R', { ranAt: T0 + 2 * MIN + H, parkedAt: T0, account: 'acct-r' });
+  await r.pass(2);
+  assert.deepEqual([r.rec.read('card', 'R').doc.wait.who, r.rec.read('card', 'R').doc.wait.what], ['joe', LIMIT_NO_RUN]);
+});
