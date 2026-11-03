@@ -150,17 +150,27 @@ test('m1: a wait that ends while its alert is still queued drops it: it is never
   assert.deepEqual(q.delivered, []);
 });
 
-test('tell or clear that throws does not break the caller: tell is unsent (told again next pass), clear is passed back', () => {
+test('L324 n1: a tell or clear that throws is thrown on (loud), and the mark is unchanged so the next pass tells', () => {
   let mark = null;
   const boom = () => { throw new Error('boom'); };
-  const r1 = stillWaiting({ waiting: true, now: T0, read: () => mark, tell: boom, clear: () => {} });
-  assert.equal(r1.did, 'unsent');
-  assert.equal(r1.error.message, 'boom');
+  assert.throws(() => stillWaiting({ waiting: true, now: T0, read: () => mark, tell: boom, clear: () => {} }), /boom/);
+  assert.equal(mark, null);
   const r2 = stillWaiting({ waiting: true, now: T0 + MIN, read: () => mark, tell: (f) => { mark = f; return true; }, clear: () => {} });
   assert.equal(r2.did, 'told');
-  const r3 = stillWaiting({ waiting: false, now: T0 + 2 * MIN, read: () => mark, tell: () => true, clear: boom });
-  assert.equal(r3.did, 'cleared');
-  assert.equal(r3.error.message, 'boom');
+  assert.throws(() => stillWaiting({ waiting: false, now: T0 + 2 * MIN, read: () => mark, tell: () => true, clear: boom }), /boom/);
+  assert.throws(() => stillWaiting({ waiting: false, now: T0 + 3 * MIN, read: () => null, tell: () => true, clear: boom }), /boom/, 'with no mark too');
+});
+
+test('L324 n2: `since` must be text, and is compared as text', () => {
+  for (const bad of [NaN, 42, new Date(T0), null, {}]) {
+    assert.throws(() => stillWaiting({ waiting: true, now: T0, since: bad, read: () => null, tell: () => true, clear: () => {} }), StillWaitingError, String(bad));
+    assert.throws(() => dueToTell(null, T0, undefined, bad), StillWaitingError, String(bad));
+    assert.throws(() => stillWaiting({ waiting: false, now: T0, since: bad, read: () => null, tell: () => true, clear: () => {} }), StillWaitingError, `${String(bad)}, ended`);
+  }
+  const at = new Date(T0).toISOString();
+  assert.equal(dueToTell({ told_at: at, since: 'w1' }, T0 + MIN, undefined, 'w1'), false, 'the same text: quiet');
+  assert.equal(dueToTell({ told_at: at, since: 7 }, T0 + MIN, undefined, '7'), true, 'a stored number is not the text');
+  assert.equal(dueToTell({ told_at: at }, T0 + MIN, undefined, 'w1'), true, 'a mark missing since (a tell that dropped it) tells');
 });
 
 test('a corrupt mark when the wait ends is cleared too', () => {
