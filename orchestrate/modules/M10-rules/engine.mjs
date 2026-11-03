@@ -10,7 +10,9 @@
 //     products      ['<product>', …] from products.json (the strictest-wins scope, MAT-10)
 //     rulesState(p) → the reader's state(p): { status: ok|last_good|deny_all, policy, commit, blob }
 //     productState(p) → the product record's doc ({ state, away?: { tz } }) or null
-//     running({ product }) / running({}) → editing sessions running for that product / on the whole Mac
+//     running({ product }) / running({}) → editing sessions running for that product / on the whole Mac, undo
+//                   workers included (they still count toward the caps for other starts, L199)
+//     running({ product, undo: true }) → undo workers (exact-reverse cards) running for that product (L199)
 //     rolesDir      the role-profile folder (roles/), loaded against each claude_code.pin
 //     clock()       → ms since epoch; the only clock used (subject.now is ignored, R3-m9)
 //     deepMerge     false (the first cutover): a merge passes only the docs-lane path check (lane-check.mjs, L34).
@@ -19,7 +21,7 @@
 import { allow, ask, deny, MAC_MIN, MAC_MAX, MAC_MATCH, MAC_LIST_ALL, keyMatches, isMacKey } from '../../shared/rules.mjs';
 import { classifyChange, needsJoe, readSubjectOnce, MAX_FILES } from './classify.mjs';
 import { compileList, pathProblem } from './paths.mjs';
-import { PRODUCT_STATES, HOURS, validZone, compareVersions } from './policy.mjs';
+import { PRODUCT_STATES, HOURS, validZone, compareVersions, START_RULES, TIER1_MERGE_RULES } from './policy.mjs';
 import { loadRoles, profileFor } from './roles.mjs';
 import { docsLaneProblem, DOCS_FLOOR } from './lane-check.mjs';
 import { activeKind } from '../../shared/asks.mjs';
@@ -159,11 +161,28 @@ export function makeEngine({ products, rulesState, productState, running, rolesD
     const state = stateOf(product);
     const floor = STATE_FLOOR[state];
     const fileRule = at(pol, `product_state_rules.${state}.start`);
-    if (!['within_caps', 'editing_cap_1', 'none'].includes(fileRule)) return deny(`product_state_rules.${state}.start is not a known rule`);
-    if (!floor.start || fileRule === 'none') return deny(`product is ${state}: no starts`);
+    if (!START_RULES.includes(fileRule)) return deny(`product_state_rules.${state}.start is not a known rule`);
 
-    // Caps (MAT-5, MAT-10). Editing starts only.
-    if (editing) {
+    // An undo (an exact-reverse card) is never refused by the product's state or the editing caps, a cap of 0 included:
+    // safety acts are never held, and pausing is often the moment Joe wants to undo (L31, L199, L210). This is the rule
+    // push_branch and merge already keep: an exact reverse passes the paused floor and the file's state rule (here
+    // `start: none`, as merge passes `undo_only`). Its own limit instead: at most one undo running per product. A
+    // running undo still counts toward the caps for every other editing start (the running port counts it). This
+    // matches M11's gate after #117 (lane 2, L199). The card's kind is only the claim; the Dispatcher checks it is an
+    // exact reverse before the start (L40). Only a worker runs an undo: no other role starts under this exception (L220).
+    // At the first cutover, an undo starts only where its merge could land: the state's tier1_merge must be a rule
+    // merge knows, so a typo there refuses the undo's start as the docs-lane merge refuses it (L220 M1). The second
+    // cutover's merge (mergeDeep) lets an exact reverse through before it reads tier1_merge, so there this check is
+    // stricter than the merge, not equal to it (L226).
+    const undo = editing && role === 'worker' && s.card?.kind === 'exact_reverse';
+    if (undo && !TIER1_MERGE_RULES.includes(at(pol, `product_state_rules.${state}.tier1_merge`))) {
+      return deny(`product_state_rules.${state}.tier1_merge is not a known rule`);
+    }
+    if (!undo && (!floor.start || fileRule === 'none')) return deny(`product is ${state}: no starts`);
+    if (undo && count({ product, undo: true }) >= 1) return deny(`an undo is already running for ${product} (one at a time)`);
+
+    // Caps (MAT-5, MAT-10). Editing starts only; an undo is not capped (above).
+    if (editing && !undo) {
       let cap = pol.caps.editing_per_product;
       if (!Number.isSafeInteger(cap)) return deny('caps.editing_per_product missing');
       if (floor.editingCap1 || fileRule === 'editing_cap_1') cap = Math.min(cap, 1);
@@ -174,8 +193,9 @@ export function makeEngine({ products, rulesState, productState, running, rolesD
       if (count({}) >= macCap) return deny(`editing cap reached on this Mac (${macCap})`);
     }
 
-    // Tier 1 needs a fresh usage reading (A8).
-    if (tier === 1) {
+    // Tier 1 needs a fresh usage reading (A8). Not an undo: M11 already exempts undos from the usage bands, and a
+    // missing or stale reading must not hold a safety act (L31, L220).
+    if (tier === 1 && !undo) {
       const staleMin = macValue('usage.stale_after_min');
       const readAt = Date.parse(s.usage?.read_at ?? '');
       const now = clock();
@@ -292,7 +312,7 @@ export function makeEngine({ products, rulesState, productState, running, rolesD
     const reverse = s.kind === 'exact_reverse' && typeof s.reverses === 'string' && SHA.test(s.reverses) && s.exact_reverse_ok === true && REVERSED_AUDIT.includes(s.reversed_audit);
     const state = stateOf(s.product);
     const fileRule = at(pol, `product_state_rules.${state}.tier1_merge`);
-    if (!['rules', 'tier1_hours_only', 'undo_only'].includes(fileRule)) return deny(`product_state_rules.${state}.tier1_merge is not a known rule`);
+    if (!TIER1_MERGE_RULES.includes(fileRule)) return deny(`product_state_rules.${state}.tier1_merge is not a known rule`);
     if (!reverse && (state === 'paused' || fileRule === 'undo_only')) return deny(`product is ${state}: only an exact reverse may merge`);
     return allow(reverse ? 'exact reverse of a docs-lane change' : 'docs lane');
   }
@@ -337,7 +357,7 @@ export function makeEngine({ products, rulesState, productState, running, rolesD
     }
     const state = stateOf(s.product);
     const fileRule = at(pol, `product_state_rules.${state}.tier1_merge`);
-    if (!['rules', 'tier1_hours_only', 'undo_only'].includes(fileRule)) return deny(`product_state_rules.${state}.tier1_merge is not a known rule`);
+    if (!TIER1_MERGE_RULES.includes(fileRule)) return deny(`product_state_rules.${state}.tier1_merge is not a known rule`);
     if (state === 'paused' || fileRule === 'undo_only') return deny(`product is ${state}: only an exact reverse may merge`);
     if (c.tier === 1 && !inHours(pol, s.product)) return deny('held_tier1_hours');
     if (c.risky.length || c.tier === 1) return ask(1, c.risky.length ? `risky: ${c.risky.join(', ')}` : 'Tier 1');

@@ -7,6 +7,7 @@ import { OUTAGE_FACT } from './outage.mjs';
 import { retellWaits, WAIT_TELL_FACT } from './joe-waits.mjs';
 import { KEYS as K } from './keys.mjs';
 import { makeRules } from '../../shared/rules.mjs';
+import { fakeAlert } from '../../test/fake-alert.test-helper.mjs';
 import { change, parkOnLimit, rulesWith, realEngine, recWith, seed, usageFact, undoEntries, filesOfCommits, T0, MIN, H, iso, withAlerts, setClock } from './fixtures.test-helper.mjs';
 
 // Each step runs as the tick runs it: its alerts are queued, then sent once it is done (alerts.mjs, L47).
@@ -274,6 +275,33 @@ test('audit #125 r1 MAT-A: a reset more than a week after the hit is read as no 
   assert.deepEqual([e.state, e.wait.who, e.wait.what], ['waiting', 'joe', LIMIT_NO_RESET]);
   assert.equal(w.calls.alerts.filter((x) => /card E: account acct-e hit its usage limit but the reset time it gave \(.*\) is more than a week after the hit/.test(x)).length, 1);
   assert.deepEqual([w.rec.read('card', 'F').doc.wait.who], ['usage'], 'a reset at the edge still waits on usage');
+});
+
+test('audit #125 r2 m-1, c-2: the far reset is judged against the hit, not now: a reset an hour past the bound waits on Joe though the pass runs 2 h after the hit', async () => {
+  assert.equal(LIMIT_RESET_MAX_MS, 7 * 24 * H + H, 'the bound is a week and an hour (the longest real window, with slack)');
+  // Judged from now (2 h after the hit), this reset would be inside the bound and the card would wait on usage.
+  const w = world([['fact', LIMIT_FACT('acct-g'), { resets_at: iso(T0 + MIN + LIMIT_RESET_MAX_MS + H), observed_at: iso(T0 + MIN) }]]);
+  parkOnLimit(w.rec, 'G', { ranAt: T0, account: 'acct-g' });
+  await w.pass(2 * 60 + 1);
+  const g = w.rec.read('card', 'G').doc;
+  assert.deepEqual([g.state, g.wait.who, g.wait.what], ['waiting', 'joe', LIMIT_NO_RESET]);
+  assert.equal(w.calls.alerts.filter((x) => /card G: account acct-g hit its usage limit but the reset time it gave .* is more than a week after the hit/.test(x)).length, 1);
+});
+
+test('audit #125 r2 m-2, m-3: a card that has waited on a limit longer than the bound waits on Joe, told once, though each new hit moves the reset ahead', async () => {
+  const DAY = 24 * H;
+  // A hit dated 3 days after the park, its reset a week later: each reading is in bounds, yet the card never resumes.
+  const w = world([['fact', LIMIT_FACT('acct-h'), { resets_at: iso(T0 + 10 * DAY), observed_at: iso(T0 + 3 * DAY) }]]);
+  parkOnLimit(w.rec, 'H', { ranAt: T0, account: 'acct-h' });
+  await w.pass(LIMIT_RESET_MAX_MS / MIN);
+  assert.deepEqual([w.rec.read('card', 'H').doc.wait.who], ['usage'], 'exactly the bound is not over it');
+  await w.pass(LIMIT_RESET_MAX_MS / MIN + 1);
+  const h = w.rec.read('card', 'H').doc;
+  assert.deepEqual([h.state, h.wait.who, h.wait.what], ['waiting', 'joe', LIMIT_NO_RESET]);
+  const told = () => w.calls.alerts.filter((x) => /card H: it has waited on account acct-h's usage limit since .*, longer than any real limit window/.test(x));
+  assert.equal(told().length, 1);
+  await w.pass(LIMIT_RESET_MAX_MS / MIN + 2);
+  assert.equal(told().length, 1, 'told once');
 });
 
 test('L110 m-4: a limit_hit wait that names no account resumes nothing, never on the pass\'s account; it waits on Joe, one alert', async () => {
@@ -873,6 +901,45 @@ test('r4 MAT-5: during an outage the undo starts start nothing', async () => {
   const r2 = await undoStarts({ rec, rules: rulesWith({}, { start_session: { decision: 'allow', reason: 'ok' } }), now: T0, bands: { band: 'green', own_building: 'open', prodBlocked: false },
     running: [], launch: async (x) => { launched.push(x.card.id); return { ok: true, sessionId: x.sessionId, pid: 4242, pidStart: 's4242', head: 'h'.repeat(40) }; }, filesOf: filesOfCommits, alert: () => {} });
   assert.deepEqual(r2.started, ['U-1']);
+});
+
+// L199 (1): the first cutover's caps.editing_per_product is 0. The real undo start still starts Joe's Undo, one per
+// product at a time: a second undo card on the product waits (Joe is told why), and starts once the first has ended.
+test('L199: at editing cap 0 the undo start starts one undo per product; the second waits its turn', async () => {
+  const rec = recWith([['product', 'p1', { state: 'active' }], ...undoEntries('U-1'), ...undoEntries('U-2')]);
+  const rules = rulesWith({ [K.editingPerProduct]: 0 }, { start_session: { decision: 'allow', reason: 'ok' } });
+  const launched = [];
+  const ask = (running) => undoStarts({ rec, rules, now: T0, bands: { band: 'green', own_building: 'open', prodBlocked: false }, running,
+    launch: async (x) => { launched.push([x.card.id, x.kind]); return { ok: true, sessionId: x.sessionId, pid: 4242, pidStart: 's4242', head: 'h'.repeat(40) }; },
+    filesOf: filesOfCommits, alert: fakeAlert() });
+  const r = await ask([]);
+  assert.deepEqual(r.started, ['U-1']);
+  assert.deepEqual(launched, [['U-1', 'undo']]);
+  assert.deepEqual(r.missing, []);
+  assert.deepEqual(r.refused, [['U-2', 'an undo is already running for p1 (one at a time)']]);
+  assert.equal(rec.read('card', 'U-2').doc.state, 'ready');
+  // U-1 still running in the Record, gone from the running list (the sessions port lost it): U-2 still waits (#117 m2).
+  const r1 = await ask([]);
+  assert.deepEqual(r1.refused, [['U-2', 'an undo is already running for p1 (one at a time)']]);
+  // The first undo really over: its worker handed it in (in_review), so it no longer runs, and the second starts.
+  change(rec, 'card', 'U-1', { state: 'in_review' });
+  const r2 = await ask([]);
+  assert.deepEqual(r2.started, ['U-2']);
+});
+
+// #117 audit m2: a launch that never answers leaves its undo card claimed and out of the running list. A second undo
+// on the product in the same pass is refused: the one-undo limit reads the Record, not only the list.
+test('#117 m2: an undo launch that times out leaves its card claimed; a second undo in the same pass is refused', { timeout: 10_000 }, async () => {
+  const rec = recWith([['product', 'p1', { state: 'active' }], ...undoEntries('U-1'), ...undoEntries('U-2')]);
+  const launched = [];
+  const r = await undoStarts({ rec, rules: rulesWith({}, { start_session: { decision: 'allow', reason: 'ok' } }), now: T0,
+    bands: { band: 'green', own_building: 'open', prodBlocked: false }, running: [],
+    launch: (x) => { launched.push(x.card.id); return new Promise(() => {}); }, filesOf: filesOfCommits, alert: fakeAlert(), portDeadlineMs: 50 });
+  assert.deepEqual(launched, ['U-1']);
+  assert.deepEqual(r.started, []);
+  assert.equal(rec.read('card', 'U-1').doc.state, 'claimed');
+  assert.deepEqual(r.refused.find(([id]) => id === 'U-2'), ['U-2', 'an undo is already running for p1 (one at a time)']);
+  assert.equal(rec.read('card', 'U-2').doc.state, 'ready');
 });
 
 test('r4 Minor: usage unread for over a day is told again each day it lasts', async () => {

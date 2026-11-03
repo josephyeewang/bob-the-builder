@@ -18,6 +18,8 @@
 //       what a plan reviewer names in its pass: the plan it read, as the go would bind it
 //   recordGo(ctx, askId) → { ok, go } | { ok: false, reason }           an answered "go" → the go record; the ask consumed
 //   await goCheck({ go, card, changed, headRows, tier, view, mainSha }) → { ok, reasons, newGo }   at merge (refusal 10)
+//       + unreadable: true, cause: <the error> when a GitHub read threw and nothing else is wrong (L205); the
+//         caller classes `cause` (M6 gather failedRead: a 4xx other than 401/403/429 is GitHub's answer)
 //   await tier1Changed(ctx, { cardId, view, mainTip }) → { ok, changed: [paths] }   did a listed file change on main?
 //   recordRecheck(ctx, { cardId, mainCommit, planSha256, files }) → { ok, newGo }   unchanged plan → rechecked (m3-3)
 // ctx = { record, rules, product, now, alert } (+ gh, owner, repo for a Tier-1 go's decision pull request)
@@ -77,13 +79,15 @@ function fingerprintOf(product, cardId, d) {
 }
 
 // No entry in a go's file list may be a folder (M7): a pattern or unsafe path is refused by the fingerprint itself; a
-// plain name that is a folder in main's tree is refused here. Any error reading the tree refuses too.
+// plain name that is a folder in main's tree is refused here. → null, or { reason, unreadable?, cause? }. A tree read
+// that threw says nothing about the change (#108 r2, LEAD-CALLS L205): it is marked `unreadable`, with the error as
+// `cause`, so the Merge Gate waits it out rather than refusing for good; a go is not asked on it either.
 async function folderIn(view, sha, files) {
-  if (!view || !SHA.test(sha ?? '')) return 'no main commit to check the file list against';
+  if (!view || !SHA.test(sha ?? '')) return { reason: 'no main commit to check the file list against' };
   try {
-    for (const f of files) if (await view.isDir(sha, f)) return `${f} is a folder; a go names files`;
+    for (const f of files) if (await view.isDir(sha, f)) return { reason: `${f} is a folder; a go names files` };
   } catch (e) {
-    return `could not check the file list: ${String(e?.message ?? e).slice(0, 200)}`;
+    return { reason: `could not check the file list: ${String(e?.message ?? e).slice(0, 200)}`, unreadable: true, cause: e };
   }
   return null;
 }
@@ -118,7 +122,7 @@ export async function raiseGo(ctx, { cardId, rows, view, mainSha, planCheck } = 
   if (d.tier === 1) { const no = planCheckProblem(planCheck, { fingerprint: fp.sha256, card: cardId, planSha256: fp.inputs.plan_sha256 }); if (no) return fail(no); }
   // Tier 1 checks folders at the plan's main commit; Tier 2 at main as it is now.
   const folder = await folderIn(view, d.tier === 1 ? d.main_commit : mainSha, fp.inputs.files);
-  if (folder) return fail(folder);
+  if (folder) return fail(folder.reason, folder.unreadable ? { unreadable: true, cause: folder.cause } : {});
   // One live ask per plan. A plan the owner said "not now" to, or whose ask was withdrawn or ran out, is asked again
   // under a new id when the Lead raises it again (audit round 1 M-3); otherwise the card would hang on a closed ask.
   const base = `go-${cardId}-${fp.sha256.slice(0, 12)}`;
@@ -220,9 +224,15 @@ export async function goCheck({ go, card, changed, headRows, tier, view, mainSha
     if (tier !== 1 && tier !== 2) reasons.push('the change\'s tier is unknown');
     else if (tier === 1 && go.tier !== 1) reasons.push('the change is Tier 1; the go was for Tier 2');
     const folder = await folderIn(view, mainSha, go.files ?? []);
-    if (folder) reasons.push(folder);
+    // A failed tree read is not a reason about the change. With no other reason, the check could not be done: it
+    // comes back `unreadable` (L205); with one, the change is refused for that.
+    if (folder?.unreadable && !reasons.length) return { ok: false, reasons: [folder.reason], newGo: false, unreadable: true, cause: folder.cause };
+    if (folder && !folder.unreadable) reasons.push(folder.reason);
   } catch (e) {
-    reasons.push(`the go check failed: ${String(e?.message ?? e).slice(0, 200)}`);
+    // Nothing above reads GitHub except folderIn, which doesn't throw; a throw here is the check failing, not the change.
+    // `unreadable` here does not mean held for ever: the Merge Gate classes `cause`, and an error that is not a failed
+    // GitHub read counts toward its wait cap, so the change is refused at the cap (gather.mjs failedRead).
+    return { ok: false, reasons: [`the go check failed: ${String(e?.message ?? e).slice(0, 200)}`], newGo: false, unreadable: true, cause: e };
   }
   return { ok: reasons.length === 0, reasons, newGo: reasons.length > 0 };
 }

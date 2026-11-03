@@ -8,6 +8,7 @@
 #   D-019: bob-upgrade.mjs (/bob UPGRADE, on fixture projects scaffolded from an older Bob) · hooks/warn-only.mjs
 #   D-020: bob-upgrade.mjs (own-version detection, green-gate test command, damaged list, pointer target) ·
 #          doc-pointers-check.mjs short paths · config-protection.js's required-checks advice · commit-sweep.sh
+#   D-036: templates/wired.test.mjs (Phase Gate 17)
 #
 # Rule 28's discipline applied to Bob's own checkers: each check is run against the defect it
 # was written for (must catch it) AND against a clean case (must pass it). Everything happens in
@@ -1029,6 +1030,96 @@ DH="$TMP/doc-home"; mkdir -p "$DH/.claude/skills"; ln -s "$(cd "$HERE/.." && pwd
 expect "bob-doctor: design skills not linked -> a warning with the line to paste" 0 "design-gallery is not installed.*ln -s" -- env HOME="$DH" bash "$HERE/bob-doctor.sh"
 ln -s "$(cd "$HERE/.." && pwd -P)/skills/design-gallery" "$DH/.claude/skills/design-gallery"
 expect "bob-doctor: a linked design skill -> reported as linked" 0 "design-gallery linked" -- env HOME="$DH" bash "$HERE/bob-doctor.sh"
+
+# ── 23. templates/wired.test.mjs: Phase Gate 17, nothing built sits unused (D-036) ──
+echo "templates/wired.test.mjs"
+WT="$TMP/wired"
+wired_base() {
+  rm -rf "$WT"; mkdir -p "$WT/src" "$WT/test"
+  cp "$HERE/../templates/wired.test.mjs" "$WT/test/wired.test.mjs"
+  printf '#!/usr/bin/env node\nimport { syncJob } from "./jobs.mjs";\nawait syncJob();\n' > "$WT/src/main.mjs"
+  printf 'export async function syncJob() { return 1; }\nexport function cleanupJob() { return 2; }\n' > "$WT/src/jobs.mjs"
+}
+# unwired <name> <reason>: list a unit in the copy's UNWIRED block.
+unwired() { perl -pi -e "s|^export const UNWIRED = Object.freeze\\(\\{|export const UNWIRED = Object.freeze({\\n  $1: '$2',|" "$WT/test/wired.test.mjs"; }
+wired_base
+expect "wired: a built job nothing runs -> FAIL, named" 1 "cleanupJob \\(src/jobs.mjs\\)" -- node --test "$WT/test/wired.test.mjs"
+unwired cleanupJob 'C-3: the cleanup schedule is not built yet'
+expect "wired: the same job listed with its row -> pass" 0 "" -- node --test "$WT/test/wired.test.mjs"
+wired_base; unwired cleanupJob 'later'
+expect "wired: listed without a row -> FAIL" 1 "say which roadmap row" -- node --test "$WT/test/wired.test.mjs"
+wired_base; unwired cleanupJob 'C-3: the cleanup schedule'
+printf '#!/usr/bin/env node\nimport { syncJob, cleanupJob } from "./jobs.mjs";\nawait syncJob(); cleanupJob();\n' > "$WT/src/main.mjs"
+expect "wired: a listed job that is now run -> FAIL as stale" 1 "take it off UNWIRED" -- node --test "$WT/test/wired.test.mjs"
+wired_base; printf 'import { syncJob } from "./jobs.mjs";\nawait syncJob();\n' > "$WT/src/main.mjs"
+expect "wired: no entry point -> FAIL, cannot judge" 1 "cannot judge: no entry point" -- node --test "$WT/test/wired.test.mjs"
+wired_base; printf 'export const x = 1;\n' > "$WT/src/jobs.mjs"; printf '#!/usr/bin/env node\nimport { x } from "./jobs.mjs";\n' > "$WT/src/main.mjs"
+expect "wired: no unit of work in the source -> FAIL, cannot judge" 1 "cannot judge: no unit of work" -- node --test "$WT/test/wired.test.mjs"
+wired_base; rm "$WT/src/main.mjs"
+printf '#!/usr/bin/env node\nconst { syncJob } = require("./jobs");\nconst j = require("./more");\nsyncJob();\n' > "$WT/src/main.js"
+printf 'function cleanupJob() {}\nconst more = () => cleanupJob();\nexport { cleanupJob };\nexport default more;\n' > "$WT/src/more.mjs"
+printf 'export const syncJob = async () => 1;\n' > "$WT/src/jobs.mjs"; printf 'export * from "./more.mjs";\n' > "$WT/src/more.js"
+expect "wired: require, a path with no extension and an export list -> all found and run" 0 "" -- node --test "$WT/test/wired.test.mjs"
+wired_base; printf 'export async function syncJob() { return 1; }\n// cleanupJob() runs from the nightly schedule\nexport function cleanupJob() { return 2; }\n' > "$WT/src/jobs.mjs"
+expect "wired: a unit named only in a comment is not run -> FAIL" 1 "cleanupJob" -- node --test "$WT/test/wired.test.mjs"
+wired_base; printf 'import { cleanupJob } from "../src/jobs.mjs";\ncleanupJob();\n' > "$WT/test/jobs.test.mjs"
+expect "wired: a unit only a test calls is not run -> FAIL" 1 "cleanupJob" -- node --test "$WT/test/wired.test.mjs"
+# Healthy shapes a fresh review found the first version failing (false alarms), all in one project.
+wired_base; mkdir -p "$WT/src/tasks"
+printf '#!/usr/bin/env node\nimport nightlyJob, { syncJob } from "./jobs.mjs";\nimport { reportJob } from "./tasks";\nconst { mailJob } = require("./mail");\nimport "./register.mjs";\nawait syncJob(); nightlyJob(); reportJob(); mailJob();\n' > "$WT/src/main.mjs"
+printf 'export async function syncJob() { return 1; }\nexport const cleanupJob = () => 2;\nexport function runAll() { cleanupJob(); }\nexport default async function nightlyJob() { runAll(); }\n' > "$WT/src/jobs.mjs"
+printf 'export * from "./report.mjs";\n' > "$WT/src/tasks/index.mjs"; printf 'export function reportJob() {}\n' > "$WT/src/tasks/report.mjs"
+printf 'function mailJob() {}\nmodule.exports = { mailJob };\n' > "$WT/src/mail.js"; printf 'export function hookHandler() {}\nhookHandler();\n' > "$WT/src/register.mjs"
+expect "wired: default import, folder re-export, arrow used in its own file, CommonJS, side-effect import -> pass" 0 "" -- node --test "$WT/test/wired.test.mjs"
+# Broken shapes the first version passed (missed): each must fail and name cleanupJob.
+wired_base; printf '#!/usr/bin/env node\nimport { syncJob, cleanupJob } from "./jobs.mjs";\nawait syncJob();\n' > "$WT/src/main.mjs"
+expect "wired: imported but never used -> FAIL" 1 "cleanupJob" -- node --test "$WT/test/wired.test.mjs"
+wired_base; printf '#!/usr/bin/env node\nimport * as jobs from "./jobs.mjs";\n// import { cleanupJob } from "./jobs.mjs";\nawait jobs.syncJob();\n/* jobs.cleanupJob() once scheduled */\nconsole.log("then cleanupJob(later)");\n' > "$WT/src/main.mjs"
+expect "wired: named only in a commented-out import, a comment or a string -> FAIL" 1 "cleanupJob" -- node --test "$WT/test/wired.test.mjs"
+wired_base; printf 'export async function syncJob() { return 1; }\nexport function cleanupJob(n) { if (n) cleanupJob(n - 1); }\n' > "$WT/src/jobs.mjs"
+expect "wired: a unit that only calls itself -> FAIL" 1 "cleanupJob" -- node --test "$WT/test/wired.test.mjs"
+wired_base; mkdir -p "$WT/scripts"; printf '#!/usr/bin/env node\nimport { cleanupJob } from "../src/jobs.mjs";\ncleanupJob();\n' > "$WT/scripts/seed-dev.mjs"
+perl -pi -e "s|NOT_PRODUCTION: \\[\\]|NOT_PRODUCTION: ['scripts']|" "$WT/test/wired.test.mjs"
+expect "wired: used only by a dev script listed in NOT_PRODUCTION -> FAIL" 1 "cleanupJob" -- node --test "$WT/test/wired.test.mjs"
+wired_base; printf 'import { cleanupJob } from "./jobs.mjs";\nexport const usage = () => `usage: ${process.argv[1]}`;\nexport const go = () => cleanupJob();\n' > "$WT/src/util.mjs"
+expect "wired: a file that only prints process.argv[1] is not an entry point -> FAIL" 1 "cleanupJob" -- node --test "$WT/test/wired.test.mjs"
+# Shapes a second fresh review found the rebuilt version missing: each leaves cleanupJob unused and must fail.
+wired_base; printf 'export async function syncJob() { return 1; }\nexport class CleanupJob { run() {} }\n' > "$WT/src/jobs.mjs"
+expect "wired: an exported class nothing uses -> FAIL" 1 "CleanupJob" -- node --test "$WT/test/wired.test.mjs"
+wired_base; printf 'module.exports = async function cleanupJob() {};\n' > "$WT/src/clean.js"
+expect "wired: module.exports = function cleanupJob, unused -> FAIL" 1 "cleanupJob" -- node --test "$WT/test/wired.test.mjs"
+wired_base; printf 'export async function syncJob() { return 1; }\nexport function cleanupJob() {}\nexport default { syncJob, cleanupJob, helper() { return 1; } };\n' > "$WT/src/jobs.mjs"
+expect "wired: listed only in an exported object -> FAIL" 1 "cleanupJob" -- node --test "$WT/test/wired.test.mjs"
+wired_base; printf 'export async function syncJob() { return 1; }\nexport const LIMIT = 5, cleanupJob = () => 1;\n' > "$WT/src/jobs.mjs"
+expect "wired: the second name in one export const, unused -> FAIL" 1 "cleanupJob" -- node --test "$WT/test/wired.test.mjs"
+wired_base; printf '#!/usr/bin/env node\nimport jobs from "./jobs.mjs";\nlet n = 1; n++ / 2; jobs.syncJob(); jobs.cleanupJob();\n' > "$WT/src/main.mjs"
+printf 'export async function syncJob() { return 1; }\nexport function cleanupJob() {}\nexport default { syncJob, cleanupJob };\n' > "$WT/src/jobs.mjs"
+expect "wired: used off a default-exported object, after a division -> pass" 0 "" -- node --test "$WT/test/wired.test.mjs"
+# Shapes a third fresh review found passing quietly.
+wired_base; printf 'export async function syncJob() { return 1; }\nexport default { syncJob, cleanupJob() { return 2; } };\n' > "$WT/src/jobs.mjs"
+expect "wired: a unit defined inside an exported object, unused -> FAIL" 1 "cleanupJob" -- node --test "$WT/test/wired.test.mjs"
+wired_base; printf 'export async function syncJob() { return 1; }\n' > "$WT/src/jobs.mjs"; printf 'exports.cleanupJob = function () {};\n' > "$WT/src/dead.js"
+printf 'module.exports = { cleanupJob: require("./dead.js").cleanupJob };\n' > "$WT/src/index.js"
+printf '#!/usr/bin/env node\nimport { syncJob } from "./jobs.mjs";\nimport "./index.js";\nawait syncJob();\n' > "$WT/src/main.mjs"
+expect "wired: passed on through module.exports = { x: require(...).x } -> FAIL, names the source" 1 "cleanupJob \\(src/dead.js\\)" -- node --test "$WT/test/wired.test.mjs"
+wired_base; printf 'import { cleanupJob } from "./jobs.mjs";\nexport const scriptName = process.argv[1];\nexport const here = import.meta.url;\nexport const run = () => cleanupJob();\n' > "$WT/src/paths.mjs"
+expect "wired: argv[1] and import.meta.url near each other but not compared -> not an entry, FAIL" 1 "cleanupJob" -- node --test "$WT/test/wired.test.mjs"
+wired_base; rm "$WT/src/main.mjs"; printf 'import { fileURLToPath } from "node:url";\nimport { syncJob, cleanupJob } from "./jobs.mjs";\nconst invoked = process.argv[1];\nif (invoked === fileURLToPath(import.meta.url)) { await syncJob(); cleanupJob(); }\n' > "$WT/src/cli.mjs"
+expect "wired: a main-module check through a variable is an entry point -> pass" 0 "" -- node --test "$WT/test/wired.test.mjs"
+wired_base; rm "$WT/src/main.mjs"; perl -pi -e "s|ENTRY_FILES: \[\]|ENTRY_FILES: ['src/worker.mjs']|" "$WT/test/wired.test.mjs"
+printf 'import { syncJob, cleanupJob } from "./jobs.mjs";\nexport default {\n  async fetch() { return cleanupJob(); },\n  async scheduled() { if (1) /x/.test("y"); await syncJob(); },\n};\n' > "$WT/src/worker.mjs"
+expect "wired: units called inside the methods of an exported worker object -> pass" 0 "" -- node --test "$WT/test/wired.test.mjs"
+# Shapes the re-check of those fixes found.
+wired_base; printf 'export async function syncJob() { return 1; }\nexport function cleanupJob() {}\nexport default { syncJob, later: [cleanupJob], helper() { return 1; } };\n' > "$WT/src/jobs.mjs"
+expect "wired: listed only in an array nested in an exported object -> FAIL" 1 "cleanupJob" -- node --test "$WT/test/wired.test.mjs"
+wired_base; printf 'import { cleanupJob } from "./jobs.mjs";\nconst script = process.argv[1];\nconst here = import.meta.url;\nif (script === undefined) console.log(here);\nexport const run = () => cleanupJob();\n' > "$WT/src/paths.mjs"
+expect "wired: argv[1] in a variable compared with something else -> not an entry, FAIL" 1 "cleanupJob" -- node --test "$WT/test/wired.test.mjs"
+wired_base; rm "$WT/src/main.mjs"; printf 'import { fileURLToPath } from "node:url";\nimport { syncJob, cleanupJob } from "./jobs.mjs";\nconst __filename = fileURLToPath(import.meta.url);\nif (process.argv[1] === __filename) { await syncJob(); cleanupJob(); }\n' > "$WT/src/cli.mjs"
+expect "wired: argv[1] compared with a __filename variable is an entry point -> pass" 0 "" -- node --test "$WT/test/wired.test.mjs"
+wired_base; printf 'export async function syncJob() { return 1; }\n' > "$WT/src/jobs.mjs"; printf 'exports.cleanupJob = function () {};\n' > "$WT/src/clean.js"
+printf 'module.exports = { run() { return require("./clean.js").cleanupJob(); } };\n' > "$WT/src/runner.js"
+printf '#!/usr/bin/env node\nimport runner from "./runner.js";\nimport { syncJob } from "./jobs.mjs";\nawait syncJob(); runner.run();\n' > "$WT/src/main.mjs"
+expect "wired: required and called inside a method of an exported object -> pass" 0 "" -- node --test "$WT/test/wired.test.mjs"
 
 echo
 echo "selftest-gate-scripts: $PASS passed, $FAIL failed"

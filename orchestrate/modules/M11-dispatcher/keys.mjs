@@ -73,7 +73,8 @@ export const NEW_KEYS = Object.freeze([
 const DEFAULTS = Object.freeze({ [KEYS.paceMinShare]: 0.143, [KEYS.shakedown]: true });
 
 export class MissingKey extends Error {
-  constructor(key, why) { super(why ? `the rules' ${key} ${why}` : `the rules have no value for ${key}`); this.key = key; }
+  // `unreadable`: the key has a value, but not one of its type (L228): a rule nobody can read, never "no value".
+  constructor(key, why, { unreadable = false } = {}) { super(why ? `the rules' ${key} ${why}` : `the rules have no value for ${key}`); this.key = key; if (unreadable) this.unreadable = true; }
 }
 
 // The keys whose value may have a fraction: shares, paces and percentages. They are read with dec(); every other
@@ -104,8 +105,8 @@ export function need(rules, key, { product, type = 'number' } = {}) {
   else if (type === 'text') v = typeof raw === 'string' && raw.trim() ? raw : undefined;
   else if (type === 'list') v = Array.isArray(raw) && raw.every((x) => typeof x === 'string') ? raw : undefined;
   else if (type === 'object') v = raw !== null && typeof raw === 'object' && !Array.isArray(raw) ? raw : undefined;
-  if (v === undefined) throw new MissingKey(key);
-  if (AT_LEAST_ONE.includes(key) && !(v >= 1)) throw new MissingKey(key, `is ${v}; it must be at least 1`);
+  if (v === undefined) throw raw === undefined ? new MissingKey(key) : new MissingKey(key, 'is unreadable', { unreadable: true });
+  if (AT_LEAST_ONE.includes(key) && !(v >= 1)) throw new MissingKey(key, `is ${v}; it must be at least 1`, { unreadable: true });
   return v;
 }
 
