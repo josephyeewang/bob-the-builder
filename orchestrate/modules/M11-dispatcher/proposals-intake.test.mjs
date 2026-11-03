@@ -1034,16 +1034,31 @@ const reviewAll = () => {
   return { seen, over: { docsCheck: async () => null, toReview: (x) => { seen.push(x.card); return { ok: true }; } } };
 };
 
+// The record with its card reads swapped where `cards` says: id → a read result, or a function of the real one.
+const swapCards = (w, cards) => {
+  const read = w.rec.read.bind(w.rec);
+  const rec = Object.fromEntries(Object.keys(w.rec).map((k) => [k, typeof w.rec[k] === 'function' ? w.rec[k].bind(w.rec) : w.rec[k]]));
+  rec.read = (entity, id) => {
+    if (entity !== 'card' || !Object.hasOwn(cards, id)) return read(entity, id);
+    const c = cards[id];
+    return typeof c === 'function' ? c(read(entity, id)) : c;
+  };
+  return rec;
+};
+
 test('R-0b-129: a proposal naming no card in the record is refused at intake; nothing is checked or reviewed', async () => {
   const w = world();
   put(w, 'proposal-C-404.md', 'a change', 'a', { card: false });
   put(w, 'bundle-C-404.bundle', 'bundle bytes');
+  put(w, 'proposal-C-405.md', 'another change');
+  put(w, 'bundle-C-405.bundle', 'other bundle bytes');
   const r = reviewAll();
-  let checked = 0;
-  const out = await w.pass({ rules: rulesFor(w.dirs, { a: 'second' }), ...r.over, docsCheck: async () => { checked += 1; return null; } });
+  const checked = [];
+  // The first cutover, each with a bundle: the docs check would run, so its count shows the card check came first (#159 audit Minor 3).
+  const out = await w.pass({ ...r.over, docsCheck: async ({ card }) => { checked.push(card); return null; } });
   assert.match(one(out, 'proposal-C-404.md').refused, /^no card C-404 in the record: a proposal must name a ready card$/);
-  assert.deepEqual(r.seen, []);
-  assert.equal(checked, 0);
+  assert.deepEqual(checked, ['C-405'], 'only the proposal with a ready card is docs-checked');
+  assert.deepEqual(r.seen, ['C-405']);
   assert.equal(fact(w, 'proposal-C-404.md').state, 'refused');
   assert.ok(w.calls.alerts.some((t) => /proposal-C-404\.md/.test(t) && /no card C-404/.test(t)), 'Joe is told');
 });
@@ -1077,9 +1092,80 @@ test('R-0b-129: a card that can\'t be read keeps the proposal unused and unrefus
   assert.match(one(out, 'proposal-C-30.md').refused, /^card C-30 could not be read \(bad json\)$/);
   assert.notEqual(fact(w, 'proposal-C-30.md')?.state, 'refused', 'not refused for good: the next pass looks again');
   assert.deepEqual(r.seen, []);
+  // A second broken pass: still unused, and Joe is told exactly once, naming the file (#159 audit Minor 4).
+  const twice = await w.pass({ rec, rules: rulesFor(w.dirs, { a: 'second' }), ...r.over });
+  assert.match(one(twice, 'proposal-C-30.md').refused, /^card C-30 could not be read \(bad json\)$/);
+  assert.equal(w.calls.alerts.filter((t) => t.includes('proposal-C-30.md')).length, 1, 'told once over two passes');
+  assert.ok(w.calls.alerts.some((t) => t.includes('proposal-C-30.md') && /card C-30 could not be read/.test(t)));
   seed(w.rec, 'card', 'C-30', { product: 'a', state: 'ready' });
   const again = await w.pass({ rules: rulesFor(w.dirs, { a: 'second' }), ...r.over });
   assert.equal(one(again, 'proposal-C-30.md').applied, true);
+});
+
+test('#159 audit Minor 5: a claimed card and a lowercase name are refused; a card with no product reads as can\'t be read', async () => {
+  const w = world();
+  seed(w.rec, 'card', 'C-31', { product: 'a', state: 'claimed' });
+  put(w, 'proposal-C-31.md', 'a change', 'a', { card: false });
+  seed(w.rec, 'card', 'C-5', { product: 'a', state: 'ready' });
+  put(w, 'proposal-c-5.md', 'a change to c-5', 'a', { card: false });
+  put(w, 'proposal-C-32.md', 'a third change');
+  const rec = swapCards(w, { 'C-32': (o) => ({ ...o, doc: { ...o.doc, product: undefined } }) });
+  const r = reviewAll();
+  const out = await w.pass({ rec, rules: rulesFor(w.dirs, { a: 'second' }), ...r.over });
+  assert.equal(one(out, 'proposal-C-31.md').refused, 'card C-31 is claimed, not ready: a proposal must name a ready card');
+  assert.equal(one(out, 'proposal-c-5.md').refused, 'no card c-5 in the record: a proposal must name a ready card');
+  assert.equal(one(out, 'proposal-C-32.md').refused, 'card C-32 could not be read (no product named)');
+  assert.notEqual(fact(w, 'proposal-C-32.md')?.state, 'refused', 'held, not refused for good');
+  assert.deepEqual(r.seen, []);
+});
+
+test('#159 audit Minor 1: the card is checked again after the docs check, and its revision goes to review', async () => {
+  const w = world();
+  put(w, 'proposal-C-40.md', 'a change');
+  put(w, 'bundle-C-40.bundle', 'bundle bytes');
+  put(w, 'proposal-C-42.md', 'a fine change');
+  put(w, 'bundle-C-42.bundle', 'fine bundle bytes');
+  let cancelled = false;
+  const rec = swapCards(w, { 'C-40': (o) => (cancelled ? { ...o, rev: o.rev + 1, doc: { ...o.doc, state: 'cancelled' } } : o) });
+  const sent = [];
+  const out = await w.pass({ rec, docsCheck: async ({ card }) => { if (card === 'C-40') cancelled = true; return null; }, toReview: (x) => { sent.push(x); return { ok: true }; } });
+  assert.equal(one(out, 'proposal-C-40.md').refused, 'card C-40 is cancelled, not ready: a proposal must name a ready card');
+  assert.notEqual(one(out, 'proposal-C-40.md').applied, true);
+  assert.deepEqual(sent.map((x) => x.card), ['C-42'], 'the cancelled card never reaches review');
+  assert.equal(sent[0].cardRev, w.rec.read('card', 'C-42').rev, 'review gets the revision the card was checked at');
+  assert.equal(fact(w, 'proposal-C-40.md').state, 'refused');
+  assert.ok(w.calls.alerts.some((t) => t.includes('proposal-C-40.md') && /is cancelled/.test(t)), 'Joe is told');
+});
+
+test('#159 audit Minor 2: a card refusal is looked at again once the card changes; told again only for a new reason', async () => {
+  const w = world();
+  seed(w.rec, 'card', 'C-41', { product: 'a', state: 'draft' });
+  put(w, 'proposal-C-41.md', 'a change', 'a', { card: false });
+  put(w, 'notes.md', 'an odd name');
+  const stage = rulesFor(w.dirs, { a: 'second' });
+  const r = reviewAll();
+  const told = () => w.calls.alerts.filter((t) => t.includes('proposal-C-41.md')).length;
+  assert.match(one(await w.pass({ rules: stage, ...r.over }), 'proposal-C-41.md').refused, /is draft, not ready/);
+  assert.equal(told(), 1);
+  // The same card, unchanged: still refused, not told again.
+  assert.match(one(await w.pass({ rules: stage, ...r.over }), 'proposal-C-41.md').refused, /is draft, not ready/);
+  assert.equal(told(), 1);
+  // The card edited but still a draft: looked at again, the same reason, not told again.
+  let card = (o) => ({ ...o, rev: o.rev + 1 });
+  const rec = swapCards(w, { 'C-41': (o) => card(o) });
+  assert.match(one(await w.pass({ rec, rules: stage, ...r.over }), 'proposal-C-41.md').refused, /is draft, not ready/);
+  assert.equal(told(), 1);
+  assert.equal(fact(w, 'proposal-C-41.md').card_key, `C-41@${w.rec.read('card', 'C-41').rev + 1}`, 'the newest card key is kept');
+  // Merged: a new reason, told once.
+  card = (o) => ({ ...o, rev: o.rev + 2, doc: { ...o.doc, state: 'merged' } });
+  assert.match(one(await w.pass({ rec, rules: stage, ...r.over }), 'proposal-C-41.md').refused, /is merged, not ready/);
+  assert.equal(told(), 2);
+  // Ready: the same bytes now go on to review.
+  card = (o) => ({ ...o, rev: o.rev + 3, doc: { ...o.doc, state: 'ready' } });
+  assert.equal(one(await w.pass({ rec, rules: stage, ...r.over }), 'proposal-C-41.md').applied, true);
+  assert.deepEqual(r.seen, ['C-41']);
+  // A refusal that is not the card's stays for good.
+  assert.equal(fact(w, 'notes.md').state, 'refused');
 });
 
 test('R-0b-129: a card claimed by a lane other than the one handing in is refused', { todo: 'R-0b-130 (tab claims) is not built; until then only a ready card is taken, so a card claimed by anyone is refused (L215 3)' }, () => {
