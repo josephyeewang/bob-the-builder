@@ -5,7 +5,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { env, OWNER_ID, session, write, box, PRODUCT, must } from './fixtures.test-helper.mjs';
 import { leadCard, put } from '../M9-record/fixtures.test-helper.mjs';
@@ -643,6 +643,26 @@ test('L315: a bad config is told again each day while it stands; L317: a told ti
   assert.equal(cfg(), 3, 'a told time 30 days ahead: told now');
   await w.at(W8 + 28 * HOUR);
   assert.equal(cfg(), 3);
+});
+
+// L331 Minor 2: the config mark goes once the config reads fine, so the same problem coming back is told at once,
+// not held back by the day an earlier copy of it was told.
+test('L331 Minor 2: a fixed config clears its mark, and the same problem coming back is told at once', async () => {
+  const w = world({ 'approvals.push_windows': [] });
+  const bad = w.t.ctx.rules;
+  yesNo(w);
+  const cfg = () => w.t.alerts.filter((a) => a.type === 'approvals_config').length;
+  const f = join(w.t.ctx.stateDir, 'config-alert.json');
+  await w.at(W8);
+  assert.equal(cfg(), 1);
+  assert.ok(existsSync(f));
+  w.t.ctx.rules = env().ctx.rules;   // the same rules with a config that reads fine
+  await w.at(W8 + HOUR);
+  assert.equal(existsSync(f), false, 'the mark is gone once the config reads fine');
+  assert.equal(cfg(), 1);
+  w.t.ctx.rules = bad;
+  await w.at(W8 + 2 * HOUR);
+  assert.equal(cfg(), 2, 'the same problem again, an hour later: told at once');
 });
 
 test('L317: an ask-alerts told time 30 days ahead is not "told": the ask that cannot be pushed is told now', async () => {

@@ -20,10 +20,12 @@
 //     that can't be saved throws, so the product is not turned on and the step's failure alert tells Joe; a product
 //     on with no mark to tell it can't happen. The mark holds the diary's last line number at that moment, and the
 //     notice goes out only while the record's onboard line comes after it, so a mark left in an old folder never
-//     re-tells a product that has long been on (L295 Minor 3; it is cleared unsent). Cleared only once the sink took
-//     it, so a lost send is sent again next pass, never lost (a lost clear sends it twice);
-//   - the key is there but is not exactly `active` (`Active`, `[active]`, `active `) and there is no record: one alert
-//     per distinct value. A missing key stays silent: a product not yet onboarded is normal (L129);
+//     re-tells a product that has long been on (L295 Minor 3; it is cleared unsent). A mark that can't be read, has the
+//     wrong shape or is missing is unsure: a product approvals turned on is told once more (L309 Minor 3, L331 Minor 1).
+//     Cleared only once the sink took it, so a lost send is sent again next pass, never lost (a lost clear sends it twice);
+//   - the key is there but is not exactly `active` (`Active`, `[active]`, `active `) and there is no record: told at
+//     once for each new value, then again each day while it stands (L315). A missing key stays silent: a product not
+//     yet onboarded is normal (L129);
 //   - the create was refused: one alert per distinct reason (its numbers out, so a moving rev is one reason). M9's own
 //     `refused` alert still goes out from the store each time; this one says which product was not turned on.
 // Kept in ctx.stateDir (onboard-notices.json). With no stateDir nothing is kept, so each is told every pass.
@@ -96,7 +98,9 @@ function readNotices(ctx) {
   try {
     const f = join(ctx.stateDir, NOTICES);
     const v = existsSync(f) ? JSON.parse(readFileSync(f, 'utf8')) : null;
-    return { seen: Array.isArray(v?.seen) ? v.seen.filter((x) => typeof x === 'string') : [], due: DUE(v?.due), near: NEAR(v?.near) };
+    // Nothing due is written as false. No file, or a mark of any other shape ({after:"3"}, null, []), is UNSURE (L331 Minor 1).
+    const due = v?.due === false ? false : DUE(v?.due) || UNSURE;
+    return { seen: Array.isArray(v?.seen) ? v.seen.filter((x) => typeof x === 'string') : [], due, near: NEAR(v?.near) };
   } catch { return { seen: [], due: UNSURE, near: null }; }
 }
 

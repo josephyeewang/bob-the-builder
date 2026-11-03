@@ -4,7 +4,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { env, PRODUCT, must } from './fixtures.test-helper.mjs';
 import { schedulePass } from './schedule.mjs';
@@ -282,11 +282,11 @@ test('L295 MAT-1: the due mark is on disk before the record is written, and the 
 
 // L295 Minor 3: a mark left in an old folder never re-tells a product that has long been on.
 test('L295 Minor 3: an old due mark for a product long on is cleared without telling Joe again', async () => {
-  // Older shapes are not marks at all; a mark of today's shape whose diary line is not there, or has another time, is
-  // another Record's (L309: it is matched by the Record's own line, never by a clock).
-  // 'just-before' is a mark naming the line right before this product's onboard line, but with another time: the case
-  // only the Record's own time tells apart.
-  for (let stale of [true, { after: 0, at: Date.parse('2020-01-01T00:00:00Z') }, 'just-before', { after: 10_000, ts: '2026-01-01T00:00:00.000Z' }]) {
+  // A mark of today's shape whose diary line is not there, or has another time, is another Record's (L309: it is
+  // matched by the Record's own line, never by a clock). 'just-before' is a mark naming the line right before this
+  // product's onboard line, but with another time: the case only the Record's own time tells apart. (A mark of any
+  // other shape is not sure, so it tells: the L331 Minor 1 test below.)
+  for (let stale of ['just-before', { after: 10_000, ts: '2026-01-01T00:00:00.000Z' }]) {
     const t = world();
     must(createAsk(t.ctx, { id: 'Q-1', kind: 'tap_yes_no', card: 'C-1', title: 'A line before the create' }));
     await schedulePass(t.ctx);
@@ -296,9 +296,33 @@ test('L295 Minor 3: an old due mark for a product long on is cleared without tel
     await schedulePass(t.ctx);
     await schedulePass(t.ctx);
     assert.equal(told(t, 'product_on').length, 1, `not told again: ${JSON.stringify(stale)}`);
-    // An old-format mark (true) is not read as a mark at all; one in today's form is cleared.
-    if (typeof stale.ts === 'string') assert.equal(JSON.parse(readFileSync(join(t.ctx.stateDir, 'onboard-notices.json'), 'utf8')).due, false);
+    assert.equal(JSON.parse(readFileSync(join(t.ctx.stateDir, 'onboard-notices.json'), 'utf8')).due, false, 'cleared');
   }
+});
+
+// L331 Minor 1: a notices file that parses but whose mark has the wrong shape, or no file at all, can't say whether
+// "is now on" went out, so it is read as unsure, like an unreadable file: a product approvals turned on is told once
+// more rather than never, and the file is then rewritten with nothing due. Before, these read as "nothing due".
+test('L331 Minor 1: a due mark of the wrong shape, or a deleted notices file, tells "is now on" once', async () => {
+  const file = (t) => join(t.ctx.stateDir, 'onboard-notices.json');
+  for (const bad of [{ after: '3' }, null, [], true, { after: 0, at: Date.parse('2020-01-01T00:00:00Z') }, 'deleted']) {
+    const t = world();
+    await schedulePass(t.ctx);
+    assert.equal(told(t, 'product_on').length, 1);
+    if (bad === 'deleted') rmSync(file(t));
+    else writeFileSync(file(t), JSON.stringify({ seen: [], due: bad }));
+    await schedulePass(t.ctx);
+    assert.equal(told(t, 'product_on').length, 2, `told once more: ${JSON.stringify(bad)}`);
+    assert.equal(JSON.parse(readFileSync(file(t), 'utf8')).due, false, 'rewritten with nothing due');
+    await schedulePass(t.ctx);
+    assert.equal(told(t, 'product_on').length, 2, 'and not again');
+  }
+  // Nothing due, written as false, stays quiet; and a product approvals did not turn on is never told.
+  const q = world();
+  await schedulePass(q.ctx);
+  writeFileSync(file(q), JSON.stringify({ seen: [], due: false }));
+  await schedulePass(q.ctx);
+  assert.equal(told(q, 'product_on').length, 1, 'false is nothing due');
 });
 
 // L309 MAT-1: the mark is the Record's own (a diary line's number and time), so a pass whose clock is far from the
