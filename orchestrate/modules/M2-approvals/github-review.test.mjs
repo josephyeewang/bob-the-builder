@@ -25,7 +25,7 @@ function world() {
   g.openPull({ number: 7, head: H0 });
   const view = makeGitView({ gh: g.gh, owner: 'sample-org', repo: 'sample-app' });
   const w = { g, r, view, M0, M1, H0, H1, setNow: (t) => { now = t; } };
-  w.raise = async () => { const x = await requestReview({ gh: g.gh, owner: 'sample-org', repo: 'sample-app', pr: 7, githubId: OWNER }); assert.equal(x.ok, true, x.reason); return x.raised_at; };
+  w.raise = async () => { const x = await requestReview({ gh: g.gh, owner: 'sample-org', repo: 'sample-app', pr: 7, githubId: OWNER, now }); assert.equal(x.ok, true, x.reason); return x.raised_at; };
   w.count = (raisedAt, catchUps = []) => countApprove({ gh: g.gh, view, owner: 'sample-org', repo: 'sample-app', pr: 7, githubId: OWNER, raisedAt, catchUps });
   w.moveHead = (sha) => { g.pulls.get(7).head = sha; };
   return w;
