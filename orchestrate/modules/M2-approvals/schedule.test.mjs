@@ -12,7 +12,7 @@ import { leadCard, put } from '../M9-record/fixtures.test-helper.mjs';
 import { fakeGitHub } from './fixtures/fake-github.mjs';
 import { makeGitView } from '../M10-rules/git-view.mjs';
 import { askStore, consumeAsk, writeDoc } from './ask-store.mjs';
-import { createAsk, processSession } from './binding.mjs';
+import { createAsk, processSession, nextBox } from './binding.mjs';
 import { readDecision } from './decision.mjs';
 import { approvalStands, heldBy, readApprove, schedulePass } from './schedule.mjs';
 import { UNDO_OPEN_QUESTION_LINE } from './kinds.mjs';
@@ -681,3 +681,72 @@ test('L317: an ask-alerts told time 30 days ahead is not "told": the ask that ca
   await w.at(W8 + 2 * MIN);
   assert.equal(noPush(), 2);
 });
+
+// L329 (L321 sweep): every stored time M2 reads for "has it lapsed / is a push due" goes through shared pastTime. A time
+// that can't be read, or lies an hour ahead (a clock that went back, a bad write), counts as long past: an expiry lapses
+// now and a push goes out now, never waits on a time it can't trust. Two plants per site.
+const PLANTS = (now) => [['unreadable', 'not a time'], ['1 h ahead', new Date(now + HOUR).toISOString()]];
+const plant = (w, id, fields) => {
+  const c = w.t.record.read('ask', id);
+  must(w.t.record.write({ actor: 'approvals', entity: 'ask', id, expectRev: c.rev, doc: { ...c.doc, ...fields } }), `plant ${id}`);
+};
+
+for (const [name, at] of PLANTS(W8 + HOUR)) {
+  test(`L329 kinds lapseAt + runOut: a raised_at ${name} lapses the ask at the next pass`, async () => {
+    const w = world();
+    yesNo(w);
+    await w.at(W8);
+    assert.equal(ask(w, 'Q-1').state, 'pushed');
+    plant(w, 'Q-1', { raised_at: at });
+    await w.at(W8 + HOUR);
+    assert.deepEqual([ask(w, 'Q-1').state, ask(w, 'Q-1').reask_count], ['open', 1], 'lapsed now, not never (or an hour late)');
+  });
+
+  test(`L329 binding nextBox and tryBind: an ask whose raised_at is ${name} is not offered, and a box for it is refused as lapsed`, async () => {
+    const w = world();
+    session(w.t, 'FD-1');
+    yesNo(w);
+    await w.at(W8);
+    w.t.clock.t = W8 + HOUR;
+    assert.equal(nextBox(w.t.ctx, { sessionId: 'FD-1', role: 'front_door' })?.ask, 'Q-1', 'control: offered while it stands');
+    plant(w, 'Q-1', { raised_at: at });
+    assert.equal(nextBox(w.t.ctx, { sessionId: 'FD-1', role: 'front_door' }), null);
+    const b = box(ask(w, 'Q-1').payload, W8 + HOUR);
+    write(w.t, 'FD-1', b.entry);
+    const r = must(processSession(w.t.ctx, { sessionId: 'FD-1', sourcePath: w.t.log('FD-1') }));
+    assert.ok(r.events.some((e) => e.type === 'mismatched_question' && e.reason === 'the ask has lapsed'), JSON.stringify(r.events));
+  });
+
+  test(`L329 schedule: an urgent ask whose last_push_at is ${name} is re-pushed now`, async () => {
+    const w = world();
+    const t0 = AT('2026-10-01T12:00:00Z');
+    must(createAsk(w.t.ctx, { id: 'U-1', kind: 'undo', card: 'C-1', title: 'Undo the export' }));
+    await w.at(t0);
+    assert.equal(w.pushes.length, 1);
+    plant(w, 'U-1', { last_push_at: at === 'not a time' ? at : new Date(t0 + 30 * MIN + HOUR).toISOString() });
+    await w.at(t0 + 30 * MIN);
+    assert.equal(w.pushes.length, 2, 'pushed again at once, not held back by the stored time');
+  });
+
+  test(`L329 schedule: a non-urgent ask whose created_at is ${name} goes out in the next window`, async () => {
+    const w = world();
+    yesNo(w);
+    plant(w, 'Q-1', { created_at: at === 'not a time' ? at : new Date(W8 + HOUR).toISOString() });
+    await w.at(W8);
+    assert.deepEqual(w.pushes.map((p) => p.ask), ['Q-1'], 'never kept out of every window');
+  });
+
+  test(`L329 schedule: a merge approval whose raised_at is ${name} no longer stands, and goes back at the next pass`, async () => {
+    const w = riskyWorld();
+    await w.at(W8);
+    w.g.review(7, { state: 'APPROVED', commit_id: w.H, submitted_at: W8 + HOUR });
+    w.t.clock.t = W8 + HOUR;
+    assert.equal((await readApprove(w.t.ctx, 'R-1', { view: w.view })).counted, true);
+    assert.equal((await approvalStands(w.t.ctx, 'R-1', { head: w.H, view: w.view })).ok, true, 'control');
+    plant(w, 'R-1', { raised_at: at === 'not a time' ? at : new Date(W8 + 2 * HOUR).toISOString() });
+    const s = await approvalStands(w.t.ctx, 'R-1', { head: w.H, view: w.view });
+    assert.deepEqual([s.ok, s.reason], [false, 'the approval lapsed: no merge within 24 hours']);
+    await w.at(W8 + HOUR + MIN);
+    assert.deepEqual([ask(w, 'R-1').state, ask(w, 'R-1').reask_count], ['open', 1], 'an unused approval never outlives a time it cannot trust');
+  });
+}
