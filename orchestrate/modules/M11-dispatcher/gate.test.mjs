@@ -374,3 +374,18 @@ test('#117 m2: the one-undo limit counts the product\'s exact_reverse cards clai
   const r = go({ rec: deaf, card: undoCard(), kind: 'undo', exactReverse: true, running: [] });
   assert.deepEqual([r.ok, r.reason], [false, 'the running undos could not be counted (locked)']);
 });
+
+test('L228 Minor 2: a cap value that is there but unreadable, whichever cap, refuses the undo and says so; a missing one is named and the undo starts', () => {
+  const rec = setup({ products: [product('p1', 'paused'), product('p2')] });
+  const undo = (values) => go({ rec, rules: rulesWith(values), card: undoCard(), kind: 'undo', exactReverse: true });
+  for (const key of [K.editingPerProduct, K.editingPerMac]) {
+    const r = undo({ [key]: 'two' });
+    assert.deepEqual([r.ok, r.missing, r.reason], [false, key, `the rules' value for ${key} is unreadable: start nothing`], key);
+    const gone = undo({ [key]: undefined });
+    assert.deepEqual([gone.ok, gone.missing], [true, key], `${key} missing: ${gone.reason}`);
+  }
+  const ps = undo({ [K.perState]: { light: 1, active: 3, away: 3, paused: 'two' } });
+  assert.deepEqual([ps.ok, ps.reason], [false, `the rules' value for ${K.perState} is unreadable: start nothing`]);
+  // A non-undo is refused either way, with the same words.
+  assert.equal(go({ rec, rules: rulesWith({ [K.editingPerMac]: 'two' }), product: 'p2', card: { id: 'n2', product: 'p2', tier: 2, files: ['src/n2.js'] } }).reason, `the rules' value for ${K.editingPerMac} is unreadable: start nothing`);
+});

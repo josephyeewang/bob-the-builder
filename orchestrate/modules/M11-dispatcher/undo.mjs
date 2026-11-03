@@ -123,13 +123,19 @@ function fixCards({ rec, now, alert, out }) {
       continue;
     }
     if (!fix) {
-      // The undo card's tier is not copied (#117 audit m1): Tier 2 is for an exact reverse, and a fix card is a
-      // hand-planned change, so it has no tier until the Lead plans it, and no tier counts as Tier 1 (fail-closed).
+      // The undo card's tier is not copied (#117 audit m1, L228): Tier 2 is for an exact reverse, and a fix card is a
+      // hand-made change. M9 lets a fix card's tier be absent (the rest of its plan is its root's and never changes),
+      // and no tier counts as Tier 1, so the fix can only be stricter than its root.
       const plan = Object.fromEntries(PLAN_INPUTS.filter((k) => k !== 'tier' && doc[k] !== undefined).map((k) => [k, doc[k]]));
       const w = rec.write({ actor: 'dispatcher', entity: 'card', id: FIX_CARD(id), expectRev: 0, kind: 'undo_fix_card',
         // A draft, never `ready` (audit MAT-4): the Lead plans it; the start loop never picks it up.
         doc: { state: 'draft', kind: 'fix', fix_of: id, product: doc.product ?? null, module: doc.module ?? null, what: why, ...plan } });
-      if (!w.ok) { out.push([id, `fix card not recorded: ${w.reason}`]); continue; }
+      if (!w.ok) {
+        // Told, once a day while it lasts (L228): a refused fix card left silent fails again on every pass.
+        out.push([id, `fix card not recorded: ${w.reason}`]);
+        holdAlert({ rec, cause: `undo-fix-card-${id}`, text: `${why}; its fix card could not be recorded (${w.reason}), so the Lead must make one by hand`, alert, now });
+        continue;
+      }
       out.push([id, 'fix card written']);
     }
     const noted = { text: `undo ${id} not clean; fix card ${FIX_CARD(id)} written`, at: new Date(now).toISOString() };

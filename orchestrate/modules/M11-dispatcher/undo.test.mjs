@@ -321,3 +321,15 @@ test('r4 MAT-5: exactReverse refuses a card that differs from the merge in any o
     assert.match(out.reason, why, label);
   }
 });
+
+test('L228: a fix card the Record refuses is told to Joe, once a day while it lasts, never silently', async () => {
+  const U = UNDO_CARD('A-1');
+  const refusesFix = (rec) => ({ ...proxy(rec), write: (x) => (x.entity === 'card' && x.id === FIX_CARD(U) ? { ok: false, reason: 'the store is busy' } : rec.write(x)) });
+  const w = world([target(), merge(), ['ask', 'A-1', ask()], failedUndo(), reverseFact({ state: 'not_clean', reason: 'a later change touched src/a.js' })], { rec: refusesFix });
+  assert.deepEqual(await w.step(), [[U, 'fix card not recorded: the store is busy']]);
+  assert.equal(w.calls.alerts.length, 1);
+  assert.match(w.calls.alerts[0], /could not be an exact reverse: a later change touched src\/a\.js; its fix card could not be recorded \(the store is busy\)/);
+  await w.step();
+  assert.equal(w.calls.alerts.length, 1, 'once a day, not every pass');
+  assert.equal(w.rec.read('fact', UNDO_NOTE_FACT(U)), null, 'not noted as written');
+});

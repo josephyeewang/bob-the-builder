@@ -14,7 +14,7 @@
 import { canonicalJson } from '../../shared/plan-fingerprint.mjs';
 import { SESSION_ID, STATES } from '../../shared/record-names.mjs';
 import { CREATE_STATES, INTERNAL_MOVES, moveActors } from './moves.mjs';
-import { ATTEMPTS, WRITERS, actorName, factFamilyOf, fieldsAllowed } from './permissions.mjs';
+import { ATTEMPTS, PLAN_INPUTS, WRITERS, actorName, factFamilyOf, fieldsAllowed } from './permissions.mjs';
 
 const no = (reason) => ({ ok: false, reason });
 export const same = (a, b) => { try { return canonicalJson(a ?? null) === canonicalJson(b ?? null); } catch { return false; } };
@@ -139,4 +139,17 @@ export function claimCheck({ old, doc, from, to, changed, nowMs }) {
   if ((to === 'claimed' || to === 'running') && !has) return no(`a ${to} card has a claim`);
   if (!(to === 'claimed' || to === 'running') && has) return no(`a ${to} card has no claim`);
   return claim ? { ok: true, claim } : { ok: true };
+}
+
+/**
+ * A new fix card's plan inputs are its root card's (R3-m2): the go covers only that plan. Its tier may be absent
+ * (LEAD-CALLS L228): no tier counts as Tier 1 everywhere, so a fix card can only be stricter than its root. `lookup(id)`
+ * gives a card's doc or null. One check, made by the Store Writer and the stand-in.
+ */
+export function fixPlanCheck(doc, lookup) {
+  let root = typeof doc?.fix_of === 'string' ? lookup(doc.fix_of) : null;
+  if (!root) return no('a fix card names the card it fixes (fix_of)');
+  for (let i = 0; i < 64 && typeof root.fix_of === 'string'; i++) root = lookup(root.fix_of) ?? root;
+  const diff = PLAN_INPUTS.filter((f) => !(f === 'tier' && doc.tier === undefined) && !same(doc[f], root[f]));
+  return diff.length ? no(`a fix card's ${diff.join(', ')} must equal its root card's`) : { ok: true };
 }
