@@ -42,7 +42,7 @@ function world(entries = [], { usage = GREEN, over = {} } = {}) {
   let n = 0;
   let launchAnswer = () => ({ ok: true });
   const pass = (min = 0, extra = {}) => dispatcherPass({
-    rec, rules: extra.rules ?? rules, now: T0 + min * MIN, account: ACCT, sessions: [...sessions],
+    rec: extra.rec ?? rec, rules: extra.rules ?? rules, now: T0 + min * MIN, account: ACCT, sessions: [...sessions],
     probe: (s) => probes.get(s.id) ?? idle,
     // The launcher starts the session the claim names and reports its process (L72), as M4's does.
     launch: async (x) => { calls.launched.push(x.card.id); const a = launchAnswer(x); if (!a.ok) return a; n += 1; const id = 'sessionId' in a ? a.sessionId : x.sessionId; sessions.push({ id, product: x.product, kind: x.kind, card: x.card.id, pgid: 100 + n }); return { ok: true, sessionId: id, pid: 1000 + n, pidStart: `start-${n}`, pgid: 100 + n, head: 'head' in a ? a.head : 'h'.repeat(40) }; },
@@ -1396,4 +1396,14 @@ test('L324: an unknown-usage start that is ahead or unreadable counts as over a 
     await w.pass(1);
     assert.equal(told(), 1, label);
   }
+});
+
+test('L343: a limit wait put on the owner whose tell could not keep its since says so in the notes and in the text they read', async () => {
+  const w = world();
+  parkOnLimit(w.rec, 'R', { ranAt: T0 + 365 * 24 * H, parkedAt: T0, account: 'acct-r' });
+  const rec = { ...w.rec, base: w.rec.base ?? w.rec, write: (x) => (x.doc?.wait_since ? { ok: false, reason: 'busy' } : w.rec.write(x)) };
+  const out = await w.pass(1, { rec });
+  assert.deepEqual(w.rec.read('card', 'R').doc.wait.what, LIMIT_NO_RUN);
+  assert.ok(out.notes.some((n) => /^card R: this card's tell could not be kept with its wait \(busy\)/.test(n)), JSON.stringify(out.notes));
+  assert.ok(w.calls.alerts.some((x) => /card R: .*could not be kept with its wait \(busy\)/.test(x)), JSON.stringify(w.calls.alerts));
 });

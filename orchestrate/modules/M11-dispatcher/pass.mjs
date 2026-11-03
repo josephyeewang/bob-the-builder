@@ -308,7 +308,7 @@ export const HELD_BANDS = Object.freeze({ band: 'unknown', own_building: 'unknow
 export async function dispatcherPass({ rec, rules, now, account, sessions, probe, launch, stopGroup, saveWork, hostLock = () => null, pauseLead = () => {}, filesOf, alert, startsOff = null, tellMissing = true, stops, portDeadlineMs = PORT_DEADLINE_MS, saveDeadlineMs = SAVE_DEADLINE_MS, host = hostname() }) {
   const st = stops === undefined ? await stopPass({ rec, rules, now, account, sessions, probe, stopGroup, saveWork, alert, portDeadlineMs, saveDeadlineMs }) : stops;
   const out = { started: [], refused: [], stopping: st?.stopping ?? [], stopped: st?.stopped ?? [], resumed: [], notes: [] };
-  // A tell whose since could not be kept goes in the pass's notes as well as in Joe's text (L343).
+  // A tell whose since could not be kept goes in the pass's notes as well as in the owner's text (L343).
   const askJoe = (id, ask) => { const w = waitOnJoe(rec, id, ask); if (w.tell_refused) out.notes.push(`card ${id}: ${w.tell_refused}`); return w; };
   const missing = [...(st?.missing ?? [])];
   const read = readOr(missing);

@@ -717,3 +717,21 @@ test('L329: a limit whose entry\'s time is unreadable or an hour ahead still tim
     }
   }
 });
+
+// L343: a refused copy of a wait's since (joe-waits.mjs tell_refused) is in the step's moves as well as in the owner's text.
+const noCopy = (rec) => ({ ...rec, base: rec, write: (w) => (w.doc?.wait_since ? { ok: false, reason: 'busy' } : rec.write(w)) });
+
+test('L343: a merge put on the owner whose tell could not keep its since says so in the moves', async () => {
+  const base = recWith([cardMerging, checking('M-1', 0), checking('M-2', 10)]);
+  const rec = noCopy(base);
+  await pass(rec, 31);
+  change(base, 'card', 'C-1', { state: 'merging' });
+  const { moves } = await pass(rec, 71);
+  assert.match(moves.at(-1)[1], /^waiting on joe; this card's tell could not be kept with its wait \(busy\)/);
+});
+
+test('L343: a card with no reviewer put on the owner whose tell could not keep its since says so in the moves', async () => {
+  const rec = noCopy(recWith([['card', 'C-1', { state: 'in_review', head: HA, product: 'p1', attempts: { reviewer_starts: 2 } }]]));
+  const { moves } = await pass(rec, 300, { hasReviewer: () => false });
+  assert.match(moves.find(([id]) => id === 'C-1')?.[1] ?? '', /^in_review->waiting; this card's tell could not be kept with its wait \(busy\)/, JSON.stringify(moves));
+});
