@@ -12,6 +12,7 @@ import { checkOutboxFile, intakePush, outboxFile } from '../M1-front-door/outbox
 import { waitingItems, waitingLines } from '../M13-ledger/waiting.mjs';
 import { askStore } from './ask-store.mjs';
 import { researchHandler, RESEARCH_CARD } from '../M11-dispatcher/research-intake.mjs';
+import { fenceFor } from '../M11-dispatcher/proposals-intake.mjs';
 import { blobSha } from '../M10-rules/reader.mjs';
 import { GO_FREE_KEY } from '../M9-record/ready.mjs';
 import { landResearch, markResearchPushSent, openResearchAsks, researchBrief, researchFileName, runLine } from './research-ask.mjs';
@@ -32,10 +33,12 @@ function fileAsk(t, brief, id = '20261103-0915-ra', product = PRODUCT, sid = 'F-
 // The real R-0b-135 handler (M11 research-intake.mjs): a `research-<ask>.md` from the owner's desktop session is taken in
 // only while that research ask is open, onto one go-free research_copy card, and lands the ask.
 const RESEARCH_ON = { [`${GO_FREE_KEY}.research_copy`]: true };
-function handIn(t, name, text) {
+function handIn(t, name, text, { fenced = true } = {}) {
   const m = /^research-(.*)\.md$/.exec(name);
-  // What the intake hands it (L290 M-1): the raw bytes' sha256, blob id and size, never the text.
+  // What the intake hands it (L290 M-1): the fenced copy, from the real intake's own fenceFor (so this stand-in is never
+  // looser than the intake), and the raw bytes' sha256, blob id and size, never the text.
   return researchHandler({ rules: t.ctx.rules })({ rec: t.record, product: PRODUCT, kind: 'research', id: m ? m[1] : name, name,
+    ...(fenced ? fenceFor('research', text) : {}),
     sha256: createHash('sha256').update(text).digest('hex'), blob: blobSha(Buffer.from(text)), size: Buffer.byteLength(text), now: t.clock.t });
 }
 
@@ -105,6 +108,9 @@ test('R-0b-136: "run research ask R-1" needs nothing pasted, and the report land
   assert.deepEqual(b, { ok: true, id, product: PRODUCT, brief: 'find out which payroll tools small agencies use', file: 'research-R-1.md' });
   assert.equal(runLine(id), 'run research ask R-1');
   const report = '# Payroll tools\n\nThree tools came up most.\n';
+  // A stand-in that leaves out the fenced copy is refused, as the real handler refuses it, and the ask stays open.
+  assert.match(handIn(t, researchFileName(id), report, { fenced: false }).reason, /did not hand on the report's fenced text/);
+  assert.equal(researchBrief(t.record, id).ok, true);
   must(handIn(t, researchFileName(id), report), 'research report');
   const card = t.record.read('card', RESEARCH_CARD(id)).doc;
   assert.equal(card.kind, 'research_copy'); assert.equal(card.research_ask, id);
