@@ -723,3 +723,23 @@ for (const lost of ['send refused', 'queue refused']) {
     assert.equal(got.length, n, 'told exactly once once delivered (P20)');
   });
 }
+
+// L246 MIN-18: a closed reading whose merged is not true or false now waits instead of being refused. The wait is
+// bounded by the same merging limit as no reading at all: past it, Joe is told once (the L89 alert, whose mark is the
+// UNREAD note), even while the Sensors keep bringing the same half answer every pass; the card never sits there untold.
+test('L246 MIN-18: GitHub answering closed with a non-boolean merged, pass after pass, is told once past the merging limit', async () => {
+  const { rec } = gone();
+  const half = (m) => reading(rec, m - 0.5, { state: 'closed', merged: 'true', merge_commit_sha: MC, head_sha: HA });
+  half(14);
+  const p1 = await pass(rec, 14, dead);
+  assert.deepEqual([p1.moves, p1.alerts], [[['M-1', 'waiting for a fresh PR reading']], []], 'under the limit: wait, no alert');
+  const told = [];
+  for (const m of [20, 21, 40, 120]) { half(m); told.push(...(await pass(rec, m, dead)).alerts); }
+  assert.deepEqual(states(rec), ['merging', 'merging'], 'never merged and never refused on a half answer');
+  assert.equal(told.length, 1, 'told once');
+  assert.match(told[0], /merge M-1: the Merge Gate stopped mid-merge and PR 7 has had no fresh reading for 20 min; .*merged true or false/);
+  // GitHub answers in full: settled as before.
+  reading(rec, 121, { state: 'closed', merged: true, merge_commit_sha: MC, head_sha: HA });
+  await pass(rec, 122, dead);
+  assert.deepEqual(states(rec), ['merged', 'merged']);
+});

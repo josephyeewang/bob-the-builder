@@ -182,7 +182,7 @@ export async function timeLimits({ rec, rules, now, b, running = [], gateAlive, 
         const since = (ms) => (Number.isFinite(ms) ? `${Math.round(ms / 60_000)} min` : 'longer than the merging limit');
         if (tooLongOpen(rec, id, now, lim.ms) && !rec.read('fact', UNREAD_FACT(id))) {
           // The note is the alert's mark, written once it is delivered (L127): a queue that refused it is retried next pass.
-          const say = `merge ${id}: the Merge Gate stopped mid-merge and PR ${doc.pr} has had no fresh reading for ${since(ageMs(rec, 'merge', id, now, { since: 'write' }))}; it stays merging until the Sensors read the PR (check that they are running)`;
+          const say = `merge ${id}: the Merge Gate stopped mid-merge and PR ${doc.pr} has had no fresh reading for ${since(ageMs(rec, 'merge', id, now, { since: 'write' }))}; it stays merging until the Sensors read the PR (check that they are running, and what GitHub answers for it: a reading counts only with state open or closed and merged true or false)`;
           const why = `merge ${id}: no fresh reading of PR ${doc.pr} past the merging limit; the owner was told`;
           tellThen(alert, say, { fact: UNREAD_FACT(id), fields: noted(why, now), kind: 'note' });
         }
