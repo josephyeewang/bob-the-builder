@@ -89,7 +89,10 @@ test('R-0b-168: each WRITERS entry writes its own family, with every field READ_
 
 // Every fact id and kind written in M12's code, by file and function: each READ_FACTS family's ids and its kind are
 // written by exactly one function (a second writer, or a reading written under another family's id, fails here).
-const CODE = readdirSync(HERE).filter((f) => f.endsWith('.mjs') && !/\.test(-helper)?\.mjs$/.test(f));
+// Every code file under M12, in sub-folders too (#78 r2 m-2: probes/ arrives with R-0b-169), keyed by its path there.
+// Test files and `fixtures/` folders (sample inputs for tests, which no module imports) are left out.
+const CODE = readdirSync(HERE, { recursive: true }).map(String)
+  .filter((f) => f.endsWith('.mjs') && !/\.test(-helper)?\.mjs$/.test(f) && !f.split(/[\\/]/).includes('fixtures')).sort();
 const stripComments = (t) => t.split('\n').map((l) => l.replace(/(^|[^:'"`])\/\/.*$/, '$1')).join('\n');
 const ID_BUILDERS = { 'pr-': ['PR_FACT('], 'usage-': ['USAGE_FACT('], 'signed-in-account': ['ACCOUNT_FACT'], 'limit-hit-': ['LIMIT_FACT('],
   'network-up': ['FACTS.network', "FACTS['network']", 'FACTS[which]'], 'frontdoor-reachable': ['FACTS.reachable', "FACTS['reachable']", 'FACTS[which]'],
@@ -117,6 +120,13 @@ export function kindWriters(family, sources = Object.fromEntries(CODE.map((f) =>
 const PUT_ALIAS = /\[\s*['"`]put['"`]\s*\]|\{[^{}]*\bput\b[^{}]*\}\s*=[^=>]|=\s*[\w.]+\.put\b(?!\s*\()/;
 export const putAliases = (sources = Object.fromEntries(CODE.map((f) => [f, stripComments(readFileSync(join(HERE, f), 'utf8'))]))) =>
   Object.entries(sources).filter(([, text]) => PUT_ALIAS.test(text)).map(([file]) => file);
+// A fact written straight into the record, past the fact writer (#78 r2 m-2, plant Q10): facts.mjs is the one file that
+// calls the record's write() for facts. Elsewhere in M12, a `.write(` (or `['write']`) call whose arguments mention a
+// fact in any form (entity 'fact', ACCOUNT_FACT, LIMIT_FACT(…), …) is refused; plain log writes stay allowed.
+const FACT_WRITE = /\.write\(([^;]*)|\[\s*['"`]write['"`]\s*\]/g;
+export const directFactWrites = (sources = Object.fromEntries(CODE.map((f) => [f, stripComments(readFileSync(join(HERE, f), 'utf8'))]))) =>
+  Object.entries(sources).filter(([file]) => file !== 'facts.mjs')
+    .filter(([, text]) => [...text.matchAll(FACT_WRITE)].some((m) => m[1] === undefined || /fact/i.test(m[1]))).map(([file]) => file);
 
 test('L97 m-5: each fact M11 reads has exactly one writer in M12, under one kind', () => {
   for (const { family } of READ_FACTS) {
@@ -141,6 +151,16 @@ test('L97 m-5: each fact M11 reads has exactly one writer in M12, under one kind
   for (const plant of ["writer['put'](ACCOUNT_FACT, {});", 'const { put } = writer;', 'const { get, put: p } = writer;', 'const p = writer.put;']) {
     assert.deepEqual(putAliases({ ...src, 'plant.mjs': plant }), ['plant.mjs'], plant);
   }
+  // #78 r2 m-2: the scan reads sub-folders (Q9), and a fact written past the fact writer is refused (Q10).
+  assert.ok(CODE.includes('facts.mjs') && CODE.includes(join('shell-guard', 'runner.mjs')), JSON.stringify(CODE));
+  const q9 = { ...src, [join('probes', 'signed.mjs')]: "export const w = (writer) => writer.put(ACCOUNT_FACT, { kind: 'fact.signed-in-account', account: 'a' });" };
+  assert.equal(writersOf('signed-in-account', q9).length, 2, 'a second writer in a sub-folder');
+  assert.deepEqual(directFactWrites(), [], 'M12 writes a fact past facts.mjs');
+  for (const plant of ["export const w = (rec) => rec.write({ actor: 'sensors', entity: 'fact', id: ACCOUNT_FACT, expectRev: 0, doc: { kind: K } });",
+    "rec.write({ actor: 'sensors', entity: E, id: LIMIT_FACT('a'), doc })", "rec['write']({ entity: 'fact' })"]) {
+    assert.deepEqual(directFactWrites({ ...src, 'zz-second.mjs': plant }), ['zz-second.mjs'], plant);
+  }
+  assert.deepEqual(directFactWrites({ ...src, 'log.mjs': 'process.stderr.write(`sensors: ${p}\\n`);' }), [], 'a log line is not a fact');
 });
 
 // ---- the real writers into the real record ----
@@ -188,6 +208,12 @@ test('L97 M-2: a PR reading whose reads straddle a merge attempt is dated before
     b: { band: 'green', own_building: 'open', prodBlocked: false }, gateAlive: () => false, hasReviewer: () => true, requestReview: () => ({ ok: true }), alert }));
   assert.deepEqual(moves, [['M-1', 'waiting for a fresh PR reading']]);
   assert.equal(rec.read('merge', 'M-1').doc.state, 'merging');
+  // #78 r2 m-1 (plant Q2): the slow read is pr() itself, the one that carries the state. A stamp taken after pr()
+  // answers, before checks(), is caught here.
+  t = T0;
+  const slowPr = { ...gh({ state: 'open', merged: false }), pr: async (n) => { const p = await gh({ state: 'open', merged: false }).pr(n); t = T0 + 3 * MIN; return p; } };
+  await writePrFact(makeFactWriter(rec), slowPr, 7, { now: () => new Date(t) });
+  assert.equal(rec.read('fact', PR_FACT(7)).doc.observed_at, iso(T0), 'stamped before pr() was called');
   // Every other writer stamps before its port too.
   const rec2 = recWith();
   for (const family of Object.keys(WRITERS).filter((f) => f !== 'pr-' && f !== 'limit-hit-')) {
@@ -315,6 +341,45 @@ test('L97 M-3 (lane 3 review): a hit with no reset time keeps today\'s reset tim
   assert.equal(w.rec.read('card', 'T2').doc.state, 'waiting');
   await w.pass(121);
   assert.equal(w.rec.read('card', 'T2').doc.state, 'ready', 'resumed after the kept reset time');
+});
+
+test('#78 r2 m-5 (Q16): a newer READABLE reset time beats the kept one', async () => {
+  const rec = recWith();
+  await writeLimitHit(makeFactWriter(rec), { account: ACCT, resets_at: iso(T0 + 120 * MIN) }, { now: clockAt(T0 + MIN) });
+  await writeLimitHit(makeFactWriter(rec), { account: ACCT, resets_at: iso(T0 + 90 * MIN) }, { now: clockAt(T0 + 5 * MIN) });
+  assert.equal(rec.read('fact', LIMIT_FACT(ACCT)).doc.resets_at, iso(T0 + 90 * MIN));
+});
+
+test('#78 r2 m-5 (Q14): account b is written under b by every account writer, never as a', async () => {
+  const rec = recWith();
+  await WRITERS['usage-'](makeFactWriter(rec), async (a) => ({ ...usageReading(T0), source: `screen-${a}` }), { account: 'b', now: clockAt(T0) });
+  assert.deepEqual([rec.read('fact', USAGE_FACT('b'))?.doc?.account, rec.read('fact', USAGE_FACT('b'))?.doc?.source], ['b', 'screen-b']);
+  assert.equal(rec.read('fact', USAGE_FACT('a')), null);
+  await WRITERS['limit-hit-'](makeFactWriter(rec), { account: 'b', resets_at: iso(T0 + 30 * MIN) }, { now: clockAt(T0) });
+  assert.equal(rec.read('fact', LIMIT_FACT('b'))?.doc?.account, 'b');
+  assert.equal(rec.read('fact', LIMIT_FACT('a')), null);
+});
+
+test('#78 r2 m-3: a reset time already past at the hit is unreadable (null, or the kept one); a few seconds early is clock skew', async () => {
+  const rec = recWith();
+  const hit = (resets, at) => writeLimitHit(makeFactWriter(rec), { account: ACCT, resets_at: resets }, { now: clockAt(at) });
+  // 11pm reads "resets 1am" as today's 1am (22 hours ago): stored as no time.
+  await hit(iso(T0 - 22 * 60 * MIN), T0);
+  assert.equal(rec.read('fact', LIMIT_FACT(ACCT)).doc.resets_at, null);
+  // 5 s in the past: the worker's clock and ours differ a little; kept as given.
+  await hit(iso(T0 - 5_000), T0);
+  assert.equal(rec.read('fact', LIMIT_FACT(ACCT)).doc.resets_at, iso(T0 - 5_000));
+  // A past time when a later reset is stored: the stored one is kept (it is still ahead).
+  await hit(iso(T0 + 60 * MIN), T0);
+  await hit(iso(T0 - 60 * MIN), T0 + MIN);
+  assert.equal(rec.read('fact', LIMIT_FACT(ACCT)).doc.resets_at, iso(T0 + 60 * MIN));
+});
+
+test('#78 r2 m-4: writeLimitHit refuses a writer with no get(), so the keep rule is never skipped', async () => {
+  const rec = recWith();
+  const { put } = makeFactWriter(rec);
+  await assert.rejects(() => writeLimitHit({ put }, { account: ACCT, resets_at: null }, { now: clockAt(T0) }), /needs a fact writer with get\(\)/);
+  assert.equal(rec.read('fact', LIMIT_FACT(ACCT)), null);
 });
 
 test('R-0b-168: the writers refuse what M11 must not decide on', async () => {

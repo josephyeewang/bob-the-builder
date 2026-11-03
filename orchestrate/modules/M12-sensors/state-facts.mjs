@@ -56,16 +56,24 @@ export async function writeReading(writer, which, probe, { now = () => new Date(
 
 // exit: the worker's exit result, { account, resets_at, source }. A hit is always written, even with no readable reset
 // time (L97 M-3). M11 resumes a card only on a hit observed after the card began to wait, with a reset time that has
-// passed. With no readable time, the stored hit's reset time is kept if it is still ahead (the same limit window: a
-// second worker hitting it must not throw away the time the first one learned, or the card would wait for good; lane 3
-// review of r2); otherwise resets_at is null, so yesterday's past reset never resumes a card early.
-// Only a hit that names no known account is refused: there is no fact id to write it under.
+// passed. A reset time already more than PAST_SLACK_MS before the hit is unreadable too (#78 r2 m-3: "resets 1am" read
+// at 11pm as today's 1am would resume the card a minute later, hit again, and loop every pass).
+// With no readable time, the stored hit's reset time is kept if it is still ahead. ASSUMPTION, not checked (#78 r2
+// c-2): a reset still ahead belongs to the same limit window as this hit; the fact stores no window to check it by. It
+// is kept so a second worker hitting the limit does not throw away the time the first one learned, or the card would
+// wait for good (lane 3 review of r2). Otherwise resets_at is null, so yesterday's past reset never resumes a card early.
+// A newer readable time always wins over the kept one.
+// Only a hit that names no known account is refused: there is no fact id to write it under. A writer with no get()
+// cannot apply the keep rule, so it is refused outright (#78 r2 m-4), never silently skipped.
+export const PAST_SLACK_MS = 10_000;
 export async function writeLimitHit(writer, exit, { now = () => new Date() } = {}) {
+  if (typeof writer?.get !== 'function') throw new Error('writeLimitHit needs a fact writer with get() (the keep rule reads the stored hit)');
   const observed_at = stamp(now);
   if (!accountOk(exit?.account)) return { ok: false, reason: 'the limit hit names no known account' };
   let resets_at = timeOrNull(exit.resets_at);
+  if (resets_at !== null && Date.parse(resets_at) < Date.parse(observed_at) - PAST_SLACK_MS) resets_at = null;
   if (resets_at === null) {
-    const kept = timeOrNull(writer.get?.(LIMIT_FACT(exit.account))?.resets_at);
+    const kept = timeOrNull(writer.get(LIMIT_FACT(exit.account))?.resets_at);
     if (kept && Date.parse(kept) > Date.parse(observed_at)) resets_at = kept;
   }
   return writer.put(LIMIT_FACT(exit.account), { kind: 'fact.limit-hit', account: exit.account, resets_at, observed_at, source: exit.source ?? null });
