@@ -22,7 +22,7 @@ import { readMark } from './mark.mjs';
 import { readNeedsJoe } from './checker-entry.mjs';
 import { gatherFacts } from './gather.mjs';
 import { timeLimits, requestMerges } from '../M11-dispatcher/merges.mjs';
-import { MERGED_OUTSIDE, MERGED_OUTSIDE_UNTOLD } from './merge-outcome.mjs';
+import { MERGED_OUTSIDE, MERGED_OUTSIDE_UNTOLD, settleMerge } from './merge-outcome.mjs';
 import { fakeAlert } from '../../test/fake-alert.test-helper.mjs';
 
 const POLICY = 'tiers: {}\n';
@@ -2857,6 +2857,251 @@ for (const name of ['unreadable', '1 h ahead']) {
     assert.equal(mergeOf(w).doc.state, 'held', 'only the wait\'s own clock was bad: the cap clock is fine');
   });
 }
+
+// L353: an ABSENT stuck_since is old enough too (L321), never "start the clock": the catch-up cap fires on that pass.
+test('L353 gate.mjs catch-up cap: a catch-up with no stuck_since at all fires the cap on that pass', async () => {
+  const w = world(limited());
+  verifiedCard(w);
+  stuckCatchUp(w);
+  await gatePass(w.ctx);
+  assert.equal(mergeOf(w).doc.state, 'catching_up');
+  const { stuck_since, ...rest } = mergeOf(w).doc;
+  must(recOf(w).write({ actor: 'merge_gate', entity: 'merge', id: mergeOf(w).id, expectRev: mergeOf(w).rev, doc: rest }), 'planted');
+  assert.equal('stuck_since' in mergeOf(w).doc, false, 'planted with no stuck_since');
+  tick(w, 1);
+  await gatePass(w.ctx);
+  const m = mergeOf(w);
+  assert.equal(m.doc.state, 'refused', JSON.stringify(m.doc));
+  assert.deepEqual(m.doc.reasons, ['GitHub accepted the branch update but the head never moved']);
+  assert.equal(told(w, 'merge_refused').length, 1);
+});
+
+// L356 MAT-1 (the auditor's probe E): where the cap can't be judged, only the cap's clock is stamped. waiting_since and
+// the told mark are the wait's own (L330), so a 10-day wait is not made new and its told mark is kept.
+test('L356 MAT-1 gate.mjs catch-up cap: with no limit, an absent stuck_since is stamped, and waiting_since and the told mark are left alone', async () => {
+  const w = world(limited());
+  verifiedCard(w);
+  stuckCatchUp(w);
+  await gatePass(w.ctx);
+  const old = nowIso(w, -10 * DAY_MIN);
+  const toldAt = nowIso(w, -60);
+  plantMerge(w, { stuck_since: null, waiting_since: old, wait_told_at: toldAt });
+  const base = w.ctx.rules;
+  const broken = (k) => { if (k === 'timeouts.merging_open_max_min') throw new Error('the rules engine stopped'); };
+  w.ctx.rules = Object.create(base, {
+    get: { value: (k, o) => { broken(k); return base.get(k, o); } },
+    num: { value: (k, o) => { broken(k); return base.num(k, o); } },
+  });
+  tick(w, 1);
+  await gatePass(w.ctx);
+  const m = mergeOf(w);
+  assert.equal(m.doc.state, 'catching_up');
+  assert.equal(Date.parse(m.doc.stuck_since), w.env.clock.t, 'the cap clock is stamped, to be judged once the rules answer');
+  assert.equal(m.doc.waiting_since, old, 'waiting_since is not made new');
+  assert.equal(m.doc.wait_told_at, toldAt, 'the told mark is kept');
+  w.ctx.rules = base;
+});
+
+// L356 MAT-2 (the auditor's probe F): the interrupted-PR wait borrows only the told clock of a merge that is catching
+// up; its catch-up clock (stuck_since) is kept, and the catch-up wait is timed from it again when the reading lands.
+test('L356 MAT-2 gate.mjs: a catch-up that meets the interrupted-PR wait keeps its catch-up clock through it, and is not refused at once after', async () => {
+  const w = world(limited());
+  const head = verifiedCard(w);
+  await interruptedThenAskedAgain(w, head);
+  const again = () => recOf(w).list('merge').find((m) => m.doc.request === 'mr-C-1-again');
+  await later(w, 1);
+  assert.ok(again().doc.wait_reading, 'waits for the reading');
+  // It was catching up (two merges of one pull request at once), with its catch-up clock running.
+  const a = again();
+  const clock = nowIso(w, -5);
+  must(recOf(w).write({ actor: 'merge_gate', entity: 'merge', id: a.id, expectRev: a.rev, doc: { ...a.doc, wait_reading: null, state: 'catching_up', catch_up_from: head, stuck_since: clock } }), 'catching up');
+  tick(w, 1);
+  await gatePass(w.ctx);
+  assert.ok(again().doc.wait_reading, 'the wait began again');
+  assert.equal(again().doc.stuck_since, clock, 'the wait leaves the catch-up clock alone');
+  sensorsReads(w, { state: 'open', merged: false, merge_commit_sha: null, head_sha: head, observed_at: nowIso(w, 1) });
+  tick(w, 2);
+  await gatePass(w.ctx);
+  const back = again();
+  assert.notEqual(back.doc.state, 'refused', `refused at once: ${JSON.stringify(back.doc)}`);
+  assert.equal(back.doc.wait_reading ?? null, null, 'that wait is over');
+  assert.equal(back.doc.stuck_since, clock, 'the catch-up clock was kept');
+  assert.equal(back.doc.waiting_since, clock, 'the catch-up wait is timed from it again');
+  assert.deepEqual(back.doc.waiting_on, ['GitHub accepted the branch update but the head never moved']);
+});
+
+// L356 MAT-3 (the auditor's probe G): a catch-up whose pull request can't be read is an outage pass: never refused, but
+// told after the limit and every 24 h.
+test('L356 MAT-3 gate.mjs: a catch-up whose pull request can\'t be read is told after the limit and again at +25 h, and never refused', async () => {
+  const w = world(limited());
+  verifiedCard(w);
+  stuckCatchUp(w);
+  await gatePass(w.ctx);
+  assert.equal(mergeOf(w).doc.state, 'catching_up');
+  const get = w.g.gh.get.bind(w.g.gh);
+  w.g.gh.get = async (path) => { if (/\/pulls\/7$/.test(path)) throw new Error('GitHub is down'); return get(path); };
+  await later(w, LIMIT_MIN);
+  const waits = () => told(w, 'merge_waiting_long').filter((a) => a.merge === mergeOf(w).id);
+  assert.equal(waits().length, 1, 'told after the limit');
+  assert.equal(waits()[0].outage, true);
+  await later(w, 120);
+  assert.equal(waits().length, 1, 'quiet at +2 h');
+  for (let m = 0; m < DAY_MIN; m += 60) await later(w, 60);
+  assert.equal(waits().length, 2, 'told again a day on');
+  assert.equal(mergeOf(w).doc.state, 'catching_up', 'never refused while it can\'t be read');
+  assert.deepEqual(told(w, 'merge_refused'), []);
+});
+
+// L356 m3 P5: a told mark the Record refuses is alerted (L323), never dropped quietly.
+test('L356 m3 P5 gate.mjs: a refused wait_told write is alerted', async () => {
+  const w = world(limited());
+  verifiedCard(w);
+  w.g.checks.set(w.g.main, redRun(w.g.main));
+  await gatePass(w.ctx);
+  const rec = recOf(w);
+  const refuses = (a) => a.entity === 'merge' && a.doc?.wait_told_at && a.doc.wait_told_at !== rec.read('merge', a.id)?.doc?.wait_told_at;
+  w.ctx.record = Object.create(rec, { write: { value: (a) => (refuses(a) ? { ok: false, reason: 'planted refusal' } : rec.write(a)) } });
+  tick(w, LIMIT_MIN);
+  await gatePass(w.ctx);
+  w.ctx.record = rec;
+  assert.equal(told(w, 'merge_waiting_long').length, 1);
+  assert.ok(w.alerts.some((a) => a.type === 'merge_gate_write_refused' && a.to === 'wait_told' && /planted refusal/.test(a.reason)), 'the refused mark is alerted');
+});
+
+// L356 m3 P6: when the reading lands the interrupted-PR wait is cleared, so a later wait gets its own clock and notice.
+test('L356 m3 P6 gate.mjs: the clear when the reading lands gives the next wait its own start and no told mark', async () => {
+  const w = world(limited());
+  const head = verifiedCard(w);
+  await interruptedThenAskedAgain(w, head);
+  const again = () => recOf(w).list('merge').find((m) => m.doc.request === 'mr-C-1-again');
+  await later(w, 1);
+  await later(w, LIMIT_MIN);
+  assert.ok(again().doc.wait_told_at, 'the interrupted-PR wait was told');
+  // The reading lands, and main is red: the merge is held in a new wait.
+  sensorsReads(w, { state: 'open', merged: false, merge_commit_sha: null, head_sha: head, observed_at: nowIso(w, 1) });
+  tick(w, 2);
+  w.g.checks.set(w.g.main, redRun(w.g.main));
+  await gatePass(w.ctx);
+  const m = again();
+  assert.equal(m.doc.state, 'held', JSON.stringify(m.doc));
+  assert.equal(m.doc.wait_reading ?? null, null);
+  assert.equal(Date.parse(m.doc.waiting_since), w.env.clock.t, 'the new wait starts now');
+  assert.equal(m.doc.wait_told_at ?? null, null, 'with nothing told yet');
+});
+
+// L356 m3 P8: the cut check reads with the clock, so a reading stamped in the future never ends the wait.
+test('L356 m3 P8 gate.mjs: a reading stamped 1 h ahead does not end the interrupted-PR wait, and no second merge call goes out', async () => {
+  const w = world(limited());
+  const head = verifiedCard(w);
+  await interruptedThenAskedAgain(w, head);
+  const again = () => recOf(w).list('merge').find((m) => m.doc.request === 'mr-C-1-again');
+  await later(w, 1);
+  sensorsReads(w, { state: 'open', merged: false, merge_commit_sha: null, head_sha: head, observed_at: nowIso(w, 60) });
+  await later(w, 1);
+  assert.equal(again().doc.state, 'queued');
+  assert.ok(again().doc.wait_reading, 'still waiting for a reading it can trust');
+  assert.equal(gatePuts(w), 1, 'no second merge call');
+});
+
+// L356 m3 P11 and c3: telling never restamps waiting_since (L330), and the re-tell counts the hours from it.
+test('L356 m3 P11 gate.mjs: the waiting alert leaves waiting_since alone, and the re-tell says how many hours', async () => {
+  const w = world(limited());
+  verifiedCard(w);
+  const post = w.g.gh.post;
+  w.g.gh.post = async (path, body) => (path === '/graphql' ? { status: 502, json: null } : post(path, body));
+  await later(w, 0);
+  const t0 = mergeOf(w).doc.waiting_since;
+  assert.ok(t0);
+  await later(w, LIMIT_MIN);
+  assert.equal(told(w, 'merge_waiting_long').length, 1);
+  assert.equal(mergeOf(w).doc.waiting_since, t0, 'not restamped by the tell');
+  await later(w, DAY_MIN + 60);
+  const notes = told(w, 'merge_waiting_long');
+  assert.equal(notes.length, 2);
+  assert.equal(mergeOf(w).doc.waiting_since, t0, 'not restamped by the re-tell');
+  const hours = Math.floor((w.env.clock.t - Date.parse(t0)) / 3_600_000);
+  assert.match(notes[1].note, new RegExp(`waited to be judged for ${hours} h`));
+});
+
+// L356 m5: the told mark names its wait, so a mark left by another wait never quiets this one.
+test('L356 m5 gate.mjs: a told mark from another wait does not quiet this one', async () => {
+  const w = world(limited());
+  verifiedCard(w);
+  w.g.checks.set(w.g.main, redRun(w.g.main));
+  await gatePass(w.ctx);
+  plantMerge(w, { waiting_since: nowIso(w, -2 * LIMIT_MIN), wait_told_at: nowIso(w, -1), wait_told_since: nowIso(w, -DAY_MIN) });
+  tick(w, 1);
+  await gatePass(w.ctx);
+  assert.equal(told(w, 'merge_waiting_long').length, 1, 'told: the mark was another wait\'s');
+  assert.equal(mergeOf(w).doc.wait_told_since, mergeOf(w).doc.waiting_since, 'the mark now names this wait');
+  tick(w, 1);
+  await gatePass(w.ctx);
+  assert.equal(told(w, 'merge_waiting_long').length, 1, 'then quiet');
+});
+
+// L357 (b): an interrupted refusal settled by another caller (M11's open-too-long refusal) is told by step 3b, with
+// its note written in the refusal itself, and sent again after an alert that wasn't taken.
+test('L357 gate.mjs: an interrupted_note written with a refusal settled outside the gate is delivered by step 3b, and re-sent after a lost alert', async () => {
+  const w = world(limited());
+  verifiedCard(w);
+  loseAnswer(w, { merged: false });
+  await gatePass(w.ctx);
+  const m = mergeOf(w);
+  assert.equal(m.doc.state, 'merging');
+  const out = settleMerge({ record: recOf(w), alert: w.ctx.alert, now: () => w.env.clock.t }, m.id, {
+    pr: { state: 'open', merged: false, merge_commit_sha: null, head_sha: m.doc.judged_head }, reason: 'interrupted', openTooLong: true,
+    fields: { interrupted_note: 'still open after the merge call (settled outside the gate)', interrupted_told_at: null } });
+  assert.equal(out.ok, true, JSON.stringify(out));
+  assert.equal(mergeOf(w).doc.interrupted_note, 'still open after the merge call (settled outside the gate)', 'written in the refusal itself');
+  const tries = flakyAlert(w, 'merge_interrupted', 'false', 1);
+  await later(w, 1);
+  assert.equal(tries.length, 1);
+  assert.equal(told(w, 'merge_interrupted').length, 0, 'the first was lost');
+  await later(w, 1);
+  assert.equal(told(w, 'merge_interrupted').length, 1, 'sent again by 3b, with no merge in progress');
+  assert.equal(told(w, 'merge_interrupted')[0].note, 'still open after the merge call (settled outside the gate)');
+  assert.ok(mergeOf(w).doc.interrupted_told_at);
+  await later(w, DAY_MIN);
+  assert.equal(told(w, 'merge_interrupted').length, 1, 'once taken, not again');
+});
+
+// L358: the start gate stops merging, not telling. With robot merges not green, a lost refusal alert and an
+// interrupted note are both sent again, and nothing else happens.
+test('L358 gate.mjs: with the start gate shut, a lost refusal alert and an interrupted note are sent again, and nothing merges', async () => {
+  const w = world(limited());
+  verifiedCard(w);
+  loseAnswer(w, { merged: false });
+  await gatePass(w.ctx);
+  const m = mergeOf(w);
+  must(settleMerge({ record: recOf(w), alert: w.ctx.alert, now: () => w.env.clock.t }, m.id, {
+    pr: { state: 'open', merged: false, merge_commit_sha: null, head_sha: m.doc.judged_head }, reason: 'interrupted', openTooLong: true,
+    fields: { interrupted_note: 'still open after the merge call', interrupted_told_at: null, tell_owner: true } }), 'settled outside the gate');
+  // A second card's merge request waits in the queue: it must not be taken in while the gate is shut.
+  const puts = gatePuts(w);
+  const writes = w.g.writes.length;
+  const merges = recOf(w).list('merge').length;
+  const lost = flakyAlert(w, 'merge_refused', 'false', 1);
+  tick(w, 121);   // the outside check has not been green for 2 h: the start gate is shut
+  const r1 = await gatePass(w.ctx);
+  assert.equal(r1.ran, false);
+  assert.equal(r1.reason, NOT_GREEN_LINE);
+  assert.equal(lost.length, 1, 'the refusal alert was tried with the gate shut');
+  assert.equal(told(w, 'merge_refused').length, 0, 'and lost');
+  assert.equal(told(w, 'merge_interrupted').length, 1, 'the interrupted note is delivered with the gate shut');
+  tick(w, 1);
+  const r2 = await gatePass(w.ctx);
+  assert.equal(r2.ran, false);
+  assert.equal(told(w, 'merge_refused').length, 1, 'the lost refusal alert is sent again with the gate shut');
+  assert.ok(mergeOf(w).doc.told_at);
+  tick(w, 1);
+  await gatePass(w.ctx);
+  assert.equal(told(w, 'merge_refused').length, 1, 'once taken, not again');
+  assert.equal(told(w, 'merge_interrupted').length, 1);
+  assert.equal(gatePuts(w), puts, 'no merge call');
+  assert.equal(w.g.writes.length, writes, 'no GitHub write');
+  assert.equal(recOf(w).list('merge').length, merges, 'no merge taken in');
+  assert.equal(mergeOf(w).doc.state, 'refused');
+});
 
 test('L329 gate.mjs hold cap: where the cap can\'t be judged (the rules can\'t answer the limit), a bad stuck_since is restamped, then judged from it', async () => {
   const w = world(limited());
