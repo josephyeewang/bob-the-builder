@@ -58,7 +58,7 @@ const REPO = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})\/[A-Za-z0-9._-]{1,100}$/;
 const LOGIN = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/;
 const BOB = /^bob-the-builder$/i;
 const ISSUE = (n) => Number.isSafeInteger(n) && n > 0;
-const TOLD = new Set(['opened', 'updated', 'changed']);
+const TOLD = new Set(['opened', 'updated', 'changed', 'reminded']);
 const sha256 = (s) => createHash('sha256').update(String(s)).digest('hex');
 const msg = (e) => String(e?.message ?? e).slice(0, 200);
 const own = (o, k) => Object.prototype.hasOwnProperty.call(o, k);

@@ -1,14 +1,23 @@
 // notify.mjs — one updated issue per failing check, in the outside-check repo itself (this job has no secrets and
 // only `issues: write` here; the Mini's 10-minute watch puts the matching robot issue in the product's repo).
 //
-// Same rules as Bob's M13 alerts.mjs (review-0b-7 M10): a check still failing edits its open issue's body (silent; the
-// owner is notified once, when it opens); a check that passes again closes its issue with a "cleared" comment and a
+// Same rules as Bob's M13 alerts.mjs (review-0b-7 M10): a check still failing edits its open issue's body (silent), and
+// comments again every 24 h (L315: this issue is what still tells the owner when the host is down); a check that passes again closes its issue with a "cleared" comment and a
 // "cleared at <time>" line in the issue's body (the line, not the comment, is what counts; see below); an
 // issue the owner closed while the check still failed stays closed until a run sees it pass and fail again. Titles are
 // the step names ("product N / <check>"), so no product data appears.
 import { fileURLToPath } from 'node:url';
 
 export const BOT = 'github-actions[bot]';
+// This file runs alone in the outside-check repo, so it can't import shared/still-waiting.mjs. Same rule, in small: a
+// told time that can't be read, or is more than a minute ahead, tells now.
+// alerts.test.mjs runs this and the shared rule over one table, so the two can't drift apart.
+export const RETELL_MS = 24 * 60 * 60_000;
+export const FUTURE_SKEW_MS = 60_000;
+export const dueToTell = (told, nowMs) => {
+  const t = typeof told === 'string' ? Date.parse(told) : NaN;
+  return !Number.isFinite(t) || t > nowMs + FUTURE_SKEW_MS || nowMs - t >= RETELL_MS;
+};
 const CLEARED = 'Cleared: the check passes again.';
 
 export async function notify({ ran, failed, api, now = () => new Date() }) {
@@ -28,7 +37,15 @@ export async function notify({ ran, failed, api, now = () => new Date() }) {
     const i = latest.get(title);
     const failing = failed.includes(title);
     if (failing) {
-      if (i && i.state === 'open') { await api('PATCH', `/issues/${i.number}`, { body: bodyOf(title, i.body, stamp) }); done.push([title, 'updated']); return; }
+      if (i && i.state === 'open') {
+        // Comment first: the told line goes in only once the comment was taken, so a lost one is sent by the next run.
+        // An issue from before the told line is dated from when it opened.
+        const due = dueToTell(toldOf(i.body) ?? sinceOf(i.body), Date.parse(stamp));
+        if (due) await api('POST', `/issues/${i.number}/comments`, { body: `Still failing since ${sinceOf(i.body) ?? stamp}.` });
+        await api('PATCH', `/issues/${i.number}`, { body: bodyOf(title, i.body, stamp, due ? stamp : toldOf(i.body)) });
+        done.push([title, due ? 'reminded' : 'updated']);
+        return;
+      }
       if (i && i.state === 'closed' && !clearedByBot(i)) { done.push([title, 'suppressed']); return; }
       await api('POST', '/issues', { title, body: bodyOf(title, '', stamp) });
       done.push([title, 'opened']);
@@ -53,9 +70,12 @@ const CLEARED_LINE = /^cleared at \S+$/m;
 const clearedByBot = (issue) => CLEARED_LINE.test(issue.body ?? '');
 const markCleared = (body, stamp) => `${String(body ?? '').replace(/\n*^cleared at \S+$/m, '')}\ncleared at ${stamp}`;
 
-function bodyOf(title, old, stamp) {
-  const since = /^failing since (\S+)$/m.exec(old ?? '')?.[1] ?? stamp;
-  return `The outside check's step "${title}" is failing. Open the latest outside-check run for its reason code.\n\nfailing since ${since}\nlast seen ${stamp}`;
+const sinceOf = (body) => /^failing since (\S+)$/m.exec(body ?? '')?.[1] ?? null;
+const toldOf = (body) => /^last told (\S+)$/m.exec(body ?? '')?.[1] ?? null;
+
+function bodyOf(title, old, stamp, told = stamp) {
+  const since = sinceOf(old) ?? stamp;
+  return `The outside check's step "${title}" is failing. Open the latest outside-check run for its reason code.\n\nfailing since ${since}\nlast seen ${stamp}\nlast told ${told ?? since}`;
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {

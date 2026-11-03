@@ -5,8 +5,11 @@
 // live, a Dispatcher down for an hour) would otherwise open ~60 issues an hour, and that volume can hit GitHub's rate
 // limits on the robot's token, the same token the Merge Gate and Approvals use. So each alert has a stable key
 // (product, kind, subject); the record keeps its state; a repeat only edits the open issue's body (silent); a comment,
-// which notifies, goes out only when the condition changes; the issue closes when the condition clears. If the owner closes
-// it while the condition still holds, nothing reopens it until the condition has cleared and come back.
+// which notifies, goes out when the condition changes, and again every 24 h while it stands (L315: an open issue is not
+// telling the owner again, so this goes through the shared stillWaiting); the issue closes when the condition clears. If
+// the owner closes it while the same condition still holds, nothing reopens or comments on it: closing it is their
+// answer. That answer covers that cause only (L371): a different status, or the condition coming back after it cleared,
+// opens a new issue, so a close never silences a later problem.
 //
 // Every alert is a robot GitHub issue assigned to the owner (login from private config, passed in). No mail, no
 // other channel (design: alerts are only GitHub notices, Actions failure notices or Remote Control pushes).
@@ -20,6 +23,7 @@
 import { createHash } from 'node:crypto';
 import { makeFactWriter } from '../M12-sensors/facts.mjs';
 import { makeMasker } from '../M12-sensors/mask.mjs';
+import { stillWaiting } from '../../shared/still-waiting.mjs';
 
 const ISSUE = (n) => Number.isSafeInteger(n) && n > 0;
 const idOf = (key) => `alert-${createHash('sha256').update(key).digest('hex').slice(0, 16)}`;
@@ -29,8 +33,8 @@ export function alertKey(product, kind, subject) { return `${product}|${kind}|${
 export function makeAlerts({ rec, gh, owner, actor = 'ledger', now = () => new Date(), masker = makeMasker(), writer = makeFactWriter(rec, { actor, now, masker }) }) {
   const bodyOf = (s) => `${s.body}\n\n---\nfirst seen ${s.since} · last seen ${s.last} · seen ${s.count} times\n<!-- alert-key ${idOf(s.key)} -->`;
 
-  // The condition holds now. Returns what happened: opened | updated | changed | suppressed (the owner closed it), or
-  // false when GitHub lost it (L143).
+  // The condition holds now. Returns what happened: opened | updated | changed | reminded (the 24 h comment) | suppressed
+  // (the owner closed it), or false when GitHub lost it (L143).
   // `status` is the condition's stable state; only a change of it comments (and so notifies). A body that carries a
   // changing figure ("down 40 minutes") is edited silently (0b-7 audit M-3). Without a status, the body is the status.
   // `note` is the comment's text when the status changes (default "Changed: <first line>"); masked like the body.
@@ -48,24 +52,37 @@ export function makeAlerts({ rec, gh, owner, actor = 'ledger', now = () => new D
     const s = writer.get(id);
     // An open alert saved without an issue number (before L143) is opened again, not read as closed by the owner.
     const known = s && (s.status === 'closed-by-owner' || (s.status === 'open' && ISSUE(s.issue)));
-    if (known) {
-      if (s.status === 'open' && await gh.isClosed(s.issue)) {
-        writer.put(id, { ...s, kind: 'fact.alert', status: 'closed-by-owner', last: t });
-        return 'suppressed';
-      }
-      if (s.status === 'closed-by-owner') { writer.put(id, { ...s, kind: 'fact.alert', last: t }); return 'suppressed'; }
+    const closed = known && (s.status === 'closed-by-owner' || await gh.isClosed(s.issue));
+    if (closed && status === (s.status_text ?? s.body)) {
+      writer.put(id, { ...s, kind: 'fact.alert', status: 'closed-by-owner', last: t });
+      return 'suppressed';
+    }
+    if (known && !closed) {
       const next = { ...s, kind: 'fact.alert', last: t, count: s.count + 1, body, status_text: status };
       if (await gh.edit(s.issue, bodyOf(next)) === false) return false;
       if (status !== (s.status_text ?? s.body)) {
         const note = rawNote === undefined ? `Changed: ${body.split('\n')[0]}` : masker.maskSecrets(rawNote).text;
         if (await gh.comment(s.issue, note) === false) return false;
-        writer.put(id, next);
+        writer.put(id, { ...next, told_at: t });
         return 'changed';
       }
+      // Told again every 24 h while it stands (L315). The mark is written only once GitHub took the comment. tell is
+      // async, so its answer is awaited here; a throw reaches raise's caller, as every GitHub call's does. An alert
+      // saved before told_at is dated from when it opened: opening it told the owner.
+      const told = stillWaiting({
+        now: Date.parse(t), waiting: true, clear: () => {},
+        read: () => ({ told_at: s.told_at ?? s.since }),
+        tell: async ({ told_at }) => {
+          if (await gh.comment(s.issue, `Still open since ${s.since}: ${body.split('\n')[0]}`) === false) return false;
+          writer.put(id, { ...next, told_at });
+          return 'reminded';
+        },
+      });
+      if (told.did !== 'quiet') return told.answer;
       writer.put(id, next);
       return 'updated';
     }
-    const st = { kind: 'fact.alert', key, title, body, status_text: status, status: 'open', since: t, last: t, count: 1 };
+    const st = { kind: 'fact.alert', key, title, body, status_text: status, status: 'open', since: t, last: t, count: 1, told_at: t };
     const issue = await gh.open({ title, body: bodyOf(st), assignee: owner });
     if (!ISSUE(issue)) return false;
     writer.put(id, { ...st, issue });

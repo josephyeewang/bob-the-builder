@@ -204,6 +204,48 @@ test('notify: an issue the owner closed mid-failure stays closed until the check
   assert.deepEqual(await notify({ ran: [t], failed: [t], api: gh.api }), [[t, 'opened']]);
 });
 
+// L315: a failing check's issue is commented on again every 24 h. This repo's issue is the one that still tells the
+// owner when the host itself is down, so it can't lean on the host's copy of the alert.
+test('L315 notify: a check still failing is commented on again every 24 h, not more often, and the told time is kept in the body', async () => {
+  const gh = fakeRepoIssues();
+  const t = 'product 1 / heartbeat';
+  const at = (h) => ({ ran: [t], failed: [t], api: gh.api, now: () => new Date(NOW + h * 3600e3) });
+  assert.deepEqual(await notify(at(0)), [[t, 'opened']]);
+  assert.deepEqual(await notify(at(23)), [[t, 'updated']]);
+  assert.equal(gh.issues[0].comments.length, 0);
+  assert.deepEqual(await notify(at(24)), [[t, 'reminded']]);
+  assert.equal(gh.issues[0].comments.length, 1);
+  assert.equal(gh.issues[0].comments[0].body, 'Still failing since 2026-11-03T12:00:00.000Z.');
+  assert.match(gh.issues[0].body, /failing since 2026-11-03T12:00:00.000Z\nlast seen 2026-11-04T12:00:00.000Z\nlast told 2026-11-04T12:00:00.000Z/);
+  assert.deepEqual(await notify(at(25)), [[t, 'updated']]);
+  assert.deepEqual(await notify(at(47)), [[t, 'updated']]);
+  assert.deepEqual(await notify(at(48)), [[t, 'reminded']]);
+  assert.equal(gh.issues[0].comments.length, 2);
+  assert.deepEqual(await notify({ ran: [t], failed: [], api: gh.api, now: () => new Date(NOW + 49 * 3600e3) }), [[t, 'cleared']]);
+});
+
+test('L315 notify: a comment that fails is an error, the told time stays, and the next run tells again', async () => {
+  const gh = fakeRepoIssues();
+  const t = 'product 1 / heartbeat';
+  const at = (h, api = gh.api) => ({ ran: [t], failed: [t], api, now: () => new Date(NOW + h * 3600e3) });
+  await notify(at(0));
+  const lost = async (m, p, b) => { if (/comments$/.test(p)) throw new Error('GitHub is down'); return gh.api(m, p, b); };
+  assert.deepEqual(await notify(at(25, lost)), [[t, 'error']]);
+  assert.match(gh.issues[0].body, /last told 2026-11-03T12:00:00.000Z/, 'the told time stays');
+  assert.deepEqual(await notify(at(26)), [[t, 'reminded']]);
+  assert.equal(gh.issues[0].comments.length, 1);
+});
+
+test('L315 notify: a told time that cannot be read or is in the future tells now; an issue from before the told line is dated from failing since', async () => {
+  const t = 'product 1 / heartbeat';
+  for (const [line, h, want] of [['', 2, 'updated'], ['', 25, 'reminded'], ['\nlast told garbage', 2, 'reminded'], ['\nlast told 2099-01-01T00:00:00.000Z', 2, 'reminded']]) {
+    const gh = fakeRepoIssues();
+    await notify({ ran: [t], failed: [t], api: gh.api, now: () => new Date(NOW) });
+    gh.issues[0].body = gh.issues[0].body.replace(/\nlast told \S+/, '') + line;
+    assert.deepEqual(await notify({ ran: [t], failed: [t], api: gh.api, now: () => new Date(NOW + h * 3600e3) }), [[t, want]], line);
+  }
+});
+
 test('keep-alive commits only after 50 quiet days', async () => {
   const mk = (days) => { const puts = []; return { puts, api: async (m, p, b) => { if (m === 'PUT') { puts.push(b); return {}; } if (p === '') return { default_branch: 'main' }; if (p.startsWith('/commits')) return [{ commit: { committer: { date: new Date(NOW - days * 86400e3).toISOString() } } }]; throw new Error('404'); } }; };
   const young = mk(49); assert.equal((await keepAlive({ api: young.api, now: () => NOW })).committed, false);
