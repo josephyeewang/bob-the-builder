@@ -304,12 +304,16 @@ test('audit #125 r2 m-2, m-3: a card that has waited on a limit longer than the 
   assert.equal(told().length, 1, 'told once');
 });
 
-// A hand-edited Record (L285): the M9 writer always stamps a readable since; this test's stand-in Record keeps what it
-// is given, so it can hold one that isn't.
+// A hand-edited Record (L285): the M9 writer always stamps a readable since. The stand-in keeps a re-checked wait's
+// since as the writer does (L296), but stores a new wait's since as sent (its one departure, shared/record.mjs), so the
+// bad since goes in as a wait on another what, then back: an unreadable since is never kept, so it stays as sent.
 const garbleSince = (rec, id) => {
-  const r = change(rec, 'card', id, { wait: { ...rec.read('card', id).doc.wait, since: 'not a time' } });
-  assert.ok(r.ok, r.reason);
-  assert.equal(rec.read('card', id).doc.wait.since, 'not a time');
+  const wait = rec.read('card', id).doc.wait;
+  for (const what of ['hand-edited', wait.what]) {
+    const r = change(rec, 'card', id, { wait: { ...rec.read('card', id).doc.wait, what, since: 'not a time' } });
+    assert.ok(r.ok, r.reason);
+  }
+  assert.deepEqual([rec.read('card', id).doc.wait.what, rec.read('card', id).doc.wait.since], [wait.what, 'not a time']);
 };
 
 test('L285: a limit wait whose since can\'t be read still ends: both caps count from the run\'s start, never from a hit that moves', async () => {

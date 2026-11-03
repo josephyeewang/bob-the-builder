@@ -20,7 +20,7 @@ import { createHash } from 'node:crypto';
 import { hostname } from 'node:os';
 import { basename } from 'node:path';
 import { CARD_KINDS, ENTITIES, FINAL_STATES, SESSION_ID, STATES, WAIT_FIELDS, WAIT_WHO, isNotARecord, isOpen, makeRecord, missingFields, notARecord, releaseData, timeoutFor } from '../../shared/record.mjs';
-import { claimCheck, fixPlanCheck, guardWrite, same } from './guard.mjs';
+import { claimCheck, fixPlanCheck, guardWrite, same, waitSince } from './guard.mjs';
 import { PLAN_INPUTS, TAB_HEARTBEAT_FAMILY, TAB_HEARTBEAT_WRITER, actorName, factFrom, mayCreateKind } from './permissions.mjs';
 import { readyCheck } from './ready.mjs';
 import { PASSES, headReviews, readOutboxFile, runnerLaunchFor, verdictFields, worstVerdict } from './outbox.mjs';
@@ -81,16 +81,15 @@ export function openRecordWithStore({ root, product, ownerUid, rules, alert = ()
     if (!WAIT_WHO.includes(wait.who)) return no(`wait.who must be one of ${WAIT_WHO.join(', ')}`);
     if (typeof wait.what !== 'string' || !wait.what.trim()) return no('wait.what must say what it waits on');
     if (wait.who === 'date' && !(typeof wait.reason === 'string' && wait.reason.trim())) return no('a wait on a date needs a reason');
-    const keep = kept && kept.who === wait.who && kept.what === wait.what && Number.isFinite(Date.parse(kept.since)) ? kept.since : null;
-    const since = Date.parse(wait.since);
-    if (!(keep !== null && wait.since === keep) && (!Number.isFinite(since) || Math.abs(since - nowMs) > MIN)) return no('wait.since must be now (within 60 s)');
+    const ws = waitSince({ wait, kept, nowMs });
+    if (!ws.ok) return ws;
     const next = Date.parse(wait.next_check);
     if (!Number.isFinite(next) || next <= nowMs) return no('wait.next_check must be in the future');
     const limit = timeoutFor(timeouts(), entity, state);
     if (limit === undefined || limit === null) return no(`the rules have no time limit for ${entity} ${state}`);
     const maxMin = limit.minutes ?? limit.recheck_max_min;
     if (next > nowMs + maxMin * MIN) return no(`wait.next_check is later than ${maxMin} minutes from now`);
-    const out = { ...wait, since: keep ?? iso(nowMs) };
+    const out = { ...wait, since: ws.since };
     if (card) {
       if (wait.resume !== 'retry' && wait.resume !== 'continue') return no('a card wait needs resume: retry or continue');
       if (from === 'running' && wait.resume !== 'retry') return no('a running card waits only with resume: retry (its claim ends)');

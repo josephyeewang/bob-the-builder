@@ -1912,6 +1912,8 @@ __bob_i('orchestrate/modules/M9-record/permissions.mjs', (m) => { ATTEMPTS = m.A
 Object.defineProperties(__bob_e, {
   same: { get: () => same, enumerable: true },
   guardWrite: { get: () => guardWrite, enumerable: true },
+  keptSince: { get: () => keptSince, enumerable: true },
+  waitSince: { get: () => waitSince, enumerable: true },
   claimCheck: { get: () => claimCheck, enumerable: true },
   fixPlanCheck: { get: () => fixPlanCheck, enumerable: true },
 });
@@ -1926,7 +1928,7 @@ Object.defineProperties(__bob_e, {
 //   guardWrite({ entity, id, actor, old, doc, createdBy }) → { ok: true, doc, moving, from, to, changed, cleared } | { ok: false, reason }
 //   `old` is the document as stored now, or null to create. `doc` is not changed; the answer's doc has the ended
 //   fields taken out. The Store Writer's other checks (the ready rule, the claim, waits, verdicts, merges) stay in
-//   writer.mjs: they need the whole record.
+//   writer.mjs: they need the whole record, but for the since a wait's re-check keeps (keptSince), which the stand-in keeps the same way.
 
 
 const no = (reason) => ({ ok: false, reason });
@@ -2050,6 +2052,26 @@ function checkStart(before, after) {
   if (!same(rest, before)) return no('claimed → running only adds pid and pid_start to the claim');
   return { ok: true };
 }
+/** The since a re-check keeps: the stored wait's, when it waits on the same who and what and its since reads; else null. */
+function keptSince({ wait, kept = null }) {
+  return kept && kept.who === wait?.who && kept.what === wait?.what && Number.isFinite(Date.parse(kept.since)) ? kept.since : null;
+}
+
+/**
+ * A wait's since, on the write that sets or re-checks it (L285, L296): { ok: true, since } | { ok: false, reason }.
+ * `kept` is the wait being re-checked (the entry stays in its waiting state), or null when the wait begins. A re-check on
+ * the same who and what keeps the stored since, whatever the caller sends: since is when the waiting began, and moving
+ * it would quietly reset every cap measured from it. Otherwise the caller's since must be now (within 60 s), and the
+ * write stores now. The Store Writer's checkWait calls this; the stand-in (shared/record.mjs memoryRecord) calls keptSince.
+ */
+function waitSince({ wait, kept = null, nowMs }) {
+  const keep = keptSince({ wait, kept });
+  if (keep !== null && wait.since === keep) return { ok: true, since: keep };
+  const since = Date.parse(wait?.since);
+  if (!Number.isFinite(since) || Math.abs(since - nowMs) > 60000) return no('wait.since must be now (within 60 s)');
+  return { ok: true, since: keep ?? new Date(nowMs).toISOString() };
+}
+
 /** A card write's claim, after guardWrite: { ok: true, claim? } (claim = the stamped claim to store) | { ok: false, reason }. */
 function claimCheck({ old, doc, from, to, changed, nowMs }) {
   let claim;
@@ -2598,9 +2620,9 @@ __bob_def('orchestrate/shared/record.mjs', ['orchestrate/shared/record-names.mjs
 const { createHash } = __bob_node_crypto;
 const { lstatSync, readFileSync, realpathSync } = __bob_node_fs;
 const { basename, dirname, join } = __bob_node_path;
-let CARD_KINDS, NOT_A_RECORD, OUTBOX_KINDS, OUTBOX_KIND_PATTERN, OUTBOX_NAME, SESSION_ID, STATES, isNotARecord, notARecord, outboxKindOf, claimCheck, fixPlanCheck, guardWrite;
+let CARD_KINDS, NOT_A_RECORD, OUTBOX_KINDS, OUTBOX_KIND_PATTERN, OUTBOX_NAME, SESSION_ID, STATES, isNotARecord, notARecord, outboxKindOf, claimCheck, fixPlanCheck, guardWrite, keptSince, same;
 __bob_i('orchestrate/shared/record-names.mjs', (m) => { CARD_KINDS = m.CARD_KINDS; NOT_A_RECORD = m.NOT_A_RECORD; OUTBOX_KINDS = m.OUTBOX_KINDS; OUTBOX_KIND_PATTERN = m.OUTBOX_KIND_PATTERN; OUTBOX_NAME = m.OUTBOX_NAME; SESSION_ID = m.SESSION_ID; STATES = m.STATES; isNotARecord = m.isNotARecord; notARecord = m.notARecord; outboxKindOf = m.outboxKindOf; });
-__bob_i('orchestrate/modules/M9-record/guard.mjs', (m) => { claimCheck = m.claimCheck; fixPlanCheck = m.fixPlanCheck; guardWrite = m.guardWrite; });
+__bob_i('orchestrate/modules/M9-record/guard.mjs', (m) => { claimCheck = m.claimCheck; fixPlanCheck = m.fixPlanCheck; guardWrite = m.guardWrite; keptSince = m.keptSince; same = m.same; });
 Object.defineProperties(__bob_e, {
   CARD_KINDS: { get: () => CARD_KINDS, enumerable: true },
   NOT_A_RECORD: { get: () => NOT_A_RECORD, enumerable: true },
@@ -2895,6 +2917,16 @@ function memoryRecord({ outboxRoot, now = () => Date.now(), dead = null } = {}) 
           const fp = fixPlanCheck(g.doc, (fid) => docs.get(key('card', fid))?.doc ?? null);
           if (!fp.ok) return refused(fp.reason);
         }
+      }
+      // A wait's since on a re-check, by the Store Writer's own rule (keptSince, L285, L296): a wait that stays on the
+      // same who and what keeps its stored since, whatever the caller sends, so a test sees a cap measured from when
+      // the waiting began. DEPARTURE: a new wait's since is stored as the caller sends it. The Store Writer refuses one
+      // more than 60 s from its own clock and stores now; here a test's pass runs at its own `now` while this clock
+      // stays where the test set it, and the two are the same clock only in the real system.
+      const waits = (entity === 'card' && g.to === 'waiting') || (entity === 'session' && (g.to === 'waiting_input' || g.to === 'waiting_limit'));
+      if (waits && g.doc?.wait && !g.moving && !same(cur?.doc?.wait, g.doc.wait)) {
+        const keep = keptSince({ wait: g.doc.wait, kept: cur?.doc?.wait ?? null });
+        if (keep !== null) g.doc.wait = { ...g.doc.wait, since: keep };
       }
       const rev = expectRev + 1;
       const d = { entity, id, doc: g.doc, rev, createdBy: cur?.createdBy ?? actor, ts: cur?.ts, stateSince: cur?.stateSince };
