@@ -86,7 +86,7 @@ function dayOne({ text = FIRST, withProduct = true } = {}) {
   const rules = rulesFromText({ [P]: text }, { productState: (p) => env?.record.read('product', p)?.doc ?? null, clock: () => env?.clock.t ?? T0 });
   env = setup({ prefix: 'orch-day-one-', extra: { rules } });
   env.clock.t = T0;
-  // The product document: the Record grants it to approvals, but no production code writes it yet (L129, L204-b; see
+  // The product document: M2 onboard.mjs writes it (L204-b), but only through the approvals port, not wired yet (L270; see
   // the writers tests below). With withProduct it is written through the real Record, as approvals would.
   // productState is wired here by the test: no production code builds the engine yet, and rulesFromText's own default
   // reads every product as active, so "paused with no document" is this wiring's answer, not yet the Mac's.
@@ -253,7 +253,7 @@ test('the undo card the real undo step makes can pass the first-cutover docs lan
   assert.equal(r.decision, 'allow', `the docs lane refuses the undo: ${r.reason}`);
 });
 
-test('with only production writers, the product reads active and the docs lane is not undo-only', { todo: 'L129, L204-b (lane 1, M2): no production code writes the product document yet; with none, the product reads as paused, so no worker starts and only an exact reverse may merge' }, () => {
+test('with only production writers, the product reads active and the docs lane is not undo-only', { todo: 'L270 (lane 1, the approvals wiring PR after #121): M2 onboard.mjs writes the product document, but only through the tick approvals port, and the Dispatcher wiring answers that port with "not wired yet"; until it is wired the product reads as paused, so no worker starts and only an exact reverse may merge' }, () => {
   const { rules } = dayOne({ withProduct: false });
   const merge = rules.may('merge', { product: P, card: { id: 'C-2', kind: 'ordinary', tier: 2 }, truncated: false, labels: [], declared_tier: 2, kind: 'ordinary', files: docsChange() });
   assert.equal(merge.decision, 'allow', merge.reason);
