@@ -21,12 +21,26 @@ function reads(text) {
   return rulesReads(text.replace(HELPER, ''), { helpers: ['get'] });
 }
 
-test('every rules key readConfig reads is on Approvals\' list, and every listed key is read', () => {
-  const { keys, nonLiteral } = reads(body(KINDS, 'readConfig'));
-  assert.equal(nonLiteral, 0, 'every rules read names its key');
+// onboard.mjs reads onboarding.state (L204-b); the whole file is scanned, so a read added anywhere in it is seen (L221 m-4).
+const ONBOARD = readFileSync(new URL('onboard.mjs', import.meta.url), 'utf8');
+
+test('every rules key readConfig and onboard.mjs read is on Approvals\' list, and every listed key is read', () => {
+  const cfg = reads(body(KINDS, 'readConfig'));
+  const on = rulesReads(ONBOARD);
+  assert.equal(cfg.nonLiteral + on.nonLiteral, 0, 'every rules read names its key');
+  assert.deepEqual([...on.keys], ['onboarding.state'], 'onboard.mjs reads exactly onboarding.state, written out');
+  const keys = new Set([...cfg.keys, ...on.keys]);
   assert.ok(keys.has('accounts.joe.github_id'), 'the typed read rules?.num?.( is seen (L123)');
-  for (const k of keys) assert.ok(LIST.includes(k), `readConfig reads ${k}, which required-keys.mjs doesn't list`);
-  for (const k of LIST) assert.ok(keys.has(k), `required-keys.mjs lists ${k}, which readConfig doesn't read`);
+  for (const k of keys) assert.ok(LIST.includes(k), `M2 reads ${k}, which required-keys.mjs doesn't list`);
+  for (const k of LIST) assert.ok(keys.has(k), `required-keys.mjs lists ${k}, which neither readConfig nor onboard.mjs reads`);
+});
+
+test('the reader sees a new read in onboard.mjs, and a key it can\'t name (plants on copies, L221 m-4)', () => {
+  const at = "const on = ctx.rules?.get?.('onboarding.state', { product: ctx.product });";
+  assert.ok(ONBOARD.includes(at), 'onboard.mjs reads the key through ctx.rules, written out');
+  const plant = (line) => rulesReads(ONBOARD.replace(at, `${at} ${line}`));
+  assert.deepEqual([...plant("ctx.rules.get('onboarding.extra', { product: ctx.product });").keys].filter((k) => !LIST.includes(k)), ['onboarding.extra']);
+  assert.equal(rulesReads(ONBOARD.replace("get?.('onboarding.state'", 'get?.(keyFromSomewhere')).nonLiteral, 1);
 });
 
 test('the only rules reads in kinds.mjs are readConfig\'s', () => {

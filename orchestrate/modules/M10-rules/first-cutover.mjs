@@ -18,11 +18,11 @@
 // known-gaps.mjs), says so on its end; the file is still refused for it. Daily-card lists are a rule
 // of their own until M11 reads them with compile (L120).
 
-import { fileURLToPath } from 'node:url';
 import { parseYaml } from '../../../scripts/blueprint/yaml-lite.mjs';
 import { parsePolicy, EFFECT_FIELDS } from './policy.mjs';
 import { checkProducts } from './reader.mjs';
 import { makeEngine } from './engine.mjs';
+import { ROLES_DIR } from './roles.mjs';
 import { isMacKey, keyMatches, makeRules, MAC_LIST_ALL } from '../../shared/rules.mjs';
 import * as M6 from '../M6-merge-gate/required-keys.mjs';
 import * as M2 from '../M2-approvals/required-keys.mjs';
@@ -37,7 +37,7 @@ import { SCOPE_OWNERS, scopeLabel } from './known-gaps.mjs';
 // editingLimits for every product state. NEW_KEYS once meant "the rules schema can't hold these yet", and this check
 // skipped them; since #79 parsePolicy holds every one, so the skip let a file the Dispatcher can't run on pass (#77 r5
 // MAT-1). A test fails if any M11 key is left out here.
-const M11_TYPES = Object.freeze({ perState: 'object', shakedown: 'boolean', leadDailyCard: 'list', redRuns: 'list' });
+const M11_TYPES = Object.freeze({ perState: 'object', shakedown: 'boolean', leadDailyCard: 'list', redRuns: 'list', proposalsOutbox: 'text' });
 // L120: M11's gate.mjs matches() reads daily-card patterns with a matcher of its own, and no list of forms it reads
 // differently from M10 compile was ever complete (`docs/blueprint/**/daily.md`, a leading `**/`, spaces at either end).
 // Until lane 2 moves matches() onto compile, any non-empty list is refused, as a rule; L96 already says [] at the first
@@ -74,7 +74,6 @@ const M11 = Object.freeze({
 });
 export const READERS = Object.freeze({ M6, M2, M9, M11 });
 export const MODULE_KEYS = Object.freeze([...new Set(Object.values(READERS).flatMap((m) => m.REQUIRED_KEYS))]);
-const ROLES_DIR = fileURLToPath(new URL('./roles', import.meta.url));
 
 export const FIRST_LANES = Object.freeze(['docs', 'research']);
 // Every effect field read by path alone; package_imports is the import scan's, so the first cutover needs none.
@@ -91,6 +90,8 @@ export function firstCutoverProblems(text, entry, existing = []) {
   const out = [];
   // A missing stage reads as first, but the onboarding entry says it, so the second cutover is one visible edit.
   if (parseYaml(text, 'policy.yaml').product?.cutover_stage !== 'first') out.push('product.cutover_stage must say first');
+  // The one "on" switch (L204-b, L209): Approvals makes the product's record from it (M2 onboard.mjs), so the entry says it.
+  if (p.onboarding?.state !== 'active') out.push('onboarding.state must say active');
   if (p.caps.editing_per_product !== 0) out.push('caps.editing_per_product must be 0');
   const lanes = Object.keys(p.lanes);
   if (lanes.length !== FIRST_LANES.length || !FIRST_LANES.every((l) => lanes.includes(l))) out.push('lanes must be docs and research only');

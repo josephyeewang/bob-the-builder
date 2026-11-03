@@ -1,0 +1,443 @@
+{
+ "note": "Real GitHub REST answers recorded read-only (unauthenticated), names replaced with sample-org / sample-app / a-user, free text replaced, lists cut short. Recorded for R-0b-169.",
+ "recorded_at": "2026-11-02T11:39:08.958Z",
+ "merged": 119,
+ "open": 122,
+ "answers": {
+  "/pulls?state=open&per_page=100": [
+   {
+    "url": "https://api.a-user.com/repos/sample-org/sample-app/pulls/122",
+    "number": 122,
+    "state": "open",
+    "locked": false,
+    "title": "Recorded pull request 122",
+    "user": {
+     "login": "sample-org",
+     "type": "User"
+    },
+    "created_at": "2026-11-02T10:55:02Z",
+    "updated_at": "2026-11-02T10:55:02Z",
+    "closed_at": null,
+    "merged_at": null,
+    "merge_commit_sha": "10a4d961674e970281c1b544b7f92ab21029d1b1",
+    "draft": true,
+    "head": {
+     "label": "sample-org:claude/orch-lane4-95b",
+     "ref": "claude/orch-lane4-95b",
+     "sha": "0f0aab684a761c6ddb027ed45d5b597cdbc32640"
+    },
+    "base": {
+     "label": "sample-org:main",
+     "ref": "main",
+     "sha": "9c141c45eccb1c6a163bfa6266f1a59d72f34dcd"
+    }
+   },
+   {
+    "url": "https://api.a-user.com/repos/sample-org/sample-app/pulls/121",
+    "number": 121,
+    "state": "open",
+    "locked": false,
+    "title": "Recorded pull request 121",
+    "user": {
+     "login": "sample-org",
+     "type": "User"
+    },
+    "created_at": "2026-11-02T10:44:19Z",
+    "updated_at": "2026-11-02T10:44:19Z",
+    "closed_at": null,
+    "merged_at": null,
+    "merge_commit_sha": "ee602a73ef7374972eab2ab85129ca87949e5f7d",
+    "draft": true,
+    "head": {
+     "label": "sample-org:claude/l204b-onboard",
+     "ref": "claude/l204b-onboard",
+     "sha": "42fe0232ac041d0de5f8f9450c1dfd0be8e9186d"
+    },
+    "base": {
+     "label": "sample-org:main",
+     "ref": "main",
+     "sha": "9c141c45eccb1c6a163bfa6266f1a59d72f34dcd"
+    }
+   },
+   {
+    "url": "https://api.a-user.com/repos/sample-org/sample-app/pulls/120",
+    "number": 120,
+    "state": "open",
+    "locked": false,
+    "title": "Recorded pull request 120",
+    "user": {
+     "login": "sample-org",
+     "type": "User"
+    },
+    "created_at": "2026-11-02T10:42:31Z",
+    "updated_at": "2026-11-02T10:42:37Z",
+    "closed_at": null,
+    "merged_at": null,
+    "merge_commit_sha": "793b27000b68a9bf86f5ecabd98d53400ea1151a",
+    "draft": true,
+    "head": {
+     "label": "sample-org:claude/orch-lane3-l204c",
+     "ref": "claude/orch-lane3-l204c",
+     "sha": "6e6242475ad8c7362237eb76382625f0fc6005cb"
+    },
+    "base": {
+     "label": "sample-org:main",
+     "ref": "main",
+     "sha": "9c141c45eccb1c6a163bfa6266f1a59d72f34dcd"
+    }
+   }
+  ],
+  "/pulls/119": {
+   "url": "https://api.a-user.com/repos/sample-org/sample-app/pulls/119",
+   "number": 119,
+   "state": "closed",
+   "locked": false,
+   "title": "Recorded pull request 119",
+   "user": {
+    "login": "sample-org",
+    "type": "User"
+   },
+   "created_at": "2026-11-02T10:28:44Z",
+   "updated_at": "2026-11-02T11:00:20Z",
+   "closed_at": "2026-11-02T11:00:17Z",
+   "merged_at": "2026-11-02T11:00:17Z",
+   "merge_commit_sha": "bb961a2853d3ad35814fe350f96219741f0c356c",
+   "draft": false,
+   "head": {
+    "label": "sample-org:claude/lead-95-inventory",
+    "ref": "claude/lead-95-inventory",
+    "sha": "756d21aafa0e6ba1437b68522feb07e1a9d0323d"
+   },
+   "base": {
+    "label": "sample-org:main",
+    "ref": "main",
+    "sha": "9c141c45eccb1c6a163bfa6266f1a59d72f34dcd"
+   },
+   "merged": true,
+   "mergeable": null,
+   "mergeable_state": "unknown",
+   "comments": 0,
+   "review_comments": 0,
+   "commits": 31,
+   "additions": 926,
+   "deletions": 141,
+   "changed_files": 29
+  },
+  "/pulls/119/files?per_page=100": [
+   {
+    "sha": "77598e13c3c3b418aec05b57466c9a5021eef8a6",
+    "filename": "orchestrate/modules/M1-front-door/README.md",
+    "status": "modified",
+    "additions": 14,
+    "deletions": 3,
+    "changes": 17,
+    "blob_url": "https://a-user.com/sample-org/sample-app/blob/756d21aafa0e6ba1437b68522feb07e1a9d0323d/orchestrate%2Fmodules%2FM1-front-door%2FREADME.md",
+    "raw_url": "https://a-user.com/sample-org/sample-app/raw/756d21aafa0e6ba1437b68522feb07e1a9d0323d/orchestrate%2Fmodules%2FM1-front-door%2FREADME.md",
+    "contents_url": "https://api.a-user.com/repos/sample-org/sample-app/contents/orchestrate%2Fmodules%2FM1-front-door%2FREADME.md?ref=756d21aafa0e6ba1437b68522feb07e1a9d0323d"
+   },
+   {
+    "sha": "9524c1e63dbe867b13f79c620ef1555fbfbc317e",
+    "filename": "orchestrate/modules/M1-front-door/sort.mjs",
+    "status": "modified",
+    "additions": 3,
+    "deletions": 2,
+    "changes": 5,
+    "blob_url": "https://a-user.com/sample-org/sample-app/blob/756d21aafa0e6ba1437b68522feb07e1a9d0323d/orchestrate%2Fmodules%2FM1-front-door%2Fsort.mjs",
+    "raw_url": "https://a-user.com/sample-org/sample-app/raw/756d21aafa0e6ba1437b68522feb07e1a9d0323d/orchestrate%2Fmodules%2FM1-front-door%2Fsort.mjs",
+    "contents_url": "https://api.a-user.com/repos/sample-org/sample-app/contents/orchestrate%2Fmodules%2FM1-front-door%2Fsort.mjs?ref=756d21aafa0e6ba1437b68522feb07e1a9d0323d"
+   },
+   {
+    "sha": "32422b6945b4aeb1e221906c2ca843e29ae70947",
+    "filename": "orchestrate/modules/M11-dispatcher/outbox-intake.test.mjs",
+    "status": "modified",
+    "additions": 1,
+    "deletions": 0,
+    "changes": 1,
+    "blob_url": "https://a-user.com/sample-org/sample-app/blob/756d21aafa0e6ba1437b68522feb07e1a9d0323d/orchestrate%2Fmodules%2FM11-dispatcher%2Foutbox-intake.test.mjs",
+    "raw_url": "https://a-user.com/sample-org/sample-app/raw/756d21aafa0e6ba1437b68522feb07e1a9d0323d/orchestrate%2Fmodules%2FM11-dispatcher%2Foutbox-intake.test.mjs",
+    "contents_url": "https://api.a-user.com/repos/sample-org/sample-app/contents/orchestrate%2Fmodules%2FM11-dispatcher%2Foutbox-intake.test.mjs?ref=756d21aafa0e6ba1437b68522feb07e1a9d0323d"
+   },
+   {
+    "sha": "c4a46e3cc264434c78bbc8d3d7d4951de6b073fa",
+    "filename": "orchestrate/modules/M11-dispatcher/tick.test.mjs",
+    "status": "modified",
+    "additions": 1,
+    "deletions": 0,
+    "changes": 1,
+    "blob_url": "https://a-user.com/sample-org/sample-app/blob/756d21aafa0e6ba1437b68522feb07e1a9d0323d/orchestrate%2Fmodules%2FM11-dispatcher%2Ftick.test.mjs",
+    "raw_url": "https://a-user.com/sample-org/sample-app/raw/756d21aafa0e6ba1437b68522feb07e1a9d0323d/orchestrate%2Fmodules%2FM11-dispatcher%2Ftick.test.mjs",
+    "contents_url": "https://api.a-user.com/repos/sample-org/sample-app/contents/orchestrate%2Fmodules%2FM11-dispatcher%2Ftick.test.mjs?ref=756d21aafa0e6ba1437b68522feb07e1a9d0323d"
+   },
+   {
+    "sha": "643faf29e06bd89614fbe1df361fd210d873cc8a",
+    "filename": "orchestrate/modules/M2-approvals/inert-reports.test.mjs",
+    "status": "added",
+    "additions": 53,
+    "deletions": 0,
+    "changes": 53,
+    "blob_url": "https://a-user.com/sample-org/sample-app/blob/756d21aafa0e6ba1437b68522feb07e1a9d0323d/orchestrate%2Fmodules%2FM2-approvals%2Finert-reports.test.mjs",
+    "raw_url": "https://a-user.com/sample-org/sample-app/raw/756d21aafa0e6ba1437b68522feb07e1a9d0323d/orchestrate%2Fmodules%2FM2-approvals%2Finert-reports.test.mjs",
+    "contents_url": "https://api.a-user.com/repos/sample-org/sample-app/contents/orchestrate%2Fmodules%2FM2-approvals%2Finert-reports.test.mjs?ref=756d21aafa0e6ba1437b68522feb07e1a9d0323d"
+   }
+  ],
+  "/commits/756d21aafa0e6ba1437b68522feb07e1a9d0323d/check-runs?per_page=100": {
+   "total_count": 6,
+   "check_runs": [
+    {
+     "name": "x",
+     "status": "completed",
+     "conclusion": "success",
+     "head_sha": "756d21aafa0e6ba1437b68522feb07e1a9d0323d",
+     "started_at": "2026-11-02T10:28:51Z",
+     "completed_at": "2026-11-02T10:28:56Z",
+     "output": {
+      "title": null,
+      "summary": null
+     }
+    },
+    {
+     "name": "x",
+     "status": "completed",
+     "conclusion": "success",
+     "head_sha": "756d21aafa0e6ba1437b68522feb07e1a9d0323d",
+     "started_at": "2026-11-02T10:29:01Z",
+     "completed_at": "2026-11-02T10:34:54Z",
+     "output": {
+      "title": null,
+      "summary": null
+     }
+    },
+    {
+     "name": "x",
+     "status": "completed",
+     "conclusion": "success",
+     "head_sha": "756d21aafa0e6ba1437b68522feb07e1a9d0323d",
+     "started_at": "2026-11-02T10:29:01Z",
+     "completed_at": "2026-11-02T10:29:17Z",
+     "output": {
+      "title": null,
+      "summary": null
+     }
+    },
+    {
+     "name": "x",
+     "status": "completed",
+     "conclusion": "success",
+     "head_sha": "756d21aafa0e6ba1437b68522feb07e1a9d0323d",
+     "started_at": "2026-11-02T10:28:51Z",
+     "completed_at": "2026-11-02T10:28:57Z",
+     "output": {
+      "title": null,
+      "summary": null
+     }
+    },
+    {
+     "name": "x",
+     "status": "completed",
+     "conclusion": "success",
+     "head_sha": "756d21aafa0e6ba1437b68522feb07e1a9d0323d",
+     "started_at": "2026-11-02T10:28:51Z",
+     "completed_at": "2026-11-02T10:31:29Z",
+     "output": {
+      "title": null,
+      "summary": null
+     }
+    },
+    {
+     "name": "x",
+     "status": "completed",
+     "conclusion": "success",
+     "head_sha": "756d21aafa0e6ba1437b68522feb07e1a9d0323d",
+     "started_at": "2026-11-02T10:28:50Z",
+     "completed_at": "2026-11-02T10:28:55Z",
+     "output": {
+      "title": null,
+      "summary": null
+     }
+    }
+   ]
+  },
+  "/compare/main...756d21aafa0e6ba1437b68522feb07e1a9d0323d": {
+   "status": "diverged",
+   "ahead_by": 31,
+   "behind_by": 1,
+   "total_commits": 31
+  },
+  "/pulls/122": {
+   "url": "https://api.a-user.com/repos/sample-org/sample-app/pulls/122",
+   "number": 122,
+   "state": "open",
+   "locked": false,
+   "title": "Recorded pull request 122",
+   "user": {
+    "login": "sample-org",
+    "type": "User"
+   },
+   "created_at": "2026-11-02T10:55:02Z",
+   "updated_at": "2026-11-02T10:55:02Z",
+   "closed_at": null,
+   "merged_at": null,
+   "merge_commit_sha": "10a4d961674e970281c1b544b7f92ab21029d1b1",
+   "draft": true,
+   "head": {
+    "label": "sample-org:claude/orch-lane4-95b",
+    "ref": "claude/orch-lane4-95b",
+    "sha": "0f0aab684a761c6ddb027ed45d5b597cdbc32640"
+   },
+   "base": {
+    "label": "sample-org:main",
+    "ref": "main",
+    "sha": "9c141c45eccb1c6a163bfa6266f1a59d72f34dcd"
+   },
+   "merged": false,
+   "mergeable": true,
+   "mergeable_state": "unstable",
+   "comments": 0,
+   "review_comments": 0,
+   "commits": 29,
+   "additions": 1256,
+   "deletions": 119,
+   "changed_files": 26
+  },
+  "/pulls/122/files?per_page=100": [
+   {
+    "sha": "77598e13c3c3b418aec05b57466c9a5021eef8a6",
+    "filename": "orchestrate/modules/M1-front-door/README.md",
+    "status": "modified",
+    "additions": 14,
+    "deletions": 3,
+    "changes": 17,
+    "blob_url": "https://a-user.com/sample-org/sample-app/blob/0f0aab684a761c6ddb027ed45d5b597cdbc32640/orchestrate%2Fmodules%2FM1-front-door%2FREADME.md",
+    "raw_url": "https://a-user.com/sample-org/sample-app/raw/0f0aab684a761c6ddb027ed45d5b597cdbc32640/orchestrate%2Fmodules%2FM1-front-door%2FREADME.md",
+    "contents_url": "https://api.a-user.com/repos/sample-org/sample-app/contents/orchestrate%2Fmodules%2FM1-front-door%2FREADME.md?ref=0f0aab684a761c6ddb027ed45d5b597cdbc32640"
+   },
+   {
+    "sha": "9524c1e63dbe867b13f79c620ef1555fbfbc317e",
+    "filename": "orchestrate/modules/M1-front-door/sort.mjs",
+    "status": "modified",
+    "additions": 3,
+    "deletions": 2,
+    "changes": 5,
+    "blob_url": "https://a-user.com/sample-org/sample-app/blob/0f0aab684a761c6ddb027ed45d5b597cdbc32640/orchestrate%2Fmodules%2FM1-front-door%2Fsort.mjs",
+    "raw_url": "https://a-user.com/sample-org/sample-app/raw/0f0aab684a761c6ddb027ed45d5b597cdbc32640/orchestrate%2Fmodules%2FM1-front-door%2Fsort.mjs",
+    "contents_url": "https://api.a-user.com/repos/sample-org/sample-app/contents/orchestrate%2Fmodules%2FM1-front-door%2Fsort.mjs?ref=0f0aab684a761c6ddb027ed45d5b597cdbc32640"
+   },
+   {
+    "sha": "32422b6945b4aeb1e221906c2ca843e29ae70947",
+    "filename": "orchestrate/modules/M11-dispatcher/outbox-intake.test.mjs",
+    "status": "modified",
+    "additions": 1,
+    "deletions": 0,
+    "changes": 1,
+    "blob_url": "https://a-user.com/sample-org/sample-app/blob/0f0aab684a761c6ddb027ed45d5b597cdbc32640/orchestrate%2Fmodules%2FM11-dispatcher%2Foutbox-intake.test.mjs",
+    "raw_url": "https://a-user.com/sample-org/sample-app/raw/0f0aab684a761c6ddb027ed45d5b597cdbc32640/orchestrate%2Fmodules%2FM11-dispatcher%2Foutbox-intake.test.mjs",
+    "contents_url": "https://api.a-user.com/repos/sample-org/sample-app/contents/orchestrate%2Fmodules%2FM11-dispatcher%2Foutbox-intake.test.mjs?ref=0f0aab684a761c6ddb027ed45d5b597cdbc32640"
+   },
+   {
+    "sha": "c4a46e3cc264434c78bbc8d3d7d4951de6b073fa",
+    "filename": "orchestrate/modules/M11-dispatcher/tick.test.mjs",
+    "status": "modified",
+    "additions": 1,
+    "deletions": 0,
+    "changes": 1,
+    "blob_url": "https://a-user.com/sample-org/sample-app/blob/0f0aab684a761c6ddb027ed45d5b597cdbc32640/orchestrate%2Fmodules%2FM11-dispatcher%2Ftick.test.mjs",
+    "raw_url": "https://a-user.com/sample-org/sample-app/raw/0f0aab684a761c6ddb027ed45d5b597cdbc32640/orchestrate%2Fmodules%2FM11-dispatcher%2Ftick.test.mjs",
+    "contents_url": "https://api.a-user.com/repos/sample-org/sample-app/contents/orchestrate%2Fmodules%2FM11-dispatcher%2Ftick.test.mjs?ref=0f0aab684a761c6ddb027ed45d5b597cdbc32640"
+   },
+   {
+    "sha": "643faf29e06bd89614fbe1df361fd210d873cc8a",
+    "filename": "orchestrate/modules/M2-approvals/inert-reports.test.mjs",
+    "status": "added",
+    "additions": 53,
+    "deletions": 0,
+    "changes": 53,
+    "blob_url": "https://a-user.com/sample-org/sample-app/blob/0f0aab684a761c6ddb027ed45d5b597cdbc32640/orchestrate%2Fmodules%2FM2-approvals%2Finert-reports.test.mjs",
+    "raw_url": "https://a-user.com/sample-org/sample-app/raw/0f0aab684a761c6ddb027ed45d5b597cdbc32640/orchestrate%2Fmodules%2FM2-approvals%2Finert-reports.test.mjs",
+    "contents_url": "https://api.a-user.com/repos/sample-org/sample-app/contents/orchestrate%2Fmodules%2FM2-approvals%2Finert-reports.test.mjs?ref=0f0aab684a761c6ddb027ed45d5b597cdbc32640"
+   }
+  ],
+  "/commits/0f0aab684a761c6ddb027ed45d5b597cdbc32640/check-runs?per_page=100": {
+   "total_count": 6,
+   "check_runs": [
+    {
+     "name": "x",
+     "status": "completed",
+     "conclusion": "success",
+     "head_sha": "0f0aab684a761c6ddb027ed45d5b597cdbc32640",
+     "started_at": "2026-11-02T10:55:09Z",
+     "completed_at": "2026-11-02T10:59:20Z",
+     "output": {
+      "title": null,
+      "summary": null
+     }
+    },
+    {
+     "name": "x",
+     "status": "completed",
+     "conclusion": "success",
+     "head_sha": "0f0aab684a761c6ddb027ed45d5b597cdbc32640",
+     "started_at": "2026-11-02T10:55:09Z",
+     "completed_at": "2026-11-02T10:55:24Z",
+     "output": {
+      "title": null,
+      "summary": null
+     }
+    },
+    {
+     "name": "x",
+     "status": "completed",
+     "conclusion": "failure",
+     "head_sha": "0f0aab684a761c6ddb027ed45d5b597cdbc32640",
+     "started_at": "2026-11-02T10:55:19Z",
+     "completed_at": "2026-11-02T11:01:05Z",
+     "output": {
+      "title": null,
+      "summary": null
+     }
+    },
+    {
+     "name": "x",
+     "status": "completed",
+     "conclusion": "success",
+     "head_sha": "0f0aab684a761c6ddb027ed45d5b597cdbc32640",
+     "started_at": "2026-11-02T10:55:09Z",
+     "completed_at": "2026-11-02T10:55:22Z",
+     "output": {
+      "title": null,
+      "summary": null
+     }
+    },
+    {
+     "name": "x",
+     "status": "completed",
+     "conclusion": "success",
+     "head_sha": "0f0aab684a761c6ddb027ed45d5b597cdbc32640",
+     "started_at": "2026-11-02T10:55:10Z",
+     "completed_at": "2026-11-02T10:55:15Z",
+     "output": {
+      "title": null,
+      "summary": null
+     }
+    },
+    {
+     "name": "x",
+     "status": "completed",
+     "conclusion": "success",
+     "head_sha": "0f0aab684a761c6ddb027ed45d5b597cdbc32640",
+     "started_at": "2026-11-02T10:55:19Z",
+     "completed_at": "2026-11-02T10:55:24Z",
+     "output": {
+      "title": null,
+      "summary": null
+     }
+    }
+   ]
+  },
+  "/compare/main...0f0aab684a761c6ddb027ed45d5b597cdbc32640": {
+   "status": "diverged",
+   "ahead_by": 29,
+   "behind_by": 5,
+   "total_commits": 29
+  }
+ }
+}

@@ -4,13 +4,14 @@
 // answer (m11). It reads; it never writes.
 //
 // Sessions it counts are the running ones the pass hands in: { id, product, kind, card, lead, files,
-// bundle_files }. kind is editing | script | readonly | review | audit | lead | front_door.
+// bundle_files }. kind is editing | undo | script | readonly | review | audit | merge | undo_merge | lead | front_door.
 
 import { posix } from 'node:path';
-import { KEYS, need } from './keys.mjs';
+import { KEYS, MissingKey, need } from './keys.mjs';
 import { wholeNumber } from '../../shared/rules.mjs';
 import { mayStart } from './usage.mjs';
 import { foldKey } from '../../shared/plan-fingerprint.mjs';
+import { STATES } from '../../shared/record-names.mjs';
 
 const refuse = (reason) => ({ ok: false, reason });
 const ROW_FILE = /^docs\/blueprint\/rows\/([^/]+)\.yaml$/;
@@ -60,13 +61,20 @@ function overlaps(a, b) {
   return null;
 }
 
-// Undo workers are worker-profile sessions too (M14, audit MIN-7): they count toward the editing caps.
+// Undo workers are worker-profile sessions too (M14, audit MIN-7): a running one counts toward the editing caps
+// for every other editing start. An exact-reverse undo's own start is not held by those caps (L199): see startGate.
 // Overnight runs edit files too (audit 0b-6 r2, L27): they count toward the caps, never around them.
 const isEditing = (s) => s.kind === 'editing' || s.kind === 'undo' || s.kind === 'overnight';
 // Every session that writes files takes part in the files-don't-overlap check (audit MIN-16).
 // Sessions that finish work or answer the owner; they write no product files, so the caps do not apply.
 const CAP_FREE = Object.freeze(['review', 'audit', 'merge', 'undo_merge', 'lead', 'front_door']);
 const writesFiles = (s) => isEditing(s) || s.kind === 'script';
+// The product states the Record knows (shared/record-names.mjs). A product with no state, or one not in this list,
+// is read as paused, as M10 reads it (L210).
+const PRODUCT_STATES = STATES.product;
+// An undo card in one of these states is taken or running: it counts toward the one-undo limit even when the
+// running-sessions list does not hold it (a launch that timed out leaves its card claimed; #117 audit m2).
+const UNDO_LIVE = Object.freeze(['claimed', 'running']);
 
 /**
  * The card's tier and risky classes, failing closed (audit MAT-3, MIN-15): the risky set is the card's
@@ -85,8 +93,10 @@ export function editingLimits({ rules, product, productDoc, amberCaps }) {
   const state = productDoc?.state;
   // per_state is a map, so its values come as the rules file's text; each is read by the shared whole-number rule (L123).
   const perState = need(rules, KEYS.perState, { product, type: 'object' });
-  const stateCap = Object.hasOwn(perState, state) ? wholeNumber(perState[state]) : undefined;
-  if (stateCap === undefined) throw Object.assign(new Error(`no per-state cap for ${state}`), { key: KEYS.perState });
+  const has = Object.hasOwn(perState, state);
+  const stateCap = has ? wholeNumber(perState[state]) : undefined;
+  // `unreadable`: the state's value is there but is not a whole number, a rule nobody can read (L210 point 3).
+  if (stateCap === undefined) throw has ? new MissingKey(KEYS.perState, `value for ${state} is unreadable`, { unreadable: true }) : new MissingKey(KEYS.perState, `has no value for ${state}`);
   const forProduct = [need(rules, KEYS.editingPerProduct, { product }), stateCap];
   const forMac = [need(rules, KEYS.editingPerMac)];
   if (amberCaps) {
@@ -130,12 +140,37 @@ export function startGate({ rules, rec, card, kind, product, b, running, lead, e
     if (!isEditing({ kind })) return refuse(`unknown session kind ${kind}: start nothing`);
     const productDoc = rec.read('product', product)?.doc;
     if (!productDoc) return refuse(`no product record for ${product}`);
-    // A cap is budget, not safety (LEAD-CALLS L40): an exact reverse whose cap value is missing skips that
-    // cap and names it, so Joe is still told. The files-don't-overlap check below is safety and still runs.
+    // The shared undo rule (L31, L199, L210): an undo (an exact-reverse card) is never refused
+    // by the product's state or the editing caps, a cap of 0 included. Its own limit: at most one undo running per
+    // product. A running undo still counts toward the caps for every other editing start (isEditing). A paused
+    // product starts its undo, the same way push and merge already let an exact reverse through; every other
+    // editing start on a paused product is refused. A product with no state, or a state the Record doesn't know, is
+    // read as paused. A missing cap value is still named for the undo (L40), so Joe is told; a cap value that is
+    // there but unreadable, whichever cap it is, is a rule nobody can read, and refuses the undo too (L228). The
+    // files-don't-overlap check below is safety and still runs. This gate does not read M10's product-state rules
+    // (an unknown merge or start rule): production asks M10 first (pass.mjs starts()), and M10 refuses those.
+    const exactUndo = kind === 'undo' && exactReverse === true && card?.kind === 'exact_reverse';
+    const paused = !PRODUCT_STATES.includes(productDoc.state) || productDoc.state === 'paused';
     let lim = null;
     let capMissing = null;
-    try { lim = editingLimits({ rules, product, productDoc, amberCaps: band.amberCaps }); } catch (e) { if (!(kind === 'undo' && exactReverse && e.key)) throw e; capMissing = e.key; }
-    if (lim) {
+    // A state read as paused is looked up as paused, so an unknown state names no rule of its own.
+    try { lim = editingLimits({ rules, product, productDoc: paused ? { ...productDoc, state: 'paused' } : productDoc, amberCaps: band.amberCaps }); } catch (e) { if (!(exactUndo && e.key && !e.unreadable)) throw e; capMissing = e.key; }
+    // After the caps are read, so a broken or missing value for any state is still named (M10's readers check).
+    if (paused && !exactUndo) return refuse(`${product} is paused: only its undo starts`);
+    if (exactUndo) {
+      // The one-undo limit comes after the state check. It counts this product's undos in the running list and its
+      // exact-reverse cards the Record holds as claimed or running (#117 audit m2): the list comes from the
+      // sessions port, and a launch that timed out leaves its card claimed and out of the list. A count that can't
+      // be read refuses.
+      const live = new Set(mine.filter((s) => s.kind === 'undo').map((s) => s.card ?? s.id));
+      let cards;
+      try { cards = rec.list('card'); } catch (e) { return refuse(`the running undos could not be counted (${e?.message ?? e})`); }
+      if (!Array.isArray(cards)) return refuse('the running undos could not be counted');
+      for (const c of cards) if (c.doc?.product === product && c.doc?.kind === 'exact_reverse' && UNDO_LIVE.includes(c.doc?.state)) live.add(c.id);
+      // This card itself is not another undo: its own claim (the pass claims before it launches) never holds it.
+      live.delete(card.id);
+      if (live.size) return refuse(`an undo is already running for ${product} (one at a time)`);
+    } else if (lim) {
       const onProduct = mine.filter(isEditing);
       if (onProduct.length >= lim.product) return refuse(`the product already runs ${onProduct.length} editing worker(s) (cap ${lim.product})`);
       const onMac = running.filter(isEditing).length;
@@ -146,7 +181,7 @@ export function startGate({ rules, rec, card, kind, product, b, running, lead, e
   } catch (e) {
     // `missing` names the key, so the caller can tell Joe once (audit 0b-6 r3 MAT-3); a refusal alone was silent.
     const missing = e.key ?? `the rules (${e.message})`;
-    return { ...refuse(`the rules have no value for ${missing}: start nothing`), missing };
+    return { ...refuse(e.unreadable === true ? `the rules' value for ${missing} is unreadable: start nothing` : `the rules have no value for ${missing}: start nothing`), missing };
   }
 }
 
@@ -170,7 +205,10 @@ export function disjoint({ rules, card, product, others, rec }) {
   return { ok: true };
 }
 
-/** M4's launch check 12, as a port: the same answer the pass got. */
+/**
+ * M4's launch check 12, as a port: the same answer the pass got. M4 launches only reviewers and auditors
+ * (review-launch.mjs GATE_KIND), so no undo comes this way and `exactReverse` is never needed here.
+ */
 export function check12({ rules, rec, bandsNow, runningNow }) {
   return (ctx) => startGate({ rules, rec, card: ctx.card, kind: ctx.kind, product: ctx.product, b: bandsNow(), running: runningNow(), lead: ctx.lead });
 }

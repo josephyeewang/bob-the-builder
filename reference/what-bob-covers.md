@@ -42,7 +42,7 @@
   hooks that can stop work arrive warn-only first). `bob-init` records what it installed in `.bob/installed.json`.
 - **Three layers** (D-019): the user's global instructions (any task) · Bob (the one method for building software) ·
   the project (its own facts + deliberate differences from Bob). Write a rule once in the lowest layer that covers
-  it; point, don't copy — `build-protocol-core.md` §"WHERE RULES LIVE". Bob's own Engineering Principles 1–9 are
+  it; point, don't copy — `build-protocol-core.md` §"WHERE RULES LIVE". Bob's own Engineering Principles 1–11 are
   in §"ENGINEERING PRINCIPLES".
 - **Mechanical checkers:** `scripts/spec-audit.py` (spec structure + leftover TODO/TBD), `scripts/coverage-check.py`
   (an audit's coverage record adds up), `scripts/doc-pointers-check.mjs` (every pointer in the root AGENTS.md /

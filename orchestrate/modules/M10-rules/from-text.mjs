@@ -9,18 +9,16 @@
 //   rules.engine.noProductReads                               // per-product keys read with no product (L104 O-1)
 //     options: { running = () => 0, productState = () => ({ state: 'active' }), clock, rolesDir }
 
-import { join, dirname } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { makeRules } from '../../shared/rules.mjs';
 import { makeEngine } from './engine.mjs';
+import { ROLES_DIR } from './roles.mjs';
 import { parsePolicy } from './policy.mjs';
 
-const here = dirname(fileURLToPath(import.meta.url));
 const COMMIT = 'c'.repeat(40);
 const BLOB = 'b'.repeat(40);
 
 export function rulesFromText(texts, { running = () => 0, productState = () => ({ state: 'active' }),
-  clock = () => Date.parse('2026-10-14T14:00:00Z'), rolesDir = join(here, 'roles') } = {}) {
+  clock = () => Date.parse('2026-10-14T14:00:00Z'), rolesDir = ROLES_DIR } = {}) {
   const byProduct = typeof texts === 'string' ? { app: texts } : texts;
   if (!byProduct || typeof byProduct !== 'object' || !Object.keys(byProduct).length) throw new Error('rulesFromText needs rules text');
   const policies = {};

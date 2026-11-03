@@ -20,7 +20,7 @@ const PATHS = {
   reviewWalls: { outboxRoot: '/r/outbox', runnerRoot: '/r/review' },
 };
 const PRODUCT = { commands: { test: 'npm test', build: 'npm run build' }, hosts: ['registry.example.com'] };
-const render = (role, extra = {}) => renderRoleSettings({ productionFiles: [], role, profile: DESIGN_PROFILES[role], paths: PATHS, product: PRODUCT, rulesHosts: ['registry.example.com'], ...extra });
+const render = (role, extra = {}) => renderRoleSettings({ productionFiles: [], proposalOutboxes: [], role, profile: DESIGN_PROFILES[role], paths: PATHS, product: PRODUCT, rulesHosts: ['registry.example.com'], ...extra });
 
 // ---- role profiles ----
 
@@ -240,7 +240,7 @@ test('the role file is written, read back from disk and checked', () => {
 // ---- planted failures for each refusal line, checked by their own reasons (audit R-0b-44 M-6) ----
 
 test('render and check: an unknown role, a bad phase, a path with a space, a missing unsandboxed refusal and a read-back that differs each refuse with their own reason', () => {
-  assert.equal(renderRoleSettings({ productionFiles: [], role: 'nobody', profile: DESIGN_PROFILES.worker, paths: PATHS }).reason, 'no such role "nobody"');
+  assert.equal(renderRoleSettings({ productionFiles: [], proposalOutboxes: [], role: 'nobody', profile: DESIGN_PROFILES.worker, paths: PATHS }).reason, 'no such role "nobody"');
   assert.equal(render('worker', { phase: 'later' }).reason, 'bad phase');
   assert.match(render('worker', { paths: { ...PATHS, outbox: '/w/out box' } }).reason, /^path "\/w\/out box" is not a plain absolute path$/);
   const s = structuredClone(render('worker').settings);

@@ -6,9 +6,10 @@ import { takePassLock } from './pass-lock.mjs';
 import { RESTART_FACT, HANDOFF_NAME } from './lead-restart.mjs';
 import { RULES_MISSING_FACT } from './pass.mjs';
 import { tempDir } from '../../shared/test-tmp.mjs';
+import { fakeAlert } from '../../test/fake-alert.test-helper.mjs';
 import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
-import { tick, runTick, signedInAccount, actOnDead, STEPS, STEP_DEADLINE_MS, ACCOUNT_FACT, LAST_PASS_FACT, STEP_ERROR_FACT } from './tick.mjs';
+import { tick, runTick, signedInAccount, actOnDead, approvalsStep, approvalsAlertText, STEPS, STEP_DEADLINE_MS, ACCOUNT_FACT, LAST_PASS_FACT, STEP_ERROR_FACT } from './tick.mjs';
 import { queueAlert, sendAlerts, ALERT_QUEUE_MAX, ALERT_QUEUE_FACT, ALERT_SEND_MS, ALERT_BUDGET_MS } from './alerts.mjs';
 import { main, WATCHDOG_MARGIN_MS, RUN_DEADLINE_MS } from './main.mjs';
 import { PR_FACT } from './merges.mjs';
@@ -56,6 +57,8 @@ function world(entries = [], { over = {}, rules = rulesWith({}, allow) } = {}) {
     sendFrontDoor: async () => ({ outcome: 'sent' }), restartFrontDoor: async () => ({ ok: true }), startMinibase: async () => ({ ok: true }),
     frontDoorAlive: () => null, frontDoorHandoff: () => null,
     cleanup: { copiesRoot: empty, sealRoot: empty, mirrorFor: () => null },
+    // No products for Approvals in this world (the test world only: in production a missing port fails the step).
+    approvals: () => [],
     ...over,
   };
   const pass = (min = 0, extra = {}) => tick({ rec, rules: extra.rules ?? rules, now: T0 + min * MIN, ports: { ...ports, ...extra.ports } });
@@ -66,12 +69,98 @@ test('MAT-1: one tick runs every step once, in the fixed order, and records the 
   const w = world([account(), usage()]);
   const r = await w.pass();
   assert.deepEqual(Object.keys(r.steps), STEPS);
-  assert.deepEqual(STEPS, ['stops', 'undo', 'undo-starts', 'outage', 'intake', 'leads', 'pass', 'limits', 'merges', 'waits', 'phone', 'cleanup']);
+  assert.deepEqual(STEPS, ['stops', 'undo', 'undo-starts', 'outage', 'intake', 'leads', 'approvals', 'pass', 'limits', 'merges', 'waits', 'phone', 'cleanup']);
   for (const s of STEPS) assert.equal(r.steps[s].ok, true, `${s}: ${r.steps[s].error}`);
   const last = w.rec.read('fact', LAST_PASS_FACT).doc;
   assert.equal(last.at, iso(T0));
   assert.deepEqual(Object.values(last.steps), STEPS.map(() => 'ok'));
   assert.deepEqual(w.calls.alerts, []);
+});
+
+// L221 MAT-1: the approvals step runs M2's schedule pass on the Mini. A product whose rules file says
+// `onboarding.state: active` and that has no record gets one in one real runTick, on the real M9 grant check
+// (memoryRecord), written as approvals, and the main pass of the same tick starts its ready card.
+const M2_RULES = { 'accounts.joe.github_id': 4242, 'accounts.joe.tz': 'America/Los_Angeles', 'approvals.push_windows': ['08:00', '17:00'], 'approvals.decisions_dir': 'decisions' };
+test('L221 MAT-1: one real runTick turns on a product its rules file names, written as approvals, and starts its card', async () => {
+  const w = world([account(), usage(), card('C-2', { product: 'p2' })]);
+  assert.equal(w.rec.read('product', 'p2'), null, 'p2 has no record before the tick');
+  const rules = rulesWith({ ...M2_RULES, 'onboarding.state': 'active' }, allow);
+  const stateDir = join(tempDir('m11-approvals-'), 'm2');
+  const ports = { ...w.ports, approvals: () => [{ product: 'p2', stateDir }] };
+  const r = await runTick({ lockFile: join(tempDir('m11-lock-'), 'pass.lock'), rec: w.rec, rules, now: T0, ports });
+  assert.equal(r.ran, true);
+  assert.equal(r.steps.approvals.ok, true, r.steps.approvals.error);
+  assert.deepEqual(r.steps.approvals.result, [{ product: 'p2', ok: true, events: r.steps.approvals.result[0].events }]);
+  assert.equal(w.rec.read('product', 'p2').doc.state, 'active');
+  const lines = w.rec.diary({}).filter((l) => l.entity === 'product' && l.id === 'p2');
+  assert.equal(lines.length, 1);
+  assert.equal(lines[0].actor, 'approvals', 'the diary line says approvals, not dispatcher');
+  assert.equal(lines[0].kind, 'onboard');
+  assert.ok(w.calls.launched.includes('C-2'), 'the main pass, after approvals, started p2\'s card in the same tick');
+  // The "now on" notice went through the outbox as one line, and a second tick says nothing new.
+  assert.deepEqual(w.calls.alerts, ['p2 is now on: its rules file says onboarding.state: active.']);
+  await runTick({ lockFile: join(tempDir('m11-lock-'), 'pass.lock'), rec: w.rec, rules, now: T0 + MIN, ports });
+  assert.equal(w.rec.diary({}).filter((l) => l.entity === 'product' && l.id === 'p2').length, 1);
+  assert.equal(w.calls.alerts.length, 1);
+});
+
+test('L221: the approvals step runs before the main pass and during an outage; it is not in `complete`', async () => {
+  const order = [];
+  const w = world([account(), usage(), ['fact', OUTAGE_FACT, { state: 'open', opened_at: iso(T0 - MIN) }]]);
+  const ports = { ...w.ports, approvals: () => { order.push('approvals'); return []; }, launch: async (x) => { order.push('launch'); return w.ports.launch(x); } };
+  const r = await w.pass(0, { ports });
+  assert.equal(r.steps.approvals.ok, true, r.steps.approvals.error);
+  assert.deepEqual(order, ['approvals'], 'it ran with the outage open');
+  // Before `pass`: its index is just before it in STEPS, and Object.keys(steps) is the run order.
+  const keys = Object.keys(r.steps);
+  assert.equal(keys.indexOf('approvals') + 1, keys.indexOf('pass'));
+  // A failing approvals step does not stop the dropping of rules values already told (not in `complete`).
+  const src = readFileSync(fileURLToPath(new URL('./tick.mjs', import.meta.url)), 'utf8');
+  assert.match(src, /const complete = \['stops', 'undo-starts', 'pass', 'limits', 'merges'\]/);
+});
+
+test('L221: a missing approvals port fails the step (loud); one product failing or hanging never stops the next', async () => {
+  const w = world([account(), usage()]);
+  const r = await w.pass(0, { ports: { approvals: undefined } });
+  assert.equal(r.steps.approvals.ok, false);
+  assert.match(r.steps.approvals.error, /the approvals port is missing/);
+  assert.ok(w.calls.alerts.some((a) => /Dispatcher's approvals step failed: the approvals port is missing/.test(a)));
+  for (const s of STEPS.filter((x) => x !== 'approvals')) assert.equal(r.steps[s].ok, true, s);
+
+  // Per product: one throws, one hangs past its deadline, one runs. Each gets its own try and deadline.
+  const ran = [];
+  const pass = async (ctx) => {
+    ran.push(ctx.product);
+    if (ctx.product === 'p3') throw new Error('rev 17 moved');
+    if (ctx.product === 'p1') await new Promise(() => {});
+    return { ok: true, events: [] };
+  };
+  const rules = rulesWith({}, allow);
+  await assert.rejects(approvalsStep({ rec: w.rec, rules, now: T0, alert: fakeAlert(), approvals: () => [{ product: 'p3' }, { product: 'p1' }, { product: 'p2' }], productMs: 30, pass }),
+    (e) => e.message === 'the Approvals pass failed for p1 (it did not finish within N ms), p3 (rev N moved)');
+  assert.deepEqual(ran, ['p3', 'p1', 'p2'], 'the product after a failed and a hung one still ran');
+  // A bad approvals config is M2's to tell (approvals_config), not a step failure.
+  const ok = await approvalsStep({ rec: w.rec, rules, now: T0, alert: fakeAlert(), approvals: () => [{ product: 'p2' }], pass: async () => ({ ok: false, reason: 'bad config', events: [] }) });
+  assert.deepEqual(ok, [{ product: 'p2', ok: false, reason: 'bad config', events: 0 }]);
+});
+
+test('L221: M2\'s object alerts become one line from known fields; an unknown type still becomes a line; false comes back', async () => {
+  assert.equal(approvalsAlertText('p2', { type: 'push_not_sent', ask: 'A-1' }), 'Approvals, p2: push not sent (ask A-1)');
+  assert.equal(approvalsAlertText('p2', { type: 'decision_pr_not_closed', ask: 'A-1', pr: 12, reason: 'status 422' }), 'Approvals, p2: decision pr not closed (ask A-1, PR 12): status 422');
+  assert.equal(approvalsAlertText('p2', { type: 'approvals_untrusted', items: [1, 2] }), 'Approvals, p2: approvals untrusted (2 items)');
+  assert.equal(approvalsAlertText('p2', { type: 'product_on', product: 'p2', text: 'p2 is now on: x.' }), 'p2 is now on: x.');
+  // Unknown fields (a GitHub answer, a token) never reach the line; an odd type is still told.
+  const line = approvalsAlertText('p2', { type: 'Weird-Type!', token: 'secret-value', response: { body: 'gh says' } });
+  assert.equal(line, 'Approvals, p2: an alert of an unknown type');
+  assert.doesNotMatch(line, /secret|gh says/);
+  assert.equal(approvalsAlertText('p2', { type: 'brand_new_kind' }), 'Approvals, p2: brand new kind');
+  // The outbox's false is passed back to M2, so its `=== false` dedup keeps working.
+  const w = world([account(), usage()]);
+  const lost = fakeAlert({ answer: false });
+  let answer;
+  await approvalsStep({ rec: w.rec, rules: rulesWith({}, allow), now: T0, alert: lost, approvals: () => [{ product: 'p2' }],
+    pass: async (ctx) => { answer = ctx.alert({ type: 'push_not_sent', ask: 'A-1' }); return { ok: true, events: [] }; } });
+  assert.deepEqual([lost.texts, answer], [['Approvals, p2: push not sent (ask A-1)'], false]);
 });
 
 test('MAT-1: a failing step never stops the rest; one alert per distinct error; cleared when it works again', async () => {
@@ -269,7 +358,7 @@ export async function wire(config) {
     sessions: noop, probe: () => null, launch: async () => ({ ok: false }), stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }),
     hasSession: () => true, gateAlive: () => true, hasReviewer: () => true, requestReview: () => ({ ok: true }), filesOf: noop,
     sendFrontDoor: async () => ({}), restartFrontDoor: async () => ({ ok: true }), startMinibase: async () => ({ ok: true }),
-    cleanup: { copiesRoot: ${JSON.stringify(dir)}, sealRoot: ${JSON.stringify(dir)}, mirrorFor: () => null } } };
+    cleanup: { copiesRoot: ${JSON.stringify(dir)}, sealRoot: ${JSON.stringify(dir)}, mirrorFor: () => null }, approvals: () => [] } };
 }
 export { rec };
 `);
@@ -314,7 +403,7 @@ export async function wire() {
     sessions: noop, probe: () => null, launch: async () => ({ ok: false }), stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }),
     hasSession: () => true, gateAlive: () => true, hasReviewer: () => true, requestReview: () => ({ ok: true }), filesOf: noop,
     sendFrontDoor: async () => ({}), restartFrontDoor: async () => ({ ok: true }), startMinibase: async () => ({ ok: true }),
-    cleanup: { copiesRoot: ${JSON.stringify(dir)}, sealRoot: ${JSON.stringify(dir)}, mirrorFor: () => null } } };
+    cleanup: { copiesRoot: ${JSON.stringify(dir)}, sealRoot: ${JSON.stringify(dir)}, mirrorFor: () => null }, approvals: () => [] } };
 }
 `);
   const config = join(dir, 'config.json');
@@ -462,7 +551,7 @@ export async function wire() {
     launch: () => new Promise(() => { setInterval(() => {}, 1000); }), stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }),
     hasSession: () => true, gateAlive: () => true, hasReviewer: () => true, requestReview: () => ({ ok: true }), filesOf: noop,
     sendFrontDoor: async () => ({}), restartFrontDoor: async () => ({ ok: true }), startMinibase: async () => ({ ok: true }),
-    cleanup: { copiesRoot: ${JSON.stringify(dir)}, sealRoot: ${JSON.stringify(dir)}, mirrorFor: () => null } } };
+    cleanup: { copiesRoot: ${JSON.stringify(dir)}, sealRoot: ${JSON.stringify(dir)}, mirrorFor: () => null }, approvals: () => [] } };
 }
 `);
   const lockFile = join(dir, 'pass.lock');
@@ -866,7 +955,7 @@ export async function wire() {
     sessions: block, probe: () => null, launch: async () => ({ ok: false }), stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }),
     hasSession: () => true, gateAlive: () => true, hasReviewer: () => true, requestReview: () => ({ ok: true }), filesOf: noop,
     sendFrontDoor: async () => ({}), restartFrontDoor: async () => ({ ok: true }), startMinibase: async () => ({ ok: true }),
-    cleanup: { copiesRoot: ${JSON.stringify(dir)}, sealRoot: ${JSON.stringify(dir)}, mirrorFor: () => null } } };
+    cleanup: { copiesRoot: ${JSON.stringify(dir)}, sealRoot: ${JSON.stringify(dir)}, mirrorFor: () => null }, approvals: () => [] } };
 }
 `);
   const lockFile = join(dir, 'pass.lock');
@@ -900,7 +989,7 @@ export async function wire() {
     sessions: noop, probe: () => null, launch: async () => ({ ok: false }), stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }),
     hasSession: () => true, gateAlive: () => true, hasReviewer: () => true, requestReview: () => ({ ok: true }), filesOf: noop,
     sendFrontDoor: async () => ({}), restartFrontDoor: async () => ({ ok: true }), startMinibase: async () => ({ ok: true }),
-    cleanup: { copiesRoot: ${JSON.stringify(dir)}, sealRoot: ${JSON.stringify(dir)}, mirrorFor: () => null } } };
+    cleanup: { copiesRoot: ${JSON.stringify(dir)}, sealRoot: ${JSON.stringify(dir)}, mirrorFor: () => null }, approvals: () => [] } };
 }
 `);
   const config = join(dir, 'config.json');
@@ -945,7 +1034,7 @@ export async function wire() {
     sessions: block, probe: () => null, launch: async () => ({ ok: false }), stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }),
     hasSession: () => true, gateAlive: () => true, hasReviewer: () => true, requestReview: () => ({ ok: true }), filesOf: noop,
     sendFrontDoor: async () => ({}), restartFrontDoor: async () => ({ ok: true }), startMinibase: async () => ({ ok: true }),
-    cleanup: { copiesRoot: ${JSON.stringify(dir)}, sealRoot: ${JSON.stringify(dir)}, mirrorFor: () => null } } };
+    cleanup: { copiesRoot: ${JSON.stringify(dir)}, sealRoot: ${JSON.stringify(dir)}, mirrorFor: () => null }, approvals: () => [] } };
 }
 `);
   const config = join(dir, 'config.json');
@@ -1032,14 +1121,14 @@ test('L172 m3: an outage opened in a pass whose outage alert send throws still h
   const gone = (id, c) => ({ id, card: c, alive: false, ended: true, lastWriteAt: T0 - 10 * MIN });
   const board = [gone('S-1', 'C-1'), gone('S-2', 'C-2'), gone('S-3', 'C-3')];
   let throwOnce = true;
-  const told = [];
+  const textOf = (t) => (typeof t === 'string' ? t : t.text);
+  const stopped = (t) => /stopped at once/.test(textOf(t));
+  const lostPort = fakeAlert({ throws: (t) => stopped(t) && throwOnce && ((throwOnce = false), 'queue gone') });
   const w = world([account(), usage(), card('C-1', { state: 'running' }), card('C-2', { state: 'running' }), card('C-3', { state: 'running' }),
     card('R-1', { state: 'in_review', changed_at: iso(T0 - 60 * MIN) }), ...mergeReady('V-1', 7)],
-  { over: { board: () => board, healthy: () => false, alert: (t) => {
-    const text = typeof t === 'string' ? t : t.text;
-    if (/stopped at once/.test(text)) { if (throwOnce) { throwOnce = false; throw new Error('queue gone'); } told.push(text); }
-    return true;
-  } } });
+  { over: { board: () => board, healthy: () => false, alert: lostPort } });
+  // Told: each outage alert the port took (not the one that threw).
+  const told = { get length() { return lostPort.texts.filter((t, i) => stopped(t) && lostPort.answers[i] !== 'threw').length; } };
   const r = await w.pass();
   assert.equal(w.rec.read('fact', OUTAGE_FACT).doc.state, 'open');
   assert.equal(w.rec.read('fact', OUTAGE_FACT).doc.told_id, undefined);

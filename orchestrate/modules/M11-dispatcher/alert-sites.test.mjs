@@ -54,7 +54,8 @@ export function directSends(files) {
       const port = /\b(?:p|ports)\.alert\b/.test(body) && !/sendAlerts\([^)]*\b(?:p|ports)\.alert\b/.test(body);
       // `textAlerts(alert)` (alerts.mjs) only words an object alert for the step's own outbox.
       // `heldAlerts(into)` only keeps an M6 call's alerts for the step to send itself (L127); it never sends.
-      const handed = [...body.matchAll(/\balert\s*:\s*([^,})\s]+)/g)].some((m) => m[1] !== 'alert' && !m[1].startsWith('outbox(') && m[1] !== 'textAlerts(alert' && !m[1].startsWith('heldAlerts('));
+      // `approvalsAlerts(alert` (tick.mjs) only words one product's approvals alerts for the step's own outbox (L221).
+      const handed = [...body.matchAll(/\balert\s*:\s*([^,})\s]+)/g)].some((m) => m[1] !== 'alert' && !m[1].startsWith('outbox(') && m[1] !== 'textAlerts(alert' && m[1] !== 'approvalsAlerts(alert' && !m[1].startsWith('heldAlerts('));
       const outboxMade = /\bconst\s+alert\s*=/.test(body) && !/\bconst\s+alert\s*=\s*outbox\(/.test(body);
       if (port || handed || outboxMade) bad.push(`${f}:${i + 1}: ${line.trim()}`);
     });
@@ -135,6 +136,9 @@ export const LATE_MARK_OK = Object.freeze({
   WAIT_TELL_FACT: 'the mark carries the wait it told (told_since); a new wait has a new since and is told again',
   appliedId: 'the mark carries the state it told (told_state); a new hand-in under the name rewrites the fact without it',
   UNSAVED_FACT: 'one per stopped session, and a session id is never reused',
+  // R-0b-128: the proposals folder's file facts.
+  intakeFactId: 'the mark carries what it told (told_interrupted: the interrupted bytes, told_key: the refusal\'s reason and file, or told_new for the bytes); new bytes under the name are told again',
+  toldFactId: 'the mark carries what it told (`told`: the cause and bytes); a different cause or new bytes is told again',
 });
 
 // The fact names each told mark goes on: `fact: NAME` inside a tellThen call (a call `NAME(...)` or a bare name).

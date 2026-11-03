@@ -60,7 +60,7 @@ import { moduleSources, scanSources, stripComments } from '../modules/M9-record/
 import { WRITERS } from '../modules/M9-record/permissions.mjs';
 import { startGate, riskOf } from '../modules/M11-dispatcher/gate.mjs';
 import { bands, readFact } from '../modules/M11-dispatcher/usage.mjs';
-import { undoStep, UNDO_CARD } from '../modules/M11-dispatcher/undo.mjs';
+import { undoStep, UNDO_CARD, exactReverse } from '../modules/M11-dispatcher/undo.mjs';
 import { undoStarts } from '../modules/M11-dispatcher/pass.mjs';
 import { outbox } from '../modules/M11-dispatcher/alerts.mjs';
 import { usageFact, undoEntries, undoSha, filesOfCommits, UNDO_ASK, T0 } from '../modules/M11-dispatcher/fixtures.test-helper.mjs';
@@ -86,7 +86,7 @@ function dayOne({ text = FIRST, withProduct = true } = {}) {
   const rules = rulesFromText({ [P]: text }, { productState: (p) => env?.record.read('product', p)?.doc ?? null, clock: () => env?.clock.t ?? T0 });
   env = setup({ prefix: 'orch-day-one-', extra: { rules } });
   env.clock.t = T0;
-  // The product document: the Record grants it to approvals, but no production code writes it yet (L129, L204-b; see
+  // The product document: M2 onboard.mjs writes it (L204-b), but only through the approvals port, not wired yet (L270; see
   // the writers tests below). With withProduct it is written through the real Record, as approvals would.
   // productState is wired here by the test: no production code builds the engine yet, and rulesFromText's own default
   // reads every product as active, so "paused with no document" is this wiring's answer, not yet the Mac's.
@@ -175,10 +175,13 @@ async function gateAnswers() {
   assert.ok(undo, 'the undo step made the undo card');
   const docs = { id: 'C-2', kind: 'ordinary', product: P, tier: 2, files: [DOC] };
   const b = green(w.rules);
+  // pass.mjs asks undo.mjs's exactReverse before the gate; so does this (#117 audit c3).
+  const exact = exactReverse({ rec: w.rec, card: undo, filesOf: filesOfCommits });
+  assert.equal(exact.ok, true, `the undo card is not an exact reverse: ${exact.reason}`);
   const answers = {};
   for (const kind of START_KINDS) {
     const card = kind === 'undo' || kind === 'undo_merge' ? undo : kind === 'readonly' ? null : docs;
-    answers[kind] = startGate({ rules: w.rules, rec: w.rec, card, kind, product: P, b, running: [], lead: kind === 'readonly' ? 'L-1' : undefined, exactReverse: kind === 'undo' });
+    answers[kind] = startGate({ rules: w.rules, rec: w.rec, card, kind, product: P, b, running: [], lead: kind === 'readonly' ? 'L-1' : undefined, exactReverse: kind === 'undo' && exact.ok });
   }
   return answers;
 }
@@ -193,9 +196,8 @@ test('M11\'s start gate: no kind is held for a rules value the fixture lacks, an
 });
 
 // The known day-one gaps (L199, L204), each a to-do that the PR fixing it switches off.
-const UNDO_CAP_TODO = { todo: 'L199-A (lane 2, M11 gate.mjs): an exact-reverse undo is never refused by the editing caps' };
 for (const kind of USED) {
-  test(`M11's start gate allows a start of kind ${kind} on day one`, kind === 'undo' ? UNDO_CAP_TODO : {}, async () => {
+  test(`M11's start gate allows a start of kind ${kind} on day one`, async () => {
     const a = (await gateAnswers())[kind];
     assert.equal(a.ok, true, `the start gate refuses ${kind}: ${a.reason}`);
   });
@@ -225,7 +227,7 @@ test('Joe\'s Undo on day one: the real undo step makes a ready card, and the Rec
   assert.ok(w.rec.ready().some((c) => c.id === id), 'the Record lists the undo card as ready');
 });
 
-test('Joe\'s Undo on day one: M11\'s real undo start starts the undo card', { todo: 'L199-A and L199-B (lanes 2 and 1): M11\'s gate and M10\'s start question both refuse an undo at editing cap 0' }, async () => {
+test('Joe\'s Undo on day one: M11\'s real undo start starts the undo card', { todo: 'L199-B (lane 1): M10\'s start question refuses an undo at editing cap 0 (M11\'s side, L199-A, is done on #117)' }, async () => {
   const w = dayOne();
   const id = undoTapped(w);
   await undoStep({ rec: w.rec, rules: w.rules, now: T0, filesOf: filesOfCommits, alert: w.alerts });
@@ -240,9 +242,9 @@ test('Joe\'s Undo on day one: M11\'s real undo start starts the undo card', { to
 });
 
 // The merge question below is built by hand (exact_reverse_ok, reversed_audit and the missing reverses_files are
-// gather.mjs's to work out from GitHub). When L199-D switches this to-do off, ask it through checksStep's real
-// gatherFacts and assert on f.lane instead (day-one audit Minor 2).
-test('the undo card the real undo step makes can pass the first-cutover docs lane (declared Tier 2)', { todo: 'L199-D (lane 2, M11 undo.mjs): the undo card is written with no tier, and the docs lane takes only declared Tier 2' }, async () => {
+// gather.mjs's to work out from GitHub). The same card through M6's real gatherFacts, asserting on f.lane, is
+// modules/M11-dispatcher/undo-lane.test.mjs (L199-D; day-one audit Minor 2).
+test('the undo card the real undo step makes can pass the first-cutover docs lane (declared Tier 2)', async () => {
   const w = dayOne();
   const id = undoTapped(w);
   await undoStep({ rec: w.rec, rules: w.rules, now: T0, filesOf: filesOfCommits, alert: w.alerts });
@@ -253,7 +255,7 @@ test('the undo card the real undo step makes can pass the first-cutover docs lan
   assert.equal(r.decision, 'allow', `the docs lane refuses the undo: ${r.reason}`);
 });
 
-test('with only production writers, the product reads active and the docs lane is not undo-only', { todo: 'L129, L204-b (lane 1, M2): no production code writes the product document yet; with none, the product reads as paused, so no worker starts and only an exact reverse may merge' }, () => {
+test('with only production writers, the product reads active and the docs lane is not undo-only', { todo: 'L270 (lane 1, the approvals wiring PR after #121): M2 onboard.mjs writes the product document, but only through the tick approvals port, and the Dispatcher wiring answers that port with "not wired yet"; until it is wired the product reads as paused, so no worker starts and only an exact reverse may merge' }, () => {
   const { rules } = dayOne({ withProduct: false });
   const merge = rules.may('merge', { product: P, card: { id: 'C-2', kind: 'ordinary', tier: 2 }, truncated: false, labels: [], declared_tier: 2, kind: 'ordinary', files: docsChange() });
   assert.equal(merge.decision, 'allow', merge.reason);
@@ -336,7 +338,6 @@ function readsAndWriters() {
 // The documents production reads that nothing in production makes, today. Each is a known gap; the test below fails
 // when one is made (take it off) or a new one appears.
 const KNOWN_UNWRITTEN = Object.freeze({
-  product: 'L129: read by M11 gate.mjs and pass.mjs and M2 schedule.mjs; M2 approvals has the grant, no code writes it, so no worker starts (L204-b)',
   session: 'L129: read by M4 push.mjs, M2 binding.mjs and M11 merges.mjs; M11 has the create grant, no code makes one, so no worker branch can be pushed (L204-a)',
 });
 
