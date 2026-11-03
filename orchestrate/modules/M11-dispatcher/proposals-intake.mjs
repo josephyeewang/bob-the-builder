@@ -19,8 +19,12 @@
 // `intake-applied-` family). Per kind (L78 n2): a heartbeat with the same name and new bytes is a new poll, and its one
 // fact is updated in place; any other kind with new bytes on a used name is refused with an alert, outbox-intake.mjs's
 // rule (a file never used, refused or interrupted, may come again with new bytes). A refusal is recorded with its
-// text and told once; a refused file is not looked at again until its bytes change. outbox-intake's retell finds a
-// refusal whose tell was not queued by the same `session`/`name` shape.
+// text and told once; a refused file is not looked at again until its bytes change. A refusal or interruption whose
+// tell was lost (the queue write refused, or the cap dropped it) is told again at the start of each pass, until its
+// told mark is written (L260 MAT-1): outbox-intake's retell no longer finds these facts, whose ids are hashes (L233 M-4).
+// A folder problem or a kind with nothing to take it in is likewise told until delivered (L260 MAT-2), and two products
+// whose rules name the same folder are both refused, so no file is taken in twice (L260 MAT-3). A file name goes into
+// an alert or the diary only cleaned (`shown`): printable ASCII, quoted, at most 80 characters.
 //
 // Day 1 (`product.cutover_stage` first; L76 (5)):
 //   - research-, claim- and heartbeat- files go to their handlers (R-0b-135, R-0b-130, R-0b-131);
@@ -103,13 +107,13 @@ export function folderProblem(dir, ownerUid, look = lstatSync) {
 export function readProposalFile(dir, name, { ownerUid, kind, fs = { openSync, fstatSync, readSync, closeSync } }) {
   const cap = kind === 'bundle' ? BUNDLE_CAP : TEXT_CAP;
   let fd;
-  try { fd = fs.openSync(join(dir, name), C.O_RDONLY | C.O_NOFOLLOW | (C.O_NONBLOCK ?? 0)); } catch { return { ok: false, reason: `"${name}" could not be opened without following a link` }; }
+  try { fd = fs.openSync(join(dir, name), C.O_RDONLY | C.O_NOFOLLOW | (C.O_NONBLOCK ?? 0)); } catch { return { ok: false, reason: 'it could not be opened without following a link' }; }
   try {
     const st = fs.fstatSync(fd);
-    if (!st.isFile()) return { ok: false, reason: `"${name}" is not a plain file` };
-    if (st.nlink !== 1) return { ok: false, reason: `"${name}" has more than one link` };
-    if (st.uid !== ownerUid) return { ok: false, reason: `"${name}" is owned by user ${st.uid}, not the owner's user` };
-    if (st.size > cap) return { ok: false, reason: `"${name}" is larger than ${cap} bytes` };
+    if (!st.isFile()) return { ok: false, reason: 'it is not a plain file' };
+    if (st.nlink !== 1) return { ok: false, reason: 'it has more than one link' };
+    if (st.uid !== ownerUid) return { ok: false, reason: `it is owned by user ${st.uid}, not the owner's user` };
+    if (st.size > cap) return { ok: false, reason: `it is larger than ${cap} bytes` };
     const h = createHash('sha256');
     const keep = kind === 'bundle' ? null : [];
     const buf = Buffer.alloc(1 << 20);
@@ -118,12 +122,18 @@ export function readProposalFile(dir, name, { ownerUid, kind, fs = { openSync, f
       const n = fs.readSync(fd, buf, 0, buf.length, null);
       if (!n) break;
       total += n;
-      if (total > cap) return { ok: false, reason: `"${name}" is larger than ${cap} bytes` };
+      if (total > cap) return { ok: false, reason: `it is larger than ${cap} bytes` };
       h.update(buf.subarray(0, n));
       keep?.push(Buffer.from(buf.subarray(0, n)));
     }
     return { ok: true, sha256: h.digest('hex'), size: total, ...(keep ? { text: Buffer.concat(keep).toString('utf8') } : {}) };
   } finally { fs.closeSync(fd); }
+}
+
+/** A file name as it may appear in an alert or the diary: printable ASCII only, quoted, at most 80 characters (r1 P7). */
+export function shown(name) {
+  const s = String(name).replace(/[^\x20-\x7e]/g, '?');
+  return JSON.stringify(s.length > 80 ? `${s.slice(0, 77)}...` : s);
 }
 
 const statOf = (p) => { try { const s = lstatSync(p); return `${s.size}:${s.mtimeMs}:${s.ino}`; } catch { return null; } };
@@ -149,7 +159,8 @@ export async function proposalsPass({ rec, rules, products, ownerUid, wait, aler
   if (!Number.isInteger(ownerUid) || ownerUid <= 0) throw new Error('proposalsPass: ownerUid must be the owner\'s uid from the config');
   const out = [];
   const seen = [];
-  for (const product of products) {
+  retellFiles(rec, alert, products);
+  const folders = products.map((product) => {
     let dir;
     let why = null;
     // No proposals.outbox, or one that is not text, is a folder that is never read: told once like any other folder
@@ -160,6 +171,24 @@ export async function proposalsPass({ rec, rules, products, ownerUid, wait, aler
       why = raw === undefined ? 'no proposals.outbox in the rules' : 'proposals.outbox is set but is not a folder path';
     }
     if (!why) why = folderProblem(dir, ownerUid, lookDir);
+    return { product, dir, why };
+  });
+  // Two products whose rules name the same folder (by device and file number, so a second path to it counts too)
+  // would each take every file in once: both are refused until the rules give each its own folder (L260 MAT-3).
+  const byFolder = new Map();
+  for (const f of folders) {
+    if (f.why) continue;
+    let st; try { st = lookDir(f.dir); } catch { continue; }
+    if (!Number.isInteger(st?.ino) || st.ino <= 0) continue;
+    const k = `${st.dev}:${st.ino}`;
+    byFolder.set(k, [...(byFolder.get(k) ?? []), f]);
+  }
+  for (const group of byFolder.values()) {
+    if (group.length < 2) continue;
+    for (const f of group) f.why = `the proposals folder is also ${group.filter((g) => g !== f).map((g) => g.product).join(', ')}'s, so its files would be taken in once per product`;
+  }
+  for (const { product, dir, why: cause } of folders) {
+    let why = cause;
     let names = null;
     if (!why) { try { names = list(dir); } catch { why = 'the proposals folder could not be read'; } }
     tellCause(rec, folderFactId(product), { product, folder: true }, why, `${product}'s proposals folder is not taken in: ${why}`, alert, now);
@@ -188,27 +217,30 @@ export async function proposalsPass({ rec, rules, products, ownerUid, wait, aler
     // The record refused this file's own fact: the tell is marked on its told fact instead, so it is told once per
     // cause, not every pass (L233 M-3, m4).
     const tellUnrecorded = (said, key) => {
-      note(`proposals ${product}: ${name}: ${said}`);
+      note(`proposals ${product}: ${shown(name)}: ${said}`);
       if (rec.read('fact', toldFactId(product, name))?.doc?.told === key || isQueued(rec, toldFactId(product, name))) return undefined;
       return tellThen(alert, said, { fact: toldFactId(product, name), fields: { told: key }, kind: 'proposal_told' });
     };
     // A refusal is recorded once per reason and bytes, and told once (not every pass while the file sits there).
     // A refusal with no bytes to name (a bad name, too big, a link, another owner) never erases a recorded state (L254):
     // it is added beside it, so a used file's "already used" still holds when its bytes come back.
+    // Told once per reason and file: the bytes' hash, or for a file never read, its size, change time and file number
+    // (L259). A new file refused for the same reason is a new request, and told again; one sitting there is not.
     const refuse = (reason, hash = null) => {
       r.refused = reason;
-      if (prev?.doc?.state === 'refused' && prev.doc.why === reason && prev.doc.sha256 === hash) return;
+      const told = `${reason}\n${hash ?? first}`;
       const keep = hash === null && prev?.doc?.sha256 != null && prev.doc.state !== 'refused';
-      if (keep && prev.doc.refused_why === reason) return;
-      const said = `a file in ${product}'s proposals folder was refused: ${reason}`;
-      note(`proposals ${product}: ${name} refused: ${reason}`);
+      if ((keep || prev?.doc?.state === 'refused') && prev.doc.refused_key === told) return;
+      const said = `${shown(name)} in ${product}'s proposals folder was refused: ${reason}`;
+      note(`proposals ${product}: ${shown(name)} refused: ${reason}`);
       const at = new Date(now).toISOString();
-      const w = put(keep ? { ...prev.doc, refused_why: reason, refused_at: at, alert_text: said } : { sha256: hash, state: 'refused', why: reason, at, alert_text: said }, 'proposal_refused');
-      if (w.ok) tellThen(alert, said, { fact: intakeFactId(product, name), fields: { told_state: 'refused' }, kind: 'proposal_told' });
+      // Its own text and key, apart from an interruption's alert_text, so each is told again until delivered (L260 MAT-1).
+      const w = put(keep ? { ...prev.doc, refused_why: reason, refused_at: at, refused_key: told, refused_text: said } : { sha256: hash, state: 'refused', why: reason, at, refused_key: told, refused_text: said }, 'proposal_refused');
+      if (w.ok) tellThen(alert, said, { fact: intakeFactId(product, name), fields: { told_key: told }, kind: 'proposal_told' });
       else tellUnrecorded(said, `refused ${hash} ${reason}`);
     };
     const parsed = proposalName(name);
-    if (!parsed) { refuse(name.startsWith('verdict-') ? `"${name}": a verdict comes only from a review session's own outbox` : `"${name}" is not a proposals file name`); continue; }
+    if (!parsed) { refuse(name.startsWith('verdict-') ? 'a verdict comes only from a review session\'s own outbox' : 'it is not a proposals file name'); continue; }
     r.kind = parsed.kind;
     const file = readProposalFile(dir, name, { ownerUid, kind: parsed.kind, ...(fs ? { fs } : {}) });
     if (!file.ok) { refuse(file.reason); continue; }
@@ -316,15 +348,35 @@ function usedOf(d) {
 
 // A cause (a folder problem, or a kind with nothing to take it in) is told when it starts or changes, and its end is
 // recorded; never every pass.
-function tellCause(rec, factId, doc, why, said, alert, now) {
-  const prev = rec.read('fact', factId);
-  if ((why ?? null) === (prev?.doc?.why ?? null)) return undefined;
-  const w = rec.write({ actor: 'dispatcher', entity: 'fact', id: factId, expectRev: prev?.rev ?? 0, doc: { ...doc, why: why ?? null, at: new Date(now).toISOString() }, kind: 'proposal_cause' });
+// A tell that was lost (the queue write refused, or the cap dropped it) is asked again each pass until its told mark,
+// `told_why`, is written (L260 MAT-2): `why` is written before the send, so it alone can't say the cause was told.
+function tellCause(rec, causeFact, doc, why, said, alert, now) {
+  const prev = rec.read('fact', causeFact);
+  if ((why ?? null) === (prev?.doc?.why ?? null)) {
+    if (!why || prev.doc.told_why === why || isQueued(rec, causeFact)) return undefined;
+    return tellThen(alert, said, { fact: causeFact, fields: { told_why: why }, kind: 'proposal_told' });
+  }
+  const w = rec.write({ actor: 'dispatcher', entity: 'fact', id: causeFact, expectRev: prev?.rev ?? 0, doc: { ...doc, why: why ?? null, at: new Date(now).toISOString() }, kind: 'proposal_cause' });
   // The cause cleared: a tell still queued for it leaves unsent (the r7 M2 rule).
-  if (!why) { dropCause(rec, factId); return undefined; }
+  if (!why) { dropCause(rec, causeFact); return undefined; }
   // The alert's answer goes back as it is (false when it was lost); nothing to tell answers undefined.
   if (!w.ok) return alert(said);
-  return tellThen(alert, said, { fact: factId, fields: { told_why: why }, kind: 'proposal_told' });
+  return tellThen(alert, said, { fact: causeFact, fields: { told_why: why }, kind: 'proposal_told' });
+}
+
+// Each pass, before any folder is read: a file's refusal or interruption, recorded with its text, whose told mark is not
+// written and that is not queued, is told again (L260 MAT-1; outbox-intake's retellHandIns, L130 M7 M8, for these ids).
+const FILE_PREFIX = 'intake-applied-proposals-file-';
+function retellFiles(rec, alert, products) {
+  let facts;
+  try { facts = rec.list('fact'); } catch { return; }
+  for (const f of facts) {
+    const d = f.doc;
+    if (!f.id.startsWith(FILE_PREFIX) || !d || !products.includes(d.product) || f.id !== intakeFactId(d.product, d.name)) continue;
+    if (isQueued(rec, f.id)) continue;
+    if (d.state === 'interrupted' && d.alert_text && d.told_state !== 'interrupted') tellThen(alert, d.alert_text, { fact: intakeFactId(d.product, d.name), fields: { told_state: 'interrupted' }, kind: 'proposal_told' });
+    if (d.refused_key && d.refused_text && d.told_key !== d.refused_key) tellThen(alert, d.refused_text, { fact: intakeFactId(d.product, d.name), fields: { told_key: d.refused_key }, kind: 'proposal_told' });
+  }
 }
 
 /**
