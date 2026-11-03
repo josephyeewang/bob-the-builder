@@ -323,8 +323,12 @@ export function createPushScript(deps) {
     // Only real text names a fact: String(undefined) or String(null) would pass the id patterns as "undefined" / "null".
     const id = `push.${typeof card === 'string' && CARD.test(card) ? card : 'unknown'}.${typeof att === 'string' && ATTEMPT.test(att) ? att : 'unknown'}`;
     const cur = record.read('fact', id);
-    const doc = res.ok ? { result: 'pushed', branch: res.branch, tip: res.tip, binaries: res.binaries ?? [], at: new Date(now()).toISOString() } : { result: 'refused', reason: res.reason, at: new Date(now()).toISOString() };
+    let doc = res.ok ? { result: 'pushed', branch: res.branch, tip: res.tip, binaries: res.binaries ?? [], at: new Date(now()).toISOString() } : { result: 'refused', reason: res.reason, at: new Date(now()).toISOString() };
+    // A refusal never erases a recorded push of the same attempt (#170 r1): it is added to it as the last refusal.
+    if (!res.ok && cur?.doc?.result === 'pushed' && !cur.corrupt) doc = { ...cur.doc, last_refusal: { reason: res.reason, at: doc.at } };
     if (from) doc.from = from;
+    // The product pushed for: bytes already pushed answer again only for the same product (#170 r1 m1).
+    if (res.ok && from) doc.product = res.product;
     record.write({ actor: 'workshop', entity: 'fact', id, expectRev: cur?.rev ?? 0, doc, kind: res.ok ? 'push' : 'push_refused' });
     return res;
   }
@@ -341,10 +345,14 @@ export function createPushScript(deps) {
   async function pushProposal(p = {}, { look = false } = {}) {
     const sha = SHA256.test(String(p?.sha256)) ? p.sha256 : null;
     // The same bytes are the same attempt (L274 (6), L334): once pushed, they answer the recorded push, with no
-    // second push and the fact left as it is.
-    if (!look && sha && typeof p.card === 'string' && CARD.test(p.card)) {
-      const done = record.read('fact', `push.${p.card}.p-${sha.slice(0, 12)}`)?.doc;
-      if (done?.result === 'pushed') return { ok: true, already: true, product: p.product, card: p.card, branch: done.branch, tip: done.tip, binaries: done.binaries ?? [] };
+    // second push and the fact left as it is. Only after the proposal's own checks pass (the card still in the Record,
+    // the product's folder), and only for the product the fact recorded; a corrupt fact is not a push (#170 r1 m1, m2).
+    if (!look && sha) {
+      let inputs = null;
+      try { inputs = proposalInputs(p); } catch (e) { if (!(e instanceof Refusal)) throw e; }
+      const f = inputs && record.read('fact', `push.${inputs.card}.${inputs.att}`);
+      const done = f?.doc && !f.corrupt ? f.doc : null;
+      if (done?.result === 'pushed' && done.product === inputs.product) return { ok: true, already: true, product: inputs.product, card: inputs.card, branch: done.branch, tip: done.tip, binaries: done.binaries ?? [] };
     }
     return settle(() => proposalInputs(p), () => [p?.card, sha ? `p-${sha.slice(0, 12)}` : null], { look, from: 'proposal' });
   }
