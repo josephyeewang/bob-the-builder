@@ -12,6 +12,7 @@
 //   writer.mjs: they need the whole record, but for the since a wait's re-check keeps (keptSince), which the stand-in keeps the same way.
 
 import { canonicalJson } from '../../shared/plan-fingerprint.mjs';
+import { pastTime } from '../../shared/still-waiting.mjs';
 import { SESSION_ID, STATES } from '../../shared/record-names.mjs';
 import { CREATE_STATES, INTERNAL_MOVES, moveActors } from './moves.mjs';
 import { ATTEMPTS, PLAN_INPUTS, WRITERS, actorName, factFamilyOf, fieldsAllowed } from './permissions.mjs';
@@ -137,9 +138,15 @@ function checkStart(before, after) {
   if (!same(rest, before)) return no('claimed → running only adds pid and pid_start to the claim');
   return { ok: true };
 }
-/** The since a re-check keeps: the stored wait's, when it waits on the same who and what and its since reads; else null. */
-export function keptSince({ wait, kept = null }) {
-  return kept && kept.who === wait?.who && kept.what === wait?.what && Number.isFinite(Date.parse(kept.since)) ? kept.since : null;
+/**
+ * The since a re-check keeps: the stored wait's, when it waits on the same who and what and its since reads as a past
+ * time by pastTime's rule (no more than 60 s ahead of `nowMs`); else null. A stored since in the future is not kept
+ * (#153 audit MAT-1): kept, it would hold every cap measured from it at zero until that time came, and the re-check
+ * that should replace it would keep it again. `nowMs` is required; without a readable one nothing is kept.
+ */
+export function keptSince({ wait, kept = null, nowMs }) {
+  if (!kept || kept.who !== wait?.who || kept.what !== wait?.what || !Number.isFinite(nowMs)) return null;
+  return pastTime(kept.since, nowMs) === null ? null : kept.since;
 }
 
 /**
@@ -150,7 +157,7 @@ export function keptSince({ wait, kept = null }) {
  * write stores now. The Store Writer's checkWait calls this; the stand-in (shared/record.mjs memoryRecord) calls keptSince.
  */
 export function waitSince({ wait, kept = null, nowMs }) {
-  const keep = keptSince({ wait, kept });
+  const keep = keptSince({ wait, kept, nowMs });
   if (keep !== null && wait.since === keep) return { ok: true, since: keep };
   const since = Date.parse(wait?.since);
   if (!Number.isFinite(since) || Math.abs(since - nowMs) > 60000) return no('wait.since must be now (within 60 s)');

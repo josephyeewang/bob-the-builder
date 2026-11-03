@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
-import { dispatcherPass as dispatcherPass0, stopPass as stopPass0, undoStarts, stopProcessGroup, STOP_FACT, UNSAVED_FACT, LIMIT_FACT, LIMIT_NO_ACCOUNT, LIMIT_NO_HIT, LIMIT_NO_RESET, LIMIT_RESET_MAX_MS, UNDO_HELD_FACT, PAUSE_FACT, RULES_MISSING_FACT, rulesMissingAlert as rulesMissingAlert0 } from './pass.mjs';
+import { dispatcherPass as dispatcherPass0, stopPass as stopPass0, undoStarts, stopProcessGroup, STOP_FACT, UNSAVED_FACT, LIMIT_FACT, LIMIT_NO_ACCOUNT, LIMIT_NO_RUN, LIMIT_NO_HIT, LIMIT_NO_RESET, LIMIT_RESET_MAX_MS, UNDO_HELD_FACT, PAUSE_FACT, RULES_MISSING_FACT, rulesMissingAlert as rulesMissingAlert0 } from './pass.mjs';
 import { USAGE_FACT, BAND_FACT } from './usage.mjs';
 import { OUTAGE_FACT } from './outage.mjs';
 import { retellWaits, WAIT_TELL_FACT } from './joe-waits.mjs';
@@ -307,13 +307,13 @@ test('audit #125 r2 m-2, m-3: a card that has waited on a limit longer than the 
 // A hand-edited Record (L285): the M9 writer always stamps a readable since. The stand-in keeps a re-checked wait's
 // since as the writer does (L296), but stores a new wait's since as sent (its one departure, shared/record.mjs), so the
 // bad since goes in as a wait on another what, then back: an unreadable since is never kept, so it stays as sent.
-const garbleSince = (rec, id) => {
+const garbleSince = (rec, id, since = 'not a time') => {
   const wait = rec.read('card', id).doc.wait;
   for (const what of ['hand-edited', wait.what]) {
-    const r = change(rec, 'card', id, { wait: { ...rec.read('card', id).doc.wait, what, since: 'not a time' } });
+    const r = change(rec, 'card', id, { wait: { ...rec.read('card', id).doc.wait, what, since } });
     assert.ok(r.ok, r.reason);
   }
-  assert.deepEqual([rec.read('card', id).doc.wait.what, rec.read('card', id).doc.wait.since], [wait.what, 'not a time']);
+  assert.deepEqual([rec.read('card', id).doc.wait.what, rec.read('card', id).doc.wait.since], [wait.what, since]);
 };
 
 test('L285: a limit wait whose since can\'t be read still ends: both caps count from the run\'s start, never from a hit that moves', async () => {
@@ -1194,4 +1194,46 @@ test('L138 m4: a card put on Joe for unread usage is told after usage is back, e
   assert.equal(w.rec.read('fact', WAIT_TELL_FACT('C-1')).doc.told_since, w.rec.read('card', 'C-1').doc.wait.since);
   for (const min of [3, 4, 5]) await tick(24 * 60 + min);
   assert.equal(cardTells(), 1, 'told exactly once (P20)');
+});
+
+// Audit #153 MAT-1: a since or run_started more than 60 s ahead reads as none (pastTime's rule), so neither cap is held
+// at zero by a time that has not come.
+test('audit #153 MAT-1: a limit wait whose since is in the future still ends: both caps count from the run\'s start', async () => {
+  const DAY = 24 * H;
+  const w = world([['fact', LIMIT_FACT('acct-s'), { resets_at: iso(T0 + 10 * DAY), observed_at: iso(T0 + 3 * DAY) }]]);
+  parkOnLimit(w.rec, 'S', { ranAt: T0, account: 'acct-s' });
+  parkOnLimit(w.rec, 'U', { ranAt: T0, account: 'acct-u' });
+  const future = iso(T0 + 365 * DAY);
+  garbleSince(w.rec, 'S', future); garbleSince(w.rec, 'U', future);
+  await w.pass(24 * 60);
+  assert.equal(w.rec.read('card', 'U').doc.wait.who, 'usage');
+  await w.pass(24 * 60 + 1);
+  assert.deepEqual([w.rec.read('card', 'U').doc.wait.who, w.rec.read('card', 'U').doc.wait.what], ['joe', LIMIT_NO_HIT]);
+  await w.pass(LIMIT_RESET_MAX_MS / MIN);
+  assert.equal(w.rec.read('card', 'S').doc.wait.who, 'usage');
+  await w.pass(LIMIT_RESET_MAX_MS / MIN + 1);
+  assert.deepEqual([w.rec.read('card', 'S').doc.wait.who, w.rec.read('card', 'S').doc.wait.what], ['joe', LIMIT_NO_RESET]);
+  assert.equal(w.calls.alerts.filter((x) => /card S: it has waited on account acct-s's usage limit since 2\S+Z, longer/.test(x)).length, 1);
+});
+
+test('audit #153 MAT-1: a limit wait whose run_started is in the future is one with no run start: it waits on Joe', async () => {
+  const w = world();
+  // run_started is the Record's own, copied from the claim on the park: a run claimed by a clock a year ahead.
+  parkOnLimit(w.rec, 'R', { ranAt: T0 + 365 * 24 * H, parkedAt: T0, account: 'acct-r' });
+  assert.equal(w.rec.read('card', 'R').doc.wait.run_started, iso(T0 + 365 * 24 * H));
+  await w.pass(1);
+  const r = w.rec.read('card', 'R').doc;
+  assert.deepEqual([r.wait.who, r.wait.what], ['joe', LIMIT_NO_RUN]);
+});
+
+test('audit #153 MAT-1: the stand-in does not keep a stored since in the future either; it keeps one up to 60 s ahead', () => {
+  const w = world();
+  parkOnLimit(w.rec, 'F', { ranAt: T0, account: 'acct-f' });
+  const recheck = (since) => { const r = change(w.rec, 'card', 'F', { wait: { ...w.rec.read('card', 'F').doc.wait, since, next_check: iso(T0 + 2 * MIN) } }); assert.ok(r.ok, r.reason); };
+  garbleSince(w.rec, 'F', iso(T0 + 365 * 24 * H));
+  recheck(iso(T0));
+  assert.equal(w.rec.read('card', 'F').doc.wait.since, iso(T0), 'the future since is not kept: the since sent is stored');
+  garbleSince(w.rec, 'F', iso(T0 + MIN));
+  recheck(iso(T0));
+  assert.equal(w.rec.read('card', 'F').doc.wait.since, iso(T0 + MIN), 'one 60 s ahead of the clock is kept');
 });

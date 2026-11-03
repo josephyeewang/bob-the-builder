@@ -26,7 +26,7 @@ const SINCE_WINDOW_MS = 60_000;
 /** waitOn with who 'joe', told by `text` (see above). Returns waitOn's answer, or the tell's refusal. */
 export function waitOnJoe(rec, id, { text, alert, now, ...wait }) {
   const card = rec.read('card', id)?.doc;
-  const since = (card?.state === 'waiting' ? keptSince({ wait: { who: 'joe', what: wait.what }, kept: card.wait }) : null) ?? iso(now);
+  const since = (card?.state === 'waiting' ? keptSince({ wait: { who: 'joe', what: wait.what }, kept: card.wait, nowMs: now }) : null) ?? iso(now);
   const cur = rec.read('fact', WAIT_TELL_FACT(id));
   const req = rec.write({ actor: 'dispatcher', entity: 'fact', id: WAIT_TELL_FACT(id), expectRev: cur?.rev ?? 0, doc: { since, text }, kind: 'wait_tell' });
   if (!req.ok) return { ok: false, reason: `the tell could not be recorded: ${req.reason}` };

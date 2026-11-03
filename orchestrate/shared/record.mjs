@@ -272,7 +272,7 @@ export function memoryRecord({ outboxRoot, now = () => Date.now(), dead = null }
       // stays where the test set it, and the two are the same clock only in the real system.
       const waits = (entity === 'card' && g.to === 'waiting') || (entity === 'session' && (g.to === 'waiting_input' || g.to === 'waiting_limit'));
       if (waits && g.doc?.wait && !g.moving && !same(cur?.doc?.wait, g.doc.wait)) {
-        const keep = keptSince({ wait: g.doc.wait, kept: cur?.doc?.wait ?? null });
+        const keep = keptSince({ wait: g.doc.wait, kept: cur?.doc?.wait ?? null, nowMs: now() });
         if (keep !== null) g.doc.wait = { ...g.doc.wait, since: keep };
       }
       const rev = expectRev + 1;

@@ -34,6 +34,7 @@ import { sensorsFact } from './sensor-facts.mjs';
 import { tellThen, dropCause, isQueued } from './alerts.mjs';
 import { exactReverse } from './undo.mjs';
 import { FINAL_STATES, OWNER_WAIT_WHO, PAUSED_WAIT_WHAT } from '../../shared/record.mjs';
+import { pastTime } from '../../shared/still-waiting.mjs';
 
 export const STOP_FACT = (sid) => `stop-${sid}`;
 /** The mark that a stop's unsaved work was told (L130 M9). */
@@ -56,7 +57,9 @@ export const LIMIT_RESET_MAX_MS = 7 * 24 * 60 * 60 * 1000 + 60 * 60 * 1000;
 // it still ends. The Record writer stamps since and keeps it on a re-check (M9 checkWait), so only a hand-edited
 // Record lacks one. The fallback is the run's start (wait.run_started, which every limit wait that gets this far has):
 // fixed, and never later than the park. Not the hit's time: each new hit moves it, so a cap counted from it never ends.
-const waitedFrom = (doc, fallback) => { const t = Date.parse(doc.wait?.since ?? ''); return Number.isFinite(t) ? t : fallback; };
+// Read by pastTime's rule (#153 audit MAT-1): a since more than 60 s ahead of `now` is not read, so a cap measured from
+// it still ends.
+const waitedFrom = (doc, fallback, now) => pastTime(doc.wait?.since, now) ?? fallback;
 export const LIMIT_NO_HIT = 'limit_hit: no limit hit was recorded for the run in time';
 export const UNKNOWN_FACT = 'unknown-usage-alert';
 export const RULES_MISSING_FACT = 'rules-missing-alert';
@@ -356,8 +359,9 @@ export async function dispatcherPass({ rec, rules, now, account, sessions, probe
           text: `card ${id}: it waits on a usage limit but the wait does not say which account's, so it can't resume by itself; it waits on you` });
         continue;
       }
-      const runStarted = Date.parse(doc.wait?.run_started ?? '');
-      if (!Number.isFinite(runStarted)) {
+      // The same rule on run_started (#153 audit MAT-1): one in the future is as good as none.
+      const runStarted = pastTime(doc.wait?.run_started, now);
+      if (runStarted === null) {
         waitOnJoe(rec, id, { what: LIMIT_NO_RUN, now, kind: 'limit_no_run', alert,
           text: `card ${id}: it waits on account ${acct}'s usage limit but the record has no time its run began, so no limit hit can be matched to it; it waits on you` });
         continue;
@@ -365,7 +369,7 @@ export async function dispatcherPass({ rec, rules, now, account, sessions, probe
       const lf = sensorsFact(rec, LIMIT_FACT(acct))?.doc;
       const seen = Date.parse(lf?.observed_at ?? '');
       if (!(seen > runStarted)) {
-        if (now - waitedFrom(doc, runStarted) > unknownMaxMs) {
+        if (now - waitedFrom(doc, runStarted, now) > unknownMaxMs) {
           waitOnJoe(rec, id, { what: LIMIT_NO_HIT, now, kind: 'limit_no_hit', alert,
             text: `card ${id}: it has waited on account ${acct}'s usage limit with no limit hit recorded for its run, so it can't resume by itself; it waits on you` });
         }
@@ -381,9 +385,9 @@ export async function dispatcherPass({ rec, rules, now, account, sessions, probe
         continue;
       }
       if (now < resets) {
-        if (now - waitedFrom(doc, runStarted) > LIMIT_RESET_MAX_MS) {
+        if (now - waitedFrom(doc, runStarted, now) > LIMIT_RESET_MAX_MS) {
           waitOnJoe(rec, id, { what: LIMIT_NO_RESET, now, kind: 'limit_no_reset', alert,
-            text: `card ${id}: it has waited on account ${acct}'s usage limit since ${iso(waitedFrom(doc, runStarted))}, longer than any real limit window, and the reset it gives (${lf.resets_at}) is still ahead, so it can't resume by itself; it waits on you` });
+            text: `card ${id}: it has waited on account ${acct}'s usage limit since ${iso(waitedFrom(doc, runStarted, now))}, longer than any real limit window, and the reset it gives (${lf.resets_at}) is still ahead, so it can't resume by itself; it waits on you` });
         }
         continue;
       }
