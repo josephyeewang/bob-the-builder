@@ -36,7 +36,7 @@ Every outside effect (launching, stopping, typing into a session, git, alerts) i
 
 ## The tick's ports
 
-`tick()` takes every outside effect as a port, so the wiring module (written at the live proof) is the only place that touches the Mac. `main.mjs` reads a config file `{ wiring, lockFile }` (both absolute paths), imports the wiring module and calls its `wire(config, { limitedSync })`, which returns `{ rec, rules, ports }`. The ports:
+`tick()` takes every outside effect as a port, so the wiring module (written at the live proof) is the only place that touches the Mac. `main.mjs` reads a config file `{ installRoot, wiring, lockFile }` (all absolute paths) through the one checked reader, `shared/job-config.mjs` (L253): the config, the wiring and `main.mjs` itself must be files of the installed copy at `installRoot`, root's or the job's own user's alone, or nothing runs. Then it imports the wiring module and calls its `wire(config, { limitedSync })`, which returns `{ rec, rules, ports }`. The ports:
 
 | Port | Used by | What it does |
 |---|---|---|
