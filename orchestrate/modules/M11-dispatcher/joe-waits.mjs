@@ -36,6 +36,8 @@ export function waitOnJoe(rec, id, { text, alert, now, ...wait }) {
   if (!req.ok) return { ok: false, reason: `the tell could not be recorded: ${req.reason}` };
   const w = waitOn(rec, id, { who: 'joe', now, ...wait });
   if (!w.ok) return w;
+  // A copy still queued for the card's last wait (on Joe too) is about a wait that has ended: it leaves unsent (L355 m4).
+  dropCause(rec, WAIT_TELL_FACT(id));
   const stored = confirm(rec, id, rec.read('card', id)?.doc);
   if (stored) tellThen(alert, text, { fact: WAIT_TELL_FACT(id), fields: { told_since: stored, told_at: iso(now) }, kind: 'wait_told' });
   return w;
@@ -74,22 +76,29 @@ export function untoldWaitText(card, wait) {
 }
 
 // A card waiting on Joe whose wait has no tell for it: one is written, so retellWaits tells it like any other (L316).
+// A copy still queued for an older wait leaves unsent first (L355 m4). Returns the writes the Record refused (L323, L355
+// m1): without its tell the card would never be told, so retellWaits throws them, and the tick tells Joe daily.
 function adoptUntold(rec) {
+  const refused = [];
   let cards;
-  try { cards = rec.list('card'); } catch { return; }
+  try { cards = rec.list('card'); } catch { return refused; }
   for (const { id, doc } of cards) {
     const w = doc?.wait;
     if (doc?.state !== 'waiting' || w?.who !== OWNER_WAIT_WHO || w.what === PAUSED_WAIT_WHAT || !w.since) continue;
     const f = rec.read('fact', WAIT_TELL_FACT(id));
     if (f?.doc?.since && waitOf(f.doc, doc)) continue;
-    rewriteTell(rec, id, f?.rev ?? 0, { since: w.since, wait_since: w.since, text: untoldWaitText(id, w) });
+    dropCause(rec, WAIT_TELL_FACT(id));
+    const text = untoldWaitText(id, w);
+    const put = rewriteTell(rec, id, f?.rev ?? 0, { since: w.since, wait_since: w.since, text });
+    if (!put.ok) refused.push(`${text} (its reminder could not be recorded: ${put.reason ?? 'no reason'})`);
   }
+  return refused;
 }
 
 /** Each tick: every card waiting on Joe is told at once, then daily while the same wait lasts (shared stillWaiting). */
 export function retellWaits({ rec, alert, now }) {
   const out = [];
-  adoptUntold(rec);
+  const refused = adoptUntold(rec);
   for (const f of rec.list('fact')) {
     if (!f.id.startsWith(WAIT_TELL_FACT('')) || !f.doc?.since) continue;
     const card = f.id.slice(WAIT_TELL_FACT('').length);
@@ -112,9 +121,15 @@ export function retellWaits({ rec, alert, now }) {
       clear: () => {
         dropCause(rec, fact);
         const d = rec.read('fact', fact);
-        if (d?.doc?.told_at != null) rewriteTell(rec, card, d.rev, { ...d.doc, told_at: null });
+        // A refused clear is harmless (a mark counts only for the wait it names), so it is noted, not told (L355 m1).
+        if (d?.doc?.told_at != null) {
+          const put = rewriteTell(rec, card, d.rev, { ...d.doc, told_at: null });
+          if (!put.ok) out.push([card, `told mark not cleared: ${put.reason ?? 'no reason'}`]);
+        }
       },
     });
   }
+  // Thrown after every other card is told: the tick's step error tells Joe at once, and daily while it lasts.
+  if (refused.length) throw new Error(`cards wait on you with no reminder recorded: ${refused.join('; ')}`);
   return out;
 }

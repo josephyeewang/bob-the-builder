@@ -76,6 +76,12 @@ export async function leadRestartStep({ rec, rules, now, lead, size, inFlight, s
     if (w.ok) { cur = rec.read('fact', RESTART_FACT(sid)); st = cur.doc; }
     return w;
   };
+  // The old Lead keeps running, and the owner is told until a copy is delivered (L130). `asked`: a second ask was sent.
+  const giveUp = (why, asked = true) => {
+    save({ phase: 'gave_up', gave_up_why: why, gave_up_asked: asked }, 'lead_restart_gave_up');
+    tellThen(alert, gaveUpText(sid, why, asked), { fact: RESTART_FACT(sid), fields: { gave_up_told: true }, kind: 'lead_gave_up_alert' });
+    return 'gave up; the old Lead keeps running';
+  };
 
   const noSize = !size || size.tokens == null;
   // Told only once sent (audit 0b-6 r5 MAT-2).
@@ -83,7 +89,7 @@ export async function leadRestartStep({ rec, rules, now, lead, size, inFlight, s
     tellThen(alert, `the Lead ${sid} is at ${size.tokens} tokens, past ${hard} + ${HARD_MARGIN}: its compaction did not happen`, { fact: RESTART_FACT(sid), fields: { hard_told: true }, kind: 'lead_hard_alert' });
   }
   // A give-up whose alert the queue refused is told again each pass until it is delivered (L130).
-  if (st.phase === 'gave_up' && !st.gave_up_told) tellThen(alert, gaveUpText(sid, st.gave_up_why), { fact: RESTART_FACT(sid), fields: { gave_up_told: true }, kind: 'lead_gave_up_alert' });
+  if (st.phase === 'gave_up' && !st.gave_up_told) tellThen(alert, gaveUpText(sid, st.gave_up_why, st.gave_up_asked !== false), { fact: RESTART_FACT(sid), fields: { gave_up_told: true }, kind: 'lead_gave_up_alert' });
   if (['done', 'gave_up'].includes(st.phase)) return st.phase;
   // The old Lead is stopped and the new one did not start (audit 0b-6 r2 MIN-1): try again every pass,
   // whatever the old transcript says; Joe was told once.
@@ -97,6 +103,15 @@ export async function leadRestartStep({ rec, rules, now, lead, size, inFlight, s
     }
     save({ phase: 'done', restarted_at: iso(now), new_lead: again.sessionId ?? null }, 'lead_restarted');
     return 'restarted';
+  }
+  // The wait on the Lead's answer has its day's cap whatever its transcript shows (L355 m5): a Lead with no size reading,
+  // or never at a finished turn, a day after the ask (or with an ask time that can't be read, L329) is given up on, and
+  // the owner told. Nothing is sent mid-turn and the Lead is never stopped. One at a finished turn goes the re-ask path.
+  if (['wrap_sent', 'reasked'].includes(st.phase) && (noSize || !size.turnEnded)) {
+    const askedAt = pastTime(st.sent_at, now);
+    if (askedAt === null || now - askedAt >= STILL_WAITING_MS) {
+      return giveUp(noSize ? 'its size could not be read for a day after the ask' : 'it did not finish a turn within a day of the ask', st.phase === 'reasked');
+    }
   }
   if (noSize) return 'no size';
   // Every move happens only at a finished turn: never WRAP mid-turn, never act on a turn in progress.
@@ -158,11 +173,9 @@ export async function leadRestartStep({ rec, rules, now, lead, size, inFlight, s
     save({ phase: 'reasked', sent_at: iso(now), reasks: 1 }, 'lead_reask');
     return 're-asked';
   }
-  save({ phase: 'gave_up', gave_up_why: why }, 'lead_restart_gave_up');
-  tellThen(alert, gaveUpText(sid, why), { fact: RESTART_FACT(sid), fields: { gave_up_told: true }, kind: 'lead_gave_up_alert' });
-  return 'gave up; the old Lead keeps running';
+  return giveUp(why);
 }
 
 const startFailedText = (sid, reason) => `the Lead ${sid} was stopped after its handoff, but the new Lead did not start: ${reason ?? 'no answer'}; it is tried again every pass`;
-const gaveUpText = (sid, why) => `the Lead ${sid} did not hand in a usable handoff after a second ask (${why ?? 'no reason recorded'}); it keeps running`;
+const gaveUpText = (sid, why, asked = true) => `the Lead ${sid} did not hand in a usable handoff ${asked ? 'after a second ask' : 'within a day of the ask'} (${why ?? 'no reason recorded'}); it keeps running`;
 const wrapText = (sid, cap) => `WRAP: this session is large. Write your handoff to your outbox as ${HANDOFF_NAME(sid)}, under ${cap} tokens (about ${cap * 4} bytes), then reply DONE. Requests still queued in your outbox do not carry over: name any you still need in the handoff.`;

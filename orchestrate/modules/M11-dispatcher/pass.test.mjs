@@ -1340,6 +1340,30 @@ test('L350: a new unknown-usage stretch whose start is short or corrupt is told 
   }
 });
 
+test('L355 m6: an unknown-usage stretch recorded with no start is told, not read as just started every pass', async () => {
+  // No start: counted from when the band was decided (the first pass), so told once that is over a day old.
+  let w = world([], { usage: null });
+  const told = (x) => x.calls.alerts.filter((a) => /usage has been unreadable for over a day/.test(a)).length;
+  await w.pass(0);
+  change(w.rec, 'fact', BAND_FACT, { unknown_since: null });
+  await w.pass(60);
+  assert.equal(told(w), 0, 'within the day of its decided time');
+  await w.pass(25 * 60);
+  assert.equal(told(w), 1, 'counted from the decided time: told');
+  await w.pass(25 * 60 + 1);
+  assert.equal(told(w), 1, 'then quiet');
+  // No start and no decided time: counts as old enough, told at the next pass, quiet, then again a day on.
+  w = world([], { usage: null });
+  await w.pass(0);
+  change(w.rec, 'fact', BAND_FACT, { unknown_since: '', decided_at: null });
+  await w.pass(1);
+  assert.equal(told(w), 1, 'neither time: told at once');
+  await w.pass(2);
+  assert.equal(told(w), 1, 'then quiet');
+  await w.pass(25 * 60);
+  assert.equal(told(w), 2, 'again a day on');
+});
+
 test('L339 m2: an unknown-usage start stored as a number is told once, then daily, not every pass', async () => {
   const w = world([], { usage: null });
   const told = () => w.calls.alerts.filter((a) => /usage has been unreadable for over a day/.test(a)).length;

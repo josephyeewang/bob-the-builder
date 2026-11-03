@@ -226,3 +226,65 @@ test('L329: a tell whose since is unreadable or an hour ahead is told at the nex
     assert.equal(w.got.length, 3, `${label}: told again a day on`);
   }
 });
+
+// L355 m1 (L323): a joe wait written with no tell gets one from adoptUntold; when the Record refuses that write, the card
+// would never be told. The step throws after telling the rest, so the tick's step error tells the owner, daily.
+test('L355 m1: a reminder the Record refuses to record for a card on the owner is thrown, after the other cards are told', async () => {
+  const w = world();
+  readyCard(w.E, 'C-2');
+  runCard(w.E, 'C-2');
+  assert.equal((await withAlerts(w.E.record, w.E.clock.t, w.port, (alert) => waitOnJoe(w.E.record, 'C-2', { text: 'card C-2 needs you', alert, now: w.E.clock.t, ...ask }))).ok, true);
+  w.E.clock.t += MIN;
+  assert.equal(waitOn(w.E.record, 'C-1', { who: 'joe', what: 'round cap', now: w.E.clock.t }).ok, true);
+  const real = w.E.record;
+  const rec = Object.create(real, { write: { value: (x) => (x.entity === 'fact' && x.id === WAIT_TELL_FACT('C-1') ? { ok: false, reason: 'busy' } : real.write(x)) } });
+  w.E.clock.t += 24 * 60 * MIN;
+  await assert.rejects(
+    withAlerts(real, w.E.clock.t, w.port, (alert) => retellWaits({ rec, alert, now: w.E.clock.t })),
+    /cards wait on you with no reminder recorded: card C-1 waits on you \(round cap\).*\(its reminder could not be recorded: busy\)$/,
+  );
+  // The tick sends the queue in its own step; here the throw stops withAlerts before sending, so the copy is still queued.
+  assert.equal(isQueued(real, WAIT_TELL_FACT('C-2')), true, 'the other card was still told again, a day on');
+});
+
+// L355 m3 (plant P4): a mark counts only for the wait it names. A mark left by an older wait, told just now, does not
+// hold a new wait's tell for a day.
+test('L355 m3: a told mark naming an older wait does not count for the new one: the new wait is told at the next pass', async () => {
+  const w = world();
+  assert.equal((await withAlerts(w.E.record, w.E.clock.t, w.port, (alert) => waitOnJoe(w.E.record, 'C-1', { text: 'wait one', alert, now: w.E.clock.t, ...ask }))).ok, true);
+  const old = w.tell().told_since;
+  w.E.clock.t += MIN;
+  assert.equal(waitOnJoe(w.E.record, 'C-1', { text: 'wait two', alert: () => false, now: w.E.clock.t, ...ask }).ok, true);
+  const f = w.E.record.read('fact', WAIT_TELL_FACT('C-1'));
+  const at = new Date(w.E.clock.t).toISOString();
+  assert.equal(w.E.record.write({ actor: 'dispatcher', entity: 'fact', id: WAIT_TELL_FACT('C-1'), expectRev: f.rev, doc: { ...f.doc, told_since: old, told_at: at }, kind: 'wait_told' }).ok, true);
+  assert.notEqual(w.card().wait.since, old, 'a second wait on the owner');
+  w.E.clock.t += MIN;
+  await w.pass();
+  assert.deepEqual(w.got, ['wait one', 'wait two'], 'the new wait is told at once, not held by the old mark');
+  assert.equal(w.tell().told_since, w.card().wait.since);
+});
+
+// L355 m4: owner -> owner between ticks. The first wait's copy, still queued, is about a wait that has ended: it is
+// dropped, never delivered, and the second wait is told.
+test('L355 m4: a copy still queued for a wait on the owner that ended in a second one is dropped; the second is told', async () => {
+  const w = world();
+  assert.equal(waitOnJoe(w.E.record, 'C-1', { text: 'W1 text', alert: outbox(w.E.record, w.E.clock.t), now: w.E.clock.t, ...ask }).ok, true);
+  assert.equal(isQueued(w.E.record, WAIT_TELL_FACT('C-1')), true, 'the first copy waits in the queue');
+  w.E.clock.t += MIN;
+  assert.equal(waitOnJoe(w.E.record, 'C-1', { text: 'W2 text', alert: outbox(w.E.record, w.E.clock.t), now: w.E.clock.t, ...ask }).ok, true);
+  w.E.clock.t += MIN;
+  await w.pass();
+  assert.deepEqual(w.got, ['W2 text'], 'only the live wait is told');
+  assert.equal(w.tell().told_since, w.card().wait.since);
+});
+
+test('L355 m4: owner -> owner by a writer that tells nothing: the old copy is dropped, and the new wait is told by its own text', async () => {
+  const w = world();
+  assert.equal(waitOnJoe(w.E.record, 'C-1', { text: 'W1 text', alert: outbox(w.E.record, w.E.clock.t), now: w.E.clock.t, ...ask }).ok, true);
+  w.E.clock.t += 5 * MIN;
+  assert.equal(waitOn(w.E.record, 'C-1', { who: 'joe', what: 'round cap', now: w.E.clock.t }).ok, true);
+  w.E.clock.t += MIN;
+  await w.pass();
+  assert.deepEqual(w.got, [untoldWaitText('C-1', w.card().wait)], 'only the live wait is told');
+});
