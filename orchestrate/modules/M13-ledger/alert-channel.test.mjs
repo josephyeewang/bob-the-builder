@@ -2,7 +2,7 @@
 // robot job, with the Dispatcher dead or alive. Every GitHub call here is a fake; no network.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, readdirSync, writeFileSync, appendFileSync, mkdirSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, writeFileSync, appendFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { memoryRecord } from '../../shared/record.mjs';
 import { tempDir } from '../../shared/test-tmp.mjs';
@@ -111,13 +111,14 @@ test('L237: an issue Joe closed does not silence the next alert of its key: it o
   assert.deepEqual(queued(w.rec), []);
 });
 
-test('L242: a lock left by a dead process is broken by M9\'s rule, and the round delivers', async () => {
+test('L242: a lock left by a dead process counts as free and the round delivers, but only the store breaks it (it recovers after)', async () => {
   const w = world();
   writeLock(w.root, holder(T0 - 60 * MIN));
   outbox(w.rec, T0)('x');
   const r = await w.run({ host: 'mac-a', probe: DEAD });
   assert.equal(r.refused, undefined);
   assert.equal(r.sent, 1);
+  assert.ok(existsSync(join(w.root, 'lock')), 'the dead holder\'s lock is left for the store, whose break triggers recovery');
 });
 
 test('L244/L245: a live holder: up to the red limit nothing is opened; past it one issue; later rounds edit it; freed, it closes and the queue drains', async () => {

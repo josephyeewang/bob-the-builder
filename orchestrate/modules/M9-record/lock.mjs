@@ -74,10 +74,14 @@ function createWhole(dir, path, body) {
 // kept the Record locked too long, and the age comes from the holder's own `at`.
 export function readHolder(dir) { return readJson(join(dir, 'lock')); }
 
+// The one test of a dead holder: one on this host whose process is gone. makeLock breaks only such a lock; the alert
+// channel uses the same test to see that a lock is no one's, and leaves breaking it to the store (lane 1's review).
+export function holderDead(h, { host = hostname(), probe = realProbe } = {}) { return !!h && !h.unreadable && h.host === host && processDead(h, probe); }
+
 export function makeLock({ dir, host = hostname(), timeoutMs = 10000, probe = realProbe, disabled = false } = {}) {
   const path = join(dir, 'lock');
   const breakPath = join(dir, 'break.lock');
-  const isDead = (h) => !!h && !h.unreadable && h.host === host && processDead(h, probe);
+  const isDead = (h) => holderDead(h, { host, probe });
   const me = () => ({ pid: process.pid, pid_start: ownPidStart(), host, nonce: randomBytes(12).toString('hex'), at: new Date().toISOString() });
 
   function tryBreak(found) {

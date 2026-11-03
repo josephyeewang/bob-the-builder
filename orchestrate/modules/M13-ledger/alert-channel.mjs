@@ -23,8 +23,11 @@
 // its key: an alert is news, so the next one opens a new issue (L237). Nothing here closes an alert's issue by itself;
 // wiring `clear` to causes that clear is a follow-up row.
 //
-// The Record's lock (L242, L244, L245). The pass first takes and drops M9's own lock with a bounded wait, so a lock
-// left by a dead process is broken by M9's rule. A live holder makes the pass give up with nothing lost. When that
+// The Record's lock (L242, L244, L245). The pass reads M9's lock and never takes it: only the store breaks a dead
+// holder's lock, because only the store recovers after a break (store.mjs `broke`), so a break from here would leave a
+// process that already opened its store not rolling forward a write the dead holder committed (lane 1's review). A
+// dead holder's lock is left for the store's next write. A live holder, waited on for a few seconds, makes the pass
+// give up with nothing lost. When that
 // holder has kept the lock longer than the heartbeat's red limit (or can't be read), the pass tells Joe straight through
 // GitHub, since the Record can't be written: one issue, found again by a hidden marker, edited while it lasts and closed
 // once the lock is free. No state file.
@@ -33,7 +36,7 @@ import { createHash } from 'node:crypto';
 import { alertKey, makeAlerts } from './alerts.mjs';
 import { DISPATCHER_LATE_MIN } from './heartbeat.mjs';
 import { ALERT_BUDGET_MS, ALERT_SEND_MS, sendAlerts } from '../M11-dispatcher/alerts.mjs';
-import { makeLock, readHolder } from '../M9-record/lock.mjs';
+import { holderDead, readHolder, sleepMs } from '../M9-record/lock.mjs';
 import { markSent, readUnsent } from '../M9-record/unsent.mjs';
 
 export const RECORD_LOCKED_MIN = DISPATCHER_LATE_MIN;
@@ -155,17 +158,15 @@ export function storeText(event) {
   return [`The Record's store: ${String(e.type ?? 'alert').slice(0, 100)}`, ...lines].join('\n');
 }
 
-// Take and drop M9's lock, waiting at most `ms`: a dead holder's lock is broken by M9's own rule; a live one is left.
+// Read M9's lock, waiting at most `ms` for a live holder to let go. Free: no lock, or a dead holder's (M9's own test),
+// which the store's next write breaks and recovers from. Never taken or broken here.
 function lockCheck({ recordRoot, ms, probe, host, nowMs }) {
-  try {
-    const lock = makeLock({ dir: recordRoot, timeoutMs: ms, ...(probe ? { probe } : {}), ...(host ? { host } : {}) });
-    const { nonce } = lock.acquire();
-    lock.release(nonce);
-    return { free: true };
-  } catch (e) {
-    if (!e?.store) return { free: false, pid: '?', ageMin: null, reason: `the Record's lock could not be checked: ${msg(e)}` };
-    let h = null;
-    try { h = readHolder(recordRoot); } catch { h = null; }
+  const deadline = Date.now() + ms;
+  for (;;) {
+    let h;
+    try { h = readHolder(recordRoot); } catch (e) { return { free: false, pid: '?', ageMin: null, reason: `the Record's lock could not be checked: ${msg(e)}` }; }
+    if (h === null || holderDead(h, { host, probe })) return { free: true };
+    if (!h.unreadable && Date.now() < deadline) { sleepMs(25); continue; }
     const at = Date.parse(h?.at ?? '');
     const ageMin = Number.isFinite(at) ? Math.max(0, Math.floor((nowMs - at) / MIN)) : null;
     const pid = Number.isInteger(h?.pid) ? h.pid : '?';
