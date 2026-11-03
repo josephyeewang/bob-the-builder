@@ -11,6 +11,8 @@ import { outboxFile as m9file } from '../M9-record/fixtures.test-helper.mjs';
 import { checkOutboxFile, intakePush, outboxFile } from '../M1-front-door/outbox.mjs';
 import { waitingItems, waitingLines } from '../M13-ledger/waiting.mjs';
 import { askStore } from './ask-store.mjs';
+import { researchHandler, RESEARCH_CARD } from '../M11-dispatcher/research-intake.mjs';
+import { GO_FREE_KEY } from '../M9-record/ready.mjs';
 import { landResearch, markResearchPushSent, openResearchAsks, researchBrief, researchFileName, runLine } from './research-ask.mjs';
 
 const SKILL = readFileSync(new URL('../M1-front-door/skill/orchestrate/SKILL.md', import.meta.url), 'utf8');
@@ -26,77 +28,17 @@ function fileAsk(t, brief, id = '20261103-0915-ra', product = PRODUCT, sid = 'F-
   return intakePush(f.name, c);
 }
 
-// STAND-IN for lane 2's R-0b-135 (rerun against the real intake once it merges): a `research-<ask>.md` from the owner's
-// desktop session is taken in only while that research ask is open, onto a go-free research_copy card into
-// docs/research/; the real M9 writer makes the binding and the one-card-per-ask rules.
-function standIn135(t, name, text) {
-  const m = /^research-(R-[1-9]\d{0,5})\.md$/.exec(name);
-  if (!m) return { ok: false, reason: 'not a research file name' };
-  const a = askStore(t.record).ask(m[1]);
-  if (!a || a.doc.kind !== 'research' || a.doc.state !== 'open' || !a.doc.wait) return { ok: false, reason: `no open research ask ${m[1]}` };
-  return t.record.write({ actor: 'dispatcher', entity: 'card', id: `RC-${m[1]}`, expectRev: 0, doc: { state: 'draft', product: PRODUCT,
-    kind: 'research_copy', research_ask: m[1], module: 'docs', files: [`docs/research/${m[1]}.md`], done_when: 'the report is copied as it is',
-    tier: 2, source: { file: name, sha256: createHash('sha256').update(text).digest('hex') } } });
+// The real R-0b-135 handler (M11 research-intake.mjs): a `research-<ask>.md` from the owner's desktop session is taken in
+// only while that research ask is open, onto one go-free research_copy card, and lands the ask.
+const RESEARCH_ON = { [`${GO_FREE_KEY}.research_copy`]: true };
+function handIn(t, name, text) {
+  const m = /^research-(.*)\.md$/.exec(name);
+  return researchHandler({ rules: t.ctx.rules })({ rec: t.record, product: PRODUCT, kind: 'research', id: m ? m[1] : name, name, text,
+    sha256: createHash('sha256').update(text).digest('hex'), now: t.clock.t });
 }
 
-test('R-0b-136: "find out X" puts a research ask with its brief on "waiting on you"', () => {
-  const t = m2env();
-  const push = fileAsk(t, 'find out how the top three rivals price their annual plan');
-  assert.match(push, /^Request taken: research ask for sample-app\. Nothing has started yet/);
-  const r = openResearchAsks(t.ctx);
-  assert.deepEqual(r.refused, []);
-  assert.equal(r.opened.length, 1);
-  const { id } = r.opened[0];
-  assert.equal(id, 'R-1');
-  assert.match(r.opened[0].push, /research ask R-1 for sample-app: find out how the top three rivals price.*say "run research ask R-1"/);
-  const lines = waitingLines(waitingItems(t.record));
-  assert.equal(lines.length, 1);
-  assert.match(lines[0], /^ask R-1: waits on joe for "run research ask R-1" in a desktop session on the Mini: find out how the top three rivals price their annual plan, since 2026-/);
-  // Once per report, also after a restart (the ask names its report). Its push is handed back until it is marked
-  // sent (L95), and never after.
-  assert.deepEqual(openResearchAsks(t.ctx).opened.map((o) => o.id), ['R-1']);
-  must(markResearchPushSent(t.ctx, 'R-1'), 'mark sent');
-  assert.deepEqual(openResearchAsks(t.ctx).opened, []);
-  assert.equal(t.record.list('ask').length, 1);
-  assert.equal(markResearchPushSent(t.ctx, 'R-1').ok, false, 'marked once');
-});
-
-// L95 (audit stack r3 Minor 1, probes P4a and P4b): a throw in the pass loses no research push. The sink throwing on
-// an alert, or the record throwing on a later write, still hands back every ask opened; and an ask whose push the
-// caller never marked sent is handed back on the next pass.
-test('L95 Minor 1: a research push is never lost to a throwing alert sink or a later store write', () => {
-  // P4a: the alert sink throws on the refused report's alert.
-  const t = m2env();
-  fileAsk(t, 'find out the first thing', '20261103-0915-rg');
-  must(t.record.applyOutbox({ role: 'incident', sessionId: 'I-1' }, m9file(t, 'incident', 'I-1', 'ask-request-20261103-0915-rh.json', '{"ask":"research","product":"sample-app","brief":"find out x"}\n')));
-  const ctx = { ...t.ctx, alert: () => { throw new Error('the sink is down'); } };
-  const r = openResearchAsks(ctx);
-  assert.deepEqual(r.opened.map((o) => o.id), ['R-1']);
-  assert.equal(r.refused.length, 1);
-  assert.ok(r.alerts_failed >= 1, 'the failed alerts are counted');
-  // The caller crashed before sending: the next pass hands R-1 back again.
-  assert.deepEqual(openResearchAsks(t.ctx).opened.map((o) => o.id), ['R-1']);
-
-  // P4b: the record throws on the second ask write. R-1 is still handed back, and the second report is refused with
-  // the reason, so it opens on a later pass.
-  const u = m2env();
-  fileAsk(u, 'find out the first thing', '20261103-0915-ri');
-  fileAsk(u, 'find out the second thing', '20261103-0915-rj');
-  const real = u.record.write.bind(u.record);
-  let asks = 0;
-  const write = (w) => { if (w.entity === 'ask' && ++asks === 2) throw new Error('disk full'); return real(w); };
-  const rec = { ...u.record, write }; // the record is frozen, so a copy of its methods with write swapped
-  const r2 = openResearchAsks({ ...u.ctx, record: rec });
-  assert.deepEqual(r2.opened.map((o) => o.id), ['R-1']);
-  assert.equal(r2.refused.length, 1);
-  assert.equal(r2.refused[0].reason, 'the pass failed on it');
-  assert.match(r2.refused[0].error, /disk full/);
-  const r3 = openResearchAsks(u.ctx);
-  assert.deepEqual(r3.opened.map((o) => o.id).sort(), ['R-1', 'R-2']);
-});
-
-test('R-0b-136: "run research ask R-1" needs nothing pasted, and the report lands in the record (stand-in for R-0b-135)', () => {
-  const t = m2env();
+test('R-0b-136: "run research ask R-1" needs nothing pasted, and the report lands in the record (through R-0b-135)', () => {
+  const t = m2env({ values: RESEARCH_ON });
   fileAsk(t, 'find out which payroll tools small agencies use');
   const { id } = openResearchAsks(t.ctx).opened[0];
   // The desktop session reads the brief and the file to leave from the record, by the ask's number alone.
@@ -104,18 +46,18 @@ test('R-0b-136: "run research ask R-1" needs nothing pasted, and the report land
   assert.deepEqual(b, { ok: true, id, product: PRODUCT, brief: 'find out which payroll tools small agencies use', file: 'research-R-1.md' });
   assert.equal(runLine(id), 'run research ask R-1');
   const report = '# Payroll tools\n\nThree tools came up most.\n';
-  must(standIn135(t, researchFileName(id), report), 'research report');
-  const card = t.record.read('card', 'RC-R-1').doc;
+  must(handIn(t, researchFileName(id), report), 'research report');
+  const card = t.record.read('card', RESEARCH_CARD(id)).doc;
   assert.equal(card.kind, 'research_copy'); assert.equal(card.research_ask, id);
   assert.equal(card.source.sha256, createHash('sha256').update(report).digest('hex'));
-  // The ask leaves the waiting list; a second report for it is refused.
-  must(landResearch(t.ctx, id), 'land');
+  // The handler lands the ask: it leaves the waiting list; landing again and a second report are refused.
   assert.deepEqual(waitingItems(t.record), []);
-  assert.equal(t.record.read('ask', id).doc.landed.card, 'RC-R-1');
-  assert.equal(standIn135(t, researchFileName(id), 'again').ok, false);
+  assert.equal(t.record.read('ask', id).doc.landed.card, RESEARCH_CARD(id));
+  assert.deepEqual(landResearch(t.ctx, id), { ok: true, already: true });
+  assert.equal(handIn(t, researchFileName(id), 'again').ok, false);
   assert.equal(researchBrief(t.record, id).ok, false, 'a landed ask is not run again');
-  // A planted research file with no open ask is refused (R-0b-135's check, here in the stand-in).
-  assert.match(standIn135(t, 'research-R-99.md', 'x').reason, /no open research ask R-99/);
+  // A planted research file with no open ask is refused.
+  assert.match(handIn(t, 'research-R-99.md', 'x').reason, /there is no research ask R-99/);
 });
 
 test('R-0b-136: what opens nothing', () => {

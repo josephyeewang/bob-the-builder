@@ -271,7 +271,7 @@ test('with no product document today, the gaps are exactly the known ones (pause
   assert.match(start.reason, /no product record/);
 });
 
-test('a research_copy card is ready on day one with no go', { todo: 'R-0b-135, L204-c (lane 2, M11): nothing makes a research_copy card yet, and the first-cutover rules do not set go_free.research_copy' }, () => {
+test('a research_copy card is ready on day one with no go', { todo: 'R-0b-135, L204-c, L286: M11 research-intake.mjs makes the card; the first-cutover rules do not set go_free.research_copy yet (the owner's step 15b)' }, () => {
   const { rules } = dayOne();
   assert.ok(goFreeKinds(rules, P).includes('research_copy'));
 });
