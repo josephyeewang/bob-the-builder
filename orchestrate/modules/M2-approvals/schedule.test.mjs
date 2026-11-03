@@ -5,7 +5,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { chmodSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { env, OWNER_ID, session, write, box, PRODUCT, must } from './fixtures.test-helper.mjs';
 import { leadCard, put } from '../M9-record/fixtures.test-helper.mjs';
@@ -575,4 +575,89 @@ test('L295 Minor 1: a refused push is told once per ask and cause; a push that g
   await w.at(W8 + 8 * MIN + 2 * HOUR + MIN);
   await w.at(W8 + 8 * MIN + 4 * HOUR);
   assert.equal(notSent(), 1);
+  // L309 MAT-2: told again each day while the ask still waits: not at +2 h, again past +24 h.
+  await w.at(W8 + 8 * MIN + 2 * HOUR + 23 * HOUR);
+  assert.equal(notSent(), 1, 'under a day: not again');
+  await w.at(W8 + 8 * MIN + 2 * HOUR + 25 * HOUR);
+  assert.equal(notSent(), 2, 'a day on and still waiting: told again');
+  await w.at(W8 + 8 * MIN + 2 * HOUR + 26 * HOUR);
+  assert.equal(notSent(), 2);
+});
+
+// L309 MAT-2: an ask never pushed has no time limit, so its cause is re-told each day, not once ever.
+test('L309 MAT-2: an ask with no phone channel is told again each day while it waits', async () => {
+  const w = world();
+  delete w.t.ctx.push;
+  must(createAsk(w.t.ctx, { id: 'U-1', kind: 'undo', card: 'C-1', title: 'Undo' }));
+  const noPush = () => w.t.alerts.filter((a) => a.type === 'approvals_no_push' && a.ask === 'U-1').length;
+  await w.at(W8);
+  await w.at(W8 + 2 * HOUR);
+  assert.equal(noPush(), 1, '+2 h: not again');
+  await w.at(W8 + 25 * HOUR);
+  assert.equal(noPush(), 2, '+25 h: again');
+  await w.at(W8 + 26 * HOUR);
+  assert.equal(noPush(), 2);
+  await w.at(W8 + 50 * HOUR);
+  assert.equal(noPush(), 3);
+});
+
+// L309 Minor 2: an ask-alerts file that can't be read or parsed is "nothing told", never "already told", and is
+// replaced by a readable one, so the cause is told once more, not every pass.
+test('L309 Minor 2: a corrupt or unreadable ask-alerts.json tells again, once', async () => {
+  for (const how of ['corrupt', 'unreadable']) {
+    const w = world();
+    delete w.t.ctx.push;
+    must(createAsk(w.t.ctx, { id: 'U-1', kind: 'undo', card: 'C-1', title: 'Undo' }));
+    const noPush = () => w.t.alerts.filter((a) => a.type === 'approvals_no_push' && a.ask === 'U-1').length;
+    await w.at(W8);
+    assert.equal(noPush(), 1);
+    const f = join(w.t.ctx.stateDir, 'ask-alerts.json');
+    if (how === 'corrupt') writeFileSync(f, '{ not json');
+    else chmodSync(f, 0o200);
+    await w.at(W8 + MIN);
+    assert.equal(noPush(), 2, `${how}: told again`);
+    await w.at(W8 + 2 * MIN);
+    assert.equal(noPush(), 2, `${how}: the file was replaced, so not every pass`);
+    assert.equal(typeof JSON.parse(readFileSync(f, 'utf8'))['U-1'], 'object');
+  }
+});
+
+// L315: a bad rules config raises no asks, so it is told again each day while the same problem stands, and its mark goes
+// once the config reads fine. L317: a told time more than a minute ahead counts as not told.
+test('L315: a bad config is told again each day while it stands; L317: a told time 30 days ahead is not "told"', async () => {
+  const w = world({ 'approvals.push_windows': [] });
+  yesNo(w);
+  const cfg = () => w.t.alerts.filter((a) => a.type === 'approvals_config').length;
+  await w.at(W8);
+  assert.equal(cfg(), 1);
+  await w.at(W8 + 2 * HOUR);
+  assert.equal(cfg(), 1, '+2 h: quiet');
+  await w.at(W8 + 25 * HOUR);
+  assert.equal(cfg(), 2, '+25 h: told again');
+  await w.at(W8 + 26 * HOUR);
+  assert.equal(cfg(), 2);
+  const f = join(w.t.ctx.stateDir, 'config-alert.json');
+  const m = JSON.parse(readFileSync(f, 'utf8'));
+  writeFileSync(f, JSON.stringify({ ...m, at: m.at + 30 * 24 * HOUR }));
+  await w.at(W8 + 27 * HOUR);
+  assert.equal(cfg(), 3, 'a told time 30 days ahead: told now');
+  await w.at(W8 + 28 * HOUR);
+  assert.equal(cfg(), 3);
+});
+
+test('L317: an ask-alerts told time 30 days ahead is not "told": the ask that cannot be pushed is told now', async () => {
+  const w = world();
+  delete w.t.ctx.push;
+  must(createAsk(w.t.ctx, { id: 'U-1', kind: 'undo', card: 'C-1', title: 'Undo' }));
+  const noPush = () => w.t.alerts.filter((a) => a.type === 'approvals_no_push' && a.ask === 'U-1').length;
+  await w.at(W8);
+  assert.equal(noPush(), 1);
+  const f = join(w.t.ctx.stateDir, 'ask-alerts.json');
+  const m = JSON.parse(readFileSync(f, 'utf8'));
+  for (const k of Object.keys(m['U-1'])) m['U-1'][k] += 30 * 24 * HOUR;
+  writeFileSync(f, JSON.stringify(m));
+  await w.at(W8 + MIN);
+  assert.equal(noPush(), 2);
+  await w.at(W8 + 2 * MIN);
+  assert.equal(noPush(), 2);
 });
