@@ -3076,7 +3076,10 @@ test('L358 gate.mjs: with the start gate shut, a lost refusal alert and an inter
   must(settleMerge({ record: recOf(w), alert: w.ctx.alert, now: () => w.env.clock.t }, m.id, {
     pr: { state: 'open', merged: false, merge_commit_sha: null, head_sha: m.doc.judged_head }, reason: 'interrupted', openTooLong: true,
     fields: { interrupted_note: 'still open after the merge call', interrupted_told_at: null, tell_owner: true } }), 'settled outside the gate');
-  // A second card's merge request waits in the queue: it must not be taken in while the gate is shut.
+  // A second, ready card waits with its merge request: it must not be taken in while the gate is shut.
+  verifiedCard(w, 'C-2', { pr: 8, files: { 'src/b.mjs': 'b' } });
+  const card2 = cardOf(w, 'C-2').state;
+  assert.equal(recOf(w).list('merge_request').filter((q) => q.doc.card === 'C-2').length, 1, 'C-2 is queued');
   const puts = gatePuts(w);
   const writes = w.g.writes.length;
   const merges = recOf(w).list('merge').length;
@@ -3100,7 +3103,15 @@ test('L358 gate.mjs: with the start gate shut, a lost refusal alert and an inter
   assert.equal(gatePuts(w), puts, 'no merge call');
   assert.equal(w.g.writes.length, writes, 'no GitHub write');
   assert.equal(recOf(w).list('merge').length, merges, 'no merge taken in');
+  assert.equal(mergeOf(w, 'C-2'), undefined, 'C-2 is not taken in');
+  assert.equal(cardOf(w, 'C-2').state, card2, 'and its card has not moved');
   assert.equal(mergeOf(w).doc.state, 'refused');
+  // The control: C-2 was ready all along, so it is the shut gate that held it. With the gate open its merge call goes
+  // out on the next pass (its answer is lost like C-1's, so it stops at merging).
+  stayGreen(w);
+  await gatePass(w.ctx);
+  assert.equal(gatePuts(w), puts + 1, 'C-2\'s merge call goes out once the gate opens');
+  assert.equal(mergeOf(w, 'C-2').doc.state, 'merging');
 });
 
 test('L329 gate.mjs hold cap: where the cap can\'t be judged (the rules can\'t answer the limit), a bad stuck_since is restamped, then judged from it', async () => {
