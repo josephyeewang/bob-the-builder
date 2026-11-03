@@ -47,12 +47,16 @@ export async function runPasses({ rec, passes, now, passDeadlineMs = PASS_DEADLI
   return res;
 }
 
-export async function main(argv, { now = () => Date.now(), log = (s) => process.stderr.write(`${s}\n`), watchdog = false, wireOpts = {} } = {}) {
+const realOf = (p) => { try { return realpathSync(p); } catch { return null; } };
+const SELF = realOf(fileURLToPath(import.meta.url));
+
+// `self`: this script's real path, checked as one of the installed copy's code files (audit #144 m4).
+export async function main(argv, { now = () => Date.now(), log = (s) => process.stderr.write(`${s}\n`), watchdog = false, wireOpts = {}, self = SELF } = {}) {
   let config; let wired;
   let dog = watchdog ? startWatchdog(RUN_DEADLINE_MS + WATCHDOG_MARGIN_MS) : null;
   try {
     if (!argv[0]) throw new Error('usage: robot-main.mjs <config.json>');
-    config = readConfig(argv[0]);
+    config = readConfig(argv[0], { self });
     const limit = config.runDeadlineMs ?? RUN_DEADLINE_MS;
     if (dog && config.runDeadlineMs !== undefined) { dog.terminate(); dog = startWatchdog(limit + WATCHDOG_MARGIN_MS); }
     const mod = await import(pathToFileURL(config.wiring).href);
@@ -87,9 +91,7 @@ export async function main(argv, { now = () => Date.now(), log = (s) => process.
   } finally { clearTimeout(timer); l.release(); }
 }
 
-const realOf = (p) => { try { return realpathSync(p); } catch { return null; } };
-const self = realOf(fileURLToPath(import.meta.url));
-if (self && process.argv[1] && self === realOf(process.argv[1])) {
+if (SELF && process.argv[1] && SELF === realOf(process.argv[1])) {
   const code = await main(process.argv.slice(2), { watchdog: true });
   process.exitCode = code;
   setTimeout(() => process.exit(code), 1000).unref();
