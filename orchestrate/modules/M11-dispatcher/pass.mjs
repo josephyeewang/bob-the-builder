@@ -32,6 +32,7 @@ import { move, waitOn, note } from './moves.mjs';
 import { waitOnJoe } from './joe-waits.mjs';
 import { sensorsFact } from './sensor-facts.mjs';
 import { tellThen, dropCause, isQueued } from './alerts.mjs';
+import { stillWaiting, dueToTell, pastTime, STILL_WAITING_MS } from '../../shared/still-waiting.mjs';
 import { exactReverse } from './undo.mjs';
 import { FINAL_STATES, OWNER_WAIT_WHO, PAUSED_WAIT_WHAT } from '../../shared/record.mjs';
 
@@ -104,7 +105,8 @@ export async function rulesMissingAlert({ rec, factId = RULES_MISSING_FACT, keys
 }
 
 export const HOLD_FACT = (cause) => `hold-${cause}`;
-export const HOLD_REPEAT_MS = 24 * 60 * 60_000;
+// The shared still-waiting repeat, one definition (#164 audit c1).
+export const HOLD_REPEAT_MS = STILL_WAITING_MS;
 
 /**
  * No silent hold (LEAD-CALLS L38): anything that holds or blocks work tells Joe what and why, once per
@@ -112,10 +114,10 @@ export const HOLD_REPEAT_MS = 24 * 60 * 60_000;
  */
 export function holdAlert({ rec, cause, text, alert, now, every = HOLD_REPEAT_MS }) {
   const f = factDoc(rec, HOLD_FACT(cause))?.doc;
-  const last = Date.parse(f?.told_at ?? '');
   // Once per cause per day (L38), or per `every` (a paused product, weekly; L299): a changing detail in the text
-  // does not make it a new cause. null, not false: already told today is not a refused alert (L130 m12).
-  if (Number.isFinite(last) && now - last < every) return null;
+  // does not make it a new cause. null, not false: already told today is not a refused alert (L130 m12). A told_at
+  // that can't be read, or more than 60 s ahead of now, is not told (shared dueToTell; #157 audit MAT-1).
+  if (!dueToTell(f, now, every)) return null;
   // Marked told only once a copy is delivered (audit 0b-6 r5 MAT-2; L47).
   return tellThen(alert, text, { fact: HOLD_FACT(cause), fields: { text, told_at: iso(now) }, kind: 'hold_alert' });
 }
@@ -471,41 +473,78 @@ export const UNDO_HELD_FACT = (card) => `undo-held-${card}`;
 // cause, then daily (L38: no silent hold).
 export const TOLD_BANDS = Object.freeze(['red', 'unknown']);
 export const PAUSED_REPEAT_MS = 7 * HOLD_REPEAT_MS;
+// M10 is asked before the gate, so a full cap is first refused in M10's words (engine.mjs; #157 audit m2), then the gate's.
 const QUEUES = [
-  ['product-cap', /^the product already runs \d+ (editing worker\(s\) \(cap \d+\)|script\(s\))$/],
-  ['mac-cap', /^the Mac already runs \d+ (editing workers \(cap \d+\)|scripts)$/],
+  ['product-cap', /^the product already runs \d+ (editing worker\(s\) \(cap \d+\)|script\(s\))$|^rules: editing cap reached for \S+ \(\d+\)$/],
+  ['mac-cap', /^the Mac already runs \d+ (editing workers \(cap \d+\)|scripts)$|^rules: editing cap reached on this Mac \(\d+\)$/],
   ['files', /^shares .+ with running card \S+$|^a card with no file list runs alone$|^card \S+ has no file list and runs alone$/],
   ['tier1-first', /^queued behind Tier-1 work in amber$/],
 ];
-const BANDS = /^(the red band|usage is unknown: no Tier-1|ORCHESTRATE has used its share of the week$|no new (scripts|overnight runs) outside the green band$|no Tier-1 production work above the usage line$|rules: .*Tier 1 start needs a usage reading)/;
+const BAND_REASONS = /^(the red band|usage is unknown: no Tier-1|ORCHESTRATE has used its share of the week$|no new (scripts|overnight runs) outside the green band$|no Tier-1 production work above the usage line$|rules: .*Tier 1 start needs a usage reading)/;
 /** Which fold a held start's reason belongs to, or null if it is told on first sight. `band` is this pass's band. */
 export function waitClass(reason, product, band) {
   if (/can't be folded/.test(reason)) return null;
-  // M10 is asked first (`rules: product is paused`, a state it can't read included); the gate's own words are the backstop.
-  if (reason === 'rules: product is paused' || reason === `${product} is paused: only its undo starts`) return 'paused';
+  // M10 is asked first: `product is paused: no starts` (engine.mjs, a state it can't read included; #157 audit m1). The
+  // gate's own words are the backstop.
+  if (reason === 'rules: product is paused: no starts' || reason === `${product} is paused: only its undo starts`) return 'paused';
   const q = QUEUES.find(([, re]) => re.test(reason));
   if (q) return q[0];
-  return BANDS.test(reason) && TOLD_BANDS.includes(band) ? `band-${band}` : null;
+  return BAND_REASONS.test(reason) && TOLD_BANDS.includes(band) ? `band-${band}` : null;
 }
-// Who holds the slot: a shared file names its card; otherwise the running cards on the product, or the Mac for a Mac cap.
-function holders(reason, product, running) {
+const FOLDS = ['paused', ...QUEUES.map(([c]) => c), ...TOLD_BANDS.map((b) => `band-${b}`)];
+// Who holds the slot: a shared file names its card; Tier-1 first names the Tier-1 cards it waits behind; otherwise the
+// running cards on the product, or on the Mac for a Mac cap.
+function holders(reason, product, running, tier1) {
   const named = /with running card (\S+)$|^card (\S+) has no file list/.exec(reason);
   if (named) return [named[1] ?? named[2]];
-  const on = /^the Mac /.test(reason) ? running : running.filter((s) => s.product === product);
+  if (reason === 'queued behind Tier-1 work in amber') return tier1.get(product) ?? [];
+  const on = /^the Mac |on this Mac \(/.test(reason) ? running : running.filter((s) => s.product === product);
   return on.map((s) => s.card).filter(Boolean);
 }
 const LIST_MAX = 10;
 const listed = (ids) => ids.slice(0, LIST_MAX).join(', ') + (ids.length > LIST_MAX ? ` +${ids.length - LIST_MAX} more` : '');
-/** The one alert per product and cause for held starts (L299). */
+function foldText(g) {
+  const n = g.cards.length;
+  if (g.cls === 'paused') return `${g.product} is paused; ${n} card(s) are waiting: ${listed(g.cards)}`;
+  const why = [...g.why].map(([reason, ids]) => `${listed(ids)} (${reason})`).join('; ');
+  const by = [...new Set(g.by)];
+  const behind = !by.length ? '' : g.cls === 'tier1-first' ? `; they wait behind Tier-1 card(s) ${listed(by)}` : `; the slot is held by card(s) ${listed(by)}`;
+  return `${g.product}: ${n} card(s) held from starting, the oldest for over a day: ${why}${behind}`;
+}
+/**
+ * The one alert per product and cause for held starts (L299), on the shared still-waiting rule (L315): told once the
+ * oldest held card has waited a day, again daily (a paused product weekly), and the mark cleared once nothing on that
+ * product and cause has waited a day, so a return is told afresh (#157 audit m3). Run on a full pass only: a pass that
+ * starts undo cards alone sees no groups and must not clear them.
+ */
 function tellWaits({ rec, groups, alert, now }) {
-  for (const [key, g] of groups) {
-    if (!(now - g.oldest >= HOLD_REPEAT_MS)) continue;
-    const by = [...new Set(g.by)];
-    const text = g.cls === 'paused' ? `${g.product} is paused; ${g.cards.length} card(s) are waiting: ${listed(g.cards)}`
-      : `${g.product}: ${g.cards.length} card(s) have waited over a day to start (${g.reason}): ${listed(g.cards)}${by.length ? `; the slot is held by ${by.map((c) => `card ${c}`).join(', ')}` : ''}`;
-    holdAlert({ rec, cause: `waits-${key}`, text, alert, now, every: g.cls === 'paused' ? PAUSED_REPEAT_MS : HOLD_REPEAT_MS });
+  let products;
+  try { products = rec.list('product').map((x) => x.id); } catch { products = []; }
+  const keys = new Set([...groups.keys(), ...products.flatMap((p) => FOLDS.map((c) => `${p}-${c}`))]);
+  for (const key of keys) {
+    const g = groups.get(key);
+    const fact = HOLD_FACT(`waits-${key}`);
+    stillWaiting({
+      now,
+      every: g?.cls === 'paused' ? PAUSED_REPEAT_MS : HOLD_REPEAT_MS,
+      waiting: () => !!g && now - g.oldest >= HOLD_REPEAT_MS,
+      read: () => factDoc(rec, fact)?.doc,
+      // Marked told only once a copy is delivered (L47), as holdAlert.
+      tell: ({ told_at }) => { const text = foldText(g); return tellThen(alert, text, { fact, fields: { text, told_at }, kind: 'hold_alert' }); },
+      // Called on every pass with nothing to tell (L320 m1): a queued copy is dropped, and the mark written only if set.
+      clear: () => {
+        dropCause(rec, fact);
+        const cur = rec.read('fact', fact)?.doc;
+        if (cur != null && !(typeof cur === 'object' && cur.told_at == null)) putFact(rec, fact, { ...(typeof cur === 'object' ? cur : {}), told_at: null }, 'hold_cleared');
+      },
+    });
   }
 }
+// Refusals whose words carry a changing detail (a session id, an error message) are one cause per card, keyed by a
+// fixed class, not their text (#157 audit m5); any other is keyed by its text with the numbers out.
+const FIXED_CAUSES = [['launcher', /^launcher: /], ['claim', /^not claimed: /], ['rules-error', /^rules: (could not be asked|rules error: )/]];
+const causeOf = (reason) => FIXED_CAUSES.find(([, re]) => re.test(reason))?.[0]
+  ?? createHash('sha256').update(reason.replace(/\d+/g, 'N')).digest('hex').slice(0, 12);
 
 async function starts({ rec, rules, now, b, running, launch, out, alert, onlyUndo = false, missing = [], filesOf, portDeadlineMs = PORT_DEADLINE_MS, host = hostname() }) {
   const amberish = b.band !== 'green' || b.own_building !== 'open';
@@ -518,7 +557,7 @@ async function starts({ rec, rules, now, b, running, launch, out, alert, onlyUnd
   ready.sort((x, y) => isUndo(y.doc) - isUndo(x.doc)
     || (amberish ? tierOf(x.doc) - tierOf(y.doc) : 0)
     || since(x).localeCompare(since(y)) || x.id.localeCompare(y.id));
-  const tier1Waiting = new Set();
+  const tier1Waiting = new Map();
   const groups = new Map();
   for (const { id, rev, doc } of ready) {
     const card = { id, ...doc };
@@ -534,17 +573,21 @@ async function starts({ rec, rules, now, b, running, launch, out, alert, onlyUnd
         if (toldElsewhere) return;
         const cls = waitClass(reason, product, b?.band);
         if (cls === null) {
-          holdAlert({ rec, cause: `start-${id}-${createHash('sha256').update(reason.replace(/\d+/g, 'N')).digest('hex').slice(0, 12)}`, text: `card ${id} can't start: ${reason}`, alert, now });
+          holdAlert({ rec, cause: `start-${id}-${causeOf(reason)}`, text: `card ${id} can't start: ${reason}`, alert, now });
           return;
         }
         // Folded per product and cause; the clock is the oldest ready time, the Record's, so nothing is written per pass.
-        // A ready time that can't be read counts as a day old: told, never held in silence.
+        // A ready time that can't be read, or more than 60 s ahead of now, counts as a day old: told, never held in
+        // silence (shared pastTime; #157 audit MAT-1). A paused card counts from the later of the pause and its ready
+        // time (#157 audit m3): a pause over cards long in ready is told a day after the pause, not at once.
         const key = `${product}-${cls}`;
-        const g = groups.get(key) ?? { product, cls, reason, cards: [], by: [], oldest: Infinity };
-        const t = Date.parse(since({ id }));
-        g.oldest = Math.min(g.oldest, Number.isFinite(t) ? t : -Infinity);
+        const g = groups.get(key) ?? { product, cls, why: new Map(), cards: [], by: [], oldest: Infinity };
+        let t = pastTime(since({ id }), now) ?? -Infinity;
+        if (cls === 'paused') t = Math.max(t, pastTime(rec.meta?.('product', product)?.stateSince, now) ?? -Infinity);
+        g.oldest = Math.min(g.oldest, t);
         g.cards.push(id);
-        if (QUEUES.some(([c]) => c === cls)) g.by.push(...holders(reason, product, running));
+        g.why.set(reason, [...(g.why.get(reason) ?? []), id]);
+        if (QUEUES.some(([c]) => c === cls)) g.by.push(...holders(reason, product, running, tier1Waiting));
         groups.set(key, g);
         return;
       }
@@ -569,7 +612,7 @@ async function starts({ rec, rules, now, b, running, launch, out, alert, onlyUnd
     if (exact && !exact.ok) { await refuse(`it is not an exact reverse: ${exact.reason}`); continue; }
     const g = startGate({ rules, rec, card, kind, product, b, running, exactReverse: !!exact?.ok });
     if (g.missing) missing.push(g.missing);
-    if (!g.ok) { if (amberish && tierOf(doc) === 1 && capRefusal(g.reason)) tier1Waiting.add(product); await refuse(g.reason, !!g.missing); continue; }
+    if (!g.ok) { if (amberish && tierOf(doc) === 1 && capRefusal(g.reason)) tier1Waiting.set(product, [...(tier1Waiting.get(product) ?? []), id]); await refuse(g.reason, !!g.missing); continue; }
     // The claim names the session before it starts (L72): the launcher starts claude with this id, so a second start
     // can't take the card. The Record stamps claimed_at; rules_rev is the rules the claim was made under.
     const sessionId = randomUUID();
@@ -616,5 +659,5 @@ async function starts({ rec, rules, now, b, running, launch, out, alert, onlyUnd
     dropCause(rec, UNDO_HELD_FACT(id));
     out.started.push(id);
   }
-  tellWaits({ rec, groups, alert, now });
+  if (!onlyUndo) tellWaits({ rec, groups, alert, now });
 }
