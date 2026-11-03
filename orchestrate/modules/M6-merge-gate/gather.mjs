@@ -97,9 +97,11 @@ const failed = (message) => Object.assign(new Error(message), { unreadable: true
 const VIEW_READS = ['commit', 'compare', 'files', 'entry', 'isDir', 'onHistory'];
 function watchReads({ view, gh } = {}) {
   const seen = { error: null };
-  // A read that threw with no HTTP status got no answer at all (a dropped connection, a fake's plain Error): failed.
+  // The error is kept as thrown, so failedRead is the one judge of it (#108 r3 M-r3, LEAD-CALLS L225). git-view's own
+  // answers ("file list ... is cut off", "compare lists 300 files", "is not an ancestor", an odd answer) are GitHub's
+  // answer about the change: they count toward the wait cap, as the same error from an unwatched read does.
   const note = (e) => {
-    const c = statusOf(e) === null && !failedRead(e) ? Object.assign(new Error(String(e?.message ?? e)), { unreadable: true, cause: e }) : e;
+    const c = e ?? new Error('a read failed and threw nothing');
     seen.error ??= c;
     return c;
   };

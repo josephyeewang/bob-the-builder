@@ -1826,7 +1826,9 @@ test('L186 control: a carry-over read that fails past the cap never refuses', as
   w.g.pulls.get(7).head = h1;
   const view = w.ctx.view;
   let down = true;
-  w.ctx.view = Object.create(view, { compare: { value: (b, h) => (down && h === h0 ? Promise.reject(new Error('compare gone')) : view.compare(b, h)) } });
+  // A real failed read: the connection dropped (as Node's fetch throws it). A plain Error is git-view's own answer
+  // and counts toward the cap (#108 r3 M-r3).
+  w.ctx.view = Object.create(view, { compare: { value: (b, h) => (down && h === h0 ? Promise.reject(new TypeError('fetch failed')) : view.compare(b, h)) } });
   const re = /^5: whether the review carries over .* could not be read/;
   for (const step of [0, WAIT_CAP_TIMES * LIMIT_MIN, 5]) {
     tick(w, step);
@@ -2574,3 +2576,53 @@ test('L205 Minor 1: a review-thread read GitHub answers with a 404 waits on 7, a
   w.g.gh.post = async (path, body) => (path === '/graphql' ? { status: 404, json: null } : post(path, body));
   await cappedAfter(w, /^7: the review threads could not be read/);
 });
+
+// #108 r3 (LEAD-CALLS L225): git-view's own answers about the change, thrown from a watched read, are not failed reads.
+// The wait they cause counts toward the cap, as the same error from an unwatched read does, so the merge is
+// refused at the cap, never held for ever. failedRead is the one judge.
+const CUT_OFF = (sha = 'abcdef1') => new Error(`file list of ${sha} is cut off or unknown`);
+const OVER_300 = () => new Error('compare lists 300 files; GitHub cuts the list at 300');
+test('#108 r3 R3-a: the go check\'s folder read finds main\'s tree cut off: the wait on 10 counts toward the cap', async () => {
+  const w = world(limited());
+  verifiedCard(w);
+  const view = w.ctx.view;
+  w.ctx.view = Object.create(view, { isDir: { value: () => Promise.reject(CUT_OFF()) } });
+  await cappedAfter(w, /^10: the go could not be checked/);
+});
+test('#108 r3 R3-b: a carry-over whose files read is cut off at 300 (main moved since the review): the wait on 5 counts toward the cap', async () => {
+  const w = world(limited());
+  verifiedCard(w);
+  w.g.main = w.g.commit([w.g.main], { 'docs/other.md': 'x' }, { from: w.g.main });
+  const newMain = w.g.main;
+  const view = w.ctx.view;
+  w.ctx.view = Object.create(view, { files: { value: (b, h) => (h === newMain ? Promise.reject(OVER_300()) : view.files(b, h)) } });
+  await gatePass(w.ctx);
+  const m = mergeOf(w);
+  assert.ok(m.doc.stuck_since !== null || m.doc.state === 'refused', `the wait counts toward the cap: ${JSON.stringify(m.doc)}`);
+  for (const step of [LIMIT_MIN, WAIT_CAP_TIMES * LIMIT_MIN]) { tick(w, step); await gatePass(w.ctx); }
+  assert.equal(mergeOf(w).doc.state, 'refused', JSON.stringify(mergeOf(w).doc));
+  assert.ok(mergeOf(w).doc.reasons.some((x) => /^5: /.test(x)), mergeOf(w).doc.reasons.join(' | '));
+  assert.equal(told(w, 'merge_refused').length, 1);
+});
+test('#108 r3 R3-c: an undo whose exact-reverse compare lists 300 files: the wait counts toward the cap and the undo is refused, told', async () => {
+  const w = world();
+  verifiedCard(w);
+  await gatePass(w.ctx);
+  const flagged = mergeOf(w).doc.merge_commit;
+  const rec = recOf(w);
+  must(rec.write({ actor: 'sensors', entity: 'fact', id: 'audit-run-1', expectRev: 0, doc: { type: 'audit_run', commit: flagged, conclusion: 'failure' } }), 'fact');
+  await gatePass(w.ctx);
+  must(put(rec, 'dispatcher', 'card', 'C-1', { state: 'closed' }), 'closed');
+  tick(w, 1);
+  verifiedCard(w, 'U-1', { pr: 9, files: { 'src/a.mjs': 'one' }, undo: flagged });
+  w.ctx.rules = fakeRules({ values: { ...w.values, 'timeouts.merging_open_max_min': LIMIT_MIN }, answers: { merge: allow('in lane') } });
+  const view = w.ctx.view;
+  w.ctx.view = Object.create(view, { onHistory: { value: (s, t) => (s === flagged ? Promise.reject(OVER_300()) : view.onHistory(s, t)) } });
+  await gatePass(w.ctx);
+  assert.equal(mergeOf(w, 'U-1').doc.state, 'held', JSON.stringify(mergeOf(w, 'U-1').doc));
+  assert.notEqual(mergeOf(w, 'U-1').doc.stuck_since, null, 'the cap\'s clock runs');
+  for (const step of [LIMIT_MIN, WAIT_CAP_TIMES * LIMIT_MIN]) { tick(w, step); await gatePass(w.ctx); }
+  assert.equal(mergeOf(w, 'U-1').doc.state, 'refused', JSON.stringify(mergeOf(w, 'U-1').doc));
+  assert.equal(told(w, 'merge_refused').filter((a) => a.card === 'U-1' || JSON.stringify(a).includes('U-1')).length, 1);
+});
+
