@@ -63,7 +63,7 @@ test('v3 §2.4, L74 b3: checking over 30 min is refused (timeout) by the Merge G
 });
 
 test('the same refusal reason twice goes to Joe (the gate counts it in attempts.merge_refusals)', async () => {
-  const rec = recWith([cardMerging, checking('M-1', 0), checking('M-2', 40)]);
+  const rec = recWith([cardMerging, checking('M-1', 0), checking('M-2', 10)]); // M-2 is 21 min old at the first pass, 61 at the second (a time ahead counts as old: L329)
   await pass(rec, 31);
   assert.equal(rec.read('card', 'C-1').doc.state, 'verified');
   assert.equal(rec.read('merge', 'M-2').doc.state, 'checking');
