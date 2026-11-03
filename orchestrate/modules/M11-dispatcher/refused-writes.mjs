@@ -14,6 +14,9 @@
 // told through stillWaiting (shared/still-waiting.mjs): at once, again every 24 h while any is kept, and cleared when
 // none is. A pass whose steps did not all finish, with nothing kept and nothing new, leaves the cause as it is: no
 // answer is not "ended". A throw in one cause never skips the others; they are thrown on together at the end.
+// Nothing that can't be read clears a cause (L352): a target read that throws, now or when refused, is still refused;
+// a kept list or entry that can't be read, and refused writes past the cap, are counted in `more`, said as "and N
+// more", and keep the cause told.
 import { stillWaiting } from '../../shared/still-waiting.mjs';
 import { dropCause, tellThen } from './alerts.mjs';
 import { HOLD_FACT } from './pass.mjs';
@@ -31,7 +34,13 @@ export const REFUSED_CAUSES = Object.freeze({
     kinds: ['dead_ask', 'usage_unknown', 'limit_no_account', 'limit_no_run', 'limit_no_hit', 'limit_no_reset', 'limit_reset', 'no_reviewer_ask'] },
   review_count: { what: "a card's failed review requests could not be counted, so it would never reach you", steps: ['limits'], kinds: ['review_request'] },
   resume: { what: 'a parked card could not be put back in the queue', steps: ['pass'], kinds: ['resume_usage_band', 'resume_limit_hit', 'resume_paused'] },
-  timeout: { what: 'a session past its time limit could not be ended', steps: ['limits'], kinds: ['timeout'] },
+  // The text names what was refused (L352 c1): a session's end, its card's failing, or both.
+  timeout: { what: (items) => {
+    const s = items.some((x) => x.entity === 'session');
+    const c = items.some((x) => x.entity === 'card');
+    return c && !s ? "a card past its time limit could not be failed" : s && !c ? 'a session past its time limit could not be ended'
+      : 'a session past its time limit could not be ended, or its card failed';
+  }, steps: ['limits'], kinds: ['timeout'] },
 });
 const CAUSE_OF = new Map(Object.entries(REFUSED_CAUSES).flatMap(([cause, c]) => c.kinds.map((k) => [k, cause])));
 
@@ -73,36 +82,66 @@ export function watchWrites(inner) {
 }
 
 const iso = (ms) => new Date(ms).toISOString();
-const textOf = (cause, items) => `the Dispatcher: ${REFUSED_CAUSES[cause].what}: ${items.map((x) => `${x.id} (${x.reason})`).join('; ')}; told again each day while it stays so`;
+const whatOf = (cause, items) => { const w = REFUSED_CAUSES[cause].what; return typeof w === 'function' ? w(items) : w; };
+// What Joe reads: the kept ones, how many more could not be kept, and whether the kept list could be read.
+const textOf = (cause, items, more, unreadable) => {
+  const list = items.map((x) => `${x.id} (${x.reason})`).join('; ');
+  const extra = [more > 0 ? `and ${more} more` : null, unreadable ? 'the kept list could not be read' : null].filter(Boolean).join('; ');
+  return `the Dispatcher: ${whatOf(cause, items)}: ${[list, extra].filter(Boolean).join('; ')}; told again each day while it stays so`;
+};
 const isItem = (x) => x && typeof x === 'object' && typeof x.entity === 'string' && typeof x.id === 'string' && typeof x.from === 'string';
+
+// The kept list on a cause's fact. A list that is there but can't be read, or an entry that can't, is not "nothing
+// kept" (L352 MAT-2): it counts as more refused writes than are kept, so the cause stays told and is never cleared for
+// it. A mark with no list at all (from before lists were kept) has nothing kept.
+function keptOf(doc) {
+  const raw = doc?.items;
+  const prior = doc?.more;
+  // A `more` count that can't be read is at least one unknown refused write.
+  let more = prior === undefined ? 0 : Number.isInteger(prior) && prior >= 0 ? prior : 1;
+  if (raw === undefined) return { kept: [], more, unreadable: prior !== undefined && more !== prior };
+  if (!Array.isArray(raw)) return { kept: [], more: more + 1, unreadable: true };
+  const kept = raw.filter(isItem);
+  return { kept, more: more + raw.length - kept.length, unreadable: kept.length < raw.length || (prior !== undefined && more !== prior) };
+}
+
+// A kept one stays refused while its target is as it was, unless a write of it was taken since. An 'unreadable' target,
+// now or when it was refused, has not been seen to move (L352 MAT-1).
+const stillRefused = (rec, k) => {
+  const now = stateOf(rec, k.entity, k.id);
+  return now === k.from || now === 'unreadable' || k.from === 'unreadable';
+};
 
 function tellCause({ rec, alert, now, cause, fresh, taken, ran }) {
   const fact = REFUSED_FACT(cause);
   const cur = rec.read('fact', fact);
-  const kept = Array.isArray(cur?.doc?.items) ? cur.doc.items.filter(isItem) : [];
-  if (!fresh.length && !kept.length && !REFUSED_CAUSES[cause].steps.every(ran)) return 'kept';
-  // A kept one is still refused while its target has not moved and no write of it was taken since.
+  const { kept, more: prior, unreadable } = keptOf(cur?.doc);
+  if (!fresh.length && !kept.length && !prior && !REFUSED_CAUSES[cause].steps.every(ran)) return 'kept';
   const freshKeys = new Set(fresh.map(keyOf));
-  const still = kept.filter((k) => !freshKeys.has(keyOf(k)) && !taken.has(keyOf(k)) && stateOf(rec, k.entity, k.id) === k.from);
-  const items = [...still, ...fresh].slice(-REFUSED_KEEP_MAX);
+  const still = kept.filter((k) => !freshKeys.has(keyOf(k)) && !taken.has(keyOf(k)) && stillRefused(rec, k));
+  const all = [...still, ...fresh];
+  const items = all.slice(-REFUSED_KEEP_MAX);
+  // The oldest beyond the cap are dropped from the list but counted (L352 m1): they can't be re-checked, so any count
+  // keeps the cause told and blocks its clear.
+  const more = prior + (all.length - items.length);
   let cleared = null;
   const r = stillWaiting({
     now,
-    waiting: items.length > 0,
+    waiting: items.length > 0 || more > 0,
     read: () => rec.read('fact', fact)?.doc ?? null,
-    tell: (fields) => tellThen(alert, textOf(cause, items), { fact, fields, kind: 'write_refused' }),
+    tell: (fields) => tellThen(alert, textOf(cause, items, more, unreadable), { fact, fields, kind: 'write_refused' }),
     clear: () => {
       dropCause(rec, fact);
       const c = rec.read('fact', fact);
-      if (c?.doc?.told_at == null && !(c?.doc?.items ?? []).length) return;
-      cleared = rec.write({ actor: 'dispatcher', entity: 'fact', id: fact, expectRev: c.rev, doc: { ...c.doc, items: [], told_at: null, cleared_at: iso(now) }, kind: 'write_refused_cleared' });
+      if (c?.doc?.told_at == null && !(c?.doc?.items ?? []).length && !c?.doc?.more) return;
+      cleared = rec.write({ actor: 'dispatcher', entity: 'fact', id: fact, expectRev: c.rev, doc: { ...c.doc, items: [], more: 0, told_at: null, cleared_at: iso(now) }, kind: 'write_refused_cleared' });
       // A refused clear keeps the cause (L332 m6): a stale told_at would keep a refusal within 24 h quiet.
       if (cleared?.ok !== true) throw new Error(`its clear was refused (${cleared?.reason ?? 'no answer'})`);
     },
   });
-  if (items.length && JSON.stringify(items) !== JSON.stringify(kept)) {
+  if ((items.length || more) && (unreadable || more !== prior || JSON.stringify(items) !== JSON.stringify(kept))) {
     const c = rec.read('fact', fact);
-    const w = rec.write({ actor: 'dispatcher', entity: 'fact', id: fact, expectRev: c?.rev ?? 0, doc: { ...(c?.doc ?? {}), items }, kind: 'write_refused_kept' });
+    const w = rec.write({ actor: 'dispatcher', entity: 'fact', id: fact, expectRev: c?.rev ?? 0, doc: { ...(c?.doc ?? {}), items, more }, kind: 'write_refused_kept' });
     if (w?.ok !== true) throw new Error(`its list could not be kept (${w?.reason ?? 'no answer'}), so it may clear while still refused`);
   }
   return r.did;

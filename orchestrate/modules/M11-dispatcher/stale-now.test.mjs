@@ -341,6 +341,11 @@ test('L332 MAT-2 (Probe D): a parked card whose resume the Record refuses is tol
   assert.match(alerts.join(' | '), /a parked card could not be put back in the queue: C-1 \(not ready: dependency D-1 is failed/);
   E.clock.t += 10 * MIN;
   assert.deepEqual((await pass()).refused.find(([c]) => c === 'resume'), ['resume', 'quiet']);
+  // The card moves on (now waiting on Joe, not on usage): the cause clears (L352 m3).
+  E.clock.t += 10 * MIN;
+  assert.equal(waitOn(E.record, 'C-1', { who: 'joe', what: 'moved by the test', now: E.clock.t, kind: 'test_move' }).ok, true);
+  assert.deepEqual((await pass()).refused.find(([c]) => c === 'resume'), ['resume', 'cleared']);
+  assert.equal(E.record.read('fact', REFUSED_FACT('resume')).doc.told_at, null);
 });
 
 test('L332 MAT-2: a time limit\'s end the Record refuses is noted under its own cause', async () => {
@@ -351,6 +356,28 @@ test('L332 MAT-2: a time limit\'s end the Record refuses is noted under its own 
   setClock(rec, T0 + 11 * MIN);
   await timeLimits({ rec: w.rec, rules: rulesWith(), now: T0 + 11 * MIN, b: { band: 'green', own_building: 'open' }, running: [], gateAlive: () => true, alert: fakeAlert() });
   assert.deepEqual(w.refused.get('timeout')?.map((x) => [x.entity, x.id, x.reason]), [['card', 'C-1', 'refused for the test'], ['session', 'S-1', 'refused for the test']]);
+  // Told, then cleared once both writes are taken (L352 m3).
+  const alert = fakeAlert();
+  assert.deepEqual(tellRefused({ ...w, rec, alert, now: T0 + 11 * MIN, ran: () => true }).find(([c]) => c === 'timeout'), ['timeout', 'told']);
+  assert.match(alert.texts[0], /a session past its time limit could not be ended, or its card failed: C-1 \(refused for the test\); S-1/);
+  for (const [, o] of alert.calls.splice(0)) rec.write({ actor: 'dispatcher', entity: 'fact', id: o.mark.fact, expectRev: rec.read('fact', o.mark.fact).rev, doc: { ...rec.read('fact', o.mark.fact).doc, ...o.mark.fields } });
+  const w2 = watchWrites(rec);
+  setClock(rec, T0 + 12 * MIN);
+  await timeLimits({ rec: w2.rec, rules: rulesWith(), now: T0 + 12 * MIN, b: { band: 'green', own_building: 'open' }, running: [], gateAlive: () => true, alert: fakeAlert() });
+  assert.equal(rec.read('session', 'S-1').doc.state, 'ended');
+  assert.deepEqual(tellRefused({ ...w2, rec, alert, now: T0 + 12 * MIN, ran: () => true }).find(([c]) => c === 'timeout'), ['timeout', 'cleared']);
+});
+
+test('L352 c1: a time limit whose card only could not be failed says so', async () => {
+  const rec = recWith([['card', 'C-1', { state: 'running', product: 'p1' }], ['session', 'S-1', { card: 'C-1', state: 'reporting', changed_at: iso(T0) }]]);
+  const refusing = Object.create(rec);
+  Object.defineProperty(refusing, 'write', { value: (x) => (x.kind === 'timeout' && x.entity === 'card' ? { ok: false, reason: 'refused for the test' } : rec.write(x)) });
+  const w = watchWrites(refusing);
+  setClock(rec, T0 + 11 * MIN);
+  await timeLimits({ rec: w.rec, rules: rulesWith(), now: T0 + 11 * MIN, b: { band: 'green', own_building: 'open' }, running: [], gateAlive: () => true, alert: fakeAlert() });
+  const alert = fakeAlert();
+  tellRefused({ ...w, rec, alert, now: T0 + 11 * MIN, ran: () => true });
+  assert.match(alert.texts[0], /^the Dispatcher: a card past its time limit could not be failed: C-1 \(refused for the test\); told again/);
 });
 
 test('L332 P10, P13: a refused write\'s mark is written only once its alert is delivered, and the tick says which steps finished', async () => {
@@ -390,4 +417,73 @@ test('L332 MAT-1: a refused write taken on a later pass, with its card in the sa
   const r2 = await pass();
   assert.equal(card('C-3').state, 'in_review', 'still in review: only the count was written');
   assert.deepEqual(r2.refused.find(([c]) => c === 'review_count'), ['review_count', 'cleared']);
+});
+
+// L352: a kept refusal is never cleared by what can't be read: a target, a kept list or its entries, or the overflow.
+const running = JSON.stringify(['running', null, null]);
+const keptWorld = (ids = ['C-1']) => {
+  const rec = recWith(ids.map((id) => ['card', id, { state: 'running' }]));
+  const alert = fakeAlert();
+  const delivered = () => { for (const [, o] of alert.calls.splice(0)) rec.write({ actor: 'dispatcher', entity: 'fact', id: o.mark.fact, expectRev: rec.read('fact', o.mark.fact)?.rev ?? 0, doc: { ...rec.read('fact', o.mark.fact)?.doc, ...o.mark.fields } }); };
+  const tell = (r, now, refused = new Map()) => { const out = tellRefused({ rec: r, alert, now, refused, ran: () => true }); delivered(); return out.find(([c]) => c === 'park')[1]; };
+  const item = (id, from = running) => ({ entity: 'card', id, kind: 'park_paused', reason: 'r', from });
+  return { rec, alert, tell, item, fact: () => rec.read('fact', REFUSED_FACT('park')) };
+};
+
+test('L352 MAT-1: a kept refusal whose target can\'t be read now, or could not be read when refused, is still refused', () => {
+  // Now: the card's read throws on a later pass.
+  const a = keptWorld();
+  assert.equal(a.tell(a.rec, T0, new Map([['park', [a.item('C-1')]]])), 'told');
+  const blind = Object.create(a.rec);
+  Object.defineProperty(blind, 'read', { value: (e, id) => { if (e === 'card') throw new Error('unreadable'); return a.rec.read(e, id); } });
+  assert.equal(a.tell(blind, T0 + H), 'quiet');
+  assert.equal(a.tell(blind, T0 + 25 * H), 'told');
+  assert.equal(a.fact().doc.items.length, 1);
+  // Then: refused while unreadable; the read works again with the card as it was.
+  const b = keptWorld();
+  assert.equal(b.tell(b.rec, T0, new Map([['park', [b.item('C-1', 'unreadable')]]])), 'told');
+  assert.equal(b.tell(b.rec, T0 + 25 * H), 'told');
+  assert.equal(b.fact().doc.items.length, 1);
+  // A write of it taken still clears it.
+  assert.equal(tellRefused({ rec: b.rec, alert: b.alert, now: T0 + 26 * H, refused: new Map(), taken: new Map([['park', new Set(['card/C-1'])]]), ran: () => true }).find(([c]) => c === 'park')[1], 'cleared');
+});
+
+test('L352 MAT-2: a kept list that is not a list, or holds an entry that can\'t be read, is told as unreadable, not cleared', () => {
+  for (const items of ['garbage', { a: 1 }, [{ entity: 'card', id: 'C-1' }]]) {
+    const w = keptWorld();
+    w.rec.write({ actor: 'dispatcher', entity: 'fact', id: REFUSED_FACT('park'), expectRev: 0, doc: { items, told_at: iso(T0) } });
+    const did = w.tell(w.rec, T0 + 25 * H);
+    assert.equal(did, 'told', JSON.stringify(items));
+    assert.match(w.alert.texts.at(-1), /and 1 more; the kept list could not be read; told again/, JSON.stringify(items));
+    assert.equal(w.fact().doc.more, 1, 'counted, so it is not cleared later');
+    assert.equal(w.tell(w.rec, T0 + 26 * H), 'quiet');
+    assert.equal(w.tell(w.rec, T0 + 50 * H), 'told');
+    assert.ok(w.fact().doc.told_at);
+  }
+  // An unreadable `more` count is at least one.
+  const w = keptWorld();
+  w.rec.write({ actor: 'dispatcher', entity: 'fact', id: REFUSED_FACT('park'), expectRev: 0, doc: { items: [], more: 'x', told_at: iso(T0) } });
+  assert.equal(w.tell(w.rec, T0 + 25 * H), 'told');
+  assert.equal(w.fact().doc.more, 1);
+});
+
+test('L352 m1: refusals past the kept cap are counted, said as "and N more", and keep the cause from clearing', () => {
+  const ids = Array.from({ length: 22 }, (_, i) => `C-${i + 1}`);
+  const w = keptWorld(ids);
+  assert.equal(w.tell(w.rec, T0, new Map([['park', ids.map((id) => w.item(id))]])), 'told');
+  assert.match(w.alert.texts.at(-1), /C-22 \(r\); and 2 more; told again/);
+  assert.doesNotMatch(w.alert.texts.at(-1), /C-1 \(/);
+  assert.deepEqual([w.fact().doc.items.length, w.fact().doc.more], [20, 2]);
+  // The 20 kept ones move on; the 2 dropped can't be re-checked, so the cause stays.
+  for (const id of ids.slice(2)) park(w.rec, id, T0 + 25 * H);
+  assert.equal(w.tell(w.rec, T0 + 25 * H), 'told');
+  assert.match(w.alert.texts.at(-1), /could not be parked: and 2 more; told again/);
+  assert.ok(w.fact().doc.told_at);
+});
+
+test('L352 m2: a kept list the Record will not write throws for its cause, so the tick is told', () => {
+  const w = keptWorld();
+  const refusing = Object.create(w.rec);
+  Object.defineProperty(refusing, 'write', { value: (x) => (x.kind === 'write_refused_kept' ? { ok: false, reason: 'refused for the test' } : w.rec.write(x)) });
+  assert.throws(() => tellRefused({ rec: refusing, alert: w.alert, now: T0, refused: new Map([['park', [w.item('C-1')]]]), ran: () => true }), /park: its list could not be kept \(refused for the test\)/);
 });
