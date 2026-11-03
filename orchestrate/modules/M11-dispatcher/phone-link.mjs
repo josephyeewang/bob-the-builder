@@ -20,7 +20,6 @@
 //   is stopped, checked at most once every 5 min; an alert, once, if it can't be stopped.
 // - A reading older than 5 min counts as unknown (audit MIN-10).
 // The step's memory is the fact `phone-link`. A reading counts once (by its observed_at).
-
 import { KEYS, minutes } from './keys.mjs';
 import { note } from './moves.mjs';
 import { sensorsFact } from './sensor-facts.mjs';
