@@ -48,7 +48,7 @@ export const CONFIG = Object.freeze({
   SOURCE: ['modules', 'shared'], // the units of work live here; wiring/ and setup/ hold entry points and glue
   ENTRY_FILES: [],
   NOT_PRODUCTION: [],
-  UNIT_SUFFIXES: ['Pass', 'Once', 'Step', 'Sweep'],
+  UNIT_SUFFIXES: ['Pass', 'Once', 'Step', 'Sweep', 'Handler'], // Handler: an intake's per-kind handler (#154 audit, L303)
   SKIP_DIRS: ['node_modules', 'fixtures', 'test', 'tests', '__tests__'],
   SKIP_TOP: ['dist', 'build', 'coverage'],
   ROW: /\b(?:L\d+|R-0b-\d+)\b/, // a lead call (L221) or a roadmap row (R-0b-162)
@@ -63,6 +63,8 @@ export const UNWIRED = Object.freeze({
   planPass: 'L221: R-0b-142 (the Lead turns a plan reviewer PASS into M2 plan check), no code calls it yet; lead to place',
   installStep: 'L221: R-0b-162 wiring (a worker launch with an install phase), lane 4',
   proposalsPass: 'L233: R-0b-162 wiring, lane 4',
+  researchPass: 'R-0b-135: R-0b-162 wiring beside proposalsPass, lane 4',
+  researchHandler: 'R-0b-135: R-0b-162 wiring, handed to proposalsPass as its research handler, lane 4 (L303)',
 });
 // ────────────────────────────────────────────────────────────────────────────
 

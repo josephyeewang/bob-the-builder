@@ -271,7 +271,17 @@ test('with no product document today, the gaps are exactly the known ones (pause
   assert.match(start.reason, /no product record/);
 });
 
-test('a research_copy card is ready on day one with no go', { todo: 'R-0b-135, L204-c (lane 2, M11): nothing makes a research_copy card yet, and the first-cutover rules do not set go_free.research_copy' }, () => {
+// L303 (#154 audit Minors 4 and 5): two silences the research path leaves for its wiring. Today nothing calls the
+// handler or researchPass, so neither can happen; lane 4's R-0b-162 wiring PR must close both before it lands.
+test('a research report whose card can\'t go ready or land is told to Joe, every time', { todo: 'L303, R-0b-162 (lane 4): the wiring must tell Joe on every settle() failure (not ready, not landed) from researchHandler and researchPass, or a paused product leaves a draft card and a closed ask in silence' }, () => {
+  assert.fail('R-0b-162 wires researchHandler and researchPass; until then nothing reports their settle() results');
+});
+
+test('a research report sent again after an interrupted intake is told, never stuck in silence', { todo: 'L303, R-0b-162 (lane 4): a re-sent report refused with "already has its research_copy card" after an interrupted intake must reach Joe, with what to do' }, () => {
+  assert.fail('R-0b-162 wires the research path; until then a re-send cannot happen');
+});
+
+test('a research_copy card is ready on day one with no go', { todo: 'R-0b-135, L204-c, L286: M11 research-intake.mjs makes the card; the first-cutover rules do not set go_free.research_copy yet (it waits for step 15b)' }, () => {
   const { rules } = dayOne();
   assert.ok(goFreeKinds(rules, P).includes('research_copy'));
 });

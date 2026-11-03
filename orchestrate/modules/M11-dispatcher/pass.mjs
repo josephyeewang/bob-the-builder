@@ -470,14 +470,17 @@ const tierOf = (c) => (c.tier === 2 ? 2 : 1);
 const capRefusal = (r) => /cap|already runs|shares |runs alone/.test(r);
 
 export const UNDO_HELD_FACT = (card) => `undo-held-${card}`;
+/** Card kinds the start loop never hands to a session. */
+export const NEVER_STARTED = Object.freeze(['lead_daily_card', 'research_copy']);
 
 async function starts({ rec, rules, now, b, running, launch, out, alert, onlyUndo = false, missing = [], filesOf, portDeadlineMs = PORT_DEADLINE_MS, host = hostname() }) {
   const amberish = b.band !== 'green' || b.own_building !== 'open';
   // Undo cards first, then (in amber) Tier 1 before Tier 2, then the longest in ready, by the Record's clock.
   // The Record's own ready rule (rec.ready: unclaimed, dependencies merged, a go where one is needed; L72).
   // The Lead's own daily card is never started as a worker (audit MAT-4; M9 lets only the Lead make one). A fix
-  // card stays a draft until the Lead plans it, so rec.ready never holds it.
-  const ready = rec.ready().filter((c) => c.doc.kind !== 'lead_daily_card');
+  // card stays a draft until the Lead plans it, so rec.ready never holds it. A research_copy card is never a worker's
+  // either: its commit is the owner's file, copied mechanically (research-intake.mjs; lane 2's copier, L286).
+  const ready = rec.ready().filter((c) => !NEVER_STARTED.includes(c.doc.kind));
   const since = (c) => String(rec.meta?.('card', c.id)?.stateSince ?? '');
   ready.sort((x, y) => isUndo(y.doc) - isUndo(x.doc)
     || (amberish ? tierOf(x.doc) - tierOf(y.doc) : 0)
