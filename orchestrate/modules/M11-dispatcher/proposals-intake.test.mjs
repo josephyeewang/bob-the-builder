@@ -404,6 +404,78 @@ test('plant: a proposal never takes a bundle held from an earlier pass that is n
   assert.equal(sent.length, 0);
 });
 
+// ---- L254: a refusal never erases a used record (lane 2's probe) ----
+
+test('plant L254: used, then refused with no hash (too big), then the same bytes again: not handed on twice', async () => {
+  const w = world();
+  put(w, 'research-r1.md', 'look into x');
+  assert.equal(one(await w.pass(), 'research-r1.md').applied, true);
+  put(w, 'research-r1.md', 'x'.repeat(TEXT_CAP + 1));
+  assert.match(one(await w.pass(), 'research-r1.md').refused, /larger than/);
+  assert.equal(fact(w, 'research-r1.md').state, 'applied', 'the used state is kept');
+  assert.equal(fact(w, 'research-r1.md').sha256, createHash('sha256').update('look into x').digest('hex'));
+  put(w, 'research-r1.md', 'look into x');
+  assert.equal(one(await w.pass(), 'research-r1.md').already, true);
+  assert.equal(w.calls.handed.length, 1, 'handed on once');
+  assert.equal(w.calls.alerts.filter((t) => /larger than/.test(t)).length, 1, 'the refusal is still told');
+});
+
+test('plant L254: the same with an interrupted file, and with a link put in its place', async () => {
+  for (const swap of ['big', 'link']) {
+    const w = world();
+    put(w, 'research-r2.md', 'y');
+    seed(w.rec, 'fact', intakeFactId('a', 'research-r2.md'), { session: 'proposals-a', product: 'a', name: 'research-r2.md', sha256: createHash('sha256').update('y').digest('hex'), state: 'applying' });
+    await w.pass();
+    assert.equal(fact(w, 'research-r2.md').state, 'interrupted');
+    const p = join(w.dirs.a, 'research-r2.md');
+    if (swap === 'big') put(w, 'research-r2.md', 'x'.repeat(TEXT_CAP + 1));
+    else { const { unlinkSync } = await import('node:fs'); unlinkSync(p); writeFileSync(join(w.root, 'elsewhere.md'), 'y'); symlinkSync(join(w.root, 'elsewhere.md'), p); }
+    assert.equal(typeof one(await w.pass(), 'research-r2.md').refused, 'string', swap);
+    assert.equal(fact(w, 'research-r2.md').state, 'interrupted', `${swap}: kept`);
+    const { unlinkSync } = await import('node:fs');
+    unlinkSync(p);
+    put(w, 'research-r2.md', 'y');
+    assert.equal(one(await w.pass(), 'research-r2.md').already, true, swap);
+    assert.deepEqual(w.calls.handed, [], `${swap}: never used`);
+  }
+});
+
+test('plant L254: an interrupted name taking new bytes never makes the old bytes usable again (refused with a hash, or a claim lost)', async () => {
+  const w = world();
+  const H = (t) => createHash('sha256').update(t).digest('hex');
+  put(w, 'research-r3.md', 'old');
+  seed(w.rec, 'fact', intakeFactId('a', 'research-r3.md'), { session: 'proposals-a', product: 'a', name: 'research-r3.md', sha256: H('old'), state: 'interrupted' });
+  put(w, 'research-r3.md', 'new');
+  assert.equal(one(await w.pass({ handlers: { research: () => ({ ok: false, reason: 'not now' }) } }), 'research-r3.md').refused, 'not now');
+  assert.deepEqual(fact(w, 'research-r3.md').used, [H('old')]);
+  put(w, 'research-r3.md', 'old');
+  assert.equal(one(await w.pass(), 'research-r3.md').already, true, 'refused with a hash: the old bytes stay used');
+  // A claim of new bytes left by a crash, over the interrupted record.
+  const cur = w.rec.read('fact', intakeFactId('a', 'research-r3.md'));
+  assert.equal(w.rec.write({ actor: 'dispatcher', entity: 'fact', id: intakeFactId('a', 'research-r3.md'), expectRev: cur.rev, doc: { ...cur.doc, sha256: H('newer'), state: 'applying' } }).ok, true);
+  put(w, 'research-r3.md', 'old');
+  assert.equal(one(await w.pass(), 'research-r3.md').already, true, 'a lost claim: the old bytes stay used');
+  assert.deepEqual(w.calls.handed, []);
+});
+
+test('plant L254: a held bundle refused with no hash keeps its record, and its proposal is not taken', async () => {
+  const w = world();
+  const rules = rulesFor(w.dirs, { a: 'second' });
+  const sent = [];
+  const toReview = (x) => { sent.push(x); return { ok: false, reason: 'review is full' }; };
+  put(w, 'bundle-C-1.bundle', 'bytes');
+  put(w, 'proposal-C-1.md', 'change');
+  await w.pass({ rules, toReview });
+  assert.equal(fact(w, 'bundle-C-1.bundle').state, 'held');
+  put(w, 'bundle-C-1.bundle', 'x'.repeat(TEXT_CAP * 2 + 1));
+  put(w, 'proposal-C-1.md', 'change 2');
+  const out = await w.pass({ rules, toReview });
+  assert.equal(typeof one(out, 'bundle-C-1.bundle').refused, 'string');
+  assert.equal(fact(w, 'bundle-C-1.bundle').state, 'held', 'kept');
+  assert.equal(one(out, 'proposal-C-1.md').refused, 'its bundle-C-1.bundle was refused');
+  assert.equal(sent.length, 1);
+});
+
 // ---- the read-deny wall (render-settings.mjs, L78 n5) ----
 
 const PATHS = (proposals) => ({
