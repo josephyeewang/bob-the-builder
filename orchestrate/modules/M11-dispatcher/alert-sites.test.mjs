@@ -54,7 +54,8 @@ export function directSends(files) {
       const port = /\b(?:p|ports)\.alert\b/.test(body) && !/sendAlerts\([^)]*\b(?:p|ports)\.alert\b/.test(body);
       // `textAlerts(alert)` (alerts.mjs) only words an object alert for the step's own outbox.
       // `heldAlerts(into)` only keeps an M6 call's alerts for the step to send itself (L127); it never sends.
-      const handed = [...body.matchAll(/\balert\s*:\s*([^,})\s]+)/g)].some((m) => m[1] !== 'alert' && !m[1].startsWith('outbox(') && m[1] !== 'textAlerts(alert' && !m[1].startsWith('heldAlerts('));
+      // `approvalsAlerts(alert` (tick.mjs) only words one product's approvals alerts for the step's own outbox (L221).
+      const handed = [...body.matchAll(/\balert\s*:\s*([^,})\s]+)/g)].some((m) => m[1] !== 'alert' && !m[1].startsWith('outbox(') && m[1] !== 'textAlerts(alert' && m[1] !== 'approvalsAlerts(alert' && !m[1].startsWith('heldAlerts('));
       const outboxMade = /\bconst\s+alert\s*=/.test(body) && !/\bconst\s+alert\s*=\s*outbox\(/.test(body);
       if (port || handed || outboxMade) bad.push(`${f}:${i + 1}: ${line.trim()}`);
     });

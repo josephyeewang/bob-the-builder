@@ -63,6 +63,8 @@ export const APPROVALS_PRODUCT_MS = 30_000;
 // so M2's `=== false` checks (configAlert, the onboard notices) keep working.
 const ALERT_FIELDS = [['ask', 'ask'], ['card', 'card'], ['session', 'session'], ['kind', 'kind'], ['pr', 'PR']];
 const plain = (v, n = 200) => String(v).replace(/[\r\n\t]+/g, ' ').slice(0, n);
+/** The outbox `alert` handed to one product's approvals pass: its alerts, as text, into the step's own outbox. */
+export function approvalsAlerts(alert, product) { return (a) => alert(approvalsAlertText(product, a)); }
 export function approvalsAlertText(product, a) {
   if (typeof a === 'string') return `Approvals, ${plain(product, 80)}: ${plain(a, 400)}`;
   if (typeof a?.text === 'string') return plain(a.text, 400);
@@ -93,7 +95,7 @@ export async function approvalsStep({ rec, rules, now, alert, approvals, product
     let timer;
     try {
       const late = new Promise((_, no) => { timer = setTimeout(() => no(new Error(`it did not finish within ${productMs} ms`)), productMs); });
-      const ctx = { ...x, record: rec, rules, product, now: () => now, alert: (a) => alert(approvalsAlertText(product, a)) };
+      const ctx = { ...x, record: rec, rules, product, now: () => now, alert: approvalsAlerts(alert, product) };
       const r = await Promise.race([Promise.resolve().then(() => pass(ctx)), late]);
       results.push({ product, ok: r?.ok === true, ...(r?.ok === true ? {} : { reason: r?.reason }), events: Array.isArray(r?.events) ? r.events.length : 0 });
     } catch (e) {
