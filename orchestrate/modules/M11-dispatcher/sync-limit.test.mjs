@@ -86,7 +86,9 @@ test('main hands limitedSync to the wiring', async () => {
   try {
     const wiring = L.write('wiring/wiring.mjs', "export async function wire(config, helpers) { globalThis.__helpers = helpers; throw new Error('stop here'); }\n");
     const config = L.write('config.json', { installRoot: L.installRoot, wiring, lockFile: join(dir, 'l.lock') });
-    assert.equal(await main([config], { log: () => {} }), 1);
+    // The job's own script must be one of the copy's code files (audit #144 m4): a stand-in in the layout.
+    const self = L.write('modules/M11-dispatcher/main.mjs', 'export {};\n');
+    assert.equal(await main([config], { self, log: () => {} }), 1);
     assert.equal(globalThis.__helpers?.limitedSync, limitedSync);
   } finally {
     delete globalThis.__helpers;

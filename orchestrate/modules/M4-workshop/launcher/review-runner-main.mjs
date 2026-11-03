@@ -76,7 +76,7 @@ import { runnerPass, CARD_ID, isClaudeCommand } from './review-runner.mjs';
 import { installProblem, readInstallStamp, aclProblem, currentCopy, copyPath, copyReady, RUNNER_MODULES } from './install-check.mjs';
 import { sessionVerdict, verdictFromFile } from '../../M9-record/outbox.mjs';
 import { SESSION_ID } from '../../../shared/record.mjs';
-import { codeFileProblem, openJobJson, readChangedProblem } from '../../../shared/job-config.mjs';
+import { codeFileProblem, openJobJson, readByDescriptor, readChangedProblem } from '../../../shared/job-config.mjs';
 import { readAccountFile, ACCOUNT_FILE } from './accounts.mjs';
 import { REVIEW_USER } from './review-user.mjs';
 import { git, gitOk } from '../git/safe-git.mjs';
@@ -482,15 +482,16 @@ export function readyProblem(c, wiring, { write = writeSnapshot } = {}) {
 
 // `ports` stand in for the walls in a test (the config reader, the root-owned check and the pass); production leaves them out.
 export async function main(argv, { log = (s) => process.stderr.write(`${s}\n`), ports = {} } = {}) {
-  const { readConfigFn = readConfig, programs = programsProblem, pass = runnerPass, write } = ports;
+  const { readConfigFn = readConfig, programs = programsProblem, pass = runnerPass, write, lstat } = ports;
   if (!argv[0]) { log('usage: review-runner-main.mjs <config.json>'); return 1; }
   let c;
   try { c = readConfigFn(argv[0]); } catch (e) { log(`review runner: ${e.message}`); return 1; }
   const self = realpathSync.native(fileURLToPath(import.meta.url));
   const bad = programs(c, { self, config: realpathSync.native(argv[0]) });
   if (bad) { log(`review runner: refused, the installed copy is not one it may run (root's alone, its link, its stamp): ${bad}`); return 1; }
-  // The file programsProblem checked by name is the one read (L253); a test's own reader has no read to compare.
-  const swapped = readConfigFn === readConfig ? readChangedProblem(argv[0], c) : null;
+  // The file programsProblem checked by name is the one read (L253). Always for the real reader; a test's reader is
+  // checked too when it read by descriptor (audit #144 m3), and one answering a plain object has no read to compare.
+  const swapped = readConfigFn === readConfig || readByDescriptor(c) ? readChangedProblem(argv[0], c, lstat ? { lstat } : {}) : null;
   if (swapped) { log(`review runner: config ${argv[0]} ${swapped}`); return 1; }
   let wiring;
   try { wiring = await import(pathToFileURL(c.wiring).href); } catch (e) { log(`review runner: the wiring could not be loaded (${e.message})`); return 1; }

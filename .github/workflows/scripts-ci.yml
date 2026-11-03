@@ -73,9 +73,16 @@ jobs:
         run: bash scripts/selftest-gate-scripts.sh
       - name: Blueprint checks prove their planted cases (D-029)
         run: bash scripts/blueprint/selftest-blueprint.sh
+      - name: A temp folder only this job's user can write (L257 (A), audit #144 M1)
+        # /tmp is world-writable, and $RUNNER_TEMP sits under /home, which has an access list (ACL) on GitHub's runner:
+        # the job-config reader rightly refuses both. A folder at the root, made with sudo on the CI runner only (never
+        # on a Mac), owned by the job's user, 0755. Fails if / or the folder carries an access list (a '+' in ls -ld).
+        run: |
+          sudo install -d -o "$(id -u)" -g "$(id -g)" -m 0755 /orch-tmp
+          ls -ld / /orch-tmp
+          if ls -ld / /orch-tmp | awk '{print $1}' | grep -q '+'; then echo "an access list on / or /orch-tmp: the job-config tests would be refused"; exit 1; fi
       - name: ORCHESTRATE's tests (no dependencies, Node's own test runner)
-        # A temp folder no one else can write (L257 (A)): /tmp is world-writable, and the job-config reader refuses that.
-        run: TMPDIR="$RUNNER_TEMP" node --test $(find orchestrate -name '*.test.mjs')
+        run: TMPDIR=/orch-tmp node --test $(find orchestrate -name '*.test.mjs')
       - name: The design skill's logo scripts still run (standard-library Python; PNG checks skip without a renderer)
         run: |
           cd skills/design-gallery/logo-kit

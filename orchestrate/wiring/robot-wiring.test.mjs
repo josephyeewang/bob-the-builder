@@ -189,7 +189,7 @@ test('R-0b-162 B (L242): with the Dispatcher never run, the late alert is queued
   // A stand-in for lane 3's deliverAlertsPass: it takes what is in the Record's queue when it runs.
   const deliver = ({ rec }) => { got.push(...queued(rec)); return { sent: got.length }; };
   const logs = [];
-  const code = await main([w.configFile], { log: (l) => logs.push(l), wireOpts: { deliver, fetchFn: fakeGitHubFetch(w.fake) } });
+  const code = await main([w.configFile], { self: w.main, log: (l) => logs.push(l), wireOpts: { deliver, fetchFn: fakeGitHubFetch(w.fake) } });
   assert.equal(code, 0, logs.join('\n'));
   assert.ok(got.includes('the Dispatcher has no full pass on record: nothing is started or merged until it runs'), got.join(' | '));
   // Every pass before it had run: their failures were queued first, so delivery saw them too.
@@ -206,7 +206,7 @@ test('L265 M2 (P7, P5, P6a/b): a live holder runs nothing; a dead holder\'s lock
   const w = world();
   const run = async (opts = {}, cfg = w.configFile) => { const logs = []; let delivered = 0;
     const deliver = opts.deliver ?? (() => { delivered += 1; return { sent: 0 }; });
-    const code = await main([cfg], { log: (l) => logs.push(l), wireOpts: { deliver, fetchFn: fakeGitHubFetch(w.fake) }, ...opts.main });
+    const code = await main([cfg], { self: w.main, log: (l) => logs.push(l), wireOpts: { deliver, fetchFn: fakeGitHubFetch(w.fake) }, ...opts.main });
     return { code, logs, delivered }; };
   // P7: a live holder (this test's own pid): exit 0, a log line, no pass runs, the lock is left as it was.
   writeFileSync(lockOf(w), JSON.stringify({ pid: process.pid, taken_at: 'T-live' }));
@@ -225,7 +225,7 @@ test('L265 M2 (P7, P5, P6a/b): a live holder runs nothing; a dead holder\'s lock
   // P6a/b: a round past its deadline: told, exit 2, and the lock stays (M7: the pass may still run).
   const slow = world({ extra: { runDeadlineMs: 300 } });
   const logs = [];
-  const code = await main([slow.configFile], { log: (l) => logs.push(l), wireOpts: { deliver: () => new Promise(() => {}), fetchFn: fakeGitHubFetch(slow.fake) } });
+  const code = await main([slow.configFile], { self: slow.main, log: (l) => logs.push(l), wireOpts: { deliver: () => new Promise(() => {}), fetchFn: fakeGitHubFetch(slow.fake) } });
   assert.equal(code, 2, logs.join('\n'));
   assert.ok(logs.some((l) => /the round did not finish within 300 ms/.test(l)));
   assert.ok(queued(readRecord(slow)).includes('a robot job round did not finish within 300 ms and was stopped; the next round starts in a minute'));
@@ -250,7 +250,7 @@ test('L265 M1, P16: an alert the queue refuses, or a queue that throws, is logge
   // In main: the failed pass's line says it could not be told, and a stopped round whose alert is refused says so.
   writeFileSync(lockOf(w), JSON.stringify({ pid: deadPid(), taken_at: 'T0' }));
   const logs = [];
-  const code = await main([w.configFile], { log: (l) => logs.push(l), hold: () => false, wireOpts: { fetchFn: fakeGitHubFetch(w.fake) } });
+  const code = await main([w.configFile], { self: w.main, log: (l) => logs.push(l), hold: () => false, wireOpts: { fetchFn: fakeGitHubFetch(w.fake) } });
   assert.equal(code, 0);
   assert.ok(logs.includes(`robot: the stopped round ${NOT_QUEUED}`), logs.join('\n'));
   assert.ok(logs.some((l) => /robot: gate failed: not wired yet.*\(and could not be told: could not be queued\)/.test(l)), logs.join('\n'));
@@ -264,7 +264,7 @@ test('L265 M1, P16: an alert the queue refuses, or a queue that throws, is logge
 test('L265 M7, M9: a pass past its own limit keeps the lock; any `refused` fails the pass; failed items are logged', async () => {
   const w = world();
   const logs = [];
-  const code = await main([w.configFile], { log: (l) => logs.push(l), passDeadlineMs: 50, wireOpts: { deliver: () => new Promise(() => {}), fetchFn: fakeGitHubFetch(w.fake) } });
+  const code = await main([w.configFile], { self: w.main, log: (l) => logs.push(l), passDeadlineMs: 50, wireOpts: { deliver: () => new Promise(() => {}), fetchFn: fakeGitHubFetch(w.fake) } });
   assert.equal(code, 0, logs.join('\n'));
   assert.ok(logs.some((l) => /robot: deliver failed: it did not finish within 50 ms/.test(l)));
   assert.ok(logs.includes('robot: a pass ran past its time limit and may still be running; the lock stays until this process exits'));
@@ -277,7 +277,7 @@ test('L265 M7, M9: a pass past its own limit keeps the lock; any `refused` fails
     assert.equal(r.deliver.ok, false, JSON.stringify(refused));
   }
   const l2 = [];
-  assert.equal(await main([w.configFile], { log: (l) => l2.push(l), wireOpts: { deliver: () => ({ sent: 2, failed: 3 }), fetchFn: fakeGitHubFetch(w.fake) } }), 0);
+  assert.equal(await main([w.configFile], { self: w.main, log: (l) => l2.push(l), wireOpts: { deliver: () => ({ sent: 2, failed: 3 }), fetchFn: fakeGitHubFetch(w.fake) } }), 0);
   assert.ok(l2.includes('robot: deliver ran, and 3 of its items failed'), l2.join('\n'));
 });
 

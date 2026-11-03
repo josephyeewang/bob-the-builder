@@ -19,7 +19,8 @@ import { makeRules } from '../../shared/rules.mjs';
 // Rules with one reading replaced, built on makeRules (L148 item 1): num(), dec() and flag() read through the same
 // override, so a test never answers `get` alone while the code reads numbers through num().
 const overGet = (base, get) => makeRules({ get rev() { return base.rev; }, may: (a, s) => base.may(a, s), get, classify: (c) => base.classify(c) });
-import { setup, product, readyCard, outboxFile, passingVerdict, put, must, HEAD, PRODUCT, iso } from '../M9-record/fixtures.test-helper.mjs';
+import { setup, product, readyCard, outboxFile, passingVerdict, put, must, seed, HEAD, PRODUCT, iso } from '../M9-record/fixtures.test-helper.mjs';
+import { undoStep, undoCardDoc, UNDO_CARD, FIX_CARD, REVERSE_FACT, UNDO_NOTE_FACT } from './undo.mjs';
 
 const MIN = 60_000;
 const ACCT = 'acct-a';
@@ -410,4 +411,29 @@ test('L116 m5 contract (L110 m-4): a limit_hit wait naming no account is re-wait
   const c = w.rec.read('card', 'C-1').doc;
   assert.deepEqual([c.state, c.wait.who, c.wait.what, c.wait.resume, c.wait.return_to], ['waiting', 'joe', LIMIT_NO_ACCOUNT, 'retry', 'ready']);
   assert.ok(diaryKinds(w.rec, 'C-1').includes('limit_no_account'));
+});
+
+// L228 (#117 r2 M1): the fix card for a Tier 2 undo, written by the real step to the real Record. The stand-in let a
+// tier-less fix card through when M9 refused it; this runs the Store Writer's own rule.
+test('L228 contract: a failed Tier 2 undo the gate calls not clean gets its fix card from the real Record, with no tier, and Joe is told', async () => {
+  const env = setup({ prefix: 'm11-fix-', host: HOST });
+  const rec = env.record;
+  product(env);
+  const sha = 'a'.repeat(40);
+  const files = ['src/a.mjs'];
+  seed(env, 'card', 'T-1', { state: 'merged', module: 'M1', product: PRODUCT, kind: 'ordinary', round: 1, tier: 2, files, done_when: 'tests pass', merge_commit: sha });
+  seed(env, 'merge', 'MG-1', { state: 'audited_ok', card: 'T-1', pr: 7, merge_commit: sha, product: PRODUCT });
+  seed(env, 'ask', 'A-1', { state: 'answered', kind: 'undo', product: PRODUCT, card: 'T-1', tier: 2, risky: [], choices: ['Undo', 'Keep'], answer: { channel: 'tap', choice: 'Undo', approves: true, at: iso(env.clock.t) } });
+  const U = UNDO_CARD('A-1');
+  const undo = undoCardDoc({ askId: 'A-1', files, target: { id: 'T-1', doc: { product: PRODUCT, module: 'M1' } }, pr: 7, commit: sha });
+  assert.equal(undo.tier, 2, 'production makes an undo card Tier 2');
+  seed(env, 'card', U, { ...undo, round: 1, state: 'failed', failure: { reason: 'the reverse is not clean', at: iso(env.clock.t) } });
+  must(rec.write({ actor: 'merge_gate', entity: 'fact', id: REVERSE_FACT(U), expectRev: 0, doc: { state: 'not_clean', reason: 'a later change touched src/a.mjs' } }), 'the gate\'s reverse fact');
+  const sent = [];
+  const out = await withAlerts(rec, env.clock.t, (t) => { sent.push(t); return true; }, (alert) => undoStep({ rec, rules: rulesWith(), now: env.clock.t, filesOf: () => files, alert }));
+  assert.deepEqual(out.filter(([id]) => id === U), [[U, 'fix card written']], JSON.stringify(out));
+  const fix = rec.read('card', FIX_CARD(U)).doc;
+  assert.deepEqual([fix.kind, fix.state, fix.fix_of, Object.hasOwn(fix, 'tier'), fix.files], ['fix', 'draft', U, false, files]);
+  assert.equal(sent.filter((t) => /a fix card waits for the Lead/.test(t)).length, 1, sent.join(' | '));
+  assert.ok(rec.read('fact', UNDO_NOTE_FACT(U)), 'noted once told');
 });

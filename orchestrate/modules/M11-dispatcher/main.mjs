@@ -45,6 +45,9 @@ setTimeout(() => { require('node:fs').writeSync(2, 'dispatcher: the pass was blo
   return w;
 }
 
+const realOf = (p) => { try { return realpathSync(p); } catch { return null; } };
+const SELF = realOf(fileURLToPath(import.meta.url));
+
 export function readConfig(file, opts = {}) {
   const c = readJobConfig(file, { code: ['wiring'], ...opts });
   for (const k of ['wiring', 'lockFile']) if (typeof c?.[k] !== 'string' || !isAbsolute(c[k])) throw new Error(`config: ${k} must be an absolute path`);
@@ -52,7 +55,9 @@ export function readConfig(file, opts = {}) {
   return c;
 }
 
-export async function main(argv, { now = Date.now(), log = (s) => process.stderr.write(`${s}\n`), runDeadlineMs, watchdog = false, readConfigFn = readConfig } = {}) {
+// `self`: this script's real path, checked as one of the installed copy's code files (audit #144 m4); a test names a
+// file inside its own layout.
+export async function main(argv, { now = Date.now(), log = (s) => process.stderr.write(`${s}\n`), runDeadlineMs, watchdog = false, readConfigFn = readConfig, self = SELF } = {}) {
   let config;
   let wired;
   // The watchdog starts first (audit 0b-6 r5 MAT-1): a wiring whose import or wire() never finishes would
@@ -63,7 +68,7 @@ export async function main(argv, { now = Date.now(), log = (s) => process.stderr
   let dog = watchdog ? startWatchdog((runDeadlineMs ?? RUN_DEADLINE_MS) + WATCHDOG_MARGIN_MS) : null;
   try {
     if (!argv[0]) throw new Error('usage: main.mjs <config.json>');
-    config = readConfigFn(argv[0]);
+    config = readConfigFn(argv[0], { self });
     if (dog && runDeadlineMs === undefined && config.runDeadlineMs !== undefined) { dog.terminate(); dog = startWatchdog(config.runDeadlineMs + WATCHDOG_MARGIN_MS); }
     const mod = await import(pathToFileURL(config.wiring).href);
     if (typeof mod.wire !== 'function') throw new Error('the wiring module has no wire()');
@@ -100,10 +105,8 @@ export async function main(argv, { now = Date.now(), log = (s) => process.stderr
 
 // Run as a script, not when imported. Real paths on both sides (audit 0b-6 r2 MAT-1): a folder reached
 // through a symlink spells the path differently, and a mismatch here would exit 0 having done nothing.
-const realOf = (p) => { try { return realpathSync(p); } catch { return null; } };
-const self = realOf(fileURLToPath(import.meta.url));
 // A port left hanging keeps handles open; the unref'd timer exits a second later, after stderr is written.
-if (self && process.argv[1] && self === realOf(process.argv[1])) {
+if (SELF && process.argv[1] && SELF === realOf(process.argv[1])) {
   const code = await main(process.argv.slice(2), { watchdog: true });
   process.exitCode = code;
   setTimeout(() => process.exit(code), 1000).unref();
