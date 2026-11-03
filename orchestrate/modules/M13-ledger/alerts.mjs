@@ -33,12 +33,13 @@ export function makeAlerts({ rec, gh, owner, actor = 'ledger', now = () => new D
   // false when GitHub lost it (L143).
   // `status` is the condition's stable state; only a change of it comments (and so notifies). A body that carries a
   // changing figure ("down 40 minutes") is edited silently (0b-7 audit M-3). Without a status, the body is the status.
+  // `note` is the comment's text when the status changes (default "Changed: <first line>"); masked like the body.
   // Title and body are masked before they are compared, stored or posted.
   // A GitHub call that throws makes raise throw; one that answers false (or an `open` with no issue number) makes raise
   // answer false. Either way nothing is saved that would stop the next pass trying again: no open alert without an
   // issue (every later pass would read it as closed by the owner), no new status whose comment was lost. A caller that
   // keeps something after a raise (a baseline, a login) keeps it only when raise did not answer false.
-  async function raise({ key, title: rawTitle, body: rawBody, status: rawStatus }) {
+  async function raise({ key, title: rawTitle, body: rawBody, status: rawStatus, note: rawNote }) {
     const id = idOf(key);
     const title = masker.maskSecrets(rawTitle).text;
     const body = masker.maskSecrets(rawBody).text;
@@ -56,7 +57,8 @@ export function makeAlerts({ rec, gh, owner, actor = 'ledger', now = () => new D
       const next = { ...s, kind: 'fact.alert', last: t, count: s.count + 1, body, status_text: status };
       if (await gh.edit(s.issue, bodyOf(next)) === false) return false;
       if (status !== (s.status_text ?? s.body)) {
-        if (await gh.comment(s.issue, `Changed: ${body.split('\n')[0]}`) === false) return false;
+        const note = rawNote === undefined ? `Changed: ${body.split('\n')[0]}` : masker.maskSecrets(rawNote).text;
+        if (await gh.comment(s.issue, note) === false) return false;
         writer.put(id, next);
         return 'changed';
       }
