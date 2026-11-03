@@ -5,7 +5,15 @@
 // the unresolved review threads and how far the branch is behind main. Every outside string is masked and fenced.
 //
 // The GitHub client is injected (robot identity on the Mini; a fake in tests). Shape it must return:
-//   pr(number)       → { number, title, head_sha, base_ref, head_ref, author }
+//   pr(number)       → { number, title, head_sha, base_ref, head_ref, author, state, merged, merge_commit_sha }
+//
+// The Dispatcher's merges step (M11 merges.mjs) reads state, merged, merge_commit_sha, head_sha and observed_at, and
+// trusts only a reading taken after a merge attempt last changed (R-0b-168). So observed_at is taken from the injected
+// clock just BEFORE the first GitHub read starts (LEAD-CALLS L97 M-2): a reading whose reads straddle a merge attempt
+// is dated before it, so M11 waits for the next one instead of taking a pre-merge "open" as fresh. merged is true only
+// for a literal true; merge_commit_sha is null unless merged (GitHub fills it with a test-merge commit on open PRs);
+// state is `open` or `closed`, any case, else null (L97 m-1: another GitHub API says CLOSED, which M6 and M11 would
+// read as never closed).
 //   files(number)    → [{ filename, status, additions, deletions, previous_filename? }]
 //   checks(sha)      → [{ name, status, conclusion, output_summary? }]
 //   threads(number)  → [{ resolved, author, body, path? }]
@@ -13,13 +21,17 @@
 
 import { makePrepare } from './escape.mjs';
 import { validPath } from './history.mjs';
+import { PR_FACT } from '../M11-dispatcher/merges.mjs';
 
 // Paths go through as plain strings when valid (review-0b-7 Minor 4); an invalid one is replaced by a marker.
 const keepPath = (x) => (validPath(x) ? x : '[path refused: control characters]');
 
-export async function prFact(gh, number, { prepare = makePrepare() } = {}) {
+export async function prFact(gh, number, { prepare = makePrepare(), now = () => new Date() } = {}) {
+  const observed_at = now().toISOString();
   const [pr, files, threads, behind] = await Promise.all([gh.pr(number), gh.files(number), gh.threads(number), gh.behindBy(number)]);
   const checks = await gh.checks(pr.head_sha);
+  const st = typeof pr.state === 'string' ? pr.state.toLowerCase() : null;
+  const merged = pr.merged === true;
   const changed = files.map((f) => ({
     path: keepPath(f.filename),
     ...(f.previous_filename ? { from: keepPath(f.previous_filename) } : {}),
@@ -31,6 +43,10 @@ export async function prFact(gh, number, { prepare = makePrepare() } = {}) {
     title: prepare(pr.title, 'pr-title'),
     author: prepare(pr.author, 'commit-author'),
     head_sha: pr.head_sha,
+    state: st === 'open' || st === 'closed' ? st : null,
+    merged,
+    merge_commit_sha: merged ? pr.merge_commit_sha ?? null : null,
+    observed_at,
     base: keepPath(pr.base_ref),
     branch: keepPath(pr.head_ref),
     changed_files: changed,
@@ -48,5 +64,5 @@ export async function prFact(gh, number, { prepare = makePrepare() } = {}) {
 }
 
 export async function writePrFact(writer, gh, number, opts) {
-  return writer.put(`pr-${number}`, await prFact(gh, number, opts));
+  return writer.put(PR_FACT(number), await prFact(gh, number, opts));
 }

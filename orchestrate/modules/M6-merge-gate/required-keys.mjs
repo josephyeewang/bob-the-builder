@@ -27,8 +27,9 @@ export const OPTIONAL_KEYS = Object.freeze([
   'product_profile.checks_ignored',       // missing ignores none
   'effect_paths',                         // first_customer_visible.new_files_under; missing makes that fact unknown
   'rules.adopted',                        // the engine's own answer, not a key in the file
-  KEYS.mergingOpenMaxMin,                 // missing: an open merge is never refused as interrupted, and the owner is
-                                          // told once per merge that the limit is missing (gate.mjs, L148 item 5);
+  KEYS.mergingOpenMaxMin,                 // missing: an open merge is never refused as interrupted, a wait to be judged
+                                          // uses gate.mjs's DEFAULT_WAIT_LIMIT_MIN (L184), and the owner is told once
+                                          // per merge that the limit is missing (gate.mjs, L148 item 5);
                                           // set, it must be a whole number of minutes, at least 1 (L164 m1)
 ]);
 

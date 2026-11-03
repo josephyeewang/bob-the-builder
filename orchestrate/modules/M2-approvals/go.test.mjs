@@ -284,3 +284,31 @@ test('a plan A → B → A gets a go again; a withdrawn or expired go ask is ask
     assert.deepEqual([next.id, next.existing], [`${first.id}-2`, undefined], state);
   }
 });
+
+// L205 (#108 r2): a GitHub read that fails while the go check looks at main's file tree is not a reason about the
+// change. With nothing else wrong, the check comes back `unreadable` with the error as `cause` (the Merge Gate waits on
+// it); with something else wrong, the change is refused for that. raiseGo raises no ask on an unread tree.
+test('L205: a failed tree read in the go check is unreadable, not a go mismatch; a real reason beside it still refuses', async () => {
+  const w = world();
+  const rows = card(w, 'A');
+  const { go } = await goFor(w, 'A', rows);
+  const c = { id: 'A', doc: w.t.record.read('card', 'A').doc };
+  const boom = new Error('GitHub answered 502 for /repos/sample-org/sample-app/git/trees/t?recursive=1');
+  const down = Object.create(w.view, { isDir: { value: async () => { throw boom; } } });
+  const at = (changed, view) => goCheck({ go, card: c, changed, headRows: { 'R-1': row('R-1') }, tier: 2, view, mainSha: w.M0 });
+  const a = { path: 'src/a.mjs', status: 'modified' };
+  const r = await at([a], down);
+  assert.deepEqual([r.ok, r.unreadable, r.cause, r.newGo], [false, true, boom, false]);
+  assert.match(r.reasons[0], /could not check the file list: GitHub answered 502/);
+  const both = await at([a, { path: 'src/b.mjs', status: 'modified' }], down);
+  assert.equal(both.ok, false);
+  assert.equal(both.unreadable, undefined, 'a file outside the list is GitHub\'s answer, not an unread');
+  assert.deepEqual(both.reasons, ['src/b.mjs is outside the go\'s file list']);
+  assert.equal((await at([a], w.view)).ok, true, 'the same check, read: passes');
+  const w2 = world();
+  const rows2 = card(w2, 'B');
+  const down2 = Object.create(w2.view, { isDir: { value: async () => { throw boom; } } });
+  const raised = await raiseGo(w2.t.ctx, { cardId: 'B', rows: rows2, view: down2, mainSha: w2.M0 });
+  assert.deepEqual([raised.ok, raised.unreadable, raised.cause], [false, true, boom], 'the same shape as goCheck\'s (lane 1 note 2)');
+  assert.equal(askStore(w2.t.record).asks().length, 0);
+});
