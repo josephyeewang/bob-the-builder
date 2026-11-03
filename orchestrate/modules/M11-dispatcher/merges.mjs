@@ -135,7 +135,8 @@ export async function timeLimits({ rec, rules, now, b, running = [], gateAlive, 
     // A count that drives a decision lives in the card's attempts, the Dispatcher's own key (L74).
     const fails = doc.attempts?.reviewer_starts ?? 0;
     if (fails >= 2) {
-      if (waitOnJoe(rec, id, { what: 'no reviewer could be asked for', now, alert, text: `card ${id}: no reviewer could be asked for twice` }).ok) done.push([id, 'in_review->waiting']);
+      const w = waitOnJoe(rec, id, { what: 'no reviewer could be asked for', now, alert, text: `card ${id}: no reviewer could be asked for twice` });
+      if (w.ok) done.push([id, w.tell_refused ? `in_review->waiting; ${w.tell_refused}` : 'in_review->waiting']);
       continue;
     }
     const g = startGate({ rules, rec, card: { id, ...doc }, kind: 'review', product: doc.product, b, running });
@@ -270,7 +271,7 @@ function askOnRepeat(rec, id, { now, alert, pr }) {
     }
     return [id, `not sent to joe: ${w.reason}`];
   }
-  return [id, 'waiting on joe'];
+  return [id, w.tell_refused ? `waiting on joe; ${w.tell_refused}` : 'waiting on joe'];
 }
 
 // What M6's settleMerge did, for the list. A card put back with the same refusal reason twice in a row goes to Joe.

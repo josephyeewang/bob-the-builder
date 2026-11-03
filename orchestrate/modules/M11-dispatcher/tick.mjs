@@ -162,7 +162,7 @@ export function actOnDead({ rec, rules, now, restart, asks, cards = {}, alert = 
     // Told until delivered (L130 M1): waitOnJoe records the tell, and retellWaits asks again while it is not delivered.
     const w = waitOnJoe(rec, cardId, { what: 'dead_session: its session stopped and the card is not marked safe to re-run', now, link: `card ${cardId}`, kind: 'dead_ask',
       alert, text: `card ${cardId}: its session stopped and the card is not marked safe to re-run, so it waits on you` });
-    if (w.ok) done.push([cardId, 'waiting on Joe']);
+    if (w.ok) done.push([cardId, w.tell_refused ? `waiting on Joe; ${w.tell_refused}` : 'waiting on Joe']);
   }
   return done;
 }
