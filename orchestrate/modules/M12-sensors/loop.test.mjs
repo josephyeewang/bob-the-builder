@@ -275,3 +275,14 @@ test('L253: main reads its config through the checked reader: the copy\'s own sc
   assert.equal(await main([outside], { self, log: (s) => lines.push(s) }), 1);
   assert.match(lines.pop(), /outside\.json is not inside the installed copy/);
 });
+
+test('audit #144 r2 n1: a config that names no installRoot is refused by main, which says installRoot', async () => {
+  const L = installedLayout('m12-noroot-', { files: { 'wiring/w.mjs': 'export async function wire() { return {}; }\n' } });
+  const self = L.write('modules/M12-sensors/loop.mjs', 'export {};\n');
+  // Everything else as a working config has it: only the reader can refuse this one (a job that read its own file
+  // first and returned it when it named no installRoot would go on to the wiring instead).
+  const config = L.write('job.json', { wiring: L.path('wiring/w.mjs') });
+  const lines = [];
+  assert.equal(await main([config], { self, log: (s) => lines.push(s) }), 1);
+  assert.match(lines.join('\n'), /installRoot must be a full path/);
+});

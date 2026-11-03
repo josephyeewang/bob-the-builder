@@ -8,7 +8,7 @@ import { dirname, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { tempDir } from './test-tmp.mjs';
 import { readJobConfig } from './job-config.mjs';
-import { installedLayout } from './job-config.test-helper.mjs';
+import { installedLayout, copyRetrying, COPY_TRIES } from './job-config.test-helper.mjs';
 
 const WIRING = 'modules/x/wiring.mjs';
 function layout() {
@@ -143,16 +143,17 @@ const ORCH = fileURLToPath(new URL('..', import.meta.url));
 // Built, so consume-ask's computed-import scan does not count the pinned text below as a loader of this file's own.
 const IMPORT = ['im', 'port'].join('');
 export const LOADERS = {
-  'modules/M11-dispatcher/main.mjs': { imports: 1, pins: [
+  'modules/M11-dispatcher/main.mjs': { imports: 2, noReads: true, pins: [
+    ['  const w = new Worker(code, { eval: true, workerData: { ms, pid: process.pid } });', 1],
     ["  const c = readJobConfig(file, { code: ['wiring'], ...opts });", 1],
     ['readConfigFn = readConfig, self = SELF } = {}) {', 1],
     ['    config = readConfigFn(argv[0], { self });', 1],
     [`    const mod = await ${IMPORT}(pathToFileURL(config.wiring).href);`, 1]] },
-  'wiring/robot-main.mjs': { imports: 1, pins: [
+  'wiring/robot-main.mjs': { imports: 1, noReads: true, pins: [
     ["import { readConfig, startWatchdog, WATCHDOG_MARGIN_MS } from '../modules/M11-dispatcher/main.mjs';", 1],
     ['    config = readConfig(argv[0], { self });', 1],
     [`    const mod = await ${IMPORT}(pathToFileURL(config.wiring).href);`, 1]] },
-  'modules/M12-sensors/loop.mjs': { imports: 1, pins: [
+  'modules/M12-sensors/loop.mjs': { imports: 1, noReads: true, pins: [
     ["  return readJobConfig(file, { code: ['wiring'], ...opts });", 1],
     ['runDeadlineMs = RUN_DEADLINE_MS, self = SELF } = {}) {', 1],
     ['    const config = readConfig(argv[0], { self });', 1],
@@ -168,6 +169,14 @@ export const LOADERS = {
 };
 const CALL_ANY = /(?<![\w$.])import\s*\(/g;
 const CALL_LIT = /(?<![\w$.])import\s*\(\s*(['"`])[^'"`$]+\1\s*\)/g;
+// A Worker or a create-require runs code it is handed, so it is a loader too (audit #144 r2 n1): counted with the computed
+// imports, and pinned like them (the Dispatcher's watchdog is one, with its code written out in main.mjs).
+// Built like IMPORT, so consume-ask's scan does not count the word here as a loader of this file's own.
+const CREATE_REQUIRE = ['create', 'Require'].join('');
+const CALL_RUN = new RegExp(`(?<![\\w$.])(?:new\\s+Worker|${CREATE_REQUIRE})\\s*\\(`, 'g');
+// A job marked noReads reads no file and parses no JSON itself (audit #144 r2 n1): its config comes only through the
+// reader, so a parse ahead of it (`const own = JSON.parse(readFileSync(file)); if (!own.installRoot) return own;`) is refused.
+const OWN_READ = /(?<![\w$])(?:JSON\.parse|readFileSync)\b/;
 const SELF_PARSE = /JSON\.parse\([^;]*\bargv\b|readFileSync\(\s*(?:process\.)?argv\b/;
 const uncomment = (t) => t.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '').replace(/(^|[^:'"`])\/\/(?![^\n]*['"`]\)).*$/gm, '$1');
 const count = (text, needle) => text.split(needle).length - 1;
@@ -187,13 +196,14 @@ export function unreadConfigLoaders(root, loaders = LOADERS) {
   for (const f of productionFiles(root)) {
     const rel = relative(root, f).split('\\').join('/');
     const text = uncomment(readFileSync(f, 'utf8'));
-    const computed = (text.match(CALL_ANY) ?? []).length - (text.match(CALL_LIT) ?? []).length;
+    const computed = (text.match(CALL_ANY) ?? []).length - (text.match(CALL_LIT) ?? []).length + (text.match(CALL_RUN) ?? []).length;
     if (computed === 0) { if (loaders[rel]) out.push(`${rel}: on LOADERS but makes no computed import`); continue; }
     const pin = loaders[rel];
     if (!pin) { out.push(`${rel}: makes ${computed} computed imports and is not on LOADERS`); continue; }
     if (computed !== pin.imports) out.push(`${rel}: makes ${computed} computed imports, not ${pin.imports}`);
     for (const [line, n] of pin.pins) { const c = count(text, line); if (c !== n) out.push(`${rel}: holds "${line.trim()}" ${c} time(s), not ${n}`); }
     if (SELF_PARSE.test(text)) out.push(`${rel}: parses its argument itself`);
+    if (pin.noReads && OWN_READ.test(text)) out.push(`${rel}: reads or parses a file itself (JSON.parse or readFileSync); its config comes only through the reader`);
   }
   return out;
 }
@@ -228,4 +238,52 @@ test('L253 guard, planted (audit #144 m1): own JSON.parse beside the reader, a p
   w('wiring/ok.mjs', good);
   w('modules/My/half.mjs', `const c = openJobJson(f, fail).value;\nawait ${IMP}(new URL(c.wiring, 'file:').href);\n`);
   assert.deepEqual(unreadConfigLoaders(root, pins), ['modules/My/half.mjs: makes 1 computed imports and is not on LOADERS']);
+});
+
+test('L253 guard, planted (audit #144 r2 n1): a job that reads its own config ahead of the reader; a Worker or a create-require loads', () => {
+  const IMP = ['im', 'port'].join('');
+  const root = tempDir('orch-jobguard-');
+  const w = (rel, text) => { mkdirSync(dirname(join(root, rel)), { recursive: true }); writeFileSync(join(root, rel), text); };
+  const load = `    const mod = await ${IMP}(pathToFileURL(config.wiring).href);`;
+  const reader = "  return readJobConfig(file, { code: ['wiring'], ...opts });";
+  const pins = { 'wiring/ok.mjs': { imports: 1, noReads: true, pins: [[reader, 1], [load, 1]] } };
+  const good = `${reader}\n${load}\n`;
+  w('wiring/ok.mjs', good);
+  assert.deepEqual(unreadConfigLoaders(root, pins), []);
+  // The audit's plant: the job parses its own file and returns it when it names no installRoot, before the reader.
+  w('wiring/ok.mjs', `  const own = JSON.parse(readFileSync(file, 'utf8')); if (!own.installRoot) return own;\n${good}`);
+  assert.deepEqual(unreadConfigLoaders(root, pins), ['wiring/ok.mjs: reads or parses a file itself (JSON.parse or readFileSync); its config comes only through the reader']);
+  // Either one alone is refused.
+  w('wiring/ok.mjs', `  const own = JSON.parse(text);\n${good}`);
+  assert.equal(unreadConfigLoaders(root, pins).length, 1);
+  w('wiring/ok.mjs', `  const text = fs.readFileSync(file, 'utf8');\n${good}`);
+  assert.equal(unreadConfigLoaders(root, pins).length, 1);
+  // A file not marked noReads may read (the review runner reads its own records).
+  w('wiring/ok.mjs', `  const own = JSON.parse(text);\n${good}`);
+  assert.deepEqual(unreadConfigLoaders(root, { 'wiring/ok.mjs': { ...pins['wiring/ok.mjs'], noReads: false } }), []);
+  // A Worker or a create-require is a load: one more than pinned, or an unlisted loader.
+  w('wiring/ok.mjs', `${good}  const t = new Worker(config.wiring);\n`);
+  assert.deepEqual(unreadConfigLoaders(root, pins), ['wiring/ok.mjs: makes 2 computed imports, not 1']);
+  w('wiring/ok.mjs', good);
+  w('modules/My/req.mjs', `const req = ${CREATE_REQUIRE}(import.meta.url);\nreq(c.wiring);\n`);
+  assert.deepEqual(unreadConfigLoaders(root, pins), ['modules/My/req.mjs: makes 1 computed imports and is not on LOADERS']);
+});
+
+test('audit #144 r2 c1: the source copy is redone when a file was gone, up to 5 tries, then throws; any other error throws at once', () => {
+  const gone = () => Object.assign(new Error('gone'), { code: 'ENOENT' });
+  assert.equal(COPY_TRIES, 5);
+  // Gone twice, then copied: three tries, two resets.
+  let calls = 0; let resets = 0;
+  assert.equal(copyRetrying(() => { calls += 1; if (calls < 3) throw gone(); }, () => { resets += 1; }), 3);
+  assert.deepEqual([calls, resets], [3, 2]);
+  // Gone every time: five tries, four resets, then the last error.
+  calls = 0; resets = 0;
+  assert.throws(() => copyRetrying(() => { calls += 1; throw gone(); }, () => { resets += 1; }), { code: 'ENOENT' });
+  assert.deepEqual([calls, resets], [5, 4]);
+  // Any other error: thrown on the first try, nothing reset.
+  for (const code of ['EACCES', 'EEXIST', undefined]) {
+    calls = 0; resets = 0;
+    assert.throws(() => copyRetrying(() => { calls += 1; throw Object.assign(new Error('other'), { code }); }, () => { resets += 1; }), { message: 'other' });
+    assert.deepEqual([calls, resets], [1, 0], `code ${code}`);
+  }
 });

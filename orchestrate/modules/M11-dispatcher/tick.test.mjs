@@ -1206,3 +1206,14 @@ test('L172 follow-up: an outage step that throws right after writing the open ou
   assert.deepEqual(w.calls.launched, [], 'nothing starts');
   assert.equal(requested(w.rec, 'V-1'), null, 'no merge is requested');
 });
+
+test('audit #144 r2 n1: a config that names no installRoot is refused by main, which says installRoot', async () => {
+  const L = installedLayout('m11-noroot-', { files: { 'wiring/w.mjs': 'export async function wire() { return {}; }\n' } });
+  const self = L.write('modules/M11-dispatcher/main.mjs', 'export {};\n');
+  // Everything else as a working config has it: only the reader can refuse this one (a job that read its own file
+  // first and returned it when it named no installRoot would go on to the wiring instead).
+  const config = L.write('job.json', { wiring: L.path('wiring/w.mjs'), lockFile: L.path('pass.lock') });
+  const lines = [];
+  assert.equal(await main([config], { self, log: (s) => lines.push(s) }), 1);
+  assert.match(lines.join('\n'), /installRoot must be a full path/);
+});

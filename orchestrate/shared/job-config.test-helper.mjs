@@ -23,6 +23,20 @@ export const LAYOUT_COMMIT = 'c'.repeat(40);
 const ORCH = fileURLToPath(new URL('..', import.meta.url));
 const tidy = (p) => { const st = lstatSync(p); chmodSync(p, st.isDirectory() ? 0o755 : 0o644); if (st.isDirectory()) for (const n of readdirSync(p)) tidy(join(p, n)); };
 
+export const COPY_TRIES = 5;
+/**
+ * Runs `copy`; when it fails because a file was gone (ENOENT), runs `reset` and copies again, COPY_TRIES times in all,
+ * then throws the last error. Any other error is thrown at once. → the number of tries it took.
+ */
+export function copyRetrying(copy, reset, tries = COPY_TRIES) {
+  for (let n = 1; ; n += 1) {
+    try { copy(); return n; } catch (e) {
+      if (e?.code !== 'ENOENT' || n >= tries) throw e;
+      reset();
+    }
+  }
+}
+
 export function installedLayout(prefix, { files = {}, dirs = [], source = false, commit = LAYOUT_COMMIT } = {}) {
   const base = realpathSync.native(tempDir(prefix));
   const installRoot = join(base, 'install');
@@ -44,12 +58,7 @@ export function installedLayout(prefix, { files = {}, dirs = [], source = false,
     // Other suites briefly write and remove plant files inside this tree while it is copied (M3's n15-plant.yaml), so a
     // file that vanishes mid-copy is skipped, and a copy that still trips on one is redone from empty.
     const keep = (p) => !/\/(node_modules|\.git)(\/|$)/.test(p) && existsSync(p);
-    for (let tries = 1; ; tries += 1) {
-      try { cpSync(ORCH, copy, { recursive: true, filter: keep }); break; } catch (e) {
-        if (e?.code !== 'ENOENT' || tries >= 5) throw e;
-        rmSync(copy, { recursive: true, force: true }); mkdirSync(copy); chmodSync(copy, 0o755);
-      }
-    }
+    copyRetrying(() => cpSync(ORCH, copy, { recursive: true, filter: keep }), () => { rmSync(copy, { recursive: true, force: true }); mkdirSync(copy); chmodSync(copy, 0o755); });
     tidy(copy);
     for (const rel of OUTSIDE_FILES) { const to = join(folder, rel); cpSync(join(ORCH, '..', rel), to); tidy(folder); }
   }
