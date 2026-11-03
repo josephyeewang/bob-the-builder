@@ -349,7 +349,9 @@ export function createPushScript(deps) {
     // the product's folder), and only for the product the fact recorded; a corrupt fact is not a push (#170 r1 m1, m2).
     if (!look && sha) {
       let inputs = null;
-      try { inputs = proposalInputs(p); } catch (e) { if (!(e instanceof Refusal)) throw e; }
+      // Any throw here (a refusal, or a rules or Record read that fails) falls through to settle, which meets the same
+      // error and records it the usual way, masked (#170 r2).
+      try { inputs = proposalInputs(p); } catch { inputs = null; }
       const f = inputs && record.read('fact', `push.${inputs.card}.${inputs.att}`);
       const done = f?.doc && !f.corrupt ? f.doc : null;
       if (done?.result === 'pushed' && done.product === inputs.product) return { ok: true, already: true, product: inputs.product, card: inputs.card, branch: done.branch, tip: done.tip, binaries: done.binaries ?? [] };
