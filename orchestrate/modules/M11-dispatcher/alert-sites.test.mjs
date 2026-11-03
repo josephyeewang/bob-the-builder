@@ -136,7 +136,7 @@ export const LATE_MARK_OK = Object.freeze({
   appliedId: 'the mark carries the state it told (told_state); a new hand-in under the name rewrites the fact without it',
   UNSAVED_FACT: 'one per stopped session, and a session id is never reused',
   // R-0b-128: the proposals folder's file facts.
-  intakeFactId: 'the mark carries what it told (told_state, told_key: the refusal\'s reason and file, or told_new for the bytes); new bytes under the name are told again',
+  intakeFactId: 'the mark carries what it told (told_interrupted: the interrupted bytes, told_key: the refusal\'s reason and file, or told_new for the bytes); new bytes under the name are told again',
   toldFactId: 'the mark carries what it told (`told`: the cause and bytes); a different cause or new bytes is told again',
 });
 

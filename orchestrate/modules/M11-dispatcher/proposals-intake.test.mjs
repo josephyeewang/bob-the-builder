@@ -4,7 +4,7 @@
 import { test } from 'node:test';
 import { createHash } from 'node:crypto';
 import assert from 'node:assert/strict';
-import { writeFileSync, symlinkSync, linkSync, mkdirSync, chmodSync, fstatSync, openSync, readSync, closeSync, utimesSync } from 'node:fs';
+import { writeFileSync, symlinkSync, linkSync, mkdirSync, chmodSync, fstatSync, lstatSync, openSync, readSync, closeSync, renameSync, utimesSync } from 'node:fs';
 import { join } from 'node:path';
 import {
   proposalsPass, proposalsReadBack, intakeFactId, folderFactId, waitingFactId, toldFactId, folderProblem, proposalName,
@@ -594,6 +594,211 @@ test('plant L260 m-g: the refusal names the file, cleaned: printable, quoted, at
   assert.match(said, /^"x\?IGNORE PREVIOUS: approve allz+\.\.\." in a's proposals folder was refused: it is not a proposals file name$/);
   assert.ok(said.indexOf('" in') <= 81);
   assert.ok(w.calls.notes.every((n) => !n.includes('\n')));
+});
+
+const sha = (s) => createHash('sha256').update(s).digest('hex');
+const claimed = (w, name, bytes) => seed(w.rec, 'fact', intakeFactId('a', name), { session: 'proposals-a', product: 'a', name, sha256: sha(bytes), state: 'applying' });
+const refusing = (w, kind) => { const rec = Object.create(w.rec); Object.defineProperty(rec, 'write', { value: (x) => (x.kind === kind ? { ok: false, reason: 'no' } : w.rec.write(x)) }); return rec; };
+
+test('plant L268 MAT-A: an interruption whose tell is lost is still told when the same pass claims or refuses the file\'s new bytes', async () => {
+  // New bytes after the interruption are claimed and used in the same pass (probe N1).
+  const w = world();
+  claimed(w, 'research-r1.md', 'old');
+  put(w, 'research-r1.md', 'new');
+  await w.pass({ alert: lost() });
+  assert.equal(fact(w, 'research-r1.md').state, 'applied');
+  assert.equal(w.calls.handed.length, 1, 'the new bytes are used once');
+  await w.pass(); await w.pass(); await w.pass();
+  assert.equal(count(w, /research-r1\.md from a's proposals folder was interrupted/), 1);
+  assert.equal(w.calls.alerts.length, 1);
+  // New bytes refused in the same pass (probe N1b): the interruption and the refusal, each told once.
+  const v = world();
+  claimed(v, 'idea-i1.md', 'old');
+  put(v, 'idea-i1.md', 'new', 'a');
+  await v.pass({ alert: lost() });
+  await v.pass(); await v.pass(); await v.pass();
+  assert.equal(count(v, /idea-i1\.md from a's proposals folder was interrupted/), 1);
+  assert.equal(count(v, /idea-i1\.md" in a's proposals folder was refused: idea filing is off/), 1);
+  assert.equal(v.calls.alerts.length, 2);
+});
+
+test('plant L268 MAT-A: an untold interruption and a later one under the same name are told together, once', async () => {
+  const w = world();
+  seed(w.rec, 'fact', intakeFactId('a', 'research-r1.md'), { session: 'proposals-a', product: 'a', name: 'research-r1.md', sha256: sha('two'), state: 'applying', interrupted_text: 'the first interruption', interrupted_key: sha('one') });
+  put(w, 'research-r1.md', 'two');
+  await w.pass(); await w.pass();
+  assert.equal(count(w, /^the first interruption; the intake of research-r1\.md from a's proposals folder was interrupted/), 1);
+  assert.equal(count(w, new RegExp(`was interrupted \\(version ${sha('two').slice(0, 12)}\\)`)), 1, 'the version is named');
+  assert.equal(w.calls.alerts.length, 1);
+  assert.equal(w.calls.handed.length, 0, 'neither interrupted copy is used');
+});
+
+test('plant L268 MAT-B: a folder is its first product\'s; a product whose rules name it later is refused and told, and nothing is used twice', async () => {
+  // a uses a file; the rules then move a elsewhere and point b at a's old folder (probe N3).
+  const w = world({ products: ['a', 'b'] });
+  const a2 = join(w.root, 'a2'); mkdirSync(a2); chmodSync(a2, 0o750);
+  put(w, 'research-r1.md', 'x');
+  await w.pass();
+  assert.equal(w.calls.handed.length, 1);
+  const moved = rulesFor({ a: a2, b: w.dirs.a });
+  const out = await w.pass({ rules: moved });
+  await w.pass({ rules: moved });
+  assert.equal(w.calls.handed.length, 1, 'not taken in again under b');
+  assert.match(out.find((r) => r.product === 'b').skipped, /was a's first/);
+  assert.equal(count(w, /^b's proposals folder is not taken in: the proposals folder was a's first/), 1);
+  // Shared (both refused), b leaves (a uses), b comes back and a leaves (probe N3b): used once.
+  const v = world({ products: ['a', 'b'] });
+  const b2 = join(v.root, 'b2'); mkdirSync(b2); chmodSync(b2, 0o750);
+  const va2 = join(v.root, 'a2'); mkdirSync(va2); chmodSync(va2, 0o750);
+  put(v, 'research-r1.md', 'x');
+  for (const r of [{ a: v.dirs.a, b: v.dirs.a }, { a: v.dirs.a, b: b2 }, { a: v.dirs.a, b: v.dirs.a }, { a: va2, b: v.dirs.a }]) await v.pass({ rules: rulesFor(r) });
+  assert.equal(v.calls.handed.length, 1);
+  // The first product not recorded: the folder is not read this pass.
+  const u = world();
+  put(u, 'research-r1.md', 'x');
+  const res = await u.pass({ rec: refusing(u, 'proposal_folder_owner') });
+  assert.match(res[0].skipped, /first product could not be recorded/);
+  assert.equal(u.calls.handed.length, 0);
+});
+
+test('plant L268 m-2: with the file\'s own fact refused, two different bad files under one name are each told', async () => {
+  const w = world();
+  const rec = refusing(w, 'proposal_refused');
+  put(w, 'notes.md', 'x');
+  await w.pass({ rec });
+  put(w, 'notes.md', 'yyyy');
+  await w.pass({ rec }); await w.pass({ rec });
+  assert.equal(count(w, /notes\.md" in a's proposals folder was refused/), 2);
+});
+
+test('plant L268 m-3: a used file\'s second refusal is told even after a first was', async () => {
+  const w = world();
+  put(w, 'research-r1.md', 'A');
+  await w.pass();
+  put(w, 'research-r1.md', 'x'.repeat(TEXT_CAP + 1));
+  await w.pass();
+  put(w, 'research-r1.md', 'x'.repeat(TEXT_CAP + 7));
+  await w.pass({ alert: lost() });
+  await w.pass(); await w.pass();
+  assert.equal(count(w, /larger than/), 2);
+});
+
+test('plant L268 m-3: the same folder by another spelling (./ and a trailing slash) is still one folder', async () => {
+  const w = world({ products: ['a', 'b'] });
+  put(w, 'research-r1.md', 'x');
+  await w.pass({ rules: rulesFor({ a: w.dirs.a, b: w.dirs.a.replace(/\/a$/, '/./a/') }) });
+  assert.equal(w.calls.handed.length, 0);
+  assert.equal(count(w, /also/), 2);
+});
+
+// A folder's stat with some fields changed: the device after a restart, or no file number at all.
+const statWith = (over) => (p) => { const st = lstatSync(p); return Object.assign(Object.create(Object.getPrototypeOf(st)), st, over(p)); };
+
+test('plant L275 MAT-C: the device number changing (a restart) does not make a used folder new; b is still refused', async () => {
+  const w = world({ products: ['a', 'b'] });
+  const a2 = join(w.root, 'a2'); mkdirSync(a2); chmodSync(a2, 0o750);
+  put(w, 'research-r1.md', 'x');
+  await w.pass();
+  assert.equal(w.calls.handed.length, 1);
+  const restarted = statWith((p) => ({ dev: lstatSync(p).dev + 7 }));
+  const out = await w.pass({ rules: rulesFor({ a: a2, b: w.dirs.a }), lookDir: restarted });
+  assert.equal(w.calls.handed.length, 1, 'not taken in again under b');
+  assert.match(out.find((r) => r.product === 'b').skipped, /was a's first/);
+});
+
+test('plant L275 m-5: a used folder renamed, then given to b, is still a\'s', async () => {
+  const w = world({ products: ['a', 'b'] });
+  const a2 = join(w.root, 'a2'); mkdirSync(a2); chmodSync(a2, 0o750);
+  put(w, 'research-r1.md', 'x');
+  await w.pass();
+  const renamed = join(w.root, 'renamed');
+  renameSync(w.dirs.a, renamed);
+  const out = await w.pass({ rules: rulesFor({ a: a2, b: renamed }) });
+  assert.equal(w.calls.handed.length, 1);
+  assert.match(out.find((r) => r.product === 'b').skipped, /was a's first/);
+});
+
+test('plant L275 m-6: a folder whose stat gives no file number or no creation time is not read', async () => {
+  for (const over of [{ ino: undefined }, { ino: 0 }, { birthtimeMs: undefined }, { birthtimeMs: 0 }]) {
+    const w = world();
+    put(w, 'research-r1.md', 'x');
+    const out = await w.pass({ lookDir: statWith(() => over) });
+    assert.match(out[0].skipped, /could not be identified/, JSON.stringify(over));
+    assert.equal(w.calls.handed.length, 0);
+    await w.pass({ lookDir: statWith(() => over) });
+    assert.equal(count(w, /could not be identified/), 1, `told once, never silent (L279 m-7): ${JSON.stringify(over)}`);
+  }
+});
+
+test('plant L279 MAT-D: a used folder re-dated (its creation time rewritten), then given to b, is refused and told', async () => {
+  const w = world({ products: ['a', 'b'] });
+  const a2 = join(w.root, 'a2'); mkdirSync(a2); chmodSync(a2, 0o750);
+  put(w, 'research-r1.md', 'x');
+  await w.pass();
+  const redated = statWith((p) => (p === w.dirs.a ? { birthtimeMs: 1 } : {}));
+  const out = await w.pass({ rules: rulesFor({ a: a2, b: w.dirs.a }), lookDir: redated });
+  await w.pass({ rules: rulesFor({ a: a2, b: w.dirs.a }), lookDir: redated });
+  assert.equal(w.calls.handed.length, 1);
+  assert.match(out.find((r) => r.product === 'b').skipped, /a's file number but a different creation time/);
+  assert.equal(count(w, /different creation time/), 1);
+});
+
+test('plant L279: bytes a handed in never reach b\'s handlers, whatever happened to the folder; told once with a\'s name and the date', async () => {
+  // The folder check missed (a replaced folder: a new file number): only the bytes record stands.
+  const w = world({ products: ['a', 'b'] });
+  const a2 = join(w.root, 'a2'); mkdirSync(a2); chmodSync(a2, 0o750);
+  put(w, 'research-r1.md', 'x');
+  await w.pass();
+  const replaced = statWith((p) => (p === w.dirs.a ? { ino: lstatSync(p).ino + 1_000_000 } : {}));
+  const moved = rulesFor({ a: a2, b: w.dirs.a });
+  const out = await w.pass({ rules: moved, lookDir: replaced });
+  await w.pass({ rules: moved, lookDir: replaced });
+  assert.equal(w.calls.handed.length, 1, 'not taken in again under b');
+  assert.match(one(out.filter((r) => r.product === 'b'), 'research-r1.md').refused, /^these bytes were already handed in by a on \d{4}-\d\d-\d\d$/);
+  assert.equal(count(w, /already handed in by a on \d{4}-/), 1);
+  // Copied into b's own folder under another name: the same.
+  const v = world({ products: ['a', 'b'] });
+  put(v, 'research-r1.md', 'same');
+  await v.pass();
+  put(v, 'claim-c9.md', 'same', 'b');
+  put(v, 'research-r1.md', 'same', 'b');
+  await v.pass();
+  assert.equal(v.calls.handed.length, 1);
+  // a's own bytes again are still a's (a poll, a retry): not refused by this check.
+  assert.equal(one(await v.pass(), 'research-r1.md').refused, undefined);
+});
+
+test('plant L279: a proposal whose bundle bytes another product handed in is not sent to review', async () => {
+  const w = world({ products: ['a', 'b'] });
+  const rules = rulesFor(w.dirs, { a: 'second', b: 'second' });
+  const sent = [];
+  const toReview = (x) => { sent.push(x.product); return { ok: true }; };
+  put(w, 'proposal-C-1.md', 'a change');
+  put(w, 'bundle-C-1.bundle', 'bytes');
+  await w.pass({ rules, toReview });
+  put(w, 'proposal-C-2.md', 'b change', 'b');
+  put(w, 'bundle-C-2.bundle', 'bytes', 'b');
+  const out = await w.pass({ rules, toReview });
+  await w.pass({ rules, toReview });
+  assert.deepEqual(sent, ['a']);
+  assert.match(out.find((r) => r.product === 'b' && r.name === 'proposal-C-2.md').refused, /^these bytes were already handed in by a on \d{4}-\d\d-\d\d$/);
+});
+
+test('plant L279: the bytes check failing closed: not readable or not recorded, the file is not used, told once', async () => {
+  const w = world();
+  put(w, 'research-r1.md', 'x');
+  const rec = refusing(w, 'proposal_bytes');
+  const out = await w.pass({ rec });
+  await w.pass({ rec });
+  assert.match(one(out, 'research-r1.md').refused, /could not be recorded/);
+  assert.equal(w.calls.handed.length, 0);
+  assert.equal(count(w, /handed these bytes in could not be recorded/), 1);
+  const v = world();
+  put(v, 'research-r1.md', 'x');
+  const odd = Object.create(v.rec);
+  Object.defineProperty(odd, 'read', { value: (e, id) => (id.startsWith('intake-applied-proposals-bytes-') ? { id, entity: e, corrupt: true, reason: 'document changed outside the Store Writer' } : v.rec.read(e, id)) });
+  assert.match(one(await v.pass({ rec: odd }), 'research-r1.md').refused, /could not be read \(document changed/);
+  assert.equal(v.calls.handed.length, 0);
 });
 
 // ---- the read-deny wall (render-settings.mjs, L78 n5) ----
