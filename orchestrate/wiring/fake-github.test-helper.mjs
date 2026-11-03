@@ -1,7 +1,7 @@
-// fake-github.test-helper.mjs — a stand-in for api.github.com, for the Dispatcher boot test (R-0b-162 A).
+// fake-github.test-helper.mjs — a stand-in for api.github.com, for the Dispatcher and robot job boot tests (R-0b-162).
 //
-// It answers only the two reads M10's rules reader makes on a first load (main's head, the rules file at that commit),
-// for the one repository it is given, and refuses the rest as GitHub would: another repository path is a 404, a call
+// It answers only the two reads M10's rules reader makes on a first load (main's head, the rules file at that commit)
+// and the robot job's one read of the open `idea` issues (`issues`, default none), for the one repository it is given, and refuses the rest as GitHub would: another repository path is a 404, a call
 // with no token is a 401, a write is a 404 (the read-only client never sends one). Any other host throws, so a test
 // can never reach the network. Every call is written to `logFile`, one line each, so a test can see the real reader ran.
 //
@@ -14,7 +14,7 @@ import { blobSha, RULES_PATH } from '../modules/M10-rules/reader.mjs';
 
 const answer = (status, json = null) => ({ status, json: async () => json });
 
-export function fakeGitHubFetch({ owner, repo, commit, text, logFile = null }) {
+export function fakeGitHubFetch({ owner, repo, commit, text, issues = [], logFile = null }) {
   const buf = Buffer.from(text, 'utf8');
   const file = { type: 'file', path: RULES_PATH, sha: blobSha(buf), encoding: 'base64', content: buf.toString('base64'), size: buf.length };
   const base = `/repos/${owner}/${repo}`;
@@ -29,6 +29,7 @@ export function fakeGitHubFetch({ owner, repo, commit, text, logFile = null }) {
     if (method !== 'GET') return answer(404, { message: 'Not Found' });
     if (path === `${base}/git/ref/heads/main`) return answer(200, { ref: 'refs/heads/main', object: { sha: commit, type: 'commit' } });
     if (path === `${base}/contents/${RULES_PATH}?ref=${commit}`) return answer(200, file);
+    if (path === `${base}/issues?labels=idea&state=open&per_page=100`) return answer(200, issues);
     return answer(404, { message: 'Not Found' });
   };
 }

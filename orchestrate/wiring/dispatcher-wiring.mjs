@@ -31,10 +31,10 @@
 //   tokenFile      a GitHub token that can read the product's repository: this user's own file, mode 600
 
 import { isAbsolute } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { openRecord } from '../modules/M9-record/writer.mjs';
 import { makeReader, readProducts } from '../modules/M10-rules/reader.mjs';
 import { makeEngine } from '../modules/M10-rules/engine.mjs';
+import { ROLES_DIR } from '../modules/M10-rules/roles.mjs';
 import { makeRules } from '../shared/rules.mjs';
 import { readOnlyClient, tokenFile } from '../modules/M6-merge-gate/watch-only.mjs';
 import { queueAlert } from '../modules/M11-dispatcher/alerts.mjs';
@@ -42,8 +42,6 @@ import { queueAlert } from '../modules/M11-dispatcher/alerts.mjs';
 export const CONFIG_KEYS = Object.freeze(['wiring', 'lockFile', 'runDeadlineMs', 'product', 'recordRoot', 'ownerUid', 'productsFile', 'rulesStateDir', 'tokenFile']);
 const PATHS = Object.freeze(['recordRoot', 'productsFile', 'rulesStateDir', 'tokenFile']);
 const NAME = /^[A-Za-z0-9._-]+$/;
-// M10's role files, as M10 first-cutover.mjs and M6 watch-only.mjs name them (one export from M10 roles.mjs is proposed).
-const ROLES_DIR = fileURLToPath(new URL('../modules/M10-rules/roles', import.meta.url));
 
 // The ports PRs C and D wire (M11 README, "The tick's ports"). Each throws when called: never a stand-in answer.
 export const NOT_WIRED = Object.freeze(['board', 'healthy', 'resume', 'outboxSessions', 'wait', 'startReadonly', 'replyToLead', 'leads',
@@ -52,15 +50,16 @@ export const NOT_WIRED = Object.freeze(['board', 'healthy', 'resume', 'outboxSes
   'strayFrontDoor', 'frontDoorHandoff']);
 export const NOT_WIRED_CLEANUP = Object.freeze(['mirrorFor', 'git', 'saveWork']);
 export const notWiredText = (port) => `not wired yet: ${port} (R-0b-162)`;
-const refusing = (port) => () => { throw new Error(notWiredText(port)); };
+export const refusing = (port) => () => { throw new Error(notWiredText(port)); };
 
-export function checkConfig(c) {
+// `keys` and `paths`: the robot job's wiring (robot-wiring.mjs) checks its own config with its own lists.
+export function checkConfig(c, { keys = CONFIG_KEYS, paths = PATHS } = {}) {
   if (!c || typeof c !== 'object' || Array.isArray(c)) throw new Error('config: must be an object');
   // A misspelt key would be ignored and its default used instead, so an unknown key stops the start.
-  const extra = Object.keys(c).filter((k) => !CONFIG_KEYS.includes(k));
+  const extra = Object.keys(c).filter((k) => !keys.includes(k));
   if (extra.length) throw new Error(`config: unknown key ${extra.join(', ')}`);
   if (typeof c.product !== 'string' || !NAME.test(c.product)) throw new Error('config: product must be a product name (letters, digits, . _ -)');
-  for (const k of PATHS) if (typeof c[k] !== 'string' || !isAbsolute(c[k])) throw new Error(`config: ${k} must be an absolute path`);
+  for (const k of paths) if (typeof c[k] !== 'string' || !isAbsolute(c[k])) throw new Error(`config: ${k} must be an absolute path`);
   if (!Number.isSafeInteger(c.ownerUid) || c.ownerUid < 0) throw new Error('config: ownerUid must be a Mac user id');
   return c;
 }
@@ -70,11 +69,15 @@ export function logOnlyAlert(log) {
   return async (text) => { log(`dispatcher: alert not sent (no channel to Joe is wired yet): ${text}`); return false; };
 }
 
-export async function wire(config, { limitedSync, log = (s) => process.stderr.write(`${s}\n`), fetchFn = globalThis.fetch, now = () => Date.now() } = {}) {
-  void limitedSync;   // the synchronous ports (PRs C, D) run their commands through it
-  const c = checkConfig(config);
+/**
+ * The Record and the rules, built the one way both jobs use (this file and robot-wiring.mjs). `c` is a checked config
+ * with product, recordRoot, ownerUid, productsFile, rulesStateDir and tokenFile; `who` names the job in its log lines.
+ * → { rec, rules, gh (read-only), entry (the product's products.json entry) }
+ */
+export async function recordAndRules(c, { who, log, fetchFn, now }) {
   const products = readProducts(c.productsFile);
-  if (!products.some((p) => p.product === c.product)) throw new Error(`config: ${c.productsFile} does not list the product ${c.product}`);
+  const entry = products.find((p) => p.product === c.product);
+  if (!entry) throw new Error(`config: ${c.productsFile} does not list the product ${c.product}`);
   // M6's reader words its refusals for the watch-only week; here they name this config key instead.
   const readToken = tokenFile(c.tokenFile);
   const token = () => { try { return readToken(); } catch (e) { throw new Error(String(e?.message ?? e).replace('the watch-only token file', 'the GitHub token file (tokenFile)')); } };
@@ -99,10 +102,16 @@ export async function wire(config, { limitedSync, log = (s) => process.stderr.wr
   const rules = makeRules(engine);
   // The store's own alerts (a refused write, a store fault) go to the log, "not delivered": the store keeps them in its
   // own unsent file and tells them again. Never into the record's queue: the store alerts from inside its own writes.
-  const storeAlert = (e) => { log(`dispatcher: record alert not sent: ${JSON.stringify(e)}`); return false; };
+  const storeAlert = (e) => { log(`${who}: record alert not sent: ${JSON.stringify(e)}`); return false; };
   ({ record: rec } = openRecord({ root: c.recordRoot, product: c.product, ownerUid: c.ownerUid, rules, alert: storeAlert, now }));
   await reader.refresh();
+  return { rec, rules, gh, entry };
+}
 
+export async function wire(config, { limitedSync, log = (s) => process.stderr.write(`${s}\n`), fetchFn = globalThis.fetch, now = () => Date.now() } = {}) {
+  void limitedSync;   // the synchronous ports (PRs C, D) run their commands through it
+  const c = checkConfig(config);
+  const { rec, rules } = await recordAndRules(c, { who: 'dispatcher', log, fetchFn, now });
   const ports = { alert: logOnlyAlert(log) };
   for (const k of NOT_WIRED) ports[k] = refusing(k);
   // cleanupPass reads a missing copies folder as "nothing to clean" (cleanup.mjs), which would pass in silence. So the
