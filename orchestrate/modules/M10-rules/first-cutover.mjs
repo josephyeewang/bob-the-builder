@@ -37,7 +37,7 @@ import { SCOPE_OWNERS, scopeLabel } from './known-gaps.mjs';
 // editingLimits for every product state. NEW_KEYS once meant "the rules schema can't hold these yet", and this check
 // skipped them; since #79 parsePolicy holds every one, so the skip let a file the Dispatcher can't run on pass (#77 r5
 // MAT-1). A test fails if any M11 key is left out here.
-const M11_TYPES = Object.freeze({ perState: 'object', shakedown: 'boolean', leadDailyCard: 'list', redRuns: 'list' });
+const M11_TYPES = Object.freeze({ perState: 'object', shakedown: 'boolean', leadDailyCard: 'list', redRuns: 'list', proposalsOutbox: 'text' });
 // L120: M11's gate.mjs matches() reads daily-card patterns with a matcher of its own, and no list of forms it reads
 // differently from M10 compile was ever complete (`docs/blueprint/**/daily.md`, a leading `**/`, spaces at either end).
 // Until lane 2 moves matches() onto compile, any non-empty list is refused, as a rule; L96 already says [] at the first
