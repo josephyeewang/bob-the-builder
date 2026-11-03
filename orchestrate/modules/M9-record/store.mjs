@@ -21,11 +21,12 @@
 //   store.recover()   // runs under the lock at the first lock in each process and after a dead holder's lock is broken
 
 import { createHash, randomBytes } from 'node:crypto';
-import { chmodSync, closeSync, fchmodSync, existsSync, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync,
+import { chmodSync, closeSync, existsSync, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync,
   renameSync, ftruncateSync, unlinkSync, writeFileSync, writeSync, constants } from 'node:fs';
 import { hostname } from 'node:os';
 import { dirname, isAbsolute, join } from 'node:path';
 import { makeLock, processDead, realProbe, sleepMs } from './lock.mjs';
+import { UNSENT, appendPlain, markSent, plainFd, readPlain, readUnsent } from './unsent.mjs';
 
 export const FAULT_POINTS = Object.freeze(['locked', 'temp_written', 'diary_torn', 'diary_written', 'renamed', 'dir_synced', 'released']);
 // Test faults that don't kill the process: a failed append, a short write, a line that reads back wrong, and a document
@@ -65,18 +66,6 @@ function look(path) {
     return { kind: 'file', bytes: readFileSync(fd) };
   } catch (e) { return { kind: 'odd', why: `unreadable (${e?.code ?? e})` }; } finally { closeSync(fd); }
 }
-// The store's own side files are opened without following a link or waiting on a FIFO, and only a plain file is
-// written or read: a link in their place must not let a refusal or a seen mark land outside the store (round 9).
-function plainFd(path, flags) {
-  const fd = openSync(path, flags | constants.O_NOFOLLOW | constants.O_NONBLOCK);
-  try { const st = fstatSync(fd); if (!st.isFile() || st.nlink !== 1) throw Object.assign(new Error(`${path} is not a plain file with one name`), { store: true }); } catch (e) { closeSync(fd); throw e; }
-  return fd;
-}
-function appendPlain(path, text) {
-  const fd = plainFd(path, constants.O_WRONLY | constants.O_APPEND);
-  try { fchmodSync(fd, 0o644); writeSync(fd, text); } finally { closeSync(fd); }
-}
-function readPlain(path) { const fd = plainFd(path, constants.O_RDONLY); try { return readFileSync(fd, 'utf8'); } finally { closeSync(fd); } }
 // A document's bytes: null when there is none, ODD when something other than a readable plain file is there.
 const ODD = Symbol('odd');
 function docAt(path) { const l = look(path); return l.kind === 'none' ? null : l.kind === 'file' ? l.bytes : ODD; }
@@ -94,7 +83,7 @@ export function openStore({ root, ownerUid, alert = () => {}, now = () => Date.n
   }
 
   const P = { docs: join(root, 'docs'), tmp: join(root, 'tmp'), quarantine: join(root, 'quarantine'), diary: join(root, 'diary.jsonl'),
-    refusals: join(root, 'refusals.jsonl'), seen: join(root, 'outbox-seen.jsonl'), unsent: join(root, 'unsent-alerts.jsonl') };
+    refusals: join(root, 'refusals.jsonl'), seen: join(root, 'outbox-seen.jsonl'), unsent: join(root, UNSENT) };
   // The store's own names must be what they should be before anything touches them: a link, a FIFO or the wrong kind of
   // thing in their place stops the store with an alert naming it, and nothing is read, written, moved or deleted through it
   // (0b-2 audit round 9 M1-M4; one check for the whole store folder, after rounds 6-8 patched it one name at a time).
@@ -138,19 +127,11 @@ export function openStore({ root, ownerUid, alert = () => {}, now = () => Date.n
   };
   const sayOrKeep = (event) => { const e = stamp(event); if (send(e)) return true; keep(e); return false; };
   function resend() {
-    let text = '';
-    try { text = readPlain(P.unsent); } catch { /* the layout check names a bad file; the ones held here are still tried */ }
-    const done = new Set();
-    const waiting = [];
-    for (const l of text.split('\n')) {
-      let x; try { x = JSON.parse(l); } catch { continue; }
-      if (x?.outcome === 'sent' && typeof x.id === 'string') done.add(x.id);
-      else if (x?.outcome === 'unsent' && typeof x.id === 'string' && x.event && typeof x.event === 'object') waiting.push(x);
-    }
+    let waiting = [];
+    try { waiting = readUnsent(root); } catch { /* the layout check names a bad file; the ones held here are still tried */ }
     for (const x of waiting) {
-      if (done.has(x.id) || !send({ ...x.event, resent: true })) continue;
-      done.add(x.id);
-      try { appendPlain(P.unsent, `${JSON.stringify({ id: x.id, outcome: 'sent', at: new Date(now()).toISOString() })}\n`); } catch { /* sent twice, never lost */ }
+      if (!send({ ...x.event, resent: true })) continue;
+      try { markSent(root, x.id, new Date(now()).toISOString()); } catch { /* sent twice, never lost */ }
     }
     for (let i = unsentHere.length - 1; i >= 0; i--) if (send({ ...unsentHere[i].event, resent: true })) unsentHere.splice(i, 1);
   }

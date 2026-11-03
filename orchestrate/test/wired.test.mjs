@@ -56,6 +56,7 @@ export const CONFIG = Object.freeze({
 
 // name → why it is not wired yet. Each names the capability row or issue that will give it a running home.
 export const UNWIRED = Object.freeze({
+  deliverAlertsPass: 'L236: the robot job runs it last in each round (deliverWith), lane 4 on R-0b-162; and not before lane 2 fixes M11 alerts.mjs putFact to write against the version it read (L288 MAT-4), since the robot job settles queue writes beside the Dispatcher',
   gatePass: 'L221: R-0b-162 wiring, lane 4',
   heartbeatOnce: 'L221: R-0b-162 wiring, lane 4',
   watchOnce: 'L221: R-0b-162 wiring, lane 4',
