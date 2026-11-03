@@ -12,7 +12,7 @@
 // The layout is the install step's (install-check.mjs currentCopy): <base>/install → install.v-<commit>/orchestrate,
 // the commit stamp in the versioned folder, every folder 0755 and every file 0644. `base` is the temp folder's real
 // path, so no folder above it is a link (macOS's /var is one).
-import { chmodSync, cpSync, lstatSync, mkdirSync, readdirSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, cpSync, existsSync, lstatSync, mkdirSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { tempDir } from './test-tmp.mjs';
@@ -41,7 +41,16 @@ export function installedLayout(prefix, { files = {}, dirs = [], source = false,
     return path(rel);
   };
   if (source) {
-    cpSync(ORCH, copy, { recursive: true, filter: (p) => !/\/(node_modules|\.git)(\/|$)/.test(p) }); tidy(copy);
+    // Other suites briefly write and remove plant files inside this tree while it is copied (M3's n15-plant.yaml), so a
+    // file that vanishes mid-copy is skipped, and a copy that still trips on one is redone from empty.
+    const keep = (p) => !/\/(node_modules|\.git)(\/|$)/.test(p) && existsSync(p);
+    for (let tries = 1; ; tries += 1) {
+      try { cpSync(ORCH, copy, { recursive: true, filter: keep }); break; } catch (e) {
+        if (e?.code !== 'ENOENT' || tries >= 5) throw e;
+        rmSync(copy, { recursive: true, force: true }); mkdirSync(copy); chmodSync(copy, 0o755);
+      }
+    }
+    tidy(copy);
     for (const rel of OUTSIDE_FILES) { const to = join(folder, rel); cpSync(join(ORCH, '..', rel), to); tidy(folder); }
   }
   for (const rel of dirs) { mkdirSync(join(copy, rel), { recursive: true }); chmodSync(join(copy, rel), 0o755); }
