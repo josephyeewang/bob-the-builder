@@ -10,32 +10,39 @@ import { posix } from 'node:path';
 import { KEYS, MissingKey, need } from './keys.mjs';
 import { wholeNumber } from '../../shared/rules.mjs';
 import { mayStart } from './usage.mjs';
+import { foldKey, matchForm } from '../../shared/plan-fingerprint.mjs';
 import { STATES } from '../../shared/record-names.mjs';
 
 const refuse = (reason) => ({ ok: false, reason });
 const ROW_FILE = /^docs\/blueprint\/rows\/([^/]+)\.yaml$/;
 
-/** A repo path, normalised and case-folded (macOS names ignore case). Null for a path outside the repo. */
+/** A repo path, normalised and folded by the one shared fold (shared/plan-fingerprint.mjs foldKey; L105 M-3), as the
+ * Mac's disk compares names. Null for a path outside the repo or one that is not well formed. */
 export function normPath(p) {
   if (typeof p !== 'string' || !p.trim() || p.includes('\0')) return null;
   if (p.startsWith('/') || p.startsWith('~') || /^[A-Za-z]:/.test(p)) return null;
   const n = posix.normalize(p.replace(/\\/g, '/'));
   if (n === '..' || n.startsWith('../') || n === '.' || n.endsWith('/')) return null;
-  return n.toLowerCase();
+  return foldKey(n);
 }
 
-/** `**` matches any depth, `*` one name. Patterns are case-folded like paths. */
+/** `**` matches any depth, `*` one name. Patterns are folded like paths (foldKey); one that can't be folded matches
+ * everything, so it counts as an overlap, never as none. Both sides are compared in the shared matchForm (NFD), so `docs/cafe*` still matches
+ * `docs/café.md`, whose é is e plus an accent there (audit-pr133-r2 Minor 2). */
 export function matches(pattern, path) {
-  const p = String(pattern).toLowerCase();
+  const p = matchForm(String(pattern));
+  if (p === null) return true;
   const re = new RegExp(`^${p.split('**').map((part) => part.split('*').map((s) => s.replace(/[.+?^${}()|[\]\\]/g, '\\$&')).join('[^/]*')).join('.*')}$`);
-  return re.test(path);
+  return re.test(matchForm(String(path)) ?? '');
 }
 
 /** A card's own file set, or a refusal. The daily card also carries its patterns. */
 export function fileSet(card, { dailyPatterns }) {
   const out = new Set();
-  const named = new Set((card.rows ?? []).map((r) => String(r).toLowerCase()));
+  const named = new Set((card.rows ?? []).map((r) => foldKey(String(r))));
+  if (named.has(null)) return refuse('the card names a row id that is not well formed');
   for (const f of card.files ?? []) {
+    if (typeof f === 'string' && !f.isWellFormed()) return refuse(`the card names a path that is not well formed (${JSON.stringify(f)})`);
     const n = normPath(f);
     if (!n) return refuse(`the card names a path outside the repo (${f})`);
     const row = ROW_FILE.exec(n);
@@ -46,10 +53,12 @@ export function fileSet(card, { dailyPatterns }) {
   return { ok: true, files: out, patterns: card.kind === 'daily' ? dailyPatterns : [] };
 }
 
+// A pattern hit names a pattern that can't be folded, so a run held by it says why (L247).
+const byPattern = (p, f) => (foldKey(String(p)) === null ? `${f} (daily pattern ${JSON.stringify(String(p))} can't be folded, so it counts as every file)` : f);
 function overlaps(a, b) {
   for (const f of a.files) if (b.files.has(f)) return f;
-  for (const p of a.patterns) for (const f of b.files) if (matches(p, f)) return f;
-  for (const p of b.patterns) for (const f of a.files) if (matches(p, f)) return f;
+  for (const p of a.patterns) for (const f of b.files) if (matches(p, f)) return byPattern(p, f);
+  for (const p of b.patterns) for (const f of a.files) if (matches(p, f)) return byPattern(p, f);
   return null;
 }
 

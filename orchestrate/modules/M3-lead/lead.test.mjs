@@ -114,7 +114,17 @@ test('a brief needs all four parts and plain paths', () => {
   assert.ok(briefProblems({ ...brief(['a.js']), not_in_scope: undefined }).some((p) => p.includes('Not in scope')));
   // The shared path rule (shared/plan-fingerprint.mjs cleanPath), and no file twice however it is spelled.
   for (const bad of [[], ['/etc/x'], ['../x'], ['src/'], ['src/*.js'], ['a.js', 'a.js'], ['a.js', './a.js'], ['a.js', 'A.js'],
-    ['src//a.js'], ['src/./a.js'], ['src/[a].js'], ['src/{a,b}.js'], ['src\\a.js'], ['a\rb.js'], ['a\u2028b.js'], ['a\u0007.js']]) assert.ok(briefProblems(brief(bad)).length, JSON.stringify(bad));
+    ['src//a.js'], ['src/./a.js'], ['src/[a].js'], ['src/{a,b}.js'], ['src\\a.js'], ['a\rb.js'], ['a\u2028b.js'], ['a\u0007.js'],
+    ['a\u202eb.js'], ['a\u200bb.js'], ['\ufeffa.js'], ['a\u2066b.js'], ['straße.js', 'STRASSE.js'], ['ς.js', 'σ.js']]) assert.ok(briefProblems(brief(bad)).length, JSON.stringify(bad));
+  // audit-pr133 M-1: one non-ASCII path on its own is refused (not only as a duplicate), with its own reason, and the
+  // brief is never written. Also the pre-existing case: a leading ~, any :, a path of only spaces (L289).
+  for (const one of ['café.js', 'straße.js', 'src/\uff21.js', 'src/a\u00a0b.js', 'docs/日本.md', '~notes.md', 'C:x.js', 'a:b.js', '   ']) {
+    const p = briefProblems(brief([one]));
+    assert.equal(p.length, 1, `${JSON.stringify(one)}: ${p.join('; ')}`);
+    assert.ok(/is not plain ASCII|is not one plain path/.test(p[0]), p[0]);
+    assert.throws(() => briefText('C-1', brief([one])), JSON.stringify(one));
+  }
+  assert.match(briefProblems(brief(['café.js']))[0], /"café\.js" is not plain ASCII/);
   // `./x` is the shared rule's: accepted, and the worker reads the cleaned path.
   assert.deepEqual(briefProblems(brief(['./src/notes.js'])), []);
   assert.ok(briefText('C-1', brief(['./src/notes.js'])).includes('\n- src/notes.js\n'));
@@ -168,7 +178,9 @@ test('the plan: briefs, predicted files and waves', () => {
 });
 
 test('L87 M-1: one file spelled six ways, or a folder beside a file in it, is shared inside a wave', () => {
-  for (const [a, b] of [['src/a.js', './src/a.js'], ['src/a.js', 'SRC/A.js'], ['src/é.js', 'src/é.js'], ['src', 'src/a.js'], ['src/a.js', 'src']]) {
+  for (const [a, b] of [['src/a.js', './src/a.js'], ['src/a.js', 'SRC/A.js'], ['src/é.js', 'src/é.js'], ['src', 'src/a.js'], ['src/a.js', 'src'],
+    // L93 m-1: a full case fold, not toLowerCase (ß/SS and final ς/σ are one name on the Mac's disk).
+    ['straße.js', 'STRASSE.js'], ['ς.js', 'σ.js'], ['src/straße', 'SRC/STRASSE/a.js']]) {
     const r = edit((c) => { c[0].brief.files = [a]; c[1].brief.files = [b]; });
     assert.ok(r.some((p) => p.startsWith('wave 1: cards C-1 and C-2 both touch')), `${a} / ${b}: ${JSON.stringify(r)}`);
   }
