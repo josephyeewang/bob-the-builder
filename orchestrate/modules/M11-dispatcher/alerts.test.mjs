@@ -1,7 +1,7 @@
 // The one outbox (alerts.mjs, LEAD-CALLS L47): the sender on its own.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { queueAlert, sendAlerts, outbox, dropCause, settleAlert, droppedCount, ALERT_QUEUE_FACT, ALERT_QUEUE_MAX, ALERT_UNTRIED_MAX } from './alerts.mjs';
+import { queueAlert, sendAlerts, outbox, dropCause, settleAlert, droppedCount, writeFrom, ALERT_QUEUE_FACT, ALERT_QUEUE_MAX, ALERT_UNTRIED_MAX } from './alerts.mjs';
 import { holdAlert } from './pass.mjs';
 import { recWith, T0 } from './fixtures.test-helper.mjs';
 
@@ -538,4 +538,38 @@ test('#39 round 3 recheck (L56, N1): through an outage as tick.mjs runs it, one 
     counts.push(doc39(rec).dropped_causes.length);
   }
   assert.ok(counts.at(-1) <= 1, 'one cause is listed once (L52)');
+});
+
+test('L335 m-1: writeFrom writes only what changed since the read, over a concurrent write; a forced key is written even when unchanged', () => {
+  const rec = recWith([]);
+  const put = (doc) => { const cur = rec.read('fact', 'stop-f'); return rec.write({ actor: 'dispatcher', entity: 'fact', id: 'stop-f', expectRev: cur?.rev ?? 0, doc }); };
+  assert.equal(put({ a: 1, gone: 1, told: false }).ok, true);
+  const base = rec.read('fact', 'stop-f').doc;
+  // Another writer, after this one's read: a mark and a field of its own.
+  assert.equal(put({ ...base, told: true, other: 'kept' }).ok, true);
+  assert.equal(writeFrom(rec, 'stop-f', base, { a: 2, told: false }, 'k').ok, true);
+  assert.deepEqual(rec.read('fact', 'stop-f').doc, { a: 2, told: true, other: 'kept' }, 'a set, gone deleted, the mark and the other field kept');
+  assert.equal(writeFrom(rec, 'stop-f', base, { a: 2, told: false }, 'k', { force: ['told'] }).ok, true);
+  assert.deepEqual(rec.read('fact', 'stop-f').doc, { a: 2, told: false, other: 'kept' }, 'the forced clear wins over the mark');
+  assert.equal(writeFrom({ ...rec, read: () => { throw new Error('disk gone'); } }, 'stop-f', base, { a: 3 }, 'k').ok, false, 'never throws');
+});
+
+test('L335 M-1: an entry no longer queued when it settles marks nothing (its cause was cleared meanwhile)', async () => {
+  const rec = recWith([['fact', 'stop-g', { told_at: null }]]);
+  queueAlert(rec, 'gone', { now: T0, mark: mark('stop-g') });
+  const r = await sendAlerts(rec, () => { dropCause(rec, 'stop-g'); return true; }, T0, { sendMs: 50 });
+  assert.equal(r.sent, 1);
+  assert.deepEqual(rec.read('fact', 'stop-g').doc, { told_at: null }, 'marked told after its cause was dropped');
+});
+
+test('L335 m-2: a settle that cannot write the queue answers why, and the send leaves a diary line', async () => {
+  const rec = recWith([]);
+  queueAlert(rec, 'stuck', { now: T0 });
+  const [e] = queue(rec);
+  const broken = { ...rec, write: (w) => (w.id === ALERT_QUEUE_FACT ? { ok: false, reason: 'conflict' } : rec.write(w)) };
+  const s = settleAlert(broken, e, true, T0, null);
+  assert.equal(s.ok, false);
+  assert.match(s.reason, /queue/);
+  await sendAlerts(broken, () => true, T0, { sendMs: 50 });
+  assert.match(rec.read('fact', `step-error-alert-settle-${e.id}`)?.doc?.text ?? '', /could not be written.*may be sent again/);
 });

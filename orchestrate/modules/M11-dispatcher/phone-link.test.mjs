@@ -4,6 +4,7 @@ import { phoneLinkStep, FACTS, LINK_FACT, REMOTE_CONTROL } from './phone-link.mj
 import { factFamilyOf } from '../M9-record/permissions.mjs';
 import { KEYS as K } from './keys.mjs';
 import { rulesWith, recWith, T0, MIN, iso, withAlerts } from './fixtures.test-helper.mjs';
+import { fakeAlert } from '../../test/fake-alert.test-helper.mjs';
 
 function world({ outcome = 'sent', restartOk = true, minibaseOk = true, alert = null } = {}) {
   const rec = recWith();
@@ -225,4 +226,26 @@ test('r7 M2: an outage alert queued while the port was down is dropped when the 
   assert.equal(got.length, 0, 'the passed outage is not told');
   for (m = 18; m <= 60; m += 1) { read(m, false); await step(m); }
   assert.equal(got.filter((t) => /cannot reach the Front Door/.test(t)).length, 1, got.join(' | '));
+});
+
+test('L335 m-1: the link coming back clears told even when a told mark landed after the step read the link (the clear is forced)', async () => {
+  const w = world();
+  w.read(0, { fd: true });
+  await w.step(0);
+  assert.equal(w.rec.read('fact', LINK_FACT).doc.told, false);
+  w.read(1, { fd: true });
+  let fired = false;
+  // The alert's settle marks the link told between the step's read of the link and its save.
+  const view = { ...w.rec, read: (e, id) => {
+    const r = w.rec.read(e, id);
+    if (!fired && e === 'fact' && id === FACTS.reachable) {
+      fired = true;
+      const cur = w.rec.read('fact', LINK_FACT);
+      assert.equal(w.rec.write({ actor: 'dispatcher', entity: 'fact', id: LINK_FACT, expectRev: cur.rev, doc: { ...cur.doc, told: true } }).ok, true);
+    }
+    return r;
+  } };
+  await phoneLinkStep({ rec: view, rules: rulesWith(), now: T0 + MIN, send: async () => ({ outcome: 'sent' }), restartFrontDoor: async () => ({ ok: true }), startMinibase: async () => ({ ok: true }), alert: fakeAlert() });
+  assert.ok(fired);
+  assert.equal(w.rec.read('fact', LINK_FACT).doc.told, false, 'the mark survived the clear');
 });

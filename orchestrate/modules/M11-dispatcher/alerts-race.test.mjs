@@ -4,6 +4,8 @@
 // write is tried. Nothing either process wrote may be lost.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { setup } from '../M9-record/fixtures.test-helper.mjs';
 import { ALERT_QUEUE_FACT, queueAlert, dropCause, sendAlerts, WRITE_TRIES } from './alerts.mjs';
 
@@ -111,4 +113,61 @@ test('L288 MAT-4: the told mark merges into its fact as read at write time; anot
     assert.equal(out.sent, 1);
     assert.deepEqual(w.record.read('fact', 'stop-p1').doc, { reason: race ? 'second' : 'first', told: true }, `race ${race}`);
   }
+});
+
+// L335 M-1, L341: a cause cleared by another process while its alert is sent and settled. The other process is a real
+// separate node process on the same store on disk (alerts-clear.test-helper.mjs) doing a clear site's two steps, the
+// clear write and dropCause, each right after one of this process's reads of the queue or the cause fact (or after
+// the settle), for every pair of moments in the site's order. With the drop first (every clear site's order), the
+// clear wins in every pair; with the old order (clear, then drop) some pair leaves a cleared cause marked told, which
+// shows the test can see the race at all.
+const CLEARER = fileURLToPath(new URL('./alerts-clear.test-helper.mjs', import.meta.url));
+async function clearDuringSettle(first, second) {
+  const CAUSE = 'step-error-race';
+  const prepare = (env) => {
+    assert.equal(env.record.write({ actor: 'dispatcher', entity: 'fact', id: CAUSE, expectRev: 0, doc: { error: 'boom', told: false } }).ok, true);
+    assert.ok(queueAlert(env.record, 'step race failed', { now: env.clock.t, mark: { fact: CAUSE, fields: { told: true } } }));
+  };
+  const run = (env, step) => execFileSync(process.execPath, [CLEARER, env.root, CAUSE, step, String(env.clock.t)], { stdio: 'pipe' });
+  // `at` maps a read count to the steps run right after it; steps at reads past the last run after the settle.
+  const act = async (env, at) => {
+    let reads = 0;
+    const view = { ...env.review, read: (e, id) => {
+      const r = env.review.read(e, id);
+      if (e === 'fact' && (id === ALERT_QUEUE_FACT || id === CAUSE)) for (const step of at.get(++reads) ?? []) run(env, step);
+      return r;
+    } };
+    const out = await sendAlerts(view, async () => true, env.clock.t, { sendMs: 1000, budgetMs: 5000 });
+    for (const [n, steps] of at) if (n > reads) for (const step of steps) run(env, step);
+    return { reads, out };
+  };
+  const dry = setup({ prefix: 'm11-clear-' });
+  prepare(dry);
+  const { reads } = await act(dry, new Map());
+  assert.ok(reads >= 3, `the send read the queue and the cause only ${reads} times`);
+  const lost = [];
+  for (let a = 1; a <= reads + 1; a += 1) {
+    for (let b = a; b <= reads + 1; b += 1) {
+      const env = setup({ prefix: 'm11-clear-' });
+      prepare(env);
+      const at = new Map();
+      at.set(a, [first]);
+      at.set(b, [...(at.get(b) ?? []), second]);
+      await act(env, at);
+      const doc = env.record.read('fact', CAUSE).doc;
+      assert.equal(doc.cleared, true, `${first} at ${a}, ${second} at ${b}: the clear was lost`);
+      if (doc.told !== false) lost.push(`${first}@${a} ${second}@${b}`);
+    }
+  }
+  return { reads, lost };
+}
+
+test('L335 M-1 (two processes): a cause cleared while its alert settles stays cleared in every window when the clear site drops it first', async () => {
+  const { reads, lost } = await clearDuringSettle('drop', 'clear');
+  assert.deepEqual(lost, [], `of ${reads} reads: the told mark landed after the clear`);
+});
+
+test('L335 M-1 (two processes): with the old order, clear then drop, some window marks a cleared cause told (the test sees the race)', async () => {
+  const { lost } = await clearDuringSettle('clear', 'drop');
+  assert.ok(lost.length > 0, 'no window showed the race: the test cannot see M-1');
 });

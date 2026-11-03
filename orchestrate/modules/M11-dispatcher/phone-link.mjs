@@ -24,7 +24,7 @@
 import { KEYS, minutes } from './keys.mjs';
 import { note } from './moves.mjs';
 import { sensorsFact } from './sensor-facts.mjs';
-import { tellThen, dropCause } from './alerts.mjs';
+import { tellThen, dropCause, writeFrom } from './alerts.mjs';
 
 export const LINK_FACT = 'phone-link';
 // Once-per-cause marks (L63): a failed Front Door restart, and a Front Door left on another account that won't stop.
@@ -64,7 +64,11 @@ export async function phoneLinkStep({ rec, rules, now, send, restartFrontDoor, s
   const cur = rec.read('fact', LINK_FACT);
   const st = { false_streak: 0, attempts: 0, failures: 0, ...(cur?.doc ?? {}) };
   const done = [];
-  const save = () => rec.write({ actor: 'dispatcher', entity: 'fact', id: LINK_FACT, expectRev: rec.read('fact', LINK_FACT)?.rev ?? 0, doc: { ...st, changed_at: iso(now) }, kind: 'phone_link' });
+  // Each save writes only what this step changed since the doc it read (or last saved), at the version it reads and
+  // again on a conflict, so a mark or clear written meanwhile (the step awaits its ports) is kept (L335 m-1).
+  let base = cur?.doc;
+  // `force` names keys written even when unchanged since the read: the cause clearing writes told: false over a mark.
+  const save = (force) => { const doc = { ...st, changed_at: iso(now) }; const r = writeFrom(rec, LINK_FACT, base, doc, 'phone_link', { force }); if (r?.ok === true) base = doc; return r; };
 
   const net = reading(rec, FACTS.network, now);
   if (net.value !== true) {
@@ -125,7 +129,7 @@ export async function phoneLinkStep({ rec, rules, now, send, restartFrontDoor, s
   if (fd.value === true) {
     if (st.false_streak || st.refused_since) done.push('phone link back');
     Object.assign(st, { false_streak: 0, attempts: 0, failures: 0, told: false, refused_since: null, last_try_at: null });
-    save();
+    save(['told']);
     dropCause(rec, LINK_FACT);
     return done;
   }

@@ -48,7 +48,7 @@ import { phoneLinkStep } from './phone-link.mjs';
 import { cleanupPass } from './cleanup.mjs';
 import { move, note } from './moves.mjs';
 import { waitOnJoe, retellWaits } from './joe-waits.mjs';
-import { outbox, tellThen, sendAlerts, dropCause } from './alerts.mjs';
+import { outbox, tellThen, sendAlerts, dropCause, writeFrom } from './alerts.mjs';
 import { takePassLock } from './pass-lock.mjs';
 import { schedulePass } from '../M2-approvals/schedule.mjs';
 
@@ -114,7 +114,9 @@ export const LAST_PASS_FACT = 'last-full-pass';
 export const STEP_ERROR_FACT = (step) => `step-error-${step}`;
 export const STEP_DEADLINE_MS = 120_000;
 const iso = (ms) => new Date(ms).toISOString();
-const putFact = (rec, id, doc, kind) => rec.write({ actor: 'dispatcher', entity: 'fact', id, expectRev: rec.read('fact', id)?.rev ?? 0, doc, kind });
+// With `base` (the doc the caller read), only what the caller changed is written, at the version read and again on
+// a conflict (writeFrom, L335 m-1); without it, `doc` replaces the fact as before.
+const putFact = (rec, id, doc, kind, base) => (base === undefined ? rec.write({ actor: 'dispatcher', entity: 'fact', id, expectRev: rec.read('fact', id)?.rev ?? 0, doc, kind }) : writeFrom(rec, id, base, doc, kind));
 
 /** The signed-in account, or a reason nothing may start (audit MIN-9). */
 export function signedInAccount({ rec, rules, now }) {

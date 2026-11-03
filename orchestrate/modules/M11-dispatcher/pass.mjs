@@ -31,7 +31,7 @@ import { hostname } from 'node:os';
 import { move, waitOn, note } from './moves.mjs';
 import { waitOnJoe } from './joe-waits.mjs';
 import { sensorsFact } from './sensor-facts.mjs';
-import { tellThen, dropCause, isQueued } from './alerts.mjs';
+import { tellThen, dropCause, isQueued, writeFrom } from './alerts.mjs';
 import { exactReverse } from './undo.mjs';
 import { FINAL_STATES, OWNER_WAIT_WHO, PAUSED_WAIT_WHAT } from '../../shared/record.mjs';
 
@@ -138,7 +138,9 @@ const kindOf = (card) => (isUndo(card) ? 'undo' : card.kind === 'script' ? 'scri
 const startRole = (kind) => (kind === 'script' ? 'script' : 'worker');
 const roleOf = (s) => s.role ?? (s.kind === 'editing' || s.kind === 'script' ? 'worker' : s.kind);
 const factDoc = (rec, id) => rec.read('fact', id);
-const putFact = (rec, id, doc, kind) => rec.write({ actor: 'dispatcher', entity: 'fact', id, expectRev: rec.read('fact', id)?.rev ?? 0, doc, kind });
+// With `base` (the doc the caller read), only what the caller changed is written, at the version read and again on
+// a conflict (writeFrom, L335 m-1); without it, `doc` replaces the fact as before.
+const putFact = (rec, id, doc, kind, base) => (base === undefined ? rec.write({ actor: 'dispatcher', entity: 'fact', id, expectRev: rec.read('fact', id)?.rev ?? 0, doc, kind }) : writeFrom(rec, id, base, doc, kind));
 
 // A stronger reason replaces a pending weaker one (audit MIN-2): cancel > needs_split > the rest.
 const RANK = { cancel: 3, needs_split: 2, card_ended: 1, red: 1, paused: 1 };

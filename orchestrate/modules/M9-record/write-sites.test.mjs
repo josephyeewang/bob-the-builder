@@ -34,7 +34,7 @@ test('L112: every Record write in a module is one the permissions table allows (
 
 test('L112: the scan sees the writes the lead counted, so an empty answer is not a blind scan', () => {
   const n = (actor, entity) => scan.sites.filter((s) => s.actor === actor && s.entity === entity).length;
-  assert.equal(n('dispatcher', 'fact'), 17, 'alerts, joe-waits ×2, lead-restart, merges, moves, outage, outbox-intake, pass, phone-link ×2, proposals-intake ×4, tick, usage');
+  assert.equal(n('dispatcher', 'fact'), 16, 'alerts, joe-waits ×2, lead-restart, merges, moves, outage, outbox-intake, pass, phone-link (its save goes through writeFrom, L335 m-1), proposals-intake ×4, tick, usage');
   // #68: the restart handoff is the Lead's own (its outbox); the Dispatcher saves a lead-restart- fact instead, and
   // asks are approvals' alone (lane 2's consumeAsk).
   assert.equal(n('dispatcher', 'handoff'), 0);
@@ -55,7 +55,9 @@ test('L112, L118 m4, c3: an update is checked where the call passes a read rev, 
   const at = (file, line) => scan.sites.find((s) => s.file === file && s.line === line);
   // The alert queue's write, found by its text (L288 MAT-4 moved it into updateFact).
   const alertSrc = SOURCES.find((f) => f.file === 'modules/M11-dispatcher/alerts.mjs').src.split('\n');
-  const alertLine = alertSrc.findIndex((l) => l.includes("rec.write({ actor: 'dispatcher', entity: 'fact', id, expectRev: cur?.rev ?? 0")) + 1;
+  const alertLines = alertSrc.map((l, i) => (l.includes("rec.write({ actor: 'dispatcher', entity: 'fact', id, expectRev: cur?.rev ?? 0") ? i + 1 : 0)).filter(Boolean);
+  assert.equal(alertLines.length, 1, `the alert queue's write is found exactly once: ${alertLines}`);
+  const [alertLine] = alertLines;
   assert.deepEqual(at('modules/M11-dispatcher/alerts.mjs', alertLine)?.modes, ['create', 'update'], 'cur?.rev ?? 0');
   assert.deepEqual(at('modules/M11-dispatcher/phone-link.mjs', 44).modes, ['update'], 'c.rev');
   // The gate's create, found by its text, so an edit above it does not move the check.
