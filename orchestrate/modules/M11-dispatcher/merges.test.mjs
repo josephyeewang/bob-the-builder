@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { timeLimits, requestMerges, MERGE_REQUEST, PR_FACT, RECONCILED_FACT, RECONCILE_TELL_FACT } from './merges.mjs';
+import { timeLimits, requestMerges, MERGE_REQUEST, PR_FACT, RECONCILED_FACT, RECONCILE_TELL_FACT, UNREAD_FACT } from './merges.mjs';
 import { KEYS as K } from './keys.mjs';
 import { settleMerge, reconcileMerge, openTooLong, prReadingAfter } from '../M6-merge-gate/merge-outcome.mjs';
 import { rulesWith, recWith, change, seed, setClock, undoEntries, T0, MIN, iso, withAlerts } from './fixtures.test-helper.mjs';
@@ -166,7 +166,7 @@ test('L85 M-1 (a): still open past timeouts.merging_open_max_min after the mergi
   assert.deepEqual(states(u.rec), ['merging', 'merging']);
 });
 
-test('L89: no fresh PR reading past timeouts.merging_open_max_min: still merging, Joe told once', async () => {
+test('L89: no fresh PR reading past timeouts.merging_open_max_min: still merging, Joe told (and not again within the day)', async () => {
   // The Merge Gate stopped mid-merge and the Sensors never read the PR again (the limit is 15 min).
   const { rec } = gone();
   const p1 = await pass(rec, 14, dead);
@@ -176,7 +176,7 @@ test('L89: no fresh PR reading past timeouts.merging_open_max_min: still merging
   assert.equal(p2.alerts.length, 1);
   assert.match(p2.alerts[0], /merge M-1: the Merge Gate stopped mid-merge and PR 7 has had no fresh reading for 20 min/);
   const p3 = await pass(rec, 40, dead);
-  assert.deepEqual([states(rec), p3.alerts], [['merging', 'merging'], []], 'told once');
+  assert.deepEqual([states(rec), p3.alerts], [['merging', 'merging'], []], 'not told again within the day (L342)');
   // A reading that comes after all settles it as before.
   reading(rec, 41, { state: 'closed', merged: true, merge_commit_sha: MC });
   await pass(rec, 42, dead);
@@ -727,7 +727,7 @@ for (const lost of ['send refused', 'queue refused']) {
 // L246 MIN-18: a closed reading whose merged is not true or false now waits instead of being refused. The wait is
 // bounded by the same merging limit as no reading at all: past it, Joe is told once (the L89 alert, whose mark is the
 // UNREAD note), even while the Sensors keep bringing the same half answer every pass; the card never sits there untold.
-test('L246 MIN-18: GitHub answering closed with a non-boolean merged, pass after pass, is told once past the merging limit', async () => {
+test('L246 MIN-18: GitHub answering closed with a non-boolean merged, pass after pass, is told once a day past the merging limit', async () => {
   const { rec } = gone();
   const half = (m) => reading(rec, m - 0.5, { state: 'closed', merged: 'true', merge_commit_sha: MC, head_sha: HA });
   half(14);
@@ -736,10 +736,47 @@ test('L246 MIN-18: GitHub answering closed with a non-boolean merged, pass after
   const told = [];
   for (const m of [20, 21, 40, 120]) { half(m); told.push(...(await pass(rec, m, dead)).alerts); }
   assert.deepEqual(states(rec), ['merging', 'merging'], 'never merged and never refused on a half answer');
-  assert.equal(told.length, 1, 'told once');
+  assert.equal(told.length, 1, 'told once within the day (L342: again each day while it stays so)');
   assert.match(told[0], /merge M-1: the Merge Gate stopped mid-merge and PR 7 has had no fresh reading for 20 min; .*merged true or false/);
   // GitHub answers in full: settled as before.
   reading(rec, 121, { state: 'closed', merged: true, merge_commit_sha: MC, head_sha: HA });
   await pass(rec, 122, dead);
   assert.deepEqual(states(rec), ['merged', 'merged']);
 });
+
+// L342 (the L315 class): a merge stuck in merging with no fresh reading is told at once past the limit, then again each
+// day while it stays so, never told once and then left (shared stillWaiting). A fresh reading, or the merge leaving
+// merging, clears the mark, so a new stretch is told afresh.
+test('L342: still merging with no reading at +25 h is told a second time; a fresh reading clears the mark', async () => {
+  const { rec } = gone();
+  const told = [];
+  for (const m of [20, 40, 24 * 60 + 15]) told.push(...(await pass(rec, m, dead)).alerts);
+  assert.equal(told.length, 1, 'told at 20 min, quiet for the rest of the day');
+  const p = await pass(rec, 25 * 60, dead);
+  assert.deepEqual(states(rec), ['merging', 'merging']);
+  assert.equal(p.alerts.length, 1, 'still merging a day later: told a second time');
+  assert.match(p.alerts[0], /no fresh reading for 1500 min; .*Told again each day while it stays so/);
+  assert.equal((await pass(rec, 25 * 60 + 30, dead)).alerts.length, 0, 'and not every pass');
+  assert.ok(rec.read('fact', UNREAD_FACT('M-1')).doc.told_at, 'the mark is set');
+  // A fresh reading arrives: the merge settles, and the mark is cleared.
+  reading(rec, 25 * 60 + 31, { state: 'closed', merged: true, merge_commit_sha: MC });
+  await pass(rec, 25 * 60 + 32, dead);
+  await pass(rec, 25 * 60 + 33, dead);
+  assert.equal(rec.read('merge', 'M-1').doc.state, 'merged');
+  assert.equal(rec.read('fact', UNREAD_FACT('M-1')).doc.told_at, null, 'cleared once the wait ended');
+});
+
+// L329/L321: the merge's last write is read through pastTime. One that can't be read, or lies an hour ahead (a clock
+// that went back), counts as past the limit: told at once and then daily, never waited out.
+for (const [name, ts] of [['unreadable', 'not a time'], ['1 h ahead', iso(T0 + 61 * MIN)]]) {
+  test(`L342 + L329: a merge whose last write time is ${name} is told at once, then daily, never waited out`, async () => {
+    const { rec: r0 } = gone();
+    const rec = { ...r0, meta: (e, id) => (e === 'merge' ? { ...r0.meta(e, id), ts } : r0.meta(e, id)) };
+    const p1 = await pass(rec, 1, dead);
+    assert.equal(p1.alerts.length, 1, 'told at once');
+    assert.match(p1.alerts[0], /no fresh reading for longer than the merging limit/);
+    assert.equal((await pass(rec, 30, dead)).alerts.length, 0, 'not every pass');
+    assert.equal((await pass(rec, 24 * 60 + 2, dead)).alerts.length, 1, 'told again a day later');
+    assert.deepEqual(states(rec), ['merging', 'merging']);
+  });
+}
