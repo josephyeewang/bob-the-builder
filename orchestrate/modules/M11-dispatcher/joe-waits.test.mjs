@@ -163,3 +163,22 @@ test('audit #153 m1: a re-wait whose since could not be copied onto the tell is 
   assert.deepEqual(await w.pass(), [['C-1', 'told again: waits on joe']]);
   assert.deepEqual(w.got, ['first tell', 'second tell']);
 });
+
+test('audit #153 r2 m1-r: a re-wait across the 60 s edge (stored since 59 s ahead, the tick 50 s behind) is still told', async () => {
+  const { seed } = await import('../M9-record/fixtures.test-helper.mjs');
+  for (const [ahead, behind] of [[59e3, 50e3], [59e3, 0], [-60 * MIN, 50e3]]) {
+    const w = world();
+    const rec = w.E.record;
+    assert.equal((await withAlerts(rec, w.E.clock.t, w.port, (alert) => waitOnJoe(rec, 'C-1', { text: 'first tell', alert, now: w.E.clock.t, ...ask }))).ok, true);
+    w.E.clock.t += 2 * 60 * MIN;
+    const c = w.card();
+    seed(w.E, 'card', 'C-1', { ...c, wait: { ...c.wait, since: new Date(w.E.clock.t + ahead).toISOString() } });
+    const now = w.E.clock.t - behind;
+    const r = await withAlerts(rec, now, w.port, (alert) => waitOnJoe(rec, 'C-1', { text: 'second tell', alert, now, ...ask }));
+    assert.equal(r.ok, true, r.reason);
+    w.E.clock.t += MIN;
+    await w.pass();
+    assert.deepEqual(w.got, ['first tell', 'second tell'], `ahead ${ahead / 1000} s, behind ${behind / 1000} s`);
+    assert.equal(w.tell().wait_since, w.card().wait.since, 'the stored since is on the tell');
+  }
+});

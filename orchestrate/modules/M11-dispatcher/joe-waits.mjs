@@ -32,26 +32,30 @@ export function waitOnJoe(rec, id, { text, alert, now, ...wait }) {
   if (!req.ok) return { ok: false, reason: `the tell could not be recorded: ${req.reason}` };
   const w = waitOn(rec, id, { who: 'joe', now, ...wait });
   if (!w.ok) return w;
-  const stored = confirm(rec, id, rec.read('card', id)?.doc);
+  // The wait just written is this tell's: its stored since is copied on as it is, not matched by the window, which the
+  // Writer judges on its own clock, not the tick's (audit #153 r2 m1-r).
+  const stored = confirm(rec, id, rec.read('card', id)?.doc, { ours: true });
   if (stored) tellThen(alert, text, { fact: WAIT_TELL_FACT(id), fields: { told_since: stored }, kind: 'wait_told' });
   return w;
 }
 
 // The stored since of the wait tell `f` is for, on card doc `c`: its `wait_since` when copied on, else a joe wait
-// within the Record's window of its asked time. null when the card waits on no such wait.
-function waitOf(f, c) {
+// within the Record's window of its asked time (any joe wait, when `ours`). null when the card waits on no such wait.
+function waitOf(f, c, ours = false) {
   if (c?.state !== 'waiting' || c.wait?.who !== 'joe' || !c.wait.since) return null;
+  if (ours) return c.wait.since;
   if (f.wait_since) return c.wait.since === f.wait_since ? f.wait_since : null;
   const gap = Math.abs(Date.parse(c.wait.since) - Date.parse(f.since));
   return Number.isFinite(gap) && gap <= SINCE_WINDOW_MS ? c.wait.since : null;
 }
 
 // Copies the stored since of the card's wait onto its tell. Returns it, or null when the card waits on no wait the
-// tell is for, or the copy could not be written (the next pass matches by the window and tries again).
-function confirm(rec, card, c) {
+// tell is for, or the copy could not be written (the next pass matches by the window and tries again). `ours`: the
+// caller just wrote this card's joe wait for this tell, so its since is taken without the window.
+function confirm(rec, card, c, { ours = false } = {}) {
   const f = rec.read('fact', WAIT_TELL_FACT(card));
   if (!f?.doc?.since) return null;
-  const stored = waitOf(f.doc, c);
+  const stored = waitOf(f.doc, c, ours);
   if (!stored || f.doc.wait_since === stored) return stored;
   const put = rec.write({ actor: 'dispatcher', entity: 'fact', id: WAIT_TELL_FACT(card), expectRev: f.rev, doc: { ...f.doc, wait_since: stored }, kind: 'wait_tell' });
   return put.ok ? stored : null;
