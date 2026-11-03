@@ -3156,3 +3156,62 @@ test('L329 merge-outcome.mjs: openTooLong counts a last write that is unreadable
   assert.equal(prReadingAfter(recOfReading(iso(60)), 7, 'M-1', T0), null, 'a reading stamped 1 h ahead is not fresh');
   assert.equal(prReadingAfter(recOfReading('not a time'), 7, 'M-1', T0), null, 'an unreadable reading is not fresh');
 });
+
+// L379 n2 (L323): the told mark on an interrupted note, refused by the Record. The note was taken, so the owner has heard
+// it, but nothing says so: the refusal is alerted, and the note goes out again until the mark is written.
+test('L323 gate.mjs: a refused interrupted_told_at write is alerted, the note goes out again, and the next good write ends it', async () => {
+  const w = world(limited());
+  verifiedCard(w);
+  loseAnswer(w, { merged: false });
+  await gatePass(w.ctx);
+  const rec = recOf(w);
+  let refuse = true;
+  w.ctx.record = Object.create(rec, { write: { value: (a) => (refuse && a.entity === 'merge' && a.doc?.interrupted_told_at ? { ok: false, reason: 'planted' } : rec.write(a)) } });
+  const refused = () => told(w, 'merge_gate_write_refused').filter((a) => a.to === 'interrupted_told');
+  tick(w, LIMIT_MIN); stayGreen(w); await gatePass(w.ctx);
+  assert.equal(mergeOf(w).doc.state, 'refused');
+  assert.ok(!mergeOf(w).doc.interrupted_told_at);
+  assert.equal(told(w, 'merge_interrupted').length, 1);
+  assert.equal(refused().length, 1);
+  assert.equal(refused()[0].reason, 'planted');
+  await later(w, 1);
+  assert.equal(told(w, 'merge_interrupted').length, 2, 'not marked, so sent again');
+  assert.equal(refused().length, 2);
+  refuse = false;
+  await later(w, 1);
+  assert.equal(told(w, 'merge_interrupted').length, 3);
+  assert.ok(mergeOf(w).doc.interrupted_told_at);
+  await later(w, 1);
+  assert.equal(told(w, 'merge_interrupted').length, 3, 'marked, so told no more');
+  assert.equal(refused().length, 2);
+});
+
+// L379 n3 (L356): the reading landed, but the write that ends the wait is refused. The Record still says it waits, so
+// the merge steps aside: no merge call on that pass. The next pass clears it and goes on.
+test('L356 gate.mjs: a refused clear of the landed reading steps aside with an alert and no merge call, and the next pass goes on', async () => {
+  const w = world(limited());
+  const head = verifiedCard(w);
+  await interruptedThenAskedAgain(w, head);
+  const again = () => recOf(w).list('merge').find((m) => m.doc.request === 'mr-C-1-again');
+  await later(w, 1);
+  assert.ok(again().doc.wait_reading, 'waits for the reading');
+  const rec = recOf(w);
+  let refuse = true;
+  const clears = (a) => a.entity === 'merge' && a.doc?.wait_reading === null && !!rec.read('merge', a.id)?.doc?.wait_reading;
+  w.ctx.record = Object.create(rec, { write: { value: (a) => (refuse && clears(a) ? { ok: false, reason: 'planted' } : rec.write(a)) } });
+  sensorsReads(w, { state: 'open', merged: false, merge_commit_sha: null, head_sha: head, observed_at: nowIso(w, 1) });
+  const before = again().doc;
+  const puts = gatePuts(w);
+  await later(w, 2);
+  const refused = () => told(w, 'merge_gate_write_refused').filter((a) => a.to === 'wait_reading_cleared');
+  assert.equal(refused().length, 1);
+  assert.equal(refused()[0].reason, 'planted');
+  assert.equal(again().doc.state, before.state, 'stepped aside');
+  assert.equal(again().doc.wait_reading, before.wait_reading, 'the Record still says it waits');
+  assert.equal(gatePuts(w), puts, 'no merge call from a record that still says it waits');
+  refuse = false;
+  await later(w, 1);
+  assert.equal(again().doc.wait_reading ?? null, null, 'cleared on the next pass');
+  assert.equal(gatePuts(w), puts + 1, 'and it went on');
+  assert.equal(refused().length, 1);
+});
