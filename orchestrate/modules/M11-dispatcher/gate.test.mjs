@@ -231,7 +231,7 @@ test('audit 0b-6 r2 / L27: an unknown kind is refused; an overnight run meets th
 // skips a missing cap value; the same undo not marked exact, or any other kind marked exact, is refused.
 test('L40 / r4 MAT-5: a missing cap is skipped only for an undo that is an exact reverse, and is still named', () => {
   const rules = rulesWith({ [K.perState]: undefined });
-  const undo = { id: 'U-1', product: 'p1', tier: 2, kind: 'undo', files: ['src/u.js'] };
+  const undo = { id: 'U-1', product: 'p1', kind: 'exact_reverse', files: ['src/u.js'] };
   const ask = (kind, exactReverse) => startGate({ rules, rec: setup(), card: undo, kind, product: 'p1', b: GREEN, running: [], exactReverse });
   const exact = ask('undo', true);
   assert.equal(exact.ok, true, exact.reason);
@@ -251,7 +251,7 @@ test('L40 / r4 MAT-5: a missing cap is skipped only for an undo that is an exact
 // L199 (1): the first cutover's rules set caps.editing_per_product to 0, and Joe's Undo must still start. An exact
 // reverse undo is never held by the editing caps (L31); its own limit is one undo running per product; while it runs
 // it counts toward the caps for every other editing start.
-const undoCard = (id = 'U-1', files = ['src/u.js']) => ({ id, product: 'p1', tier: 2, kind: 'exact_reverse', files });
+const undoCard = (id = 'U-1', files = ['src/u.js']) => ({ id, product: 'p1', kind: 'exact_reverse', files });
 const undoSession = (n, prod = 'p1', c = `u${n}`) => ({ id: `S-U-${prod}-${n}`, product: prod, kind: 'undo', card: c });
 
 test('L199: at caps.editing_per_product 0 an exact-reverse undo starts; editing and a not-exact undo are held at cap 0', () => {
@@ -285,7 +285,7 @@ test('L199: one undo at a time per product; another product\'s undo does not hol
   const rec = setup({ cards: [card('u0', ['src/other.js'], { kind: 'exact_reverse' })] });
   const second = go({ rules, rec, card: undoCard(), kind: 'undo', exactReverse: true, running: [undoSession(0)] });
   assert.equal(second.ok, false);
-  assert.match(second.reason, /already runs 1 undo\(s\) \(one at a time\)/);
+  assert.equal(second.reason, 'an undo is already running for p1 (one at a time)');
   const elsewhere = go({ rules, rec, card: undoCard(), kind: 'undo', exactReverse: true, running: [undoSession(0, 'p2')] });
   assert.equal(elsewhere.ok, true, elsewhere.reason);
   // Editing workers on the product are not undos: three of them (the cap) do not hold it.
@@ -304,4 +304,73 @@ test('L199: a running undo counts toward the caps for every other editing start'
   const mac = [worker(0, 'p2', 'w3'), worker(1, 'p2', 'w4'), worker(2, 'p2', 'w5'), worker(3, 'p2', 'w6'), undoSession(0, 'p2')];
   assert.match(go({ running: mac }).reason ?? '', /Mac already runs 5/);
   assert.equal(go({ running: mac.slice(0, 4) }).ok, true, 'control: four on the Mac');
+});
+
+// L210 (one rule across start, push and merge; lane 1's shared wording): an exact-reverse undo starts on a paused
+// product; every other editing start there is refused; a second undo while one runs is refused.
+// `stateIs` stands in a product document the Record would not hold (no state, or one it doesn't know): read through.
+const stateIs = (rec, doc) => ({ read: (e, id) => (e === 'product' && id === 'p1' ? { id, doc } : rec.read(e, id)), list: (e) => rec.list(e) });
+
+test('L210: a paused product starts its undo; a normal edit there is refused; so is a second undo while one runs', () => {
+  const rec = setup({ products: [product('p1', 'paused'), product('p2')], cards: [card('u0', ['src/other.js'], { kind: 'exact_reverse' })] });
+  const undo = go({ rec, card: undoCard(), kind: 'undo', exactReverse: true });
+  assert.equal(undo.ok, true, undo.reason);
+  assert.equal(undo.missing, undefined, 'nothing to tell Joe: the paused cap is there');
+  const edit = go({ rec });
+  assert.deepEqual([edit.ok, edit.reason], [false, 'p1 is paused: only its undo starts']);
+  const second = go({ rec, card: undoCard(), kind: 'undo', exactReverse: true, running: [undoSession(0)] });
+  assert.deepEqual([second.ok, second.reason], [false, 'an undo is already running for p1 (one at a time)']);
+  // Not the undo: an undo start not checked as an exact reverse, a card that is not an exact_reverse card, or an editing start.
+  for (const [what, over] of [['not exact', { exactReverse: false }], ['not an undo card', { card: { ...undoCard(), kind: 'fix' } }], ['an editing start', { kind: 'editing' }]]) {
+    const r = go({ rec, card: undoCard(), kind: 'undo', exactReverse: true, ...over });
+    assert.deepEqual([r.ok, r.reason], [false, 'p1 is paused: only its undo starts'], what);
+  }
+  // A read-only start is not an editing start: the Lead's swarm, as before (M20).
+  assert.equal(go({ rec, kind: 'readonly', lead: 'L1' }).ok, true);
+  // The other product is not paused by p1's state.
+  assert.equal(go({ rec, product: 'p2', card: { id: 'n2', product: 'p2', tier: 2, files: ['src/n2.js'] } }).ok, true);
+});
+
+test('L210: a product with no state, or one the Record does not know, reads as paused: its undo starts, nothing else', () => {
+  for (const doc of [{}, { state: 'retired' }, { state: null }]) {
+    const rec = stateIs(setup(), doc);
+    const undo = go({ rec, card: undoCard(), kind: 'undo', exactReverse: true });
+    assert.equal(undo.ok, true, `${JSON.stringify(doc)}: ${undo.reason}`);
+    assert.equal(undo.missing, undefined, `${JSON.stringify(doc)}: looked up as paused, so no rule is missing`);
+    assert.equal(go({ rec }).reason, 'p1 is paused: only its undo starts', JSON.stringify(doc));
+  }
+});
+
+test('L210: a per-state value that is there but not a whole number refuses the undo; a missing one is named and the undo starts', () => {
+  const rec = setup({ products: [product('p1', 'paused'), product('p2')] });
+  for (const bad of ['two', -1, 1.5, '']) {
+    const r = go({ rec, rules: rulesWith({ [K.perState]: { light: 1, active: 3, away: 3, paused: bad } }), card: undoCard(), kind: 'undo', exactReverse: true });
+    assert.equal(r.ok, false, `paused: ${JSON.stringify(bad)}`);
+    assert.equal(r.missing, K.perState);
+  }
+  const gone = go({ rec, rules: rulesWith({ [K.perState]: { light: 1, active: 3, away: 3 } }), card: undoCard(), kind: 'undo', exactReverse: true });
+  assert.equal(gone.ok, true, gone.reason);
+  assert.equal(gone.missing, K.perState, 'Joe is told the paused cap is missing (L40)');
+});
+
+test('#117 m2: the one-undo limit counts the product\'s exact_reverse cards claimed or running in the Record, not only the running list', () => {
+  for (const state of ['claimed', 'running']) {
+    const rec = setup({ cards: [card('U-0', ['src/other.js'], { kind: 'exact_reverse', state })] });
+    const r = go({ rec, card: undoCard(), kind: 'undo', exactReverse: true, running: [] });
+    assert.deepEqual([r.ok, r.reason], [false, 'an undo is already running for p1 (one at a time)'], state);
+  }
+  // Not counted: one finished or waiting to start, another product's, a card that is not an undo, or this card itself.
+  const quiet = setup({ cards: [
+    card('U-0', ['src/a.js'], { kind: 'exact_reverse', state: 'in_review' }),
+    card('U-2', ['src/b.js'], { kind: 'exact_reverse', state: 'ready' }),
+    card('U-3', ['src/c.js'], { kind: 'exact_reverse', state: 'running', product: 'p2' }),
+    card('C-4', ['src/d.js'], { state: 'running' }),
+    card('U-1', ['src/u.js'], { kind: 'exact_reverse', state: 'claimed' }),
+  ] });
+  const ok = go({ rec: quiet, card: undoCard(), kind: 'undo', exactReverse: true, running: [] });
+  assert.equal(ok.ok, true, ok.reason);
+  // A Record whose cards can't be listed refuses the undo.
+  const deaf = { read: (e, id) => quiet.read(e, id), list: () => { throw new Error('locked'); } };
+  const r = go({ rec: deaf, card: undoCard(), kind: 'undo', exactReverse: true, running: [] });
+  assert.deepEqual([r.ok, r.reason], [false, 'the running undos could not be counted (locked)']);
 });

@@ -123,7 +123,9 @@ function fixCards({ rec, now, alert, out }) {
       continue;
     }
     if (!fix) {
-      const plan = Object.fromEntries(PLAN_INPUTS.filter((k) => doc[k] !== undefined).map((k) => [k, doc[k]]));
+      // The undo card's tier is not copied (#117 audit m1): Tier 2 is for an exact reverse, and a fix card is a
+      // hand-planned change, so it has no tier until the Lead plans it, and no tier counts as Tier 1 (fail-closed).
+      const plan = Object.fromEntries(PLAN_INPUTS.filter((k) => k !== 'tier' && doc[k] !== undefined).map((k) => [k, doc[k]]));
       const w = rec.write({ actor: 'dispatcher', entity: 'card', id: FIX_CARD(id), expectRev: 0, kind: 'undo_fix_card',
         // A draft, never `ready` (audit MAT-4): the Lead plans it; the start loop never picks it up.
         doc: { state: 'draft', kind: 'fix', fix_of: id, product: doc.product ?? null, module: doc.module ?? null, what: why, ...plan } });

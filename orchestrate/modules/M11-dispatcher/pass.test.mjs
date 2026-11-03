@@ -871,11 +871,30 @@ test('L199: at editing cap 0 the undo start starts one undo per product; the sec
   assert.deepEqual(r.started, ['U-1']);
   assert.deepEqual(launched, [['U-1', 'undo']]);
   assert.deepEqual(r.missing, []);
-  assert.deepEqual(r.refused, [['U-2', 'the product already runs 1 undo(s) (one at a time)']]);
+  assert.deepEqual(r.refused, [['U-2', 'an undo is already running for p1 (one at a time)']]);
   assert.equal(rec.read('card', 'U-2').doc.state, 'ready');
-  // The first undo over (no longer running), the second starts.
+  // U-1 still running in the Record, gone from the running list (the sessions port lost it): U-2 still waits (#117 m2).
+  const r1 = await ask([]);
+  assert.deepEqual(r1.refused, [['U-2', 'an undo is already running for p1 (one at a time)']]);
+  // The first undo really over: its worker handed it in (in_review), so it no longer runs, and the second starts.
+  change(rec, 'card', 'U-1', { state: 'in_review' });
   const r2 = await ask([]);
   assert.deepEqual(r2.started, ['U-2']);
+});
+
+// #117 audit m2: a launch that never answers leaves its undo card claimed and out of the running list. A second undo
+// on the product in the same pass is refused: the one-undo limit reads the Record, not only the list.
+test('#117 m2: an undo launch that times out leaves its card claimed; a second undo in the same pass is refused', { timeout: 10_000 }, async () => {
+  const rec = recWith([['product', 'p1', { state: 'active' }], ...undoEntries('U-1'), ...undoEntries('U-2')]);
+  const launched = [];
+  const r = await undoStarts({ rec, rules: rulesWith({}, { start_session: { decision: 'allow', reason: 'ok' } }), now: T0,
+    bands: { band: 'green', own_building: 'open', prodBlocked: false }, running: [],
+    launch: (x) => { launched.push(x.card.id); return new Promise(() => {}); }, filesOf: filesOfCommits, alert: fakeAlert(), portDeadlineMs: 50 });
+  assert.deepEqual(launched, ['U-1']);
+  assert.deepEqual(r.started, []);
+  assert.equal(rec.read('card', 'U-1').doc.state, 'claimed');
+  assert.deepEqual(r.refused.find(([id]) => id === 'U-2'), ['U-2', 'an undo is already running for p1 (one at a time)']);
+  assert.equal(rec.read('card', 'U-2').doc.state, 'ready');
 });
 
 test('r4 Minor: usage unread for over a day is told again each day it lasts', async () => {
