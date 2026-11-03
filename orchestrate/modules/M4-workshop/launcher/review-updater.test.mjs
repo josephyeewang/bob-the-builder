@@ -937,20 +937,29 @@ test('L75 m-4, L132 M-1: a new copy must hold what the runner\'s config names in
   const w = await world();
   // The wiring and the budget module must be the copy's own code files from main, under modules/ or shared/ (L132
   // M-1): a copy item is refused before the flip, even one `keep` carries, and so is one main does not hold.
-  mkdirSync(join(w.keepSeed, 'wiring'));
-  writeFileSync(join(w.keepSeed, 'wiring', 'w.mjs'), '');
-  const kept = { ...w.c, keep: [...w.c.keep, 'wiring'] };
+  // L257 (B): wiring/ is a code home now, so a carried item may not take its name (or modules/ or shared/).
+  const keepDir = tempDir('m4-keephome-');
+  for (const home of ['wiring', 'modules', 'shared']) {
+    const f = join(keepDir, `keep-${home}.json`);
+    writeFileSync(f, `${JSON.stringify({ ...w.c, keep: [...w.c.keep, home] })}\n`);
+    assert.throws(() => readUpdaterConfig(f, { localAddress: true }), new RegExp(`keep must not hold ${home}, the name of a folder of the copy's own code`), home);
+    writeFileSync(f, `${JSON.stringify(w.c)}\n`);
+    assert.doesNotThrow(() => readUpdaterConfig(f, { localAddress: true }), 'the same config without it is read');
+  }
+  mkdirSync(join(w.keepSeed, 'plug'));
+  writeFileSync(join(w.keepSeed, 'plug', 'w.mjs'), '');
+  const kept = { ...w.c, keep: [...w.c.keep, 'plug'] };
   const wired = join(w.installRoot, SCRIPTS.updater);
   for (const k of ['wiring', 'budget']) {
-    const kw = join(w.installRoot, 'wiring', 'w.mjs');
+    const kw = join(w.installRoot, 'plug', 'w.mjs');
     writeFileSync(join(w.keepSeed, RUNNER_CONFIG), `${JSON.stringify({ wiring: wired, [k]: kw, claudeBin: '/usr/local/bin/claude' })}\n`);
     const r = await updateOnce(kept, { ...w.o, first: w.keepSeed });
-    assert.match(r.reason, new RegExp(`the new copy was not made \\(the runner's ${k}, ${kw}, is not one of the copy's own code files \\(a \\.mjs file under its modules/ or shared/ folder\\)`), k);
+    assert.match(r.reason, new RegExp(`the new copy was not made \\(the runner's ${k}, ${kw}, is not one of the copy's own code files \\(a \\.mjs file under its modules/ or shared/ or wiring/ folder\\)`), k);
     assert.equal(existsSync(w.installRoot), false);
     // L136 m5: a file at the top of the copy (where the install step once put the wiring) is not one of its own code
     // files either; L136 m2: nor is a test file, test helper or fixture, though main holds it.
     for (const [rel, re] of [
-      ['review-wiring.mjs', /is not one of the copy's own code files \(a \.mjs file under its modules\/ or shared\/ folder\)/],
+      ['review-wiring.mjs', /is not one of the copy's own code files \(a \.mjs file under its modules\/ or shared\/ or wiring\/ folder\)/],
       ['modules/M4-workshop/launcher/review-updater.test.mjs', /is one of the copy's test files, test helpers or test fixtures/],
       ['modules/M12-sensors/shell-guard/fixtures/naive-hook.mjs', /is one of the copy's test files, test helpers or test fixtures/],
     ]) {
@@ -970,12 +979,12 @@ test('L75 m-4, L132 M-1: a new copy must hold what the runner\'s config names in
   assert.equal(existsSync(w.installRoot), false);
   assert.deepEqual(leftovers(w), []);
   writeFileSync(join(w.keepSeed, RUNNER_CONFIG), `${JSON.stringify({ wiring: wired, claudeBin: join(w.installRoot, 'claude', 'bin') })}\n`);
-  const c = { ...w.c, keep: [...w.c.keep, 'wiring'] };
+  const c = { ...w.c, keep: [...w.c.keep, 'plug'] };
   assert.match((await updateOnce(c, { ...w.o, first: w.keepSeed })).reason, /has no claude\/bin, the runner's claudeBin: keep must hold claude/);
   writeFileSync(join(w.keepSeed, RUNNER_CONFIG), `${JSON.stringify({ wiring: wired, budget: wired, claudeBin: '/usr/local/bin/claude' })}\n`);
   const ok = await updateOnce(c, { ...w.o, first: w.keepSeed });
   assert.equal(ok.ok, true, ok.reason);
-  assert.equal(existsSync(join(w.installRoot, 'wiring', 'w.mjs')), true);
+  assert.equal(existsSync(join(w.installRoot, 'plug', 'w.mjs')), true);
   writeFileSync(join(w.installRoot, RUNNER_CONFIG), 'not json\n');
   await moveMain(w, 'm4\n');
   assert.match((await updateOnce(c, w.o)).reason, /the new copy's review\.json is not JSON/);

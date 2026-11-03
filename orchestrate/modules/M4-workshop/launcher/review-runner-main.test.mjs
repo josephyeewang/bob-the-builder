@@ -102,7 +102,7 @@ test('L66 M2: what a review runs (claude, node, the hooks folder) must be inside
   // L132 M-1: the wiring and the budget module, which the runner imports, must be the copy's own code files, .mjs files
   // under its modules/ or shared/ folder. A copy item the install step put at the top of the copy, a folder or the
   // config is refused: the runner would import it and fail on its first import of the copy's own files.
-  const own = /is not one of the copy's own code files \(a \.mjs file under its modules\/ or shared\/ folder\)/;
+  const own = /is not one of the copy's own code files \(a \.mjs file under its modules\/ or shared\/ or wiring\/ folder\)/;
   writeFileSync(join(base, 'kept-wiring.mjs'), '', { mode: 0o644 });
   writeFileSync(join(base, 'modules', 'x.js'), '', { mode: 0o644 });
   mkdirSync(join(base, 'shared'), { mode: 0o755 });

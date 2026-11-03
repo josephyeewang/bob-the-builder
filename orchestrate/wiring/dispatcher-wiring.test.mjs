@@ -13,7 +13,7 @@ import { spawnSync } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { tempDir } from '../shared/test-tmp.mjs';
+import { installedLayout } from '../shared/job-config.test-helper.mjs';
 import { fakeRules } from '../shared/rules.mjs';
 import { openRecord } from '../modules/M9-record/writer.mjs';
 import { FIRST, ENTRY, SAMPLE } from '../modules/M10-rules/first-cutover.test-helper.mjs';
@@ -23,7 +23,6 @@ import { wire, notWiredText } from './dispatcher-wiring.mjs';
 import { fakeGitHubFetch, blobOf } from './fake-github.test-helper.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
-const WIRING = join(here, 'dispatcher-wiring.mjs');
 const MAIN = join(here, '..', 'modules', 'M11-dispatcher', 'main.mjs');
 const FAKE = join(here, 'fake-github.test-helper.mjs');
 const COMMIT = 'a'.repeat(40);
@@ -48,7 +47,10 @@ const EXPECTED_STEPS = Object.freeze({
 
 // One Mac's worth of files in a temp folder: the config, products.json, the approval list, the token file.
 function world({ extra = {} } = {}) {
-  const dir = tempDir('orch-wiring-');
+  // An installed copy of this checkout (L253): main.mjs reads its config through shared/job-config.mjs, which takes only
+  // a config and wiring inside the copy, so the boot runs the copy's main.mjs with the copy's wiring, as the job will.
+  const L = installedLayout('orch-wiring-', { source: true });
+  const dir = L.base;
   const f = (n) => join(dir, n);
   writeFileSync(f('products.json'), JSON.stringify([ENTRY]));
   const rulesStateDir = f('rules-state');
@@ -56,17 +58,18 @@ function world({ extra = {} } = {}) {
   const token = f('token');
   writeFileSync(token, 'x'.repeat(40), { mode: 0o600 });
   chmodSync(token, 0o600);
-  const config = { wiring: WIRING, lockFile: f('dispatcher.lock'), product: P, recordRoot: f('record'), ownerUid: process.getuid(),
+  const config = { installRoot: L.installRoot, wiring: L.path('wiring/dispatcher-wiring.mjs'), lockFile: f('dispatcher.lock'), product: P, recordRoot: f('record'), ownerUid: process.getuid(),
     productsFile: f('products.json'), rulesStateDir, tokenFile: token, ...extra };
-  writeFileSync(f('config.json'), JSON.stringify(config));
+  const configFile = L.write('dispatcher.json', config);
+  const main = L.path('modules/M11-dispatcher/main.mjs');
   const fake = { owner: ENTRY.owner, repo: ENTRY.repo, commit: COMMIT, text: FIRST, logFile: f('github.log') };
   writeFileSync(f('fake-github.json'), JSON.stringify(fake));
   const approve = (list) => { writeFileSync(join(rulesStateDir, 'approved-rules.json'), JSON.stringify({ [P]: list })); };
-  return { dir, f, config, fake, approve };
+  return { dir, f, config, configFile, main, fake, approve };
 }
 
 function boot(w) {
-  const r = spawnSync(process.execPath, ['--import', FAKE, MAIN, w.f('config.json')], {
+  const r = spawnSync(process.execPath, ['--import', FAKE, w.main, w.configFile], {
     env: { PATH: process.env.PATH, HOME: process.env.HOME, ORCH_FAKE_GITHUB: w.f('fake-github.json') }, encoding: 'utf8', timeout: 60_000 });
   return { code: r.status, err: r.stderr };
 }

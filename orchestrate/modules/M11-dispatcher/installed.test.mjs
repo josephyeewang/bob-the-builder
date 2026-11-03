@@ -5,7 +5,7 @@ import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import assert from 'node:assert/strict';
 import { mkdirSync, writeFileSync, readFileSync, symlinkSync, existsSync } from 'node:fs';
-import { tempDir } from '../../shared/test-tmp.mjs';
+import { installedLayout } from '../../shared/job-config.test-helper.mjs';
 import { join, dirname } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { loginJobPlist } from './login-job.mjs';
@@ -16,13 +16,15 @@ const strings = (xml) => [...xml.matchAll(/<string>([^<]*)<\/string>/g)].map((m)
 const after = (xml, key) => xml.split(`<key>${key}</key>`)[1];
 
 test('L31: one pass runs from the login job file as installed, through a linked folder, and writes its diary line', () => {
-  const root = tempDir('m11-installed-');
-  const install = join(root, 'install');
+  // The wiring and config sit in an installed copy (L253: the job reads its config through shared/job-config.mjs).
+  const L = installedLayout('m11-installed-', { dirs: ['wiring'] });
+  const root = L.base;
+  const install = join(root, 'jobs');
   mkdirSync(install);
   symlinkSync(HERE, join(install, 'dispatcher'));
   const logDir = join(root, 'logs'); mkdirSync(logDir);
   const diary = join(root, 'diary.json');
-  const wiring = join(root, 'wiring.mjs');
+  const wiring = L.path('wiring/wiring.mjs');
   writeFileSync(wiring, `import { writeFileSync } from 'node:fs';
 import { recWith, rulesWith } from ${JSON.stringify(join(install, 'dispatcher', 'fixtures.test-helper.mjs'))};
 const rec = recWith();
@@ -36,8 +38,7 @@ export async function wire() {
     cleanup: { copiesRoot: ${JSON.stringify(root)}, sealRoot: ${JSON.stringify(root)}, mirrorFor: () => null } } };
 }
 `);
-  const config = join(root, 'config.json');
-  writeFileSync(config, JSON.stringify({ wiring, lockFile: join(root, 'pass.lock') }));
+  const config = L.write('config.json', { installRoot: L.installRoot, wiring, lockFile: join(root, 'pass.lock') });
   const xml = loginJobPlist({ label: 'org.example.dispatcher', node: process.execPath, script: join(install, 'dispatcher', 'main.mjs'), config,
     path: `${dirname(process.execPath)}:/usr/bin:/bin`, logDir, workDir: root });
   // Read the job back the way launchd does: its arguments, its one variable, its folder.

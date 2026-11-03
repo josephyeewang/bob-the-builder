@@ -46,7 +46,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:pat
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { git, checkMirror, useGitHome, MIRROR_CONFIG_TEMPLATE, ROOT_PATH } from '../git/safe-git.mjs';
-import { SOURCE, OUTSIDE_FILES, STAMP, NODE, UPDATER_CONFIG, RUNNER_CONFIG, RUNNER_MODULES, copyModuleProblem, installStamp, installProblem, chainProblem, aclProblem, currentCopy, readInstallStamp,
+import { SOURCE, OUTSIDE_FILES, STAMP, NODE, UPDATER_CONFIG, RUNNER_CONFIG, RUNNER_MODULES, MODULE_HOMES, copyModuleProblem, installStamp, installProblem, chainProblem, aclProblem, currentCopy, readInstallStamp,
   versionName, versionCommit, mainSeenFile, readMainSeen, nextMainSeen } from './install-check.mjs';
 
 export const MAIN = 'refs/heads/main';
@@ -83,6 +83,9 @@ export function readUpdaterConfig(file, { localAddress = false } = {}) {
   for (const k of ['installRoot', 'clone', 'gitBin']) if (typeof c?.[k] !== 'string' || !isAbsolute(c[k]) || resolve(c[k]) !== c[k] || c[k].includes('..') || c[k] === '/') throw new Error(`config: ${k} must be an absolute path in its plain form`);
   if (!addressOk(c.address, localAddress)) throw new Error('config: address must be an https address');
   if (!Array.isArray(c.keep) || c.keep.some((n) => typeof n !== 'string' || !NAME.test(n) || n === STAMP)) throw new Error('config: keep must list plain top-level names');
+  // A code home's name is main's alone (L257 (B)): a carried item named wiring/ would otherwise pass as the copy's code.
+  const home = c.keep.find((n) => MODULE_HOMES.includes(n));
+  if (home) throw new Error(`config: keep must not hold ${home}, the name of a folder of the copy's own code (main's alone)`);
   for (const [n, what] of Object.entries(MUST_KEEP)) if (!c.keep.includes(n)) throw new Error(`config: keep must hold ${n} (${what})`);
   return c;
 }
