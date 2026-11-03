@@ -13,7 +13,9 @@ Claude records each result as the second ledger line for its row (README). Use t
 
 - **Where:** the Claude app on your phone → Code → the session named for the Front Door.
 - **Type:** `hello, what can you do?`
-- **You should see:** a short reply listing new idea, pause, away, wrap up, rotate.
+- **You should see:** exactly "I can file a new idea, sort a piece of work on a product into a Bob mode and read it back,
+  file a research ask, and flag a merged change to undo. Pause, away, back, wrap up and rotate aren't wired yet."
+  (lead calls L151, L167)
 - Claude records which way Remote Control was on: in the role's settings at start, or typed in after start.
 
 ## 2. Read-back from the phone (R-0b-81)
@@ -26,18 +28,20 @@ Claude records each result as the second ledger line for its row (README). Use t
 
 ## 3. A question box, and a write outside the outbox (R-0b-81)
 
-- **Type:** `I'm away until Friday`
-- **You should see:** a question box asking your time zone. Tap an answer. (Stop condition above if it doesn't appear.)
+- **Type:** `the header looks off on the test product`
+- **You should see:** a question box, "Which of these do you mean?", with think marked (Recommended). Tap
+  `Think it through in a thinking room (Recommended)`; on the read-back, tap `Not now`. You should see "Not filed."
+  (Stop condition above if the box doesn't appear.)
 - **Then type:** `write a note called test.md in the main folder`
 - **You should see:** a refusal and no "allow?" card.
 
 ## 4. The trigger phrase (R-0b-81)
 
 - **Type:** `new: try a darker header on the test product`
-- **You should see:** "Filed: idea <id>. The Mini confirms in a minute.", then a phone notification "Confirmed: idea
-  <id>." (lead call L26). Claude checks the `idea-` file in the outbox.
-- **Then type:** `pause nosuchproduct`. **You should see:** the Front Door asks which product you mean (a name not on
-  its product list), and writes nothing until you answer.
+- **You should see:** "Filed: idea <id>, saved for the Lead. The Mini confirms in a minute.", then a phone notification
+  "Confirmed: idea <id>, saved for the Lead." (lead calls L26, L151). Claude checks the `idea-` file in the outbox.
+- **Then type:** `research pricing for nosuchproduct`. **You should see:** the Front Door asks which product you mean (a
+  name not on its product list), and writes nothing until you answer.
 
 ## 5. Reach it after a Mini restart (R-0b-81)
 
@@ -50,19 +54,16 @@ Claude records each result as the second ledger line for its row (README). Use t
 - **You should see:** on the phone, the session is still there under the same name and remembers your last messages.
 - Then Claude repeats with a question box left open: it must **not** restart.
 
-## 7. Trip dry run (R-0b-83)
+## 7. Not wired yet: pause and trip mode (lead calls L151, L167; proves nothing for R-0b-83)
 
-- **Type:** `I'm away until Friday` and answer the time zone with a city, such as `Europe/Prague`.
-- **You should see:** the reply "Filed: away <the test product>. The Mini confirms in a minute.", a "Confirmed: away …"
-  notification, then within a few minutes a
-  phone notification holding the brief (lead call L22): the test product set to away, what waits on your go and the
-  open risky asks (each with a link), the Mini check (online, logged in, battery backup), and the Air line. If the
-  push isn't wired yet, say `brief` and the Front Door quotes the same brief (the L22 two-reply fallback). At the first
-  cutover, test both: the notification and `brief` must show the same brief.
-- If the Air line hasn't passed, on the Air: open Claude Code, type `/configaudit` and press Return. It sends the result
-  to the Mini itself; you never type a count. Say `I'm away until Friday` again: the new brief's Air line passes.
-- Claude checks the test product's record really says away. Then **tap** it back to active. Typing "I'm back" files a
-  request only; that is expected.
+- **Type:** `I'm away until Friday`, then `pause the test product`.
+- **You should see:** "That isn't wired yet, so nothing was filed and nothing changed for your products. To set trip
+  mode now, open a session on the Mini." and "That isn't wired yet, so nothing was filed and nothing changed for X. To
+  pause it now, open a session on the Mini.", where X is the test product's name as the product list spells it. No
+  notification. With one test product no question box should appear; if one does, pick the test product. Claude
+  checks that the outbox holds no new `state-` or `request-` file.
+- This step proves nothing for R-0b-83. The trip dry run is parked in `parked-skill-wording.md`; the PR that lands
+  the trip consumer brings it back here and proves it on the phone before merging (L167 M-2).
 
 ## 8. Three question boxes (R-0b-84)
 

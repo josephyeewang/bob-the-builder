@@ -1,6 +1,7 @@
 // decision.test.mjs — R-0b-50: decisions go out as small decision pull requests; Approve = the recommended choice, a
 // letter picks another, another account's review is ignored. Also the Tier-1 go as a decision pull request (L17/N20).
 
+import { planFingerprint } from '../../shared/plan-fingerprint.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { env, OWNER_ID } from './fixtures.test-helper.mjs';
@@ -15,8 +16,11 @@ function world({ kind = 'decision', ...over } = {}) {
   const g = fakeGitHub({ ownerId: OWNER_ID, now: () => t.clock.t });
   g.repo.main = g.repo.commit([], { 'README.md': 'hi' });
   Object.assign(t.ctx, { gh: g.gh, owner: 'sample-org', repo: 'sample-app' });
+  const fp = planFingerprint({ product: t.ctx.product, card_id: 'C-1', tier: 1, files: ['src/a.mjs'], done_when: 'the export matches the ledger', plan_sha256: 'e'.repeat(64), main_commit: 'a'.repeat(40) });
   const fields = kind === 'go_t1'
-    ? { id: 'G-1', kind, card: 'C-1', title: 'Billing export', tier: 1, fingerprint: 'f'.repeat(64), files: ['src/a.mjs'] }
+    ? { id: 'G-1', kind, card: 'C-1', title: 'Billing export', tier: 1, fingerprint: fp.sha256, files: ['src/a.mjs'], extra: {
+      fingerprint_inputs: fp.inputs,
+      plan_check: { pass: true, material: 0, card: 'C-1', fingerprint: fp.sha256, plan_sha256: 'e'.repeat(64), reviewer_session: 'S-review', author_session: 'S-lead' } } }
     : { id: 'D-1', kind, card: 'C-1', title: 'Which export format', choices: ['CSV', 'JSON', 'Parquet'], recommended: 'CSV' };
   const r = createAsk(t.ctx, { ...fields, ...over });
   assert.equal(r.ok, true, r.reason);
@@ -141,12 +145,17 @@ test('missing owner settings: no pull request is opened, nothing counts', async 
 });
 
 test('no owner GitHub id, or a bad one, in the settings: no decision pull request is opened', async () => {
-  for (const bad of [undefined, 0, '4242', -1]) {
+  // L96 step 2: the id reads through num(), so the text '4242' (what the settings reader hands back) is a good id;
+  // '0', a sign, a decimal or a word is not.
+  for (const bad of [undefined, 0, '0', -1, '-1', '42.5', '0420', 'joe', true]) {
     const { t, id } = world();
     t.ctx.rules = env({ values: { 'accounts.joe.github_id': bad } }).ctx.rules;
     assert.equal((await openDecision(t.ctx, id)).ok, false, String(bad));
     assert.match(readConfig(t.ctx.rules, t.ctx.product).reason ?? '', /github_id/, String(bad));
   }
+  const { t } = world();
+  t.ctx.rules = env({ values: { 'accounts.joe.github_id': '4242' } }).ctx.rules;
+  assert.doesNotMatch(readConfig(t.ctx.rules, t.ctx.product).reason ?? '', /github_id/, 'the text 4242 is a good id');
 });
 
 test('another account asks for changes after the owner\'s Approve: nothing is recorded, nothing is declined, the PR stays open', async () => {

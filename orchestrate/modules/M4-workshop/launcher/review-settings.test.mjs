@@ -27,7 +27,7 @@ function direct(role, v) {
   return renderRoleSettings({
     role, profile: DESIGN_PROFILES[role], productionFiles: [],
     paths: {
-      copy: v.copy, outbox: v.outbox, hooksDir: v.hooks, snapshot: v.snapshot, node: v.node, bobFolder: v.bob,
+      copy: v.copy, outbox: v.outbox, hooksDir: v.hooks, snapshot: v.snapshot, node: v.node, bobFolder: v.bob, notes: v.notes,
       deny: { secrets: v.deny },
       reviewWalls: Object.fromEntries(REVIEW_WALLS.map((k) => [k, v[`wall_${k}`]])),
     },
@@ -41,9 +41,10 @@ const V = `install.v-${'c'.repeat(40)}`;
 function machine(role = 'reviewer') {
   const base = realpathSync(tempDir('m4-tpl-'));
   const d = (...p) => { const x = join(base, ...p); mkdirSync(x, { recursive: true }); return x; };
-  const real = d(V);
+  // L92 item 4: the link names orchestrate/ inside the versioned folder.
+  const real = d(V, 'orchestrate');
   const installRoot = join(base, 'install');
-  symlinkSync(V, installRoot);
+  symlinkSync(`${V}/orchestrate`, installRoot);
   mkdirSync(dirname(templateFile(installRoot, 'reviewer')), { recursive: true });
   for (const r of REVIEW_ROLES) { copyFileSync(committed(r), templateFile(installRoot, r)); chmodSync(templateFile(installRoot, r), 0o644); }
   const node = join(d('install', 'bin'), 'node');
@@ -65,7 +66,7 @@ function machine(role = 'reviewer') {
 const run = (m, { c = {}, x = {} } = {}, opts = {}) => sessionSettings({ ...m.c, ...c }, { ...m.x, ...x }, { owner: ME, uid: ME, ...opts });
 
 const MADE_UP = {
-  outbox: '/o/reviewer/s-1', copy: '/rc/card-1', node: '/i/bin/node', hooks: '/i/hooks', snapshot: '/r/rules.json', bob: '/bob',
+  outbox: '/o/reviewer/s-1', copy: '/rc/card-1', notes: '/r/notes/s-1', node: '/i/bin/node', hooks: '/i/hooks', snapshot: '/r/rules.json', bob: '/bob',
   deny: ['/sec/a', '/home/claude', '/wc'], wall_outboxRoot: '/o', wall_runnerRoot: '/r',
 };
 
@@ -115,6 +116,10 @@ test('L67: a session\'s settings are filled, checked and written to the runner\'
     assert.equal(v.node, join(m.real, 'bin', 'node'));
     assert.equal(v.hooks, join(m.real, 'hooks'));
     assert.equal(v.outbox, join(m.c.outboxRoot, role, m.x.sessionId));
+    // L101: the session's compaction notes folder is the runner's own (0700), apart from the outbox.
+    assert.equal(v.notes, join(m.c.root, 'notes', m.x.sessionId));
+    assert.equal(lstatSync(v.notes).mode & 0o777, 0o700);
+    assert.match(readFileSync(r.file, 'utf8'), new RegExp(`--notes ${v.notes.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} `));
     assert.deepEqual(v.deny, [...m.c.deny, m.c.workerCopies], 'the workers\' copies folder is denied whole');
     assert.equal(v.wall_outboxRoot, m.c.outboxRoot);
     assert.equal(v.wall_runnerRoot, m.c.root);
@@ -224,7 +229,7 @@ test('L67: each machine value is a real plain path under its expected root', () 
   assert.match(run(m, { c: { outboxRoot: `${m.c.outboxRoot}/` } }).reason, /is not in its plain form/);
   // node or the hooks named by another copy folder's real path, beside the one the link names.
   const other = m.d(`install.v-${'d'.repeat(40)}`, 'hooks');
-  assert.match(run(m, { c: { hooksDir: other } }).reason, /hooks: .* is not inside the installed copy \(.*install\.v-c{40}\)/);
+  assert.match(run(m, { c: { hooksDir: other } }).reason, /hooks: .* is not inside the installed copy \(.*install\.v-c{40}\/orchestrate\)/);
   assert.equal(realPathProblem('/a/./b'), '/a/./b is not in its plain form');
   assert.equal(realPathProblem('/a//b'), '/a//b is not in its plain form');
 });
@@ -315,9 +320,9 @@ test('L75 M-1: the installed copy must be root\'s link to a versioned folder; a 
   // The link of another owner's, or naming a folder that is missing.
   assert.match(run(m, {}, { owner: ME + 1 }).reason, /not root's|is not owned by uid/);
   rmSync(m.c.installRoot);
-  symlinkSync(`install.v-${'e'.repeat(40)}`, m.c.installRoot);
-  assert.match(run(m).reason, /the reviewer template can't be opened|the installed copy: .* which is missing/);
-  assert.match(slotValues(m.c, m.x, { owner: ME }).reason, /^the installed copy: .*install\.v-e{40}, which is missing/);
+  symlinkSync(`install.v-${'e'.repeat(40)}/orchestrate`, m.c.installRoot);
+  assert.match(run(m).reason, /the reviewer template can't be opened|the installed copy: .* is missing/);
+  assert.match(slotValues(m.c, m.x, { owner: ME }).reason, /^the installed copy: .*install\.v-e{40}\/orchestrate, and install\.v-e{40} is missing/);
 });
 
 test('L75 caveat (c): every hook command exits 2 when its node or script is gone or crashes, so a hook never fails open', () => {

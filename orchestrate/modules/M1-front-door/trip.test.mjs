@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { memoryRecord } from '../../shared/record.mjs';
+import { recWith, seed } from '../M11-dispatcher/fixtures.test-helper.mjs';
+import { factFamilyOf } from '../M9-record/permissions.mjs';
 import { makeFactWriter } from '../M12-sensors/facts.mjs';
 import { POWER_FACT } from '../M12-sensors/power-source.mjs';
 import { STATUS_FACT } from '../M13-ledger/heartbeat.mjs';
@@ -13,9 +14,13 @@ const ago = (min) => new Date(NOW - min * 60e3).toISOString();
 const HB = 'mini';
 
 function world() {
-  const rec = memoryRecord();
-  const facts = makeFactWriter(rec, { actor: 'ledger', now });
-  const w = (entity, id, doc) => assert.equal(rec.write({ actor: 'dispatcher', entity, id, expectRev: rec.read(entity, id)?.rev ?? 0, doc }).ok, true);
+  const rec = recWith([]);
+  // Each fact is written by the role whose family holds it (L74): the power reading is the Sensors', the rest the
+  // Ledger's. Each record entry is seeded the way M9 takes it, by the script that may make it (L72).
+  const ledger = makeFactWriter(rec, { actor: 'ledger', now });
+  const sensors = makeFactWriter(rec, { actor: 'sensors', now });
+  const facts = { ...ledger, put: (id, doc, kind) => (factFamilyOf(id) === 'sensors' ? sensors : ledger).put(id, doc, kind) };
+  const w = (entity, id, doc) => seed(rec, entity, id, doc);
   return { rec, facts, w };
 }
 const green = (facts) => {
@@ -75,7 +80,9 @@ test('R-0b-83 brief: away line, time zone question, go items and risky asks with
   assert.match(text, /Which time zone will you be in\?/);
   assert.match(text, /test-product: number work holds until you answer; \[Undo\] still runs/);
   assert.match(text, /second still merges the way you run it today; the hours rule starts at the second cutover/);
-  assert.match(text, /Waiting on your go \(1\):\n- go go-1: .*go on roadmap row 7.*\(https:\/\/example.invalid\/roadmap#row-7\)/);
+  // L84 minor 3: the research ask waits on the owner (who 'joe'), so it is listed with the goes, by its id.
+  assert.match(text, /Waiting on your go \(2\):\n- go go-1: .*go on roadmap row 7.*\(https:\/\/example.invalid\/roadmap#row-7\)/);
+  assert.match(text.split('Open risky-act asks')[0], /- ask R-1: .*run research ask R-1.*\(ask R-1\)/);
   assert.match(text, /Open risky-act asks \(2\); they still expire after 12 h/);
   assert.match(text, /ask-1: .*\(https:\/\/example.invalid\/pr\/9\)/);
   assert.match(text, /ask-3: .*RECORD ERROR: no pull request link/);

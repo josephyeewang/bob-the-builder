@@ -74,8 +74,8 @@ test('0b-7 audit round 6 MAT-B: values in a list or object under a secret name a
   const rec = memoryRecord();
   const writer = makeFactWriter(rec, { masker: makeMasker({ env: {} }) });
   const plain = 'hunter2'.repeat(2);
-  writer.put('mb', { kind: 'fact.x', password: [plain], db_password: { value: FAKE.dbPassword, deeper: [{ x: plain }] }, client_secret: [FAKE.vercelClassic], tokens: { input: 12, note: plain } });
-  const d = rec.read('fact', 'mb').doc;
+  writer.put('pr-mb', { kind: 'fact.x', password: [plain], db_password: { value: FAKE.dbPassword, deeper: [{ x: plain }] }, client_secret: [FAKE.vercelClassic], tokens: { input: 12, note: plain } });
+  const d = rec.read('fact', 'pr-mb').doc;
   const all = JSON.stringify(d);
   for (const bad of [plain, FAKE.dbPassword, FAKE.vercelClassic]) assert.equal(all.includes(bad), false, 'masked');
   // fact.x has no shape, so under L25 the allow-list masks every value; the second layer alone does the same job.

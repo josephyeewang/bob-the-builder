@@ -14,11 +14,14 @@
 // Injected GitHub client for one product repo (a fake in tests):
 //   open({ title, body, assignee }) → number      edit(number, body)      comment(number, text)
 //   close(number, text)                           isClosed(number) → boolean
+// edit, comment and close answer false when GitHub refused them; open answers the new issue's number, anything else is
+// a lost open (L143).
 
 import { createHash } from 'node:crypto';
 import { makeFactWriter } from '../M12-sensors/facts.mjs';
 import { makeMasker } from '../M12-sensors/mask.mjs';
 
+const ISSUE = (n) => Number.isSafeInteger(n) && n > 0;
 const idOf = (key) => `alert-${createHash('sha256').update(key).digest('hex').slice(0, 16)}`;
 
 export function alertKey(product, kind, subject) { return `${product}|${kind}|${subject}`; }
@@ -26,10 +29,15 @@ export function alertKey(product, kind, subject) { return `${product}|${kind}|${
 export function makeAlerts({ rec, gh, owner, actor = 'ledger', now = () => new Date(), masker = makeMasker(), writer = makeFactWriter(rec, { actor, now, masker }) }) {
   const bodyOf = (s) => `${s.body}\n\n---\nfirst seen ${s.since} · last seen ${s.last} · seen ${s.count} times\n<!-- alert-key ${idOf(s.key)} -->`;
 
-  // The condition holds now. Returns what happened: opened | updated | changed | suppressed (the owner closed it).
+  // The condition holds now. Returns what happened: opened | updated | changed | suppressed (the owner closed it), or
+  // false when GitHub lost it (L143).
   // `status` is the condition's stable state; only a change of it comments (and so notifies). A body that carries a
   // changing figure ("down 40 minutes") is edited silently (0b-7 audit M-3). Without a status, the body is the status.
   // Title and body are masked before they are compared, stored or posted.
+  // A GitHub call that throws makes raise throw; one that answers false (or an `open` with no issue number) makes raise
+  // answer false. Either way nothing is saved that would stop the next pass trying again: no open alert without an
+  // issue (every later pass would read it as closed by the owner), no new status whose comment was lost. A caller that
+  // keeps something after a raise (a baseline, a login) keeps it only when raise did not answer false.
   async function raise({ key, title: rawTitle, body: rawBody, status: rawStatus }) {
     const id = idOf(key);
     const title = masker.maskSecrets(rawTitle).text;
@@ -37,30 +45,38 @@ export function makeAlerts({ rec, gh, owner, actor = 'ledger', now = () => new D
     const status = rawStatus === undefined ? body : masker.maskSecrets(rawStatus).text;
     const t = now().toISOString();
     const s = writer.get(id);
-    if (s && (s.status === 'open' || s.status === 'closed-by-owner')) {
+    // An open alert saved without an issue number (before L143) is opened again, not read as closed by the owner.
+    const known = s && (s.status === 'closed-by-owner' || (s.status === 'open' && ISSUE(s.issue)));
+    if (known) {
       if (s.status === 'open' && await gh.isClosed(s.issue)) {
         writer.put(id, { ...s, kind: 'fact.alert', status: 'closed-by-owner', last: t });
         return 'suppressed';
       }
       if (s.status === 'closed-by-owner') { writer.put(id, { ...s, kind: 'fact.alert', last: t }); return 'suppressed'; }
       const next = { ...s, kind: 'fact.alert', last: t, count: s.count + 1, body, status_text: status };
-      await gh.edit(s.issue, bodyOf(next));
-      if (status !== (s.status_text ?? s.body)) { await gh.comment(s.issue, `Changed: ${body.split('\n')[0]}`); writer.put(id, next); return 'changed'; }
+      if (await gh.edit(s.issue, bodyOf(next)) === false) return false;
+      if (status !== (s.status_text ?? s.body)) {
+        if (await gh.comment(s.issue, `Changed: ${body.split('\n')[0]}`) === false) return false;
+        writer.put(id, next);
+        return 'changed';
+      }
       writer.put(id, next);
       return 'updated';
     }
     const st = { kind: 'fact.alert', key, title, body, status_text: status, status: 'open', since: t, last: t, count: 1 };
-    st.issue = await gh.open({ title, body: bodyOf(st), assignee: owner });
-    writer.put(id, st);
+    const issue = await gh.open({ title, body: bodyOf(st), assignee: owner });
+    if (!ISSUE(issue)) return false;
+    writer.put(id, { ...st, issue });
     return 'opened';
   }
 
-  // The condition no longer holds. Closes an open issue with a note; re-arms a owner-closed one.
+  // The condition no longer holds. Closes an open issue with a note; re-arms a owner-closed one. Answers false, and
+  // keeps the alert open so the next pass closes it, when GitHub answers the close false (L143).
   async function clear({ key, note = 'Cleared: the condition no longer holds.' }) {
     const id = idOf(key);
     const s = writer.get(id);
     if (!s || s.status === 'cleared') return 'none';
-    if (s.status === 'open' && !(await gh.isClosed(s.issue))) await gh.close(s.issue, note);
+    if (s.status === 'open' && ISSUE(s.issue) && !(await gh.isClosed(s.issue)) && await gh.close(s.issue, note) === false) return false;
     writer.put(id, { ...s, kind: 'fact.alert', status: 'cleared', cleared: now().toISOString() });
     return 'cleared';
   }
@@ -80,7 +96,13 @@ export function fakeIssues() {
     async edit(i, body) { issues.get(i).body = body; calls.push(['edit', i]); },
     async comment(i, text) { issues.get(i).comments.push(text); calls.push(['comment', i]); },
     async close(i, text) { const x = issues.get(i); x.closed = true; x.comments.push(text); calls.push(['close', i]); },
-    async isClosed(i) { return issues.get(i)?.closed ?? true; },
+    // Strict, as GitHub would be (#98 r1 m2, Principle 10): asking about an issue that was never opened, or about
+    // something that is not an issue number, is a caller's bug, so it throws rather than answering "closed".
+    async isClosed(i) {
+      if (!Number.isSafeInteger(i) || i <= 0) throw new Error(`fakeIssues.isClosed: not an issue number: ${JSON.stringify(i)}`);
+      if (!issues.has(i)) throw new Error(`fakeIssues.isClosed: no issue ${i}`);
+      return issues.get(i).closed;
+    },
     ownerCloses(i) { issues.get(i).closed = true; },
   };
 }

@@ -1,7 +1,8 @@
 // undo.mjs — the Merge Gate's half of the undo route (R-0b-95; v4 §8 D8; 0b-9 round 2 R2-M2, R2-M3).
 //
 // THE ROUTE. The audit flags a merge (R-0b-93/94: an audit_run fact concluding failure → audit_flagged, and the issue);
-// the Dispatcher makes an undo card (kind exact_reverse, `reverses` = the flagged merge commit; lane 2); the gate
+// the Dispatcher makes an undo card (kind exact_reverse, its `source` naming the answered Undo ask, or the audit issue:
+// a Sensors `undo-issue-` fact, checked by family and maker; never a commit field: see WHAT IS UNDONE below; lane 2); the gate
 // serves undo cards first in its queue (gate.mjs queueOrder) and merges one with no review, request or Approve, but only
 // when M10 recomputes the change as the exact reverse (refusals.mjs: the exemptions are lost otherwise, and M10's own
 // "ask" for a reverse of a merge whose audit passed still needs the Approve). The row's "done" is taken back by the
@@ -12,8 +13,10 @@
 // an answered Undo ask names the card (its merge_commit is the commit); an authenticated audit issue names the commit
 // (`commit`) or the card (`card`). The same answer feeds the judge (gather.mjs) and the reverted mark below.
 //   undoneBy(record, card) → { commit, card } | null     card = the undo card's { id, doc }
-//   markReverted({ record, alert }, undoCardId) → { ok, card?, reason? }
+//   markReverted({ record, alert }, undoCardId) → { ok, card? } | { ok: false, reason, told }
 //     after an undo card merges, the card it undid is marked reverted (merged or closed → reverted, merge_gate)
+
+import { factFrom } from '../M9-record/permissions.mjs';
 
 const SHA = /^[0-9a-f]{40}$/;
 
@@ -24,7 +27,8 @@ export function undoneBy(record, card) {
   if (typeof src.ask === 'string') { const a = record.read('ask', src.ask); return a?.doc?.kind === 'undo' ? byCard(a.doc.card) : null; }
   if (typeof src.fact === 'string') {
     const f = record.read('fact', src.fact);
-    if (f?.doc?.type !== 'undo_issue') return null;
+    // Proof only from Sensors' own family, made by Sensors (L74 addendum), as M9 checks it when the card is made.
+    if (f?.doc?.type !== 'undo_issue' || !factFrom('sensors', { id: src.fact, createdBy: record.meta?.('fact', src.fact)?.createdBy ?? null }, 'undo-issue-')) return null;
     if (SHA.test(f.doc.commit ?? '')) { const cs = record.list('card').filter((c) => c.doc?.merge_commit === f.doc.commit); return { commit: f.doc.commit, card: cs.length === 1 ? cs[0].id : null }; }
     return byCard(f.doc.card);
   }
@@ -32,7 +36,8 @@ export function undoneBy(record, card) {
 }
 
 export function markReverted({ record, alert = () => {} }, undoCardId) {
-  const no = (reason) => { alert({ type: 'undo_not_marked', card: undoCardId, reason }); return { ok: false, reason }; };
+  // told: the alert was delivered (not false, no throw). The gate retries until it was, or the mark holds (L135 site G).
+  const no = (reason) => { let told; try { told = alert({ type: 'undo_not_marked', card: undoCardId, reason }) !== false; } catch { told = false; } return { ok: false, reason, told }; };
   const u = record.read('card', undoCardId);
   if (!u?.doc || u.doc.kind !== 'exact_reverse' || u.doc.state !== 'merged') return no('not a merged undo card');
   const d = undoneBy(record, u);
