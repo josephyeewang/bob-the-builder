@@ -75,12 +75,16 @@ export async function wire(config, { limitedSync, log = (s) => process.stderr.wr
   const c = checkConfig(config);
   const products = readProducts(c.productsFile);
   if (!products.some((p) => p.product === c.product)) throw new Error(`config: ${c.productsFile} does not list the product ${c.product}`);
-  const gh = readOnlyClient({ token: tokenFile(c.tokenFile), fetchFn });
+  // M6's reader words its refusals for the watch-only week; here they name this config key instead.
+  const readToken = tokenFile(c.tokenFile);
+  const token = () => { try { return readToken(); } catch (e) { throw new Error(String(e?.message ?? e).replace('the watch-only token file', 'the GitHub token file (tokenFile)')); } };
+  const gh = readOnlyClient({ token, fetchFn });
 
   let rec = null;
   // The reader's alert, by kind and product: into the record's queue once the record is open (the reader is first
-  // asked in refresh(), below, after it is). False, "not delivered", before then.
-  const readerAlert = (a) => (rec ? queueAlert(rec, `the rules for ${a.product} could not be used (${a.reason})${a.detail ? `: ${a.detail}` : ''}`, { now: now() }) : false);
+  // asked in refresh(), below, after it is). False, "not delivered", before then, and when the Record refuses the entry
+  // or the queue's cap drops it (queueAlert answers null, turned into false here): the reader then asks again on the next pass.
+  const readerAlert = (a) => (rec ? queueAlert(rec, `the rules for ${a.product} could not be used (${a.reason})${a.detail ? `: ${a.detail}` : ''}`, { now: now() }) ?? false : false);
   const reader = makeReader({ gh, stateDir: c.rulesStateDir, products, alert: readerAlert, now });
   const engine = makeEngine({
     products: products.map((p) => p.product),

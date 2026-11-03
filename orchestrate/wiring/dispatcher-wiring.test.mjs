@@ -19,7 +19,7 @@ import { openRecord } from '../modules/M9-record/writer.mjs';
 import { FIRST, ENTRY, SAMPLE } from '../modules/M10-rules/first-cutover.test-helper.mjs';
 import { ALERT_QUEUE_FACT } from '../modules/M11-dispatcher/alerts.mjs';
 import { LAST_PASS_FACT, STEPS, STEP_ERROR_FACT } from '../modules/M11-dispatcher/tick.mjs';
-import { wire, NOT_WIRED, NOT_WIRED_CLEANUP, notWiredText } from './dispatcher-wiring.mjs';
+import { wire, notWiredText } from './dispatcher-wiring.mjs';
 import { fakeGitHubFetch, blobOf } from './fake-github.test-helper.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -28,6 +28,23 @@ const MAIN = join(here, '..', 'modules', 'M11-dispatcher', 'main.mjs');
 const FAKE = join(here, 'fake-github.test-helper.mjs');
 const COMMIT = 'a'.repeat(40);
 const P = ENTRY.product;
+const TICK = join(here, '..', 'modules', 'M11-dispatcher', 'tick.mjs');
+
+// PINNED HERE, not imported from the wiring (audit #127 M-1): a port the wiring quietly answers, or a step the tick
+// quietly skips, must fail this test. PRs B, C and D update these as each port is wired.
+// The ports not wired yet: each must refuse when called.
+const PORTS_NOT_WIRED = Object.freeze(['board', 'filesOf', 'frontDoorAlive', 'frontDoorHandoff', 'gateAlive', 'hasReviewer', 'healthy',
+  'hostLock', 'launch', 'leads', 'outboxSessions', 'pauseLead', 'probe', 'replyToLead', 'requestReview', 'restartFrontDoor', 'resume',
+  'reviewAlerts', 'saveWork', 'sendFrontDoor', 'sessions', 'startMinibase', 'startReadonly', 'stopGroup', 'stopSession', 'strayFrontDoor', 'wait']);
+const CLEANUP_NOT_WIRED = Object.freeze(['copiesRoot', 'git', 'mirrorFor', 'saveWork']);
+// What else the tick reads from its ports object: the alert port, the cleanup group, and options with defaults.
+const NOT_PORTS = Object.freeze(['alert', 'alertSendMs', 'cleanup', 'intakeFs', 'portDeadlineMs', 'saveDeadlineMs', 'stepDeadlineMs']);
+// One full pass with the ports above refusing: each step's outcome, and for a failed step the port its error names.
+const NW = (port) => notWiredText(port);
+const EXPECTED_STEPS = Object.freeze({
+  stops: NW('sessions'), undo: 'ok', 'undo-starts': NW('sessions'), outage: NW('board'), intake: NW('outboxSessions'), leads: NW('leads'),
+  pass: NW('sessions'), limits: `no review was asked for: ${NW('reviewAlerts')}`, merges: 'ok', waits: 'ok', phone: 'ok', cleanup: NW('cleanup.copiesRoot'),
+});
 
 // One Mac's worth of files in a temp folder: the config, products.json, the approval list, the token file.
 function world({ extra = {} } = {}) {
@@ -71,12 +88,17 @@ test('R-0b-162 A: `node main.mjs <config>` with the real wiring runs one full pa
   let rec = readRecord(w);
   const pass = rec.read('fact', LAST_PASS_FACT)?.doc;
   assert.ok(pass, 'the pass wrote last-full-pass');
-  assert.deepEqual(Object.keys(pass.steps), [...STEPS]);
-  // With no session list nothing starts, stops or merges: the steps that need it fail, and Joe is told which.
-  for (const s of ['stops', 'pass']) assert.equal(pass.steps[s], 'failed', s);
-  assert.match(rec.read('fact', STEP_ERROR_FACT('stops'))?.doc?.error ?? '', /not wired yet: sessions/);
-  assert.match(rec.read('fact', STEP_ERROR_FACT('cleanup'))?.doc?.error ?? '', /not wired yet: cleanup\.copiesRoot/);
-  assert.ok(queued(rec).some((t) => /the Dispatcher's stops step failed: not wired yet: sessions/.test(t)), queued(rec).join('\n'));
+  // Every step ran, in the tick's order, with the pinned outcome. A failed step names the port that refused, and Joe is told.
+  assert.deepEqual(Object.keys(EXPECTED_STEPS), [...STEPS], 'the pinned map covers every step of the tick, in order');
+  assert.deepEqual(pass.steps, Object.fromEntries(STEPS.map((s) => [s, EXPECTED_STEPS[s] === 'ok' ? 'ok' : 'failed'])));
+  for (const s of STEPS) {
+    if (EXPECTED_STEPS[s] === 'ok') continue;
+    assert.equal(rec.read('fact', STEP_ERROR_FACT(s))?.doc?.error, EXPECTED_STEPS[s], s);
+    assert.ok(queued(rec).includes(`the Dispatcher's ${s} step failed: ${EXPECTED_STEPS[s]}; the other steps still ran`), `${s} told: ${queued(rec).join('\n')}`);
+  }
+  // The Record was opened with the real rules: each write carries the approved version's revision (audit #127 m-2).
+  const line = rec.diary({ since: 0 }).filter((l) => l.id === LAST_PASS_FACT).at(-1);
+  assert.equal(line.rules_rev, `${P}=${COMMIT.slice(0, 7)}:${blobOf(FIRST).slice(0, 7)}`);
   // No channel to Joe yet: the alert is logged and stays queued, never marked sent.
   assert.match(first.err, /alert not sent \(no channel to Joe is wired yet\)/);
   const n = queued(rec).length;
@@ -98,10 +120,40 @@ test('R-0b-162 A: rules Joe did not approve are not used, and that goes in the a
 });
 
 test('R-0b-162 A: a config the wiring does not know stops the start, told on stderr', () => {
-  const w = world({ extra: { recordRot: '/tmp/typo' } });
-  const r = boot(w);
-  assert.equal(r.code, 1);
-  assert.match(r.err, /dispatcher: not started: config: unknown key recordRot/);
+  const cases = [
+    [{ recordRot: '/tmp/typo' }, /config: unknown key recordRot/],
+    [{ recordRoot: 'relative/record' }, /config: recordRoot must be an absolute path/],
+    [{ rulesStateDir: 'rules-state' }, /config: rulesStateDir must be an absolute path/],
+    [{ product: 'another-app' }, /config: .*products\.json does not list the product another-app/],
+  ];
+  for (const [extra, why] of cases) {
+    const r = boot(world({ extra }));
+    assert.equal(r.code, 1, JSON.stringify(extra));
+    assert.match(r.err, new RegExp(`dispatcher: not started: ${why.source}`));
+  }
+});
+
+test('R-0b-162 A: the tick reads exactly the pinned ports, and the wiring answers each one that is not wired by refusing', async () => {
+  const src = readFileSync(TICK, 'utf8');
+  const reads = [...new Set([...src.matchAll(/(?<!\w)p\.(\w+)/g)].map((m) => m[1]))].sort();
+  assert.deepEqual(reads, [...PORTS_NOT_WIRED, ...NOT_PORTS].sort(), 'a new port in tick.mjs must be pinned here');
+  const w = world();
+  const { ports } = await wire(w.config, { log: () => {}, fetchFn: fakeGitHubFetch(w.fake) });
+  assert.deepEqual(Object.keys(ports).sort(), [...PORTS_NOT_WIRED, 'alert', 'cleanup'].sort(), 'no port is answered by anything but a refusal');
+  assert.deepEqual(Object.keys(Object.getOwnPropertyDescriptors(ports.cleanup)).sort(), [...CLEANUP_NOT_WIRED].sort());
+});
+
+test('R-0b-162 A: the Record\'s own alerts are logged and answered "not delivered", so the store keeps them', async () => {
+  const w = world();
+  const logs = [];
+  const { rec } = await wire(w.config, { log: (s) => logs.push(s), fetchFn: fakeGitHubFetch(w.fake) });
+  // A document file changed behind the Store Writer's back: the next write quarantines it and raises a store alert.
+  const put = () => rec.write({ actor: 'dispatcher', entity: 'fact', id: LAST_PASS_FACT, expectRev: rec.read('fact', LAST_PASS_FACT)?.rev ?? 0, doc: { at: new Date().toISOString(), steps: {} }, kind: 'full_pass' });
+  assert.ok(put().ok);
+  writeFileSync(join(w.config.recordRoot, 'docs', 'fact', `${LAST_PASS_FACT}.json`), '{"changed":true}');
+  put();
+  assert.ok(logs.some((l) => l.startsWith('dispatcher: record alert not sent: ')), logs.join('\n'));
+  assert.notEqual(readFileSync(join(w.config.recordRoot, 'unsent-alerts.jsonl'), 'utf8').trim(), '', 'kept to be told again');
 });
 
 test('R-0b-162 A: every port not wired yet refuses when called, and the alert port answers "not delivered"', async () => {
@@ -109,8 +161,8 @@ test('R-0b-162 A: every port not wired yet refuses when called, and the alert po
   const logs = [];
   const { ports, rec } = await wire(w.config, { log: (s) => logs.push(s), fetchFn: fakeGitHubFetch(w.fake) });
   assert.ok(rec && typeof rec.read === 'function');
-  for (const k of NOT_WIRED) assert.throws(() => ports[k](), { message: notWiredText(k) }, k);
-  for (const k of NOT_WIRED_CLEANUP) assert.throws(() => ports.cleanup[k](), { message: notWiredText(`cleanup.${k}`) }, k);
+  for (const k of PORTS_NOT_WIRED) assert.throws(() => ports[k](), { message: notWiredText(k) }, k);
+  for (const k of CLEANUP_NOT_WIRED.filter((x) => x !== 'copiesRoot')) assert.throws(() => ports.cleanup[k](), { message: notWiredText(`cleanup.${k}`) }, k);
   // The tick spreads the cleanup ports into its step: the spread itself refuses.
   assert.throws(() => ({ ...ports.cleanup }), { message: notWiredText('cleanup.copiesRoot') });
   assert.equal(await ports.alert('hello'), false);
