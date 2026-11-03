@@ -22,7 +22,6 @@ const TEST_DIR = join(ORCH, 'test');
 
 // name → why it is not run yet. Each names the row or lead call that gives it a running home.
 export const UNWIRED = Object.freeze({
-  schedulePass: 'L221: tick approvals step, lane 1 on #121',
   gatePass: 'L221: R-0b-162 wiring, lane 4',
   heartbeatOnce: 'L221: R-0b-162 wiring, lane 4',
   caughtUpOnce: 'L221: R-0b-162 wiring, lane 4',

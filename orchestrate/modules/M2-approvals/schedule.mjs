@@ -31,7 +31,7 @@ import { askStore, writeDoc } from './ask-store.mjs';
 import { releaseBoxes, releaseSessions } from './binding.mjs';
 import { CLOSE_DUE, closeDecisionPr, openDecision } from './decision.mjs';
 import { goText, goView, undoPushText } from './go-view.mjs';
-import { onboard } from './onboard.mjs';
+import { onboard, onboardNotices } from './onboard.mjs';
 import { countApprove, requestReview } from './github-review.mjs';
 import { MERGE_APPROVE_MS, UNDO_OPEN_QUESTION_LINE, URGENT_REPUSH_MS, dueWindow, lapseAt, readConfig, zoneFor } from './kinds.mjs';
 
@@ -162,10 +162,12 @@ export async function schedulePass(ctx) {
   const cfg = readConfig(ctx.rules, ctx.product);
   if (!cfg.ok) { configAlert(ctx, cfg.reason); return fail(cfg.reason, { events }); }
   configAlert(ctx, null);
-  // A product whose rules file says it is on gets its record, once (L204-b, L209); only after the config reads, so a
-  // product whose owner can't be asked is not started.
+  // A product whose rules file says it is on gets its record, once (L204-b, L209), after the config read (L221 m-3,
+  // ratified): a product whose owner can't be asked is not started. Before the product read below, so the record the
+  // rest of the pass reads is the one just made (pinned: onboarded is events[0]). Joe is told once (onboard.mjs).
   const made = onboard(ctx);
   if (made) events.push(made);
+  onboardNotices(ctx, made);
   const nowMs = ctx.now();
   const p = ctx.record.read('product', ctx.product);
   const win = dueWindow(nowMs, zoneFor(cfg, p && !p.corrupt ? p.doc : null), cfg.windows);
