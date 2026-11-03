@@ -23,8 +23,8 @@ import { timeLimits, PR_FACT } from '../M11-dispatcher/merges.mjs';
 import { readFact, USAGE_FACT, currentBands } from '../M11-dispatcher/usage.mjs';
 import { signedInAccount, ACCOUNT_FACT } from '../M11-dispatcher/tick.mjs';
 import { phoneLinkStep, FACTS } from '../M11-dispatcher/phone-link.mjs';
-import { dispatcherPass, LIMIT_FACT } from '../M11-dispatcher/pass.mjs';
-import { rulesWith, recWith, setClock, withAlerts, T0, MIN, D, iso } from '../M11-dispatcher/fixtures.test-helper.mjs';
+import { dispatcherPass, LIMIT_FACT, LIMIT_NO_RESET } from '../M11-dispatcher/pass.mjs';
+import { parkOnLimit, rulesWith, recWith, setClock, withAlerts, T0, MIN, D, iso } from '../M11-dispatcher/fixtures.test-helper.mjs';
 import { setup as m9Setup } from '../M9-record/fixtures.test-helper.mjs';
 import { factFamilyOf } from '../M9-record/permissions.mjs';
 
@@ -290,11 +290,11 @@ test('R-0b-168 phone link: M11 reads the real readings: down stops, unknown stop
   assert.ok(out.includes('Mini Base started'), JSON.stringify(out));
 });
 
-// A Tier-2 card parked on a's limit since `sinceMin` (the wait M9 lets a script set), and a pass that writes fresh usage.
+// A Tier-2 card whose run began at `sinceMin` and was parked on a's limit then (the way a worker's limit exit parks it:
+// running → waiting, so the Record sets wait.run_started; MAT-1), and a pass that writes fresh usage.
 function limitWorld(sinceMin) {
-  const rec = recWith([['product', 'p1', { state: 'active' }],
-    ['card', 'T2', { state: 'waiting', product: 'p1', tier: 2, files: ['src/t2.js'], changed_at: iso(T0 + sinceMin * MIN),
-      wait: { who: 'usage', what: 'limit_hit', since: iso(T0 + sinceMin * MIN), next_check: iso(T0 + sinceMin * MIN), account: ACCT } }]]);
+  const rec = recWith([['product', 'p1', { state: 'active' }]]);
+  parkOnLimit(rec, 'T2', { ranAt: T0 + sinceMin * MIN, account: ACCT });
   const rules = rulesWith({}, { start_session: () => ({ decision: 'deny', reason: 'this test starts nothing' }) });
   const pass = async (min) => {
     const now = T0 + min * MIN;
@@ -316,7 +316,7 @@ test('R-0b-168 limit hit: a Tier-2 card parked on a limit hit resumes only after
   assert.equal(w.rec.read('card', 'T2').doc.state, 'ready');
 });
 
-test('L97 M-3: a new hit with no reset time replaces yesterday\'s, and the card keeps waiting', async () => {
+test('L97 M-3, MAT-1: a new hit with no reset time replaces yesterday\'s; the card never resumes on it and waits on Joe', async () => {
   const w = limitWorld(24 * 60);
   // Yesterday's hit for a, reset yesterday.
   await writeLimitHit(makeFactWriter(w.rec), { account: ACCT, resets_at: iso(T0 + 5 * 60 * MIN), source: 'worker-exit' }, { now: clockAt(T0) });
@@ -326,7 +326,8 @@ test('L97 M-3: a new hit with no reset time replaces yesterday\'s, and the card 
   const f = w.rec.read('fact', LIMIT_FACT(ACCT)).doc;
   assert.deepEqual([f.resets_at, f.observed_at], [null, iso(T0 + 24 * 60 * MIN + MIN)]);
   await w.pass(24 * 60 + 10);
-  assert.equal(w.rec.read('card', 'T2').doc.state, 'waiting', 'no reset time: never resumed on yesterday\'s');
+  const c = w.rec.read('card', 'T2').doc;
+  assert.deepEqual([c.state, c.wait.who, c.wait.what], ['waiting', 'joe', LIMIT_NO_RESET], 'no reset time: never resumed on yesterday\'s; told to Joe');
 });
 
 test('L97 M-3 (lane 3 review): a hit with no reset time keeps today\'s reset time from the same window, and the card resumes after it', async () => {

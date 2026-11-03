@@ -20,7 +20,7 @@ import { createHash } from 'node:crypto';
 import { hostname } from 'node:os';
 import { basename } from 'node:path';
 import { CARD_KINDS, ENTITIES, FINAL_STATES, SESSION_ID, STATES, WAIT_FIELDS, WAIT_WHO, isNotARecord, isOpen, makeRecord, missingFields, notARecord, releaseData, timeoutFor } from '../../shared/record.mjs';
-import { claimCheck, guardWrite, same } from './guard.mjs';
+import { claimCheck, fixPlanCheck, guardWrite, same } from './guard.mjs';
 import { PLAN_INPUTS, TAB_HEARTBEAT_FAMILY, TAB_HEARTBEAT_WRITER, actorName, factFrom, mayCreateKind } from './permissions.mjs';
 import { readyCheck } from './ready.mjs';
 import { PASSES, headReviews, readOutboxFile, runnerLaunchFor, verdictFields, worstVerdict } from './outbox.mjs';
@@ -167,11 +167,9 @@ export function openRecordWithStore({ root, product, ownerUid, rules, alert = ()
       // cap can't be stepped round by naming the root again.
       if (parent.doc.state !== 'failed') return no(`a fix card fixes a failed card; ${doc.fix_of} is ${parent.doc.state}`);
       if (tx.list('card').some((c) => c.doc.kind === 'fix' && c.doc.fix_of === doc.fix_of)) return no(`${doc.fix_of} already has a fix card; the next round fixes that one`);
-      let root = parent;
-      for (let i = 0; i < 64 && typeof root.doc.fix_of === 'string'; i++) root = tx.lookup('card', root.doc.fix_of) ?? root;
-      // The plan inputs are the root's, unchanged (R3-m2): the go covers only that plan.
-      const diff = PLAN_INPUTS.filter((f) => !same(doc[f], root.doc[f]));
-      if (diff.length) return no(`a fix card's ${diff.join(', ')} must equal its root card's`);
+      // The plan inputs are the root's, unchanged, except that the tier may be absent (R3-m2, L228): guard.mjs.
+      const fp = fixPlanCheck(doc, (fid) => tx.lookup('card', fid)?.doc ?? null);
+      if (!fp.ok) return fp;
       // The round comes from the chain, never from the caller (M-8).
       doc.round = (Number.isInteger(parent.doc.round) ? parent.doc.round : 1) + 1;
     } else {

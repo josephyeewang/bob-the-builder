@@ -472,3 +472,20 @@ test('overdue: a state past its limit by a minute is listed, a minute before is 
   assert.equal(bad.corrupt, true);
   assert.match(bad.reason, /no time limit for card in_review/);
 });
+
+test('L228: a fix card\'s tier may be absent (no tier is Tier 1); a tier it does give must equal its root\'s', () => {
+  const env = setup({ prefix: 'm9-wr-' });
+  product(env);
+  for (const id of ['C-1', 'C-2', 'C-3']) { readyCard(env, id); fail(env, id); }
+  const noTier = plan();
+  delete noTier.tier;
+  refused(fixCard(env, 'F-1', 'C-1', { tier: 1 }), /a fix card's tier must equal its root card's/);
+  refused(fixCard(env, 'F-1', 'C-1', { tier: null }), /a fix card's tier must equal its root card's/, 'null is a tier given, not an absent one');
+  const w = env.record.write({ actor: 'dispatcher', entity: 'card', id: 'F-1', expectRev: 0, doc: { state: 'draft', product: PRODUCT, kind: 'fix', fix_of: 'C-1', ...noTier } });
+  must(w, 'no tier');
+  assert.equal(Object.hasOwn(env.record.read('card', 'F-1').doc, 'tier'), false);
+  must(fixCard(env, 'F-2', 'C-2'), 'the root\'s tier');
+  refused(env.record.write({ actor: 'dispatcher', entity: 'card', id: 'F-3', expectRev: 0, doc: { state: 'draft', product: PRODUCT, kind: 'fix', fix_of: 'C-3', ...noTier, files: ['src/other.mjs'] } }), /a fix card's files must equal its root card's/, 'no tier excuses nothing else');
+  // A tier-less fix card's plan still never changes: the Lead can't give it a tier later.
+  refused(put(env.record, 'dispatcher', 'card', 'F-1', { tier: 2 }), /fix card's plan|may not change tier/);
+});

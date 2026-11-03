@@ -122,7 +122,6 @@ const NOT_YET = [
   [1, 'the checks unreadable (statuses null)', (f) => { f.statuses = null; }],
   [3, 'mergeable not worked out yet (null)', (f) => { f.pr.mergeable = null; }],
   [3, 'mergeable_state unknown', (f) => { f.pr.mergeable_state = 'unknown'; }],
-  [5, 'tier unknown', (f) => { f.tier = null; }],
   [5, 'the review records unreadable', (f) => { f.reviews = null; f.reviewsProblem = 'the gate has no review launches folder set'; }],
   [5, 'the carry-over could not be read', (f) => { pastH0(f); f.carried = { review: false, audit: false, unread: true, reasons: ['carry-over could not be read'] }; }],
   [5, 'the carry-over was not gathered', (f) => { pastH0(f); f.carried = null; }],
@@ -133,6 +132,14 @@ const NOT_YET = [
 for (const [n, name, plant] of NOT_YET) {
   test(`L164 not yet, so held: ${name}`, () => assert.deepEqual(waitsOn(clean(plant)), [n]));
 }
+
+// L187: M10 gives the tier from the files, so no tier for files that were read is final; with them unread, it waits.
+test('L187: no tier with the files read refuses on 5 for good; with them unread, 5 waits', () => {
+  const r = judge(clean((f) => { f.tier = null; }));
+  assert.equal(r.decision, 'refuse');
+  assert.deepEqual(r.refusals, [{ n: 5, reason: 'the rules give no tier for the change\'s files' }]);
+  assert.ok(waitsOn(clean((f) => { f.tier = null; f.files = null; })).includes(5));
+});
 
 // PROBE-D (L164): with the change's files unread, M10 calls the change unclassifiable, so "needs the Approve" is not
 // known yet; read, the same answer refuses.
@@ -321,3 +328,21 @@ test('L182 class (r2 probe): too_many with main red still refuses (a final refus
   const b = judge(clean((f) => { f.files = null; f.filesProblem = 'unread'; f.lane = null; f.tier = null; f.go = null; }));
   assert.equal(b.decision, 'hold', JSON.stringify(b));
 });
+
+// L205 (#108 r2): a check whose GitHub read failed is not GitHub's "no". Each refusal it feeds waits, and the same fact
+// read (not unread) still refuses, so the wait is only for the unknown.
+const unreadAp = (over = {}) => ({ needed: true, why: ['risky: schema'], stands: false, unread: true, reason: 'the Approve could not be read from GitHub: GitHub answered 502', ...over });
+const L205 = [
+  [[8], 'the Approve unread, needed', (f) => { f.approve = unreadAp(); }, (f) => { f.approve = { ...unreadAp(), unread: undefined }; }],
+  [[8], 'the Approve unread, the rules ask', (f) => { f.lane = { decision: 'ask', tier: 1, reason: 'risky' }; f.approve = unreadAp({ needed: false }); }, (f) => { f.lane = { decision: 'ask', tier: 1, reason: 'risky' }; f.approve = { needed: false, why: [], stands: false }; }],
+  [[13], 'the Approve unread, a fix card', (f) => { f.card.doc.kind = 'fix'; f.approve = unreadAp({ needed: false }); }, (f) => { f.card.doc.kind = 'fix'; }],
+  [[14], 'the Approve unread, a new customer-visible file', (f) => { f.files.push({ path: 'app/pages/new.tsx', status: 'added' }); f.approve = unreadAp({ needed: false }); }, (f) => { f.files.push({ path: 'app/pages/new.tsx', status: 'added' }); }],
+  [[9], 'an undo whose exact-reverse read failed', (f) => { reverse(f); f.exactReverse = false; f.exactReverseUnread = true; }, (f) => { reverse(f); f.exactReverse = false; }],
+  [[9], 'a first-cutover undo whose robot-mark read failed', (f) => { reverse(f); f.cutoverStage = 'first'; f.reversesGateMerge = false; f.reversesGateMergeUnread = true; }, (f) => { reverse(f); f.cutoverStage = 'first'; f.reversesGateMerge = false; }],
+];
+for (const [ns, name, unread, answered] of L205) {
+  test(`L205: ${name} waits; read and answered, it refuses`, () => {
+    assert.deepEqual(waitsOn(clean(unread)), ns);
+    assert.ok(only(clean(answered)).includes(ns[0]));
+  });
+}

@@ -39,6 +39,16 @@ test('m4: refuses a bad label, a relative path, a bad PATH or a bad user name', 
   assert.throws(() => loginJobPlist({ ...OK, userName: 'Root User' }), /bad user name/);
 });
 
+test('L246: logName names both logs; left out, they are the Dispatcher\'s; a name that could leave logDir is refused', () => {
+  const logs = (t) => [...t.matchAll(/<key>Standard(?:Out|Error)Path<\/key><string>([^<]*)<\/string>/g)].map((m) => m[1]);
+  assert.deepEqual(logs(loginJobPlist(OK)), ['/srv/orch/logs/dispatcher.out.log', '/srv/orch/logs/dispatcher.err.log']);
+  assert.deepEqual(logs(loginJobPlist({ ...OK, logName: 'sensors' })), ['/srv/orch/logs/sensors.out.log', '/srv/orch/logs/sensors.err.log']);
+  assert.equal(loginJobPlist({ ...OK, logName: 'sensors' }).replace(/sensors/g, 'dispatcher'), loginJobPlist(OK), 'only the two log names change');
+  for (const logName of ['', '../x', 'a/b', '.hidden', '-x', 'a b', 'a.log', 'x'.repeat(65), null, 7]) {
+    assert.throws(() => loginJobPlist({ ...OK, logName }), /bad log name/, `logName ${JSON.stringify(logName)}`);
+  }
+});
+
 test('m4: text is escaped', () => {
   assert.match(loginJobPlist({ ...OK, workDir: '/a&b' }), /<string>\/a&amp;b<\/string>/);
 });

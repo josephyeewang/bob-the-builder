@@ -14,7 +14,7 @@
 import { canonicalJson } from '../../shared/plan-fingerprint.mjs';
 import { SESSION_ID, STATES } from '../../shared/record-names.mjs';
 import { CREATE_STATES, INTERNAL_MOVES, moveActors } from './moves.mjs';
-import { ATTEMPTS, WRITERS, actorName, factFamilyOf, fieldsAllowed } from './permissions.mjs';
+import { ATTEMPTS, PLAN_INPUTS, WRITERS, actorName, factFamilyOf, fieldsAllowed } from './permissions.mjs';
 
 const no = (reason) => ({ ok: false, reason });
 export const same = (a, b) => { try { return canonicalJson(a ?? null) === canonicalJson(b ?? null); } catch { return false; } };
@@ -43,6 +43,8 @@ export function guardWrite({ entity, id, actor, old, doc, createdBy }) {
   const name = actorName(actor);
   if (!doc || typeof doc !== 'object' || Array.isArray(doc)) return no('doc must be an object');
   const out = structuredClone(doc);
+  // A card wait's run_started is the Record's, never the caller's (MAT-1): dropped here on every path, set below.
+  if (entity === 'card' && out.wait && typeof out.wait === 'object' && !Array.isArray(out.wait)) delete out.wait.run_started;
   const stateful = Object.hasOwn(STATES, entity);
   if (stateful && !STATES[entity].includes(out.state)) return no(`unknown ${entity} state "${out.state}"`);
   const row = Object.hasOwn(WRITERS[entity] ?? {}, name) ? WRITERS[entity][name] : null;
@@ -79,6 +81,17 @@ export function guardWrite({ entity, id, actor, old, doc, createdBy }) {
   // waiting state, a paused product's return_to.
   const cleared = [];
   if (entity === 'card' && moving && (from === 'claimed' || from === 'running') && to !== 'claimed' && to !== 'running') { delete out.claim; cleared.push('claim'); }
+  // When the run a card waits from began (MAT-1, audit #78 r2): a card parked on a usage limit resumes only on a limit
+  // hit seen after its run began, so the Dispatcher needs that time on the wait. It is copied from the claim in the
+  // same write that ends the claim, so it can't be lost or come in the wrong order. claimed/running → waiting: the
+  // claim's claimed_at (none when it is missing or not a time; such a wait never resumes on a hit by itself). A
+  // re-check while waiting keeps it. Any other move into waiting has none. (claimed → waiting is not a legal move
+  // today, so only running → waiting sets it; claimed is listed so the rule holds if that move is ever added.)
+  if (entity === 'card' && to === 'waiting' && out.wait && typeof out.wait === 'object' && !Array.isArray(out.wait)) {
+    const at = moving && (from === 'claimed' || from === 'running') ? old.claim?.claimed_at
+      : !moving ? old.wait?.run_started : undefined;
+    if (typeof at === 'string' && Number.isFinite(Date.parse(at))) out.wait.run_started = at;
+  }
   if (moving && WAITING.includes(from)) { delete out.wait; cleared.push('wait'); }
   if (entity === 'product' && moving && from === 'paused') { delete out.return_to; cleared.push('return_to'); }
 
@@ -139,4 +152,17 @@ export function claimCheck({ old, doc, from, to, changed, nowMs }) {
   if ((to === 'claimed' || to === 'running') && !has) return no(`a ${to} card has a claim`);
   if (!(to === 'claimed' || to === 'running') && has) return no(`a ${to} card has no claim`);
   return claim ? { ok: true, claim } : { ok: true };
+}
+
+/**
+ * A new fix card's plan inputs are its root card's (R3-m2): the go covers only that plan. Its tier may be absent
+ * (LEAD-CALLS L228): no tier counts as Tier 1 everywhere, so a fix card can only be stricter than its root. `lookup(id)`
+ * gives a card's doc or null. One check, made by the Store Writer and the stand-in.
+ */
+export function fixPlanCheck(doc, lookup) {
+  let root = typeof doc?.fix_of === 'string' ? lookup(doc.fix_of) : null;
+  if (!root) return no('a fix card names the card it fixes (fix_of)');
+  for (let i = 0; i < 64 && typeof root.fix_of === 'string'; i++) root = lookup(root.fix_of) ?? root;
+  const diff = PLAN_INPUTS.filter((f) => !(f === 'tier' && doc.tier === undefined) && !same(doc[f], root[f]));
+  return diff.length ? no(`a fix card's ${diff.join(', ')} must equal its root card's`) : { ok: true };
 }

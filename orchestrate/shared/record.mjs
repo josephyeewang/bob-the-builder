@@ -41,7 +41,7 @@ export { CARD_KINDS, NOT_A_RECORD, OUTBOX_KINDS, OUTBOX_KIND_PATTERN, OUTBOX_NAM
 // A second name for outboxKindOf (the same function, not a copy), kept because record.test and older callers import it.
 export const outboxKind = outboxKindOf;
 // The test stand-in's field and move check is M9's own (L72); guard.mjs needs only record-names.mjs, so no load loop.
-import { claimCheck, guardWrite } from '../modules/M9-record/guard.mjs';
+import { claimCheck, fixPlanCheck, guardWrite } from '../modules/M9-record/guard.mjs';
 
 // Plain-script actors write under their own name; AI roles only through applyOutbox, as `<role>:<sessionId>`.
 // `joe` writes nothing in 0b (the owner acts through `approvals`); it stays a name so old diary lines still parse.
@@ -259,6 +259,11 @@ export function memoryRecord({ outboxRoot, now = () => Date.now(), dead = null }
         const c = claimCheck({ old: cur?.doc ?? null, doc: g.doc, from: g.from, to: g.to, changed: g.changed, nowMs: now() });
         if (!c.ok) return refused(c.reason);
         if (c.claim) g.doc.claim = c.claim;
+        // A new fix card's plan is its root's, a tier aside (L228): the Store Writer's own check.
+        if (!cur && g.doc?.kind === 'fix') {
+          const fp = fixPlanCheck(g.doc, (fid) => docs.get(key('card', fid))?.doc ?? null);
+          if (!fp.ok) return refused(fp.reason);
+        }
       }
       const rev = expectRev + 1;
       const d = { entity, id, doc: g.doc, rev, createdBy: cur?.createdBy ?? actor, ts: cur?.ts, stateSince: cur?.stateSince };
