@@ -241,7 +241,7 @@ test('L355 m1: a reminder the Record refuses to record for a card on the owner i
   w.E.clock.t += 24 * 60 * MIN;
   await assert.rejects(
     withAlerts(real, w.E.clock.t, w.port, (alert) => retellWaits({ rec, alert, now: w.E.clock.t })),
-    /cards wait on you with no reminder recorded: card C-1 waits on you \(round cap\).*\(its reminder could not be recorded: busy\)$/,
+    /cards wait on you whose reminder could not be kept right: card C-1 waits on you \(round cap\).*\(its reminder could not be recorded: busy\)$/,
   );
   // The tick sends the queue in its own step; here the throw stops withAlerts before sending, so the copy is still queued.
   assert.equal(isQueued(real, WAIT_TELL_FACT('C-2')), true, 'the other card was still told again, a day on');
@@ -287,4 +287,24 @@ test('L355 m4: owner -> owner by a writer that tells nothing: the old copy is dr
   w.E.clock.t += MIN;
   await w.pass();
   assert.deepEqual(w.got, [untoldWaitText('C-1', w.card().wait)], 'only the live wait is told');
+});
+
+test('L359: a drop of the old wait\'s queued copy that the Record refuses is told (adoptUntold) or in the answer (waitOnJoe)', async () => {
+  const w = world();
+  assert.equal(waitOnJoe(w.E.record, 'C-1', { text: 'W1 text', alert: outbox(w.E.record, w.E.clock.t), now: w.E.clock.t, ...ask }).ok, true);
+  const real = w.E.record;
+  const noDrop = Object.create(real, { write: { value: (x) => (x.kind === 'alert_cause_cleared' ? { ok: false, reason: 'busy' } : real.write(x)) } });
+  w.E.clock.t += 5 * MIN;
+  // waitOnJoe: the wait moves, and the refused drop is in its answer.
+  const r = waitOnJoe(noDrop, 'C-1', { text: 'W2 text', alert: () => false, now: w.E.clock.t, ...ask });
+  assert.equal(r.ok, true);
+  assert.match(r.old_copy_kept, /could not be dropped/);
+  // adoptUntold: owner -> owner by a writer that tells nothing; the refused drop is thrown, so the tick tells it.
+  w.E.clock.t += 5 * MIN;
+  assert.equal(waitOn(real, 'C-1', { who: 'joe', what: 'round cap', now: w.E.clock.t }).ok, true);
+  w.E.clock.t += MIN;
+  await assert.rejects(
+    withAlerts(real, w.E.clock.t, w.port, (alert) => retellWaits({ rec: noDrop, alert, now: w.E.clock.t })),
+    /card C-1 waits on you \(round cap\).*\(a reminder still queued for its last wait could not be dropped\)/,
+  );
 });

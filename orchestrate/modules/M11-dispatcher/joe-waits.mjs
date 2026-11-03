@@ -37,10 +37,12 @@ export function waitOnJoe(rec, id, { text, alert, now, ...wait }) {
   const w = waitOn(rec, id, { who: 'joe', now, ...wait });
   if (!w.ok) return w;
   // A copy still queued for the card's last wait (on Joe too) is about a wait that has ended: it leaves unsent (L355 m4).
-  dropCause(rec, WAIT_TELL_FACT(id));
+  // A refused drop is in the answer (L359): the new tell, once queued, replaces that copy in place (one entry per cause),
+  // so the old text goes out only when this tell is not queued either.
+  const dropped = dropCause(rec, WAIT_TELL_FACT(id));
   const stored = confirm(rec, id, rec.read('card', id)?.doc);
   if (stored) tellThen(alert, text, { fact: WAIT_TELL_FACT(id), fields: { told_since: stored, told_at: iso(now) }, kind: 'wait_told' });
-  return w;
+  return dropped ? w : { ...w, old_copy_kept: 'a reminder still queued for the last wait could not be dropped' };
 }
 
 // The stored since of the wait tell `f` is for, on card doc `c`: its `wait_since` when copied on, else a joe wait
@@ -87,8 +89,9 @@ function adoptUntold(rec) {
     if (doc?.state !== 'waiting' || w?.who !== OWNER_WAIT_WHO || w.what === PAUSED_WAIT_WHAT || !w.since) continue;
     const f = rec.read('fact', WAIT_TELL_FACT(id));
     if (f?.doc?.since && waitOf(f.doc, doc)) continue;
-    dropCause(rec, WAIT_TELL_FACT(id));
     const text = untoldWaitText(id, w);
+    // A refused drop is thrown and told too (L359): the old wait's text would go out as if it were this one's.
+    if (!dropCause(rec, WAIT_TELL_FACT(id))) refused.push(`${text} (a reminder still queued for its last wait could not be dropped)`);
     const put = rewriteTell(rec, id, f?.rev ?? 0, { since: w.since, wait_since: w.since, text });
     if (!put.ok) refused.push(`${text} (its reminder could not be recorded: ${put.reason ?? 'no reason'})`);
   }
@@ -130,6 +133,6 @@ export function retellWaits({ rec, alert, now }) {
     });
   }
   // Thrown after every other card is told: the tick's step error tells Joe at once, and daily while it lasts.
-  if (refused.length) throw new Error(`cards wait on you with no reminder recorded: ${refused.join('; ')}`);
+  if (refused.length) throw new Error(`cards wait on you whose reminder could not be kept right: ${refused.join('; ')}`);
   return out;
 }

@@ -17,7 +17,7 @@
 import { KEYS, need } from './keys.mjs';
 import { tellThen } from './alerts.mjs';
 import { ENTITIES } from '../../shared/record.mjs';
-import { pastTime, STILL_WAITING_MS } from '../../shared/still-waiting.mjs';
+import { pastTime, stillWaiting, STILL_WAITING_MS } from '../../shared/still-waiting.mjs';
 
 export const RESTART_FACT = (sid) => `lead-restart-${sid}`;
 export const HANDOFF_NAME = (sid) => `handoff-${sid}.md`;
@@ -169,13 +169,26 @@ export async function leadRestartStep({ rec, rules, now, lead, size, inFlight, s
     : used?.state === 'applied' ? 'a handoff under that name was already used before the WRAP' : 'it is missing or over the cap';
   if ((st.reasks ?? 0) < 1) {
     const r = await send(`Your handoff was not used (${why}). Write ${HANDOFF_NAME(sid)} again, under ${cap} tokens (about ${cap * 4} bytes), then reply DONE.`);
-    if (r?.outcome !== 'sent') return `re-ask not sent (${r?.outcome ?? 'no answer'})`;
-    save({ phase: 'reasked', sent_at: iso(now), reasks: 1 }, 'lead_reask');
+    if (r?.outcome !== 'sent') {
+      // A re-ask the Lead keeps refusing would be tried each finished turn with no word (L359): the owner is told
+      // through stillWaiting, from the first refused re-ask, then daily; cleared once the re-ask is sent.
+      if (st.reask_refused_since == null) save({ reask_refused_since: iso(now) }, 'lead_reask_refused');
+      const since = String(st.reask_refused_since ?? iso(now));
+      stillWaiting({
+        now, waiting: true, since,
+        read: () => st.reask_refused_told ?? null,
+        tell: (mark) => tellThen(alert, reaskRefusedText(sid, r?.outcome, since), { fact: RESTART_FACT(sid), fields: { reask_refused_told: mark }, kind: 'lead_reask_refused_alert' }),
+        clear: () => {},
+      });
+      return `re-ask not sent (${r?.outcome ?? 'no answer'})`;
+    }
+    save({ phase: 'reasked', sent_at: iso(now), reasks: 1, reask_refused_since: null, reask_refused_told: null }, 'lead_reask');
     return 're-asked';
   }
   return giveUp(why);
 }
 
 const startFailedText = (sid, reason) => `the Lead ${sid} was stopped after its handoff, but the new Lead did not start: ${reason ?? 'no answer'}; it is tried again every pass`;
+const reaskRefusedText = (sid, outcome, since) => `the Lead ${sid} did not hand in a usable handoff, and the second ask could not be sent since ${since} (${outcome ?? 'no answer'}); it is tried again at each finished turn`;
 const gaveUpText = (sid, why, asked = true) => `the Lead ${sid} did not hand in a usable handoff ${asked ? 'after a second ask' : 'within a day of the ask'} (${why ?? 'no reason recorded'}); it keeps running`;
 const wrapText = (sid, cap) => `WRAP: this session is large. Write your handoff to your outbox as ${HANDOFF_NAME(sid)}, under ${cap} tokens (about ${cap * 4} bytes), then reply DONE. Requests still queued in your outbox do not carry over: name any you still need in the handoff.`;
