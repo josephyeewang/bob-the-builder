@@ -1898,15 +1898,16 @@ async function readMark({ gh, owner, repo, sha, robotBotId }) {
 
 // ---- orchestrate/modules/M9-record/guard.mjs ----
 __bob_def('orchestrate/modules/M9-record/guard.mjs', ['orchestrate/shared/plan-fingerprint.mjs', 'orchestrate/shared/record-names.mjs', 'orchestrate/modules/M9-record/moves.mjs', 'orchestrate/modules/M9-record/permissions.mjs'], function (__bob_e, __bob_i) {
-let canonicalJson, SESSION_ID, STATES, CREATE_STATES, INTERNAL_MOVES, moveActors, ATTEMPTS, WRITERS, actorName, factFamilyOf, fieldsAllowed;
+let canonicalJson, SESSION_ID, STATES, CREATE_STATES, INTERNAL_MOVES, moveActors, ATTEMPTS, PLAN_INPUTS, WRITERS, actorName, factFamilyOf, fieldsAllowed;
 __bob_i('orchestrate/shared/plan-fingerprint.mjs', (m) => { canonicalJson = m.canonicalJson; });
 __bob_i('orchestrate/shared/record-names.mjs', (m) => { SESSION_ID = m.SESSION_ID; STATES = m.STATES; });
 __bob_i('orchestrate/modules/M9-record/moves.mjs', (m) => { CREATE_STATES = m.CREATE_STATES; INTERNAL_MOVES = m.INTERNAL_MOVES; moveActors = m.moveActors; });
-__bob_i('orchestrate/modules/M9-record/permissions.mjs', (m) => { ATTEMPTS = m.ATTEMPTS; WRITERS = m.WRITERS; actorName = m.actorName; factFamilyOf = m.factFamilyOf; fieldsAllowed = m.fieldsAllowed; });
+__bob_i('orchestrate/modules/M9-record/permissions.mjs', (m) => { ATTEMPTS = m.ATTEMPTS; PLAN_INPUTS = m.PLAN_INPUTS; WRITERS = m.WRITERS; actorName = m.actorName; factFamilyOf = m.factFamilyOf; fieldsAllowed = m.fieldsAllowed; });
 Object.defineProperties(__bob_e, {
   same: { get: () => same, enumerable: true },
   guardWrite: { get: () => guardWrite, enumerable: true },
   claimCheck: { get: () => claimCheck, enumerable: true },
+  fixPlanCheck: { get: () => fixPlanCheck, enumerable: true },
 });
 // guard.mjs — the one check of who may write what: the fields an actor may set (permissions.mjs) and the moves it may
 // make (moves.mjs), with the fields a move itself ends (L72).
@@ -2058,6 +2059,19 @@ function claimCheck({ old, doc, from, to, changed, nowMs }) {
   if ((to === 'claimed' || to === 'running') && !has) return no(`a ${to} card has a claim`);
   if (!(to === 'claimed' || to === 'running') && has) return no(`a ${to} card has no claim`);
   return claim ? { ok: true, claim } : { ok: true };
+}
+
+/**
+ * A new fix card's plan inputs are its root card's (R3-m2): the go covers only that plan. Its tier may be absent
+ * (LEAD-CALLS L228): no tier counts as Tier 1 everywhere, so a fix card can only be stricter than its root. `lookup(id)`
+ * gives a card's doc or null. One check, made by the Store Writer and the stand-in.
+ */
+function fixPlanCheck(doc, lookup) {
+  let root = typeof doc?.fix_of === 'string' ? lookup(doc.fix_of) : null;
+  if (!root) return no('a fix card names the card it fixes (fix_of)');
+  for (let i = 0; i < 64 && typeof root.fix_of === 'string'; i++) root = lookup(root.fix_of) ?? root;
+  const diff = PLAN_INPUTS.filter((f) => !(f === 'tier' && doc.tier === undefined) && !same(doc[f], root[f]));
+  return diff.length ? no(`a fix card's ${diff.join(', ')} must equal its root card's`) : { ok: true };
 }
 });
 
@@ -2578,9 +2592,9 @@ __bob_def('orchestrate/shared/record.mjs', ['orchestrate/shared/record-names.mjs
 const { createHash } = __bob_node_crypto;
 const { lstatSync, readFileSync, realpathSync } = __bob_node_fs;
 const { basename, dirname, join } = __bob_node_path;
-let CARD_KINDS, NOT_A_RECORD, OUTBOX_KINDS, OUTBOX_KIND_PATTERN, OUTBOX_NAME, SESSION_ID, STATES, isNotARecord, notARecord, outboxKindOf, claimCheck, guardWrite;
+let CARD_KINDS, NOT_A_RECORD, OUTBOX_KINDS, OUTBOX_KIND_PATTERN, OUTBOX_NAME, SESSION_ID, STATES, isNotARecord, notARecord, outboxKindOf, claimCheck, fixPlanCheck, guardWrite;
 __bob_i('orchestrate/shared/record-names.mjs', (m) => { CARD_KINDS = m.CARD_KINDS; NOT_A_RECORD = m.NOT_A_RECORD; OUTBOX_KINDS = m.OUTBOX_KINDS; OUTBOX_KIND_PATTERN = m.OUTBOX_KIND_PATTERN; OUTBOX_NAME = m.OUTBOX_NAME; SESSION_ID = m.SESSION_ID; STATES = m.STATES; isNotARecord = m.isNotARecord; notARecord = m.notARecord; outboxKindOf = m.outboxKindOf; });
-__bob_i('orchestrate/modules/M9-record/guard.mjs', (m) => { claimCheck = m.claimCheck; guardWrite = m.guardWrite; });
+__bob_i('orchestrate/modules/M9-record/guard.mjs', (m) => { claimCheck = m.claimCheck; fixPlanCheck = m.fixPlanCheck; guardWrite = m.guardWrite; });
 Object.defineProperties(__bob_e, {
   CARD_KINDS: { get: () => CARD_KINDS, enumerable: true },
   NOT_A_RECORD: { get: () => NOT_A_RECORD, enumerable: true },
@@ -2870,6 +2884,11 @@ function memoryRecord({ outboxRoot, now = () => Date.now(), dead = null } = {}) 
         const c = claimCheck({ old: cur?.doc ?? null, doc: g.doc, from: g.from, to: g.to, changed: g.changed, nowMs: now() });
         if (!c.ok) return refused(c.reason);
         if (c.claim) g.doc.claim = c.claim;
+        // A new fix card's plan is its root's, a tier aside (L228): the Store Writer's own check.
+        if (!cur && g.doc?.kind === 'fix') {
+          const fp = fixPlanCheck(g.doc, (fid) => docs.get(key('card', fid))?.doc ?? null);
+          if (!fp.ok) return refused(fp.reason);
+        }
       }
       const rev = expectRev + 1;
       const d = { entity, id, doc: g.doc, rev, createdBy: cur?.createdBy ?? actor, ts: cur?.ts, stateSince: cur?.stateSince };

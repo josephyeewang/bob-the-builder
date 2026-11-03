@@ -30,14 +30,14 @@
 import { closeSync, constants, fstatSync, openSync, readFileSync, appendFileSync, existsSync, statSync, lstatSync, unlinkSync, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { dirname, join } from 'node:path';
-import { makeGitView } from '../M10-rules/git-view.mjs';
+import { COMPARE_FILE_LIMIT, makeGitView } from '../M10-rules/git-view.mjs';
 import { makeEngine } from '../M10-rules/engine.mjs';
 import { ROLES_DIR } from '../M10-rules/roles.mjs';
 import { parsePolicy } from '../M10-rules/policy.mjs';
 import { MAX_BYTES, RULES_PATH, blobSha, findApprovingPull } from '../M10-rules/reader.mjs';
 import { approveNeeded } from '../M2-approvals/go.mjs';
 import { makeRules } from '../../shared/rules.mjs';
-import { botId, linesOf, threads as threadsOf, threadsQuery } from './gather.mjs';
+import { botId, checksAt, failedRead, linesOf, statusesAt, threads as threadsOf, threadsQuery } from './gather.mjs';
 import { judge } from './refusals.mjs';
 
 export const NOT_JUDGED = Object.freeze([2, 3, 5, 10, 11, 12, 13]);
@@ -184,6 +184,7 @@ export function judgeMerged(facts, rules) {
     main: { green: true }, request: null, go: { ok: true, skipped: true }, compareStatus: 'ahead', rulesAdopted: true, exactReverse: false, reviews: [], movesSinceRequest: [],
     checks: facts.checks, statuses: facts.statuses, requiredChecks: Array.isArray(required) ? required : null,
     checksIgnored: Array.isArray(ignoredRaw) ? ignoredRaw.map((x) => ({ app_id: botId({ bot_user_id: x?.app_id }), name: x?.name })) : [],
+    filesProblem: facts.filesProblem ?? (files ? null : 'unread'), filesMissing: facts.filesMissing, checksTooLong: facts.checksTooLong, checksCutOff: facts.checksCutOff, judgedOnMain: true,
     threads: facts.threads, files, firstCustomerNewFiles: Array.isArray(fcv) ? fcv : null, tier, lane,
     approve: { needed: need.needed, why: need.why, stands: false, reason: null },
   };
@@ -222,27 +223,39 @@ export async function gatherMerged({ gh, owner, repo, policy, sha, now = () => D
     const headSha = SHA.test(pr?.head?.sha ?? '') ? pr.head.sha : fail(`pull request ${num}`, 'no head');
     const parent = c?.parents?.[0] ?? fail('the commit', 'no parent');
     const cmp = await get(`${base}/compare/${parent}...${sha}`, 'the change');
-    const raw = Array.isArray(cmp.files) && cmp.files.length < 300 ? cmp.files : null;
+    // The gate's own limit and readers (L187 c2): 300+ files, or a check or status list too long to read, are facts.
+    const tooMany = Array.isArray(cmp.files) && cmp.files.length >= COMPARE_FILE_LIMIT;
+    const raw = Array.isArray(cmp.files) && !tooMany ? cmp.files : null;
     let files = null;
+    let noEntry = null;      // a listed file not in its commit's file list: both commits are fixed, so it is a fact (as gather.mjs)
     if (raw) {
       try {
-        files = await Promise.all(raw.map(async (x) => {
+        const got = await Promise.all(raw.map(async (x) => {
           const e = await view.entry(x.status === 'removed' ? parent : sha, x.filename);
-          if (!e) throw new Error(`${x.filename}: no tree entry`);
+          if (!e) { noEntry ??= x.filename; return null; }
           return { path: x.filename, ...(x.previous_filename ? { previous_path: x.previous_filename } : {}), status: x.status === 'changed' ? 'modified' : x.status, mode: e.mode, ...linesOf(x.patch) };
         }));
+        files = noEntry ? null : got;
       } catch (e) { fail('the files', e); }
     }
-    let checks = null;
-    { const j = await get(`${base}/commits/${headSha}/check-runs?per_page=${MAX_LIST}`, 'the check runs');
-      if (Array.isArray(j.check_runs) && Number.isInteger(j.total_count) && j.total_count < MAX_LIST && j.total_count === j.check_runs.length) checks = j.check_runs.map((x) => ({ name: x?.name, app_id: x?.app?.id, head_sha: x?.head_sha, status: x?.status, conclusion: x?.conclusion })); }
-    let statuses = null;
-    { const j = await get(`${base}/commits/${headSha}/status?per_page=${MAX_LIST}`, 'the statuses');
-      if (Array.isArray(j.statuses) && !(Number.isInteger(j.total_count) && j.total_count >= MAX_LIST)) statuses = j.statuses.map((s) => ({ context: s?.context, state: s?.state })); }
+    let checksTooLong;
+    let checksCutOff;
+    // A list GitHub answered but cut off (its count doesn't match it) is not a failed read (L190 minor a): the gate waits
+    // on it and refuses it at the cap (refusal 1), so for a commit already on main that is the gate's verdict.
+    const list = async (read, what) => {
+      try { return await read(gh, base, headSha); } catch (e) {
+        if (e?.tooLong) { checksTooLong = String(e.message); return null; }
+        if (!failedRead(e)) { checksCutOff = failText(e); return null; }
+        return fail(what, Number.isInteger(e?.status) ? `HTTP ${e.status}` : e);
+      }
+    };
+    const checks = await list(checksAt, 'the check runs');
+    const statuses = await list(statusesAt, 'the statuses');
     let threads;
     try { threads = await threadsOf(gh, owner, repo, num); } catch (e) { if (e?.unreadable) throw e; fail('the review threads', e); }
     return {
       direct: false, sha, pr: num, mergedAt: pr.merged_at ?? null, mergedBy: pr.merged_by?.login ?? null, prBase: pr.base?.ref ?? null, headSha, checks, statuses, threads, files,
+      filesProblem: files ? null : tooMany ? 'too_many' : noEntry ? 'no_entry' : 'unread', ...(noEntry ? { filesMissing: noEntry } : {}), ...(checksTooLong ? { checksTooLong } : {}), ...(checksCutOff ? { checksCutOff } : {}),
       labels: (pr.labels ?? []).map((l) => l?.name).filter((n) => typeof n === 'string'),
     };
   } catch (e) { if (e?.unreadable) return { unreadable: e.message }; throw e; }

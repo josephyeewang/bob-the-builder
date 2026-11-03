@@ -12,8 +12,9 @@
 //   6. The next queued merge (queueOrder): behind main → catch up (PUT update-branch; a conflict returns it to the
 //      builder); otherwise judge (refusals.mjs over gather.mjs). refuse → refused, with every reason; hold → held;
 //      a change that can't be judged yet (GitHub unreadable, a check or review still running, main red) is held as
-//      waiting and judged again on the next pass, never refused for good (L164); a wait past
-//      timeouts.merging_open_max_min is told to the owner once;
+//      waiting and judged again on the next pass (L164); a wait past timeouts.merging_open_max_min is told to the
+//      owner once, and one still waiting with GitHub readable after 3 times that is refused for good and told (L184);
+//      a pass with GitHub unreadable never refuses;
 //      merge → the paired write (merge → checking, card → merging), judged again under the lock, then merging, the
 //      merge on GitHub (PUT /pulls/n/merge with the judged head, squash: never a ref write), merged, the card merged,
 //      the robot's mark on the merge commit, and a check that the merge commit's first parent is the judged main.
@@ -51,7 +52,39 @@ const DONE = ['merged', 'audited_ok', 'audit_flagged'];
 const short = (s) => String(s ?? '').slice(0, 7);
 // What a refusal's alert tells the owner happens next.
 export const FINAL_NOTE = 'refused for a reason about the change itself; it won\'t be retried until the card changes';
-export const GITHUB_NO_NOTE = 'GitHub refused the merge; the card goes back and is asked for again, and the same refusal twice goes to the owner';
+// The cap on a wait (L184): refused for good after WAIT_CAP_TIMES × the wait limit. The wait limit is
+// timeouts.merging_open_max_min; until the rules carry that key, waiting reads DEFAULT_WAIT_LIMIT_MIN (the open-merge
+// timer in recover has no default: with no key it still waits for GitHub's final answer).
+export const WAIT_CAP_TIMES = 3;
+export const DEFAULT_WAIT_LIMIT_MIN = 30;
+export const waitCapNote = (limitMs) => `waited ${Math.round((WAIT_CAP_TIMES * limitMs) / 60_000)} min or more to be judged and was never judged, with GitHub readable; refused for good so the owner can act on what it waited on. It won't be retried until the card changes`;
+// A catch-up GitHub accepted (202) whose head never moves (L190 B1): capped as a wait is, timed from the request.
+export const CATCH_UP_STUCK = 'GitHub accepted the branch update but the head never moved';
+// The fields a wait keeps (L164, L184). Cleared when the merge leaves the wait for a catch-up or the merge call (L190 M1):
+// a new wait after that gets its own clock and its own notice.
+const WAIT_CLEARED = Object.freeze({ waiting_on: null, waiting_since: null, wait_told_at: null, stuck_since: null });
+
+/**
+ * One answer to "was GitHub unreadable this pass", for serve and for check under the lock (L190 M2).
+ * outage: the pull request, main or the head's checks or statuses could not be read: hold this one and stop the queue.
+ * unreadable: that, or another read that FAILED (gather's unreadReads: main's checks, the reviewed tree, the go check,
+ * the Approve check, the undo's checks, the carry-over, the compare, the threads, the rules at main; L186, L187, L205),
+ * or a compare with no answer. Failed is gather's failedRead: a 4xx other than 401/403/429 was answered. A pass with
+ * GitHub unreadable neither starts the wait cap's clock nor refuses at the cap. A read that was answered but came back
+ * incomplete (a count that doesn't match its list) is not unreadable, so it counts toward the cap (L190 M3, M4).
+ */
+export function passUnreadable(facts) {
+  const failed = (k) => (facts?.unreadReads ?? []).includes(k);
+  const outage = !!facts?.card && (!facts.pr || !SHA.test(facts.main?.sha ?? '') || failed('checks') || failed('statuses'));
+  // A carry-over or compare read that failed is in unreadReads (L205); one GitHub answered with a 4xx other than 401,
+  // 403 and 429 is not (#108 r2 Minor 1), so that wait counts toward the cap.
+  const unreadable = !!facts?.card && (outage || (facts.unreadReads ?? []).length > 0 || facts.threads?.unreadable === true
+    || (facts.compareStatus === null && facts.compareAnswered !== true));
+  return { outage, unreadable };
+}
+// A merge whose check just before merging did not finish (L231): a refused write under the lock, or a stopped pass.
+export const CHECK_CUT_NOTE = 'the gate\'s check just before merging did not finish (a write was refused, or the pass stopped); nothing was merged, and the card goes back and is asked for again';
+export const GITHUB_NO_NOTE ='GitHub refused the merge; the card goes back and is asked for again, and the same refusal twice goes to the owner';
 
 // The order the queue is served in: undo first, the lead's daily card when the blueprint's freshness alarm is on,
 // then Tier 1, then Tier 2; ties go to whoever has waited longest (queue_since, kept through holds and catch-ups).
@@ -167,6 +200,10 @@ export async function gatePass(ctx) {
     // An interrupted merge of this PR may still land on GitHub (L102): no merge or catch-up call goes out for it again
     // until Sensors has read the PR after that refusal and seen it not merged. A reading that shows merged is the
     // Dispatcher's reconcile to record, never a second merge.
+    // TO-DO (L190 minor c, owner lane 3, Sensors): this wait has no cap of its own (L184 says every wait). It ends only
+    // when Sensors reads the pull request after the interrupted merge, so the cap belongs with that reading: Sensors
+    // should tell the owner when the reading is overdue. Not done here because it is not a few lines: the merge stays
+    // queued with no wait clock, and refusing it while the earlier merge may still land would be wrong.
     const cut = merges().find((x) => x.id !== m.id && x.doc.pr === m.doc.pr && x.doc.state === 'refused' && (x.doc.reasons ?? []).includes('interrupted')
       && ((r) => !r || r.merged === true)(prReadingAfter(record, x.doc.pr, x.id)));
     if (cut) { step(m, 'waiting', { reasons: [`merge ${cut.id} of this pull request was interrupted; waiting for a reading of the pull request after it`] }); return STEPPED_ASIDE; }
@@ -177,8 +214,11 @@ export async function gatePass(ctx) {
       return now?.doc?.state === 'queued' ? serve(now) : STEPPED_ASIDE;
     }
     const facts = await gatherFacts(ctx, m);
-    // GitHub unreadable: hold this one and stop, rather than hold the whole queue in one pass.
-    const outage = !!facts.card && (!facts.pr || !SHA.test(facts.main?.sha ?? '') || facts.checks === null || facts.statuses === null || facts.compareStatus === null);
+    // GitHub unreadable: hold this one and stop, rather than hold the whole queue in one pass. A check or status list
+    // too long to read is a fact (refusal 1, final), not GitHub down (L187 c1); one cut off is a wait that counts toward
+    // the cap (L190 M3). A compare that fails while the pull request, main and the checks read is this change's, not
+    // GitHub down: it holds this one and the queue goes on (L187), as a failed thread read does.
+    const { outage, unreadable } = passUnreadable(facts);
     // Behind main: catch up first (R-0b-89), never judge a head that can't land as judged.
     if ((facts.compareStatus === 'behind' || facts.compareStatus === 'diverged') && facts.pr?.state === 'open' && SHA.test(facts.pr?.head?.sha ?? '')) {
       if ((m.doc.catch_ups ?? []).length >= (ctx.maxCatchUps ?? MAX_CATCH_UPS)) { move(m, 'returned_to_builder', { reasons: [`caught up ${MAX_CATCH_UPS} times and still behind main`] }); return STEPPED_ASIDE; }
@@ -186,12 +226,14 @@ export async function gatePass(ctx) {
     }
     const v = judge(facts);
     if (v.decision === 'refuse') { refuse(m, facts, v); return outage ? undefined : STEPPED_ASIDE; }
-    if (v.decision === 'hold') { hold(m, v); return outage ? undefined : STEPPED_ASIDE; }
+    if (v.decision === 'hold') { hold(m, v, unreadable); return outage ? undefined : STEPPED_ASIDE; }
     return take(m, facts);
   }
 
   async function catchUp(m, head) {
-    if (!move(m, 'catching_up', { catch_up_from: head })) return;
+    // Leaving a wait clears its clock (L190 M1); the catch-up's own wait starts now (B1), with nothing told yet.
+    const at = iso();
+    if (!move(m, 'catching_up', { catch_up_from: head, ...WAIT_CLEARED, waiting_on: [CATCH_UP_STUCK], waiting_since: at, stuck_since: at })) return;
     let r;
     try { r = await gh.put(`${base}/pulls/${m.doc.pr}/update-branch`, { expected_head_sha: head }); } catch (e) { r = { status: 0 }; }
     if (r?.status === 202) return step(m, 'catch_up_asked');
@@ -200,13 +242,35 @@ export async function gatePass(ctx) {
     return STEPPED_ASIDE;
   }
 
+  // L190 B1: a catch-up GitHub accepted but whose head never moves is a wait like any other (L184): told once past the
+  // wait limit, refused for good at WAIT_CAP_TIMES times it, timed from the request. A pass where the pull request can't
+  // be read is an outage pass: it neither refuses nor stops the clock.
   async function finishCatchUp(m) {
-    let pr;
-    try { pr = (await gh.get(`${base}/pulls/${m.doc.pr}`)).json; } catch { pr = null; }
-    const after = pr?.head?.sha;
-    if (!SHA.test(after ?? '') || after === m.doc.catch_up_from) return;   // GitHub hasn't made the commit yet
+    let r;
+    try { r = await gh.get(`${base}/pulls/${m.doc.pr}`); } catch { r = null; }
+    const after = r?.status === 200 ? r.json?.head?.sha : undefined;
+    if (!SHA.test(after ?? '')) return;   // the pull request could not be read: an outage pass
+    if (after === m.doc.catch_up_from) return catchUpWaits(m);   // GitHub hasn't made the commit yet
     const catchUps = [...(m.doc.catch_ups ?? []), { pr: m.doc.pr, before_sha: m.doc.catch_up_from, after_sha: after }];
-    move(m, 'queued', { catch_ups: catchUps, catch_up_from: null });
+    move(m, 'queued', { catch_ups: catchUps, catch_up_from: null, ...WAIT_CLEARED });
+  }
+
+  function catchUpWaits(m) {
+    const cur = fresh('merge', m.id) ?? m;
+    // A catch-up asked for before its clock was kept starts it now.
+    if (!Number.isFinite(Date.parse(cur.doc.stuck_since ?? ''))) {
+      const at = iso();
+      const w = write('merge', cur, { waiting_on: [CATCH_UP_STUCK], waiting_since: at, wait_told_at: null, stuck_since: at });
+      if (!w.ok) alert({ type: 'merge_gate_write_refused', merge: m.id, to: 'catch_up_clock', reason: w.reason });
+      return;
+    }
+    const limit = waitLimit(cur, [CATCH_UP_STUCK]);
+    if (limit === undefined) return;
+    if (now() - Date.parse(cur.doc.stuck_since) >= WAIT_CAP_TIMES * limit) {
+      if (move(cur, 'refused', { reasons: [CATCH_UP_STUCK], catch_up_from: null, tell_owner: true, tell_note: waitCapNote(limit) })) tellRefused(fresh('merge', m.id));
+      return;
+    }
+    waitedLong(cur, limit);
   }
 
   function refuse(m, facts, v) {
@@ -227,22 +291,42 @@ export async function gatePass(ctx) {
   }
 
   // A hold. A waiting one (L164) keeps the time it began waiting (waiting_since) and what it waits on, so the owner hears
-  // of a wait past timeouts.merging_open_max_min, once (wait_told_at); any other hold starts that clock again.
-  function hold(m, v) {
+  // of a wait past the wait limit, once (wait_told_at); any other hold starts that clock again.
+  // The cap (L184): a wait the gate can't end by itself (a tree too big to read, main red, GitHub never working out
+  // mergeable, a check that never runs, a review that never ends...) is refused for good after WAIT_CAP_TIMES × the wait
+  // limit, told once, with what it waited on as the reasons. Its clock (stuck_since) starts at the first waiting pass
+  // with GitHub readable: a pass with GitHub unreadable (passUnreadable: any read that FAILED, L186, L187, L190) neither
+  // starts it, nor refuses, nor stops it, so an outage alone never refuses a change for good (L164), and an outage in the
+  // middle of a long wait doesn't start it again. Only a read that succeeds and comes back incomplete counts toward the cap.
+  // `unreadable` has no default: every caller says (L190 M2, a caller missed when this function's inputs changed).
+  // Answers whether the merge moved (held, or refused at the cap): check() must not leave one in checking (L231).
+  function hold(m, v, unreadable) {
+    if (typeof unreadable !== 'boolean') throw new Error('hold() needs to be told whether GitHub was readable this pass (L190 M2)');
+    const outage = unreadable;
     const cur = fresh('merge', m.id) ?? m;
     const waiting = v.hold === WAITING_HOLD;
+    const waitingOn = v.refusals.map((x) => `${x.n}: ${x.reason}`);
     const fields = waiting
-      ? { hold: v.hold, waiting_on: v.refusals.map((x) => `${x.n}: ${x.reason}`), waiting_since: cur.doc.waiting_since ?? iso(), wait_told_at: cur.doc.wait_told_at ?? null }
-      : { hold: v.hold, waiting_on: null, waiting_since: null, wait_told_at: null };
-    if (!move(cur, 'held', fields) || !waiting) return;
-    waitedLong(fresh('merge', m.id));
+      ? { hold: v.hold, waiting_on: waitingOn, waiting_since: cur.doc.waiting_since ?? iso(), wait_told_at: cur.doc.wait_told_at ?? null, stuck_since: cur.doc.stuck_since ?? (outage ? null : iso()) }
+      : { hold: v.hold, waiting_on: null, waiting_since: null, wait_told_at: null, stuck_since: null };
+    // The limit is asked once per hold (L188 follow-up): rules that can't answer are told once a pass, not twice.
+    const limit = waiting ? waitLimit(cur, waitingOn) : undefined;
+    if (waiting && !outage) {
+      const stuck = Date.parse(fields.stuck_since ?? '');
+      if (limit !== undefined && Number.isFinite(stuck) && now() - stuck >= WAIT_CAP_TIMES * limit) {
+        const reasons = waitingOn;
+        if (!move(cur, 'refused', { ...fields, hold: null, reasons, tell_owner: true, tell_note: waitCapNote(limit) })) return false;
+        tellRefused(fresh('merge', m.id));
+        return true;
+      }
+    }
+    if (!move(cur, 'held', fields)) return false;
+    if (waiting) waitedLong(fresh('merge', m.id), limit);
+    return true;
   }
 
-  function waitedLong(m) {
-    if (!m?.doc || m.doc.wait_told_at) return;
-    const limit = mergingLimit(m);
-    if (limit === undefined) return;
-    if (!Number.isFinite(limit)) { tellLimitMissing(m, `merge ${m.id} is waiting to be judged (${(m.doc.waiting_on ?? []).join('; ')}), and the rules have no ${KEYS.mergingOpenMaxMin}, so a long wait is never told. Add the limit to the rules file`); return; }
+  function waitedLong(m, limit) {
+    if (!m?.doc || m.doc.wait_told_at || limit === undefined) return;
     const since = Date.parse(m.doc.waiting_since ?? '');
     if (Number.isFinite(since) && now() - since < limit) return;
     const taken = alertTaken(alert, { type: 'merge_waiting_long', merge: m.id, card: m.doc.card, pr: m.doc.pr, waiting_since: m.doc.waiting_since ?? null, waiting_on: m.doc.waiting_on ?? [],
@@ -250,6 +334,15 @@ export async function gatePass(ctx) {
     if (!taken) return;
     const r = write('merge', m, { wait_told_at: iso() });
     if (!r.ok) alert({ type: 'merge_gate_write_refused', merge: m.id, to: 'wait_told', reason: r.reason });
+  }
+
+  // The wait limit in ms: timeouts.merging_open_max_min, or DEFAULT_WAIT_LIMIT_MIN while the rules lack it (L184; the
+  // owner is told once per merge that the default is in use); undefined when the rules could not answer.
+  function waitLimit(m, waitingOn) {
+    const limit = mergingLimit(m);
+    if (limit === undefined || Number.isFinite(limit)) return limit;
+    tellLimitMissing(m, 'waiting', `merge ${m.id} is waiting to be judged (${waitingOn.join('; ')}), and the rules have no ${KEYS.mergingOpenMaxMin}, so the gate uses its own default of ${DEFAULT_WAIT_LIMIT_MIN} min: a wait is told after ${DEFAULT_WAIT_LIMIT_MIN} min and refused after ${WAIT_CAP_TIMES * DEFAULT_WAIT_LIMIT_MIN} min, and an open merge after the merge call is never recorded as interrupted. Add the limit to the rules file`);
+    return DEFAULT_WAIT_LIMIT_MIN * 60_000;
   }
 
   // timeouts.merging_open_max_min in ms; NaN when the rules lack it (MissingKey); undefined when the rules could not
@@ -267,6 +360,8 @@ export async function gatePass(ctx) {
     const head = facts.pr.head.sha;
     const card = fresh('card', m.doc.card);
     const mm = fresh('merge', m.id);
+    // The wait clock (waiting_since, stuck_since) comes along into checking (L231): a wait seen again under the lock
+    // is the same wait, so it goes on from when it began and can reach the cap at once. That is meant.
     const pair = record.write({ actor: ACTOR, entity: 'merge', id: mm.id, expectRev: mm.rev, doc: { ...mm.doc, state: 'checking', judged_head: head, judged_main: facts.main.sha, tier: facts.tier, needs_joe: facts.approve?.needed !== false || card.doc.needs_joe === true },
       also: [{ entity: 'card', id: card.id, expectRev: card.rev, doc: { ...card.doc, state: 'merging' } }] });
     if (!pair.ok) { alert({ type: 'merge_gate_write_refused', merge: m.id, to: 'checking', reason: pair.reason }); return; }
@@ -281,11 +376,23 @@ export async function gatePass(ctx) {
     const head = facts.pr?.head?.sha;
     if (v.decision !== 'merge' || head !== m.doc.judged_head) {
       const reasons = v.decision === 'merge' ? ['the head moved while the merge was being checked'] : v.refusals.map((x) => `${x.n}: ${x.reason}`);
-      if (v.decision === 'hold') hold(m, v); else move(m, 'refused', { reasons });
+      const left = v.decision === 'hold' ? hold(m, v, passUnreadable(facts).unreadable) : move(m, 'refused', { reasons });
+      if (!left) cutShort(m, reasons);
       return putBack(m, 'verified');
     }
-    if (!move(m, 'merging', { judged_main: facts.main.sha })) return;
+    if (!move(m, 'merging', { judged_main: facts.main.sha, ...WAIT_CLEARED })) return;
     return land(fresh('merge', m.id));
+  }
+
+  // L231: under the lock, the move out of checking was refused. Left in checking, the next pass's recover() would refuse
+  // it with no word of why, and the write-refused alert alone can be lost, so Joe would never hear of the wait or the
+  // cap. It ends now, refused with what the check found, told until delivered (3b). The card goes back and is asked
+  // for again, so a wait ended this way is judged again, never refused for good. If this write is refused too,
+  // recover() refuses and tells the same way next pass.
+  function cutShort(m, reasons) {
+    const cur = fresh('merge', m.id);
+    if (cur?.doc?.state !== 'checking') return;
+    if (move(cur, 'refused', { ...WAIT_CLEARED, hold: null, reasons, tell_owner: true, tell_note: CHECK_CUT_NOTE })) tellRefused(fresh('merge', m.id));
   }
 
   async function land(m) {
@@ -408,17 +515,20 @@ export async function gatePass(ctx) {
         putBack(m, 'verified');
         return;
       }
-      move(m, 'refused', { reasons: ['GitHub did not merge the judged head'] });
+      // Told until delivered (L231): this is where a check cut short by a refused write, or a stopped pass, ends.
+      if (move(m, 'refused', { reasons: ['GitHub did not merge the judged head'], tell_owner: true, tell_note: CHECK_CUT_NOTE })) tellRefused(fresh('merge', m.id));
       putBack(m, 'verified');
       return;
     }
     const reading = prReading(pr);
     const final = reading.merged || reading.state === 'closed';
-    const limit = mergingLimit(m);
+    // A pull request GitHub shows merged or closed is settled whatever the rules say: the limit is asked only while it is
+    // open, so rules that can't answer never keep a final merge, and the gate behind it, waiting (L188 m6).
+    const limit = final ? null : mergingLimit(m);
     if (limit === undefined) return;
     const tooLong = !final && openTooLong(record, m.id, now, limit);
     if (!final && !tooLong) {
-      if (!Number.isFinite(limit)) tellLimitMissing(m);
+      if (!Number.isFinite(limit)) tellLimitMissing(m, 'open');
       step(m, 'outcome_unknown', { reasons: [Number.isFinite(limit) ? 'the pull request is still open' : `the pull request is still open, and the rules have no ${KEYS.mergingOpenMaxMin}`] });
       return;
     }
@@ -436,17 +546,21 @@ export async function gatePass(ctx) {
   }
 
   // With no timeouts.merging_open_max_min, an open merge is never refused as interrupted: it waits for GitHub's final
-  // answer, and a waiting hold is never told as long (L164), so the owner is told once per merge that the rules lack
-  // the limit (L148 item 5). The told fact is written
+  // answer, and a waiting hold is timed by DEFAULT_WAIT_LIMIT_MIN (L184), so the owner is told once per merge that the
+  // rules lack the limit (L148 item 5). The told fact is written
   // only once the alert was taken (as MERGED_OUTSIDE, L130 M6); a refused alert, or a refused fact write, tells again
-  // next pass.
-  function tellLimitMissing(m, note = `pull request #${m.doc.pr} is still open after the merge call, and the rules have no ${KEYS.mergingOpenMaxMin}, so it is never recorded as interrupted; it waits for GitHub's final answer. Add the limit to the rules file`) {
+  // next pass. Each of the two notes is told once per merge (L188): `told` lists which ('waiting' while it waits to be
+  // judged, 'open' when its pull request is open after the merge call), so being told one doesn't skip the other. A
+  // fact with no `told` is from before the waiting note, so it stands for 'open'.
+  function tellLimitMissing(m, when, note = `pull request #${m.doc.pr} is still open after the merge call, and the rules have no ${KEYS.mergingOpenMaxMin}, so it is never recorded as interrupted; it waits for GitHub's final answer. Add the limit to the rules file`) {
     const id = MERGE_LIMIT_TOLD_FACT(m.id);
     const f = record.read('fact', id);
-    if (f?.doc && !f.corrupt && factFrom(ACTOR, { id, createdBy: record.meta?.('fact', id)?.createdBy ?? null }, MERGE_LIMIT_TOLD_FAMILY)) return;
+    const ours = f?.doc && !f.corrupt && factFrom(ACTOR, { id, createdBy: record.meta?.('fact', id)?.createdBy ?? null }, MERGE_LIMIT_TOLD_FAMILY);
+    const told = ours ? (Array.isArray(f.doc.told) ? f.doc.told : ['open']) : [];
+    if (told.includes(when)) return;
     const said = alertTaken(alert, { type: 'merge_limit_missing', merge: m.id, card: m.doc.card, pr: m.doc.pr, note });
     if (!said) return;
-    const r = record.write({ actor: ACTOR, entity: 'fact', id, expectRev: f?.rev ?? 0, doc: { type: 'merge_limit_told', merge: m.id, key: KEYS.mergingOpenMaxMin, told_at: iso() } });
+    const r = record.write({ actor: ACTOR, entity: 'fact', id, expectRev: f?.rev ?? 0, doc: { type: 'merge_limit_told', merge: m.id, key: KEYS.mergingOpenMaxMin, told: [...told, when], told_at: iso() } });
     if (!r.ok) alert({ type: 'merge_gate_write_refused', merge: m.id, to: 'told', reason: r.reason });
   }
 
