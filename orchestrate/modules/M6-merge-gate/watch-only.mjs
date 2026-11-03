@@ -30,9 +30,9 @@
 import { closeSync, constants, fstatSync, openSync, readFileSync, appendFileSync, existsSync, statSync, lstatSync, unlinkSync, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { COMPARE_FILE_LIMIT, makeGitView } from '../M10-rules/git-view.mjs';
 import { makeEngine } from '../M10-rules/engine.mjs';
+import { ROLES_DIR } from '../M10-rules/roles.mjs';
 import { parsePolicy } from '../M10-rules/policy.mjs';
 import { MAX_BYTES, RULES_PATH, blobSha, findApprovingPull } from '../M10-rules/reader.mjs';
 import { approveNeeded } from '../M2-approvals/go.mjs';
@@ -53,8 +53,6 @@ const FRESH_MS = 3_600_000;
 const EDGE_MS = FRESH_MS + 3_600_000;   // the hold-back for a young direct push, plus one pass interval
 const LOCK_STALE_MS = 20 * 60_000;
 const PRODUCT = 'watch';
-const here = dirname(fileURLToPath(import.meta.url));
-const ROLES = join(here, '../M10-rules/roles');
 
 /** The token, from the file the runner's own user owns (0600), as a function so it is never held in a variable others can print. */
 export function tokenFile(path, { uid = process.getuid?.() } = {}) {
@@ -105,7 +103,7 @@ function readPlain(path, max) {
 }
 
 const engineFor = (policy, commit, blob) => makeRules(makeEngine({ products: [PRODUCT], rulesState: () => ({ status: 'ok', policy, commit, blob }),
-  productState: () => ({ state: ASSUMED.product_state }), running: () => 0, rolesDir: ROLES, clock: () => Date.now() }));
+  productState: () => ({ state: ASSUMED.product_state }), running: () => 0, rolesDir: ROLES_DIR, clock: () => Date.now() }));
 
 /** The owner's OK'd draft, pinned by hash. rules(commit) → { policy, engine, id } or { reason }. Same answer for every commit. */
 export function draftRules({ dir, sha256: pinned }) {

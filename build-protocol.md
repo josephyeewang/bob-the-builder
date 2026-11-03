@@ -387,7 +387,7 @@ In a consumer task app, specs were written comprehensively upfront (good) but ne
 14. **Nothing still names a file this change moved, deleted or gutted (2026-10-29, D-033 — Rule 26):** `node "$(realpath ~/.claude/skills/bob/..)/scripts/run-commands-check.mjs" --base <commit the phase started from>` asks git what the phase deleted, renamed or stripped of its `if __name__ == "__main__":` block, and refuses when a run config still names that file — package scripts, CI workflows (not their `paths:` filters), a Makefile, Procfile, Dockerfile, compose file, schedule or pyproject entry point; by path, by `python -m` module, or by bare file name when no other file has that name. With no run config in the project it exits 2 ("cannot judge"); record "no run configs" for this item. Run it after any move, rename or wrap. It matches names as text: it cannot see a command that was broken before the phase, a name built from a variable, an absolute path (as in a crontab), or a file named outside those configs. On main or in a CI clone, pass `--base`; without one it reports that it cannot judge.
 15. **No recurring defect closed too low (2026-10-29, D-033 — Rule 31):** when the phase fixed a defect, `node "$(realpath ~/.claude/skills/bob/..)/scripts/recurrence-check.mjs"` refuses a class of defect fixed twice whose newest fix is below rung 3 (a fresh-context read where it can come back, or making it impossible). It reads `Class:` and `Rung:` lines in fix commit messages; with none yet it reports it cannot judge — record that and skip.
 16. **Capability list updated (2026-11-02, D-036 — Engineering Principle 11):** update the Capability Traceability Matrix's Works column for this phase. No capability is marked done below "works end-to-end in tests" (driven from the product's real entry point); a capability whose only proof is unit tests on its pieces is "partly built" or "built, not connected". Put the scoreboard (how many capabilities at each status) in the phase report.
-17. **Nothing built sits unused (2026-11-02, D-036 — Engineering Principle 11, `SCRIPT` in part):** the project's copy of `templates/wired.test.mjs` passes. Every exported unit of work (a pass, step, job or handler) is used by code reachable from the product's entry points, or is listed in its `UNWIRED` block with the roadmap row that will wire it; a listed one that is now used fails as stale. It reads JavaScript (TypeScript through its compiled output); a project in another language writes the same check for its stack, or records "no wiring check for <language>" in the phase report. When it finds no entry point or no unit of work, it fails saying it cannot judge (Rule 29); a project with no units of work at all (a page-only app) records "Gate 17: no units of work" in the phase report instead of copying it.
+17. **Nothing built sits unused (2026-11-02, D-036 — Engineering Principle 11, `SCRIPT` in part):** the project's copy of `templates/wired.test.mjs` passes. Every exported unit of work (a pass, step, job or handler) is used by code reachable from the product's entry points, or is listed in its `UNWIRED` block with the roadmap row that will wire it; a listed one that is now used fails as stale. It reads JavaScript (TypeScript through its compiled output); a project in another language writes the same check for its stack, or records "no wiring check for <language>" in the phase report. When it finds no entry point or no unit of work, it fails saying it cannot judge (Rule 29); a project with no units of work at all (a page-only app) records "Gate 17: no units of work" in the phase report instead of copying it. Copy it in the first phase that builds a unit of work, not before: with none yet, it can only say it cannot judge.
 18. **Simplicity review (2026-11-02, D-036):** at least once per phase, each part the phase changed gets one review that asks: is the same job done two ways, and what can be deleted? Its findings go through Rule 30's triage like any other.
 
 If ANY check fails → fix before proceeding. Do NOT advance to next phase with known regressions or invariant violations.
@@ -1100,26 +1100,29 @@ flowchart LR
 
 **5a-ii: Capability Traceability Matrix (MANDATORY)**
 
-Use `templates/capability-traceability-matrix.md` as the starting point — it has the status code legend, the H/H++ hardening badge column, and a worked example.
+Use `templates/capability-traceability-matrix.md` as the starting point — it has the Status and Works legends, the H/H++ hardening badge column, and a worked example.
 
 After defining phases, create a matrix mapping EVERY capability from the Product Spec to a build phase:
 
 ```
-| # | Capability | Phase | Status | Notes |
-|---|-----------|-------|--------|-------|
-| 1 | [capability name] | Phase N | E/S/F/— | |
+| # | Capability | Phase | Status | Works | Evidence | Notes |
+|---|-----------|-------|--------|-------|----------|-------|
+| 1 | [capability, in the owner's words] | Phase N | E/S/F/— | live/e2e/unwired/partial/none/— | [what was seen, or the test's name] | |
 ```
 
-Status codes:
+Status codes (what each phase built, stubbed or left for later):
 - **E** = Explicitly built in this phase (full implementation)
 - **S** = Stubbed (interface exists, implementation deferred)
 - **F** = Future (not built, assigned to a later phase)
 - **—** = Not applicable to this phase
 
+Works (what the product can actually do — Engineering Principle 11, D-036): **live** (seen working in the real product) and **e2e** (a test drives it from the product's real entry point all the way through) count as done; **unwired** (built, but nothing in the running product calls it), **partial** and **none** do not. The template has the full legend and the scoreboard.
+
 **Rules:**
 - Every capability in the Product Spec MUST have a row. No implicit capabilities.
 - Every row MUST have a phase assignment. Unassigned capabilities are a gap.
-- Review this matrix at every `[N]c: Reconcile` — mark capabilities as they're completed.
+- Review this matrix at every `[N]c: Reconcile` — mark capabilities as they're completed, update Works, and put the scoreboard in the phase report (Phase Gate 16).
+- In the first phase that builds a unit of work (a pass, step, job or handler), copy `templates/wired.test.mjs` into the project's tests (Phase Gate 17). A capability whose pieces it finds unused is `unwired`, whatever their tests say.
 - At hardening, every E-status row must be verifiable in the code.
 
 This matrix is the "nothing falls through the cracks" guarantee. Without it, you discover at hardening that Phase 3 was supposed to build feature X but nobody assigned it.
@@ -1684,7 +1687,7 @@ In addition to the markdown verdict table, Claude writes findings to `audit-arti
 **[N+1]f: Fix & Final Reconcile**
 - Fix all approved items from the six audits (a, b, c, d, e, j)
 - Final spec update: all docs now reflect what was actually built
-- Capability Traceability Matrix updated — all statuses final
+- Capability Traceability Matrix updated — all statuses final, and every `live` or `e2e` Works value names its evidence
 - Build Manifest updated to reflect hardening complete
 - **PR-back prompt (v2.13)** — at the end of full-scope hardening, Claude offers the [N+2]c PR-back template proactively (don't wait for Step [N+2]). Suggested phrasing: *"Hardening passed. Before we move to Learning Extraction, run `bash ~/.claude/skills/bob/../scripts/bob-stats.sh` for the fix-commit ratio — that one number is the most useful signal Bob can get on whether the protocol helped. Paste the output into a GitHub issue or email it to joe@joe.wang. Skip if you'd rather; one report per shipped project is plenty."*
 - `→ HG:` Hardening gate passed
