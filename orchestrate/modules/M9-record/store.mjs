@@ -77,6 +77,33 @@ function appendPlain(path, text) {
   try { fchmodSync(fd, 0o644); writeSync(fd, text); } finally { closeSync(fd); }
 }
 function readPlain(path) { const fd = plainFd(path, constants.O_RDONLY); try { return readFileSync(fd, 'utf8'); } finally { closeSync(fd); } }
+
+// ---- unsent-alerts.jsonl: the one reader and the one 'delivered' mark (L240) ----
+// Read by resend() at every transaction and by the alert channel (M13 alert-channel.mjs) in the robot job, which delivers
+// them while the Dispatcher is dead. A line that is not whole JSON (a torn write) is skipped: it neither waits nor marks
+// anything sent. The file is only ever appended to, so a mark from outside the lock never races a resend; both may
+// send one alert twice, never lose it.
+const UNSENT = 'unsent-alerts.jsonl';
+function unsentIn(text) {
+  const done = new Set();
+  const waiting = [];
+  for (const l of String(text).split('\n')) {
+    let x; try { x = JSON.parse(l); } catch { continue; }
+    if (x?.outcome === 'sent' && typeof x.id === 'string') done.add(x.id);
+    else if (x?.outcome === 'unsent' && typeof x.id === 'string' && x.event && typeof x.event === 'object') waiting.push(x);
+  }
+  return waiting.filter((x) => !done.has(x.id));
+}
+/** The store's alerts not yet delivered: [{ id, event }], oldest first. Throws when the file can't be read as a plain file. */
+export function readUnsent(root) { return unsentIn(readPlain(join(root, UNSENT))).map(({ id, event }) => ({ id, event })); }
+/**
+ * Marks one delivered: one line, appended in a single write() with O_APPEND (appendPlain), well under the size a write
+ * lands whole in. Throws when it can't be written; the alert then stays unsent and is delivered again.
+ */
+export function markSent(root, id, at) {
+  if (typeof id !== 'string' || !id) throw new Error('markSent needs an entry id');
+  appendPlain(join(root, UNSENT), `${JSON.stringify({ id, outcome: 'sent', at: String(at) })}\n`);
+}
 // A document's bytes: null when there is none, ODD when something other than a readable plain file is there.
 const ODD = Symbol('odd');
 function docAt(path) { const l = look(path); return l.kind === 'none' ? null : l.kind === 'file' ? l.bytes : ODD; }
@@ -94,7 +121,7 @@ export function openStore({ root, ownerUid, alert = () => {}, now = () => Date.n
   }
 
   const P = { docs: join(root, 'docs'), tmp: join(root, 'tmp'), quarantine: join(root, 'quarantine'), diary: join(root, 'diary.jsonl'),
-    refusals: join(root, 'refusals.jsonl'), seen: join(root, 'outbox-seen.jsonl'), unsent: join(root, 'unsent-alerts.jsonl') };
+    refusals: join(root, 'refusals.jsonl'), seen: join(root, 'outbox-seen.jsonl'), unsent: join(root, UNSENT) };
   // The store's own names must be what they should be before anything touches them: a link, a FIFO or the wrong kind of
   // thing in their place stops the store with an alert naming it, and nothing is read, written, moved or deleted through it
   // (0b-2 audit round 9 M1-M4; one check for the whole store folder, after rounds 6-8 patched it one name at a time).
@@ -138,19 +165,11 @@ export function openStore({ root, ownerUid, alert = () => {}, now = () => Date.n
   };
   const sayOrKeep = (event) => { const e = stamp(event); if (send(e)) return true; keep(e); return false; };
   function resend() {
-    let text = '';
-    try { text = readPlain(P.unsent); } catch { /* the layout check names a bad file; the ones held here are still tried */ }
-    const done = new Set();
-    const waiting = [];
-    for (const l of text.split('\n')) {
-      let x; try { x = JSON.parse(l); } catch { continue; }
-      if (x?.outcome === 'sent' && typeof x.id === 'string') done.add(x.id);
-      else if (x?.outcome === 'unsent' && typeof x.id === 'string' && x.event && typeof x.event === 'object') waiting.push(x);
-    }
+    let waiting = [];
+    try { waiting = readUnsent(root); } catch { /* the layout check names a bad file; the ones held here are still tried */ }
     for (const x of waiting) {
-      if (done.has(x.id) || !send({ ...x.event, resent: true })) continue;
-      done.add(x.id);
-      try { appendPlain(P.unsent, `${JSON.stringify({ id: x.id, outcome: 'sent', at: new Date(now()).toISOString() })}\n`); } catch { /* sent twice, never lost */ }
+      if (!send({ ...x.event, resent: true })) continue;
+      try { markSent(root, x.id, new Date(now()).toISOString()); } catch { /* sent twice, never lost */ }
     }
     for (let i = unsentHere.length - 1; i >= 0; i--) if (send({ ...unsentHere[i].event, resent: true })) unsentHere.splice(i, 1);
   }

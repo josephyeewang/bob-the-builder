@@ -10,6 +10,7 @@
 //   lock.acquire() → { nonce, broke }          // throws 'store busy' after timeoutMs
 //   lock.holds(nonce) → boolean                // re-read before the commit point
 //   lock.release(nonce)
+//   readHolder(dir) → the lock's holder record { pid, pid_start, host, nonce, at } | null (no lock) | { unreadable: true }
 //
 // The lock file is written whole before it appears (written to a temp name, then hard-linked into place, which fails if
 // one exists), so a reader never sees an empty lock. A dead holder's lock is broken only while holding `break.lock`, and
@@ -68,6 +69,10 @@ function createWhole(dir, path, body) {
   try { writeSync(fd, body); fsyncSync(fd); } finally { closeSync(fd); }
   try { chmodSync(tmp, 0o644); linkSync(tmp, path); return true; } catch (e) { if (e?.code === 'EEXIST') return false; throw e; } finally { try { unlinkSync(tmp); } catch { /* gone */ } }
 }
+
+// Who holds the lock in `dir`, read without taking it (L240, L245): the alert channel tells Joe when a live holder has
+// kept the Record locked too long, and the age comes from the holder's own `at`.
+export function readHolder(dir) { return readJson(join(dir, 'lock')); }
 
 export function makeLock({ dir, host = hostname(), timeoutMs = 10000, probe = realProbe, disabled = false } = {}) {
   const path = join(dir, 'lock');
