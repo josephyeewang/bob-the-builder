@@ -20,7 +20,7 @@ import { HOLD_FACT } from '../modules/M11-dispatcher/pass.mjs';
 import { LAST_PASS_FACT } from '../modules/M11-dispatcher/tick.mjs';
 import { wire, checkUser, lastReturn, dispatcherLate, NOT_WIRED_PASSES, ROBOT_PASSES } from './robot-wiring.mjs';
 import { DISPATCHER_LATE_MIN } from '../modules/M13-ledger/heartbeat.mjs';
-import { runPasses, CAUSE } from './robot-main.mjs';
+import { runPasses, CAUSE, main } from './robot-main.mjs';
 import { notWiredText } from './dispatcher-wiring.mjs';
 import { fakeGitHubFetch, blobOf } from './fake-github.test-helper.mjs';
 
@@ -175,4 +175,18 @@ test('R-0b-162 B (L239): the heartbeat tells Joe when the Dispatcher\'s last ful
   assert.equal(dispatcherLate(rec, { nowMs: at + DISPATCHER_LATE_MIN * MIN }), null);
   assert.ok(dispatcherLate(rec, { nowMs: at + (DISPATCHER_LATE_MIN + 1) * MIN }));
   assert.match(dispatcherLate(rec, { nowMs: at - 11 * MIN }).text, /in the future/);
+});
+
+test('R-0b-162 B (L242): with the Dispatcher never run, the late alert is queued and delivered in the same round', async () => {
+  const w = world();
+  const got = [];
+  // A stand-in for lane 3's deliverAlertsPass: it takes what is in the Record's queue when it runs.
+  const deliver = ({ rec }) => { got.push(...queued(rec)); return { sent: got.length }; };
+  const logs = [];
+  const code = await main([w.f('config.json')], { log: (l) => logs.push(l), wireOpts: { deliver, fetchFn: fakeGitHubFetch(w.fake) } });
+  assert.equal(code, 0, logs.join('\n'));
+  assert.ok(got.includes('the Dispatcher has no full pass on record: nothing is started or merged until it runs'), got.join(' | '));
+  // Every pass before it had run: their failures were queued first, so delivery saw them too.
+  for (const p of ['gate', 'watch']) assert.ok(got.some((t) => t.startsWith(`the robot job's ${p} pass failed`)), p);
+  assert.equal(ROBOT_PASSES.at(-1), 'deliver');
 });

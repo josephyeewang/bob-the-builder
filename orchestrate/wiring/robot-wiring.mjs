@@ -15,12 +15,14 @@
 //               last full pass is older than M13's DISPATCHER_LATE_MIN, or missing, Joe is told (dispatcherLate(), below).
 //               heartbeatOnce itself is not called yet: its account probe is not wired, and a probe that throws makes it
 //               write a signed-out fact the Dispatcher would act on.
-//               WHERE IT GOES, and its limit: the job's log and the Dispatcher's alert queue, the only places there are.
-//               The queue's one sender is the Dispatcher, so while the Dispatcher is down this alert reaches Joe only
-//               when it is back. The delivery adapter (L235) must give this job a sender of its own.
+//               It goes to the job's log and the Record's alert queue; `deliver`, below, sends it in the same round.
 //   caught-up   M13 caughtUpOnce. REAL: the idea issues are read with the read-only client, the ideas and the push
 //               request are written as the Ledger. See lastReturn() for what "the Mini came back" means here.
 //   watch       M12 watchOnce. Needs a Vercel client and M13 alerts: not wired, refuses.
+//   deliver     LAST, so every alert the passes above queued goes out in the same round (L242). The alert queue is the
+//               Record's, and delivery runs here, never in the Dispatcher (L236, L237): a dead Dispatcher is still told.
+//               The port is lane 3's M13 deliverAlertsPass, injected as `deliver({ rec, now })`; until it lands, it
+//               refuses, and the alerts stay queued.
 // A pass that refuses fails, and robot-main.mjs tells Joe ("the robot job's <pass> pass failed: not wired yet: …").
 //
 // The config: the Dispatcher's keys (dispatcher-wiring.mjs) and one more.
@@ -38,9 +40,10 @@ import { notWiredText } from './dispatcher-wiring.mjs';
 
 export const CONFIG_KEYS = Object.freeze([...DISPATCHER_KEYS, 'keyDir']);
 const PATHS = Object.freeze(['recordRoot', 'productsFile', 'rulesStateDir', 'tokenFile', 'keyDir']);
-export const ROBOT_PASSES = Object.freeze(['gate', 'heartbeat', 'caught-up', 'watch']);
+export const ROBOT_PASSES = Object.freeze(['gate', 'heartbeat', 'caught-up', 'watch', 'deliver']);
 // What each pass that is not wired yet is waiting for: the port named in its refusal.
-export const NOT_WIRED_PASSES = Object.freeze({ gate: 'robot.github (R-0b-02)', heartbeat: 'robot.issues (L235)', watch: 'robot.vercel' });
+export const NOT_WIRED_PASSES = Object.freeze({ gate: 'robot.github (R-0b-02)', heartbeat: 'robot.issues (L235)', watch: 'robot.vercel',
+  deliver: 'robot.deliver (L237)' });
 const DAY_MS = 24 * 60 * 60 * 1000;
 const MAX_IDEAS = 100;
 
@@ -99,13 +102,14 @@ export async function ideaIssues(gh, { owner, repo }) {
 }
 
 export async function wire(config, { log = (s) => process.stderr.write(`${s}\n`), fetchFn = globalThis.fetch, now = () => Date.now(),
-  uid = process.getuid?.() } = {}) {
+  uid = process.getuid?.(), deliver = null } = {}) {
   const c = checkConfig(config, { keys: CONFIG_KEYS, paths: PATHS });
   checkUser({ uid, ownerUid: c.ownerUid, keyDir: c.keyDir });
   const { rec, gh, entry } = await recordAndRules(c, { who: 'robot', log, fetchFn, now });
 
   const ledger = makeFactWriter(rec, { actor: 'ledger', now: () => new Date(now()) });
   const passes = Object.fromEntries(Object.entries(NOT_WIRED_PASSES).map(([p, port]) => [p, refusing(port)]));
+  if (deliver) passes.deliver = () => deliver({ rec, now });
   passes.heartbeat = async () => {
     const late = dispatcherLate(rec, { nowMs: now() });
     if (late) {
