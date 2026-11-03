@@ -29,6 +29,13 @@
 //   productsFile   M10's products.json: [{ product, owner, repo, joe_github_id }]; it must list `product`
 //   rulesStateDir  M10 reader's folder: the last good rules, and approved-rules.json (the stopgap approval list)
 //   tokenFile      a GitHub token that can read the product's repository: this user's own file, mode 600
+//   approvalsStateDir  M2 Approvals' own folder: what it has told Joe once (onboard-notices.json, config-alert.json)
+//
+// THE APPROVALS PORT (L270). Approvals' schedule pass runs for this product each tick: it turns the product on the
+// first time its rules file says onboarding.state: active (M2 onboard.mjs), which is all the first cutover needs from it.
+// Its GitHub writes (a decision's pull request, a review request) and the transcript copies need a GitHub identity that
+// can write and the session copies, neither wired yet: `gh` and `copies` refuse, so an ask that needs them fails the
+// approvals step, told once. No `push`: no phone channel exists, so M2 says so per ask (approvals_no_push).
 
 import { isAbsolute } from 'node:path';
 import { openRecord } from '../modules/M9-record/writer.mjs';
@@ -39,15 +46,15 @@ import { makeRules } from '../shared/rules.mjs';
 import { readOnlyClient, tokenFile } from '../modules/M6-merge-gate/watch-only.mjs';
 import { queueAlert } from '../modules/M11-dispatcher/alerts.mjs';
 
-export const CONFIG_KEYS = Object.freeze(['wiring', 'lockFile', 'runDeadlineMs', 'product', 'recordRoot', 'ownerUid', 'productsFile', 'rulesStateDir', 'tokenFile']);
-const PATHS = Object.freeze(['recordRoot', 'productsFile', 'rulesStateDir', 'tokenFile']);
+export const CONFIG_KEYS = Object.freeze(['wiring', 'lockFile', 'runDeadlineMs', 'product', 'recordRoot', 'ownerUid', 'productsFile', 'rulesStateDir', 'tokenFile', 'approvalsStateDir']);
+const PATHS = Object.freeze(['recordRoot', 'productsFile', 'rulesStateDir', 'tokenFile', 'approvalsStateDir']);
 const NAME = /^[A-Za-z0-9._-]+$/;
 
 // The ports PRs C and D wire (M11 README, "The tick's ports"). Each throws when called: never a stand-in answer.
 export const NOT_WIRED = Object.freeze(['board', 'healthy', 'resume', 'outboxSessions', 'wait', 'startReadonly', 'replyToLead', 'leads',
   'sessions', 'probe', 'launch', 'stopGroup', 'saveWork', 'hostLock', 'pauseLead', 'gateAlive', 'stopSession', 'hasReviewer',
   'requestReview', 'reviewAlerts', 'filesOf', 'sendFrontDoor', 'restartFrontDoor', 'startMinibase', 'frontDoorAlive',
-  'strayFrontDoor', 'frontDoorHandoff', 'approvals']);
+  'strayFrontDoor', 'frontDoorHandoff']);
 export const NOT_WIRED_CLEANUP = Object.freeze(['mirrorFor', 'git', 'saveWork']);
 export const notWiredText = (port) => `not wired yet: ${port} (R-0b-162)`;
 export const refusing = (port) => () => { throw new Error(notWiredText(port)); };
@@ -62,6 +69,13 @@ export function checkConfig(c, { keys = CONFIG_KEYS, paths = PATHS } = {}) {
   for (const k of paths) if (typeof c[k] !== 'string' || !isAbsolute(c[k])) throw new Error(`config: ${k} must be an absolute path`);
   if (!Number.isSafeInteger(c.ownerUid) || c.ownerUid < 0) throw new Error('config: ownerUid must be a Mac user id');
   return c;
+}
+
+export const APPROVALS_NOT_WIRED = Object.freeze({ gh: ['get', 'post', 'put', 'patch'], copies: ['sync', 'told', 'pending', 'done'] });
+/** One product's approvals context (tick.mjs approvalsStep): the real state folder; GitHub writes and copies refuse. */
+export function approvalsFor(c, entry) {
+  const refuse = (group) => Object.freeze(Object.fromEntries(APPROVALS_NOT_WIRED[group].map((k) => [k, refusing(`approvals.${group}`)])));
+  return { product: c.product, owner: entry.owner, repo: entry.repo, stateDir: c.approvalsStateDir, gh: refuse('gh'), copies: refuse('copies') };
 }
 
 /** The alert port until a channel to Joe exists: logged, and answered "not delivered", so it stays queued. */
@@ -111,9 +125,10 @@ export async function recordAndRules(c, { who, log, fetchFn, now }) {
 export async function wire(config, { limitedSync, log = (s) => process.stderr.write(`${s}\n`), fetchFn = globalThis.fetch, now = () => Date.now() } = {}) {
   void limitedSync;   // the synchronous ports (PRs C, D) run their commands through it
   const c = checkConfig(config);
-  const { rec, rules } = await recordAndRules(c, { who: 'dispatcher', log, fetchFn, now });
+  const { rec, rules, entry } = await recordAndRules(c, { who: 'dispatcher', log, fetchFn, now });
   const ports = { alert: logOnlyAlert(log) };
   for (const k of NOT_WIRED) ports[k] = refusing(k);
+  ports.approvals = () => [approvalsFor(c, entry)];
   // cleanupPass reads a missing copies folder as "nothing to clean" (cleanup.mjs), which would pass in silence. So the
   // folder itself refuses: the tick spreads this object into the step, and the read throws inside the step.
   ports.cleanup = Object.defineProperty(Object.fromEntries(NOT_WIRED_CLEANUP.map((k) => [k, refusing(`cleanup.${k}`)])), 'copiesRoot',

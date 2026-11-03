@@ -35,14 +35,18 @@ const TICK = join(here, '..', 'modules', 'M11-dispatcher', 'tick.mjs');
 // The ports not wired yet: each must refuse when called.
 const PORTS_NOT_WIRED = Object.freeze(['board', 'filesOf', 'frontDoorAlive', 'frontDoorHandoff', 'gateAlive', 'hasReviewer', 'healthy',
   'hostLock', 'launch', 'leads', 'outboxSessions', 'pauseLead', 'probe', 'replyToLead', 'requestReview', 'restartFrontDoor', 'resume',
-  'reviewAlerts', 'saveWork', 'sendFrontDoor', 'sessions', 'startMinibase', 'startReadonly', 'stopGroup', 'stopSession', 'strayFrontDoor', 'wait', 'approvals']);
+  'reviewAlerts', 'saveWork', 'sendFrontDoor', 'sessions', 'startMinibase', 'startReadonly', 'stopGroup', 'stopSession', 'strayFrontDoor', 'wait']);
 const CLEANUP_NOT_WIRED = Object.freeze(['copiesRoot', 'git', 'mirrorFor', 'saveWork']);
+// The ports wired for real (L270): approvals, whose GitHub writes and copies still refuse (pinned below).
+const PORTS_WIRED = Object.freeze(['approvals']);
+const APPROVALS_GH = Object.freeze(['get', 'patch', 'post', 'put']);
+const APPROVALS_COPIES = Object.freeze(['done', 'pending', 'sync', 'told']);
 // What else the tick reads from its ports object: the alert port, the cleanup group, and options with defaults.
 const NOT_PORTS = Object.freeze(['alert', 'alertSendMs', 'approvalsProductMs', 'cleanup', 'intakeFs', 'portDeadlineMs', 'saveDeadlineMs', 'stepDeadlineMs']);
 // One full pass with the ports above refusing: each step's outcome, and for a failed step the port its error names.
 const NW = (port) => notWiredText(port);
 const EXPECTED_STEPS = Object.freeze({
-  stops: NW('sessions'), undo: 'ok', 'undo-starts': NW('sessions'), outage: NW('board'), intake: NW('outboxSessions'), leads: NW('leads'), approvals: NW('approvals'),
+  stops: NW('sessions'), undo: 'ok', 'undo-starts': NW('sessions'), outage: NW('board'), intake: NW('outboxSessions'), leads: NW('leads'), approvals: 'ok',
   pass: NW('sessions'), limits: `no review was asked for: ${NW('reviewAlerts')}`, merges: 'ok', waits: 'ok', phone: 'ok', cleanup: NW('cleanup.copiesRoot'),
 });
 
@@ -57,7 +61,7 @@ function world({ extra = {} } = {}) {
   writeFileSync(token, 'x'.repeat(40), { mode: 0o600 });
   chmodSync(token, 0o600);
   const config = { wiring: WIRING, lockFile: f('dispatcher.lock'), product: P, recordRoot: f('record'), ownerUid: process.getuid(),
-    productsFile: f('products.json'), rulesStateDir, tokenFile: token, ...extra };
+    productsFile: f('products.json'), rulesStateDir, tokenFile: token, approvalsStateDir: f('approvals-state'), ...extra };
   writeFileSync(f('config.json'), JSON.stringify(config));
   const fake = { owner: ENTRY.owner, repo: ENTRY.repo, commit: COMMIT, text: FIRST, logFile: f('github.log') };
   writeFileSync(f('fake-github.json'), JSON.stringify(fake));
@@ -136,10 +140,10 @@ test('R-0b-162 A: a config the wiring does not know stops the start, told on std
 test('R-0b-162 A: the tick reads exactly the pinned ports, and the wiring answers each one that is not wired by refusing', async () => {
   const src = readFileSync(TICK, 'utf8');
   const reads = [...new Set([...src.matchAll(/(?<!\w)p\.(\w+)/g)].map((m) => m[1]))].sort();
-  assert.deepEqual(reads, [...PORTS_NOT_WIRED, ...NOT_PORTS].sort(), 'a new port in tick.mjs must be pinned here');
+  assert.deepEqual(reads, [...PORTS_NOT_WIRED, ...PORTS_WIRED, ...NOT_PORTS].sort(), 'a new port in tick.mjs must be pinned here');
   const w = world();
   const { ports } = await wire(w.config, { log: () => {}, fetchFn: fakeGitHubFetch(w.fake) });
-  assert.deepEqual(Object.keys(ports).sort(), [...PORTS_NOT_WIRED, 'alert', 'cleanup'].sort(), 'no port is answered by anything but a refusal');
+  assert.deepEqual(Object.keys(ports).sort(), [...PORTS_NOT_WIRED, ...PORTS_WIRED, 'alert', 'cleanup'].sort(), 'no port is answered by anything but a refusal or a pinned wiring');
   assert.deepEqual(Object.keys(Object.getOwnPropertyDescriptors(ports.cleanup)).sort(), [...CLEANUP_NOT_WIRED].sort());
 });
 
@@ -180,4 +184,38 @@ test('R-0b-162 A: the wired rules know the role files, and refuse a start that n
   const ed = rules.may('start_session', { product: P, role: 'worker', tier: 2, editing: true });
   assert.equal(ed.decision, 'deny');
   assert.match(ed.reason, new RegExp(notWiredText('running').replace(/[()]/g, '\\$&')));
+});
+
+test('L270: the approvals port answers this product with its state folder; its GitHub writes and copies refuse', async () => {
+  const w = world();
+  const { ports } = await wire(w.config, { log: () => {}, fetchFn: fakeGitHubFetch(w.fake) });
+  const list = await ports.approvals();
+  assert.equal(list.length, 1);
+  const [x] = list;
+  assert.deepEqual(Object.keys(x).sort(), ['copies', 'gh', 'owner', 'product', 'repo', 'stateDir']);
+  assert.deepEqual([x.product, x.owner, x.repo, x.stateDir], [P, ENTRY.owner, ENTRY.repo, w.config.approvalsStateDir]);
+  assert.deepEqual(Object.keys(x.gh).sort(), [...APPROVALS_GH]);
+  for (const k of APPROVALS_GH) assert.throws(() => x.gh[k]('/x'), { message: notWiredText('approvals.gh') }, k);
+  assert.deepEqual(Object.keys(x.copies).sort(), [...APPROVALS_COPIES]);
+  for (const k of APPROVALS_COPIES) assert.throws(() => x.copies[k]('s'), { message: notWiredText('approvals.copies') }, k);
+  assert.equal('push' in x, false, 'no phone channel: M2 says approvals_no_push in the open');
+});
+
+test('L270: a boot whose rules say onboarding.state active turns the product on, as approvals, once', () => {
+  const w = world();
+  w.approve([blobOf(FIRST)]);
+  assert.equal(boot(w).code, 0);
+  let rec = readRecord(w);
+  const p = rec.read('product', P);
+  assert.equal(p?.doc?.state, 'active', 'the product record was made');
+  const made = rec.diary({ since: 0 }).filter((l) => l.entity === 'product' && l.id === P);
+  assert.deepEqual(made.map((l) => [l.actor, l.kind]), [['approvals', 'onboard']]);
+  assert.ok(queued(rec).some((s) => s.includes(`${P} is now on`)), queued(rec).join('\n'));
+  // A second boot leaves the record alone and says nothing new about it.
+  const n = queued(rec).length;
+  assert.equal(boot(w).code, 0);
+  rec = readRecord(w);
+  assert.equal(rec.diary({ since: 0 }).filter((l) => l.entity === 'product' && l.id === P).length, 1);
+  assert.equal(queued(rec).filter((s) => s.includes(`${P} is now on`)).length, 1);
+  assert.equal(queued(rec).length, n);
 });
