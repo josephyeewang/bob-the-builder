@@ -318,6 +318,25 @@ test('m3: a pause counts from the pause; an unpause clears the mark, so a re-pau
   void r0;
 });
 
+test('L324 n4: a re-pause with no full pass since the unpause is told a day after the re-pause, not a week after the last tell', async () => {
+  const m = mac([card('A', { changed_at: iso(T0 - 10 * D) })], { state: 'active' });
+  await m.at(0);
+  seed(m.rec, 'card', 'B', { state: 'ready', module: 'M-test', product: 'p1', tier: 2, files: ['src/B.js'], changed_at: iso(T0 - 10 * D) });
+  setClock(m.rec, T0 + H); change(m.rec, 'product', 'p1', { state: 'paused' });
+  await m.at(H + D);
+  assert.deepEqual(m.told, ['p1 is paused; 1 card(s) are waiting: B']);
+  assert.equal(m.rec.read('fact', 'hold-waits-p1-paused').doc.since, iso(T0 + H), 'the mark names this pause');
+  // Unpaused and re-paused with no full pass between (starts off, an outage): the old mark is never cleared.
+  setClock(m.rec, T0 + 2 * D); change(m.rec, 'product', 'p1', { state: 'active' });
+  setClock(m.rec, T0 + 3 * D); change(m.rec, 'product', 'p1', { state: 'paused' });
+  await m.at(3 * D + H);
+  assert.equal(m.told.length, 1, 'an hour after the re-pause: quiet');
+  await m.at(4 * D + H);
+  assert.deepEqual(m.told, ['p1 is paused; 1 card(s) are waiting: B', 'p1 is paused; 1 card(s) are waiting: B'], 'a day after the re-pause');
+  await m.at(5 * D + H);
+  assert.equal(m.told.length, 2, 'then weekly');
+});
+
 test('MAT-1: a first-sight hold mark more than 60 s in the future counts as not told', async () => {
   const m = mac([card('A'), ['fact', 'hold-start-A-launcher', { text: 'old', told_at: iso(T0 + 30 * D) }]], { launchOver: async () => ({ ok: false, reason: 'busy' }) });
   await m.at(0);
@@ -329,6 +348,17 @@ test('m5: a launcher refusal whose words change each time is one cause per card,
   for (const t of [0, MIN, 2 * MIN, 3 * MIN]) await m.at(t);
   const mine = m.told.filter((t) => /^card A can't start: launcher: busy with session /.test(t));
   assert.equal(mine.length, 1, `${m.told.join(' | ')} || ${JSON.stringify(m.rec.list('fact').map((f) => f.id))}`);
+});
+
+// #157 r2 audit n5 (plant Q12): a rules error whose words change each time (an error message) is one cause per card,
+// keyed by its fixed class, not its text: told once a day, not once per pass.
+test('n5: a rules error whose words change each time is one cause per card, told once a day', async () => {
+  const m = mac([card('A')], { answers: { start_session: () => { throw new Error(`engine down: ${randomUUID()}`); } } });
+  for (const t of [0, MIN, 2 * MIN, 3 * MIN]) await m.at(t);
+  const mine = () => m.told.filter((t) => /^card A can't start: rules: (could not be asked|rules error: )/.test(t));
+  assert.equal(mine().length, 1, m.told.join(' | '));
+  await m.at(D + 4 * MIN);
+  assert.equal(mine().length, 2, 'again a day later');
 });
 
 test('first sight: a daily pattern that can\'t be folded is told at once, naming the pattern, then not again that day', async () => {

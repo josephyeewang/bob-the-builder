@@ -91,15 +91,16 @@ export async function rulesMissingAlert({ rec, factId = RULES_MISSING_FACT, keys
   // last recorded set count, so a key that left is told again when it comes back.
   const told = list(doc?.told_keys).filter((k) => had.includes(k));
   const fresh = seen.filter((k) => !told.includes(k));
-  // Still missing a day after the last alert: told again, all of them (LEAD-CALLS L38, once per cause per day).
-  const last = Date.parse(doc?.told_at ?? '');
-  const again = !fresh.length && keep.length && seen.length && Number.isFinite(last) && now - last >= HOLD_REPEAT_MS;
+  // Still missing a day after the last alert: told again, all of them (LEAD-CALLS L38, once per cause per day). A told
+  // time that can't be read or lies ahead counts as due (L324, shared dueToTell): before, it was never told again.
+  const last = pastTime(doc?.told_at, now);
+  const again = !fresh.length && keep.length && seen.length && dueToTell(doc, now, HOLD_REPEAT_MS);
   const tell = fresh.length ? fresh : again ? keep : [];
   const joined = keep.join(', ') || null;
   if (joined !== (doc?.keys ?? null)) putFact(rec, factId, { ...doc, keys: joined, at: iso(now) }, keep.length ? 'rules_missing' : 'rules_missing_cleared');
   const toldNow = () => [...new Set([...told, ...tell])].sort().join(', ');
   // A new key told alone keeps the day clock of the keys told before (audit 0b-6 r6 m-5).
-  const at = again || !Number.isFinite(last) ? iso(now) : doc.told_at;
+  const at = again || last === null ? iso(now) : doc.told_at;
   if (tell.length) tellThen(alert, `the rules have no value for ${tell.join(', ')}: ${what}`, { fact: factId, fields: { told_keys: toldNow(), told_at: at }, kind: 'rules_missing_told' });
   return seen.join(', ') || null;
 }
@@ -241,7 +242,7 @@ export async function stopPass({ rec, rules, now, account, sessions, probe, stop
   // One alert per wanted stop, and again each day it fails (audit MIN-4; L38: no silent hold); told only
   // once delivered (r5 MAT-2). Queued, never waited on: a safety step does not wait on a send (L47).
   for (const { s, pending, stopped } of failed) {
-    if (!(now - Date.parse(pending.told_at ?? '') < HOLD_REPEAT_MS)) tellThen(alert, `session ${s.id} (card ${s.card}) could not be stopped: ${stopped?.reason ?? 'no answer'}`, { fact: STOP_FACT(s.id), fields: { told_at: iso(now) }, kind: 'stop_failed' });
+    if (dueToTell(pending, now, HOLD_REPEAT_MS)) tellThen(alert, `session ${s.id} (card ${s.card}) could not be stopped: ${stopped?.reason ?? 'no answer'}`, { fact: STOP_FACT(s.id), fields: { told_at: iso(now) }, kind: 'stop_failed' });
   }
   const saves = await Promise.all(done.map(({ s }) => guarded(() => saveWork(s), saveDeadlineMs)));
   for (const [i, { s, pending, late, stopped }] of done.entries()) {
@@ -395,7 +396,7 @@ export async function dispatcherPass({ rec, rules, now, account, sessions, probe
   }
   // Once per stretch of unread usage, and again each day it lasts (L38).
   const uf = factDoc(rec, UNKNOWN_FACT)?.doc;
-  if (unknownLong && (!uf?.since?.startsWith?.(unknownSince) || !(now - Date.parse(uf?.told_at ?? '') < HOLD_REPEAT_MS))) {
+  if (unknownLong && (!uf?.since?.startsWith?.(unknownSince) || dueToTell(uf, now, HOLD_REPEAT_MS))) {
     tellThen(alert, 'usage has been unreadable for over a day; parked work waits on you', { fact: UNKNOWN_FACT, fields: { since: unknownSince, told_at: iso(now) }, kind: 'usage_unknown_alert' });
   }
 
@@ -422,7 +423,7 @@ export async function dispatcherPass({ rec, rules, now, account, sessions, probe
       // Once per reason (its numbers out; audit 0b-6 r5 m4), and again each day it fails (L38); told only once sent (r5 MAT-2).
       const cause = String(asked.reason).replace(/\d+/g, 'N');
       if (pf?.doc?.state !== 'failed') putFact(rec, PAUSE_FACT(product), { state: 'failed', reason: asked.reason, at: iso(now) }, 'pause_lead_failed');
-      if (pf?.doc?.told_cause !== cause || !(now - Date.parse(pf?.doc?.told_at ?? '') < HOLD_REPEAT_MS)) {
+      if (pf?.doc?.told_cause !== cause || dueToTell(pf?.doc, now, HOLD_REPEAT_MS)) {
         tellThen(alert, `the Lead of ${product} could not be asked to hand off: ${asked.reason}; tried again every pass`, { fact: PAUSE_FACT(product), fields: { told_cause: cause, told_at: iso(now) }, kind: 'pause_lead_failed' });
       }
       continue;
@@ -527,10 +528,13 @@ function tellWaits({ rec, groups, alert, now }) {
     stillWaiting({
       now,
       every: g?.cls === 'paused' ? PAUSED_REPEAT_MS : HOLD_REPEAT_MS,
+      // A paused fold is the wait of this pause (L324 n4): a re-pause is told on its own clock, not held by the mark
+      // of the last pause when no full pass ran in between to clear it (starts off, an outage).
+      ...(typeof g?.pausedSince === 'string' ? { since: g.pausedSince } : {}),
       waiting: () => !!g && now - g.oldest >= HOLD_REPEAT_MS,
       read: () => factDoc(rec, fact)?.doc,
-      // Marked told only once a copy is delivered (L47), as holdAlert.
-      tell: ({ told_at }) => { const text = foldText(g); return tellThen(alert, text, { fact, fields: { text, told_at }, kind: 'hold_alert' }); },
+      // Marked told only once a copy is delivered (L47), as holdAlert; every field it is given is written.
+      tell: (fields) => { const text = foldText(g); return tellThen(alert, text, { fact, fields: { text, ...fields }, kind: 'hold_alert' }); },
       // Called on every pass with nothing to tell (L320 m1): a queued copy is dropped, and the mark written only if set.
       clear: () => {
         dropCause(rec, fact);
@@ -583,7 +587,11 @@ async function starts({ rec, rules, now, b, running, launch, out, alert, onlyUnd
         const key = `${product}-${cls}`;
         const g = groups.get(key) ?? { product, cls, why: new Map(), cards: [], by: [], oldest: Infinity };
         let t = pastTime(since({ id }), now) ?? -Infinity;
-        if (cls === 'paused') t = Math.max(t, pastTime(rec.meta?.('product', product)?.stateSince, now) ?? -Infinity);
+        if (cls === 'paused') {
+          const paused = rec.meta?.('product', product)?.stateSince;
+          t = Math.max(t, pastTime(paused, now) ?? -Infinity);
+          if (typeof paused === 'string') g.pausedSince = paused;
+        }
         g.oldest = Math.min(g.oldest, t);
         g.cards.push(id);
         g.why.set(reason, [...(g.why.get(reason) ?? []), id]);
@@ -593,7 +601,7 @@ async function starts({ rec, rules, now, b, running, launch, out, alert, onlyUnd
       }
       const held = factDoc(rec, UNDO_HELD_FACT(id))?.doc;
       const cause = reason.replace(/\d+/g, 'N');
-      if (held?.told_cause !== cause || !(now - Date.parse(held?.told_at ?? '') < HOLD_REPEAT_MS)) {
+      if (held?.told_cause !== cause || dueToTell(held, now, HOLD_REPEAT_MS)) {
         tellThen(alert, `your undo (card ${id}) is waiting: ${reason}`, { fact: UNDO_HELD_FACT(id), fields: { reason, told_cause: cause, told_at: iso(now) }, kind: 'undo_held' });
       }
     };
