@@ -700,3 +700,20 @@ for (const lost of ['send refused', 'queue refused']) {
     assert.equal(got.length, n, 'told exactly once once delivered (P20)');
   });
 }
+
+// L329: ageMs reads the Record's times by shared pastTime. One that can't be read, or is more than 60 s ahead, is an
+// unknown age (Infinity), so each limit that uses it fires rather than waiting for a time that has not come.
+test('L329: a limit whose entry\'s time is unreadable or an hour ahead still times it out (checking, reporting, no reviewer)', async () => {
+  const NOW = T0 + 60 * MIN;
+  for (const [what, bad] of [['unreadable', 'not a time'], ['an hour ahead', iso(NOW + 60 * MIN)]]) {
+    for (const key of [K.checkingMaxMin, K.reportingMaxMin, K.inReviewNoReviewerMin]) {
+      const w = LIMIT_WORLDS[key];
+      const base = recWith(w.rows({}));
+      setClock(base, NOW);
+      const rec = Object.create(base);
+      Object.defineProperty(rec, 'meta', { value: (entity, id) => ({ ...base.meta(entity, id), ts: bad, stateSince: bad }) });
+      await timeLimits({ rec, rules: R, now: NOW, b: GREEN, ...ports({ hasReviewer: () => false, ...dead }).p, missing: [] });
+      assert.equal(w.timed(base), true, `${key}, ${what}`);
+    }
+  }
+});

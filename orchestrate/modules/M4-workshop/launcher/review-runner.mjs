@@ -56,6 +56,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { dirname, join } from 'node:path';
 import { REVIEW_ROLES } from '../../../shared/review-roles.mjs';
 import { SESSION_ID } from '../../../shared/record.mjs';
+import { pastTime } from '../../../shared/still-waiting.mjs';
 import { ASIDE_FOLDER, ENDED_FOLDER, NEVER_RAN, PASSES, launchesFolderProblem, reviewUid, runnerEnded, runnerLaunches, CARD_ID } from '../../M9-record/outbox.mjs';
 import { checkReviewOutbox, reviewOutbox, uidsProblem } from './review-user.mjs';
 import { ACCOUNT_NAMES, accountDir, accountEnv } from './accounts.mjs';
@@ -474,8 +475,10 @@ export async function runnerPass(ctx) {
     const runningIds = new Set(state.running.map((x) => x.session_id));
     for (const { doc } of rl.launches) {
       if (runningIds.has(doc.session_id)) continue;
-      const at = Date.parse(doc.launched_at ?? '');
-      if (Number.isFinite(at) && now - at < SWEEP_AFTER_MS) continue;
+      // pastTime (L329): a launch time that can't be read or is more than 60 s ahead counts as old enough, so a bad
+      // one is swept rather than held for ever.
+      const at = pastTime(doc.launched_at, now);
+      if (at !== null && now - at < SWEEP_AFTER_MS) continue;
       try { lstatSync(join(P.ended, `${doc.session_id}.json`)); continue; } catch { /* not marked */ }
       if (await endSession(doc, 'swept')) alert(`swept-${doc.session_id}`, `The ${doc.role} session ${doc.session_id} for card ${doc.card} at ${doc.head.slice(0, 7)} was not being tracked by the review runner; it is now marked ended.`);
     }
@@ -576,8 +579,10 @@ export async function runnerPass(ctx) {
       // minutes after its session ended is told to Joe once; the Merge Gate reads the verdict file itself either way. A
       // held head (silent, or a verdict that can't be counted) was told already, with the "review again" tap.
       const sid = a.session_id;
-      const ended = Date.parse(a.ended_at ?? '');
-      if (!a.held && Number.isFinite(ended) && now - ended >= INTAKE_WAIT_MS) {
+      // An ended session's end time by pastTime (L329): one that can't be read or is more than 60 s ahead counts as
+      // old enough, so its untaken verdict is told now, not never. No ended_at at all is a session not yet ended.
+      const ended = a.ended_at == null ? null : (pastTime(a.ended_at, now) ?? -Infinity);
+      if (!a.held && ended !== null && now - ended >= INTAKE_WAIT_MS) {
         let t;
         try { t = await ctx.verdictTaken({ role, sessionId: sid, card, head }); } catch (e) { t = { ok: false, reason: `the Record could not be read (${e?.message ?? e})` }; }
         if (t?.ok !== true) {
@@ -593,7 +598,10 @@ export async function runnerPass(ctx) {
       alert(`gave-up-${k}`, `No ${role} could be started for card ${card} at ${head.slice(0, 7)} after ${MAX_FAILED_STARTS} tries (last: ${a.last_reason ?? 'ended with no verdict'}).`);
       continue;
     }
-    if (a.last_failed_at && now - Date.parse(a.last_failed_at) < RETRY_MS) { refuse(`the last start of a ${role} for card ${card} failed less than 15 minutes ago`); continue; }
+    // pastTime (L329): a failure time that can't be read or is more than 60 s ahead counts as old enough, so the
+    // retry is not held for ever.
+    const failedAt = a.last_failed_at ? pastTime(a.last_failed_at, now) : null;
+    if (failedAt !== null && now - failedAt < RETRY_MS) { refuse(`the last start of a ${role} for card ${card} failed less than 15 minutes ago`); continue; }
 
     // Start it: the session id is the runner's own, the outbox is made fresh, the launch record is written before the start.
     starts += 1;
