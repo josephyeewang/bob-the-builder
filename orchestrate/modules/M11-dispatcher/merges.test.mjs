@@ -118,7 +118,7 @@ test('R-0b-57: the Merge Gate killed mid-merge: the next pass hands the PR readi
 });
 
 test('m16, L74 b3: merged at a head the gate did not judge is refused by the gate, told, and the card put back', async () => {
-  const rec = recWith([cardMerging, merging(), ['fact', PR_FACT(7), { merged: true, merge_commit_sha: MC, head_sha: HB, observed_at: at(1) }]]);
+  const rec = recWith([cardMerging, merging(), ['fact', PR_FACT(7), { state: 'closed', merged: true, merge_commit_sha: MC, head_sha: HB, observed_at: at(1) }]]);
   const { alerts } = await pass(rec, 2, dead);
   assert.equal(rec.read('merge', 'M-1').doc.state, 'refused');
   assert.match(rec.read('merge', 'M-1').doc.reasons[0], /merged outside the gate/);
@@ -216,7 +216,7 @@ test('L85 M-1 (b): an interrupted merge GitHub shows merged at an unjudged head 
   const rec = recWith([
     ['card', 'C-1', { state: 'verified', head: HA }],
     ['merge', 'M-1', { card: 'C-1', pr: 7, state: 'refused', reasons: ['interrupted'], judged_head: HA, changed_at: at(5) }],
-    ['fact', PR_FACT(7), { merged: true, merge_commit_sha: MC, head_sha: HB, observed_at: at(4) }],
+    ['fact', PR_FACT(7), { state: 'closed', merged: true, merge_commit_sha: MC, head_sha: HB, observed_at: at(4) }],
   ]);
   assert.deepEqual((await pass(rec, 6)).alerts, [], 'the reading predates the refusal');
   change(rec, 'fact', PR_FACT(7), { observed_at: at(7) });
@@ -228,11 +228,11 @@ test('L85 M-1 (b): an interrupted merge GitHub shows merged at an unjudged head 
   assert.ok(rec.read('fact', RECONCILED_FACT('M-1')));
   assert.deepEqual((await pass(rec, 9)).alerts, [], 'told once');
   // no merge commit in the reading: the same
-  const r3 = recWith([['card', 'C-3', { state: 'verified', head: HA }], ['merge', 'M-3', { card: 'C-3', pr: 9, state: 'refused', reasons: ['interrupted'], judged_head: HA, changed_at: at(0) }], ['fact', PR_FACT(9), { merged: true, head_sha: HA, observed_at: at(1) }]]);
+  const r3 = recWith([['card', 'C-3', { state: 'verified', head: HA }], ['merge', 'M-3', { card: 'C-3', pr: 9, state: 'refused', reasons: ['interrupted'], judged_head: HA, changed_at: at(0) }], ['fact', PR_FACT(9), { state: 'closed', merged: true, head_sha: HA, observed_at: at(1) }]]);
   assert.equal((await pass(r3, 2)).alerts.length, 1);
   assert.equal(r3.read('merge', 'M-3').doc.state, 'refused');
   // a refused{timeout} merge is not reconciled, but no refusal wording is silent (L94 point 3): the owner is told once
-  const r2 = recWith([['merge', 'M-2', { pr: 8, state: 'refused', reasons: ['timeout'], changed_at: at(0) }], ['fact', PR_FACT(8), { merged: true, observed_at: at(1) }]]);
+  const r2 = recWith([['merge', 'M-2', { pr: 8, state: 'refused', reasons: ['timeout'], changed_at: at(0) }], ['fact', PR_FACT(8), { state: 'closed', merged: true, observed_at: at(1) }]]);
   const told = (await pass(r2, 2)).alerts;
   assert.deepEqual(told, ['merge M-2 was refused (timeout) but PR 8 shows merged; check the card and its audit']);
   assert.equal(r2.read('merge', 'M-2').doc.state, 'refused');
@@ -449,17 +449,18 @@ test('L72: the session is the newest worker launch for the card, and the pull re
 
 test('audit MIN-18 / MIN-19: after a gate crash only merged === true counts, and only a reading newer than the last write', async () => {
   const mk = (pr) => recWith([cardMerging, merging(), ['fact', PR_FACT(7), pr]]);
-  for (const merged of [undefined, 'true', 1]) {
+  // A merged that is not true or false is no reading at all (L246): the merge waits for a real one, never merged and
+  // never refused on it. (Before L246 a closed reading with such a merged was refused as interrupted.)
+  for (const merged of [undefined, 'true', 1, null]) {
     const rec = mk({ state: 'closed', ...(merged === undefined ? {} : { merged }), merge_commit_sha: MC, head_sha: HA, observed_at: at(1) });
-    await pass(rec, 2, dead);
-    assert.deepEqual([rec.read('merge', 'M-1').doc.state, rec.read('merge', 'M-1').doc.reasons], ['refused', ['interrupted']], String(merged));
-    assert.notEqual(rec.read('card', 'C-1').doc.state, 'merged');
+    assert.deepEqual((await pass(rec, 2, dead)).moves, [['M-1', 'waiting for a fresh PR reading']], String(merged));
+    assert.deepEqual(states(rec), ['merging', 'merging'], String(merged));
   }
   // a reading at the same moment as the last write is not fresh
-  const same = mk({ merged: true, merge_commit_sha: MC, head_sha: HA, observed_at: at(0) });
+  const same = mk({ state: 'closed', merged: true, merge_commit_sha: MC, head_sha: HA, observed_at: at(0) });
   assert.deepEqual((await pass(same, 2, dead)).moves, [['M-1', 'waiting for a fresh PR reading']]);
   // a reading with no time is never fresh
-  const none = mk({ merged: true, merge_commit_sha: MC, head_sha: HA });
+  const none = mk({ state: 'closed', merged: true, merge_commit_sha: MC, head_sha: HA });
   assert.deepEqual((await pass(none, 2, dead)).moves, [['M-1', 'waiting for a fresh PR reading']]);
 });
 
@@ -553,6 +554,28 @@ test('L110 m-6 (G13): a pull request reading counts only when Sensors made it, a
   assert.equal(prReadingAfter(recBy(null), 7, 'M-1'), null, 'a maker the Record can\'t name is not Sensors');
   assert.equal(prReadingAfter(recBy('sensors', at(6)), 7, 'M-1'), null, 'a reading from before the merge\'s last write');
   assert.equal(prReadingAfter(recBy('sensors'), null, 'M-1'), null, 'no pull request number');
+});
+
+test('L246: a reading whose state is not open or closed, or whose merged is not true or false, is no reading', () => {
+  const recOf = (doc) => ({
+    read: (e, id) => (e === 'fact' && id === PR_FACT(7) ? { id, rev: 1, doc: { observed_at: at(5), ...doc } } : null),
+    meta: (e) => (e === 'fact' ? { createdBy: 'sensors' } : { ts: at(0) }),
+  });
+  for (const [doc, ok] of [[{ state: 'open', merged: false }, true], [{ state: 'closed', merged: true }, true], [{ state: 'closed', merged: false }, true],
+    [{ state: null, merged: null }, false], [{ state: 'open', merged: null }, false], [{ state: 'merged', merged: true }, false],
+    [{ state: 'closed', merged: 'true' }, false], [{ merged: false }, false], [{ state: 'open' }, false]]) {
+    assert.equal(prReadingAfter(recOf(doc), 7, 'M-1') !== null, ok, JSON.stringify(doc));
+  }
+});
+
+test('L246: an all-null reading past the merging limit leaves the merge merging; a later real merged reading settles it', async () => {
+  const { rec } = gone();
+  reading(rec, 1, { state: null, merged: null, merge_commit_sha: null, head_sha: null });
+  await pass(rec, 20, dead);
+  assert.deepEqual(states(rec), ['merging', 'merging'], 'no reading is never refused as open too long');
+  reading(rec, 21, { state: 'closed', merged: true, merge_commit_sha: MC });
+  await pass(rec, 22, dead);
+  assert.deepEqual(states(rec), ['merged', 'merged']);
 });
 
 test('audit 0b-6 r3 MAT-3: a rules value the gate lacks is handed back to the tick, by the time limits and by the merge requests', async () => {

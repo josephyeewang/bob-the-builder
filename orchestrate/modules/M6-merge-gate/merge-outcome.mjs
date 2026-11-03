@@ -70,7 +70,10 @@ export function prReadingAfter(record, prNumber, mergeId) {
   if (!f?.doc || f.corrupt || !factFrom('sensors', { id, createdBy: record.meta?.('fact', id)?.createdBy ?? null }, 'pr-')) return null;
   const seen = Date.parse(f.doc.observed_at ?? '');
   const changed = Date.parse(record.meta?.('merge', mergeId)?.ts ?? '');
-  return Number.isFinite(seen) && Number.isFinite(changed) && seen > changed ? f.doc : null;
+  if (!(Number.isFinite(seen) && Number.isFinite(changed) && seen > changed)) return null;
+  // A reading is one only when GitHub answered: state open or closed, merged true or false (L246). Anything else (all
+  // null, a state GitHub never gives) is no reading, so the merge waits for a real one and is never refused as open.
+  return (f.doc.state === 'open' || f.doc.state === 'closed') && typeof f.doc.merged === 'boolean' ? f.doc : null;
 }
 
 export function openTooLong(record, mergeId, now, limitMs) {
