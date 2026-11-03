@@ -24,9 +24,10 @@ import { parseRawZ, refusedEntries } from './push-refusals.mjs';
 import { scanSecrets } from './gitleaks.mjs';
 import { allowList, maskPath } from './binary-files.mjs';
 import { startGate } from './start-gate.mjs';
+import { BRANCH, cardBranch } from './branch.mjs';
 
+export { BRANCH };
 export const BUNDLE_CAP = 200 * 1024 * 1024;
-export const BRANCH = /^card\/[a-z0-9][a-z0-9-]{0,63}$/;
 // git's change letters (diff-tree --raw --no-renames) as M10 names them; a type change (T) is a modified file.
 const CHANGE_STATUS = Object.freeze({ A: 'added', M: 'modified', D: 'removed', T: 'modified' });
 const CARD = /^[A-Za-z0-9][A-Za-z0-9-]{0,63}$/;
@@ -148,7 +149,7 @@ export function createPushScript(deps) {
     if (!CARD.test(String(card))) no('the launch record has a bad card id');
     if (!ATTEMPT.test(String(att))) no('the launch record has a bad attempt id');
     if (typeof outbox !== 'string' || !isAbsolute(outbox)) no('the launch record has no outbox');
-    if (!BRANCH.test(String(branch)) || branch !== `card/${card.toLowerCase()}`) no(`the branch "${branch}" is not the card's branch`);
+    if (!BRANCH.test(String(branch)) || branch !== cardBranch(card)) no(`the branch "${branch}" is not the card's branch`);
 
     const repo = rules.get('product.repo', { product });
     const mirror = rules.get('product.mirror', { product });

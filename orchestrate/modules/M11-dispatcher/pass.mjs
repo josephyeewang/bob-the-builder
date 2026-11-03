@@ -33,6 +33,8 @@ import { waitOnJoe } from './joe-waits.mjs';
 import { sensorsFact } from './sensor-facts.mjs';
 import { tellThen, dropCause, isQueued } from './alerts.mjs';
 import { exactReverse } from './undo.mjs';
+import { cardBranch } from '../M4-workshop/git/branch.mjs';
+import { isAbsolute } from 'node:path';
 import { FINAL_STATES, OWNER_WAIT_WHO, PAUSED_WAIT_WHAT } from '../../shared/record.mjs';
 
 export const STOP_FACT = (sid) => `stop-${sid}`;
@@ -268,8 +270,9 @@ export const HELD_BANDS = Object.freeze({ band: 'unknown', own_building: 'unknow
  * One pass. Ports:
  *   sessions: the running sessions Mac-wide [{ id, product, kind, card, lead, role, pgid, bundle_files }]
  *   probe(s) -> { size, activity }   (transcript size incl. compactions, and the activity tracker)
- *   launch({ card, kind, product, sessionId }) -> { ok, pid, pidStart, pgid, head, reason, signin, configDir }
- *                                    (M4 launch, through accountLaunch; it starts claude with the claimed sessionId)
+ *   launch({ card, kind, product, sessionId }) -> { ok, pid, pidStart, pgid, head, outbox, reason, signin, configDir }
+ *                                    (M4 launch, through accountLaunch; it starts claude with the claimed sessionId;
+ *                                    `outbox` is the full path of the session's own outbox folder, which it made)
  *   stopGroup(s) -> { ok, how }      (stopProcessGroup on the session's group)
  *   saveWork(s) -> { ok, reason }    (M4 save-work, inside the worker's lock-down)
  *   hostLock() -> string | null      (the host.lock text; its path is config)
@@ -504,6 +507,15 @@ async function starts({ rec, rules, now, b, running, launch, out, alert, onlyUnd
       doc: { session_id: sessionId, role: 'worker', kind, card: id, head: l.head ?? null, rev: started.rev ?? null, product: product ?? null, signin: l.signin ?? null, config_dir: l.configDir ?? null, copy: l.copy ?? null, launched_at: iso(now) } });
     // A notice only: the merge refusal catches it later; a lost one is in the pass's notes (L130 m4).
     if (!lr.ok && alert(`card ${id}: session ${sessionId} started but its launch was not recorded (${lr.reason}); its merge will be refused`) === false) out.notes.push(`card ${id}: the launch-not-recorded alert could not be queued`);
+    // The session record (L204-a). M4's push script takes its inputs from it alone (product, card, branch, outbox,
+    // attempt), M9's claim break reads its process, and M2 its state. The Dispatcher makes it in preparing (M9: only
+    // the Dispatcher makes one, and the workshop moves it on). `attempt` counts this card's sessions, so each start's
+    // push has its own record line. With no record, or no outbox, the work can never be pushed: Joe is told.
+    const outboxOk = typeof l.outbox === 'string' && isAbsolute(l.outbox);
+    const attempt = `a${rec.list('session').filter((s) => s.doc?.card === id).length + 1}`;
+    const sr = rec.write({ actor: 'dispatcher', entity: 'session', id: sessionId, expectRev: 0, kind: 'session',
+      doc: { state: 'preparing', role: 'worker', product: product ?? null, card: id, branch: cardBranch(id), outbox: outboxOk ? l.outbox : null, attempt, host, pid: l.pid ?? null, pid_start: l.pidStart ?? null, launched_at: iso(now) } });
+    if (!sr.ok || !outboxOk) holdAlert({ rec, cause: `session-${id}`, text: `card ${id}: session ${sessionId} started, but ${sr.ok ? 'the launcher did not say where its outbox is' : `its session record was not written (${sr.reason})`}, so its work cannot be pushed`, alert, now });
     running.push({ id: sessionId, product, kind, card: id, pgid: l.pgid, signin: l.signin ?? null, config_dir: l.configDir ?? null });
     if (factDoc(rec, UNDO_HELD_FACT(id))?.doc?.reason) putFact(rec, UNDO_HELD_FACT(id), { reason: null, at: iso(now) }, 'undo_started');
     // Whether or not the hold was told: an alert still queued for it leaves unsent (audit 0b-6 r8 MAT-1).

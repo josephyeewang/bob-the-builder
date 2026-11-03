@@ -20,22 +20,10 @@ import { fakeRules, makeRules, allow, deny } from '../../../shared/rules.mjs';
 import { makeEngine } from '../../M10-rules/engine.mjs';
 import { parsePolicy } from '../../M10-rules/policy.mjs';
 import { fileURLToPath } from 'node:url';
+import { pushWorld, makeFakeScanner, realEngine, WF, PRODUCT, REPO } from './push-world.test-helper.mjs';
 
 const tmp = (p = 'orch-push-') => tempDir(p);
-const WF = '.github/workflows/outside-check.yml';
-const PRODUCT = 'p1';
-const here = dirname(fileURLToPath(import.meta.url));
-let engine;
 const pushAsked = [];
-function realEngine() {
-  if (engine) return engine;
-  const policy = parsePolicy(readFileSync(join(here, '../../M10-rules/fixtures/policy.yaml'), 'utf8'));
-  assert.ok(policy.ok, policy.reason);
-  engine = makeRules(makeEngine({ products: [PRODUCT], rulesState: () => ({ status: 'ok', policy: policy.policy, commit: 'c'.repeat(40), blob: 'b'.repeat(40) }),
-    productState: () => ({ state: 'active' }), running: () => 0, rolesDir: join(here, '../../M10-rules/roles'), clock: () => Date.now() }));
-  return engine;
-}
-const REPO = 'owner/test-repo';
 
 // A GitHub-token-shaped string made at run time, so no secret-shaped text is ever committed.
 const ALNUM = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
@@ -50,31 +38,6 @@ const realGitleaks = await (async () => {
   }
   return null;
 })();
-
-// ---- a fake gitleaks: checks it got the Do-plane's config and flags, and does as its mode file says ----
-function makeFakeScanner(dir) {
-  const bin = join(dir, 'gitleaks');
-  const mode = join(dir, 'mode');
-  writeFileSync(mode, 'clean');
-  writeFileSync(bin, `#!${process.execPath}
-const fs = require('fs'); const a = process.argv.slice(2);
-const mode = fs.readFileSync(${JSON.stringify(mode)}, 'utf8').trim();
-if (a[0] === 'version') { console.log(mode === 'wrongversion' ? '1.0.0' : '8.30.1'); process.exit(0); }
-const at = (f) => a[a.indexOf(f) + 1];
-if (at('--config') !== ${JSON.stringify(join(dir, 'do-plane.toml'))} || at('--gitleaks-ignore-path') !== ${JSON.stringify(join(dir, 'empty-ignore'))} || !a.includes('--ignore-gitleaks-allow')) process.exit(7);
-if (Object.keys(process.env).some((k) => k.startsWith('GITLEAKS'))) process.exit(8);
-fs.appendFileSync(${JSON.stringify(join(dir, 'calls'))}, a[0] + '\\n');
-if (mode === 'crash') process.exit(2);
-if (mode === 'noreport') process.exit(0);
-if (mode === 'stdinquit' && a[0] === 'stdin') process.exit(3);
-fs.writeFileSync(at('--report-path'), mode === 'leak' ? JSON.stringify([{ RuleID: 'fake-rule', File: 'x.txt' }]) : mode === 'leakname' ? JSON.stringify([{ RuleID: 'fake-rule', File: 'docs/ghp_' + 'A1'.repeat(18) + '.txt' }]) : mode === 'badreport' ? 'not json' : '[]');
-process.exit(mode === 'leak' || mode === 'leakname' ? 1 : 0);
-`);
-  chmodSync(bin, 0o755);
-  writeFileSync(join(dir, 'do-plane.toml'), DO_PLANE_TOML);
-  writeFileSync(join(dir, 'empty-ignore'), '');
-  return { setup: { bin, version: '8.30.1', config: join(dir, 'do-plane.toml'), ignoreFile: join(dir, 'empty-ignore') }, setMode: (m) => writeFileSync(mode, m), calls: () => (existsSync(join(dir, 'calls')) ? readFileSync(join(dir, 'calls'), 'utf8') : '') };
-}
 
 // Positive control for the bypass cases: real gitleaks run the careless way (the branch's own
 // config, ignore file, inline comments or environment), to show each bypass does hide the secret
@@ -91,73 +54,8 @@ async function realScanner(dir) {
   return { bin: realGitleaks, version: /(\d+\.\d+\.\d+)/.exec(out)[1], config: join(dir, 'do-plane.toml'), ignoreFile: join(dir, 'empty-ignore') };
 }
 
-// ---- the world: "GitHub", the mirror, a worker clone, the record, rules and the gate's ports ----
-async function world({ scanner: scannerOverride, gate = {} } = {}) {
-  const root = tmp();
-  const gh = join(root, 'gh.git');
-  await gitOk(['init', '--bare', '-q', gh], { gitDir: gh });
-  const seed = join(root, 'seed');
-  mkdirSync(seed);
-  const sg = { gitDir: join(seed, '.git'), workTree: seed, cwd: seed };
-  await gitOk(['init', '-q', seed], sg);
-  mkdirSync(join(seed, '.github/workflows'), { recursive: true });
-  writeFileSync(join(seed, '.github/workflows/ci.yml'), 'name: ci\n');
-  writeFileSync(join(seed, 'README.md'), 'hello\n');
-  writeFileSync(join(seed, 'app.txt'), 'app\n');
-  await gitOk(['add', '-A'], sg);
-  await gitOk(['commit', '-q', '-m', 'first'], sg);
-  await gitOk(['push', '-q', gh, 'HEAD:refs/heads/main'], sg);
-
-  const mirror = join(root, 'mirror.git');
-  await initMirror(mirror);
-  await gitOk(['fetch', '-q', gh, '+refs/heads/main:refs/heads/main'], { gitDir: mirror });
-
-  const clone = join(root, 'clone');
-  mkdirSync(clone);
-  const cg = { gitDir: join(clone, '.git'), workTree: clone, cwd: clone };
-  await gitOk(['init', '-q', clone], cg);
-  await gitOk(['fetch', '-q', '--update-head-ok', gh, 'refs/heads/main:refs/heads/main'], cg);
-  await gitOk(['checkout', '-q', '-b', 'card/c-1', 'main'], cg);
-
-  const outbox = join(root, 'outbox');
-  mkdirSync(outbox, { mode: 0o700 });
-  const privateDir = join(root, 'private');
-  mkdirSync(privateDir, { mode: 0o700 });
-
-  const record = memoryRecord();
-  // Seeded as the real Record takes them (L72): a session starts in preparing; a card names its state and module,
-  // and its PR title is the card's `what`.
-  assert.equal(record.write({ actor: 'dispatcher', entity: 'session', id: 'S-1', expectRev: 0, doc: { state: 'preparing', product: PRODUCT, card: 'C-1', branch: 'card/c-1', outbox, attempt: 'a1' } }).ok, true);
-  assert.equal(record.write({ actor: 'dispatcher', entity: 'card', id: 'C-1', expectRev: 0, doc: { state: 'draft', module: 'M-test', product: PRODUCT, lane: 'product', what: 'Card one' } }).ok, true);
-  const writeFact = (kind, doc) => { const cur = record.read('fact', factId(kind, PRODUCT)); return record.write({ actor: 'sensors', entity: 'fact', id: factId(kind, PRODUCT), expectRev: cur?.rev ?? 0, doc }); };
-  const fresh = () => new Date().toISOString();
-  writeFact('vercel_skip', { product: PRODUCT, vercel_project: 'prj_1', read_at: fresh(), result: true });
-  writeFact('vercel_env', { product: PRODUCT, vercel_project: 'prj_1', read_at: fresh(), result: true });
-
-  const fake = makeFakeScanner((mkdirSync(join(root, 'scan')), join(root, 'scan')));
-  const issues = []; const prs = [];
-  const values = { 'product.repo': REPO, 'product.mirror': mirror, 'product.onboarded': true, 'product.default_branch': 'main', 'product.vercel_project': 'prj_1', 'outside_check.workflow': WF };
-  // push_branch is M10's real engine on its sample policy (L81 sweep): the push is asked what the engine reads.
-  const answers = { push_branch: (s) => { pushAsked.push(s); return realEngine().may('push_branch', s); } };
-  const run = { workflow_path: WF, event: 'schedule', head_branch: 'main', run_at: fresh(), steps: [{ product: PRODUCT, conclusion: 'success' }] };
-  const ports = {
-    record,
-    rules: fakeRules({ answers, values }),
-    privateDir,
-    scanner: scannerOverride ?? fake.setup,
-    getRobotToken: async () => 'robot-key-for-test',
-    readRun: async () => (gate.readRun ? gate.readRun() : run),
-    workflowRule: gate.workflowRule ?? (async () => ({ ok: true })),
-    issues: { upsert: async (i) => { issues.push(i); } },
-    pullRequests: { upsert: async (p) => { prs.push(p); return { number: 1 }; } },
-    testRemote: () => gh,
-  };
-  const commit = async (msg, fn) => { fn?.(clone); await gitOk(['add', '-A'], cg); await gitOk(['commit', '-q', '--allow-empty', '-m', msg], cg); };
-  const bundle = async (args = ['refs/heads/card/c-1', '^refs/heads/main']) => { rmSync(join(outbox, 'bundle-C-1.bundle'), { force: true }); await gitOk(['bundle', 'create', '-q', join(outbox, 'bundle-C-1.bundle'), ...args], cg); };
-  const ghRefs = async () => (await gitOk(['for-each-ref', '--format=%(refname) %(objectname)'], { gitDir: gh })).trim();
-  const push = (over = {}) => createPushScript({ ...ports, ...over })('S-1');
-  return { root, gh, mirror, clone, cg, outbox, record, values, answers, run, fake, issues, prs, commit, bundle, ghRefs, push, ports, writeFact };
-}
+// ---- the world: "GitHub", the mirror, a worker clone, the record, rules and the gate's ports (push-world.test-helper) ----
+const world = ({ scanner, gate } = {}) => pushWorld({ root: tmp(), scanner, gate, onPushAsked: (x) => pushAsked.push(x) });
 
 // L81 sweep: the push asks M10's push_branch what it reads, and the real engine answers it.
 test('L81: push_branch is asked the card as { id, rows, doc: { lane } } and each file as { path, status }; the old subject is refused', async () => {
