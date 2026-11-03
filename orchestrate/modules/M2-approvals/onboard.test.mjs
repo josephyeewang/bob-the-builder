@@ -501,3 +501,24 @@ test('L326: a near miss and a refusal are one wait, so moving from one to the ot
   pass();
   assert.equal(count(), 2);
 });
+
+// L340 Minor 1 (L323): once "is now on" is told, its mark is cleared by writing false. A write that fails then is never
+// silent: the pass rejects, so the step's failure alert tells Joe. The mark stays due, so the next pass that can write
+// tells once more and clears it (told twice rather than a failure nobody hears of).
+test('L340 Minor 1: a state folder made read-only after the turn-on fails the pass that clears the mark', async () => {
+  const t = world();
+  t.sink.answer = false;
+  await schedulePass(t.ctx);
+  assert.equal(t.record.read('product', PRODUCT).doc.state, 'active');
+  assert.equal(told(t, 'product_on').length, 0, 'made, not yet told');
+  t.sink.answer = true;
+  chmodSync(t.ctx.stateDir, 0o500);
+  try {
+    await assert.rejects(schedulePass(t.ctx), /EACCES|EPERM/);
+    assert.equal(told(t, 'product_on').length, 1, 'told, then the clear failed');
+  } finally { chmodSync(t.ctx.stateDir, 0o700); }
+  await schedulePass(t.ctx);
+  await schedulePass(t.ctx);
+  assert.equal(told(t, 'product_on').length, 2, 'the mark stayed due: told once more, then cleared');
+  assert.equal(JSON.parse(readFileSync(join(t.ctx.stateDir, 'onboard-notices.json'), 'utf8')).due, false);
+});
