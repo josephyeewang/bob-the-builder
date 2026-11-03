@@ -1156,6 +1156,11 @@ test('L274 (6): the same bytes pushed twice answer the recorded push: no second 
   const broke = await w.pushP({ product: PRODUCT, card: 'C-1', sha256 }, { rules: { ...w.ports.rules, get: () => { throw new Error('rules broke'); } } });
   assert.equal(broke.ok, false);
   assert.match(w.record.read('fact', id).doc.last_refusal.reason, /rules broke/);
+  // So does the shortcut's read of the push fact, when it throws (once, here): it answers, never throws (L344).
+  let throws = 1;
+  const factBroke = await w.pushP({ product: PRODUCT, card: 'C-1', sha256 }, { record: view((e, i) => { if (e === 'fact' && i === id && throws-- > 0) throw new Error('record broke'); return w.record.read(e, i); }) });
+  assert.equal(factBroke.ok, false);
+  assert.equal(factBroke.already, undefined);
   const corrupt = await w.pushP({ product: PRODUCT, card: 'C-1', sha256 }, { record: view((e, i) => { const r = w.record.read(e, i); return e === 'fact' && i === id ? { ...r, corrupt: true } : r; }) });
   assert.equal(corrupt.already, undefined, 'a corrupt fact answered as a push');
   // A refused attempt is not "already": the same bytes are tried again.
