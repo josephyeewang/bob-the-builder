@@ -476,6 +476,39 @@ test('plant L254: a held bundle refused with no hash keeps its record, and its p
   assert.equal(sent.length, 1);
 });
 
+test('plant L259: used, refused (too big, told), fixed with new bytes, then too big again: the second refusal is told', async () => {
+  const w = world();
+  put(w, 'research-r1.md', 'A');
+  assert.equal(one(await w.pass(), 'research-r1.md').applied, true);
+  put(w, 'research-r1.md', 'x'.repeat(TEXT_CAP + 1));
+  await w.pass();
+  await w.pass();
+  assert.equal(w.calls.alerts.filter((t) => /larger than/.test(t)).length, 1, 'told once while it sits there');
+  put(w, 'research-r1.md', 'B');
+  assert.equal(one(await w.pass(), 'research-r1.md').refused, 'the same name with new content', 'B is new content on a used name');
+  put(w, 'research-r1.md', 'x'.repeat(TEXT_CAP + 2));
+  await w.pass();
+  assert.equal(w.calls.alerts.filter((t) => /larger than/.test(t)).length, 2, 'a new oversized file is a new request: told');
+  // The same with the used bytes back between the two: the second oversized file is told too.
+  put(w, 'research-r1.md', 'A');
+  assert.equal(one(await w.pass(), 'research-r1.md').already, true);
+  put(w, 'research-r1.md', 'x'.repeat(TEXT_CAP + 3));
+  await w.pass();
+  assert.equal(w.calls.alerts.filter((t) => /larger than/.test(t)).length, 3);
+  // A refusal with no record behind it (a link, then another link) is told per file, too.
+  const v = world();
+  const p = join(v.dirs.a, 'research-r9.md');
+  writeFileSync(join(v.root, 'o1.md'), 'one');
+  symlinkSync(join(v.root, 'o1.md'), p);
+  await v.pass(); await v.pass();
+  const { unlinkSync } = await import('node:fs');
+  unlinkSync(p);
+  writeFileSync(join(v.root, 'o2.md'), 'two');
+  symlinkSync(join(v.root, 'o2.md'), p);
+  await v.pass();
+  assert.equal(v.calls.alerts.filter((t) => /without following a link/.test(t)).length, 2);
+});
+
 // ---- the read-deny wall (render-settings.mjs, L78 n5) ----
 
 const PATHS = (proposals) => ({

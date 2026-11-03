@@ -195,15 +195,17 @@ export async function proposalsPass({ rec, rules, products, ownerUid, wait, aler
     // A refusal is recorded once per reason and bytes, and told once (not every pass while the file sits there).
     // A refusal with no bytes to name (a bad name, too big, a link, another owner) never erases a recorded state (L254):
     // it is added beside it, so a used file's "already used" still holds when its bytes come back.
+    // Told once per reason and file: the bytes' hash, or for a file never read, its size, change time and file number
+    // (L259). A new file refused for the same reason is a new request, and told again; one sitting there is not.
     const refuse = (reason, hash = null) => {
       r.refused = reason;
-      if (prev?.doc?.state === 'refused' && prev.doc.why === reason && prev.doc.sha256 === hash) return;
+      const told = `${reason}\n${hash ?? first}`;
       const keep = hash === null && prev?.doc?.sha256 != null && prev.doc.state !== 'refused';
-      if (keep && prev.doc.refused_why === reason) return;
+      if ((keep || prev?.doc?.state === 'refused') && prev.doc.refused_key === told) return;
       const said = `a file in ${product}'s proposals folder was refused: ${reason}`;
       note(`proposals ${product}: ${name} refused: ${reason}`);
       const at = new Date(now).toISOString();
-      const w = put(keep ? { ...prev.doc, refused_why: reason, refused_at: at, alert_text: said } : { sha256: hash, state: 'refused', why: reason, at, alert_text: said }, 'proposal_refused');
+      const w = put(keep ? { ...prev.doc, refused_why: reason, refused_at: at, refused_key: told, alert_text: said } : { sha256: hash, state: 'refused', why: reason, at, refused_key: told, alert_text: said }, 'proposal_refused');
       if (w.ok) tellThen(alert, said, { fact: intakeFactId(product, name), fields: { told_state: 'refused' }, kind: 'proposal_told' });
       else tellUnrecorded(said, `refused ${hash} ${reason}`);
     };
