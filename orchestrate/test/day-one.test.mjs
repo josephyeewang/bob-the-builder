@@ -227,7 +227,7 @@ test('Joe\'s Undo on day one: the real undo step makes a ready card, and the Rec
   assert.ok(w.rec.ready().some((c) => c.id === id), 'the Record lists the undo card as ready');
 });
 
-test('Joe\'s Undo on day one: M11\'s real undo start starts the undo card', { todo: 'L199-A and L199-B (lanes 2 and 1): M11\'s gate and M10\'s start question both refuse an undo at editing cap 0' }, async () => {
+test('Joe\'s Undo on day one: M11\'s real undo start starts the undo card', { todo: 'L199-B (lane 1): M10\'s start question refuses an undo at editing cap 0 (M11\'s side, L199-A, is done on #117)' }, async () => {
   const w = dayOne();
   const id = undoTapped(w);
   await undoStep({ rec: w.rec, rules: w.rules, now: T0, filesOf: filesOfCommits, alert: w.alerts });
