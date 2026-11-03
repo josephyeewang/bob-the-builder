@@ -22,7 +22,8 @@
 // goes through every step above exactly like a worker's bundle. What differs is only where it comes from: the folder,
 // the owner the bundle must have (Joe's `ownerUid`, where a worker's must be `uids.worker`; L76 (3), L77 m2), and its
 // bytes, which must be the ones the intake recorded (`sha256`). Its branch is `card/<card>` and its attempt
-// `p-<first 12 of sha256>`, so new bytes are a new attempt. `{ look: true }` stops after step 4 and answers the net
+// `p-<first 12 of sha256>`, so new bytes are a new attempt and bytes already pushed answer that push
+// again ({ already: true }); its card must be in the Record. `{ look: true }` stops after step 4 and answers the net
 // change's files without asking the rules or pushing: the intake's day-1 docs check reads the push script's own list
 // (L77 m1), never one a proposal declares.
 
@@ -188,6 +189,8 @@ export function createPushScript(deps) {
     if (typeof product !== 'string' || !product) no('the proposal names no product');
     if (!CARD.test(String(card))) no('the proposal has a bad card id');
     if (!SHA256.test(String(sha256))) no('the proposal has no sha256 of the bundle the intake recorded');
+    // Fail closed here too, not only at the intake (L274 (2), L334): a proposal for a card the Record lacks is refused.
+    if (!record.read('card', card)?.doc) no(`card ${card} is not in the Record`);
     const folder = rules.get('proposals.outbox', { product });
     if (typeof folder !== 'string' || !isAbsolute(folder) || folder.split('/').includes('..')) no('the product has no proposals folder in the rules');
     return { product, card, branch: `card/${card.toLowerCase()}`, folder, uid: ownerUid, folderUid: ownerUid, att: `p-${sha256.slice(0, 12)}`, sha256 };
@@ -320,8 +323,12 @@ export function createPushScript(deps) {
     // Only real text names a fact: String(undefined) or String(null) would pass the id patterns as "undefined" / "null".
     const id = `push.${typeof card === 'string' && CARD.test(card) ? card : 'unknown'}.${typeof att === 'string' && ATTEMPT.test(att) ? att : 'unknown'}`;
     const cur = record.read('fact', id);
-    const doc = res.ok ? { result: 'pushed', branch: res.branch, tip: res.tip, binaries: res.binaries ?? [], at: new Date(now()).toISOString() } : { result: 'refused', reason: res.reason, at: new Date(now()).toISOString() };
+    let doc = res.ok ? { result: 'pushed', branch: res.branch, tip: res.tip, binaries: res.binaries ?? [], at: new Date(now()).toISOString() } : { result: 'refused', reason: res.reason, at: new Date(now()).toISOString() };
+    // A refusal never erases a recorded push of the same attempt (#170 r1): it is added to it as the last refusal.
+    if (!res.ok && cur?.doc?.result === 'pushed' && !cur.corrupt) doc = { ...cur.doc, last_refusal: { reason: res.reason, at: doc.at } };
     if (from) doc.from = from;
+    // The product pushed for: bytes already pushed answer again only for the same product (#170 r1 m1).
+    if (res.ok && from) doc.product = res.product;
     record.write({ actor: 'workshop', entity: 'fact', id, expectRev: cur?.rev ?? 0, doc, kind: res.ok ? 'push' : 'push_refused' });
     return res;
   }
@@ -337,6 +344,16 @@ export function createPushScript(deps) {
    */
   async function pushProposal(p = {}, { look = false } = {}) {
     const sha = SHA256.test(String(p?.sha256)) ? p.sha256 : null;
+    // The same bytes are the same attempt (L274 (6), L334): once pushed, they answer the recorded push, with no
+    // second push and the fact left as it is. Only after the proposal's own checks pass (the card still in the Record,
+    // the product's folder), and only for the product the fact recorded; a corrupt fact is not a push (#170 r1 m1, m2).
+    if (!look && sha) {
+      let inputs = null;
+      try { inputs = proposalInputs(p); } catch (e) { if (!(e instanceof Refusal)) throw e; }
+      const f = inputs && record.read('fact', `push.${inputs.card}.${inputs.att}`);
+      const done = f?.doc && !f.corrupt ? f.doc : null;
+      if (done?.result === 'pushed' && done.product === inputs.product) return { ok: true, already: true, product: inputs.product, card: inputs.card, branch: done.branch, tip: done.tip, binaries: done.binaries ?? [] };
+    }
     return settle(() => proposalInputs(p), () => [p?.card, sha ? `p-${sha.slice(0, 12)}` : null], { look, from: 'proposal' });
   }
 
