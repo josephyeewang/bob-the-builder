@@ -83,7 +83,9 @@ const sensorsFact = (rec, id) => fromSensors(rec, id, 'pr-');
  * is asked for, and the pass ends with that error once the other limits have run, so the tick tells Joe. Returns the
  * list of moves made, for the diary and the tests.
  */
-export async function timeLimits({ rec, rules, now, b, running = [], gateAlive, hasReviewer, requestReview, reviewAlerts, alert, startsHeld = null, missing = [] }) {
+// `clock` (ms): read again for a wait written after the reviewer calls, one card after another (L321: the Store Writer
+// refuses a since more than 60 s off its clock). Left out, it is `now`.
+export async function timeLimits({ rec, rules, now, clock = () => now, b, running = [], gateAlive, hasReviewer, requestReview, reviewAlerts, alert, startsHeld = null, missing = [] }) {
   const done = [];
   const statusErrors = [];
   done.push(...retellReconciles(rec, { alert, now }));
@@ -135,7 +137,7 @@ export async function timeLimits({ rec, rules, now, b, running = [], gateAlive, 
     // A count that drives a decision lives in the card's attempts, the Dispatcher's own key (L74).
     const fails = doc.attempts?.reviewer_starts ?? 0;
     if (fails >= 2) {
-      if (waitOnJoe(rec, id, { what: 'no reviewer could be asked for', now, alert, text: `card ${id}: no reviewer could be asked for twice` }).ok) done.push([id, 'in_review->waiting']);
+      if (waitOnJoe(rec, id, { what: 'no reviewer could be asked for', now: Math.max(now, clock()), kind: 'no_reviewer_ask', alert, text: `card ${id}: no reviewer could be asked for twice` }).ok) done.push([id, 'in_review->waiting']);
       continue;
     }
     const g = startGate({ rules, rec, card: { id, ...doc }, kind: 'review', product: doc.product, b, running });
@@ -171,7 +173,7 @@ export async function timeLimits({ rec, rules, now, b, running = [], gateAlive, 
     if (doc.state === 'checking') {
       const lim = limOf(doc.card, 'checkingMaxMin');
       if (lim.none) { done.push([id, lim.none]); continue; }
-      if (ageMs(rec, 'merge', id, now) >= lim.ms) done.push(...settled(rec, id, settleMerge({ record: rec, alert: textAlerts(alert), now }, id, { reason: 'timeout' }), { now, alert }));
+      if (ageMs(rec, 'merge', id, now) >= lim.ms) done.push(...settled(rec, id, settleMerge({ record: rec, alert: textAlerts(alert), now }, id, { reason: 'timeout' }), { now: Math.max(now, clock()), alert }));
     } else if (doc.state === 'merging' && !gateAlive()) {
       const pr = fresh(rec, doc.pr, id);
       if (!pr) {
@@ -202,7 +204,7 @@ export async function timeLimits({ rec, rules, now, b, running = [], gateAlive, 
       const r = settleMerge({ record: rec, alert: textAlerts(alert), now }, id, { pr, reason: 'interrupted', openTooLong });
       // A notice only: the card goes back to be merged again whatever the answer; a lost one is in the list (L130 m3).
       if (openTooLong && r.ok && r.outcome === 'refused' && alert(`merge ${id}: the Merge Gate stopped mid-merge and PR ${doc.pr} is still open after ${Math.round(openMs / 60_000)} min; recorded as interrupted, and the card goes back to be merged again`) === false) done.push([id, 'not told: the alert could not be queued']);
-      done.push(...settled(rec, id, r, { now, alert }));
+      done.push(...settled(rec, id, r, { now: Math.max(now, clock()), alert }));
     } else if (doc.state === 'refused' && !(doc.reasons ?? []).includes(MERGED_OUTSIDE) && !rec.read('fact', RECONCILED_FACT(id)) && !landedElsewhere(rec, id, doc)) {
       // A refused merge whose PR GitHub later shows merged, by a reading after the refusal. An interrupted one goes to
       // M6's reconcile, which records it merged when it was merged at the judged head (L85 M-1 b). Any other refusal, or

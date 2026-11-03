@@ -31,10 +31,12 @@
 //
 // Shared by both callers, the gate's own recover() and the Dispatcher's time limits (L94: one decision function):
 //   PR_FACT(n) → 'pr-<n>', Sensors' reading of pull request n.
-//   prReadingAfter(record, prNumber, mergeId) → the reading's doc, only when Sensors made it and its observed_at is
-//     after the merge's last write by the Record's clock; else null.
+//   prReadingAfter(record, prNumber, mergeId, now?) → the reading's doc, only when Sensors made it and its observed_at
+//     is after the merge's last write by the Record's clock; else null. With `now`, a time more than a minute ahead of
+//     it is unreadable (shared pastTime, L329), so a reading stamped in the future is never fresh.
 //   openTooLong(record, mergeId, now, limitMs) → true once the merge's last write is at least limitMs old (an age the
-//     Record can't give counts as too long, so the limit only ever fires rather than waits forever); false when the
+//     Record can't give, or one stamped in the future, counts as too long, so the limit only ever fires rather than
+//     waits forever); false when the
 //     limit itself is unknown.
 //   prReading(pr) → GitHub's pull request answer in the reading's shape { state, merged, merge_commit_sha, head_sha }.
 //   refusedTwice(cardDoc) → the reason, when the card's last two merge refusals are the same and the owner has not been
@@ -42,6 +44,7 @@
 
 import { markReverted } from './undo.mjs';
 import { factFrom } from '../M9-record/permissions.mjs';
+import { pastTime } from '../../shared/still-waiting.mjs';
 
 export const PR_FACT = (n) => `pr-${n}`;
 
@@ -63,21 +66,25 @@ export function alertTaken(alert, e) {
   try { return alert(e) !== false; } catch { return false; }
 }
 
-export function prReadingAfter(record, prNumber, mergeId) {
+// `now` (ms) lets a reading or a write stamped in the future count as unreadable (L329): a future observed_at is never a
+// fresh reading, so the wait on it goes on and is told. A caller that passes no `now` keeps the old check (readable only).
+export function prReadingAfter(record, prNumber, mergeId, now) {
   if (prNumber == null) return null;
   const id = PR_FACT(prNumber);
   const f = record.read('fact', id);
   if (!f?.doc || f.corrupt || !factFrom('sensors', { id, createdBy: record.meta?.('fact', id)?.createdBy ?? null }, 'pr-')) return null;
-  const seen = Date.parse(f.doc.observed_at ?? '');
-  const changed = Date.parse(record.meta?.('merge', mergeId)?.ts ?? '');
-  return Number.isFinite(seen) && Number.isFinite(changed) && seen > changed ? f.doc : null;
+  const at = typeof now === 'number' && Number.isFinite(now) ? now : Infinity;
+  const seen = pastTime(f.doc.observed_at, at);
+  const changed = pastTime(record.meta?.('merge', mergeId)?.ts, at);
+  return seen !== null && changed !== null && seen > changed ? f.doc : null;
 }
 
 export function openTooLong(record, mergeId, now, limitMs) {
   if (!Number.isFinite(limitMs)) return false;
-  const t = Date.parse(record.meta?.('merge', mergeId)?.ts ?? '');
   const at = typeof now === 'function' ? now() : now;
-  return Number.isFinite(t) ? at - t >= limitMs : true;
+  // Through pastTime (L329): a last write that can't be read, or is stamped in the future, counts as old enough.
+  const t = pastTime(record.meta?.('merge', mergeId)?.ts, at);
+  return t === null ? true : at - t >= limitMs;
 }
 
 export const prReading = (pr) => ({ state: pr?.state ?? null, merged: pr?.merged === true, merge_commit_sha: pr?.merge_commit_sha ?? null, head_sha: pr?.head?.sha ?? null });
