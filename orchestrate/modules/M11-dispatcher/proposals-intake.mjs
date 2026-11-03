@@ -40,6 +40,7 @@ import { join } from 'node:path';
 import { KEYS, need } from './keys.mjs';
 import { tellThen, dropCause, isQueued } from './alerts.mjs';
 import { BUNDLE_CAP } from '../M4-workshop/git/push.mjs';
+import { cleanOutside, SOURCES } from '../M12-sensors/escape.mjs';
 
 export const FIRST_CUTOVER = 'First cutover: MAIN merges code by hand.';
 export const IDEAS_OFF = 'idea filing is off until #95-b lands (L212, L215)';
@@ -56,6 +57,20 @@ export const NAMES = Object.freeze({
   claim: new RegExp(`^claim-${ID}\\.md$`),
   heartbeat: new RegExp(`^heartbeat-${ID}\\.md$`),
 });
+// What each kind's text is, as outside text (R-0b-126). Every kind in NAMES names its source here, so none falls to
+// 'unknown'; a bundle is git's bytes, handed on only as a path and never read as text, so it is BYTES. The text a
+// handler or review gets is only ever cleanOutside's fenced copy (stripped, masked, escaped); the sha256 is of the
+// raw bytes. A kind with no source here is refused (fenceFor throws), and proposals-intake.test.mjs fails.
+export const BYTES = 'bytes';
+export const SOURCE_OF = Object.freeze({
+  proposal: 'proposal-file', bundle: BYTES, research: 'research-file', idea: 'idea-file', claim: 'proposal-file', heartbeat: 'proposal-file',
+});
+/** The fenced copy of a file's text, with its kind's own source; throws for a kind with none, or one that is bytes. */
+export function fenceFor(kind, text) {
+  const source = Object.hasOwn(SOURCE_OF, kind) ? SOURCE_OF[kind] : null;
+  if (!source || source === BYTES || !SOURCES.includes(source)) throw new Error(`no outside-text source for a ${kind} file`);
+  return { source, fenced: cleanOutside(text, source) };
+}
 const PLAIN_DIR = /^\/[A-Za-z0-9._/-]+$/;
 
 /** The kind and id a name stands for, or null. */
@@ -127,8 +142,9 @@ export function stageOf(rules, product) {
  * One pass over every product's proposals folder.
  * `products`: the product ids. `ownerUid`: Joe's uid from the Dispatcher's config. `wait(ms)`: a sleep.
  * `alert(text, { mark })`: the queueing alert. `note(text)`: a diary line.
- * `handlers`: { research, claim, heartbeat }, each ({ rec, product, kind, id, name, text, sha256 }) → { ok, reason? }.
- * `docsCheck({ product, card, bundle })` → null | reason, and `toReview({ rec, product, card, proposal, bundle })` → { ok, reason? }:
+ * `handlers`: { research, claim, heartbeat }, each ({ rec, product, kind, id, name, source, fenced, sha256 }) → { ok, reason? }:
+ *   `fenced` is the file's text as cleanOutside's fenced copy (R-0b-126); a handler never sees the raw text.
+ * `docsCheck({ product, card, bundle })` → null | reason, and `toReview({ rec, product, card, proposal, bundle })` → { ok, reason? } (`proposal` fenced too):
  *   part 2's; not passed in, every proposal is refused.
  * Returns what happened to each file.
  */
@@ -217,11 +233,11 @@ export async function intakeProposals({ rec, rules, products, ownerUid, wait, al
         if (docs) { refuse(`${FIRST_CUTOVER} (${docs})`, hash); continue; }
       }
       if (typeof toReview !== 'function') { refuse('a proposal\'s route to review is not built yet (R-0b-128 part 2)', hash); continue; }
-      use = () => toReview({ rec, product, card, proposal: file.text, bundle: names.includes(pair) ? join(dir, pair) : null });
+      use = () => toReview({ rec, product, card, proposal: fenceFor('proposal', file.text).fenced, bundle: names.includes(pair) ? join(dir, pair) : null });
     } else {
       const h = handlers[parsed.kind];
       if (typeof h !== 'function') { r.waiting = `no ${parsed.kind} handler yet`; continue; }
-      use = () => h({ rec, product, kind: parsed.kind, id: parsed.id, name, text: file.text, sha256: hash });
+      use = () => h({ rec, product, kind: parsed.kind, id: parsed.id, name, ...fenceFor(parsed.kind, file.text), sha256: hash });
     }
     // Claim first, so a crash after the hand-over cannot use the file twice.
     const claim = put({ sha256: hash, state: 'applying', at: new Date(now).toISOString() }, 'proposal_claim');
