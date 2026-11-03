@@ -63,7 +63,7 @@ test('v3 §2.4, L74 b3: checking over 30 min is refused (timeout) by the Merge G
 });
 
 test('the same refusal reason twice goes to Joe (the gate counts it in attempts.merge_refusals)', async () => {
-  const rec = recWith([cardMerging, checking('M-1', 0), checking('M-2', 40)]);
+  const rec = recWith([cardMerging, checking('M-1', 0), checking('M-2', 10)]);
   await pass(rec, 31);
   assert.equal(rec.read('card', 'C-1').doc.state, 'verified');
   assert.equal(rec.read('merge', 'M-2').doc.state, 'checking');
@@ -702,7 +702,7 @@ for (const lost of ['send refused', 'queue refused']) {
 }
 
 test('L332 m5: a merge refused twice is put on Joe at the time after the reviewer checks, not the step\'s start', async () => {
-  const rec = recWith([cardMerging, checking('M-1', 0), checking('M-2', 40), ['card', 'C-5', { state: 'in_review', head: HB, changed_at: at(0) }]]);
+  const rec = recWith([cardMerging, checking('M-1', 0), checking('M-2', 10), ['card', 'C-5', { state: 'in_review', head: HB, changed_at: at(0) }]]);
   await pass(rec, 31, { hasReviewer: () => true });
   change(rec, 'card', 'C-1', { state: 'merging' }); // the gate takes it again
   // Each reviewer check takes 80 s on the Record's clock, before the merges are settled.
