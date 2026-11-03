@@ -18,7 +18,8 @@ import { FIRST, ENTRY } from '../modules/M10-rules/first-cutover.test-helper.mjs
 import { ALERT_QUEUE_FACT } from '../modules/M11-dispatcher/alerts.mjs';
 import { HOLD_FACT } from '../modules/M11-dispatcher/pass.mjs';
 import { LAST_PASS_FACT } from '../modules/M11-dispatcher/tick.mjs';
-import { wire, checkUser, lastReturn, NOT_WIRED_PASSES, ROBOT_PASSES } from './robot-wiring.mjs';
+import { wire, checkUser, lastReturn, dispatcherLate, NOT_WIRED_PASSES, ROBOT_PASSES } from './robot-wiring.mjs';
+import { DISPATCHER_LATE_MIN } from '../modules/M13-ledger/heartbeat.mjs';
 import { runPasses, CAUSE } from './robot-main.mjs';
 import { notWiredText } from './dispatcher-wiring.mjs';
 import { fakeGitHubFetch, blobOf } from './fake-github.test-helper.mjs';
@@ -72,6 +73,8 @@ test('R-0b-162 B: `node robot-main.mjs <config>` runs every pass; the ones not w
     assert.ok(q.includes(`the robot job's ${p} pass failed: ${notWiredText(port)}; the other passes still ran`), `${p} is told: ${q.join(' | ')}`);
     assert.match(first.err, new RegExp(`robot: ${p} failed: not wired yet`));
   }
+  // The Dispatcher never ran in this world: that is told too.
+  assert.ok(q.includes('the Dispatcher has no full pass on record: nothing is started or merged until it runs'), q.join(' | '));
   // caught-up is real: it ran (no failure told), read the idea issues, and filed Joe's idea only.
   assert.equal(rec.read('fact', HOLD_FACT(CAUSE('caught-up'))), null);
   assert.ok(rec.read('fact', 'idea-issue-7'), 'the owner\'s idea is filed');
@@ -142,4 +145,34 @@ test('R-0b-162 B: every pass is named, and a pass that throws does not stop the 
   // A pass that never answers is cut off at its deadline and told.
   const stuck = await runPasses({ rec, passes: { ...passes, watch: () => new Promise(() => {}) }, now: () => Date.now(), passDeadlineMs: 50 });
   assert.match(stuck.watch.error, /did not finish within 50 ms/);
+});
+
+test('R-0b-162 B (L239): the heartbeat tells Joe when the Dispatcher\'s last full pass is too old, once per stop', () => {
+  const w = world();
+  // The Dispatcher's last pass, written as the Dispatcher would, some minutes before the robot job runs.
+  const lastPass = (minAgo) => {
+    const rec = readRecord(w);
+    assert.ok(rec.write({ actor: 'dispatcher', entity: 'fact', id: LAST_PASS_FACT, expectRev: rec.read('fact', LAST_PASS_FACT)?.rev ?? 0,
+      doc: { at: new Date(Date.now() - minAgo * MIN).toISOString(), steps: {} }, kind: 'full_pass' }).ok);
+  };
+  const late = (q) => q.filter((t) => /^the Dispatcher's last full pass was \d+ minutes ago \(late after 15\)/.test(t));
+  lastPass(DISPATCHER_LATE_MIN + 25);
+  const r = boot(w);
+  assert.equal(r.code, 0, r.err);
+  assert.match(r.err, /robot: alert: the Dispatcher's last full pass was 4\d minutes ago \(late after 15\)/);
+  assert.equal(late(queued(readRecord(w))).length, 1, queued(readRecord(w)).join(' | '));
+  // The same stop is not told again on the next run.
+  boot(w);
+  assert.equal(late(queued(readRecord(w))).length, 1);
+  // On time: nothing new. A new stop later: told again.
+  lastPass(1); boot(w);
+  assert.equal(late(queued(readRecord(w))).length, 1);
+  lastPass(DISPATCHER_LATE_MIN + 1); boot(w);
+  assert.equal(late(queued(readRecord(w))).length, 2);
+  // The edges, without a process: 15 minutes is on time, 16 is late, a pass from the future is told.
+  const rec = readRecord(w);
+  const at = Date.parse(rec.read('fact', LAST_PASS_FACT).doc.at);
+  assert.equal(dispatcherLate(rec, { nowMs: at + DISPATCHER_LATE_MIN * MIN }), null);
+  assert.ok(dispatcherLate(rec, { nowMs: at + (DISPATCHER_LATE_MIN + 1) * MIN }));
+  assert.match(dispatcherLate(rec, { nowMs: at - 11 * MIN }).text, /in the future/);
 });

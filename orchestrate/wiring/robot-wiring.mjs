@@ -11,7 +11,13 @@
 //   gate        M6 gatePass. Needs the robot's GitHub client (a token minted from the robot App's key, M6 token.mjs).
 //               No robot App exists yet (R-0b-02): not wired, refuses.
 //   heartbeat   M13 heartbeatOnce. Needs a GitHub client that edits issues (M13 alerts.mjs), from lane 3's delivery
-//               adapter (L235) and the robot token: not wired, refuses.
+//               adapter (L235) and the robot token: not wired, refuses. One part is real now (L239): when the Dispatcher's
+//               last full pass is older than M13's DISPATCHER_LATE_MIN, or missing, Joe is told (dispatcherLate(), below).
+//               heartbeatOnce itself is not called yet: its account probe is not wired, and a probe that throws makes it
+//               write a signed-out fact the Dispatcher would act on.
+//               WHERE IT GOES, and its limit: the job's log and the Dispatcher's alert queue, the only places there are.
+//               The queue's one sender is the Dispatcher, so while the Dispatcher is down this alert reaches Joe only
+//               when it is back. The delivery adapter (L235) must give this job a sender of its own.
 //   caught-up   M13 caughtUpOnce. REAL: the idea issues are read with the read-only client, the ideas and the push
 //               request are written as the Ledger. See lastReturn() for what "the Mini came back" means here.
 //   watch       M12 watchOnce. Needs a Vercel client and M13 alerts: not wired, refuses.
@@ -25,6 +31,10 @@ import { CONFIG_KEYS as DISPATCHER_KEYS, checkConfig, recordAndRules, refusing }
 import { caughtUpOnce, RETURN_GAP_MIN } from '../modules/M13-ledger/caught-up.mjs';
 import { makeFactWriter } from '../modules/M12-sensors/facts.mjs';
 import { LAST_PASS_FACT } from '../modules/M11-dispatcher/tick.mjs';
+import { holdAlert } from '../modules/M11-dispatcher/pass.mjs';
+import { outbox } from '../modules/M11-dispatcher/alerts.mjs';
+import { DISPATCHER_LATE_MIN } from '../modules/M13-ledger/heartbeat.mjs';
+import { notWiredText } from './dispatcher-wiring.mjs';
 
 export const CONFIG_KEYS = Object.freeze([...DISPATCHER_KEYS, 'keyDir']);
 const PATHS = Object.freeze(['recordRoot', 'productsFile', 'rulesStateDir', 'tokenFile', 'keyDir']);
@@ -66,6 +76,20 @@ export function lastReturn(rec, { nowMs, gapMin = RETURN_GAP_MIN, withinMs = DAY
   return null;
 }
 
+/**
+ * Is the Dispatcher late? Its last full pass (the `last-full-pass` fact) older than M13's DISPATCHER_LATE_MIN, missing,
+ * or more than 10 minutes in the future (heartbeat.mjs's own rule). → null when on time, else { since (ms | null), text }.
+ * `since` keys the alert: each stop of the Dispatcher is told once (and again each day it lasts).
+ */
+export function dispatcherLate(rec, { nowMs, lateMin = DISPATCHER_LATE_MIN }) {
+  const at = Date.parse(rec.read('fact', LAST_PASS_FACT)?.doc?.at ?? '');
+  if (!Number.isFinite(at)) return { since: null, text: 'the Dispatcher has no full pass on record: nothing is started or merged until it runs' };
+  const min = Math.round((nowMs - at) / 60e3);
+  if (min < -10) return { since: at, text: `the Dispatcher's last full pass is dated ${-min} minutes in the future: check the Mini's clock` };
+  if (min <= lateMin) return null;
+  return { since: at, text: `the Dispatcher's last full pass was ${min} minutes ago (late after ${lateMin}): nothing new is started or merged until it runs again` };
+}
+
 /** The open `idea` issues (caught-up.mjs's listIdeaIssues), one read. A list that could be cut off is refused, not used. */
 export async function ideaIssues(gh, { owner, repo }) {
   const r = await gh.get(`/repos/${owner}/${repo}/issues?labels=idea&state=open&per_page=${MAX_IDEAS}`);
@@ -82,6 +106,14 @@ export async function wire(config, { log = (s) => process.stderr.write(`${s}\n`)
 
   const ledger = makeFactWriter(rec, { actor: 'ledger', now: () => new Date(now()) });
   const passes = Object.fromEntries(Object.entries(NOT_WIRED_PASSES).map(([p, port]) => [p, refusing(port)]));
+  passes.heartbeat = async () => {
+    const late = dispatcherLate(rec, { nowMs: now() });
+    if (late) {
+      log(`robot: alert: ${late.text}`);
+      holdAlert({ rec, cause: `robot-dispatcher-late-${late.since ?? 'never'}`, text: late.text, alert: outbox(rec, now()), now: now() });
+    }
+    throw new Error(notWiredText(NOT_WIRED_PASSES.heartbeat));
+  };
   passes['caught-up'] = async () => {
     const ret = lastReturn(rec, { nowMs: now() });
     return caughtUpOnce({ rec, gh: { listIdeaIssues: () => ideaIssues(gh, entry) }, writer: ledger, ownerId: entry.joe_github_id,
