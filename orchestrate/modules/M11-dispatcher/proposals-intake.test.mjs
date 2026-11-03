@@ -725,7 +725,80 @@ test('plant L275 m-6: a folder whose stat gives no file number or no creation ti
     const out = await w.pass({ lookDir: statWith(() => over) });
     assert.match(out[0].skipped, /could not be identified/, JSON.stringify(over));
     assert.equal(w.calls.handed.length, 0);
+    await w.pass({ lookDir: statWith(() => over) });
+    assert.equal(count(w, /could not be identified/), 1, `told once, never silent (L279 m-7): ${JSON.stringify(over)}`);
   }
+});
+
+test('plant L279 MAT-D: a used folder re-dated (its creation time rewritten), then given to b, is refused and told', async () => {
+  const w = world({ products: ['a', 'b'] });
+  const a2 = join(w.root, 'a2'); mkdirSync(a2); chmodSync(a2, 0o750);
+  put(w, 'research-r1.md', 'x');
+  await w.pass();
+  const redated = statWith((p) => (p === w.dirs.a ? { birthtimeMs: 1 } : {}));
+  const out = await w.pass({ rules: rulesFor({ a: a2, b: w.dirs.a }), lookDir: redated });
+  await w.pass({ rules: rulesFor({ a: a2, b: w.dirs.a }), lookDir: redated });
+  assert.equal(w.calls.handed.length, 1);
+  assert.match(out.find((r) => r.product === 'b').skipped, /a's file number but a different creation time/);
+  assert.equal(count(w, /different creation time/), 1);
+});
+
+test('plant L279: bytes a handed in never reach b\'s handlers, whatever happened to the folder; told once with a\'s name and the date', async () => {
+  // The folder check missed (a replaced folder: a new file number): only the bytes record stands.
+  const w = world({ products: ['a', 'b'] });
+  const a2 = join(w.root, 'a2'); mkdirSync(a2); chmodSync(a2, 0o750);
+  put(w, 'research-r1.md', 'x');
+  await w.pass();
+  const replaced = statWith((p) => (p === w.dirs.a ? { ino: lstatSync(p).ino + 1_000_000 } : {}));
+  const moved = rulesFor({ a: a2, b: w.dirs.a });
+  const out = await w.pass({ rules: moved, lookDir: replaced });
+  await w.pass({ rules: moved, lookDir: replaced });
+  assert.equal(w.calls.handed.length, 1, 'not taken in again under b');
+  assert.match(one(out.filter((r) => r.product === 'b'), 'research-r1.md').refused, /^these bytes were already handed in by a on \d{4}-\d\d-\d\d$/);
+  assert.equal(count(w, /already handed in by a on \d{4}-/), 1);
+  // Copied into b's own folder under another name: the same.
+  const v = world({ products: ['a', 'b'] });
+  put(v, 'research-r1.md', 'same');
+  await v.pass();
+  put(v, 'claim-c9.md', 'same', 'b');
+  put(v, 'research-r1.md', 'same', 'b');
+  await v.pass();
+  assert.equal(v.calls.handed.length, 1);
+  // a's own bytes again are still a's (a poll, a retry): not refused by this check.
+  assert.equal(one(await v.pass(), 'research-r1.md').refused, undefined);
+});
+
+test('plant L279: a proposal whose bundle bytes another product handed in is not sent to review', async () => {
+  const w = world({ products: ['a', 'b'] });
+  const rules = rulesFor(w.dirs, { a: 'second', b: 'second' });
+  const sent = [];
+  const toReview = (x) => { sent.push(x.product); return { ok: true }; };
+  put(w, 'proposal-C-1.md', 'a change');
+  put(w, 'bundle-C-1.bundle', 'bytes');
+  await w.pass({ rules, toReview });
+  put(w, 'proposal-C-2.md', 'b change', 'b');
+  put(w, 'bundle-C-2.bundle', 'bytes', 'b');
+  const out = await w.pass({ rules, toReview });
+  await w.pass({ rules, toReview });
+  assert.deepEqual(sent, ['a']);
+  assert.match(out.find((r) => r.product === 'b' && r.name === 'proposal-C-2.md').refused, /^these bytes were already handed in by a on \d{4}-\d\d-\d\d$/);
+});
+
+test('plant L279: the bytes check failing closed: not readable or not recorded, the file is not used, told once', async () => {
+  const w = world();
+  put(w, 'research-r1.md', 'x');
+  const rec = refusing(w, 'proposal_bytes');
+  const out = await w.pass({ rec });
+  await w.pass({ rec });
+  assert.match(one(out, 'research-r1.md').refused, /could not be recorded/);
+  assert.equal(w.calls.handed.length, 0);
+  assert.equal(count(w, /handed these bytes in could not be recorded/), 1);
+  const v = world();
+  put(v, 'research-r1.md', 'x');
+  const odd = Object.create(v.rec);
+  Object.defineProperty(odd, 'read', { value: (e, id) => (id.startsWith('intake-applied-proposals-bytes-') ? { id, entity: e, corrupt: true, reason: 'document changed outside the Store Writer' } : v.rec.read(e, id)) });
+  assert.match(one(await v.pass({ rec: odd }), 'research-r1.md').refused, /could not be read \(document changed/);
+  assert.equal(v.calls.handed.length, 0);
 });
 
 // ---- the read-deny wall (render-settings.mjs, L78 n5) ----
