@@ -949,6 +949,75 @@ test('R3 cosmetic: a failed read\'s reason starts with the HTTP status', async (
   assert.match(w.lines().find((l) => l.not_judged_reason).not_judged_reason, /^HTTP 500/);
 });
 
+// L187 c2: watch-only reads files, checks and statuses with the gate's own limit and readers, so a list too long to
+// judge is a "would refuse" with the gate's final reason, never a "not judged" that hides it.
+const reasonOf = (w, n) => (w.judged()[0]?.refusals ?? []).filter((x) => x.n === n).map((x) => x.reason).join(' | ');
+
+test('L187 c2: 100 check runs → refusal 1 with the gate\'s too-long reason', async () => {
+  const w = world(); await w.pass(PIN_AT);
+  const { head } = w.land({ 'docs/a.md': 'two' });
+  w.g.checks.set(head, Array.from({ length: 100 }, (_, i) => ({ name: i ? `c${i}` : 'test', app: { id: 1 }, head_sha: head, status: 'completed', conclusion: 'success' })));
+  await w.pass();
+  assert.match(reasonOf(w, 1), /the commit has 100 check runs; the gate reads at most 99/, JSON.stringify(w.lines()));
+});
+
+test('L187 c2: 100 statuses → refusal 1 with the gate\'s too-long reason', async () => {
+  const w = world(); await w.pass(PIN_AT);
+  const { head } = w.land({ 'docs/a.md': 'two' });
+  w.g.statuses.set(head, Array.from({ length: 100 }, (_, i) => ({ context: `s${i}`, state: 'success' })));
+  await w.pass();
+  assert.match(reasonOf(w, 1), /the commit has 100 statuses; the gate reads at most 99/, JSON.stringify(w.lines()));
+});
+
+for (const [n, want] of [[299, false], [300, true]]) {
+  test(`L187 c2: a change of ${n} files ${want ? 'is refused for its size' : 'is judged on its files'}`, async () => {
+    const w = world(); await w.pass(PIN_AT);
+    w.land(Object.fromEntries(Array.from({ length: n }, (_, i) => [`docs/f${i}.md`, `v${i}`])));
+    await w.pass();
+    const all = (w.judged()[0]?.refusals ?? []).map((x) => x.reason).join(' | ');
+    assert.ok(w.judged().length === 1, JSON.stringify(w.lines().map((l) => l.not_judged_reason ?? l.verdict)));
+    assert.equal(/the change has 300 or more files/.test(all), want, all);
+  });
+}
+
+test('L187 c2: a listed file missing from its commit\'s file list is a "would refuse", not "not judged"', async () => {
+  const w = world(); await w.pass(PIN_AT);
+  w.land({ 'docs/a.md': 'two' });
+  const get = w.g.gh.get;
+  w.g.gh.get = async (path) => { const r = await get(path); return /\/compare\//.test(path) && r?.status === 200 ? { ...r, json: { ...r.json, files: [...r.json.files, { filename: 'docs/ghost.md', status: 'modified', patch: '+x' }] } } : r; };
+  await w.pass();
+  assert.ok(!w.lines().some((l) => l.not_judged_reason), JSON.stringify(w.lines()));
+  const all = (w.judged()[0]?.refusals ?? []).map((x) => x.reason).join(' | ');
+  assert.match(all, /docs\/ghost\.md is not in its commit's file list/);
+});
+
+// L190 minor a: a cut-off list is an answer, not a failed read. The gate waits on it and refuses it at the cap, so for a
+// commit already on main the verdict is the gate's at the cap: refusal 1, final. A failed check read stays "not judged".
+test('L187 c2 / L190 minor a: a cut-off check list (GitHub counts more than it lists) is judged as the gate\'s final refusal 1, never as complete', async () => {
+  const w = world(); await w.pass(PIN_AT);
+  w.land({ 'docs/a.md': 'two' });
+  const get = w.g.gh.get;
+  w.g.gh.get = async (path) => { const r = await get(path); return /\/check-runs/.test(path) && r?.status === 200 ? { ...r, json: { ...r.json, total_count: r.json.check_runs.length + 1 } } : r; };
+  await w.pass();
+  assert.ok(!w.lines().some((l) => l.not_judged_reason), JSON.stringify(w.lines()));
+  const r1 = (w.judged()[0]?.refusals ?? []).find((x) => x.n === 1);
+  assert.match(r1?.reason ?? '', /the check runs are cut off \(\d+ listed of \d+\); GitHub's count doesn't match its list/, JSON.stringify(w.judged()));
+  assert.notEqual(r1.temporary, true, 'final, as the gate is at the cap');
+  assert.equal(w.judged()[0].verdict, 'would refuse');
+});
+
+test('L190 minor a control: a FAILED check read (HTTP 502) is still "not judged", with the status and no "HTTP undefined"', async () => {
+  const w = world(); await w.pass(PIN_AT);
+  w.land({ 'docs/a.md': 'two' });
+  const get = w.g.gh.get;
+  w.g.gh.get = async (path) => (/\/check-runs/.test(path) ? { status: 502, json: null } : get(path));
+  await w.pass();
+  assert.equal(w.judged().length, 0, JSON.stringify(w.judged()));
+  const why = w.lines().find((l) => l.not_judged_reason)?.not_judged_reason ?? '';
+  assert.match(why, /HTTP 502.*the check runs/);
+  assert.doesNotMatch(why, /undefined/);
+});
+
 // ───────────────────────────── round 3: m-e / m-d / m-f
 
 test('R3 m-f only a stated Approve need is "would ask"; refusal 14 and "the Approve check could not run" are refusals', () => {

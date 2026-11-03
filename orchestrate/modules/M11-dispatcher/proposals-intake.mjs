@@ -25,7 +25,10 @@
 // A folder problem or a kind with nothing to take it in is likewise told until delivered (L260 MAT-2), and two products
 // whose rules name the same folder are both refused, so no file is taken in twice (L260 MAT-3). A folder is, for good,
 // the first product's that takes files in from it: a product whose rules name it later is refused and told until its
-// rules give it a new folder, so files the first used are never taken in again (L268 MAT-B). An interruption whose
+// rules give it a new folder, so files the first used are never taken in again (L268 MAT-B). Bytes are one product's for
+// good too: by sha256, whatever happened to the folders, bytes another product handed in are refused (L279; the per-name
+// used list covers only the same name in the same product, so a product's own bytes under a new name go in again,
+// L254). Heartbeats are not checked: a poll's bytes come again by design. An interruption whose
 // tell was lost is carried by every later write of the file's fact, so a claim or refusal never hides it (L268 MAT-A).
 // A file name goes into an alert or the diary only fenced (`shownName`: one line, stripped, masked; R-0b-126, probe P7).
 //
@@ -322,6 +325,30 @@ export async function proposalsPass({ rec, rules, products, ownerUid, wait, aler
     }
     let use;
     let useBundle = null;
+    // Which product handed these bytes in (L279). `record` writes this product's mark for bytes nobody has; without it the
+    // check only reads, so a proposal's duplicate is refused as one before the first-cutover docs check (r6 m-1).
+    const bytesSeen = (hashes, record) => {
+      for (const h of hashes) {
+        let o;
+        try { o = rec.read('fact', bytesFactId(h)); } catch (e) { return { broke: `the check that no other product handed these bytes in could not be read (${String(e?.message ?? e).slice(0, 200)})` }; }
+        if (o && (o.corrupt || typeof o.doc?.product !== 'string' || !o.doc.product)) return { broke: `the check that no other product handed these bytes in could not be read (${o.corrupt ? String(o.reason).slice(0, 200) : 'no product named'})` };
+        if (o && o.doc.product !== product) return { other: o.doc };
+        if (o || !record) continue;
+        const w = rec.write({ actor: 'dispatcher', entity: 'fact', id: bytesFactId(h), expectRev: 0, doc: { product, name, sha256: h, at: new Date(now).toISOString() }, kind: 'proposal_bytes' });
+        if (!w.ok) return { broke: `which product handed these bytes in could not be recorded (${w.reason})` };
+      }
+      return {};
+    };
+    // Refused or told; true when the file must not be used this pass.
+    const bytesStop = ({ other, broke }) => {
+      if (other) {
+        const as = typeof other.name === 'string' ? ` (as ${shownName(other.name)})` : '';
+        refuse(`these bytes were already handed in by ${other.product}${as} on ${String(other.at ?? '').slice(0, 10) || 'an unknown date'}`, hash);
+        return true;
+      }
+      if (broke) { r.refused = broke; tellUnrecorded(`${shown} in ${product}'s proposals folder was not used: ${broke}`, `bytes ${hash}`); return true; }
+      return false;
+    };
     if (parsed.kind === 'idea') { refuse(IDEAS_OFF, hash); continue; }
     if (parsed.kind === 'bundle') {
       const pair = `proposal-${parsed.id}.md`;
@@ -352,6 +379,7 @@ export async function proposalsPass({ rec, rules, products, ownerUid, wait, aler
         if (!bundleRow?.held || b?.state !== 'held') { r.waiting = `waiting for ${pair} to be taken in`; continue; }
         bundle = { path: join(dir, pair), sha256: b.sha256 };
       }
+      if (bytesStop(bytesSeen([hash, ...(bundle ? [bundle.sha256] : [])], false))) continue;
       if (stageOf(rules, product) !== 'second') {
         if (typeof docsCheck !== 'function') { refuse(`${FIRST_CUTOVER} (A docs proposal is taken in once the docs check on the push script's changed files is wired: R-0b-128 part 2.)`, hash); continue; }
         if (!bundle) { refuse(`no ${pair} carries this proposal's change`, hash); continue; }
@@ -371,22 +399,7 @@ export async function proposalsPass({ rec, rules, products, ownerUid, wait, aler
     // (L279: three misses telling folders apart, MAT-B, C, D). Checked across all products by sha256, the bundle's too
     // when one goes with a proposal, and recorded before the claim. A check that can't be read or written keeps the file
     // unused this pass and is told once (fail closed). A heartbeat is a poll: the same bytes come again by design.
-    if (parsed.kind !== 'heartbeat') {
-      const hashes = [hash, ...(useBundle ? [useBundle] : [])];
-      let other = null;
-      let broke = null;
-      for (const h of hashes) {
-        let o;
-        try { o = rec.read('fact', bytesFactId(h)); } catch (e) { broke = `the check that no other product handed these bytes in could not be read (${String(e?.message ?? e).slice(0, 200)})`; break; }
-        if (o && (o.corrupt || typeof o.doc?.product !== 'string')) { broke = `the check that no other product handed these bytes in could not be read (${o.corrupt ? String(o.reason).slice(0, 200) : 'no product named'})`; break; }
-        if (o && o.doc.product !== product) { other = o.doc; break; }
-        if (o) continue;
-        const w = rec.write({ actor: 'dispatcher', entity: 'fact', id: bytesFactId(h), expectRev: 0, doc: { product, name, sha256: h, at: new Date(now).toISOString() }, kind: 'proposal_bytes' });
-        if (!w.ok) { broke = `which product handed these bytes in could not be recorded (${w.reason})`; break; }
-      }
-      if (other) { refuse(`these bytes were already handed in by ${other.product} on ${String(other.at ?? '').slice(0, 10) || 'an unknown date'}`, hash); continue; }
-      if (broke) { r.refused = broke; tellUnrecorded(`${shown} in ${product}'s proposals folder was not used: ${broke}`, `bytes ${hash}`); continue; }
-    }
+    if (parsed.kind !== 'heartbeat' && bytesStop(bytesSeen([hash, ...(useBundle ? [useBundle] : [])], true))) continue;
     // Claim first, so a crash after the hand-over cannot use the file twice.
     const claim = put({ sha256: hash, state: 'applying', at: new Date(now).toISOString() }, 'proposal_claim');
     if (!claim.ok) { r.refused = `could not record the intake: ${claim.reason}`; tellUnrecorded(`the intake of ${shown} from ${product}'s proposals folder could not be recorded (${claim.reason}); it was not used`, `claim ${hash}`); continue; }

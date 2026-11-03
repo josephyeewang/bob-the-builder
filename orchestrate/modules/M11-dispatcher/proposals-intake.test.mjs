@@ -765,8 +765,8 @@ test('plant L279: bytes a handed in never reach b\'s handlers, whatever happened
   const out = await w.pass({ rules: moved, lookDir: replaced });
   await w.pass({ rules: moved, lookDir: replaced });
   assert.equal(w.calls.handed.length, 1, 'not taken in again under b');
-  assert.match(one(out.filter((r) => r.product === 'b'), 'research-r1.md').refused, /^these bytes were already handed in by a on \d{4}-\d\d-\d\d$/);
-  assert.equal(count(w, /already handed in by a on \d{4}-/), 1);
+  assert.match(one(out.filter((r) => r.product === 'b'), 'research-r1.md').refused, /^these bytes were already handed in by a \(as .*research-r1\.md.*\) on \d{4}-\d\d-\d\d$/);
+  assert.equal(count(w, /already handed in by a \(as .*research-r1\.md.*\) on \d{4}-/), 1, 'told once, naming a\'s file (r6 c-1)');
   // Copied into b's own folder under another name: the same.
   const v = world({ products: ['a', 'b'] });
   put(v, 'research-r1.md', 'same');
@@ -792,7 +792,37 @@ test('plant L279: a proposal whose bundle bytes another product handed in is not
   const out = await w.pass({ rules, toReview });
   await w.pass({ rules, toReview });
   assert.deepEqual(sent, ['a']);
-  assert.match(out.find((r) => r.product === 'b' && r.name === 'proposal-C-2.md').refused, /^these bytes were already handed in by a on \d{4}-\d\d-\d\d$/);
+  assert.match(out.find((r) => r.product === 'b' && r.name === 'proposal-C-2.md').refused, /^these bytes were already handed in by a \(as .*proposal-C-1\.md.*\) on \d{4}-\d\d-\d\d$/);
+});
+
+test('r6 m-1: a proposal another product handed in is refused as a duplicate at the first cutover, before the docs check', async () => {
+  const w = world({ products: ['a', 'b'] });
+  const rules = rulesFor(w.dirs, { a: 'second' });
+  const checked = [];
+  const docsCheck = ({ product }) => { checked.push(product); return 'not docs only'; };
+  const toReview = () => ({ ok: true });
+  put(w, 'proposal-C-1.md', 'a change');
+  put(w, 'bundle-C-1.bundle', 'bytes');
+  await w.pass({ rules, toReview, docsCheck });
+  put(w, 'proposal-C-1.md', 'a change', 'b');
+  put(w, 'bundle-C-1.bundle', 'bytes', 'b');
+  const out = await w.pass({ rules, toReview, docsCheck });
+  const b = out.find((r) => r.product === 'b' && r.name === 'proposal-C-1.md');
+  assert.match(b.refused, /^these bytes were already handed in by a \(as .*proposal-C-1\.md.*\) on \d{4}-/);
+  assert.deepEqual(checked, [], 'the docs check never ran on b\'s copy');
+  assert.equal(count(w, /First cutover/), 0);
+});
+
+test('r6 m-3: a claim write refused once leaves a\'s own file usable: the next pass hands it on exactly once, with no duplicate alert', async () => {
+  const w = world();
+  put(w, 'research-r1.md', 'x');
+  const out = await w.pass({ rec: refusing(w, 'proposal_claim') });
+  assert.match(one(out, 'research-r1.md').refused, /could not record the intake/);
+  assert.equal(w.calls.handed.length, 0);
+  assert.equal(one(await w.pass(), 'research-r1.md').applied, true);
+  await w.pass();
+  assert.equal(w.calls.handed.length, 1);
+  assert.equal(count(w, /already handed in/), 0);
 });
 
 test('plant L279: the bytes check failing closed: not readable or not recorded, the file is not used, told once', async () => {
