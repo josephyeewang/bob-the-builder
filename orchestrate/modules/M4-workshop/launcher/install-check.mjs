@@ -51,7 +51,8 @@ export const RUNNER_MODULES = Object.freeze(['wiring', 'budget']);
 // Each must be one of the copy's own code files from the repository: a .mjs file under one of these folders of the
 // copy. A copy item the install step puts at the top of the copy (`keep`), a folder or the config is refused: the
 // runner imports the module from the copy, and only a file among the copy's own finds the files it imports.
-export const MODULE_HOMES = Object.freeze(['modules', 'shared']);
+// wiring/ too (LEAD-CALLS L257 (B)): the Dispatcher's and the robot job's wiring live there, read through shared/job-config.mjs.
+export const MODULE_HOMES = Object.freeze(['modules', 'shared', 'wiring']);
 // A test file, a test helper, or anything in a test or fixtures folder is in the copy too, but it is never a program
 // the runner may load: a test imports the test runner, and a fixture may exit as soon as it loads, so a config naming
 // one by mistake would leave the runner quiet with nothing useful said (L136 m2).

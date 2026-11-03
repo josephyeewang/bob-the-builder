@@ -17,7 +17,7 @@ import { realpathSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { LABEL, SCRIPTS } from '../modules/M4-workshop/launcher/review-daemons.mjs';
-import { NODE, RUNNER_CONFIG, RUNNER_MODULES, STAMP, UPDATER_CONFIG, aclProblem, copyModuleProblem, currentCopy, installProblem, readInstallStamp } from '../modules/M4-workshop/launcher/install-check.mjs';
+import { MODULE_HOMES, NODE, RUNNER_CONFIG, RUNNER_MODULES, STAMP, UPDATER_CONFIG, aclProblem, copyModuleProblem, currentCopy, installProblem, readInstallStamp } from '../modules/M4-workshop/launcher/install-check.mjs';
 import { MUST_KEEP, RUNNER_NAMES } from '../modules/M4-workshop/launcher/review-updater.mjs';
 import { parseConfig } from './layout.mjs';
 
@@ -41,7 +41,10 @@ export function parseInstallConfig(raw) {
   if (typeof label !== 'string' || !LABEL_RE.test(label)) throw new Error('config: label must be letters, digits, . and - (it starts the jobs\' names)');
   if (!PLAIN_ABS(runnerConfig)) throw new Error('config: runnerConfig must be the full path of the review runner\'s prepared config file');
   if (!PLAIN_ABS(nodeBin)) throw new Error('config: nodeBin must be a full path');
-  if (!Array.isArray(extras) || extras.length > 20 || extras.some((e) => !PLAIN_ABS(e) || !KEEP_NAME.test(posix.basename(e)) || [...Object.keys(MUST_KEEP), STAMP, UPDATER_CONFIG, RUNNER_CONFIG].includes(posix.basename(e)))) {
+  // A code home's name is main's alone (L257 (B)), in any case (lane 2 on #144: macOS's disk ignores case), and said so.
+  const home = Array.isArray(extras) ? extras.find((e) => typeof e === 'string' && MODULE_HOMES.includes(posix.basename(e).toLowerCase())) : undefined;
+  if (home) throw new Error(`config: extras must not hold ${home}: ${posix.basename(home)} is the name of a folder of the copy's own code (main's alone)`);
+  if (!Array.isArray(extras) || extras.length > 20 || extras.some((e) => !PLAIN_ABS(e) || !KEEP_NAME.test(posix.basename(e)) || [...Object.keys(MUST_KEEP), STAMP, UPDATER_CONFIG, RUNNER_CONFIG].map((n) => n.toLowerCase()).includes(posix.basename(e).toLowerCase()))) {
     throw new Error('config: extras must be full paths of files or folders to carry into the copy (the review runner\'s claude program and its hooks), each with a plain name of its own');
   }
   return { ...base, address, gitBin, label, runnerConfig, extras, nodeBin };
