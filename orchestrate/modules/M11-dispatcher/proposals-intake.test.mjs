@@ -4,7 +4,7 @@
 import { test } from 'node:test';
 import { createHash } from 'node:crypto';
 import assert from 'node:assert/strict';
-import { writeFileSync, symlinkSync, linkSync, mkdirSync, chmodSync, fstatSync, openSync, readSync, closeSync, utimesSync } from 'node:fs';
+import { writeFileSync, symlinkSync, linkSync, mkdirSync, chmodSync, fstatSync, lstatSync, openSync, readSync, closeSync, renameSync, utimesSync } from 'node:fs';
 import { join } from 'node:path';
 import {
   proposalsPass, proposalsReadBack, intakeFactId, folderFactId, waitingFactId, toldFactId, folderProblem, proposalName,
@@ -639,6 +639,7 @@ test('plant L268 MAT-A: an untold interruption and a later one under the same na
   put(w, 'research-r1.md', 'two');
   await w.pass(); await w.pass();
   assert.equal(count(w, /^the first interruption; the intake of <outside-text source="proposal-name">research-r1\.md<\/outside-text> from a's proposals folder was interrupted/), 1);
+  assert.equal(count(w, new RegExp(`was interrupted \\(version ${sha('two').slice(0, 12)}\\)`)), 1, 'the version is named');
   assert.equal(w.calls.alerts.length, 1);
   assert.equal(w.calls.handed.length, 0, 'neither interrupted copy is used');
 });
@@ -699,6 +700,43 @@ test('plant L268 m-3: the same folder by another spelling (./ and a trailing sla
   await w.pass({ rules: rulesFor({ a: w.dirs.a, b: w.dirs.a.replace(/\/a$/, '/./a/') }) });
   assert.equal(w.calls.handed.length, 0);
   assert.equal(count(w, /also/), 2);
+});
+
+// A folder's stat with some fields changed: the device after a restart, or no file number at all.
+const statWith = (over) => (p) => { const st = lstatSync(p); return Object.assign(Object.create(Object.getPrototypeOf(st)), st, over(p)); };
+
+test('plant L275 MAT-C: the device number changing (a restart) does not make a used folder new; b is still refused', async () => {
+  const w = world({ products: ['a', 'b'] });
+  const a2 = join(w.root, 'a2'); mkdirSync(a2); chmodSync(a2, 0o750);
+  put(w, 'research-r1.md', 'x');
+  await w.pass();
+  assert.equal(w.calls.handed.length, 1);
+  const restarted = statWith((p) => ({ dev: lstatSync(p).dev + 7 }));
+  const out = await w.pass({ rules: rulesFor({ a: a2, b: w.dirs.a }), lookDir: restarted });
+  assert.equal(w.calls.handed.length, 1, 'not taken in again under b');
+  assert.match(out.find((r) => r.product === 'b').skipped, /was a's first/);
+});
+
+test('plant L275 m-5: a used folder renamed, then given to b, is still a\'s', async () => {
+  const w = world({ products: ['a', 'b'] });
+  const a2 = join(w.root, 'a2'); mkdirSync(a2); chmodSync(a2, 0o750);
+  put(w, 'research-r1.md', 'x');
+  await w.pass();
+  const renamed = join(w.root, 'renamed');
+  renameSync(w.dirs.a, renamed);
+  const out = await w.pass({ rules: rulesFor({ a: a2, b: renamed }) });
+  assert.equal(w.calls.handed.length, 1);
+  assert.match(out.find((r) => r.product === 'b').skipped, /was a's first/);
+});
+
+test('plant L275 m-6: a folder whose stat gives no file number or no creation time is not read', async () => {
+  for (const over of [{ ino: undefined }, { ino: 0 }, { birthtimeMs: undefined }, { birthtimeMs: 0 }]) {
+    const w = world();
+    put(w, 'research-r1.md', 'x');
+    const out = await w.pass({ lookDir: statWith(() => over) });
+    assert.match(out[0].skipped, /could not be identified/, JSON.stringify(over));
+    assert.equal(w.calls.handed.length, 0);
+  }
 });
 
 // ---- the read-deny wall (render-settings.mjs, L78 n5) ----
