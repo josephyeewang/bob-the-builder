@@ -7,7 +7,8 @@
 // next window, then expires. A merge approval not used within 24 hours of being raised goes back the same way. All
 // clocks run from raised_at (GitHub's time for a review request; the first push or bound box for a tap), so a pass
 // that runs late — the Mini was down — lapses an ask exactly as an on-time pass would, and an answer given after the
-// lapse counts nothing (decision.mjs, readApprove below).
+// lapse counts nothing (decision.mjs, readApprove below). A tap ask whose created_at can't be read is asked again from
+// now, and Joe is told why, before anything else happens to it (reaskUnreadable, L362).
 //
 //   await schedulePass(ctx) → { ok, events } | { ok: false, reason, events }    one pass; the dispatcher runs it often
 //     first makes the product's record when its rules file says `onboarding.state: active` and it has none (onboard.mjs)
@@ -35,7 +36,7 @@ import { CLOSE_DUE, closeDecisionPr, openDecision } from './decision.mjs';
 import { goText, goView, undoPushText } from './go-view.mjs';
 import { onboard, onboardNotices } from './onboard.mjs';
 import { countApprove, requestReview } from './github-review.mjs';
-import { MERGE_APPROVE_MS, UNDO_OPEN_QUESTION_LINE, URGENT_REPUSH_MS, dueWindow, lapseAt, readConfig, zoneFor } from './kinds.mjs';
+import { MERGE_APPROVE_MS, TIME_REASKED_LINE, UNDO_OPEN_QUESTION_LINE, URGENT_REPUSH_MS, dueWindow, lapseAt, outsideTime, readConfig, zoneFor } from './kinds.mjs';
 import { pastTime } from '../../shared/still-waiting.mjs';
 
 export const HELD_CLOSED_STATES = Object.freeze(['merged', 'closed', 'cancelled', 'closed_no_answer', 'reverted']);
@@ -136,6 +137,25 @@ async function retryClose(ctx, a, events) {
   write(ctx, a, rest, events, { type: 'decision_pr_close_retried', ask: a.id, card: a.doc.card });
 }
 
+// A tap ask whose created_at can't be read or lies in the future: no box can bind on it (binding.mjs), so left alone it
+// would expire with Joe never told (L362 MAT-2). It is raised afresh: created_at = now, open, no raised time, its boxes
+// released, and not counted as the one re-ask, since Joe was never really asked. Joe is told first; a tell that didn't
+// go through leaves the ask as it is, and the next pass tells again. True when this pass is done with the ask.
+function reaskUnreadable(ctx, a, nowMs, events) {
+  const doc = a.doc;
+  if (activeKind(doc.kind).channel !== 'tap' || (doc.state !== 'open' && doc.state !== 'pushed') || pastTime(doc.created_at, nowMs) !== null) return false;
+  let told = false;
+  try { told = ctx.alert({ type: 'ask_time_unreadable', ask: a.id, card: doc.card, line: `The question about ${doc.card} is being asked again because its time could not be read. An earlier copy of it no longer counts.` }) === true; } catch { told = false; }
+  if (!told) return true;
+  const next = structuredClone(doc);
+  releaseBoxes(next, 'time_unreadable', nowMs, { moveBack: false });
+  delete next.raised_at;
+  delete next.raised_reask;
+  Object.assign(next, { state: 'open', created_at: iso(nowMs), time_reasked_at: iso(nowMs) });
+  write(ctx, a, next, events, { type: 'reasked_time_unreadable', ask: a.id, card: doc.card, line: TIME_REASKED_LINE });
+  return true;
+}
+
 // An unanswered lapsing ask 12 hours after it was raised this round, or an unused merge approval 24 hours after:
 // the first time it goes back to open to be re-asked once (reask_count 1); the second time it expires. A raised_at that
 // can't be read or lies in the future runs out now (L329: pastTime; an expiry never waits on a time it can't trust).
@@ -200,7 +220,7 @@ async function push(ctx, a, { urgent, win, anyBound, nowMs, once }, events) {
   }
   if (!Number.isSafeInteger(doc.pr)) { once.alert(a.id, { type: 'approvals_no_pull_request', ask: a.id }); return; }
   const cfg = readConfig(ctx.rules, ctx.product);
-  const r = await requestReview({ gh: ctx.gh, owner: ctx.owner, repo: ctx.repo, pr: doc.pr, githubId: cfg.githubId });
+  const r = await requestReview({ gh: ctx.gh, owner: ctx.owner, repo: ctx.repo, pr: doc.pr, githubId: cfg.githubId, now: nowMs });
   if (!r.ok) { once.alert(a.id, { type: 'review_not_requested', ask: a.id, reason: r.reason }); return; }
   const next = structuredClone(doc);
   Object.assign(next, { state: 'pushed', raised_at: r.raised_at, raised_reask: next.reask_count, first_pushed_at: next.first_pushed_at ?? iso(nowMs) });
@@ -230,6 +250,7 @@ export async function schedulePass(ctx) {
     if (!activeKind(a.doc.kind)) continue;
     // A close still due is retried first; the ask's run-out waits for the next pass (one write per ask per pass).
     if (a.doc[CLOSE_DUE] === true) { await retryClose(ctx, a, events); continue; }
+    if (reaskUnreadable(ctx, a, nowMs, events)) continue;
     await runOut(ctx, a, nowMs, events);
   }
   // Re-read: the run-outs above changed states.
@@ -264,11 +285,12 @@ export async function readApprove(ctx, id, { view, catchUps = [] } = {}) {
   if (!a) return fail(`no trusted ask ${id}`);
   const doc = a.doc;
   if (doc.kind !== 'risky_approve') return fail(`a ${doc.kind} ask is not a merge approval`);
-  if (doc.state !== 'pushed' || !Number.isSafeInteger(doc.pr) || !raisedThisRound(doc)) return { ok: true, counted: false };
+  if (doc.state !== 'pushed' || !Number.isSafeInteger(doc.pr)) return { ok: true, counted: false };
+  if (!raisedThisRound(doc)) return { ok: true, counted: false, reason: 'the ask has no readable raised time this round' };   // L362 m2
   const c = await countApprove({ gh: ctx.gh, view, owner: ctx.owner, repo: ctx.repo, pr: doc.pr, githubId: cfg.githubId, raisedAt: doc.raised_at, catchUps });
   if (!c.ok) return { ok: true, counted: false, reason: c.reason, ...(c.line ? { line: c.line } : {}) };
   if ((ms(c.review.submitted_at) ?? Infinity) >= lapseAt(doc, ctx.now())) return { ok: true, counted: false, lapsed: true };
-  const binding = { kind: 'github_review', pr: doc.pr, review_id: c.review.id, commit_id: c.review.commit_id, submitted_at: c.review.submitted_at, carried: c.carried };
+  const binding = { kind: 'github_review', pr: doc.pr, review_id: c.review.id, commit_id: c.review.commit_id, submitted_at: iso(outsideTime(c.review.submitted_at, ctx.now())), carried: c.carried };
   const answer = { channel: 'github_review', choice: 'approve', approves: true, declined: false, head: c.head, binding, at: iso(ctx.now()) };
   // The one approval check, on the answer as it will be recorded (L81).
   const counted = answerCounts(ctx.rules, { ...doc, answer }, { product: ctx.product });

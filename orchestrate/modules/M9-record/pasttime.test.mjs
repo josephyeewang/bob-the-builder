@@ -68,3 +68,32 @@ test('L329 writer.mjs lapseClaims: a heartbeat stamped 1 h ahead keeps no tab cl
   assert.deepEqual(r.lapsed.map((x) => [x.card, x.to]), [['C-1', 'ready']]);
   assert.equal(env.record.diary().at(-1).data.why, 'heartbeat stale');
 });
+
+// L362 m3, the plants that survived the audit of #180.
+test('L362 P6c writer.mjs lapseClaims: a claimed_at 30 s ahead is kept', () => {
+  const env = setup({ prefix: 'm9-pasttime-' });
+  product(env); readyCard(env, 'C-1');
+  claimCard(env, 'C-1', { kind: 'tab', claim_id: 'T-1', host: 'mac-a' });
+  const t0 = env.clock.t;
+  plantClaim(env, 'C-1', iso(t0 + 30_000));
+  assert.deepEqual(env.record.lapseClaims(t0).lapsed, [], 'a small drift is no lapse');
+});
+
+test('L362 P7 writer.mjs lapseClaims: a tab claim with no readable claimed_at and no beat lapses as stale, not held as recent', () => {
+  const env = setup({ prefix: 'm9-pasttime-' });
+  product(env); readyCard(env, 'C-1');
+  claimCard(env, 'C-1', { kind: 'tab', claim_id: 'T-1', host: 'mac-a' });
+  plantClaim(env, 'C-1', null);
+  const r = env.record.lapseClaims(env.clock.t);
+  assert.deepEqual(r.lapsed.map((x) => [x.card, x.to]), [['C-1', 'ready']]);
+  assert.equal(env.record.diary().at(-1).data.why, 'heartbeat stale');
+});
+
+test('L362 P6c writer.mjs lapseClaims: a session claim whose claimed_at is 30 s ahead is kept', () => {
+  const env = setup({ prefix: 'm9-pasttime-' });
+  product(env); readyCard(env, 'C-1');
+  claimCard(env, 'C-1');
+  const t0 = env.clock.t;
+  plantClaim(env, 'C-1', iso(t0 + MIN + 30_000));
+  assert.deepEqual(env.record.lapseClaims(t0 + MIN, { stopSession: () => true }).lapsed, [], 'a small drift is no lapse');
+});

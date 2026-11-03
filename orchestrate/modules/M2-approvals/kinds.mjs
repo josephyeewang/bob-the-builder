@@ -14,6 +14,7 @@ import { pastTime } from '../../shared/still-waiting.mjs';
 
 export const STILL_OPEN_LINE = 'Still open: a typed answer doesn\'t count, tap a choice';
 export const CLOSED_LINE = 'that question had closed; nothing was recorded';
+export const TIME_REASKED_LINE = 'that question was asked again because its time could not be read; nothing was recorded, so answer the new one';
 export const typedReplyLine = (card) => `Your typed reply didn't answer the question about ${card}; nothing was recorded. I'll ask again next time — tap a choice.`;
 export const otherCardLine = (card) => `The question below is about ${card}`;
 export const OTHER_ROOM_LINE = 'you have an open question in your thinking room';
@@ -37,6 +38,14 @@ export function lapseAt(doc, now) {
   if (!ASK_KINDS[doc?.kind]?.lapse || doc.raised_at == null || doc.raised_reask !== doc.reask_count) return Infinity;
   const t = pastTime(doc.raised_at, now);
   return t === null ? -Infinity : t + LAPSE_MS;
+}
+
+// A time from outside the Mini's clock (GitHub, the phone, any remote), as it is STORED: min(theirs, now), or now if it
+// can't be read (L362, a standing rule). Reading stays strict (pastTime), so a clock running ahead of the Mini must not
+// reach the record: a stored time read as "in the future" lapses an ask at the next pass, and the re-ask too.
+export function outsideTime(theirs, now) {
+  const t = Date.parse(theirs ?? '');
+  return Number.isFinite(t) ? Math.min(t, now) : now;
 }
 
 const HHMM = /^([01]\d|2[0-3]):([0-5]\d)$/;

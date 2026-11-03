@@ -4,7 +4,7 @@
 // WHAT COUNTS. A tap counts only as the answer to a question box M2 worded (payload.mjs), asked in a Front Door or
 // thinking session the Dispatcher launched, read from M2's tamper-checked copy of that session's log. In order:
 //   1. Binding. An AskUserQuestion call whose input canonicalises to exactly the ask's `payload` or `payload_still_open`,
-//      at or after the ask's created_at, while the ask is open or pushed, with no other live box for that ask anywhere and
+//      at or after the ask's created_at (a box older than the ask must not answer it), while the ask is open or pushed, with no other live box for that ask anywhere and
 //      none for any ask in that session. Binding counts as delivering the ask (M5-1): open → pushed in the same write,
 //      first_pushed_at and raised_at set if unset. Anything else that names an ask is `mismatched_question` (binds nothing).
 //   2. The answer. The tool result for exactly that box (tool_use_id), in the same session, while the ask is still
@@ -28,8 +28,13 @@
 //   releaseBoxes(doc, reason, at, { keepState })   used by the schedule when it moves an ask on
 //   ctx = { record, rules, product, copies, now: () => ms, alert }
 //
-// Events tell the Front Door what to say: `answered`, `released_typed` (typedReplyLine), `closed` (CLOSED_LINE),
-// `mismatched_question`, `tampered`.
+// Events tell the Front Door what to say: `answered`, `released_typed` (typedReplyLine), `closed` (CLOSED_LINE, or the
+// event's own `line`), `mismatched_question`, `tampered`.
+//
+// AN ASK WHOSE TIME CAN'T BE READ (L362). A created_at that can't be read, or lies in the future, proves nothing about a
+// box, so the box never binds on it: binding could let an old box approve a new ask. The schedule's pass re-raises the
+// ask with created_at = now and tells Joe (schedule.mjs reaskUnreadable). A tap on a box from before that gets
+// TIME_REASKED_LINE, not CLOSED_LINE.
 
 import { ownerTurns, QUESTION_TOOL } from '../M1-front-door/transcript.mjs';
 import { canonicalJson } from '../../shared/plan-fingerprint.mjs';
@@ -37,7 +42,8 @@ import { activeKind } from '../../shared/asks.mjs';
 import { answerCounts } from '../../shared/approval.mjs';
 import { askStore, writeDoc } from './ask-store.mjs';
 import { askIdOf, payloadSha, renderPayload } from './payload.mjs';
-import { lapseAt, readConfig } from './kinds.mjs';
+import { lapseAt, outsideTime, readConfig, TIME_REASKED_LINE } from './kinds.mjs';
+import { pastTime } from '../../shared/still-waiting.mjs';
 
 export const BOX_ROLES = Object.freeze(['front_door', 'thinking']);
 const MAX_MISMATCHED = 20;
@@ -54,7 +60,9 @@ export function boxSession(record, sid) {
   const s = record.read('session', sid);
   if (s?.doc?.state === 'ended') return { ok: false, reason: 'session ended', ended: true };
   if (role === 'front_door') {
-    const latest = launches.filter((l) => l.doc.role === 'front_door').sort((a, b) => (ms(a.doc.launched_at) ?? 0) - (ms(b.doc.launched_at) ?? 0)).at(-1);
+    // Newest by the diary's order (the order list() gives), never a stored launch time: a stale launch stamped days
+    // ahead must not win, and a live one with a garbage time must not sort oldest (L362 m1).
+    const latest = launches.filter((l) => l.doc.role === 'front_door').at(-1);
     if (latest.doc.session_id !== sid) return { ok: false, reason: 'a newer Front Door replaced this session', replaced: true };
   }
   return { ok: true, role };
@@ -160,9 +168,9 @@ function tryBind(ctx, sid, role, e, b, events) {
   if (!askId) return;   // not one of M2's boxes (the session's own question)
   const st = askStore(ctx.record);
   const a = st.ask(askId);
-  const at = Math.min(ms(e.timestamp) ?? ctx.now(), ctx.now());
+  const at = outsideTime(e.timestamp, ctx.now());
   const mismatch = (reason) => {
-    events.push({ type: 'mismatched_question', ask: askId, session: sid, reason });
+    events.push({ type: 'mismatched_question', ask: askId, session: sid, reason, ...(reason === TIME_REASKED_LINE ? { line: reason } : {}) });
     if (!a) return;
     if ((a.doc.boxes ?? []).some((x) => x.session_id === sid && x.tool_use_id === b.id)) return;
     addMismatch(a.doc, { session_id: sid, tool_use_id: b.id, status: 'mismatched_question', reason, at: iso(at) });
@@ -176,7 +184,9 @@ function tryBind(ctx, sid, role, e, b, events) {
   const version = sha && sha === doc.payload_sha256 ? 'payload' : sha && sha === doc.payload_still_open_sha256 ? 'still_open' : null;
   if (!version) return mismatch('the box is not M2\'s exact question');
   if (doc.state !== 'open' && doc.state !== 'pushed') return mismatch(`the ask is ${doc.state}`);
-  if (ms(doc.created_at) === null || ms(e.timestamp) === null || ms(e.timestamp) < ms(doc.created_at)) return mismatch('asked before the ask was created');
+  const created = pastTime(doc.created_at, ctx.now());
+  if (created === null) return mismatch(TIME_REASKED_LINE);   // the pass re-raises it (L362 MAT-2)
+  if (ms(e.timestamp) === null || ms(e.timestamp) < created) return mismatch(doc.time_reasked_at ? TIME_REASKED_LINE : 'asked before the ask was created');
   if (ms(e.timestamp) >= lapseAt(doc, ctx.now())) return mismatch('the ask has lapsed');
   if (role === 'thinking' && doc.origin_session !== sid) return mismatch('a thinking room asks only its own questions');
   if (liveBox(doc)) return mismatch('the ask already has a live box');
@@ -204,11 +214,16 @@ function release(ctx, a, reason, sid, events) {
 function answer(ctx, sid, e, b, events) {
   const st = askStore(ctx.record);
   const a = st.asks().find((o) => (o.doc.boxes ?? []).some((x) => x.session_id === sid && x.tool_use_id === b.tool_use_id && x.status !== 'mismatched_question'));
-  if (!a) return;
+  if (!a) {
+    // A box refused because the ask's time can't be read: its tap is told so (L362 MAT-2). Any other refused box stays quiet.
+    const old = st.asks().find((o) => (o.doc.boxes ?? []).some((x) => x.session_id === sid && x.tool_use_id === b.tool_use_id && x.reason === TIME_REASKED_LINE));
+    if (old) events.push({ type: 'closed', ask: old.id, card: old.doc.card, session: sid, line: TIME_REASKED_LINE });
+    return;
+  }
   const doc = a.doc;
   const box = doc.boxes.find((x) => x.session_id === sid && x.tool_use_id === b.tool_use_id);
   if (box.status === 'answered') return;   // the same result read again
-  if (box.status !== 'bound') { events.push({ type: 'closed', ask: a.id, card: doc.card, session: sid }); return; }
+  if (box.status !== 'bound') { events.push({ type: 'closed', ask: a.id, card: doc.card, session: sid, ...(box.reason === 'time_unreadable' ? { line: TIME_REASKED_LINE } : {}) }); return; }
   const at = ms(e.timestamp);
   // The ask moved on while the box was open (m4-1): the box is released, nothing counts, and the owner is told.
   if (doc.state !== 'pushed' || at === null || at >= lapseAt(doc, ctx.now()) || at < (ms(box.bound_at) ?? Infinity)) {
@@ -230,7 +245,7 @@ function answer(ctx, sid, e, b, events) {
   const choice = same && keys.length === 1 && keys[0] === q && typeof answers[q] === 'string' ? answers[q] : null;
   if (choice === null || !(doc.choices ?? []).includes(choice)) return release(ctx, a, 'typed', sid, events);
   // The answer as it will be recorded; the one approval check reads its channel from it (L81).
-  const answer = { channel: 'tap', choice, approves: choice === doc.choices[0], session_id: sid, tool_use_id: b.tool_use_id, at: iso(at) };
+  const answer = { channel: 'tap', choice, approves: choice === doc.choices[0], session_id: sid, tool_use_id: b.tool_use_id, at: iso(outsideTime(e.timestamp, ctx.now())) };
   const counted = answerCounts(ctx.rules, { ...doc, answer }, { product: ctx.product });
   if (!counted.ok) {
     ctx.alert({ type: 'approval_not_counted', ask: a.id, reason: counted.reason });
