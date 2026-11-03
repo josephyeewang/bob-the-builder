@@ -58,7 +58,7 @@ const abs = (p) => `/${p.replace(/^\/+/, '')}`; // Claude's "//path" form needs 
 const denyPair = (p) => [`Read(/${abs(p)}/**)`, `Edit(/${abs(p)}/**)`];
 
 /**
- * paths: { copy, outbox, hooksDir, snapshot, node, deny: { secrets: [], claudeHome, ssh, gh, robotKeys, record, otherCopies: [] },
+ * paths: { copy, outbox, hooksDir, snapshot, node, deny: { secrets: [], claudeHome, ssh, gh, robotKeys, record, otherCopies: [], proposals: [] },
  *          bobFolder?, extraOutboxes?: [], reviewWalls?, notes? }
  * notes: the session's own compaction-notes folder, apart from the outbox (L101). Needed by every role whose kinds hold no
  * `<compactKind>-compact-` kind (all but the worker and the Front Door), refused without: their note never goes in the outbox.
@@ -68,8 +68,12 @@ const denyPair = (p) => [`Read(/${abs(p)}/**)`, `Edit(/${abs(p)}/**)`];
  * phase: 'session' | 'install'
  * productionFiles: the rules' `production.env_files`. Each must be on the read-deny list, or the launch is refused
  * (audit R-0b-44 round 3 MIN-2): the hooks match only plain words, and this list is the wall for `grep -r` or `tar`.
+ * proposalOutboxes: every product's `proposals.outbox` from the rules, not only this session's product's (R-0b-128; L77 (1),
+ * L78 n5). Each must be on the read-deny list (`deny.proposals`), or the launch is refused: every AI session runs as
+ * `orchestrate`, which can read Joe's proposals folders, so the settings are the wall. Required for every role but a
+ * reviewer or auditor, which runs as the `review` user the folders already shut out (the setup read-back proves it).
  */
-export function renderRoleSettings({ role, profile, paths, product = {}, rulesHosts = [], registryHosts = [], phase = 'session', productionFiles }) {
+export function renderRoleSettings({ role, profile, paths, product = {}, rulesHosts = [], registryHosts = [], phase = 'session', productionFiles, proposalOutboxes }) {
   if (!DESIGN_PROFILES[role]) return refuse(`no such role "${role}"`);
   if (phase !== 'session' && phase !== 'install') return refuse('bad phase');
   if (phase === 'install' && role !== 'worker') return refuse('only a worker has an install step');
@@ -91,11 +95,15 @@ export function renderRoleSettings({ role, profile, paths, product = {}, rulesHo
   }
 
   const d = paths.deny ?? {};
-  const denyPaths = [...(d.secrets ?? []), d.claudeHome, d.ssh, d.gh, d.robotKeys, d.record, ...(d.otherCopies ?? [])].filter(Boolean);
+  const denyPaths = [...(d.secrets ?? []), d.claudeHome, d.ssh, d.gh, d.robotKeys, d.record, ...(d.otherCopies ?? []), ...(d.proposals ?? [])].filter(Boolean);
   if (paths.mirror && denyPaths.includes(paths.mirror)) return refuse('the mirror must not be on the read-deny list');
   if (!Array.isArray(productionFiles)) return refuse('the rules\' production file list was not given');
   const unguarded = productionFiles.filter((f) => !denyPaths.some((d) => typeof f === 'string' && (f === d || f.startsWith(`${d.replace(/\/+$/, '')}/`))));
   if (unguarded.length) return refuse(`the rules list production files the role file does not deny: ${unguarded.join(', ')}`);
+  if (proposalOutboxes === undefined && !REVIEW_ROLES.includes(role)) return refuse('the rules\' proposals folders were not given');
+  if (proposalOutboxes !== undefined && !Array.isArray(proposalOutboxes)) return refuse('the rules\' proposals folders are not a list');
+  const open = (proposalOutboxes ?? []).filter((f) => typeof f !== 'string' || !denyPaths.includes(f));
+  if (open.length) return refuse(`the rules' proposals folders are not all on the read-deny list: ${open.join(', ')}`);
   const deny = denyPaths.flatMap(denyPair);
   // Outbox: no dot-names, no sub-folders' dot-names.
   const ob = abs(paths.outbox);
