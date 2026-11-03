@@ -39,7 +39,7 @@ import { sensorsFact } from './sensor-facts.mjs';
 import { outageStep, OUTAGE_FACT } from './outage.mjs';
 import { intakePass } from './outbox-intake.mjs';
 import { leadRestartStep, leadInFlight, handoffVet } from './lead-restart.mjs';
-import { dispatcherPass, stopPass, undoStarts, rulesMissingAlert, holdAlert, HELD_BANDS, HOLD_REPEAT_MS } from './pass.mjs';
+import { dispatcherPass, stopPass, undoStarts, rulesMissingAlert, holdAlert, HELD_BANDS, HOLD_REPEAT_MS, TOLD_BANDS } from './pass.mjs';
 import { startGate } from './gate.mjs';
 import { currentBands } from './usage.mjs';
 import { timeLimits, requestMerges } from './merges.mjs';
@@ -81,7 +81,7 @@ export function approvalsAlertText(product, a) {
  * each with its own deadline and its own try (L221 MAT-1). A product whose pass throws or runs late is failed, the
  * others still run, and the step then fails with one stable line naming the failed products, sorted, each with a short
  * cause (numbers out), so the tick's step-error alert tells it once per distinct set. A pass that answers `ok: false`
- * (a bad approvals config) is not failed here: M2 has told Joe itself (approvals_config), once.
+ * (a bad approvals config) is not failed here: M2 has told Joe itself (approvals_config), again each day while it stands.
  *   approvals() → [{ product, gh, owner, repo, stateDir, push, copies }]   per product, everything M2 reaches outside
  */
 export async function approvalsStep({ rec, rules, now, alert, approvals, productMs = APPROVALS_PRODUCT_MS, pass = schedulePass }) {
@@ -303,7 +303,8 @@ export async function tick({ rec, rules, now, ports: p }) {
     // A missing rules value is told by the missing-values alert, not twice.
     if (acct.reason && !acct.missing) holdAlert({ rec, cause: 'account', text: `nothing new starts but undo cards: ${acct.reason}`, alert, now });
     const band = stops?.bands ?? bands;
-    if (!acct.reason && band && ['red', 'unknown'].includes(band.band)) {
+    // One list with the start pass (L305): a held start is folded only under a band this alert tells.
+    if (!acct.reason && band && TOLD_BANDS.includes(band.band)) {
       holdAlert({ rec, cause: `band-${band.band}`, text: `the usage band is ${band.band}${band.reason ? ` (${band.reason})` : ''}: work it holds waits; stops and undo still run`, alert, now });
     }
   } catch (e) { alert(`the Dispatcher could not record a hold: ${e?.message ?? e}`); }
