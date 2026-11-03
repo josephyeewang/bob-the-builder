@@ -22,7 +22,8 @@
 // goes through every step above exactly like a worker's bundle. What differs is only where it comes from: the folder,
 // the owner the bundle must have (Joe's `ownerUid`, where a worker's must be `uids.worker`; L76 (3), L77 m2), and its
 // bytes, which must be the ones the intake recorded (`sha256`). Its branch is `card/<card>` and its attempt
-// `p-<first 12 of sha256>`, so new bytes are a new attempt. `{ look: true }` stops after step 4 and answers the net
+// `p-<first 12 of sha256>`, so new bytes are a new attempt and bytes already pushed answer that push
+// again ({ already: true }); its card must be in the Record. `{ look: true }` stops after step 4 and answers the net
 // change's files without asking the rules or pushing: the intake's day-1 docs check reads the push script's own list
 // (L77 m1), never one a proposal declares.
 
@@ -188,6 +189,8 @@ export function createPushScript(deps) {
     if (typeof product !== 'string' || !product) no('the proposal names no product');
     if (!CARD.test(String(card))) no('the proposal has a bad card id');
     if (!SHA256.test(String(sha256))) no('the proposal has no sha256 of the bundle the intake recorded');
+    // Fail closed here too, not only at the intake (L274 (2), L334): a proposal for a card the Record lacks is refused.
+    if (!record.read('card', card)?.doc) no(`card ${card} is not in the Record`);
     const folder = rules.get('proposals.outbox', { product });
     if (typeof folder !== 'string' || !isAbsolute(folder) || folder.split('/').includes('..')) no('the product has no proposals folder in the rules');
     return { product, card, branch: `card/${card.toLowerCase()}`, folder, uid: ownerUid, folderUid: ownerUid, att: `p-${sha256.slice(0, 12)}`, sha256 };
@@ -337,6 +340,12 @@ export function createPushScript(deps) {
    */
   async function pushProposal(p = {}, { look = false } = {}) {
     const sha = SHA256.test(String(p?.sha256)) ? p.sha256 : null;
+    // The same bytes are the same attempt (L274 (6), L334): once pushed, they answer the recorded push, with no
+    // second push and the fact left as it is.
+    if (!look && sha && typeof p.card === 'string' && CARD.test(p.card)) {
+      const done = record.read('fact', `push.${p.card}.p-${sha.slice(0, 12)}`)?.doc;
+      if (done?.result === 'pushed') return { ok: true, already: true, product: p.product, card: p.card, branch: done.branch, tip: done.tip, binaries: done.binaries ?? [] };
+    }
     return settle(() => proposalInputs(p), () => [p?.card, sha ? `p-${sha.slice(0, 12)}` : null], { look, from: 'proposal' });
   }
 

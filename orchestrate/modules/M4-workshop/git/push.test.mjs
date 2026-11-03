@@ -1114,6 +1114,55 @@ test('R-0b-127: a proposal bundle is verified, fetched for its card\'s branch on
   assert.deepEqual(readdirSync(w.ports.privateDir), []);
 });
 
+test('L274 (6): the same bytes pushed twice answer the recorded push: no second push, no second pull request, the fact unchanged; new bytes are a new attempt', async () => {
+  const w = await world();
+  await w.commit('docs', (c) => writeFileSync(join(c, 'README.md'), 'better\n'));
+  const sha256 = await w.propose();
+  const first = await w.pushP({ product: PRODUCT, card: 'C-1', sha256 });
+  assert.equal(first.ok, true, first.reason);
+  const id = `push.C-1.p-${sha256.slice(0, 12)}`;
+  const fact = w.record.read('fact', id);
+  const refs = await w.ghRefs();
+  callLog.length = 0;
+  const again = await w.pushP({ product: PRODUCT, card: 'C-1', sha256 });
+  assert.deepEqual(again, { ok: true, already: true, product: PRODUCT, card: 'C-1', branch: first.branch, tip: first.tip, binaries: first.binaries ?? [] });
+  assert.equal(callLog.length, 0, 'git ran for bytes already pushed');
+  assert.equal(await w.ghRefs(), refs);
+  assert.equal(w.prs.length, 1);
+  assert.deepEqual(w.record.read('fact', id), fact, 'the push fact was rewritten');
+  // New bytes for the same card are a new attempt, pushed and recorded beside the first.
+  await w.commit('more docs', (c) => writeFileSync(join(c, 'README.md'), 'better still\n'));
+  const sha2 = await w.propose();
+  const next = await w.pushP({ product: PRODUCT, card: 'C-1', sha256: sha2 });
+  assert.equal(next.ok, true, next.reason);
+  assert.equal(next.already, undefined);
+  assert.equal(w.record.read('fact', `push.C-1.p-${sha2.slice(0, 12)}`).doc.result, 'pushed');
+  assert.deepEqual(w.record.read('fact', id), fact);
+  // A refused attempt is not "already": the same bytes are tried again.
+  const w2 = await world();
+  await w2.commit('docs', (c) => writeFileSync(join(c, 'README.md'), 'better\n'));
+  const sha3 = await w2.propose();
+  assert.equal((await w2.pushP({ product: PRODUCT, card: 'C-1', sha256: sha3 }, { fstat: ownedBy(ME + 7) })).ok, false);
+  const retry = await w2.pushP({ product: PRODUCT, card: 'C-1', sha256: sha3 });
+  assert.equal(retry.ok, true, retry.reason);
+  assert.equal(retry.already, undefined);
+});
+
+test('L274 (2): a proposal for a card the Record lacks is refused at the push script, and says so; GitHub untouched', async () => {
+  const w = await world();
+  await w.commit('docs', (c) => writeFileSync(join(c, 'README.md'), 'better\n'));
+  const sha256 = await w.propose();
+  const refs = await w.ghRefs();
+  for (const look of [false, true]) {
+    const r = await w.pushP({ product: PRODUCT, card: 'C-9', sha256 }, { look });
+    assert.equal(r.ok, false);
+    assert.match(r.reason, /card C-9 is not in the Record/);
+  }
+  assert.equal(await w.ghRefs(), refs);
+  assert.equal(w.prs.length, 0);
+  assert.equal(w.record.read('fact', `push.C-9.p-${sha256.slice(0, 12)}`).doc.result, 'refused');
+});
+
 test('R-0b-127: look answers the net change\'s files and pushes, asks and records nothing', async () => {
   const w = await world();
   await w.commit('docs', (c) => { writeFileSync(join(c, 'README.md'), 'better\n'); writeFileSync(join(c, 'notes.md'), 'new\n'); });
