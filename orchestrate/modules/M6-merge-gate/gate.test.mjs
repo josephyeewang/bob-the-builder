@@ -2669,3 +2669,28 @@ test('L231: a hold under the lock whose move is refused ends refused, and Joe is
   }
 });
 
+
+// #154 audit Minor 2 (L290 M-1): each gathered file's blob is the one compare named for it, git's own id for its bytes;
+// a file compare gives no sha for has no blob, so refusal 10 waits on it instead of matching anything.
+test('gather: each file\'s blob is compare\'s sha for it, git\'s id of its bytes; no sha, no blob', async () => {
+  const files = { 'src/a.mjs': 'two', 'docs/b.md': 'line\r\nnext\r\n' };
+  const w = world();
+  verifiedCard(w, 'C-1', { files });
+  await gatePass(w.ctx);
+  const m = mergeOf(w);
+  const f = await gatherFacts(w.ctx, m);
+  assert.ok(Array.isArray(f.files) && f.files.length === 2, JSON.stringify(f.filesProblem));
+  for (const x of f.files) assert.equal(x.blob, blobSha(Buffer.from(files[x.path])), x.path);
+  // The same ids the compare answer gave, file by file.
+  const real = w.g.gh.get.bind(w.g.gh);
+  let seen = null;
+  w.g.gh.get = async (path) => { const r = await real(path); if (/\/compare\//.test(path)) seen = r.json.files; return r; };
+  const again = await gatherFacts(w.ctx, m);
+  assert.ok(seen, 'compare was read');
+  assert.deepEqual(again.files.map((x) => [x.path, x.blob]).sort(), seen.map((x) => [x.filename, x.sha]).sort());
+  // Compare names no sha: the file has no blob at all.
+  w.g.gh.get = async (path) => { const r = await real(path); return /\/compare\//.test(path) && r.status === 200 ? { ...r, json: { ...r.json, files: r.json.files.map(({ sha, ...x }) => x) } } : r; };
+  const none = await gatherFacts(w.ctx, m);
+  assert.equal(none.files.length, 2);
+  for (const x of none.files) assert.equal('blob' in x, false, x.path);
+});

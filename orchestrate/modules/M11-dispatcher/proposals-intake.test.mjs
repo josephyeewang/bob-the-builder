@@ -970,7 +970,7 @@ test('L291 (1): the exact inputs: a handler and review get these keys and no oth
   await w.pass({ rules: rulesFor(w.dirs, { a: 'second' }),
     handlers: { ...w.base.handlers, research: (x) => { got.handler = x; return { ok: true }; } },
     toReview: (x) => { got.review = x; return { ok: true }; } });
-  assert.deepEqual(Object.keys(got.handler).sort(), ['blob', 'fenced', 'id', 'kind', 'name', 'product', 'rec', 'sha256', 'size', 'source']);
+  assert.deepEqual(Object.keys(got.handler).sort(), ['blob', 'fenced', 'id', 'kind', 'name', 'now', 'product', 'rec', 'sha256', 'size', 'source']);
   assert.deepEqual(Object.keys(got.review).sort(), ['bundle', 'card', 'product', 'proposal', 'rec']);
   assert.deepEqual(Object.keys(got.review.bundle).sort(), ['path', 'sha256']);
   for (const v of [...Object.values(got.handler), ...Object.values(got.review)]) assert.ok(!(v instanceof Uint8Array), 'no bytes');

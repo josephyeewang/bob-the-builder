@@ -6,7 +6,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { chmodSync, mkdirSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { researchHandler, researchPass, researchCardDoc, researchPath, RESEARCH_CARD, RESEARCH_OFF } from './research-intake.mjs';
 import { proposalsPass } from './proposals-intake.mjs';
@@ -22,6 +22,12 @@ import { judge, researchCopyProblem } from '../M6-merge-gate/refusals.mjs';
 import { blobSha } from '../M10-rules/reader.mjs';
 import { cleanOutside } from '../M12-sensors/escape.mjs';
 import { GO_FREE_KEY } from '../M9-record/ready.mjs';
+import { product as productOf } from '../M9-record/fixtures.test-helper.mjs';
+import { gatherFacts } from '../M6-merge-gate/gather.mjs';
+import { fakeGateGitHub } from '../M6-merge-gate/fixtures/fake-gate-github.mjs';
+import { rulesFromText } from '../M10-rules/from-text.mjs';
+import { makeGitView } from '../M10-rules/git-view.mjs';
+import { T0 } from './fixtures.test-helper.mjs';
 
 const ON = { [`${GO_FREE_KEY}.research_copy`]: true };
 const sha = (t) => createHash('sha256').update(t).digest('hex');
@@ -89,6 +95,11 @@ test('refused: no open ask by that number, an odd name, another product, no proo
   for (const over of [{ sha256: undefined }, { sha256: 'X'.repeat(64) }, { blob: undefined }, { blob: sha(REPORT) }, { size: undefined }, { size: -1 }, { size: '10' }]) {
     assert.match(w.hand('R-1', REPORT, over).reason, /did not hand on the report's sha256, blob id and size/, JSON.stringify(over));
   }
+  // An empty report is no report (#154 audit Minor 6), and a handler with no clock from the pass uses none of its own.
+  assert.match(w.hand('R-1', '').reason, /^the research report for R-1 is empty \(0 bytes\), so there is nothing to copy; the ask stays open$/);
+  assert.match(w.hand('R-1', REPORT, { now: undefined }).reason, /did not hand on its clock/);
+  assert.throws(() => researchPass({ rec: w.rec }), /needs the pass's clock/);
+  assert.equal(researchBrief(w.rec, 'R-1').ok, true, 'the ask is still open');
   assert.equal(w.rec.list('card').length, 0);
   // Taken in once; the ask has landed, so a second report for it is refused.
   assert.equal(w.hand('R-2', REPORT).ok, true);
@@ -118,7 +129,7 @@ test('restart-safe: a card written before a crash is landed by the same bytes or
 });
 
 test('through the real proposals intake: taken in once, and a refusal is told to the owner once', async () => {
-  const w = world({ asks: 1 });
+  const w = world({ asks: 2 });
   const dir = join(w.t.base, 'proposals'); mkdirSync(dir); chmodSync(dir, 0o750);
   // The real queue: each alert is queued in the Record, then sent to a fake port, which writes its told mark (as the tick).
   const port = fakeAlert();
@@ -131,11 +142,17 @@ test('through the real proposals intake: taken in once, and a refusal is told to
   };
   writeFileSync(join(dir, 'research-R-1.md'), REPORT);
   writeFileSync(join(dir, 'research-R-7.md'), 'no such ask');
+  writeFileSync(join(dir, 'research-R-2.md'), '');
   await pass();
   await pass();
   assert.equal(w.rec.read('card', RESEARCH_CARD('R-1')).doc.source.sha256, sha(REPORT));
   assert.equal(w.rec.list('card').length, 1);
   assert.equal(alerts.filter((a) => /research-R-7\.md/.test(a) && /there is no research ask R-7/.test(a)).length, 1, 'told once');
+  // An empty report is refused and told once; its ask stays open (#154 audit Minor 6).
+  assert.equal(alerts.filter((a) => /research-R-2\.md/.test(a) && /is empty \(0 bytes\)/.test(a)).length, 1, 'the empty report is told once');
+  assert.equal(researchBrief(w.rec, 'R-2').ok, true);
+  // The pass's clock, handed on by the intake, not this machine's (#154 audit cosmetic).
+  assert.equal(w.rec.read('ask', 'R-1').doc.landed.at, new Date(now).toISOString());
 });
 
 test('L290: through the real proposals intake, the card\'s sha256 and blob are the raw bytes\', git\'s own, for BOM, CRLF and non-UTF-8 reports', async () => {
@@ -186,6 +203,18 @@ test('refusal 10: a research copy changes only its one path, as a plain file, wi
   fin(problem([file()], card({ files: ['src/x.mjs'] })), /one file must be/);
   fin(problem([file()], card({ research_ask: undefined })), /one file must be/);
   fin(problem([file()], card({ source: { sha256: sha(REPORT) } })), /no blob id for the report/);
+  // #154 audit Minor 1: a path that differs only in case, or by a look-alike character, is another path. On the
+  // change side the copy touches a file that isn't its one path; on the card side the card's one file isn't its ask's.
+  const LOOKS = ['docs/research/Research-R-1.md', 'docs/Research/research-R-1.md', 'DOCS/research/research-R-1.md', 'docs/research/research-r-1.md',
+    'docs/research/research-R-1.MD', 'docs/research/research-\uFF32-1.md', 'docs/research/r\u0435search-R-1.md', 'docs/research/research-R-\u0661.md',
+    'docs/research/research-R-1.md\u200B', 'docs/research/research\u2010R-1.md'];
+  for (const p of LOOKS) {
+    fin(problem([file({ path: p })]), /may change only docs\/research\/research-R-1\.md/);
+    fin(problem([file({ path: p })], card({ files: [p] })), /one file must be its ask's docs\/research\/research-R-1\.md/);
+    fin(problem([file()], card({ files: [p] })), /one file must be its ask's/);
+  }
+  // A blob that is some other id of the same bytes (the sha256, cut to 40) is not git's own: refused.
+  fin(problem([file({ blob: sha(REPORT).slice(0, 40) })]), /is not the owner's report byte for byte/);
 });
 
 test('refusal 10 in judge: a go-free research copy that touches another file is refused there; unread files wait', () => {
@@ -203,4 +232,38 @@ test('refusal 10 in judge: a go-free research copy that touches another file is 
   assert.match(unread[0].reason, /research copy can't be checked/);
   // Files that can never be read (too many) make it final.
   assert.notEqual(r10(facts(null, 'too_many'))[0].temporary, true);
+});
+
+// #154 audit Minor 1, end to end: the real handler makes the card, the real gather reads the change from the fake GitHub,
+// and the real judge decides. An exact copy passes refusal 10; a path off only by case or a look-alike is refused, final.
+test('refusal 10 end to end: the real handler, gather and judge refuse a copy whose path differs only in case or by a look-alike', async () => {
+  const policy = readFileSync(new URL('../M10-rules/fixtures/policy.yaml', import.meta.url), 'utf8')
+    + '\napprovals:\n  plan_go:\n    go_free:\n      exact_reverse: true\n      research_copy: true\n';
+  const g = fakeGateGitHub({ owner: 'sample-org', repo: 'sample-app' });
+  const base = g.commit([], { 'README.md': 'hi' }); g.main = base;
+  let env = null;
+  const rules = rulesFromText({ [PRODUCT]: policy }, { productState: (p) => env?.record.read('product', p)?.doc ?? null, clock: () => env?.clock.t ?? T0 });
+  env = setup({ prefix: 'm11-research-e2e-', extra: { rules } }); env.clock.t = T0; productOf(env, 'active');
+  const f = outboxFile('ask-request', '20261103-0915-ra', { ask: 'research', product: PRODUCT, brief: 'find out x' });
+  must(env.record.applyOutbox({ role: 'front_door', sessionId: 'F-1' }, m9file(env, 'front_door', 'F-1', f.name, f.text)), 'ask');
+  openResearchAsks({ record: env.record, rules, product: PRODUCT, now: () => env.clock.t, alert: fakeAlert() });
+  must(researchHandler({ rules })({ rec: env.record, product: PRODUCT, kind: 'research', id: 'R-1', name: 'research-R-1.md',
+    sha256: sha(REPORT), blob: blobSha(Buffer.from(REPORT)), size: Buffer.byteLength(REPORT), now: env.clock.t }), 'handed in');
+  const ctx = { record: env.record, rules, product: PRODUCT, gh: g.gh, owner: 'sample-org', repo: 'sample-app',
+    view: makeGitView({ gh: g.gh, owner: 'sample-org', repo: 'sample-app' }), now: () => env.clock.t, alert: fakeAlert(), readFact: () => null };
+  let n = 10;
+  const r10 = async (path) => {
+    const head = g.commit([base], { 'README.md': 'hi', [path]: REPORT }, { from: base });
+    g.openPull({ number: ++n, head, files: { [path]: REPORT } });
+    const facts = await gatherFacts(ctx, { id: `M-${n}`, doc: { card: RESEARCH_CARD('R-1'), pr: n } });
+    assert.ok(Array.isArray(facts.files), `${path}: ${facts.filesProblem}`);
+    return judge(facts).refusals.filter((x) => x.n === 10);
+  };
+  assert.deepEqual(await r10(researchPath('R-1')), [], 'the exact copy passes refusal 10');
+  for (const p of ['docs/research/Research-R-1.md', 'docs/Research/research-R-1.md', 'docs/research/research-Ｒ-1.md', 'docs/research/rеsearch-R-1.md']) {
+    const got = await r10(p);
+    assert.equal(got.length, 1, p);
+    assert.notEqual(got[0].temporary, true, `${p}: final`);
+    assert.match(got[0].reason, /may change only docs\/research\/research-R-1\.md/, p);
+  }
 });

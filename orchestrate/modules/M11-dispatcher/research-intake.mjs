@@ -12,8 +12,8 @@
 // hands a research_copy card to a worker (pass.mjs starts).
 //
 //   researchHandler({ rules }) → the proposals intake's `research` handler:
-//     ({ rec, product, id, name, sha256, blob, size, now }) → { ok: true, card } | { ok: false, reason }   (`fenced` unused)
-//   researchPass({ rec, now }) → [[card, what]]   each pass: a research_copy card left in draft is moved to ready, and
+//     ({ rec, product, id, name, sha256, blob, size, now }) → { ok: true, card } | { ok: false, reason }   (`fenced` unused; `now` is the pass's clock, required; a 0-byte report is refused)
+//   researchPass({ rec, now })  (now required) → [[card, what]]   each pass: a research_copy card left in draft is moved to ready, and
 //                                                  an ask whose card exists leaves the waiting list (restart-safe)
 //   researchCardDoc({ askId, product, name, sha256, blob, size }) → the one card shape (tests build theirs with it)
 //   researchPath(askId) → the card's one allowed path (M2's); the blob id is M10 reader.mjs blobSha's, made by the intake
@@ -46,11 +46,15 @@ export function researchCardDoc({ askId, product, name, sha256, blob, size }) {
 }
 
 export function researchHandler({ rules }) {
-  return function research({ rec, product, id, name, sha256, blob, size, now = Date.now() }) {
+  return function research({ rec, product, id, name, sha256, blob, size, now }) {
+    // The pass's own clock, handed on by the intake, never this machine's at call time (#154 audit, cosmetic).
+    if (!Number.isFinite(now)) return { ok: false, reason: 'the intake did not hand on its clock, so the report was not used' };
     if (!goFreeOn(rules, product, 'research_copy')) return { ok: false, reason: RESEARCH_OFF };
     if (!RESEARCH_ID.test(String(id)) || name !== researchFileName(id)) return { ok: false, reason: 'a research report is named research-R-<number>.md, after its ask' };
     // The proof the copy is checked against: the intake's, from the raw bytes it read (L290 M-1).
     if (!HEX64.test(String(sha256)) || !HEX40.test(String(blob)) || !Number.isSafeInteger(size) || size < 0) return { ok: false, reason: 'the intake did not hand on the report\'s sha256, blob id and size, so its copy could not be checked' };
+    // An empty file is not a report: refused, so the ask stays open and Joe is told (#154 audit Minor 6).
+    if (size === 0) return { ok: false, reason: `the research report for ${id} is empty (0 bytes), so there is nothing to copy; the ask stays open` };
     const brief = researchBrief(rec, id);
     if (!brief.ok) return { ok: false, reason: brief.reason };
     if (brief.product !== product) return { ok: false, reason: `research ask ${id} is for product ${brief.product}, not this one` };
@@ -83,7 +87,8 @@ function settle(rec, cardId, askId, now) {
   return out;
 }
 
-export function researchPass({ rec, now = Date.now() }) {
+export function researchPass({ rec, now }) {
+  if (!Number.isFinite(now)) throw new Error('researchPass needs the pass\'s clock (now)');
   const out = [];
   for (const c of rec.list('card')) {
     if (c.doc?.kind !== 'research_copy' || typeof c.doc.research_ask !== 'string') continue;
