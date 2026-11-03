@@ -9,14 +9,19 @@ const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replac
 const str = (s) => `<string>${esc(s)}</string>`;
 const LABEL = /^[A-Za-z0-9][A-Za-z0-9.-]{0,127}$/;
 const ABS = /^\/[^\0\n]*$/;
+// One plain file-name part: no "/", "..", dot-name or space, so each log stays a file directly in logDir.
+const LOG_NAME = /^[A-Za-z0-9_][A-Za-z0-9_-]{0,63}$/;
 
 /**
- * { label, node, script, config, path, logDir, workDir, userName? } -> the plist text.
+ * { label, node, script, config, path, logDir, workDir, userName?, logName? } -> the plist text.
  * `config` is main.mjs's one argument; without it every run stops at once (audit 0b-6 r2 MAT-1).
- * Refuses (throws) a bad label or a non-absolute path.
+ * `logName` names the two logs in logDir (<logName>.out.log, <logName>.err.log); left out, they are the Dispatcher's.
+ * Another job built here passes its own, so no caller edits the text this returns (L246).
+ * Refuses (throws) a bad label, a bad log name or a non-absolute path.
  */
-export function loginJobPlist({ label, node, script, config, path, logDir, workDir, userName }) {
+export function loginJobPlist({ label, node, script, config, path, logDir, workDir, userName, logName = 'dispatcher' }) {
   if (!LABEL.test(String(label))) throw new Error('bad job label');
+  if (typeof logName !== 'string' || !LOG_NAME.test(logName)) throw new Error('bad log name (letters, digits, "-" and "_", not starting with "-")');
   for (const [k, v] of Object.entries({ node, script, config, logDir, workDir })) if (!ABS.test(String(v))) throw new Error(`${k} must be an absolute path`);
   if (typeof path !== 'string' || !path || path.split(':').some((p) => !ABS.test(p))) throw new Error('PATH must be absolute folders joined by ":"');
   const lines = [
@@ -30,8 +35,8 @@ export function loginJobPlist({ label, node, script, config, path, logDir, workD
     `  <key>WorkingDirectory</key>${str(workDir)}`,
     '  <key>StartInterval</key><integer>60</integer>',
     '  <key>RunAtLoad</key><true/>',
-    `  <key>StandardOutPath</key>${str(`${logDir}/dispatcher.out.log`)}`,
-    `  <key>StandardErrorPath</key>${str(`${logDir}/dispatcher.err.log`)}`,
+    `  <key>StandardOutPath</key>${str(`${logDir}/${logName}.out.log`)}`,
+    `  <key>StandardErrorPath</key>${str(`${logDir}/${logName}.err.log`)}`,
   ];
   if (userName != null) {
     if (!/^[a-z_][a-z0-9_-]{0,31}$/.test(String(userName))) throw new Error('bad user name');

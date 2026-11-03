@@ -28,6 +28,12 @@
 ### Open questions
 *(things genuinely undecided — list them honestly rather than papering over)*
 
+### Hardening (Engineering Principle 11, D-036)
+*(failure handling and loophole closing, kept off the main roadmap. **Owner:** {one named owner — a separate lane or session when several work at once}. A Material finding (Rule 30(c), and for a product that acts on its own 30(g): it could act wrongly, hide something from the owner, lose data, touch production or break a capability) is fixed in the change that found it and never parked here. This list is separate from the Step [N+1] hardening audits, which still run. Start each row's Item with its bucket; its Revisit-trigger stays the concrete condition or date:)*
+- **[first release]** — must be closed before the first real user or real data: the product already stops and tells the owner, but the gap would cost them real work. These hold up the first release, not the next phase.
+- **[wider release]** — the product stops and tells the owner, but a new user would be stuck or confused.
+- **[long tail]** — rare cases with a clear message and an easy way out. They count toward the cap like any other row, which keeps the tail short; drop at each weekly triage what no longer matters.
+
 ---
 
 *Status legend: **open** = still to do · **done** = completed (keep for the record, strike through) · **dropped** = consciously abandoned (note why; mirror to decision-log if non-trivial).*

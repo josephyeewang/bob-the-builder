@@ -18,11 +18,11 @@
 // known-gaps.mjs), says so on its end; the file is still refused for it. Daily-card lists are a rule
 // of their own until M11 reads them with compile (L120).
 
-import { fileURLToPath } from 'node:url';
 import { parseYaml } from '../../../scripts/blueprint/yaml-lite.mjs';
 import { parsePolicy, EFFECT_FIELDS } from './policy.mjs';
 import { checkProducts } from './reader.mjs';
 import { makeEngine } from './engine.mjs';
+import { ROLES_DIR } from './roles.mjs';
 import { isMacKey, keyMatches, makeRules, MAC_LIST_ALL } from '../../shared/rules.mjs';
 import * as M6 from '../M6-merge-gate/required-keys.mjs';
 import * as M2 from '../M2-approvals/required-keys.mjs';
@@ -74,7 +74,6 @@ const M11 = Object.freeze({
 });
 export const READERS = Object.freeze({ M6, M2, M9, M11 });
 export const MODULE_KEYS = Object.freeze([...new Set(Object.values(READERS).flatMap((m) => m.REQUIRED_KEYS))]);
-const ROLES_DIR = fileURLToPath(new URL('./roles', import.meta.url));
 
 export const FIRST_LANES = Object.freeze(['docs', 'research']);
 // Every effect field read by path alone; package_imports is the import scan's, so the first cutover needs none.
