@@ -233,7 +233,7 @@ test('round 10 audit 5 minors: no recursive grep of a folder holding the file is
 
 // Round 10 audit 6: three routes a careful guard (variables, home, cd, globs, whole folders it is shown) still missed.
 test('round 10 audit 6 M-1: a guard that only looks at the paths named misses a read of the run folder that names none', () => {
-  const root = tmp(); tmp(); // a folder beside root, for the allow-beside cases
+  const root = tmp();
   mkdirSync(`${root}/apps/web`, { recursive: true }); mkdirSync(`${root}/apps/api`);
   for (const target of [T, `apps/web/${T}`]) {
     const file = resolve(root, target);
