@@ -196,7 +196,9 @@ export async function proposalsPass({ rec, rules, products, ownerUid, wait, aler
   }
   // The folder's first product owns it for good (L268 MAT-B): the used memory is per product, so another product that
   // named it later would take every file the first one used in again. Recorded before any file is read; a write the
-  // record refuses keeps the folder unread this pass.
+  // record refuses keeps the folder unread this pass. The cost (L268): a folder stays its first product's for good, so
+  // another product needs a new folder, never a used one. And the folder is known by device and file number: a remount
+  // (an external disk, a rebuilt volume) can change them, and the folder then counts as new. MAT-3 has the same limit.
   for (const f of folders) {
     if (f.why) continue;
     const id = ownerFactId(f.at.dev, f.at.ino);
