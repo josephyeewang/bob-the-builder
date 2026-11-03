@@ -116,6 +116,15 @@ test('a brief needs all four parts and plain paths', () => {
   for (const bad of [[], ['/etc/x'], ['../x'], ['src/'], ['src/*.js'], ['a.js', 'a.js'], ['a.js', './a.js'], ['a.js', 'A.js'],
     ['src//a.js'], ['src/./a.js'], ['src/[a].js'], ['src/{a,b}.js'], ['src\\a.js'], ['a\rb.js'], ['a\u2028b.js'], ['a\u0007.js'],
     ['a\u202eb.js'], ['a\u200bb.js'], ['\ufeffa.js'], ['a\u2066b.js'], ['straße.js', 'STRASSE.js'], ['ς.js', 'σ.js']]) assert.ok(briefProblems(brief(bad)).length, JSON.stringify(bad));
+  // audit-pr133 M-1: one non-ASCII path on its own is refused (not only as a duplicate), with its own reason, and the
+  // brief is never written. Also the pre-existing case: a leading ~, any :, a path of only spaces (L289).
+  for (const one of ['café.js', 'straße.js', 'src/\uff21.js', 'src/a\u00a0b.js', 'docs/日本.md', '~notes.md', 'C:x.js', 'a:b.js', '   ']) {
+    const p = briefProblems(brief([one]));
+    assert.equal(p.length, 1, `${JSON.stringify(one)}: ${p.join('; ')}`);
+    assert.ok(/is not plain ASCII|is not one plain path/.test(p[0]), p[0]);
+    assert.throws(() => briefText('C-1', brief([one])), JSON.stringify(one));
+  }
+  assert.match(briefProblems(brief(['café.js']))[0], /"café\.js" is not plain ASCII/);
   // `./x` is the shared rule's: accepted, and the worker reads the cleaned path.
   assert.deepEqual(briefProblems(brief(['./src/notes.js'])), []);
   assert.ok(briefText('C-1', brief(['./src/notes.js'])).includes('\n- src/notes.js\n'));

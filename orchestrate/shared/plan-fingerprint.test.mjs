@@ -117,7 +117,7 @@ test('L105: a plan path is plain printable ASCII only, like M10 pathProblem; eve
   // The whole printable ASCII range passes except the folder-pattern and backslash characters.
   for (let c = 0x20; c <= 0x7e; c++) {
     const ch = String.fromCharCode(c);
-    assert.equal(cleanPath(`src/a${ch}b.js`) !== null, !'*?[]{}\\'.includes(ch), JSON.stringify(ch));
+    assert.equal(cleanPath(`src/a${ch}b.js`) !== null, !'*?[]{}\\:'.includes(ch), JSON.stringify(ch));
   }
 });
 
@@ -229,4 +229,25 @@ test('L105 guard: no module outside shared/ builds its own path key', () => {
   assert.deepEqual(found, [], `fold a path with shared/plan-fingerprint.mjs foldKey or pathKey instead:\n${found.join('\n')}`);
   // The guard sees a fold when there is one (a plant through the same test).
   assert.ok(FOLD.test('const k = file.toLowerCase();') && PATHY.test('const k = file.toLowerCase();'));
+});
+
+test('L289 (audit-pr133 m-2 and the pre-existing case): what M10 and M11 refuse, cleanPath refuses first', () => {
+  for (const p of ['~notes.md', '~/a.js', 'C:x.js', 'a:b.js', 'src/a:b.js', ' ', '   ', 'a'.repeat(4097), `src/${'a'.repeat(4093)}`]) {
+    assert.equal(cleanPath(p), null, JSON.stringify(p.slice(0, 20)));
+    assert.equal(pathKey(p), null, JSON.stringify(p.slice(0, 20)));
+    assert.match(fp({ files: [p] }).reason ?? '', /is not one plain path/);
+  }
+  // At the edge: 4096 characters pass, as M10 lets them; a ~ or a space inside a name is fine.
+  assert.equal(cleanPath('a'.repeat(4096))?.length, 4096);
+  for (const p of ['src/a~b.js', 'src/a b.js', ' a.js']) assert.equal(cleanPath(p), p, p);
+  // Every path cleanPath accepts, M11's start gate accepts too (never accepted by the plan, then held on every pass).
+  for (const p of ['src/a~b.js', 'src/a b.js', ' a.js', 'a'.repeat(4096), "src/it's.js"]) assert.ok(normPath(p) !== null, p);
+});
+
+test('L289 (audit-pr133 m-1): a pattern with sigma still matches; final ς and σ are one letter in every key', () => {
+  assert.equal(foldKey('docs/aσ*'), foldKey('docs/aσ*').replaceAll('ς', 'σ'));
+  assert.equal(matches('docs/aσ*', normPath('docs/aσb.md')), true);
+  assert.equal(matches('docs/AΣ*', normPath('docs/aσb.md')), true);
+  assert.equal(matches('docs/*ς.md', normPath('docs/aσ.md')), true);
+  for (const s of ['ς', 'σ', 'Σ', 'aς', 'aσb', 'ΣΑΣ']) assert.ok(!foldKey(s).includes('ς'), s);
 });

@@ -34,13 +34,16 @@ export function canonicalJson(v) {
 // A path's shape, before any plan rule: one relative POSIX path with no empty, "." or ".." name, no folder pattern
 // (*, ?, [, {), no backslash, no control character or line separator, no Unicode format character (\p{Cf}), and
 // well formed (no lone surrogate: the disk writes each as U+FFFD, so three spellings are one file; L105 M-2). NFC.
+// Also refused, as M10 pathProblem and M11's start gate refuse them, so a plan never passes here and then stops later
+// (audit-pr133 m-2 and the pre-existing case, L289): over 4096 characters, a leading `~` (a home folder), any `:` (a
+// drive letter, and the Finder shows `:` as `/`), and a path that is only spaces.
 // Returns the path in NFC with any leading "./" taken off, or null.
 const UNPRINTED = /[\u0000-\u001f\u007f-\u009f\u2028\u2029\p{Cf}]/u;
 function shapeClean(p) {
-  if (typeof p !== 'string' || !p || !p.isWellFormed()) return null;
+  if (typeof p !== 'string' || !p || p.length > 4096 || !p.isWellFormed()) return null;
   let q = p.normalize('NFC');
   while (q.startsWith('./')) q = q.slice(2);
-  if (!q || q.endsWith('/') || q.startsWith('/') || /[*?[\]{}]/.test(q) || q.includes('\\') || UNPRINTED.test(q) || q.split('/').some((s) => s === '' || s === '.' || s === '..')) return null;
+  if (!q.trim() || q.startsWith('~') || q.includes(':') || q.endsWith('/') || q.startsWith('/') || /[*?[\]{}]/.test(q) || q.includes('\\') || UNPRINTED.test(q) || q.split('/').some((s) => s === '' || s === '.' || s === '..')) return null;
   return q;
 }
 
@@ -55,20 +58,25 @@ export function cleanPath(p) {
   return q !== null && PLAIN.test(q) ? q : null;
 }
 
-// The one case fold for "is it the same file" (L93 m-1, L105 M-1): lower, upper, lower, then NFC. The Mac's default disk
+// The one case fold for "is it the same file" (L93 m-1, L105 M-1): lower, upper, lower, every final ς as σ, then NFC.
+// The Mac's default disk
 // ignores case and Unicode normalization. A plain toLowerCase misses ß/SS and final ς/σ; upper-then-lower misses the
 // capital sharp S (ẞ → ß, but ß → SS). Measured against the Mac's own disk on 16,627 names (audit-pr84 r1): 0 groups
 // the disk treats as one file get two keys. One false collision is known (dotless ı and i), the safe direction: it can
 // only call two files one. Null for a string that is not well formed. Every module compares paths by this or by
-// pathKey, never by a fold of its own (the guard test in plan-fingerprint.test.mjs).
+// pathKey, never by a fold of its own (the guard test in plan-fingerprint.test.mjs). Final ς becomes σ because the
+// fold picks σ or ς from the letters around it, and a pattern's `*` changes those: `docs/aσ*` folded to `docs/aς*` and
+// missed `docs/aσb.md` (audit-pr133 m-1). The disk treats ς and σ as one letter anyway.
 export function foldKey(s) {
   if (typeof s !== 'string' || !s.isWellFormed()) return null;
-  return s.toLowerCase().toUpperCase().toLowerCase().normalize('NFC');
+  return s.toLowerCase().toUpperCase().toLowerCase().replaceAll('ς', 'σ').normalize('NFC');
 }
 
-// The one key two paths are compared by: the path's shape cleaned (not the ASCII plan rule, since M3 and M11 also
-// compare paths that are not plan paths), then foldKey. The fingerprint keeps case (cleanPath); this key answers "is
-// it the same file", never what the worker is told.
+// The one key two plan paths are compared by (M3's duplicate and wave checks): the path's shape cleaned, then foldKey.
+// It does not apply the ASCII rule, so it answers "is it the same file" for any path; a caller that needs a plan path
+// also asks cleanPath (M3 filesProblems does). M11's start gate keys paths with its own shape rules (normPath) and this
+// same foldKey; wherever pathKey accepts a path the two keys are identical (audit-pr133: 400,000 paths, 0 splits). The
+// fingerprint keeps case (cleanPath); this key is never what the worker is told.
 export function pathKey(p) {
   const q = shapeClean(p);
   return q === null ? null : foldKey(q);
