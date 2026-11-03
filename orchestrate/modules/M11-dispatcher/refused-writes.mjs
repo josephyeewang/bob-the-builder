@@ -1,22 +1,27 @@
 // refused-writes.mjs — a Record write the Dispatcher makes and the Store Writer refuses is told to Joe (lead call L323).
 //
-// WHY. A stopped session's park, a card put on Joe, a stop's own record and a review's failure count were each written
-// and their answer dropped (pass.mjs moveAfterStop, tick.mjs's dead-session ask, the limit asks, merges.mjs). When the
-// Store Writer refused one (L321: a tick's `now` gone more than 60 s stale), the card stayed where it was and nobody
-// was told: a silent hold (L38). A fresh clock fixes that cause; this makes any other refusal of those writes loud.
+// WHY. A stopped session's park, a card put on Joe, a stop's own record, a review's failure count, a parked card put
+// back in the queue and a time limit's end were each written and their answer dropped (pass.mjs moveAfterStop and the
+// resume moves, tick.mjs's dead-session ask, the limit asks, merges.mjs). When the Store Writer refused one (L321: a
+// tick's `now` gone more than 60 s stale), the card stayed where it was and nobody was told: a silent hold (L38). A
+// fresh clock fixes that cause; this makes any other refusal of those writes loud.
 //
-// HOW. watchWrites(rec) gives the tick a Record whose write() notes each refusal of a WATCHED kind under its cause.
-// tellRefused(), at the end of the pass, tells Joe once per cause through stillWaiting (shared/still-waiting.mjs):
-// told at once, again every 24 h while each pass still has one, and cleared when a pass has none. Each of these
-// writes is made again on the next pass (a park by pass.mjs reparkStopped, the asks by the next pass meeting the same
-// card), so "still refused" is what the pass sees. A cause whose step did not finish is left as it is that pass: no
-// answer is not "ended".
+// HOW. watchWrites(rec) gives the tick a Record whose write() notes each refused write of a WATCHED kind under its
+// cause, with the state its target was in (`from`), and each one the Writer took. tellRefused(), at the end of the
+// pass, keeps the refused ones on the cause's fact (L332 MAT-1): some writes are tried only once (outage.mjs decides
+// the held dead sessions at the outage's end), so "no refusal this pass" is not "ended". A kept one stays while its
+// target is still in the state it was in when the write was refused and no later write of it was taken. The cause is
+// told through stillWaiting (shared/still-waiting.mjs): at once, again every 24 h while any is kept, and cleared when
+// none is. A pass whose steps did not all finish, with nothing kept and nothing new, leaves the cause as it is: no
+// answer is not "ended". A throw in one cause never skips the others; they are thrown on together at the end.
 import { stillWaiting } from '../../shared/still-waiting.mjs';
 import { dropCause, tellThen } from './alerts.mjs';
 import { HOLD_FACT } from './pass.mjs';
 
 // A refused write is a hold (L38): its fact is in the Dispatcher's `hold-` family (pass.mjs HOLD_FACT; M9 permissions).
 export const REFUSED_FACT = (cause) => HOLD_FACT(`write-refused-${cause}`);
+// The most refused writes one cause keeps; the newest are kept.
+export const REFUSED_KEEP_MAX = 20;
 
 // Each cause: what Joe reads, the tick steps that make its writes, and the write kinds it covers.
 export const REFUSED_CAUSES = Object.freeze({
@@ -25,53 +30,97 @@ export const REFUSED_CAUSES = Object.freeze({
   joe_wait: { what: 'a card could not be put on you', steps: ['outage', 'pass', 'limits'],
     kinds: ['dead_ask', 'usage_unknown', 'limit_no_account', 'limit_no_run', 'limit_no_hit', 'limit_no_reset', 'limit_reset', 'no_reviewer_ask'] },
   review_count: { what: "a card's failed review requests could not be counted, so it would never reach you", steps: ['limits'], kinds: ['review_request'] },
+  resume: { what: 'a parked card could not be put back in the queue', steps: ['pass'], kinds: ['resume_usage_band', 'resume_limit_hit', 'resume_paused'] },
+  timeout: { what: 'a session past its time limit could not be ended', steps: ['limits'], kinds: ['timeout'] },
 });
 const CAUSE_OF = new Map(Object.entries(REFUSED_CAUSES).flatMap(([cause, c]) => c.kinds.map((k) => [k, cause])));
 
-/** A Record like `inner` whose write() notes each refused write of a watched kind in `refused` (cause → [{ id, reason }]). */
+// What a refused write's target looked like: a card by its state and wait, anything else by its revision.
+const stateOf = (rec, entity, id) => {
+  let cur;
+  try { cur = rec.read(entity, id); } catch { return 'unreadable'; }
+  if (cur == null) return 'absent';
+  return entity === 'card' ? JSON.stringify([cur.doc?.state ?? null, cur.doc?.wait?.who ?? null, cur.doc?.wait?.what ?? null]) : `rev ${cur.rev}`;
+};
+const keyOf = (x) => `${x.entity}/${x.id}`;
+
+/**
+ * A Record like `inner` whose write() notes, per cause, each refused write of a watched kind in `refused`
+ * (cause → [{ entity, id, kind, reason, from }]) and each one taken in `taken` (cause → Set of `entity/id`).
+ */
 export function watchWrites(inner) {
   const refused = new Map();
+  const taken = new Map();
   const watched = Object.create(inner);
   Object.defineProperty(watched, 'write', {
     value: (args) => {
-      const r = inner.write(args);
       const cause = CAUSE_OF.get(args?.kind);
-      if (cause && r?.ok !== true) {
+      const from = cause ? stateOf(inner, args.entity, args.id) : null;
+      const r = inner.write(args);
+      if (cause && r?.ok === true) {
+        const set = taken.get(cause) ?? new Set();
+        set.add(keyOf(args));
+        taken.set(cause, set);
+      } else if (cause) {
         const list = refused.get(cause) ?? [];
-        list.push({ id: args.id, reason: r?.reason ?? 'no answer' });
+        list.push({ entity: args.entity, id: args.id, kind: args.kind, reason: String(r?.reason ?? 'no answer').slice(0, 300), from });
         refused.set(cause, list);
       }
       return r;
     },
   });
-  return { rec: watched, refused };
+  return { rec: watched, refused, taken };
 }
 
 const iso = (ms) => new Date(ms).toISOString();
-const textOf = (cause, items) => `the Dispatcher: ${REFUSED_CAUSES[cause].what}: ${items.map((x) => `${x.id} (${x.reason})`).join('; ')}; it tries again each pass`;
+const textOf = (cause, items) => `the Dispatcher: ${REFUSED_CAUSES[cause].what}: ${items.map((x) => `${x.id} (${x.reason})`).join('; ')}; told again each day while it stays so`;
+const isItem = (x) => x && typeof x === 'object' && typeof x.entity === 'string' && typeof x.id === 'string' && typeof x.from === 'string';
+
+function tellCause({ rec, alert, now, cause, fresh, taken, ran }) {
+  const fact = REFUSED_FACT(cause);
+  const cur = rec.read('fact', fact);
+  const kept = Array.isArray(cur?.doc?.items) ? cur.doc.items.filter(isItem) : [];
+  if (!fresh.length && !kept.length && !REFUSED_CAUSES[cause].steps.every(ran)) return 'kept';
+  // A kept one is still refused while its target has not moved and no write of it was taken since.
+  const freshKeys = new Set(fresh.map(keyOf));
+  const still = kept.filter((k) => !freshKeys.has(keyOf(k)) && !taken.has(keyOf(k)) && stateOf(rec, k.entity, k.id) === k.from);
+  const items = [...still, ...fresh].slice(-REFUSED_KEEP_MAX);
+  let cleared = null;
+  const r = stillWaiting({
+    now,
+    waiting: items.length > 0,
+    read: () => rec.read('fact', fact)?.doc ?? null,
+    tell: (fields) => tellThen(alert, textOf(cause, items), { fact, fields, kind: 'write_refused' }),
+    clear: () => {
+      dropCause(rec, fact);
+      const c = rec.read('fact', fact);
+      if (c?.doc?.told_at == null && !(c?.doc?.items ?? []).length) return;
+      cleared = rec.write({ actor: 'dispatcher', entity: 'fact', id: fact, expectRev: c.rev, doc: { ...c.doc, items: [], told_at: null, cleared_at: iso(now) }, kind: 'write_refused_cleared' });
+      // A refused clear keeps the cause (L332 m6): a stale told_at would keep a refusal within 24 h quiet.
+      if (cleared?.ok !== true) throw new Error(`its clear was refused (${cleared?.reason ?? 'no answer'})`);
+    },
+  });
+  if (items.length && JSON.stringify(items) !== JSON.stringify(kept)) {
+    const c = rec.read('fact', fact);
+    const w = rec.write({ actor: 'dispatcher', entity: 'fact', id: fact, expectRev: c?.rev ?? 0, doc: { ...(c?.doc ?? {}), items }, kind: 'write_refused_kept' });
+    if (w?.ok !== true) throw new Error(`its list could not be kept (${w?.reason ?? 'no answer'}), so it may clear while still refused`);
+  }
+  return r.did;
+}
 
 /**
- * Told once per cause, again each day it lasts, cleared when a pass has none. `ran(step)` answers whether that step
- * finished this pass. Returns [[cause, did]].
+ * Told once per cause, again each day while any refused write of it is kept, cleared when none is. `ran(step)`
+ * answers whether that step finished this pass; left out, no step did, so nothing is cleared for want of an answer
+ * (L332 c4). `taken` is watchWrites' map of writes the Writer took. Returns [[cause, did]]; a cause that threw is
+ * 'error', and once every cause has been tried the throws are thrown on together.
  */
-export function tellRefused({ rec, alert, now, refused, ran = () => true }) {
+export function tellRefused({ rec, alert, now, refused, taken = new Map(), ran = () => false }) {
   const out = [];
+  const errors = [];
   for (const cause of Object.keys(REFUSED_CAUSES)) {
-    const items = refused.get(cause) ?? [];
-    if (!items.length && !REFUSED_CAUSES[cause].steps.every(ran)) continue;
-    const fact = REFUSED_FACT(cause);
-    const r = stillWaiting({
-      now,
-      waiting: items.length > 0,
-      read: () => rec.read('fact', fact)?.doc ?? null,
-      tell: (fields) => tellThen(alert, textOf(cause, items), { fact, fields, kind: 'write_refused' }),
-      clear: () => {
-        dropCause(rec, fact);
-        const cur = rec.read('fact', fact);
-        if (cur?.doc?.told_at != null) rec.write({ actor: 'dispatcher', entity: 'fact', id: fact, expectRev: cur.rev, doc: { ...cur.doc, told_at: null, cleared_at: iso(now) }, kind: 'write_refused_cleared' });
-      },
-    });
-    out.push([cause, r.did]);
+    try { out.push([cause, tellCause({ rec, alert, now, cause, fresh: refused.get(cause) ?? [], taken: taken.get(cause) ?? new Set(), ran })]); }
+    catch (e) { out.push([cause, 'error']); errors.push(`${cause}: ${e?.message ?? e}`); }
   }
+  if (errors.length) throw new Error(errors.join('; '));
   return out;
 }

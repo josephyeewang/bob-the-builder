@@ -319,11 +319,12 @@ export async function tick({ rec, rules, now, clock = () => now, ports: p }) {
   await run('cleanup', () => cleanupPass({ rec, rules, now, ...p.cleanup, alert }));
 
   putFact(rec, LAST_PASS_FACT, { at: iso(now), steps: Object.fromEntries(STEPS.map((s) => [s, res[s]?.ok ? 'ok' : 'failed'])) }, 'full_pass');
-  // The one sender (alerts.mjs) again, last: this pass's own alerts.
   // Refused writes (L323): told after every step, before this pass's own alerts go out.
+  // watchWrites' whole answer, its refusals and the writes it saw taken, so neither can be left out alone.
   let refused = [];
-  try { refused = tellRefused({ rec: base, alert, now: Math.max(now, clock()), refused: watched.refused, ran: (step) => res[step]?.ok === true }); }
+  try { refused = tellRefused({ ...watched, rec: base, alert, now: Math.max(now, clock()), ran: (step) => res[step]?.ok === true }); }
   catch (e) { alert(`the Dispatcher could not tell its refused writes: ${e?.message ?? e}`); }
+  // The one sender (alerts.mjs) again, last: this pass's own alerts.
   const last = await sendAlerts(rec, p.alert, now, sendOpts);
   const alerts = { sent: first.sent + last.sent, failed: first.failed + last.failed, left: last.left };
   return { steps: res, alerts, refused };

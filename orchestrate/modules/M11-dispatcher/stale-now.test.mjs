@@ -14,9 +14,11 @@ import { fileURLToPath } from 'node:url';
 import { stopPass, STOP_FACT } from './pass.mjs';
 import { REFUSED_FACT, tellRefused, watchWrites } from './refused-writes.mjs';
 import { timeLimits } from './merges.mjs';
+import { waitOn } from './moves.mjs';
 import { USAGE_FACT } from './usage.mjs';
-import { rulesWith, usageFact, filesOfCommits, recWith, seed as seedFake, T0 } from './fixtures.test-helper.mjs';
-import { setup, product, readyCard, runCard, seed } from '../M9-record/fixtures.test-helper.mjs';
+import { OUTAGE_FACT } from './outage.mjs';
+import { rulesWith, usageFact, filesOfCommits, recWith, setClock, iso, T0 } from './fixtures.test-helper.mjs';
+import { setup, product, readyCard, runCard, seed, sessionClaim } from '../M9-record/fixtures.test-helper.mjs';
 import { tempDir } from '../../shared/test-tmp.mjs';
 import { fakeAlert } from '../../test/fake-alert.test-helper.mjs';
 
@@ -28,10 +30,11 @@ const allow = { start_session: { decision: 'allow', reason: 'ok' } };
 
 // A real Record with two running cards: C-1's session S-1 is alive (its product is paused, so the stops step parks it),
 // C-2's session S-2 is gone (the outage step puts it on Joe).
-function world() {
+// Options (audit #166's probes): `pause` the product, the `cards` made running, the `live` sessions and the dead `board`.
+function world({ pause = true, cards = ['C-1', 'C-2'], live = [{ id: 'S-1', product: PRODUCT, kind: 'editing', card: 'C-1', pgid: 50 }], board } = {}) {
   const E = setup({ prefix: 'm11-stale-', probe: { kill() {}, pidStart: () => 'start' } });
   product(E);
-  for (const id of ['C-1', 'C-2']) { readyCard(E, id); runCard(E, id); }
+  for (const id of cards) { readyCard(E, id); runCard(E, id, sessionClaim({ session_id: id === 'C-2' ? 'S-2' : 'S-1' })); }
   const sensors = (id, doc) => {
     const cur = E.record.read('fact', id);
     const r = E.record.write({ actor: 'sensors', entity: 'fact', id, expectRev: cur?.rev ?? 0, doc });
@@ -42,15 +45,17 @@ function world() {
     sensors(USAGE_FACT('acct-a'), usageFact({ week: 30, h5: 20, account: 'acct-a', now: E.clock.t }));
   };
   fresh();
-  const pause = E.record.write({ actor: 'approvals', entity: 'product', id: PRODUCT, expectRev: E.record.read('product', PRODUCT).rev, doc: { state: 'paused', return_to: 'active' } });
-  assert.equal(pause.ok, true, pause.reason);
+  if (pause) {
+  const paused = E.record.write({ actor: 'approvals', entity: 'product', id: PRODUCT, expectRev: E.record.read('product', PRODUCT).rev, doc: { state: 'paused', return_to: 'active' } });
+  assert.equal(paused.ok, true, paused.reason);
+  }
   const fake = fakeAlert();
   const alerts = fake.texts;
   const empty = tempDir('m11-stale-');
-  let sessions = [{ id: 'S-1', product: PRODUCT, kind: 'editing', card: 'C-1', pgid: 50 }];
+  let sessions = [...live];
   const ports = (step) => ({
     alert: fake,
-    board: () => [{ id: 'S-2', card: 'C-2', alive: false, ended: true, lastWriteAt: E.clock.t - 10 * MIN }],
+    board: board ?? (() => [{ id: 'S-2', card: 'C-2', alive: false, ended: true, lastWriteAt: E.clock.t - 10 * MIN }]),
     healthy: () => true, resume: () => false,
     outboxSessions: () => [], wait: async () => {}, startReadonly: async () => ({ ok: true }), replyToLead: async () => {}, leads: () => [],
     sessions: () => sessions, probe: () => idle,
@@ -169,36 +174,81 @@ test('L321: timeLimits puts a card on Joe after reviewer checks that took 80 s, 
   }
 });
 
-test('L323: refusals fold by cause, a cause whose step did not finish is left as it is, and one with none is cleared', () => {
-  const rec = recWith();
+// A card parked through the real writer, at `now` on its clock.
+const park = (rec, id, now) => { setClock(rec, now); assert.equal(waitOn(rec, id, { who: 'usage', what: 'usage_band', now, kind: 'park_red' }).ok, true); };
+
+test('L323, L332 MAT-1: refusals fold by cause and are kept while their card has not moved; a cause whose step did not finish is left as it is', () => {
+  const rec = recWith([['card', 'C-1', { state: 'running' }], ['card', 'C-2', { state: 'running' }]]);
   const alert = fakeAlert();
   const told = alert.texts;
   // What the outbox sender does once a copy is delivered: the mark's fields go onto its fact.
   const delivered = () => { for (const [, o] of alert.calls.splice(0)) rec.write({ actor: 'dispatcher', entity: 'fact', id: o.mark.fact, expectRev: rec.read('fact', o.mark.fact)?.rev ?? 0, doc: { ...rec.read('fact', o.mark.fact)?.doc, ...o.mark.fields } }); };
-  const refused = new Map([['park', [{ id: 'C-1', reason: 'r1' }, { id: 'C-2', reason: 'r2' }]]]);
-  const r1 = tellRefused({ rec, alert, now: T0, refused });
+  const running = JSON.stringify(['running', null, null]);
+  const item = (id, reason) => ({ entity: 'card', id, kind: 'park_paused', reason, from: running });
+  const all = () => true;
+  const r1 = tellRefused({ rec, alert, now: T0, refused: new Map([['park', [item('C-1', 'r1'), item('C-2', 'r2')]]]), ran: all });
   assert.deepEqual(r1.find(([c]) => c === 'park'), ['park', 'told']);
   assert.equal(told.length, 1, 'one alert for the cause');
-  assert.match(told[0], /C-1 \(r1\); C-2 \(r2\)/);
+  assert.match(told[0], /C-1 \(r1\); C-2 \(r2\); told again each day while it stays so/);
   delivered();
-  // The stops step did not finish: no refusals seen is not "ended".
-  const r2 = tellRefused({ rec, alert, now: T0 + H, refused: new Map(), ran: (s) => s !== 'stops' });
-  assert.equal(r2.find(([c]) => c === 'park'), undefined);
+  assert.deepEqual(rec.read('fact', REFUSED_FACT('park')).doc.items.map((x) => x.id), ['C-1', 'C-2'], 'kept on the fact');
+  // No refusal this pass, every step finished, but neither card has moved: still refused (Probe A), quiet within a day.
+  assert.deepEqual(tellRefused({ rec, alert, now: T0 + H, refused: new Map(), ran: all }).find(([c]) => c === 'park'), ['park', 'quiet']);
   assert.ok(rec.read('fact', REFUSED_FACT('park')).doc.told_at);
-  const r3 = tellRefused({ rec, alert, now: T0 + 2 * H, refused: new Map() });
+  // C-1 moves on: only C-2 is kept, and told again a day on.
+  park(rec, 'C-1', T0 + 25 * H);
+  assert.deepEqual(tellRefused({ rec, alert, now: T0 + 25 * H, refused: new Map(), ran: all }).find(([c]) => c === 'park'), ['park', 'told']);
+  assert.match(told.at(-1), /could not be parked: C-2 \(r2\);/);
+  assert.doesNotMatch(told.at(-1), /C-1/);
+  delivered();
+  // A write of C-2 the Writer took counts as moved on, even with its state unchanged.
+  const r3 = tellRefused({ rec, alert, now: T0 + 26 * H, refused: new Map(), taken: new Map([['park', new Set(['card/C-2'])]]), ran: all });
   assert.deepEqual(r3.find(([c]) => c === 'park'), ['park', 'cleared']);
-  assert.equal(rec.read('fact', REFUSED_FACT('park')).doc.told_at, null);
+  assert.deepEqual([rec.read('fact', REFUSED_FACT('park')).doc.told_at, rec.read('fact', REFUSED_FACT('park')).doc.items], [null, []]);
+  // A mark with nothing kept (written before items were kept) is left alone while its step did not finish, or when
+  // `ran` is left out (L332 c4: no answer is not "ended"), and cleared once every step finished.
+  rec.write({ actor: 'dispatcher', entity: 'fact', id: REFUSED_FACT('park'), expectRev: rec.read('fact', REFUSED_FACT('park')).rev, doc: { told_at: iso(T0 + 26 * H) } });
+  assert.deepEqual(tellRefused({ rec, alert, now: T0 + 27 * H, refused: new Map(), ran: (st) => st !== 'stops' }).find(([c]) => c === 'park'), ['park', 'kept']);
+  assert.deepEqual(tellRefused({ rec, alert, now: T0 + 27 * H, refused: new Map() }).find(([c]) => c === 'park'), ['park', 'kept']);
+  assert.ok(rec.read('fact', REFUSED_FACT('park')).doc.told_at);
+  assert.deepEqual(tellRefused({ rec, alert, now: T0 + 28 * H, refused: new Map(), ran: all }).find(([c]) => c === 'park'), ['park', 'cleared']);
 });
 
-test('L323: watchWrites notes only refused writes of a watched kind, and passes every answer back', () => {
+test('L332 m6: a refused clear keeps the cause, and a throw in one cause does not skip the others', () => {
+  const rec = recWith([['card', 'C-1', { state: 'running' }]]);
+  const alert = fakeAlert();
+  const running = JSON.stringify(['running', null, null]);
+  tellRefused({ rec, alert, now: T0, ran: () => true, refused: new Map([['park', [{ entity: 'card', id: 'C-1', kind: 'park_paused', reason: 'r', from: running }]]]) });
+  for (const [, o] of alert.calls.splice(0)) rec.write({ actor: 'dispatcher', entity: 'fact', id: o.mark.fact, expectRev: rec.read('fact', o.mark.fact).rev, doc: { ...rec.read('fact', o.mark.fact).doc, ...o.mark.fields } });
+  park(rec, 'C-1', T0 + H);
+  // The Writer refuses the clear: the cause stays marked, and the tick is told (it throws, after every cause is tried).
+  const refusing = Object.create(rec);
+  Object.defineProperty(refusing, 'write', { value: (x) => (x.kind === 'write_refused_cleared' ? { ok: false, reason: 'refused for the test' } : rec.write(x)) });
+  // And the joe_wait cause's alert throws: the causes after it are still tried.
+  const throwing = fakeAlert();
+  const tellAll = (r, a, refused) => { try { tellRefused({ rec: r, alert: a, now: T0 + H, ran: () => true, refused }); return null; } catch (e) { return e.message; } };
+  const err = tellAll(refusing, throwing, new Map());
+  assert.match(err, /park: its clear was refused \(refused for the test\)/);
+  assert.ok(rec.read('fact', REFUSED_FACT('park')).doc.told_at, 'still marked');
+  assert.equal(rec.read('fact', REFUSED_FACT('park')).doc.items.length, 1, 'still kept');
+  const bad = Object.assign((t) => { if (/could not be put on you/.test(t)) throw new Error('port down'); return true; }, {});
+  const both = new Map([['joe_wait', [{ entity: 'card', id: 'C-9', kind: 'dead_ask', reason: 'r', from: 'absent' }]], ['review_count', [{ entity: 'card', id: 'C-8', kind: 'review_request', reason: 'r', from: 'absent' }]]]);
+  const r = recWith();
+  const later = fakeAlert();
+  const fail = tellAll(r, (t, m) => (/could not be put on you/.test(t) ? bad(t) : later(t, m)), both);
+  assert.match(fail, /joe_wait: port down/);
+  assert.match(later.texts.join(' | '), /could not be counted, so it would never reach you: C-8/, 'the cause after the throw is still told');
+});
+
+test('L323: watchWrites notes refused writes of a watched kind with their target\'s state, and taken ones, and passes every answer back', () => {
   const answers = { a: { ok: false, reason: 'no' }, b: { ok: true }, c: { ok: false, reason: 'other' } };
-  const base = Object.freeze({ write: (x) => answers[x.id], read: () => 'kept' });
+  const base = Object.freeze({ write: (x) => answers[x.id], read: (entity, id) => (id === 'a' ? { rev: 1, doc: { state: 'running' } } : null) });
   const w = watchWrites(base);
-  assert.equal(w.rec.read(), 'kept');
-  assert.deepEqual(w.rec.write({ id: 'a', kind: 'park_paused' }), answers.a);
-  w.rec.write({ id: 'b', kind: 'park_red' });
-  w.rec.write({ id: 'c', kind: 'note' });
-  assert.deepEqual([...w.refused], [['park', [{ id: 'a', reason: 'no' }]]]);
+  assert.deepEqual(w.rec.write({ entity: 'card', id: 'a', kind: 'park_paused' }), answers.a);
+  w.rec.write({ entity: 'card', id: 'b', kind: 'park_red' });
+  w.rec.write({ entity: 'card', id: 'c', kind: 'note' });
+  assert.deepEqual([...w.refused], [['park', [{ entity: 'card', id: 'a', kind: 'park_paused', reason: 'no', from: JSON.stringify(['running', null, null]) }]]]);
+  assert.deepEqual([...w.taken].map(([c, s]) => [c, [...s]]), [['park', ['card/b']]]);
 });
 
 test('L321: main hands its own clock to the tick, which reads it before each step', async () => {
@@ -229,4 +279,115 @@ export { rec };
   assert.ok(reads.length >= 13, `the clock was read before each step (${reads.length})`);
   const at = rec.read('fact', LAST_PASS_FACT).doc.at;
   assert.ok(reads.map((x) => new Date(x).toISOString()).includes(at) && Date.parse(at) >= T0 + 13 * MIN, at);
+});
+
+test('L332 MAT-1 (Probe A): a dead ask refused at an outage\'s end stays told while the card is stuck, though no pass asks again', async () => {
+  const { E, fake, alerts, ports, card, fresh } = world({ pause: false, cards: ['C-2'], live: [], board: () => [] });
+  assert.equal(E.record.write({ actor: 'dispatcher', entity: 'fact', id: OUTAGE_FACT, expectRev: 0, kind: 'outage_start', doc: { id: 'outage-x', state: 'open', started_at: new Date(E.clock.t - H).toISOString(), dead: [{ id: 'S-2', card: 'C-2' }], board: 3, healthy_passes: 1, told_id: 'outage-x' } }).ok, true);
+  const rules = rulesWith({}, allow);
+  const pass = async (opts = {}) => { fake.reset(); fresh(); return tick({ rec: E.record, rules, now: E.clock.t, clock: () => E.clock.t, ...opts, ports: { ...ports(), ...(opts.ports ?? {}) } }); };
+  const told = () => alerts.filter((a) => /a card could not be put on you: C-2/.test(a));
+  // The outage ends this pass; its ask is written at the tick's start time while reading the sessions takes 80 s.
+  const r0 = await pass({ clock: undefined, ports: { sessions: () => { E.clock.t += 80_000; return []; } } });
+  assert.deepEqual([r0.refused.find(([c]) => c === 'joe_wait'), told().length, card('C-2').state], [['joe_wait', 'told'], 1, 'running']);
+  E.clock.t += 5 * MIN;
+  const r1 = await pass();
+  assert.equal(card('C-2').state, 'running', 'no later pass asks again');
+  assert.deepEqual([r1.refused.find(([c]) => c === 'joe_wait'), told()], [['joe_wait', 'quiet'], []], 'kept, not cleared');
+  E.clock.t += 25 * H;
+  const r2 = await pass();
+  assert.deepEqual([r2.refused.find(([c]) => c === 'joe_wait'), told().length, card('C-2').state], [['joe_wait', 'told'], 1, 'running'], 'told again a day on');
+  // The card is put on Joe (any move will do): the cause clears.
+  assert.equal(waitOn(E.record, 'C-2', { who: 'joe', what: 'dead session', now: E.clock.t, kind: 'wait' }).ok, true);
+  const r3 = await pass();
+  assert.deepEqual(r3.refused.find(([c]) => c === 'joe_wait'), ['joe_wait', 'cleared']);
+});
+
+// A done stop of C-1 whose park was refused, made by the Dispatcher as stopPass makes it.
+const stopFact = (E, sid) => assert.equal(E.record.write({ actor: 'dispatcher', entity: 'fact', id: STOP_FACT(sid), expectRev: 0, kind: 'stop_done',
+  doc: { state: 'done', reason: 'needs_split', card: 'C-1', since: new Date(E.clock.t - H).toISOString(), stopped_at: new Date(E.clock.t - 30 * MIN).toISOString(), moved: false, move_reason: 'x' } }).ok, true);
+
+test('L332 m3 (Probe C): a stop whose card now runs under another session is marked superseded, and that run is not parked', async () => {
+  const { E, card } = world({ pause: false, cards: ['C-1'], live: [] });
+  const cur = E.record.read('card', 'C-1');
+  seed(E, 'card', 'C-1', { ...cur.doc, claim: { ...cur.doc.claim, session_id: 'S-9' } });
+  stopFact(E, 'S-1');
+  stopFact(E, 'S-8');
+  const sessions = [{ id: 'S-9', product: PRODUCT, kind: 'editing', card: 'C-1', pgid: 77 }];
+  await stopPass({ rec: E.record, rules: rulesWith({}, allow), now: E.clock.t, clock: () => E.clock.t, account: 'acct-a', sessions, probe: () => idle,
+    alert: fakeAlert(), stopGroup: async () => ({ ok: true, how: 'x' }), saveWork: async () => ({ ok: true }) });
+  assert.equal(card('C-1').state, 'running', 'the new run is not parked');
+  for (const sid of ['S-1', 'S-8']) {
+    const f = E.record.read('fact', STOP_FACT(sid)).doc;
+    assert.deepEqual([f.moved, f.move_reason], ['superseded', 'the card runs under session S-9 now'], sid);
+  }
+  // The stop of the session that still runs it is parked, as before.
+  stopFact(E, 'S-9');
+  await stopPass({ rec: E.record, rules: rulesWith({}, allow), now: E.clock.t, clock: () => E.clock.t, account: 'acct-a', sessions: [], probe: () => idle,
+    alert: fakeAlert(), stopGroup: async () => ({ ok: true, how: 'x' }), saveWork: async () => ({ ok: true }) });
+  assert.deepEqual([card('C-1').state, card('C-1').wait?.what, E.record.read('fact', STOP_FACT('S-9')).doc.moved], ['waiting', 'needs_split', true]);
+});
+
+test('L332 MAT-2 (Probe D): a parked card whose resume the Record refuses is told, and cleared once it moves', async () => {
+  const { E, fake, alerts, ports, card, fresh } = world({ pause: false, cards: ['C-1'], live: [], board: () => [] });
+  const { claim, ...rest } = E.record.read('card', 'C-1').doc;
+  seed(E, 'card', 'D-1', { ...rest, state: 'failed', failure: 'x' });
+  seed(E, 'card', 'C-1', { ...rest, depends_on: ['D-1'], state: 'waiting', wait: { who: 'usage', what: 'usage_band', since: new Date(E.clock.t - H).toISOString(), next_check: new Date(E.clock.t - 1).toISOString(), resume: 'retry', return_to: 'ready' } });
+  const rules = rulesWith({}, allow);
+  const pass = async () => { fake.reset(); fresh(); return tick({ rec: E.record, rules, now: E.clock.t, clock: () => E.clock.t, ports: ports() }); };
+  const r1 = await pass();
+  assert.equal(card('C-1').state, 'waiting');
+  assert.deepEqual(r1.refused.find(([c]) => c === 'resume'), ['resume', 'told']);
+  assert.match(alerts.join(' | '), /a parked card could not be put back in the queue: C-1 \(not ready: dependency D-1 is failed/);
+  E.clock.t += 10 * MIN;
+  assert.deepEqual((await pass()).refused.find(([c]) => c === 'resume'), ['resume', 'quiet']);
+});
+
+test('L332 MAT-2: a time limit\'s end the Record refuses is noted under its own cause', async () => {
+  const rec = recWith([['card', 'C-1', { state: 'running', product: 'p1' }], ['session', 'S-1', { card: 'C-1', state: 'reporting', changed_at: iso(T0) }]]);
+  const refusing = Object.create(rec);
+  Object.defineProperty(refusing, 'write', { value: (x) => (x.kind === 'timeout' ? { ok: false, reason: 'refused for the test' } : rec.write(x)) });
+  const w = watchWrites(refusing);
+  setClock(rec, T0 + 11 * MIN);
+  await timeLimits({ rec: w.rec, rules: rulesWith(), now: T0 + 11 * MIN, b: { band: 'green', own_building: 'open' }, running: [], gateAlive: () => true, alert: fakeAlert() });
+  assert.deepEqual(w.refused.get('timeout')?.map((x) => [x.entity, x.id, x.reason]), [['card', 'C-1', 'refused for the test'], ['session', 'S-1', 'refused for the test']]);
+});
+
+test('L332 P10, P13: a refused write\'s mark is written only once its alert is delivered, and the tick says which steps finished', async () => {
+  const { E, fake, alerts, ports, card, fresh } = world();
+  const rules = rulesWith({}, allow);
+  let up = false;
+  const port = Object.assign((t, e) => (up ? fake(t, e) : false), {});
+  const pass = async (opts = {}) => { fake.reset(); fresh(); return tick({ rec: E.record, rules, now: E.clock.t, ...opts, ports: { ...ports(), alert: port, ...(opts.ports ?? {}) } }); };
+  // The ask is refused while the alert port is down: told, but not marked.
+  await pass({ ports: { sessions: () => { E.clock.t += 80_000; return []; } } });
+  assert.equal(card('C-2').state, 'running');
+  assert.equal(E.record.read('fact', REFUSED_FACT('joe_wait'))?.doc?.told_at ?? null, null, 'not marked before delivery (P10)');
+  // A legacy mark (no list) on another cause, with every step finishing: cleared only because the tick says so (P13).
+  E.record.write({ actor: 'dispatcher', entity: 'fact', id: REFUSED_FACT('review_count'), expectRev: 0, doc: { told_at: new Date(E.clock.t).toISOString() }, kind: 'x' });
+  up = true;
+  E.clock.t += 5 * MIN;
+  const r = await pass({ clock: () => E.clock.t });
+  assert.match(alerts.join(' | '), /a card could not be put on you: C-2/, 'told on the next pass that delivers');
+  assert.equal(r.refused.find(([c]) => c === 'review_count')[1], 'cleared', JSON.stringify(r.steps));
+});
+
+test('L332 MAT-1: a refused write taken on a later pass, with its card in the same state, clears the cause through the tick', async () => {
+  const { E, fake, ports, card, fresh } = world({ pause: false, cards: ['C-1'], live: [], board: () => [] });
+  const { claim, ...rest } = E.record.read('card', 'C-1').doc;
+  seed(E, 'card', 'C-3', { ...rest, state: 'in_review', head: 'a'.repeat(40) });
+  E.clock.t += 3 * H; // in review with no reviewer for longer than its limit
+  let refuse = true;
+  const rec = Object.create(E.record);
+  Object.defineProperty(rec, 'write', { value: (x) => (refuse && x.kind === 'review_request' ? { ok: false, reason: 'refused for the test' } : E.record.write(x)) });
+  const rules = rulesWith({}, allow);
+  const pass = async () => { fake.reset(); fresh(); return tick({ rec, rules, now: E.clock.t, clock: () => E.clock.t, ports: { ...ports(), hasReviewer: () => false } }); };
+  const r1 = await pass();
+  assert.deepEqual(r1.refused.find(([c]) => c === 'review_count'), ['review_count', 'told'], JSON.stringify(r1.steps));
+  assert.equal(card('C-3').state, 'in_review');
+  refuse = false;
+  E.clock.t += 3 * H;
+  const r2 = await pass();
+  assert.equal(card('C-3').state, 'in_review', 'still in review: only the count was written');
+  assert.deepEqual(r2.refused.find(([c]) => c === 'review_count'), ['review_count', 'cleared']);
 });

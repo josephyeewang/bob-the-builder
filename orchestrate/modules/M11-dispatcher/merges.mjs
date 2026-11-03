@@ -173,7 +173,7 @@ export async function timeLimits({ rec, rules, now, clock = () => now, b, runnin
     if (doc.state === 'checking') {
       const lim = limOf(doc.card, 'checkingMaxMin');
       if (lim.none) { done.push([id, lim.none]); continue; }
-      if (ageMs(rec, 'merge', id, now) >= lim.ms) done.push(...settled(rec, id, settleMerge({ record: rec, alert: textAlerts(alert), now }, id, { reason: 'timeout' }), { now, alert }));
+      if (ageMs(rec, 'merge', id, now) >= lim.ms) done.push(...settled(rec, id, settleMerge({ record: rec, alert: textAlerts(alert), now }, id, { reason: 'timeout' }), { now: Math.max(now, clock()), alert }));
     } else if (doc.state === 'merging' && !gateAlive()) {
       const pr = fresh(rec, doc.pr, id);
       if (!pr) {
@@ -204,7 +204,7 @@ export async function timeLimits({ rec, rules, now, clock = () => now, b, runnin
       const r = settleMerge({ record: rec, alert: textAlerts(alert), now }, id, { pr, reason: 'interrupted', openTooLong });
       // A notice only: the card goes back to be merged again whatever the answer; a lost one is in the list (L130 m3).
       if (openTooLong && r.ok && r.outcome === 'refused' && alert(`merge ${id}: the Merge Gate stopped mid-merge and PR ${doc.pr} is still open after ${Math.round(openMs / 60_000)} min; recorded as interrupted, and the card goes back to be merged again`) === false) done.push([id, 'not told: the alert could not be queued']);
-      done.push(...settled(rec, id, r, { now, alert }));
+      done.push(...settled(rec, id, r, { now: Math.max(now, clock()), alert }));
     } else if (doc.state === 'refused' && !(doc.reasons ?? []).includes(MERGED_OUTSIDE) && !rec.read('fact', RECONCILED_FACT(id)) && !landedElsewhere(rec, id, doc)) {
       // A refused merge whose PR GitHub later shows merged, by a reading after the refusal. An interrupted one goes to
       // M6's reconcile, which records it merged when it was merged at the judged head (L85 M-1 b). Any other refusal, or

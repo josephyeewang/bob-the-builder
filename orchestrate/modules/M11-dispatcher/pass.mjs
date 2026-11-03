@@ -268,12 +268,21 @@ export async function stopPass({ rec, rules, now, clock = () => now, account, se
 // A stop's record of its card's move: moved true, or false with the Record's reason; nothing when no move was due.
 const movedFields = (m) => (m == null ? {} : m.ok ? { moved: true } : { moved: false, move_reason: m.reason ?? 'refused' });
 
-// A done stop whose card's park the Record refused (L323) is parked again each pass while its card still runs. Each
-// refusal is told through refused-writes.mjs; once the card moves on, by this or anything else, the stop says so.
+// A done stop whose card's park the Record refused (L323) is parked again each pass while its card still runs under
+// the stopped session. Each refusal is told through refused-writes.mjs; once the card moves on, by this or anything
+// else, the stop says so. A card that runs under another session now was started again: the stop no longer speaks for
+// it, and is marked superseded, never parked over the new run (L332 m3).
 function reparkStopped({ rec, now }) {
   for (const f of rec.list('fact')) {
     if (!f.id.startsWith(STOP_FACT('')) || f.doc?.state !== 'done' || f.doc.moved !== false) continue;
-    const m = rec.read('card', f.doc.card)?.doc?.state === 'running' ? moveAfterStop(rec, f.doc.card, f.doc.reason, now) : { ok: true };
+    const card = rec.read('card', f.doc.card)?.doc;
+    const sid = f.id.slice(STOP_FACT('').length);
+    const runSid = card?.claim?.session_id;
+    if (card?.state === 'running' && typeof runSid === 'string' && runSid !== sid) {
+      putFact(rec, f.id, { ...f.doc, moved: 'superseded', move_reason: `the card runs under session ${runSid} now` }, 'stop_moved');
+      continue;
+    }
+    const m = card?.state === 'running' ? moveAfterStop(rec, f.doc.card, f.doc.reason, now) : { ok: true };
     if (m?.ok) putFact(rec, f.id, { ...f.doc, moved: true, move_reason: null }, 'stop_moved');
     else if (m && m.reason !== f.doc.move_reason) putFact(rec, f.id, { ...f.doc, move_reason: m.reason ?? 'refused' }, 'stop_moved');
   }
