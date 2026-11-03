@@ -26,10 +26,27 @@ import { PR_FACT } from '../M11-dispatcher/merges.mjs';
 // Paths go through as plain strings when valid (review-0b-7 Minor 4); an invalid one is replaced by a marker.
 const keepPath = (x) => (validPath(x) ? x : '[path refused: control characters]');
 
+// A read that fails (GitHub down, a time-out, an answer of the wrong shape) is written as an UNKNOWN reading with its
+// time: state, merged and merge_commit_sha null, and nothing else claimed (R-0b-169: a failed reading never leaves the
+// old value in place). Written here, by the one writer of pr- facts, so the loop never writes a pr- fact itself.
+const KIND = 'fact.pr';
+export const unknownPr = (number, observed_at) => ({ kind: KIND, number: Number.isInteger(number) ? number : null,
+  head_sha: null, state: null, merged: null, merge_commit_sha: null, observed_at });
+
 export async function prFact(gh, number, { prepare = makePrepare(), now = () => new Date() } = {}) {
   const observed_at = now().toISOString();
+  try {
+    return await readPr(gh, number, observed_at, prepare);
+  } catch {
+    return unknownPr(number, observed_at);
+  }
+}
+
+async function readPr(gh, number, observed_at, prepare) {
   const [pr, files, threads, behind] = await Promise.all([gh.pr(number), gh.files(number), gh.threads(number), gh.behindBy(number)]);
+  if (!pr || typeof pr !== 'object' || !Array.isArray(files) || !Array.isArray(threads)) throw new Error('a GitHub answer of the wrong shape');
   const checks = await gh.checks(pr.head_sha);
+  if (!Array.isArray(checks)) throw new Error('a GitHub answer of the wrong shape');
   const st = typeof pr.state === 'string' ? pr.state.toLowerCase() : null;
   const merged = pr.merged === true;
   const changed = files.map((f) => ({
@@ -38,7 +55,7 @@ export async function prFact(gh, number, { prepare = makePrepare(), now = () => 
     status: f.status, added: f.additions, removed: f.deletions,
   }));
   return {
-    kind: 'fact.pr',
+    kind: KIND,
     number: pr.number,
     title: prepare(pr.title, 'pr-title'),
     author: prepare(pr.author, 'commit-author'),

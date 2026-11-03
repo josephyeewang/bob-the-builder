@@ -56,6 +56,10 @@ export const REQUIRED_KEYS = Object.freeze(TOP_KEYS.filter((k) => KEYS[k].requir
 export const CUTOVER_STAGES = Object.freeze(['first', 'second']);
 export const PRODUCT_STATES = Object.freeze(['active', 'away', 'paused', 'light']);
 export const FAILURE_ACTIONS = Object.freeze(['retry', 'quarantine', 'joe']);
+// The values a product state's rule may take (L226): `start` for start_session, `tier1_merge` for both merges.
+// Each list is defined here once; the engine and its tests read it, so a value can't be known to one and not the other.
+export const START_RULES = Object.freeze(['within_caps', 'editing_cap_1', 'none']);
+export const TIER1_MERGE_RULES = Object.freeze(['rules', 'tier1_hours_only', 'undo_only']);
 const BANNED_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
 const INT = WHOLE_TEXT;     // the one definition, shared with rules.num() and rules.dec() (L104)
 const DEC = DECIMAL_TEXT;
