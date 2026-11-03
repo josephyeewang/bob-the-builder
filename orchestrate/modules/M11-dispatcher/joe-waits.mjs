@@ -11,9 +11,12 @@
 // retellWaits ignores. A wait written but not yet copied onto its tell (that write failed) is matched by the Record's
 // own window: the Record takes a wait only when its since is within 60 s of the Record's clock, so a joe wait whose
 // since is within 60 s of the tell's asked time is the wait it asked for; retellWaits copies it on, then tells.
+// A card that already waits on Joe for the same `what` keeps its stored since (L296, M9 guard.mjs keptSince), so the
+// tell's asked time is that kept since, not now (audit #153 m1): the window then matches it, and the new tell is sent.
 
 import { waitOn } from './moves.mjs';
 import { tellThen, isQueued } from './alerts.mjs';
+import { keptSince } from '../M9-record/guard.mjs';
 
 export const WAIT_TELL_FACT = (card) => `wait-tell-${card}`;
 const iso = (ms) => new Date(ms).toISOString();
@@ -22,7 +25,8 @@ const SINCE_WINDOW_MS = 60_000;
 
 /** waitOn with who 'joe', told by `text` (see above). Returns waitOn's answer, or the tell's refusal. */
 export function waitOnJoe(rec, id, { text, alert, now, ...wait }) {
-  const since = iso(now);
+  const card = rec.read('card', id)?.doc;
+  const since = (card?.state === 'waiting' ? keptSince({ wait: { who: 'joe', what: wait.what }, kept: card.wait }) : null) ?? iso(now);
   const cur = rec.read('fact', WAIT_TELL_FACT(id));
   const req = rec.write({ actor: 'dispatcher', entity: 'fact', id: WAIT_TELL_FACT(id), expectRev: cur?.rev ?? 0, doc: { since, text }, kind: 'wait_tell' });
   if (!req.ok) return { ok: false, reason: `the tell could not be recorded: ${req.reason}` };

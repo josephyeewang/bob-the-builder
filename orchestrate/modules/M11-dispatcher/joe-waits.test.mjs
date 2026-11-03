@@ -116,3 +116,49 @@ test('L138 MAT-1: a wait whose stored since could not be copied onto the tell is
   assert.deepEqual(await w.pass(), []);
   assert.equal(w.got.length, 1);
 });
+
+// Audit #153 m1: the Record keeps a re-checked wait's since (L296), so a tell asked at now would match no wait.
+test('audit #153 m1: a card put on Joe again for the same what is told the new text, on the real writer and the stand-in', async () => {
+  const { recWith, seed, setClock, T0 } = await import('./fixtures.test-helper.mjs');
+  const real = world();
+  const stand = recWith();
+  seed(stand, 'card', 'C-1', { state: 'running', product: 'p1', tier: 2, files: ['src/C-1.js'] });
+  // Each side: its Record, and a way to set its clock (the stand-in's is setClock; the real one's is E.clock).
+  const sides = [
+    { name: 'real', rec: real.E.record, start: real.E.clock.t, set: (ms) => { real.E.clock.t = ms; } },
+    { name: 'stand-in', rec: stand, start: T0, set: (ms) => setClock(stand, ms) },
+  ];
+  for (const s of sides) {
+    let t = s.start;
+    const at = (ms) => { t = ms; s.set(ms); };
+    const got = [];
+    const port = (x) => { got.push(typeof x === 'string' ? x : x.text); return true; };
+    const say = (text) => withAlerts(s.rec, t, port, (alert) => waitOnJoe(s.rec, 'C-1', { text, alert, now: t, ...ask }));
+    assert.equal((await say('first tell')).ok, true, s.name);
+    const first = s.rec.read('card', 'C-1').doc.wait.since;
+    at(t + 2 * 60 * MIN);
+    const r = await say('second tell');
+    assert.equal(r.ok, true, `${s.name}: ${r.reason}`);
+    assert.equal(s.rec.read('card', 'C-1').doc.wait.since, first, `${s.name}: the wait keeps its since`);
+    assert.deepEqual(got, ['first tell', 'second tell'], `${s.name}: the second tell is sent`);
+    assert.equal(s.rec.read('fact', WAIT_TELL_FACT('C-1')).doc.told_since, first, `${s.name}: marked told for the kept since`);
+    at(t + MIN);
+    assert.deepEqual(await withAlerts(s.rec, t, port, (alert) => retellWaits({ rec: s.rec, alert })), [], `${s.name}: and not again`);
+    assert.equal(got.length, 2, s.name);
+  }
+});
+
+test('audit #153 m1: a re-wait whose since could not be copied onto the tell is still matched by the window, then told', async () => {
+  const w = world();
+  const real = w.E.record;
+  assert.equal((await withAlerts(real, w.E.clock.t, w.port, (alert) => waitOnJoe(real, 'C-1', { text: 'first tell', alert, now: w.E.clock.t, ...ask }))).ok, true);
+  w.E.clock.t += 2 * 60 * MIN;
+  let refuse = true;
+  const rec = Object.create(real, { write: { value: (x) => (refuse && x.entity === 'fact' && x.id === WAIT_TELL_FACT('C-1') && x.doc?.wait_since ? { ok: false, reason: 'busy' } : real.write(x)) } });
+  assert.equal((await withAlerts(rec, w.E.clock.t, w.port, (alert) => waitOnJoe(rec, 'C-1', { text: 'second tell', alert, now: w.E.clock.t, ...ask }))).ok, true);
+  assert.deepEqual(w.got, ['first tell'], 'nothing queued until the since is copied on');
+  refuse = false;
+  w.E.clock.t += MIN;
+  assert.deepEqual(await w.pass(), [['C-1', 'told again: waits on joe']]);
+  assert.deepEqual(w.got, ['first tell', 'second tell']);
+});

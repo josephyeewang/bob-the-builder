@@ -6,6 +6,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { iso, must, product, put, readyCard, runCard, setup } from './fixtures.test-helper.mjs';
+import { keptSince, waitSince } from './guard.mjs';
 
 const MIN = 60000;
 const limitWait = (env, over = {}) => ({ who: 'usage', what: 'limit_hit', since: iso(env.clock.t), next_check: iso(env.clock.t + 30 * MIN),
@@ -46,4 +47,28 @@ test('L285: a wait on a new what (a limit wait turned to Joe) is a new wait: its
   const w = card(env, 'C-1').wait;
   assert.equal(w.since, iso(env.clock.t));
   assert.notEqual(w.since, parkedAt);
+});
+
+// Audit #153 m3: who and what each count alone, compared exactly (case and spaces count); an unreadable stored since is
+// never kept.
+test('audit #153 m3: a new who alone, or a new what alone, is a new wait with a new since', () => {
+  for (const change of [{ who: 'joe' }, { what: 'limit_hit: another reading' }, { what: 'LIMIT_HIT' }, { what: 'limit_hit ' }, { what: ' limit_hit' }]) {
+    const { env, parkedAt } = parked();
+    env.clock.t += 60 * MIN;
+    must(put(env.record, 'dispatcher', 'card', 'C-1', { wait: { ...card(env, 'C-1').wait, ...change, since: iso(env.clock.t), next_check: iso(env.clock.t + 30 * MIN) } }), JSON.stringify(change));
+    assert.equal(card(env, 'C-1').wait.since, iso(env.clock.t), JSON.stringify(change));
+    assert.notEqual(card(env, 'C-1').wait.since, parkedAt);
+  }
+});
+
+test('audit #153 m3: keptSince keeps only a readable since of the same who and what; waitSince then wants now', () => {
+  const NOW = Date.parse('2026-10-29T12:00:00Z');
+  const wait = { who: 'usage', what: 'limit_hit', since: new Date(NOW).toISOString() };
+  const kept = { who: 'usage', what: 'limit_hit', since: '2026-10-27T12:00:00.000Z' };
+  assert.equal(keptSince({ wait, kept }), kept.since);
+  for (const k of [{ ...kept, since: 'not a time' }, { ...kept, since: undefined }, { ...kept, who: 'joe' }, { ...kept, what: 'LIMIT_HIT' }, { ...kept, what: 'limit_hit ' }, null]) {
+    assert.equal(keptSince({ wait, kept: k }), null, JSON.stringify(k));
+    assert.deepEqual(waitSince({ wait, kept: k, nowMs: NOW }), { ok: true, since: wait.since }, JSON.stringify(k));
+    assert.equal(waitSince({ wait: { ...wait, since: '2026-10-27T12:00:00.000Z' }, kept: k, nowMs: NOW }).ok, false, JSON.stringify(k));
+  }
 });

@@ -100,16 +100,27 @@ test('L296: the stand-in and the Store Writer store the same wait.since, step fo
   step('re-check an hour on, sending the kept since', t0 + 2 * 24 * 60 * MIN + 60 * MIN, () => ({}));
   step('the same wait turned to Joe (a new what)', t0 + 3 * 24 * 60 * MIN, (n) => ({ who: 'joe', what: 'limit_hit: the hit has no readable reset time', since: iso(n) }));
   step('the Joe wait re-checked an hour on, sending now', t0 + 3 * 24 * 60 * MIN + 60 * MIN, (n) => ({ since: iso(n) }));
+  // Audit #153 m2: who alone, what alone, and a what that differs only by case or a trailing space are each a new wait.
+  const D3 = t0 + 3 * 24 * 60 * MIN;
+  const JOE_WHAT = 'limit_hit: the hit has no readable reset time';
+  step('who alone changes (joe back to usage, the same what)', D3 + 2 * 60 * MIN, (n) => ({ who: 'usage', since: iso(n) }));
+  step('what alone changes (usage, another what)', D3 + 3 * 60 * MIN, (n) => ({ what: 'limit_hit: another reading', since: iso(n) }));
+  step('what differs only by case', D3 + 4 * 60 * MIN, (n) => ({ what: 'LIMIT_HIT: another reading', since: iso(n) }));
+  step('what differs only by a trailing space', D3 + 5 * 60 * MIN, (n) => ({ what: 'LIMIT_HIT: another reading ', since: iso(n) }));
+  step('and that wait re-checked, sending now', D3 + 6 * 60 * MIN, (n) => ({ since: iso(n) }));
   for (const [what, ok, r, f, rw, fw] of steps) {
     assert.deepEqual(ok, { real: true, stand: true }, what);
     assert.equal(f, r, `${what}: since`);
     assert.equal(fw, rw, `${what}: who`);
   }
-  // The kept sinces really were kept, and the new wait's really is new.
-  assert.deepEqual(steps.map(([, , r]) => r), [iso(t0), iso(t0), iso(t0 + 3 * 24 * 60 * MIN), iso(t0 + 3 * 24 * 60 * MIN)]);
+  assert.equal(real().what, 'LIMIT_HIT: another reading ');
+  assert.notEqual(JOE_WHAT, real().what);
+  // The kept sinces really were kept, and each new wait's really is new.
+  const h = (k) => iso(D3 + k * 60 * MIN);
+  assert.deepEqual(steps.map(([, , r]) => r), [iso(t0), iso(t0), iso(D3), iso(D3), h(2), h(3), h(4), h(5), h(5)]);
   // The one allowed difference: a re-check naming another past since. The Store Writer refuses it; the stand-in does
   // not check since against its clock (shared/record.mjs), but still keeps the stored since, never the one sent.
-  at(t0 + 3 * 24 * 60 * MIN + 2 * 60 * MIN);
+  at(D3 + 7 * 60 * MIN);
   const ok = recheck((n) => ({ since: iso(n - 30 * MIN) }));
   assert.deepEqual(ok, { real: false, stand: true });
   assert.equal(stand().since, real().since);
