@@ -102,8 +102,10 @@ export const intakeFactId = (product, name) => `intake-applied-proposals-file-${
 export const folderFactId = (product) => `intake-applied-proposals-folder-${idHash(product)}`;
 /** The fact that says files of `kind` sit in a product's folder with nothing to take them in yet. */
 export const waitingFactId = (product, kind) => `intake-applied-proposals-waiting-${idHash(product, kind)}`;
-/** The fact that says which product first took files in from a folder, by its device and file number (L268 MAT-B). */
-export const ownerFactId = (ino, birth) => `intake-applied-proposals-owner-${idHash(ino, birth)}`;
+/** The fact that says which product first took files in from a folder, by its file number; its creation time is kept inside and checked (L268 MAT-B, L275, L279). */
+export const ownerFactId = (ino) => `intake-applied-proposals-owner-${idHash(ino)}`;
+/** The product that first handed these bytes in, for good, across every product (L279). */
+export const bytesFactId = (sha256) => `intake-applied-proposals-bytes-${idHash(sha256)}`;
 /** The fact a tell is marked on when the record refused the file's own fact (told once, not every pass). */
 export const toldFactId = (product, name) => `intake-applied-proposals-told-${idHash(product, name)}`;
 // The row that will take each handed-on kind in (L233 M-2: until then, told once per product and kind).
@@ -191,11 +193,12 @@ export async function proposalsPass({ rec, rules, products, ownerUid, wait, aler
     if (!why) why = folderProblem(dir, ownerUid, lookDir);
     return { product, dir, why };
   });
-  // Two products whose rules name the same folder (by file number and creation time, so a second path to it counts too)
-  // would each take every file in once: both are refused until the rules give each its own folder (L260 MAT-3).
-  // A folder is known by its file number and creation time, never its device number: macOS numbers devices in the
-  // order they attach, so the device can change after a restart or an update, and the folder would count as new
-  // (L275 MAT-C). Both survive a restart and a rename.
+  // Two products whose rules name the same folder (by file number, so a second path to it counts too) would each take
+  // every file in once: both are refused until the rules give each its own folder (L260 MAT-3).
+  // A folder is known by its file number, never its device number: macOS numbers devices in the order they attach, so
+  // the device can change after a restart (L275 MAT-C). Its creation time is kept in the owner record and checked, not
+  // used to find it: macOS rewrites it when something dates the folder earlier (L279 MAT-D). None of this is what keeps
+  // a file from being used twice; the bytes record below is (L279).
   const byFolder = new Map();
   for (const f of folders) {
     if (f.why) continue;
@@ -203,7 +206,7 @@ export async function proposalsPass({ rec, rules, products, ownerUid, wait, aler
     // A folder that can't be told apart from another is not read: no owner could be checked for it (L268 MAT-B).
     if (!Number.isInteger(st?.ino) || st.ino <= 0 || !Number.isFinite(st?.birthtimeMs) || st.birthtimeMs <= 0) { f.why = 'the proposals folder could not be identified'; continue; }
     f.at = { ino: st.ino, birth: st.birthtimeMs };
-    const k = `${st.ino}:${st.birthtimeMs}`;
+    const k = String(st.ino);
     byFolder.set(k, [...(byFolder.get(k) ?? []), f]);
   }
   for (const group of byFolder.values()) {
@@ -213,14 +216,15 @@ export async function proposalsPass({ rec, rules, products, ownerUid, wait, aler
   // The folder's first product owns it for good (L268 MAT-B): the used memory is per product, so another product that
   // named it later would take every file the first one used in again. Recorded before any file is read; a write the
   // record refuses keeps the folder unread this pass. The cost (L268): a folder stays its first product's for good, so
-  // another product needs a new folder, never a used one. A folder copied or restored to a new place has a new file
-  // number and counts as new; MAT-3 has the same limit.
+  // another product needs a new folder, never a used one. A folder copied or restored has a new file number and counts
+  // as new, even at the same path; MAT-3 has the same limit, and the bytes record covers what it lets through.
   for (const f of folders) {
     if (f.why) continue;
-    const id = ownerFactId(f.at.ino, f.at.birth);
+    const id = ownerFactId(f.at.ino);
     const o = rec.read('fact', id);
     const first = o?.doc?.product;
     if (first === f.product) continue;
+    if (first != null && o.doc.birth !== f.at.birth) { f.why = `the proposals folder has ${first}'s file number but a different creation time (re-dated or replaced), so it may be ${first}'s; give ${f.product} a new folder`; continue; }
     if (first != null) { f.why = `the proposals folder was ${first}'s first, so the files ${first} took in from it would be taken in again; give ${f.product} a new folder`; continue; }
     const w = rec.write({ actor: 'dispatcher', entity: 'fact', id, expectRev: o?.rev ?? 0, doc: { product: f.product, ino: f.at.ino, birth: f.at.birth, at: new Date(now).toISOString() }, kind: 'proposal_folder_owner' });
     if (!w.ok) f.why = `the proposals folder's first product could not be recorded (${w.reason})`;
@@ -317,6 +321,7 @@ export async function proposalsPass({ rec, rules, products, ownerUid, wait, aler
       }
     }
     let use;
+    let useBundle = null;
     if (parsed.kind === 'idea') { refuse(IDEAS_OFF, hash); continue; }
     if (parsed.kind === 'bundle') {
       const pair = `proposal-${parsed.id}.md`;
@@ -355,11 +360,32 @@ export async function proposalsPass({ rec, rules, products, ownerUid, wait, aler
         if (docs) { refuse(`${FIRST_CUTOVER} (${docs})`, hash); continue; }
       }
       if (typeof toReview !== 'function') { refuse('a proposal\'s route to review is not built yet (R-0b-128 part 2)', hash); continue; }
+      useBundle = bundle?.sha256 ?? null;
       use = () => toReview({ rec, product, card, proposal: fenceFor('proposal', file.text).fenced, bundle });
     } else {
       const h = handlers[parsed.kind];
       if (typeof h !== 'function') { r.waiting = `no ${parsed.kind} handler yet`; waiting.get(product)?.add(parsed.kind); continue; }
       use = () => h({ rec, product, kind: parsed.kind, id: parsed.id, name, ...fenceFor(parsed.kind, file.text), sha256: hash });
+    }
+    // Bytes any other product already handed in never reach this one's handlers, whatever happened to the folders
+    // (L279: three misses telling folders apart, MAT-B, C, D). Checked across all products by sha256, the bundle's too
+    // when one goes with a proposal, and recorded before the claim. A check that can't be read or written keeps the file
+    // unused this pass and is told once (fail closed). A heartbeat is a poll: the same bytes come again by design.
+    if (parsed.kind !== 'heartbeat') {
+      const hashes = [hash, ...(useBundle ? [useBundle] : [])];
+      let other = null;
+      let broke = null;
+      for (const h of hashes) {
+        let o;
+        try { o = rec.read('fact', bytesFactId(h)); } catch (e) { broke = `the check that no other product handed these bytes in could not be read (${String(e?.message ?? e).slice(0, 200)})`; break; }
+        if (o && (o.corrupt || typeof o.doc?.product !== 'string')) { broke = `the check that no other product handed these bytes in could not be read (${o.corrupt ? String(o.reason).slice(0, 200) : 'no product named'})`; break; }
+        if (o && o.doc.product !== product) { other = o.doc; break; }
+        if (o) continue;
+        const w = rec.write({ actor: 'dispatcher', entity: 'fact', id: bytesFactId(h), expectRev: 0, doc: { product, name, sha256: h, at: new Date(now).toISOString() }, kind: 'proposal_bytes' });
+        if (!w.ok) { broke = `which product handed these bytes in could not be recorded (${w.reason})`; break; }
+      }
+      if (other) { refuse(`these bytes were already handed in by ${other.product} on ${String(other.at ?? '').slice(0, 10) || 'an unknown date'}`, hash); continue; }
+      if (broke) { r.refused = broke; tellUnrecorded(`${shown} in ${product}'s proposals folder was not used: ${broke}`, `bytes ${hash}`); continue; }
     }
     // Claim first, so a crash after the hand-over cannot use the file twice.
     const claim = put({ sha256: hash, state: 'applying', at: new Date(now).toISOString() }, 'proposal_claim');
