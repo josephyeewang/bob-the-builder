@@ -20,7 +20,8 @@ const refuse = (reason) => ({ ok: false, reason });
 
 /**
  * `busy(outbox)` returns a list of running programs that hold the folder (empty when none).
- * `alert(message)` raises an alert to the owner. Never follows a link: entries are removed as entries.
+ * `alert(message)` raises an alert to the owner; false or a throw is an alert not sent. Never follows a link: entries
+ * are removed as entries.
  */
 export function emptyOutbox(outbox, { busy, alert = () => {} }) {
   let st; try { st = lstatSync(outbox); } catch { return refuse('the outbox is missing'); }
@@ -28,14 +29,15 @@ export function emptyOutbox(outbox, { busy, alert = () => {} }) {
   let holders; try { holders = busy(outbox); } catch { return refuse('could not check what holds the outbox'); }
   if (!Array.isArray(holders)) return refuse('could not check what holds the outbox');
   if (holders.length) return refuse(`still held by ${holders.join(', ')}; not emptied`);
-  const odd = [];
-  for (const n of readdirSync(outbox)) {
-    const p = join(outbox, n);
-    const e = lstatSync(p);
-    if (n.startsWith('.') || e.isDirectory() || e.isSymbolicLink() || !e.isFile()) odd.push(n);
-    rmSync(p, { recursive: true, force: true }); // rm never follows a link it is handed
+  const names = readdirSync(outbox);
+  const odd = names.filter((n) => { const e = lstatSync(join(outbox, n)); return n.startsWith('.') || e.isDirectory() || e.isSymbolicLink() || !e.isFile(); });
+  // Told before anything is removed, and the answer counts (L135 H): an alert that answers false or throws leaves the
+  // outbox as it is, the evidence with it, and the launch is refused, so the refusal is what reaches the owner.
+  if (odd.length) {
+    let told; try { told = alert(`the outbox held things a role cannot make: ${odd.join(', ')}`); } catch { told = false; }
+    if (told === false) return refuse(`the outbox holds things a role cannot make (${odd.join(', ')}), and the alert about them could not be sent; nothing was removed`);
   }
-  if (odd.length) alert(`the outbox held things a role cannot make: ${odd.join(', ')}`);
+  for (const n of names) rmSync(join(outbox, n), { recursive: true, force: true }); // rm never follows a link it is handed
   return { ok: true, removed: odd };
 }
 

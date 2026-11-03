@@ -19,6 +19,7 @@ import { removeProtected } from './worker-copy.mjs';
 import { makeSnapshot } from '../hooks/snapshot.mjs';
 import { sha256 } from './role-profiles.mjs';
 import { memoryRecord } from '../../../shared/record.mjs';
+import { fakeAlert } from '../../../test/fake-alert.test-helper.mjs';
 
 const tmp = () => realpathSync(tempDir('orch-launch-'));
 
@@ -497,6 +498,33 @@ test('check 3: the outbox is emptied only when nothing holds it; odd entries rai
   const linked = join(d, 'linked'); symlinkSync(real, linked);
   assert.equal(emptyOutbox(linked, { busy: () => [] }).ok, false);
   assert.deepEqual(readdirSync(real), ['report-T-3.md']);
+});
+
+test('L135 H: odd entries are told before anything is removed; an alert not sent refuses and removes nothing', () => {
+  const d = tmp();
+  const outbox = join(d, 'outbox'); mkdirSync(outbox);
+  writeFileSync(join(outbox, 'report-T-1.md'), 'x');
+  mkdirSync(join(outbox, 'sub'));
+  const seen = [];
+  const look = () => seen.push(readdirSync(outbox).sort());
+  for (const alert of [fakeAlert({ answer: () => { look(); return false; } }), fakeAlert({ throws: () => { look(); return 'down'; } })]) {
+    const r = emptyOutbox(outbox, { busy: () => [], alert });
+    assert.equal(r.ok, false);
+    assert.match(r.reason, /the alert about them could not be sent; nothing was removed/);
+    assert.match(r.reason, /\(sub\)/);
+    assert.deepEqual(readdirSync(outbox).sort(), ['report-T-1.md', 'sub'], 'the evidence stays');
+  }
+  // A sent alert (undefined or true) empties it, and the entries were all still there when it was told.
+  const r = emptyOutbox(outbox, { busy: () => [], alert: fakeAlert({ answer: () => { look(); return undefined; } }) });
+  assert.equal(r.ok, true);
+  assert.deepEqual(readdirSync(outbox), []);
+  assert.deepEqual(seen, [['report-T-1.md', 'sub'], ['report-T-1.md', 'sub'], ['report-T-1.md', 'sub']]);
+  // Only plain files: no alert is asked, so one that would fail can't hold the launch.
+  writeFileSync(join(outbox, 'report-T-2.md'), 'x');
+  const never = fakeAlert({ answer: false });
+  assert.equal(emptyOutbox(outbox, { busy: () => [], alert: never }).ok, true);
+  assert.equal(never.calls.length, 0);
+  assert.deepEqual(readdirSync(outbox), []);
 });
 
 test('intake: only a plain, single-link file of the role user, with an allowed name and kind, is read', () => {
